@@ -33,8 +33,8 @@ const DIVERGENT: &[(&str, &str, &str)] = &[
     // parse.ves: brace nesting is unbounded (hostile_inputs_are_bounded).
     (
         "util",
-        "                return 0;\n            }\n            return 2;",
-        "                return 2;\n            }\n            return 0;",
+        "                return Order::Less;\n            }\n            return Order::Greater;",
+        "                return Order::Greater;\n            }\n            return Order::Less;",
     ),
     ("tree", "    if nr > 1 {", "    if nr > 99 {"),
     ("local", "    if n == 1 {", "    if n == 0 {"),
@@ -48,5 +48,9 @@ const DIVERGENT: &[(&str, &str, &str)] = &[
         "            bound_hit = true;",
         "            bound_hit = false;",
     ),
-    ("parse", "    if depth > 64 {", "    if depth > 100000 {"),
+    (
+        "parse",
+        "    if depth > Limit::Nesting {",
+        "    if depth > 100000 {",
+    ),
 ];

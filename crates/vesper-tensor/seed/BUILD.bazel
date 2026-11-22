@@ -1,7 +1,8 @@
 # The frozen Rust seed copy of vesper-tensor (package vesper-tensor-seed,
 # library vesper_tensor) that the compiler and, under the owner's parity
 # rule, every other dependent link: ../src built without the port, so
-# cfg(vesper_port) is off. Written by hand because its sources live in the
+# cfg(vesper_port) is off, over the frozen Rust engine in src/engine for the
+# modules the port replaced (SH6 lane 11, #1406). Written by hand because its sources live in the
 # parent package; see "Crates the compiler links" in
 # docs/maintenance/porting-a-crate.md (port wave P1 lane 8, #905).
 load("@crates//vesper-tensor-seed:data.bzl", "all_crate_deps")
@@ -16,9 +17,9 @@ PKG_ENV = {
 
 rust_library(
     name = "seed",
-    srcs = ["//crates/vesper-tensor:rust_srcs"],
+    srcs = glob(["src/**/*.rs"]) + ["//crates/vesper-tensor:rust_srcs"],
     crate_name = "vesper_tensor",
-    crate_root = "//crates/vesper-tensor:src/lib.rs",
+    crate_root = "src/lib.rs",
     edition = "2021",
     rustc_env = PKG_ENV,
     version = "0.1.0",

@@ -2,6 +2,7 @@
 name = "vesper-vault"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
 description = "Vesper Vault: constant-time SSA taint verifier, secret scalars, locked secret slots, nonce-safe AEAD and hybrid X25519MLKEM768 (design section 23)"
 publish = false
 

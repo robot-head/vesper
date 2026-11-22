@@ -29,6 +29,9 @@ serde_json = { workspace = true }
 vesper-port-abi = { path = "../vesper-port-abi" }
 
 [dev-dependencies]
+# The frozen Rust seed copy, as the reference of
+# tests/standalone_differential.rs.
+vesper-pact-seed = { package = "vesper-pact-seed", path = "seed" }
 # The ABBA benchmark (examples/abba.rs; its Rust arm is the seed's
 # abba_rust example).
 vesper-bench = { path = "../vesper-bench" }

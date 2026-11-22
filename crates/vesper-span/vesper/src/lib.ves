@@ -86,12 +86,46 @@ pub copy struct Sizes {
 
 // Checked arithmetic and budgets.
 
+const MAX_U64: u64 = 18446744073709551615;
+// The largest line or character of a `Position` (`u32::MAX`).
+const MAX_U32: u64 = 4294967295;
+// The work of a range check: both endpoint scans of the text.
+const SCANS: u64 = 2;
+// The UTF-16 units of a 4-byte char (a surrogate pair).
+const PAIR_UNITS: u64 = 2;
+// The line table holds two words per line: start and end.
+const LINE_WORDS: u64 = 2;
+
+enum Ascii: _ {
+    Lf = 0x0a,
+    Cr = 0x0d
+}
+
+// An edit: span start, span end, the expected text's offset and length in
+// `pool`, and the replacement length.
+enum Edit: _ {
+    Start = 0,
+    End = 1,
+    ExpOff = 2,
+    ExpLen = 3,
+    RepLen = 4,
+    Words = 5
+}
+
+// A replacement of `edits_apply`: span start, span end, replacement length.
+enum Repl: _ {
+    Start = 0,
+    End = 1,
+    Len = 2,
+    Words = 3
+}
+
 fn u(x: usize) -> u64 {
     widen_u64(x)
 }
 
 fn add(a: u64, b: u64, r: Resource) -> u64 eff [Fail[Error]] {
-    if a > wrapping_sub(18446744073709551615, b) {
+    if a > wrapping_sub(MAX_U64, b) {
         Fail::raise(Error::Budget(r));
     }
     wrapping_add(a, b)
@@ -225,7 +259,7 @@ pub fn line_table(in text: Str, in limits: Limits, line_size: usize)
     let bytes = text.as_bytes();
     let n = text.len();
     bound(n, limits.max_source_bytes, Resource::Source);
-    bound(mul(n, 2, Resource::Work), limits.max_work, Resource::Work);
+    bound(mul(n, SCANS, Resource::Work), limits.max_work, Resource::Work);
     let mut table: ChunkSeq[u64] = ChunkSeq::new();
     let mut count: u64 = 1;
     let mut start: u64 = 0;
@@ -234,7 +268,7 @@ pub fn line_table(in text: Str, in limits: Limits, line_size: usize)
         if i >= n {
             break;
         }
-        let at = match bytes[i..n].find_either(13, 10) {
+        let at = match bytes[i..n].find_either(Ascii::Cr, Ascii::Lf) {
             Option::Some(k) => wrapping_add(i, k),
             Option::None => n,
         };
@@ -244,7 +278,7 @@ pub fn line_table(in text: Str, in limits: Limits, line_size: usize)
         table.push(start);
         table.push(at);
         i = wrapping_add(at, 1);
-        if byte(in bytes, at) == 13 && i < n && byte(in bytes, i) == 10 {
+        if byte(in bytes, at) == Ascii::Cr && i < n && byte(in bytes, i) == Ascii::Lf {
             i = wrapping_add(i, 1);
         }
         start = i;
@@ -265,7 +299,7 @@ pub fn line_table(in text: Str, in limits: Limits, line_size: usize)
 pub fn offset(in text: Str, in lines: Slice[u64], max_work: usize, p: Position)
     -> usize eff [Fail[Error]] {
     let line = widen_u64(p.line);
-    let count = lines.len() / 2;
+    let count = lines.len() / LINE_WORDS;
     if line >= count {
         Fail::raise(Error::LineOutOfBounds);
     }
@@ -291,11 +325,11 @@ pub fn offset(in text: Str, in lines: Slice[u64], max_work: usize, p: Position)
             return narrow_usize(i);
         }
         let next = if len == 4 {
-            wrapping_add(utf16, 2)
+            wrapping_add(utf16, PAIR_UNITS)
         } else {
             wrapping_add(utf16, 1)
         };
-        if next > 4294967295 {
+        if next > MAX_U32 {
             Fail::raise(Error::CharacterOutOfBounds);
         }
         if target < next {
@@ -314,7 +348,7 @@ pub fn offset(in text: Str, in lines: Slice[u64], max_work: usize, p: Position)
 // The number of lines whose start is at most `offset` (`partition_point`).
 fn lines_through(in lines: Slice[u64], offset: u64) -> u64 {
     let mut lo: u64 = 0;
-    let mut hi = lines.len() / 2;
+    let mut hi = lines.len() / LINE_WORDS;
     loop {
         if lo >= hi {
             break;
@@ -358,16 +392,16 @@ pub fn position(in text: Str, in lines: Slice[u64], max_work: usize, offset: usi
         let b = byte(in bytes, i);
         if !is_continuation(b) {
             character = if b >= 240 {
-                wrapping_add(character, 2)
+                wrapping_add(character, PAIR_UNITS)
             } else {
                 wrapping_add(character, 1)
             };
         }
     }
-    if character > 4294967295 {
+    if character > MAX_U32 {
         Fail::raise(Error::CharacterOutOfBounds);
     }
-    if line > 4294967295 {
+    if line > MAX_U32 {
         Fail::raise(Error::LineOutOfBounds);
     }
     Position {
@@ -452,14 +486,14 @@ fn check_edits(
     let mut removed: u64 = 0;
     let mut inserted: u64 = 0;
     for i in 0..count {
-        let at = wrapping_add(from, wrapping_mul(i, 5));
+        let at = wrapping_add(from, wrapping_mul(i, Edit::Words));
         let start = word(in edits, at);
-        let end = word(in edits, wrapping_add(at, 1));
-        let exp_off = word(in edits, wrapping_add(at, 2));
-        let exp_len = word(in edits, wrapping_add(at, 3));
-        let rep_len = word(in edits, wrapping_add(at, 4));
+        let end = word(in edits, wrapping_add(at, Edit::End));
+        let exp_off = word(in edits, wrapping_add(at, Edit::ExpOff));
+        let exp_len = word(in edits, wrapping_add(at, Edit::ExpLen));
+        let rep_len = word(in edits, wrapping_add(at, Edit::RepLen));
         work = charge(work, add(exp_len, rep_len, Resource::Work), cap);
-        work = charge(work, mul(n, 2, Resource::Work), cap);
+        work = charge(work, mul(n, SCANS, Resource::Work), cap);
         let checked = range(
             in text,
             in lines,
@@ -477,9 +511,9 @@ fn check_edits(
         inserted = add(inserted, rep_len, Resource::Output);
         for j in 0..i {
             work = charge(work, 1, cap);
-            let other = wrapping_add(from, wrapping_mul(j, 5));
+            let other = wrapping_add(from, wrapping_mul(j, Edit::Words));
             let b_start = word(in edits, other);
-            let b_end = word(in edits, wrapping_add(other, 1));
+            let b_end = word(in edits, wrapping_add(other, Edit::End));
             // Adjacent nonempty edits are allowed; insertions at a shared
             // boundary are not.
             if start
@@ -528,7 +562,7 @@ pub fn edits_check(
         in lines,
         in edits,
         0,
-        edits.len() / 5,
+        edits.len() / Edit::Words,
         in pool,
         in limits,
         edit_size,
@@ -546,12 +580,12 @@ pub fn edits_apply(in text: Slice[u8], in replace: Slice[u64], in pool: Slice[u8
     let mut out: ChunkSeq[u8] = ChunkSeq::with_capacity(u(output));
     let mut cursor: u64 = 0;
     let mut at: u64 = 0;
-    let count = replace.len() / 3;
+    let count = replace.len() / Repl::Words;
     for i in 0..count {
-        let w = wrapping_mul(i, 3);
+        let w = wrapping_mul(i, Repl::Words);
         let start = word(in replace, w);
-        let end = word(in replace, wrapping_add(w, 1));
-        let len = word(in replace, wrapping_add(w, 2));
+        let end = word(in replace, wrapping_add(w, Repl::End));
+        let len = word(in replace, wrapping_add(w, Repl::Len));
         out.extend(text[cursor..start]);
         out.extend(pool[at..wrapping_add(at, len)]);
         at = wrapping_add(at, len);
@@ -570,9 +604,34 @@ pub fn edits_apply(in text: Slice[u8], in replace: Slice[u64], in pool: Slice[u8
 // count, followed by its edits in the edit encoding. `pool` holds the
 // expected texts of the edits.
 
-fn primary_bit() -> u64 {
-    9223372036854775808
+// A diagnostic header, a label and a fix header in `data`.
+enum Diag: _ {
+    CodeLen = 0,
+    MessageLen = 1,
+    Help = 2,
+    HelpLen = 3,
+    Labels = 4,
+    Fixes = 5,
+    Words = 6
 }
+
+enum Label: _ {
+    Start = 0,
+    End = 1,
+    Message = 2,
+    Words = 3
+}
+
+enum Fix: _ {
+    IdLen = 0,
+    TitleLen = 1,
+    Edits = 2,
+    Words = 3
+}
+
+// Bit 63 of a label's message length marks a primary label.
+const PRIMARY_BIT: u64 = 9223372036854775808;
+const LABEL_LEN_MASK: u64 = 9223372036854775807;
 
 // `Diagnostics::new` before the copies.
 pub fn diagnostics_check(
@@ -598,11 +657,11 @@ pub fn diagnostics_check(
     let mut at: u64 = 0;
     for d in 0..count {
         let code_len = word(in data, at);
-        let message_len = word(in data, wrapping_add(at, 1));
-        let help_len = word(in data, wrapping_add(at, 3));
-        let label_count = word(in data, wrapping_add(at, 4));
-        let fix_count = word(in data, wrapping_add(at, 5));
-        at = wrapping_add(at, 6);
+        let message_len = word(in data, wrapping_add(at, Diag::MessageLen));
+        let help_len = word(in data, wrapping_add(at, Diag::HelpLen));
+        let label_count = word(in data, wrapping_add(at, Diag::Labels));
+        let fix_count = word(in data, wrapping_add(at, Diag::Fixes));
+        at = wrapping_add(at, Diag::Words);
         if code_len == 0 || message_len == 0 || label_count == 0 {
             Fail::raise(Error::InvalidDiagnostic);
         }
@@ -611,7 +670,11 @@ pub fn diagnostics_check(
         let mut primary = false;
         for l in 0..label_count {
             if (
-                word(in data, wrapping_add(at, wrapping_add(wrapping_mul(l, 3), 2))) & primary_bit()
+                word(
+                    in data,
+                    wrapping_add(at, wrapping_add(wrapping_mul(l, Label::Words), Label::Message))
+                )
+                    & PRIMARY_BIT
             )
                 != 0 {
                 primary = true;
@@ -635,11 +698,11 @@ pub fn diagnostics_check(
             Resource::Metadata
         );
         for l in 0..label_count {
-            work = charge(work, mul(n, 2, Resource::Work), cap);
+            work = charge(work, mul(n, SCANS, Resource::Work), cap);
             let start = word(in data, at);
-            let end = word(in data, wrapping_add(at, 1));
-            let message = word(in data, wrapping_add(at, 2)) & wrapping_sub(primary_bit(), 1);
-            at = wrapping_add(at, 3);
+            let end = word(in data, wrapping_add(at, Label::End));
+            let message = word(in data, wrapping_add(at, Label::Message)) & LABEL_LEN_MASK;
+            at = wrapping_add(at, Label::Words);
             let checked = range(
                 in text,
                 in lines,
@@ -653,9 +716,9 @@ pub fn diagnostics_check(
         }
         for f in 0..fix_count {
             let id_len = word(in data, at);
-            let title_len = word(in data, wrapping_add(at, 1));
-            let edits = word(in data, wrapping_add(at, 2));
-            at = wrapping_add(at, 3);
+            let title_len = word(in data, wrapping_add(at, Fix::TitleLen));
+            let edits = word(in data, wrapping_add(at, Fix::Edits));
+            at = wrapping_add(at, Fix::Words);
             if id_len == 0 || title_len == 0 || edits == 0 {
                 Fail::raise(Error::InvalidDiagnostic);
             }
@@ -675,12 +738,12 @@ pub fn diagnostics_check(
             metadata = add(metadata, u(totals.metadata), Resource::Metadata);
             total_text = add(total_text, add(id_len, title_len, Resource::Text), Resource::Text);
             for e in 0..edits {
-                let w = wrapping_add(at, wrapping_mul(e, 5));
-                let exp_len = word(in data, wrapping_add(w, 3));
-                let rep_len = word(in data, wrapping_add(w, 4));
+                let w = wrapping_add(at, wrapping_mul(e, Edit::Words));
+                let exp_len = word(in data, wrapping_add(w, Edit::ExpLen));
+                let rep_len = word(in data, wrapping_add(w, Edit::RepLen));
                 total_text = add(total_text, add(exp_len, rep_len, Resource::Text), Resource::Text);
             }
-            at = wrapping_add(at, wrapping_mul(edits, 5));
+            at = wrapping_add(at, wrapping_mul(edits, Edit::Words));
         }
     }
     bound(total_text, limits.max_text_bytes, Resource::Text);

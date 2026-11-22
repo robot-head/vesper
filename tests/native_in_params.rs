@@ -201,13 +201,14 @@ fn main() -> u64 {
     twice(s, t, 1)
 }
 "#;
-    // `twice` calls, so its parameters keep their home slots: across a call
-    // the incoming words would need callee-saved registers, which cost
-    // more (#1023). The leaf `count` reads `s` in place.
+    // `twice` calls, so the lowering gives its parameters home slots
+    // (#1023); the CLIF clean-up then promotes those slots, which nothing
+    // else addresses, to SSA values (#1426). The leaf `count` reads `s` in
+    // place.
     assert!(
         shape(source, "twice", true)
             .iter()
-            .all(|&(_, spills)| spills > 0)
+            .all(|&(_, spills)| spills == 0)
     );
     assert!(
         shape(source, "count", true)

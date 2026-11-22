@@ -41,6 +41,12 @@
 //   [5, keyword, epath path, handler path, body] Handle,
 //   [6, n, items..] Block.
 use self::util::{
+    Code,
+    Node,
+    Out,
+    Tk,
+    Token,
+    W,
     byte,
     same_set,
     set_insert,
@@ -49,69 +55,142 @@ use self::util::{
     wd
 };
 
-pub fn err_exhausted() -> u64 {
-    4
+// The rows of `w` and `g` (see above).
+enum Origin: _ {
+    Rank = 0,
+    Package = 1,
+    Words = 2
 }
 
-pub fn err_preresolved_binder() -> u64 {
-    5
+enum Def: _ {
+    Package = 0,
+    Item = 1,
+    Kind = 2,
+    Visibility = 3,
+    PathStart = 4,
+    PathLen = 5,
+    Words = 6
 }
 
-pub fn err_mixed_path() -> u64 {
-    6
+// `DefKind` and `Visibility` codes (src/port.rs).
+enum DefKind: _ {
+    Effect = 1,
+    Handler = 3
 }
 
-pub fn err_unbound() -> u64 {
-    7
+enum Vis: _ {
+    Public = 0
 }
 
-pub fn err_ambiguous() -> u64 {
-    8
+enum G: _ {
+    Globals = 0,
+    GlobalBase = 1,
+    Defs = 2,
+    DefBase = 3,
+    Packages = 4,
+    PackageBase = 5
 }
 
-pub fn err_wrong_kind() -> u64 {
-    9
+enum Global: _ {
+    Symbol = 0,
+    First = 1,
+    Len = 2,
+    Package = 3,
+    Item = 4,
+    Words = 5
 }
 
-pub fn err_expected_global() -> u64 {
-    10
+enum Package: _ {
+    Id = 0,
+    Deps = 1,
+    DepsLen = 2,
+    Words = 3
 }
 
-pub fn err_unknown_definition() -> u64 {
-    11
+// The `Call` node: [tag, open, close, nargs, callee, args..].
+enum Call: _ {
+    Open = 1,
+    Close = 2,
+    Nargs = 3,
+    Callee = 4
 }
 
-pub fn err_unknown_package() -> u64 {
-    12
+// The records of the result (see `fg_resolve`), and an operation's kind.
+enum Rec: _ {
+    Binder = 1,
+    Reference = 2,
+    Operation = 3
 }
 
-pub fn err_not_a_dependency() -> u64 {
-    13
+enum Op: _ {
+    Use = 1,
+    Handler = 2,
+    IndirectCall = 3
 }
 
-pub fn err_private() -> u64 {
-    14
+// What `Code::Exhausted` ran out of in `e1`: src/port.rs reads 0 as scopes
+// and anything else as binders.
+enum Identity: _ {
+    Scope = 0,
+    Binder = 3
 }
 
-pub fn err_printed_mismatch() -> u64 {
-    15
+// The resolver's own rows: a local binding, a context pair, an alias, a
+// lookup candidate and a resolution triple (`Res`).
+enum Local: _ {
+    Symbol = 0,
+    First = 1,
+    Len = 2,
+    Binder = 3,
+    Words = 4
 }
 
-pub fn err_parameter() -> u64 {
-    16
+enum Ctx: _ {
+    Scope = 0,
+    Rank = 1,
+    Words = 2
 }
 
-fn def_effect() -> u64 {
-    1
+enum Alias: _ {
+    Has = 0,
+    Package = 1,
+    Item = 2,
+    First = 3,
+    Len = 4,
+    Words = 5
 }
 
-fn def_handler() -> u64 {
-    3
+enum Cand: _ {
+    InGlobals = 0,
+    First = 1,
+    Len = 2,
+    Tag = 3,
+    A = 4,
+    B = 5,
+    Words = 6
 }
 
-fn tok_stride() -> u64 {
-    10
+enum Triple: _ {
+    Tag = 0,
+    A = 1,
+    B = 2,
+    Words = 3
 }
+
+// A resolution's tag.
+enum Tag: _ {
+    Local = 0,
+    Global = 1
+}
+
+// No row, token or label.
+const NONE: u64 = 18446744073709551615;
+// Marks a definition row of the host's table `g` (else of the call's `w`):
+// bit 62.
+const IN_HOST: u64 = 4611686018427387904;
+// The `::` between a path's parts.
+const COLON: u64 = 58;
+const SEPARATOR_LEN: u64 = 2;
 
 // A resolution: tag 0 Local (a = binder), 1 Global (a = package,
 // b = item); `Resolution`'s order is the order of (tag, a, b).
@@ -158,24 +237,24 @@ pub struct R {
 
 fn header(capacity: u64) -> ChunkSeq[u64] {
     let mut out = ChunkSeq::with_capacity[u64](capacity);
-    out.resize(8, 0);
+    out.resize(Out::Words, 0);
     out
 }
 
 pub fn resolver_new(in w: Slice[u64]) -> R {
     R {
-        next_scope: wd(in w, 1),
-        scope_limit: wd(in w, 2),
-        first_binder: wd(in w, 3),
-        next_binder: wd(in w, 3),
-        binder_limit: wd(in w, 4),
+        next_scope: wd(in w, W::NextScope),
+        scope_limit: wd(in w, W::ScopeLimit),
+        first_binder: wd(in w, W::NextBinder),
+        next_binder: wd(in w, W::NextBinder),
+        binder_limit: wd(in w, W::BinderLimit),
         err: 0,
         e1: 0,
         e2: 0,
         e3: 0,
         e4: 0,
         ext: ChunkSeq::new[u64](),
-        out: header(wrapping_mul(wrapping_add(wd(in w, 5), 4), 4)),
+        out: header(wrapping_mul(wrapping_add(wd(in w, W::Tokens), 4), 4)),
         locals: ChunkSeq::new[u64](),
         sp: ChunkSeq::new[u64](),
         ctx: ChunkSeq::new[u64](),
@@ -193,22 +272,31 @@ pub fn resolver_new(in w: Slice[u64]) -> R {
 }
 
 fn tok(in w: Slice[u64], i: u64, field: u64) -> u64 {
-    wd(in w, wrapping_add(wrapping_add(wd(in w, 6), wrapping_mul(i, tok_stride())), field))
+    wd(
+        in w,
+        wrapping_add(wrapping_add(wd(in w, W::TokenBase), wrapping_mul(i, Token::Words)), field)
+    )
 }
 
 fn origin_rank(in w: Slice[u64], o: u64) -> u64 {
-    wd(in w, wrapping_add(wd(in w, 8), wrapping_mul(o, 2)))
+    wd(in w, wrapping_add(wd(in w, W::OriginBase), wrapping_mul(o, Origin::Words)))
 }
 
 fn origin_package(in w: Slice[u64], o: u64) -> u64 {
-    wd(in w, wrapping_add(wd(in w, 8), wrapping_add(wrapping_mul(o, 2), 1)))
+    wd(
+        in w,
+        wrapping_add(
+            wd(in w, W::OriginBase),
+            wrapping_add(wrapping_mul(o, Origin::Words), Origin::Package)
+        )
+    )
 }
 
 fn fresh_scope(inout r: R) -> u64 {
     if r.next_scope >= r.scope_limit {
         if r.err == 0 {
-            r.err = err_exhausted();
-            r.e1 = 0;
+            r.err = Code::Exhausted;
+            r.e1 = Identity::Scope;
             r.e2 = r.scope_limit;
         }
         return 0;
@@ -220,8 +308,8 @@ fn fresh_scope(inout r: R) -> u64 {
 fn fresh_binder(inout r: R) -> u64 {
     if r.next_binder >= r.binder_limit {
         if r.err == 0 {
-            r.err = err_exhausted();
-            r.e1 = 3;
+            r.err = Code::Exhausted;
+            r.e1 = Identity::Binder;
             r.e2 = r.binder_limit;
         }
         return 0;
@@ -269,7 +357,7 @@ fn scopes_for(
             if j >= ctx_len {
                 break;
             }
-            if rank <= sq(in ctx, wrapping_add(wrapping_mul(j, 2), 1)) {
+            if rank <= sq(in ctx, wrapping_add(wrapping_mul(j, Ctx::Words), Ctx::Rank)) {
                 break;
             }
             j = wrapping_add(j, 1);
@@ -280,7 +368,7 @@ fn scopes_for(
             break;
         }
         let x = wd(in w, wrapping_add(f, i));
-        let y = sq(in ctx, wrapping_mul(j, 2));
+        let y = sq(in ctx, wrapping_mul(j, Ctx::Words));
         if hi && (!hj || x < y) {
             out.push(x);
             i = wrapping_add(i, 1);
@@ -301,19 +389,19 @@ fn bind(in w: Slice[u64], inout r: R, t: u64, ctx_len: u64, binder: u64) {
     let first = r.sp.len();
     scopes_for(
         in w,
-        tok(in w, t, 6),
-        tok(in w, t, 7),
+        tok(in w, t, Token::ScopesFirst),
+        tok(in w, t, Token::ScopesLen),
         in r.ctx,
         ctx_len,
-        origin_rank(in w, tok(in w, t, 2)),
+        origin_rank(in w, tok(in w, t, Token::Origin)),
         inout r.sp
     );
     let len = wrapping_sub(r.sp.len(), first);
-    r.locals.push(tok(in w, t, 1));
+    r.locals.push(tok(in w, t, Token::Symbol));
     r.locals.push(first);
     r.locals.push(len);
     r.locals.push(binder);
-    r.out.push(1);
+    r.out.push(Rec::Binder);
     r.out.push(binder);
     r.out.push(t);
     r.out.push(len);
@@ -324,39 +412,39 @@ fn bind(in w: Slice[u64], inout r: R, t: u64, ctx_len: u64, binder: u64) {
 
 // Pushes a context pair (scope, rank) after the first `ctx_len`.
 fn ctx_with(inout r: R, ctx_len: u64, scope: u64, rank: u64) {
-    r.ctx.truncate(wrapping_mul(ctx_len, 2));
+    r.ctx.truncate(wrapping_mul(ctx_len, Ctx::Words));
     r.ctx.push(scope);
     r.ctx.push(rank);
 }
 
 // `Resolver::parameters`: returns the context length.
 pub fn parameters(in w: Slice[u64], inout r: R) -> u64 {
-    let n = wd(in w, 15);
-    let base = wd(in w, 16);
-    let ntok = wd(in w, 5);
+    let n = wd(in w, W::Params);
+    let base = wd(in w, W::ParamBase);
+    let ntok = wd(in w, W::Tokens);
     let mut ctx_len: u64 = 0;
     for p in 0..n {
         let index = wd(in w, wrapping_add(base, p));
         if index >= ntok {
-            raise(inout r, err_parameter(), index, 0, 0, 0);
+            raise(inout r, Code::Parameter, index, 0, 0, 0);
             return ctx_len;
         }
         let mut distinct = true;
-        let sym = tok(in w, index, 1);
-        for l in 0..(r.locals.len() >> 2) {
-            if sq(in r.locals, wrapping_mul(l, 4)) == sym {
+        let sym = tok(in w, index, Token::Symbol);
+        for l in 0..(r.locals.len() / Local::Words) {
+            if sq(in r.locals, wrapping_mul(l, Local::Words)) == sym {
                 distinct = false;
             }
         }
         // Only source tokens (rank 0) without a claim.
-        if tok(in w, index, 0)
-            != 1
-            || origin_rank(in w, tok(in w, index, 2))
+        if tok(in w, index, Token::Kind)
+            != Tk::Ident
+            || origin_rank(in w, tok(in w, index, Token::Origin))
             != 0
-            || tok(in w, index, 3)
+            || tok(in w, index, Token::HasClaim)
             != 0
             || !distinct {
-            raise(inout r, err_parameter(), index, 1, 0, 0);
+            raise(inout r, Code::Parameter, index, 1, 0, 0);
             return ctx_len;
         }
         let scope = fresh_scope(inout r);
@@ -374,24 +462,19 @@ pub fn parameters(in w: Slice[u64], inout r: R) -> u64 {
     ctx_len
 }
 
-// Marks a definition row of the host's table `g` (else of the call's `w`).
-fn in_host() -> u64 {
-    4611686018427387904
-}
-
-// The row at of (package, item) in a table of `n` 6-word rows from `base`
+// The row at of (package, item) in a table of `n` `Def` rows from `base`
 // sorted by id, or `none`.
 fn find_row(in t: Slice[u64], base: u64, n: u64, pkg: u64, item: u64) -> u64 {
     let mut lo: u64 = 0;
     let mut hi = n;
     loop {
         if lo >= hi {
-            return 18446744073709551615;
+            return NONE;
         }
         let mid = wrapping_add(lo, wrapping_sub(hi, lo) >> 1);
-        let at = wrapping_add(base, wrapping_mul(mid, 6));
+        let at = wrapping_add(base, wrapping_mul(mid, Def::Words));
         let p = wd(in t, at);
-        let i = wd(in t, wrapping_add(at, 1));
+        let i = wd(in t, wrapping_add(at, Def::Item));
         if p == pkg && i == item {
             return at;
         }
@@ -404,20 +487,20 @@ fn find_row(in t: Slice[u64], base: u64, n: u64, pkg: u64, item: u64) -> u64 {
 }
 
 // The definition of (package, item): its row in the host's table (the
-// globals' definitions, marked with `in_host()`) or in the call's (the
+// globals' definitions, marked with `IN_HOST`) or in the call's (the
 // other claimed definitions), or `none`.
 fn def_row(in w: Slice[u64], in g: Slice[u64], pkg: u64, item: u64) -> u64 {
-    let at = find_row(in g, wd(in g, 3), wd(in g, 2), pkg, item);
-    if at != 18446744073709551615 {
-        return wrapping_add(at, in_host());
+    let at = find_row(in g, wd(in g, G::DefBase), wd(in g, G::Defs), pkg, item);
+    if at != NONE {
+        return wrapping_add(at, IN_HOST);
     }
-    find_row(in w, wd(in w, 12), wd(in w, 11), pkg, item)
+    find_row(in w, wd(in w, W::DefBase), wd(in w, W::Defs), pkg, item)
 }
 
 // Word k of the definition row `d`.
 fn def_word(in w: Slice[u64], in g: Slice[u64], d: u64, k: u64) -> u64 {
-    if d >= in_host() {
-        wd(in g, wrapping_add(wrapping_sub(d, in_host()), k))
+    if d >= IN_HOST {
+        wd(in g, wrapping_add(wrapping_sub(d, IN_HOST), k))
     } else {
         wd(in w, wrapping_add(d, k))
     }
@@ -425,15 +508,15 @@ fn def_word(in w: Slice[u64], in g: Slice[u64], d: u64, k: u64) -> u64 {
 
 // The package row of `id` in the host's table, or `none`.
 fn package_row(in g: Slice[u64], id: u64) -> u64 {
-    let base = wd(in g, 5);
+    let base = wd(in g, G::PackageBase);
     let mut lo: u64 = 0;
-    let mut hi = wd(in g, 4);
+    let mut hi = wd(in g, G::Packages);
     loop {
         if lo >= hi {
-            return 18446744073709551615;
+            return NONE;
         }
         let mid = wrapping_add(lo, wrapping_sub(hi, lo) >> 1);
-        let at = wrapping_add(base, wrapping_mul(mid, 3));
+        let at = wrapping_add(base, wrapping_mul(mid, Package::Words));
         let p = wd(in g, at);
         if p == id {
             return at;
@@ -450,20 +533,20 @@ fn package_row(in g: Slice[u64], id: u64) -> u64 {
 fn visible_from(in w: Slice[u64], in g: Slice[u64], inout r: R, from: u64, pkg: u64, item: u64)
     -> bool {
     let d = def_row(in w, in g, pkg, item);
-    if d == 18446744073709551615 {
-        raise(inout r, err_unknown_definition(), pkg, item, 0, 0);
+    if d == NONE {
+        raise(inout r, Code::UnknownDefinition, pkg, item, 0, 0);
         return false;
     }
     if pkg == from {
         return true;
     }
     let p = package_row(in g, from);
-    if p == 18446744073709551615 {
-        raise(inout r, err_unknown_package(), from, 0, 0, 0);
+    if p == NONE {
+        raise(inout r, Code::UnknownPackage, from, 0, 0, 0);
         return false;
     }
-    let deps = wd(in g, wrapping_add(p, 1));
-    let ndeps = wd(in g, wrapping_add(p, 2));
+    let deps = wd(in g, wrapping_add(p, Package::Deps));
+    let ndeps = wd(in g, wrapping_add(p, Package::DepsLen));
     let mut found = false;
     for k in 0..ndeps {
         if wd(in g, wrapping_add(deps, k)) == pkg {
@@ -471,11 +554,11 @@ fn visible_from(in w: Slice[u64], in g: Slice[u64], inout r: R, from: u64, pkg: 
         }
     }
     if !found {
-        raise(inout r, err_not_a_dependency(), from, pkg, item, 0);
+        raise(inout r, Code::NotADependency, from, pkg, item, 0);
         return false;
     }
-    if def_word(in w, in g, d, 3) != 0 {
-        raise(inout r, err_private(), from, pkg, item, 0);
+    if def_word(in w, in g, d, Def::Visibility) != Vis::Public {
+        raise(inout r, Code::Private, from, pkg, item, 0);
         return false;
     }
     true
@@ -495,19 +578,19 @@ fn path_spells(
     let mut k: u64 = 0;
     for i in 0..n {
         if i > 0 {
-            if wrapping_add(k, 2)
+            if wrapping_add(k, SEPARATOR_LEN)
                 > len
                 || byte(in names, wrapping_add(start, k))
-                != 58
+                != COLON
                 || byte(in names, wrapping_add(start, wrapping_add(k, 1)))
-                != 58 {
+                != COLON {
                 return false;
             }
-            k = wrapping_add(k, 2);
+            k = wrapping_add(k, SEPARATOR_LEN);
         }
         let t = wd(in w, wrapping_add(at, wrapping_add(i, 1)));
-        let ts = tok(in w, t, 8);
-        let tl = tok(in w, t, 9);
+        let ts = tok(in w, t, Token::TextStart);
+        let tl = tok(in w, t, Token::TextLen);
         if wrapping_add(k, tl) > len {
             return false;
         }
@@ -527,7 +610,7 @@ fn path_origins(in w: Slice[u64], inout r: R, at: u64, from: u64) {
     let n = wd(in w, at);
     for i in 0..n {
         let t = wd(in w, wrapping_add(at, wrapping_add(i, 1)));
-        set_insert(inout r.apool, from, tok(in w, t, 2));
+        set_insert(inout r.apool, from, tok(in w, t, Token::Origin));
     }
 }
 
@@ -538,60 +621,60 @@ fn path_end(in w: Slice[u64], at: u64) -> u64 {
 // `Resolver::lookup` for `symbol` against the scope set in `r.tmp`.
 fn lookup(in w: Slice[u64], in g: Slice[u64], inout r: R, symbol: u64, token: u64) -> Res {
     r.cands.clear();
-    let nl = r.locals.len() >> 2;
+    let nl = r.locals.len() / Local::Words;
     let tn = r.tmp.len();
     for l in 0..nl {
-        let at = wrapping_mul(l, 4);
+        let at = wrapping_mul(l, Local::Words);
         if sq(in r.locals, at) == symbol {
-            let f = sq(in r.locals, wrapping_add(at, 1));
-            let n = sq(in r.locals, wrapping_add(at, 2));
+            let f = sq(in r.locals, wrapping_add(at, Local::First));
+            let n = sq(in r.locals, wrapping_add(at, Local::Len));
             if subset(in r.sp.as_slice(), f, n, in r.tmp.as_slice(), 0, tn) {
                 r.cands.push(0);
                 r.cands.push(f);
                 r.cands.push(n);
-                r.cands.push(0);
-                r.cands.push(sq(in r.locals, wrapping_add(at, 3)));
+                r.cands.push(Tag::Local);
+                r.cands.push(sq(in r.locals, wrapping_add(at, Local::Binder)));
                 r.cands.push(0);
             }
         }
     }
-    let ng = wd(in g, 0);
-    let gb = wd(in g, 1);
+    let ng = wd(in g, G::Globals);
+    let gb = wd(in g, G::GlobalBase);
     for k in 0..ng {
-        let at = wrapping_add(gb, wrapping_mul(k, 5));
+        let at = wrapping_add(gb, wrapping_mul(k, Global::Words));
         if wd(in g, at) == symbol {
-            let f = wd(in g, wrapping_add(at, 1));
-            let n = wd(in g, wrapping_add(at, 2));
+            let f = wd(in g, wrapping_add(at, Global::First));
+            let n = wd(in g, wrapping_add(at, Global::Len));
             if subset(in g, f, n, in r.tmp.as_slice(), 0, tn) {
                 r.cands.push(1);
                 r.cands.push(f);
                 r.cands.push(n);
-                r.cands.push(1);
-                r.cands.push(wd(in g, wrapping_add(at, 3)));
-                r.cands.push(wd(in g, wrapping_add(at, 4)));
+                r.cands.push(Tag::Global);
+                r.cands.push(wd(in g, wrapping_add(at, Global::Package)));
+                r.cands.push(wd(in g, wrapping_add(at, Global::Item)));
             }
         }
     }
-    let nc = r.cands.len() / 6;
+    let nc = r.cands.len() / Cand::Words;
     let none = Res {
         tag: 0,
         a: 0,
         b: 0
     };
     if nc == 0 {
-        raise(inout r, err_unbound(), token, symbol, 0, 0);
+        raise(inout r, Code::Unbound, token, symbol, 0, 0);
         return none;
     }
     // The maximal candidates' resolutions, sorted and distinct, as triples
     // in `ext`.
     r.ext.clear();
     for c in 0..nc {
-        let ca = wrapping_mul(c, 6);
-        let cn = sq(in r.cands, wrapping_add(ca, 2));
+        let ca = wrapping_mul(c, Cand::Words);
+        let cn = sq(in r.cands, wrapping_add(ca, Cand::Len));
         let mut maximal = true;
         for o in 0..nc {
-            let oa = wrapping_mul(o, 6);
-            let on = sq(in r.cands, wrapping_add(oa, 2));
+            let oa = wrapping_mul(o, Cand::Words);
+            let on = sq(in r.cands, wrapping_add(oa, Cand::Len));
             if cn < on && cand_subset(in g, in r, ca, oa) {
                 maximal = false;
                 break;
@@ -600,31 +683,31 @@ fn lookup(in w: Slice[u64], in g: Slice[u64], inout r: R, symbol: u64, token: u6
         if maximal {
             res_insert(
                 inout r.ext,
-                sq(in r.cands, wrapping_add(ca, 3)),
-                sq(in r.cands, wrapping_add(ca, 4)),
-                sq(in r.cands, wrapping_add(ca, 5))
+                sq(in r.cands, wrapping_add(ca, Cand::Tag)),
+                sq(in r.cands, wrapping_add(ca, Cand::A)),
+                sq(in r.cands, wrapping_add(ca, Cand::B))
             );
         }
     }
-    if r.ext.len() == 3 {
+    if r.ext.len() == Triple::Words {
         let res = Res {
-            tag: sq(in r.ext, 0),
-            a: sq(in r.ext, 1),
-            b: sq(in r.ext, 2)
+            tag: sq(in r.ext, Triple::Tag),
+            a: sq(in r.ext, Triple::A),
+            b: sq(in r.ext, Triple::B)
         };
         r.ext.clear();
         return res;
     }
-    raise(inout r, err_ambiguous(), token, symbol, 0, 0);
+    raise(inout r, Code::Ambiguous, token, symbol, 0, 0);
     none
 }
 
 // Whether candidate a's scopes are a subset of candidate b's.
 fn cand_subset(in g: Slice[u64], in r: R, ca: u64, cb: u64) -> bool {
-    let af = sq(in r.cands, wrapping_add(ca, 1));
-    let an = sq(in r.cands, wrapping_add(ca, 2));
-    let bf = sq(in r.cands, wrapping_add(cb, 1));
-    let bn = sq(in r.cands, wrapping_add(cb, 2));
+    let af = sq(in r.cands, wrapping_add(ca, Cand::First));
+    let an = sq(in r.cands, wrapping_add(ca, Cand::Len));
+    let bf = sq(in r.cands, wrapping_add(cb, Cand::First));
+    let bn = sq(in r.cands, wrapping_add(cb, Cand::Len));
     let ag = sq(in r.cands, ca) == 1;
     let bg = sq(in r.cands, cb) == 1;
     if ag && bg {
@@ -640,16 +723,16 @@ fn cand_subset(in g: Slice[u64], in r: R, ca: u64, cb: u64) -> bool {
 
 // Inserts the triple (t, a, b) into the sorted, distinct triples of `s`.
 fn res_insert(inout s: ChunkSeq[u64], t: u64, a: u64, b: u64) {
-    let n = s.len() / 3;
+    let n = s.len() / Triple::Words;
     let mut i: u64 = 0;
     loop {
         if i >= n {
             break;
         }
-        let at = wrapping_mul(i, 3);
+        let at = wrapping_mul(i, Triple::Words);
         let x = sq(in s, at);
-        let y = sq(in s, wrapping_add(at, 1));
-        let z = sq(in s, wrapping_add(at, 2));
+        let y = sq(in s, wrapping_add(at, Triple::A));
+        let z = sq(in s, wrapping_add(at, Triple::B));
         if x == t && y == a && z == b {
             return;
         }
@@ -666,17 +749,17 @@ fn res_insert(inout s: ChunkSeq[u64], t: u64, a: u64, b: u64) {
         if k <= i {
             break;
         }
-        let from = wrapping_mul(wrapping_sub(k, 1), 3);
-        let to = wrapping_mul(k, 3);
+        let from = wrapping_mul(wrapping_sub(k, 1), Triple::Words);
+        let to = wrapping_mul(k, Triple::Words);
         let _ = s.try_set(to, sq(in s, from));
-        let _ = s.try_set(wrapping_add(to, 1), sq(in s, wrapping_add(from, 1)));
-        let _ = s.try_set(wrapping_add(to, 2), sq(in s, wrapping_add(from, 2)));
+        let _ = s.try_set(wrapping_add(to, Triple::A), sq(in s, wrapping_add(from, Triple::A)));
+        let _ = s.try_set(wrapping_add(to, Triple::B), sq(in s, wrapping_add(from, Triple::B)));
         k = wrapping_sub(k, 1);
     }
-    let at = wrapping_mul(i, 3);
+    let at = wrapping_mul(i, Triple::Words);
     let _ = s.try_set(at, t);
-    let _ = s.try_set(wrapping_add(at, 1), a);
-    let _ = s.try_set(wrapping_add(at, 2), b);
+    let _ = s.try_set(wrapping_add(at, Triple::A), a);
+    let _ = s.try_set(wrapping_add(at, Triple::B), b);
 }
 
 // `Resolver::path`: resolves the path at `at` and records the reference.
@@ -697,23 +780,30 @@ fn path(
     let n = wd(in w, at);
     let first = wd(in w, wrapping_add(at, 1));
     let symbol = wd(in w, wrapping_add(at, wrapping_add(n, 1)));
-    let ff = tok(in w, first, 6);
-    let fl = tok(in w, first, 7);
-    let fo = tok(in w, first, 2);
+    let ff = tok(in w, first, Token::ScopesFirst);
+    let fl = tok(in w, first, Token::ScopesLen);
+    let fo = tok(in w, first, Token::Origin);
     let mut nclaims: u64 = 0;
     let mut cp: u64 = 0;
     let mut ci: u64 = 0;
     for i in 0..n {
         let t = wd(in w, wrapping_add(at, wrapping_add(i, 1)));
-        if !same_set(in w, tok(in w, t, 6), tok(in w, t, 7), in w, ff, fl)
-            || tok(in w, t, 2)
+        if !same_set(
+            in w,
+            tok(in w, t, Token::ScopesFirst),
+            tok(in w, t, Token::ScopesLen),
+            in w,
+            ff,
+            fl
+        )
+            || tok(in w, t, Token::Origin)
             != fo {
-            raise(inout r, err_mixed_path(), t, 0, 0, 0);
+            raise(inout r, Code::MixedPath, t, 0, 0, 0);
             return none;
         }
-        if tok(in w, t, 3) != 0 {
-            let p = tok(in w, t, 4);
-            let it = tok(in w, t, 5);
+        if tok(in w, t, Token::HasClaim) != 0 {
+            let p = tok(in w, t, Token::ClaimPackage);
+            let it = tok(in w, t, Token::ClaimItem);
             if nclaims == 0 {
                 nclaims = 1;
                 cp = p;
@@ -724,7 +814,7 @@ fn path(
         }
     }
     if nclaims > 1 {
-        raise(inout r, err_mixed_path(), first, 0, 0, 0);
+        raise(inout r, Code::MixedPath, first, 0, 0, 0);
         return none;
     }
     let mut res = none;
@@ -735,19 +825,19 @@ fn path(
             return none;
         }
         let d = def_row(in w, in g, cp, ci);
-        let start = def_word(in w, in g, d, 4);
-        let len = def_word(in w, in g, d, 5);
-        let spelled = if d >= in_host() {
+        let start = def_word(in w, in g, d, Def::PathStart);
+        let len = def_word(in w, in g, d, Def::PathLen);
+        let spelled = if d >= IN_HOST {
             path_spells(in w, in text, in gt, at, start, len)
         } else {
             path_spells(in w, in text, in text, at, start, len)
         };
         if !spelled {
-            raise(inout r, err_printed_mismatch(), cp, ci, symbol, 0);
+            raise(inout r, Code::PrintedMismatch, cp, ci, symbol, 0);
             return none;
         }
         res = Res {
-            tag: 1,
+            tag: Tag::Global,
             a: cp,
             b: ci
         };
@@ -760,7 +850,7 @@ fn path(
             return none;
         }
     }
-    r.out.push(2);
+    r.out.push(Rec::Reference);
     r.out.push(first);
     r.out.push(symbol);
     r.out.push(res.tag);
@@ -774,7 +864,7 @@ fn path(
 
 // Records an operation whose origins are r.apool[from..], then drops them.
 fn push_op(inout r: R, kind: u64, a: u64, b: u64, c: u64, d: u64, token: u64, from: u64) {
-    r.out.push(3);
+    r.out.push(Rec::Operation);
     r.out.push(kind);
     r.out.push(a);
     r.out.push(b);
@@ -792,19 +882,19 @@ fn push_op(inout r: R, kind: u64, a: u64, b: u64, c: u64, d: u64, token: u64, fr
 // `first_token` of the term at `at`, or `none`.
 fn first_token(in w: Slice[u64], at: u64) -> u64 {
     let k = wd(in w, at);
-    if k == 1 {
+    if k == Node::Ref {
         wd(in w, wrapping_add(at, 2))
-    } else if k == 2 || k == 3 || k == 5 {
+    } else if k == Node::Lit || k == Node::Let || k == Node::Handle {
         wd(in w, wrapping_add(at, 1))
-    } else if k == 4 {
-        let f = first_token(in w, wrapping_add(at, 4));
-        if f == 18446744073709551615 {
+    } else if k == Node::Call {
+        let f = first_token(in w, wrapping_add(at, Call::Callee));
+        if f == NONE {
             wd(in w, wrapping_add(at, 1))
         } else {
             f
         }
     } else if wd(in w, wrapping_add(at, 1)) == 0 {
-        18446744073709551615
+        NONE
     } else {
         first_token(in w, wrapping_add(at, 2))
     }
@@ -814,27 +904,35 @@ fn first_token(in w: Slice[u64], at: u64) -> u64 {
 // term's end.
 fn collect_origins(in w: Slice[u64], inout r: R, at: u64, from: u64) -> u64 {
     let k = wd(in w, at);
-    if k == 1 {
+    if k == Node::Ref {
         path_origins(in w, inout r, wrapping_add(at, 1), from);
         path_end(in w, wrapping_add(at, 1))
-    } else if k == 2 {
-        set_insert(inout r.apool, from, tok(in w, wd(in w, wrapping_add(at, 1)), 2));
+    } else if k == Node::Lit {
+        set_insert(inout r.apool, from, tok(in w, wd(in w, wrapping_add(at, 1)), Token::Origin));
         wrapping_add(at, 2)
-    } else if k == 3 {
-        set_insert(inout r.apool, from, tok(in w, wd(in w, wrapping_add(at, 1)), 2));
+    } else if k == Node::Let {
+        set_insert(inout r.apool, from, tok(in w, wd(in w, wrapping_add(at, 1)), Token::Origin));
         let body = collect_origins(in w, inout r, wrapping_add(at, 2), from);
         collect_origins(in w, inout r, body, from)
-    } else if k == 4 {
-        set_insert(inout r.apool, from, tok(in w, wd(in w, wrapping_add(at, 1)), 2));
-        set_insert(inout r.apool, from, tok(in w, wd(in w, wrapping_add(at, 2)), 2));
-        let nargs = wd(in w, wrapping_add(at, 3));
-        let mut next = collect_origins(in w, inout r, wrapping_add(at, 4), from);
+    } else if k == Node::Call {
+        set_insert(
+            inout r.apool,
+            from,
+            tok(in w, wd(in w, wrapping_add(at, Call::Open)), Token::Origin)
+        );
+        set_insert(
+            inout r.apool,
+            from,
+            tok(in w, wd(in w, wrapping_add(at, Call::Close)), Token::Origin)
+        );
+        let nargs = wd(in w, wrapping_add(at, Call::Nargs));
+        let mut next = collect_origins(in w, inout r, wrapping_add(at, Call::Callee), from);
         for i in 0..nargs {
             next = collect_origins(in w, inout r, next, from);
         }
         next
-    } else if k == 5 {
-        set_insert(inout r.apool, from, tok(in w, wd(in w, wrapping_add(at, 1)), 2));
+    } else if k == Node::Handle {
+        set_insert(inout r.apool, from, tok(in w, wd(in w, wrapping_add(at, 1)), Token::Origin));
         let epath = wrapping_add(at, 2);
         path_origins(in w, inout r, epath, from);
         let handler = path_end(in w, epath);
@@ -866,13 +964,13 @@ fn global_of_kind(
         return res;
     }
     let first = wd(in w, wrapping_add(at, 1));
-    if res.tag == 1 {
+    if res.tag == Tag::Global {
         let d = def_row(in w, in g, res.a, res.b);
-        if d == 18446744073709551615 || def_word(in w, in g, d, 2) != kind {
-            raise(inout r, err_wrong_kind(), first, res.a, res.b, kind);
+        if d == NONE || def_word(in w, in g, d, Def::Kind) != kind {
+            raise(inout r, Code::WrongKind, first, res.a, res.b, kind);
         }
     } else {
-        raise(inout r, err_expected_global(), first, 0, 0, 0);
+        raise(inout r, Code::ExpectedGlobal, first, 0, 0, 0);
     }
     res
 }
@@ -889,23 +987,23 @@ pub fn term(
     ctx_len: u64
 ) -> u64 {
     let k = wd(in w, at);
-    if k == 2 {
+    if k == Node::Lit {
         return wrapping_add(at, 2);
     }
-    if k == 1 {
+    if k == Node::Ref {
         let p = wrapping_add(at, 1);
         let res = path(in w, in text, in g, in gt, inout r, p, ctx_len);
         if r.err != 0 {
             return 0;
         }
-        if res.tag == 1 {
+        if res.tag == Tag::Global {
             let from = r.apool.len();
             path_origins(in w, inout r, p, from);
-            push_op(inout r, 1, res.a, res.b, 0, 0, wd(in w, wrapping_add(p, 1)), from);
+            push_op(inout r, Op::Use, res.a, res.b, 0, 0, wd(in w, wrapping_add(p, 1)), from);
         }
         return path_end(in w, p);
     }
-    if k == 3 {
+    if k == Node::Let {
         let binder = wd(in w, wrapping_add(at, 1));
         let value = wrapping_add(at, 2);
         let body = term(in w, in text, in g, in gt, inout r, value, ctx_len);
@@ -917,21 +1015,21 @@ pub fn term(
         let mut ap: u64 = 0;
         let mut ai: u64 = 0;
         let afrom = r.apool.len();
-        if wd(in w, value) == 1 && r.has_last {
+        if wd(in w, value) == Node::Ref && r.has_last {
             let last = r.last;
-            if last.tag == 1 {
+            if last.tag == Tag::Global {
                 has_alias = true;
                 ap = last.a;
                 ai = last.b;
                 path_origins(in w, inout r, wrapping_add(value, 1), afrom);
             } else {
-                let row = wrapping_mul(wrapping_sub(last.a, r.first_binder), 5);
+                let row = wrapping_mul(wrapping_sub(last.a, r.first_binder), Alias::Words);
                 if sq(in r.alias, row) == 1 {
                     has_alias = true;
-                    ap = sq(in r.alias, wrapping_add(row, 1));
-                    ai = sq(in r.alias, wrapping_add(row, 2));
-                    let of = sq(in r.alias, wrapping_add(row, 3));
-                    let on = sq(in r.alias, wrapping_add(row, 4));
+                    ap = sq(in r.alias, wrapping_add(row, Alias::Package));
+                    ai = sq(in r.alias, wrapping_add(row, Alias::Item));
+                    let of = sq(in r.alias, wrapping_add(row, Alias::First));
+                    let on = sq(in r.alias, wrapping_add(row, Alias::Len));
                     for q in 0..on {
                         set_insert(inout r.apool, afrom, sq(in r.apool, wrapping_add(of, q)));
                     }
@@ -939,13 +1037,13 @@ pub fn term(
                 }
             }
         }
-        if tok(in w, binder, 3) != 0 {
+        if tok(in w, binder, Token::HasClaim) != 0 {
             raise(
                 inout r,
-                err_preresolved_binder(),
+                Code::PreresolvedBinder,
                 binder,
-                tok(in w, binder, 4),
-                tok(in w, binder, 5),
+                tok(in w, binder, Token::ClaimPackage),
+                tok(in w, binder, Token::ClaimItem),
                 0
             );
             return 0;
@@ -954,7 +1052,7 @@ pub fn term(
         if r.err != 0 {
             return 0;
         }
-        ctx_with(inout r, ctx_len, scope, origin_rank(in w, tok(in w, binder, 2)));
+        ctx_with(inout r, ctx_len, scope, origin_rank(in w, tok(in w, binder, Token::Origin)));
         let inner = wrapping_add(ctx_len, 1);
         let id = fresh_binder(inout r);
         if r.err != 0 {
@@ -963,53 +1061,55 @@ pub fn term(
         if has_alias {
             // The alias's origins stay in `apool` (below every later
             // operation's run).
-            let row = wrapping_mul(wrapping_sub(id, r.first_binder), 5);
+            let row = wrapping_mul(wrapping_sub(id, r.first_binder), Alias::Words);
             let _ = r.alias.try_set(row, 1);
-            let _ = r.alias.try_set(wrapping_add(row, 1), ap);
-            let _ = r.alias.try_set(wrapping_add(row, 2), ai);
-            let _ = r.alias.try_set(wrapping_add(row, 3), afrom);
-            let _ = r.alias.try_set(wrapping_add(row, 4), wrapping_sub(r.apool.len(), afrom));
+            let _ = r.alias.try_set(wrapping_add(row, Alias::Package), ap);
+            let _ = r.alias.try_set(wrapping_add(row, Alias::Item), ai);
+            let _ = r.alias.try_set(wrapping_add(row, Alias::First), afrom);
+            let _ = r
+                .alias
+                .try_set(wrapping_add(row, Alias::Len), wrapping_sub(r.apool.len(), afrom));
         }
         bind(in w, inout r, binder, inner, id);
         return term(in w, in text, in g, in gt, inout r, body, inner);
     }
-    if k == 4 {
-        let open = wd(in w, wrapping_add(at, 1));
-        let close = wd(in w, wrapping_add(at, 2));
-        let nargs = wd(in w, wrapping_add(at, 3));
-        let callee = wrapping_add(at, 4);
+    if k == Node::Call {
+        let open = wd(in w, wrapping_add(at, Call::Open));
+        let close = wd(in w, wrapping_add(at, Call::Close));
+        let nargs = wd(in w, wrapping_add(at, Call::Nargs));
+        let callee = wrapping_add(at, Call::Callee);
         let mut first = first_token(in w, callee);
-        if first == 18446744073709551615 {
+        if first == NONE {
             first = open;
         }
         let mut next: u64 = 0;
-        if wd(in w, callee) == 1 {
+        if wd(in w, callee) == Node::Ref {
             // The call syntax contributes provenance too: generated
             // parentheses around spliced caller syntax are a generated call.
             let from = r.apool.len();
-            set_insert(inout r.apool, from, tok(in w, open, 2));
-            set_insert(inout r.apool, from, tok(in w, close, 2));
+            set_insert(inout r.apool, from, tok(in w, open, Token::Origin));
+            set_insert(inout r.apool, from, tok(in w, close, Token::Origin));
             let p = wrapping_add(callee, 1);
             path_origins(in w, inout r, p, from);
             let res = path(in w, in text, in g, in gt, inout r, p, ctx_len);
             if r.err != 0 {
                 return 0;
             }
-            let mut kind: u64 = 3;
+            let mut kind: u64 = Op::IndirectCall;
             let mut da: u64 = 0;
             let mut db: u64 = 0;
-            if res.tag == 1 {
-                kind = 1;
+            if res.tag == Tag::Global {
+                kind = Op::Use;
                 da = res.a;
                 db = res.b;
             } else {
-                let row = wrapping_mul(wrapping_sub(res.a, r.first_binder), 5);
+                let row = wrapping_mul(wrapping_sub(res.a, r.first_binder), Alias::Words);
                 if sq(in r.alias, row) == 1 {
-                    kind = 1;
-                    da = sq(in r.alias, wrapping_add(row, 1));
-                    db = sq(in r.alias, wrapping_add(row, 2));
-                    let of = sq(in r.alias, wrapping_add(row, 3));
-                    let on = sq(in r.alias, wrapping_add(row, 4));
+                    kind = Op::Use;
+                    da = sq(in r.alias, wrapping_add(row, Alias::Package));
+                    db = sq(in r.alias, wrapping_add(row, Alias::Item));
+                    let of = sq(in r.alias, wrapping_add(row, Alias::First));
+                    let on = sq(in r.alias, wrapping_add(row, Alias::Len));
                     for q in 0..on {
                         set_insert(inout r.apool, from, sq(in r.apool, wrapping_add(of, q)));
                     }
@@ -1024,10 +1124,10 @@ pub fn term(
                 return 0;
             }
             let from = r.apool.len();
-            set_insert(inout r.apool, from, tok(in w, open, 2));
-            set_insert(inout r.apool, from, tok(in w, close, 2));
+            set_insert(inout r.apool, from, tok(in w, open, Token::Origin));
+            set_insert(inout r.apool, from, tok(in w, close, Token::Origin));
             let end = collect_origins(in w, inout r, callee, from);
-            push_op(inout r, 3, 0, 0, 0, 0, first, from);
+            push_op(inout r, Op::IndirectCall, 0, 0, 0, 0, first, from);
         }
         for a in 0..nargs {
             next = term(in w, in text, in g, in gt, inout r, next, ctx_len);
@@ -1037,12 +1137,21 @@ pub fn term(
         }
         return next;
     }
-    if k == 5 {
+    if k == Node::Handle {
         let keyword = wd(in w, wrapping_add(at, 1));
         let epath = wrapping_add(at, 2);
         let handler = path_end(in w, epath);
         let body = path_end(in w, handler);
-        let e = global_of_kind(in w, in text, in g, in gt, inout r, epath, ctx_len, def_effect());
+        let e = global_of_kind(
+            in w,
+            in text,
+            in g,
+            in gt,
+            inout r,
+            epath,
+            ctx_len,
+            DefKind::Effect
+        );
         if r.err != 0 {
             return 0;
         }
@@ -1054,7 +1163,7 @@ pub fn term(
             inout r,
             handler,
             ctx_len,
-            def_handler()
+            DefKind::Handler
         );
         if r.err != 0 {
             return 0;
@@ -1062,8 +1171,8 @@ pub fn term(
         let from = r.apool.len();
         path_origins(in w, inout r, epath, from);
         path_origins(in w, inout r, handler, from);
-        set_insert(inout r.apool, from, tok(in w, keyword, 2));
-        push_op(inout r, 2, e.a, e.b, h.a, h.b, keyword, from);
+        set_insert(inout r.apool, from, tok(in w, keyword, Token::Origin));
+        push_op(inout r, Op::Handler, e.a, e.b, h.a, h.b, keyword, from);
         return term(in w, in text, in g, in gt, inout r, body, ctx_len);
     }
     let n = wd(in w, wrapping_add(at, 1));

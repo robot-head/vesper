@@ -2,6 +2,7 @@
 name = "vesper-highlight"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
 description = "Vesper Chroma (§43): lossless CST semantic highlighting, OKLCH palettes with contrast audits, HTML/ANSI/wire output and a wasm32 C ABI"
 build = "build.rs"
 

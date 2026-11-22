@@ -1,0 +1,43 @@
+[package]
+name = "vesper-crypto-sys"
+version = "0.1.0"
+edition = "2024"
+description = "The one C-ABI shim over the vetted cryptography libraries (RustCrypto, dalek, libcrux, ring) for Vesper's `.vsys` imports (Rust-exit SH6 lane 17)"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+# The rlib is what Rust hosts (the JIT tests, the port crates) link; the
+# staticlib is what a C or Vesper executable links.
+crate-type = ["rlib", "staticlib"]
+
+[dependencies]
+# Same versions and features as the crates this shim replaces, so the shim
+# links the exact vetted builds they did.
+aes = { workspace = true }
+aes-gcm = { workspace = true }
+chacha20 = { workspace = true }
+chacha20poly1305 = { workspace = true }
+hkdf = { workspace = true }
+hmac = "=0.12.1"
+sha2 = { workspace = true }
+subtle = { workspace = true }
+zeroize = { workspace = true }
+# Not called directly: enable zeroize-on-drop of the GHASH/Poly1305 state
+# inside aes-gcm and chacha20poly1305 through Cargo feature unification.
+poly1305 = { workspace = true }
+polyval = { workspace = true }
+getrandom = { workspace = true }
+x25519-dalek = { workspace = true }
+ed25519-dalek = "2"
+libcrux-ml-kem = { workspace = true }
+ring = "0.17.14"
+
+# ML-KEM-768 vector NTT backends: libcrux's formally verified AVX2 and NEON
+# kernels, each only on the architecture whose intrinsics it compiles
+# against (as crates/vesper-vault does).
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+libcrux-ml-kem = { workspace = true, features = ["simd256"] }
+
+[target.'cfg(target_arch = "aarch64")'.dependencies]
+libcrux-ml-kem = { workspace = true, features = ["simd128"] }

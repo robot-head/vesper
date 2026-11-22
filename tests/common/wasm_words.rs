@@ -80,7 +80,7 @@ impl Sec<'_> {
         self.ty(&f.result);
         self.row(&f.effects);
     }
-    /// Kind (0 int lo hi, 1 float, 2 bool, 3 string), as in ir_words.
+    /// Kind (0 int lo hi, 1 float, 2 bool, 3 string, 4 wide int), as in ir_words.
     fn literal(&mut self, l: &Literal) {
         match l {
             Literal::Int(n) => {
@@ -102,6 +102,12 @@ impl Sec<'_> {
                 self.raw(3);
                 self.name(t);
                 self.raw(0);
+            }
+            // A literal past `i128::MAX`: two raw words, like an Int.
+            Literal::WideInt(n) => {
+                self.raw(4);
+                self.raw(*n as u64);
+                self.raw((*n >> 64) as u64);
             }
         }
     }

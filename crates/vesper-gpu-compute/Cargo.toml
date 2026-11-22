@@ -2,6 +2,7 @@
 name = "vesper-gpu-compute"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
 description = "Vesper GPU compute (design sections 28 and 36): a small Vulkan compute runtime with naga-compiled WGSL kernels for Tensor inference and the Kinetic broadphase, validated on Mesa lavapipe"
 publish = false
 
@@ -13,3 +14,15 @@ vesper-kinetic = { path = "../vesper-kinetic/seed", package = "vesper-kinetic-se
 # The Rust seed copy: the Vesper port of vesper-tensor stays non-default
 # until it reaches performance parity (port wave P1 lane 8, #905).
 vesper-tensor = { path = "../vesper-tensor/seed", package = "vesper-tensor-seed" }
+vesper-port-abi = { path = "../vesper-port-abi", optional = true }
+
+[build-dependencies]
+vesper-port-harness = { path = "../vesper-port-harness", optional = true }
+
+[features]
+# The Vesper runtime (vesper/, SH6 lane 15, #1410): Context, Buffer, Kernel,
+# Recording and Submission call the Vulkan loader from Vesper through
+# vesper/vk.vsys instead of ash. Off by default until the flip; the
+# lavapipe workflow runs every test against both builds. It links the
+# system libvulkan, so it needs the Vulkan loader at build time.
+vesper-port = ["dep:vesper-port-abi", "dep:vesper-port-harness"]

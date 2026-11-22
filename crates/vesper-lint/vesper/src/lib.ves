@@ -58,6 +58,59 @@ const U64_MAX: u64 = 18446744073709551615;
 // End of input for `at`.
 const EOF: u64 = 256;
 
+// `analyze`'s limits (crates/vesper-lint/src/lib.rs): the ceilings of
+// `Limits`, then the per-function and per-type sizes it checks.
+const MAX_FUNCTIONS: u64 = 256;
+const MAX_ACTIONS: u64 = 16384;
+const MAX_WORK: u64 = 1000000;
+const MAX_CALL_DEPTH: u64 = 64;
+const MAX_EFFECTS: u64 = 64;
+const MAX_PARAMS: u64 = 128;
+const MAX_GENERICS: u64 = 64;
+const MAX_STRUCT_FIELDS: u64 = 128;
+const MAX_SUBSTITUTIONS: u64 = 64;
+const MAX_PROJECTION_DEPTH: u64 = 32;
+const MAX_TYPE_DEPTH: u64 = 32;
+const MAX_TYPE_NODES: u64 = 512;
+const MAX_TYPE_ARGS: u64 = 512;
+const MAX_EFFECT_ARGS: u64 = 64;
+// `apply_edits`' limits.
+const MAX_EDITS: u64 = 8192;
+const MAX_EDIT_BYTES: u64 = 262144;
+
+// Lists of (name, type) pairs: parameters of an arrow, substitutions.
+const PAIR: u64 = 2;
+
+// The type tags of the fact stream (port.rs `encode`).
+enum Wire: _ {
+    IntLiteral = 0,
+    Named = 1,
+    Tuple = 2,
+    Function = 3,
+    Row = 4
+}
+
+// An edit after the count: span start and end, expected text start and
+// length, replacement start and length in `texts`.
+enum Edit: _ {
+    Start = 0,
+    End = 1,
+    ExpStart = 2,
+    ExpLen = 3,
+    RepStart = 4,
+    RepLen = 5,
+    Words = 6
+}
+
+enum Ascii: _ {
+    LParen = 0x28,
+    RParen = 0x29,
+    Dot = 0x2e,
+    LBracket = 0x5b,
+    RBracket = 0x5d,
+    Underscore = 0x5f
+}
+
 pub copy struct LintFail {
     code: u64
 }
@@ -374,7 +427,7 @@ fn rd_effects(in w: Slice[u64], inout r: Rd, inout p: Prog, in blob: Str) -> u32
 
 fn rd_type(in w: Slice[u64], inout r: Rd, inout p: Prog, in blob: Str) -> u32 {
     let tag = rd(in w, inout r);
-    if tag == 0 {
+    if tag == Wire::IntLiteral {
         let at = wrapping_u32(p.ilits.len());
         p.ilits.push(rd(in w, inout r));
         p.ilits.push(rd(in w, inout r));
@@ -388,7 +441,7 @@ fn rd_type(in w: Slice[u64], inout r: Rd, inout p: Prog, in blob: Str) -> u32 {
                 d: 0
             }
         )
-    } else if tag == 1 {
+    } else if tag == Wire::Named {
         let name = rd_name(in w, inout r, inout p, in blob);
         let args = rd_types(in w, inout r, inout p, in blob);
         add_type(
@@ -401,7 +454,7 @@ fn rd_type(in w: Slice[u64], inout r: Rd, inout p: Prog, in blob: Str) -> u32 {
                 d: 0
             }
         )
-    } else if tag == 2 {
+    } else if tag == Wire::Tuple {
         let args = rd_types(in w, inout r, inout p, in blob);
         add_type(
             inout p,
@@ -413,9 +466,9 @@ fn rd_type(in w: Slice[u64], inout r: Rd, inout p: Prog, in blob: Str) -> u32 {
                 d: 0
             }
         )
-    } else if tag == 3 {
+    } else if tag == Wire::Function {
         let n = rd(in w, inout r);
-        let mut items = ChunkSeq::with_capacity[u32](wrapping_mul(n, 2));
+        let mut items = ChunkSeq::with_capacity[u32](wrapping_mul(n, PAIR));
         for i in 0..n {
             items.push(wrapping_u32(rd(in w, inout r)));
             items.push(rd_type(in w, inout r, inout p, in blob));
@@ -434,7 +487,7 @@ fn rd_type(in w: Slice[u64], inout r: Rd, inout p: Prog, in blob: Str) -> u32 {
                 d: mode
             }
         )
-    } else if tag == 4 {
+    } else if tag == Wire::Row {
         let effects = rd_effects(in w, inout r, inout p, in blob);
         add_type(
             inout p,
@@ -546,7 +599,7 @@ fn rd_function(in w: Slice[u64], inout r: Rd, inout p: Prog, in blob: Str) {
         } else if kind == A_CALL {
             let callee = rd_name(in w, inout r, inout p, in blob);
             let n = rd(in w, inout r);
-            let mut subs = ChunkSeq::with_capacity[u32](wrapping_mul(n, 2));
+            let mut subs = ChunkSeq::with_capacity[u32](wrapping_mul(n, PAIR));
             for j in 0..n {
                 subs.push(rd_name(in w, inout r, inout p, in blob));
                 subs.push(rd_type(in w, inout r, inout p, in blob));
@@ -683,7 +736,7 @@ fn validate_type(in p: Prog, ty: u32) eff [Fail[LintFail]] {
         let t = wrapping_u32(word(in stack.as_slice(), wrapping_sub(n, 2)));
         stack.truncate(wrapping_sub(n, 2));
         nodes = inc(nodes);
-        if depth > 32 || nodes > 512 {
+        if depth > MAX_TYPE_DEPTH || nodes > MAX_TYPE_NODES {
             fail(L_TYPE_COMPLEXITY);
         }
         let x = type_at(in p, t);
@@ -695,7 +748,7 @@ fn validate_type(in p: Prog, ty: u32) eff [Fail[LintFail]] {
                 x.a
             };
             let len = list_len(in p, args);
-            if len > 512 {
+            if len > MAX_TYPE_ARGS {
                 fail(L_TYPE_ARITY);
             }
             for i in 0..len {
@@ -704,12 +757,12 @@ fn validate_type(in p: Prog, ty: u32) eff [Fail[LintFail]] {
             }
         } else if x.kind == TY_FUNCTION {
             let row = row_at(in p, x.c);
-            let np = list_len(in p, x.a) / 2;
-            if np > 128 || list_len(in p, row.instances) > 64 {
+            let np = list_len(in p, x.a) / PAIR;
+            if np > MAX_PARAMS || list_len(in p, row.instances) > MAX_EFFECTS {
                 fail(L_ARROW_SHAPE);
             }
             for i in 0..np {
-                stack.push(widen_u64(list_at(in p, x.a, inc(wrapping_mul(i, 2)))));
+                stack.push(widen_u64(list_at(in p, x.a, inc(wrapping_mul(i, PAIR)))));
                 stack.push(d);
             }
             stack.push(widen_u64(x.b));
@@ -717,7 +770,7 @@ fn validate_type(in p: Prog, ty: u32) eff [Fail[LintFail]] {
             push_row_args(in p, row, inout stack, d);
         } else if x.kind == TY_ROW {
             let row = row_at(in p, x.a);
-            if list_len(in p, row.instances) > 64 {
+            if list_len(in p, row.instances) > MAX_EFFECTS {
                 fail(L_ROW_SHAPE);
             }
             push_row_args(in p, row, inout stack, d);
@@ -731,7 +784,7 @@ fn push_row_args(in p: Prog, row: EffectsNode, inout stack: ChunkSeq[u64], d: u6
     for i in 0..list_len(in p, row.instances) {
         let e = eff_at(in p, list_at(in p, row.instances, i));
         let n = list_len(in p, e.args);
-        if n > 64 {
+        if n > MAX_EFFECT_ARGS {
             fail(L_NESTED_EFFECT_ARITY);
         }
         for j in 0..n {
@@ -744,7 +797,7 @@ fn push_row_args(in p: Prog, row: EffectsNode, inout stack: ChunkSeq[u64], d: u6
 fn validate_effect(in p: Prog, e: u32) eff [Fail[LintFail]] {
     let x = eff_at(in p, e);
     let n = list_len(in p, x.args);
-    if n > 64 {
+    if n > MAX_EFFECT_ARGS {
         fail(L_EFFECT_ARITY);
     }
     for i in 0..n {
@@ -759,19 +812,19 @@ fn check_limits(in p: Prog, functions: u64, actions: u64, work: u64, depth: u64)
     if functions
         == 0
         || functions
-        > 256
+        > MAX_FUNCTIONS
         || actions
         == 0
         || actions
-        > 16384
+        > MAX_ACTIONS
         || work
         == 0
         || work
-        > 1000000
+        > MAX_WORK
         || depth
         == 0
         || depth
-        > 64 {
+        > MAX_CALL_DEPTH {
         fail(L_INVALID_LIMITS);
     }
     if p.fns.len() > functions {
@@ -782,10 +835,15 @@ fn check_limits(in p: Prog, functions: u64, actions: u64, work: u64, depth: u64)
         let f = fn_at(in p, i);
         count = wrapping_add(count, widen_u64(f.act_len));
         let row = row_at(in p, f.effects);
-        if count > actions || list_len(in p, row.instances) > 64 || list_len(in p, f.facts) > 128 {
+        if count
+            > actions
+            || list_len(in p, row.instances)
+            > MAX_EFFECTS
+            || list_len(in p, f.facts)
+            > MAX_PARAMS {
             fail(L_FACT_LIMIT);
         }
-        if list_len(in p, f.params) > 128 || list_len(in p, f.generics) > 64 {
+        if list_len(in p, f.params) > MAX_PARAMS || list_len(in p, f.generics) > MAX_GENERICS {
             fail(L_SIGNATURE_LIMIT);
         }
         validate_type(in p, f.result);
@@ -795,7 +853,7 @@ fn check_limits(in p: Prog, functions: u64, actions: u64, work: u64, depth: u64)
         for j in 0..list_len(in p, f.facts) {
             let q = param_at(in p, list_at(in p, f.facts, j));
             validate_type(in p, q.ty);
-            if list_len(in p, q.fields) > 128 {
+            if list_len(in p, q.fields) > MAX_STRUCT_FIELDS {
                 fail(L_STRUCT_FIELD_LIMIT);
             }
         }
@@ -807,15 +865,15 @@ fn check_limits(in p: Prog, functions: u64, actions: u64, work: u64, depth: u64)
             if a.kind == A_PERFORM {
                 validate_effect(in p, a.a);
             } else if a.kind == A_CALL {
-                let n = list_len(in p, a.b) / 2;
-                if n > 64 {
+                let n = list_len(in p, a.b) / PAIR;
+                if n > MAX_SUBSTITUTIONS {
                     fail(L_SUBSTITUTION_LIMIT);
                 }
                 for k in 0..n {
-                    validate_type(in p, list_at(in p, a.b, inc(wrapping_mul(k, 2))));
+                    validate_type(in p, list_at(in p, a.b, inc(wrapping_mul(k, PAIR))));
                 }
             } else if a.kind == A_ACCESS {
-                if list_len(in p, a.b) > 32 {
+                if list_len(in p, a.b) > MAX_PROJECTION_DEPTH {
                     fail(L_PROJECTION_DEPTH);
                 }
             }
@@ -906,7 +964,7 @@ fn type_eq(in p: Prog, a: u32, b: u32) -> bool {
         for i in 0..n {
             let u = list_at(in p, x.a, i);
             let v = list_at(in p, y.a, i);
-            if i % 2 == 0 {
+            if i % PAIR == 0 {
                 if u != v {
                     return false;
                 }
@@ -935,9 +993,9 @@ fn substitute(inout p: Prog, t: u32, subs: u32) -> u32 {
     if x.kind == TY_NAMED {
         let n = list_len(in p, x.b);
         if n == 0 {
-            for i in 0..list_len(in p, subs) / 2 {
-                if list_at(in p, subs, wrapping_mul(i, 2)) == x.a {
-                    return list_at(in p, subs, inc(wrapping_mul(i, 2)));
+            for i in 0..list_len(in p, subs) / PAIR {
+                if list_at(in p, subs, wrapping_mul(i, PAIR)) == x.a {
+                    return list_at(in p, subs, inc(wrapping_mul(i, PAIR)));
                 }
             }
             return t;
@@ -1129,7 +1187,7 @@ fn required_body(
                 return req_err(R_UNRESOLVED_CALL);
             }
             let target = fn_at(in p, widen_u64(ti));
-            let nsubs = list_len(in p, a.b) / 2;
+            let nsubs = list_len(in p, a.b) / PAIR;
             for i in 0..list_len(in p, target.generics) {
                 let gname = match p.generics.try_get(widen_u64(list_at(in p, target.generics, i))) {
                     Option::Some(g) => g.name,
@@ -1137,7 +1195,7 @@ fn required_body(
                 };
                 let mut found = false;
                 for j in 0..nsubs {
-                    if list_at(in p, a.b, wrapping_mul(j, 2)) == gname {
+                    if list_at(in p, a.b, wrapping_mul(j, PAIR)) == gname {
                         found = true;
                     }
                 }
@@ -1146,7 +1204,7 @@ fn required_body(
                 }
             }
             for j in 0..nsubs {
-                if opaque_type(in p, list_at(in p, a.b, inc(wrapping_mul(j, 2)))) {
+                if opaque_type(in p, list_at(in p, a.b, inc(wrapping_mul(j, PAIR)))) {
                     return req_err(R_UNRESOLVED_SUBSTITUTION);
                 }
             }
@@ -1222,8 +1280,8 @@ fn sym_is(in p: Prog, in blob: Str, sym: u32, in w: Str) -> bool {
 }
 
 fn put_types(inout o: ChunkSeq[u8], in p: Prog, in blob: Str, list: u32, stride: u64, offset: u64) {
-    let n = if stride == 2 {
-        list_len(in p, list) / 2
+    let n = if stride == PAIR {
+        list_len(in p, list) / PAIR
     } else {
         list_len(in p, list)
     };
@@ -1253,21 +1311,21 @@ fn put_type(inout o: ChunkSeq[u8], in p: Prog, in blob: Str, t: u32) {
         }
         put_sym(inout o, in p, in blob, x.a);
         if list_len(in p, x.b) != 0 {
-            o.push(91);
+            o.push(Ascii::LBracket);
             put_types(inout o, in p, in blob, x.b, 1, 0);
-            o.push(93);
+            o.push(Ascii::RBracket);
         }
     } else if x.kind == TY_TUPLE {
-        o.push(40);
+        o.push(Ascii::LParen);
         put_types(inout o, in p, in blob, x.a, 1, 0);
-        o.push(41);
+        o.push(Ascii::RParen);
     } else if x.kind == TY_FUNCTION {
         put(inout o, in "fn(");
-        put_types(inout o, in p, in blob, x.a, 2, 1);
+        put_types(inout o, in p, in blob, x.a, PAIR, 1);
         put(inout o, in ") -> ");
         put_type(inout o, in p, in blob, x.b);
     } else {
-        o.push(95);
+        o.push(Ascii::Underscore);
     }
 }
 
@@ -1279,9 +1337,9 @@ fn put_effect(inout o: ChunkSeq[u8], in p: Prog, in blob: Str, e: u32) {
     }
     put_sym(inout o, in p, in blob, x.name);
     if list_len(in p, x.args) != 0 {
-        o.push(91);
+        o.push(Ascii::LBracket);
         put_types(inout o, in p, in blob, x.args, 1, 0);
-        o.push(93);
+        o.push(Ascii::RBracket);
     }
 }
 
@@ -1466,7 +1524,7 @@ fn put_paths(inout o: ChunkSeq[u8], in p: Prog, in blob: Str, f: FnFacts, in pat
         let path = act_path(in p, f, u32_at(in paths, i));
         for j in 0..list_len(in p, path) {
             if j != 0 {
-                o.push(46);
+                o.push(Ascii::Dot);
             }
             put_sym(inout o, in p, in blob, list_at(in p, path, j));
         }
@@ -1675,7 +1733,7 @@ pub fn analyze(
     out.push(w.used);
     out.push(nfindings);
     out.extend(in findings.as_slice());
-    out.push(skipped.len() / 2);
+    out.push(skipped.len() / PAIR);
     out.extend(in skipped.as_slice());
     out
 }
@@ -1712,17 +1770,17 @@ pub fn apply_edits(in source: Str, in edits: Slice[u64], in texts: Str, max_byte
     let n = word(in edits, 0);
     let s = source.as_bytes();
     let x = texts.as_bytes();
-    if n > 8192 || s.len() > max_bytes || max_bytes > 262144 {
+    if n > MAX_EDITS || s.len() > max_bytes || max_bytes > MAX_EDIT_BYTES {
         fail(E_EDIT_LIMIT);
     }
     let mut keys = ChunkSeq::with_capacity[EditKey](n);
     for i in 0..n {
-        let b = inc(wrapping_mul(i, 6));
+        let b = inc(wrapping_mul(i, Edit::Words));
         keys
             .push(
             EditKey {
                 start: word(in edits, b),
-                end: word(in edits, inc(b)),
+                end: word(in edits, wrapping_add(b, Edit::End)),
                 index: i
             }
         );
@@ -1739,10 +1797,10 @@ pub fn apply_edits(in source: Str, in edits: Slice[u64], in texts: Str, max_byte
                 index: 0
             },
         };
-        let b = inc(wrapping_mul(e.index, 6));
-        let es = word(in edits, wrapping_add(b, 2));
-        let el = word(in edits, wrapping_add(b, 3));
-        let rl = word(in edits, wrapping_add(b, 5));
+        let b = inc(wrapping_mul(e.index, Edit::Words));
+        let es = word(in edits, wrapping_add(b, Edit::ExpStart));
+        let el = word(in edits, wrapping_add(b, Edit::ExpLen));
+        let rl = word(in edits, wrapping_add(b, Edit::RepLen));
         if e
             .start
             < end
@@ -1782,9 +1840,9 @@ pub fn apply_edits(in source: Str, in edits: Slice[u64], in texts: Str, max_byte
                 index: 0
             },
         };
-        let b = inc(wrapping_mul(e.index, 6));
-        let rs = word(in edits, wrapping_add(b, 4));
-        let rl = word(in edits, wrapping_add(b, 5));
+        let b = inc(wrapping_mul(e.index, Edit::Words));
+        let rs = word(in edits, wrapping_add(b, Edit::RepStart));
+        let rl = word(in edits, wrapping_add(b, Edit::RepLen));
         out.extend(in s[cursor..e.start]);
         out.extend(in x[rs..wrapping_add(rs, rl)]);
         cursor = e.end;

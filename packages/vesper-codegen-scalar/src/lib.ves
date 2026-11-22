@@ -1,0 +1,1462 @@
+// @vesper/codegen-scalar: the core of the native `Codegen` of src/native.rs
+// (the Place IR graph walk `ir_graph_at` and the expression lowering
+// `expr_at`: operators, conversions, checked arithmetic, shifts, bit
+// builtins, branches and exits), self-hosting SH4 lane 6 (#1280).
+//
+// Part 1 ports what the walk decides before it emits a Cranelift
+// instruction, over the @vesper/place-ir tables and the @vesper/check-data
+// world. Emission joins it once lane 1 (#1275) lends the Rust builder.
+//
+// - blocks.ves: the block order, cycles and seals of one graph.
+// - `decide_unary`, `decide_binary`: the `expr_at` arm of an `Op::Unary`
+//   or `Op::Binary`, the operand's integer kind and lane, and the run-time
+//   checks it needs (overflow, divisor, narrowing bounds, shift range).
+// - `codegen_scalar_decisions`: the harness entry: one text dump per
+//   program, line for line `decisions` of tests/self_host_codegen_scalar.rs.
+//
+// Integer kinds are numbered in `numeric::IntegerKind`'s spelling order:
+// 1 u8, 2 u16, 3 u32, 4 u64, 5 usize, 6 i8, 7 i16, 8 i32, 9 i64, 10 isize,
+// 11 i128, 12 u128; 0 is no kind. Lanes are a value's Cranelift type:
+// 0 I64, 1 F32, 2 F64, 3 I128.
+
+use @vesper/check-data::pack_text;
+use @vesper/check-data::util::{
+    add,
+    inc,
+    n32,
+    push_decimal,
+    u32_at,
+    w
+};
+use @vesper/check-data::names::{
+    Names
+};
+use @vesper/check-data::types::{
+    Types,
+    default_type
+};
+use @vesper/check-data::world::{
+    set_by_symbol
+};
+use @vesper/check-data::input::{
+    Ctx,
+    Reader,
+    read_ctx
+};
+use @vesper/check-layout::{
+    Layouts,
+    layout_of,
+    layouts_new
+};
+use @vesper/place-ir::{
+    FnRow,
+    InstRow,
+    Program,
+    read_program
+};
+use self::blocks::{
+    block_layout
+};
+
+const NONE32: u32 = 4294967295;
+
+// check-data's type kinds.
+const K_LIT: u8 = 0;
+const K_NAMED: u8 = 1;
+const K_FN: u8 = 3;
+
+// Operand tags and opcodes of @vesper/place-ir.
+const T_NAME: u8 = 1;
+const T_TYPE: u8 = 3;
+const T_VALUE: u8 = 6;
+const T_BLOCK: u8 = 7;
+const OP_CONST: u8 = 0;
+const OP_UNIT: u8 = 1;
+const OP_UNARY: u8 = 5;
+const OP_BINARY: u8 = 6;
+const OP_LOOP: u8 = 20;
+const OP_EXIT: u8 = 21;
+const TERM_RETURN: u8 = 0;
+const TERM_JUMP: u8 = 1;
+const TERM_BRANCH: u8 = 2;
+const TERM_MATCH: u8 = 3;
+
+// The `scalar` hook's requests (@vesper/codegen-scalar-emit keeps the
+// same numbers): the plan names one per instruction it emits.
+const PLAN_ZERO: u64 = 1;
+const PLAN_ICONST: u64 = 2;
+const PLAN_F64CONST: u64 = 3;
+const PLAN_ICMP: u64 = 4;
+const PLAN_BINOP: u64 = 5;
+const PLAN_BNOT: u64 = 6;
+const PLAN_NOT: u64 = 7;
+const PLAN_INEG: u64 = 8;
+const PLAN_SHIFT: u64 = 9;
+const PLAN_CONVERT: u64 = 10;
+// `PLAN_SHIFT`'s operations (the low byte; the kind is the next one).
+const SHIFT_ISHL: u64 = 1;
+const SHIFT_USHR: u64 = 2;
+const SHIFT_SSHR: u64 = 3;
+const SHIFT_ROTL: u64 = 4;
+const SHIFT_ROTR: u64 = 5;
+// `PLAN_BINOP`'s operations.
+const BIN_IADD: u64 = 1;
+const BIN_ISUB: u64 = 2;
+const BIN_IMUL: u64 = 3;
+const BIN_UDIV: u64 = 4;
+const BIN_UREM: u64 = 5;
+const BIN_SREM: u64 = 6;
+const BIN_BAND: u64 = 7;
+const BIN_BOR: u64 = 8;
+const BIN_BXOR: u64 = 9;
+// `PLAN_ICMP`'s condition codes; an unsigned ordering adds CC_UNSIGNED.
+const CC_EQ: u64 = 1;
+const CC_NE: u64 = 2;
+const CC_SLT: u64 = 3;
+const CC_SLE: u64 = 4;
+const CC_SGT: u64 = 5;
+const CC_SGE: u64 = 6;
+const CC_UNSIGNED: u64 = 4;
+
+// Literal kinds (the first operand word of a constant).
+const LIT_INT: u64 = 0;
+const LIT_FLOAT: u64 = 1;
+const LIT_BOOL: u64 = 2;
+
+// Integer kinds.
+const KIND_U64: u32 = 4;
+const KIND_I64: u32 = 9;
+const KIND_I128: u32 = 11;
+const KIND_U128: u32 = 12;
+const KIND_COUNT: u32 = 12;
+
+// Lanes.
+const LANE_I64: u8 = 0;
+const LANE_F32: u8 = 1;
+const LANE_F64: u8 = 2;
+const LANE_I128: u8 = 3;
+
+// `numeric::Conversion`, in `conversion`'s search order.
+const CONV_WIDEN: u32 = 1;
+const CONV_NARROW: u32 = 2;
+const CONV_WRAPPING: u32 = 3;
+
+// `integer_widths::BitOp`, in `BIT_BUILTINS` order.
+const BIT_OP_COUNT: u32 = 6;
+
+// Flags of the float table.
+const FLOAT_INTRINSIC: u32 = 1;
+const FLOAT_MATH: u32 = 2;
+
+// The largest i64, which a literal's magnitude must exceed to default to u64.
+const I64_MAX: u64 = 9223372036854775807;
+
+fn put(inout o: ChunkSeq[u8], in s: Str) {
+    o.extend(in s.as_bytes());
+}
+
+fn get(in table: ChunkSeq[u32], s: u32) -> u32 {
+    if w(s) < table.len() {
+        u32_at(in table, w(s))
+    } else {
+        0
+    }
+}
+
+fn intern(inout names: Names, in s: Str) -> u32 {
+    names.intern(in s.as_bytes())
+}
+
+// `name` spelled `prefix` + the name of kind `k`.
+fn intern_kind(inout names: Names, in prefix: Str, k: u32) -> u32 {
+    let mut text: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put(inout text, in prefix);
+    put_kind(inout text, k);
+    names.intern(in text.as_slice())
+}
+
+fn put_kind(inout o: ChunkSeq[u8], k: u32) {
+    if k == 1 {
+        put(inout o, in "u8");
+    } else if k == 2 {
+        put(inout o, in "u16");
+    } else if k == 3 {
+        put(inout o, in "u32");
+    } else if k == 4 {
+        put(inout o, in "u64");
+    } else if k == 5 {
+        put(inout o, in "usize");
+    } else if k == 6 {
+        put(inout o, in "i8");
+    } else if k == 7 {
+        put(inout o, in "i16");
+    } else if k == 8 {
+        put(inout o, in "i32");
+    } else if k == 9 {
+        put(inout o, in "i64");
+    } else if k == 10 {
+        put(inout o, in "isize");
+    } else if k == 11 {
+        put(inout o, in "i128");
+    } else if k == 12 {
+        put(inout o, in "u128");
+    } else {
+        put(inout o, in "-");
+    }
+}
+
+// `IntegerKind::bits`.
+fn kind_bits(k: u32) -> u64 {
+    if k == 1 || k == 6 {
+        8
+    } else if k == 2 || k == 7 {
+        16
+    } else if k == 3 || k == 8 {
+        32
+    } else if k == KIND_I128 || k == KIND_U128 {
+        128
+    } else {
+        64
+    }
+}
+
+fn kind_unsigned(k: u32) -> bool {
+    (k >= 1 && k <= 5) || k == KIND_U128
+}
+
+fn kind_wide(k: u32) -> bool {
+    k == KIND_I128 || k == KIND_U128
+}
+
+// `IntegerKind::max` of a one-word kind, as a u64.
+fn kind_max(k: u32) -> u64 {
+    if k == 1 {
+        255
+    } else if k == 2 {
+        65535
+    } else if k == 3 {
+        4294967295
+    } else if k == 4 || k == 5 {
+        18446744073709551615
+    } else if k == 6 {
+        127
+    } else if k == 7 {
+        32767
+    } else if k == 8 {
+        2147483647
+    } else {
+        9223372036854775807
+    }
+}
+
+// `IntegerKind::min` of a one-word kind, as the magnitude of a value at
+// most 0 (0 for an unsigned kind).
+fn kind_min_magnitude(k: u32) -> u64 {
+    if kind_unsigned(k) {
+        0
+    } else if k == 6 {
+        128
+    } else if k == 7 {
+        32768
+    } else if k == 8 {
+        2147483648
+    } else {
+        9223372036854775808
+    }
+}
+
+fn put_conversion(inout o: ChunkSeq[u8], c: u32) {
+    if c == CONV_WIDEN {
+        put(inout o, in "Widen");
+    } else if c == CONV_NARROW {
+        put(inout o, in "Narrow");
+    } else {
+        put(inout o, in "Wrapping");
+    }
+}
+
+fn put_bit_op(inout o: ChunkSeq[u8], op: u32) {
+    if op == 1 {
+        put(inout o, in "LeadingZeros");
+    } else if op == 2 {
+        put(inout o, in "TrailingZeros");
+    } else if op == 3 {
+        put(inout o, in "CountOnes");
+    } else if op == 4 {
+        put(inout o, in "WrappingShl");
+    } else if op == 5 {
+        put(inout o, in "WrappingShr");
+    } else {
+        put(inout o, in "WrappingNeg");
+    }
+}
+
+fn bit_prefix(op: u32) -> Str {
+    if op == 1 {
+        "leading_zeros_"
+    } else if op == 2 {
+        "trailing_zeros_"
+    } else if op == 3 {
+        "count_ones_"
+    } else if op == 4 {
+        "wrapping_shl_"
+    } else if op == 5 {
+        "wrapping_shr_"
+    } else {
+        "wrapping_neg_"
+    }
+}
+
+// The operator and intrinsic names the decisions compare against, and
+// per-symbol tables of the name families (`conversion`, `bit_builtin`,
+// `is_float_intrinsic`, `bit_intrinsic`, `rotate_intrinsic`).
+struct Tables {
+    // symbol -> integer kind of a type name
+    kind: ChunkSeq[u32],
+    // symbol -> conversion * 16 + kind
+    conv: ChunkSeq[u32],
+    // symbol -> bit wrapping_add(wrapping_mul(op, 16), k)ind
+    bitb: ChunkSeq[u32],
+    // symbol -> FLOAT_* flags
+    float: ChunkSeq[u32],
+    // symbol -> 1 bit_and, 2 bit_or, 3 bit_xor, 4 bit_shl, 5 bit_shr
+    bitint: ChunkSeq[u32],
+    // symbol -> 1 rotate_left, 2 rotate_right
+    rot: ChunkSeq[u32],
+}
+
+copy struct Ops {
+    tilde: u32,
+    bang: u32,
+    minus: u32,
+    plus: u32,
+    star: u32,
+    slash: u32,
+    percent: u32,
+    eq: u32,
+    ne: u32,
+    lt: u32,
+    le: u32,
+    gt: u32,
+    ge: u32,
+    and_and: u32,
+    or_or: u32,
+    shl: u32,
+    shr: u32,
+    amp: u32,
+    pipe: u32,
+    caret: u32,
+    widen_u64: u32,
+    wrapping_add: u32,
+    wrapping_sub: u32,
+    wrapping_mul: u32,
+    f32_: u32,
+    f64_: u32,
+    string: u32,
+    str_: u32,
+    never: u32,
+    box_: u32,
+    bool_: u32,
+}
+
+fn mark(inout table: ChunkSeq[u32], s: u32, flag: u32) {
+    let old = get(in table, s);
+    set_by_symbol(inout table, s, old | flag);
+}
+
+fn ops_new(inout names: Names, inout tab: Tables) -> Ops {
+    let mut kind: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut conv: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut bitb: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut float: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut bitint: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut rot: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut k: u32 = 1;
+    loop {
+        if k > KIND_COUNT {
+            break;
+        }
+        let s = intern_kind(inout names, in "", k);
+        set_by_symbol(inout kind, s, k);
+        // `conversion` tries widen_, narrow_, wrapping_ in that order; the
+        // spellings never collide.
+        let widen = intern_kind(inout names, in "widen_", k);
+        set_by_symbol(inout conv, widen, wrapping_add(wrapping_mul(CONV_WIDEN, 16), k));
+        let narrow = intern_kind(inout names, in "narrow_", k);
+        set_by_symbol(inout conv, narrow, wrapping_add(wrapping_mul(CONV_NARROW, 16), k));
+        let wrapping = intern_kind(inout names, in "wrapping_", k);
+        set_by_symbol(inout conv, wrapping, wrapping_add(wrapping_mul(CONV_WRAPPING, 16), k));
+        let mut op: u32 = 1;
+        loop {
+            if op > BIT_OP_COUNT {
+                break;
+            }
+            let b = intern_kind(inout names, bit_prefix(op), k);
+            set_by_symbol(inout bitb, b, wrapping_add(wrapping_mul(op, 16), k));
+            op = wrapping_add(op, 1);
+        }
+        let saturating = intern_kind(inout names, in "saturating_", k);
+        mark(inout float, saturating, FLOAT_INTRINSIC);
+        k = wrapping_add(k, 1);
+    }
+    let math = intern(inout names, in "sqrt");
+    mark(inout float, math, FLOAT_INTRINSIC | FLOAT_MATH);
+    let m2 = intern(inout names, in "abs");
+    mark(inout float, m2, FLOAT_INTRINSIC | FLOAT_MATH);
+    let m3 = intern(inout names, in "floor");
+    mark(inout float, m3, FLOAT_INTRINSIC | FLOAT_MATH);
+    let m4 = intern(inout names, in "ceil");
+    mark(inout float, m4, FLOAT_INTRINSIC | FLOAT_MATH);
+    let m5 = intern(inout names, in "round");
+    mark(inout float, m5, FLOAT_INTRINSIC | FLOAT_MATH);
+    let m6 = intern(inout names, in "trunc");
+    mark(inout float, m6, FLOAT_INTRINSIC | FLOAT_MATH);
+    let m7 = intern(inout names, in "min");
+    mark(inout float, m7, FLOAT_INTRINSIC | FLOAT_MATH);
+    let m8 = intern(inout names, in "max");
+    mark(inout float, m8, FLOAT_INTRINSIC | FLOAT_MATH);
+    let m9 = intern(inout names, in "fma");
+    mark(inout float, m9, FLOAT_INTRINSIC | FLOAT_MATH);
+    // float conversions and bit reinterpretations
+    let c1 = intern(inout names, in "widen_f32");
+    mark(inout float, c1, FLOAT_INTRINSIC);
+    let c2 = intern(inout names, in "widen_f64");
+    mark(inout float, c2, FLOAT_INTRINSIC);
+    let c3 = intern(inout names, in "nearest_f32");
+    mark(inout float, c3, FLOAT_INTRINSIC);
+    let c4 = intern(inout names, in "nearest_f64");
+    mark(inout float, c4, FLOAT_INTRINSIC);
+    let c5 = intern(inout names, in "to_bits_f32");
+    mark(inout float, c5, FLOAT_INTRINSIC);
+    let c6 = intern(inout names, in "to_bits_f64");
+    mark(inout float, c6, FLOAT_INTRINSIC);
+    let c7 = intern(inout names, in "from_bits_f32");
+    mark(inout float, c7, FLOAT_INTRINSIC);
+    let c8 = intern(inout names, in "from_bits_f64");
+    mark(inout float, c8, FLOAT_INTRINSIC);
+    let b1 = intern(inout names, in "bit_and");
+    set_by_symbol(inout bitint, b1, 1);
+    let b2 = intern(inout names, in "bit_or");
+    set_by_symbol(inout bitint, b2, 2);
+    let b3 = intern(inout names, in "bit_xor");
+    set_by_symbol(inout bitint, b3, 3);
+    let b4 = intern(inout names, in "bit_shl");
+    set_by_symbol(inout bitint, b4, 4);
+    let b5 = intern(inout names, in "bit_shr");
+    set_by_symbol(inout bitint, b5, 5);
+    let r1 = intern(inout names, in "rotate_left");
+    set_by_symbol(inout rot, r1, 1);
+    let r2 = intern(inout names, in "rotate_right");
+    set_by_symbol(inout rot, r2, 2);
+    tab.kind = kind;
+    tab.conv = conv;
+    tab.bitb = bitb;
+    tab.float = float;
+    tab.bitint = bitint;
+    tab.rot = rot;
+    Ops {
+        tilde: intern(inout names, in "~"),
+        bang: intern(inout names, in "!"),
+        minus: intern(inout names, in "-"),
+        plus: intern(inout names, in "+"),
+        star: intern(inout names, in "*"),
+        slash: intern(inout names, in "/"),
+        percent: intern(inout names, in "%"),
+        eq: intern(inout names, in "=="),
+        ne: intern(inout names, in "!="),
+        lt: intern(inout names, in "<"),
+        le: intern(inout names, in "<="),
+        gt: intern(inout names, in ">"),
+        ge: intern(inout names, in ">="),
+        and_and: intern(inout names, in "&&"),
+        or_or: intern(inout names, in "||"),
+        shl: intern(inout names, in "<<"),
+        shr: intern(inout names, in ">>"),
+        amp: intern(inout names, in "&"),
+        pipe: intern(inout names, in "|"),
+        caret: intern(inout names, in "^"),
+        widen_u64: intern(inout names, in "widen_u64"),
+        wrapping_add: intern(inout names, in "wrapping_add"),
+        wrapping_sub: intern(inout names, in "wrapping_sub"),
+        wrapping_mul: intern(inout names, in "wrapping_mul"),
+        f32_: intern(inout names, in "f32"),
+        f64_: intern(inout names, in "f64"),
+        string: intern(inout names, in "String"),
+        str_: intern(inout names, in "Str"),
+        never: intern(inout names, in "Never"),
+        box_: intern(inout names, in "Box"),
+        bool_: intern(inout names, in "bool"),
+    }
+}
+
+impl Ops {
+    fn is_comparison(self, op: u32) -> bool {
+        op
+            == self
+            .eq
+            || op
+            == self
+            .ne
+            || op
+            == self
+            .lt
+            || op
+            == self
+            .le
+            || op
+            == self
+            .gt
+            || op
+            == self
+            .ge
+    }
+}
+
+// The decisions of one program.
+struct Gen {
+    c: Ctx,
+    tab: Tables,
+    ops: Ops,
+    ls: Layouts,
+    p: Program,
+    // value id -> its IR type + 1 (0: no type) for the current function
+    vty: ChunkSeq[u32],
+    o: ChunkSeq[u8],
+    // The emission plan (`codegen_scalar_plan`).
+    plan: ChunkSeq[u64],
+}
+
+impl Gen {
+    // `IntegerKind::from_type`: a literal's default kind, or the kind the
+    // type's name spells.
+    fn kind_of(in self, ty: u32) -> u32 {
+        let n = self.c.types.node(ty);
+        if n.kind == K_LIT {
+            if n.mode == 0 && wrapping_u64(n.lit) > I64_MAX {
+                return KIND_U64;
+            }
+            return KIND_I64;
+        }
+        get(in self.tab.kind, self.c.types.name(ty))
+    }
+
+    // The Cranelift lane of a value of type `ty` (`native::scalar` of the
+    // defaulted type).
+    fn lane(inout self, ty: u32) -> u8 {
+        let d = default_type(inout self.c.types, ty);
+        let name = self.c.types.name(d);
+        if name == self.ops.f32_ {
+            LANE_F32
+        } else if name == self.ops.f64_ {
+            LANE_F64
+        } else if kind_wide(get(in self.tab.kind, name)) {
+            LANE_I128
+        } else {
+            LANE_I64
+        }
+    }
+
+    // `FloatKind::from_type`: `f32` or `f64` with no arguments.
+    fn float_type(in self, ty: u32) -> bool {
+        let n = self.c.types.node(ty);
+        n.kind == K_NAMED && n.n == 0 && (n.name == self.ops.f32_ || n.name == self.ops.f64_)
+    }
+
+    // `strings::is_text`.
+    fn is_text(in self, ty: u32) -> bool {
+        let n = self.c.types.node(ty);
+        n.kind == K_NAMED && n.n == 0 && (n.name == self.ops.string || n.name == self.ops.str_)
+    }
+
+    // `fip::is_box_type` (no FFI handle drops in scope).
+    fn is_box(in self, ty: u32) -> bool {
+        let n = self.c.types.node(ty);
+        self.c.world.box_active && n.kind == K_NAMED && n.name == self.ops.box_ && n.n == 1
+    }
+
+    // The IR type of value `v`, or NONE32.
+    fn value_type(in self, v: u64) -> u32 {
+        if v < self.vty.len() {
+            let t = u32_at(in self.vty, v);
+            if t != 0 {
+                return wrapping_sub(t, 1);
+            }
+        }
+        NONE32
+    }
+
+    fn never(in self, v: u64) -> bool {
+        let t = self.value_type(v);
+        t != NONE32 && self.c.types.name(t) == self.ops.never
+    }
+
+    fn name(inout self, s: u32) {
+        self.c.names.write(s, inout self.o);
+    }
+
+    // `f.values` of function `f`, from its header's (value, type) words.
+    fn load_values(inout self, f: FnRow) {
+        self.vty.clear();
+        let end = add(f.ha, f.hn);
+        let mut i = f.ha;
+        loop {
+            if inc(i) >= end {
+                break;
+            }
+            if self.p.tag(i) == T_VALUE && self.p.tag(inc(i)) == T_TYPE {
+                let v = self.p.op(i);
+                let t = n32(self.p.op(inc(i)));
+                loop {
+                    if self.vty.len() > v {
+                        break;
+                    }
+                    self.vty.push(0);
+                }
+                let ok = self.vty.try_set(v, wrapping_add(t, 1));
+                i = add(i, 2);
+            } else {
+                i = inc(i);
+            }
+        }
+    }
+
+    // `Codegen::binary`'s instruction for `op` on lanes `a` and `b`.
+    fn binary(inout self, op: u32, a: u8, b: u8, unsigned: bool) {
+        if a != b {
+            put(inout self.o, in "error mismatch");
+            return;
+        }
+        let float = a == LANE_F32 || a == LANE_F64;
+        let ops = self.ops;
+        if (op == ops.slash || op == ops.percent) && a == LANE_I128 {
+            put(inout self.o, in "wide-divide ");
+            put(
+                inout self.o,
+                if unsigned {
+                    "u"
+                } else {
+                    "s"
+                }
+            );
+            return;
+        }
+        if ops.is_comparison(op) {
+            if float {
+                put(inout self.o, in "fcmp ");
+            } else {
+                put(inout self.o, in "icmp ");
+                if unsigned && op != ops.eq && op != ops.ne {
+                    self.o.push(117);
+                }
+            }
+            self.name(op);
+            return;
+        }
+        let r = if !float && (op == ops.plus || op == ops.wrapping_add) {
+            "iadd"
+        } else if !float && (op == ops.minus || op == ops.wrapping_sub) {
+            "isub"
+        } else if !float && (op == ops.star || op == ops.wrapping_mul) {
+            "imul"
+        } else if !float && op == ops.slash {
+            if unsigned {
+                "udiv"
+            } else {
+                "sdiv-guarded"
+            }
+        } else if !float && op == ops.percent {
+            if unsigned {
+                "urem"
+            } else {
+                "srem"
+            }
+        } else if float && op == ops.plus {
+            "fadd"
+        } else if float && op == ops.minus {
+            "fsub"
+        } else if float && op == ops.star {
+            "fmul"
+        } else if float && op == ops.slash {
+            "fdiv"
+        } else if float && op == ops.percent {
+            "fmod"
+        } else {
+            "error operator"
+        };
+        put(inout self.o, r);
+    }
+
+    // The overflow test `checked_arithmetic` emits for `op` on kind `k`.
+    fn checked_test(in self, op: u32, k: u32) -> Str {
+        let ops = self.ops;
+        if kind_wide(k) {
+            return "wide";
+        }
+        let narrow_signed = k == 6 || k == 7 || k == 8;
+        let narrow_unsigned = k == 1 || k == 2 || k == 3;
+        let word_unsigned = k == 4 || k == 5;
+        let word_signed = k == 9 || k == 10;
+        let add_sub_mul = op == ops.plus || op == ops.minus || op == ops.star;
+        if add_sub_mul && narrow_signed {
+            "narrow-signed"
+        } else if op == ops.slash && narrow_signed {
+            "div-min"
+        } else if (op == ops.plus || op == ops.star) && narrow_unsigned {
+            "narrow-unsigned"
+        } else if op == ops.minus && (narrow_unsigned || word_unsigned) {
+            "borrow"
+        } else if op == ops.plus && word_unsigned {
+            "carry"
+        } else if op == ops.star && word_unsigned {
+            "umulhi"
+        } else if (op == ops.plus || op == ops.minus) && word_signed {
+            "sign"
+        } else if op == ops.star && word_signed {
+            "smulhi"
+        } else if op == ops.slash && word_signed {
+            "div-min"
+        } else {
+            "none"
+        }
+    }
+
+    // The `expr_at` arm for `Op::Unary(op, v)` at span (s0, s1).
+    fn decide_unary(inout self, op: u32, v: u64, s0: u64, s1: u64) {
+        let tv = self.value_type(v);
+        if tv == NONE32 {
+            put(inout self.o, in "error untyped");
+            return;
+        }
+        if op == self.ops.tilde {
+            put(inout self.o, in "bnot");
+            return;
+        }
+        let conv = get(in self.tab.conv, op);
+        if (get(in self.tab.float, op) & FLOAT_INTRINSIC)
+            != 0
+            || (conv != 0 && self.float_type(tv)) {
+            put(inout self.o, in "float-unary");
+            return;
+        }
+        let bit = get(in self.tab.bitb, op);
+        if bit != 0 {
+            put(inout self.o, in "bit ");
+            put_bit_op(inout self.o, bit >> 4);
+            self.o.push(32);
+            put_kind(inout self.o, bit & 15);
+            return;
+        }
+        let overflow = self.c.world.may_overflow(s0, s1);
+        if conv != 0 {
+            let from = self.kind_of(tv);
+            if from == 0 {
+                put(inout self.o, in "error convert");
+                return;
+            }
+            let c = conv >> 4;
+            let to = conv & 15;
+            if kind_wide(from) || kind_wide(to) {
+                put(inout self.o, in "convert wide ");
+                put_conversion(inout self.o, c);
+                self.o.push(32);
+                put_kind(inout self.o, from);
+                self.o.push(32);
+                put_kind(inout self.o, to);
+                if overflow {
+                    put(inout self.o, in " checked");
+                }
+                return;
+            }
+            if c == CONV_WIDEN {
+                put(inout self.o, in "convert widen");
+            } else if c == CONV_WRAPPING {
+                put(inout self.o, in "convert wrapping ");
+                put_kind(inout self.o, to);
+            } else {
+                put(inout self.o, in "convert narrow ");
+                put_kind(inout self.o, from);
+                self.o.push(32);
+                put_kind(inout self.o, to);
+                if overflow {
+                    let high = kind_max(to) < kind_max(from);
+                    let low = !kind_unsigned(from)
+                        && kind_min_magnitude(to)
+                        < kind_min_magnitude(from);
+                    if low {
+                        put(inout self.o, in " low");
+                    }
+                    if high {
+                        put(inout self.o, in " high");
+                    }
+                }
+            }
+            return;
+        }
+        let k = self.kind_of(tv);
+        let lane = self.lane(tv);
+        let float = lane == LANE_F32 || lane == LANE_F64;
+        let check = if op == self.ops.minus && k != 0 && overflow {
+            if kind_unsigned(k) {
+                " check=nonzero"
+            } else if kind_wide(k) {
+                " check=min128"
+            } else {
+                " check=min"
+            }
+        } else {
+            ""
+        };
+        let r = if op == self.ops.minus {
+            if float {
+                "fneg"
+            } else {
+                "ineg"
+            }
+        } else if op == self.ops.bang && !float {
+            "not"
+        } else if op == self.ops.widen_u64 && !float {
+            "widen"
+        } else {
+            put(inout self.o, in "error unary");
+            return;
+        };
+        put(inout self.o, r);
+        self.o.push(32);
+        put_kind(inout self.o, k);
+        put(inout self.o, check);
+    }
+
+    // The `expr_at` arm for `Op::Binary(op, a, b)` at span (s0, s1).
+    fn decide_binary(inout self, op: u32, a: u64, b: u64, s0: u64, s1: u64) {
+        let ta = self.value_type(a);
+        let tb = self.value_type(b);
+        if ta == NONE32 || tb == NONE32 {
+            put(inout self.o, in "error untyped");
+            return;
+        }
+        if (get(in self.tab.float, op) & FLOAT_MATH) != 0 {
+            put(inout self.o, in "float-math");
+            return;
+        }
+        let bit = get(in self.tab.bitb, op);
+        if bit != 0 {
+            put(inout self.o, in "bit ");
+            put_bit_op(inout self.o, bit >> 4);
+            self.o.push(32);
+            put_kind(inout self.o, bit & 15);
+            return;
+        }
+        let ops = self.ops;
+        if op == ops.and_and || op == ops.or_or {
+            put(inout self.o, in "logic");
+            return;
+        }
+        let overflow = self.c.world.may_overflow(s0, s1);
+        let shift = op == ops.shl || op == ops.shr;
+        let rot = get(in self.tab.rot, op);
+        if shift || rot != 0 {
+            let k = self.kind_of(ta);
+            if k == 0 {
+                put(inout self.o, in "error shift");
+                return;
+            }
+            let how = if op == ops.shl {
+                "ishl"
+            } else if op == ops.shr {
+                if kind_unsigned(k) {
+                    "ushr"
+                } else {
+                    "sshr"
+                }
+            } else if rot == 1 {
+                "rotl"
+            } else {
+                "rotr"
+            };
+            put(inout self.o, in "shift ");
+            put(inout self.o, how);
+            self.o.push(32);
+            put_kind(inout self.o, k);
+            if shift && overflow {
+                put(inout self.o, in " range");
+            }
+            return;
+        }
+        if op == ops.amp || op == ops.pipe || op == ops.caret {
+            put(inout self.o, in "bitop ");
+            self.name(op);
+            return;
+        }
+        if ops.is_comparison(op) && (self.is_text(ta) || self.is_text(tb)) {
+            put(inout self.o, in "str-compare ");
+            self.name(op);
+            return;
+        }
+        // `i128` and `u128` are two-word scalars (`Layout::build`);
+        // @vesper/check-layout predates them (#1174), so they are decided
+        // here.
+        let na = self.c.types.node(ta);
+        let wide = na.kind == K_NAMED && na.n == 0 && kind_wide(get(in self.tab.kind, na.name));
+        if (op == ops.eq || op == ops.ne) && !wide {
+            let m = self.ls.mark();
+            let l = layout_of(
+                inout self.ls,
+                inout self.c.types,
+                inout self.c.names,
+                in self.c.world,
+                ta
+            );
+            if l == NONE32 {
+                self.ls.reset(m);
+                put(inout self.o, in "error layout");
+                return;
+            }
+            let aggregate = self.ls.aggregate(l);
+            self.ls.reset(m);
+            if aggregate || self.c.types.kind(ta) == K_FN || self.is_box(ta) {
+                put(inout self.o, in "equal ");
+                self.name(op);
+                return;
+            }
+        }
+        let k = self.kind_of(ta);
+        let unsigned = kind_unsigned(k);
+        if (op == ops.slash || op == ops.percent) && self.c.world.is_partial(s0, s1) {
+            put(inout self.o, in "divisor ");
+        }
+        let la = self.lane(ta);
+        let lb = self.lane(tb);
+        let bitint = get(in self.tab.bitint, op);
+        if k != 0 && overflow {
+            put(inout self.o, in "checked ");
+            put_kind(inout self.o, k);
+            self.o.push(32);
+            put(inout self.o, self.checked_test(op, k));
+            self.o.push(32);
+            self.binary(op, la, lb, unsigned);
+        } else if bitint != 0 {
+            if k == 0 {
+                put(inout self.o, in "error bitwise-kind");
+            } else if la != LANE_I64 || lb != LANE_I64 {
+                put(inout self.o, in "error bitwise-lane");
+            } else {
+                put(inout self.o, in "bitwise ");
+                put(
+                    inout self.o,
+                    if bitint == 1 {
+                        "&"
+                    } else if bitint == 2 {
+                        "|"
+                    } else if bitint == 3 {
+                        "^"
+                    } else if bitint == 4 {
+                        "<<"
+                    } else {
+                        ">>"
+                    }
+                );
+                self.o.push(32);
+                put_kind(inout self.o, k);
+            }
+        } else {
+            self.binary(op, la, lb, unsigned);
+        }
+    }
+
+    // The `const` decision: Rust asks the checker's type at the span.
+    fn decide_constant(inout self, i: InstRow) {
+        let lit = self.p.op(i.a);
+        if lit == LIT_INT {
+            let t = self.c.world.expr_type(i.s0, i.s1);
+            let wide = if t == NONE32 {
+                false
+            } else {
+                let d = default_type(inout self.c.types, t);
+                self.c.types.kind(d) != K_LIT && kind_wide(self.kind_of(d))
+            };
+            put(
+                inout self.o,
+                if wide {
+                    "const wide"
+                } else {
+                    "const int"
+                }
+            );
+        } else if lit == LIT_FLOAT {
+            let t = self.c.world.expr_type(i.s0, i.s1);
+            let f32 = if t == NONE32 {
+                false
+            } else {
+                let d = default_type(inout self.c.types, t);
+                self.c.types.name(d) == self.ops.f32_
+            };
+            put(
+                inout self.o,
+                if f32 {
+                    "const f32"
+                } else {
+                    "const f64"
+                }
+            );
+        } else if lit == LIT_BOOL {
+            put(inout self.o, in "const bool");
+        } else {
+            put(inout self.o, in "const string");
+        }
+    }
+
+    fn terminator(inout self, bi: u64, term: u8, ta: u64, tn: u64) {
+        push_decimal(inout self.o, bi);
+        self.o.push(32);
+        if term == TERM_RETURN {
+            put(inout self.o, in "return");
+            if self.never(self.p.op(ta)) {
+                put(inout self.o, in " never");
+            }
+        } else if term == TERM_JUMP {
+            put(inout self.o, in "jump ");
+            push_decimal(inout self.o, self.p.op(ta));
+            let n = self.p.op(inc(ta));
+            for k in 0..n {
+                if self.never(self.p.op(add(add(ta, 2), k))) {
+                    put(inout self.o, in " never");
+                    push_decimal(inout self.o, k);
+                }
+            }
+        } else if term == TERM_BRANCH {
+            put(inout self.o, in "branch ");
+            push_decimal(inout self.o, self.p.op(inc(ta)));
+            self.o.push(32);
+            push_decimal(inout self.o, self.p.op(add(ta, 2)));
+        } else if term == TERM_MATCH {
+            put(inout self.o, in "match ");
+            push_decimal(inout self.o, self.p.op(inc(ta)));
+            for k in ta..add(ta, tn) {
+                if self.p.tag(k) == T_BLOCK {
+                    self.o.push(32);
+                    push_decimal(inout self.o, self.p.op(k));
+                }
+            }
+        } else {
+            put(inout self.o, in "trap");
+        }
+        self.o.push(10);
+    }
+
+    fn function(inout self, fi: u64) {
+        let f = self.p.function(fi);
+        put(inout self.o, in "fn ");
+        self.name(f.name);
+        self.o.push(10);
+        block_layout(in self.p, f, inout self.o);
+        self.load_values(f);
+        for bi in 0..f.bc {
+            let blk = self.p.block(add(f.b0, bi));
+            for ii in 0..blk.ic {
+                let i = self.p.inst(add(blk.i0, ii));
+                let known = i
+                    .op
+                    == OP_CONST
+                    || i
+                    .op
+                    == OP_UNARY
+                    || i
+                    .op
+                    == OP_BINARY
+                    || i
+                    .op
+                    == OP_LOOP
+                    || i
+                    .op
+                    == OP_EXIT;
+                if known {
+                    push_decimal(inout self.o, bi);
+                    self.o.push(46);
+                    push_decimal(inout self.o, ii);
+                    put(inout self.o, in " %");
+                    push_decimal(inout self.o, w(i.dest));
+                    self.o.push(32);
+                    if i.op == OP_CONST {
+                        self.decide_constant(i);
+                    } else if i.op == OP_UNARY {
+                        let op = n32(self.p.op(i.a));
+                        put(inout self.o, in "unary ");
+                        self.name(op);
+                        self.o.push(32);
+                        self.decide_unary(op, self.p.op(inc(i.a)), i.s0, i.s1);
+                    } else if i.op == OP_BINARY {
+                        let op = n32(self.p.op(i.a));
+                        put(inout self.o, in "binary ");
+                        self.name(op);
+                        self.o.push(32);
+                        self
+                            .decide_binary(
+                            op,
+                            self.p.op(inc(i.a)),
+                            self.p.op(add(i.a, 2)),
+                            i.s0,
+                            i.s1
+                        );
+                    } else if i.op == OP_LOOP {
+                        put(inout self.o, in "loop");
+                    } else {
+                        put(inout self.o, in "exit ");
+                        self.name(n32(self.p.op(inc(i.a))));
+                        if self.never(self.p.op(i.a)) {
+                            put(inout self.o, in " never");
+                        }
+                    }
+                    self.o.push(10);
+                }
+            }
+            self.terminator(bi, blk.term, blk.ta, blk.tn);
+        }
+    }
+
+    // ----------------------------------------------------------- the plan
+
+    // The plan's coerce word for a value of checker type `t` (`expr_at`
+    // ends with `coerce(value, ty(e))`): 0 when `coerce` leaves the value
+    // alone (no integer kind, or a one-word 64-bit one), the kind of a
+    // narrow one, or NONE32 when the port does not emit it (a 128-bit kind,
+    // or a type that may name a generic parameter, which `ty` substitutes).
+    fn coerce_word(inout self, t: u32) -> u32 {
+        if t == NONE32 {
+            return 0;
+        }
+        let d = default_type(inout self.c.types, t);
+        let n = self.c.types.node(d);
+        if n.kind == K_LIT {
+            return 0;
+        }
+        if n.kind != K_NAMED || n.n != 0 {
+            return NONE32;
+        }
+        if n.name == self.ops.bool_ {
+            return 0;
+        }
+        let k = get(in self.tab.kind, n.name);
+        if k == 0 || kind_wide(k) {
+            NONE32
+        } else if kind_bits(k) < 64 {
+            k
+        } else {
+            0
+        }
+    }
+
+    // Whether an operand of IR type `t` is a one-word integer or a bool:
+    // `expr_at`'s `Name` arm reads it with one `use_var` (no copy, tag or
+    // split read), and its kind does not depend on a generic parameter.
+    fn plain_operand(in self, t: u32) -> bool {
+        if t == NONE32 {
+            return false;
+        }
+        let n = self.c.types.node(t);
+        if n.kind == K_LIT {
+            return true;
+        }
+        if n.kind != K_NAMED || n.n != 0 {
+            return false;
+        }
+        if n.name == self.ops.bool_ {
+            return true;
+        }
+        let k = get(in self.tab.kind, n.name);
+        k != 0 && !kind_wide(k)
+    }
+
+    // Pushes one plan record: site, request code and its immediates.
+    fn record(inout self, fi: u64, bi: u64, ii: u64, code: u64, a: u64, b: u64) {
+        self.plan.push(fi);
+        self.plan.push(bi);
+        self.plan.push(ii);
+        self.plan.push(code);
+        self.plan.push(a);
+        self.plan.push(b);
+    }
+
+    // The plan of `Op::Constant`: `expr_at`'s `Literal` arm and `coerce`.
+    fn plan_constant(inout self, fi: u64, bi: u64, ii: u64, i: InstRow) {
+        let lit = self.p.op(i.a);
+        let t = self.c.world.expr_type(i.s0, i.s1);
+        if lit == LIT_INT || lit == LIT_BOOL {
+            let ck = self.coerce_word(t);
+            if ck != NONE32 {
+                self.record(fi, bi, ii, PLAN_ICONST, self.p.op(inc(i.a)), widen_u64(ck));
+            }
+        } else if lit == LIT_FLOAT && t != NONE32 {
+            let d = default_type(inout self.c.types, t);
+            let n = self.c.types.node(d);
+            if n.kind == K_NAMED && n.n == 0 && n.name == self.ops.f64_ {
+                self.record(fi, bi, ii, PLAN_F64CONST, self.p.op(inc(i.a)), 0);
+            }
+        }
+    }
+
+    // The plan of `Op::Unary(op, v)`, in `expr_at`'s arm order.
+    fn plan_unary(inout self, fi: u64, bi: u64, ii: u64, i: InstRow) {
+        let op = n32(self.p.op(i.a));
+        let tv = self.value_type(self.p.op(inc(i.a)));
+        if !self.plain_operand(tv) {
+            return;
+        }
+        let ck = self.coerce_word(self.c.world.expr_type(i.s0, i.s1));
+        let kx = self.coerce_word(tv);
+        if ck == NONE32 || kx == NONE32 {
+            return;
+        }
+        // The result's coerce word, and the operand's (`expr_at` reads
+        // a `Name` through `coerce` as well), one byte each.
+        let c = widen_u64(ck | (kx << 8));
+        let ops = self.ops;
+        if op == ops.tilde {
+            self.record(fi, bi, ii, PLAN_BNOT, c, 0);
+            return;
+        }
+        if (get(in self.tab.float, op) & FLOAT_INTRINSIC) != 0 || get(in self.tab.bitb, op) != 0 {
+            return;
+        }
+        let conv = get(in self.tab.conv, op);
+        if conv != 0 {
+            // `Codegen::convert`: a widening is the operand, a wrapping
+            // conversion is `coerce` to the target and an unchecked
+            // narrowing is the operand; 128-bit kinds and checked
+            // narrowings stay on the Rust code.
+            let from = self.kind_of(tv);
+            let how = conv >> 4;
+            let to = conv & 15;
+            if from == 0 || kind_wide(from) || kind_wide(to) {
+                return;
+            }
+            if how == CONV_NARROW && self.c.world.may_overflow(i.s0, i.s1) {
+                return;
+            }
+            self.record(fi, bi, ii, PLAN_CONVERT, widen_u64(how | (to << 8)), c);
+            return;
+        }
+        if op == ops.minus {
+            if self.kind_of(tv) != 0 && self.c.world.may_overflow(i.s0, i.s1) {
+                return;
+            }
+            self.record(fi, bi, ii, PLAN_INEG, c, 0);
+        } else if op == ops.bang {
+            self.record(fi, bi, ii, PLAN_NOT, c, 0);
+        }
+    }
+
+    // The condition code of comparison `op` (`Codegen::binary`).
+    fn plan_cc(in self, op: u32, unsigned: bool) -> u64 {
+        let ops = self.ops;
+        if op == ops.eq {
+            return CC_EQ;
+        }
+        if op == ops.ne {
+            return CC_NE;
+        }
+        let base = if op == ops.lt {
+            CC_SLT
+        } else if op == ops.le {
+            CC_SLE
+        } else if op == ops.gt {
+            CC_SGT
+        } else {
+            CC_SGE
+        };
+        if unsigned {
+            add(base, CC_UNSIGNED)
+        } else {
+            base
+        }
+    }
+
+    // The plan of `Op::Binary(op, a, b)`, in `expr_at`'s arm order.
+    fn plan_binary(inout self, fi: u64, bi: u64, ii: u64, i: InstRow) {
+        let op = n32(self.p.op(i.a));
+        let ta = self.value_type(self.p.op(inc(i.a)));
+        let tb = self.value_type(self.p.op(add(i.a, 2)));
+        if !self.plain_operand(ta) || !self.plain_operand(tb) {
+            return;
+        }
+        let ck = self.coerce_word(self.c.world.expr_type(i.s0, i.s1));
+        let ka = self.coerce_word(ta);
+        let kb = self.coerce_word(tb);
+        if ck == NONE32 || ka == NONE32 || kb == NONE32 {
+            return;
+        }
+        let ops = self.ops;
+        // The coerce words of the result and of both operands, one byte
+        // each (below).
+        if (get(in self.tab.float, op) & FLOAT_MATH)
+            != 0
+            || get(in self.tab.bitb, op)
+            != 0
+            || op
+            == ops
+            .and_and
+            || op
+            == ops
+            .or_or {
+            return;
+        }
+        let c = widen_u64(ck | (ka << 8) | (kb << 16));
+        let rot = get(in self.tab.rot, op);
+        if op == ops.shl || op == ops.shr || rot != 0 {
+            // `Codegen::shift` on the left operand's kind; a shift the
+            // checker could not prove in range stays on the Rust code.
+            let k = self.kind_of(ta);
+            if k
+                == 0
+                || ((op == ops.shl || op == ops.shr) && self.c.world.may_overflow(i.s0, i.s1)) {
+                return;
+            }
+            let how = if op == ops.shl {
+                SHIFT_ISHL
+            } else if op == ops.shr {
+                if kind_unsigned(k) {
+                    SHIFT_USHR
+                } else {
+                    SHIFT_SSHR
+                }
+            } else if rot == 1 {
+                SHIFT_ROTL
+            } else {
+                SHIFT_ROTR
+            };
+            self.record(fi, bi, ii, PLAN_SHIFT, how | (widen_u64(k) << 8), c);
+            return;
+        }
+        if op == ops.amp {
+            self.record(fi, bi, ii, PLAN_BINOP, BIN_BAND, c);
+            return;
+        } else if op == ops.pipe {
+            self.record(fi, bi, ii, PLAN_BINOP, BIN_BOR, c);
+            return;
+        } else if op == ops.caret {
+            self.record(fi, bi, ii, PLAN_BINOP, BIN_BXOR, c);
+            return;
+        }
+        // Text comparisons and `equal` take non-scalar operands, which
+        // `plain_operand` refused.
+        let k = self.kind_of(ta);
+        let unsigned = kind_unsigned(k);
+        if (op == ops.slash || op == ops.percent) && self.c.world.is_partial(i.s0, i.s1) {
+            return;
+        }
+        if (k != 0 && self.c.world.may_overflow(i.s0, i.s1)) || get(in self.tab.bitint, op) != 0 {
+            return;
+        }
+        if ops.is_comparison(op) {
+            self.record(fi, bi, ii, PLAN_ICMP, self.plan_cc(op, unsigned), c);
+            return;
+        }
+        let sel = if op == ops.plus || op == ops.wrapping_add {
+            BIN_IADD
+        } else if op == ops.minus || op == ops.wrapping_sub {
+            BIN_ISUB
+        } else if op == ops.star || op == ops.wrapping_mul {
+            BIN_IMUL
+        } else if op == ops.slash && unsigned {
+            BIN_UDIV
+        } else if op == ops.percent && unsigned {
+            BIN_UREM
+        } else if op == ops.percent {
+            BIN_SREM
+        } else {
+            return;
+        };
+        self.record(fi, bi, ii, PLAN_BINOP, sel, c);
+    }
+
+    // The plan of one function's instructions.
+    fn plan_function(inout self, fi: u64) {
+        let f = self.p.function(fi);
+        self.load_values(f);
+        for bi in 0..f.bc {
+            let blk = self.p.block(add(f.b0, bi));
+            for ii in 0..blk.ic {
+                let i = self.p.inst(add(blk.i0, ii));
+                if i.op == OP_CONST {
+                    self.plan_constant(fi, bi, ii, i);
+                } else if i.op == OP_UNIT || i.op == OP_LOOP {
+                    self.record(fi, bi, ii, PLAN_ZERO, 0, 0);
+                } else if i.op == OP_UNARY {
+                    self.plan_unary(fi, bi, ii, i);
+                } else if i.op == OP_BINARY {
+                    self.plan_binary(fi, bi, ii, i);
+                }
+            }
+        }
+    }
+}
+
+// The decisions of the input's program, packed by `pack_text`.
+pub fn codegen_scalar_decisions(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut r = Reader {
+        pos: 0
+    };
+    let mut c = read_ctx(inout r, in b);
+    let p = read_program(inout r, in b, in c);
+    let mut tab = Tables {
+        kind: ChunkSeq::new[u32](),
+        conv: ChunkSeq::new[u32](),
+        bitb: ChunkSeq::new[u32](),
+        float: ChunkSeq::new[u32](),
+        bitint: ChunkSeq::new[u32](),
+        rot: ChunkSeq::new[u32]()
+    };
+    let ops = ops_new(inout c.names, inout tab);
+    let mut g = Gen {
+        c: c,
+        tab: tab,
+        ops: ops,
+        ls: layouts_new(),
+        p: p,
+        vty: ChunkSeq::new[u32](),
+        o: ChunkSeq::new[u8](),
+        plan: ChunkSeq::new[u64]()
+    };
+    for fi in 0..g.p.fn_count() {
+        g.function(fi);
+    }
+    pack_text(in g.o)
+}
+
+// The emission plan of the input's program: six words per instruction the
+// `scalar` hook emits, `[function, block, instruction, request, a, b]`
+// (functions in program order). Coerce words (`coerce_word`) are packed a
+// byte each: the result's, then each operand's. The request and its immediates are the
+// `scalar_hook` protocol of @vesper/codegen-scalar-emit; an instruction
+// with no record is left to the Rust lowering.
+pub fn codegen_scalar_plan(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut r = Reader {
+        pos: 0
+    };
+    let mut c = read_ctx(inout r, in b);
+    let p = read_program(inout r, in b, in c);
+    let mut tab = Tables {
+        kind: ChunkSeq::new[u32](),
+        conv: ChunkSeq::new[u32](),
+        bitb: ChunkSeq::new[u32](),
+        float: ChunkSeq::new[u32](),
+        bitint: ChunkSeq::new[u32](),
+        rot: ChunkSeq::new[u32]()
+    };
+    let ops = ops_new(inout c.names, inout tab);
+    let mut g = Gen {
+        c: c,
+        tab: tab,
+        ops: ops,
+        ls: layouts_new(),
+        p: p,
+        vty: ChunkSeq::new[u32](),
+        o: ChunkSeq::new[u8](),
+        plan: ChunkSeq::new[u64]()
+    };
+    for fi in 0..g.p.fn_count() {
+        g.plan_function(fi);
+    }
+    g.plan
+}

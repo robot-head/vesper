@@ -20,6 +20,10 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 use std::collections::{BTreeMap, BTreeSet};
 use std::{cell::RefCell, rc::Rc};
 
+/// The aggregate decisions as text, for the SH4 lane 8 differential.
+#[doc(hidden)]
+#[path = "native_aggregate_decisions.rs"]
+pub mod aggregate_decisions;
 /// `vesper build --lib`: C-ABI library objects (port P0 lane 6, #878).
 #[path = "native_aggregates.rs"]
 mod aggregates;
@@ -177,6 +181,13 @@ fn instance_key(name: &str, vars: &BTreeMap<String, Type>) -> String {
 /// `Type::Named(<function>, [])`. `$` never starts a generic name, so
 /// substitution ignores these entries.
 const FN_ARG: &str = "$fn:";
+/// Stack the native lowering keeps free before it recurses into a nested
+/// graph or expression; below it, the recursion moves to a new segment of
+/// [`LOWERING_STACK_SEGMENT`] bytes. One specialization level of a debug
+/// build takes about 75 KiB (SH5 lane 6, #1329).
+const LOWERING_RED_ZONE: usize = 512 * 1024;
+/// Size of each stack segment the native lowering grows by.
+const LOWERING_STACK_SEGMENT: usize = 8 * 1024 * 1024;
 /// Type nodes one native instance's type arguments may hold. There is no
 /// cap on the number of instances (SH3 lane 7, #1246): a program has as
 /// many as it reaches. Only polymorphic recursion makes that number
@@ -298,120 +309,8 @@ fn call_vars(world: &World, e: &Expr, vars: &BTreeMap<String, Type>) -> BTreeMap
         })
         .unwrap_or_default()
 }
-fn visit(e: &Expr, callback: &mut impl FnMut(&Expr)) {
-    callback(e);
-    match &e.kind {
-        ExprKind::Tuple(es) => {
-            for e in es {
-                visit(e, callback)
-            }
-        }
-        ExprKind::Struct { fields, .. } => {
-            for (_, e) in fields {
-                visit(e, callback)
-            }
-        }
-        ExprKind::Block { statements, tail } => {
-            for s in statements {
-                visit(
-                    match s {
-                        Statement::Let { value, .. } => value,
-                        Statement::Expr(e) => e,
-                    },
-                    callback,
-                )
-            }
-            if let Some(e) = tail {
-                visit(e, callback)
-            }
-        }
-        ExprKind::Call { callee, args, .. } => {
-            visit(callee, callback);
-            for a in args {
-                visit(&a.expr, callback)
-            }
-        }
-        ExprKind::Unary(_, e) | ExprKind::Field(e, _) | ExprKind::Try(e) => visit(e, callback),
-        ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) | ExprKind::Assign(_, a, b) => {
-            visit(a, callback);
-            visit(b, callback)
-        }
-        ExprKind::If {
-            condition,
-            then,
-            otherwise,
-        } => {
-            visit(condition, callback);
-            visit(then, callback);
-            if let Some(e) = otherwise {
-                visit(e, callback)
-            }
-        }
-        ExprKind::Match { value, arms } => {
-            visit(value, callback);
-            for (_, e) in arms {
-                visit(e, callback)
-            }
-        }
-        ExprKind::Closure { body, .. } => visit(body, callback),
-        ExprKind::Handle {
-            state,
-            body,
-            ret,
-            ops,
-            ..
-        } => {
-            if let Some((_, e)) = state {
-                visit(e, callback)
-            }
-            visit(body, callback);
-            visit(&ret.body, callback);
-            for c in ops {
-                visit(&c.body, callback)
-            }
-        }
-        k @ (ExprKind::Loop(_)
-        | ExprKind::For { .. }
-        | ExprKind::Range { .. }
-        | ExprKind::Break(_)
-        | ExprKind::Continue
-        | ExprKind::Return(_)) => {
-            for c in k.control_children().into_iter().flatten() {
-                visit(c, callback)
-            }
-        }
-        _ => {}
-    }
-}
-pub(crate) fn contains_function(world: &World, t: &Type) -> bool {
-    fn visit(world: &World, t: &Type, seen: &mut BTreeSet<String>) -> bool {
-        match t {
-            Type::Function { .. } => true,
-            Type::Tuple(ts) => ts.iter().any(|t| visit(world, t, seen)),
-            Type::Named(n, args) => {
-                if !seen.insert(n.clone()) {
-                    return args.iter().any(|t| matches!(t, Type::Function { .. }));
-                }
-                let result = world.adts.get(n).is_some_and(|a| {
-                    let vars = a
-                        .generics
-                        .iter()
-                        .zip(args)
-                        .map(|(g, t)| (g.name.clone(), t.clone()))
-                        .collect();
-                    a.variants
-                        .iter()
-                        .flat_map(|v| &v.fields)
-                        .any(|f| visit(world, &substitute(&f.ty, &vars), seen))
-                });
-                seen.remove(n);
-                result
-            }
-            _ => false,
-        }
-    }
-    visit(world, t, &mut BTreeSet::new())
-}
+pub use crate::source_analysis::{closure_capabilities, needs_nan_canonicalization};
+use crate::source_analysis::{contains_function, visit};
 fn specialized_function(world: &World, f: &Function) -> bool {
     (!capability_only(f)
         || f.effects.tail.is_some()
@@ -433,30 +332,6 @@ fn capability_only(f: &Function) -> bool {
             || crate::ffi_lowering::is_foreign_effect(&e.name)
     })
 }
-/// Whether the program needs Cranelift's NaN canonicalisation: any
-/// `eff [DetFloat]` function promises bit-identical floats on x86-64 and
-/// AArch64, whose default NaN bits differ (§36.2).
-pub fn needs_nan_canonicalization(world: &World) -> bool {
-    world.functions.values().any(|f| {
-        crate::capability_effects::capabilities(&f.effects)
-            .contains(&crate::capability_effects::Capability::DetFloat)
-            || closure_capabilities(f).contains(&crate::capability_effects::Capability::DetFloat)
-    })
-}
-/// Capability effects declared on closure literals anywhere in `f`'s body.
-/// Closures are specialized into the function that contains them, so their
-/// code is part of that function's Cranelift function.
-pub fn closure_capabilities(f: &Function) -> BTreeSet<crate::capability_effects::Capability> {
-    let mut out = BTreeSet::new();
-    if let Some(body) = &f.body {
-        visit(body, &mut |e| {
-            if let ExprKind::Closure { effects, .. } = &e.kind {
-                out.extend(crate::capability_effects::capabilities(effects));
-            }
-        });
-    }
-    out
-}
 /// A function whose only effects are unlabeled `Fail` instances, such as a
 /// recursive function using checked arithmetic. `raise` never resumes (its
 /// continuation takes `Never`), so instead of inlining the function into its
@@ -476,12 +351,15 @@ pub fn closure_capabilities(f: &Function) -> BTreeSet<crate::capability_effects:
 /// places only by calls with an empty effect row. Such a call returns
 /// normally, so `call_function` restores the value from its scratch slot
 /// right after it; a call that may fail or perform an effect could leave
-/// through a handler first, so its places keep a home slot that the callee
-/// writes through.
+/// through a handler first, so the places it lends `inout` or `sink` keep a
+/// home slot that the callee writes through. Its `in` places are values
+/// (nothing writes them back), so whether they keep a home is a cost
+/// question ([`keeps_in_home`]).
 fn register_locals(
     world: &World,
     f: &crate::ir::FunctionIr,
     generics: &BTreeMap<String, Type>,
+    nested: bool,
 ) -> BTreeSet<String> {
     use crate::ir::Op;
     let mut memory = BTreeSet::new();
@@ -492,25 +370,79 @@ fn register_locals(
             }
         }
     };
-    for inst in f.blocks.iter().flat_map(|b| &b.instructions) {
+    // Loop-weighted counts: `in` loans to real impure calls, and every
+    // other read or write of each name.
+    let cyclic = aggregates::cyclic_blocks(f);
+    let weight = |b: usize| {
+        if cyclic.contains(&b) {
+            aggregates::LOOP_WEIGHT
+        } else {
+            1
+        }
+    };
+    let mut lent_in: BTreeMap<String, usize> = BTreeMap::new();
+    let mut touched: BTreeMap<String, usize> = BTreeMap::new();
+    for (b, inst) in f
+        .blocks
+        .iter()
+        .enumerate()
+        .flat_map(|(b, block)| block.instructions.iter().map(move |i| (b, i)))
+    {
+        match &inst.op {
+            Op::Read { root, .. } => *touched.entry(root.clone()).or_default() += weight(b),
+            Op::Write { place, .. } => {
+                *touched
+                    .entry(place.split('.').next().unwrap_or(place).to_owned())
+                    .or_default() += weight(b)
+            }
+            _ => {}
+        }
         match &inst.op {
             Op::Call { callee, args, .. } => {
-                let pure = world
-                    .functions
-                    .get(callee)
-                    .is_some_and(|g| g.effects.instances.is_empty() && g.effects.tail.is_none());
+                let g = world.functions.get(callee);
+                let pure =
+                    g.is_some_and(|g| g.effects.instances.is_empty() && g.effects.tail.is_none());
+                // A specialized callee (a `with_ref`-style method with a
+                // lent callback, or an effectful one) is inlined here, and
+                // binds each `in` scalar argument as a value: nothing is
+                // written through it and there is no call to keep it across
+                // (#1278). That covers the key and the names a lent closure
+                // borrows (§4.2), which the call takes as `in` arguments. A
+                // handler that could change such a name while the call runs
+                // is a `handle` in this graph or an enclosing one, and every
+                // name in scope there keeps its home (below). Other impure
+                // calls keep homes for the places they lend `inout` or
+                // `sink`; their `in` places follow a cost rule
+                // (`keeps_in_home`, #1330).
+                let inlined = g.is_some_and(|g| specialized_function(world, g));
                 if !pure {
-                    place_roots(args, &mut memory);
+                    for a in args {
+                        let Some(p) = &a.place else {
+                            continue;
+                        };
+                        if a.pass != Pass::In {
+                            memory.insert(p.root.clone());
+                        } else if !inlined {
+                            // A real impure call takes an `in` scalar as a
+                            // value, so the home is a cost question only
+                            // (#1330): decided below.
+                            *lent_in.entry(p.root.clone()).or_default() += weight(b);
+                        }
+                    }
                 }
             }
             // Sequence and `Box` operations take their operands as values.
             Op::Indirect { args, .. } | Op::Tiled { args, .. } => place_roots(args, &mut memory),
-            Op::Closure {
-                expr,
-                aliases,
-                moves,
+            // A closure literal copies each name it captures into its own
+            // slot when it is made (`closure_tag`), or for a lent aggregate
+            // stores the address the name already holds, and its body never
+            // writes the caller's names (#1278). Its `aliases` list every
+            // name in scope, not just the ones it uses. So only what it
+            // moves needs a home.
+            Op::Closure { moves, .. } => {
+                memory.extend(moves.iter().map(|p| p.root.clone()));
             }
-            | Op::Handle {
+            Op::Handle {
                 expr,
                 aliases,
                 moves,
@@ -524,6 +456,15 @@ fn register_locals(
             _ => {}
         }
     }
+    // A name lent `in` to real impure calls keeps its home by the cost
+    // rule of `keeps_in_home` (#1330). Each loan comes with a read of its
+    // own, which the count of other uses leaves out.
+    for (n, loans) in lent_in {
+        let others = touched.get(&n).copied().unwrap_or(0).saturating_sub(loans);
+        if keeps_in_home(others, loans) {
+            memory.insert(n);
+        }
+    }
     f.locals
         .iter()
         .filter(|(n, t)| {
@@ -534,8 +475,25 @@ fn register_locals(
                         || matches!(name.as_str(), "f32" | "f64" | "bool")))
         })
         .map(|(n, _)| n.clone())
-        .chain(in_param_registers(world, f, generics))
+        .chain(in_param_registers(world, f, generics, nested))
         .collect()
+}
+/// Whether a scalar lent `in` to real impure calls keeps its home slot
+/// (#1330), from loop-weighted counts of those loans (`loans`) and of its
+/// other reads and writes (`others`).
+///
+/// A real call takes an `in` scalar as a value, so the slot only decides
+/// where the name lives between uses. Lent outside loops, or only ever
+/// passed to calls, the name is cheaper in a register: the slot costs a
+/// store when it is bound and a load for each loan (Aegis `snp`, `tdx` and
+/// `sgx` 5-8% fewer instructions, Grammar 5-11%). A name lent inside a loop
+/// that the loop also computes with stays live in a register across every
+/// call of the loop, and with several of them Cranelift's register
+/// allocator spills in the loop instead (Aegis `policy` +0.9%, Silicon
+/// `dtb-parse` +0.3% when every home was dropped), so such a name keeps its
+/// home.
+fn keeps_in_home(others: usize, loans: usize) -> bool {
+    loans >= aggregates::LOOP_WEIGHT && others > 0
 }
 /// The `in` parameters of `f` whose word (a sequence, string or other
 /// handle; aggregates already arrive as pointers) can stay in the incoming
@@ -547,12 +505,20 @@ fn register_locals(
 /// the word read at entry is the word at every later read, and a use that
 /// needs an address gets a scratch copy ([`Codegen::address`]), which is
 /// never written. A name that the body rebinds, writes, moves or lends
-/// mutably, or that a closure or handler captures, keeps its slot, and so
-/// does every parameter of a function that calls.
+/// mutably, or that a handler captures, keeps its slot, and so does every
+/// parameter of a function that calls.
+///
+/// A graph inlined by a specialized call (`nested`) has no incoming
+/// argument registers: its parameters are values of the caller's code, so
+/// the calling rule does not apply to them. A function-typed parameter (a
+/// lent callback, §4.2) is one tag word; a call through it reads the tag
+/// (its `Sink` read does not change it), and keeping it in a register keeps
+/// the closure target its value carries (#1278).
 fn in_param_registers<'a>(
     world: &'a World,
     f: &'a crate::ir::FunctionIr,
     generics: &'a BTreeMap<String, Type>,
+    nested: bool,
 ) -> impl Iterator<Item = String> + 'a {
     use crate::ir::Op;
     let mut kept = BTreeSet::new();
@@ -565,13 +531,24 @@ fn in_param_registers<'a>(
             }
         }
     };
+    let callback = |name: &str| {
+        f.params.iter().any(|p| {
+            p.name == name
+                && matches!(
+                    crate::numeric::default_type(&substitute(&p.ty, generics)),
+                    Type::Function { .. }
+                )
+        })
+    };
     for inst in f.blocks.iter().flat_map(|b| &b.instructions) {
         match &inst.op {
             Op::Write { place, .. } => {
                 kept.insert(place.split('.').next().unwrap_or(place).to_owned());
             }
             Op::Bind { pattern, .. } => bound_names(pattern, &mut kept),
-            Op::Read { root, pass, .. } if *pass != Pass::In => {
+            Op::Read {
+                root, pass, path, ..
+            } if *pass != Pass::In && !(path.is_empty() && callback(root)) => {
                 kept.insert(root.clone());
             }
             Op::Call { args, .. }
@@ -579,12 +556,9 @@ fn in_param_registers<'a>(
             | Op::Tiled { args, .. }
             | Op::Fip { args, .. }
             | Op::Seq { args, .. } => lent(args, &mut kept),
-            Op::Closure {
-                expr,
-                aliases,
-                moves,
-            }
-            | Op::Handle {
+            // See `register_locals`: a closure copies what it captures.
+            Op::Closure { moves, .. } => kept.extend(moves.iter().map(|p| p.root.clone())),
+            Op::Handle {
                 expr,
                 aliases,
                 moves,
@@ -602,10 +576,11 @@ fn in_param_registers<'a>(
     // word would need a callee-saved register (saved and restored around
     // the whole body) or a spill, which costs more than the home slot's
     // store and reloads (Quarry's planner ran 0.07% more instructions).
-    if f.blocks
-        .iter()
-        .flat_map(|b| &b.instructions)
-        .any(|i| crate::bounds_hoist::calls_out(&i.op))
+    if !nested
+        && f.blocks
+            .iter()
+            .flat_map(|b| &b.instructions)
+            .any(|i| crate::bounds_hoist::calls_out(&i.op))
     {
         kept.extend(f.params.iter().map(|p| p.name.clone()));
     }
@@ -614,7 +589,6 @@ fn in_param_registers<'a>(
         (p.pass == Pass::In
             && !kept.contains(&p.name)
             && f.locals.contains_key(&p.name)
-            && !matches!(ty, Type::Function { .. })
             && Layout::of(world, &ty).is_ok_and(|l| !l.aggregate()))
         .then(|| p.name.clone())
     })
@@ -1037,6 +1011,8 @@ fn compile_entry<M: Module>(
     entry_effects: EntryEffects,
     linkage: DefinitionLinkage,
 ) -> Result<(BTreeMap<String, FuncId>, String), String> {
+    // One encode-once swap input per compilation (SH4 lane 2, #1276).
+    let _inputs = crate::swap_input::open(world);
     let entry_fn = world.functions.get(entry).ok_or("unknown entry")?;
     // Foreign capabilities are granted by the package's `.vsys` import.
     let trace_ok = entry_effects == EntryEffects::TraceHost
@@ -1076,6 +1052,7 @@ fn compile_entry<M: Module>(
     let instances = instances_for_entry(world, entry, trace_ok)?;
     let mut program = crate::ir_swap::lower(world);
     crate::integer_widths::lower_bit_builtin_calls(world, &mut program);
+    wide_native::refine_wide_tuples(&mut program);
     let mut inlined_into = BTreeMap::new();
     if optimize {
         crate::ir_swap::optimize(world, &mut program)?;
@@ -1287,7 +1264,7 @@ fn declare_instances_with_trace<M: Module>(
             let symbol = if key == entry {
                 entry.to_owned()
             } else {
-                format!("vesper_function_{i}")
+                local_symbol(i, key)
             };
             let id = m
                 .declare_function(
@@ -1364,7 +1341,7 @@ fn define_instances_observed_with_trace<M: Module>(
         let own_abi = abi.of(key);
         ctx.func.signature = signature_with_abi(m, world, &f, pass_trace, own_abi)?;
         let mut fbctx = FunctionBuilderContext::new();
-        {
+        let wide_divisions = {
             let mut b = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
             let entry = b.create_block();
             b.append_block_params_for_function_params(entry);
@@ -1455,6 +1432,8 @@ fn define_instances_observed_with_trace<M: Module>(
                 caller_slot,
                 reuse_slots: BTreeMap::new(),
                 register_locals: BTreeSet::new(),
+                bound_params: BTreeSet::new(),
+                scalar_enums: Default::default(),
                 split: BTreeMap::new(),
                 current_call_slot: None,
                 in_fip_fn: f.fip,
@@ -1472,6 +1451,7 @@ fn define_instances_observed_with_trace<M: Module>(
                 forced_call_vars: None,
                 discard_slot: None,
                 element_writebacks: vec![],
+                wide_divisions: vec![],
             };
             c.set_location(f.span.start);
             // Function-value parameters bound to top-level functions by
@@ -1531,13 +1511,18 @@ fn define_instances_observed_with_trace<M: Module>(
             )?;
             c.b.seal_all_blocks();
             c.b.finalize();
-        }
+            c.wide_divisions
+        };
+        wide_native::fuse_wide_divisions(&mut ctx.func, &wide_divisions);
         // A hook error at an infallible layout helper (#1275).
         crate::codegen_swap::take_error()?;
         if let Some(rewrite) = instrument.as_mut() {
             rewrite(key, &mut ctx.func)?;
         }
         linkage.normalize_references(&mut ctx.func);
+        if operands_only {
+            crate::native_clif_opt::run(&mut ctx.func);
+        }
         // No JIT caller reads the CLIF text, and printing it costs as much
         // as half of Cranelift's own work on a large function (#1151).
         if matches!(linkage, DefinitionLinkage::Object) {
@@ -1805,6 +1790,25 @@ impl WordFunction {
         }
     }
 }
+/// The symbol of the local (not exported) function instance `i`, whose
+/// instance key is `key`: `vesper_function_{i}_` and the key with every
+/// character outside `[A-Za-z0-9_]` as `_` (at most 96 of them), so
+/// profilers and disassemblers name the Vesper function. The index keeps
+/// symbols unique.
+pub(crate) fn local_symbol(i: usize, key: &str) -> String {
+    let name: String = key
+        .chars()
+        .take(96)
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("vesper_function_{i}_{name}")
+}
 pub(crate) fn register_jit_runtime_symbols(builder: &mut JITBuilder, trace_host: bool) {
     builder.symbol("fmod", native_float_remainder as *const u8);
     builder.symbol("fmodf", float_math::native_float_remainder_f32 as *const u8);
@@ -1982,6 +1986,55 @@ pub fn object_isa_optimized(
 ) -> Result<std::sync::Arc<dyn cranelift_codegen::isa::TargetIsa>, String> {
     isa_with_flags(target, needs_nan_canonicalization(world), optimize)
 }
+/// CPU features an explicit `--target` uses beyond the target's baseline
+/// ([`set_target_features`]).
+static TARGET_FEATURES: std::sync::RwLock<Vec<String>> = std::sync::RwLock::new(Vec::new());
+
+/// Use the CPU features `list` (comma-separated, Rust's names, as in
+/// cargo's `CARGO_CFG_TARGET_FEATURE`) for every later explicit-target
+/// build in this process. A build without `--target` uses the host's own
+/// features. The port harness passes the outer cargo build's features, so
+/// a port's object is built for the same CPU as the Rust it is measured
+/// against (`-C target-cpu=native` for both, or the baseline for both).
+pub fn set_target_features(list: &str) {
+    let features = list
+        .split(',')
+        .map(str::trim)
+        .filter(|f| !f.is_empty())
+        .map(str::to_owned)
+        .collect();
+    if let Ok(mut current) = TARGET_FEATURES.write() {
+        *current = features;
+    }
+}
+
+/// The Cranelift ISA setting for the Rust target feature `feature`.
+fn cranelift_feature(feature: &str) -> Option<&'static str> {
+    Some(match feature {
+        "sse3" => "has_sse3",
+        "ssse3" => "has_ssse3",
+        "sse4.1" => "has_sse41",
+        "sse4.2" => "has_sse42",
+        "popcnt" => "has_popcnt",
+        "avx" => "has_avx",
+        "avx2" => "has_avx2",
+        "fma" => "has_fma",
+        "bmi1" => "has_bmi1",
+        "bmi2" => "has_bmi2",
+        "lzcnt" => "has_lzcnt",
+        "cmpxchg16b" => "has_cmpxchg16b",
+        "avx512f" => "has_avx512f",
+        "avx512vl" => "has_avx512vl",
+        "avx512dq" => "has_avx512dq",
+        "avx512bitalg" => "has_avx512bitalg",
+        "avx512vbmi" => "has_avx512vbmi",
+        "lse" => "has_lse",
+        "paca" => "has_pauth",
+        "fp16" => "has_fp16",
+        _ => return None,
+    })
+}
+
 fn isa_with_flags(
     target: Option<&str>,
     canonicalize_nans: bool,
@@ -2012,7 +2065,15 @@ fn isa_with_flags(
         ) {
             return Err("native targets must be x86_64 or AArch64".into());
         }
-        cranelift_codegen::isa::lookup(triple).map_err(|e| e.to_string())?
+        let mut builder = cranelift_codegen::isa::lookup(triple).map_err(|e| e.to_string())?;
+        for feature in TARGET_FEATURES.read().map_err(|e| e.to_string())?.iter() {
+            // A feature this target's ISA has no setting for (or Cranelift
+            // does not use) changes nothing, as for rustc.
+            if let Some(setting) = cranelift_feature(feature) {
+                let _ = builder.enable(setting);
+            }
+        }
+        builder
     } else {
         cranelift_native::builder().map_err(str::to_string)?
     };
@@ -2309,11 +2370,23 @@ impl NativeInfo {
         }
     }
 }
+/// Where a closure keeps one captured name from its creation to its calls.
+#[derive(Clone, Copy)]
+enum CaptureHome {
+    /// A copy of an aggregate.
+    Slot(ir::StackSlot),
+    /// One word: a scalar, a handle, a function tag, or the address a lent
+    /// aggregate capture borrows (§4.2). A frontend variable defined where
+    /// the closure is made, so the call reads the word from a register
+    /// instead of a stack slot (#1278); like the slot it held before, it
+    /// keeps the word of the closure made last at that site.
+    Word(Variable),
+}
 #[derive(Clone)]
 struct NativeClosure {
     ty: Type,
     target: ClosureTarget,
-    captures: Vec<(String, Type, ir::StackSlot, NativeInfo)>,
+    captures: Vec<(String, Type, CaptureHome, NativeInfo)>,
     generics: BTreeMap<String, Type>,
     capabilities: BTreeMap<String, String>,
 }
@@ -2378,6 +2451,9 @@ struct ExitTarget {
     /// a callee inlined into it.
     registers: Rc<BTreeMap<crate::ir::ValueId, Variable>>,
     scope: Rc<GraphScope>,
+    /// The words this graph passes to its join instead of an enum's address
+    /// ([`aggregates::EnumShape`], #1330).
+    scalar: Option<aggregates::EnumShape>,
 }
 struct Codegen<'a, 'b, M: Module> {
     b: FunctionBuilder<'a>,
@@ -2429,6 +2505,15 @@ struct Codegen<'a, 'b, M: Module> {
     /// Scalar locals kept in registers on the optimize path
     /// ([`register_locals`]): a place use spills them to a scratch slot.
     register_locals: BTreeSet<u32>,
+    /// Variables a specialized call or a closure invocation binds for the
+    /// parameters (and a closure's captures) of the graph it inlines
+    /// (#1278). They belong to that graph, so it may keep them in
+    /// registers like its own locals, unlike the names a nested control
+    /// graph shares with its enclosing one.
+    bound_params: BTreeSet<u32>,
+    /// Small enum results passed as words across a specialized call
+    /// ([`aggregates::EnumShape`], #1330).
+    scalar_enums: aggregates::ScalarEnumState,
     /// Copy-struct locals kept as one variable per word on the optimize
     /// path ([`aggregates::Split`]).
     /// Keyed by the local's own variable, so a specialized callee's local
@@ -2476,6 +2561,51 @@ struct Codegen<'a, 'b, M: Module> {
     /// through a word of scratch: (scratch, element address, element type),
     /// written back when the call or place primitive that borrows them ends.
     element_writebacks: Vec<(ir::Value, ir::Value, Type)>,
+    /// The 128-bit divisions emitted so far, for
+    /// [`wide_native::fuse_wide_divisions`] once the function is built.
+    wide_divisions: Vec<wide_native::WideDivision>,
+}
+/// The most place re-entries one hook request may make
+/// ([`Codegen::walk_instruction`]).
+const WALK_REENTRIES: usize = 64;
+/// The graph walk's plans for one instruction, lent to a hook
+/// ([`crate::codegen_swap::walk::plan`]).
+#[derive(Clone, Copy)]
+struct WalkPlans {
+    hoisted: bool,
+    homed: bool,
+    split_source: bool,
+    array: bool,
+    bound_early: bool,
+    placed: bool,
+}
+/// The walk's maps, lent to a hook for one request.
+struct WalkMaps<'r> {
+    pointers: &'r BTreeMap<u32, Variable>,
+    narrow: &'r BTreeMap<u32, (Variable, Type)>,
+    registers: &'r BTreeSet<u32>,
+    split: &'r BTreeMap<u32, aggregates::Split>,
+    operands: Vec<Option<u32>>,
+}
+impl crate::codegen_swap::walk::Maps for WalkMaps<'_> {
+    fn home(&self, var: u32) -> Option<u32> {
+        self.pointers.get(&var).map(|v| v.as_u32())
+    }
+    fn narrow(&self, var: u32) -> bool {
+        self.narrow.contains_key(&var)
+    }
+    fn register(&self, var: u32) -> bool {
+        self.registers.contains(&var)
+    }
+    fn split_words(&self, var: u32) -> Vec<u32> {
+        self.split
+            .get(&var)
+            .map(|s| s.leaves.iter().map(|l| l.var.as_u32()).collect())
+            .unwrap_or_default()
+    }
+    fn operand_var(&self, index: usize) -> Option<u32> {
+        self.operands.get(index).copied().flatten()
+    }
 }
 /// The Cranelift source location of source byte `offset`. Locations are
 /// byte offsets into the checked module's source; the all-ones value is
@@ -2529,6 +2659,13 @@ impl<M: Module> Codegen<'_, '_, M> {
         if !flush || !is_float_type(ty) {
             return v;
         }
+        // SH4 swap point (#1285): the `numeric` hook may emit the flush.
+        if let Some(r) = self.swap_numeric(
+            crate::codegen_swap::numeric::FLOAT_FLUSH,
+            &[crate::codegen_swap::word(v)],
+        ) {
+            return r;
+        }
         let magnitude = self.b.ins().fabs(v);
         let smallest = if ty == types::F32 {
             self.b.ins().f32const(f32::MIN_POSITIVE)
@@ -2556,12 +2693,97 @@ impl<M: Module> Codegen<'_, '_, M> {
         }
     }
     fn def_var(&mut self, variable: Variable, value: ir::Value) {
+        self.note_def(variable, value);
+        self.b.def_var(variable, value);
+        self.def_homes(variable, value);
+    }
+    /// The facts a definition of `variable` adds (no code).
+    fn note_def(&mut self, variable: Variable, value: ir::Value) {
         let info = self.info(value);
         self.variable_infos
             .entry(variable.as_u32())
             .or_default()
             .merge(&info);
-        self.b.def_var(variable, value);
+    }
+    /// Whether `variable` lives only in its Cranelift variable: no
+    /// narrow element home and no pointer to store through.
+    fn plain_var(&self, variable: Variable) -> bool {
+        !self.narrow_homes.contains_key(&variable.as_u32())
+            && !self.pointers.contains_key(&variable.as_u32())
+    }
+    /// [`Self::def_var`] of a plain local, emitted by the `scalar` hook's
+    /// `WRITE_LOCAL` when one is installed (SH4 lane 6, #1280).
+    fn def_local(&mut self, variable: Variable, value: ir::Value) {
+        use crate::codegen_swap::{scalar, word};
+        if self.plain_var(variable)
+            && self
+                .swap_scalar_words(
+                    scalar::WRITE_LOCAL,
+                    &[u64::from(variable.as_u32()), word(value)],
+                )
+                .is_some()
+        {
+            self.note_def(variable, value);
+            return;
+        }
+        self.def_var(variable, value);
+    }
+    /// A fresh variable of `value`'s type defined as `value`, declared and
+    /// defined by the `scalar` hook's `BIND_LOCAL` when one is installed.
+    fn bind_local(&mut self, value: ir::Value) -> Variable {
+        use crate::codegen_swap::{scalar, word};
+        if let Some(results) = self.swap_scalar_words(scalar::BIND_LOCAL, &[word(value)])
+            && let [var] = results[..]
+            && let Ok(var) = u32::try_from(var)
+        {
+            let var = Variable::from_u32(var);
+            self.note_def(var, value);
+            self.def_homes(var, value);
+            return var;
+        }
+        let var = self.b.declare_var(self.b.func.dfg.value_type(value));
+        self.def_var(var, value);
+        var
+    }
+    /// [`Self::use_var`] of a plain local then [`Self::coerce`] to `ty`, by
+    /// the `scalar` hook's `READ_LOCAL` when one is installed; `None` (no
+    /// hook, a decline, or a type the request does not carry) leaves the
+    /// read to the Rust code.
+    fn read_local(&mut self, variable: Variable, ty: &Type) -> Option<ir::Value> {
+        use crate::codegen_swap::{scalar, value_of};
+        if !self.plain_var(variable) || matches!(ty, Type::Function { .. }) {
+            return None;
+        }
+        let layout = Layout::of(self.world, ty).ok()?;
+        if layout.aggregate() || wide_native::is_wide(ty) {
+            return None;
+        }
+        let kind = match crate::numeric::IntegerKind::from_type(ty) {
+            Some(k) if k.wide() => return None,
+            Some(k) if k.bits() < 64 => scalar::kind_word(k)?,
+            _ => 0,
+        };
+        let results =
+            self.swap_scalar_words(scalar::READ_LOCAL, &[u64::from(variable.as_u32()), kind])?;
+        let [value, raw] = results[..] else {
+            crate::codegen_swap::record("READ_LOCAL answers [value, raw]".into());
+            return None;
+        };
+        let value = value_of(&[value]).ok()?;
+        let raw = value_of(&[raw]).ok()?;
+        debug_assert!(
+            self.b.func.dfg.value_is_valid(raw),
+            "READ_LOCAL's raw value is not of this function"
+        );
+        let mut info = self.info(raw);
+        if let Some(stored) = self.variable_infos.get(&variable.as_u32()) {
+            info.merge(stored);
+        }
+        self.infos.insert(raw, info);
+        Some(value)
+    }
+    /// The narrow home and pointer stores of a definition of `variable`.
+    fn def_homes(&mut self, variable: Variable, value: ir::Value) {
         if let Some((address, elem)) = self.narrow_homes.get(&variable.as_u32()).cloned() {
             let pointer = self.b.use_var(address);
             // The element is stored at its width; a failure here is a type
@@ -2725,7 +2947,9 @@ impl<M: Module> Codegen<'_, '_, M> {
         }
         let mut captures = vec![];
         // A lent closure (§4.2) borrows its aggregate captures for the
-        // call: the slot keeps the caller's address, not a copy.
+        // call: its word is the caller's address, not a copy. A word-sized
+        // capture lives in a variable (`CaptureHome::Word`), and only an
+        // owned aggregate copy needs a slot.
         let lent = self
             .world
             .lent_closures
@@ -2736,17 +2960,11 @@ impl<M: Module> Codegen<'_, '_, M> {
             if let Some(var) = self.vars.get(&name).copied() {
                 let ty = self.local_types[&name].clone();
                 let layout = Layout::of(self.world, &ty)?;
-                if lent.contains(&name) && layout.aggregate() {
-                    let pointer_type = self.m.target_config().pointer_type();
-                    let slot = self.b.create_sized_stack_slot(ir::StackSlotData::new(
-                        ir::StackSlotKind::ExplicitSlot,
-                        pointer_type.bytes(),
-                        3,
-                    ));
-                    let pointer = self.b.ins().stack_addr(pointer_type, slot, 0);
+                if !layout.aggregate() || lent.contains(&name) {
                     let value = self.use_var(var);
-                    self.b.ins().store(ir::MemFlags::new(), value, pointer, 0);
-                    captures.push((name, ty, slot, self.info(value)));
+                    let word = self.b.declare_var(self.b.func.dfg.value_type(value));
+                    self.b.def_var(word, value);
+                    captures.push((name, ty, CaptureHome::Word(word), self.info(value)));
                     continue;
                 }
                 let slot = self.b.create_sized_stack_slot(ir::StackSlotData::new(
@@ -2760,7 +2978,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                         .stack_addr(self.m.target_config().pointer_type(), slot, 0);
                 let value = self.use_var(var);
                 self.store(pointer, value, &ty)?;
-                captures.push((name, ty, slot, self.info(value)));
+                captures.push((name, ty, CaptureHome::Slot(slot), self.info(value)));
             }
         }
         let mut caps = self.capabilities.clone();
@@ -2856,7 +3074,17 @@ impl<M: Module> Codegen<'_, '_, M> {
                 prepared.push(arg.clone());
                 continue;
             }
-            let value = self.expr(&arg.expr)?;
+            // An `in` aggregate is lent for the call, as `call_function`
+            // lends it: the body reads it through the caller's address and
+            // never writes it, so it is not copied (#1278).
+            let value = if *pass == Pass::In
+                && Layout::of(self.world, t)?.aggregate()
+                && crate::check::Place::from_expr(&arg.expr).is_some()
+            {
+                self.address(&arg.expr)?
+            } else {
+                self.expr(&arg.expr)?
+            };
             let name = format!("$closure_arg{}_{}", value.as_u32(), index);
             let variable = self.b.declare_var(self.b.func.dfg.value_type(value));
             self.def_var(variable, value);
@@ -3057,6 +3285,12 @@ impl<M: Module> Codegen<'_, '_, M> {
                     restores.push((self.vars[n], ptr, param.ty.clone()));
                 }
                 ptr
+            } else if param.pass == Pass::In
+                && Layout::of(self.world, &param.ty)?.aggregate()
+                && crate::check::Place::from_expr(&arg.expr).is_some()
+            {
+                // Lent, not copied (`invoke_tag`, #1278).
+                self.address(&arg.expr)?
             } else {
                 self.expr(&arg.expr)?
             };
@@ -3068,32 +3302,29 @@ impl<M: Module> Codegen<'_, '_, M> {
         let mut caps = self.capabilities.clone();
         caps.extend(closure.capabilities.clone());
         self.capabilities = caps;
-        let lent = self
-            .world
-            .lent_closures
-            .get(name)
-            .cloned()
-            .unwrap_or_default();
-        for (name, ty, slot, info) in &closure.captures {
-            let pointer_type = self.m.target_config().pointer_type();
-            let ptr = self.b.ins().stack_addr(pointer_type, *slot, 0);
-            self.write_info(ptr, info.clone());
-            let layout = Layout::of(self.world, ty)?;
-            let value = if lent.contains(name) && layout.aggregate() {
-                // Borrowed in place (`closure_tag`): read-only, no copy.
-                let value = self.b.ins().load(pointer_type, ir::MemFlags::new(), ptr, 0);
-                self.write_info(value, info.clone());
-                value
-            } else if layout.aggregate() {
-                let value = self.load(ptr, ty)?;
-                let copy = self.alloc(layout.size);
-                self.copy_bytes(value, copy, layout.size);
-                copy
-            } else {
-                self.load(ptr, ty)?
+        for (name, ty, home, info) in &closure.captures {
+            let value = match *home {
+                // A word, or a lent aggregate borrowed in place
+                // (`closure_tag`): read-only, no copy.
+                CaptureHome::Word(word) => {
+                    let value = self.b.use_var(word);
+                    self.write_info(value, info.clone());
+                    value
+                }
+                CaptureHome::Slot(slot) => {
+                    let pointer_type = self.m.target_config().pointer_type();
+                    let ptr = self.b.ins().stack_addr(pointer_type, slot, 0);
+                    self.write_info(ptr, info.clone());
+                    let layout = Layout::of(self.world, ty)?;
+                    let value = self.load(ptr, ty)?;
+                    let copy = self.alloc(layout.size);
+                    self.copy_bytes(value, copy, layout.size);
+                    copy
+                }
             };
             let variable = self.b.declare_var(self.b.func.dfg.value_type(value));
             self.def_var(variable, value);
+            self.bound_params.insert(variable.as_u32());
             self.vars.insert(name.clone(), variable);
             self.local_types.insert(name.clone(), ty.clone());
         }
@@ -3106,6 +3337,7 @@ impl<M: Module> Codegen<'_, '_, M> {
             };
             let variable = self.b.declare_var(self.b.func.dfg.value_type(value));
             self.def_var(variable, value);
+            self.bound_params.insert(variable.as_u32());
             self.vars.insert(p.name.clone(), variable);
             self.local_types.insert(p.name.clone(), p.ty.clone());
             if p.pass == Pass::Inout && !Layout::of(self.world, &p.ty)?.aggregate() {
@@ -3217,7 +3449,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                 } else {
                     value
                 };
-                self.def_var(var, bound_value);
+                self.def_local(var, bound_value);
                 Ok(())
             }
             PatternKind::Tuple(ps) => {
@@ -3287,7 +3519,13 @@ impl<M: Module> Codegen<'_, '_, M> {
     ) -> Result<(), String> {
         // An inlined graph restores the caller's location when it is done.
         let saved = self.srcloc;
-        let result = self.ir_graph_at(f, sret, return_to);
+        // Effect and closure specialization inline a callee's graph here,
+        // up to 64 levels, and a debug build spends about 75 KiB of stack
+        // per level: the lowering continues on a fresh stack segment
+        // whenever the current one runs low (SH5 lane 6, #1329).
+        let result = stacker::maybe_grow(LOWERING_RED_ZONE, LOWERING_STACK_SEGMENT, || {
+            self.ir_graph_at(f, sret, return_to)
+        });
         if return_to.is_some() && self.source_locations {
             self.srcloc = saved;
             self.b.set_srcloc(saved);
@@ -3301,6 +3539,38 @@ impl<M: Module> Codegen<'_, '_, M> {
         return_to: Option<ir::Block>,
     ) -> Result<(), String> {
         use crate::ir::{Op, Terminator};
+        // Small enum values kept as words (#1330): the graph is rewritten
+        // so that their tags and fields are scalar values and locals.
+        let scalar_join = self.scalar_enums.join.take();
+        let scalar_graph = if self.operands_only && !self.in_fip_fn {
+            let world = self.world;
+            let shared: BTreeSet<String> = f
+                .locals
+                .keys()
+                .filter(|n| self.vars.contains_key(*n))
+                .cloned()
+                .collect();
+            aggregates::scalar_enums(
+                world,
+                f,
+                &self.generic_vars,
+                scalar_join.as_ref(),
+                &|callee| {
+                    world
+                        .functions
+                        .get(callee)
+                        .is_some_and(|g| specialized_function(world, g))
+                },
+                &shared,
+            )
+        } else {
+            None
+        };
+        let no_words = BTreeMap::new();
+        let (f, scalar_calls, scalar_returns) = match &scalar_graph {
+            Some(s) => (&s.f, &s.calls, &s.returns),
+            None => (f, &no_words, &BTreeMap::new()),
+        };
         let entry = self
             .b
             .current_block()
@@ -3321,7 +3591,7 @@ impl<M: Module> Codegen<'_, '_, M> {
         // handled body, shares the names its caller already has).
         let mut fresh_locals = BTreeSet::new();
         let registers_ok = if self.operands_only {
-            register_locals(self.world, f, &self.generic_vars)
+            register_locals(self.world, f, &self.generic_vars, return_to.is_some())
         } else {
             BTreeSet::new()
         };
@@ -3367,8 +3637,11 @@ impl<M: Module> Codegen<'_, '_, M> {
             // A function's own by-value parameters qualify too; a nested
             // graph keeps whatever its enclosing graph chose for a shared
             // name.
+            // So do the parameters a specialized call or a closure
+            // invocation bound for this graph (#1278).
             let owned = existing.is_none()
-                || (return_to.is_none() && !self.pointers.contains_key(&var.as_u32()));
+                || (!self.pointers.contains_key(&var.as_u32())
+                    && (return_to.is_none() || self.bound_params.contains(&var.as_u32())));
             if owned && registers_ok.contains(n) {
                 self.register_locals.insert(var.as_u32());
             } else if !layout.aggregate()
@@ -3405,9 +3678,55 @@ impl<M: Module> Codegen<'_, '_, M> {
         } else {
             vec![]
         };
-        // Only a function's own graph has its parameters.
+        // Aggregate `in` parameters whose memory nothing can change for the
+        // call (#1330): a function's own, or a specialized callee's bound to
+        // such an address. A graph that rebinds the name loses it.
+        let mut rebound = BTreeSet::new();
+        for inst in f.blocks.iter().flat_map(|b| &b.instructions) {
+            if let Op::Bind { pattern, .. } = &inst.op {
+                bound_names(pattern, &mut rebound);
+            }
+        }
+        let handles = f
+            .blocks
+            .iter()
+            .flat_map(|b| &b.instructions)
+            .any(|i| matches!(i.op, Op::Handle { .. }));
+        for n in &rebound {
+            if let Some(var) = self.vars.get(n) {
+                self.scalar_enums.invariant_roots.remove(&var.as_u32());
+            }
+        }
+        for p in &f.params {
+            let Some(var) = self.vars.get(&p.name) else {
+                continue;
+            };
+            let ty = crate::numeric::default_type(&substitute(&p.ty, &self.generic_vars));
+            if p.pass != Pass::In || rebound.contains(&p.name) {
+                self.scalar_enums.invariant_roots.remove(&var.as_u32());
+            } else if return_to.is_none()
+                && !handles
+                && self.operands_only
+                && Layout::of(self.world, &ty)?.aggregate()
+                && !crate::seq::is_slice_type(&ty)
+            {
+                self.scalar_enums.invariant_roots.insert(var.as_u32());
+            }
+        }
+        // Only a function's own graph has its parameters, unless a field
+        // hoist reads through an invariant root: its words are then loaded
+        // as read-only memory that Cranelift moves out of the caller's
+        // loops.
         if return_to.is_some() {
-            header_hoists.retain(|h| !h.entry);
+            let roots = &self.scalar_enums.invariant_roots;
+            header_hoists.retain(|h| {
+                !h.entry
+                    || (!h.place.path.is_empty()
+                        && self
+                            .vars
+                            .get(&h.place.root)
+                            .is_some_and(|v| roots.contains(&v.as_u32())))
+            });
         }
         let mut hoisted_reads = BTreeMap::new();
         let mut entry_reads = BTreeMap::new();
@@ -3595,6 +3914,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                 self.local_types.clone(),
                 self.generic_vars.clone(),
             )),
+            scalar: scalar_join.clone(),
         });
         // Seal each block once every predecessor is lowered (#1151): a block
         // left unsealed until `seal_all_blocks` gets a parameter for every
@@ -3633,7 +3953,11 @@ impl<M: Module> Codegen<'_, '_, M> {
             // here, in the block that dominates every other.
             if i == 0 {
                 for hoist in header_hoists.iter().filter(|h| h.entry) {
-                    let receiver = self.seq_entry_view(&hoist.place, &hoist.ty)?;
+                    let receiver = if return_to.is_some() {
+                        self.seq_invariant_field_view(&hoist.place, &hoist.ty)?
+                    } else {
+                        self.seq_entry_view(&hoist.place, &hoist.ty)?
+                    };
                     for read in &hoist.reads {
                         hoisted_reads.insert(*read, receiver);
                         entry_reads.insert(*read, receiver);
@@ -3650,12 +3974,25 @@ impl<M: Module> Codegen<'_, '_, M> {
             let before_inst_drops = f.box_drops_before_inst.get(&i);
             let after_inst_drops = f.box_drops_after_inst.get(&i);
             for (inst_idx, inst) in block.instructions.iter().enumerate() {
-                if refresh_all || before_inst_drops.is_some() || after_inst_drops.is_some() {
+                if refresh_all {
                     for (id, register) in &registers {
                         values.insert(*id, self.use_var(*register));
                     }
                 } else {
-                    for id in crate::ir_inline::operands(&inst.op) {
+                    // Operands, and the values this instruction's Box drops
+                    // read. Refreshing every register here made each local
+                    // live across the whole graph, a block parameter at
+                    // every join, whenever the function planned a drop (#1426).
+                    let drop_reads = [before_inst_drops, after_inst_drops]
+                        .into_iter()
+                        .flatten()
+                        .flatten()
+                        .filter(|(d_idx, _)| *d_idx == inst_idx)
+                        .filter_map(|(_, drop)| drop.value());
+                    for id in crate::ir_inline::operands(&inst.op)
+                        .into_iter()
+                        .chain(drop_reads)
+                    {
                         if let Some(register) = registers.get(&id) {
                             values.insert(id, self.use_var(*register));
                         }
@@ -3696,15 +4033,42 @@ impl<M: Module> Codegen<'_, '_, M> {
                 };
                 // SH4 swap point (#1275): a family hook may emit this
                 // instruction (`codegen_swap`); none is installed by default.
-                let swapped = crate::codegen_swap::instruction(
-                    &mut self.b,
-                    &mut *self.m,
-                    self.world,
-                    self.program,
-                    (&f.name, i, inst_idx, inst),
-                    &values,
-                    &ty,
-                )?;
+                // The hook is lent the walk's state and may re-enter it
+                // (`codegen_swap::walk`, SH5 lane 1, #1324): `reentered`
+                // asks it again once the Rust arm below has emitted.
+                let mut walk_kept = Vec::new();
+                let (swapped, reentered) =
+                    if crate::codegen_swap::walk::wanted(self.world, &inst.op) {
+                        let plans = WalkPlans {
+                            hoisted: hoisted_reads.contains_key(&inst.dest),
+                            homed: matches!(&inst.op, Op::Read { root, .. }
+                            if homes.contains_key(&inst.dest) && self.vars.contains_key(root)),
+                            split_source: split_sources.contains_key(&inst.dest),
+                            array: match &inst.op {
+                                Op::Read { .. } => native_arrays::read_in_place(f, i, inst_idx),
+                                Op::Write { op, value, .. } => {
+                                    op.starts_with(crate::arrays::WRITE_PREFIX)
+                                        && native_arrays::written_pair(f, *value).is_some()
+                                }
+                                _ => false,
+                            },
+                            bound_early: matches!(&inst.op, Op::Bind { value, .. }
+                            if bound_early.contains(value)),
+                            placed: matches!(&inst.op, Op::Write { value, .. }
+                            if aggregates::placed(&home_pointers, *value)),
+                        };
+                        self.walk_instruction(
+                            f,
+                            (i, inst_idx, inst),
+                            &values,
+                            &ty,
+                            &registers,
+                            plans,
+                            &mut walk_kept,
+                        )?
+                    } else {
+                        (None, None)
+                    };
                 let value = match &inst.op {
                     _ if swapped.is_some() => swapped.expect("guarded by is_some"),
                     Op::Loop => self.zero(),
@@ -3780,7 +4144,21 @@ impl<M: Module> Codegen<'_, '_, M> {
                         {
                             self.address(&e)?
                         } else {
-                            let value = self.expr(&e)?;
+                            // A plain scalar local's read (SH4 lane 6).
+                            let local = if path.is_empty()
+                                && self.world.constructor(root).is_none()
+                                && self.split_of(root).is_none()
+                            {
+                                self.vars.get(root).copied()
+                            } else {
+                                None
+                            };
+                            let read_ty = self.ty(&e);
+                            let swapped = local.and_then(|var| self.read_local(var, &read_ty));
+                            let value = match swapped {
+                                Some(value) => value,
+                                None => self.expr(&e)?,
+                            };
                             if *pass == Pass::Sink && path.is_empty() {
                                 self.seq_drop_moved(root);
                             } else if *pass == Pass::Sink
@@ -4018,9 +4396,27 @@ impl<M: Module> Codegen<'_, '_, M> {
                             self.current_call_slot = f.fip_call_slots.get(&inst.dest).cloned();
                             let into =
                                 self.home_pointer(inst.dest, &homes, &mut home_pointers, sret)?;
+                            let words = scalar_calls.get(&inst.dest);
+                            self.scalar_enums.request = words.map(|(shape, _)| shape.clone());
+                            self.scalar_enums.result = None;
                             let call_res = self.call_function_into(callee, &es, &site, into);
                             self.current_call_slot = None;
-                            call_res?
+                            self.scalar_enums.request = None;
+                            let call_res = call_res?;
+                            if let Some((shape, ids)) = words {
+                                // The call passed its result's words, or
+                                // (when it was not specialized) its address.
+                                let ws = match self.scalar_enums.result.take() {
+                                    Some(ws) => ws,
+                                    None => self.enum_words(call_res, shape)?,
+                                };
+                                for ((id, w), t) in ids.iter().zip(ws).zip(&shape.words) {
+                                    let w = self.coerce(w, Some(t));
+                                    values.insert(*id, w);
+                                    self.def_var(registers[id], w);
+                                }
+                            }
+                            call_res
                         } else if let Some((effect, op)) = callee.split_once("::") {
                             self.perform(effect, capability.as_deref(), instance, op, &es)?
                         } else if let Some(v) = self.float_call(callee, &es, &site)? {
@@ -4230,6 +4626,19 @@ impl<M: Module> Codegen<'_, '_, M> {
                         result?
                     }
                 };
+                let value = match reentered {
+                    Some(facts) => self.walk_resume(
+                        f,
+                        (i, inst_idx, inst),
+                        &values,
+                        &ty,
+                        &registers,
+                        &facts,
+                        &mut walk_kept,
+                        value,
+                    )?,
+                    None => value,
+                };
                 let value = self.coerce(value, Some(&ty));
                 let value = if matches!(ty, Type::Function { .. })
                     && matches!(inst.op, crate::ir::Op::Read { .. })
@@ -4238,6 +4647,20 @@ impl<M: Module> Codegen<'_, '_, M> {
                 } else {
                     value
                 };
+                if let Op::Read {
+                    root,
+                    path,
+                    pass: Pass::In,
+                    ..
+                } = &inst.op
+                    && path.is_empty()
+                    && self
+                        .vars
+                        .get(root)
+                        .is_some_and(|v| self.scalar_enums.invariant_roots.contains(&v.as_u32()))
+                {
+                    self.scalar_enums.invariant_pointers.insert(value);
+                }
                 values.insert(inst.dest, value);
                 self.def_var(registers[&inst.dest], value);
                 if inst.ty.name() != "Never" {
@@ -4254,12 +4677,21 @@ impl<M: Module> Codegen<'_, '_, M> {
                     }
                 }
             }
-            if refresh_all || f.box_drops_before_term.contains_key(&i) {
+            if refresh_all {
                 for (id, register) in &registers {
                     values.insert(*id, self.use_var(*register));
                 }
             } else {
-                for id in crate::ir_inline::terminator_operands(&block.terminator) {
+                let drop_reads = f
+                    .box_drops_before_term
+                    .get(&i)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(crate::fip::FipDrop::value);
+                for id in crate::ir_inline::terminator_operands(&block.terminator)
+                    .into_iter()
+                    .chain(drop_reads)
+                {
                     if let Some(register) = registers.get(&id) {
                         values.insert(id, self.use_var(*register));
                     }
@@ -4282,6 +4714,30 @@ impl<M: Module> Codegen<'_, '_, M> {
                 }
             }
             match &block.terminator {
+                Terminator::Return(id) if scalar_join.is_some() => {
+                    self.seq_drop_exit(self.exits.len() - 1)?;
+                    let words = match scalar_returns.get(id) {
+                        Some(ws) => ws.iter().map(|w| self.use_var(registers[w])).collect(),
+                        None => {
+                            let ty = crate::numeric::default_type(&substitute(
+                                &f.result,
+                                &self.generic_vars,
+                            ));
+                            let value = if f.values[id].name() == "Never" {
+                                self.default_value(&ty)?
+                            } else {
+                                values[id]
+                            };
+                            let shape = scalar_join
+                                .as_ref()
+                                .ok_or("native enum words lack a shape")?;
+                            self.enum_words(value, shape)?
+                        }
+                    };
+                    let join = return_to.ok_or("native enum words lack a join")?;
+                    let args: Vec<ir::BlockArg> = words.into_iter().map(Into::into).collect();
+                    self.jump(join, &args);
+                }
                 Terminator::Return(id) => {
                     self.seq_drop_exit(self.exits.len() - 1)?;
                     let ty =
@@ -4448,6 +4904,14 @@ impl<M: Module> Codegen<'_, '_, M> {
         } else {
             value
         };
+        if let (Some(shape), Some(join)) = (&target.scalar, target.join) {
+            let words = self.enum_words(value, shape)?;
+            let args: Vec<ir::BlockArg> = words.into_iter().map(Into::into).collect();
+            self.jump(join, &args);
+            let dead = self.b.create_block();
+            self.b.switch_to_block(dead);
+            return Ok(());
+        }
         let value = if let Some(output) = target.sret {
             if !placed {
                 let layout = Layout::of(self.world, &target.result)?;
@@ -4752,8 +5216,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                 } else {
                     value
                 };
-                let var = self.b.declare_var(self.b.func.dfg.value_type(bound_value));
-                self.def_var(var, bound_value);
+                let var = self.bind_local(bound_value);
                 self.vars.insert(n.clone(), var);
                 self.local_types.insert(n.clone(), ty.clone());
                 Ok(())
@@ -4876,6 +5339,11 @@ impl<M: Module> Codegen<'_, '_, M> {
                     self.b.ins().icmp(IntCC::Equal, value, n)
                 }
                 Literal::Int(n) => self.b.ins().icmp_imm(IntCC::Equal, value, *n as i64),
+                // Only a `u128` holds it: the I128 bit pattern.
+                Literal::WideInt(n) => {
+                    let n = self.wide_const(*n as i128);
+                    self.b.ins().icmp(IntCC::Equal, value, n)
+                }
                 Literal::Bool(b) => self.b.ins().icmp_imm(IntCC::Equal, value, i64::from(*b)),
                 Literal::Float(n) => {
                     let ty = self.b.func.dfg.value_type(value);
@@ -4972,6 +5440,385 @@ impl<M: Module> Codegen<'_, '_, M> {
             op,
             args,
         )
+    }
+    /// The facts of instruction `inst` that a hook reads through the lent
+    /// walk state ([`crate::codegen_swap::walk::query`]): built only when a
+    /// hook of the instruction's family is in effect.
+    fn walk_facts(
+        &self,
+        f: &crate::ir::FunctionIr,
+        (block, index, inst): (usize, usize, &crate::ir::Instruction),
+        ty: &Type,
+        plans: WalkPlans,
+    ) -> Result<crate::codegen_swap::walk::Facts, String> {
+        use crate::codegen_swap::walk::{Facts, NONE, flags, kind, plan};
+        use crate::ir::Op;
+        let var_word = |n: &str| self.vars.get(n).map_or(NONE, |v| u64::from(v.as_u32()));
+        let type_flags = |t: &Type, aggregate: u64, function: u64| -> Result<u64, String> {
+            let mut bits = 0;
+            if Layout::of(self.world, t)?.aggregate() {
+                bits |= aggregate;
+            }
+            if matches!(t, Type::Function { .. }) {
+                bits |= function;
+            }
+            Ok(bits)
+        };
+        // `Codegen::coerce` changes a value of type `t`.
+        let coerces = |t: &Type| {
+            crate::numeric::IntegerKind::from_type(t).is_some_and(|k| k.wide() || k.bits() < 64)
+        };
+        let place_flags = |root: &str, path: &[String]| -> Result<u64, String> {
+            let p = crate::check::Place {
+                root: root.into(),
+                path: path.to_vec(),
+            };
+            let t = self.ty(&ir_place_expr(&p, inst.span.clone()));
+            let mut bits = type_flags(&t, flags::PLACE_AGGREGATE, flags::PLACE_FUNCTION)?;
+            if coerces(&t) {
+                bits |= flags::PLACE_COERCES;
+            }
+            if self.world.constructor(root).is_some() {
+                bits |= flags::PLACE_CONSTRUCTOR;
+            }
+            Ok(bits)
+        };
+        let value_type = |id: &crate::ir::ValueId| {
+            f.values
+                .get(id)
+                .map(|t| crate::numeric::default_type(&substitute(t, &self.generic_vars)))
+                .ok_or_else(|| format!("undefined native IR value %{id}"))
+        };
+        let mut facts = Facts::default();
+        let mut bits = 0;
+        for (on, bit) in [
+            (plans.hoisted, plan::HOISTED),
+            (plans.homed, plan::HOMED),
+            (plans.split_source, plan::SPLIT_SOURCE),
+            (plans.array, plan::ARRAY),
+            (plans.bound_early, plan::BOUND_EARLY),
+            (plans.placed, plan::PLACED),
+            (!self.world.element_views.is_empty(), plan::ELEMENT_VIEWS),
+        ] {
+            if on {
+                bits |= bit;
+            }
+        }
+        let root_plan = |root: &str, bits: &mut u64| {
+            if self.split_of(root).is_some() {
+                *bits |= plan::SPLIT;
+            }
+        };
+        match &inst.op {
+            Op::Read {
+                root, path, pass, ..
+            } => {
+                facts.kind = kind::READ;
+                facts.place_var = var_word(root);
+                facts.path_len = path.len() as u64;
+                facts.pass = match pass {
+                    Pass::In => 0,
+                    Pass::Inout => 1,
+                    Pass::Sink => 2,
+                };
+                facts.flags = type_flags(ty, flags::RESULT_AGGREGATE, flags::RESULT_FUNCTION)?
+                    | place_flags(root, path)?;
+                root_plan(root, &mut bits);
+                if self.seq_drop_slot_kind(root).is_some() {
+                    bits |= plan::DROP_SLOT;
+                }
+            }
+            Op::Bind { pattern, value } => {
+                facts.kind = kind::BIND;
+                if let PatternKind::Bind(n) = &pattern.kind {
+                    facts.place_var = var_word(n);
+                    facts.path_len = 0;
+                    root_plan(n, &mut bits);
+                    if self.seq_drop_slot_kind(n).is_some() {
+                        bits |= plan::DROP_SLOT;
+                    }
+                }
+                facts.flags = type_flags(
+                    &value_type(value)?,
+                    flags::RESULT_AGGREGATE,
+                    flags::RESULT_FUNCTION,
+                )?;
+                if self.seq_is_fused(*value) {
+                    bits |= plan::FUSED;
+                }
+            }
+            Op::Write { place, op, value } => {
+                facts.kind = kind::WRITE;
+                let mut parts = place.split('.');
+                let root = parts.next().unwrap_or("");
+                let path: Vec<String> = parts.map(str::to_owned).collect();
+                facts.place_var = var_word(root);
+                facts.path_len = path.len() as u64;
+                facts.assign = u64::from(op == "=");
+                facts.flags = type_flags(
+                    &value_type(value)?,
+                    flags::RESULT_AGGREGATE,
+                    flags::RESULT_FUNCTION,
+                )? | place_flags(root, &path)?;
+                // `ir_temp` names the value with its substituted type, and
+                // `expr` of the assignment reads the checker's type of
+                // the span.
+                let temp = substitute(
+                    f.values.get(value).ok_or("IR value lacks a type")?,
+                    &self.generic_vars,
+                );
+                if coerces(&temp) {
+                    facts.flags |= flags::RESULT_COERCES;
+                }
+                let statement = crate::numeric::default_type(&substitute(
+                    self.world
+                        .types
+                        .get(&(inst.span.start, inst.span.end))
+                        .unwrap_or(&Type::Infer),
+                    &self.generic_vars,
+                ));
+                if coerces(&statement) {
+                    facts.flags |= flags::STATEMENT_COERCES;
+                }
+                root_plan(root, &mut bits);
+                if self.seq_drop_slot_kind(place).is_some() {
+                    bits |= plan::DROP_SLOT;
+                }
+                if op == "="
+                    && self.drops_enabled()
+                    && self
+                        .exits
+                        .last()
+                        .is_some_and(|t| t.replace.contains(&(block, index)))
+                {
+                    bits |= plan::REPLACES;
+                }
+            }
+            _ => {}
+        }
+        facts.plan = bits;
+        facts.optimize = u64::from(self.operands_only);
+        Ok(facts)
+    }
+    /// Asks the hook of `inst`'s family to emit it with the walk lent
+    /// ([`crate::codegen_swap::walk`]), emitting the places it re-enters
+    /// for. Answers the hook's value, or `None` for the Rust arm; with
+    /// `Some(facts)` second the hook re-entered the whole instruction and
+    /// is asked again after the Rust arm ([`Codegen::walk_resume`]).
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    fn walk_instruction(
+        &mut self,
+        f: &crate::ir::FunctionIr,
+        at: (usize, usize, &crate::ir::Instruction),
+        values: &BTreeMap<crate::ir::ValueId, ir::Value>,
+        ty: &Type,
+        registers: &BTreeMap<crate::ir::ValueId, Variable>,
+        plans: WalkPlans,
+        kept: &mut Vec<u64>,
+    ) -> Result<(Option<ir::Value>, Option<crate::codegen_swap::walk::Facts>), String> {
+        use crate::codegen_swap::walk::{Answer, reentry};
+        let facts = self.walk_facts(f, at, ty, plans)?;
+        for _ in 0..=WALK_REENTRIES {
+            match self.walk_call(f, at, values, ty, registers, &facts, kept)? {
+                Answer::Rust => return Ok((None, None)),
+                Answer::Value(v) => return Ok((Some(v), None)),
+                Answer::Reenter(reentry::INSTRUCTION) => return Ok((None, Some(facts))),
+                Answer::Reenter(kind) => {
+                    let v = self.walk_place(at.2, kind)?;
+                    kept.push(crate::codegen_swap::word(v));
+                }
+            }
+        }
+        Err(format!(
+            "codegen hook re-entered one instruction more than {WALK_REENTRIES} times"
+        ))
+    }
+    /// The hook's answer once the Rust arm emitted the instruction it
+    /// re-entered for, as `value`.
+    #[allow(clippy::too_many_arguments)]
+    fn walk_resume(
+        &mut self,
+        f: &crate::ir::FunctionIr,
+        at: (usize, usize, &crate::ir::Instruction),
+        values: &BTreeMap<crate::ir::ValueId, ir::Value>,
+        ty: &Type,
+        registers: &BTreeMap<crate::ir::ValueId, Variable>,
+        facts: &crate::codegen_swap::walk::Facts,
+        kept: &mut Vec<u64>,
+        value: ir::Value,
+    ) -> Result<ir::Value, String> {
+        use crate::codegen_swap::walk::Answer;
+        kept.push(crate::codegen_swap::word(value));
+        match self.walk_call(f, at, values, ty, registers, facts, kept)? {
+            Answer::Value(v) => Ok(v),
+            other => Err(format!(
+                "codegen hook re-entered an instruction and then answered {other:?}"
+            )),
+        }
+    }
+    /// One call of the hook with the walk lent, its effects applied.
+    #[allow(clippy::too_many_arguments)]
+    fn walk_call(
+        &mut self,
+        f: &crate::ir::FunctionIr,
+        (block, index, inst): (usize, usize, &crate::ir::Instruction),
+        values: &BTreeMap<crate::ir::ValueId, ir::Value>,
+        ty: &Type,
+        registers: &BTreeMap<crate::ir::ValueId, Variable>,
+        facts: &crate::codegen_swap::walk::Facts,
+        kept: &mut Vec<u64>,
+    ) -> Result<crate::codegen_swap::walk::Answer, String> {
+        let maps = WalkMaps {
+            pointers: &self.pointers,
+            narrow: &self.narrow_homes,
+            registers: &self.register_locals,
+            split: &self.split,
+            operands: crate::ir_inline::operands(&inst.op)
+                .iter()
+                .map(|id| registers.get(id).map(|v| v.as_u32()))
+                .collect(),
+        };
+        let (answer, effects) = crate::codegen_swap::walk::instruction(
+            &mut self.b,
+            &mut *self.m,
+            self.world,
+            self.program,
+            (&f.name, block, index, inst),
+            values,
+            ty,
+            facts,
+            &maps,
+            kept,
+        )?;
+        self.walk_apply(f, inst, &effects)?;
+        Ok(answer)
+    }
+    /// Applies a hook's walk effects: the bookkeeping of the Rust helpers
+    /// they stand for.
+    fn walk_apply(
+        &mut self,
+        f: &crate::ir::FunctionIr,
+        inst: &crate::ir::Instruction,
+        effects: &[crate::codegen_swap::walk::Effect],
+    ) -> Result<(), String> {
+        use crate::codegen_swap::walk::Effect;
+        for effect in effects {
+            match *effect {
+                // `use_var`
+                Effect::Used { var, value } => {
+                    let mut info = self.info(value);
+                    if let Some(stored) = self.variable_infos.get(&var) {
+                        info.merge(stored);
+                    }
+                    self.infos.insert(value, info);
+                }
+                // `def_var`
+                Effect::Defined { var, value } => {
+                    let info = self.info(value);
+                    self.variable_infos.entry(var).or_default().merge(&info);
+                }
+                // `store`, and `def_var`'s home store
+                Effect::Stored { pointer, value } => {
+                    let info = self.info(value);
+                    self.write_info(pointer, info);
+                }
+                // `edge_info`, through `jump` and `branch`
+                Effect::Edge {
+                    block,
+                    param,
+                    value,
+                } => {
+                    if block.as_u32() as usize >= self.b.func.dfg.num_blocks() {
+                        return Err(format!("codegen hook named no block {block}"));
+                    }
+                    let p = *self.b.block_params(block).get(param).ok_or_else(|| {
+                        format!("codegen hook named no parameter {param} of {block}")
+                    })?;
+                    let mut info = self.info(p);
+                    info.merge(&self.info(value));
+                    self.infos.insert(p, info);
+                }
+                // `ir_temp`
+                Effect::Temp { operand, var } => {
+                    let id = *crate::ir_inline::operands(&inst.op)
+                        .get(operand)
+                        .ok_or_else(|| format!("codegen hook named no operand {operand}"))?;
+                    let ty = substitute(
+                        f.values.get(&id).ok_or("IR value lacks a type")?,
+                        &self.generic_vars,
+                    );
+                    let name = format!("$ir_value{id}");
+                    self.vars.insert(name.clone(), Variable::from_u32(var));
+                    self.local_types.insert(name, ty);
+                }
+            }
+        }
+        Ok(())
+    }
+    /// The place of a `Read` or `Write`, emitted for a hook's re-entry.
+    fn walk_place(
+        &mut self,
+        inst: &crate::ir::Instruction,
+        kind: u32,
+    ) -> Result<ir::Value, String> {
+        use crate::codegen_swap::walk::reentry;
+        let p = match &inst.op {
+            crate::ir::Op::Read { root, path, .. } => crate::check::Place {
+                root: root.clone(),
+                path: path.clone(),
+            },
+            crate::ir::Op::Write { place, .. } => {
+                let mut parts = place.split('.');
+                crate::check::Place {
+                    root: parts.next().ok_or("empty IR place")?.into(),
+                    path: parts.map(str::to_owned).collect(),
+                }
+            }
+            _ => {
+                return Err("codegen hook re-entered a place of an instruction without one".into());
+            }
+        };
+        let e = ir_place_expr(&p, inst.span.clone());
+        match kind {
+            reentry::PLACE_VALUE => self.expr(&e),
+            reentry::PLACE_ADDRESS => self.address(&e),
+            _ => Err(format!("codegen hook asked for unknown re-entry {kind}")),
+        }
+    }
+    /// A `scalar` family request outside the graph walk (SH4 lane 6,
+    /// #1280), answering one value; `None` emits the Rust code.
+    fn swap_scalar(&mut self, op: u32, args: &[u64]) -> Option<ir::Value> {
+        let results = self.swap_scalar_words(op, args)?;
+        crate::codegen_swap::value_or_record(&results)
+    }
+    /// A `scalar` family request answering its result words.
+    fn swap_scalar_words(&mut self, op: u32, args: &[u64]) -> Option<Vec<u64>> {
+        crate::codegen_swap::request_or_record(
+            crate::codegen_swap::Family::Scalar,
+            &mut self.b,
+            &mut *self.m,
+            self.world,
+            self.program,
+            op,
+            args,
+        )
+    }
+    /// `checked_arithmetic`'s overflow test from the `scalar` hook.
+    fn swap_overflow(
+        &mut self,
+        op: &str,
+        kind: crate::numeric::IntegerKind,
+        a: ir::Value,
+        b: ir::Value,
+    ) -> Option<ir::Value> {
+        use crate::codegen_swap::{scalar, word};
+        let args = [
+            scalar::op_word(op)?,
+            scalar::kind_word(kind)?,
+            word(a),
+            word(b),
+        ];
+        self.swap_scalar(scalar::OVERFLOW, &args)
     }
     /// [`Codegen::swap_aggregate`] for a request answering one value.
     fn swap_value(&mut self, op: u32, args: &[u64]) -> Option<ir::Value> {
@@ -5166,6 +6013,12 @@ impl<M: Module> Codegen<'_, '_, M> {
     /// keeps the parent's span. Synthetic expressions (`0..0`) keep the
     /// enclosing location.
     fn expr(&mut self, e: &Expr) -> Result<ir::Value, String> {
+        // Nested expressions recurse here; see `ir_graph`.
+        stacker::maybe_grow(LOWERING_RED_ZONE, LOWERING_STACK_SEGMENT, || {
+            self.expr_located(e)
+        })
+    }
+    fn expr_located(&mut self, e: &Expr) -> Result<ir::Value, String> {
         if !self.source_locations || e.span.end == 0 {
             return self.expr_at(e);
         }
@@ -5187,6 +6040,7 @@ impl<M: Module> Codegen<'_, '_, M> {
             ExprKind::Literal(l) => match l {
                 Literal::Int(n) if wide_native::is_wide(&self.ty(e)) => self.wide_const(*n),
                 Literal::Int(n) => self.b.ins().iconst(types::I64, *n as i64),
+                Literal::WideInt(n) => self.wide_const(*n as i128),
                 // An f32 literal is the f32 nearest its f64 value
                 // (`vesper.float.ieee754/1`).
                 Literal::Float(n) if self.ty(e).name() == "f32" => self.b.ins().f32const(*n as f32),
@@ -5277,21 +6131,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                     self.expr(base)?
                 };
                 let index = self.expr(index)?;
-                let valid = self
-                    .b
-                    .ins()
-                    .icmp_imm(IntCC::UnsignedLessThan, index, fs.len() as i64);
-                let good = self.b.create_block();
-                let bad = self.b.create_block();
-                self.branch(valid, good, &[], bad, &[]);
-                self.b.switch_to_block(bad);
-                if self.world.partial_ops.contains(&(e.span.start, e.span.end)) {
-                    self.primitive_failure("IndexOutOfBounds")?;
-                    self.jump(good, &[]);
-                } else {
-                    self.b.ins().trap(ir::TrapCode::unwrap_user(2));
-                }
-                self.b.switch_to_block(good);
+                self.index_check(&e.span, index, fs.len() as u64)?;
                 let f = fs.first().ok_or("index into empty tuple")?;
                 let offset = self.b.ins().imul_imm(index, f.layout.size as i64);
                 let address = self.b.ins().iadd(ptr, offset);
@@ -5390,7 +6230,17 @@ impl<M: Module> Codegen<'_, '_, M> {
                         .contains(&(e.span.start, e.span.end))
                 {
                     // Signed MIN and every nonzero unsigned value overflow.
-                    let overflow = if kind.unsigned() {
+                    // SH4 swap point (#1280): the `scalar` hook may emit
+                    // the test of a one-word kind.
+                    let swapped = crate::codegen_swap::scalar::kind_word(kind).and_then(|k| {
+                        self.swap_scalar(
+                            crate::codegen_swap::scalar::NEGATE,
+                            &[k, crate::codegen_swap::word(v)],
+                        )
+                    });
+                    let overflow = if let Some(flag) = swapped {
+                        flag
+                    } else if kind.unsigned() {
                         self.b.ins().icmp_imm(IntCC::NotEqual, v, 0)
                     } else if kind.wide() {
                         let min = self.wide_const(i128::MIN);
@@ -5580,7 +6430,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                         let ptr = self.use_var(var);
                         self.store(ptr, value, &ty)?;
                     } else {
-                        self.def_var(var, value);
+                        self.def_local(var, value);
                         if let Some(destination) = self.pointer(var) {
                             self.store(destination, value, &ty)?;
                         }
@@ -6082,10 +6932,16 @@ impl<M: Module> Codegen<'_, '_, M> {
         if crate::numeric::is_shift(op) && self.world.overflow_ops.contains(&(span.start, span.end))
         {
             // Negative amounts are huge as unsigned lanes.
-            let bad =
-                self.b
-                    .ins()
-                    .icmp_imm(IntCC::UnsignedGreaterThanOrEqual, n, i64::from(kind.bits()));
+            // SH4 swap point (#1280): the `scalar` hook may emit the test.
+            let args = [crate::codegen_swap::word(n), u64::from(kind.bits())];
+            let bad = match self.swap_scalar(crate::codegen_swap::scalar::SHIFT_RANGE, &args) {
+                Some(v) => v,
+                None => self.b.ins().icmp_imm(
+                    IntCC::UnsignedGreaterThanOrEqual,
+                    n,
+                    i64::from(kind.bits()),
+                ),
+            };
             self.check_overflow(bad)?;
         }
         if let Some(r) = self.wide_shift_const(op, kind, a, n) {
@@ -6246,6 +7102,16 @@ impl<M: Module> Codegen<'_, '_, M> {
             return Err("native parallel_for data is not one word".into());
         }
         let n = self.expr(&args[1].expr)?;
+        // SH4 swap point (#1285): the `numeric` hook may emit the runtime
+        // call (`codegen_swap::numeric::PARALLEL_FOR`).
+        let words = [
+            u64::from(fun.as_u32()),
+            crate::codegen_swap::word(data),
+            crate::codegen_swap::word(n),
+        ];
+        if let Some(v) = self.swap_numeric(crate::codegen_swap::numeric::PARALLEL_FOR, &words) {
+            return Ok(Some(v));
+        }
         let pointer = self.b.ins().func_addr(types::I64, fun);
         let mut runtime = self.m.make_signature();
         runtime.params.extend([word, word, word]);
@@ -6295,8 +7161,16 @@ impl<M: Module> Codegen<'_, '_, M> {
         let flags = ir::MemFlags::trusted();
         // `Atomic { cell }` -> sequence header `{len, cap, data}` -> element.
         let receiver = self.expr(&args[0].expr)?;
-        let handle = self.b.ins().load(types::I64, flags, receiver, 0);
-        let data = self.b.ins().load(types::I64, flags, handle, 16);
+        // SH4 swap point (#1285): the `numeric` hook may emit the element
+        // address and the operation (`codegen_swap::numeric::ATOMIC_*`).
+        use crate::codegen_swap::{numeric as n, word};
+        let data = match self.swap_numeric(n::ATOMIC_CELL, &[word(receiver)]) {
+            Some(data) => data,
+            None => {
+                let handle = self.b.ins().load(types::I64, flags, receiver, 0);
+                self.b.ins().load(types::I64, flags, handle, 16)
+            }
+        };
         let mut operands = vec![];
         for a in &args[1..1 + op.values()] {
             let v = self.expr(&a.expr)?;
@@ -6315,6 +7189,30 @@ impl<M: Module> Codegen<'_, '_, M> {
                 c.b.ins().uextend(types::I64, v)
             }
         };
+        let swap_op = match op {
+            A::Load => Some(n::ATOMIC_LOAD),
+            A::Store => Some(n::ATOMIC_STORE),
+            A::Swap => Some(n::ATOMIC_SWAP),
+            A::FetchAdd => Some(n::ATOMIC_ADD),
+            A::FetchSub => Some(n::ATOMIC_SUB),
+            A::FetchAnd => Some(n::ATOMIC_AND),
+            A::FetchOr => Some(n::ATOMIC_OR),
+            A::FetchXor => Some(n::ATOMIC_XOR),
+            // The Cranelift shim has no `atomic_cas` yet.
+            A::CompareExchange => None,
+        };
+        if let Some(code) = swap_op {
+            let mut words = vec![
+                code,
+                crate::codegen_swap::ty_code(narrow),
+                u64::from(signed),
+                word(data),
+            ];
+            words.extend(operands.iter().map(|v| word(*v)));
+            if let Some(v) = self.swap_numeric(n::ATOMIC, &words) {
+                return Ok(v);
+            }
+        }
         let rmw = match op {
             A::Load => {
                 let v = self.b.ins().atomic_load(narrow, flags, data);
@@ -6381,7 +7279,22 @@ impl<M: Module> Codegen<'_, '_, M> {
             Conversion::Widen => Ok(v),
             Conversion::Wrapping => Ok(self.coerce(v, Some(&to.ty()))),
             Conversion::Narrow => {
-                if self.world.overflow_ops.contains(&(span.start, span.end)) {
+                // SH4 swap point (#1280): the `scalar` hook may emit the
+                // bounds test (a decline when there is none to emit).
+                let swapped = if self.world.overflow_ops.contains(&(span.start, span.end)) {
+                    use crate::codegen_swap::scalar;
+                    match (scalar::kind_word(from), scalar::kind_word(to)) {
+                        (Some(f), Some(t)) => {
+                            self.swap_scalar(scalar::NARROW, &[f, t, crate::codegen_swap::word(v)])
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                if let Some(overflow) = swapped {
+                    self.check_overflow(overflow)?;
+                } else if self.world.overflow_ops.contains(&(span.start, span.end)) {
                     let (low, high) = if from.unsigned() {
                         // The lane is the value as a u64; the target
                         // minimum is at most 0.
@@ -6448,7 +7361,10 @@ impl<M: Module> Codegen<'_, '_, M> {
         if kind.wide() {
             return self.wide_checked(op, kind, a, b);
         }
+        // SH4 swap point (#1280): the `scalar` hook may emit the test.
+        let swapped = self.swap_overflow(op, kind, a, b);
         let overflow = match (op, kind) {
+            _ if swapped.is_some() => swapped,
             ("+" | "-" | "*", K::I8 | K::I16 | K::I32) => {
                 // Exact in 64 bits; overflow iff the result leaves the kind.
                 let r = match op {
@@ -6572,7 +7488,12 @@ impl<M: Module> Codegen<'_, '_, M> {
         Ok(())
     }
     fn check_divisor(&mut self, divisor: ir::Value) -> Result<(), String> {
-        let nonzero = self.b.ins().icmp_imm(IntCC::NotEqual, divisor, 0);
+        // SH4 swap point (#1280): the `scalar` hook may emit the test.
+        let args = [crate::codegen_swap::word(divisor)];
+        let nonzero = match self.swap_scalar(crate::codegen_swap::scalar::DIVISOR, &args) {
+            Some(v) => v,
+            None => self.b.ins().icmp_imm(IntCC::NotEqual, divisor, 0),
+        };
         let good = self.b.create_block();
         let bad = self.b.create_block();
         self.branch(nonzero, good, &[], bad, &[]);
@@ -6756,6 +7677,8 @@ impl<M: Module> Codegen<'_, '_, M> {
         site: &Expr,
         into: Option<ir::Value>,
     ) -> Result<ir::Value, String> {
+        // A caller that keeps this call's enum result as words (#1330).
+        let scalar_request = self.scalar_enums.request.take();
         if name == crate::integer_widths::MUL_WIDE && args.len() == 2 {
             // The reserved prelude product (`integer_widths`): `(low, high)`.
             let a = self.expr(&args[0].expr)?;
@@ -7006,6 +7929,10 @@ impl<M: Module> Codegen<'_, '_, M> {
                 };
                 let var = self.b.declare_var(self.b.func.dfg.value_type(value));
                 self.def_var(var, value);
+                self.bound_params.insert(var.as_u32());
+                if p.pass == Pass::In && self.scalar_enums.invariant_pointers.contains(&value) {
+                    self.scalar_enums.invariant_roots.insert(var.as_u32());
+                }
                 self.vars.insert(p.name.clone(), var);
                 self.local_types.insert(p.name.clone(), p.ty.clone());
                 if p.pass == Pass::Inout && !Layout::of(self.world, &p.ty)?.aggregate() {
@@ -7013,24 +7940,47 @@ impl<M: Module> Codegen<'_, '_, M> {
                 }
             }
             self.inline_depth += 1;
+            // An enum result the caller keeps as words reaches the join as
+            // its words, not through storage (#1330).
+            let words = scalar_request.filter(|s| {
+                into.is_none() && aggregates::enum_shape(self.world, &f.result).as_ref() == Some(s)
+            });
+            let mut joined_words = None;
             let result = (|| {
                 let join = self.b.create_block();
-                self.b.append_block_param(
-                    join,
-                    if result_layout.aggregate() {
-                        self.m.target_config().pointer_type()
-                    } else {
-                        scalar(&f.result, &[])?
-                    },
-                );
+                if let Some(shape) = &words {
+                    for t in &shape.words {
+                        self.b.append_block_param(join, scalar(t, &[])?);
+                    }
+                } else {
+                    self.b.append_block_param(
+                        join,
+                        if result_layout.aggregate() {
+                            self.m.target_config().pointer_type()
+                        } else {
+                            scalar(&f.result, &[])?
+                        },
+                    );
+                }
                 let graph = self
                     .program
                     .functions
                     .get(name)
                     .ok_or("effectful function lacks IR")?
                     .clone();
-                self.ir_graph(&graph, None, Some(join))?;
+                self.scalar_enums.join = words.clone();
+                let lowered = self.ir_graph(&graph, None, Some(join));
+                self.scalar_enums.join = None;
+                lowered?;
                 self.b.switch_to_block(join);
+                if words.is_some() {
+                    joined_words = Some(self.b.block_params(join).to_vec());
+                    return Ok::<_, String>(
+                        self.b
+                            .ins()
+                            .iconst(self.m.target_config().pointer_type(), 0),
+                    );
+                }
                 Ok::<_, String>(self.b.block_params(join)[0])
             })();
             self.inline_depth -= 1;
@@ -7045,6 +7995,10 @@ impl<M: Module> Codegen<'_, '_, M> {
             self.seq_element_writeback(writebacks)?;
             for lent in self.sink_blocks.split_off(lent) {
                 self.free_sink_block(lent)?;
+            }
+            if joined_words.is_some() {
+                self.scalar_enums.result = joined_words;
+                return Ok(result);
             }
             match into {
                 Some(out) if result_layout.aggregate() => {

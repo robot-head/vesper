@@ -1,6 +1,7 @@
 // Integer literal values as the type arena keeps them: a sign and a u64
-// magnitude (`Types::literal`; Rust holds an `i128`, which waits on SH2
-// lane 2). `numeric::IntegerKind::{fits, default_for}` over that form.
+// magnitude (`Types::literal`; Rust holds an `i128`, which can be wider).
+// `numeric::IntegerKind::{fits, default_for}` over that form, including
+// the 128-bit kinds.
 
 use @vesper/check-data::world::{
     Known
@@ -62,6 +63,8 @@ pub fn int_bits(k: Known, s: u32) -> u32 {
         16
     } else if s == k.u32_ || s == k.i32_ {
         32
+    } else if s == k.i128_ || s == k.u128_ {
+        128
     } else if k.is_integer(s) {
         64
     } else {
@@ -70,7 +73,7 @@ pub fn int_bits(k: Known, s: u32) -> u32 {
 }
 
 pub fn int_unsigned(k: Known, s: u32) -> bool {
-    s == k.u8_ || s == k.u16_ || s == k.u32_ || s == k.u64_ || s == k.usize_
+    s == k.u8_ || s == k.u16_ || s == k.u32_ || s == k.u64_ || s == k.usize_ || s == k.u128_
 }
 
 // `IntegerKind::fits` for kind `s` (an integer name symbol).
@@ -83,10 +86,14 @@ pub fn fits(k: Known, s: u32, v: Lit) -> bool {
         if v.neg {
             return false;
         }
-        if bits == 64 {
+        if bits >= 64 {
             return true;
         }
         return v.mag <= wrapping_sub(wrapping_shl_u64(1, bits), 1);
+    }
+    // Every u64 magnitude fits a 128-bit kind.
+    if bits == 128 {
+        return true;
     }
     let half = wrapping_shl_u64(1, wrapping_sub(bits, 1));
     if v.neg {
@@ -96,11 +103,24 @@ pub fn fits(k: Known, s: u32, v: Lit) -> bool {
     }
 }
 
-// `IntegerKind::default_for(n).fits(m)`: u64 above i64::MAX, else i64.
+// `IntegerKind::default_for(n).fits(m)`.
 pub fn default_fits(k: Known, n: Lit, m: Lit) -> bool {
+    fits(k, default_of(k, n), m)
+}
+
+// `n < i64::MIN as i128`: a magnitude past 2^63, negated.
+pub fn below_i64(a: Lit) -> bool {
+    a.neg && a.mag > wrapping_add(I64_MAX, 1)
+}
+
+// `IntegerKind::default_for(n)`: u64 above i64::MAX, i128 below i64::MIN
+// (a kept magnitude never passes u64::MAX), else i64.
+pub fn default_of(k: Known, n: Lit) -> u32 {
     if above_i64(n) {
-        fits(k, k.u64_, m)
+        k.u64_
+    } else if below_i64(n) {
+        k.i128_
     } else {
-        fits(k, k.i64_, m)
+        k.i64_
     }
 }

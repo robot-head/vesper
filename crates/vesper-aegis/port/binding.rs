@@ -48,12 +48,12 @@ unsafe extern "C" {
     fn vesper_aegis_seq_new(capacity: i64, stride: i64) -> i64;
     fn vesper_aegis_seq_free(seq: i64) -> i64;
     fn vesper_aegis_live_allocations() -> i64;
-    fn vesper_aegis_claims_wire_decode(b: *mut u64, w: *mut u64, d: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_aegis_claims_wire_decode(b: *mut u64, w: *mut u64, fail: *mut u64) -> i64;
     fn vesper_aegis_iso8601_utc_to_unix(result: *mut u64, s: *mut u64) -> i64;
-    fn vesper_aegis_sgx_parse(b: *mut u64, mode: i64, w: *mut u64, d: *mut u64, fail: *mut u64) -> i64;
-    fn vesper_aegis_snp_etcb_parse(b: *mut u64, d: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_aegis_sgx_parse(b: *mut u64, mode: i64, w: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_aegis_snp_etcb_parse(b: *mut u64, w: *mut u64, fail: *mut u64) -> i64;
     fn vesper_aegis_snp_parse(b: *mut u64, w: *mut u64, d: *mut u64, fail: *mut u64) -> i64;
-    fn vesper_aegis_tdx_parse(b: *mut u64, mode: i64, w: *mut u64, d: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_aegis_tdx_parse(b: *mut u64, mode: i64, w: *mut u64, fail: *mut u64) -> i64;
     fn vesper_aegis_verify_attestation_claims(cw: *mut u64, cb: *mut u64, pw: *mut u64, pb: *mut u64, expected: *mut u64, fail: *mut u64) -> i64;
 }
 
@@ -70,12 +70,12 @@ pub fn live_allocations() -> i64 {
 }
 
 /// Calls `claims_wire_decode` of the Vesper library `aegis` (`vesper_aegis_claims_wire_decode`).
-pub fn claims_wire_decode(b: &[u8], w: &mut Vec<u64>, d: &mut Vec<u8>) -> Result<(), AErr> {
+pub fn claims_wire_decode(b: &[u8], w: &mut [u64]) -> Result<(), AErr> {
     let mut fail = [0u64; 6];
     // SAFETY: `vesper_aegis_claims_wire_decode` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = vesper_port_abi::with_slice(b, |view_b| vesper_port_abi::with_seq_mut(RUNTIME, w, |seq_w| vesper_port_abi::with_seq_mut(RUNTIME, d, |seq_d| unsafe { vesper_aegis_claims_wire_decode(view_b, seq_w, seq_d, fail.as_mut_ptr()) })));
+    let raw = vesper_port_abi::with_slice(b, |view_b| vesper_port_abi::with_slice_mut(w, |view_w| unsafe { vesper_aegis_claims_wire_decode(view_b, view_w, fail.as_mut_ptr()) }));
     match fail[0] {
         0 => Ok({ let _ = raw; }),
         1 => Err(<AErr as Abi>::get(&fail[1..])),
@@ -94,12 +94,12 @@ pub fn iso8601_utc_to_unix(s: &[u8]) -> Option<u64> {
 }
 
 /// Calls `sgx_parse` of the Vesper library `aegis` (`vesper_aegis_sgx_parse`).
-pub fn sgx_parse(b: &[u8], mode: u64, w: &mut Vec<u64>, d: &mut Vec<u8>) -> Result<u64, AErr> {
+pub fn sgx_parse(b: &[u8], mode: u64, w: &mut [u64]) -> Result<u64, AErr> {
     let mut fail = [0u64; 6];
     // SAFETY: `vesper_aegis_sgx_parse` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = vesper_port_abi::with_slice(b, |view_b| vesper_port_abi::with_seq_mut(RUNTIME, w, |seq_w| vesper_port_abi::with_seq_mut(RUNTIME, d, |seq_d| unsafe { vesper_aegis_sgx_parse(view_b, mode as i64, seq_w, seq_d, fail.as_mut_ptr()) })));
+    let raw = vesper_port_abi::with_slice(b, |view_b| vesper_port_abi::with_slice_mut(w, |view_w| unsafe { vesper_aegis_sgx_parse(view_b, mode as i64, view_w, fail.as_mut_ptr()) }));
     match fail[0] {
         0 => Ok(raw as u64),
         1 => Err(<AErr as Abi>::get(&fail[1..])),
@@ -108,12 +108,12 @@ pub fn sgx_parse(b: &[u8], mode: u64, w: &mut Vec<u64>, d: &mut Vec<u8>) -> Resu
 }
 
 /// Calls `snp_etcb_parse` of the Vesper library `aegis` (`vesper_aegis_snp_etcb_parse`).
-pub fn snp_etcb_parse(b: &[u8], d: &mut Vec<u8>) -> Result<(), AErr> {
+pub fn snp_etcb_parse(b: &[u8], w: &mut [u64]) -> Result<(), AErr> {
     let mut fail = [0u64; 6];
     // SAFETY: `vesper_aegis_snp_etcb_parse` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = vesper_port_abi::with_slice(b, |view_b| vesper_port_abi::with_seq_mut(RUNTIME, d, |seq_d| unsafe { vesper_aegis_snp_etcb_parse(view_b, seq_d, fail.as_mut_ptr()) }));
+    let raw = vesper_port_abi::with_slice(b, |view_b| vesper_port_abi::with_slice_mut(w, |view_w| unsafe { vesper_aegis_snp_etcb_parse(view_b, view_w, fail.as_mut_ptr()) }));
     match fail[0] {
         0 => Ok({ let _ = raw; }),
         1 => Err(<AErr as Abi>::get(&fail[1..])),
@@ -122,12 +122,12 @@ pub fn snp_etcb_parse(b: &[u8], d: &mut Vec<u8>) -> Result<(), AErr> {
 }
 
 /// Calls `snp_parse` of the Vesper library `aegis` (`vesper_aegis_snp_parse`).
-pub fn snp_parse(b: &[u8], w: &mut Vec<u64>, d: &mut Vec<u8>) -> Result<(), AErr> {
+pub fn snp_parse(b: &[u8], w: &mut [u64], d: &mut [u8]) -> Result<(), AErr> {
     let mut fail = [0u64; 6];
     // SAFETY: `vesper_aegis_snp_parse` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = vesper_port_abi::with_slice(b, |view_b| vesper_port_abi::with_seq_mut(RUNTIME, w, |seq_w| vesper_port_abi::with_seq_mut(RUNTIME, d, |seq_d| unsafe { vesper_aegis_snp_parse(view_b, seq_w, seq_d, fail.as_mut_ptr()) })));
+    let raw = vesper_port_abi::with_slice(b, |view_b| vesper_port_abi::with_slice_mut(w, |view_w| vesper_port_abi::with_slice_mut(d, |view_d| unsafe { vesper_aegis_snp_parse(view_b, view_w, view_d, fail.as_mut_ptr()) })));
     match fail[0] {
         0 => Ok({ let _ = raw; }),
         1 => Err(<AErr as Abi>::get(&fail[1..])),
@@ -136,12 +136,12 @@ pub fn snp_parse(b: &[u8], w: &mut Vec<u64>, d: &mut Vec<u8>) -> Result<(), AErr
 }
 
 /// Calls `tdx_parse` of the Vesper library `aegis` (`vesper_aegis_tdx_parse`).
-pub fn tdx_parse(b: &[u8], mode: u64, w: &mut Vec<u64>, d: &mut Vec<u8>) -> Result<u64, AErr> {
+pub fn tdx_parse(b: &[u8], mode: u64, w: &mut [u64]) -> Result<u64, AErr> {
     let mut fail = [0u64; 6];
     // SAFETY: `vesper_aegis_tdx_parse` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = vesper_port_abi::with_slice(b, |view_b| vesper_port_abi::with_seq_mut(RUNTIME, w, |seq_w| vesper_port_abi::with_seq_mut(RUNTIME, d, |seq_d| unsafe { vesper_aegis_tdx_parse(view_b, mode as i64, seq_w, seq_d, fail.as_mut_ptr()) })));
+    let raw = vesper_port_abi::with_slice(b, |view_b| vesper_port_abi::with_slice_mut(w, |view_w| unsafe { vesper_aegis_tdx_parse(view_b, mode as i64, view_w, fail.as_mut_ptr()) }));
     match fail[0] {
         0 => Ok(raw as u64),
         1 => Err(<AErr as Abi>::get(&fail[1..])),

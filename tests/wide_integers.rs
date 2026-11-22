@@ -567,7 +567,9 @@ fn main() -> (u128, u128, u64) {{ handle Fail[RuntimeError] in {{ f() }} with {{
 }
 
 #[test]
-fn export_abi_refuses_wide_integers() {
+fn export_abi_passes_wide_integers_by_pointer() {
+    // SH4 lane 3 (#1277) gave 128-bit integers a two-word export cell;
+    // tests/wide_aggregates_export.rs drives it from C.
     use vesper::native::export::{LibraryOptions, compile_source};
     let options = LibraryOptions {
         library: "wide",
@@ -578,11 +580,11 @@ fn export_abi_refuses_wide_integers() {
         "pub fn f(a: i128) -> u64 { wrapping_u64(a) }",
         "pub fn f(a: u64) -> u128 { widen_u128(a) }",
     ] {
-        let error = compile_source("wide.ves", source, &options)
-            .err()
-            .unwrap_or_else(|| panic!("exported {source}"))
-            .to_string();
-        assert!(error.contains("128-bit integer"), "{source}: {error}");
+        let interface = compile_source("wide.ves", source, &options)
+            .unwrap_or_else(|e| panic!("{source}: {e}"))
+            .interface;
+        let f = &interface.functions[0];
+        assert!(f.result_pointer || f.params[0].pointer, "{source}: {f:?}");
     }
 }
 

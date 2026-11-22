@@ -939,11 +939,7 @@ impl KafkaSource {
         start: &[(i64, u64)],
         ends: &[i64],
     ) -> Result<(TickInput, Vec<u64>, Vec<KafkaRecord>), Error> {
-        let mut acc: Vec<Accumulator> = self
-            .widths
-            .iter()
-            .map(|w| Accumulator::new(*w, self.limits))
-            .collect::<Result<_, _>>()?;
+        let mut acc = Accumulator::new(&self.widths, self.limits)?;
         let mut budget = Budget::new(self.limits);
         let mut stats = self.stats.get();
         let mut lsns = Vec::with_capacity(start.len());
@@ -979,16 +975,18 @@ impl KafkaSource {
                     return Err(Error::Cdc("source offset"));
                 }
                 next = next.checked_add(1).ok_or(Error::Overflow)?;
-                acc[binding.input].add(&row, i128::from(header.z_weight), &mut budget)?;
+                acc.add(
+                    binding.input,
+                    &row,
+                    i128::from(header.z_weight),
+                    &mut budget,
+                )?;
             }
             lsns.push(next);
         }
         stats.decoded += 1;
         self.stats.set(stats);
-        let deltas = acc
-            .into_iter()
-            .map(Accumulator::finish)
-            .collect::<Result<Vec<_>, _>>()?;
+        let deltas = acc.finish()?;
         if deltas
             .iter()
             .any(|d| d.len() > self.limits.max_input_entries)

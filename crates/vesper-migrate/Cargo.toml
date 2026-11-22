@@ -2,6 +2,7 @@
 name = "vesper-migrate"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
 description = "vesper migrate: C header and Rust crate signature lifting to Bridge sys-specs, Vesper externs and differential shadowing"
 
 [dependencies]

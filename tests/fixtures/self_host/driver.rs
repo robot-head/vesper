@@ -417,6 +417,24 @@ pub(super) fn fixtures() -> Vec<PathBuf> {
                     || path.ends_with("packages/vesper-wasm-backend")
                     // SH5 lane 11 (#1334): the wit-component port too.
                     || path.ends_with("packages/vesper-wit-component")
+                    // SH5 lane 17 (#1340): the LSP features package exports
+                    // with `pub fn` and imports with `use` (#880).
+                    || path.ends_with("packages/vesper-lsp-features")
+                    // SH5 lane 16 (#1339): the LSP and memo packages export
+                    // with `pub fn` and import with `use` (#880).
+                    || path.ends_with("packages/vesper-lsp")
+                    || path.ends_with("packages/vesper-memo")
+                    // SH2 lane 10 (#1182): `pub fn` items, which the Stage 1
+                    // parser reads with a different tree (out.ves has no
+                    // loops, so the loop filter below keeps it).
+                    || path.ends_with("packages/vesper-check-loops-atomics")
+                    // SH5 lane 14 (#1337): `use` (#880) and `pub fn`.
+                    || path.ends_with("packages/vesper-test-runner")
+                    // SH4 lane 17 (#1291): `use` (#880) and const items.
+                    || path.ends_with("packages/vesper-backend-checks")
+                    // SH5 lane 1 (#1324): `use` (#880) and `pub const`.
+                    || path.ends_with("packages/vesper-codegen-base/walk")
+                    || path.ends_with("crates/vesper-codegen-swap-test/walk-demo")
                 {
                     continue;
                 }

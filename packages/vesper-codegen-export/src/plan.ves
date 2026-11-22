@@ -1,0 +1,2220 @@
+// The export interface planner (src/native_export.rs `plan_with`): which
+// public functions a library exports, the ABI type of every parameter and
+// result, the declarations of the types they reach, and the refusals.
+//
+// The checker's answers about each type (its class, mode, layout and
+// declaration) come with the input (tests/self_host_codegen_export/
+// plan_words.rs, which documents the words); every decision here is the
+// Rust planner's, in its order, so the refusals come out alike.
+//
+// `plan_words` is the entry: the answer is a status word, then the
+// interface or the refusals (`write_plan`).
+
+use @vesper/check-data::util::{
+    inc,
+    n32,
+    u32_at,
+    u64_at,
+    u8_at,
+    w
+};
+use @vesper/check-data::input::Reader;
+use @vesper/check-data::names::{
+    Names,
+    names_new
+};
+
+// Type classes (plan_words.rs `C_*`).
+const C_OTHER: u8 = 0;
+const C_TUPLE: u8 = 1;
+const C_SCALAR: u8 = 2;
+const C_WIDE: u8 = 3;
+const C_SEQ: u8 = 4;
+const C_SLICE: u8 = 5;
+const C_STRING: u8 = 6;
+const C_STR: u8 = 7;
+const C_BOX: u8 = 8;
+const C_NAMED: u8 = 9;
+const C_EXTERN: u8 = 10;
+
+// ABI type kinds (words.rs `K_*`).
+const K_SCALAR: u8 = 0;
+const K_TUPLE: u8 = 1;
+const K_NAMED: u8 = 2;
+const K_SEQ: u8 = 3;
+const K_SLICE: u8 = 4;
+const K_BOX: u8 = 5;
+const K_STR: u8 = 6;
+const K_OBJECT: u8 = 7;
+const K_EXTERN: u8 = 8;
+
+const M_COPY: u8 = 0;
+const M_LINEAR: u8 = 2;
+
+// Passing modes: the input's (0 in, 1 inout, 2 sink); the output's raw
+// `pass` field is 0 for none, else one more.
+const PASS_IN: u8 = 0;
+const PASS_INOUT: u8 = 1;
+const PASS_SINK: u8 = 2;
+
+// Positions (`Position`): a parameter's pass, then these.
+const POS_RESULT: u8 = 3;
+const POS_ERROR: u8 = 4;
+
+// `ExportError` kinds (plan_words.rs `Dec::error`).
+const E_LIBRARY_NAME: u8 = 0;
+const E_NO_EXPORTS: u8 = 1;
+const E_GENERIC: u8 = 2;
+const E_EFFECT: u8 = 3;
+const E_TYPE: u8 = 4;
+const E_INSTANCE: u8 = 5;
+const E_COMPILE: u8 = 6;
+
+const MIRROR_NONE: u8 = 0;
+const MIRROR_REPR_C: u8 = 1;
+const MIRROR_CONVERTED: u8 = 2;
+
+// A failed step's answer; the refusal is in `Planner::pending`.
+const FAIL: u32 = 4294967295;
+
+// One input type.
+copy struct TNode {
+    disp: u32,
+    class: u8,
+    name: u32,
+    flag: bool,
+    // A boxed object's display.
+    inner: u32,
+    mode: u8,
+    // tkids[a..a+n]
+    a: u64,
+    n: u64,
+    has_adt: bool,
+    generics: u64,
+    tiled: bool,
+    is_enum: bool,
+    // adt_vars[va..va+vn]
+    va: u64,
+    vn: u64,
+    lok: bool,
+    lreason: u32,
+    size: u64,
+    aggregate: bool,
+    // 0 scalar, 1 product, 2 enum
+    lkind: u8,
+    // lvars[la..la+ln]
+    la: u64,
+    ln: u64,
+}
+
+copy struct LVar {
+    name: u32,
+    // lfields[fa..fa+fc]
+    fa: u64,
+    fc: u64,
+}
+
+copy struct LField {
+    name: u32,
+    ty: u32,
+    offset: u64,
+}
+
+copy struct EffIn {
+    name: u32,
+    labeled: bool,
+    // eff_args[a..a+n]
+    a: u64,
+    n: u64,
+}
+
+copy struct ParamIn {
+    name: u32,
+    pass: u8,
+    ty: u32,
+}
+
+copy struct FnIn {
+    name: u32,
+    generated: bool,
+    public: bool,
+    generics: bool,
+    dyn_param: u32,
+    // symbol + 1, 0 for none
+    dyn_trait: u32,
+    tail: u32,
+    // effs[ea..ea+en]
+    ea: u64,
+    en: u64,
+    caller_slot: bool,
+    // params_in[pa..pa+pn]
+    pa: u64,
+    pn: u64,
+    result: u32,
+}
+
+copy struct VsysIn {
+    library: u32,
+    handler: u32,
+    // vsys_syms[sa..sa+sn]
+    sa: u64,
+    sn: u64,
+    // symbol + 1, 0 for none
+    rust_path: u32,
+}
+
+copy struct InstIn {
+    function: u32,
+    alias: u32,
+    spelling: u32,
+}
+
+// One ABI type node of the answer.
+copy struct ANode {
+    kind: u8,
+    name: u32,
+    owned: bool,
+    // akids[a..a+n]
+    a: u64,
+    n: u64,
+}
+
+copy struct Decl {
+    name: u32,
+    is_enum: bool,
+    words: u64,
+    is_handle: bool,
+    linear: bool,
+    // symbol + 1, 0 for none
+    drop: u32,
+    owns_sequence: bool,
+    mirror: u8,
+    reason: u32,
+    // dvars[va..va+vn]
+    va: u64,
+    vn: u64,
+}
+
+copy struct DVar {
+    name: u32,
+    // dfields[fa..fa+fc]
+    fa: u64,
+    fc: u64,
+}
+
+copy struct DField {
+    name: u32,
+    ty: u32,
+    offset: u64,
+}
+
+copy struct POut {
+    name: u32,
+    ty: u32,
+    pointer: bool,
+    // 0 none, else the pass + 1
+    raw: u8,
+    in_place: bool,
+}
+
+copy struct FnOut {
+    name: u32,
+    symbol: u32,
+    // pouts[pa..pa+pn]
+    pa: u64,
+    pn: u64,
+    result: u32,
+    result_words: u64,
+    result_pointer: bool,
+    // errs[ea..ea+en]
+    ea: u64,
+    en: u64,
+    // fail record words + 1, 0 for none
+    fail: u64,
+    // symbol + 1, 0 for none
+    instance_of: u32,
+    // fn_libs[la..la+ln]
+    la: u64,
+    ln: u64,
+    result_in_place: bool,
+}
+
+copy struct Refusal {
+    kind: u8,
+    a: u32,
+    b: u32,
+    c: u32,
+}
+
+struct Planner {
+    names: Names,
+    library: u32,
+    prefix: u32,
+    abi: u64,
+    option_mirrors: bool,
+    vsys: ChunkSeq[VsysIn],
+    vsys_syms: ChunkSeq[u32],
+    insts: ChunkSeq[InstIn],
+    nodes: ChunkSeq[TNode],
+    tkids: ChunkSeq[u32],
+    adt_vars: ChunkSeq[u32],
+    lvars: ChunkSeq[LVar],
+    lfields: ChunkSeq[LField],
+    fns: ChunkSeq[FnIn],
+    effs: ChunkSeq[EffIn],
+    eff_args: ChunkSeq[u32],
+    params_in: ChunkSeq[ParamIn],
+    // The answer.
+    anodes: ChunkSeq[ANode],
+    akids: ChunkSeq[u32],
+    decls: ChunkSeq[Decl],
+    // symbol -> decl index + 1
+    decl_by: ChunkSeq[u32],
+    dvars: ChunkSeq[DVar],
+    dfields: ChunkSeq[DField],
+    outs: ChunkSeq[FnOut],
+    pouts: ChunkSeq[POut],
+    errs: ChunkSeq[u32],
+    fn_libs: ChunkSeq[u32],
+    refusals: ChunkSeq[Refusal],
+    pending: Refusal,
+    v2: bool,
+    v4: bool,
+    // Symbols the planner compares against.
+    s_unit: u32,
+    s_fail: u32,
+    s_in: u32,
+    s_inout: u32,
+    s_sink: u32,
+    s_option: u32,
+    s_result: u32,
+    s_arith: u32,
+    s_runtime: u32,
+}
+
+fn tnode_none() -> TNode {
+    TNode {
+        disp: 0,
+        class: 0,
+        name: 0,
+        flag: false,
+        inner: 0,
+        mode: 0,
+        a: 0,
+        n: 0,
+        has_adt: false,
+        generics: 0,
+        tiled: false,
+        is_enum: false,
+        va: 0,
+        vn: 0,
+        lok: false,
+        lreason: 0,
+        size: 0,
+        aggregate: false,
+        lkind: 0,
+        la: 0,
+        ln: 0
+    }
+}
+
+fn anode_none() -> ANode {
+    ANode {
+        kind: 0,
+        name: 0,
+        owned: false,
+        a: 0,
+        n: 0
+    }
+}
+
+fn decl_none() -> Decl {
+    Decl {
+        name: 0,
+        is_enum: false,
+        words: 0,
+        is_handle: false,
+        linear: false,
+        drop: 0,
+        owns_sequence: false,
+        mirror: 0,
+        reason: 0,
+        va: 0,
+        vn: 0
+    }
+}
+
+fn flag(x: u64) -> bool {
+    x != 0
+}
+
+// A length-prefixed string of the input, interned.
+fn read_str(inout r: Reader, in b: Slice[u8], inout names: Names) -> u32 {
+    let len = r.word(in b);
+    let start = r.pos;
+    let s = names.intern(in b[start..wrapping_add(start, len)]);
+    r.pos = wrapping_add(start, wrapping_mul(wrapping_add(len, 7) / 8, 8));
+    s
+}
+
+fn read_opt(inout r: Reader, in b: Slice[u8], inout names: Names) -> u32 {
+    if r.word(in b) == 0 {
+        0
+    } else {
+        let s = read_str(inout r, in b, inout names);
+        wrapping_add(s, 1)
+    }
+}
+
+fn intern_text(inout names: Names, in s: Str) -> u32 {
+    names.intern(in s.as_bytes())
+}
+
+fn intern_buf(inout names: Names, in o: ChunkSeq[u8]) -> u32 {
+    names.intern(in o.as_slice())
+}
+
+fn put(inout o: ChunkSeq[u8], in s: Str) {
+    let b = s.as_bytes();
+    for i in 0..b.len() {
+        let c = match b.try_get(i) {
+            Option::Some(c) => c,
+            Option::None => 0,
+        };
+        o.push(c);
+    }
+}
+
+fn put_sym(inout o: ChunkSeq[u8], in names: Names, s: u32) {
+    let n = names.size(s);
+    for i in 0..n {
+        o.push(names.byte(s, i));
+    }
+}
+
+fn put_u64(inout o: ChunkSeq[u8], v: u64) {
+    if v >= 10 {
+        put_u64(inout o, v / 10);
+    }
+    o.push(wrapping_u8(wrapping_add(v % 10, 48)));
+}
+
+pub fn read_planner(in b: Slice[u8]) -> Planner {
+    let mut r = Reader {
+        pos: 0
+    };
+    let mut names = names_new();
+    let library = read_str(inout r, in b, inout names);
+    let prefix = read_str(inout r, in b, inout names);
+    let abi = r.word(in b);
+    let option_mirrors = flag(r.word(in b));
+    let mut vsys = ChunkSeq::new[VsysIn]();
+    let mut vsys_syms = ChunkSeq::new[u32]();
+    let nv = r.word(in b);
+    for i in 0..nv {
+        let lib = read_str(inout r, in b, inout names);
+        let handler = read_str(inout r, in b, inout names);
+        let sa = vsys_syms.len();
+        let sn = r.word(in b);
+        for j in 0..sn {
+            let s = read_str(inout r, in b, inout names);
+            vsys_syms.push(s);
+        }
+        let rust_path = read_opt(inout r, in b, inout names);
+        vsys
+            .push(
+            VsysIn {
+                library: lib,
+                handler: handler,
+                sa: sa,
+                sn: sn,
+                rust_path: rust_path
+            }
+        );
+    }
+    let mut insts = ChunkSeq::new[InstIn]();
+    let ni = r.word(in b);
+    for i in 0..ni {
+        let function = read_str(inout r, in b, inout names);
+        let alias = read_str(inout r, in b, inout names);
+        let spelling = read_str(inout r, in b, inout names);
+        insts
+            .push(
+            InstIn {
+                function: function,
+                alias: alias,
+                spelling: spelling
+            }
+        );
+    }
+    let mut nodes = ChunkSeq::new[TNode]();
+    let mut tkids = ChunkSeq::new[u32]();
+    let mut adt_vars = ChunkSeq::new[u32]();
+    let mut lvars = ChunkSeq::new[LVar]();
+    let mut lfields = ChunkSeq::new[LField]();
+    let nt = r.word(in b);
+    for i in 0..nt {
+        let mut t = tnode_none();
+        t.disp = read_str(inout r, in b, inout names);
+        t.class = wrapping_u8(r.word(in b));
+        t.name = read_str(inout r, in b, inout names);
+        t.flag = flag(r.word(in b));
+        if t.class == C_BOX && t.flag {
+            t.inner = read_str(inout r, in b, inout names);
+        }
+        t.mode = wrapping_u8(r.word(in b));
+        t.a = tkids.len();
+        t.n = r.word(in b);
+        for j in 0..t.n {
+            tkids.push(n32(r.word(in b)));
+        }
+        t.has_adt = flag(r.word(in b));
+        if t.has_adt {
+            t.generics = r.word(in b);
+            t.tiled = flag(r.word(in b));
+            t.is_enum = flag(r.word(in b));
+            t.va = adt_vars.len();
+            t.vn = r.word(in b);
+            for j in 0..t.vn {
+                let s = read_str(inout r, in b, inout names);
+                adt_vars.push(s);
+            }
+        }
+        if r.word(in b) == 0 {
+            t.lok = true;
+            t.size = r.word(in b);
+            t.aggregate = flag(r.word(in b));
+            t.lkind = wrapping_u8(r.word(in b));
+            t.la = lvars.len();
+            t.ln = r.word(in b);
+            // Fields are read per variant, so a variant's rows are pushed
+            // once its fields are.
+            for j in 0..t.ln {
+                let vname = read_str(inout r, in b, inout names);
+                let fa = lfields.len();
+                let fc = r.word(in b);
+                for k in 0..fc {
+                    let fname = read_str(inout r, in b, inout names);
+                    let fty = n32(r.word(in b));
+                    let off = r.word(in b);
+                    lfields
+                        .push(
+                        LField {
+                            name: fname,
+                            ty: fty,
+                            offset: off
+                        }
+                    );
+                }
+                lvars
+                    .push(
+                    LVar {
+                        name: vname,
+                        fa: fa,
+                        fc: fc
+                    }
+                );
+            }
+        } else {
+            t.lreason = read_str(inout r, in b, inout names);
+        }
+        nodes.push(t);
+    }
+    let mut fns = ChunkSeq::new[FnIn]();
+    let mut effs = ChunkSeq::new[EffIn]();
+    let mut eff_args = ChunkSeq::new[u32]();
+    let mut params_in = ChunkSeq::new[ParamIn]();
+    let nf = r.word(in b);
+    for i in 0..nf {
+        let name = read_str(inout r, in b, inout names);
+        let generated = flag(r.word(in b));
+        let public = flag(r.word(in b));
+        let generics = flag(r.word(in b));
+        let mut dyn_param: u32 = 0;
+        let mut dyn_trait: u32 = 0;
+        if r.word(in b) != 0 {
+            dyn_param = read_str(inout r, in b, inout names);
+            let tr = read_str(inout r, in b, inout names);
+            dyn_trait = wrapping_add(tr, 1);
+        }
+        let tail = read_opt(inout r, in b, inout names);
+        let ea = effs.len();
+        let en = r.word(in b);
+        for j in 0..en {
+            let ename = read_str(inout r, in b, inout names);
+            let labeled = flag(r.word(in b));
+            let a = eff_args.len();
+            let n = r.word(in b);
+            for k in 0..n {
+                eff_args.push(n32(r.word(in b)));
+            }
+            effs
+                .push(
+                EffIn {
+                    name: ename,
+                    labeled: labeled,
+                    a: a,
+                    n: n
+                }
+            );
+        }
+        let caller_slot = flag(r.word(in b));
+        let pa = params_in.len();
+        let pn = r.word(in b);
+        for j in 0..pn {
+            let pname = read_str(inout r, in b, inout names);
+            let pass = wrapping_u8(r.word(in b));
+            let pty = n32(r.word(in b));
+            params_in
+                .push(
+                ParamIn {
+                    name: pname,
+                    pass: pass,
+                    ty: pty
+                }
+            );
+        }
+        let result = n32(r.word(in b));
+        fns
+            .push(
+            FnIn {
+                name: name,
+                generated: generated,
+                public: public,
+                generics: generics,
+                dyn_param: dyn_param,
+                dyn_trait: dyn_trait,
+                tail: tail,
+                ea: ea,
+                en: en,
+                caller_slot: caller_slot,
+                pa: pa,
+                pn: pn,
+                result: result
+            }
+        );
+    }
+    let s_unit = intern_text(inout names, "Unit");
+    let s_fail = intern_text(inout names, "Fail");
+    let s_in = intern_text(inout names, "in");
+    let s_inout = intern_text(inout names, "inout");
+    let s_sink = intern_text(inout names, "sink");
+    let s_option = intern_text(inout names, "Option");
+    let s_result = intern_text(inout names, "Result");
+    let s_arith = intern_text(inout names, "ArithOverflow");
+    let s_runtime = intern_text(inout names, "RuntimeError");
+    Planner {
+        names: names,
+        library: library,
+        prefix: prefix,
+        abi: abi,
+        option_mirrors: option_mirrors,
+        vsys: vsys,
+        vsys_syms: vsys_syms,
+        insts: insts,
+        nodes: nodes,
+        tkids: tkids,
+        adt_vars: adt_vars,
+        lvars: lvars,
+        lfields: lfields,
+        fns: fns,
+        effs: effs,
+        eff_args: eff_args,
+        params_in: params_in,
+        anodes: ChunkSeq::new[ANode](),
+        akids: ChunkSeq::new[u32](),
+        decls: ChunkSeq::new[Decl](),
+        decl_by: ChunkSeq::new[u32](),
+        dvars: ChunkSeq::new[DVar](),
+        dfields: ChunkSeq::new[DField](),
+        outs: ChunkSeq::new[FnOut](),
+        pouts: ChunkSeq::new[POut](),
+        errs: ChunkSeq::new[u32](),
+        fn_libs: ChunkSeq::new[u32](),
+        refusals: ChunkSeq::new[Refusal](),
+        pending: Refusal {
+            kind: 0,
+            a: 0,
+            b: 0,
+            c: 0
+        },
+        v2: false,
+        v4: abi == 4,
+        s_unit: s_unit,
+        s_fail: s_fail,
+        s_in: s_in,
+        s_inout: s_inout,
+        s_sink: s_sink,
+        s_option: s_option,
+        s_result: s_result,
+        s_arith: s_arith,
+        s_runtime: s_runtime,
+    }
+}
+
+impl Planner {
+    fn node(in self, t: u32) -> TNode {
+        match self.nodes.try_get(w(t)) {
+            Option::Some(n) => n,
+            Option::None => tnode_none(),
+        }
+    }
+
+    fn tkid(in self, n: TNode, i: u64) -> u32 {
+        u32_at(in self.tkids, wrapping_add(n.a, i))
+    }
+
+    fn anode(in self, a: u32) -> ANode {
+        match self.anodes.try_get(w(a)) {
+            Option::Some(n) => n,
+            Option::None => anode_none(),
+        }
+    }
+
+    fn akid(in self, n: ANode, i: u64) -> u32 {
+        u32_at(in self.akids, wrapping_add(n.a, i))
+    }
+
+    fn decl(in self, i: u64) -> Decl {
+        match self.decls.try_get(i) {
+            Option::Some(d) => d,
+            Option::None => decl_none(),
+        }
+    }
+
+    // The declaration of the type named `s`, index + 1 (0: none).
+    fn decl_of(in self, s: u32) -> u64 {
+        w(u32_at(in self.decl_by, w(s)))
+    }
+
+    fn handle_type(in self, s: u32) -> bool {
+        let d = self.decl_of(s);
+        d != 0 && self.decl(wrapping_sub(d, 1)).is_handle
+    }
+
+    fn push_anode(inout self, kind: u8, name: u32, owned: bool, in kids: ChunkSeq[u32]) -> u32 {
+        let a = self.akids.len();
+        for i in 0..kids.len() {
+            self.akids.push(u32_at(in kids, i));
+        }
+        let id = n32(self.anodes.len());
+        self
+            .anodes
+            .push(
+            ANode {
+                kind: kind,
+                name: name,
+                owned: owned,
+                a: a,
+                n: kids.len()
+            }
+        );
+        id
+    }
+
+    fn leaf(inout self, kind: u8, name: u32) -> u32 {
+        let none = ChunkSeq::new[u32]();
+        self.push_anode(kind, name, false, in none)
+    }
+
+    fn refuse3(inout self, kind: u8, a: u32, b: u32, c: u32) -> u32 {
+        self.pending = Refusal {
+            kind: kind,
+            a: a,
+            b: b,
+            c: c
+        };
+        FAIL
+    }
+
+    // `ExportError::Type { function, ty: t's display, reason }`.
+    fn refuse(inout self, function: u32, t: u32, in reason: Str) -> u32 {
+        let r = intern_text(inout self.names, reason);
+        let d = self.node(t).disp;
+        self.refuse3(E_TYPE, function, d, r)
+    }
+
+    // `owning`: whether a value of `a` owns memory.
+    fn owning(in self, a: u32) -> bool {
+        let n = self.anode(a);
+        if n
+            .kind
+            == K_SEQ
+            || n
+            .kind
+            == K_SLICE
+            || n
+            .kind
+            == K_BOX
+            || n
+            .kind
+            == K_STR
+            || n
+            .kind
+            == K_OBJECT {
+            return true;
+        }
+        if n.kind == K_SCALAR || n.kind == K_EXTERN {
+            return false;
+        }
+        if n.kind == K_NAMED && self.handle_type(n.name) {
+            return true;
+        }
+        for i in 0..n.n {
+            if self.owning(self.akid(n, i)) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn contains_extern(in self, a: u32) -> bool {
+        let n = self.anode(a);
+        if n.kind == K_EXTERN {
+            return true;
+        }
+        if n
+            .kind
+            == K_BOX
+            || n
+            .kind
+            == K_SEQ
+            || n
+            .kind
+            == K_SLICE
+            || n
+            .kind
+            == K_TUPLE
+            || n
+            .kind
+            == K_NAMED {
+            for i in 0..n.n {
+                if self.contains_extern(self.akid(n, i)) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn holds_sequence(in self, a: u32) -> bool {
+        let n = self.anode(a);
+        if n.kind == K_SEQ {
+            return true;
+        }
+        if n.kind == K_STR {
+            return n.owned;
+        }
+        if n.kind == K_NAMED {
+            let d = self.decl_of(n.name);
+            if d != 0 && self.decl(wrapping_sub(d, 1)).owns_sequence {
+                return true;
+            }
+        }
+        if n.kind == K_TUPLE || n.kind == K_BOX || n.kind == K_NAMED {
+            for i in 0..n.n {
+                if self.holds_sequence(self.akid(n, i)) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn mirrored(in self, a: u32) -> bool {
+        let n = self.anode(a);
+        if n.kind != K_NAMED {
+            return false;
+        }
+        let d = self.decl_of(n.name);
+        d != 0 && self.decl(wrapping_sub(d, 1)).mirror == MIRROR_REPR_C
+    }
+
+    fn lent(in self, a: u32, options: bool) -> bool {
+        if self.mirrored(a) {
+            return true;
+        }
+        if !options {
+            return false;
+        }
+        let n = self.anode(a);
+        if n.kind != K_NAMED || self.owning(a) {
+            return false;
+        }
+        if n.name == self.s_option {
+            return n.n == 1;
+        }
+        n.name == self.s_result && n.n == 2
+    }
+
+    fn wide_by_pointer(in self, a: u32) -> bool {
+        let n = self.anode(a);
+        if n.kind != K_SCALAR {
+            return false;
+        }
+        self
+            .names
+            .spells(n.name, in "i128".as_bytes())
+            || self
+            .names
+            .spells(n.name, in "u128".as_bytes())
+    }
+
+    // `result_shape`: 0 when `a` may be a result, else the reason.
+    fn result_shape(inout self, a: u32) -> u32 {
+        if !self.owning(a) {
+            return 0;
+        }
+        let n = self.anode(a);
+        if n.kind == K_SEQ && self.owning(self.akid(n, 0)) {
+            return intern_text(inout self.names, SEQ_OF_HANDLES);
+        }
+        if n.kind == K_SEQ || n.kind == K_STR && n.owned {
+            return 0;
+        }
+        if n.kind == K_NAMED && self.handle_type(n.name) {
+            return 0;
+        }
+        if n.kind == K_NAMED && n.name == self.s_option {
+            let k = self.akid(n, 0);
+            return self.result_shape(k);
+        }
+        if n.kind == K_TUPLE {
+            for i in 0..n.n {
+                let k = self.akid(n, i);
+                let r = self.result_shape(k);
+                if r != 0 {
+                    return r;
+                }
+            }
+            return 0;
+        }
+        if n.kind == K_BOX {
+            return intern_text(
+                inout self.names,
+                "is a box; return a handle type that holds it instead"
+            );
+        }
+        intern_text(inout self.names, "owns memory in a form no result can carry")
+    }
+
+    // `field_shape`: 0 when `a` may be a field of a handle, else the reason.
+    fn field_shape(inout self, a: u32) -> u32 {
+        if !self.owning(a) {
+            return 0;
+        }
+        let n = self.anode(a);
+        if n.kind == K_SEQ || n.kind == K_STR && n.owned {
+            return 0;
+        }
+        if n.kind == K_NAMED && self.handle_type(n.name) {
+            return 0;
+        }
+        if n.kind == K_NAMED && n.name == self.s_option {
+            let k = self.akid(n, 0);
+            return self.field_shape(k);
+        }
+        if n.kind == K_BOX {
+            let k = self.akid(n, 0);
+            if self.anode(k).kind == K_OBJECT {
+                return 0;
+            }
+            return self.field_shape(k);
+        }
+        intern_text(
+            inout self.names,
+            "is a field form handles do not carry yet (use a sequence, a String, a box, a handle type or an Option of one)"
+        )
+    }
+
+    // `position`: where each owning form may cross. 0, or FAIL.
+    fn position(inout self, function: u32, source: u32, a: u32, pos: u8) -> u32 {
+        let n = self.anode(a);
+        if self.contains_extern(a) && n.kind != K_EXTERN {
+            return self
+                .refuse(
+                function,
+                source,
+                "holds an opaque .vsys extern-type handle; Rust lends one only directly as an `in` parameter (export ABI v4)"
+            );
+        }
+        if n.kind == K_EXTERN {
+            if pos == PASS_IN {
+                return 0;
+            }
+            return self
+                .refuse(
+                function,
+                source,
+                "is an opaque .vsys extern-type handle; Rust lends one only to an `in` parameter (export ABI v4)"
+            );
+        }
+        if !self.owning(a) {
+            return 0;
+        }
+        if pos == POS_ERROR {
+            return self.refuse(function, source, "is not a copy type; error types must be copy");
+        }
+        if pos == POS_RESULT {
+            let r = self.result_shape(a);
+            if r == 0 {
+                return 0;
+            }
+            let d = self.node(source).disp;
+            return self.refuse3(E_TYPE, function, d, r);
+        }
+        if n.kind == K_SLICE {
+            return 0;
+        }
+        if n.kind == K_SEQ {
+            if self.owning(self.akid(n, 0)) {
+                return self.refuse(function, source, SEQ_OF_HANDLES);
+            }
+            return 0;
+        }
+        if n.kind == K_NAMED && self.handle_type(n.name) {
+            return 0;
+        }
+        if n.kind == K_STR {
+            if pos == PASS_IN || n.owned {
+                return 0;
+            }
+            return self
+                .refuse(
+                function,
+                source,
+                "is a `Str` view, which crosses only as an `in` parameter"
+            );
+        }
+        self
+            .refuse(
+            function,
+            source,
+            "owns memory; only sequences, slices, strings and handle types cross as parameters"
+        )
+    }
+
+    // `ExportError::Type` for a type without a layout.
+    fn no_layout(inout self, function: u32, t: u32) -> u32 {
+        let nd = self.node(t);
+        let mut o = ChunkSeq::new[u8]();
+        put(inout o, "has no layout: ");
+        put_sym(inout o, in self.names, nd.lreason);
+        let r = intern_buf(inout self.names, in o);
+        self.refuse3(E_TYPE, function, nd.disp, r)
+    }
+
+    // Whether the declaration's variant names are the builtin order.
+    fn builtin_order(in self, nd: TNode, in order: ChunkSeq[u8]) -> bool {
+        // `order`: the names joined with spaces.
+        let mut o = ChunkSeq::new[u8]();
+        for i in 0..nd.vn {
+            if i > 0 {
+                o.push(32);
+            }
+            put_sym(inout o, in self.names, u32_at(in self.adt_vars, wrapping_add(nd.va, i)));
+        }
+        if o.len() != order.len() {
+            return false;
+        }
+        for i in 0..o.len() {
+            if u8_at(in o, i) != u8_at(in order, i) {
+                return false;
+            }
+        }
+        true
+    }
+
+    // The builtin variant order of `s` (`BUILTIN_TYPES`), or an empty text
+    // when `s` is not a builtin.
+    fn builtin(in self, s: u32) -> ChunkSeq[u8] {
+        let mut o = ChunkSeq::new[u8]();
+        if s == self.s_option {
+            put(inout o, "None Some");
+        } else if s == self.s_result {
+            put(inout o, "Ok Err");
+        } else if s == self.s_arith {
+            put(inout o, "ArithOverflow");
+        } else if s == self.s_runtime {
+            put(inout o, "DivisionByZero IndexOutOfBounds");
+        }
+        o
+    }
+
+    // `Planner::ty`: the ABI type of input type `t`, or FAIL.
+    fn ty(inout self, function: u32, t: u32) -> u32 {
+        let nd = self.node(t);
+        let c = nd.class;
+        if c == C_EXTERN {
+            if self.v4 {
+                return self.leaf(K_EXTERN, nd.name);
+            }
+            return self
+                .refuse(
+                function,
+                t,
+                "is an opaque .vsys extern-type handle; keep it inside the Vesper library (a handle crosses only to its own imports, or, with `// @export abi 4`, is lent `in` by Rust)"
+            );
+        }
+        if c == C_WIDE || c == C_SCALAR {
+            return self.leaf(K_SCALAR, nd.name);
+        }
+        if c == C_TUPLE {
+            if nd.n == 0 {
+                let u = self.s_unit;
+                return self.leaf(K_SCALAR, u);
+            }
+            let mut kids = ChunkSeq::new[u32]();
+            for i in 0..nd.n {
+                let k = self.ty(function, self.tkid(nd, i));
+                if k == FAIL {
+                    return FAIL;
+                }
+                kids.push(k);
+            }
+            return self.push_anode(K_TUPLE, 0, false, in kids);
+        }
+        if c == C_SEQ || c == C_SLICE {
+            let elem = self.tkid(nd, 0);
+            let abi = self.ty(function, elem);
+            if abi == FAIL {
+                return FAIL;
+            }
+            if self.node(elem).mode != M_COPY || self.owning(abi) {
+                let an = self.anode(abi);
+                let mut field = c
+                    == C_SEQ
+                    && an
+                    .kind
+                    != K_SLICE
+                    && !(an.kind == K_STR && !an.owned);
+                if field {
+                    field = self.field_shape(abi) == 0;
+                }
+                if !field {
+                    return self
+                        .refuse(
+                        function,
+                        t,
+                        "has non-copy elements; only sequences and slices of copy elements cross the boundary (a handle type may hold a ChunkSeq of handles, boxes or strings)"
+                    );
+                }
+            }
+            self.v2 = true;
+            let mut kids = ChunkSeq::new[u32]();
+            kids.push(abi);
+            let kind = if c == C_SEQ {
+                K_SEQ
+            } else {
+                K_SLICE
+            };
+            return self.push_anode(kind, 0, false, in kids);
+        }
+        if c == C_STRING || c == C_STR {
+            self.v2 = true;
+            let none = ChunkSeq::new[u32]();
+            return self.push_anode(K_STR, 0, c == C_STRING, in none);
+        }
+        if c == C_BOX {
+            self.v2 = true;
+            let mut inner: u32 = 0;
+            if nd.flag {
+                inner = self.leaf(K_OBJECT, nd.inner);
+            } else {
+                inner = self.ty(function, self.tkid(nd, 0));
+                if inner == FAIL {
+                    return FAIL;
+                }
+            }
+            let mut kids = ChunkSeq::new[u32]();
+            kids.push(inner);
+            return self.push_anode(K_BOX, 0, false, in kids);
+        }
+        if c == C_NAMED {
+            return self.named(function, t);
+        }
+        self.refuse(function, t, "has no fixed word layout")
+    }
+
+    fn named(inout self, function: u32, t: u32) -> u32 {
+        let nd = self.node(t);
+        let n = nd.name;
+        if !nd.has_adt {
+            return self.refuse(function, t, "has no fixed word layout");
+        }
+        if nd.generics != nd.n {
+            return self.refuse(function, t, "has unresolved type arguments");
+        }
+        if nd.tiled {
+            return self.refuse(function, t, "is a tiled struct");
+        }
+        let order = self.builtin(n);
+        if order.len() > 0 {
+            if !self.builtin_order(nd, in order) {
+                return self
+                    .refuse(function, t, "has a builtin variant order this ABI does not know");
+            }
+            let mut kids = ChunkSeq::new[u32]();
+            for i in 0..nd.n {
+                let k = self.ty(function, self.tkid(nd, i));
+                if k == FAIL {
+                    return FAIL;
+                }
+                kids.push(k);
+            }
+            return self.push_anode(K_NAMED, n, false, in kids);
+        }
+        if nd.n != 0 {
+            return self
+                .refuse(function, t, "is a generic user type; export a monomorphic type instead");
+        }
+        if self.decl_of(n) == 0 {
+            if !nd.lok {
+                return self.no_layout(function, t);
+            }
+            let is_handle = nd.mode != M_COPY;
+            if is_handle {
+                self.v2 = true;
+            }
+            let linear = nd.mode == M_LINEAR;
+            let mut drop: u32 = 0;
+            if is_handle && !linear {
+                let mut o = ChunkSeq::new[u8]();
+                put(inout o, "vesper_");
+                put_sym(inout o, in self.names, self.library);
+                put(inout o, "_");
+                put_sym(inout o, in self.names, n);
+                put(inout o, "_drop");
+                drop = wrapping_add(intern_buf(inout self.names, in o), 1);
+            }
+            // Insert before recursing so a recursive type cannot loop.
+            let di = self.decls.len();
+            self
+                .decls
+                .push(
+                Decl {
+                    name: n,
+                    is_enum: nd.is_enum,
+                    words: nd.size / 8,
+                    is_handle: is_handle,
+                    linear: linear,
+                    drop: drop,
+                    owns_sequence: false,
+                    mirror: MIRROR_NONE,
+                    reason: 0,
+                    va: 0,
+                    vn: 0
+                }
+            );
+            if self.decl_by.len() <= w(n) {
+                self.decl_by.resize(wrapping_add(w(n), 1), 0);
+            }
+            let ok = self.decl_by.try_set(w(n), n32(inc(di)));
+            if nd.lkind == 0 {
+                return self.refuse(function, t, "has no word layout");
+            }
+            // Every variant's fields first (they may declare more types),
+            // then the rows, contiguously.
+            let mut fnames = ChunkSeq::new[u32]();
+            let mut ftys = ChunkSeq::new[u32]();
+            let mut foffs = ChunkSeq::new[u64]();
+            let mut counts = ChunkSeq::new[u64]();
+            for v in 0..nd.ln {
+                let lv = match self.lvars.try_get(wrapping_add(nd.la, v)) {
+                    Option::Some(x) => x,
+                    Option::None => LVar {
+                        name: 0,
+                        fa: 0,
+                        fc: 0
+                    },
+                };
+                counts.push(lv.fc);
+                for k in 0..lv.fc {
+                    let lf = match self.lfields.try_get(wrapping_add(lv.fa, k)) {
+                        Option::Some(x) => x,
+                        Option::None => LField {
+                            name: 0,
+                            ty: 0,
+                            offset: 0
+                        },
+                    };
+                    let fty = self.ty(function, lf.ty);
+                    if fty == FAIL {
+                        return FAIL;
+                    }
+                    if self.contains_extern(fty) || is_handle {
+                        let mut reason: u32 = 0;
+                        if self.contains_extern(fty) {
+                            reason = intern_text(
+                                inout self.names,
+                                "holds an opaque .vsys extern-type handle; Rust lends one only directly as an `in` parameter (export ABI v4)"
+                            );
+                        } else {
+                            reason = self.field_shape(fty);
+                        }
+                        if reason != 0 {
+                            let mut o = ChunkSeq::new[u8]();
+                            put_sym(inout o, in self.names, n);
+                            o.push(46);
+                            put_sym(inout o, in self.names, lf.name);
+                            let d = intern_buf(inout self.names, in o);
+                            return self.refuse3(E_TYPE, function, d, reason);
+                        }
+                    }
+                    fnames.push(lf.name);
+                    ftys.push(fty);
+                    foffs.push(lf.offset / 8);
+                }
+            }
+            let va = self.dvars.len();
+            let mut at: u64 = 0;
+            for v in 0..nd.ln {
+                let lv = match self.lvars.try_get(wrapping_add(nd.la, v)) {
+                    Option::Some(x) => x,
+                    Option::None => LVar {
+                        name: 0,
+                        fa: 0,
+                        fc: 0
+                    },
+                };
+                // A struct has one variant named after the type.
+                let vname = if nd.lkind == 1 {
+                    n
+                } else {
+                    lv.name
+                };
+                let fa = self.dfields.len();
+                let fc = u64_at(in counts, v);
+                for k in 0..fc {
+                    let j = wrapping_add(at, k);
+                    self
+                        .dfields
+                        .push(
+                        DField {
+                            name: u32_at(in fnames, j),
+                            ty: u32_at(in ftys, j),
+                            offset: u64_at(in foffs, j)
+                        }
+                    );
+                }
+                at = wrapping_add(at, fc);
+                self
+                    .dvars
+                    .push(
+                    DVar {
+                        name: vname,
+                        fa: fa,
+                        fc: fc
+                    }
+                );
+            }
+            let mut d = self.decl(di);
+            d.va = va;
+            d.vn = nd.ln;
+            let ok2 = self.decls.try_set(di, d);
+        }
+        self.leaf(K_NAMED, n)
+    }
+
+    // Whether `s` starts with the `.vsys` effect prefix and the rest names
+    // an imported library: that library's symbol, else 0.
+    fn foreign_library(inout self, s: u32) -> u32 {
+        let p = self.prefix;
+        let pn = self.names.size(p);
+        let sn = self.names.size(s);
+        if sn < pn {
+            return 0;
+        }
+        for i in 0..pn {
+            if self.names.byte(s, i) != self.names.byte(p, i) {
+                return 0;
+            }
+        }
+        let mut o = ChunkSeq::new[u8]();
+        for i in pn..sn {
+            o.push(self.names.byte(s, i));
+        }
+        let rest = intern_buf(inout self.names, in o);
+        for i in 0..self.vsys.len() {
+            let v = match self.vsys.try_get(i) {
+                Option::Some(v) => v,
+                Option::None => VsysIn {
+                    library: 0,
+                    handler: 0,
+                    sa: 0,
+                    sn: 0,
+                    rust_path: 0
+                },
+            };
+            if v.library == rest {
+                return rest;
+            }
+        }
+        0
+    }
+
+    // `fail_record_size(world, f) / 8`, or FAIL (`ExportError::Compile`).
+    fn fail_words(inout self, f: FnIn) -> u64 {
+        let mut payload: u64 = 8;
+        for i in 0..f.en {
+            let e = match self.effs.try_get(wrapping_add(f.ea, i)) {
+                Option::Some(e) => e,
+                Option::None => EffIn {
+                    name: 0,
+                    labeled: false,
+                    a: 0,
+                    n: 0
+                },
+            };
+            if e.name == self.s_fail && e.n > 0 {
+                let nd = self.node(u32_at(in self.eff_args, e.a));
+                if !nd.lok {
+                    let r = nd.lreason;
+                    let x = self.refuse3(E_COMPILE, r, 0, 0);
+                    return 18446744073709551615;
+                }
+                if nd.size > payload {
+                    payload = nd.size;
+                }
+            }
+        }
+        let bytes = wrapping_add(8, wrapping_mul(wrapping_add(payload, 7) / 8, 8));
+        bytes / 8
+    }
+
+    // `Planner::function`: the exported function of input function `fi`,
+    // or FAIL.
+    fn function(inout self, fi: u64) -> u32 {
+        let f = match self.fns.try_get(fi) {
+            Option::Some(f) => f,
+            Option::None => return FAIL,
+        };
+        let function = f.name;
+        if f.generics {
+            return self.refuse3(E_GENERIC, function, 0, 0);
+        }
+        if f.tail != 0 {
+            let mut o = ChunkSeq::new[u8]();
+            put(inout o, "row variable ");
+            put_sym(inout o, in self.names, wrapping_sub(f.tail, 1));
+            let e = intern_buf(inout self.names, in o);
+            return self.refuse3(E_EFFECT, function, e, 0);
+        }
+        let mut errors = ChunkSeq::new[u32]();
+        let mut foreign = ChunkSeq::new[u32]();
+        for i in 0..f.en {
+            let e = match self.effs.try_get(wrapping_add(f.ea, i)) {
+                Option::Some(e) => e,
+                Option::None => return FAIL,
+            };
+            if e.name == self.s_fail && !e.labeled && e.n == 1 {
+                let arg = u32_at(in self.eff_args, e.a);
+                let t = self.ty(function, arg);
+                if t == FAIL {
+                    return FAIL;
+                }
+                if self.position(function, arg, t, POS_ERROR) == FAIL {
+                    return FAIL;
+                }
+                errors.push(t);
+            } else {
+                let lib = if !e.labeled && e.n == 0 {
+                    self.foreign_library(e.name)
+                } else {
+                    0
+                };
+                if lib == 0 {
+                    return self.refuse3(E_EFFECT, function, e.name, 0);
+                }
+                foreign.push(lib);
+            }
+        }
+        if f.caller_slot {
+            return self.refuse(function, f.result, "is returned through a caller Box slot");
+        }
+        let mut pnames = ChunkSeq::new[u32]();
+        let mut ptys = ChunkSeq::new[u32]();
+        let mut pptr = ChunkSeq::new[u8]();
+        let mut ppass = ChunkSeq::new[u8]();
+        for i in 0..f.pn {
+            let p = match self.params_in.try_get(wrapping_add(f.pa, i)) {
+                Option::Some(p) => p,
+                Option::None => return FAIL,
+            };
+            let t = self.ty(function, p.ty);
+            if t == FAIL {
+                return FAIL;
+            }
+            if self.position(function, p.ty, t, p.pass) == FAIL {
+                return FAIL;
+            }
+            if p.pass == PASS_INOUT {
+                self.v2 = true;
+            }
+            let nd = self.node(p.ty);
+            if !nd.lok {
+                return self.no_layout(function, p.ty);
+            }
+            let pointer = nd.aggregate || p.pass == PASS_INOUT || self.wide_by_pointer(t);
+            pnames.push(p.name);
+            ptys.push(t);
+            pptr
+                .push(
+                if pointer {
+                    1
+                } else {
+                    0
+                }
+            );
+            ppass
+                .push(
+                if p.pass == PASS_IN {
+                    0
+                } else {
+                    wrapping_add(p.pass, 1)
+                }
+            );
+        }
+        let result = self.ty(function, f.result);
+        if result == FAIL {
+            return FAIL;
+        }
+        if self.position(function, f.result, result, POS_RESULT) == FAIL {
+            return FAIL;
+        }
+        let wide_result = self.wide_by_pointer(result);
+        let rn = self.node(f.result);
+        if !rn.lok {
+            return self.no_layout(function, f.result);
+        }
+        let mut fail: u64 = 0;
+        if errors.len() > 0 {
+            let words = self.fail_words(f);
+            if words == 18446744073709551615 {
+                return FAIL;
+            }
+            fail = wrapping_add(words, 1);
+        }
+        if foreign.len() > 0 {
+            self.v2 = true;
+        }
+        let mut o = ChunkSeq::new[u8]();
+        put(inout o, "vesper_");
+        put_sym(inout o, in self.names, self.library);
+        put(inout o, "_");
+        put_sym(inout o, in self.names, function);
+        let symbol = intern_buf(inout self.names, in o);
+        let pa = self.pouts.len();
+        for i in 0..pnames.len() {
+            self
+                .pouts
+                .push(
+                POut {
+                    name: u32_at(in pnames, i),
+                    ty: u32_at(in ptys, i),
+                    pointer: u8_at(in pptr, i) != 0,
+                    raw: u8_at(in ppass, i),
+                    in_place: false
+                }
+            );
+        }
+        let ea = self.errs.len();
+        for i in 0..errors.len() {
+            self.errs.push(u32_at(in errors, i));
+        }
+        let la = self.fn_libs.len();
+        for i in 0..foreign.len() {
+            self.fn_libs.push(u32_at(in foreign, i));
+        }
+        let id = n32(self.outs.len());
+        self
+            .outs
+            .push(
+            FnOut {
+                name: function,
+                symbol: symbol,
+                pa: pa,
+                pn: pnames.len(),
+                result: result,
+                result_words: rn.size / 8,
+                result_pointer: rn.aggregate || wide_result,
+                ea: ea,
+                en: errors.len(),
+                fail: fail,
+                instance_of: 0,
+                la: la,
+                ln: foreign.len(),
+                result_in_place: false
+            }
+        );
+        id
+    }
+
+    fn push_refusal(inout self) {
+        let r = self.pending;
+        self.refusals.push(r);
+    }
+
+    fn out(in self, i: u64) -> FnOut {
+        match self.outs.try_get(i) {
+            Option::Some(f) => f,
+            Option::None => FnOut {
+                name: 0,
+                symbol: 0,
+                pa: 0,
+                pn: 0,
+                result: 0,
+                result_words: 0,
+                result_pointer: false,
+                ea: 0,
+                en: 0,
+                fail: 0,
+                instance_of: 0,
+                la: 0,
+                ln: 0,
+                result_in_place: false
+            },
+        }
+    }
+
+    fn pout(in self, i: u64) -> POut {
+        match self.pouts.try_get(i) {
+            Option::Some(p) => p,
+            Option::None => POut {
+                name: 0,
+                ty: 0,
+                pointer: false,
+                raw: 0,
+                in_place: false
+            },
+        }
+    }
+
+    fn inst(in self, i: u64) -> InstIn {
+        match self.insts.try_get(i) {
+            Option::Some(x) => x,
+            Option::None => InstIn {
+                function: 0,
+                alias: 0,
+                spelling: 0
+            },
+        }
+    }
+
+    // -1, 0 or 1 as symbol `a`'s bytes compare with `b`'s.
+    fn cmp(in self, a: u32, b: u32) -> i64 {
+        let na = self.names.size(a);
+        let nb = self.names.size(b);
+        let n = if na < nb {
+            na
+        } else {
+            nb
+        };
+        for i in 0..n {
+            let x = self.names.byte(a, i);
+            let y = self.names.byte(b, i);
+            if x < y {
+                return -1;
+            }
+            if x > y {
+                return 1;
+            }
+        }
+        if na < nb {
+            -1
+        } else if na > nb {
+            1
+        } else {
+            0
+        }
+    }
+
+    // `mark_owned_sequences`: a fixpoint, since types may be recursive.
+    fn mark_owned_sequences(inout self) {
+        loop {
+            let mut changed = false;
+            for i in 0..self.decls.len() {
+                let d = self.decl(i);
+                if d.owns_sequence {
+                    continue;
+                }
+                let mut owns = false;
+                for v in 0..d.vn {
+                    let dv = match self.dvars.try_get(wrapping_add(d.va, v)) {
+                        Option::Some(x) => x,
+                        Option::None => DVar {
+                            name: 0,
+                            fa: 0,
+                            fc: 0
+                        },
+                    };
+                    for k in 0..dv.fc {
+                        let df = match self.dfields.try_get(wrapping_add(dv.fa, k)) {
+                            Option::Some(x) => x,
+                            Option::None => DField {
+                                name: 0,
+                                ty: 0,
+                                offset: 0
+                            },
+                        };
+                        if self.holds_sequence(df.ty) {
+                            owns = true;
+                        }
+                    }
+                }
+                if owns {
+                    let mut e = d;
+                    e.owns_sequence = true;
+                    let ok = self.decls.try_set(i, e);
+                    changed = true;
+                }
+            }
+            if !changed {
+                return;
+            }
+        }
+    }
+
+    // `mark_mirrors` (v3).
+    fn mark_mirrors(inout self) {
+        for i in 0..self.decls.len() {
+            let mut d = self.decl(i);
+            if d.is_handle {
+                continue;
+            }
+            if d.is_enum {
+                d.mirror = MIRROR_CONVERTED;
+                d
+                    .reason = intern_text(
+                    inout self.names,
+                    "an enum's payload words have no fixed Rust layout (tag and payload validity), so it is converted as in v2"
+                );
+            } else {
+                let first = match self.dvars.try_get(d.va) {
+                    Option::Some(x) => x.fc,
+                    Option::None => 0,
+                };
+                if first == 0 {
+                    d.mirror = MIRROR_CONVERTED;
+                    d
+                        .reason = intern_text(
+                        inout self.names,
+                        "a struct without fields is one ignored word"
+                    );
+                } else {
+                    d.mirror = MIRROR_REPR_C;
+                }
+            }
+            let ok = self.decls.try_set(i, d);
+        }
+    }
+}
+
+const SEQ_OF_HANDLES: Str = "has non-copy elements (handles, boxes or strings); such a sequence crosses only inside a handle type, whose binding does not read its elements";
+
+fn valid_library_name(in names: Names, s: u32) -> bool {
+    let n = names.size(s);
+    if n == 0 {
+        return false;
+    }
+    let c0 = names.byte(s, 0);
+    if c0 < 97 || c0 > 122 {
+        return false;
+    }
+    for i in 1..n {
+        let c = names.byte(s, i);
+        if !(c >= 97 && c <= 122 || c >= 48 && c <= 57 || c == 95) {
+            return false;
+        }
+    }
+    true
+}
+
+fn has_path(in names: Names, s: u32) -> bool {
+    let n = names.size(s);
+    for i in 1..n {
+        if names.byte(s, wrapping_sub(i, 1)) == 58 && names.byte(s, i) == 58 {
+            return true;
+        }
+    }
+    false
+}
+
+// `plan_with`: the planner's answer in `p` (`p.refusals` empty when it
+// planned).
+pub fn plan(inout p: Planner) {
+    if !valid_library_name(in p.names, p.library) {
+        let lib = p.library;
+        let x = p.refuse3(E_LIBRARY_NAME, lib, 0, 0);
+        p.push_refusal();
+        return;
+    }
+    let mut order = ChunkSeq::new[u32]();
+    for fi in 0..p.fns.len() {
+        let f = match p.fns.try_get(fi) {
+            Option::Some(f) => f,
+            Option::None => continue,
+        };
+        if has_path(in p.names, f.name) || f.generated || !f.public {
+            continue;
+        }
+        if f.generics {
+            let mut named = false;
+            for i in 0..p.insts.len() {
+                if p.inst(i).function == f.name {
+                    named = true;
+                }
+            }
+            if named {
+                continue;
+            }
+        }
+        if f.dyn_trait != 0 {
+            let mut o = ChunkSeq::new[u8]();
+            put(inout o, "dyn ");
+            put_sym(inout o, in p.names, wrapping_sub(f.dyn_trait, 1));
+            let ty = intern_buf(inout p.names, in o);
+            let mut r = ChunkSeq::new[u8]();
+            put(inout r, "parameter '");
+            put_sym(inout r, in p.names, f.dyn_param);
+            put(inout r, "' is a trait object, which the export ABI does not pass yet");
+            let reason = intern_buf(inout p.names, in r);
+            let x = p.refuse3(E_TYPE, f.name, ty, reason);
+            p.push_refusal();
+            continue;
+        }
+        let id = p.function(fi);
+        if id == FAIL {
+            p.push_refusal();
+        } else {
+            order.push(id);
+        }
+    }
+    // Instances compile as generated monomorphic wrappers.
+    for k in 0..p.outs.len() {
+        let mut f = p.out(k);
+        for i in 0..p.insts.len() {
+            let ins = p.inst(i);
+            if ins.alias == f.name {
+                f.instance_of = wrapping_add(ins.spelling, 1);
+                let ok = p.outs.try_set(k, f);
+                break;
+            }
+        }
+    }
+    if p.outs.len() == 0 && p.refusals.len() == 0 {
+        let x = p.refuse3(E_NO_EXPORTS, 0, 0, 0);
+        p.push_refusal();
+    }
+    for k in 0..p.outs.len() {
+        let f = p.out(k);
+        for j in 0..k {
+            if p.out(j).symbol == f.symbol {
+                let instance = if f.instance_of != 0 {
+                    wrapping_sub(f.instance_of, 1)
+                } else {
+                    f.name
+                };
+                let mut o = ChunkSeq::new[u8]();
+                put(inout o, "symbol ");
+                put_sym(inout o, in p.names, f.symbol);
+                put(inout o, " is exported twice");
+                let reason = intern_buf(inout p.names, in o);
+                let x = p.refuse3(E_INSTANCE, instance, reason, 0);
+                p.push_refusal();
+                break;
+            }
+        }
+    }
+    if p.refusals.len() > 0 {
+        return;
+    }
+    // Sort by name (insertion sort of the rows; names are distinct).
+    let n = p.outs.len();
+    for i in 1..n {
+        let x = p.out(i);
+        let mut j = i;
+        loop {
+            if j == 0 {
+                break;
+            }
+            let prev = p.out(wrapping_sub(j, 1));
+            if p.cmp(prev.name, x.name) <= 0 {
+                break;
+            }
+            let ok = p.outs.try_set(j, prev);
+            j = wrapping_sub(j, 1);
+        }
+        let ok2 = p.outs.try_set(j, x);
+    }
+    p.mark_owned_sequences();
+    for k in 0..n {
+        let f = p.out(k);
+        for i in 0..f.pn {
+            let q = p.pout(wrapping_add(f.pa, i));
+            if q.raw == wrapping_add(PASS_SINK, 1) {
+                let a = p.anode(q.ty);
+                if a.kind == K_NAMED {
+                    let d = p.decl_of(a.name);
+                    if d != 0 && p.decl(wrapping_sub(d, 1)).owns_sequence {
+                        let reason = intern_text(
+                            inout p.names,
+                            "is a handle that owns a sequence, taken by value; native code does not free the sequences inside a dropped handle yet, so take it `inout`"
+                        );
+                        let x = p.refuse3(E_TYPE, f.name, a.name, reason);
+                        p.push_refusal();
+                    }
+                }
+            }
+        }
+    }
+    if p.refusals.len() > 0 {
+        return;
+    }
+    let v4 = p.abi == 4;
+    let v3 = p.abi == 3 || v4;
+    let options = v3 && p.option_mirrors;
+    let v2 = v3 || p.v2 || p.vsys.len() > 0 || p.insts.len() > 0;
+    if v3 {
+        p.mark_mirrors();
+        for k in 0..n {
+            let mut f = p.out(k);
+            for i in 0..f.pn {
+                let at = wrapping_add(f.pa, i);
+                let mut q = p.pout(at);
+                let a = p.anode(q.ty);
+                let is_in = q.raw == 0 || q.raw == wrapping_add(PASS_IN, 1);
+                let is_inout = q.raw == wrapping_add(PASS_INOUT, 1);
+                if a.kind == K_SLICE {
+                    q.in_place = p.mirrored(p.akid(a, 0));
+                } else if a.kind == K_NAMED && is_in && p.handle_type(a.name) {
+                    // An `in` handle is lent as the caller's own words.
+                    q.in_place = true;
+                } else if is_in || is_inout {
+                    q.in_place = p.lent(q.ty, options);
+                } else {
+                    q.in_place = false;
+                }
+                let ok = p.pouts.try_set(at, q);
+            }
+            f.result_in_place = p.lent(f.result, options);
+            let ok2 = p.outs.try_set(k, f);
+        }
+    }
+    if v2 {
+        for i in 0..p.pouts.len() {
+            let mut q = p.pout(i);
+            if q.raw == 0 {
+                q.raw = wrapping_add(PASS_IN, 1);
+                let ok = p.pouts.try_set(i, q);
+            }
+        }
+    }
+    p.v2 = v2;
+}
+
+// The answer's words (plan_words.rs `decode_plan`).
+fn put_word(inout out: ChunkSeq[u64], x: u64) {
+    out.push(x);
+}
+
+fn put_str(inout out: ChunkSeq[u64], in names: Names, s: u32) {
+    let n = names.size(s);
+    out.push(n);
+    let mut x: u64 = 0;
+    let mut k: u32 = 0;
+    for i in 0..n {
+        x = x | wrapping_shl_u64(widen_u64(names.byte(s, i)), wrapping_mul(k, 8));
+        k = wrapping_add(k, 1);
+        if k == 8 {
+            out.push(x);
+            x = 0;
+            k = 0;
+        }
+    }
+    if k != 0 {
+        out.push(x);
+    }
+}
+
+fn put_opt(inout out: ChunkSeq[u64], in names: Names, s1: u32) {
+    if s1 == 0 {
+        out.push(0);
+    } else {
+        out.push(1);
+        put_str(inout out, in names, wrapping_sub(s1, 1));
+    }
+}
+
+fn put_flag(inout out: ChunkSeq[u64], b: bool) {
+    out
+        .push(
+        if b {
+            1
+        } else {
+            0
+        }
+    );
+}
+
+fn put_type(inout out: ChunkSeq[u64], in p: Planner, a: u32) {
+    let n = p.anode(a);
+    out.push(widen_u64(n.kind));
+    if n.kind == K_SCALAR || n.kind == K_OBJECT || n.kind == K_EXTERN {
+        put_str(inout out, in p.names, n.name);
+        return;
+    }
+    if n.kind == K_STR {
+        put_flag(inout out, n.owned);
+        return;
+    }
+    if n.kind == K_NAMED {
+        put_str(inout out, in p.names, n.name);
+    }
+    if n.kind == K_TUPLE || n.kind == K_NAMED {
+        out.push(n.n);
+    }
+    for i in 0..n.n {
+        put_type(inout out, in p, p.akid(n, i));
+    }
+}
+
+fn put_abi(inout out: ChunkSeq[u64], in s: Str) {
+    let mut o = ChunkSeq::new[u8]();
+    put(inout o, s);
+    out.push(o.len());
+    let mut x: u64 = 0;
+    let mut k: u32 = 0;
+    for i in 0..o.len() {
+        x = x | wrapping_shl_u64(widen_u64(u8_at(in o, i)), wrapping_mul(k, 8));
+        k = wrapping_add(k, 1);
+        if k == 8 {
+            out.push(x);
+            x = 0;
+            k = 0;
+        }
+    }
+    if k != 0 {
+        out.push(x);
+    }
+}
+
+fn put_buf(inout out: ChunkSeq[u64], in o: ChunkSeq[u8]) {
+    out.push(o.len());
+    let mut x: u64 = 0;
+    let mut k: u32 = 0;
+    for i in 0..o.len() {
+        x = x | wrapping_shl_u64(widen_u64(u8_at(in o, i)), wrapping_mul(k, 8));
+        k = wrapping_add(k, 1);
+        if k == 8 {
+            out.push(x);
+            x = 0;
+            k = 0;
+        }
+    }
+    if k != 0 {
+        out.push(x);
+    }
+}
+
+// `vesper_<library>_<what>`.
+fn runtime_name(inout out: ChunkSeq[u64], in p: Planner, in what: Str) {
+    let mut o = ChunkSeq::new[u8]();
+    put(inout o, "vesper_");
+    put_sym(inout o, in p.names, p.library);
+    put(inout o, "_");
+    put(inout o, what);
+    put_buf(inout out, in o);
+}
+
+pub fn write_plan(in p: Planner) -> ChunkSeq[u64] {
+    let mut out = ChunkSeq::with_capacity[u64](4096);
+    if p.refusals.len() > 0 {
+        out.push(1);
+        out.push(p.refusals.len());
+        for i in 0..p.refusals.len() {
+            let r = match p.refusals.try_get(i) {
+                Option::Some(r) => r,
+                Option::None => Refusal {
+                    kind: 1,
+                    a: 0,
+                    b: 0,
+                    c: 0
+                },
+            };
+            out.push(widen_u64(r.kind));
+            if r.kind == E_NO_EXPORTS {
+                continue;
+            }
+            put_str(inout out, in p.names, r.a);
+            if r.kind == E_EFFECT || r.kind == E_TYPE || r.kind == E_INSTANCE {
+                put_str(inout out, in p.names, r.b);
+            }
+            if r.kind == E_TYPE {
+                put_str(inout out, in p.names, r.c);
+            }
+        }
+        return out;
+    }
+    out.push(0);
+    let v4 = p.abi == 4;
+    let v3 = p.abi == 3 || v4;
+    if v4 {
+        put_abi(inout out, "vesper.native.export-abi/4");
+    } else if v3 {
+        put_abi(inout out, "vesper.native.export-abi/3");
+    } else if p.v2 {
+        put_abi(inout out, "vesper.native.export-abi/2");
+    } else {
+        put_abi(inout out, "vesper.native.export-abi/1");
+    }
+    put_str(inout out, in p.names, p.library);
+    put_flag(inout out, v3 && p.option_mirrors);
+    put_flag(inout out, p.v2);
+    if p.v2 {
+        runtime_name(inout out, in p, "seq_new");
+        runtime_name(inout out, in p, "seq_free");
+        runtime_name(inout out, in p, "live_allocations");
+        if v4 {
+            out.push(1);
+            runtime_name(inout out, in p, "box_new");
+        } else {
+            out.push(0);
+        }
+    }
+    // Declarations in name order.
+    let nd = p.decls.len();
+    let mut order = ChunkSeq::with_capacity[u64](nd);
+    for i in 0..nd {
+        let name = p.decl(i).name;
+        let mut j = order.len();
+        order.push(i);
+        loop {
+            if j == 0 {
+                break;
+            }
+            let prev = u64_at(in order, wrapping_sub(j, 1));
+            if p.cmp(p.decl(prev).name, name) <= 0 {
+                break;
+            }
+            let ok = order.try_set(j, prev);
+            j = wrapping_sub(j, 1);
+        }
+        let ok2 = order.try_set(j, i);
+    }
+    out.push(nd);
+    for k in 0..nd {
+        let d = p.decl(u64_at(in order, k));
+        put_str(inout out, in p.names, d.name);
+        put_flag(inout out, d.is_enum);
+        out.push(d.words);
+        put_flag(inout out, d.is_handle);
+        put_flag(inout out, d.linear);
+        put_opt(inout out, in p.names, d.drop);
+        put_flag(inout out, d.owns_sequence);
+        out.push(widen_u64(d.mirror));
+        if d.mirror == MIRROR_CONVERTED {
+            put_str(inout out, in p.names, d.reason);
+        }
+        out.push(d.vn);
+        for v in 0..d.vn {
+            let dv = match p.dvars.try_get(wrapping_add(d.va, v)) {
+                Option::Some(x) => x,
+                Option::None => DVar {
+                    name: 0,
+                    fa: 0,
+                    fc: 0
+                },
+            };
+            put_str(inout out, in p.names, dv.name);
+            out.push(dv.fc);
+            for f in 0..dv.fc {
+                let df = match p.dfields.try_get(wrapping_add(dv.fa, f)) {
+                    Option::Some(x) => x,
+                    Option::None => DField {
+                        name: 0,
+                        ty: 0,
+                        offset: 0
+                    },
+                };
+                put_str(inout out, in p.names, df.name);
+                put_type(inout out, in p, df.ty);
+                out.push(df.offset);
+            }
+        }
+    }
+    out.push(p.outs.len());
+    for k in 0..p.outs.len() {
+        let f = p.out(k);
+        put_str(inout out, in p.names, f.name);
+        put_str(inout out, in p.names, f.symbol);
+        out.push(f.pn);
+        for i in 0..f.pn {
+            let q = p.pout(wrapping_add(f.pa, i));
+            put_str(inout out, in p.names, q.name);
+            put_type(inout out, in p, q.ty);
+            put_flag(inout out, q.pointer);
+            if q.raw == 0 {
+                out.push(0);
+            } else {
+                out.push(1);
+                if q.raw == wrapping_add(PASS_IN, 1) {
+                    put_abi(inout out, "in");
+                } else if q.raw == wrapping_add(PASS_INOUT, 1) {
+                    put_abi(inout out, "inout");
+                } else {
+                    put_abi(inout out, "sink");
+                }
+            }
+            put_flag(inout out, q.in_place);
+        }
+        put_type(inout out, in p, f.result);
+        out.push(f.result_words);
+        put_flag(inout out, f.result_pointer);
+        out.push(f.en);
+        for i in 0..f.en {
+            put_type(inout out, in p, u32_at(in p.errs, wrapping_add(f.ea, i)));
+        }
+        out.push(f.fail);
+        put_opt(inout out, in p.names, f.instance_of);
+        out.push(f.ln);
+        for i in 0..f.ln {
+            put_str(inout out, in p.names, u32_at(in p.fn_libs, wrapping_add(f.la, i)));
+        }
+        put_flag(inout out, f.result_in_place);
+    }
+    out.push(p.vsys.len());
+    for i in 0..p.vsys.len() {
+        let v = match p.vsys.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => VsysIn {
+                library: 0,
+                handler: 0,
+                sa: 0,
+                sn: 0,
+                rust_path: 0
+            },
+        };
+        put_str(inout out, in p.names, v.library);
+        put_str(inout out, in p.names, v.handler);
+        out.push(v.sn);
+        for j in 0..v.sn {
+            put_str(inout out, in p.names, u32_at(in p.vsys_syms, wrapping_add(v.sa, j)));
+        }
+        put_opt(inout out, in p.names, v.rust_path);
+    }
+    out
+}
+
+// Harness entry: `plan_with` of the encoded inputs, as words.
+pub fn plan_words(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    plan_bytes(in b)
+}
+
+// `plan_words` over the input's bytes (the hybrid's `plan` hook).
+pub fn plan_bytes(in input: Slice[u8]) -> ChunkSeq[u64] {
+    let mut p = read_planner(in input);
+    plan(inout p);
+    write_plan(in p)
+}

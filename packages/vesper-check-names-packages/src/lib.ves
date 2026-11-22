@@ -46,6 +46,9 @@ use self::state::{
     St,
     at32,
     at64,
+    at8,
+    join_path,
+    kind_value,
     emit,
     err,
     hi,
@@ -76,6 +79,7 @@ use self::load::{
 };
 use self::resolve::{
     ambiguous,
+    group,
     local_of,
     lookup,
     name_of,
@@ -147,12 +151,155 @@ fn hidden_and_variants(inout s: St) {
     }
 }
 
+// The literal value of every constant that has one, by internal name
+// (latest declaration wins), and the untyped value enum members.
+fn literals(inout s: St) {
+    for i in 0..s.cl_mod.len() {
+        let key = pair(at32(in s.cl_mod, i), at32(in s.cl_item, i));
+        let name = name_of(inout s, key);
+        if at8(in s.cl_untyped, i) == 1 {
+            s.untyped.insert(name, 1);
+        }
+        s.lit_row.insert(name, n32(i));
+    }
+}
+
+fn ambiguous_name(inout s: St, local: u32, start: u32, end: u32, in what: Str, file: u32) {
+    err(inout s, ambiguous(), start, end);
+    let mut msg = String::new();
+    msg.push_str(in "'");
+    push_sym(in s, local, inout msg);
+    msg.push_str(in what);
+    s.err_msg.push_str(in msg);
+    emit(inout s, file);
+}
+
+// A value enum import: each member `E::M` of the enum in `s.grp_m` and
+// `s.grp_k` becomes the local constant `local::M` (`assemble`'s group
+// branch).
+fn bind_group(
+    inout s: St,
+    m: u32,
+    local: u32,
+    public: bool,
+    start: u32,
+    end: u32,
+    file: u32,
+    inout exported: ChunkSeq[u32]
+) {
+    if s.item_kind.contains_key(pair(m, local)) || s.own_prefix.contains_key(pair(m, local)) {
+        ambiguous_name(
+            inout s,
+            local,
+            start,
+            end,
+            in "' is both declared in this module and imported",
+            file
+        );
+        return;
+    }
+    let mut members: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut targets: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..s.grp_m.len() {
+        let member = at32(in s.grp_m, i);
+        let key = at64(in s.grp_k, i);
+        let ml = join_path(inout s, local, member);
+        members.push(ml);
+        let t = name_of(inout s, key);
+        targets.push(t);
+    }
+    // The member set, sorted by symbol (a set compares by its elements).
+    let mut source: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..targets.len() {
+        let t = at32(in targets, i);
+        let mut j = source.len();
+        let mut dup = false;
+        for k in 0..source.len() {
+            if at32(in source, k) == t {
+                dup = true;
+            }
+        }
+        if !dup {
+            source.push(t);
+            loop {
+                if j == 0 {
+                    break;
+                }
+                let a = at32(in source, wrapping_sub(j, 1));
+                if a <= t {
+                    break;
+                }
+                source.try_set(j, a);
+                source.try_set(wrapping_sub(j, 1), t);
+                j = wrapping_sub(j, 1);
+            }
+        }
+    }
+    match s.groups.get(local) {
+        Option::Some(range) => {
+            let first = lo(range);
+            let len = w(hi(range));
+            let mut same = len == source.len();
+            if same {
+                for k in 0..len {
+                    if at32(in s.group_pool, wrapping_add(w(first), k)) != at32(in source, k) {
+                        same = false;
+                    }
+                }
+            }
+            if !same {
+                ambiguous_name(
+                    inout s,
+                    local,
+                    start,
+                    end,
+                    in "' is imported twice from different items",
+                    file
+                );
+                return;
+            }
+        },
+        Option::None => {},
+    }
+    for i in 0..members.len() {
+        match s.names.get(at32(in members, i)) {
+            Option::Some(v) => {
+                if lo(v) != at32(in targets, i) {
+                    ambiguous_name(
+                        inout s,
+                        local,
+                        start,
+                        end,
+                        in "' is imported twice from different items",
+                        file
+                    );
+                    return;
+                }
+            },
+            Option::None => {},
+        }
+    }
+    let first = s.group_pool.len();
+    s.group_pool.extend(in source.as_slice());
+    s.groups.insert(local, first | wrapping_shl_u64(source.len(), 32));
+    for i in 0..members.len() {
+        let t = at32(in targets, i);
+        if public {
+            exported.push(t);
+        }
+        s.names.insert(at32(in members, i), w(t) | wrapping_shl_u64(widen_u64(kind_value()), 32));
+        s.targets.insert(t, 1);
+    }
+}
+
 // The names module `m` binds: its own items, then its imports (reported
 // when they do not resolve or clash). Returns the targets of its `pub use`
 // names in `exported`.
 fn bind(inout s: St, m: u32, inout exported: ChunkSeq[u32]) {
     s.names.clear();
     s.targets.clear();
+    s.groups.clear();
+    s.group_pool.clear();
     let file = at32(in s.mod_file, w(m));
     let f = w(at32(in s.mod_items_first, w(m)));
     let n = w(at32(in s.mod_items_len, w(m)));
@@ -192,6 +339,17 @@ fn bind(inout s: St, m: u32, inout exported: ChunkSeq[u32]) {
             let ni = wrapping_add(nf, k);
             let start = at32(in s.un_start, ni);
             let end = at32(in s.un_end, ni);
+            // A value enum imports each member `E::M` as a constant.
+            let g = group(inout s, tm, at32(in s.un_name, ni), same, in module_shown, start, end);
+            if g == 2 {
+                emit(inout s, file);
+                continue;
+            }
+            if g == 1 {
+                let local = local_of(in s, ni);
+                bind_group(inout s, m, local, public, start, end, file, inout exported);
+                continue;
+            }
             let (key, kind) = lookup(
                 inout s,
                 tm,
@@ -418,6 +576,7 @@ fn assemble_module(inout s: St, in input: Str, m: u32, dump: bool) {
     let (x, y) = text_range(in s, w(m));
     let mut l = lower_source(in input[x..y]);
     begin_module(inout s);
+    s.made_from = l.ast.exprs.len();
     generic_scopes(inout s, inout l.ast);
     let mut found: ChunkSeq[u32] = ChunkSeq::new[u32]();
     for i in 0..l.ast.m_items.len() {
@@ -512,6 +671,7 @@ fn run(in input: Str, dump: bool) -> St {
     reexports(inout s);
     overrides(inout s);
     hidden_and_variants(inout s);
+    literals(inout s);
     for m in 0..s.mod_pkg.len() {
         assemble_module(inout s, in input, n32(m), dump);
     }

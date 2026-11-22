@@ -1,0 +1,13 @@
+[package]
+name = "@vesper/lsp-features"
+version = "0.1.0"
+edition = "2026"
+# The editor features only compute over text the caller lends them.
+capability_ceiling = ["Fail", "Alloc"]
+
+[dependencies]
+"@vesper/ast" = { version = "^0.1", path = "../vesper-ast" }
+"@vesper/front" = { version = "^0.1", path = "../vesper-front" }
+"@vesper/span" = { version = "^0.1", path = "../../crates/vesper-span/vesper" }
+"@vesper-std/arena" = { version = "^0.1", path = "../vesper-std/arena" }
+"@vesper-std/intern" = { version = "^0.1", path = "../vesper-std/intern" }

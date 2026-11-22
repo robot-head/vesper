@@ -2644,7 +2644,8 @@ pub fn expr(inout st: St, inout cx: Cx, in a: Ast, e: u32, expected: u32) -> u32
     let end = widen_u64(n.end);
     if k == 1 {
         let l = lit_at(in a, n.a);
-        if l.kind == 1 {
+        // Int, or WideInt past `i128::MAX` (both "int" to Rust).
+        if l.kind == 1 || l.kind == 5 {
             return ty_named(inout st, T_BASE, st.s_int);
         }
         if l.kind == 2 {

@@ -1,0 +1,591 @@
+// The pass: `bounds_hoist::run` on a `@vesper/place-ir` program. Each
+// function goes through `hoist_function`'s steps in order; every decision
+// is made by plans.ves on the function as it stands (encoded afresh after
+// each rewrite), and rewrite.ves applies it to the tables.
+
+use @vesper/check-data::names::{
+    Names
+};
+use @vesper/check-data::types::{
+    Types
+};
+use @vesper/check-data::input::{
+    Reader,
+    read_ctx
+};
+use @vesper/place-ir::{
+    InstRow,
+    Program,
+    put_program,
+    read_program
+};
+use self::fun::{
+    Fun,
+    add,
+    inc,
+    insert,
+    n32,
+    read_fun,
+    u32_at,
+    u64_at,
+    u8_at,
+    w
+};
+use self::encode::{
+    POOL_GUARD,
+    TypeCache,
+    encode_fun,
+    type_cache
+};
+use self::plans::{
+    BoundRow,
+    CountedPlan,
+    Lin,
+    LoopPlan,
+    compared_list,
+    counted_plan,
+    dominated_list,
+    fail_lin,
+    next_loop,
+    order_list
+};
+use self::rewrite::{
+    Convert,
+    Fresh,
+    Guards,
+    convert_new,
+    copy_loop,
+    fresh_new,
+    make_unchecked,
+    pool_entry,
+    prog_inst
+};
+
+const T_RAW: u8 = 0;
+const T_OPT_NAME: u8 = 2;
+const T_PATH: u8 = 4;
+const T_POOL: u8 = 5;
+const T_VALUE: u8 = 6;
+const OP_CONST: u8 = 0;
+const OP_READ: u8 = 2;
+const OP_SEQ: u8 = 18;
+const P_IN: u64 = 0;
+const P_SINK: u64 = 2;
+const O_VALUE: u64 = 0;
+const O_LOCAL: u64 = 1;
+const NONE64: u64 = 18446744073709551615;
+
+// What the rewrites need of the type and name tables.
+pub struct Ctx2 {
+    tc: TypeCache,
+    u64_ty: u32,
+    bool_ty: u32,
+    infer: u32,
+}
+
+fn fun_of(in p: Program, inout t: Types, in names: Names, inout cx: Ctx2, fi: u64) -> Fun {
+    let bytes = encode_fun(in p, inout t, in names, inout cx.tc, fi);
+    read_fun(in bytes.as_slice())
+}
+
+// The program symbol of `Fun` name `s`.
+fn symbol(in f: Fun, inout names: Names, s: u32) -> u32 {
+    let mut b: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    f.put_name(s, inout b);
+    names.intern(in b.as_slice())
+}
+
+// A `Fun` place as the program's (root symbol, path index).
+fn prog_place(in f: Fun, inout p: Program, inout names: Names, place: u32) -> (u32, u64) {
+    let mut comps: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut x = place;
+    loop {
+        let d = f.depth(x);
+        if d <= 1 {
+            break;
+        }
+        comps.push(u32_at(in f.plast, w(x)));
+        x = u32_at(in f.pparent, w(x));
+    }
+    let root = symbol(in f, inout names, u32_at(in f.plast, w(x)));
+    let mut syms: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let n = comps.len();
+    for i in 0..n {
+        let s = symbol(in f, inout names, u32_at(in comps, wrapping_sub(wrapping_sub(n, 1), i)));
+        syms.push(s);
+    }
+    // an existing path with these names, else a new one
+    for pi in 0..p.paths.len() {
+        let row = p.path(pi);
+        if row.n != syms.len() {
+            continue;
+        }
+        let mut same = true;
+        for k in 0..row.n {
+            if p.path_name(pi, k) != u32_at(in syms, k) {
+                same = false;
+            }
+        }
+        if same {
+            return (root, pi);
+        }
+    }
+    let pi = p.add_path(in syms);
+    (root, pi)
+}
+
+fn sink_value(inout p: Program, v: u64) {
+    p.put(P_SINK, T_RAW);
+    p.put(v, T_VALUE);
+    p.put(0, T_OPT_NAME);
+    p.put(0, T_PATH);
+}
+
+// A `BoundsGuard` instruction over the argument words from `a`.
+fn guard_inst(dest: u64, ty: u32, s0: u64, s1: u64, tin: u64, tout: u64, a: u64, n: u64)
+    -> InstRow {
+    InstRow {
+        dest: n32(dest),
+        ty: ty,
+        s0: s0,
+        s1: s1,
+        has_token: 1,
+        tin: tin,
+        tout: tout,
+        fallible: 0,
+        op: OP_SEQ,
+        a: a,
+        n: n
+    }
+}
+
+fn read_row(inout p: Program, dest: u64, ty: u32, s0: u64, s1: u64, tok: u64, root: u32)
+    -> InstRow {
+    let a = p.ops.len();
+    p.put(w(root), 1);
+    p.put(0, T_PATH);
+    p.put(P_SINK, T_RAW);
+    p.put(0, T_RAW);
+    InstRow {
+        dest: n32(dest),
+        ty: ty,
+        s0: s0,
+        s1: s1,
+        has_token: 1,
+        tin: tok,
+        tout: tok,
+        fallible: 0,
+        op: OP_READ,
+        a: a,
+        n: 4
+    }
+}
+
+fn const_row(inout p: Program, dest: u64, ty: u32, s0: u64, s1: u64, lo: u64, hi: u64) -> InstRow {
+    let a = p.ops.len();
+    p.put(0, T_RAW);
+    p.put(lo, T_RAW);
+    p.put(hi, T_RAW);
+    InstRow {
+        dest: n32(dest),
+        ty: ty,
+        s0: s0,
+        s1: s1,
+        has_token: 0,
+        tin: 0,
+        tout: 0,
+        fallible: 0,
+        op: OP_CONST,
+        a: a,
+        n: 3
+    }
+}
+
+// The preheader's outgoing token.
+fn out_token(in p: Program, fi: u64, b: u64) -> u64 {
+    let fr = p.function(fi);
+    let bk = p.block(add(fr.b0, b));
+    let ni = p.op(inc(bk.ha));
+    p.op(add(add(bk.ha, 2), wrapping_mul(ni, 2)))
+}
+
+// `clone_loop`: the counted loop `plan` of `f` (function `fi`).
+fn clone_loop(
+    inout p: Program,
+    inout names: Names,
+    inout cx: Ctx2,
+    fi: u64,
+    in f: Fun,
+    in plan: CountedPlan
+) {
+    let mut fresh = fresh_new(in p, fi);
+    let fr = p.function(fi);
+    let h = f.header;
+    let hb = p.block(add(fr.b0, w(h)));
+    let first = p.inst(hb.i0);
+    let s0 = first.s0;
+    let s1 = first.s1;
+    let before = out_token(in p, fi, w(plan.pre));
+    let guard_token = fresh.token();
+    let index_sym = n32(p.op(p.inst(inc(hb.i0)).a));
+    let bound_sym = n32(p.op(p.inst(add(hb.i0, 2)).a));
+    let lo = fresh.value(cx.u64_ty);
+    let hi = fresh.value(cx.u64_ty);
+    let mut g = Guards {
+        rows: ChunkSeq::new[InstRow](),
+    };
+    let r1 = read_row(inout p, lo, cx.u64_ty, s0, s1, before, index_sym);
+    g.rows.push(r1);
+    let r2 = read_row(inout p, hi, cx.u64_ty, s0, s1, before, bound_sym);
+    g.rows.push(r2);
+    let mut guards: ChunkSeq[InstRow] = ChunkSeq::new[InstRow]();
+    let mut previous = NONE64;
+    let mut token = before;
+    let n = plan.rread.len();
+    for k in 0..n {
+        let rx = prog_inst(in p, fi, in f, u64_at(in plan.rread, k));
+        let rr = p.inst(rx);
+        let v = fresh.value(rr.ty);
+        let mut row = rr;
+        row.dest = n32(v);
+        row.s0 = s0;
+        row.s1 = s1;
+        row.has_token = 1;
+        row.tin = before;
+        row.tout = before;
+        row.fallible = 0;
+        g.rows.push(row);
+        let form = match plan.rform.try_get(k) {
+            Option::Some(x) => x,
+            Option::None => fail_lin(),
+        };
+        // the terms' values, in form order
+        let mut tv: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        for side in 0..2 {
+            let (a0, an) = if side == 0 {
+                (form.p0, form.pn)
+            } else {
+                (form.m0, form.mn)
+            };
+            for q in 0..w(an) {
+                let x = u64_at(in plan.c.offs, add(w(a0), q));
+                let kind = x >> 62;
+                let val = x & 4611686018427387903;
+                if kind == O_VALUE {
+                    tv.push(val);
+                } else {
+                    let ix = prog_inst(in p, fi, in f, val);
+                    let src = p.inst(ix);
+                    let c = fresh.value(cx.u64_ty);
+                    let mut ci = src;
+                    ci.dest = n32(c);
+                    ci.fallible = 0;
+                    if kind == O_LOCAL {
+                        ci.s0 = s0;
+                        ci.s1 = s1;
+                        ci.has_token = 1;
+                        ci.tin = before;
+                        ci.tout = before;
+                    } else if ci.has_token != 0 {
+                        ci.tin = before;
+                        ci.tout = before;
+                    }
+                    g.rows.push(ci);
+                    tv.push(c);
+                }
+            }
+        }
+        let a = p.ops.len();
+        let mut label: u32 = 0;
+        if plan.head.inclusive {
+            label = label | 1;
+        }
+        if form.sign < 0 {
+            label = label | 2;
+        }
+        label = label | wrapping_shl_u32(form.pn, 8) | wrapping_shl_u32(form.mn, 16);
+        let e = pool_entry(inout p, POOL_GUARD, label);
+        // the pool word, then the arguments
+        let a = p.ops.len();
+        p.put(e, T_POOL);
+        let nargs = add(
+            add(3, tv.len()),
+            if previous == NONE64 {
+                0
+            } else {
+                1
+            }
+        );
+        p.put(nargs, T_RAW);
+        sink_value(inout p, lo);
+        sink_value(inout p, hi);
+        p.put(P_IN, T_RAW);
+        p.put(v, T_VALUE);
+        p.put(inc(p.op(rr.a)), T_OPT_NAME);
+        p.put(p.op(inc(rr.a)), T_PATH);
+        for q in 0..tv.len() {
+            sink_value(inout p, u64_at(in tv, q));
+        }
+        if previous != NONE64 {
+            sink_value(inout p, previous);
+        }
+        let last = inc(k) == n;
+        let guard = fresh.value(cx.bool_ty);
+        let input = token;
+        token = if last {
+            guard_token
+        } else {
+            fresh.token()
+        };
+        guards
+            .push(
+            guard_inst(guard, cx.bool_ty, s0, s1, input, token, a, wrapping_sub(p.ops.len(), a))
+        );
+        previous = guard;
+    }
+    for q in 0..guards.len() {
+        let gi = match guards.try_get(q) {
+            Option::Some(x) => x,
+            Option::None => p.inst(0),
+        };
+        g.rows.push(gi);
+    }
+    let mut conv = convert_new(true);
+    for q in 0..plan.accesses.len() {
+        let x = u64_at(in plan.accesses, q);
+        conv.add(x >> 8, x & 255);
+    }
+    copy_loop(
+        inout p,
+        fi,
+        w(h),
+        w(plan.pre),
+        in plan.c.blocks,
+        in g,
+        previous,
+        guard_token,
+        inout fresh,
+        in conv,
+        cx.infer
+    );
+}
+
+// `guard_and_copy` (facts.rs): the compared loop `lp` of `f`.
+fn guard_and_copy(
+    inout p: Program,
+    inout names: Names,
+    inout cx: Ctx2,
+    fi: u64,
+    in f: Fun,
+    in lp: LoopPlan
+) {
+    let mut fresh = fresh_new(in p, fi);
+    let fr = p.function(fi);
+    let hb = p.block(add(fr.b0, w(lp.h)));
+    let first = p.inst(hb.i0);
+    let s0 = first.s0;
+    let s1 = first.s1;
+    let before = out_token(in p, fi, w(lp.pre));
+    let guard_token = fresh.token();
+    let mut g = Guards {
+        rows: ChunkSeq::new[InstRow](),
+    };
+    let lo = fresh.value(cx.u64_ty);
+    let c0 = const_row(inout p, lo, cx.u64_ty, s0, s1, 0, 0);
+    g.rows.push(c0);
+    let mut previous = NONE64;
+    let mut token = before;
+    let mut guards: ChunkSeq[InstRow] = ChunkSeq::new[InstRow]();
+    let n = lp.gplace.len();
+    for k in 0..n {
+        let gb = match lp.gbound.try_get(k) {
+            Option::Some(x) => x,
+            Option::None => BoundRow {
+                kind: 2,
+                a: 0,
+                b: 0
+            },
+        };
+        let hi = if gb.kind == 2 {
+            gb.a
+        } else {
+            fresh.value(cx.u64_ty)
+        };
+        if gb.kind == 1 {
+            let c = const_row(inout p, hi, cx.u64_ty, s0, s1, gb.a, gb.b);
+            g.rows.push(c);
+        } else if gb.kind == 0 {
+            let root = symbol(in f, inout names, n32(gb.a));
+            let mut r = read_row(inout p, hi, cx.u64_ty, s0, s1, before, root);
+            g.rows.push(r);
+        }
+        let rx = prog_inst(in p, fi, in f, u64_at(in lp.gread, k));
+        let rr = p.inst(rx);
+        let s = fresh.value(rr.ty);
+        let mut row = rr;
+        row.dest = n32(s);
+        row.s0 = s0;
+        row.s1 = s1;
+        row.has_token = 1;
+        row.tin = before;
+        row.tout = before;
+        row.fallible = 0;
+        g.rows.push(row);
+        let (root, path) = if rr.op == OP_READ {
+            (n32(p.op(rr.a)), p.op(inc(rr.a)))
+        } else {
+            prog_place(in f, inout p, inout names, u32_at(in lp.gplace, k))
+        };
+        let e = pool_entry(inout p, POOL_GUARD, 0);
+        let a = p.ops.len();
+        p.put(e, T_POOL);
+        let nargs: u64 = if previous == NONE64 {
+            3
+        } else {
+            4
+        };
+        p.put(nargs, T_RAW);
+        sink_value(inout p, lo);
+        sink_value(inout p, hi);
+        p.put(P_IN, T_RAW);
+        p.put(s, T_VALUE);
+        p.put(inc(w(root)), T_OPT_NAME);
+        p.put(path, T_PATH);
+        if previous != NONE64 {
+            sink_value(inout p, previous);
+        }
+        let guard = fresh.value(cx.bool_ty);
+        let input = token;
+        token = if inc(k) == n {
+            guard_token
+        } else {
+            fresh.token()
+        };
+        guards
+            .push(
+            guard_inst(guard, cx.bool_ty, s0, s1, input, token, a, wrapping_sub(p.ops.len(), a))
+        );
+        previous = guard;
+    }
+    for q in 0..guards.len() {
+        let gi = match guards.try_get(q) {
+            Option::Some(x) => x,
+            Option::None => p.inst(0),
+        };
+        g.rows.push(gi);
+    }
+    let mut conv = convert_new(false);
+    for q in 0..lp.conv.len() {
+        let x = u64_at(in lp.conv, q);
+        conv.add(wrapping_shl_u64(x >> 40, 32) | ((x >> 8) & 4294967295), x & 255);
+    }
+    copy_loop(
+        inout p,
+        fi,
+        w(lp.h),
+        w(lp.pre),
+        in lp.blocks,
+        in g,
+        previous,
+        guard_token,
+        inout fresh,
+        in conv,
+        cx.infer
+    );
+}
+
+// `hoist_function`: returns how many loops it versioned.
+pub fn hoist_function(inout p: Program, inout t: Types, inout names: Names, inout cx: Ctx2, fi: u64)
+    -> u64 {
+    let f0 = fun_of(in p, inout t, in names, inout cx, fi);
+    let compared = compared_list(in f0);
+    if compared.len() > 0 {
+        let mut at: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        for q in 0..compared.len() {
+            let x = u64_at(in compared, q);
+            at.push(wrapping_shl_u64(x >> 40, 32) | ((x >> 8) & 4294967295));
+        }
+        make_unchecked(inout p, in names, fi, in at);
+    }
+    let mut f = fun_of(in p, inout t, in names, inout cx, fi);
+    let ord = order_list(in f);
+    let mut versioned: u64 = 0;
+    for j in 0..ord.hs.len() {
+        f.header = u32_at(in ord.hs, j);
+        f.has_enclosing = u8_at(in ord.has, j) != 0;
+        f.enclosing.clear();
+        let e0 = u64_at(in ord.e0, j);
+        for q in 0..u64_at(in ord.en, j) {
+            f.enclosing.push(u32_at(in ord.encl, add(e0, q)));
+        }
+        let plan = counted_plan(in f);
+        if plan.ok {
+            clone_loop(inout p, inout names, inout cx, fi, in f, in plan);
+            versioned = inc(versioned);
+            let h = f.header;
+            let has = f.has_enclosing;
+            let mut encl: ChunkSeq[u32] = ChunkSeq::new[u32]();
+            for q in 0..f.enclosing.len() {
+                encl.push(u32_at(in f.enclosing, q));
+            }
+            f = fun_of(in p, inout t, in names, inout cx, fi);
+            f.header = h;
+            f.has_enclosing = has;
+            f.enclosing = encl;
+        }
+    }
+    // Compared loops, one at a time.
+    let mut tried: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    loop {
+        let fl = fun_of(in p, inout t, in names, inout cx, fi);
+        let lp = next_loop(in fl, inout tried);
+        if !lp.ok {
+            break;
+        }
+        let base = p.function(fi).bc;
+        guard_and_copy(inout p, inout names, inout cx, fi, in fl, in lp);
+        for b in base..p.function(fi).bc {
+            let new = insert(inout tried, n32(b));
+        }
+        versioned = inc(versioned);
+    }
+    let fd = fun_of(in p, inout t, in names, inout cx, fi);
+    let dominated = dominated_list(in fd);
+    if dominated.len() > 0 {
+        make_unchecked(inout p, in names, fi, in dominated);
+    }
+    versioned
+}
+
+// `bounds_hoist::run` on the program of `input` (the words of
+// tests/common/ir_words.rs `program_only_input`): the hoisted program as
+// `put_program` words.
+pub fn hoist_words(in input: Str) -> ChunkSeq[u64] {
+    hoist_bytes(in input.as_bytes())
+}
+
+// `bounds_hoist::run` on the program input of tests/common/ir_words.rs
+// (names, types, the world, the program section): the `put_program` words
+// of the hoisted program. The hybrid's `hoist` hook calls it.
+pub fn hoist_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
+    let mut r = Reader {
+        pos: 0
+    };
+    let mut c = read_ctx(inout r, in b);
+    let mut p = read_program(inout r, in b, in c);
+    let s_bool = c.names.intern(in "bool".as_bytes());
+    let u64_ty = c.types.named0(c.types.s_u64);
+    let bool_ty = c.types.named0(s_bool);
+    let mut cx = Ctx2 {
+        tc: type_cache(in c.names, in c.types),
+        u64_ty: u64_ty,
+        bool_ty: bool_ty,
+        infer: c.types.infer,
+    };
+    for fi in 0..p.fn_count() {
+        let n = hoist_function(inout p, inout c.types, inout c.names, inout cx, fi);
+    }
+    let mut o: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    put_program(in p, in c.types, in c.names, inout o);
+    o
+}

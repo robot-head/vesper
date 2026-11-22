@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 296" width="560" height="296" role="img" aria-labelledby="title description">
+  <title id="title">Three exits from a transaction</title>
+  <desc id="description">An owned transaction can be committed or aborted. Both methods consume it. Returning with it still live produces E0302.</desc>
+  <defs><marker id="teal" viewBox="0 0 9 9" markerWidth="7" markerHeight="7" refX="8" refY="4.5" orient="auto"><path d="M0 0 L9 4.5 L0 9 Z" fill="#83dacc"/></marker><marker id="gold" viewBox="0 0 9 9" markerWidth="7" markerHeight="7" refX="8" refY="4.5" orient="auto"><path d="M0 0 L9 4.5 L0 9 Z" fill="#ffbf7f"/></marker><marker id="red" viewBox="0 0 9 9" markerWidth="7" markerHeight="7" refX="8" refY="4.5" orient="auto"><path d="M0 0 L9 4.5 L0 9 Z" fill="#ff9fae"/></marker></defs>
+  <rect width="560" height="296" fill="#111a25" rx="10"/>
+  <g font-family="system-ui, sans-serif">
+  <rect x="20" y="105" width="133" height="74" rx="8" fill="#1b2735" stroke="#ffbf7f" stroke-width="1.6"/>
+  <text x="86" y="135" text-anchor="middle" font-size="17" font-weight="500" fill="#bac7d6">Caller owns</text>
+  <text x="86" y="162" text-anchor="middle" font-size="23" font-weight="500" fill="#ffbf7f">tx</text>
+  <path d="M153 141 H183 V55 H326" fill="none" stroke="#ffbf7f" stroke-width="2.5" stroke-linejoin="round" marker-end="url(#gold)"/>
+  <path d="M183 141 H326" fill="none" stroke="#ffbf7f" stroke-width="2.5" stroke-linejoin="round" marker-end="url(#gold)"/>
+  <path d="M183 141 V236 H326" fill="none" stroke="#ff9fae" stroke-width="2.5" stroke-linejoin="round" marker-end="url(#red)" stroke-dasharray="5 5"/>
+  <text x="253" y="46" text-anchor="middle" font-size="19" font-weight="500" fill="#ffbf7f">commit</text>
+  <text x="257" y="132" text-anchor="middle" font-size="19" font-weight="500" fill="#ffbf7f">abort</text>
+  <text x="256" y="226" text-anchor="middle" font-size="18" font-weight="500" fill="#ff9fae">leave live</text>
+  <rect x="337" y="24" width="198" height="62" rx="8" fill="#1b2735" stroke="#536479" stroke-width="1.6"/>
+  <text x="436" y="50" text-anchor="middle" font-size="20" font-weight="500" fill="#e8edf5">Consumed</text>
+  <text x="436" y="73" text-anchor="middle" font-size="16" font-weight="500" fill="#bac7d6">return slot</text>
+  <rect x="337" y="110" width="198" height="62" rx="8" fill="#1b2735" stroke="#536479" stroke-width="1.6"/>
+  <text x="436" y="136" text-anchor="middle" font-size="20" font-weight="500" fill="#e8edf5">Consumed</text>
+  <text x="436" y="159" text-anchor="middle" font-size="16" font-weight="500" fill="#bac7d6">return Unit</text>
+  <rect x="337" y="203" width="198" height="70" rx="8" fill="#1b2735" stroke="#ff9fae" stroke-width="1.6"/>
+  <text x="436" y="231" text-anchor="middle" font-size="20" font-weight="500" fill="#ff9fae">Rejected</text>
+  <text x="436" y="255" text-anchor="middle" font-size="16" font-weight="500" fill="#bac7d6">E0302 at scope exit</text>
+  </g>
+</svg>

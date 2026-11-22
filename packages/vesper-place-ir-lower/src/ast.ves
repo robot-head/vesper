@@ -1,0 +1,872 @@
+// The lowering input after check-data's context: the world's function
+// table, effect operation signatures, and every function body as flat
+// rows of expressions and patterns (tests/common/ir_lower_words.rs writes
+// them; its module comment is the format). Rows are in post-order, so a
+// row's children have smaller ids. Names are check-data symbols and types
+// are check-data type ids.
+
+use @vesper/check-data::util::{
+    inc,
+    n32,
+    u32_at,
+    u64_at,
+    w
+};
+use @vesper/check-data::world::{
+    set_by_symbol
+};
+use @vesper/check-data::input::{
+    Ctx,
+    Reader
+};
+
+const NONE32: u32 = 4294967295;
+const NONE64: u64 = 18446744073709551615;
+
+// Expression kinds (ir_lower_words.rs `X_*`).
+const X_FOREIGN: u8 = 0;
+const X_LITERAL: u8 = 1;
+const X_NAME: u8 = 2;
+const X_TUPLE: u8 = 3;
+const X_STRUCT: u8 = 4;
+const X_FIELD: u8 = 5;
+const X_INDEX: u8 = 6;
+const X_UNARY: u8 = 7;
+const X_BINARY: u8 = 8;
+const X_ASSIGN: u8 = 9;
+const X_BLOCK: u8 = 10;
+const X_CALL: u8 = 11;
+const X_TRY: u8 = 12;
+const X_IF: u8 = 13;
+const X_MATCH: u8 = 14;
+const X_LOOP: u8 = 15;
+const X_FOR: u8 = 16;
+const X_RANGE: u8 = 17;
+const X_BREAK: u8 = 18;
+const X_CONTINUE: u8 = 19;
+const X_RETURN: u8 = 20;
+const X_CLOSURE: u8 = 21;
+const X_HANDLE: u8 = 22;
+
+// Pattern kinds (the Place IR's: 0 wild, 1 bind, 2 literal, 3 tuple,
+// 4 constructor).
+const PT_BIND: u8 = 1;
+const PT_LITERAL: u8 = 2;
+const PT_TUPLE: u8 = 3;
+const PT_CTOR: u8 = 4;
+
+// Literal kinds.
+const LIT_STRING: u64 = 3;
+
+// One expression. By kind (lists are ranges of `xs`):
+// - literal: a = literal kind, b = low word (a string's symbol), c = high;
+// - name: a = symbol; tuple: xs[a..a+n] exprs;
+// - struct: a = name, xs[b..b+2n] (field, expr) pairs;
+// - field: a = base, b = field; index: a = base, b = index;
+// - unary: a = op, b = operand; binary, assign: a = op, b, c operands;
+// - block: xs[a..a+3n] (is let, pattern, expr) triples, b = tail or NONE;
+// - call: a = callee, x = intrinsic class, xs[b..b+2n] (pass, expr)
+//   pairs, xs[c..c+m] type ids;
+// - try, loop: a; if: a, b, c = else or NONE;
+// - match: a = value, xs[b..b+2n] (pattern, body) pairs;
+// - for: a = pattern, b = iter, c = body; range: a, b, c = inclusive;
+// - break, return: a = value or NONE;
+// - closure: a = pool entry, pms[b..b+n] params, c = body, xs[x..x+2m]
+//   moves (root, path id);
+// - handle: a = its `Hd` row.
+pub copy struct Ex {
+    kind: u8,
+    s0: u64,
+    s1: u64,
+    a: u64,
+    b: u64,
+    c: u64,
+    n: u64,
+    m: u64,
+    x: u64,
+}
+
+// One pattern: bind: a = name; literal: a = kind, b, c = words;
+// tuple: pxs[b..b+n] patterns; constructor: a = name, c = named,
+// pxs[b..b+2n] (field, pattern) pairs.
+pub copy struct Pt {
+    kind: u8,
+    s0: u64,
+    s1: u64,
+    a: u64,
+    b: u64,
+    c: u64,
+    n: u64,
+}
+
+// A path: psyms[a..a+n].
+pub copy struct PathR {
+    a: u64,
+    n: u64,
+}
+
+// A world function (`world.functions`, in key order).
+pub copy struct FnR {
+    key: u32,
+    name: u32,
+    has_body: bool,
+    body: u64,
+    // params pms[pa..pa+pn]
+    pa: u64,
+    pn: u64,
+    result: u32,
+    effects: u32,
+    // generics gens[ga..ga+gn]
+    ga: u64,
+    gn: u64,
+    // capabilities caps[ca..ca+2cn] (label, effect)
+    ca: u64,
+    cn: u64,
+    // the function a `return` leaves (a handler body's enclosing owner)
+    owner: u32,
+    // external captures exts[xa..xa+xn]
+    xa: u64,
+    xn: u64,
+}
+
+// A parameter: projections are path ids projs[qa..qa+qn].
+pub copy struct Pm {
+    name: u32,
+    pass: u8,
+    qa: u64,
+    qn: u64,
+    ty: u32,
+    s0: u64,
+    s1: u64,
+}
+
+pub copy struct Gn {
+    name: u32,
+    bound: u8,
+    row: bool,
+}
+
+// An effect declaration: generic names egens[ga..ga+gn], operations
+// eops[oa..oa+on].
+pub copy struct Ef {
+    name: u32,
+    linear: bool,
+    ga: u64,
+    gn: u64,
+    oa: u64,
+    on: u64,
+}
+
+// An effect operation: parameters pms[pa..pa+pn] and result type.
+pub copy struct Eop {
+    name: u32,
+    pa: u64,
+    pn: u64,
+    result: u32,
+}
+
+// A handler clause: patterns xs[pa..pa+pn], body.
+pub copy struct Cl {
+    name: u32,
+    pa: u64,
+    pn: u64,
+    body: u64,
+}
+
+// A handler (`ExprKind::Handle`): effect label (symbol + 1, or 0), name
+// and argument types xs[ta..ta+tn]; state pattern and expression (NONE
+// without state); the return clause cls[ret] and operation clauses
+// cls[ret+1..ret+1+on]; outgoing effects (a Row type); moves
+// xs[ma..ma+2mn].
+pub copy struct Hd {
+    pool: u64,
+    label: u32,
+    eff_name: u32,
+    ta: u64,
+    tn: u64,
+    has_state: bool,
+    spat: u64,
+    sexpr: u64,
+    body: u64,
+    ret: u64,
+    on: u64,
+    outgoing: u32,
+    ma: u64,
+    mn: u64,
+}
+
+pub struct Ast {
+    exs: ChunkSeq[Ex],
+    xs: ChunkSeq[u64],
+    pts: ChunkSeq[Pt],
+    pxs: ChunkSeq[u64],
+    fns: ChunkSeq[FnR],
+    pms: ChunkSeq[Pm],
+    projs: ChunkSeq[u64],
+    paths: ChunkSeq[PathR],
+    psyms: ChunkSeq[u32],
+    gens: ChunkSeq[Gn],
+    caps: ChunkSeq[u32],
+    exts: ChunkSeq[u32],
+    // symbol -> function index + 1
+    fn_by_key: ChunkSeq[u32],
+    effs: ChunkSeq[Ef],
+    egens: ChunkSeq[u32],
+    eops: ChunkSeq[Eop],
+    // symbol -> effect index + 1
+    eff_by_name: ChunkSeq[u32],
+    hds: ChunkSeq[Hd],
+    cls: ChunkSeq[Cl],
+    // payload pool entries (closure and handler expressions)
+    pub pool_count: u64,
+}
+
+impl Ast {
+    pub fn ex(in self, i: u64) -> Ex {
+        match self.exs.try_get(i) {
+            Option::Some(x) => x,
+            Option::None => Ex {
+                kind: X_FOREIGN,
+                s0: 0,
+                s1: 0,
+                a: NONE64,
+                b: NONE64,
+                c: NONE64,
+                n: 0,
+                m: 0,
+                x: 0
+            },
+        }
+    }
+
+    pub fn pt(in self, i: u64) -> Pt {
+        match self.pts.try_get(i) {
+            Option::Some(x) => x,
+            Option::None => Pt {
+                kind: 0,
+                s0: 0,
+                s1: 0,
+                a: 0,
+                b: 0,
+                c: 0,
+                n: 0
+            },
+        }
+    }
+
+    pub fn x(in self, i: u64) -> u64 {
+        u64_at(in self.xs, i)
+    }
+
+    pub fn px(in self, i: u64) -> u64 {
+        u64_at(in self.pxs, i)
+    }
+
+    pub fn function(in self, i: u64) -> FnR {
+        match self.fns.try_get(i) {
+            Option::Some(x) => x,
+            Option::None => FnR {
+                key: 0,
+                name: 0,
+                has_body: false,
+                body: NONE64,
+                pa: 0,
+                pn: 0,
+                result: 0,
+                effects: 0,
+                ga: 0,
+                gn: 0,
+                ca: 0,
+                cn: 0,
+                owner: 0,
+                xa: 0,
+                xn: 0
+            },
+        }
+    }
+
+    pub fn param(in self, i: u64) -> Pm {
+        match self.pms.try_get(i) {
+            Option::Some(x) => x,
+            Option::None => Pm {
+                name: 0,
+                pass: 0,
+                qa: 0,
+                qn: 0,
+                ty: 0,
+                s0: 0,
+                s1: 0
+            },
+        }
+    }
+
+    pub fn generic(in self, i: u64) -> Gn {
+        match self.gens.try_get(i) {
+            Option::Some(x) => x,
+            Option::None => Gn {
+                name: 0,
+                bound: 0,
+                row: false
+            },
+        }
+    }
+
+    pub fn path(in self, i: u64) -> PathR {
+        match self.paths.try_get(i) {
+            Option::Some(x) => x,
+            Option::None => PathR {
+                a: 0,
+                n: 0
+            },
+        }
+    }
+
+    pub fn psym(in self, i: u64) -> u32 {
+        u32_at(in self.psyms, i)
+    }
+
+    pub fn proj(in self, i: u64) -> u64 {
+        u64_at(in self.projs, i)
+    }
+
+    pub fn cap(in self, i: u64) -> u32 {
+        u32_at(in self.caps, i)
+    }
+
+    // The index of the world function keyed `s`, or NONE.
+    pub fn fn_index(in self, s: u32) -> u64 {
+        if s == NONE32 {
+            return NONE64;
+        }
+        let x = u32_at(in self.fn_by_key, w(s));
+        if x == 0 {
+            NONE64
+        } else {
+            w(wrapping_sub(x, 1))
+        }
+    }
+
+    pub fn effect_decl(in self, i: u64) -> Ef {
+        match self.effs.try_get(i) {
+            Option::Some(x) => x,
+            Option::None => Ef {
+                name: 0,
+                linear: false,
+                ga: 0,
+                gn: 0,
+                oa: 0,
+                on: 0
+            },
+        }
+    }
+
+    pub fn egen(in self, i: u64) -> u32 {
+        u32_at(in self.egens, i)
+    }
+
+    pub fn eop(in self, i: u64) -> Eop {
+        match self.eops.try_get(i) {
+            Option::Some(x) => x,
+            Option::None => Eop {
+                name: 0,
+                pa: 0,
+                pn: 0,
+                result: 0
+            },
+        }
+    }
+
+    pub fn handler(in self, i: u64) -> Hd {
+        match self.hds.try_get(i) {
+            Option::Some(x) => x,
+            Option::None => Hd {
+                pool: 0,
+                label: 0,
+                eff_name: 0,
+                ta: 0,
+                tn: 0,
+                has_state: false,
+                spat: NONE64,
+                sexpr: NONE64,
+                body: NONE64,
+                ret: 0,
+                on: 0,
+                outgoing: 0,
+                ma: 0,
+                mn: 0
+            },
+        }
+    }
+
+    pub fn clause(in self, i: u64) -> Cl {
+        match self.cls.try_get(i) {
+            Option::Some(x) => x,
+            Option::None => Cl {
+                name: 0,
+                pa: 0,
+                pn: 0,
+                body: NONE64
+            },
+        }
+    }
+
+    // Appends a parameter row; returns its index.
+    pub fn add_param(inout self, p: Pm) -> u64 {
+        let i = self.pms.len();
+        self.pms.push(p);
+        i
+    }
+
+    // Appends a function row (a nested closure or handler function).
+    pub fn add_function(inout self, f: FnR) {
+        self.fns.push(f);
+    }
+
+    // Appends a capability pair (label, effect).
+    pub fn add_cap(inout self, label: u32, eff: u32) {
+        self.caps.push(label);
+        self.caps.push(eff);
+    }
+
+    // Appends an external capture name.
+    pub fn add_ext(inout self, s: u32) {
+        self.exts.push(s);
+    }
+
+    pub fn ext(in self, i: u64) -> u32 {
+        u32_at(in self.exts, i)
+    }
+
+    // The index of the effect named `s`, or NONE.
+    pub fn effect_index(in self, s: u32) -> u64 {
+        if s == NONE32 {
+            return NONE64;
+        }
+        let x = u32_at(in self.eff_by_name, w(s));
+        if x == 0 {
+            NONE64
+        } else {
+            w(wrapping_sub(x, 1))
+        }
+    }
+}
+
+fn sym(in c: Ctx, x: u64) -> u32 {
+    u32_at(in c.nmap, x)
+}
+
+fn tyw(in c: Ctx, x: u64) -> u32 {
+    u32_at(in c.tmap, x)
+}
+
+fn read_path(inout r: Reader, in b: Slice[u8], in c: Ctx, inout a: Ast) -> u64 {
+    let k = r.word(in b);
+    let at = a.psyms.len();
+    for i in 0..k {
+        a.psyms.push(sym(in c, r.word(in b)));
+    }
+    let id = a.paths.len();
+    a
+        .paths
+        .push(
+        PathR {
+            a: at,
+            n: k
+        }
+    );
+    id
+}
+
+// n, then n parameters (name, pass, projections, type, span).
+fn read_params(inout r: Reader, in b: Slice[u8], in c: Ctx, inout a: Ast) -> u64 {
+    let n = r.word(in b);
+    for i in 0..n {
+        let name = sym(in c, r.word(in b));
+        let pass = wrapping_u8(r.word(in b));
+        let qn = r.word(in b);
+        let mut ids: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        for j in 0..qn {
+            let id = read_path(inout r, in b, in c, inout a);
+            ids.push(id);
+        }
+        let qa = a.projs.len();
+        for j in 0..qn {
+            a.projs.push(u64_at(in ids, j));
+        }
+        let ty = tyw(in c, r.word(in b));
+        let s0 = r.word(in b);
+        let s1 = r.word(in b);
+        a
+            .pms
+            .push(
+            Pm {
+                name: name,
+                pass: pass,
+                qa: qa,
+                qn: qn,
+                ty: ty,
+                s0: s0,
+                s1: s1
+            }
+        );
+    }
+    n
+}
+
+fn read_literal(inout r: Reader, in b: Slice[u8], in c: Ctx, inout x: Ex) {
+    x.a = r.word(in b);
+    x.b = r.word(in b);
+    if x.a == LIT_STRING {
+        x.b = w(sym(in c, x.b));
+    }
+    x.c = r.word(in b);
+}
+
+fn read_pattern(inout r: Reader, in b: Slice[u8], in c: Ctx, inout a: Ast) {
+    let kind = wrapping_u8(r.word(in b));
+    let mut p = Pt {
+        kind: kind,
+        s0: r.word(in b),
+        s1: r.word(in b),
+        a: 0,
+        b: 0,
+        c: 0,
+        n: 0
+    };
+    if kind == PT_BIND {
+        p.a = w(sym(in c, r.word(in b)));
+    } else if kind == PT_LITERAL {
+        p.a = r.word(in b);
+        p.b = r.word(in b);
+        if p.a == LIT_STRING {
+            p.b = w(sym(in c, p.b));
+        }
+        p.c = r.word(in b);
+    } else if kind == PT_TUPLE {
+        p.n = r.word(in b);
+        p.b = a.pxs.len();
+        for i in 0..p.n {
+            a.pxs.push(r.word(in b));
+        }
+    } else if kind == PT_CTOR {
+        p.a = w(sym(in c, r.word(in b)));
+        p.c = r.word(in b);
+        p.n = r.word(in b);
+        p.b = a.pxs.len();
+        for i in 0..p.n {
+            a.pxs.push(w(sym(in c, r.word(in b))));
+            a.pxs.push(r.word(in b));
+        }
+    }
+    a.pts.push(p);
+}
+
+fn read_expr(inout r: Reader, in b: Slice[u8], in c: Ctx, inout a: Ast) {
+    let kind = wrapping_u8(r.word(in b));
+    let mut x = Ex {
+        kind: kind,
+        s0: r.word(in b),
+        s1: r.word(in b),
+        a: NONE64,
+        b: NONE64,
+        c: NONE64,
+        n: 0,
+        m: 0,
+        x: 0
+    };
+    if kind == X_LITERAL {
+        read_literal(inout r, in b, in c, inout x);
+    } else if kind == X_NAME {
+        x.a = w(sym(in c, r.word(in b)));
+    } else if kind == X_TUPLE {
+        x.n = r.word(in b);
+        x.a = a.xs.len();
+        for i in 0..x.n {
+            a.xs.push(r.word(in b));
+        }
+    } else if kind == X_STRUCT {
+        x.a = w(sym(in c, r.word(in b)));
+        x.n = r.word(in b);
+        x.b = a.xs.len();
+        for i in 0..x.n {
+            a.xs.push(w(sym(in c, r.word(in b))));
+            a.xs.push(r.word(in b));
+        }
+    } else if kind == X_FIELD {
+        x.a = r.word(in b);
+        x.b = w(sym(in c, r.word(in b)));
+    } else if kind == X_INDEX {
+        x.a = r.word(in b);
+        x.b = r.word(in b);
+    } else if kind == X_UNARY {
+        x.a = w(sym(in c, r.word(in b)));
+        x.b = r.word(in b);
+    } else if kind == X_BINARY || kind == X_ASSIGN {
+        x.a = w(sym(in c, r.word(in b)));
+        x.b = r.word(in b);
+        x.c = r.word(in b);
+    } else if kind == X_BLOCK {
+        x.n = r.word(in b);
+        x.a = a.xs.len();
+        for i in 0..x.n {
+            let is_let = r.word(in b);
+            a.xs.push(is_let);
+            if is_let == 1 {
+                a.xs.push(r.word(in b));
+            } else {
+                a.xs.push(NONE64);
+            }
+            a.xs.push(r.word(in b));
+        }
+        x.b = r.word(in b);
+    } else if kind == X_CALL {
+        x.a = r.word(in b);
+        x.x = r.word(in b);
+        x.n = r.word(in b);
+        x.b = a.xs.len();
+        for i in 0..x.n {
+            a.xs.push(r.word(in b));
+            a.xs.push(r.word(in b));
+        }
+        x.m = r.word(in b);
+        x.c = a.xs.len();
+        for i in 0..x.m {
+            a.xs.push(w(tyw(in c, r.word(in b))));
+        }
+    } else if kind == X_TRY || kind == X_LOOP || kind == X_BREAK || kind == X_RETURN {
+        x.a = r.word(in b);
+    } else if kind == X_IF || kind == X_FOR || kind == X_RANGE {
+        x.a = r.word(in b);
+        x.b = r.word(in b);
+        x.c = r.word(in b);
+    } else if kind == X_MATCH {
+        x.a = r.word(in b);
+        x.n = r.word(in b);
+        x.b = a.xs.len();
+        for i in 0..x.n {
+            a.xs.push(r.word(in b));
+            a.xs.push(r.word(in b));
+        }
+    } else if kind == X_CLOSURE {
+        x.a = r.word(in b);
+        x.b = a.pms.len();
+        x.n = read_params(inout r, in b, in c, inout a);
+        x.c = r.word(in b);
+        x.m = r.word(in b);
+        x.x = a.xs.len();
+        read_moves(inout r, in b, in c, inout a, x.m);
+    } else if kind == X_HANDLE {
+        x.a = a.hds.len();
+        read_handler(inout r, in b, in c, inout a);
+    }
+    a.exs.push(x);
+}
+
+// m moves (root, path) into xs as (root symbol, path id) pairs.
+fn read_moves(inout r: Reader, in b: Slice[u8], in c: Ctx, inout a: Ast, m: u64) {
+    for i in 0..m {
+        let root = sym(in c, r.word(in b));
+        let p = read_path(inout r, in b, in c, inout a);
+        a.xs.push(w(root));
+        a.xs.push(p);
+    }
+}
+
+fn read_clause(inout r: Reader, in b: Slice[u8], in c: Ctx, inout a: Ast) {
+    let name = sym(in c, r.word(in b));
+    let pn = r.word(in b);
+    let pa = a.xs.len();
+    for i in 0..pn {
+        a.xs.push(r.word(in b));
+    }
+    let body = r.word(in b);
+    a
+        .cls
+        .push(
+        Cl {
+            name: name,
+            pa: pa,
+            pn: pn,
+            body: body
+        }
+    );
+}
+
+fn read_handler(inout r: Reader, in b: Slice[u8], in c: Ctx, inout a: Ast) {
+    let pool = r.word(in b);
+    let lw = r.word(in b);
+    let label = if lw == 0 {
+        0
+    } else {
+        inc32w(sym(in c, wrapping_sub(lw, 1)))
+    };
+    let eff_name = sym(in c, r.word(in b));
+    let tn = r.word(in b);
+    let ta = a.xs.len();
+    for i in 0..tn {
+        a.xs.push(w(tyw(in c, r.word(in b))));
+    }
+    let has_state = r.word(in b) != 0;
+    let spat = r.word(in b);
+    let sexpr = r.word(in b);
+    let body = r.word(in b);
+    let on = r.word(in b);
+    let ret = a.cls.len();
+    for i in 0..inc(on) {
+        read_clause(inout r, in b, in c, inout a);
+    }
+    let outgoing = tyw(in c, r.word(in b));
+    let mn = r.word(in b);
+    let ma = a.xs.len();
+    read_moves(inout r, in b, in c, inout a, mn);
+    a
+        .hds
+        .push(
+        Hd {
+            pool: pool,
+            label: label,
+            eff_name: eff_name,
+            ta: ta,
+            tn: tn,
+            has_state: has_state,
+            spat: spat,
+            sexpr: sexpr,
+            body: body,
+            ret: ret,
+            on: on,
+            outgoing: outgoing,
+            ma: ma,
+            mn: mn
+        }
+    );
+}
+
+fn inc32w(x: u32) -> u32 {
+    wrapping_add(x, 1)
+}
+
+// The lowering section, after `read_ctx`.
+pub fn read_ast(inout r: Reader, in b: Slice[u8], in c: Ctx) -> Ast {
+    let mut a = Ast {
+        exs: ChunkSeq::new[Ex](),
+        xs: ChunkSeq::new[u64](),
+        pts: ChunkSeq::new[Pt](),
+        pxs: ChunkSeq::new[u64](),
+        fns: ChunkSeq::new[FnR](),
+        pms: ChunkSeq::new[Pm](),
+        projs: ChunkSeq::new[u64](),
+        paths: ChunkSeq::new[PathR](),
+        psyms: ChunkSeq::new[u32](),
+        gens: ChunkSeq::new[Gn](),
+        caps: ChunkSeq::new[u32](),
+        fn_by_key: ChunkSeq::new[u32](),
+        effs: ChunkSeq::new[Ef](),
+        egens: ChunkSeq::new[u32](),
+        eops: ChunkSeq::new[Eop](),
+        eff_by_name: ChunkSeq::new[u32](),
+        hds: ChunkSeq::new[Hd](),
+        cls: ChunkSeq::new[Cl](),
+        pool_count: 0,
+        exts: ChunkSeq::new[u32](),
+    };
+    a.pool_count = r.word(in b);
+    let nf = r.word(in b);
+    for i in 0..nf {
+        let key = sym(in c, r.word(in b));
+        let name = sym(in c, r.word(in b));
+        let has_body = r.word(in b) != 0;
+        let body = r.word(in b);
+        let pa = a.pms.len();
+        let pn = read_params(inout r, in b, in c, inout a);
+        let result = tyw(in c, r.word(in b));
+        let effects = tyw(in c, r.word(in b));
+        let gn = r.word(in b);
+        let ga = a.gens.len();
+        for j in 0..gn {
+            let g = Gn {
+                name: sym(in c, r.word(in b)),
+                bound: wrapping_u8(r.word(in b)),
+                row: r.word(in b) != 0
+            };
+            a.gens.push(g);
+        }
+        let cn = r.word(in b);
+        let ca = a.caps.len();
+        for j in 0..cn {
+            a.caps.push(sym(in c, r.word(in b)));
+            a.caps.push(sym(in c, r.word(in b)));
+        }
+        a
+            .fns
+            .push(
+            FnR {
+                key: key,
+                name: name,
+                has_body: has_body,
+                body: body,
+                pa: pa,
+                pn: pn,
+                result: result,
+                effects: effects,
+                ga: ga,
+                gn: gn,
+                ca: ca,
+                cn: cn,
+                owner: name,
+                xa: 0,
+                xn: 0
+            }
+        );
+        set_by_symbol(inout a.fn_by_key, key, n32(inc(i)));
+    }
+    let ne = r.word(in b);
+    for i in 0..ne {
+        let name = sym(in c, r.word(in b));
+        let linear = r.word(in b) != 0;
+        let gn = r.word(in b);
+        let ga = a.egens.len();
+        for j in 0..gn {
+            a.egens.push(sym(in c, r.word(in b)));
+        }
+        let on = r.word(in b);
+        let oa = a.eops.len();
+        for j in 0..on {
+            let op = sym(in c, r.word(in b));
+            let pa = a.pms.len();
+            let pn = read_params(inout r, in b, in c, inout a);
+            let result = tyw(in c, r.word(in b));
+            a
+                .eops
+                .push(
+                Eop {
+                    name: op,
+                    pa: pa,
+                    pn: pn,
+                    result: result
+                }
+            );
+        }
+        a
+            .effs
+            .push(
+            Ef {
+                name: name,
+                linear: linear,
+                ga: ga,
+                gn: gn,
+                oa: oa,
+                on: on
+            }
+        );
+        set_by_symbol(inout a.eff_by_name, name, n32(inc(i)));
+    }
+    let np = r.word(in b);
+    for i in 0..np {
+        read_pattern(inout r, in b, in c, inout a);
+    }
+    let nx = r.word(in b);
+    for i in 0..nx {
+        read_expr(inout r, in b, in c, inout a);
+    }
+    a
+}

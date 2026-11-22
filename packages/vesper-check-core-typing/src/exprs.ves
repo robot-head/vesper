@@ -51,8 +51,8 @@ use @vesper/check-data::input::{
 };
 use self::ints::{
     Lit,
-    above_i64,
     default_fits,
+    default_of,
     fits,
     lit_max
 };
@@ -909,10 +909,7 @@ fn int_kind(in ck: Ck, ty: u32) -> u32 {
     let n = ck.c.types.node(ty);
     let k = ck.c.world.k;
     if n.kind == K_LIT {
-        if above_i64(lit_of(n)) {
-            return k.u64_;
-        }
-        return k.i64_;
+        return default_of(k, lit_of(n));
     }
     if n.kind == K_NAMED && k.is_integer(n.name) {
         return n.name;
@@ -921,11 +918,7 @@ fn int_kind(in ck: Ck, ty: u32) -> u32 {
 }
 
 fn default_kind(in ck: Ck, v: Lit) -> u32 {
-    if above_i64(v) {
-        ck.c.world.k.u64_
-    } else {
-        ck.c.world.k.i64_
-    }
+    default_of(ck.c.world.k, v)
 }
 
 fn bounds_of(in ck: Ck, f: FnSig) -> Bounds {

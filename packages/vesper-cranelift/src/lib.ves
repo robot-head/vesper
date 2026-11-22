@@ -119,6 +119,20 @@
 // |     fn vcl_call_module(call: u64) -> ForeignVal[Option[Module]];
 // |     fn vcl_call_return_builder(call: u64, sink b: Builder) -> ForeignVal[Unit];
 // |     fn vcl_call_return_module(call: u64, sink m: Module) -> ForeignVal[Unit];
+// |     fn vcl_sig_param_ext(inout m: Module, sig: u32, ty: u32, ext: u32) -> ForeignVal[u32];
+// |     fn vcl_sig_return_ext(inout m: Module, sig: u32, ty: u32, ext: u32) -> ForeignVal[u32];
+// |     fn vcl_define_function_bytes(inout m: Module, func: u32, align: u64, nocapture in bytes: CSlice[u8], nocapture in relocs: CSlice[u64]) -> ForeignVal[u32];
+// |     fn vcl_module_function_at(inout m: Module, i: u32) -> ForeignVal[u32];
+// |     fn vcl_module_function_linkage(inout m: Module, func: u32) -> ForeignVal[u32];
+// |     fn vcl_module_function_signature(inout m: Module, func: u32) -> ForeignVal[u32];
+// |     fn vcl_module_data_count(in m: Module) -> ForeignVal[u32];
+// |     fn vcl_module_data_at(inout m: Module, i: u32) -> ForeignVal[u32];
+// |     fn vcl_module_data_name(in m: Module, data: u32, nocapture inout out: CSlice[u8]) -> ForeignVal[u64];
+// |     fn vcl_module_data_linkage(inout m: Module, data: u32) -> ForeignVal[u32];
+// |     fn vcl_module_last_clif(in m: Module, offset: u64, nocapture inout out: CSlice[u8]) -> ForeignVal[u64];
+// |     fn vcl_module_last_relocs(in m: Module, nocapture inout out: CSlice[u64]) -> ForeignVal[u64];
+// |     fn vcl_module_last_call_sites(in m: Module, nocapture inout out: CSlice[u64]) -> ForeignVal[u64];
+// |     fn vcl_module_last_frame_size(in m: Module) -> ForeignVal[u64];
 // | }
 //
 // @vesper/cranelift: Cranelift 0.125 from Vesper (self-hosting wave SH0,
@@ -355,6 +369,39 @@ pub fn module_keep_clif(inout m: Module, keep: bool) eff [Ffi[Cranelift]] {
 }
 pub fn module_code_bytes(in m: Module) -> u64 eff [Ffi[Cranelift]] {
     Cranelift::vcl_module_code_bytes(in m)
+}
+// The CLIF text of every function defined since `module_keep_clif(m,
+// true)`, in definition order (SH4 lane 14).
+pub fn module_clif(in m: Module) -> ChunkSeq[u8] eff [Ffi[Cranelift]] {
+    let mut none: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let n = Cranelift::vcl_module_clif(in m, 0, inout none.as_slice_mut());
+    let mut out: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](n);
+    for _ in 0..n {
+        out.push(0);
+    }
+    Cranelift::vcl_module_clif(in m, 0, inout out.as_slice_mut());
+    out
+}
+// The module's first error (empty if none).
+pub fn module_error_text(in m: Module) -> ChunkSeq[u8] eff [Ffi[Cranelift]] {
+    let mut none: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let n = Cranelift::vcl_module_error(in m, inout none.as_slice_mut());
+    let mut out: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](n);
+    for _ in 0..n {
+        out.push(0);
+    }
+    Cranelift::vcl_module_error(in m, inout out.as_slice_mut());
+    out
+}
+// The error of the last `module_new` that returned None.
+pub fn new_error_text() -> ChunkSeq[u8] eff [Ffi[Cranelift]] {
+    let n = new_error_len();
+    let mut out: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](n);
+    for _ in 0..n {
+        out.push(0);
+    }
+    Cranelift::vcl_new_error(inout out.as_slice_mut());
+    out
 }
 pub fn sig_new(inout m: Module, call_conv: u32) -> SigId eff [Ffi[Cranelift]] {
     SigId {
@@ -1223,4 +1270,301 @@ pub fn ty_of_word(w: u64) -> Ty {
     Ty {
         code: wrapping_u32(w)
     }
+}
+
+// ---------------------------------------------------------------------------
+// The calls SH4's lanes lacked (self-hosting wave SH5, lane 2, #1325):
+// parameter extension, functions defined from machine code, declaration
+// listing, the vector float conversions and read-back of the last compiled
+// or defined function. A relocation is five words: the code offset, the
+// kind (codes.rs `RELOC`), the target kind (`reloc_target_*`), the target
+// and the addend; `module_last_relocs` gives the words
+// `define_function_bytes` takes.
+
+pub fn ext_none() -> u32 {
+    0
+}
+pub fn ext_uext() -> u32 {
+    1
+}
+pub fn ext_sext() -> u32 {
+    2
+}
+// `sig_param` with extension `ext` (`ext_none`, `ext_uext`, `ext_sext`).
+pub fn sig_param_ext(inout m: Module, sig: SigId, ty: Ty, ext: u32) eff [Ffi[Cranelift]] {
+    Cranelift::vcl_sig_param_ext(inout m, sig.id, ty.code, ext);
+}
+pub fn sig_return_ext(inout m: Module, sig: SigId, ty: Ty, ext: u32) eff [Ffi[Cranelift]] {
+    Cranelift::vcl_sig_return_ext(inout m, sig.id, ty.code, ext);
+}
+// Define `func` as machine code `bytes` aligned to `align` with relocations
+// `relocs`; false if it failed (`module_error_len`).
+pub fn define_function_bytes(
+    inout m: Module,
+    func: FuncId,
+    align: u64,
+    in bytes: Slice[u8],
+    in relocs: Slice[u64],
+) -> bool eff [Ffi[Cranelift]] {
+    Cranelift::vcl_define_function_bytes(inout m, func.id, align, in bytes, in relocs) == 0
+}
+pub fn reloc_target_function() -> u64 {
+    0
+}
+pub fn reloc_target_data() -> u64 {
+    1
+}
+pub fn reloc_target_libcall() -> u64 {
+    2
+}
+pub fn reloc_target_known_symbol() -> u64 {
+    3
+}
+pub fn reloc_target_function_offset() -> u64 {
+    4
+}
+pub fn reloc_target_user_name() -> u64 {
+    5
+}
+// The `i`th declared function (`module_function_count` says how many).
+pub fn module_function_at(inout m: Module, i: u32) -> Option[FuncId] eff [Ffi[Cranelift]] {
+    let id = Cranelift::vcl_module_function_at(inout m, i);
+    if id == invalid() {
+        None
+    } else {
+        Some(
+            FuncId {
+                id: id
+            }
+        )
+    }
+}
+// The linkage code of declared function `func`.
+pub fn module_function_linkage(inout m: Module, func: FuncId) -> u32 eff [Ffi[Cranelift]] {
+    Cranelift::vcl_module_function_linkage(inout m, func.id)
+}
+// Declared function `func`'s signature, added to the module's signatures.
+pub fn module_function_signature(inout m: Module, func: FuncId) -> SigId eff [Ffi[Cranelift]] {
+    SigId {
+        id: Cranelift::vcl_module_function_signature(inout m, func.id)
+    }
+}
+pub fn module_data_count(in m: Module) -> u32 eff [Ffi[Cranelift]] {
+    Cranelift::vcl_module_data_count(in m)
+}
+pub fn module_data_at(inout m: Module, i: u32) -> Option[DataId] eff [Ffi[Cranelift]] {
+    let id = Cranelift::vcl_module_data_at(inout m, i);
+    if id == invalid() {
+        None
+    } else {
+        Some(
+            DataId {
+                id: id
+            }
+        )
+    }
+}
+pub fn module_data_name(in m: Module, data: DataId) -> ChunkSeq[u8] eff [Ffi[Cranelift]] {
+    let mut none: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let n = Cranelift::vcl_module_data_name(in m, data.id, inout none.as_slice_mut());
+    let mut out: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](n);
+    for _ in 0..n {
+        out.push(0);
+    }
+    Cranelift::vcl_module_data_name(in m, data.id, inout out.as_slice_mut());
+    out
+}
+// Declared data `data`'s linkage code, with bit 8 set when it is writable
+// and bit 9 when it is thread-local.
+pub fn module_data_linkage(inout m: Module, data: DataId) -> u32 eff [Ffi[Cranelift]] {
+    Cranelift::vcl_module_data_linkage(inout m, data.id)
+}
+// The CLIF text of the last compiled or defined function (kept while
+// `module_keep_clif` is on).
+pub fn module_last_clif(in m: Module) -> ChunkSeq[u8] eff [Ffi[Cranelift]] {
+    let mut none: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let n = Cranelift::vcl_module_last_clif(in m, 0, inout none.as_slice_mut());
+    let mut out: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](n);
+    for _ in 0..n {
+        out.push(0);
+    }
+    Cranelift::vcl_module_last_clif(in m, 0, inout out.as_slice_mut());
+    out
+}
+pub fn module_last_relocs(in m: Module) -> ChunkSeq[u64] eff [Ffi[Cranelift]] {
+    let mut none: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let n = Cranelift::vcl_module_last_relocs(in m, inout none.as_slice_mut());
+    let mut out: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+    for _ in 0..n {
+        out.push(0);
+    }
+    Cranelift::vcl_module_last_relocs(in m, inout out.as_slice_mut());
+    out
+}
+// Two words per call site: the return address's offset and the frame
+// offset at the call (`u64::MAX` when the backend gives none).
+pub fn module_last_call_sites(in m: Module) -> ChunkSeq[u64] eff [Ffi[Cranelift]] {
+    let mut none: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let n = Cranelift::vcl_module_last_call_sites(in m, inout none.as_slice_mut());
+    let mut out: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+    for _ in 0..n {
+        out.push(0);
+    }
+    Cranelift::vcl_module_last_call_sites(in m, inout out.as_slice_mut());
+    out
+}
+pub fn module_last_frame_size(in m: Module) -> u64 eff [Ffi[Cranelift]] {
+    Cranelift::vcl_module_last_frame_size(in m)
+}
+pub fn ins_fvpromote_low(inout b: Builder, x: Value) -> Value eff [Ffi[Cranelift]] {
+    ins_unary(inout b, 20, x)
+}
+pub fn ins_fvdemote(inout b: Builder, x: Value) -> Value eff [Ffi[Cranelift]] {
+    ins_unary(inout b, 21, x)
+}
+
+// Typed entity words: every entity a host lends as a `call_arg` word or
+// takes back as a `call_result` word, so a hook never handles a bare `u64`
+// (the `u64` forms above stay for compatibility).
+pub fn var_of_word(w: u64) -> Var {
+    Var {
+        id: wrapping_u32(w)
+    }
+}
+pub fn var_word(x: Var) -> u64 {
+    widen_u64(x.id)
+}
+pub fn is_invalid_var(x: Var) -> bool {
+    x.id == invalid()
+}
+pub fn slot_of_word(w: u64) -> Slot {
+    Slot {
+        id: wrapping_u32(w)
+    }
+}
+pub fn slot_word(x: Slot) -> u64 {
+    widen_u64(x.id)
+}
+pub fn is_invalid_slot(x: Slot) -> bool {
+    x.id == invalid()
+}
+pub fn func_ref_of_word(w: u64) -> FuncRef {
+    FuncRef {
+        id: wrapping_u32(w)
+    }
+}
+pub fn func_ref_word(x: FuncRef) -> u64 {
+    widen_u64(x.id)
+}
+pub fn is_invalid_func_ref(x: FuncRef) -> bool {
+    x.id == invalid()
+}
+pub fn sig_ref_of_word(w: u64) -> SigRef {
+    SigRef {
+        id: wrapping_u32(w)
+    }
+}
+pub fn sig_ref_word(x: SigRef) -> u64 {
+    widen_u64(x.id)
+}
+pub fn is_invalid_sig_ref(x: SigRef) -> bool {
+    x.id == invalid()
+}
+pub fn global_value_of_word(w: u64) -> GlobalValue {
+    GlobalValue {
+        id: wrapping_u32(w)
+    }
+}
+pub fn global_value_word(x: GlobalValue) -> u64 {
+    widen_u64(x.id)
+}
+pub fn is_invalid_global_value(x: GlobalValue) -> bool {
+    x.id == invalid()
+}
+pub fn func_of_word(w: u64) -> FuncId {
+    FuncId {
+        id: wrapping_u32(w)
+    }
+}
+pub fn func_word(x: FuncId) -> u64 {
+    widen_u64(x.id)
+}
+pub fn is_invalid_func(x: FuncId) -> bool {
+    x.id == invalid()
+}
+pub fn data_of_word(w: u64) -> DataId {
+    DataId {
+        id: wrapping_u32(w)
+    }
+}
+pub fn data_word(x: DataId) -> u64 {
+    widen_u64(x.id)
+}
+pub fn is_invalid_data(x: DataId) -> bool {
+    x.id == invalid()
+}
+pub fn sig_of_word(w: u64) -> SigId {
+    SigId {
+        id: wrapping_u32(w)
+    }
+}
+pub fn sig_word(x: SigId) -> u64 {
+    widen_u64(x.id)
+}
+pub fn is_invalid_sig(x: SigId) -> bool {
+    x.id == invalid()
+}
+pub fn ty_word(t: Ty) -> u64 {
+    widen_u64(t.code)
+}
+pub fn call_arg_value(call: u64, i: u64) -> Value eff [Ffi[Cranelift]] {
+    value_of_word(Cranelift::vcl_call_arg(call, i))
+}
+pub fn call_arg_block(call: u64, i: u64) -> Block eff [Ffi[Cranelift]] {
+    block_of_word(Cranelift::vcl_call_arg(call, i))
+}
+pub fn call_arg_var(call: u64, i: u64) -> Var eff [Ffi[Cranelift]] {
+    var_of_word(Cranelift::vcl_call_arg(call, i))
+}
+pub fn call_arg_slot(call: u64, i: u64) -> Slot eff [Ffi[Cranelift]] {
+    slot_of_word(Cranelift::vcl_call_arg(call, i))
+}
+pub fn call_arg_func_ref(call: u64, i: u64) -> FuncRef eff [Ffi[Cranelift]] {
+    func_ref_of_word(Cranelift::vcl_call_arg(call, i))
+}
+pub fn call_arg_global_value(call: u64, i: u64) -> GlobalValue eff [Ffi[Cranelift]] {
+    global_value_of_word(Cranelift::vcl_call_arg(call, i))
+}
+pub fn call_arg_func(call: u64, i: u64) -> FuncId eff [Ffi[Cranelift]] {
+    func_of_word(Cranelift::vcl_call_arg(call, i))
+}
+pub fn call_arg_data(call: u64, i: u64) -> DataId eff [Ffi[Cranelift]] {
+    data_of_word(Cranelift::vcl_call_arg(call, i))
+}
+pub fn call_arg_ty(call: u64, i: u64) -> Ty eff [Ffi[Cranelift]] {
+    ty_of_word(Cranelift::vcl_call_arg(call, i))
+}
+pub fn call_result_block(call: u64, x: Block) eff [Ffi[Cranelift]] {
+    Cranelift::vcl_call_result(call, block_word(x));
+}
+pub fn call_result_var(call: u64, x: Var) eff [Ffi[Cranelift]] {
+    Cranelift::vcl_call_result(call, var_word(x));
+}
+pub fn call_result_slot(call: u64, x: Slot) eff [Ffi[Cranelift]] {
+    Cranelift::vcl_call_result(call, slot_word(x));
+}
+pub fn call_result_func_ref(call: u64, x: FuncRef) eff [Ffi[Cranelift]] {
+    Cranelift::vcl_call_result(call, func_ref_word(x));
+}
+pub fn call_result_global_value(call: u64, x: GlobalValue) eff [Ffi[Cranelift]] {
+    Cranelift::vcl_call_result(call, global_value_word(x));
+}
+pub fn call_result_func(call: u64, x: FuncId) eff [Ffi[Cranelift]] {
+    Cranelift::vcl_call_result(call, func_word(x));
+}
+pub fn call_result_data(call: u64, x: DataId) eff [Ffi[Cranelift]] {
+    Cranelift::vcl_call_result(call, data_word(x));
+}
+pub fn call_result_ty(call: u64, x: Ty) eff [Ffi[Cranelift]] {
+    Cranelift::vcl_call_result(call, ty_word(x));
 }

@@ -1,11 +1,53 @@
 load("//tools/bazel:defs.bzl", "vesper_crate")
+load("//tools/bazel:vesper_port.bzl", "VESPER_TARGET", "vesper_package", "vesper_port_object")
+
+# The saturation engine is the Vesper port (Rust-exit SH6 lane 18, #1413):
+# build.rs links the object built here from the Loom package in vesper/ and
+# checks port/binding.rs against the generated binding. The divergent build
+# stays compiling here; crates/vesper-fusion/port/test-port.sh asserts which
+# test catches it.
+vesper_package(
+    name = "port_package",
+    srcs = glob(["vesper/src/**/*.ves"]),
+    manifest = "vesper/Loom.toml",
+)
+
+vesper_port_object(
+    name = "fusion_vesper",
+    library = "fusion",
+    package = ":port_package",
+    target = VESPER_TARGET,
+)
+
+filegroup(
+    name = "fusion_vesper_binding",
+    srcs = [":fusion_vesper"],
+    output_group = "rust_binding",
+)
+
+vesper_port_object(
+    name = "fusion_vesper_divergent_engine",
+    edit_src = "vesper/src/engine.ves",
+    edits = {"self.emit_step(j, at32(in self.a_l, w(j)) == src);": "self.emit_step(j, at32(in self.a_l, w(j)) != src);"},
+    library = "fusion",
+    package = ":port_package",
+    target = VESPER_TARGET,
+)
 
 vesper_crate(
-    # Fusion runs egglog with proofs on (rewrite witnesses), which is slow in
+    build_script_data = [
+        ":fusion_vesper",
+        ":fusion_vesper_binding",
+    ],
+    build_script_env = {
+        # rules_rust already makes these execpaths absolute.
+        "VESPER_PORT_OBJECT": "$(execpath :fusion_vesper)",
+        "VESPER_PORT_GENERATED_BINDING": "$(execpath :fusion_vesper_binding)",
+    },
+    # The differential runs egglog with proofs on, which is slow in
     # unoptimized builds.
     test_timeouts = {
-        "test/dsp_fusion": "long",
-        "test/tensor_fusion": "long",
+        "test/egglog_differential": "long",
     },
     # Lean resolves symlinked runfiles to the source tree and then rejects
     # them as outside --root, so the model check runs in a copy of regular files.

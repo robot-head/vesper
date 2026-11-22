@@ -2,6 +2,7 @@
 name = "vesper-forge-runner"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
 description = "Cached WASI Forge macro execution with fresh per-session hygiene and authority approval"
 publish = false
 build = "build.rs"

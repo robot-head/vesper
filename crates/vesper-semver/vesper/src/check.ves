@@ -9,11 +9,7 @@
 // the strings. Every other value is a node offset into `w`. The encoder hash-conses nodes, so two nodes of the same class
 // are structurally equal exactly when their offsets are equal.
 //
-// Codes: Mode Copy 0, Affine 1, Linear 2. Resumption Affine 0, Linear 1.
-// Pass In 0, Inout 1, Sink 2. GradeRelation UpperBound 0, Exact 1.
-// Primitive Unit 0, Never 1, Bool 2, U8 3, U32 4, U64 5, I64 6, F64 7,
-// String 8. Generic: (kind, value) with Type 0 (bound mode) and Row 1
-// (minimum resumption).
+// The codes and node words are named by the enums below.
 //
 // Nodes:
 //   interface  [schema, semantics, m, (name, declaration) * m,
@@ -40,6 +36,7 @@
 // Maps and sets are in Rust iteration order (sorted).
 use self::Q;
 use self::util::{
+    Class,
     none,
     put,
     put_i64,
@@ -48,13 +45,262 @@ use self::util::{
 };
 
 // SCHEMA_VERSION and SEMANTICS_VERSION of src/lib.rs.
-fn schema_version() -> u64 {
-    1
+const SCHEMA_VERSION: u64 = 1;
+const SEMANTICS_VERSION: u64 = 2;
+// Recursion limit of validation, `type_mode` and subtyping.
+const MAX_DEPTH: u64 = 128;
+// i64::MIN and i64::MAX as u64 bit patterns.
+const I64_MIN: u64 = 9223372036854775808;
+const I64_MAX: u64 = 9223372036854775807;
+
+// Input header words.
+enum Input: _ {
+    Old,
+    New,
+    StringCount,
+    StringTable
 }
 
-fn semantics_version() -> u64 {
-    2
+// Words per string table entry (offset, length).
+const STR_WORDS: u64 = 2;
+
+// A list node [m, item * m]: the count, then the items.
+enum List: _ {
+    Count,
+    First
 }
+
+// Interface words; the k (name, arity, mode) external types follow the
+// exports.
+enum Iface: _ {
+    Schema,
+    Semantics,
+    ExportCount,
+    FirstExport
+}
+
+// Words per export (name, declaration).
+const EXPORT_WORDS: u64 = 2;
+
+// The fields of an external type entry.
+enum Ext: _ {
+    Name,
+    Arity,
+    Mode
+}
+
+const EXT_WORDS: u64 = 3;
+
+// Declaration tags.
+enum DeclTag: _ {
+    Function,
+    Struct,
+    Enum,
+    Effect,
+    Unsupported
+}
+
+// Declaration words, by kind (Function, Description: Function and
+// Unsupported; Generics, Mode, Fields: Struct; Generics, Mode, Open and the
+// entries: Enum; Generics, Sealed, Resumption and the entries: Effect).
+enum Decl: _ {
+    Tag = 0,
+    Function = 1,
+    Description = 1,
+    Generics = 1,
+    Mode = 2,
+    Sealed = 2,
+    Fields = 3,
+    Open = 3,
+    Resumption = 3,
+    EntryCount = 4,
+    FirstEntry = 5
+}
+
+// Words per (name, value) entry of an enum or effect declaration.
+const ENTRY_WORDS: u64 = 2;
+
+// Struct fields: Closed [Closed], Public [Public, m, (name, type) * m].
+enum Fields: _ {
+    Closed,
+    Public
+}
+
+enum FieldList: _ {
+    Kind = 0,
+    Count = 1,
+    FirstType = 3
+}
+
+const FIELD_WORDS: u64 = 2;
+
+// Generic binders: (kind, value) entries of a list.
+enum Gen: _ {
+    Kind,
+    Value
+}
+
+const GEN_WORDS: u64 = 2;
+
+// A binder kind, with the value a bound `Mode` (Type) or a minimum
+// `Resumption` (Row).
+enum GenKind: _ {
+    Type,
+    Row
+}
+
+// Type tags.
+enum TypeTag: _ {
+    Primitive,
+    I64Range,
+    U64Range,
+    Parameter,
+    Named,
+    Tuple,
+    Function,
+    Unsupported
+}
+
+// Type words, by tag (Name: Primitive and Named; Min, Max: the ranges;
+// Index: Parameter; ArgCount, FirstArg: Named; ElementCount, FirstElement:
+// Tuple; Function: Function; Description: Unsupported).
+enum Ty: _ {
+    Tag = 0,
+    Name = 1,
+    Min = 1,
+    Index = 1,
+    ElementCount = 1,
+    Function = 1,
+    Description = 1,
+    Max = 2,
+    ArgCount = 2,
+    FirstElement = 2,
+    FirstArg = 3
+}
+
+// Primitive type names.
+enum Prim: _ {
+    Unit,
+    Never,
+    Bool,
+    U8,
+    U32,
+    U64,
+    I64,
+    F64,
+    String
+}
+
+// Modal kinds, ordered from most to least reusable.
+enum Mode: _ {
+    Copy,
+    Affine,
+    Linear
+}
+
+enum Resumption: _ {
+    Affine,
+    Linear
+}
+
+// Function words; the parameters follow.
+enum Func: _ {
+    Generics,
+    Mode,
+    Result,
+    ResultMode,
+    Effects,
+    ParamCount,
+    FirstParam
+}
+
+// Parameter words.
+enum Param: _ {
+    Pass,
+    Type,
+    Projection
+}
+
+enum Pass: _ {
+    In,
+    Inout,
+    Sink
+}
+
+// Projections: All [All], Paths [Paths, m, path * m].
+enum ProjKind: _ {
+    All,
+    Paths
+}
+
+enum Proj: _ {
+    Kind,
+    Count,
+    First
+}
+
+// Capability words; the argument types follow.
+enum Cap: _ {
+    Identity,
+    Effect,
+    Resumption,
+    HasCeiling,
+    Ceiling,
+    Grade,
+    ArgCount,
+    FirstArg
+}
+
+// `GradeRelation`.
+enum Grade: _ {
+    UpperBound,
+    Exact
+}
+
+// Issue path nodes: (parent, kind, value) words in `q.paths`.
+enum PathWord: _ {
+    Parent,
+    Kind,
+    Value
+}
+
+// Path node kinds: a root string id, the `Side`, `.{string id}`,
+// `.parameter[{value}]` and `.result`.
+enum PathKind: _ {
+    Root,
+    Side,
+    Field,
+    Parameter,
+    Result
+}
+
+enum Side: _ {
+    Old,
+    New
+}
+
+enum IssueKind: _ {
+    Breaking,
+    Unsupported
+}
+
+// Words of a found issue in `q.found`: kind, path node, then the rule,
+// message and witness pool ranges copied to `q.issues`.
+enum Found: _ {
+    Kind,
+    Path,
+    Rule
+}
+
+const FOUND_WORDS: u64 = 8;
+
+// Words of a found adapter in `q.adapts`.
+enum Adapt: _ {
+    Path,
+    Index
+}
+
+const ADAPT_WORDS: u64 = 2;
 
 // Word `i` of the input, or 0 past the end. The input is copied into a
 // `ChunkSeq` once, because functions with slice parameters are never
@@ -71,11 +317,14 @@ fn at(in w: ChunkSeq[u64], p: u64, k: u64) -> u64 {
 }
 
 fn str_off(in w: ChunkSeq[u64], id: u64) -> u64 {
-    word(in w, wrapping_add(word(in w, 3), wrapping_mul(id, 2)))
+    word(in w, wrapping_add(word(in w, Input::StringTable), wrapping_mul(id, STR_WORDS)))
 }
 
 fn str_len(in w: ChunkSeq[u64], id: u64) -> u64 {
-    word(in w, wrapping_add(wrapping_add(word(in w, 3), 1), wrapping_mul(id, 2)))
+    word(
+        in w,
+        wrapping_add(wrapping_add(word(in w, Input::StringTable), 1), wrapping_mul(id, STR_WORDS))
+    )
 }
 
 fn str_empty(in w: ChunkSeq[u64], id: u64) -> bool {
@@ -95,30 +344,31 @@ fn le_i64(a: u64, b: u64) -> bool {
     wrapping_i64(a) <= wrapping_i64(b)
 }
 
-fn i64_min() -> u64 {
-    9223372036854775808
-}
-
-fn i64_max() -> u64 {
-    9223372036854775807
+// Whether declaration `d` is a nominal type (a struct or an enum).
+fn is_nominal(in w: ChunkSeq[u64], d: u64) -> bool {
+    let tag = at(in w, d, Decl::Tag);
+    tag == DeclTag::Struct || tag == DeclTag::Enum
 }
 
 // Interfaces.
 
 fn export_count(in w: ChunkSeq[u64], i: u64) -> u64 {
-    at(in w, i, 2)
+    at(in w, i, Iface::ExportCount)
 }
 
 fn export_name(in w: ChunkSeq[u64], i: u64, k: u64) -> u64 {
-    at(in w, i, wrapping_add(3, wrapping_mul(k, 2)))
+    at(in w, i, wrapping_add(Iface::FirstExport, wrapping_mul(k, EXPORT_WORDS)))
 }
 
 fn export_decl(in w: ChunkSeq[u64], i: u64, k: u64) -> u64 {
-    at(in w, i, wrapping_add(4, wrapping_mul(k, 2)))
+    at(in w, i, wrapping_add(Iface::FirstExport + 1, wrapping_mul(k, EXPORT_WORDS)))
 }
 
 fn ext_base(in w: ChunkSeq[u64], i: u64) -> u64 {
-    wrapping_add(wrapping_add(i, 3), wrapping_mul(export_count(in w, i), 2))
+    wrapping_add(
+        wrapping_add(i, Iface::FirstExport),
+        wrapping_mul(export_count(in w, i), EXPORT_WORDS)
+    )
 }
 
 fn ext_count(in w: ChunkSeq[u64], i: u64) -> u64 {
@@ -126,7 +376,11 @@ fn ext_count(in w: ChunkSeq[u64], i: u64) -> u64 {
 }
 
 fn ext_field(in w: ChunkSeq[u64], i: u64, k: u64, f: u64) -> u64 {
-    at(in w, ext_base(in w, i), wrapping_add(wrapping_add(1, wrapping_mul(k, 3)), f))
+    at(
+        in w,
+        ext_base(in w, i),
+        wrapping_add(wrapping_add(List::First, wrapping_mul(k, EXT_WORDS)), f)
+    )
 }
 
 // Binary search of a sorted (name, value) list of `m` entries of `stride`
@@ -154,7 +408,13 @@ fn find_sorted(in w: ChunkSeq[u64], base: u64, m: u64, stride: u64, id: u64) -> 
 
 // `exports.get(name)`: the declaration node, or none.
 fn find_export(in w: ChunkSeq[u64], i: u64, id: u64) -> u64 {
-    let k = find_sorted(in w, wrapping_add(i, 3), export_count(in w, i), 2, id);
+    let k = find_sorted(
+        in w,
+        wrapping_add(i, Iface::FirstExport),
+        export_count(in w, i),
+        EXPORT_WORDS,
+        id
+    );
     if k == none() {
         none()
     } else {
@@ -164,7 +424,13 @@ fn find_export(in w: ChunkSeq[u64], i: u64, id: u64) -> u64 {
 
 // `external_types.get(name)`: the entry index, or none.
 fn find_ext(in w: ChunkSeq[u64], i: u64, id: u64) -> u64 {
-    find_sorted(in w, wrapping_add(ext_base(in w, i), 1), ext_count(in w, i), 3, id)
+    find_sorted(
+        in w,
+        wrapping_add(ext_base(in w, i), List::First),
+        ext_count(in w, i),
+        EXT_WORDS,
+        id
+    )
 }
 
 // Generics.
@@ -174,11 +440,11 @@ fn gen_count(in w: ChunkSeq[u64], g: u64) -> u64 {
 }
 
 fn gen_kind(in w: ChunkSeq[u64], g: u64, k: u64) -> u64 {
-    at(in w, g, wrapping_add(1, wrapping_mul(k, 2)))
+    at(in w, g, wrapping_add(List::First + Gen::Kind, wrapping_mul(k, GEN_WORDS)))
 }
 
 fn gen_value(in w: ChunkSeq[u64], g: u64, k: u64) -> u64 {
-    at(in w, g, wrapping_add(2, wrapping_mul(k, 2)))
+    at(in w, g, wrapping_add(List::First + Gen::Value, wrapping_mul(k, GEN_WORDS)))
 }
 
 // `a.starts_with(b)` for generic lists.
@@ -201,31 +467,31 @@ fn gen_starts_with(in w: ChunkSeq[u64], a: u64, b: u64) -> bool {
 // Functions, parameters, effects and capabilities.
 
 fn fn_generics(in w: ChunkSeq[u64], f: u64) -> u64 {
-    at(in w, f, 0)
+    at(in w, f, Func::Generics)
 }
 
 fn fn_mode(in w: ChunkSeq[u64], f: u64) -> u64 {
-    at(in w, f, 1)
+    at(in w, f, Func::Mode)
 }
 
 fn fn_result(in w: ChunkSeq[u64], f: u64) -> u64 {
-    at(in w, f, 2)
+    at(in w, f, Func::Result)
 }
 
 fn fn_result_mode(in w: ChunkSeq[u64], f: u64) -> u64 {
-    at(in w, f, 3)
+    at(in w, f, Func::ResultMode)
 }
 
 fn fn_effects(in w: ChunkSeq[u64], f: u64) -> u64 {
-    at(in w, f, 4)
+    at(in w, f, Func::Effects)
 }
 
 fn fn_param_count(in w: ChunkSeq[u64], f: u64) -> u64 {
-    at(in w, f, 5)
+    at(in w, f, Func::ParamCount)
 }
 
 fn fn_param(in w: ChunkSeq[u64], f: u64, k: u64) -> u64 {
-    at(in w, f, wrapping_add(6, k))
+    at(in w, f, wrapping_add(Func::FirstParam, k))
 }
 
 fn cap_count(in w: ChunkSeq[u64], e: u64) -> u64 {
@@ -233,11 +499,11 @@ fn cap_count(in w: ChunkSeq[u64], e: u64) -> u64 {
 }
 
 fn cap_at(in w: ChunkSeq[u64], e: u64, k: u64) -> u64 {
-    at(in w, e, wrapping_add(1, k))
+    at(in w, e, wrapping_add(List::First, k))
 }
 
 fn row_base(in w: ChunkSeq[u64], e: u64) -> u64 {
-    wrapping_add(wrapping_add(e, 1), cap_count(in w, e))
+    wrapping_add(wrapping_add(e, List::First), cap_count(in w, e))
 }
 
 fn row_count(in w: ChunkSeq[u64], e: u64) -> u64 {
@@ -245,39 +511,39 @@ fn row_count(in w: ChunkSeq[u64], e: u64) -> u64 {
 }
 
 fn row_at(in w: ChunkSeq[u64], e: u64, k: u64) -> u64 {
-    at(in w, row_base(in w, e), wrapping_add(1, k))
+    at(in w, row_base(in w, e), wrapping_add(List::First, k))
 }
 
 fn cap_identity(in w: ChunkSeq[u64], c: u64) -> u64 {
-    at(in w, c, 0)
+    at(in w, c, Cap::Identity)
 }
 
 fn cap_effect(in w: ChunkSeq[u64], c: u64) -> u64 {
-    at(in w, c, 1)
+    at(in w, c, Cap::Effect)
 }
 
 fn cap_resumption(in w: ChunkSeq[u64], c: u64) -> u64 {
-    at(in w, c, 2)
+    at(in w, c, Cap::Resumption)
 }
 
 fn cap_has_ceiling(in w: ChunkSeq[u64], c: u64) -> bool {
-    at(in w, c, 3) != 0
+    at(in w, c, Cap::HasCeiling) != 0
 }
 
 fn cap_ceiling(in w: ChunkSeq[u64], c: u64) -> u64 {
-    at(in w, c, 4)
+    at(in w, c, Cap::Ceiling)
 }
 
 fn cap_grade(in w: ChunkSeq[u64], c: u64) -> u64 {
-    at(in w, c, 5)
+    at(in w, c, Cap::Grade)
 }
 
 fn cap_arg_count(in w: ChunkSeq[u64], c: u64) -> u64 {
-    at(in w, c, 6)
+    at(in w, c, Cap::ArgCount)
 }
 
 fn cap_arg(in w: ChunkSeq[u64], c: u64, k: u64) -> u64 {
-    at(in w, c, wrapping_add(7, k))
+    at(in w, c, wrapping_add(Cap::FirstArg, k))
 }
 
 // The same identity, effect and type arguments.
@@ -303,15 +569,15 @@ fn same_capability(in w: ChunkSeq[u64], a: u64, b: u64) -> bool {
 // Projections.
 
 fn proj_full(in w: ChunkSeq[u64], p: u64) -> bool {
-    if at(in w, p, 0) == 0 {
+    if at(in w, p, Proj::Kind) == ProjKind::All {
         return true;
     }
-    let n = at(in w, p, 1);
+    let n = at(in w, p, Proj::Count);
     if n == 0 {
         return true;
     }
     for k in 0..n {
-        if word(in w, at(in w, p, wrapping_add(2, k))) == 0 {
+        if word(in w, at(in w, p, wrapping_add(Proj::First, k))) == 0 {
             return true;
         }
     }
@@ -325,7 +591,7 @@ fn path_starts_with(in w: ChunkSeq[u64], a: u64, b: u64) -> bool {
         return false;
     }
     for k in 0..n {
-        if at(in w, a, wrapping_add(1, k)) != at(in w, b, wrapping_add(1, k)) {
+        if at(in w, a, wrapping_add(List::First, k)) != at(in w, b, wrapping_add(List::First, k)) {
             return false;
         }
     }
@@ -347,13 +613,13 @@ fn subset_q(in w: ChunkSeq[u64], new: u64, old: u64) -> bool {
     if proj_full(in w, new) {
         return false;
     }
-    let nn = at(in w, new, 1);
-    let on = at(in w, old, 1);
+    let nn = at(in w, new, Proj::Count);
+    let on = at(in w, old, Proj::Count);
     for i in 0..nn {
-        let np = at(in w, new, wrapping_add(2, i));
+        let np = at(in w, new, wrapping_add(Proj::First, i));
         let mut found = false;
         for j in 0..on {
-            if path_starts_with(in w, np, at(in w, old, wrapping_add(2, j))) {
+            if path_starts_with(in w, np, at(in w, old, wrapping_add(Proj::First, j))) {
                 found = true;
                 break;
             }
@@ -369,8 +635,7 @@ fn subset_q(in w: ChunkSeq[u64], new: u64, old: u64) -> bool {
 
 // Issue paths are built lazily, as nodes (parent, kind, value) in
 // `q.paths`, and written as text only for the issues and adapters that use
-// them. Kinds: 0 a root string id, 1 the side ("old" 0, "new" 1),
-// 2 `.{string id}`, 3 `.parameter[{value}]`, 4 `.result`.
+// them.
 fn path_node(inout q: Q, parent: u64, kind: u64, value: u64) -> u64 {
     let at = q.paths.len();
     q.paths.push(parent);
@@ -387,24 +652,24 @@ fn path_word(in q: Q, p: u64, k: u64) -> u64 {
 }
 
 fn put_path(inout q: Q, in w: ChunkSeq[u64], in t: Slice[u8], p: u64) {
-    let parent = path_word(in q, p, 0);
-    let kind = path_word(in q, p, 1);
-    let value = path_word(in q, p, 2);
+    let parent = path_word(in q, p, PathWord::Parent);
+    let kind = path_word(in q, p, PathWord::Kind);
+    let value = path_word(in q, p, PathWord::Value);
     if parent != none() {
         put_path(inout q, in w, in t, parent);
     }
-    if kind == 0 {
+    if kind == PathKind::Root {
         put_text(inout q.pool, in t, str_off(in w, value), str_len(in w, value));
-    } else if kind == 1 {
-        if value == 0 {
+    } else if kind == PathKind::Side {
+        if value == Side::Old {
             put(inout q.pool, "old");
         } else {
             put(inout q.pool, "new");
         }
-    } else if kind == 2 {
+    } else if kind == PathKind::Field {
         put(inout q.pool, ".");
         put_text(inout q.pool, in t, str_off(in w, value), str_len(in w, value));
-    } else if kind == 3 {
+    } else if kind == PathKind::Parameter {
         put(inout q.pool, ".parameter[");
         put_u64(inout q.pool, value);
         put(inout q.pool, "]");
@@ -436,23 +701,23 @@ fn finish_paths(inout q: Q, in w: ChunkSeq[u64], in t: Slice[u8]) {
             break;
         }
         let o = q.pool.len();
-        let p = found_word(in q, wrapping_add(i, 1));
+        let p = found_word(in q, wrapping_add(i, Found::Path));
         put_path(inout q, in w, in t, p);
         let l = wrapping_sub(q.pool.len(), o);
-        let kind = found_word(in q, i);
+        let kind = found_word(in q, wrapping_add(i, Found::Kind));
         q.issues.push(kind);
         q.issues.push(o);
         q.issues.push(l);
-        let mut k: u64 = 2;
+        let mut k: u64 = Found::Rule;
         loop {
-            if k >= 8 {
+            if k >= FOUND_WORDS {
                 break;
             }
             let x = found_word(in q, wrapping_add(i, k));
             k = wrapping_add(k, 1);
             q.issues.push(x);
         }
-        i = wrapping_add(i, 8);
+        i = wrapping_add(i, FOUND_WORDS);
     }
     let mut i: u64 = 0;
     loop {
@@ -460,14 +725,14 @@ fn finish_paths(inout q: Q, in w: ChunkSeq[u64], in t: Slice[u8]) {
             break;
         }
         let o = q.pool.len();
-        let p = adapt_word(in q, i);
+        let p = adapt_word(in q, wrapping_add(i, Adapt::Path));
         put_path(inout q, in w, in t, p);
         let l = wrapping_sub(q.pool.len(), o);
         q.adapters.push(o);
         q.adapters.push(l);
-        let x = adapt_word(in q, wrapping_add(i, 1));
+        let x = adapt_word(in q, wrapping_add(i, Adapt::Index));
         q.adapters.push(x);
-        i = wrapping_add(i, 2);
+        i = wrapping_add(i, ADAPT_WORDS);
     }
 }
 
@@ -500,12 +765,12 @@ fn push_issue(inout q: Q, kind: u64, path: u64, in rule: Str, mo: u64, ml: u64, 
 fn breaking(inout q: Q, path: u64, in rule: Str, in message: Str, in witness: Str) {
     let (mo, ml) = lit(inout q, message);
     let (wo, wl) = lit(inout q, witness);
-    push_issue(inout q, 0, path, rule, mo, ml, wo, wl);
+    push_issue(inout q, IssueKind::Breaking, path, rule, mo, ml, wo, wl);
 }
 
 fn breaking_witness(inout q: Q, path: u64, in rule: Str, in message: Str, wo: u64, wl: u64) {
     let (mo, ml) = lit(inout q, message);
-    push_issue(inout q, 0, path, rule, mo, ml, wo, wl);
+    push_issue(inout q, IssueKind::Breaking, path, rule, mo, ml, wo, wl);
 }
 
 fn unsupported_range(inout q: Q, path: u64, mo: u64, ml: u64) {
@@ -513,7 +778,7 @@ fn unsupported_range(inout q: Q, path: u64, mo: u64, ml: u64) {
         inout q,
         "The checker cannot certify substitutability for this interface feature."
     );
-    push_issue(inout q, 1, path, "Unsupported", mo, ml, wo, wl);
+    push_issue(inout q, IssueKind::Unsupported, path, "Unsupported", mo, ml, wo, wl);
 }
 
 fn unsupported(inout q: Q, path: u64, in message: Str) {
@@ -548,62 +813,74 @@ fn has_unsupported(in q: Q) -> bool {
         if i >= n {
             break;
         }
-        if found_word(in q, i) == 1 {
+        if found_word(in q, wrapping_add(i, Found::Kind)) == IssueKind::Unsupported {
             return true;
         }
-        i = wrapping_add(i, 8);
+        i = wrapping_add(i, FOUND_WORDS);
     }
     false
 }
 
 // `type_mode`: the modal kind of a type, or none.
 fn type_mode(in w: ChunkSeq[u64], i: u64, ty: u64, g: u64, depth: u64) -> u64 {
-    if depth > 128 {
+    if depth > MAX_DEPTH {
         return none();
     }
-    let tag = at(in w, ty, 0);
-    if tag == 0 {
-        if at(in w, ty, 1) == 8 {
-            1
+    let tag = at(in w, ty, Ty::Tag);
+    if tag == TypeTag::Primitive {
+        if at(in w, ty, Ty::Name) == Prim::String {
+            Mode::Affine
         } else {
-            0
+            Mode::Copy
         }
-    } else if tag == 1 || tag == 2 {
-        0
-    } else if tag == 3 {
-        let index = at(in w, ty, 1);
-        if index < gen_count(in w, g) && gen_kind(in w, g, index) == 0 {
+    } else if tag == TypeTag::I64Range || tag == TypeTag::U64Range {
+        Mode::Copy
+    } else if tag == TypeTag::Parameter {
+        let index = at(in w, ty, Ty::Index);
+        if index < gen_count(in w, g) && gen_kind(in w, g, index) == GenKind::Type {
             gen_value(in w, g, index)
         } else {
             none()
         }
-    } else if tag == 6 {
-        fn_mode(in w, at(in w, ty, 1))
-    } else if tag == 5 {
-        let mut m: u64 = 0;
-        for k in 0..at(in w, ty, 1) {
-            let n = type_mode(in w, i, at(in w, ty, wrapping_add(2, k)), g, wrapping_add(depth, 1));
+    } else if tag == TypeTag::Function {
+        fn_mode(in w, at(in w, ty, Ty::Function))
+    } else if tag == TypeTag::Tuple {
+        let mut m: u64 = Mode::Copy;
+        for k in 0..at(in w, ty, Ty::ElementCount) {
+            let n = type_mode(
+                in w,
+                i,
+                at(in w, ty, wrapping_add(Ty::FirstElement, k)),
+                g,
+                wrapping_add(depth, 1)
+            );
             if n == none() {
                 return none();
             }
             m = max_mode(m, n);
         }
         m
-    } else if tag == 4 {
-        let name = at(in w, ty, 1);
+    } else if tag == TypeTag::Named {
+        let name = at(in w, ty, Ty::Name);
         let d = find_export(in w, i, name);
-        let mut m: u64 = 0;
-        if d != none() && (at(in w, d, 0) == 1 || at(in w, d, 0) == 2) {
-            m = at(in w, d, 2);
+        let mut m: u64 = Mode::Copy;
+        if d != none() && is_nominal(in w, d) {
+            m = at(in w, d, Decl::Mode);
         } else {
             let e = find_ext(in w, i, name);
             if e == none() {
                 return none();
             }
-            m = ext_field(in w, i, e, 2);
+            m = ext_field(in w, i, e, Ext::Mode);
         }
-        for k in 0..at(in w, ty, 2) {
-            let n = type_mode(in w, i, at(in w, ty, wrapping_add(3, k)), g, wrapping_add(depth, 1));
+        for k in 0..at(in w, ty, Ty::ArgCount) {
+            let n = type_mode(
+                in w,
+                i,
+                at(in w, ty, wrapping_add(Ty::FirstArg, k)),
+                g,
+                wrapping_add(depth, 1)
+            );
             if n == none() {
                 return none();
             }
@@ -627,37 +904,37 @@ fn validate_type(
     path: u64,
     depth: u64
 ) {
-    if depth > 128 {
+    if depth > MAX_DEPTH {
         unsupported(inout q, path, "type nesting exceeds 128 levels");
         return;
     }
-    let tag = at(in w, ty, 0);
-    if tag == 1 {
-        if !le_i64(at(in w, ty, 1), at(in w, ty, 2)) {
+    let tag = at(in w, ty, Ty::Tag);
+    if tag == TypeTag::I64Range {
+        if !le_i64(at(in w, ty, Ty::Min), at(in w, ty, Ty::Max)) {
             unsupported(inout q, path, "invalid i64 refinement range");
         }
-    } else if tag == 2 {
-        if at(in w, ty, 1) > at(in w, ty, 2) {
+    } else if tag == TypeTag::U64Range {
+        if at(in w, ty, Ty::Min) > at(in w, ty, Ty::Max) {
             unsupported(inout q, path, "invalid u64 refinement range");
         }
-    } else if tag == 3 {
-        let index = at(in w, ty, 1);
-        if !(index < gen_count(in w, g) && gen_kind(in w, g, index) == 0) {
+    } else if tag == TypeTag::Parameter {
+        let index = at(in w, ty, Ty::Index);
+        if !(index < gen_count(in w, g) && gen_kind(in w, g, index) == GenKind::Type) {
             unsupported(inout q, path, "unbound or non-type generic parameter");
         }
-    } else if tag == 4 {
-        let name = at(in w, ty, 1);
-        let n = at(in w, ty, 2);
+    } else if tag == TypeTag::Named {
+        let name = at(in w, ty, Ty::Name);
+        let n = at(in w, ty, Ty::ArgCount);
         let d = find_export(in w, i, name);
-        let nominal = d != none() && (at(in w, d, 0) == 1 || at(in w, d, 0) == 2);
+        let nominal = d != none() && is_nominal(in w, d);
         let arity = if nominal {
-            gen_count(in w, at(in w, d, 1))
+            gen_count(in w, at(in w, d, Decl::Generics))
         } else {
             let e = find_ext(in w, i, name);
             if e == none() {
                 none()
             } else {
-                ext_field(in w, i, e, 1)
+                ext_field(in w, i, e, Ext::Arity)
             }
         };
         if arity != n {
@@ -671,14 +948,14 @@ fn validate_type(
             );
         }
         if nominal {
-            let ps = at(in w, d, 1);
+            let ps = at(in w, d, Decl::Generics);
             let pn = gen_count(in w, ps);
             for k in 0..n {
                 if k >= pn {
                     break;
                 }
-                let arg = at(in w, ty, wrapping_add(3, k));
-                if gen_kind(in w, ps, k) == 0 {
+                let arg = at(in w, ty, wrapping_add(Ty::FirstArg, k));
+                if gen_kind(in w, ps, k) == GenKind::Type {
                     let m = type_mode(in w, i, arg, g, 0);
                     if m != none() && m > gen_value(in w, ps, k) {
                         unsupported(inout q, path, "nominal type argument exceeds its modal bound");
@@ -698,29 +975,37 @@ fn validate_type(
                 in w,
                 in t,
                 i,
-                at(in w, ty, wrapping_add(3, k)),
+                at(in w, ty, wrapping_add(Ty::FirstArg, k)),
                 g,
                 path,
                 wrapping_add(depth, 1)
             );
         }
-    } else if tag == 5 {
-        for k in 0..at(in w, ty, 1) {
+    } else if tag == TypeTag::Tuple {
+        for k in 0..at(in w, ty, Ty::ElementCount) {
             validate_type(
                 inout q,
                 in w,
                 in t,
                 i,
-                at(in w, ty, wrapping_add(2, k)),
+                at(in w, ty, wrapping_add(Ty::FirstElement, k)),
                 g,
                 path,
                 wrapping_add(depth, 1)
             );
         }
-    } else if tag == 6 {
-        validate_function(inout q, in w, in t, i, at(in w, ty, 1), path, wrapping_add(depth, 1));
-    } else if tag == 7 {
-        let (mo, ml) = text_range(inout q, in w, in t, at(in w, ty, 1));
+    } else if tag == TypeTag::Function {
+        validate_function(
+            inout q,
+            in w,
+            in t,
+            i,
+            at(in w, ty, Ty::Function),
+            path,
+            wrapping_add(depth, 1)
+        );
+    } else if tag == TypeTag::Unsupported {
+        let (mo, ml) = text_range(inout q, in w, in t, at(in w, ty, Ty::Description));
         unsupported_range(inout q, path, mo, ml);
     }
 }
@@ -734,26 +1019,35 @@ fn validate_function(
     path: u64,
     depth: u64
 ) {
-    if depth > 128 {
+    if depth > MAX_DEPTH {
         unsupported(inout q, path, "function type nesting exceeds 128 levels");
         return;
     }
     let g = fn_generics(in w, f);
     for k in 0..fn_param_count(in w, f) {
         let p = fn_param(in w, f, k);
-        validate_type(inout q, in w, in t, i, at(in w, p, 1), g, path, wrapping_add(depth, 1));
-        let proj = at(in w, p, 2);
-        if at(in w, proj, 0) == 1 {
-            let n = at(in w, proj, 1);
+        validate_type(
+            inout q,
+            in w,
+            in t,
+            i,
+            at(in w, p, Param::Type),
+            g,
+            path,
+            wrapping_add(depth, 1)
+        );
+        let proj = at(in w, p, Param::Projection);
+        if at(in w, proj, Proj::Kind) == ProjKind::Paths {
+            let n = at(in w, proj, Proj::Count);
             let mut bad = n == 0;
             for j in 0..n {
-                let path = at(in w, proj, wrapping_add(2, j));
+                let path = at(in w, proj, wrapping_add(Proj::First, j));
                 let m = word(in w, path);
                 if m == 0 {
                     bad = true;
                 }
                 for c in 0..m {
-                    if str_empty(in w, at(in w, path, wrapping_add(1, c))) {
+                    if str_empty(in w, at(in w, path, wrapping_add(List::First, c))) {
                         bad = true;
                     }
                 }
@@ -762,7 +1056,7 @@ fn validate_function(
                 unsupported(inout q, path, "projection paths must have nonempty components");
             }
         }
-        if at(in w, p, 0) == 2 && at(in w, proj, 0) != 0 {
+        if at(in w, p, Param::Pass) == Pass::Sink && at(in w, proj, Proj::Kind) != ProjKind::All {
             unsupported(
                 inout q,
                 path,
@@ -780,7 +1074,7 @@ fn validate_function(
     let e = fn_effects(in w, f);
     for k in 0..cap_count(in w, e) {
         let c = cap_at(in w, e, k);
-        if cap_grade(in w, c) == 1 && !cap_has_ceiling(in w, c) {
+        if cap_grade(in w, c) == Grade::Exact && !cap_has_ceiling(in w, c) {
             unsupported(inout q, path, "an exact grade requires a constant value");
         }
         let id = cap_identity(in w, c);
@@ -804,11 +1098,11 @@ fn validate_function(
             unsupported(inout q, path, "capability identities must be nonempty and unique");
         }
         let d = find_export(in w, i, cap_effect(in w, c));
-        if d != none() && at(in w, d, 0) == 3 {
+        if d != none() && at(in w, d, Decl::Tag) == DeclTag::Effect {
             if cap_resumption(in w, c)
-                != at(in w, d, 3)
+                != at(in w, d, Decl::Resumption)
                 || cap_arg_count(in w, c)
-                != gen_count(in w, at(in w, d, 1)) {
+                != gen_count(in w, at(in w, d, Decl::Generics)) {
                 unsupported(
                     inout q,
                     path,
@@ -832,23 +1126,23 @@ fn validate_function(
     q.seen.truncate(base);
     for k in 0..row_count(in w, e) {
         let index = row_at(in w, e, k);
-        if !(index < gen_count(in w, g) && gen_kind(in w, g, index) == 1) {
+        if !(index < gen_count(in w, g) && gen_kind(in w, g, index) == GenKind::Row) {
             unsupported(inout q, path, "unbound or non-row effect variable");
         }
     }
 }
 
-// `side` is 0 for "old" and 1 for "new".
+// `side` is a `Side`.
 fn validate(inout q: Q, in w: ChunkSeq[u64], in t: Slice[u8], i: u64, side: u64) {
-    let spath = path_node(inout q, none(), 1, side);
-    if at(in w, i, 1) != semantics_version() {
+    let spath = path_node(inout q, none(), PathKind::Side, side);
+    if at(in w, i, Iface::Semantics) != SEMANTICS_VERSION {
         unsupported(inout q, spath, "unsupported language-semantics version");
     }
-    if at(in w, i, 0) != schema_version() {
+    if at(in w, i, Iface::Schema) != SCHEMA_VERSION {
         unsupported(inout q, spath, "unsupported interface schema version");
     }
     for k in 0..ext_count(in w, i) {
-        let name = ext_field(in w, i, k, 0);
+        let name = ext_field(in w, i, k, Ext::Name);
         if str_empty(in w, name) || find_export(in w, i, name) != none() {
             unsupported(inout q, spath, "invalid or conflicting external type identity");
         }
@@ -858,41 +1152,45 @@ fn validate(inout q: Q, in w: ChunkSeq[u64], in t: Slice[u8], i: u64, side: u64)
         if str_empty(in w, name) {
             unsupported(inout q, spath, "empty export identity");
         }
-        let path = path_node(inout q, spath, 2, name);
+        let path = path_node(inout q, spath, PathKind::Field, name);
         let d = export_decl(in w, i, k);
-        let tag = at(in w, d, 0);
-        if tag == 0 {
-            validate_function(inout q, in w, in t, i, at(in w, d, 1), path, 0);
-        } else if tag == 1 {
-            let g = at(in w, d, 1);
-            let fields = at(in w, d, 3);
-            if at(in w, fields, 0) == 1 {
-                for j in 0..at(in w, fields, 1) {
-                    let ty = at(in w, fields, wrapping_add(3, wrapping_mul(j, 2)));
+        let tag = at(in w, d, Decl::Tag);
+        if tag == DeclTag::Function {
+            validate_function(inout q, in w, in t, i, at(in w, d, Decl::Function), path, 0);
+        } else if tag == DeclTag::Struct {
+            let g = at(in w, d, Decl::Generics);
+            let fields = at(in w, d, Decl::Fields);
+            if at(in w, fields, FieldList::Kind) == Fields::Public {
+                for j in 0..at(in w, fields, FieldList::Count) {
+                    let ty = at(
+                        in w,
+                        fields,
+                        wrapping_add(FieldList::FirstType, wrapping_mul(j, FIELD_WORDS))
+                    );
                     validate_type(inout q, in w, in t, i, ty, g, path, 0);
                 }
             }
-        } else if tag == 2 {
-            let g = at(in w, d, 1);
-            for j in 0..at(in w, d, 4) {
-                let payload = at(in w, d, wrapping_add(6, wrapping_mul(j, 2)));
+        } else if tag == DeclTag::Enum {
+            let g = at(in w, d, Decl::Generics);
+            for j in 0..entry_count(in w, d) {
+                let payload = entry_value(in w, d, j);
                 for x in 0..word(in w, payload) {
                     validate_type(
                         inout q,
                         in w,
                         in t,
                         i,
-                        at(in w, payload, wrapping_add(1, x)),
+                        at(in w, payload, wrapping_add(List::First, x)),
                         g,
                         path,
                         0
                     );
                 }
             }
-        } else if tag == 3 {
-            let g = at(in w, d, 1);
-            for j in 0..at(in w, d, 4) {
-                let op = at(in w, d, wrapping_add(6, wrapping_mul(j, 2)));
+        } else if tag == DeclTag::Effect {
+            let g = at(in w, d, Decl::Generics);
+            for j in 0..entry_count(in w, d) {
+                let op = entry_value(in w, d, j);
                 if !gen_starts_with(in w, fn_generics(in w, op), g) {
                     unsupported(
                         inout q,
@@ -903,7 +1201,7 @@ fn validate(inout q: Q, in w: ChunkSeq[u64], in t: Slice[u8], i: u64, side: u64)
                 validate_function(inout q, in w, in t, i, op, path, 0);
             }
         } else {
-            let (mo, ml) = text_range(inout q, in w, in t, at(in w, d, 1));
+            let (mo, ml) = text_range(inout q, in w, in t, at(in w, d, Decl::Description));
             unsupported_range(inout q, path, mo, ml);
         }
     }
@@ -928,7 +1226,8 @@ fn generic_bounds(inout q: Q, in w: ChunkSeq[u64], path: u64, a: u64, b: u64) {
         let kb = gen_kind(in w, b, k);
         let va = gen_value(in w, a, k);
         let vb = gen_value(in w, b, k);
-        let safe = (ka == 0 && kb == 0 && va <= vb) || (ka == 1 && kb == 1 && vb <= va);
+        let safe = (ka == GenKind::Type && kb == GenKind::Type && va <= vb)
+            || (ka == GenKind::Row && kb == GenKind::Row && vb <= va);
         if !safe {
             breaking(
                 inout q,
@@ -943,22 +1242,22 @@ fn generic_bounds(inout q: Q, in w: ChunkSeq[u64], path: u64, a: u64, b: u64) {
 
 // The inclusive u64 bounds of a validated direct u64 interval: (ok, min, max).
 fn u64_bounds(in w: ChunkSeq[u64], ty: u64) -> (bool, u64, u64) {
-    let tag = at(in w, ty, 0);
-    if tag == 0 && at(in w, ty, 1) == 5 {
+    let tag = at(in w, ty, Ty::Tag);
+    if tag == TypeTag::Primitive && at(in w, ty, Ty::Name) == Prim::U64 {
         (true, 0, none())
-    } else if tag == 2 && at(in w, ty, 1) <= at(in w, ty, 2) {
-        (true, at(in w, ty, 1), at(in w, ty, 2))
+    } else if tag == TypeTag::U64Range && at(in w, ty, Ty::Min) <= at(in w, ty, Ty::Max) {
+        (true, at(in w, ty, Ty::Min), at(in w, ty, Ty::Max))
     } else {
         (false, 0, 0)
     }
 }
 
 fn i64_bounds(in w: ChunkSeq[u64], ty: u64) -> (bool, u64, u64) {
-    let tag = at(in w, ty, 0);
-    if tag == 0 && at(in w, ty, 1) == 6 {
-        (true, i64_min(), i64_max())
-    } else if tag == 1 && le_i64(at(in w, ty, 1), at(in w, ty, 2)) {
-        (true, at(in w, ty, 1), at(in w, ty, 2))
+    let tag = at(in w, ty, Ty::Tag);
+    if tag == TypeTag::Primitive && at(in w, ty, Ty::Name) == Prim::I64 {
+        (true, I64_MIN, I64_MAX)
+    } else if tag == TypeTag::I64Range && le_i64(at(in w, ty, Ty::Min), at(in w, ty, Ty::Max)) {
+        (true, at(in w, ty, Ty::Min), at(in w, ty, Ty::Max))
     } else {
         (false, 0, 0)
     }
@@ -995,7 +1294,7 @@ fn i64_counterexample(in w: ChunkSeq[u64], sub: u64, sup: u64) -> (bool, u64) {
 
 // `resumption(effects, generics)`.
 fn resumption(in w: ChunkSeq[u64], e: u64, g: u64) -> u64 {
-    let mut r: u64 = 1;
+    let mut r: u64 = Resumption::Linear;
     for k in 0..cap_count(in w, e) {
         let x = cap_resumption(in w, cap_at(in w, e, k));
         if x < r {
@@ -1004,7 +1303,7 @@ fn resumption(in w: ChunkSeq[u64], e: u64, g: u64) -> u64 {
     }
     for k in 0..row_count(in w, e) {
         let index = row_at(in w, e, k);
-        if index < gen_count(in w, g) && gen_kind(in w, g, index) == 1 {
+        if index < gen_count(in w, g) && gen_kind(in w, g, index) == GenKind::Row {
             let x = gen_value(in w, g, index);
             if x < r {
                 r = x;
@@ -1041,7 +1340,7 @@ fn function(
     b: u64,
     depth: u64
 ) {
-    if depth > 128 {
+    if depth > MAX_DEPTH {
         unsupported(inout q, path, "subtyping recursion exceeds 128 levels");
         return;
     }
@@ -1072,10 +1371,14 @@ fn function(
         }
         let old = fn_param(in w, a, index);
         let new = fn_param(in w, b, index);
-        let xpath = path_node(inout q, path, 3, index);
-        let old_pass = at(in w, old, 0);
-        let new_pass = at(in w, new, 0);
-        let narrowed = subset_q(in w, at(in w, new, 2), at(in w, old, 2));
+        let xpath = path_node(inout q, path, PathKind::Parameter, index);
+        let old_pass = at(in w, old, Param::Pass);
+        let new_pass = at(in w, new, Param::Pass);
+        let narrowed = subset_q(
+            in w,
+            at(in w, new, Param::Projection),
+            at(in w, old, Param::Projection)
+        );
         if !narrowed {
             breaking(
                 inout q,
@@ -1086,7 +1389,7 @@ fn function(
             );
         }
         if old_pass != new_pass {
-            if old_pass == 1 && new_pass == 0 && narrowed {
+            if old_pass == Pass::Inout && new_pass == Pass::In && narrowed {
                 q.adapts.push(path);
                 q.adapts.push(index);
                 breaking(
@@ -1106,9 +1409,9 @@ fn function(
                 );
             }
         }
-        let old_ty = at(in w, old, 1);
-        let new_ty = at(in w, new, 1);
-        let ok = if old_pass == 1 {
+        let old_ty = at(in w, old, Param::Type);
+        let new_ty = at(in w, new, Param::Type);
+        let ok = if old_pass == Pass::Inout {
             old_ty == new_ty
         } else {
             subtype(inout q, in w, in t, old_ty, new_ty, xpath, wrapping_add(depth, 1))
@@ -1116,7 +1419,7 @@ fn function(
         if !ok {
             let mut witnessed = false;
             let wo = q.pool.len();
-            if old_pass == new_pass && old_pass != 1 {
+            if old_pass == new_pass && old_pass != Pass::Inout {
                 let (fu, vu) = u64_counterexample(in w, old_ty, new_ty);
                 if fu {
                     put(inout q.pool, "Pass ");
@@ -1158,7 +1461,7 @@ fn function(
             "Discard or duplicate a returned value as permitted by the old return mode."
         );
     }
-    let rpath = path_node(inout q, path, 4, 0);
+    let rpath = path_node(inout q, path, PathKind::Result, 0);
     let br = fn_result(in w, b);
     let ar = fn_result(in w, a);
     if !subtype(inout q, in w, in t, br, ar, rpath, wrapping_add(depth, 1)) {
@@ -1210,7 +1513,7 @@ fn function(
     }
     for k in 0..cap_count(in w, ea) {
         let o = cap_at(in w, ea, k);
-        if cap_grade(in w, o) == 1 {
+        if cap_grade(in w, o) == Grade::Exact {
             let mut kept = false;
             for j in 0..cap_count(in w, eb) {
                 if same_capability(in w, o, cap_at(in w, eb, j)) {
@@ -1248,7 +1551,7 @@ fn function(
                     "grade relation changed",
                     "An equality contract cannot be replaced by an upper-bound contract."
                 );
-            } else if cap_grade(in w, o) == 1 {
+            } else if cap_grade(in w, o) == Grade::Exact {
                 if cap_has_ceiling(in w, o)
                     != cap_has_ceiling(in w, n)
                     || cap_ceiling(in w, o)
@@ -1304,38 +1607,41 @@ fn subtype(
     path: u64,
     depth: u64
 ) -> bool {
-    if depth > 128 {
+    if depth > MAX_DEPTH {
         unsupported(inout q, path, "subtyping recursion exceeds 128 levels");
         return false;
     }
-    let a = at(in w, sub, 0);
-    let b = at(in w, sup, 0);
-    if a == 0 && at(in w, sub, 1) == 1 {
+    let a = at(in w, sub, Ty::Tag);
+    let b = at(in w, sup, Ty::Tag);
+    if a == TypeTag::Primitive && at(in w, sub, Ty::Name) == Prim::Never {
         return true;
     }
-    if a == 7 || b == 7 {
+    if a == TypeTag::Unsupported || b == TypeTag::Unsupported {
         return false;
     }
-    if a == 1 && b == 1 {
-        return le_i64(at(in w, sup, 1), at(in w, sub, 1))
-            && le_i64(at(in w, sub, 2), at(in w, sup, 2));
+    if a == TypeTag::I64Range && b == TypeTag::I64Range {
+        return le_i64(at(in w, sup, Ty::Min), at(in w, sub, Ty::Min))
+            && le_i64(at(in w, sub, Ty::Max), at(in w, sup, Ty::Max));
     }
-    if a == 1 && b == 0 && at(in w, sup, 1) == 6 {
+    if a == TypeTag::I64Range && b == TypeTag::Primitive && at(in w, sup, Ty::Name) == Prim::I64 {
         return true;
     }
-    if a == 0 && at(in w, sub, 1) == 6 && b == 1 {
-        return at(in w, sup, 1) == i64_min() && at(in w, sup, 2) == i64_max();
+    if a == TypeTag::Primitive && at(in w, sub, Ty::Name) == Prim::I64 && b == TypeTag::I64Range {
+        return at(in w, sup, Ty::Min) == I64_MIN && at(in w, sup, Ty::Max) == I64_MAX;
     }
-    if a == 2 && b == 2 {
-        return at(in w, sup, 1) <= at(in w, sub, 1) && at(in w, sub, 2) <= at(in w, sup, 2);
+    if a == TypeTag::U64Range && b == TypeTag::U64Range {
+        return at(in w, sup, Ty::Min)
+            <= at(in w, sub, Ty::Min)
+            && at(in w, sub, Ty::Max)
+            <= at(in w, sup, Ty::Max);
     }
-    if a == 2 && b == 0 && at(in w, sup, 1) == 5 {
+    if a == TypeTag::U64Range && b == TypeTag::Primitive && at(in w, sup, Ty::Name) == Prim::U64 {
         return true;
     }
-    if a == 0 && at(in w, sub, 1) == 5 && b == 2 {
-        return at(in w, sup, 1) == 0 && at(in w, sup, 2) == none();
+    if a == TypeTag::Primitive && at(in w, sub, Ty::Name) == Prim::U64 && b == TypeTag::U64Range {
+        return at(in w, sup, Ty::Min) == 0 && at(in w, sup, Ty::Max) == none();
     }
-    if a == 6 && b == 6 {
+    if a == TypeTag::Function && b == TypeTag::Function {
         let before = issue_count(in q);
         let adapters = q.adapts.len();
         // A value of `sub` must be usable at `sup`, so `sub` is the candidate.
@@ -1344,20 +1650,20 @@ fn subtype(
             in w,
             in t,
             path,
-            at(in w, sup, 1),
-            at(in w, sub, 1),
+            at(in w, sup, Ty::Function),
+            at(in w, sub, Ty::Function),
             wrapping_add(depth, 1)
         );
         return before == issue_count(in q) && adapters == q.adapts.len();
     }
-    if a == 5 && b == 5 {
-        let n = at(in w, sub, 1);
-        if n != at(in w, sup, 1) {
+    if a == TypeTag::Tuple && b == TypeTag::Tuple {
+        let n = at(in w, sub, Ty::ElementCount);
+        if n != at(in w, sup, Ty::ElementCount) {
             return false;
         }
         for k in 0..n {
-            let x = at(in w, sub, wrapping_add(2, k));
-            let y = at(in w, sup, wrapping_add(2, k));
+            let x = at(in w, sub, wrapping_add(Ty::FirstElement, k));
+            let y = at(in w, sup, wrapping_add(Ty::FirstElement, k));
             if !subtype(inout q, in w, in t, x, y, path, wrapping_add(depth, 1)) {
                 return false;
             }
@@ -1367,21 +1673,27 @@ fn subtype(
     sub == sup
 }
 
-// The (name, value) entry list of an enum or effect declaration at word 5.
+// The (name, value) entry list of an enum or effect declaration.
 fn entry_count(in w: ChunkSeq[u64], d: u64) -> u64 {
-    at(in w, d, 4)
+    at(in w, d, Decl::EntryCount)
 }
 
 fn entry_name(in w: ChunkSeq[u64], d: u64, k: u64) -> u64 {
-    at(in w, d, wrapping_add(5, wrapping_mul(k, 2)))
+    at(in w, d, wrapping_add(Decl::FirstEntry, wrapping_mul(k, ENTRY_WORDS)))
 }
 
 fn entry_value(in w: ChunkSeq[u64], d: u64, k: u64) -> u64 {
-    at(in w, d, wrapping_add(6, wrapping_mul(k, 2)))
+    at(in w, d, wrapping_add(Decl::FirstEntry + 1, wrapping_mul(k, ENTRY_WORDS)))
 }
 
 fn find_entry(in w: ChunkSeq[u64], d: u64, id: u64) -> u64 {
-    let k = find_sorted(in w, wrapping_add(d, 5), entry_count(in w, d), 2, id);
+    let k = find_sorted(
+        in w,
+        wrapping_add(d, Decl::FirstEntry),
+        entry_count(in w, d),
+        ENTRY_WORDS,
+        id
+    );
     if k == none() {
         none()
     } else {
@@ -1398,9 +1710,9 @@ fn declaration(
     a: u64,
     b: u64
 ) {
-    let ta = at(in w, a, 0);
-    let tb = at(in w, b, 0);
-    if ta == 4 || tb == 4 {
+    let ta = at(in w, a, Decl::Tag);
+    let tb = at(in w, b, Decl::Tag);
+    if ta == DeclTag::Unsupported || tb == DeclTag::Unsupported {
         return;
     }
     if ta != tb {
@@ -1413,11 +1725,25 @@ fn declaration(
         );
         return;
     }
-    if ta == 0 {
-        function(inout q, in w, in t, path, at(in w, a, 1), at(in w, b, 1), 0);
-    } else if ta == 1 {
-        generic_bounds(inout q, in w, path, at(in w, a, 1), at(in w, b, 1));
-        if at(in w, b, 2) > at(in w, a, 2) {
+    if ta == DeclTag::Function {
+        function(
+            inout q,
+            in w,
+            in t,
+            path,
+            at(in w, a, Decl::Function),
+            at(in w, b, Decl::Function),
+            0
+        );
+    } else if ta == DeclTag::Struct {
+        generic_bounds(
+            inout q,
+            in w,
+            path,
+            at(in w, a, Decl::Generics),
+            at(in w, b, Decl::Generics)
+        );
+        if at(in w, b, Decl::Mode) > at(in w, a, Decl::Mode) {
             breaking(
                 inout q,
                 path,
@@ -1426,7 +1752,7 @@ fn declaration(
                 "A caller discards or copies a value under the old kind."
             );
         }
-        if at(in w, a, 3) != at(in w, b, 3) {
+        if at(in w, a, Decl::Fields) != at(in w, b, Decl::Fields) {
             breaking(
                 inout q,
                 path,
@@ -1435,13 +1761,13 @@ fn declaration(
                 "A caller constructs, projects or destructures the old public field set."
             );
         }
-    } else if ta == 2 {
-        let ag = at(in w, a, 1);
-        let am = at(in w, a, 2);
-        let ao = at(in w, a, 3) != 0;
-        let bo = at(in w, b, 3) != 0;
-        generic_bounds(inout q, in w, path, ag, at(in w, b, 1));
-        if at(in w, b, 2) > am || ao != bo {
+    } else if ta == DeclTag::Enum {
+        let ag = at(in w, a, Decl::Generics);
+        let am = at(in w, a, Decl::Mode);
+        let ao = at(in w, a, Decl::Open) != 0;
+        let bo = at(in w, b, Decl::Open) != 0;
+        generic_bounds(inout q, in w, path, ag, at(in w, b, Decl::Generics));
+        if at(in w, b, Decl::Mode) > am || ao != bo {
             breaking(
                 inout q,
                 path,
@@ -1475,9 +1801,15 @@ fn declaration(
                     );
                 }
                 let payload = entry_value(in w, b, k);
-                let mut m: u64 = 0;
+                let mut m: u64 = Mode::Copy;
                 for x in 0..word(in w, payload) {
-                    let n = type_mode(in w, new_i, at(in w, payload, wrapping_add(1, x)), ag, 0);
+                    let n = type_mode(
+                        in w,
+                        new_i,
+                        at(in w, payload, wrapping_add(List::First, x)),
+                        ag,
+                        0
+                    );
                     if n == none() {
                         m = none();
                         break;
@@ -1487,7 +1819,7 @@ fn declaration(
                 if m == none() {
                     unsupported(inout q, path, "cannot establish the added payload's modal kind");
                 } else if m > am {
-                    let vpath = path_node(inout q, path, 2, name);
+                    let vpath = path_node(inout q, path, PathKind::Field, name);
                     breaking(
                         inout q,
                         vpath,
@@ -1498,12 +1830,18 @@ fn declaration(
                 }
             }
         }
-    } else if ta == 3 {
-        generic_bounds(inout q, in w, path, at(in w, a, 1), at(in w, b, 1));
-        let aseal = at(in w, a, 2) != 0;
-        let bseal = at(in w, b, 2) != 0;
-        let aq = at(in w, a, 3);
-        let bq = at(in w, b, 3);
+    } else if ta == DeclTag::Effect {
+        generic_bounds(
+            inout q,
+            in w,
+            path,
+            at(in w, a, Decl::Generics),
+            at(in w, b, Decl::Generics)
+        );
+        let aseal = at(in w, a, Decl::Sealed) != 0;
+        let bseal = at(in w, b, Decl::Sealed) != 0;
+        let aq = at(in w, a, Decl::Resumption);
+        let bq = at(in w, b, Decl::Resumption);
         if aseal != bseal || (!aseal && aq != bq) || (aseal && bq < aq) {
             breaking(
                 inout q,
@@ -1538,7 +1876,7 @@ fn declaration(
             let name = entry_name(in w, a, k);
             let new = find_entry(in w, b, name);
             if new != none() && new != entry_value(in w, a, k) {
-                let vpath = path_node(inout q, path, 2, name);
+                let vpath = path_node(inout q, path, PathKind::Field, name);
                 breaking(
                     inout q,
                     vpath,
@@ -1553,7 +1891,7 @@ fn declaration(
 
 fn new_q() -> Q {
     Q {
-        class: 0,
+        class: Class::Patch,
         issues: ChunkSeq::new[u64](),
         adapters: ChunkSeq::new[u64](),
         pool: ChunkSeq::new[u8](),
@@ -1569,19 +1907,19 @@ pub fn compare_q(in ws: Slice[u64], in t: Slice[u8]) -> Q {
     let mut q = new_q();
     let mut w = ChunkSeq::new[u64]();
     w.extend(in ws);
-    let old = word(in w, 0);
-    let new = word(in w, 1);
-    validate(inout q, in w, in t, old, 0);
-    validate(inout q, in w, in t, new, 1);
+    let old = word(in w, Input::Old);
+    let new = word(in w, Input::New);
+    validate(inout q, in w, in t, old, Side::Old);
+    validate(inout q, in w, in t, new, Side::New);
     for k in 0..ext_count(in w, old) {
-        let name = ext_field(in w, old, k, 0);
+        let name = ext_field(in w, old, k, Ext::Name);
         let e = find_ext(in w, new, name);
         if e != none() {
-            if ext_field(in w, new, e, 1)
-                != ext_field(in w, old, k, 1)
-                || ext_field(in w, new, e, 2)
-                > ext_field(in w, old, k, 2) {
-                let path = path_node(inout q, none(), 0, name);
+            if ext_field(in w, new, e, Ext::Arity)
+                != ext_field(in w, old, k, Ext::Arity)
+                || ext_field(in w, new, e, Ext::Mode)
+                > ext_field(in w, old, k, Ext::Mode) {
+                let path = path_node(inout q, none(), PathKind::Root, name);
                 breaking(
                     inout q,
                     path,
@@ -1594,7 +1932,7 @@ pub fn compare_q(in ws: Slice[u64], in t: Slice[u8]) -> Q {
     }
     for k in 0..export_count(in w, old) {
         let name = export_name(in w, old, k);
-        let path = path_node(inout q, none(), 0, name);
+        let path = path_node(inout q, none(), PathKind::Root, name);
         let after = find_export(in w, new, name);
         if after != none() {
             declaration(inout q, in w, in t, new, path, export_decl(in w, old, k), after);
@@ -1609,13 +1947,13 @@ pub fn compare_q(in ws: Slice[u64], in t: Slice[u8]) -> Q {
         }
     }
     q.class = if has_unsupported(in q) {
-        3
+        Class::Unknown
     } else if q.found.len() != 0 || q.adapts.len() != 0 {
-        2
+        Class::Major
     } else if old == new {
-        0
+        Class::Patch
     } else {
-        1
+        Class::Minor
     };
     finish_paths(inout q, in w, in t);
     q

@@ -1,0 +1,386 @@
+// @vesper/lsp: the LSP transport of crates/vesper-lsp in Vesper
+// (self-hosting wave SH5 lane 16, #1339).
+//
+// - limits.ves: `ProtocolLimits` and `ProtocolErrorKind`.
+// - frame.ves: `read_frame` (bounded headers, the body).
+// - envelope.ves: `parse_envelope` over the serde port's token tape.
+// - numbers.ves: serde_json's "number out of range".
+// - encode.ves: `encode_frame` (the output budget and serde_json's writer).
+// - lib.ves: the entries, and `lsp_serve`, the transport half of the stdio
+//   loop of src/lsp.rs (`dispatch`).
+use self::limits::{
+    Le,
+    LimitWord,
+    Perr,
+    Plimits,
+    perr_code,
+    perr_name,
+    read_limits
+};
+use self::envelope::{
+    Env,
+    Envelope,
+    Id,
+    NO_TOKEN,
+    decoded,
+    new_doc,
+    parse_envelope,
+    raw_span
+};
+use @vesper/serde::Doc;
+use self::encode::encode_frame;
+use self::frame::{
+    Body,
+    Cursor,
+    read_frame
+};
+
+// A `read_frame` step's status.
+enum Status: _ {
+    Body = 0,
+    End = 1,
+    Error = 2
+}
+
+// A task result's first word.
+enum Outcome: _ {
+    Ok = 0,
+    Err = 1
+}
+
+// Where the client stream starts in a task input: after the limits.
+const STREAM_AT: u64 = LimitWord::Count * Le::WordBytes;
+
+// One `read_frame` call as three words (`lsp_frames`).
+copy struct Step {
+    status: u64,
+    a: u64,
+    b: u64
+}
+
+fn frame_step(in s: Slice[u8], inout c: Cursor, l: Plimits) -> Step {
+    handle Fail[Perr] in {
+        match read_frame(in s, inout c, l) {
+            Option::Some(body) => Step {
+                status: Status::Body,
+                a: body.start,
+                b: body.len
+            },
+            Option::None => Step {
+                status: Status::End,
+                a: 0,
+                b: 0
+            },
+        }
+    } with {
+        return v => v,
+        raise(e, resume) => Step {
+            status: Status::Error,
+            a: perr_code(e),
+            b: 0
+        },
+    }
+}
+
+// Task "frames": the input is the limits, then the client byte stream.
+// Every frame gives three words: `Status::Body` with the body's start and
+// length, then `Status::End`, or `Status::Error` with the error's index.
+pub fn lsp_frames(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let l = read_limits(in b, 0);
+    let at = STREAM_AT;
+    let s = b[at..b.len()];
+    let mut out: ChunkSeq[u64] = ChunkSeq::new();
+    let mut c = Cursor {
+        pos: 0
+    };
+    loop {
+        let step = frame_step(in s, inout c, l);
+        out.push(step.status);
+        out.push(step.a);
+        if step.status == Status::Error {
+            out.push(c.pos);
+        } else {
+            out.push(step.b);
+        }
+        if step.status != Status::Body {
+            return out;
+        }
+    }
+}
+
+fn envelope_step(inout doc: Doc, in body: Slice[u8], l: Plimits) -> Result[Env, Perr] {
+    handle Fail[Perr] in {
+        env_ok(parse_envelope(inout doc, in body, l))
+    } with {
+        return v => v,
+        raise(e, resume) => env_err(e),
+    }
+}
+
+// A token's raw span as three words: present, start, end.
+fn put_span(inout out: ChunkSeq[u64], in doc: Doc, i: u64) {
+    if i == NO_TOKEN {
+        out.push(0);
+        out.push(0);
+        out.push(0);
+    } else {
+        let (a, b) = raw_span(in doc, i);
+        out.push(1);
+        out.push(a);
+        out.push(b);
+    }
+}
+
+// Bytes as a length word and eight bytes per little-endian word.
+fn put_bytes(inout out: ChunkSeq[u64], in bytes: Slice[u8]) {
+    out.push(bytes.len());
+    let mut x: u64 = 0;
+    let mut k: u32 = 0;
+    for i in 0..bytes.len() {
+        let c = match bytes.try_get(i) {
+            Option::Some(v) => widen_u64(v),
+            Option::None => 0,
+        };
+        x = x | wrapping_shl_u64(c, wrapping_mul(k, 8));
+        k = wrapping_add(k, 1);
+        if k == Le::WordBytes {
+            out.push(x);
+            x = 0;
+            k = 0;
+        }
+    }
+    if k != 0 {
+        out.push(x);
+    }
+}
+
+fn put_decoded(inout out: ChunkSeq[u64], in doc: Doc, in body: Slice[u8], i: u64) {
+    let mut text: ChunkSeq[u8] = ChunkSeq::new();
+    if i != NO_TOKEN {
+        decoded(in doc, in body, i, inout text);
+    }
+    put_bytes(inout out, in text[0..text.len()]);
+}
+
+// Task "envelope": the input is the limits, then one body. The result is
+// 0 and the envelope (variant; id tag and integer; params, result and
+// data spans; error code; then the decoded id string, method and message),
+// or 1 and the error's index.
+pub fn lsp_envelope(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let l = read_limits(in b, 0);
+    let at = STREAM_AT;
+    let body = b[at..b.len()];
+    let mut out: ChunkSeq[u64] = ChunkSeq::new();
+    let mut doc = new_doc();
+    match envelope_step(inout doc, in body, l) {
+        Result::Ok(env) => {
+            out.push(Outcome::Ok);
+            out.push(env.kind);
+            out.push(env.id_tag);
+            out.push(wrapping_u64(env.id_int));
+            put_span(inout out, in doc, env.params);
+            put_span(inout out, in doc, env.result);
+            out.push(wrapping_u64(env.code));
+            put_span(inout out, in doc, env.data);
+            if env.id_tag == Id::String {
+                put_decoded(inout out, in doc, in body, env.id);
+            } else {
+                put_decoded(inout out, in doc, in body, NO_TOKEN);
+            }
+            put_decoded(inout out, in doc, in body, env.method);
+            put_decoded(inout out, in doc, in body, env.message);
+        }
+        Result::Err(e) => {
+            out.push(Outcome::Err);
+            out.push(perr_code(e));
+        }
+    }
+    out
+}
+
+fn encode_step(in w: Slice[u64], in pool: Slice[u8], l: Plimits) -> Result[ChunkSeq[u8], Perr] {
+    handle Fail[Perr] in {
+        frame_ok(encode_frame(in w, in pool, l))
+    } with {
+        return v => v,
+        raise(e, resume) => frame_err(e),
+    }
+}
+
+// Task "encode": the input is the limits, the number of envelope words,
+// the words (encode.ves) and the text pool. The result is 0 and the frame
+// (a length word, then eight bytes per word), or 1 and the error's index.
+pub fn lsp_encode(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let l = read_limits(in b, 0);
+    let at = STREAM_AT;
+    let n = self::limits::le(in b, at, 0);
+    let mut w: ChunkSeq[u64] = ChunkSeq::with_capacity(n);
+    for i in 0..n {
+        w.push(self::limits::le(in b, at, wrapping_add(i, 1)));
+    }
+    let pool = b[wrapping_add(at, wrapping_mul(wrapping_add(n, 1), Le::WordBytes))..b.len()];
+    let mut out: ChunkSeq[u64] = ChunkSeq::new();
+    match encode_step(in w[0..w.len()], in pool, l) {
+        Result::Ok(frame) => {
+            out.push(Outcome::Ok);
+            put_bytes(inout out, in frame[0..frame.len()]);
+        }
+        Result::Err(e) => {
+            out.push(Outcome::Err);
+            out.push(perr_code(e));
+        }
+    }
+    out
+}
+
+// What `dispatch` (src/lsp.rs) does with each frame of the client stream,
+// as `lsp_serve` records it.
+enum Serve: _ {
+    Reply = 0,
+    Request = 1,
+    Notification = 2,
+    Cancel = 3,
+    Response = 4,
+    Fatal = 5,
+    Eof = 6
+}
+
+// A refusal that cannot be encoded ends the server with this plus the
+// error's index.
+const FATAL_ENCODE_BASE: u64 = 100;
+
+// encode.ves's `Payload::Error`.
+const PAYLOAD_ERROR: u64 = 1;
+
+// JSON-RPC's parse error and invalid request codes.
+const PARSE_ERROR: i64 = -32700;
+const INVALID_REQUEST: i64 = -32600;
+
+fn method_is(in doc: Doc, in body: Slice[u8], i: u64, in name: Str) -> bool {
+    let mut m: ChunkSeq[u8] = ChunkSeq::new();
+    decoded(in doc, in body, i, inout m);
+    let n = name.as_bytes();
+    if m.len() != n.len() {
+        return false;
+    }
+    for k in 0..m.len() {
+        if m.try_get(k) != n.try_get(k) {
+            return false;
+        }
+    }
+    true
+}
+
+// The response `dispatch` writes for a body `parse_envelope` refuses: no
+// id, -32700 for bad UTF-8 or JSON, else -32600, and the error's text.
+fn refusal(e: Perr, l: Plimits) -> Result[ChunkSeq[u8], Perr] {
+    let mut pool: ChunkSeq[u8] = ChunkSeq::new();
+    pool.extend("LSP ".as_bytes());
+    pool.extend(perr_name(e).as_bytes());
+    let code = match e {
+        Perr::PUtf8 => PARSE_ERROR,
+        Perr::PJson => PARSE_ERROR,
+        _ => INVALID_REQUEST,
+    };
+    let mut w: ChunkSeq[u64] = ChunkSeq::new();
+    // A response without an id, its error code, message and no data
+    // (encode.ves's word stream).
+    w.push(Envelope::Response);
+    w.push(Id::Null);
+    // The id's integer, offset and length.
+    w.push(0);
+    w.push(0);
+    w.push(0);
+    w.push(PAYLOAD_ERROR);
+    w.push(wrapping_u64(code));
+    // The message is the whole pool.
+    w.push(0);
+    w.push(pool.len());
+    // No data.
+    w.push(0);
+    encode_step(in w[0..w.len()], in pool[0..pool.len()], l)
+}
+
+// Task "serve": the input is the limits, then the client byte stream. Each
+// frame gives a record: `Serve::Reply` and the packed frame `dispatch`
+// writes at once for a refused body; `Serve::Request`, `Serve::Notification`,
+// `Serve::Cancel` (`$/cancelRequest`) or `Serve::Response` with the body's
+// start and length for what goes on to the session or the pending table.
+// The stream ends with `Serve::Eof`, or `Serve::Fatal` and the framing
+// error's index. (A refusal that cannot be encoded ends the server:
+// `Serve::Fatal` and `FATAL_ENCODE_BASE` plus the index.)
+pub fn lsp_serve(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let l = read_limits(in b, 0);
+    let at = STREAM_AT;
+    let s = b[at..b.len()];
+    let mut out: ChunkSeq[u64] = ChunkSeq::new();
+    let mut c = Cursor {
+        pos: 0
+    };
+    loop {
+        let step = frame_step(in s, inout c, l);
+        if step.status == Status::End {
+            out.push(Serve::Eof);
+            return out;
+        }
+        if step.status == Status::Error {
+            out.push(Serve::Fatal);
+            out.push(step.a);
+            return out;
+        }
+        let body = s[step.a..wrapping_add(step.a, step.b)];
+        let mut doc = new_doc();
+        match envelope_step(inout doc, in body, l) {
+            Result::Err(e) => match refusal(e, l) {
+                Result::Ok(frame) => {
+                    out.push(Serve::Reply);
+                    put_bytes(inout out, in frame[0..frame.len()]);
+                }
+                Result::Err(f) => {
+                    out.push(Serve::Fatal);
+                    out.push(wrapping_add(FATAL_ENCODE_BASE, perr_code(f)));
+                    return out;
+                }
+            },
+            Result::Ok(env) => {
+                let kind = if env.kind == Envelope::Request {
+                    Serve::Request
+                } else if env.kind == Envelope::Notification {
+                    if method_is(in doc, in body, env.method, "$/cancelRequest") {
+                        Serve::Cancel
+                    } else {
+                        Serve::Notification
+                    }
+                } else {
+                    Serve::Response
+                };
+                out.push(kind);
+                out.push(step.a);
+                out.push(step.b);
+            }
+        }
+    }
+}
+
+// Typed constructors: a handle body or clause that builds a Result or
+// Option with a variant constructor leaves the other type parameter
+// uninferred (`_`), which the native layout refuses (report, gap 2).
+fn env_ok(v: Env) -> Result[Env, Perr] {
+    Result::Ok(v)
+}
+
+fn env_err(e: Perr) -> Result[Env, Perr] {
+    Result::Err(e)
+}
+
+fn frame_ok(sink v: ChunkSeq[u8]) -> Result[ChunkSeq[u8], Perr] {
+    Result::Ok(v)
+}
+
+fn frame_err(e: Perr) -> Result[ChunkSeq[u8], Perr] {
+    Result::Err(e)
+}

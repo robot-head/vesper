@@ -264,6 +264,7 @@ pub(crate) fn literal(value: &Literal) -> Term {
                 magnitude
             }
         }
+        Literal::WideInt(n) => Term::Nat((*n).into()),
         Literal::Float(n) => Term::app(
             global(&["Float", "ofBits"]),
             [Term::Nat(n.to_bits().into())],

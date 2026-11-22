@@ -1,0 +1,73 @@
+// The GNU ld / ld.lld linker script (src/freestanding/script.rs).
+
+use self::util::{
+    push_hex,
+    push_text
+};
+use self::stub::{
+    is_riscv
+};
+
+pub fn schema() -> Str {
+    "vesper.native.freestanding/1"
+}
+
+pub fn triple(target: u64) -> Str {
+    if is_riscv(target) {
+        "riscv64imac-unknown-none-elf"
+    } else {
+        "aarch64-unknown-none"
+    }
+}
+
+// `script::linker_script(target, board, stack_bytes)`; the board's name is
+// `name`.
+pub fn linker_script(
+    target: u64,
+    in name: Slice[u8],
+    ram_base: u64,
+    ram_bytes: u64,
+    image_base: u64,
+    stack_bytes: u64
+) -> ChunkSeq[u8] {
+    let arch = if is_riscv(target) {
+        "riscv"
+    } else {
+        "aarch64"
+    };
+    let stack = if stack_bytes % 16 == 0 {
+        stack_bytes
+    } else {
+        wrapping_mul(wrapping_add(stack_bytes / 16, 1), 16)
+    };
+    let ram_end = wrapping_add(ram_base, ram_bytes);
+    let mut s: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    push_text(inout s, in "/* ");
+    push_text(inout s, in schema());
+    push_text(inout s, in ": ");
+    push_text(inout s, in triple(target));
+    push_text(inout s, in " on ");
+    s.extend(in name);
+    push_text(inout s, in " */\nOUTPUT_ARCH(");
+    push_text(inout s, in arch);
+    push_text(inout s, in ")\nENTRY(_start)\n\nSECTIONS\n{\n  . = ");
+    push_hex(inout s, image_base);
+    push_text(
+        inout s,
+        in ";\n  __image_start = .;\n  .text : ALIGN(16)\n  {\n    KEEP(*(.text.boot))\n    *(.text .text.*)\n  }\n  .rodata : ALIGN(16)\n  {\n    *(.rodata .rodata.* .srodata .srodata.*)\n  }\n  . = ALIGN(0x1000);\n  .data : ALIGN(16)\n  {\n    *(.data .data.* .sdata .sdata.*)\n  }\n  .bss (NOLOAD) : ALIGN(16)\n  {\n    __bss_start = .;\n    *(.bss .bss.* .sbss .sbss.* COMMON)\n    . = ALIGN(8);\n    __bss_end = .;\n  }\n  .stack (NOLOAD) : ALIGN(16)\n  {\n    __stack_bottom = .;\n    . += "
+    );
+    push_hex(inout s, stack);
+    push_text(
+        inout s,
+        in ";\n    __stack_top = .;\n  }\n  __image_end = .;\n  /DISCARD/ : { *(.eh_frame*) *(.comment) *(.note*) *(.riscv.attributes) }\n}\n\nASSERT(__stack_top <= "
+    );
+    push_hex(inout s, ram_end);
+    push_text(inout s, in ", \"image and stack exceed RAM (");
+    push_hex(inout s, ram_base);
+    push_text(inout s, in " + ");
+    push_hex(inout s, ram_bytes);
+    push_text(inout s, in ")\")\nASSERT(_start == ");
+    push_hex(inout s, image_base);
+    push_text(inout s, in ", \"the entry stub must be first\")\n");
+    s
+}

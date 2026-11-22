@@ -7,6 +7,7 @@ use self::{
     Ver
 };
 use self::util::{
+    Class,
     div_rem,
     put,
     put_u64
@@ -26,15 +27,93 @@ fn put_bytes(inout m: ChunkSeq[u8], in t: ChunkSeq[u8], off: u64, len: u64) {
     }
 }
 
-// Error kinds (`semver::error::ErrorKind`, the version subset): none 0,
-// Empty 1, UnexpectedEnd 2, UnexpectedChar 3, UnexpectedCharAfter 4,
-// LeadingZero 5, Overflow 6, EmptySegment 7.
-// Positions: Major 0, Minor 1, Patch 2, Pre 3, Build 4.
+// Error kinds (`semver::error::ErrorKind`, the version subset).
+enum ErrorKind: _ {
+    None,
+    Empty,
+    UnexpectedEnd,
+    UnexpectedChar,
+    UnexpectedCharAfter,
+    LeadingZero,
+    Overflow,
+    EmptySegment
+}
+
+// `semver::error::Position`.
+enum Pos: _ {
+    Major,
+    Minor,
+    Patch,
+    Pre,
+    Build
+}
+
+// The bytes the grammar and the error messages name.
+enum Ascii: _ {
+    Nul = 0,
+    Tab = 9,
+    Lf = 10,
+    Cr = 13,
+    Space = 32,
+    Quote = 39,
+    Plus = 43,
+    Minus = 45,
+    Dot = 46,
+    Zero = 48,
+    Nine = 57,
+    UpperA = 65,
+    UpperZ = 90,
+    Backslash = 92,
+    LowerA = 97,
+    LowerZ = 122,
+    Delete = 127
+}
+
+// The input end in `identifier`: above every byte.
+const END: u64 = 256;
+const DECIMAL_BASE: u64 = 10;
+const HEX_BASE: u64 = 16;
+// A hex letter digit d is the byte d + HEX_LETTER_BIAS ('a' is 10 + 87).
+const HEX_LETTER_BIAS: u64 = 87;
+// `value * 10 + digit` fits u64 while value is below u64::MAX / 10, or
+// equal to it with a digit up to u64::MAX % 10.
+const MAX_BEFORE_DIGIT: u64 = 1844674407370955161;
+const MAX_LAST_DIGIT: u64 = 5;
+// UTF-8 leading bytes: below 0x80 one byte, 0xE0 two, 0xF0 three.
+const UTF8_TWO: u8 = 128;
+const UTF8_THREE: u8 = 224;
+const UTF8_FOUR: u8 = 240;
+// U+0080 ..= U+009F (C1 controls) are 0xC2 then a byte below 0xA0.
+const C1_LEAD: u8 = 194;
+const C1_END: u8 = 160;
+
+// Release bumps, with None for no increase.
+enum Bump: _ {
+    None,
+    Patch,
+    Minor,
+    Major
+}
+
+// The side of a version error.
+enum Side: _ {
+    None,
+    Old,
+    New
+}
+
+// Release issue codes.
+enum Issue: _ {
+    UnknownInterface,
+    PrereleaseUnsupported,
+    NonIncreasingVersion,
+    InsufficientBump
+}
 
 pub fn new_ver() -> Ver {
     Ver {
-        err: 0,
-        pos: 0,
+        err: ErrorKind::None,
+        pos: Pos::Major,
         at: 0,
         major: 0,
         minor: 0,
@@ -47,7 +126,7 @@ pub fn new_ver() -> Ver {
 }
 
 fn fail_at(inout v: Ver, kind: u64, pos: u64, at: u64) {
-    if v.err == 0 {
+    if v.err == ErrorKind::None {
         v.err = kind;
         v.pos = pos;
         v.at = at;
@@ -55,11 +134,14 @@ fn fail_at(inout v: Ver, kind: u64, pos: u64, at: u64) {
 }
 
 fn is_digit(b: u8) -> bool {
-    b >= 48 && b <= 57
+    b >= Ascii::Zero && b <= Ascii::Nine
 }
 
 fn is_ident_letter(b: u8) -> bool {
-    (b >= 65 && b <= 90) || (b >= 97 && b <= 122) || b == 45
+    (b >= Ascii::UpperA && b <= Ascii::UpperZ)
+        || (b >= Ascii::LowerA && b <= Ascii::LowerZ)
+        || b
+        == Ascii::Minus
 }
 
 // `numeric_identifier`: the value and the offset after it.
@@ -77,38 +159,38 @@ fn numeric(in t: ChunkSeq[u8], start: u64, pos: u64, inout v: Ver) -> (u64, u64)
             break;
         }
         if value == 0 && len > 0 {
-            fail_at(inout v, 5, pos, 0);
+            fail_at(inout v, ErrorKind::LeadingZero, pos, 0);
             return (0, i);
         }
-        let digit = wrapping_sub(widen_u64(d), 48);
+        let digit = wrapping_sub(widen_u64(d), Ascii::Zero);
         // value * 10 + digit must fit in u64.
-        if value > 1844674407370955161 || (value == 1844674407370955161 && digit > 5) {
-            fail_at(inout v, 6, pos, 0);
+        if value > MAX_BEFORE_DIGIT || (value == MAX_BEFORE_DIGIT && digit > MAX_LAST_DIGIT) {
+            fail_at(inout v, ErrorKind::Overflow, pos, 0);
             return (0, i);
         }
-        value = wrapping_add(wrapping_mul(value, 10), digit);
+        value = wrapping_add(wrapping_mul(value, DECIMAL_BASE), digit);
         len = wrapping_add(len, 1);
     }
     if len > 0 {
         (value, wrapping_add(start, len))
     } else if start < n {
-        fail_at(inout v, 3, pos, start);
+        fail_at(inout v, ErrorKind::UnexpectedChar, pos, start);
         (0, start)
     } else {
-        fail_at(inout v, 2, pos, 0);
+        fail_at(inout v, ErrorKind::UnexpectedEnd, pos, 0);
         (0, start)
     }
 }
 
 // `dot`: the offset after a `.`.
 fn dot(in t: ChunkSeq[u8], i: u64, pos: u64, inout v: Ver) -> u64 {
-    if i < t.len() && byte(in t, i) == 46 {
+    if i < t.len() && byte(in t, i) == Ascii::Dot {
         wrapping_add(i, 1)
     } else if i < t.len() {
-        fail_at(inout v, 4, pos, i);
+        fail_at(inout v, ErrorKind::UnexpectedCharAfter, pos, i);
         i
     } else {
-        fail_at(inout v, 2, pos, 0);
+        fail_at(inout v, ErrorKind::UnexpectedEnd, pos, 0);
         i
     }
 }
@@ -122,31 +204,37 @@ fn identifier(in t: ChunkSeq[u8], start: u64, pos: u64, inout v: Ver) -> u64 {
     let mut nondigit = false;
     loop {
         let i = wrapping_add(wrapping_add(start, acc), seg);
-        // 256 stands for the end of input.
+        // END stands for the end of input.
         let b: u64 = if i < n {
             widen_u64(byte(in t, i))
         } else {
-            256
+            END
         };
-        if b < 256 && is_ident_letter(byte(in t, i)) {
+        if b < END && is_ident_letter(byte(in t, i)) {
             seg = wrapping_add(seg, 1);
             nondigit = true;
-        } else if b < 256 && is_digit(byte(in t, i)) {
+        } else if b < END && is_digit(byte(in t, i)) {
             seg = wrapping_add(seg, 1);
         } else {
             if seg == 0 {
-                if acc == 0 && b != 46 {
+                if acc == 0 && b != Ascii::Dot {
                     return start;
                 }
-                fail_at(inout v, 7, pos, 0);
+                fail_at(inout v, ErrorKind::EmptySegment, pos, 0);
                 return start;
             }
-            if pos == 3 && seg > 1 && !nondigit && byte(in t, wrapping_add(start, acc)) == 48 {
-                fail_at(inout v, 5, pos, 0);
+            if pos
+                == Pos::Pre
+                && seg
+                > 1
+                && !nondigit
+                && byte(in t, wrapping_add(start, acc))
+                == Ascii::Zero {
+                fail_at(inout v, ErrorKind::LeadingZero, pos, 0);
                 return start;
             }
             acc = wrapping_add(acc, seg);
-            if b == 46 {
+            if b == Ascii::Dot {
                 acc = wrapping_add(acc, 1);
                 seg = 0;
                 nondigit = false;
@@ -158,66 +246,66 @@ fn identifier(in t: ChunkSeq[u8], start: u64, pos: u64, inout v: Ver) -> u64 {
     start
 }
 
-// `Version::parse`: `err` is 0 on success.
+// `Version::parse`: `err` is ErrorKind::None on success.
 pub fn parse(in t: ChunkSeq[u8]) -> Ver {
     let mut v = new_ver();
     let n = t.len();
     if n == 0 {
-        fail_at(inout v, 1, 0, 0);
+        fail_at(inout v, ErrorKind::Empty, Pos::Major, 0);
         return v;
     }
-    let (major, i) = numeric(in t, 0, 0, inout v);
-    if v.err != 0 {
+    let (major, i) = numeric(in t, 0, Pos::Major, inout v);
+    if v.err != ErrorKind::None {
         return v;
     }
-    let i = dot(in t, i, 0, inout v);
-    if v.err != 0 {
+    let i = dot(in t, i, Pos::Major, inout v);
+    if v.err != ErrorKind::None {
         return v;
     }
-    let (minor, i) = numeric(in t, i, 1, inout v);
-    if v.err != 0 {
+    let (minor, i) = numeric(in t, i, Pos::Minor, inout v);
+    if v.err != ErrorKind::None {
         return v;
     }
-    let i = dot(in t, i, 1, inout v);
-    if v.err != 0 {
+    let i = dot(in t, i, Pos::Minor, inout v);
+    if v.err != ErrorKind::None {
         return v;
     }
-    let (patch, i) = numeric(in t, i, 2, inout v);
-    if v.err != 0 {
+    let (patch, i) = numeric(in t, i, Pos::Patch, inout v);
+    if v.err != ErrorKind::None {
         return v;
     }
     v.major = major;
     v.minor = minor;
     v.patch = patch;
     let mut i = i;
-    let mut pos: u64 = 2;
+    let mut pos: u64 = Pos::Patch;
     if i == n {
         return v;
     }
-    if byte(in t, i) == 45 {
-        pos = 3;
+    if byte(in t, i) == Ascii::Minus {
+        pos = Pos::Pre;
         let s = wrapping_add(i, 1);
-        let e = identifier(in t, s, 3, inout v);
-        if v.err != 0 {
+        let e = identifier(in t, s, Pos::Pre, inout v);
+        if v.err != ErrorKind::None {
             return v;
         }
         if e == s {
-            fail_at(inout v, 7, 3, 0);
+            fail_at(inout v, ErrorKind::EmptySegment, Pos::Pre, 0);
             return v;
         }
         v.pre_off = s;
         v.pre_len = wrapping_sub(e, s);
         i = e;
     }
-    if i < n && byte(in t, i) == 43 {
-        pos = 4;
+    if i < n && byte(in t, i) == Ascii::Plus {
+        pos = Pos::Build;
         let s = wrapping_add(i, 1);
-        let e = identifier(in t, s, 4, inout v);
-        if v.err != 0 {
+        let e = identifier(in t, s, Pos::Build, inout v);
+        if v.err != ErrorKind::None {
             return v;
         }
         if e == s {
-            fail_at(inout v, 7, 4, 0);
+            fail_at(inout v, ErrorKind::EmptySegment, Pos::Build, 0);
             return v;
         }
         v.build_off = s;
@@ -225,19 +313,19 @@ pub fn parse(in t: ChunkSeq[u8]) -> Ver {
         i = e;
     }
     if i < n {
-        fail_at(inout v, 4, pos, i);
+        fail_at(inout v, ErrorKind::UnexpectedCharAfter, pos, i);
     }
     v
 }
 
 fn put_position(inout m: ChunkSeq[u8], pos: u64) {
-    if pos == 0 {
+    if pos == Pos::Major {
         put(inout m, "major version number");
-    } else if pos == 1 {
+    } else if pos == Pos::Minor {
         put(inout m, "minor version number");
-    } else if pos == 2 {
+    } else if pos == Pos::Patch {
         put(inout m, "patch version number");
-    } else if pos == 3 {
+    } else if pos == Pos::Pre {
         put(inout m, "pre-release identifier");
     } else {
         put(inout m, "build metadata");
@@ -245,17 +333,17 @@ fn put_position(inout m: ChunkSeq[u8], pos: u64) {
 }
 
 fn hex_digit(d: u64) -> u8 {
-    if d < 10 {
-        wrapping_u8(wrapping_add(d, 48))
+    if d < DECIMAL_BASE {
+        wrapping_u8(wrapping_add(d, Ascii::Zero))
     } else {
-        wrapping_u8(wrapping_add(d, 87))
+        wrapping_u8(wrapping_add(d, HEX_LETTER_BIAS))
     }
 }
 
 // `\u{..}` with lowercase hex and no leading zeros, for `c` below 256.
 fn put_unicode_escape(inout m: ChunkSeq[u8], c: u64) {
     put(inout m, "\\u{");
-    let (hi, lo) = div_rem(c, 16);
+    let (hi, lo) = div_rem(c, HEX_BASE);
     if hi != 0 {
         m.push(hex_digit(hi));
     }
@@ -265,11 +353,11 @@ fn put_unicode_escape(inout m: ChunkSeq[u8], c: u64) {
 
 // The byte length of the UTF-8 character with leading byte `b`.
 fn char_len(b: u8) -> u64 {
-    if b < 128 {
+    if b < UTF8_TWO {
         1
-    } else if b < 224 {
+    } else if b < UTF8_THREE {
         2
-    } else if b < 240 {
+    } else if b < UTF8_FOUR {
         3
     } else {
         4
@@ -282,21 +370,21 @@ fn char_len(b: u8) -> u64 {
 fn put_quoted_char(inout m: ChunkSeq[u8], in t: ChunkSeq[u8], at: u64) {
     let b = byte(in t, at);
     put(inout m, "'");
-    if b == 0 {
+    if b == Ascii::Nul {
         put(inout m, "\\0");
-    } else if b == 9 {
+    } else if b == Ascii::Tab {
         put(inout m, "\\t");
-    } else if b == 10 {
+    } else if b == Ascii::Lf {
         put(inout m, "\\n");
-    } else if b == 13 {
+    } else if b == Ascii::Cr {
         put(inout m, "\\r");
-    } else if b == 39 {
+    } else if b == Ascii::Quote {
         put(inout m, "\\'");
-    } else if b == 92 {
+    } else if b == Ascii::Backslash {
         put(inout m, "\\\\");
-    } else if b < 32 || b == 127 {
+    } else if b < Ascii::Space || b == Ascii::Delete {
         put_unicode_escape(inout m, widen_u64(b));
-    } else if b == 194 && byte(in t, wrapping_add(at, 1)) < 160 {
+    } else if b == C1_LEAD && byte(in t, wrapping_add(at, 1)) < C1_END {
         // U+0080 ..= U+009F.
         put_unicode_escape(inout m, wrapping_sub(widen_u64(byte(in t, wrapping_add(at, 1))), 0));
     } else {
@@ -307,25 +395,25 @@ fn put_quoted_char(inout m: ChunkSeq[u8], in t: ChunkSeq[u8], at: u64) {
 
 // `semver::Error` Display.
 pub fn put_error(inout m: ChunkSeq[u8], in t: ChunkSeq[u8], v: Ver) {
-    if v.err == 1 {
+    if v.err == ErrorKind::Empty {
         put(inout m, "empty string, expected a semver version");
-    } else if v.err == 2 {
+    } else if v.err == ErrorKind::UnexpectedEnd {
         put(inout m, "unexpected end of input while parsing ");
         put_position(inout m, v.pos);
-    } else if v.err == 3 {
+    } else if v.err == ErrorKind::UnexpectedChar {
         put(inout m, "unexpected character ");
         put_quoted_char(inout m, in t, v.at);
         put(inout m, " while parsing ");
         put_position(inout m, v.pos);
-    } else if v.err == 4 {
+    } else if v.err == ErrorKind::UnexpectedCharAfter {
         put(inout m, "unexpected character ");
         put_quoted_char(inout m, in t, v.at);
         put(inout m, " after ");
         put_position(inout m, v.pos);
-    } else if v.err == 5 {
+    } else if v.err == ErrorKind::LeadingZero {
         put(inout m, "invalid leading zero in ");
         put_position(inout m, v.pos);
-    } else if v.err == 6 {
+    } else if v.err == ErrorKind::Overflow {
         put(inout m, "value of ");
         put_position(inout m, v.pos);
         put(inout m, " exceeds u64::MAX");
@@ -366,7 +454,7 @@ fn cmp_u64(a: u64, b: u64) -> i64 {
 fn segment_end(in t: ChunkSeq[u8], i: u64, end: u64) -> u64 {
     let mut j = i;
     loop {
-        if j >= end || byte(in t, j) == 46 {
+        if j >= end || byte(in t, j) == Ascii::Dot {
             break;
         }
         j = wrapping_add(j, 1);
@@ -476,9 +564,9 @@ pub fn cmp_precedence(in a: ChunkSeq[u8], va: Ver, in b: ChunkSeq[u8], vb: Ver) 
 }
 
 fn put_bump(inout m: ChunkSeq[u8], bump: u64) {
-    if bump == 1 {
+    if bump == Bump::Patch {
         put(inout m, "patch");
-    } else if bump == 2 {
+    } else if bump == Bump::Minor {
         put(inout m, "minor");
     } else {
         put(inout m, "major");
@@ -494,21 +582,18 @@ fn issue(inout r: R, code: u64, in m: Str) {
 
 fn new_r() -> R {
     R {
-        err: 0,
+        err: Side::None,
         words: ChunkSeq::new[u64](),
         pool: ChunkSeq::new[u8]()
     }
 }
 
 // Release policy 1 (src/release.rs `check_release`) once the comparison is
-// known. `classification` is the comparison's (Patch 0, Minor 1, Major 2,
-// Unknown 3).
+// known. `classification` is the comparison's `Class`.
 //
-// On a version error, `err` is the side (Old 1, New 2) and `pool` holds the
-// message. Otherwise `words` is [actual bump (None 0, Patch 1, Minor 2,
-// Major 3), old display off, len, new display off, len, then one
-// (code, message off, len) per issue], with codes UnknownInterface 0,
-// PrereleaseUnsupported 1, NonIncreasingVersion 2, InsufficientBump 3.
+// On a version error, `err` is the `Side` and `pool` holds the message.
+// Otherwise `words` is [actual `Bump`, old display off, len, new display
+// off, len, then one (`Issue` code, message off, len) per issue].
 pub fn release_q(in old_text: Slice[u8], in new_text: Slice[u8], classification: u64) -> R {
     let mut r = new_r();
     // Copied once into sequences, whose accessors inline (functions with
@@ -518,30 +603,30 @@ pub fn release_q(in old_text: Slice[u8], in new_text: Slice[u8], classification:
     let mut new = ChunkSeq::new[u8]();
     new.extend(in new_text);
     let before = parse(in old);
-    if before.err != 0 {
-        r.err = 1;
+    if before.err != ErrorKind::None {
+        r.err = Side::Old;
         put_error(inout r.pool, in old, before);
         return r;
     }
     let after = parse(in new);
-    if after.err != 0 {
-        r.err = 2;
+    if after.err != ErrorKind::None {
+        r.err = Side::New;
         put_error(inout r.pool, in new, after);
         return r;
     }
-    let required: u64 = if classification == 0 {
-        1
-    } else if classification == 1 {
-        2
-    } else if classification == 2 {
-        3
+    let required: u64 = if classification == Class::Patch {
+        Bump::Patch
+    } else if classification == Class::Minor {
+        Bump::Minor
+    } else if classification == Class::Major {
+        Bump::Major
     } else {
-        0
+        Bump::None
     };
     let actual: u64 = if after.major > before.major {
-        3
+        Bump::Major
     } else if after.major == before.major && after.minor > before.minor {
-        2
+        Bump::Minor
     } else if after
         .major
         == before
@@ -554,9 +639,9 @@ pub fn release_q(in old_text: Slice[u8], in new_text: Slice[u8], classification:
         .patch
         > before
         .patch {
-        1
+        Bump::Patch
     } else {
-        0
+        Bump::None
     };
     r.words.push(actual);
     let o = r.pool.len();
@@ -567,17 +652,29 @@ pub fn release_q(in old_text: Slice[u8], in new_text: Slice[u8], classification:
     put_version(inout r.pool, in new, after);
     r.words.push(o);
     r.words.push(wrapping_sub(r.pool.len(), o));
-    if required == 0 {
-        issue(inout r, 0, "unsupported or unknown interface contracts cannot certify a release");
+    if required == Bump::None {
+        issue(
+            inout r,
+            Issue::UnknownInterface,
+            "unsupported or unknown interface contracts cannot certify a release"
+        );
     }
     if before.pre_len != 0 || after.pre_len != 0 {
-        issue(inout r, 1, "release policy 1 does not classify prerelease version transitions");
+        issue(
+            inout r,
+            Issue::PrereleaseUnsupported,
+            "release policy 1 does not classify prerelease version transitions"
+        );
     }
     if cmp_precedence(in new, after, in old, before) != 1 {
-        issue(inout r, 2, "candidate precedence must increase; build metadata is ignored");
+        issue(
+            inout r,
+            Issue::NonIncreasingVersion,
+            "candidate precedence must increase; build metadata is ignored"
+        );
     }
-    if actual != 0 && required != 0 && actual < required {
-        r.words.push(3);
+    if actual != Bump::None && required != Bump::None && actual < required {
+        r.words.push(Issue::InsufficientBump);
         let o = r.pool.len();
         put(inout r.pool, "interface change requires a ");
         put_bump(inout r.pool, required);

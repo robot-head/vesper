@@ -1,0 +1,16 @@
+[package]
+name = "vesper-codegen-numeric-test"
+version = "0.1.0"
+edition = "2024"
+description = "Differential test of @vesper/codegen-numeric against the Rust lowering (self-hosting SH4 lane 11)"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# The test links both the compiler and the Cranelift shim. It lives in its
+# own crate because the shim's tests already depend on the compiler: a
+# dev-dependency of the root crate on the shim is a cycle in Bazel.
+
+[dev-dependencies]
+vesper = { path = "../.." }
+vesper-cranelift-sys = { path = "../vesper-cranelift-sys" }
+object = { version = "=0.37.3", default-features = false, features = ["write_core", "elf", "std", "read_core"] }

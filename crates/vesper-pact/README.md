@@ -18,7 +18,7 @@ Run `check_coherence` and reject its diagnostics before accepting solver evidenc
 
 ## Builds
 
-`vesper-pact` is the Vesper port in `vesper/` (port wave P3a lane 3, #1038), and it is the package's only build (#1085). `check_orphan`, `conformance_env` and `validate_query` are not ported and stay Rust in `src/`. The compiler cannot link a port before self-hosting Stage 2, so it links `vesper-pact-seed` (`seed/`): the shared API in `src/` over the frozen Rust engine in `seed/src/engine` (bug fixes only). Both packages run every test of the crate. See "Crates the compiler links" in `docs/maintenance/porting-a-crate.md`.
+`vesper-pact` is the Vesper port in `vesper/` (port wave P3a lane 3, #1038), and it is the package's only build (#1085). Since Rust-exit SH6 lane 12 (#1407), `check_orphan`, `conformance_env` and `validate_query` run in the port too (`tests/standalone_differential.rs` compares them with the seed), so the Rust in `src/` is only the shared types, their text, the folds and the wrappers. The compiler cannot link a port before self-hosting Stage 2, so it links `vesper-pact-seed` (`seed/`): the shared API in `src/` over the frozen Rust engine in `seed/src/engine` (bug fixes only). Both packages run every test of the crate. See "Crates the compiler links" in `docs/maintenance/porting-a-crate.md`.
 
 ```sh
 cargo fmt -- --check

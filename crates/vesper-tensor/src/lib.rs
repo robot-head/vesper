@@ -34,7 +34,7 @@ pub mod attention;
 pub mod formats;
 pub mod gguf;
 pub mod host;
-mod json;
+pub(crate) mod json;
 pub mod kv;
 pub mod llama;
 pub mod mmap;

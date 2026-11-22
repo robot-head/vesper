@@ -150,6 +150,35 @@ pub struct St {
     reexp_key: FlatTable[u64, u64],
     reexp_kind: FlatTable[u64, u8],
     root_reexports: ChunkSeq[u32],
+    // The re-exported path locals `E::M` of each module, listed by (module,
+    // E) through `rx_next`: the members of re-exported value enums.
+    rx_head: FlatTable[u64, u32],
+    rx_local: ChunkSeq[u32],
+    rx_next: ChunkSeq[u32],
+    // Value enums (`Table::group`): (module, enum) -> its first member row;
+    // each row is a member name, its constant `const$E::M` and the next
+    // row. `own_prefix` holds (module, P) for every constant `const$P::..`.
+    grp_head: FlatTable[u64, u32],
+    grp_member: ChunkSeq[u32],
+    grp_item: ChunkSeq[u32],
+    grp_next: ChunkSeq[u32],
+    own_prefix: FlatTable[u64, u8],
+    // The last `group` result: members in byte order and their item keys.
+    grp_m: ChunkSeq[u32],
+    grp_k: ChunkSeq[u64],
+    // Constants with a literal value (`const_literal`), as parsed: module,
+    // function name, the literal and whether the constant is an untyped
+    // value enum member. `lit_row` maps each one's internal name to its
+    // row (latest declaration wins); `untyped` holds the untyped ones.
+    cl_mod: ChunkSeq[u32],
+    cl_item: ChunkSeq[u32],
+    cl_kind: ChunkSeq[u8],
+    cl_neg: ChunkSeq[u8],
+    cl_bits: ChunkSeq[u64],
+    cl_hi: ChunkSeq[u64],
+    cl_untyped: ChunkSeq[u8],
+    lit_row: FlatTable[u32, u32],
+    untyped: FlatTable[u32, u8],
     // `Resolver::renamed`: item key -> root name.
     renamed: FlatTable[u64, u32],
     // `mangled` names already built, by item key.
@@ -195,6 +224,16 @@ pub struct St {
     seen_pat: FlatTable[u32, u8],
     seen_param: FlatTable[u32, u8],
     seen_tref: FlatTable[u32, u8],
+    // `const_flags` of each global symbol asked about, by symbol id (with
+    // bit 2 set; 0 when not computed yet).
+    const_flag: ChunkSeq[u8],
+    // The module's expression count before renaming: the nodes the renamer
+    // makes (a constant's call callee) come after it and are final.
+    made_from: u64,
+    // `assemble`'s per-module `groups`: local enum name -> range of
+    // `group_pool` (its member constants, sorted).
+    groups: FlatTable[u32, u64],
+    group_pool: ChunkSeq[u32],
     // `generic_scopes`: owner -> range of `scope_pool`.
     scopes: FlatTable[u32, u64],
     scope_pool: ChunkSeq[u32],
@@ -262,6 +301,25 @@ pub fn st_new() -> St {
         reexp_key: flat_table_new[u64, u64](),
         reexp_kind: flat_table_new[u64, u8](),
         root_reexports: ChunkSeq::new[u32](),
+        rx_head: flat_table_new[u64, u32](),
+        rx_local: ChunkSeq::new[u32](),
+        rx_next: ChunkSeq::new[u32](),
+        grp_head: flat_table_new[u64, u32](),
+        grp_member: ChunkSeq::new[u32](),
+        grp_item: ChunkSeq::new[u32](),
+        grp_next: ChunkSeq::new[u32](),
+        own_prefix: flat_table_new[u64, u8](),
+        grp_m: ChunkSeq::new[u32](),
+        grp_k: ChunkSeq::new[u64](),
+        cl_mod: ChunkSeq::new[u32](),
+        cl_item: ChunkSeq::new[u32](),
+        cl_kind: ChunkSeq::new[u8](),
+        cl_neg: ChunkSeq::new[u8](),
+        cl_bits: ChunkSeq::new[u64](),
+        cl_hi: ChunkSeq::new[u64](),
+        cl_untyped: ChunkSeq::new[u8](),
+        lit_row: flat_table_new[u32, u32](),
+        untyped: flat_table_new[u32, u8](),
         renamed: flat_table_new[u64, u32](),
         mangled: flat_table_new[u64, u32](),
         err_code: 0,
@@ -292,6 +350,10 @@ pub fn st_new() -> St {
         seen_pat: flat_table_new[u32, u8](),
         seen_param: flat_table_new[u32, u8](),
         seen_tref: flat_table_new[u32, u8](),
+        const_flag: ChunkSeq::new[u8](),
+        made_from: 0,
+        groups: flat_table_new[u32, u64](),
+        group_pool: ChunkSeq::new[u32](),
         scopes: flat_table_new[u32, u64](),
         scope_pool: ChunkSeq::new[u32](),
         s_self: s_self,
@@ -406,6 +468,108 @@ pub fn sym_less(in s: St, a: u32, b: u32) -> bool {
         }
         i = inc(i);
     }
+}
+
+// Whether `p` occurs in `sym` (one pass over the interner's text; the
+// renamer asks for every new name).
+pub fn sym_contains(in s: St, sym: u32, in p: Str) -> bool {
+    let (a, z) = sym_range(in s, sym);
+    let k = p.len();
+    if k == 0 || wrapping_sub(z, a) < k {
+        return false;
+    }
+    let t = s.g.text.as_bytes();
+    let b = p.as_bytes();
+    let c0 = match b.try_get(0) {
+        Option::Some(c) => c,
+        Option::None => 0,
+    };
+    let last = wrapping_sub(z, k);
+    let mut i = a;
+    loop {
+        if i > last {
+            break false;
+        }
+        let c = match t.try_get(i) {
+            Option::Some(c) => c,
+            Option::None => 0,
+        };
+        if c == c0 {
+            let mut j: u64 = 1;
+            let found = loop {
+                if j >= k {
+                    break true;
+                }
+                let x = match t.try_get(wrapping_add(i, j)) {
+                    Option::Some(x) => x,
+                    Option::None => 0,
+                };
+                let y = match b.try_get(j) {
+                    Option::Some(y) => y,
+                    Option::None => 0,
+                };
+                if x != y {
+                    break false;
+                }
+                j = inc(j);
+            };
+            if found {
+                break true;
+            }
+        }
+        i = inc(i);
+    }
+}
+
+// The prefix of a module constant's function (`CONST_PREFIX`).
+pub fn const_prefix() -> Str {
+    "const$"
+}
+
+// `const$` followed by the text of `sym`.
+pub fn const_of(inout s: St, sym: u32) -> u32 {
+    s.buf.clear();
+    s.buf.push_str(in const_prefix());
+    s.g.resolve_into(symbol_from_id(sym), inout s.buf);
+    s.g.intern(in s.buf).id()
+}
+
+// `a::b`.
+pub fn join_path(inout s: St, a: u32, b: u32) -> u32 {
+    s.buf.clear();
+    s.g.resolve_into(symbol_from_id(a), inout s.buf);
+    s.buf.push_str(in "::");
+    s.g.resolve_into(symbol_from_id(b), inout s.buf);
+    s.g.intern(in s.buf).id()
+}
+
+// `is_const_function`: `const$NAME`, or one renamed into a package
+// (`{scope}__{package}__{module}__const$NAME`).
+pub fn is_const_function(in s: St, sym: u32) -> bool {
+    sym_starts(in s, sym, in const_prefix()) || sym_contains(in s, sym, in "__const$")
+}
+
+// Bit 0: `sym` contains `const$`; bit 1: it is a constant's function
+// (`is_const_function`). Cached per symbol: the renamer asks for every
+// name expression.
+pub fn const_flags(inout s: St, sym: u32) -> u8 {
+    let i = w(sym);
+    let cached = at8(in s.const_flag, i);
+    if cached != 0 {
+        return cached & 3;
+    }
+    let mut f: u8 = 0;
+    if sym_contains(in s, sym, in const_prefix()) {
+        f = 1;
+        if is_const_function(in s, sym) {
+            f = 3;
+        }
+    }
+    if i >= s.const_flag.len() {
+        s.const_flag.resize(inc(i), 0);
+    }
+    s.const_flag.try_set(i, f | 4);
+    f
 }
 
 // ---------------------------------------------------------------- output

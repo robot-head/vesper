@@ -2,6 +2,7 @@
 name = "vesper-loom-calculus"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
 build = "build.rs"
 
 # This is the port-backed build: build.rs links the Vesper package in vesper/

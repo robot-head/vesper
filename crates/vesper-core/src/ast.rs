@@ -491,6 +491,20 @@ pub enum Literal {
     Float(f64),
     Bool(bool),
     String(String),
+    /// An integer literal above `i128::MAX` (at most `u128::MAX`): only
+    /// `u128` holds it. Every other integer literal is an [`Literal::Int`]
+    /// (`Literal::int` picks the variant).
+    WideInt(u128),
+}
+impl Literal {
+    /// The literal for magnitude `n`: an [`Literal::Int`] up to `i128::MAX`,
+    /// a [`Literal::WideInt`] above.
+    pub fn int(n: u128) -> Literal {
+        match i128::try_from(n) {
+            Ok(n) => Literal::Int(n),
+            Err(_) => Literal::WideInt(n),
+        }
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Arg {

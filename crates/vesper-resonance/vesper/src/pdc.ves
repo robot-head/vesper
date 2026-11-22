@@ -28,9 +28,99 @@ use self::seqs::{
     sort
 };
 
-fn none() -> u64 {
-    18446744073709551615
+// No index, buffer or reader.
+const NONE: u64 = 18446744073709551615;
+
+// The record sizes, in words: graph nodes, then the schedule's header, ops,
+// inputs and lines (an enum, not consts: other modules import them, and an
+// imported const is a call where an enum member is a literal).
+pub enum Words: _ {
+    Node = 4,
+    Header = 4,
+    Op = 6,
+    Input = 7,
+    Line = 3
 }
+
+// The graph slice: a node's words, then an input's.
+enum Node: _ {
+    Id,
+    Latency,
+    FirstInput,
+    InputCount
+}
+
+enum GraphInput: _ {
+    Kind,
+    Source,
+    Delay
+}
+
+const GRAPH_INPUT_WORDS: u64 = 3;
+
+// An input's kind, in the graph and in the schedule.
+pub enum InputKind: _ {
+    Forward,
+    Feedback
+}
+
+// The schedule's first word.
+pub enum PdcCode: _ {
+    Ok,
+    DuplicateNode,
+    UnknownNode,
+    CycleWithoutDelay,
+    ZeroDelayFeedback,
+    LatencyOverflow
+}
+
+// The schedule's header words.
+pub enum Header: _ {
+    Status,
+    BufferCount,
+    OpCount,
+    LineCount
+}
+
+// An op's header words; its inputs and feeds follow.
+pub enum Op: _ {
+    NodeId,
+    Spec,
+    Output,
+    Arrival,
+    OutputLatency,
+    InputCount
+}
+
+// A scheduled input's words.
+pub enum Input: _ {
+    Kind,
+    Source,
+    // The compensation (forward) or the delay (feedback).
+    Delay,
+    Buffer,
+    HasLine,
+    Line,
+    Scratch
+}
+
+// A line's words: source id, delay, then 1 for feedback.
+pub enum Line: _ {
+    Source,
+    Delay,
+    Feedback
+}
+
+// A feed is (source spec index, line).
+const FEED_WORDS: u64 = 2;
+
+// A sort key is (id << KEY_SHIFT | index); a compensation must fit u32.
+const KEY_SHIFT: u64 = 32;
+const INDEX_MASK: u64 = 4294967295;
+const U32_MAX: u64 = 4294967295;
+
+// `MAX_DELAY_SAMPLES`.
+const MAX_DELAY_SAMPLES: u64 = 16777216;
 
 fn fail1(code: u64, a: u64) -> ChunkSeq[u64] {
     let mut out: ChunkSeq[u64] = ChunkSeq::new();
@@ -45,20 +135,20 @@ fn fail2(code: u64, a: u64, b: u64) -> ChunkSeq[u64] {
     out
 }
 
-// The spec index of node `id`, or `none()`: a binary search of `keys`, the
-// sorted (id << 32 | index) words.
+// The spec index of node `id`, or `NONE`: a binary search of `keys`, the
+// sorted (id << KEY_SHIFT | index) words.
 fn index_of(in keys: ChunkSeq[u64], id: u64) -> u64 {
     let mut lo: u64 = 0;
     let mut hi = keys.len();
     loop {
         if lo >= hi {
-            return none();
+            return NONE;
         }
         let mid = wrapping_add(lo, wrapping_sub(hi, lo) / 2);
         let k = get(in keys, mid);
-        let kid = k >> 32;
+        let kid = k >> KEY_SHIFT;
         if kid == id {
-            return k & 4294967295;
+            return k & INDEX_MASK;
         }
         if kid < id {
             lo = wrapping_add(mid, 1);
@@ -69,24 +159,30 @@ fn index_of(in keys: ChunkSeq[u64], id: u64) -> u64 {
 }
 
 fn node_id(in g: Slice[u64], i: u64) -> u64 {
-    at(in g, wrapping_mul(i, 4))
+    at(in g, wrapping_mul(i, Words::Node))
 }
 
 fn node_latency(in g: Slice[u64], i: u64) -> u64 {
-    at(in g, wrapping_add(wrapping_mul(i, 4), 1))
+    at(in g, wrapping_add(wrapping_mul(i, Words::Node), Node::Latency))
 }
 
 fn node_first(in g: Slice[u64], i: u64) -> u64 {
-    at(in g, wrapping_add(wrapping_mul(i, 4), 2))
+    at(in g, wrapping_add(wrapping_mul(i, Words::Node), Node::FirstInput))
 }
 
 fn node_count(in g: Slice[u64], i: u64) -> u64 {
-    at(in g, wrapping_add(wrapping_mul(i, 4), 3))
+    at(in g, wrapping_add(wrapping_mul(i, Words::Node), Node::InputCount))
 }
 
-// Word `w` (0 kind, 1 source id, 2 delay) of input `j`.
+// Word `w` (`GraphInput`) of input `j`.
 fn input_word(in g: Slice[u64], n: u64, j: u64, w: u64) -> u64 {
-    at(in g, wrapping_add(wrapping_add(wrapping_mul(n, 4), wrapping_mul(j, 3)), w))
+    at(
+        in g,
+        wrapping_add(
+            wrapping_add(wrapping_mul(n, Words::Node), wrapping_mul(j, GRAPH_INPUT_WORDS)),
+            w
+        )
+    )
 }
 
 // `compile_schedule`.
@@ -94,22 +190,22 @@ pub fn p_compile(in g: Slice[u64], n: u64) -> ChunkSeq[u64] {
     // Ids, and the first duplicate in spec order.
     let mut keys: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
     for i in 0..n {
-        keys.push((node_id(in g, i) << 32) | i);
+        keys.push((node_id(in g, i) << KEY_SHIFT) | i);
     }
     sort(inout keys);
-    let mut dup = none();
+    let mut dup = NONE;
     for k in 1..n {
         let a = get(in keys, wrapping_sub(k, 1));
         let b = get(in keys, k);
-        if a >> 32 == b >> 32 {
-            let i = b & 4294967295;
+        if a >> KEY_SHIFT == b >> KEY_SHIFT {
+            let i = b & INDEX_MASK;
             if i < dup {
                 dup = i;
             }
         }
     }
-    if dup != none() {
-        return fail1(1, node_id(in g, dup));
+    if dup != NONE {
+        return fail1(PdcCode::DuplicateNode, node_id(in g, dup));
     }
 
     // Forward in-degrees and dependents (in spec order, as the Rust build
@@ -119,18 +215,18 @@ pub fn p_compile(in g: Slice[u64], n: u64) -> ChunkSeq[u64] {
     for i in 0..n {
         let first = node_first(in g, i);
         for j in first..wrapping_add(first, node_count(in g, i)) {
-            let src = input_word(in g, n, j, 1);
+            let src = input_word(in g, n, j, GraphInput::Source);
             let s = index_of(in keys, src);
-            if s == none() {
-                return fail1(2, src);
+            if s == NONE {
+                return fail1(PdcCode::UnknownNode, src);
             }
-            if input_word(in g, n, j, 0) == 0 {
+            if input_word(in g, n, j, GraphInput::Kind) == InputKind::Forward {
                 let v_w = wrapping_add(get(in indegree, i), 1);
                 set(inout indegree, i, v_w);
                 let v_w = wrapping_add(get(in dep_count, s), 1);
                 set(inout dep_count, s, v_w);
-            } else if input_word(in g, n, j, 2) == 0 {
-                return fail2(4, src, node_id(in g, i));
+            } else if input_word(in g, n, j, GraphInput::Delay) == 0 {
+                return fail2(PdcCode::ZeroDelayFeedback, src, node_id(in g, i));
             }
         }
     }
@@ -144,8 +240,8 @@ pub fn p_compile(in g: Slice[u64], n: u64) -> ChunkSeq[u64] {
     for i in 0..n {
         let first = node_first(in g, i);
         for j in first..wrapping_add(first, node_count(in g, i)) {
-            if input_word(in g, n, j, 0) == 0 {
-                let s = index_of(in keys, input_word(in g, n, j, 1));
+            if input_word(in g, n, j, GraphInput::Kind) == InputKind::Forward {
+                let s = index_of(in keys, input_word(in g, n, j, GraphInput::Source));
                 let at_s = wrapping_add(get(in dep_start, s), get(in dep_fill, s));
                 set(inout dependents, at_s, i);
                 let v_w = wrapping_add(get(in dep_fill, s), 1);
@@ -186,7 +282,7 @@ pub fn p_compile(in g: Slice[u64], n: u64) -> ChunkSeq[u64] {
             }
         }
         sort(inout stuck);
-        let mut out = fail1(3, stuck.len());
+        let mut out = fail1(PdcCode::CycleWithoutDelay, stuck.len());
         for k in 0..stuck.len() {
             out.push(get(in stuck, k));
         }
@@ -201,8 +297,11 @@ pub fn p_compile(in g: Slice[u64], n: u64) -> ChunkSeq[u64] {
         let mut a: u64 = 0;
         let first = node_first(in g, i);
         for j in first..wrapping_add(first, node_count(in g, i)) {
-            if input_word(in g, n, j, 0) == 0 {
-                let l = get(in out_lat, index_of(in keys, input_word(in g, n, j, 1)));
+            if input_word(in g, n, j, GraphInput::Kind) == InputKind::Forward {
+                let l = get(
+                    in out_lat,
+                    index_of(in keys, input_word(in g, n, j, GraphInput::Source))
+                );
                 if l > a {
                     a = l;
                 }
@@ -210,8 +309,8 @@ pub fn p_compile(in g: Slice[u64], n: u64) -> ChunkSeq[u64] {
         }
         set(inout arrival, i, a);
         let lat = node_latency(in g, i);
-        if a > wrapping_sub(none(), lat) {
-            return fail1(5, node_id(in g, i));
+        if a > wrapping_sub(NONE, lat) {
+            return fail1(PdcCode::LatencyOverflow, node_id(in g, i));
         }
         set(inout out_lat, i, wrapping_add(a, lat));
     }
@@ -221,15 +320,15 @@ pub fn p_compile(in g: Slice[u64], n: u64) -> ChunkSeq[u64] {
     for p in 0..n {
         set(inout pos, get(in order, p), p);
     }
-    let mut last_read = filled(n, none());
+    let mut last_read = filled(n, NONE);
     for i in 0..n {
         let first = node_first(in g, i);
         for j in first..wrapping_add(first, node_count(in g, i)) {
-            if input_word(in g, n, j, 0) == 0 {
-                let s = index_of(in keys, input_word(in g, n, j, 1));
+            if input_word(in g, n, j, GraphInput::Kind) == InputKind::Forward {
+                let s = index_of(in keys, input_word(in g, n, j, GraphInput::Source));
                 let lr = get(in last_read, s);
                 let pi = get(in pos, i);
-                if lr == none() || pi > lr {
+                if lr == NONE || pi > lr {
                     set(inout last_read, s, pi);
                 }
             }
@@ -239,7 +338,7 @@ pub fn p_compile(in g: Slice[u64], n: u64) -> ChunkSeq[u64] {
     let mut die_count = filled(wrapping_add(n, 1), 0);
     for s in 0..n {
         let lr = get(in last_read, s);
-        if lr != none() {
+        if lr != NONE {
             let v_w = wrapping_add(get(in die_count, lr), 1);
             set(inout die_count, lr, v_w);
         }
@@ -253,7 +352,7 @@ pub fn p_compile(in g: Slice[u64], n: u64) -> ChunkSeq[u64] {
     let mut dying = filled(get(in die_start, n), 0);
     for s in 0..n {
         let lr = get(in last_read, s);
-        if lr != none() {
+        if lr != NONE {
             set(inout dying, wrapping_add(get(in die_start, lr), get(in die_fill, lr)), s);
             let v_w = wrapping_add(get(in die_fill, lr), 1);
             set(inout die_fill, lr, v_w);
@@ -268,7 +367,7 @@ pub fn p_compile(in g: Slice[u64], n: u64) -> ChunkSeq[u64] {
     let mut feeds: ChunkSeq[u64] = ChunkSeq::new();
     let mut free: ChunkSeq[u64] = ChunkSeq::new();
     let mut buffer_count: u64 = 0;
-    let mut out_buf = filled(n, none());
+    let mut out_buf = filled(n, NONE);
     let mut ops: ChunkSeq[u64] = ChunkSeq::new();
     let mut temps: ChunkSeq[u64] = ChunkSeq::new();
     for p in 0..n {
@@ -284,14 +383,14 @@ pub fn p_compile(in g: Slice[u64], n: u64) -> ChunkSeq[u64] {
         temps.clear();
         let first = node_first(in g, i);
         for j in first..wrapping_add(first, count) {
-            let src = input_word(in g, n, j, 1);
+            let src = input_word(in g, n, j, GraphInput::Source);
             let s = index_of(in keys, src);
-            if input_word(in g, n, j, 0) == 0 {
+            if input_word(in g, n, j, GraphInput::Kind) == InputKind::Forward {
                 let comp = wrapping_sub(get(in arrival, i), get(in out_lat, s));
-                if comp > 4294967295 {
-                    return fail1(5, node_id(in g, i));
+                if comp > U32_MAX {
+                    return fail1(PdcCode::LatencyOverflow, node_id(in g, i));
                 }
-                ops.push(0);
+                ops.push(InputKind::Forward);
                 ops.push(src);
                 ops.push(comp);
                 ops.push(get(in out_buf, s));
@@ -300,9 +399,9 @@ pub fn p_compile(in g: Slice[u64], n: u64) -> ChunkSeq[u64] {
                     temps.push(scratch);
                     lines.push(src);
                     lines.push(comp);
-                    lines.push(0);
+                    lines.push(InputKind::Forward);
                     ops.push(1);
-                    ops.push(wrapping_sub(lines.len() / 3, 1));
+                    ops.push(wrapping_sub(lines.len() / Words::Line, 1));
                     ops.push(scratch);
                 } else {
                     ops.push(0);
@@ -310,16 +409,16 @@ pub fn p_compile(in g: Slice[u64], n: u64) -> ChunkSeq[u64] {
                     ops.push(0);
                 }
             } else {
-                let delay = input_word(in g, n, j, 2);
+                let delay = input_word(in g, n, j, GraphInput::Delay);
                 let scratch = alloc(inout free, inout buffer_count);
                 temps.push(scratch);
                 lines.push(src);
                 lines.push(delay);
-                lines.push(1);
-                let line = wrapping_sub(lines.len() / 3, 1);
+                lines.push(InputKind::Feedback);
+                let line = wrapping_sub(lines.len() / Words::Line, 1);
                 feeds.push(s);
                 feeds.push(line);
-                ops.push(1);
+                ops.push(InputKind::Feedback);
                 ops.push(src);
                 ops.push(delay);
                 ops.push(scratch);
@@ -340,30 +439,30 @@ pub fn p_compile(in g: Slice[u64], n: u64) -> ChunkSeq[u64] {
     }
 
     let mut out: ChunkSeq[u64] = ChunkSeq::new();
-    out.push(0);
+    out.push(PdcCode::Ok);
     out.push(buffer_count);
     out.push(n);
-    out.push(lines.len() / 3);
+    out.push(lines.len() / Words::Line);
     let mut at_op: u64 = 0;
     for p in 0..n {
-        let spec = get(in ops, wrapping_add(at_op, 1));
-        let count = get(in ops, wrapping_add(at_op, 5));
-        let words = wrapping_add(6, wrapping_mul(count, 7));
+        let spec = get(in ops, wrapping_add(at_op, Op::Spec));
+        let count = get(in ops, wrapping_add(at_op, Op::InputCount));
+        let words = wrapping_add(Words::Op, wrapping_mul(count, Words::Input));
         for k in 0..words {
             out.push(get(in ops, wrapping_add(at_op, k)));
         }
         at_op = wrapping_add(at_op, words);
         let mut nfeeds: u64 = 0;
-        let pairs = feeds.len() / 2;
+        let pairs = feeds.len() / FEED_WORDS;
         for k in 0..pairs {
-            if get(in feeds, wrapping_mul(k, 2)) == spec {
+            if get(in feeds, wrapping_mul(k, FEED_WORDS)) == spec {
                 nfeeds = wrapping_add(nfeeds, 1);
             }
         }
         out.push(nfeeds);
         for k in 0..pairs {
-            if get(in feeds, wrapping_mul(k, 2)) == spec {
-                out.push(get(in feeds, wrapping_add(wrapping_mul(k, 2), 1)));
+            if get(in feeds, wrapping_mul(k, FEED_WORDS)) == spec {
+                out.push(get(in feeds, wrapping_add(wrapping_mul(k, FEED_WORDS), 1)));
             }
         }
     }
@@ -386,18 +485,13 @@ fn alloc(inout free: ChunkSeq[u64], inout count: u64) -> u64 {
 
 // `DelayLine::new`: the line length (`delay + block`) after its checks.
 pub fn p_line_len(delay: u64, block: u64) -> u64 eff [Fail[PdcFault]] {
-    if delay > max_delay() {
+    if delay > MAX_DELAY_SAMPLES {
         Fail::raise(PdcFault::DelayTooLong(delay));
     }
-    if block > max_delay() || block == 0 {
+    if block > MAX_DELAY_SAMPLES || block == 0 {
         Fail::raise(PdcFault::BadBlockLength(block));
     }
     wrapping_add(delay, block)
-}
-
-// `MAX_DELAY_SAMPLES`.
-pub fn max_delay() -> u64 {
-    16777216
 }
 
 // `DelayLine::write`: this block's input at `head` of the ring `buf`.

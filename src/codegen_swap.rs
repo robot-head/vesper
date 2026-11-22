@@ -48,7 +48,9 @@
 //! | `numeric` | the same | [`INSTRUCTION`] for `Op::Vector` and `Op::Tiled` |
 //! | `drops` (fip) | the same | [`INSTRUCTION`] for `Op::Fip` |
 //! | `ffi` | the same | [`INSTRUCTION`] for a call of a foreign (`.vsys`) effect operation |
-//! | `export` | `native_export::compile_exports`, the v2 glue | the whole glue over a lent module ([`ExportHook`]) |
+//! | `export` | `native_export::glue::define`, after the sequence runtime and `vesper_box_alloc` | the rest of the v2 glue over a lent module ([`ExportHook`]) |
+//! | `plan` | `native_export::plan_with` | the whole library interface ([`PlanHook`]) |
+//! | `interface_json` | `native_export::interface_json` | the whole interface file ([`InterfaceJsonHook`]) |
 //! | `freestanding` | `native_freestanding::build_image` | whole image ([`FreestandingHook`]) |
 //! | `wasm` | `wasm_backend::compile` | whole component ([`WasmHook`]) |
 //! | `ebpf` | `ebpf_backend::compile_world` | whole program ([`EbpfHook`]) |
@@ -59,6 +61,17 @@
 //! ([`NO_VALUE`] for an operand with no value yet), and its one result is
 //! the instruction's value. The [`Site`] names the instruction, so a hook
 //! reads the instruction itself from the `Program`.
+//!
+//! # Walk state and re-entry
+//!
+//! An [`INSTRUCTION`] request also lends the graph walk's own state for
+//! the length of the request ([`walk`], SH5 lane 1): queries of the
+//! instruction's facts and the walk's maps (variables, home slots,
+//! register locals, split words, the walk's plans), effects that keep the
+//! Rust bookkeeping of what the hook emitted (`use_var`, `def_var`,
+//! `store`, `jump`, `ir_temp`), and continuation re-entry: a hook asks
+//! Rust to emit the instruction or its place, declines, and is asked again
+//! with the value kept. A hook that never calls them is unaffected.
 use crate::ast::Type;
 use crate::check::World;
 use crate::ir::{Op, Program};
@@ -68,6 +81,8 @@ use cranelift_module::Module;
 use std::cell::Cell;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+pub mod walk;
 
 /// An argument word for an operand that has no Cranelift value.
 pub const NO_VALUE: u64 = u64::MAX;
@@ -129,13 +144,29 @@ pub struct Lent<'a, 'f> {
 /// A family hook (see the module documentation for the protocol).
 pub type Hook = for<'a, 'f> fn(&mut Lent<'a, 'f>) -> Result<bool, String>;
 
-/// The export glue hook: `native_export::glue::define` over the lent
-/// module (`vesper_cranelift_sys::lend_module`); `None` declines.
+/// The export glue hook, called by `native_export::glue::define` over the
+/// lent module (`vesper_cranelift_sys::lend_module`) once the sequence
+/// runtime and `vesper_box_alloc` are defined. The hook finds those by name
+/// and must not redefine them. `None` declines.
 pub type ExportHook = fn(
     &mut dyn Module,
     &World,
     &crate::native::export::LibraryInterface,
 ) -> Option<Result<(), String>>;
+/// The export interface planner hook: `native_export::plan_with`'s
+/// signature (`native_export::plan_native` is the Rust planner); `None`
+/// declines.
+pub type PlanHook = fn(
+    &World,
+    &std::collections::BTreeSet<String>,
+    &str,
+    &crate::native::export::Directives,
+) -> Option<
+    Result<crate::native::export::LibraryInterface, Vec<crate::native::export::ExportError>>,
+>;
+/// The interface file hook: `native_export::interface_json`'s text (the
+/// pretty JSON and its trailing newline); `None` declines.
+pub type InterfaceJsonHook = fn(&crate::native::export::LibraryInterface) -> Option<String>;
 /// The whole-image hook: `native::freestanding::build_image`'s signature;
 /// `None` declines.
 pub type FreestandingHook = fn(
@@ -248,6 +279,8 @@ pub struct CodegenHooks {
     pub numeric: Option<Hook>,
     pub ffi: Option<Hook>,
     pub export: Option<ExportHook>,
+    pub plan: Option<PlanHook>,
+    pub interface_json: Option<InterfaceJsonHook>,
     pub freestanding: Option<FreestandingHook>,
     pub wasm: Option<WasmHook>,
     pub ebpf: Option<EbpfHook>,
@@ -271,6 +304,8 @@ impl CodegenHooks {
     fn any(&self) -> bool {
         Family::ALL.iter().any(|f| self.family(*f).is_some())
             || self.export.is_some()
+            || self.plan.is_some()
+            || self.interface_json.is_some()
             || self.freestanding.is_some()
             || self.wasm.is_some()
             || self.ebpf.is_some()
@@ -582,4 +617,192 @@ pub mod drops {
     /// Drop the `Box` contents a value owns (`Codegen::drop_box_value`).
     /// Args `[value]`, with the value's type; no result.
     pub const DROP_BOX: u32 = 1;
+}
+
+/// The `numeric` family's requests (lane 11, #1285). `Op::Vector` and
+/// `Op::Tiled` instructions arrive as [`INSTRUCTION`] first; a hook that
+/// declines those gets the typed requests below from `Codegen::vector_op`
+/// (src/native_vector.rs) and `Codegen::tiled_op` (src/tiled/native.rs).
+pub mod numeric {
+    /// One `TiledSeq` operation, with the tiled runtime already defined in
+    /// an object module. Args `[kind, jit, ...]`, where `kind` is one of the
+    /// `TILED_*` codes below and `jit` is 1 in a JIT module (the runtime
+    /// is then imported, not local). The rest, by kind (`v` is a value):
+    ///
+    /// - `NEW`: `[tile width, tile stride bytes, cold words per row]`;
+    /// - `WITH_CAPACITY`: those, then `[v capacity]`;
+    /// - `WITH_REGION`: those, then `[region variable, v capacity]`;
+    /// - `LEN`, `TILE_COUNT`: `[v seq]`;
+    /// - `PUSH`: `[v seq, v record]`, `GET`: `[v seq, v row]`, `SET`:
+    ///   `[v seq, v row, v record]`; each followed by the row layout:
+    ///   `[record size, hot count, (record offset, tile offset, element
+    ///   bytes)..., cold count, (aggregate, words, record offset, word
+    ///   offset)...]`;
+    /// - `COL_GET`: `[v seq, v row]`, `COL_SET`: `[v seq, v row, v value]`;
+    ///   then `[0, tile offset, element bytes, type]` for a hot column or
+    ///   `[1, aggregate, size, words, word offset, type]` for a cold field
+    ///   (type is a [`super::ty_code`], 0 for an aggregate);
+    /// - `LOAD_TILE_VEC`: `[v seq, v tile, tile offset, vector bytes,
+    ///   chunks]`.
+    ///
+    /// Result `[value]`.
+    pub const TILED: u32 = 1;
+    /// One vector operation (`Codegen::vector_op`, src/native_vector.rs):
+    /// `[intrinsic, element, lanes, constant count, constants...,
+    /// v operands...]`, with the codes of `request_intrinsic` and
+    /// `request_elem` there. Result `[value]`.
+    pub const VECTOR: u32 = 2;
+    /// `Isa::supported`: `[enabled]`. Result `[value]` (`iconst.i64`).
+    pub const ISA_SUPPORTED: u32 = 3;
+    pub const TILED_NEW: u32 = 1;
+    pub const TILED_WITH_CAPACITY: u32 = 2;
+    pub const TILED_WITH_REGION: u32 = 3;
+    pub const TILED_LEN: u32 = 4;
+    pub const TILED_TILE_COUNT: u32 = 5;
+    pub const TILED_PUSH: u32 = 6;
+    pub const TILED_GET: u32 = 7;
+    pub const TILED_SET: u32 = 8;
+    pub const TILED_COL_GET: u32 = 9;
+    pub const TILED_COL_SET: u32 = 10;
+    pub const TILED_LOAD_TILE_VEC: u32 = 11;
+    /// A float math intrinsic (`Codegen::math`, src/float_math/native.rs):
+    /// `[op, v operands...]`, with `op` the position of the intrinsic in
+    /// `MathOp::ALL` from 1 (`sqrt` 1 ... `fma` 9). Result `[value]`.
+    pub const FLOAT_MATH: u32 = 4;
+    /// A conversion to a float kind: `[to, from, v]`, `to` a float word
+    /// ([`FROM_F32`] or [`FROM_F64`]) and `from` one of the `FROM_*` classes
+    /// (the Rust code emits nothing for a same-kind conversion). Result
+    /// `[value]`.
+    pub const FLOAT_CONVERT: u32 = 5;
+    /// The saturating truncation of a float to an integer kind's canonical
+    /// 64-bit lane (`float_to_integer`): `[signed, bits, min, max, v]`, with
+    /// the kind's bounds as two's complement words. Result `[value]`.
+    pub const FLOAT_TO_INT: u32 = 6;
+    /// `to_bits_k` (`to_bits` 1) or `from_bits_k` (0) of float kind `kind`:
+    /// `[to_bits, kind, v]`. Result `[value]`.
+    pub const FLOAT_BITS: u32 = 7;
+    /// The range test of a checked float narrowing: `[kind, lo, hi, v]`,
+    /// with the truncation bounds as `f64` bit patterns. Result
+    /// `[overflow]`; the Rust code raises.
+    pub const FLOAT_NARROW_TEST: u32 = 8;
+    /// The software flush-to-zero of a subnormal float (`Codegen::flush`,
+    /// requested only when the flush applies): `[v]`. Result `[value]`.
+    pub const FLOAT_FLUSH: u32 = 9;
+    /// One step of a region block (src/regions/native.rs), with the region
+    /// runtime already defined in an object module: `[kind, jit, ...]`,
+    /// `kind` one of the `REGION_*` codes below and `jit` 1 in a JIT module
+    /// (the runtime is then imported). By kind (`v` is a value; a payload
+    /// is `[size, aggregate, type]`, with `type` a [`super::ty_code`], 0
+    /// for an aggregate; a 128-bit payload is never requested):
+    ///
+    /// - `OPEN`: `[capacity]`; result the region id;
+    /// - `CLOSE`, `CHECKPOINT`, `USED`: `[v id]`;
+    /// - `REWIND`, `COMMIT`: `[v id, v mark]`;
+    /// - `BOX`: `[v id, v value, payload...]`; result the handle;
+    /// - `GET`, `TAKE`: `[v id, v handle, payload...]`; result the value;
+    /// - `SET`: `[v id, v handle, v value, payload...]`; result `0`.
+    ///
+    /// Result `[value]`.
+    pub const REGION: u32 = 10;
+    pub const REGION_OPEN: u64 = 1;
+    pub const REGION_CLOSE: u64 = 2;
+    pub const REGION_BOX: u64 = 3;
+    pub const REGION_GET: u64 = 4;
+    pub const REGION_TAKE: u64 = 5;
+    pub const REGION_SET: u64 = 6;
+    pub const REGION_CHECKPOINT: u64 = 7;
+    pub const REGION_REWIND: u64 = 8;
+    pub const REGION_COMMIT: u64 = 9;
+    pub const REGION_USED: u64 = 10;
+    /// The element address of an `Atomic[T]` receiver (`atomic_call`):
+    /// `[v receiver]`. Result `[address]` (two trusted loads).
+    pub const ATOMIC_CELL: u32 = 11;
+    /// One atomic operation besides `compare_exchange` (the shim has no
+    /// `atomic_cas`): `[op, type, signed, v address, v operands...]`, `op`
+    /// one of the `ATOMIC_*` codes below, `type` the narrow lane's
+    /// [`super::ty_code`] and the operands already narrowed. Result
+    /// `[value]`, the old value as a canonical lane (`0` for a store).
+    pub const ATOMIC: u32 = 12;
+    pub const ATOMIC_LOAD: u64 = 1;
+    pub const ATOMIC_STORE: u64 = 2;
+    pub const ATOMIC_SWAP: u64 = 3;
+    pub const ATOMIC_ADD: u64 = 4;
+    pub const ATOMIC_SUB: u64 = 5;
+    pub const ATOMIC_AND: u64 = 6;
+    pub const ATOMIC_OR: u64 = 7;
+    pub const ATOMIC_XOR: u64 = 8;
+    /// The `vesper_parallel_for(body, data, n)` call of `parallel_for_call`:
+    /// `[body FuncRef, v data, v n]`. Result `[value]` (`0`).
+    pub const PARALLEL_FOR: u32 = 13;
+    /// The classes of a [`FLOAT_CONVERT`] operand (`FROM_F32` and
+    /// `FROM_F64` are also the float words of the other requests).
+    pub const FROM_F32: u64 = 1;
+    pub const FROM_F64: u64 = 2;
+    pub const FROM_SIGNED: u64 = 3;
+    pub const FROM_UNSIGNED: u64 = 4;
+}
+
+/// The `scalar` family's requests besides [`INSTRUCTION`] (SH4 lane 6,
+/// #1280): the run-time tests of `expr_at`'s raising arms. The hook
+/// answers the test's flag; the Rust code raises and emits the rest as it
+/// always has, so the hook never needs `Codegen`'s raise machinery.
+pub mod scalar {
+    use crate::numeric::IntegerKind;
+    /// `Codegen::checked_arithmetic`'s overflow test of a one-word kind.
+    /// Args `[op, kind, a, b]` (op [`ADD`], [`SUB`], [`MUL`] or [`DIV`];
+    /// kind [`kind_word`]); result `[overflow]`, an `i8` flag. A decline
+    /// leaves the test to the Rust code.
+    pub const OVERFLOW: u32 = 1;
+    /// `Codegen::check_divisor`'s test. Args `[divisor]`; result
+    /// `[nonzero]`, an `i8` flag.
+    pub const DIVISOR: u32 = 2;
+    /// `expr_at`'s checked negation of a one-word kind. Args `[kind, v]`;
+    /// result `[overflow]` (`v` is the signed minimum, or any nonzero
+    /// unsigned value).
+    pub const NEGATE: u32 = 3;
+    /// `Codegen::shift`'s range test. Args `[amount, bits]`; result
+    /// `[bad]` (the amount, as an unsigned lane, is at least `bits`).
+    pub const SHIFT_RANGE: u32 = 4;
+    /// `Codegen::convert`'s checked narrowing bounds. Args
+    /// `[from kind, to kind, v]`; result `[overflow]`. The hook declines
+    /// when the target holds every value of the source (no test).
+    pub const NARROW: u32 = 5;
+    /// The read of a plain scalar local (no home, pointer or split):
+    /// `use_var`, then `coerce` to the read's type. Args
+    /// `[var, kind]` (kind the [`kind_word`] of a kind narrower than 64
+    /// bits, else 0); result `[value, raw]`, the coerced value and the
+    /// `use_var` value (the Rust code keeps the variable's facts on it).
+    /// `raw` must be the `use_var` result itself, not a copy or a coerce
+    /// of it: any other value silently loses the variable's facts rather
+    /// than failing.
+    pub const READ_LOCAL: u32 = 6;
+    /// A fresh local bound to a value: `declare_var` of the value's type,
+    /// then `def_var`. Args `[value]`; result `[var]`.
+    pub const BIND_LOCAL: u32 = 7;
+    /// The definition of a plain local (no home or pointer): `def_var`.
+    /// Args `[var, value]`; no result.
+    pub const WRITE_LOCAL: u32 = 8;
+    /// [`OVERFLOW`]'s operators.
+    pub const ADD: u64 = 1;
+    pub const SUB: u64 = 2;
+    pub const MUL: u64 = 3;
+    pub const DIV: u64 = 4;
+    /// The word of operator `op`, when [`OVERFLOW`] takes it.
+    pub fn op_word(op: &str) -> Option<u64> {
+        match op {
+            "+" => Some(ADD),
+            "-" => Some(SUB),
+            "*" => Some(MUL),
+            "/" => Some(DIV),
+            _ => None,
+        }
+    }
+    /// The word of a one-word integer kind: its position in
+    /// [`crate::numeric::INTEGER_KINDS`] from 1 (`u8` 1 ... `isize` 10).
+    pub fn kind_word(kind: IntegerKind) -> Option<u64> {
+        crate::numeric::INTEGER_KINDS
+            .iter()
+            .position(|k| *k == kind)
+            .map(|i| i as u64 + 1)
+    }
 }

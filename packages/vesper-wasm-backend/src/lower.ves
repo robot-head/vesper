@@ -228,6 +228,8 @@ const LIT_INT: u64 = 0;
 const LIT_FLOAT: u64 = 1;
 const LIT_BOOL: u64 = 2;
 const LIT_STRING: u64 = 3;
+// A literal past `i128::MAX` (`Literal::WideInt`): it fits no wasm scalar.
+const LIT_WIDE: u64 = 4;
 // IntegerKind of a scalar: 0 none, else the scalar + 1
 const IK_NONE: u8 = 0;
 
@@ -1999,6 +2001,9 @@ impl L {
         }
         if kind == LIT_FLOAT {
             return wrapping_i64(lo);
+        }
+        if kind == LIT_WIDE {
+            Fail::raise(werr(K_INVALID, 0, 180));
         }
         Fail::raise(werr(K_UNSUPPORTED, U_STRING, 181));
         0

@@ -7,6 +7,9 @@ pub copy struct Acc {
     lo: u64
 }
 
+// Bit 63: the sign of an i64, and -i64::MIN as a magnitude.
+const SIGN_BIT: u64 = 9223372036854775808;
+
 pub fn acc_zero() -> Acc {
     Acc {
         hi: 0,
@@ -38,8 +41,7 @@ pub fn acc_is_zero(a: Acc) -> bool {
 
 // Whether the value is an i64 (`i64::try_from` succeeds).
 pub fn acc_fits(a: Acc) -> bool {
-    let top: u64 = 9223372036854775808;
-    (a.hi == 0 && a.lo < top) || (a.hi == -1 && a.lo >= top)
+    (a.hi == 0 && a.lo < SIGN_BIT) || (a.hi == -1 && a.lo >= SIGN_BIT)
 }
 
 pub fn acc_value(a: Acc) -> i64 {
@@ -60,10 +62,9 @@ pub fn mul_fits(x: i64, y: i64) -> bool {
     if hi != 0 {
         return false;
     }
-    let top: u64 = 9223372036854775808;
     if (x < 0) != (y < 0) {
-        lo <= top
+        lo <= SIGN_BIT
     } else {
-        lo < top
+        lo < SIGN_BIT
     }
 }

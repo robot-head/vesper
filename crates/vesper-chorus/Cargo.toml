@@ -2,6 +2,7 @@
 name = "vesper-chorus"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
 description = "Vesper Chorus: choreographies, endpoint projection, linear session channels (in memory and over Warp QUIC streams), simulated quorum replication and a software RDMA model (design section 25)"
 publish = false
 build = "build.rs"

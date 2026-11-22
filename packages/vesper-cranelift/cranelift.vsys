@@ -118,4 +118,18 @@ sys library Cranelift (
     fn vcl_call_module(call: u64) -> ForeignVal[Option[Module]];
     fn vcl_call_return_builder(call: u64, sink b: Builder) -> ForeignVal[Unit];
     fn vcl_call_return_module(call: u64, sink m: Module) -> ForeignVal[Unit];
+    fn vcl_sig_param_ext(inout m: Module, sig: u32, ty: u32, ext: u32) -> ForeignVal[u32];
+    fn vcl_sig_return_ext(inout m: Module, sig: u32, ty: u32, ext: u32) -> ForeignVal[u32];
+    fn vcl_define_function_bytes(inout m: Module, func: u32, align: u64, nocapture in bytes: CSlice[u8], nocapture in relocs: CSlice[u64]) -> ForeignVal[u32];
+    fn vcl_module_function_at(inout m: Module, i: u32) -> ForeignVal[u32];
+    fn vcl_module_function_linkage(inout m: Module, func: u32) -> ForeignVal[u32];
+    fn vcl_module_function_signature(inout m: Module, func: u32) -> ForeignVal[u32];
+    fn vcl_module_data_count(in m: Module) -> ForeignVal[u32];
+    fn vcl_module_data_at(inout m: Module, i: u32) -> ForeignVal[u32];
+    fn vcl_module_data_name(in m: Module, data: u32, nocapture inout out: CSlice[u8]) -> ForeignVal[u64];
+    fn vcl_module_data_linkage(inout m: Module, data: u32) -> ForeignVal[u32];
+    fn vcl_module_last_clif(in m: Module, offset: u64, nocapture inout out: CSlice[u8]) -> ForeignVal[u64];
+    fn vcl_module_last_relocs(in m: Module, nocapture inout out: CSlice[u64]) -> ForeignVal[u64];
+    fn vcl_module_last_call_sites(in m: Module, nocapture inout out: CSlice[u64]) -> ForeignVal[u64];
+    fn vcl_module_last_frame_size(in m: Module) -> ForeignVal[u64];
 }

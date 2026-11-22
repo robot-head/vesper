@@ -82,6 +82,114 @@ fn little() -> MemFlags {
     MemFlags::new().with_endianness(ir::Endianness::Little)
 }
 
+/// The element code of a `numeric::VECTOR` request.
+fn request_elem(e: Elem) -> u64 {
+    match e {
+        Elem::U8 => 0,
+        Elem::U32 => 1,
+        Elem::U64 => 2,
+        Elem::I64 => 3,
+        Elem::F32 => 4,
+        Elem::F64 => 5,
+    }
+}
+
+/// The intrinsic code of a `numeric::VECTOR` request, `family << 8 | op`,
+/// or `None` for the slice operations and `Isa::supported`.
+fn request_intrinsic(i: Intrinsic) -> Option<u64> {
+    use Intrinsic as I;
+    let (family, op): (u64, u64) = match i {
+        I::Splat => (2, 0),
+        I::From => (3, 0),
+        I::Binary(op) => (
+            4,
+            match op {
+                BinOp::Add => 0,
+                BinOp::Sub => 1,
+                BinOp::Mul => 2,
+                BinOp::Div => 3,
+                BinOp::Min => 4,
+                BinOp::Max => 5,
+                BinOp::And => 6,
+                BinOp::Or => 7,
+                BinOp::Xor => 8,
+                BinOp::SaturatingAdd => 9,
+                BinOp::SaturatingSub => 10,
+            },
+        ),
+        I::Not => (5, 0),
+        I::Unary(op) => (
+            6,
+            match op {
+                UnaryOp::Sqrt => 0,
+                UnaryOp::Abs => 1,
+                UnaryOp::Neg => 2,
+            },
+        ),
+        I::MulAdd => (7, 0),
+        I::Convert(c) => (
+            8,
+            match c {
+                Conv::ToBits => 0,
+                Conv::FromBits => 1,
+                Conv::Widen => 2,
+                Conv::Narrow => 3,
+            },
+        ),
+        I::Shift(op) => (
+            9,
+            match op {
+                ShiftOp::Shl => 0,
+                ShiftOp::Shr => 1,
+            },
+        ),
+        I::Compare(op) => (
+            10,
+            match op {
+                CmpOp::Eq => 0,
+                CmpOp::Ne => 1,
+                CmpOp::Lt => 2,
+                CmpOp::Le => 3,
+                CmpOp::Gt => 4,
+                CmpOp::Ge => 5,
+            },
+        ),
+        I::Select => (11, 0),
+        I::MaskBinary(op) => (
+            12,
+            match op {
+                MaskOp::And => 0,
+                MaskOp::Or => 1,
+                MaskOp::Xor => 2,
+            },
+        ),
+        I::MaskNot => (13, 0),
+        I::MaskCount => (14, 0),
+        I::MaskBitmask => (15, 0),
+        I::MaskAny => (16, 0),
+        I::MaskAll => (17, 0),
+        I::Reduce(op) => (
+            18,
+            match op {
+                ReduceOp::Add => 0,
+                ReduceOp::Xor => 1,
+                ReduceOp::Or => 2,
+                ReduceOp::And => 3,
+                ReduceOp::Min => 4,
+                ReduceOp::Max => 5,
+            },
+        ),
+        I::Extract => (19, 0),
+        I::Replace => (20, 0),
+        I::Shuffle => (21, 0),
+        I::LoadMasked => (22, 0),
+        I::InBounds => (26, 0),
+        I::Active => (27, 0),
+        I::Load | I::Store | I::StoreMasked | I::IsaSupported => return None,
+    };
+    Some(family << 8 | op)
+}
+
 impl<M: Module> Codegen<'_, '_, M> {
     /// Lower one vector operation on its IR operands.
     pub(super) fn vector_op(
@@ -89,6 +197,12 @@ impl<M: Module> Codegen<'_, '_, M> {
         op: &VectorOp,
         args: &[ir::Value],
     ) -> Result<ir::Value, String> {
+        // SH4 swap point (#1285): the `numeric` hook may emit the
+        // operation (`codegen_swap::numeric::VECTOR`); none is installed by
+        // default.
+        if let Some(v) = self.swap_vector(op, args)? {
+            return Ok(v);
+        }
         let (intrinsic, shape, constants) = match op {
             VectorOp::IsaSupported(p) => {
                 let enabled = crate::vector::isa_enabled(self.m.isa(), *p);
@@ -346,6 +460,57 @@ impl<M: Module> Codegen<'_, '_, M> {
                 ));
             }
         })
+    }
+    /// The `numeric` hook's request for `op` (`codegen_swap::numeric`
+    /// documents the words), or `None` when no hook is in effect or it
+    /// declines. It emits nothing itself.
+    fn swap_vector(
+        &mut self,
+        op: &VectorOp,
+        args: &[ir::Value],
+    ) -> Result<Option<ir::Value>, String> {
+        use crate::codegen_swap::{self, Family, numeric};
+        if codegen_swap::hook(Family::Numeric).is_none() {
+            return Ok(None);
+        }
+        let (request, words) = match op {
+            VectorOp::IsaSupported(p) => {
+                let enabled = crate::vector::isa_enabled(self.m.isa(), *p);
+                (numeric::ISA_SUPPORTED, vec![u64::from(enabled)])
+            }
+            VectorOp::Lanes {
+                intrinsic,
+                shape,
+                constants,
+            } => {
+                let Some(code) = request_intrinsic(*intrinsic) else {
+                    return Ok(None);
+                };
+                let mut words = vec![
+                    code,
+                    request_elem(shape.elem),
+                    u64::from(shape.lanes),
+                    constants.len() as u64,
+                ];
+                words.extend(constants.iter().map(|c| u64::from(*c)));
+                words.extend(args.iter().map(|v| codegen_swap::word(*v)));
+                (numeric::VECTOR, words)
+            }
+        };
+        match codegen_swap::request(
+            Family::Numeric,
+            &mut self.b,
+            &mut *self.m,
+            self.world,
+            self.program,
+            codegen_swap::Site::NONE,
+            request,
+            &words,
+            None,
+        )? {
+            Some(results) => codegen_swap::value_of(&results).map(Some),
+            None => Ok(None),
+        }
     }
     /// The chunks of a converted vector of shape `target`.
     fn convert_chunks(&mut self, conv: Conv, target: Shape, a: &[ir::Value]) -> Vec<ir::Value> {
