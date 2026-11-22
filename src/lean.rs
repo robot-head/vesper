@@ -2604,6 +2604,9 @@ impl Generator<'_> {
             }
             PatternKind::Literal(l) => match l {
                 Literal::Int(n) => LP::Int(*n),
+                Literal::WideInt(_) => {
+                    return Err("Lean extraction does not support 128-bit literal patterns".into());
+                }
                 Literal::Bool(b) => LP::Bool(*b),
                 Literal::String(s) => LP::String(s.clone()),
                 Literal::Float(_) => {

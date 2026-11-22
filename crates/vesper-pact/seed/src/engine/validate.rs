@@ -3,7 +3,9 @@
 
 use crate::diag::{DiagCode, Diagnostic, Subject};
 use crate::ids::*;
-use crate::program::{ConformanceDecl, ProgramDto, Scope, Validator, check_schema};
+use crate::program::{
+    ConformanceDecl, PlaceholderDecl, Program, ProgramDto, QueryDto, SCHEMA_VERSION, SchemaVersion,
+};
 use crate::term::*;
 
 /// Validates a whole program (`Program::new`).
@@ -197,5 +199,317 @@ impl Validator<'_> {
                 );
             }
         }
+    }
+}
+
+pub(crate) fn check_schema(v: SchemaVersion) -> Option<Diagnostic> {
+    if v.major != SCHEMA_VERSION.major || v.minor > SCHEMA_VERSION.minor {
+        Some(Diagnostic::new(
+            DiagCode::SchemaVersion,
+            Subject::Program,
+            format!(
+                "unsupported schema {}.{} (this solver accepts {}.0..={}.{})",
+                v.major, v.minor, SCHEMA_VERSION.major, SCHEMA_VERSION.major, SCHEMA_VERSION.minor
+            ),
+        ))
+    } else {
+        None
+    }
+}
+
+/// Which variable forms a term may contain.
+#[derive(Clone, Copy)]
+pub(crate) enum Scope<'a> {
+    Template(&'a [ParamKind]),
+    Query {
+        placeholders: &'a [PlaceholderDecl],
+        binders: &'a [ParamKind],
+    },
+}
+
+pub(crate) struct Validator<'a> {
+    pub dto: &'a ProgramDto,
+    pub diags: &'a mut Vec<Diagnostic>,
+}
+
+impl Validator<'_> {
+    pub(crate) fn err(&mut self, code: DiagCode, subject: Subject, msg: String) {
+        self.diags.push(Diagnostic::new(code, subject, msg));
+    }
+
+    pub(crate) fn trait_ref(&mut self, t: &TraitRef, scope: Scope, subj: Subject) -> bool {
+        self.ty(&t.self_ty, scope, subj);
+        self.trait_args(t.trait_id, &t.args, scope, subj)
+    }
+
+    pub(crate) fn trait_args(
+        &mut self,
+        id: TraitId,
+        args: &[GenericArg],
+        scope: Scope,
+        subj: Subject,
+    ) -> bool {
+        let Some(t) = self.dto.traits.get(id.index()) else {
+            self.err(DiagCode::UnknownId, subj, format!("unknown {id}"));
+            return false;
+        };
+        let params = t.params.clone();
+        self.args(&params, args, scope, subj, &format!("{id}"))
+    }
+
+    pub(crate) fn args(
+        &mut self,
+        params: &[ParamKind],
+        args: &[GenericArg],
+        scope: Scope,
+        subj: Subject,
+        what: &str,
+    ) -> bool {
+        if params.len() != args.len() {
+            self.err(
+                DiagCode::Arity,
+                subj,
+                format!(
+                    "{what} expects {} arguments, got {}",
+                    params.len(),
+                    args.len()
+                ),
+            );
+            return false;
+        }
+        let mut ok = true;
+        for (p, a) in params.iter().zip(args) {
+            if a.kind() != *p {
+                self.err(
+                    DiagCode::KindMismatch,
+                    subj,
+                    format!("{what} expects a {p:?} argument, got {a}"),
+                );
+                ok = false;
+            } else {
+                self.arg(a, scope, subj);
+            }
+        }
+        ok
+    }
+
+    pub(crate) fn goal(&mut self, g: &Goal, scope: Scope, subj: Subject) {
+        match g {
+            Goal::Implements { trait_ref, brand } => {
+                self.trait_ref(trait_ref, scope, subj);
+                self.brand(brand, scope, subj);
+            }
+            Goal::ProjectionEq { projection, ty } => {
+                self.projection(projection, scope, subj);
+                self.ty(ty, scope, subj);
+            }
+            Goal::ModeBound { ty, bound } => {
+                self.ty(ty, scope, subj);
+                self.mode(bound, scope, subj);
+            }
+        }
+    }
+
+    pub(crate) fn projection(&mut self, p: &Projection, scope: Scope, subj: Subject) {
+        if self.trait_ref(&p.trait_ref, scope, subj) {
+            let t = &self.dto.traits[p.trait_ref.trait_id.index()];
+            if p.assoc.0 as usize >= t.assoc.len() {
+                self.err(
+                    DiagCode::UnknownId,
+                    subj,
+                    format!("{} has no {}", t.id, p.assoc),
+                );
+            }
+        }
+        self.brand(&p.brand, scope, subj);
+    }
+
+    pub(crate) fn ty(&mut self, t: &Ty, scope: Scope, subj: Subject) {
+        match t {
+            Ty::Ctor { ctor, args } => {
+                let Some(c) = self.dto.type_ctors.get(ctor.index()) else {
+                    self.err(DiagCode::UnknownId, subj, format!("unknown {ctor}"));
+                    return;
+                };
+                let params = c.params.clone();
+                self.args(&params, args, scope, subj, &format!("{ctor}"));
+            }
+            Ty::Var(v) => self.var(*v, ParamKind::Type, scope, subj),
+            Ty::Projection(p) => self.projection(p, scope, subj),
+        }
+    }
+
+    pub(crate) fn arg(&mut self, a: &GenericArg, scope: Scope, subj: Subject) {
+        match a {
+            GenericArg::Ty(t) => self.ty(t, scope, subj),
+            GenericArg::Mode(m) => self.mode(m, scope, subj),
+            GenericArg::Row(r) => self.row(r, scope, subj),
+            GenericArg::Brand(b) => self.brand(b, scope, subj),
+            GenericArg::Capability(v) => self.cap(*v, scope, subj),
+        }
+    }
+
+    pub(crate) fn mode(&mut self, m: &ModeTerm, scope: Scope, subj: Subject) {
+        if let ModeTerm::Var(v) = m {
+            self.var(*v, ParamKind::Mode, scope, subj);
+        }
+    }
+
+    pub(crate) fn brand(&mut self, b: &Brand, scope: Scope, subj: Subject) {
+        match b {
+            Brand::Var(v) => self.var(*v, ParamKind::Brand, scope, subj),
+            Brand::Named(m) => {
+                if m.index() >= self.dto.models.len() {
+                    self.err(DiagCode::UnknownId, subj, format!("unknown {m}"));
+                }
+            }
+            Brand::Canonical => {}
+        }
+    }
+
+    pub(crate) fn cap(&mut self, v: Var, scope: Scope, subj: Subject) {
+        if let Var::Infer(_) = v {
+            self.err(
+                DiagCode::Unsupported,
+                subj,
+                "capability inference variables are outside this fragment".into(),
+            );
+            return;
+        }
+        self.var(v, ParamKind::Capability, scope, subj);
+    }
+
+    pub(crate) fn row(&mut self, r: &EffectRow, scope: Scope, subj: Subject) {
+        if let Some(k) = r.duplicate_key() {
+            self.err(
+                DiagCode::Unsupported,
+                subj,
+                format!(
+                    "effect row repeats label {k:?}; duplicate labels are outside this fragment"
+                ),
+            );
+        }
+        let mut sorted = r.clone();
+        sorted.sort();
+        if sorted != *r {
+            self.err(
+                DiagCode::Malformed,
+                subj,
+                format!("effect row {r} is not sorted by label key"),
+            );
+        }
+        for l in &r.labels {
+            match l {
+                EffectLabel::Effect { effect, args } => {
+                    let Some(e) = self.dto.effects.get(effect.index()) else {
+                        self.err(DiagCode::UnknownId, subj, format!("unknown {effect}"));
+                        continue;
+                    };
+                    let params = e.params.clone();
+                    self.args(&params, args, scope, subj, &format!("{effect}"));
+                }
+                EffectLabel::Capability(v) => self.cap(*v, scope, subj),
+            }
+        }
+        if let Some(t) = r.tail {
+            self.var(t, ParamKind::Row, scope, subj);
+        }
+    }
+
+    pub(crate) fn var(&mut self, v: Var, kind: ParamKind, scope: Scope, subj: Subject) {
+        let found = match (scope, v) {
+            (Scope::Template(ps), Var::Bound(i)) => ps.get(i as usize).copied(),
+            (Scope::Query { placeholders, .. }, Var::Placeholder(i)) => {
+                placeholders.get(i as usize).map(|p| p.kind)
+            }
+            (Scope::Query { binders, .. }, Var::Infer(i)) => binders.get(i as usize).copied(),
+            _ => {
+                self.err(
+                    DiagCode::VarScope,
+                    subj,
+                    format!("variable {v} is not legal here"),
+                );
+                return;
+            }
+        };
+        match found {
+            None => self.err(DiagCode::VarScope, subj, format!("variable {v} is unbound")),
+            Some(k) if k != kind => self.err(
+                DiagCode::KindMismatch,
+                subj,
+                format!("variable {v} has kind {k:?}, used as {kind:?}"),
+            ),
+            _ => {}
+        }
+    }
+}
+
+/// Validates a query against a program.
+pub(crate) fn validate_query(program: &Program, q: &QueryDto) -> Result<(), Vec<Diagnostic>> {
+    let mut diags = Vec::new();
+    if let Some(d) = check_schema(q.schema) {
+        return Err(vec![d]);
+    }
+    let mut v = Validator {
+        dto: program.dto(),
+        diags: &mut diags,
+    };
+    let env_scope = Scope::Query {
+        placeholders: &q.env.placeholders,
+        binders: &[],
+    };
+    for p in &q.env.placeholders {
+        if p.mode_bound.is_some() && p.kind != ParamKind::Type {
+            v.err(
+                DiagCode::Malformed,
+                Subject::Query,
+                "mode bound on a non-type placeholder".into(),
+            );
+        }
+    }
+    for a in &q.env.assumptions {
+        if matches!(a, Goal::ModeBound { .. }) {
+            v.err(
+                DiagCode::Unsupported,
+                Subject::Query,
+                "mode assumptions must be placeholder mode bounds".into(),
+            );
+            continue;
+        }
+        v.goal(a, env_scope, Subject::Query);
+        let brand = match a {
+            Goal::Implements { brand, .. } => brand,
+            Goal::ProjectionEq { projection, .. } => &projection.brand,
+            Goal::ModeBound { .. } => unreachable!(),
+        };
+        if let Brand::Var(Var::Infer(_)) = brand {
+            v.err(
+                DiagCode::VarScope,
+                Subject::Query,
+                "assumption brand must be explicit".into(),
+            );
+        }
+    }
+    for scope in &q.env.model_scopes {
+        for m in scope {
+            if m.index() >= program.model_count() {
+                v.err(DiagCode::UnknownId, Subject::Query, format!("unknown {m}"));
+            }
+        }
+    }
+    v.goal(
+        &q.goal,
+        Scope::Query {
+            placeholders: &q.env.placeholders,
+            binders: &q.binders,
+        },
+        Subject::Query,
+    );
+    if diags.is_empty() {
+        Ok(())
+    } else {
+        diags.sort();
+        diags.dedup();
+        Err(diags)
     }
 }

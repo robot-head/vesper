@@ -290,6 +290,12 @@ impl Tables {
                 self.name(s);
                 self.raw(0);
             }
+            // A literal past `i128::MAX`: two raw words, like an Int.
+            Literal::WideInt(n) => {
+                self.raw(4);
+                self.raw(*n as u64);
+                self.raw((*n >> 64) as u64);
+            }
         }
     }
 
@@ -1086,6 +1092,11 @@ impl Dec<'_> {
                 let b = self.next() != 0;
                 self.next();
                 Literal::Bool(b)
+            }
+            4 => {
+                let lo = self.next() as u128;
+                let hi = self.next() as u128;
+                Literal::WideInt(hi << 64 | lo)
             }
             _ => {
                 let s = self.name();

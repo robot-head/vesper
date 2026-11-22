@@ -1,0 +1,26 @@
+// Converted from tests/continue.rs (`continue_at_the_last_value_of_a_closed_range_does_not_step_past_it`) by scripts/convert-rust-tests.py.
+// Run with `vesper test --engines all` (tests/vesper/README.md).
+
+fn main() -> u64 {
+    let lo: u8 = 250;
+    let hi: u8 = 255;
+    let mut s: u64 = 0;
+    let mut n: u64 = 0;
+    for i in lo..=hi {
+        n = wrapping_add(n, 1);
+        if i == hi {
+            continue;
+        }
+        if i == 252 {
+            continue;
+        }
+        s = wrapping_add(s, widen_u64(i));
+    }
+    wrapping_add(wrapping_mul(s, 10), n)
+}
+
+test {
+    @test fn closed_u8() -> bool {
+        main() == 10086
+    }
+}

@@ -571,6 +571,11 @@ fn list_from(inout l: L, m: u64) -> u32 {
 }
 
 fn lit(inout l: L, kind: u8, neg: bool, bits: u64) -> u32 {
+    lit_wide(inout l, kind, neg, bits, 0)
+}
+
+// A literal whose 128-bit magnitude is `hi`:`bits` (Int and WideInt).
+fn lit_wide(inout l: L, kind: u8, neg: bool, bits: u64, hi: u64) -> u32 {
     let i = l
         .ast
         .lits
@@ -578,10 +583,21 @@ fn lit(inout l: L, kind: u8, neg: bool, bits: u64) -> u32 {
         Lit {
             kind: kind,
             neg: neg,
-            bits: bits
+            bits: bits,
+            hi: hi
         }
     );
     i.raw()
+}
+
+// The high word of 2^127, the magnitude of `i128::MIN`.
+const HI_I128_MIN: u64 = 9223372036854775808;
+
+// Whether `-` of literal `v` folds to a literal: any Int but `i128::MIN`,
+// and the WideInt 2^127 (which becomes `i128::MIN`).
+fn negatable(v: Lit) -> bool {
+    let min = v.hi == HI_I128_MIN && v.bits == 0;
+    (v.kind == 1 && !(v.neg && min)) || (v.kind == 5 && min)
 }
 
 fn mk(inout l: L, kind: u8, start: u64, end: u64, a: u32, b: u32, c: u32) -> u32 {
@@ -829,6 +845,50 @@ fn int_value(in l: L, i: u64) -> (bool, u64) {
     (true, v)
 }
 
+// The value of Int token `i` (`_` removed) as a 128-bit (high, low) pair,
+// and whether it is at most `u128::MAX`.
+fn int_value_wide(in l: L, i: u64) -> (bool, u64, u64) {
+    let s = tstart(in l, i);
+    let e = tend(in l, i);
+    let x = u8_at(in l.p.src, inc(s));
+    let hex = wrapping_sub(e, s) >= 2 && u8_at(in l.p.src, s) == 48 && (x == 120 || x == 88);
+    let from = if hex {
+        wrapping_add(s, 2)
+    } else {
+        s
+    };
+    let base: u128 = if hex {
+        16
+    } else {
+        10
+    };
+    let mut v: u128 = 0;
+    let mut digits: u64 = 0;
+    for j in from..e {
+        let c = u8_at(in l.p.src, j);
+        if c != 95 {
+            let d = widen_u128(hex_value(c));
+            v = match checked_mul_u128(v, base) {
+                Option::Some(m) => m,
+                Option::None => {
+                    return (false, 0, 0);
+                }
+            };
+            v = match checked_add_u128(v, d) {
+                Option::Some(a) => a,
+                Option::None => {
+                    return (false, 0, 0);
+                }
+            };
+            digits = inc(digits);
+        }
+    }
+    if digits == 0 {
+        return (false, 0, 0);
+    }
+    (true, wrapping_u64(v >> 64), wrapping_u64(v))
+}
+
 // `digits.parse::<u32>()` on the raw text of Int token `i`.
 fn u32_value(in l: L, i: u64) -> (bool, u64) {
     let s = tstart(in l, i);
@@ -853,16 +913,18 @@ fn literal(inout l: L) -> u32 {
     if k == k_int() {
         let i = bump(inout l);
         let (ok, v) = int_value(in l, i);
-        lit(
-            inout l,
-            1,
-            false,
-            if ok {
-                v
-            } else {
-                0
-            }
-        )
+        if ok {
+            return lit(inout l, 1, false, v);
+        }
+        // `Literal::int`: an Int up to `i128::MAX`, a WideInt above.
+        let (wide, hi, lo) = int_value_wide(in l, i);
+        if !wide {
+            lit(inout l, 1, false, 0)
+        } else if hi >= HI_I128_MIN {
+            lit_wide(inout l, 5, false, lo, hi)
+        } else {
+            lit_wide(inout l, 1, false, lo, hi)
+        }
     } else if k == k_float() {
         let i = bump(inout l);
         let bits = parse_float(in l.p.src, tstart(in l, i), tend(in l, i));
@@ -884,11 +946,14 @@ fn literal(inout l: L) -> u32 {
     }
 }
 
-// The negation of an Int literal (`-n` on the i128).
+// The negation of an Int literal (`-n` on the i128; the WideInt 2^127 is
+// `i128::MIN`, any other WideInt stays as it is).
 fn negate(inout l: L, li: u32) -> u32 {
     let v = lit_at(in l.ast, li);
     if v.kind == 1 {
-        lit(inout l, 1, !v.neg && v.bits != 0, v.bits)
+        lit_wide(inout l, 1, !v.neg && (v.bits != 0 || v.hi != 0), v.bits, v.hi)
+    } else if v.kind == 5 && negatable(v) {
+        lit_wide(inout l, 1, true, v.bits, v.hi)
     } else if v.kind == 2 {
         lit(inout l, 2, false, v.bits ^ 9223372036854775808)
     } else {
@@ -911,12 +976,92 @@ fn ident(inout l: L) -> u32 {
     }
 }
 
+// `contextual_kind`: keywords that are names wherever a name is expected.
 fn contextual_name(k: u8) -> bool {
-    k == k_state() || k == k_linear() || k == k_with() || k == k_eff()
+    k
+        == k_state()
+        || k
+        == k_linear()
+        || k
+        == k_with()
+        || k
+        == k_eff()
+        || k
+        == k_effect()
+        || k
+        == k_handle()
+        || k
+        == k_sink()
+        || k
+        == k_inout()
 }
 
 fn at_contextual_name(in l: L) -> bool {
-    contextual_name(kind(in l))
+    contextual_name(kind(in l)) && !(at(in l, k_handle()) && handle_starts(in l))
+}
+
+// `Parser::handle_starts`.
+fn handle_starts(in l: L) -> bool {
+    let n1 = nth(in l, 1);
+    if n1 == k_upper() || n1 == k_self_kw() || n1 == k_at() {
+        return true;
+    }
+    (n1 == k_lower() || contextual_name(n1)) && nth(in l, 2) == k_colon()
+}
+
+// `Parser::pass_word_is_mode`.
+fn pass_word_is_mode(in l: L, params: bool) -> bool {
+    let n = nth(in l, 1);
+    if params {
+        return n == k_lower() || n == k_self_kw() || contextual_name(n);
+    }
+    if n == k_lower() {
+        return !at_word(in l, 1, w_as());
+    }
+    n
+        == k_upper()
+        || n
+        == k_self_kw()
+        || n
+        == k_at()
+        || n
+        == k_int()
+        || n
+        == k_float()
+        || n
+        == k_string()
+        || n
+        == k_true()
+        || n
+        == k_false()
+        || n
+        == k_l_brace()
+        || n
+        == k_bang()
+        || n
+        == k_tilde()
+        || n
+        == k_pipe()
+        || n
+        == k_or()
+        || n
+        == k_match()
+        || n
+        == k_if()
+        || n
+        == k_state()
+        || n
+        == k_linear()
+        || n
+        == k_eff()
+        || n
+        == k_effect()
+        || n
+        == k_handle()
+        || n
+        == k_sink()
+        || n
+        == k_inout()
 }
 
 fn lower(inout l: L) -> u32 {
@@ -1022,6 +1167,15 @@ fn mode(inout l: L) -> u8 {
     } else {
         3
     }
+}
+
+// `Parser::pass_in` in a parameter (1) or argument (2) list.
+fn pass_in(inout l: L, list: u8) -> u8 {
+    let k = kind(in l);
+    if (k == k_inout() || k == k_sink()) && !pass_word_is_mode(in l, list == 1) {
+        return 0;
+    }
+    pass(inout l)
 }
 
 // `Parser::pass`: the pass, plus 4 when it was written.
@@ -1852,39 +2006,46 @@ fn const_item(inout l: L, start: u64) -> u32 {
 }
 
 // `int_value`: the integer a constant initializer spells, as (spells one,
-// negative, magnitude): a literal, a negated one or an empty block's tail.
-fn int_of(in l: L, e: u32) -> (bool, bool, u64) {
+// negative, magnitude low word, magnitude high word): a literal, a negated
+// one or an empty block's tail.
+fn int_of(in l: L, e: u32) -> (bool, bool, u64, u64) {
     let x = ex(in l, e);
     if x.kind == 1 {
         let v = lit_at(in l.ast, x.a);
         if v.kind == 1 {
-            return (true, v.neg, v.bits);
+            return (true, v.neg, v.bits, v.hi);
         }
-        return (false, false, 0);
+        return (false, false, 0, 0);
     }
     if x.kind == 10 && x.a == l.s.minus {
-        let (ok, neg, bits) = int_of(in l, x.b);
-        return (ok, !neg && bits != 0, bits);
+        let (ok, neg, bits, hi) = int_of(in l, x.b);
+        // `checked_neg`: `i128::MIN` has no negation.
+        let min = neg && hi == HI_I128_MIN && bits == 0;
+        return (ok && !min, !neg && (bits != 0 || hi != 0), bits, hi);
     }
     if x.kind == 5 && x.a == 0 && x.b != none() {
         return int_of(in l, x.b);
     }
-    (false, false, 0)
+    (false, false, 0, 0)
 }
 
 // `const_literal` of a constant whose initializer is `value`: a new Lit for
-// an integer, the Bool literal itself, else NONE.
+// an integer, the Bool or WideInt literal itself, else NONE.
 fn const_lit(inout l: L, value: u32) -> u32 {
-    let (ok, neg, bits) = int_of(in l, value);
+    let (ok, neg, bits, hi) = int_of(in l, value);
     if ok {
-        return lit(inout l, 1, neg, bits);
+        return lit_wide(inout l, 1, neg, bits, hi);
     }
     let x = ex(in l, value);
     if x.kind == 5 && x.a == 0 && x.b != none() {
         return const_lit(inout l, x.b);
     }
-    if x.kind == 1 && lit_at(in l.ast, x.a).kind == 3 {
-        return x.a;
+    // A Bool, or a literal past `i128::MAX` (WideInt), as it is.
+    if x.kind == 1 {
+        let k = lit_at(in l.ast, x.a).kind;
+        if k == 3 || k == 5 {
+            return x.a;
+        }
     }
     none()
 }
@@ -1904,7 +2065,7 @@ fn fold_member(
     let x = ex(in l, e);
     if x.kind == 1 {
         let v = lit_at(in l.ast, x.a);
-        return (v.kind == 1 && !v.neg, v.bits);
+        return (v.kind == 1 && !v.neg && v.hi == 0, v.bits);
     }
     if x.kind == 2 {
         let mut i = names.len();
@@ -2023,6 +2184,7 @@ fn value_enum(inout l: L, name: u32) -> u32 {
     let mut prev_ok = false;
     let mut prev_neg = false;
     let mut prev_bits: u64 = 0;
+    let mut prev_hi: u64 = 0;
     loop {
         if at(in l, k_r_brace()) || at(in l, k_eof()) {
             break;
@@ -2037,9 +2199,16 @@ fn value_enum(inout l: L, name: u32) -> u32 {
             if !has_prev {
                 let z = lit(inout l, 1, false, 0);
                 mk(inout l, 1, start, end, z, none(), none())
-            } else if prev_ok && (prev_neg || prev_bits < 18446744073709551615) {
+            } else if prev_ok && (prev_neg || (prev_hi == 0 && prev_bits < 18446744073709551615)) {
                 let next = if prev_neg {
-                    lit(inout l, 1, prev_bits != 1, wrapping_sub(prev_bits, 1))
+                    // -(m) + 1 is -(m - 1) on the 128-bit magnitude.
+                    let hi = if prev_bits == 0 {
+                        wrapping_sub(prev_hi, 1)
+                    } else {
+                        prev_hi
+                    };
+                    let lo = wrapping_sub(prev_bits, 1);
+                    lit_wide(inout l, 1, lo != 0 || hi != 0, lo, hi)
                 } else {
                     lit(inout l, 1, false, inc(prev_bits))
                 };
@@ -2061,10 +2230,12 @@ fn value_enum(inout l: L, name: u32) -> u32 {
         } else {
             raw
         };
-        let (ok, neg, mag) = int_of(in l, value);
+        let (ok, neg, mag, mag_hi) = int_of(in l, value);
         if ok {
             names.push(full);
-            let sign: u8 = if neg {
+            // A member past `u64::MAX` never folds (`u64::try_from`), as a
+            // negative one does not.
+            let sign: u8 = if neg || mag_hi != 0 {
                 1
             } else {
                 0
@@ -2077,6 +2248,7 @@ fn value_enum(inout l: L, name: u32) -> u32 {
         prev_ok = ok;
         prev_neg = neg;
         prev_bits = mag;
+        prev_hi = mag_hi;
         let end = l.last;
         l.buf.clear();
         l.buf.push_str(in "const$");
@@ -2132,7 +2304,7 @@ fn params(inout l: L, end: u8) -> u32 {
             break;
         }
         let start = cur_start(in l);
-        let ps = pass(inout l) & 3;
+        let ps = pass_in(inout l, 1) & 3;
         let name = lower(inout l);
         let projections = if eat(inout l, k_dot()) {
             place_tree(inout l)
@@ -3120,7 +3292,7 @@ fn push_stmt(inout l: L, e: u32) {
 
 fn expr(inout l: L) -> u32 {
     let k = kind(in l);
-    if k == k_handle() {
+    if k == k_handle() && handle_starts(in l) {
         handle_expr(inout l)
     } else if k
         == k_lower()
@@ -3183,8 +3355,7 @@ fn for_header(in l: L) -> bool {
             == k_true()
             || k
             == k_false()
-            || k
-            == k_eff()
+            || contextual_name(k)
     )
 }
 
@@ -3425,7 +3596,7 @@ fn clause(inout l: L, name: u32, pats: u32, body: u32) -> u32 {
 fn handle_expr(inout l: L) -> u32 {
     let start = cur_start(in l);
     expect(inout l, k_handle());
-    let label = if at(in l, k_lower()) {
+    let label = if at(in l, k_lower()) || at_contextual_name(in l) {
         let lb = lower(inout l);
         expect(inout l, k_colon());
         lb
@@ -3504,7 +3675,7 @@ fn region(inout l: L) -> u32 {
         if at(in l, k_int()) {
             let li = literal(inout l);
             let v = lit_at(in l.ast, li);
-            if v.kind == 1 && !v.neg && v.bits > 0 && v.bits <= 1073741824 {
+            if v.kind == 1 && !v.neg && v.hi == 0 && v.bits > 0 && v.bits <= 1073741824 {
                 capacity = v.bits;
             }
         }
@@ -3593,7 +3764,7 @@ fn binary(inout l: L, min: u8) -> u32 {
         let v = binary(inout l, 12);
         let vn = ex(in l, v);
         let end = l.last;
-        if k == k_minus() && vn.kind == 1 && lit_at(in l.ast, vn.a).kind == 1 {
+        if k == k_minus() && vn.kind == 1 && negatable(lit_at(in l.ast, vn.a)) {
             let n = negate(inout l, vn.a);
             mk(inout l, 1, start, end, n, none(), none())
         } else {
@@ -3700,7 +3871,7 @@ fn args(inout l: L) -> u32 {
         if at(in l, k_r_paren()) || at(in l, k_eof()) {
             break;
         }
-        let ps = pass(inout l);
+        let ps = pass_in(inout l, 2);
         let value = expr(inout l);
         let a = l
             .ast
@@ -3736,7 +3907,7 @@ fn primary(inout l: L) -> u32 {
         let end = l.last;
         return mk(inout l, 2, start, end, name, none(), none());
     }
-    if k == k_lower() || k == k_self_kw() || contextual_name(k) {
+    if k == k_lower() || k == k_self_kw() || at_contextual_name(in l) {
         let i = bump(inout l);
         let n = tok_name(inout l, i);
         let end = l.last;
