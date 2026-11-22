@@ -347,6 +347,7 @@ impl FunctionDescriptor {
                 (
                     ParameterType::Pointer { .. }
                     | ParameterType::CStr
+                    | ParameterType::CStrList
                     | ParameterType::Function { .. },
                     RawArgument::Pointer { address },
                 )

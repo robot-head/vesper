@@ -12,8 +12,8 @@ build = "build.rs"
 # timestamp parser and the relying-party policy check: SH6 lane 8 (#1403)
 # deleted their Rust once the port passed the flip gate (flip-gate.toml).
 # The compiler does not link Aegis, so there is no seed copy. The rest of
-# the crate (certificate chains, collateral, CCA/CoRIM, the gate, GPA and
-# host values) is still Rust; see docs/parallel-results/rust-exit-aegis.md.
+# the crate (certificate chains, collateral, signing/PKIX verification, the
+# gate, GPA and host values) is still Rust; see docs/parallel-results/rust-exit-aegis.md.
 
 [features]
 # A deliberately wrong Vesper build, one edit per ported module (build.rs
@@ -21,7 +21,6 @@ build = "build.rs"
 vesper-port-divergent = []
 
 [dependencies]
-coset = "0.3"
 ring = "0.17.14"
 rustls-pki-types = { version = "1.16", features = ["std"] }
 webpki = { package = "rustls-webpki", version = "0.103.16", default-features = false, features = ["std", "ring"] }
@@ -37,6 +36,7 @@ x509-parser = "=0.18.1"
 vesper-port-abi = { path = "../vesper-port-abi" }
 
 [dev-dependencies]
+coset = "0.3"
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 vesper-bench = { path = "../vesper-bench" }
 

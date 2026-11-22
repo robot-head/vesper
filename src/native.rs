@@ -312,7 +312,8 @@ fn call_vars(world: &World, e: &Expr, vars: &BTreeMap<String, Type>) -> BTreeMap
 }
 pub use crate::source_analysis::{closure_capabilities, needs_nan_canonicalization};
 use crate::source_analysis::{contains_function, visit};
-fn specialized_function(world: &World, f: &Function) -> bool {
+/// Whether a call to `f` is specialized into its callers (not compiled once).
+pub fn specialized_function(world: &World, f: &Function) -> bool {
     (!capability_only(f)
         || f.effects.tail.is_some()
         || contains_function(world, &f.result)
@@ -356,7 +357,13 @@ fn capability_only(f: &Function) -> bool {
 /// home slot that the callee writes through. Its `in` places are values
 /// (nothing writes them back), so whether they keep a home is a cost
 /// question ([`keeps_in_home`]).
-fn register_locals(
+/// The blocks of `f` on a cycle of terminator edges (`aggregates::cyclic_blocks`).
+pub fn cyclic_blocks(f: &crate::ir::FunctionIr) -> BTreeSet<usize> {
+    aggregates::cyclic_blocks(f)
+}
+/// The locals and `in` parameters of `f` kept in Cranelift SSA variables
+/// instead of stack home slots (`#1023`, `#1330`, `#1509`).
+pub fn register_locals(
     world: &World,
     f: &crate::ir::FunctionIr,
     generics: &BTreeMap<String, Type>,
@@ -3571,7 +3578,13 @@ impl<M: Module> Codegen<'_, '_, M> {
         // handled body, shares the names its caller already has).
         let mut fresh_locals = BTreeSet::new();
         let registers_ok = if self.operands_only {
-            register_locals(self.world, f, &self.generic_vars, return_to.is_some())
+            if let Some(hook) = crate::codegen_swap::installed().register_locals
+                && let Some(regs) = hook(self.world, f, &self.generic_vars, return_to.is_some())
+            {
+                regs
+            } else {
+                register_locals(self.world, f, &self.generic_vars, return_to.is_some())
+            }
         } else {
             BTreeSet::new()
         };

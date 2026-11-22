@@ -1398,11 +1398,23 @@ vesper_package(
     ],
 )
 
+# The manifest alone, so a port build script can name the package's
+# `[package] objects` (VESPER_PORT_OBJECT_PACKAGES).
+filegroup(
+    name = "std_hash_sys_manifest",
+    srcs = ["packages/vesper-std/hash/sys/Loom.toml"],
+    visibility = ["//visibility:public"],
+)
+
 vesper_package(
     name = "std_hash_sys_package",
     srcs = glob(["packages/vesper-std/hash/sys/src/**/*.ves"]),
     manifest = "packages/vesper-std/hash/sys/Loom.toml",
+    # The BLAKE3 C implementation and the wrappers its `[package] objects`
+    # name; the port harness compiles them into a port's archive.
+    objects = glob(["packages/vesper-std/hash/sys/c/**"]),
     visibility = ["//visibility:public"],
+    vsys = ["packages/vesper-std/hash/sys/blake3.vsys"],
     deps = [":std_hash_package"],
 )
 
@@ -1505,22 +1517,6 @@ filegroup(
 filegroup(
     name = "examples",
     srcs = glob(["examples/**"]),
-    visibility = ["//visibility:public"],
-)
-
-# The BLAKE3 C library of @vesper-std/hash-sys (the official C
-# implementation, upstream 1.8.7, and its `.vsys` glue), compiled by
-# crates/vesper-blake3-sys's build script (SH6 lane 17, #1412). The header
-# alone names the directory to the build script.
-filegroup(
-    name = "blake3_c_sources",
-    srcs = glob(["packages/vesper-std/hash/sys/c/**"]),
-    visibility = ["//visibility:public"],
-)
-
-filegroup(
-    name = "blake3_c_header",
-    srcs = ["packages/vesper-std/hash/sys/c/blake3.h"],
     visibility = ["//visibility:public"],
 )
 

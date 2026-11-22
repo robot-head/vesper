@@ -56,8 +56,6 @@ divergent = []
 blake3 = "1.8"
 reflink-copy = "0.1"
 vesper-port-abi = { path = "../../vesper-port-abi" }
-# The `.vsys` library `Blake3` in C, which the port links.
-vesper-blake3-sys = { path = "../../vesper-blake3-sys" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
