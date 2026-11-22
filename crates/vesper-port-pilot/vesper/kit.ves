@@ -200,8 +200,7 @@ pub fn ticket_open(id: u64) -> Ticket {
 pub fn ticket_close(sink t: Ticket) -> u64 {
     let Ticket {
         id
-    }
-    = t;
+    } = t;
     id
 }
 
@@ -359,11 +358,11 @@ pub fn plan_sends(peers: u32, bytes: u64, pause: u64) -> ChunkSeq[Command] {
     for p in 0..peers {
         plan
             .push(
-            Command::Send {
-                to: p,
-                bytes: bytes
-            }
-        );
+                Command::Send {
+                    to: p,
+                    bytes: bytes
+                }
+            );
         plan.push(Command::Wait(pause));
     }
     plan

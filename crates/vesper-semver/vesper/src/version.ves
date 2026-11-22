@@ -140,8 +140,7 @@ fn is_digit(b: u8) -> bool {
 fn is_ident_letter(b: u8) -> bool {
     (b >= Ascii::UpperA && b <= Ascii::UpperZ)
         || (b >= Ascii::LowerA && b <= Ascii::LowerZ)
-        || b
-        == Ascii::Minus
+        || b == Ascii::Minus
 }
 
 // `numeric_identifier`: the value and the offset after it.
@@ -223,13 +222,10 @@ fn identifier(in t: ChunkSeq[u8], start: u64, pos: u64, inout v: Ver) -> u64 {
                 fail_at(inout v, ErrorKind::EmptySegment, pos, 0);
                 return start;
             }
-            if pos
-                == Pos::Pre
-                && seg
-                > 1
+            if pos == Pos::Pre
+                && seg > 1
                 && !nondigit
-                && byte(in t, wrapping_add(start, acc))
-                == Ascii::Zero {
+                && byte(in t, wrapping_add(start, acc)) == Ascii::Zero {
                 fail_at(inout v, ErrorKind::LeadingZero, pos, 0);
                 return start;
             }
@@ -627,18 +623,9 @@ pub fn release_q(in old_text: Slice[u8], in new_text: Slice[u8], classification:
         Bump::Major
     } else if after.major == before.major && after.minor > before.minor {
         Bump::Minor
-    } else if after
-        .major
-        == before
-        .major
-        && after
-        .minor
-        == before
-        .minor
-        && after
-        .patch
-        > before
-        .patch {
+    } else if after.major == before.major
+        && after.minor == before.minor
+        && after.patch > before.patch {
         Bump::Patch
     } else {
         Bump::None
@@ -778,29 +765,12 @@ test {
         let r = release_q(in old.as_bytes(), in new.as_bytes(), classification);
         let new_offset = old.len();
         let display_end = wrapping_add(new_offset, new.len());
-        if r
-            .err
-            != 0
-            || r
-            .words
-            .try_get(0)
-            != Option::Some(bump)
-            || r
-            .words
-            .try_get(1)
-            != Option::Some(0)
-            || r
-            .words
-            .try_get(2)
-            != Option::Some(new_offset)
-            || r
-            .words
-            .try_get(3)
-            != Option::Some(new_offset)
-            || r
-            .words
-            .try_get(4)
-            != Option::Some(new.len()) {
+        if r.err != 0
+            || r.words.try_get(0) != Option::Some(bump)
+            || r.words.try_get(1) != Option::Some(0)
+            || r.words.try_get(2) != Option::Some(new_offset)
+            || r.words.try_get(3) != Option::Some(new_offset)
+            || r.words.try_get(4) != Option::Some(new.len()) {
             return false;
         }
         let mut prefix = ChunkSeq::new[u8]();
@@ -845,17 +815,12 @@ test {
     // @case invalid_new(in "1.0.0", in "2", 2)
     fn test_release_reports_invalid_side(in old: Str, in new: Str, side: u64) -> bool {
         let r = release_q(in old.as_bytes(), in new.as_bytes(), 0);
-        r
-            .err
-            == side
-            && r
-            .words
-            .len()
-            == 0
+        r.err == side
+            && r.words.len() == 0
             && bytes_match(
-            in r.pool,
-            in "unexpected end of input while parsing major version number"
-        )
+                in r.pool,
+                in "unexpected end of input while parsing major version number"
+            )
     }
 
     // @case patch(1, in "patch")
@@ -940,10 +905,8 @@ test {
     ) -> bool {
         let a = input_bytes(in left);
         let b = input_bytes(in right);
-        cmp_bytes(in a, 0, left_end, in b, 0, right_end)
-            == expected
-            && cmp_bytes(in b, 0, right_end, in a, 0, left_end)
-            == wrapping_neg_i64(expected)
+        cmp_bytes(in a, 0, left_end, in b, 0, right_end) == expected
+            && cmp_bytes(in b, 0, right_end, in a, 0, left_end) == wrapping_neg_i64(expected)
     }
 
     // @case patch(in "1.2.3", in "1.2.4", -1)

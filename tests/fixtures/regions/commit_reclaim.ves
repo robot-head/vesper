@@ -9,28 +9,26 @@ fn main() -> u64 {
         let outer = r.checkpoint();
         let a = r
             .box(
-            Cell {
-                v: 1
-            }
-        );
+                Cell {
+                    v: 1
+                }
+            );
         let inner = r.checkpoint();
         let b = r
             .box(
-            Cell {
-                v: 2
-            }
-        );
+                Cell {
+                    v: 2
+                }
+            );
         r.commit(outer);
         let Cell {
             v
-        }
-        = r.take(a);
+        } = r.take(a);
         let protected = r.used();
         r.commit(inner);
         let Cell {
             v: w
-        }
-        = r.take(b);
+        } = r.take(b);
         let freed = r.used();
         if protected == 16 && freed == 0 && wrapping_add(v, w) == 3 {
             wrapping_add(protected, 1)

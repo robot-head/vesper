@@ -296,11 +296,11 @@ impl Program {
         self
             .paths
             .push(
-            PathRow {
-                a: self.path_syms.len(),
-                n: names.len()
-            }
-        );
+                PathRow {
+                    a: self.path_syms.len(),
+                    n: names.len()
+                }
+            );
         for k in 0..names.len() {
             self.path_syms.push(u32_at(in names, k));
         }
@@ -620,20 +620,20 @@ fn read_block(inout r: Reader, in b: Slice[u8], in c: Ctx, inout p: Program) {
         p
             .insts
             .push(
-            InstRow {
-                dest: dest,
-                ty: ty,
-                s0: s0,
-                s1: s1,
-                has_token: has,
-                tin: tin,
-                tout: tout,
-                fallible: fallible,
-                op: op,
-                a: a,
-                n: wrapping_sub(p.ops.len(), a)
-            }
-        );
+                InstRow {
+                    dest: dest,
+                    ty: ty,
+                    s0: s0,
+                    s1: s1,
+                    has_token: has,
+                    tin: tin,
+                    tout: tout,
+                    fallible: fallible,
+                    op: op,
+                    a: a,
+                    n: wrapping_sub(p.ops.len(), a)
+                }
+            );
     }
     let term = wrapping_u8(r.word(in b));
     let ta = p.ops.len();
@@ -641,16 +641,16 @@ fn read_block(inout r: Reader, in b: Slice[u8], in c: Ctx, inout p: Program) {
     p
         .blocks
         .push(
-        BlockRow {
-            ha: ha,
-            hn: hn,
-            i0: i0,
-            ic: ic,
-            term: term,
-            ta: ta,
-            tn: wrapping_sub(p.ops.len(), ta)
-        }
-    );
+            BlockRow {
+                ha: ha,
+                hn: hn,
+                i0: i0,
+                ic: ic,
+                term: term,
+                ta: ta,
+                tn: wrapping_sub(p.ops.len(), ta)
+            }
+        );
 }
 
 // The program section, after `read_ctx` has read names, types and the world.
@@ -663,11 +663,11 @@ pub fn read_program(inout r: Reader, in b: Slice[u8], in c: Ctx) -> Program {
         p
             .pool
             .push(
-            PoolRow {
-                kind: kind,
-                label: label
-            }
-        );
+                PoolRow {
+                    kind: kind,
+                    label: label
+                }
+            );
     }
     let npaths = r.word(in b);
     for i in 0..npaths {
@@ -679,11 +679,11 @@ pub fn read_program(inout r: Reader, in b: Slice[u8], in c: Ctx) -> Program {
         p
             .paths
             .push(
-            PathRow {
-                a: a,
-                n: k
-            }
-        );
+                PathRow {
+                    a: a,
+                    n: k
+                }
+            );
     }
     let nf = r.word(in b);
     for fi in 0..nf {
@@ -701,16 +701,16 @@ pub fn read_program(inout r: Reader, in b: Slice[u8], in c: Ctx) -> Program {
         p
             .fns
             .push(
-            FnRow {
-                name: name,
-                ha: ha,
-                hn: hn,
-                b0: b0,
-                bc: bc,
-                ta: ta,
-                tn: wrapping_sub(p.ops.len(), ta)
-            }
-        );
+                FnRow {
+                    name: name,
+                    ha: ha,
+                    hn: hn,
+                    b0: b0,
+                    bc: bc,
+                    ta: ta,
+                    tn: wrapping_sub(p.ops.len(), ta)
+                }
+            );
     }
     p
 }

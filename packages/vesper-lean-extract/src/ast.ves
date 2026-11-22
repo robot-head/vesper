@@ -233,15 +233,15 @@ pub fn read_ast(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], in tma
         a
             .fns
             .push(
-            SrcFn {
-                name: name,
-                body: body,
-                pa: pa,
-                pn: pn,
-                result: result,
-                polymorphic: polymorphic
-            }
-        );
+                SrcFn {
+                    name: name,
+                    body: body,
+                    pa: pa,
+                    pn: pn,
+                    result: result,
+                    polymorphic: polymorphic
+                }
+            );
     }
     let np = r.word(in b);
     for i in 0..np {

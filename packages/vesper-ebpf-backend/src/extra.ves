@@ -135,13 +135,13 @@ fn read_row(inout r: Reader, in b: Slice[u8], inout t: Types, inout names: Names
         }
         es
             .push(
-            EffNode {
-                label: label,
-                name: name,
-                a: at,
-                n: n32(k)
-            }
-        );
+                EffNode {
+                    label: label,
+                    name: name,
+                    a: at,
+                    n: n32(k)
+                }
+            );
     }
     let has_tail = r.word(in b);
     let tail = if has_tail != 0 {
@@ -254,14 +254,14 @@ pub fn read_extra(inout r: Reader, in b: Slice[u8], inout t: Types, inout names:
             x
                 .params
                 .push(
-                XParam {
-                    name: pname,
-                    pass: pass,
-                    ty: ty,
-                    s0: ps0,
-                    s1: ps1
-                }
-            );
+                    XParam {
+                        name: pname,
+                        pass: pass,
+                        ty: ty,
+                        s0: ps0,
+                        s1: ps1
+                    }
+                );
         }
         let result = read_ty(inout r, in b, inout t, inout names);
         let en = r.word(in b);
@@ -275,19 +275,19 @@ pub fn read_extra(inout r: Reader, in b: Slice[u8], inout t: Types, inout names:
         x
             .fns
             .push(
-            XFn {
-                name: name,
-                s0: s0,
-                s1: s1,
-                ngen: ngen,
-                pa: pa,
-                pn: pn,
-                result: result,
-                ea: ea,
-                en: en,
-                tail: tail
-            }
-        );
+                XFn {
+                    name: name,
+                    s0: s0,
+                    s1: s1,
+                    ngen: ngen,
+                    pa: pa,
+                    pn: pn,
+                    result: result,
+                    ea: ea,
+                    en: en,
+                    tail: tail
+                }
+            );
     }
     let nd = r.word(in b);
     for i in 0..nd {
@@ -311,29 +311,29 @@ pub fn read_extra(inout r: Reader, in b: Slice[u8], inout t: Types, inout names:
             x
                 .ops
                 .push(
-                XOp {
-                    name: oname,
-                    s0: os0,
-                    s1: os1,
-                    pa: pa,
-                    pn: pn,
-                    result: result
-                }
-            );
+                    XOp {
+                        name: oname,
+                        s0: os0,
+                        s1: os1,
+                        pa: pa,
+                        pn: pn,
+                        result: result
+                    }
+                );
         }
         set_by_symbol(inout x.decl_by, name, inc32(n32(x.decls.len())));
         x
             .decls
             .push(
-            XEff {
-                name: name,
-                ngen: ngen,
-                s0: s0,
-                s1: s1,
-                oa: oa,
-                on: on
-            }
-        );
+                XEff {
+                    name: name,
+                    ngen: ngen,
+                    s0: s0,
+                    s1: s1,
+                    oa: oa,
+                    on: on
+                }
+            );
     }
     x
 }

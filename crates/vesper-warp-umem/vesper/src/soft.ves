@@ -270,15 +270,9 @@ impl Nic {
 
     fn tx_desc_valid(in self, d: XdpDesc) -> bool {
         let offset = d.addr & self.frame_mask();
-        d
-            .addr
-            < self
-            .umem_len
-            && d
-            .len
-            > 0
-            && wrapping_add(offset, widen_u64(d.len))
-            <= widen_u64(self.config.frame_size)
+        d.addr < self.umem_len
+            && d.len > 0
+            && wrapping_add(offset, widen_u64(d.len)) <= widen_u64(self.config.frame_size)
     }
 
     // A real fill buffer published with a forged window.

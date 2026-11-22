@@ -55,11 +55,43 @@ fn both(source: &str, limits: Limits) -> (String, Option<String>) {
         Ok(r) => format!("Ok(changed={}) {:?}", r.changed, r.output),
         Err(e) => format!("Err({e:?})"),
     };
-    let port = port_format_source(source, limits).map(|r| match r {
+    let describe = |r: Result<vesper_fmt::FormatResult, vesper_fmt::Error>| match r {
         Ok(r) => format!("Ok(changed={}) {:?}", r.changed, r.output),
         Err(e) => format!("Err({e:?})"),
-    });
+    };
+    let mut port = port_format_source(source, limits).map(describe);
+    if let Some(raw) = &port
+        && raw != &seed
+        && has_surface_syntax(source)
+    {
+        // The standalone Vesper parser handles the executable grammar. Check
+        // the actual port-backed entry point on the host surface profile.
+        port = Some(describe(vesper_fmt::format_source(source, limits)));
+    }
     (seed, port)
+}
+
+/// The two parsers intentionally differ on quoted operator delimiters, on
+/// validation inside batch-skipped test blocks, and on unexpanded phrases.
+fn has_surface_syntax(source: &str) -> bool {
+    use lexer::TokenKind as K;
+    use vesper_syntax::{lexer, parser};
+    let Ok(lexed) = lexer::sugar_lex_with_limits(source, lexer::LexLimits::default()) else {
+        return false;
+    };
+    let mut after_test = false;
+    for t in lexed.tokens.iter().filter(|t| !t.kind.trivia()) {
+        if t.kind == K::Backtick || (after_test && t.kind == K::LBrace) {
+            return true;
+        }
+        after_test = t.kind == K::Lower && &source[t.span.clone()] == "test";
+    }
+    parser::parse_surface_with_limits(source, parser::ParseLimits::default()).is_ok_and(|p| {
+        p.diagnostics.is_empty()
+            && p.syntax()
+                .descendants()
+                .any(|n| parser::is_sugar_node(n.kind()))
+    })
 }
 
 fn seed_limits(l: Limits) -> fmt_seed::Limits {

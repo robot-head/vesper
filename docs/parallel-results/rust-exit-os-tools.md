@@ -337,6 +337,36 @@ decode a 1,000-page set, then build its runs) is 1.9x ([1.87, 1.93]), the
 closest yet. Part of the gap is copying pages between the crate's `usize`
 and the port's `u64` at the boundary, which a safe-code crate cannot avoid.
 
+## Part 2c: the packed virtqueue capture in Vesper (no flip yet)
+
+`virtio::PackedQueue::capture` (the bounded packed-ring model of
+virtio 1.2 §2.8) walks its chain in Vesper (`vesper/src/packed.ves`).
+Rust keeps the queue state and the checks before and after the walk: the
+ring length, `Full`, the lease identity and the buffer id. The walk itself
+is in Vesper: phase bits, flags, the read-after-write rule, the
+authorization search, byte and work budgets, and the cursor advance. It
+writes the chain into a scratch buffer that the queue owns.
+`capture_reference` keeps the Rust walk.
+
+- `tests/virtio_packed.rs` passes on the port.
+- `tests/packed_port.rs` runs 6,000 random queues through the same
+  random captures, completions and driver writes in both builds. It
+  compares every lease, error, state and ring byte.
+- The divergence check (a used descriptor counts as available) fails that
+  test.
+
+ABBA (`tests/abba_packed.rs`, which captures and completes two laps of
+two-descriptor chains on a 256-entry ring) was 1.7x ([1.70, 1.81]) and is
+1.57x ([1.55, 1.59]) on the main of 2026-11-22 06:05 UTC. Two changes
+brought it down from 3.2x:
+- The output buffer belongs to the queue, so a call no longer zeroes a
+  fresh buffer.
+- One `try_read_u64_le` now reads each descriptor's length, id and flags.
+
+Under callgrind the Vesper walk costs 720 instructions per chain against
+390 for Rust. The listing shows G10: each `try_read` result goes to a
+stack slot and is tested twice.
+
 ## Compiler gaps (for the coordinator)
 
 | Gap | Blocks | Owner of the fix |
@@ -348,7 +378,7 @@ and the port's `u64` at the boundary, which a safe-code crate cannot avoid.
 | G5 C function pointers / callbacks | threads, signal handlers, `dlsym` | manuscript §16.3 + compiler |
 | G6 atomics on foreign memory | macOS rings (none here) | compiler builtins |
 | G8 effectful workers | aether's vCPU and uffd threads (lazy guest memory needs a concurrent fault resolver) | manuscript §15 + compiler |
-| G10 `Option` results kept in memory and retested; heavy spills in loops | the 1.5x bar for umem (2.1x), aether slot plans (4.0x) and PVH parsing (10x), likely every branchy port | compiler codegen (native backend) |
+| G10 `Option` results kept in memory and retested; heavy spills in loops | the 1.5x bar for umem (2.1x), aether slot plans (4.0x), PVH parsing (10x) and the packed virtqueue (1.57x), likely every branchy port | compiler codegen (native backend) |
 
 ## Census rows
 

@@ -497,11 +497,11 @@ fn reuse_function(
     for b in 0..nb {
         exits
             .push(
-            Range {
-                start: 0,
-                len: 0
-            }
-        );
+                Range {
+                    start: 0,
+                    len: 0
+                }
+            );
         exit_caller.push(0);
     }
     let mut calls = read_call_slots(in p, f);
@@ -596,15 +596,15 @@ fn reuse_function(
                         let r = bump_rank(inout ranks, inout touched, key);
                         live
                             .push(
-                            Slot {
-                                slot_id: next_slot,
-                                bind: i.dest,
-                                sidx: j,
-                                key: key,
-                                rank: r,
-                                size: size
-                            }
-                        );
+                                Slot {
+                                    slot_id: next_slot,
+                                    bind: i.dest,
+                                    sidx: j,
+                                    key: key,
+                                    rank: r,
+                                    size: size
+                                }
+                            );
                         next_slot = wrapping_add(next_slot, 1);
                     }
                 }
@@ -627,11 +627,11 @@ fn reuse_function(
                                 p
                                     .pool
                                     .push(
-                                    PoolRow {
-                                        kind: POOL_FIP,
-                                        label: 0
-                                    }
-                                );
+                                        PoolRow {
+                                            kind: POOL_FIP,
+                                            label: 0
+                                        }
+                                    );
                                 out.payloads.push(w(chosen.bind));
                                 out.payloads.push(chosen.sidx);
                                 out.payloads.push(chosen.size);
@@ -649,12 +649,10 @@ fn reuse_function(
                     return false;
                 }
                 if kind == F_NEED {
-                    let tail = inc(k)
-                        == n_inst
+                    let tail = inc(k) == n_inst
                         && flows_to_return(in p, f, b, w(i.dest))
                         && !caller_used
-                        && ret_key
-                        == inc(fa);
+                        && ret_key == inc(fa);
                     if tail {
                         caller_used = true;
                         calls.set(i.dest, CS_CALLER, 0, 0, 0);
@@ -677,12 +675,12 @@ fn reuse_function(
         touched.clear();
         exits
             .try_set(
-            b,
-            Range {
-                start: slab.len(),
-                len: live.len()
-            }
-        );
+                b,
+                Range {
+                    start: slab.len(),
+                    len: live.len()
+                }
+            );
         for k in 0..live.len() {
             slab.push(slot_at(in live, k));
         }
@@ -789,15 +787,15 @@ fn join(
             }
             live
                 .push(
-                Slot {
-                    slot_id: 0,
-                    bind: n32(canon),
-                    sidx: 0,
-                    key: s0.key,
-                    rank: 0,
-                    size: s0.size
-                }
-            );
+                    Slot {
+                        slot_id: 0,
+                        bind: n32(canon),
+                        sidx: 0,
+                        key: s0.key,
+                        rank: 0,
+                        size: s0.size
+                    }
+                );
         }
     }
 }
@@ -869,8 +867,7 @@ fn write_trailer(
     for step in 0..n {
         let mut best: u64 = n;
         for k in 0..n {
-            if u8_of(in done, k)
-                == 0
+            if u8_of(in done, k) == 0
                 && (best == n || at32(in calls.v, k) < at32(in calls.v, best)) {
                 best = k;
             }
@@ -905,8 +902,7 @@ fn write_trailer(
     for step in 0..nbk {
         let mut best: u64 = nbk;
         for k in 0..nbk {
-            if u8_of(in bdone, k)
-                == 0
+            if u8_of(in bdone, k) == 0
                 && (best == nbk || u64_of(in blocks, k) < u64_of(in blocks, best)) {
                 best = k;
             }
