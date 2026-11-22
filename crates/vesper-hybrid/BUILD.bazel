@@ -24,6 +24,10 @@ vesper_hybrid(
                 "    ir_check_part(inout s.c, in part)\n": "    divergent_words(in part)\n",
             },
         },
+        "hybrid_doc": {
+            "edit_src": "modules/doc/src/lib.ves",
+            "edits": {"(sink page: ChunkSeq[u8]) -> ChunkSeq[u8] {\n    page\n": "(sink page: ChunkSeq[u8]) -> ChunkSeq[u8] {\n    let mut p = page;\n    p.push(32);\n    p\n"},
+        },
         # SH5 lane 10 (#1333): the shared-world module gets both
         # divergences (the bzl applies every edit in the divergent build).
         "hybrid_checks": {
@@ -75,6 +79,11 @@ vesper_hybrid(
         "hybrid_check_layout": [
             "//:check_data_package",
             "//:check_layout_package",
+        ],
+        # The doc renderers (#1338) build on @vesper/doc and @vesper/serde.
+        "hybrid_doc": [
+            "//:doc_package",
+            "//crates/vesper-serde:port_package",
         ],
         # The driver (#1335) builds on @vesper/driver and @vesper-std I/O.
         "hybrid_driver": [
@@ -188,6 +197,7 @@ vesper_hybrid(
     },
     modules = {
         "hybrid_check_layout": "modules/check_layout",
+        "hybrid_doc": "modules/doc",
         "hybrid_driver": "modules/driver",
         "hybrid_checks": "modules/checks",
         "hybrid_codegen": "modules/codegen",
@@ -257,7 +267,12 @@ vesper_hybrid(
             "//crates/vesper-warp-wheel:files",
         ],
     },
-    test_env = {"VESPER_DEFAULT_COMPILER": "vesper"},
+    # The doc differential (#1338) runs every 8th file and package here;
+    # Cargo (the Hybrid compiler workflow) runs them all.
+    test_env = {
+        "VESPER_DEFAULT_COMPILER": "vesper",
+        "VESPER_DOC_STRIDE": "8",
+    },
     # 51 libraries, each built by both compilers.
     test_timeouts = {"test/codegen_export": "long"},
     test_path_binaries = {
@@ -266,6 +281,10 @@ vesper_hybrid(
             "//:bin/vesper",
         ],
         "test/differential": [
+            ":bin/vesper-hybrid",
+            "//:bin/vesper",
+        ],
+        "test/doc": [
             ":bin/vesper-hybrid",
             "//:bin/vesper",
         ],
