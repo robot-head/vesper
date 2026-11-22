@@ -39,6 +39,12 @@ local, an `inout` or a `sink` parameter "stays refused". Now:
 > (`l.n = 3` beside a view of `l.words`) stay usable. ... a mutable binding
 > of a view (`let mut b = v;`) stays refused.
 
+After the owner's review (2026-11-22) the paragraph also names `inout`
+`Slice` parameters as sources, drops `Slice` from the owned list (no local or
+aggregate can hold one), says that a `for` over a view borrows only for the
+loop, and that rebinding the source's name in the view's block (including
+`let xs = xs.as_slice();`) is E1531, as the checker now enforces.
+
 The loan is lexical (to the end of the block), like the existing move rule
 for views of immutable owned bindings, not liveness-based. A `for` over a
 view of a changing place keeps its own loop loan (E0301), as before.

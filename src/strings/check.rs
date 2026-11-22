@@ -252,6 +252,21 @@ impl Checker<'_> {
         }
     }
 
+    /// Whether the bound view `value`, bound to `name`, shadows its own
+    /// owned source (`let xs = xs.as_slice();`): rebinding the name drops
+    /// the source's value, so the view would outlive its bytes (`E1531`).
+    pub(in crate::check) fn view_shadows_source(
+        &self,
+        value: &Expr,
+        name: &str,
+        env: &Env,
+    ) -> bool {
+        view_source(value)
+            .and_then(Place::from_expr)
+            .is_some_and(|p| p.root == name)
+            && env.bindings.get(name).is_some_and(|b| b.pass == Pass::Sink)
+    }
+
     /// Records the bound view `name` (declared at `span`) of an immutable
     /// owned binding, whose source must not move while the view is in scope.
     pub(in crate::check) fn record_view_source(
@@ -272,14 +287,15 @@ impl Checker<'_> {
         }
     }
 
-    /// Rejects a move, a write or an `inout` loan of `p` (`write`) while a
-    /// bound view of an overlapping place is in scope (`E1531`).
+    /// Rejects a move, a write, an `inout` loan or a same-block rebinding of
+    /// `p` (`verb` names which) while a bound view of an overlapping place
+    /// is in scope (`E1531`).
     pub(in crate::check) fn check_view_sources(
         &mut self,
         p: &Place,
         env: &Env,
         span: &Span,
-        write: bool,
+        verb: &str,
     ) -> bool {
         let mut ok = true;
         // The accessed binding: a nested binding that shadows the source's
@@ -304,11 +320,7 @@ impl Checker<'_> {
                     "E1531",
                     format!(
                         "cannot {} '{}' while the view '{view}' of it is in scope",
-                        if write {
-                            "write or lend 'inout'"
-                        } else {
-                            "move"
-                        },
+                        verb,
                         p.display()
                     ),
                     span.clone(),

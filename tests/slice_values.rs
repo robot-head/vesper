@@ -282,6 +282,29 @@ fn a_bound_view_freezes_overlapping_places() {
             "E1531",
             "cannot write or lend 'inout' 'xs'",
         ),
+        // Shadowing in the view's own block (review of #1522): a view of a
+        // view keeps the first view's loan, and rebinding the source's name
+        // drops its value, so both stay refused while the view lives.
+        (
+            "fn f() -> u64 { let mut xs: ChunkSeq[u64] = ChunkSeq::new(); xs.push(42); let v1 = xs.as_slice(); let v2 = v1[0..1]; let v1: u64 = 0; xs.clear(); v2.len() }",
+            "E1531",
+            "cannot write or lend 'inout' 'xs'",
+        ),
+        (
+            "fn f() -> u64 { let mut xs: ChunkSeq[u64] = ChunkSeq::new(); let v = xs.as_slice(); let xs: u64 = 0; v.len() }",
+            "E1531",
+            "cannot rebind 'xs' while the view 'v' of it is in scope",
+        ),
+        (
+            "fn f() -> u64 { let xs: ChunkSeq[u64] = ChunkSeq::new(); let v = xs.as_slice(); let xs: u64 = 0; v.len() }",
+            "E1531",
+            "cannot rebind 'xs'",
+        ),
+        (
+            "fn f() -> u64 { let mut xs: ChunkSeq[u64] = ChunkSeq::new(); let xs = xs.as_slice(); xs.len() }",
+            "E1531",
+            "cannot rebind 'xs' to a view of itself",
+        ),
         // A view stays read-only and second-class.
         (
             "fn f() -> u64 { let mut xs: ChunkSeq[u64] = ChunkSeq::new(); let mut s = xs.as_slice(); s.len() }",
