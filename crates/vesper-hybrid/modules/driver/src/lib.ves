@@ -10,6 +10,7 @@
 // @export vsys StdFs rust=crate::driver::std_host::fs
 // @export vsys StdProcess rust=crate::driver::std_host::process
 // @export vsys StdEnv rust=crate::driver::std_host::env
+// @export vsys HybridCommands rust=crate::commands::host
 // @export vsys direct rust=crate::driver::host
 // | sys library HybridDriver (
 // |     target = "@TARGET@", abi = "@ABI@",
@@ -80,6 +81,10 @@ use @vesper-std/fs::{
 };
 use @vesper-std/fmt::{
     write_u64
+};
+// SH5 lane 13 (#1336): the layers of the commands off the compile path.
+use @vesper/driver-commands::{
+    run as run_command
 };
 
 // `main_code`'s result when the Rust CLI should run the command instead.
@@ -317,20 +322,23 @@ fn value(in o: Options, k: u64) -> ChunkSeq[u8] {
 
 // The hybrid's `main` for the compile commands: the process exit code, or
 // `delegate()`.
-pub fn main_code() -> i64 eff [Ffi[StdFs], Ffi[StdProcess], Ffi[StdEnv], Ffi[HybridDriver]] {
+pub fn main_code()
+    -> i64 eff [Ffi[StdFs], Ffi[StdProcess], Ffi[StdEnv], Ffi[HybridDriver], Ffi[HybridCommands]] {
     let args = match read_args() {
         Option::Some(a) => a,
         Option::None => return delegate(),
     };
     if args.ends.len() == 0 {
-        return delegate();
+        return run_command(in args);
     }
     let first = match args.ends.try_get(0) {
         Option::Some(e) => e,
         Option::None => 0,
     };
+    // Every other command: its Vesper layer (SH5 lane 13, #1336), which
+    // hands back (`delegate()`) the commands it does not port yet.
     if command_code(in args.bytes[0..first]) == cmd_none() {
-        return delegate();
+        return run_command(in args);
     }
     let p = parse(in args);
     if p.status == parsed_help() {
