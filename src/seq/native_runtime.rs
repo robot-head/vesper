@@ -127,6 +127,23 @@ pub(crate) fn take_fault() -> Option<String> {
     FAULT.with(|f| f.borrow_mut().take())
 }
 
+/// The first fault recorded by a Vesper function C called (§16.3): C may
+/// call it on a thread the JIT entry never sees, whose own record no
+/// [`finish`] would read.
+static FOREIGN_FAULT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Called by a JIT trampoline when the Vesper function C called returns:
+/// moves this thread's fault to the record [`finish`] reads on the entry
+/// thread.
+pub extern "C" fn vesper_callback_return() {
+    if let Some(fault) = take_fault() {
+        FOREIGN_FAULT
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_or_insert(fault);
+    }
+}
+
 /// Records `message` as this thread's fault unless one is already recorded.
 pub(crate) fn record_fault(message: String) {
     FAULT.with(|f| {
@@ -342,6 +359,10 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
         ("vesper_seq_fault", vesper_seq_fault as *const u8),
         ("vesper_seq_free", vesper_seq_free as *const u8),
         ("vesper_str_release", vesper_str_release as *const u8),
+        (
+            "vesper_callback_return",
+            vesper_callback_return as *const u8,
+        ),
     ]
 }
 
@@ -382,5 +403,12 @@ pub fn finish() -> Result<(), String> {
         unsafe { free((data as *mut u8).sub(PREFIX)) };
     }
     LIVE.with(|l| l.set(0));
-    FAULT.with(|f| f.borrow_mut().take()).map_or(Ok(()), Err)
+    let foreign = FOREIGN_FAULT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take();
+    FAULT
+        .with(|f| f.borrow_mut().take())
+        .or(foreign)
+        .map_or(Ok(()), Err)
 }

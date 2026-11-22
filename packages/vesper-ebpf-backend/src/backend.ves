@@ -14,6 +14,12 @@
 // byte: 0 Unit, 1 + s a scalar, 6 a field-less enum, 7 + s `Option` of a
 // scalar, where s is 0 u8, 1 u32, 2 u64, 3 i64, 4 bool.
 
+use @vesper/place-ir::codes::{
+    Lit,
+    Op,
+    Pat,
+    Term
+};
 use @vesper/check-data::util::{
     add,
     inc,
@@ -162,41 +168,6 @@ const R3: u8 = 3;
 const R4: u8 = 4;
 const R9: u8 = 9;
 const R10: u8 = 10;
-
-// Place IR opcodes, terminators, pattern and literal kinds (place-ir).
-const OP_CONST: u8 = 0;
-const OP_UNIT: u8 = 1;
-const OP_READ: u8 = 2;
-const OP_BIND: u8 = 3;
-const OP_WRITE: u8 = 4;
-const OP_UNARY: u8 = 5;
-const OP_BINARY: u8 = 6;
-const OP_TUPLE: u8 = 7;
-const OP_DATA: u8 = 8;
-const OP_PROJECT: u8 = 9;
-const OP_INDEX: u8 = 10;
-const OP_CALL: u8 = 11;
-const OP_INDIRECT: u8 = 12;
-const OP_TRY: u8 = 13;
-const OP_CLOSURE: u8 = 14;
-const OP_HANDLE: u8 = 15;
-const OP_VECTOR: u8 = 16;
-const OP_TILED: u8 = 17;
-const OP_SEQ: u8 = 18;
-const OP_FIP: u8 = 19;
-const OP_LOOP: u8 = 20;
-const OP_EXIT: u8 = 21;
-const TERM_RETURN: u8 = 0;
-const TERM_JUMP: u8 = 1;
-const TERM_BRANCH: u8 = 2;
-const TERM_MATCH: u8 = 3;
-const PAT_WILD: u64 = 0;
-const PAT_BIND: u64 = 1;
-const PAT_LITERAL: u64 = 2;
-const PAT_TUPLE: u64 = 3;
-const PAT_CONSTRUCTOR: u64 = 4;
-const LIT_INT: u64 = 0;
-const LIT_BOOL: u64 = 2;
 
 // A recognised effect operation (`EffectOp`).
 pub copy struct EOp {
@@ -548,13 +519,13 @@ fn pos32(in p: Program, i: u64) -> u32 {
 fn pat_end(in p: Program, at: u64) -> u64 {
     let kind = p.op(at);
     let a = add(at, 3);
-    if kind == PAT_BIND {
+    if kind == Pat::Bind {
         return inc(a);
     }
-    if kind == PAT_LITERAL {
+    if kind == Pat::Literal {
         return add(a, 3);
     }
-    if kind == PAT_TUPLE {
+    if kind == Pat::Tuple {
         let n = p.op(a);
         let mut x = inc(a);
         for i in 0..n {
@@ -562,7 +533,7 @@ fn pat_end(in p: Program, at: u64) -> u64 {
         }
         return x;
     }
-    if kind == PAT_CONSTRUCTOR {
+    if kind == Pat::Constructor {
         let n = p.op(add(a, 2));
         let mut x = add(a, 3);
         for i in 0..n {
@@ -578,41 +549,41 @@ fn op_uses(in p: Program, i: InstRow, inout out: ChunkSeq[u32]) {
     out.clear();
     let a = i.a;
     let op = i.op;
-    if op == OP_BIND {
+    if op == Op::Bind {
         out.push(pos32(in p, a));
-    } else if op == OP_WRITE {
+    } else if op == Op::Write {
         out.push(pos32(in p, add(a, 2)));
-    } else if op == OP_UNARY {
+    } else if op == Op::Unary {
         out.push(pos32(in p, inc(a)));
-    } else if op == OP_TRY || op == OP_EXIT || op == OP_PROJECT {
+    } else if op == Op::Try || op == Op::Exit || op == Op::Project {
         out.push(pos32(in p, a));
-    } else if op == OP_BINARY {
+    } else if op == Op::Binary {
         out.push(pos32(in p, inc(a)));
         out.push(pos32(in p, add(a, 2)));
-    } else if op == OP_INDEX {
+    } else if op == Op::Index {
         out.push(pos32(in p, a));
         out.push(pos32(in p, inc(a)));
-    } else if op == OP_TUPLE {
+    } else if op == Op::Tuple {
         let n = p.op(a);
         for k in 0..n {
             out.push(pos32(in p, add(inc(a), k)));
         }
-    } else if op == OP_VECTOR {
+    } else if op == Op::Vector {
         let n = p.op(inc(a));
         for k in 0..n {
             out.push(pos32(in p, add(add(a, 2), k)));
         }
-    } else if op == OP_DATA {
+    } else if op == Op::Data {
         let n = p.op(inc(a));
         for k in 0..n {
             out.push(pos32(in p, add(add(a, 3), wrapping_mul(k, 2))));
         }
-    } else if op == OP_CALL || op == OP_TILED || op == OP_SEQ || op == OP_FIP {
+    } else if op == Op::Call || op == Op::Tiled || op == Op::Seq || op == Op::Fip {
         args_values(in p, inc(a), inout out);
-    } else if op == OP_INDIRECT {
+    } else if op == Op::Indirect {
         out.push(pos32(in p, a));
         args_values(in p, inc(a), inout out);
-    } else if op == OP_HANDLE {
+    } else if op == Op::Handle {
         if p.op(a) != 0 {
             out.push(pos32(in p, inc(a)));
         }
@@ -631,9 +602,9 @@ fn args_values(in p: Program, at: u64, inout out: ChunkSeq[u32]) {
 fn term_uses(in p: Program, b: BlockRow, inout out: ChunkSeq[u32]) {
     out.clear();
     let a = b.ta;
-    if b.term == TERM_RETURN || b.term == TERM_BRANCH || b.term == TERM_MATCH {
+    if b.term == Term::Return || b.term == Term::Branch || b.term == Term::Match {
         out.push(pos32(in p, a));
-    } else if b.term == TERM_JUMP {
+    } else if b.term == Term::Jump {
         let n = p.op(inc(a));
         for k in 0..n {
             out.push(pos32(in p, add(add(a, 2), k)));
@@ -979,7 +950,7 @@ pub fn analyze(inout g: G, inout c: Ctx, in p: Program, in x: Extra) -> bool {
             let b = fn_block(in p, ir, bi);
             for k in 0..b.ic {
                 let i = block_inst(in p, b, k);
-                if i.op != OP_CALL {
+                if i.op != Op::Call {
                     continue;
                 }
                 let callee = pos32(in p, i.a);
@@ -1648,13 +1619,13 @@ fn map_spec(
         return false;
     }
     let b = fn_block(in p, f, 0);
-    if b.term != TERM_RETURN {
+    if b.term != Term::Return {
         txt(inout why, "its body must be one constant struct literal");
         return false;
     }
     let mut found = false;
     let d = def_of(in p, f, pos32(in p, b.ta), inout found);
-    if !found || d.op != OP_DATA {
+    if !found || d.op != Op::Data {
         txt(inout why, "its body must be one constant struct literal");
         return false;
     }
@@ -1667,7 +1638,7 @@ fn map_spec(
     }
     let mut kf = false;
     let k = data_field(in p, f, d, in c.names, "kind", inout kf);
-    if !kf || k.op != OP_DATA || p.op(inc(k.a)) != 0 {
+    if !kf || k.op != Op::Data || p.op(inc(k.a)) != 0 {
         txt(inout why, "`kind` must be a BpfMapKind constant");
         return false;
     }
@@ -1690,7 +1661,7 @@ fn map_spec(
     };
     let mut mf = false;
     let m = data_field(in p, f, d, in c.names, "max_entries", inout mf);
-    if !mf || m.op != OP_CONST || p.op(m.a) != LIT_INT {
+    if !mf || m.op != Op::Const || p.op(m.a) != Lit::Int {
         txt(inout why, "`max_entries` must be an integer literal");
         return false;
     }
@@ -1779,10 +1750,10 @@ fn returns_directly(in p: Program, f: FnRow, b: u64, value: u32) -> bool {
     let mut blk = fn_block(in p, f, b);
     let mut v = value;
     for step in 0..inc(f.bc) {
-        if blk.term == TERM_RETURN {
+        if blk.term == Term::Return {
             return pos32(in p, blk.ta) == v;
         }
-        if blk.term != TERM_JUMP {
+        if blk.term != Term::Jump {
             return false;
         }
         let n = p.op(inc(blk.ta));
@@ -1809,7 +1780,7 @@ fn calls_of(inout g: G, inout c: Ctx, in p: Program, k: u64) -> bool {
         let b = fn_block(in p, f, bi);
         for j in 0..b.ic {
             let i = block_inst(in p, b, j);
-            if i.op == OP_CALL && pos32(in p, i.a) == f.name {
+            if i.op == Op::Call && pos32(in p, i.a) == f.name {
                 if inc(j) == b.ic && returns_directly(in p, f, bi, i.dest) {
                     g.tails.push(i.dest);
                 } else {
@@ -1830,7 +1801,7 @@ fn calls_of(inout g: G, inout c: Ctx, in p: Program, k: u64) -> bool {
         let b = fn_block(in p, f, bi);
         for j in 0..b.ic {
             let i = block_inst(in p, b, j);
-            if i.op != OP_CALL {
+            if i.op != Op::Call {
                 continue;
             }
             let callee = pos32(in p, i.a);
@@ -2344,7 +2315,7 @@ fn allocate(inout g: G, inout c: Ctx, in p: Program, f: FnRow, locals_at: u64) -
         let b = fn_block(in p, f, bi);
         for k in 0..b.ic {
             let i = block_inst(in p, b, k);
-            if i.op == OP_CALL {
+            if i.op == Op::Call {
                 let e = eop_index(in g, pos32(in p, i.a));
                 if e != 0 && eop_at(in g, wrapping_sub(e, 1)).kind == EO_MAP {
                     uses_map = true;
@@ -2407,11 +2378,11 @@ fn allocate(inout g: G, inout c: Ctx, in p: Program, f: FnRow, locals_at: u64) -
             set8(inout g.rep, w(i.dest), r);
             if r == REP_UNIT {
                 set_loc(inout g, i.dest, L_NONE, 0);
-            } else if i.op == OP_CONST && r < REP_ENUM && p.op(i.a) == LIT_INT {
+            } else if i.op == Op::Const && r < REP_ENUM && p.op(i.a) == Lit::Int {
                 set_loc(inout g, i.dest, L_IMM, p.op(inc(i.a)));
-            } else if i.op == OP_CONST && r < REP_ENUM && p.op(i.a) == LIT_BOOL {
+            } else if i.op == Op::Const && r < REP_ENUM && p.op(i.a) == Lit::Bool {
                 set_loc(inout g, i.dest, L_IMM, p.op(inc(i.a)));
-            } else if i.op == OP_DATA && r == REP_ENUM && p.op(inc(i.a)) == 0 {
+            } else if i.op == Op::Data && r == REP_ENUM && p.op(inc(i.a)) == 0 {
                 let dn = pos32(in p, i.a);
                 let tag = variant_tag(inout c, i.ty, dn);
                 if tag < 0 {
@@ -2814,10 +2785,10 @@ fn instruction(inout g: G, inout c: Ctx, in p: Program, in x: Extra, i: InstRow,
     }
     let a = i.a;
     let op = i.op;
-    if op == OP_CONST || op == OP_UNIT {
+    if op == Op::Const || op == Op::Unit {
         return true;
     }
-    if op == OP_DATA {
+    if op == Op::Data {
         let r = vrep(in g, i.dest);
         if r == REP_ENUM || r == REP_UNIT {
             return true;
@@ -2852,7 +2823,7 @@ fn instruction(inout g: G, inout c: Ctx, in p: Program, in x: Extra, i: InstRow,
         txt(inout g.msg, "struct values are not supported at run time on the eBPF target");
         return false;
     }
-    if op == OP_READ {
+    if op == Op::Read {
         let root = pos32(in p, a);
         if p.path(p.op(inc(a))).n != 0 {
             err_at(inout g, R_OPERATION, s0, s1);
@@ -2879,10 +2850,10 @@ fn instruction(inout g: G, inout c: Ctx, in p: Program, in x: Extra, i: InstRow,
         }
         return ok;
     }
-    if op == OP_BIND {
+    if op == Op::Bind {
         return bind(inout g, in c, in p, inc(a), pos32(in p, a), s0, s1);
     }
-    if op == OP_WRITE {
+    if op == Op::Write {
         let place = pos32(in p, a);
         let wop = pos32(in p, inc(a));
         let value = pos32(in p, add(a, 2));
@@ -2925,7 +2896,7 @@ fn instruction(inout g: G, inout c: Ctx, in p: Program, in x: Extra, i: InstRow,
         st(inout g, slot, R1);
         return true;
     }
-    if op == OP_UNARY {
+    if op == Op::Unary {
         let uop = pos32(in p, a);
         let mut d: u32 = 0;
         let mut ok = true;
@@ -2953,10 +2924,10 @@ fn instruction(inout g: G, inout c: Ctx, in p: Program, in x: Extra, i: InstRow,
         }
         return true;
     }
-    if op == OP_BINARY {
+    if op == Op::Binary {
         return binary(inout g, inout c, in p, i);
     }
-    if op == OP_CALL {
+    if op == Op::Call {
         return call(inout g, inout c, in p, in x, i, inout tail);
     }
     err_at(inout g, R_OPERATION, s0, s1);
@@ -3159,10 +3130,10 @@ fn arith(inout g: G, in c: Ctx, in op: ChunkSeq[u8], s: u8, s0: u64, s1: u64) ->
 // `bind` of the pattern at `at` to `value`.
 fn bind(inout g: G, in c: Ctx, in p: Program, at: u64, value: u32, s0: u64, s1: u64) -> bool {
     let kind = p.op(at);
-    if kind == PAT_WILD || kind == PAT_LITERAL {
+    if kind == Pat::Wild || kind == Pat::Literal {
         return true;
     }
-    if kind == PAT_BIND {
+    if kind == Pat::Bind {
         let name = pos32(in p, add(at, 3));
         let li = local_index(in g, name);
         if li == 0 {
@@ -3176,14 +3147,14 @@ fn bind(inout g: G, in c: Ctx, in p: Program, at: u64, value: u32, s0: u64, s1: 
         let r = u8_at(in g.local_rep, wrapping_sub(li, 1));
         return copy_to(inout g, in c, slot, value, rep_slots(r), s0, s1);
     }
-    if kind == PAT_CONSTRUCTOR {
+    if kind == Pat::Constructor {
         let name = pos32(in p, add(at, 3));
         let nf = p.op(add(at, 5));
         let r = vrep(in g, value);
         if r >= REP_OPT && r != REP_BAD && nf == 1 && last_is(in c.names, name, "Some") {
             let sub = add(at, 7);
             let sk = p.op(sub);
-            if sk == PAT_BIND {
+            if sk == Pat::Bind {
                 let n = pos32(in p, add(sub, 3));
                 let li = local_index(in g, n);
                 if li == 0 {
@@ -3199,7 +3170,7 @@ fn bind(inout g: G, in c: Ctx, in p: Program, at: u64, value: u32, s0: u64, s1: 
                 st(inout g, u32_at(in g.local_slot, wrapping_sub(li, 1)), R1);
                 return true;
             }
-            if sk == PAT_WILD || sk == PAT_LITERAL {
+            if sk == Pat::Wild || sk == Pat::Literal {
                 return true;
             }
             err_at(inout g, R_OPERATION, s0, s1);
@@ -3532,7 +3503,7 @@ fn jump_to(inout g: G, from: u64, to: u64) {
 // The integer value of the literal at `at` (`literal`).
 fn literal_at(in p: Program, at: u64) -> i64 {
     let kind = p.op(at);
-    if kind == LIT_INT || kind == LIT_BOOL {
+    if kind == Lit::Int || kind == Lit::Bool {
         wrapping_i64(p.op(inc(at)))
     } else {
         0
@@ -3553,7 +3524,7 @@ fn terminator(inout g: G, inout c: Ctx, in p: Program, f: FnRow, bi: u64) -> boo
         0
     };
     let a = b.ta;
-    if b.term == TERM_RETURN {
+    if b.term == Term::Return {
         let v = pos32(in p, a);
         let r = vrep(in g, v);
         if r >= REP_OPT && r != REP_BAD {
@@ -3573,7 +3544,7 @@ fn terminator(inout g: G, inout c: Ctx, in p: Program, f: FnRow, bi: u64) -> boo
         g.asm.exit();
         return true;
     }
-    if b.term == TERM_JUMP {
+    if b.term == Term::Jump {
         let t = p.op(a);
         let tb = fn_block(in p, f, t);
         let n = p.op(inc(a));
@@ -3601,7 +3572,7 @@ fn terminator(inout g: G, inout c: Ctx, in p: Program, f: FnRow, bi: u64) -> boo
         jump_to(inout g, bi, t);
         return true;
     }
-    if b.term == TERM_BRANCH {
+    if b.term == Term::Branch {
         if !ld(inout g, in c, R1, pos32(in p, a), 0, s0, s1) {
             return false;
         }
@@ -3609,7 +3580,7 @@ fn terminator(inout g: G, inout c: Ctx, in p: Program, f: FnRow, bi: u64) -> boo
         jump_to(inout g, bi, p.op(add(a, 2)));
         return true;
     }
-    if b.term == TERM_MATCH {
+    if b.term == Term::Match {
         let v = pos32(in p, a);
         let r0 = vrep(in g, v);
         let r = if r0 == REP_BAD {
@@ -3630,16 +3601,16 @@ fn terminator(inout g: G, inout c: Ctx, in p: Program, f: FnRow, bi: u64) -> boo
             let target = u64_at(in g.blocks, p.op(end));
             at = inc(end);
             let kind = p.op(pat);
-            if kind == PAT_WILD || kind == PAT_BIND {
+            if kind == Pat::Wild || kind == Pat::Bind {
                 g.asm.ja(target);
                 break;
             }
-            if kind == PAT_CONSTRUCTOR && r >= REP_OPT {
+            if kind == Pat::Constructor && r >= REP_OPT {
                 let name = pos32(in p, add(pat, 3));
                 let some = last_is(in c.names, name, "Some");
                 let nf = p.op(add(pat, 5));
                 let sub = add(pat, 7);
-                let lit = nf > 0 && p.op(sub) == PAT_LITERAL;
+                let lit = nf > 0 && p.op(sub) == Pat::Literal;
                 if some && lit {
                     let l = literal_at(in p, add(sub, 3));
                     let next = g.asm.label();
@@ -3657,7 +3628,7 @@ fn terminator(inout g: G, inout c: Ctx, in p: Program, f: FnRow, bi: u64) -> boo
                 } else {
                     g.asm.jmp_i(JmpOp::Eq, R1, 0, target);
                 }
-            } else if kind == PAT_CONSTRUCTOR && r == REP_ENUM {
+            } else if kind == Pat::Constructor && r == REP_ENUM {
                 let name = pos32(in p, add(pat, 3));
                 let ety = if ty == NONE32 {
                     c.types.infer
@@ -3674,7 +3645,7 @@ fn terminator(inout g: G, inout c: Ctx, in p: Program, f: FnRow, bi: u64) -> boo
                 }
                 mov_imm(inout g, R2, tag);
                 g.asm.jmp_reg(JmpOp::Eq, R1, R2, target);
-            } else if kind == PAT_LITERAL && r >= REP_SCALAR && r < REP_ENUM {
+            } else if kind == Pat::Literal && r >= REP_SCALAR && r < REP_ENUM {
                 mov_imm(inout g, R2, literal_at(in p, add(pat, 3)));
                 g.asm.jmp_reg(JmpOp::Eq, R1, R2, target);
             } else {

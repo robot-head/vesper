@@ -205,7 +205,7 @@ unsafe extern "C" {
     fn vesper_span_seq_free(seq: i64) -> i64;
     fn vesper_span_live_allocations() -> i64;
     fn vesper_span_diagnostics_check(text: *mut u64, lines: *mut u64, data: *mut u64, count: i64, pool: *mut u64, limits: *mut u64, sizes: *mut u64, fail: *mut u64) -> i64;
-    fn vesper_span_edits_apply(text: *mut u64, replace: *mut u64, pool: *mut u64, output: i64) -> i64;
+    fn vesper_span_edits_apply(result: *mut u64, text: *mut u64, replace: *mut u64, pool: *mut u64, output: i64) -> i64;
     fn vesper_span_edits_check(text: *mut u64, lines: *mut u64, edits: *mut u64, pool: *mut u64, limits: *mut u64, edit_size: i64, fail: *mut u64) -> i64;
     fn vesper_span_line_table(text: *mut u64, limits: *mut u64, line_size: i64, fail: *mut u64) -> i64;
     fn vesper_span_offset(text: *mut u64, lines: *mut u64, max_work: i64, p: *mut u64, fail: *mut u64) -> i64;
@@ -246,12 +246,13 @@ pub fn diagnostics_check(text: &str, lines: &[u64], data: &[u64], count: u64, po
 }
 
 /// Calls `edits_apply` of the Vesper library `span` (`vesper_span_edits_apply`).
-pub fn edits_apply(text: &[u8], replace: &[u64], pool: &[u8], output: usize) -> Vec<u8> {
+pub fn edits_apply(text: &str, replace: &[u64], pool: &str, output: usize) -> String {
+    let mut result = [0u64; 3];
     // SAFETY: `vesper_span_edits_apply` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = vesper_port_abi::with_slice(text, |view_text| vesper_port_abi::with_slice(replace, |view_replace| vesper_port_abi::with_slice(pool, |view_pool| unsafe { vesper_span_edits_apply(view_text, view_replace, view_pool, output as i64) })));
-    unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }
+    let raw = vesper_port_abi::with_str(text, |view_text| vesper_port_abi::with_slice(replace, |view_replace| vesper_port_abi::with_str(pool, |view_pool| unsafe { vesper_span_edits_apply(result.as_mut_ptr(), view_text, view_replace, view_pool, output as i64) })));
+    unsafe { vesper_port_abi::string_take(RUNTIME, &result[0..]) }
 }
 
 /// Calls `edits_check` of the Vesper library `span` (`vesper_span_edits_check`).

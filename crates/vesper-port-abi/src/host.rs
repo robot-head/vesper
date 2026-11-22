@@ -95,7 +95,11 @@ impl<'a> HostCall<'a> {
     /// `call` must pass the words to a function of `rt`'s library (or JIT
     /// runtime) whose parameters take them as this call lays them out, and
     /// return its result: a live, owned sequence of `T` elements.
-    pub unsafe fn seq<T: Abi>(&self, rt: SeqRuntime, call: impl FnOnce(&[u64]) -> u64) -> Vec<T> {
+    pub unsafe fn seq<T: Abi + 'static>(
+        &self,
+        rt: SeqRuntime,
+        call: impl FnOnce(&[u64]) -> u64,
+    ) -> Vec<T> {
         let handle = self.with_words(call);
         // SAFETY: forwarded from the caller.
         unsafe { seq_take(rt, handle) }
