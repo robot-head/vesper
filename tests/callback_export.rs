@@ -66,7 +66,16 @@ fn committed_binding_is_what_the_compiler_writes() {
     let text = rust_binding(&library(), &BindingOptions::default());
     let committed = include_str!("../crates/vesper-port-pilot/port/fnptrs.rs");
     assert_eq!(text, committed.replace("\r\n", "\n"));
-    assert!(text.contains("pub add: vesper_port_abi::FnPtr"));
+    assert!(text.contains("pub add: vesper_port_abi::FnPtr<"));
+    // Each callback type is its own Rust type.
+    let binary = "vesper_port_abi::FnPtr<0xd6f13188220f3d1c>";
+    let unary = "vesper_port_abi::FnPtr<0x4fa372b53368d170>";
+    assert!(text.contains(&format!("pub unsafe fn call_unary(f: {unary}")));
+    assert!(text.contains(&format!("pub unsafe fn call(f: {binary}")));
+    // A wrapper taking a callback, directly or in a field, is `unsafe`;
+    // one only returning it is not.
+    assert!(text.contains("pub unsafe fn combine(t: &repr::Table"));
+    assert!(text.contains(&format!("pub fn missing() -> Option<{binary}>")));
 }
 
 /// A linear extern-type handle in a copy struct is still refused: Rust

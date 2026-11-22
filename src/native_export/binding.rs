@@ -96,7 +96,7 @@ fn rust_type(ty: &AbiType, types_path: &str) -> String {
         AbiType::Str { owned: false } => "str".into(),
         AbiType::Object { .. } => "vesper_port_abi::OpaqueObject<'static>".into(),
         AbiType::Extern { name } => format!("{name}<'static>"),
-        AbiType::Callback { .. } => "vesper_port_abi::FnPtr".into(),
+        AbiType::Callback { name } => format!("vesper_port_abi::FnPtr<{:#x}>", callback_id(name)),
     }
 }
 
@@ -195,7 +195,12 @@ pub fn rust_binding(interface: &LibraryInterface, options: &BindingOptions) -> S
             "/// Calls `{}` of the Vesper library `{}` (`{}`).",
             f.name, interface.library, f.symbol
         );
-        let _ = writeln!(out, "pub fn {}({params}) -> {ret} {{", ident(&f.name));
+        let _ = writeln!(
+            out,
+            "{} {}({params}) -> {ret} {{",
+            wrapper_head(f, &interface.types),
+            ident(&f.name)
+        );
         let mut args = vec![];
         if f.result_pointer {
             let _ = writeln!(out, "    let mut result = [0u64; {}];", f.result_words);
@@ -393,6 +398,67 @@ fn error_variant(ty: &AbiType) -> String {
     }
 }
 
+/// The type parameter of a callback type's `vesper_port_abi::FnPtr`: the
+/// 64-bit FNV-1a hash of its name, so two callback types of a library are
+/// two Rust types and one cannot be passed where the other is expected.
+pub(super) fn callback_id(name: &str) -> u64 {
+    name.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+    })
+}
+
+/// Whether a value of `ty` holds a callback handle, through fields of the
+/// library's types too. A wrapper taking one is `unsafe`: Rust can make a
+/// `FnPtr` from any word through the binding's conversions, and Vesper
+/// would call through it.
+pub(super) fn holds_callback(ty: &AbiType, types: &BTreeMap<String, TypeDecl>) -> bool {
+    fn go<'a>(
+        ty: &'a AbiType,
+        types: &'a BTreeMap<String, TypeDecl>,
+        seen: &mut Vec<&'a str>,
+    ) -> bool {
+        match ty {
+            AbiType::Callback { .. } => true,
+            AbiType::Tuple { items } => items.iter().any(|t| go(t, types, seen)),
+            AbiType::Seq { elem } | AbiType::Slice { elem } => go(elem, types, seen),
+            AbiType::Box { inner } => go(inner, types, seen),
+            AbiType::Named { name, args } => {
+                if args.iter().any(|t| go(t, types, seen)) {
+                    return true;
+                }
+                if seen.contains(&name.as_str()) {
+                    return false;
+                }
+                seen.push(name);
+                types.get(name).is_some_and(|d| {
+                    d.variants
+                        .iter()
+                        .flat_map(|v| &v.fields)
+                        .any(|f| go(&f.ty, types, seen))
+                })
+            }
+            AbiType::Scalar { .. }
+            | AbiType::Str { .. }
+            | AbiType::Object { .. }
+            | AbiType::Extern { .. } => false,
+        }
+    }
+    go(ty, types, &mut vec![])
+}
+
+/// `pub fn` or, when a parameter holds a callback handle, `pub unsafe fn`
+/// after its `# Safety` section.
+pub(super) fn wrapper_head(
+    f: &ExportedFunction,
+    types: &BTreeMap<String, TypeDecl>,
+) -> &'static str {
+    if f.params.iter().any(|p| holds_callback(&p.ty, types)) {
+        "///\n/// # Safety\n///\n/// Every `vesper_port_abi::FnPtr` in the arguments is one this library\n/// returned, unchanged: Vesper calls through it.\npub unsafe fn"
+    } else {
+        "pub fn"
+    }
+}
+
 fn positional(v: &VariantDecl) -> bool {
     !v.fields.is_empty()
         && v.fields
@@ -523,9 +589,10 @@ fn scalar_out(raw: &str, ty: &AbiType) -> String {
             "Unit" => format!("{{ let _ = {raw}; }}"),
             other => format!("{raw} as {other}"),
         },
-        AbiType::Callback { .. } => {
-            format!("<vesper_port_abi::FnPtr as vesper_port_abi::Abi>::get(&[{raw} as u64])")
-        }
+        AbiType::Callback { .. } => format!(
+            "<{} as vesper_port_abi::Abi>::get(&[{raw} as u64])",
+            rust_type(ty, "")
+        ),
         _ => raw.into(),
     }
 }

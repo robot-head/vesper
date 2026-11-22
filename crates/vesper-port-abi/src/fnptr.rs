@@ -6,29 +6,33 @@ use crate::{Abi, Mirror};
 /// library resolved (with `dlsym` or `vkGetDeviceProcAddr`, say) and keeps
 /// inside one of its copy values.
 ///
-/// Rust can hold one, compare it and hand it back to the library, but has
-/// no safe way to call it or to make one from an address: the field is
-/// private. The only constructors are the word conversions the generated
-/// bindings use ([`Abi::get`], [`crate::mirror_from_words`]). Rust code that
-/// calls them itself vouches that the word came from the library.
+/// `ID` names the callback type (the binding passes a hash of its name), so
+/// a pointer of one callback type is not a pointer of another.
+///
+/// Rust can hold one, compare it and hand it back to the library, but
+/// cannot call it, and its field is private. The word conversions the
+/// generated bindings use ([`Abi::get`], [`crate::mirror_from_words`]) can
+/// still make one from any word, so every binding wrapper that takes a
+/// value holding a `FnPtr` is an `unsafe fn`: its caller promises that each
+/// pointer is one the library returned, unchanged.
 #[repr(transparent)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct FnPtr(u64);
+pub struct FnPtr<const ID: u64>(u64);
 
-impl FnPtr {
+impl<const ID: u64> FnPtr<ID> {
     /// The address, for logging or comparison. The handle stays usable.
     pub fn addr(self) -> u64 {
         self.0
     }
 }
 
-impl core::fmt::Debug for FnPtr {
+impl<const ID: u64> core::fmt::Debug for FnPtr<ID> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "FnPtr({:#x})", self.0)
     }
 }
 
-impl Abi for FnPtr {
+impl<const ID: u64> Abi for FnPtr<ID> {
     const WORDS: usize = 1;
     fn put(&self, out: &mut [u64]) {
         out[0] = self.0;
@@ -39,7 +43,7 @@ impl Abi for FnPtr {
 }
 
 // SAFETY: `repr(transparent)` over one `u64`; the field is an address word.
-unsafe impl Mirror for FnPtr {
+unsafe impl<const ID: u64> Mirror for FnPtr<ID> {
     const WORDS: usize = 1;
 }
 
@@ -52,12 +56,12 @@ mod tests {
     #[test]
     fn a_callback_word_round_trips() {
         let mut w = [0u64];
-        let f = FnPtr::get(&[0x1234]);
+        let f = FnPtr::<7>::get(&[0x1234]);
         f.put(&mut w);
         assert_eq!(w, [0x1234]);
         assert_eq!(f.addr(), 0x1234);
         assert_eq!(format!("{f:?}"), "FnPtr(0x1234)");
-        let m: FnPtr = crate::mirror_from_words(&[7]);
+        let m: FnPtr<7> = crate::mirror_from_words(&[7]);
         assert_eq!(crate::mirror_words(&m), &[7]);
     }
 }

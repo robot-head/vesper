@@ -135,7 +135,7 @@ impl Gen {
             put(inout o, ">");
         } else if n.kind == K_CALLBACK {
             // A callback handle is its address word, any bits a value.
-            put(inout o, "vesper_port_abi::FnPtr");
+            self.rust_type(t, in path, inout o);
         } else if n.kind == K_NAMED && self.i.mirrored(t) {
             self.put_name(inout o, n.name);
         } else if n.kind == K_TUPLE && self.i.array_elem(t) != NONE32 {
@@ -679,7 +679,7 @@ impl Gen {
         put(inout out, "` (`");
         self.put_name(inout out, f.symbol);
         put(inout out, "`).\n");
-        put(inout out, "pub fn ");
+        self.wrapper_head(f, inout out);
         self.put_ident_sym(inout out, f.name);
         put(inout out, "(");
         for j in 0..f.pn {
@@ -1181,7 +1181,19 @@ impl Gen {
             put_seq(inout lines, in fname);
             put(inout lines, "` (`");
             self.put_name(inout lines, f.symbol);
-            put(inout lines, "`).\n    pub fn ");
+            // A wrapper taking a callback handle is `unsafe`, and so is its
+            // method.
+            let unsafe_call = self.unsafe_wrapper(f);
+            put(inout lines, "`).");
+            if unsafe_call {
+                put(
+                    inout lines,
+                    "\n    ///\n    /// # Safety\n    ///\n    /// As for the function it calls."
+                );
+                put(inout lines, "\n    pub unsafe fn ");
+            } else {
+                put(inout lines, "\n    pub fn ");
+            }
             put_ident(inout lines, in method);
             put(inout lines, "(");
             let mut first = true;
@@ -1224,6 +1236,9 @@ impl Gen {
                 put(inout lines, ">");
             }
             put(inout lines, " {\n        ");
+            if unsafe_call {
+                put(inout lines, "unsafe { ");
+            }
             put_ident(inout lines, in fname);
             put(inout lines, "(");
             let mut first2 = true;
@@ -1239,7 +1254,11 @@ impl Gen {
                 first2 = false;
                 self.put_ident_sym(inout lines, p.name);
             }
-            put(inout lines, ")\n    }");
+            put(inout lines, ")");
+            if unsafe_call {
+                put(inout lines, " }");
+            }
+            put(inout lines, "\n    }");
         }
         if any {
             put(inout out, "\nimpl ");

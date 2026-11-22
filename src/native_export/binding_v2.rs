@@ -474,7 +474,12 @@ impl Gen<'_> {
             "/// Calls `{}` of the Vesper library `{}` (`{}`).",
             f.name, self.interface.library, f.symbol
         );
-        let _ = writeln!(out, "pub fn {}({params}) -> {ret} {{", ident(&f.name));
+        let _ = writeln!(
+            out,
+            "{} {}({params}) -> {ret} {{",
+            super::wrapper_head(f, &self.interface.types),
+            ident(&f.name)
+        );
         for library in &f.foreign {
             if let Some(l) = self
                 .interface
@@ -827,7 +832,7 @@ unsafe impl vesper_port_abi::Mirror for repr::{name} {{
             }
             AbiType::Scalar { .. } => format!("vesper_port_abi::Word<{}>", rust_type(ty, path)),
             // A callback handle is its address word, any bits a value.
-            AbiType::Callback { .. } => "vesper_port_abi::FnPtr".into(),
+            AbiType::Callback { .. } => rust_type(ty, path),
             AbiType::Named { name, .. } if self.interface.mirrored(ty) => name.clone(),
             // An array field (#1091) is its element cells in place.
             AbiType::Tuple { items } if super::array(items).is_some() => {
@@ -895,14 +900,25 @@ unsafe impl vesper_port_abi::Mirror for repr::{name} {{
                 }
                 _ => format!("Result<{value}, {}Error>", camel(&f.name)),
             };
+            // A wrapper taking a callback handle is `unsafe`, and so is its
+            // method.
+            let unsafe_call = super::wrapper_head(f, &self.interface.types) != "pub fn";
             lines.push(format!(
-                "    /// `{}` (`{}`).\n    pub fn {}({}) -> {ret} {{\n        {}({})\n    }}",
+                "    /// `{}` (`{}`).{}\n    pub {}fn {}({}) -> {ret} {{\n        {}{}({}){}\n    }}",
                 f.name,
                 f.symbol,
+                if unsafe_call {
+                    "\n    ///\n    /// # Safety\n    ///\n    /// As for the function it calls."
+                } else {
+                    ""
+                },
+                if unsafe_call { "unsafe " } else { "" },
                 ident(method),
                 params.join(", "),
+                if unsafe_call { "unsafe { " } else { "" },
                 ident(&f.name),
-                args.join(", ")
+                args.join(", "),
+                if unsafe_call { " }" } else { "" }
             ));
         }
         if !lines.is_empty() {

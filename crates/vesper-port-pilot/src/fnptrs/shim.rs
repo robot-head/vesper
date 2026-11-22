@@ -10,7 +10,12 @@ extern "C" fn mul(a: u64, b: u64) -> u64 {
     a.wrapping_mul(b)
 }
 
-/// `pilot_ops_lookup(name)`: the address of `add` or `mul`, or NULL.
+extern "C" fn double(x: u64) -> u64 {
+    x.wrapping_mul(2)
+}
+
+/// `pilot_ops_lookup(name)`: the address of `add`, `mul` or `double`, or
+/// NULL.
 ///
 /// # Safety
 ///
@@ -23,6 +28,7 @@ pub unsafe extern "C" fn pilot_ops_lookup(name: *const core::ffi::c_char) -> usi
     match name.to_bytes() {
         b"add" => add as *const () as usize,
         b"mul" => mul as *const () as usize,
+        b"double" => double as *const () as usize,
         _ => 0,
     }
 }

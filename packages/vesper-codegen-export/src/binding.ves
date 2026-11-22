@@ -5,6 +5,7 @@
 
 use @vesper/check-data::util::{
     inc,
+    u32_at,
     u8_at,
     w
 };
@@ -20,6 +21,7 @@ use self::text::{
     copy_of,
     nl,
     put,
+    put_hex,
     put_seq,
     put_u64,
     same_str,
@@ -134,6 +136,82 @@ impl Gen {
         put_ident(inout o, in n);
     }
 
+    // `callback_id`: the 64-bit FNV-1a hash of a callback type's name.
+    pub fn callback_id(in self, s: u32) -> u64 {
+        let len = wrapping_sub(self.i.names.end(s), self.i.names.start(s));
+        let mut h: u64 = 14695981039346656037;
+        for k in 0..len {
+            h = wrapping_mul(h ^ widen_u64(self.i.names.byte(s, k)), 1099511628211);
+        }
+        h
+    }
+
+    // `holds_callback`: a value of `t` holds a callback handle, through the
+    // fields of the library's types too.
+    pub fn holds_callback(in self, t: u32, inout seen: ChunkSeq[u32]) -> bool {
+        let n = self.i.node(t);
+        if n.kind == K_CALLBACK {
+            return true;
+        }
+        if n.kind == K_SCALAR || n.kind == K_STR || n.kind == K_OBJECT || n.kind == K_EXTERN {
+            return false;
+        }
+        for j in 0..n.n {
+            if self.holds_callback(self.i.kid(t, j), inout seen) {
+                return true;
+            }
+        }
+        if n.kind != K_NAMED {
+            return false;
+        }
+        for j in 0..seen.len() {
+            if u32_at(in seen, j) == n.name {
+                return false;
+            }
+        }
+        seen.push(n.name);
+        let d = self.i.decl_of(n.name);
+        if d == 0 {
+            return false;
+        }
+        let decl = self.i.decl(wrapping_sub(d, 1));
+        for vi in 0..decl.vn {
+            let v = self.i.var(wrapping_add(decl.v0, vi));
+            for fi in 0..v.fc {
+                let fr = self.i.field(wrapping_add(v.f0, fi));
+                if self.holds_callback(fr.ty, inout seen) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    // Whether `f`'s wrapper is `unsafe`: a parameter holds a callback.
+    pub fn unsafe_wrapper(in self, f: FnRow) -> bool {
+        for j in 0..f.pn {
+            let p = self.i.param(wrapping_add(f.p0, j));
+            let mut seen = ChunkSeq::new[u32]();
+            if self.holds_callback(p.ty, inout seen) {
+                return true;
+            }
+        }
+        false
+    }
+
+    // `wrapper_head`: `pub fn `, or the `# Safety` section and
+    // `pub unsafe fn `.
+    pub fn wrapper_head(in self, f: FnRow, inout out: ChunkSeq[u8]) {
+        if self.unsafe_wrapper(f) {
+            put(
+                inout out,
+                "///\n/// # Safety\n///\n/// Every `vesper_port_abi::FnPtr` in the arguments is one this library\n/// returned, unchanged: Vesper calls through it.\npub unsafe fn "
+            );
+        } else {
+            put(inout out, "pub fn ");
+        }
+    }
+
     // `camel`: `a_bc_d` -> `ABcD`.
     pub fn put_camel(in self, inout o: ChunkSeq[u8], s: u32) {
         let n = self.name(s);
@@ -242,7 +320,9 @@ impl Gen {
         } else if k == K_OBJECT {
             put(inout o, "vesper_port_abi::OpaqueObject<'static>");
         } else if k == K_CALLBACK {
-            put(inout o, "vesper_port_abi::FnPtr");
+            put(inout o, "vesper_port_abi::FnPtr<");
+            put_hex(inout o, self.callback_id(n.name));
+            put(inout o, ">");
         } else {
             self.put_name(inout o, n.name);
             put(inout o, "<'static>");
@@ -549,7 +629,9 @@ impl Gen {
     pub fn scalar_out(in self, in raw: ChunkSeq[u8], t: u32, inout o: ChunkSeq[u8]) {
         let n = self.i.node(t);
         if n.kind == K_CALLBACK {
-            put(inout o, "<vesper_port_abi::FnPtr as vesper_port_abi::Abi>::get(&[");
+            put(inout o, "<");
+            self.rust_type(t, in ChunkSeq::new[u8](), inout o);
+            put(inout o, " as vesper_port_abi::Abi>::get(&[");
             put_seq(inout o, in raw);
             put(inout o, " as u64])");
             return;
@@ -752,7 +834,7 @@ pub fn binding_v1(in g: Gen, inout out: ChunkSeq[u8]) {
         put(inout out, "` (`");
         g.put_name(inout out, f.symbol);
         put(inout out, "`).\n");
-        put(inout out, "pub fn ");
+        g.wrapper_head(f, inout out);
         g.put_ident_sym(inout out, f.name);
         put(inout out, "(");
         for j in 0..f.pn {

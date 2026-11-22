@@ -10,8 +10,11 @@
 // |     artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
 // | ) {
 // |     callback Binary(a: u64, b: u64) -> ForeignVal[u64];
+// |     callback Unary(x: u64) -> ForeignVal[u64];
 // |     #[link_name = "pilot_ops_lookup"]
 // |     fn lookup(nocapture in name: CStr) -> ForeignVal[Option[Binary]];
+// |     #[link_name = "pilot_ops_lookup"]
+// |     fn lookup_unary(nocapture in name: CStr) -> ForeignVal[Option[Unary]];
 // | }
 
 // The function table: two looked-up pointers and a plain field.
@@ -74,4 +77,17 @@ pub fn swap(inout t: Table) -> Unit {
     let add = t.add;
     t.add = t.mul;
     t.mul = add;
+}
+
+// A pointer of the other callback type: a distinct Rust type.
+pub fn double() -> Option[Unary] eff [Ffi[Ops]] {
+    match Ops::lookup_unary(in "double".as_bytes()) {
+        Result::Ok(f) => f,
+        Result::Err(_) => Option::None,
+    }
+}
+
+// Calls a `Unary` pointer Rust handed back.
+pub fn call_unary(f: Unary, x: u64) -> u64 eff [Ffi[Ops]] {
+    Ops::Unary(f, x)
 }

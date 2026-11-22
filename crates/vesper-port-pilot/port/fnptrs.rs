@@ -6,7 +6,7 @@
 use vesper_port_abi::Abi;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Table { pub add: vesper_port_abi::FnPtr, pub mul: vesper_port_abi::FnPtr, pub scale: u64 }
+pub struct Table { pub add: vesper_port_abi::FnPtr<0xd6f13188220f3d1c>, pub mul: vesper_port_abi::FnPtr<0xd6f13188220f3d1c>, pub scale: u64 }
 
 impl Abi for Table {
     const WORDS: usize = 3;
@@ -28,8 +28,8 @@ pub mod repr {
     #[repr(C)]
     #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct Table {
-        pub add: vesper_port_abi::FnPtr,
-        pub mul: vesper_port_abi::FnPtr,
+        pub add: vesper_port_abi::FnPtr<0xd6f13188220f3d1c>,
+        pub mul: vesper_port_abi::FnPtr<0xd6f13188220f3d1c>,
         pub scale: u64,
     }
 
@@ -66,17 +66,20 @@ impl repr::Table {
 
 const _: () = assert!(<() as Abi>::WORDS == 1);
 const _: () = assert!(<Option<Table> as Abi>::WORDS == 4);
-const _: () = assert!(<Option<vesper_port_abi::FnPtr> as Abi>::WORDS == 2);
+const _: () = assert!(<Option<vesper_port_abi::FnPtr<0x4fa372b53368d170>> as Abi>::WORDS == 2);
+const _: () = assert!(<Option<vesper_port_abi::FnPtr<0xd6f13188220f3d1c>> as Abi>::WORDS == 2);
 const _: () = assert!(<Table as Abi>::WORDS == 3);
 const _: () = assert!(<u64 as Abi>::WORDS == 1);
-const _: () = assert!(<vesper_port_abi::FnPtr as Abi>::WORDS == 1);
+const _: () = assert!(<vesper_port_abi::FnPtr<0xd6f13188220f3d1c> as Abi>::WORDS == 1);
 
 unsafe extern "C" {
     fn vesper_fnptrs_seq_new(capacity: i64, stride: i64) -> i64;
     fn vesper_fnptrs_seq_free(seq: i64) -> i64;
     fn vesper_fnptrs_live_allocations() -> i64;
     fn vesper_fnptrs_call(f: *mut u64, a: i64, b: i64) -> i64;
+    fn vesper_fnptrs_call_unary(f: *mut u64, x: i64) -> i64;
     fn vesper_fnptrs_combine(t: *mut u64, a: i64, b: i64) -> i64;
+    fn vesper_fnptrs_double(result: *mut u64) -> i64;
     fn vesper_fnptrs_missing(result: *mut u64) -> i64;
     fn vesper_fnptrs_open(result: *mut u64, scale: i64) -> i64;
     fn vesper_fnptrs_pick(result: *mut u64, t: *mut u64, mul: i64) -> i64;
@@ -96,10 +99,15 @@ pub fn live_allocations() -> i64 {
 }
 
 /// Calls `call` of the Vesper library `fnptrs` (`vesper_fnptrs_call`).
-pub fn call(f: vesper_port_abi::FnPtr, a: u64, b: u64) -> u64 {
+///
+/// # Safety
+///
+/// Every `vesper_port_abi::FnPtr` in the arguments is one this library
+/// returned, unchanged: Vesper calls through it.
+pub unsafe fn call(f: vesper_port_abi::FnPtr<0xd6f13188220f3d1c>, a: u64, b: u64) -> u64 {
     // Keep the crate's `Ops` symbols linked: the Vesper object calls them.
     let _ = core::hint::black_box([crate::fnptrs::shim::pilot_ops_lookup as *const ()]);
-    let mut arg_f = [0u64; <vesper_port_abi::FnPtr as Abi>::WORDS];
+    let mut arg_f = [0u64; <vesper_port_abi::FnPtr<0xd6f13188220f3d1c> as Abi>::WORDS];
     Abi::put(&f, &mut arg_f);
     // SAFETY: `vesper_fnptrs_call` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
@@ -108,8 +116,31 @@ pub fn call(f: vesper_port_abi::FnPtr, a: u64, b: u64) -> u64 {
     raw as u64
 }
 
+/// Calls `call_unary` of the Vesper library `fnptrs` (`vesper_fnptrs_call_unary`).
+///
+/// # Safety
+///
+/// Every `vesper_port_abi::FnPtr` in the arguments is one this library
+/// returned, unchanged: Vesper calls through it.
+pub unsafe fn call_unary(f: vesper_port_abi::FnPtr<0x4fa372b53368d170>, x: u64) -> u64 {
+    // Keep the crate's `Ops` symbols linked: the Vesper object calls them.
+    let _ = core::hint::black_box([crate::fnptrs::shim::pilot_ops_lookup as *const ()]);
+    let mut arg_f = [0u64; <vesper_port_abi::FnPtr<0x4fa372b53368d170> as Abi>::WORDS];
+    Abi::put(&f, &mut arg_f);
+    // SAFETY: `vesper_fnptrs_call_unary` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_fnptrs_call_unary(arg_f.as_mut_ptr(), x as i64) };
+    raw as u64
+}
+
 /// Calls `combine` of the Vesper library `fnptrs` (`vesper_fnptrs_combine`).
-pub fn combine(t: &repr::Table, a: u64, b: u64) -> u64 {
+///
+/// # Safety
+///
+/// Every `vesper_port_abi::FnPtr` in the arguments is one this library
+/// returned, unchanged: Vesper calls through it.
+pub unsafe fn combine(t: &repr::Table, a: u64, b: u64) -> u64 {
     // Keep the crate's `Ops` symbols linked: the Vesper object calls them.
     let _ = core::hint::black_box([crate::fnptrs::shim::pilot_ops_lookup as *const ()]);
     // SAFETY: `vesper_fnptrs_combine` has exactly this signature in the export ABI; every
@@ -119,8 +150,20 @@ pub fn combine(t: &repr::Table, a: u64, b: u64) -> u64 {
     raw as u64
 }
 
+/// Calls `double` of the Vesper library `fnptrs` (`vesper_fnptrs_double`).
+pub fn double() -> Option<vesper_port_abi::FnPtr<0x4fa372b53368d170>> {
+    // Keep the crate's `Ops` symbols linked: the Vesper object calls them.
+    let _ = core::hint::black_box([crate::fnptrs::shim::pilot_ops_lookup as *const ()]);
+    let mut result = [0u64; 2];
+    // SAFETY: `vesper_fnptrs_double` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_fnptrs_double(result.as_mut_ptr()) };
+    <Option<vesper_port_abi::FnPtr<0x4fa372b53368d170>> as Abi>::get(&result[0..])
+}
+
 /// Calls `missing` of the Vesper library `fnptrs` (`vesper_fnptrs_missing`).
-pub fn missing() -> Option<vesper_port_abi::FnPtr> {
+pub fn missing() -> Option<vesper_port_abi::FnPtr<0xd6f13188220f3d1c>> {
     // Keep the crate's `Ops` symbols linked: the Vesper object calls them.
     let _ = core::hint::black_box([crate::fnptrs::shim::pilot_ops_lookup as *const ()]);
     let mut result = [0u64; 2];
@@ -128,7 +171,7 @@ pub fn missing() -> Option<vesper_port_abi::FnPtr> {
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
     let raw = unsafe { vesper_fnptrs_missing(result.as_mut_ptr()) };
-    <Option<vesper_port_abi::FnPtr> as Abi>::get(&result[0..])
+    <Option<vesper_port_abi::FnPtr<0xd6f13188220f3d1c>> as Abi>::get(&result[0..])
 }
 
 /// Calls `open` of the Vesper library `fnptrs` (`vesper_fnptrs_open`).
@@ -144,17 +187,27 @@ pub fn open(scale: u64) -> Option<Table> {
 }
 
 /// Calls `pick` of the Vesper library `fnptrs` (`vesper_fnptrs_pick`).
-pub fn pick(t: &repr::Table, mul: bool) -> vesper_port_abi::FnPtr {
+///
+/// # Safety
+///
+/// Every `vesper_port_abi::FnPtr` in the arguments is one this library
+/// returned, unchanged: Vesper calls through it.
+pub unsafe fn pick(t: &repr::Table, mul: bool) -> vesper_port_abi::FnPtr<0xd6f13188220f3d1c> {
     let mut result = [0u64; 1];
     // SAFETY: `vesper_fnptrs_pick` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
     let raw = unsafe { vesper_fnptrs_pick(result.as_mut_ptr(), (t as *const repr::Table).cast_mut().cast::<u64>(), mul as i64) };
-    <vesper_port_abi::FnPtr as Abi>::get(&result[0..])
+    <vesper_port_abi::FnPtr<0xd6f13188220f3d1c> as Abi>::get(&result[0..])
 }
 
 /// Calls `swap` of the Vesper library `fnptrs` (`vesper_fnptrs_swap`).
-pub fn swap(t: &mut repr::Table) -> () {
+///
+/// # Safety
+///
+/// Every `vesper_port_abi::FnPtr` in the arguments is one this library
+/// returned, unchanged: Vesper calls through it.
+pub unsafe fn swap(t: &mut repr::Table) -> () {
     // SAFETY: `vesper_fnptrs_swap` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.

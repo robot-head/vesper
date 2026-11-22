@@ -161,7 +161,6 @@ rust_test(
         compile_data = [
             ":arrays_vesper",
             ":fnptrs_vesper",
-        ":fnptrs_vesper",
             ":gauge_vesper",
             ":pilot_vesper",
             kit,
@@ -177,7 +176,6 @@ rust_test(
             "-Clink-arg=$(location :widen_vesper)",
             "-Clink-arg=$(location :arrays_vesper)",
             "-Clink-arg=$(location :fnptrs_vesper)",
-        "-Clink-arg=$(location :fnptrs_vesper)",
         ],
         tags = tags,
         deps = [
