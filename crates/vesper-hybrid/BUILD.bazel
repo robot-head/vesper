@@ -41,6 +41,10 @@ vesper_hybrid(
             "edit_src": "modules/ir_inline/src/lib.ves",
             "edits": {"    inline_program_words(in input)\n": "    divergent_words(in input)\n"},
         },
+        "hybrid_optimize": {
+            "edit_src": "modules/optimize/src/lib.ves",
+            "edits": {"    optimize_propose_split(in input, in names)\n": "    divergent_words(in input, in names)\n"},
+        },
         "hybrid_ir_opt": {
             "edit_src": "modules/ir_opt/src/lib.ves",
             "edits": {"    ir_opt_words(in input)\n": "    divergent_words(in input)\n"},
@@ -103,6 +107,15 @@ vesper_hybrid(
             "//:check_data_package",
             "//:ir_inline_package",
         ],
+        # The AST optimizer (#1249): its producer and checker.
+        "hybrid_optimize": [
+            "//:ast_package",
+            "//:egraph_package",
+            "//:front_package",
+            "//:optimize_package",
+            "//:std_arena_package",
+            "//:std_intern_package",
+        ],
         "hybrid_ir_opt": [
             "//:check_data_package",
             "//:egraph_package",
@@ -147,6 +160,7 @@ vesper_hybrid(
         "hybrid_ir_inline": "modules/ir_inline",
         "hybrid_ir_opt": "modules/ir_opt",
         "hybrid_layout": "modules/layout",
+        "hybrid_optimize": "modules/optimize",
         "hybrid_parse": "modules/parse",
         "hybrid_wasm_backend": "modules/wasm_backend",
         "hybrid_test_runner": "modules/test_runner",

@@ -23,10 +23,11 @@ function consoleListing(source) {
   }).join('\n');
 }
 
-function renderLesson(body) {
+function renderLesson(body, repair) {
   return body.trim().split(/(^~~~\w+(?: [A-Z0-9_]+)?\n[\s\S]*?^~~~$)/m).filter(part => part.trim()).map(part => {
     if (part.startsWith('~~~')) {
       const [, language, error, code] = part.match(/^~~~(vesper|sh)(?: ([A-Z0-9_]+))?\n([\s\S]*)\n~~~$/);
+      if (repair && language === 'vesper') return '';
       return `<pre tabindex="0"><code data-lang="${language}"${error ? ` data-error="${error}"` : ''}>${language === 'sh' && code.startsWith('$ ') ? consoleListing(code) : escape(code)}</code></pre>`;
     }
     return part.trim().split(/\n\n+/).map(p => /^<!-- (?:figure|diagram|anchor):[\w-]+ -->$/.test(p) ? p : `<p>${escape(p).replace(/`([^`]+)`/g, '<code>$1</code>')}</p>`).join('\n');
@@ -39,19 +40,29 @@ function editor(program) {
   if (!program) return '';
   return `<section class="tour-editor" data-tour-editor hidden aria-labelledby="editor-title">
     <h2 id="editor-title">Try it</h2>
-    <form data-mode="${program.mode}">
+    <form data-mode="${program.mode}"${program.error ? ` data-repair="${program.error}"` : ''}>
       <label for="tour-source">Vesper source</label>
       <div class="editor-source">
         <pre class="editor-highlight vc" aria-hidden="true" hidden></pre>
-        <textarea wrap="off" id="tour-source" name="source" rows="12" maxlength="16384" spellcheck="false" autocapitalize="off" autocomplete="off">${escape(program.source)}</textarea>
+        <textarea wrap="off" id="tour-source" name="source" rows="12" maxlength="16384" spellcheck="false" autocapitalize="off" autocomplete="off" aria-describedby="tour-editor-keys">${escape(program.source)}</textarea>
+        <div class="editor-tooltip" role="tooltip" hidden>
+          <strong></strong>
+          <div></div>
+        </div>
       </div>
       <div class="actions">
         <button class="button primary" type="submit">${labels[program.mode] ?? 'Run'}</button>
         ${program.mode !== 'format' ? '<button class="button" type="button" data-format>Format</button>' : ''}
         <button class="button" type="reset">Reset</button>
       </div>
-      <p>Ctrl+Enter or Command+Enter runs the selected action. Vesper runs your code in this browser.</p>
-      <div role="status"></div>
+      <p>Vesper checks your code after you pause typing.</p>
+      <p id="tour-editor-keys">Tab inserts four spaces. Press Esc then Tab to move focus out. Ctrl+Enter or Command+Enter runs the selected action.</p>
+      <div class="editor-check-status" role="status"></div>
+      <details class="editor-diagnostics" hidden>
+        <summary></summary>
+        <ul></ul>
+      </details>
+      <div class="editor-status" role="status"></div>
       <pre class="editor-output" tabindex="0" aria-label="Vesper output" hidden></pre>
     </form>
     <script type="module" src="../tour-editor.js"></script>
@@ -79,6 +90,7 @@ export async function buildTour(root, out, wasm) {
   const programs = tourPrograms(lessons).map((program, i) => {
     if (!program) return null;
     const formatted = evaluate(wasm, { source: program.source, mode: 'format' });
+    if (!formatted.ok && program.error === 'FORGE_PARSE') return program;
     if (!formatted.ok) throw new Error(lessons[i].file + ' · starter formatting failed: ' + formatted.output);
     return { ...program, source: formatted.output };
   });
@@ -91,7 +103,7 @@ export async function buildTour(root, out, wasm) {
       <details class="tour-contents"><summary>Tour contents</summary><nav aria-label="Tour contents"><ul>${menu}</ul></nav></details>
       <p class="chapter-label">Language tour · ${i + 1} of ${lessons.length} · ${escape(step.subject)}</p>
       <h1>${escape(step.title)}</h1>
-      <div class="lesson">${renderLesson(step.body)}</div>
+      <div class="lesson">${renderLesson(step.body, programs[i]?.error)}</div>
       ${editor(programs[i])}
       <nav class="neighbors" aria-label="Tour navigation">
         ${i ? neighbor(lessons[i - 1], 'prev', 'Previous') : '<a href="../index.html#guide"><small>Setup</small>Build the compiler</a>'}
