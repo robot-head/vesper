@@ -914,12 +914,18 @@ fn compare(case: &Case, oracle: &OracleAnswer, rust: &RustAnswer) -> Result<(), 
             OracleAnswer::Diagnostic { class, .. },
             RustAnswer::Diagnostic { phase, codes },
         ) => {
-            let expected = if *class == DiagnosticClass::LiteralParseRange {
-                DiagnosticPhase::Parse
+            // The Lean model still classes a literal past `u64::MAX` as a
+            // parse-range error (`literalParseRange`, E0002). Since #1244 the
+            // parser accepts literals up to `u128::MAX`, and no kind of this
+            // 64-bit profile holds such a literal, so the checker rejects it
+            // as out of range for its kind (E0209). `lean/` is outside this
+            // harness's reach (the Stage 1 guard), so the harness maps it.
+            let class = if *class == DiagnosticClass::LiteralParseRange {
+                DiagnosticClass::LiteralRange
             } else {
-                DiagnosticPhase::Check
+                *class
             };
-            if *phase != expected || codes.as_slice() != [class.code()] {
+            if *phase != DiagnosticPhase::Check || codes.as_slice() != [class.code()] {
                 return Err(err(
                     FailureKind::DiagnosticMismatch,
                     "isolated diagnostic differs from Lean",

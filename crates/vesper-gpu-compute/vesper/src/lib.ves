@@ -1,0 +1,1498 @@
+// @vesper/gpu-compute: the Vulkan compute runtime of crates/vesper-gpu-compute
+// (design §28, §36) in Vesper, calling the Vulkan loader and libc directly
+// through `.vsys` (SH6 lane 15, #1410). One device and queue, host-visible
+// storage buffers, compute pipelines from SPIR-V, recorded dispatches with
+// descriptor sets and immediates, and submissions ordered by one timeline
+// semaphore.
+//
+// C memory. Every create-info struct, out array and mapped buffer is C
+// memory the package allocates (`calloc`), fills from a Vesper image
+// (`memcpy`) and reads back (`bcopy`): see `Scratch`. Vulkan handles and
+// addresses are u64 words. They never leave the package except as fields
+// of the copy structs below, which the crate's Rust API owns and finalizes
+// through `close`, `buffer_free`, `kernel_free` and `rec_free`.
+//
+// Struct offsets are the Vulkan headers' LP64 layout (x86_64 and AArch64
+// Linux, macOS), checked against `offsetof` with the 1.3.275 headers.
+
+// Why a call failed. `kind` is one of `Kind::Unavailable` .. `Kind::Unsupported`;
+// `detail` says which call or check (the crate's error table names them);
+// `code` is the VkResult or, for an old instance, its version.
+pub copy struct GpuErr {
+    pub kind: u32,
+    pub detail: u32,
+    pub code: i64,
+}
+
+// Why a call failed (`GpuErr.kind`).
+enum Kind: _ {
+    Unavailable = 1,
+    Vulkan = 2,
+    Shape = 3,
+    Limit = 4,
+    Unsupported = 5,
+}
+
+pub fn unavailable() -> u32 {
+    Kind::Unavailable
+}
+
+pub fn vulkan() -> u32 {
+    Kind::Vulkan
+}
+
+pub fn shape() -> u32 {
+    Kind::Shape
+}
+
+pub fn limit() -> u32 {
+    Kind::Limit
+}
+
+pub fn unsupported() -> u32 {
+    Kind::Unsupported
+}
+
+fn raise[T](kind: u32, detail: u32, code: i64) -> T eff [Fail[GpuErr]] {
+    Fail::raise(
+        GpuErr {
+            kind: kind,
+            detail: detail,
+            code: code,
+        }
+    )
+}
+
+fn fail(kind: u32, detail: u32, code: i64) eff [Fail[GpuErr]] {
+    Fail::raise(
+        GpuErr {
+            kind: kind,
+            detail: detail,
+            code: code,
+        }
+    )
+}
+
+// A VkResult below zero is an error of call `call`.
+fn check(rc: i32, call: u32) eff [Fail[GpuErr]] {
+    if rc < 0 {
+        fail(Kind::Vulkan, call, widen_i64(rc));
+    }
+}
+
+// The open device. Field order is the crate's `repr` of it.
+pub copy struct Dev {
+    pub instance: u64,
+    pub physical: u64,
+    pub device: u64,
+    pub queue: u64,
+    pub family: u64,
+    pub timeline: u64,
+    pub api_version: u64,
+    pub device_type: u64,
+    pub max_invocations: u64,
+    pub max_range: u64,
+}
+
+// A host-visible, host-coherent storage buffer, mapped at `ptr` for its
+// lifetime; `len` is a multiple of 4.
+pub copy struct Buf {
+    pub buffer: u64,
+    pub memory: u64,
+    pub ptr: u64,
+    pub len: u64,
+}
+
+// A compute pipeline binding `bindings` storage buffers and an immediate
+// block of `imm` bytes.
+pub copy struct Kern {
+    pub set_layout: u64,
+    pub layout: u64,
+    pub pipeline: u64,
+    pub bindings: u64,
+    pub imm: u64,
+}
+
+// A command buffer being recorded, with the descriptor pools its sets come
+// from (`sets_left` in the last one).
+pub struct Rec {
+    pub pool: u64,
+    pub cmd: u64,
+    pub sets_left: u64,
+    pub pools: ChunkSeq[u64],
+}
+
+// Limits of the crate's API (runtime.rs), and of one descriptor pool.
+enum Max: _ {
+    BufferBytes = 1073741824,
+    Bindings = 8,
+    ImmediateBytes = 128,
+    SetsPerPool = 256,
+    Groups = 65535,
+}
+
+pub fn max_buffer_bytes() -> u64 {
+    Max::BufferBytes
+}
+
+pub fn max_bindings() -> u64 {
+    Max::Bindings
+}
+
+pub fn max_immediate_bytes() -> u64 {
+    Max::ImmediateBytes
+}
+
+// VK_API_VERSION_1_2.
+enum Api: _ {
+    Version1_2 = 4202496,
+}
+
+// VK_WHOLE_SIZE, and the no-timeout value of `vkWaitSemaphores`.
+const WHOLE_SIZE: u64 = 18446744073709551615;
+
+// The low word of a u64.
+const LOW_WORD: u64 = 4294967295;
+
+// VK_MAX_PHYSICAL_DEVICE_NAME_SIZE and VK_MAX_DRIVER_NAME_SIZE.
+const MAX_NAME_SIZE: u64 = 256;
+
+// 1.0f, the queue priority.
+const ONE_F32_BITS: u32 = 1065353216;
+
+// VkStructureType values.
+enum St: _ {
+    ApplicationInfo = 0,
+    InstanceCreateInfo = 1,
+    DeviceQueueCreateInfo = 2,
+    DeviceCreateInfo = 3,
+    SubmitInfo = 4,
+    MemoryAllocateInfo = 5,
+    SemaphoreCreateInfo = 9,
+    BufferCreateInfo = 12,
+    ShaderModuleCreateInfo = 16,
+    PipelineShaderStageCreateInfo = 18,
+    ComputePipelineCreateInfo = 29,
+    PipelineLayoutCreateInfo = 30,
+    DescriptorSetLayoutCreateInfo = 32,
+    DescriptorPoolCreateInfo = 33,
+    DescriptorSetAllocateInfo = 34,
+    WriteDescriptorSet = 35,
+    CommandPoolCreateInfo = 39,
+    CommandBufferAllocateInfo = 40,
+    CommandBufferBeginInfo = 42,
+    MemoryBarrier = 46,
+    Vulkan12Features = 51,
+    Features2 = 1000059000,
+    Properties2 = 1000059001,
+    DriverProperties = 1000196000,
+    TimelineFeatures = 1000207000,
+    SemaphoreTypeCreateInfo = 1000207002,
+    TimelineSubmitInfo = 1000207003,
+    SemaphoreWaitInfo = 1000207004,
+}
+
+// Flag and enum values.
+enum Queue: _ {
+    Compute = 2,
+}
+
+enum ShaderStage: _ {
+    Compute = 32,
+}
+
+enum DescriptorType: _ {
+    StorageBuffer = 7,
+}
+
+enum BindPoint: _ {
+    Compute = 1,
+}
+
+enum PipelineStage: _ {
+    Compute = 2048,
+    Host = 16384,
+}
+
+enum Access: _ {
+    ShaderRead = 32,
+    ShaderWrite = 64,
+    HostRead = 8192,
+}
+
+// HOST_VISIBLE | HOST_COHERENT.
+enum MemoryProperty: _ {
+    HostVisibleCoherent = 6,
+}
+
+// STORAGE_BUFFER | TRANSFER_SRC | TRANSFER_DST.
+enum BufferUsage: _ {
+    StorageTransfer = 35,
+}
+
+enum SemaphoreKind: _ {
+    Timeline = 1,
+}
+
+enum CommandPoolFlag: _ {
+    Transient = 1,
+}
+
+enum CommandBufferUsage: _ {
+    OneTimeSubmit = 1,
+}
+
+// Which call failed (`GpuErr.detail` with `Kind::Vulkan`).
+enum Call: _ {
+    EnumerateInstanceVersion = 1,
+    EnumeratePhysicalDevices = 2,
+    CreateDevice = 3,
+    CreateSemaphore = 4,
+    GetSemaphoreCounterValue = 5,
+    WaitSemaphores = 6,
+    CreateBuffer = 7,
+    AllocateMemory = 8,
+    BindBufferMemory = 9,
+    MapMemory = 10,
+    CreateDescriptorSetLayout = 11,
+    CreatePipelineLayout = 12,
+    CreateShaderModule = 13,
+    CreateComputePipelines = 14,
+    CreateCommandPool = 15,
+    AllocateCommandBuffers = 16,
+    BeginCommandBuffer = 17,
+    CreateDescriptorPool = 18,
+    AllocateDescriptorSets = 19,
+    EndCommandBuffer = 20,
+    QueueSubmit = 21,
+    DeviceWaitIdle = 22,
+}
+
+// `Kind::Unavailable` details.
+enum Unavailable: _ {
+    OldInstance = 2,
+    CreateInstance = 3,
+    NoDevice = 4,
+}
+
+// `Kind::Shape` details.
+enum BadShape: _ {
+    ZeroBuffer = 1,
+    BufferRange = 2,
+    DispatchBuffers = 3,
+    DispatchImmediates = 4,
+    ZeroGroups = 5,
+    EntryNul = 7,
+}
+
+// `Kind::Limit` details.
+enum OverLimit: _ {
+    BufferSize = 1,
+    Bindings = 2,
+    Immediates = 3,
+    Groups = 4,
+}
+
+// `Kind::Unsupported` details.
+enum Unsupported: _ {
+    MemoryType = 1,
+}
+
+// Struct layouts. Each enum gives a Vulkan struct's field offsets and its
+// size (`Bytes`); every struct starts with `Header`.
+enum Header: _ {
+    SType = 0,
+    PNext = 8,
+}
+
+// A dispatchable or non-dispatchable handle, or a u64 value.
+enum Handle: _ {
+    Bytes = 8,
+}
+
+enum ApplicationInfo: _ {
+    ApplicationName = 16,
+    EngineName = 32,
+    ApiVersion = 44,
+    Bytes = 48,
+}
+
+enum InstanceCreateInfo: _ {
+    ApplicationInfo = 24,
+    Bytes = 64,
+}
+
+// VkPhysicalDeviceProperties2 (its `properties` at 16).
+enum Properties2: _ {
+    ApiVersion = 16,
+    DeviceType = 32,
+    DeviceName = 36,
+    MaxStorageBufferRange = 340,
+    MaxComputeWorkGroupInvocations = 544,
+    Bytes = 840,
+}
+
+enum DriverProperties: _ {
+    DriverName = 20,
+    DriverInfo = 276,
+    Bytes = 536,
+}
+
+enum Features2: _ {
+    Bytes = 240,
+}
+
+enum TimelineFeatures: _ {
+    TimelineSemaphore = 16,
+    Bytes = 24,
+}
+
+enum QueueFamilyProperties: _ {
+    QueueFlags = 0,
+    Bytes = 24,
+}
+
+enum DeviceQueueCreateInfo: _ {
+    QueueFamilyIndex = 20,
+    QueueCount = 24,
+    QueuePriorities = 32,
+    Bytes = 40,
+}
+
+enum Vulkan12Features: _ {
+    TimelineSemaphore = 164,
+    Bytes = 208,
+}
+
+enum DeviceCreateInfo: _ {
+    QueueCreateInfoCount = 20,
+    QueueCreateInfos = 24,
+    Bytes = 72,
+}
+
+enum SemaphoreTypeCreateInfo: _ {
+    SemaphoreType = 16,
+    Bytes = 32,
+}
+
+enum SemaphoreCreateInfo: _ {
+    Bytes = 24,
+}
+
+enum SemaphoreWaitInfo: _ {
+    SemaphoreCount = 20,
+    Semaphores = 24,
+    Values = 32,
+    Bytes = 40,
+}
+
+enum BufferCreateInfo: _ {
+    Size = 24,
+    Usage = 32,
+    Bytes = 56,
+}
+
+enum MemoryRequirements: _ {
+    Size = 0,
+    MemoryTypeBits = 16,
+    Bytes = 24,
+}
+
+enum MemoryProperties: _ {
+    MemoryTypeCount = 0,
+    MemoryTypes = 4,
+    Bytes = 520,
+}
+
+enum MemoryType: _ {
+    PropertyFlags = 0,
+    Bytes = 8,
+}
+
+enum MemoryAllocateInfo: _ {
+    AllocationSize = 16,
+    MemoryTypeIndex = 24,
+    Bytes = 32,
+}
+
+enum SetLayoutBinding: _ {
+    Binding = 0,
+    DescriptorType = 4,
+    DescriptorCount = 8,
+    StageFlags = 12,
+    Bytes = 24,
+}
+
+enum SetLayoutCreateInfo: _ {
+    BindingCount = 20,
+    Bindings = 24,
+    Bytes = 32,
+}
+
+enum PushConstantRange: _ {
+    StageFlags = 0,
+    Size = 8,
+    Bytes = 12,
+}
+
+enum PipelineLayoutCreateInfo: _ {
+    SetLayoutCount = 20,
+    SetLayouts = 24,
+    PushConstantRangeCount = 32,
+    PushConstantRanges = 40,
+    Bytes = 48,
+}
+
+enum ShaderModuleCreateInfo: _ {
+    CodeSize = 24,
+    Code = 32,
+    Bytes = 40,
+}
+
+enum ShaderStageCreateInfo: _ {
+    Stage = 20,
+    Module = 24,
+    Name = 32,
+    Bytes = 48,
+}
+
+enum ComputePipelineCreateInfo: _ {
+    Stage = 24,
+    Layout = 72,
+    Bytes = 96,
+}
+
+enum CommandPoolCreateInfo: _ {
+    Flags = 16,
+    QueueFamilyIndex = 20,
+    Bytes = 24,
+}
+
+enum CommandBufferAllocateInfo: _ {
+    CommandPool = 16,
+    CommandBufferCount = 28,
+    Bytes = 32,
+}
+
+enum CommandBufferBeginInfo: _ {
+    Flags = 16,
+    Bytes = 32,
+}
+
+enum DescriptorPoolSize: _ {
+    Type = 0,
+    DescriptorCount = 4,
+    Bytes = 8,
+}
+
+enum DescriptorPoolCreateInfo: _ {
+    MaxSets = 20,
+    PoolSizeCount = 24,
+    PoolSizes = 32,
+    Bytes = 40,
+}
+
+enum DescriptorSetAllocateInfo: _ {
+    DescriptorPool = 16,
+    DescriptorSetCount = 24,
+    SetLayouts = 32,
+    Bytes = 40,
+}
+
+enum DescriptorBufferInfo: _ {
+    Buffer = 0,
+    Range = 16,
+    Bytes = 24,
+}
+
+enum WriteDescriptorSet: _ {
+    DstSet = 16,
+    DstBinding = 24,
+    DescriptorCount = 32,
+    DescriptorType = 36,
+    BufferInfo = 48,
+    Bytes = 64,
+}
+
+enum MemoryBarrier: _ {
+    SrcAccessMask = 16,
+    DstAccessMask = 20,
+    Bytes = 24,
+}
+
+enum TimelineSubmitInfo: _ {
+    WaitValueCount = 16,
+    WaitValues = 24,
+    SignalValueCount = 32,
+    SignalValues = 40,
+    Bytes = 48,
+}
+
+enum SubmitInfo: _ {
+    WaitSemaphoreCount = 16,
+    WaitSemaphores = 24,
+    WaitDstStageMask = 32,
+    CommandBufferCount = 40,
+    CommandBuffers = 48,
+    SignalSemaphoreCount = 56,
+    SignalSemaphores = 64,
+    Bytes = 72,
+}
+
+// Scratch block layouts: where each function puts its structs.
+// `create_instance`: the two names follow VkInstanceCreateInfo, 24 bytes
+// each.
+enum InstanceBlock: _ {
+    Instance = 48,
+    AppName = 112,
+    EngineName = 136,
+    Bytes = 160,
+}
+
+// `properties`: VkPhysicalDeviceProperties2 at 0, then the driver
+// properties.
+enum PropertiesBlock: _ {
+    Driver = 840,
+    Bytes = 1376,
+}
+
+// `open_on`: the queue info at 0, then its priority, the Vulkan 1.2
+// features and the device info.
+enum DeviceBlock: _ {
+    Priority = 40,
+    Features = 48,
+    Device = 256,
+    Bytes = 328,
+}
+
+// `wait_value`: the semaphore, the value, then the wait info.
+enum WaitBlock: _ {
+    Semaphore = 0,
+    Value = 8,
+    Info = 16,
+    Bytes = 56,
+}
+
+// `buffer_new`: the buffer info at 0.
+enum BufferBlock: _ {
+    Requirements = 56,
+    Properties = 80,
+    Allocate = 600,
+    Bytes = 632,
+}
+
+// `kernel_new`: up to `Max::Bindings` set-layout bindings at 0.
+enum LayoutBlock: _ {
+    SetLayoutInfo = 192,
+    PushRange = 224,
+    SetLayout = 240,
+    PipelineLayoutInfo = 248,
+    Bytes = 296,
+}
+
+// `rec_new`: the command pool info at 0.
+enum CommandBlock: _ {
+    Allocate = 24,
+    Begin = 56,
+    Bytes = 88,
+}
+
+// `rec_dispatch`: up to `Max::Bindings` buffer infos at 0.
+enum DispatchBlock: _ {
+    Writes = 192,
+    Barrier = 704,
+    Set = 728,
+    Immediates = 736,
+    Bytes = 864,
+}
+
+// `rec_submit`.
+enum SubmitBlock: _ {
+    WaitValue = 0,
+    SignalValue = 8,
+    Timeline = 16,
+    Semaphore = 64,
+    Stage = 72,
+    Command = 80,
+    Submit = 88,
+    Bytes = 160,
+}
+
+// A block of C memory and the Vesper image of its bytes. `put*` write the
+// image, `flush` copies it to C, `pull` copies C back into it and `get*`
+// read the image. `release` frees the C block.
+struct Scratch {
+    base: u64,
+    image: ChunkSeq[u8],
+}
+
+fn scratch(bytes: u64) -> Scratch eff [Ffi[LibC]] {
+    let mut image: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](bytes);
+    image.resize(bytes, 0);
+    Scratch {
+        base: LibC::calloc(bytes, 1),
+        image: image,
+    }
+}
+
+fn addr(in s: Scratch, offset: u64) -> u64 {
+    wrapping_add(s.base, offset)
+}
+
+fn put32(inout s: Scratch, at: u64, v: u32) eff [Fail[RuntimeError], Fail[ArithOverflow]] {
+    s.image.set(at, narrow_u8(v & 255));
+    s.image.set(at + 1, narrow_u8((v >> 8) & 255));
+    s.image.set(at + 2, narrow_u8((v >> 16) & 255));
+    s.image.set(at + 3, narrow_u8(v >> 24));
+}
+
+fn put64(inout s: Scratch, at: u64, v: u64) eff [Fail[RuntimeError], Fail[ArithOverflow]] {
+    put32(inout s, at, narrow_u32(v & LOW_WORD));
+    put32(inout s, at + 4, narrow_u32(v >> 32));
+}
+
+// A sType and a zero pNext at `at`.
+fn header(inout s: Scratch, at: u64, s_type: u32) eff [Fail[RuntimeError], Fail[ArithOverflow]] {
+    put32(inout s, at, s_type);
+}
+
+fn put_bytes(inout s: Scratch, at: u64, in bytes: Slice[u8]) eff [
+    Fail[RuntimeError],
+    Fail[ArithOverflow]
+] {
+    for i in 0..bytes.len() {
+        s.image.set(at + i, bytes[i]);
+    }
+}
+
+fn get32(in s: Scratch, at: u64) -> u32 eff [Fail[RuntimeError], Fail[ArithOverflow]] {
+    widen_u32(s.image[at]) | (widen_u32(s.image[at + 1]) << 8) | (
+        widen_u32(s.image[at + 2]) << 16
+    ) | (widen_u32(s.image[at + 3]) << 24)
+}
+
+fn get64(in s: Scratch, at: u64) -> u64 eff [Fail[RuntimeError], Fail[ArithOverflow]] {
+    widen_u64(get32(in s, at)) | (widen_u64(get32(in s, at + 4)) << 32)
+}
+
+fn flush(in s: Scratch) eff [Ffi[LibC]] {
+    LibC::memcpy(s.base, in s.image.as_slice());
+}
+
+fn pull(inout s: Scratch) eff [Ffi[LibC]] {
+    LibC::bcopy(s.base, inout s.image.as_slice_mut());
+}
+
+fn release(in s: Scratch) eff [Ffi[LibC]] {
+    LibC::free(s.base);
+}
+
+// The NUL-terminated bytes of a fixed `char[256]` field at `at`.
+fn c_string(in s: Scratch, at: u64) -> ChunkSeq[u8] eff [Fail[RuntimeError], Fail[ArithOverflow]] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for i in 0..MAX_NAME_SIZE {
+        let b = s.image[at + i];
+        if b == 0 {
+            break;
+        }
+        out.push(b);
+    }
+    out
+}
+
+fn contains(in hay: Slice[u8], in needle: Slice[u8])
+    -> bool eff [Fail[RuntimeError], Fail[ArithOverflow]] {
+    if needle.len() == 0 {
+        return true;
+    }
+    if needle.len() > hay.len() {
+        return false;
+    }
+    for start in 0..(hay.len() - needle.len() + 1) {
+        let mut same = true;
+        for j in 0..needle.len() {
+            if hay[start + j] != needle[j] {
+                same = false;
+                break;
+            }
+        }
+        if same {
+            return true;
+        }
+    }
+    false
+}
+
+// VkPhysicalDeviceProperties2 at 0 chained to VkPhysicalDeviceDriverProperties
+// at 840, filled for `physical`.
+fn properties(physical: u64)
+    -> Scratch eff [Ffi[Vk], Ffi[LibC], Fail[RuntimeError], Fail[ArithOverflow]] {
+    let mut s = scratch(PropertiesBlock::Bytes);
+    header(inout s, 0, St::Properties2);
+    put64(inout s, Header::PNext, addr(in s, PropertiesBlock::Driver));
+    header(inout s, PropertiesBlock::Driver, St::DriverProperties);
+    flush(in s);
+    Vk::vkGetPhysicalDeviceProperties2(physical, s.base);
+    pull(inout s);
+    s
+}
+
+fn timeline_supported(physical: u64)
+    -> bool eff [Ffi[Vk], Ffi[LibC], Fail[RuntimeError], Fail[ArithOverflow]] {
+    let mut s = scratch(Features2::Bytes + TimelineFeatures::Bytes);
+    header(inout s, 0, St::Features2);
+    put64(inout s, Header::PNext, addr(in s, Features2::Bytes));
+    header(inout s, Features2::Bytes, St::TimelineFeatures);
+    flush(in s);
+    Vk::vkGetPhysicalDeviceFeatures2(physical, s.base);
+    pull(inout s);
+    let on = get32(in s, Features2::Bytes + TimelineFeatures::TimelineSemaphore) != 0;
+    release(in s);
+    on
+}
+
+// The first queue family with compute, or None.
+fn compute_family(physical: u64)
+    -> Option[u64] eff [Ffi[Vk], Ffi[LibC], Fail[RuntimeError], Fail[ArithOverflow]] {
+    let mut count: u32 = 0;
+    Vk::vkGetPhysicalDeviceQueueFamilyProperties(physical, inout count, 0);
+    let n = widen_u64(count);
+    if n == 0 {
+        return Option::None;
+    }
+    let mut s = scratch(n * QueueFamilyProperties::Bytes);
+    Vk::vkGetPhysicalDeviceQueueFamilyProperties(physical, inout count, s.base);
+    pull(inout s);
+    let mut found: Option[u64] = Option::None;
+    for i in 0..widen_u64(count) {
+        if get32(in s, i * QueueFamilyProperties::Bytes + QueueFamilyProperties::QueueFlags)
+            & Queue::Compute
+            != 0 {
+            found = Option::Some(i);
+            break;
+        }
+    }
+    release(in s);
+    found
+}
+
+fn create_instance()
+    -> u64 eff [Ffi[Vk], Ffi[LibC], Fail[GpuErr], Fail[RuntimeError], Fail[ArithOverflow]] {
+    let mut version: u32 = 0;
+    check(Vk::vkEnumerateInstanceVersion(inout version), Call::EnumerateInstanceVersion);
+    if version < Api::Version1_2 {
+        fail(Kind::Unavailable, Unavailable::OldInstance, widen_i64(version));
+    }
+    // VkApplicationInfo at 0, VkInstanceCreateInfo at 48, then the names.
+    let app_name = "vesper-gpu-compute";
+    let engine_name = "vesper";
+    let mut s = scratch(InstanceBlock::Bytes);
+    header(inout s, 0, St::ApplicationInfo);
+    put64(inout s, ApplicationInfo::ApplicationName, addr(in s, InstanceBlock::AppName));
+    put64(inout s, ApplicationInfo::EngineName, addr(in s, InstanceBlock::EngineName));
+    put32(inout s, ApplicationInfo::ApiVersion, Api::Version1_2);
+    header(inout s, InstanceBlock::Instance, St::InstanceCreateInfo);
+    put64(inout s, InstanceBlock::Instance + InstanceCreateInfo::ApplicationInfo, s.base);
+    put_bytes(inout s, InstanceBlock::AppName, in app_name.as_bytes());
+    put_bytes(inout s, InstanceBlock::EngineName, in engine_name.as_bytes());
+    flush(in s);
+    let mut instance: u64 = 0;
+    let rc = Vk::vkCreateInstance(addr(in s, InstanceBlock::Instance), 0, inout instance);
+    release(in s);
+    if rc != 0 {
+        fail(Kind::Unavailable, Unavailable::CreateInstance, widen_i64(rc));
+    }
+    instance
+}
+
+// Loads nothing (the loader is linked), creates an instance and opens the
+// first physical device with a compute queue and Vulkan 1.2 timeline
+// semaphores whose name contains `wanted` (any device when it is empty).
+pub fn open(in wanted: Str)
+    -> Dev eff [Ffi[Vk], Ffi[LibC], Fail[GpuErr], Fail[RuntimeError], Fail[ArithOverflow]] {
+    let instance = create_instance();
+    handle Fail[GpuErr] in {
+        open_on(instance, in wanted)
+    } with {
+        return d => d,
+        raise(e, k) => {
+            Vk::vkDestroyInstance(instance, 0);
+            raise(e.kind, e.detail, e.code)
+        },
+    }
+}
+
+fn open_on(instance: u64, in wanted: Str)
+    -> Dev eff [Ffi[Vk], Ffi[LibC], Fail[GpuErr], Fail[RuntimeError], Fail[ArithOverflow]] {
+    let mut count: u32 = 0;
+    check(Vk::vkEnumeratePhysicalDevices(instance, inout count, 0), Call::EnumeratePhysicalDevices);
+    let mut list = scratch(wrapping_add(widen_u64(count) * Handle::Bytes, Handle::Bytes));
+    check(
+        Vk::vkEnumeratePhysicalDevices(instance, inout count, list.base),
+        Call::EnumeratePhysicalDevices
+    );
+    pull(inout list);
+    let mut chosen: Option[Dev] = Option::None;
+    for i in 0..widen_u64(count) {
+        let physical = get64(in list, i * Handle::Bytes);
+        let p = properties(physical);
+        let api = get32(in p, Properties2::ApiVersion);
+        let name = c_string(in p, Properties2::DeviceName);
+        let fits = api >= Api::Version1_2
+            && contains(in name.as_slice(), in wanted.as_bytes())
+            && timeline_supported(physical);
+        if fits {
+            match compute_family(physical) {
+                Option::Some(family) => {
+                    chosen = Option::Some(
+                        Dev {
+                            instance: instance,
+                            physical: physical,
+                            device: 0,
+                            queue: 0,
+                            family: family,
+                            timeline: 0,
+                            api_version: widen_u64(api),
+                            device_type: widen_u64(get32(in p, Properties2::DeviceType)),
+                            max_invocations: widen_u64(
+                                get32(in p, Properties2::MaxComputeWorkGroupInvocations)
+                            ),
+                            max_range: widen_u64(get32(in p, Properties2::MaxStorageBufferRange)),
+                        }
+                    );
+                }
+                Option::None => {}
+            }
+        }
+        release(in p);
+        let done = match chosen {
+            Option::Some(_) => true,
+            Option::None => false,
+        };
+        if done {
+            break;
+        }
+    }
+    release(in list);
+    let mut d = match chosen {
+        Option::Some(d) => d,
+        Option::None => return raise(Kind::Unavailable, Unavailable::NoDevice, 0),
+    };
+    // VkDeviceQueueCreateInfo at 0, its priority (1.0f) at 40,
+    // VkPhysicalDeviceVulkan12Features at 48, VkDeviceCreateInfo at 256.
+    let mut s = scratch(DeviceBlock::Bytes);
+    header(inout s, 0, St::DeviceQueueCreateInfo);
+    put32(inout s, DeviceQueueCreateInfo::QueueFamilyIndex, narrow_u32(d.family));
+    put32(inout s, DeviceQueueCreateInfo::QueueCount, 1);
+    put64(inout s, DeviceQueueCreateInfo::QueuePriorities, addr(in s, DeviceBlock::Priority));
+    put32(inout s, DeviceBlock::Priority, ONE_F32_BITS);
+    header(inout s, DeviceBlock::Features, St::Vulkan12Features);
+    put32(inout s, DeviceBlock::Features + Vulkan12Features::TimelineSemaphore, 1);
+    header(inout s, DeviceBlock::Device, St::DeviceCreateInfo);
+    put64(inout s, DeviceBlock::Device + Header::PNext, addr(in s, DeviceBlock::Features));
+    put32(inout s, DeviceBlock::Device + DeviceCreateInfo::QueueCreateInfoCount, 1);
+    put64(inout s, DeviceBlock::Device + DeviceCreateInfo::QueueCreateInfos, s.base);
+    flush(in s);
+    let mut device: u64 = 0;
+    let rc = Vk::vkCreateDevice(d.physical, addr(in s, DeviceBlock::Device), 0, inout device);
+    release(in s);
+    check(rc, Call::CreateDevice);
+    d.device = device;
+    let mut queue: u64 = 0;
+    Vk::vkGetDeviceQueue(device, narrow_u32(d.family), 0, inout queue);
+    d.queue = queue;
+    // VkSemaphoreTypeCreateInfo (timeline, initial 0) at 0 chained from
+    // VkSemaphoreCreateInfo at 32.
+    let mut t = scratch(SemaphoreTypeCreateInfo::Bytes + SemaphoreCreateInfo::Bytes);
+    header(inout t, 0, St::SemaphoreTypeCreateInfo);
+    put32(inout t, SemaphoreTypeCreateInfo::SemaphoreType, SemaphoreKind::Timeline);
+    header(inout t, SemaphoreTypeCreateInfo::Bytes, St::SemaphoreCreateInfo);
+    put64(inout t, SemaphoreTypeCreateInfo::Bytes + Header::PNext, t.base);
+    flush(in t);
+    let mut timeline: u64 = 0;
+    let rc = Vk::vkCreateSemaphore(
+        device,
+        addr(in t, SemaphoreTypeCreateInfo::Bytes),
+        0,
+        inout timeline
+    );
+    release(in t);
+    if rc < 0 {
+        Vk::vkDestroyDevice(device, 0);
+        fail(Kind::Vulkan, Call::CreateSemaphore, widen_i64(rc));
+    }
+    d.timeline = timeline;
+    d
+}
+
+// Waits for the device, then destroys the timeline, the device and the
+// instance. Every buffer, kernel and recording must be freed first.
+pub fn close(in d: Dev) eff [Ffi[Vk]] {
+    Vk::vkDeviceWaitIdle(d.device);
+    Vk::vkDestroySemaphore(d.device, d.timeline, 0);
+    Vk::vkDestroyDevice(d.device, 0);
+    Vk::vkDestroyInstance(d.instance, 0);
+}
+
+// Waits for the device to go idle (after a failed wait, before freeing).
+pub fn wait_idle(in d: Dev) eff [Ffi[Vk]] {
+    Vk::vkDeviceWaitIdle(d.device);
+}
+
+// The device name, the driver name and the driver info, each followed by a
+// NUL byte.
+pub fn device_strings(in d: Dev)
+    -> ChunkSeq[u8] eff [Ffi[Vk], Ffi[LibC], Fail[RuntimeError], Fail[ArithOverflow]] {
+    let p = properties(d.physical);
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let name = c_string(in p, Properties2::DeviceName);
+    let driver = c_string(in p, PropertiesBlock::Driver + DriverProperties::DriverName);
+    let info = c_string(in p, PropertiesBlock::Driver + DriverProperties::DriverInfo);
+    out.extend(in name.as_slice());
+    out.push(0);
+    out.extend(in driver.as_slice());
+    out.push(0);
+    out.extend(in info.as_slice());
+    out.push(0);
+    release(in p);
+    out
+}
+
+// The timeline value of the last completed submission.
+pub fn completed(in d: Dev) -> u64 eff [Ffi[Vk], Fail[GpuErr]] {
+    let mut value: u64 = 0;
+    check(
+        Vk::vkGetSemaphoreCounterValue(d.device, d.timeline, inout value),
+        Call::GetSemaphoreCounterValue
+    );
+    value
+}
+
+// Blocks until the timeline reaches `value`. With the compute-to-host
+// barrier after every dispatch, the device's writes are then visible to
+// the host.
+pub fn wait_value(in d: Dev, value: u64) eff [
+    Ffi[Vk],
+    Ffi[LibC],
+    Fail[GpuErr],
+    Fail[RuntimeError],
+    Fail[ArithOverflow]
+] {
+    // The semaphore at 0, the value at 8, VkSemaphoreWaitInfo at 16.
+    let mut s = scratch(WaitBlock::Bytes);
+    put64(inout s, WaitBlock::Semaphore, d.timeline);
+    put64(inout s, WaitBlock::Value, value);
+    header(inout s, WaitBlock::Info, St::SemaphoreWaitInfo);
+    put32(inout s, WaitBlock::Info + SemaphoreWaitInfo::SemaphoreCount, 1);
+    put64(
+        inout s,
+        WaitBlock::Info + SemaphoreWaitInfo::Semaphores,
+        addr(in s, WaitBlock::Semaphore)
+    );
+    put64(inout s, WaitBlock::Info + SemaphoreWaitInfo::Values, addr(in s, WaitBlock::Value));
+    flush(in s);
+    let rc = Vk::vkWaitSemaphores(d.device, addr(in s, WaitBlock::Info), WHOLE_SIZE);
+    release(in s);
+    check(rc, Call::WaitSemaphores);
+}
+
+// A zero-filled storage buffer of `bytes` bytes rounded up to 4, mapped
+// host-visible and coherent.
+pub fn buffer_new(in d: Dev, bytes: u64)
+    -> Buf eff [Ffi[Vk], Ffi[LibC], Fail[GpuErr], Fail[RuntimeError], Fail[ArithOverflow]] {
+    if bytes == 0 {
+        return raise(Kind::Shape, BadShape::ZeroBuffer, 0);
+    }
+    if bytes > Max::BufferBytes || bytes > d.max_range {
+        return raise(Kind::Limit, OverLimit::BufferSize, 0);
+    }
+    let len = (bytes + 3) / 4 * 4;
+    // VkBufferCreateInfo at 0, VkMemoryRequirements at 56,
+    // VkPhysicalDeviceMemoryProperties at 80, VkMemoryAllocateInfo at 600.
+    let mut s = scratch(BufferBlock::Bytes);
+    header(inout s, 0, St::BufferCreateInfo);
+    put64(inout s, BufferCreateInfo::Size, len);
+    put32(inout s, BufferCreateInfo::Usage, BufferUsage::StorageTransfer);
+    flush(in s);
+    let mut buffer: u64 = 0;
+    let rc = Vk::vkCreateBuffer(d.device, s.base, 0, inout buffer);
+    if rc < 0 {
+        release(in s);
+        return raise(Kind::Vulkan, Call::CreateBuffer, widen_i64(rc));
+    }
+    Vk::vkGetBufferMemoryRequirements(d.device, buffer, addr(in s, BufferBlock::Requirements));
+    Vk::vkGetPhysicalDeviceMemoryProperties(d.physical, addr(in s, BufferBlock::Properties));
+    pull(inout s);
+    let size = get64(in s, BufferBlock::Requirements + MemoryRequirements::Size);
+    let bits = get32(in s, BufferBlock::Requirements + MemoryRequirements::MemoryTypeBits);
+    let types = widen_u64(get32(in s, BufferBlock::Properties + MemoryProperties::MemoryTypeCount));
+    let mut chosen: Option[u32] = Option::None;
+    for i in 0..types {
+        let flags = get32(
+            in s,
+            BufferBlock::Properties
+                + MemoryProperties::MemoryTypes
+                + i * MemoryType::Bytes
+                + MemoryType::PropertyFlags
+        );
+        let allowed = (bits >> narrow_u32(i)) & 1 != 0;
+        if allowed
+            && flags & MemoryProperty::HostVisibleCoherent == MemoryProperty::HostVisibleCoherent {
+            chosen = Option::Some(narrow_u32(i));
+            break;
+        }
+    }
+    let index = match chosen {
+        Option::Some(i) => i,
+        Option::None => {
+            release(in s);
+            Vk::vkDestroyBuffer(d.device, buffer, 0);
+            return raise(Kind::Unsupported, Unsupported::MemoryType, 0);
+        }
+    };
+    header(inout s, BufferBlock::Allocate, St::MemoryAllocateInfo);
+    put64(inout s, BufferBlock::Allocate + MemoryAllocateInfo::AllocationSize, size);
+    put32(inout s, BufferBlock::Allocate + MemoryAllocateInfo::MemoryTypeIndex, index);
+    flush(in s);
+    let mut memory: u64 = 0;
+    let rc = Vk::vkAllocateMemory(d.device, addr(in s, BufferBlock::Allocate), 0, inout memory);
+    release(in s);
+    if rc < 0 {
+        Vk::vkDestroyBuffer(d.device, buffer, 0);
+        return raise(Kind::Vulkan, Call::AllocateMemory, widen_i64(rc));
+    }
+    let rc = Vk::vkBindBufferMemory(d.device, buffer, memory, 0);
+    if rc < 0 {
+        Vk::vkDestroyBuffer(d.device, buffer, 0);
+        Vk::vkFreeMemory(d.device, memory, 0);
+        return raise(Kind::Vulkan, Call::BindBufferMemory, widen_i64(rc));
+    }
+    let mut ptr: u64 = 0;
+    let rc = Vk::vkMapMemory(d.device, memory, 0, WHOLE_SIZE, 0, inout ptr);
+    if rc < 0 {
+        Vk::vkDestroyBuffer(d.device, buffer, 0);
+        Vk::vkFreeMemory(d.device, memory, 0);
+        return raise(Kind::Vulkan, Call::MapMemory, widen_i64(rc));
+    }
+    LibC::memset(ptr, 0, len);
+    Buf {
+        buffer: buffer,
+        memory: memory,
+        ptr: ptr,
+        len: len,
+    }
+}
+
+fn in_range(in b: Buf, offset: u64, n: u64) eff [Fail[GpuErr]] {
+    if offset > b.len || n > wrapping_sub(b.len, offset) {
+        fail(Kind::Shape, BadShape::BufferRange, 0);
+    }
+}
+
+// Copies `data` to byte `offset`. The caller has waited for every
+// submission that bound the buffer (`wait_value`).
+pub fn buffer_write(in b: Buf, offset: u64, in data: Slice[u8]) eff [Ffi[LibC], Fail[GpuErr]] {
+    in_range(in b, offset, data.len());
+    LibC::memcpy(wrapping_add(b.ptr, offset), in data);
+}
+
+// Copies from byte `offset` into `out`, after the same wait.
+pub fn buffer_read(in b: Buf, offset: u64, inout out: Slice[u8]) eff [Ffi[LibC], Fail[GpuErr]] {
+    in_range(in b, offset, out.len());
+    LibC::bcopy(wrapping_add(b.ptr, offset), inout out);
+}
+
+// Unmaps and frees a buffer no pending submission uses.
+pub fn buffer_free(in d: Dev, in b: Buf) eff [Ffi[Vk]] {
+    Vk::vkUnmapMemory(d.device, b.memory);
+    Vk::vkDestroyBuffer(d.device, b.buffer, 0);
+    Vk::vkFreeMemory(d.device, b.memory, 0);
+}
+
+// A compute pipeline for entry point `entry` of the SPIR-V module `spirv`
+// (little-endian words), binding `bindings` storage buffers at
+// group 0, bindings 0.., and an immediate block of `imm` bytes.
+pub fn kernel_new(in d: Dev, in spirv: Slice[u8], in entry: Str, bindings: u64, imm: u64)
+    -> Kern eff [Ffi[Vk], Ffi[LibC], Fail[GpuErr], Fail[RuntimeError], Fail[ArithOverflow]] {
+    if bindings == 0 || bindings > Max::Bindings {
+        return raise(Kind::Limit, OverLimit::Bindings, 0);
+    }
+    if imm > Max::ImmediateBytes || imm % 4 != 0 {
+        return raise(Kind::Limit, OverLimit::Immediates, 0);
+    }
+    let name = entry.as_bytes();
+    for i in 0..name.len() {
+        if name[i] == 0 {
+            return raise(Kind::Shape, BadShape::EntryNul, 0);
+        }
+    }
+    // Set-layout bindings at 0 (24 each, up to 8), VkDescriptorSetLayoutCreateInfo
+    // at 192, VkPushConstantRange at 224, the set layout at 240,
+    // VkPipelineLayoutCreateInfo at 248.
+    let mut s = scratch(LayoutBlock::Bytes);
+    for i in 0..bindings {
+        put32(inout s, i * SetLayoutBinding::Bytes + SetLayoutBinding::Binding, narrow_u32(i));
+        put32(
+            inout s,
+            i * SetLayoutBinding::Bytes + SetLayoutBinding::DescriptorType,
+            DescriptorType::StorageBuffer
+        );
+        put32(inout s, i * SetLayoutBinding::Bytes + SetLayoutBinding::DescriptorCount, 1);
+        put32(
+            inout s,
+            i * SetLayoutBinding::Bytes + SetLayoutBinding::StageFlags,
+            ShaderStage::Compute
+        );
+    }
+    header(inout s, LayoutBlock::SetLayoutInfo, St::DescriptorSetLayoutCreateInfo);
+    put32(
+        inout s,
+        LayoutBlock::SetLayoutInfo + SetLayoutCreateInfo::BindingCount,
+        narrow_u32(bindings)
+    );
+    put64(inout s, LayoutBlock::SetLayoutInfo + SetLayoutCreateInfo::Bindings, s.base);
+    flush(in s);
+    let mut set_layout: u64 = 0;
+    let rc = Vk::vkCreateDescriptorSetLayout(
+        d.device,
+        addr(in s, LayoutBlock::SetLayoutInfo),
+        0,
+        inout set_layout
+    );
+    if rc < 0 {
+        release(in s);
+        return raise(Kind::Vulkan, Call::CreateDescriptorSetLayout, widen_i64(rc));
+    }
+    put32(inout s, LayoutBlock::PushRange + PushConstantRange::StageFlags, ShaderStage::Compute);
+    put32(inout s, LayoutBlock::PushRange + PushConstantRange::Size, narrow_u32(imm));
+    put64(inout s, LayoutBlock::SetLayout, set_layout);
+    header(inout s, LayoutBlock::PipelineLayoutInfo, St::PipelineLayoutCreateInfo);
+    put32(inout s, LayoutBlock::PipelineLayoutInfo + PipelineLayoutCreateInfo::SetLayoutCount, 1);
+    put64(
+        inout s,
+        LayoutBlock::PipelineLayoutInfo + PipelineLayoutCreateInfo::SetLayouts,
+        addr(in s, LayoutBlock::SetLayout)
+    );
+    if imm > 0 {
+        put32(
+            inout s,
+            LayoutBlock::PipelineLayoutInfo + PipelineLayoutCreateInfo::PushConstantRangeCount,
+            1
+        );
+        put64(
+            inout s,
+            LayoutBlock::PipelineLayoutInfo + PipelineLayoutCreateInfo::PushConstantRanges,
+            addr(in s, LayoutBlock::PushRange)
+        );
+    }
+    flush(in s);
+    let mut layout: u64 = 0;
+    let rc = Vk::vkCreatePipelineLayout(
+        d.device,
+        addr(in s, LayoutBlock::PipelineLayoutInfo),
+        0,
+        inout layout
+    );
+    release(in s);
+    if rc < 0 {
+        Vk::vkDestroyDescriptorSetLayout(d.device, set_layout, 0);
+        return raise(Kind::Vulkan, Call::CreatePipelineLayout, widen_i64(rc));
+    }
+    // The code, then VkShaderModuleCreateInfo after it (8-aligned).
+    let code_at = 0;
+    let info_at = (spirv.len() + 7) / 8 * 8;
+    let mut m = scratch(info_at + ShaderModuleCreateInfo::Bytes);
+    put_bytes(inout m, code_at, in spirv);
+    header(inout m, info_at, St::ShaderModuleCreateInfo);
+    put64(inout m, info_at + ShaderModuleCreateInfo::CodeSize, spirv.len());
+    put64(inout m, info_at + ShaderModuleCreateInfo::Code, m.base);
+    flush(in m);
+    let mut module: u64 = 0;
+    let rc = Vk::vkCreateShaderModule(d.device, addr(in m, info_at), 0, inout module);
+    release(in m);
+    if rc < 0 {
+        Vk::vkDestroyPipelineLayout(d.device, layout, 0);
+        Vk::vkDestroyDescriptorSetLayout(d.device, set_layout, 0);
+        return raise(Kind::Vulkan, Call::CreateShaderModule, widen_i64(rc));
+    }
+    // VkComputePipelineCreateInfo at 0 with its stage at 24, the entry
+    // name (NUL-terminated) at 96.
+    let mut p = scratch(ComputePipelineCreateInfo::Bytes + 1 + name.len());
+    header(inout p, 0, St::ComputePipelineCreateInfo);
+    header(inout p, ComputePipelineCreateInfo::Stage, St::PipelineShaderStageCreateInfo);
+    put32(
+        inout p,
+        ComputePipelineCreateInfo::Stage + ShaderStageCreateInfo::Stage,
+        ShaderStage::Compute
+    );
+    put64(inout p, ComputePipelineCreateInfo::Stage + ShaderStageCreateInfo::Module, module);
+    put64(
+        inout p,
+        ComputePipelineCreateInfo::Stage + ShaderStageCreateInfo::Name,
+        addr(in p, ComputePipelineCreateInfo::Bytes)
+    );
+    put64(inout p, ComputePipelineCreateInfo::Layout, layout);
+    put_bytes(inout p, ComputePipelineCreateInfo::Bytes, in name);
+    flush(in p);
+    let mut pipeline: u64 = 0;
+    let rc = Vk::vkCreateComputePipelines(d.device, 0, 1, p.base, 0, inout pipeline);
+    release(in p);
+    Vk::vkDestroyShaderModule(d.device, module, 0);
+    if rc < 0 {
+        Vk::vkDestroyPipelineLayout(d.device, layout, 0);
+        Vk::vkDestroyDescriptorSetLayout(d.device, set_layout, 0);
+        return raise(Kind::Vulkan, Call::CreateComputePipelines, widen_i64(rc));
+    }
+    Kern {
+        set_layout: set_layout,
+        layout: layout,
+        pipeline: pipeline,
+        bindings: bindings,
+        imm: imm,
+    }
+}
+
+// Destroys a kernel no pending submission uses.
+pub fn kernel_free(in d: Dev, in k: Kern) eff [Ffi[Vk]] {
+    Vk::vkDestroyPipeline(d.device, k.pipeline, 0);
+    Vk::vkDestroyPipelineLayout(d.device, k.layout, 0);
+    Vk::vkDestroyDescriptorSetLayout(d.device, k.set_layout, 0);
+}
+
+// Starts recording a one-time-submit command buffer from a transient pool.
+pub fn rec_new(in d: Dev)
+    -> Rec eff [Ffi[Vk], Ffi[LibC], Fail[GpuErr], Fail[RuntimeError], Fail[ArithOverflow]] {
+    // VkCommandPoolCreateInfo at 0, VkCommandBufferAllocateInfo at 24,
+    // VkCommandBufferBeginInfo at 56.
+    let mut s = scratch(CommandBlock::Bytes);
+    header(inout s, 0, St::CommandPoolCreateInfo);
+    put32(inout s, CommandPoolCreateInfo::Flags, CommandPoolFlag::Transient);
+    put32(inout s, CommandPoolCreateInfo::QueueFamilyIndex, narrow_u32(d.family));
+    flush(in s);
+    let mut pool: u64 = 0;
+    let rc = Vk::vkCreateCommandPool(d.device, s.base, 0, inout pool);
+    if rc < 0 {
+        release(in s);
+        return raise(Kind::Vulkan, Call::CreateCommandPool, widen_i64(rc));
+    }
+    header(inout s, CommandBlock::Allocate, St::CommandBufferAllocateInfo);
+    put64(inout s, CommandBlock::Allocate + CommandBufferAllocateInfo::CommandPool, pool);
+    put32(inout s, CommandBlock::Allocate + CommandBufferAllocateInfo::CommandBufferCount, 1);
+    header(inout s, CommandBlock::Begin, St::CommandBufferBeginInfo);
+    put32(
+        inout s,
+        CommandBlock::Begin + CommandBufferBeginInfo::Flags,
+        CommandBufferUsage::OneTimeSubmit
+    );
+    flush(in s);
+    let mut cmd: u64 = 0;
+    let rc = Vk::vkAllocateCommandBuffers(d.device, addr(in s, CommandBlock::Allocate), inout cmd);
+    if rc < 0 {
+        release(in s);
+        Vk::vkDestroyCommandPool(d.device, pool, 0);
+        return raise(Kind::Vulkan, Call::AllocateCommandBuffers, widen_i64(rc));
+    }
+    let rc = Vk::vkBeginCommandBuffer(cmd, addr(in s, CommandBlock::Begin));
+    release(in s);
+    if rc < 0 {
+        Vk::vkDestroyCommandPool(d.device, pool, 0);
+        return raise(Kind::Vulkan, Call::BeginCommandBuffer, widen_i64(rc));
+    }
+    Rec {
+        pool: pool,
+        cmd: cmd,
+        sets_left: 0,
+        pools: ChunkSeq::new[u64](),
+    }
+}
+
+fn descriptor_set(in d: Dev, inout r: Rec, in k: Kern)
+    -> u64 eff [Ffi[Vk], Ffi[LibC], Fail[GpuErr], Fail[RuntimeError], Fail[ArithOverflow]] {
+    if r.sets_left == 0 {
+        // VkDescriptorPoolSize at 0, VkDescriptorPoolCreateInfo at 8.
+        let mut s = scratch(DescriptorPoolSize::Bytes + DescriptorPoolCreateInfo::Bytes);
+        put32(inout s, DescriptorPoolSize::Type, DescriptorType::StorageBuffer);
+        put32(
+            inout s,
+            DescriptorPoolSize::DescriptorCount,
+            narrow_u32(Max::SetsPerPool * Max::Bindings)
+        );
+        header(inout s, DescriptorPoolSize::Bytes, St::DescriptorPoolCreateInfo);
+        put32(
+            inout s,
+            DescriptorPoolSize::Bytes + DescriptorPoolCreateInfo::MaxSets,
+            narrow_u32(Max::SetsPerPool)
+        );
+        put32(inout s, DescriptorPoolSize::Bytes + DescriptorPoolCreateInfo::PoolSizeCount, 1);
+        put64(inout s, DescriptorPoolSize::Bytes + DescriptorPoolCreateInfo::PoolSizes, s.base);
+        flush(in s);
+        let mut pool: u64 = 0;
+        let rc = Vk::vkCreateDescriptorPool(
+            d.device,
+            addr(in s, DescriptorPoolSize::Bytes),
+            0,
+            inout pool
+        );
+        release(in s);
+        check(rc, Call::CreateDescriptorPool);
+        r.pools.push(pool);
+        r.sets_left = Max::SetsPerPool;
+    }
+    let pool = r.pools[r.pools.len() - 1];
+    // The set layout at 0, VkDescriptorSetAllocateInfo at 8.
+    let mut s = scratch(Handle::Bytes + DescriptorSetAllocateInfo::Bytes);
+    put64(inout s, 0, k.set_layout);
+    header(inout s, Handle::Bytes, St::DescriptorSetAllocateInfo);
+    put64(inout s, Handle::Bytes + DescriptorSetAllocateInfo::DescriptorPool, pool);
+    put32(inout s, Handle::Bytes + DescriptorSetAllocateInfo::DescriptorSetCount, 1);
+    put64(inout s, Handle::Bytes + DescriptorSetAllocateInfo::SetLayouts, s.base);
+    flush(in s);
+    let mut set: u64 = 0;
+    let rc = Vk::vkAllocateDescriptorSets(d.device, addr(in s, Handle::Bytes), inout set);
+    release(in s);
+    check(rc, Call::AllocateDescriptorSets);
+    r.sets_left = r.sets_left - 1;
+    set
+}
+
+// Records `k` over `gx * gy * gz` workgroups with `buffers` (their
+// VkBuffer handles) bound to bindings 0.. and `immediates` as its immediate
+// block, followed by a compute-to-compute and compute-to-host memory
+// barrier. Arguments are checked before anything is recorded.
+pub fn rec_dispatch(
+    in d: Dev,
+    inout r: Rec,
+    in k: Kern,
+    in buffers: Slice[u64],
+    in immediates: Slice[u8],
+    gx: u32,
+    gy: u32,
+    gz: u32,
+) eff [Ffi[Vk], Ffi[LibC], Fail[GpuErr], Fail[RuntimeError], Fail[ArithOverflow]] {
+    if buffers.len() != k.bindings {
+        return raise(Kind::Shape, BadShape::DispatchBuffers, 0);
+    }
+    if immediates.len() != k.imm {
+        return raise(Kind::Shape, BadShape::DispatchImmediates, 0);
+    }
+    if gx == 0 || gy == 0 || gz == 0 {
+        return raise(Kind::Shape, BadShape::ZeroGroups, 0);
+    }
+    if gx > Max::Groups || gy > Max::Groups || gz > Max::Groups {
+        return raise(Kind::Limit, OverLimit::Groups, 0);
+    }
+    let set = descriptor_set(in d, inout r, in k);
+    // VkDescriptorBufferInfo at 0 (24 each, up to 8), VkWriteDescriptorSet at
+    // 192 (64 each), VkMemoryBarrier at 704, the set at 728, immediates at 736.
+    let mut s = scratch(DispatchBlock::Bytes);
+    let n = buffers.len();
+    for i in 0..n {
+        put64(inout s, i * DescriptorBufferInfo::Bytes + DescriptorBufferInfo::Buffer, buffers[i]);
+        put64(inout s, i * DescriptorBufferInfo::Bytes + DescriptorBufferInfo::Range, WHOLE_SIZE);
+        let w = DispatchBlock::Writes + i * WriteDescriptorSet::Bytes;
+        header(inout s, w, St::WriteDescriptorSet);
+        put64(inout s, w + WriteDescriptorSet::DstSet, set);
+        put32(inout s, w + WriteDescriptorSet::DstBinding, narrow_u32(i));
+        put32(inout s, w + WriteDescriptorSet::DescriptorCount, 1);
+        put32(inout s, w + WriteDescriptorSet::DescriptorType, DescriptorType::StorageBuffer);
+        put64(
+            inout s,
+            w + WriteDescriptorSet::BufferInfo,
+            addr(in s, i * DescriptorBufferInfo::Bytes)
+        );
+    }
+    header(inout s, DispatchBlock::Barrier, St::MemoryBarrier);
+    put32(inout s, DispatchBlock::Barrier + MemoryBarrier::SrcAccessMask, Access::ShaderWrite);
+    put32(
+        inout s,
+        DispatchBlock::Barrier + MemoryBarrier::DstAccessMask,
+        Access::ShaderRead | Access::ShaderWrite | Access::HostRead
+    );
+    put64(inout s, DispatchBlock::Set, set);
+    put_bytes(inout s, DispatchBlock::Immediates, in immediates);
+    flush(in s);
+    Vk::vkUpdateDescriptorSets(d.device, narrow_u32(n), addr(in s, DispatchBlock::Writes), 0, 0);
+    Vk::vkCmdBindPipeline(r.cmd, BindPoint::Compute, k.pipeline);
+    Vk::vkCmdBindDescriptorSets(
+        r.cmd,
+        BindPoint::Compute,
+        k.layout,
+        0,
+        1,
+        addr(in s, DispatchBlock::Set),
+        0,
+        0
+    );
+    if immediates.len() > 0 {
+        Vk::vkCmdPushConstants(
+            r.cmd,
+            k.layout,
+            ShaderStage::Compute,
+            0,
+            narrow_u32(immediates.len()),
+            addr(in s, DispatchBlock::Immediates)
+        );
+    }
+    Vk::vkCmdDispatch(r.cmd, gx, gy, gz);
+    Vk::vkCmdPipelineBarrier(
+        r.cmd,
+        PipelineStage::Compute,
+        PipelineStage::Compute | PipelineStage::Host,
+        0,
+        1,
+        addr(in s, DispatchBlock::Barrier),
+        0,
+        0,
+        0,
+        0
+    );
+    release(in s);
+}
+
+// Ends recording and submits: the submission waits for timeline value
+// `previous` and signals `previous + 1`, which it returns. The caller
+// serializes submissions on the queue.
+pub fn rec_submit(in d: Dev, in r: Rec, previous: u64)
+    -> u64 eff [Ffi[Vk], Ffi[LibC], Fail[GpuErr], Fail[RuntimeError], Fail[ArithOverflow]] {
+    check(Vk::vkEndCommandBuffer(r.cmd), Call::EndCommandBuffer);
+    let value = previous + 1;
+    // Wait value at 0, signal value at 8, VkTimelineSemaphoreSubmitInfo at
+    // 16, the semaphore at 64, the wait stage at 72, the command buffer at
+    // 80, VkSubmitInfo at 88.
+    let mut s = scratch(SubmitBlock::Bytes);
+    let tl = SubmitBlock::Timeline;
+    let sub = SubmitBlock::Submit;
+    put64(inout s, SubmitBlock::WaitValue, previous);
+    put64(inout s, SubmitBlock::SignalValue, value);
+    header(inout s, tl, St::TimelineSubmitInfo);
+    put32(inout s, tl + TimelineSubmitInfo::WaitValueCount, 1);
+    put64(inout s, tl + TimelineSubmitInfo::WaitValues, addr(in s, SubmitBlock::WaitValue));
+    put32(inout s, tl + TimelineSubmitInfo::SignalValueCount, 1);
+    put64(inout s, tl + TimelineSubmitInfo::SignalValues, addr(in s, SubmitBlock::SignalValue));
+    put64(inout s, SubmitBlock::Semaphore, d.timeline);
+    put32(inout s, SubmitBlock::Stage, PipelineStage::Compute);
+    put64(inout s, SubmitBlock::Command, r.cmd);
+    header(inout s, sub, St::SubmitInfo);
+    put64(inout s, sub + Header::PNext, addr(in s, tl));
+    put32(inout s, sub + SubmitInfo::WaitSemaphoreCount, 1);
+    put64(inout s, sub + SubmitInfo::WaitSemaphores, addr(in s, SubmitBlock::Semaphore));
+    put64(inout s, sub + SubmitInfo::WaitDstStageMask, addr(in s, SubmitBlock::Stage));
+    put32(inout s, sub + SubmitInfo::CommandBufferCount, 1);
+    put64(inout s, sub + SubmitInfo::CommandBuffers, addr(in s, SubmitBlock::Command));
+    put32(inout s, sub + SubmitInfo::SignalSemaphoreCount, 1);
+    put64(inout s, sub + SubmitInfo::SignalSemaphores, addr(in s, SubmitBlock::Semaphore));
+    flush(in s);
+    let rc = Vk::vkQueueSubmit(d.queue, 1, addr(in s, sub), 0);
+    release(in s);
+    check(rc, Call::QueueSubmit);
+    value
+}
+
+// Frees a recording's descriptor pools and command pool. Its command
+// buffer must not be pending: never submitted, or its value waited for.
+pub fn rec_free(in d: Dev, in r: Rec) eff [Ffi[Vk], Fail[RuntimeError]] {
+    for i in 0..r.pools.len() {
+        Vk::vkDestroyDescriptorPool(d.device, r.pools[i], 0);
+    }
+    Vk::vkDestroyCommandPool(d.device, r.pool, 0);
+}

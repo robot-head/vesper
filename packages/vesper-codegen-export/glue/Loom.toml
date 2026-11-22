@@ -1,0 +1,11 @@
+[package]
+name = "@vesper/codegen-export-glue"
+version = "0.1.0"
+edition = "2026"
+# The export glue emits through @vesper/cranelift's `.vsys` library.
+capability_ceiling = ["Fail", "Alloc", "Ffi"]
+
+[dependencies]
+"@vesper/check-data" = { version = "^0.1", path = "../../vesper-check-data" }
+"@vesper/codegen-export" = { version = "^0.1", path = ".." }
+"@vesper/cranelift" = { version = "^0.1", path = "../../vesper-cranelift" }

@@ -134,31 +134,19 @@ fn key_extra(c: u8) -> bool {
 
 // `!#$%&'*+-.^_`|~:/` in a token.
 fn token_extra(c: u8) -> bool {
-    c
-        == ASCII_BANG
+    c == ASCII_BANG
         || (c >= ASCII_HASH && c <= ASCII_APOSTROPHE)
-        || c
-        == ASCII_STAR
-        || c
-        == ASCII_PLUS
-        || c
-        == ASCII_MINUS
-        || c
-        == ASCII_DOT
-        || c
-        == ASCII_CARET
-        || c
-        == ASCII_UNDERSCORE
-        || c
-        == ASCII_BACKTICK
-        || c
-        == ASCII_PIPE
-        || c
-        == ASCII_TILDE
-        || c
-        == ASCII_COLON
-        || c
-        == ASCII_SLASH
+        || c == ASCII_STAR
+        || c == ASCII_PLUS
+        || c == ASCII_MINUS
+        || c == ASCII_DOT
+        || c == ASCII_CARET
+        || c == ASCII_UNDERSCORE
+        || c == ASCII_BACKTICK
+        || c == ASCII_PIPE
+        || c == ASCII_TILDE
+        || c == ASCII_COLON
+        || c == ASCII_SLASH
 }
 
 // `+/=` in a byte sequence.

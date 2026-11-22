@@ -621,14 +621,14 @@ fn lower_function(inout d: D, f: u32, owner: u32) {
             .ast
             .trait_refs
             .alloc(
-            TraitRefNode {
-                package: NONE,
-                name: trn.a,
-                args: trn.b,
-                start: p.start,
-                end: p.end
-            }
-        )
+                TraitRefNode {
+                    package: NONE,
+                    name: trn.a,
+                    args: trn.b,
+                    start: p.start,
+                    end: p.end
+                }
+            )
             .raw();
         let b = new_bound(inout d, g, tref, p.start, p.end, owner);
         d.ast.m_bounds.push(b);

@@ -4,8 +4,8 @@
 //
 // The Rust wrapper owns the 64-byte-aligned `Vec<f32>` (alignment is a
 // property of its address) and lends it as bits with its base offset. A
-// delay line's metadata is five words: offset, delay, capacity, stride and
-// head.
+// delay line's metadata is `SlabWords::Line` words (`Slot`): offset, delay,
+// capacity, stride and head.
 use self::{
     SlabFault
 };
@@ -13,25 +13,46 @@ use self::seqs::{
     at
 };
 
-fn isize_max() -> u64 {
-    9223372036854775807
+const ISIZE_MAX: u64 = 9223372036854775807;
+const U64_MAX: u64 = 18446744073709551615;
+// Buffers and lines are whole tiles of TILE samples; an allocation has
+// TILE_SLACK more samples, so its base can be aligned.
+const TILE: u64 = 16;
+const TILE_SLACK: u64 = 15;
+const SAMPLE_BYTES: u64 = 4;
+
+// A delay line's metadata words.
+pub enum Slot: _ {
+    Offset,
+    Delay,
+    Capacity,
+    Stride,
+    Head
 }
 
-fn umax() -> u64 {
-    18446744073709551615
+// The words after the lines' metadata in `s_delays`.
+pub enum Totals: _ {
+    Stride,
+    Length
 }
 
-// `n` rounded up to whole 16-sample tiles, or `None` on overflow.
+// A line's metadata words, then the totals' (an enum, as graph imports it).
+pub enum SlabWords: _ {
+    Line = 5,
+    Totals = 2
+}
+
+// `n` rounded up to whole tiles, or `None` on overflow.
 fn tiles(n: u64) -> Option[u64] eff [Fail[RuntimeError], Fail[ArithOverflow]] {
-    if n > wrapping_sub(umax(), 15) {
+    if n > wrapping_sub(U64_MAX, TILE_SLACK) {
         return Option::None;
     }
-    Option::Some(wrapping_add(n, 15) / 16 * 16)
+    Option::Some(wrapping_add(n, TILE_SLACK) / TILE * TILE)
 }
 
 // Whether a slab of `len` samples has a byte size of at most `isize::MAX`.
 fn fits_bytes(len: u64) -> bool {
-    len <= isize_max() / 4
+    len <= ISIZE_MAX / SAMPLE_BYTES
 }
 
 // `TiledSlab::new`: the stride and the allocation length in samples.
@@ -44,29 +65,31 @@ pub fn s_tiled(buffers: u64, block: u64)
             0
         },
     };
-    if stride != 0 && buffers > umax() / stride {
+    if stride != 0 && buffers > U64_MAX / stride {
         Fail::raise(SlabFault::TooLarge(buffers, block));
     }
     let used = wrapping_mul(buffers, stride);
-    if used > wrapping_sub(umax(), 15) {
+    if used > wrapping_sub(U64_MAX, TILE_SLACK) {
         Fail::raise(SlabFault::TooLarge(buffers, block));
     }
-    let len = wrapping_add(used, 15);
+    let len = wrapping_add(used, TILE_SLACK);
     if !fits_bytes(len) {
         Fail::raise(SlabFault::TooLarge(buffers, block));
     }
     (stride, len)
 }
 
-// `DelaySlab::new`: five metadata words per line, then the total stride and
-// the allocation length (0 and 0 without lines).
+// `DelaySlab::new`: `SlabWords::Line` metadata words per line, then the `Totals`:
+// the total stride and the allocation length (0 and 0 without lines).
 pub fn s_delays(in delays: Slice[u32], block: u64)
     -> ChunkSeq[u64] eff [Fail[RuntimeError], Fail[ArithOverflow], Fail[SlabFault]] {
     let n = delays.len();
     if block == 0 {
         Fail::raise(SlabFault::TooLarge(n, block));
     }
-    let mut out: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](wrapping_add(wrapping_mul(n, 5), 2));
+    let mut out: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](
+        wrapping_add(wrapping_mul(n, SlabWords::Line), SlabWords::Totals)
+    );
     if n == 0 {
         out.push(0);
         out.push(0);
@@ -78,7 +101,7 @@ pub fn s_delays(in delays: Slice[u32], block: u64)
             Option::Some(d) => widen_u64(d),
             Option::None => 0,
         };
-        if delay > wrapping_sub(umax(), block) {
+        if delay > wrapping_sub(U64_MAX, block) {
             Fail::raise(SlabFault::TooLarge(n, block));
         }
         let cap = wrapping_add(delay, block);
@@ -94,15 +117,15 @@ pub fn s_delays(in delays: Slice[u32], block: u64)
         out.push(cap);
         out.push(stride);
         out.push(0);
-        if total > wrapping_sub(umax(), stride) {
+        if total > wrapping_sub(U64_MAX, stride) {
             Fail::raise(SlabFault::TooLarge(n, block));
         }
         total = wrapping_add(total, stride);
     }
-    if total > wrapping_sub(umax(), 15) {
+    if total > wrapping_sub(U64_MAX, TILE_SLACK) {
         Fail::raise(SlabFault::TooLarge(n, block));
     }
-    let len = wrapping_add(total, 15);
+    let len = wrapping_add(total, TILE_SLACK);
     if !fits_bytes(len) {
         Fail::raise(SlabFault::TooLarge(n, block));
     }
@@ -120,13 +143,13 @@ pub fn s_write(
     line: u64,
     in input: Slice[u32]
 ) eff [Fail[RuntimeError], Fail[ArithOverflow]] {
-    if line >= slots.len() / 5 {
+    if line >= slots.len() / SlabWords::Line {
         return;
     }
-    let m = line * 5;
+    let m = line * SlabWords::Line;
     let start = base + slots[m];
-    let cap = slots[m + 2];
-    let head = slots[m + 4];
+    let cap = slots[m + Slot::Capacity];
+    let head = slots[m + Slot::Head];
     let n = input.len();
     if n <= cap {
         let mut first = cap - head;
@@ -152,14 +175,14 @@ pub fn s_read(
     line: u64,
     inout out: Slice[u32]
 ) eff [Fail[RuntimeError], Fail[ArithOverflow]] {
-    if line >= slots.len() / 5 {
+    if line >= slots.len() / SlabWords::Line {
         return;
     }
-    let m = line * 5;
+    let m = line * SlabWords::Line;
     let ring = base + slots[m];
-    let delay = slots[m + 1];
-    let cap = slots[m + 2];
-    let head = slots[m + 4];
+    let delay = slots[m + Slot::Delay];
+    let cap = slots[m + Slot::Capacity];
+    let head = slots[m + Slot::Head];
     let start = if head >= delay {
         head - delay
     } else if delay <= cap {
@@ -189,15 +212,15 @@ pub fn s_advance(inout slots: Slice[u64], block: u64) eff [
     Fail[RuntimeError],
     Fail[ArithOverflow]
 ] {
-    let lines = slots.len() / 5;
+    let lines = slots.len() / SlabWords::Line;
     for line in 0..lines {
-        let m = line * 5;
-        let cap = slots[m + 2];
-        let next = slots[m + 4] + block;
+        let m = line * SlabWords::Line;
+        let cap = slots[m + Slot::Capacity];
+        let next = slots[m + Slot::Head] + block;
         if next < cap {
-            slots.set(m + 4, next);
+            slots.set(m + Slot::Head, next);
         } else {
-            slots.set(m + 4, next % cap);
+            slots.set(m + Slot::Head, next % cap);
         }
     }
 }

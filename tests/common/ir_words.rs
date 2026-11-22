@@ -24,14 +24,16 @@
 //! index, the Vesper tables carry the index and (for the operation enums)
 //! the `Debug` text as a name, so a pass can tell `Get` from `Push`. A
 //! Vesper pass can copy, move and drop pool references but not make new
-//! payloads; a lane that must (bounds hoisting makes `SeqOp::Hoisted`)
-//! adds a structured pool kind.
+//! payloads, except the structured pool kinds of [`made_payload`]
+//! (bounds hoisting's `SeqOp::Hoisted` and `SeqOp::BoundsGuard`), which
+//! it appends after the input's entries.
 //!
 //! The program section (every name a name index, every type a type index
 //! of the stream's own tables; `opt` is 0 for none, else index + 1):
 //!
 //! ```text
 //! pool:   n, n x (kind, label name)          kind: 0 seq 1 vector 2 tiled 3 fip 4 expr
+//!                                            (5 hoisted, 6 guard: label a number)
 //! paths:  n, n x (k, k names)                path 0 is the empty path
 //! fns:    n, n x function
 //! function: name, header, blocks, trailer
@@ -287,6 +289,12 @@ impl Tables {
                 self.raw(3);
                 self.name(s);
                 self.raw(0);
+            }
+            // A literal past `i128::MAX`: two raw words, like an Int.
+            Literal::WideInt(n) => {
+                self.raw(4);
+                self.raw(*n as u64);
+                self.raw((*n >> 64) as u64);
             }
         }
     }
@@ -803,7 +811,7 @@ impl Tables {
         out
     }
 
-    fn label_names(&mut self) {
+    pub fn label_names(&mut self) {
         let labels: Vec<String> = self.pool.items.iter().map(Payload::label).collect();
         for l in labels {
             self.enc.name(&l);
@@ -886,6 +894,36 @@ pub fn program_input(w: &World, program: &Program) -> Option<(Vec<u8>, Pool)> {
     Some((t.enc.finish(&world, &section), t.pool))
 }
 
+/// [`program_input`] with an empty world section, for a pass that takes
+/// no world (bounds hoisting) and for the identity round trip.
+pub fn program_only_input(program: &Program) -> Option<(Vec<u8>, Pool)> {
+    if !program.functions.values().all(function_fits) {
+        return None;
+    }
+    let mut t = Tables::of(program);
+    t.label_names();
+    let section = t.section();
+    // box_active, then empty ADT, effect, expression-type and span tables.
+    let world = [0, 0, 0, 0, 0, 0];
+    Some((t.enc.finish(&world, &section), t.pool))
+}
+
+/// `program` through a Vesper pass `call` (input bytes to output words) and
+/// back: the identity hook of the IR swap point when `call` is
+/// `place_ir_round_trip`. With `world` the input carries it; `None` when
+/// the program cannot be encoded (the caller keeps the Rust program).
+pub fn through_vesper(
+    world: Option<&World>,
+    program: &Program,
+    call: impl FnOnce(&[u8]) -> Vec<u64>,
+) -> Option<Program> {
+    let (input, pool) = match world {
+        Some(w) => program_input(w, program)?,
+        None => program_only_input(program)?,
+    };
+    Some(decode_program(&call(&input), &pool))
+}
+
 /// The words `put_program` writes, made by Rust: names, types (no world),
 /// then the program section. The Rust half of the round trip.
 pub fn program_words(program: &Program) -> Option<(Vec<u64>, Pool)> {
@@ -910,6 +948,42 @@ pub fn program_words(program: &Program) -> Option<(Vec<u64>, Pool)> {
     out.extend(&t.enc.type_words);
     out.extend(section);
     Some((out, t.pool))
+}
+
+// ------------------------------------------------------- made payloads
+//
+// SH3 lane 12 (#1251, bounds hoisting): the pool kinds a Vesper pass
+// creates rather than keeps. Their label is a number, not a name:
+//
+// - 5, `SeqOp::Hoisted(access)`: label 0 `Get`, 1 `Set`, 2 `TryGet`,
+//   3 `TrySet`.
+// - 6, `SeqOp::BoundsGuard`: label bit 0 `inclusive`, bit 1
+//   `form.negated`, bits 8..16 `form.plus`, bits 16..24 `form.minus`.
+//
+// packages/vesper-bounds-hoist/src/encode.ves (`POOL_HOISTED`,
+// `POOL_GUARD`) writes them. The input encoding never has them.
+
+/// The payload a Vesper pass made for pool `kind` with `label`, or `None`
+/// for an entry of the input pool.
+fn made_payload(kind: u64, label: u64) -> Option<Payload> {
+    use vesper::seq::{Access, IndexForm};
+    match kind {
+        5 => Some(Payload::Seq(SeqOp::Hoisted(match label {
+            0 => Access::Get,
+            1 => Access::Set,
+            2 => Access::TryGet,
+            _ => Access::TrySet,
+        }))),
+        6 => Some(Payload::Seq(SeqOp::BoundsGuard {
+            inclusive: label & 1 != 0,
+            form: IndexForm {
+                negated: label & 2 != 0,
+                plus: (label >> 8) as u8,
+                minus: (label >> 16) as u8,
+            },
+        })),
+        _ => None,
+    }
 }
 
 // ------------------------------------------------------------------ decoder
@@ -938,8 +1012,11 @@ struct Dec<'a> {
     paths: Vec<Vec<String>>,
     pool: &'a Pool,
     /// Pool indices of the stream, mapped to `pool` (the entries a Vesper
-    /// pass kept, which it may have reordered).
+    /// pass kept, which it may have reordered). An index past `pool` is
+    /// an entry of `made`.
     pool_map: Vec<usize>,
+    /// Payloads a Vesper pass made itself ([`made_payload`]).
+    made: Vec<Payload>,
 }
 
 impl Dec<'_> {
@@ -982,9 +1059,12 @@ impl Dec<'_> {
     fn payload(&mut self) -> Payload {
         let i = self.next() as usize;
         let at = self.pool_map.get(i).copied().unwrap_or(usize::MAX);
+        let n = self.pool.items.len();
+        let made = at.checked_sub(n).and_then(|j| self.made.get(j));
         self.pool
             .items
             .get(at)
+            .or(made)
             .cloned()
             .unwrap_or(Payload::Fip(FipOp::BoxNew))
     }
@@ -1012,6 +1092,11 @@ impl Dec<'_> {
                 let b = self.next() != 0;
                 self.next();
                 Literal::Bool(b)
+            }
+            4 => {
+                let lo = self.next() as u128;
+                let hi = self.next() as u128;
+                Literal::WideInt(hi << 64 | lo)
             }
             _ => {
                 let s = self.name();
@@ -1587,14 +1672,22 @@ pub fn decode_program(words: &[u64], pool: &Pool) -> Program {
         paths: vec![],
         pool,
         pool_map: vec![],
+        made: vec![],
     };
     // The pool: each entry's kind and label, matched to the input pool by
-    // position (a Vesper pass keeps the input's pool and appends nothing).
+    // position (a Vesper pass keeps the input's pool and appends only the
+    // entries of [`made_payload`]).
     let np = d.count();
     for i in 0..np {
-        d.next();
-        d.next();
-        d.pool_map.push(i);
+        let kind = d.next();
+        let label = d.next();
+        match made_payload(kind, label) {
+            Some(p) => {
+                d.pool_map.push(pool.items.len() + d.made.len());
+                d.made.push(p);
+            }
+            None => d.pool_map.push(i),
+        }
     }
     let n = d.count();
     for _ in 0..n {
@@ -1717,4 +1810,89 @@ pub fn dump(program: &Program) -> String {
     let mut t = Tables::of(program);
     t.label_names();
     t.dump()
+}
+
+// ------------------------------------------------------------------ pass harness
+
+/// What [`compare_pass`] found; `None` fields agree.
+#[derive(Debug, Default)]
+pub struct PassOutcome {
+    /// The first differing line of the two outputs' canonical dumps.
+    pub dump: Option<String>,
+    /// The outputs are not `Debug`-equal (the dump can hide nothing the
+    /// words carry, so this only fires with `dump`, or on a payload).
+    pub debug: bool,
+    /// `ir_check::validate` disagrees on the two outputs.
+    pub ir_check: bool,
+    /// The input could not be encoded; nothing was compared.
+    pub skipped: bool,
+}
+
+impl PassOutcome {
+    pub fn agrees(&self) -> bool {
+        self.dump.is_none() && !self.debug && !self.ir_check
+    }
+}
+
+fn first_line_difference(a: &str, b: &str) -> Option<String> {
+    let (x, y): (Vec<&str>, Vec<&str>) = (a.lines().collect(), b.lines().collect());
+    (0..x.len().max(y.len())).find_map(|i| {
+        let (p, q) = (x.get(i).copied(), y.get(i).copied());
+        (p != q).then(|| {
+            format!(
+                "line {}:\n  rust:   {}\n  vesper: {}",
+                i + 1,
+                p.unwrap_or("<end>"),
+                q.unwrap_or("<end>")
+            )
+        })
+    })
+}
+
+/// Programs with more instructions than this skip [`compare_pass`]'s IR
+/// check.
+pub const IR_CHECK_CAP: usize = 20_000;
+
+/// The instructions of `p`.
+pub fn instructions(p: &Program) -> usize {
+    p.functions
+        .values()
+        .flat_map(|f| &f.blocks)
+        .map(|b| b.instructions.len())
+        .sum()
+}
+
+/// The pass harness of the SH3 IR lanes: runs the Rust pass `rust` and the
+/// Vesper pass `vesper` (input bytes of [`program_input`] to the words of
+/// `put_program`) on the same `input`, and compares the outputs: their
+/// canonical dumps, `Debug` equality, and the IR check's diagnostics on
+/// each below [`IR_CHECK_CAP`] instructions (`@vesper/ir-check` runs
+/// through `ir_check::validate` in the hybrid build). JIT results go through the swap point instead
+/// (tests/self_host_place_ir_jit.rs).
+pub fn compare_pass(
+    world: &World,
+    input: &Program,
+    rust: impl FnOnce(&mut Program),
+    vesper: impl FnOnce(&[u8]) -> Vec<u64>,
+) -> PassOutcome {
+    let Some(theirs) = through_vesper(Some(world), input, vesper) else {
+        return PassOutcome {
+            skipped: true,
+            ..PassOutcome::default()
+        };
+    };
+    let mut ours = input.clone();
+    rust(&mut ours);
+    let dump = first_line_difference(&dump(&ours), &dump(&theirs));
+    let debug = format!("{ours:?}") != format!("{theirs:?}");
+    // The IR check of a large optimized package can take minutes (one
+    // inlined package: 247 s), so it runs only below the cap.
+    let ir_check = instructions(input) <= IR_CHECK_CAP
+        && vesper::ir_check::validate(world, &ours) != vesper::ir_check::validate(world, &theirs);
+    PassOutcome {
+        dump,
+        debug,
+        ir_check,
+        skipped: false,
+    }
 }

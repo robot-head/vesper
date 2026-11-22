@@ -20,59 +20,29 @@ fn assemble(inout pl: Planner, in g: Graph, inout out: PlanOut) {
         loop {
             match pl.tex.try_get(j) {
                 Option::Some(e) => {
-                    let same_key = e
-                        .pk0
-                        == head
-                        .pk0
-                        && e
-                        .pk1
-                        == head
-                        .pk1
-                        && e
-                        .pk2
-                        == head
-                        .pk2
-                        && e
-                        .resource
-                        == head
-                        .resource
-                        && e
-                        .sync_before
-                        == head
-                        .sync_before
-                        && e
-                        .sync_after
-                        == head
-                        .sync_after
-                        && e
-                        .access_before
-                        == head
-                        .access_before
-                        && e
-                        .access_after
-                        == head
-                        .access_after
-                        && e
-                        .layout_before
-                        == head
-                        .layout_before
-                        && e
-                        .layout_after
-                        == head
-                        .layout_after;
+                    let same_key = e.pk0 == head.pk0
+                        && e.pk1 == head.pk1
+                        && e.pk2 == head.pk2
+                        && e.resource == head.resource
+                        && e.sync_before == head.sync_before
+                        && e.sync_after == head.sync_after
+                        && e.access_before == head.access_before
+                        && e.access_after == head.access_after
+                        && e.layout_before == head.layout_before
+                        && e.layout_after == head.layout_after;
                     if !same_key {
                         break;
                     }
                     members.push(e.sub);
                     coords
                         .push(
-                        SubPos {
-                            flat: e.sub,
-                            mip: e.mip,
-                            slice: e.slice,
-                            plane: e.plane
-                        }
-                    );
+                            SubPos {
+                                flat: e.sub,
+                                mip: e.mip,
+                                slice: e.slice,
+                                plane: e.plane
+                            }
+                        );
                     j = wrapping_add(j, 1);
                 },
                 Option::None => {
@@ -138,27 +108,27 @@ fn assemble(inout pl: Planner, in g: Graph, inout out: PlanOut) {
     for p in 0..n {
         pre
             .push(
-            SlotRange {
-                start: 0,
-                count: 0
-            }
-        );
+                SlotRange {
+                    start: 0,
+                    count: 0
+                }
+            );
         post
             .push(
-            SlotRange {
-                start: 0,
-                count: 0
-            }
-        );
+                SlotRange {
+                    start: 0,
+                    count: 0
+                }
+            );
     }
     for q in 0..nq {
         fin
             .push(
-            SlotRange {
-                start: 0,
-                count: 0
-            }
-        );
+                SlotRange {
+                    start: 0,
+                    count: 0
+                }
+            );
     }
     let mut k: u64 = 0;
     loop {
@@ -258,11 +228,11 @@ fn assemble(inout pl: Planner, in g: Graph, inout out: PlanOut) {
     for p in 0..n {
         wait_at
             .push(
-            SlotRange {
-                start: 0,
-                count: 0
-            }
-        );
+                SlotRange {
+                    start: 0,
+                    count: 0
+                }
+            );
     }
     for x in 0..out.order.len() {
         let p = get32(in out.order, x);
@@ -271,22 +241,22 @@ fn assemble(inout pl: Planner, in g: Graph, inout out: PlanOut) {
         let w = needed_waits(inout ck, q, in producers);
         wait_at
             .try_set(
-            widen_u64(p),
-            SlotRange {
-                start: waits.len(),
-                count: w.len()
-            }
-        );
+                widen_u64(p),
+                SlotRange {
+                    start: waits.len(),
+                    count: w.len()
+                }
+            );
         for i in 0..w.len() {
             match w.try_get(i) {
                 Option::Some(c) => waits
                     .push(
-                    WaitRec {
-                        pass: p,
-                        queue: c.key,
-                        producer: c.value
-                    }
-                ),
+                        WaitRec {
+                            pass: p,
+                            queue: c.key,
+                            producer: c.value
+                        }
+                    ),
                 Option::None => (),
             }
         }
@@ -306,21 +276,21 @@ fn assemble(inout pl: Planner, in g: Graph, inout out: PlanOut) {
                 match w.try_get(i) {
                     Option::Some(c) => final_lists
                         .push(
-                        Pair {
-                            key: wrapping_u32(q),
-                            value: c.key
-                        }
-                    ),
+                            Pair {
+                                key: wrapping_u32(q),
+                                value: c.key
+                            }
+                        ),
                     Option::None => (),
                 }
                 match w.try_get(i) {
                     Option::Some(c) => final_lists
                         .push(
-                        Pair {
-                            key: wrapping_u32(q),
-                            value: c.value
-                        }
-                    ),
+                            Pair {
+                                key: wrapping_u32(q),
+                                value: c.value
+                            }
+                        ),
                     Option::None => (),
                 }
             }
@@ -352,13 +322,13 @@ fn assemble(inout pl: Planner, in g: Graph, inout out: PlanOut) {
                     Option::Some(w) => out
                         .cmds
                         .push(
-                        CmdRec {
-                            queue: q32,
-                            tag: 0,
-                            a: widen_u64(w.queue),
-                            b: get64(in value_of, widen_u64(w.producer))
-                        }
-                    ),
+                            CmdRec {
+                                queue: q32,
+                                tag: 0,
+                                a: widen_u64(w.queue),
+                                b: get64(in value_of, widen_u64(w.producer))
+                            }
+                        ),
                     Option::None => (),
                 }
             }
@@ -366,25 +336,25 @@ fn assemble(inout pl: Planner, in g: Graph, inout out: PlanOut) {
             out
                 .cmds
                 .push(
-                CmdRec {
-                    queue: q32,
-                    tag: 2,
-                    a: p,
-                    b: 0
-                }
-            );
+                    CmdRec {
+                        queue: q32,
+                        tag: 2,
+                        a: p,
+                        b: 0
+                    }
+                );
             emit_slot(inout out, in items, in pending, get_range(in post, p), q32);
             if getb(in ck.signaled, p) {
                 out
                     .cmds
                     .push(
-                    CmdRec {
-                        queue: q32,
-                        tag: 3,
-                        a: 0,
-                        b: get64(in value_of, p)
-                    }
-                );
+                        CmdRec {
+                            queue: q32,
+                            tag: 3,
+                            a: 0,
+                            b: get64(in value_of, p)
+                        }
+                    );
             }
         }
         let mut f: u64 = 0;
@@ -396,13 +366,13 @@ fn assemble(inout pl: Planner, in g: Graph, inout out: PlanOut) {
                             out
                                 .cmds
                                 .push(
-                                CmdRec {
-                                    queue: q32,
-                                    tag: 0,
-                                    a: widen_u64(dq.value),
-                                    b: get64(in value_of, widen_u64(d.value))
-                                }
-                            );
+                                    CmdRec {
+                                        queue: q32,
+                                        tag: 0,
+                                        a: widen_u64(dq.value),
+                                        b: get64(in value_of, widen_u64(d.value))
+                                    }
+                                );
                         }
                     },
                     Option::None => (),
@@ -491,31 +461,29 @@ pub fn graph_plan(in g: Graph, split_barriers: bool) -> PlanOut {
             pl
                 .segs
                 .push(
-                Seg {
-                    start: 0,
-                    end: res.size,
-                    sid: wrapping_u32(pl.states.len()),
-                    next: none32()
-                }
-            );
+                    Seg {
+                        start: 0,
+                        end: res.size,
+                        sid: wrapping_u32(pl.states.len()),
+                        next: none32()
+                    }
+                );
             pl.states.push(new_state(false, Layout::Undefined));
         }
     }
     for e in 0..g.explicit.len() {
         match g.explicit.try_get(e) {
             Option::Some(x) => {
-                if get_pass(in g, widen_u64(x.before))
-                    .queue
-                    != get_pass(in g, widen_u64(x.after))
-                    .queue {
+                if get_pass(in g, widen_u64(x.before)).queue
+                    != get_pass(in g, widen_u64(x.after)).queue {
                     pl
                         .cross
                         .push(
-                        Pair {
-                            key: x.after,
-                            value: x.before
-                        }
-                    );
+                            Pair {
+                                key: x.after,
+                                value: x.before
+                            }
+                        );
                 }
             },
             Option::None => (),
@@ -543,15 +511,16 @@ pub fn graph_plan(in g: Graph, split_barriers: bool) -> PlanOut {
             Option::Some(x) => out
                 .deps
                 .push(
-                DepRec {
-                    before: x.before,
-                    after: x.after,
-                    kind: dep_kind_of(x.kind),
-                    has_resource: x.has_resource == 1,
-                    resource: x.resource,
-                    texture: x.has_resource == 1 && graph_is_texture(in g, widen_u64(x.resource))
-                }
-            ),
+                    DepRec {
+                        before: x.before,
+                        after: x.after,
+                        kind: dep_kind_of(x.kind),
+                        has_resource: x.has_resource == 1,
+                        resource: x.resource,
+                        texture: x.has_resource == 1
+                            && graph_is_texture(in g, widen_u64(x.resource))
+                    }
+                ),
             Option::None => (),
         }
     }

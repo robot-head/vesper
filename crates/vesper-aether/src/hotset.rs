@@ -100,6 +100,30 @@ impl HotSet {
     }
     /// Maximal contiguous runs, each split to at most `batch` pages.
     pub fn runs(&self, batch: usize) -> Result<Vec<PageRun>, HotSetError> {
+        #[cfg(feature = "vesper-port")]
+        {
+            let pages: Vec<u64> = self.pages.iter().map(|&p| p as u64).collect();
+            let mut out = vec![0u64; 2 * pages.len()];
+            let n = crate::binding::hotset_runs(&pages, batch as u64, &mut out)
+                .map_err(HotSetError::from)?;
+            Ok(out
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .take(n as usize)
+                .map(|w| PageRun {
+                    start: w[0] as usize,
+                    pages: w[1] as usize,
+                })
+                .collect())
+        }
+        #[cfg(not(feature = "vesper-port"))]
+        self.runs_reference(batch)
+    }
+    /// The Rust implementation of [`Self::runs`], kept for the differential
+    /// and ABBA tests until the port flips.
+    #[doc(hidden)]
+    pub fn runs_reference(&self, batch: usize) -> Result<Vec<PageRun>, HotSetError> {
         if batch == 0 {
             return Err(HotSetError::BadBatch);
         }
@@ -125,6 +149,33 @@ impl HotSet {
         out
     }
     pub fn decode(bytes: &[u8], expected_page_count: usize) -> Result<Self, HotSetError> {
+        #[cfg(feature = "vesper-port")]
+        {
+            // Room for the header's count, bounded by what the body can hold
+            // and by MAX_HOT_PAGES. This only sizes the buffer: the port
+            // rejects a bad header, a count above MAX_HOT_PAGES and a body
+            // that is not exactly the count's size before writing.
+            let declared = bytes
+                .get(12..16)
+                .map_or(0, |b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize);
+            let room = (bytes.len().saturating_sub(HEADER_BYTES) / 4)
+                .min(MAX_HOT_PAGES)
+                .min(declared);
+            let mut out = vec![0u64; room];
+            let n = crate::binding::hotset_decode(bytes, expected_page_count as u64, &mut out)
+                .map_err(HotSetError::from)?;
+            Ok(Self {
+                page_count: expected_page_count,
+                pages: out[..n as usize].iter().map(|&p| p as usize).collect(),
+            })
+        }
+        #[cfg(not(feature = "vesper-port"))]
+        Self::decode_reference(bytes, expected_page_count)
+    }
+    /// The Rust implementation of [`Self::decode`], kept for the
+    /// differential and ABBA tests until the port flips.
+    #[doc(hidden)]
+    pub fn decode_reference(bytes: &[u8], expected_page_count: usize) -> Result<Self, HotSetError> {
         if bytes.len() < HEADER_BYTES {
             return Err(HotSetError::Truncated);
         }

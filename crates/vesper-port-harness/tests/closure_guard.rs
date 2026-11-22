@@ -120,8 +120,11 @@ fn compiler_closure_links_only_seed_packages() {
         );
     }
     // The guard sees ports at all: vesper-beacon-arrow, outside the
-    // closure, links the port-backed vesper-beacon.
-    assert_eq!(violations(&meta, "vesper-beacon-arrow"), ["vesper-beacon"]);
+    // closure, is port-backed and links the port-backed vesper-beacon.
+    assert_eq!(
+        violations(&meta, "vesper-beacon-arrow"),
+        ["vesper-beacon", "vesper-beacon-arrow"]
+    );
 }
 
 #[test]

@@ -1,0 +1,681 @@
+// @vesper/codegen-export-glue: the export ABI v2 glue in Vesper
+// (self-hosting SH4 lane 12, #1286). It ports src/native_export/glue.rs:
+// the runtime entry points every v2 library exports
+// (`vesper_<lib>_seq_new`, `_seq_free`, `_live_allocations`, v4's
+// `_box_new`) and the drop glue of each seq_handle type, emitted through the
+// Cranelift module the Rust compiler lends (`vesper_cranelift_sys::
+// lend_module`).
+//
+// The Rust glue first defines the sequence runtime and `vesper_box_alloc`
+// (those belong to the seq and drops families); the `export` hook takes
+// over from there (`glue::define`'s swap point). `export_glue` is the hook:
+// its argument words are a flags word and the interface in the words of
+// tests/self_host_codegen_export/words.rs.
+
+use @vesper/check-data::util::{
+    inc
+};
+use @vesper/codegen-export::iface::{
+    DeclRow,
+    FieldRow,
+    Iface,
+    TyNode,
+    VarRow,
+    read_iface
+};
+use @vesper/cranelift::{
+    Block,
+    DataId,
+    FuncId,
+    SigId,
+    Value,
+    append_block_param,
+    append_block_params_for_function_params,
+    block_param,
+    builder_new,
+    call_args,
+    call_module,
+    call_return_module,
+    call_conv_default,
+    cc_eq,
+    cc_ult,
+    create_block,
+    declare_data,
+    declare_function,
+    define_function,
+    import_data,
+    import_function,
+    import_signature,
+    ins_atomic_load,
+    ins_atomic_rmw,
+    ins_brif,
+    ins_brif0,
+    ins_call,
+    ins_call_indirect,
+    ins_iadd,
+    ins_iadd_imm,
+    ins_iconst,
+    ins_icmp,
+    ins_icmp_imm,
+    ins_imul_imm,
+    ins_jump,
+    ins_jump0,
+    ins_load,
+    ins_return,
+    ins_return1,
+    ins_symbol_value,
+    ins_trap,
+    inst_result,
+    linkage_export,
+    linkage_import,
+    linkage_local,
+    mem_readonly,
+    mem_trusted,
+    module_pointer_type,
+    seal_all_blocks,
+    sig_new,
+    sig_param,
+    sig_return,
+    switch_to_block,
+    trap_user,
+    ty_i64,
+    vals1,
+    vals2
+};
+
+// The answer of a hook (src/codegen_swap.rs).
+const HANDLED: u64 = 1;
+const DECLINED: u64 = 0;
+
+// `AbiType` kinds (iface.ves `K_*`).
+const K_SCALAR: u8 = 0;
+const K_TUPLE: u8 = 1;
+const K_NAMED: u8 = 2;
+const K_SEQ: u8 = 3;
+const K_SLICE: u8 = 4;
+const K_BOX: u8 = 5;
+const K_STR: u8 = 6;
+const K_OBJECT: u8 = 7;
+const K_EXTERN: u8 = 8;
+
+// The flags word: what the lent module already holds.
+// `vesper_box_free` is defined (`declare_or_define_free` finds it).
+const F_BOX_FREE: u64 = 1;
+// The sequence runtime's live counter `vesper_seq_live` exists.
+const F_SEQ_COUNTER: u64 = 2;
+// The box runtime's live counter `vesper_box_live` exists.
+const F_BOX_COUNTER: u64 = 4;
+
+// `dyn_trait::BOXED_HEADER`: a boxed object is `{vtable, value}`.
+const BOXED_HEADER: i64 = 8;
+// The status `vesper_box_alloc` exits with when `calloc` fails.
+const OOM: i64 = 72;
+// The word size and the `cranelift` code of `I64`.
+const WORD: u64 = 8;
+const I64_CODE: u32 = 4;
+// `AtomicRmwOp::Add` in the shim's atomic_rmw codes.
+const RMW_ADD: u32 = 1;
+
+// The runtime functions the drop glue calls.
+copy struct Runtime {
+    seq_free: FuncId,
+    str_release: FuncId,
+    box_free: FuncId,
+}
+
+fn bytes_of(in s: Str) -> ChunkSeq[u8] {
+    let b = s.as_bytes();
+    let mut o = ChunkSeq::with_capacity[u8](b.len());
+    o.extend(in b);
+    o
+}
+
+fn name_of(in i: Iface, s: u32) -> ChunkSeq[u8] {
+    let mut o = ChunkSeq::new[u8]();
+    i.names.write(s, inout o);
+    o
+}
+
+// `word_sig(m, params, true)`: `params` words in, one word out.
+fn word_sig(inout m: Module, params: u64) -> SigId eff [Ffi[Cranelift]] {
+    let s = sig_new(inout m, call_conv_default());
+    for _ in 0..params {
+        sig_param(inout m, s, ty_i64());
+    }
+    sig_return(inout m, s, ty_i64());
+    s
+}
+
+// A signature of `params` words and no result.
+fn void_sig(inout m: Module, params: u64) -> SigId eff [Ffi[Cranelift]] {
+    let s = sig_new(inout m, call_conv_default());
+    for _ in 0..params {
+        sig_param(inout m, s, ty_i64());
+    }
+    s
+}
+
+fn declare(inout m: Module, in name: ChunkSeq[u8], linkage: u32, params: u64)
+    -> FuncId eff [Ffi[Cranelift]] {
+    let s = word_sig(inout m, params);
+    declare_function(inout m, in name.as_slice(), linkage, s)
+}
+
+fn declare_str(inout m: Module, in name: Str, linkage: u32, params: u64)
+    -> FuncId eff [Ffi[Cranelift]] {
+    let n = bytes_of(in name);
+    declare(inout m, in n, linkage, params)
+}
+
+// `call(b, m, id, args)`: import `f` into the function and call it.
+fn call1(inout b: Builder, inout m: Module, f: FuncId, x: Value) -> u32 eff [Ffi[Cranelift]] {
+    let r = import_function(inout b, inout m, f);
+    let a = vals1(x);
+    ins_call(inout b, r, in a.as_slice())
+}
+
+fn call2(inout b: Builder, inout m: Module, f: FuncId, x: Value, y: Value)
+    -> u32 eff [Ffi[Cranelift]] {
+    let r = import_function(inout b, inout m, f);
+    let a = vals2(x, y);
+    ins_call(inout b, r, in a.as_slice())
+}
+
+fn load_word(inout b: Builder, addr: Value, offset: i32) -> Value eff [Ffi[Cranelift]] {
+    ins_load(inout b, ty_i64(), mem_trusted(), addr, offset)
+}
+
+fn zero(inout b: Builder) -> Value eff [Ffi[Cranelift]] {
+    ins_iconst(inout b, ty_i64(), 0)
+}
+
+// `body`'s prologue: a builder for a `params`-word function, switched to
+// its entry block.
+fn begin(inout m: Module, params: u64) -> Option[Builder] eff [Ffi[Cranelift]] {
+    let s = word_sig(inout m, params);
+    match builder_new(in m, s) {
+        Option::Some(b) => {
+            let mut fb = b;
+            let entry = create_block(inout fb);
+            append_block_params_for_function_params(inout fb, entry);
+            switch_to_block(inout fb, entry);
+            Option::Some(fb)
+        },
+        Option::None => Option::None,
+    }
+}
+
+// `body`'s epilogue.
+fn finish(inout m: Module, f: FuncId, sink b: Builder) -> bool eff [Ffi[Cranelift]] {
+    let mut fb = b;
+    seal_all_blocks(inout fb);
+    define_function(inout m, f, fb)
+}
+
+fn entry_param(inout b: Builder, i: u32) -> Value eff [Ffi[Cranelift]] {
+    // The entry block is the function's first block, number 0.
+    block_param(
+        inout b,
+        Block {
+            id: 0
+        },
+        i
+    )
+}
+
+// `vesper_box_free` (`fip::aot_runtime::declare_or_define_free`), when the
+// module does not define it yet.
+fn box_free(inout m: Module, defined: bool) -> FuncId eff [Ffi[Cranelift]] {
+    let name = bytes_of(in "vesper_box_free");
+    if defined {
+        let s = void_sig(inout m, 1);
+        return declare_function(inout m, in name.as_slice(), linkage_local(), s);
+    }
+    let counter = bytes_of(in "vesper_box_live");
+    let live = declare_data(inout m, in counter.as_slice(), linkage_local(), true);
+    let fs = void_sig(inout m, 1);
+    let free_name = bytes_of(in "free");
+    let libc_free = declare_function(inout m, in free_name.as_slice(), linkage_import(), fs);
+    let bs = void_sig(inout m, 1);
+    let id = declare_function(inout m, in name.as_slice(), linkage_local(), bs);
+    let ss = void_sig(inout m, 1);
+    match builder_new(in m, ss) {
+        Option::Some(b) => {
+            let mut fb = b;
+            let entry = create_block(inout fb);
+            let do_free = create_block(inout fb);
+            let done = create_block(inout fb);
+            append_block_params_for_function_params(inout fb, entry);
+            switch_to_block(inout fb, entry);
+            let ptr = block_param(inout fb, entry, 0);
+            let is_null = ins_icmp_imm(inout fb, cc_eq(), ptr, 0);
+            ins_brif0(inout fb, is_null, done, do_free);
+            switch_to_block(inout fb, do_free);
+            call1(inout fb, inout m, libc_free, ptr);
+            count(inout fb, inout m, live, -1);
+            ins_jump0(inout fb, done);
+            switch_to_block(inout fb, done);
+            let none: ChunkSeq[u32] = ChunkSeq::new[u32]();
+            ins_return(inout fb, in none.as_slice());
+            finish(inout m, id, fb);
+        },
+        Option::None => {},
+    }
+    id
+}
+
+// `fip::aot_runtime::count`: add `delta` to the live counter.
+fn count(inout b: Builder, inout m: Module, live: DataId, delta: i64) eff [Ffi[Cranelift]] {
+    let data = import_data(inout b, in m, live);
+    let address = ins_symbol_value(inout b, ty_i64(), data);
+    let d = ins_iconst(inout b, ty_i64(), delta);
+    ins_atomic_rmw(inout b, RMW_ADD, ty_i64(), mem_trusted(), address, d);
+}
+
+// The glue after the runtime prelude (`glue::define` from `box_alloc` on).
+fn glue(inout m: Module, in i: Iface, flags: u64) eff [Ffi[Cranelift]] {
+    let alloc_name = bytes_of(in "vesper_box_alloc");
+    let box_alloc = declare(inout m, in alloc_name, linkage_local(), 1);
+    // v4 (#1149): Rust-encoded trees allocate their boxes here.
+    if i.box_new != 0 {
+        let n = name_of(in i, wrapping_sub(i.box_new, 1));
+        let box_new = declare(inout m, in n, linkage_export(), 1);
+        match begin(inout m, 1) {
+            Option::Some(b) => {
+                let mut fb = b;
+                let x = entry_param(inout fb, 0);
+                call1(inout fb, inout m, box_alloc, x);
+                let r = inst_result(inout fb, 0);
+                ins_return1(inout fb, r);
+                finish(inout m, box_new, fb);
+            },
+            Option::None => {},
+        }
+    }
+    let bf = box_free(inout m, (flags & F_BOX_FREE) != 0);
+    let seq_new_local = declare_str(inout m, in "vesper_seq_new", linkage_local(), 2);
+    let seq_free_local = declare_str(inout m, in "vesper_seq_free", linkage_local(), 1);
+    let str_release = declare_str(inout m, in "vesper_str_release", linkage_local(), 1);
+    let rt = Runtime {
+        seq_free: seq_free_local,
+        str_release: str_release,
+        box_free: bf
+    };
+    // Exported entry points.
+    let sn = name_of(in i, i.seq_new);
+    let seq_new = declare(inout m, in sn, linkage_export(), 2);
+    match begin(inout m, 2) {
+        Option::Some(b) => {
+            let mut fb = b;
+            let x = entry_param(inout fb, 0);
+            let y = entry_param(inout fb, 1);
+            call2(inout fb, inout m, seq_new_local, x, y);
+            let r = inst_result(inout fb, 0);
+            ins_return1(inout fb, r);
+            finish(inout m, seq_new, fb);
+        },
+        Option::None => {},
+    }
+    let sf = name_of(in i, i.seq_free);
+    let seq_free = declare(inout m, in sf, linkage_export(), 1);
+    match begin(inout m, 1) {
+        Option::Some(b) => {
+            let mut fb = b;
+            let x = entry_param(inout fb, 0);
+            call1(inout fb, inout m, rt.seq_free, x);
+            let z = zero(inout fb);
+            ins_return1(inout fb, z);
+            finish(inout m, seq_free, fb);
+        },
+        Option::None => {},
+    }
+    let ln = name_of(in i, i.live);
+    let live = declare(inout m, in ln, linkage_export(), 0);
+    // The counters, looked up before the body (as `get_name` is).
+    let mut counters = ChunkSeq::new[u32]();
+    if (flags & F_SEQ_COUNTER) != 0 {
+        let c = bytes_of(in "vesper_seq_live");
+        let d = declare_data(inout m, in c.as_slice(), linkage_import(), true);
+        counters.push(d.id);
+    }
+    if (flags & F_BOX_COUNTER) != 0 {
+        let c = bytes_of(in "vesper_box_live");
+        let d = declare_data(inout m, in c.as_slice(), linkage_import(), true);
+        counters.push(d.id);
+    }
+    match begin(inout m, 0) {
+        Option::Some(b) => {
+            let mut fb = b;
+            let mut total = zero(inout fb);
+            for k in 0..counters.len() {
+                let id = match counters.try_get(k) {
+                    Option::Some(x) => x,
+                    Option::None => 0,
+                };
+                let data = import_data(
+                    inout fb,
+                    in m,
+                    DataId {
+                        id: id
+                    }
+                );
+                let address = ins_symbol_value(inout fb, ty_i64(), data);
+                let value = ins_atomic_load(inout fb, ty_i64(), mem_trusted(), address);
+                total = ins_iadd(inout fb, total, value);
+            }
+            ins_return1(inout fb, total);
+            finish(inout m, live, fb);
+        },
+        Option::None => {},
+    }
+    // Drop glue: declare every seq_handle type's function first, since types
+    // may refer to each other (and to themselves) through boxes.
+    // drops[d] is the function of decl d (0 when it is not a seq_handle).
+    let mut drops = ChunkSeq::new[u32]();
+    for d in 0..i.decls.len() {
+        let decl = i.decl(d);
+        if !decl.is_handle {
+            drops.push(0);
+            continue;
+        }
+        let id = if decl.drop != 0 {
+            let n = name_of(in i, wrapping_sub(decl.drop, 1));
+            declare(inout m, in n, linkage_export(), 1)
+        } else {
+            let mut n = bytes_of(in "vesper_");
+            i.names.write(i.library, inout n);
+            n.push(95);
+            i.names.write(decl.name, inout n);
+            let tail = bytes_of(in "_drop_local");
+            n.extend(in tail.as_slice());
+            declare(inout m, in n, linkage_local(), 1)
+        };
+        drops.push(id.id);
+    }
+    for d in 0..i.decls.len() {
+        let decl = i.decl(d);
+        if !decl.is_handle {
+            continue;
+        }
+        let id = FuncId {
+            id: drop_fn(in drops, d)
+        };
+        match begin(inout m, 1) {
+            Option::Some(b) => {
+                let mut fb = b;
+                let base = entry_param(inout fb, 0);
+                drop_decl(inout fb, inout m, in i, in drops, rt, decl, base);
+                let z = zero(inout fb);
+                ins_return1(inout fb, z);
+                finish(inout m, id, fb);
+            },
+            Option::None => {},
+        }
+    }
+}
+
+fn drop_fn(in drops: ChunkSeq[u32], d: u64) -> u32 {
+    match drops.try_get(d) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+// Whether variant `v` has a field that owns something.
+fn variant_owns(in i: Iface, v: VarRow) -> bool {
+    for k in 0..v.fc {
+        let f = i.field(wrapping_add(v.f0, k));
+        if i.owning(f.ty) {
+            return true;
+        }
+    }
+    false
+}
+
+fn drop_fields(
+    inout b: Builder,
+    inout m: Module,
+    in i: Iface,
+    in drops: ChunkSeq[u32],
+    rt: Runtime,
+    v: VarRow,
+    base: Value
+) eff [Ffi[Cranelift]] {
+    for k in 0..v.fc {
+        let f = i.field(wrapping_add(v.f0, k));
+        drop_at(inout b, inout m, in i, in drops, rt, f.ty, base, f.offset);
+    }
+}
+
+// Drop the fields of a seq_handle value at `base`.
+fn drop_decl(
+    inout b: Builder,
+    inout m: Module,
+    in i: Iface,
+    in drops: ChunkSeq[u32],
+    rt: Runtime,
+    decl: DeclRow,
+    base: Value
+) eff [Ffi[Cranelift]] {
+    if !decl.is_enum {
+        if decl.vn > 0 {
+            let v = i.var(decl.v0);
+            drop_fields(inout b, inout m, in i, in drops, rt, v, base);
+        }
+        return;
+    }
+    let tag = load_word(inout b, base, 0);
+    let done = create_block(inout b);
+    for index in 0..decl.vn {
+        let v = i.var(wrapping_add(decl.v0, index));
+        if !variant_owns(in i, v) {
+            continue;
+        }
+        let this = create_block(inout b);
+        let next = create_block(inout b);
+        let hit = ins_icmp_imm(inout b, cc_eq(), tag, wrapping_i64(index));
+        ins_brif0(inout b, hit, this, next);
+        switch_to_block(inout b, this);
+        drop_fields(inout b, inout m, in i, in drops, rt, v, base);
+        ins_jump0(inout b, done);
+        switch_to_block(inout b, next);
+    }
+    ins_jump0(inout b, done);
+    switch_to_block(inout b, done);
+}
+
+// Drop a value of type `t` stored at word `offset` of `base`.
+fn drop_at(
+    inout b: Builder,
+    inout m: Module,
+    in i: Iface,
+    in drops: ChunkSeq[u32],
+    rt: Runtime,
+    t: u32,
+    base: Value,
+    offset: u64
+) eff [Ffi[Cranelift]] {
+    if !i.owning(t) {
+        return;
+    }
+    let at = wrapping_i32(wrapping_mul(offset, WORD));
+    let n = i.node(t);
+    let k = n.kind;
+    if k == K_SEQ {
+        let elem = i.kid(t, 0);
+        if i.owning(elem) {
+            // An empty slot or a moved-from field holds handle 0.
+            let seq_handle = load_word(inout b, base, at);
+            let live = create_block(inout b);
+            let done = create_block(inout b);
+            ins_brif0(inout b, seq_handle, live, done);
+            switch_to_block(inout b, live);
+            let len = load_word(inout b, seq_handle, 0);
+            let data = load_word(inout b, seq_handle, 16);
+            let stride = wrapping_i64(wrapping_mul(i.words(elem), WORD));
+            let head = create_block(inout b);
+            append_block_param(inout b, head, ty_i64());
+            let body = create_block(inout b);
+            let exit = create_block(inout b);
+            let z = zero(inout b);
+            let za = vals1(z);
+            ins_jump(inout b, head, in za.as_slice());
+            switch_to_block(inout b, head);
+            let ix = block_param(inout b, head, 0);
+            let more = ins_icmp(inout b, cc_ult(), ix, len);
+            ins_brif0(inout b, more, body, exit);
+            switch_to_block(inout b, body);
+            let off = ins_imul_imm(inout b, ix, stride);
+            let element = ins_iadd(inout b, data, off);
+            drop_at(inout b, inout m, in i, in drops, rt, elem, element, 0);
+            let next = ins_iadd_imm(inout b, ix, 1);
+            let na = vals1(next);
+            ins_jump(inout b, head, in na.as_slice());
+            switch_to_block(inout b, exit);
+            call1(inout b, inout m, rt.seq_free, seq_handle);
+            ins_jump0(inout b, done);
+            switch_to_block(inout b, done);
+        } else {
+            let seq_handle = load_word(inout b, base, at);
+            call1(inout b, inout m, rt.seq_free, seq_handle);
+        }
+        return;
+    }
+    if k == K_BOX {
+        let inner = i.kid(t, 0);
+        if i.node(inner).kind == K_OBJECT {
+            // A boxed object (§7.3): the block `{vtable, value}`; the
+            // vtable's word 0 drops the value (0 when it owns nothing).
+            let block = load_word(inout b, base, at);
+            let live = create_block(inout b);
+            let call_drop = create_block(inout b);
+            let free = create_block(inout b);
+            let done = create_block(inout b);
+            ins_brif0(inout b, block, live, done);
+            switch_to_block(inout b, live);
+            let table = load_word(inout b, block, 0);
+            let drop = ins_load(inout b, ty_i64(), mem_trusted() | mem_readonly(), table, 0);
+            ins_brif0(inout b, drop, call_drop, free);
+            switch_to_block(inout b, call_drop);
+            let value = ins_iadd_imm(inout b, block, BOXED_HEADER);
+            let s = void_sig(inout m, 1);
+            let sr = import_signature(inout b, in m, s);
+            let va = vals1(value);
+            ins_call_indirect(inout b, sr, drop, in va.as_slice());
+            ins_jump0(inout b, free);
+            switch_to_block(inout b, free);
+            call1(inout b, inout m, rt.box_free, block);
+            ins_jump0(inout b, done);
+            switch_to_block(inout b, done);
+        } else {
+            let pointer = load_word(inout b, base, at);
+            drop_at(inout b, inout m, in i, in drops, rt, inner, pointer, 0);
+            call1(inout b, inout m, rt.box_free, pointer);
+        }
+        return;
+    }
+    if k == K_TUPLE {
+        let mut word = offset;
+        for j in 0..n.n {
+            let item = i.kid(t, j);
+            drop_at(inout b, inout m, in i, in drops, rt, item, base, word);
+            word = wrapping_add(word, i.words(item));
+        }
+        return;
+    }
+    if k == K_NAMED {
+        let is_option = n.name == i.known.option;
+        if is_option || n.name == i.known.result {
+            let tag = load_word(inout b, base, at);
+            let done = create_block(inout b);
+            for index in 0..n.n {
+                let arg = i.kid(t, index);
+                // Option: tag 1 is Some(args[0]); Result: tag 0 is Ok, 1 Err.
+                let tag_value: i64 = if is_option {
+                    1
+                } else {
+                    wrapping_i64(index)
+                };
+                if !i.owning(arg) {
+                    continue;
+                }
+                let this = create_block(inout b);
+                let next = create_block(inout b);
+                let hit = ins_icmp_imm(inout b, cc_eq(), tag, tag_value);
+                ins_brif0(inout b, hit, this, next);
+                switch_to_block(inout b, this);
+                drop_at(inout b, inout m, in i, in drops, rt, arg, base, inc(offset));
+                ins_jump0(inout b, done);
+                switch_to_block(inout b, next);
+            }
+            ins_jump0(inout b, done);
+            switch_to_block(inout b, done);
+            return;
+        }
+        // A seq_handle type's drop function (`rt.drops.get(name)`).
+        let d = i.decl_of(n.name);
+        if d != 0 && i.decl(wrapping_sub(d, 1)).is_handle {
+            let f = drop_fn(in drops, wrapping_sub(d, 1));
+            let address = ins_iadd_imm(inout b, base, widen_i64(at));
+            call1(
+                inout b,
+                inout m,
+                FuncId {
+                    id: f
+                },
+                address
+            );
+        }
+        return;
+    }
+    if k == K_STR && n.owned {
+        let address = ins_iadd_imm(inout b, base, widen_i64(at));
+        call1(inout b, inout m, rt.str_release, address);
+    }
+}
+
+// The interface words of the request: argument words 1.. (word 0 is the
+// flags word), as the bytes `read_iface` reads.
+fn interface_bytes(in args: ChunkSeq[u64]) -> ChunkSeq[u8] {
+    let n = args.len();
+    let mut o = ChunkSeq::with_capacity[u8](wrapping_mul(n, WORD));
+    for k in 1..n {
+        let x = match args.try_get(k) {
+            Option::Some(x) => x,
+            Option::None => 0,
+        };
+        let mut y = x;
+        for _ in 0..8 {
+            o.push(wrapping_u8(y & 255));
+            y = y / 256;
+        }
+    }
+    o
+}
+
+// The `export` hook: the v2 glue after the runtime prelude, over the lent
+// module. Declines (0) when the module's pointer type is not 64-bit (the
+// Rust glue then reports that), before emitting anything.
+pub fn export_glue(call: u64) -> u64 eff [Ffi[Cranelift]] {
+    let args = call_args(call);
+    let flags = match args.try_get(0) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    };
+    let bytes = interface_bytes(in args);
+    let i = read_iface(in bytes.as_slice());
+    match call_module(call) {
+        Option::Some(m) => {
+            let mut lm = m;
+            let answer = if module_pointer_type(in lm).code != I64_CODE {
+                DECLINED
+            } else {
+                glue(inout lm, in i, flags);
+                HANDLED
+            };
+            call_return_module(call, lm);
+            answer
+        },
+        Option::None => DECLINED,
+    }
+}

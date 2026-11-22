@@ -317,11 +317,8 @@ test {
         let graph = adjacency_fixture();
         let bounds = graph.succ_range(node) == (lo, hi);
         let indexed = graph.succ_at(node, index) == expected;
-        let ordered = index
-            >= wrapping_sub(hi, lo)
-            || graph
-            .succ_edge(wrapping_add(lo, index))
-            == expected;
+        let ordered = index >= wrapping_sub(hi, lo)
+            || graph.succ_edge(wrapping_add(lo, index)) == expected;
         bounds && indexed && ordered && graph.succ_len(node) == wrapping_sub(hi, lo)
     }
 
@@ -337,11 +334,8 @@ test {
         let graph = adjacency_fixture();
         let bounds = graph.pred_range(node) == (lo, hi);
         let indexed = graph.pred_at(node, index) == expected;
-        let ordered = index
-            >= wrapping_sub(hi, lo)
-            || graph
-            .pred_edge(wrapping_add(lo, index))
-            == expected;
+        let ordered = index >= wrapping_sub(hi, lo)
+            || graph.pred_edge(wrapping_add(lo, index)) == expected;
         bounds && indexed && ordered && graph.pred_len(node) == wrapping_sub(hi, lo)
     }
 }

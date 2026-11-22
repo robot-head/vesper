@@ -280,15 +280,15 @@ impl Abi for Ver {
 /// Owned handle of a Vesper `L` value: its words, which own the Vesper
 /// allocations they point to. Dropping it calls `vesper_loom_calculus_L_drop`.
 pub struct L {
-    words: [u64; 70],
+    words: [u64; 72],
 }
 
 impl L {
     /// # Safety
     /// `words` must hold a `L` value of this library that the caller owns.
     unsafe fn from_words(words: &[u64]) -> Self {
-        let mut owned = [0u64; 70];
-        owned.copy_from_slice(&words[..70]);
+        let mut owned = [0u64; 72];
+        owned.copy_from_slice(&words[..72]);
         Self { words: owned }
     }
 
@@ -328,281 +328,289 @@ impl<'a> LRef<'a> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[0]) }
     }
-    pub fn pos(&self) -> u64 {
+    pub fn skat(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
-        <u64 as Abi>::get(&w[1..])
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[1]) }
     }
-    pub fn pool(&self) -> vesper_port_abi::SeqRef<'a, u8> {
+    pub fn sk(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[2]) }
     }
+    pub fn pos(&self) -> u64 {
+        let w: &'a [u64] = self.words;
+        <u64 as Abi>::get(&w[3..])
+    }
+    pub fn pool(&self) -> vesper_port_abi::SeqRef<'a, u8> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[4]) }
+    }
     pub fn out(&self) -> vesper_port_abi::SeqRef<'a, u64> {
-        let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[3]) }
-    }
-    pub fn k(&self) -> u64 {
-        let w: &'a [u64] = self.words;
-        <u64 as Abi>::get(&w[4..])
-    }
-    pub fn rank(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[5]) }
     }
-    pub fn roff(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+    pub fn k(&self) -> u64 {
         let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[6]) }
+        <u64 as Abi>::get(&w[6..])
     }
-    pub fn rlen(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+    pub fn rank(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[7]) }
     }
-    pub fn rocc(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+    pub fn roff(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[8]) }
     }
-    pub fn vers(&self) -> vesper_port_abi::SeqRef<'a, Ver> {
+    pub fn rlen(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[9]) }
     }
-    pub fn cmps(&self) -> vesper_port_abi::SeqRef<'a, Cmp> {
+    pub fn rocc(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[10]) }
     }
-    pub fn reqs(&self) -> vesper_port_abi::SeqRef<'a, Req> {
+    pub fn vers(&self) -> vesper_port_abi::SeqRef<'a, Ver> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[11]) }
     }
-    pub fn ids(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+    pub fn cmps(&self) -> vesper_port_abi::SeqRef<'a, Cmp> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[12]) }
     }
-    pub fn mans(&self) -> vesper_port_abi::SeqRef<'a, Man> {
+    pub fn reqs(&self) -> vesper_port_abi::SeqRef<'a, Req> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[13]) }
     }
-    pub fn feats(&self) -> vesper_port_abi::SeqRef<'a, Feat> {
+    pub fn ids(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[14]) }
     }
-    pub fn syss(&self) -> vesper_port_abi::SeqRef<'a, Sys> {
+    pub fn mans(&self) -> vesper_port_abi::SeqRef<'a, Man> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[15]) }
     }
-    pub fn deps(&self) -> vesper_port_abi::SeqRef<'a, Dep> {
+    pub fn feats(&self) -> vesper_port_abi::SeqRef<'a, Feat> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[16]) }
     }
-    pub fn roots(&self) -> vesper_port_abi::SeqRef<'a, Root> {
+    pub fn syss(&self) -> vesper_port_abi::SeqRef<'a, Sys> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[17]) }
     }
-    pub fn ssels(&self) -> vesper_port_abi::SeqRef<'a, SysSel> {
+    pub fn deps(&self) -> vesper_port_abi::SeqRef<'a, Dep> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[18]) }
     }
+    pub fn roots(&self) -> vesper_port_abi::SeqRef<'a, Root> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[19]) }
+    }
+    pub fn ssels(&self) -> vesper_port_abi::SeqRef<'a, SysSel> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[20]) }
+    }
     pub fn schema(&self) -> u64 {
-        let w: &'a [u64] = self.words;
-        <u64 as Abi>::get(&w[19..])
-    }
-    pub fn sel_at(&self) -> u64 {
-        let w: &'a [u64] = self.words;
-        <u64 as Abi>::get(&w[20..])
-    }
-    pub fn sel_n(&self) -> u64 {
         let w: &'a [u64] = self.words;
         <u64 as Abi>::get(&w[21..])
     }
-    pub fn root_at(&self) -> u64 {
+    pub fn sel_at(&self) -> u64 {
         let w: &'a [u64] = self.words;
         <u64 as Abi>::get(&w[22..])
     }
-    pub fn root_n(&self) -> u64 {
+    pub fn sel_n(&self) -> u64 {
         let w: &'a [u64] = self.words;
         <u64 as Abi>::get(&w[23..])
     }
-    pub fn ss_at(&self) -> u64 {
+    pub fn root_at(&self) -> u64 {
         let w: &'a [u64] = self.words;
         <u64 as Abi>::get(&w[24..])
     }
-    pub fn ss_n(&self) -> u64 {
+    pub fn root_n(&self) -> u64 {
         let w: &'a [u64] = self.words;
         <u64 as Abi>::get(&w[25..])
     }
+    pub fn ss_at(&self) -> u64 {
+        let w: &'a [u64] = self.words;
+        <u64 as Abi>::get(&w[26..])
+    }
+    pub fn ss_n(&self) -> u64 {
+        let w: &'a [u64] = self.words;
+        <u64 as Abi>::get(&w[27..])
+    }
     pub fn diags(&self) -> vesper_port_abi::SeqRef<'a, Diag> {
-        let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[26]) }
-    }
-    pub fn dtmp(&self) -> vesper_port_abi::SeqRef<'a, Diag> {
-        let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[27]) }
-    }
-    pub fn udiags(&self) -> vesper_port_abi::SeqRef<'a, Diag> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[28]) }
     }
-    pub fn snaps(&self) -> vesper_port_abi::SeqRef<'a, Snap> {
+    pub fn dtmp(&self) -> vesper_port_abi::SeqRef<'a, Diag> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[29]) }
     }
-    pub fn gn(&self) -> vesper_port_abi::SeqRef<'a, GNode> {
+    pub fn udiags(&self) -> vesper_port_abi::SeqRef<'a, Diag> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[30]) }
     }
-    pub fn gids(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+    pub fn snaps(&self) -> vesper_port_abi::SeqRef<'a, Snap> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[31]) }
     }
-    pub fn ge(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+    pub fn gn(&self) -> vesper_port_abi::SeqRef<'a, GNode> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[32]) }
     }
-    pub fn gs(&self) -> vesper_port_abi::SeqRef<'a, SEdge> {
+    pub fn gids(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[33]) }
     }
-    pub fn gl(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+    pub fn ge(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[34]) }
     }
-    pub fn changes(&self) -> vesper_port_abi::SeqRef<'a, Change> {
+    pub fn gs(&self) -> vesper_port_abi::SeqRef<'a, SEdge> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[35]) }
     }
-    pub fn cids(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+    pub fn gl(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[36]) }
     }
+    pub fn changes(&self) -> vesper_port_abi::SeqRef<'a, Change> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[37]) }
+    }
+    pub fn cids(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[38]) }
+    }
     pub fn np(&self) -> u64 {
-        let w: &'a [u64] = self.words;
-        <u64 as Abi>::get(&w[37..])
-    }
-    pub fn nc(&self) -> u64 {
-        let w: &'a [u64] = self.words;
-        <u64 as Abi>::get(&w[38..])
-    }
-    pub fn nf(&self) -> u64 {
         let w: &'a [u64] = self.words;
         <u64 as Abi>::get(&w[39..])
     }
+    pub fn nc(&self) -> u64 {
+        let w: &'a [u64] = self.words;
+        <u64 as Abi>::get(&w[40..])
+    }
+    pub fn nf(&self) -> u64 {
+        let w: &'a [u64] = self.words;
+        <u64 as Abi>::get(&w[41..])
+    }
     pub fn cmap(&self) -> vesper_port_abi::SeqRef<'a, u64> {
-        let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[40]) }
-    }
-    pub fn clist(&self) -> vesper_port_abi::SeqRef<'a, u64> {
-        let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[41]) }
-    }
-    pub fn fmap(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[42]) }
     }
-    pub fn flist(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+    pub fn clist(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[43]) }
     }
-    pub fn pof(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+    pub fn fmap(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[44]) }
     }
-    pub fn sysof(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+    pub fn flist(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[45]) }
     }
-    pub fn pname(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+    pub fn pof(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[46]) }
     }
-    pub fn psel(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+    pub fn sysof(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[47]) }
     }
-    pub fn frow(&self) -> vesper_port_abi::SeqRef<'a, bool> {
+    pub fn pname(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[48]) }
     }
-    pub fn nrow(&self) -> vesper_port_abi::SeqRef<'a, bool> {
+    pub fn psel(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[49]) }
     }
-    pub fn rrow(&self) -> vesper_port_abi::SeqRef<'a, bool> {
+    pub fn frow(&self) -> vesper_port_abi::SeqRef<'a, bool> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[50]) }
     }
-    pub fn reach(&self) -> vesper_port_abi::SeqRef<'a, bool> {
+    pub fn nrow(&self) -> vesper_port_abi::SeqRef<'a, bool> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[51]) }
     }
-    pub fn hasn(&self) -> vesper_port_abi::SeqRef<'a, bool> {
+    pub fn rrow(&self) -> vesper_port_abi::SeqRef<'a, bool> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[52]) }
     }
-    pub fn queued(&self) -> vesper_port_abi::SeqRef<'a, bool> {
+    pub fn reach(&self) -> vesper_port_abi::SeqRef<'a, bool> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[53]) }
     }
-    pub fn nfirst(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+    pub fn hasn(&self) -> vesper_port_abi::SeqRef<'a, bool> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[54]) }
     }
-    pub fn mk(&self) -> vesper_port_abi::SeqRef<'a, bool> {
+    pub fn queued(&self) -> vesper_port_abi::SeqRef<'a, bool> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[55]) }
     }
-    pub fn rootf(&self) -> vesper_port_abi::SeqRef<'a, bool> {
+    pub fn nfirst(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[56]) }
     }
-    pub fn usedsys(&self) -> vesper_port_abi::SeqRef<'a, bool> {
+    pub fn mk(&self) -> vesper_port_abi::SeqRef<'a, bool> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[57]) }
     }
-    pub fn queue(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+    pub fn rootf(&self) -> vesper_port_abi::SeqRef<'a, bool> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[58]) }
     }
-    pub fn work(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+    pub fn usedsys(&self) -> vesper_port_abi::SeqRef<'a, bool> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[59]) }
     }
-    pub fn idx(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+    pub fn queue(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[60]) }
     }
-    pub fn tmp(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+    pub fn work(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[61]) }
     }
-    pub fn se(&self) -> vesper_port_abi::SeqRef<'a, SEdge> {
+    pub fn idx(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[62]) }
     }
-    pub fn pcount(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+    pub fn tmp(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[63]) }
     }
-    pub fn pstart(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+    pub fn se(&self) -> vesper_port_abi::SeqRef<'a, SEdge> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[64]) }
     }
-    pub fn plist(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+    pub fn pcount(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[65]) }
     }
-    pub fn sa(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+    pub fn pstart(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[66]) }
     }
-    pub fn sb(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+    pub fn plist(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[67]) }
     }
-    pub fn ea(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+    pub fn sa(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[68]) }
     }
-    pub fn eb(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+    pub fn sb(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[69]) }
+    }
+    pub fn ea(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[70]) }
+    }
+    pub fn eb(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[71]) }
     }
 }
 
@@ -647,7 +655,7 @@ pub fn live_allocations() -> i64 {
 
 /// Calls `check_upgrade` of the Vesper library `loom_calculus` (`vesper_loom_calculus_check_upgrade`).
 pub fn check_upgrade(words: &[u64], text: &[u8]) -> L {
-    let mut result = [0u64; 70];
+    let mut result = [0u64; 72];
     // SAFETY: `vesper_loom_calculus_check_upgrade` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
@@ -666,7 +674,7 @@ pub fn package_name_valid(s: &str) -> bool {
 
 /// Calls `validate_manifest` of the Vesper library `loom_calculus` (`vesper_loom_calculus_validate_manifest`).
 pub fn validate_manifest(words: &[u64], text: &[u8]) -> L {
-    let mut result = [0u64; 70];
+    let mut result = [0u64; 72];
     // SAFETY: `vesper_loom_calculus_validate_manifest` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
@@ -676,7 +684,7 @@ pub fn validate_manifest(words: &[u64], text: &[u8]) -> L {
 
 /// Calls `validate_solution` of the Vesper library `loom_calculus` (`vesper_loom_calculus_validate_solution`).
 pub fn validate_solution(words: &[u64], text: &[u8]) -> L {
-    let mut result = [0u64; 70];
+    let mut result = [0u64; 72];
     // SAFETY: `vesper_loom_calculus_validate_solution` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.

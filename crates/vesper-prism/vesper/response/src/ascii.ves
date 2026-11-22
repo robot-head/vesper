@@ -3,9 +3,12 @@
 
 // ASCII characters.
 pub enum Ascii: _ {
+    Lf = 0x0a,
+    Cr = 0x0d,
     Space = 0x20,
     Digit0 = 0x30,
     Digit9 = 0x39,
+    Colon = 0x3a,
     UpperA = 0x41,
     UpperZ = 0x5a,
     LowerA = 0x61,

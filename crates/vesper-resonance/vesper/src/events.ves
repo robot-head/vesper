@@ -17,6 +17,21 @@ use self::util::{
     finite_bits
 };
 
+// The 16-byte wire record: sample offset and node id (u16), then param
+// id, target bits and ramp samples (u32), little-endian.
+const EVENT_BYTES: u64 = 16;
+
+enum At: _ {
+    SampleOffset = 0,
+    NodeId = 2,
+    ParamId = 4,
+    Target = 8,
+    RampSamples = 12
+}
+
+// The node id's shift in the first word.
+const NODE_ID_SHIFT: u32 = 16;
+
 fn byte(in b: Slice[u8], i: u64) -> u32 eff [Fail[RuntimeError], Fail[ArithOverflow]] {
     widen_u32(b[i])
 }
@@ -36,28 +51,28 @@ fn put32(inout b: Slice[u8], i: u64, v: u32) eff [Fail[RuntimeError], Fail[Arith
     b.set(i + 3, narrow_u8(v >> 24));
 }
 
-// `RtParamEvent::encode` into the first 16 bytes of `out`.
+// `RtParamEvent::encode` into the first EVENT_BYTES bytes of `out`.
 pub fn e_encode(in w: Wire, inout out: Slice[u8]) eff [Fail[RuntimeError], Fail[ArithOverflow]] {
-    let head = widen_u32(w.sample_offset) | (widen_u32(w.node_id) << 16);
-    put32(inout out, 0, head);
-    put32(inout out, 4, w.param_id);
-    put32(inout out, 8, w.target);
-    put32(inout out, 12, w.ramp_samples);
+    let head = widen_u32(w.sample_offset) | (widen_u32(w.node_id) << NODE_ID_SHIFT);
+    put32(inout out, At::SampleOffset, head);
+    put32(inout out, At::ParamId, w.param_id);
+    put32(inout out, At::Target, w.target);
+    put32(inout out, At::RampSamples, w.ramp_samples);
 }
 
-// `RtParamEvent::decode` of the 16 bytes at `at`.
+// `RtParamEvent::decode` of the EVENT_BYTES bytes at `at`.
 pub fn e_decode(in b: Slice[u8], at: u64)
     -> Wire eff [Fail[RuntimeError], Fail[ArithOverflow], Fail[EventFault]] {
-    let target = le32(in b, at + 8);
+    let target = le32(in b, at + At::Target);
     if !finite_bits(target) {
         Fail::raise(EventFault::NonFiniteTarget);
     }
     Wire {
-        sample_offset: le16(in b, at),
-        node_id: le16(in b, at + 2),
-        param_id: le32(in b, at + 4),
+        sample_offset: le16(in b, at + At::SampleOffset),
+        node_id: le16(in b, at + At::NodeId),
+        param_id: le32(in b, at + At::ParamId),
         target: target,
-        ramp_samples: le32(in b, at + 12)
+        ramp_samples: le32(in b, at + At::RampSamples)
     }
 }
 
@@ -65,10 +80,10 @@ pub fn e_decode(in b: Slice[u8], at: u64)
 // bytes, at most `budget`.
 pub fn e_frames(len: u64, budget: u64)
     -> u64 eff [Fail[RuntimeError], Fail[ArithOverflow], Fail[EventFault]] {
-    if len % 16 != 0 {
-        Fail::raise(EventFault::TrailingBytes(len % 16));
+    if len % EVENT_BYTES != 0 {
+        Fail::raise(EventFault::TrailingBytes(len % EVENT_BYTES));
     }
-    let n = len / 16;
+    let n = len / EVENT_BYTES;
     if n > budget {
         Fail::raise(EventFault::OverBudget(budget));
     }

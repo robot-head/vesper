@@ -23,6 +23,7 @@ use crate::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod aot_runtime;
 pub mod native_runtime;
 
@@ -80,6 +81,17 @@ pub enum FipDrop {
         ty: Type,
         keep: String,
     },
+}
+
+impl FipDrop {
+    /// The IR value this drop reads, if any (a [`FipDrop::Place`] reads its
+    /// local's variable instead).
+    pub fn value(&self) -> Option<ValueId> {
+        match self {
+            FipDrop::Value(id, _) | FipDrop::OtherFields { value: id, .. } => Some(*id),
+            FipDrop::Place(..) => None,
+        }
+    }
 }
 
 /// Whether the module needs the built-in `Box[T]` prelude: it uses `@fip` or

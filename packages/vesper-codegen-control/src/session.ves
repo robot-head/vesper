@@ -310,12 +310,8 @@ impl Planner {
             }
             let fail = e.name == self.fail && e.label == 0 && e.n == 1;
             let cap = (self.is_cap(in names, e.name) || self.is_foreign(in names, e.name))
-                && e
-                .label
-                == 0
-                && e
-                .n
-                == 0;
+                && e.label == 0
+                && e.n == 0;
             if !(fail || cap) {
                 return false;
             }
@@ -469,13 +465,13 @@ impl Planner {
             for i in 0..fts.len() {
                 if !self
                     .word_buffer(
-                    inout ls,
-                    inout t,
-                    inout names,
-                    in wd,
-                    u32_at(in fts, i),
-                    inc(depth)
-                ) {
+                        inout ls,
+                        inout t,
+                        inout names,
+                        in wd,
+                        u32_at(in fts, i),
+                        inc(depth)
+                    ) {
                     let mut head: ChunkSeq[u8] = ChunkSeq::new[u8]();
                     put(inout head, "read buffer ");
                     display(in t, in names, ty, inout head);
@@ -721,21 +717,21 @@ impl Planner {
         self
             .bound
             .push(
-            BoundOp {
-                op: bind.op,
-                read: bind.read,
-                buffer: buffer,
-                buffer_size: buffer_size,
-                result: result,
-                value: bind.value,
-                value_field: value_field,
-                error: bind.error,
-                error_field: error_field,
-                cancel_ctor: bind.cancel_ctor,
-                cancel: bind.cancel,
-                code: bind.code
-            }
-        );
+                BoundOp {
+                    op: bind.op,
+                    read: bind.read,
+                    buffer: buffer,
+                    buffer_size: buffer_size,
+                    result: result,
+                    value: bind.value,
+                    value_field: value_field,
+                    error: bind.error,
+                    error_field: error_field,
+                    cancel_ctor: bind.cancel_ctor,
+                    cancel: bind.cancel,
+                    code: bind.code
+                }
+            );
         true
     }
 
@@ -843,11 +839,11 @@ impl Planner {
             if e.label != 0 {
                 return self
                     .effect_text(
-                    in names,
-                    "labelled external effect instance ",
-                    e.name,
-                    " is unsupported"
-                );
+                        in names,
+                        "labelled external effect instance ",
+                        e.name,
+                        " is unsupported"
+                    );
             }
             if contains32(in seen, e.name) {
                 return self
@@ -862,11 +858,11 @@ impl Planner {
             if !d.linear {
                 return self
                     .effect_text(
-                    in names,
-                    "external effect ",
-                    e.name,
-                    " must be declared linear (one-shot resumption)"
-                );
+                        in names,
+                        "external effect ",
+                        e.name,
+                        " must be declared linear (one-shot resumption)"
+                    );
             }
             if d.generics != 0 || e.n != 0 {
                 return self
@@ -917,34 +913,34 @@ impl Planner {
                 if !found {
                     return self
                         .op_text(
-                        in names,
-                        "operation ",
-                        d.name,
-                        sig.name,
-                        " has no native binding"
-                    );
+                            in names,
+                            "operation ",
+                            d.name,
+                            sig.name,
+                            " has no native binding"
+                        );
                 }
             }
             self
                 .effects
                 .push(
-                BoundEffect {
-                    name: d.name,
-                    a: a,
-                    n: n32(wrapping_sub(self.bound.len(), w(a)))
-                }
-            );
+                    BoundEffect {
+                        name: d.name,
+                        a: a,
+                        n: n32(wrapping_sub(self.bound.len(), w(a)))
+                    }
+                );
         }
         for i in 0..bindings.len() {
             let b = binding_at(in bindings, i);
             if !contains32(in seen, b.eff_name) {
                 return self
                     .effect_text(
-                    in names,
-                    "binding names effect ",
-                    b.eff_name,
-                    " which the entry does not declare"
-                );
+                        in names,
+                        "binding names effect ",
+                        b.eff_name,
+                        " which the entry does not declare"
+                    );
             }
         }
         let mut failure_size: u64 = 0;
@@ -980,16 +976,11 @@ impl Planner {
         let failure_offset = align8(result_size);
         let staging_offset = align8(add(failure_offset, failure_size));
         let mut bytes = align8(add(staging_offset, staging_size));
-        if wrapping_add(result_size, 7)
-            > MAX_U32
-            || add(failure_offset, failure_size)
-            > MAX_U32
-            || add(staging_offset, staging_size)
-            > MAX_U32
-            || wrapping_add(add(failure_offset, failure_size), 7)
-            > MAX_U32
-            || wrapping_add(add(staging_offset, staging_size), 7)
-            > MAX_U32 {
+        if wrapping_add(result_size, 7) > MAX_U32
+            || add(failure_offset, failure_size) > MAX_U32
+            || add(staging_offset, staging_size) > MAX_U32
+            || wrapping_add(add(failure_offset, failure_size), 7) > MAX_U32
+            || wrapping_add(add(staging_offset, staging_size), 7) > MAX_U32 {
             return self.fail_text("session data frame is too large");
         }
         if bytes < 8 {
@@ -997,18 +988,18 @@ impl Planner {
         }
         self
             .write_plan(
-            in t,
-            in names,
-            entry,
-            result,
-            result_size,
-            failure_offset,
-            failure_size,
-            staging_offset,
-            staging_size,
-            bytes,
-            inout out
-        );
+                in t,
+                in names,
+                entry,
+                result,
+                result_size,
+                failure_offset,
+                failure_size,
+                staging_offset,
+                staging_size,
+                bytes,
+                inout out
+            );
         true
     }
 
@@ -1055,13 +1046,12 @@ impl Planner {
                     if bool_at(in done, q) {
                         continue;
                     }
-                    if best
-                        == w(e.n)
+                    if best == w(e.n)
                         || name_lt(
-                        in names,
-                        bound_at(in self.bound, add(w(e.a), q)).op,
-                        bound_at(in self.bound, add(w(e.a), best)).op
-                    ) {
+                            in names,
+                            bound_at(in self.bound, add(w(e.a), q)).op,
+                            bound_at(in self.bound, add(w(e.a), best)).op
+                        ) {
                         best = q;
                     }
                 }

@@ -1,0 +1,184 @@
+// The `i128` of `AttrValue::Int` as a sign and a 128-bit magnitude in two
+// words (`hi`, `lo`), with `parse_int` and `i128::to_string` of
+// crates/vesper-syntax/src/test_attrs.rs and src/test_discovery.rs.
+
+use self::util::{
+    add,
+    byte,
+    inc,
+    sub
+};
+
+// A signed 128-bit integer: zero is never negative.
+pub copy struct Big {
+    ok: bool,
+    neg: bool,
+    hi: u64,
+    lo: u64,
+}
+
+fn none() -> Big {
+    Big {
+        ok: false,
+        neg: false,
+        hi: 0,
+        lo: 0
+    }
+}
+
+// `x * m + a` for a magnitude below 2^127, `m` at most 16 and `a` below
+// `m`; `ok` is false past `i128::MAX`.
+fn mul_add(x: Big, m: u64, a: u64) -> Big {
+    let mask: u64 = 4294967295;
+    let p0 = wrapping_add(wrapping_mul(x.lo & mask, m), a);
+    let p1 = wrapping_add(wrapping_mul(x.lo >> 32, m), p0 >> 32);
+    let lo = (p0 & mask) | wrapping_shl_u64(p1, 32);
+    let carry = p1 >> 32;
+    // x.hi < 2^63 and m <= 16, so the product stays below 2^67: check it
+    // in halves.
+    let h0 = wrapping_add(wrapping_mul(x.hi & mask, m), carry);
+    let h1 = wrapping_add(wrapping_mul(x.hi >> 32, m), h0 >> 32);
+    if h1 >= 2147483648 {
+        return none();
+    }
+    Big {
+        ok: true,
+        neg: false,
+        hi: (h0 & mask) | wrapping_shl_u64(h1, 32),
+        lo: lo
+    }
+}
+
+fn digit(c: u8, hex: bool) -> u64 {
+    if c >= 48 && c <= 57 {
+        widen_u64(wrapping_sub(c, 48))
+    } else if hex && c >= 97 && c <= 102 {
+        widen_u64(wrapping_sub(c, 87))
+    } else if hex && c >= 65 && c <= 70 {
+        widen_u64(wrapping_sub(c, 55))
+    } else {
+        99
+    }
+}
+
+// `parse_int(raw, negative)`: underscores are dropped, `0x`/`0X` is hex;
+// `ok` is false for an empty or invalid spelling or a magnitude past
+// `i128::MAX`.
+pub fn parse_int(in b: Slice[u8], s: u64, e: u64, negative: bool) -> Big {
+    // The first two non-underscore bytes decide the radix.
+    let mut i = s;
+    let mut seen: u64 = 0;
+    let mut c0: u8 = 0;
+    let mut hex = false;
+    let mut start = s;
+    loop {
+        if i >= e || seen >= 2 {
+            break;
+        }
+        let c = byte(in b, i);
+        if c != 95 {
+            if seen == 0 {
+                c0 = c;
+            } else if c0 == 48 && (c == 120 || c == 88) {
+                hex = true;
+                start = inc(i);
+            }
+            seen = inc(seen);
+        }
+        i = inc(i);
+    }
+    let base: u64 = if hex {
+        16
+    } else {
+        10
+    };
+    let mut x = Big {
+        ok: true,
+        neg: false,
+        hi: 0,
+        lo: 0
+    };
+    let mut digits: u64 = 0;
+    let mut j = start;
+    loop {
+        if j >= e {
+            break;
+        }
+        let c = byte(in b, j);
+        j = inc(j);
+        if c == 95 {
+            continue;
+        }
+        let d = digit(c, hex);
+        if d >= base {
+            return none();
+        }
+        x = mul_add(x, base, d);
+        if !x.ok {
+            return none();
+        }
+        digits = inc(digits);
+    }
+    if digits == 0 {
+        return none();
+    }
+    let zero = x.hi == 0 && x.lo == 0;
+    Big {
+        ok: true,
+        neg: negative && !zero,
+        hi: x.hi,
+        lo: x.lo
+    }
+}
+
+// `u64::try_from(n)`.
+pub fn as_u64(x: Big) -> (bool, u64) {
+    if x.neg || x.hi != 0 {
+        (false, 0)
+    } else {
+        (true, x.lo)
+    }
+}
+
+// Appends the decimal spelling of `x` (`i128::to_string`).
+pub fn push_big(inout out: ChunkSeq[u8], x: Big) {
+    if x.neg {
+        out.push(45);
+    }
+    let mask: u64 = 4294967295;
+    let mut limbs: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    limbs.push(x.hi >> 32);
+    limbs.push(x.hi & mask);
+    limbs.push(x.lo >> 32);
+    limbs.push(x.lo & mask);
+    let mut digits: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    loop {
+        let mut r: u64 = 0;
+        let mut nonzero = false;
+        for k in 0..4 {
+            let limb = match limbs.try_get(k) {
+                Option::Some(v) => v,
+                Option::None => 0,
+            };
+            let cur = wrapping_shl_u64(r, 32) | limb;
+            let q = cur / 10;
+            r = cur % 10;
+            let ok = limbs.try_set(k, q);
+            if q != 0 {
+                nonzero = true;
+            }
+        }
+        digits.push(wrapping_u8(add(r, 48)));
+        if !nonzero {
+            break;
+        }
+    }
+    let n = digits.len();
+    for k in 0..n {
+        let c = match digits.try_get(sub(sub(n, 1), k)) {
+            Option::Some(v) => v,
+            Option::None => 48,
+        };
+        out.push(c);
+    }
+}

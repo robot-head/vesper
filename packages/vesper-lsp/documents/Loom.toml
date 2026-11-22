@@ -1,0 +1,9 @@
+[package]
+name = "@vesper/lsp-documents"
+version = "0.1.0"
+edition = "2026"
+# The document store only computes over text the caller lends it.
+capability_ceiling = ["Fail", "Alloc"]
+
+[dependencies]
+"@vesper/span" = { version = "^0.1", path = "../../../crates/vesper-span/vesper" }

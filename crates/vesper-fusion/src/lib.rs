@@ -1,4 +1,4 @@
-//! Host-library operator fusion on `egglog` (design §28.1 item 4, §28.5,
+//! Host-library operator fusion by equality saturation (design §28.1 item 4, §28.5,
 //! §32.1 item 4, §7 Stage 4).
 //!
 //! Two rule sets run on the same bounded equality-saturation engine
@@ -21,10 +21,10 @@
 //! reassociate are proved over exact rationals only and are checked against
 //! the unfused graph within a stated float tolerance by the tests.
 //!
-//! Every fusion is checked before it is used ([`witness`]): egglog is run
-//! with proofs on, its proof that the root equals the extracted term becomes
-//! a witness with one step per applied rewrite (rule, direction, position,
-//! substitution), and a checker that does not use egglog replays the steps
+//! Every fusion is checked before it is used ([`witness`]): the engine
+//! explains why the root equals the extracted term as a witness with one
+//! step per applied rewrite (rule, direction, position, substitution), and
+//! a checker that does not use the engine replays the steps
 //! from the source term rebuilt from the graph to the extracted term, using
 //! only named rules that have a lemma. `fuse` returns [`Error::Witness`]
 //! instead of a fused term when that fails.
@@ -32,7 +32,8 @@
 //! This is a host library, not the compiler's Stage 4 optimizer (`src/ir_opt`
 //! is separate): nothing here reads Vesper source, and Rust ownership in this
 //! crate is not evidence that Vesper's source typing rules are implemented.
-#![forbid(unsafe_code)]
+// The only unsafe code is the generated binding to the Vesper engine.
+#![deny(unsafe_code)]
 
 pub mod dsp;
 pub mod engine;
@@ -61,7 +62,8 @@ pub enum Error {
     Overflow,
     /// A parameter is outside its domain (epsilon, pan position, coefficients).
     Parameter(&'static str),
-    /// egglog rejected the program or extraction failed.
+    /// The engine rejected the program (egglog's errors, by name) or
+    /// extraction failed.
     Egglog(String),
     /// The extracted term does not match the rule set's grammar.
     Extraction(String),

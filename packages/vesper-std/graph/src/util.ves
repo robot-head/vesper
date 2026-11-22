@@ -42,16 +42,10 @@ test {
     fn test_filled_sequences(len: u64, index: u64, expected: u32, present: bool) -> bool {
         let words = filled32(len, 7);
         let bits = filled_bool(len, true);
-        words
-            .len()
-            == len
-            && bits
-            .len()
-            == len
-            && get32(in words.as_slice(), index, 0)
-            == expected
-            && get_bool(in bits.as_slice(), index)
-            == present
+        words.len() == len
+            && bits.len() == len
+            && get32(in words.as_slice(), index, 0) == expected
+            && get_bool(in bits.as_slice(), index) == present
     }
 
     // @case first(0, 4294967296)

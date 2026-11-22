@@ -645,36 +645,37 @@ impl<'a> Facts<'a> {
     }
 }
 
-/// Makes unchecked each element access whose index the dominating
-/// comparisons put below its receiver's length; returns how many.
-pub(super) fn drop_compared_checks(f: &mut FunctionIr) -> usize {
-    let found: Vec<(usize, usize, Access)> = {
-        let facts = Facts::new(f);
-        if facts.edges.is_empty() {
-            return 0;
-        }
-        let mut found = vec![];
-        for &b in &facts.reached {
-            for (k, access, place, index) in facts.accesses(b) {
-                let target = Target {
-                    place: facts.length_place(&place),
-                    at: (b, k),
-                };
-                if facts.below_len(&facts.term(index), &target, b, 0) {
-                    found.push((b, k, access));
-                }
+/// The element accesses whose index the dominating comparisons put below
+/// their receiver's length: (block, instruction, access) each.
+pub(super) fn compared_checks(f: &FunctionIr) -> Vec<(usize, usize, Access)> {
+    let facts = Facts::new(f);
+    if facts.edges.is_empty() {
+        return vec![];
+    }
+    let mut found = vec![];
+    for &b in &facts.reached {
+        for (k, access, place, index) in facts.accesses(b) {
+            let target = Target {
+                place: facts.length_place(&place),
+                at: (b, k),
+            };
+            if facts.below_len(&facts.term(index), &target, b, 0) {
+                found.push((b, k, access));
             }
         }
-        found
-    };
-    for &(b, k, access) in &found {
+    }
+    found
+}
+
+/// Makes the accesses of [`compared_checks`] unchecked.
+pub(super) fn make_unchecked(f: &mut FunctionIr, found: &[(usize, usize, Access)]) {
+    for &(b, k, access) in found {
         let i = &mut f.blocks[b].instructions[k];
         if let Op::Seq { op, .. } = &mut i.op {
             *op = SeqOp::Hoisted(access);
             i.fallible = false;
         }
     }
-    found.len()
 }
 
 /// A loop-invariant bound, readable in the preheader.
@@ -699,14 +700,33 @@ struct Guarded {
 /// loop-invariant bound that the function cannot compare with the length:
 /// a guard `bound <= len` in the preheader enters a copy with unchecked
 /// accesses. Returns how many loops it versioned.
-pub(super) fn version_compared_loops(f: &mut FunctionIr) -> usize {
+pub(super) fn version_compared_loops(
+    f: &mut FunctionIr,
+    trace: &mut Option<super::Trace<'_>>,
+) -> usize {
     let mut count = 0;
     // One loop at a time: versioning adds blocks and changes dominators, so
     // the facts are recomputed only after a loop is versioned. Each loop is
     // tried once, by its header, innermost first.
     let mut tried = BTreeSet::new();
     loop {
-        let Some((h, pre, blocks, guarded, convert)) = next_loop(f, &mut tried) else {
+        let before = tried.clone();
+        let next = next_loop(f, &mut tried);
+        if let Some(t) = trace.as_mut() {
+            let decision = match &next {
+                None => "none".to_string(),
+                Some(c) => candidate_text(c),
+            };
+            t(
+                f,
+                Step {
+                    tried: before,
+                    decision: format!("{decision} tried={}", blocks_text(&tried)),
+                    ..step(StepKind::ComparedLoop, String::new())
+                },
+            );
+        }
+        let Some((h, pre, blocks, guarded, convert)) = next else {
             return count;
         };
         let base = f.blocks.len();
@@ -715,6 +735,31 @@ pub(super) fn version_compared_loops(f: &mut FunctionIr) -> usize {
         tried.extend(base..f.blocks.len());
         count += 1;
     }
+}
+
+/// The decision text of a [`StepKind::ComparedLoop`] step.
+fn candidate_text((h, pre, blocks, guarded, convert): &Candidate) -> String {
+    let guards = guarded
+        .iter()
+        .map(|g| {
+            let bound = match &g.bound {
+                Bound::Local(n) => format!("local:{n}"),
+                Bound::Const(c) => format!("const:{c}"),
+                Bound::Value(v) => format!("value:{v}"),
+            };
+            format!("{}<{bound}:{}", g.place.display(), g.read.dest)
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let accesses = convert
+        .iter()
+        .map(|((b, k), a)| format!("{b}:{k}:{}", access_text(*a)))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        "header={h} pre={pre} blocks={} guards=[{guards}] accesses=[{accesses}]",
+        blocks_text(blocks)
+    )
 }
 
 type Candidate = (

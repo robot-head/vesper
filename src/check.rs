@@ -25,8 +25,12 @@ mod for_sequences;
 mod literal_typing;
 #[path = "loops/check.rs"]
 mod loop_rules;
+#[path = "check/sugar.rs"]
+mod sugar;
 #[path = "loops/try_option.rs"]
 mod try_option;
+#[path = "check/world_mode.rs"]
+mod world_mode;
 
 const TRY_OPERAND: &str = "'?' requires Result[T, E], or Option[T] in a function returning Option";
 #[path = "seq/check.rs"]
@@ -76,6 +80,9 @@ pub struct World {
     /// Second-class trait objects: `dyn` parameters, vtable stubs and the
     /// vtables the program needs (empty without `dyn`; §7.1).
     pub dyn_objects: crate::dyn_trait::DynObjects,
+    /// Memoized ADT expansions of [`World::mode`]. A clone starts empty and
+    /// it never makes two worlds unequal.
+    pub mode_cache: world_mode::ModeCache,
 }
 impl World {
     pub fn collect(module: &Module) -> (Self, Vec<Diagnostic>) {
@@ -276,85 +283,27 @@ impl World {
                 .map(|v| (a, v))
         })
     }
+    /// The mode of `ty` in this world, with `bounds` giving the modes of
+    /// type parameters. ADT expansions are memoized per world
+    /// ([`world_mode`]); the answer is the original algorithm's
+    /// ([`world_mode::reference`]).
     pub fn mode(&self, ty: &Type, bounds: &BTreeMap<String, Mode>) -> Mode {
-        fn visit(
-            w: &World,
-            ty: &Type,
-            bounds: &BTreeMap<String, Mode>,
-            seen: &mut BTreeSet<String>,
-        ) -> Mode {
-            match ty {
-                Type::Infer | Type::IntLiteral(_) => Mode::Copy,
-                Type::Row(_) => Mode::Copy,
-                Type::Tuple(ts) => ts
-                    .iter()
-                    .fold(Mode::Copy, |m, t| m.join(visit(w, t, bounds, seen))),
-                Type::Function { mode, .. } => *mode,
-                Type::Named(n, args) => {
-                    if let Some(m) = bounds.get(n) {
-                        return *m;
-                    }
-                    if crate::vector::shape_of(ty).is_some() {
-                        return Mode::Copy;
-                    }
-                    if crate::numeric::is_scalar_name(n) {
-                        return Mode::Copy;
-                    }
-                    if n == crate::strings::STRING_TYPE || n == crate::strings::STR_TYPE {
-                        return Mode::Affine;
-                    }
-                    // A trait object owns an affine value (§7.3).
-                    if n == crate::ast::DYN_TYPE {
-                        return Mode::Affine;
-                    }
-                    // RegionBox[r, T] has the mode of T (§15.2).
-                    if n == crate::regions::BOX_TYPE {
-                        return args
-                            .get(1)
-                            .map_or(Mode::Linear, |t| visit(w, t, bounds, seen));
-                    }
-                    // ChunkSeq[T] owns its elements; Slice[T] is a borrow (§13).
-                    if n == crate::seq::CHUNK_SEQ_TYPE || n == crate::seq::SLICE_TYPE {
-                        return args
-                            .first()
-                            .map_or(Mode::Affine, |t| visit(w, t, bounds, seen))
-                            .join(Mode::Affine);
-                    }
-                    // TiledSeq[T] is an affine AoSoA sequence container (§12.5).
-                    if n == crate::tiled::TILED_SEQ_TYPE {
-                        return args
-                            .first()
-                            .map_or(Mode::Affine, |t| visit(w, t, bounds, seen))
-                            .join(Mode::Affine);
-                    }
-                    let Some(a) = w.adts.get(n) else {
-                        return Mode::Linear;
-                    };
-                    let argument_modes = args
-                        .iter()
-                        .map(|t| visit(w, t, bounds, seen))
-                        .collect::<Vec<_>>();
-                    let key = format!("{n}:{argument_modes:?}");
-                    if !seen.insert(key.clone()) {
-                        return a.mode;
-                    }
-                    let component_bounds = a
-                        .generics
-                        .iter()
-                        .zip(argument_modes)
-                        .map(|(g, m)| (g.name.clone(), m))
-                        .collect();
-                    let mut m = a.mode;
-                    for f in a.variants.iter().flat_map(|v| &v.fields) {
-                        let intrinsic = visit(w, &f.ty, &component_bounds, seen);
-                        m = m.join(f.modality.unwrap_or(intrinsic));
-                    }
-                    seen.remove(&key);
-                    m
-                }
-            }
-        }
-        visit(self, ty, bounds, &mut BTreeSet::new())
+        world_mode::mode(self, ty, bounds)
+    }
+    /// The original, unmemoized `mode` (for differential tests and benches).
+    #[doc(hidden)]
+    pub fn mode_reference(&self, ty: &Type, bounds: &BTreeMap<String, Mode>) -> Mode {
+        world_mode::reference(self, ty, bounds)
+    }
+    /// Forgets the memoized modes. Call it after changing `adts` of a world
+    /// that has answered a `mode` query.
+    pub fn clear_mode_cache(&self) {
+        self.mode_cache.clear();
+    }
+    /// How many ADT expansions the mode memo holds.
+    #[doc(hidden)]
+    pub fn mode_cache_len(&self) -> usize {
+        world_mode::cached(self)
     }
     pub fn field(&self, ty: &Type, path: &[String]) -> Option<Type> {
         let mut ty = ty.clone();
@@ -448,12 +397,14 @@ impl World {
 
         let mut diagnostics;
         let mut option_tries;
+        let mut integer_nots: BTreeSet<(usize, usize)>;
         let mut types;
         let mut for_plans;
         let mut iteration = 0usize;
         loop {
             iteration += 1;
             let mut c = Checker {
+                sugar: &sugar::Ceilings::default(),
                 world: &world,
                 diagnostics: vec![],
                 types: BTreeMap::new(),
@@ -495,6 +446,8 @@ impl World {
                 loop_borrows: vec![],
                 view_sources: vec![],
                 result_ranges: Default::default(),
+                total_operands: 0,
+                integer_nots: BTreeSet::new(),
             };
             c.function_with_literal_typing(&func_norm);
             let Checker {
@@ -504,8 +457,10 @@ impl World {
                 option_tries: tries,
                 types: checked_types,
                 for_sequences: plans,
+                integer_nots: nots,
                 ..
             } = c;
+            integer_nots = nots;
             option_tries = tries;
             types = checked_types;
             for_plans = plans;
@@ -557,6 +512,17 @@ impl World {
             let desugared = try_option::desugar(&single, &option_tries, after);
             if let Some(Item::Function(desugared_fn)) = desugared.items.into_iter().next() {
                 return self.check_isolated_item(&desugared_fn);
+            }
+        }
+        if !integer_nots.is_empty() {
+            // Check the complements `!` on integers means instead.
+            let single = Module {
+                items: vec![Item::Function(Box::new(func_norm.clone()))],
+                ..Module::default()
+            };
+            let rewritten = integer_widths_rules::complement_nots(&single, &integer_nots);
+            if let Some(Item::Function(rewritten_fn)) = rewritten.items.into_iter().next() {
+                return self.check_isolated_item(&rewritten_fn);
             }
         }
         let after = func_norm
@@ -793,7 +759,7 @@ pub fn check(module: &Module) -> Checked {
     for u in &module.uses {
         checked.diagnostics.push(
             Diagnostic::new(
-                crate::packages::USE_OUTSIDE_PACKAGE,
+                USE_OUTSIDE_PACKAGE,
                 "`use` imports need a package; check the package directory instead of one file",
                 u.span.clone(),
             )
@@ -841,15 +807,18 @@ pub(crate) fn check_core(
     // Module constants (§2.2): every use is a call of the constant.
     let with_consts = crate::arrays::lower_consts(module);
     let module = with_consts.as_ref().unwrap_or(module);
+    let ceilings = sugar::Ceilings::new(&module.sugar_origins);
     let (mut world, collection_errors) = World::collect(module);
     let mut resolved;
     let mut diagnostics = vec![];
     let mut iteration = 0;
     let mut option_tries: BTreeSet<(usize, usize)>;
+    let mut integer_nots: BTreeSet<(usize, usize)>;
     let mut for_plans: BTreeMap<(usize, usize), for_sequences::Plan>;
     loop {
         iteration += 1;
         let mut c = Checker {
+            sugar: &ceilings,
             world: &world,
             diagnostics: collection_errors.clone(),
             types: BTreeMap::new(),
@@ -891,6 +860,8 @@ pub(crate) fn check_core(
             loop_borrows: vec![],
             view_sources: vec![],
             result_ranges: Default::default(),
+            total_operands: 0,
+            integer_nots: BTreeSet::new(),
         };
         c.declarations();
         for f in world.functions.values() {
@@ -911,8 +882,10 @@ pub(crate) fn check_core(
             resolved: trait_calls,
             option_tries: tries,
             for_sequences: plans,
+            integer_nots: nots,
             ..
         } = c;
+        integer_nots = nots;
         option_tries = tries;
         for_plans = plans;
         resolved = trait_calls;
@@ -935,6 +908,14 @@ pub(crate) fn check_core(
             diagnostics.push(Diagnostic::new("E0408","capability and continuation effect inference did not converge; add explicit type/effect annotations",0..0));
             break;
         }
+    }
+    // Rewriting a loop or an element view creates synthetic spans. Keep a
+    // violation already established against the original expansion evidence.
+    if diagnostics
+        .iter()
+        .any(|d| matches!(d.code.as_str(), "E0143" | "E0144"))
+    {
+        return (finish_check(world, diagnostics), resolved);
     }
     if !for_plans.is_empty() {
         // Check the index loops `for` over a sequence means instead
@@ -960,6 +941,13 @@ pub(crate) fn check_core(
             .unwrap_or(0)
             + 1;
         return check_core(&try_option::desugar(module, &option_tries, after), traits);
+    }
+    if !integer_nots.is_empty() {
+        // Check the complements `!` on integers means instead.
+        return check_core(
+            &integer_widths_rules::complement_nots(module, &integer_nots),
+            traits,
+        );
     }
     // Field paths through sequence elements and calls that borrow two
     // elements of one sequence mean element views (§13): check those
@@ -1001,20 +989,22 @@ pub(crate) fn check_core(
         diagnostics.extend(crate::ir_check::validate(&world, &program));
         diagnostics.extend(crate::atomics::check_program(&world, &program));
     }
+    (finish_check(world, diagnostics), resolved)
+}
+
+fn finish_check(world: World, mut diagnostics: Vec<Diagnostic>) -> Checked {
     let mut seen = BTreeSet::new();
     diagnostics
         .retain(|d| seen.insert((d.code.clone(), d.span.start, d.span.end, d.message.clone())));
-    (
-        Checked {
-            expression_types: world.types.clone(),
-            world,
-            diagnostics,
-        },
-        resolved,
-    )
+    Checked {
+        expression_types: world.types.clone(),
+        world,
+        diagnostics,
+    }
 }
 #[derive(Clone)]
 struct Checker<'a> {
+    sugar: &'a sugar::Ceilings<'a>,
     world: &'a World,
     diagnostics: Vec<Diagnostic>,
     types: TypeMap,
@@ -1091,6 +1081,13 @@ struct Checker<'a> {
     view_sources: Vec<(Place, String, Span)>,
     /// Result-range summaries of called functions ([`call_facts`]).
     result_ranges: std::cell::RefCell<call_facts::ResultRanges>,
+    /// Nonzero while a shift amount or a divisor is checked: its `+`, `-`
+    /// and `*` may be proven in range by range facts
+    /// ([`crate::integer_widths`] check rules).
+    total_operands: usize,
+    /// Spans of prefix `!` on an integer operand: the bitwise complement,
+    /// rewritten to `~` and checked again.
+    integer_nots: BTreeSet<(usize, usize)>,
 }
 impl Checker<'_> {
     fn error(&mut self, code: &str, msg: impl Into<String>, span: Span) {
@@ -1138,7 +1135,7 @@ impl Checker<'_> {
                     }
                     if c.world
                         .functions
-                        .contains_key(&format!("{}{n}", crate::ffi_lowering::drops::DROP_PREFIX))
+                        .contains_key(&format!("{}{n}", FOREIGN_DROP_PREFIX))
                     {
                         return true;
                     }
@@ -1203,8 +1200,7 @@ impl Checker<'_> {
                 self.world.adts.get(n).is_some_and(|a| {
                     a.variants.iter().any(|v| {
                         v.fields.iter().any(|f| {
-                            f.name == crate::ffi_lowering::HANDLE_FIELD
-                                || self.holds_extern_handle(&f.ty, seen)
+                            f.name == FOREIGN_HANDLE_FIELD || self.holds_extern_handle(&f.ty, seen)
                         })
                     })
                 })
@@ -1617,6 +1613,17 @@ impl Checker<'_> {
         }
     }
     fn place(&mut self, p: &Place, env: &mut Env, usage: Usage, span: Span) -> Type {
+        self.check_place(p, env, usage, span, false)
+    }
+
+    fn check_place(
+        &mut self,
+        p: &Place,
+        env: &mut Env,
+        usage: Usage,
+        span: Span,
+        initialize: bool,
+    ) -> Type {
         let Some(b) = env.bindings.get(&p.root).cloned() else {
             self.error("E0201", format!("unknown binding '{}'", p.root), span);
             return Type::Infer;
@@ -1675,6 +1682,18 @@ impl Checker<'_> {
             );
             Type::Infer
         });
+        if !self.sugar.is_empty() {
+            let requested = match usage {
+                Usage::Borrow(Pass::Inout) if initialize => SugarPass::Out,
+                Usage::Borrow(Pass::Inout) => SugarPass::Inout,
+                Usage::Borrow(Pass::Sink) => SugarPass::Sink,
+                Usage::Own if self.mode(&ty) != Mode::Copy => SugarPass::Sink,
+                _ => SugarPass::In,
+            };
+            if let Some(d) = self.sugar.captured_access(&span, requested) {
+                self.diagnostics.push(d);
+            }
+        }
         for (loan, mode, origin) in self.loans.clone() {
             let reserved =
                 mode == Pass::Inout && self.reserved_loans.contains(&(origin.start, origin.end));
@@ -1777,6 +1796,16 @@ impl Checker<'_> {
         self.expr_expected(e, env, usage, &Type::Infer)
     }
     fn expr_expected(&mut self, e: &Expr, env: &mut Env, usage: Usage, expected: &Type) -> Type {
+        if let ExprKind::Assign(op, lhs, _) = &e.kind {
+            let pass = if op == "=" {
+                SugarPass::Out
+            } else {
+                SugarPass::Inout
+            };
+            if let Some(d) = self.sugar.access(&e.span, lhs, pass) {
+                self.diagnostics.push(d);
+            }
+        }
         let before = if matches!(e.kind, ExprKind::Handle { .. } | ExprKind::Closure { .. }) {
             Some(env.clone())
         } else {
@@ -1861,7 +1890,7 @@ impl Checker<'_> {
                     // Qualified paths resolve only through the package
                     // loader (`crate::packages`), like `use` imports.
                     self.error(
-                        crate::packages::USE_OUTSIDE_PACKAGE,
+                        USE_OUTSIDE_PACKAGE,
                         format!("the qualified path '{n}' needs a package; check the package directory instead of one file"),
                         e.span.clone(),
                     );
@@ -2121,6 +2150,8 @@ impl Checker<'_> {
                 if op == "~" {
                     self.check_complement(&t, e.span.clone());
                     t
+                } else if op == "!" && self.integer_not(&t, e.span.clone()) {
+                    t
                 } else if op == "!" {
                     self.expect_type(&Type::named("bool"), &t, e.span.clone());
                     Type::named("bool")
@@ -2164,6 +2195,7 @@ impl Checker<'_> {
                 let left_fact = self.integer_fact(l, env);
                 let left_bounds = self.integer_bounds(l, env);
                 let left_index = Self::loop_index(l, env);
+                let left_operand = self.total_operand_bounds(l, env);
                 let right_goal = if goal != Type::Infer {
                     goal
                 } else if float_math_rules::float_literal_tree(l) {
@@ -2191,6 +2223,8 @@ impl Checker<'_> {
                         self.merge(env, &before, &after, e.span.clone());
                     }
                     b
+                } else if matches!(op.as_str(), "/" | "%") {
+                    self.divisor(r, env, &right_goal)
                 } else {
                     self.expr_expected(r, env, Usage::Own, &right_goal)
                 };
@@ -2234,13 +2268,18 @@ impl Checker<'_> {
                         e.span.clone(),
                     );
                 }
-                if matches!(op.as_str(), "/" | "%") && integer(&common) && !self.nonzero(r, env) {
+                if matches!(op.as_str(), "/" | "%")
+                    && integer(&common)
+                    && !self.nonzero(r, env)
+                    && !self.nonzero_divisor(r, env)
+                {
                     self.primitive_failure(env, e.span.clone());
                 }
                 if let Some(kind) = crate::numeric::IntegerKind::from_type(&common)
                     && crate::numeric::may_overflow(op, kind)
                     && !self.in_range(op, kind, left_fact, self.integer_fact(r, env))
                     && !Self::quotient_in_range(op, kind, left_bounds, self.integer_bounds(r, env))
+                    && !self.total_operation(op, kind, left_operand, r, env)
                     && !((left_index || Self::loop_index(r, env))
                         && Self::bounds_in_range(
                             op,
@@ -2283,7 +2322,13 @@ impl Checker<'_> {
                     self.expr(r, env, Usage::Own);
                     return Type::unit();
                 }
-                let expected = self.place(&p, env, Usage::Borrow(Pass::Inout), l.span.clone());
+                let expected = self.check_place(
+                    &p,
+                    env,
+                    Usage::Borrow(Pass::Inout),
+                    l.span.clone(),
+                    op == "=",
+                );
                 self.types
                     .insert((l.span.start, l.span.end), expected.clone());
                 let target_fact = |env: &Env| {
@@ -2554,7 +2599,20 @@ impl Checker<'_> {
                             env,
                             e.span.clone(),
                         );
-                        args[0].clone()
+                        if args[0] == Type::Infer {
+                            // `Err(e)?` with nothing to infer its `Ok` type
+                            // from: the operand never succeeds, so its `Ok`
+                            // payload is `Unit` and every backend has a
+                            // layout for it (SH5 lane 6, #1329).
+                            let ok = Type::unit();
+                            self.constrain_literals(
+                                value,
+                                &Type::Named("Result".into(), vec![ok.clone(), args[1].clone()]),
+                            );
+                            ok
+                        } else {
+                            args[0].clone()
+                        }
                     } else {
                         self.error("E0200", TRY_OPERAND, e.span.clone());
                         Type::Infer
@@ -3501,6 +3559,14 @@ impl Checker<'_> {
             env,
         );
         for ((expr, explicit), param) in actuals.into_iter().zip(&f.params) {
+            let pass = match param.pass {
+                Pass::In => SugarPass::In,
+                Pass::Inout => SugarPass::Inout,
+                Pass::Sink => SugarPass::Sink,
+            };
+            if let Some(d) = self.sugar.access(&span, expr, pass) {
+                self.diagnostics.push(d);
+            }
             // Two-phase argument loans (§4.3): every `inout` argument, not
             // only the receiver, is reserved while the call's other
             // arguments are evaluated.
@@ -4000,6 +4066,11 @@ impl Checker<'_> {
         self.observations.pop().unwrap().1
     }
     fn require_effect(&mut self, effect: &Effect, env: &Env, span: Span) {
+        if self.dead == 0
+            && let Some(d) = self.sugar.effect(&span, effect)
+        {
+            self.diagnostics.push(d);
+        }
         // Built-in capability effects constrain callees, not callers: they are
         // never requested from the caller's row (see `capability_effects`).
         if self.dead != 0 || crate::capability_effects::is_capability_effect(&effect.name) {
@@ -4062,6 +4133,11 @@ impl Checker<'_> {
         }
     }
     fn check_abort_frame(&mut self, env: &Env, effect: &str, span: Span) {
+        if self.dead == 0
+            && let Some(d) = self.sugar.open_row(&span, effect)
+        {
+            self.diagnostics.push(d);
+        }
         self.check_abort_frame_for(env, effect, span, None);
     }
     fn check_abort_frame_for(
@@ -5127,7 +5203,10 @@ impl Checker<'_> {
         }
         for (name, b) in &outer.bindings {
             if free.contains(name) {
-                if self.mode(&b.ty) != Mode::Copy || b.pass != Pass::Sink {
+                // A `copy` value read through an `in` borrow is stable for
+                // the whole handler, so its snapshot is a plain copy
+                // (§ handler state threading; SH5 lane 6, #1329).
+                if self.mode(&b.ty) != Mode::Copy || !matches!(b.pass, Pass::Sink | Pass::In) {
                     self.error("E0404",format!("handler clause capture '{name}' must be owned copy; thread unique resources through state"),span.clone());
                 }
                 clause_env.bindings.insert(name.clone(), b.clone());
@@ -5156,7 +5235,7 @@ impl Checker<'_> {
         if let Some(previous) = self.world.handler_effects.get(&(span.start, span.end)) {
             union_effects(&mut resume_effects, previous);
         }
-        let out = if returned.name() == "Never" && *expected != Type::Infer {
+        let mut out = if returned.name() == "Never" && *expected != Type::Infer {
             expected.clone()
         } else {
             returned
@@ -5237,6 +5316,11 @@ impl Checker<'_> {
             self.leave_control();
             union_effects(&mut outgoing, &self.finish_observing());
             self.expect_type(&out, &actual, op.body.span.clone());
+            // Complementary variants can determine generic arguments that
+            // the return clause alone leaves open (Ok(v) versus Err(e)).
+            if unresolved(&out) {
+                out = self.join_types(&out, &actual, op.body.span.clone());
+            }
             if crate::integer_widths::holds_wide(&out) {
                 self.constrain_literals(&op.body, &out);
             }
@@ -5267,6 +5351,8 @@ impl Checker<'_> {
 pub fn literal_type(l: &Literal) -> Type {
     match l {
         Literal::Int(n) => Type::IntLiteral(*n),
+        // Above `i128::MAX` only `u128` holds the literal.
+        Literal::WideInt(_) => Type::named("u128"),
         Literal::Float(_) => Type::named("f64"),
         Literal::Bool(_) => Type::named("bool"),
         Literal::String(_) => Type::named("String"),
@@ -6126,6 +6212,10 @@ pub mod core_typing_probe {
         (t, diagnostics.len())
     }
 }
+pub const USE_OUTSIDE_PACKAGE: &str = "E0110";
+pub(crate) const FOREIGN_DROP_PREFIX: &str = "$drop$";
+pub(crate) const FOREIGN_HANDLE_FIELD: &str = "$handle";
+
 #[cfg(test)]
 mod isolated_item_tests {
     use super::*;
@@ -6263,9 +6353,11 @@ fn ok_tx() -> i64 {
         assert_eq!(world.functions.len(), orig_fn_count);
         assert!(!world.functions.contains_key("leak_tx"));
         assert!(!world.functions.contains_key("alias_mut"));
-        // Sanity check latency (sub-millisecond in release, very fast in debug).
+        // Sanity check latency: sub-millisecond in release and a few ms in
+        // debug, but a loaded CI runner (BuildBuddy, #1353) has taken 87 ms
+        // for one check, so the bound only catches a pathological slowdown.
         assert!(
-            d_e0302.as_millis() < 50 && d_e0301.as_millis() < 50,
+            d_e0302.as_millis() < 2000 && d_e0301.as_millis() < 2000,
             "isolated checks unexpectedly slow: e0302={d_e0302:?}, e0301={d_e0301:?}"
         );
     }

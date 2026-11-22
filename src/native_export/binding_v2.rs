@@ -820,6 +820,11 @@ unsafe impl vesper_port_abi::Mirror for repr::{name} {{
             {
                 name.clone()
             }
+            // A 128-bit integer is its two words (#1277): eight-byte
+            // aligned, so not a Rust `u128` field.
+            ty if super::wide_by_pointer(ty) => {
+                format!("vesper_port_abi::Words<{}, 2>", rust_type(ty, path))
+            }
             AbiType::Scalar { .. } => format!("vesper_port_abi::Word<{}>", rust_type(ty, path)),
             AbiType::Named { name, .. } if self.interface.mirrored(ty) => name.clone(),
             // An array field (#1091) is its element cells in place.

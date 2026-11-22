@@ -1,0 +1,408 @@
+// The bytes wasm-encoder 0.261 writes: LEB128 integers, value types and
+// the instructions the backend emits (src/wasm_backend uses
+// `wasm_encoder::Instruction`; each method here is one of its variants,
+// encoded as `Instruction::encode` does).
+//
+// A function body is a `Code`: the encoded instructions and their count
+// (the backend's `max_instructions` limit counts instructions, and the
+// portable handler lowering splices code at instruction positions).
+
+// Value types.
+pub const VT_I32: u8 = 127;
+pub const VT_I64: u8 = 126;
+pub const VT_F64: u8 = 124;
+// A reference value type is two bytes: 0x63 (nullable) or 0x64 and the
+// heap type; `ValTy` holds both.
+pub const VT_REF_NULL: u8 = 99;
+pub const VT_REF: u8 = 100;
+
+// Opcodes.
+pub const OP_UNREACHABLE: u8 = 0;
+pub const OP_NOP: u8 = 1;
+pub const OP_BLOCK: u8 = 2;
+pub const OP_LOOP: u8 = 3;
+pub const OP_IF: u8 = 4;
+pub const OP_ELSE: u8 = 5;
+pub const OP_END: u8 = 11;
+pub const OP_BR: u8 = 12;
+pub const OP_BR_IF: u8 = 13;
+pub const OP_RETURN: u8 = 15;
+pub const OP_CALL: u8 = 16;
+pub const OP_CALL_INDIRECT: u8 = 17;
+pub const OP_RETURN_CALL: u8 = 18;
+pub const OP_DROP: u8 = 26;
+pub const OP_SELECT: u8 = 27;
+pub const OP_LOCAL_GET: u8 = 32;
+pub const OP_LOCAL_SET: u8 = 33;
+pub const OP_LOCAL_TEE: u8 = 34;
+pub const OP_GLOBAL_GET: u8 = 35;
+pub const OP_GLOBAL_SET: u8 = 36;
+pub const OP_I32_LOAD: u8 = 40;
+pub const OP_I64_LOAD: u8 = 41;
+pub const OP_F32_LOAD: u8 = 42;
+pub const OP_F64_LOAD: u8 = 43;
+pub const OP_I32_LOAD8_U: u8 = 45;
+pub const OP_I32_LOAD16_U: u8 = 47;
+pub const OP_I64_LOAD8_U: u8 = 49;
+pub const OP_I64_LOAD16_U: u8 = 51;
+pub const OP_I64_LOAD32_U: u8 = 53;
+pub const OP_I32_STORE: u8 = 54;
+pub const OP_I64_STORE: u8 = 55;
+pub const OP_F64_STORE: u8 = 57;
+pub const OP_I32_STORE8: u8 = 58;
+pub const OP_I32_STORE16: u8 = 59;
+pub const OP_I64_STORE8: u8 = 60;
+pub const OP_I64_STORE16: u8 = 61;
+pub const OP_I64_STORE32: u8 = 62;
+pub const OP_MEMORY_SIZE: u8 = 63;
+pub const OP_MEMORY_GROW: u8 = 64;
+pub const OP_I32_CONST: u8 = 65;
+pub const OP_I64_CONST: u8 = 66;
+pub const OP_F64_CONST: u8 = 68;
+pub const OP_I32_EQZ: u8 = 69;
+pub const OP_I32_LT_U: u8 = 73;
+pub const OP_I32_EQ: u8 = 70;
+pub const OP_I32_NE: u8 = 71;
+pub const OP_I64_EQZ: u8 = 80;
+pub const OP_I64_EQ: u8 = 81;
+pub const OP_I64_NE: u8 = 82;
+pub const OP_I64_LT_S: u8 = 83;
+pub const OP_I64_LT_U: u8 = 84;
+pub const OP_I64_GT_S: u8 = 85;
+pub const OP_I64_GT_U: u8 = 86;
+pub const OP_I64_LE_S: u8 = 87;
+pub const OP_I64_LE_U: u8 = 88;
+pub const OP_I64_GE_S: u8 = 89;
+pub const OP_I64_GE_U: u8 = 90;
+pub const OP_F64_EQ: u8 = 97;
+pub const OP_F64_NE: u8 = 98;
+pub const OP_F64_LT: u8 = 99;
+pub const OP_F64_GT: u8 = 100;
+pub const OP_F64_LE: u8 = 101;
+pub const OP_F64_GE: u8 = 102;
+pub const OP_I32_ADD: u8 = 106;
+pub const OP_I32_AND: u8 = 113;
+pub const OP_I32_OR: u8 = 114;
+pub const OP_I64_CLZ: u8 = 121;
+pub const OP_I64_ADD: u8 = 124;
+pub const OP_I64_SUB: u8 = 125;
+pub const OP_I64_MUL: u8 = 126;
+pub const OP_I64_DIV_S: u8 = 127;
+pub const OP_I64_DIV_U: u8 = 128;
+pub const OP_I64_REM_S: u8 = 129;
+pub const OP_I64_REM_U: u8 = 130;
+pub const OP_I64_AND: u8 = 131;
+pub const OP_I64_OR: u8 = 132;
+pub const OP_I64_XOR: u8 = 133;
+pub const OP_I64_SHL: u8 = 134;
+pub const OP_I64_SHR_S: u8 = 135;
+pub const OP_I64_SHR_U: u8 = 136;
+pub const OP_F64_NEG: u8 = 154;
+pub const OP_F64_ADD: u8 = 160;
+pub const OP_F64_SUB: u8 = 161;
+pub const OP_F64_MUL: u8 = 162;
+pub const OP_F64_DIV: u8 = 163;
+pub const OP_I32_WRAP_I64: u8 = 167;
+pub const OP_I64_EXTEND_I32_U: u8 = 173;
+pub const OP_I64_REINTERPRET_F64: u8 = 189;
+pub const OP_F64_REINTERPRET_I64: u8 = 191;
+pub const OP_REF_FUNC: u8 = 210;
+pub const OP_CONT_NEW: u8 = 224;
+pub const OP_SUSPEND: u8 = 226;
+pub const OP_RESUME: u8 = 227;
+pub const OP_PREFIX_FC: u8 = 252;
+// The `memory.copy` sub-opcode after 0xFC.
+pub const FC_MEMORY_COPY: u64 = 10;
+
+// Block types: empty, or one result.
+pub const BT_EMPTY: u8 = 64;
+
+// `x` as unsigned LEB128.
+pub fn uleb(inout out: ChunkSeq[u8], v: u64) {
+    let mut x = v;
+    loop {
+        let byte = wrapping_u8(x & 127);
+        x = x >> 7;
+        if x == 0 {
+            out.push(byte);
+            break;
+        }
+        out.push(byte | 128);
+    }
+}
+
+// `x` as signed LEB128 (`i64` and the 33-bit heap and block type
+// indices, which take the same bytes for the values they hold).
+pub fn sleb(inout out: ChunkSeq[u8], v: i64) {
+    let mut x = v;
+    loop {
+        let byte = wrapping_u8(wrapping_u64(x) & 127);
+        x = x >> 7;
+        let sign = (byte & 64) != 0;
+        if (x == 0 && !sign) || (x == -1 && sign) {
+            out.push(byte);
+            break;
+        }
+        out.push(byte | 128);
+    }
+}
+
+// The LEB128 size of `v`, for section and body lengths.
+pub fn uleb_size(v: u64) -> u64 {
+    let mut n: u64 = 1;
+    let mut x = v >> 7;
+    loop {
+        if x == 0 {
+            break;
+        }
+        n = wrapping_add(n, 1);
+        x = x >> 7;
+    }
+    n
+}
+
+// A value type: `I32`, `I64`, `F64`, or a reference (`kind` 0x63/0x64)
+// to concrete heap type `index`.
+pub copy struct ValTy {
+    kind: u8,
+    index: u32,
+}
+
+pub fn vt(kind: u8) -> ValTy {
+    ValTy {
+        kind: kind,
+        index: 0
+    }
+}
+
+pub fn vt_ref(nullable: bool, index: u32) -> ValTy {
+    ValTy {
+        kind: if nullable {
+            VT_REF_NULL
+        } else {
+            VT_REF
+        },
+        index: index
+    }
+}
+
+pub fn put_valtype(inout out: ChunkSeq[u8], t: ValTy) {
+    out.push(t.kind);
+    if t.kind == VT_REF_NULL || t.kind == VT_REF {
+        sleb(inout out, wrapping_i64(w64(t.index)));
+    }
+}
+
+fn w64(x: u32) -> u64 {
+    widen_u64(x)
+}
+
+// A name or byte string: its length, then its bytes.
+pub fn put_bytes(inout out: ChunkSeq[u8], in b: Slice[u8]) {
+    uleb(inout out, b.len());
+    for i in 0..b.len() {
+        match b.try_get(i) {
+            Option::Some(x) => out.push(x),
+            Option::None => {},
+        }
+    }
+}
+
+pub fn append(inout out: ChunkSeq[u8], in b: ChunkSeq[u8]) {
+    for i in 0..b.len() {
+        match b.try_get(i) {
+            Option::Some(x) => out.push(x),
+            Option::None => {},
+        }
+    }
+}
+
+// One function body under construction: the instructions' bytes and how
+// many there are.
+pub struct Code {
+    bytes: ChunkSeq[u8],
+    count: u64,
+}
+
+pub fn code_new() -> Code {
+    Code {
+        bytes: ChunkSeq::new[u8](),
+        count: 0
+    }
+}
+
+impl Code {
+    pub fn len(in self) -> u64 {
+        self.count
+    }
+
+    // An instruction without immediates.
+    pub fn op(inout self, op: u8) {
+        self.bytes.push(op);
+        self.count = wrapping_add(self.count, 1);
+    }
+
+    // An instruction with one unsigned immediate (locals, globals,
+    // functions, branch depths).
+    pub fn op_u(inout self, op: u8, x: u64) {
+        self.bytes.push(op);
+        uleb(inout self.bytes, x);
+        self.count = wrapping_add(self.count, 1);
+    }
+
+    pub fn get(inout self, x: u32) {
+        self.op_u(OP_LOCAL_GET, widen_u64(x));
+    }
+
+    pub fn set(inout self, x: u32) {
+        self.op_u(OP_LOCAL_SET, widen_u64(x));
+    }
+
+    pub fn tee(inout self, x: u32) {
+        self.op_u(OP_LOCAL_TEE, widen_u64(x));
+    }
+
+    pub fn global_get(inout self, x: u32) {
+        self.op_u(OP_GLOBAL_GET, widen_u64(x));
+    }
+
+    pub fn global_set(inout self, x: u32) {
+        self.op_u(OP_GLOBAL_SET, widen_u64(x));
+    }
+
+    pub fn call(inout self, f: u32) {
+        self.op_u(OP_CALL, widen_u64(f));
+    }
+
+    pub fn return_call(inout self, f: u32) {
+        self.op_u(OP_RETURN_CALL, widen_u64(f));
+    }
+
+    pub fn br(inout self, d: u32) {
+        self.op_u(OP_BR, widen_u64(d));
+    }
+
+    pub fn br_if(inout self, d: u32) {
+        self.op_u(OP_BR_IF, widen_u64(d));
+    }
+
+    pub fn ref_func(inout self, f: u32) {
+        self.op_u(OP_REF_FUNC, widen_u64(f));
+    }
+
+    pub fn cont_new(inout self, ct: u32) {
+        self.op_u(OP_CONT_NEW, widen_u64(ct));
+    }
+
+    pub fn i64_const(inout self, v: i64) {
+        self.bytes.push(OP_I64_CONST);
+        sleb(inout self.bytes, v);
+        self.count = wrapping_add(self.count, 1);
+    }
+
+    pub fn u64_const(inout self, v: u64) {
+        self.i64_const(wrapping_i64(v));
+    }
+
+    pub fn i32_const(inout self, v: i64) {
+        self.bytes.push(OP_I32_CONST);
+        sleb(inout self.bytes, v);
+        self.count = wrapping_add(self.count, 1);
+    }
+
+    // `f64.const` with the IEEE bits `bits`.
+    pub fn f64_const(inout self, bits: u64) {
+        self.bytes.push(OP_F64_CONST);
+        for k in 0..8 {
+            self
+                .bytes
+                .push(wrapping_u8(wrapping_shr_u64(bits, wrapping_u32(wrapping_mul(k, 8))) & 255));
+        }
+        self.count = wrapping_add(self.count, 1);
+    }
+
+    // A load or store with `MemArg { offset, align, memory_index: 0 }`.
+    pub fn mem(inout self, op: u8, align: u64, offset: u64) {
+        self.bytes.push(op);
+        uleb(inout self.bytes, align);
+        uleb(inout self.bytes, offset);
+        self.count = wrapping_add(self.count, 1);
+    }
+
+    // `i64.load` / `i64.store` of an 8-byte slot (`mem(offset)` of
+    // lower.rs: align 3).
+    pub fn load(inout self, offset: u64) {
+        self.mem(OP_I64_LOAD, 3, offset);
+    }
+
+    pub fn store(inout self, offset: u64) {
+        self.mem(OP_I64_STORE, 3, offset);
+    }
+
+    // `block`, `loop` or `if` with an empty block type.
+    pub fn open(inout self, op: u8) {
+        self.bytes.push(op);
+        self.bytes.push(BT_EMPTY);
+        self.count = wrapping_add(self.count, 1);
+    }
+
+    // `block`, `loop` or `if` with one result of value type `t`.
+    pub fn open_result(inout self, op: u8, t: ValTy) {
+        self.bytes.push(op);
+        put_valtype(inout self.bytes, t);
+        self.count = wrapping_add(self.count, 1);
+    }
+
+    pub fn call_indirect(inout self, ty: u32) {
+        self.bytes.push(OP_CALL_INDIRECT);
+        uleb(inout self.bytes, widen_u64(ty));
+        uleb(inout self.bytes, 0);
+        self.count = wrapping_add(self.count, 1);
+    }
+
+    pub fn memory_size(inout self) {
+        self.bytes.push(OP_MEMORY_SIZE);
+        self.bytes.push(0);
+        self.count = wrapping_add(self.count, 1);
+    }
+
+    pub fn memory_grow(inout self) {
+        self.bytes.push(OP_MEMORY_GROW);
+        self.bytes.push(0);
+        self.count = wrapping_add(self.count, 1);
+    }
+
+    pub fn memory_copy(inout self) {
+        self.bytes.push(OP_PREFIX_FC);
+        uleb(inout self.bytes, FC_MEMORY_COPY);
+        self.bytes.push(0);
+        self.bytes.push(0);
+        self.count = wrapping_add(self.count, 1);
+    }
+
+    // Every instruction of `other` after this code's.
+    pub fn extend(inout self, in other: Code) {
+        append(inout self.bytes, in other.bytes);
+        self.count = wrapping_add(self.count, other.count);
+    }
+}
+
+// A finished function body: `Function::new(locals)` then the code (the
+// locals as `(count, type)` runs, each as given).
+pub fn function_bytes(in locals: ChunkSeq[u32], in types: ChunkSeq[ValTy], in code: Code)
+    -> ChunkSeq[u8] {
+    let mut out = ChunkSeq::new[u8]();
+    uleb(inout out, locals.len());
+    for i in 0..locals.len() {
+        match locals.try_get(i) {
+            Option::Some(n) => uleb(inout out, widen_u64(n)),
+            Option::None => {},
+        }
+        match types.try_get(i) {
+            Option::Some(t) => put_valtype(inout out, t),
+            Option::None => {},
+        }
+    }
+    append(inout out, in code.bytes);
+    out
+}

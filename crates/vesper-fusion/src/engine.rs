@@ -1,4 +1,4 @@
-//! Bounded egglog equality saturation and extraction.
+//! Bounded equality saturation and extraction.
 //!
 //! A rule set is plain egglog text: sort and constructor declarations whose
 //! `:cost` annotations are the cost model, followed by named rewrites. The
@@ -7,11 +7,21 @@
 //! representative of the root e-class is extracted with egglog's tree-cost
 //! extractor. The extracted term is returned as a hash-consed arena so a
 //! shared subterm is converted once.
-use crate::witness::{self, RuleSet, Summary, Witness};
+//!
+//! The engine is the Vesper package in `vesper/` (Rust-exit wave SH6, lane
+//! 18, #1413), which replaced egglog 3: it reads the same program text, runs
+//! egglog's `(run n)` and tree-cost extraction, and explains the extraction
+//! as a rewrite chain (egg-style explanations over a proof forest) instead of
+//! asking egglog for a proof. `tests/egglog_differential.rs` compares its
+//! extractions with egglog's.
+use crate::witness::{self, Direction, RuleSet, Step, Summary, Witness};
 use crate::{Error, MAX_EXTRACTED};
-use egglog::{CommandOutput, EGraph, Term, TermDag, ast::Literal};
-use std::collections::HashMap;
-use std::fmt::Write as _;
+
+// Generated and committed, outside src/ (see the porting recipe).
+#[rustfmt::skip]
+#[allow(unsafe_code)]
+#[path = "../port/binding.rs"]
+mod binding;
 
 /// Saturation iterations; every shipped rule set reaches a fixpoint sooner on
 /// the graphs the tests use, and this caps work on adversarial graphs.
@@ -83,24 +93,199 @@ impl Extracted {
 /// the rewrites are declared but never run, which extracts the input graph
 /// itself (used for the unfused cost).
 pub fn run(rules: &str, bindings: &str, root: &str, saturate: bool) -> Result<Extracted, Error> {
-    let mut program = String::with_capacity(rules.len() + bindings.len() + 64);
-    program.push_str(rules);
-    program.push_str(bindings);
-    if saturate {
-        program.push_str(&format!("(run {ITERATIONS})\n"));
+    let program = format!("{rules}{bindings}");
+    let mode = if saturate { MODE_SATURATE } else { 0 };
+    let out = Words::run(&program, root, mode)?;
+    let mut r = out.reader(&program);
+    r.extracted()
+}
+
+/// Mode bits of the Vesper entry point.
+const MODE_SATURATE: u64 = 1;
+const MODE_EXPLAIN: u64 = 2;
+
+/// Words returned by the Vesper engine (see `vesper/src/lib.ves`).
+struct Words(Vec<u64>);
+
+impl Words {
+    fn run(program: &str, root: &str, mode: u64) -> Result<Self, Error> {
+        let words = binding::fusion_run(program, root, mode | ((ITERATIONS as u64) << 8));
+        let status = words.first().copied().unwrap_or(u64::MAX);
+        let at = words.get(1).copied().unwrap_or(0);
+        let what = match status {
+            0 => return Ok(Self(words)),
+            10 => return Err(Error::Limit("e-graph nodes")),
+            11 => return Err(Error::Limit("witness steps")),
+            1 => "malformed s-expression",
+            2 => "unknown or malformed command",
+            3 => "unknown or duplicate sort",
+            4 => "unknown constructor",
+            5 => "wrong number of arguments",
+            6 => "type mismatch",
+            7 => "unbound name",
+            8 => "duplicate name",
+            9 => "no binding named the root",
+            13 => "the root has no finite-cost term",
+            14 => "integer out of range",
+            15 => "right-side variable not bound by the left side",
+            16 => "a rewrite's left side is not a constructor application",
+            _ => "unexpected engine status",
+        };
+        Err(Error::Egglog(format!("{what} at byte {at}")))
     }
-    program.push_str(&format!("(extract {root})\n"));
-    let mut egraph = EGraph::default();
-    let outputs = egraph
-        .parse_and_run_program(None, &program)
-        .map_err(|e| Error::Egglog(e.to_string()))?;
-    let Some((dag, cost, term)) = outputs.into_iter().rev().find_map(|o| match o {
-        CommandOutput::ExtractBest(dag, cost, term) => Some((dag, cost, term)),
-        _ => None,
-    }) else {
-        return Err(Error::Egglog("no extraction output".into()));
-    };
-    convert(&dag, cost, term)
+
+    fn reader<'a>(&'a self, program: &'a str) -> Reader<'a> {
+        Reader {
+            words: &self.0,
+            at: 4,
+            program,
+        }
+    }
+}
+
+struct Reader<'a> {
+    words: &'a [u64],
+    at: usize,
+    program: &'a str,
+}
+
+impl Reader<'_> {
+    fn word(&mut self) -> Result<u64, Error> {
+        let w = *self
+            .words
+            .get(self.at)
+            .ok_or_else(|| Error::Extraction("engine output truncated".into()))?;
+        self.at += 1;
+        Ok(w)
+    }
+
+    fn index(&mut self) -> Result<usize, Error> {
+        usize::try_from(self.word()?).map_err(|_| Error::Extraction("engine index".into()))
+    }
+
+    fn text(&mut self) -> Result<String, Error> {
+        let start = self.index()?;
+        let len = self.index()?;
+        self.program
+            .get(start..start.saturating_add(len))
+            .map(str::to_owned)
+            .ok_or_else(|| Error::Extraction("engine text range".into()))
+    }
+
+    /// An arena of `count` nodes whose children precede their parents.
+    fn arena(&mut self, limit: usize, what: &'static str) -> Result<Vec<Node>, Error> {
+        let count = self.index()?;
+        if count > limit {
+            return Err(Error::Limit(what));
+        }
+        let mut nodes = Vec::with_capacity(count);
+        for i in 0..count {
+            let kind = self.word()?;
+            let node = match kind {
+                0 => {
+                    let v = self.word()? as i64;
+                    self.word()?;
+                    Node::Int(v)
+                }
+                1 => Node::Str(self.text()?),
+                2 => Node::App(self.text()?, Vec::new()),
+                _ => return Err(Error::Extraction("engine node kind".into())),
+            };
+            let kids = self.index()?;
+            let node = match node {
+                Node::App(head, _) => {
+                    let mut ks = Vec::with_capacity(kids);
+                    for _ in 0..kids {
+                        let k = self.index()?;
+                        if k >= i {
+                            return Err(Error::Extraction("engine arena order".into()));
+                        }
+                        ks.push(k);
+                    }
+                    Node::App(head, ks)
+                }
+                other if kids == 0 => other,
+                _ => return Err(Error::Extraction("literal with children".into())),
+            };
+            nodes.push(node);
+        }
+        Ok(nodes)
+    }
+
+    fn extracted(&mut self) -> Result<Extracted, Error> {
+        let cost = self.word()?;
+        let nodes = self.arena(MAX_EXTRACTED, "extracted term nodes")?;
+        let root = self.index()?;
+        if root >= nodes.len() {
+            return Err(Error::Extraction("engine root slot".into()));
+        }
+        let text = render(&nodes, root);
+        Ok(Extracted {
+            nodes,
+            root,
+            cost,
+            text,
+        })
+    }
+
+    /// The witness: terms, the source slot (unused: the checker rebuilds
+    /// the source from the bindings), and the steps, with each rule mapped
+    /// from the program's rewrite order to `set`.
+    fn witness(
+        &mut self,
+        rewrites: &[(witness::Pat, witness::Pat)],
+        set: &RuleSet,
+    ) -> Result<Witness, Error> {
+        let terms = self.arena(witness::MAX_TERMS, "witness terms")?;
+        self.index()?;
+        let count = self.index()?;
+        if count > witness::MAX_STEPS {
+            return Err(Error::Limit("witness steps"));
+        }
+        let mut steps = Vec::with_capacity(count);
+        for _ in 0..count {
+            let k = self.index()?;
+            let (lhs, rhs) = rewrites
+                .get(k)
+                .ok_or_else(|| Error::Witness("engine rule index".into()))?;
+            let rule = set.find(lhs, rhs).ok_or_else(|| {
+                Error::Witness(format!(
+                    "equality justified by unknown rule {k} of the program"
+                ))
+            })?;
+            let direction = match self.word()? {
+                0 => Direction::Forward,
+                1 => Direction::Backward,
+                _ => return Err(Error::Witness("engine step direction".into())),
+            };
+            let depth = self.index()?;
+            if depth > witness::MAX_DEPTH {
+                return Err(Error::Limit("witness step depth"));
+            }
+            let mut path = Vec::with_capacity(depth);
+            for _ in 0..depth {
+                path.push(
+                    u32::try_from(self.word()?)
+                        .map_err(|_| Error::Witness("engine path".into()))?,
+                );
+            }
+            let nv = self.index()?;
+            let mut substitution = Vec::with_capacity(nv);
+            for _ in 0..nv {
+                let var = self.text()?;
+                let term = self.index()?;
+                substitution.push((var, term));
+            }
+            substitution.sort();
+            steps.push(Step {
+                rule,
+                direction,
+                path,
+                substitution,
+            });
+        }
+        Ok(Witness { terms, steps })
+    }
 }
 
 /// A checked fusion: the unfused and fused extractions, the rewrite witness
@@ -123,12 +308,12 @@ pub struct Fusion {
 /// Stack for the proof thread (virtual; pages are touched only as used).
 const PROOF_STACK: usize = 1 << 30;
 
-/// Prefix of the bindings that name the extracted term in the proof query.
+/// Prefix reserved for binding identifiers (egglog's proof query named the
+/// extracted term's shared subterms with it; the reservation is kept).
 const TARGET_PREFIX: &str = "fusionwitness";
 
-/// Saturates `bindings` with `rules`, extracts `root`, asks egglog for a proof
-/// that `root` equals the extracted term, converts it into a [`Witness`] and
-/// checks the witness against the source term rebuilt from `bindings` and the
+/// Saturates `bindings` with `rules`, extracts `root`, explains why `root`
+/// equals the extracted term as a [`Witness`] and checks the witness against the source term rebuilt from `bindings` and the
 /// extracted term. Any failure refuses the fusion.
 pub fn fuse(rules: &str, set: &RuleSet, bindings: &str, root: &str) -> Result<Fusion, Error> {
     // Only binding identifiers can collide with the query's bindings; input
@@ -145,20 +330,17 @@ pub fn fuse(rules: &str, set: &RuleSet, bindings: &str, root: &str) -> Result<Fu
     }
     let before = run(rules, bindings, root, false)?;
     let source = witness::source_term(bindings, root)?;
-    // egglog's proof extraction recurses over proof depth, which grows with
-    // the graph, so it runs on a thread with a stack sized for MAX_NODES-node
-    // chains. egglog reports malformed states by panicking; a panic there is
-    // a refusal, not a crash of the caller.
+    // The explanation recurses over proof-forest paths, whose depth grows
+    // with the graph, so it runs on a thread with a stack sized for
+    // MAX_NODES-node chains.
     let (term, witness) = std::thread::scope(|scope| {
         std::thread::Builder::new()
             .name("vesper-fusion-proof".into())
             .stack_size(PROOF_STACK)
-            .spawn_scoped(scope, || {
-                run_proved(rules, set, bindings, root, (&source.0, source.1))
-            })
+            .spawn_scoped(scope, || explained(rules, set, bindings, root))
             .map_err(|e| Error::Witness(format!("cannot start the proof thread: {e}")))?
             .join()
-            .map_err(|_| Error::Witness("egglog panicked while producing the proof".into()))?
+            .map_err(|_| Error::Witness("the fusion engine panicked".into()))?
     })?;
     let summary = witness::check(
         set,
@@ -175,84 +357,21 @@ pub fn fuse(rules: &str, set: &RuleSet, bindings: &str, root: &str) -> Result<Fu
     })
 }
 
-fn run_proved(
+/// Saturates `bindings` with `rules`, extracts `root` and explains the
+/// extraction as a rewrite chain from the bindings' term (unchecked; [`fuse`]
+/// checks it).
+pub fn explained(
     rules: &str,
     set: &RuleSet,
     bindings: &str,
     root: &str,
-    source: (&[Node], usize),
 ) -> Result<(Extracted, Witness), Error> {
-    let mut program = String::with_capacity(rules.len() + bindings.len() + 64);
-    program.push_str(rules);
-    program.push_str(bindings);
-    let _ = writeln!(program, "(run {ITERATIONS})\n(extract {root})");
-    let mut egraph = EGraph::new_with_proofs();
-    let outputs = egraph
-        .parse_and_run_program(None, &program)
-        .map_err(|e| Error::Egglog(e.to_string()))?;
-    let Some((dag, cost, term)) = outputs.into_iter().rev().find_map(|o| match o {
-        CommandOutput::ExtractBest(dag, cost, term) => Some((dag, cost, term)),
-        _ => None,
-    }) else {
-        return Err(Error::Egglog("no extraction output".into()));
-    };
-    let term = convert(&dag, cost, term)?;
-    // Write the extracted term out for the query: a subterm with several
-    // parents gets its own binding (so a shared DAG stays linear in size),
-    // the rest is inlined (each `let` is a command, and commands are slow in
-    // proof mode).
-    let mut parents = vec![0usize; term.nodes.len()];
-    for node in &term.nodes {
-        if let Node::App(_, kids) = node {
-            kids.iter().for_each(|&k| parents[k] += 1);
-        }
-    }
-    fn write_term(nodes: &[Node], shared: &[bool], id: usize, top: bool, out: &mut String) {
-        match &nodes[id] {
-            Node::Int(v) => {
-                let _ = write!(out, "{v}");
-            }
-            Node::Str(s) => {
-                let _ = write!(out, "\"{s}\"");
-            }
-            Node::App(_, _) if shared[id] && !top => {
-                let _ = write!(out, "{TARGET_PREFIX}{id}");
-            }
-            Node::App(head, kids) => {
-                let _ = write!(out, "({head}");
-                for &k in kids {
-                    out.push(' ');
-                    write_term(nodes, shared, k, false, out);
-                }
-                out.push(')');
-            }
-        }
-    }
-    let shared: Vec<bool> = parents.iter().map(|&p| p > 1).collect();
-    let mut query = String::new();
-    for id in (0..term.nodes.len()).filter(|&id| shared[id]) {
-        if matches!(term.nodes[id], Node::App(..)) {
-            let _ = write!(query, "(let {TARGET_PREFIX}{id} ");
-            write_term(&term.nodes, &shared, id, true, &mut query);
-            query.push_str(")\n");
-        }
-    }
-    let _ = write!(query, "(prove (= {root} ");
-    write_term(&term.nodes, &shared, term.root, false, &mut query);
-    query.push_str("))\n");
-    let outputs = egraph
-        .parse_and_run_program(None, &query)
-        .map_err(|e| Error::Witness(format!("egglog could not prove the extraction: {e}")))?;
-    let Some((store, proof)) = outputs.into_iter().rev().find_map(|o| match o {
-        CommandOutput::ProveExists {
-            proof_store,
-            proof_id,
-        } => Some((proof_store, proof_id)),
-        _ => None,
-    }) else {
-        return Err(Error::Witness("egglog returned no proof".into()));
-    };
-    let witness = witness::produce(set, &store, proof, source, &term)?;
+    let program = format!("{rules}{bindings}");
+    let rewrites = witness::program_rewrites(rules)?;
+    let out = Words::run(&program, root, MODE_SATURATE | MODE_EXPLAIN)?;
+    let mut r = out.reader(&program);
+    let term = r.extracted()?;
+    let witness = r.witness(&rewrites, set)?;
     Ok((term, witness))
 }
 
@@ -288,57 +407,4 @@ fn render(nodes: &[Node], root: usize) -> String {
         out.push_str(" ...");
     }
     out
-}
-
-fn convert(dag: &TermDag, cost: u64, term: egglog::TermId) -> Result<Extracted, Error> {
-    let mut nodes = Vec::new();
-    let mut index: HashMap<Node, usize> = HashMap::new();
-    let mut memo: HashMap<egglog::TermId, usize> = HashMap::new();
-    // Iterative post-order so deep chains cannot overflow the stack.
-    let mut stack = vec![(term, false)];
-    while let Some((id, expanded)) = stack.pop() {
-        if memo.contains_key(&id) {
-            continue;
-        }
-        let node = match dag.get(id) {
-            Term::Lit(Literal::Int(v)) => Node::Int(*v),
-            Term::Lit(Literal::String(s)) => Node::Str(s.clone()),
-            Term::Lit(other) => {
-                return Err(Error::Extraction(format!("unexpected literal {other:?}")));
-            }
-            Term::Var(v) => return Err(Error::Extraction(format!("unexpected variable {v}"))),
-            Term::App(head, kids) => {
-                if !expanded {
-                    stack.push((id, true));
-                    for k in kids.iter().rev() {
-                        if !memo.contains_key(k) {
-                            stack.push((*k, false));
-                        }
-                    }
-                    continue;
-                }
-                Node::App(head.clone(), kids.iter().map(|k| memo[k]).collect())
-            }
-        };
-        let slot = match index.get(&node) {
-            Some(&slot) => slot,
-            None => {
-                if nodes.len() >= MAX_EXTRACTED {
-                    return Err(Error::Limit("extracted term nodes"));
-                }
-                nodes.push(node.clone());
-                index.insert(node, nodes.len() - 1);
-                nodes.len() - 1
-            }
-        };
-        memo.insert(id, slot);
-    }
-    let root = memo[&term];
-    let text = render(&nodes, root);
-    Ok(Extracted {
-        nodes,
-        root,
-        cost,
-        text,
-    })
 }

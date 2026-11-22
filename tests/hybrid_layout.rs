@@ -56,6 +56,17 @@ fn write_layout(o: &mut String, l: &Layout) {
     }
 }
 
+/// The world's types the port lays out: `world_types` without those that
+/// reach `i128`/`u128`, which the hybrid build leaves to Rust
+/// (`wide_integers_stay_on_rust`). Corpus sources hold 128-bit types since
+/// integer literals reach `u128::MAX` (#1244).
+fn ported_types(w: &World) -> Vec<Type> {
+    world_types(w)
+        .into_iter()
+        .filter(|t| check_words::layout_input(w, t).is_some())
+        .collect()
+}
+
 fn rust_text(w: &World, types: &[Type]) -> String {
     let mut o = String::new();
     for t in types {
@@ -83,8 +94,8 @@ fn layout_text_matches_rust() {
     let f = package().entry("check_layout_text", true);
     let bad = differential(
         "layout text",
-        |c| rust_text(&c.world, &world_types(&c.world)),
-        |c| vesper_text(&f, &c.world, &world_types(&c.world)),
+        |c| rust_text(&c.world, &ported_types(&c.world)),
+        |c| vesper_text(&f, &c.world, &ported_types(&c.world)),
     );
     assert_eq!(bad, 0);
 }
@@ -95,7 +106,7 @@ fn layout_text_unoptimized_matches_rust() {
     let f = package().entry("check_layout_text", false);
     let mut bad = 0;
     for c in corpus().iter().step_by(10) {
-        let types = world_types(&c.world);
+        let types = ported_types(&c.world);
         if first_difference(
             &rust_text(&c.world, &types),
             &vesper_text(&f, &c.world, &types),
@@ -114,7 +125,7 @@ fn layout_words_decode_to_rust_layouts() {
     let f = package().entry("check_layout_words", true);
     let (mut bad, mut checked, mut errors) = (0, 0, 0);
     for c in corpus() {
-        for t in world_types(&c.world) {
+        for t in ported_types(&c.world) {
             let input = check_words::layout_input(&c.world, &t).expect("encodable corpus type");
             let vesper = check_words::decode_layout(&f.words(&input));
             let rust = Layout::of(&c.world, &t);
@@ -161,16 +172,53 @@ fn layout_words_depend_on_the_type() {
     );
 }
 
-/// `i128` and `u128` (#1174) are two words in Rust and not in the
-/// check-data format yet, so the hybrid build sends them to Rust.
+/// A world whose types hold `i128` and `u128` (#1174), which no corpus
+/// program uses yet.
+const WIDE_WORLD: &str = "copy struct W { lo: u8, x: i128, y: u128 }
+copy enum E { A(i128), B(u8, u128), C }
+struct G[T] { v: T, n: i128 }
+fn f(a: i128, b: u128, w: W) -> (u8, i128) { (w.lo, a) }
+fn g(e: E) -> i128 { match e { E::A(x) => x, E::B(_, _) => 0, E::C => 1, } }
+fn h(sink g: G[u128]) -> u128 { g.v }
+fn main() -> i64 { 0 }";
+
+/// `i128` and `u128` are two words, in Rust and in `@vesper/check-layout`
+/// (SH5 lane 6, #1329): both forms agree with `Layout::of`, alone, in
+/// tuples, in struct fields and in enum and generic payloads.
 #[test]
-fn wide_integers_stay_on_rust() {
-    let w = &corpus()[0].world;
+fn wide_integers_match_rust() {
+    let parsed = vesper::parser::parse(WIDE_WORLD);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let checked = vesper::check::check(&parsed.module);
+    assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+    let w = &checked.world;
+    let mut types = world_types(w);
     for n in ["i128", "u128"] {
         let wide = Type::Named(n.into(), vec![]);
-        assert!(check_words::layout_input(w, &wide).is_none(), "{n}");
-        let pair = Type::Tuple(vec![Type::Named("u8".into(), vec![]), wide]);
-        assert!(check_words::layout_input(w, &pair).is_none(), "({n})");
+        types.push(Type::Tuple(vec![
+            Type::Named("u8".into(), vec![]),
+            wide.clone(),
+        ]));
+        types.push(Type::Named("Option".into(), vec![wide.clone()]));
+        types.push(wide);
+    }
+    assert!(types.iter().any(|t| format!("{t}").contains("i128")));
+    let text = package().entry("check_layout_text", true);
+    let rust = rust_text(w, &types);
+    assert_eq!(
+        first_difference(&rust, &vesper_text(&text, w, &types)),
+        None
+    );
+    assert!(rust.contains("16 S"), "{rust}");
+    let words = package().entry("check_layout_words", true);
+    for t in &types {
+        let input = check_words::layout_input(w, t).expect("encodable wide type");
+        let vesper = check_words::decode_layout(&words.words(&input));
+        assert_eq!(
+            format!("{vesper:?}"),
+            format!("{:?}", Layout::of(w, t)),
+            "{t}"
+        );
     }
 }
 
@@ -186,7 +234,7 @@ fn layout_speed() {
     let words = package().entry("check_layout_words", true);
     let cases: Vec<(&World, Vec<Type>)> = corpus()
         .iter()
-        .map(|c| (&c.world, world_types(&c.world)))
+        .map(|c| (&c.world, ported_types(&c.world)))
         .collect();
     abba(
         "layout per call (encode + Vesper + decode)",

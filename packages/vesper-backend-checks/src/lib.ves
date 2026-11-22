@@ -1,0 +1,369 @@
+// @vesper/backend-checks: the checks that run on emitted code, in Vesper
+// (self-hosting wave SH4 lane 17, #1291). Part 1 is src/native_verifiers.rs:
+// the Stage-5 verifiers over the Cranelift functions native lowering emits.
+//
+// - input.ves: the decoder of tests/common/backend_checks_input.rs's input:
+//   the emitted functions as CLIF tables, world and capability facts, the
+//   policy and the source.
+// - consttime.ves: Vault's constant-time taint verifier.
+// - stack.ves: the stack verifier's prologue measurement and call graph.
+// - stack_bound.ves: the shared worst-case stack analysis and its render
+//   (SH4 lane 16 builds its eBPF-origin checks on it).
+// - realtime.ves: Resonance's CLIF call graph; the confinement verifier
+//   itself is @vesper/resonance's port.
+// - detfloat.ves: Kinetic's DetFloat audit.
+// - verify.ves: `verify_emitted`, the capability policies and the
+//   verification half of `verify_native_with_capabilities`.
+// - lib.ves: `render` and the entries.
+//
+// Rust stays the default build; tests/self_host_backend_checks.rs runs both
+// over the verifier tests and compares the reports byte for byte.
+
+use @vesper/check-data::{
+    pack_text
+};
+use @vesper/check-data::names::{
+    Names
+};
+use self::input::{
+    Cx,
+    read_input
+};
+use self::stack_bound::{
+    render
+};
+use self::verify::{
+    run
+};
+use self::util::{
+    g,
+    put,
+    putn,
+    puts
+};
+
+const FDW: u64 = 13;
+const V_CT: u64 = 1;
+const V_DF: u64 = 8;
+const V_RT: u64 = 4;
+const V_STACK: u64 = 2;
+
+fn src_len(in c: Cx) -> u64 {
+    c.nm.size(wrapping_u32(c.source))
+}
+
+fn src(in c: Cx, i: u64) -> u8 {
+    c.nm.byte(wrapping_u32(c.source), i)
+}
+
+fn verifier_name(inout o: ChunkSeq[u8], v: u64) {
+    if v == V_CT {
+        put(inout o, "const-time");
+    } else if v == V_STACK {
+        put(inout o, "stack");
+    } else if v == V_RT {
+        put(inout o, "realtime");
+    } else {
+        put(inout o, "detfloat");
+    }
+}
+
+fn text(inout o: ChunkSeq[u8], in tx: ChunkSeq[u8], at: u64, len: u64) {
+    for i in at..wrapping_add(at, len) {
+        let b = match tx.try_get(i) {
+            Option::Some(b) => b,
+            Option::None => 0,
+        };
+        o.push(b);
+    }
+}
+
+fn is_continuation(b: u8) -> bool {
+    b >= 128 && b < 192
+}
+
+// `file:line:col: ` of byte `offset` (back to a char boundary).
+fn at(in c: Cx, inout o: ChunkSeq[u8], offset: u64) {
+    let n = src_len(in c);
+    let mut start = offset;
+    if start > n {
+        start = n;
+    }
+    loop {
+        if start == 0 || start == n || !is_continuation(src(in c, start)) {
+            break;
+        }
+        start = wrapping_sub(start, 1);
+    }
+    let mut line: u64 = 1;
+    let mut col: u64 = 0;
+    for i in 0..start {
+        let b = src(in c, i);
+        if b == 10 {
+            line = wrapping_add(line, 1);
+            col = 0;
+        } else if !is_continuation(b) {
+            col = wrapping_add(col, 1);
+        }
+    }
+    puts(inout o, in c.nm, c.file);
+    put(inout o, ":");
+    putn(inout o, line);
+    put(inout o, ":");
+    putn(inout o, wrapping_add(col, 1));
+    put(inout o, ": ");
+}
+
+fn is_space(b: u8) -> bool {
+    b == 32 || (b >= 9 && b <= 13)
+}
+
+// The span start past leading whitespace and `//` comment lines.
+fn item_start(in c: Cx, s: u64, e: u64) -> u64 {
+    let n = src_len(in c);
+    let mut start = s;
+    if start > n {
+        start = n;
+    }
+    let mut end = e;
+    if end > n {
+        end = n;
+    }
+    if end < start {
+        end = start;
+    }
+    loop {
+        // `source.get(start..end)` fails off char boundaries.
+        if (start < n && is_continuation(src(in c, start)))
+            || (end < n && is_continuation(src(in c, end))) {
+            break;
+        }
+        let mut k = start;
+        loop {
+            if k >= end || !is_space(src(in c, k)) {
+                break;
+            }
+            k = wrapping_add(k, 1);
+        }
+        if wrapping_add(k, 1) < end && src(in c, k) == 47 && src(in c, wrapping_add(k, 1)) == 47 {
+            let mut j = k;
+            loop {
+                if j >= end || src(in c, j) == 10 {
+                    break;
+                }
+                j = wrapping_add(j, 1);
+            }
+            if j < end {
+                start = wrapping_add(j, 1);
+            } else {
+                start = end;
+            }
+        } else {
+            start = k;
+            break;
+        }
+    }
+    start
+}
+
+// `native_verifiers::render`.
+fn render_report(in c: Cx, inout o: ChunkSeq[u8]) {
+    for k in 0..c.r.notes.len() / 2 {
+        put(inout o, "note: ");
+        text(
+            inout o,
+            in c.r.tx,
+            g(in c.r.notes, wrapping_mul(k, 2)),
+            g(in c.r.notes, wrapping_add(wrapping_mul(k, 2), 1))
+        );
+        put(inout o, "\n");
+    }
+    if c.r.has_stack {
+        render(in c.nm, in c.r, inout o);
+    }
+    for k in 0..c.r.fd.len() / FDW {
+        let b = wrapping_mul(k, FDW);
+        if g(in c.r.fd, wrapping_add(b, 11)) == 1 {
+            at(in c, inout o, g(in c.r.fd, wrapping_add(b, 12)));
+        } else if g(in c.r.fd, wrapping_add(b, 8)) == 1 {
+            let s = item_start(
+                in c,
+                g(in c.r.fd, wrapping_add(b, 9)),
+                g(in c.r.fd, wrapping_add(b, 10))
+            );
+            at(in c, inout o, s);
+        }
+        put(inout o, "error[");
+        verifier_name(inout o, g(in c.r.fd, b));
+        put(inout o, "/");
+        text(
+            inout o,
+            in c.r.tx,
+            g(in c.r.fd, wrapping_add(b, 4)),
+            g(in c.r.fd, wrapping_add(b, 5))
+        );
+        put(inout o, "]: ");
+        puts(inout o, in c.nm, g(in c.r.fd, wrapping_add(b, 1)));
+        if g(in c.r.fd, wrapping_add(b, 2)) == 1 {
+            put(inout o, " (inst ");
+            putn(inout o, g(in c.r.fd, wrapping_add(b, 3)));
+            put(inout o, ")");
+        }
+        put(inout o, ": ");
+        text(
+            inout o,
+            in c.r.tx,
+            g(in c.r.fd, wrapping_add(b, 6)),
+            g(in c.r.fd, wrapping_add(b, 7))
+        );
+        put(inout o, "\n");
+    }
+}
+
+fn opt(inout o: ChunkSeq[u8], has: bool, v: u64) {
+    if has {
+        putn(inout o, v);
+    } else {
+        put(inout o, "-");
+    }
+}
+
+// The report as tests/common/backend_checks_input.rs `dump` prints it.
+fn dump(in c: Cx, inout o: ChunkSeq[u8]) {
+    render_report(in c, inout o);
+    put(inout o, "--\nverifiers ");
+    let mut first = true;
+    for bit in 0..4 {
+        let v = wrapping_shl_u64(1, bit);
+        if c.r.verifiers & v != 0 {
+            if !first {
+                put(inout o, ",");
+            }
+            first = false;
+            verifier_name(inout o, v);
+        }
+    }
+    put(inout o, "\nfunctions ");
+    putn(inout o, c.r.functions);
+    put(inout o, "\n");
+    for k in 0..c.r.notes.len() / 2 {
+        put(inout o, "note ");
+        text(
+            inout o,
+            in c.r.tx,
+            g(in c.r.notes, wrapping_mul(k, 2)),
+            g(in c.r.notes, wrapping_add(wrapping_mul(k, 2), 1))
+        );
+        put(inout o, "\n");
+    }
+    for k in 0..c.r.fd.len() / FDW {
+        let b = wrapping_mul(k, FDW);
+        put(inout o, "finding ");
+        verifier_name(inout o, g(in c.r.fd, b));
+        put(inout o, " ");
+        puts(inout o, in c.nm, g(in c.r.fd, wrapping_add(b, 1)));
+        put(inout o, " ");
+        opt(inout o, g(in c.r.fd, wrapping_add(b, 2)) == 1, g(in c.r.fd, wrapping_add(b, 3)));
+        put(inout o, " ");
+        text(
+            inout o,
+            in c.r.tx,
+            g(in c.r.fd, wrapping_add(b, 4)),
+            g(in c.r.fd, wrapping_add(b, 5))
+        );
+        put(inout o, " ");
+        if g(in c.r.fd, wrapping_add(b, 8)) == 1 {
+            putn(inout o, g(in c.r.fd, wrapping_add(b, 9)));
+            put(inout o, "..");
+            putn(inout o, g(in c.r.fd, wrapping_add(b, 10)));
+        } else {
+            put(inout o, "-");
+        }
+        put(inout o, " ");
+        opt(inout o, g(in c.r.fd, wrapping_add(b, 11)) == 1, g(in c.r.fd, wrapping_add(b, 12)));
+        put(inout o, " ");
+        text(
+            inout o,
+            in c.r.tx,
+            g(in c.r.fd, wrapping_add(b, 6)),
+            g(in c.r.fd, wrapping_add(b, 7))
+        );
+        put(inout o, "\n");
+    }
+    if c.r.has_stack {
+        for k in 0..c.r.sr.len() / 7 {
+            let b = wrapping_mul(k, 7);
+            put(inout o, "root ");
+            puts(inout o, in c.nm, g(in c.r.sr, b));
+            put(inout o, " ");
+            putn(inout o, g(in c.r.sr, wrapping_add(b, 1)));
+            put(inout o, " ");
+            opt(inout o, g(in c.r.sr, wrapping_add(b, 2)) == 1, g(in c.r.sr, wrapping_add(b, 3)));
+            put(inout o, " ");
+            putn(inout o, g(in c.r.sr, wrapping_add(b, 4)));
+            put(inout o, " ");
+            let pa = g(in c.r.sr, wrapping_add(b, 5));
+            for q in 0..g(in c.r.sr, wrapping_add(b, 6)) {
+                if q > 0 {
+                    put(inout o, " -> ");
+                }
+                puts(inout o, in c.nm, g(in c.r.spool, wrapping_add(pa, q)));
+            }
+            put(inout o, "\n");
+        }
+        for k in 0..c.r.sf.len() / 7 {
+            let b = wrapping_mul(k, 7);
+            put(inout o, "stack ");
+            puts(inout o, in c.nm, g(in c.r.sf, b));
+            put(inout o, " ");
+            opt(inout o, g(in c.r.sf, wrapping_add(b, 1)) == 1, g(in c.r.sf, wrapping_add(b, 2)));
+            put(inout o, " ");
+            text(
+                inout o,
+                in c.r.tx,
+                g(in c.r.sf, wrapping_add(b, 3)),
+                g(in c.r.sf, wrapping_add(b, 4))
+            );
+            put(inout o, " ");
+            text(
+                inout o,
+                in c.r.tx,
+                g(in c.r.sf, wrapping_add(b, 5)),
+                g(in c.r.sf, wrapping_add(b, 6))
+            );
+            put(inout o, "\n");
+        }
+    }
+}
+
+// The verification run of the input: the dump of the report, or
+// `error <message>` (packed by `pack_text`).
+pub fn backend_verify(in input: Str) -> ChunkSeq[u64] {
+    let mut c = read_input(in input.as_bytes());
+    run(inout c);
+    let mut o: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    if c.err {
+        put(inout o, "error ");
+        o.extend(in c.emsg.as_slice());
+        put(inout o, "\n");
+    } else {
+        dump(in c, inout o);
+    }
+    pack_text(in o)
+}
+
+// The run without the text: the finding count (timing).
+pub fn backend_verify_count(in input: Str) -> u64 {
+    let mut c = read_input(in input.as_bytes());
+    run(inout c);
+    if c.err {
+        return 18446744073709551615;
+    }
+    wrapping_add(c.r.fd.len() / FDW, c.r.notes.len())
+}
+
+// Decoding only: the baseline the timing subtracts.
+pub fn backend_verify_decode(in input: Str) -> u64 {
+    let c = read_input(in input.as_bytes());
+    wrapping_add(c.insts.len(), c.nfns)
+}

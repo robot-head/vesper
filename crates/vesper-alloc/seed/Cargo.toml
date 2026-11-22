@@ -2,6 +2,7 @@
 name = "vesper-alloc-seed"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
 description = "Frozen Rust seed copy of vesper-alloc for the compiler's own dependency closure"
 publish = false
 autotests = false

@@ -340,10 +340,12 @@ unsafe extern "C" {
     fn vesper_resonance_pid_step(gains: *mut u64, st: *mut u64, setpoint: i64, measurement: i64, fail: *mut u64) -> i64;
     fn vesper_resonance_ramp_next(r: *mut u64, fail: *mut u64) -> i64;
     fn vesper_resonance_ramp_set(r: *mut u64, target: i64, samples: i64) -> i64;
+    fn vesper_resonance_ramp_tick(lanes: i64, r: *mut u64, fail: *mut u64) -> i64;
     fn vesper_resonance_render_graph(g: *mut u64, n: i64, kinds: *mut u64, block: i64, blocks: i64, sink_node: i64, fail: *mut u64) -> i64;
     fn vesper_resonance_scale(out: *mut u64, gain: i64, fail: *mut u64) -> i64;
     fn vesper_resonance_svf_render(ic1: *mut u64, ic2: *mut u64, gc: *mut u64, kd: *mut u64, gn: *mut u64, ramps: *mut u64, pan_l: *mut u64, pan_r: *mut u64, input: *mut u64, left: *mut u64, right: *mut u64, start: i64, end: i64, fail: *mut u64) -> i64;
     fn vesper_resonance_svf_render_reference(ic1: *mut u64, ic2: *mut u64, gc: *mut u64, kd: *mut u64, gn: *mut u64, ramps: *mut u64, input: *mut u64, left: *mut u64, right: *mut u64, start: i64, end: i64, fail: *mut u64) -> i64;
+    fn vesper_resonance_svf_tick(lanes: i64, t: *mut u64, pan: *mut u64, v0: i64, out: *mut u64, fail: *mut u64) -> i64;
     fn vesper_resonance_tile_advance_lane(current: *mut u64, target: *mut u64, step: *mut u64, remaining: *mut u64, lane: i64, fail: *mut u64) -> i64;
     fn vesper_resonance_tile_next(current: *mut u64, target: *mut u64, step: *mut u64, remaining: *mut u64, fail: *mut u64) -> i64;
     fn vesper_resonance_tile_set_lane(current: *mut u64, target: *mut u64, step: *mut u64, remaining: *mut u64, lane: i64, value: i64, samples: i64, fail: *mut u64) -> i64;
@@ -805,6 +807,28 @@ pub fn ramp_set(r: &mut repr::Ramp, target: u32, samples: u32) -> () {
     { let _ = raw; }
 }
 
+/// The errors `ramp_tick` can raise, in status order.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RampTickError {
+    RuntimeError(vesper_port_abi::RuntimeError),
+    ArithOverflow(vesper_port_abi::ArithOverflow),
+}
+
+/// Calls `ramp_tick` of the Vesper library `resonance` (`vesper_resonance_ramp_tick`).
+pub fn ramp_tick(lanes: u64, r: &mut [u32]) -> Result<(), RampTickError> {
+    let mut fail = [0u64; 2];
+    // SAFETY: `vesper_resonance_ramp_tick` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice_mut(r, |view_r| unsafe { vesper_resonance_ramp_tick(lanes as i64, view_r, fail.as_mut_ptr()) });
+    match fail[0] {
+        0 => Ok({ let _ = raw; }),
+        1 => Err(RampTickError::RuntimeError(<vesper_port_abi::RuntimeError as Abi>::get(&fail[1..]))),
+        2 => Err(RampTickError::ArithOverflow(<vesper_port_abi::ArithOverflow as Abi>::get(&fail[1..]))),
+        status => panic!("invalid failure status {status} from vesper_resonance_ramp_tick"),
+    }
+}
+
 /// The errors `render_graph` can raise, in status order.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum RenderGraphError {
@@ -884,6 +908,20 @@ pub fn svf_render_reference(ic1: &mut [u32], ic2: &mut [u32], gc: &mut [u32], kd
         1 => Err(SvfRenderReferenceError::RuntimeError(<vesper_port_abi::RuntimeError as Abi>::get(&fail[1..]))),
         2 => Err(SvfRenderReferenceError::ArithOverflow(<vesper_port_abi::ArithOverflow as Abi>::get(&fail[1..]))),
         status => panic!("invalid failure status {status} from vesper_resonance_svf_render_reference"),
+    }
+}
+
+/// Calls `svf_tick` of the Vesper library `resonance` (`vesper_resonance_svf_tick`).
+pub fn svf_tick(lanes: u64, t: &mut [u32], pan: &[u32], v0: u32, out: &mut [u32]) -> Result<(), vesper_port_abi::RuntimeError> {
+    let mut fail = [0u64; 2];
+    // SAFETY: `vesper_resonance_svf_tick` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice_mut(t, |view_t| vesper_port_abi::with_slice(pan, |view_pan| vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_resonance_svf_tick(lanes as i64, view_t, view_pan, v0 as i64, view_out, fail.as_mut_ptr()) })));
+    match fail[0] {
+        0 => Ok({ let _ = raw; }),
+        1 => Err(<vesper_port_abi::RuntimeError as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_resonance_svf_tick"),
     }
 }
 

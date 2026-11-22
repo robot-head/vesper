@@ -1048,6 +1048,7 @@ fn emit_literal(
             _ => Ok(b.ins().f64const(*f)),
         },
         Literal::String(_) => Err("anvil jit string literal unsupported".into()),
+        Literal::WideInt(_) => Err("anvil jit 128-bit literal unsupported".into()),
     }
 }
 

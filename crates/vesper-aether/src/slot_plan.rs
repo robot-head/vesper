@@ -157,6 +157,28 @@ impl KvmSlotPlan {
 
     /// Checks every rule in the module docs in O(n log n).
     pub fn verify(self, limits: &KvmHostLimits) -> Result<VerifiedKvmSlotPlan, PlanError> {
+        #[cfg(feature = "vesper-port")]
+        {
+            if let Some(e) = crate::binding::slot_plan_verify(&self.regions, *limits) {
+                return Err(e.into());
+            }
+            Ok(VerifiedKvmSlotPlan {
+                vm_id: self.vm_id,
+                regions: self.regions,
+                limits: *limits,
+            })
+        }
+        #[cfg(not(feature = "vesper-port"))]
+        self.verify_reference(limits)
+    }
+
+    /// The Rust implementation of [`Self::verify`], kept for the ABBA
+    /// benchmark until the port flips.
+    #[doc(hidden)]
+    pub fn verify_reference(
+        self,
+        limits: &KvmHostLimits,
+    ) -> Result<VerifiedKvmSlotPlan, PlanError> {
         if limits.max_slots == 0 || limits.guest_phys_bits == 0 || limits.guest_phys_bits > 64 {
             return Err(PlanError::InvalidLimits);
         }
@@ -284,6 +306,30 @@ impl VerifiedKvmSlotPlan {
 /// Cross-VM host check for plans that will run on one host: VMs may share host
 /// memory only as identical, read-only ranges (deduplicated CAS pages).
 pub fn verify_cross_vm(plans: &[&VerifiedKvmSlotPlan]) -> Result<(), PlanError> {
+    #[cfg(feature = "vesper-port")]
+    {
+        let vms: Vec<u64> = plans.iter().map(|p| p.vm_id).collect();
+        let regions: Vec<PlannedRegion> = plans
+            .iter()
+            .flat_map(|p| p.regions.iter().copied())
+            .collect();
+        let region_vm: Vec<u64> = plans
+            .iter()
+            .flat_map(|p| std::iter::repeat_n(p.vm_id, p.regions.len()))
+            .collect();
+        match crate::binding::slot_plan_verify_cross_vm(&vms, &regions, &region_vm) {
+            Some(e) => Err(e.into()),
+            None => Ok(()),
+        }
+    }
+    #[cfg(not(feature = "vesper-port"))]
+    verify_cross_vm_reference(plans)
+}
+
+/// The Rust implementation of [`verify_cross_vm`], kept for the ABBA
+/// benchmark until the port flips.
+#[doc(hidden)]
+pub fn verify_cross_vm_reference(plans: &[&VerifiedKvmSlotPlan]) -> Result<(), PlanError> {
     let mut vms: Vec<u64> = plans.iter().map(|p| p.vm_id).collect();
     vms.sort_unstable();
     if let Some(w) = vms.windows(2).find(|w| w[0] == w[1]) {

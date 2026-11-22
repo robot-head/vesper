@@ -1,0 +1,182 @@
+// SHA-256 (FIPS 180-4), for the WAL frame checks and the identity digests
+// (program.rs `sha256_hex`, wal.rs `check`). Words are `u32` with wrapping
+// adds and total rotates; the state and the message schedule are fixed
+// arrays, so a block reads no sequence after its 64 message bytes.
+
+const BLOCK_BYTES: u64 = 64;
+const DIGEST_WORDS: u64 = 8;
+// The padding marker byte and the length of the trailing bit count.
+const PAD_MARKER: u8 = 128;
+const LENGTH_BYTES: u64 = 8;
+const BITS_PER_BYTE: u64 = 8;
+
+const K: [u32; 64] = [
+    1116352408,
+    1899447441,
+    3049323471,
+    3921009573,
+    961987163,
+    1508970993,
+    2453635748,
+    2870763221,
+    3624381080,
+    310598401,
+    607225278,
+    1426881987,
+    1925078388,
+    2162078206,
+    2614888103,
+    3248222580,
+    3835390401,
+    4022224774,
+    264347078,
+    604807628,
+    770255983,
+    1249150122,
+    1555081692,
+    1996064986,
+    2554220882,
+    2821834349,
+    2952996808,
+    3210313671,
+    3336571891,
+    3584528711,
+    113926993,
+    338241895,
+    666307205,
+    773529912,
+    1294757372,
+    1396182291,
+    1695183700,
+    1986661051,
+    2177026350,
+    2456956037,
+    2730485921,
+    2820302411,
+    3259730800,
+    3345764771,
+    3516065817,
+    3600352804,
+    4094571909,
+    275423344,
+    430227734,
+    506948616,
+    659060556,
+    883997877,
+    958139571,
+    1322822218,
+    1537002063,
+    1747873779,
+    1955562222,
+    2024104815,
+    2227730452,
+    2361852424,
+    2428436474,
+    2756734187,
+    3204031479,
+    3329325298
+];
+
+const H0: [u32; 8] = [
+    1779033703,
+    3144134277,
+    1013904242,
+    2773480762,
+    1359893119,
+    2600822924,
+    528734635,
+    1541459225
+];
+
+// The big-endian word at `at` of `bytes`, 0 past the end.
+fn be32(in bytes: Slice[u8], at: u64) -> u32 {
+    match bytes.try_read_u32_be(at) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+// The state after compressing the 64-byte block at `base` of `bytes`.
+fn compress(h: [u32; 8], in bytes: Slice[u8], base: u64) -> [u32; 8] {
+    let mut w: [u32; 64] = [0; 64];
+    for t in 0..16 {
+        w[t] = be32(in bytes, wrapping_add(base, wrapping_mul(t, 4)));
+    }
+    for i in 16..64 {
+        let w15 = w[i - 15];
+        let w2 = w[i - 2];
+        let s0 = rotate_right(w15, 7) ^ rotate_right(w15, 18) ^ (w15 >> 3);
+        let s1 = rotate_right(w2, 17) ^ rotate_right(w2, 19) ^ (w2 >> 10);
+        w[i] = wrapping_add(wrapping_add(w[i - 16], s0), wrapping_add(w[i - 7], s1));
+    }
+    let mut a = h[0];
+    let mut b = h[1];
+    let mut c = h[2];
+    let mut d = h[3];
+    let mut e = h[4];
+    let mut f = h[5];
+    let mut g = h[6];
+    let mut hh = h[7];
+    for i in 0..64 {
+        let s1 = rotate_right(e, 6) ^ rotate_right(e, 11) ^ rotate_right(e, 25);
+        let ch = (e & f) ^ (~e & g);
+        let t1 = wrapping_add(wrapping_add(wrapping_add(hh, s1), wrapping_add(ch, K[i])), w[i]);
+        let s0 = rotate_right(a, 2) ^ rotate_right(a, 13) ^ rotate_right(a, 22);
+        let maj = (a & b) ^ (a & c) ^ (b & c);
+        let t2 = wrapping_add(s0, maj);
+        hh = g;
+        g = f;
+        f = e;
+        e = wrapping_add(d, t1);
+        d = c;
+        c = b;
+        b = a;
+        a = wrapping_add(t1, t2);
+    }
+    [
+        wrapping_add(h[0], a),
+        wrapping_add(h[1], b),
+        wrapping_add(h[2], c),
+        wrapping_add(h[3], d),
+        wrapping_add(h[4], e),
+        wrapping_add(h[5], f),
+        wrapping_add(h[6], g),
+        wrapping_add(h[7], hh)
+    ]
+}
+
+// The SHA-256 digest of `bytes`, 32 bytes.
+pub fn sha256_digest(in bytes: Slice[u8]) -> ChunkSeq[u8] {
+    let n = bytes.len();
+    let mut h: [u32; 8] = H0;
+    let full = n / BLOCK_BYTES;
+    for block in 0..full {
+        h = compress(h, in bytes, wrapping_mul(block, BLOCK_BYTES));
+    }
+    // The tail, the marker byte, zeros and the 64-bit bit length: one or
+    // two blocks.
+    let done = wrapping_mul(full, BLOCK_BYTES);
+    let rest = wrapping_sub(n, done);
+    let mut tail: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](wrapping_mul(BLOCK_BYTES, 2));
+    tail.extend(in bytes[done..n]);
+    tail.push(PAD_MARKER);
+    let tail_len = if wrapping_add(rest, wrapping_add(1, LENGTH_BYTES)) > BLOCK_BYTES {
+        wrapping_mul(BLOCK_BYTES, 2)
+    } else {
+        BLOCK_BYTES
+    };
+    tail.resize(tail_len, 0);
+    tail.try_write_u64_be(wrapping_sub(tail_len, LENGTH_BYTES), wrapping_mul(n, BITS_PER_BYTE));
+    let blocks = tail_len / BLOCK_BYTES;
+    for block in 0..blocks {
+        h = compress(h, in tail.as_slice(), wrapping_mul(block, BLOCK_BYTES));
+    }
+    let mut out: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](32);
+    out.resize(32, 0);
+    for i in 0..DIGEST_WORDS {
+        if i < 8 {
+            out.try_write_u32_be(wrapping_mul(i, 4), h[i]);
+        }
+    }
+    out
+}

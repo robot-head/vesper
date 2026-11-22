@@ -1,0 +1,9 @@
+[package]
+name = "@vesper/gpu-compute"
+version = "0.1.0"
+edition = "2026"
+license = "MIT OR Apache-2.0"
+capability_ceiling = ["Fail", "Ffi[Vk]", "Ffi[LibC]"]
+# The C libraries this package calls directly (manuscript §16.3): the
+# Vulkan loader and libc, with no Rust in between.
+vsys = ["vk.vsys", "libc.vsys"]

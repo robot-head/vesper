@@ -83,7 +83,7 @@ pub struct Matches {
     dval_start: ChunkSeq[u64]
 }
 
-fn matches_new() -> Matches {
+pub fn matches_new() -> Matches {
     Matches {
         rule_start: ChunkSeq::new[u64](),
         eclass: ChunkSeq::new[u32](),
@@ -91,6 +91,24 @@ fn matches_new() -> Matches {
         val_start: ChunkSeq::new[u64](),
         dvals: ChunkSeq::new[i64](),
         dval_start: ChunkSeq::new[u64]()
+    }
+}
+
+// For a driver outside this module (`@vesper/optimize`'s budgeted search).
+impl Matches {
+    // Starts the next rule's range.
+    pub fn mark(inout self) {
+        self.rule_start.push(self.eclass.len());
+    }
+
+    // The matches of rule `r`, after `mark` was called for it and the next.
+    pub fn range(in self, r: u64) -> (u64, u64) {
+        (at64(in self.rule_start, r), at64(in self.rule_start, inc(r)))
+    }
+
+    // Class variable `v` of match `mi`.
+    pub fn val(in self, mi: u64, v: u64) -> u32 {
+        at32(in self.vals, wrapping_add(at64(in self.val_start, mi), v))
     }
 }
 
@@ -198,7 +216,7 @@ fn run_from(
 
 // Searches rule `r` over every class in ascending id order, appending at
 // most `limit` matches. Returns the number found.
-fn search_rule(in g: EGraph, in rules: Rules, r: u64, limit: u64, inout out: Matches) -> u64 {
+pub fn search_rule(in g: EGraph, in rules: Rules, r: u64, limit: u64, inout out: Matches) -> u64 {
     let (start, len) = rules.prog(r);
     let end = wrapping_add(start, len);
     let mut m = Machine {
@@ -237,7 +255,7 @@ fn search_all(in g: EGraph, in rules: Rules, limit: u64, inout out: Matches) -> 
 // Instantiates the right side of rule `r` for match `mi` (egg's
 // `apply_pat`) and unions it with the matched class. Returns whether the
 // union merged two classes.
-fn apply_one(
+pub fn apply_one(
     inout g: EGraph,
     in rules: Rules,
     r: u64,
@@ -280,7 +298,7 @@ fn apply_one(
     g.union(class, last)
 }
 
-fn guard_holds(in g: EGraph, in rules: Rules, r: u64, in ms: Matches, mi: u64) -> bool {
+pub fn guard_holds(in g: EGraph, in rules: Rules, r: u64, in ms: Matches, mi: u64) -> bool {
     let (kind, g0, g1) = rules.guard_of(r);
     if kind == G_TOTAL {
         let v = at32(in ms.vals, wrapping_add(at64(in ms.val_start, mi), w(g0)));
