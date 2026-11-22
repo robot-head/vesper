@@ -1,5 +1,5 @@
-//! Adapters to the Vesper port of the codecs (vesper/, feature
-//! `vesper-port`): names, object ids, tree and derivation encodings. Each
+//! Adapters to the Vesper port of the codecs (vesper/, built by the
+//! `vesper-loom-cas-port` package in port/): names, object ids, tree and derivation encodings. Each
 //! function has the signature of the Rust code it replaces; it flattens the
 //! crate's values into the words and bytes `vesper/src/lib.ves` documents,
 //! and rebuilds the crate's values and errors from what comes back.
@@ -14,7 +14,7 @@ use crate::tree::{EntryKind, MAX_TREE_ENTRIES, Tree};
 #[rustfmt::skip]
 #[allow(clippy::all, dead_code, unsafe_code)]
 #[path = "../port/binding.rs"]
-mod binding;
+pub(crate) mod binding;
 
 fn word(n: usize) -> u64 {
     n as u64

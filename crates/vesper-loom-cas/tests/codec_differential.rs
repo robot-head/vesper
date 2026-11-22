@@ -1,8 +1,8 @@
 //! Differential test of the codecs: a seeded corpus of names, object ids,
 //! trees and derivation inputs (valid, invalid and mutated encodings) run
 //! through the public API, with every result's `Debug` text folded into
-//! one FNV-1a digest. The Rust build and the Vesper port (feature
-//! `vesper-port`) must give the same digest, which is pinned below from
+//! one FNV-1a digest. The Rust build and the Vesper port (package
+//! `vesper-loom-cas-port`) must give the same digest, which is pinned below from
 //! the Rust build. A different digest means the builds disagree on some
 //! input; `CODEC_DIFF_DUMP=<path>` writes the full transcript to compare.
 

@@ -6420,6 +6420,17 @@ dependencies = [
  "libc",
  "reflink-copy",
  "tempfile",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "vesper-loom-cas-port"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "libc",
+ "reflink-copy",
+ "tempfile",
  "vesper-blake3-sys",
  "vesper-port-abi",
  "vesper-port-harness",

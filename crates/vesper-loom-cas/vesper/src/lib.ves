@@ -1,4 +1,4 @@
-// @export abi 3
+// @export abi 4
 // @export vsys direct rust=crate::blake3_shim
 // | sys library Blake3 (
 // |     target = "@TARGET@", abi = "@ABI@",
@@ -15,7 +15,52 @@
 // |     fn vesper_blake3_hash(nocapture in data: CSlice[u8], nocapture inout out: CSlice[u8]) -> ForeignVal[Unit];
 // | }
 //
-// The `.vsys` library above is @vesper-std/hash-sys's (`.vsys` imports are
+// @export vsys direct rust=crate::port_fs
+// | sys library CasFs (
+// |     target = "@TARGET@", abi = "@ABI@",
+// |     link = "static", name = "vesper_loom_cas_fs",
+// |     artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+// | ) {
+// |     linear extern type CasFile;
+// |     linear extern type CasDir;
+// |     affine extern type Reader;
+// |     wire struct CasMeta { size: u64, mtime_s: i64, mtime_ns: u32, kind: u32 }
+// |     fn cfs_sep() -> ForeignVal[u8];
+// |     fn cfs_unique(nocapture inout out: CSlice[u8]) -> ForeignVal[Unit];
+// |     fn cfs_now(nocapture inout out: CSlice[u8]) -> ForeignVal[Unit];
+// |     fn cfs_create_dir_all(nocapture in path: CSlice[u8], nocapture inout err: u64) -> ForeignVal[u32];
+// |     fn cfs_create_dir(nocapture in path: CSlice[u8], nocapture inout err: u64) -> ForeignVal[u32];
+// |     fn cfs_canonicalize(nocapture in path: CSlice[u8], nocapture inout out: CSlice[u8], nocapture inout err: u64) -> ForeignVal[u64];
+// |     fn cfs_meta(nocapture in path: CSlice[u8], nocapture inout m: CasMeta, nocapture inout err: u64) -> ForeignVal[u32];
+// |     fn cfs_open_regular(nocapture in path: CSlice[u8], nocapture inout err: u64) -> ForeignVal[Option[CasFile]];
+// |     fn cfs_create_new(nocapture in path: CSlice[u8], nocapture inout err: u64) -> ForeignVal[Option[CasFile]];
+// |     fn cfs_open_lock(nocapture in path: CSlice[u8], nocapture inout stage: u64, nocapture inout err: u64) -> ForeignVal[Option[CasFile]];
+// |     fn cfs_file_len(in f: CasFile, nocapture inout err: u64) -> ForeignVal[u64];
+// |     fn cfs_file_exec(in f: CasFile, nocapture inout err: u64) -> ForeignVal[u32];
+// |     fn cfs_read(inout f: CasFile, nocapture inout buf: CSlice[u8], nocapture inout err: u64) -> ForeignVal[u64];
+// |     fn cfs_write(inout f: CasFile, nocapture in buf: CSlice[u8], nocapture inout err: u64) -> ForeignVal[u32];
+// |     fn cfs_sync(inout f: CasFile, nocapture inout err: u64) -> ForeignVal[u32];
+// |     fn cfs_make_readonly(inout f: CasFile, nocapture inout err: u64) -> ForeignVal[u32];
+// |     fn cfs_close(sink f: CasFile) -> ForeignVal[Unit];
+// |     fn cfs_publish(nocapture in staged: CSlice[u8], nocapture in dest: CSlice[u8], dir: bool, nocapture inout err: u64) -> ForeignVal[u32];
+// |     fn cfs_remove_staged(nocapture in path: CSlice[u8], nocapture inout err: u64) -> ForeignVal[u32];
+// |     fn cfs_remove_file(nocapture in path: CSlice[u8], nocapture inout err: u64) -> ForeignVal[u32];
+// |     fn cfs_remove_dir_all(nocapture in path: CSlice[u8], nocapture inout err: u64) -> ForeignVal[u32];
+// |     fn cfs_rename(nocapture in from: CSlice[u8], nocapture in to: CSlice[u8], nocapture inout err: u64) -> ForeignVal[u32];
+// |     fn cfs_sync_dir(nocapture in path: CSlice[u8], nocapture inout err: u64) -> ForeignVal[u32];
+// |     fn cfs_set_workspace_mode(nocapture in path: CSlice[u8], exec: bool, nocapture inout err: u64) -> ForeignVal[u32];
+// |     fn cfs_reflink(nocapture in src: CSlice[u8], nocapture in dst: CSlice[u8], nocapture inout err: u64) -> ForeignVal[u32];
+// |     fn cfs_read_dir(nocapture in path: CSlice[u8], nocapture inout err: u64) -> ForeignVal[Option[CasDir]];
+// |     fn cfs_dir_next(inout d: CasDir, nocapture inout name: CSlice[u8], nocapture inout err: u64) -> ForeignVal[i64];
+// |     fn cfs_dir_close(sink d: CasDir) -> ForeignVal[Unit];
+// |     fn cfs_reader_read(in r: Reader, nocapture inout buf: CSlice[u8], nocapture inout err: u64) -> ForeignVal[u64];
+// | }
+//
+// The `.vsys` library `CasFs` above is the store's file system calls, one
+// system operation each, provided by the Rust crate (src/port_fs.rs over
+// src/fsutil.rs). `Reader` is a Rust reader lent to one call.
+//
+// The `.vsys` library `Blake3` is @vesper-std/hash-sys's (`.vsys` imports are
 // read from the root module of a library build only), provided in C by
 // packages/vesper-std/hash/sys/c, which the Rust crate links through
 // vesper-blake3-sys as `crate::blake3_shim`.
@@ -23,7 +68,8 @@
 // @vesper/loom-cas: Vesper port of vesper-loom-cas's codecs (Rust-exit wave
 // SH6 lane 16, #1411, part 2a): the portable naming policy, object ids and
 // their text form, the canonical tree encoding, and the derivation inputs
-// encoding and key. The store and its file system layer are still Rust.
+// encoding and key (part 2a); the store (`store`, part 2b) over the
+// `CasFs` calls.
 //
 // Errors are value enums (`NameErr`, `TreeErr`, `DrvErr`, `IdErr`). Where
 // the Rust error carries a detail (a version, a tag, an entry), the
@@ -46,6 +92,7 @@ use self::drv::{
     drv_encode_into,
     drv_scan
 };
+use self::store::StoreErr;
 use @vesper-std/hash-sys::{
     hasher_new_derive_key,
     update,
@@ -224,4 +271,149 @@ pub fn derivation_hash(in enc: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[Blake3]] {
 pub fn drv_decode(in bytes: Slice[u8], inout info: u64, inout info2: u64)
     -> ChunkSeq[u64] eff [Fail[DrvErr]] {
     drv_scan(in bytes, inout info, inout info2)
+}
+
+// ---------------------------------------------------------------------------
+// The store (module `store`). Each call answers a reply (see store.ves):
+// the payload and a 0, or a `CasError`'s fields and its code (last byte). `root`
+// is the store's canonical root (from `store_open`), `durable` whether it
+// flushes writes.
+
+fn reply_of(code: u8) -> ChunkSeq[u8] {
+    let mut r: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    r.push(code);
+    r
+}
+
+// `Store::open_with`: answers the canonical root.
+pub fn store_open(in root: Slice[u8], durable: bool) -> ChunkSeq[u8] eff [Ffi[CasFs], Ffi[Blake3]] {
+    let mut r = reply_of(0);
+    handle Fail[StoreErr] in {
+        self::store::open(inout r, in root, durable);
+    } with {
+        return v => v,
+        raise(_e, _k) => {},
+    };
+    r
+}
+
+// `contains`: answers 1 or 0.
+pub fn store_contains(in root: Slice[u8], in id: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[CasFs]] {
+    let mut r = reply_of(0);
+    handle Fail[StoreErr] in {
+        self::store::contains_reply(inout r, in root, in id);
+    } with {
+        return v => v,
+        raise(_e, _k) => {},
+    };
+    r
+}
+
+// `put_blob`: `rd` reads `bytes`. Answers the id, size and newly-stored
+// byte (also for the calls below).
+pub fn store_put_blob(in root: Slice[u8], durable: bool, domain: u8, in bytes: Slice[u8], in rd: Reader)
+    -> ChunkSeq[u8] eff [Ffi[CasFs], Ffi[Blake3]] {
+    let mut r = reply_of(0);
+    handle Fail[StoreErr] in {
+        self::store::put_blob(inout r, in root, durable, domain, in bytes, in rd);
+    } with {
+        return v => v,
+        raise(_e, _k) => {},
+    };
+    r
+}
+
+// `put_blob_reader` and (`has_expected`) `put_blob_expected`.
+pub fn store_put_stream(
+    in root: Slice[u8],
+    durable: bool,
+    domain: u8,
+    in rd: Reader,
+    has_expected: bool,
+    in expected: Slice[u8]
+) -> ChunkSeq[u8] eff [Ffi[CasFs], Ffi[Blake3]] {
+    let mut r = reply_of(0);
+    handle Fail[StoreErr] in {
+        self::store::put_stream(inout r, in root, durable, domain, in rd, has_expected, in expected);
+    } with {
+        return v => v,
+        raise(_e, _k) => {},
+    };
+    r
+}
+
+// `put_tree`: `enc` is the tree's encoding and `rd` reads it.
+pub fn store_put_tree(in root: Slice[u8], durable: bool, domain: u8, in enc: Slice[u8], in rd: Reader)
+    -> ChunkSeq[u8] eff [Ffi[CasFs], Ffi[Blake3]] {
+    let mut r = reply_of(0);
+    handle Fail[StoreErr] in {
+        self::store::put_tree(inout r, in root, durable, domain, in enc, in rd);
+    } with {
+        return v => v,
+        raise(_e, _k) => {},
+    };
+    r
+}
+
+// `verify_object`: answers the size.
+pub fn store_verify(in root: Slice[u8], in id: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[CasFs], Ffi[Blake3]] {
+    let mut r = reply_of(0);
+    handle Fail[StoreErr] in {
+        self::store::verify_object(inout r, in root, in id);
+    } with {
+        return v => v,
+        raise(_e, _k) => {},
+    };
+    r
+}
+
+// `read_blob` (`kind` 1) and `read_tree`'s read (`kind` 2): answers the
+// verified bytes.
+pub fn store_read(in root: Slice[u8], in id: Slice[u8], kind: u8) -> ChunkSeq[u8] eff [Ffi[CasFs], Ffi[Blake3]] {
+    let mut r = reply_of(0);
+    handle Fail[StoreErr] in {
+        self::store::read_verified(inout r, in root, in id, kind);
+    } with {
+        return v => v,
+        raise(_e, _k) => {},
+    };
+    r
+}
+
+// `publish_derivation`: `enc` is the inputs' encoding. Answers the key and
+// the newly-recorded byte.
+pub fn store_publish_derivation(in root: Slice[u8], durable: bool, in enc: Slice[u8], in output: Slice[u8])
+    -> ChunkSeq[u8] eff [Ffi[CasFs], Ffi[Blake3]] {
+    let mut r = reply_of(0);
+    handle Fail[StoreErr] in {
+        self::store::publish_derivation(inout r, in root, durable, in enc, in output);
+    } with {
+        return v => v,
+        raise(_e, _k) => {},
+    };
+    r
+}
+
+// `lookup_derivation`: answers 0, or 1 and the output id.
+pub fn store_lookup_derivation(in root: Slice[u8], in enc: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[CasFs], Ffi[Blake3]] {
+    let mut r = reply_of(0);
+    handle Fail[StoreErr] in {
+        self::store::lookup_derivation(inout r, in root, in enc);
+    } with {
+        return v => v,
+        raise(_e, _k) => {},
+    };
+    r
+}
+
+// `sweep_temporaries`: answers the number removed.
+pub fn store_sweep(in root: Slice[u8], min_s: u64, min_ns: u64) -> ChunkSeq[u8] eff [Ffi[CasFs]] {
+    let mut r = reply_of(0);
+    handle Fail[StoreErr] in {
+        self::store::sweep(inout r, in root, min_s, min_ns);
+    } with {
+        return v => v,
+        raise(_e, _k) => {},
+    };
+    r
 }

@@ -60,6 +60,10 @@ mod fsutil;
 mod id;
 #[cfg(vesper_port)]
 mod port;
+#[cfg(vesper_port)]
+mod port_fs;
+#[cfg(vesper_port)]
+mod port_store;
 mod store;
 pub mod transfer;
 mod tree;

@@ -17,7 +17,7 @@ fn byte(in s: Slice[u8], i: u64) -> u8 {
 }
 
 // `object_context`: "vesper-loom-cas 2026-11 v1 <domain> <kind>".
-fn context(domain: u8, kind: u8) -> Str {
+pub fn context(domain: u8, kind: u8) -> Str {
     if domain == 1 {
         if kind == 1 {
             "vesper-loom-cas 2026-11 v1 source blob"
@@ -63,14 +63,18 @@ fn hex_digit(v: u8) -> u8 {
 }
 
 pub fn hex_into(in bytes: Slice[u8], inout out: ChunkSeq[u8]) {
+    // Grow once, then write each byte's two digits as one u16.
+    let at = out.len();
+    out.resize(wrapping_add(at, wrapping_mul(bytes.len(), 2)), 0);
     let mut i: u64 = 0;
     loop {
         if i >= bytes.len() {
             break;
         }
         let b = byte(in bytes, i);
-        out.push(hex_digit(wrapping_shr_u8(b, 4)));
-        out.push(hex_digit(b & 15));
+        let hi = widen_u16(hex_digit(wrapping_shr_u8(b, 4)));
+        let lo = widen_u16(hex_digit(b & 15));
+        out.try_write_u16_le(wrapping_add(at, wrapping_mul(i, 2)), hi | wrapping_shl_u16(lo, 8));
         i = wrapping_add(i, 1);
     }
 }
