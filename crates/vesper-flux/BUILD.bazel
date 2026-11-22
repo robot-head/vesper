@@ -77,6 +77,6 @@ vesper_crate(
         ("cdc", "cdc.ves", "        if flags != 0 {\n", "        if flags > 1 {\n"),
         ("log", "log.ves", "    put_u16(inout h, 1);\n", "    put_u16(inout h, 2);\n"),
         ("spine", "spine.ves", "            if n == 0 || n > max_rows {\n", "            if n > max_rows {\n"),
-        ("image", "image.ves", "            if weight == 0 {\n                Fail::raise(CpErr::Noncanonical);\n", "            if false {\n                Fail::raise(CpErr::Noncanonical);\n"),
+        ("image", "image.ves", "        if width != get(in widths, i) || count > max_rows {\n", "        if width != get(in widths, i) {\n"),
     ]
 ]

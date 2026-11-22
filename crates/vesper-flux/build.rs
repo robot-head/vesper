@@ -73,11 +73,12 @@ const DIVERGENT: &[(&str, &str, &str)] = &[
         "    put_u16(inout h, 1);\n",
         "    put_u16(inout h, 2);\n",
     ),
-    // image (vesper/src/image.ves): a checkpoint row of weight 0 is kept.
+    // image (vesper/src/image.ves): a node's row count is not checked
+    // against the circuit's row limit.
     (
         "image",
-        "            if weight == 0 {\n                Fail::raise(CpErr::Noncanonical);\n",
-        "            if false {\n                Fail::raise(CpErr::Noncanonical);\n",
+        "        if width != get(in widths, i) || count > max_rows {\n",
+        "        if width != get(in widths, i) {\n",
     ),
     // spine (vesper/src/spine.ves): a manifest batch of 0 rows is accepted.
     (

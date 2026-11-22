@@ -121,7 +121,7 @@ Stacked on part 2 (in the same PR, #1447: one crate).
 The `image` workload checkpoints an executor of two width-3 inputs holding
 8 ticks of 1,024-row sets and restores the image into a fresh executor, 8
 times per batch. The Rust arm is `main` at `468dced`. The divergent edit
-`image` keeps a checkpoint row of weight 0.
+`image` skips the check of a node's row count against the row limit.
 
 ## Part 4: the Flux durable checkpoint codecs
 
