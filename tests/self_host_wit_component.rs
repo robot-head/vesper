@@ -30,8 +30,13 @@ pub fn cases() -> &'static [WasmCase] {
     C.get_or_init(|| {
         let mut out = vec![];
         let src = std::fs::read_to_string(repo().join("tests/wasm_backend.rs")).unwrap();
-        for (i, lit) in string_literals(&src).into_iter().enumerate() {
-            if !lit.contains("fn main") {
+        let literals = string_literals(&src).into_iter().enumerate();
+        let extra = EXTRA
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (1_000_000 + i, s.to_string()));
+        for (i, lit) in literals.chain(extra) {
+            if !lit.contains("fn ") {
                 continue;
             }
             let p = vesper::parser::parse(&lit);
@@ -42,6 +47,21 @@ pub fn cases() -> &'static [WasmCase] {
             if c.diagnostics.is_empty() {
                 out.push(WasmCase {
                     name: format!("tests/wasm_backend.rs#{i}"),
+                    world: c.world,
+                });
+                continue;
+            }
+            // tests/wasm_backend.rs `hosted_differential` programs: the
+            // host capabilities (`Stdout`, `Clock`) are declared in front.
+            let hosted = format!("{HOST_PRELUDE}{lit}");
+            let p = vesper::parser::parse(&hosted);
+            if !p.diagnostics.is_empty() {
+                continue;
+            }
+            let c = vesper::check::check(&p.module);
+            if c.diagnostics.is_empty() {
+                out.push(WasmCase {
+                    name: format!("tests/wasm_backend.rs#{i}+host"),
                     world: c.world,
                 });
             }
@@ -57,6 +77,25 @@ pub fn cases() -> &'static [WasmCase] {
         out
     })
 }
+
+/// Entries the backend's tests reach less often: string parameters (the
+/// export's `cabi_realloc`) and Nexus plugins (`run`).
+const EXTRA: &[&str] = &[
+    "fn main(s: String) -> u64 { 1 }",
+    "fn main(a: u64, sink s: String, sink t: String) -> (bool, String) { (t == \"abc\", s) }",
+    "fn main(sink s: String) -> String { s }",
+    "struct Named { name: String, value: i64 } fn main(sink n: Named) -> i64 { let Named { name, value } = n; value }",
+    "fn main(x: u8, y: f64, sink s: String) -> (u8, f64) { (x, y) }",
+    "fn main(sink s: String) -> Unit eff [Stdout] { Stdout::write(s); }",
+    "fn main(sink s: String) -> u64 eff [Stdout, Clock] { Stdout::write(s); Clock::now_ns() }",
+    "fn run(scenario: u32, arg: u64) -> i64 { 7 }",
+    "fn run(scenario: u32, arg: u64) -> i64 { if scenario == 0 { 1 } else { -1 } }",
+    "struct P { a: u64, b: i64 } fn run(scenario: u32, arg: u64) -> i64 { let p = P { a: arg, b: 2 }; p.b }",
+];
+
+/// tests/wasm_backend.rs `HOST_PRELUDE`.
+const HOST_PRELUDE: &str =
+    "linear effect Stdout { fn write(s: String); } linear effect Clock { fn now_ns() -> u64; } ";
 
 /// The `"..."` and `r#"..."#` literals of a Rust source, unescaped.
 fn string_literals(src: &str) -> Vec<String> {
@@ -212,19 +251,43 @@ pub fn answer(words: &[u64]) -> Result<Vec<u8>, u64> {
     }
 }
 
-/// Every compilation Rust's backend completes, in case order.
+/// Every compilation Rust's backend completes, in case order: `main` of
+/// each case under the four configurations, then (under the first) every
+/// other function as a command entry (parameters, strings among them) and
+/// `run` as a Nexus plugin.
 fn rust_artifacts() -> &'static [(String, usize, WasmArtifact)] {
     static A: OnceLock<Vec<(String, usize, WasmArtifact)>> = OnceLock::new();
     A.get_or_init(|| {
         let quiet = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
+        let compile = |w: &World, entry: &str, o: &WasmOptions| {
+            std::panic::catch_unwind(|| wasm_backend::compile(w, entry, o))
+                .ok()
+                .and_then(Result::ok)
+        };
         let mut out = vec![];
         for c in cases().iter().step_by(step()) {
             for (k, o) in configs().iter().enumerate() {
-                if let Ok(Ok(a)) =
-                    std::panic::catch_unwind(|| wasm_backend::compile(&c.world, "main", o))
-                {
+                if let Some(a) = compile(&c.world, "main", o) {
                     out.push((c.name.clone(), k, a));
+                }
+            }
+            let mut entries: Vec<&String> = c.world.functions.keys().collect();
+            entries.sort();
+            for entry in entries {
+                if entry == "main" {
+                    continue;
+                }
+                let o = &configs()[0];
+                if let Some(a) = compile(&c.world, entry, o) {
+                    out.push((format!("{}::{entry}", c.name), 0, a));
+                }
+                let plugin = WasmOptions {
+                    world: WasmWorld::NexusPlugin,
+                    ..o.clone()
+                };
+                if let Some(a) = compile(&c.world, entry, &plugin) {
+                    out.push((format!("{}::{entry} (plugin)", c.name), 0, a));
                 }
             }
         }
@@ -249,7 +312,6 @@ pub struct Tally {
     pub compared: usize,
     pub identical: usize,
     pub declined: usize,
-    pub declined_imports: usize,
     pub ran: usize,
     pub diffs: Vec<String>,
 }
@@ -285,13 +347,7 @@ pub fn differential_run(execute: bool) -> Tally {
                 c.iter().zip(&a.component).position(|(x, y)| x != y)
             )),
             Err(reason) => {
-                // Host imports (the WIT `import`s) are the one shape the
-                // port leaves to Rust (wit.ves `E_IMPORT`).
-                if a.wit.contains("\n  import ") && reason == 16 + 4 {
-                    t.declined_imports += 1;
-                } else {
-                    t.diffs.push(format!("{tag}: declined ({reason})"));
-                }
+                t.diffs.push(format!("{tag}: declined ({reason})"));
                 t.declined += 1;
             }
         }
@@ -299,14 +355,14 @@ pub fn differential_run(execute: bool) -> Tally {
     t
 }
 
-/// Every Rust component equals the port's, byte for byte, except the worlds
-/// with host imports, which the port declines.
+/// Every Rust component equals the port's, byte for byte: commands with
+/// and without host imports, string parameters and Nexus plugins.
 #[test]
 fn port_matches_wit_component() {
     let t = differential_run(true);
     eprintln!(
-        "compared {} identical {} declined {} (host imports {}) ran {}",
-        t.compared, t.identical, t.declined, t.declined_imports, t.ran
+        "compared {} identical {} declined {} ran {}",
+        t.compared, t.identical, t.declined, t.ran
     );
     for d in t.diffs.iter().take(40) {
         eprintln!("DIFF {d}");
@@ -337,13 +393,13 @@ fn declines_outside_the_subset() {
         (
             &good.replace(
                 "export entry;",
-                "export entry;\n  import wasi:cli/stdout@0.2.0;",
+                "export entry;\n  import wasi:filesystem/types@0.2.0;",
             ),
             WasmWorld::Command,
         ),
         (
-            &good.replace("func()", "func(%s: string)"),
-            WasmWorld::Command,
+            "package vesper:program@0.1.0;\n\nworld plugin {\n  export run: func(%s: string) -> s64;\n}\n",
+            WasmWorld::NexusPlugin,
         ),
         (&good.replace("}\n\nworld", "\n\nworld"), WasmWorld::Command),
         (&good[..good.len() - 3], WasmWorld::Command),
@@ -366,7 +422,6 @@ fn timing() {
     let f = package().entry("wit_component_wrap", true);
     let work: Vec<_> = rust_artifacts()
         .iter()
-        .filter(|(_, _, a)| a.imports.is_empty() && !a.wit.contains("\n  import "))
         .map(|(_, _, a)| (a, wrap_input(&a.core, &a.wit, a.world)))
         .collect();
     let reps = 5;
