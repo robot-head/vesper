@@ -28,8 +28,6 @@ use crate::claims::{
     SupplyChainEvidence, TeeArch, ct_eq, single_extend,
 };
 use crate::error::{AttestError, ParseError};
-use coset::cbor::value::Value;
-use coset::{CoseSign1, TaggedCborSerializable, iana};
 use ring::digest;
 
 pub const CCA_COLLECTION_TAG: u64 = 399;
@@ -129,13 +127,15 @@ pub struct CcaTbbRotpk {
 }
 
 impl CcaTbbRotpk {
-    fn to_value(&self) -> Value {
+    fn encode_cbor(&self, out: &mut Vec<u8>) {
         use keys::*;
-        Value::Map(vec![
-            (ROTPK_NAME.into(), Value::Text(self.name.clone())),
-            (ROTPK_INDEX.into(), Value::Integer(self.index.into())),
-            (ROTPK_HASH.into(), Value::Bytes(self.hash.clone())),
-        ])
+        cbor_head(out, 5, 3);
+        cbor_int(out, ROTPK_NAME);
+        cbor_text(out, &self.name);
+        cbor_int(out, ROTPK_INDEX);
+        cbor_head(out, 0, self.index);
+        cbor_int(out, ROTPK_HASH);
+        cbor_bytes(out, &self.hash);
     }
 }
 
@@ -155,24 +155,29 @@ pub struct CcaSwComponent {
 }
 
 impl CcaSwComponent {
-    fn to_value(&self) -> Value {
+    fn encode_cbor(&self, out: &mut Vec<u8>) {
         use keys::*;
-        let mut m = Vec::new();
+        let n = usize::from(self.measurement_type.is_some())
+            + 2
+            + usize::from(self.version.is_some())
+            + usize::from(self.measurement_description.is_some());
+        cbor_head(out, 5, n as u64);
         if let Some(t) = &self.measurement_type {
-            m.push((SW_MEASUREMENT_TYPE.into(), Value::Text(t.clone())));
+            cbor_int(out, SW_MEASUREMENT_TYPE);
+            cbor_text(out, t);
         }
-        m.push((
-            SW_MEASUREMENT_VALUE.into(),
-            Value::Bytes(self.measurement_value.clone()),
-        ));
+        cbor_int(out, SW_MEASUREMENT_VALUE);
+        cbor_bytes(out, &self.measurement_value);
         if let Some(t) = &self.version {
-            m.push((SW_VERSION.into(), Value::Text(t.clone())));
+            cbor_int(out, SW_VERSION);
+            cbor_text(out, t);
         }
-        m.push((SW_SIGNER_ID.into(), Value::Bytes(self.signer_id.clone())));
+        cbor_int(out, SW_SIGNER_ID);
+        cbor_bytes(out, &self.signer_id);
         if let Some(t) = &self.measurement_description {
-            m.push((SW_MEASUREMENT_DESCRIPTION.into(), Value::Text(t.clone())));
+            cbor_int(out, SW_MEASUREMENT_DESCRIPTION);
+            cbor_text(out, t);
         }
-        Value::Map(m)
     }
 }
 
@@ -184,14 +189,41 @@ fn algo_name(h: RegisterHash) -> &'static str {
     }
 }
 
-fn cbor_err(field: &'static str, reason: &'static str) -> ParseError {
-    ParseError::Cbor { field, reason }
+fn cbor_head(out: &mut Vec<u8>, major: u8, n: u64) {
+    let base = major << 5;
+    if n <= 23 {
+        out.push(base | n as u8);
+    } else if n <= u8::MAX as u64 {
+        out.push(base | 24);
+        out.push(n as u8);
+    } else if n <= u16::MAX as u64 {
+        out.push(base | 25);
+        out.extend_from_slice(&(n as u16).to_be_bytes());
+    } else if n <= u32::MAX as u64 {
+        out.push(base | 26);
+        out.extend_from_slice(&(n as u32).to_be_bytes());
+    } else {
+        out.push(base | 27);
+        out.extend_from_slice(&n.to_be_bytes());
+    }
 }
 
-fn bytes<'v>(v: &'v Value, field: &'static str) -> Result<&'v [u8], ParseError> {
-    v.as_bytes()
-        .map(Vec::as_slice)
-        .ok_or_else(|| cbor_err(field, "expected byte string"))
+fn cbor_int(out: &mut Vec<u8>, v: i64) {
+    if v >= 0 {
+        cbor_head(out, 0, v as u64);
+    } else {
+        cbor_head(out, 1, (-1i128 - i128::from(v)) as u64);
+    }
+}
+
+fn cbor_bytes(out: &mut Vec<u8>, b: &[u8]) {
+    cbor_head(out, 2, b.len() as u64);
+    out.extend_from_slice(b);
+}
+
+fn cbor_text(out: &mut Vec<u8>, s: &str) {
+    cbor_head(out, 3, s.len() as u64);
+    out.extend_from_slice(s.as_bytes());
 }
 
 /// The digest of a measurement: a 64-byte encoding of a shorter digest
@@ -251,227 +283,145 @@ pub enum CcaCollection {
     Cmw907,
 }
 
-fn platform_profile(payload: &[u8]) -> Result<CcaPlatformProfile, ParseError> {
-    use crate::port::{CBOR_PLATFORM_CLAIMS, cbor_call, vesper};
-    let (p, _) = cbor_call(payload, CBOR_PLATFORM_CLAIMS, |n, st, _| {
-        vesper::cca_platform_profile(payload, n, st)
-    })?;
-    Ok(match p {
-        0 => CcaPlatformProfile::CcaSsd1,
-        1 => CcaPlatformProfile::Platform2023,
-        2 => CcaPlatformProfile::Platform2024,
-        p => unreachable!("platform profile {p} from the Vesper port"),
-    })
+/// Algorithm carried in a parsed `COSE_Sign1` protected header.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CoseAlg {
+    None,
+    Assigned(i64),
+    Private(i64),
+    Text,
 }
 
-fn realm_profile(payload: &[u8]) -> Result<CcaRealmProfile, ParseError> {
-    use crate::port::{CBOR_REALM_CLAIMS, cbor_call, vesper};
-    let (p, _) = cbor_call(payload, CBOR_REALM_CLAIMS, |n, st, _| {
-        vesper::cca_realm_profile(payload, n, st)
-    })?;
-    Ok(match p {
-        0 => CcaRealmProfile::Unspecified,
-        1 => CcaRealmProfile::Realm2023,
-        2 => CcaRealmProfile::Realm2024,
-        p => unreachable!("realm profile {p} from the Vesper port"),
-    })
+/// Parsed tagged `COSE_Sign1` envelope (RFC 8152 tag 18).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CoseSign1 {
+    pub protected_raw: Vec<u8>,
+    pub alg: CoseAlg,
+    pub content_type: Option<String>,
+    pub(crate) corim_meta: Option<Result<Vec<u8>, ()>>,
+    pub payload: Option<Vec<u8>>,
+    pub signature: Vec<u8>,
 }
 
-/// An integer-keyed claims map with duplicate keys rejected.
-struct ClaimMap<'v>(Vec<(i64, &'v Value)>);
-
-impl<'v> ClaimMap<'v> {
-    fn new(v: &'v Value, what: &'static str) -> Result<Self, ParseError> {
-        let entries = v.as_map().ok_or_else(|| cbor_err(what, "expected map"))?;
-        let mut out: Vec<(i64, &'v Value)> = Vec::with_capacity(entries.len());
-        for (k, val) in entries {
-            let key = k
-                .as_integer()
-                .and_then(|i| i64::try_from(i).ok())
-                .ok_or_else(|| cbor_err(what, "non-integer claim key"))?;
-            if out.iter().any(|(seen, _)| *seen == key) {
-                return Err(cbor_err(what, "duplicate claim key"));
-            }
-            out.push((key, val));
-        }
-        Ok(ClaimMap(out))
+impl CoseSign1 {
+    /// Decode a tagged `COSE_Sign1` (RFC 8152 tag 18) via the Vesper port.
+    pub fn from_tagged_slice(bytes: &[u8]) -> Result<Self, ParseError> {
+        crate::port::cose_sign1_parse(bytes, 33, 25)
     }
 
-    fn get(&self, key: i64, field: &'static str) -> Result<&'v Value, ParseError> {
-        self.0
-            .iter()
-            .find(|(k, _)| *k == key)
-            .map(|(_, v)| *v)
-            .ok_or_else(|| cbor_err(field, "missing claim"))
+    /// Encode RFC 8152 §4.4 `Sig_structure` TBS bytes via the Vesper port.
+    pub fn tbs_data(&self, aad: &[u8]) -> Vec<u8> {
+        let pay = self.payload.as_deref().unwrap_or(&[]);
+        crate::port::cose_sig_structure(&self.protected_raw, aad, pay)
     }
-}
-
-pub(crate) fn decode_value(bytes: &[u8], what: &'static str) -> Result<Value, ParseError> {
-    let (v, used) =
-        crate::port::cbor_value(bytes).ok_or_else(|| cbor_err(what, "malformed CBOR"))?;
-    if used != bytes.len() {
-        return Err(cbor_err(what, "trailing bytes"));
-    }
-    Ok(v)
-}
-
-fn encode_value(v: &Value) -> Vec<u8> {
-    let mut out = Vec::new();
-    coset::cbor::ser::into_writer(v, &mut out).expect("CBOR encoding into Vec cannot fail");
-    out
 }
 
 impl CcaRealmClaims {
     pub fn from_cbor(payload: &[u8]) -> Result<Self, ParseError> {
-        use crate::port::{CBOR_REALM_CLAIMS, CborFields, cbor_call, vesper};
+        use crate::port::{CBOR_REALM_CLAIMS, CborFields, cbor_call, read_realm_claims, vesper};
         let ((), w) = cbor_call(payload, CBOR_REALM_CLAIMS, |n, st, w| {
             vesper::cca_realm_claims(payload, n, st, w)
         })?;
         let mut f = CborFields::new(&w, payload);
-        let hash_algo = f.hash();
-        let initial_measurement = f.bytes();
-        let extensible_measurements = std::array::from_fn(|_| f.bytes());
-        Ok(CcaRealmClaims {
-            challenge: f.array(),
-            personalization: f.array(),
-            hash_algo,
-            public_key: f.bytes(),
-            public_key_hash_algo: f.hash(),
-            initial_measurement,
-            extensible_measurements,
-        })
+        Ok(read_realm_claims(&mut f))
     }
 
     pub fn to_cbor(&self) -> Vec<u8> {
         use keys::*;
-        let b = |x: &[u8]| Value::Bytes(x.to_vec());
-        encode_value(&Value::Map(vec![
-            (
-                PROFILE.into(),
-                Value::Text("tag:arm.com,2023:realm#1.0.0".into()),
-            ),
-            (CHALLENGE.into(), b(&self.challenge)),
-            (REALM_PERSONALIZATION.into(), b(&self.personalization)),
-            (
-                REALM_HASH_ALGO.into(),
-                Value::Text(algo_name(self.hash_algo).into()),
-            ),
-            (REALM_PUBLIC_KEY.into(), b(&self.public_key)),
-            (
-                REALM_PUBLIC_KEY_HASH_ALGO.into(),
-                Value::Text(algo_name(self.public_key_hash_algo).into()),
-            ),
-            (
-                REALM_INITIAL_MEASUREMENT.into(),
-                b(&self.initial_measurement),
-            ),
-            (
-                REALM_EXTENSIBLE_MEASUREMENTS.into(),
-                Value::Array(self.extensible_measurements.iter().map(|r| b(r)).collect()),
-            ),
-        ]))
+        let mut out = Vec::with_capacity(512);
+        cbor_head(&mut out, 5, 8);
+        cbor_int(&mut out, PROFILE);
+        cbor_text(&mut out, "tag:arm.com,2023:realm#1.0.0");
+        cbor_int(&mut out, CHALLENGE);
+        cbor_bytes(&mut out, &self.challenge);
+        cbor_int(&mut out, REALM_PERSONALIZATION);
+        cbor_bytes(&mut out, &self.personalization);
+        cbor_int(&mut out, REALM_HASH_ALGO);
+        cbor_text(&mut out, algo_name(self.hash_algo));
+        cbor_int(&mut out, REALM_PUBLIC_KEY);
+        cbor_bytes(&mut out, &self.public_key);
+        cbor_int(&mut out, REALM_PUBLIC_KEY_HASH_ALGO);
+        cbor_text(&mut out, algo_name(self.public_key_hash_algo));
+        cbor_int(&mut out, REALM_INITIAL_MEASUREMENT);
+        cbor_bytes(&mut out, &self.initial_measurement);
+        cbor_int(&mut out, REALM_EXTENSIBLE_MEASUREMENTS);
+        cbor_head(&mut out, 4, self.extensible_measurements.len() as u64);
+        for rem in &self.extensible_measurements {
+            cbor_bytes(&mut out, rem);
+        }
+        out
     }
 }
 
 impl CcaPlatformClaims {
     pub fn from_cbor(payload: &[u8]) -> Result<Self, ParseError> {
-        use crate::port::{CBOR_PLATFORM_CLAIMS, CborFields, cbor_call, vesper};
+        use crate::port::{
+            CBOR_PLATFORM_CLAIMS, CborFields, cbor_call, read_platform_claims, vesper,
+        };
         let ((), w) = cbor_call(payload, CBOR_PLATFORM_CLAIMS, |n, st, w| {
             vesper::cca_platform_claims(payload, n, st, w)
         })?;
         let mut f = CborFields::new(&w, payload);
-        let lifecycle = f.word();
-        let sw_components = (0..f.word())
-            .map(|_| CcaSwComponent {
-                measurement_type: f.opt_text(),
-                measurement_value: f.bytes(),
-                version: f.opt_text(),
-                signer_id: f.bytes(),
-                measurement_description: f.opt_text(),
-            })
-            .collect();
-        let config = f.opt_bytes();
-        let manufacturing_config = f.opt_bytes();
-        let tbb_rotpks = (0..f.word())
-            .map(|_| CcaTbbRotpk {
-                name: f.text(),
-                index: f.word(),
-                hash: f.bytes(),
-            })
-            .collect();
-        Ok(CcaPlatformClaims {
-            sw_components,
-            config,
-            manufacturing_config,
-            tbb_rotpks,
-            challenge: f.bytes(),
-            instance_id: f.bytes(),
-            implementation_id: f.bytes(),
-            lifecycle,
-            hash_algo: f.hash(),
-        })
+        Ok(read_platform_claims(&mut f))
     }
 
     pub fn to_cbor(&self) -> Vec<u8> {
         use keys::*;
-        let b = |x: &[u8]| Value::Bytes(x.to_vec());
-        let mut m = vec![
-            (
-                PROFILE.into(),
-                Value::Text("tag:arm.com,2023:cca_platform#1.0.0".into()),
-            ),
-            (CHALLENGE.into(), b(&self.challenge)),
-            (
-                PLATFORM_IMPLEMENTATION_ID.into(),
-                b(&self.implementation_id),
-            ),
-            (PLATFORM_INSTANCE_ID.into(), b(&self.instance_id)),
-            (
-                PLATFORM_LIFECYCLE.into(),
-                Value::Integer(self.lifecycle.into()),
-            ),
-            (
-                PLATFORM_HASH_ALGO.into(),
-                Value::Text(algo_name(self.hash_algo).into()),
-            ),
-        ];
+        let mut out = Vec::with_capacity(512);
+        let n = 6
+            + usize::from(!self.sw_components.is_empty())
+            + usize::from(self.config.is_some())
+            + usize::from(self.manufacturing_config.is_some())
+            + usize::from(!self.tbb_rotpks.is_empty());
+        cbor_head(&mut out, 5, n as u64);
+        cbor_int(&mut out, PROFILE);
+        cbor_text(&mut out, "tag:arm.com,2023:cca_platform#1.0.0");
+        cbor_int(&mut out, CHALLENGE);
+        cbor_bytes(&mut out, &self.challenge);
+        cbor_int(&mut out, PLATFORM_IMPLEMENTATION_ID);
+        cbor_bytes(&mut out, &self.implementation_id);
+        cbor_int(&mut out, PLATFORM_INSTANCE_ID);
+        cbor_bytes(&mut out, &self.instance_id);
+        cbor_int(&mut out, PLATFORM_LIFECYCLE);
+        cbor_head(&mut out, 0, self.lifecycle);
+        cbor_int(&mut out, PLATFORM_HASH_ALGO);
+        cbor_text(&mut out, algo_name(self.hash_algo));
         if !self.sw_components.is_empty() {
-            m.push((
-                PLATFORM_SW_COMPONENTS.into(),
-                Value::Array(self.sw_components.iter().map(|c| c.to_value()).collect()),
-            ));
+            cbor_int(&mut out, PLATFORM_SW_COMPONENTS);
+            cbor_head(&mut out, 4, self.sw_components.len() as u64);
+            for c in &self.sw_components {
+                c.encode_cbor(&mut out);
+            }
         }
         if let Some(c) = &self.config {
-            m.push((PLATFORM_CONFIG.into(), b(c)));
+            cbor_int(&mut out, PLATFORM_CONFIG);
+            cbor_bytes(&mut out, c);
         }
         if let Some(c) = &self.manufacturing_config {
-            m.push((PLATFORM_MANUFACTURING_CONFIG.into(), b(c)));
+            cbor_int(&mut out, PLATFORM_MANUFACTURING_CONFIG);
+            cbor_bytes(&mut out, c);
         }
         if !self.tbb_rotpks.is_empty() {
-            m.push((
-                PLATFORM_TBB_ROTPK.into(),
-                Value::Array(self.tbb_rotpks.iter().map(|r| r.to_value()).collect()),
-            ));
+            cbor_int(&mut out, PLATFORM_TBB_ROTPK);
+            cbor_head(&mut out, 4, self.tbb_rotpks.len() as u64);
+            for r in &self.tbb_rotpks {
+                r.encode_cbor(&mut out);
+            }
         }
-        encode_value(&Value::Map(m))
+        out
     }
 }
 
 /// Encode a CCA token collection from two tagged COSE_Sign1 encodings.
 pub fn encode_collection(platform_sign1: &[u8], realm_sign1: &[u8]) -> Vec<u8> {
-    encode_value(&Value::Tag(
-        CCA_COLLECTION_TAG,
-        Box::new(Value::Map(vec![
-            (
-                CCA_PLATFORM_TOKEN_KEY.into(),
-                Value::Bytes(platform_sign1.to_vec()),
-            ),
-            (
-                CCA_REALM_TOKEN_KEY.into(),
-                Value::Bytes(realm_sign1.to_vec()),
-            ),
-        ])),
-    ))
+    let mut out = Vec::with_capacity(platform_sign1.len() + realm_sign1.len() + 32);
+    cbor_head(&mut out, 6, CCA_COLLECTION_TAG);
+    cbor_head(&mut out, 5, 2);
+    cbor_int(&mut out, CCA_PLATFORM_TOKEN_KEY);
+    cbor_bytes(&mut out, platform_sign1);
+    cbor_int(&mut out, CCA_REALM_TOKEN_KEY);
+    cbor_bytes(&mut out, realm_sign1);
+    out
 }
 
 /// The two tokens of a collection, signatures not yet checked.
@@ -487,14 +437,10 @@ pub struct CcaToken {
 }
 
 pub(crate) fn sign1_curve(sign1: &CoseSign1, what: &'static str) -> Result<Curve, AttestError> {
-    use coset::{Algorithm, RegisteredLabelWithPrivate};
-    match &sign1.protected.header.alg {
-        Some(Algorithm::Assigned(iana::Algorithm::ES256)) => Ok(Curve::P256),
-        Some(Algorithm::Assigned(iana::Algorithm::ES384)) => Ok(Curve::P384),
-        Some(RegisteredLabelWithPrivate::Assigned(a)) => Err(AttestError::UnsupportedAlgorithm {
-            what,
-            value: *a as i64,
-        }),
+    match sign1.alg {
+        CoseAlg::Assigned(-7) => Ok(Curve::P256),
+        CoseAlg::Assigned(-35) => Ok(Curve::P384),
+        CoseAlg::Assigned(a) => Err(AttestError::UnsupportedAlgorithm { what, value: a }),
         _ => Err(AttestError::UnsupportedAlgorithm { what, value: 0 }),
     }
 }
@@ -507,146 +453,41 @@ pub(crate) fn verify_sign1(
     if sign1_curve(sign1, what)? != key.curve {
         return Err(AttestError::UnexpectedKeyType { what });
     }
-    sign1.verify_signature(b"", |sig, data| key.verify_fixed(data, sig, what))
+    let tbs = sign1.tbs_data(b"");
+    key.verify_fixed(&tbs, &sign1.signature, what)
 }
 
 impl CcaToken {
     pub fn parse(bytes: &[u8]) -> Result<Self, ParseError> {
-        if bytes.len() > MAX_CCA_TOKEN_LEN {
-            return Err(ParseError::OverBudget {
-                format: crate::error::Format::CcaToken,
-                field: "token",
-                limit: MAX_CCA_TOKEN_LEN,
-                value: bytes.len() as u64,
-            });
-        }
-        let v = decode_value(bytes, "token collection")?;
-        let (collection, inner) = match v {
-            Value::Tag(CCA_COLLECTION_TAG, inner) => (CcaCollection::Tag399, *inner),
-            Value::Tag(CCA_CMW_COLLECTION_TAG, inner) => (CcaCollection::Cmw907, *inner),
-            Value::Tag(..) => return Err(cbor_err("token collection", "wrong tag")),
-            _ => return Err(cbor_err("token collection", "missing tag 399 or 907")),
-        };
-        let m = ClaimMap::new(&inner, "token collection")?;
-        if m.0.len() != 2 {
-            return Err(cbor_err("token collection", "expected exactly two tokens"));
-        }
-        let member = |key, field| -> Result<&[u8], ParseError> {
-            let v = m.get(key, field)?;
-            match collection {
-                CcaCollection::Tag399 => bytes_of(v, field),
-                CcaCollection::Cmw907 => cmw_record(v, field),
-            }
-        };
-        let p = member(CCA_PLATFORM_TOKEN_KEY, "platform token")?;
-        let r = member(CCA_REALM_TOKEN_KEY, "realm token")?;
-        let platform = CoseSign1::from_tagged_slice(p)
-            .map_err(|_| cbor_err("platform token", "malformed COSE_Sign1"))?;
-        let realm = CoseSign1::from_tagged_slice(r)
-            .map_err(|_| cbor_err("realm token", "malformed COSE_Sign1"))?;
-        let platform_payload = platform
-            .payload
-            .as_deref()
-            .ok_or_else(|| cbor_err("platform token", "detached payload"))?;
-        let realm_payload = realm
-            .payload
-            .as_deref()
-            .ok_or_else(|| cbor_err("realm token", "detached payload"))?;
-        let platform_claims = CcaPlatformClaims::from_cbor(platform_payload)?;
-        let realm_claims = CcaRealmClaims::from_cbor(realm_payload)?;
-        Ok(CcaToken {
-            collection,
-            platform_profile: platform_profile(platform_payload)?,
-            realm_profile: realm_profile(realm_payload)?,
-            platform,
-            platform_claims,
-            realm,
-            realm_claims,
-        })
-    }
-}
-
-fn bytes_of<'v>(v: &'v Value, field: &'static str) -> Result<&'v [u8], ParseError> {
-    bytes(v, field)
-}
-
-/// A CMW record `[263, bstr]`.
-fn cmw_record<'v>(v: &'v Value, field: &'static str) -> Result<&'v [u8], ParseError> {
-    let a = v
-        .as_array()
-        .ok_or_else(|| cbor_err(field, "CMW record is not an array"))?;
-    match a.as_slice() {
-        [cf, b] => {
-            let cf = cf
-                .as_integer()
-                .and_then(|i| u64::try_from(i).ok())
-                .ok_or_else(|| cbor_err(field, "CMW content format is not an integer"))?;
-            if cf != CCA_CMW_CONTENT_FORMAT {
-                return Err(cbor_err(field, "CMW content format is not 263"));
-            }
-            bytes(b, field)
-        }
-        _ => Err(cbor_err(field, "CMW record is not [type, value]")),
+        crate::port::cca_token_parse(bytes)
     }
 }
 
 /// Decode the RAK claim: a `COSE_Key` (kty EC2, crv P-384, uncompressed
 /// x/y) or a raw 97-byte SEC1 point.
 pub fn realm_public_key(encoded: &[u8]) -> Result<EcPublicKey, AttestError> {
-    use coset::{CborSerializable, CoseKey, KeyType, Label};
-    if encoded.len() == P384_SEC1_LEN && encoded[0] == SEC1_UNCOMPRESSED {
-        return EcPublicKey::from_sec1(Curve::P384, encoded);
-    }
-    let bad = |what| AttestError::UnexpectedKeyType { what };
-    let key = CoseKey::from_slice(encoded).map_err(|_| bad("RAK is neither COSE_Key nor SEC1"))?;
-    if key.kty != KeyType::Assigned(iana::KeyType::EC2) {
-        return Err(bad("RAK COSE_Key kty is not EC2"));
-    }
-    let param = |label: iana::Ec2KeyParameter| {
-        let mut found = key
-            .params
-            .iter()
-            .filter(|(l, _)| *l == Label::Int(label as i64));
-        match (found.next(), found.next()) {
-            (Some((_, v)), None) => Some(v),
-            _ => None,
-        }
-    };
-    let crv = param(iana::Ec2KeyParameter::Crv)
-        .and_then(Value::as_integer)
-        .and_then(|i| i64::try_from(i).ok());
-    if crv != Some(iana::EllipticCurve::P_384 as i64) {
-        return Err(bad("RAK COSE_Key curve is not P-384"));
-    }
-    let coord = |label| {
-        param(label)
-            .and_then(Value::as_bytes)
-            .filter(|b| b.len() == P384_COORD_LEN)
-            .ok_or(bad("RAK COSE_Key coordinate"))
-    };
-    let mut sec1 = Vec::with_capacity(P384_SEC1_LEN);
-    sec1.push(SEC1_UNCOMPRESSED);
-    sec1.extend_from_slice(coord(iana::Ec2KeyParameter::X)?);
-    sec1.extend_from_slice(coord(iana::Ec2KeyParameter::Y)?);
+    let sec1 = crate::port::cose_key_p384(encoded)?;
     EcPublicKey::from_sec1(Curve::P384, &sec1)
 }
 
 /// Encode an uncompressed P-384 SEC1 point as a `COSE_Key` (for simulators
 /// and tests).
 pub fn encode_realm_cose_key(sec1: &[u8]) -> Vec<u8> {
-    use coset::CborSerializable;
     assert!(
         sec1.len() == P384_SEC1_LEN && sec1[0] == SEC1_UNCOMPRESSED,
         "uncompressed P-384 point"
     );
-    coset::CoseKeyBuilder::new_ec2_pub_key(
-        iana::EllipticCurve::P_384,
-        sec1[1..=P384_COORD_LEN].to_vec(),
-        sec1[1 + P384_COORD_LEN..].to_vec(),
-    )
-    .build()
-    .to_vec()
-    .expect("COSE_Key encoding into Vec cannot fail")
+    let mut out = Vec::with_capacity(112);
+    cbor_head(&mut out, 5, 4);
+    cbor_int(&mut out, 1);
+    cbor_int(&mut out, 2);
+    cbor_int(&mut out, -1);
+    cbor_int(&mut out, 2);
+    cbor_int(&mut out, -2);
+    cbor_bytes(&mut out, &sec1[1..=P384_COORD_LEN]);
+    cbor_int(&mut out, -3);
+    cbor_bytes(&mut out, &sec1[1 + P384_COORD_LEN..]);
+    out
 }
 
 /// Normalized 48-byte measurement for a CCA RIM:
@@ -835,17 +676,18 @@ pub fn verify_cca_token(
 /// with `sign` (which returns fixed-width `r || s`). Used by simulators and
 /// tests to produce tokens; verification never calls it.
 pub fn build_sign1(curve: Curve, payload: Vec<u8>, sign: impl FnOnce(&[u8]) -> Vec<u8>) -> Vec<u8> {
-    let alg = match curve {
-        Curve::P256 => iana::Algorithm::ES256,
-        Curve::P384 => iana::Algorithm::ES384,
+    let prot: &[u8] = match curve {
+        Curve::P256 => &[0xa1, 0x01, 0x26],
+        Curve::P384 => &[0xa1, 0x01, 0x38, 0x22],
     };
-    let protected = coset::HeaderBuilder::new().algorithm(alg).build();
-    let mut sign = Some(sign);
-    coset::CoseSign1Builder::new()
-        .protected(protected)
-        .payload(payload)
-        .create_signature(b"", |data| (sign.take().expect("called once"))(data))
-        .build()
-        .to_tagged_vec()
-        .expect("COSE_Sign1 encoding into Vec cannot fail")
+    let tbs = crate::port::cose_sig_structure(prot, b"", &payload);
+    let sig = sign(&tbs);
+    let mut out = Vec::with_capacity(prot.len() + payload.len() + sig.len() + 24);
+    cbor_head(&mut out, 6, 18);
+    cbor_head(&mut out, 4, 4);
+    cbor_bytes(&mut out, prot);
+    cbor_head(&mut out, 5, 0);
+    cbor_bytes(&mut out, &payload);
+    cbor_bytes(&mut out, &sig);
+    out
 }

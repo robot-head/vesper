@@ -13,6 +13,8 @@
 //! that allocates passes it. Here confinement is reachability.
 
 use crate::VerifierFinding;
+#[cfg(vesper_port)]
+use std::collections::HashMap;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
@@ -298,16 +300,20 @@ pub fn verify_realtime(
 ) -> Result<Vec<VerifierFinding>, GraphError> {
     #[cfg(vesper_port)]
     {
-        // Number the distinct effects; the port compares codes.
+        // Number the distinct effects via a hash index; keep `effects` for
+        // decoding findings.
         let mut effects: Vec<&Effect> = Vec::new();
-        fn intern<'a>(effects: &mut Vec<&'a Effect>, e: &'a Effect) -> u64 {
-            match effects.iter().position(|x| *x == e) {
-                Some(i) => i as u64,
-                None => {
-                    effects.push(e);
-                    (effects.len() - 1) as u64
-                }
-            }
+        let mut effect_ids: HashMap<&Effect, u64> = HashMap::new();
+        fn intern<'a>(
+            effects: &mut Vec<&'a Effect>,
+            effect_ids: &mut HashMap<&'a Effect, u64>,
+            e: &'a Effect,
+        ) -> u64 {
+            *effect_ids.entry(e).or_insert_with(|| {
+                let id = effects.len() as u64;
+                effects.push(e);
+                id
+            })
         }
         let mut fns = Vec::with_capacity(8 * graph.functions.len());
         let mut pool = Vec::new();
@@ -319,7 +325,7 @@ pub fn verify_realtime(
             };
             let eff_first = pool.len() as u64;
             for e in &f.effects {
-                let c = intern(&mut effects, e);
+                let c = intern(&mut effects, &mut effect_ids, e);
                 pool.push(c);
             }
             let site_first = pool.len() as u64;
@@ -371,7 +377,7 @@ pub fn verify_realtime(
         let allowed: Vec<u64> = policy
             .allowed_effects
             .iter()
-            .map(|e| intern(&mut effects, e))
+            .map(|e| intern(&mut effects, &mut effect_ids, e))
             .collect();
         let w = crate::port::verify_realtime(
             &fns,
