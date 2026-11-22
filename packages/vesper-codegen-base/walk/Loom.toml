@@ -1,0 +1,15 @@
+[package]
+name = "@vesper/codegen-walk"
+version = "0.1.0"
+edition = "2026"
+# The graph walk's state, lent to a hook for one request (self-hosting SH5
+# lane 1, #1324), through the `.vsys` library of src/lib.ves; emission
+# reaches Cranelift through @vesper/cranelift.
+capability_ceiling = ["Fail", "Ffi"]
+# The `.vsys` library, so a package that depends on this one imports it.
+# It is the `// @export vsys` directive of src/lib.ves, copied; the
+# walk-state test keeps the two equal.
+vsys = ["walk.vsys"]
+
+[dependencies]
+"@vesper/cranelift" = { version = "^0.1", path = "../../vesper-cranelift" }

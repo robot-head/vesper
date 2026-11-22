@@ -1,0 +1,320 @@
+// The `numeric` hook's region blocks: `region_enter`, `region_exit` and
+// `region_perform` of src/regions/native.rs, emitted through the lent
+// Cranelift builder and module (self-hosting SH4 lane 11, #1285, part 3).
+//
+// The Rust code sends one `codegen_swap::numeric::REGION` request per
+// step, after evaluating the operands and defining the region runtime of
+// an object module (the words are documented there). Every emission makes
+// the Cranelift calls of the Rust function in the same order. A 128-bit
+// payload (`isplit`/`iconcat`, which the shim lacks) is never requested.
+
+use @vesper/cranelift::{
+    Ty,
+    Value,
+    call_arg,
+    call_arg_count,
+    call_conv_default,
+    create_stack_slot,
+    declare_function,
+    import_function,
+    ins_call,
+    ins_convert,
+    ins_iconst,
+    ins_load,
+    ins_stack_addr,
+    ins_store,
+    inst_result,
+    linkage_import,
+    linkage_local,
+    module_pointer_type,
+    sig_new,
+    sig_param,
+    sig_return,
+    value_of_word,
+    value_type,
+};
+
+pub const NUM_REGION: u32 = 10;
+
+// `numeric::REGION_*`.
+const RK_OPEN: u64 = 1;
+const RK_CLOSE: u64 = 2;
+const RK_BOX: u64 = 3;
+const RK_GET: u64 = 4;
+const RK_TAKE: u64 = 5;
+const RK_SET: u64 = 6;
+const RK_CHECKPOINT: u64 = 7;
+const RK_REWIND: u64 = 8;
+const RK_COMMIT: u64 = 9;
+const RK_USED: u64 = 10;
+
+// The request's first words: the kind, then 1 in a JIT module.
+const RW_KIND: u64 = 0;
+const RW_JIT: u64 = 1;
+const RW_FIRST: u64 = 2;
+
+// The shim's type codes.
+const RT_I32: u32 = 3;
+const RT_I64: u32 = 4;
+const RT_I128: u32 = 5;
+const RT_F32: u32 = 6;
+const RT_F64: u32 = 7;
+// `MemFlags::new()`; convert ops `uextend`, `ireduce`, `bitcast`.
+const RF_PLAIN: u32 = 0;
+const RV_UEXTEND: u32 = 1;
+const RV_IREDUCE: u32 = 3;
+const RV_BITCAST: u32 = 4;
+
+fn rty(code: u32) -> Ty {
+    Ty {
+        code: code
+    }
+}
+
+fn r_iconst(inout b: Builder, v: u64) -> Value eff [Ffi[Cranelift]] {
+    ins_iconst(inout b, rty(RT_I64), wrapping_i64(v))
+}
+
+// The operand words of each kind after `[kind, jit]`.
+fn r_operands(kind: u64) -> u64 {
+    if kind == RK_OPEN || kind == RK_CLOSE || kind == RK_CHECKPOINT || kind == RK_USED {
+        1
+    } else if kind == RK_REWIND || kind == RK_COMMIT {
+        2
+    } else if kind == RK_SET {
+        6
+    } else {
+        5
+    }
+}
+
+fn r_word(call: u64, i: u64) -> u64 eff [Ffi[Cranelift]] {
+    call_arg(call, wrapping_add(RW_FIRST, i))
+}
+fn r_value(call: u64, i: u64) -> Value eff [Ffi[Cranelift]] {
+    value_of_word(r_word(call, i))
+}
+
+// Whether `call` is a `REGION` request this file emits.
+pub fn region_known(call: u64) -> bool eff [Ffi[Cranelift]] {
+    let kind = call_arg(call, RW_KIND);
+    if call_arg_count(call) < RW_FIRST || kind < RK_OPEN || kind > RK_USED {
+        return false;
+    }
+    let n = r_operands(kind);
+    if call_arg_count(call) != wrapping_add(RW_FIRST, n) {
+        return false;
+    }
+    if n >= 5 {
+        // The payload's type: an aggregate (0) or a one-word scalar.
+        let t = r_word(call, wrapping_sub(n, 1));
+        let aggregate = r_word(call, wrapping_sub(n, 2));
+        if aggregate > 1 || t == widen_u64(RT_I128) || (aggregate == 0 && t == 0) {
+            return false;
+        }
+    }
+    true
+}
+
+// `region_call`: declare `name` with one `i64` per argument and an `i64`
+// result (imported in a JIT module, local otherwise), and call it.
+fn r_call(inout b: Builder, inout m: Module, jit: bool, in name: Str, in args: Slice[u32])
+    -> Value eff [Ffi[Cranelift]] {
+    let s = sig_new(inout m, call_conv_default());
+    for _ in 0..args.len() {
+        sig_param(inout m, s, rty(RT_I64));
+    }
+    sig_return(inout m, s, rty(RT_I64));
+    let linkage = if jit {
+        linkage_import()
+    } else {
+        linkage_local()
+    };
+    let f = declare_function(inout m, in name.as_bytes(), linkage, s);
+    let r = import_function(inout b, inout m, f);
+    ins_call(inout b, r, in args);
+    inst_result(inout b, 0)
+}
+
+fn r_args(a: Value, c: Value, d: Value, e: Value, n: u32) -> ChunkSeq[u32] {
+    let mut s = ChunkSeq::with_capacity[u32](4);
+    s.push(a.id);
+    if n > 1 {
+        s.push(c.id);
+    }
+    if n > 2 {
+        s.push(d.id);
+    }
+    if n > 3 {
+        s.push(e.id);
+    }
+    s
+}
+
+// `alloc`: a zeroed stack slot of `max(size, 8)` bytes.
+fn r_alloc(inout b: Builder, inout m: Module, size: u32) -> Value eff [Ffi[Cranelift]] {
+    let bytes = if size < 8 {
+        8
+    } else {
+        size
+    };
+    let slot = create_stack_slot(inout b, bytes, 3);
+    let ptr = ins_stack_addr(inout b, module_pointer_type(in m), slot, 0);
+    for i in 0..(widen_u64(bytes) >> 3) {
+        let zero = ins_iconst(inout b, rty(RT_I64), 0);
+        ins_store(inout b, RF_PLAIN, zero, ptr, wrapping_i32(wrapping_mul(i, 8)));
+    }
+    ptr
+}
+
+fn r_words_of(size: u64) -> u64 {
+    wrapping_add(size, 7) >> 3
+}
+
+// `region_store_payload`: `value` (a scalar, or the address of an
+// aggregate of `size` bytes) into the payload `handle` word by word.
+fn r_store_payload(
+    inout b: Builder,
+    inout m: Module,
+    jit: bool,
+    id: Value,
+    handle: Value,
+    value: Value,
+    size: u64,
+    aggregate: bool,
+) eff [Ffi[Cranelift]] {
+    let mut words = ChunkSeq::with_capacity[u32](4);
+    if aggregate {
+        for i in 0..r_words_of(size) {
+            let w = ins_load(
+                inout b,
+                rty(RT_I64),
+                RF_PLAIN,
+                value,
+                wrapping_i32(wrapping_mul(i, 8))
+            );
+            words.push(w.id);
+        }
+    } else {
+        let ty = value_type(inout b, value).code;
+        let w = if ty == RT_F64 {
+            ins_convert(inout b, RV_BITCAST, rty(RT_I64), value)
+        } else if ty == RT_F32 {
+            let bits = ins_convert(inout b, RV_BITCAST, rty(RT_I32), value);
+            ins_convert(inout b, RV_UEXTEND, rty(RT_I64), bits)
+        } else if ty < RT_I64 {
+            ins_convert(inout b, RV_UEXTEND, rty(RT_I64), value)
+        } else {
+            value
+        };
+        words.push(w.id);
+    }
+    for i in 0..words.len() {
+        let w = match words.try_get(i) {
+            Some(x) => Value {
+                id: x
+            },
+            None => value,
+        };
+        let index = r_iconst(inout b, i);
+        let args = r_args(id, handle, index, w, 4);
+        let _r = r_call(inout b, inout m, jit, in "vesper_region_store", in args.as_slice());
+    }
+}
+
+// `region_load_payload`: the payload `handle`, a scalar of shim type `t`
+// or the address of a fresh copy of an aggregate of `size` bytes.
+fn r_load_payload(
+    inout b: Builder,
+    inout m: Module,
+    jit: bool,
+    id: Value,
+    handle: Value,
+    size: u64,
+    aggregate: bool,
+    t: u32,
+) -> Value eff [Ffi[Cranelift]] {
+    if aggregate {
+        let ptr = r_alloc(inout b, inout m, wrapping_u32(size));
+        for i in 0..r_words_of(size) {
+            let index = r_iconst(inout b, i);
+            let args = r_args(id, handle, index, index, 3);
+            let w = r_call(inout b, inout m, jit, in "vesper_region_load", in args.as_slice());
+            ins_store(inout b, RF_PLAIN, w, ptr, wrapping_i32(wrapping_mul(i, 8)));
+        }
+        return ptr;
+    }
+    let index = r_iconst(inout b, 0);
+    let args = r_args(id, handle, index, index, 3);
+    let w = r_call(inout b, inout m, jit, in "vesper_region_load", in args.as_slice());
+    if t == RT_F64 {
+        ins_convert(inout b, RV_BITCAST, rty(RT_F64), w)
+    } else if t == RT_F32 {
+        let bits = ins_convert(inout b, RV_IREDUCE, rty(RT_I32), w);
+        ins_convert(inout b, RV_BITCAST, rty(RT_F32), bits)
+    } else if t < RT_I64 {
+        ins_convert(inout b, RV_IREDUCE, rty(t), w)
+    } else {
+        w
+    }
+}
+
+// One `REGION` request; the result value.
+pub fn region_request(call: u64, inout b: Builder, inout m: Module) -> Value eff [Ffi[Cranelift]] {
+    let kind = call_arg(call, RW_KIND);
+    let jit = call_arg(call, RW_JIT) != 0;
+    if kind == RK_OPEN {
+        let c = r_iconst(inout b, r_word(call, 0));
+        let args = r_args(c, c, c, c, 1);
+        return r_call(inout b, inout m, jit, in "vesper_region_open", in args.as_slice());
+    }
+    let id = r_value(call, 0);
+    if kind == RK_CLOSE || kind == RK_CHECKPOINT || kind == RK_USED {
+        let args = r_args(id, id, id, id, 1);
+        let name = if kind == RK_CLOSE {
+            "vesper_region_close"
+        } else if kind == RK_CHECKPOINT {
+            "vesper_region_checkpoint"
+        } else {
+            "vesper_region_used"
+        };
+        return r_call(inout b, inout m, jit, in name, in args.as_slice());
+    }
+    if kind == RK_REWIND || kind == RK_COMMIT {
+        let args = r_args(id, r_value(call, 1), id, id, 2);
+        let name = if kind == RK_REWIND {
+            "vesper_region_rewind"
+        } else {
+            "vesper_region_commit"
+        };
+        return r_call(inout b, inout m, jit, in name, in args.as_slice());
+    }
+    // The payload words follow the operands.
+    let first = if kind == RK_SET {
+        3
+    } else {
+        2
+    };
+    let size = r_word(call, first);
+    let aggregate = r_word(call, wrapping_add(first, 1)) != 0;
+    let t = wrapping_u32(r_word(call, wrapping_add(first, 2)));
+    if kind == RK_BOX {
+        let value = r_value(call, 1);
+        let s = r_iconst(inout b, size);
+        let args = r_args(id, s, s, s, 2);
+        let handle = r_call(inout b, inout m, jit, in "vesper_region_alloc", in args.as_slice());
+        r_store_payload(inout b, inout m, jit, id, handle, value, size, aggregate);
+        return handle;
+    }
+    let handle = r_value(call, 1);
+    if kind == RK_SET {
+        r_store_payload(inout b, inout m, jit, id, handle, r_value(call, 2), size, aggregate);
+        return r_iconst(inout b, 0);
+    }
+    let value = r_load_payload(inout b, inout m, jit, id, handle, size, aggregate, t);
+    if kind == RK_TAKE {
+        let args = r_args(id, handle, id, id, 2);
+        let _r = r_call(inout b, inout m, jit, in "vesper_region_release", in args.as_slice());
+    }
+    value
+}

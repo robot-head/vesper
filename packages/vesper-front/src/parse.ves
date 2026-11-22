@@ -921,18 +921,9 @@ fn lower(inout p: P) -> u64 {
     let k = kind(in p);
     if k != k_lower() && k != k_self_kw() {
         if reserved_word(k) {
-            let i = idx(in p, 0);
-            if err_open(inout p) {
-                p
-                    .d
-                    .text
-                    .extend(in "expected a lower-case identifier, found the keyword `".as_bytes());
-                for j in tstart(in p, i)..tend(in p, i) {
-                    let c = u8_at(in p.src, j);
-                    p.d.text.push(c);
-                }
-                p.d.text.extend(in "`, which cannot be a name".as_bytes());
-            }
+            keyword_err(inout p, in "expected a lower-case identifier, found the keyword `");
+            // One diagnostic: the keyword stands in for the name.
+            return bump(inout p);
         } else {
             err(inout p, in "expected a lower-case identifier");
         }
@@ -940,13 +931,23 @@ fn lower(inout p: P) -> u64 {
     ident(inout p)
 }
 
+// `head` followed by the keyword at the cursor and "`, which cannot be a
+// name" (`lower` and `pattern_inner`).
+fn keyword_err(inout p: P, in head: String) {
+    let i = idx(in p, 0);
+    if err_open(inout p) {
+        p.d.text.extend(in head.as_bytes());
+        for j in tstart(in p, i)..tend(in p, i) {
+            let c = u8_at(in p.src, j);
+            p.d.text.push(c);
+        }
+        p.d.text.extend(in "`, which cannot be a name".as_bytes());
+    }
+}
+
 // The keywords `lower` names in its message: never a name anywhere.
 fn reserved_word(k: u8) -> bool {
     k
-        == k_copy()
-        || k
-        == k_affine()
-        || k
         == k_mod()
         || k
         == k_in()
@@ -973,7 +974,9 @@ fn reserved_word(k: u8) -> bool {
 // `state`, `linear`, `with` and `eff` are keywords only where their forms
 // start; wherever a name is expected they are names (`at_contextual_name`).
 // `eff` opens an effect row only after a signature and as the `e: eff` bound.
-// `effect`, `handle`, `sink` and `inout` are contextual too (`contextual_kind`):
+// `copy`, `affine`, `effect`, `handle`, `sink` and `inout` are contextual too
+// (`contextual_kind`): `copy` and `affine` are modes only after `mod`, `@`,
+// `@@` and at an item start;
 // `handle` starts an expression only before an effect (`handle_starts`), and
 // the pass modes are modes only before an operand (`pass_word_is_mode`).
 fn contextual_name(k: u8) -> bool {
@@ -981,6 +984,10 @@ fn contextual_name(k: u8) -> bool {
         == k_state()
         || k
         == k_linear()
+        || k
+        == k_copy()
+        || k
+        == k_affine()
         || k
         == k_with()
         || k
@@ -1053,6 +1060,12 @@ fn pass_word_is_mode(in p: P, params: bool) -> bool {
         == k_state()
         || n
         == k_linear()
+        || n
+        == k_copy()
+        || n
+        == k_affine()
+        || n
+        == k_with()
         || n
         == k_eff()
         || n
@@ -2282,7 +2295,7 @@ fn block(inout p: P) -> Ex {
 }
 
 fn block_like(k: u8) -> bool {
-    k == x_loop() || k == x_for() || k == x_if() || k == x_match()
+    k == x_loop() || k == x_for() || k == x_if() || k == x_match() || k == x_handle()
 }
 
 fn ends_with_brace(in p: P, end: u32) -> bool {
@@ -3281,6 +3294,13 @@ fn primary_inner(inout p: P) -> Ex {
     if k == k_l_brace() {
         return block(inout p);
     }
+    // `a && if b { x } else { y }`, `a || match v { .. }`: an operand.
+    if k == k_if() {
+        return if_expr(inout p);
+    }
+    if k == k_match() {
+        return match_expr(inout p);
+    }
     err(inout p, in "expected expression");
     let k = kind(in p);
     if p
@@ -3458,6 +3478,10 @@ fn pattern_inner(inout p: P) {
             bump(inout p);
             pattern_list(inout p, k_r_paren());
             expect(inout p, k_r_paren());
+        } else if reserved_word(k) {
+            // `let in = ..`: one diagnostic that names the keyword.
+            keyword_err(inout p, in "expected pattern, found the keyword `");
+            bump(inout p);
         } else {
             err(inout p, in "expected pattern");
             if !at(in p, k_eof()) {

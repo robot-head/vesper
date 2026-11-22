@@ -17,7 +17,7 @@ use vesper_loom_cas::{DerivationInputs, Domain, Store, blob_id};
 /// The bundled card font: JetBrains Mono 2.304 Regular, SIL OFL 1.1
 /// (assets/fonts/jetbrains-mono/OFL.txt).
 pub const CARD_FONT: &[u8] =
-    include_bytes!("../assets/fonts/jetbrains-mono/JetBrainsMono-Regular.ttf");
+    include_bytes!("../../../assets/fonts/jetbrains-mono/JetBrainsMono-Regular.ttf");
 
 const HELP: &str = "Usage:
   vesper shot <file> -o <out.svg|out.png> [--theme dusk|dawn] [--dpi 1-4]
@@ -123,7 +123,7 @@ fn default_store() -> Option<PathBuf> {
 /// Tier 1 when the snippet checks, else Tier 0 (with lane 1's fallback
 /// reason); the hover table comes along for `//^?` queries.
 fn highlight(display: &str) -> Result<Highlight, String> {
-    crate::highlight_commands::highlight_source(display, 1).map_err(|e| format!("highlight: {e:?}"))
+    crate::highlight::highlight_source(display, 1).map_err(|e| format!("highlight: {e:?}"))
 }
 
 /// Checks the displayed example and runs it in the doctest sandbox: the

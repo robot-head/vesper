@@ -15,6 +15,7 @@ _TOOLS = [
     "//crates/vesper-tools:bin/vesper-cas",
     "//crates/vesper-tools:bin/vesper-fuzz",
     "//crates/vesper-tools:bin/vesper-grammar",
+    "//crates/vesper-tools:bin/vesper-highlight",
     "//crates/vesper-tools:bin/vesper-json",
     "//crates/vesper-tools:bin/vesper-migrate",
     "//crates/vesper-tools:bin/vesper-publish",
@@ -22,6 +23,7 @@ _TOOLS = [
     "//crates/vesper-tools:bin/vesper-replay",
     "//crates/vesper-tools:bin/vesper-resolve",
     "//crates/vesper-tools:bin/vesper-sbom",
+    "//crates/vesper-tools:bin/vesper-shot",
     "//crates/vesper-tools:bin/vesper-semver",
     "//crates/vesper-tools:bin/vesper-simd",
     "//crates/vesper-tools:bin/vesper-tee",
@@ -282,6 +284,13 @@ vesper_crate(
         # SH3 lane 1 (#1240): @vesper/place-ir round trips over the same
         # corpus at every native IR pass boundary.
         "test/self_host_place_ir": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
+        # SH4 lane 8 (#1282): the aggregate decisions of native lowering in
+        # Vesper against src/native_aggregates.rs over the same corpus.
+        "test/self_host_codegen_aggregates": glob([
             "examples/**",
             "packages/**",
             "tests/fixtures/**",
@@ -879,6 +888,7 @@ vesper_crate(
         "test/self_host_check_data": "long",
         "test/hybrid_layout": "long",
         "test/hybrid_ir_check": "long",
+        "test/self_host_codegen_aggregates": "long",
         # The inliner differential passed 900 s on a cold CI run.
         "test/self_host_ir_inline": "eternal",
         # Four round-trip tests and the pass harness share one stage build;
@@ -1151,6 +1161,13 @@ vesper_package(
     manifest = "packages/vesper-codegen-base/Loom.toml",
     visibility = ["//visibility:public"],
     deps = ["//packages/vesper-cranelift:cranelift_package"],
+)
+
+# The font `vesper shot` embeds (crates/vesper-tools, SH6 lane 3).
+filegroup(
+    name = "fonts",
+    srcs = glob(["assets/fonts/**"]),
+    visibility = ["//visibility:public"],
 )
 
 filegroup(

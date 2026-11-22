@@ -10,15 +10,16 @@ autobenches = false
 build = false
 
 # The seed-copy rule (port wave P1 lane 2, #899): the compiler links this
-# package, the Rust build of ../src, under the library name
-# `vesper_loom_calculus`. Crates inside `cargo tree -p vesper -e normal,build`
+# package, the shared API in ../src over the frozen Rust calculus in
+# src/engine (moved here by Rust-exit SH6 lane 12, #1407), under the library
+# name `vesper_loom_calculus`. Crates inside `cargo tree -p vesper -e normal,build`
 # depend on it with
 # `vesper-loom-calculus = { path = ".../seed", package = "vesper-loom-calculus-seed" }`;
 # every other crate uses the port-backed package `vesper-loom-calculus`. The
 # Rust code takes bug fixes only until self-hosting Stage 2.
 [lib]
 name = "vesper_loom_calculus"
-path = "../src/lib.rs"
+path = "src/lib.rs"
 
 [[test]]
 name = "calculus"

@@ -23,6 +23,7 @@ use crate::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod aot_runtime;
 pub mod native_runtime;
 

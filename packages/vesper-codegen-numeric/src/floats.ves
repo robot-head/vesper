@@ -1,0 +1,333 @@
+// The `numeric` hook's float family: `Codegen::math`, the float
+// conversions of `Codegen::float_unary` and `Codegen::flush` (Rust:
+// src/float_math/native.rs and src/native.rs), emitted through the lent
+// Cranelift builder (self-hosting SH4 lane 11, #1285, part 3).
+//
+// The Rust code sends one typed request per operation, with what it
+// resolved (the words are documented in `codegen_swap::numeric` of
+// src/codegen_swap.rs). Errors (arity, a non-float operand) and the raise
+// of a checked narrowing stay in the Rust code. Every emission makes the
+// Cranelift calls of the Rust function in the same order.
+
+use @vesper/cranelift::{
+    Builder,
+    Ty,
+    Value,
+    call_arg,
+    call_arg_count,
+    ins_binary,
+    ins_convert,
+    ins_f32const,
+    ins_f64const,
+    ins_fcmp,
+    ins_icmp_imm,
+    ins_iconst,
+    ins_select,
+    ins_unary,
+    value_of_word,
+    value_type,
+};
+
+// Request ops (`codegen_swap::numeric`).
+pub const NUM_FLOAT_MATH: u32 = 4;
+pub const NUM_FLOAT_CONVERT: u32 = 5;
+pub const NUM_FLOAT_TO_INT: u32 = 6;
+pub const NUM_FLOAT_BITS: u32 = 7;
+pub const NUM_FLOAT_NARROW_TEST: u32 = 8;
+pub const NUM_FLOAT_FLUSH: u32 = 9;
+
+// Float words and conversion classes (`numeric::FROM_*`).
+const FROM_F32: u64 = 1;
+const FROM_F64: u64 = 2;
+const FROM_SIGNED: u64 = 3;
+const FROM_UNSIGNED: u64 = 4;
+
+// `MathOp::ALL` positions from 1.
+const MATH_SQRT: u64 = 1;
+const MATH_ABS: u64 = 2;
+const MATH_FLOOR: u64 = 3;
+const MATH_CEIL: u64 = 4;
+const MATH_ROUND: u64 = 5;
+const MATH_TRUNC: u64 = 6;
+const MATH_MIN: u64 = 7;
+const MATH_MAX: u64 = 8;
+const MATH_FMA: u64 = 9;
+
+// Shim opcodes (crates/vesper-cranelift-sys/src/codes.rs).
+const FL_UN_FABS: u32 = 11;
+const FL_UN_SQRT: u32 = 12;
+const UN_CEIL: u32 = 13;
+const UN_FLOOR: u32 = 14;
+const UN_TRUNC: u32 = 15;
+const BIN_BAND: u32 = 10;
+const BIN_UMIN: u32 = 21;
+const BIN_SMIN: u32 = 23;
+const BIN_SMAX: u32 = 24;
+const BIN_FADD: u32 = 25;
+const BIN_FSUB: u32 = 26;
+const BIN_FMIN: u32 = 29;
+const BIN_FMAX: u32 = 30;
+const BIN_FCOPYSIGN: u32 = 31;
+const FL_CV_UEXTEND: u32 = 1;
+const FL_CV_IREDUCE: u32 = 3;
+const CV_BITCAST: u32 = 4;
+const CV_FPROMOTE: u32 = 5;
+const CV_FDEMOTE: u32 = 6;
+const CV_FCVT_TO_UINT_SAT: u32 = 9;
+const CV_FCVT_TO_SINT_SAT: u32 = 10;
+const CV_FCVT_FROM_UINT: u32 = 11;
+const CV_FCVT_FROM_SINT: u32 = 12;
+const FL_TE_FMA: u32 = 3;
+const FCC_LT: u32 = 6;
+const FCC_GE: u32 = 9;
+const ICC_EQ: u32 = 0;
+const FL_TY_I32: u32 = 3;
+const FL_TY_I64: u32 = 4;
+const FL_TY_F32: u32 = 6;
+const FL_TY_F64: u32 = 7;
+
+// IEEE 754 bit patterns of the constants the Rust code emits.
+const F32_HALF: u32 = 1056964608;
+const F32_ONE: u32 = 1065353216;
+const F32_MIN_POSITIVE: u32 = 8388608;
+const F64_HALF: u64 = 4602678819172646912;
+const F64_ONE: u64 = 4607182418800017408;
+const F64_MIN_POSITIVE: u64 = 4503599627370496;
+
+fn fty(code: u32) -> Ty {
+    Ty {
+        code: code
+    }
+}
+
+fn arg(call: u64, i: u64) -> u64 eff [Ffi[Cranelift]] {
+    call_arg(call, i)
+}
+
+fn arg_value(call: u64, i: u64) -> Value eff [Ffi[Cranelift]] {
+    value_of_word(call_arg(call, i))
+}
+
+fn is_f32(inout b: Builder, v: Value) -> bool eff [Ffi[Cranelift]] {
+    value_type(inout b, v).code == FL_TY_F32
+}
+
+// `float_const(ty, x)` for the constants above: `f32const` of the `f32`
+// bits when `v` is an `f32`, else `f64const`.
+fn float_const_like(inout b: Builder, v: Value, bits32: u32, bits64: u64)
+    -> Value eff [Ffi[Cranelift]] {
+    if is_f32(inout b, v) {
+        ins_f32const(inout b, bits32)
+    } else {
+        ins_f64const(inout b, bits64)
+    }
+}
+
+// `float_const(ty, x)` of an `f64` bit pattern: `x as f32` for `f32`.
+fn float_const_of(inout b: Builder, f32_kind: bool, bits: u64) -> Value eff [Ffi[Cranelift]] {
+    if f32_kind {
+        ins_f32const(inout b, wrapping_u32(to_bits_f32(nearest_f32(from_bits_f64(bits)))))
+    } else {
+        ins_f64const(inout b, bits)
+    }
+}
+
+// Whether `op` is a float request this hook answers, with its operand
+// count right.
+pub fn float_known(call: u64, op: u32) -> bool eff [Ffi[Cranelift]] {
+    let n = call_arg_count(call);
+    if op == NUM_FLOAT_MATH {
+        if n < 2 {
+            return false;
+        }
+        let k = arg(call, 0);
+        let arity: u64 = if k == MATH_MIN || k == MATH_MAX {
+            2
+        } else if k == MATH_FMA {
+            3
+        } else if k >= MATH_SQRT && k <= MATH_TRUNC {
+            1
+        } else {
+            0
+        };
+        return arity > 0 && n == wrapping_add(arity, 1);
+    }
+    if op == NUM_FLOAT_CONVERT {
+        let to = arg(call, 0);
+        let from = arg(call, 1);
+        return n
+            == 3
+            && (to == FROM_F32 || to == FROM_F64)
+            && from
+            >= FROM_F32
+            && from
+            <= FROM_UNSIGNED;
+    }
+    if op == NUM_FLOAT_TO_INT {
+        return n == 5;
+    }
+    if op == NUM_FLOAT_BITS {
+        let kind = arg(call, 1);
+        return n == 3 && (kind == FROM_F32 || kind == FROM_F64);
+    }
+    if op == NUM_FLOAT_NARROW_TEST {
+        let kind = arg(call, 0);
+        return n == 4 && (kind == FROM_F32 || kind == FROM_F64);
+    }
+    if op == NUM_FLOAT_FLUSH {
+        return n == 1;
+    }
+    false
+}
+
+// `Codegen::math`.
+fn math(call: u64, inout b: Builder) -> Value eff [Ffi[Cranelift]] {
+    let k = arg(call, 0);
+    let x = arg_value(call, 1);
+    if k == MATH_SQRT {
+        return ins_unary(inout b, FL_UN_SQRT, x);
+    }
+    if k == MATH_ABS {
+        return ins_unary(inout b, FL_UN_FABS, x);
+    }
+    if k == MATH_FLOOR {
+        return ins_unary(inout b, UN_FLOOR, x);
+    }
+    if k == MATH_CEIL {
+        return ins_unary(inout b, UN_CEIL, x);
+    }
+    if k == MATH_TRUNC {
+        return ins_unary(inout b, UN_TRUNC, x);
+    }
+    if k == MATH_MIN {
+        return ins_binary(inout b, BIN_FMIN, x, arg_value(call, 2));
+    }
+    if k == MATH_MAX {
+        return ins_binary(inout b, BIN_FMAX, x, arg_value(call, 2));
+    }
+    if k == MATH_FMA {
+        let y = arg_value(call, 2);
+        let z = arg_value(call, 3);
+        return Value {
+            id: Cranelift::vcl_ternary(inout b, FL_TE_FMA, x.id, y.id, z.id)
+        };
+    }
+    // `round`: t = trunc(x); |x - t| >= 0.5 moves t one away from zero.
+    let t = ins_unary(inout b, UN_TRUNC, x);
+    let d = ins_binary(inout b, BIN_FSUB, x, t);
+    let d = ins_unary(inout b, FL_UN_FABS, d);
+    let half = float_const_like(inout b, x, F32_HALF, F64_HALF);
+    let far = ins_fcmp(inout b, FCC_GE, d, half);
+    let one = float_const_like(inout b, x, F32_ONE, F64_ONE);
+    let step = ins_binary(inout b, BIN_FCOPYSIGN, one, x);
+    let away = ins_binary(inout b, BIN_FADD, t, step);
+    ins_select(inout b, far, away, t)
+}
+
+// `float_unary`'s conversion to a float kind.
+fn convert(call: u64, inout b: Builder) -> Value eff [Ffi[Cranelift]] {
+    let target = if arg(call, 0) == FROM_F32 {
+        fty(FL_TY_F32)
+    } else {
+        fty(FL_TY_F64)
+    };
+    let from = arg(call, 1);
+    let v = arg_value(call, 2);
+    let op = if from == FROM_F32 {
+        CV_FPROMOTE
+    } else if from == FROM_F64 {
+        CV_FDEMOTE
+    } else if from == FROM_SIGNED {
+        CV_FCVT_FROM_SINT
+    } else {
+        CV_FCVT_FROM_UINT
+    };
+    ins_convert(inout b, op, target, v)
+}
+
+// `float_to_integer`: truncation toward zero, clamped, NaN to zero.
+fn to_integer(call: u64, inout b: Builder) -> Value eff [Ffi[Cranelift]] {
+    let signed = arg(call, 0) != 0;
+    let bits = arg(call, 1);
+    let lo = wrapping_i64(arg(call, 2));
+    let hi = wrapping_i64(arg(call, 3));
+    let v = arg_value(call, 4);
+    if signed {
+        let n = ins_convert(inout b, CV_FCVT_TO_SINT_SAT, fty(FL_TY_I64), v);
+        if bits == 64 {
+            return n;
+        }
+        let lo = ins_iconst(inout b, fty(FL_TY_I64), lo);
+        let hi = ins_iconst(inout b, fty(FL_TY_I64), hi);
+        let n = ins_binary(inout b, BIN_SMAX, n, lo);
+        ins_binary(inout b, BIN_SMIN, n, hi)
+    } else {
+        let n = ins_convert(inout b, CV_FCVT_TO_UINT_SAT, fty(FL_TY_I64), v);
+        if bits == 64 {
+            return n;
+        }
+        let hi = ins_iconst(inout b, fty(FL_TY_I64), hi);
+        ins_binary(inout b, BIN_UMIN, n, hi)
+    }
+}
+
+// `to_bits_k` and `from_bits_k`.
+fn bits(call: u64, inout b: Builder) -> Value eff [Ffi[Cranelift]] {
+    let to_bits = arg(call, 0) != 0;
+    let f64_kind = arg(call, 1) == FROM_F64;
+    let v = arg_value(call, 2);
+    if to_bits && f64_kind {
+        return ins_convert(inout b, CV_BITCAST, fty(FL_TY_I64), v);
+    }
+    if to_bits {
+        let w = ins_convert(inout b, CV_BITCAST, fty(FL_TY_I32), v);
+        return ins_convert(inout b, FL_CV_UEXTEND, fty(FL_TY_I64), w);
+    }
+    if f64_kind {
+        return ins_convert(inout b, CV_BITCAST, fty(FL_TY_F64), v);
+    }
+    let w = ins_convert(inout b, FL_CV_IREDUCE, fty(FL_TY_I32), v);
+    ins_convert(inout b, CV_BITCAST, fty(FL_TY_F32), w)
+}
+
+// The range test of a checked float narrowing: the overflow flag.
+fn narrow_test(call: u64, inout b: Builder) -> Value eff [Ffi[Cranelift]] {
+    let f32_kind = arg(call, 0) == FROM_F32;
+    let v = arg_value(call, 3);
+    let t = ins_unary(inout b, UN_TRUNC, v);
+    let lo = float_const_of(inout b, f32_kind, arg(call, 1));
+    let hi = float_const_of(inout b, f32_kind, arg(call, 2));
+    // Ordered comparisons: a NaN fails both.
+    let above = ins_fcmp(inout b, FCC_GE, t, lo);
+    let below = ins_fcmp(inout b, FCC_LT, t, hi);
+    let ok = ins_binary(inout b, BIN_BAND, above, below);
+    ins_icmp_imm(inout b, ICC_EQ, ok, 0)
+}
+
+// `Codegen::flush`: a subnormal becomes a zero of the same sign.
+fn flush(call: u64, inout b: Builder) -> Value eff [Ffi[Cranelift]] {
+    let v = arg_value(call, 0);
+    let magnitude = ins_unary(inout b, FL_UN_FABS, v);
+    let smallest = float_const_like(inout b, v, F32_MIN_POSITIVE, F64_MIN_POSITIVE);
+    let tiny = ins_fcmp(inout b, FCC_LT, magnitude, smallest);
+    let zero = float_const_like(inout b, v, 0, 0);
+    let signed_zero = ins_binary(inout b, BIN_FCOPYSIGN, zero, v);
+    ins_select(inout b, tiny, signed_zero, v)
+}
+
+// One float request `op` (checked by `float_known`).
+pub fn float_request(call: u64, op: u32, inout b: Builder) -> Value eff [Ffi[Cranelift]] {
+    if op == NUM_FLOAT_MATH {
+        math(call, inout b)
+    } else if op == NUM_FLOAT_CONVERT {
+        convert(call, inout b)
+    } else if op == NUM_FLOAT_TO_INT {
+        to_integer(call, inout b)
+    } else if op == NUM_FLOAT_BITS {
+        bits(call, inout b)
+    } else if op == NUM_FLOAT_NARROW_TEST {
+        narrow_test(call, inout b)
+    } else {
+        flush(call, inout b)
+    }
+}

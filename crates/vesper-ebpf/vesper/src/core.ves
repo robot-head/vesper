@@ -91,6 +91,13 @@ fn wd(in s: Slice[u64], i: u64) -> u64 {
     }
 }
 
+fn w32(in s: Slice[u32], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => widen_u64(v),
+        Option::None => 0,
+    }
+}
+
 fn bt(in s: Slice[u8], i: u64) -> u64 {
     match s.try_get(i) {
         Option::Some(v) => widen_u64(v),
@@ -1063,4 +1070,48 @@ pub fn patch_insn(
 
 fn signed(x: u64) -> i64 {
     wrapping_i64(x)
+}
+
+// `CoreSpec::target_value_with` against one BTF (no split modules): the
+// candidates among `ids` from `from` on, their values, combined. Returns
+// the `port::result` code with `value` and `bad` set.
+pub fn target_value(
+    kind: u64,
+    in lt: Slice[u64],
+    in ltext: Slice[u8],
+    in access32: Slice[u32],
+    in tab: Slice[u64],
+    in idx: Slice[u64],
+    in strs: Slice[u8],
+    in ids32: Slice[u32],
+    from: u64,
+    inout value: u64,
+    inout bad: u64
+) -> u64 {
+    let mut access: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](access32.len());
+    for i in 0..access32.len() {
+        access.push(w32(in access32, i));
+    }
+    let mut ids: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](ids32.len());
+    for i in 0..ids32.len() {
+        ids.push(w32(in ids32, i));
+    }
+    let cands = filter_candidates(in lt, in tab, in idx, in ids.as_slice(), from);
+    let w = values_over(
+        kind,
+        in lt,
+        in ltext,
+        in access.as_slice(),
+        in tab,
+        in idx,
+        in strs,
+        in cands.as_slice()
+    );
+    if wd(in w.as_slice(), 0) == 1 {
+        value = 0;
+        bad = wd(in w.as_slice(), 2);
+        return wd(in w.as_slice(), 1);
+    }
+    bad = 0;
+    combine(kind, in w[1..w.len()], inout value)
 }
