@@ -27,6 +27,7 @@ vesper-port-abi = { path = "../vesper-port-abi" }
 
 [dev-dependencies]
 vesper-bench = { path = "../vesper-bench" }
+toml_edit = "0.22"
 
 [build-dependencies]
 vesper-port-harness = { path = "../vesper-port-harness" }

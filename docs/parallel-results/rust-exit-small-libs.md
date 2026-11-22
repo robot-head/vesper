@@ -10,7 +10,7 @@ carries #915 (Crucible), #965 (TOML reader) and #1068 (Chorus). Started
 | Crate | State | Speed (port / Rust, ABBA) | What keeps Rust |
 |---|---|---|---|
 | vesper-pact | Rust gone from `src/` (part 1, #1427) | unchanged (port was already the only build) | the seed, until Stage 2 |
-| vesper-loom-calculus | flipped, Rust in the seed (part 2, #1449) | 8 pkgs 1.12x [1.03, 1.38]; 64 pkgs 0.80x [0.74, 0.91]; 256 pkgs about 0.77x | the seed; TOML, JSON and SemVer text readers (#965) |
+| vesper-loom-calculus | flipped, Rust in the seed (part 2, #1449) | 8 pkgs 1.12x [1.03, 1.38]; 64 pkgs 0.80x [0.74, 0.91]; 256 pkgs about 0.77x | the seed; TOML typed decoding, JSON and SemVer text (#965; the TOML reader is Vesper, part 4) |
 | vesper-loom-audit | flipped, Rust in the seed (part 3, this PR) | 8 pkgs 1.37x [1.34, 1.41] (n=54); 64 pkgs 1.15x [1.05, 1.27]; 256 pkgs 0.96x [0.91, 1.04] | the seed; input-size checks and BLAKE3 context digests (serde_json + blake3), until `vesper-blake3-sys` lands |
 | vesper-semver | above the bar | 64 exports 1.63-1.81x; 8 exports 1.93-2.29x; empty interfaces 3.2x | encoder cost and checker codegen (below) |
 | vesper-beacon | above the bar | exp 3.5x, hist 4.5x, spans 2.1x, traceparent 1.0x | per-call FFI cost (calls of a few ns) |
@@ -111,6 +111,42 @@ is about 100 instructions a draw against about 40 for Rust's inlined draw.
 `source_draw` also zeroes 8 stack slots twice on entry (a codegen gap,
 below). Collections drawn by a closure (`draw_vec`) cannot batch the way
 `draw_bytes` does.
+
+## TOML reader (part 4, #965)
+
+`@vesper-std/toml` (packages/vesper-std/toml) is a transliteration of the
+parser of `toml_edit` 0.22, which `toml::from_str` (0.8) runs first. It keeps
+winnow 0.7's error model, so a rejected document gets the same text,
+position and highlight. It builds the same tree, in IndexMap entry order,
+with the same item and key spans. `@vesper/loom-calculus` exports it as
+`read_toml` (a canonical dump) and `toml_accepts`.
+
+`tests/toml_reader.rs` compares the dump with one built from toml_edit's
+`ImDocument` and with `toml::from_str`'s error text:
+
+- 74 fixed cases and every `.toml` file under packages/, crates/ and
+  examples/;
+- 20,000 mutated documents and 20,000 generated table structures per run
+  (`VESPER_TOML_FUZZ` and `VESPER_TOML_SEED` scale them). After the fixes
+  below, five seeds of 1,000,000 of each kind ran with 0 differences.
+
+The fuzzing found three differences, all fixed:
+
+1. A big negative float is `-inf`, not an error, because toml_edit only
+   rejects `+inf` (`verify(|f| *f != f64::INFINITY)`).
+2. An inline table's duplicate key inside an array is a cut, because
+   `table_from_pairs` runs under `cut_err`.
+3. A table header's duplicate key is shown in toml_write's default key form
+   (bare, basic, literal, or escaped basic), not as written, because parsed
+   keys keep no raw text.
+
+Speed, `examples/toml_abba.rs`, in-process ABBA over the 122 Loom.toml files
+of the repository (32 KB, Rust 791 us per pass): Vesper/Rust **0.96x**,
+95% interval [0.93, 1.03], 21 epochs.
+
+Typed decoding with serde's messages (part 5) and the `parse_manifest` flip
+(part 6) come next. The reader has no flip of its own: the bar applies to
+`parse_manifest` end to end.
 
 ## Compiler gaps
 

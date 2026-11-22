@@ -19,6 +19,11 @@ mod port;
 #[path = "../port/binding.rs"]
 mod port_binding;
 
+/// The Vesper TOML reader's canonical dump, for the differential tests.
+#[cfg(vesper_port)]
+#[doc(hidden)]
+pub use port::{read_toml, toml_accepts};
+
 /// Which build this is: `"vesper"` for the port-backed package
 /// `vesper-loom-calculus`, `"rust"` for the seed copy
 /// `vesper-loom-calculus-seed` that the compiler links.

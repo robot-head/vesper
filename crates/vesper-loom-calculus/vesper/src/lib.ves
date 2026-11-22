@@ -28,6 +28,10 @@ use self::solve::{
 use self::upgrade::{
     upgrade
 };
+use @vesper-std/toml::{
+    parse,
+    dump
+};
 use self::encode::{
     encode_manifest_diags,
     encode_upgrade,
@@ -314,4 +318,22 @@ pub fn check_upgrade(in words: Slice[u64], in text: Slice[u8]) -> L {
     upgrade(inout l);
     encode_upgrade(inout l);
     l
+}
+
+// The TOML reader's result on `text` (see `@vesper-std/toml::dump`), for
+// the differential tests against the `toml` crate.
+pub struct TomlRead {
+    pool: ChunkSeq[u8]
+}
+
+pub fn read_toml(in text: Slice[u8]) -> TomlRead {
+    let d = parse(in text);
+    TomlRead {
+        pool: dump(in d, in text)
+    }
+}
+
+// Whether the TOML reader accepts `text`, for the reader's benchmark.
+pub fn toml_accepts(in text: Slice[u8]) -> bool {
+    parse(in text).ok
 }
