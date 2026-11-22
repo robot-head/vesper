@@ -247,12 +247,11 @@ impl<M: Module> Codegen<'_, '_, M> {
         // local leaf function of machine code for this target (`ffi::cpu`);
         // every other call imports its symbol.
         let architecture = self.m.isa().triple().architecture;
+        let cpu = ffi::cpu::code_for(plan.function.symbol(), architecture)?;
         let callee = if plan.function.is_indirect() {
             let pointer = c_args.remove(0);
             Callee::Indirect(self.b.import_signature(sig), pointer)
-        } else if let Some((arch, code)) =
-            ffi::cpu::code_for(plan.function.symbol(), architecture)?
-        {
+        } else if let Some((arch, code)) = cpu {
             if arch == ffi::cpu::Arch::X86_64 {
                 sig.call_conv = cranelift_codegen::isa::CallConv::SystemV;
             }
