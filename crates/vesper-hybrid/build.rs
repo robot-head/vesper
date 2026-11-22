@@ -73,6 +73,8 @@ const MODULES: &[(&str, &str, &str)] = &[
         "modules/bounds_hoist",
         "port/bounds_hoist.rs",
     ),
+    // SH2 lane 13 (#1185): the declaration pass of the trait frontend.
+    ("hybrid_pact", "modules/pact", "port/pact.rs"),
 ];
 
 /// The divergence check of the differential harness: the enum tag word
@@ -162,6 +164,15 @@ const DIVERGENT_OPTIMIZE_EDIT: (&str, &str) = (
 #[cfg(feature = "divergent-ir-opt")]
 const DIVERGENT_IR_OPT_EDIT: (&str, &str) = (
     "    ir_opt_words(in input)\n",
+    "    divergent_words(in input)\n",
+);
+
+/// The declaration pass's divergence check: every package with trait
+/// declarations is rejected with a made-up E0600 (`divergent_words` in
+/// modules/pact), so every trait program fails to check.
+#[cfg(feature = "divergent-pact")]
+const DIVERGENT_PACT_EDIT: (&str, &str) = (
+    "    declarations_words(in input)\n",
     "    divergent_words(in input)\n",
 );
 
@@ -259,6 +270,12 @@ fn main() {
         #[cfg(feature = "divergent-ir-opt")]
         let port = if *library == "hybrid_ir_opt" {
             port.edit(DIVERGENT_IR_OPT_EDIT.0, DIVERGENT_IR_OPT_EDIT.1)
+        } else {
+            port
+        };
+        #[cfg(feature = "divergent-pact")]
+        let port = if *library == "hybrid_pact" {
+            port.edit(DIVERGENT_PACT_EDIT.0, DIVERGENT_PACT_EDIT.1)
         } else {
             port
         };
