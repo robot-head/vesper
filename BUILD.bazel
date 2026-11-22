@@ -307,6 +307,13 @@ vesper_crate(
         # Rust exit gap wave 1 lane 9 (#1506): the port's sequences and
         # strings under Wasmtime against the evaluator.
         "test/wasm_seed_breadth": glob(["packages/**"]),
+        # SH5 lane 11 (#1334): @vesper/wit-component against wit-component
+        # over the same programs.
+        "test/self_host_wit_component": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]) + ["tests/wasm_backend.rs"],
         # SH4 lane 8 (#1282): the aggregate decisions of native lowering in
         # Vesper against src/native_aggregates.rs over the same corpus.
         "test/self_host_codegen_aggregates": glob([
@@ -992,6 +999,8 @@ vesper_crate(
         "test/self_host_wasm_backend": "long",
         # Loads the port package, then 17 compilations and Wasmtime runs.
         "test/wasm_seed_breadth": "long",
+        # The component wrapping differential (#1334): ~2 min release.
+        "test/self_host_wit_component": "long",
         "test/self_host_codegen_scalar": "long",
         "test/self_host_native_walk": "long",
         "test/self_host_check_harness": "long",
@@ -1209,6 +1218,14 @@ vesper_package(
         ":check_data_package",
         ":place_ir_package",
     ],
+)
+
+vesper_package(
+    name = "wit_component_package",
+    srcs = glob(["packages/vesper-wit-component/src/**/*.ves"]),
+    manifest = "packages/vesper-wit-component/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [":check_data_package"],
 )
 
 vesper_package(

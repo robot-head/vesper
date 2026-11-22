@@ -7207,7 +7207,9 @@ impl<M: Module> Codegen<'_, '_, M> {
         let Some(f) = self.world.functions.get(function) else {
             return Ok(None);
         };
-        if !f.generics.is_empty() || !f.effects.instances.is_empty() || f.effects.tail.is_some() {
+        // Capability and foreign effects need no evidence, so the body keeps
+        // the word ABI; any other worker row (`Alloc`) runs sequentially.
+        if !f.generics.is_empty() || f.effects.tail.is_some() || !capability_only(f) {
             return Ok(None);
         }
         let Some(&id) = self.ids.get(&instance_key(function, &BTreeMap::new())) else {
