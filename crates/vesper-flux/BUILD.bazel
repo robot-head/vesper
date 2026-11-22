@@ -41,9 +41,6 @@ vesper_crate(
     # tests/lean_model.rs kernel-checks lean/FluxDbsp.lean; Lean rejects
     # symlinked runfiles outside --root, so it runs in a regular copy.
     copy_test_cwd = ["test/lean_model"],
-    # src/lib.rs includes packages/vesper-std/hash/sys/shim.rs, the Rust side
-    # of the port's BLAKE3 `.vsys` import (in the root package).
-    extra_compile_data = ["//:files"],
     extra_test_data = ["//:lean"],
     # Fault injection at every scheduler step of several protocols.
     # tests/kafka.rs needs a broker (VESPER_KAFKA_HOME); without one it

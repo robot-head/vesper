@@ -20,6 +20,8 @@ vesper-port-divergent = []
 
 [dependencies]
 vesper-port-abi = { path = "../vesper-port-abi" }
+# The `.vsys` library `Blake3` in C, which the port links.
+vesper-blake3-sys = { path = "../vesper-blake3-sys" }
 blake3 = "1.8"
 # The Kafka wire client (src/kafka_wire.rs, src/kafka_client.rs) is Flux's
 # own; these are its vetted building blocks: CRC-32C of record batches,

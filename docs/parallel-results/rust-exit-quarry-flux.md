@@ -71,9 +71,9 @@ Base: `main` at `979cfa8` (part 1, #1419, merged).
 - `log.rs`'s header, frame encoder, frame checksum and frame decoder run in
   Vesper (`vesper/src/log.ves`, exported as `log_header`, `log_frame`,
   `log_frame_ok` and `log_decode`). The checksums are BLAKE3 through
-  `@vesper-std/hash-sys` (the `.vsys` library `Blake3`, whose Rust side
-  `packages/vesper-std/hash/sys/shim.rs` the crate links, as `vesper-fmt`
-  does). `log.rs` keeps the file: create, open, scan, append, read and the
+  `@vesper-std/hash-sys` (the `.vsys` library `Blake3`, the BLAKE3 C
+  implementation that the crate links through `vesper-blake3-sys`, as
+  `vesper-fmt` does since #1462). `log.rs` keeps the file: create, open, scan, append, read and the
   torn-tail cut. The Rust codec is deleted.
 - `src/accumulator_differential.rs` became `src/differential.rs` and gained
   the deleted Rust codec as the reference of a third differential test.

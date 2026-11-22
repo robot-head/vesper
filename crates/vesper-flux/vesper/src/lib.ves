@@ -16,9 +16,9 @@
 // | }
 //
 // The `.vsys` library above is @vesper-std/hash-sys's (`.vsys` imports are
-// read from the root module of a library build only, #1150), provided by
-// packages/vesper-std/hash/sys/shim.rs, which the Rust crate links as
-// `crate::blake3_shim`.
+// read from the root module of a library build only, #1150), provided in C
+// by packages/vesper-std/hash/sys/c, which the Rust crate links through
+// vesper-blake3-sys as `crate::blake3_shim`.
 //
 // @vesper/flux: Vesper port of the vesper-flux Z-set kernels and frontier
 // (port wave P3b lane 7, #1069), the accumulator that builds sets from
