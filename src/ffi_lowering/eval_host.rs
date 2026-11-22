@@ -54,6 +54,10 @@ impl EvalHost {
                 ));
             }
             for f in library.functions() {
+                // `@vesper-std/cpu`'s instructions exist only in native code.
+                if super::cpu::function(f.symbol()).is_some() {
+                    continue;
+                }
                 let address = symbols
                     .iter()
                     .find(|(n, _)| *n == f.symbol())
@@ -86,7 +90,16 @@ impl EvalHost {
         let f = self
             .functions
             .get(&(call.library.clone(), call.symbol.clone()))
-            .ok_or_else(|| format!("no host function for {}::{}", call.library, call.symbol))?;
+            .ok_or_else(|| {
+                if super::cpu::function(&call.symbol).is_some() {
+                    format!(
+                        "{}::{} is a CPU instruction, which only native code runs; the evaluator has none",
+                        call.library, call.symbol
+                    )
+                } else {
+                    format!("no host function for {}::{}", call.library, call.symbol)
+                }
+            })?;
         let d = &f.descriptor;
         let args = call.arguments().to_vec();
         let params = d.parameters();

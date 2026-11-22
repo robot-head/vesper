@@ -191,7 +191,9 @@ fn keywords_still_work_and_reserved_words_stay_errors() {
             .diagnostics
             .is_empty()
     );
-    for word in ["copy", "affine", "in", "match", "struct"] {
+    // `copy` and `affine` are contextual names since SH5 lane 4 (#1327,
+    // tests/sh5_parser_gaps.rs).
+    for word in ["in", "match", "struct"] {
         let p = parser::parse(&format!("fn {word}() -> u64 {{ 1 }}"));
         assert!(
             p.diagnostics

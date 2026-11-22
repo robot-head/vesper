@@ -1,0 +1,97 @@
+// ---------------------------------------------------------------------------
+// Toeplitz RSS hashing (src/reference/rss.rs): the bit-serial reference and
+// the table-driven hash. Keys are 40 bytes; inputs at most 36.
+
+const MAX_RSS_INPUT: u64 = 36;
+const RSS_KEY_LEN: u64 = 40;
+
+fn key_byte(in key: Slice[u8], i: u64) -> u64 {
+    match key.try_get(i) {
+        Option::Some(b) => widen_u64(b),
+        Option::None => 0,
+    }
+}
+
+// Raises the input length when it is over 36 bytes.
+pub fn toeplitz_reference_hash(in key: Slice[u8], in input: Slice[u8]) -> u32 eff [Fail[u64]] {
+    let n = input.len();
+    if n > MAX_RSS_INPUT {
+        Fail::raise(n);
+    }
+    let mut window = wrapping_shl_u64(key_byte(in key, 0), 24) | wrapping_shl_u64(
+        key_byte(in key, 1),
+        16
+    ) | wrapping_shl_u64(key_byte(in key, 2), 8) | key_byte(in key, 3);
+    let mut result: u64 = 0;
+    for i in 0..n {
+        let byte = match input.try_get(i) {
+            Option::Some(b) => widen_u64(b),
+            Option::None => 0,
+        };
+        for j in 0..8 {
+            let b = wrapping_sub(7, j);
+            if wrapping_shr_u64(byte, wrapping_u32(b)) & 1 == 1 {
+                result = result ^ window;
+            }
+            // Next key bit: index 32 + bits consumed so far, at most 319.
+            let k = wrapping_add(wrapping_add(32, wrapping_mul(i, 8)), j);
+            let kb = wrapping_shr_u64(key_byte(in key, k / 8), wrapping_u32(wrapping_sub(7, k % 8)))
+                & 1;
+            window = (wrapping_shl_u64(window, 1) | kb) & U32_MAX;
+        }
+    }
+    wrapping_u32(result)
+}
+
+// The table-driven hash: `rows[pos * 256 + v]` is the XOR of the windows
+// of the set bits of input byte `v` at position `pos`.
+struct ToeplitzCore {
+    rows: ChunkSeq[u32]
+}
+
+pub fn toeplitz_core_new(in key: Slice[u8]) -> ToeplitzCore {
+    let total = wrapping_mul(MAX_RSS_INPUT, 256);
+    let mut rows: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](total);
+    for pos in 0..MAX_RSS_INPUT {
+        // The windows of the 8 bits of position `pos`, from the MSB.
+        let mut windows: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](8);
+        for b in 0..8 {
+            let start = wrapping_add(wrapping_mul(pos, 8), b);
+            let byte = start / 8;
+            let mut w: u64 = 0;
+            for k in 0..8 {
+                w = wrapping_shl_u64(w, 8) | key_byte(in key, wrapping_add(byte, k));
+            }
+            windows.push(wrapping_shr_u64(w, wrapping_u32(wrapping_sub(32, start % 8))) & U32_MAX);
+        }
+        for v in 0..256 {
+            let mut e: u64 = 0;
+            for b in 0..8 {
+                if wrapping_shr_u64(v, wrapping_u32(wrapping_sub(7, b))) & 1 == 1 {
+                    e = e ^ get64(in windows, b);
+                }
+            }
+            rows.push(wrapping_u32(e));
+        }
+    }
+    ToeplitzCore {
+        rows: rows
+    }
+}
+
+// Raises the input length when it is over 36 bytes.
+pub fn toeplitz_core_hash(in t: ToeplitzCore, in input: Slice[u8]) -> u32 eff [Fail[u64]] {
+    let n = input.len();
+    if n > MAX_RSS_INPUT {
+        Fail::raise(n);
+    }
+    let mut h: u64 = 0;
+    for i in 0..n {
+        let byte = match input.try_get(i) {
+            Option::Some(b) => widen_u64(b),
+            Option::None => 0,
+        };
+        h = h ^ get32(in t.rows, wrapping_add(wrapping_mul(i, 256), byte));
+    }
+    wrapping_u32(h)
+}

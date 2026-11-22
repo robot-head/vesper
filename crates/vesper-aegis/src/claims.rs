@@ -3,16 +3,11 @@
 //! measurement register replay.
 
 use crate::error::ParseError;
-#[cfg(not(vesper_port))]
-use crate::{error::Format, reader::Reader};
 use ring::digest;
 
 pub const ENCLAVE_FLAG_DEBUG_DISABLED: u32 = 1 << 0;
 pub const ENCLAVE_FLAG_SMT_MITIGATED: u32 = 1 << 1;
 pub const ENCLAVE_FLAG_LEAN_VERIFIED: u32 = 1 << 2;
-#[cfg(not(vesper_port))]
-const KNOWN_FLAGS: u32 =
-    ENCLAVE_FLAG_DEBUG_DISABLED | ENCLAVE_FLAG_SMT_MITIGATED | ENCLAVE_FLAG_LEAN_VERIFIED;
 
 /// Size of [`AegisAttestationClaimsWire`]: 2+2+4+48+32+32+8 = 128, as the
 /// design states; the fields are consistent with the stated size.
@@ -271,10 +266,10 @@ impl AegisAttestationClaimsWire {
 
     /// Decode exactly 128 bytes. Unknown architecture tags and flag bits
     /// are rejected rather than ignored.
-    #[cfg(vesper_port)]
     pub fn decode(bytes: &[u8]) -> Result<Self, ParseError> {
-        let ((), p) =
-            crate::port::parse(|w, d| crate::port::vesper::claims_wire_decode(bytes, w, d))?;
+        let ((), p) = crate::port::parse(bytes, |w, _| {
+            crate::port::vesper::claims_wire_decode(bytes, w)
+        })?;
         let mut f = p.fields();
         Ok(AegisAttestationClaimsWire {
             tee_arch_tag: f.u16(),
@@ -285,40 +280,5 @@ impl AegisAttestationClaimsWire {
             olean_spec_mif: f.array(),
             chan_binding_prefix: f.array(),
         })
-    }
-
-    /// Decode exactly 128 bytes. Unknown architecture tags and flag bits
-    /// are rejected rather than ignored.
-    #[cfg(not(vesper_port))]
-    pub fn decode(bytes: &[u8]) -> Result<Self, ParseError> {
-        let mut r = Reader::new(bytes, Format::ClaimsWire);
-        let tee_arch_tag = r.u16("tee_arch_tag")?;
-        if TeeArch::from_tag(tee_arch_tag).is_none() {
-            return Err(ParseError::UnsupportedValue {
-                format: Format::ClaimsWire,
-                field: "tee_arch_tag",
-                value: tee_arch_tag.into(),
-            });
-        }
-        let tcb_svn = r.u16("tcb_svn")?;
-        let enclave_flags = r.u32("enclave_flags")?;
-        if enclave_flags & !KNOWN_FLAGS != 0 {
-            return Err(ParseError::UnsupportedValue {
-                format: Format::ClaimsWire,
-                field: "enclave_flags",
-                value: enclave_flags.into(),
-            });
-        }
-        let wire = AegisAttestationClaimsWire {
-            tee_arch_tag,
-            tcb_svn,
-            enclave_flags,
-            mr_enclave_sha384: r.array("mr_enclave_sha384")?,
-            loom_lock_blake3: r.array("loom_lock_blake3")?,
-            olean_spec_mif: r.array("olean_spec_mif")?,
-            chan_binding_prefix: r.array("chan_binding_prefix")?,
-        };
-        r.finish()?;
-        Ok(wire)
     }
 }

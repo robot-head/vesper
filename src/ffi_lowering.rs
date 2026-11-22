@@ -87,6 +87,8 @@ use vesper_ffi::sys::{
     ValueType,
 };
 
+#[path = "ffi_lowering/cpu.rs"]
+pub mod cpu;
 pub mod drops;
 #[path = "ffi_lowering/eval_host.rs"]
 mod eval_host;
@@ -109,7 +111,7 @@ pub const MAX_SLICE_ELEMENTS: usize = 4096;
 /// The one field of a generated extern-type handle struct: the C handle
 /// word. `$` is not a source identifier character, so source code can
 /// never name, read, build or destructure it.
-pub const HANDLE_FIELD: &str = "$handle";
+pub const HANDLE_FIELD: &str = crate::check::FOREIGN_HANDLE_FIELD;
 /// Slice-length marker of a `CSlice` argument that is a source `Slice[T]`
 /// lent in place as `(ptr, len)` (its length is a run-time value).
 pub(crate) const SOURCE_SLICE: usize = usize::MAX;
@@ -586,6 +588,7 @@ impl ForeignChecked {
             .calls
             .iter()
             .filter_map(|c| self.plan.libraries.get(&effect_name(&c.library)))
+            .filter(|l| l.descriptor.link().name() != cpu::LINK_NAME)
             .map(|l| {
                 (
                     l.descriptor.link().name().to_owned(),
@@ -659,7 +662,9 @@ impl ForeignChecked {
                     Some(call.span.clone()),
                 ));
             }
-            if !symbols.iter().any(|(n, _)| *n == call.symbol) {
+            if !symbols.iter().any(|(n, _)| *n == call.symbol)
+                && cpu::function(&call.symbol).is_none()
+            {
                 return Err(FfiError::new(
                     FfiErrorKind::UnknownForeignFunction,
                     format!(
@@ -694,7 +699,8 @@ impl ForeignChecked {
     ) -> Result<crate::native::WordFunction, FfiError> {
         for call in &self.calls {
             if self.plan.libraries[&effect_name(&call.library)].handler != Handler::Direct
-                || !symbols.iter().any(|(n, _)| *n == call.symbol)
+                || (!symbols.iter().any(|(n, _)| *n == call.symbol)
+                    && cpu::function(&call.symbol).is_none())
             {
                 return Err(FfiError::new(
                     FfiErrorKind::UnknownForeignFunction,

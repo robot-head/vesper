@@ -142,15 +142,15 @@ impl Abi for crate::forward::response::abi::ResponseLimits {
 /// Owned handle of a Vesper `ResponsePlan` value: its words, which own the Vesper
 /// allocations they point to. Dropping it calls `vesper_response_ResponsePlan_drop`.
 pub struct ResponsePlan {
-    words: [u64; 14],
+    words: [u64; 11],
 }
 
 impl ResponsePlan {
     /// # Safety
     /// `words` must hold a `ResponsePlan` value of this library that the caller owns.
     unsafe fn from_words(words: &[u64]) -> Self {
-        let mut owned = [0u64; 14];
-        owned.copy_from_slice(&words[..14]);
+        let mut owned = [0u64; 11];
+        owned.copy_from_slice(&words[..11]);
         Self { words: owned }
     }
 
@@ -206,29 +206,17 @@ impl<'a> ResponsePlanRef<'a> {
         let w: &'a [u64] = self.words;
         <crate::forward::response::abi::ResponseLimits as Abi>::get(&w[4..])
     }
-    pub fn names(&self) -> vesper_port_abi::SeqRef<'a, u8> {
+    pub fn fields(&self) -> vesper_port_abi::SeqRef<'a, u8> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[8]) }
     }
-    pub fn name_ends(&self) -> vesper_port_abi::SeqRef<'a, u64> {
-        let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[9]) }
-    }
-    pub fn values(&self) -> vesper_port_abi::SeqRef<'a, u8> {
-        let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[10]) }
-    }
-    pub fn value_ends(&self) -> vesper_port_abi::SeqRef<'a, u64> {
-        let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[11]) }
-    }
     pub fn head_length(&self) -> u64 {
         let w: &'a [u64] = self.words;
-        <u64 as Abi>::get(&w[12..])
+        <u64 as Abi>::get(&w[9..])
     }
     pub fn header_count(&self) -> u64 {
         let w: &'a [u64] = self.words;
-        <u64 as Abi>::get(&w[13..])
+        <u64 as Abi>::get(&w[10..])
     }
 }
 
@@ -287,7 +275,7 @@ pub fn response_plan_header(p: &mut ResponsePlan, name: &[u8], value: &[u8]) -> 
 
 /// Calls `response_plan_new` of the Vesper library `response` (`vesper_response_response_plan_new`).
 pub fn response_plan_new(status: u64, context: crate::forward::response::abi::ResponseContext, connection: crate::forward::response::abi::ConnectionPolicy, representation_length: u64, limits: crate::forward::response::abi::ResponseLimits) -> Result<ResponsePlan, crate::forward::response::abi::ResponseError> {
-    let mut result = [0u64; 14];
+    let mut result = [0u64; 11];
     let mut arg_context = [0u64; <crate::forward::response::abi::ResponseContext as Abi>::WORDS];
     Abi::put(&context, &mut arg_context);
     let mut arg_connection = [0u64; <crate::forward::response::abi::ConnectionPolicy as Abi>::WORDS];
