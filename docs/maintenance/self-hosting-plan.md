@@ -300,6 +300,7 @@ release) and the hybrid CLI against the default.
 
 | Swap | Lane | Ported so far | Differential | Swapped part alone | Hybrid CLI | Report |
 |---|---|---|---|--:|---|---|
+| `scalar` (constants, operators, compares, casts, raising-arm tests, plain locals' reads, binds and writes) | SH4-6 (#1280) | parts 1-3; fields, homes, split locals and rewritten small-enum graphs stay Rust | hybrid differential 0 of 2,212 runs; swap test 0 of 76 worlds; 7,931 requests from Vesper over 170 corpus objects | emission ~3.2k Ir per request; plan + lookup 16.8M Ir on `strings/text.ves` (2.1% of the compile) | `emit --emit object` 1.02x wall (ABBA, 340 compiles) and 1.022x-1.069x Ir against the hybrid without the hook | [self-host-codegen-scalar.md](../parallel-results/self-host-codegen-scalar.md) |
 | `wasm` (`wasm_backend::compile`; wit-component wrapping stays Rust) | SH4-15 (#1289) | all but handlers, host frames and evidence (part 1) | 640 of 1,292 compilations byte-identical, 136 equal errors, 516 declined, 0 differ; hybrid differential 0 of 2,152 runs | 0.27x (0.38x with encoding) | `build --target wasm32-wasip2` 1.51x (debug; declined programs compile twice) | [self-host-wasm-backend.md](../parallel-results/self-host-wasm-backend.md) |
 
 ## Estimates

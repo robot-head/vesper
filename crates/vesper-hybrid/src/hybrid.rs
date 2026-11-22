@@ -58,6 +58,11 @@ mod codegen_numeric_binding;
 
 #[rustfmt::skip]
 #[allow(clippy::all)]
+#[path = "../port/codegen_scalar.rs"]
+mod codegen_scalar_binding;
+
+#[rustfmt::skip]
+#[allow(clippy::all)]
 #[path = "../port/codegen_export.rs"]
 mod codegen_export_binding;
 
@@ -159,6 +164,10 @@ static WASM_DECLINED: AtomicU64 = AtomicU64::new(0);
 /// declined.
 static NUMERIC_CALLS: AtomicU64 = AtomicU64::new(0);
 static NUMERIC_DECLINED: AtomicU64 = AtomicU64::new(0);
+/// `scalar` requests (scalars, locals, control flow) the Vesper module
+/// emitted, and left to Rust (unplanned, or declined by the hook).
+static SCALAR_CALLS: AtomicU64 = AtomicU64::new(0);
+static SCALAR_DECLINED: AtomicU64 = AtomicU64::new(0);
 /// Libraries whose v2 glue the Vesper export module emitted, and declined.
 static EXPORT_CALLS: AtomicU64 = AtomicU64::new(0);
 static EXPORT_DECLINED: AtomicU64 = AtomicU64::new(0);
@@ -690,6 +699,150 @@ fn vesper_numeric(lent: &mut vesper::codegen_swap::Lent<'_, '_>) -> Result<bool,
     }
 }
 
+/// `scalar_hook`'s request numbers past the plan's (1-10) for the typed
+/// requests of `codegen_swap::scalar` (@vesper/codegen-scalar-emit).
+fn scalar_request(op: u32) -> Option<u32> {
+    use vesper::codegen_swap::scalar as s;
+    Some(match op {
+        s::OVERFLOW => 11,
+        s::DIVISOR => 12,
+        s::NEGATE => 13,
+        s::SHIFT_RANGE => 14,
+        s::NARROW => 15,
+        s::READ_LOCAL => 16,
+        s::BIND_LOCAL => 17,
+        s::WRITE_LOCAL => 18,
+        _ => return None,
+    })
+}
+
+/// One program's scalar plan: per `(function, block, instruction)`, the
+/// `scalar_hook` request and its two immediates.
+struct ScalarPlan {
+    key: (usize, usize, usize),
+    sites: std::collections::HashMap<(String, u32, u32), (u32, u64, u64)>,
+}
+
+thread_local! {
+    /// The plan of the program being lowered on this thread.
+    static SCALAR_PLAN: std::cell::RefCell<Option<ScalarPlan>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Identifies a lent program for the plan cache: its address, function
+/// count and instruction count (a later compile may reuse the address).
+fn program_key(p: &vesper::ir::Program) -> (usize, usize, usize) {
+    let insts = p
+        .functions
+        .values()
+        .flat_map(|f| f.blocks.iter())
+        .map(|b| b.instructions.len())
+        .sum();
+    (std::ptr::from_ref(p) as usize, p.functions.len(), insts)
+}
+
+/// The plan of `program` from `modules/codegen_scalar`. A program the
+/// Place IR words cannot encode has no sites, so it stays on Rust.
+fn scalar_plan(world: &vesper::check::World, program: &vesper::ir::Program) -> ScalarPlan {
+    const RECORD: usize = 6;
+    let mut sites = std::collections::HashMap::new();
+    if let Some((input, _)) = ir_words::program_input(world, program) {
+        let names: Vec<&String> = program.functions.keys().collect();
+        let words = codegen_scalar_binding::plan(&input);
+        for r in words.chunks_exact(RECORD) {
+            let Some(name) = names.get(r[0] as usize) else {
+                continue;
+            };
+            sites.insert(
+                ((*name).clone(), r[1] as u32, r[2] as u32),
+                (r[3] as u32, r[4], r[5]),
+            );
+        }
+    }
+    ScalarPlan {
+        key: program_key(program),
+        sites,
+    }
+}
+
+/// The `scalar` hook of `vesper::codegen_swap` from
+/// `modules/codegen_scalar` (#1280). A graph-walk `INSTRUCTION` request
+/// emits the planned request of its instruction; the typed requests of
+/// `codegen_swap::scalar` (raising arms' tests, plain locals) go to the
+/// hook as they come. Unplanned instructions, and operands Rust has no
+/// value for, stay on Rust.
+fn vesper_scalar(lent: &mut vesper::codegen_swap::Lent<'_, '_>) -> Result<bool, String> {
+    let (request, args) = if lent.op == vesper::codegen_swap::INSTRUCTION {
+        let planned = SCALAR_PLAN.with(|cell| {
+            let mut cell = cell.borrow_mut();
+            if cell
+                .as_ref()
+                .is_none_or(|p| p.key != program_key(lent.program))
+            {
+                *cell = Some(scalar_plan(lent.world, lent.program));
+            }
+            cell.as_ref().and_then(|p| {
+                p.sites
+                    .get(&(
+                        lent.site.function.to_string(),
+                        lent.site.block,
+                        lent.site.inst,
+                    ))
+                    .copied()
+            })
+        });
+        let Some((request, a, b)) = planned else {
+            SCALAR_DECLINED.fetch_add(1, Relaxed);
+            return Ok(false);
+        };
+        if lent.args.contains(&vesper::codegen_swap::NO_VALUE) {
+            SCALAR_DECLINED.fetch_add(1, Relaxed);
+            return Ok(false);
+        }
+        let mut args = vec![a, b, u64::from(lent.optimize)];
+        args.extend_from_slice(lent.args);
+        (request, args)
+    } else {
+        let Some(request) = scalar_request(lent.op) else {
+            return Ok(false);
+        };
+        let mut args = lent.args.to_vec();
+        if lent.op == vesper::codegen_swap::scalar::READ_LOCAL {
+            args.push(u64::from(lent.optimize));
+        }
+        (request, args)
+    };
+    let kind = if lent.jit {
+        vesper_cranelift_sys::ModuleKind::Jit
+    } else {
+        vesper_cranelift_sys::ModuleKind::Object
+    };
+    let (answer, crossing) = vesper_cranelift_sys::lend_as(
+        kind,
+        lent.builder,
+        &mut *lent.module,
+        request,
+        &args,
+        codegen_scalar_binding::scalar,
+    );
+    if let Some(e) = crossing.error {
+        return Err(format!("codegen (scalar request {request}): {e}"));
+    }
+    if crossing.unreturned {
+        return Err(format!(
+            "codegen (scalar request {request}) kept a lent handle"
+        ));
+    }
+    if answer == 1 {
+        SCALAR_CALLS.fetch_add(1, Relaxed);
+        lent.results.extend(crossing.results);
+        Ok(true)
+    } else {
+        SCALAR_DECLINED.fetch_add(1, Relaxed);
+        Ok(false)
+    }
+}
+
 /// The `plan` hook of `vesper::codegen_swap` from `modules/codegen_export`
 /// (#1286): `plan_with` in Vesper. The checker's answers about each type
 /// travel with the request (plan_words.rs `plan_input`).
@@ -914,6 +1067,10 @@ extern "C" fn install() {
         aggregate: Some(vesper_aggregate),
         wasm: Some(vesper_wasm),
         numeric: Some(vesper_numeric),
+        // `VESPER_HYBRID_SCALAR=0` leaves scalars to Rust (the scoreboard's
+        // before side).
+        scalar: (!std::env::var_os("VESPER_HYBRID_SCALAR").is_some_and(|v| v == "0"))
+            .then_some(vesper_scalar as vesper::codegen_swap::Hook),
         export: Some(vesper_export),
         plan: Some(vesper_plan),
         interface_json: Some(vesper_interface_json),
@@ -976,6 +1133,11 @@ extern "C" fn report() {
         "vesper-hybrid: codegen emitted {} numeric requests from Vesper ({} declined)",
         NUMERIC_CALLS.load(Relaxed),
         NUMERIC_DECLINED.load(Relaxed)
+    );
+    eprintln!(
+        "vesper-hybrid: codegen emitted {} scalar requests from Vesper ({} left to Rust)",
+        SCALAR_CALLS.load(Relaxed),
+        SCALAR_DECLINED.load(Relaxed)
     );
     eprintln!(
         "vesper-hybrid: codegen emitted the export glue of {} libraries from Vesper ({} declined)",

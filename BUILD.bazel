@@ -1090,6 +1090,28 @@ vesper_package(
     deps = [":check_data_package"],
 )
 
+# The scalar lowering's plan and emission for the hybrid compiler's
+# codegen_scalar module (SH4 lane 6, #1280).
+vesper_package(
+    name = "codegen_scalar_package",
+    srcs = glob(["packages/vesper-codegen-scalar/src/**/*.ves"]),
+    manifest = "packages/vesper-codegen-scalar/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":check_data_package",
+        ":check_layout_package",
+        ":place_ir_package",
+    ],
+)
+
+vesper_package(
+    name = "codegen_scalar_emit_package",
+    srcs = glob(["packages/vesper-codegen-scalar/emit/src/**/*.ves"]),
+    manifest = "packages/vesper-codegen-scalar/emit/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = ["//packages/vesper-cranelift:cranelift_package"],
+)
+
 # Bounds hoisting for the hybrid compiler's bounds_hoist module (SH3 lane
 # 12, #1251).
 vesper_package(

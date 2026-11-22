@@ -83,6 +83,16 @@ vesper_hybrid(
             "//packages/vesper-codegen-numeric:codegen_numeric_package",
             "//packages/vesper-cranelift:cranelift_package",
         ],
+        # Scalars, locals and control flow (#1280): the plan, and emission
+        # through the shim.
+        "hybrid_codegen_scalar": [
+            "//:check_data_package",
+            "//:check_layout_package",
+            "//:codegen_scalar_emit_package",
+            "//:codegen_scalar_package",
+            "//:place_ir_package",
+            "//packages/vesper-cranelift:cranelift_package",
+        ],
         # The export planner and glue (#1286); the glue emits through the
         # Cranelift shim too.
         "hybrid_codegen_export": [
@@ -143,6 +153,7 @@ vesper_hybrid(
         "hybrid_codegen": "modules/codegen",
         "hybrid_codegen_export": "modules/codegen_export",
         "hybrid_codegen_numeric": "modules/codegen_numeric",
+        "hybrid_codegen_scalar": "modules/codegen_scalar",
         "hybrid_ir_check": "modules/ir_check",
         "hybrid_ir_inline": "modules/ir_inline",
         "hybrid_ir_opt": "modules/ir_opt",
@@ -217,6 +228,11 @@ vesper_hybrid(
         ],
         # The stack-bound swap (#1182) through the CLI.
         "test/stack_bound": [
+            ":bin/vesper-hybrid",
+            "//:bin/vesper",
+        ],
+        # SH4 lane 6 (#1280): scalar programs through both compilers.
+        "test/scalar": [
             ":bin/vesper-hybrid",
             "//:bin/vesper",
         ],
