@@ -131,6 +131,8 @@ vesper_crate(
             "packages/vesper-std/*/Loom.toml",
             "packages/vesper-std/*/src/*.ves",
         ]) + [
+            # @vesper/prism-h3 depends on @vesper/prism-bytes.
+            "//crates/vesper-prism:files",
             "//crates/vesper-prism-h3:files",
             "//crates/vesper-semver:files",
         ],
