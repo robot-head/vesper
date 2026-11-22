@@ -46,8 +46,12 @@ pub fn run(c: Command<'_>) -> Result<(), String> {
                 .into(),
         );
     }
+    // A wasm component reaches the standard I/O libraries through WASI
+    // (the wasm backend's port, packages/vesper-wasm-backend/src/host.ves),
+    // so its foreign calls are checked against the host's `.vsys` view.
+    let wasm = c.command == "build" && c.target == Some(vesper::wasm_backend::TARGET);
     let object_target = match c.command {
-        "build" => c.target,
+        "build" if !wasm => c.target,
         _ => None,
     };
     let imports = c.package.imports(object_target)?;
@@ -89,6 +93,7 @@ pub fn run(c: Command<'_>) -> Result<(), String> {
             println!("{value}");
             Ok(())
         }
+        "build" if wasm => build_wasm(&c, &checked),
         "build" => build(&c, &checked, &imports),
         "run" => {
             // The evaluator reaches the same host functions as `jit`.
@@ -183,6 +188,26 @@ fn host_symbols(
         }
     }
     Ok(out)
+}
+
+/// `build --target wasm32-wasip2`: a component whose `StdEnv` and `StdFs`
+/// calls import WASI 0.2. Only the wasm backend's Vesper port lowers them
+/// (through `vesper-hybrid`); the Rust backend refuses the program.
+fn build_wasm(c: &Command<'_>, checked: &ffi_lowering::ForeignChecked) -> Result<(), String> {
+    let options = vesper::wasm_backend::WasmOptions {
+        optimize: c.optimize,
+        ..Default::default()
+    };
+    let artifact = vesper::wasm_backend::compile(checked.world(), c.entry, &options)
+        .map_err(|e| e.to_string())?;
+    let path = c.output.clone().unwrap_or_else(|| PathBuf::from("a.wasm"));
+    vesper::atomic_file::atomic_write(&path, &artifact.component)?;
+    println!(
+        "built {} ({} component)",
+        path.display(),
+        vesper::wasm_backend::TARGET
+    );
+    Ok(())
 }
 
 /// Add `symbol` at `address` to the host table. The JIT and the evaluator
