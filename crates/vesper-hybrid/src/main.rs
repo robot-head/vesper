@@ -22,6 +22,9 @@ mod driver;
 
 /// The C entry point: the Vesper driver.
 #[unsafe(export_name = "main")]
-extern "C" fn hybrid_main(_argc: std::ffi::c_int, _argv: *const *const std::ffi::c_char) -> std::ffi::c_int {
+extern "C" fn hybrid_main(
+    _argc: std::ffi::c_int,
+    _argv: *const *const std::ffi::c_char,
+) -> std::ffi::c_int {
     driver::main()
 }
