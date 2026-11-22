@@ -47,7 +47,7 @@ jobs:
                 latest.set(status.context, status);
               }
             }
-            for (const name of ['Test all targets', 'Native and acceptance scripts']) {
+            for (const name of ['Test all targets', 'Self-host differentials', 'Native and acceptance scripts']) {
               if (latest.get(name)?.state !== 'success') {
                 throw new Error(`Exact-candidate Linux check is not successful: ${name}`);
               }
@@ -93,7 +93,7 @@ jobs:
               }
             }
             const linux = [];
-            for (const name of ['Test all targets', 'Native and acceptance scripts']) {
+            for (const name of ['Test all targets', 'Self-host differentials', 'Native and acceptance scripts']) {
               const status = latest.get(name);
               if (status?.state !== 'success') {
                 throw new Error(`Exact-candidate Linux check is no longer successful: ${name}`);
