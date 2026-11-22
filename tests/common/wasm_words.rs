@@ -430,7 +430,126 @@ pub fn outcome(words: &[u64]) -> Outcome {
 /// The WASI packages a command world without host imports names
 /// (src/wasm_backend/host.rs `IO_WIT`, `CLI_WIT`).
 const IO_WIT: &str = "package wasi:io@0.2.0;\n\ninterface error {\n  resource error;\n}\n\ninterface streams {\n  use error.{error};\n  variant stream-error {\n    last-operation-failed(error),\n    closed,\n  }\n  resource output-stream {\n    blocking-write-and-flush: func(contents: list<u8>) -> result<_, stream-error>;\n  }\n}\n";
-const CLI_WIT: &str = "package wasi:cli@0.2.0;\n\ninterface run {\n  run: func() -> result;\n}\n\ninterface stdout {\n  use wasi:io/streams@0.2.0.{output-stream};\n  get-stdout: func() -> output-stream;\n}\n";
+const CLI_WIT: &str = "package wasi:cli@0.2.0;\n\ninterface run {\n  run: func() -> result;\n}\n\ninterface stdout {\n  use wasi:io/streams@0.2.0.{output-stream};\n  get-stdout: func() -> output-stream;\n}\n\ninterface environment {\n  get-environment: func() -> list<tuple<string, string>>;\n  get-arguments: func() -> list<string>;\n  initial-cwd: func() -> option<string>;\n}\n";
+/// The WASI 0.2 interfaces the standard I/O libraries lower to
+/// (packages/vesper-wasm-backend/src/host.ves): every type as WASI defines
+/// it, and only the functions the shims import.
+const CLOCKS_WIT: &str = r#"package wasi:clocks@0.2.0;
+
+interface wall-clock {
+  record datetime {
+    seconds: u64,
+    nanoseconds: u32,
+  }
+}
+"#;
+const FILESYSTEM_WIT: &str = r#"package wasi:filesystem@0.2.0;
+
+interface types {
+  use wasi:clocks/wall-clock@0.2.0.{datetime};
+  type filesize = u64;
+  enum descriptor-type {
+    unknown,
+    block-device,
+    character-device,
+    directory,
+    fifo,
+    symbolic-link,
+    regular-file,
+    socket,
+  }
+  flags descriptor-flags {
+    read,
+    write,
+    file-integrity-sync,
+    data-integrity-sync,
+    requested-write-sync,
+    mutate-directory,
+  }
+  flags path-flags {
+    symlink-follow,
+  }
+  flags open-flags {
+    create,
+    directory,
+    exclusive,
+    truncate,
+  }
+  type link-count = u64;
+  record descriptor-stat {
+    %type: descriptor-type,
+    link-count: link-count,
+    size: filesize,
+    data-access-timestamp: option<datetime>,
+    data-modification-timestamp: option<datetime>,
+    status-change-timestamp: option<datetime>,
+  }
+  record directory-entry {
+    %type: descriptor-type,
+    name: string,
+  }
+  enum error-code {
+    access,
+    would-block,
+    already,
+    bad-descriptor,
+    busy,
+    deadlock,
+    quota,
+    exist,
+    file-too-large,
+    illegal-byte-sequence,
+    in-progress,
+    interrupted,
+    invalid,
+    io,
+    is-directory,
+    loop,
+    too-many-links,
+    message-size,
+    name-too-long,
+    no-device,
+    no-entry,
+    no-lock,
+    insufficient-memory,
+    insufficient-space,
+    not-directory,
+    not-empty,
+    not-recoverable,
+    unsupported,
+    no-tty,
+    no-such-device,
+    overflow,
+    not-permitted,
+    pipe,
+    read-only,
+    invalid-seek,
+    text-file-busy,
+    cross-device,
+  }
+  resource descriptor {
+    read: func(length: filesize, offset: filesize) -> result<tuple<list<u8>, bool>, error-code>;
+    write: func(buffer: list<u8>, offset: filesize) -> result<filesize, error-code>;
+    read-directory: func() -> result<directory-entry-stream, error-code>;
+    sync: func() -> result<_, error-code>;
+    create-directory-at: func(path: string) -> result<_, error-code>;
+    stat: func() -> result<descriptor-stat, error-code>;
+    stat-at: func(path-flags: path-flags, path: string) -> result<descriptor-stat, error-code>;
+    open-at: func(path-flags: path-flags, path: string, open-flags: open-flags, %flags: descriptor-flags) -> result<descriptor, error-code>;
+    remove-directory-at: func(path: string) -> result<_, error-code>;
+    rename-at: func(old-path: string, new-descriptor: borrow<descriptor>, new-path: string) -> result<_, error-code>;
+    unlink-file-at: func(path: string) -> result<_, error-code>;
+  }
+  resource directory-entry-stream {
+    read-directory-entry: func() -> result<option<directory-entry>, error-code>;
+  }
+}
+
+interface preopens {
+  use types.{descriptor};
+  get-directories: func() -> list<tuple<descriptor, string>>;
+}
+"#;
 
 /// `component::encode` for a port module: the WIT world embedded, then
 /// wit-component (the part of the backend that stays in Rust).
@@ -438,6 +557,10 @@ pub fn wrap(mut core: Vec<u8>, wit: &str, world: WasmWorld) -> Vec<u8> {
     let mut resolve = wit_parser::Resolve::default();
     resolve.push_source("wasi-io.wit", IO_WIT).unwrap();
     resolve.push_source("wasi-cli.wit", CLI_WIT).unwrap();
+    resolve.push_source("wasi-clocks.wit", CLOCKS_WIT).unwrap();
+    resolve
+        .push_source("wasi-filesystem.wit", FILESYSTEM_WIT)
+        .unwrap();
     let pkg = resolve.push_source("vesper-program.wit", wit).unwrap();
     let name = match world {
         WasmWorld::Command => "program",

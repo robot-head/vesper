@@ -159,6 +159,10 @@ pub copy struct Syms {
     stdout: u32,
     clock: u32,
     trace: u32,
+    // the `.vsys` libraries of @vesper-std/env and @vesper-std/fs
+    // (`ffi_lowering::effect_name`), lowered over WASI (src/host.ves)
+    ffi_env: u32,
+    ffi_fs: u32,
     eq: u32,
     empty: u32,
     chunkseq: u32,
@@ -192,6 +196,8 @@ pub fn syms_new(inout n: Names) -> Syms {
         stdout: n.intern(in "Stdout".as_bytes()),
         clock: n.intern(in "Clock".as_bytes()),
         trace: n.intern(in "Trace".as_bytes()),
+        ffi_env: n.intern(in "Ffi$StdEnv".as_bytes()),
+        ffi_fs: n.intern(in "Ffi$StdFs".as_bytes()),
         eq: n.intern(in "=".as_bytes()),
         empty: n.intern(in "".as_bytes()),
         chunkseq: n.intern(in "ChunkSeq".as_bytes()),
@@ -752,7 +758,8 @@ pub struct Plan {
     // every dynamic evidence key, in byte order
     keys: ChunkSeq[u32],
     max_arity: u64,
-    // host capabilities, sorted: 0 Stdout, 1 Clock, 2 Trace
+    // host capabilities, sorted: 0 Stdout, 1 Clock, 2 Trace, 3 the
+    // StdEnv library, 4 the StdFs library (`host::HOST_ENV`, `HOST_FS`)
     host: ChunkSeq[u8],
     handlers: ChunkSeq[Handler],
     clauses: ChunkSeq[HClause],
@@ -945,6 +952,29 @@ fn capabilities(inout cx: Cx, inout out: ChunkSeq[u8], entry: u32) eff [Fail[WEr
     for i in 0..sig.en {
         let e = cx.f.eff(add(sig.e0, i));
         if cx.f.is_capability(e.name) {
+            continue;
+        }
+        // The standard I/O libraries become WASI calls (src/host.ves).
+        if e.name == cx.s.ffi_env || e.name == cx.s.ffi_fs {
+            let code: u8 = if e.name == cx.s.ffi_env {
+                3
+            } else {
+                4
+            };
+            let mut seen = false;
+            for k in 0..out.len() {
+                match out.try_get(k) {
+                    Option::Some(x) => {
+                        if x == code {
+                            seen = true;
+                        }
+                    },
+                    Option::None => {},
+                }
+            }
+            if !seen {
+                out.push(code);
+            }
             continue;
         }
         if e.name == cx.s.stdout || e.name == cx.s.clock || e.name == cx.s.trace {
