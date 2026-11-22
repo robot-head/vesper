@@ -10,7 +10,7 @@ sys library Xsk (
     // u32} from byte 64.
     linear extern type Socket;
     linear extern mapping Ring[u8];
-    fn xsk_socket_new(in umem: Pinned[u8], frame_size: u32) -> ForeignVal[Option[Socket]];
+    fn xsk_socket_new(inout umem: Pinned[u8], frame_size: u32) -> ForeignVal[Option[Socket]];
     fn xsk_ring_map(in s: Socket, bytes: u64) -> ForeignVal[Option[Ring[bytes]]];
     fn xsk_kernel_rx(inout s: Socket, packets: u32) -> ForeignVal[u32];
     fn xsk_ring_unmap(sink r: Ring) -> ForeignVal[i32];

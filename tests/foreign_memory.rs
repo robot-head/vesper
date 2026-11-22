@@ -325,6 +325,14 @@ fn foreign_memory_never_moves_while_c_may_hold_it() {
         "fn g[T](inout p: Pinned[T], inout s: ChunkSeq[T]) { swap(inout p.data, inout s); }",
         // Through a handler's return clause and an operation clause.
         "effect Ask { fn ask() -> u64; }\nfn f(sink r: Ring) -> u64 eff [Ffi[Xsk]] { handle Ask in { r } with { return m => { let mut m2 = m; m2.data.push(1); Xsk::xsk_ring_unmap(m2); 1 }, ask(resume) => resume(0), } }",
+        // A view held across a foreign call, which may write the memory:
+        // bound, directly or through a function that calls into C, or lent
+        // to such a function.
+        "fn f(inout s: Socket, in r: Ring) -> u64 eff [Ffi[Xsk]] { let v = r.data.as_slice(); Xsk::xsk_kernel_rx(inout s, 1); v.len() }",
+        "fn f(inout s: Socket, in p: Pinned[u8]) -> u64 eff [Ffi[Xsk]] { let v = p.data[0..64]; Xsk::xsk_kernel_rx(inout s, 1); v.len() }",
+        "fn pump(inout s: Socket) -> u32 eff [Ffi[Xsk]] { Xsk::xsk_kernel_rx(inout s, 1) }\nfn f(inout s: Socket, in r: Ring) -> u64 eff [Ffi[Xsk]] { let v = r.data.as_slice(); let n = v.len(); pump(inout s); n }",
+        "fn pump(inout s: Socket, in v: Slice[u8]) -> u64 eff [Ffi[Xsk]] { Xsk::xsk_kernel_rx(inout s, 1); v.len() }\nfn f(inout s: Socket, in r: Ring) -> u64 eff [Ffi[Xsk]] { pump(inout s, in r.data[0..8]) }",
+        "fn pump(inout s: Socket, in v: Slice[u8]) -> u64 eff [Ffi[Xsk]] { Xsk::xsk_kernel_rx(inout s, 1); v.len() }\nfn f(inout s: Socket, in p: Pinned[u8]) -> u64 eff [Ffi[Xsk]] { pump(inout s, in p.data.as_slice()) }",
         "effect Give { fn give(sink r: Ring) -> u64; }\nfn f(sink r: Ring) -> u64 eff [Ffi[Xsk]] { handle Give in { Give::give(r) } with { return v => v, give(m, resume) => { let mut m2 = m; m2.data.push(1); Xsk::xsk_ring_unmap(m2); resume(1) }, } }",
     ] {
         let e = refused(body);
@@ -358,12 +366,30 @@ fn foreign_memory_never_moves_while_c_may_hold_it() {
         }}"
     );
     ffi_lowering::check_source(&ok, &imports(LINUX)).unwrap_or_else(|e| panic!("{e}"));
+    // A view that ends before the foreign call, and element reads after
+    // it, are accepted.
+    let ok = format!(
+        "{PRELUDE}
+        fn f(inout s: Socket, in r: Ring) -> u64 eff [Ffi[Xsk]] {{
+            let n = {{
+                let v = r.data.as_slice();
+                v.len()
+            }};
+            Xsk::xsk_kernel_rx(inout s, 1);
+            let m = match r.data.try_read_u32_le(0) {{
+                Some(p) => widen_u64(p),
+                None => 0,
+            }};
+            wrapping_add(n, m)
+        }}"
+    );
+    ffi_lowering::check_source(&ok, &imports(LINUX)).unwrap_or_else(|e| panic!("{e}"));
 }
 
 #[test]
 fn mappings_and_pinned_buffers_are_linear_and_views_cannot_escape() {
     let ring = "match Xsk::xsk_ring_map(in s, 192) { Some(r) => r, None => { Xsk::xsk_socket_free(s); release(u); return 0; } }";
-    let socket = "let u = umem(); let s = match Xsk::xsk_socket_new(in u, 2048) { Some(s) => s, None => { release(u); return 0; } };";
+    let socket = "let mut u = umem(); let s = match Xsk::xsk_socket_new(inout u, 2048) { Some(s) => s, None => { release(u); return 0; } };";
     let cases = [
         // Never released.
         (

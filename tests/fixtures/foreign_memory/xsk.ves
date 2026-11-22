@@ -58,8 +58,8 @@ fn consume(inout ring: Ring, in umem: Pinned[u8]) -> u64 {
 // Receive `packets` packets in batches of up to 5: the ring holds 8, so
 // the kernel stops when Vesper has not caught up.
 pub fn rx(packets: u32) -> u64 eff [Ffi[Xsk]] {
-    let umem = umem();
-    let mut socket = match Xsk::xsk_socket_new(in umem, 2048) {
+    let mut umem = umem();
+    let mut socket = match Xsk::xsk_socket_new(inout umem, 2048) {
         Some(s) => s,
         None => {
             let Pinned {
@@ -108,8 +108,8 @@ pub fn rx(packets: u32) -> u64 eff [Ffi[Xsk]] {
 
 // A ring the socket refuses to map (too small) is `None`: `MAP_FAILED`.
 pub fn refused() -> u64 eff [Ffi[Xsk]] {
-    let umem = umem();
-    let socket = match Xsk::xsk_socket_new(in umem, 2048) {
+    let mut umem = umem();
+    let socket = match Xsk::xsk_socket_new(inout umem, 2048) {
         Some(s) => s,
         None => {
             let Pinned {
@@ -135,8 +135,8 @@ pub fn refused() -> u64 eff [Ffi[Xsk]] {
 // A bound view of a mapping reads it in place; the mapping is released
 // once the view's block ends.
 pub fn view() -> u64 eff [Ffi[Xsk]] {
-    let umem = umem();
-    let socket = match Xsk::xsk_socket_new(in umem, 2048) {
+    let mut umem = umem();
+    let socket = match Xsk::xsk_socket_new(inout umem, 2048) {
         Some(s) => s,
         None => {
             let Pinned {
@@ -198,8 +198,8 @@ fn consume_copy(inout s: Socket, inout buf: ChunkSeq[u8]) -> u64 eff [Ffi[Xsk]] 
 }
 
 pub fn rx_copy(packets: u32) -> u64 eff [Ffi[Xsk]] {
-    let umem = umem();
-    let mut socket = match Xsk::xsk_socket_new(in umem, 2048) {
+    let mut umem = umem();
+    let mut socket = match Xsk::xsk_socket_new(inout umem, 2048) {
         Some(s) => s,
         None => {
             let Pinned {

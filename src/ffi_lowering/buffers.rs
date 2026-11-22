@@ -12,7 +12,15 @@
 //! access or a view (`b.data[i]`, `b.data[a..c]`), a call of a method that
 //! keeps the buffer where it is and as long as it is, and an explicit `in`
 //! argument.
+//!
+//! C may also write the memory during any later foreign call, not only one
+//! that takes it, so a view of it may not be held across one: a bound view
+//! (`let v = b.data.as_slice();`, `let v = b.data[a..c];`) is refused when a
+//! call that may perform `Ffi` follows it in its block, and a view is never
+//! lent to a source function that may perform `Ffi`. Element reads after a
+//! foreign call read the memory again.
 use super::types::{BUFFER_FIELD, Generated};
+use super::{CAPABILITY, EFFECT_PREFIX};
 use super::{FfiError, FfiErrorKind};
 use crate::ast::*;
 
@@ -58,6 +66,8 @@ struct Walk<'a> {
     /// Effect declarations by name, for the types of handler-clause
     /// patterns.
     effects: std::collections::BTreeMap<&'a str, &'a EffectDecl>,
+    /// Source functions and methods whose effect row may perform `Ffi`.
+    foreign: std::collections::BTreeSet<&'a str>,
     /// Local bindings in scope, innermost last. The checker records the
     /// types of expressions it evaluates but not of place roots (`b` in
     /// `b.data.push(x)`), so the walk types places itself.
@@ -181,6 +191,53 @@ impl<'a> Walk<'a> {
             _ => None,
         }
     }
+    /// Whether `e` is a view of a pinned buffer's or a mapping's memory:
+    /// `b.data`, `b.data[a..c]` or `b.data.as_slice()`.
+    fn view_of(&self, e: &Expr) -> Option<String> {
+        match &e.kind {
+            ExprKind::Field(..) => self.buffer_of(e),
+            // A slice interval `b.data[a..c]` indexes with the binary `..`.
+            ExprKind::Index(base, index)
+                if matches!(&index.kind, ExprKind::Binary(op, ..) if op == "..") =>
+            {
+                self.buffer_of(base)
+            }
+            ExprKind::Call { callee, .. } => match &callee.kind {
+                ExprKind::Field(receiver, method)
+                    if method == "as_slice" || method == "as_slice_mut" =>
+                {
+                    self.buffer_of(receiver)
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+    /// Whether calling `callee` may perform `Ffi`: a foreign import, or a
+    /// source function or method whose row names `Ffi` or is open.
+    fn calls_foreign(&self, callee: &Expr) -> bool {
+        match &callee.kind {
+            ExprKind::Name(n) => n.starts_with(EFFECT_PREFIX) || self.foreign.contains(n.as_str()),
+            ExprKind::Field(_, method) => self.foreign.contains(method.as_str()),
+            _ => false,
+        }
+    }
+    /// Whether evaluating `e` may call into C.
+    fn may_call_foreign(&self, e: &Expr) -> bool {
+        let here = matches!(&e.kind, ExprKind::Call { callee, .. } if self.calls_foreign(callee));
+        here || children(e).into_iter().any(|c| self.may_call_foreign(c))
+    }
+    fn refuse_view(&mut self, ty: &str, e: &Expr, why: &str) {
+        if self.error.is_none() {
+            self.error = Some(FfiError::new(
+                FfiErrorKind::BufferMisuse,
+                format!(
+                    "C may write the memory of {ty} during any foreign call, so a view of it {why}: read it through `.data[i]` after the call, or end the view before it"
+                ),
+                Some(e.span.clone()),
+            ));
+        }
+    }
     fn refuse(&mut self, ty: &str, e: &Expr) {
         if self.error.is_none() {
             self.error = Some(FfiError::new(
@@ -226,9 +283,28 @@ impl<'a> Walk<'a> {
             ExprKind::Tuple(es) => es.iter().for_each(|e| self.expr(e, false)),
             ExprKind::Struct { fields, .. } => fields.iter().for_each(|(_, e)| self.expr(e, false)),
             ExprKind::Block { statements, tail } => self.scoped(|w| {
-                for s in statements {
+                for (i, s) in statements.iter().enumerate() {
                     match s {
                         Statement::Let { pat, ty, value, .. } => {
+                            if let Some(buffer) = w.view_of(value) {
+                                let later = statements[i + 1..]
+                                    .iter()
+                                    .map(|s| match s {
+                                        Statement::Let { value, .. } => value,
+                                        Statement::Expr(e) => e,
+                                    })
+                                    .chain(tail.as_deref());
+                                if let Some(call) = later
+                                    .into_iter()
+                                    .find(|e| w.may_call_foreign(e))
+                                {
+                                    w.refuse_view(
+                                        &buffer,
+                                        call,
+                                        "may not stay bound across one",
+                                    );
+                                }
+                            }
                             w.expr(value, false);
                             let t = match ty {
                                 Type::Infer => w.type_of(value),
@@ -249,6 +325,18 @@ impl<'a> Walk<'a> {
                         self.expr(receiver, keeps_buffer(method));
                     }
                     _ => self.expr(callee, false),
+                }
+                let import = matches!(&callee.kind, ExprKind::Name(n) if n.starts_with(EFFECT_PREFIX));
+                if !import && self.calls_foreign(callee) {
+                    for a in args {
+                        if let Some(buffer) = self.view_of(&a.expr) {
+                            self.refuse_view(
+                                &buffer,
+                                &a.expr,
+                                "may not be lent to a function that may call into C",
+                            );
+                        }
+                    }
                 }
                 for a in args {
                     self.expr(&a.expr, a.explicit && a.pass == Pass::In);
@@ -403,6 +491,19 @@ pub(super) fn check(
                 _ => None,
             })
             .collect(),
+        foreign: module
+            .items
+            .iter()
+            .flat_map(|i| match i {
+                Item::Function(f) => vec![&**f],
+                Item::Impl { methods, .. } | Item::Conformance(Conformance { methods, .. }) => {
+                    methods.iter().collect()
+                }
+                _ => vec![],
+            })
+            .filter(|f| may_perform_foreign(&f.effects))
+            .map(|f| f.name.as_str())
+            .collect(),
         scopes: vec![],
         error: None,
     };
@@ -418,4 +519,64 @@ pub(super) fn check(
         }
     }
     walk.error.map_or(Ok(()), Err)
+}
+
+/// Whether a function with row `effects` may call into C: the row names
+/// `Ffi` (before or after the rewrite) or is open.
+fn may_perform_foreign(effects: &Effects) -> bool {
+    effects.tail.is_some()
+        || effects
+            .instances
+            .iter()
+            .any(|e| e.name == CAPABILITY || e.name.starts_with(EFFECT_PREFIX))
+}
+
+/// The direct subexpressions of `e`.
+fn children(e: &Expr) -> Vec<&Expr> {
+    match &e.kind {
+        ExprKind::Literal(_) | ExprKind::Name(_) => vec![],
+        ExprKind::Tuple(es) => es.iter().collect(),
+        ExprKind::Struct { fields, .. } => fields.iter().map(|(_, e)| e).collect(),
+        ExprKind::Block { statements, tail } => statements
+            .iter()
+            .map(|s| match s {
+                Statement::Let { value, .. } => value,
+                Statement::Expr(e) => e,
+            })
+            .chain(tail.as_deref())
+            .collect(),
+        ExprKind::Call { callee, args, .. } => std::iter::once(&**callee)
+            .chain(args.iter().map(|a| &a.expr))
+            .collect(),
+        ExprKind::Field(b, _) | ExprKind::Try(b) | ExprKind::Unary(_, b) => vec![&**b],
+        ExprKind::Index(a, b) | ExprKind::Binary(_, a, b) | ExprKind::Assign(_, a, b) => {
+            vec![&**a, &**b]
+        }
+        ExprKind::If {
+            condition,
+            then,
+            otherwise,
+        } => std::iter::once(&**condition)
+            .chain(std::iter::once(&**then))
+            .chain(otherwise.as_deref())
+            .collect(),
+        ExprKind::Match { value, arms } => std::iter::once(&**value)
+            .chain(arms.iter().map(|(_, e)| e))
+            .collect(),
+        ExprKind::Closure { body, .. } => vec![&**body],
+        ExprKind::Handle {
+            state,
+            body,
+            ret,
+            ops,
+            ..
+        } => state
+            .iter()
+            .map(|(_, s)| &**s)
+            .chain(std::iter::once(&**body))
+            .chain(std::iter::once(&ret.body))
+            .chain(ops.iter().map(|c| &c.body))
+            .collect(),
+        k => k.control_children().unwrap_or_default(),
+    }
 }

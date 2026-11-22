@@ -31,17 +31,23 @@ field `data` is a `ChunkSeq[T]` over memory that never moves.
 - **`Pinned[T]`** is a buffer C may keep. A `.vsys` parameter
   `in b: Pinned[u8]` or `inout b: Pinned[u8]` (no `nocapture`) passes
   `(data, len)`, and C may hold the address after the call returns.
-  - In source, `Pinned[T]` is the generated
-    `linear struct Pinned[T] { data: ChunkSeq[T] }`.
+  - With `in`, C may only read through the address it keeps. A buffer C
+    writes into later, such as a UMEM, is passed `inout`, so its owner is a
+    `let mut` binding. `E1521` then refuses any bound view of it.
+  - In source, `Pinned[T]` is the one generated
+    `linear struct Pinned[T] { data: ChunkSeq[T] }` of the program.
   - `Pinned { data: s }` pins a sequence, and `let Pinned { data } = p;`
     releases it.
   - Linearity makes the release explicit on every path.
 - **`linear extern mapping M[T];`** is memory the library owns.
   - An import returns it as `ForeignVal[Option[M[len]]]`, where `len` names a
-    by-value `u32`/`u64`/`usize` parameter. `NULL` and `MAP_FAILED` are both
-    `None`.
-  - `in`, `inout` and `sink` parameters pass `(data, len)`, so
-    `fn munmap(sink m: M) -> ForeignVal[i32];` is exactly munmap's ABI.
+    by-value `u32`/`u64`/`usize` parameter and counts elements of `T`.
+    `NULL` and `MAP_FAILED` are both `None`. If the header allocation fails,
+    the program traps with status 8.
+  - `in`, `inout` and `sink` parameters pass `(data, len)` in elements, so
+    for `M[u8]`, `fn munmap(sink m: M) -> ForeignVal[i32];` is exactly
+    munmap's ABI. A mapping of wider elements needs a C finalizer that
+    scales `len` to bytes.
   - A `sink` import is required (the finalizer).
   - Source code cannot build or destructure an `M` (handle misuse).
 - **Views.** Both are read, written and viewed through `b.data` under the
@@ -50,7 +56,8 @@ field `data` is a `ChunkSeq[T]` over memory that never moves.
     sequence.
   - `f(inout b.data[a..c])` lends a view.
   - `let v = b.data.as_slice();` binds a view. While it is in scope, `b`
-    cannot be released (`E1531`).
+    cannot be released (`E1531`). A view of a `let mut` owner is refused
+    (`E1521`).
   - A view never escapes (`E1520`).
   - `b` cannot be used after its release (`E0303`), dropped (`E0302`) or
     kept across an abortable effect (`E0402`).
@@ -59,6 +66,21 @@ field `data` is a `ChunkSeq[T]` over memory that never moves.
   frontend error, `src/ffi_lowering/buffers.rs`). Only element and range
   accesses, explicit `in` arguments and length-preserving methods are
   accepted.
+- **No view across a foreign call.** C may write the memory during any
+  later foreign call, not only one that takes it. The AF_XDP kernel writes
+  the UMEM during `xsk_kernel_rx(inout socket)`. So:
+  - a bound view (`as_slice()` or `[a..c]`) is refused when a call that may
+    perform `Ffi` follows it in its block (`BufferMisuse`);
+  - a view is never lent to a source function that may perform `Ffi`.
+
+  "May perform `Ffi`" covers an import, or a function or method whose row
+  names `Ffi` or is open. Element reads after the call read the memory
+  again.
+- **Trusted contracts**, like `nocapture`:
+  - a pinned buffer is released only once C no longer uses it;
+  - C never writes a buffer it took `in`;
+  - live pinned buffers and mappings never overlap;
+  - `len * sizeof(T)` never wraps.
 - **Where it runs.** Only native code lends foreign memory: the evaluator
   refuses these imports.
 
@@ -185,9 +207,9 @@ owns read without a call per field. A faster in-place loop waits on #1426.
    `Pinned` passes `(data, len)` as arguments only. A `Pinned::address(in p)
    -> u64` (an integer, never dereferenced in source) would close it.
 3. **Aliasing.** Two mappings over the same memory, or a mapping over a
-   pinned buffer, look like two distinct sequences to the optimizer. Nothing
-   in the fixture does this; a library that returns overlapping mappings
-   would need a rule.
+   pinned buffer, look like two distinct sequences to the optimizer. The
+   spec now states non-overlap as a trusted contract. A library that
+   returns overlapping mappings would need a checked rule.
 4. **Vesper port of the FFI rewrite.** It ran out of memory on the new
    fixture (above).
 
