@@ -330,6 +330,13 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # SH4 lane 9 (#1283): @vesper/codegen-seq's lowering decisions
+        # against Rust's over the same corpus programs.
+        "test/self_host_codegen_seq": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
         # Self-hosting SH4 lane 13 (#1287): the .vsys type mapping and call
         # plans in Vesper against src/ffi_lowering over every .vsys source the
         # root package can declare (crates/* are their own Bazel packages;
@@ -953,6 +960,7 @@ vesper_crate(
         "test/self_host_ir_lower": "long",
         # The eBPF backend differential (#1290) loads every corpus world.
         "test/self_host_ebpf_backend": "long",
+        "test/self_host_codegen_seq": "long",
         # The wasm backend differential: about 10 min in a debug build.
         "test/self_host_wasm_backend": "long",
         "test/self_host_codegen_scalar": "long",

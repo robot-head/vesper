@@ -118,6 +118,8 @@ CRATES = {
     "vesper-vault": ("shim", "", "", "libcrux ML-KEM, x25519, AEADs: crypto shim; Cranelift via its shim", "17"),
     "vesper-warp-tls": ("shim", "", "", "rustls: TLS shim (or the TLS 1.3 state machine ports over the crypto shim)", "17"),
     "vesper-simd": ("c-api", "", "", "out of the compiler's closure (#1398); Cranelift JIT host: through vesper-cranelift-sys", "13"),
+    "vesper-crypto-sys": ("shim", "", "", "vetted crypto C-ABI shim (SH6 lane 17)", "17"),
+    "vesper-blake3-sys": ("c-api", "", "", "BLAKE3 C library: import it straight from .vsys", "G1-12"),
     "vesper-cranelift-sys": ("shim", "", "", "Cranelift C-ABI shim (owner 2026-11-19)", "-"),
     "vesper-codegen-verified": ("diverse", "", "", "DDC auditor, diverse on purpose", "owner"),
 }
@@ -131,7 +133,7 @@ MODULES = {
     "lean_nodes": ("SH5-18", "vesper-lean-extract", ""),
     "verify_commands": ("SH5-18", "", ""),
     "proof_commands": ("SH5-18", "", ""),
-    "native": ("SH4-1, SH5-1", "vesper-codegen-base", "swap point merged"),
+    "native": ("G1-11", "vesper-codegen-base", "family hooks swapped by SH4; the walk itself ports in gap wave 1 lane 11"),
     "seq": ("SH4-9", "", ""),
     "wasm_backend": ("SH4-15, SH5-11", "", "0 diffs (#1311)"),
     "check": ("SH2-7", "vesper-check-core-typing", ""),
@@ -142,7 +144,7 @@ MODULES = {
     "forge_frontend": ("SH1-14", "", "#1157"),
     "native_export": ("SH4-12", "vesper-codegen-export", ""),
     "ffi_lowering": ("SH4-13", "", ""),
-    "optimize": ("SH3-10", "vesper-optimize", "search 0.68x"),
+    "optimize": ("G1-4", "vesper-optimize", "search 0.68x; checker 1.94x"),
     "fip": ("SH2-12", "vesper-check-fip", "0.92x"),
     "bounds_hoist": ("SH3-12", "vesper-bounds-hoist", ""),
     "tiled": ("SH4-11", "vesper-codegen-numeric", ""),
@@ -177,11 +179,11 @@ MODULES = {
     "anvil_sim": ("SH5-14", "", ""),
     "native_freestanding": ("SH4-14", "", ""),
     "native_vector": ("SH4-11", "", ""),
-    "ir_opt_policy": ("SH5-9", "", ""),
+    "ir_opt_policy": ("G1-12", "", ""),
     "ir_opt": ("SH3-9", "vesper-ir-opt", "0.0036x"),
     "native_windows": ("SH4-14", "", ""),
     "native_batch": ("SH4-17", "", ""),
-    "database": ("SH5-16", "", "salsa: memo tables"),
+    "database": ("G1-12", "", "salsa: memo tables"),
     "float_math": ("SH2-7", "", ""),
     "package_graph": ("SH2-6", "", ""),
     "layout": ("SH2-5", "vesper-check-layout", "swapped"),
@@ -194,6 +196,13 @@ MODULES = {
     "lib": ("SH5-12", "", ""),
     "atomic_file": ("SH5-12", "", ""),
     "test_discovery": ("SH5-14", "", ""),
+    "native_aggregate_decisions": ("SH4-8", "", ""),
+    "compiler_modules": ("2", "", "goes with the hybrid"),
+    "swap_input": ("2", "", "goes with the hybrid"),
+    "test_engines": ("SH6-19", "", ""),
+    "source_analysis": ("G1-12", "", "tour playground"),
+    "browser_tour": ("G1-12", "", "tour playground"),
+    "native_clif_opt": ("G1-11", "", "new in #1466 (#1426); ported with the walk"),
 }
 
 
@@ -295,7 +304,7 @@ def main():
         w(f"| `{c}` | {crates[c]:,} | `{cls}` | {port} | {speed} | {left} | {lane} |\n")
 
     w(f"\n## Root compiler (`src/`, {sum(modules.values()):,} lines)\n\n")
-    w("Every module has an owner lane. SHn-m is wave n lane m; a bare number is an SH6 lane.\n\n")
+    w("Every module has an owner lane. SHn-m is wave n lane m; G1-m is gap wave 1 lane m; a bare number is an SH6 lane.\n\n")
     w("| Module | Lines | Owner lane | Vesper package | Status |\n|---|--:|---|---|---|\n")
     for m in sorted(modules, key=lambda m: -modules[m]):
         default = ("SH5-13", "vesper-driver-commands", "") if m.endswith("_commands") else ("**none**", "", "")
