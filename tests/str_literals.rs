@@ -58,9 +58,9 @@ fn only_static_text_may_be_returned_as_str() {
     ] {
         rejects(source, "E1530");
     }
-    // A view of a mutable local stays refused.
+    // A view of a mutable local freezes it while the view is in scope.
     rejects(
-        "fn main() -> u64 { let mut s = String::new(); s.push_str(\"x\"); let v = s.as_bytes(); v.len() }",
+        "fn main() -> u64 { let mut s = String::new(); let v = s.as_bytes(); s.push_str(\"x\"); v.len() }",
         "E1531",
     );
 }

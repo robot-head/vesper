@@ -71,6 +71,28 @@ fn random_and_replayed_sources_match_the_rust_build() {
 }
 
 #[test]
+fn replayed_byte_strings_stop_clamp_and_overrun_like_the_rust_build() {
+    // Flags clamp to 1 and bytes to 255; a 0 flag ends the string.
+    let mut src = Source::replay(&ChoiceTape::new(vec![1, 7, 5, 300, 0, 4]));
+    assert_eq!(src.draw_bytes(10), Ok(vec![7, 255]));
+    assert_eq!(src.realized_values(), &[1, 7, 1, 255, 0]);
+    assert_eq!(src.draw_u8(), Ok(4));
+
+    // At `max_len` bytes no further flag is drawn.
+    let mut src = Source::replay(&ChoiceTape::new(vec![1, 2, 1, 3, 1, 4]));
+    assert_eq!(src.draw_bytes(2), Ok(vec![2, 3]));
+    assert_eq!(src.realized_values(), &[1, 2, 1, 3]);
+    assert_eq!(src.draw_bytes(0), Ok(vec![]));
+    assert_eq!(src.draws(), 4);
+
+    // A tape that ends inside the string overruns; the draws before the
+    // overrun stay realized.
+    let mut src = Source::replay(&ChoiceTape::new(vec![1, 9, 1]));
+    assert!(src.draw_bytes(10).is_err());
+    assert_eq!(src.realized_values(), &[1, 9, 1]);
+}
+
+#[test]
 fn tape_text_and_keys_match_the_rust_build() {
     let tape = ChoiceTape::new(vec![0, 1, 0xabc_def0, u64::MAX, 16]);
     assert_eq!(
@@ -82,6 +104,20 @@ fn tape_text_and_keys_match_the_rust_build() {
     let spaced = "\u{3000}vesper-crucible-tape/1\u{a0}\r\n\u{2009}ff\u{85}\n\n";
     assert_eq!(ChoiceTape::from_text(spaced).unwrap().values, vec![0xff]);
     assert!(ChoiceTape::from_text("vesper-crucible-tape/1\nf\u{a0}f\n").is_err());
+    // Every byte outside 0-9 and a-f is an invalid digit, the ones between
+    // `9` and `a` (`W` to the backtick) and `A-F` included.
+    for c in (0u8..=127).filter(|c| !matches!(c, b'0'..=b'9' | b'a'..=b'f' | b'\n' | b'\r')) {
+        let text = format!("vesper-crucible-tape/1\n1{}\n", c as char);
+        if text.lines().nth(1).is_some_and(|l| l.trim() != "1") {
+            assert!(ChoiceTape::from_text(&text).is_err(), "{text:?}");
+        }
+    }
+    assert_eq!(
+        ChoiceTape::from_text("vesper-crucible-tape/1\n09af\n")
+            .unwrap()
+            .values,
+        vec![0x9af]
+    );
     let long = format!("  \u{2028}{}\n", "é".repeat(80));
     match ChoiceTape::from_text(&long) {
         Err(vesper_crucible::TapeError::UnknownHeader(shown)) => {

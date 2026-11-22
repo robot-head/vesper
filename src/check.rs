@@ -1075,10 +1075,12 @@ struct Checker<'a> {
     /// Places an enclosing `for` loop iterates: its body may read them but
     /// not write, lend `inout` or move them ([`for_sequences`]).
     loop_borrows: Vec<(Place, Span)>,
-    /// Bound views of immutable owned bindings: the viewed place, the view
-    /// binding's name and declaration span. While the view is in scope the
-    /// place cannot be moved (`E1531`).
-    view_sources: Vec<(Place, String, Span)>,
+    /// Bound views of owned or `inout` places: the viewed place, the span
+    /// of its binding (so a nested binding that shadows the name is not
+    /// frozen), the view binding's name and declaration span. While the
+    /// view is in scope the place cannot be written, lent `inout` or moved
+    /// (`E1531`).
+    view_sources: Vec<(Place, Span, String, Span)>,
     /// Result-range summaries of called functions ([`call_facts`]).
     result_ranges: std::cell::RefCell<call_facts::ResultRanges>,
     /// Nonzero while a shift amount or a divisor is checked: its `+`, `-`
@@ -1723,10 +1725,19 @@ impl Checker<'_> {
         {
             transfer_allowed = false;
         }
-        if matches!(usage, Usage::Own)
-            && self.mode(&ty) != Mode::Copy
+        if (matches!(usage, Usage::Borrow(Pass::Inout))
+            || (matches!(usage, Usage::Own) && self.mode(&ty) != Mode::Copy))
             && !self.view_sources.is_empty()
-            && !self.check_view_sources(p, env, &span)
+            && !self.check_view_sources(
+                p,
+                env,
+                &span,
+                if matches!(usage, Usage::Borrow(Pass::Inout)) {
+                    "write or lend 'inout'"
+                } else {
+                    "move"
+                },
+            )
         {
             transfer_allowed = false;
         }
@@ -2032,7 +2043,7 @@ impl Checker<'_> {
                             self.valid_type(ty, &self.generics.clone(), value.span.clone());
                             let bound_view = !*mutable
                                 && matches!(pat.kind, PatternKind::Bind(_))
-                                && self.bind_view(value, env);
+                                && self.bind_view(value, env, true);
                             let actual = self.expr_expected(value, env, Usage::Own, ty);
                             self.expect_type(ty, &actual, value.span.clone());
                             let t = if *ty == Type::Infer {
@@ -2073,6 +2084,37 @@ impl Checker<'_> {
                             let fact = self.integer_fact(value, env);
                             let nonzero = self.nonzero(value, env);
                             let bounds = self.integer_bounds(value, env);
+                            // Rebinding a name bound earlier in this block
+                            // drops its value, so a bound view of it must
+                            // have ended (a nested block's shadow keeps the
+                            // outer binding alive and is not a rebinding).
+                            if bound_view
+                                && let PatternKind::Bind(n) = &pat.kind
+                                && self.view_shadows_source(value, n, env)
+                            {
+                                self.error(
+                                    "E1531",
+                                    format!("cannot rebind '{n}' to a view of itself: the view would outlive the value it reads"),
+                                    pat.span.clone(),
+                                );
+                                self.help("Bind the view to a new name; the source then stays alive until the view's block ends.");
+                            }
+                            if !self.view_sources.is_empty() {
+                                for n in pattern_names(pat) {
+                                    let outer = original
+                                        .bindings
+                                        .get(&n)
+                                        .zip(env.bindings.get(&n))
+                                        .is_some_and(|(a, b)| a.span == b.span);
+                                    if env.bindings.contains_key(&n) && !outer {
+                                        let p = Place {
+                                            root: n,
+                                            path: vec![],
+                                        };
+                                        self.check_view_sources(&p, env, &pat.span, "rebind");
+                                    }
+                                }
+                            }
                             self.bind(pat, &t, env);
                             if let PatternKind::Bind(n) = &pat.kind {
                                 let binding = env.bindings.get_mut(n).unwrap();

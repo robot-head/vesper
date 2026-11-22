@@ -318,13 +318,15 @@ fn rejected(source: &str, code: &str, needle: &str) {
 
 #[test]
 fn views_are_second_class() {
+    // A bound view of an `inout` string freezes it while it is in scope
+    // (tests/slice_values.rs); a mutable view binding stays refused.
     rejected(
-        "fn f(inout s: String) -> u64 { let v = s.as_str(); 0 }",
+        "fn f(inout s: String) -> u64 { let v = s.as_str(); s.push_str(\"x\"); v.len() }",
         "E1531",
-        "second-class",
+        "while the view 'v' of it is in scope",
     );
     rejected(
-        "fn f(inout s: String) -> u64 { let v = s[0..1]; 0 }",
+        "fn f(inout s: String) -> u64 { let mut v = s[0..1]; 0 }",
         "E1531",
         "second-class",
     );

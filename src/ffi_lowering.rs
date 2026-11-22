@@ -87,6 +87,8 @@ use vesper_ffi::sys::{
     ValueType,
 };
 
+#[path = "ffi_lowering/buffers.rs"]
+mod buffers;
 #[path = "ffi_lowering/cpu.rs"]
 pub mod cpu;
 pub mod drops;
@@ -123,6 +125,9 @@ pub const NULL_HANDLE_TRAP: u8 = 6;
 /// Trap code of a `CStr` argument whose terminated copy could not be
 /// allocated.
 pub const CSTR_ALLOC_TRAP: u8 = 7;
+/// Trap code of a mapping result whose sequence header could not be
+/// allocated.
+pub const MAPPING_ALLOC_TRAP: u8 = 8;
 
 /// The C function that yields the calling thread's OS error code on
 /// `triple`, and whether it returns the address of `errno` (Unix) rather
@@ -194,6 +199,9 @@ pub enum FfiErrorKind {
     /// Source code builds, destructures or compares an extern-type handle,
     /// which only its library can create and inspect.
     HandleMisuse,
+    /// Source code could grow, shrink, move or replace the memory of a
+    /// pinned buffer or a mapping, whose address C may hold.
+    BufferMisuse,
     /// `Realtime` code may not call foreign code (§32.2).
     Realtime,
     /// The ordinary checker rejected the elaborated module.
@@ -798,6 +806,22 @@ impl ForeignChecked {
                         .split_once('$')
                         .map_or(request.operation.as_str(), |(s, _)| s)
                         .to_owned();
+                    // The evaluator has no stable addresses to lend C.
+                    if self
+                        .plan
+                        .libraries
+                        .get(&request.effect.name)
+                        .and_then(|l| l.descriptor.function(&symbol))
+                        .is_some_and(|f| f.uses_foreign_memory())
+                    {
+                        return Err(FfiError::new(
+                            FfiErrorKind::Codegen,
+                            format!(
+                                "{library}::{symbol} takes or returns foreign memory viewed in place (a pinned buffer or a mapping), which only native code lends; the evaluator refuses it"
+                            ),
+                            None,
+                        ));
+                    }
                     let mut call = EvalCall {
                         library,
                         symbol,
@@ -992,6 +1016,8 @@ pub fn check_module(module: &Module, imports: &Imports) -> Result<ForeignChecked
         return Err(e);
     }
     drops::check_rows(&checked.world)?;
+    check_isolated_workers(&checked.world, imports, &generated)?;
+    buffers::check(&second, &checked.expression_types, &generated)?;
     let mut plan = Plan::default();
     for (name, import) in &imports.libraries {
         plan.libraries.insert(
@@ -1008,6 +1034,52 @@ pub fn check_module(module: &Module, imports: &Imports) -> Result<ForeignChecked
         calls,
         plan,
     })
+}
+
+/// A `parallel_for` body may carry `Ffi[Lib]` only for a direct library
+/// (§15.4): an isolated call needs the calling thread's protection-key
+/// gate, which a pool worker does not have (`E0823`).
+fn check_isolated_workers(
+    world: &World,
+    imports: &Imports,
+    generated: &types::Generated,
+) -> Result<(), FfiError> {
+    let mut diagnostics = vec![];
+    for (span, body) in crate::atomics::worker_bodies(world) {
+        let Some(f) = world.functions.get(&body) else {
+            continue;
+        };
+        for effect in &f.effects.instances {
+            let isolated = effect
+                .name
+                .strip_prefix(EFFECT_PREFIX)
+                .and_then(|library| imports.libraries.get(library))
+                .is_some_and(|import| import.handler == Handler::IsolatedMpk);
+            if isolated {
+                diagnostics.push(
+                    Diagnostic::new(
+                        "E0823",
+                        generated.demangle(&format!(
+                            "the body of 'parallel_for' may not call the isolated library {}",
+                            effect.name
+                        )),
+                        span.clone(),
+                    )
+                    .with_help("call isolated libraries on the calling thread, outside the loop"),
+                );
+            }
+        }
+    }
+    if diagnostics.is_empty() {
+        return Ok(());
+    }
+    let mut e = FfiError::new(
+        FfiErrorKind::Check,
+        format!("{} semantic error(s)", diagnostics.len()),
+        None,
+    );
+    e.diagnostics = diagnostics;
+    Err(e)
 }
 
 fn slice_length(
@@ -1504,6 +1576,14 @@ pub fn describe_parameter(p: &ParameterType) -> String {
             format!("{} {}", access.keyword(), handle.name())
         }
         ParameterType::Value(v) => describe_value(v),
+        ParameterType::Pinned { element, access } => format!(
+            "{} Pinned[{}]",
+            match access {
+                Access::In => "in",
+                Access::Inout => "inout",
+            },
+            element.name()
+        ),
         ParameterType::Pointer {
             pointee,
             access,

@@ -5,6 +5,8 @@
 mod check_harness;
 #[path = "common/check_words.rs"]
 mod check_words;
+#[path = "common/corpus_shard.rs"]
+mod corpus_shard;
 #[path = "common/ir_words.rs"]
 mod ir_words;
 #[path = "common/wasm_words.rs"]
@@ -177,7 +179,8 @@ fn main() -> u64 { let mut s = ChunkSeq::new[u64](); s.push(1); s.push(2); s.pus
 #[test]
 fn sequences_and_strings_run_like_the_evaluator() {
     let o = &configs()[0];
-    for (i, src) in SEED_PROGRAMS.iter().enumerate() {
+    let shard = corpus_shard::Shard::from_environment();
+    for (i, src) in shard.keep(SEED_PROGRAMS.iter().enumerate()) {
         let p = vesper::parser::parse(src);
         let c = vesper::check::check(&p.module);
         assert!(c.diagnostics.is_empty(), "#{i}: {:?}", c.diagnostics);

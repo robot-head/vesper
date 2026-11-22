@@ -1522,6 +1522,11 @@ fn define_instances_observed_with_trace<M: Module>(
         linkage.normalize_references(&mut ctx.func);
         if operands_only {
             crate::native_clif_opt::run(&mut ctx.func);
+            let simd = matches!(
+                m.isa().triple().architecture,
+                target_lexicon::Architecture::X86_64 | target_lexicon::Architecture::Aarch64(_)
+            );
+            crate::native_vectorize::run(&mut ctx.func, simd);
         }
         // No JIT caller reads the CLIF text, and printing it costs as much
         // as half of Cranelift's own work on a large function (#1151).
@@ -5652,12 +5657,19 @@ impl<M: Module> Codegen<'_, '_, M> {
                 .map(|id| registers.get(id).map(|v| v.as_u32()))
                 .collect(),
         };
+        // A site names an instruction of the program's own graph. A graph
+        // the walk rewrote first (small enums as words, #1330) has other
+        // instructions at those indices, so its requests carry no site.
+        let function = match self.program.functions.get(&f.name) {
+            Some(g) if std::ptr::eq(g, f) => f.name.as_str(),
+            _ => "",
+        };
         let (answer, effects) = crate::codegen_swap::walk::instruction(
             &mut self.b,
             &mut *self.m,
             self.world,
             self.program,
-            (&f.name, block, index, inst),
+            (function, block, index, inst),
             values,
             ty,
             facts,
@@ -7207,7 +7219,9 @@ impl<M: Module> Codegen<'_, '_, M> {
         let Some(f) = self.world.functions.get(function) else {
             return Ok(None);
         };
-        if !f.generics.is_empty() || !f.effects.instances.is_empty() || f.effects.tail.is_some() {
+        // Capability and foreign effects need no evidence, so the body keeps
+        // the word ABI; any other worker row (`Alloc`) runs sequentially.
+        if !f.generics.is_empty() || f.effects.tail.is_some() || !capability_only(f) {
             return Ok(None);
         }
         let Some(&id) = self.ids.get(&instance_key(function, &BTreeMap::new())) else {
