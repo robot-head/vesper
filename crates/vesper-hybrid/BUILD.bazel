@@ -26,6 +26,10 @@ vesper_hybrid(
             "edit_src": "modules/optimize/src/lib.ves",
             "edits": {"    optimize_propose_split(in input, in names)\n": "    divergent_words(in input, in names)\n"},
         },
+        "hybrid_ir_opt": {
+            "edit_src": "modules/ir_opt/src/lib.ves",
+            "edits": {"    ir_opt_words(in input)\n": "    divergent_words(in input)\n"},
+        },
         "hybrid_parse": {
             "edit_src": "modules/parse/src/lib.ves",
             "edits": {"    if b {\n        1\n    } else {\n        0\n    }": "    if b {\n        0\n    } else {\n        1\n    }"},
@@ -76,6 +80,12 @@ vesper_hybrid(
             "//:std_arena_package",
             "//:std_intern_package",
         ],
+        "hybrid_ir_opt": [
+            "//:check_data_package",
+            "//:egraph_package",
+            "//:ir_opt_package",
+            "//:place_ir_package",
+        ],
         # The IR swap point's identity round trip (#1240).
         "hybrid_place_ir": [
             "//:check_data_package",
@@ -104,6 +114,7 @@ vesper_hybrid(
         "hybrid_codegen_export": "modules/codegen_export",
         "hybrid_ir_check": "modules/ir_check",
         "hybrid_ir_inline": "modules/ir_inline",
+        "hybrid_ir_opt": "modules/ir_opt",
         "hybrid_layout": "modules/layout",
         "hybrid_optimize": "modules/optimize",
         "hybrid_parse": "modules/parse",

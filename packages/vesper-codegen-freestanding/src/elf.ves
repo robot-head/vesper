@@ -1,0 +1,627 @@
+// Little-endian ELF64 executables (src/freestanding/elf.rs):
+// `write_executable` and `read_executable`.
+
+use self::util::{
+    add,
+    sub,
+    max64,
+    grow,
+    push16,
+    push32,
+    push64,
+    put_str,
+    rd8,
+    rd16,
+    rd32,
+    rd64
+};
+use self::obj::{
+    section_header
+};
+
+// "no such row" (util.ves).
+const NONE64: u64 = 18446744073709551615;
+
+const PT_LOAD: u32 = 1;
+const PF_X: u32 = 1;
+const PF_W: u32 = 2;
+const PF_R: u32 = 4;
+
+pub fn pf_rx() -> u32 {
+    PF_R | PF_X
+}
+
+pub fn pf_rw() -> u32 {
+    PF_R | PF_W
+}
+const PAGE: u64 = 0x1000;
+
+const SHT_PROGBITS: u64 = 1;
+const SHT_SYMTAB: u64 = 2;
+const SHT_STRTAB: u64 = 3;
+const SHT_NOBITS: u64 = 8;
+const SHF_WRITE: u64 = 1;
+const SHF_ALLOC: u64 = 2;
+const SHF_EXECINSTR: u64 = 4;
+const SHN_ABS: u16 = 0xfff1;
+
+// Output section names (link.rs `OUT_NAMES` and `.stack`).
+pub fn section_name(i: u64) -> Str {
+    if i == 0 {
+        ".text"
+    } else if i == 1 {
+        ".rodata"
+    } else if i == 2 {
+        ".data"
+    } else if i == 3 {
+        ".bss"
+    } else {
+        ".stack"
+    }
+}
+
+// One output section (`OutSection`): its data is `data[data_at..data_at +
+// data_len]` (nothing when `nobits`).
+pub copy struct OutSec {
+    name: u64,
+    address: u64,
+    data_at: u64,
+    data_len: u64,
+    mem_bytes: u64,
+    nobits: bool,
+    writable: bool,
+    executable: bool,
+}
+
+// One `PT_LOAD` over sections `first..end` (`OutSegment`).
+pub copy struct OutSeg {
+    first: u64,
+    end: u64,
+    flags: u32,
+}
+
+// A `.symtab` symbol (`OutSymbol`); its name is `names[name_at..name_at +
+// name_len]`; `section` is an index into the section list or NONE64 for an
+// absolute symbol.
+pub copy struct OutSym {
+    name_at: u64,
+    name_len: u64,
+    value: u64,
+    size: u64,
+    global: bool,
+    function: bool,
+    section: u64,
+}
+
+// `(vaddr, file offset, file bytes, memory bytes)` of a written segment.
+pub copy struct Placement {
+    vaddr: u64,
+    offset: u64,
+    file_bytes: u64,
+    mem_bytes: u64,
+}
+
+fn s_at(in secs: ChunkSeq[OutSec], i: u64) -> OutSec {
+    match secs.try_get(i) {
+        Option::Some(s) => s,
+        Option::None => OutSec {
+            name: 0,
+            address: 0,
+            data_at: 0,
+            data_len: 0,
+            mem_bytes: 0,
+            nobits: true,
+            writable: false,
+            executable: false
+        },
+    }
+}
+
+fn append_name(inout t: ChunkSeq[u8], in s: Slice[u8]) -> u32 {
+    let at = wrapping_u32(t.len());
+    t.extend(in s);
+    t.push(0);
+    at
+}
+
+fn place(inout out: ChunkSeq[u8], in data: ChunkSeq[u8], align: u64) -> u64 {
+    let len = out.len();
+    if align <= 1 {
+        out.extend(in data.as_slice());
+        return len;
+    }
+    let at = if len % align == 0 {
+        len
+    } else {
+        wrapping_mul(add(len / align, 1), align)
+    };
+    out.resize(at, 0);
+    out.extend(in data.as_slice());
+    at
+}
+
+// `elf::write_executable`. Returns the bytes; `placements` gets one row per
+// segment.
+pub fn write_executable(
+    machine: u16,
+    e_flags: u32,
+    entry: u64,
+    in secs: ChunkSeq[OutSec],
+    in data: ChunkSeq[u8],
+    in segs: ChunkSeq[OutSeg],
+    in names: ChunkSeq[u8],
+    in syms: ChunkSeq[OutSym],
+    inout placements: ChunkSeq[Placement]
+) -> ChunkSeq[u8] {
+    let phnum = segs.len();
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    out.resize(add(64, wrapping_mul(phnum, 56)), 0);
+    let mut file_offsets: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    file_offsets.resize(secs.len(), 0);
+    for k in 0..phnum {
+        let seg = match segs.try_get(k) {
+            Option::Some(v) => v,
+            Option::None => OutSeg {
+                first: 0,
+                end: 0,
+                flags: 0
+            },
+        };
+        let first = s_at(in secs, seg.first);
+        let mut off = out.len();
+        let want = first.address % PAGE;
+        if off % PAGE != want {
+            off = add(off, (add(want, sub(PAGE, off % PAGE))) % PAGE);
+        }
+        out.resize(off, 0);
+        let seg_base = first.address;
+        let mut file_end = off;
+        let mut mem_end = seg_base;
+        for i in seg.first..seg.end {
+            let s = s_at(in secs, i);
+            let at = add(off, sub(s.address, seg_base));
+            let ok = file_offsets.try_set(i, at);
+            if !s.nobits {
+                out.resize(at, 0);
+                out.extend(in data[s.data_at..add(s.data_at, s.data_len)]);
+                file_end = add(at, s.data_len);
+            }
+            mem_end = max64(mem_end, add(s.address, s.mem_bytes));
+        }
+        placements
+            .push(
+            Placement {
+                vaddr: seg_base,
+                offset: off,
+                file_bytes: sub(file_end, off),
+                mem_bytes: sub(mem_end, seg_base)
+            }
+        );
+    }
+    // String tables and symbols.
+    let mut shstrtab: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    shstrtab.push(0);
+    let mut sh_names: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..secs.len() {
+        sh_names
+            .push(append_name(inout shstrtab, in section_name(s_at(in secs, i).name).as_bytes()));
+    }
+    let symtab_name = append_name(inout shstrtab, in ".symtab".as_bytes());
+    let strtab_name = append_name(inout shstrtab, in ".strtab".as_bytes());
+    let shstrtab_name = append_name(inout shstrtab, in ".shstrtab".as_bytes());
+    let mut strtab: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    strtab.push(0);
+    let mut symtab: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    symtab.resize(24, 0);
+    let mut locals: u64 = 0;
+    for pass in 0..2 {
+        for i in 0..syms.len() {
+            let s = match syms.try_get(i) {
+                Option::Some(v) => v,
+                Option::None => OutSym {
+                    name_at: 0,
+                    name_len: 0,
+                    value: 0,
+                    size: 0,
+                    global: false,
+                    function: false,
+                    section: NONE64
+                },
+            };
+            if s.global == (pass == 1) {
+                if !s.global {
+                    locals = add(locals, 1);
+                }
+                let name = append_name(
+                    inout strtab,
+                    in names[s.name_at..add(s.name_at, s.name_len)]
+                );
+                push32(inout symtab, name);
+                let bind: u8 = if s.global {
+                    1
+                } else {
+                    0
+                };
+                let kind: u8 = if s.function {
+                    2
+                } else {
+                    0
+                };
+                symtab.push((bind << 4) | kind);
+                symtab.push(0);
+                let shndx: u16 = if s.section == NONE64 {
+                    SHN_ABS
+                } else {
+                    wrapping_u16(add(s.section, 1))
+                };
+                push16(inout symtab, shndx);
+                push64(inout symtab, s.value);
+                push64(inout symtab, s.size);
+            }
+        }
+    }
+    let first_global = add(1, locals);
+    let symtab_off = place(inout out, in symtab, 8);
+    let strtab_off = place(inout out, in strtab, 1);
+    let shstrtab_off = place(inout out, in shstrtab, 1);
+    let len = out.len();
+    let shoff = if len % 8 == 0 {
+        len
+    } else {
+        wrapping_mul(add(len / 8, 1), 8)
+    };
+    out.resize(shoff, 0);
+    let shnum = add(secs.len(), 4);
+    let z = grow(inout out, 64);
+    for i in 0..secs.len() {
+        let s = s_at(in secs, i);
+        let mut flags = SHF_ALLOC;
+        if s.writable {
+            flags = flags | SHF_WRITE;
+        }
+        if s.executable {
+            flags = flags | SHF_EXECINSTR;
+        }
+        let kind = if s.nobits {
+            SHT_NOBITS
+        } else {
+            SHT_PROGBITS
+        };
+        let name = match sh_names.try_get(i) {
+            Option::Some(v) => widen_u64(v),
+            Option::None => 0,
+        };
+        let off = match file_offsets.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        header_at(inout out, name, kind, flags, s.address, off, s.mem_bytes, 0, 0, 8, 0);
+    }
+    let strtab_index = add(secs.len(), 2);
+    header_at(
+        inout out,
+        widen_u64(symtab_name),
+        SHT_SYMTAB,
+        0,
+        0,
+        symtab_off,
+        symtab.len(),
+        strtab_index,
+        first_global,
+        8,
+        24
+    );
+    header_at(
+        inout out,
+        widen_u64(strtab_name),
+        SHT_STRTAB,
+        0,
+        0,
+        strtab_off,
+        strtab.len(),
+        0,
+        0,
+        1,
+        0
+    );
+    header_at(
+        inout out,
+        widen_u64(shstrtab_name),
+        SHT_STRTAB,
+        0,
+        0,
+        shstrtab_off,
+        shstrtab.len(),
+        0,
+        0,
+        1,
+        0
+    );
+    // ELF header.
+    let mut h: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    h.push(127);
+    h.push(69);
+    h.push(76);
+    h.push(70);
+    h.push(2);
+    h.push(1);
+    h.push(1);
+    h.push(0);
+    let pad = grow(inout h, 8);
+    push16(inout h, 2);
+    push16(inout h, machine);
+    push32(inout h, 1);
+    push64(inout h, entry);
+    push64(inout h, 64);
+    push64(inout h, shoff);
+    push32(inout h, e_flags);
+    push16(inout h, 64);
+    push16(inout h, 56);
+    push16(inout h, wrapping_u16(phnum));
+    push16(inout h, 64);
+    push16(inout h, wrapping_u16(shnum));
+    push16(inout h, wrapping_u16(sub(shnum, 1)));
+    let ok = out.try_copy_from(0, in h.as_slice());
+    for k in 0..phnum {
+        let seg = match segs.try_get(k) {
+            Option::Some(v) => v,
+            Option::None => OutSeg {
+                first: 0,
+                end: 0,
+                flags: 0
+            },
+        };
+        let p = match placements.try_get(k) {
+            Option::Some(v) => v,
+            Option::None => Placement {
+                vaddr: 0,
+                offset: 0,
+                file_bytes: 0,
+                mem_bytes: 0
+            },
+        };
+        let mut ph: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        push32(inout ph, PT_LOAD);
+        push32(inout ph, seg.flags);
+        push64(inout ph, p.offset);
+        push64(inout ph, p.vaddr);
+        push64(inout ph, p.vaddr);
+        push64(inout ph, p.file_bytes);
+        push64(inout ph, p.mem_bytes);
+        push64(inout ph, PAGE);
+        let ok2 = out.try_copy_from(add(64, wrapping_mul(k, 56)), in ph.as_slice());
+    }
+    out
+}
+
+// A section header with an address (`elf::write_executable`'s
+// `section_header`).
+fn header_at(
+    inout out: ChunkSeq[u8],
+    name: u64,
+    kind: u64,
+    flags: u64,
+    addr: u64,
+    off: u64,
+    size: u64,
+    link: u64,
+    info: u64,
+    align: u64,
+    entsize: u64
+) {
+    push32(inout out, wrapping_u32(name));
+    push32(inout out, wrapping_u32(kind));
+    push64(inout out, flags);
+    push64(inout out, addr);
+    push64(inout out, off);
+    push64(inout out, size);
+    push32(inout out, wrapping_u32(link));
+    push32(inout out, wrapping_u32(info));
+    push64(inout out, align);
+    push64(inout out, entsize);
+}
+
+// ----- read_executable -----------------------------------------------------------
+
+fn trunc(inout err: ChunkSeq[u8], at: u64) {
+    err.clear();
+    err.extend(in "truncated ELF at ".as_bytes());
+    push_dec_into(inout err, at);
+}
+
+fn push_dec_into(inout out: ChunkSeq[u8], x: u64) {
+    if x >= 10 {
+        push_dec_into(inout out, x / 10);
+    }
+    out.push(wrapping_u8(add(x % 10, 48)));
+}
+
+fn set_err(inout err: ChunkSeq[u8], in msg: Str) {
+    err.clear();
+    err.extend(in msg.as_bytes());
+}
+
+fn r16(in b: Slice[u8], at: u64, inout err: ChunkSeq[u8]) -> u64 {
+    match rd16(in b, at) {
+        Option::Some(v) => widen_u64(v),
+        Option::None => {
+            if err.len() == 0 {
+                trunc(inout err, at);
+            }
+            0
+        }
+    }
+}
+
+fn r32(in b: Slice[u8], at: u64, inout err: ChunkSeq[u8]) -> u64 {
+    match rd32(in b, at) {
+        Option::Some(v) => widen_u64(v),
+        Option::None => {
+            if err.len() == 0 {
+                trunc(inout err, at);
+            }
+            0
+        }
+    }
+}
+
+fn r64(in b: Slice[u8], at: u64, inout err: ChunkSeq[u8]) -> u64 {
+    match rd64(in b, at) {
+        Option::Some(v) => v,
+        Option::None => {
+            if err.len() == 0 {
+                trunc(inout err, at);
+            }
+            0
+        }
+    }
+}
+
+// `elf::read_executable` as result words: on success 0, entry, machine,
+// e_type, the `PT_LOAD` count and per segment (vaddr, offset, file bytes,
+// memory bytes, flags), then the symbol count and per symbol (name, value);
+// on failure 1 and the message.
+pub fn read_executable(in b: Slice[u8]) -> ChunkSeq[u8] {
+    let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    read_into(in b, inout out, inout err);
+    if err.len() != 0 {
+        let mut e: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        push64(inout e, 1);
+        put_str(inout e, in err.as_slice());
+        return e;
+    }
+    let mut r: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    push64(inout r, 0);
+    r.extend(in out.as_slice());
+    r
+}
+
+fn read_into(in b: Slice[u8], inout out: ChunkSeq[u8], inout err: ChunkSeq[u8]) {
+    if b
+        .len()
+        < 64
+        || rd8(in b, 0)
+        != 127
+        || rd8(in b, 1)
+        != 69
+        || rd8(in b, 2)
+        != 76
+        || rd8(in b, 3)
+        != 70 {
+        set_err(inout err, in "not an ELF file");
+        return;
+    }
+    if rd8(in b, 4) != 2 || rd8(in b, 5) != 1 {
+        set_err(inout err, in "not a little-endian ELF64 file");
+        return;
+    }
+    let e_type = r16(in b, 16, inout err);
+    let machine = r16(in b, 18, inout err);
+    let entry = r64(in b, 24, inout err);
+    let phoff = r64(in b, 32, inout err);
+    let shoff = r64(in b, 40, inout err);
+    let phentsize = r16(in b, 54, inout err);
+    let phnum = r16(in b, 56, inout err);
+    let shentsize = r16(in b, 58, inout err);
+    let shnum = r16(in b, 60, inout err);
+    if err.len() != 0 {
+        return;
+    }
+    if phnum > 0 && phentsize < 56 {
+        set_err(inout err, in "bad program header size");
+        return;
+    }
+    let mut segs: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut nseg: u64 = 0;
+    for i in 0..phnum {
+        let p = add(phoff, wrapping_mul(i, phentsize));
+        if p < phoff {
+            set_err(inout err, in "overflow");
+            return;
+        }
+        if r32(in b, p, inout err) == widen_u64(PT_LOAD) {
+            let flags = r32(in b, add(p, 4), inout err);
+            let offset = r64(in b, add(p, 8), inout err);
+            let vaddr = r64(in b, add(p, 16), inout err);
+            let filesz = r64(in b, add(p, 32), inout err);
+            let memsz = r64(in b, add(p, 40), inout err);
+            push64(inout segs, vaddr);
+            push64(inout segs, offset);
+            push64(inout segs, filesz);
+            push64(inout segs, memsz);
+            push64(inout segs, flags);
+            nseg = add(nseg, 1);
+        }
+        if err.len() != 0 {
+            return;
+        }
+    }
+    if shnum > 0 && shentsize < 64 {
+        set_err(inout err, in "bad section header size");
+        return;
+    }
+    let mut syms: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut nsym: u64 = 0;
+    for i in 0..shnum {
+        let s = add(shoff, wrapping_mul(i, shentsize));
+        let kind = r32(in b, add(s, 4), inout err);
+        let offset = r64(in b, add(s, 24), inout err);
+        let size = r64(in b, add(s, 32), inout err);
+        let link = r32(in b, add(s, 40), inout err);
+        let entsize = r64(in b, add(s, 56), inout err);
+        if err.len() != 0 {
+            return;
+        }
+        if kind == SHT_SYMTAB {
+            if entsize < 24 {
+                set_err(inout err, in "bad symbol size");
+                return;
+            }
+            let t = add(shoff, wrapping_mul(link, shentsize));
+            let str_off = r64(in b, add(t, 24), inout err);
+            let str_size = r64(in b, add(t, 32), inout err);
+            if err.len() != 0 {
+                return;
+            }
+            let str_end = add(str_off, str_size);
+            if str_end < str_off || str_off > str_end || str_end > b.len() {
+                set_err(inout err, in "truncated string table");
+                return;
+            }
+            let count = size / entsize;
+            for k in 0..count {
+                let at = add(offset, wrapping_mul(k, entsize));
+                let name_off = r32(in b, at, inout err);
+                let value = r64(in b, add(at, 8), inout err);
+                if err.len() != 0 {
+                    return;
+                }
+                if name_off > sub(str_end, str_off) {
+                    set_err(inout err, in "bad symbol name");
+                    return;
+                }
+                let start = add(str_off, name_off);
+                let mut end = start;
+                loop {
+                    if end >= str_end || rd8(in b, end) == 0 {
+                        break;
+                    }
+                    end = add(end, 1);
+                }
+                if end > start {
+                    put_str(inout syms, in b[start..end]);
+                    push64(inout syms, value);
+                    nsym = add(nsym, 1);
+                }
+            }
+        }
+    }
+    push64(inout out, entry);
+    push64(inout out, machine);
+    push64(inout out, e_type);
+    push64(inout out, nseg);
+    out.extend(in segs.as_slice());
+    push64(inout out, nsym);
+    out.extend(in syms.as_slice());
+}
