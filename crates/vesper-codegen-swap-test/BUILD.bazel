@@ -15,6 +15,7 @@ vesper_crate(
     ],
     test_timeouts = {
         "test/self_host_codegen_aggregates_drops": "long",
+        "test/self_host_codegen_seq": "long",
         "test/self_host_codegen_swap": "long",
         # SH4 lane 13 (#1287): the foreign-call emission differential.
         "test/self_host_ffi_emission": "long",
