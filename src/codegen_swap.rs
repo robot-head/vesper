@@ -94,7 +94,9 @@ pub const INSTRUCTION: u32 = 0;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Site<'a> {
     /// The lowered function (its `Program` key) being emitted; empty when
-    /// the request is not inside a Place IR graph.
+    /// the request is not inside a Place IR graph, or the walk emits a
+    /// rewritten copy of the graph (small enums as words, #1330) whose
+    /// indices are not the program's.
     pub function: &'a str,
     /// The block and instruction index in that function's graph
     /// (`u32::MAX` when the request is not one instruction).
