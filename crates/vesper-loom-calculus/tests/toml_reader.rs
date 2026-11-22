@@ -218,13 +218,25 @@ fn toml_cases_match_the_toml_crate() {
     }
 }
 
+/// The repository checkout, or `None` (with a note) when the test runs
+/// without it, as under Bazel, whose runfiles hold only declared inputs.
+fn repository() -> Option<std::path::PathBuf> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    if root.join("Cargo.lock").is_file() && root.join("packages").is_dir() {
+        Some(root)
+    } else {
+        eprintln!("no repository checkout next to the crate; not compared");
+        None
+    }
+}
+
 /// Every Loom.toml in the repository parses to the same tree.
 #[test]
 fn repository_manifests_match_the_toml_crate() {
-    let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
+    let Some(root) = repository() else { return };
     let mut seen = 0;
     for dir in ["packages", "crates", "examples"] {
-        let mut stack = vec![std::path::Path::new(root).join(dir)];
+        let mut stack = vec![root.join(dir)];
         while let Some(path) = stack.pop() {
             let Ok(entries) = std::fs::read_dir(&path) else {
                 continue;
@@ -391,10 +403,8 @@ fn rust_escape_ranges() -> Vec<(u32, u32)> {
 /// `VESPER_TOML_BLESS=1` rewrites it from the running toolchain.
 #[test]
 fn debug_escape_table_matches_the_rust_toolchain() {
-    let path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../packages/vesper-std/toml/src/escape.ves"
-    );
+    let Some(root) = repository() else { return };
+    let path = root.join("packages/vesper-std/toml/src/escape.ves");
     let (major, minor, update) = char::UNICODE_VERSION;
     let ranges = rust_escape_ranges();
     if std::env::var_os("VESPER_TOML_BLESS").is_some() {
@@ -417,9 +427,9 @@ fn debug_escape_table_matches_the_rust_toolchain() {
             write!(out, "{a:06x}{b:06x}").unwrap();
         }
         out.push_str("\";\n");
-        std::fs::write(path, out).unwrap();
+        std::fs::write(&path, out).unwrap();
     }
-    let text = std::fs::read_to_string(path).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
     let version = format!("\"{major}.{minor}.{update}\"");
     if !text.contains(&version) {
         eprintln!("escape.ves is for another Unicode version than {version}; not compared");
