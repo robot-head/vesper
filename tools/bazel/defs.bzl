@@ -262,7 +262,11 @@ def vesper_crate(
     )
 
     def execution_tags(label):
-        return test_tags.get(label, []) + ([] if "*" in remote_tests or label in remote_tests else ["no-remote-exec"])
+        # `self_host` marks the corpus differentials (test/self_host_*), which
+        # BuildBuddy runs as their own "Self-host differentials" check so
+        # neither check passes its one-hour limit (#1519).
+        self_host = ["self_host"] if label.split("/")[-1].startswith("self_host_") else []
+        return test_tags.get(label, []) + self_host + ([] if "*" in remote_tests or label in remote_tests else ["no-remote-exec"])
 
     def wrapped_test(label, path_binaries = [], **kwargs):
         # The rust_test itself is an implementation detail of the cargo_test
