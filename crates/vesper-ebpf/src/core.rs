@@ -666,6 +666,9 @@ impl CoreSpec {
         if self.kind == CoreKind::TypeIdLocal {
             return self.local_value_with(local_id);
         }
+        if modules.is_empty() {
+            return port::target_value(self, vmlinux);
+        }
         // the root is encoded once for every call below
         let (lt, text) = port::encode(&self.root);
         let cands = self.candidates_of(&lt, vmlinux, 0);
@@ -1089,9 +1092,40 @@ pub fn apply_with_modules(
 /// `vesper/src/core.ves`).
 #[cfg(vesper_port)]
 mod port {
-    use super::{CoreError, CoreSpec, LocalType};
+    use super::{CoreError, CoreSpec, LocalType, essential_name};
+    use crate::btf::Btf;
 
     /// `t` as the port's preorder word tree, with its names in a text pool.
+    /// [`CoreSpec::target_value_with`] without modules: one call into the
+    /// port, the root encoded into a buffer this thread reuses.
+    pub(super) fn target_value(spec: &CoreSpec, target: &Btf) -> Result<u64, CoreError> {
+        thread_local! {
+            static SCRATCH: std::cell::RefCell<(Vec<u64>, Vec<u8>)> =
+                const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
+        }
+        let (code, value, bad) = SCRATCH.with(|s| {
+            let (w, text) = &mut *s.borrow_mut();
+            w.clear();
+            text.clear();
+            node(&spec.root, w, text);
+            let (mut value, mut bad) = (0, 0);
+            let code = crate::port::ffi::core_target_value(
+                spec.kind.code().into(),
+                w,
+                text,
+                &spec.access,
+                &target.table,
+                &target.index,
+                target.strings(),
+                target.by_name(essential_name(spec.root.name())),
+                &mut value,
+                &mut bad,
+            );
+            (code, value, bad)
+        });
+        result(spec, code, value, bad)
+    }
+
     pub(super) fn encode(t: &LocalType) -> (Vec<u64>, Vec<u8>) {
         let mut w = Vec::with_capacity(64);
         let mut text = Vec::with_capacity(64);

@@ -1318,16 +1318,22 @@ fn concat4(inout d: Doc, a: u64, b: u64, c: u64, e: u64) -> u64 eff [Fail[FmtFai
     push_concat(inout d, in ids.as_slice())
 }
 
-// `word_used_as_name`: `effect`, `handle`, `sink` or `inout` after `.`,
-// `fn` or `let`, or before an infix operator or `?`, spaces as a name.
+// `word_used_as_name`: `effect`, `handle`, `sink`, `inout`, `copy` or
+// `affine` after `.`, `fn` or `let`, or before an infix operator or `?`,
+// spaces as a name; so do `copy (`, `copy [` and `affine (` except after
+// `@` or `@@` (`fn @copy (u64)`).
 fn word_used_as_name(has_prev: bool, prev: u8, c: u8, next: u8) -> bool {
-    (c == K_EFFECT || c == K_HANDLE || c == K_SINK || c == K_INOUT)
+    let modal = c == K_COPY || c == K_AFFINE;
+    (c == K_EFFECT || c == K_HANDLE || c == K_SINK || c == K_INOUT || modal)
         && (
         has_prev
             && (prev == K_DOT || prev == K_FN || prev == K_LET)
             || is_binary_operator(next)
             || next
             == K_QUESTION
+            || modal
+            && (next == K_L_PAREN || next == K_L_BRACKET)
+            && !(has_prev && (prev == K_AT || prev == K_AT_AT))
     )
 }
 

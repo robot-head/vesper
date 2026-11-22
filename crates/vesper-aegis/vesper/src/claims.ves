@@ -14,7 +14,8 @@ use self::reader::{
     rd,
     rd_u16,
     rd_u32,
-    unsupported
+    unsupported,
+    put
 };
 
 // src/claims.rs: the wire's architecture tags (TDX 1, SNP 2, CCA 3), the
@@ -28,6 +29,8 @@ const FLAGS_RESERVED: u64 = 4294967288;
 const MEASUREMENT_BYTES: u64 = 48;
 const DIGEST_BYTES: u64 = 32;
 const PREFIX_BYTES: u64 = 8;
+// `ct_eq` folds eight bytes at a time.
+const WORD_BYTES: u64 = 8;
 const CHANNEL_BINDING_BYTES: u64 = 48;
 // Claims and policy layouts (see check_policy).
 const CW_ARCH: u64 = 0;
@@ -66,8 +69,7 @@ const TCB_HIGH_SKIP: u64 = 4;
 // AegisAttestationClaimsWire::decode. Words: tee_arch_tag, tcb_svn,
 // enclave_flags. Bytes: mr_enclave_sha384, loom_lock_blake3,
 // olean_spec_mif, chan_binding_prefix.
-pub fn decode_wire(in b: Slice[u8], inout w: ChunkSeq[u64], inout d: ChunkSeq[u8])
-    -> Unit eff [Fail[AErr]] {
+pub fn decode_wire(in b: Slice[u8], inout w: Slice[u64]) -> Unit eff [Fail[AErr]] {
     let mut r = rd(0, b.len(), FORMAT_CLAIMS_WIRE);
     let tag = rd_u16(in b, inout r, 122);
     if tag < ARCH_TDX || tag > ARCH_CCA {
@@ -78,25 +80,39 @@ pub fn decode_wire(in b: Slice[u8], inout w: ChunkSeq[u64], inout d: ChunkSeq[u8
     if flags & FLAGS_RESERVED != 0 {
         unsupported(in r, 124, flags);
     }
-    w.push(tag);
-    w.push(tcb_svn);
-    w.push(flags);
-    arr(in b, inout r, MEASUREMENT_BYTES, 125, inout d);
-    arr(in b, inout r, DIGEST_BYTES, 126, inout d);
-    arr(in b, inout r, DIGEST_BYTES, 127, inout d);
-    arr(in b, inout r, PREFIX_BYTES, 128, inout d);
+    put(inout w, tag);
+    put(inout w, tcb_svn);
+    put(inout w, flags);
+    arr(in b, inout r, MEASUREMENT_BYTES, 125, inout w);
+    arr(in b, inout r, DIGEST_BYTES, 126, inout w);
+    arr(in b, inout r, DIGEST_BYTES, 127, inout w);
+    arr(in b, inout r, PREFIX_BYTES, 128, inout w);
     finish(in r);
 }
 
 // Whether `a[ai..ai + n]` equals `b[bi..bi + n]`, in time that depends on
-// `n` only: every byte pair is visited and folded with XOR and OR, with no
-// early exit (claims::ct_eq uses `subtle` for the same).
+// `n` only: every word and byte pair is visited and folded with XOR and
+// OR, with no early exit (claims::ct_eq uses `subtle` for the same). Eight
+// bytes at a time, then the tail; callers check both intervals first.
 pub fn ct_eq(in a: Slice[u8], ai: u64, in b: Slice[u8], bi: u64, n: u64) -> bool {
     let mut acc: u64 = 0;
-    for i in 0..n {
+    let words = n / WORD_BYTES;
+    for k in 0..words {
+        let at = wrapping_mul(k, WORD_BYTES);
+        acc = acc | (le_word(in a, wrapping_add(ai, at)) ^ le_word(in b, wrapping_add(bi, at)));
+    }
+    for i in wrapping_mul(words, WORD_BYTES)..n {
         acc = acc | (byte(in a, wrapping_add(ai, i)) ^ byte(in b, wrapping_add(bi, i)));
     }
     acc == 0
+}
+
+// The eight bytes at `i` as a little-endian word, or 0 past the end.
+pub fn le_word(in s: Slice[u8], i: u64) -> u64 {
+    match s.try_read_u64_le(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
 }
 
 // The word at `i`, or 0 past the end.
