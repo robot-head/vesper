@@ -72,7 +72,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                     "ChunkSeq in a freestanding image needs an allocator; the generated one uses the C library".into(),
                 );
             }
-            aot_runtime::define(self.m)?;
+            self.seq_define_runtime()?;
         }
         let mut signature = self.m.make_signature();
         signature
@@ -89,6 +89,11 @@ impl<M: Module> Codegen<'_, '_, M> {
         Ok(self.b.inst_results(call)[0])
     }
 
+    /// [`define_runtime`] from a `Codegen`.
+    fn seq_define_runtime(&mut self) -> Result<(), String> {
+        define_runtime(&mut self.b, self.m, self.world, Some(self.program))
+    }
+
     /// The address of the shared empty header (#1021): what `new` and
     /// `with_capacity(0)` return. It is `{0, 0, null}`, freeing it is a
     /// no-op and growing it allocates a fresh header, which generated code
@@ -103,7 +108,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                 "ChunkSeq in a freestanding image needs an allocator; the generated one uses the C library".into(),
             );
         }
-        aot_runtime::define(self.m)?;
+        self.seq_define_runtime()?;
         let Some(cranelift_module::FuncOrDataId::Data(id)) =
             self.m.get_name(aot_runtime::EMPTY_HEADER)
         else {
@@ -767,7 +772,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                             "ChunkSeq in a freestanding image needs an allocator; the generated one uses the C library".into(),
                         );
                     }
-                    aot_runtime::define(self.m)?;
+                    self.seq_define_runtime()?;
                 }
                 let linkage = if jit { Linkage::Import } else { Linkage::Local };
                 let id = self
@@ -1710,17 +1715,55 @@ impl<M: Module> Codegen<'_, '_, M> {
     }
 }
 
+/// [`aot_runtime::define`], through the `seq` hook when one is in effect
+/// (SH4 swap point, lane 9 #1283): the hook defines the same runtime in the
+/// lent module ([`crate::codegen_swap::seq::RUNTIME`], which reads no
+/// program, so drop glue outside a `Codegen` passes `None`). When the hook
+/// declines, or none is installed, the Rust emitter runs.
+pub(super) fn define_runtime<M: Module>(
+    b: &mut FunctionBuilder<'_>,
+    m: &mut M,
+    world: &World,
+    program: Option<&crate::ir::Program>,
+) -> Result<(), String> {
+    use crate::codegen_swap::{self as swap, Family};
+    if swap::hook(Family::Seq).is_some()
+        && !aot_runtime::defined(m)
+        && m.target_config().pointer_type() == types::I64
+    {
+        let windows = m.isa().triple().operating_system == target_lexicon::OperatingSystem::Windows;
+        let args = swap::seq::runtime_args(windows);
+        let none = crate::ir::Program::default();
+        let answer = swap::request(
+            Family::Seq,
+            b,
+            m,
+            world,
+            program.unwrap_or(&none),
+            swap::Site::NONE,
+            swap::seq::RUNTIME,
+            &args,
+            None,
+        )?;
+        if answer.is_some() {
+            return Ok(());
+        }
+    }
+    aot_runtime::define(m)
+}
+
 /// Calls a sequence runtime function (`vesper_seq_free`, `vesper_str_release`)
 /// from a generated drop helper, as [`Codegen::seq_runtime_call`] does.
 fn glue_runtime_call<M: Module>(
     b: &mut FunctionBuilder<'_>,
     m: &mut M,
+    world: &World,
     name: &str,
     args: &[ir::Value],
 ) -> Result<(), String> {
     let jit = std::any::type_name::<M>().contains("JITModule");
     if !jit {
-        aot_runtime::define(m)?;
+        define_runtime(b, m, world, None)?;
     }
     let mut signature = m.make_signature();
     signature
@@ -1782,13 +1825,13 @@ pub(super) fn emit_drop_glue<M: Module>(
             let data = b.ins().load(types::I64, MemFlags::new(), value, DATA);
             emit_drop_elements(b, m, world, data, len, &elem)?;
         }
-        glue_runtime_call(b, m, "vesper_seq_free", &[value])?;
+        glue_runtime_call(b, m, world, "vesper_seq_free", &[value])?;
         b.ins().jump(done, &[]);
         b.switch_to_block(done);
         return Ok(());
     }
     if crate::strings::is_string_type(&ty) {
-        return glue_runtime_call(b, m, "vesper_str_release", &[value]);
+        return glue_runtime_call(b, m, world, "vesper_str_release", &[value]);
     }
     if crate::fip::is_box_type(world, &ty) {
         return emit_drop_box_value(b, m, world, value, &ty);
