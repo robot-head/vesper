@@ -11,7 +11,7 @@ name: Rust census
 on:
   push:
     branches: [main]
-    paths: ['src/**', 'crates/**', 'scripts/rust-census.py', '.github/workflows/rust-census.yml']
+    paths: ['src/**', 'crates/**', 'tests/**', 'scripts/rust-census.py', '.github/workflows/rust-census.yml']
   workflow_dispatch:
 
 permissions:
@@ -42,6 +42,11 @@ jobs:
         run: |
           set -euo pipefail
           if git diff --quiet -- "$FILE"; then
+            # A refresh made obsolete by a later change (a revert, say) must
+            # not stay open to replace the current census.
+            for number in $(gh pr list --head "$BRANCH" --state open --json number --jq '.[].number'); do
+              gh pr close "$number" --delete-branch --comment "The census on main is current; this refresh is obsolete."
+            done
             echo "the census on main is current"
             exit 0
           fi

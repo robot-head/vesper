@@ -58,8 +58,12 @@ def blockers(number, base_ref, head, main, open_prs):
             reasons.append(f"it carries {len(shared)} commit(s) of open PR #{pr['number']}")
     if git("merge-tree", "--write-tree", main, head, check=False).returncode != 0:
         reasons.append("it conflicts with main")
+    # A lane that took main's census (the remedy below) still lists it in the
+    # three-dot diff when main refreshed it after the lane branched, so only a
+    # census that differs from current main counts.
     changed = set(git("diff", "--name-only", f"{main}...{head}").stdout.split())
-    if CENSUS in changed and changed != {CENSUS}:
+    census_differs = git("diff", "--quiet", main, head, "--", CENSUS, check=False).returncode != 0
+    if census_differs and CENSUS in changed and changed != {CENSUS}:
         reasons.append(f"it changes {CENSUS}, which only the census refresh PR updates: "
                        f"run `git checkout {main} -- {CENSUS}` and keep the STATUS edits "
                        "in scripts/rust-census.py")
