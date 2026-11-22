@@ -27,7 +27,10 @@ fn main() {
 #[cfg(feature = "vesper-port-divergent")]
 const EDITS: &[(&str, &str)] = &[
     // rng.rs: a different SplitMix64 increment.
-    ("0x9e3779b97f4a7c15)", "0x9e3779b97f4a7c17)"),
+    (
+        "r.word = wrapping_add(r.word, 0x9e3779b97f4a7c15);",
+        "r.word = wrapping_add(r.word, 0x9e3779b97f4a7c17);",
+    ),
     // source.rs draws: replayed values are no longer clamped to the bound.
     (
         "            value: min_u64(v, max)\n",
@@ -35,11 +38,14 @@ const EDITS: &[(&str, &str)] = &[
     ),
     // tape.rs text: hex digits a-f are written one letter off.
     (
-        "wrapping_u8(wrapping_add(d, 87))",
-        "wrapping_u8(wrapping_add(d, 88))",
+        "wrapping_u8(wrapping_add(d, HEX_LETTER_BIAS))",
+        "wrapping_u8(wrapping_add(d, HEX_LETTER_BIAS + 1))",
     ),
     // shrink.rs: invalid runs are accepted as reproducing failures.
-    ("    if outcome == 0 {\n", "    if outcome <= 1 {\n"),
+    (
+        "    if outcome == Outcome::FailedSameKind {\n",
+        "    if outcome <= Outcome::Invalid {\n",
+    ),
     // fuzz.rs: the "zero a value" mutation writes 1.
     ("self.cur.try_set(pos, 0);", "self.cur.try_set(pos, 1);"),
     // dpor.rs: unbounded DPOR adds every awake candidate, not the first.

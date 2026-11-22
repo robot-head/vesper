@@ -80,11 +80,17 @@ const CR: u8 = 13;
 const SPACE: u8 = 32;
 
 // `check_orphan`: true when legal; otherwise the message is appended to
-// txt and false is returned.
+// txt and false is returned. s.oob is set (and false returned) when the
+// trait or a type constructor reached is not declared, where the Rust
+// build panics; validated programs never reach it.
 pub fn orphan(inout s: S, c: u64) -> bool {
     let tr = sw(in s.cf_tref, c);
     let t = fa(in s, tr);
     let pkg = sw(in s.cf_pkg, c);
+    if t >= s.tr_id.len() {
+        s.oob = true;
+        return false;
+    }
     if sw(in s.tr_pkg, t) == pkg {
         return true;
     }
@@ -104,6 +110,10 @@ pub fn orphan(inout s: S, c: u64) -> bool {
         i = inc(i);
         let k = tg(in s, ty);
         if k == t_ctor() {
+            if fa(in s, ty) >= s.ct_id.len() {
+                s.oob = true;
+                return false;
+            }
             if sw(in s.ct_pkg, fa(in s, ty)) == pkg {
                 return true;
             }
@@ -169,7 +179,8 @@ fn heads_unify(inout s: S, a: u64, b: u64) -> u64 {
     }
 }
 
-// `conformance_env` of conformance c: an e_env node.
+// `conformance_env` of conformance c: an e_env node. s.oob is set when a
+// mode bound names a parameter c does not declare.
 pub fn conformance_env(inout s: S, c: u64) -> u64 {
     let params = sw(in s.cf_params, c);
     let np = nlen(in s, params);
@@ -197,6 +208,10 @@ pub fn conformance_env(inout s: S, c: u64) -> u64 {
             let bd = fb(in s, w);
             if tg(in s, ty) == t_var() && vkind(fa(in s, ty)) == 0 && tg(in s, bd) == m_const() {
                 let p = vidx(fa(in s, ty));
+                if p >= np {
+                    // The Rust build panics on an out-of-range parameter.
+                    s.oob = true;
+                }
                 let m = fa(in s, bd);
                 let old = sw(in bounds, p);
                 let nb = if old == none() || m < old {

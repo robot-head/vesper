@@ -1,0 +1,9 @@
+[package]
+name = "@vesper/place-ir"
+version = "0.1.0"
+edition = "2026"
+# Place IR data only computes: no I/O, clock or network (design §42.3).
+capability_ceiling = ["Fail", "Alloc"]
+
+[dependencies]
+"@vesper/check-data" = { version = "^0.1", path = "../vesper-check-data" }

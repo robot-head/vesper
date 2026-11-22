@@ -149,7 +149,38 @@ impl Origins {
         })
     }
 }
+/// The ownership and evidence diagnostics of `program`: [`rust_validate`],
+/// or the installed [`IrCheckTable`] (the hybrid build's Vesper IR check).
 pub fn validate(world: &World, program: &ir::Program) -> Vec<Diagnostic> {
+    (IR_CHECK_TABLE.get().unwrap_or(&RUST_IR_CHECK).validate)(world, program)
+}
+
+/// [`validate`] as a function table: the swap-in point of this module for
+/// the hybrid Stage 2 build (self-hosting SH2 lane 5, #1177), which installs
+/// `@vesper/ir-check` here. Nothing in the default compiler installs one, so
+/// it always runs [`rust_validate`]. An installed `validate` must return
+/// exactly what [`rust_validate`] returns (the hybrid's tests check it).
+#[derive(Debug, Clone, Copy)]
+pub struct IrCheckTable {
+    /// [`validate`].
+    pub validate: fn(&World, &ir::Program) -> Vec<Diagnostic>,
+}
+
+/// The Rust IR check, the default [`IrCheckTable`].
+pub const RUST_IR_CHECK: IrCheckTable = IrCheckTable {
+    validate: rust_validate,
+};
+
+static IR_CHECK_TABLE: std::sync::OnceLock<IrCheckTable> = std::sync::OnceLock::new();
+
+/// Replace [`RUST_IR_CHECK`] for the rest of the process. Only the first
+/// call takes effect; a later one returns its table back.
+pub fn install_ir_check(table: IrCheckTable) -> Result<(), IrCheckTable> {
+    IR_CHECK_TABLE.set(table)
+}
+
+/// [`validate`] by the Rust IR check, whatever table is installed.
+pub fn rust_validate(world: &World, program: &ir::Program) -> Vec<Diagnostic> {
     let mut diagnostics = evidence(program);
     for f in program.functions.values() {
         let mut checker = Flow {
@@ -162,6 +193,8 @@ pub fn validate(world: &World, program: &ir::Program) -> Vec<Diagnostic> {
             local_consumes: BTreeMap::new(),
             reservable: reservable(f),
             scrutinees: scrutinees(f),
+            callees: callees(f),
+            views: element_views(world, f),
         };
         checker.function(f);
         diagnostics.extend(checker.diagnostics);
@@ -282,6 +315,29 @@ struct Flow<'a> {
     reservable: BTreeSet<ValueId>,
     /// The values that a `match` terminator inspects ([`scrutinees`]).
     scrutinees: BTreeSet<ValueId>,
+    /// The values `f` calls indirectly ([`callees`]).
+    callees: BTreeSet<ValueId>,
+    /// The `try_get` values of element view matches ([`element_views`]).
+    views: BTreeMap<ValueId, Pass>,
+}
+/// The `try_get`/`try_get_mut` values of `f` that element view matches
+/// (§13) inspect, with how their `Some(x)` binds the element: an `in` or
+/// `inout` borrow its sequence keeps owning.
+fn element_views(world: &World, f: &FunctionIr) -> BTreeMap<ValueId, Pass> {
+    if world.element_views.is_empty() {
+        return BTreeMap::new();
+    }
+    f.blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .filter(|i| matches!(i.op, Op::Seq { .. }))
+        .filter_map(|i| {
+            world
+                .element_views
+                .get(&(i.span.start, i.span.end))
+                .map(|pass| (i.dest, *pass))
+        })
+        .collect()
 }
 /// The values `f` matches on. A by-value read of a borrowed slot's
 /// non-copy place that only a `match` inspects is a borrow (§4.3): the
@@ -291,6 +347,18 @@ fn scrutinees(f: &FunctionIr) -> BTreeSet<ValueId> {
         .iter()
         .filter_map(|b| match &b.terminator {
             crate::ir::Terminator::Match { value, .. } => Some(*value),
+            _ => None,
+        })
+        .collect()
+}
+/// The function values `f` calls. Calling a borrowed slot of a function
+/// type that is not `copy` (a lent function parameter, §4.2) reads it.
+fn callees(f: &FunctionIr) -> BTreeSet<ValueId> {
+    f.blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .filter_map(|i| match &i.op {
+            Op::Indirect { callee, .. } => Some(*callee),
             _ => None,
         })
         .collect()
@@ -642,6 +710,9 @@ impl Flow<'_> {
             }
         }
     }
+    fn element_view(&self, value: ValueId) -> Option<Pass> {
+        self.views.get(&value).copied()
+    }
     fn instruction(&mut self, s: &mut State, i: &Instruction) {
         let mut owned = true;
         let mut loan = None;
@@ -679,6 +750,16 @@ impl Flow<'_> {
                 {
                     pass = Pass::In;
                 }
+                if pass == Pass::Sink
+                    && path.is_empty()
+                    && self.callees.contains(&i.dest)
+                    && s.slots
+                        .get(root)
+                        .is_some_and(|slot| slot.pass != Pass::Sink)
+                    && matches!(&i.ty, Type::Function { mode, .. } if *mode != Mode::Copy)
+                {
+                    pass = Pass::In;
+                }
                 if s.slots.contains_key(root) || !self.world.functions.contains_key(root) {
                     for p in &places {
                         self.access(s, p, pass, &i.span);
@@ -701,7 +782,10 @@ impl Flow<'_> {
                     .map(|v| v.ty.clone())
                     .unwrap_or(Type::Infer);
                 // A borrowed scrutinee binds borrows of its payloads.
-                let pass = if self.scrutinees.contains(value)
+                let view = self.element_view(*value);
+                let pass = if let Some(pass) = view {
+                    pass
+                } else if self.scrutinees.contains(value)
                     && s.values.get(value).is_some_and(|v| !v.owned)
                 {
                     Pass::In
@@ -775,6 +859,16 @@ impl Flow<'_> {
                 }
             }
             Op::Tiled { args, .. } | Op::Seq { args, .. } | Op::Fip { args, .. } => {
+                // An element view's `try_get` (§13) names an element its
+                // sequence keeps owning.
+                if matches!(i.op, Op::Seq { .. })
+                    && self
+                        .world
+                        .element_views
+                        .contains_key(&(i.span.start, i.span.end))
+                {
+                    owned = false;
+                }
                 self.activate(s, args, &i.span);
                 for a in args {
                     if a.pass == Pass::Sink {
@@ -845,7 +939,16 @@ impl Flow<'_> {
                         None
                     }
                 });
-                self.consume(s, *callee, &i.span);
+                if let Some(v) = s.values.get_mut(callee)
+                    && !v.owned
+                    && matches!(&v.ty, Type::Function { mode, .. } if *mode != Mode::Copy)
+                {
+                    // A lent function parameter is read by its call (§4.2).
+                    v.consumed = true;
+                    v.loan = None;
+                } else {
+                    self.consume(s, *callee, &i.span);
+                }
                 self.activate(s, args, &i.span);
                 for a in args {
                     if a.pass == Pass::Sink {
@@ -928,20 +1031,22 @@ impl Flow<'_> {
         let mut out = a.clone();
         for (n, slot) in &b.slots {
             if let Some(old) = out.slots.get_mut(n) {
-                let x = self.mode(&old.ty) == Mode::Linear
-                    && old.pass == Pass::Sink
-                    && !old.moved.contains(&vec![]);
-                let y = self.mode(&slot.ty) == Mode::Linear
-                    && slot.pass == Pass::Sink
-                    && !slot.moved.contains(&vec![]);
+                // The cheap tests come first: `mode` is pure, so the order
+                // does not change the answer (#1331).
+                let x = old.pass == Pass::Sink
+                    && !old.moved.contains(&vec![])
+                    && self.mode(&old.ty) == Mode::Linear;
+                let y = slot.pass == Pass::Sink
+                    && !slot.moved.contains(&vec![])
+                    && self.mode(&slot.ty) == Mode::Linear;
                 if x != y {
                     self.caused(format!("linear place '{n}' has inconsistent ownership at a CFG join"), span.clone(), self.origins.slot(n), "Ownership of a linear place must agree on the incoming control-flow edges.");
                 }
                 old.moved.extend(slot.moved.clone());
             } else {
-                if self.mode(&slot.ty) == Mode::Linear
-                    && slot.pass == Pass::Sink
+                if slot.pass == Pass::Sink
                     && !slot.moved.contains(&vec![])
+                    && self.mode(&slot.ty) == Mode::Linear
                 {
                     self.caused(format!("linear place '{n}' survives only one CFG edge"), span.clone(), self.origins.slot(n), "An owned linear place cannot disappear on another incoming control-flow edge.");
                 }
@@ -950,7 +1055,7 @@ impl Flow<'_> {
         }
         for (id, value) in &b.values {
             if let Some(old) = out.values.get_mut(id) {
-                if self.mode(&old.ty) == Mode::Linear && old.owned && old.consumed != value.consumed
+                if old.owned && old.consumed != value.consumed && self.mode(&old.ty) == Mode::Linear
                 {
                     self.caused(format!("linear temporary %{id} has inconsistent ownership at a CFG join"), span.clone(), self.origins.value(*id), "Ownership of a linear temporary must agree on incoming control-flow edges.");
                 }
@@ -969,12 +1074,16 @@ impl Flow<'_> {
             return;
         }
         let mut initial = State::default();
+        // A lent closure's body (§4.2) borrows its captures `in`.
+        let lent = self.world.lent_closures.get(&f.name);
         for p in &f.params {
+            let borrowed =
+                p.pass == Pass::Sink && lent.is_some_and(|names| names.contains(&p.name));
             initial.slots.insert(
                 p.name.clone(),
                 SlotState {
                     ty: p.ty.clone(),
-                    pass: p.pass,
+                    pass: if borrowed { Pass::In } else { p.pass },
                     moved: BTreeSet::new(),
                 },
             );

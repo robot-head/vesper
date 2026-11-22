@@ -26,13 +26,51 @@ use self::index::{
     strings_equal,
     tok
 };
+use self::ascii::{
+    Ascii,
+    Utf8
+};
+
+// `BatchLimits::HARD` and the per-record `Limits` ceilings it enforces
+// (src/ndjson.rs).
+const HARD_MAX_INPUT_BYTES: u64 = 16777216;
+const HARD_MAX_RECORDS: u64 = 16384;
+const HARD_MAX_TOKENS: u64 = 1048576;
+const HARD_MAX_INDEX_BYTES: u64 = 67108864;
+const HARD_MAX_METADATA_BYTES: u64 = 4194304;
+const HARD_MAX_WORK: u64 = 536870912;
+const HARD_RECORD_INPUT_BYTES: u64 = 1048576;
+const HARD_RECORD_DEPTH: u64 = 128;
+const HARD_RECORD_STRING_BYTES: u64 = 1048576;
+// Work charges (src/ndjson.rs, src/event_columns.rs): three units per
+// input byte, 32 per record, and three comparisons of 24 units per name
+// byte.
+const INPUT_WORK_PER_BYTE: u64 = 3;
+const RECORD_WORK: u64 = 32;
+const COMPARE_STEP_WORK: u64 = 24;
+const NAME_COMPARISONS: u64 = 3;
+// `i64` magnitudes: i64::MAX, and |i64::MIN|.
+const I64_MAX: u64 = 0x7fffffffffffffff;
+const I64_MIN_MAGNITUDE: u64 = 0x8000000000000000;
+const U32_MAX: u64 = 0xffffffff;
+const U16_MAX: u64 = 0xffff;
+// A trace id decodes to at most 32 bytes (four packed words).
+const TRACE_ID_MAX_BYTES: u64 = 32;
+const WORD_BYTES: u64 = 8;
+const BYTE_MASK: u64 = 0xff;
+const DECIMAL_BASE: u64 = 10;
+// `next_decoded`'s end-of-string mark.
+const NO_CHAR: u64 = 0x110000;
+// UTF-8 lead tags, the continuation tag and payload mask, and the first
+// code points that need 2, 3 and 4 bytes.
+const LF_BYTE: u8 = 0x0a;
 
 fn max64() -> u64 {
-    18446744073709551615
+    0xffffffffffffffff
 }
 
 fn none() -> u64 {
-    18446744073709551615
+    0xffffffffffffffff
 }
 
 fn fault(code: u64, detail: u64, offset: u64, record: u64, line: u64) -> Unit eff [Fail[Fault]] {
@@ -64,11 +102,11 @@ fn digits_u64(in t: Slice[u8], s: u64, e: u64) -> Option[u64] {
             break;
         }
         let b = at(in t, i);
-        if b < 48 || b > 57 {
+        if b < Ascii::Zero || b > Ascii::Nine {
             return Option::None;
         }
-        let (lo, hi) = mul_wide(v, 10);
-        let d = wrapping_sub(b, 48);
+        let (lo, hi) = mul_wide(v, DECIMAL_BASE);
+        let d = wrapping_sub(b, Ascii::Zero);
         if hi != 0 || d > wrapping_sub(max64(), lo) {
             return Option::None;
         }
@@ -84,7 +122,7 @@ fn parse_u64(in t: Slice[u8], s: u64, e: u64) -> Option[u64] {
 
 // (negative, magnitude) of an `i64`.
 fn parse_i64(in t: Slice[u8], s: u64, e: u64) -> Option[(bool, u64)] {
-    let neg = at(in t, s) == 45;
+    let neg = at(in t, s) == Ascii::Minus;
     let from = if neg {
         wrapping_add(s, 1)
     } else {
@@ -93,12 +131,12 @@ fn parse_i64(in t: Slice[u8], s: u64, e: u64) -> Option[(bool, u64)] {
     match digits_u64(in t, from, e) {
         Option::Some(m) => {
             if neg {
-                if m > 9223372036854775808 {
+                if m > I64_MIN_MAGNITUDE {
                     Option::None
                 } else {
                     Option::Some((m != 0, m))
                 }
-            } else if m > 9223372036854775807 {
+            } else if m > I64_MAX {
                 Option::None
             } else {
                 Option::Some((false, m))
@@ -260,7 +298,7 @@ pub fn tile_decode(in doc: Doc, in input: Slice[u8], root: u64) -> TilePoint eff
         tile_fault(1, 4);
     }
     let (neg, m) = tile_int(in input, tok(in doc.tokens, found0), 0);
-    if !neg && m > 9223372036854775807 {
+    if !neg && m > I64_MAX {
         tile_fault(3, 0);
     }
     let ts = if neg {
@@ -268,14 +306,14 @@ pub fn tile_decode(in doc: Doc, in input: Slice[u8], root: u64) -> TilePoint eff
     } else {
         wrapping_i64(m)
     };
-    let latency = tile_unsigned(in input, tok(in doc.tokens, found1), 1, 4294967295);
-    let status = tile_unsigned(in input, tok(in doc.tokens, found2), 2, 65535);
-    let flags = tile_unsigned(in input, tok(in doc.tokens, found3), 3, 65535);
+    let latency = tile_unsigned(in input, tok(in doc.tokens, found1), 1, U32_MAX);
+    let status = tile_unsigned(in input, tok(in doc.tokens, found2), 2, U16_MAX);
+    let flags = tile_unsigned(in input, tok(in doc.tokens, found3), 3, U16_MAX);
     let trace = tok(in doc.tokens, found4);
     if trace.kind != Kind::String {
         tile_fault(2, 4);
     }
-    if trace.decoded_len > 32 {
+    if trace.decoded_len > TRACE_ID_MAX_BYTES {
         tile_fault(3, 4);
     }
     // The decoded trace id, little-endian into four words.
@@ -290,12 +328,12 @@ pub fn tile_decode(in doc: Doc, in input: Slice[u8], root: u64) -> TilePoint eff
         let mut a = s;
         loop {
             let (c, a2) = next_decoded(in input, a, e);
-            if c == 1114112 {
+            if c == NO_CHAR {
                 break;
             }
             let (len, b) = utf8_bytes(c);
             for k in 0..len {
-                let byte = bit_shr(b, wrapping_mul(k, 8)) & 255;
+                let byte = bit_shr(b, wrapping_mul(k, 8)) & BYTE_MASK;
                 put_word(inout w0, inout w1, inout w2, inout w3, n, byte);
                 n = wrapping_add(n, 1);
             }
@@ -327,26 +365,35 @@ pub fn tile_decode(in doc: Doc, in input: Slice[u8], root: u64) -> TilePoint eff
 
 // The UTF-8 bytes of scalar `c`, packed low byte first, and their count.
 fn utf8_bytes(c: u64) -> (u64, u64) {
-    if c < 128 {
+    if c < Utf8::TwoByteMin {
         (1, c)
-    } else if c < 2048 {
-        (2, (192 | (c >> 6)) | bit_shl(128 | (c & 63), 8))
-    } else if c < 65536 {
-        (3, (224 | (c >> 12)) | bit_shl(128 | ((c >> 6) & 63), 8) | bit_shl(128 | (c & 63), 16))
+    } else if c < Utf8::ThreeByteMin {
+        (2, (Utf8::Lead2Tag | (c >> 6)) | bit_shl(Utf8::Cont | (c & Utf8::ContPayload), 8))
+    } else if c < Utf8::FourByteMin {
+        (
+            3,
+            (Utf8::Lead3Tag | (c >> 12)) | bit_shl(
+                Utf8::Cont | ((c >> 6) & Utf8::ContPayload),
+                8
+            ) | bit_shl(Utf8::Cont | (c & Utf8::ContPayload), 16)
+        )
     } else {
         (
             4,
-            (240 | (c >> 18)) | bit_shl(128 | ((c >> 12) & 63), 8) | bit_shl(
-                128 | ((c >> 6) & 63),
-                16
-            ) | bit_shl(128 | (c & 63), 24)
+            (Utf8::Lead4Tag | (c >> 18)) | bit_shl(
+                Utf8::Cont | ((c >> 12) & Utf8::ContPayload),
+                8
+            ) | bit_shl(Utf8::Cont | ((c >> 6) & Utf8::ContPayload), 16) | bit_shl(
+                Utf8::Cont | (c & Utf8::ContPayload),
+                24
+            )
         )
     }
 }
 
 fn put_word(inout w0: u64, inout w1: u64, inout w2: u64, inout w3: u64, n: u64, byte: u64) {
-    let shifted = bit_shl(byte, wrapping_mul(n % 8, 8));
-    let q = n / 8;
+    let shifted = bit_shl(byte, wrapping_mul(n % WORD_BYTES, 8));
+    let q = n / WORD_BYTES;
     if q == 0 {
         w0 = w0 | shifted;
     } else if q == 1 {
@@ -415,7 +462,10 @@ pub fn event_check(in doc: Doc, in input: Slice[u8], root: u64, inout remaining:
         let name = tok(in doc.tokens, i);
         let v = wrapping_add(i, 1);
         let raw_len = wrapping_sub(wrapping_sub(name.end, name.start), 2);
-        let comparisons = checked_add(checked_mul(checked_mul(checked_add(raw_len, 1), 24), 3), 1);
+        let comparisons = checked_add(
+            checked_mul(checked_mul(checked_add(raw_len, 1), COMPARE_STEP_WORK), NAME_COMPARISONS),
+            1
+        );
         charge(inout remaining, comparisons, passes);
         // The same three comparisons for every name.
         let is_id = name_is(in input, name, in "id".as_bytes());
@@ -484,19 +534,19 @@ fn within(value: u64, ceiling: u64) -> Unit eff [Fail[Fault]] {
 
 // `BatchLimits::validate` against `BatchLimits::HARD`.
 pub fn ndjson_validate(b: BatchLimits, r: Limits) -> Unit eff [Fail[Fault]] {
-    within(b.max_input_bytes, 16777216);
-    within(b.max_records, 16384);
-    within(b.max_tokens, 1048576);
-    within(b.max_index_bytes, 67108864);
-    within(b.max_metadata_bytes, 4194304);
-    within(b.max_work, 536870912);
-    within(r.max_input_bytes, 1048576);
-    within(r.max_depth, 128);
-    within(r.max_tokens, 1048576);
-    within(r.max_string_bytes, 1048576);
-    within(r.max_total_string_bytes, 1048576);
-    within(r.max_work, 536870912);
-    within(r.max_index_bytes, 67108864);
+    within(b.max_input_bytes, HARD_MAX_INPUT_BYTES);
+    within(b.max_records, HARD_MAX_RECORDS);
+    within(b.max_tokens, HARD_MAX_TOKENS);
+    within(b.max_index_bytes, HARD_MAX_INDEX_BYTES);
+    within(b.max_metadata_bytes, HARD_MAX_METADATA_BYTES);
+    within(b.max_work, HARD_MAX_WORK);
+    within(r.max_input_bytes, HARD_RECORD_INPUT_BYTES);
+    within(r.max_depth, HARD_RECORD_DEPTH);
+    within(r.max_tokens, HARD_MAX_TOKENS);
+    within(r.max_string_bytes, HARD_RECORD_STRING_BYTES);
+    within(r.max_total_string_bytes, HARD_RECORD_STRING_BYTES);
+    within(r.max_work, HARD_MAX_WORK);
+    within(r.max_index_bytes, HARD_MAX_INDEX_BYTES);
 }
 
 fn initial_mul(a: u64, b: u64) -> u64 eff [Fail[Fault]] {
@@ -515,7 +565,7 @@ fn initial_add(a: u64, b: u64) -> u64 eff [Fail[Fault]] {
 }
 
 fn find_newline(in s: Slice[u8]) -> Option[u64] {
-    s.find_byte(10)
+    s.find_byte(LF_BYTE)
 }
 
 // Batch admission before any record: the record count, EOF line, record
@@ -526,7 +576,7 @@ pub fn ndjson_admit(in input: Slice[u8], b: BatchLimits, record_size: u64)
     if len > b.max_input_bytes {
         initial(1);
     }
-    let mut work = initial_mul(len, 3);
+    let mut work = initial_mul(len, INPUT_WORK_PER_BYTE);
     if work > b.max_work {
         initial(6);
     }
@@ -548,7 +598,7 @@ pub fn ndjson_admit(in input: Slice[u8], b: BatchLimits, record_size: u64)
     }
     let count = if len == 0 {
         0
-    } else if at(in input, wrapping_sub(len, 1)) != 10 {
+    } else if at(in input, wrapping_sub(len, 1)) != Ascii::Lf {
         initial_add(newlines, 1)
     } else {
         newlines
@@ -561,7 +611,7 @@ pub fn ndjson_admit(in input: Slice[u8], b: BatchLimits, record_size: u64)
     if metadata_bytes > b.max_metadata_bytes {
         initial(5);
     }
-    work = initial_add(initial_add(work, initial_mul(count, 32)), metadata_bytes);
+    work = initial_add(initial_add(work, initial_mul(count, RECORD_WORK)), metadata_bytes);
     if work > b.max_work {
         initial(6);
     }
@@ -578,7 +628,7 @@ fn here(in c: NdCursor, code: u64) -> Unit eff [Fail[Fault]] {
 }
 
 fn blank(b: u64) -> bool {
-    b == 32 || b == 9 || b == 13
+    b == Ascii::Space || b == Ascii::Tab || b == Ascii::Cr
 }
 
 // The frame at `c.start`: its end, payload end and the record's limits
@@ -599,7 +649,7 @@ pub fn ndjson_frame(in input: Slice[u8], inout c: NdCursor, b: BatchLimits, r: L
         && body_end
         > start
         && at(in input, wrapping_sub(body_end, 1))
-        == 13 {
+        == Ascii::Cr {
         wrapping_sub(body_end, 1)
     } else {
         body_end

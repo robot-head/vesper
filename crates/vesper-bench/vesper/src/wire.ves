@@ -7,6 +7,7 @@ use self::{
     WireErr
 };
 use self::util::{
+    BP_SCALE,
     add,
     gb,
     gu,
@@ -21,19 +22,42 @@ use self::wide::{
     w_udivrem
 };
 
-pub fn field_count() -> u64 {
-    9
+// PmuField::ALL order.
+enum Field: _ {
+    RefCycles,
+    InstructionsRetired,
+    L1dReadMisses,
+    LlcMisses,
+    BranchMispredicts,
+    SimdVecUopsRetired,
+    ArenaBumpBytes,
+    // The two 32-bit fields come last.
+    TmaBackendBoundSlotsBp,
+    IcacheRandOffsetBytes
 }
 
+const FIELD_COUNT: u64 = 9;
+// PmuFieldMask::ALL: one bit per field.
+const ALL_FIELDS: u16 = 511;
+// PMU_SAMPLE_WIRE_BYTES: one cache line.
+const WIRE_BYTES: u64 = 64;
+const WIDE_FIELD_BYTES: u64 = 8;
+const NARROW_FIELD_BYTES: u64 = 4;
+const NARROW_FIELD_MAX: u64 = 4294967295;
+const BYTE_BITS: u64 = 8;
+// icache_rand_offset_bytes is a cache-line multiple below MAX_OFFSET.
+const MAX_OFFSET: u64 = 4096;
+const CACHE_LINE_BYTES: u64 = 64;
+
 fn check_ranges(bp: u64, offset: u64) eff [Fail[WireErr]] {
-    if bp > 10000 {
+    if bp > BP_SCALE {
         Fail::raise(
             WireErr::BasisPointsOutOfRange {
                 value: bp
             }
         );
     }
-    if offset >= 4096 || rem(offset, 64) != 0 {
+    if offset >= MAX_OFFSET || rem(offset, CACHE_LINE_BYTES) != 0 {
         Fail::raise(
             WireErr::LayoutOffsetOutOfRange {
                 value: offset
@@ -50,30 +74,30 @@ pub fn do_wire_validate(in wire: PmuSampleWire) eff [Fail[WireErr]] {
 }
 
 fn field_value(in wire: PmuSampleWire, field: u64) -> u64 {
-    if field == 0 {
+    if field == Field::RefCycles {
         wire.ref_cycles
-    } else if field == 1 {
+    } else if field == Field::InstructionsRetired {
         wire.instructions_retired
-    } else if field == 2 {
+    } else if field == Field::L1dReadMisses {
         wire.l1d_read_misses
-    } else if field == 3 {
+    } else if field == Field::LlcMisses {
         wire.llc_misses
-    } else if field == 4 {
+    } else if field == Field::BranchMispredicts {
         wire.branch_mispredicts
-    } else if field == 5 {
+    } else if field == Field::SimdVecUopsRetired {
         wire.simd_vec_uops_retired
-    } else if field == 6 {
+    } else if field == Field::ArenaBumpBytes {
         wire.arena_bump_bytes
-    } else if field == 7 {
+    } else if field == Field::TmaBackendBoundSlotsBp {
         widen_u64(wire.tma_backend_bound_slots_bp)
     } else {
         widen_u64(wire.icache_rand_offset_bytes)
     }
 }
 
-// `PmuSampleWire::set`'s narrowing check: fields 7 and 8 are 32 bits.
+// `PmuSampleWire::set`'s narrowing check of the two 32-bit fields.
 fn check_width(field: u64, value: u64) eff [Fail[WireErr]] {
-    if field >= 7 && value > 4294967295 {
+    if field >= Field::TmaBackendBoundSlotsBp && value > NARROW_FIELD_MAX {
         Fail::raise(
             WireErr::FieldOverflow {
                 field: field
@@ -84,30 +108,30 @@ fn check_width(field: u64, value: u64) eff [Fail[WireErr]] {
 
 fn wire_of(in v: Slice[u64]) -> PmuSampleWire {
     PmuSampleWire {
-        ref_cycles: gu(in v, 0),
-        instructions_retired: gu(in v, 1),
-        l1d_read_misses: gu(in v, 2),
-        llc_misses: gu(in v, 3),
-        branch_mispredicts: gu(in v, 4),
-        simd_vec_uops_retired: gu(in v, 5),
-        arena_bump_bytes: gu(in v, 6),
-        tma_backend_bound_slots_bp: wrapping_u32(gu(in v, 7)),
-        icache_rand_offset_bytes: wrapping_u32(gu(in v, 8))
+        ref_cycles: gu(in v, Field::RefCycles),
+        instructions_retired: gu(in v, Field::InstructionsRetired),
+        l1d_read_misses: gu(in v, Field::L1dReadMisses),
+        llc_misses: gu(in v, Field::LlcMisses),
+        branch_mispredicts: gu(in v, Field::BranchMispredicts),
+        simd_vec_uops_retired: gu(in v, Field::SimdVecUopsRetired),
+        arena_bump_bytes: gu(in v, Field::ArenaBumpBytes),
+        tma_backend_bound_slots_bp: wrapping_u32(gu(in v, Field::TmaBackendBoundSlotsBp)),
+        icache_rand_offset_bytes: wrapping_u32(gu(in v, Field::IcacheRandOffsetBytes))
     }
 }
 
 pub fn do_wire_encode(in wire: PmuSampleWire) -> ChunkSeq[u8] eff [Fail[WireErr]] {
     do_wire_validate(in wire);
-    let mut bytes: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](64);
-    for field in 0..field_count() {
-        let width: u64 = if field >= 7 {
-            4
+    let mut bytes: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](WIRE_BYTES);
+    for field in 0..FIELD_COUNT {
+        let width: u64 = if field >= Field::TmaBackendBoundSlotsBp {
+            NARROW_FIELD_BYTES
         } else {
-            8
+            WIDE_FIELD_BYTES
         };
         let value = field_value(in wire, field);
         for k in 0..width {
-            bytes.push(wrapping_u8(wrapping_shr_u64(value, wrapping_u32(mul(8, k)))));
+            bytes.push(wrapping_u8(wrapping_shr_u64(value, wrapping_u32(mul(BYTE_BITS, k)))));
         }
     }
     bytes
@@ -115,24 +139,27 @@ pub fn do_wire_encode(in wire: PmuSampleWire) -> ChunkSeq[u8] eff [Fail[WireErr]
 
 pub fn do_wire_decode(in bytes: Slice[u8]) -> PmuSampleWire eff [Fail[WireErr]] {
     let len = bytes.len();
-    if len != 64 {
+    if len != WIRE_BYTES {
         Fail::raise(
             WireErr::Length {
                 len: widen_usize(len)
             }
         );
     }
-    let mut values: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](9);
+    let mut values: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](FIELD_COUNT);
     let mut offset: u64 = 0;
-    for field in 0..field_count() {
-        let width: u64 = if field >= 7 {
-            4
+    for field in 0..FIELD_COUNT {
+        let width: u64 = if field >= Field::TmaBackendBoundSlotsBp {
+            NARROW_FIELD_BYTES
         } else {
-            8
+            WIDE_FIELD_BYTES
         };
         let mut value: u64 = 0;
         for k in 0..width {
-            value = value | wrapping_shl_u64(gb(in bytes, add(offset, k)), wrapping_u32(mul(8, k)));
+            value = value | wrapping_shl_u64(
+                gb(in bytes, add(offset, k)),
+                wrapping_u32(mul(BYTE_BITS, k))
+            );
         }
         check_width(field, value);
         values.push(value);
@@ -146,9 +173,9 @@ pub fn do_wire_decode(in bytes: Slice[u8]) -> PmuSampleWire eff [Fail[WireErr]] 
 // `PmuSample::set`'s checks of one measured value.
 pub fn do_sample_check(field: u64, value: u64) eff [Fail[WireErr]] {
     check_width(field, value);
-    if field == 7 {
+    if field == Field::TmaBackendBoundSlotsBp {
         check_ranges(value, 0);
-    } else if field == 8 {
+    } else if field == Field::IcacheRandOffsetBytes {
         check_ranges(0, value);
     }
 }
@@ -157,8 +184,8 @@ pub fn do_sample_check(field: u64, value: u64) eff [Fail[WireErr]] {
 // `present`) are zero.
 pub fn do_wire_from_values(in values: Slice[u64], present: u64)
     -> PmuSampleWire eff [Fail[WireErr]] {
-    let mut v: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](9);
-    for field in 0..field_count() {
+    let mut v: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](FIELD_COUNT);
+    for field in 0..FIELD_COUNT {
         let value = if present & pow2(field) != 0 {
             gu(in values, field)
         } else {
@@ -173,7 +200,7 @@ pub fn do_wire_from_values(in values: Slice[u64], present: u64)
 }
 
 pub fn do_mask_check(bits: u16) eff [Fail[WireErr]] {
-    if bits & ~wrapping_u16(511) != 0 {
+    if bits & ~ALL_FIELDS != 0 {
         Fail::raise(
             WireErr::InvalidMask {
                 bits: bits
@@ -186,6 +213,6 @@ pub fn do_backend_bound_bp(backend_slots: u64, total_slots: u64) -> Option[u64] 
     if total_slots == 0 || backend_slots > total_slots {
         return Option::None;
     }
-    let (q, r) = w_udivrem(w_mul_u64(backend_slots, 10000), w_u64(total_slots));
+    let (q, r) = w_udivrem(w_mul_u64(backend_slots, BP_SCALE), w_u64(total_slots));
     Option::Some(q.lo)
 }

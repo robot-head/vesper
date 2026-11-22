@@ -358,9 +358,8 @@ pub(crate) fn secret_prelude(module: &Module) -> Module {
     if source.is_empty() {
         return Module::default();
     }
-    // Pad so that every prelude span lies after the module's spans.
-    let padded = format!("{}{source}", " ".repeat(end + 1));
-    let parsed = crate::parser::parse(&padded);
+    // Every prelude span lies after the module's spans.
+    let parsed = crate::integer_widths::parse_at(&source, end + 1);
     debug_assert!(
         parsed.diagnostics.is_empty(),
         "secret prelude: {:?}",
@@ -763,7 +762,10 @@ fn summarise(world: &World) -> Summaries {
 /// through an inferred parameter as public), and once with its inferred
 /// parameters secret too, which applies every other rule to the values its
 /// callers pass.
-pub(crate) fn check_world(world: &World) -> Vec<Diagnostic> {
+///
+/// Public for the differential test of its Vesper port
+/// (`tests/self_host_check_effects.rs`, self-hosting SH2 lane 8).
+pub fn check_world(world: &World) -> Vec<Diagnostic> {
     let summaries = summarise(world);
     let mut diagnostics = vec![];
     let mut graph: BTreeMap<String, Vec<(String, Span)>> = BTreeMap::new();

@@ -242,8 +242,10 @@ pub fn layout_of_adt(world: &World, adt: &Adt) -> Result<TiledLayout, String> {
 }
 
 /// Validates all `tiled(N) struct` declarations and misplaced `hot`/`cold`
-/// annotations in `world`.
-pub(crate) fn check_world_adts(world: &World) -> Vec<Diagnostic> {
+/// annotations in `world`. Public for the self-hosting differential (SH2
+/// lane 9, #1181).
+#[doc(hidden)]
+pub fn check_world_adts(world: &World) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
     for adt in world.adts.values() {
         if let Some(width) = adt.tile_width {

@@ -2,6 +2,7 @@
 name = "vesper-loom-cas"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
 description = "Vesper Loom immutable BLAKE3 content-addressed store (design section 8.2.6)"
 publish = false
 

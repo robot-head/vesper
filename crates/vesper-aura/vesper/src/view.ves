@@ -1,17 +1,10 @@
 // view.rs: decoding and validating an input tree.
 use self::codes::{
-    b_children,
-    b_depth,
-    b_nodes,
-    b_properties,
-    b_subscriptions,
-    b_teardown,
-    b_text,
-    b_total_text,
-    k_container,
-    max_u64,
-    none_id,
-    v_text
+    Budget,
+    ValueTag,
+    WidgetKind,
+    MAX_U64,
+    NONE_ID
 };
 use self::plan::{
     teardown
@@ -142,7 +135,7 @@ pub fn decode(inout t: Tree, in w: Slice[u64]) {
         t.nodes.push(node);
         t.keys.push(key);
         t.sorted.push(i);
-        t.parent.push(none_id());
+        t.parent.push(NONE_ID);
     }
 }
 
@@ -158,7 +151,7 @@ pub fn validate(inout t: Tree, lim: Lim, in text: Slice[u8]) -> Option[ViewFault
     }
     let n = t.nodes.len();
     if n > lim.nodes {
-        return Option::Some(ViewFault::Budget(b_nodes()));
+        return Option::Some(ViewFault::Budget(Budget::Nodes));
     }
     let mut dup: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
     sort_by_key(in t.keys, inout t.sorted, inout dup);
@@ -182,26 +175,26 @@ pub fn validate(inout t: Tree, lim: Lim, in text: Slice[u8]) -> Option[ViewFault
         let node = tnode(in t.nodes, i);
         // Every accepted tree must remain fully unmountable under the budget.
         let more = add(add(add(1, node.pcount), node.scount), node.ccount);
-        if teardown > wrapping_sub(max_u64(), more) {
-            return Option::Some(ViewFault::Budget(b_teardown()));
+        if teardown > wrapping_sub(MAX_U64, more) {
+            return Option::Some(ViewFault::Budget(Budget::Teardown));
         }
         teardown = add(teardown, more);
         if teardown > lim.patches {
-            return Option::Some(ViewFault::Budget(b_teardown()));
+            return Option::Some(ViewFault::Budget(Budget::Teardown));
         }
         if seq_u64(in dup, i) == 1 {
             return Option::Some(ViewFault::DuplicateKey(node.key));
         }
         if node.ccount > lim.children {
-            return Option::Some(ViewFault::Budget(b_children()));
+            return Option::Some(ViewFault::Budget(Budget::Children));
         }
         if node.pcount > lim.properties {
-            return Option::Some(ViewFault::Budget(b_properties()));
+            return Option::Some(ViewFault::Budget(Budget::Properties));
         }
         if node.scount > lim.subscriptions {
-            return Option::Some(ViewFault::Budget(b_subscriptions()));
+            return Option::Some(ViewFault::Budget(Budget::Subscriptions));
         }
-        if node.kind != k_container() && node.ccount != 0 {
+        if node.kind != WidgetKind::Container && node.ccount != 0 {
             return Option::Some(ViewFault::ChildrenOnLeaf(node.key));
         }
         for j in 0..node.pcount {
@@ -214,16 +207,16 @@ pub fn validate(inout t: Tree, lim: Lim, in text: Slice[u8]) -> Option[ViewFault
                     }
                 );
             }
-            if p.tag == v_text() {
+            if p.tag == ValueTag::Text {
                 if p.tlen > lim.text {
-                    return Option::Some(ViewFault::Budget(b_text()));
+                    return Option::Some(ViewFault::Budget(Budget::Text));
                 }
-                if total > wrapping_sub(max_u64(), p.tlen) {
-                    return Option::Some(ViewFault::Budget(b_total_text()));
+                if total > wrapping_sub(MAX_U64, p.tlen) {
+                    return Option::Some(ViewFault::Budget(Budget::TotalText));
                 }
                 total = add(total, p.tlen);
                 if total > lim.total {
-                    return Option::Some(ViewFault::Budget(b_total_text()));
+                    return Option::Some(ViewFault::Budget(Budget::TotalText));
                 }
             }
         }
@@ -240,7 +233,7 @@ pub fn validate(inout t: Tree, lim: Lim, in text: Slice[u8]) -> Option[ViewFault
         }
     }
     let root = tree_find(in t, t.root);
-    if root == none_id() {
+    if root == NONE_ID {
         return Option::Some(ViewFault::MissingRoot(t.root));
     }
     for i in 0..n {
@@ -248,7 +241,7 @@ pub fn validate(inout t: Tree, lim: Lim, in text: Slice[u8]) -> Option[ViewFault
         for j in 0..node.ccount {
             let child = seq_u64(in t.kids, add(node.cstart, j));
             let c = tree_find(in t, child);
-            if c == none_id() {
+            if c == NONE_ID {
                 return Option::Some(
                     ViewFault::MissingChild {
                         parent: node.key,
@@ -256,14 +249,14 @@ pub fn validate(inout t: Tree, lim: Lim, in text: Slice[u8]) -> Option[ViewFault
                     }
                 );
             }
-            if seq_u64(in t.parent, c) != none_id() {
+            if seq_u64(in t.parent, c) != NONE_ID {
                 return Option::Some(ViewFault::MultipleParents(child));
             }
             t.parent.try_set(c, i);
             t.kidx.push(c);
         }
     }
-    if seq_u64(in t.parent, root) != none_id() {
+    if seq_u64(in t.parent, root) != NONE_ID {
         return Option::Some(ViewFault::RootHasParent);
     }
     let mut seen_at: ChunkSeq[bool] = ChunkSeq::with_capacity[bool](n);
@@ -285,7 +278,7 @@ pub fn validate(inout t: Tree, lim: Lim, in text: Slice[u8]) -> Option[ViewFault
         stack.truncate(dec(top));
         depths.truncate(dec(top));
         if depth > lim.depth {
-            return Option::Some(ViewFault::Budget(b_depth()));
+            return Option::Some(ViewFault::Budget(Budget::Depth));
         }
         if seq_bool(in seen_at, i) {
             return Option::Some(ViewFault::CycleOrDisconnected);

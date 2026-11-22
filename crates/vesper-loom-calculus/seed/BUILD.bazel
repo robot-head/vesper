@@ -1,8 +1,8 @@
 # The frozen Rust seed copy of vesper-loom-calculus (package
 # vesper-loom-calculus-seed, library vesper_loom_calculus) that the compiler
-# and the other Loom crates link: ../src built without the port, so
-# cfg(vesper_port) is off. Written by hand because its sources live in the
-# parent package; see "Crates the compiler links" in
+# and the other Loom crates link: the shared API in ../src (cfg(vesper_port)
+# off) over the Rust calculus in src/engine. Written by hand because part of
+# its sources live in the parent package; see "Crates the compiler links" in
 # docs/maintenance/porting-a-crate.md.
 load("@rules_rs//rs:rust_library.bzl", "rust_library")
 load("@rules_rs//rs:rust_test.bzl", "rust_test")
@@ -16,11 +16,11 @@ _DEPS = all_crate_deps(_CRATE, normal = True, platforms = _CRATE["platforms"])
 
 rust_library(
     name = "seed",
-    srcs = ["//crates/vesper-loom-calculus:rust_srcs"],
+    srcs = glob(["src/**/*.rs"]) + ["//crates/vesper-loom-calculus:rust_srcs"],
     aliases = _CRATE.get("aliases", {}),
     compile_data = ["//crates/vesper-loom-calculus:README.md"],
     crate_name = "vesper_loom_calculus",
-    crate_root = "//crates/vesper-loom-calculus:src/lib.rs",
+    crate_root = "src/lib.rs",
     edition = "2024",
     rustc_env = {
         "CARGO_PKG_NAME": "vesper-loom-calculus-seed",

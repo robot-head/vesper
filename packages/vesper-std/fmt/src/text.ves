@@ -88,3 +88,103 @@ pub fn parse_u64_str(in s: Str) -> Result[u64, ParseIntError] {
 pub fn parse_i64_str(in s: Str) -> Result[i64, ParseIntError] {
     parse_i64(in s.as_bytes())
 }
+
+test {
+    fn prefixed(in text: Str) -> String {
+        let mut out = String::new();
+        out.push_str(in "é:");
+        out.push_str(in text);
+        out
+    }
+
+    // @case zero(0, in "0")
+    // @case decimal(123, in "123")
+    // @case large_unsigned(18446744073709551615, in "18446744073709551615")
+    fn test_unsigned_text(value: u64, in expected: Str) -> bool {
+        let mut appended = String::new();
+        appended.push_str(in "é:");
+        push_u64(inout appended, value);
+        let text = u64_to_string(value);
+        text == expected && appended == prefixed(in expected)
+    }
+
+    // @case zero(0, in "0")
+    // @case positive(42, in "42")
+    // @case negative(-42, in "-42")
+    // @case minimum(-9223372036854775808, in "-9223372036854775808")
+    fn test_signed_text(value: i64, in expected: Str) -> bool {
+        let mut appended = String::new();
+        appended.push_str(in "é:");
+        push_i64(inout appended, value);
+        let text = i64_to_string(value);
+        text == expected && appended == prefixed(in expected)
+    }
+
+    // @case binary(5, 2, 8, in "é:00000101")
+    // @case base36(35, 36, 1, in "é:z")
+    // @case invalid_radix(42, 1, 3, in "é:")
+    // @case high_radix(42, 37, 0, in "é:")
+    fn test_radix_append(value: u64, radix: u64, digits: u64, in expected: Str) -> bool {
+        let mut out = String::new();
+        out.push_str(in "é:");
+        push_u64_radix(inout out, value, radix, digits);
+        out == expected
+    }
+
+    // @case true_and_padded_hex(true, 175, 4, in "true00af")
+    // @case false_and_zero(false, 0, 0, in "false0")
+    fn test_hex_and_bool(value: bool, hex: u64, digits: u64, in expected: Str) -> bool {
+        let mut out = String::new();
+        push_bool(inout out, value);
+        push_hex_u64(inout out, hex, digits);
+        out == expected
+    }
+
+    fn same_error(a: ParseIntError, b: ParseIntError) -> bool {
+        match (a, b) {
+            (ParseIntError::EmptyInput, ParseIntError::EmptyInput) => true,
+            (ParseIntError::InvalidDigit, ParseIntError::InvalidDigit) => true,
+            (ParseIntError::OutOfRange, ParseIntError::OutOfRange) => true,
+            _ => false,
+        }
+    }
+
+    // @case zero(in "0", Result::Ok(0))
+    // @case maximum(in "18446744073709551615", Result::Ok(18446744073709551615))
+    // @case overflow(in "18446744073709551616", Result::Err(ParseIntError::OutOfRange))
+    // @case empty(in "", Result::Err(ParseIntError::EmptyInput))
+    // @case invalid_utf8_digit(in "４", Result::Err(ParseIntError::InvalidDigit))
+    fn test_parse_unsigned(in input: Str, expected: Result[u64, ParseIntError]) -> bool {
+        match (parse_u64_str(in input), expected) {
+            (Result::Ok(a), Result::Ok(b)) => a == b,
+            (Result::Err(a), Result::Err(b)) => same_error(a, b),
+            _ => false,
+        }
+    }
+
+    // @case hex(in "Ab", 16, Result::Ok(171))
+    // @case binary(in "101", 2, Result::Ok(5))
+    // @case digit_out_of_radix(in "2", 2, Result::Err(ParseIntError::InvalidDigit))
+    // @case bad_radix(in "1", 37, Result::Err(ParseIntError::InvalidDigit))
+    fn test_parse_radix(in input: Str, radix: u64, expected: Result[u64, ParseIntError]) -> bool {
+        match (parse_u64_radix_str(in input, radix), expected) {
+            (Result::Ok(a), Result::Ok(b)) => a == b,
+            (Result::Err(a), Result::Err(b)) => same_error(a, b),
+            _ => false,
+        }
+    }
+
+    // @case plus(in "+42", Result::Ok(42))
+    // @case negative_zero(in "-0", Result::Ok(0))
+    // @case minimum(in "-9223372036854775808", Result::Ok(-9223372036854775808))
+    // @case underflow(in "-9223372036854775809", Result::Err(ParseIntError::OutOfRange))
+    // @case sign_only(in "-", Result::Err(ParseIntError::EmptyInput))
+    // @case invalid_suffix(in "12é", Result::Err(ParseIntError::InvalidDigit))
+    fn test_parse_signed(in input: Str, expected: Result[i64, ParseIntError]) -> bool {
+        match (parse_i64_str(in input), expected) {
+            (Result::Ok(a), Result::Ok(b)) => a == b,
+            (Result::Err(a), Result::Err(b)) => same_error(a, b),
+            _ => false,
+        }
+    }
+}

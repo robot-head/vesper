@@ -1,0 +1,204 @@
+// The size of `Layout::of` (src/layout.rs), which `slots_match`,
+// `slot_size_label` and `slot_key` read: the fip checks need the byte size
+// of a concrete type, or whether it has no layout. A copy of the size half
+// of the census layout sample (docs/parallel-results/self-host-census.md),
+// which matched Rust on every corpus type; SH2 lane 5 swaps the full
+// layout module, and this file goes once that package can be imported.
+//
+// Sizes are memoized per (defaulted) type id: the type arena is
+// hash-consed, so equal types share the entry.
+
+use @vesper/check-data::util::{
+    add,
+    inc,
+    n32,
+    u32_at,
+    u64_at,
+    w
+};
+use @vesper/check-data::names::{
+    Names
+};
+use @vesper/check-data::types::{
+    Types,
+    default_type,
+    substitute
+};
+use @vesper/check-data::world::{
+    World,
+    vector_words
+};
+
+const NONE32: u32 = 4294967295;
+const K_LIT: u8 = 0;
+const K_NAMED: u8 = 1;
+const K_TUPLE: u8 = 2;
+const K_FN: u8 = 3;
+
+// No layout (`Layout::of` returned `Err`).
+pub const NO_SIZE: u64 = 18446744073709551615;
+
+pub struct Sizes {
+    // type id -> 0 unknown, else size + 1 (NO_SIZE + 1 wraps to 0, so a
+    // failure is kept in `failed`)
+    memo: ChunkSeq[u64],
+    failed: ChunkSeq[bool],
+    seen: ChunkSeq[u32],
+}
+
+pub fn sizes_new() -> Sizes {
+    Sizes {
+        memo: ChunkSeq::new[u64](),
+        failed: ChunkSeq::new[bool](),
+        seen: ChunkSeq::new[u32]()
+    }
+}
+
+fn fits_i32(x: i64) -> bool {
+    x <= 2147483647 && x >= -2147483648
+}
+
+fn max_u64(a: u64, b: u64) -> u64 {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+// `Layout::of(world, ty).map(|l| l.size)`, or NO_SIZE.
+pub fn layout_size(inout s: Sizes, inout t: Types, in names: Names, in wd: World, ty: u32) -> u64 {
+    let d = default_type(inout t, ty);
+    let at = w(d);
+    if at < s.memo.len() {
+        let m = u64_at(in s.memo, at);
+        if m != 0 {
+            return wrapping_sub(m, 1);
+        }
+        match s.failed.try_get(at) {
+            Option::Some(f) => {
+                if f {
+                    return NO_SIZE;
+                }
+            }
+            Option::None => {}
+        }
+    }
+    s.seen.clear();
+    let size = build(inout s, inout t, in names, in wd, d, 0);
+    if at >= s.memo.len() {
+        let n = inc(at);
+        s.memo.resize(n, 0);
+        s.failed.resize(n, false);
+    }
+    if size == NO_SIZE {
+        let ok = s.failed.try_set(at, true);
+    } else {
+        let ok = s.memo.try_set(at, inc(size));
+    }
+    size
+}
+
+fn build(inout s: Sizes, inout t: Types, in names: Names, in wd: World, ty: u32, depth: u64)
+    -> u64 {
+    let k = wd.k;
+    if depth > 128 {
+        return NO_SIZE;
+    }
+    let n = t.node(ty);
+    let name = if n.kind == K_NAMED {
+        n.name
+    } else {
+        0
+    };
+    let scalar = n
+        .kind
+        == K_LIT
+        || n
+        .kind
+        == K_FN
+        || (n.kind == K_NAMED && k.is_scalar(name))
+        || (n.kind == K_NAMED && (name == k.region_box || name == k.watermark))
+        || (n.kind == K_NAMED && name == k.tiled_seq && (n.n == 1 || n.n == 2))
+        || (n.kind == K_NAMED && name == k.chunk_seq && n.n == 1)
+        || (wd.box_active && n.kind == K_NAMED && name == k.box_ && n.n == 1)
+        || ty
+        == t
+        .unit;
+    if scalar {
+        return 8;
+    }
+    // A trait object is the pair `{data, vtable}`; a slice is the view
+    // `{handle, start, len}`.
+    if n.kind == K_NAMED && name == k.dyn_ && n.n == 1 {
+        return 16;
+    }
+    if n.kind == K_NAMED && name == k.slice && n.n == 1 {
+        return 24;
+    }
+    if n.kind == K_TUPLE {
+        let mut offset: i64 = 0;
+        for i in 0..w(n.n) {
+            let ft = u32_at(in t.items, add(w(n.a), i));
+            let l = build(inout s, inout t, in names, in wd, ft, inc(depth));
+            if l == NO_SIZE {
+                return NO_SIZE;
+            }
+            offset = wrapping_add(offset, widen_i64(wrapping_i32(n32(l))));
+            if !fits_i32(offset) {
+                return NO_SIZE;
+            }
+        }
+        return max_u64(widen_u64(wrapping_u32(wrapping_i32(offset))), 8);
+    }
+    let words = vector_words(in t, in names, k, ty);
+    if words != 0 {
+        return wrapping_mul(w(words), 8);
+    }
+    if n.kind == K_NAMED && n.n == 0 && (name == k.string || name == k.str_) {
+        return 24;
+    }
+    if n.kind != K_NAMED {
+        return NO_SIZE;
+    }
+    let ai = wd.lookup(name);
+    if ai == NONE32 {
+        return NO_SIZE;
+    }
+    let a = wd.adt(ai);
+    if a.gn != n.n {
+        return NO_SIZE;
+    }
+    for i in 0..s.seen.len() {
+        if u32_at(in s.seen, i) == ty {
+            return NO_SIZE;
+        }
+    }
+    s.seen.push(ty);
+    let vars = wd.vars_of(in t, a, ty);
+    let mut size: u64 = 8;
+    for vi in 0..w(a.vn) {
+        let v = wd.variant(add(w(a.va), vi));
+        let mut offset: i64 = if a.is_enum {
+            8
+        } else {
+            0
+        };
+        for fi in 0..w(v.fc) {
+            let f = wd.field(add(w(v.fa), fi));
+            let ft = substitute(inout t, f.ty, in vars);
+            let l = build(inout s, inout t, in names, in wd, ft, inc(depth));
+            if l == NO_SIZE {
+                return NO_SIZE;
+            }
+            offset = wrapping_add(offset, widen_i64(wrapping_i32(n32(l))));
+            if !fits_i32(offset) {
+                return NO_SIZE;
+            }
+        }
+        size = max_u64(size, widen_u64(wrapping_u32(wrapping_i32(offset))));
+    }
+    let last = wrapping_sub(s.seen.len(), 1);
+    s.seen.truncate(last);
+    size
+}

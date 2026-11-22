@@ -84,12 +84,13 @@ impl Code {
             return None;
         }
         let shifted = self.0 - Self::WT_APPLICATION_FIRST;
-        Some((shifted - shifted / 0x1f) as u32)
+        Some((shifted - shifted / crate::frame::GREASE_STEP) as u32)
     }
 
     /// Reserved "grease" codes `0x1f * N + 0x21` (RFC 9114 §8.1).
     pub const fn is_reserved(self) -> bool {
-        self.0 >= 0x21 && (self.0 - 0x21).is_multiple_of(0x1f)
+        use crate::frame::{GREASE_BASE, GREASE_STEP};
+        self.0 >= GREASE_BASE && (self.0 - GREASE_BASE).is_multiple_of(GREASE_STEP)
     }
 }
 

@@ -18,6 +18,9 @@ use self::closure::{
     has_entry
 };
 use self::diag::{
+    Objective,
+    ResultTag,
+    SolverSort,
     dedup,
     msort
 };
@@ -48,7 +51,7 @@ pub fn reset_diags(inout s: S) {
 pub fn out_error(inout s: S, kind: u64, decisions: u64) {
     dedup(inout s);
     table(inout s);
-    w(inout s, 1);
+    w(inout s, ResultTag::Error);
     w(inout s, kind);
     w(inout s, decisions);
     let n = s.ds.len();
@@ -73,7 +76,7 @@ pub fn solution_words(inout s: S, best: bool) {
         let x = sw(in s.anames, i);
         s.idx.push(x);
     }
-    msort(inout s, 3);
+    msort(inout s, SolverSort::Values);
     s.cbuf.clear();
     let nsel = s.idx.len();
     s.cbuf.push(nsel);
@@ -125,7 +128,7 @@ pub fn solution_words(inout s: S, best: bool) {
 // table, 0, solution.
 pub fn out_solution(inout s: S) {
     table(inout s);
-    w(inout s, 0);
+    w(inout s, ResultTag::Solution);
     solution_words(inout s, false);
 }
 
@@ -141,21 +144,20 @@ fn str_is(in a: Str, in b: Str) -> bool {
     true
 }
 
-// Objectives: ZeroCve 0, MinCapabilitySurface 1, MinDupMajors 2,
-// MinStaleness 3, MinTrustCost 4; unknown 5.
+// The `Objective` named by raw.
 pub fn objective_code_of(in raw: Str) -> u64 {
     if str_is(in raw, "zero_cve") {
-        0
+        Objective::ZeroCve
     } else if str_is(in raw, "min_capability_surface") {
-        1
+        Objective::MinCapabilitySurface
     } else if str_is(in raw, "min_dup_majors") {
-        2
+        Objective::MinDupMajors
     } else if str_is(in raw, "min_staleness") {
-        3
+        Objective::MinStaleness
     } else if str_is(in raw, "min_trust_cost") {
-        4
+        Objective::MinTrustCost
     } else {
-        5
+        Objective::Unknown
     }
 }
 
@@ -164,16 +166,16 @@ pub fn objective_of_id(in s: S, x: u64) -> u64 {
     let off = soff(in s.l, x);
     let len = slen(in s.l, x);
     if is_lit(in s.l, off, len, "zero_cve") {
-        0
+        Objective::ZeroCve
     } else if is_lit(in s.l, off, len, "min_capability_surface") {
-        1
+        Objective::MinCapabilitySurface
     } else if is_lit(in s.l, off, len, "min_dup_majors") {
-        2
+        Objective::MinDupMajors
     } else if is_lit(in s.l, off, len, "min_staleness") {
-        3
+        Objective::MinStaleness
     } else if is_lit(in s.l, off, len, "min_trust_cost") {
-        4
+        Objective::MinTrustCost
     } else {
-        5
+        Objective::Unknown
     }
 }

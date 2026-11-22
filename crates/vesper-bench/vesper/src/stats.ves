@@ -19,6 +19,8 @@ use self::{
     W
 };
 use self::util::{
+    BP_SCALE,
+    MAX_EPOCHS,
     add,
     cs,
     cu,
@@ -36,12 +38,15 @@ use self::util::{
     zeros
 };
 use self::wide::{
+    udiv_u128,
+    w_from_u128,
     w,
     w_add,
     w_floor_divrem,
     w_is_zero,
     w_mul_small,
     w_mul_u64,
+    w_neg,
     w_sub,
     w_twice,
     w_u64,
@@ -52,29 +57,37 @@ use self::wide::{
 };
 
 // Error::Limit codes (src/port.rs LIMITS).
-pub fn limit_rank() -> u64 {
-    0
+pub enum Limit: _ {
+    Rank,
+    ExactRank,
+    Epochs,
+    Layouts,
+    BodyCalls,
+    Elapsed
 }
 
-pub fn limit_exact_rank() -> u64 {
-    1
+// `analyze_pairs`'s InconclusiveReason (src/port.rs `analysis`).
+enum Reason: _ {
+    None,
+    InsufficientEpochs,
+    IntervalCrossesThreshold
 }
 
-pub fn limit_epochs() -> u64 {
-    2
+// LayoutSurvival verdicts (src/port.rs).
+enum Verdict: _ {
+    CandidateSlower,
+    CandidateFaster,
+    DoesNotSurvive,
+    InsufficientLayouts
 }
 
-pub fn limit_layouts() -> u64 {
-    3
-}
-
-pub fn limit_body_calls() -> u64 {
-    4
-}
-
-pub fn limit_elapsed() -> u64 {
-    5
-}
+// The most observations in each sample of the exact Mann-Whitney test.
+const MAX_EXACT_RANK_SAMPLES: u64 = 32;
+// The median interval's one-sided binomial tail is at most 5/200 = 2.5%.
+const ALPHA_TAIL_NUMERATOR: u64 = 5;
+const ALPHA_TAIL_DENOMINATOR: u64 = 200;
+// The lowest regression threshold (-99.99%): a ratio stays positive.
+const MIN_REGRESSION_BP: i64 = -9999;
 
 fn overflow() eff [Fail[PortError]] {
     Fail::raise(PortError::ArithmeticOverflow);
@@ -99,10 +112,10 @@ pub fn do_mann_whitney_ranks(in first: Slice[u64], in second: Slice[u64])
     if n == 0 || m == 0 {
         Fail::raise(PortError::EmptyEvidence);
     }
-    if n > 64 || m > 64 {
+    if n > MAX_EPOCHS || m > MAX_EPOCHS {
         Fail::raise(
             PortError::Limit {
-                code: limit_rank()
+                code: Limit::Rank
             }
         );
     }
@@ -151,10 +164,10 @@ fn check_exact_sizes(n: u64, m: u64) eff [Fail[PortError]] {
     if n == 0 || m == 0 {
         Fail::raise(PortError::EmptyEvidence);
     }
-    if n > 32 || m > 32 {
+    if n > MAX_EXACT_RANK_SAMPLES || m > MAX_EXACT_RANK_SAMPLES {
         Fail::raise(
             PortError::Limit {
-                code: limit_exact_rank()
+                code: Limit::ExactRank
             }
         );
     }
@@ -306,40 +319,75 @@ pub fn do_paired_sample_new(baseline: u64, candidate: u64, operations: u64)
 
 // Directed rounding of the regression in basis points, floor and ceiling.
 pub fn do_regression_bp_bounds(s: Sample) -> BpBounds {
-    let scaled = w_mul_small(w_sub(w_u64(s.candidate), w_u64(s.baseline)), 10000);
-    let (q, r) = w_floor_divrem(scaled, w_u64(s.baseline));
-    BpBounds {
-        floor: q,
-        ceil: if w_is_zero(r) {
-            q
-        } else {
-            w_add(q, w_u64(1))
+    if s.baseline == 0 {
+        let scaled = w_mul_small(w_sub(w_u64(s.candidate), w_u64(s.baseline)), BP_SCALE);
+        let (q, r) = w_floor_divrem(scaled, w_u64(s.baseline));
+        return BpBounds {
+            floor: q,
+            ceil: if w_is_zero(r) {
+                q
+            } else {
+                w_add(q, w_u64(1))
+            }
+        };
+    }
+    // |candidate - baseline| * BP_SCALE / baseline in native u128, then the
+    // sign: floor(-x) = -ceil(x).
+    let up = s.candidate >= s.baseline;
+    let magnitude = if up {
+        wrapping_sub(s.candidate, s.baseline)
+    } else {
+        wrapping_sub(s.baseline, s.candidate)
+    };
+    let (q, exact) = udiv_u128(
+        wrapping_mul(widen_u128(magnitude), widen_u128(BP_SCALE)),
+        s.baseline
+    );
+    let down = w_from_u128(q);
+    let away = if exact {
+        down
+    } else {
+        w_add(down, w_u64(1))
+    };
+    if up {
+        BpBounds {
+            floor: down,
+            ceil: away
+        }
+    } else {
+        BpBounds {
+            floor: w_neg(away),
+            ceil: w_neg(down)
         }
     }
 }
 
 // The exact ratio order candidate/baseline (-1, 0, 1).
-fn compare_ratio(a: Sample, b: Sample) -> i64 {
-    w_ucmp(w_mul_u64(a.candidate, b.baseline), w_mul_u64(b.candidate, a.baseline))
-}
 
-// candidate/baseline against 1 + bp/10000, for bp >= -9999.
+// candidate/baseline against 1 + bp/BP_SCALE, for bp >= MIN_REGRESSION_BP.
 fn compare_threshold(s: Sample, bp: i64) -> i64 {
-    let factor = wrapping_add(wrapping_u64(bp), 10000);
-    w_ucmp(w_mul_u64(s.candidate, 10000), w_mul_u64(s.baseline, factor))
+    let factor = wrapping_add(wrapping_u64(bp), BP_SCALE);
+    w_ucmp(w_mul_u64(s.candidate, BP_SCALE), w_mul_u64(s.baseline, factor))
 }
 
 // A stable bottom-up merge sort by ratio (Rust `sort_by` is stable, and
 // the interval reports the samples themselves, so equal ratios keep their
-// input order): runs of width 1, 2, 4, ... merge from `src` into `dst`,
-// taking the left run's sample on a tie.
+// input order): runs of width 1, 2, 4, ... of sample positions merge from
+// `src` into `dst`, taking the left run's position on a tie. The keys sit
+// in two word sequences and the cross products are native `u128`, so a
+// merge step moves one word instead of a `Sample`.
 fn sorted_by_ratio(in samples: Slice[Sample]) -> ChunkSeq[Sample] {
     let n = samples.len();
-    let mut src: ChunkSeq[Sample] = ChunkSeq::with_capacity[Sample](n);
-    let mut dst: ChunkSeq[Sample] = ChunkSeq::with_capacity[Sample](n);
+    let mut base: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+    let mut cand: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+    let mut src: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+    let mut dst: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
     for i in 0..n {
-        src.push(gs(in samples, i));
-        dst.push(gs(in samples, i));
+        let x = gs(in samples, i);
+        base.push(x.baseline);
+        cand.push(x.candidate);
+        src.push(i);
+        dst.push(i);
     }
     let mut width: u64 = 1;
     loop {
@@ -361,15 +409,24 @@ fn sorted_by_ratio(in samples: Slice[Sample]) -> ChunkSeq[Sample] {
                     break;
                 }
                 let take_left = if i < mid && j < hi {
-                    compare_ratio(cs(in src, i), cs(in src, j)) <= 0
+                    let a = cu(in src, i);
+                    let b = cu(in src, j);
+                    let left = wrapping_mul(widen_u128(cu(in cand, a)), widen_u128(cu(in base, b)));
+                    let right = wrapping_mul(
+                        widen_u128(cu(in cand, b)),
+                        widen_u128(cu(in base, a))
+                    );
+                    left <= right
                 } else {
                     i < mid
                 };
                 if take_left {
-                    dst.try_set(k, cs(in src, i));
+                    let at = cu(in src, i);
+                    dst.try_set(k, at);
                     i = inc(i);
                 } else {
-                    dst.try_set(k, cs(in src, j));
+                    let at = cu(in src, j);
+                    dst.try_set(k, at);
                     j = inc(j);
                 }
                 k = inc(k);
@@ -379,31 +436,34 @@ fn sorted_by_ratio(in samples: Slice[Sample]) -> ChunkSeq[Sample] {
         swap(inout src, inout dst);
         width = add(width, width);
     }
-    src
+    let mut out: ChunkSeq[Sample] = ChunkSeq::with_capacity[Sample](n);
+    for i in 0..n {
+        out.push(gs(in samples, cu(in src, i)));
+    }
+    out
 }
 
-// Decision codes are the crate's `Decision`; reasons: 0 none, 1
-// InsufficientEpochs, 2 IntervalCrossesThreshold.
+// Decision codes are the crate's `Decision`; reasons are Reason codes.
 pub fn do_analyze_pairs(in samples: Slice[Sample], max_regression_bp: i64)
     -> AnalysisOut eff [Fail[PortError]] {
     let n = samples.len();
     if n == 0 {
         Fail::raise(PortError::EmptyEvidence);
     }
-    if n > 64 {
+    if n > MAX_EPOCHS {
         Fail::raise(
             PortError::Limit {
-                code: limit_epochs()
+                code: Limit::Epochs
             }
         );
     }
-    if max_regression_bp < -9999 {
+    if max_regression_bp < MIN_REGRESSION_BP {
         Fail::raise(PortError::InvalidThreshold);
     }
     let sorted = sorted_by_ratio(in samples);
     let median_lower = cs(in sorted, div(dec(n), 2));
     let median_upper = cs(in sorted, div(n, 2));
-    let total = if n == 64 {
+    let total = if n == MAX_EPOCHS {
         w(1, 0)
     } else {
         w_u64(pow2(n))
@@ -415,7 +475,10 @@ pub fn do_analyze_pairs(in samples: Slice[Sample], max_regression_bp: i64)
     let mut chosen_tail = w_zero();
     for j in 0..div(n, 2) {
         tail = w_add(tail, coefficient);
-        if !w_ult(w_mul_small(total, 5), w_mul_small(tail, 200)) {
+        if !w_ult(
+            w_mul_small(total, ALPHA_TAIL_NUMERATOR),
+            w_mul_small(tail, ALPHA_TAIL_DENOMINATOR)
+        ) {
             found = true;
             rank = inc(j);
             chosen_tail = tail;
@@ -428,7 +491,7 @@ pub fn do_analyze_pairs(in samples: Slice[Sample], max_regression_bp: i64)
     if !found {
         return AnalysisOut {
             decision: Decision::Inconclusive,
-            reason: 1,
+            reason: Reason::InsufficientEpochs,
             median_lower: median_lower,
             median_upper: median_upper,
             has_interval: false,
@@ -443,11 +506,11 @@ pub fn do_analyze_pairs(in samples: Slice[Sample], max_regression_bp: i64)
     let lower = cs(in sorted, dec(rank));
     let upper = cs(in sorted, sub(n, rank));
     let (decision, reason): (Decision, u64) = if compare_threshold(upper, max_regression_bp) != 1 {
-        (Decision::Pass, 0)
+        (Decision::Pass, Reason::None)
     } else if compare_threshold(lower, max_regression_bp) == 1 {
-        (Decision::Regression, 0)
+        (Decision::Regression, Reason::None)
     } else {
-        (Decision::Inconclusive, 2)
+        (Decision::Inconclusive, Reason::IntervalCrossesThreshold)
     };
     AnalysisOut {
         decision: decision,
@@ -467,26 +530,24 @@ pub fn do_analyze_pairs(in samples: Slice[Sample], max_regression_bp: i64)
 // ---------------------------------------------------------------------------
 // layout.rs
 
-// Verdicts: 0 CandidateSlower, 1 CandidateFaster, 2 DoesNotSurvive, 3
-// InsufficientLayouts.
 pub fn do_layout_survival(in per_layout: Slice[Sample]) -> SurvivalOut eff [Fail[PortError]] {
-    if per_layout.len() > 64 {
+    if per_layout.len() > MAX_EPOCHS {
         Fail::raise(
             PortError::Limit {
-                code: limit_layouts()
+                code: Limit::Layouts
             }
         );
     }
     let analysis = do_analyze_pairs(in per_layout, 0);
     let verdict: u64 = if !analysis.has_interval {
-        3
+        Verdict::InsufficientLayouts
     } else {
         match analysis.decision {
-            Decision::Regression => 0,
+            Decision::Regression => Verdict::CandidateSlower,
             _ => if analysis.upper.candidate < analysis.upper.baseline {
-                1
+                Verdict::CandidateFaster
             } else {
-                2
+                Verdict::DoesNotSurvive
             },
         }
     };

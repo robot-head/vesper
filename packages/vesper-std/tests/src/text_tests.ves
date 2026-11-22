@@ -50,7 +50,7 @@ test {
         some_u64
     };
 
-    pub fn test_fmt_write() -> u64 {
+    pub fn check_fmt_write() -> u64 {
         let mut r: u64 = 0;
         let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
         write_u64(inout out, 123);
@@ -103,7 +103,7 @@ test {
         r
     }
 
-    pub fn test_fmt_parse() -> u64 {
+    pub fn check_fmt_parse() -> u64 {
         let mut r: u64 = 0;
         let s = text(3355185, 0, 0);
         r = check(parsed_u64(parse_u64(in s.as_slice()), 123), 1, r);
@@ -138,7 +138,7 @@ test {
         r
     }
 
-    pub fn test_bytes() -> u64 {
+    pub fn check_bytes() -> u64 {
         let mut r: u64 = 0;
         let mut b: ChunkSeq[u8] = ChunkSeq::new[u8]();
         let a16: u16 = 4660;

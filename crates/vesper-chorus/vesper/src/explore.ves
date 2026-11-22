@@ -26,7 +26,11 @@ use self::util::{
     setw,
     sw,
     tb_str,
-    tb_sym
+    tb_sym,
+    Br,
+    Fnv,
+    LTag,
+    Out
 };
 use self::local::{
     la,
@@ -40,8 +44,44 @@ use self::local::{
     unfold
 };
 
+// The error kinds of `out` (after `Out::Failed`).
+pub enum XErr: _ {
+    Projection = 1,
+    Deadlock = 2,
+    UnexpectedMessage = 3,
+    Orphans = 4,
+    StateBudgetExceeded = 5
+}
+
+// A queue segment `key n (label payload)*n`: the offsets of the head
+// message's label and payload, the words before the messages and the
+// words per message.
+enum Seg: _ {
+    Label = 2,
+    Payload = 3,
+    Head = 2,
+    Msg = 2
+}
+
+// The successor edits of `build`.
+enum Op: _ {
+    Keep = 0,
+    Push = 1,
+    Pop = 2
+}
+
+// `key = from << KEY_SHIFT | to`.
+const KEY_SHIFT: u64 = 16;
+const KEY_MASK: u64 = 65535;
+// The visited set's first size.
+const MIN_SLOTS: u64 = 1024;
+// Words per orphan `(from, to, label)` and per waiting role `(role,
+// summary)` in the error words.
+const ORPHAN_WORDS: u64 = 3;
+const WAITER_WORDS: u64 = 2;
+
 fn mix(h: u64, x: u64) -> u64 {
-    wrapping_mul(h ^ x, 1099511628211)
+    wrapping_mul(h ^ x, Fnv::Prime)
 }
 
 fn xword(in c: C, s: u64, i: u64) -> u64 {
@@ -50,7 +90,7 @@ fn xword(in c: C, s: u64, i: u64) -> u64 {
 
 fn grow(inout c: C) {
     let cap = if c.x_mask == 0 {
-        1024
+        MIN_SLOTS
     } else {
         wrapping_mul(inc(c.x_mask), 2)
     };
@@ -90,7 +130,7 @@ fn intern_state(inout c: C) -> u64 {
     if wrapping_mul(inc(c.xoff.len()), 2) > c.x_mask {
         grow(inout c);
     }
-    let mut h: u64 = 14695981039346656037;
+    let mut h: u64 = Fnv::Offset;
     for i in 0..c.sb.len() {
         h = mix(h, sw(in c.sb, i));
     }
@@ -137,7 +177,7 @@ fn seg(in c: C, s: u64, k: u64, key: u64) -> (u64, bool) {
         if kk > key {
             return (i, false);
         }
-        i = add(i, add(2, wrapping_mul(xword(in c, s, inc(i)), 2)));
+        i = add(i, add(Seg::Head, wrapping_mul(xword(in c, s, inc(i)), Seg::Msg)));
     }
 }
 
@@ -150,8 +190,8 @@ fn qlen(in c: C, s: u64, k: u64, key: u64) -> u64 {
     }
 }
 
-// Writes the successor of `s` with role `i` at `t` into `sb`: `op` 1
-// appends `(l, p)` to queue `key`, 2 pops the head of queue `key`.
+// Writes the successor of `s` with role `i` at `t` into `sb`: `op` (`Op`)
+// keeps the queues, appends `(l, p)` to queue `key` or pops its head.
 fn build(inout c: C, s: u64, k: u64, i: u64, t: u64, op: u64, key: u64, l: u64, p: u64) {
     c.sb.clear();
     for j in 0..k {
@@ -163,7 +203,7 @@ fn build(inout c: C, s: u64, k: u64, i: u64, t: u64, op: u64, key: u64, l: u64, 
         c.sb.push(w);
     }
     let len = sw(in c.xlen, s);
-    if op == 0 {
+    if op == Op::Keep {
         let mut j = k;
         loop {
             if j >= len {
@@ -185,23 +225,23 @@ fn build(inout c: C, s: u64, k: u64, i: u64, t: u64, op: u64, key: u64, l: u64, 
         c.sb.push(w);
         j = inc(j);
     }
-    if op == 1 {
+    if op == Op::Push {
         if found {
             let n = xword(in c, s, inc(at));
             c.sb.push(key);
             c.sb.push(inc(n));
             let mut q: u64 = 0;
             loop {
-                if q >= wrapping_mul(n, 2) {
+                if q >= wrapping_mul(n, Seg::Msg) {
                     break;
                 }
-                let w = xword(in c, s, add(add(at, 2), q));
+                let w = xword(in c, s, add(add(at, Seg::Head), q));
                 c.sb.push(w);
                 q = inc(q);
             }
             c.sb.push(l);
             c.sb.push(p);
-            j = add(add(at, 2), wrapping_mul(n, 2));
+            j = add(add(at, Seg::Head), wrapping_mul(n, Seg::Msg));
         } else {
             c.sb.push(key);
             c.sb.push(1);
@@ -214,17 +254,17 @@ fn build(inout c: C, s: u64, k: u64, i: u64, t: u64, op: u64, key: u64, l: u64, 
         if n > 1 {
             c.sb.push(key);
             c.sb.push(wrapping_sub(n, 1));
-            let mut q: u64 = 2;
+            let mut q: u64 = Seg::Msg;
             loop {
-                if q >= wrapping_mul(n, 2) {
+                if q >= wrapping_mul(n, Seg::Msg) {
                     break;
                 }
-                let w = xword(in c, s, add(add(at, 2), q));
+                let w = xword(in c, s, add(add(at, Seg::Head), q));
                 c.sb.push(w);
                 q = inc(q);
             }
         }
-        j = add(add(at, 2), wrapping_mul(n, 2));
+        j = add(add(at, Seg::Head), wrapping_mul(n, Seg::Msg));
     }
     loop {
         if j >= len {
@@ -257,23 +297,23 @@ fn unexpected(inout c: C, me: u64, peer: u64, t: u64, hl: u64, hp: u64) {
     let rs = role_sym(inout c, me);
     let ps = role_sym(inout c, peer);
     let mut ex: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    if lt(in c, t) == 2 {
+    if lt(in c, t) == LTag::Recv {
         let h118 = lb(in c, t);
         let h119 = lc(in c, t);
         let y = msg_sym(inout c, h118, h119);
         ex.push(y);
     } else {
         for b in 0..lkn(in c, t) {
-            let h120 = lbr(in c, t, b, 0);
-            let h121 = lbr(in c, t, b, 1);
+            let h120 = lbr(in c, t, b, Br::Label);
+            let h121 = lbr(in c, t, b, Br::Payload);
             let y = msg_sym(inout c, h120, h121);
             ex.push(y);
         }
     }
     let found = msg_sym(inout c, hl, hp);
     c.out.clear();
-    c.out.push(1);
-    c.out.push(3);
+    c.out.push(Out::Failed);
+    c.out.push(XErr::UnexpectedMessage);
     c.out.push(rs);
     c.out.push(ps);
     c.out.push(ex.len());
@@ -314,8 +354,8 @@ pub fn explore_run(inout c: C, in locals: ChunkSeq[u64], max_states: u64, max_qu
         states = inc(states);
         if states > max_states {
             c.out.clear();
-            c.out.push(1);
-            c.out.push(5);
+            c.out.push(Out::Failed);
+            c.out.push(XErr::StateBudgetExceeded);
             c.out.push(states);
             return;
         }
@@ -325,45 +365,45 @@ pub fn explore_run(inout c: C, in locals: ChunkSeq[u64], max_states: u64, max_qu
         for i in 0..k {
             let t = xword(in c, s, i);
             let tag = lt(in c, t);
-            if tag == 5 {
+            if tag == LTag::Action {
                 let h122 = lb(in c, t);
                 let u = unfold(inout c, h122);
-                build(inout c, s, k, i, u, 0, 0, 0, 0);
+                build(inout c, s, k, i, u, Op::Keep, 0, 0, 0);
                 succ(inout c);
                 nsucc = inc(nsucc);
-            } else if tag == 1 || tag == 3 {
+            } else if tag == LTag::Send || tag == LTag::Select {
                 let peer = la(in c, t);
-                let key = (i << 16) | peer;
+                let key = (i << KEY_SHIFT) | peer;
                 if qlen(in c, s, k, key) >= max_queue {
                     cut = true;
-                } else if tag == 1 {
+                } else if tag == LTag::Send {
                     let h123 = ld(in c, t);
                     let u = unfold(inout c, h123);
                     let h124 = lb(in c, t);
                     let h125 = lc(in c, t);
-                    build(inout c, s, k, i, u, 1, key, h124, h125);
+                    build(inout c, s, k, i, u, Op::Push, key, h124, h125);
                     succ(inout c);
                     nsucc = inc(nsucc);
                 } else {
                     for b in 0..lkn(in c, t) {
-                        let h126 = lbr(in c, t, b, 2);
+                        let h126 = lbr(in c, t, b, Br::Next);
                         let u = unfold(inout c, h126);
-                        let h127 = lbr(in c, t, b, 0);
-                        let h128 = lbr(in c, t, b, 1);
-                        build(inout c, s, k, i, u, 1, key, h127, h128);
+                        let h127 = lbr(in c, t, b, Br::Label);
+                        let h128 = lbr(in c, t, b, Br::Payload);
+                        build(inout c, s, k, i, u, Op::Push, key, h127, h128);
                         succ(inout c);
                         nsucc = inc(nsucc);
                     }
                 }
-            } else if tag == 2 || tag == 4 {
+            } else if tag == LTag::Recv || tag == LTag::Offer {
                 let peer = la(in c, t);
-                let key = (peer << 16) | i;
+                let key = (peer << KEY_SHIFT) | i;
                 let (at, found) = seg(in c, s, k, key);
                 if found {
-                    let hl = xword(in c, s, add(at, 2));
-                    let hp = xword(in c, s, add(at, 3));
+                    let hl = xword(in c, s, add(at, Seg::Label));
+                    let hp = xword(in c, s, add(at, Seg::Payload));
                     let mut next = none();
-                    if tag == 2 {
+                    if tag == LTag::Recv {
                         if lb(in c, t) == hl && lc(in c, t) == hp {
                             next = ld(in c, t);
                         }
@@ -371,11 +411,11 @@ pub fn explore_run(inout c: C, in locals: ChunkSeq[u64], max_states: u64, max_qu
                         for b in 0..lkn(in c, t) {
                             if next
                                 == none()
-                                && lbr(in c, t, b, 0)
+                                && lbr(in c, t, b, Br::Label)
                                 == hl
-                                && lbr(in c, t, b, 1)
+                                && lbr(in c, t, b, Br::Payload)
                                 == hp {
-                                next = lbr(in c, t, b, 2);
+                                next = lbr(in c, t, b, Br::Next);
                             }
                         }
                     }
@@ -384,7 +424,7 @@ pub fn explore_run(inout c: C, in locals: ChunkSeq[u64], max_states: u64, max_qu
                         return;
                     }
                     let u = unfold(inout c, next);
-                    build(inout c, s, k, i, u, 2, key, 0, 0);
+                    build(inout c, s, k, i, u, Op::Pop, key, 0, 0);
                     succ(inout c);
                     nsucc = inc(nsucc);
                 }
@@ -417,7 +457,7 @@ pub fn explore_run(inout c: C, in locals: ChunkSeq[u64], max_states: u64, max_qu
         }
     }
     c.out.clear();
-    c.out.push(0);
+    c.out.push(Out::Ok);
     c.out.push(states);
     c.out.push(completed);
     c
@@ -441,19 +481,19 @@ fn orphans(inout c: C, s: u64, k: u64) {
         }
         let key = xword(in c, s, i);
         let n = xword(in c, s, inc(i));
-        let f = role_sym(inout c, key >> 16);
-        let t = role_sym(inout c, key & 65535);
+        let f = role_sym(inout c, key >> KEY_SHIFT);
+        let t = role_sym(inout c, key & KEY_MASK);
         for q in 0..n {
             ms.push(f);
             ms.push(t);
-            ms.push(xword(in c, s, add(add(i, 2), wrapping_mul(q, 2))));
+            ms.push(xword(in c, s, add(add(i, Seg::Head), wrapping_mul(q, Seg::Msg))));
         }
-        i = add(add(i, 2), wrapping_mul(n, 2));
+        i = add(add(i, Seg::Head), wrapping_mul(n, Seg::Msg));
     }
     c.out.clear();
-    c.out.push(1);
-    c.out.push(4);
-    c.out.push(ms.len() / 3);
+    c.out.push(Out::Failed);
+    c.out.push(XErr::Orphans);
+    c.out.push(ms.len() / ORPHAN_WORDS);
     for j in 0..ms.len() {
         let y = match ms.try_get(j) {
             Option::Some(v) => v,
@@ -475,9 +515,9 @@ fn deadlock(inout c: C, s: u64, k: u64) {
         }
     }
     c.out.clear();
-    c.out.push(1);
-    c.out.push(2);
-    c.out.push(ws.len() / 2);
+    c.out.push(Out::Failed);
+    c.out.push(XErr::Deadlock);
+    c.out.push(ws.len() / WAITER_WORDS);
     for j in 0..ws.len() {
         let y = match ws.try_get(j) {
             Option::Some(v) => v,

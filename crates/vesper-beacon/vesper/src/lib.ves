@@ -138,16 +138,82 @@ copy struct RingState {
     len: u64
 }
 
-fn max_u64() -> u64 {
-    18446744073709551615
+const MAX_U64: u64 = 18446744073709551615;
+
+// FastLogHistogram's bins (HISTOGRAM_BINS): each value below LINEAR_BINS
+// has its own bin; each octave from FIRST_OCTAVE up has OCTAVE_BINS bins,
+// picked by the SUB_BITS bits below its top bit.
+const HISTOGRAM_BINS: u64 = 496;
+const LINEAR_BINS: u64 = 16;
+const FIRST_OCTAVE: u64 = 4;
+const OCTAVE_BINS: u64 = 8;
+const SUB_BITS: u64 = 3;
+const SUB_MASK: u64 = 7;
+
+// ExponentialHistogram's bucket window (EXP_HISTOGRAM_BUCKETS).
+const EXP_BUCKETS: i64 = 160;
+
+// The IEEE 754 binary64 fraction width and exponent bias.
+const F64_FRACTION_BITS: u64 = 52;
+const F64_EXPONENT_BIAS: u64 = 1023;
+
+// The v00 traceparent `vv-<32 hex trace ID>-<16 hex span ID>-ff`: its
+// length and the offsets of its fields and hyphens.
+enum Tp: _ {
+    Version = 0,
+    FirstHyphen = 2,
+    TraceHi = 3,
+    TraceLo = 19,
+    SecondHyphen = 35,
+    SpanId = 36,
+    ThirdHyphen = 52,
+    Flags = 53,
+    Len = 55
 }
+
+// Hex digits in a byte (version, flags) and in a word (IDs), and bytes in
+// half a word.
+const BYTE_DIGITS: u64 = 2;
+const WORD_DIGITS: u64 = 16;
+const HALF_WORD_BYTES: u64 = 8;
+
+enum Ascii: _ {
+    Minus = 0x2d,
+    Zero = 0x30,
+    Nine = 0x39,
+    // 'a' - 10, so that 'a' + digit - 10 is a letter.
+    LetterBase = 0x57,
+    LowerA = 0x61,
+    LowerF = 0x66
+}
+
+// SWAR lanes of eight bytes: the top bit, the low nibble and the low bit
+// of every byte, and every other byte or pair of bytes.
+const LANE_HIGH: u64 = 0x8080808080808080;
+const LANE_NIBBLE: u64 = 0x0f0f0f0f0f0f0f0f;
+const LANE_ONES: u64 = 0x0101010101010101;
+const LANE_PAIRS: u64 = 0x00ff00ff00ff00ff;
+const LANE_QUADS: u64 = 0x0000ffff0000ffff;
+const LOW_32: u64 = 0xffffffff;
+// Per lane, 0x80 - c: added to a byte, it sets the top bit exactly when the
+// byte is at least c.
+const AT_LEAST_0: u64 = 0x5050505050505050;
+const ABOVE_9: u64 = 0x4646464646464646;
+const AT_LEAST_A: u64 = 0x1f1f1f1f1f1f1f1f;
+const ABOVE_F: u64 = 0x1919191919191919;
+const AT_LEAST_10: u64 = 0x7676767676767676;
+// '0' in every lane; a letter's low nibble plus LETTER_NIBBLE is its value;
+// 'a' - '0' - 10.
+const LANE_ZERO: u64 = 0x3030303030303030;
+const LETTER_NIBBLE: u64 = 9;
+const LETTER_GAP: u64 = 39;
 
 // The index of the highest set bit of `v > 0` (63 - leading_zeros), from
 // the exponent of the nearest f64: Vesper has no leading-zeros builtin, and
 // this has no data-dependent branch except when rounding reached the next
 // power of two (only for values above 2^53).
 fn high_bit(v: u64) -> u64 eff [Fail[ArithOverflow]] {
-    let e = wrapping_sub(to_bits_f64(nearest_f64(v)) >> 52, 1023);
+    let e = wrapping_sub(to_bits_f64(nearest_f64(v)) >> F64_FRACTION_BITS, F64_EXPONENT_BIAS);
     let one: u64 = 1;
     if e == 64 {
         63
@@ -175,19 +241,24 @@ fn slot_u64(in s: Slice[u64], i: u64) -> u64 {
 // histogram.rs: FastLogHistogram.
 
 pub fn bucket_index(value: u64) -> usize eff [Fail[ArithOverflow]] {
-    if value < 16 {
+    if value < LINEAR_BINS {
         return widen_usize(value);
     }
     let octave = high_bit(value);
-    widen_usize(16 + (octave - 4) * 8 + ((value >> (octave - 3)) - 8))
+    widen_usize(
+        LINEAR_BINS
+            + (octave - FIRST_OCTAVE)
+            * OCTAVE_BINS
+            + ((value >> (octave - SUB_BITS)) - OCTAVE_BINS)
+    )
 }
 
 pub fn bin_range(index: usize) -> Option[BinRange] eff [Fail[ArithOverflow]] {
     let i = widen_u64(index);
-    if i >= 496 {
+    if i >= HISTOGRAM_BINS {
         return Option::None;
     }
-    if i < 16 {
+    if i < LINEAR_BINS {
         return Option::Some(
             BinRange {
                 lower: i,
@@ -195,11 +266,11 @@ pub fn bin_range(index: usize) -> Option[BinRange] eff [Fail[ArithOverflow]] {
             }
         );
     }
-    let octave = ((i - 16) >> 3) + 4;
-    let sub = (i - 16) & 7;
+    let octave = ((i - LINEAR_BINS) >> SUB_BITS) + FIRST_OCTAVE;
+    let sub = (i - LINEAR_BINS) & SUB_MASK;
     let one: u64 = 1;
-    let width = one << (octave - 3);
-    let lower = (8 + sub) * width;
+    let width = one << (octave - SUB_BITS);
+    let lower = (OCTAVE_BINS + sub) * width;
     Option::Some(
         BinRange {
             lower: lower,
@@ -218,14 +289,14 @@ pub fn histogram_record(
     let index = bucket_index(value);
     let i = widen_u64(index);
     let count = slot_u64(buckets, i);
-    if count == max_u64() {
+    if count == MAX_U64 {
         raise_histogram(
             HistogramError::BinOverflow {
                 index: index
             }
         );
     }
-    if stats.total_count == max_u64() {
+    if stats.total_count == MAX_U64 {
         raise_histogram(HistogramError::TotalOverflow);
     }
     buckets.try_set(i, count + 1);
@@ -316,7 +387,7 @@ fn needed_shift(in st: ExpState, index: i32) -> i64 eff [Fail[ArithOverflow]] {
     let hi = max_i64(last, widen_i64(index));
     let mut shift: i64 = 0;
     loop {
-        if (hi >> shift) - (lo >> shift) + 1 <= 160 {
+        if (hi >> shift) - (lo >> shift) + 1 <= EXP_BUCKETS {
             break;
         }
         shift = shift + 1;
@@ -349,7 +420,7 @@ pub fn exp_record(inout counts: Slice[u64], inout st: ExpState, value: u64) eff 
     Fail[HistogramError],
     Fail[ArithOverflow]
 ] {
-    if st.total_count == max_u64() {
+    if st.total_count == MAX_U64 {
         raise_histogram(HistogramError::TotalOverflow);
     }
     let sum_lo = wrapping_add(st.sum_lo, value);
@@ -358,11 +429,11 @@ pub fn exp_record(inout counts: Slice[u64], inout st: ExpState, value: u64) eff 
     } else {
         0
     };
-    if carry == 1 && st.sum_hi == max_u64() {
+    if carry == 1 && st.sum_hi == MAX_U64 {
         raise_histogram(HistogramError::TotalOverflow);
     }
     if value == 0 {
-        if st.zero_count == max_u64() {
+        if st.zero_count == MAX_U64 {
             raise_histogram(HistogramError::TotalOverflow);
         }
         st.zero_count = st.zero_count + 1;
@@ -431,10 +502,10 @@ pub fn span_context_new(trace_hi: u64, trace_lo: u64, span_id: u64, trace_flags:
 
 fn nibble(b: u8) -> Option[u64] {
     let c = widen_u64(b);
-    if c >= 48 && c <= 57 {
-        Option::Some(wrapping_sub(c, 48))
-    } else if c >= 97 && c <= 102 {
-        Option::Some(wrapping_sub(c, 87))
+    if c >= Ascii::Zero && c <= Ascii::Nine {
+        Option::Some(wrapping_sub(c, Ascii::Zero))
+    } else if c >= Ascii::LowerA && c <= Ascii::LowerF {
+        Option::Some(wrapping_sub(c, Ascii::LetterBase))
     } else {
         Option::None
     }
@@ -463,25 +534,25 @@ fn hex_at(in raw: Slice[u8], start: u64, n: u64) -> Result[u64, u64] {
 // stays under 0x100 once no byte has its top bit set, so no lane carries
 // into the next.
 fn hex8(x: u64) -> Option[u64] {
-    let high: u64 = 9259542123273814144;
+    let high: u64 = LANE_HIGH;
     if x & high != 0 {
         return Option::None;
     }
     // Lanes >= '0' (0x30), <= '9' (0x39), >= 'a' (0x61), <= 'f' (0x66).
-    let ge_0 = wrapping_add(x, 5787213827046133840) & high;
-    let gt_9 = wrapping_add(x, 5063812098665367110) & high;
-    let ge_a = wrapping_add(x, 2242545357980376863) & high;
-    let gt_f = wrapping_add(x, 1808504320951916825) & high;
+    let ge_0 = wrapping_add(x, AT_LEAST_0) & high;
+    let gt_9 = wrapping_add(x, ABOVE_9) & high;
+    let ge_a = wrapping_add(x, AT_LEAST_A) & high;
+    let gt_f = wrapping_add(x, ABOVE_F) & high;
     let digit = ge_0 & (gt_9 ^ high);
     let letter = ge_a & (gt_f ^ high);
     if (digit | letter) != high {
         return Option::None;
     }
-    // A lane's value: its low nibble, plus 9 for a letter (bit 6 set).
-    let n = wrapping_add(x & 1085102592571150095, wrapping_mul((x >> 6) & 72340172838076673, 9));
-    let pairs = (n | (n >> 4)) & 71777214294589695;
-    let quads = (pairs | (pairs >> 8)) & 281470681808895;
-    Option::Some((quads | (quads >> 16)) & 4294967295)
+    // A lane's value: its low nibble, plus LETTER_NIBBLE for a letter (bit 6 set).
+    let n = wrapping_add(x & LANE_NIBBLE, wrapping_mul((x >> 6) & LANE_ONES, LETTER_NIBBLE));
+    let pairs = (n | (n >> 4)) & LANE_PAIRS;
+    let quads = (pairs | (pairs >> 8)) & LANE_QUADS;
+    Option::Some((quads | (quads >> 16)) & LOW_32)
 }
 
 // The value of the 16 hex digits at `start`, eight bytes at a time; any
@@ -491,13 +562,13 @@ fn hex16_or_raise(in raw: Slice[u8], start: u64) -> u64 eff [Fail[TraceError]] {
         Option::Some(x) => hex8(x),
         Option::None => Option::None,
     };
-    let lo = match raw.try_read_u64_be(wrapping_add(start, 8)) {
+    let lo = match raw.try_read_u64_be(wrapping_add(start, HALF_WORD_BYTES)) {
         Option::Some(x) => hex8(x),
         Option::None => Option::None,
     };
     match (hi, lo) {
         (Option::Some(h), Option::Some(l)) => (h << 32) | l,
-        _ => hex_or_raise(raw, start, 16),
+        _ => hex_or_raise(raw, start, WORD_DIGITS),
     }
 }
 
@@ -514,7 +585,7 @@ fn hex_or_raise(in raw: Slice[u8], start: u64, n: u64) -> u64 eff [Fail[TraceErr
 
 fn hyphen_at(in raw: Slice[u8], at: u64) -> bool {
     match raw.try_get(at) {
-        Option::Some(b) => b == 45,
+        Option::Some(b) => b == Ascii::Minus,
         Option::None => false,
     }
 }
@@ -522,35 +593,35 @@ fn hyphen_at(in raw: Slice[u8], at: u64) -> bool {
 // Deterministic errors: length, separators left to right, version, trace
 // ID, span ID, flags.
 pub fn parse_traceparent_55(in raw: Slice[u8]) -> SpanContext eff [Fail[TraceError]] {
-    if raw.len() != 55 {
+    if raw.len() != Tp::Len {
         Fail::raise(
             TraceError::InvalidLength {
                 actual: widen_usize(raw.len())
             }
         );
     }
-    if !hyphen_at(raw, 2) {
+    if !hyphen_at(raw, Tp::FirstHyphen) {
         Fail::raise(
             TraceError::MissingHyphen {
-                offset: 2
+                offset: Tp::FirstHyphen
             }
         );
     }
-    if !hyphen_at(raw, 35) {
+    if !hyphen_at(raw, Tp::SecondHyphen) {
         Fail::raise(
             TraceError::MissingHyphen {
-                offset: 35
+                offset: Tp::SecondHyphen
             }
         );
     }
-    if !hyphen_at(raw, 52) {
+    if !hyphen_at(raw, Tp::ThirdHyphen) {
         Fail::raise(
             TraceError::MissingHyphen {
-                offset: 52
+                offset: Tp::ThirdHyphen
             }
         );
     }
-    let version = hex_or_raise(raw, 0, 2);
+    let version = hex_or_raise(raw, Tp::Version, BYTE_DIGITS);
     if version != 0 {
         Fail::raise(
             TraceError::UnsupportedVersion {
@@ -558,24 +629,24 @@ pub fn parse_traceparent_55(in raw: Slice[u8]) -> SpanContext eff [Fail[TraceErr
             }
         );
     }
-    let trace_hi = hex16_or_raise(raw, 3);
-    let trace_lo = hex16_or_raise(raw, 19);
+    let trace_hi = hex16_or_raise(raw, Tp::TraceHi);
+    let trace_lo = hex16_or_raise(raw, Tp::TraceLo);
     if trace_hi == 0 && trace_lo == 0 {
         Fail::raise(TraceError::ZeroTraceId);
     }
-    let span_id = hex16_or_raise(raw, 36);
+    let span_id = hex16_or_raise(raw, Tp::SpanId);
     if span_id == 0 {
         Fail::raise(TraceError::ZeroSpanId);
     }
-    let flags = hex_or_raise(raw, 53, 2);
+    let flags = hex_or_raise(raw, Tp::Flags, BYTE_DIGITS);
     span_context_new(trace_hi, trace_lo, span_id, wrapping_u8(flags))
 }
 
 fn hex_digit(d: u64) -> u8 {
     if d < 10 {
-        wrapping_u8(wrapping_add(d, 48))
+        wrapping_u8(wrapping_add(d, Ascii::Zero))
     } else {
-        wrapping_u8(wrapping_add(d, 87))
+        wrapping_u8(wrapping_add(d, Ascii::LetterBase))
     }
 }
 
@@ -592,29 +663,30 @@ fn write_hex(inout out: Slice[u8], start: u64, n: u64, value: u64) {
 // first digit highest (SWAR: spread one nibble per lane, then add '0', and
 // 'a' - '0' - 10 more in the lanes that hold 10 or more).
 fn hex8_bytes(v: u64) -> u64 {
-    let a = ((v & 4294967295) | (v << 16)) & 281470681808895;
-    let b = (a | (a << 8)) & 71777214294589695;
-    let n = (b | (b << 4)) & 1085102592571150095;
-    let ten_or_more = (wrapping_add(n, 8536140394893047414) & 9259542123273814144) >> 7;
-    wrapping_add(wrapping_add(n, 3472328296227680304), wrapping_mul(ten_or_more, 39))
+    let a = ((v & LOW_32) | (v << 16)) & LANE_QUADS;
+    let b = (a | (a << 8)) & LANE_PAIRS;
+    let n = (b | (b << 4)) & LANE_NIBBLE;
+    let ten_or_more = (wrapping_add(n, AT_LEAST_10) & LANE_HIGH) >> 7;
+    wrapping_add(wrapping_add(n, LANE_ZERO), wrapping_mul(ten_or_more, LETTER_GAP))
 }
 
 fn write_hex16(inout out: Slice[u8], at: u64, v: u64) {
     out.try_write_u64_be(at, hex8_bytes(v >> 32));
-    out.try_write_u64_be(wrapping_add(at, 8), hex8_bytes(v));
+    out.try_write_u64_be(wrapping_add(at, HALF_WORD_BYTES), hex8_bytes(v));
 }
 
 // Writes exactly 55 canonical lowercase ASCII bytes to `out` (55 bytes).
 pub fn format_traceparent(in context: SpanContext, inout out: Slice[u8]) {
-    out.try_set(0, 48);
-    out.try_set(1, 48);
-    out.try_set(2, 45);
-    write_hex16(out, 3, context.trace_hi);
-    write_hex16(out, 19, context.trace_lo);
-    out.try_set(35, 45);
-    write_hex16(out, 36, context.span_id);
-    out.try_set(52, 45);
-    write_hex(out, 53, 2, widen_u64(context.trace_flags));
+    // Version 00.
+    out.try_set(Tp::Version, Ascii::Zero);
+    out.try_set(1, Ascii::Zero);
+    out.try_set(Tp::FirstHyphen, Ascii::Minus);
+    write_hex16(out, Tp::TraceHi, context.trace_hi);
+    write_hex16(out, Tp::TraceLo, context.trace_lo);
+    out.try_set(Tp::SecondHyphen, Ascii::Minus);
+    write_hex16(out, Tp::SpanId, context.span_id);
+    out.try_set(Tp::ThirdHyphen, Ascii::Minus);
+    write_hex(out, Tp::Flags, BYTE_DIGITS, widen_u64(context.trace_flags));
 }
 
 // ---------------------------------------------------------------------------
@@ -645,7 +717,7 @@ pub fn pool_unclosed_count(in occupied: Slice[u8]) -> u64 {
 }
 
 fn next_after(id: u64) -> u64 {
-    if id == max_u64() {
+    if id == MAX_U64 {
         0
     } else {
         wrapping_add(id, 1)

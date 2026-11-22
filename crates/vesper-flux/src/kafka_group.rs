@@ -730,11 +730,7 @@ impl KafkaGroupSource {
     }
 
     fn decode(&self, spans: &[Span]) -> Result<(TickInput, Vec<u64>), Error> {
-        let mut acc: Vec<Accumulator> = self
-            .widths
-            .iter()
-            .map(|w| Accumulator::new(*w, self.limits))
-            .collect::<Result<_, _>>()?;
+        let mut acc = Accumulator::new(&self.widths, self.limits)?;
         let mut budget = Budget::new(self.limits);
         let mut lsns = Vec::with_capacity(spans.len());
         for (i, (t, s)) in self.topics.iter().zip(spans).enumerate() {
@@ -755,16 +751,18 @@ impl KafkaGroupSource {
                         return Err(Error::Cdc("source offset"));
                     }
                     next = next.checked_add(1).ok_or(Error::Overflow)?;
-                    acc[binding.input].add(&row, i128::from(header.z_weight), &mut budget)?;
+                    acc.add(
+                        binding.input,
+                        &row,
+                        i128::from(header.z_weight),
+                        &mut budget,
+                    )?;
                 }
             }
             lsns.push(next);
         }
         self.decoded.set(self.decoded.get() + 1);
-        let deltas = acc
-            .into_iter()
-            .map(Accumulator::finish)
-            .collect::<Result<Vec<_>, _>>()?;
+        let deltas = acc.finish()?;
         Ok((TickInput { deltas }, lsns))
     }
 }

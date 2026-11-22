@@ -31,6 +31,7 @@
 //!   of all sources ([`SourceMap`]), so span-keyed checker tables never
 //!   collide and diagnostics map back to the right file.
 use crate::ast::*;
+use crate::parser::CONST_PREFIX;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -39,7 +40,7 @@ use std::{
 use vesper_loom_calculus::{Manifest, PackageName};
 
 /// `use` in a single-file module, which has no package to import from.
-pub const USE_OUTSIDE_PACKAGE: &str = "E0110";
+pub use crate::check::USE_OUTSIDE_PACKAGE;
 /// Unknown package, module or item in an import, or an unimported name.
 pub const UNKNOWN_IMPORT: &str = "E0111";
 /// Import of an item that is not `pub`.
@@ -187,6 +188,27 @@ pub struct PackageVsys {
 }
 
 impl PackageVsys {
+    /// The type names the library declares (its extern types, wire structs
+    /// and enums), each paired with the library's name. Only the names
+    /// matter, and they do not depend on the target, so the host target
+    /// fills the placeholders. A library that does not parse declares no
+    /// names here; [`Assembled::imports`] reports its error.
+    fn type_names(&self) -> Vec<(String, String)> {
+        let Ok(source) = self.source_for(None) else {
+            return vec![];
+        };
+        let Ok(d) = vesper_ffi::sys::parse(&source, vesper_ffi::sys::Limits::default()) else {
+            return vec![];
+        };
+        let library = d.name().to_owned();
+        d.extern_types()
+            .iter()
+            .map(|t| t.name().to_owned())
+            .chain(d.wire_structs().iter().map(|w| w.name().to_owned()))
+            .chain(d.enums().iter().map(|e| e.name().to_owned()))
+            .map(|n| (n, library.clone()))
+            .collect()
+    }
     /// The `.vsys` source for an object of `target` (the host when `None`):
     /// `@TARGET@` and `@ABI@` replaced by its triple and calling convention.
     pub fn source_for(&self, target: Option<&str>) -> Result<String, String> {
@@ -241,6 +263,10 @@ struct Package {
     /// Dependency name -> package index.
     deps: BTreeMap<String, usize>,
     modules: Vec<ModuleSource>,
+    /// The type names (extern types, wire structs and enums) the `.vsys`
+    /// libraries in this package's manifest declare, each with its
+    /// library: a `use` of the package's root may name them (§16.3).
+    foreign_types: BTreeMap<String, String>,
 }
 /// (package index, module path).
 type ModuleKey = (usize, Vec<String>);
@@ -260,18 +286,51 @@ pub fn is_package(path: &Path) -> bool {
 /// them into one module. `Err` is an I/O failure; language and manifest
 /// errors are reported in [`Assembled`].
 pub fn load(dir: &Path) -> Result<Assembled, String> {
-    load_with_tests(dir, false)
+    load_with_parser(dir, None, None)
 }
 
 /// Include test-only declarations in the root package. Dependencies are
 /// loaded in ordinary mode.
 pub fn load_for_tests(dir: &Path) -> Result<Assembled, String> {
-    load_with_tests(dir, true)
+    load_with_root_parser(dir, &mut |path| {
+        let source = read_source(path)?;
+        let parsed = crate::parser::parse_for_tests(&source);
+        Ok((source, parsed))
+    })
 }
 
-fn load_with_tests(dir: &Path, include_tests: bool) -> Result<Assembled, String> {
-    let mut loader = Loader::default();
-    let root = loader.package(dir, dir.to_path_buf(), &mut vec![], include_tests)?;
+type RootParser<'a> = dyn FnMut(&Path) -> Result<(String, crate::parser::Parse), String> + 'a;
+
+/// Prepare root sources before resolving imports and assigning global spans.
+/// The callback may append synthetic source, but its AST must use offsets
+/// into the resulting text. Dependencies always use the ordinary parser.
+pub fn load_with_root_parser(dir: &Path, parse: &mut RootParser<'_>) -> Result<Assembled, String> {
+    load_with_parser(dir, Some(parse), None)
+}
+
+/// Assemble tests against one changed dependency source held in memory.
+pub fn load_with_dependency_replacement(
+    dir: &Path,
+    parse: &mut RootParser<'_>,
+    replacement: (&Path, &str),
+) -> Result<Assembled, String> {
+    load_with_parser(dir, Some(parse), Some(replacement))
+}
+
+fn read_source(path: &Path) -> Result<String, String> {
+    fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))
+}
+
+fn load_with_parser(
+    dir: &Path,
+    parse: Option<&mut RootParser<'_>>,
+    replacement: Option<(&Path, &str)>,
+) -> Result<Assembled, String> {
+    let mut loader = Loader {
+        replacement,
+        ..Loader::default()
+    };
+    let root = loader.package(dir, dir.to_path_buf(), &mut vec![], parse)?;
     let package = root
         .map(|i| loader.packages[i].name.as_str().to_owned())
         .unwrap_or_default();
@@ -304,7 +363,7 @@ fn load_with_tests(dir: &Path, include_tests: bool) -> Result<Assembled, String>
 }
 
 #[derive(Default)]
-struct Loader {
+struct Loader<'a> {
     packages: Vec<Package>,
     /// Canonical directory -> package index.
     by_path: BTreeMap<PathBuf, usize>,
@@ -312,6 +371,7 @@ struct Loader {
     diagnostics: Vec<PackageDiagnostic>,
     manifest_errors: Vec<(String, Diagnostic)>,
     vsys: Vec<PackageVsys>,
+    replacement: Option<(&'a Path, &'a str)>,
 }
 
 fn manifest_error(code: &str, message: impl Into<String>) -> Diagnostic {
@@ -419,7 +479,7 @@ fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) -> Result<(), String> 
     Ok(())
 }
 
-impl Loader {
+impl Loader<'_> {
     /// Load one package (and, recursively, its dependencies). `stack` holds
     /// the canonical directories being loaded, for cycle detection.
     fn package(
@@ -427,7 +487,7 @@ impl Loader {
         dir: &Path,
         shown: PathBuf,
         stack: &mut Vec<(PathBuf, String)>,
-        include_tests: bool,
+        mut parse: Option<&mut RootParser<'_>>,
     ) -> Result<Option<usize>, String> {
         let canonical = fs::canonicalize(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         if let Some(i) = stack.iter().position(|(p, _)| *p == canonical) {
@@ -505,8 +565,6 @@ impl Loader {
                 roots.push(file_shown.clone());
                 segments.clear();
             }
-            let text = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-            let file = self.add_file(file_shown.clone(), text);
             if let Some(bad) = segments.iter().find(|s| !is_module_segment(s)) {
                 self.manifest_errors.push((
                     file_shown,
@@ -517,12 +575,17 @@ impl Loader {
                 ));
                 continue;
             }
-            let source = &self.sources.files[file].text;
-            let parsed = if include_tests {
-                crate::parser::parse_for_tests(source)
+            let (text, parsed) = if let Some(parse) = parse.as_deref_mut() {
+                parse(&path)?
             } else {
-                crate::parser::parse(source)
+                let text = match self.replacement {
+                    Some((replaced, text)) if normalize(&path) == replaced => text.to_owned(),
+                    _ => read_source(&path)?,
+                };
+                let parsed = crate::parser::parse(&text);
+                (text, parsed)
             };
+            let file = self.add_file(file_shown, text);
             for d in parsed.diagnostics {
                 self.diagnostics.push(PackageDiagnostic {
                     file: Some(file),
@@ -547,7 +610,7 @@ impl Loader {
                 ),
             ));
         }
-        self.package_vsys(dir, &shown, &manifest_shown, &manifest)?;
+        let foreign_types = self.package_vsys(dir, &shown, &manifest_shown, &manifest)?;
         let index = self.packages.len();
         self.packages.push(Package {
             name: name.clone(),
@@ -555,6 +618,7 @@ impl Loader {
             display: shown.clone(),
             deps: BTreeMap::new(),
             modules,
+            foreign_types,
         });
         self.by_path.insert(canonical.clone(), index);
         stack.push((canonical, name.as_str().to_owned()));
@@ -586,7 +650,7 @@ impl Loader {
                 continue;
             }
             let Some(dep_index) =
-                self.package(&dep_dir, normalize(&shown.join(path)), stack, false)?
+                self.package(&dep_dir, normalize(&shown.join(path)), stack, None)?
             else {
                 continue;
             };
@@ -629,15 +693,17 @@ impl Loader {
     }
 
     /// Read the `.vsys` files `[package] vsys` names: relative paths inside
-    /// the package directory, each read once.
+    /// the package directory, each read once. Returns the type names the
+    /// libraries declare, each with its library.
     fn package_vsys(
         &mut self,
         dir: &Path,
         shown: &Path,
         manifest_shown: &str,
         manifest: &Manifest,
-    ) -> Result<(), String> {
+    ) -> Result<BTreeMap<String, String>, String> {
         let mut seen = BTreeSet::new();
+        let mut types = BTreeMap::new();
         for path in &manifest.package.vsys {
             let bad = |why: &str| {
                 manifest_error(INVALID_PACKAGE, format!("package.vsys '{path}': {why}"))
@@ -671,13 +737,15 @@ impl Loader {
                 continue;
             }
             let text = fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
-            self.vsys.push(PackageVsys {
+            let v = PackageVsys {
                 package: manifest.package.name.as_str().to_owned(),
                 display: display(&normalize(&shown.join(relative))),
                 text,
-            });
+            };
+            types.extend(v.type_names());
+            self.vsys.push(v);
         }
-        Ok(())
+        Ok(types)
     }
 
     fn add_file(&mut self, display: String, text: String) -> usize {
@@ -719,8 +787,14 @@ impl Loader {
         if let Some(t) = resolver.tables.get(&(root, vec![])) {
             hidden.extend(t.items.iter().map(|(n, k)| (n.clone(), *k)));
         }
+        // A `.vsys` type keeps its global name, so a re-export of one hides
+        // nothing.
         if let Some(r) = resolver.reexported.get(&(root, vec![])) {
-            hidden.extend(r.iter().map(|(n, (_, k))| (n.clone(), *k)));
+            hidden.extend(
+                r.iter()
+                    .filter(|(_, (key, _))| !resolver.is_foreign(key))
+                    .map(|(n, (_, k))| (n.clone(), *k)),
+            );
         }
         // Enum variants keep their names; record each one's owning enum so a
         // module may use it only when it declares or imports that enum.
@@ -739,6 +813,27 @@ impl Loader {
                                 .entry(v.name.clone())
                                 .or_insert_with(|| (owner.clone(), shown.clone()));
                         }
+                    }
+                }
+            }
+        }
+        // The literal value of every constant that has one, by internal
+        // name: such a constant may be a match pattern in any module.
+        let mut literals: BTreeMap<String, Literal> = BTreeMap::new();
+        // Untyped value enum members (`enum E: _`): their uses are literals.
+        let mut untyped: BTreeSet<String> = BTreeSet::new();
+        for (p, package) in packages.iter().enumerate() {
+            for m in &package.modules {
+                for item in &m.parsed.items {
+                    if let Item::Function(f) = item
+                        && f.name.starts_with(CONST_PREFIX)
+                        && let Some(l) = crate::parser::const_literal(f)
+                    {
+                        let name = resolver.name_of(&(p, m.path.clone(), f.name.clone()));
+                        if f.result == Type::Infer {
+                            untyped.insert(name.clone());
+                        }
+                        literals.insert(name, l);
                     }
                 }
             }
@@ -764,6 +859,7 @@ impl Loader {
                     names.insert(n.clone(), (mangled, *kind));
                 }
                 let mut exported = vec![];
+                let mut groups: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
                 for u in &m.parsed.uses {
                     let (target_pkg, target_path, module_shown) =
                         match resolver.use_module(p, &m.path, u) {
@@ -778,6 +874,84 @@ impl Loader {
                         };
                     let same_module = target_pkg == p && target_path == m.path;
                     for n in &u.names {
+                        // A value enum imports each member `E::M` as a
+                        // constant.
+                        if let Some(members) = resolver.group(
+                            target_pkg,
+                            &target_path,
+                            &n.name,
+                            same_module,
+                            &module_shown,
+                            n.span.clone(),
+                        ) {
+                            match members {
+                                Ok(members) => {
+                                    let local = n.local();
+                                    let prefix = format!("{CONST_PREFIX}{local}::");
+                                    if own.contains_key(local)
+                                        || own.keys().any(|k| k.starts_with(&prefix))
+                                    {
+                                        self.error(
+                                            file,
+                                            AMBIGUOUS,
+                                            format!("'{local}' is both declared in this module and imported"),
+                                            n.span.clone(),
+                                        );
+                                        continue;
+                                    }
+                                    let targets = members
+                                        .into_iter()
+                                        .map(|(member, key)| {
+                                            (format!("{local}::{member}"), resolver.name_of(&key))
+                                        })
+                                        .collect::<Vec<_>>();
+                                    // Two imports of one local enum name must
+                                    // be the same enum: no member may differ
+                                    // and the member sets must agree.
+                                    let source = targets
+                                        .iter()
+                                        .map(|(_, t)| t.clone())
+                                        .collect::<BTreeSet<_>>();
+                                    match groups.get(local) {
+                                        Some(existing) if *existing != source => {
+                                            self.error(
+                                                file,
+                                                AMBIGUOUS,
+                                                format!("'{local}' is imported twice from different items"),
+                                                n.span.clone(),
+                                            );
+                                            continue;
+                                        }
+                                        _ => {}
+                                    }
+                                    if targets.iter().any(|(m, t)| {
+                                        names.get(m).is_some_and(|(existing, _)| existing != t)
+                                    }) {
+                                        self.error(
+                                            file,
+                                            AMBIGUOUS,
+                                            format!(
+                                                "'{local}' is imported twice from different items"
+                                            ),
+                                            n.span.clone(),
+                                        );
+                                        continue;
+                                    }
+                                    groups.insert(local.to_owned(), source);
+                                    for (member, target) in targets {
+                                        if u.public {
+                                            exported.push(target.clone());
+                                        }
+                                        names.insert(member, (target, Kind::Value));
+                                    }
+                                }
+                                Err(d) => self.diagnostics.push(PackageDiagnostic {
+                                    file: Some(file),
+                                    diagnostic: d,
+                                }),
+                            }
+                            continue;
+                        }
                         let (key, kind) = match resolver.lookup(
                             target_pkg,
                             &target_path,
@@ -816,7 +990,9 @@ impl Loader {
                                 );
                             }
                             _ => {
-                                if u.public {
+                                // A `.vsys` type is not a source item, so a
+                                // root module does not export it.
+                                if u.public && !resolver.is_foreign(&key) {
                                     exported.push(target.clone());
                                 }
                                 names.insert(local, (target, kind));
@@ -829,6 +1005,8 @@ impl Loader {
                     names: &names,
                     hidden: if is_root_module { None } else { Some(&hidden) },
                     variants: &variants,
+                    literals: &literals,
+                    untyped: &untyped,
                     resolver: &resolver,
                     package: p,
                     module: &m.path,
@@ -936,6 +1114,21 @@ struct Table {
     items: BTreeMap<String, Kind>,
     public: BTreeSet<String>,
 }
+impl Table {
+    /// The members `M` of the value enum `group` (its constants
+    /// `const$group::M`), or `None` when the module declares no such enum.
+    fn group(&self, group: &str) -> Option<Vec<String>> {
+        let prefix = format!("{CONST_PREFIX}{group}::");
+        let members = self
+            .items
+            .range(prefix.clone()..)
+            .take_while(|(n, _)| n.starts_with(&prefix))
+            .map(|(n, _)| n[prefix.len()..].to_owned())
+            .filter(|m| !m.contains("::"))
+            .collect::<Vec<_>>();
+        (!members.is_empty()).then_some(members)
+    }
+}
 
 /// (package index, module path, item name).
 type ItemKey = (usize, Vec<String>, String);
@@ -977,6 +1170,9 @@ impl<'a> Resolver<'a> {
     /// The internal name of an item: its root re-export name, its plain
     /// name in the root package's root module, else the mangled name.
     fn name_of(&self, key: &ItemKey) -> String {
+        if self.is_foreign(key) {
+            return key.2.clone();
+        }
         if let Some(n) = self.renamed.get(key) {
             return n.clone();
         }
@@ -985,6 +1181,16 @@ impl<'a> Resolver<'a> {
             return item.clone();
         }
         mangled(self.packages[*pkg].name.as_str(), path, item)
+    }
+    /// Whether `key` names a type of one of its package's `.vsys`
+    /// libraries rather than a source item: it keeps its global name.
+    fn is_foreign(&self, (pkg, path, item): &ItemKey) -> bool {
+        path.is_empty()
+            && self.packages[*pkg].foreign_types.contains_key(item)
+            && !self
+                .tables
+                .get(&(*pkg, vec![]))
+                .is_some_and(|t| t.items.contains_key(item))
     }
     /// The display name `@scope/name::m::item`.
     fn shown(&self, (pkg, path, item): &ItemKey) -> String {
@@ -1096,10 +1302,19 @@ impl<'a> Resolver<'a> {
         span: Span,
     ) -> Result<(ItemKey, Kind), Diagnostic> {
         let key = (pkg, path.to_vec());
+        // A constant `NAME` (or a value enum member `E::M`) is the function
+        // `const$NAME`.
+        let constant = format!("{CONST_PREFIX}{name}");
+        let item = match self.tables.get(&key) {
+            Some(t) if !t.items.contains_key(name) && t.items.contains_key(&constant) => {
+                constant.as_str()
+            }
+            _ => name,
+        };
         if let Some(table) = self.tables.get(&key)
-            && let Some(&kind) = table.items.get(name)
+            && let Some(&kind) = table.items.get(item)
         {
-            if !same_module && !table.public.contains(name) {
+            if !same_module && !table.public.contains(item) {
                 return Err(Diagnostic::new(
                     PRIVATE_ITEM,
                     format!("'{name}' is private to module {module_shown}"),
@@ -1107,10 +1322,17 @@ impl<'a> Resolver<'a> {
                 )
                 .with_help("mark the item `pub` to export it"));
             }
-            return Ok(((pkg, path.to_vec(), name.to_owned()), kind));
+            return Ok(((pkg, path.to_vec(), item.to_owned()), kind));
         }
         if let Some((target, kind)) = self.reexported.get(&key).and_then(|r| r.get(name)) {
             return Ok((target.clone(), *kind));
+        }
+        // A type a `.vsys` library of the package declares (manuscript
+        // §16.3): its name is global, so every importer names one type.
+        if path.is_empty() && self.packages[pkg].foreign_types.contains_key(name) {
+            // Generated as a struct or enum, so a type and a constructor,
+            // like a source struct or enum.
+            return Ok(((pkg, vec![], name.to_owned()), Kind::Both));
         }
         let d = Diagnostic::new(
             UNKNOWN_IMPORT,
@@ -1126,6 +1348,51 @@ impl<'a> Resolver<'a> {
                 d
             },
         )
+    }
+    /// The members of a value enum `name` of a module, declared there (and
+    /// `pub`, unless the lookup comes from that module) or re-exported by
+    /// it: each member `M` with the item of its constant. `None` when the
+    /// module has no value enum of that name.
+    fn group(
+        &self,
+        pkg: usize,
+        path: &[String],
+        name: &str,
+        same_module: bool,
+        module_shown: &str,
+        span: Span,
+    ) -> Option<Result<Vec<(String, ItemKey)>, Diagnostic>> {
+        let key = (pkg, path.to_vec());
+        if let Some(table) = self.tables.get(&key)
+            && let Some(members) = table.group(name)
+        {
+            let mut out = vec![];
+            for m in members {
+                let item = format!("{CONST_PREFIX}{name}::{m}");
+                if !same_module && !table.public.contains(&item) {
+                    return Some(Err(Diagnostic::new(
+                        PRIVATE_ITEM,
+                        format!("value enum '{name}' is private to module {module_shown}"),
+                        span,
+                    )
+                    .with_help("mark the enum `pub` to export it")));
+                }
+                out.push((m, (pkg, path.to_vec(), item)));
+            }
+            return Some(Ok(out));
+        }
+        let prefix = format!("{name}::");
+        let members = self
+            .reexported
+            .get(&key)?
+            .iter()
+            .filter_map(|(local, (target, _))| {
+                local
+                    .strip_prefix(&prefix)
+                    .map(|m| (m.to_owned(), target.clone()))
+            })
+            .collect::<Vec<_>>();
+        (!members.is_empty()).then_some(Ok(members))
     }
     /// Resolve every module's `pub use` names to the items they re-export,
     /// following chains of re-exports to a fixed point. Names that do not
@@ -1149,7 +1416,20 @@ impl<'a> Resolver<'a> {
                             {
                                 continue;
                             }
-                            if let Ok(found) =
+                            if let Some(Ok(members)) =
+                                self.group(tp, &tpath, &n.name, same, &shown, n.span.clone())
+                            {
+                                let r = self.reexported.entry(key).or_default();
+                                for (m, target) in members {
+                                    let local = format!("{}::{m}", n.local());
+                                    if let std::collections::btree_map::Entry::Vacant(slot) =
+                                        r.entry(local)
+                                    {
+                                        slot.insert((target, Kind::Value));
+                                        changed = true;
+                                    }
+                                }
+                            } else if let Ok(found) =
                                 self.lookup(tp, &tpath, &n.name, same, &shown, n.span.clone())
                             {
                                 self.reexported
@@ -1185,6 +1465,12 @@ impl<'a> Resolver<'a> {
             // `pub use self::f;` in the root module re-exports a root item
             // under its own name: nothing to rename. `pub use self::f as g;`
             // renames the root item `f` to `g` like any other re-export.
+            // A constant keeps its function prefix under its new name.
+            let local = &if item.2.starts_with(CONST_PREFIX) {
+                format!("{CONST_PREFIX}{local}")
+            } else {
+                local.clone()
+            };
             if item.0 == self.root && item.1.is_empty() && item.2 == *local {
                 continue;
             }
@@ -1270,6 +1556,14 @@ impl<'a> Resolver<'a> {
             .collect::<Vec<_>>()
             .join("::");
         let same = pkg == p && module == current;
+        // `m::E::M` names the member `M` of the value enum `E` of `m`.
+        if j + 2 == rest.len()
+            && let Some(Ok(members)) =
+                self.group(pkg, &module, rest[j], same, &module_shown, span.clone())
+            && let Some((_, key)) = members.into_iter().find(|(m, _)| m == rest[j + 1])
+        {
+            return Ok(self.name_of(&key));
+        }
         let found = self.lookup(pkg, &module, rest[j], same, &module_shown, span.clone());
         let (key, _) = match found {
             // `self::nope::f`: a lower-case segment followed by more is a
@@ -1366,6 +1660,10 @@ struct Renamer<'a> {
     hidden: Option<&'a BTreeMap<String, Kind>>,
     /// Enum variant -> (owning enum's internal name, its display name).
     variants: &'a BTreeMap<String, (String, String)>,
+    /// Constant function (internal name) -> its literal value.
+    literals: &'a BTreeMap<String, Literal>,
+    /// Untyped value enum members (internal names), used as literals.
+    untyped: &'a BTreeSet<String>,
     /// Qualified paths resolve against the whole package graph.
     resolver: &'a Resolver<'a>,
     package: usize,
@@ -1432,6 +1730,13 @@ impl Renamer<'_> {
     }
     /// A path name `Head::rest` or plain type/effect name.
     fn type_name(&mut self, n: &mut String, span: &Span) {
+        // A value enum member `E::M` (own `const$E::M` or imported).
+        if n.contains("::")
+            && let Some((t, _)) = self.names.get(n.as_str())
+        {
+            *n = t.clone();
+            return;
+        }
         if is_qualified(n) {
             self.qualified(n, span);
             return;
@@ -1652,6 +1957,7 @@ impl Renamer<'_> {
     /// Rename a pattern and bind its variables (the caller restores scope).
     fn pattern(&mut self, p: &mut Pattern) {
         let span = p.span.clone();
+        let mut literal = None;
         match &mut p.kind {
             PatternKind::Wild | PatternKind::Literal(_) => {}
             PatternKind::Bind(n) => self.values.push(n.clone()),
@@ -1660,12 +1966,31 @@ impl Renamer<'_> {
                     self.pattern(p);
                 }
             }
-            PatternKind::Constructor { name, fields, .. } => {
-                self.type_name(name, &span);
-                for (_, p) in fields {
-                    self.pattern(p);
+            PatternKind::Constructor {
+                name,
+                fields,
+                named,
+            } => {
+                let local = self.names.get(name.as_str()).map(|(t, _)| t.clone());
+                if let Some(t) = local.filter(|t| crate::arrays::is_const_function(t)) {
+                    *name = t;
+                } else {
+                    self.type_name(name, &span);
+                }
+                if fields.is_empty()
+                    && !*named
+                    && let Some(l) = self.literals.get(name.as_str())
+                {
+                    literal = Some(l.clone());
+                } else {
+                    for (_, p) in fields {
+                        self.pattern(p);
+                    }
                 }
             }
+        }
+        if let Some(l) = literal {
+            p.kind = PatternKind::Literal(l);
         }
         self.span(&mut p.span);
     }
@@ -1681,7 +2006,29 @@ impl Renamer<'_> {
         let span = e.span.clone();
         match &mut e.kind {
             ExprKind::Literal(_) => {}
-            ExprKind::Name(n) => self.value_name(n, &span),
+            ExprKind::Name(n) => {
+                let written = n.contains(CONST_PREFIX);
+                self.value_name(n, &span);
+                // An imported constant or a path to one is a call of its
+                // function, as the parser makes a module's own (empty
+                // callee span: see `parser::lower_const_names`).
+                if !written
+                    && self.untyped.contains(n.as_str())
+                    && let Some(l) = self.literals.get(n.as_str())
+                {
+                    e.kind = ExprKind::Literal(l.clone());
+                } else if !written && crate::arrays::is_const_function(n) {
+                    let callee = Expr {
+                        kind: ExprKind::Name(std::mem::take(n)),
+                        span: span.start + self.shift..span.start + self.shift,
+                    };
+                    e.kind = ExprKind::Call {
+                        callee: Box::new(callee),
+                        types: vec![],
+                        args: vec![],
+                    };
+                }
+            }
             ExprKind::Tuple(es) => {
                 for e in es {
                     self.expr(e);

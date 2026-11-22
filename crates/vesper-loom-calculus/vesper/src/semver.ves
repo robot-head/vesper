@@ -6,6 +6,8 @@ use self::{
     Ver
 };
 use self::util::{
+    CmpOp,
+    Order,
     add,
     cmp,
     pre_ord,
@@ -43,7 +45,7 @@ fn greater(in l: L, in c: Cmp, in v: Ver) -> bool {
     if v.patch != c.patch {
         return v.patch > c.patch;
     }
-    pre_ord(in l, v.pre, c.pre) == 2
+    pre_ord(in l, v.pre, c.pre) == Order::Greater
 }
 
 fn less(in l: L, in c: Cmp, in v: Ver) -> bool {
@@ -62,7 +64,7 @@ fn less(in l: L, in c: Cmp, in v: Ver) -> bool {
     if v.patch != c.patch {
         return v.patch < c.patch;
     }
-    pre_ord(in l, v.pre, c.pre) == 0
+    pre_ord(in l, v.pre, c.pre) == Order::Less
 }
 
 fn tilde(in l: L, in c: Cmp, in v: Ver) -> bool {
@@ -75,7 +77,7 @@ fn tilde(in l: L, in c: Cmp, in v: Ver) -> bool {
     if c.has_patch && v.patch != c.patch {
         return v.patch > c.patch;
     }
-    pre_ord(in l, v.pre, c.pre) != 0
+    pre_ord(in l, v.pre, c.pre) != Order::Less
 }
 
 fn caret(in l: L, in c: Cmp, in v: Ver) -> bool {
@@ -108,23 +110,23 @@ fn caret(in l: L, in c: Cmp, in v: Ver) -> bool {
     } else if v.minor != c.minor || v.patch != c.patch {
         return false;
     }
-    pre_ord(in l, v.pre, c.pre) != 0
+    pre_ord(in l, v.pre, c.pre) != Order::Less
 }
 
 fn matches_impl(in l: L, in c: Cmp, in v: Ver) -> bool {
-    if c.op == 0 || c.op == 7 {
+    if c.op == CmpOp::Exact || c.op == CmpOp::Wildcard {
         exact(in l, in c, in v)
-    } else if c.op == 1 {
+    } else if c.op == CmpOp::Greater {
         greater(in l, in c, in v)
-    } else if c.op == 2 {
+    } else if c.op == CmpOp::GreaterEq {
         exact(in l, in c, in v) || greater(in l, in c, in v)
-    } else if c.op == 3 {
+    } else if c.op == CmpOp::Less {
         less(in l, in c, in v)
-    } else if c.op == 4 {
+    } else if c.op == CmpOp::LessEq {
         exact(in l, in c, in v) || less(in l, in c, in v)
-    } else if c.op == 5 {
+    } else if c.op == CmpOp::Tilde {
         tilde(in l, in c, in v)
-    } else if c.op == 6 {
+    } else if c.op == CmpOp::Caret {
         caret(in l, in c, in v)
     } else {
         false

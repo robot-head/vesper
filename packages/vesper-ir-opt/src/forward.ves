@@ -1,0 +1,435 @@
+// Memory forwarding: `ir_opt::optimize`'s per-block equality saturation over
+// memory observations and state tokens (src/ir_opt.rs `RULES`), on
+// @vesper/egraph's memory terms instead of an egglog program.
+//
+// Per block, as the Rust pass builds it: the places the block's reads of
+// locals, writes and plain binds observe, numbered by first appearance;
+// every pair the place graph says does not overlap is `disjoint`; a state
+// term per token (`Start` at entry, `Write` for a scalar `=` write or plain
+// scalar bind, `Barrier` for any other effect); every scalar sink read of a
+// known place is `(union v (Read s p))`. After twelve rounds a read is
+// replaced by the first earlier scalar of its type in its class. Reads are
+// only ever aliased to existing values (the scalar-only replacement rule),
+// and aliases are resolved through chains.
+//
+// Errors are the Rust pass's: a forwarded read without state evidence, and
+// a block egglog would refuse (a state read before it is defined, or a token
+// defined twice; the e-graph lane's `egraph_memory` check).
+
+use @vesper/check-data::util::{
+    add,
+    inc,
+    n32,
+    w
+};
+use @vesper/check-data::names::{
+    Names,
+    names_new
+};
+use @vesper/place-ir::{
+    BlockRow,
+    FnRow,
+    InstRow,
+    Program
+};
+use @vesper/egraph::graph::{
+    EGraph,
+    egraph_new
+};
+use @vesper/egraph::run::{
+    run_rounds
+};
+use @vesper/egraph::{
+    memory_arity,
+    memory_rules
+};
+use self::view::{
+    FnView,
+    at32,
+    block_entry,
+    block_params_at,
+    class_of,
+    fn_view,
+    overlaps,
+    place_text,
+    resolve
+};
+
+// Constants are copied, not imported: the Vesper package assembler
+// (@vesper/check-names-packages) does not resolve an imported constant
+// yet (E0111), and tests/self_host_check_names_packages.rs assembles this
+// package too.
+const C_SCALAR: u8 = 1;
+const NONE: u32 = 4294967295;
+const OP_BIND: u8 = 3;
+const OP_HANDLE: u8 = 15;
+const OP_READ: u8 = 2;
+const OP_WRITE: u8 = 4;
+const PAT_BIND: u64 = 1;
+const P_SINK: u64 = 2;
+const T_VALUE: u8 = 6;
+
+// @vesper/egraph's memory terms (its `V_*` constants). They are copied, not
+// imported: the Vesper package assembler (@vesper/check-names-packages)
+// does not resolve a constant imported from another package's root yet
+// (E0111), and tests/self_host_check_names_packages.rs assembles this
+// package too.
+const V_REF: u32 = 0;
+const V_START: u32 = 1;
+const V_WRITE: u32 = 2;
+const V_BARRIER: u32 = 3;
+const V_READ: u32 = 4;
+
+// ir_opt's `(run 12)`.
+const ROUNDS: u64 = 12;
+
+// egglog refuses a token past this (the e-graph lane's bound).
+const TOKEN_CAP: u64 = 16777216;
+
+pub const S_OK: u8 = 0;
+// "read lacks state evidence"
+pub const S_NO_TOKEN: u8 = 1;
+// "effect equality saturation: ..." (egglog refuses the block's program)
+pub const S_BAD_STATE: u8 = 2;
+
+fn set_token(inout s: ChunkSeq[u32], t: u64, id: u32) -> bool {
+    if t >= TOKEN_CAP {
+        return false;
+    }
+    if s.len() <= t {
+        s.resize(inc(t), NONE);
+    }
+    if at32(in s, t) != NONE {
+        return false;
+    }
+    s.try_set(t, id);
+    true
+}
+
+fn token(in s: ChunkSeq[u32], t: u64) -> u32 {
+    at32(in s, t)
+}
+
+fn is_scalar(in cls: ChunkSeq[u8], ty: u32) -> bool {
+    class_of(in cls, ty) == C_SCALAR
+}
+
+// The scratch state one function's blocks share.
+pub struct Scratch {
+    // place texts
+    pn: Names,
+    buf: ChunkSeq[u8],
+    // place symbol -> the block's place index
+    pidx: ChunkSeq[u32],
+    // name symbol -> 1 for the function's locals
+    lmark: ChunkSeq[u8]
+}
+
+pub fn scratch_new(names_len: u64) -> Scratch {
+    let mut lmark: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](names_len);
+    lmark.resize(names_len, 0);
+    Scratch {
+        pn: names_new(),
+        buf: ChunkSeq::new[u8](),
+        pidx: ChunkSeq::new[u32](),
+        lmark: lmark
+    }
+}
+
+fn is_local(in sc: Scratch, s: u32) -> bool {
+    match sc.lmark.try_get(w(s)) {
+        Option::Some(x) => x != 0,
+        Option::None => false,
+    }
+}
+
+// One block: aliases found are added to `aliases`. Returns the status and
+// the number of reads replaced.
+fn forward_block(
+    in p: Program,
+    in names: Names,
+    in cls: ChunkSeq[u8],
+    in v: FnView,
+    inout sc: Scratch,
+    bk: BlockRow,
+    inout aliases: ChunkSeq[u32]
+) -> (u8, u64) {
+    let mut places: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut isym: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](bk.ic);
+    for k in 0..bk.ic {
+        let i = p.inst(add(bk.i0, k));
+        let mut s: u32 = NONE;
+        let mut creates = true;
+        if i.op == OP_READ {
+            let local = is_local(in sc, n32(p.op(i.a)));
+            // A read of a non-local only looks a place up, and only a
+            // scalar sink read does that.
+            if local || (p.op(add(i.a, 2)) == P_SINK && is_scalar(in cls, i.ty)) {
+                s = place_text(in p, in names, inout sc.pn, inout sc.buf, i);
+            }
+            creates = local;
+        } else if i.op == OP_WRITE || i.op == OP_BIND {
+            s = place_text(in p, in names, inout sc.pn, inout sc.buf, i);
+        }
+        isym.push(s);
+        if s != NONE && creates {
+            if w(s) >= sc.pidx.len() {
+                sc.pidx.resize(sc.pn.len(), NONE);
+            }
+            if at32(in sc.pidx, w(s)) == NONE {
+                sc.pidx.try_set(w(s), n32(places.len()));
+                places.push(s);
+            }
+        }
+    }
+    let r = forward_places(
+        in p,
+        in names,
+        in cls,
+        in v,
+        inout sc,
+        bk,
+        in places,
+        in isym,
+        inout aliases
+    );
+    for k in 0..places.len() {
+        sc.pidx.try_set(w(at32(in places, k)), NONE);
+    }
+    r
+}
+
+fn place_index(in sc: Scratch, s: u32) -> u32 {
+    if s == NONE {
+        return NONE;
+    }
+    at32(in sc.pidx, w(s))
+}
+
+fn forward_places(
+    in p: Program,
+    in names: Names,
+    in cls: ChunkSeq[u8],
+    in v: FnView,
+    inout sc: Scratch,
+    bk: BlockRow,
+    in places: ChunkSeq[u32],
+    in isym: ChunkSeq[u32],
+    inout aliases: ChunkSeq[u32]
+) -> (u8, u64) {
+    let mut rules = memory_rules();
+    let np = places.len();
+    for a in 0..np {
+        for b in 0..np {
+            if !overlaps(in sc.pn, at32(in places, a), at32(in places, b)) {
+                rules.rel_add(wrapping_i64(a), wrapping_i64(b));
+            }
+        }
+    }
+    let arity = memory_arity();
+    let mut g = egraph_new(in arity);
+    let mut tokens: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut bad = false;
+    let entry = block_entry(in p, bk);
+    let st = g.add(V_START, wrapping_i64(entry), 0, 0);
+    if !set_token(inout tokens, entry, st) {
+        bad = true;
+    }
+    let mut prior: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let pa = block_params_at(in p, bk);
+    let npar = p.op(pa);
+    for k in 0..npar {
+        let x = n32(p.op(add(inc(pa), k)));
+        if is_scalar(in cls, v.vtype(w(x))) {
+            prior.push(x);
+        }
+    }
+    // queries: dest, candidates[qs[k]..qs[k+1]]
+    let mut qd: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut qs: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut qc: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for k in 0..bk.ic {
+        let i = p.inst(add(bk.i0, k));
+        let s = at32(in isym, k);
+        if i.op == OP_READ && p.op(add(i.a, 2)) == P_SINK && is_scalar(in cls, i.ty) {
+            let pi = place_index(in sc, s);
+            if pi != NONE {
+                if i.has_token == 0 {
+                    return (S_NO_TOKEN, 0);
+                }
+                let t = token(in tokens, i.tin);
+                if t == NONE {
+                    bad = true;
+                } else {
+                    let x = g.add(V_REF, wrapping_i64(w(i.dest)), 0, 0);
+                    let rd = g.add(V_READ, wrapping_i64(w(pi)), t, 0);
+                    g.union(x, rd);
+                }
+                qd.push(i.dest);
+                qs.push(qc.len());
+                for j in 0..prior.len() {
+                    let c = at32(in prior, j);
+                    if v.vtype(w(c)) == i.ty {
+                        qc.push(c);
+                    }
+                }
+            }
+        }
+        if i.has_token != 0 && i.tin != i.tout {
+            // (place index, value) of a forwarding write, or NONE
+            let mut wp: u32 = NONE;
+            let mut wv: u64 = 0;
+            if i.op == OP_WRITE {
+                let value = p.op(add(i.a, 2));
+                let is_eq = names.spells(n32(p.op(inc(i.a))), in "=".as_bytes());
+                if is_eq && is_scalar(in cls, v.vtype(value)) {
+                    wp = place_index(in sc, s);
+                    wv = value;
+                }
+            } else if i.op == OP_BIND && p.op(inc(i.a)) == PAT_BIND {
+                let value = p.op(i.a);
+                if is_scalar(in cls, v.vtype(value)) {
+                    wp = place_index(in sc, s);
+                    wv = value;
+                }
+            }
+            let t = token(in tokens, i.tin);
+            if t == NONE {
+                bad = true;
+            } else {
+                let x = if wp != NONE {
+                    let vr = g.add(V_REF, wrapping_i64(wv), 0, 0);
+                    g.add(V_WRITE, wrapping_i64(w(wp)), t, vr)
+                } else {
+                    g.add(V_BARRIER, wrapping_i64(w(i.dest)), t, 0)
+                };
+                if !set_token(inout tokens, i.tout, x) {
+                    bad = true;
+                }
+            }
+        }
+        if is_scalar(in cls, i.ty) {
+            prior.push(i.dest);
+        }
+    }
+    if qd.len() == 0 {
+        return (S_OK, 0);
+    }
+    if bad {
+        return (S_BAD_STATE, 0);
+    }
+    qs.push(qc.len());
+    let r = run_rounds(inout g, in rules, ROUNDS);
+    let mut count: u64 = 0;
+    for q in 0..qd.len() {
+        let dest = at32(in qd, q);
+        let root = g.lookup(V_REF, wrapping_i64(w(dest)), 0, 0);
+        if root == NONE {
+            continue;
+        }
+        let lo = match qs.try_get(q) {
+            Option::Some(x) => x,
+            Option::None => 0,
+        };
+        let hi = match qs.try_get(inc(q)) {
+            Option::Some(x) => x,
+            Option::None => 0,
+        };
+        for j in lo..hi {
+            let c = at32(in qc, j);
+            let x = g.lookup(V_REF, wrapping_i64(w(c)), 0, 0);
+            if x != NONE && x == root {
+                if w(dest) >= aliases.len() {
+                    aliases.resize(inc(w(dest)), NONE);
+                }
+                let to = resolve(in aliases, c);
+                aliases.try_set(w(dest), to);
+                count = inc(count);
+                break;
+            }
+        }
+    }
+    (S_OK, count)
+}
+
+// Drops the replaced reads and resolves every operand and terminator value
+// through the aliases (src/ir_opt.rs `operands`: every value operand but a
+// handler without state). `orig` (instruction row -> input row) is
+// compacted with the rows.
+fn rewrite(inout p: Program, f: FnRow, in aliases: ChunkSeq[u32], inout orig: ChunkSeq[u64]) {
+    for bi in 0..f.bc {
+        let b = add(f.b0, bi);
+        let bk = p.block(b);
+        let mut kept: u64 = 0;
+        for k in 0..bk.ic {
+            let at = add(bk.i0, k);
+            let i = p.inst(at);
+            if at32(in aliases, w(i.dest)) != NONE {
+                continue;
+            }
+            for j in 0..i.n {
+                let x = add(i.a, j);
+                if p.tag(x) == T_VALUE && !(i.op == OP_HANDLE && j == 1 && p.op(i.a) == 0) {
+                    p.ops.try_set(x, w(resolve(in aliases, n32(p.op(x)))));
+                }
+            }
+            let to = add(bk.i0, kept);
+            if to != at {
+                p.insts.try_set(to, i);
+                let o = match orig.try_get(at) {
+                    Option::Some(o) => o,
+                    Option::None => at,
+                };
+                orig.try_set(to, o);
+            }
+            kept = inc(kept);
+        }
+        for j in 0..bk.tn {
+            let x = add(bk.ta, j);
+            if p.tag(x) == T_VALUE {
+                p.ops.try_set(x, w(resolve(in aliases, n32(p.op(x)))));
+            }
+        }
+        let mut nb = bk;
+        nb.ic = kept;
+        p.blocks.try_set(b, nb);
+    }
+}
+
+// The memory forwarding of every function. Returns the status and the
+// number of replaced reads; `orig` maps instruction rows to input rows.
+pub fn forward_program(
+    inout p: Program,
+    in names: Names,
+    in cls: ChunkSeq[u8],
+    inout orig: ChunkSeq[u64]
+) -> (u8, u64) {
+    let mut sc = scratch_new(names.len());
+    let mut total: u64 = 0;
+    for fi in 0..p.fn_count() {
+        let f = p.function(fi);
+        let v = fn_view(in p, f);
+        for k in 0..v.locals.len() {
+            sc.lmark.try_set(w(at32(in v.locals, k)), 1);
+        }
+        let mut aliases: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](v.next_value);
+        aliases.resize(v.next_value, NONE);
+        let mut found: u64 = 0;
+        for bi in 0..f.bc {
+            let bk = p.block(add(f.b0, bi));
+            let (st, n) = forward_block(in p, in names, in cls, in v, inout sc, bk, inout aliases);
+            if st != S_OK {
+                return (st, 0);
+            }
+            found = add(found, n);
+        }
+        for k in 0..v.locals.len() {
+            sc.lmark.try_set(w(at32(in v.locals, k)), 0);
+        }
+        if found != 0 {
+            rewrite(inout p, f, in aliases, inout orig);
+        }
+        total = add(total, found);
+    }
+    (S_OK, total)
+}

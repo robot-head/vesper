@@ -124,4 +124,107 @@ test {
             Option::None => !expected_present,
         }
     }
+
+    // @case some(Option::Some(0), true)
+    // @case none(Option::None, false)
+    fn test_presence(input: Option[u64], present: bool) -> bool {
+        is_some(input) == present && is_none(input) != present
+    }
+
+    // @case some(Option::Some(4), 4)
+    // @case none(Option::None, 9)
+    fn test_unwrap_or_else(input: Option[u64], expected: u64) -> bool {
+        unwrap_or_else(
+            input,
+            || -> u64 {
+                9
+            }
+        )
+            == expected
+    }
+
+    // @case some(Option::Some(4), Result::Ok(4))
+    // @case none(Option::None, Result::Err(RuntimeError::IndexOutOfBounds))
+    fn test_unwrap(input: Option[u64], expected: Result[u64, RuntimeError]) -> bool {
+        let actual: Result[u64, RuntimeError] = handle Fail[RuntimeError] in {
+            unwrap(input)
+        } with {
+            return x => Result::Ok(x),
+            raise(error, k) => Result::Err(error),
+        };
+        match (actual, expected) {
+            (Result::Ok(x), Result::Ok(y)) => x == y,
+            (
+                Result::Err(RuntimeError::IndexOutOfBounds),
+                Result::Err(RuntimeError::IndexOutOfBounds)
+            ) => true,
+            _ => false,
+        }
+    }
+
+    // @case some(Option::Some(4), Option::Some(5), 5)
+    // @case none(Option::None, Option::None, 99)
+    fn test_map_and_map_or(input: Option[u8], mapped: Option[u16], resolved: u16) -> bool {
+        let actual = map(
+            input,
+            | x: u8 | -> u16 {
+                wrapping_add(wrapping_u16(x), 1)
+            }
+        );
+        actual
+            == mapped
+            && map_or(
+            input,
+            99,
+            | x: u8 | -> u16 {
+                wrapping_add(wrapping_u16(x), 1)
+            }
+        )
+            == resolved
+    }
+
+    // @case maps_even(Option::Some(8), Option::Some(4))
+    // @case rejects_odd(Option::Some(7), Option::None)
+    // @case none(Option::None, Option::None)
+    fn test_and_then(input: Option[u64], expected: Option[u64]) -> bool {
+        and_then(
+            input,
+            | x: u64 | -> Option[u64] {
+                if (x & 1) == 0 {
+                    Option::Some(x >> 1)
+                } else {
+                    Option::None
+                }
+            }
+        )
+            == expected
+    }
+
+    // @case first_some(Option::Some(4), Option::Some(9), Option::Some(4))
+    // @case fallback_some(Option::None, Option::Some(9), Option::Some(9))
+    // @case fallback_none(Option::Some(4), Option::None, Option::Some(4))
+    // @case both_none(Option::None, Option::None, Option::None)
+    fn test_or(first: Option[u64], fallback: Option[u64], expected: Option[u64]) -> bool {
+        or(first, fallback) == expected
+    }
+
+    // @case keep(Option::Some(9), Option::Some(9))
+    // @case reject_at_boundary(Option::Some(8), Option::None)
+    // @case none(Option::None, Option::None)
+    fn test_filter(input: Option[u64], expected: Option[u64]) -> bool {
+        filter(
+            input,
+            | x: u64 | -> bool {
+                x > 8
+            }
+        )
+            == expected
+    }
+
+    // @case some(Option::Some(4), Result::Ok(4))
+    // @case none(Option::None, Result::Err(13))
+    fn test_ok_or(input: Option[u64], expected: Result[u64, u8]) -> bool {
+        let error: u8 = 13;
+        ok_or(input, error) == expected
+    }
 }

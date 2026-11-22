@@ -1,0 +1,200 @@
+// Extraction: egg 0.10's `Extractor` with `AstSize` (an e-node costs one
+// plus its children's costs).
+//
+// `find_costs` passes over the classes until no cost changes. A class takes
+// the first e-node of least cost among those whose children all have
+// costs, in its sorted order (egg's `min_by`), and a later pass replaces it
+// only with a strictly cheaper one. Classes are passed over in ascending id
+// order (egg: hash-map order), so when two e-nodes of one class tie, the
+// choice can differ from egg's; the cost never does.
+//
+// `find_best` builds the expression as egg's `build_recexpr` does: a stack
+// that starts with the root's children, last child first, each class
+// emitted once all its children are, and the root last.
+
+use self::util::{
+    at32,
+    at64,
+    ati,
+    filled32,
+    inc,
+    n32,
+    w
+};
+use self::graph::{
+    EGraph
+};
+
+const NONE: u32 = 4294967295;
+const NO_COST: u64 = 18446744073709551615;
+
+pub struct Extracted {
+    // Per class root: its cost and the index of its best e-node in the
+    // graph's rebuilt view.
+    cost: ChunkSeq[u64],
+    best: ChunkSeq[u32],
+    // The expression of the last `find_best`: e-nodes, children first,
+    // children as indices into these lists.
+    op: ChunkSeq[u32],
+    data: ChunkSeq[i64],
+    c0: ChunkSeq[u32],
+    c1: ChunkSeq[u32]
+}
+
+fn node_cost(in g: EGraph, in cost: ChunkSeq[u64], k: u64) -> u64 {
+    let a = widen_u64(g.arity_of(g.node_op(k)));
+    let mut sum: u64 = 1;
+    for j in 0..a {
+        let c = at64(in cost, w(g.find(g.node_child(k, j))));
+        if c == NO_COST {
+            return NO_COST;
+        }
+        // saturating_add
+        let s = wrapping_add(sum, c);
+        sum = if s < sum {
+            NO_COST
+        } else {
+            s
+        };
+    }
+    sum
+}
+
+// egg's `Extractor::new(egraph, AstSize)` on a rebuilt graph.
+pub fn extractor(in g: EGraph) -> Extracted {
+    let n = g.raw_len();
+    let mut cost: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+    cost.resize(n, NO_COST);
+    let mut best = filled32(n, NONE);
+    loop {
+        let mut changed = false;
+        for x in 0..g.live_count() {
+            let c = g.live_at(x);
+            let s = g.class_start(c);
+            let mut min = NO_COST;
+            let mut arg: u32 = NONE;
+            for k in s..wrapping_add(s, g.class_len(c)) {
+                let v = node_cost(in g, in cost, k);
+                if v != NO_COST && (arg == NONE || v < min) {
+                    min = v;
+                    arg = n32(k);
+                }
+            }
+            if arg != NONE {
+                let old = at64(in cost, w(c));
+                if old == NO_COST || min < old {
+                    cost.try_set(w(c), min);
+                    best.try_set(w(c), arg);
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    Extracted {
+        cost: cost,
+        best: best,
+        op: ChunkSeq::new[u32](),
+        data: ChunkSeq::new[i64](),
+        c0: ChunkSeq::new[u32](),
+        c1: ChunkSeq::new[u32]()
+    }
+}
+
+impl Extracted {
+    // The cost of a class, or u64::MAX when it has none.
+    pub fn cost_of(in self, in g: EGraph, id: u32) -> u64 {
+        at64(in self.cost, w(g.find(id)))
+    }
+
+    pub fn len(in self) -> u64 {
+        self.op.len()
+    }
+
+    pub fn op_at(in self, i: u64) -> u32 {
+        at32(in self.op, i)
+    }
+
+    pub fn data_at(in self, i: u64) -> i64 {
+        ati(in self.data, i)
+    }
+
+    pub fn child_at(in self, i: u64, j: u64) -> u32 {
+        if j == 0 {
+            at32(in self.c0, i)
+        } else {
+            at32(in self.c1, i)
+        }
+    }
+
+    fn emit(inout self, in g: EGraph, k: u64, in ids: ChunkSeq[u32]) -> u32 {
+        let op = g.node_op(k);
+        let a = g.arity_of(op);
+        let x0 = if a >= 1 {
+            at32(in ids, w(g.find(g.node_child(k, 0))))
+        } else {
+            0
+        };
+        let x1 = if a >= 2 {
+            at32(in ids, w(g.find(g.node_child(k, 1))))
+        } else {
+            0
+        };
+        let id = n32(self.op.len());
+        self.op.push(op);
+        self.data.push(g.node_data(k));
+        self.c0.push(x0);
+        self.c1.push(x1);
+        id
+    }
+
+    // egg's `find_best`: builds the best expression of `root`'s class into
+    // this extractor's expression lists. False if the class has no cost.
+    pub fn find_best(inout self, in g: EGraph, root: u32) -> bool {
+        self.op.clear();
+        self.data.clear();
+        self.c0.clear();
+        self.c1.clear();
+        let r = g.find(root);
+        let rk = at32(in self.best, w(r));
+        if rk == NONE {
+            return false;
+        }
+        let mut ids = filled32(g.raw_len(), NONE);
+        let mut todo: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        let ra = widen_u64(g.arity_of(g.node_op(w(rk))));
+        for j in 0..ra {
+            todo.push(g.find(g.node_child(w(rk), j)));
+        }
+        loop {
+            let n = todo.len();
+            if n == 0 {
+                break;
+            }
+            let id = at32(in todo, wrapping_sub(n, 1));
+            if at32(in ids, w(id)) != NONE {
+                todo.truncate(wrapping_sub(n, 1));
+                continue;
+            }
+            let k = w(at32(in self.best, w(id)));
+            let a = widen_u64(g.arity_of(g.node_op(k)));
+            let mut all = true;
+            for j in 0..a {
+                let c = g.find(g.node_child(k, j));
+                if at32(in ids, w(c)) == NONE {
+                    all = false;
+                    todo.push(c);
+                }
+            }
+            if all {
+                let x = self.emit(in g, k, in ids);
+                ids.try_set(w(id), x);
+                todo.truncate(wrapping_sub(n, 1));
+            }
+        }
+        self.emit(in g, w(rk), in ids);
+        true
+    }
+}

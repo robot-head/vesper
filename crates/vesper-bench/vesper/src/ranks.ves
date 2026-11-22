@@ -22,6 +22,9 @@ use self::{
     WalshOut
 };
 use self::util::{
+    I64_MAX,
+    I64_MIN_MAGNITUDE,
+    MAX_PAIRS,
     add,
     add_rank,
     cu,
@@ -44,6 +47,7 @@ use self::util::{
 };
 use self::wide::{
     w,
+    w_to_i128,
     w_add,
     w_eq,
     w_i64,
@@ -60,8 +64,25 @@ use self::wide::{
     w_zero
 };
 
-pub fn max_pairs() -> u64 {
-    32
+// A two-sided 5% test: each tail holds at most 1/TAIL_LIMIT_SCALE of the
+// outcomes.
+const TAIL_LIMIT_SCALE: u64 = 40;
+
+// Gate outcomes shared with the wrappers (src/port.rs).
+enum Outcome: _ {
+    Pass,
+    Regression,
+    // An empty confidence set, or too few pairs for an interval.
+    NoInterval,
+    // The interval does not separate from the threshold.
+    CrossesThreshold
+}
+
+// per_op_difference's codes.
+enum Exactness: _ {
+    Integral,
+    Fractional,
+    OutOfRange
 }
 
 // ---------------------------------------------------------------------------
@@ -114,7 +135,7 @@ fn validate_len(len: u64) eff [Fail[SignedRankError]] {
     if len == 0 {
         Fail::raise(SignedRankError::EmptyEvidence);
     }
-    if len > max_pairs() {
+    if len > MAX_PAIRS {
         Fail::raise(SignedRankError::TooManyPairs);
     }
 }
@@ -222,7 +243,7 @@ pub fn do_signed_rank_exact_paired_samples(in samples: Slice[Sample])
 
 // One centered observation of the inversion: |4d - location4| and its sign.
 copy struct CObs {
-    mag: W,
+    mag: u128,
     positive: bool
 }
 
@@ -230,7 +251,7 @@ fn cco(in s: ChunkSeq[CObs], i: u64) -> CObs {
     match s.try_get(i) {
         Option::Some(x) => x,
         Option::None => CObs {
-            mag: w_zero(),
+            mag: widen_u128(0),
             positive: false
         },
     }
@@ -245,7 +266,7 @@ fn sort_cobs(inout s: ChunkSeq[CObs], n: u64) {
                 break;
             }
             let p = cco(in s, dec(j));
-            if w_ult(x.mag, p.mag) {
+            if x.mag < p.mag {
                 s.try_set(j, p);
                 j = dec(j);
             } else {
@@ -258,6 +279,19 @@ fn sort_cobs(inout s: ChunkSeq[CObs], n: u64) {
 
 // Whether the exact two-sided p-value at `location_times_four` is strictly
 // greater than 0.05. `obs` and `dist` are scratch the caller reuses.
+// One past the last observation tied with obs[start].
+fn tie_end(in obs: ChunkSeq[CObs], start: u64, n: u64) -> u64 {
+    let first = cco(in obs, start).mag;
+    let mut end = inc(start);
+    loop {
+        if end >= n || cco(in obs, end).mag != first {
+            break;
+        }
+        end = inc(end);
+    }
+    end
+}
+
 fn accepts(
     in differences: Slice[i64],
     location_times_four: W,
@@ -266,15 +300,24 @@ fn accepts(
 ) -> bool {
     obs.truncate(0);
     let len = differences.len();
+    let location = w_to_i128(location_times_four);
     for i in 0..len {
-        let d4 = w_twice(w_twice(w_i64(gi(in differences, i))));
-        let centered = w_sub(d4, location_times_four);
-        if !w_is_zero(centered) {
+        let centered = wrapping_sub(
+            wrapping_mul(widen_i128(gi(in differences, i)), widen_i128(4)),
+            location
+        );
+        if centered != widen_i128(0) {
+            let negative = centered < widen_i128(0);
+            let mag = if negative {
+                wrapping_u128(wrapping_neg_i128(centered))
+            } else {
+                wrapping_u128(centered)
+            };
             obs
                 .push(
                 CObs {
-                    mag: w_uabs(centered),
-                    positive: !w_is_neg(centered)
+                    mag: mag,
+                    positive: !negative
                 }
             );
         }
@@ -284,11 +327,8 @@ fn accepts(
         return true;
     }
     sort_cobs(inout obs, n);
-    let cells = inc(mul(n, inc(n)));
-    for i in 0..cells {
-        dist.try_set(i, 0);
-    }
-    dist.try_set(0, 1);
+    // The ranks first: the tail only needs dist[0..=tail_limit], and those
+    // cells depend on no cell above them, so the subset-sum stops there.
     let mut total_rank: u64 = 0;
     let mut positive_rank: u64 = 0;
     let mut start: u64 = 0;
@@ -296,28 +336,40 @@ fn accepts(
         if start >= n {
             break;
         }
-        let first = cco(in obs, start).mag;
-        let mut end = inc(start);
-        loop {
-            if end >= n || !w_eq(cco(in obs, end).mag, first) {
-                break;
-            }
-            end = inc(end);
-        }
+        let end = tie_end(in obs, start, n);
         let rank = add(inc(start), end);
         for k in start..end {
             if cco(in obs, k).positive {
                 positive_rank = add(positive_rank, rank);
             }
-            add_rank(inout dist, total_rank, rank);
             total_rank = add(total_rank, rank);
         }
         start = end;
     }
     let tail_limit = min_u64(positive_rank, sub(total_rank, positive_rank));
+    dist.resize(0, 0);
+    dist.resize(inc(tail_limit), 0);
+    dist.try_set(0, 1);
+    let mut reached: u64 = 0;
+    start = 0;
+    loop {
+        if start >= n {
+            break;
+        }
+        let end = tie_end(in obs, start, n);
+        let rank = add(inc(start), end);
+        for k in start..end {
+            // dist[s + rank] += dist[s] for s + rank <= tail_limit.
+            if rank <= tail_limit {
+                add_rank(inout dist, min_u64(reached, sub(tail_limit, rank)), rank);
+            }
+            reached = add(reached, rank);
+        }
+        start = end;
+    }
     let tail = tail_sum(in dist, tail_limit);
     // 2*tail / total > 1/20; both sides fit u64 for n <= 32.
-    mul(40, tail) > pow2(n)
+    mul(TAIL_LIMIT_SCALE, tail) > pow2(n)
 }
 
 fn segment(lower: Option[W], lower_inclusive: bool, upper: Option[W], upper_inclusive: bool)
@@ -415,7 +467,7 @@ fn confidence_core(in differences: Slice[i64]) -> ChunkSeq[Segment] {
     }
     let mut result: ChunkSeq[Segment] = ChunkSeq::with_capacity[Segment](inc(mul(2, unique)));
     let mut obs: ChunkSeq[CObs] = ChunkSeq::with_capacity[CObs](n);
-    let mut dist = zeros(inc(mul(n, inc(n))));
+    let mut dist: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](inc(mul(n, inc(n))));
     let mut left: Option[W] = Option::None;
     for k in 0..unique {
         let right = cw(in bps, k);
@@ -444,7 +496,7 @@ pub fn do_signed_rank_confidence_set(in differences: Slice[i64])
     if n == 0 {
         Fail::raise(SignedRankConfidenceError::EmptyEvidence);
     }
-    if n > max_pairs() {
+    if n > MAX_PAIRS {
         Fail::raise(SignedRankConfidenceError::TooManyPairs);
     }
     confidence_core(in differences)
@@ -456,7 +508,7 @@ pub fn do_paired_samples_confidence_set(in samples: Slice[Sample])
     if n == 0 {
         Fail::raise(PairedConfError::EmptyEvidence);
     }
-    if n > max_pairs() {
+    if n > MAX_PAIRS {
         Fail::raise(PairedConfError::TooManySamples);
     }
     let operations = gs(in samples, 0).operations;
@@ -472,7 +524,7 @@ pub fn do_paired_samples_confidence_set(in samples: Slice[Sample])
         }
         if s.candidate >= s.baseline {
             let d = sub(s.candidate, s.baseline);
-            if d > 9223372036854775807 {
+            if d > I64_MAX {
                 Fail::raise(
                     PairedConfError::DifferenceOutOfRange {
                         index: widen_usize(i)
@@ -482,7 +534,7 @@ pub fn do_paired_samples_confidence_set(in samples: Slice[Sample])
             differences.push(wrapping_i64(d));
         } else {
             let d = sub(s.baseline, s.candidate);
-            if d > 9223372036854775808 {
+            if d > I64_MIN_MAGNITUDE {
                 Fail::raise(
                     PairedConfError::DifferenceOutOfRange {
                         index: widen_usize(i)
@@ -503,27 +555,25 @@ fn seg_upper(s: Segment) -> W {
     w(s.upper_hi, s.upper_lo)
 }
 
-// Gate outcomes shared with the wrappers: 0 Pass, 1 Regression, 2 empty
-// set, 3 threshold not separated.
 pub fn do_classify_differences(in segments: Slice[Segment], max_difference: i64) -> u64 {
     let n = segments.len();
     if n == 0 {
-        return 2;
+        return Outcome::NoInterval;
     }
     let first = gseg(in segments, 0);
     let last = gseg(in segments, dec(n));
     let threshold = w_twice(w_i64(max_difference));
     if last.upper_bounded && !w_slt(threshold, seg_upper(last)) {
-        0
+        Outcome::Pass
     } else if first
         .lower_bounded
         && (
         w_slt(threshold, seg_lower(first))
             || (w_eq(seg_lower(first), threshold) && !first.lower_inclusive)
     ) {
-        1
+        Outcome::Regression
     } else {
-        3
+        Outcome::CrossesThreshold
     }
 }
 
@@ -548,20 +598,20 @@ pub fn do_classify_samples(in segments: Slice[Segment], operations: u64, max_dif
     -> u64 {
     let n = segments.len();
     if n == 0 {
-        return 2;
+        return Outcome::NoInterval;
     }
     let first = gseg(in segments, 0);
     let last = gseg(in segments, dec(n));
     if last.upper_bounded && do_compare_endpoint(seg_upper(last), operations, max_difference) != 1 {
-        return 0;
+        return Outcome::Pass;
     }
     if first.lower_bounded {
         let order = do_compare_endpoint(seg_lower(first), operations, max_difference);
         if order == 1 || (order == 0 && !first.lower_inclusive) {
-            return 1;
+            return Outcome::Regression;
         }
     }
-    3
+    Outcome::CrossesThreshold
 }
 
 // ---------------------------------------------------------------------------
@@ -598,7 +648,7 @@ pub fn do_walsh_pseudomedian(in differences: Slice[i64])
     if n == 0 {
         Fail::raise(WalshEstimateError::EmptyEvidence);
     }
-    if n > max_pairs() {
+    if n > MAX_PAIRS {
         Fail::raise(WalshEstimateError::TooManyPairs);
     }
     let sums = walsh_sums(in differences);
@@ -618,7 +668,7 @@ pub fn do_hodges_lehmann_paired(in differences: Slice[i64])
     if n == 0 {
         Fail::raise(HodgesLehmannError::EmptyEvidence);
     }
-    if n > max_pairs() {
+    if n > MAX_PAIRS {
         Fail::raise(HodgesLehmannError::TooManyPairs);
     }
     for i in 0..n {
@@ -659,7 +709,7 @@ pub fn do_hodges_lehmann_paired(in differences: Slice[i64])
     let mut critical_tail: u64 = 0;
     for rank in 0..inc(max_rank) {
         tail = add(tail, cu(in dist, rank));
-        if mul(40, tail) <= total {
+        if mul(TAIL_LIMIT_SCALE, tail) <= total {
             found = true;
             critical = rank;
             critical_tail = tail;
@@ -690,20 +740,19 @@ pub fn do_hodges_lehmann_paired(in differences: Slice[i64])
     }
 }
 
-// Gate outcomes: 0 Pass, 1 Regression, 2 insufficient pairs, 3 interval
-// crosses the threshold.
+// Gate outcomes are Outcome codes.
 pub fn do_gate_paired_difference(in differences: Slice[i64], max_difference: i64)
     -> HlGate eff [Fail[HodgesLehmannError]] {
     let estimate = do_hodges_lehmann_paired(in differences);
     let threshold = w_twice(w_i64(max_difference));
     let outcome: u64 = if !estimate.has_interval {
-        2
+        Outcome::NoInterval
     } else if !w_slt(threshold, estimate.upper_times_two) {
-        0
+        Outcome::Pass
     } else if w_slt(threshold, estimate.lower_times_two) {
-        1
+        Outcome::Regression
     } else {
-        3
+        Outcome::CrossesThreshold
     };
     HlGate {
         outcome: outcome,
@@ -714,9 +763,8 @@ pub fn do_gate_paired_difference(in differences: Slice[i64], max_difference: i64
 // ---------------------------------------------------------------------------
 // paired_difference.rs
 
-// The exact per-operation difference of one sample: 0 and `ok` when it is
-// an integer in i64, else the error code 1 (fractional) or 2 (out of
-// range).
+// The exact per-operation difference of one sample with its Exactness
+// (the difference is 0 unless Integral).
 fn per_op_difference(s: Sample) -> (u64, i64) {
     let up = s.candidate >= s.baseline;
     let mag = if up {
@@ -725,19 +773,19 @@ fn per_op_difference(s: Sample) -> (u64, i64) {
         sub(s.baseline, s.candidate)
     };
     if rem(mag, s.operations) != 0 {
-        return (1, 0);
+        return (Exactness::Fractional, 0);
     }
     let q = div(mag, s.operations);
     if up {
-        if q > 9223372036854775807 {
-            (2, 0)
+        if q > I64_MAX {
+            (Exactness::OutOfRange, 0)
         } else {
-            (0, wrapping_i64(q))
+            (Exactness::Integral, wrapping_i64(q))
         }
-    } else if q > 9223372036854775808 {
-        (2, 0)
+    } else if q > I64_MIN_MAGNITUDE {
+        (Exactness::OutOfRange, 0)
     } else {
-        (0, wrapping_i64(sub(0, q)))
+        (Exactness::Integral, wrapping_i64(sub(0, q)))
     }
 }
 
@@ -747,20 +795,20 @@ pub fn do_exact_paired_differences(in samples: Slice[Sample])
     if n == 0 {
         Fail::raise(PairedDifferenceError::EmptyEvidence);
     }
-    if n > max_pairs() {
+    if n > MAX_PAIRS {
         Fail::raise(PairedDifferenceError::TooManySamples);
     }
     let mut result: ChunkSeq[i64] = ChunkSeq::with_capacity[i64](n);
     for i in 0..n {
         let (code, d) = per_op_difference(gs(in samples, i));
-        if code == 1 {
+        if code == Exactness::Fractional {
             Fail::raise(
                 PairedDifferenceError::NonIntegral {
                     index: widen_usize(i)
                 }
             );
         }
-        if code == 2 {
+        if code == Exactness::OutOfRange {
             Fail::raise(
                 PairedDifferenceError::OutOfRange {
                     index: widen_usize(i)

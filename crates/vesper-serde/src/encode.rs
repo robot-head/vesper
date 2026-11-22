@@ -107,6 +107,23 @@ fn err(kind: ErrorKind) -> Error {
     Error::new(kind, 0)
 }
 const FLOAT_TEXT_BYTES: usize = 512;
+/// The hard nesting ceiling, whatever `EncodeLimits::max_depth` says.
+const HARD_MAX_DEPTH: usize = 128;
+/// Encoded widths: `null`/`true`, `false`, a two-byte escape, `\u00XX`, a
+/// pair of quotes or brackets.
+const NULL_LEN: usize = 4;
+const TRUE_LEN: usize = 4;
+const FALSE_LEN: usize = 5;
+const ESCAPE_LEN: usize = 2;
+const UNICODE_ESCAPE_LEN: usize = 6;
+const DELIMITERS_LEN: usize = 2;
+/// The last control character JSON strings must escape.
+const LAST_CONTROL: u8 = 0x1f;
+const ASCII_BACKSPACE: u8 = 0x08;
+const ASCII_FF: u8 = 0x0c;
+/// `u64::MAX` has 20 decimal digits.
+const U64_DIGITS: usize = 20;
+const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 // Declared conservative logical allowance per bounded binary64 formatting pass.
 // This is admission accounting, not a CPU instruction or time guarantee. Both
 // passes are paid before formatting; the existing size charge pays output writes.
@@ -175,13 +192,13 @@ impl Check {
     fn string(&mut self, text: &str) -> Result<usize, Error> {
         self.string_bytes(text.len())?;
         self.charge(text.len())?;
-        let mut size = 2;
+        let mut size = DELIMITERS_LEN;
         for b in text.bytes() {
             size = add(
                 size,
                 match b {
-                    b'"' | b'\\' | b'\n' | b'\r' | b'\t' | 8 | 12 => 2,
-                    0..=31 => 6,
+                    b'"' | b'\\' | b'\n' | b'\r' | b'\t' | ASCII_BACKSPACE | ASCII_FF => ESCAPE_LEN,
+                    0..=LAST_CONTROL => UNICODE_ESCAPE_LEN,
                     _ => 1,
                 },
             )?;
@@ -189,7 +206,7 @@ impl Check {
         Ok(size)
     }
     fn depth(&self, depth: usize) -> Result<(), Error> {
-        if depth >= self.limits.max_depth || depth >= 128 {
+        if depth >= self.limits.max_depth || depth >= HARD_MAX_DEPTH {
             return Err(err(ErrorKind::DepthLimit));
         }
         Ok(())
@@ -210,12 +227,12 @@ impl Check {
         }
         self.token()?;
         Ok(match value {
-            Value::Null => 4,
+            Value::Null => NULL_LEN,
             Value::Bool(b) => {
                 if *b {
-                    4
+                    TRUE_LEN
                 } else {
-                    5
+                    FALSE_LEN
                 }
             }
             Value::U64(n) => digits(*n),
@@ -232,7 +249,7 @@ impl Check {
             Value::String(text) => self.string(text)?,
             Value::Array(values) => {
                 self.depth(depth)?;
-                let mut size = 2;
+                let mut size = DELIMITERS_LEN;
                 for (i, value) in values.iter().enumerate() {
                     size = add(size, usize::from(i != 0))?;
                     size = add(size, self.value(value, depth + 1)?)?;
@@ -241,7 +258,7 @@ impl Check {
             }
             Value::Object(fields) => {
                 self.depth(depth)?;
-                let mut size = 2;
+                let mut size = DELIMITERS_LEN;
                 for (i, (key, value)) in fields.iter().enumerate() {
                     self.token()?; // Object key is itself a string token.
                     for (previous, _) in &fields[..i] {
@@ -282,8 +299,8 @@ impl Writer<'_> {
         self.pos += 1;
     }
     fn integer(&mut self, mut n: u64) {
-        let mut buffer = [0; 20];
-        let mut i = 20;
+        let mut buffer = [0; U64_DIGITS];
+        let mut i = U64_DIGITS;
         loop {
             i -= 1;
             buffer[i] = b'0' + (n % 10) as u8;
@@ -303,12 +320,12 @@ impl Writer<'_> {
                 b'\n' => self.bytes(b"\\n"),
                 b'\r' => self.bytes(b"\\r"),
                 b'\t' => self.bytes(b"\\t"),
-                8 => self.bytes(b"\\b"),
-                12 => self.bytes(b"\\f"),
-                0..=31 => {
+                ASCII_BACKSPACE => self.bytes(b"\\b"),
+                ASCII_FF => self.bytes(b"\\f"),
+                0..=LAST_CONTROL => {
                     self.bytes(b"\\u00");
-                    self.byte(b"0123456789abcdef"[usize::from(b >> 4)]);
-                    self.byte(b"0123456789abcdef"[usize::from(b & 15)]);
+                    self.byte(HEX_DIGITS[usize::from(b >> 4)]);
+                    self.byte(HEX_DIGITS[usize::from(b & 0x0f)]);
                 }
                 _ => self.byte(b),
             }

@@ -500,6 +500,12 @@ pub fn build_image(
     entry: &str,
     options: &ImageOptions,
 ) -> Result<FreestandingImage, FreestandingError> {
+    // SH4 swap point (#1275): the `freestanding` hook may build the image.
+    if let Some(hook) = crate::codegen_swap::installed().freestanding
+        && let Some(r) = hook(world, entry, options)
+    {
+        return r;
+    }
     let target = options.target;
     let board = options.board.clone().unwrap_or_else(|| target.qemu_virt());
     let (kind, fail) = result_kind(world, entry)?;

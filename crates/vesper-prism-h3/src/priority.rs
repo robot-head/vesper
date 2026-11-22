@@ -25,6 +25,25 @@ pub const PRIORITY_UPDATE_PUSH: u64 = 0xf0701;
 pub const SETTINGS_NO_RFC7540_PRIORITIES: u64 = 0x09;
 
 pub const DEFAULT_URGENCY: u8 = 3;
+/// The least urgent level (RFC 9218 §4.1: urgency is 0 to 7).
+pub const MAX_URGENCY: u8 = 7;
+/// The number of urgency levels.
+#[cfg(not(feature = "vesper-port"))]
+const URGENCY_LEVELS: usize = MAX_URGENCY as usize + 1;
+
+/// RFC 8941 §3.3.1: an integer has at most 15 digits.
+#[cfg(not(feature = "vesper-port"))]
+const MAX_INTEGER_DIGITS: usize = 15;
+/// RFC 8941 §3.3.2: a decimal has at most 12 integer digits and 3
+/// fractional digits.
+#[cfg(not(feature = "vesper-port"))]
+const MAX_DECIMAL_INT_DIGITS: usize = 12;
+#[cfg(not(feature = "vesper-port"))]
+const MAX_DECIMAL_FRAC_DIGITS: usize = 3;
+/// Words per stream handed to the port's scheduler: id, urgency,
+/// incremental.
+#[cfg(feature = "vesper-port")]
+const STREAM_WORDS: usize = 3;
 
 /// One response's priority.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -46,7 +65,7 @@ impl Default for Priority {
 impl Priority {
     pub fn new(urgency: u8, incremental: bool) -> Self {
         Self {
-            urgency: urgency.min(7),
+            urgency: urgency.min(MAX_URGENCY),
             incremental,
         }
     }
@@ -67,7 +86,9 @@ impl Priority {
         };
         for (key, item) in members {
             match (key.as_slice(), item) {
-                (b"u", Item::Integer(u)) if (0..=7).contains(&u) => p.urgency = u as u8,
+                (b"u", Item::Integer(u)) if (0..=i64::from(MAX_URGENCY)).contains(&u) => {
+                    p.urgency = u as u8
+                }
                 (b"u", _) => {}
                 (b"i", Item::Boolean(b)) => p.incremental = b,
                 _ => {}
@@ -166,7 +187,7 @@ fn bare_item(v: &[u8], at: &mut usize) -> Option<Item> {
             return None;
         }
         if v.get(*at) == Some(&b'.') {
-            if int_digits > 12 {
+            if int_digits > MAX_DECIMAL_INT_DIGITS {
                 return None;
             }
             *at += 1;
@@ -174,12 +195,12 @@ fn bare_item(v: &[u8], at: &mut usize) -> Option<Item> {
             while v.get(*at).is_some_and(u8::is_ascii_digit) {
                 *at += 1;
             }
-            if *at == frac || *at - frac > 3 {
+            if *at == frac || *at - frac > MAX_DECIMAL_FRAC_DIGITS {
                 return None;
             }
             return Some(Item::Other);
         }
-        if int_digits > 15 {
+        if int_digits > MAX_INTEGER_DIGITS {
             return None;
         }
         let n: i64 = std::str::from_utf8(&v[start..*at]).ok()?.parse().ok()?;
@@ -200,7 +221,7 @@ fn bare_item(v: &[u8], at: &mut usize) -> Option<Item> {
                         *at += 1;
                     }
                     b'"' => return Some(Item::Other),
-                    0x20..=0x7e => {}
+                    b' '..=b'~' => {}
                     _ => return None,
                 }
             }
@@ -343,7 +364,7 @@ impl PriorityUpdate {
         let (element_id, n) = varint::decode(payload).map_err(|_| FrameError::Malformed)?;
         let value = &payload[n..];
         // The field value is ASCII (RFC 8941 §4.2).
-        if value.iter().any(|b| !(0x20..=0x7e).contains(b)) {
+        if value.iter().any(|b| !(b' '..=b'~').contains(b)) {
             return Err(FrameError::Malformed);
         }
         Ok(Self {
@@ -377,9 +398,9 @@ impl PriorityUpdate {
 /// in quanta; `rotate` picks which of them goes first.
 #[cfg(not(feature = "vesper-port"))]
 pub fn schedule(streams: &[(u64, Priority)], rotate: usize) -> Vec<Vec<u64>> {
-    let mut by_urgency: [Vec<(u64, bool)>; 8] = Default::default();
+    let mut by_urgency: [Vec<(u64, bool)>; URGENCY_LEVELS] = Default::default();
     for (id, p) in streams {
-        by_urgency[usize::from(p.urgency.min(7))].push((*id, p.incremental));
+        by_urgency[usize::from(p.urgency.min(MAX_URGENCY))].push((*id, p.incremental));
     }
     let mut groups = Vec::new();
     for mut g in by_urgency {
@@ -406,7 +427,7 @@ pub fn schedule(streams: &[(u64, Priority)], rotate: usize) -> Vec<Vec<u64>> {
 /// transport (RFC 9218 §10), in the Vesper build.
 #[cfg(feature = "vesper-port")]
 pub fn schedule(streams: &[(u64, Priority)], rotate: usize) -> Vec<Vec<u64>> {
-    let mut flat = Vec::with_capacity(streams.len() * 3);
+    let mut flat = Vec::with_capacity(streams.len() * STREAM_WORDS);
     for (id, p) in streams {
         flat.extend_from_slice(&[*id, u64::from(p.urgency), u64::from(p.incremental)]);
     }

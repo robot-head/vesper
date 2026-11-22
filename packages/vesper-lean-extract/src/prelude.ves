@@ -1,0 +1,550 @@
+// The fixed declarations at the top of every extracted module
+// (src/lean.rs `prelude`, `arithmetic_simp_bundle`, `divergence` and
+// `fail_models`). Each function writes one declaration, in the order
+// `extract_report` lists them.
+
+use self::build::{
+    B,
+    B_EXPLICIT,
+    B_IMPLICIT,
+    D_DEF,
+    D_INSTANCE,
+    D_THEOREM,
+    D_TYPE,
+    K_ABBREV,
+    K_DEF,
+    OP_ADD,
+    OP_AND,
+    OP_EQ,
+    OP_IFF,
+    OP_LE,
+    OP_LT,
+    OP_MOD,
+    OP_MUL,
+    OP_SUB,
+    P_BIND,
+    S_BIND,
+    TD_CLASS,
+    T_ARROW,
+    T_DO,
+    T_FORALL,
+    T_RECORD,
+    T_STRING,
+    T_UNARY,
+    U_NEG
+};
+
+// `app(m, [x])` for fixed names.
+fn m_of(inout b: B, in x: Str) {
+    b.app_named(in "m", in x);
+}
+
+// `HandlerCPS S O m`.
+fn cps_som(inout b: B) {
+    let m = b.app(3);
+    b.named(in "HandlerCPS");
+    b.args(m);
+    b.arg();
+    b.named(in "S");
+    b.arg();
+    b.named(in "O");
+    b.arg();
+    b.named(in "m");
+}
+
+// `{S O : Type} {m : Type → Type}`.
+fn som_binders(inout b: B) {
+    b.implicit_type(in "S");
+    b.implicit_type(in "O");
+    b.binder(B_IMPLICIT, in "m");
+    b.monad_ty();
+}
+
+// `k a s`-shaped applications of fixed names.
+fn call2(inout b: B, in f: Str, in x: Str, in y: Str) {
+    let m = b.app(2);
+    b.named(in f);
+    b.args(m);
+    b.arg();
+    b.named(in x);
+    b.arg();
+    b.named(in y);
+}
+
+pub fn handler_cps(inout b: B) {
+    b.w(D_DEF);
+    b.w(K_ABBREV);
+    b.name_fixed(in "HandlerCPS");
+    b.w(4);
+    b.binder(B_EXPLICIT, in "S");
+    b.type0();
+    b.binder(B_EXPLICIT, in "O");
+    b.type0();
+    b.binder(B_EXPLICIT, in "m");
+    b.monad_ty();
+    b.binder(B_EXPLICIT, in "A");
+    b.type0();
+    b.type0();
+    // (A → S → m O) → S → m O
+    b.w(T_ARROW);
+    b.w(T_ARROW);
+    b.named(in "A");
+    b.w(T_ARROW);
+    b.named(in "S");
+    m_of(inout b, in "O");
+    b.w(T_ARROW);
+    b.named(in "S");
+    m_of(inout b, in "O");
+}
+
+pub fn cps_monad(inout b: B) {
+    b.w(D_INSTANCE);
+    b.w(0);
+    b.w(4);
+    som_binders(inout b);
+    b.monad_instance();
+    let m = b.app(1);
+    b.global(in "Monad");
+    b.args(m);
+    b.arg();
+    cps_som(inout b);
+    b.w(T_RECORD);
+    b.w(2);
+    // pure := fun a k s => k a s
+    b.text(in "pure");
+    b.lambda(3);
+    b.lambda_name(in "a");
+    b.lambda_name(in "k");
+    b.lambda_name(in "s");
+    call2(inout b, in "k", in "a", in "s");
+    // bind := fun action next k s => action (fun a s' => next a k s') s
+    b.text(in "bind");
+    b.lambda(4);
+    b.lambda_name(in "action");
+    b.lambda_name(in "next");
+    b.lambda_name(in "k");
+    b.lambda_name(in "s");
+    let outer = b.app(2);
+    b.named(in "action");
+    b.args(outer);
+    b.arg();
+    b.lambda(2);
+    b.lambda_name(in "a");
+    b.lambda_name(in "s'");
+    let inner = b.app(3);
+    b.named(in "next");
+    b.args(inner);
+    b.arg();
+    b.named(in "a");
+    b.arg();
+    b.named(in "k");
+    b.arg();
+    b.named(in "s'");
+    b.arg();
+    b.named(in "s");
+}
+
+pub fn lift_action(inout b: B) {
+    b.w(D_DEF);
+    b.w(K_DEF);
+    b.name_fixed(in "liftAction");
+    b.w(6);
+    som_binders(inout b);
+    b.implicit_type(in "A");
+    b.monad_instance();
+    b.binder(B_EXPLICIT, in "action");
+    m_of(inout b, in "A");
+    // HandlerCPS S O m A
+    let m = b.app(4);
+    b.named(in "HandlerCPS");
+    b.args(m);
+    b.arg();
+    b.named(in "S");
+    b.arg();
+    b.named(in "O");
+    b.arg();
+    b.named(in "m");
+    b.arg();
+    b.named(in "A");
+    // fun k s => do let value ← action; k value s
+    b.lambda(2);
+    b.lambda_name(in "k");
+    b.lambda_name(in "s");
+    b.w(T_DO);
+    b.w(1);
+    b.w(S_BIND);
+    b.w(P_BIND);
+    b.text(in "value");
+    b.named(in "action");
+    call2(inout b, in "k", in "value", in "s");
+}
+
+// `kind.toNat v` around a fixed name.
+fn to_nat(inout b: B, in kind: Str, in v: Str) {
+    let m = b.app(1);
+    b.global2(in kind, in "toNat");
+    b.args(m);
+    b.arg();
+    b.named(in v);
+}
+
+// `kind.toNat (x op y)`.
+fn to_nat_op(inout b: B, in kind: Str, op: u64) {
+    let m = b.app(1);
+    b.global2(in kind, in "toNat");
+    b.args(m);
+    b.arg();
+    b.binary(op);
+    b.named(in "x");
+    b.named(in "y");
+}
+
+// `(x y : kind)`.
+fn xy_binders(inout b: B, in kind: Str) {
+    b.w(2);
+    b.binder(B_EXPLICIT, in "x");
+    b.global(in kind);
+    b.binder(B_EXPLICIT, in "y");
+    b.global(in kind);
+}
+
+fn modulus(inout b: B, width: u64) {
+    if width == 8 {
+        b.nat(in "256");
+    } else if width == 16 {
+        b.nat(in "65536");
+    } else if width == 32 {
+        b.nat(in "4294967296");
+    } else {
+        b.nat(in "18446744073709551616");
+    }
+}
+
+fn kind_name(i: u64) -> Str {
+    if i == 0 {
+        "UInt8"
+    } else if i == 1 {
+        "UInt16"
+    } else if i == 2 {
+        "UInt32"
+    } else {
+        "UInt64"
+    }
+}
+
+fn width_of(i: u64) -> u64 {
+    if i == 0 {
+        8
+    } else if i == 1 {
+        16
+    } else if i == 2 {
+        32
+    } else {
+        64
+    }
+}
+
+// Rule `r` (0..6) of kind `k`: le, lt, add, sub, mul, ofNat.
+fn rule_proposition(inout b: B, k: u64, r: u64) {
+    let kind = kind_name(k);
+    if r < 2 {
+        let op = if r == 0 {
+            OP_LE
+        } else {
+            OP_LT
+        };
+        b.w(T_FORALL);
+        xy_binders(inout b, in kind);
+        b.binary(OP_IFF);
+        b.binary(op);
+        b.named(in "x");
+        b.named(in "y");
+        b.binary(op);
+        to_nat(inout b, in kind, in "x");
+        to_nat(inout b, in kind, in "y");
+    } else if r < 5 {
+        let op = if r == 2 {
+            OP_ADD
+        } else if r == 3 {
+            OP_SUB
+        } else {
+            OP_MUL
+        };
+        b.w(T_FORALL);
+        xy_binders(inout b, in kind);
+        b.binary(OP_EQ);
+        to_nat_op(inout b, in kind, op);
+        b.binary(OP_MOD);
+        if op == OP_SUB {
+            b.binary(OP_ADD);
+            b.binary(OP_SUB);
+            modulus(inout b, width_of(k));
+            to_nat(inout b, in kind, in "y");
+            to_nat(inout b, in kind, in "x");
+        } else {
+            b.binary(op);
+            to_nat(inout b, in kind, in "x");
+            to_nat(inout b, in kind, in "y");
+        }
+        modulus(inout b, width_of(k));
+    } else {
+        b.w(T_FORALL);
+        b.w(1);
+        b.binder(B_EXPLICIT, in "n");
+        b.global(in "Nat");
+        b.binary(OP_EQ);
+        let m = b.app(1);
+        b.global2(in kind, in "toNat");
+        b.args(m);
+        b.arg();
+        let inner = b.app(1);
+        b.global2(in kind, in "ofNat");
+        b.args(inner);
+        b.arg();
+        b.named(in "n");
+        b.binary(OP_MOD);
+        b.named(in "n");
+        modulus(inout b, width_of(k));
+    }
+}
+
+fn lemma(r: u64) -> Str {
+    if r == 0 {
+        "le_iff_toNat_le"
+    } else if r == 1 {
+        "lt_iff_toNat_lt"
+    } else if r == 2 {
+        "toNat_add"
+    } else if r == 3 {
+        "toNat_sub"
+    } else if r == 4 {
+        "toNat_mul"
+    } else {
+        "toNat_ofNat"
+    }
+}
+
+fn rule_proof(inout b: B, k: u64, r: u64) {
+    let kind = kind_name(k);
+    let name = lemma(r);
+    if r < 5 {
+        b.lambda(2);
+        b.binder(B_EXPLICIT, in "x");
+        b.global(in kind);
+        b.binder(B_EXPLICIT, in "y");
+        b.global(in kind);
+    } else {
+        b.lambda(1);
+        b.binder(B_EXPLICIT, in "n");
+        b.global(in "Nat");
+    }
+    if r < 2 || r == 5 {
+        b.global2(in kind, in name);
+    } else {
+        let m = b.app(2);
+        b.global2(in kind, in name);
+        b.args(m);
+        b.arg();
+        b.named(in "x");
+        b.arg();
+        b.named(in "y");
+    }
+}
+
+// `theorem $arith_simps : r0 ∧ (r1 ∧ ...) := And.intro e0 (And.intro e1 ...)`.
+pub fn arithmetic_simp_bundle(inout b: B) {
+    let rules: u64 = 24;
+    b.w(D_THEOREM);
+    b.name_fixed(in "$arith_simps");
+    b.w(0);
+    for i in 0..rules {
+        if wrapping_add(i, 1) < rules {
+            b.binary(OP_AND);
+        }
+        rule_proposition(inout b, i / 6, i % 6);
+    }
+    for i in 0..rules {
+        if wrapping_add(i, 1) < rules {
+            let m = b.app(2);
+            b.global2(in "And", in "intro");
+            b.args(m);
+            b.arg();
+            rule_proof(inout b, i / 6, i % 6);
+            b.arg();
+        } else {
+            rule_proof(inout b, i / 6, i % 6);
+        }
+    }
+}
+
+pub fn arithmetic_semantics(inout b: B) {
+    b.w(D_DEF);
+    b.w(K_DEF);
+    b.name_fixed(in "$arithmetic_semantics");
+    b.w(0);
+    b.global(in "String");
+    b.w(T_STRING);
+    // `numeric::ARITHMETIC_SEMANTICS`.
+    b.text(in "vesper.arith.checked/1");
+}
+
+pub fn in_i64(inout b: B) {
+    b.w(D_DEF);
+    b.w(K_DEF);
+    b.name_fixed(in "inI64");
+    b.w(1);
+    b.binder(B_EXPLICIT, in "x");
+    b.global(in "Int");
+    b.global(in "Bool");
+    let m = b.app(1);
+    b.global2(in "Decidable", in "decide");
+    b.args(m);
+    b.arg();
+    b.binary(OP_AND);
+    b.binary(OP_LE);
+    b.w(T_UNARY);
+    b.w(U_NEG);
+    b.nat(in "9223372036854775808");
+    b.named(in "x");
+    b.binary(OP_LE);
+    b.named(in "x");
+    b.nat(in "9223372036854775807");
+}
+
+// `VesperDiverge.diverge`.
+fn diverge(inout b: B) {
+    b.w(1);
+    b.w(0);
+    b.w(2);
+    b.text(in "VesperDiverge");
+    b.text(in "diverge");
+}
+
+// `VesperDiverge x` where `x` is written by the caller.
+fn diverge_class(inout b: B) {
+    let m = b.app(1);
+    b.named(in "VesperDiverge");
+    b.args(m);
+    b.arg();
+}
+
+pub fn divergence(inout b: B) {
+    // class VesperDiverge (m : Type → Type) where diverge : ∀ {A : Type}, m A
+    b.w(D_TYPE);
+    b.w(TD_CLASS);
+    b.name_fixed(in "VesperDiverge");
+    b.w(1);
+    b.binder(B_EXPLICIT, in "m");
+    b.monad_ty();
+    b.w(1);
+    b.text(in "diverge");
+    b.w(T_FORALL);
+    b.w(1);
+    b.implicit_type(in "A");
+    m_of(inout b, in "A");
+    b.w(0);
+    // instance [Monad m] [VesperDiverge m] : VesperDiverge (HandlerCPS S O m)
+    b.w(D_INSTANCE);
+    b.w(0);
+    b.w(5);
+    som_binders(inout b);
+    b.monad_instance();
+    b.instance_binder();
+    diverge_class(inout b);
+    b.named(in "m");
+    diverge_class(inout b);
+    cps_som(inout b);
+    b.w(T_RECORD);
+    b.w(1);
+    b.text(in "diverge");
+    b.lambda(2);
+    b.lambda_name(in "k");
+    b.lambda_name(in "s");
+    diverge(inout b);
+    // instance : VesperDiverge Option
+    b.w(D_INSTANCE);
+    b.w(0);
+    b.w(0);
+    diverge_class(inout b);
+    b.global(in "Option");
+    b.w(T_RECORD);
+    b.w(1);
+    b.text(in "diverge");
+    b.global2(in "Option", in "none");
+    // instance [Monad m] [VesperDiverge m] : VesperDiverge (ExceptT E m)
+    b.w(D_INSTANCE);
+    b.w(0);
+    b.w(4);
+    b.implicit_type(in "E");
+    b.binder(B_IMPLICIT, in "m");
+    b.monad_ty();
+    b.monad_instance();
+    b.instance_binder();
+    diverge_class(inout b);
+    b.named(in "m");
+    diverge_class(inout b);
+    call_global2(inout b, in "ExceptT", in "E", in "m");
+    b.w(T_RECORD);
+    b.w(1);
+    b.text(in "diverge");
+    let m = b.app(1);
+    b.global2(in "ExceptT", in "lift");
+    b.args(m);
+    b.arg();
+    diverge(inout b);
+}
+
+// `app(global(&[f]), [named(x), named(y)])`.
+fn call_global2(inout b: B, in f: Str, in x: Str, in y: Str) {
+    let m = b.app(2);
+    b.global(in f);
+    b.args(m);
+    b.arg();
+    b.named(in x);
+    b.arg();
+    b.named(in y);
+}
+
+// `Effect_Fail E <model>`: the model is written by the caller.
+fn fail_head(inout b: B) {
+    let m = b.app(2);
+    b.named(in "Effect_Fail");
+    b.args(m);
+    b.arg();
+    b.named(in "E");
+    b.arg();
+}
+
+// `{ raise := fun e => MonadExcept.throw e }`.
+fn raise_record(inout b: B) {
+    b.w(T_RECORD);
+    b.w(1);
+    b.text(in "raise");
+    b.lambda(1);
+    b.lambda_name(in "e");
+    let m = b.app(1);
+    b.global2(in "MonadExcept", in "throw");
+    b.args(m);
+    b.arg();
+    b.named(in "e");
+}
+
+pub fn fail_models(inout b: B) {
+    b.w(D_INSTANCE);
+    b.w(0);
+    b.w(1);
+    b.implicit_type(in "E");
+    fail_head(inout b);
+    b.app_named_global(in "Except", in "E");
+    raise_record(inout b);
+    b.w(D_INSTANCE);
+    b.w(0);
+    b.w(3);
+    b.implicit_type(in "E");
+    b.binder(B_IMPLICIT, in "m");
+    b.monad_ty();
+    b.monad_instance();
+    fail_head(inout b);
+    call_global2(inout b, in "ExceptT", in "E", in "m");
+    raise_record(inout b);
+}

@@ -13,14 +13,24 @@ use self::parse::{
     Parser,
     delimiters,
     expr,
-    parser_new,
-    want_end
+    parser_new
 };
 use self::resolve::{
     parameters,
     resolver_new,
     term
 };
+use self::util::{
+    Code,
+    Out,
+    Row,
+    Token,
+    W,
+    Want
+};
+
+// The header of `fg_parse`'s result: error, e1, e2, paths, path words.
+const PARSE_HEADER: u64 = 5;
 
 // `check_delimiters` over token kinds (1 Ident .. 10 Close Brace): 0 when
 // balanced, 1 when deeper than `max_depth`, else 2 + the index of the
@@ -31,10 +41,10 @@ pub fn fg_delimiters(in kinds: Slice[u64], max_depth: u64) -> u64 {
     let e = delimiters(in kinds, 0, kinds.len(), 1, max_depth, inout at, inout stack);
     if e == 0 {
         0
-    } else if e == 1 {
-        1
+    } else if e == Code::Depth {
+        Code::Depth
     } else {
-        wrapping_add(at, 2)
+        wrapping_add(at, Code::Unbalanced)
     }
 }
 
@@ -49,12 +59,12 @@ pub fn fg_delimiters(in kinds: Slice[u64], max_depth: u64) -> u64 {
 // arguments), [5, keyword, effect path, handler path] Handle (after its
 // body), [6, n] Block (after its items).
 pub fn fg_parse(in toks: Slice[u64], in text: Slice[u8], max_depth: u64) -> ChunkSeq[u64] {
-    let n = toks.len() / 3;
+    let n = toks.len() / Row::Words;
     let mut p = parser_new(n, max_depth);
     let mut at: u64 = 0;
-    let e = delimiters(in toks, 0, n, 3, max_depth, inout at, inout p.term);
+    let e = delimiters(in toks, 0, n, Row::Words, max_depth, inout at, inout p.term);
     if e != 0 {
-        let mut out = ChunkSeq::with_capacity[u64](5);
+        let mut out = ChunkSeq::with_capacity[u64](PARSE_HEADER);
         out.push(e);
         out.push(at);
         out.push(0);
@@ -64,12 +74,12 @@ pub fn fg_parse(in toks: Slice[u64], in text: Slice[u8], max_depth: u64) -> Chun
     }
     expr(in toks, in text, inout p);
     if p.err == 0 && p.pos != n {
-        p.err = 3;
+        p.err = Code::Parse;
         p.e1 = p.pos;
-        p.e2 = want_end();
+        p.e2 = Want::End;
     }
     let mut out = ChunkSeq::with_capacity[u64](
-        wrapping_add(wrapping_add(p.paths.len(), p.term.len()), 5)
+        wrapping_add(wrapping_add(p.paths.len(), p.term.len()), PARSE_HEADER)
     );
     out.push(p.err);
     out.push(p.e1);
@@ -99,16 +109,16 @@ pub fn fg_resolve(in w: Slice[u64], in text: Slice[u8], in g: Slice[u64], in gt:
     let mut at: u64 = 0;
     let e = delimiters(
         in w,
-        match w.try_get(6) {
+        match w.try_get(W::TokenBase) {
             Option::Some(v) => v,
             Option::None => 0,
         },
-        match w.try_get(5) {
+        match w.try_get(W::Tokens) {
             Option::Some(v) => v,
             Option::None => 0,
         },
-        10,
-        match w.try_get(0) {
+        Token::Words,
+        match w.try_get(W::MaxDepth) {
             Option::Some(v) => v,
             Option::None => 0,
         },
@@ -122,22 +132,22 @@ pub fn fg_resolve(in w: Slice[u64], in text: Slice[u8], in g: Slice[u64], in gt:
         let scope0 = r.next_scope;
         let ctx_len = parameters(in w, inout r);
         if r.err == 0 {
-            let root = match w.try_get(17) {
+            let root = match w.try_get(W::Term) {
                 Option::Some(v) => v,
                 Option::None => 0,
             };
             let end = term(in w, in text, in g, in gt, inout r, root, ctx_len);
         }
-        r.out.try_set(1, wrapping_sub(r.next_scope, scope0));
-        r.out.try_set(2, wrapping_sub(r.next_binder, r.first_binder));
+        r.out.try_set(Out::Scopes, wrapping_sub(r.next_scope, scope0));
+        r.out.try_set(Out::Binders, wrapping_sub(r.next_binder, r.first_binder));
     }
-    r.out.try_set(0, r.err);
-    r.out.try_set(3, r.e1);
-    r.out.try_set(4, r.e2);
-    r.out.try_set(5, r.e3);
-    r.out.try_set(6, r.e4);
+    r.out.try_set(Out::Error, r.err);
+    r.out.try_set(Out::E1, r.e1);
+    r.out.try_set(Out::E2, r.e2);
+    r.out.try_set(Out::E3, r.e3);
+    r.out.try_set(Out::E4, r.e4);
     if r.err != 0 {
-        r.out.try_set(7, r.ext.len());
+        r.out.try_set(Out::Extra, r.ext.len());
         r.out.extend(in r.ext.as_slice());
     }
     let mut out = ChunkSeq::new[u64]();

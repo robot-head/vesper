@@ -918,6 +918,10 @@ impl Emitter<'_> {
                     let text = n.to_string();
                     self.emit(&text, token)?;
                 }
+                Literal::WideInt(n) => {
+                    let text = n.to_string();
+                    self.emit(&text, token)?;
+                }
                 Literal::Bool(b) => {
                     self.emit(if *b { "true" } else { "false" }, token)?;
                 }

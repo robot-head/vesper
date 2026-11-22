@@ -1,0 +1,158 @@
+// Byte-class scans shared by the prism packages (SH6 lane 5, #1400).
+//
+// `find_not_in` is a scalar loop of about 14 instructions per byte on the
+// SSE2-only x86-64 target, and Prism's hot paths run it over every field
+// name and value. These scans read eight bytes at a time and test them with
+// word arithmetic (SWAR). A word with a byte outside the fast class, and the
+// last bytes after the final whole word, go to `find_not_in` with the exact
+// class.
+// Each returns what `find_not_in` would: the index of the first byte outside
+// the class.
+//
+// Every word test below works on 7-bit lanes (`x & LOW7`), where adding a
+// constant below 128 to a lane never carries into the next one, so each
+// lane's flag (its high bit) is exact.
+
+const LOW7: u64 = 9187201950435737471;
+const HIGHS: u64 = 9259542123273814144;
+const ONES: u64 = 72340172838076673;
+// Bytes per word.
+const WORD: u64 = 8;
+// The ASCII case bit: setting it maps A-Z onto a-z.
+const CASE_BITS: u64 = 2314885530818453536;
+
+// Lanes of `x` (7-bit) with a value of at least `lo`, as their high bits.
+fn ge(x: u64, lo: u64) -> u64 {
+    wrapping_add(x, wrapping_mul(ONES, wrapping_sub(128, lo))) & HIGHS
+}
+
+// Lanes of `x` (7-bit) with a value of at most `hi`.
+fn le(x: u64, hi: u64) -> u64 {
+    (~wrapping_add(x, wrapping_mul(ONES, wrapping_sub(127, hi)))) & HIGHS
+}
+
+// Lanes of `x` (7-bit) equal to `b`.
+fn eq(x: u64, b: u64) -> u64 {
+    let y = x ^ wrapping_mul(ONES, b);
+    (~(wrapping_add(y, LOW7) | y)) & HIGHS
+}
+
+// The scalar scan of the word `s[at..at + 8]`, as an index of `s`. Callers
+// keep `at + 8 <= s.len()`.
+fn within(in s: Slice[u8], at: u64, lo_mask: u64, hi_mask: u64, high: bool) -> Option[u64] {
+    let end = wrapping_add(at, WORD);
+    if end > s.len() || at > end {
+        return Option::None;
+    }
+    match s[at..end].find_not_in(lo_mask, hi_mask, high) {
+        Option::Some(i) => Option::Some(wrapping_add(at, i)),
+        Option::None => Option::None,
+    }
+}
+
+// The scalar scan of `s[at..]`, as an index of `s`.
+fn rest(in s: Slice[u8], at: u64, lo_mask: u64, hi_mask: u64, high: bool) -> Option[u64] {
+    let n = s.len();
+    if at >= n {
+        return Option::None;
+    }
+    match s[at..n].find_not_in(lo_mask, hi_mask, high) {
+        Option::Some(i) => Option::Some(wrapping_add(at, i)),
+        Option::None => Option::None,
+    }
+}
+
+// The first control byte of `s` other than tab (when `tab_ok`), or DEL:
+// RFC 9110 §5.5 field values allow VCHAR, SP, HTAB and obs-text. `lo_mask`
+// and `hi_mask` are the same class for `find_not_in` (bytes 128-255 in it).
+pub fn first_control(in s: Slice[u8], tab_ok: bool, lo_mask: u64, hi_mask: u64) -> Option[u64] {
+    let n = s.len();
+    let mut at: u64 = 0;
+    loop {
+        if wrapping_add(at, WORD) > n || at > n {
+            break;
+        }
+        let x = match s.try_read_u64_le(at) {
+            Option::Some(x) => x,
+            Option::None => 0,
+        };
+        let x7 = x & LOW7;
+        let mut bad = ((~ge(x7, 32)) | eq(x7, 127)) & (~x) & HIGHS;
+        if tab_ok {
+            bad = bad & (~eq(x7, 9));
+        }
+        if bad != 0 {
+            let lane = widen_u64(trailing_zeros_u64(bad)) / WORD;
+            return Option::Some(wrapping_add(at, lane));
+        }
+        at = wrapping_add(at, WORD);
+    }
+    rest(in s, at, lo_mask, hi_mask, true)
+}
+
+// The first byte of `s` outside the RFC 9110 §5.6.2 `tchar` class (ALPHA,
+// DIGIT and !#$%&'*+-.^_`|~), given as `lo_mask` and `hi_mask`. The word
+// test covers ALPHA, DIGIT and `-`, the bytes of nearly every field name.
+pub fn first_not_token(in s: Slice[u8], lo_mask: u64, hi_mask: u64) -> Option[u64] {
+    let n = s.len();
+    let mut at: u64 = 0;
+    loop {
+        if wrapping_add(at, WORD) > n || at > n {
+            break;
+        }
+        let x = match s.try_read_u64_le(at) {
+            Option::Some(x) => x,
+            Option::None => 0,
+        };
+        let x7 = x & LOW7;
+        let folded = x7 | CASE_BITS;
+        let alpha = ge(folded, 97) & le(folded, 122);
+        let digit = ge(x7, 48) & le(x7, 57);
+        let good = (alpha | digit | eq(x7, 45)) & (~x);
+        if good != HIGHS {
+            match within(in s, at, lo_mask, hi_mask, false) {
+                Option::Some(i) => {
+                    return Option::Some(i);
+                },
+                Option::None => (),
+            }
+        }
+        at = wrapping_add(at, WORD);
+    }
+    rest(in s, at, lo_mask, hi_mask, false)
+}
+
+// The first byte of `s` outside an origin-form target class given as
+// `lo_mask` and `hi_mask` (for `find_not_in`, no bytes 128-255). The word
+// test covers ALPHA, DIGIT and `-./_&=`, the bytes of most paths and queries.
+pub fn first_not_path(in s: Slice[u8], lo_mask: u64, hi_mask: u64) -> Option[u64] {
+    let n = s.len();
+    let mut at: u64 = 0;
+    loop {
+        if wrapping_add(at, WORD) > n || at > n {
+            break;
+        }
+        let x = match s.try_read_u64_le(at) {
+            Option::Some(x) => x,
+            Option::None => 0,
+        };
+        let x7 = x & LOW7;
+        let folded = x7 | CASE_BITS;
+        let alpha = ge(folded, 97) & le(folded, 122);
+        // `-` `.` `/` `0`-`9` are 45-57; `_` is 95; the query's `&` and `=`
+        // are 38 and 61.
+        let path = ge(x7, 45) & le(x7, 57);
+        let marks = eq(x7, 95) | eq(x7, 38) | eq(x7, 61);
+        let good = (alpha | path | marks) & (~x);
+        if good != HIGHS {
+            match within(in s, at, lo_mask, hi_mask, false) {
+                Option::Some(i) => {
+                    return Option::Some(i);
+                },
+                Option::None => (),
+            }
+        }
+        at = wrapping_add(at, WORD);
+    }
+    rest(in s, at, lo_mask, hi_mask, false)
+}

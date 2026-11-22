@@ -26,65 +26,75 @@
 
 // ---------------------------------------------------------------------
 // Constants (the same names as the Rust crate's `bbr.rs`, `pacing.rs` and
-// `events.rs`). Gains are per mille: `GAIN_UNIT` (1000) means 1.0.
+// `events.rs`). Gains are per mille: `Gain::Unit` (1000) means 1.0.
 // Initializers are literals because `-` and `*` on `u64` may raise.
 
 // The draft's "Infinity" for volumes and rates (`u64::MAX`).
 const INFINITY: u64 = 18446744073709551615;
 // `u32::MAX`: windows are reported as `u32`.
 const U32_MAX: u64 = 4294967295;
-const NANOS_PER_SEC: u64 = 1000000000;
+
+// Durations in nanoseconds.
+enum Nanos: u64 {
+    // One second.
+    PerSec = 1000000000,
+    // `BBR.MinRTTFilterLen` = 10 s.
+    MinRttFilterLen = 10000000000,
+    // `BBR.ProbeRTTDuration` = 200 ms.
+    ProbeRttDuration = 200000000,
+    // Lower bound of the randomized ProbeBW wait, 2 s.
+    ProbeWaitBase = 2000000000,
+    // The randomized part of the ProbeBW wait is drawn from
+    // `0..Nanos::ProbeWaitDraws`, that is up to `PROBE_WAIT_RANGE_NS` (1 s).
+    ProbeWaitDraws = 1000000001,
+    // The smoothed RTT assumed before there is a sample, 1 ms.
+    DefaultSrtt = 1000000,
+}
+
 // `pacing_rate / MILLIS_PER_SEC` is one millisecond of data.
 const MILLIS_PER_SEC: u64 = 1000;
-// Fixed-point unit for gains and fractions: 1000 means 1.0.
-const GAIN_UNIT: u64 = 1000;
-// `BBR.StartupPacingGain` = 4 ln 2, about 2.77.
-const STARTUP_PACING_GAIN: u64 = 2770;
-// `BBR.DrainPacingGain` = 0.5.
-const DRAIN_PACING_GAIN: u64 = 500;
-// `BBR.DefaultCwndGain` = 2.
-const DEFAULT_CWND_GAIN: u64 = 2000;
-// ProbeBW_DOWN pacing gain 0.90.
-const PROBE_DOWN_PACING_GAIN: u64 = 900;
-// ProbeBW_CRUISE, ProbeBW_REFILL and ProbeRTT pacing gain 1.0.
-const UNIT_PACING_GAIN: u64 = 1000;
-// ProbeBW_UP pacing gain 1.25.
-const PROBE_UP_PACING_GAIN: u64 = 1250;
-// ProbeBW_UP cwnd gain 2.25.
-const PROBE_UP_CWND_GAIN: u64 = 2250;
-// `BBR.ProbeRTTCwndGain` = 0.5.
-const PROBE_RTT_CWND_GAIN: u64 = 500;
-// `BBR.LossThresh` = 2%.
-const LOSS_THRESH: u64 = 20;
-// `GAIN_UNIT - LOSS_THRESH`.
-const GAIN_UNIT_MINUS_LOSS_THRESH: u64 = 980;
-// `BBR.Beta` = 0.7.
-const BETA: u64 = 700;
-// `BBR.Headroom` = 0.15.
-const HEADROOM: u64 = 150;
+
+// Gains and fractions per mille: `Gain::Unit` (1000) means 1.0.
+enum Gain: u64 {
+    Unit = 1000,
+    // `BBR.StartupPacingGain` = 4 ln 2, about 2.77.
+    StartupPacing = 2770,
+    // `BBR.DrainPacingGain` = 0.5.
+    DrainPacing = 500,
+    // `BBR.DefaultCwndGain` = 2.
+    DefaultCwnd = 2000,
+    // ProbeBW_DOWN pacing gain 0.90.
+    ProbeDownPacing = 900,
+    // ProbeBW_CRUISE, ProbeBW_REFILL and ProbeRTT pacing gain 1.0.
+    UnitPacing = 1000,
+    // ProbeBW_UP pacing gain 1.25.
+    ProbeUpPacing = 1250,
+    // ProbeBW_UP cwnd gain 2.25.
+    ProbeUpCwnd = 2250,
+    // `BBR.ProbeRTTCwndGain` = 0.5.
+    ProbeRttCwnd = 500,
+    // `BBR.LossThresh` = 2%.
+    LossThresh = 20,
+    // `Gain::Unit - Gain::LossThresh`.
+    UnitMinusLossThresh = 980,
+    // `BBR.Beta` = 0.7.
+    Beta = 700,
+    // `BBR.Headroom` = 0.15.
+    Headroom = 150,
+    // Full-pipe growth threshold 1.25.
+    FullBwGrowth = 1250,
+}
+
 // `100 - BBR.PacingMarginPercent` (the margin is 1%).
 const PACING_MARGIN_KEEP_PERCENT: u64 = 99;
-// `GAIN_UNIT * 100`, the divisor of a gain times a percentage.
+// `Gain::Unit * 100`, the divisor of a gain times a percentage.
 const GAIN_UNIT_TIMES_PERCENT: u64 = 100000;
-// Full-pipe growth threshold 1.25.
-const FULL_BW_GROWTH: u64 = 1250;
-// `BBR.MinRTTFilterLen` = 10 s.
-const MIN_RTT_FILTER_LEN_NS: u64 = 10000000000;
-// `BBR.ProbeRTTDuration` = 200 ms.
-const PROBE_RTT_DURATION_NS: u64 = 200000000;
 // Maximum send quantum, 64 KiB.
 const MAX_SEND_QUANTUM: u64 = 65536;
-// Lower bound of the randomized ProbeBW wait, 2 s.
-const PROBE_WAIT_BASE_NS: u64 = 2000000000;
-// The randomized part of the ProbeBW wait is drawn from
-// `0..PROBE_WAIT_DRAWS_NS`, that is up to `PROBE_WAIT_RANGE_NS` (1 s).
-const PROBE_WAIT_DRAWS_NS: u64 = 1000000001;
 // Cap on Reno-coexistence rounds.
 const RENO_ROUNDS_CAP: u64 = 63;
 // Cap on `bw_probe_up_rounds`, so `1 << rounds` stays in range.
 const MAX_PROBE_UP_ROUNDS: u32 = 30;
-// The smoothed RTT assumed before there is a sample, 1 ms.
-const DEFAULT_SRTT_NS: u64 = 1000000;
 // RFC 9002 §7.2 initial window floor: `min(10 * smss, max(14720, 2 * smss))`.
 const INITIAL_WINDOW_FLOOR_BYTES: u64 = 14720;
 // The largest accepted sender maximum segment size.
@@ -93,10 +103,13 @@ const MAX_SMSS: u32 = 65535;
 const MAX_PACKET_NUMBER: u64 = 4611686018427387903;
 // The default seed of the ProbeBW wait generator ("bbr3warp" in ASCII).
 const DEFAULT_PROBE_SEED: u64 = 0x6262723377617270;
+
 // SplitMix64 increment and finalizer multipliers.
-const SPLITMIX_GAMMA: u64 = 0x9e3779b97f4a7c15;
-const SPLITMIX_MUL_1: u64 = 0xbf58476d1ce4e5b9;
-const SPLITMIX_MUL_2: u64 = 0x94d049bb133111eb;
+enum SplitMix: u64 {
+    Gamma = 0x9e3779b97f4a7c15,
+    Mul1 = 0xbf58476d1ce4e5b9,
+    Mul2 = 0x94d049bb133111eb,
+}
 
 // ---------------------------------------------------------------------
 // Types shared with the Rust crate (same names, fields and variants).

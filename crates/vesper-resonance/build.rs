@@ -22,13 +22,19 @@ fn main() {
 #[cfg(feature = "vesper-port-divergent")]
 const EDITS: &[(&str, &str)] = &[
     // kernels.ves: the right channel mixes with the left pan weights.
-    ("r = r + y * f(in pan_r, v);", "r = r + y * f(in pan_l, v);"),
+    (
+        "right.set(i, to_bits_f32(r + y0 * pr0 + y1 * pr1 + y2 * pr2 + y3 * pr3));",
+        "right.set(i, to_bits_f32(r + y0 * pl0 + y1 * pr1 + y2 * pr2 + y3 * pr3));",
+    ),
     // events.ves: decreasing offsets are accepted after the first event.
     ("if offset < prev {", "if offset < prev && index == 0 {"),
     // pdc.ves: a node's arrival is its earliest forward input, not its latest.
     ("if l > a {", "if l < a || a == 0 {"),
     // slab.ves: every delay line's head returns to 0 when it wraps.
-    ("slots.set(m + 4, next % cap);", "slots.set(m + 4, 0);"),
+    (
+        "slots.set(m + Slot::Head, next % cap);",
+        "slots.set(m + Slot::Head, 0);",
+    ),
     // lease.ves: frames may be written out of order.
     ("if frame != written {", "if frame > frames {"),
     // confine.ves: allowed effects are reported instead of forbidden ones.
@@ -38,7 +44,7 @@ const EDITS: &[(&str, &str)] = &[
     ),
     // graph.ves: the Vesper graph's gain nodes ignore their gain.
     (
-        "let v = from_bits_f32(out[k]) * self.gain;",
-        "let v = from_bits_f32(out[k]);",
+        "sum_inputs(in r.slab, in r.plan[ins..p], block, inout r.out, 0, true, gain);",
+        "sum_inputs(in r.slab, in r.plan[ins..p], block, inout r.out, 0, false, gain);",
     ),
 ];

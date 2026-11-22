@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Print the Bazel flag that scopes the `lean_replay` tests for this CI run.
 
-"Test all targets" runs the whole `//...` suite on pushes to main. On a pull
-request it skips targets tagged `lean_replay` (the Lean/Logos replay suite in
-BUILD.bazel) unless the change touches a path those tests read. Anything this
-script cannot determine selects the full suite: it prints nothing.
+The replay action runs targets tagged `lean_replay` on pushes to main and
+on pull requests that touch a path those tests read. Anything this script
+cannot determine selects the replay suite: it prints nothing.
 
 Usage: lean_replay_scope.py [--base REF]   (prints flags on stdout)
 """
@@ -62,6 +61,7 @@ TRIGGERS = (
     "scripts/ci/prepare-logos42.sh",
     "scripts/ci/prepare-lean4lean42.sh",
     "scripts/ci/lean_replay_scope.py",
+    "scripts/ci/test-lean-replay.sh",
 )
 
 

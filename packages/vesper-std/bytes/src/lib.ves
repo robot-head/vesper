@@ -121,3 +121,224 @@ pub fn put_u64_le(inout s: Slice[u8], at: u64, v: u64) -> bool {
 pub fn put_u64_be(inout s: Slice[u8], at: u64, v: u64) -> bool {
     s.try_write_u64_be(at, v)
 }
+
+test {
+    // @case first(in "abc", 0, Option::Some(97))
+    // @case last(in "abc", 2, Option::Some(99))
+    // @case end(in "abc", 3, Option::None)
+    // @case empty(in "", 0, Option::None)
+    // @case huge_offset(in "abc", 18446744073709551615, Option::None)
+    fn test_read_u8(in bytes: Str, offset: u64, expected: Option[u8]) -> bool {
+        read_u8(in bytes.as_bytes(), offset) == expected
+    }
+
+    // @case first(in "0123456789", 0, Option::Some(0x3130), Option::Some(0x3031))
+    // @case unaligned(in "0123456789", 1, Option::Some(0x3231), Option::Some(0x3132))
+    // @case exact_end(in "0123456789", 8, Option::Some(0x3938), Option::Some(0x3839))
+    // @case truncated(in "0123456789", 9, Option::None, Option::None)
+    // @case empty(in "", 0, Option::None, Option::None)
+    // @case huge_offset(in "0123456789", 18446744073709551615, Option::None, Option::None)
+    fn test_read_u16(in bytes: Str, offset: u64, le: Option[u16], be: Option[u16]) -> bool {
+        read_u16_le(in bytes.as_bytes(), offset)
+            == le
+            && read_u16_be(in bytes.as_bytes(), offset)
+            == be
+    }
+
+    // @case first(in "0123456789", 0, Option::Some(0x33323130), Option::Some(0x30313233))
+    // @case unaligned(in "0123456789", 1, Option::Some(0x34333231), Option::Some(0x31323334))
+    // @case exact_end(in "0123456789", 6, Option::Some(0x39383736), Option::Some(0x36373839))
+    // @case truncated(in "0123456789", 7, Option::None, Option::None)
+    // @case empty(in "", 0, Option::None, Option::None)
+    // @case huge_offset(in "0123456789", 18446744073709551615, Option::None, Option::None)
+    fn test_read_u32(in bytes: Str, offset: u64, le: Option[u32], be: Option[u32]) -> bool {
+        read_u32_le(in bytes.as_bytes(), offset)
+            == le
+            && read_u32_be(in bytes.as_bytes(), offset)
+            == be
+    }
+
+    // @case first(in "0123456789", 0, Option::Some(0x3736353433323130), Option::Some(0x3031323334353637))
+    // @case unaligned(in "0123456789", 1, Option::Some(0x3837363534333231), Option::Some(0x3132333435363738))
+    // @case exact_end(in "0123456789", 2, Option::Some(0x3938373635343332), Option::Some(0x3233343536373839))
+    // @case truncated(in "0123456789", 3, Option::None, Option::None)
+    // @case empty(in "", 0, Option::None, Option::None)
+    // @case huge_offset(in "0123456789", 18446744073709551615, Option::None, Option::None)
+    fn test_read_u64(in bytes: Str, offset: u64, le: Option[u64], be: Option[u64]) -> bool {
+        read_u64_le(in bytes.as_bytes(), offset)
+            == le
+            && read_u64_be(in bytes.as_bytes(), offset)
+            == be
+    }
+
+    // Words in these fixtures pack the first byte into their least significant bits.
+    fn bytes_match(in bytes: Slice[u8], offset: u64, width: u64, packed: u64) -> bool {
+        for i in 0..width {
+            if bytes
+                .try_get(wrapping_add(offset, i))
+                != Option::Some(wrapping_u8(wrapping_shr_u64(packed, wrapping_u32(i << 3)))) {
+                return false;
+            }
+        }
+        true
+    }
+
+    // @case negative_big_endian(0x80, 1, Option::Some(128), Option::Some(-9223372036854775808))
+    // @case negative_little_endian(0x8000000000000000, 1, Option::Some(-9223372036854775808), Option::Some(128))
+    // @case all_ones(0xffffffffffffffff, 1, Option::Some(-1), Option::Some(-1))
+    // @case truncated(0x80, 2, Option::None, Option::None)
+    // @case huge_offset(0, 18446744073709551615, Option::None, Option::None)
+    fn test_read_i64(packed: u64, offset: u64, le: Option[i64], be: Option[i64]) -> bool {
+        let mut bytes = ChunkSeq::new[u8]();
+        bytes.push(90);
+        for i in 0..8 {
+            bytes.push(wrapping_u8(wrapping_shr_u64(packed, wrapping_u32(i << 3))));
+        }
+        read_i64_le(in bytes.as_slice(), offset)
+            == le
+            && read_i64_be(in bytes.as_slice(), offset)
+            == be
+    }
+
+    // @case asymmetric(0x12ab, 0x12ab, 0xab12)
+    // @case all_bits(0xffff, 0xffff, 0xffff)
+    // @case zero(0, 0, 0)
+    fn test_push_u16(value: u16, le: u64, be: u64) -> bool {
+        let mut bytes = ChunkSeq::new[u8]();
+        bytes.push(90);
+        push_u16_le(inout bytes, value);
+        push_u16_be(inout bytes, value);
+        bytes
+            .len()
+            == 5
+            && bytes
+            .try_get(0)
+            == Option::Some(90)
+            && bytes_match(in bytes.as_slice(), 1, 2, le)
+            && bytes_match(in bytes.as_slice(), 3, 2, be)
+    }
+
+    // @case middle(0x12ab, 1, true, 0x12ab, 0xab12)
+    // @case exact_end(0x12ab, 2, true, 0x12ab, 0xab12)
+    // @case truncated(0x12ab, 3, false, 0, 0)
+    // @case huge_offset(0x12ab, 18446744073709551615, false, 0, 0)
+    fn test_put_u16(value: u16, offset: u64, succeeds: bool, le: u64, be: u64) -> bool {
+        let mut left = ChunkSeq::new[u8]();
+        let mut right = ChunkSeq::new[u8]();
+        left.resize(4, 90);
+        right.resize(4, 90);
+        let left_ok = put_u16_le(inout left.as_slice_mut(), offset, value);
+        let right_ok = put_u16_be(inout right.as_slice_mut(), offset, value);
+        left_ok
+            == succeeds
+            && right_ok
+            == succeeds
+            && put_bytes_match(in left.as_slice(), offset, 2, succeeds, le)
+            && put_bytes_match(in right.as_slice(), offset, 2, succeeds, be)
+    }
+
+    // @case asymmetric(0x1234abcd, 0x1234abcd, 0xcdab3412)
+    // @case all_bits(0xffffffff, 0xffffffff, 0xffffffff)
+    // @case zero(0, 0, 0)
+    fn test_push_u32(value: u32, le: u64, be: u64) -> bool {
+        let mut bytes = ChunkSeq::new[u8]();
+        bytes.push(90);
+        push_u32_le(inout bytes, value);
+        push_u32_be(inout bytes, value);
+        bytes
+            .len()
+            == 9
+            && bytes
+            .try_get(0)
+            == Option::Some(90)
+            && bytes_match(in bytes.as_slice(), 1, 4, le)
+            && bytes_match(in bytes.as_slice(), 5, 4, be)
+    }
+
+    // @case middle(0x1234abcd, 1, true, 0x1234abcd, 0xcdab3412)
+    // @case exact_end(0x1234abcd, 2, true, 0x1234abcd, 0xcdab3412)
+    // @case truncated(0x1234abcd, 3, false, 0, 0)
+    // @case huge_offset(0x1234abcd, 18446744073709551615, false, 0, 0)
+    fn test_put_u32(value: u32, offset: u64, succeeds: bool, le: u64, be: u64) -> bool {
+        let mut left = ChunkSeq::new[u8]();
+        let mut right = ChunkSeq::new[u8]();
+        left.resize(6, 90);
+        right.resize(6, 90);
+        let left_ok = put_u32_le(inout left.as_slice_mut(), offset, value);
+        let right_ok = put_u32_be(inout right.as_slice_mut(), offset, value);
+        left_ok
+            == succeeds
+            && right_ok
+            == succeeds
+            && put_bytes_match(in left.as_slice(), offset, 4, succeeds, le)
+            && put_bytes_match(in right.as_slice(), offset, 4, succeeds, be)
+    }
+
+    // @case asymmetric(0x0123456789abcdef, 0x0123456789abcdef, 0xefcdab8967452301)
+    // @case all_bits(0xffffffffffffffff, 0xffffffffffffffff, 0xffffffffffffffff)
+    // @case zero(0, 0, 0)
+    fn test_push_u64(value: u64, le: u64, be: u64) -> bool {
+        let mut bytes = ChunkSeq::new[u8]();
+        bytes.push(90);
+        push_u64_le(inout bytes, value);
+        push_u64_be(inout bytes, value);
+        bytes
+            .len()
+            == 17
+            && bytes
+            .try_get(0)
+            == Option::Some(90)
+            && bytes_match(in bytes.as_slice(), 1, 8, le)
+            && bytes_match(in bytes.as_slice(), 9, 8, be)
+    }
+
+    // @case middle(0x0123456789abcdef, 1, true, 0x0123456789abcdef, 0xefcdab8967452301)
+    // @case exact_end(0x0123456789abcdef, 2, true, 0x0123456789abcdef, 0xefcdab8967452301)
+    // @case truncated(0x0123456789abcdef, 3, false, 0, 0)
+    // @case huge_offset(0x0123456789abcdef, 18446744073709551615, false, 0, 0)
+    fn test_put_u64(value: u64, offset: u64, succeeds: bool, le: u64, be: u64) -> bool {
+        let mut left = ChunkSeq::new[u8]();
+        let mut right = ChunkSeq::new[u8]();
+        left.resize(10, 90);
+        right.resize(10, 90);
+        let left_ok = put_u64_le(inout left.as_slice_mut(), offset, value);
+        let right_ok = put_u64_be(inout right.as_slice_mut(), offset, value);
+        left_ok
+            == succeeds
+            && right_ok
+            == succeeds
+            && put_bytes_match(in left.as_slice(), offset, 8, succeeds, le)
+            && put_bytes_match(in right.as_slice(), offset, 8, succeeds, be)
+    }
+
+    // @case positive(0x0123456789abcdef, 0x0123456789abcdef, 0xefcdab8967452301)
+    // @case negative(-2, 0xfffffffffffffffe, 0xfeffffffffffffff)
+    // @case minimum(-9223372036854775808, 0x8000000000000000, 0x80)
+    // @case zero(0, 0, 0)
+    fn test_push_i64(value: i64, le: u64, be: u64) -> bool {
+        let mut bytes = ChunkSeq::new[u8]();
+        bytes.push(90);
+        push_i64_le(inout bytes, value);
+        push_i64_be(inout bytes, value);
+        bytes
+            .len()
+            == 17
+            && bytes
+            .try_get(0)
+            == Option::Some(90)
+            && bytes_match(in bytes.as_slice(), 1, 8, le)
+            && bytes_match(in bytes.as_slice(), 9, 8, be)
+    }
+
+    fn put_bytes_match(in bytes: Slice[u8], offset: u64, width: u64, written: bool, packed: u64)
+        -> bool {
+        for i in 0..bytes.len() {
+            if !written || i < offset || i >= wrapping_add(offset, width) {
+                if bytes.try_get(i) != Option::Some(90) {
+                    return false;
+                }
+            }
+        }
+        ! written || bytes_match(in bytes, offset, width, packed)
+    }
+}

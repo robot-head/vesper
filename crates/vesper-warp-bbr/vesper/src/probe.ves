@@ -8,14 +8,14 @@ fn start_probe_bw_down(inout b: Bbrv3, now_ns: u64) {
     b.is_bw_probe_stopping = true;
     start_round(inout b);
     b.bbr_state = BbrState::ProbeBwDown;
-    b.pacing_gain = PROBE_DOWN_PACING_GAIN;
-    b.cwnd_gain = DEFAULT_CWND_GAIN;
+    b.pacing_gain = Gain::ProbeDownPacing;
+    b.cwnd_gain = Gain::DefaultCwnd;
 }
 
 fn start_probe_bw_cruise(inout b: Bbrv3) {
     b.bbr_state = BbrState::ProbeBwCruise;
-    b.pacing_gain = UNIT_PACING_GAIN;
-    b.cwnd_gain = DEFAULT_CWND_GAIN;
+    b.pacing_gain = Gain::UnitPacing;
+    b.cwnd_gain = Gain::DefaultCwnd;
 }
 
 fn start_probe_bw_refill(inout b: Bbrv3) {
@@ -26,8 +26,8 @@ fn start_probe_bw_refill(inout b: Bbrv3) {
     b.is_bw_probe_stopping = false;
     start_round(inout b);
     b.bbr_state = BbrState::ProbeBwRefill;
-    b.pacing_gain = UNIT_PACING_GAIN;
-    b.cwnd_gain = DEFAULT_CWND_GAIN;
+    b.pacing_gain = Gain::UnitPacing;
+    b.cwnd_gain = Gain::DefaultCwnd;
 }
 
 fn start_probe_bw_up(inout b: Bbrv3) {
@@ -35,8 +35,8 @@ fn start_probe_bw_up(inout b: Bbrv3) {
     reset_full_bw(inout b);
     b.full_bw = b.rs.delivery_rate;
     b.bbr_state = BbrState::ProbeBwUp;
-    b.pacing_gain = PROBE_UP_PACING_GAIN;
-    b.cwnd_gain = PROBE_UP_CWND_GAIN;
+    b.pacing_gain = Gain::ProbeUpPacing;
+    b.cwnd_gain = Gain::ProbeUpCwnd;
     raise_inflight_longterm_slope(inout b);
 }
 
@@ -79,7 +79,7 @@ fn is_time_to_cruise(inout b: Bbrv3) -> bool {
     if b.inflight > inflight_with_headroom(in b) {
         return false;
     }
-    let target = inflight_with_gain(inout b, UNIT_PACING_GAIN);
+    let target = inflight_with_gain(inout b, Gain::UnitPacing);
     b.inflight <= target
 }
 
@@ -117,8 +117,8 @@ fn is_time_to_probe_bw(inout b: Bbrv3, now_ns: u64) -> bool {
 
 fn pick_probe_wait(inout b: Bbrv3) {
     b.rounds_since_probe_up = splitmix_below(inout b.rng, 2);
-    let wait = splitmix_below(inout b.rng, PROBE_WAIT_DRAWS_NS);
-    b.bw_probe_wait_ns = wrapping_add(PROBE_WAIT_BASE_NS, wait);
+    let wait = splitmix_below(inout b.rng, Nanos::ProbeWaitDraws);
+    b.bw_probe_wait_ns = wrapping_add(Nanos::ProbeWaitBase, wait);
 }
 
 // The draft counts Reno rounds in packets: TargetInflight() is converted
@@ -136,7 +136,7 @@ fn inflight_with_headroom(in b: Bbrv3) -> u64 {
     if b.inflight_longterm == INFINITY {
         return INFINITY;
     }
-    let headroom = max(b.smss, mul_gain(b.inflight_longterm, HEADROOM));
+    let headroom = max(b.smss, mul_gain(b.inflight_longterm, Gain::Headroom));
     max(sat_sub(b.inflight_longterm, headroom), min_pipe_cwnd(in b))
 }
 
@@ -212,7 +212,7 @@ fn handle_inflight_too_high(inout b: Bbrv3, now_ns: u64, is_app_limited: bool, t
     b.prev_probe_too_high = true;
     b.check_probe_loss = false;
     if !is_app_limited {
-        b.inflight_longterm = max(tx_in_flight, mul_gain(target_inflight(in b), BETA));
+        b.inflight_longterm = max(tx_in_flight, mul_gain(target_inflight(in b), Gain::Beta));
     }
     if b.bbr_state == BbrState::ProbeBwUp {
         b.undo_state = Option::Some(BbrState::ProbeBwUp);
@@ -263,9 +263,9 @@ fn restore_cwnd(inout b: Bbrv3) {
 }
 
 fn update_min_rtt(inout b: Bbrv3, now_ns: u64) {
-    b.min_rtt_expired = now_ns > sat_add(b.min_rtt_stamp_ns, MIN_RTT_FILTER_LEN_NS);
+    b.min_rtt_expired = now_ns > sat_add(b.min_rtt_stamp_ns, Nanos::MinRttFilterLen);
     if b.min_rtt_expired {
-        b.probe_rtt_cwnd = bdp_multiple(inout b, PROBE_RTT_CWND_GAIN);
+        b.probe_rtt_cwnd = bdp_multiple(inout b, Gain::ProbeRttCwnd);
     }
     match b.rs.rtt_ns {
         Option::Some(rtt) => {
@@ -300,8 +300,8 @@ fn check_probe_rtt(inout b: Bbrv3, now_ns: u64) {
 
 fn enter_probe_rtt(inout b: Bbrv3) {
     b.bbr_state = BbrState::ProbeRtt;
-    b.pacing_gain = UNIT_PACING_GAIN;
-    b.cwnd_gain = PROBE_RTT_CWND_GAIN;
+    b.pacing_gain = Gain::UnitPacing;
+    b.cwnd_gain = Gain::ProbeRttCwnd;
 }
 
 fn handle_probe_rtt(inout b: Bbrv3, now_ns: u64) {
@@ -319,7 +319,7 @@ fn handle_probe_rtt(inout b: Bbrv3, now_ns: u64) {
         false
     };
     if drained {
-        b.probe_rtt_done_stamp_ns = Option::Some(sat_add(now_ns, PROBE_RTT_DURATION_NS));
+        b.probe_rtt_done_stamp_ns = Option::Some(sat_add(now_ns, Nanos::ProbeRttDuration));
         b.probe_rtt_round_done = false;
         start_round(inout b);
     } else if !pending {

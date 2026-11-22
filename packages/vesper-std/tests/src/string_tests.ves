@@ -21,7 +21,7 @@ test {
         parse_error_i64
     };
 
-    pub fn test_fmt_string() -> u64 {
+    pub fn check_fmt_string() -> u64 {
         let mut r: u64 = 0;
         let a = u64_to_string(123);
         r = check(a == "123", 1, r);

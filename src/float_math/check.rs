@@ -133,6 +133,10 @@ impl Checker<'_> {
         let exact = if let Some(from) = FloatKind::from_type(&t) {
             crate::numeric::float::float_widens_to(from, to)
         } else if let Some(k) = IntegerKind::from_type(&t) {
+            if k.wide() {
+                self.wide_float_refusal(name, a.expr.span.clone());
+                return to.ty();
+            }
             to.holds(k)
         } else {
             if t != Type::Infer {
@@ -167,6 +171,9 @@ impl Checker<'_> {
         span: Span,
     ) -> Type {
         self.by_value_operands(name, types, args, 1, &span);
+        if to.wide() {
+            self.wide_float_refusal(name, span.clone());
+        }
         if let Some(a) = args.first() {
             let t = self.expr_expected(&a.expr, env, Usage::Own, &Type::Infer);
             if FloatKind::from_type(&t).is_none() && t != Type::Infer {
@@ -178,6 +185,15 @@ impl Checker<'_> {
             }
         }
         to.ty()
+    }
+    /// Float conversions do not take or produce `i128`/`u128` yet (SH2
+    /// lane 2, #1174).
+    pub(super) fn wide_float_refusal(&mut self, name: &str, span: Span) {
+        self.error(
+            "E0200",
+            format!("'{name}' does not convert 128-bit integers yet; convert a 64-bit half"),
+            span,
+        );
     }
     /// `to_bits_f(x)` and `from_bits_f(n)`: exact reinterpretation.
     pub(super) fn bits_call(
@@ -214,7 +230,9 @@ impl Checker<'_> {
         env: &mut Env,
         span: Span,
     ) {
-        if conversion == crate::numeric::Conversion::Narrow {
+        if crate::numeric::is_wide_name(&name[conversion.prefix().len()..]) {
+            self.wide_float_refusal(name, span);
+        } else if conversion == crate::numeric::Conversion::Narrow {
             self.overflow_failure(env, span);
         } else {
             let to = &name[conversion.prefix().len()..];

@@ -9,7 +9,7 @@ pub fn pacing_delay_ns(bytes: u32, rate_bytes_per_sec: u64) -> u64 {
     if rate_bytes_per_sec == 0 {
         return INFINITY;
     }
-    let numerator = wrapping_mul(widen_u64(bytes), NANOS_PER_SEC);
+    let numerator = wrapping_mul(widen_u64(bytes), Nanos::PerSec);
     let q = div(numerator, rate_bytes_per_sec);
     if wrapping_mul(q, rate_bytes_per_sec) == numerator {
         q
@@ -133,10 +133,10 @@ pub fn cycle_max_advance(inout f: CycleMax) -> u64 {
 
 // SplitMix64: the next 64-bit output.
 pub fn splitmix_next(inout seed: u64) -> u64 {
-    seed = wrapping_add(seed, SPLITMIX_GAMMA);
+    seed = wrapping_add(seed, SplitMix::Gamma);
     let mut z = seed;
-    z = wrapping_mul(z ^ (z >> 30), SPLITMIX_MUL_1);
-    z = wrapping_mul(z ^ (z >> 27), SPLITMIX_MUL_2);
+    z = wrapping_mul(z ^ (z >> 30), SplitMix::Mul1);
+    z = wrapping_mul(z ^ (z >> 27), SplitMix::Mul2);
     z ^ (z >> 31)
 }
 

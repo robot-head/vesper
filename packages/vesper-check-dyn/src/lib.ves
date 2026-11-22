@@ -1,0 +1,290 @@
+// @vesper/check-dyn: `src/dyn_fn.rs` and `src/dyn_trait.rs` in Vesper
+// (self-hosting wave SH2, lane 11, #1183). Both are syntactic passes over
+// the surface AST that run before type checking, as in
+// `pact_frontend::check_package_with`:
+//
+// - fnobj.ves (`dyn_fn`): function objects become hidden one-method
+//   traits; closures written where one is expected become hidden structs
+//   and conformances.
+// - dyntrait.ves (`dyn_trait`): `dyn Trait` parameters become hidden
+//   bounded type parameters, with the second-class and object-safety
+//   checks.
+// - core.ves: the state, AST node helpers, types as hash-consed
+//   @vesper/check-data ids, the type walker and `free_names`.
+//
+// The tree is @vesper/ast's (a module parsed by the Vesper front end),
+// names are its interned symbols, types are compared and printed through
+// @vesper/check-data's `Types`. Rust stays the default; nothing here
+// replaces Rust code.
+
+use @vesper/ast::lower::{
+    lower_source
+};
+use @vesper/ast::dump::{
+    dump_ast
+};
+use @vesper/check-data::{
+    pack_text
+};
+use self::core::{
+    D,
+    d_new,
+    w,
+    inc,
+    u32_at,
+    u64_at,
+    u8_at,
+    put,
+    put_u64,
+    put_sym,
+    sym_cmp,
+    sort_syms,
+    display_into
+};
+use self::fnobj::{
+    uses_fn_objects,
+    lower_fn_objects,
+    relocate
+};
+use self::dyntrait::{
+    uses_dyn,
+    lower_dyn
+};
+
+const NONE: u32 = 4294967295;
+
+fn put_bool(inout o: ChunkSeq[u8], b: bool) {
+    if b {
+        o.push(49);
+    } else {
+        o.push(48);
+    }
+}
+
+fn put_diags(inout o: ChunkSeq[u8], in d: D, from: u64) {
+    for i in from..d.diags.len() {
+        let r = d.diags.row(i);
+        put(inout o, in "D ");
+        for j in r.code_a..r.msg_a {
+            o.push(u8_at(in d.diags.text, j));
+        }
+        o.push(32);
+        put_u64(inout o, r.start);
+        o.push(32);
+        put_u64(inout o, r.stop);
+        o.push(32);
+        for j in r.msg_a..r.msg_b {
+            o.push(u8_at(in d.diags.text, j));
+        }
+        o.push(10);
+    }
+}
+
+fn put_span_line(inout o: ChunkSeq[u8], in tag: Str, a: u64, b: u64, c: u64) {
+    put(inout o, in tag);
+    o.push(32);
+    put_u64(inout o, a);
+    o.push(32);
+    put_u64(inout o, b);
+    o.push(32);
+    put_u64(inout o, c);
+    o.push(10);
+}
+
+// The origins table, then `relocate` at probe spans: just below the
+// synthetic range, each origin's first span and the one after it, and the
+// end of the range.
+fn put_origins(inout o: ChunkSeq[u8], in d: D) {
+    let n = d.origins.len() / 3;
+    put(inout o, in "origins ");
+    put_u64(inout o, d.base);
+    o.push(32);
+    put_u64(inout o, d.next_span);
+    o.push(32);
+    put_u64(inout o, n);
+    o.push(10);
+    for i in 0..n {
+        let at = wrapping_mul(i, 3);
+        put_span_line(
+            inout o,
+            in "O",
+            u64_at(in d.origins, at),
+            u64_at(in d.origins, inc(at)),
+            u64_at(in d.origins, wrapping_add(at, 2))
+        );
+    }
+    let mut probes = ChunkSeq::new[u64]();
+    if d.base > 0 {
+        probes.push(wrapping_sub(d.base, 1));
+    }
+    probes.push(d.base);
+    for i in 0..n {
+        let s = u64_at(in d.origins, wrapping_mul(i, 3));
+        probes.push(s);
+        probes.push(inc(s));
+    }
+    probes.push(d.next_span);
+    for i in 0..probes.len() {
+        let p = u64_at(in probes, i);
+        let (a, b) = relocate(in d, p, inc(p));
+        put_span_line(inout o, in "R", p, a, b);
+    }
+}
+
+// The `params` rows in (owner, generic) text order.
+fn put_params(inout o: ChunkSeq[u8], inout d: D) {
+    let mut rows = ChunkSeq::new[u64]();
+    for i in 0..d.p_owner.len() {
+        if u8_at(in d.p_live, i) == 1 {
+            rows.push(i);
+        }
+    }
+    let n = rows.len();
+    for i in 1..n {
+        let x = u64_at(in rows, i);
+        let mut j = i;
+        loop {
+            if j == 0 {
+                break;
+            }
+            let y = u64_at(in rows, wrapping_sub(j, 1));
+            let c = sym_cmp(in d.ast, u32_at(in d.p_owner, y), u32_at(in d.p_owner, x));
+            let c2 = if c != 0 {
+                c
+            } else {
+                sym_cmp(in d.ast, u32_at(in d.p_g, y), u32_at(in d.p_g, x))
+            };
+            if c2 <= 0 {
+                break;
+            }
+            let ok = rows.try_set(j, y);
+            j = wrapping_sub(j, 1);
+        }
+        let ok = rows.try_set(j, x);
+    }
+    for i in 0..n {
+        let r = u64_at(in rows, i);
+        put(inout o, in "P ");
+        put_sym(in d.ast, inout o, u32_at(in d.p_owner, r));
+        o.push(32);
+        put_sym(in d.ast, inout o, u32_at(in d.p_g, r));
+        o.push(32);
+        display_into(inout d, u32_at(in d.p_tr, r), inout o);
+        o.push(10);
+    }
+}
+
+fn put_forwards(inout o: ChunkSeq[u8], in d: D) {
+    let n = d.fwd.len() / 10;
+    for i in 0..n {
+        let at = wrapping_mul(i, 10);
+        put(inout o, in "F ");
+        put_sym(in d.ast, inout o, wrapping_u32(u64_at(in d.fwd, at)));
+        for k in 1..3 {
+            o.push(32);
+            put_u64(inout o, u64_at(in d.fwd, wrapping_add(at, k)));
+        }
+        if u64_at(in d.fwd, wrapping_add(at, 3)) == 1 {
+            put(inout o, in " N ");
+            put_sym(in d.ast, inout o, wrapping_u32(u64_at(in d.fwd, wrapping_add(at, 4))));
+        } else {
+            put(inout o, in " M ");
+            put_u64(inout o, u64_at(in d.fwd, wrapping_add(at, 5)));
+            o.push(32);
+            put_u64(inout o, u64_at(in d.fwd, wrapping_add(at, 6)));
+            o.push(32);
+            put_sym(in d.ast, inout o, wrapping_u32(u64_at(in d.fwd, wrapping_add(at, 4))));
+        }
+        for k in 7..10 {
+            o.push(32);
+            put_u64(inout o, u64_at(in d.fwd, wrapping_add(at, k)));
+        }
+        o.push(10);
+    }
+}
+
+fn put_boxed(inout o: ChunkSeq[u8], inout d: D) {
+    let mut b = ChunkSeq::with_capacity[u32](d.boxed.len());
+    for i in 0..d.boxed.len() {
+        b.push(u32_at(in d.boxed, i));
+    }
+    sort_syms(in d.ast, inout b);
+    for i in 0..b.len() {
+        put(inout o, in "B ");
+        put_sym(in d.ast, inout o, u32_at(in b, i));
+        o.push(10);
+    }
+}
+
+// Runs both passes over a module as `check_package_with` does and writes
+// the outcome: each pass's diagnostics (code, span, message), the origins
+// of generated code and `relocate` probes, `params`, `forwards` and
+// `boxed`, then the canonical dump of the lowered module. With `force`,
+// each pass runs even when its `uses_*` gate says the module needs none
+// (more coverage; the passes do not change such a module).
+fn run(in source: Str, base: u64, force: bool, inout o: ChunkSeq[u8]) {
+    let l = lower_source(in source);
+    let mut d = d_new(l.ast, base);
+    let uses_fn = uses_fn_objects(in d);
+    put(inout o, in "fn uses=");
+    put_bool(inout o, uses_fn);
+    if uses_fn || force {
+        let ok = lower_fn_objects(inout d);
+        put(inout o, in " ok=");
+        put_bool(inout o, ok);
+        o.push(10);
+        put_diags(inout o, in d, 0);
+        if !ok {
+            return;
+        }
+        put_origins(inout o, in d);
+    } else {
+        o.push(10);
+    }
+    let first = d.diags.len();
+    let uses = uses_dyn(inout d);
+    put(inout o, in "dyn uses=");
+    put_bool(inout o, uses);
+    if uses || force {
+        let ok = lower_dyn(inout d);
+        put(inout o, in " ok=");
+        put_bool(inout o, ok);
+        o.push(10);
+        put_diags(inout o, in d, first);
+        if !ok {
+            return;
+        }
+        put_params(inout o, inout d);
+        put_forwards(inout o, in d);
+        put_boxed(inout o, inout d);
+    } else {
+        o.push(10);
+    }
+    dump_ast(in d.ast, inout o);
+}
+
+// The harness entry: `source` with the dyn_fn span base (`serde_json`'s
+// length of the parsed module plus 1,000,000, computed by the caller) and
+// flags (bit 0: force both passes). Returns `pack_text` of the outcome.
+pub fn check_dyn(in source: Str, base: u64, flags: u64) -> ChunkSeq[u64] {
+    let mut o = ChunkSeq::new[u8]();
+    run(in source, base, (flags & 1) == 1, inout o);
+    pack_text(in o)
+}
+
+// Runs both passes and returns a digest of the outcome's length, for
+// benchmarks (no dump, no text).
+pub fn check_dyn_count(in source: Str, base: u64, flags: u64) -> u64 {
+    let l = lower_source(in source);
+    let mut d = d_new(l.ast, base);
+    let force = (flags & 1) == 1;
+    if uses_fn_objects(in d) || force {
+        if !lower_fn_objects(inout d) {
+            return d.diags.len();
+        }
+    }
+    if uses_dyn(inout d) || force {
+        let ok = lower_dyn(inout d);
+    }
+    wrapping_add(wrapping_add(d.diags.len(), d.ast.exprs.len()), d.origins.len())
+}

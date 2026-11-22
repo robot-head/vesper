@@ -1,0 +1,158 @@
+// The output text: serde_json's compact writer for the few shapes the
+// navigation responses use (objects with sorted keys, arrays, unsigned
+// numbers and strings), and the packing the harness reads.
+
+use @vesper/span::{
+    Position,
+    Range
+};
+
+// Byte `i` of `b`, or 0 past its end.
+pub fn byte(in b: Slice[u8], i: u64) -> u8 {
+    match b.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+// Appends the bytes of `s`.
+pub fn put(inout o: ChunkSeq[u8], in s: Str) {
+    put_bytes(inout o, in s.as_bytes());
+}
+
+pub fn put_bytes(inout o: ChunkSeq[u8], in b: Slice[u8]) {
+    for i in 0..b.len() {
+        o.push(byte(in b, i));
+    }
+}
+
+// The decimal digits of `n`.
+pub fn put_u64(inout o: ChunkSeq[u8], n: u64) {
+    if n < 10 {
+        o.push(wrapping_u8(wrapping_add(n, 48)));
+        return;
+    }
+    put_u64(inout o, n / 10);
+    o.push(wrapping_u8(wrapping_add(n % 10, 48)));
+}
+
+pub fn put_i64(inout o: ChunkSeq[u8], n: i64) {
+    if n < 0 {
+        o.push(45);
+        put_u64(inout o, wrapping_sub(0, wrapping_u64(n)));
+    } else {
+        put_u64(inout o, wrapping_u64(n));
+    }
+}
+
+fn hex(d: u8) -> u8 {
+    if d < 10 {
+        wrapping_add(d, 48)
+    } else {
+        wrapping_add(d, 87)
+    }
+}
+
+// A JSON string with serde_json's escapes: `\"`, `\\`, the five short
+// control escapes, `\u00xx` (lowercase) for the other control bytes, and
+// every other byte (DEL and UTF-8 included) as is.
+pub fn put_string(inout o: ChunkSeq[u8], in b: Slice[u8]) {
+    o.push(34);
+    for i in 0..b.len() {
+        let c = byte(in b, i);
+        if c == 34 || c == 92 {
+            o.push(92);
+            o.push(c);
+        } else if c < 32 {
+            o.push(92);
+            if c == 8 {
+                o.push(98);
+            } else if c == 12 {
+                o.push(102);
+            } else if c == 10 {
+                o.push(110);
+            } else if c == 13 {
+                o.push(114);
+            } else if c == 9 {
+                o.push(116);
+            } else {
+                put(inout o, in "u00");
+                o.push(hex(c >> 4));
+                o.push(hex(c & 15));
+            }
+        } else {
+            o.push(c);
+        }
+    }
+    o.push(34);
+}
+
+// `{"character":c,"line":l}`.
+pub fn put_position(inout o: ChunkSeq[u8], p: Position) {
+    put(inout o, in "{\"character\":");
+    put_u64(inout o, widen_u64(p.character));
+    put(inout o, in ",\"line\":");
+    put_u64(inout o, widen_u64(p.line));
+    o.push(125);
+}
+
+// `{"end":..,"start":..}`.
+pub fn put_range(inout o: ChunkSeq[u8], r: Range) {
+    put(inout o, in "{\"end\":");
+    put_position(inout o, r.end);
+    put(inout o, in ",\"start\":");
+    put_position(inout o, r.start);
+    o.push(125);
+}
+
+// The packing the harness reads (`unpack_text`): the byte length, then the
+// bytes eight per word, little-endian.
+pub fn pack(in b: Slice[u8]) -> ChunkSeq[u64] {
+    let n = b.len();
+    let mut out = ChunkSeq::with_capacity[u64](wrapping_add(n >> 3, 2));
+    out.push(n);
+    let mut w: u64 = 0;
+    let mut k: u32 = 0;
+    for i in 0..n {
+        w = w | wrapping_shl_u64(widen_u64(byte(in b, i)), wrapping_mul(k, 8));
+        k = wrapping_add(k, 1);
+        if k == 8 {
+            out.push(w);
+            w = 0;
+            k = 0;
+        }
+    }
+    if k != 0 {
+        out.push(w);
+    }
+    out
+}
+
+test {
+    // @case plain(in "abc", in "\"abc\"")
+    // @case quote(in "a\"b", in "\"a\\\"b\"")
+    // @case newline(in "a\nb", in "\"a\\nb\"")
+    // @case tab(in "a\tb", in "\"a\\tb\"")
+    fn test_string_escapes(in s: Str, in want: Str) -> bool {
+        let mut o = ChunkSeq::new[u8]();
+        put_string(inout o, in s.as_bytes());
+        let w = want.as_bytes();
+        if o.len() != w.len() {
+            return false;
+        }
+        for i in 0..w.len() {
+            if o.try_get(i) != w.try_get(i) {
+                return false;
+            }
+        }
+        true
+    }
+
+    // @case zero(0, 1)
+    // @case big(18446744073709551615, 20)
+    fn test_decimal_length(n: u64, len: u64) -> bool {
+        let mut o = ChunkSeq::new[u8]();
+        put_u64(inout o, n);
+        o.len() == len
+    }
+}

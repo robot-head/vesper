@@ -249,6 +249,12 @@ pub fn compile_world(
     source: Option<&str>,
     options: &Options,
 ) -> Result<Compiled, EbpfBackendError> {
+    // SH4 swap point (#1275): the `ebpf` hook may compile the program.
+    if let Some(hook) = crate::codegen_swap::installed().ebpf
+        && let Some(r) = hook(world, source, options)
+    {
+        return r;
+    }
     let ir = crate::ir::lower_world(world);
     let surface = surface::Surface::analyze(world, &ir, &options.entry)?;
     let lowered = lower::lower(world, &ir, &surface, source, options)?;

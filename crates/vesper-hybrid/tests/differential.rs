@@ -8,8 +8,9 @@
 //! `VESPER_PORT_COMPILER` (CI builds it once), else the in-tree one built by
 //! `cargo build -p vesper --bin vesper` into this build's target directory.
 //!
-//! Under the `divergent` (or `divergent-parse`) feature the hybrid's pilot
-//! (or parse) module is deliberately wrong (build.rs), and the harness must
+//! Under the `divergent` (or `divergent-parse`, `divergent-ir-check`,
+//! `divergent-ir-inline`, `divergent-ir-opt`) feature the hybrid's layout
+//! (or parse, IR-check, inliner, IR optimizer) module is deliberately wrong (build.rs), and the harness must
 //! report differences instead: that is the proof it can fail.
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -215,7 +216,13 @@ fn hybrid_matches_the_default_compiler() {
         h.as_secs_f64() / d.as_secs_f64(),
         mismatches.len()
     );
-    if cfg!(any(feature = "divergent", feature = "divergent-parse")) {
+    if cfg!(any(
+        feature = "divergent",
+        feature = "divergent-parse",
+        feature = "divergent-ir-check",
+        feature = "divergent-ir-inline",
+        feature = "divergent-ir-opt"
+    )) {
         assert!(
             !mismatches.is_empty(),
             "the divergent hybrid build agreed with the default compiler on every run: \
@@ -249,13 +256,12 @@ fn pilot_module_runs_from_vesper() {
     let _ = std::fs::remove_file(&out);
     assert!(output.status.success(), "{output:?}");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let calls: u64 = stderr
+    let calls: Option<u64> = stderr
         .lines()
         .find_map(|l| l.strip_prefix("vesper-hybrid: layout answered "))
         .and_then(|l| l.split(' ').next())
-        .and_then(|n| n.parse().ok())
-        .unwrap_or_else(|| panic!("no layout report in {stderr:?}"));
-    assert!(calls > 0, "the Vesper layout module answered no calls");
+        .and_then(|n| n.parse().ok());
+    assert!(calls.is_some(), "no layout report in {stderr:?}");
     let parses: u64 = stderr
         .lines()
         .find_map(|l| l.strip_prefix("vesper-hybrid: parse answered "))
@@ -263,4 +269,30 @@ fn pilot_module_runs_from_vesper() {
         .and_then(|n| n.parse().ok())
         .unwrap_or_else(|| panic!("no parse report in {stderr:?}"));
     assert!(parses > 0, "the Vesper parse module answered no calls");
+    // SH2 lane 5 (#1177): the whole layout and the IR check. With the whole
+    // layout swapped, the pilot's word arithmetic runs only under the Rust
+    // fallback, so its count may be 0 here (tests/kernel.rs still checks it).
+    // SH3 lane 11 (#1250): the inliner, on the optimized object. SH3 lane 9
+    // (#1248): the IR optimizer, on the same object.
+    for module in ["check-layout", "ir-check", "ir-inline", "ir-opt"] {
+        let prefix = format!("vesper-hybrid: {module} answered ");
+        let calls: u64 = stderr
+            .lines()
+            .find_map(|l| l.strip_prefix(prefix.as_str()))
+            .and_then(|l| l.split(' ').next())
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_else(|| panic!("no {module} report in {stderr:?}"));
+        assert!(calls > 0, "the Vesper {module} module answered no calls");
+    }
+    // SH3 lane 12 (#1251): the `hoist` hook hoists every native program.
+    let hoisted: u64 = stderr
+        .lines()
+        .find_map(|l| l.strip_prefix("vesper-hybrid: bounds-hoist hoisted "))
+        .and_then(|l| l.split(' ').next())
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| panic!("no bounds-hoist report in {stderr:?}"));
+    assert!(
+        hoisted > 0,
+        "the Vesper bounds-hoist module hoisted no program"
+    );
 }

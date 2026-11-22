@@ -12,6 +12,19 @@ use self::wide::{
     w_zero
 };
 
+// `gb`'s past-the-end value: above every byte.
+pub const NO_BYTE: u64 = 256;
+// Basis points per whole (10000 bp = 100%).
+pub const BP_SCALE: u64 = 10000;
+// Pairs or samples the exact signed-rank, Walsh, Hodges-Lehmann and
+// paired-difference routines accept (MAX_SIGNED_RANK_PAIRS and friends).
+pub const MAX_PAIRS: u64 = 32;
+// Epochs (and layouts) one analysis folds (MAX_EPOCHS, MAX_LAYOUT_RUNS).
+pub const MAX_EPOCHS: u64 = 64;
+// The largest i64 and the magnitude of the smallest, as u64.
+pub const I64_MAX: u64 = 9223372036854775807;
+pub const I64_MIN_MAGNITUDE: u64 = 9223372036854775808;
+
 pub fn gi(in s: Slice[i64], i: u64) -> i64 {
     match s.try_get(i) {
         Option::Some(x) => x,
@@ -29,7 +42,7 @@ pub fn gu(in s: Slice[u64], i: u64) -> u64 {
 pub fn gb(in s: Slice[u8], i: u64) -> u64 {
     match s.try_get(i) {
         Option::Some(x) => widen_u64(x),
-        Option::None => 256,
+        Option::None => NO_BYTE,
     }
 }
 

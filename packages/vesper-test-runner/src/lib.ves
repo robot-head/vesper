@@ -1,0 +1,46 @@
+// @vesper/test-runner: the test runner of `vesper test` in Vesper
+// (self-hosting wave SH5 lane 14, #1337). Part 1 is discovery: the
+// `// @case` rows of a source and their wrapper functions, the
+// `@test`/`@test_case` attributes (crates/vesper-syntax/src/test_attrs.rs,
+// over @vesper/front's lexer), which functions are tests, and each test's
+// Anvil harness plan (`classify` of crates/vesper-test). Execution (the JIT,
+// the evaluator and SimPulse) stays in Rust.
+//
+// Rust stays the default: src/test_discovery.rs is the swap point, the
+// hybrid Stage 2 build installs this package there, and
+// tests/self_host_test_runner.rs runs both on the repository's corpus.
+//
+// - util.ves: bytes, text and the input/result words.
+// - big.ves: the `i128` of integer attribute values.
+// - attrs.ves: `extract_test_attrs`.
+// - discover.ves: `case_rows`, `discover` and `classify`.
+
+use self::discover::{
+    case_rows,
+    discover
+};
+
+// The word format of the entries; tests/common/test_runner_words.rs
+// checks it.
+pub fn format() -> u64 {
+    1
+}
+
+// `test_discovery::case_rows` over the input words.
+pub fn case_rows_words(in input: Slice[u8]) -> ChunkSeq[u64] {
+    case_rows(in input)
+}
+
+// `test_discovery::discover` over the input words.
+pub fn discover_words(in input: Slice[u8]) -> ChunkSeq[u64] {
+    discover(in input)
+}
+
+// The same entries taking `in Str`, for the JIT harness.
+pub fn case_rows_str(in input: Str) -> ChunkSeq[u64] {
+    case_rows(in input.as_bytes())
+}
+
+pub fn discover_str(in input: Str) -> ChunkSeq[u64] {
+    discover(in input.as_bytes())
+}

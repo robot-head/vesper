@@ -74,6 +74,114 @@ crate.annotation(
     gen_build_script = "off",
     rustc_env = {"DEBUG_OUTPUT_DIR": "wasmtime-component-macro-debug"},
 )
+# Optimize the e-graph engines and Cranelift in every build (#1376). In
+# fastbuild they ran unoptimized, and the self-host differentials spent most
+# of Test all targets JIT-compiling the Vesper ports through them. The last
+# opt-level flag wins, and these come after the compilation mode's. Keep the
+# list in step with [profile.dev.package] in Cargo.toml.
+#
+# Debug assertions and overflow checks stay on, as in Cargo's dev profile:
+# rustc turns them off with opt-level 2 otherwise, and the Cranelift shim's
+# pilot relies on Cranelift's debug assertions to report invalid arguments.
+OPTIMIZED_DEP_FLAGS = [
+    "-Copt-level=2",
+    "-Cdebug-assertions=on",
+    "-Coverflow-checks=on",
+]
+
+crate.annotation(
+    crate = "cranelift-assembler-x64",
+    rustc_flags = OPTIMIZED_DEP_FLAGS,
+)
+crate.annotation(
+    crate = "cranelift-bforest",
+    rustc_flags = OPTIMIZED_DEP_FLAGS,
+)
+crate.annotation(
+    crate = "cranelift-bitset",
+    rustc_flags = OPTIMIZED_DEP_FLAGS,
+)
+crate.annotation(
+    crate = "cranelift-codegen",
+    rustc_flags = OPTIMIZED_DEP_FLAGS,
+)
+crate.annotation(
+    crate = "cranelift-codegen-shared",
+    rustc_flags = OPTIMIZED_DEP_FLAGS,
+)
+crate.annotation(
+    crate = "cranelift-control",
+    rustc_flags = OPTIMIZED_DEP_FLAGS,
+)
+crate.annotation(
+    crate = "cranelift-entity",
+    rustc_flags = OPTIMIZED_DEP_FLAGS,
+)
+crate.annotation(
+    crate = "cranelift-frontend",
+    rustc_flags = OPTIMIZED_DEP_FLAGS,
+)
+crate.annotation(
+    crate = "cranelift-jit",
+    rustc_flags = OPTIMIZED_DEP_FLAGS,
+)
+crate.annotation(
+    crate = "cranelift-module",
+    rustc_flags = OPTIMIZED_DEP_FLAGS,
+)
+crate.annotation(
+    crate = "cranelift-native",
+    rustc_flags = OPTIMIZED_DEP_FLAGS,
+)
+crate.annotation(
+    crate = "cranelift-object",
+    rustc_flags = OPTIMIZED_DEP_FLAGS,
+)
+crate.annotation(
+    crate = "egg",
+    rustc_flags = OPTIMIZED_DEP_FLAGS,
+)
+crate.annotation(
+    crate = "egglog",
+    rustc_flags = OPTIMIZED_DEP_FLAGS,
+)
+crate.annotation(
+    crate = "egglog-add-primitive",
+    rustc_flags = OPTIMIZED_DEP_FLAGS,
+)
+crate.annotation(
+    crate = "egglog-ast",
+    rustc_flags = OPTIMIZED_DEP_FLAGS,
+)
+crate.annotation(
+    crate = "egglog-bridge",
+    rustc_flags = OPTIMIZED_DEP_FLAGS,
+)
+crate.annotation(
+    crate = "egglog-concurrency",
+    rustc_flags = OPTIMIZED_DEP_FLAGS,
+)
+crate.annotation(
+    crate = "egglog-core-relations",
+    rustc_flags = OPTIMIZED_DEP_FLAGS,
+)
+crate.annotation(
+    crate = "egglog-numeric-id",
+    rustc_flags = OPTIMIZED_DEP_FLAGS,
+)
+crate.annotation(
+    crate = "egglog-reports",
+    rustc_flags = OPTIMIZED_DEP_FLAGS,
+)
+crate.annotation(
+    crate = "egglog-union-find",
+    rustc_flags = OPTIMIZED_DEP_FLAGS,
+)
+crate.annotation(
+    crate = "regalloc2",
+    rustc_flags = OPTIMIZED_DEP_FLAGS,
+)
+
 use_repo(crate, "crates")
 
 use_repo(toolchains, "host_cargo")

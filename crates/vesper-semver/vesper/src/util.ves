@@ -1,6 +1,15 @@
 // Module util of @vesper/semver (see lib.ves): word and byte access, and
 // text output into a byte pool.
 
+// The interface comparison's classification (check.ves `compare_q`, and
+// the input of version.ves `release_q`).
+pub enum Class: _ {
+    Patch,
+    Minor,
+    Major,
+    Unknown
+}
+
 pub fn none() -> u64 {
     18446744073709551615
 }
@@ -72,11 +81,17 @@ pub fn div_rem(v: u64, d: u64) -> (u64, u64) {
     }
 }
 
-// 10^k for k <= 19.
+const DECIMAL_BASE: u64 = 10;
+// u64::MAX has 20 digits: at most 19 after the first.
+const MAX_DIGITS_AFTER_FIRST: u64 = 19;
+const DIGIT_ZERO: u64 = 48;
+const MINUS: u8 = 45;
+
+// 10^k for k <= MAX_DIGITS_AFTER_FIRST.
 fn pow10(k: u64) -> u64 {
     let mut p: u64 = 1;
     for i in 0..k {
-        p = wrapping_mul(p, 10);
+        p = wrapping_mul(p, DECIMAL_BASE);
     }
     p
 }
@@ -84,14 +99,14 @@ fn pow10(k: u64) -> u64 {
 // Append the decimal digits of `x`, by repeated subtraction of powers of
 // ten (no division, so no handler on this hot path).
 pub fn put_u64(inout m: ChunkSeq[u8], x: u64) {
-    if x < 10 {
-        m.push(wrapping_u8(wrapping_add(x, 48)));
+    if x < DECIMAL_BASE {
+        m.push(wrapping_u8(wrapping_add(x, DIGIT_ZERO)));
         return;
     }
     // The number of digits after the first.
     let mut k: u64 = 1;
     loop {
-        if k == 19 || pow10(wrapping_add(k, 1)) > x {
+        if k == MAX_DIGITS_AFTER_FIRST || pow10(wrapping_add(k, 1)) > x {
             break;
         }
         k = wrapping_add(k, 1);
@@ -107,7 +122,7 @@ pub fn put_u64(inout m: ChunkSeq[u8], x: u64) {
             v = wrapping_sub(v, p);
             digit = wrapping_add(digit, 1);
         }
-        m.push(wrapping_u8(wrapping_add(digit, 48)));
+        m.push(wrapping_u8(wrapping_add(digit, DIGIT_ZERO)));
         if k == 0 {
             break;
         }
@@ -118,7 +133,7 @@ pub fn put_u64(inout m: ChunkSeq[u8], x: u64) {
 // Append the decimal form of the i64 whose two's-complement bits are `x`.
 pub fn put_i64(inout m: ChunkSeq[u8], x: u64) {
     if wrapping_i64(x) < 0 {
-        m.push(45);
+        m.push(MINUS);
         // The magnitude, also right for i64::MIN.
         put_u64(inout m, wrapping_sub(0, x));
     } else {

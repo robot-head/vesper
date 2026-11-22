@@ -10,13 +10,15 @@ use self::static_table::{
     static_bytes,
     static_ends
 };
+use self::wire::{
+    ENTRY_OVERHEAD
+};
 
 // 32-bit FNV-1a, folded to one of `buckets()` (256) buckets.
 const FNV_OFFSET_BASIS: u64 = 2166136261;
 const FNV_PRIME: u64 = 16777619;
 const BUCKET_MASK: u64 = 255;
 // RFC 9204 §3.2.1: an entry's size is its name and value lengths plus 32.
-const ENTRY_OVERHEAD: u64 = 32;
 // compact() waits for at least this many evicted slots.
 const COMPACT_MIN_SLOTS: u64 = 16;
 

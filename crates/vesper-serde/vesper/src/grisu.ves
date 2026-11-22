@@ -7,6 +7,24 @@
 // digits are kept as one integer (at most 17 of them), so no sequence is
 // written on the fast path.
 
+// Rust's `flt2dec::strategy::grisu`: the target exponent window and the
+// cached-powers table (`CACHED_POW10`, 81 entries with exponents -1087 to 1039,
+// `k` from -308 in steps of 8).
+const GAMMA: i64 = -32;
+// Minus the first entry's binary exponent (-1087).
+const CACHED_POW10_E_BIAS: i64 = 1087;
+const CACHED_POW10_STEPS: u64 = 80;
+// The exponent span of the table, 1039 - (-1087).
+const CACHED_POW10_E_SPAN: u64 = 2126;
+// Minus the first entry's decimal exponent k (-308).
+const CACHED_POW10_K_BIAS: i64 = 308;
+const CACHED_POW10_K_STEP: i64 = 8;
+// `flt2dec::MAX_SIG_DIGITS`.
+const MAX_SIG_DIGITS: u64 = 17;
+const DECIMAL_BASE: u64 = 10;
+// `Fp` significands are 64 bits.
+const FP_BITS: i64 = 64;
+
 // Shortest digits `d1 d2 ... dn` (as the integer `digits`) of a value
 // `0.d1 d2 ... dn * 10^k`.
 pub copy struct Digits {
@@ -264,14 +282,21 @@ pub fn grisu_shortest(mant: u64, minus: u64, plus: u64, exp: i64) -> Digits {
     let minus_f = bit_shl(wrapping_sub(mant, minus), s);
     let v_f = bit_shl(mant, s);
     // `cached_power(ALPHA - plus.e - 64, GAMMA - plus.e - 64)`.
-    let gamma = wrapping_sub(wrapping_sub(-32, plus_e), 64);
-    let idx = wrapping_mul(wrapping_u64(wrapping_add(gamma, 1087)), 80) / 2126;
+    let gamma = wrapping_sub(wrapping_sub(GAMMA, plus_e), FP_BITS);
+    let idx = wrapping_mul(
+        wrapping_u64(wrapping_add(gamma, CACHED_POW10_E_BIAS)),
+        CACHED_POW10_STEPS
+    )
+        / CACHED_POW10_E_SPAN;
     let (cf, ce) = cached_pow10(idx);
-    let minusk = wrapping_sub(wrapping_mul(8, wrapping_i64(idx)), 308);
+    let minusk = wrapping_sub(
+        wrapping_mul(CACHED_POW10_K_STEP, wrapping_i64(idx)),
+        CACHED_POW10_K_BIAS
+    );
     let plus_m = fp_mul(plus_f, cf);
     let minus_m = fp_mul(minus_f, cf);
     let v_m = fp_mul(v_f, cf);
-    let e = wrapping_u64(wrapping_sub(0, wrapping_add(wrapping_add(plus_e, ce), 64)));
+    let e = wrapping_u64(wrapping_sub(0, wrapping_add(wrapping_add(plus_e, ce), FP_BITS)));
     let plus1 = wrapping_add(plus_m, 1);
     let minus1 = wrapping_sub(minus_m, 1);
     let mask = wrapping_sub(bit_shl(1, e), 1);
@@ -290,7 +315,7 @@ pub fn grisu_shortest(mant: u64, minus: u64, plus: u64, exp: i64) -> Digits {
     let mut remainder = plus1int;
     loop {
         let (q, r) = div_pow10(remainder, kappa);
-        digits = wrapping_add(wrapping_mul(digits, 10), q);
+        digits = wrapping_add(wrapping_mul(digits, DECIMAL_BASE), q);
         i = wrapping_add(i, 1);
         let plus1rem = wrapping_add(bit_shl(r, e), plus1frac);
         if plus1rem < delta1 {
@@ -300,7 +325,7 @@ pub fn grisu_shortest(mant: u64, minus: u64, plus: u64, exp: i64) -> Digits {
             break;
         }
         kappa = wrapping_sub(kappa, 1);
-        ten_kappa = ten_kappa / 10;
+        ten_kappa = ten_kappa / DECIMAL_BASE;
         remainder = r;
     }
     // The fractional part, scaled by ten per digit.
@@ -308,12 +333,12 @@ pub fn grisu_shortest(mant: u64, minus: u64, plus: u64, exp: i64) -> Digits {
     let mut threshold = delta1frac;
     let mut ulp: u64 = 1;
     loop {
-        remainder = wrapping_mul(remainder, 10);
-        threshold = wrapping_mul(threshold, 10);
-        ulp = wrapping_mul(ulp, 10);
+        remainder = wrapping_mul(remainder, DECIMAL_BASE);
+        threshold = wrapping_mul(threshold, DECIMAL_BASE);
+        ulp = wrapping_mul(ulp, DECIMAL_BASE);
         let q = bit_shr(remainder, e);
         let r = remainder & mask;
-        digits = wrapping_add(wrapping_mul(digits, 10), q);
+        digits = wrapping_add(wrapping_mul(digits, DECIMAL_BASE), q);
         i = wrapping_add(i, 1);
         if r < threshold {
             return round_and_weed(
@@ -327,7 +352,7 @@ pub fn grisu_shortest(mant: u64, minus: u64, plus: u64, exp: i64) -> Digits {
                 ulp
             );
         }
-        if i > 17 {
+        if i > MAX_SIG_DIGITS {
             // Unreachable by Grisu's bounds; never trust more digits.
             return none();
         }

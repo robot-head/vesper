@@ -298,6 +298,28 @@ const CONTEXTUAL_DECL: [&str; 9] = [
     "pub", "use", "trait", "model", "wire", "type", "where", "region", "dim",
 ];
 
+/// Whether a contextual keyword token (`effect`, `handle`, `sink`, `inout`)
+/// is a name: right after `fn`, `.` or `let`, or right before a token that
+/// follows a name (`:`, `(`, `,`, `)`, `.`, `=`, `;`, `}`). Before an
+/// upper-case name, a name or an operand it is the keyword (`effect E`,
+/// `handle E in`, `sink x`, `inout x.{a}`).
+fn contextual_name_at(kind: K, before: Option<K>, after: Option<K>) -> bool {
+    matches!(kind, K::Effect | K::Handle | K::Sink | K::Inout)
+        && (matches!(before, Some(K::Fn | K::Dot | K::Let))
+            || matches!(
+                after,
+                Some(
+                    K::Colon
+                        | K::LParen
+                        | K::Comma
+                        | K::RParen
+                        | K::Dot
+                        | K::Eq
+                        | K::Semi
+                        | K::RBrace
+                )
+            ))
+}
 fn classify(src: &str, toks: &[Tok], token_mode: bool) -> Vec<HighlightSpan> {
     let text = |t: &Tok| &src[t.start..t.end];
     // Indices of significant (non-trivia) tokens and each token's position in it.
@@ -384,7 +406,14 @@ fn classify(src: &str, toks: &[Tok], token_mode: bool) -> Vec<HighlightSpan> {
     let mut projection: Option<usize> = None;
     for (i, t) in toks.iter().enumerate() {
         let mut flag = if t.recovered { flags::RECOVERED } else { 0 };
-        let class = match t.kind {
+        // `effect`, `handle`, `sink` and `inout` used as names (#1244) are
+        // classed as the identifiers they are.
+        let kind = if contextual_name_at(t.kind, prev(i).map(|p| p.kind), next(i).map(|n| n.kind)) {
+            K::Lower
+        } else {
+            t.kind
+        };
+        let class = match kind {
             K::Whitespace => C::Whitespace,
             K::Comment | K::BlockComment => C::CommentTrivia,
             K::Struct

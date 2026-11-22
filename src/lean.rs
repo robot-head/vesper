@@ -1021,6 +1021,88 @@ pub fn extract_report(world: &World) -> Result<Extraction, ExtractError> {
     })
 }
 
+/// What the CFG extractor returns for one function.
+#[doc(hidden)]
+pub type CfgNodes = Option<Result<Vec<Declaration>, String>>;
+/// Per source function (name order), what the CFG extractor
+/// (`lean_ir::extract_function_nodes`) returns for it: `None` when the
+/// structured extractor handles the function instead. `program` is
+/// `ir::lower_world(world)`. Self-hosting SH5
+/// lane 18 compares it with the Vesper port
+/// (tests/self_host_lean_extract.rs).
+#[doc(hidden)]
+pub fn cfg_function_nodes(world: &World, program: &crate::ir::Program) -> Vec<(String, CfgNodes)> {
+    world
+        .functions
+        .values()
+        .filter_map(|f| {
+            let ir = program.functions.get(&f.name)?;
+            Some((
+                f.name.clone(),
+                crate::lean_ir::extract_function_nodes(world, ir),
+            ))
+        })
+        .collect()
+}
+
+/// What the structured extractor returns for one function.
+#[doc(hidden)]
+pub type StructuredNode = Option<Result<Definition, String>>;
+/// Per source function (name order), what the structured extractor
+/// (`Generator::function` over `Id`) returns for it: `None` when the CFG
+/// extractor handles the function, or when it needs the ambient monad
+/// (effects or effectful arrows). `program` is `ir::lower_world(world)`.
+/// Self-hosting SH5 lane 18 (#1341) compares the Vesper port with it; it
+/// adds no behaviour.
+#[doc(hidden)]
+pub fn structured_function_nodes(
+    world: &World,
+    program: &crate::ir::Program,
+) -> Vec<(String, StructuredNode)> {
+    world
+        .functions
+        .values()
+        .filter_map(|f| {
+            let ir = program.functions.get(&f.name)?;
+            if crate::lean_ir::extract_function_nodes(world, ir).is_some() {
+                return Some((f.name.clone(), None));
+            }
+            let polymorphic = effectful_function(f)
+                || effectful_arrow(&f.result)
+                || f.params.iter().any(|p| effectful_arrow(&p.ty));
+            if polymorphic {
+                return Some((f.name.clone(), None));
+            }
+            let mut generator = Generator::new(world, global(&["Id"]));
+            Some((f.name.clone(), Some(generator.function(f))))
+        })
+        .collect()
+}
+
+/// `tiled::resolve_ir_call` as `Generator::call` asks it, for the
+/// differential's encoder (SH5 lane 18, #1341). It adds no behaviour.
+#[doc(hidden)]
+pub fn tiled_route(
+    world: &World,
+    name: &str,
+    receiver: Option<&Expr>,
+    types: &[Type],
+    args: &[Arg],
+    call: &Expr,
+) -> Option<crate::tiled::TiledOp> {
+    crate::tiled::resolve_ir_call(
+        world,
+        &world.types,
+        &BTreeMap::new(),
+        name,
+        receiver,
+        types,
+        args,
+        call,
+    )
+    .map(|(op, _)| op)
+}
+
 /// How the kernel can reason about one source function's extraction.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Totality {
@@ -2522,6 +2604,9 @@ impl Generator<'_> {
             }
             PatternKind::Literal(l) => match l {
                 Literal::Int(n) => LP::Int(*n),
+                Literal::WideInt(_) => {
+                    return Err("Lean extraction does not support 128-bit literal patterns".into());
+                }
                 Literal::Bool(b) => LP::Bool(*b),
                 Literal::String(s) => LP::String(s.clone()),
                 Literal::Float(_) => {

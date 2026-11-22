@@ -347,7 +347,7 @@ fn align8(n: u32) -> Result<u32, String> {
 /// uses), so shadowing locals and local closures add no call edges.
 type References = BTreeSet<(usize, usize, String)>;
 fn function_references(world: &World) -> References {
-    crate::ffi_lowering::drops::lower_world(world)
+    crate::ir_swap::lower(world)
         .functions
         .values()
         .flat_map(|f| {
@@ -852,19 +852,22 @@ fn compile_session_with_linkage<M: Module>(
     optimize: bool,
     linkage: super::DefinitionLinkage,
 ) -> Result<(FuncId, String), String> {
+    // One encode-once swap input per compilation (SH4 lane 2, #1276).
+    let _inputs = crate::swap_input::open(world);
     let instances: InstanceMap = super::instances(world, &plan.entry)?;
-    let mut program = crate::ffi_lowering::drops::lower_world(world);
+    let mut program = crate::ir_swap::lower(world);
     crate::integer_widths::lower_bit_builtin_calls(world, &mut program);
+    super::wide_native::refine_wide_tuples(&mut program);
     if optimize {
-        crate::ir_opt::optimize(world, &mut program)?;
-        crate::ir_inline::inline(world, &mut program, &crate::ir_inline::Budget::default());
+        crate::ir_swap::optimize(world, &mut program)?;
+        crate::ir_swap::inline(world, &mut program, &crate::ir_inline::Budget::default());
     } else {
         crate::ir_opt::fip_reuse_pass(world, &mut program)?;
     }
     crate::fip::elaborate_non_fip_drops(world, &mut program);
     if optimize {
         // Native only, never the verified backend (Stage 1 perf lane 3).
-        crate::bounds_hoist::run(&mut program);
+        crate::ir_swap::hoist(&mut program);
     }
     let ids = super::declare_instances(m, world, &plan.entry, &instances, linkage)?;
     let mut text =
@@ -885,7 +888,7 @@ fn compile_session_with_linkage<M: Module>(
     let mut ctx = m.make_context();
     ctx.func.signature = sig;
     let mut fbctx = FunctionBuilderContext::new();
-    let (context, park) = {
+    let (context, park, wide_divisions) = {
         let mut b = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
         let block = b.create_block();
         b.append_block_params_for_function_params(block);
@@ -925,6 +928,7 @@ fn compile_session_with_linkage<M: Module>(
             local_types: BTreeMap::new(),
             generic_vars: BTreeMap::new(),
             pointers: BTreeMap::new(),
+            narrow_homes: BTreeMap::new(),
             handlers: vec![],
             exits: vec![],
             inline_depth: 0,
@@ -935,6 +939,8 @@ fn compile_session_with_linkage<M: Module>(
             caller_slot: None,
             reuse_slots: BTreeMap::new(),
             register_locals: BTreeSet::new(),
+            bound_params: BTreeSet::new(),
+            scalar_enums: Default::default(),
             split: BTreeMap::new(),
             current_call_slot: None,
             in_fip_fn: world.functions.get(&plan.entry).is_some_and(|f| f.fip),
@@ -949,6 +955,8 @@ fn compile_session_with_linkage<M: Module>(
             result_buffer: None,
             forced_call_vars: None,
             discard_slot: None,
+            element_writebacks: vec![],
+            wide_divisions: vec![],
             session: Some(SessionCodegen {
                 ctx: context,
                 park,
@@ -974,8 +982,9 @@ fn compile_session_with_linkage<M: Module>(
         clif::emit_violation(&mut c.b, violation);
         c.b.seal_all_blocks();
         c.b.finalize();
-        (context, park)
+        (context, park, c.wide_divisions)
     };
+    super::wide_native::fuse_wide_divisions(&mut ctx.func, &wide_divisions);
     linkage.normalize_references(&mut ctx.func);
     check_data_base_freshness(&ctx.func, context, park)?;
     text.push_str(&format!("; {name}\n{}\n", ctx.func.display()));

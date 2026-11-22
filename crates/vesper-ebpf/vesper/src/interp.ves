@@ -4,8 +4,9 @@
 // both builds give the same results, errors and map, ring and context
 // contents.
 //
-// Layout. The environment's persistent state crosses the boundary as four
-// sequences, which a run copies, changes and returns:
+// Layout. The environment's persistent state is four sequences, held in
+// the caller's `Mach` handle between runs (a run moves them in, changes
+// them and moves them back, so nothing is copied across the boundary):
 //
 //   st     next_base, regions, entries, table size, maps, then one count
 //          per map, 3 words per region (base, offset in mem, length), 4
@@ -42,6 +43,7 @@ use self::concrete::{
     endian
 };
 use self::helpers::{
+    Helper,
     allowed
 };
 use self::insn::{
@@ -57,46 +59,27 @@ use self::insn::{
     decode_slots
 };
 use self::program::{
+    MapType,
     ProgramType
 };
 
-// Kernel UAPI values (src/helpers.rs, src/interp.rs, src/verifier.rs).
-// Helper ids, `enum bpf_func_id`.
-const MAP_LOOKUP_ELEM: u64 = 1;
-const MAP_UPDATE_ELEM: u64 = 2;
-const MAP_DELETE_ELEM: u64 = 3;
-const KTIME_GET_NS: u64 = 5;
-const GET_PRANDOM_U32: u64 = 7;
-const GET_SMP_PROCESSOR_ID: u64 = 8;
-const TAIL_CALL: u64 = 12;
-const GET_CURRENT_PID_TGID: u64 = 14;
-const GET_CURRENT_UID_GID: u64 = 15;
-const GET_CURRENT_COMM: u64 = 16;
-const XDP_ADJUST_HEAD: u64 = 44;
-const SK_LOOKUP_TCP: u64 = 84;
-const SK_RELEASE: u64 = 86;
-const RINGBUF_OUTPUT: u64 = 130;
-const RINGBUF_RESERVE: u64 = 131;
-const RINGBUF_SUBMIT: u64 = 132;
-const RINGBUF_DISCARD: u64 = 133;
-const LOOP: u64 = 181;
-
-// `enum bpf_map_type`.
-const BPF_MAP_TYPE_ARRAY: u64 = 2;
-const BPF_MAP_TYPE_PROG_ARRAY: u64 = 3;
-const BPF_MAP_TYPE_PERCPU_ARRAY: u64 = 6;
-const BPF_MAP_TYPE_RINGBUF: u64 = 27;
+// Kernel UAPI values (src/helpers.rs, src/interp.rs, src/verifier.rs); helper
+// ids are `Helper` (helpers.ves) and map types `MapType` (program.ves).
 
 // `bpf_map_update_elem` flags (BPF_ANY is 0).
-const BPF_NOEXIST: u64 = 1;
-const BPF_EXIST: u64 = 2;
+enum UpdateFlag: u64 {
+    NoExist = 1,
+    Exist = 2,
+}
 
 // errno values a helper returns negated.
-const ENOENT: u64 = 2;
-const E2BIG: u64 = 7;
-const EAGAIN: u64 = 11;
-const EEXIST: u64 = 17;
-const EINVAL: u64 = 22;
+enum Errno: u64 {
+    NoEnt = 2,
+    TooBig = 7,
+    Again = 11,
+    Exist = 17,
+    Inval = 22,
+}
 
 // Limits: registers r0..r10, the stack of one frame, call frames,
 // `MAX_TAIL_CALL_CNT` and `BPF_MAX_LOOPS` (1 << 23).
@@ -133,20 +116,24 @@ const SOCK_TUPLE_IPV4: u64 = 12;
 const IRQ_FLAGS: u64 = 582;
 
 // `struct xdp_md` field offsets.
-const XDP_DATA: u64 = 0;
-const XDP_DATA_END: u64 = 4;
-const XDP_INGRESS_IFINDEX: u64 = 12;
-const XDP_RX_QUEUE_INDEX: u64 = 16;
+enum XdpMd: u64 {
+    Data = 0,
+    DataEnd = 4,
+    IngressIfindex = 12,
+    RxQueueIndex = 16,
+}
 const LOOPBACK_IFINDEX: u64 = 1;
 
 // `struct __sk_buff` field offsets.
-const SKB_MARK: u64 = 8;
-const SKB_PRIORITY: u64 = 32;
-const SKB_TC_INDEX: u64 = 44;
-const SKB_CB: u64 = 48;
-const SKB_TC_CLASSID: u64 = 72;
-const SKB_DATA: u64 = 76;
-const SKB_DATA_END: u64 = 80;
+enum SkBuff: u64 {
+    Mark = 8,
+    Priority = 32,
+    TcIndex = 44,
+    Cb = 48,
+    TcClassid = 72,
+    Data = 76,
+    DataEnd = 80,
+}
 // Tracepoint records start with 8 bytes of common fields.
 const TRACE_COMMON_BYTES: u64 = 8;
 
@@ -156,17 +143,21 @@ const FNV_PRIME: u64 = 1099511628211;
 const XORSHIFT64_STAR_MUL: u64 = 2685821657736338717;
 
 // Region kinds (`I.rt` word 0).
-const KIND_CTX: u64 = 0;
-const KIND_PACKET: u64 = 1;
-const KIND_STACK: u64 = 2;
-const KIND_MAP_VALUE: u64 = 3;
-const KIND_RING: u64 = 4;
-const KIND_SOCKET: u64 = 5;
+enum Region: u64 {
+    Ctx = 0,
+    Packet = 1,
+    Stack = 2,
+    MapValue = 3,
+    Ring = 4,
+    Socket = 5,
+}
 
 // Program types as `ptype` carries them.
-const PT_XDP: u64 = 0;
-const PT_SCHED_CLS: u64 = 1;
-const PT_TRACEPOINT: u64 = 2;
+enum PType: u64 {
+    Xdp = 0,
+    SchedCls = 1,
+    Tracepoint = 2,
+}
 
 pub copy struct IErr {
     code: u64,
@@ -182,13 +173,18 @@ pub copy struct Val {
     p: u64
 }
 
-pub struct RunOut {
+// The port's `Env` state, held by the Rust side as a handle between runs:
+// the interpreter itself, whose persistent fields (the map-value regions
+// in `rt`, `mem` and `spill`, the entries, keys, hash table and counts;
+// see the module header) carry over and whose other fields each run resets,
+// whether `i.insns` holds the decoded code of the main program of the last
+// run (`cached`; the caller passes `reuse` for a run of the same slots), and
+// the last run's result words and bytes (see `run_program`).
+pub struct Mach {
+    i: I,
+    cached: bool,
     words: ChunkSeq[u64],
-    bytes: ChunkSeq[u8],
-    st: ChunkSeq[u64],
-    keys: ChunkSeq[u8],
-    mem: ChunkSeq[u8],
-    spill: ChunkSeq[u64]
+    bytes: ChunkSeq[u8]
 }
 
 pub struct I {
@@ -221,6 +217,10 @@ pub struct I {
     tab: ChunkSeq[u64],
     used: u64,
     changed: bool,
+    // A map entry was deleted this run (`changed` without it means entries
+    // were only added, from entry `nent0` on).
+    removed: bool,
+    nent0: u64,
     rlog: ChunkSeq[u64],
     rbytes: ChunkSeq[u8],
     held: ChunkSeq[u64],
@@ -384,11 +384,11 @@ fn jump(pc: u64, off: u64) -> u64 {
 }
 
 fn ptype_of(t: u64) -> ProgramType {
-    if t == PT_XDP {
+    if t == PType::Xdp {
         ProgramType::Xdp
-    } else if t == PT_SCHED_CLS {
+    } else if t == PType::SchedCls {
         ProgramType::SchedCls
-    } else if t == PT_TRACEPOINT {
+    } else if t == PType::Tracepoint {
         ProgramType::Tracepoint
     } else {
         ProgramType::Kprobe
@@ -571,10 +571,10 @@ fn resolve(in i: I, pc: u64, x: Val, off: u64, n: u64) -> u64 eff [Fail[IErr]] {
         access(pc, 3, at, n, len);
     }
     let kind = rt(in i, p, 0);
-    if kind == KIND_PACKET && at < i.data_off {
+    if kind == Region::Packet && at < i.data_off {
         access(pc, 4, 0, 0, 0);
     }
-    if kind == KIND_SOCKET {
+    if kind == Region::Socket {
         access(pc, 5, 0, 0, 0);
     }
     at
@@ -612,29 +612,29 @@ fn pkt_ptr(in i: I, end: bool) -> Val {
 // from the context.
 fn ctx_read(in i: I, pc: u64, at: u64, n: u64) -> Val eff [Fail[IErr]] {
     let t = i.ptype;
-    if t == PT_XDP {
-        if at == XDP_DATA {
+    if t == PType::Xdp {
+        if at == XdpMd::Data {
             return pkt_ptr(in i, false);
         }
-        if at == XDP_DATA_END {
+        if at == XdpMd::DataEnd {
             return pkt_ptr(in i, true);
         }
-        if at == XDP_INGRESS_IFINDEX {
+        if at == XdpMd::IngressIfindex {
             return scalar(LOOPBACK_IFINDEX);
         }
-        if at == XDP_RX_QUEUE_INDEX {
+        if at == XdpMd::RxQueueIndex {
             return scalar(0);
         }
         access(pc, 6, at, n, 0);
     }
-    if t == PT_SCHED_CLS {
-        if at == SKB_DATA && n == 4 {
+    if t == PType::SchedCls {
+        if at == SkBuff::Data && n == 4 {
             return pkt_ptr(in i, false);
         }
-        if at == SKB_DATA_END && n == 4 {
+        if at == SkBuff::DataEnd && n == 4 {
             return pkt_ptr(in i, true);
         }
-        if at < SKB_DATA {
+        if at < SkBuff::Data {
             return Val {
                 v: 0,
                 p: plain()
@@ -642,7 +642,7 @@ fn ctx_read(in i: I, pc: u64, at: u64, n: u64) -> Val eff [Fail[IErr]] {
         }
         access(pc, 6, at, n, 0);
     }
-    if t == PT_TRACEPOINT && at < TRACE_COMMON_BYTES {
+    if t == PType::Tracepoint && at < TRACE_COMMON_BYTES {
         access(pc, 6, at, n, 0);
     }
     Val {
@@ -653,30 +653,30 @@ fn ctx_read(in i: I, pc: u64, at: u64, n: u64) -> Val eff [Fail[IErr]] {
 
 fn skb_writable(at: u64) -> bool {
     at
-        == SKB_MARK
+        == SkBuff::Mark
         || at
-        == SKB_PRIORITY
+        == SkBuff::Priority
         || at
-        == SKB_TC_INDEX
+        == SkBuff::TcIndex
         || at
-        == SKB_CB
+        == SkBuff::Cb
         || at
-        == add(SKB_CB, 4)
+        == add(SkBuff::Cb, 4)
         || at
-        == add(SKB_CB, 8)
+        == add(SkBuff::Cb, 8)
         || at
-        == add(SKB_CB, 12)
+        == add(SkBuff::Cb, 12)
         || at
-        == add(SKB_CB, 16)
+        == add(SkBuff::Cb, 16)
         || at
-        == SKB_TC_CLASSID
+        == SkBuff::TcClassid
 }
 
 fn store(inout i: I, pc: u64, x: Val, off: u64, n: u64, v: Val) eff [Fail[IErr]] {
     let at = resolve(in i, pc, x, off, n);
     let p = x.p;
-    if rt(in i, p, 0) == KIND_CTX {
-        let writable = i.ptype == PT_SCHED_CLS && n == 4 && skb_writable(at) && v.p == none();
+    if rt(in i, p, 0) == Region::Ctx {
+        let writable = i.ptype == PType::SchedCls && n == 4 && skb_writable(at) && v.p == none();
         if !writable {
             access(pc, 7, at, n, 0);
         }
@@ -696,7 +696,7 @@ fn store(inout i: I, pc: u64, x: Val, off: u64, n: u64, v: Val) eff [Fail[IErr]]
 }
 
 fn new_stack(inout i: I) -> Val {
-    let r = alloc(inout i, KIND_STACK, STACK_BYTES, false);
+    let r = alloc(inout i, Region::Stack, STACK_BYTES, false);
     Val {
         v: add(rt(in i, r, 1), STACK_BYTES),
         p: r
@@ -717,7 +717,7 @@ fn mword(in i: I, m: u64, f: u64) -> u64 {
 }
 
 fn is_array_kind(t: u64) -> bool {
-    t == BPF_MAP_TYPE_ARRAY || t == BPF_MAP_TYPE_PERCPU_ARRAY || t == BPF_MAP_TYPE_PROG_ARRAY
+    t == MapType::Array || t == MapType::PercpuArray || t == MapType::ProgArray
 }
 
 fn map_of(in i: I, pc: u64, x: Val) -> u64 eff [Fail[IErr]] {
@@ -851,6 +851,7 @@ fn remove(inout i: I, m: u64, slot: u64) {
     i.tab.try_set(slot, 1);
     i.counts.try_set(m, sub(gw(in i.counts, m), 1));
     i.changed = true;
+    i.removed = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -951,7 +952,7 @@ fn karg(in i: I, pc: u64, a: u64) -> Val eff [Fail[IErr]] {
 fn kslot(in i: I, pc: u64, code: u64) -> u64 eff [Fail[IErr]] {
     let p = karg(in i, pc, 0);
     let at = resolve(in i, pc, p, 0, 8);
-    if rt(in i, p.p, 0) != KIND_STACK {
+    if rt(in i, p.p, 0) != Region::Stack {
         raise(4, pc, 6, code, 0, 0);
     }
     at
@@ -998,10 +999,10 @@ fn call_kfunc(inout i: I, pc: u64, code: u64) -> Val eff [Fail[IErr]] {
         let mut kst: u64 = 0;
         let mut ret: u64 = 0;
         if start > end {
-            ret = neg(EINVAL);
+            ret = neg(Errno::Inval);
         } else if wrapping_i64(sub(wrapping_u64(end), wrapping_u64(start)))
             > wrapping_i64(BPF_MAX_LOOPS) {
-            ret = neg(E2BIG);
+            ret = neg(Errno::TooBig);
         } else {
             kst = pack(sub(wrapping_u64(start), 1), wrapping_u64(end));
         }
@@ -1044,7 +1045,7 @@ fn map_elem(inout i: I, pc: u64, id: u64, a0: Val, a1: Val, a2: Val, a3: Val)
     -> Val eff [Fail[IErr]] {
     let m = map_of(in i, pc, a0);
     let t = mword(in i, m, 0);
-    if t == BPF_MAP_TYPE_RINGBUF {
+    if t == MapType::Ringbuf {
         bad(pc, 8);
     }
     let ks = mword(in i, m, 1);
@@ -1055,7 +1056,7 @@ fn map_elem(inout i: I, pc: u64, id: u64, a0: Val, a1: Val, a2: Val, a3: Val)
     } else {
         sub(gw(in i.tab, slot), 2)
     };
-    if id == MAP_LOOKUP_ELEM {
+    if id == Helper::MapLookupElem {
         if e == none() {
             return scalar(0);
         }
@@ -1065,35 +1066,35 @@ fn map_elem(inout i: I, pc: u64, id: u64, a0: Val, a1: Val, a2: Val, a3: Val)
             p: r
         };
     }
-    if id == MAP_UPDATE_ELEM {
+    if id == Helper::MapUpdateElem {
         let vs = mword(in i, m, 2);
         let val = read_mem(inout i, pc, a2, vs);
         let exists = e != none();
         let flags = a3.v;
-        if flags > BPF_EXIST {
-            return ret_err(EINVAL);
+        if flags > UpdateFlag::Exist {
+            return ret_err(Errno::Inval);
         }
         if is_array_kind(t) {
             if !exists {
-                return ret_err(E2BIG);
+                return ret_err(Errno::TooBig);
             }
-            if flags == BPF_NOEXIST {
-                return ret_err(EEXIST);
+            if flags == UpdateFlag::NoExist {
+                return ret_err(Errno::Exist);
             }
-        } else if flags == BPF_NOEXIST && exists {
-            return ret_err(EEXIST);
-        } else if flags == BPF_EXIST && !exists {
-            return ret_err(ENOENT);
+        } else if flags == UpdateFlag::NoExist && exists {
+            return ret_err(Errno::Exist);
+        } else if flags == UpdateFlag::Exist && !exists {
+            return ret_err(Errno::NoEnt);
         }
         if !exists && gw(in i.counts, m) >= mword(in i, m, 3) {
-            return ret_err(E2BIG);
+            return ret_err(Errno::TooBig);
         }
         if exists {
             let r = gw(in i.ent, add(mul(e, 4), 3));
             i.mem.try_copy_from(rt(in i, r, 2), in val.as_slice());
             return scalar(0);
         }
-        let r = alloc(inout i, KIND_MAP_VALUE, vs, true);
+        let r = alloc(inout i, Region::MapValue, vs, true);
         i.mem.try_copy_from(rt(in i, r, 2), in val.as_slice());
         insert(inout i, m, in key, r);
         return scalar(0);
@@ -1102,7 +1103,7 @@ fn map_elem(inout i: I, pc: u64, id: u64, a0: Val, a1: Val, a2: Val, a3: Val)
         remove(inout i, m, slot);
         return scalar(0);
     }
-    ret_err(ENOENT)
+    ret_err(Errno::NoEnt)
 }
 
 fn take_held(inout i: I, r: u64) -> bool {
@@ -1127,13 +1128,13 @@ fn call_helper(inout i: I, pc: u64, id: u64) -> Val eff [Fail[IErr]] {
     let a1 = peek(in i, 2);
     let a2 = peek(in i, 3);
     let a3 = peek(in i, 4);
-    if id == MAP_LOOKUP_ELEM || id == MAP_UPDATE_ELEM || id == MAP_DELETE_ELEM {
+    if id == Helper::MapLookupElem || id == Helper::MapUpdateElem || id == Helper::MapDeleteElem {
         return map_elem(inout i, pc, id, a0, a1, a2, a3);
     }
-    if id == KTIME_GET_NS {
+    if id == Helper::KtimeGetNs {
         return scalar(gw(in i.cfg, 1));
     }
-    if id == GET_PRANDOM_U32 {
+    if id == Helper::GetPrandomU32 {
         let mut x = i.prandom;
         x = x ^ shr(x, 12);
         x = x ^ shl(x, 25);
@@ -1141,10 +1142,10 @@ fn call_helper(inout i: I, pc: u64, id: u64) -> Val eff [Fail[IErr]] {
         i.prandom = x;
         return scalar(shr(mul(x, XORSHIFT64_STAR_MUL), 32) & low32());
     }
-    if id == GET_SMP_PROCESSOR_ID {
+    if id == Helper::GetSmpProcessorId {
         return scalar(gw(in i.cfg, 0));
     }
-    if id == XDP_ADJUST_HEAD {
+    if id == Helper::XdpAdjustHead {
         let delta = sext_const(a1.v & low32(), 32);
         if i.pkt == none() {
             bad(pc, 9);
@@ -1152,22 +1153,22 @@ fn call_helper(inout i: I, pc: u64, id: u64) -> Val eff [Fail[IErr]] {
         let len = rt(in i, i.pkt, 3);
         let nw = add(i.data_off, delta);
         if wrapping_i64(nw) < 0 || wrapping_i64(sub(len, nw)) < wrapping_i64(ETH_HLEN) {
-            return ret_err(EINVAL);
+            return ret_err(Errno::Inval);
         }
         i.data_off = nw;
         return scalar(0);
     }
-    if id == RINGBUF_RESERVE {
+    if id == Helper::RingbufReserve {
         let m = map_of(in i, pc, a0);
         let size = a1.v;
-        if mword(in i, m, 0) != BPF_MAP_TYPE_RINGBUF {
+        if mword(in i, m, 0) != MapType::Ringbuf {
             bad(pc, 10);
         }
         let res = reserve(inout i, m, size);
         if res.v == none() {
             return scalar(0);
         }
-        let r = alloc(inout i, KIND_RING, size, true);
+        let r = alloc(inout i, Region::Ring, size, true);
         set_rt(inout i, r, 5, m);
         set_rt(inout i, r, 6, res.p);
         set_rt(inout i, r, 7, res.v);
@@ -1177,7 +1178,7 @@ fn call_helper(inout i: I, pc: u64, id: u64) -> Val eff [Fail[IErr]] {
             p: r
         };
     }
-    if id == RINGBUF_SUBMIT || id == RINGBUF_DISCARD {
+    if id == Helper::RingbufSubmit || id == Helper::RingbufDiscard {
         let r = a0.p;
         if r == none() {
             bad(pc, 11);
@@ -1195,7 +1196,7 @@ fn call_helper(inout i: I, pc: u64, id: u64) -> Val eff [Fail[IErr]] {
             bad(pc, 13);
         }
         take_held(inout i, r);
-        if rt(in i, r, 0) != KIND_RING {
+        if rt(in i, r, 0) != Region::Ring {
             bad(pc, 11);
         }
         let m = rt(in i, r, 5);
@@ -1205,26 +1206,26 @@ fn call_helper(inout i: I, pc: u64, id: u64) -> Val eff [Fail[IErr]] {
         let pay_at = rt(in i, r, 6);
         let hdr_at = rt(in i, r, 7);
         ring_log(inout i, m, pay_at, in payload);
-        commit(inout i, m, hdr_at, id == RINGBUF_DISCARD);
+        commit(inout i, m, hdr_at, id == Helper::RingbufDiscard);
         set_rt(inout i, r, 4, 0);
         return scalar(0);
     }
-    if id == RINGBUF_OUTPUT {
+    if id == Helper::RingbufOutput {
         let m = map_of(in i, pc, a0);
         let size = a2.v;
         let bytes = read_mem(inout i, pc, a1, size);
-        if mword(in i, m, 0) != BPF_MAP_TYPE_RINGBUF {
+        if mword(in i, m, 0) != MapType::Ringbuf {
             bad(pc, 14);
         }
         let res = reserve(inout i, m, size);
         if res.v == none() {
-            return ret_err(EAGAIN);
+            return ret_err(Errno::Again);
         }
         ring_log(inout i, m, res.p, in bytes);
         commit(inout i, m, res.v, false);
         return scalar(0);
     }
-    if id == SK_LOOKUP_TCP {
+    if id == Helper::SkLookupTcp {
         let size = a2.v;
         let tuple = read_mem(inout i, pc, a1, size);
         if size != SOCK_TUPLE_IPV4 {
@@ -1249,14 +1250,14 @@ fn call_helper(inout i: I, pc: u64, id: u64) -> Val eff [Fail[IErr]] {
         if !hit {
             return scalar(0);
         }
-        let r = alloc(inout i, KIND_SOCKET, 8, true);
+        let r = alloc(inout i, Region::Socket, 8, true);
         i.held.push(r);
         return Val {
             v: rt(in i, r, 1),
             p: r
         };
     }
-    if id == SK_RELEASE {
+    if id == Helper::SkRelease {
         let r = a0.p;
         if r == none() {
             bad(pc, 15);
@@ -1267,13 +1268,13 @@ fn call_helper(inout i: I, pc: u64, id: u64) -> Val eff [Fail[IErr]] {
         set_rt(inout i, r, 4, 0);
         return scalar(0);
     }
-    if id == GET_CURRENT_PID_TGID {
+    if id == Helper::GetCurrentPidTgid {
         return scalar(shl(gw(in i.cfg, 5), 32) | gw(in i.cfg, 4));
     }
-    if id == GET_CURRENT_UID_GID {
+    if id == Helper::GetCurrentUidGid {
         return scalar(shl(gw(in i.cfg, 7), 32) | gw(in i.cfg, 6));
     }
-    if id == GET_CURRENT_COMM {
+    if id == Helper::GetCurrentComm {
         let size = a1.v;
         if size == 0 {
             bad(pc, 17);
@@ -1303,7 +1304,7 @@ fn call_helper(inout i: I, pc: u64, id: u64) -> Val eff [Fail[IErr]] {
         };
         let r = a0.p;
         let kind = rt(in i, r, 0);
-        if !(kind == KIND_STACK || kind == KIND_MAP_VALUE || kind == KIND_RING) {
+        if !(kind == Region::Stack || kind == Region::MapValue || kind == Region::Ring) {
             bad(pc, 18);
         }
         let m = add(rt(in i, r, 2), at);
@@ -1635,7 +1636,7 @@ fn exec(
                     v: 0,
                     p: plain()
                 };
-                if rt(in i, p.p, 0) == KIND_CTX {
+                if rt(in i, p.p, 0) == Region::Ctx {
                     v = ctx_read(in i, pc, at, n);
                 }
                 if v.p == plain() {
@@ -1696,7 +1697,7 @@ fn exec(
                 let n = size_bytes(size);
                 let at = resolve(in i, pc, p, off16(off), n);
                 let kind = rt(in i, p.p, 0);
-                if kind == KIND_CTX || kind == KIND_PACKET {
+                if kind == Region::Ctx || kind == Region::Packet {
                     access(pc, 9, 0, 0, 0);
                 }
                 let m = add(rt(in i, p.p, 2), at);
@@ -1794,7 +1795,7 @@ fn exec(
                     },
                     CallTarget::Helper(id) => {
                         let hid = imm_bits(id);
-                        if hid == LOOP {
+                        if hid == Helper::Loop {
                             let n = get(in i, pc, 1).v;
                             let cb = get(in i, pc, 2);
                             let arg = get(in i, pc, 3);
@@ -1802,7 +1803,7 @@ fn exec(
                                 bad(pc, 2);
                             }
                             if n > BPF_MAX_LOOPS {
-                                set(inout i, 0, scalar(neg(E2BIG)));
+                                set(inout i, 0, scalar(neg(Errno::TooBig)));
                                 uninit(inout i, 1, 5);
                             } else if n == 0 {
                                 set(inout i, 0, scalar(0));
@@ -1822,10 +1823,10 @@ fn exec(
                                 set(inout i, 2, arg);
                                 to = entry;
                             }
-                        } else if hid == TAIL_CALL {
+                        } else if hid == Helper::TailCall {
                             let m = map_of(in i, pc, get(in i, pc, 2));
                             let index = get(in i, pc, 3).v & low32();
-                            if mword(in i, m, 0) != BPF_MAP_TYPE_PROG_ARRAY {
+                            if mword(in i, m, 0) != MapType::ProgArray {
                                 bad(pc, 3);
                             }
                             uninit(inout i, 0, 5);
@@ -1951,7 +1952,9 @@ fn exec(
 // ---------------------------------------------------------------------------
 // State in and out.
 
-fn blank(in maps: Slice[u64], in cfg: Slice[u64], ptype: u64) -> I {
+// A machine with no state yet: an interpreter with fresh zero and one
+// buffers and no regions.
+fn new_mach() -> Mach {
     let mut zeros: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](PAGE_SIZE);
     let mut ones: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](PAGE_SIZE);
     let mut z64: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](64);
@@ -1962,7 +1965,7 @@ fn blank(in maps: Slice[u64], in cfg: Slice[u64], ptype: u64) -> I {
         o64.push(1);
         w64s.push(0);
     }
-    // Bulk 64-element extends instead of 8,704 pushes per run.
+    // Bulk 64-element extends instead of 8,704 pushes.
     for k in w64(0)..w64(64) {
         zeros.extend(in z64[0..64]);
         ones.extend(in o64[0..64]);
@@ -1971,66 +1974,106 @@ fn blank(in maps: Slice[u64], in cfg: Slice[u64], ptype: u64) -> I {
     for k in w64(0)..w64(8) {
         zwords.extend(in w64s[0..64]);
     }
-    let mut mw: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    mw.extend(in maps);
-    let mut cw: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    cw.extend(in cfg);
-    let mut rv: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    let mut rp: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    let mut ri: ChunkSeq[bool] = ChunkSeq::new[bool]();
+    let mut rv: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](MAX_BPF_REG);
+    let mut rp: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](MAX_BPF_REG);
+    let mut ri: ChunkSeq[bool] = ChunkSeq::with_capacity[bool](MAX_BPF_REG);
     for r in w64(0)..w64(MAX_BPF_REG) {
         rv.push(0);
         rp.push(none());
         ri.push(false);
     }
-    let nmaps = maps.len() / 7;
-    let mut counts: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    for m in 0..nmaps {
-        counts.push(0);
+    Mach {
+        i: I {
+            insns: ChunkSeq::new[Insn](),
+            start: ChunkSeq::new[bool](),
+            kf: ChunkSeq::new[u64](),
+            cmaps: ChunkSeq::new[u64](),
+            cptype: 0,
+            ptype: 0,
+            rt: ChunkSeq::new[u64](),
+            mem: ChunkSeq::new[u8](),
+            ini: ChunkSeq::new[u8](),
+            spill: ChunkSeq::new[u64](),
+            pbytes: 0,
+            np: 0,
+            ptrans: ChunkSeq::new[u64](),
+            next_base: FIRST_REGION_BASE,
+            pkt: none(),
+            ctx: none(),
+            data_off: HEADROOM,
+            maps: ChunkSeq::new[u64](),
+            nmaps: 0,
+            counts: ChunkSeq::new[u64](),
+            ent: ChunkSeq::new[u64](),
+            keys: ChunkSeq::new[u8](),
+            tab: ChunkSeq::new[u64](),
+            used: 0,
+            changed: false,
+            removed: false,
+            nent0: 0,
+            rlog: ChunkSeq::new[u64](),
+            rbytes: ChunkSeq::new[u8](),
+            held: ChunkSeq::new[u64](),
+            prandom: 0,
+            budget: 0,
+            cfg: ChunkSeq::new[u64](),
+            count: 0,
+            tail_calls: 0,
+            tail_taken: 0,
+            rv: rv,
+            rp: rp,
+            ri: ri,
+            frames: ChunkSeq::new[u64](),
+            zeros: zeros,
+            ones: ones,
+            zwords: zwords
+        },
+        cached: false,
+        words: ChunkSeq::new[u64](),
+        bytes: ChunkSeq::new[u8]()
     }
-    I {
-        insns: ChunkSeq::new[Insn](),
-        start: ChunkSeq::new[bool](),
-        kf: ChunkSeq::new[u64](),
-        cmaps: ChunkSeq::new[u64](),
-        cptype: ptype,
-        ptype: ptype,
-        rt: ChunkSeq::new[u64](),
-        mem: ChunkSeq::new[u8](),
-        ini: ChunkSeq::new[u8](),
-        spill: ChunkSeq::new[u64](),
-        pbytes: 0,
-        np: 0,
-        ptrans: ChunkSeq::new[u64](),
-        next_base: FIRST_REGION_BASE,
-        pkt: none(),
-        ctx: none(),
-        data_off: HEADROOM,
-        maps: mw,
-        nmaps: nmaps,
-        counts: counts,
-        ent: ChunkSeq::new[u64](),
-        keys: ChunkSeq::new[u8](),
-        tab: ChunkSeq::new[u64](),
-        used: 0,
-        changed: false,
-        rlog: ChunkSeq::new[u64](),
-        rbytes: ChunkSeq::new[u8](),
-        held: ChunkSeq::new[u64](),
-        prandom: sw(in cfg, 2),
-        budget: sw(in cfg, 3),
-        cfg: cw,
-        count: 0,
-        tail_calls: 0,
-        tail_taken: 0,
-        rv: rv,
-        rp: rp,
-        ri: ri,
-        frames: ChunkSeq::new[u64](),
-        zeros: zeros,
-        ones: ones,
-        zwords: zwords
+}
+
+// Start a run: every field but the persistent ones (and the cached code)
+// back to its initial value, with this run's maps and configuration, and
+// room for the run's packet, ctx and stack.
+fn reset(inout i: I, in maps: Slice[u64], in cfg: Slice[u64], ptype: u64) {
+    i.kf.clear();
+    i.cmaps.clear();
+    i.cptype = ptype;
+    i.ptype = ptype;
+    i.ini.clear();
+    i.pbytes = i.mem.len();
+    i.ptrans.clear();
+    i.pkt = none();
+    i.ctx = none();
+    i.data_off = HEADROOM;
+    i.maps.clear();
+    i.maps.extend(in maps);
+    i.nmaps = maps.len() / 7;
+    i.changed = false;
+    i.removed = false;
+    i.nent0 = shr(i.ent.len(), 2);
+    i.rlog.clear();
+    i.rbytes.clear();
+    i.held.clear();
+    i.prandom = sw(in cfg, 2);
+    i.budget = sw(in cfg, 3);
+    i.cfg.clear();
+    i.cfg.extend(in cfg);
+    i.count = 0;
+    i.tail_calls = 0;
+    i.tail_taken = 0;
+    for r in w64(0)..w64(MAX_BPF_REG) {
+        i.rv.try_set(r, 0);
+        i.rp.try_set(r, none());
+        i.ri.try_set(r, false);
     }
+    i.frames.clear();
+    i.rt.reserve(add(i.rt.len(), 64));
+    i.mem.reserve(add(i.mem.len(), 8192));
+    i.ini.reserve(8192);
+    i.spill.reserve(add(i.spill.len(), 1024));
 }
 
 fn push_dead(inout i: I) {
@@ -2040,94 +2083,27 @@ fn push_dead(inout i: I) {
     }
 }
 
-// Load `st`, `keys`, `mem` and `spill` (see the module header).
-fn load_state(
-    inout i: I,
-    in st: Slice[u64],
-    in keys: Slice[u8],
-    in mem: Slice[u8],
-    in spill: Slice[u64]
-) {
-    i.next_base = sw(in st, 0);
-    let nreg = sw(in st, 1);
-    let nent = sw(in st, 2);
-    let tabsize = sw(in st, 3);
-    let nmaps = sw(in st, 4);
-    for m in 0..nmaps {
-        i.counts.try_set(m, sw(in st, add(5, m)));
-    }
-    let rb = add(5, nmaps);
-    // One allocation each, with room for this run's packet, ctx and stack.
-    i.rt.reserve(mul(add(nreg, 8), 8));
-    i.mem.reserve(add(mem.len(), 8192));
-    i.ini.reserve(8192);
-    i.spill.reserve(add(spill.len(), 1024));
-    i.keys.reserve(keys.len());
-    for r in 0..nreg {
-        let b = add(rb, mul(r, 3));
-        i
-            .rt
-            .push(
-            if r == 0 {
-                6
-            } else {
-                3
-            }
-        );
-        i.rt.push(sw(in st, b));
-        i.rt.push(sw(in st, add(b, 1)));
-        i.rt.push(sw(in st, add(b, 2)));
-        i
-            .rt
-            .push(
-            if r == 0 {
-                0
-            } else {
-                1
-            }
-        );
-        i.rt.push(0);
-        i.rt.push(0);
-        i.rt.push(0);
-    }
-    let eb = add(rb, mul(nreg, 3));
-    i.ent.extend(in st[eb..add(eb, mul(nent, 4))]);
-    let tb = add(eb, mul(nent, 4));
-    i.tab.extend(in st[tb..add(tb, tabsize)]);
-    let mut used: u64 = 0;
-    for k in 0..tabsize {
-        if sw(in st, add(tb, k)) != 0 {
-            used = add(used, 1);
-        }
-    }
-    i.used = used;
-    i.keys.extend(in keys);
-    i.mem.extend(in mem);
-    i.spill.extend(in spill);
-    i.pbytes = mem.len();
-    i.np = nreg;
-}
-
-// Drop every region but the map values still in a map, renumber those from
-// 1, and write the persistent words.
-fn save(inout i: I) -> ChunkSeq[u64] {
-    let mut regions: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](
-        add(mul(shr(i.rt.len(), 3), 3), 3)
-    );
-    if i.changed {
+// Drop every region but the map values still in a map, renumbering those
+// from 1 when a map changed.
+fn save(inout i: I) {
+    if i.changed && !i.removed {
+        save_appended(inout i);
+    } else if i.changed {
         let nold = shr(i.rt.len(), 3);
         let mut ids: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](nold);
         for r in 0..nold {
             ids.push(none());
         }
-        regions.push(0);
-        regions.push(0);
-        regions.push(0);
+        let n = shr(i.ent.len(), 2);
+        let mut nrt: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](mul(add(n, 1), 8));
+        nrt.push(6);
+        for k in w64(0)..w64(7) {
+            nrt.push(0);
+        }
         let mut mem: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](i.pbytes);
         let mut spill: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](shr(i.pbytes, 3));
         let mut ent: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](i.ent.len());
         let mut keys: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](i.keys.len());
-        let n = shr(i.ent.len(), 2);
         let mut nid: u64 = 1;
         for e in 0..n {
             let b = mul(e, 4);
@@ -2139,9 +2115,14 @@ fn save(inout i: I) -> ChunkSeq[u64] {
                 let noff = mem.len();
                 mem.extend(in i.mem[off..add(off, pl)]);
                 spill.extend(in i.spill[shr(off, 3)..shr(add(off, pl), 3)]);
-                regions.push(rt(in i, r, 1));
-                regions.push(noff);
-                regions.push(rt(in i, r, 3));
+                nrt.push(3);
+                nrt.push(rt(in i, r, 1));
+                nrt.push(noff);
+                nrt.push(rt(in i, r, 3));
+                nrt.push(1);
+                nrt.push(0);
+                nrt.push(0);
+                nrt.push(0);
                 let ko = gw(in i.ent, add(b, 1));
                 let kl = gw(in i.ent, add(b, 2));
                 ent.push(gw(in i.ent, b));
@@ -2167,12 +2148,15 @@ fn save(inout i: I) -> ChunkSeq[u64] {
                 );
             }
         }
+        i.rt = nrt;
+        i.np = nid;
         i.mem = mem;
         i.spill = spill;
         i.ent = ent;
         i.keys = keys;
         rebuild(inout i, sub(nid, 1));
     } else {
+        i.rt.truncate(mul(i.np, 8));
         i.mem.truncate(i.pbytes);
         i.spill.truncate(shr(i.pbytes, 3));
         for k in 0..i.ptrans.len() {
@@ -2181,80 +2165,157 @@ fn save(inout i: I) -> ChunkSeq[u64] {
                 i.spill.try_set(idx, 1);
             }
         }
-        for r in 0..i.np {
-            regions.push(rt(in i, r, 1));
-            regions.push(rt(in i, r, 2));
-            regions.push(rt(in i, r, 3));
-        }
     }
-    let mut st: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](
-        add(add(add(5, i.counts.len()), regions.len()), add(i.ent.len(), i.tab.len()))
-    );
-    st.push(i.next_base);
-    st.push(regions.len() / 3);
-    st.push(shr(i.ent.len(), 2));
-    st.push(i.tab.len());
-    st.push(i.nmaps);
-    st.extend(in i.counts.as_slice());
-    st.extend(in regions.as_slice());
-    st.extend(in i.ent.as_slice());
-    st.extend(in i.tab.as_slice());
-    st
 }
 
-fn take_out(inout i: I, sink words: ChunkSeq[u64], sink bytes: ChunkSeq[u8]) -> RunOut {
-    let st = save(inout i);
-    let mut keys: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    let mut mem: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    let mut spill: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    swap(inout keys, inout i.keys);
-    swap(inout mem, inout i.mem);
-    swap(inout spill, inout i.spill);
-    RunOut {
-        words: words,
-        bytes: bytes,
-        st: st,
-        keys: keys,
-        mem: mem,
-        spill: spill
+// `save` when entries were only added: the persistent regions keep their
+// numbers and bytes (they are the live entries in entry order, as the full
+// renumbering leaves them), and the new entries' values follow them in
+// entry order, which is where the full renumbering would put them.
+fn save_appended(inout i: I) {
+    let n = shr(i.ent.len(), 2);
+    let np = i.np;
+    let nold = shr(i.rt.len(), 3);
+    let mut ids: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](sub(nold, np));
+    for r in np..nold {
+        ids.push(none());
     }
+    let mut nrt: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut vb: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut vs: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut nid = np;
+    for e in i.nent0..n {
+        let b = mul(e, 4);
+        let r = gw(in i.ent, add(b, 3));
+        if r != none() && r >= np {
+            ids.try_set(sub(r, np), nid);
+            let off = rt(in i, r, 2);
+            let pl = pad8(rt(in i, r, 3));
+            nrt.push(3);
+            nrt.push(rt(in i, r, 1));
+            nrt.push(add(i.pbytes, vb.len()));
+            nrt.push(rt(in i, r, 3));
+            nrt.push(1);
+            nrt.push(0);
+            nrt.push(0);
+            nrt.push(0);
+            vb.extend(in i.mem[off..add(off, pl)]);
+            vs.extend(in i.spill[shr(off, 3)..shr(add(off, pl), 3)]);
+            i.ent.try_set(add(b, 3), nid);
+            nid = add(nid, 1);
+        }
+    }
+    for k in 0..vs.len() {
+        let w = gw(in vs, k);
+        if w > np {
+            let t = gw(in ids, sub(sub(w, 1), np));
+            vs
+                .try_set(
+                k,
+                if t == none() {
+                    1
+                } else {
+                    add(t, 1)
+                }
+            );
+        }
+    }
+    i.rt.truncate(mul(np, 8));
+    i.rt.extend(in nrt.as_slice());
+    i.mem.truncate(i.pbytes);
+    i.mem.extend(in vb.as_slice());
+    i.spill.truncate(shr(i.pbytes, 3));
+    // `ptrans` lists a slot once per store, so every new word is computed
+    // from the slots as they were before any is rewritten: a slot stored to
+    // twice is translated once.
+    let mut moved: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](i.ptrans.len());
+    for k in 0..i.ptrans.len() {
+        let w = gw(in i.spill, gw(in i.ptrans, k));
+        if w > np {
+            let t = gw(in ids, sub(sub(w, 1), np));
+            moved
+                .push(
+                if t == none() {
+                    1
+                } else {
+                    add(t, 1)
+                }
+            );
+        } else {
+            moved.push(w);
+        }
+    }
+    for k in 0..i.ptrans.len() {
+        i.spill.try_set(gw(in i.ptrans, k), gw(in moved, k));
+    }
+    i.spill.extend(in vs.as_slice());
+    i.np = nid;
+}
+
+fn copy_words(inout to: ChunkSeq[u64], in from: ChunkSeq[u64]) {
+    to.clear();
+    to.extend(in from.as_slice());
+}
+
+fn copy_bytes(inout to: ChunkSeq[u8], in from: ChunkSeq[u8]) {
+    to.clear();
+    to.extend(in from.as_slice());
+}
+
+// A copy of `m` (`Env::clone`): its persistent state and cached code.
+pub fn clone_mach(in m: Mach) -> Mach {
+    let mut c = new_mach();
+    c.i.insns.extend(in m.i.insns.as_slice());
+    c.i.start.extend(in m.i.start.as_slice());
+    copy_words(inout c.i.rt, in m.i.rt);
+    copy_bytes(inout c.i.mem, in m.i.mem);
+    copy_words(inout c.i.spill, in m.i.spill);
+    copy_words(inout c.i.counts, in m.i.counts);
+    copy_words(inout c.i.ent, in m.i.ent);
+    copy_bytes(inout c.i.keys, in m.i.keys);
+    copy_words(inout c.i.tab, in m.i.tab);
+    c.i.np = m.i.np;
+    c.i.next_base = m.i.next_base;
+    c.i.used = m.i.used;
+    c.cached = m.cached;
+    copy_words(inout c.words, in m.words);
+    copy_bytes(inout c.bytes, in m.bytes);
+    c
 }
 
 // `Env::new`: the state of an environment for maps `maps` (7 words each,
 // as `run_program` takes them), with every array value allocated.
-pub fn new_env(in maps: Slice[u64]) -> RunOut {
+pub fn new_env(in maps: Slice[u64]) -> Mach {
     let cfg: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    let mut i = blank(in maps, in cfg.as_slice(), 0);
-    push_dead(inout i);
-    i.changed = true;
-    for m in 0..i.nmaps {
-        let t = mword(in i, m, 0);
+    let mut m = new_mach();
+    reset(inout m.i, in maps, in cfg.as_slice(), 0);
+    for k in 0..m.i.nmaps {
+        m.i.counts.push(0);
+    }
+    push_dead(inout m.i);
+    m.i.changed = true;
+    m.i.removed = true;
+    for mp in 0..m.i.nmaps {
+        let t = mword(in m.i, mp, 0);
         if is_array_kind(t) && t != 3 {
-            let vs = mword(in i, m, 2);
-            for k in 0..mword(in i, m, 3) {
-                let r = alloc(inout i, KIND_MAP_VALUE, vs, true);
+            let vs = mword(in m.i, mp, 2);
+            for k in 0..mword(in m.i, mp, 3) {
+                let r = alloc(inout m.i, Region::MapValue, vs, true);
                 let key = le32_bytes(k);
-                insert(inout i, m, in key, r);
+                insert(inout m.i, mp, in key, r);
             }
         }
     }
-    take_out(inout i, ChunkSeq::new[u64](), ChunkSeq::new[u8]())
+    save(inout m.i);
+    m
 }
 
-fn short(status: u64, a: u64, b: u64, c: u64) -> RunOut {
-    let mut w: ChunkSeq[u64] = ChunkSeq::new[u64]();
+fn short(inout w: ChunkSeq[u64], status: u64, a: u64, b: u64, c: u64) {
+    w.clear();
     w.push(status);
     w.push(a);
     w.push(b);
     w.push(c);
-    RunOut {
-        words: w,
-        bytes: ChunkSeq::new[u8](),
-        st: ChunkSeq::new[u64](),
-        keys: ChunkSeq::new[u8](),
-        mem: ChunkSeq::new[u8](),
-        spill: ChunkSeq::new[u64]()
-    }
 }
 
 // `run`: execute `slots` once. `input` is 0 XDP, 1 tc, 2 tracepoint, 3
@@ -2270,8 +2331,9 @@ fn short(status: u64, a: u64, b: u64, c: u64) -> RunOut {
 // input), the fault (code, pc, detail, 3 operands), r0, instructions, tail
 // calls, packet and context lengths in the bytes, the prandom state, the
 // producer of every map and the ring log (count, then map, position,
-// length and offset in the bytes after the packet and context). A decode error or a
-// bad input leaves the state as it was and returns no state.
+// length and offset in the bytes after the packet and context), in
+// `m.words`, and the bytes in `m.bytes`. A decode error or a bad input
+// leaves the state as it was.
 pub fn run_program(
     in slots: Slice[RawInsn],
     in kf: Slice[u64],
@@ -2285,33 +2347,84 @@ pub fn run_program(
     in tails: Slice[u64],
     in tslots: Slice[RawInsn],
     in taux: Slice[u64],
-    in st: Slice[u64],
-    in keys: Slice[u8],
-    in mem: Slice[u8],
-    in spill: Slice[u64]
-) -> RunOut {
-    let mut i = blank(in maps, in cfg, ptype);
-    let derr = load_code(inout i, in slots);
-    if derr != none() {
-        return short(2, derr & 15, shr(derr, 12), shr(derr, 4) & 255);
+    reuse: bool,
+    inout m: Mach
+) {
+    reset(inout m.i, in maps, in cfg, ptype);
+    let mut w: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut bytes: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    swap(inout w, inout m.words);
+    swap(inout bytes, inout m.bytes);
+    bytes.clear();
+    // The main program's code from the last run, when the caller says its
+    // slots are the same (it then passes no slots).
+    let same = reuse && m.cached;
+    let mut derr = none();
+    if !same {
+        m.cached = false;
+        derr = load_code(inout m.i, in slots);
     }
+    let mut bad: u64 = 0;
+    let mut blen: u64 = 0;
     if input == 1 && pkt.len() > low32() {
-        return short(3, 3, pkt.len(), 0);
+        bad = 3;
+        blen = pkt.len();
     }
     if input == 2 && ctxb.len() > PERF_MAX_TRACE_SIZE {
-        return short(3, 1, ctxb.len(), 0);
+        bad = 1;
+        blen = ctxb.len();
     }
     let pt = sw(in cfg, 10);
     if input == 3 && (pt == 0 || ctxb.len() != pt) {
-        return short(3, 2, ctxb.len(), 0);
+        bad = 2;
+        blen = ctxb.len();
     }
-    load_state(inout i, in st, in keys, in mem, in spill);
+    if derr != none() {
+        short(inout w, 2, derr & 15, shr(derr, 12), shr(derr, 4) & 255);
+    } else if bad != 0 {
+        short(inout w, 3, bad, blen, 0);
+    } else {
+        run_body(
+            inout m.i,
+            in kf,
+            input,
+            in pkt,
+            in ctxb,
+            nmain,
+            in tails,
+            in tslots,
+            in taux,
+            inout w,
+            inout bytes
+        );
+        // The main program's code stays unless a tail call replaced it.
+        m.cached = m.i.tail_taken == 0;
+    }
+    swap(inout w, inout m.words);
+    swap(inout bytes, inout m.bytes);
+}
+
+// The run itself, after the checks: the result words in `w` and bytes in
+// `bytes`, the state saved.
+fn run_body(
+    inout i: I,
+    in kf: Slice[u64],
+    input: u64,
+    in pkt: Slice[u8],
+    in ctxb: Slice[u8],
+    nmain: u64,
+    in tails: Slice[u64],
+    in tslots: Slice[RawInsn],
+    in taux: Slice[u64],
+    inout w: ChunkSeq[u64],
+    inout bytes: ChunkSeq[u8]
+) {
     i.kf.extend(in kf);
     for m in 0..nmain {
         i.cmaps.push(m);
     }
     if input <= 1 {
-        let r = alloc(inout i, KIND_PACKET, add(HEADROOM, pkt.len()), true);
+        let r = alloc(inout i, Region::Packet, add(HEADROOM, pkt.len()), true);
         i.mem.try_copy_from(add(rt(in i, r, 2), HEADROOM), in pkt);
         i.pkt = r;
     }
@@ -2322,7 +2435,7 @@ pub fn run_program(
     } else {
         ctxb.len()
     };
-    let c = alloc(inout i, KIND_CTX, clen, true);
+    let c = alloc(inout i, Region::Ctx, clen, true);
     if input != 0 {
         i.mem.try_copy_from(rt(in i, c, 2), in ctxb);
     }
@@ -2348,8 +2461,9 @@ pub fn run_program(
         return x => x,
         raise(e, k) => e,
     };
-    let mut w: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](add(add(16, i.nmaps), i.rlog.len()));
-    let mut bytes: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](i.rbytes.len());
+    w.clear();
+    w.reserve(add(add(16, i.nmaps), i.rlog.len()));
+    bytes.reserve(i.rbytes.len());
     w
         .push(
         if res.code == 0 {
@@ -2401,5 +2515,73 @@ pub fn run_program(
         w.push(gw(in i.rlog, add(b, 2)));
         w.push(add(base, gw(in i.rlog, add(b, 3))));
     }
-    take_out(inout i, w, bytes)
+    save(inout i);
+}
+
+// ---------------------------------------------------------------------------
+// The environment's maps, for `Env::map_get` and `Env::map_keys`.
+
+fn mrt(in m: Mach, r: u64, k: u64) -> u64 {
+    gw(in m.i.rt, add(mul(r, 8), k))
+}
+
+// The entry of `key` in map `map`, or NONE.
+fn find_entry(in m: Mach, map: u64, in key: Slice[u8]) -> u64 {
+    let n = shr(m.i.ent.len(), 2);
+    for e in 0..n {
+        let b = mul(e, 4);
+        if gw(in m.i.ent, b) == map && gw(in m.i.ent, add(b, 2)) == key.len() {
+            let ko = gw(in m.i.ent, add(b, 1));
+            let mut same = true;
+            for k in 0..key.len() {
+                let x = match key.try_get(k) {
+                    Option::Some(v) => v,
+                    Option::None => 0,
+                };
+                let y = match m.i.keys.try_get(add(ko, k)) {
+                    Option::Some(v) => v,
+                    Option::None => 0,
+                };
+                if x != y {
+                    same = false;
+                    break;
+                }
+            }
+            if same {
+                return e;
+            }
+        }
+    }
+    none()
+}
+
+pub fn map_has(in m: Mach, map: u64, in key: Slice[u8]) -> bool {
+    find_entry(in m, map, in key) != none()
+}
+
+// The value bytes of `key` in map `map` (empty when absent).
+pub fn map_value(in m: Mach, map: u64, in key: Slice[u8]) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let e = find_entry(in m, map, in key);
+    if e != none() {
+        let r = gw(in m.i.ent, add(mul(e, 4), 3));
+        let off = mrt(in m, r, 2);
+        out.extend(in m.i.mem[off..add(off, mrt(in m, r, 3))]);
+    }
+    out
+}
+
+// The keys of map `map` as (offset, length) pairs in `m.i.keys`, in entry
+// order.
+pub fn map_key_spans(in m: Mach, map: u64) -> ChunkSeq[u64] {
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let n = shr(m.i.ent.len(), 2);
+    for e in 0..n {
+        let b = mul(e, 4);
+        if gw(in m.i.ent, b) == map && gw(in m.i.ent, add(b, 3)) != none() {
+            out.push(gw(in m.i.ent, add(b, 1)));
+            out.push(gw(in m.i.ent, add(b, 2)));
+        }
+    }
+    out
 }

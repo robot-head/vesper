@@ -13,6 +13,12 @@ use self::{
     Snap
 };
 use self::util::{
+    Code,
+    Forbid,
+    Order,
+    Scope,
+    SortKind,
+    UpgradeCode,
     add,
     dep,
     diag,
@@ -35,6 +41,9 @@ use self::check::{
     since
 };
 
+// An edge is a (parent, child, dependency) triple.
+const EDGE_WORDS: u64 = 3;
+
 fn snap(in l: L, i: u64) -> Snap {
     match l.snaps.try_get(i) {
         Option::Some(s) => s,
@@ -56,35 +65,35 @@ fn snap(in l: L, i: u64) -> Snap {
 
 // `{:?}` of `Code`.
 fn put_code(inout l: L, code: u64) {
-    if code == 0 {
+    if code == Code::ManifestSyntax {
         put(inout l, "ManifestSyntax");
-    } else if code == 1 {
+    } else if code == Code::InvalidCapability {
         put(inout l, "InvalidCapability");
-    } else if code == 2 {
+    } else if code == Code::UnsupportedBuildPolicy {
         put(inout l, "UnsupportedBuildPolicy");
-    } else if code == 3 {
+    } else if code == Code::InvalidFeature {
         put(inout l, "InvalidFeature");
-    } else if code == 4 {
+    } else if code == Code::UnknownFeature {
         put(inout l, "UnknownFeature");
-    } else if code == 5 {
+    } else if code == Code::UnknownDependency {
         put(inout l, "UnknownDependency");
-    } else if code == 6 {
+    } else if code == Code::InvalidSystemRequirement {
         put(inout l, "InvalidSystemRequirement");
-    } else if code == 7 {
+    } else if code == Code::DuplicatePackage {
         put(inout l, "DuplicatePackage");
-    } else if code == 8 {
+    } else if code == Code::DuplicateSystemPackage {
         put(inout l, "DuplicateSystemPackage");
-    } else if code == 9 {
+    } else if code == Code::MissingRoot {
         put(inout l, "MissingRoot");
-    } else if code == 10 {
+    } else if code == Code::MissingDependency {
         put(inout l, "MissingDependency");
-    } else if code == 11 {
+    } else if code == Code::MissingSystemPackage {
         put(inout l, "MissingSystemPackage");
-    } else if code == 12 {
+    } else if code == Code::VersionMismatch {
         put(inout l, "VersionMismatch");
-    } else if code == 13 {
+    } else if code == Code::CapabilityEscalation {
         put(inout l, "CapabilityEscalation");
-    } else if code == 14 {
+    } else if code == Code::EdgeCapabilityEscalation {
         put(inout l, "EdgeCapabilityEscalation");
     } else {
         put(inout l, "UnsafeFfiForbidden");
@@ -93,11 +102,11 @@ fn put_code(inout l: L, code: u64) {
 
 // `{:?}` of `AuthorityScope`.
 fn put_scope(inout l: L, scope: u64) {
-    if scope == 0 {
+    if scope == Scope::RequiredCapabilities {
         put(inout l, "RequiredCapabilities");
-    } else if scope == 1 {
+    } else if scope == Scope::CapabilityCeiling {
         put(inout l, "CapabilityCeiling");
-    } else if scope == 2 {
+    } else if scope == Scope::DependencyCeiling {
         put(inout l, "DependencyCeiling");
     } else {
         put(inout l, "UnsafeFfiPolicy");
@@ -139,10 +148,17 @@ fn validation_diagnostics(inout l: L, si: u64, tag: u64) {
         put_range(inout l, d.so, d.sl);
         put(inout l, ": ");
         put_range(inout l, d.mo, d.ml);
-        udiag_at(inout l, 1, d.pkg, none(), tag, mo);
+        udiag_at(inout l, UpgradeCode::InvalidSnapshot, d.pkg, none(), tag, mo);
     }
     if !s.graph && s.diag_n == 0 {
-        udiag(inout l, 1, none(), none(), tag, "snapshot validation produced no graph");
+        udiag(
+            inout l,
+            UpgradeCode::InvalidSnapshot,
+            none(),
+            none(),
+            tag,
+            "snapshot validation produced no graph"
+        );
     }
 }
 
@@ -255,7 +271,7 @@ fn sets(inout l: L, scope: u64, pkg: u64, dep: u64) {
             let c = sw(in l.cids, add(add_at, i));
             put_id(inout l, c);
         }
-        udiag_at(inout l, 0, pkg, dep, 0, mo);
+        udiag_at(inout l, UpgradeCode::CapabilityEscalation, pkg, dep, 0, mo);
     }
     l
         .changes
@@ -272,8 +288,8 @@ fn sets(inout l: L, scope: u64, pkg: u64, dep: u64) {
             add_n: add_n,
             rem_at: rem_at,
             rem_n: rem_n,
-            bf: 0,
-            af: 0,
+            bf: Forbid::Unset,
+            af: Forbid::Unset,
             relaxed: false
         }
     );
@@ -290,7 +306,7 @@ fn node_sets(inout l: L, has_a: bool, in a: GNode, has_b: bool, in b: GNode, nam
     } else {
         l.sb.clear();
     }
-    sets(inout l, 0, name, none());
+    sets(inout l, Scope::RequiredCapabilities, name, none());
     if has_a {
         let m = man(in l, a.man);
         load(inout l, 0, 0, m.ceil_at, m.ceil_n);
@@ -303,7 +319,7 @@ fn node_sets(inout l: L, has_a: bool, in a: GNode, has_b: bool, in b: GNode, nam
     } else {
         l.sb.clear();
     }
-    sets(inout l, 1, name, none());
+    sets(inout l, Scope::CapabilityCeiling, name, none());
     if has_b {
         let old_forbid = if has_a {
             man(in l, a.man).forbid
@@ -318,7 +334,7 @@ fn node_sets(inout l: L, has_a: bool, in a: GNode, has_b: bool, in b: GNode, nam
                 .changes
                 .push(
                 Change {
-                    scope: 3,
+                    scope: Scope::UnsafeFfiPolicy,
                     pkg: name,
                     dep: none(),
                     b_at: at,
@@ -330,14 +346,14 @@ fn node_sets(inout l: L, has_a: bool, in a: GNode, has_b: bool, in b: GNode, nam
                     rem_at: at,
                     rem_n: 0,
                     bf: if old_forbid {
-                        2
+                        Forbid::Forbidden
                     } else {
-                        1
+                        Forbid::Allowed
                     },
                     af: if new_forbid {
-                        2
+                        Forbid::Forbidden
                     } else {
-                        1
+                        Forbid::Allowed
                     },
                     relaxed: relaxed
                 }
@@ -345,7 +361,7 @@ fn node_sets(inout l: L, has_a: bool, in a: GNode, has_b: bool, in b: GNode, nam
             if relaxed {
                 udiag(
                     inout l,
-                    3,
+                    UpgradeCode::UnsafeFfiPolicyRelaxed,
                     name,
                     none(),
                     0,
@@ -393,12 +409,12 @@ fn finish(inout l: L) {
     for i in 0..l.udiags.len() {
         l.idx.push(i);
     }
-    sort(inout l, 4);
+    sort(inout l, SortKind::UpgradeDiagnostics);
     l.work.clear();
     let mut last = none();
     for j in 0..l.idx.len() {
         let x = sw(in l.idx, j);
-        let dup = last != none() && udiag_ord(in l, last, x) == 1;
+        let dup = last != none() && udiag_ord(in l, last, x) == Order::Equal;
         if !dup {
             last = x;
             l.work.push(x);
@@ -413,7 +429,7 @@ fn finish(inout l: L) {
     for i in 0..l.changes.len() {
         l.idx.push(i);
     }
-    sort(inout l, 5);
+    sort(inout l, SortKind::AuthorityChanges);
 }
 
 pub fn upgrade(inout l: L) {
@@ -430,7 +446,7 @@ pub fn upgrade(inout l: L) {
     if !sa.graph || !sb.graph {
         udiag(
             inout l,
-            1,
+            UpgradeCode::InvalidSnapshot,
             none(),
             none(),
             0,
@@ -451,7 +467,7 @@ pub fn upgrade(inout l: L) {
     if !same_roots {
         udiag(
             inout l,
-            2,
+            UpgradeCode::RootMismatch,
             none(),
             none(),
             0,
@@ -469,16 +485,16 @@ pub fn upgrade(inout l: L) {
         let a = gnode(in l, add(sa.node_at, i));
         let b = gnode(in l, add(sb.node_at, j));
         let o = if i >= sa.node_n {
-            2
+            Order::Greater
         } else if j >= sb.node_n {
-            0
+            Order::Less
         } else {
             ord(a.name, b.name)
         };
-        if o == 0 {
+        if o == Order::Less {
             node_sets(inout l, true, in a, false, in b, a.name);
             i = inc(i);
-        } else if o == 2 {
+        } else if o == Order::Greater {
             node_sets(inout l, false, in a, true, in b, b.name);
             j = inc(j);
         } else {
@@ -495,44 +511,44 @@ pub fn upgrade(inout l: L) {
         if i >= na && j >= nb {
             break;
         }
-        let ap = sw(in l.ea, mul(i, 3));
-        let ac = sw(in l.ea, inc(mul(i, 3)));
-        let ad = sw(in l.ea, add(mul(i, 3), 2));
-        let bp = sw(in l.eb, mul(j, 3));
-        let bc = sw(in l.eb, inc(mul(j, 3)));
-        let bd = sw(in l.eb, add(mul(j, 3), 2));
+        let ap = sw(in l.ea, mul(i, EDGE_WORDS));
+        let ac = sw(in l.ea, inc(mul(i, EDGE_WORDS)));
+        let ad = sw(in l.ea, add(mul(i, EDGE_WORDS), 2));
+        let bp = sw(in l.eb, mul(j, EDGE_WORDS));
+        let bc = sw(in l.eb, inc(mul(j, EDGE_WORDS)));
+        let bd = sw(in l.eb, add(mul(j, EDGE_WORDS), 2));
         let o = if i >= na {
-            2
+            Order::Greater
         } else if j >= nb {
-            0
+            Order::Less
         } else {
             let o1 = ord(ap, bp);
-            if o1 != 1 {
+            if o1 != Order::Equal {
                 o1
             } else {
                 ord(ac, bc)
             }
         };
-        if o == 0 || o == 1 {
+        if o == Order::Less || o == Order::Equal {
             let d = dep(in l, ad);
             load(inout l, 0, 0, d.eff_at, d.eff_n);
         } else {
             l.sa.clear();
         }
-        if o == 2 || o == 1 {
+        if o == Order::Greater || o == Order::Equal {
             let d = dep(in l, bd);
             load(inout l, 1, 0, d.eff_at, d.eff_n);
         } else {
             l.sb.clear();
         }
-        if o == 0 {
-            sets(inout l, 2, ap, ac);
+        if o == Order::Less {
+            sets(inout l, Scope::DependencyCeiling, ap, ac);
             i = inc(i);
-        } else if o == 2 {
-            sets(inout l, 2, bp, bc);
+        } else if o == Order::Greater {
+            sets(inout l, Scope::DependencyCeiling, bp, bc);
             j = inc(j);
         } else {
-            sets(inout l, 2, ap, ac);
+            sets(inout l, Scope::DependencyCeiling, ap, ac);
             i = inc(i);
             j = inc(j);
         }

@@ -1,0 +1,18 @@
+// The libc functions the Vulkan runtime uses for memory the C side reads or
+// writes (create-info structs, out arrays, mapped buffers). Addresses are
+// u64 words that never leave the package. `memcpy` copies a Vesper slice to
+// an address and `bcopy` an address into a Vesper slice: a CSlice lowers to
+// (pointer, length), which is the tail of both signatures. Each signature
+// matches the declaration the compiler's runtime already makes of the same
+// symbol (see docs/parallel-results/rust-exit-graphics.md, gap 5).
+sys library LibC (
+    target = "@TARGET@", abi = "@ABI@",
+    link = "dynamic", name = "c",
+    artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+) {
+    fn calloc(count: u64, size: u64) -> ForeignVal[u64];
+    fn free(p: u64) -> ForeignVal[Unit];
+    fn memcpy(dst: u64, nocapture in src: CSlice[u8]) -> ForeignVal[u64];
+    fn bcopy(src: u64, nocapture inout dst: CSlice[u8]) -> ForeignVal[Unit];
+    fn memset(dst: u64, value: i64, n: u64) -> ForeignVal[u64];
+}

@@ -1,0 +1,779 @@
+// `src/dyn_trait.rs` in Vesper: `uses_dyn` and `lower`, which turns every
+// `p: dyn Trait[args]` parameter into a hidden type parameter `__dyn__p`
+// bounded by `Trait[args]`, checks that `dyn` appears nowhere else, that
+// every object trait is object safe (E0630), and that no `dyn` value
+// escapes syntactically (E0631, E0632). Its outputs are the rewritten
+// module and the `params`, `forwards` and `boxed` tables of `Lowered`.
+
+use @vesper/ast::{
+    ParamNode,
+    FnNode,
+    TraitRefNode,
+    StmtNode
+};
+use @vesper/check-data::types::{
+    Vars,
+    vars_new,
+    substitute_row
+};
+use self::core::{
+    D,
+    w,
+    n32,
+    inc,
+    u32_at,
+    u64_at,
+    table_get,
+    table_set,
+    contains,
+    ll,
+    la,
+    mk_list,
+    list_words,
+    ex,
+    pt,
+    ty,
+    named,
+    new_generic,
+    new_bound,
+    stmt_at,
+    arg_at,
+    clause_at,
+    param_at,
+    set_param,
+    effects_at,
+    effect_at,
+    generic_at,
+    field_at,
+    variant_at,
+    adt_at,
+    fn_at,
+    set_fn,
+    effect_decl_at,
+    impl_at,
+    trait_at,
+    assoc_at,
+    conf_at,
+    item_at,
+    intern_buf,
+    buf_sym,
+    nsym,
+    tid,
+    rid,
+    type_name,
+    object_trait,
+    boxed_traits,
+    mentions_dyn,
+    mentions_bare_dyn,
+    mentions_name,
+    fn_types,
+    pattern_names,
+    without,
+    diag_open,
+    diag_close,
+    dput,
+    dsym,
+    dtype,
+    diag_text,
+    display_into
+};
+
+const NONE: u32 = 4294967295;
+
+// ---------------------------------------------------------------- uses_dyn
+
+fn fn_mentions_dyn(inout d: D, f: u32) -> bool {
+    let mut ts = ChunkSeq::new[u32]();
+    fn_types(in d, f, false, inout ts);
+    let n = ts.len() / 3;
+    for i in 0..n {
+        if mentions_dyn(in d, u32_at(in ts, wrapping_mul(i, 3))) {
+            return true;
+        }
+    }
+    false
+}
+
+fn fns_mention_dyn(inout d: D, list: u32) -> bool {
+    for i in 0..ll(in d, list) {
+        if fn_mentions_dyn(inout d, la(in d, list, i)) {
+            return true;
+        }
+    }
+    false
+}
+
+fn adt_mentions(in d: D, a: u32, bare: bool) -> bool {
+    let an = adt_at(in d, a);
+    for i in 0..ll(in d, an.variants) {
+        let v = variant_at(in d, la(in d, an.variants, i));
+        for j in 0..ll(in d, v.fields) {
+            let f = field_at(in d, la(in d, v.fields, j));
+            if mentions_name(in d, f.ty, d.k.dyn_, bare) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+// `dyn_trait::uses_dyn`: whether the module writes `dyn` anywhere.
+pub fn uses_dyn(inout d: D) -> bool {
+    for i in 0..d.ast.m_items.len() {
+        let it = item_at(in d, u32_at(in d.ast.m_items, i));
+        let x = it.node;
+        let found = if it.kind == 2 {
+            fn_mentions_dyn(inout d, x)
+        } else if it.kind == 4 {
+            let im = impl_at(in d, x);
+            mentions_dyn(in d, im.ty) || fns_mention_dyn(inout d, im.methods)
+        } else if it.kind == 5 {
+            fns_mention_dyn(inout d, trait_at(in d, x).methods)
+        } else if it.kind == 6 {
+            let c = conf_at(in d, x);
+            fns_mention_dyn(inout d, c.methods) || mentions_dyn(in d, c.self_ty)
+        } else if it.kind == 3 {
+            fns_mention_dyn(inout d, effect_decl_at(in d, x).ops)
+        } else if it.kind == 1 {
+            adt_mentions(in d, x, false)
+        } else {
+            false
+        };
+        if found {
+            return true;
+        }
+    }
+    false
+}
+
+// ---------------------------------------------------------------- object safety
+
+// The FNV-1a hash of the `Display` text of type `t` (`checked_objects`
+// holds `tr.to_string()`).
+fn display_hash(inout d: D, t: u32) -> u64 {
+    d.scratch.clear();
+    let mut o = ChunkSeq::new[u8]();
+    display_into(inout d, t, inout o);
+    let mut h: u64 = 14695981039346656037;
+    for i in 0..o.len() {
+        let c = match o.try_get(i) {
+            Option::Some(c) => c,
+            Option::None => 0,
+        };
+        h = wrapping_mul(h ^ widen_u64(c), 1099511628211);
+    }
+    h
+}
+
+// `checked.insert(tr.to_string())`.
+fn check_once(inout d: D, tr: u32) -> bool {
+    let h = display_hash(inout d, tr);
+    for i in 0..d.checked.len() {
+        if u64_at(in d.checked, i) == h {
+            return false;
+        }
+    }
+    d.checked.push(h);
+    true
+}
+
+fn unsafe_open(inout d: D, decl: u32) -> (u64, u64) {
+    let at = diag_open(inout d, in "E0630");
+    dput(inout d, in "trait '");
+    dsym(inout d, trait_at(in d, decl).name);
+    dput(inout d, in "' is not object safe: ");
+    at
+}
+
+fn method_unsafe(inout d: D, decl: u32, m: u32, in why: Str, start: u32, end: u32) {
+    let at = unsafe_open(inout d, decl);
+    dput(inout d, in "method '");
+    dsym(inout d, m);
+    dput(inout d, in why);
+    diag_close(inout d, at, start, end);
+}
+
+fn mentions_self(in d: D, t: u32) -> bool {
+    mentions_name(in d, t, d.k.self_ty, false)
+}
+
+// `object_safety`: the rules of the module docs for trait `decl` used at
+// trait arguments `args` (a list of types).
+fn object_safety(inout d: D, decl: u32, args: u32, start: u32, end: u32) {
+    let tn = trait_at(in d, decl);
+    if ll(in d, tn.assoc) > 0 {
+        let a = assoc_at(in d, la(in d, tn.assoc, 0));
+        let at = unsafe_open(inout d, decl);
+        dput(inout d, in "it declares the associated type '");
+        dsym(inout d, a.name);
+        dput(inout d, in "'");
+        diag_close(inout d, at, start, end);
+    }
+    let mut vars = vars_new();
+    let ng = ll(in d, tn.generics);
+    let na = ll(in d, args);
+    let nz = if ng < na {
+        ng
+    } else {
+        na
+    };
+    for i in 0..nz {
+        let g = generic_at(in d, la(in d, tn.generics, i));
+        let k = nsym(inout d, g.name);
+        let v = tid(inout d, la(in d, args, i));
+        vars.set(k, v);
+    }
+    for i in 0..ll(in d, tn.methods) {
+        let m = fn_at(in d, la(in d, tn.methods, i));
+        if ll(in d, m.generics) > 0 {
+            method_unsafe(inout d, decl, m.name, in "' has type parameters", start, end);
+        }
+        let mut has_self = false;
+        if ll(in d, m.params) > 0 {
+            let p = param_at(in d, la(in d, m.params, 0));
+            // Every `Pass` is `in`, `inout` or `sink`: no `out self`.
+            has_self = p.name == d.k.self_;
+        }
+        if !has_self {
+            method_unsafe(inout d, decl, m.name, in "' has no `self` receiver", start, end);
+        }
+        let mut by_self = false;
+        for j in 1..ll(in d, m.params) {
+            if mentions_self(in d, param_at(in d, la(in d, m.params, j)).ty) {
+                by_self = true;
+            }
+        }
+        if mentions_self(in d, m.result) {
+            by_self = true;
+        }
+        let en = effects_at(in d, m.effects);
+        for j in 0..ll(in d, en.instances) {
+            let x = effect_at(in d, la(in d, en.instances, j));
+            for q in 0..ll(in d, x.args) {
+                if mentions_self(in d, la(in d, x.args, q)) {
+                    by_self = true;
+                }
+            }
+        }
+        if by_self {
+            method_unsafe(
+                inout d,
+                decl,
+                m.name,
+                in "' mentions `Self` outside its receiver",
+                start,
+                end
+            );
+        }
+        let r = rid(inout d, m.effects);
+        let s = substitute_row(inout d.types, r, in vars);
+        if d.types.row(s).tail != 0 {
+            method_unsafe(inout d, decl, m.name, in "' has an open effect row", start, end);
+        }
+    }
+}
+
+// A trait type found anywhere (`lower`'s first pass): object-safety
+// checked once per Display text, and its name recorded in `boxed`.
+fn found_trait(inout d: D, tr: u32, start: u32, end: u32) {
+    let n = ty(in d, tr);
+    if n.kind != 1 {
+        return;
+    }
+    let decl = table_get(in d.trait_by, n.a);
+    if decl == 0 {
+        return;
+    }
+    if check_once(inout d, tr) {
+        object_safety(inout d, wrapping_sub(decl, 1), n.b, start, end);
+    }
+    d.boxed.push(n.a);
+}
+
+fn found_in(inout d: D, in ts: ChunkSeq[u32]) {
+    let n = ts.len() / 3;
+    for i in 0..n {
+        let t = u32_at(in ts, wrapping_mul(i, 3));
+        let s = u32_at(in ts, inc(wrapping_mul(i, 3)));
+        let e = u32_at(in ts, wrapping_add(wrapping_mul(i, 3), 2));
+        let mut trs = ChunkSeq::new[u32]();
+        let o = object_trait(in d, t);
+        if o != NONE {
+            trs.push(o);
+        }
+        boxed_traits(in d, t, inout trs);
+        for j in 0..trs.len() {
+            found_trait(inout d, u32_at(in trs, j), s, e);
+        }
+    }
+}
+
+fn found_fns(inout d: D, list: u32) {
+    for i in 0..ll(in d, list) {
+        let mut ts = ChunkSeq::new[u32]();
+        fn_types(in d, la(in d, list, i), false, inout ts);
+        found_in(inout d, in ts);
+    }
+}
+
+// ---------------------------------------------------------------- escapes
+
+fn second_class_name(inout d: D, name: u32, start: u32, end: u32) {
+    let at = diag_open(inout d, in "E0631");
+    dput(inout d, in "the `dyn` parameter '");
+    dsym(inout d, name);
+    dput(
+        inout d,
+        in "' is second-class: use it only as a method receiver or as the argument of another `dyn` parameter (it cannot be bound, stored, returned or captured)"
+    );
+    diag_close(inout d, at, start, end);
+}
+
+fn is_live(in d: D, e: u32, in live: ChunkSeq[u32]) -> bool {
+    let n = ex(in d, e);
+    n.kind == 2 && contains(in live, n.a)
+}
+
+// A forward: the parameter, the call's span, the callee (1 a name, 2 a
+// method with its base's span), the argument index and span.
+fn push_forward(
+    inout d: D,
+    name: u32,
+    call: u32,
+    kind: u64,
+    callee: u32,
+    base_s: u32,
+    base_e: u32,
+    index: u64,
+    arg: u32
+) {
+    let c = ex(in d, call);
+    let a = ex(in d, arg);
+    d.fwd.push(w(name));
+    d.fwd.push(w(c.start));
+    d.fwd.push(w(c.end));
+    d.fwd.push(kind);
+    d.fwd.push(w(callee));
+    d.fwd.push(w(base_s));
+    d.fwd.push(w(base_e));
+    d.fwd.push(index);
+    d.fwd.push(w(a.start));
+    d.fwd.push(w(a.end));
+}
+
+fn esc_opt(inout d: D, e: u32, in live: ChunkSeq[u32], closure: bool) {
+    if e != NONE {
+        escapes(inout d, e, in live, closure);
+    }
+}
+
+fn bound_by(in d: D, p: u32) -> ChunkSeq[u32] {
+    let mut b = ChunkSeq::new[u32]();
+    pattern_names(in d, p, inout b);
+    b
+}
+
+// `escapes`: the syntactic second-class rule over `e` with the `dyn`
+// parameters `live` in scope; `closure` inside a closure or handler.
+fn escapes(inout d: D, e: u32, in live: ChunkSeq[u32], closure: bool) {
+    if live.len() == 0 {
+        return;
+    }
+    let n = ex(in d, e);
+    let k = n.kind;
+    if k == 2 {
+        if contains(in live, n.a) {
+            second_class_name(inout d, n.a, n.start, n.end);
+        }
+    } else if k == 1 {} else if k == 6 {
+        let c = ex(in d, n.a);
+        let mut kind: u64 = 0;
+        let mut callee: u32 = NONE;
+        let mut bs: u32 = 0;
+        let mut be: u32 = 0;
+        if c.kind == 7 {
+            if is_live(in d, c.a, in live) {
+                if closure {
+                    escapes(inout d, c.a, in live, closure);
+                }
+            } else {
+                escapes(inout d, c.a, in live, closure);
+            }
+            let b = ex(in d, c.a);
+            kind = 2;
+            callee = c.b;
+            bs = b.start;
+            be = b.end;
+        } else if c.kind == 2 {
+            kind = 1;
+            callee = c.a;
+        } else {
+            escapes(inout d, n.a, in live, closure);
+        }
+        for i in 0..ll(in d, n.c) {
+            let a = arg_at(in d, la(in d, n.c, i)).expr;
+            let an = ex(in d, a);
+            if an.kind == 2 && contains(in live, an.a) && kind != 0 && !closure {
+                push_forward(inout d, an.a, e, kind, callee, bs, be, i, a);
+            } else {
+                escapes(inout d, a, in live, closure);
+            }
+        }
+    } else if k == 5 {
+        let none = ChunkSeq::new[u32]();
+        let mut cur = without(in live, in none);
+        for i in 0..ll(in d, n.a) {
+            let s = stmt_at(in d, la(in d, n.a, i));
+            escapes(inout d, s.value, in cur, closure);
+            if s.kind == 1 {
+                let b = bound_by(in d, s.pat);
+                cur = without(in cur, in b);
+            }
+        }
+        esc_opt(inout d, n.b, in cur, closure);
+    } else if k == 3 {
+        for i in 0..ll(in d, n.a) {
+            escapes(inout d, la(in d, n.a, i), in live, closure);
+        }
+    } else if k == 4 {
+        let len = ll(in d, n.b) / 2;
+        for i in 0..len {
+            escapes(inout d, la(in d, n.b, inc(wrapping_mul(i, 2))), in live, closure);
+        }
+    } else if k == 7 || k == 9 {
+        escapes(inout d, n.a, in live, closure);
+    } else if k == 10 {
+        escapes(inout d, n.b, in live, closure);
+    } else if k == 8 {
+        escapes(inout d, n.a, in live, closure);
+        escapes(inout d, n.b, in live, closure);
+    } else if k == 11 || k == 12 {
+        escapes(inout d, n.b, in live, closure);
+        escapes(inout d, n.c, in live, closure);
+    } else if k == 13 {
+        escapes(inout d, n.a, in live, closure);
+        escapes(inout d, n.b, in live, closure);
+        esc_opt(inout d, n.c, in live, closure);
+    } else if k == 14 {
+        escapes(inout d, n.a, in live, closure);
+        let len = ll(in d, n.b) / 2;
+        for i in 0..len {
+            let b = bound_by(in d, la(in d, n.b, wrapping_mul(i, 2)));
+            let inner = without(in live, in b);
+            escapes(inout d, la(in d, n.b, inc(wrapping_mul(i, 2))), in inner, closure);
+        }
+    } else if k == 15 {
+        let mut b = ChunkSeq::new[u32]();
+        for i in 0..ll(in d, n.a) {
+            b.push(param_at(in d, la(in d, n.a, i)).name);
+        }
+        let inner = without(in live, in b);
+        escapes(inout d, n.e, in inner, true);
+    } else if k == 16 {
+        if n.b != NONE {
+            escapes(inout d, n.c, in live, closure);
+        }
+        escapes(inout d, n.d, in live, closure);
+        for i in 0..ll(in d, n.e) {
+            let c = clause_at(in d, la(in d, n.e, i));
+            let mut b = ChunkSeq::new[u32]();
+            for j in 0..ll(in d, c.pats) {
+                pattern_names(in d, la(in d, c.pats, j), inout b);
+            }
+            let inner = without(in live, in b);
+            escapes(inout d, c.body, in inner, true);
+        }
+    } else if k == 18 {
+        escapes(inout d, n.b, in live, closure);
+        let b = bound_by(in d, n.a);
+        let inner = without(in live, in b);
+        escapes(inout d, n.c, in inner, closure);
+    } else if k == 17 {
+        escapes(inout d, n.a, in live, closure);
+    } else if k == 19 {
+        escapes(inout d, n.a, in live, closure);
+        escapes(inout d, n.b, in live, closure);
+    } else if k == 20 || k == 21 {
+        esc_opt(inout d, n.a, in live, closure);
+    }
+}
+
+// ---------------------------------------------------------------- lowering
+
+// `bare_dyn_type`: the first type written in `f` that mentions `dyn`
+// other than as a boxed object or the object `Box::new[dyn Trait](x)`
+// boxes; returns (found, start, end).
+fn bare_dyn_type(in d: D, f: u32) -> (bool, u32, u32) {
+    let mut ts = ChunkSeq::new[u32]();
+    fn_types(in d, f, true, inout ts);
+    let n = ts.len() / 3;
+    for i in 0..n {
+        if mentions_bare_dyn(in d, u32_at(in ts, wrapping_mul(i, 3))) {
+            return (
+                true,
+                u32_at(in ts, inc(wrapping_mul(i, 3))),
+                u32_at(in ts, wrapping_add(wrapping_mul(i, 3), 2))
+            );
+        }
+    }
+    (false, 0, 0)
+}
+
+fn elsewhere(inout d: D, in what: Str, start: u32, end: u32) {
+    let at = diag_open(inout d, in "E0632");
+    dput(
+        inout d,
+        in "`dyn Trait` is second-class: it may only be the whole type of an `in`, `inout` or `sink` parameter of a function or inherent method, not "
+    );
+    dput(inout d, in what);
+    diag_close(inout d, at, start, end);
+}
+
+fn fns_elsewhere(inout d: D, list: u32, in what: Str) {
+    for i in 0..ll(in d, list) {
+        let (found, s, e) = bare_dyn_type(in d, la(in d, list, i));
+        if found {
+            elsewhere(inout d, in what, s, e);
+        }
+    }
+}
+
+// `params.insert(owner, own)`: the rows of an earlier insert of `owner`
+// stop counting.
+fn insert_params(inout d: D, owner: u32, in gs: ChunkSeq[u32], in trs: ChunkSeq[u32]) {
+    for i in 0..d.p_owner.len() {
+        if u32_at(in d.p_owner, i) == owner {
+            let ok = d.p_live.try_set(i, 0);
+        }
+    }
+    for i in 0..gs.len() {
+        let g = u32_at(in gs, i);
+        // `own.insert(g, tr)`: a later parameter of the same name wins.
+        let mut later = false;
+        for j in inc(i)..gs.len() {
+            if u32_at(in gs, j) == g {
+                later = true;
+            }
+        }
+        if !later {
+            d.p_owner.push(owner);
+            d.p_g.push(g);
+            d.p_tr.push(u32_at(in trs, i));
+            d.p_live.push(1);
+        }
+    }
+}
+
+// `lower_function`: the `dyn` parameters of function `f` (World name
+// `owner`) become hidden bounded type parameters.
+fn lower_function(inout d: D, f: u32, owner: u32) {
+    let fnode = fn_at(in d, f);
+    let mut names = ChunkSeq::new[u32]();
+    let mut own_g = ChunkSeq::new[u32]();
+    let mut own_tr = ChunkSeq::new[u32]();
+    let mut generics = list_words(in d, fnode.generics);
+    let before = generics.len();
+    for i in 0..ll(in d, fnode.params) {
+        let pi = la(in d, fnode.params, i);
+        let p = param_at(in d, pi);
+        let tr = object_trait(in d, p.ty);
+        if tr == NONE {
+            continue;
+        }
+        let trn = ty(in d, tr);
+        if trn.kind != 1 {
+            continue;
+        }
+        let mut nested = false;
+        for j in 0..ll(in d, trn.b) {
+            if mentions_dyn(in d, la(in d, trn.b, j)) {
+                nested = true;
+            }
+        }
+        if nested {
+            diag_text(
+                inout d,
+                in "E0632",
+                in "`dyn Trait` cannot be a trait argument of another `dyn` type",
+                p.start,
+                p.end
+            );
+            continue;
+        }
+        let decl = table_get(in d.trait_by, trn.a);
+        if decl != 0 && check_once(inout d, tr) {
+            object_safety(inout d, wrapping_sub(decl, 1), trn.b, p.start, p.end);
+        }
+        d.buf.clear();
+        d.buf.push_str(in "__dyn__");
+        buf_sym(inout d, p.name);
+        let g = intern_buf(inout d);
+        // A borrowed object may be linear; a consumed one may be dropped
+        // by the callee, so `sink dyn` admits affine types.
+        let bound: u8 = if p.pass == 2 {
+            1
+        } else {
+            2
+        };
+        let gn = new_generic(inout d, g, bound);
+        generics.push(gn);
+        let tref = d
+            .ast
+            .trait_refs
+            .alloc(
+            TraitRefNode {
+                package: NONE,
+                name: trn.a,
+                args: trn.b,
+                start: p.start,
+                end: p.end
+            }
+        )
+            .raw();
+        let b = new_bound(inout d, g, tref, p.start, p.end, owner);
+        d.ast.m_bounds.push(b);
+        let gt = named(inout d, g, 0);
+        set_param(
+            inout d,
+            pi,
+            ParamNode {
+                name: p.name,
+                pass: p.pass,
+                projections: p.projections,
+                ty: gt,
+                start: p.start,
+                end: p.end
+            }
+        );
+        names.push(p.name);
+        own_g.push(g);
+        own_tr.push(tr);
+    }
+    if generics.len() != before {
+        let gl = mk_list(inout d, in generics);
+        let cur = fn_at(in d, f);
+        set_fn(
+            inout d,
+            f,
+            FnNode {
+                name: cur.name,
+                fip: cur.fip,
+                generics: gl,
+                params: cur.params,
+                result: cur.result,
+                effects: cur.effects,
+                body: cur.body,
+                start: cur.start,
+                end: cur.end
+            }
+        );
+    }
+    let (found, s, e) = bare_dyn_type(in d, f);
+    if found {
+        diag_text(
+            inout d,
+            in "E0632",
+            in "`dyn Trait` is second-class unless boxed: it may only be the whole type of an `in`, `inout` or `sink` parameter or the argument of `Box[dyn Trait]`, not a result, a `let` annotation, a type argument, a closure parameter or part of another type",
+            s,
+            e
+        );
+    }
+    if own_g.len() == 0 {
+        return;
+    }
+    let body = fn_at(in d, f).body;
+    if body != NONE {
+        escapes(inout d, body, in names, false);
+    }
+    insert_params(inout d, owner, in own_g, in own_tr);
+}
+
+// `dyn_trait::lower`. Returns whether it succeeded (no diagnostics).
+pub fn lower_dyn(inout d: D) -> bool {
+    let first_diag = d.diags.len();
+    let nitems = d.ast.m_items.len();
+    // The traits by name; a later declaration replaces an earlier one.
+    for i in 0..nitems {
+        let it = item_at(in d, u32_at(in d.ast.m_items, i));
+        if it.kind == 5 {
+            let name = trait_at(in d, it.node).name;
+            table_set(inout d.trait_by, name, wrapping_add(it.node, 1));
+        }
+    }
+    // Every object and boxed object trait written anywhere.
+    for i in 0..nitems {
+        let it = item_at(in d, u32_at(in d.ast.m_items, i));
+        let x = it.node;
+        if it.kind == 2 {
+            let mut ts = ChunkSeq::new[u32]();
+            fn_types(in d, x, false, inout ts);
+            found_in(inout d, in ts);
+        } else if it.kind == 4 {
+            found_fns(inout d, impl_at(in d, x).methods);
+        } else if it.kind == 5 {
+            found_fns(inout d, trait_at(in d, x).methods);
+        } else if it.kind == 6 {
+            found_fns(inout d, conf_at(in d, x).methods);
+        } else if it.kind == 3 {
+            found_fns(inout d, effect_decl_at(in d, x).ops);
+        } else if it.kind == 1 {
+            let an = adt_at(in d, x);
+            let mut ts = ChunkSeq::new[u32]();
+            for j in 0..ll(in d, an.variants) {
+                let v = variant_at(in d, la(in d, an.variants, j));
+                for q in 0..ll(in d, v.fields) {
+                    let f = field_at(in d, la(in d, v.fields, q));
+                    ts.push(f.ty);
+                    ts.push(an.start);
+                    ts.push(an.end);
+                }
+            }
+            found_in(inout d, in ts);
+        }
+    }
+    for i in 0..nitems {
+        let it = item_at(in d, u32_at(in d.ast.m_items, i));
+        let x = it.node;
+        if it.kind == 2 {
+            let owner = fn_at(in d, x).name;
+            lower_function(inout d, x, owner);
+        } else if it.kind == 4 {
+            let im = impl_at(in d, x);
+            if mentions_dyn(in d, im.ty) {
+                elsewhere(inout d, in "an impl self type", 0, 0);
+            }
+            let head = type_name(in d, im.ty);
+            for j in 0..ll(in d, im.methods) {
+                let f = la(in d, im.methods, j);
+                d.buf.clear();
+                buf_sym(inout d, head);
+                d.buf.push_str(in "::");
+                buf_sym(inout d, fn_at(in d, f).name);
+                let owner = intern_buf(inout d);
+                lower_function(inout d, f, owner);
+            }
+        } else if it.kind == 5 {
+            fns_elsewhere(inout d, trait_at(in d, x).methods, in "in a trait method signature");
+        } else if it.kind == 6 {
+            let c = conf_at(in d, x);
+            if mentions_dyn(in d, c.self_ty) {
+                elsewhere(inout d, in "a conformance self type", c.start, c.end);
+            }
+            fns_elsewhere(inout d, c.methods, in "in a conformance method");
+        } else if it.kind == 3 {
+            fns_elsewhere(inout d, effect_decl_at(in d, x).ops, in "in an effect operation");
+        } else if it.kind == 1 {
+            let an = adt_at(in d, x);
+            for j in 0..ll(in d, an.variants) {
+                let v = variant_at(in d, la(in d, an.variants, j));
+                for q in 0..ll(in d, v.fields) {
+                    let f = field_at(in d, la(in d, v.fields, q));
+                    if mentions_bare_dyn(in d, f.ty) {
+                        elsewhere(inout d, in "the type of a field", an.start, an.end);
+                    }
+                }
+            }
+        }
+    }
+    d.diags.len() == first_diag
+}

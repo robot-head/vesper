@@ -20,7 +20,7 @@ test {
 
     // `n` keys (`n` not a multiple of 7919, at least 20): several levels of
     // splits once `n` passes 16 * 17.
-    pub fn test_btree(n: u64) -> u64 {
+    pub fn check_btree(n: u64) -> u64 {
         let mut r: u64 = 0;
         let last = wrapping_sub(n, 1);
         let mut t: CacheBTree[u64, u64] = btree_new[u64, u64]();
@@ -135,7 +135,7 @@ test {
 
     impl Hash for Point {}
 
-    pub fn test_struct_keys() -> u64 {
+    pub fn check_struct_keys() -> u64 {
         let mut r: u64 = 0;
         let mut t: CacheBTree[Point, u64] = btree_new[Point, u64]();
         let mut f: FlatTable[Point, u64] = flat_table_new[Point, u64]();
@@ -161,7 +161,7 @@ test {
     }
 
     // `n` entries (at least 2), enough to rebuild the index several times.
-    pub fn test_flat_table(n: u64) -> u64 {
+    pub fn check_flat_table(n: u64) -> u64 {
         let mut r: u64 = 0;
         let last = wrapping_sub(n, 1);
         let mut f: FlatTable[u64, u64] = flat_table_new[u64, u64]();
@@ -199,7 +199,7 @@ test {
     }
 
     // FlatTable against CacheBTree on a random workload: every lookup agrees.
-    pub fn test_flat_table_differential(ops: u64) -> u64 {
+    pub fn check_flat_table_differential(ops: u64) -> u64 {
         let mut f: FlatTable[u64, u64] = flat_table_new[u64, u64]();
         let mut t: CacheBTree[u64, u64] = btree_new[u64, u64]();
         let mut x: u64 = 88172645463325252;

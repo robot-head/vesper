@@ -202,6 +202,10 @@ pub copy struct Change {
 // All state. Scratch sequences live here, so nothing function-local leaks.
 pub struct L {
     inw: ChunkSeq[u64],
+    // Each string occurrence's bytes as big-endian words (zero padded)
+    // from skat[occ] on, so the string sort compares eight bytes at once.
+    skat: ChunkSeq[u64],
+    sk: ChunkSeq[u64],
     pos: u64,
     pool: ChunkSeq[u8],
     out: ChunkSeq[u64],

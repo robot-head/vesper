@@ -10,6 +10,60 @@ use self::{
 };
 use self::index::utf8_valid_up_to;
 
+// StreamVByte: four 2-bit width tags per control byte; values of 1 to 4
+// little-endian bytes. Decoding charges two work units per byte.
+const VALUES_PER_CONTROL: u64 = 4;
+const TAG_BITS: u64 = 2;
+const TAG_MASK: u64 = 3;
+const MAX_VALUE_BYTES: u64 = 4;
+const ONE_BYTE_LIMIT: u32 = 0x100;
+const TWO_BYTE_LIMIT: u32 = 0x10000;
+const THREE_BYTE_LIMIT: u32 = 0x1000000;
+const DECODE_WORK_PER_BYTE: u64 = 2;
+const BYTE_MASK: u64 = 0xff;
+// The VSPA archive (src/archive.rs): the header fields.
+const MAGIC_V: u64 = 0x56;
+const MAGIC_S: u64 = 0x53;
+const MAGIC_P: u64 = 0x50;
+const MAGIC_A: u64 = 0x41;
+const VERSION: u64 = 1;
+const TREE_SCHEMA: u64 = 1;
+const HDR_VERSION: u64 = 4;
+const HDR_SCHEMA: u64 = 6;
+const HDR_TOTAL_LEN: u64 = 8;
+const HDR_NODE_COUNT: u64 = 12;
+const HDR_ROOT: u64 = 16;
+const HDR_NODES: u64 = 20;
+const HDR_NODES_COUNT: u64 = 24;
+const HDR_RESERVED: u64 = 28;
+// The root and the node array both start right after the header:
+// HEADER_LEN - HDR_ROOT and HEADER_LEN - HDR_NODES.
+const ROOT_RELATIVE: u64 = 16;
+const NODES_RELATIVE: u64 = 12;
+// Node fields, after the u32 id, then three reserved words (20, 24, 28).
+const NODE_LABEL: u64 = 4;
+const NODE_LABEL_COUNT: u64 = 8;
+const NODE_CHILDREN: u64 = 12;
+const NODE_CHILD_COUNT: u64 = 16;
+const NODE_RESERVED_FIRST: u64 = 20;
+const NODE_RESERVED_LAST: u64 = 28;
+// Relative pointers and child entries are 4-byte aligned i32s; a slice
+// field is pointer plus count.
+const REL_BYTES: u64 = 4;
+const REL_SLICE_BYTES: u64 = 8;
+const ALIGN_MASK: u64 = 0xfffffffffffffffc;
+// Words per flattened input node: id, label offset and length, children
+// offset and count.
+const NODE_WORDS: u64 = 5;
+const NODE_LABEL_OFF_WORD: u64 = 1;
+const NODE_LABEL_LEN_WORD: u64 = 2;
+const NODE_CHILD_OFF_WORD: u64 = 3;
+const NODE_CHILD_COUNT_WORD: u64 = 4;
+// Validation charges per edge, and keeps two metadata words per node.
+const EDGE_WORK: u64 = 8;
+const META_WORDS: u64 = 2;
+const U32_MAX: u64 = 0xffffffff;
+
 fn raise(kind: BinErrorKind, offset: u64) -> Unit eff [Fail[BinError]] {
     Fail::raise(
         BinError {
@@ -20,7 +74,7 @@ fn raise(kind: BinErrorKind, offset: u64) -> Unit eff [Fail[BinError]] {
 }
 
 fn max64() -> u64 {
-    18446744073709551615
+    0xffffffffffffffff
 }
 
 fn add(a: u64, b: u64) -> u64 eff [Fail[BinError]] {
@@ -63,23 +117,23 @@ fn byte(in s: Slice[u8], i: u64) -> u64 {
 // -------------------------------------------------------------------
 
 fn controls(count: u64) -> u64 {
-    let tail: u64 = if count % 4 != 0 {
+    let tail: u64 = if count % VALUES_PER_CONTROL != 0 {
         1
     } else {
         0
     };
-    wrapping_add(count / 4, tail)
+    wrapping_add(count / VALUES_PER_CONTROL, tail)
 }
 
 fn width(v: u32) -> u64 {
-    if v < 256 {
+    if v < ONE_BYTE_LIMIT {
         1
-    } else if v < 65536 {
+    } else if v < TWO_BYTE_LIMIT {
         2
-    } else if v < 16777216 {
+    } else if v < THREE_BYTE_LIMIT {
         3
     } else {
-        4
+        MAX_VALUE_BYTES
     }
 }
 
@@ -91,7 +145,7 @@ fn value_at(in values: Slice[u32], i: u64) -> u32 {
 }
 
 pub fn vbyte_max_size(count: u64) -> u64 eff [Fail[BinError]] {
-    add(controls(count), mul(count, 4))
+    add(controls(count), mul(count, MAX_VALUE_BYTES))
 }
 
 pub fn vbyte_size(in values: Slice[u32], lim: VbyteLimits) -> u64 eff [Fail[BinError]] {
@@ -103,7 +157,7 @@ pub fn vbyte_size(in values: Slice[u32], lim: VbyteLimits) -> u64 eff [Fail[BinE
     work(inout remaining, add(control, mul(n, 2)));
     for i in 0..n {
         let w = width(value_at(in values, i));
-        work(inout remaining, wrapping_mul(w, 2));
+        work(inout remaining, wrapping_mul(w, DECODE_WORK_PER_BYTE));
         size = add(size, w);
         bound(size, lim.max_bytes, BinErrorKind::BByteLimit);
     }
@@ -126,13 +180,17 @@ pub fn vbyte_encode(in values: Slice[u32], inout out: Slice[u8], lim: VbyteLimit
     for i in 0..n {
         let v = widen_u64(value_at(in values, i));
         let w = width(value_at(in values, i));
-        let c = i / 4;
-        let shift = wrapping_mul(i % 4, 2);
+        let c = i / VALUES_PER_CONTROL;
+        let shift = wrapping_mul(i % VALUES_PER_CONTROL, TAG_BITS);
         let tag = bit_shl(wrapping_sub(w, 1), shift);
         let old = byte(in out, c);
         out.try_set(c, wrapping_u8(old | tag));
         for k in 0..w {
-            out.try_set(wrapping_add(pos, k), wrapping_u8(bit_shr(v, wrapping_mul(k, 8)) & 255));
+            out
+                .try_set(
+                wrapping_add(pos, k),
+                wrapping_u8(bit_shr(v, wrapping_mul(k, 8)) & BYTE_MASK)
+            );
         }
         pos = wrapping_add(pos, w);
     }
@@ -140,8 +198,8 @@ pub fn vbyte_encode(in values: Slice[u32], inout out: Slice[u8], lim: VbyteLimit
 }
 
 fn tag_width(in input: Slice[u8], i: u64) -> u64 {
-    let shift = wrapping_mul(i % 4, 2);
-    wrapping_add(bit_shr(byte(in input, i / 4), shift) & 3, 1)
+    let shift = wrapping_mul(i % VALUES_PER_CONTROL, TAG_BITS);
+    wrapping_add(bit_shr(byte(in input, i / VALUES_PER_CONTROL), shift) & TAG_MASK, 1)
 }
 
 pub fn vbyte_decode(in input: Slice[u8], count: u64, inout out: Slice[u32], lim: VbyteLimits)
@@ -157,11 +215,11 @@ pub fn vbyte_decode(in input: Slice[u8], count: u64, inout out: Slice[u32], lim:
         raise(BinErrorKind::BOutputTooSmall, 0);
     }
     let mut remaining = lim.max_work;
-    work(inout remaining, add(control, mul(count, 2)));
+    work(inout remaining, add(control, mul(count, DECODE_WORK_PER_BYTE)));
     let mut end = control;
     for i in 0..count {
         let w = tag_width(in input, i);
-        work(inout remaining, wrapping_mul(w, 2));
+        work(inout remaining, wrapping_mul(w, DECODE_WORK_PER_BYTE));
         end = add(end, w);
         if end > len {
             raise(BinErrorKind::BTruncated, len);
@@ -187,12 +245,16 @@ pub fn vbyte_decode(in input: Slice[u8], count: u64, inout out: Slice[u32], lim:
 // The VSPA archive (src/archive.rs).
 // -------------------------------------------------------------------
 
+// src/archive.rs `HEADER_LEN` and `NODE_LEN`.
+const HEADER_BYTES: u64 = 32;
+const NODE_BYTES: u64 = 32;
+
 fn header_len() -> u64 {
-    32
+    HEADER_BYTES
 }
 
 fn node_len() -> u64 {
-    32
+    NODE_BYTES
 }
 
 fn i32_max() -> u64 {
@@ -213,7 +275,7 @@ fn is_power_of_two(n: u64) -> bool {
 }
 
 fn field(offset: u64, size: u64, len: u64) -> Unit eff [Fail[BinError]] {
-    if offset % 4 != 0 {
+    if offset % REL_BYTES != 0 {
         raise(BinErrorKind::BAlignment, offset);
     }
     if add(offset, size) > len {
@@ -230,7 +292,7 @@ fn alignment_valid(alignment: u64) -> Unit eff [Fail[BinError]] {
 // `RelPtr32::resolve`.
 pub fn relptr_resolve(offset: i32, field_offset: u64, size: u64, alignment: u64, archive_len: u64)
     -> Span eff [Fail[BinError]] {
-    field(field_offset, 4, archive_len);
+    field(field_offset, REL_BYTES, archive_len);
     alignment_valid(alignment);
     let o = widen_i64(offset);
     let target = if o < 0 {
@@ -268,7 +330,7 @@ pub fn relslice_resolve(
     alignment: u64,
     archive_len: u64
 ) -> Span eff [Fail[BinError]] {
-    field(field_offset, 8, archive_len);
+    field(field_offset, REL_SLICE_BYTES, archive_len);
     alignment_valid(alignment);
     if item_size == 0 {
         raise(BinErrorKind::BLayout, field_offset);
@@ -303,7 +365,7 @@ pub fn relptr_between(field_offset: u64, target_offset: u64) -> i32 eff [Fail[Bi
 }
 
 fn aligned(n: u64) -> u64 eff [Fail[BinError]] {
-    add(n, 3) & 18446744073709551612
+    add(n, wrapping_sub(REL_BYTES, 1)) & ALIGN_MASK
 }
 
 fn node_offset(index: u64) -> u64 eff [Fail[BinError]] {
@@ -343,17 +405,17 @@ fn meta_get(in meta: ChunkSeq[u64], i: u64) -> u64 {
 fn check_new(count: u64, lim: ArchiveLimits, inout meta: ChunkSeq[u64])
     -> Check eff [Fail[BinError]] {
     if count == 0 {
-        raise(BinErrorKind::BTree, 12);
+        raise(BinErrorKind::BTree, HDR_NODE_COUNT);
     }
     bound(count, lim.max_nodes, BinErrorKind::BCountLimit);
-    bound(count, 4294967295, BinErrorKind::BOverflow);
+    bound(count, U32_MAX, BinErrorKind::BOverflow);
     bound(1, lim.max_depth, BinErrorKind::BDepthLimit);
     let bytes = archive_validation_bytes(count);
     bound(bytes, lim.max_validation_bytes, BinErrorKind::BAllocationLimit);
     let mut remaining = lim.max_work;
     work(inout remaining, count);
     // Two words per node: parents, depth.
-    meta = ChunkSeq::with_capacity(wrapping_mul(count, 2));
+    meta = ChunkSeq::with_capacity(wrapping_mul(count, META_WORDS));
     for _i in 0..count {
         meta.push(0);
         meta.push(0);
@@ -388,7 +450,7 @@ fn check_node(inout c: Check, in meta: ChunkSeq[u64], index: u64, children: u64)
 
 fn check_edge(inout c: Check, inout meta: ChunkSeq[u64], parent: u64, child: u64)
     -> Unit eff [Fail[BinError]] {
-    work(inout c.remaining, 8);
+    work(inout c.remaining, EDGE_WORK);
     if child <= parent || child >= c.count {
         raise(BinErrorKind::BTree, node_offset(parent));
     }
@@ -422,20 +484,20 @@ pub fn archive_size(
     in children: Slice[u32],
     lim: ArchiveLimits
 ) -> u64 eff [Fail[BinError]] {
-    let count = nodes.len() / 5;
+    let count = nodes.len() / NODE_WORDS;
     let mut meta: ChunkSeq[u64] = ChunkSeq::new();
     let mut c = check_new(count, lim, inout meta);
     let mut cursor = node_offset(count);
     check_size(in c, cursor);
     for i in 0..count {
-        let base = wrapping_mul(i, 5);
-        let label_len = w_at(in nodes, wrapping_add(base, 2));
-        let child_off = w_at(in nodes, wrapping_add(base, 3));
-        let child_count = w_at(in nodes, wrapping_add(base, 4));
+        let base = wrapping_mul(i, NODE_WORDS);
+        let label_len = w_at(in nodes, wrapping_add(base, NODE_LABEL_LEN_WORD));
+        let child_off = w_at(in nodes, wrapping_add(base, NODE_CHILD_OFF_WORD));
+        let child_count = w_at(in nodes, wrapping_add(base, NODE_CHILD_COUNT_WORD));
         check_node(inout c, in meta, i, child_count);
         check_label(inout c, label_len);
         cursor = aligned(add(cursor, label_len));
-        cursor = add(cursor, mul(child_count, 4));
+        cursor = add(cursor, mul(child_count, REL_BYTES));
         check_size(in c, cursor);
         for k in 0..child_count {
             let child = match children.try_get(wrapping_add(child_off, k)) {
@@ -471,33 +533,33 @@ pub fn archive_encode(
     if out.len() < size {
         raise(BinErrorKind::BOutputTooSmall, 0);
     }
-    let count = nodes.len() / 5;
+    let count = nodes.len() / NODE_WORDS;
     for i in 0..size {
         out.try_set(i, 0);
     }
-    out.try_set(0, 86);
-    out.try_set(1, 83);
-    out.try_set(2, 80);
-    out.try_set(3, 65);
-    out.try_set(4, 1);
-    out.try_set(6, 1);
-    put_u32(inout out, 8, size);
-    put_u32(inout out, 12, count);
-    put_u32(inout out, 16, 16);
-    put_u32(inout out, 20, 12);
-    put_u32(inout out, 24, count);
+    out.try_set(0, wrapping_u8(MAGIC_V));
+    out.try_set(1, wrapping_u8(MAGIC_S));
+    out.try_set(2, wrapping_u8(MAGIC_P));
+    out.try_set(3, wrapping_u8(MAGIC_A));
+    out.try_set(HDR_VERSION, wrapping_u8(VERSION));
+    out.try_set(HDR_SCHEMA, wrapping_u8(TREE_SCHEMA));
+    put_u32(inout out, HDR_TOTAL_LEN, size);
+    put_u32(inout out, HDR_NODE_COUNT, count);
+    put_u32(inout out, HDR_ROOT, ROOT_RELATIVE);
+    put_u32(inout out, HDR_NODES, NODES_RELATIVE);
+    put_u32(inout out, HDR_NODES_COUNT, count);
     let mut cursor = wrapping_add(header_len(), wrapping_mul(count, node_len()));
     for i in 0..count {
-        let base = wrapping_mul(i, 5);
+        let base = wrapping_mul(i, NODE_WORDS);
         let offset = wrapping_add(header_len(), wrapping_mul(i, node_len()));
         put_u32(inout out, offset, w_at(in nodes, base));
-        let label_off = w_at(in nodes, wrapping_add(base, 1));
-        let label_len = w_at(in nodes, wrapping_add(base, 2));
-        let child_off = w_at(in nodes, wrapping_add(base, 3));
-        let child_count = w_at(in nodes, wrapping_add(base, 4));
+        let label_off = w_at(in nodes, wrapping_add(base, NODE_LABEL_OFF_WORD));
+        let label_len = w_at(in nodes, wrapping_add(base, NODE_LABEL_LEN_WORD));
+        let child_off = w_at(in nodes, wrapping_add(base, NODE_CHILD_OFF_WORD));
+        let child_count = w_at(in nodes, wrapping_add(base, NODE_CHILD_COUNT_WORD));
         if label_len != 0 {
-            put_relative(inout out, wrapping_add(offset, 4), cursor);
-            put_u32(inout out, wrapping_add(offset, 8), label_len);
+            put_relative(inout out, wrapping_add(offset, NODE_LABEL), cursor);
+            put_u32(inout out, wrapping_add(offset, NODE_LABEL_COUNT), label_len);
             for k in 0..label_len {
                 out
                     .try_set(
@@ -507,10 +569,10 @@ pub fn archive_encode(
             }
             cursor = wrapping_add(cursor, label_len);
         }
-        cursor = wrapping_add(cursor, 3) & 18446744073709551612;
+        cursor = wrapping_add(cursor, wrapping_sub(REL_BYTES, 1)) & ALIGN_MASK;
         if child_count != 0 {
-            put_relative(inout out, wrapping_add(offset, 12), cursor);
-            put_u32(inout out, wrapping_add(offset, 16), child_count);
+            put_relative(inout out, wrapping_add(offset, NODE_CHILDREN), cursor);
+            put_u32(inout out, wrapping_add(offset, NODE_CHILD_COUNT), child_count);
             for k in 0..child_count {
                 let child = match children.try_get(wrapping_add(child_off, k)) {
                     Option::Some(v) => widen_u64(v),
@@ -521,7 +583,7 @@ pub fn archive_encode(
                     cursor,
                     wrapping_add(header_len(), wrapping_mul(child, node_len()))
                 );
-                cursor = wrapping_add(cursor, 4);
+                cursor = wrapping_add(cursor, REL_BYTES);
             }
         }
     }
@@ -537,45 +599,55 @@ pub fn archive_validate(in bytes: Slice[u8], lim: ArchiveLimits) -> u64 eff [Fai
         raise(BinErrorKind::BTruncated, len);
     }
     if byte(in bytes, 0)
-        != 86
+        != MAGIC_V
         || byte(in bytes, 1)
-        != 83
+        != MAGIC_S
         || byte(in bytes, 2)
-        != 80
+        != MAGIC_P
         || byte(in bytes, 3)
-        != 65 {
+        != MAGIC_A {
         raise(BinErrorKind::BMagic, 0);
     }
-    if byte(in bytes, 4) != 1 || byte(in bytes, 5) != 0 {
-        raise(BinErrorKind::BVersion, 4);
+    if byte(in bytes, HDR_VERSION) != VERSION || byte(in bytes, wrapping_add(HDR_VERSION, 1)) != 0 {
+        raise(BinErrorKind::BVersion, HDR_VERSION);
     }
-    if byte(in bytes, 6) != 1 || byte(in bytes, 7) != 0 {
-        raise(BinErrorKind::BSchema, 6);
+    if byte(in bytes, HDR_SCHEMA)
+        != TREE_SCHEMA
+        || byte(in bytes, wrapping_add(HDR_SCHEMA, 1))
+        != 0 {
+        raise(BinErrorKind::BSchema, HDR_SCHEMA);
     }
-    let total = get_u32(in bytes, 8);
+    let total = get_u32(in bytes, HDR_TOTAL_LEN);
     if total > len {
         raise(BinErrorKind::BTruncated, len);
     }
     if total < len {
         raise(BinErrorKind::BTrailingBytes, total);
     }
-    if get_u32(in bytes, 28) != 0 {
-        raise(BinErrorKind::BLayout, 28);
+    if get_u32(in bytes, HDR_RESERVED) != 0 {
+        raise(BinErrorKind::BLayout, HDR_RESERVED);
     }
-    let count = get_u32(in bytes, 12);
+    let count = get_u32(in bytes, HDR_NODE_COUNT);
     bound(count, lim.max_nodes, BinErrorKind::BCountLimit);
-    let nodes_offset = get_i32(in bytes, 20);
-    let nodes_count = get_u32(in bytes, 24);
+    let nodes_offset = get_i32(in bytes, HDR_NODES);
+    let nodes_count = get_u32(in bytes, HDR_NODES_COUNT);
     if nodes_count != count {
-        raise(BinErrorKind::BLayout, 24);
+        raise(BinErrorKind::BLayout, HDR_NODES_COUNT);
     }
-    let range = relslice_resolve(nodes_offset, wrapping_u32(nodes_count), 20, node_len(), 4, len);
+    let range = relslice_resolve(
+        nodes_offset,
+        wrapping_u32(nodes_count),
+        HDR_NODES,
+        node_len(),
+        REL_BYTES,
+        len
+    );
     if range.start != header_len() {
-        raise(BinErrorKind::BLayout, 20);
+        raise(BinErrorKind::BLayout, HDR_NODES);
     }
-    let root = relptr_resolve(get_i32(in bytes, 16), 16, node_len(), 4, len);
+    let root = relptr_resolve(get_i32(in bytes, HDR_ROOT), HDR_ROOT, node_len(), REL_BYTES, len);
     if root.start != header_len() {
-        raise(BinErrorKind::BTree, 16);
+        raise(BinErrorKind::BTree, HDR_ROOT);
     }
     // A hostile count must fit actual node bytes before any metadata
     // allocation, even when caller-supplied limits are large.
@@ -586,33 +658,33 @@ pub fn archive_validate(in bytes: Slice[u8], lim: ArchiveLimits) -> u64 eff [Fai
     let mut cursor = range.end;
     for i in 0..count {
         let offset = node_offset(i);
-        let mut r: u64 = 20;
+        let mut r: u64 = NODE_RESERVED_FIRST;
         loop {
-            if r > 28 {
+            if r > NODE_RESERVED_LAST {
                 break;
             }
             if get_u32(in bytes, wrapping_add(offset, r)) != 0 {
                 raise(BinErrorKind::BLayout, wrapping_add(offset, r));
             }
-            r = wrapping_add(r, 4);
+            r = wrapping_add(r, REL_BYTES);
         }
-        let label_offset = get_i32(in bytes, wrapping_add(offset, 4));
-        let label_count = get_u32(in bytes, wrapping_add(offset, 8));
-        let child_offset = get_i32(in bytes, wrapping_add(offset, 12));
-        let child_count = get_u32(in bytes, wrapping_add(offset, 16));
+        let label_offset = get_i32(in bytes, wrapping_add(offset, NODE_LABEL));
+        let label_count = get_u32(in bytes, wrapping_add(offset, NODE_LABEL_COUNT));
+        let child_offset = get_i32(in bytes, wrapping_add(offset, NODE_CHILDREN));
+        let child_count = get_u32(in bytes, wrapping_add(offset, NODE_CHILD_COUNT));
         check_node(inout c, in meta, i, child_count);
         check_label(inout c, label_count);
         let label = relslice_resolve(
             label_offset,
             wrapping_u32(label_count),
-            wrapping_add(offset, 4),
+            wrapping_add(offset, NODE_LABEL),
             1,
             1,
             len
         );
         if label_count != 0 {
             if label.start != cursor {
-                raise(BinErrorKind::BLayout, wrapping_add(offset, 4));
+                raise(BinErrorKind::BLayout, wrapping_add(offset, NODE_LABEL));
             }
             let valid = utf8_valid_up_to(in bytes, label.start, label.end);
             if valid != label.end {
@@ -633,21 +705,27 @@ pub fn archive_validate(in bytes: Slice[u8], lim: ArchiveLimits) -> u64 eff [Fai
         let kids = relslice_resolve(
             child_offset,
             wrapping_u32(child_count),
-            wrapping_add(offset, 12),
-            4,
-            4,
+            wrapping_add(offset, NODE_CHILDREN),
+            REL_BYTES,
+            REL_BYTES,
             len
         );
         if child_count != 0 {
             if kids.start != cursor {
-                raise(BinErrorKind::BLayout, wrapping_add(offset, 12));
+                raise(BinErrorKind::BLayout, wrapping_add(offset, NODE_CHILDREN));
             }
             let mut entry = kids.start;
             loop {
                 if entry >= kids.end {
                     break;
                 }
-                let target = relptr_resolve(get_i32(in bytes, entry), entry, node_len(), 4, len);
+                let target = relptr_resolve(
+                    get_i32(in bytes, entry),
+                    entry,
+                    node_len(),
+                    REL_BYTES,
+                    len
+                );
                 if target
                     .start
                     < header_len()
@@ -656,12 +734,17 @@ pub fn archive_validate(in bytes: Slice[u8], lim: ArchiveLimits) -> u64 eff [Fai
                     >= range
                     .end
                     || wrapping_sub(target.start, header_len())
-                    % 32
+                    % NODE_BYTES
                     != 0 {
                     raise(BinErrorKind::BTree, entry);
                 }
-                check_edge(inout c, inout meta, i, wrapping_sub(target.start, header_len()) / 32);
-                entry = wrapping_add(entry, 4);
+                check_edge(
+                    inout c,
+                    inout meta,
+                    i,
+                    wrapping_sub(target.start, header_len()) / NODE_BYTES
+                );
+                entry = wrapping_add(entry, REL_BYTES);
             }
             cursor = kids.end;
         }

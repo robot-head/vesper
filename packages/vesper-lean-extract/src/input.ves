@@ -1,0 +1,154 @@
+// The effect section of the input (`effect_task` in
+// tests/self_host_lean_extract.rs): per effect of `world.effects` in name
+// order, its name, generic names, and per operation its name, parameters
+// (pass, type) and result. The harness world has effect names only.
+
+use @vesper/check-data::input::{
+    Reader
+};
+use @vesper/check-data::util::{
+    n32,
+    u32_at
+};
+
+pub copy struct Effect {
+    name: u32,
+    // generic names: gens[ga..ga+gn]
+    ga: u32,
+    gn: u32,
+    // operations: ops[oa..oa+on]
+    oa: u32,
+    on: u32,
+}
+
+pub copy struct Op {
+    name: u32,
+    // parameters: params[pa..pa+pn]
+    pa: u32,
+    pn: u32,
+    result: u32,
+}
+
+pub copy struct Param {
+    pass: u8,
+    ty: u32,
+}
+
+pub struct Effects {
+    effects: ChunkSeq[Effect],
+    gens: ChunkSeq[u32],
+    ops: ChunkSeq[Op],
+    params: ChunkSeq[Param],
+}
+
+impl Effects {
+    pub fn effect_at(in self, i: u64) -> Effect {
+        match self.effects.try_get(i) {
+            Option::Some(e) => e,
+            Option::None => Effect {
+                name: 0,
+                ga: 0,
+                gn: 0,
+                oa: 0,
+                on: 0
+            },
+        }
+    }
+
+    pub fn generic(in self, e: Effect, i: u64) -> u32 {
+        u32_at(in self.gens, wrapping_add(widen_u64(e.ga), i))
+    }
+
+    pub fn op(in self, e: Effect, i: u64) -> Op {
+        match self.ops.try_get(wrapping_add(widen_u64(e.oa), i)) {
+            Option::Some(o) => o,
+            Option::None => Op {
+                name: 0,
+                pa: 0,
+                pn: 0,
+                result: 0
+            },
+        }
+    }
+
+    pub fn param(in self, o: Op, i: u64) -> Param {
+        match self.params.try_get(wrapping_add(widen_u64(o.pa), i)) {
+            Option::Some(p) => p,
+            Option::None => Param {
+                pass: 0,
+                ty: 0
+            },
+        }
+    }
+}
+
+fn sym(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32]) -> u32 {
+    let x = r.word(in b);
+    u32_at(in nmap, x)
+}
+
+pub fn read_effects(
+    inout r: Reader,
+    in b: Slice[u8],
+    in nmap: ChunkSeq[u32],
+    in tmap: ChunkSeq[u32]
+) -> Effects {
+    let mut out = Effects {
+        effects: ChunkSeq::new[Effect](),
+        gens: ChunkSeq::new[u32](),
+        ops: ChunkSeq::new[Op](),
+        params: ChunkSeq::new[Param](),
+    };
+    let n = r.word(in b);
+    for i in 0..n {
+        let name = sym(inout r, in b, in nmap);
+        let ga = n32(out.gens.len());
+        let gn = r.word(in b);
+        for j in 0..gn {
+            let g = sym(inout r, in b, in nmap);
+            out.gens.push(g);
+        }
+        let oa = n32(out.ops.len());
+        let on = r.word(in b);
+        for j in 0..on {
+            let op = sym(inout r, in b, in nmap);
+            let pa = n32(out.params.len());
+            let pn = r.word(in b);
+            for k in 0..pn {
+                let pass = wrapping_u8(r.word(in b));
+                let ty = u32_at(in tmap, r.word(in b));
+                out
+                    .params
+                    .push(
+                    Param {
+                        pass: pass,
+                        ty: ty
+                    }
+                );
+            }
+            let result = u32_at(in tmap, r.word(in b));
+            out
+                .ops
+                .push(
+                Op {
+                    name: op,
+                    pa: pa,
+                    pn: n32(pn),
+                    result: result
+                }
+            );
+        }
+        out
+            .effects
+            .push(
+            Effect {
+                name: name,
+                ga: ga,
+                gn: n32(gn),
+                oa: oa,
+                on: n32(on)
+            }
+        );
+    }
+    out
+}

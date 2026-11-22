@@ -1,6 +1,6 @@
 // recording.rs: the recording backend's state and lookups.
 use self::codes::{
-    none_id
+    NONE_ID
 };
 use self::{
     BackendFault,
@@ -63,8 +63,8 @@ pub fn redge(in s: ChunkSeq[Edge], i: u64) -> Edge {
     match s.try_get(i) {
         Option::Some(e) => e,
         Option::None => Edge {
-            parent: none_id(),
-            child: none_id()
+            parent: NONE_ID,
+            child: NONE_ID
         },
     }
 }
@@ -121,7 +121,7 @@ pub fn widget_index(in s: RState, serial: u64) -> u64 {
         && seq_bool(in s.wlive, lo) {
         lo
     } else {
-        none_id()
+        NONE_ID
     }
 }
 
@@ -142,7 +142,7 @@ pub fn slot_index(in s: RState, serial: u64) -> u64 {
     if lo < s.slots.len() && rslot(in s.slots, lo).serial == serial && seq_bool(in s.slive, lo) {
         lo
     } else {
-        none_id()
+        NONE_ID
     }
 }
 
@@ -163,7 +163,7 @@ pub fn sub_index(in s: RState, serial: u64) -> u64 {
     if lo < s.subs.len() && rsub(in s.subs, lo).serial == serial && seq_bool(in s.blive, lo) {
         lo
     } else {
-        none_id()
+        NONE_ID
     }
 }
 
@@ -177,7 +177,7 @@ pub fn widget_slot(in s: RState, widget: u64, property: u64) -> u64 {
             }
         }
     }
-    none_id()
+    NONE_ID
 }
 
 pub fn widget_slot_count(in s: RState, widget: u64) -> u64 {
@@ -199,7 +199,7 @@ pub fn widget_sub(in s: RState, widget: u64, event: u64) -> u64 {
             }
         }
     }
-    none_id()
+    NONE_ID
 }
 
 pub fn widget_sub_count(in s: RState, widget: u64) -> u64 {
@@ -233,7 +233,7 @@ pub fn child_edge(in s: RState, parent: u64, index: u64) -> u64 {
             n = inc(n);
         }
     }
-    none_id()
+    NONE_ID
 }
 
 // One pass over the edges for `parent`: its child count, and the position
@@ -241,7 +241,7 @@ pub fn child_edge(in s: RState, parent: u64, index: u64) -> u64 {
 // count).
 pub fn child_scan(in s: RState, parent: u64, index: u64) -> (u64, u64) {
     let mut n: u64 = 0;
-    let mut at = none_id();
+    let mut at = NONE_ID;
     for i in 0..s.edges.len() {
         if redge(in s.edges, i).parent == parent {
             if n == index {
@@ -315,7 +315,7 @@ pub fn insert_child(inout s: RState, parent: u64, child: u64, index: u64) {
         child: child
     };
     let at = child_edge(in s, parent, index);
-    if at == none_id() {
+    if at == NONE_ID {
         s.edges.push(e);
     } else {
         insert_edge(inout s, at, e);
@@ -469,7 +469,7 @@ pub fn do_recorder_set_user_state(inout rec: Recorder, session: u64, serial: u64
         return Option::Some(BackendFault::ForeignSession);
     }
     let i = widget_index(in rec.st, serial);
-    if i == none_id() {
+    if i == NONE_ID {
         return Option::Some(BackendFault::StaleWidget);
     }
     let w = rwidget(in rec.st.widgets, i);
@@ -492,7 +492,7 @@ pub fn do_recorder_check_widget(in rec: Recorder, session: u64, serial: u64)
     -> Option[BackendFault] {
     if !session_ok(in rec.st, session) {
         Option::Some(BackendFault::ForeignSession)
-    } else if widget_index(in rec.st, serial) == none_id() {
+    } else if widget_index(in rec.st, serial) == NONE_ID {
         Option::Some(BackendFault::StaleWidget)
     } else {
         Option::None
@@ -502,7 +502,7 @@ pub fn do_recorder_check_widget(in rec: Recorder, session: u64, serial: u64)
 pub fn do_recorder_check_slot(in rec: Recorder, session: u64, serial: u64) -> Option[BackendFault] {
     if !session_ok(in rec.st, session) {
         Option::Some(BackendFault::ForeignSession)
-    } else if slot_index(in rec.st, serial) == none_id() {
+    } else if slot_index(in rec.st, serial) == NONE_ID {
         Option::Some(BackendFault::StaleSlot)
     } else {
         Option::None
@@ -516,7 +516,7 @@ pub fn do_recorder_dispatch(in rec: Recorder, session: u64, serial: u64)
         Result::Err(BackendFault::ForeignSession)
     } else {
         let i = sub_index(in rec.st, serial);
-        if i == none_id() {
+        if i == NONE_ID {
             Result::Err(BackendFault::StaleSubscription)
         } else {
             Result::Ok(rsub(in rec.st.subs, i).handler)

@@ -11,11 +11,17 @@
 #![deny(unsafe_code)]
 
 mod circuit;
+#[cfg(test)]
+mod differential;
 mod frontier;
 /// The adapters to the Vesper library `flux` (vesper/), where the Z-set
-/// kernels and the frontier run.
+/// kernels, the frontier, the accumulator and the CDC decoder run.
 mod port;
 mod zset;
+// @vesper-std/hash-sys's `.vsys` library `Blake3` (the official BLAKE3 C
+// implementation, built by vesper-blake3-sys), which the port imports for
+// the input log's and the checkpoints' checksums.
+use vesper_blake3_sys as blake3_shim;
 
 pub use circuit::{
     BINS, CdcHeader, CdcPolicy, CheckpointLimits, CheckpointMode, CheckpointPhase, Circuit,
@@ -31,6 +37,13 @@ pub use circuit::{
     read_kafka_output, run_cluster, run_cluster_with,
 };
 pub use frontier::{Frontier, FrontierTicket, TicketError};
+
+/// Live allocations of the Vesper port's runtime, for leak tests
+/// (`tests/port_memory.rs`).
+#[doc(hidden)]
+pub fn port_live_allocations() -> i64 {
+    port::live_allocations()
+}
 pub use zset::{Row, ZSet};
 
 /// Every limit is enforced before its associated growth/work operation.

@@ -55,6 +55,16 @@ pub enum ExpectErrorOutcome {
         /// Actual primary span text observed.
         observed_primary: String,
     },
+    /// The expected code was emitted, but no such diagnostic's message
+    /// contained the expected text.
+    MessageMismatch {
+        /// Matched diagnostic code.
+        code: String,
+        /// Expected substring in the message.
+        expected_message: String,
+        /// The messages of the diagnostics with the expected code.
+        observed_messages: Vec<String>,
+    },
     /// The expected code and primary span matched, but no related label matched.
     RelatedSpanMismatch {
         /// Matched diagnostic code.
@@ -101,6 +111,15 @@ impl fmt::Display for ExpectErrorOutcome {
                 f,
                 "{code} primary span mismatch: expected substring `{expected_primary}`, got `{observed_primary}`"
             ),
+            Self::MessageMismatch {
+                code,
+                expected_message,
+                observed_messages,
+            } => write!(
+                f,
+                "{code} message mismatch: expected substring `{expected_message}`, observed [{}]",
+                observed_messages.join(", ")
+            ),
             Self::RelatedSpanMismatch {
                 code,
                 expected_related,
@@ -127,6 +146,7 @@ fn is_parse_error_code(code: &str) -> bool {
 ///    immediately with [`ExpectErrorOutcome::UnexpectedParseError`] unless
 ///    `spec.code` itself expects a parse error code.
 /// 3. At least one diagnostic must match `spec.code` exactly, contain
+///    `spec.message` (if specified) in its message,
 ///    `spec.primary` (if specified) in `primary_text`, and contain `spec.related`
 ///    (if specified) in at least one entry of `related_texts`.
 pub fn verify_expect_error(
@@ -157,6 +177,24 @@ pub fn verify_expect_error(
         .iter()
         .filter(|d| d.code.as_deref() == Some(spec.code.as_str()))
         .collect();
+    let code_matches: Vec<&ObservedDiagnostic> = match spec.message.as_deref() {
+        Some(want) if !code_matches.is_empty() => {
+            let matching: Vec<_> = code_matches
+                .iter()
+                .copied()
+                .filter(|d| d.message.contains(want))
+                .collect();
+            if matching.is_empty() {
+                return ExpectErrorOutcome::MessageMismatch {
+                    code: spec.code.clone(),
+                    expected_message: want.to_owned(),
+                    observed_messages: code_matches.iter().map(|d| d.message.clone()).collect(),
+                };
+            }
+            matching
+        }
+        _ => code_matches,
+    };
 
     if code_matches.is_empty() {
         let observed_codes = diagnostics.iter().filter_map(|d| d.code.clone()).collect();
@@ -225,6 +263,21 @@ mod tests {
             primary_text: "early_return?".into(),
             related_texts: vec!["linear value `txn` created here".into()],
         }
+    }
+
+    #[test]
+    fn message_must_appear_in_a_diagnostic_with_the_code() {
+        let found = ExpectErrorSpec::new("E0302").with_message("unconsumed linear");
+        assert!(verify_expect_error(&found, &[linear_leak_diag()]).is_pass());
+        let missing = ExpectErrorSpec::new("E0302").with_message("moved twice");
+        assert_eq!(
+            verify_expect_error(&missing, &[linear_leak_diag()]),
+            ExpectErrorOutcome::MessageMismatch {
+                code: "E0302".into(),
+                expected_message: "moved twice".into(),
+                observed_messages: vec!["unconsumed linear obligation `txn`".into()],
+            }
+        );
     }
 
     #[test]

@@ -246,6 +246,12 @@ pub fn compile(
     entry: &str,
     options: &WasmOptions,
 ) -> Result<WasmArtifact, WasmError> {
+    // SH4 swap point (#1275): the `wasm` hook may compile the component.
+    if let Some(hook) = crate::codegen_swap::installed().wasm
+        && let Some(r) = hook(world, entry, options)
+    {
+        return r;
+    }
     if options.max_memory_pages == 0 || options.max_memory_pages > 65536 {
         return Err(WasmError::Limit(
             "max_memory_pages must be in 1..=65536".into(),
@@ -257,7 +263,7 @@ pub fn compile(
         .ok_or_else(|| WasmError::Entry(format!("unknown entry function '{entry}'")))?;
     let mut program = crate::ir::lower_world(world);
     if options.optimize {
-        crate::ir_opt::optimize(world, &mut program).map_err(WasmError::Invalid)?;
+        crate::ir_opt_policy::optimize(world, &mut program).map_err(WasmError::Invalid)?;
     }
     let stack_switching = options.effects == EffectLowering::StackSwitching;
     let plan = analysis::plan(

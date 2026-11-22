@@ -35,9 +35,9 @@ DIVERGENT = {
     "huffman": ("huffman", "out.push(wrapping_u8(shl(acc, pad) | wrapping_sub(bit(pad), 1)));", "out.push(wrapping_u8(shl(acc, pad)));"),
     "prefix": ("prefix", "used: wrapping_sub(inc(i), at)", "used: wrapping_sub(i, at)"),
     "table": ("table", "wrapping_sub(t.inserted, table_len(in t))", "wrapping_sub(t.inserted, inc(table_len(in t)))"),
-    "varint": ("varint", "if v < 64 {", "if v <= 64 {"),
+    "varint": ("varint", "if v < VI1_LIMIT {", "if v <= VI1_LIMIT {"),
     "frame": ("frame", "if n.used == p.len() {", "if n.used <= p.len() {"),
-    "priority": ("priority", "item.kind == 0 && item.mag <= 7", "item.kind == 0 && item.mag <= 8"),
+    "priority": ("priority", "item.kind == ITEM_INTEGER && item.mag <= MAX_URGENCY", "item.kind == ITEM_INTEGER && item.mag <= URGENCY_LEVELS"),
     "message": ("message", "if hosts > 1 {", "if hosts > 2 {"),
     "capsule": ("capsule", "(widen_u64(byte(in v, 0)) << 24)", "(widen_u64(byte(in v, 0)) << 16)"),
 }

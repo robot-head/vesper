@@ -1,0 +1,21 @@
+// Module ascii of @vesper/prism-target: the ASCII bytes its modules compare
+// against. Untyped, so a member is a `u8` or a `u64` where it is used.
+
+// ASCII characters.
+pub enum Ascii: _ {
+    Nul = 0,
+    Space = 0x20,
+    Percent = 0x25,
+    Dot = 0x2e,
+    Slash = 0x2f,
+    Digit0 = 0x30,
+    Digit9 = 0x39,
+    Question = 0x3f,
+    UpperA = 0x41,
+    UpperF = 0x46,
+    UpperZ = 0x5a,
+    Backslash = 0x5c,
+    LowerA = 0x61,
+    LowerF = 0x66,
+    LowerZ = 0x7a,
+}

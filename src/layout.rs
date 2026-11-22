@@ -29,7 +29,17 @@ pub struct LayoutVariant {
     pub fields: Vec<LayoutField>,
 }
 impl Layout {
+    /// The layout of `ty`: [`rust_layout_of`], or the installed
+    /// [`LayoutTable`] (the hybrid build's Vesper layout).
     pub fn of(world: &World, ty: &Type) -> Result<Self, String> {
+        match LAYOUT_TABLE.get() {
+            // While a `.vsys` handle drop plan runs, `Box` detection reads
+            // thread-local state the Vesper layout does not see.
+            Some(table) if !crate::fip::handle_drops_active() => (table.of)(world, ty),
+            _ => rust_layout_of(world, ty),
+        }
+    }
+    fn rust_of(world: &World, ty: &Type) -> Result<Self, String> {
         Self::build(
             world,
             &crate::numeric::default_type(ty),
@@ -49,6 +59,16 @@ impl Layout {
                 "value layout exceeds 128 levels; use an owning indirection for recursive data"
                     .into(),
             );
+        }
+        // `i128` and `u128` are two words, low word first (SH2 lane 2, #1174).
+        if crate::numeric::is_wide_name(ty.name())
+            && matches!(ty, Type::Named(_, a) if a.is_empty())
+        {
+            return Ok(Self {
+                ty: ty.clone(),
+                size: 16,
+                kind: LayoutKind::Scalar,
+            });
         }
         if matches!(ty, Type::IntLiteral(_) | Type::Function { .. })
             || crate::numeric::is_scalar_name(ty.name())
@@ -265,6 +285,34 @@ pub const RUST_WORD_LAYOUT: WordLayout = WordLayout {
 
 static WORD_LAYOUT: std::sync::OnceLock<WordLayout> = std::sync::OnceLock::new();
 
+/// [`Layout::of`] as a function table: the swap-in point for the whole
+/// layout in the hybrid Stage 2 build (self-hosting SH2 lane 5, #1177),
+/// which installs `@vesper/check-layout` here. Nothing in the default
+/// compiler installs one, so it always runs [`rust_layout_of`]. An installed
+/// `of` must return exactly what [`rust_layout_of`] returns (the hybrid's
+/// tests check it).
+#[derive(Debug, Clone, Copy)]
+pub struct LayoutTable {
+    /// [`Layout::of`].
+    pub of: fn(&World, &Type) -> Result<Layout, String>,
+}
+
+/// The Rust layout, the default [`LayoutTable`].
+pub const RUST_LAYOUT: LayoutTable = LayoutTable { of: rust_layout_of };
+
+static LAYOUT_TABLE: std::sync::OnceLock<LayoutTable> = std::sync::OnceLock::new();
+
+/// Replace [`RUST_LAYOUT`] for the rest of the process. Only the first call
+/// takes effect; a later one returns its table back.
+pub fn install_layout(table: LayoutTable) -> Result<(), LayoutTable> {
+    LAYOUT_TABLE.set(table)
+}
+
+/// [`Layout::of`] by the Rust layout, whatever table is installed.
+pub fn rust_layout_of(world: &World, ty: &Type) -> Result<Layout, String> {
+    Layout::rust_of(world, ty)
+}
+
 /// Replace [`RUST_WORD_LAYOUT`] for the rest of the process. Only the first
 /// call takes effect; a later one returns its table back.
 pub fn install_word_layout(table: WordLayout) -> Result<(), WordLayout> {
@@ -324,6 +372,20 @@ pub fn decode(world: &World, ty: &Type, bytes: &[u8]) -> Result<crate::runtime::
             // An f32 is the low half of its word.
             "f32" => Value::Float32(f32::from_bits(word() as u32)),
             "bool" => Value::Bool(word() != 0),
+            n if crate::numeric::is_wide_name(n) => {
+                let low = u128::from(word());
+                let high = u128::from(u64::from_ne_bytes(
+                    bytes
+                        .get(8..16)
+                        .ok_or("truncated native 128-bit integer")?
+                        .try_into()
+                        .unwrap(),
+                ));
+                crate::runtime::integer_from_pattern(
+                    crate::numeric::IntegerKind::from_name(n).unwrap(),
+                    low | (high << 64),
+                )
+            }
             n if crate::numeric::IntegerKind::from_name(n).is_some() => {
                 crate::runtime::integer_from_word(
                     crate::numeric::IntegerKind::from_name(n).unwrap(),

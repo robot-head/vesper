@@ -1,20 +1,10 @@
 // Sequence, sort, search and text helpers.
 use self::codes::{
-    e_changed,
-    e_click,
-    e_focused,
-    k_button,
-    k_container,
-    k_input,
-    none_id,
-    p_enabled,
-    p_text,
-    p_value,
-    p_visible,
-    p_width,
-    v_bool,
-    v_int,
-    v_text
+    Event,
+    Prop,
+    ValueTag,
+    WidgetKind,
+    NONE_ID
 };
 use self::{
     Lim,
@@ -61,7 +51,7 @@ pub fn get_u64(in s: Slice[u64], i: u64) -> u64 {
 pub fn seq_u64(in s: ChunkSeq[u64], i: u64) -> u64 {
     match s.try_get(i) {
         Option::Some(v) => v,
-        Option::None => none_id(),
+        Option::None => NONE_ID,
     }
 }
 
@@ -248,7 +238,7 @@ pub fn position(in s: ChunkSeq[u64], v: u64) -> u64 {
             return i;
         }
     }
-    none_id()
+    NONE_ID
 }
 
 // Stable bottom-up merge sort of the indices `idx` by `keys[idx[i]]`.
@@ -348,7 +338,7 @@ pub fn find_key(in keys: ChunkSeq[u64], in sorted: ChunkSeq[u64], key: u64) -> u
             return i;
         }
     }
-    none_id()
+    NONE_ID
 }
 
 // Whether a Unicode scalar is White_Space (Rust's char::is_whitespace).
@@ -429,13 +419,13 @@ pub fn blank_seq(in bytes: ChunkSeq[u8], start: u64, len: u64) -> bool {
 
 // view::property_valid. `payload` is an Int's bits.
 pub fn property_valid(kind: u64, property: u64, tag: u64, payload: u64) -> bool {
-    if property == p_text() && tag == v_text() {
-        kind != k_container()
-    } else if property == p_value() && tag == v_text() {
-        kind == k_input()
-    } else if (property == p_enabled() || property == p_visible()) && tag == v_bool() {
+    if property == Prop::Text && tag == ValueTag::Text {
+        kind != WidgetKind::Container
+    } else if property == Prop::Value && tag == ValueTag::Text {
+        kind == WidgetKind::Input
+    } else if (property == Prop::Enabled || property == Prop::Visible) && tag == ValueTag::Bool {
         true
-    } else if property == p_width() && tag == v_int() {
+    } else if property == Prop::Width && tag == ValueTag::Int {
         payload < I64_SIGN
     } else {
         false
@@ -444,10 +434,10 @@ pub fn property_valid(kind: u64, property: u64, tag: u64, payload: u64) -> bool 
 
 // view::event_valid.
 pub fn event_valid(kind: u64, event: u64) -> bool {
-    if kind == k_button() {
-        event == e_click() || event == e_focused()
-    } else if kind == k_input() {
-        event == e_changed() || event == e_focused()
+    if kind == WidgetKind::Button {
+        event == Event::Click || event == Event::Focused
+    } else if kind == WidgetKind::Input {
+        event == Event::Changed || event == Event::Focused
     } else {
         false
     }

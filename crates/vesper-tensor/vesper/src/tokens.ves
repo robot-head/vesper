@@ -39,14 +39,17 @@ const UTF8_CONTINUATION_MASK: u8 = 192;
 const UTF8_CONTINUATION: u8 = 128;
 // Binary32 sign bit, for `total_order`.
 const F32_SIGN: u32 = 2147483648;
+// The number of byte values, for the one-byte piece cache in `encode`.
+const BYTE_VALUES: u64 = 256;
 // The low word of a node or heap word.
 const LOW_32: u64 = 4294967295;
 
-// The FNV-1a hash of `s[start..start + len]`.
+// The FNV-1a hash of `s[start..start + len]` (callers keep the range in
+// bounds, so the index arithmetic cannot wrap).
 fn fnv(in s: Slice[u8], start: u64, len: u64) -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
     let mut h: u64 = FNV_OFFSET;
     for i in u64_zero()..len {
-        h = wrapping_mul(h ^ widen_u64(s[start + i]), FNV_PRIME);
+        h = wrapping_mul(h ^ widen_u64(s[wrapping_add(start, i)]), FNV_PRIME);
     }
     h
 }
@@ -65,7 +68,7 @@ fn piece_eq(
         return false;
     }
     for i in u64_zero()..len {
-        if bytes[at + i] != s[start + i] {
+        if bytes[wrapping_add(at, i)] != s[wrapping_add(start, i)] {
             return false;
         }
     }
@@ -170,24 +173,39 @@ fn dead() -> u64 {
     LOW_32 + 1
 }
 
+// Word `k` of node `i` (node offsets stay below `w.len()`, so the
+// arithmetic cannot wrap).
+fn node(i: u64, k: u64) -> u64 {
+    wrapping_add(wrapping_mul(3, i), k)
+}
+
 fn token_of(in w: Slice[u64], i: u64) -> u32 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
-    wrapping_u32(w[3 * i] & LOW_32)
+    wrapping_u32(w[node(i, 0)] & LOW_32)
 }
 
 fn version_of(in w: Slice[u64], i: u64) -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
-    w[3 * i] >> 32
+    w[node(i, 0)] >> 32
 }
 
 // A heap entry is four words at `heap + 4 * k`: the order key
 // `(total_order(score) << 32) | (NONE - left)`, `(left << 32) | right`,
-// `(left version << 32) | right version`, and the merged id.
-fn swap_entries(inout w: Slice[u64], a: u64, b: u64) eff [Fail[ArithOverflow], Fail[RuntimeError]] {
-    for t in u64_zero()..4 {
-        let x = w[a + t];
-        let y = w[b + t];
-        w.set(a + t, y);
-        w.set(b + t, x);
-    }
+// `(left version << 32) | right version`, and the merged id. Both sifts
+// move a hole instead of swapping (the order `BinaryHeap` keeps), and the
+// entry offsets stay below `w.len()`, so their arithmetic cannot wrap.
+fn entry(heap: u64, k: u64) -> u64 {
+    wrapping_add(heap, wrapping_mul(4, k))
+}
+
+// Copies entry `from` over entry `to`.
+fn move_entry(inout w: Slice[u64], to: u64, from: u64) eff [Fail[RuntimeError]] {
+    let a = w[from];
+    let b = w[wrapping_add(from, 1)];
+    let c = w[wrapping_add(from, 2)];
+    let d = w[wrapping_add(from, 3)];
+    w.set(to, a);
+    w.set(wrapping_add(to, 1), b);
+    w.set(wrapping_add(to, 2), c);
+    w.set(wrapping_add(to, 3), d);
 }
 
 fn heap_push(
@@ -199,23 +217,24 @@ fn heap_push(
     versions: u64,
     id: u64
 ) -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
-    let at = heap + 4 * count;
-    w.set(at, order);
-    w.set(at + 1, pair);
-    w.set(at + 2, versions);
-    w.set(at + 3, id);
     let mut c = count;
     loop {
         if c == 0 {
             break;
         }
-        let p = (c - 1) / 2;
-        if w[heap + 4 * p] >= w[heap + 4 * c] {
+        let p = wrapping_sub(c, 1) >> 1;
+        let at = entry(heap, p);
+        if w[at] >= order {
             break;
         }
-        swap_entries(inout w, heap + 4 * p, heap + 4 * c);
+        move_entry(inout w, entry(heap, c), at);
         c = p;
     }
+    let at = entry(heap, c);
+    w.set(at, order);
+    w.set(wrapping_add(at, 1), pair);
+    w.set(wrapping_add(at, 2), versions);
+    w.set(wrapping_add(at, 3), id);
     count + 1
 }
 
@@ -223,33 +242,43 @@ fn heap_push(
 // returns the new count.
 fn heap_pop(inout w: Slice[u64], heap: u64, count: u64)
     -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
-    for t in u64_zero()..4 {
-        let x = w[heap + t];
-        w.set(heap - 4 + t, x);
-    }
+    move_entry(inout w, heap - 4, heap);
     let n = count - 1;
-    if n > 0 {
-        for t in u64_zero()..4 {
-            let x = w[heap + 4 * n + t];
-            w.set(heap + t, x);
-        }
+    if n == 0 {
+        return n;
     }
+    // Sift the last entry down from the root.
+    let last = entry(heap, n);
+    let key = w[last];
+    let pair = w[wrapping_add(last, 1)];
+    let versions = w[wrapping_add(last, 2)];
+    let id = w[wrapping_add(last, 3)];
     let mut r: u64 = 0;
     loop {
-        let c = 2 * r + 1;
+        let c = wrapping_add(wrapping_mul(2, r), 1);
         if c >= n {
             break;
         }
         let mut m = c;
-        if c + 1 < n && w[heap + 4 * (c + 1)] > w[heap + 4 * c] {
-            m = c + 1;
+        let mut mk = w[entry(heap, c)];
+        if wrapping_add(c, 1) < n {
+            let rk = w[entry(heap, wrapping_add(c, 1))];
+            if rk > mk {
+                m = wrapping_add(c, 1);
+                mk = rk;
+            }
         }
-        if w[heap + 4 * r] >= w[heap + 4 * m] {
+        if key >= mk {
             break;
         }
-        swap_entries(inout w, heap + 4 * r, heap + 4 * m);
+        move_entry(inout w, entry(heap, r), entry(heap, m));
         r = m;
     }
+    let at = entry(heap, r);
+    w.set(at, key);
+    w.set(wrapping_add(at, 1), pair);
+    w.set(wrapping_add(at, 2), versions);
+    w.set(wrapping_add(at, 3), id);
     n
 }
 
@@ -266,7 +295,7 @@ fn candidate(
     count: u64,
     i: u64
 ) -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
-    let j = w[3 * i + 2];
+    let j = w[node(i, 2)];
     if j == none() {
         return count;
     }
@@ -276,11 +305,12 @@ fn candidate(
     let a_len = offsets[a + 1] - a_at;
     let b_at = offsets[b];
     let b_len = offsets[b + 1] - b_at;
+    // Pieces are a few bytes: a loop beats a block copy call.
     for t in u64_zero()..a_len {
-        key.set(t, bytes[a_at + t]);
+        key.set(t, bytes[wrapping_add(a_at, t)]);
     }
     for t in u64_zero()..b_len {
-        key.set(a_len + t, bytes[b_at + t]);
+        key.set(wrapping_add(a_len, t), bytes[wrapping_add(b_at, t)]);
     }
     let e = lookup(in bytes, in offsets, in table, in key, 0, a_len + b_len);
     if e == 0 {
@@ -329,6 +359,10 @@ pub fn encode(
         w.set(0, widen_u64(e - 1));
         n = 1;
     }
+    let mut single: ChunkSeq[u32] = ChunkSeq::with_capacity(BYTE_VALUES);
+    for _b in u64_zero()..BYTE_VALUES {
+        single.push(0);
+    }
     let mut start: u64 = 0;
     let mut unit: u64 = 0;
     for i in u64_zero()..len {
@@ -340,14 +374,28 @@ pub fn encode(
         unit = unit + 1;
         let continues = i + 1 < len && text[i + 1] & UTF8_CONTINUATION_MASK == UTF8_CONTINUATION;
         if !(continues && unit < 4) {
-            let e = lookup(in bytes, in offsets, in table, in text, start, unit);
+            let e = if unit == 1 {
+                // A one-byte unit's piece depends on the byte alone:
+                // look each byte up once (`single` holds `e + 1`).
+                let b = widen_u64(text[start]);
+                let known = single[b];
+                if known == 0 {
+                    let found = lookup(in bytes, in offsets, in table, in text, start, 1);
+                    single.set(b, found + 1);
+                    found
+                } else {
+                    known - 1
+                }
+            } else {
+                lookup(in bytes, in offsets, in table, in text, start, unit)
+            };
             if e != 0 {
-                w.set(3 * n, widen_u64(e - 1));
+                w.set(node(n, 0), widen_u64(e - 1));
                 n = n + 1;
             } else {
                 for t in u64_zero()..unit {
                     let id = byte_token(in bytes, in offsets, in table, inout key, text[start + t]);
-                    w.set(3 * n, widen_u64(id));
+                    w.set(node(n, 0), widen_u64(id));
                     n = n + 1;
                 }
             }
@@ -357,7 +405,7 @@ pub fn encode(
     for i in u64_zero()..n {
         w
             .set(
-            3 * i + 1,
+            node(i, 1),
             if i == 0 {
                 none()
             } else {
@@ -366,7 +414,7 @@ pub fn encode(
         );
         w
             .set(
-            3 * i + 2,
+            node(i, 2),
             if i + 1 == n {
                 none()
             } else {
@@ -399,11 +447,11 @@ pub fn encode(
         let id = w[heap - 1];
         let i = pair >> 32;
         let j = pair & LOW_32;
-        let fresh = w[3 * i + 1]
+        let fresh = w[node(i, 1)]
             != dead()
-            && w[3 * j + 1]
+            && w[node(j, 1)]
             != dead()
-            && w[3 * i + 2]
+            && w[node(i, 2)]
             == j
             && version_of(in w, i)
             == versions
@@ -413,14 +461,14 @@ pub fn encode(
             & LOW_32;
         if fresh {
             let merged = ((version_of(in w, i) + 1) << 32) | id;
-            w.set(3 * i, merged);
-            w.set(3 * j + 1, dead());
-            let after = w[3 * j + 2];
-            w.set(3 * i + 2, after);
+            w.set(node(i, 0), merged);
+            w.set(node(j, 1), dead());
+            let after = w[node(j, 2)];
+            w.set(node(i, 2), after);
             if after != none() {
-                w.set(3 * after + 1, i);
+                w.set(node(after, 1), i);
             }
-            let before = w[3 * i + 1];
+            let before = w[node(i, 1)];
             if before != none() {
                 count = candidate(
                     in bytes,
@@ -458,7 +506,7 @@ pub fn encode(
         loop {
             out.set(k, token_of(in w, i));
             k = k + 1;
-            i = w[3 * i + 2];
+            i = w[node(i, 2)];
             if i == none() {
                 break;
             }

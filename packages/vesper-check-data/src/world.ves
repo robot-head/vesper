@@ -90,6 +90,8 @@ pub copy struct Known {
     i32_: u32,
     i64_: u32,
     isize_: u32,
+    i128_: u32,
+    u128_: u32,
     f32_: u32,
     f64_: u32,
     bool_: u32,
@@ -124,6 +126,8 @@ pub fn known_new(inout n: Names) -> Known {
         i32_: n.intern(in "i32".as_bytes()),
         i64_: n.intern(in "i64".as_bytes()),
         isize_: n.intern(in "isize".as_bytes()),
+        i128_: n.intern(in "i128".as_bytes()),
+        u128_: n.intern(in "u128".as_bytes()),
         f32_: n.intern(in "f32".as_bytes()),
         f64_: n.intern(in "f64".as_bytes()),
         bool_: n.intern(in "bool".as_bytes()),
@@ -168,12 +172,26 @@ impl Known {
             || s
             == self
             .isize_
+            || s
+            == self
+            .i128_
+            || s
+            == self
+            .u128_
+    }
+
+    // `numeric::is_wide_name`: the two-word integers (#1174), which
+    // `is_integer` also includes.
+    pub fn is_wide(self, s: u32) -> bool {
+        s == self.i128_ || s == self.u128_
     }
 
     // `numeric::is_scalar_name`.
     pub fn is_scalar(self, s: u32) -> bool {
         self
             .is_integer(s)
+            || self
+            .is_wide(s)
             || s
             == self
             .f32_

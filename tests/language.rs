@@ -235,7 +235,17 @@ fn closure_capture() {
 }
 #[test]
 fn borrowed_capture() {
-    rejects("fn bad(in x: i64) { let f = || x; }", "E0310");
+    // A copy value lent `in` is captured as a copy (§4.2, #1242); a borrow
+    // of a value that is not copy, or an `inout` one, cannot be captured.
+    assert_eq!(
+        run("fn g(in x: i64) -> i64 { let f = || x; f() } fn main() -> i64 { g(42) }"),
+        "42"
+    );
+    rejects("fn bad(inout x: i64) { let f = || x; }", "E0310");
+    rejects(
+        "fn bad(in x: ChunkSeq[u64]) -> u64 { let f = || x.len(); f() }",
+        "E0310",
+    );
 }
 #[test]
 fn enum_match() {

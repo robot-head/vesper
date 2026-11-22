@@ -89,8 +89,7 @@ pub fn run(c: Command<'_>) -> Result<(), String> {
         "build" => build(&c, &checked),
         "run" => {
             // The evaluator reaches the same host functions as `jit`.
-            let symbols = host_symbols(&imports, "run")?;
-            let host = ffi_lowering::EvalHost::new(&imports, &symbols)?;
+            let host = eval_host(&imports, "run")?;
             let value = checked
                 .evaluate(c.entry, |call| host.call(call))
                 .map_err(|e| e.to_string())?;
@@ -104,6 +103,15 @@ pub fn run(c: Command<'_>) -> Result<(), String> {
     }
 }
 
+/// Bind the CLI's built-in foreign functions to evaluator calls.
+pub(crate) fn eval_host(
+    imports: &Imports,
+    command: &str,
+) -> Result<ffi_lowering::EvalHost, String> {
+    let symbols = host_symbols(imports, command)?;
+    ffi_lowering::EvalHost::new(imports, &symbols)
+}
+
 /// The host functions the CLI provides for `imports`: every function of a
 /// library linked as [`STD_HOST`].
 fn host_symbols(
@@ -113,6 +121,11 @@ fn host_symbols(
     let mut out = vec![];
     let std = ffi_lowering::std_host_symbols();
     for (library, _) in imports.libraries() {
+        // `@vesper-std/cpu`'s instructions are native code the backend
+        // defines; nothing hosts them.
+        if library.link().name() == ffi_lowering::cpu::LINK_NAME {
+            continue;
+        }
         if library.link().name() != STD_HOST {
             return Err(format!(
                 "{command}: library {} links '{}', which this vesper does not host; link it into an executable with `vesper build`",

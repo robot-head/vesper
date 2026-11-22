@@ -78,12 +78,89 @@ pub copy struct Totals {
 
 // Checked arithmetic and budgets.
 
+const MAX_U64: u64 = 18446744073709551615;
+
+// `vesper_span::Limits::HARD`, which `validate` checks the span limits
+// against, and the name budget's ceiling.
+enum Hard: _ {
+    SourceBytes = 1048576,
+    Lines = 262145,
+    MetadataBytes = 16777216,
+    Work = 67108864,
+    Edits = 4096,
+    OutputBytes = 2097152,
+    Diagnostics = 4096,
+    Labels = 16384,
+    Fixes = 4096,
+    TextBytes = 2097152,
+    NameBytes = 4096
+}
+
+// The cost factors of the budgets, as src/lib.rs charges them.
+enum PrepareCost: _ {
+    // Each label scans the source twice; each text byte costs four.
+    LabelScans = 2,
+    TextWork = 4,
+    // Both temporary DTOs and the final checked copy are present briefly.
+    Copies = 2
+}
+
+enum LspCost: _ {
+    SourceWork = 4,
+    TextWork = 32,
+    ShapeWork = 512,
+    // serde_json values per diagnostic and per label.
+    DiagnosticNodes = 24,
+    LabelNodes = 20
+}
+
+enum TerminalCost: _ {
+    SourceWork = 2,
+    TextWork = 4,
+    NameWork = 8,
+    LineCopies = 2,
+    CharBytes = 4,
+    TextBytes = 4,
+    LabelCopies = 16
+}
+
+// The bytes the port tests and writes, and `'a' - 10` for hex digits.
+enum Ascii: _ {
+    Backspace = 0x08,
+    Tab = 0x09,
+    Lf = 0x0a,
+    VTab = 0x0b,
+    FormFeed = 0x0c,
+    Cr = 0x0d,
+    Esc = 0x1b,
+    Space = 0x20,
+    Quote = 0x22,
+    Comma = 0x2c,
+    Zero = 0x30,
+    Colon = 0x3a,
+    LBracket = 0x5b,
+    Backslash = 0x5c,
+    RBracket = 0x5d,
+    LowerHexBase = 0x57,
+    LowerB = 0x62,
+    LowerF = 0x66,
+    LowerM = 0x6d,
+    LowerN = 0x6e,
+    LowerR = 0x72,
+    LowerT = 0x74,
+    RBrace = 0x7d,
+    Del = 0x7f
+}
+
+// The UTF-16 units of a 4-byte char (a surrogate pair).
+const PAIR_UNITS: u64 = 2;
+
 fn u(x: usize) -> u64 {
     widen_u64(x)
 }
 
 fn add(a: u64, b: u64, r: Res) -> u64 eff [Fail[Failure]] {
-    if a > wrapping_sub(18446744073709551615, b) {
+    if a > wrapping_sub(MAX_U64, b) {
         Fail::raise(Failure::Budget(r));
     }
     wrapping_add(a, b)
@@ -106,22 +183,22 @@ fn bound(n: u64, cap: usize, r: Res) -> Unit eff [Fail[Failure]] {
 // `Limits::validate`: the span limits against `vesper_span::Limits::HARD`,
 // then the name budget.
 fn validate(in l: Caps) -> Unit eff [Fail[Failure]] {
-    if u(l.max_source_bytes) > 1048576 || u(l.max_lines) > 262145 {
+    if u(l.max_source_bytes) > Hard::SourceBytes || u(l.max_lines) > Hard::Lines {
         Fail::raise(Failure::SpanLimits);
     }
-    if u(l.max_metadata_bytes) > 16777216 || u(l.max_work) > 67108864 {
+    if u(l.max_metadata_bytes) > Hard::MetadataBytes || u(l.max_work) > Hard::Work {
         Fail::raise(Failure::SpanLimits);
     }
-    if u(l.max_edits) > 4096 || u(l.max_output_bytes) > 2097152 {
+    if u(l.max_edits) > Hard::Edits || u(l.max_output_bytes) > Hard::OutputBytes {
         Fail::raise(Failure::SpanLimits);
     }
-    if u(l.max_diagnostics) > 4096 || u(l.max_labels) > 16384 {
+    if u(l.max_diagnostics) > Hard::Diagnostics || u(l.max_labels) > Hard::Labels {
         Fail::raise(Failure::SpanLimits);
     }
-    if u(l.max_fixes) > 4096 || u(l.max_text_bytes) > 2097152 {
+    if u(l.max_fixes) > Hard::Fixes || u(l.max_text_bytes) > Hard::TextBytes {
         Fail::raise(Failure::SpanLimits);
     }
-    if u(l.max_name_bytes) > 4096 {
+    if u(l.max_name_bytes) > Hard::NameBytes {
         Fail::raise(Failure::InvalidLimits);
     }
 }
@@ -209,7 +286,7 @@ fn line_count(in t: Slice[u8]) -> u64 {
         if i >= n {
             break;
         }
-        let found = match t[i..n].find_either(13, 10) {
+        let found = match t[i..n].find_either(Ascii::Cr, Ascii::Lf) {
             Option::Some(k) => wrapping_add(i, k),
             Option::None => n,
         };
@@ -218,7 +295,7 @@ fn line_count(in t: Slice[u8]) -> u64 {
         }
         count = wrapping_add(count, 1);
         i = wrapping_add(found, 1);
-        if byte(in t, found) == 13 && i < n && byte(in t, i) == 10 {
+        if byte(in t, found) == Ascii::Cr && i < n && byte(in t, i) == Ascii::Lf {
             i = wrapping_add(i, 1);
         }
     }
@@ -254,12 +331,12 @@ fn valid_offset(in t: Slice[u8], offset: u64) -> Unit eff [Fail[Failure]] {
     if offset
         > 0
         && byte(in t, wrapping_sub(offset, 1))
-        == 13
+        == Ascii::Cr
         && offset
         < t
         .len()
         && byte(in t, offset)
-        == 10 {
+        == Ascii::Lf {
         Fail::raise(Failure::LineEndingInterior);
     }
 }
@@ -280,12 +357,12 @@ pub fn prepare_check(in text: Str, in input: Slice[u64], count: u64, in caps: Ca
     let mut w: u64 = 0;
     for d in 0..count {
         let code_len = word(in input, w);
-        let message_len = word(in input, wrapping_add(w, 1));
-        let help_len = word(in input, wrapping_add(w, 3));
-        let related = word(in input, wrapping_add(w, 4));
-        let start = word(in input, wrapping_add(w, 5));
-        let end = word(in input, wrapping_add(w, 6));
-        w = wrapping_add(w, 7);
+        let message_len = word(in input, wrapping_add(w, In::MessageLen));
+        let help_len = word(in input, wrapping_add(w, In::HelpLen));
+        let related = word(in input, wrapping_add(w, In::Related));
+        let start = word(in input, wrapping_add(w, In::Start));
+        let end = word(in input, wrapping_add(w, In::End));
+        w = wrapping_add(w, In::Words);
         if code_len == 0 || message_len == 0 {
             Fail::raise(Failure::InvalidDiagnostic);
         }
@@ -297,9 +374,9 @@ pub fn prepare_check(in text: Str, in input: Slice[u64], count: u64, in caps: Ca
         total = add(total, help_len, Res::Text);
         valid_span(in t, start, end);
         for l in 0..related {
-            valid_span(in t, word(in input, w), word(in input, wrapping_add(w, 1)));
-            total = add(total, word(in input, wrapping_add(w, 2)), Res::Text);
-            w = wrapping_add(w, 3);
+            valid_span(in t, word(in input, w), word(in input, wrapping_add(w, Label::End)));
+            total = add(total, word(in input, wrapping_add(w, Label::MessageLen)), Res::Text);
+            w = wrapping_add(w, Label::Words);
         }
         bound(total, caps.max_text_bytes, Res::Text);
     }
@@ -308,13 +385,20 @@ pub fn prepare_check(in text: Str, in input: Slice[u64], count: u64, in caps: Ca
         add(mul(labels, u(sizes.label), Res::Metadata), total, Res::Metadata),
         Res::Metadata
     );
-    // Both temporary DTOs and the final checked copy are present briefly.
-    bound(mul(metadata, 2, Res::Metadata), caps.max_metadata_bytes, Res::Metadata);
+    bound(
+        mul(metadata, PrepareCost::Copies, Res::Metadata),
+        caps.max_metadata_bytes,
+        Res::Metadata
+    );
     let work = add(
         n,
         add(
-            mul(mul(n, 2, Res::Work), labels, Res::Work),
-            add(mul(total, 4, Res::Work), add(labels, count, Res::Work), Res::Work),
+            mul(mul(n, PrepareCost::LabelScans, Res::Work), labels, Res::Work),
+            add(
+                mul(total, PrepareCost::TextWork, Res::Work),
+                add(labels, count, Res::Work),
+                Res::Work
+            ),
             Res::Work
         ),
         Res::Work
@@ -326,6 +410,19 @@ pub fn prepare_check(in text: Str, in input: Slice[u64], count: u64, in caps: Ca
     }
 }
 
+// `prepare`'s input: seven words per diagnostic (code, message and help
+// lengths, help presence, related label count, primary span), then three
+// per related label (`Label`).
+enum In: _ {
+    CodeLen = 0,
+    MessageLen = 1,
+    HelpLen = 3,
+    Related = 4,
+    Start = 5,
+    End = 6,
+    Words = 7
+}
+
 // The checked diagnostics.
 //
 // `model` holds, per diagnostic: code length, message length, help (1 when
@@ -333,6 +430,23 @@ pub fn prepare_check(in text: Str, in input: Slice[u64], count: u64, in caps: Ca
 // primary first): span start, span end, message length. `pool` holds, per
 // diagnostic, the code, the message, the help and the label messages, in
 // that order.
+
+// A diagnostic and a label of the model.
+enum Model: _ {
+    CodeLen = 0,
+    MessageLen = 1,
+    HasHelp = 2,
+    HelpLen = 3,
+    Labels = 4,
+    Words = 5
+}
+
+enum Label: _ {
+    Start = 0,
+    End = 1,
+    MessageLen = 2,
+    Words = 3
+}
 
 // One diagnostic of the model: where its texts and labels are.
 copy struct Diag {
@@ -352,8 +466,8 @@ copy struct Diag {
 // The diagnostic at word `w` and pool offset `p`.
 fn diag_at(in model: Slice[u64], w: u64, p: u64) -> Diag {
     let code_len = word(in model, w);
-    let message_len = word(in model, wrapping_add(w, 1));
-    let help_len = word(in model, wrapping_add(w, 3));
+    let message_len = word(in model, wrapping_add(w, Model::MessageLen));
+    let help_len = word(in model, wrapping_add(w, Model::HelpLen));
     let message = wrapping_add(p, code_len);
     let help = wrapping_add(message, message_len);
     Diag {
@@ -361,18 +475,18 @@ fn diag_at(in model: Slice[u64], w: u64, p: u64) -> Diag {
         code_len: code_len,
         message: message,
         message_len: message_len,
-        has_help: word(in model, wrapping_add(w, 2)) != 0,
+        has_help: word(in model, wrapping_add(w, Model::HasHelp)) != 0,
         help: help,
         help_len: help_len,
-        labels: wrapping_add(w, 5),
+        labels: wrapping_add(w, Model::Words),
         label_text: wrapping_add(help, help_len),
-        count: word(in model, wrapping_add(w, 4))
+        count: word(in model, wrapping_add(w, Model::Labels))
     }
 }
 
 // The word index and the pool offset after `d`.
 fn next_word(in d: Diag) -> u64 {
-    wrapping_add(d.labels, wrapping_mul(d.count, 3))
+    wrapping_add(d.labels, wrapping_mul(d.count, Label::Words))
 }
 
 fn next_text(in model: Slice[u64], in d: Diag) -> u64 {
@@ -380,7 +494,13 @@ fn next_text(in model: Slice[u64], in d: Diag) -> u64 {
     for l in 0..d.count {
         p = wrapping_add(
             p,
-            word(in model, wrapping_add(d.labels, wrapping_add(wrapping_mul(l, 3), 2)))
+            word(
+                in model,
+                wrapping_add(
+                    d.labels,
+                    wrapping_add(wrapping_mul(l, Label::Words), Label::MessageLen)
+                )
+            )
         );
     }
     p
@@ -397,7 +517,7 @@ fn check_name(in name: Str, in caps: Caps) -> Unit eff [Fail[Failure]] {
     let b = name.as_bytes();
     for i in 0..n {
         let x = byte(in b, i);
-        if x < 32 || x == 127 {
+        if x < Ascii::Space || x == Ascii::Del {
             Fail::raise(Failure::Name);
         }
         if x == 194 && wrapping_add(i, 1) < n {
@@ -422,7 +542,7 @@ fn line_starts(in t: Slice[u8]) -> ChunkSeq[u64] {
         if i >= n {
             break;
         }
-        let found = match t[i..n].find_either(13, 10) {
+        let found = match t[i..n].find_either(Ascii::Cr, Ascii::Lf) {
             Option::Some(k) => wrapping_add(i, k),
             Option::None => n,
         };
@@ -430,7 +550,7 @@ fn line_starts(in t: Slice[u8]) -> ChunkSeq[u64] {
             break;
         }
         i = wrapping_add(found, 1);
-        if byte(in t, found) == 13 && i < n && byte(in t, i) == 10 {
+        if byte(in t, found) == Ascii::Cr && i < n && byte(in t, i) == Ascii::Lf {
             i = wrapping_add(i, 1);
         }
         starts.push(i);
@@ -468,7 +588,7 @@ fn utf16(in t: Slice[u8], from: u64, to: u64) -> u64 {
         let b = byte(in t, i);
         if !is_continuation(b) {
             units = if b >= 240 {
-                wrapping_add(units, 2)
+                wrapping_add(units, PAIR_UNITS)
             } else {
                 wrapping_add(units, 1)
             };
@@ -494,28 +614,49 @@ fn digits(n: u64) -> u64 {
 fn put_decimal(inout out: ChunkSeq[u8], n: u64) {
     let d = digits(n);
     let base = out.len();
-    out.resize(wrapping_add(base, d), 48);
+    out.resize(wrapping_add(base, d), Ascii::Zero);
     let mut x = n;
     for i in 0..d {
         let ok = out
             .try_set(
             wrapping_sub(wrapping_add(base, d), wrapping_add(i, 1)),
-            wrapping_u8(wrapping_add(x % 10, 48))
+            wrapping_u8(wrapping_add(x % 10, Ascii::Zero))
         );
         x = x / 10;
     }
 }
 
+// The bytes of a quoted JSON string's quotes, a two-byte escape and a
+// `\u00XX` escape.
+enum Json: _ {
+    Quotes = 2,
+    Escape = 2,
+    UnicodeEscape = 6
+}
+
 // The size of a quoted JSON string of `b[off..off + len]` as serde_json
 // writes it.
 fn quoted_size(in b: Slice[u8], off: u64, len: u64) -> u64 {
-    let mut size: u64 = 2;
+    let mut size = Json::Quotes;
     for i in off..wrapping_add(off, len) {
         let x = byte(in b, i);
-        size = if x == 34 || x == 92 || x == 8 || x == 9 || x == 10 || x == 12 || x == 13 {
-            wrapping_add(size, 2)
-        } else if x < 32 {
-            wrapping_add(size, 6)
+        size = if x
+            == Ascii::Quote
+            || x
+            == Ascii::Backslash
+            || x
+            == Ascii::Backspace
+            || x
+            == Ascii::Tab
+            || x
+            == Ascii::Lf
+            || x
+            == Ascii::FormFeed
+            || x
+            == Ascii::Cr {
+            wrapping_add(size, Json::Escape)
+        } else if x < Ascii::Space {
+            wrapping_add(size, Json::UnicodeEscape)
         } else {
             wrapping_add(size, 1)
         };
@@ -525,35 +666,35 @@ fn quoted_size(in b: Slice[u8], off: u64, len: u64) -> u64 {
 
 fn hex_digit(x: u64) -> u8 {
     if x < 10 {
-        wrapping_u8(wrapping_add(x, 48))
+        wrapping_u8(wrapping_add(x, Ascii::Zero))
     } else {
-        wrapping_u8(wrapping_add(x, 87))
+        wrapping_u8(wrapping_add(x, Ascii::LowerHexBase))
     }
 }
 
 // A quoted JSON string with serde_json's escapes.
 fn put_quoted(inout out: ChunkSeq[u8], in b: Slice[u8], off: u64, len: u64) {
-    out.push(34);
+    out.push(Ascii::Quote);
     let end = wrapping_add(off, len);
     let mut run = off;
     for i in off..end {
         let x = byte(in b, i);
-        if x < 32 || x == 34 || x == 92 {
+        if x < Ascii::Space || x == Ascii::Quote || x == Ascii::Backslash {
             out.extend(b[run..i]);
             run = wrapping_add(i, 1);
-            out.push(92);
-            if x == 34 || x == 92 {
+            out.push(Ascii::Backslash);
+            if x == Ascii::Quote || x == Ascii::Backslash {
                 out.push(x);
-            } else if x == 8 {
-                out.push(98);
-            } else if x == 9 {
-                out.push(116);
-            } else if x == 10 {
-                out.push(110);
-            } else if x == 12 {
-                out.push(102);
-            } else if x == 13 {
-                out.push(114);
+            } else if x == Ascii::Backspace {
+                out.push(Ascii::LowerB);
+            } else if x == Ascii::Tab {
+                out.push(Ascii::LowerT);
+            } else if x == Ascii::Lf {
+                out.push(Ascii::LowerN);
+            } else if x == Ascii::FormFeed {
+                out.push(Ascii::LowerF);
+            } else if x == Ascii::Cr {
+                out.push(Ascii::LowerR);
             } else {
                 out.extend("u00".as_bytes());
                 out.push(hex_digit(widen_u64(x) >> 4));
@@ -562,7 +703,31 @@ fn put_quoted(inout out: ChunkSeq[u8], in b: Slice[u8], off: u64, len: u64) {
         }
     }
     out.extend(b[run..end]);
-    out.push(34);
+    out.push(Ascii::Quote);
+}
+
+// A label's LSP range: start line, start character, end line, end
+// character.
+enum Pos: _ {
+    StartLine = 0,
+    StartCharacter = 1,
+    EndLine = 2,
+    EndCharacter = 3,
+    Words = 4
+}
+
+// The bytes of the LSP JSON's fixed text: `{"range":`, a range without its
+// numbers, `,"severity":1,"code":`, `,"source":"vesper","message":`,
+// `,"relatedInformation":[`, a related location without its texts and
+// range, and `,"data":{"help":` with its closing brace.
+enum LspText: _ {
+    RangeKey = 9,
+    Range = 61,
+    Code = 21,
+    Message = 29,
+    Related = 23,
+    Location = 41,
+    Help = 17
 }
 
 // The four position numbers of each label of the model, in label order:
@@ -572,8 +737,8 @@ fn positions(in t: Slice[u8], in model: Slice[u64], count: u64) -> ChunkSeq[u64]
     let mut out: ChunkSeq[u64] = ChunkSeq::new();
     let mut w: u64 = 0;
     for d in 0..count {
-        let labels = word(in model, wrapping_add(w, 4));
-        w = wrapping_add(w, 5);
+        let labels = word(in model, wrapping_add(w, Model::Labels));
+        w = wrapping_add(w, Model::Words);
         for l in 0..labels {
             for e in 0..2 {
                 let offset = word(in model, wrapping_add(w, e));
@@ -581,30 +746,30 @@ fn positions(in t: Slice[u8], in model: Slice[u64], count: u64) -> ChunkSeq[u64]
                 out.push(line);
                 out.push(utf16(in t, at(in starts, line), offset));
             }
-            w = wrapping_add(w, 3);
+            w = wrapping_add(w, Label::Words);
         }
     }
     out
 }
 
 fn range_size(in p: ChunkSeq[u64], i: u64) -> u64 {
-    let mut n: u64 = 61;
-    for k in 0..4 {
-        n = wrapping_add(n, digits(at(in p, wrapping_add(wrapping_mul(i, 4), k))));
+    let mut n = LspText::Range;
+    for k in 0..Pos::Words {
+        n = wrapping_add(n, digits(at(in p, wrapping_add(wrapping_mul(i, Pos::Words), k))));
     }
     n
 }
 
 fn put_range(inout out: ChunkSeq[u8], in p: ChunkSeq[u64], i: u64) {
-    let b = wrapping_mul(i, 4);
+    let b = wrapping_mul(i, Pos::Words);
     out.extend("{\"start\":{\"line\":".as_bytes());
     put_decimal(inout out, at(in p, b));
     out.extend(",\"character\":".as_bytes());
-    put_decimal(inout out, at(in p, wrapping_add(b, 1)));
+    put_decimal(inout out, at(in p, wrapping_add(b, Pos::StartCharacter)));
     out.extend("},\"end\":{\"line\":".as_bytes());
-    put_decimal(inout out, at(in p, wrapping_add(b, 2)));
+    put_decimal(inout out, at(in p, wrapping_add(b, Pos::EndLine)));
     out.extend(",\"character\":".as_bytes());
-    put_decimal(inout out, at(in p, wrapping_add(b, 3)));
+    put_decimal(inout out, at(in p, wrapping_add(b, Pos::EndCharacter)));
     out.extend("}}".as_bytes());
 }
 
@@ -627,10 +792,14 @@ pub fn lsp(
     let labels_in = u(label_count);
     let uri_len = uri.len();
     let names = mul(uri_len, labels_in, Res::Work);
-    let shape = mul(add(labels_in, count, Res::Work), 512, Res::Work);
+    let shape = mul(add(labels_in, count, Res::Work), LspCost::ShapeWork, Res::Work);
     let work = add(
-        mul(mul(n, 4, Res::Work), labels_in, Res::Work),
-        add(mul(add(u(text_bytes), names, Res::Work), 32, Res::Work), shape, Res::Work),
+        mul(mul(n, LspCost::SourceWork, Res::Work), labels_in, Res::Work),
+        add(
+            mul(add(u(text_bytes), names, Res::Work), LspCost::TextWork, Res::Work),
+            shape,
+            Res::Work
+        ),
         Res::Work
     );
     bound(work, caps.max_work, Res::Work);
@@ -647,21 +816,28 @@ pub fn lsp(
         if k > 0 {
             bytes = add(bytes, 1, Res::Output);
         }
-        let mut size = add(9, range_size(in pos, label), Res::Output);
-        size = add(size, wrapping_add(21, quoted_size(in pool, d.code, d.code_len)), Res::Output);
+        let mut size = add(LspText::RangeKey, range_size(in pos, label), Res::Output);
         size = add(
             size,
-            wrapping_add(29, quoted_size(in pool, d.message, d.message_len)),
+            wrapping_add(LspText::Code, quoted_size(in pool, d.code, d.code_len)),
+            Res::Output
+        );
+        size = add(
+            size,
+            wrapping_add(LspText::Message, quoted_size(in pool, d.message, d.message_len)),
             Res::Output
         );
         texts = add(texts, wrapping_add(d.code_len, d.message_len), Res::Metadata);
         if d.count > 1 {
-            size = add(size, 23, Res::Output);
+            size = add(size, LspText::Related, Res::Output);
             let mut m = d.label_text;
             for l in 0..d.count {
                 let len = word(
                     in model,
-                    wrapping_add(d.labels, wrapping_add(wrapping_mul(l, 3), 2))
+                    wrapping_add(
+                        d.labels,
+                        wrapping_add(wrapping_mul(l, Label::Words), Label::MessageLen)
+                    )
                 );
                 if l > 0 {
                     if l > 1 {
@@ -669,7 +845,7 @@ pub fn lsp(
                     }
                     let one = wrapping_add(
                         wrapping_add(
-                            wrapping_add(41, quoted_uri),
+                            wrapping_add(LspText::Location, quoted_uri),
                             range_size(in pos, wrapping_add(label, l))
                         ),
                         quoted_size(in pool, m, len)
@@ -684,7 +860,7 @@ pub fn lsp(
         if d.has_help {
             size = add(
                 size,
-                wrapping_add(17, quoted_size(in pool, d.help, d.help_len)),
+                wrapping_add(LspText::Help, quoted_size(in pool, d.help, d.help_len)),
                 Res::Output
             );
             texts = add(texts, d.help_len, Res::Metadata);
@@ -698,7 +874,11 @@ pub fn lsp(
     if bytes > u(caps.max_output_bytes) {
         Fail::raise(Failure::Output);
     }
-    let nodes = add(mul(count, 24, Res::Metadata), mul(labels, 20, Res::Metadata), Res::Metadata);
+    let nodes = add(
+        mul(count, LspCost::DiagnosticNodes, Res::Metadata),
+        mul(labels, LspCost::LabelNodes, Res::Metadata),
+        Res::Metadata
+    );
     bound(
         add(mul(nodes, u(sizes.value), Res::Metadata), texts, Res::Metadata),
         caps.max_metadata_bytes,
@@ -717,14 +897,14 @@ fn write_lsp(
     in uri: Str,
     in pos: ChunkSeq[u64]
 ) {
-    out.push(91);
+    out.push(Ascii::LBracket);
     let mut w: u64 = 0;
     let mut p: u64 = 0;
     let mut label: u64 = 0;
     for k in 0..count {
         let d = diag_at(in model, w, p);
         if k > 0 {
-            out.push(44);
+            out.push(Ascii::Comma);
         }
         out.extend("{\"range\":".as_bytes());
         put_range(inout out, in pos, label);
@@ -738,11 +918,14 @@ fn write_lsp(
             for l in 0..d.count {
                 let len = word(
                     in model,
-                    wrapping_add(d.labels, wrapping_add(wrapping_mul(l, 3), 2))
+                    wrapping_add(
+                        d.labels,
+                        wrapping_add(wrapping_mul(l, Label::Words), Label::MessageLen)
+                    )
                 );
                 if l > 0 {
                     if l > 1 {
-                        out.push(44);
+                        out.push(Ascii::Comma);
                     }
                     out.extend("{\"location\":{\"uri\":".as_bytes());
                     put_quoted(inout out, in uri.as_bytes(), 0, uri.len());
@@ -750,23 +933,23 @@ fn write_lsp(
                     put_range(inout out, in pos, wrapping_add(label, l));
                     out.extend("},\"message\":".as_bytes());
                     put_quoted(inout out, in pool, m, len);
-                    out.push(125);
+                    out.push(Ascii::RBrace);
                 }
                 m = wrapping_add(m, len);
             }
-            out.push(93);
+            out.push(Ascii::RBracket);
         }
         if d.has_help {
             out.extend(",\"data\":{\"help\":".as_bytes());
             put_quoted(inout out, in pool, d.help, d.help_len);
-            out.push(125);
+            out.push(Ascii::RBrace);
         }
-        out.push(125);
+        out.push(Ascii::RBrace);
         label = wrapping_add(label, d.count);
         w = next_word(in d);
         p = next_text(in model, in d);
     }
-    out.push(93);
+    out.push(Ascii::RBracket);
 }
 
 // Terminal.
@@ -778,23 +961,21 @@ fn write_lsp(
 // and every label carrying a message. Each function below names the part of
 // ariadne's `write_for_stream` (src/write.rs) it follows.
 
-// The colors ariadne uses: 0 is none, 1 is red (the error kind), any other
-// value is that 256-color index.
-fn margin_color() -> u64 {
-    246
+// The colors ariadne uses: `None`, red (the error kind), and otherwise a
+// 256-color index.
+enum Color: _ {
+    None = 0,
+    Red = 1,
+    Note = 115,
+    Skipped = 240,
+    Margin = 246,
+    Unimportant = 249
 }
 
-fn skipped_color() -> u64 {
-    240
-}
-
-fn unimportant_color() -> u64 {
-    249
-}
-
-fn note_color() -> u64 {
-    115
-}
+// ariadne's tab width.
+const TAB_WIDTH: u64 = 4;
+// `Help: ` without its `: `, which the continuation lines indent past.
+const HELP_INDENT: u64 = 6;
 
 // The UTF-8 bytes of the char `c`.
 fn put_char(inout out: ChunkSeq[u8], c: u64) {
@@ -817,22 +998,22 @@ fn put_char(inout out: ChunkSeq[u8], c: u64) {
 
 // yansi's foreground prefix and reset.
 fn open(inout out: ChunkSeq[u8], on: bool, color: u64) {
-    if on && color != 0 {
-        if color == 1 {
-            out.push(27);
+    if on && color != Color::None {
+        if color == Color::Red {
+            out.push(Ascii::Esc);
             out.extend("[31m".as_bytes());
         } else {
-            out.push(27);
+            out.push(Ascii::Esc);
             out.extend("[38;5;".as_bytes());
             put_decimal(inout out, color);
-            out.push(109);
+            out.push(Ascii::LowerM);
         }
     }
 }
 
 fn close(inout out: ChunkSeq[u8], on: bool, color: u64) {
-    if on && color != 0 {
-        out.push(27);
+    if on && color != Color::None {
+        out.push(Ascii::Esc);
         out.extend("[0m".as_bytes());
     }
 }
@@ -845,7 +1026,7 @@ fn painted(inout out: ChunkSeq[u8], on: bool, color: u64, c: u64) {
 }
 
 fn spaces(inout out: ChunkSeq[u8], n: u64) {
-    out.resize(wrapping_add(out.len(), n), 32);
+    out.resize(wrapping_add(out.len(), n), Ascii::Space);
 }
 
 // The box characters of `draw::Characters::unicode()`.
@@ -893,6 +1074,15 @@ fn underbar() -> u64 {
     9516
 }
 
+// A line of `source_lines`.
+enum Line: _ {
+    CharOff = 0,
+    CharLen = 1,
+    ByteOff = 2,
+    ByteLen = 3,
+    Words = 4
+}
+
 // The source as ariadne's `Source` sees it: the display text is the source
 // plus one blank when it ends with a terminator (`pad` is 1 then). Lines
 // are four words each: char offset, char length, byte offset, byte
@@ -902,7 +1092,7 @@ fn display_byte(in t: Slice[u8], n: u64, i: u64) -> u8 {
     if i < n {
         byte(in t, i)
     } else {
-        32
+        Ascii::Space
     }
 }
 
@@ -923,7 +1113,7 @@ fn source_lines(in t: Slice[u8], n: u64, pad: u64) -> ChunkSeq[u64] {
             break;
         }
         let found = if start < n {
-            match t[start..n].find_either(13, 10) {
+            match t[start..n].find_either(Ascii::Cr, Ascii::Lf) {
                 Option::Some(k) => wrapping_add(start, k),
                 Option::None => total,
             }
@@ -935,7 +1125,14 @@ fn source_lines(in t: Slice[u8], n: u64, pad: u64) -> ChunkSeq[u64] {
         } else {
             wrapping_add(found, 1)
         };
-        if found < total && byte(in t, found) == 13 && end < n && byte(in t, end) == 10 {
+        if found
+            < total
+            && byte(in t, found)
+            == Ascii::Cr
+            && end
+            < n
+            && byte(in t, end)
+            == Ascii::Lf {
             end = wrapping_add(end, 1);
         }
         let count = if end <= n {
@@ -954,27 +1151,27 @@ fn source_lines(in t: Slice[u8], n: u64, pad: u64) -> ChunkSeq[u64] {
 }
 
 fn line_count_of(in lines: ChunkSeq[u64]) -> u64 {
-    lines.len() / 4
+    lines.len() / Line::Words
 }
 
 fn char_off(in lines: ChunkSeq[u64], l: u64) -> u64 {
-    at(in lines, wrapping_mul(l, 4))
+    at(in lines, wrapping_mul(l, Line::Words))
 }
 
 fn char_len(in lines: ChunkSeq[u64], l: u64) -> u64 {
-    at(in lines, wrapping_add(wrapping_mul(l, 4), 1))
+    at(in lines, wrapping_add(wrapping_mul(l, Line::Words), Line::CharLen))
 }
 
 fn byte_off(in lines: ChunkSeq[u64], l: u64) -> u64 {
-    at(in lines, wrapping_add(wrapping_mul(l, 4), 2))
+    at(in lines, wrapping_add(wrapping_mul(l, Line::Words), Line::ByteOff))
 }
 
 fn byte_len(in lines: ChunkSeq[u64], l: u64) -> u64 {
-    at(in lines, wrapping_add(wrapping_mul(l, 4), 3))
+    at(in lines, wrapping_add(wrapping_mul(l, Line::Words), Line::ByteLen))
 }
 
 // `Source::get_byte_line` and `get_offset_line`: the last line whose byte
-// (`field` 2) or char (`field` 0) offset is at most `x`.
+// (`field` `Line::ByteOff`) or char (`field` `Line::CharOff`) offset is at most `x`.
 fn find_line(in lines: ChunkSeq[u64], field: u64, x: u64) -> u64 {
     let mut lo: u64 = 0;
     let mut hi = line_count_of(in lines);
@@ -983,7 +1180,7 @@ fn find_line(in lines: ChunkSeq[u64], field: u64, x: u64) -> u64 {
             break;
         }
         let mid = wrapping_add(lo, wrapping_sub(hi, lo) >> 1);
-        if at(in lines, wrapping_add(wrapping_mul(mid, 4), field)) <= x {
+        if at(in lines, wrapping_add(wrapping_mul(mid, Line::Words), field)) <= x {
             lo = wrapping_add(mid, 1);
         } else {
             hi = mid;
@@ -1048,16 +1245,34 @@ struct Rep {
     color: bool
 }
 
+// A label of `Rep.lab` and a line label of `Rep.ll`.
+enum Lab: _ {
+    Start = 0,
+    End = 1,
+    Multi = 2,
+    MessageOff = 3,
+    MessageLen = 4,
+    Words = 5
+}
+
+enum Ll: _ {
+    Label = 0,
+    Col = 1,
+    Multi = 2,
+    Draw = 3,
+    Words = 4
+}
+
 fn l_start(in r: Rep, l: u64) -> u64 {
-    at(in r.lab, wrapping_mul(l, 5))
+    at(in r.lab, wrapping_mul(l, Lab::Words))
 }
 
 fn l_end(in r: Rep, l: u64) -> u64 {
-    at(in r.lab, wrapping_add(wrapping_mul(l, 5), 1))
+    at(in r.lab, wrapping_add(wrapping_mul(l, Lab::Words), Lab::End))
 }
 
 fn l_multi(in r: Rep, l: u64) -> bool {
-    at(in r.lab, wrapping_add(wrapping_mul(l, 5), 2)) != 0
+    at(in r.lab, wrapping_add(wrapping_mul(l, Lab::Words), Lab::Multi)) != 0
 }
 
 // `LabelInfo::last_offset`.
@@ -1085,23 +1300,23 @@ fn multi_at(in r: Rep, i: u64) -> u64 {
 }
 
 fn ll_count(in r: Rep) -> u64 {
-    r.ll.len() / 4
+    r.ll.len() / Ll::Words
 }
 
 fn ll_label(in r: Rep, j: u64) -> u64 {
-    at(in r.ll, wrapping_mul(j, 4))
+    at(in r.ll, wrapping_mul(j, Ll::Words))
 }
 
 fn ll_col(in r: Rep, j: u64) -> u64 {
-    at(in r.ll, wrapping_add(wrapping_mul(j, 4), 1))
+    at(in r.ll, wrapping_add(wrapping_mul(j, Ll::Words), Ll::Col))
 }
 
 fn ll_multi(in r: Rep, j: u64) -> bool {
-    at(in r.ll, wrapping_add(wrapping_mul(j, 4), 2)) != 0
+    at(in r.ll, wrapping_add(wrapping_mul(j, Ll::Words), Ll::Multi)) != 0
 }
 
 fn ll_draw(in r: Rep, j: u64) -> bool {
-    at(in r.ll, wrapping_add(wrapping_mul(j, 4), 3)) != 0
+    at(in r.ll, wrapping_add(wrapping_mul(j, Ll::Words), Ll::Draw)) != 0
 }
 
 fn is_margin(in r: Rep, l: u64) -> bool {
@@ -1109,9 +1324,7 @@ fn is_margin(in r: Rep, l: u64) -> bool {
 }
 
 // The none label.
-fn none() -> u64 {
-    18446744073709551615
-}
+const NONE: u64 = MAX_U64;
 
 // `write_margin`. `labels` is false for the help lines, which pass no line
 // labels and no margin label.
@@ -1128,16 +1341,16 @@ fn write_margin(
     labels: bool,
     draw: bool
 ) {
-    out.push(32);
+    out.push(Ascii::Space);
     if is_line && !is_ellipsis {
-        open(inout out, r.color, margin_color());
+        open(inout out, r.color, Color::Margin);
         spaces(inout out, wrapping_sub(r.width, digits(wrapping_add(idx, 1))));
         put_decimal(inout out, wrapping_add(idx, 1));
-        out.push(32);
+        out.push(Ascii::Space);
         put_char(inout out, vbar());
-        close(inout out, r.color, margin_color());
+        close(inout out, r.color, Color::Margin);
     } else {
-        open(inout out, r.color, skipped_color());
+        open(inout out, r.color, Color::Skipped);
         spaces(inout out, wrapping_add(r.width, 1));
         put_char(
             inout out,
@@ -1147,9 +1360,9 @@ fn write_margin(
                 vbar()
             }
         );
-        close(inout out, r.color, skipped_color());
+        close(inout out, r.color, Color::Skipped);
     }
-    out.push(32);
+    out.push(Ascii::Space);
     let m = multi_count(in r);
     let has_margin = labels && r.has_margin;
     let span_start = char_off(in lines, idx);
@@ -1160,16 +1373,16 @@ fn write_margin(
         0
     };
     for col in 0..cols {
-        let mut corner = none();
+        let mut corner = NONE;
         let mut corner_start = false;
-        let mut hbar_l = none();
-        let mut vbar_l = none();
-        let mut ptr = none();
+        let mut hbar_l = NONE;
+        let mut vbar_l = NONE;
+        let mut ptr = NONE;
         let mut ptr_start = false;
         let multi_label = if col < m {
             multi_at(in r, col)
         } else {
-            none()
+            NONE
         };
         let lim = if wrapping_add(col, 1) < m {
             wrapping_add(col, 1)
@@ -1189,7 +1402,7 @@ fn write_margin(
                     ptr = label;
                     ptr_start = is_start;
                 } else if !is_start && (!is_end || is_line) {
-                    if vbar_l == none() && !is_parent {
+                    if vbar_l == NONE && !is_parent {
                         vbar_l = label;
                     }
                 } else if has_row {
@@ -1214,7 +1427,7 @@ fn write_margin(
                             vbar_l = if col == i {
                                 label
                             } else {
-                                none()
+                                NONE
                             };
                             if is_start {
                                 skip = true;
@@ -1228,55 +1441,52 @@ fn write_margin(
                                     corner_start = is_start;
                                 }
                             } else if !is_start {
-                                if vbar_l == none() && !is_parent {
+                                if vbar_l == NONE && !is_parent {
                                     vbar_l = label;
                                 }
                             }
                         }
                     } else {
-                        if vbar_l
-                            == none()
-                            && !is_parent
-                            && (is_start != (report_row < label_row)) {
+                        if vbar_l == NONE && !is_parent && (is_start != (report_row < label_row)) {
                             vbar_l = label;
                         }
                     }
                 }
             }
         }
-        if ptr != none() && is_line {
+        if ptr != NONE && is_line {
             let is_col = multi_label == ptr;
             let is_limit = wrapping_add(col, 1) == m;
-            if !is_col && !is_limit && hbar_l == none() {
+            if !is_col && !is_limit && hbar_l == NONE {
                 hbar_l = ptr;
             }
         }
-        if hbar_l != none() {
+        if hbar_l != NONE {
             let keep = !has_margin || r.margin != hbar_l || !is_line;
             if !keep {
-                hbar_l = none();
+                hbar_l = NONE;
             }
         }
-        let mut a: u64 = 32;
-        let mut b: u64 = 32;
-        if corner != none() {
+        let mut a: u64 = Ascii::Space;
+        let mut b: u64 = Ascii::Space;
+        if corner != NONE {
             a = if corner_start {
                 ltop()
             } else {
                 lbot()
             };
             b = hbar();
-        } else if hbar_l != none() {
+        } else if hbar_l != NONE {
             a = hbar();
             b = hbar();
-        } else if vbar_l != none() {
+        } else if vbar_l != NONE {
             a = if is_ellipsis {
                 vbar_gap()
             } else {
                 vbar()
             };
-            b = 32;
-        } else if ptr != none() && is_line {
+            b = Ascii::Space;
+        } else if ptr != NONE && is_line {
             let is_col = multi_label == ptr;
             let is_limit = col == m;
             a = if is_limit {
@@ -1293,7 +1503,7 @@ fn write_margin(
             b = if !is_limit {
                 hbar()
             } else {
-                32
+                Ascii::Space
             };
         }
         put_char(inout out, a);
@@ -1303,8 +1513,8 @@ fn write_margin(
 
 // `config.char_width(c, col).1` for a char of the line.
 fn drawn_width(c: u64, col: u64) -> u64 {
-    if c == 9 {
-        wrapping_sub(wrapping_mul(wrapping_add(col / 4, 1), 4), col)
+    if c == Ascii::Tab {
+        wrapping_sub(wrapping_mul(wrapping_add(col / TAB_WIDTH, 1), TAB_WIDTH), col)
     } else if is_space(c) {
         1
     } else {
@@ -1334,7 +1544,7 @@ fn vbar_at(in r: Rep, col: u64, row: u64) -> u64 {
         }
         j = wrapping_add(j, 1);
     }
-    none()
+    NONE
 }
 
 // `get_underline(col).is_some()`.
@@ -1378,11 +1588,11 @@ fn highlight_at(in r: Rep, x: u64) -> bool {
 
 // A label's message: the primary label shows the diagnostic message.
 fn message_off(in r: Rep, l: u64) -> u64 {
-    at(in r.lab, wrapping_add(wrapping_mul(l, 5), 3))
+    at(in r.lab, wrapping_add(wrapping_mul(l, Lab::Words), Lab::MessageOff))
 }
 
 fn message_len(in r: Rep, l: u64) -> u64 {
-    at(in r.lab, wrapping_add(wrapping_mul(l, 5), 4))
+    at(in r.lab, wrapping_add(wrapping_mul(l, Lab::Words), Lab::MessageLen))
 }
 
 // The labels of the report and its multi-line labels, longest first.
@@ -1398,16 +1608,16 @@ fn report_labels(
     r.multi.clear();
     let mut text = d.label_text;
     for l in 0..d.count {
-        let w = wrapping_add(d.labels, wrapping_mul(l, 3));
+        let w = wrapping_add(d.labels, wrapping_mul(l, Label::Words));
         let start = word(in model, w);
-        let end = word(in model, wrapping_add(w, 1));
-        let len = word(in model, wrapping_add(w, 2));
-        let first = find_line(in lines, 2, start);
+        let end = word(in model, wrapping_add(w, Label::End));
+        let len = word(in model, wrapping_add(w, Label::MessageLen));
+        let first = find_line(in lines, Line::ByteOff, start);
         let sc = chars_before(in t, n, in lines, first, start);
         let mut ec = sc;
         let mut last = first;
         if start < end {
-            last = find_line(in lines, 2, wrapping_sub(end, 1));
+            last = find_line(in lines, Line::ByteOff, wrapping_sub(end, 1));
             ec = chars_before(in t, n, in lines, last, end);
         }
         r.lab.push(sc);
@@ -1431,10 +1641,10 @@ fn report_labels(
         text = wrapping_add(text, len);
     }
     for l in 0..d.count {
-        if at(in r.lab, wrapping_add(wrapping_mul(l, 5), 2)) != 0 {
+        if at(in r.lab, wrapping_add(wrapping_mul(l, Lab::Words), Lab::Multi)) != 0 {
             let len = wrapping_sub(
-                at(in r.lab, wrapping_add(wrapping_mul(l, 5), 1)),
-                at(in r.lab, wrapping_mul(l, 5))
+                at(in r.lab, wrapping_add(wrapping_mul(l, Lab::Words), Lab::End)),
+                at(in r.lab, wrapping_mul(l, Lab::Words))
             );
             // After every label at least as long (stable).
             let k = r.multi.len();
@@ -1446,8 +1656,8 @@ fn report_labels(
                 }
                 let o = at(in r.multi, j);
                 let ol = wrapping_sub(
-                    at(in r.lab, wrapping_add(wrapping_mul(o, 5), 1)),
-                    at(in r.lab, wrapping_mul(o, 5))
+                    at(in r.lab, wrapping_add(wrapping_mul(o, Lab::Words), Lab::End)),
+                    at(in r.lab, wrapping_mul(o, Lab::Words))
                 );
                 if ol < len {
                     p = j;
@@ -1476,7 +1686,7 @@ fn line_labels(inout r: Rep, in lines: ChunkSeq[u64], idx: u64, count: u64) -> b
     let end = wrapping_add(off, char_len(in lines, idx));
     let m = multi_count(in r);
     r.has_margin = false;
-    r.margin = none();
+    r.margin = NONE;
     r.margin_col = 0;
     r.margin_draw = false;
     let mut best_start: u64 = 0;
@@ -1546,12 +1756,12 @@ fn line_labels(inout r: Rep, in lines: ChunkSeq[u64], idx: u64, count: u64) -> b
             if j == 0 {
                 break;
             }
-            let a = wrapping_mul(wrapping_sub(j, 1), 4);
-            let b = wrapping_mul(j, 4);
+            let a = wrapping_mul(wrapping_sub(j, 1), Ll::Words);
+            let b = wrapping_mul(j, Ll::Words);
             if at(in r.ll, a) <= at(in r.ll, b) {
                 break;
             }
-            for f in 0..4 {
+            for f in 0..Ll::Words {
                 let x = at(in r.ll, wrapping_add(a, f));
                 put(inout r.ll, wrapping_add(a, f), at(in r.ll, wrapping_add(b, f)));
                 put(inout r.ll, wrapping_add(b, f), x);
@@ -1578,7 +1788,7 @@ fn line_chars(inout r: Rep, in t: Slice[u8], n: u64, in lines: ChunkSeq[u64], id
         let c = if i < n {
             decode(in t, i)
         } else {
-            32
+            Ascii::Space
         };
         let len = if i < n {
             utf8_len(byte(in t, i))
@@ -1646,19 +1856,19 @@ fn write_line(
             let color = if r.color && highlight_at(in r, wrapping_add(off, col)) {
                 0
             } else {
-                unimportant_color()
+                Color::Unimportant
             };
             if is_space(c) {
                 let w = at(in r.widths, col);
                 for i in 0..w {
-                    painted(inout out, r.color, color, 32);
+                    painted(inout out, r.color, color, Ascii::Space);
                 }
             } else {
                 painted(inout out, r.color, color, c);
             }
         }
     }
-    out.push(10);
+    out.push(Ascii::Lf);
     for row in 0..k {
         let label = ll_label(in r, row);
         let col_of = ll_col(in r, row);
@@ -1684,9 +1894,9 @@ fn write_line(
             let w = width_at(in r, col);
             let v = vbar_at(in r, col, row);
             let under = row == 0 && underline_at(in r, wrapping_add(off, col));
-            let mut c: u64 = 32;
-            let mut tail: u64 = 32;
-            if v != none() {
+            let mut c: u64 = Ascii::Space;
+            let mut tail: u64 = Ascii::Space;
+            if v != NONE {
                 if under {
                     c = underbar();
                     tail = hbar();
@@ -1710,7 +1920,7 @@ fn write_line(
                 );
             }
         }
-        out.push(10);
+        out.push(Ascii::Lf);
         write_margin(
             inout out,
             in r,
@@ -1730,8 +1940,8 @@ fn write_line(
             }
             let w = width_at(in r, col);
             let is_hbar = ((col > col_of) != multi) || (draw && col > col_of);
-            let mut c: u64 = 32;
-            let mut tail: u64 = 32;
+            let mut c: u64 = Ascii::Space;
+            let mut tail: u64 = Ascii::Space;
             if col == col_of && !is_margin(in r, label) {
                 c = if multi {
                     if draw {
@@ -1743,7 +1953,7 @@ fn write_line(
                     lbot()
                 };
                 tail = hbar();
-            } else if vbar_at(in r, col, row) != none() {
+            } else if vbar_at(in r, col, row) != NONE {
                 if is_hbar {
                     c = hbar();
                     tail = hbar();
@@ -1765,10 +1975,10 @@ fn write_line(
             return true;
         }
         if draw {
-            out.push(32);
+            out.push(Ascii::Space);
             put_text(inout out, in pool, message_off(in r, label), message_len(in r, label));
         }
-        out.push(10);
+        out.push(Ascii::Lf);
     }
     out.len() > cap
 }
@@ -1804,7 +2014,7 @@ fn write_report(
     let last_line = wrapping_sub(total, 1);
     let src_len = wrapping_add(char_off(in lines, last_line), char_len(in lines, last_line));
     let first = if gs <= src_len {
-        find_line(in lines, 0, gs)
+        find_line(in lines, Line::CharOff, gs)
     } else {
         0
     };
@@ -1819,46 +2029,46 @@ fn write_report(
         gs
     };
     let end = if y <= src_len {
-        wrapping_add(find_line(in lines, 0, y), 1)
+        wrapping_add(find_line(in lines, Line::CharOff, y), 1)
     } else {
         total
     };
     r.width = digits(end);
     let w = r.width;
     // Header.
-    open(inout out, r.color, 1);
-    out.push(91);
+    open(inout out, r.color, Color::Red);
+    out.push(Ascii::LBracket);
     put_text(inout out, in pool, d.code, d.code_len);
     if chars_in(in pool, d.code, wrapping_add(d.code, d.code_len)) == 1 {
-        out.push(32);
+        out.push(Ascii::Space);
     }
     out.extend("] Error:".as_bytes());
-    close(inout out, r.color, 1);
-    out.push(32);
+    close(inout out, r.color, Color::Red);
+    out.push(Ascii::Space);
     put_text(inout out, in pool, d.message, d.message_len);
-    out.push(10);
+    out.push(Ascii::Lf);
     let location = word(in model, d.labels);
-    let line = find_line(in lines, 2, location);
+    let line = find_line(in lines, Line::ByteOff, location);
     let col = wrapping_sub(
         chars_before(in t, n, in lines, line, location),
         char_off(in lines, line)
     );
     spaces(inout out, wrapping_add(w, 2));
-    painted(inout out, r.color, margin_color(), ltop());
-    painted(inout out, r.color, margin_color(), hbar());
-    painted(inout out, r.color, margin_color(), 91);
-    out.push(32);
+    painted(inout out, r.color, Color::Margin, ltop());
+    painted(inout out, r.color, Color::Margin, hbar());
+    painted(inout out, r.color, Color::Margin, Ascii::LBracket);
+    out.push(Ascii::Space);
     out.extend(file.as_bytes());
-    out.push(58);
+    out.push(Ascii::Colon);
     put_decimal(inout out, wrapping_add(line, 1));
-    out.push(58);
+    out.push(Ascii::Colon);
     put_decimal(inout out, wrapping_add(col, 1));
-    out.push(32);
-    painted(inout out, r.color, margin_color(), 93);
-    out.push(10);
+    out.push(Ascii::Space);
+    painted(inout out, r.color, Color::Margin, Ascii::RBracket);
+    out.push(Ascii::Lf);
     spaces(inout out, wrapping_add(w, 2));
-    painted(inout out, r.color, margin_color(), vbar());
-    out.push(10);
+    painted(inout out, r.color, Color::Margin, vbar());
+    out.push(Ascii::Lf);
     // Source lines.
     let mut is_ellipsis = false;
     for idx in first..end {
@@ -1892,7 +2102,7 @@ fn write_report(
                             true,
                             false
                         );
-                        out.push(10);
+                        out.push(Ascii::Lf);
                     }
                     is_ellipsis = true;
                     skip = true;
@@ -1912,7 +2122,7 @@ fn write_report(
     if d.has_help {
         r.has_margin = false;
         write_margin(inout out, in r, in lines, 0, false, false, true, 0, false, false, true);
-        out.push(10);
+        out.push(Ascii::Lf);
         let end_help = wrapping_add(d.help, d.help_len);
         let mut i = d.help;
         let mut first_line = true;
@@ -1920,12 +2130,12 @@ fn write_report(
             if i >= end_help {
                 break;
             }
-            let found = match pool[i..end_help].find_byte(10) {
+            let found = match pool[i..end_help].find_byte(Ascii::Lf) {
                 Option::Some(k) => wrapping_add(i, k),
                 Option::None => end_help,
             };
             let mut stop = found;
-            if found < end_help && stop > i && byte(in pool, wrapping_sub(stop, 1)) == 13 {
+            if found < end_help && stop > i && byte(in pool, wrapping_sub(stop, 1)) == Ascii::Cr {
                 stop = wrapping_sub(stop, 1);
             }
             write_margin(inout out, in r, in lines, 0, false, false, true, 0, false, false, true);
@@ -1933,28 +2143,28 @@ fn write_report(
                 painted_text_help(inout out, r.color);
                 out.extend(": ".as_bytes());
             } else {
-                spaces(inout out, 6);
+                spaces(inout out, HELP_INDENT);
             }
             put_text(inout out, in pool, i, wrapping_sub(stop, i));
-            out.push(10);
+            out.push(Ascii::Lf);
             first_line = false;
             i = wrapping_add(found, 1);
         }
     }
-    open(inout out, r.color, margin_color());
+    open(inout out, r.color, Color::Margin);
     for k in 0..wrapping_add(w, 2) {
         put_char(inout out, hbar());
     }
     put_char(inout out, rbot());
-    close(inout out, r.color, margin_color());
-    out.push(10);
+    close(inout out, r.color, Color::Margin);
+    out.push(Ascii::Lf);
     out.len() > cap
 }
 
 fn painted_text_help(inout out: ChunkSeq[u8], on: bool) {
-    open(inout out, on, note_color());
+    open(inout out, on, Color::Note);
     out.extend("Help".as_bytes());
-    close(inout out, on, note_color());
+    close(inout out, on, Color::Note);
 }
 
 // Whether the source has a separator ariadne splits lines at but the
@@ -1963,7 +2173,7 @@ fn has_extra_separator(in t: Slice[u8]) -> bool {
     let n = t.len();
     for i in 0..n {
         let b = byte(in t, i);
-        if b == 11 || b == 12 {
+        if b == Ascii::VTab || b == Ascii::FormFeed {
             return true;
         }
         if b == 194 && byte(in t, wrapping_add(i, 1)) == 133 {
@@ -1998,26 +2208,38 @@ pub fn terminal(
     }
     let t = text.as_bytes();
     let n = text.len();
-    bound(mul(n, 2, Res::Work), caps.max_work, Res::Work);
+    bound(mul(n, TerminalCost::SourceWork, Res::Work), caps.max_work, Res::Work);
     if has_extra_separator(in t) {
         Fail::raise(Failure::UnsupportedLineEnding);
     }
     let labels_in = u(label_count);
     let texts = u(text_bytes);
     let mut work = add(
-        mul(n, 2, Res::Work),
+        mul(n, TerminalCost::SourceWork, Res::Work),
         add(
-            mul(texts, 4, Res::Work),
-            mul(mul(file.len(), wrapping_add(labels_in, count), Res::Work), 8, Res::Work),
+            mul(texts, TerminalCost::TextWork, Res::Work),
+            mul(
+                mul(file.len(), wrapping_add(labels_in, count), Res::Work),
+                TerminalCost::NameWork,
+                Res::Work
+            ),
             Res::Work
         ),
         Res::Work
     );
     let lines_n = line_count(in t);
     bound(lines_n, caps.max_lines, Res::Lines);
-    let mut metadata = mul(mul(lines_n, 2, Res::Metadata), u(sizes.line), Res::Metadata);
-    metadata = add(metadata, mul(wrapping_add(n, 1), 4, Res::Metadata), Res::Metadata);
-    metadata = add(metadata, mul(texts, 4, Res::Metadata), Res::Metadata);
+    let mut metadata = mul(
+        mul(lines_n, TerminalCost::LineCopies, Res::Metadata),
+        u(sizes.line),
+        Res::Metadata
+    );
+    metadata = add(
+        metadata,
+        mul(wrapping_add(n, 1), TerminalCost::CharBytes, Res::Metadata),
+        Res::Metadata
+    );
+    metadata = add(metadata, mul(texts, TerminalCost::TextBytes, Res::Metadata), Res::Metadata);
     let mut w: u64 = 0;
     let mut p: u64 = 0;
     for k in 0..count {
@@ -2035,7 +2257,11 @@ pub fn terminal(
         );
         metadata = add(
             metadata,
-            mul(d.count, wrapping_mul(u(sizes.report_label), 16), Res::Metadata),
+            mul(
+                d.count,
+                wrapping_mul(u(sizes.report_label), TerminalCost::LabelCopies),
+                Res::Metadata
+            ),
             Res::Metadata
         );
         work = add(
@@ -2046,7 +2272,13 @@ pub fn terminal(
         for l in 0..d.count {
             work = add(
                 work,
-                word(in model, wrapping_add(d.labels, wrapping_add(wrapping_mul(l, 3), 2))),
+                word(
+                    in model,
+                    wrapping_add(
+                        d.labels,
+                        wrapping_add(wrapping_mul(l, Label::Words), Label::MessageLen)
+                    )
+                ),
                 Res::Work
             );
         }
@@ -2057,7 +2289,9 @@ pub fn terminal(
     bound(metadata, caps.max_metadata_bytes, Res::Metadata);
     let pad: u64 = if n
         > 0
-        && (byte(in t, wrapping_sub(n, 1)) == 13 || byte(in t, wrapping_sub(n, 1)) == 10) {
+        && (
+        byte(in t, wrapping_sub(n, 1)) == Ascii::Cr || byte(in t, wrapping_sub(n, 1)) == Ascii::Lf
+    ) {
         1
     } else {
         0

@@ -1,0 +1,68 @@
+// @vesper/check-fip: the fip checks of src/fip.rs in Vesper (self-hosting
+// wave SH2 lane 12, #1184): `check_world`, which verifies `@fip` functions
+// (zero allocations and deallocations on every path, `Box::new` paired
+// with an unpacked ReuseSlot, `Box::new_in_caller` into the caller's slot,
+// no `Alloc` effect) and rejects `Box::new_in_caller` outside them.
+//
+// Built on @vesper/check-data (SH2 lane 4): the harness input carries the
+// world's names, types and tables, then the fip task section (ast.ves).
+// Rust stays the default checker; tests/self_host_check_fip.rs runs both on
+// the corpus, the fip checker tests and mutants.
+//
+// - ast.ves: the function bodies as flat node tables and their decoder.
+// - layout.ves: `Layout::of(..).size`, which slot matching reads.
+// - state.ves: `FipState` as rows.
+// - check.ves: the checks.
+
+use @vesper/check-data::input::{
+    Reader,
+    read_ctx
+};
+use @vesper/check-data::{
+    pack_text
+};
+use self::ast::{
+    read_ast
+};
+use self::check::{
+    Fip,
+    fip_new
+};
+
+// Every diagnostic of `fip::check_world` as text, one per line: code, span
+// start, span end and message (packed by `pack_text`).
+pub fn check_fip(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut r = Reader {
+        pos: 0
+    };
+    let c = read_ctx(inout r, in b);
+    let ast = read_ast(inout r, in b, in c.nmap, in c.tmap);
+    let mut cx = fip_new(c, ast);
+    cx.check_world();
+    pack_text(in cx.out)
+}
+
+// The number of diagnostics only (for timing without the text copy).
+pub fn check_fip_count(in input: Str) -> u64 {
+    let b = input.as_bytes();
+    let mut r = Reader {
+        pos: 0
+    };
+    let c = read_ctx(inout r, in b);
+    let ast = read_ast(inout r, in b, in c.nmap, in c.tmap);
+    let mut cx = fip_new(c, ast);
+    cx.check_world();
+    cx.count
+}
+
+// Decoding only: the baseline the timing subtracts.
+pub fn check_fip_decode(in input: Str) -> u64 {
+    let b = input.as_bytes();
+    let mut r = Reader {
+        pos: 0
+    };
+    let c = read_ctx(inout r, in b);
+    let ast = read_ast(inout r, in b, in c.nmap, in c.tmap);
+    wrapping_add(ast.exprs.len(), c.world.adts.len())
+}

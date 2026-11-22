@@ -87,6 +87,8 @@ use vesper_ffi::sys::{
     ValueType,
 };
 
+#[path = "ffi_lowering/cpu.rs"]
+pub mod cpu;
 pub mod drops;
 #[path = "ffi_lowering/eval_host.rs"]
 mod eval_host;
@@ -109,7 +111,7 @@ pub const MAX_SLICE_ELEMENTS: usize = 4096;
 /// The one field of a generated extern-type handle struct: the C handle
 /// word. `$` is not a source identifier character, so source code can
 /// never name, read, build or destructure it.
-pub const HANDLE_FIELD: &str = "$handle";
+pub const HANDLE_FIELD: &str = crate::check::FOREIGN_HANDLE_FIELD;
 /// Slice-length marker of a `CSlice` argument that is a source `Slice[T]`
 /// lent in place as `(ptr, len)` (its length is a run-time value).
 pub(crate) const SOURCE_SLICE: usize = usize::MAX;
@@ -586,6 +588,7 @@ impl ForeignChecked {
             .calls
             .iter()
             .filter_map(|c| self.plan.libraries.get(&effect_name(&c.library)))
+            .filter(|l| l.descriptor.link().name() != cpu::LINK_NAME)
             .map(|l| {
                 (
                     l.descriptor.link().name().to_owned(),
@@ -659,7 +662,9 @@ impl ForeignChecked {
                     Some(call.span.clone()),
                 ));
             }
-            if !symbols.iter().any(|(n, _)| *n == call.symbol) {
+            if !symbols.iter().any(|(n, _)| *n == call.symbol)
+                && cpu::function(&call.symbol).is_none()
+            {
                 return Err(FfiError::new(
                     FfiErrorKind::UnknownForeignFunction,
                     format!(
@@ -681,15 +686,73 @@ impl ForeignChecked {
             crate::native::jit_with_options(world, entry, optimize)
         })
     }
+    /// JIT-compile `entry`, whose parameters and result are each one word
+    /// and whose row holds only foreign effects, binding the foreign
+    /// symbols as [`Self::jit`] does, for a Rust host that calls it many
+    /// times: the SH4 codegen hooks of crates/vesper-codegen-swap-test
+    /// (#1275).
+    pub fn word_function(
+        &self,
+        entry: &str,
+        symbols: &[(&str, *const u8)],
+        optimize: bool,
+    ) -> Result<crate::native::WordFunction, FfiError> {
+        for call in &self.calls {
+            if self.plan.libraries[&effect_name(&call.library)].handler != Handler::Direct
+                || (!symbols.iter().any(|(n, _)| *n == call.symbol)
+                    && cpu::function(&call.symbol).is_none())
+            {
+                return Err(FfiError::new(
+                    FfiErrorKind::UnknownForeignFunction,
+                    format!(
+                        "the JIT host binds no direct function for {}::{}",
+                        call.library, call.symbol
+                    ),
+                    Some(call.span.clone()),
+                ));
+            }
+        }
+        JIT_SYMBOLS.with(|s| {
+            *s.borrow_mut() = symbols
+                .iter()
+                .map(|(n, a)| ((*n).to_owned(), *a as usize))
+                .collect()
+        });
+        let _guard = JitGuard;
+        self.with_lowering(None, |world| {
+            crate::native::WordFunction::compile_foreign(world, entry, optimize)
+        })
+    }
     /// Run the argument-free `entry` in the evaluator (`vesper run`'s
     /// machine), with `host` standing in for every foreign call: it gets the
     /// library, the `.vsys` symbol and the arguments, may update `inout`
     /// arguments and slices, and returns the call's source value (a handle
-    /// from [`handle_value`], `Unit` as an empty tuple). The entry's row may
-    /// hold only `Ffi[..]` capabilities.
+    /// from [`handle_value`], `Unit` as an empty tuple). Only `Ffi[..]`
+    /// capabilities are supplied by the host.
     pub fn evaluate(
         &self,
         entry: &str,
+        host: impl FnMut(&mut EvalCall<'_, '_>) -> Result<crate::runtime::Value, String>,
+    ) -> Result<crate::runtime::Value, FfiError> {
+        self.evaluate_with_fuel(entry, None, host)
+    }
+
+    /// Like [`Self::evaluate`], with an optional evaluator step limit.
+    pub fn evaluate_with_fuel(
+        &self,
+        entry: &str,
+        fuel: Option<u64>,
+        host: impl FnMut(&mut EvalCall<'_, '_>) -> Result<crate::runtime::Value, String>,
+    ) -> Result<crate::runtime::Value, FfiError> {
+        self.evaluate_with_options(entry, fuel, true, host)
+    }
+
+    /// Run in the evaluator with a fuel limit and a choice of optimization mode.
+    pub fn evaluate_with_options(
+        &self,
+        entry: &str,
+        fuel: Option<u64>,
+        optimize: bool,
         mut host: impl FnMut(&mut EvalCall<'_, '_>) -> Result<crate::runtime::Value, String>,
     ) -> Result<crate::runtime::Value, FfiError> {
         let fail = |m: String| FfiError::new(FfiErrorKind::Codegen, m, None);
@@ -701,8 +764,13 @@ impl ForeignChecked {
                 effect.linear = true;
             }
         }
-        let mut state = crate::runtime::Runtime::new(&world)
-            .begin_external(entry, vec![])
+        let mut runtime = crate::runtime::Runtime::new(&world);
+        runtime.optimize = optimize;
+        if let Some(fuel) = fuel {
+            runtime.fuel = fuel;
+        }
+        let mut state = runtime
+            .begin_external_for(entry, vec![], is_foreign_effect)
             .map_err(fail)?;
         loop {
             match state {

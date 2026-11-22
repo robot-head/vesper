@@ -5,6 +5,7 @@ use @vesper/loom-calculus::{
     L
 };
 use @vesper/loom-calculus::util::{
+    Order,
     gnode,
     none,
     slen,
@@ -17,6 +18,7 @@ use self::{
     Rng
 };
 use self::license::{
+    LicenseFail,
     parse
 };
 use self::paths::{
@@ -24,8 +26,9 @@ use self::paths::{
     ref_ver
 };
 use self::util::{
+    ErrorKind,
+    Identity,
     adv,
-    e_limit,
     fail,
     lit,
     nat,
@@ -94,7 +97,7 @@ fn index_catalog(inout s: A) {
     for a in 0..s.advs.len() {
         s.a_next.push(none());
         let x = adv(in s, a);
-        let key = if x.kind == 0 {
+        let key = if x.kind == Identity::Vesper {
             word(in s.nodeof, x.name)
         } else {
             let j = word(in s.natof, x.name);
@@ -284,7 +287,7 @@ pub fn findings(inout s: A) {
                             break;
                         }
                         let y = nat(in s, c);
-                        if y.name == name && ver_ord(in s.l, y.ver, v) == 1 {
+                        if y.name == name && ver_ord(in s.l, y.ver, v) == Order::Equal {
                             src = 2;
                             si = c;
                             eid = y.expr;
@@ -314,12 +317,12 @@ pub fn findings(inout s: A) {
                 } else {
                     let val = parse(inout s, eid);
                     if s.lf == 2 {
-                        s.err = wrapping_add(e_limit(), 1);
+                        s.err = wrapping_add(ErrorKind::Limit, 1);
                         s.emo = s.lmo;
                         s.eml = s.lml;
                         return;
                     }
-                    if s.lf == 1 {
+                    if s.lf == LicenseFail::Unknown {
                         nissues = wrapping_add(nissues, 1);
                         unknown = true;
                         s.iw.push(2);
@@ -343,12 +346,12 @@ pub fn findings(inout s: A) {
                         }
                         let t = wrapping_add(report_nodes, nodes);
                         if t < nodes {
-                            fail(inout s, e_limit(), "report path nodes");
+                            fail(inout s, ErrorKind::Limit, "report path nodes");
                             return;
                         }
                         report_nodes = t;
                         if report_nodes > s.m_pnodes || nfind >= s.m_entries {
-                            fail(inout s, e_limit(), "report path nodes/findings");
+                            fail(inout s, ErrorKind::Limit, "report path nodes/findings");
                             return;
                         }
                         nfind = wrapping_add(nfind, 1);

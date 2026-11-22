@@ -59,15 +59,15 @@ pub fn write_header(inout out: Slice[u8], h: Hdr, o: Opts) -> Result[u64, WireEr
     if out.len() < header_len {
         return Result::Err(WireError::BufferTooSmall);
     }
-    wr16(inout out, OFF_SRC_PORT, h.src_port);
-    wr16(inout out, OFF_DST_PORT, h.dst_port);
-    wr32(inout out, OFF_SEQ, h.seq);
-    wr32(inout out, OFF_ACK, h.ack);
-    wr8(inout out, OFF_DATA_OFFSET, wrapping_u8(header_len / 4) << 4);
-    wr8(inout out, OFF_FLAGS, h.flags);
-    wr16(inout out, OFF_WINDOW, h.window);
-    wr16(inout out, OFF_CHECKSUM, 0);
-    wr16(inout out, OFF_URGENT, h.urgent);
+    wr16(inout out, Field::SrcPort, h.src_port);
+    wr16(inout out, Field::DstPort, h.dst_port);
+    wr32(inout out, Field::Seq, h.seq);
+    wr32(inout out, Field::Ack, h.ack);
+    wr8(inout out, Field::DataOffset, wrapping_u8(header_len / 4) << 4);
+    wr8(inout out, Field::Flags, h.flags);
+    wr16(inout out, Field::Window, h.window);
+    wr16(inout out, Field::Checksum, 0);
+    wr16(inout out, Field::Urgent, h.urgent);
     opts_put(o, inout out, HEADER_LEN);
     Result::Ok(header_len)
 }

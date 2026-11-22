@@ -62,6 +62,7 @@
 //! `parallel_for` inside a worker runs on that worker.
 use crate::{ast::*, check::World, numeric::IntegerKind};
 
+#[cfg(not(target_arch = "wasm32"))]
 pub mod workers;
 
 /// The builtin fork-join loop over the Pulse pool (scoped workers).
@@ -146,12 +147,14 @@ impl AtomicOp {
 }
 
 /// The cell kind of `Atomic[T]`: `Some(None)` for `bool`, `Some(Some(k))`
-/// for an integer kind, `None` for any other `T`.
+/// for a one-word integer kind, `None` for any other `T` (`i128` and
+/// `u128` have no single-instruction atomics on every target; SH2 lane 2,
+/// #1174).
 pub fn cell_kind(t: &Type) -> Option<Option<IntegerKind>> {
     let t = crate::numeric::default_type(t);
     match &t {
         Type::Named(n, a) if n == "bool" && a.is_empty() => Some(None),
-        _ => IntegerKind::from_type(&t).map(Some),
+        _ => IntegerKind::from_type(&t).filter(|k| !k.wide()).map(Some),
     }
 }
 
@@ -417,7 +420,7 @@ pub(crate) fn prelude(module: &Module, after: usize) -> Module {
         (true, true) => format!("{PRELUDE}{WORKERS_PRELUDE}"),
     };
     let end = after.max(crate::integer_widths::module_end(module));
-    let parsed = crate::parser::parse(&format!("{}{source}", " ".repeat(end + 1)));
+    let parsed = crate::integer_widths::parse_at(&source, end + 1);
     debug_assert!(
         parsed.diagnostics.is_empty(),
         "atomic prelude: {:?}",

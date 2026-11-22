@@ -32,15 +32,9 @@ use self::closure::{
     mark_features
 };
 use self::diag::{
-    c_locked_candidate_missing,
-    c_locked_features_mismatch,
-    c_locked_manifest_mismatch,
-    c_locked_package_missing,
-    c_locked_root_mismatch,
-    c_locked_system_candidate_missing,
-    c_locked_system_missing,
-    c_locked_unused_package,
-    c_locked_unused_system,
+    ErrorKind,
+    ResultTag,
+    SolverCode,
     copy_calculus,
     dlit,
     dver,
@@ -85,13 +79,13 @@ fn expected(in s: S, x: u64, vt: u64) -> u64 {
 
 pub fn locked(inout s: S) {
     if s.ds.len() > 0 {
-        out_error(inout s, 0, 0);
+        out_error(inout s, ErrorKind::InvalidInput, 0);
         return;
     }
     let rm = s.root;
     if unsupported(in s, rm) {
         emit_unsupported(inout s, rm);
-        out_error(inout s, 1, 0);
+        out_error(inout s, ErrorKind::UnsupportedPolicy, 0);
         return;
     }
     let rname = man(in s.l, s.root).name;
@@ -116,7 +110,7 @@ pub fn locked(inout s: S) {
         }
     }
     if policies {
-        out_error(inout s, 1, 0);
+        out_error(inout s, ErrorKind::UnsupportedPolicy, 0);
         return;
     }
     // Exactly one root: the request's name, exact version and features.
@@ -148,7 +142,7 @@ pub fn locked(inout s: S) {
             inout s,
             "snapshot must contain one exact root requirement with the requested features"
         );
-        emit(inout s, c_locked_root_mismatch(), rname, so, sl, mo);
+        emit(inout s, SolverCode::LockedRootMismatch, rname, so, sl, mo);
     }
     // validate_solution(locked).
     let pool_n = s.l.pool.len();
@@ -176,7 +170,7 @@ pub fn locked(inout s: S) {
             if !ex.has_json || ex.json != json {
                 let (so, sl, mo) = subj_id(inout s, m.name);
                 dlit(inout s, "snapshot manifest differs from the current root/catalog metadata");
-                emit(inout s, c_locked_manifest_mismatch(), m.name, so, sl, mo);
+                emit(inout s, SolverCode::LockedManifestMismatch, m.name, so, sl, mo);
             }
             if sw(in s.ast, m.name) != s.agen {
                 s.anames.push(m.name);
@@ -188,7 +182,7 @@ pub fn locked(inout s: S) {
             dlit(inout s, "snapshot version ");
             dver(inout s, m.ver);
             dlit(inout s, " is absent from the current local catalog");
-            emit(inout s, c_locked_candidate_missing(), m.name, so, sl, mo);
+            emit(inout s, SolverCode::LockedCandidateMissing, m.name, so, sl, mo);
         }
     }
     if closure(inout s) {
@@ -212,7 +206,7 @@ pub fn locked(inout s: S) {
                         inout s,
                         "snapshot features differ from the request's transitive feature closure"
                     );
-                    emit(inout s, c_locked_features_mismatch(), m.name, so, sl, mo);
+                    emit(inout s, SolverCode::LockedFeaturesMismatch, m.name, so, sl, mo);
                 }
             } else {
                 let (so, sl, mo) = subj_id(inout s, m.name);
@@ -220,7 +214,7 @@ pub fn locked(inout s: S) {
                     inout s,
                     "snapshot selects a package outside the request's dependency closure"
                 );
-                emit(inout s, c_locked_unused_package(), m.name, so, sl, mo);
+                emit(inout s, SolverCode::LockedUnusedPackage, m.name, so, sl, mo);
             }
         }
         for i in 0..s.cnames.len() {
@@ -228,7 +222,7 @@ pub fn locked(inout s: S) {
             if sw(in s.nmk, x) != sg {
                 let (so, sl, mo) = subj_id(inout s, x);
                 dlit(inout s, "snapshot is missing a package required by the request");
-                emit(inout s, c_locked_package_missing(), x, so, sl, mo);
+                emit(inout s, SolverCode::LockedPackageMissing, x, so, sl, mo);
             }
         }
         s.mgen = inc(s.mgen);
@@ -242,7 +236,7 @@ pub fn locked(inout s: S) {
             if sw(in s.nmk, x) != yg {
                 let (so, sl, mo) = subj_id(inout s, x);
                 dlit(inout s, "snapshot is missing a native package required by the request");
-                emit(inout s, c_locked_system_missing(), none(), so, sl, mo);
+                emit(inout s, SolverCode::LockedSystemMissing, none(), so, sl, mo);
             }
         }
         for i in 0..s.l.ss_n {
@@ -250,7 +244,7 @@ pub fn locked(inout s: S) {
             if sw(in s.yst, y.name) != s.cgen {
                 let (so, sl, mo) = subj_id(inout s, y.name);
                 dlit(inout s, "snapshot selects a native package outside the request's closure");
-                emit(inout s, c_locked_unused_system(), none(), so, sl, mo);
+                emit(inout s, SolverCode::LockedUnusedSystem, none(), so, sl, mo);
             }
         }
     }
@@ -272,13 +266,13 @@ pub fn locked(inout s: S) {
             dlit(inout s, "snapshot native version ");
             dver(inout s, y.ver);
             dlit(inout s, " is absent from the current local catalog");
-            emit(inout s, c_locked_system_candidate_missing(), none(), so, sl, mo);
+            emit(inout s, SolverCode::LockedSystemCandidateMissing, none(), so, sl, mo);
         }
     }
     if s.ds.len() > 0 {
-        out_error(inout s, 4, 0);
+        out_error(inout s, ErrorKind::LockedMismatch, 0);
     } else {
         table(inout s);
-        w(inout s, 0);
+        w(inout s, ResultTag::Solution);
     }
 }

@@ -46,20 +46,50 @@ pub const WEBTRANSPORT_STREAM: u64 = 0x41;
 /// The WebTransport unidirectional stream type.
 pub const STREAM_WEBTRANSPORT: u64 = 0x54;
 
+/// HTTP/2 frame types with no HTTP/3 meaning (§7.2.8, §11.2.1).
+const H2_PRIORITY: u64 = 0x02;
+const H2_PING: u64 = 0x06;
+const H2_WINDOW_UPDATE: u64 = 0x08;
+const H2_CONTINUATION: u64 = 0x09;
+
 /// HTTP/2 frame types with no HTTP/3 meaning (§7.2.8): receiving one is
 /// H3_FRAME_UNEXPECTED.
 pub const fn is_http2_frame(ty: u64) -> bool {
-    matches!(ty, 0x02 | 0x06 | 0x08 | 0x09)
+    matches!(
+        ty,
+        H2_PRIORITY | H2_PING | H2_WINDOW_UPDATE | H2_CONTINUATION
+    )
 }
+
+/// HTTP/2 settings with no HTTP/3 meaning (§7.2.4.1, §11.2.2): 0x00 is
+/// reserved, then SETTINGS_ENABLE_PUSH, SETTINGS_MAX_CONCURRENT_STREAMS,
+/// SETTINGS_INITIAL_WINDOW_SIZE and SETTINGS_MAX_FRAME_SIZE.
+const H2_SETTINGS_RESERVED: u64 = 0x00;
+const H2_SETTINGS_ENABLE_PUSH: u64 = 0x02;
+const H2_SETTINGS_MAX_CONCURRENT_STREAMS: u64 = 0x03;
+const H2_SETTINGS_INITIAL_WINDOW_SIZE: u64 = 0x04;
+const H2_SETTINGS_MAX_FRAME_SIZE: u64 = 0x05;
 
 /// HTTP/2 settings that must not appear (§7.2.4.1): H3_SETTINGS_ERROR.
 pub const fn is_http2_setting(id: u64) -> bool {
-    matches!(id, 0x00 | 0x02 | 0x03 | 0x04 | 0x05)
+    matches!(
+        id,
+        H2_SETTINGS_RESERVED
+            | H2_SETTINGS_ENABLE_PUSH
+            | H2_SETTINGS_MAX_CONCURRENT_STREAMS
+            | H2_SETTINGS_INITIAL_WINDOW_SIZE
+            | H2_SETTINGS_MAX_FRAME_SIZE
+    )
 }
 
-/// The reserved grease values `0x1f * N + 0x21` (§7.2.8, §6.2.3, §7.2.4.1).
+/// The first reserved grease value and the step between them (§7.2.8,
+/// §6.2.3, §7.2.4.1, §8.1).
+pub const GREASE_BASE: u64 = 0x21;
+pub const GREASE_STEP: u64 = 0x1f;
+
+/// The reserved grease values `GREASE_STEP * N + GREASE_BASE`.
 pub const fn is_reserved(value: u64) -> bool {
-    value >= 0x21 && (value - 0x21).is_multiple_of(0x1f)
+    value >= GREASE_BASE && (value - GREASE_BASE).is_multiple_of(GREASE_STEP)
 }
 
 /// A frame-level failure, with the code to close or reset with.
@@ -201,7 +231,7 @@ impl Settings {
             ),
             (SETTINGS_WT_MAX_SESSIONS, self.webtransport_max_sessions),
             // A reserved setting exercises the peer's tolerance (§7.2.4.1).
-            (0x1f * 7 + 0x21, Some(0)),
+            (GREASE_STEP * 7 + GREASE_BASE, Some(0)),
         ] {
             if let Some(v) = value {
                 put_varint(&mut payload, id);

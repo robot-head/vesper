@@ -57,9 +57,53 @@ and the blocks of the crates that depend on them run; a documentation-only
 change runs none. Any other change (the compiler, std packages, a seed copy
 the compiler links, the harness, CI, the root manifests or lockfile) runs
 every port, and so do pushes to main, merge queue groups and the nightly.
+Since #1479 the shards do not run for pull requests at all: the Platforms run
+that `Native platform checks` dispatches for a pull request sets the plan's
+ports to `none`. The selection still applies to manual `pr` runs.
 Each block of the script names its crate directory with `if ported vesper-x;
 then ... fi` or `skip_port vesper-x || ...`; a line without a guard always
 runs.
+When the plan names no port, the seven shard jobs are skipped as jobs, so
+they take no runners, and `Platform validation complete` accepts that skip
+(#1321).
+
+## Keeping the queue short
+
+GitHub runs a limited number of jobs at once per account (5 on macOS), and
+every push to a pull request reruns its workflows. On 2026-11-21 that left 78
+runs queued and every Platforms run cancelled by the next push before it
+finished (#1321). To keep pull requests within the limit:
+
+- `Hybrid compiler` and the `Vesper ports` jobs (the compiler build and its
+  seven shards, about nine Linux runners) run only on pushes to main, the
+  nightly schedule and manual runs, not on pull requests (#1479). Neither is
+  a required check, and Bazel builds and tests both crates on every pull
+  request.
+- The narrow integration lanes (Kafka, lavapipe GPU, Ignis Vulkan, Aura GTK,
+  QEMU vectors) are not triggered on pull requests by `Cargo.toml` or
+  `Cargo.lock` alone; pushes to main still run them on those changes.
+- A push to main cancels the older main run of the same workflow.
+- The merge gate (`.github/actions/merge-gate`, `scripts/ci/merge_gate.py`)
+  enforces the project rule that pull requests which cannot merge yet get no
+  CI: when a pull request's base is not main, its branch carries another open
+  pull request's commits (a merged-in parent that has not landed), or it
+  conflicts with main, the gate cancels every Actions run for that push and
+  fails with the reason. Push again once the parent has merged. It is the
+  first step of every job that runs on pull requests, so it takes no runner
+  of its own; as a separate `Merge gate` job it waited over an hour for a
+  Linux runner ahead of everything else (#1479).
+- `macOS (AArch64)` and `Windows (x86_64 MSVC)` start only when a pull
+  request is ready to merge. Platforms no longer runs on pull request pushes;
+  `Native platform checks` (`.github/workflows/native-checks.yml`) runs on
+  each BuildBuddy status and, once `Test all targets` and `Native and
+  acceptance scripts` are both green on the head commit and the merge gate
+  passes, dispatches Platforms on the branch with `pull_request` set. That
+  run tests `refs/pull/<n>/merge`, as pull request runs did, and reports both
+  required checks on the head commit; until then they show as expected and
+  the pull request cannot merge. A new push starts over when its own
+  BuildBuddy checks go green. To start them by hand, run Platforms from the
+  Actions tab on the branch with profile `pr`, `checkout_ref`
+  `refs/pull/<n>/merge` and `pull_request` `<n>`.
 
 The native executable cases are shared with `scripts/test-native-host.sh`;
 `scripts/ci/test-native-executables.sh` runs them with the Cargo-built compiler.
@@ -80,31 +124,31 @@ fails the corresponding required check.
 
 BuildBuddy reuses workflow runners between runs, disk included. Tests write
 their scratch roots under `/tmp` (Bazel sets no `TMPDIR` for tests), and the
-job builds the Logos42 checker there. A run that is killed or fails leaves
-those behind, so `Test all targets` starts with `scripts/ci/reclaim-disk.sh`:
-it removes earlier runs' `/tmp` leftovers, runs `bazel clean` if less than
-20 GB is free (that makes the run cold, so it is a last resort), and prints
-disk use. The test step logs free space every 2 minutes, deletes the checker
-and prints disk use again when it ends (#1200).
+replay job builds the Logos42 checker there. A killed or failed run can
+leave those files behind. Both BuildBuddy actions start with
+`scripts/ci/reclaim-disk.sh`, which removes earlier runs' temporary files
+and runs `bazel clean` when less than 20 GB is free. The Bazel test steps log
+free space every two minutes. The replay step removes its temporary
+checker when it exits.
 
 ## PR test tiers
 
-`Test all targets` builds and lints every target on every run. Its tests come
-in two tiers:
+`Test all targets` builds the workspace and runs the tests, Clippy and
+rustfmt on every run. It downloads remote outputs as local actions need
+them and excludes the Bazel test targets tagged `lean_replay` from its
+build and test selection. `Native and acceptance
+scripts` runs the acceptance scripts, the Lean model audit and, when
+selected, the tagged replay tests on its own runner. Both status checks
+remain required for merge and release.
 
-- **Every run:** all tests except the ones tagged `lean_replay` in
-  `BUILD.bazel`.
-- **`lean_replay`:** the Lean/Logos replay suite (`lean4lean_*42`,
-  `logos42_acceptance`, `oracle42_acceptance`, `resource_oracle42`,
-  `resource_model42`, `replay42_kernel`). Each reserves 5-9 GiB, so together
-  they made up a 20-25 minute tail of the 8 CPU / 22 GB workflow VM (32-38
-  minute runs, November 2026). They run on every push to `main`, and on a pull
-  request only when it changes a path listed in
-  `scripts/ci/lean_replay_scope.py` (Lean models, replay tooling, the
-  Lean-facing compiler modules, those tests, the toolchain and CI config).
-  Put `[ci full]` in a commit message of the PR to force them.
+The Lean/Logos replay tests include `lean4lean_*42`, `logos42_acceptance`,
+`oracle42_acceptance`, `resource_oracle42`, `resource_model42` and
+`replay42_kernel`. They run on every push to `main` and on pull requests
+that touch paths in `scripts/ci/lean_replay_scope.py`. Put `[ci full]` in a
+PR commit message to force a replay. The replay step queries the tagged
+test labels and builds only those targets and their dependencies.
 
-If the scope script cannot read the diff, it runs the full suite. A
+If the scope script cannot read the diff, it runs the replay suite. A
 regression in a skipped replay test shows up on the next `main` run; treat it
 like any red main. When you add a test that reads new Lean-facing inputs, tag
 it `lean_replay` only if those inputs are in the trigger list.

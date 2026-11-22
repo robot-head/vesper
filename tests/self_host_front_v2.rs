@@ -594,6 +594,9 @@ fn edge_cases_and_limits_match_the_rust_parser() {
         "fn f() { handle self::m::E in { 0 } with { return x => x } }",
         "fn f() { @a /b::c; @a/b; self::; super::1 }",
         "fn f(let: u8, if: u8) { x.match; s.impl }",
+        "enum H: _ { A = 6, B, C = H::B << 3 } fn f(x: i32) -> u64 { match H::A { H::B => 1, _ => if x == H::C { H::A } else { 0 } } }",
+        "pub enum C: u8 { A, B = 2, D = C::B + 1, } enum E: u64 {} enum G[T]: u8 { A } enum H: u8 { A(u8), B } enum I: u8 { A = } enum J: [u8; 2] { K = [1, 2] }",
+        "fn f(c: u8) -> u8 { match c & C::Mask { C::A => 1, self::m::C::B | LIMIT => 2, _ => 3 } }",
         "fn f[r](x: T[self::m::U, r]) {}",
         // Fixed-size arrays and module constants (#1115).
         "const A: u8 = 1; pub const B: [u8; 2] = [1; 2]; const c: u8 = 1; pub const; const A u8 = ;",
@@ -664,6 +667,30 @@ fn edge_cases_and_limits_match_the_rust_parser() {
         "use",
         "use @",
         "/// doc\nfn f() {} // trailing",
+        // Contextual `effect`, `handle`, `sink` and `inout` (#1244).
+        "fn effect() {} fn handle(x: u64) -> u64 { x } struct S { sink: u64, inout: u8, effect: u8, handle: u8 }",
+        "fn f(sink: u64, inout: u64, sink s: S, inout inout: u64, sink sink: S) { g(sink, inout); g(sink x, inout y); g(sink.a, sink(1), sink[0], sink - 1, sink as u64); }",
+        "fn f() { let effect = 1; let handle = effect; handle = 2; let s = S { sink, handle: 1 }; s.handle(); for sink in 0..2 {} match x { effect => effect } }",
+        "fn f() { handle E in { 0 } with { return x => x } handle l: E in {} with {} handle(1); handle; handle self::m::E in {} with {} }",
+        "fn f() { g(sink S { a }, inout self.x, sink 1, sink \"s\", sink match x { _ => 1 }, sink if a { b } else { c }, inout !x, sink { 1 }) }",
+        "use m::{effect, handle as h, sink}; fn f() { m::effect(); E::handle(); }",
+        // 128-bit scalars are type arguments, not rows.
+        "fn f(x: Option[u128]) -> Seq[i128] { g[u128, i128](x) }",
+        // `handle` before a capitalized name in an import list starts no name.
+        "use m::{A, handle\n    B, C}; use m::{x as handle Y};",
+        // Literals past u64::MAX (#1244).
+        "fn f() { 18446744073709551616; 340282366920938463463374607431768211455; 340282366920938463463374607431768211456; 0xffff_ffff_ffff_ffff_ffff_ffff_ffff_ffff; 0x1_0000_0000_0000_0000_0000_0000_0000_0000 }",
+        "fn f() { -170141183460469231731687303715884105728; - -170141183460469231731687303715884105728; -340282366920938463463374607431768211455 }",
+        "fn f(x: i128) { match x { -170141183460469231731687303715884105728 => 1, -170141183460469231731687303715884105729 => 2, 340282366920938463463374607431768211455 => 3, -340282366920938463463374607431768211456 => 4, _ => 0 } }",
+        "fn f() { region r(18446744073709551616) { 1 } }",
+        // SH5 lane 4 (#1327): `if`/`match` operands, `handle` statements,
+        // `copy`/`affine` names, reserved keywords.
+        "fn f(a: bool, b: bool) -> bool { a && if b { true } else { false } } fn g(a: bool) -> bool { a || match x { 0 => true, _ => false } }",
+        "fn f() { 1 + if a { 2 } else { 3 } * 4; x == match y { _ => 1 }.len(); if a && if b { c } else { d } { 1 } else { 2 }; !if a { b } else { c }; if a { } -1 }",
+        "fn f() { handle E in { 0 } with { return x => x } let y = 1; region r { 1 } y }",
+        "fn copy(copy: u64) -> u64 { copy } fn affine() {} struct S { copy: u64, affine: u8 } fn f() { let copy = copy(1); let s = S { copy, affine: 2 }; s.copy(); copy[0]; match copy { copy => copy } g(sink copy, inout affine, sink with); for copy in 0..2 {} }",
+        "copy struct P { x: u64 } pub affine enum E { A } struct H { p: P @@ copy } fn id[T: mod copy + Ord](x: fn @copy (u64) -> u64) {} fn c() { |x| @affine x; }",
+        "fn f() { let in = 1; let fn = 2; let (a, mod) = (1, 2); } fn g(match: u64, struct: u8) {} fn h() { let x = s.impl; }",
     ]
     .iter()
     .map(|s| s.to_string())

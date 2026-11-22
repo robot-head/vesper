@@ -81,6 +81,7 @@ fn b(v: bool) -> u8 {
 fn lit(l: &Literal) -> String {
     match l {
         Literal::Int(n) => format!("int {n}"),
+        Literal::WideInt(n) => format!("int {n}"),
         Literal::Float(f) => format!("float {:#018x}", f.to_bits()),
         Literal::Bool(v) => format!("bool {v}"),
         Literal::String(s) => format!("str {}", q(s)),
@@ -956,6 +957,10 @@ fn desugarings_and_limits_match_the_rust_ast() {
         // Constants: every use becomes a call of `const$NAME`.
         "const A: u8 = 1; const B: [u8; 2] = [A; 2]; fn f() -> u8 { A + B.0 + g(A) } fn g(x: u8) -> u8 { let A = 1; x }",
         "pub const N: u64 = 0x10; impl S { fn f() -> u64 { N } } trait T { fn g(); } model M: T for S { fn g() { N; } }",
+        "pub enum C: u8 { A, B = 4, D, E = C::D | 1, F = C::E << 2, G = C::F - 100, H = C::G + 1, } enum N: i32 { M = -2, O, P, Q = N::O + 1 } enum Z: u8 {} enum B: bool { T = true }",
+        "enum E: u64 { A = 18446744073709551615, B, C = 1 << 64, D = 2 / 0, E = (1), F = { 3 } } fn f(x: u8) -> u8 { match (x, 1) { (E::A, C::B) | (LIMIT, _) => 1, (C::B(y), N::M) => y, _ => 2 } } const LIMIT: u8 = 3;",
+        "enum H: _ { A = 6, B, C = H::B << 3 } fn f(x: i32) -> u64 { match H::A { H::B => 1, _ => if x == H::C { H::A } else { 0 } } }",
+        "enum C: u8 { A = 1 } fn f(x: u8) { let C::A = x; for C::A in 0..2 {} handle E state C::A = 0 in { 0 } with { return C::A => 1, op(C::A) => 2 } }",
         // Array types and literals, with splats of pure and impure operands.
         "fn f(a: [[u8; 3]; 2], b: [(u8, u16); 2], c: [u8; 0], d: [u8; 70000], e: [[u8; 300]; 300]) {}",
         "fn f() { [1; 3]; [-x; 2]; [a + b * c; 2]; [f(); 3]; [{ 1 }; 2]; [(1, 2); 2]; [x.y; 2]; [[0; 2]; 2]; [f(); 0]; [1; 70000] }",
@@ -1011,6 +1016,27 @@ fn desugarings_and_limits_match_the_rust_ast() {
         "fn f() { let x = ; let y = ; } fn g() { let c = ; }",
         "fn f(x i64) { let y = ; } fn good() {}",
         "fn f(let: u8, if: u8) { x.match; s.impl } fn (+) {} fn f[]() {} struct {} enum { A } effect {}",
+        // Contextual `effect`, `handle`, `sink` and `inout` (#1244).
+        "fn effect() {} fn handle(x: u64) -> u64 { x } struct S { sink: u64, inout: u8, effect: u8, handle: u8 }",
+        "fn f(sink: u64, inout: u64, sink s: S, inout inout: u64, sink sink: S) { g(sink, inout); g(sink x, inout y); g(sink.a, sink(1), sink[0], sink - 1); }",
+        "fn f() { let effect = 1; let handle = effect; handle = 2; let s = S { sink, handle: 1 }; s.handle(); for sink in 0..2 {} match x { effect => effect } }",
+        "fn f() { handle E in { 0 } with { return x => x } handle(1); let h = handle; }",
+        "fn f() { g(sink S { a }, inout self.x, sink 1, sink if a { b } else { c }, sink { 1 }) }",
+        // Literals past u64::MAX (#1244).
+        "fn f() { 18446744073709551616; 340282366920938463463374607431768211455; 0xffff_ffff_ffff_ffff_ffff_ffff_ffff_ffff; 340282366920938463463374607431768211456 }",
+        "fn f() { -170141183460469231731687303715884105728; - -170141183460469231731687303715884105728; -340282366920938463463374607431768211455; -18446744073709551616 }",
+        "fn f(x: i128) { match x { -170141183460469231731687303715884105728 => 1, -170141183460469231731687303715884105729 => 2, 340282366920938463463374607431768211455 => 3, -18446744073709551617 => 4, _ => 0 } }",
+        "const A: i128 = -170141183460469231731687303715884105728; const B: u128 = 340282366920938463463374607431768211455; const C: i128 = 18446744073709551616; const D: i128 = -C; fn f() -> i128 { match A { A => 1, C => 2, _ => 3 } }",
+        "enum W: i128 { A = 18446744073709551616, B, C = -18446744073709551616, D, E = -1, F, G = 170141183460469231731687303715884105727 } enum U: u128 { A = 340282366920938463463374607431768211455 }",
+        "fn f() { region r(18446744073709551616) { 1 } }",
+        // SH5 lane 4 (#1327): `if`/`match` operands, `handle` statements,
+        // `copy`/`affine` names, reserved keywords.
+        "fn f(a: bool, b: bool) -> bool { a && if b { true } else { false } } fn g(a: bool) -> bool { a || match x { 0 => true, _ => false } }",
+        "fn f() { 1 + if a { 2 } else { 3 } * 4; x == match y { _ => 1 }.len(); if a && if b { c } else { d } { 1 } else { 2 }; !if a { b } else { c }; if a { } -1 }",
+        "fn f() { handle E in { 0 } with { return x => x } let y = 1; region r { 1 } y }",
+        "fn copy(copy: u64) -> u64 { copy } fn affine() {} struct S { copy: u64, affine: u8 } fn f() { let copy = copy(1); let s = S { copy, affine: 2 }; s.copy(); copy[0]; match copy { copy => copy } g(sink copy, inout affine, sink with); for copy in 0..2 {} }",
+        "copy struct P { x: u64 } pub affine enum E { A } struct H { p: P @@ copy } fn id[T: mod copy + Ord](x: fn @copy (u64) -> u64) {} fn c() { |x| @affine x; }",
+        "fn f() { let in = 1; let fn = 2; let (a, mod) = (1, 2); } fn g(match: u64, struct: u8) {} fn h() { let x = s.impl; }",
     ]
     .iter()
     .map(|s| s.to_string())

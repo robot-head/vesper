@@ -32,3 +32,36 @@ pub fn filled_bool(n: u64, v: bool) -> ChunkSeq[bool] {
     s.resize(n, v);
     s
 }
+
+test {
+    // @case first(3, 0, 7, true)
+    // @case last(3, 2, 7, true)
+    // @case end(3, 3, 0, false)
+    // @case empty(0, 0, 0, false)
+    // @case huge_offset(3, 18446744073709551615, 0, false)
+    fn test_filled_sequences(len: u64, index: u64, expected: u32, present: bool) -> bool {
+        let words = filled32(len, 7);
+        let bits = filled_bool(len, true);
+        words
+            .len()
+            == len
+            && bits
+            .len()
+            == len
+            && get32(in words.as_slice(), index, 0)
+            == expected
+            && get_bool(in bits.as_slice(), index)
+            == present
+    }
+
+    // @case first(0, 4294967296)
+    // @case second(1, 18446744073709551615)
+    // @case end(2, 99)
+    // @case huge_offset(18446744073709551615, 99)
+    fn test_get64(index: u64, expected: u64) -> bool {
+        let mut words = ChunkSeq::new[u64]();
+        words.push(4294967296);
+        words.push(18446744073709551615);
+        get64(in words.as_slice(), index, 99) == expected
+    }
+}

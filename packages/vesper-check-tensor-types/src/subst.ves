@@ -1,0 +1,566 @@
+// `infer::Subst`: dimension, dtype and type bindings of one call or
+// literal, and its pending dimension equations. Maps are association lists
+// read newest first, so a later insert shadows an earlier one exactly as
+// `BTreeMap::insert` replaces it, and a failed probe is undone by
+// truncating (`mark`/`undo`) where Rust clones and discards.
+
+use @vesper/check-data::util::{
+    push_decimal,
+    add,
+    inc,
+    u32_at,
+    w
+};
+use self::state::{
+    St,
+    put,
+    put_dim,
+    put_dtype,
+    put_ty,
+    dim_node,
+    dim_var_at,
+    dim_exp_at,
+    dim_mul,
+    dim_var,
+    dim_without,
+    dim_divides,
+    dim_quotient,
+    dim_mentions,
+    put_dim_error,
+    mk_ty,
+    mk_dim,
+    ty_node,
+    ty_item,
+    has_tensor,
+};
+
+const NONE: u32 = 4294967295;
+
+const T_TENSOR: u8 = 1;
+const T_LEASE: u8 = 2;
+const T_SEQ: u8 = 3;
+const T_ADT: u8 = 4;
+const T_TUPLE: u8 = 5;
+const T_FN: u8 = 6;
+const T_VAR: u8 = 7;
+const T_UNKNOWN: u8 = 9;
+
+pub struct Subst {
+    dk: ChunkSeq[u32],
+    dv: ChunkSeq[u32],
+    ek: ChunkSeq[u32],
+    ev: ChunkSeq[u32],
+    yk: ChunkSeq[u32],
+    yv: ChunkSeq[u32],
+    pa: ChunkSeq[u32],
+    pb: ChunkSeq[u32]
+}
+
+pub copy struct Mark {
+    d: u64,
+    e: u64,
+    y: u64,
+    p: u64
+}
+
+pub fn subst_new() -> Subst {
+    Subst {
+        dk: ChunkSeq::new[u32](),
+        dv: ChunkSeq::new[u32](),
+        ek: ChunkSeq::new[u32](),
+        ev: ChunkSeq::new[u32](),
+        yk: ChunkSeq::new[u32](),
+        yv: ChunkSeq::new[u32](),
+        pa: ChunkSeq::new[u32](),
+        pb: ChunkSeq::new[u32]()
+    }
+}
+
+pub fn mark(in s: Subst) -> Mark {
+    Mark {
+        d: s.dk.len(),
+        e: s.ek.len(),
+        y: s.yk.len(),
+        p: s.pa.len()
+    }
+}
+
+pub fn undo(inout s: Subst, m: Mark) {
+    s.dk.truncate(m.d);
+    s.dv.truncate(m.d);
+    s.ek.truncate(m.e);
+    s.ev.truncate(m.e);
+    s.yk.truncate(m.y);
+    s.yv.truncate(m.y);
+    s.pa.truncate(m.p);
+    s.pb.truncate(m.p);
+}
+
+pub fn find(in k: ChunkSeq[u32], in v: ChunkSeq[u32], key: u32) -> u32 {
+    let mut i = k.len();
+    loop {
+        if i == 0 {
+            return NONE;
+        }
+        i = wrapping_sub(i, 1);
+        if u32_at(in k, i) == key {
+            return u32_at(in v, i);
+        }
+    }
+}
+
+pub fn set_dim(inout s: Subst, v: u32, d: u32) {
+    s.dk.push(v);
+    s.dv.push(d);
+}
+
+pub fn set_dtype(inout s: Subst, v: u32, d: u32) {
+    s.ek.push(v);
+    s.ev.push(d);
+}
+
+pub fn set_ty(inout s: Subst, v: u32, t: u32) {
+    s.yk.push(v);
+    s.yv.push(t);
+}
+
+// Whether a name is a unification variable (`?n`, `flexible`).
+
+pub fn dim_flexible(in st: St, d: u32) -> bool {
+    for i in 0..widen_u64(dim_node(in st, d).n) {
+        if (
+            st
+                .names
+                .size((dim_var_at(in st, d, i)))
+                > 0
+                && st
+                .names
+                .byte((dim_var_at(in st, d, i)), 0)
+                == 63
+        ) {
+            return true;
+        }
+    }
+    false
+}
+
+// `Dim::subst` with `s.dims` as the environment (one pass): NONE with
+// `derr` on overflow.
+pub fn dim_subst1(inout st: St, in s: Subst, d: u32) -> u32 {
+    let x = dim_node(in st, d);
+    let none: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut out = mk_dim(inout st, x.coeff, in none);
+    for i in 0..widen_u64(x.n) {
+        let v = dim_var_at(in st, d, i);
+        let e = dim_exp_at(in st, d, i);
+        let mut f = find(in s.dk, in s.dv, v);
+        if f == NONE {
+            f = dim_var(inout st, v);
+        }
+        for k in 0..widen_u64(e) {
+            out = dim_mul(inout st, out, f);
+            if out == NONE {
+                return NONE;
+            }
+        }
+    }
+    out
+}
+
+// `Subst::dim`: NONE with `err` set.
+pub fn sub_dim(inout st: St, in s: Subst, d0: u32) -> u32 {
+    let mut d = d0;
+    for i in 0..32 {
+        let next = dim_subst1(inout st, in s, d);
+        if next == NONE {
+            st.err.clear();
+            put_dim_error(inout st.err, st.derr);
+            return NONE;
+        }
+        if next == d {
+            return d;
+        }
+        d = next;
+    }
+    st.err.clear();
+    put(inout st.err, in "dimension substitution does not terminate");
+    NONE
+}
+
+// `Subst::dim(..).unwrap_or(d)`.
+pub fn sub_dim_or(inout st: St, in s: Subst, d: u32) -> u32 {
+    let x = sub_dim(inout st, in s, d);
+    if x == NONE {
+        d
+    } else {
+        x
+    }
+}
+
+pub fn sub_dtype(in s: Subst, d: u32) -> u32 {
+    if (d >= 2 && (d & 1) == 1) {
+        let x = find(in s.ek, in s.ev, ((wrapping_sub(d, 2) >> 1)));
+        if x != NONE {
+            return x;
+        }
+    }
+    d
+}
+
+// `Subst::ty`: NONE with `err` set.
+pub fn sub_ty(inout st: St, in s: Subst, t: u32) -> u32 {
+    let x = ty_node(in st, t);
+    if x.k == T_TENSOR {
+        let mut items = ChunkSeq::new[u32]();
+        for i in 0..widen_u64(x.n) {
+            let d = sub_dim(inout st, in s, ty_item(in st, t, i));
+            if d == NONE {
+                return NONE;
+            }
+            items.push(d);
+        }
+        return mk_ty(inout st, T_TENSOR, sub_dtype(in s, x.a), 0, in items);
+    }
+    if x.k == T_LEASE || x.k == T_SEQ {
+        let kv = sub_dim(inout st, in s, x.a);
+        if kv == NONE {
+            return NONE;
+        }
+        let hd = sub_dim(inout st, in s, x.c);
+        if hd == NONE {
+            return NONE;
+        }
+        let none: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        return mk_ty(inout st, x.k, kv, hd, in none);
+    }
+    if x.k == T_ADT {
+        let mut items = ChunkSeq::new[u32]();
+        for i in 0..widen_u64(x.n) {
+            let tag = ty_item(in st, t, wrapping_mul(i, 2));
+            let id = ty_item(in st, t, inc(wrapping_mul(i, 2)));
+            let mut y = id;
+            if tag == 0 {
+                y = sub_ty(inout st, in s, id);
+            } else if tag == 1 {
+                y = sub_dim(inout st, in s, id);
+            } else {
+                y = sub_dtype(in s, id);
+            }
+            if y == NONE {
+                return NONE;
+            }
+            items.push(tag);
+            items.push(y);
+        }
+        return mk_ty(inout st, T_ADT, x.a, 0, in items);
+    }
+    if x.k == T_TUPLE || x.k == T_FN {
+        let mut items = ChunkSeq::new[u32]();
+        for i in 0..widen_u64(x.n) {
+            let y = sub_ty(inout st, in s, ty_item(in st, t, i));
+            if y == NONE {
+                return NONE;
+            }
+            items.push(y);
+        }
+        let mut r: u32 = 0;
+        if x.k == T_FN {
+            r = sub_ty(inout st, in s, x.c);
+            if r == NONE {
+                return NONE;
+            }
+        }
+        return mk_ty(inout st, x.k, 0, r, in items);
+    }
+    if x.k == T_VAR {
+        let b = find(in s.yk, in s.yv, x.a);
+        if b == NONE {
+            return t;
+        }
+        let y = ty_node(in st, b);
+        if y.k == T_VAR && y.a == x.a {
+            return t;
+        }
+        return sub_ty(inout st, in s, b);
+    }
+    t
+}
+
+// `s.ty(t).unwrap_or(dflt)`.
+pub fn sub_ty_or(inout st: St, in s: Subst, t: u32, dflt: u32) -> u32 {
+    let x = sub_ty(inout st, in s, t);
+    if x == NONE {
+        dflt
+    } else {
+        x
+    }
+}
+
+// The result of a unification: 0 Ok, else the diagnostic code with the
+// reason in `err` (empty for `String::new()`).
+
+pub fn unify_dtype(inout st: St, inout s: Subst, a0: u32, b0: u32) -> u32 {
+    let a = sub_dtype(in s, a0);
+    let b = sub_dtype(in s, b0);
+    if a == b {
+        return 0;
+    }
+    if (a >= 2 && (a & 1) == 1)
+        && (
+        st
+            .names
+            .size(((wrapping_sub(a, 2) >> 1)))
+            > 0
+            && st
+            .names
+            .byte(((wrapping_sub(a, 2) >> 1)), 0)
+            == 63
+    ) {
+        set_dtype(inout s, (wrapping_sub(a, 2) >> 1), b);
+        return 0;
+    }
+    if (b >= 2 && (b & 1) == 1)
+        && (
+        st
+            .names
+            .size(((wrapping_sub(b, 2) >> 1)))
+            > 0
+            && st
+            .names
+            .byte(((wrapping_sub(b, 2) >> 1)), 0)
+            == 63
+    ) {
+        set_dtype(inout s, (wrapping_sub(b, 2) >> 1), a);
+        return 0;
+    }
+    let mut m = ChunkSeq::new[u8]();
+    put(inout m, in "element type ");
+    put_dtype(in st, inout m, a);
+    put(inout m, in " differs from ");
+    put_dtype(in st, inout m, b);
+    st.err = m;
+    766
+}
+
+// `Subst::solve`: bind the single flexible variable of `a` so `a == b`.
+fn solve(inout st: St, inout s: Subst, a: u32, b: u32) -> bool {
+    let mut v = NONE;
+    let mut count: u64 = 0;
+    let mut exp: u32 = 0;
+    for i in 0..widen_u64(dim_node(in st, a).n) {
+        let x = dim_var_at(in st, a, i);
+        if (st.names.size(x) > 0 && st.names.byte(x, 0) == 63) {
+            count = inc(count);
+            v = x;
+            exp = dim_exp_at(in st, a, i);
+        }
+    }
+    if count != 1 || exp != 1 {
+        return false;
+    }
+    if dim_mentions(in st, b, v) {
+        return false;
+    }
+    let rest = dim_without(inout st, a, v);
+    if !dim_divides(in st, rest, b) {
+        return false;
+    }
+    let value = dim_quotient(inout st, rest, b);
+    set_dim(inout s, v, value);
+    true
+}
+
+pub fn unify_dim(inout st: St, inout s: Subst, a0: u32, b0: u32) -> u32 {
+    let a = sub_dim(inout st, in s, a0);
+    if a == NONE {
+        return 762;
+    }
+    let b = sub_dim(inout st, in s, b0);
+    if b == NONE {
+        return 762;
+    }
+    if a == b {
+        return 0;
+    }
+    if solve(inout st, inout s, a, b) || solve(inout st, inout s, b, a) {
+        return 0;
+    }
+    if dim_flexible(in st, a) || dim_flexible(in st, b) {
+        s.pa.push(a);
+        s.pb.push(b);
+        return 0;
+    }
+    let mut m = ChunkSeq::new[u8]();
+    put_dim(in st, inout m, a);
+    put(inout m, in " differs from ");
+    put_dim(in st, inout m, b);
+    st.err = m;
+    763
+}
+
+// Prefixes `err` with `p` (and a number when `with_n`) and ": ".
+fn prefix_err(inout st: St, in p: Str, with_n: bool, n: u64) {
+    let mut m = ChunkSeq::new[u8]();
+    put(inout m, in p);
+    if with_n {
+        push_decimal(inout m, n);
+    }
+    put(inout m, in ": ");
+    m.extend(in st.err.as_slice());
+    st.err = m;
+}
+
+// `Subst::unify(exp, act)`.
+pub fn unify(inout st: St, inout s: Subst, exp0: u32, act0: u32) -> u32 {
+    let exp = sub_ty(inout st, in s, exp0);
+    if exp == NONE {
+        return 762;
+    }
+    let act = sub_ty(inout st, in s, act0);
+    if act == NONE {
+        return 762;
+    }
+    let x = ty_node(in st, exp);
+    let y = ty_node(in st, act);
+    if x.k == T_UNKNOWN || y.k == T_UNKNOWN {
+        return 0;
+    }
+    if x.k == T_VAR && (st.names.size(x.a) > 0 && st.names.byte(x.a, 0) == 63) {
+        set_ty(inout s, x.a, act);
+        return 0;
+    }
+    if y.k == T_VAR && (st.names.size(y.a) > 0 && st.names.byte(y.a, 0) == 63) {
+        set_ty(inout s, y.a, exp);
+        return 0;
+    }
+    if x.k == T_TENSOR && y.k == T_TENSOR {
+        let c = unify_dtype(inout st, inout s, x.a, y.a);
+        if c != 0 {
+            return c;
+        }
+        if x.n != y.n {
+            let mut m = ChunkSeq::new[u8]();
+            put(inout m, in "rank ");
+            push_decimal(inout m, widen_u64(x.n));
+            put(inout m, in " differs from rank ");
+            push_decimal(inout m, widen_u64(y.n));
+            st.err = m;
+            return 763;
+        }
+        for i in 0..widen_u64(x.n) {
+            let c2 = unify_dim(inout st, inout s, ty_item(in st, exp, i), ty_item(in st, act, i));
+            if c2 != 0 {
+                prefix_err(inout st, in "axis ", true, i);
+                return c2;
+            }
+        }
+        return 0;
+    }
+    if (x.k == T_LEASE && y.k == T_LEASE) || (x.k == T_SEQ && y.k == T_SEQ) {
+        let c = unify_dim(inout st, inout s, x.a, y.a);
+        if c != 0 {
+            prefix_err(inout st, in "KvHeads", false, 0);
+            return c;
+        }
+        let c2 = unify_dim(inout st, inout s, x.c, y.c);
+        if c2 != 0 {
+            prefix_err(inout st, in "HeadDim", false, 0);
+            return c2;
+        }
+        return 0;
+    }
+    if x.k == T_ADT && y.k == T_ADT && x.a == y.a && x.n == y.n {
+        for i in 0..widen_u64(x.n) {
+            let t1 = ty_item(in st, exp, wrapping_mul(i, 2));
+            let t2 = ty_item(in st, act, wrapping_mul(i, 2));
+            let p = ty_item(in st, exp, inc(wrapping_mul(i, 2)));
+            let q = ty_item(in st, act, inc(wrapping_mul(i, 2)));
+            let mut c: u32 = 0;
+            if t1 == 0 && t2 == 0 {
+                c = unify(inout st, inout s, p, q);
+            } else if t1 == 1 && t2 == 1 {
+                c = unify_dim(inout st, inout s, p, q);
+            } else if t1 == 2 && t2 == 2 {
+                c = unify_dtype(inout st, inout s, p, q);
+            }
+            if c != 0 {
+                return c;
+            }
+        }
+        return 0;
+    }
+    if (x.k == T_TUPLE && y.k == T_TUPLE && x.n == y.n)
+        || (x.k == T_FN && y.k == T_FN && x.n == y.n) {
+        for i in 0..widen_u64(x.n) {
+            let c = unify(inout st, inout s, ty_item(in st, exp, i), ty_item(in st, act, i));
+            if c != 0 {
+                return c;
+            }
+        }
+        if x.k == T_FN {
+            return unify(inout st, inout s, x.c, y.c);
+        }
+        return 0;
+    }
+    if x.k == T_VAR && y.k == T_VAR && x.a == y.a {
+        return 0;
+    }
+    if !has_tensor(in st, exp) && !has_tensor(in st, act) {
+        return 0;
+    }
+    st.err.clear();
+    763
+}
+
+// `Subst::settle`.
+pub fn settle(inout st: St, inout s: Subst) -> u32 {
+    for round in 0..16 {
+        if s.pa.len() == 0 {
+            return 0;
+        }
+        let mut pa = ChunkSeq::new[u32]();
+        let mut pb = ChunkSeq::new[u32]();
+        pa.extend(in s.pa.as_slice());
+        pb.extend(in s.pb.as_slice());
+        s.pa.clear();
+        s.pb.clear();
+        let before = pa.len();
+        for i in 0..before {
+            let c = unify_dim(inout st, inout s, u32_at(in pa, i), u32_at(in pb, i));
+            if c != 0 {
+                return c;
+            }
+        }
+        if s.pa.len() >= before {
+            break;
+        }
+    }
+    if s.pa.len() == 0 {
+        return 0;
+    }
+    let a = u32_at(in s.pa, 0);
+    let b = u32_at(in s.pb, 0);
+    let da = sub_dim_or(inout st, in s, a);
+    let db = sub_dim_or(inout st, in s, b);
+    let mut m = ChunkSeq::new[u8]();
+    put(inout m, in "cannot solve ");
+    put_dim(in st, inout m, da);
+    put(inout m, in " = ");
+    put_dim(in st, inout m, db);
+    st.err = m;
+    764
+}
+
+// `unify(..).and_then(|_| settle())`.
+pub fn unify_settle(inout st: St, inout s: Subst, exp: u32, act: u32) -> u32 {
+    let c = unify(inout st, inout s, exp, act);
+    if c != 0 {
+        return c;
+    }
+    settle(inout st, inout s)
+}
+
+// Whether `s` binds dimension variable `v` (`s.dims.contains_key(v)`).
+pub fn binds_dim(in s: Subst, v: u32) -> bool {
+    find(in s.dk, in s.dv, v) != NONE
+}

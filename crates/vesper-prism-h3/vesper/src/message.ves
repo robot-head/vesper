@@ -18,6 +18,40 @@ use self::capsule::{
     valid_utf8
 };
 
+// Words per field in `meta`: name length, value length, sensitive.
+const META_WORDS: u64 = 3;
+// `find_not_in` class bitmaps (bit `x` of LO for bytes below 64, of HI
+// for 64..128). RFC 9110 §5.6.2 tchar: `!#$%&'*+-.0-9` in LO; `^_`a-z|~`
+// in HI; field names (RFC 9114 §4.2) exclude uppercase.
+const TOKEN_LO: u64 = 0x03ff6cfa00000000;
+const FIELD_NAME_HI: u64 = 0x57ffffffc0000000;
+// A method token also allows `A-Z`.
+const METHOD_HI: u64 = 0x57ffffffc7fffffe;
+// RFC 9110 §5.5: field values exclude NUL, LF and CR.
+const FIELD_VALUE_LO: u64 = 0xffffffffffffdbfe;
+const FIELD_VALUE_HI: u64 = 0xffffffffffffffff;
+// Pseudo-header values: nothing at or below SP, and no DEL.
+const PSEUDO_VALUE_LO: u64 = 0xfffffffe00000000;
+const PSEUDO_VALUE_HI: u64 = 0x7fffffffffffffff;
+// Request pseudo-header ids.
+const PSEUDO_METHOD: u64 = 1;
+const PSEUDO_SCHEME: u64 = 2;
+const PSEUDO_AUTHORITY: u64 = 3;
+const PSEUDO_PATH: u64 = 4;
+const PSEUDO_PROTOCOL: u64 = 5;
+// u64::MAX has 20 digits, so 19 always fit.
+const MAX_CONTENT_LENGTH_DIGITS: u64 = 19;
+const DECIMAL_BASE: u64 = 10;
+// RFC 9110 §15: a status code is three digits, 100..=599.
+const STATUS_DIGITS: u64 = 3;
+const STATUS_MIN: u64 = 100;
+const STATUS_MAX: u64 = 599;
+const ASCII_TAB: u8 = 0x09;
+const ASCII_SPACE: u8 = 0x20;
+const ASCII_ZERO: u8 = 0x30;
+const ASCII_NINE: u8 = 0x39;
+const ASCII_COLON: u8 = 0x3a;
+
 // Field `i`: its name is `bytes[start..start + nlen]`, then its value.
 copy struct Line {
     lo: u64,
@@ -26,24 +60,27 @@ copy struct Line {
 }
 
 fn lines(in meta: Slice[u64], inout out: ChunkSeq[u64]) {
-    let n = meta.len() / 3;
+    let n = meta.len() / META_WORDS;
     let mut at: u64 = 0;
     for i in 0..n {
         out.push(at);
         at = wrapping_add(
             at,
-            wrapping_add(word(in meta, wrapping_mul(i, 3)), word(in meta, inc(wrapping_mul(i, 3))))
+            wrapping_add(
+                word(in meta, wrapping_mul(i, META_WORDS)),
+                word(in meta, inc(wrapping_mul(i, META_WORDS)))
+            )
         );
     }
 }
 
 fn line(in starts: Slice[u64], in meta: Slice[u64], i: u64) -> Line {
     let lo = word(in starts, i);
-    let mid = wrapping_add(lo, word(in meta, wrapping_mul(i, 3)));
+    let mid = wrapping_add(lo, word(in meta, wrapping_mul(i, META_WORDS)));
     Line {
         lo: lo,
         mid: mid,
-        hi: wrapping_add(mid, word(in meta, inc(wrapping_mul(i, 3))))
+        hi: wrapping_add(mid, word(in meta, inc(wrapping_mul(i, META_WORDS))))
     }
 }
 
@@ -93,22 +130,21 @@ fn all_in(in s: Slice[u8], lo: u64, hi: u64, high: bool) -> bool {
 }
 
 fn is_digit(c: u8) -> bool {
-    c >= 48 && c <= 57
+    c >= ASCII_ZERO && c <= ASCII_NINE
 }
 
 fn space(c: u8) -> bool {
-    c == 32 || c == 9
+    c == ASCII_SPACE || c == ASCII_TAB
 }
 
 fn check_regular(in b: Slice[u8], l: Line) -> Option[MessageError] {
     if l.mid == l.lo {
         return Option::Some(MessageError::InvalidFieldName);
     }
-    if !all_in(in b[l.lo..l.mid], 288068722172624896, 6341068274263916544, false) {
+    if !all_in(in b[l.lo..l.mid], TOKEN_LO, FIELD_NAME_HI, false) {
         return Option::Some(MessageError::InvalidFieldName);
     }
-    // Anything but NUL, CR and LF.
-    if !all_in(in b[l.mid..l.hi], 18446744073709542398, 18446744073709551615, true) {
+    if !all_in(in b[l.mid..l.hi], FIELD_VALUE_LO, FIELD_VALUE_HI, true) {
         return Option::Some(MessageError::InvalidFieldValue);
     }
     if l.hi > l.mid && (space(byte(in b, l.mid)) || space(byte(in b, wrapping_sub(l.hi, 1)))) {
@@ -138,7 +174,7 @@ fn split(in b: Slice[u8], in starts: Slice[u64], in meta: Slice[u64]) -> Result[
     let mut pseudo: u64 = 0;
     for i in 0..n {
         let l = line(in starts, in meta, i);
-        if l.mid > l.lo && byte(in b, l.lo) == 58 {
+        if l.mid > l.lo && byte(in b, l.lo) == ASCII_COLON {
             if pseudo != i {
                 return Result::Err(MessageError::PseudoAfterRegular);
             }
@@ -176,7 +212,7 @@ fn content_length(in b: Slice[u8], in starts: Slice[u64], in meta: Slice[u64], f
             wrapping_sub(l.mid, l.lo) == 14 && is(in b, l.lo, l.mid, in "content-length".as_bytes())
         ) {
             let len = wrapping_sub(l.hi, l.mid);
-            if len == 0 || len > 19 {
+            if len == 0 || len > MAX_CONTENT_LENGTH_DIGITS {
                 return Result::Err(MessageError::InvalidContentLength);
             }
             let mut v: u64 = 0;
@@ -185,8 +221,10 @@ fn content_length(in b: Slice[u8], in starts: Slice[u64], in meta: Slice[u64], f
                 if !is_digit(c) {
                     return Result::Err(MessageError::InvalidContentLength);
                 }
-                // 19 digits fit a u64.
-                v = wrapping_add(wrapping_mul(v, 10), widen_u64(wrapping_sub(c, 48)));
+                v = wrapping_add(
+                    wrapping_mul(v, DECIMAL_BASE),
+                    widen_u64(wrapping_sub(c, ASCII_ZERO))
+                );
             }
             match found {
                 Option::Some(prev) => {
@@ -230,42 +268,40 @@ pub fn message_parse_request(in b: Slice[u8], in meta: Slice[u64])
                 hi: l.hi
             }
         );
-        // 1 method, 2 scheme, 3 authority, 4 path, 5 protocol.
         let which: u64 = if (
             wrapping_sub(l.mid, l.lo) == 7 && is(in b, l.lo, l.mid, in ":method".as_bytes())
         ) {
-            1
+            PSEUDO_METHOD
         } else if (
             wrapping_sub(l.mid, l.lo) == 7 && is(in b, l.lo, l.mid, in ":scheme".as_bytes())
         ) {
-            2
+            PSEUDO_SCHEME
         } else if (
             wrapping_sub(l.mid, l.lo) == 10 && is(in b, l.lo, l.mid, in ":authority".as_bytes())
         ) {
-            3
+            PSEUDO_AUTHORITY
         } else if (wrapping_sub(l.mid, l.lo) == 5 && is(in b, l.lo, l.mid, in ":path".as_bytes())) {
-            4
+            PSEUDO_PATH
         } else if (
             wrapping_sub(l.mid, l.lo) == 9 && is(in b, l.lo, l.mid, in ":protocol".as_bytes())
         ) {
-            5
+            PSEUDO_PROTOCOL
         } else {
             return Result::Err(MessageError::UnknownPseudoHeader);
         };
-        // Nothing at or below SP, and no DEL.
-        if !all_in(in b[l.mid..l.hi], 18446744065119617024, 9223372036854775807, true) {
+        if !all_in(in b[l.mid..l.hi], PSEUDO_VALUE_LO, PSEUDO_VALUE_HI, true) {
             return Result::Err(MessageError::InvalidPseudoHeader);
         }
         if !valid_utf8(in b[l.mid..l.hi]) {
             return Result::Err(MessageError::InvalidFieldValue);
         }
-        if which == 1 {
+        if which == PSEUDO_METHOD {
             method = v;
-        } else if which == 2 {
+        } else if which == PSEUDO_SCHEME {
             scheme = v;
-        } else if which == 3 {
+        } else if which == PSEUDO_AUTHORITY {
             authority = v;
-        } else if which == 4 {
+        } else if which == PSEUDO_PATH {
             path = v;
         } else {
             protocol = v;
@@ -278,7 +314,7 @@ pub fn message_parse_request(in b: Slice[u8], in meta: Slice[u64])
     if m.hi == m.lo {
         return Result::Err(MessageError::InvalidPseudoHeader);
     }
-    if !all_in(in b[m.lo..m.hi], 288068722172624896, 6341068274398134270, false) {
+    if !all_in(in b[m.lo..m.hi], TOKEN_LO, METHOD_HI, false) {
         return Result::Err(MessageError::InvalidPseudoHeader);
     }
     let connect = (wrapping_sub(m.hi, m.lo) == 7 && is(in b, m.lo, m.hi, in "CONNECT".as_bytes()));
@@ -393,7 +429,7 @@ pub fn message_parse_response(in b: Slice[u8], in meta: Slice[u64])
         if !(wrapping_sub(l.mid, l.lo) == 7 && is(in b, l.lo, l.mid, in ":status".as_bytes())) {
             return Result::Err(MessageError::UnknownPseudoHeader);
         }
-        if wrapping_sub(l.hi, l.mid) != 3 {
+        if wrapping_sub(l.hi, l.mid) != STATUS_DIGITS {
             return Result::Err(MessageError::InvalidStatus);
         }
         let mut v: u64 = 0;
@@ -402,7 +438,7 @@ pub fn message_parse_response(in b: Slice[u8], in meta: Slice[u64])
             if !is_digit(c) {
                 return Result::Err(MessageError::InvalidStatus);
             }
-            v = wrapping_add(wrapping_mul(v, 10), widen_u64(wrapping_sub(c, 48)));
+            v = wrapping_add(wrapping_mul(v, DECIMAL_BASE), widen_u64(wrapping_sub(c, ASCII_ZERO)));
         }
         status = v;
         seen = true;
@@ -410,7 +446,7 @@ pub fn message_parse_response(in b: Slice[u8], in meta: Slice[u64])
     if !seen {
         return Result::Err(MessageError::MissingPseudoHeader);
     }
-    if status < 100 || status > 599 {
+    if status < STATUS_MIN || status > STATUS_MAX {
         return Result::Err(MessageError::InvalidStatus);
     }
     let cl = match content_length(in b, in starts.as_slice(), in meta, pseudo) {
@@ -431,7 +467,7 @@ pub fn message_check_trailers(in b: Slice[u8], in meta: Slice[u64]) -> Option[Me
     lines(in meta, inout starts);
     for i in 0..starts.len() {
         let l = line(in starts.as_slice(), in meta, i);
-        if l.mid > l.lo && byte(in b, l.lo) == 58 {
+        if l.mid > l.lo && byte(in b, l.lo) == ASCII_COLON {
             return Option::Some(MessageError::UnknownPseudoHeader);
         }
         match check_regular(in b, l) {

@@ -5,6 +5,7 @@ use @vesper/loom-calculus::{
     Snap
 };
 use @vesper/loom-calculus::util::{
+    Order,
     dep,
     gnode,
     man,
@@ -16,8 +17,7 @@ use self::{
     A
 };
 use self::util::{
-    e_limit,
-    e_solution,
+    ErrorKind,
     fail,
     setw,
     spend,
@@ -94,7 +94,7 @@ fn ref_ord(in s: A, a: u64, b: u64) -> u64 {
 fn index_graph(inout s: A) -> bool {
     let x = snap0(in s);
     if !x.graph {
-        fail(inout s, e_solution(), "");
+        fail(inout s, ErrorKind::Solution, "");
         return false;
     }
     let k = s.l.k;
@@ -156,8 +156,8 @@ fn shorter(in s: A, at: u64, n: u64, p: u64) -> bool {
             word(in s.pw, wrapping_add(at, i)),
             word(in s.pw, wrapping_add(qa, i))
         );
-        if o != 1 {
-            return o == 0;
+        if o != Order::Equal {
+            return o == Order::Less;
         }
     }
     false
@@ -166,7 +166,7 @@ fn shorter(in s: A, at: u64, n: u64, p: u64) -> bool {
 fn add_nodes(inout s: A, n: u64, in t: Str) -> bool {
     let x = wrapping_add(s.path_nodes, n);
     if x < n || x > s.m_pnodes {
-        fail(inout s, e_limit(), t);
+        fail(inout s, ErrorKind::Limit, t);
         return false;
     }
     s.path_nodes = x;
@@ -200,7 +200,7 @@ fn from_root(inout s: A, root: u64, stamp: u64) -> bool {
                 return false;
             }
             if s.rev.len() >= s.m_pdepth {
-                fail(inout s, e_limit(), "dependency path depth");
+                fail(inout s, ErrorKind::Limit, "dependency path depth");
                 return false;
             }
             s.rev.push(cur);
@@ -222,7 +222,7 @@ fn from_root(inout s: A, root: u64, stamp: u64) -> bool {
                 return false;
             }
             if rl >= s.m_pdepth {
-                fail(inout s, e_limit(), "native dependency path depth");
+                fail(inout s, ErrorKind::Limit, "native dependency path depth");
                 return false;
             }
             let e = sedge(in s.l.gs, wrapping_add(g.s_at, j));

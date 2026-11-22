@@ -20,8 +20,8 @@ const DIVERGENT: &[(&str, &str, &str)] = &[
     // (differential manifest_corpus_matches_the_rust_build).
     (
         "check",
-        "if c == 92 || c == 58 || c == 0 {",
-        "if c == 92 || c == 0 {",
+        "if c == Ascii::Backslash || c == Ascii::Colon || c == Ascii::Nul {",
+        "if c == Ascii::Backslash || c == Ascii::Nul {",
     ),
     // semver.ves: `^1.2` stops matching 1.2.x
     // (differential semver_matrix_matches_the_rust_build).

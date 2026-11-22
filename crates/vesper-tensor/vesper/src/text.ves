@@ -188,12 +188,42 @@ fn put_utf8(inout strs: Slice[u8], sp: u64, code: u64)
     sp + 4
 }
 
+// SWAR over eight little-endian bytes: `ONES` repeats 0x01 and `HIGHS`
+// 0x80; `SPACES`, `QUOTES` and `BACKSLASHES` repeat the bytes a string
+// cannot hold unescaped below 0x80.
+const WORD_BYTES: u64 = 8;
+const ONES: u64 = 0x0101010101010101;
+const HIGHS: u64 = 0x8080808080808080;
+const SPACES: u64 = 0x2020202020202020;
+const QUOTES: u64 = 0x2222222222222222;
+const BACKSLASHES: u64 = 0x5c5c5c5c5c5c5c5c;
+const ALL_ONES: u64 = 0xffffffffffffffff;
+
+// The high bit of each byte of `x` that is a control byte, a quote or a
+// backslash. The lowest set bit is exact (the borrow of `x - n` only
+// starts at a byte below `n`), so it locates the first such byte.
+fn escape_mask(x: u64) -> u64 {
+    let control = wrapping_sub(x, SPACES) & (x ^ ALL_ONES);
+    let q = x ^ QUOTES;
+    let quote_bits = wrapping_sub(q, ONES) & (q ^ ALL_ONES);
+    let k = x ^ BACKSLASHES;
+    let backslash = wrapping_sub(k, ONES) & (k ^ ALL_ONES);
+    (control | quote_bits | backslash) & HIGHS
+}
+
 // Whether `s[start..end]` is UTF-8 as `String::from_utf8` accepts it: no
 // overlong forms, surrogates or code points above U+10FFFF.
 pub fn utf8_ok(in s: Slice[u8], start: u64, end: u64)
     -> bool eff [Fail[ArithOverflow], Fail[RuntimeError]] {
     let mut i = start;
     loop {
+        // Eight ASCII bytes at once.
+        if i <= end && end - i >= WORD_BYTES && end <= s.len() {
+            if s.read_u64_le(i) & HIGHS == 0 {
+                i = wrapping_add(i, WORD_BYTES);
+                continue;
+            }
+        }
         if i >= end {
             return true;
         }
@@ -258,7 +288,42 @@ fn read_string(in b: Slice[u8], at: u64, inout strs: Slice[u8], sp: u64)
     let start = sp;
     let mut i = at + 1;
     let mut o = sp;
+    // Nonzero once a raw byte from 0x80 may have been copied: only then can
+    // the string be invalid UTF-8 (escapes always write valid UTF-8).
+    let mut high: u64 = 0;
     loop {
+        // Eight bytes with no quote, backslash or control byte are copied
+        // as one word (both offsets are bounded first, so they cannot wrap).
+        if i
+            <= b
+            .len()
+            && b
+            .len()
+            - i
+            >= WORD_BYTES
+            && o
+            <= strs
+            .len()
+            && strs
+            .len()
+            - o
+            >= WORD_BYTES {
+            let x = b.read_u64_le(i);
+            let mask = escape_mask(x);
+            high = high | (x & HIGHS);
+            // The bytes before the first special one are plain: write the
+            // whole word (bytes past `o` are scratch until overwritten) and
+            // step over them; the special byte takes the byte path.
+            strs.write_u64_le(o, x);
+            if mask == 0 {
+                i = wrapping_add(i, WORD_BYTES);
+                o = wrapping_add(o, WORD_BYTES);
+                continue;
+            }
+            let k = widen_u64(trailing_zeros_u64(mask)) >> 3;
+            i = wrapping_add(i, k);
+            o = wrapping_add(o, k);
+        }
         if i >= b.len() {
             return (1, i, o);
         }
@@ -323,11 +388,14 @@ fn read_string(in b: Slice[u8], at: u64, inout strs: Slice[u8], sp: u64)
         } else if c < SPACE {
             return (9, i, o);
         } else {
+            if c >= UTF8_CONT_MIN {
+                high = 1;
+            }
             strs.set(o, c);
             o = o + 1;
         }
     }
-    if !utf8_ok(in strs, start, o) {
+    if high != 0 && !utf8_ok(in strs, start, o) {
         return (10, i, o);
     }
     (0, i, o)
@@ -336,6 +404,10 @@ fn read_string(in b: Slice[u8], at: u64, inout strs: Slice[u8], sp: u64)
 // The tape word of a string or key.
 fn string_word(kind: u64, start: u64, end: u64) -> u64 eff [Fail[ArithOverflow]] {
     kind | (start << 4) | ((end - start) << 32)
+}
+
+fn bytes_same(in a: Slice[u8], in b: Slice[u8]) -> bool {
+    a.eq(in b)
 }
 
 // Records key `word` of object `object`; returns 0, 4 on a duplicate, or
@@ -348,10 +420,23 @@ fn add_key(inout keys: Slice[u64], in strs: Slice[u8], object: u64, word: u64, c
     }
     let start = (word >> 4) & WORD_START_MASK;
     let len = word >> 32;
+    // FNV-1a over eight-byte words, then the tail bytes (the key is inside
+    // `strs`, so its offsets cannot wrap). Only probing depends on the hash.
     let mut h: u64 = FNV_OFFSET ^ object;
-    for i in u64_zero()..len {
-        h = wrapping_mul(h ^ widen_u64(strs[start + i]), FNV_PRIME);
+    let words = len >> 3;
+    for w in u64_zero()..words {
+        h = wrapping_mul(
+            h ^ strs.read_u64_le(wrapping_add(start, wrapping_mul(w, WORD_BYTES))),
+            FNV_PRIME
+        );
     }
+    for i in wrapping_mul(words, WORD_BYTES)..len {
+        h = wrapping_mul(h ^ widen_u64(strs[wrapping_add(start, i)]), FNV_PRIME);
+    }
+    // A word step mixes only upward: fold the high half into the low bits
+    // the table index uses.
+    h = wrapping_mul(h ^ (h >> 32), FNV_PRIME);
+    h = h ^ (h >> 29);
     let mask = slots - 1;
     let mut s = h & mask;
     loop {
@@ -364,13 +449,7 @@ fn add_key(inout keys: Slice[u64], in strs: Slice[u8], object: u64, word: u64, c
         let other = keys[2 * s + 1];
         if tag == object + 1 && other >> 32 == len {
             let o = (other >> 4) & WORD_START_MASK;
-            let mut same = true;
-            for i in u64_zero()..len {
-                if same && strs[o + i] != strs[start + i] {
-                    same = false;
-                }
-            }
-            if same {
+            if bytes_same(in strs[o..o + len], in strs[start..start + len]) {
                 return 4;
             }
         }

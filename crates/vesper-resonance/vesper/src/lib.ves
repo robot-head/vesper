@@ -512,11 +512,23 @@ fn rt_pid_step(in gains: Slice[u32], inout st: Slice[u32], setpoint: u32, measur
     }
 }
 
+// Sample arguments of the realtime roots below (any values reach the same
+// code): 1.0 as f32 bits, an event budget, a lane, ramp lengths, a line
+// delay and a lease's frames and channels.
+const ONE_BITS: u32 = 1065353216;
+const RT_EVENT_BUDGET: u64 = 32;
+const RT_LANE: u64 = 3;
+const RT_TILE_SAMPLES: u32 = 8;
+const RT_RAMP_SAMPLES: u32 = 4;
+const RT_LINE_DELAY: u64 = 4;
+const RT_LEASE_FRAMES: u64 = 64;
+const RT_LEASE_CHANNELS: u64 = 2;
+
 fn rt_events(in b: Slice[u8], at: u64, offset: u16, target: u32, prev: u16, block: u64) -> u64 {
     handle Fail[RuntimeError] in {
         handle Fail[ArithOverflow] in {
             handle Fail[EventFault] in {
-                let n = event_frames(b.len(), 32);
+                let n = event_frames(b.len(), RT_EVENT_BUDGET);
                 let w = event_decode(in b, at);
                 event_check(offset, target, prev, 0, block);
                 n + widen_u64(w.node_id)
@@ -548,12 +560,12 @@ fn rt_ramps(
                 inout target,
                 inout step,
                 inout remaining,
-                3,
-                1065353216,
-                8
+                RT_LANE,
+                ONE_BITS,
+                RT_TILE_SAMPLES
             );
             tile_next(inout current, in target, in step, inout remaining);
-            ramp_set(inout r, 1065353216, 4);
+            ramp_set(inout r, ONE_BITS, RT_RAMP_SAMPLES);
             widen_u64(ramp_next(inout r))
         } with {
             return v => v,
@@ -579,10 +591,10 @@ fn rt_graph_block(
             delay_read(in data, 0, in slots, 0, inout out);
             delay_advance(inout slots, block);
             line_write(inout buf, 0, in x);
-            line_read(in buf, 0, 4, inout out);
+            line_read(in buf, 0, RT_LINE_DELAY, inout out);
             zero(inout out);
             accumulate(inout out, in x);
-            scale(inout out, 1065353216);
+            scale(inout out, ONE_BITS);
             mix_lr(inout out, in x, in x, block);
             copy_samples(inout out, in x);
             line_advance(0, block, buf.len())
@@ -600,8 +612,15 @@ fn rt_lease(inout data: Slice[u32], in samples: Slice[u32]) -> u64 {
     handle Fail[RuntimeError] in {
         handle Fail[ArithOverflow] in {
             handle Fail[LeaseFault] in {
-                let w = lease_write(inout data, 0, 64, 2, 0, in samples);
-                lease_silence(inout data, w, 2);
+                let w = lease_write(
+                    inout data,
+                    0,
+                    RT_LEASE_FRAMES,
+                    RT_LEASE_CHANNELS,
+                    0,
+                    in samples
+                );
+                lease_silence(inout data, w, RT_LEASE_CHANNELS);
                 w
             } with {
                 return v => v,

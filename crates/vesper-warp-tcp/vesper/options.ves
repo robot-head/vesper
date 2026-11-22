@@ -124,8 +124,8 @@ fn opts_put(o: Opts, inout out: Slice[u8], at: u64) -> u64 {
     let mut i = at;
     match o.mss {
         Option::Some(mss) => {
-            wr8(inout out, i, OPT_MSS);
-            wr8(inout out, wrapping_add(i, 1), OPT_MSS_LEN);
+            wr8(inout out, i, OptKind::Mss);
+            wr8(inout out, wrapping_add(i, 1), OptLen::Mss);
             wr16(inout out, wrapping_add(i, 2), mss);
             i = wrapping_add(i, PADDED_LEN);
         },
@@ -133,27 +133,27 @@ fn opts_put(o: Opts, inout out: Slice[u8], at: u64) -> u64 {
     }
     match o.window_scale {
         Option::Some(ws) => {
-            wr8(inout out, i, OPT_NOP);
-            wr8(inout out, wrapping_add(i, 1), OPT_WINDOW_SCALE);
-            wr8(inout out, wrapping_add(i, 2), OPT_WINDOW_SCALE_LEN);
+            wr8(inout out, i, OptKind::Nop);
+            wr8(inout out, wrapping_add(i, 1), OptKind::WindowScale);
+            wr8(inout out, wrapping_add(i, 2), OptLen::WindowScale);
             wr8(inout out, wrapping_add(i, 3), ws);
             i = wrapping_add(i, PADDED_LEN);
         },
         Option::None => (),
     }
     if o.sack_permitted {
-        wr8(inout out, i, OPT_NOP);
-        wr8(inout out, wrapping_add(i, 1), OPT_NOP);
-        wr8(inout out, wrapping_add(i, 2), OPT_SACK_PERMITTED);
-        wr8(inout out, wrapping_add(i, 3), OPT_SACK_PERMITTED_LEN);
+        wr8(inout out, i, OptKind::Nop);
+        wr8(inout out, wrapping_add(i, 1), OptKind::Nop);
+        wr8(inout out, wrapping_add(i, 2), OptKind::SackPermitted);
+        wr8(inout out, wrapping_add(i, 3), OptLen::SackPermitted);
         i = wrapping_add(i, PADDED_LEN);
     }
     match o.timestamps {
         Option::Some(ts) => {
-            wr8(inout out, i, OPT_NOP);
-            wr8(inout out, wrapping_add(i, 1), OPT_NOP);
-            wr8(inout out, wrapping_add(i, 2), OPT_TIMESTAMPS);
-            wr8(inout out, wrapping_add(i, 3), OPT_TIMESTAMPS_LEN);
+            wr8(inout out, i, OptKind::Nop);
+            wr8(inout out, wrapping_add(i, 1), OptKind::Nop);
+            wr8(inout out, wrapping_add(i, 2), OptKind::Timestamps);
+            wr8(inout out, wrapping_add(i, 3), OptLen::Timestamps);
             wr32(inout out, wrapping_add(i, 4), ts.val);
             wr32(inout out, wrapping_add(i, 8), ts.ecr);
             i = wrapping_add(i, PADDED_TIMESTAMPS_LEN);
@@ -162,9 +162,9 @@ fn opts_put(o: Opts, inout out: Slice[u8], at: u64) -> u64 {
     }
     if o.sack_len > 0 {
         let n = sack_count(o);
-        wr8(inout out, i, OPT_NOP);
-        wr8(inout out, wrapping_add(i, 1), OPT_NOP);
-        wr8(inout out, wrapping_add(i, 2), OPT_SACK);
+        wr8(inout out, i, OptKind::Nop);
+        wr8(inout out, wrapping_add(i, 1), OptKind::Nop);
+        wr8(inout out, wrapping_add(i, 2), OptKind::Sack);
         wr8(
             inout out,
             wrapping_add(i, 3),
@@ -226,11 +226,11 @@ fn opts_parse_at(in bytes: Slice[u8], from: u64, to: u64) -> Result[Opts, WireEr
             Option::Some(v) => v,
             Option::None => 0,
         };
-        if kind == OPT_END {
+        if kind == OptKind::End {
             // End of option list; the rest is padding.
             break;
         }
-        if kind == OPT_NOP {
+        if kind == OptKind::Nop {
             i = wrapping_add(i, 1);
         } else {
             if wrapping_add(i, 1) >= to {
@@ -244,30 +244,30 @@ fn opts_parse_at(in bytes: Slice[u8], from: u64, to: u64) -> Result[Opts, WireEr
                 return malformed(kind);
             }
             let body = wrapping_add(i, KIND_AND_LEN);
-            if kind == OPT_MSS {
+            if kind == OptKind::Mss {
                 let dup = match opts.mss {
                     Option::Some(m) => true,
                     Option::None => false,
                 };
-                if len != widen_u64(OPT_MSS_LEN) || dup {
+                if len != widen_u64(OptLen::Mss) || dup {
                     return malformed(kind);
                 }
                 opts.mss = Option::Some(rd16(in bytes, body));
-            } else if kind == OPT_WINDOW_SCALE {
+            } else if kind == OptKind::WindowScale {
                 let dup = match opts.window_scale {
                     Option::Some(w) => true,
                     Option::None => false,
                 };
-                if len != widen_u64(OPT_WINDOW_SCALE_LEN) || dup {
+                if len != widen_u64(OptLen::WindowScale) || dup {
                     return malformed(kind);
                 }
                 opts.window_scale = Option::Some(rd8(in bytes, body));
-            } else if kind == OPT_SACK_PERMITTED {
-                if len != widen_u64(OPT_SACK_PERMITTED_LEN) || opts.sack_permitted {
+            } else if kind == OptKind::SackPermitted {
+                if len != widen_u64(OptLen::SackPermitted) || opts.sack_permitted {
                     return malformed(kind);
                 }
                 opts.sack_permitted = true;
-            } else if kind == OPT_SACK {
+            } else if kind == OptKind::Sack {
                 let n = wrapping_sub(len, KIND_AND_LEN) / SACK_BLOCK_LEN;
                 if wrapping_sub(len, KIND_AND_LEN)
                     % SACK_BLOCK_LEN
@@ -286,12 +286,12 @@ fn opts_parse_at(in bytes: Slice[u8], from: u64, to: u64) -> Result[Opts, WireEr
                     opts_set_blk(inout opts, k, sack_blk_at(in bytes, at));
                 }
                 opts.sack_len = wrapping_u8(n);
-            } else if kind == OPT_TIMESTAMPS {
+            } else if kind == OptKind::Timestamps {
                 let dup = match opts.timestamps {
                     Option::Some(t) => true,
                     Option::None => false,
                 };
-                if len != widen_u64(OPT_TIMESTAMPS_LEN) || dup {
+                if len != widen_u64(OptLen::Timestamps) || dup {
                     return malformed(kind);
                 }
                 // One wide read of TSval and TSecr (the length check above

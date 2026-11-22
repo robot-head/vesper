@@ -10,6 +10,122 @@ use self::{
     C
 };
 
+// The tags of global tree nodes (`gt`, and the input and output words of
+// lib.ves).
+pub enum GTag: _ {
+    Comm = 1,
+    Local = 2,
+    Rec = 3,
+    Var = 4,
+    End = 5
+}
+
+// The tags of local-type nodes (`lt`, and the input and output words of
+// lib.ves).
+pub enum LTag: _ {
+    Send = 1,
+    Recv = 2,
+    Select = 3,
+    Offer = 4,
+    Action = 5,
+    Rec = 6,
+    Var = 7,
+    End = 8
+}
+
+// A branch triple `(label, payload, next)` (in `gk`, `lk`, `tmp` and the
+// parser's `sk`): the field offsets and the width.
+pub enum Br: _ {
+    Label = 0,
+    Payload = 1,
+    Next = 2,
+    Words = 3
+}
+
+// Input words (lib.ves): a string is `(offset, length)`; a Var, Rec or
+// Action record is a tag and one string; a choice branch on the wire is
+// two strings, `(label, payload)`.
+pub enum Wire: _ {
+    Str = 2,
+    Named = 3,
+    Branch = 4
+}
+
+// The first word of `out`.
+pub enum Out: _ {
+    Ok = 0,
+    Failed = 1
+}
+
+// Well-formedness error codes (`ew`, tree.ves).
+pub enum Wf: _ {
+    NoRoles = 0,
+    TooManyRoles = 1,
+    DuplicateRole = 2,
+    BadIdentifier = 3,
+    UnknownRole = 4,
+    SelfCommunication = 5,
+    EmptyChoice = 6,
+    DuplicateLabel = 7,
+    ShadowedRecursionVariable = 8,
+    UnboundRecursionVariable = 9,
+    UnguardedRecursion = 10,
+    UnusedRole = 11,
+    TooLarge = 12,
+    TooDeep = 13
+}
+
+// The limits of `chor` (MAX_ROLES, MAX_NODES, MAX_DEPTH, MAX_NESTING,
+// MAX_IDENT).
+pub enum Limit: _ {
+    Roles = 64,
+    Nodes = 100000,
+    Depth = 256,
+    Nesting = 64,
+    Ident = 128
+}
+
+// `sym_cmp` results.
+pub enum Order: _ {
+    Less = 0,
+    Equal = 1,
+    Greater = 2
+}
+
+// The 64-bit FNV-1a parameters of the hash tables.
+pub enum Fnv: _ {
+    Offset = 14695981039346656037,
+    Prime = 1099511628211
+}
+
+// The ASCII bytes of identifiers, numbers and the parser's punctuation.
+pub enum Ascii: _ {
+    Lf = 0x0a,
+    LParen = 0x28,
+    RParen = 0x29,
+    Comma = 0x2c,
+    Minus = 0x2d,
+    Slash = 0x2f,
+    Zero = 0x30,
+    Nine = 0x39,
+    Colon = 0x3a,
+    Semi = 0x3b,
+    Greater = 0x3e,
+    UpperA = 0x41,
+    UpperZ = 0x5a,
+    LBracket = 0x5b,
+    RBracket = 0x5d,
+    Underscore = 0x5f,
+    LowerA = 0x61,
+    LowerZ = 0x7a,
+    LBrace = 0x7b,
+    RBrace = 0x7d
+}
+
+// The symbol table's first size.
+const MIN_SLOTS: u64 = 64;
+const DECIMAL_BASE: u64 = 10;
+
 pub fn none() -> u64 {
     18446744073709551615
 }
@@ -113,10 +229,10 @@ pub fn tb_sym(inout c: C, y: u64) {
 
 // Appends `x` in decimal to `c.tb`.
 pub fn tb_u64(inout c: C, x: u64) {
-    if x >= 10 {
-        tb_u64(inout c, x / 10);
+    if x >= DECIMAL_BASE {
+        tb_u64(inout c, x / DECIMAL_BASE);
     }
-    c.tb.push(wrapping_u8(add(48, x % 10)));
+    c.tb.push(wrapping_u8(add(Ascii::Zero, x % DECIMAL_BASE)));
 }
 
 pub fn sym_len(in c: C, y: u64) -> u64 {
@@ -131,7 +247,7 @@ pub fn sym_byte(in c: C, y: u64, i: u64) -> u64 {
 // 1 equal, 2 greater.
 pub fn sym_cmp(in c: C, x: u64, y: u64) -> u64 {
     if x == y {
-        return 1;
+        return Order::Equal;
     }
     let lx = sym_len(in c, x);
     let ly = sym_len(in c, y);
@@ -147,31 +263,31 @@ pub fn sym_cmp(in c: C, x: u64, y: u64) -> u64 {
         let b = bt(in c.sy_txt, add(oy, i));
         if a != b {
             if a < b {
-                return 0;
+                return Order::Less;
             }
-            return 2;
+            return Order::Greater;
         }
     }
     if lx < ly {
-        0
+        Order::Less
     } else if lx > ly {
-        2
+        Order::Greater
     } else {
-        1
+        Order::Equal
     }
 }
 
 fn hash_tb(in c: C) -> u64 {
-    let mut h: u64 = 14695981039346656037;
+    let mut h: u64 = Fnv::Offset;
     for i in 0..c.tb.len() {
-        h = wrapping_mul(h ^ bt(in c.tb, i), 1099511628211);
+        h = wrapping_mul(h ^ bt(in c.tb, i), Fnv::Prime);
     }
     h
 }
 
 fn sym_grow(inout c: C) {
     let cap = if c.sy_mask == 0 {
-        64
+        MIN_SLOTS
     } else {
         wrapping_mul(inc(c.sy_mask), 2)
     };
@@ -265,21 +381,21 @@ pub fn set_flag(inout c: C, y: u64, v: u64) {
 }
 
 fn is_alpha(b: u64) -> bool {
-    (b >= 65 && b <= 90) || (b >= 97 && b <= 122)
+    (b >= Ascii::UpperA && b <= Ascii::UpperZ) || (b >= Ascii::LowerA && b <= Ascii::LowerZ)
 }
 
 pub fn is_ident_start(b: u64) -> bool {
-    is_alpha(b) || b == 95
+    is_alpha(b) || b == Ascii::Underscore
 }
 
 pub fn is_ident_byte(b: u64) -> bool {
-    is_alpha(b) || (b >= 48 && b <= 57) || b == 95
+    is_alpha(b) || (b >= Ascii::Zero && b <= Ascii::Nine) || b == Ascii::Underscore
 }
 
-// `chor::valid_ident`: an ASCII identifier of at most `MAX_IDENT` bytes.
+// `chor::valid_ident`: an ASCII identifier of at most `Limit::Ident` (`MAX_IDENT`) bytes.
 pub fn valid_ident(in c: C, y: u64) -> bool {
     let len = sym_len(in c, y);
-    if len == 0 || len > 128 {
+    if len == 0 || len > Limit::Ident {
         return false;
     }
     if !is_ident_start(sym_byte(in c, y, 0)) {

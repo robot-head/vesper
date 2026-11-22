@@ -353,6 +353,8 @@ fn the_model_matches_rust() {
                             v.wrapping_shr(n).into(),
                         ]
                     }
+                    // `INTEGER_KINDS` holds the one-word kinds only.
+                    IntegerKind::I128 | IntegerKind::U128 => unreachable!(),
                 };
                 let ops = [
                     BitOp::LeadingZeros,

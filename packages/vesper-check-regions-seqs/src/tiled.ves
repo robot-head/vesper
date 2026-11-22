@@ -1,0 +1,221 @@
+// The type and declaration rules of src/tiled.rs: `TiledSeq[T]` and
+// `TiledSeq[T, r]` types, hot column scalars and vector shapes, and
+// `check_world_adts` (E1501-E1503). The `TiledSeq` call rules of
+// src/tiled/check.rs walk the AST: a later PR of #1181.
+
+use @vesper/check-data::util::{
+    add,
+    n32,
+    push_decimal,
+    w
+};
+use @vesper/check-data::names::{
+    Names
+};
+use @vesper/check-data::types::{
+    Types,
+    display
+};
+use @vesper/check-data::world::{
+    Known,
+    World
+};
+use @vesper/check-data::diag::{
+    Diags
+};
+use self::seqs::{
+    Sigs
+};
+use self::vector::{
+    Shape,
+    elem_of,
+    shape_new
+};
+
+const NONE32: u32 = 4294967295;
+const K_NAMED: u8 = 1;
+const T_HOT: u8 = 1;
+const T_COLD: u8 = 2;
+
+pub fn is_valid_width(width: u64) -> bool {
+    width == 8 || width == 16 || width == 32 || width == 64
+}
+
+pub fn is_tiled_seq(in t: Types, k: Known, ty: u32) -> bool {
+    let n = t.node(ty);
+    n.kind == K_NAMED && n.name == k.tiled_seq && (n.n == 1 || n.n == 2)
+}
+
+// `seq_elem`, or NONE32.
+pub fn seq_elem(in t: Types, k: Known, ty: u32) -> u32 {
+    if is_tiled_seq(in t, k, ty) {
+        t.arg(ty, 0)
+    } else {
+        NONE32
+    }
+}
+
+// `seq_adt`: the ADT index, or NONE32.
+pub fn seq_adt(in t: Types, in wd: World, k: Known, ty: u32) -> u32 {
+    let e = seq_elem(in t, k, ty);
+    if e == NONE32 {
+        return NONE32;
+    }
+    let n = t.node(e);
+    if n.kind != K_NAMED || n.n != 0 {
+        return NONE32;
+    }
+    let id = wd.lookup(n.name);
+    if id == NONE32 || wd.adt(id).tile == 0 {
+        return NONE32;
+    }
+    id
+}
+
+// `hot_elem_bytes`, or 0.
+pub fn hot_elem_bytes(in t: Types, k: Known, ty: u32) -> u64 {
+    let n = t.node(ty);
+    if n.kind != K_NAMED || n.n != 0 {
+        return 0;
+    }
+    let s = n.name;
+    if s == k.u8_ || s == k.bool_ {
+        1
+    } else if s == k.u32_ {
+        4
+    } else if s == k.u64_ || s == k.i64_ || s == k.f64_ {
+        8
+    } else {
+        0
+    }
+}
+
+// `hot_vector_shape`.
+pub fn hot_vector_shape(in t: Types, k: Known, ty: u32, width: u64) -> Shape {
+    if width > 65535 {
+        return shape_new(0, 0);
+    }
+    shape_new(elem_of(in t, k, ty), width)
+}
+
+fn tiled_name(in names: Names, inout d: Diags, a: u32) {
+    names.write(a, inout d.text);
+}
+
+// `check_world_adts`.
+pub fn check_world_adts(in t: Types, in names: Names, in wd: World, in sg: Sigs, inout d: Diags) {
+    let k = wd.k;
+    for i in 0..wd.adts.len() {
+        let a = wd.adt(n32(i));
+        let start = sg.adt_span_start(i);
+        let stop = sg.adt_span_stop(i);
+        if a.tile != 0 {
+            let width = w(wrapping_sub(a.tile, 1));
+            if a.is_enum {
+                let c = d.open("E1501");
+                let m = d.text.len();
+                d.text.extend(in "tiled(".as_bytes());
+                push_decimal(inout d.text, width);
+                d.text.extend(in ") may only annotate a struct, not enum '".as_bytes());
+                tiled_name(in names, inout d, a.name);
+                d.text.push(39);
+                d.close(c, m, "", start, stop);
+                continue;
+            }
+            if !is_valid_width(width) {
+                let c = d.open("E1501");
+                let m = d.text.len();
+                d.text.extend(in "tiled(N) struct '".as_bytes());
+                tiled_name(in names, inout d, a.name);
+                d.text.extend(in "' tile width must be 8, 16, 32, or 64, found ".as_bytes());
+                push_decimal(inout d.text, width);
+                d.close(c, m, "use tiled(8), tiled(16), tiled(32), or tiled(64)", start, stop);
+            }
+            if a.gn != 0 {
+                let c = d.open("E1501");
+                let m = d.text.len();
+                d.text.extend(in "tiled(N) struct '".as_bytes());
+                tiled_name(in names, inout d, a.name);
+                d.text.extend(in "' cannot declare generic parameters yet".as_bytes());
+                d.close(c, m, "", start, stop);
+            }
+            let mut has_hot = false;
+            if a.vn > 0 {
+                let var = wd.variant(w(a.va));
+                for x in 0..w(var.fc) {
+                    let at = add(w(var.fa), x);
+                    let fd = wd.field(at);
+                    let temp = sg.temp(at);
+                    if temp == T_HOT {
+                        has_hot = true;
+                        if hot_elem_bytes(in t, k, fd.ty) == 0 {
+                            let c = d.open("E1503");
+                            let m = d.text.len();
+                            d.text.extend(in "hot field '".as_bytes());
+                            names.write(fd.name, inout d.text);
+                            d.text.extend(in "' in tiled struct '".as_bytes());
+                            tiled_name(in names, inout d, a.name);
+                            d
+                                .text
+                                .extend(
+                                in "' must have a Copy scalar type (u8, u32, u64, i64, f64, bool), found "
+                                    .as_bytes()
+                            );
+                            display(in t, in names, fd.ty, inout d.text);
+                            d
+                                .close(
+                                c,
+                                m,
+                                "mark non-scalar or aggregate fields as 'cold'",
+                                start,
+                                stop
+                            );
+                        }
+                    } else if temp != T_COLD {
+                        let c = d.open("E1502");
+                        let m = d.text.len();
+                        d.text.extend(in "field '".as_bytes());
+                        names.write(fd.name, inout d.text);
+                        d.text.extend(in "' of tiled struct '".as_bytes());
+                        tiled_name(in names, inout d, a.name);
+                        d.text.extend(in "' must be annotated 'hot' or 'cold'".as_bytes());
+                        d
+                            .close(
+                            c,
+                            m,
+                            "prefix every field in a tiled(N) struct with 'hot' or 'cold'",
+                            start,
+                            stop
+                        );
+                    }
+                }
+            }
+            if !has_hot {
+                let c = d.open("E1502");
+                let m = d.text.len();
+                d.text.extend(in "tiled struct '".as_bytes());
+                tiled_name(in names, inout d, a.name);
+                d.text.extend(in "' must declare at least one 'hot' field".as_bytes());
+                d.close(c, m, "", start, stop);
+            }
+        } else {
+            for v in 0..w(a.vn) {
+                let var = wd.variant(add(w(a.va), v));
+                for x in 0..w(var.fc) {
+                    let at = add(w(var.fa), x);
+                    if sg.temp(at) != 0 {
+                        let fd = wd.field(at);
+                        let c = d.open("E1502");
+                        let m = d.text.len();
+                        d.text.extend(in "'hot'/'cold' field annotation on '".as_bytes());
+                        tiled_name(in names, inout d, a.name);
+                        d.text.push(46);
+                        names.write(fd.name, inout d.text);
+                        d.text.extend(in "' is only valid inside a tiled(N) struct".as_bytes());
+                        d.close(c, m, "", start, stop);
+                    }
+                }
+            }
+        }
+    }
+}

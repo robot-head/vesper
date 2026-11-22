@@ -1,10 +1,10 @@
 use serde::Serialize;
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, BTreeSet},
-    fmt::Write,
     fs::OpenOptions,
     io::Read,
-    path::Path,
+    path::{Path, PathBuf},
 };
 use vesper::{
     anvil_hash::{FunctionGraph, VerdictCache},
@@ -13,17 +13,24 @@ use vesper::{
     },
     ast::{Diagnostic, Expr, ExprKind, Function, Item, Literal, Module, Span, Statement, Type},
     check::{self, World},
-    lexer::{self, Token, TokenKind as K},
+    ffi_lowering::{self, EvalHost, FfiError, ForeignChecked, Imports},
+    lexer::{self, TokenKind as K},
     native::batch::{BatchLimits, NativeBatch},
+    packages::{self, Assembled, SourceMap},
     parser,
     runtime::{Runtime, Value},
-    test_attrs::{self, AttrValue, FunctionTestAttrs},
+    test_attrs::{self, AttrValue},
+    test_discovery::{
+        self, CaseRow, CaseRows, case_marker, is_test_marker, location, preceding_comments,
+    },
     tooling::doc::sources::{SourceLimits, discover},
 };
+#[path = "test_engines.rs"]
+mod test_engines;
+
 use vesper_test::{
-    BudgetGate, ExpectErrorOutcome, ExpectErrorSpec, FaultProfile, HarnessPlan, ObligationLedger,
-    ObservedDiagnostic, TestAttr, TestCaseAttr, TestMode, TestParam, TestSignature, VerdictKey,
-    VerdictRecord, VerdictStatus, classify, is_cacheable, verify_expect_error,
+    ExpectErrorOutcome, FaultProfile, HarnessPlan, ObligationLedger, ObservedDiagnostic, TestMode,
+    VerdictKey, VerdictRecord, VerdictStatus, is_cacheable, verify_expect_error,
 };
 
 const MAX_SOURCE_BYTES: usize = 512 * 1024;
@@ -31,7 +38,7 @@ const DEFAULT_FUEL: u64 = 1_000_000;
 const DEFAULT_MAX_MUTANTS: usize = 256;
 const HARD_MAX_MUTANTS: usize = 2048;
 
-pub const USAGE: &str = "usage: vesper test --doc [FILE|DIR] [--json]\n       vesper test <FILE|DIR> [--mutate] [--filter <PAT>] [--max-mutants <N>] [--fuel <N>] [--no-cache] [--json]";
+pub const USAGE: &str = "usage: vesper test --doc [FILE|DIR] [--json]\n       vesper test <FILE|DIR> [--mutate] [--mutate-dependency <FILE>] [--filter <PAT>] [--mutant-offset <N>] [--max-mutants <N>] [--no-opt] [--fuel <N>] [--engines all|unit] [--no-cache] [--json]";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -102,11 +109,25 @@ pub enum MutantStatus {
 struct Options {
     path: String,
     mutate: bool,
+    mutate_dependency: Option<PathBuf>,
+    optimize: bool,
     filter: Option<String>,
     max_mutants: usize,
+    mutant_offset: usize,
     fuel: u64,
     no_cache: bool,
     json: bool,
+    /// `--engines all`: every passing unit test must pass on every engine
+    /// ([`test_engines::agree`]).
+    engines_all: bool,
+}
+
+impl Options {
+    fn selects(&self, test: &DiscoveredTest) -> bool {
+        self.filter
+            .as_ref()
+            .is_none_or(|pat| test.name.contains(pat.as_str()))
+    }
 }
 
 fn parse_u64(text: &str, flag: &str) -> Result<u64, String> {
@@ -122,17 +143,30 @@ fn parse_u64(text: &str, flag: &str) -> Result<u64, String> {
 fn parse_args(args: &[String]) -> Result<Options, String> {
     let mut path = None;
     let mut mutate = false;
+    let mut mutate_dependency = None;
+    let mut optimize = true;
     let mut filter = None;
     let mut max_mutants = None;
+    let mut mutant_offset = None;
     let mut fuel = DEFAULT_FUEL;
     let mut no_cache = false;
     let mut json = false;
+    let mut engines = None;
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--mutate" if !mutate => mutate = true,
+            "--no-opt" if optimize => optimize = false,
+            "--mutate-dependency" if mutate_dependency.is_none() => {
+                let path = it.next().ok_or("--mutate-dependency requires a file")?;
+                mutate_dependency = Some(PathBuf::from(path));
+            }
             "--no-cache" if !no_cache => no_cache = true,
             "--json" if !json => json = true,
+            "--engines" if engines.is_none() => {
+                let value = it.next().ok_or("--engines requires `all` or `unit`")?;
+                engines = Some(test_engines::parse(value)?);
+            }
             "--filter" => {
                 if filter.is_some() {
                     return Err("duplicate --filter option".into());
@@ -156,6 +190,15 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
                 }
                 max_mutants = Some(n);
             }
+            "--mutant-offset" => {
+                if mutant_offset.is_some() {
+                    return Err("duplicate --mutant-offset option".into());
+                }
+                let value = it.next().ok_or("--mutant-offset requires an integer")?;
+                let n = parse_u64(value, "--mutant-offset")?;
+                mutant_offset =
+                    Some(usize::try_from(n).map_err(|_| "--mutant-offset is too large")?);
+            }
             "--fuel" => {
                 let val = it.next().ok_or("--fuel requires a positive integer")?;
                 let n = parse_u64(val, "--fuel")?;
@@ -171,15 +214,32 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
     if max_mutants.is_some() && !mutate {
         return Err("--max-mutants requires --mutate".into());
     }
+    if mutant_offset.is_some() && !mutate {
+        return Err("--mutant-offset requires --mutate".into());
+    }
+    if mutate_dependency.is_some() && !mutate {
+        return Err("--mutate-dependency requires --mutate".into());
+    }
+    if !optimize && !mutate {
+        return Err("--no-opt requires --mutate".into());
+    }
+    let engines_all = engines.unwrap_or(false);
+    if engines_all && mutate {
+        return Err("--engines all cannot be combined with --mutate".into());
+    }
     let path = path.ok_or_else(|| USAGE.to_string())?;
     Ok(Options {
         path,
         mutate,
+        mutate_dependency,
+        optimize,
         filter,
         max_mutants: max_mutants.unwrap_or(DEFAULT_MAX_MUTANTS),
+        mutant_offset: mutant_offset.unwrap_or(0),
         fuel,
         no_cache,
         json,
+        engines_all,
     })
 }
 
@@ -217,50 +277,10 @@ fn read_source(file: &Path) -> Result<String, String> {
         .map_err(|e| format!("{name}: {e}"))
 }
 
-fn location(source: &str, offset: usize) -> (usize, usize) {
-    let offset = offset.min(source.len());
-    let prefix = &source[..source.floor_char_boundary(offset)];
-    (
-        prefix.bytes().filter(|b| *b == b'\n').count() + 1,
-        prefix.rsplit('\n').next().unwrap_or("").chars().count() + 1,
-    )
-}
-
-fn is_test_marker(comment_text: &str) -> bool {
-    let trimmed = comment_text.trim_start_matches('/').trim_start();
-    trimmed == "@test"
-        || trimmed.starts_with("@test ")
-        || trimmed.starts_with("@test:")
-        || trimmed.starts_with("@test(")
-}
-
-fn case_marker(comment: &str) -> Option<&str> {
-    let rest = comment
-        .trim_start_matches('/')
-        .trim_start()
-        .strip_prefix("@case")?;
-    (rest.is_empty() || rest.starts_with(char::is_whitespace)).then(|| rest.trim())
-}
-
-fn preceding_comments(tokens: &[Token], fn_start: usize) -> impl Iterator<Item = &Token> {
-    let end = tokens.partition_point(|t| t.span.end <= fn_start);
-    tokens[..end]
-        .iter()
-        .rev()
-        .take_while(|t| matches!(t.kind, K::Whitespace | K::Comment))
-        .filter(|t| t.kind == K::Comment)
-}
-
-struct CaseWrapper {
-    entry: String,
-    generated: Span,
-    function_index: usize,
-}
-
 struct TestCase {
     name: String,
     span: Span,
-    wrapper: CaseWrapper,
+    wrapper: CaseRow,
 }
 
 impl TestCase {
@@ -270,7 +290,7 @@ impl TestCase {
     }
 }
 
-fn prepare_tests(source: &str) -> Result<(parser::Parse, Vec<TestCase>), String> {
+fn prepare_tests(source: &mut String) -> Result<(parser::Parse, Vec<TestCase>), String> {
     let parsed = parser::parse_for_tests(source);
     if let Some(d) = parsed.diagnostics.first() {
         return Err(test_diagnostic(
@@ -281,83 +301,15 @@ fn prepare_tests(source: &str) -> Result<(parser::Parse, Vec<TestCase>), String>
             parsed.diagnostics.len(),
         ));
     }
-    let (tokens, _) = lexer::lex(source);
-    let names: BTreeSet<&str> = parsed
-        .module
-        .items
-        .iter()
-        .filter_map(|item| match item {
-            Item::Function(f) => Some(f.name.as_str()),
-            _ => None,
+    let CaseRows { rows, expanded } = test_discovery::case_rows(source, &parsed.module)?;
+    let tests: Vec<TestCase> = rows
+        .into_iter()
+        .map(|row| TestCase {
+            name: row.name.clone(),
+            span: row.span.clone(),
+            wrapper: row,
         })
         .collect();
-    let mut tests = Vec::new();
-    let mut expanded = None;
-    let mut next_entry = 0;
-    for (function_index, item) in parsed.module.items.iter().enumerate() {
-        let Item::Function(f) = item else {
-            continue;
-        };
-        let rows: Vec<_> = preceding_comments(&tokens, f.span.start)
-            .filter_map(|comment| {
-                case_marker(&source[comment.span.clone()]).map(|row| (row, comment.span.clone()))
-            })
-            .collect();
-        if rows.is_empty() {
-            continue;
-        }
-        if !f.generics.is_empty() {
-            return Err(format!("test function '{}' cannot be generic", f.name));
-        }
-        if f.body.is_none() {
-            return Err(format!("test function '{}' must have a body", f.name));
-        }
-
-        let mut labels = BTreeSet::new();
-        for (row, span) in rows.into_iter().rev() {
-            let (label, args) = row.split_once('(').unwrap_or_default();
-            let label = label.trim_end();
-            let mut bytes = label.bytes();
-            if !bytes
-                .next()
-                .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
-                || !bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
-                || !args.ends_with(')')
-            {
-                let (line, column) = location(source, span.start);
-                return Err(format!(
-                    "{line}:{column}: expected @case name(arguments) for '{}'",
-                    f.name
-                ));
-            }
-            if !labels.insert(label) {
-                let (line, column) = location(source, span.start);
-                return Err(format!(
-                    "{line}:{column}: duplicate test case '{}::{label}'",
-                    f.name
-                ));
-            }
-            let entry = loop {
-                let name = format!("__vesper_test_case_{next_entry}");
-                next_entry += 1;
-                if !names.contains(name.as_str()) {
-                    break name;
-                }
-            };
-            let expanded = expanded.get_or_insert_with(|| source.to_owned());
-            let start = expanded.len() + 1;
-            write!(expanded, "\nfn {entry}() {{ {}({args} }}", f.name).unwrap();
-            tests.push(TestCase {
-                name: format!("{}::{label}", f.name),
-                span,
-                wrapper: CaseWrapper {
-                    entry,
-                    generated: start..expanded.len(),
-                    function_index,
-                },
-            });
-        }
-    }
     let Some(expanded) = expanded else {
         return Ok((parsed, tests));
     };
@@ -374,29 +326,13 @@ fn prepare_tests(source: &str) -> Result<(parser::Parse, Vec<TestCase>), String>
             lowered.diagnostics.len(),
         ));
     }
-    let first_wrapper = parsed.module.items.len();
-    for (test, index) in tests.iter().zip(first_wrapper..) {
-        let wrapper = &test.wrapper;
-        let Item::Function(target) = &parsed.module.items[wrapper.function_index] else {
-            unreachable!("only functions can declare cases");
-        };
-        // A row must parse as one direct call, contained in its own wrapper.
-        let Some(Item::Function(f)) = lowered.module.items.get_mut(index) else {
-            return Err(test.error(source, "expected a single argument list"));
-        };
-        let valid_body = matches!(
-            f.body.as_ref().map(|body| &body.kind),
-            Some(ExprKind::Block { statements, tail: Some(tail) })
-                if statements.is_empty()
-                && matches!(&tail.kind, ExprKind::Call { callee, .. }
-                    if matches!(&callee.kind, ExprKind::Name(name) if name == &target.name))
-        );
-        if f.span != wrapper.generated || f.name != wrapper.entry || !valid_body {
-            return Err(test.error(source, "expected a single argument list"));
-        }
-        f.result = target.result.clone();
-        f.effects = target.effects.clone();
-    }
+    test_discovery::finish_case_wrappers(
+        source,
+        &parsed.module,
+        &mut lowered.module,
+        tests.iter().map(|test| &test.wrapper),
+    )?;
+    *source = expanded;
     Ok((lowered, tests))
 }
 
@@ -426,101 +362,6 @@ struct DiscoveredTest {
     plan: HarnessPlan,
     raw_cases: Vec<test_attrs::TestCaseAttr>,
     func: Function,
-}
-
-fn syntax_attr_to_anvil(
-    func: &Function,
-    parsed: Option<&FunctionTestAttrs>,
-) -> (TestSignature, Vec<test_attrs::TestCaseAttr>) {
-    let mut attr = TestAttr::default();
-    let mut cases = Vec::new();
-    let mut raw_cases = Vec::new();
-    if let Some(pa) = parsed {
-        if let Some(t) = &pa.test {
-            if let Some(code) = &t.expect_error {
-                attr.expect_error = Some(ExpectErrorSpec {
-                    code: code.clone(),
-                    primary: t.primary.clone().or_else(|| t.expected_span.clone()),
-                    related: t.related.clone(),
-                });
-            }
-            attr.cases = t.cases.map(|n| n as u32);
-            attr.sim_schedules = t.sim_schedules.map(|n| n as u32);
-            if let Some(fp) = &t.fault_profile {
-                attr.fault_profile = Some(match fp.as_str() {
-                    "TornWalSector" => FaultProfile::TornWalSector,
-                    "NetPartition" => FaultProfile::NetPartition,
-                    "ClockSkew" => FaultProfile::ClockSkew,
-                    other => FaultProfile::Custom(other.to_string()),
-                });
-            }
-            let gate = BudgetGate {
-                max_stack: t.max_stack,
-                max_cycles: t.max_cycles,
-                zero_alloc: t.zero_alloc.unwrap_or(false),
-                ..Default::default()
-            };
-            if gate.max_stack.is_some() || gate.max_cycles.is_some() || gate.zero_alloc {
-                attr.budget = gate;
-            }
-        }
-        raw_cases = pa.test_cases.clone();
-        for tc in &pa.test_cases {
-            let mut vals = Vec::new();
-            for arg in &tc.args {
-                let s = match &arg.name {
-                    None => attr_value_to_string(&arg.value),
-                    Some(name) => format!("{name} = {}", attr_value_to_string(&arg.value)),
-                };
-                vals.push(s);
-            }
-            cases.push(TestCaseAttr {
-                args: vals,
-                label: None,
-            });
-        }
-    }
-
-    let params: Vec<TestParam> = func
-        .params
-        .iter()
-        .map(|p| {
-            let ty_str = format!("{}", p.ty);
-            let is_capability = matches!(ty_str.as_str(), "SimStorageCtl" | "SimNetCtl")
-                || ty_str.starts_with("Cap[");
-            TestParam {
-                name: p.name.clone(),
-                ty: ty_str,
-                is_capability,
-            }
-        })
-        .collect();
-    let effects: Vec<String> = func
-        .effects
-        .instances
-        .iter()
-        .map(|e| e.name.clone())
-        .collect();
-
-    let sig = TestSignature {
-        name: func.name.clone(),
-        params,
-        effects,
-        attr,
-        cases,
-    };
-    (sig, raw_cases)
-}
-
-fn attr_value_to_string(v: &AttrValue) -> String {
-    match v {
-        AttrValue::Int(n) => n.to_string(),
-        AttrValue::Float(f) => f.clone(),
-        AttrValue::Bool(b) => b.to_string(),
-        AttrValue::String(s) => format!("{s:?}"),
-        AttrValue::Ident(id) => id.clone(),
-        AttrValue::Raw(raw) => raw.clone(),
-    }
 }
 
 /// The argument rows of a test's `@test_case(...)` pins, or a message naming
@@ -638,77 +479,23 @@ fn discover_tests(
     items: &[Item],
     cases: &[TestCase],
 ) -> Result<Vec<DiscoveredTest>, String> {
-    let (tokens, _) = lexer::lex(source);
-    let parsed_attrs = test_attrs::extract_test_attrs(source);
-    let attr_map: BTreeMap<&str, &FunctionTestAttrs> = parsed_attrs
-        .iter()
-        .map(|a| (a.fn_name.as_str(), a))
-        .collect();
-
-    let case_entries: BTreeMap<&str, &TestCase> = cases
-        .iter()
-        .map(|case| (case.wrapper.entry.as_str(), case))
-        .collect();
-    let case_targets: BTreeSet<&str> = cases
-        .iter()
-        .filter_map(|case| match &items[case.wrapper.function_index] {
-            Item::Function(f) => Some(f.name.as_str()),
-            _ => None,
+    let rows: Vec<CaseRow> = cases.iter().map(|case| case.wrapper.clone()).collect();
+    let found = test_discovery::discover(source, items, &rows)?;
+    Ok(found
+        .into_iter()
+        .map(|test| {
+            let Item::Function(f) = &items[test.index] else {
+                unreachable!("only functions are tests");
+            };
+            DiscoveredTest {
+                name: test.name,
+                span: test.span,
+                plan: test.plan,
+                raw_cases: test.raw_cases,
+                func: (**f).clone(),
+            }
         })
-        .collect();
-    let mut tests = Vec::new();
-    for item in items {
-        let Item::Function(f) = item else {
-            continue;
-        };
-        let has_real_attr = attr_map
-            .get(f.name.as_str())
-            .is_some_and(|a| a.test.is_some() || !a.test_cases.is_empty());
-        let case = case_entries.get(f.name.as_str());
-        let legacy = !case_targets.contains(f.name.as_str())
-            && (f.name.starts_with("test_")
-                || has_preceding_test_comment(source, &tokens, f.span.start));
-        if !has_real_attr && !legacy && case.is_none() {
-            continue;
-        }
-        if !f.generics.is_empty() {
-            return Err(format!("test function '{}' cannot be generic", f.name));
-        }
-        if f.body.is_none() {
-            return Err(format!("test function '{}' must have a body", f.name));
-        }
-        let (mut sig, raw_cases) = syntax_attr_to_anvil(f, attr_map.get(f.name.as_str()).copied());
-        if case.is_some() {
-            // Each named row is an explicit unit invocation. Effect rows
-            // on the wrapper still participate in ordinary type checking.
-            sig.effects.clear();
-        }
-        let plan = classify(&sig);
-        if !f.params.is_empty() && !has_real_attr {
-            return Err(format!(
-                "test function '{}' must take zero arguments",
-                f.name
-            ));
-        }
-        tests.push(DiscoveredTest {
-            name: case.map_or_else(|| f.name.clone(), |case| case.name.clone()),
-            span: case.map_or_else(|| f.span.clone(), |case| case.span.clone()),
-            plan,
-            raw_cases,
-            func: (**f).clone(),
-        });
-    }
-    tests.sort_by_key(|test| test.span.start);
-    Ok(tests)
-}
-
-fn has_preceding_test_comment(
-    source: &str,
-    tokens: &[vesper::lexer::Token],
-    fn_start: usize,
-) -> bool {
-    preceding_comments(tokens, fn_start)
-        .any(|comment| is_test_marker(&source[comment.span.clone()]))
+        .collect())
 }
 
 fn evaluate_outcome(result: Result<Value, String>) -> (bool, Option<String>, String) {
@@ -753,16 +540,26 @@ impl From<&DiscoveredTest> for UnitEntry {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UnitExecution {
+    Standard,
+    MutationBaseline,
+    Mutant,
+}
+
 fn run_tests_on_world(
     source: &str,
     world: &World,
     selected: &[UnitEntry],
     fuel: u64,
-    prefer_jit: bool,
+    execution: UnitExecution,
+    foreign: Option<(&ForeignChecked, &EvalHost)>,
+    optimize: bool,
 ) -> (bool, Vec<UnitTestCaseReport>) {
+    let prefer_jit = execution == UnitExecution::Standard;
     let mut fallback: BTreeMap<&str, String> = Default::default();
     let mut batch = None;
-    if prefer_jit && !selected.is_empty() {
+    if foreign.is_none() && prefer_jit && !selected.is_empty() {
         let names: Vec<&str> = selected.iter().map(|test| test.entry.as_str()).collect();
         match NativeBatch::compile(world, &names, BatchLimits::default()) {
             Ok(b) => batch = Some(b),
@@ -788,7 +585,7 @@ fn run_tests_on_world(
                 }
             }
         }
-    } else {
+    } else if foreign.is_none() {
         for test in selected {
             fallback.insert(test.entry.as_str(), "mutation gate uses evaluator".into());
         }
@@ -803,9 +600,19 @@ fn run_tests_on_world(
         let (line, column) = location(source, test.span.start);
         let ((mut passed, result, mut message, engine, fallback_reason), ledger_report) = ledger
             .audit_frame(|| {
-                if let Some(reason) = fallback.get(entry) {
+                if let Some((checked, host)) = foreign {
+                    let (passed, result, message) = evaluate_outcome(
+                        checked
+                            .evaluate_with_options(entry, Some(fuel), optimize, |call| {
+                                host.call(call)
+                            })
+                            .map_err(|error| error.to_string()),
+                    );
+                    (passed, result, message, TestEngine::Evaluator, None)
+                } else if let Some(reason) = fallback.get(entry) {
                     let runtime = evaluator.get_or_insert_with(|| Runtime::new(world));
                     runtime.fuel = fuel;
+                    runtime.optimize = optimize;
                     let (passed, result, message) = evaluate_outcome(runtime.run(entry, vec![]));
                     (
                         passed,
@@ -844,8 +651,37 @@ fn run_tests_on_world(
             test_case_pin: None,
             vchrono_capsule: None,
         });
+        if !passed && execution == UnitExecution::Mutant {
+            break;
+        }
     }
     (all_passed, cases)
+}
+
+/// `--engines all` on one passing unit test: fails the report when another
+/// engine disagrees (tests with foreign imports run on the evaluator only
+/// and are left as they are).
+fn engines_agree(
+    rep: &mut UnitTestCaseReport,
+    selected: &[UnitEntry],
+    world: &World,
+    foreign: Option<(&ForeignChecked, &EvalHost)>,
+    standalone: Option<&str>,
+    fuel: u64,
+) {
+    if foreign.is_some() {
+        return;
+    }
+    let Some(entry) = selected.iter().find(|test| test.name == rep.name) else {
+        return;
+    };
+    match test_engines::agree(world, &entry.entry, standalone, fuel) {
+        Ok(()) => rep.message = format!("{} on every engine", rep.message),
+        Err(message) => {
+            rep.passed = false;
+            rep.message = format!("--engines all: {message}");
+        }
+    }
 }
 
 fn without_negative_tests(mut module: Module, negative: &BTreeSet<String>) -> Module {
@@ -856,11 +692,20 @@ fn without_negative_tests(mut module: Module, negative: &BTreeSet<String>) -> Mo
     module
 }
 
+fn checked_module(module: &Module, negative: BTreeSet<String>) -> Cow<'_, Module> {
+    // Intentional checker failures never poison other tests in the module.
+    if negative.is_empty() {
+        Cow::Borrowed(module)
+    } else {
+        Cow::Owned(without_negative_tests(module.clone(), &negative))
+    }
+}
+
 fn checked_for_mutation(
     source: &str,
     negative: &BTreeSet<String>,
 ) -> Result<check::Checked, String> {
-    let (parsed, cases) = prepare_tests(source)?;
+    let (parsed, cases) = prepare_tests(&mut source.to_owned())?;
     let world = check::check(&without_negative_tests(parsed.module, negative));
     if let Some(diagnostic) = world.diagnostics.first() {
         return Err(test_diagnostic(
@@ -888,16 +733,37 @@ struct FileUnitTests {
     expect_error_names: BTreeSet<String>,
 }
 
+impl FileUnitTests {
+    fn failed(display: String, source: String, error: String) -> Self {
+        Self {
+            display: display.clone(),
+            source,
+            report: UnitTestFileReport {
+                file: display,
+                passed: false,
+                tests: vec![],
+                error: Some(error),
+            },
+            selected: vec![],
+            replay: vec![],
+            test_names: BTreeSet::new(),
+            expect_error_names: BTreeSet::new(),
+        }
+    }
+}
+
 /// A non-unit test the mutation gate replays against each mutant.
 #[derive(Clone)]
 enum ReplayTest {
     Property {
         name: String,
+        entry: String,
         cases: usize,
         explicit: Vec<Vec<Value>>,
     },
     SimPulse {
         name: String,
+        entry: String,
         schedules: usize,
         profile: String,
         seed: u64,
@@ -910,10 +776,11 @@ impl ReplayTest {
         match self {
             ReplayTest::Property {
                 name,
+                entry,
                 cases,
                 explicit,
             } => {
-                let outcome = run_property_test(world, name, *cases, explicit, fuel);
+                let outcome = run_property_test(world, entry, *cases, explicit, fuel);
                 if outcome.passed {
                     Ok(())
                 } else {
@@ -927,11 +794,12 @@ impl ReplayTest {
             }
             ReplayTest::SimPulse {
                 name,
+                entry,
                 schedules,
                 profile,
                 seed,
             } => {
-                let outcome = run_simpulse_test_on_world(world, name, *schedules, profile, *seed);
+                let outcome = run_simpulse_test_on_world(world, entry, *schedules, profile, *seed);
                 if outcome.passed {
                     Ok(())
                 } else {
@@ -955,12 +823,330 @@ fn collect_files(target: &Path) -> Result<Vec<(String, String)>, String> {
     }
 }
 
+struct PackageTarget {
+    root: PathBuf,
+    file: Option<PathBuf>,
+}
+
+impl PackageTarget {
+    fn discover(target: &Path) -> Result<Option<Self>, String> {
+        let directory = target.is_dir();
+        let start = if directory {
+            target
+        } else {
+            target
+                .parent()
+                .filter(|dir| !dir.as_os_str().is_empty())
+                .unwrap_or(Path::new("."))
+        };
+        let start = start
+            .canonicalize()
+            .map_err(|e| format!("{}: {e}", start.display()))?;
+        let Some(root) = start
+            .ancestors()
+            .take(SourceLimits::default().max_ancestors)
+            .find(|dir| packages::is_package(dir))
+        else {
+            return Ok(None);
+        };
+        let src = root.join("src");
+        if !src.is_dir() || (start != root && !start.starts_with(&src)) {
+            return Ok(None);
+        }
+        let file = if directory {
+            None
+        } else if start.starts_with(&src) && target.extension().is_some_and(|ext| ext == "ves") {
+            target.file_name().map(|name| start.join(name))
+        } else {
+            return Ok(None);
+        };
+        Ok(Some(Self {
+            root: root.to_owned(),
+            file,
+        }))
+    }
+}
+
+struct TestSource {
+    display: String,
+    source: String,
+    id: Option<usize>,
+    cases: Vec<TestCase>,
+    tests: Vec<DiscoveredTest>,
+}
+
+impl TestSource {
+    fn prepare(display: String, source: &mut String) -> Result<(parser::Parse, Self), String> {
+        let original = source.clone();
+        let (parsed, cases) = prepare_tests(source)?;
+        let tests = discover_tests(&original, &parsed.module.items, &cases)?;
+        Ok((
+            parsed,
+            Self {
+                display,
+                source: original,
+                id: None,
+                cases,
+                tests,
+            },
+        ))
+    }
+}
+
+struct TestProgram {
+    module: Module,
+    files: Vec<TestSource>,
+    sources: Option<SourceMap>,
+    root_file_count: usize,
+    imports: Option<Imports>,
+}
+
+enum TestWorld {
+    Ordinary(World),
+    Foreign(ForeignChecked),
+}
+
+impl TestWorld {
+    fn world(&self) -> &World {
+        match self {
+            Self::Ordinary(world) => world,
+            Self::Foreign(checked) => checked.world(),
+        }
+    }
+
+    fn foreign<'a>(
+        &'a self,
+        host: Option<&'a EvalHost>,
+    ) -> Option<(&'a ForeignChecked, &'a EvalHost)> {
+        match self {
+            Self::Ordinary(_) => None,
+            Self::Foreign(checked) => host.map(|host| (checked, host)),
+        }
+    }
+}
+
+fn bridge_diagnostics(mut error: FfiError) -> Vec<Diagnostic> {
+    if let Some(span) = error.span {
+        error.diagnostics.push(Diagnostic::new(
+            "bridge",
+            format!("{:?}: {}", error.kind, error.message),
+            span,
+        ));
+    }
+    error.diagnostics
+}
+
+fn test_host(imports: &Imports) -> Result<EvalHost, String> {
+    crate::vsys_commands::eval_host(imports, "test")
+}
+
+impl TestProgram {
+    fn standalone(display: String, source: String) -> Result<Self, Box<FileUnitTests>> {
+        let mut expanded = source.clone();
+        match TestSource::prepare(display.clone(), &mut expanded) {
+            Ok((parsed, file)) => Ok(Self {
+                module: parsed.module,
+                files: vec![file],
+                sources: None,
+                root_file_count: 1,
+                imports: None,
+            }),
+            Err(error) => Err(Box::new(FileUnitTests::failed(display, source, error))),
+        }
+    }
+
+    fn negative_names(&self) -> BTreeSet<String> {
+        self.files
+            .iter()
+            .flat_map(|file| &file.tests)
+            .filter(|test| test.plan.primary_mode == TestMode::ExpectError)
+            .map(|test| test.func.name.clone())
+            .collect()
+    }
+
+    fn check(&self, module: &Module) -> Result<TestWorld, Box<FileUnitTests>> {
+        if let Some(imports) = &self.imports {
+            return ffi_lowering::check_module(module, imports)
+                .map(TestWorld::Foreign)
+                .map_err(|error| {
+                    let message = error.to_string();
+                    let diagnostics = bridge_diagnostics(error);
+                    Box::new(if diagnostics.is_empty() {
+                        FileUnitTests::failed(
+                            self.files
+                                .first()
+                                .map_or("<package>", |f| &f.display)
+                                .into(),
+                            String::new(),
+                            message,
+                        )
+                    } else {
+                        self.semantic_error(&diagnostics)
+                    })
+                });
+        }
+        let checked = check::check(module);
+        if checked.diagnostics.is_empty() {
+            Ok(TestWorld::Ordinary(checked.world))
+        } else {
+            Err(Box::new(self.semantic_error(&checked.diagnostics)))
+        }
+    }
+
+    fn package(target: &PackageTarget, replacement: Option<(&Path, &str)>) -> Result<Self, String> {
+        let mut files = Vec::new();
+        let mut found = target.file.is_none();
+        let mut parse_root = |path: &Path| {
+            let mut source = match replacement {
+                Some((replaced, text)) if path == replaced => text.to_owned(),
+                _ => read_source(path)?,
+            };
+            if target.file.as_deref().is_some_and(|file| file != path) {
+                files.push(None);
+                let parsed = parser::parse(&source);
+                return Ok((source, parsed));
+            }
+            found = true;
+            let display = path
+                .strip_prefix(&target.root)
+                .unwrap_or(path)
+                .components()
+                .map(|part| part.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
+            let (parsed, tested) = TestSource::prepare(display, &mut source)
+                .map_err(|error| format!("{}: {error}", path.display()))?;
+            files.push(Some(tested));
+            Ok((source, parsed))
+        };
+        let assembled = match replacement {
+            Some(replacement) => packages::load_with_dependency_replacement(
+                &target.root,
+                &mut parse_root,
+                replacement,
+            )?,
+            None => packages::load_with_root_parser(&target.root, &mut parse_root)?,
+        };
+        if let Some((path, d)) = assembled.manifest_errors.first() {
+            return Err(format!("{path}: {} {}", d.code, d.message));
+        }
+        let imports = (!assembled.vsys.is_empty())
+            .then(|| assembled.imports(None))
+            .transpose()?;
+        let Assembled {
+            module,
+            sources,
+            diagnostics,
+            root_package_files,
+            ..
+        } = assembled;
+        if let Some(d) = diagnostics.first() {
+            let diagnostic = &d.diagnostic;
+            if let Some(index) = d.file {
+                let file = &sources.files[index];
+                let tests = root_package_files
+                    .iter()
+                    .position(|&id| id == index)
+                    .and_then(|i| files[i].as_ref());
+                return Err(format!(
+                    "{}: {}",
+                    file.display,
+                    test_diagnostic(
+                        &file.text,
+                        tests.map_or(&[], |f| f.cases.as_slice()),
+                        diagnostic,
+                        "package",
+                        diagnostics.len()
+                    )
+                ));
+            }
+            return Err(format!("{} {}", diagnostic.code, diagnostic.message));
+        }
+        if !found {
+            return Err(format!(
+                "{} is not a source module in {}",
+                target.file.as_ref().unwrap().display(),
+                target.root.display()
+            ));
+        }
+        let functions: BTreeMap<_, _> = module
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Function(f) => Some((f.span.start, f.as_ref())),
+                _ => None,
+            })
+            .collect();
+        let mut prepared = Vec::new();
+        let root_file_count = root_package_files.len();
+        for (file, id) in files.into_iter().zip(root_package_files) {
+            let Some(mut file) = file else {
+                continue;
+            };
+            file.id = Some(id);
+            let base = sources.files[id].base;
+            for test in &mut file.tests {
+                let offset = base + test.func.span.start;
+                let function = functions.get(&offset).ok_or_else(|| {
+                    format!("{}: could not resolve test '{}'", file.display, test.name)
+                })?;
+                test.func = (**function).clone();
+            }
+            prepared.push(file);
+        }
+        Ok(Self {
+            module,
+            files: prepared,
+            sources: Some(sources),
+            root_file_count,
+            imports,
+        })
+    }
+
+    fn semantic_error(&self, diagnostics: &[Diagnostic]) -> FileUnitTests {
+        let first = &diagnostics[0];
+        let localized = self.sources.as_ref().map(|sources| sources.localize(first));
+        let id = localized.as_ref().and_then(|d| d.file);
+        let file = id.and_then(|i| self.sources.as_ref()?.files.get(i));
+        let source = match id {
+            Some(id) => self.files.iter().find(|f| f.id == Some(id)),
+            None => self.files.first(),
+        };
+        let text = source.map_or_else(|| file.map_or("", |f| f.text.as_str()), |f| &f.source);
+        let error = test_diagnostic(
+            text,
+            source.map_or(&[], |f| f.cases.as_slice()),
+            localized.as_ref().map_or(first, |d| &d.diagnostic),
+            "semantic",
+            diagnostics.len(),
+        );
+        let display = source.map_or_else(
+            || file.map_or("<package>", |f| f.display.as_str()),
+            |f| f.display.as_str(),
+        );
+        FileUnitTests::failed(display.to_owned(), text.to_owned(), error)
+    }
+}
+
 fn host_target_isa() -> String {
     format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS)
 }
 
 fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> {
-    let files = collect_files(Path::new(&opts.path))?;
+    let target = Path::new(&opts.path);
+    let package = PackageTarget::discover(target)?
+        .map(|package| TestProgram::package(&package, None))
+        .transpose()?;
+    let standalone = if package.is_none() {
+        collect_files(target)?
+    } else {
+        Vec::new()
+    };
+    let programs = package.into_iter().map(Ok).chain(
+        standalone
+            .into_iter()
+            .map(|(display, source)| TestProgram::standalone(display, source)),
+    );
     let mut results = Vec::new();
     let mut total_discovered = 0usize;
     let mut total_selected = 0usize;
@@ -971,100 +1157,119 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
         None
     };
 
-    for (display, source) in files {
-        let (parsed, cases) = match prepare_tests(&source) {
-            Ok(ok) => ok,
-            Err(error) => {
+    for program in programs {
+        let program = match program {
+            Ok(program) => program,
+            Err(file) => {
                 all_passed = false;
-                results.push(FileUnitTests {
-                    display: display.clone(),
-                    source,
-                    report: UnitTestFileReport {
-                        file: display,
-                        passed: false,
-                        tests: vec![],
-                        error: Some(error),
-                    },
-                    selected: vec![],
-                    replay: vec![],
-                    test_names: BTreeSet::new(),
-                    expect_error_names: BTreeSet::new(),
-                });
+                results.push(*file);
                 continue;
             }
         };
-        let discovered = match discover_tests(&source, &parsed.module.items, &cases) {
-            Ok(list) => list,
-            Err(error) => {
+        total_discovered += program
+            .files
+            .iter()
+            .map(|file| file.tests.len())
+            .sum::<usize>();
+        let selected_count = program
+            .files
+            .iter()
+            .flat_map(|file| &file.tests)
+            .filter(|test| opts.selects(test))
+            .count();
+        total_selected += selected_count;
+        if selected_count == 0 {
+            continue;
+        }
+
+        let module = checked_module(&program.module, program.negative_names());
+        let checked = match program.check(&module) {
+            Ok(checked) => checked,
+            Err(file) => {
                 all_passed = false;
-                results.push(FileUnitTests {
-                    display: display.clone(),
-                    source,
-                    report: UnitTestFileReport {
-                        file: display,
-                        passed: false,
-                        tests: vec![],
-                        error: Some(error),
-                    },
-                    selected: vec![],
-                    replay: vec![],
-                    test_names: BTreeSet::new(),
-                    expect_error_names: BTreeSet::new(),
-                });
+                results.push(*file);
                 continue;
             }
         };
-        total_discovered += discovered.len();
-        // Negative tests are left out of the positive module whether or not
-        // the filter selects them: their bodies are meant not to check.
-        let expect_error_names: BTreeSet<String> = discovered
+        let host = program.imports.as_ref().map(test_host).transpose()?;
+        let fn_graph = FunctionGraph::from_module(&program.module);
+        let combined = program.sources.as_ref().map(SourceMap::combined);
+        let package_hash = combined.as_ref().map(|text| blake3::hash(text.as_bytes()));
+        let execution = TestExecution {
+            opts,
+            world: checked.world(),
+            foreign: checked.foreign(host.as_ref()),
+            bridge_module: program.imports.as_ref().map(|imports| (&*module, imports)),
+            fn_graph: &fn_graph,
+            combined: combined.as_deref(),
+            package_hash,
+            // Host I/O is external to the source fingerprint and can change between runs.
+            verdict_cache: verdict_cache.as_ref().filter(|_| program.imports.is_none()),
+        };
+        for file in program.files {
+            if let Some(result) = execution.run_file(file) {
+                all_passed &= result.report.passed;
+                results.push(result);
+            }
+        }
+    }
+
+    if total_discovered == 0 && all_passed {
+        return Err(format!("no Vesper unit tests found in {}", opts.path));
+    }
+    if total_selected == 0 && opts.filter.is_some() && all_passed {
+        return Err(format!(
+            "no Vesper unit tests matched filter '{}'",
+            opts.filter.as_deref().unwrap_or_default()
+        ));
+    }
+    Ok((all_passed, results))
+}
+
+struct TestExecution<'a> {
+    opts: &'a Options,
+    world: &'a World,
+    foreign: Option<(&'a ForeignChecked, &'a EvalHost)>,
+    bridge_module: Option<(&'a Module, &'a Imports)>,
+    fn_graph: &'a FunctionGraph,
+    combined: Option<&'a str>,
+    package_hash: Option<blake3::Hash>,
+    verdict_cache: Option<&'a VerdictCache>,
+}
+
+impl TestExecution<'_> {
+    fn run_file(&self, file: TestSource) -> Option<FileUnitTests> {
+        let Self {
+            opts,
+            world,
+            foreign,
+            bridge_module,
+            fn_graph,
+            combined,
+            package_hash,
+            verdict_cache,
+        } = *self;
+        let TestSource {
+            display,
+            source,
+            tests,
+            ..
+        } = file;
+        let expect_error_names = tests
             .iter()
             .filter(|t| t.plan.primary_mode == TestMode::ExpectError)
             .map(|t| t.func.name.clone())
             .collect();
-        let all_test_names: BTreeSet<String> =
-            discovered.iter().map(|t| t.func.name.clone()).collect();
-        let selected_tests: Vec<DiscoveredTest> = discovered
+        let all_test_names = tests.iter().map(|t| t.name.clone()).collect();
+        let selected_tests: Vec<_> = tests
             .into_iter()
-            .filter(|t| {
-                opts.filter
-                    .as_ref()
-                    .is_none_or(|pat| t.name.contains(pat.as_str()))
-            })
+            .filter(|test| opts.selects(test))
             .collect();
-        total_selected += selected_tests.len();
         if selected_tests.is_empty() {
-            continue;
+            return None;
         }
+        let diagnostic_source = combined.unwrap_or(&source);
 
-        // Filter out ExpectError functions before checking the positive module
-        // so intentional substructural failures never poison sibling tests.
-        let positive_module = without_negative_tests(parsed.module.clone(), &expect_error_names);
-        let checked = match check::check(&positive_module) {
-            c if c.diagnostics.is_empty() => c,
-            c => {
-                let d = &c.diagnostics[0];
-                let error = test_diagnostic(&source, &cases, d, "semantic", c.diagnostics.len());
-                all_passed = false;
-                results.push(FileUnitTests {
-                    display: display.clone(),
-                    source,
-                    report: UnitTestFileReport {
-                        file: display,
-                        passed: false,
-                        tests: vec![],
-                        error: Some(error),
-                    },
-                    selected: vec![],
-                    replay: vec![],
-                    test_names: BTreeSet::new(),
-                    expect_error_names: BTreeSet::new(),
-                });
-                continue;
-            }
-        };
-
-        let fn_graph = FunctionGraph::from_module(&parsed.module);
         let mut case_reports: BTreeMap<String, UnitTestCaseReport> = BTreeMap::new();
         let mut unit_batch_selected = Vec::new();
         let mut unit_plans: BTreeMap<String, HarnessPlan> = BTreeMap::new();
@@ -1072,9 +1277,12 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
 
         for test in &selected_tests {
             let (line, column) = location(&source, test.span.start);
-            let fn_hash = fn_graph
+            let mut fn_hash = fn_graph
                 .transitive_fn_blake3(&test.func.name)
                 .unwrap_or_default();
+            if let Some(hash) = package_hash {
+                fn_hash.push_str(&hash.to_hex());
+            }
             let cache_key = VerdictKey {
                 fn_blake3: test_fingerprint(&fn_hash, test, opts.fuel),
                 sim_seed: test.plan.seed,
@@ -1088,14 +1296,12 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
                 && is_cacheable(&test.plan)
                 && !matches!(test.plan.primary_mode, TestMode::Unit);
             if use_cache
-                && let Some(cache) = &verdict_cache
+                && let Some(cache) = verdict_cache
                 && let Some(bytes) = cache.get(&cache_key.cache_key_hex())
                 && let Ok(record) = VerdictRecord::from_json(&String::from_utf8_lossy(&bytes))
             {
                 let passed = record.status == VerdictStatus::Pass;
-                if !passed {
-                    all_passed = false;
-                }
+
                 case_reports.insert(
                     test.name.clone(),
                     UnitTestCaseReport {
@@ -1122,13 +1328,23 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
                     unit_plans.insert(test.name.clone(), test.plan.clone());
                 }
                 TestMode::ExpectError => {
-                    let diags = checked.world.check_isolated_item(&test.func);
+                    let diags = if let Some((module, imports)) = bridge_module {
+                        let mut module = module.clone();
+                        module
+                            .items
+                            .push(Item::Function(Box::new(test.func.clone())));
+                        ffi_lowering::check_module(&module, imports)
+                            .err()
+                            .map_or_else(Vec::new, bridge_diagnostics)
+                    } else {
+                        world.check_isolated_item(&test.func)
+                    };
                     let observed: Vec<ObservedDiagnostic> = diags
                         .iter()
                         .map(|d| ObservedDiagnostic {
                             code: Some(d.code.clone()),
                             message: d.message.clone(),
-                            primary_text: source
+                            primary_text: diagnostic_source
                                 .get(d.span.start..d.span.end)
                                 .unwrap_or("")
                                 .to_string(),
@@ -1136,8 +1352,9 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
                                 .related
                                 .iter()
                                 .map(|r| {
-                                    let snippet =
-                                        source.get(r.span.start..r.span.end).unwrap_or("");
+                                    let snippet = diagnostic_source
+                                        .get(r.span.start..r.span.end)
+                                        .unwrap_or("");
                                     format!("{} {}", r.message, snippet)
                                 })
                                 .collect(),
@@ -1155,10 +1372,8 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
                         }
                         other => (false, format!("{other:?}")),
                     };
-                    if !passed {
-                        all_passed = false;
-                    }
-                    if let Some(cache) = &verdict_cache
+
+                    if let Some(cache) = verdict_cache
                         && is_cacheable(&test.plan)
                     {
                         let rec = VerdictRecord {
@@ -1200,7 +1415,6 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
                     let explicit = match eval_test_case_args(&test.func, &test.raw_cases) {
                         Ok(rows) => rows,
                         Err(message) => {
-                            all_passed = false;
                             case_reports.insert(
                                 test.name.clone(),
                                 UnitTestCaseReport {
@@ -1226,19 +1440,13 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
                     } else {
                         vesper_test::DEFAULT_PROPERTY_CASES as usize
                     };
-                    let outcome = run_property_test(
-                        &checked.world,
-                        &test.name,
-                        cases_n,
-                        &explicit,
-                        opts.fuel,
-                    );
+                    let outcome =
+                        run_property_test(world, &test.func.name, cases_n, &explicit, opts.fuel);
                     let passed = outcome.passed;
-                    if !passed {
-                        all_passed = false;
-                    } else {
+                    if passed {
                         replay.push(ReplayTest::Property {
                             name: test.name.clone(),
+                            entry: test.func.name.clone(),
                             cases: cases_n,
                             explicit: explicit.clone(),
                         });
@@ -1271,7 +1479,7 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
                                 format!("{message}; counterexample=({})", rendered.join(", "));
                         }
                     }
-                    if let Some(cache) = &verdict_cache
+                    if let Some(cache) = verdict_cache
                         && is_cacheable(&test.plan)
                     {
                         let rec = VerdictRecord {
@@ -1323,18 +1531,17 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
                         None => "None",
                     };
                     let outcome = run_simpulse_test_on_world(
-                        &checked.world,
-                        &test.name,
+                        world,
+                        &test.func.name,
                         schedules,
                         profile,
                         test.plan.seed,
                     );
                     let passed = outcome.passed;
-                    if !passed {
-                        all_passed = false;
-                    } else {
+                    if passed {
                         replay.push(ReplayTest::SimPulse {
                             name: test.name.clone(),
+                            entry: test.func.name.clone(),
                             schedules,
                             profile: profile.to_string(),
                             seed: test.plan.seed,
@@ -1383,16 +1590,19 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
         }
 
         if !unit_batch_selected.is_empty() {
-            let (unit_passed, unit_cases) = run_tests_on_world(
+            let (_, unit_cases) = run_tests_on_world(
                 &source,
-                &checked.world,
+                world,
                 &unit_batch_selected,
                 opts.fuel,
-                !opts.mutate,
+                if opts.mutate {
+                    UnitExecution::MutationBaseline
+                } else {
+                    UnitExecution::Standard
+                },
+                foreign,
+                opts.optimize,
             );
-            if !unit_passed {
-                all_passed = false;
-            }
             for mut rep in unit_cases {
                 if let Some(plan) = unit_plans.get(&rep.name) {
                     rep.anvil_mode = Some(plan.primary_mode);
@@ -1401,10 +1611,19 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
                     // strength of its ordinary unit run.
                     if plan.primary_mode == TestMode::BudgetGate && rep.passed {
                         rep.passed = false;
-                        all_passed = false;
                         rep.message = format!(
                             "budget gate not enforced: this harness cannot yet check {} (the unit run passed)",
                             budget_gate_names(plan)
+                        );
+                    }
+                    if opts.engines_all && plan.primary_mode == TestMode::Unit && rep.passed {
+                        engines_agree(
+                            &mut rep,
+                            &unit_batch_selected,
+                            world,
+                            foreign,
+                            combined.is_none().then_some(source.as_str()),
+                            opts.fuel,
                         );
                     }
                 }
@@ -1429,7 +1648,7 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
             .map(UnitEntry::from)
             .collect();
 
-        results.push(FileUnitTests {
+        Some(FileUnitTests {
             display: display.clone(),
             source,
             report: UnitTestFileReport {
@@ -1442,19 +1661,8 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
             replay,
             test_names: all_test_names,
             expect_error_names,
-        });
+        })
     }
-
-    if total_discovered == 0 && all_passed {
-        return Err(format!("no Vesper unit tests found in {}", opts.path));
-    }
-    if total_selected == 0 && opts.filter.is_some() && all_passed {
-        return Err(format!(
-            "no Vesper unit tests matched filter '{}'",
-            opts.filter.as_deref().unwrap_or_default()
-        ));
-    }
-    Ok((all_passed, results))
 }
 
 #[derive(Clone)]
@@ -1677,40 +1885,34 @@ fn collect_mutants_in_fn(
     }
 }
 
-fn collect_file_mutants(unit: &FileUnitTests) -> Vec<MutantCandidate> {
-    // Mutants are replayed against the file's unit and budget-gate tests
-    // (`unit.selected`) and its passing property and SimPulse tests
-    // (`unit.replay`). A file with none of those would report every
-    // well-typed mutant as surviving without running a test, so it gets no
-    // mutants.
-    if unit.selected.is_empty() && unit.replay.is_empty() {
-        return Vec::new();
-    }
-    let test_names: std::collections::BTreeSet<&str> =
-        unit.test_names.iter().map(String::as_str).collect();
-    let (tokens, _) = lexer::lex(&unit.source);
+fn collect_source_mutants(
+    display: &str,
+    source: &str,
+    test_names: &BTreeSet<&str>,
+) -> Vec<MutantCandidate> {
+    let (tokens, _) = lexer::lex(source);
     let mut candidates = Vec::new();
-    for item in &parser::parse(&unit.source).module.items {
+    for item in &parser::parse(source).module.items {
         match item {
             Item::Function(f) => {
                 if !test_names.contains(f.name.as_str())
                     && !f.name.starts_with("test_")
                     && !preceding_comments(&tokens, f.span.start).any(|comment| {
-                        let text = &unit.source[comment.span.clone()];
+                        let text = &source[comment.span.clone()];
                         is_test_marker(text) || case_marker(text).is_some()
                     })
                 {
-                    collect_mutants_in_fn(&unit.display, &unit.source, &tokens, f, &mut candidates);
+                    collect_mutants_in_fn(display, source, &tokens, f, &mut candidates);
                 }
             }
             Item::Impl { methods, .. } => {
                 for m in methods {
-                    collect_mutants_in_fn(&unit.display, &unit.source, &tokens, m, &mut candidates);
+                    collect_mutants_in_fn(display, source, &tokens, m, &mut candidates);
                 }
             }
             Item::Conformance(c) => {
                 for m in &c.methods {
-                    collect_mutants_in_fn(&unit.display, &unit.source, &tokens, m, &mut candidates);
+                    collect_mutants_in_fn(display, source, &tokens, m, &mut candidates);
                 }
             }
             Item::Adt(_) | Item::Effect(_) | Item::Trait(_) => {}
@@ -1749,13 +1951,83 @@ fn run_mutation_gate(opts: &Options) -> Result<(), String> {
         return Err("baseline unit tests failed before mutation testing".into());
     }
 
+    let package = PackageTarget::discover(Path::new(&opts.path))?;
+    let package_program = package
+        .as_ref()
+        .map(|target| TestProgram::package(target, None))
+        .transpose()?;
+    let host = package_program
+        .as_ref()
+        .and_then(|program| program.imports.as_ref())
+        .map(test_host)
+        .transpose()?;
     let mut all_candidates = Vec::new();
-    let mut file_indices = Vec::new();
-    for (file_idx, file) in files.iter().enumerate() {
-        let mut cands = collect_file_mutants(file);
-        for c in cands.drain(..) {
-            file_indices.push(file_idx);
-            all_candidates.push(c);
+    let dependency_source = if let Some(path) = &opts.mutate_dependency {
+        let program = package_program
+            .as_ref()
+            .ok_or("--mutate-dependency requires a Loom package")?;
+        let canonical = path
+            .canonicalize()
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        Some(
+            program
+                .sources
+                .as_ref()
+                .expect("package source map")
+                .files
+                .iter()
+                .skip(program.root_file_count)
+                .find(|file| {
+                    Path::new(&file.display)
+                        .canonicalize()
+                        .is_ok_and(|p| p == canonical)
+                })
+                .ok_or_else(|| {
+                    format!(
+                        "{} is not a source file in the package dependencies",
+                        path.display()
+                    )
+                })?,
+        )
+    } else {
+        None
+    };
+    if let Some(file) = dependency_source {
+        if files
+            .iter()
+            .any(|f| !f.selected.is_empty() || !f.replay.is_empty())
+        {
+            all_candidates.extend(
+                collect_source_mutants(&file.display, &file.text, &BTreeSet::new())
+                    .into_iter()
+                    .map(|candidate| (0, candidate)),
+            );
+        }
+    } else if let Some(program) = &package_program {
+        if files
+            .iter()
+            .any(|f| !f.selected.is_empty() || !f.replay.is_empty())
+        {
+            for (index, file) in program.files.iter().enumerate() {
+                let names = file.tests.iter().map(|test| test.name.as_str()).collect();
+                all_candidates.extend(
+                    collect_source_mutants(&file.display, &file.source, &names)
+                        .into_iter()
+                        .map(|candidate| (index, candidate)),
+                );
+            }
+        }
+    } else {
+        for (index, file) in files.iter().enumerate() {
+            if file.selected.is_empty() && file.replay.is_empty() {
+                continue;
+            }
+            let names = file.test_names.iter().map(String::as_str).collect();
+            all_candidates.extend(
+                collect_source_mutants(&file.display, &file.source, &names)
+                    .into_iter()
+                    .map(|candidate| (index, candidate)),
+            );
         }
     }
     let total_candidates = all_candidates.len();
@@ -1765,26 +2037,48 @@ fn run_mutation_gate(opts: &Options) -> Result<(), String> {
             opts.path
         ));
     }
-    let capped = total_candidates > opts.max_mutants;
-    let limit = total_candidates.min(opts.max_mutants);
+    let start = opts.mutant_offset;
+    if start >= total_candidates {
+        return Err(format!(
+            "--mutant-offset {start} is outside the {total_candidates} mutation candidate(s)"
+        ));
+    }
+    let limit = (total_candidates - start).min(opts.max_mutants);
+    let end = start + limit;
+    let capped = end < total_candidates;
 
     let mut reports = Vec::with_capacity(limit);
     let mut killed = 0usize;
     let mut survived = 0usize;
     let mut ill_typed = 0usize;
 
-    for idx in 0..limit {
-        let cand = &all_candidates[idx];
-        let unit = &files[file_indices[idx]];
-        let (line, column) = location(&unit.source, cand.start);
-        let mut mutated = String::with_capacity(
-            unit.source.len() - (cand.end - cand.start) + cand.replacement.len(),
-        );
-        mutated.push_str(&unit.source[..cand.start]);
+    for (idx, (file_index, cand)) in all_candidates.iter().enumerate().skip(start).take(limit) {
+        let file_index = *file_index;
+        let source = match (dependency_source, &package_program) {
+            (Some(file), _) => &file.text,
+            (None, Some(program)) => &program.files[file_index].source,
+            (None, None) => &files[file_index].source,
+        };
+        let (line, column) = location(source, cand.start);
+        let mut mutated =
+            String::with_capacity(source.len() - (cand.end - cand.start) + cand.replacement.len());
+        mutated.push_str(&source[..cand.start]);
         mutated.push_str(&cand.replacement);
-        mutated.push_str(&unit.source[cand.end..]);
+        mutated.push_str(&source[cand.end..]);
 
-        let report = match checked_for_mutation(&mutated, &unit.expect_error_names) {
+        let checked = if let Some(target) = &package {
+            let path = target.root.join(&cand.file);
+            TestProgram::package(target, Some((&path, &mutated))).and_then(|program| {
+                program
+                    .check(&checked_module(&program.module, program.negative_names()))
+                    .map_err(|file| file.report.error.unwrap())
+            })
+        } else {
+            checked_for_mutation(&mutated, &files[file_index].expect_error_names)
+                .map(|checked| TestWorld::Ordinary(checked.world))
+        };
+
+        let report = match checked {
             Err(err) => {
                 ill_typed += 1;
                 MutantReport {
@@ -1801,18 +2095,31 @@ fn run_mutation_gate(opts: &Options) -> Result<(), String> {
                 }
             }
             Ok(checked) => {
-                let (unit_passed, cases) =
-                    run_tests_on_world(&mutated, &checked.world, &unit.selected, opts.fuel, false);
-                let mut killer = cases
-                    .into_iter()
-                    .find(|c| !c.passed)
-                    .map(|k| (k.name, k.message));
-                if unit_passed {
-                    killer = unit
-                        .replay
-                        .iter()
-                        .find_map(|t| t.run(&checked.world, opts.fuel).err());
-                }
+                let suites = if package.is_some() {
+                    files.as_slice()
+                } else {
+                    std::slice::from_ref(&files[file_index])
+                };
+                let killer = suites.iter().find_map(|unit| {
+                    let (_, cases) = run_tests_on_world(
+                        &unit.source,
+                        checked.world(),
+                        &unit.selected,
+                        opts.fuel,
+                        UnitExecution::Mutant,
+                        checked.foreign(host.as_ref()),
+                        opts.optimize,
+                    );
+                    cases
+                        .into_iter()
+                        .find(|case| !case.passed)
+                        .map(|case| (case.name, case.message))
+                        .or_else(|| {
+                            unit.replay
+                                .iter()
+                                .find_map(|test| test.run(checked.world(), opts.fuel).err())
+                        })
+                });
                 if killer.is_none() {
                     survived += 1;
                     MutantReport {
@@ -1862,6 +2169,7 @@ fn run_mutation_gate(opts: &Options) -> Result<(), String> {
                 "mode": "mutate",
                 "passed": gate_passed,
                 "total_candidates": total_candidates,
+                "offset": start,
                 "tested": limit,
                 "capped": capped,
                 "killed": killed,
@@ -2011,5 +2319,39 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
         Err(format!(
             "{failed_tests} test(s) failed ({file_errors} file error(s))"
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mutant_replay_stops_after_the_first_failure() {
+        let source = "fn first() -> bool { false } fn second() -> bool { true }";
+        let checked = check::check(&parser::parse(source).module);
+        assert!(checked.diagnostics.is_empty());
+        let selected = ["first", "second"].map(|name| UnitEntry {
+            name: name.into(),
+            entry: name.into(),
+            span: 0..0,
+        });
+        for (execution, expected_count) in [
+            (UnitExecution::MutationBaseline, 2),
+            (UnitExecution::Mutant, 1),
+        ] {
+            let (passed, reports) = run_tests_on_world(
+                source,
+                &checked.world,
+                &selected,
+                10_000,
+                execution,
+                None,
+                true,
+            );
+            assert!(!passed);
+            assert_eq!(reports.len(), expected_count);
+            assert_eq!(reports[0].name, "first");
+        }
     }
 }

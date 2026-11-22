@@ -1,0 +1,719 @@
+// The fip checker test sources (tests/fip.rs, tests/borrowed_box_match.rs,
+// tests/loop_boxes.rs and the @fip cases of tests/seq.rs), one per
+// `==== <file>:<line>` header, for tests/self_host_check_fip.rs.
+// Regenerate with the script in docs/parallel-results/self-host-check-fip.md.
+==== tests/fip.rs:37
+enum Color { Red, Black }
+
+affine struct RbNode[K, V] {
+    color: Color,
+    key: K,
+    val: V,
+    left: Option[Box[RbNode[K, V]]],
+    right: Option[Box[RbNode[K, V]]],
+}
+
+@fip fn balance_left[K: mod copy, V](
+    color: Color,
+    key: K,
+    sink val: V,
+    sink left: Option[Box[RbNode[K, V]]],
+    sink right: Option[Box[RbNode[K, V]]],
+) -> Box[RbNode[K, V]] eff [] {
+    match left {
+        Some(Box(RbNode {
+            color: Color::Red,
+            key: lk, val: lv,
+            left: Some(Box(RbNode { color: Color::Red, key: llk, val: llv, left: a, right: b })),
+            right: c,
+        })) => {
+            let new_left  = Box::new(RbNode { color: Color::Black, key: llk, val: llv, left: a, right: b });
+            let new_right = Box::new(RbNode { color: Color::Black, key, val, left: c, right });
+            Box::new_in_caller(RbNode { color: Color::Red, key: lk, val: lv, left: Some(new_left), right: Some(new_right) })
+        }
+        other_left => Box::new_in_caller(RbNode { color, key, val, left: other_left, right }),
+    }
+}
+
+==== tests/fip.rs:70
+copy enum Color { Red, Black }
+
+affine struct RbNode[K, V] {
+    color: Color,
+    key: K,
+    val: V,
+    left: Option[Box[RbNode[K, V]]],
+    right: Option[Box[RbNode[K, V]]],
+}
+
+@fip fn balance_left[K: mod copy, V](
+    color: Color,
+    key: K,
+    sink val: V,
+    sink left: Option[Box[RbNode[K, V]]],
+    sink right: Option[Box[RbNode[K, V]]],
+) -> Box[RbNode[K, V]] eff [] {
+    match left {
+        Some(Box(RbNode {
+            color: Color::Red,
+            key: lk, val: lv,
+            left: Some(Box(RbNode { color: Color::Red, key: llk, val: llv, left: a, right: b })),
+            right: c,
+        })) => {
+            let new_left  = Box::new(RbNode { color: Color::Black, key: llk, val: llv, left: a, right: b });
+            let new_right = Box::new(RbNode { color: Color::Black, key, val, left: c, right });
+            Box::new_in_caller(RbNode { color: Color::Red, key: lk, val: lv, left: Some(new_left), right: Some(new_right) })
+        }
+        other_left => Box::new_in_caller(RbNode { color, key, val, left: other_left, right }),
+    }
+}
+
+==== tests/fip.rs:199
+
+@fip pub fn a(sink b: Box[i64]) -> Box[i64] eff [] {
+    let Box(v) = b;
+    Box::new(wrapping_add(v, 1))
+}
+pub @fip fn b(v: i64) -> Box[i64] eff [] {
+    Box::new_in_caller(wrapping_add(v, 2))
+}
+copy struct Wrap { x: i64 }
+impl Wrap {
+    @fip fn id(sink self, sink b: Box[i64]) -> Box[i64] eff [] {
+        let Box(v) = b;
+        Box::new(wrapping_add(v, self.x))
+    }
+}
+
+==== tests/fip.rs:274
+
+fn bad() -> Box[i64] { Box(42) }
+
+==== tests/fip.rs:283
+
+effect Alloc { fn alloc() -> i64; }
+@fip fn bad(x: i64) -> i64 eff [Alloc] { x }
+
+==== tests/fip.rs:291
+
+fn helper(sink b: Box[i64]) -> Box[i64] {
+    let Box(v) = b;
+    Box::new(wrapping_add(v, 1))
+}
+@fip fn bad(sink b: Box[i64]) -> Box[i64] eff [] {
+    helper(b)
+}
+
+==== tests/fip.rs:304
+
+@fip fn bad(sink f: fn(i64) -> i64, x: i64) -> i64 eff [] { f(x) }
+
+==== tests/fip.rs:313
+
+fn bad(x: i64) -> Box[i64] { Box::new_in_caller(x) }
+
+==== tests/fip.rs:322
+
+@fip fn bad(x: i64) -> Box[i64] eff [] {
+    let b = Box::new(x);
+    b
+}
+
+==== tests/fip.rs:332
+
+@fip fn bad_size(sink b: Box[u8]) -> (Box[(i64, i64)], Box[u8]) eff [] {
+    let Box(x) = b;
+    let big = Box::new((1, 2));
+    (big, Box::new(x))
+}
+
+==== tests/fip.rs:345
+
+@fip fn bad(sink b: Box[i64]) -> i64 eff [] {
+    let Box(v) = b;
+    v
+}
+
+==== tests/fip.rs:357
+
+@fip fn bad(sink b: Box[i64]) -> i64 eff [] {
+    42
+}
+
+==== tests/fip.rs:366
+
+fn consume_borrow(in b: Box[i64]) -> i64 { 1 }
+@fip fn bad(sink b: Box[i64]) -> i64 eff [] {
+    let Box(v) = b;
+    consume_borrow(Box::new(v))
+}
+
+==== tests/fip.rs:379
+
+@fip fn bad(x: i64) -> i64 eff [] {
+    let _ = Box::new_in_caller(x);
+    x
+}
+
+==== tests/fip.rs:391
+
+@fip fn bad(sink a: Box[i64]) -> Box[i64] eff [] {
+    let Box(v) = a;
+    let first = Box::new_in_caller(v);
+    let _b = first;
+    Box::new_in_caller(wrapping_add(v, 1))
+}
+
+==== tests/fip.rs:403
+
+@fip fn bad(flag: bool, sink b: Box[i64]) -> Box[i64] eff [] {
+    if flag {
+        b
+    } else {
+        let Box(v) = b;
+        let reused = Box::new(v);
+        Box::new_in_caller(v)
+    }
+}
+
+==== tests/fip.rs:420
+
+@fip fn bad(flag: bool, sink a: Box[i64], sink b: Box[i64]) -> Box[i64] eff [] {
+    let Box(va) = a;
+    let Box(vb) = b;
+    if flag {
+        let reuse_a = Box::new(va);
+        let _ = reuse_a;
+        Box::new_in_caller(vb)
+    } else {
+        let x = Box::new(va);
+        let y = Box::new(vb);
+        Box::new_in_caller(wrapping_add(va, vb))
+    }
+}
+
+==== tests/fip.rs:440
+
+copy struct Box[T] { inner: T }
+fn main() -> i64 {
+    let b = Box { inner: 42 };
+    b.inner
+}
+
+==== tests/fip.rs:461
+copy enum Color { Red, Black }
+
+affine struct RbNode[K, V] {
+    color: Color,
+    key: K,
+    val: V,
+    left: Option[Box[RbNode[K, V]]],
+    right: Option[Box[RbNode[K, V]]],
+}
+
+@fip fn balance_left[K: mod copy, V](
+    color: Color,
+    key: K,
+    sink val: V,
+    sink left: Option[Box[RbNode[K, V]]],
+    sink right: Option[Box[RbNode[K, V]]],
+) -> Box[RbNode[K, V]] eff [] {
+    match left {
+        Some(Box(RbNode {
+            color: Color::Red,
+            key: lk, val: lv,
+            left: Some(Box(RbNode { color: Color::Red, key: llk, val: llv, left: a, right: b })),
+            right: c,
+        })) => {
+            let new_left  = Box::new(RbNode { color: Color::Black, key: llk, val: llv, left: a, right: b });
+            let new_right = Box::new(RbNode { color: Color::Black, key, val, left: c, right });
+            Box::new_in_caller(RbNode { color: Color::Red, key: lk, val: lv, left: Some(new_left), right: Some(new_right) })
+        }
+        other_left => Box::new_in_caller(RbNode { color, key, val, left: other_left, right }),
+    }
+}
+
+@fip fn forward_balance[K: mod copy, V](
+    color: Color,
+    key: K,
+    sink val: V,
+    sink left: Option[Box[RbNode[K, V]]],
+    sink right: Option[Box[RbNode[K, V]]],
+) -> Box[RbNode[K, V]] eff [] {
+    balance_left[K, V](color, key, val, left, right)
+}
+
+@fip fn rotate_local(
+    sink spare: Box[RbNode[i64, i64]],
+    sink boxed_left: Box[RbNode[i64, i64]],
+    sink right: Option[Box[RbNode[i64, i64]]],
+) -> (RbNode[i64, i64], Box[RbNode[i64, i64]]) eff [] {
+    let Box(s) = spare;
+    let rot = balance_left[i64, i64](Color::Black, 30, 300, Some(boxed_left), right);
+    (s, rot)
+}
+
+==== tests/fip.rs:537
+copy enum Color { Red, Black }
+
+affine struct RbNode[K, V] {
+    color: Color,
+    key: K,
+    val: V,
+    left: Option[Box[RbNode[K, V]]],
+    right: Option[Box[RbNode[K, V]]],
+}
+
+@fip fn balance_left[K: mod copy, V](
+    color: Color,
+    key: K,
+    sink val: V,
+    sink left: Option[Box[RbNode[K, V]]],
+    sink right: Option[Box[RbNode[K, V]]],
+) -> Box[RbNode[K, V]] eff [] {
+    match left {
+        Some(Box(RbNode {
+            color: Color::Red,
+            key: lk, val: lv,
+            left: Some(Box(RbNode { color: Color::Red, key: llk, val: llv, left: a, right: b })),
+            right: c,
+        })) => {
+            let new_left  = Box::new(RbNode { color: Color::Black, key: llk, val: llv, left: a, right: b });
+            let new_right = Box::new(RbNode { color: Color::Black, key, val, left: c, right });
+            Box::new_in_caller(RbNode { color: Color::Red, key: lk, val: lv, left: Some(new_left), right: Some(new_right) })
+        }
+        other_left => Box::new_in_caller(RbNode { color, key, val, left: other_left, right }),
+    }
+}
+
+
+fn node_score(sink opt: Option[Box[RbNode[i64, i64]]], mult: i64) -> i64 {
+    match opt {
+        Some(Box(n)) => {
+            let c_score = match n.color { Color::Red => 1, Color::Black => 2 };
+            wrapping_add(c_score, wrapping_add(wrapping_mul(n.key, mult), n.val))
+        }
+        None => 0,
+    }
+}
+
+@fip fn fip_driver(
+    sink l: Box[RbNode[i64, i64]],
+    sink r: Box[RbNode[i64, i64]],
+) -> Box[RbNode[i64, i64]] eff [] {
+    balance_left[i64, i64](Color::Black, 40, 4, Some(l), Some(r))
+}
+
+fn check_rotation() -> u64 {
+    let a = Box::new(RbNode { color: Color::Black, key: 5, val: 50, left: None, right: None });
+    let b = Box::new(RbNode { color: Color::Black, key: 15, val: 150, left: None, right: None });
+    let c = Box::new(RbNode { color: Color::Black, key: 25, val: 250, left: None, right: None });
+    let r = Box::new(RbNode { color: Color::Black, key: 50, val: 500, left: None, right: None });
+    let ll = Box::new(RbNode { color: Color::Red, key: 10, val: 100, left: Some(a), right: Some(b) });
+    let l = Box::new(RbNode { color: Color::Red, key: 20, val: 200, left: Some(ll), right: Some(c) });
+
+    let Box(root) = fip_driver(l, r);
+    // Expected after Red-Red left-left rotation:
+    // root: Red (key=20, val=200)
+    // root.left: Black (key=10, val=100, left=5, right=15)
+    // root.right: Black (key=40, val=4, left=25, right=50)
+    let root_ok = match root.color { Color::Red => root.key == 20 && root.val == 200, Color::Black => false };
+    let left_ok = match root.left {
+        Some(Box(nl)) => match nl.color {
+            Color::Black => nl.key == 10 && nl.val == 100 && node_score(nl.left, 1) == 57 && node_score(nl.right, 1) == 167,
+            Color::Red => false,
+        },
+        None => false,
+    };
+    let right_ok = match root.right {
+        Some(Box(nr)) => match nr.color {
+            Color::Black => nr.key == 40 && nr.val == 4 && node_score(nr.left, 1) == 277 && node_score(nr.right, 1) == 552,
+            Color::Red => false,
+        },
+        None => false,
+    };
+
+    // Fallback case (`other_left => Box::new_in_caller(...)`): black left node triggers no rotation.
+    let bl = Box::new(RbNode { color: Color::Black, key: 7, val: 70, left: None, right: None });
+    let Box(fb) = balance_left[i64, i64](Color::Black, 99, 9, Some(bl), None);
+    let fb_ok = match fb.color {
+        Color::Black => fb.key == 99 && fb.val == 9 && node_score(fb.left, 1) == 79,
+        Color::Red => false,
+    };
+
+    if root_ok && left_ok && right_ok && fb_ok { 1 } else { 0 }
+}
+
+fn main() -> u64 {
+    check_rotation()
+}
+
+==== tests/fip.rs:647
+copy enum Color { Red, Black }
+
+affine struct RbNode[K, V] {
+    color: Color,
+    key: K,
+    val: V,
+    left: Option[Box[RbNode[K, V]]],
+    right: Option[Box[RbNode[K, V]]],
+}
+
+@fip fn balance_left[K: mod copy, V](
+    color: Color,
+    key: K,
+    sink val: V,
+    sink left: Option[Box[RbNode[K, V]]],
+    sink right: Option[Box[RbNode[K, V]]],
+) -> Box[RbNode[K, V]] eff [] {
+    match left {
+        Some(Box(RbNode {
+            color: Color::Red,
+            key: lk, val: lv,
+            left: Some(Box(RbNode { color: Color::Red, key: llk, val: llv, left: a, right: b })),
+            right: c,
+        })) => {
+            let new_left  = Box::new(RbNode { color: Color::Black, key: llk, val: llv, left: a, right: b });
+            let new_right = Box::new(RbNode { color: Color::Black, key, val, left: c, right });
+            Box::new_in_caller(RbNode { color: Color::Red, key: lk, val: lv, left: Some(new_left), right: Some(new_right) })
+        }
+        other_left => Box::new_in_caller(RbNode { color, key, val, left: other_left, right }),
+    }
+}
+
+
+fn main() -> u64 {
+    let a = Box::new(RbNode { color: Color::Black, key: 5, val: 50, left: None, right: None });
+    let b = Box::new(RbNode { color: Color::Black, key: 15, val: 150, left: None, right: None });
+    let c = Box::new(RbNode { color: Color::Black, key: 25, val: 250, left: None, right: None });
+    let r = Box::new(RbNode { color: Color::Black, key: 50, val: 500, left: None, right: None });
+    let ll = Box::new(RbNode { color: Color::Red, key: 10, val: 100, left: Some(a), right: Some(b) });
+    let l = Box::new(RbNode { color: Color::Red, key: 20, val: 200, left: Some(ll), right: Some(c) });
+
+    let Box(root) = balance_left[i64, i64](Color::Black, 40, 4, Some(l), Some(r));
+    let left_key = match root.left {
+        Some(Box(nl)) => nl.key,
+        None => 0,
+    };
+    let right_key = match root.right {
+        Some(Box(nr)) => nr.key,
+        None => 0,
+    };
+    if root.key == 20 && left_key == 10 && right_key == 40 {
+        42
+    } else {
+        0
+    }
+}
+
+==== tests/fip.rs:755
+
+fn hidden_alloc() -> i64 {
+    let Box(x) = Box::new(42);
+    x
+}
+
+@fip fn bad() -> i64 eff [] {
+    hidden_alloc()
+}
+
+==== tests/fip.rs:771
+
+fn leaf_alloc() -> i64 {
+    let Box(x) = Box::new(7);
+    x
+}
+
+fn middle() -> i64 {
+    leaf_alloc()
+}
+
+@fip fn bad() -> i64 eff [] {
+    middle()
+}
+
+==== tests/fip.rs:791
+
+copy struct Holder { v: i64 }
+impl Holder {
+    fn hidden(in self) -> i64 {
+        let Box(x) = Box::new(self.v);
+        x
+    }
+}
+
+@fip fn bad(h: Holder) -> i64 eff [] {
+    h.hidden()
+}
+
+==== tests/fip.rs:810
+
+fn pure_add(x: i64, y: i64) -> i64 {
+    wrapping_add(x, y)
+}
+
+@fip fn good(sink b: Box[i64]) -> Box[i64] eff [] {
+    let Box(v) = b;
+    Box::new(pure_add(v, 1))
+}
+
+==== tests/fip.rs:825
+
+@fip fn branch_reuse(flag: bool, nested: bool, sink b: Box[i64]) -> Box[i64] eff [] {
+    let next = if flag {
+        if nested {
+            let Box(x) = b;
+            wrapping_add(x, 10)
+        } else {
+            let Box(x) = b;
+            wrapping_add(x, 20)
+        }
+    } else {
+        match b {
+            Box(x) => wrapping_add(x, 30),
+        }
+    };
+    Box::new(next)
+}
+
+fn main() -> u64 {
+    let Box(r1) = branch_reuse(true, true, Box::new(5));
+    let Box(r2) = branch_reuse(true, false, Box::new(5));
+    let Box(r3) = branch_reuse(false, false, Box::new(5));
+    let sum = wrapping_add(r1, wrapping_add(r2, r3));
+    if sum == 75 { 1 } else { 0 }
+}
+
+==== tests/fip.rs:913
+
+enum List {
+    Nil,
+    Cons { head: i64, tail: Box[List] },
+}
+
+struct BoxPair {
+    first: Box[i64],
+    second: Box[i64],
+}
+
+fn opt_some(v: i64) -> Option[Box[i64]] {
+    Some(Box::new(v))
+}
+
+fn opt_none() -> Option[Box[i64]] {
+    None
+}
+
+fn cons(h: i64, sink t: List) -> List {
+    List::Cons { head: h, tail: Box::new(t) }
+}
+
+fn check_nan() -> bool {
+    let z = 0.0;
+    let nan = z / z;
+    !(Box::new(nan) == Box::new(nan)) && (Box::new(nan) != Box::new(nan))
+}
+
+fn main() -> u64 {
+    let s1 = Box::new(42) == Box::new(42);
+    let s2 = Box::new(42) != Box::new(43);
+    let nested = Box::new(Box::new(9)) == Box::new(Box::new(9));
+    let nested_ne = Box::new(Box::new(9)) != Box::new(Box::new(10));
+
+    let pair_eq = BoxPair { first: Box::new(1), second: Box::new(2) }
+        == BoxPair { first: Box::new(1), second: Box::new(2) };
+
+    let opt_eq = opt_some(42) == opt_some(42);
+    let opt_none_eq = opt_none() == opt_none();
+    let opt_mixed = opt_some(42) != opt_none() && !(opt_none() == opt_some(42));
+
+    let l1 = cons(1, cons(2, List::Nil));
+    let l2 = cons(1, cons(2, List::Nil));
+    let l3 = cons(1, cons(3, List::Nil));
+    let list_eq = (l1 == l2) && (cons(1, List::Nil) != List::Nil);
+    let list_ne = (cons(1, cons(2, List::Nil)) == l3) == false;
+
+    if s1 && s2 && nested && nested_ne && pair_eq && opt_eq && opt_none_eq && opt_mixed && list_eq && list_ne && check_nan() {
+        1
+    } else {
+        0
+    }
+}
+
+==== tests/fip.rs:983
+
+struct Pair {
+    first: Box[i64],
+    second: Box[i64],
+}
+
+enum Rec {
+    Leaf(i64),
+    Node { left: Box[Rec], right: Box[Rec] },
+}
+
+fn borrow_read(in _b: Box[i64]) -> i64 {
+    5
+}
+
+fn loop_allocs(n: i64) -> i64 {
+    if n <= 0 {
+        0
+    } else {
+        let Box(a) = Box::new(n);
+        let _ = Box::new(wrapping_add(n, 1));
+        let mut ow = Box::new(1);
+        ow = Box::new(2);
+        let Box(ov) = ow;
+        let pair = Pair { first: Box::new(3), second: Box::new(4) };
+        let Box(pf) = pair.first;
+        let br = borrow_read(Box::new(5));
+        let tree = Rec::Node {
+            left: Box::new(Rec::Leaf(6)),
+            right: Box::new(Rec::Node {
+                left: Box::new(Rec::Leaf(7)),
+                right: Box::new(Rec::Leaf(8)),
+            }),
+        };
+        let tv = match tree {
+            Rec::Leaf(x) => x,
+            Rec::Node { left: Box(Rec::Leaf(x)), right: _ } => x,
+            Rec::Node { left: _, right: _ } => 0,
+        };
+        let cur = wrapping_add(a, wrapping_add(ov, wrapping_add(pf, wrapping_add(br, tv))));
+        wrapping_add(cur, loop_allocs(wrapping_sub(n, 1)))
+    }
+}
+
+fn main() -> u64 {
+    if loop_allocs(4) == 74 { 1 } else { 0 }
+}
+
+==== tests/fip.rs:1076
+
+@fip fn bump(sink b: Box[i64]) -> Box[i64] eff [] {
+    let Box(v) = b;
+    Box::new(wrapping_add(v, 10))
+}
+
+fn run_box(x: i64) -> i64 {
+    let Box(v) = bump(Box::new(x));
+    v
+}
+
+fn scalar_entry() -> i64 {
+    42
+}
+
+fn main() -> i64 {
+    run_box(32)
+}
+
+==== tests/fip.rs:1153
+
+fn discard[T: mod affine](sink value: T) { let _ = value; }
+@fip fn caller(sink box_value: Box[i64]) {
+    discard[Box[i64]](box_value)
+}
+
+==== tests/fip.rs:1167
+
+affine struct Pair { first: Box[i64], second: Box[i64] }
+fn release(sink pair.{first}: Pair) {}
+
+==== tests/fip.rs:1189
+
+fn observe(in value: Box[i64], tag: bool) -> bool { tag }
+fn pick(flag: bool) -> bool {
+    observe(Box::new(42), if flag { true } else { false })
+}
+
+==== tests/fip.rs:223
+@fip fn balance_left
+==== tests/fip.rs:229
+@fip fn broken(
+==== tests/seq.rs:543
+@fip fn make() -> u64 { let mut s: ChunkSeq[u64] = ChunkSeq::new[u64](); 0 }
+==== lane12:1 short-circuit merges and statements
+@fip fn both(flag: bool, sink a: Box[i64]) -> Box[i64] eff [] {
+    let Box(v) = a;
+    let ok = flag && { let x = Box::new(v); false };
+    Box::new_in_caller(v)
+}
+@fip fn stmt(sink a: Box[i64]) -> i64 eff [] {
+    let Box(v) = a;
+    Box::new(v);
+    v
+}
+==== lane12:2 overwrite, borrowed match, receiver and argument temporaries
+affine struct Pair { a: Box[i64], b: i64 }
+fn look(in p: Pair) -> i64 { p.b }
+impl Pair {
+    fn peek(in self) -> i64 { self.b }
+    fn take(sink self) -> i64 { 0 }
+}
+fn mk() -> Pair { Pair { a: Box::new(1), b: 2 } }
+@fip fn over(sink p: Pair, sink q: Box[i64]) -> i64 eff [] {
+    p.a = q;
+    1
+}
+@fip fn borrowed(in p: Pair) -> i64 eff [] {
+    match p {
+        Pair { a: Box(x), b } => b,
+    }
+}
+@fip fn temps(sink p: Pair) -> i64 eff [] {
+    let n = mk().peek();
+    let m = look(mk());
+    p.take()
+}
+==== lane12:3 sequence and string allocation, Alloc handlers, effect ops
+effect Alloc { fn alloc() -> i64; }
+effect Make { fn make() -> Box[i64]; }
+@fip fn seq(sink s: ChunkSeq[u64], sink t: String) -> u64 eff [] {
+    let mut s2 = ChunkSeq::new[u64]();
+    s2.push(1);
+    s.push(2);
+    t.push_str("x");
+    0
+}
+@fip fn handled(x: i64) -> i64 eff [] {
+    handle Alloc in {
+        x
+    } with {
+        return v => v,
+        alloc(k) => k(1),
+    }
+}
+@fip fn op() -> i64 eff [Make] {
+    let b = Make::make();
+    let Box(v) = b;
+    v
+}
+==== lane12:4 slot labels, generic slots and forwarding
+@fip fn labels[T](sink a: Box[T], sink b: Box[(u8, u8)]) -> (Box[T], Box[i64], Box[i64]) eff [] {
+    let Box(x) = a;
+    let Box(y) = b;
+    (Box::new(x), Box::new(1), Box::new(2))
+}
+@fip fn fwd(sink a: Box[i64]) -> Box[i64] eff [] {
+    let Box(v) = a;
+    Box::new_in_caller(v)
+}
+@fip fn twice(flag: bool, sink a: Box[i64]) -> Box[i64] eff [] {
+    if flag { fwd(a) } else { let c = fwd(a); c }
+}
+@fip fn arms(n: i64, sink a: Box[i64], sink b: Box[u8]) -> i64 eff [] {
+    match n {
+        0 => { let Box(x) = a; let Box(y) = b; x }
+        _ => { let Box(x) = a; let Box(y) = b; let z = Box::new(y); x }
+    }
+}
+@fip fn loops(sink a: Box[i64]) -> i64 eff [] {
+    loop { break; }
+    0
+}
+@fip fn closure(x: i64) -> i64 eff [] {
+    let f = |y: i64| y;
+    f(x)
+}

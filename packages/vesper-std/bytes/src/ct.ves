@@ -47,3 +47,33 @@ pub fn ct_eq(in a: Slice[u8], in b: Slice[u8]) -> bool {
     }
     same_len && acc == 0
 }
+
+test {
+    // @case empty(0, 0, 0, true)
+    // @case single_zero(1, 0, 0, true)
+    // @case word_zeros(16, 16, 0, true)
+    // @case word_and_tail_zeros(17, 17, 0, true)
+    // @case nonzero_first(17, 0, 1, false)
+    // @case nonzero_last_in_word(17, 15, 255, false)
+    // @case nonzero_tail(17, 16, 128, false)
+    fn test_all_zero(len: u64, offset: u64, value: u8, expected: bool) -> bool {
+        let mut bytes = ChunkSeq::new[u8]();
+        bytes.resize(len, 0);
+        bytes.try_set(offset, value);
+        all_zero(in bytes.as_slice()) == expected
+    }
+
+    // @case both_empty(in "", in "", true)
+    // @case empty_left(in "", in "a", false)
+    // @case empty_right(in "a", in "", false)
+    // @case equal_tail_only(in "abc", in "abc", true)
+    // @case unequal_tail_only(in "abc", in "abX", false)
+    // @case equal_word(in "abcdefgh", in "abcdefgh", true)
+    // @case equal_word_and_tail(in "abcdefghi", in "abcdefghi", true)
+    // @case unequal_word(in "abcdefghi", in "Xbcdefghi", false)
+    // @case unequal_tail(in "abcdefghi", in "abcdefghX", false)
+    // @case unequal_length_after_word(in "abcdefgh", in "abcdefghi", false)
+    fn test_ct_eq(in a: Str, in b: Str, expected: bool) -> bool {
+        ct_eq(in a.as_bytes(), in b.as_bytes()) == expected
+    }
+}

@@ -217,7 +217,8 @@ struct Root {
 }
 impl Root {
     fn create(parent: &Path, retain: bool) -> Result<Self, HarnessError> {
-        fs::create_dir_all(parent)?;
+        let parent = std::path::absolute(parent)?;
+        fs::create_dir_all(&parent)?;
         for _ in 0..32 {
             let stamp = SystemTime::now()
                 .duration_since(UNIX_EPOCH)

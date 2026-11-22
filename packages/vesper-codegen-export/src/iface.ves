@@ -1,0 +1,750 @@
+// The library interface (`LibraryInterface` of src/native_export.rs) as
+// flat tables, read from the words of
+// tests/self_host_codegen_export/words.rs, and the type predicates the
+// binding generators share (`owning`, `abi_words`, `mirrored`, `lent`).
+//
+// Names are @vesper/check-data symbols. Types are hash-consed nodes, so
+// two equal `AbiType`s have the same id. An optional name is its symbol
+// plus one, 0 for none.
+
+use @vesper/check-data::util::{
+    inc,
+    inc32,
+    n32,
+    u32_at,
+    u64_at,
+    w
+};
+use @vesper/check-data::names::{
+    Names,
+    names_new
+};
+use @vesper/check-data::input::{
+    Reader
+};
+
+// `AbiType` kinds (words.rs `K_*`).
+pub const K_SCALAR: u8 = 0;
+pub const K_TUPLE: u8 = 1;
+pub const K_NAMED: u8 = 2;
+pub const K_SEQ: u8 = 3;
+pub const K_SLICE: u8 = 4;
+pub const K_BOX: u8 = 5;
+pub const K_STR: u8 = 6;
+pub const K_OBJECT: u8 = 7;
+pub const K_EXTERN: u8 = 8;
+
+// Passing modes: the parameter's `pass()` (none reads as `in`).
+pub const P_IN: u8 = 1;
+pub const P_INOUT: u8 = 2;
+pub const P_SINK: u8 = 3;
+pub const P_OTHER: u8 = 4;
+
+// `TypeDecl::mirror`.
+pub const M_NONE: u8 = 0;
+pub const M_REPR_C: u8 = 1;
+pub const M_CONVERTED: u8 = 2;
+
+pub copy struct TyNode {
+    kind: u8,
+    name: u32,
+    owned: bool,
+    // kids[a..a+n]
+    a: u64,
+    n: u64,
+}
+
+pub copy struct DeclRow {
+    name: u32,
+    is_enum: bool,
+    words: u64,
+    is_handle: bool,
+    linear: bool,
+    // symbol + 1, 0 for none
+    drop: u32,
+    owns_sequence: bool,
+    mirror: u8,
+    // the converted mirror's reason: symbol + 1, 0 for none
+    reason: u32,
+    // vars[v0..v0+vn]
+    v0: u64,
+    vn: u64,
+}
+
+pub copy struct VarRow {
+    name: u32,
+    // fields[f0..f0+fc]
+    f0: u64,
+    fc: u64,
+}
+
+pub copy struct FieldRow {
+    name: u32,
+    ty: u32,
+    offset: u64,
+}
+
+pub copy struct ParamRow {
+    name: u32,
+    ty: u32,
+    pointer: bool,
+    // the raw `pass` field: 0 none, else P_*
+    raw: u8,
+    // a P_OTHER pass's spelling: symbol + 1, 0 for none
+    other: u32,
+    in_place: bool,
+}
+
+pub copy struct FnRow {
+    name: u32,
+    symbol: u32,
+    // params[p0..p0+pn]
+    p0: u64,
+    pn: u64,
+    result: u32,
+    result_words: u64,
+    result_pointer: bool,
+    // errs[e0..e0+en]
+    e0: u64,
+    en: u64,
+    // fail record words + 1, 0 for none
+    fail: u64,
+    // symbol + 1, 0 for none
+    instance_of: u32,
+    // fn_libs[l0..l0+ln]
+    l0: u64,
+    ln: u64,
+    result_in_place: bool,
+}
+
+pub copy struct LibRow {
+    name: u32,
+    handler: u32,
+    // lib_syms[s0..s0+sn]
+    s0: u64,
+    sn: u64,
+    // symbol + 1, 0 for none
+    rust_path: u32,
+}
+
+// Symbols of the builtin names the generators compare against.
+pub copy struct Known {
+    option: u32,
+    result: u32,
+    arith: u32,
+    runtime_error: u32,
+    unit: u32,
+    f64: u32,
+    f32: u32,
+    i64: u32,
+    u64: u32,
+    isize: u32,
+    usize: u32,
+    bool: u32,
+}
+
+pub struct Iface {
+    names: Names,
+    known: Known,
+    nodes: ChunkSeq[TyNode],
+    kids: ChunkSeq[u32],
+    decls: ChunkSeq[DeclRow],
+    vars: ChunkSeq[VarRow],
+    fields: ChunkSeq[FieldRow],
+    fns: ChunkSeq[FnRow],
+    params: ChunkSeq[ParamRow],
+    errs: ChunkSeq[u32],
+    fn_libs: ChunkSeq[u32],
+    libs: ChunkSeq[LibRow],
+    lib_syms: ChunkSeq[u32],
+    // symbol -> decl index + 1 (0: not a declared type)
+    by_name: ChunkSeq[u32],
+    abi: u32,
+    library: u32,
+    option_mirrors: bool,
+    // `BindingOptions::types_path`: symbol + 1, 0 for none
+    types_path: u32,
+    runtime: bool,
+    seq_new: u32,
+    seq_free: u32,
+    live: u32,
+    // symbol + 1, 0 for none
+    box_new: u32,
+}
+
+fn nsym(in nmap: ChunkSeq[u32], x: u64) -> u32 {
+    u32_at(in nmap, x)
+}
+
+fn osym(in nmap: ChunkSeq[u32], x: u64) -> u32 {
+    if x == 0 {
+        0
+    } else {
+        inc32(u32_at(in nmap, wrapping_sub(x, 1)))
+    }
+}
+
+fn flag(x: u64) -> bool {
+    x != 0
+}
+
+fn intern_str(inout names: Names, in s: Str) -> u32 {
+    names.intern(in s.as_bytes())
+}
+
+// Reads the whole input of `binding_text`.
+pub fn read_iface(in b: Slice[u8]) -> Iface {
+    let mut r = Reader {
+        pos: 0
+    };
+    let mut names = names_new();
+    let mut nmap = ChunkSeq::new[u32]();
+    let count = r.word(in b);
+    for i in 0..count {
+        let len = r.word(in b);
+        let start = r.pos;
+        let s = names.intern(in b[start..wrapping_add(start, len)]);
+        nmap.push(s);
+        r.pos = wrapping_add(start, wrapping_mul(wrapping_add(len, 7) / 8, 8));
+    }
+    let known = Known {
+        option: intern_str(inout names, "Option"),
+        result: intern_str(inout names, "Result"),
+        arith: intern_str(inout names, "ArithOverflow"),
+        runtime_error: intern_str(inout names, "RuntimeError"),
+        unit: intern_str(inout names, "Unit"),
+        f64: intern_str(inout names, "f64"),
+        f32: intern_str(inout names, "f32"),
+        i64: intern_str(inout names, "i64"),
+        u64: intern_str(inout names, "u64"),
+        isize: intern_str(inout names, "isize"),
+        usize: intern_str(inout names, "usize"),
+        bool: intern_str(inout names, "bool"),
+    };
+    let mut nodes = ChunkSeq::new[TyNode]();
+    let mut kids = ChunkSeq::new[u32]();
+    let tcount = r.word(in b);
+    for i in 0..tcount {
+        let kind = wrapping_u8(r.word(in b));
+        let name = nsym(in nmap, r.word(in b));
+        let owned = flag(r.word(in b));
+        let n = r.word(in b);
+        let a = kids.len();
+        for j in 0..n {
+            kids.push(n32(r.word(in b)));
+        }
+        nodes
+            .push(
+            TyNode {
+                kind: kind,
+                name: name,
+                owned: owned,
+                a: a,
+                n: n
+            }
+        );
+    }
+    let abi = nsym(in nmap, r.word(in b));
+    let library = nsym(in nmap, r.word(in b));
+    let option_mirrors = flag(r.word(in b));
+    let types_path = osym(in nmap, r.word(in b));
+    let runtime = flag(r.word(in b));
+    let mut seq_new: u32 = 0;
+    let mut seq_free: u32 = 0;
+    let mut live: u32 = 0;
+    let mut box_new: u32 = 0;
+    if runtime {
+        seq_new = nsym(in nmap, r.word(in b));
+        seq_free = nsym(in nmap, r.word(in b));
+        live = nsym(in nmap, r.word(in b));
+        box_new = osym(in nmap, r.word(in b));
+    }
+    let mut decls = ChunkSeq::new[DeclRow]();
+    let mut vars = ChunkSeq::new[VarRow]();
+    let mut fields = ChunkSeq::new[FieldRow]();
+    let dcount = r.word(in b);
+    for i in 0..dcount {
+        let name = nsym(in nmap, r.word(in b));
+        let is_enum = flag(r.word(in b));
+        let words = r.word(in b);
+        let is_h = flag(r.word(in b));
+        let linear = flag(r.word(in b));
+        let drop = osym(in nmap, r.word(in b));
+        let owns_sequence = flag(r.word(in b));
+        let mirror = wrapping_u8(r.word(in b));
+        let reason = osym(in nmap, r.word(in b));
+        let vn = r.word(in b);
+        let v0 = vars.len();
+        for j in 0..vn {
+            let vname = nsym(in nmap, r.word(in b));
+            let fc = r.word(in b);
+            let f0 = fields.len();
+            for k in 0..fc {
+                let fname = nsym(in nmap, r.word(in b));
+                let fty = n32(r.word(in b));
+                let off = r.word(in b);
+                fields
+                    .push(
+                    FieldRow {
+                        name: fname,
+                        ty: fty,
+                        offset: off
+                    }
+                );
+            }
+            vars
+                .push(
+                VarRow {
+                    name: vname,
+                    f0: f0,
+                    fc: fc
+                }
+            );
+        }
+        decls
+            .push(
+            DeclRow {
+                name: name,
+                is_enum: is_enum,
+                words: words,
+                is_handle: is_h,
+                linear: linear,
+                drop: drop,
+                owns_sequence: owns_sequence,
+                mirror: mirror,
+                reason: reason,
+                v0: v0,
+                vn: vn
+            }
+        );
+    }
+    let mut fns = ChunkSeq::new[FnRow]();
+    let mut params = ChunkSeq::new[ParamRow]();
+    let mut errs = ChunkSeq::new[u32]();
+    let mut fn_libs = ChunkSeq::new[u32]();
+    let fcount = r.word(in b);
+    for i in 0..fcount {
+        let name = nsym(in nmap, r.word(in b));
+        let symbol = nsym(in nmap, r.word(in b));
+        let pn = r.word(in b);
+        let p0 = params.len();
+        for j in 0..pn {
+            let pname = nsym(in nmap, r.word(in b));
+            let pty = n32(r.word(in b));
+            let pointer = flag(r.word(in b));
+            let raw = wrapping_u8(r.word(in b));
+            let mut other: u32 = 0;
+            if raw == P_OTHER {
+                other = osym(in nmap, r.word(in b));
+            }
+            let in_place = flag(r.word(in b));
+            params
+                .push(
+                ParamRow {
+                    name: pname,
+                    ty: pty,
+                    pointer: pointer,
+                    raw: raw,
+                    other: other,
+                    in_place: in_place
+                }
+            );
+        }
+        let result = n32(r.word(in b));
+        let result_words = r.word(in b);
+        let result_pointer = flag(r.word(in b));
+        let en = r.word(in b);
+        let e0 = errs.len();
+        for j in 0..en {
+            errs.push(n32(r.word(in b)));
+        }
+        let fail = r.word(in b);
+        let instance_of = osym(in nmap, r.word(in b));
+        let ln = r.word(in b);
+        let l0 = fn_libs.len();
+        for j in 0..ln {
+            fn_libs.push(nsym(in nmap, r.word(in b)));
+        }
+        let result_in_place = flag(r.word(in b));
+        fns
+            .push(
+            FnRow {
+                name: name,
+                symbol: symbol,
+                p0: p0,
+                pn: pn,
+                result: result,
+                result_words: result_words,
+                result_pointer: result_pointer,
+                e0: e0,
+                en: en,
+                fail: fail,
+                instance_of: instance_of,
+                l0: l0,
+                ln: ln,
+                result_in_place: result_in_place
+            }
+        );
+    }
+    let mut libs = ChunkSeq::new[LibRow]();
+    let mut lib_syms = ChunkSeq::new[u32]();
+    let lcount = r.word(in b);
+    for i in 0..lcount {
+        let name = nsym(in nmap, r.word(in b));
+        let handler = nsym(in nmap, r.word(in b));
+        let sn = r.word(in b);
+        let s0 = lib_syms.len();
+        for j in 0..sn {
+            lib_syms.push(nsym(in nmap, r.word(in b)));
+        }
+        let rust_path = osym(in nmap, r.word(in b));
+        libs
+            .push(
+            LibRow {
+                name: name,
+                handler: handler,
+                s0: s0,
+                sn: sn,
+                rust_path: rust_path
+            }
+        );
+    }
+    let mut by_name = ChunkSeq::with_capacity[u32](names.len());
+    by_name.resize(names.len(), 0);
+    for i in 0..decls.len() {
+        let d = decl_at(in decls, i);
+        let ok = by_name.try_set(w(d.name), n32(inc(i)));
+    }
+    Iface {
+        names: names,
+        known: known,
+        nodes: nodes,
+        kids: kids,
+        decls: decls,
+        vars: vars,
+        fields: fields,
+        fns: fns,
+        params: params,
+        errs: errs,
+        fn_libs: fn_libs,
+        libs: libs,
+        lib_syms: lib_syms,
+        by_name: by_name,
+        abi: abi,
+        library: library,
+        option_mirrors: option_mirrors,
+        types_path: types_path,
+        runtime: runtime,
+        seq_new: seq_new,
+        seq_free: seq_free,
+        live: live,
+        box_new: box_new,
+    }
+}
+
+fn decl_at(in decls: ChunkSeq[DeclRow], i: u64) -> DeclRow {
+    match decls.try_get(i) {
+        Option::Some(d) => d,
+        Option::None => DeclRow {
+            name: 0,
+            is_enum: false,
+            words: 0,
+            is_handle: false,
+            linear: false,
+            drop: 0,
+            owns_sequence: false,
+            mirror: 0,
+            reason: 0,
+            v0: 0,
+            vn: 0
+        },
+    }
+}
+
+impl Iface {
+    pub fn node(in self, t: u32) -> TyNode {
+        match self.nodes.try_get(w(t)) {
+            Option::Some(n) => n,
+            Option::None => TyNode {
+                kind: 0,
+                name: 0,
+                owned: false,
+                a: 0,
+                n: 0
+            },
+        }
+    }
+
+    // Child `i` of node `t`.
+    pub fn kid(in self, t: u32, i: u64) -> u32 {
+        let n = self.node(t);
+        u32_at(in self.kids, wrapping_add(n.a, i))
+    }
+
+    pub fn decl(in self, i: u64) -> DeclRow {
+        decl_at(in self.decls, i)
+    }
+
+    // The declaration named `s`: its index + 1, 0 for none.
+    pub fn decl_of(in self, s: u32) -> u64 {
+        w(u32_at(in self.by_name, w(s)))
+    }
+
+    pub fn var(in self, i: u64) -> VarRow {
+        match self.vars.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => VarRow {
+                name: 0,
+                f0: 0,
+                fc: 0
+            },
+        }
+    }
+
+    pub fn field(in self, i: u64) -> FieldRow {
+        match self.fields.try_get(i) {
+            Option::Some(f) => f,
+            Option::None => FieldRow {
+                name: 0,
+                ty: 0,
+                offset: 0
+            },
+        }
+    }
+
+    pub fn func(in self, i: u64) -> FnRow {
+        match self.fns.try_get(i) {
+            Option::Some(f) => f,
+            Option::None => FnRow {
+                name: 0,
+                symbol: 0,
+                p0: 0,
+                pn: 0,
+                result: 0,
+                result_words: 0,
+                result_pointer: false,
+                e0: 0,
+                en: 0,
+                fail: 0,
+                instance_of: 0,
+                l0: 0,
+                ln: 0,
+                result_in_place: false
+            },
+        }
+    }
+
+    pub fn param(in self, i: u64) -> ParamRow {
+        match self.params.try_get(i) {
+            Option::Some(p) => p,
+            Option::None => ParamRow {
+                name: 0,
+                ty: 0,
+                pointer: false,
+                raw: 0,
+                other: 0,
+                in_place: false
+            },
+        }
+    }
+
+    pub fn lib(in self, i: u64) -> LibRow {
+        match self.libs.try_get(i) {
+            Option::Some(l) => l,
+            Option::None => LibRow {
+                name: 0,
+                handler: 0,
+                s0: 0,
+                sn: 0,
+                rust_path: 0
+            },
+        }
+    }
+
+    pub fn err(in self, i: u64) -> u32 {
+        u32_at(in self.errs, i)
+    }
+
+    pub fn fn_lib(in self, i: u64) -> u32 {
+        u32_at(in self.fn_libs, i)
+    }
+
+    pub fn lib_sym(in self, i: u64) -> u32 {
+        u32_at(in self.lib_syms, i)
+    }
+
+    // `ExportParam::pass()`.
+    pub fn pass(in self, p: ParamRow) -> u8 {
+        if p.raw == 0 {
+            P_IN
+        } else {
+            p.raw
+        }
+    }
+
+    // Whether the library uses export ABI v2 or later.
+    pub fn is_v2(in self) -> bool {
+        self.names.spells(self.abi, in "vesper.native.export-abi/2".as_bytes()) || self.is_v3()
+    }
+
+    pub fn is_v3(in self) -> bool {
+        self.names.spells(self.abi, in "vesper.native.export-abi/3".as_bytes()) || self.is_v4()
+    }
+
+    pub fn is_v4(in self) -> bool {
+        self.names.spells(self.abi, in "vesper.native.export-abi/4".as_bytes())
+    }
+
+    // Whether `t` names a handle type; its decl index + 1, else 0.
+    pub fn handle_of(in self, t: u32) -> u64 {
+        let n = self.node(t);
+        if n.kind != K_NAMED {
+            return 0;
+        }
+        let d = self.decl_of(n.name);
+        if d != 0 && self.decl(wrapping_sub(d, 1)).is_handle {
+            d
+        } else {
+            0
+        }
+    }
+
+    // `owning`: the value owns memory (a sequence, a box or a handle).
+    pub fn owning(in self, t: u32) -> bool {
+        let n = self.node(t);
+        let k = n.kind;
+        if k == K_SEQ || k == K_SLICE || k == K_BOX || k == K_STR || k == K_OBJECT {
+            return true;
+        }
+        if k == K_SCALAR || k == K_EXTERN {
+            return false;
+        }
+        if k == K_NAMED {
+            let d = self.decl_of(n.name);
+            if d != 0 && self.decl(wrapping_sub(d, 1)).is_handle {
+                return true;
+            }
+        }
+        for i in 0..n.n {
+            if self.owning(self.kid(t, i)) {
+                return true;
+            }
+        }
+        false
+    }
+
+    // `abi_words`: the size of `t` in words.
+    pub fn words(in self, t: u32) -> u64 {
+        let n = self.node(t);
+        let k = n.kind;
+        if k == K_SLICE || k == K_STR {
+            return 3;
+        }
+        if k == K_TUPLE {
+            let mut s: u64 = 0;
+            for i in 0..n.n {
+                s = wrapping_add(s, self.words(self.kid(t, i)));
+            }
+            if s == 0 {
+                return 1;
+            }
+            return s;
+        }
+        if k == K_NAMED {
+            if n.name == self.known.option {
+                return inc(self.words(self.kid(t, 0)));
+            }
+            if n.name == self.known.result {
+                let a = self.words(self.kid(t, 0));
+                let b2 = self.words(self.kid(t, 1));
+                if a > b2 {
+                    return inc(a);
+                }
+                return inc(b2);
+            }
+            if n.name == self.known.arith || n.name == self.known.runtime_error {
+                return 1;
+            }
+            let d = self.decl_of(n.name);
+            if d == 0 {
+                return 1;
+            }
+            return self.decl(wrapping_sub(d, 1)).words;
+        }
+        1
+    }
+
+    // `mirrored`: a copy struct with a `#[repr(C)]` mirror.
+    pub fn mirrored(in self, t: u32) -> bool {
+        let n = self.node(t);
+        if n.kind != K_NAMED {
+            return false;
+        }
+        let d = self.decl_of(n.name);
+        d != 0 && self.decl(wrapping_sub(d, 1)).mirror == M_REPR_C
+    }
+
+    // `lent`: crosses as a mirror.
+    pub fn lent(in self, t: u32) -> bool {
+        if self.mirrored(t) {
+            return true;
+        }
+        if !self.option_mirrors {
+            return false;
+        }
+        let n = self.node(t);
+        if n.kind != K_NAMED {
+            return false;
+        }
+        if n.name == self.known.option {
+            return !self.owning(t) && n.n == 1;
+        }
+        if n.name == self.known.result {
+            return !self.owning(t) && n.n == 2;
+        }
+        false
+    }
+
+    // A homogeneous tuple of more than eight elements reads as an array
+    // `[T; N]` (binding.rs `array`): its element, else u32::MAX.
+    pub fn array_elem(in self, t: u32) -> u32 {
+        let n = self.node(t);
+        if n.kind != K_TUPLE || n.n <= 8 {
+            return 4294967295;
+        }
+        let first = self.kid(t, 0);
+        for i in 1..n.n {
+            if self.kid(t, i) != first {
+                return 4294967295;
+            }
+        }
+        first
+    }
+
+    // Whether the fields of a variant are positional (named 0, 1, ..).
+    pub fn positional(in self, v: VarRow) -> bool {
+        if v.fc == 0 {
+            return false;
+        }
+        for i in 0..v.fc {
+            let f = self.field(wrapping_add(v.f0, i));
+            if !self.digits(f.name) {
+                return false;
+            }
+        }
+        true
+    }
+
+    // Whether name `s` is all ASCII digits (true for the empty name).
+    pub fn digits(in self, s: u32) -> bool {
+        let a = self.names.start(s);
+        let e = self.names.end(s);
+        for i in a..e {
+            let c = self.names.byte(s, wrapping_sub(i, a));
+            if c < 48 || c > 57 {
+                return false;
+            }
+        }
+        true
+    }
+}

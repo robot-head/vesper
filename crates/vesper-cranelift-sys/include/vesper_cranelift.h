@@ -121,6 +121,75 @@ void vcl_trap(vcl_builder *b, uint32_t code);
 void vcl_trap_if(vcl_builder *b, uint32_t c, bool if_nonzero, uint32_t code);
 uint32_t vcl_emit(vcl_builder *b, const uint64_t *code, size_t code_len, uint32_t *out, size_t out_len);
 
+/* JIT modules, compiling without defining, symbol names and Windows unwind
+ * information (SH4 lane 1, #1275). */
+vcl_module *vcl_jit_module_new(const uint8_t *flags, size_t flags_len, const uint8_t *symbols, size_t symbols_len, const uint64_t *addrs, size_t addrs_len);
+uint32_t vcl_module_finalize(vcl_module *m);
+uint64_t vcl_function_address(vcl_module *m, uint32_t func);
+uint32_t vcl_module_function_count(const vcl_module *m);
+uint64_t vcl_module_function_name(const vcl_module *m, uint32_t func, uint8_t *out, size_t out_len);
+/* The function declared as `name`, or UINT32_MAX. */
+uint32_t vcl_module_get_function(vcl_module *m, const uint8_t *name, size_t name_len);
+/* The data object declared as `name`, or UINT32_MAX. */
+uint32_t vcl_module_get_data(vcl_module *m, const uint8_t *name, size_t name_len);
+/* 0 object, 1 JIT, 2 object for a target with no operating system. */
+uint32_t vcl_module_kind(const vcl_module *m);
+uint64_t vcl_compile(vcl_module *m, vcl_builder *b);
+uint64_t vcl_module_last_code(const vcl_module *m, uint64_t offset, uint8_t *out, size_t out_len);
+uint64_t vcl_module_last_unwind(const vcl_module *m, uint8_t *out, size_t out_len);
+/* Trap records of the last compiled or defined function: offset and code
+ * words per trap. Returns the word count. */
+uint64_t vcl_module_last_traps(const vcl_module *m, uint64_t *out, size_t out_len);
+/* vcl_import_data with an explicit colocated flag. */
+uint32_t vcl_import_data_colocated(vcl_builder *b, const vcl_module *m, uint32_t data, bool colocated);
+
+/* Builder extras. */
+void vcl_set_srcloc(vcl_builder *b, uint32_t loc);
+void vcl_set_cold_block(vcl_builder *b, uint32_t blk);
+uint32_t vcl_current_block(vcl_builder *b);
+void vcl_set_func_name(vcl_builder *b, uint32_t ns, uint32_t index);
+uint32_t vcl_import_function_colocated(vcl_builder *b, vcl_module *m, uint32_t func, bool colocated);
+void vcl_switch(vcl_builder *b, uint32_t x, uint32_t otherwise, const uint64_t *indices, size_t indices_len, const uint32_t *blocks, size_t blocks_len);
+
+/* Lent handles: a hook's view of one call a Rust host lends its builder and
+ * module to (src/lend.rs). `call` is the word the hook was given. */
+uint32_t vcl_call_op(uint64_t call);
+uint64_t vcl_call_arg_count(uint64_t call);
+uint64_t vcl_call_arg(uint64_t call, uint64_t i);
+uint64_t vcl_call_args(uint64_t call, uint64_t *out, size_t out_len);
+void vcl_call_result(uint64_t call, uint64_t w);
+vcl_builder *vcl_call_builder(uint64_t call);
+vcl_module *vcl_call_module(uint64_t call);
+void vcl_call_return_builder(uint64_t call, vcl_builder *b);
+void vcl_call_return_module(uint64_t call, vcl_module *m);
+
+/* SH5 lane 2 (#1325): extension attributes (0 none, 1 uext, 2 sext),
+ * functions defined from machine code, declaration listing and read-back of
+ * the last compiled or defined function. A relocation is five words: code
+ * offset, kind (src/codes.rs RELOC), target kind (0 function, 1 data,
+ * 2 libcall, 3 known symbol, 4 offset in this function, 5 other user name),
+ * target and addend. vcl_unary opcodes 20 and 21 are fvpromote_low and
+ * fvdemote. */
+#define VCL_EXT_NONE 0u
+#define VCL_EXT_UEXT 1u
+#define VCL_EXT_SEXT 2u
+uint32_t vcl_sig_param_ext(vcl_module *m, uint32_t sig, uint32_t ty_code, uint32_t ext);
+uint32_t vcl_sig_return_ext(vcl_module *m, uint32_t sig, uint32_t ty_code, uint32_t ext);
+uint32_t vcl_define_function_bytes(vcl_module *m, uint32_t func, uint64_t align, const uint8_t *bytes, size_t bytes_len, const uint64_t *relocs, size_t relocs_len);
+uint32_t vcl_module_function_at(vcl_module *m, uint32_t i);
+uint32_t vcl_module_function_linkage(vcl_module *m, uint32_t func);
+uint32_t vcl_module_function_signature(vcl_module *m, uint32_t func);
+uint32_t vcl_module_data_count(const vcl_module *m);
+uint32_t vcl_module_data_at(vcl_module *m, uint32_t i);
+uint64_t vcl_module_data_name(const vcl_module *m, uint32_t data, uint8_t *out, size_t out_len);
+/* Linkage code | writable << 8 | tls << 9. */
+uint32_t vcl_module_data_linkage(vcl_module *m, uint32_t data);
+uint64_t vcl_module_last_clif(const vcl_module *m, uint64_t offset, uint8_t *out, size_t out_len);
+uint64_t vcl_module_last_relocs(const vcl_module *m, uint64_t *out, size_t out_len);
+/* Two words per call site: return offset, frame offset (UINT64_MAX: none). */
+uint64_t vcl_module_last_call_sites(const vcl_module *m, uint64_t *out, size_t out_len);
+uint64_t vcl_module_last_frame_size(const vcl_module *m);
+
 #ifdef __cplusplus
 }
 #endif

@@ -1,0 +1,338 @@
+// The type rules of src/vector.rs: lane types (`Elem`), shapes, `Vec` and
+// `Mask` spellings, `shape_of`, `type_error`, `layout_words`, ISA profiles
+// and the `Isa[P]` row entry rule (E1404). The intrinsic rules of
+// src/vector/check.rs and the ISA walker of `vector::check_world` walk the
+// AST: a later PR of #1181.
+
+use @vesper/check-data::util::{
+    add,
+    push_decimal,
+    u32_at,
+    w
+};
+use @vesper/check-data::names::{
+    Names
+};
+use @vesper/check-data::types::{
+    EffNode,
+    Types,
+    display
+};
+use @vesper/check-data::world::{
+    Known
+};
+use @vesper/check-data::diag::{
+    Diags
+};
+
+const NONE32: u32 = 4294967295;
+const K_NAMED: u8 = 1;
+
+pub const E_U8: u8 = 1;
+pub const E_U32: u8 = 2;
+pub const E_U64: u8 = 3;
+pub const E_I64: u8 = 4;
+pub const E_F32: u8 = 5;
+pub const E_F64: u8 = 6;
+
+// Profiles: 1 Baseline128, 2 Avx2, 3 Avx512, 4 Sve2, 5 Rvv1 (0 = none).
+pub struct VecNames {
+    isa: u32,
+    profiles: ChunkSeq[u32],
+}
+
+pub fn vec_names_new(inout n: Names) -> VecNames {
+    let mut p: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    p.push(n.intern(in "Baseline128".as_bytes()));
+    p.push(n.intern(in "Avx2".as_bytes()));
+    p.push(n.intern(in "Avx512".as_bytes()));
+    p.push(n.intern(in "Sve2".as_bytes()));
+    p.push(n.intern(in "Rvv1".as_bytes()));
+    VecNames {
+        isa: n.intern(in "Isa".as_bytes()),
+        profiles: p
+    }
+}
+
+// `Elem::from_name`, or 0.
+pub fn elem_of_name(k: Known, s: u32) -> u8 {
+    if s == k.u8_ {
+        E_U8
+    } else if s == k.u32_ {
+        E_U32
+    } else if s == k.u64_ {
+        E_U64
+    } else if s == k.i64_ {
+        E_I64
+    } else if s == k.f32_ {
+        E_F32
+    } else if s == k.f64_ {
+        E_F64
+    } else {
+        0
+    }
+}
+
+// `Elem::from_type`, or 0.
+pub fn elem_of(in t: Types, k: Known, ty: u32) -> u8 {
+    let n = t.node(ty);
+    if n.kind == K_NAMED && n.n == 0 {
+        elem_of_name(k, n.name)
+    } else {
+        0
+    }
+}
+
+pub fn elem_bits(e: u8) -> u64 {
+    if e == E_U8 {
+        8
+    } else if e == E_U32 || e == E_F32 {
+        32
+    } else {
+        64
+    }
+}
+
+pub fn elem_name(e: u8, inout o: ChunkSeq[u8]) {
+    match e {
+        1 => o.extend(in "u8".as_bytes()),
+        2 => o.extend(in "u32".as_bytes()),
+        3 => o.extend(in "u64".as_bytes()),
+        4 => o.extend(in "i64".as_bytes()),
+        5 => o.extend(in "f32".as_bytes()),
+        _ => o.extend(in "f64".as_bytes()),
+    }
+}
+
+// A shape: lane type and count (`Shape`); `elem` 0 means none.
+pub copy struct Shape {
+    kind: u8,
+    elem: u8,
+    lanes: u64,
+}
+
+pub fn no_shape() -> Shape {
+    Shape {
+        kind: 0,
+        elem: 0,
+        lanes: 0
+    }
+}
+
+// `Shape::new`: a shape of 128, 256 or 512 bits, else none.
+pub fn shape_new(e: u8, lanes: u64) -> Shape {
+    let bits = wrapping_mul(elem_bits(e), lanes);
+    if e != 0 && (bits == 128 || bits == 256 || bits == 512) {
+        Shape {
+            kind: 0,
+            elem: e,
+            lanes: lanes
+        }
+    } else {
+        no_shape()
+    }
+}
+
+pub fn shape_bits(s: Shape) -> u64 {
+    wrapping_mul(elem_bits(s.elem), s.lanes)
+}
+
+// `Shape::lanes_per_chunk`: lanes in one 128-bit chunk.
+pub fn lanes_per_chunk(s: Shape) -> u64 {
+    let b = elem_bits(s.elem);
+    if b == 8 {
+        16
+    } else if b == 32 {
+        4
+    } else {
+        2
+    }
+}
+
+// `Shape::required_profile`.
+pub fn required_profile(s: Shape) -> u8 {
+    let b = shape_bits(s);
+    if b == 128 {
+        1
+    } else if b == 256 {
+        2
+    } else {
+        3
+    }
+}
+
+// `is_lane_count`: a non-empty string of ASCII digits.
+fn is_lane_count(in names: Names, s: u32) -> bool {
+    let n = names.size(s);
+    if n == 0 {
+        return false;
+    }
+    for i in 0..n {
+        let b = names.byte(s, i);
+        if b < 48 || b > 57 {
+            return false;
+        }
+    }
+    true
+}
+
+// `count.parse::<u16>()` of a lane count: the value, or 65536 on overflow.
+fn lane_value(in names: Names, s: u32) -> u64 {
+    let mut v: u64 = 0;
+    for i in 0..names.size(s) {
+        v = wrapping_add(wrapping_mul(v, 10), widen_u64(wrapping_sub(names.byte(s, i), 48)));
+        if v > 65535 {
+            return 65536;
+        }
+    }
+    v
+}
+
+// 1 for `Vec`, 2 for `Mask`, else 0.
+fn kind_of(k: Known, s: u32) -> u8 {
+    if s == k.vec {
+        1
+    } else if s == k.mask {
+        2
+    } else {
+        0
+    }
+}
+
+// `is_vector_spelling`.
+pub fn is_vector_spelling(in t: Types, in names: Names, k: Known, ty: u32) -> bool {
+    let n = t.node(ty);
+    if n.kind != K_NAMED || kind_of(k, n.name) == 0 || n.n != 2 {
+        return false;
+    }
+    let c = t.node(t.arg(ty, 1));
+    c.kind == K_NAMED && c.n == 0 && is_lane_count(in names, c.name)
+}
+
+// `shape_of`: the kind (1 Vec, 2 Mask) and shape, or `elem` 0.
+pub fn shape_of(in t: Types, in names: Names, k: Known, ty: u32) -> Shape {
+    let n = t.node(ty);
+    if n.kind != K_NAMED {
+        return no_shape();
+    }
+    let kind = kind_of(k, n.name);
+    if kind == 0 || n.n != 2 {
+        return no_shape();
+    }
+    let c = t.node(t.arg(ty, 1));
+    if c.kind != K_NAMED || c.n != 0 || !is_lane_count(in names, c.name) {
+        return no_shape();
+    }
+    let lanes = lane_value(in names, c.name);
+    if lanes > 65535 {
+        return no_shape();
+    }
+    let s = shape_new(elem_of(in t, k, t.arg(ty, 0)), lanes);
+    Shape {
+        kind: kind,
+        elem: s.elem,
+        lanes: s.lanes
+    }
+}
+
+// `type_error`: appends the message and returns true, or returns false.
+pub fn type_error(in t: Types, in names: Names, k: Known, ty: u32, inout o: ChunkSeq[u8]) -> bool {
+    if !is_vector_spelling(in t, in names, k, ty) || shape_of(in t, in names, k, ty).elem != 0 {
+        return false;
+    }
+    let first = t.arg(ty, 0);
+    if elem_of(in t, k, first) == 0 {
+        names.write(t.name(ty), inout o);
+        o.extend(in " lanes must be u8, u32, u64, i64, f32 or f64, found ".as_bytes());
+        display(in t, in names, first, inout o);
+    } else {
+        display(in t, in names, ty, inout o);
+        o.extend(in " is not a 128-, 256- or 512-bit vector shape".as_bytes());
+    }
+    true
+}
+
+// `layout_words`: words of a valid vector or mask, or NONE32.
+pub fn layout_words(in t: Types, in names: Names, k: Known, ty: u32) -> u32 {
+    let s = shape_of(in t, in names, k, ty);
+    if s.elem == 0 {
+        NONE32
+    } else {
+        wrapping_u32(shape_bits(s) / 64)
+    }
+}
+
+pub fn profile_name(p: u8, inout o: ChunkSeq[u8]) {
+    match p {
+        1 => o.extend(in "Baseline128".as_bytes()),
+        2 => o.extend(in "Avx2".as_bytes()),
+        3 => o.extend(in "Avx512".as_bytes()),
+        4 => o.extend(in "Sve2".as_bytes()),
+        _ => o.extend(in "Rvv1".as_bytes()),
+    }
+}
+
+// `Profile::from_name`, or 0.
+pub fn profile_of_name(in vn: VecNames, s: u32) -> u8 {
+    for i in 0..vn.profiles.len() {
+        if u32_at(in vn.profiles, i) == s {
+            return wrapping_u8(wrapping_add(i, 1));
+        }
+    }
+    0
+}
+
+// `profile_of(effect)`, or 0.
+pub fn profile_of(in t: Types, in vn: VecNames, e: EffNode) -> u8 {
+    if e.name != vn.isa || e.n != 1 {
+        return 0;
+    }
+    let a = t.node(u32_at(in t.items, w(e.a)));
+    if a.kind != K_NAMED || a.n != 0 {
+        return 0;
+    }
+    profile_of_name(in vn, a.name)
+}
+
+// `isa_row_entry(effect, span)`: false when the entry is a valid profile.
+pub fn isa_row_entry(
+    in t: Types,
+    in names: Names,
+    in vn: VecNames,
+    e: EffNode,
+    start: u64,
+    stop: u64,
+    inout d: Diags
+) -> bool {
+    if profile_of(in t, in vn, e) != 0 {
+        return false;
+    }
+    let c = d.open("E1404");
+    let m = d.text.len();
+    d.text.extend(in "'Isa' takes one ISA profile argument, found [".as_bytes());
+    for j in 0..w(e.n) {
+        if j > 0 {
+            d.text.extend(in ", ".as_bytes());
+        }
+        display(in t, in names, u32_at(in t.items, add(w(e.a), j)), inout d.text);
+    }
+    d.text.push(93);
+    d
+        .close(
+        c,
+        m,
+        "use Isa[Baseline128], Isa[Avx2], Isa[Avx512], Isa[Sve2] or Isa[Rvv1]",
+        start,
+        stop
+    );
+    true
+}
+
+// `Display for Shape`: `[elem, lanes]`.
+pub fn shape_display(s: Shape, inout o: ChunkSeq[u8]) {
+    o.push(91);
+    elem_name(s.elem, inout o);
+    o.extend(in ", ".as_bytes());
+    push_decimal(inout o, s.lanes);
+    o.push(93);
+}

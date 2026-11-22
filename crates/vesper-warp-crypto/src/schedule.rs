@@ -1,12 +1,12 @@
 //! RFC 9001 §5.1/§5.2 key schedule: HKDF-Expand-Label, Initial secrets and
-//! per-direction key material, and the §6.1 "quic ku" secret update.
+//! per-direction key material, and the §6.1 "quic ku" secret update. The
+//! derivations are Vesper (`vesper/src/lib.ves`); the secrets stay here.
 
-use hkdf::Hkdf;
-use sha2::{Sha256, Sha384};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+use crate::port::{b, err, scratch};
 use crate::protect::{HeaderKey, PacketKey};
-use crate::{Cipher, CryptoError, IV_LEN, MAX_CID_LEN};
+use crate::{Cipher, CryptoError, IV_LEN};
 
 /// QUIC v1 Initial salt (RFC 9001 §5.2).
 pub const INITIAL_SALT_V1: [u8; 20] = [
@@ -24,25 +24,10 @@ pub enum Side {
     Server,
 }
 
-/// TLS 1.3 HKDF-Expand-Label with an empty context (RFC 8446 §7.1), built
-/// without allocation. `out.len()` must fit in a `u16` and `label` (with the
-/// `"tls13 "` prefix) in a `u8`; both hold for every label used here.
-fn expand_label(cipher: Cipher, secret: &[u8], label: &[u8], out: &mut [u8]) {
-    let len = u16::try_from(out.len()).expect("internal output length fits u16");
-    let label_len = u8::try_from(6 + label.len()).expect("internal label fits u8");
-    let info: [&[u8]; 5] = [&len.to_be_bytes(), &[label_len], b"tls13 ", label, &[0]];
-    // The secret is used as the PRK; its length always equals the hash
-    // output length (checked by `TrafficSecret::new`), and every requested
-    // output is far below 255 * HashLen, so neither call can fail.
-    let ok = match cipher {
-        Cipher::Aes128Gcm | Cipher::ChaCha20Poly1305 => Hkdf::<Sha256>::from_prk(secret)
-            .ok()
-            .and_then(|h| h.expand_multi_info(&info, out).ok()),
-        Cipher::Aes256Gcm => Hkdf::<Sha384>::from_prk(secret)
-            .ok()
-            .and_then(|h| h.expand_multi_info(&info, out).ok()),
-    };
-    ok.expect("HKDF-Expand-Label with a validated PRK and short output");
+/// A derivation whose PRK length and output sizes this crate fixed cannot
+/// fail; a shim failure here is a broken invariant.
+fn derived<E: std::fmt::Debug>(r: Result<(), E>) {
+    r.expect("HKDF-Expand-Label with a validated PRK and short output");
 }
 
 /// A TLS traffic secret for one direction and one key phase. Zeroized on
@@ -58,12 +43,7 @@ impl TrafficSecret {
     /// Wraps a secret supplied by a TLS stack. Its length must equal the
     /// cipher suite's hash output length.
     pub fn new(cipher: Cipher, secret: &[u8]) -> Result<Self, CryptoError> {
-        if secret.len() != cipher.secret_len() {
-            return Err(CryptoError::SecretLength {
-                expected: cipher.secret_len(),
-                actual: secret.len(),
-            });
-        }
+        b::secret_check(cipher.into(), secret.len() as u64).map_err(err)?;
         let mut bytes = [0u8; MAX_SECRET_LEN];
         bytes[..secret.len()].copy_from_slice(secret);
         Ok(Self { cipher, bytes })
@@ -86,12 +66,12 @@ impl TrafficSecret {
             bytes: [0u8; MAX_SECRET_LEN],
         };
         let n = self.cipher.secret_len();
-        expand_label(
-            self.cipher,
+        derived(b::next_phase(
+            self.cipher.into(),
             self.as_bytes(),
-            b"quic ku",
             &mut next.bytes[..n],
-        );
+            &mut scratch(),
+        ));
         next
     }
 
@@ -104,10 +84,15 @@ impl TrafficSecret {
             iv: [0; IV_LEN],
             hp: [0; MAX_KEY_LEN],
         };
-        let s = self.as_bytes();
-        expand_label(c, s, b"quic key", &mut m.key[..c.key_len()]);
-        expand_label(c, s, b"quic iv", &mut m.iv);
-        expand_label(c, s, b"quic hp", &mut m.hp[..c.key_len()]);
+        let n = c.key_len();
+        derived(b::key_material(
+            c.into(),
+            self.as_bytes(),
+            &mut m.key[..n],
+            &mut m.iv,
+            &mut m.hp[..n],
+            &mut scratch(),
+        ));
         m
     }
 
@@ -163,14 +148,18 @@ pub struct InitialSecrets {
     pub server: TrafficSecret,
 }
 
+/// The Initial derivations raise `ConnectionIdTooLong` or a shim failure.
+fn initial_error<E>(e: E, to_wc: impl FnOnce(E) -> Option<b::WcErr>) -> CryptoError {
+    match to_wc(e) {
+        Some(e) => err(e),
+        None => panic!("HKDF over the fixed Initial salt cannot fail"),
+    }
+}
+
 impl InitialSecrets {
     /// RFC 9001 §5.2 for QUIC v1: `initial_secret = HKDF-Extract(salt,
     /// client_dst_connection_id)`, then `"client in"` / `"server in"`.
     pub fn new_v1(client_dcid: &[u8]) -> Result<Self, CryptoError> {
-        if client_dcid.len() > MAX_CID_LEN {
-            return Err(CryptoError::ConnectionIdTooLong(client_dcid.len()));
-        }
-        let (mut prk, _) = Hkdf::<Sha256>::extract(Some(&INITIAL_SALT_V1), client_dcid);
         let c = Cipher::Aes128Gcm;
         let mut client = TrafficSecret {
             cipher: c,
@@ -180,19 +169,33 @@ impl InitialSecrets {
             cipher: c,
             bytes: [0; MAX_SECRET_LEN],
         };
-        expand_label(c, &prk, b"client in", &mut client.bytes[..32]);
-        expand_label(c, &prk, b"server in", &mut server.bytes[..32]);
-        prk.as_mut_slice().zeroize();
+        let mut prk = [0u8; 32];
+        b::initial_secrets(
+            client_dcid,
+            &mut client.bytes[..32],
+            &mut server.bytes[..32],
+            &mut prk,
+            &mut scratch(),
+        )
+        .map_err(|e| {
+            initial_error(e, |e| match e {
+                b::InitialSecretsError::WcErr(e) => Some(e),
+                _ => None,
+            })
+        })?;
         Ok(Self { client, server })
     }
 
     /// The common `initial_secret` (HKDF-Extract output), for test vectors.
     pub fn initial_secret_v1(client_dcid: &[u8]) -> Result<[u8; 32], CryptoError> {
-        if client_dcid.len() > MAX_CID_LEN {
-            return Err(CryptoError::ConnectionIdTooLong(client_dcid.len()));
-        }
-        let (prk, _) = Hkdf::<Sha256>::extract(Some(&INITIAL_SALT_V1), client_dcid);
-        Ok(prk.into())
+        let mut out = [0u8; 32];
+        b::initial_secret(client_dcid, &mut out, &mut scratch()).map_err(|e| {
+            initial_error(e, |e| match e {
+                b::InitialSecretError::WcErr(e) => Some(e),
+                _ => None,
+            })
+        })?;
+        Ok(out)
     }
 
     /// `(seal, open)` keys for `side`: an endpoint seals with its own secret

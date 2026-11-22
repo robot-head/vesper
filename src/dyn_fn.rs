@@ -1301,11 +1301,13 @@ fn erase(t: &mut Type, traits: &mut Lowering<'_>) {
 /// code came from.
 pub struct Lowered {
     pub module: Module,
-    base: usize,
+    /// The first synthetic span start's lower bound (`serde_json`'s length
+    /// of the module plus 1,000,000).
+    pub base: usize,
     /// End of the synthetic spans (the checker's own generated spans follow).
-    end: usize,
+    pub end: usize,
     /// (first synthetic span start, source span), in increasing order.
-    origins: Vec<(usize, Span)>,
+    pub origins: Vec<(usize, Span)>,
 }
 
 impl Lowered {

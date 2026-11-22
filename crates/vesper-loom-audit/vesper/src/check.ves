@@ -4,9 +4,12 @@ use @vesper/loom-calculus::check::{
     system_name_valid
 };
 use @vesper/loom-calculus::util::{
+    Ascii,
+    Order,
     dep,
     feat,
     man,
+    none,
     ver_ord
 };
 use self::{
@@ -16,13 +19,12 @@ use self::license::{
     allowlist
 };
 use self::util::{
+    AuditSort,
+    ErrorKind,
+    Identity,
     adv,
     ascii_alnum,
     byte,
-    e_catalog,
-    e_input,
-    e_limit,
-    e_policy,
     fail,
     fresh_marks,
     mark_seen,
@@ -38,9 +40,22 @@ use self::util::{
     word
 };
 
+// The safe parser limits a policy may ask for (`AuditLimits`).
+const MAX_JSON_DEPTH: u64 = 64;
+const MAX_LICENSE_DEPTH: u64 = 64;
+const MAX_LICENSE_TOKENS: u64 = 1024;
+
 pub fn check_limits(inout s: A) {
-    if s.m_jdepth > 64 || s.m_ldepth > 64 || s.m_ltokens > 1024 {
-        fail(inout s, e_limit(), "unsafe parser depth/token limit (maximum 64/64/1024)");
+    if s
+        .m_jdepth
+        > MAX_JSON_DEPTH
+        || s
+        .m_ldepth
+        > MAX_LICENSE_DEPTH
+        || s
+        .m_ltokens
+        > MAX_LICENSE_TOKENS {
+        fail(inout s, ErrorKind::Limit, "unsafe parser depth/token limit (maximum 64/64/1024)");
     }
 }
 
@@ -49,7 +64,17 @@ fn id_bytes(in s: A, id: u64) -> bool {
     let off = str_off(in s, id);
     for i in 0..str_len(in s, id) {
         let c = byte(in s, wrapping_add(off, i));
-        if !(ascii_alnum(c) || c == 45 || c == 95 || c == 46 || c == 58) {
+        if !(
+            ascii_alnum(c)
+                || c
+                == Ascii::Minus
+                || c
+                == Ascii::Underscore
+                || c
+                == Ascii::Dot
+                || c
+                == Ascii::Colon
+        ) {
             return false;
         }
     }
@@ -64,19 +89,19 @@ fn check_ranges(inout s: A, a: u64) {
     for j in 0..x.r_n {
         s.idx.push(wrapping_add(x.r_at, j));
     }
-    msort(inout s, 1);
-    let mut prev: u64 = 18446744073709551615;
+    msort(inout s, AuditSort::Ranges);
+    let mut prev: u64 = none();
     for j in 0..s.idx.len() {
         let ri = word(in s.idx, j);
         let r = rng(in s, ri);
-        if r.has_fixed && prec_ord(in s.l, r.intro, r.fixed) != 0 {
-            fail(inout s, e_catalog(), "affected interval must be nonempty and increasing");
+        if r.has_fixed && prec_ord(in s.l, r.intro, r.fixed) != Order::Less {
+            fail(inout s, ErrorKind::Catalog, "affected interval must be nonempty and increasing");
             return;
         }
-        if prev != 18446744073709551615 {
+        if prev != none() {
             let p = rng(in s, prev);
-            if !p.has_fixed || prec_ord(in s.l, p.fixed, r.intro) == 2 {
-                fail(inout s, e_catalog(), "overlapping or duplicate affected intervals");
+            if !p.has_fixed || prec_ord(in s.l, p.fixed, r.intro) == Order::Greater {
+                fail(inout s, ErrorKind::Catalog, "overlapping or duplicate affected intervals");
                 return;
             }
         }
@@ -86,16 +111,16 @@ fn check_ranges(inout s: A, a: u64) {
 
 pub fn check_catalog(inout s: A) {
     if !s.cat_ok {
-        fail(inout s, e_limit(), "programmatic input bytes");
+        fail(inout s, ErrorKind::Limit, "programmatic input bytes");
         return;
     }
     if s.cschema != 1 {
-        fail(inout s, e_catalog(), "unsupported schema version");
+        fail(inout s, ErrorKind::Catalog, "unsupported schema version");
         return;
     }
     let cl = str_len(in s, s.cid);
     if cl == 0 || cl > s.m_string {
-        fail(inout s, e_catalog(), "invalid catalog identity");
+        fail(inout s, ErrorKind::Catalog, "invalid catalog identity");
         return;
     }
     s.work = s.m_entries;
@@ -113,19 +138,19 @@ pub fn check_catalog(inout s: A) {
         let x = adv(in s, a);
         let il = str_len(in s, x.id);
         if il == 0 || il > s.m_string || !id_bytes(in s, x.id) || mark_seen(inout s, x.id) {
-            fail(inout s, e_catalog(), "empty, invalid or duplicate advisory ID");
+            fail(inout s, ErrorKind::Catalog, "empty, invalid or duplicate advisory ID");
             return;
         }
-        if x.kind == 1 && !system_name_valid(in s.l, x.name) {
-            fail(inout s, e_catalog(), "invalid package identity");
+        if x.kind == Identity::Native && !system_name_valid(in s.l, x.name) {
+            fail(inout s, ErrorKind::Catalog, "invalid package identity");
             return;
         }
         if str_len(in s, x.sum) > s.m_string {
-            fail(inout s, e_catalog(), "advisory summary exceeds string limit");
+            fail(inout s, ErrorKind::Catalog, "advisory summary exceeds string limit");
             return;
         }
         if x.r_n == 0 {
-            fail(inout s, e_catalog(), "advisory must have an affected range");
+            fail(inout s, ErrorKind::Catalog, "advisory must have an affected range");
             return;
         }
         if !spend(inout s, x.r_n) {
@@ -142,7 +167,7 @@ pub fn check_catalog(inout s: A) {
     for i in 0..s.nats.len() {
         s.idx.push(i);
     }
-    msort(inout s, 0);
+    msort(inout s, AuditSort::NativeClaims);
     let n = s.nats.len();
     fresh_marks(inout s, n);
     for j in 1..s.idx.len() {
@@ -159,11 +184,15 @@ pub fn check_catalog(inout s: A) {
         let g = s.gen;
         let dup = word(in s.mark, i) == g;
         if !system_name_valid(in s.l, x.name) || dup {
-            fail(inout s, e_catalog(), "invalid or duplicate native license identity/version");
+            fail(
+                inout s,
+                ErrorKind::Catalog,
+                "invalid or duplicate native license identity/version"
+            );
             return;
         }
         if str_len(in s, x.expr) > s.m_string {
-            fail(inout s, e_catalog(), "native license exceeds string limit");
+            fail(inout s, ErrorKind::Catalog, "native license exceeds string limit");
             return;
         }
     }
@@ -171,15 +200,15 @@ pub fn check_catalog(inout s: A) {
 
 pub fn check_policy(inout s: A) {
     if !s.pol_ok {
-        fail(inout s, e_limit(), "programmatic input bytes");
+        fail(inout s, ErrorKind::Limit, "programmatic input bytes");
         return;
     }
     if s.pschema != 1 {
-        fail(inout s, e_policy(), "unsupported schema version");
+        fail(inout s, ErrorKind::Policy, "unsupported schema version");
         return;
     }
     if s.allow.len() > s.m_entries {
-        fail(inout s, e_limit(), "license grants");
+        fail(inout s, ErrorKind::Limit, "license grants");
         return;
     }
     allowlist(inout s);
@@ -188,16 +217,16 @@ pub fn check_policy(inout s: A) {
 // Bound the calculus validator before running it (`preflight`).
 pub fn preflight(inout s: A) {
     if s.l.root_n == 0 {
-        fail(inout s, e_input(), "audit requires at least one declared root package");
+        fail(inout s, ErrorKind::Input, "audit requires at least one declared root package");
         return;
     }
     if !s.sol_ok {
-        fail(inout s, e_limit(), "programmatic input bytes");
+        fail(inout s, ErrorKind::Limit, "programmatic input bytes");
         return;
     }
     let np = s.l.sel_n;
     if sat_add(np, s.l.ss_n) > s.m_packages || s.l.root_n > s.m_roots {
-        fail(inout s, e_limit(), "package/root count");
+        fail(inout s, ErrorKind::Limit, "package/root count");
         return;
     }
     let mut edges: u64 = 0;
@@ -217,7 +246,7 @@ pub fn preflight(inout s: A) {
         }
     }
     if edges > s.m_edges {
-        fail(inout s, e_limit(), "declared edge count");
+        fail(inout s, ErrorKind::Limit, "declared edge count");
         return;
     }
     let complexity = sat_mul(

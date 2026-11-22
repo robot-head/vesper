@@ -22,6 +22,75 @@ const U64_MAX: u64 = 18446744073709551615;
 // End of input for `at`.
 const EOF: u64 = 256;
 
+// The bytes the TOML reader looks at, and `'a' - 10` and `'A' - 10` for
+// hex digits.
+enum Ascii: _ {
+    Backspace = 0x08,
+    Tab = 0x09,
+    Lf = 0x0a,
+    FormFeed = 0x0c,
+    Cr = 0x0d,
+    Space = 0x20,
+    Bang = 0x21,
+    Quote = 0x22,
+    Hash = 0x23,
+    Amp = 0x26,
+    Apostrophe = 0x27,
+    LParen = 0x28,
+    Plus = 0x2b,
+    Comma = 0x2c,
+    Minus = 0x2d,
+    Dot = 0x2e,
+    Zero = 0x30,
+    One = 0x31,
+    Nine = 0x39,
+    Colon = 0x3a,
+    Equals = 0x3d,
+    UpperA = 0x41,
+    UpperE = 0x45,
+    UpperF = 0x46,
+    UpperT = 0x54,
+    UpperU = 0x55,
+    UpperZ = 0x5a,
+    LBracket = 0x5b,
+    Backslash = 0x5c,
+    RBracket = 0x5d,
+    Underscore = 0x5f,
+    LowerA = 0x61,
+    LowerB = 0x62,
+    LowerE = 0x65,
+    LowerF = 0x66,
+    LowerI = 0x69,
+    LowerN = 0x6e,
+    LowerO = 0x6f,
+    LowerR = 0x72,
+    LowerT = 0x74,
+    LowerU = 0x75,
+    LowerX = 0x78,
+    LowerZ = 0x7a,
+    LBrace = 0x7b,
+    RBrace = 0x7d,
+    Tilde = 0x7e,
+    LowerHexBase = 0x57,
+    UpperHexBase = 0x37
+}
+
+// A multi-line string's delimiter length, and the longest quote run that
+// can close one (the delimiter and two quotes of content).
+const ML_DELIM: u64 = 3;
+const MAX_QUOTE_RUN: u64 = 5;
+// The preparse depth of a key: two levels per dotted part (policy.rs).
+const DEPTH_PER_PART: u64 = 2;
+// `path` holds three words per key part.
+const PART_WORDS: u64 = 3;
+// The largest hour, minute and second (a leap second) of a time.
+const MAX_HOUR: u64 = 23;
+const MAX_MINUTE: u64 = 59;
+const MAX_SECOND: u64 = 60;
+// The 64-bit FNV-1a parameters.
+const FNV_OFFSET: u64 = 14695981039346656037;
+const FNV_PRIME: u64 = 1099511628211;
+
 // ================================================================ policy
 //
 // crates/vesper-lint/src/policy.rs. Error codes (`LintFail::code`) are the
@@ -159,46 +228,46 @@ const T_NEWLINE: u8 = 9;
 
 fn atom_stop(c: u64) -> bool {
     c
-        == 32
+        == Ascii::Space
         || c
-        == 9
+        == Ascii::Tab
         || c
-        == 13
+        == Ascii::Cr
         || c
-        == 10
+        == Ascii::Lf
         || c
-        == 35
+        == Ascii::Hash
         || c
-        == 39
+        == Ascii::Apostrophe
         || c
-        == 34
+        == Ascii::Quote
         || c
-        == 46
+        == Ascii::Dot
         || c
-        == 61
+        == Ascii::Equals
         || c
-        == 91
+        == Ascii::LBracket
         || c
-        == 93
+        == Ascii::RBracket
         || c
-        == 123
+        == Ascii::LBrace
         || c
-        == 125
+        == Ascii::RBrace
         || c
-        == 44
+        == Ascii::Comma
 }
 
 fn string_end(in s: Slice[u8], start: u64) -> u64 eff [Fail[LintFail]] {
     let n = s.len();
     let delim = at(in s, start);
-    let multiline = wrapping_add(start, 3)
+    let multiline = wrapping_add(start, ML_DELIM)
         <= n
         && at(in s, inc(start))
         == delim
         && at(in s, wrapping_add(start, 2))
         == delim;
     let mut i = if multiline {
-        wrapping_add(start, 3)
+        wrapping_add(start, ML_DELIM)
     } else {
         inc(start)
     };
@@ -207,7 +276,7 @@ fn string_end(in s: Slice[u8], start: u64) -> u64 eff [Fail[LintFail]] {
             break;
         }
         let c = at(in s, i);
-        if delim == 34 && c == 92 {
+        if delim == Ascii::Quote && c == Ascii::Backslash {
             i = cadd(i, 2, P_STRING_ESCAPE);
             continue;
         }
@@ -223,8 +292,8 @@ fn string_end(in s: Slice[u8], start: u64) -> u64 eff [Fail[LintFail]] {
                 end = inc(end);
             }
             let run = wrapping_sub(end, i);
-            if run >= 3 {
-                if run > 5 {
+            if run >= ML_DELIM {
+                if run > MAX_QUOTE_RUN {
                     fail(P_QUOTE_RUN);
                 }
                 return end;
@@ -252,45 +321,45 @@ fn lexical(in s: Slice[u8], inout b: Budget, inout out: ChunkSeq[u8]) eff [Fail[
         }
         let c = at(in s, i);
         let mut kind: u8 = T_ATOM;
-        if c == 32 || c == 9 {
+        if c == Ascii::Space || c == Ascii::Tab {
             i = inc(i);
             continue;
-        } else if c == 35 {
+        } else if c == Ascii::Hash {
             loop {
                 if i >= n {
                     break;
                 }
                 let d = at(in s, i);
-                if d == 10 || d == 13 {
+                if d == Ascii::Lf || d == Ascii::Cr {
                     break;
                 }
                 i = inc(i);
             }
             continue;
-        } else if c == 10 || c == 13 {
-            if c == 13 && at(in s, inc(i)) == 10 {
+        } else if c == Ascii::Lf || c == Ascii::Cr {
+            if c == Ascii::Cr && at(in s, inc(i)) == Ascii::Lf {
                 i = inc(i);
             }
             i = inc(i);
             kind = T_NEWLINE;
-        } else if c == 39 || c == 34 {
+        } else if c == Ascii::Apostrophe || c == Ascii::Quote {
             i = string_end(in s, i);
             kind = T_STRING;
         } else {
             i = inc(i);
-            if c == 46 {
+            if c == Ascii::Dot {
                 kind = T_DOT;
-            } else if c == 61 {
+            } else if c == Ascii::Equals {
                 kind = T_EQ;
-            } else if c == 91 {
+            } else if c == Ascii::LBracket {
                 kind = T_LEFT_ARRAY;
-            } else if c == 93 {
+            } else if c == Ascii::RBracket {
                 kind = T_RIGHT_ARRAY;
-            } else if c == 123 {
+            } else if c == Ascii::LBrace {
                 kind = T_LEFT_TABLE;
-            } else if c == 125 {
+            } else if c == Ascii::RBrace {
                 kind = T_RIGHT_TABLE;
-            } else if c == 44 {
+            } else if c == Ascii::Comma {
                 kind = T_COMMA;
             } else {
                 loop {
@@ -360,7 +429,7 @@ fn header(in t: ChunkSeq[u8], start: u64, inout b: Budget) -> (u64, u64) eff [Fa
         if (k == T_ATOM || k == T_STRING) && expect {
             parts = inc(parts);
             expect = false;
-            check_depth(wrapping_mul(parts, 2), in b);
+            check_depth(wrapping_mul(parts, DEPTH_PER_PART), in b);
         } else if k == T_DOT && !expect {
             expect = true;
         } else if k == T_RIGHT_ARRAY && !expect {
@@ -371,7 +440,7 @@ fn header(in t: ChunkSeq[u8], start: u64, inout b: Budget) -> (u64, u64) eff [Fa
                 charge(inout b, 1);
                 i = inc(i);
             }
-            return (inc(i), wrapping_mul(parts, 2));
+            return (inc(i), wrapping_mul(parts, DEPTH_PER_PART));
         } else {
             fail(P_HEADER);
         }
@@ -439,12 +508,19 @@ fn preflight(in s: Slice[u8], inout b: Budget) -> u64 eff [Fail[LintFail]] {
             if (kind == T_ATOM || kind == T_STRING) && frame.expect_key {
                 frame.key = inc(frame.key);
                 frame.expect_key = false;
-                check_depth(wrapping_add(frame.depth, wrapping_mul(frame.key, 2)), in b);
+                check_depth(
+                    wrapping_add(frame.depth, wrapping_mul(frame.key, DEPTH_PER_PART)),
+                    in b
+                );
             } else if kind == T_DOT && !frame.expect_key {
                 frame.expect_key = true;
             } else if kind == T_EQ && !frame.expect_key {
                 frame.value = true;
-                frame.value_depth = wrapping_add(frame.depth, wrapping_mul(frame.key, 2));
+                frame
+                    .value_depth = wrapping_add(
+                    frame.depth,
+                    wrapping_mul(frame.key, DEPTH_PER_PART)
+                );
             } else if kind == T_RIGHT_TABLE && frame.kind == C_TABLE && frame.key == 0 && nested {
                 stack.truncate(top);
                 i = inc(i);
@@ -706,9 +782,9 @@ fn unlink(inout t: Toml, c: u32, e: u32) {
 }
 
 fn fnv(in t: Toml, start: u64, len: u64) -> u64 {
-    let mut h: u64 = 14695981039346656037;
+    let mut h: u64 = FNV_OFFSET;
     for i in 0..len {
-        h = wrapping_mul(h ^ at(in t.text.as_slice(), wrapping_add(start, i)), 1099511628211);
+        h = wrapping_mul(h ^ at(in t.text.as_slice(), wrapping_add(start, i)), FNV_PRIME);
     }
     h
 }
@@ -726,27 +802,29 @@ fn bump(inout t: Toml) {
 }
 
 fn is_digit(c: u64) -> bool {
-    c >= 48 && c <= 57
+    c >= Ascii::Zero && c <= Ascii::Nine
 }
 
 fn is_hex(c: u64) -> bool {
-    is_digit(c) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102)
+    is_digit(c)
+        || (c >= Ascii::UpperA && c <= Ascii::UpperF)
+        || (c >= Ascii::LowerA && c <= Ascii::LowerF)
 }
 
 fn hex_val(c: u64) -> u64 {
     if is_digit(c) {
-        wrapping_sub(c, 48)
-    } else if c >= 97 {
-        wrapping_sub(c, 87)
+        wrapping_sub(c, Ascii::Zero)
+    } else if c >= Ascii::LowerA {
+        wrapping_sub(c, Ascii::LowerHexBase)
     } else {
-        wrapping_sub(c, 55)
+        wrapping_sub(c, Ascii::UpperHexBase)
     }
 }
 
 fn skip_ws(in s: Slice[u8], inout t: Toml) {
     loop {
         let c = cur(in s, in t);
-        if c != 32 && c != 9 {
+        if c != Ascii::Space && c != Ascii::Tab {
             break;
         }
         bump(inout t);
@@ -756,9 +834,9 @@ fn skip_ws(in s: Slice[u8], inout t: Toml) {
 // `newline`: LF or CRLF.
 fn newline(in s: Slice[u8], inout t: Toml) eff [Fail[LintFail]] {
     let c = cur(in s, in t);
-    if c == 10 {
+    if c == Ascii::Lf {
         bump(inout t);
-    } else if c == 13 && peek_at(in s, in t, 1) == 10 {
+    } else if c == Ascii::Cr && peek_at(in s, in t, 1) == Ascii::Lf {
         t.pos = wrapping_add(t.pos, 2);
     } else {
         terr();
@@ -766,7 +844,7 @@ fn newline(in s: Slice[u8], inout t: Toml) eff [Fail[LintFail]] {
 }
 
 fn non_eol(c: u64) -> bool {
-    c == 9 || (c >= 32 && c <= 126) || (c >= 128 && c != EOF)
+    c == Ascii::Tab || (c >= Ascii::Space && c <= Ascii::Tilde) || (c >= 128 && c != EOF)
 }
 
 // `comment`: `#` and the rest of the line's allowed characters.
@@ -790,7 +868,7 @@ fn line_ending(in s: Slice[u8], inout t: Toml) eff [Fail[LintFail]] {
 // `line_trailing`: whitespace, an optional comment, a line ending.
 fn line_trailing(in s: Slice[u8], inout t: Toml) eff [Fail[LintFail]] {
     skip_ws(in s, inout t);
-    if cur(in s, in t) == 35 {
+    if cur(in s, in t) == Ascii::Hash {
         comment(in s, inout t);
     }
     line_ending(in s, inout t);
@@ -801,10 +879,10 @@ fn ws_comment_newline(in s: Slice[u8], inout t: Toml) eff [Fail[LintFail]] {
     loop {
         skip_ws(in s, inout t);
         let c = cur(in s, in t);
-        if c == 35 {
+        if c == Ascii::Hash {
             comment(in s, inout t);
             newline(in s, inout t);
-        } else if c == 10 || c == 13 {
+        } else if c == Ascii::Lf || c == Ascii::Cr {
             newline(in s, inout t);
         } else {
             break;
@@ -835,22 +913,22 @@ fn push_char(inout t: Toml, v: u64) {
 fn escape(in s: Slice[u8], inout t: Toml) eff [Fail[LintFail]] {
     let c = cur(in s, in t);
     bump(inout t);
-    if c == 98 {
-        t.text.push(8);
-    } else if c == 102 {
-        t.text.push(12);
-    } else if c == 110 {
-        t.text.push(10);
-    } else if c == 114 {
-        t.text.push(13);
-    } else if c == 116 {
-        t.text.push(9);
-    } else if c == 92 {
-        t.text.push(92);
-    } else if c == 34 {
-        t.text.push(34);
-    } else if c == 117 || c == 85 {
-        let digits: u64 = if c == 117 {
+    if c == Ascii::LowerB {
+        t.text.push(Ascii::Backspace);
+    } else if c == Ascii::LowerF {
+        t.text.push(Ascii::FormFeed);
+    } else if c == Ascii::LowerN {
+        t.text.push(Ascii::Lf);
+    } else if c == Ascii::LowerR {
+        t.text.push(Ascii::Cr);
+    } else if c == Ascii::LowerT {
+        t.text.push(Ascii::Tab);
+    } else if c == Ascii::Backslash {
+        t.text.push(Ascii::Backslash);
+    } else if c == Ascii::Quote {
+        t.text.push(Ascii::Quote);
+    } else if c == Ascii::LowerU || c == Ascii::UpperU {
+        let digits: u64 = if c == Ascii::LowerU {
             4
         } else {
             8
@@ -877,18 +955,22 @@ fn escape(in s: Slice[u8], inout t: Toml) eff [Fail[LintFail]] {
 // newlines).
 fn basic_unescaped(c: u64) -> bool {
     c
-        == 32
+        == Ascii::Space
         || c
-        == 9
+        == Ascii::Tab
         || c
-        == 33
-        || (c >= 35 && c <= 91)
-        || (c >= 93 && c <= 126)
+        == Ascii::Bang
+        || (c >= Ascii::Hash && c <= Ascii::LBracket)
+        || (c >= Ascii::RBracket && c <= Ascii::Tilde)
         || (c >= 128 && c != EOF)
 }
 
 fn literal_char(c: u64) -> bool {
-    c == 9 || (c >= 32 && c <= 38) || (c >= 40 && c <= 126) || (c >= 128 && c != EOF)
+    c
+        == Ascii::Tab
+        || (c >= Ascii::Space && c <= Ascii::Amp)
+        || (c >= Ascii::LParen && c <= Ascii::Tilde)
+        || (c >= 128 && c != EOF)
 }
 
 // `basic_string` from its opening quote; the decoded bytes go to `text`.
@@ -896,10 +978,10 @@ fn basic_string(in s: Slice[u8], inout t: Toml) eff [Fail[LintFail]] {
     bump(inout t);
     loop {
         let c = cur(in s, in t);
-        if c == 34 {
+        if c == Ascii::Quote {
             bump(inout t);
             return;
-        } else if c == 92 {
+        } else if c == Ascii::Backslash {
             bump(inout t);
             escape(in s, inout t);
         } else if basic_unescaped(c) {
@@ -915,7 +997,7 @@ fn literal_string(in s: Slice[u8], inout t: Toml) eff [Fail[LintFail]] {
     bump(inout t);
     loop {
         let c = cur(in s, in t);
-        if c == 39 {
+        if c == Ascii::Apostrophe {
             bump(inout t);
             return;
         } else if literal_char(c) {
@@ -938,11 +1020,11 @@ fn ml_quotes(in s: Slice[u8], inout t: Toml, q: u64) -> bool {
         }
         run = inc(run);
         bump(inout t);
-        if run == 5 {
+        if run == MAX_QUOTE_RUN {
             break;
         }
     }
-    if run < 3 {
+    if run < ML_DELIM {
         for i in 0..run {
             t.text.push(wrapping_u8(q));
         }
@@ -950,7 +1032,7 @@ fn ml_quotes(in s: Slice[u8], inout t: Toml, q: u64) -> bool {
     }
     // `opt(mlb_quotes(DELIM))` then the delimiter: the quotes past the
     // first five stay in the input.
-    for i in 0..wrapping_sub(run, 3) {
+    for i in 0..wrapping_sub(run, ML_DELIM) {
         t.text.push(wrapping_u8(q));
     }
     true
@@ -959,28 +1041,30 @@ fn ml_quotes(in s: Slice[u8], inout t: Toml, q: u64) -> bool {
 // `ml_basic_string` after its opening delimiter.
 fn ml_basic_string(in s: Slice[u8], inout t: Toml) eff [Fail[LintFail]] {
     let c0 = cur(in s, in t);
-    if c0 == 10 || (c0 == 13 && peek_at(in s, in t, 1) == 10) {
+    if c0 == Ascii::Lf || (c0 == Ascii::Cr && peek_at(in s, in t, 1) == Ascii::Lf) {
         newline(in s, inout t);
     }
     loop {
         let c = cur(in s, in t);
-        if c == 34 {
-            if ml_quotes(in s, inout t, 34) {
+        if c == Ascii::Quote {
+            if ml_quotes(in s, inout t, Ascii::Quote) {
                 return;
             }
-        } else if c == 92 {
+        } else if c == Ascii::Backslash {
             // `mlb_escaped_nl`: a backslash, whitespace and a newline, then
             // any whitespace and newlines; otherwise an escape.
             let save = t.pos;
             bump(inout t);
             skip_ws(in s, inout t);
             let d = cur(in s, in t);
-            if d == 10 || (d == 13 && peek_at(in s, in t, 1) == 10) {
+            if d == Ascii::Lf || (d == Ascii::Cr && peek_at(in s, in t, 1) == Ascii::Lf) {
                 loop {
                     let e = cur(in s, in t);
-                    if e == 32 || e == 9 {
+                    if e == Ascii::Space || e == Ascii::Tab {
                         bump(inout t);
-                    } else if e == 10 || (e == 13 && peek_at(in s, in t, 1) == 10) {
+                    } else if e
+                        == Ascii::Lf
+                        || (e == Ascii::Cr && peek_at(in s, in t, 1) == Ascii::Lf) {
                         newline(in s, inout t);
                     } else {
                         break;
@@ -990,9 +1074,9 @@ fn ml_basic_string(in s: Slice[u8], inout t: Toml) eff [Fail[LintFail]] {
                 t.pos = inc(save);
                 escape(in s, inout t);
             }
-        } else if c == 10 || c == 13 {
+        } else if c == Ascii::Lf || c == Ascii::Cr {
             newline(in s, inout t);
-            t.text.push(10);
+            t.text.push(Ascii::Lf);
         } else if basic_unescaped(c) {
             t.text.push(wrapping_u8(c));
             bump(inout t);
@@ -1005,18 +1089,18 @@ fn ml_basic_string(in s: Slice[u8], inout t: Toml) eff [Fail[LintFail]] {
 // `ml_literal_string` after its opening delimiter (CRLF decodes to LF).
 fn ml_literal_string(in s: Slice[u8], inout t: Toml) eff [Fail[LintFail]] {
     let c0 = cur(in s, in t);
-    if c0 == 10 || (c0 == 13 && peek_at(in s, in t, 1) == 10) {
+    if c0 == Ascii::Lf || (c0 == Ascii::Cr && peek_at(in s, in t, 1) == Ascii::Lf) {
         newline(in s, inout t);
     }
     loop {
         let c = cur(in s, in t);
-        if c == 39 {
-            if ml_quotes(in s, inout t, 39) {
+        if c == Ascii::Apostrophe {
+            if ml_quotes(in s, inout t, Ascii::Apostrophe) {
                 return;
             }
-        } else if c == 10 || c == 13 {
+        } else if c == Ascii::Lf || c == Ascii::Cr {
             newline(in s, inout t);
-            t.text.push(10);
+            t.text.push(Ascii::Lf);
         } else if literal_char(c) {
             t.text.push(wrapping_u8(c));
             bump(inout t);
@@ -1030,16 +1114,22 @@ fn ml_literal_string(in s: Slice[u8], inout t: Toml) eff [Fail[LintFail]] {
 fn simple_key(in s: Slice[u8], inout t: Toml) eff [Fail[LintFail]] {
     let start = t.text.len();
     let c = cur(in s, in t);
-    if c == 34 {
+    if c == Ascii::Quote {
         basic_string(in s, inout t);
-    } else if c == 39 {
+    } else if c == Ascii::Apostrophe {
         literal_string(in s, inout t);
     } else {
         let mut n: u64 = 0;
         loop {
             let d = cur(in s, in t);
             if !(
-                (d >= 65 && d <= 90) || (d >= 97 && d <= 122) || is_digit(d) || d == 45 || d == 95
+                (d >= Ascii::UpperA && d <= Ascii::UpperZ)
+                    || (d >= Ascii::LowerA && d <= Ascii::LowerZ)
+                    || is_digit(d)
+                    || d
+                    == Ascii::Minus
+                    || d
+                    == Ascii::Underscore
             ) {
                 break;
             }
@@ -1065,7 +1155,7 @@ fn key(in s: Slice[u8], inout t: Toml) eff [Fail[LintFail]] {
         skip_ws(in s, inout t);
         simple_key(in s, inout t);
         skip_ws(in s, inout t);
-        if cur(in s, in t) != 46 {
+        if cur(in s, in t) != Ascii::Dot {
             break;
         }
         bump(inout t);
@@ -1073,11 +1163,11 @@ fn key(in s: Slice[u8], inout t: Toml) eff [Fail[LintFail]] {
 }
 
 fn path_parts(in t: Toml) -> u64 {
-    t.path.len() / 3
+    t.path.len() / PART_WORDS
 }
 
 fn part(in t: Toml, i: u64) -> (u64, u64, u64) {
-    let j = wrapping_mul(i, 3);
+    let j = wrapping_mul(i, PART_WORDS);
     (
         word(in t.path.as_slice(), j),
         word(in t.path.as_slice(), inc(j)),
@@ -1162,7 +1252,7 @@ fn digits(in s: Slice[u8], inout t: Toml, n: u64, inout v: u64) -> bool {
         if !is_digit(d) {
             return false;
         }
-        x = wrapping_add(wrapping_mul(x, 10), wrapping_sub(d, 48));
+        x = wrapping_add(wrapping_mul(x, 10), wrapping_sub(d, Ascii::Zero));
     }
     t.pos = wrapping_add(t.pos, n);
     v = x;
@@ -1172,27 +1262,27 @@ fn digits(in s: Slice[u8], inout t: Toml, n: u64, inout v: u64) -> bool {
 // `partial_time`: false on a backtrack before the first colon.
 fn partial_time(in s: Slice[u8], inout t: Toml) -> bool eff [Fail[LintFail]] {
     let mut h: u64 = 0;
-    if !digits(in s, inout t, 2, inout h) || h > 23 {
+    if !digits(in s, inout t, 2, inout h) || h > MAX_HOUR {
         return false;
     }
-    if cur(in s, in t) != 58 {
+    if cur(in s, in t) != Ascii::Colon {
         return false;
     }
     bump(inout t);
     let mut m: u64 = 0;
-    if !digits(in s, inout t, 2, inout m) || m > 59 {
+    if !digits(in s, inout t, 2, inout m) || m > MAX_MINUTE {
         terr();
     }
-    if cur(in s, in t) != 58 {
+    if cur(in s, in t) != Ascii::Colon {
         terr();
     }
     bump(inout t);
     let mut sec: u64 = 0;
-    if !digits(in s, inout t, 2, inout sec) || sec > 60 {
+    if !digits(in s, inout t, 2, inout sec) || sec > MAX_SECOND {
         terr();
     }
     // `opt(time_secfrac)`.
-    if cur(in s, in t) == 46 && is_digit(peek_at(in s, in t, 1)) {
+    if cur(in s, in t) == Ascii::Dot && is_digit(peek_at(in s, in t, 1)) {
         bump(inout t);
         loop {
             if !is_digit(cur(in s, in t)) {
@@ -1208,13 +1298,13 @@ fn partial_time(in s: Slice[u8], inout t: Toml) -> bool eff [Fail[LintFail]] {
 fn date_time(in s: Slice[u8], inout t: Toml) -> bool eff [Fail[LintFail]] {
     let start = t.pos;
     let mut year: u64 = 0;
-    if digits(in s, inout t, 4, inout year) && cur(in s, in t) == 45 {
+    if digits(in s, inout t, 4, inout year) && cur(in s, in t) == Ascii::Minus {
         bump(inout t);
         let mut month: u64 = 0;
         if !digits(in s, inout t, 2, inout month) || month < 1 || month > 12 {
             terr();
         }
-        if cur(in s, in t) != 45 {
+        if cur(in s, in t) != Ascii::Minus {
             terr();
         }
         bump(inout t);
@@ -1238,19 +1328,19 @@ fn date_time(in s: Slice[u8], inout t: Toml) -> bool eff [Fail[LintFail]] {
         // `opt((time_delim, partial_time, opt(time_offset)))`.
         let after_date = t.pos;
         let d = cur(in s, in t);
-        if d == 84 || d == 116 || d == 32 {
+        if d == Ascii::UpperT || d == Ascii::LowerT || d == Ascii::Space {
             bump(inout t);
             if partial_time(in s, inout t) {
                 let o = cur(in s, in t);
-                if o == 90 || o == 122 {
+                if o == Ascii::UpperZ || o == Ascii::LowerZ {
                     bump(inout t);
-                } else if o == 43 || o == 45 {
+                } else if o == Ascii::Plus || o == Ascii::Minus {
                     bump(inout t);
                     let mut oh: u64 = 0;
                     if !digits(in s, inout t, 2, inout oh) || oh > 23 {
                         terr();
                     }
-                    if cur(in s, in t) != 58 {
+                    if cur(in s, in t) != Ascii::Colon {
                         terr();
                     }
                     bump(inout t);
@@ -1283,18 +1373,18 @@ fn digit_run(
         let ok = if hex {
             is_hex(c)
         } else {
-            is_digit(c) && wrapping_sub(c, 48) <= radix_max
+            is_digit(c) && wrapping_sub(c, Ascii::Zero) <= radix_max
         };
         if ok {
             out.push(wrapping_u8(c));
             bump(inout t);
-        } else if c == 95 {
+        } else if c == Ascii::Underscore {
             bump(inout t);
             let d = cur(in s, in t);
             let dok = if hex {
                 is_hex(d)
             } else {
-                is_digit(d) && wrapping_sub(d, 48) <= radix_max
+                is_digit(d) && wrapping_sub(d, Ascii::Zero) <= radix_max
             };
             if !dok {
                 terr();
@@ -1312,17 +1402,17 @@ fn dec_int(in s: Slice[u8], inout t: Toml, inout out: ChunkSeq[u8], inout neg: b
     out.clear();
     let c = cur(in s, in t);
     neg = false;
-    if c == 43 || c == 45 {
-        neg = c == 45;
+    if c == Ascii::Plus || c == Ascii::Minus {
+        neg = c == Ascii::Minus;
         bump(inout t);
     }
     let d = cur(in s, in t);
-    if d >= 49 && d <= 57 {
+    if d >= Ascii::One && d <= Ascii::Nine {
         out.push(wrapping_u8(d));
         bump(inout t);
         digit_run(in s, inout t, false, 9, inout out);
         true
-    } else if d == 48 {
+    } else if d == Ascii::Zero {
         out.push(48);
         bump(inout t);
         true
@@ -1357,7 +1447,7 @@ fn overflows(in d: ChunkSeq[u8], exp: i64) -> bool {
     let n = d.len();
     let mut lead: u64 = 0;
     loop {
-        if lead >= n || at(in d.as_slice(), lead) != 48 {
+        if lead >= n || at(in d.as_slice(), lead) != Ascii::Zero {
             break;
         }
         lead = inc(lead);
@@ -1407,24 +1497,24 @@ fn float(in s: Slice[u8], inout t: Toml) -> bool eff [Fail[LintFail]] {
     let mut neg = false;
     if dec_int(in s, inout t, inout ip, inout neg) {
         let c = cur(in s, in t);
-        if c == 101 || c == 69 || c == 46 {
+        if c == Ascii::LowerE || c == Ascii::UpperE || c == Ascii::Dot {
             // The significand's digits and the decimal exponent of the
             // point after the integer part.
             let mut sig = ChunkSeq::new[u8]();
             sig.extend(in ip.as_slice());
             let point = ip.len();
-            if c == 46 {
+            if c == Ascii::Dot {
                 bump(inout t);
                 zp_int(in s, inout t, inout sig);
             }
             let mut exp: i64 = 0;
             let e = cur(in s, in t);
-            if e == 101 || e == 69 {
+            if e == Ascii::LowerE || e == Ascii::UpperE {
                 bump(inout t);
                 let sc = cur(in s, in t);
                 let mut eneg = false;
-                if sc == 43 || sc == 45 {
-                    eneg = sc == 45;
+                if sc == Ascii::Plus || sc == Ascii::Minus {
+                    eneg = sc == Ascii::Minus;
                     bump(inout t);
                 }
                 let mut ed = ChunkSeq::new[u8]();
@@ -1454,13 +1544,14 @@ fn float(in s: Slice[u8], inout t: Toml) -> bool eff [Fail[LintFail]] {
     // `special_float`.
     t.pos = start;
     let c = cur(in s, in t);
-    if c == 43 || c == 45 {
+    if c == Ascii::Plus || c == Ascii::Minus {
         bump(inout t);
     }
     let a = cur(in s, in t);
     let b = peek_at(in s, in t, 1);
     let d = peek_at(in s, in t, 2);
-    if (a == 105 && b == 110 && d == 102) || (a == 110 && b == 97 && d == 110) {
+    if (a == Ascii::LowerI && b == Ascii::LowerN && d == Ascii::LowerF)
+        || (a == Ascii::LowerN && b == Ascii::LowerA && d == Ascii::LowerN) {
         t.pos = wrapping_add(t.pos, 3);
         return true;
     }
@@ -1496,12 +1587,12 @@ fn integer(in s: Slice[u8], inout t: Toml) eff [Fail[LintFail]] {
     let c = cur(in s, in t);
     let p = peek_at(in s, in t, 1);
     let mut ds = ChunkSeq::new[u8]();
-    if c == 48 && (p == 120 || p == 111 || p == 98) {
+    if c == Ascii::Zero && (p == Ascii::LowerX || p == Ascii::LowerO || p == Ascii::LowerB) {
         t.pos = wrapping_add(t.pos, 2);
-        let hex = p == 120;
-        let r: u64 = if p == 120 {
+        let hex = p == Ascii::LowerX;
+        let r: u64 = if p == Ascii::LowerX {
             16
-        } else if p == 111 {
+        } else if p == Ascii::LowerO {
             8
         } else {
             2
@@ -1510,7 +1601,7 @@ fn integer(in s: Slice[u8], inout t: Toml) eff [Fail[LintFail]] {
         let first = if hex {
             is_hex(d)
         } else {
-            is_digit(d) && wrapping_sub(d, 48) < r
+            is_digit(d) && wrapping_sub(d, Ascii::Zero) < r
         };
         if !first {
             terr();
@@ -1552,12 +1643,12 @@ fn string_value(in s: Slice[u8], inout t: Toml) -> u32 eff [Fail[LintFail]] {
     let q = cur(in s, in t);
     if peek_at(in s, in t, 1) == q && peek_at(in s, in t, 2) == q {
         t.pos = wrapping_add(t.pos, 3);
-        if q == 34 {
+        if q == Ascii::Quote {
             ml_basic_string(in s, inout t);
         } else {
             ml_literal_string(in s, inout t);
         }
-    } else if q == 34 {
+    } else if q == Ascii::Quote {
         basic_string(in s, inout t);
     } else {
         literal_string(in s, inout t);
@@ -1573,24 +1664,24 @@ fn string_value(in s: Slice[u8], inout t: Toml) -> u32 eff [Fail[LintFail]] {
 // `value`.
 fn value(in s: Slice[u8], inout t: Toml) -> u32 eff [Fail[LintFail]] {
     let c = cur(in s, in t);
-    if c == 34 || c == 39 {
+    if c == Ascii::Quote || c == Ascii::Apostrophe {
         string_value(in s, inout t)
-    } else if c == 91 {
+    } else if c == Ascii::LBracket {
         array(in s, inout t)
-    } else if c == 123 {
+    } else if c == Ascii::LBrace {
         inline_table(in s, inout t)
-    } else if c == 43 || c == 45 || is_digit(c) {
+    } else if c == Ascii::Plus || c == Ascii::Minus || is_digit(c) {
         number(in s, inout t)
-    } else if c == 116 {
+    } else if c == Ascii::LowerT {
         expect_word(in s, inout t, in "true");
         scalar(inout t, N_BOOL)
-    } else if c == 102 {
+    } else if c == Ascii::LowerF {
         expect_word(in s, inout t, in "false");
         scalar(inout t, N_BOOL)
-    } else if c == 105 {
+    } else if c == Ascii::LowerI {
         expect_word(in s, inout t, in "inf");
         scalar(inout t, N_FLOAT)
-    } else if c == 110 {
+    } else if c == Ascii::LowerN {
         expect_word(in s, inout t, in "nan");
         scalar(inout t, N_FLOAT)
     } else {
@@ -1604,7 +1695,7 @@ fn array(in s: Slice[u8], inout t: Toml) -> u32 eff [Fail[LintFail]] {
     bump(inout t);
     let id = new_node(inout t, N_ARRAY, false, false);
     ws_comment_newline(in s, inout t);
-    if cur(in s, in t) == 93 {
+    if cur(in s, in t) == Ascii::RBracket {
         bump(inout t);
         return id;
     }
@@ -1613,14 +1704,14 @@ fn array(in s: Slice[u8], inout t: Toml) -> u32 eff [Fail[LintFail]] {
         append(inout t, id, 0, 0, 0, v);
         ws_comment_newline(in s, inout t);
         let c = cur(in s, in t);
-        if c == 44 {
+        if c == Ascii::Comma {
             bump(inout t);
             ws_comment_newline(in s, inout t);
-            if cur(in s, in t) == 93 {
+            if cur(in s, in t) == Ascii::RBracket {
                 bump(inout t);
                 return id;
             }
-        } else if c == 93 {
+        } else if c == Ascii::RBracket {
             bump(inout t);
             return id;
         } else {
@@ -1635,7 +1726,7 @@ fn inline_table(in s: Slice[u8], inout t: Toml) -> u32 eff [Fail[LintFail]] {
     let id = new_node(inout t, N_INLINE, false, false);
     let save = t.pos;
     skip_ws(in s, inout t);
-    if cur(in s, in t) == 125 {
+    if cur(in s, in t) == Ascii::RBrace {
         bump(inout t);
         return id;
     }
@@ -1645,7 +1736,7 @@ fn inline_table(in s: Slice[u8], inout t: Toml) -> u32 eff [Fail[LintFail]] {
     let mut values = ChunkSeq::new[u32]();
     loop {
         key(in s, inout t);
-        if cur(in s, in t) != 61 {
+        if cur(in s, in t) != Ascii::Equals {
             terr();
         }
         bump(inout t);
@@ -1656,9 +1747,9 @@ fn inline_table(in s: Slice[u8], inout t: Toml) -> u32 eff [Fail[LintFail]] {
         values.push(v);
         skip_ws(in s, inout t);
         let c = cur(in s, in t);
-        if c == 44 {
+        if c == Ascii::Comma {
             bump(inout t);
-        } else if c == 125 {
+        } else if c == Ascii::RBrace {
             bump(inout t);
             break;
         } else {
@@ -1743,14 +1834,14 @@ fn parse_toml(in s: Slice[u8], inout t: Toml) eff [Fail[LintFail]] {
         if c == EOF {
             break;
         }
-        if c == 35 {
+        if c == Ascii::Hash {
             comment(in s, inout t);
             line_ending(in s, inout t);
-        } else if c == 91 {
-            if peek_at(in s, in t, 1) == 91 {
+        } else if c == Ascii::LBracket {
+            if peek_at(in s, in t, 1) == Ascii::LBracket {
                 t.pos = wrapping_add(t.pos, 2);
                 key(in s, inout t);
-                if cur(in s, in t) != 93 || peek_at(in s, in t, 1) != 93 {
+                if cur(in s, in t) != Ascii::RBracket || peek_at(in s, in t, 1) != Ascii::RBracket {
                     terr();
                 }
                 t.pos = wrapping_add(t.pos, 2);
@@ -1759,18 +1850,18 @@ fn parse_toml(in s: Slice[u8], inout t: Toml) eff [Fail[LintFail]] {
             } else {
                 bump(inout t);
                 key(in s, inout t);
-                if cur(in s, in t) != 93 {
+                if cur(in s, in t) != Ascii::RBracket {
                     terr();
                 }
                 bump(inout t);
                 line_trailing(in s, inout t);
                 std_header(inout t, root);
             }
-        } else if c == 10 || c == 13 {
+        } else if c == Ascii::Lf || c == Ascii::Cr {
             newline(in s, inout t);
         } else {
             key(in s, inout t);
-            if cur(in s, in t) != 61 {
+            if cur(in s, in t) != Ascii::Equals {
                 terr();
             }
             bump(inout t);

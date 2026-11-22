@@ -149,3 +149,47 @@ pub fn xxh64(in s: Slice[u8], seed: u64) -> u64 {
     h = wrapping_mul(h ^ (h >> 29), p3());
     h ^ (h >> 32)
 }
+
+test {
+    // FNV-1a reference vectors, in both published widths.
+    // @case empty(in "", 0xcbf29ce484222325, 0x811c9dc5)
+    // @case single_byte(in "a", 0xaf63dc4c8601ec8c, 0xe40c292c)
+    // @case three_bytes(in "abc", 0xe71fa2190541574b, 0x1a47e90b)
+    // @case six_bytes(in "foobar", 0x85944171f73967e8, 0xbf9cf968)
+    fn test_fnv1a(in input: Str, expected64: u64, expected32: u32) -> bool {
+        let bytes = input.as_bytes();
+        fnv1a64(in bytes) == expected64 && fnv1a32(in bytes) == expected32
+    }
+
+    // XXH64 checked against the reference C implementation.
+    // @case empty(in "", 0, 0xef46db3751d8e999)
+    // @case empty_seeded(in "", 0xae0543311b702d91, 0x4b6a04fcdf7a4672)
+    // @case byte_tail(in "*", 0, 0x0a9edecebeb03ae4)
+    // @case four_byte_tail(in "abcd", 0, 0xde0327b0d25d92cc)
+    // @case eight_byte_tail(in "abcdefgh", 0, 0x3ad351775b4634b7)
+    // @case eight_plus_one(in "abcdefghi", 0, 0x27f1a34fdbb95e13)
+    // @case below_stripe(in "0123456789abcdefghijklmnopqrstu", 0, 0x80adfc1d42020f39)
+    // @case exact_stripe(in "0123456789abcdefghijklmnopqrstuv", 0, 0xbf7c9dbe16b5c6e2)
+    // @case stripe_plus_tail(in "0123456789abcdefghijklmnopqrstuvw", 0, 0xe97423e605e2f3b4)
+    // @case two_seeded_stripes(in "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ+-", 0xae0543311b702d91, 0x7bae8f84dc631f22)
+    fn test_xxh64(in input: Str, seed: u64, expected: u64) -> bool {
+        xxh64(in input.as_bytes(), seed) == expected
+    }
+
+    // @case zero(0x0000000000000000, 0x0000000000000000)
+    // @case one(0x0000000000000001, 0x5692161d100b05e5)
+    // @case top_bit(0x8000000000000000, 0x25c26ea579cea98a)
+    // @case all_bits(0xffffffffffffffff, 0xb4d055fcf2cbbd7b)
+    fn test_mix64(value: u64, expected: u64) -> bool {
+        mix64(value) == expected
+    }
+
+    // @case zero(0x0000000000000000, 0x0000000000000000, 0x0000000000000000)
+    // @case left_only(0x0000000000000001, 0x0000000000000000, 0xe220a8397b1dcdaf)
+    // @case right_only(0x0000000000000000, 0x0000000000000001, 0xd820b7e910b0f93f)
+    // @case both(0x0123456789abcdef, 0xfedcba9876543210, 0x6d7e1601802a23ec)
+    // @case reversed(0xfedcba9876543210, 0x0123456789abcdef, 0xcd3040b1c21cb7be)
+    fn test_hash_pair(first: u64, second: u64, expected: u64) -> bool {
+        hash_pair(first, second) == expected
+    }
+}

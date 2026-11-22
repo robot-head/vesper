@@ -41,7 +41,7 @@ vesper_port_object(
 vesper_port_object(
     name = "aura_vesper_divergent_plan",
     edit_src = "vesper/src/plan.ves",
-    edits = {"op(op_move_child(), node.id, child_id, from, index)": "op(op_move_child(), node.id, child_id, index, from)"},
+    edits = {"op(OpTag::MoveChild, node.id, child_id, from, index)": "op(OpTag::MoveChild, node.id, child_id, index, from)"},
     library = "aura",
     package = ":port_package",
     target = VESPER_TARGET,
@@ -50,7 +50,7 @@ vesper_port_object(
 vesper_port_object(
     name = "aura_vesper_divergent_session",
     edit_src = "vesper/src/session.ves",
-    edits = {"    } else if p.base != r.revision {": "    } else if p.base == max_u64() {"},
+    edits = {"    } else if p.base != r.revision {": "    } else if p.base == MAX_U64 {"},
     library = "aura",
     package = ":port_package",
     target = VESPER_TARGET,
@@ -68,7 +68,7 @@ vesper_port_object(
 vesper_port_object(
     name = "aura_vesper_divergent_sim",
     edit_src = "vesper/src/sim.ves",
-    edits = {"                if kind == k_button() || kind == k_input() {\n                    q.items.push(id);": "                if kind == k_button() {\n                    q.items.push(id);"},
+    edits = {"                if kind == WidgetKind::Button || kind == WidgetKind::Input {\n                    q.items.push(id);": "                if kind == WidgetKind::Button {\n                    q.items.push(id);"},
     library = "aura",
     package = ":port_package",
     target = VESPER_TARGET,

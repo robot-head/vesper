@@ -7,11 +7,10 @@ use self::{
     Val
 };
 use self::util::{
+    ErrorKind,
     ascii_alnum,
     byte,
     copy_range,
-    e_limit,
-    e_policy,
     fail,
     lit,
     str_len,
@@ -19,73 +18,118 @@ use self::util::{
     word
 };
 use @vesper/loom-calculus::util::{
+    Ascii,
     is_lit,
     none,
     sbool
 };
 
+// The supported SPDX license IDs, in license.rs order.
+enum License: _ {
+    Mit,
+    Apache20,
+    Bsd2Clause,
+    Bsd3Clause,
+    Isc,
+    Mpl20,
+    Gpl20Only,
+    Gpl20OrLater,
+    Gpl30Only,
+    Gpl30OrLater,
+    Lgpl21Only,
+    Lgpl21OrLater,
+    Lgpl30Only,
+    Lgpl30OrLater,
+    Agpl30Only,
+    Agpl30OrLater,
+    Unlicense,
+    Zlib,
+    Bsl10,
+    Cc010
+}
+
+// The supported SPDX exceptions, in license.rs order.
+enum Exception: _ {
+    Llvm,
+    Classpath20,
+    Gcc31
+}
+
+// A license failure: none yet, an unknown or unsupported expression, or an
+// exhausted budget.
+pub enum LicenseFail: _ {
+    None,
+    Unknown,
+    Limit
+}
+
+// A grant code is license * GRANTS_PER_LICENSE, plus exception + 1 with an
+// exception; GRANT_COUNT covers the 20 licenses.
+const GRANTS_PER_LICENSE: u64 = 4;
+const GRANT_COUNT: u64 = 80;
+
 // The supported SPDX license IDs (license.rs order): the index of the
 // token at pool range (off, len), or none().
 fn license_index(in s: A, off: u64, len: u64) -> u64 {
     if is_lit(in s.l, off, len, "MIT") {
-        return 0;
+        return License::Mit;
     }
     if is_lit(in s.l, off, len, "Apache-2.0") {
-        return 1;
+        return License::Apache20;
     }
     if is_lit(in s.l, off, len, "BSD-2-Clause") {
-        return 2;
+        return License::Bsd2Clause;
     }
     if is_lit(in s.l, off, len, "BSD-3-Clause") {
-        return 3;
+        return License::Bsd3Clause;
     }
     if is_lit(in s.l, off, len, "ISC") {
-        return 4;
+        return License::Isc;
     }
     if is_lit(in s.l, off, len, "MPL-2.0") {
-        return 5;
+        return License::Mpl20;
     }
     if is_lit(in s.l, off, len, "GPL-2.0-only") {
-        return 6;
+        return License::Gpl20Only;
     }
     if is_lit(in s.l, off, len, "GPL-2.0-or-later") {
-        return 7;
+        return License::Gpl20OrLater;
     }
     if is_lit(in s.l, off, len, "GPL-3.0-only") {
-        return 8;
+        return License::Gpl30Only;
     }
     if is_lit(in s.l, off, len, "GPL-3.0-or-later") {
-        return 9;
+        return License::Gpl30OrLater;
     }
     if is_lit(in s.l, off, len, "LGPL-2.1-only") {
-        return 10;
+        return License::Lgpl21Only;
     }
     if is_lit(in s.l, off, len, "LGPL-2.1-or-later") {
-        return 11;
+        return License::Lgpl21OrLater;
     }
     if is_lit(in s.l, off, len, "LGPL-3.0-only") {
-        return 12;
+        return License::Lgpl30Only;
     }
     if is_lit(in s.l, off, len, "LGPL-3.0-or-later") {
-        return 13;
+        return License::Lgpl30OrLater;
     }
     if is_lit(in s.l, off, len, "AGPL-3.0-only") {
-        return 14;
+        return License::Agpl30Only;
     }
     if is_lit(in s.l, off, len, "AGPL-3.0-or-later") {
-        return 15;
+        return License::Agpl30OrLater;
     }
     if is_lit(in s.l, off, len, "Unlicense") {
-        return 16;
+        return License::Unlicense;
     }
     if is_lit(in s.l, off, len, "Zlib") {
-        return 17;
+        return License::Zlib;
     }
     if is_lit(in s.l, off, len, "BSL-1.0") {
-        return 18;
+        return License::Bsl10;
     }
     if is_lit(in s.l, off, len, "CC0-1.0") {
-        return 19;
+        return License::Cc010;
     }
     none()
 }
@@ -93,20 +137,20 @@ fn license_index(in s: A, off: u64, len: u64) -> u64 {
 // The supported exceptions, likewise.
 fn exception_index(in s: A, off: u64, len: u64) -> u64 {
     if is_lit(in s.l, off, len, "LLVM-exception") {
-        return 0;
+        return Exception::Llvm;
     }
     if is_lit(in s.l, off, len, "Classpath-exception-2.0") {
-        return 1;
+        return Exception::Classpath20;
     }
     if is_lit(in s.l, off, len, "GCC-exception-3.1") {
-        return 2;
+        return Exception::Gcc31;
     }
     none()
 }
 
-// Grant codes: license * 4, plus exception + 1 for `WITH`.
+// Grant codes: license * GRANTS_PER_LICENSE, plus exception + 1 for `WITH`.
 pub fn grant_count() -> u64 {
-    80
+    GRANT_COUNT
 }
 
 fn tok_off(in s: A, i: u64) -> u64 {
@@ -117,7 +161,7 @@ fn tok_len(in s: A, i: u64) -> u64 {
     word(in s.tlen, i)
 }
 
-// A license failure: 1 unknown, 2 limit. `tok` appends that token's text.
+// A license failure (`LicenseFail`). `tok` appends that token's text.
 fn lfail(inout s: A, kind: u64, in t: Str, tok: u64) {
     let mo = s.dp.len();
     lit(inout s, t);
@@ -137,7 +181,7 @@ fn push_tok(inout s: A, off: u64, len: u64) {
 }
 
 fn ws(b: u8) -> bool {
-    b == 32 || b == 9 || b == 10 || b == 12 || b == 13
+    b == Ascii::Space || b == Ascii::Tab || b == Ascii::Lf || b == Ascii::FormFeed || b == Ascii::Cr
 }
 
 // Split the pool range into tokens; false on a failure.
@@ -145,30 +189,30 @@ fn tokenize(inout s: A, off: u64, len: u64) -> bool {
     s.toff.clear();
     s.tlen.clear();
     if len > s.m_string {
-        lfail(inout s, 2, "license byte budget exhausted", none());
+        lfail(inout s, LicenseFail::Limit, "license byte budget exhausted", none());
         return false;
     }
     let mut start = none();
     for i in 0..len {
         let b = byte(in s, wrapping_add(off, i));
-        if ws(b) || b == 40 || b == 41 {
+        if ws(b) || b == Ascii::LParen || b == Ascii::RParen {
             if start != none() {
                 push_tok(inout s, wrapping_add(off, start), wrapping_sub(i, start));
                 start = none();
             }
-            if b == 40 || b == 41 {
+            if b == Ascii::LParen || b == Ascii::RParen {
                 push_tok(inout s, wrapping_add(off, i), 1);
             }
-        } else if ascii_alnum(b) || b == 45 || b == 46 {
+        } else if ascii_alnum(b) || b == Ascii::Minus || b == Ascii::Dot {
             if start == none() {
                 start = i;
             }
         } else {
-            lfail(inout s, 1, "unsupported/freeform license syntax", none());
+            lfail(inout s, LicenseFail::Unknown, "unsupported/freeform license syntax", none());
             return false;
         }
         if s.toff.len() > s.m_ltokens {
-            lfail(inout s, 2, "license token budget exhausted", none());
+            lfail(inout s, LicenseFail::Limit, "license token budget exhausted", none());
             return false;
         }
     }
@@ -176,7 +220,7 @@ fn tokenize(inout s: A, off: u64, len: u64) -> bool {
         push_tok(inout s, wrapping_add(off, start), wrapping_sub(len, start));
     }
     if s.toff.len() > s.m_ltokens {
-        lfail(inout s, 2, "license token budget exhausted", none());
+        lfail(inout s, LicenseFail::Limit, "license token budget exhausted", none());
         return false;
     }
     true
@@ -204,7 +248,7 @@ fn bad() -> Val {
 
 fn expression(inout s: A, depth: u64) -> Val {
     let mut left = conjunction(inout s, depth);
-    if s.lf != 0 {
+    if s.lf != LicenseFail::None {
         return bad();
     }
     loop {
@@ -212,7 +256,7 @@ fn expression(inout s: A, depth: u64) -> Val {
             break;
         }
         let right = conjunction(inout s, depth);
-        if s.lf != 0 {
+        if s.lf != LicenseFail::None {
             return bad();
         }
         left = Val {
@@ -226,7 +270,7 @@ fn expression(inout s: A, depth: u64) -> Val {
 
 fn conjunction(inout s: A, depth: u64) -> Val {
     let mut left = atom(inout s, depth);
-    if s.lf != 0 {
+    if s.lf != LicenseFail::None {
         return bad();
     }
     loop {
@@ -234,7 +278,7 @@ fn conjunction(inout s: A, depth: u64) -> Val {
             break;
         }
         let right = atom(inout s, depth);
-        if s.lf != 0 {
+        if s.lf != LicenseFail::None {
             return bad();
         }
         left = Val {
@@ -248,41 +292,41 @@ fn conjunction(inout s: A, depth: u64) -> Val {
 
 fn atom(inout s: A, depth: u64) -> Val {
     if depth > s.m_ldepth {
-        lfail(inout s, 2, "license nesting budget exhausted", none());
+        lfail(inout s, LicenseFail::Limit, "license nesting budget exhausted", none());
         return bad();
     }
     if take(inout s, "(") {
         let value = expression(inout s, wrapping_add(depth, 1));
-        if s.lf != 0 {
+        if s.lf != LicenseFail::None {
             return bad();
         }
         if !take(inout s, ")") {
-            lfail(inout s, 1, "missing closing license parenthesis", none());
+            lfail(inout s, LicenseFail::Unknown, "missing closing license parenthesis", none());
             return bad();
         }
         return value;
     }
     let p = s.tpos;
     if p >= s.toff.len() {
-        lfail(inout s, 1, "expected SPDX license identifier", none());
+        lfail(inout s, LicenseFail::Unknown, "expected SPDX license identifier", none());
         return bad();
     }
     let li = license_index(in s, tok_off(in s, p), tok_len(in s, p));
     if li == none() {
-        lfail(inout s, 1, "unknown/unsupported SPDX license identifier: ", p);
+        lfail(inout s, LicenseFail::Unknown, "unknown/unsupported SPDX license identifier: ", p);
         return bad();
     }
     s.tpos = wrapping_add(p, 1);
-    let mut grant = wrapping_mul(li, 4);
+    let mut grant = wrapping_mul(li, GRANTS_PER_LICENSE);
     if take(inout s, "WITH") {
         let q = s.tpos;
         if q >= s.toff.len() {
-            lfail(inout s, 1, "expected SPDX exception identifier", none());
+            lfail(inout s, LicenseFail::Unknown, "expected SPDX exception identifier", none());
             return bad();
         }
         let ei = exception_index(in s, tok_off(in s, q), tok_len(in s, q));
         if ei == none() {
-            lfail(inout s, 1, "unknown/unsupported SPDX exception: ", q);
+            lfail(inout s, LicenseFail::Unknown, "unknown/unsupported SPDX exception: ", q);
             return bad();
         }
         s.tpos = wrapping_add(q, 1);
@@ -297,7 +341,7 @@ fn atom(inout s: A, depth: u64) -> Val {
 
 // `parse` of the expression with string id `id`; on failure s.lf is set.
 pub fn parse(inout s: A, id: u64) -> Val {
-    s.lf = 0;
+    s.lf = LicenseFail::None;
     let off = str_off(in s, id);
     let len = str_len(in s, id);
     if !tokenize(inout s, off, len) {
@@ -305,11 +349,11 @@ pub fn parse(inout s: A, id: u64) -> Val {
     }
     s.tpos = 0;
     let v = expression(inout s, 0);
-    if s.lf != 0 {
+    if s.lf != LicenseFail::None {
         return bad();
     }
     if s.tpos != s.toff.len() {
-        lfail(inout s, 1, "unexpected trailing license token", none());
+        lfail(inout s, LicenseFail::Unknown, "unexpected trailing license token", none());
         return bad();
     }
     v
@@ -325,12 +369,12 @@ pub fn allowlist(inout s: A) {
     for i in 0..s.allow.len() {
         let id = word(in s.allow, i);
         let v = parse(inout s, id);
-        if s.lf != 0 {
+        if s.lf != LicenseFail::None {
             // The failure text becomes the error message.
-            s.err = if s.lf == 2 {
-                wrapping_add(e_limit(), 1)
+            s.err = if s.lf == LicenseFail::Limit {
+                wrapping_add(ErrorKind::Limit, 1)
             } else {
-                wrapping_add(e_policy(), 1)
+                wrapping_add(ErrorKind::Policy, 1)
             };
             s.emo = s.lmo;
             s.eml = s.lml;
@@ -339,13 +383,13 @@ pub fn allowlist(inout s: A) {
         if !v.single {
             fail(
                 inout s,
-                e_policy(),
+                ErrorKind::Policy,
                 "allow entries must be single licenses or explicit license WITH exception grants"
             );
             return;
         }
         if sbool(in s.grants, v.grant) {
-            fail(inout s, e_policy(), "duplicate license grant");
+            fail(inout s, ErrorKind::Policy, "duplicate license grant");
             return;
         }
         s.grants.try_set(v.grant, true);

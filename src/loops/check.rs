@@ -324,13 +324,27 @@ impl Checker<'_> {
             inclusive,
         } = &iter.kind
         else {
-            self.error(
-                "E0213",
-                "'for' iterates an integer range 'a..b' or 'a..=b'",
-                iter.span.clone(),
+            // An array, a sequence or a slice (`for_sequences`).
+            let Some((element, plan)) = self.for_sequence(pat, iter, env) else {
+                return Type::unit();
+            };
+            if !self.irrefutable(pat, &element) {
+                self.error(
+                    "E0210",
+                    "'for' pattern must be irrefutable",
+                    pat.span.clone(),
+                );
+            }
+            self.for_sequences
+                .insert((iter.span.start, iter.span.end), plan);
+            return self.loop_body(
+                body,
+                env,
+                &Type::unit(),
+                false,
+                Some((pat, &element, false, None)),
+                span,
             );
-            self.expr(iter, env, Usage::Own);
-            return Type::unit();
         };
         // A range of unsuffixed literals takes the kind of the loop
         // variable's uses (`crate::check::literal_typing`).
@@ -388,14 +402,24 @@ impl Checker<'_> {
             )
             .map(|((lo, _), (_, hi))| (lo, if *inclusive { hi } else { hi - 1 }))
             .filter(|(lo, hi)| lo <= hi);
-        self.loop_body(
+        // The index loop a `for` over a sequence means lends the sequence
+        // to its body (`for_sequences`).
+        let borrow = self.for_borrow(pat, end);
+        if let Some(loan) = &borrow {
+            self.loop_borrows.push(loan.clone());
+        }
+        let t = self.loop_body(
             body,
             env,
             &Type::unit(),
             false,
             Some((pat, &element, nonzero, range)),
             span,
-        )
+        );
+        if borrow.is_some() {
+            self.loop_borrows.pop();
+        }
+        t
     }
 
     fn break_expr(&mut self, value: Option<&Expr>, env: &mut Env, span: Span) -> Type {

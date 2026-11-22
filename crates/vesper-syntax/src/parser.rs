@@ -108,6 +108,49 @@ impl Default for ParseLimits {
 /// Compatibility API. Oversized input yields E0003, an empty AST and a lossless
 /// bounded UTF-8 prefix CST. Within the byte budget all failure CSTs retain the
 /// complete source. Explicit callers should use parse_with_limits for preflight.
+/// Keyword tokens that are names wherever a name is expected (manuscript
+/// "Contextual names"): `state`, `linear`, `with`, `eff`, `effect`,
+/// `handle`, `sink` and `inout`. `handle` is a name only where it does not
+/// start a handle expression (`Parser::handle_starts`).
+/// The magnitude of `i128::MIN`: the one literal above `i128::MAX` that may
+/// be negated.
+const WIDE_NEG_MIN: u128 = 1 << 127;
+
+/// The keywords that are never names (manuscript "Contextual names": "The
+/// other keywords cannot be names").
+fn reserved_kind(k: K) -> bool {
+    matches!(
+        k,
+        K::Mod
+            | K::In
+            | K::Return
+            | K::Match
+            | K::If
+            | K::Else
+            | K::Let
+            | K::Fn
+            | K::Struct
+            | K::Enum
+            | K::Impl
+    )
+}
+
+fn contextual_kind(k: K) -> bool {
+    matches!(
+        k,
+        K::State
+            | K::Linear
+            | K::Copy
+            | K::Affine
+            | K::With
+            | K::Eff
+            | K::Effect
+            | K::Handle
+            | K::Sink
+            | K::Inout
+    )
+}
+
 pub fn parse(source: &str) -> Parse {
     (parse_table().parse)(source)
 }
@@ -229,6 +272,7 @@ fn parse_module_with_limits(
         trait_bounds: vec![],
         uses: vec![],
         public_items: vec![],
+        extra_items: vec![],
         pending_bounds: vec![],
         limits,
         depth: 0,
@@ -292,6 +336,9 @@ struct Parser<'a> {
     uses: Vec<UseDecl>,
     /// Names of `pub` functions, types and effects, in source order.
     public_items: Vec<String>,
+    /// Further items of the latest declaration: the member constants of a
+    /// value enum after its first (see [`Parser::value_enum`]).
+    extra_items: Vec<Item>,
     /// Trait bounds read by the latest `generics` call (`[T: Trait]`).
     pending_bounds: Vec<TraitBoundSyntax>,
     limits: ParseLimits,
@@ -589,30 +636,15 @@ impl Parser<'_> {
             return self.bump();
         }
         if !matches!(self.kind(), K::Lower | K::SelfKw) {
-            match self.kind() {
-                K::Copy
-                | K::Affine
-                | K::Mod
-                | K::In
-                | K::Inout
-                | K::Sink
-                | K::Handle
-                | K::Return
-                | K::Match
-                | K::If
-                | K::Else
-                | K::Let
-                | K::Fn
-                | K::Struct
-                | K::Enum
-                | K::Effect
-                | K::Impl => {
-                    let word = self.text(0).to_owned();
-                    self.error(format!(
-                        "expected a lower-case identifier, found the keyword `{word}`, which cannot be a name"
-                    ));
-                }
-                _ => self.error("expected a lower-case identifier"),
+            if reserved_kind(self.kind()) {
+                let word = self.text(0).to_owned();
+                self.error(format!(
+                    "expected a lower-case identifier, found the keyword `{word}`, which cannot be a name"
+                ));
+                // One diagnostic: the keyword stands in for the name.
+                return self.bump();
+            } else {
+                self.error("expected a lower-case identifier");
             }
         }
         self.ident()
@@ -624,8 +656,67 @@ impl Parser<'_> {
     /// forms start; wherever a name is expected they are names (manuscript
     /// "Contextual keywords"). `eff` opens an effect row only after a
     /// signature (`Self::effects`) and as the `e: eff` row bound.
+    ///
+    /// `effect`, `handle`, `sink` and `inout` are contextual too: `effect`
+    /// starts only an item, `handle` starts an expression only before an
+    /// effect (`Self::handle_starts`), and the pass modes are modes only
+    /// before an operand (`Self::pass_word_is_mode`).
     fn at_contextual_name(&self) -> bool {
-        matches!(self.kind(), K::State | K::Linear | K::With | K::Eff)
+        contextual_kind(self.kind()) && !(self.at(K::Handle) && self.handle_starts())
+    }
+    /// Whether `handle` at the cursor starts a handle expression: the next
+    /// token starts its effect (`handle E`, `handle self::m::E`,
+    /// `handle @p/q::E`) or its label (`handle l: E`). A value named
+    /// `handle` is never followed by one of these.
+    fn handle_starts(&self) -> bool {
+        match self.nth(1) {
+            K::Upper | K::SelfKw | K::At => true,
+            k => (k == K::Lower || contextual_kind(k)) && self.nth(2) == K::Colon,
+        }
+    }
+    /// Whether the `sink` or `inout` at the cursor is a pass mode. In an
+    /// argument list it is a mode only before a token that starts an operand
+    /// and cannot continue a value named `sink`: `f(sink x)` sinks `x`, while
+    /// `f(sink)`, `f(sink.a)`, `f(sink(x))`, `f(sink[i])` and `f(sink - 1)`
+    /// use a value named `sink`; before a closure (`|` or `||`) it is a mode.
+    /// In a parameter list it is a mode before the
+    /// parameter's name (`sink x: T`), and a name before `:` (`sink: T`).
+    fn pass_word_is_mode(&self, params: bool) -> bool {
+        let next = self.nth(1);
+        if params {
+            return next == K::Lower || next == K::SelfKw || contextual_kind(next);
+        }
+        match next {
+            K::Lower => self.text(1) != "as",
+            K::Upper
+            | K::SelfKw
+            | K::At
+            | K::Int
+            | K::Float
+            | K::String
+            | K::True
+            | K::False
+            | K::LBrace
+            | K::Bang
+            | K::Tilde
+            // A closure (`sink |x| e`, `sink || e`): a value named `sink`
+            // is not or-ed (`(sink) | x` writes that).
+            | K::Pipe
+            | K::Or
+            | K::Match
+            | K::If
+            | K::State
+            | K::Linear
+            | K::Copy
+            | K::Affine
+            | K::With
+            | K::Eff
+            | K::Effect
+            | K::Handle
+            | K::Sink
+            | K::Inout => true,
+            _ => false,
+        }
     }
     /// At the root of a qualified path: `self::`, `super::` or
     /// `@scope/name::` (manuscript ch 11.3, "Qualified paths").
@@ -657,10 +748,7 @@ impl Parser<'_> {
             self.bump()
         };
         while self.at(K::ColonColon)
-            && matches!(
-                self.nth(1),
-                K::Lower | K::Upper | K::State | K::Linear | K::With | K::Eff
-            )
+            && (matches!(self.nth(1), K::Lower | K::Upper) || contextual_kind(self.nth(1)))
         {
             self.bump();
             path.push_str("::");
@@ -691,22 +779,26 @@ impl Parser<'_> {
             _ => None,
         }
     }
+    /// A pass mode (`in`, `inout`, `sink`) in a function type, where one is
+    /// always a mode.
     fn pass(&mut self) -> (Pass, bool) {
-        match self.kind() {
-            K::In => {
-                self.bump();
-                (Pass::In, true)
-            }
-            K::Inout => {
-                self.bump();
-                (Pass::Inout, true)
-            }
-            K::Sink => {
-                self.bump();
-                (Pass::Sink, true)
-            }
-            _ => (Pass::In, false),
+        self.pass_in(None)
+    }
+    /// A pass mode in a parameter (`Some(true)`) or argument (`Some(false)`)
+    /// list, where `inout` and `sink` may also be names
+    /// (`Self::pass_word_is_mode`).
+    fn pass_in(&mut self, list: Option<bool>) -> (Pass, bool) {
+        let pass = match self.kind() {
+            K::In => Pass::In,
+            K::Inout => Pass::Inout,
+            K::Sink => Pass::Sink,
+            _ => return (Pass::In, false),
+        };
+        if pass != Pass::In && list.is_some_and(|params| !self.pass_word_is_mode(params)) {
+            return (Pass::In, false);
         }
+        self.bump();
+        (pass, true)
     }
     fn generics(&mut self) -> Vec<Generic> {
         let mut out = vec![];
@@ -887,6 +979,7 @@ impl Parser<'_> {
         if let Some(item) = self.item() {
             items.push(item);
         }
+        items.append(&mut self.extra_items);
         self.builder.finish_node();
         if self.pos == before {
             self.error("expected a declaration");
@@ -901,11 +994,13 @@ impl Parser<'_> {
         }
         let (item, public) = self.declaration()?;
         if public {
-            match &item {
-                Item::Adt(a) => self.public_items.push(a.name.clone()),
-                Item::Function(f) => self.public_items.push(f.name.clone()),
-                Item::Effect(e) => self.public_items.push(e.name.clone()),
-                Item::Impl { .. } | Item::Trait(_) | Item::Conformance(_) => {}
+            for item in std::iter::once(&item).chain(&self.extra_items) {
+                match item {
+                    Item::Adt(a) => self.public_items.push(a.name.clone()),
+                    Item::Function(f) => self.public_items.push(f.name.clone()),
+                    Item::Effect(e) => self.public_items.push(e.name.clone()),
+                    Item::Impl { .. } | Item::Trait(_) | Item::Conformance(_) => {}
+                }
             }
         }
         Some(item)
@@ -1041,8 +1136,21 @@ impl Parser<'_> {
             K::Enum => {
                 self.bump();
                 let name = self.upper();
+                let bracket = self.at(K::LBracket);
                 let generics = self.generics();
                 self.own_type_bounds(&name);
+                if self.eat(K::Colon) {
+                    if bracket {
+                        self.error("a value enum takes no type parameters");
+                    }
+                    let mut members = self.value_enum(&name);
+                    if members.is_empty() {
+                        return None;
+                    }
+                    let first = members.remove(0);
+                    self.extra_items = members;
+                    return Some((first, public));
+                }
                 self.expect(K::LBrace);
                 let mut variants = vec![];
                 while !self.at(K::RBrace) && !self.at(K::Eof) {
@@ -1316,6 +1424,90 @@ impl Parser<'_> {
             span: start..self.end(),
         }
     }
+    /// The rest of a value enum `enum Name: T { A = e, B, .. }` (or `Name: _`) after its
+    /// `:` (§2.2 `EnumDecl`): one module constant per member, named
+    /// [`CONST_PREFIX`]`Name::A` and read as `Name::A`. A member without a
+    /// value is the previous member's plus one (the first is 0), folded to a
+    /// literal when the previous value is one.
+    fn value_enum(&mut self, name: &str) -> Vec<Item> {
+        // `enum Name: _ { .. }`: untyped members, integer literals that
+        // take their type from each use.
+        let repr = if self.at_word(0, "_") {
+            self.bump();
+            Type::Infer
+        } else {
+            self.ty()
+        };
+        self.expect(K::LBrace);
+        let mut members: Vec<Item> = vec![];
+        let mut previous: Option<(String, Option<i128>)> = None;
+        let mut known: std::collections::BTreeMap<String, i128> = Default::default();
+        while !self.at(K::RBrace) && !self.at(K::Eof) {
+            let start = self.start();
+            let member = self.upper();
+            let value = if self.eat(K::Eq) {
+                self.expr()
+            } else {
+                let span = start..self.end();
+                let literal = |n: i128| Expr {
+                    kind: ExprKind::Literal(Literal::Int(n)),
+                    span: span.clone(),
+                };
+                match &previous {
+                    None => literal(0),
+                    // Within the literal range -(2^64 - 1)..=2^64 - 1.
+                    Some((_, Some(n))) if *n < i128::from(u64::MAX) => literal(n + 1),
+                    Some((prev, _)) => Expr {
+                        kind: ExprKind::Binary(
+                            "+".into(),
+                            Box::new(Expr {
+                                kind: ExprKind::Name(format!("{name}::{prev}")),
+                                span: span.clone(),
+                            }),
+                            Box::new(literal(1)),
+                        ),
+                        span: span.clone(),
+                    },
+                }
+            };
+            // A value built from literals and earlier members by operators
+            // is folded to its literal, so every use is free and a pattern.
+            let value = match fold_member(&value, name, &known) {
+                Some(n) => Expr {
+                    kind: ExprKind::Literal(Literal::Int(i128::from(n))),
+                    span: value.span.clone(),
+                },
+                None => value,
+            };
+            let n = int_value(&value);
+            if let Some(n) = n {
+                known.insert(member.clone(), n);
+            }
+            previous = Some((member.clone(), n));
+            let span = start..self.end();
+            members.push(Item::Function(Box::new(Function {
+                name: format!("{CONST_PREFIX}{name}::{member}"),
+                fip: false,
+                generics: vec![],
+                params: vec![],
+                result: repr.clone(),
+                effects: Effects::default(),
+                body: Some(Expr {
+                    span: value.span.clone(),
+                    kind: ExprKind::Block {
+                        statements: vec![],
+                        tail: Some(Box::new(value)),
+                    },
+                }),
+                span,
+            })));
+            if !self.eat(K::Comma) {
+                break;
+            }
+        }
+        self.expect(K::RBrace);
+        members
+    }
     /// `const NAME: T = expr;` (§2.2 `ConstDecl`): the parameterless
     /// function [`CONST_PREFIX`]`NAME`, whose every use the checker reads
     /// as a call (`vesper::arrays`).
@@ -1349,7 +1541,7 @@ impl Parser<'_> {
         let mut out = vec![];
         while !self.at(end) && !self.at(K::Eof) {
             let start = self.start();
-            let (pass, _) = self.pass();
+            let (pass, _) = self.pass_in(Some(true));
             let name = self.lower();
             let projections = if self.eat(K::Dot) {
                 self.place_tree()
@@ -2033,10 +2225,8 @@ impl Parser<'_> {
         out
     }
     fn statement_anchor(&self) -> bool {
-        matches!(
-            self.kind(),
-            K::Let | K::Match | K::Handle | K::Return | K::If
-        )
+        matches!(self.kind(), K::Let | K::Match | K::Return | K::If)
+            || (self.at(K::Handle) && self.handle_starts())
     }
     fn recover_statement(&mut self) {
         if self.at(K::Semi) {
@@ -2150,6 +2340,7 @@ impl Parser<'_> {
                         | ExprKind::For { .. }
                         | ExprKind::If { .. }
                         | ExprKind::Match { .. }
+                        | ExprKind::Handle { .. }
                 ) && self.source[..e.span.end.min(self.source.len())].ends_with('}')
                     && !matches!(self.kind(), K::RBrace | K::Eof)
                 {
@@ -2202,7 +2393,7 @@ impl Parser<'_> {
     fn expr_inner(&mut self) -> Expr {
         self.builder.start_node(EXPR);
         let e = match self.kind() {
-            K::Handle => self.handle(),
+            K::Handle if self.handle_starts() => self.handle(),
             K::Lower
                 if self.at_word(0, "region")
                     && self.nth(1) == K::Lower
@@ -2238,10 +2429,10 @@ impl Parser<'_> {
     /// Whether `for` starts a `ForExpr` (`for Pat in`), not a value named `for`.
     fn for_header(&self) -> bool {
         !self.bound_values.contains("for")
-            && matches!(
+            && (matches!(
                 self.nth(1),
-                K::Lower | K::Upper | K::LParen | K::Int | K::True | K::False | K::Eff
-            )
+                K::Lower | K::Upper | K::LParen | K::Int | K::True | K::False
+            ) || contextual_kind(self.nth(1)))
     }
     /// `for pat in start..end { body }` (manuscript `ForExpr`). The iterable
     /// is any restricted expression; `a..b` and `a..=b` build a range.
@@ -2453,7 +2644,7 @@ impl Parser<'_> {
     fn handle(&mut self) -> Expr {
         let start = self.start();
         self.expect(K::Handle);
-        let label = if self.at(K::Lower) {
+        let label = if self.at(K::Lower) || self.at_contextual_name() {
             let l = self.lower();
             self.expect(K::Colon);
             Some(l)
@@ -2586,10 +2777,17 @@ impl Parser<'_> {
             let op = self.bump();
             let v = self.binary(12);
             let kind = if op == "-" {
-                if let ExprKind::Literal(Literal::Int(n)) = v.kind {
-                    ExprKind::Literal(Literal::Int(-n))
-                } else {
-                    ExprKind::Unary(op, Box::new(v))
+                match v.kind {
+                    // `i128::MIN` has no negation: `- -170..728` stays a
+                    // unary minus (and overflows when checked).
+                    ExprKind::Literal(Literal::Int(n)) if n != i128::MIN => {
+                        ExprKind::Literal(Literal::Int(-n))
+                    }
+                    // `-170141183460469231731687303715884105728` is `i128::MIN`.
+                    ExprKind::Literal(Literal::WideInt(n)) if n == WIDE_NEG_MIN => {
+                        ExprKind::Literal(Literal::Int(i128::MIN))
+                    }
+                    kind => ExprKind::Unary(op, Box::new(Expr { kind, span: v.span })),
                 }
             } else {
                 ExprKind::Unary(op, Box::new(v))
@@ -2790,7 +2988,7 @@ impl Parser<'_> {
     fn args(&mut self) -> Vec<Arg> {
         let mut args = vec![];
         while !self.at(K::RParen) && !self.at(K::Eof) {
-            let (pass, explicit) = self.pass();
+            let (pass, explicit) = self.pass_in(Some(false));
             args.push(Arg {
                 pass,
                 explicit,
@@ -2807,18 +3005,17 @@ impl Parser<'_> {
             K::Int => {
                 let text = self.bump().replace('_', "");
                 let n = if text.starts_with("0x") || text.starts_with("0X") {
-                    i128::from_str_radix(&text[2..], 16)
+                    u128::from_str_radix(&text[2..], 16)
                 } else {
                     text.parse()
                 };
-                Some(Literal::Int(
-                    n.ok()
-                        .filter(|n| *n <= u64::MAX as i128)
-                        .unwrap_or_else(|| {
-                            self.error("integer literal exceeds u64 range");
-                            0
-                        }),
-                ))
+                Some(match n {
+                    Ok(n) => Literal::int(n),
+                    Err(_) => {
+                        self.error("integer literal exceeds u128 range");
+                        Literal::Int(0)
+                    }
+                })
             }
             K::Float => {
                 let s = self.bump();
@@ -2872,9 +3069,8 @@ impl Parser<'_> {
                         ExprKind::Name(name)
                     }
                 }
-                K::Lower | K::SelfKw | K::State | K::Linear | K::With | K::Eff => {
-                    ExprKind::Name(self.bump())
-                }
+                K::Lower | K::SelfKw => ExprKind::Name(self.bump()),
+                _ if self.at_contextual_name() => ExprKind::Name(self.bump()),
                 K::Upper => {
                     let mut name = self.bump();
                     while self.eat(K::ColonColon) {
@@ -2912,6 +3108,11 @@ impl Parser<'_> {
                 }
                 K::LBracket => self.array_literal(start),
                 K::LBrace => return self.block(),
+                // `a && if b { x } else { y }`, `a || match v { .. }`: an
+                // `if` or `match` is an operand (manuscript `PrimaryExpr`).
+                // At a statement start `expr_inner` takes them first.
+                K::If => return self.if_expr(),
+                K::Match => return self.match_expr(),
                 _ => {
                     self.error("expected expression");
                     if self.editor
@@ -3088,6 +3289,11 @@ impl Parser<'_> {
             PatternKind::Literal(if negative {
                 match l {
                     Literal::Int(n) => Literal::Int(-n),
+                    Literal::WideInt(n) if n == WIDE_NEG_MIN => Literal::Int(i128::MIN),
+                    Literal::WideInt(n) => {
+                        self.error("integer literal exceeds i128 range when negated");
+                        Literal::WideInt(n)
+                    }
                     Literal::Float(n) => Literal::Float(-n),
                     l => {
                         self.error("only numeric patterns can be negative");
@@ -3106,7 +3312,7 @@ impl Parser<'_> {
                     let name = self.qualified_path();
                     self.constructor_pattern(name)
                 }
-                K::Lower | K::State | K::Linear | K::With | K::Eff => {
+                k if k == K::Lower || contextual_kind(k) => {
                     let name = self.bump();
                     if name == "_" {
                         PatternKind::Wild
@@ -3127,6 +3333,16 @@ impl Parser<'_> {
                     let p = self.pattern_list(K::RParen);
                     self.expect(K::RParen);
                     PatternKind::Tuple(p)
+                }
+                k if reserved_kind(k) => {
+                    // `let in = ..`: one diagnostic that names the keyword;
+                    // the keyword is taken as the pattern, so no cascade.
+                    let word = self.text(0).to_owned();
+                    self.error(format!(
+                        "expected pattern, found the keyword `{word}`, which cannot be a name"
+                    ));
+                    self.bump();
+                    PatternKind::Wild
                 }
                 _ => {
                     self.error("expected pattern");
@@ -3243,6 +3459,79 @@ pub(crate) fn contextual_item_names(
     names
 }
 
+/// The value of a value enum member's initializer built from non-negative
+/// integer literals, the enum's earlier non-negative members `Name::M`
+/// (`known`) and the operators `+ - * / % & | ^ << >>`, when every step
+/// stays within `0..=u64::MAX`. Range checks against the representation
+/// stay with the checker, which sees the folded literal.
+fn fold_member(
+    e: &Expr,
+    name: &str,
+    known: &std::collections::BTreeMap<String, i128>,
+) -> Option<u64> {
+    let fold = |e: &Expr| fold_member(e, name, known);
+    match &e.kind {
+        ExprKind::Literal(Literal::Int(n)) => u64::try_from(*n).ok(),
+        ExprKind::Name(n) => known
+            .get(n.strip_prefix(name)?.strip_prefix("::")?)
+            .and_then(|v| u64::try_from(*v).ok()),
+        ExprKind::Block {
+            statements,
+            tail: Some(t),
+        } if statements.is_empty() => fold(t),
+        ExprKind::Binary(op, a, b) => {
+            let (a, b) = (fold(a)?, fold(b)?);
+            match op.as_str() {
+                "+" => a.checked_add(b),
+                "-" => a.checked_sub(b),
+                "*" => a.checked_mul(b),
+                "/" => a.checked_div(b),
+                "%" => a.checked_rem(b),
+                "&" => Some(a & b),
+                "|" => Some(a | b),
+                "^" => Some(a ^ b),
+                "<<" if b < 64 && (a << b) >> b == a => Some(a << b),
+                ">>" if b < 64 => Some(a >> b),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// The integer a constant initializer spells: a literal or a negated one.
+fn int_value(e: &Expr) -> Option<i128> {
+    match &e.kind {
+        ExprKind::Literal(Literal::Int(n)) => Some(*n),
+        ExprKind::Unary(op, v) if op == "-" => int_value(v)?.checked_neg(),
+        ExprKind::Block {
+            statements,
+            tail: Some(t),
+        } if statements.is_empty() => int_value(t),
+        _ => None,
+    }
+}
+
+/// The literal value of a module constant's function, when its initializer
+/// is an integer (possibly negated) or `bool` literal: such a constant may
+/// be a match pattern. A literal past `i128::MAX` is kept as `WideInt`.
+pub fn const_literal(f: &Function) -> Option<Literal> {
+    let body = f.body.as_ref()?;
+    if let Some(n) = int_value(body) {
+        return Some(Literal::Int(n));
+    }
+    match &body.kind {
+        ExprKind::Block {
+            statements,
+            tail: Some(t),
+        } if statements.is_empty() => match &t.kind {
+            ExprKind::Literal(l @ (Literal::Bool(_) | Literal::WideInt(_))) => Some(l.clone()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// The function name prefix of a module constant `const NAME: T = e;`.
 pub const CONST_PREFIX: &str = "const$";
 /// The largest `N` of an array type `[T; N]` or literal `[x; N]`.
@@ -3313,36 +3602,79 @@ fn splat(value: Expr, n: usize, span: Span) -> ExprKind {
 }
 
 /// Turns every use `NAME` of a constant this module declares into a call of
-/// its function [`CONST_PREFIX`]`NAME`, before a package loader renames the
+/// its function [`CONST_PREFIX`]`NAME`, and every match pattern `NAME` of a
+/// literal constant into its literal, before a package loader renames the
 /// module's items. Returns whether the module declares a constant.
 pub fn lower_const_uses(module: &mut Module) -> bool {
     let consts = module
         .items
         .iter()
         .filter_map(|i| match i {
-            Item::Function(f) if f.name.starts_with(CONST_PREFIX) => {
-                Some(f.name[CONST_PREFIX.len()..].to_owned())
-            }
+            Item::Function(f) if f.name.starts_with(CONST_PREFIX) => Some((
+                f.name[CONST_PREFIX.len()..].to_owned(),
+                ConstUse {
+                    function: f.name.clone(),
+                    literal: const_literal(f),
+                    untyped: f.result == Type::Infer,
+                },
+            )),
             _ => None,
         })
-        .collect::<std::collections::BTreeSet<_>>();
+        .collect::<std::collections::BTreeMap<_, _>>();
     if consts.is_empty() {
         return false;
     }
+    lower_const_names(module, &consts);
+    true
+}
+
+/// One constant as [`lower_const_names`] rewrites its uses: its function,
+/// its literal value (if any) and whether it is an untyped value enum
+/// member (result type `_`), whose uses are the literal itself.
+#[derive(Debug, Clone)]
+pub struct ConstUse {
+    pub function: String,
+    pub literal: Option<Literal>,
+    pub untyped: bool,
+}
+
+/// Rewrites the uses of the constants `consts` (source name -> the
+/// constant's function and its literal value, if any) in every function of
+/// `module`: a name becomes a call of the function, and a field-less
+/// constructor pattern of a literal constant (in any pattern position)
+/// becomes that literal. The
+/// package loader runs it for imported constants.
+pub fn lower_const_names(
+    module: &mut Module,
+    consts: &std::collections::BTreeMap<String, ConstUse>,
+) {
     let mut rewrite = |e: &mut Expr| {
         if let ExprKind::Name(n) = &e.kind
-            && consts.contains(n)
+            && let Some(ConstUse {
+                untyped: true,
+                literal: Some(l),
+                ..
+            }) = consts.get(n)
+        {
+            // An untyped value enum member is its literal, typed by context.
+            e.kind = ExprKind::Literal(l.clone());
+        } else if let ExprKind::Name(n) = &e.kind
+            && let Some(ConstUse { function, .. }) = consts.get(n)
         {
             // The callee has an empty span of its own: a callee whose span
             // has a type is a function value, and the call's span has one.
             e.kind = ExprKind::Call {
                 callee: Box::new(Expr {
-                    kind: ExprKind::Name(format!("{CONST_PREFIX}{n}")),
+                    kind: ExprKind::Name(function.clone()),
                     span: e.span.start..e.span.start,
                 }),
                 types: vec![],
                 args: vec![],
             };
+        } else {
+            for p in patterns_of(e) {
+                const_patterns(p, consts);
+            }
         }
     };
     for item in &mut module.items {
@@ -3366,7 +3698,61 @@ pub fn lower_const_uses(module: &mut Module) -> bool {
             Item::Adt(_) | Item::Effect(_) => {}
         }
     }
-    true
+}
+
+/// The patterns an expression binds or matches directly: `let` patterns
+/// of a block, match arms, a `for` pattern and handler patterns.
+fn patterns_of(e: &mut Expr) -> Vec<&mut Pattern> {
+    match &mut e.kind {
+        ExprKind::Block { statements, .. } => statements
+            .iter_mut()
+            .filter_map(|s| match s {
+                Statement::Let { pat, .. } => Some(pat),
+                Statement::Expr(_) => None,
+            })
+            .collect(),
+        ExprKind::Match { arms, .. } => arms.iter_mut().map(|(p, _)| p).collect(),
+        ExprKind::For { pat, .. } => vec![pat],
+        ExprKind::Handle {
+            state, ret, ops, ..
+        } => state
+            .iter_mut()
+            .map(|(p, _)| p)
+            .chain(ret.pats.iter_mut())
+            .chain(ops.iter_mut().flat_map(|c| c.pats.iter_mut()))
+            .collect(),
+        _ => vec![],
+    }
+}
+
+/// A pattern with every field-less constructor that names a literal
+/// constant replaced by the literal.
+fn const_patterns(p: &mut Pattern, consts: &std::collections::BTreeMap<String, ConstUse>) {
+    match &mut p.kind {
+        PatternKind::Constructor {
+            name,
+            fields,
+            named: false,
+        } if fields.is_empty() => {
+            if let Some(ConstUse {
+                literal: Some(l), ..
+            }) = consts.get(name.as_str())
+            {
+                p.kind = PatternKind::Literal(l.clone());
+            }
+        }
+        PatternKind::Constructor { fields, .. } => {
+            for (_, p) in fields {
+                const_patterns(p, consts);
+            }
+        }
+        PatternKind::Tuple(ps) => {
+            for p in ps {
+                const_patterns(p, consts);
+            }
+        }
+        PatternKind::Wild | PatternKind::Bind(_) | PatternKind::Literal(_) => {}
+    }
 }
 
 fn function_exprs(f: &mut Function, g: &mut dyn FnMut(&mut Expr)) {

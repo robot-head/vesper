@@ -9,6 +9,7 @@ use @vesper/loom-calculus::solve::{
     solve
 };
 use @vesper/loom-calculus::util::{
+    Code,
     add,
     diag,
     gnode,
@@ -30,6 +31,22 @@ use self::input::{
     sysv
 };
 
+// The calculus table lengths in `marks`, in the order `mark` pushes them.
+enum Mark: _ {
+    Mans,
+    Ids,
+    Roots,
+    Ssels,
+    Diags,
+    Gn,
+    Gids,
+    Ge,
+    Gs,
+    Gl,
+    Snaps,
+    Pool
+}
+
 // Lengths of the calculus sequences before a solve.
 fn save(inout s: S) {
     s.marks.clear();
@@ -48,18 +65,18 @@ fn save(inout s: S) {
 }
 
 pub fn restore(inout s: S) {
-    s.l.mans.truncate(sw(in s.marks, 0));
-    s.l.ids.truncate(sw(in s.marks, 1));
-    s.l.roots.truncate(sw(in s.marks, 2));
-    s.l.ssels.truncate(sw(in s.marks, 3));
-    s.l.diags.truncate(sw(in s.marks, 4));
-    s.l.gn.truncate(sw(in s.marks, 5));
-    s.l.gids.truncate(sw(in s.marks, 6));
-    s.l.ge.truncate(sw(in s.marks, 7));
-    s.l.gs.truncate(sw(in s.marks, 8));
-    s.l.gl.truncate(sw(in s.marks, 9));
-    s.l.snaps.truncate(sw(in s.marks, 10));
-    s.l.pool.truncate(sw(in s.marks, 11));
+    s.l.mans.truncate(sw(in s.marks, Mark::Mans));
+    s.l.ids.truncate(sw(in s.marks, Mark::Ids));
+    s.l.roots.truncate(sw(in s.marks, Mark::Roots));
+    s.l.ssels.truncate(sw(in s.marks, Mark::Ssels));
+    s.l.diags.truncate(sw(in s.marks, Mark::Diags));
+    s.l.gn.truncate(sw(in s.marks, Mark::Gn));
+    s.l.gids.truncate(sw(in s.marks, Mark::Gids));
+    s.l.ge.truncate(sw(in s.marks, Mark::Ge));
+    s.l.gs.truncate(sw(in s.marks, Mark::Gs));
+    s.l.gl.truncate(sw(in s.marks, Mark::Gl));
+    s.l.snaps.truncate(sw(in s.marks, Mark::Snaps));
+    s.l.pool.truncate(sw(in s.marks, Mark::Pool));
 }
 
 // The last snapshot.
@@ -166,7 +183,7 @@ pub fn run_solve(inout s: S, with_systems: bool, partial: bool) -> bool {
     if partial {
         for i in 0..x.diag_n {
             let d = diag(in s.l.diags, add(x.diag_at, i));
-            if d.code != 10 && d.code != 11 {
+            if d.code != Code::MissingDependency && d.code != Code::MissingSystemPackage {
                 copy_calculus(inout s, add(x.diag_at, i));
                 result = true;
             }

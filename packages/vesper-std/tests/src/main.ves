@@ -1,32 +1,32 @@
 // Unit tests and conformance entry points for @vesper-std.
 //
-// Every `test_*` function returns 0 when it passes, else the number of its
+// Every `check_*` function returns 0 when it passes, else the number of its
 // first failing check. `run_all` returns 0, or `1000 * t + c` for check `c`
 // of the `t`-th test. `trace_*` entries return the hash of a regenerated
 // conformance trace (see `traces.ves`), and `trace_digest` folds them all.
 test {
     use self::core_tests::{
-        test_core_ordering,
-        test_core_option,
-        test_core_result
+        check_core_ordering,
+        check_core_option,
+        check_core_result
     };
     use self::text_tests::{
-        test_fmt_write,
-        test_fmt_parse,
-        test_bytes
+        check_fmt_write,
+        check_fmt_parse,
+        check_bytes
     };
     use self::map_tests::{
-        test_btree,
-        test_struct_keys,
-        test_flat_table,
-        test_flat_table_differential
+        check_btree,
+        check_struct_keys,
+        check_flat_table,
+        check_flat_table_differential
     };
     use self::seq_tests::{
-        test_sets,
-        test_radix_seq,
-        test_version
+        check_sets,
+        check_radix_seq,
+        check_version
     };
-    use self::string_tests::test_fmt_string;
+    use self::string_tests::check_fmt_string;
     use self::traces::{
         map_trace,
         seq_trace
@@ -46,21 +46,33 @@ test {
     // and `radix` the sequence test.
     fn run_sized(n: u64, radix: u64) -> u64 {
         let mut r: u64 = 0;
-        r = first_failure(1, test_core_ordering(), r);
-        r = first_failure(2, test_core_option(), r);
-        r = first_failure(3, test_core_result(), r);
-        r = first_failure(4, test_fmt_write(), r);
-        r = first_failure(5, test_fmt_parse(), r);
-        r = first_failure(6, test_bytes(), r);
-        r = first_failure(7, test_btree(n), r);
-        r = first_failure(8, test_struct_keys(), r);
-        r = first_failure(9, test_flat_table(n), r);
-        r = first_failure(10, test_flat_table_differential(wrapping_mul(n, 2)), r);
-        r = first_failure(11, test_sets(), r);
-        r = first_failure(12, test_radix_seq(radix), r);
-        r = first_failure(13, test_version(), r);
-        r = first_failure(14, test_fmt_string(), r);
+        r = first_failure(1, check_core_ordering(), r);
+        r = first_failure(2, check_core_option(), r);
+        r = first_failure(3, check_core_result(), r);
+        r = first_failure(4, check_fmt_write(), r);
+        r = first_failure(5, check_fmt_parse(), r);
+        r = first_failure(6, check_bytes(), r);
+        r = first_failure(7, check_btree(n), r);
+        r = first_failure(8, check_struct_keys(), r);
+        r = first_failure(9, check_flat_table(n), r);
+        r = first_failure(10, check_flat_table_differential(wrapping_mul(n, 2)), r);
+        r = first_failure(11, check_sets(), r);
+        r = first_failure(12, check_radix_seq(radix), r);
+        r = first_failure(13, check_version(), r);
+        r = first_failure(14, check_fmt_string(), r);
         r
+    }
+
+    // @case first_map_split_and_full_leaf(20, 32)
+    // @case multiple_map_leaves_and_second_radix_leaf(34, 33)
+    // @case evaluator_reference_sizes(40, 70)
+    fn test_std_integration(map_size: u64, radix_size: u64) -> Result[(), u64] {
+        let failure = run_sized(map_size, radix_size);
+        if failure == 0 {
+            Result::Ok(())
+        } else {
+            Result::Err(failure)
+        }
     }
 
     // The full sizes, for native code.

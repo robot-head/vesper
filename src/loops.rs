@@ -7,6 +7,9 @@
 //!   integer interval in ascending order. The bounds are evaluated once,
 //!   before the first iteration; the increment never overflows. Its type is
 //!   `Unit`, and a `break` inside it takes no value.
+//! * `for pat in e { body }` over a fixed array, a `ChunkSeq`, a `Slice` or
+//!   an array literal of static text iterates its elements; the checker
+//!   rewrites it to a loop over the index range (`loops/for_sequences.rs`).
 //! * `break` and `break value` leave the innermost loop of the enclosing
 //!   function, closure or handled body.
 //! * `continue` starts the next iteration of the innermost loop: a `loop`

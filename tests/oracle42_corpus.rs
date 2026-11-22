@@ -197,30 +197,27 @@ fn frozen_tape_draw_order_has_a_fixed_nonmandatory_postfix_fixture() {
 fn isolated_negative_matrix_matches_actual_parser_or_checker_single_codes() {
     let cases = negative_cases(128).unwrap();
     assert_eq!(cases.len(), 15);
+    // Cases 5 and 14 spell literals past `u64::MAX`: they parse since #1244
+    // (up to `u128::MAX`) and fit no kind of the profile (E0209).
     let codes = [
-        "E0201", "E0200", "E0209", "E0209", "E0209", "E0002", "E0209", "E0209", "E0401", "E0207",
-        "E0200", "E0206", "E0201", "E0201", "E0002",
+        "E0201", "E0200", "E0209", "E0209", "E0209", "E0209", "E0209", "E0209", "E0401", "E0207",
+        "E0200", "E0206", "E0201", "E0201", "E0209",
     ];
     for (n, c) in cases.iter().enumerate() {
         assert_eq!(c.id, 128 + n as u64);
         assert_eq!(c.intent, Intent::StaticNegative);
         let source = render_case(c).unwrap();
         let parsed = parser::parse(&source);
-        if matches!(n, 5 | 14) {
-            assert_eq!(parsed.diagnostics.len(), 1);
-            assert_eq!(parsed.diagnostics[0].code, codes[n]);
-        } else {
-            assert!(parsed.diagnostics.is_empty());
-            validate_rendered(c, &source, &parsed.module).unwrap();
-            let checked = check::check(&parsed.module);
-            assert_eq!(
-                checked.diagnostics.len(),
-                1,
-                "{source}: {:?}",
-                checked.diagnostics
-            );
-            assert_eq!(checked.diagnostics[0].code, codes[n]);
-        }
+        assert!(parsed.diagnostics.is_empty());
+        validate_rendered(c, &source, &parsed.module).unwrap();
+        let checked = check::check(&parsed.module);
+        assert_eq!(
+            checked.diagnostics.len(),
+            1,
+            "{source}: {:?}",
+            checked.diagnostics
+        );
+        assert_eq!(checked.diagnostics[0].code, codes[n]);
     }
     assert!(negative_cases(u64::MAX - 13).is_err());
 }

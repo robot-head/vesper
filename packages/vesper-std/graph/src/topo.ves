@@ -153,3 +153,66 @@ pub fn toposort(in g: Graph) -> Topo {
         cycle: cycle
     }
 }
+
+test {
+    use self::graph_builder;
+
+    // Each pair of ASCII digits is one directed edge.
+    // @case empty(0, in "", in "", in "")
+    // @case isolated_nodes(3, in "", in "012", in "")
+    // @case fifo_and_edge_order(4, in "0201", in "0321", in "")
+    // @case parallel_edges(3, in "010112", in "012", in "")
+    // @case self_loop(1, in "00", in "", in "0")
+    // @case cycle_and_isolated(4, in "01122331", in "0", in "231")
+    // @case cycle_blocks_downstream(4, in "01100112", in "3", in "10")
+    fn test_toposort(nodes: u32, in edges: Str, in order: Str, in cycle: Str) -> bool {
+        let mut builder = graph_builder(nodes);
+        let bytes = edges.as_bytes();
+        let mut i: u64 = 0;
+        loop {
+            if i >= bytes.len() {
+                break;
+            }
+            let a = match bytes.try_get(i) {
+                Option::Some(value) => widen_u32(wrapping_sub(value, 48)),
+                Option::None => return false,
+            };
+            let b = match bytes.try_get(wrapping_add(i, 1)) {
+                Option::Some(value) => widen_u32(wrapping_sub(value, 48)),
+                Option::None => return false,
+            };
+            if !builder.add_edge(a, b) {
+                return false;
+            }
+            i = wrapping_add(i, 2);
+        }
+        let graph = builder.build();
+        let result = toposort(in graph);
+        if result
+            .is_dag()
+            != (cycle.len() == 0)
+            || result
+            .order_len()
+            != order
+            .len()
+            || result
+            .cycle_len()
+            != cycle
+            .len() {
+            return false;
+        }
+        for j in 0..order.len() {
+            let actual = wrapping_add(wrapping_u8(result.order_at(j)), 48);
+            if order.try_byte_at(j) != Option::Some(actual) {
+                return false;
+            }
+        }
+        for j in 0..cycle.len() {
+            let actual = wrapping_add(wrapping_u8(result.cycle_at(j)), 48);
+            if cycle.try_byte_at(j) != Option::Some(actual) {
+                return false;
+            }
+        }
+        result.order_at(order.len()) == 4294967295 && result.cycle_at(cycle.len()) == 4294967295
+    }
+}

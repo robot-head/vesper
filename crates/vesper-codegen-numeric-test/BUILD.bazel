@@ -1,0 +1,11 @@
+load("//tools/bazel:defs.bzl", "vesper_crate")
+
+# The test reads @vesper/cranelift and @vesper/codegen-numeric, then
+# JIT-compiles both (minutes, so a long timeout).
+vesper_crate(
+    extra_test_data = [
+        "//packages/vesper-codegen-numeric:files",
+        "//packages/vesper-cranelift:files",
+    ],
+    test_timeouts = {"test/self_host_codegen_numeric": "long"},
+)

@@ -31,7 +31,7 @@ use self::{
     S
 };
 use self::diag::{
-    c_unknown_feature,
+    SolverCode,
     dlit,
     emit,
     setw,
@@ -195,7 +195,7 @@ fn process(inout s: S, x: u64, mi: u64) {
         } else {
             let (so, sl, mo) = subj_id(inout s, f);
             dlit(inout s, "requested feature is not declared by selected version");
-            emit(inout s, c_unknown_feature(), x, so, sl, mo);
+            emit(inout s, SolverCode::UnknownFeature, x, so, sl, mo);
             s.cfail = true;
         }
         at = sw(in s.fl_next, at);

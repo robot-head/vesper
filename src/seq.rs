@@ -52,6 +52,8 @@
 //! `TiledSeq` requests one today, and no runnable entry can discharge it.
 use crate::{ast::*, check::World};
 
+#[path = "seq/element_paths.rs"]
+pub mod element_paths;
 #[path = "seq/native_runtime.rs"]
 pub mod native_runtime;
 
@@ -92,6 +94,10 @@ pub enum SeqOp {
     Set,
     /// `s.try_get(i)` on a sequence or slice: `Option[T]`, total.
     TryGet,
+    /// `s.last()` on a sequence or slice: the last element as `Option[T]`,
+    /// `None` when empty. Total; the receiver is unchanged (SH5 lane 6,
+    /// #1329).
+    Last,
     /// `s.try_set(i, v)` on a sequence or slice: `false` when out of bounds.
     TrySet,
     /// `s.clear()`.
@@ -422,6 +428,7 @@ impl SeqOp {
             Self::Get | Self::SliceGet => "get",
             Self::Set | Self::SliceSet => "set",
             Self::TryGet => "try_get",
+            Self::Last => "last",
             Self::TrySet => "try_set",
             Self::Clear => "clear",
             Self::Truncate => "truncate",
@@ -687,7 +694,8 @@ pub fn resolve(callee_name: &str, receiver_ty: Option<&Type>) -> Option<SeqOp> {
                 "pop" => SeqOp::Pop,
                 "get" => SeqOp::Get,
                 "set" => SeqOp::Set,
-                "try_get" => SeqOp::TryGet,
+                "try_get" | "try_get_mut" => SeqOp::TryGet,
+                "last" => SeqOp::Last,
                 "try_set" => SeqOp::TrySet,
                 "clear" => SeqOp::Clear,
                 "truncate" => SeqOp::Truncate,
@@ -707,7 +715,8 @@ pub fn resolve(callee_name: &str, receiver_ty: Option<&Type>) -> Option<SeqOp> {
                 "len" => SeqOp::SliceLen,
                 "get" => SeqOp::SliceGet,
                 "set" => SeqOp::SliceSet,
-                "try_get" => SeqOp::TryGet,
+                "try_get" | "try_get_mut" => SeqOp::TryGet,
+                "last" => SeqOp::Last,
                 "try_set" => SeqOp::TrySet,
                 _ => return shared_method(method),
             });
@@ -731,7 +740,9 @@ pub fn resolve(callee_name: &str, receiver_ty: Option<&Type>) -> Option<SeqOp> {
 
 /// Where `Slice[T]` may appear: only as the whole type of an `in` or `inout`
 /// parameter. Element types of a sequence must be storable values.
-pub(crate) fn check_world(world: &World) -> Vec<Diagnostic> {
+/// Public for the self-hosting differential (SH2 lane 9, #1181).
+#[doc(hidden)]
+pub fn check_world(world: &World) -> Vec<Diagnostic> {
     let mut diagnostics = vec![];
     let second_class = |what: &str, span: &Span| {
         Diagnostic::new(
