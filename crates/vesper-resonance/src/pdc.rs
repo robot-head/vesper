@@ -912,33 +912,11 @@ pub enum BuiltinKind {
     Gain(f32),
 }
 
-/// The deterministic source of [`BuiltinKind::Source`].
-#[cfg(not(vesper_port))]
-struct BuiltinSource {
-    seed: u64,
-    t: u64,
-}
-
-#[cfg(not(vesper_port))]
-impl DspProcessor for BuiltinSource {
-    fn process(&mut self, _inputs: &Inputs<'_>, output: &mut [f32]) {
-        for y in output.iter_mut() {
-            let x = self
-                .t
-                .wrapping_mul(7919)
-                .wrapping_add(self.seed.wrapping_mul(31))
-                % 97;
-            *y = x as f32 / 97.0 - 0.5;
-            self.t += 1;
-        }
-    }
-}
-
 /// Run `blocks` blocks of a graph of built-in processors (one per node, in
 /// spec order) and return the last block of node `sink` (a sink node).
 ///
-/// The Rust build runs a [`CompiledGraph`] of `Box<dyn DspProcessor>`; the
-/// port build runs the whole graph in Vesper, dispatching on each built-in
+/// The seed runs a [`CompiledGraph`] of `Box<dyn DspProcessor>`
+/// (`seed/src/engine/pdc.rs`); this package runs the whole graph in Vesper, dispatching on each built-in
 /// processor's kind (vesper/src/graph.ves).
 /// Both give the same samples bit for bit.
 pub fn render_builtin_graph(
@@ -998,25 +976,5 @@ pub fn render_builtin_graph(
         Ok(w[1..].iter().map(|&b| f32::from_bits(b as u32)).collect())
     }
     #[cfg(not(vesper_port))]
-    {
-        let mut processors: Vec<Box<dyn DspProcessor>> = Vec::with_capacity(nodes.len());
-        for (n, k) in nodes.iter().zip(kinds) {
-            processors.push(match *k {
-                BuiltinKind::Source(seed) => Box::new(BuiltinSource {
-                    seed: u64::from(seed),
-                    t: 0,
-                }),
-                BuiltinKind::Latent => Box::new(LatentMix::new(n.latency, block)?),
-                BuiltinKind::Gain(g) => Box::new(MixGain(g)),
-            });
-        }
-        let mut graph = CompiledGraph::new(nodes, processors, block)?;
-        for _ in 0..blocks {
-            graph.process_block();
-        }
-        graph
-            .output(sink)
-            .map(<[f32]>::to_vec)
-            .ok_or(PdcError::UnknownNode(sink))
-    }
+    crate::engine::pdc::render_builtin_graph(nodes, kinds, block, blocks, sink)
 }

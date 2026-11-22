@@ -13,6 +13,7 @@
 // |     fn vesper_blake3_finalize(in h: Hasher, nocapture inout out: CSlice[u8]) -> ForeignVal[Unit];
 // |     fn vesper_blake3_free(sink h: Hasher) -> ForeignVal[Unit];
 // |     fn vesper_blake3_hash(nocapture in data: CSlice[u8], nocapture inout out: CSlice[u8]) -> ForeignVal[Unit];
+// |     fn vesper_blake3_derive_key_hash(nocapture in context: CSlice[u8], nocapture in data: CSlice[u8], nocapture inout out: CSlice[u8]) -> ForeignVal[u32];
 // | }
 //
 // @export vsys direct rust=crate::port_fs
@@ -94,16 +95,7 @@ use self::drv::{
 };
 use self::store::StoreErr;
 use self::fold::fold_into;
-use @vesper-std/hash-sys::{
-    hasher_new_derive_key,
-    update,
-    finalize,
-    hasher_free
-};
-use @vesper-std/hash::blake3::{
-    Digest,
-    digest_bytes
-};
+use @vesper-std/hash-sys::derive_key_hash;
 
 // The naming policy's verdict for one tree entry name (`validate_name`):
 // 0 for a valid name, else the `NameError` variant's position plus one
@@ -256,16 +248,12 @@ pub fn drv_key(
 // The derivation key of an encoding (`DerivationKey::of_encoding`).
 pub fn derivation_hash(in enc: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[Blake3]] {
     let mut out = ChunkSeq::with_capacity[u8](32);
-    match hasher_new_derive_key(in "vesper-loom-cas 2026-11 v1 derivation key".as_bytes()) {
-        Option::Some(h) => {
-            let mut h = h;
-            update(inout h, in enc);
-            let d = finalize(in h);
-            hasher_free(h);
-            digest_bytes(d, inout out);
-        },
-        Option::None => {},
-    }
+    derive_key_hash(
+        in "vesper-loom-cas 2026-11 v1 derivation key".as_bytes(),
+        in enc,
+        32,
+        inout out
+    );
     out
 }
 

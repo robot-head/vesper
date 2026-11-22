@@ -686,3 +686,44 @@ fn host_detection_implies_the_complete_descriptor_data_model() {
         .any(Target::is_host)
     );
 }
+#[test]
+fn call_preparation_marshals_pinned_buffers_and_mappings_as_address_and_length() {
+    let lib = library(
+        "linear extern mapping Ring[u8]; fn keep(in umem: Pinned[u8], inout ring: Ring) -> ForeignVal[i32]; fn unmap(sink ring: Ring) -> ForeignVal[i32];",
+    );
+    let f = lib.function("keep").unwrap();
+    let args = vec![
+        RawArgument::Slice {
+            address: 4096,
+            length: 64,
+        },
+        RawArgument::Slice {
+            address: 8192,
+            length: 128,
+        },
+    ];
+    let call = f.prepare_call(args, ()).unwrap();
+    assert_eq!(
+        call.arguments(),
+        &[
+            (AbiType::Pointer, 4096),
+            (AbiType::Integer(Scalar::Usize), 64),
+            (AbiType::Pointer, 8192),
+            (AbiType::Integer(Scalar::Usize), 128),
+        ]
+    );
+    let null = vec![
+        RawArgument::Slice {
+            address: 4096,
+            length: 64,
+        },
+        RawArgument::Slice {
+            address: 0,
+            length: 128,
+        },
+    ];
+    assert_eq!(
+        f.prepare_call(null, ()).unwrap_err().error(),
+        &ValidationError::NullAddress
+    );
+}

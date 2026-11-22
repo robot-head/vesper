@@ -56,6 +56,44 @@ pub fn x86_rdrand64() -> Option[u64] eff [Ffi[StdCpu]] {
     Option::Some(out)
 }
 
+// Whether the operating system has enabled protection keys
+// (CPUID.07H:ECX bit 4, OSPKE), which `x86_rdpkru` and `x86_wrpkru` need.
+// Both are invalid opcodes otherwise.
+pub fn x86_has_pku() -> bool eff [Ffi[StdCpu]] {
+    let (max, _, _, _) = x86_cpuid(0, 0);
+    if max < 7 {
+        return false;
+    }
+    let (_, _, ecx, _) = x86_cpuid(7, 0);
+    ((ecx >> 4) & 1) == 1
+}
+
+// The protection-key rights register (`rdpkru`): two bits per key, access
+// disable then write disable.
+pub fn x86_rdpkru() -> u32 eff [Ffi[StdCpu]] {
+    StdCpu::vstd_cpu_rdpkru()
+}
+
+// Set the protection-key rights register (`wrpkru`).
+pub fn x86_wrpkru(value: u32) -> Unit eff [Ffi[StdCpu]] {
+    StdCpu::vstd_cpu_wrpkru(value);
+}
+
+// `lfence`: later instructions start after earlier ones complete.
+pub fn x86_lfence() -> Unit eff [Ffi[StdCpu]] {
+    StdCpu::vstd_cpu_lfence();
+}
+
+// `mfence`: earlier loads and stores are globally visible first.
+pub fn x86_mfence() -> Unit eff [Ffi[StdCpu]] {
+    StdCpu::vstd_cpu_mfence();
+}
+
+// `sfence`: earlier stores are globally visible first.
+pub fn x86_sfence() -> Unit eff [Ffi[StdCpu]] {
+    StdCpu::vstd_cpu_sfence();
+}
+
 // The virtual count of the generic timer (`isb; mrs cntvct_el0`).
 pub fn aarch64_cntvct() -> u64 eff [Ffi[StdCpu]] {
     StdCpu::vstd_cpu_cntvct()
@@ -80,4 +118,31 @@ pub fn aarch64_rndr() -> Option[u64] eff [Ffi[StdCpu]] {
         return Option::None;
     }
     Option::Some(out)
+}
+
+// `isb`: later instructions are fetched after earlier ones complete.
+pub fn aarch64_isb() -> Unit eff [Ffi[StdCpu]] {
+    StdCpu::vstd_cpu_isb();
+}
+
+// `dmb ish`: a full barrier for the inner shareable domain.
+pub fn aarch64_dmb_ish() -> Unit eff [Ffi[StdCpu]] {
+    StdCpu::vstd_cpu_dmb_ish();
+}
+
+// `dsb sy`: a full system barrier that waits for earlier accesses.
+pub fn aarch64_dsb_sy() -> Unit eff [Ffi[StdCpu]] {
+    StdCpu::vstd_cpu_dsb_sy();
+}
+
+// The permission-overlay register (`mrs por_el0`, FEAT_S1POE): four bits
+// per overlay index. It is undefined without FEAT_S1POE
+// (ID_AA64MMFR3_EL1.S1POE; Linux: `HWCAP2_POE`), so callers check first.
+pub fn aarch64_rdpor() -> u64 eff [Ffi[StdCpu]] {
+    StdCpu::vstd_cpu_rdpor()
+}
+
+// Set the permission-overlay register (`msr por_el0; isb`).
+pub fn aarch64_wrpor(value: u64) -> Unit eff [Ffi[StdCpu]] {
+    StdCpu::vstd_cpu_wrpor(value);
 }

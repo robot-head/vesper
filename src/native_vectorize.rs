@@ -9,17 +9,19 @@
 //! `crate::native_clif_opt`, puts a two-lane prologue in front of such a
 //! loop. While at least two iterations remain and no store of one iteration
 //! writes the element a load of the next iteration reads, the prologue runs
-//! iterations `j` and `j + 1` as `i64x2` loads, lane-wise arithmetic and
-//! `i64x2` stores, then goes on with `j + 2`. The scalar loop, unchanged,
-//! runs what is left.
+//! iteration `j` and the next one as `i64x2` loads, lane-wise arithmetic
+//! and `i64x2` stores, then goes on two iterations later. The scalar loop,
+//! unchanged, runs what is left. "The next iteration" is `j + 1` in a loop
+//! that counts up and `j - 1` in one that counts down.
 //!
 //! A loop qualifies when (all of it read from the CLIF):
 //!
 //! - its header has one parameter `j` and branches on `j <u B` or `j <=u B`
-//!   with `B` invariant, to a body block or the exit;
+//!   with `B` invariant, to a body block or the exit (counting up), or on
+//!   `j == 0`, to the exit or a body block (counting down);
 //! - the body has no parameters and goes to the exit when `j == B` (the same
-//!   `B`) or straight on to a latch that only jumps back with `j + 1`, or
-//!   jumps back with `j + 1` itself;
+//!   `B`) or straight on to a latch that only jumps back with the next `j`,
+//!   or jumps back with the next `j` itself;
 //! - every body instruction is an invariant (a constant, a pure operation of
 //!   invariants, or a `readonly can_move` load of an invariant address), a
 //!   pure integer operation of `j`, an `i64` load or store whose address
@@ -34,11 +36,11 @@
 //! earlier iteration overlaps an earlier store of the later one (each store
 //! runs for both lanes before the next store does). Every access moves
 //! by the same 8 bytes per iteration, so the distance from a store of
-//! iteration `j` to an access of iteration `j + 1` is the same for every `j`:
+//! iteration `j` to an access of the next iteration is the same for every `j`:
 //! the prologue checks once, before the loop, that each such distance is at
 //! least 8 bytes (no two 8-byte elements even partly overlap), and goes to
 //! the scalar loop if not. Lanes are in memory order: a loop whose
-//! addresses go down keeps iteration `j + 1` in lane 0, and since every
+//! addresses go down keeps the next iteration in lane 0, and since every
 //! access goes the same way, lane-wise arithmetic pairs each iteration with
 //! itself.
 //!
@@ -103,8 +105,11 @@ struct Plan {
     header: Block,
     /// The header's parameter.
     j: Value,
-    /// The bound `j` is compared with.
-    bound: Value,
+    /// The bound `j` is compared with, counting up; `None` counting down
+    /// to 0.
+    bound: Option<Value>,
+    /// How `j` moves per iteration: +1 or -1.
+    delta: i64,
     /// The body's instructions in order, with their kinds.
     insts: Vec<(Inst, Kind)>,
     /// +1 when addresses grow with `j`, -1 when they shrink.
@@ -186,18 +191,22 @@ fn plan(func: &ir::Function, cfg: &ControlFlowGraph, h: Block) -> Option<Plan> {
     else {
         return None;
     };
-    let (body, body_args) = call(func, then_call);
-    let (exit, exit_args) = call(func, else_call);
-    if !body_args.is_empty() || !exit_args.is_empty() || body == h || exit == h {
+    // Counting up: `j <u B` (or `<=u`) to the body. Counting down: `j == 0`
+    // to the exit.
+    let (cond, lhs, rhs) = compare(func, strip_condition(func, arg))?;
+    let (body_call, exit_call, bound, delta) = match cond {
+        IntCC::UnsignedLessThan | IntCC::UnsignedLessThanOrEqual => {
+            (then_call, else_call, Some(rhs), 1)
+        }
+        IntCC::Equal if constant(func, rhs) == Some(0) => (else_call, then_call, None, -1),
+        _ => return None,
+    };
+    if lhs != j {
         return None;
     }
-    let (cond, lhs, bound) = compare(func, strip_condition(func, arg))?;
-    if lhs != j
-        || !matches!(
-            cond,
-            IntCC::UnsignedLessThan | IntCC::UnsignedLessThanOrEqual
-        )
-    {
+    let (body, body_args) = call(func, body_call);
+    let (exit, exit_args) = call(func, exit_call);
+    if !body_args.is_empty() || !exit_args.is_empty() || body == h || exit == h {
         return None;
     }
     for inst in func.layout.block_insts(h) {
@@ -221,7 +230,7 @@ fn plan(func: &ir::Function, cfg: &ControlFlowGraph, h: Block) -> Option<Plan> {
             let (latch, args) = call(func, destination);
             match args.as_slice() {
                 [] => Some(latch),
-                [BlockArg::Value(next)] if latch == h && is_increment(func, *next, j) => None,
+                [BlockArg::Value(next)] if latch == h && is_step(func, *next, j, delta) => None,
                 _ => return None,
             }
         }
@@ -238,7 +247,7 @@ fn plan(func: &ir::Function, cfg: &ControlFlowGraph, h: Block) -> Option<Plan> {
                 || !latch_args.is_empty()
                 || cond != IntCC::Equal
                 || x != j
-                || y != bound
+                || Some(y) != bound
             {
                 return None;
             }
@@ -259,7 +268,7 @@ fn plan(func: &ir::Function, cfg: &ControlFlowGraph, h: Block) -> Option<Plan> {
         let [BlockArg::Value(next)] = back_args.as_slice() else {
             return None;
         };
-        if back != h || !is_increment(func, *next, j) {
+        if back != h || !is_step(func, *next, j, delta) {
             return None;
         }
         for inst in func.layout.block_insts(latch) {
@@ -298,12 +307,14 @@ fn plan(func: &ir::Function, cfg: &ControlFlowGraph, h: Block) -> Option<Plan> {
         return None;
     }
     let looped: HashSet<Block> = [Some(h), Some(body), latch].into_iter().flatten().collect();
-    if looped.contains(&def_block(func, bound)?) {
+    if let Some(bound) = bound
+        && looped.contains(&def_block(func, bound)?)
+    {
         return None;
     }
     // The body's instructions.
     let mut kinds: HashMap<Value, Kind> = HashMap::new();
-    kinds.insert(j, Kind::Scalar { step: Some(1) });
+    kinds.insert(j, Kind::Scalar { step: Some(delta) });
     let kind_of = |kinds: &HashMap<Value, Kind>, v: Value| -> Option<Kind> {
         let v = resolve(func, v);
         if let Some(k) = kinds.get(&v) {
@@ -421,14 +432,15 @@ fn plan(func: &ir::Function, cfg: &ControlFlowGraph, h: Block) -> Option<Plan> {
         header: h,
         j,
         bound,
+        delta,
         insts,
         direction,
         entries,
     })
 }
 
-/// Whether `v` is `j + 1`.
-fn is_increment(func: &ir::Function, v: Value, j: Value) -> bool {
+/// Whether `v` is `j + delta`.
+fn is_step(func: &ir::Function, v: Value, j: Value, delta: i64) -> bool {
     let ir::ValueDef::Result(inst, 0) = func.dfg.value_def(resolve(func, v)) else {
         return false;
     };
@@ -437,14 +449,19 @@ fn is_increment(func: &ir::Function, v: Value, j: Value) -> bool {
             opcode: Opcode::IaddImm,
             arg,
             imm,
-        } => resolve(func, arg) == j && imm.bits() == 1,
+        } => resolve(func, arg) == j && imm.bits() == delta,
         InstructionData::Binary {
             opcode: Opcode::Iadd,
             args: [a, b],
         } => {
             let (a, b) = (resolve(func, a), resolve(func, b));
-            (a == j && constant(func, b) == Some(1)) || (b == j && constant(func, a) == Some(1))
+            (a == j && constant(func, b) == Some(delta))
+                || (b == j && constant(func, a) == Some(delta))
         }
+        InstructionData::Binary {
+            opcode: Opcode::Isub,
+            args: [a, b],
+        } => resolve(func, a) == j && constant(func, b).and_then(i64::checked_neg) == Some(delta),
         _ => false,
     }
 }
@@ -674,17 +691,26 @@ fn emit(func: &mut ir::Function, plan: &Plan) {
     let mut first = invariants.clone();
     first.insert(plan.j, j0);
     let (_, stores0) = addresses(func, plan, pre, &mut first);
-    let j01 = FuncCursor::new(func).at_bottom(pre).ins().iadd_imm(j0, 1);
+    let j01 = FuncCursor::new(func)
+        .at_bottom(pre)
+        .ins()
+        .iadd_imm(j0, plan.delta);
     let mut second = invariants.clone();
     second.insert(plan.j, j01);
     let (loads1, stores1) = addresses(func, plan, pre, &mut second);
     {
         let mut pos = FuncCursor::new(func).at_bottom(pre);
-        // Two iterations left: `j0 < B` and `j0 + 1 < B` (which cannot
-        // wrap once `j0 < B`).
-        let a = pos.ins().icmp(IntCC::UnsignedLessThan, j0, plan.bound);
-        let b = pos.ins().icmp(IntCC::UnsignedLessThan, j01, plan.bound);
-        let mut ok = pos.ins().band(a, b);
+        let mut ok = match plan.bound {
+            // Two iterations left: `j0 < B` and `j0 + 1 < B` (which cannot
+            // wrap once `j0 < B`).
+            Some(bound) => {
+                let a = pos.ins().icmp(IntCC::UnsignedLessThan, j0, bound);
+                let b = pos.ins().icmp(IntCC::UnsignedLessThan, j01, bound);
+                pos.ins().band(a, b)
+            }
+            // Counting down, `j0 != 0` and `j0 - 1 != 0`.
+            None => pos.ins().icmp_imm(IntCC::UnsignedGreaterThanOrEqual, j0, 2),
+        };
         // The pairs of accesses whose order the lanes change: a store of
         // the first iteration and a load of the next (the lanes load both
         // iterations first), and a later store of the first iteration and
@@ -799,15 +825,21 @@ fn emit(func: &mut ir::Function, plan: &Plan) {
             _ => {}
         }
     }
-    // On while two more iterations are left: `j2 < B` and `j2 + 1 < B`.
-    // `jv + 1 < B`, so `j2 = jv + 2` cannot wrap, and `j2 + 1` wraps only
-    // when `j2` is `u64::MAX`, which fails `j2 < B`.
+    // On while two more iterations are left: counting up, `jv + 2 < B` and
+    // `jv + 3 < B`; counting down, `jv - 2 >= 2` (`jv >= 2` held).
     let mut pos = FuncCursor::new(func).at_bottom(lanes);
-    let j2 = pos.ins().iadd_imm(jv, 2);
-    let j3 = pos.ins().iadd_imm(jv, 3);
-    let a = pos.ins().icmp(IntCC::UnsignedLessThan, j2, plan.bound);
-    let b = pos.ins().icmp(IntCC::UnsignedLessThan, j3, plan.bound);
-    let more = pos.ins().band(a, b);
+    let j2 = pos.ins().iadd_imm(jv, 2 * plan.delta);
+    let more = match plan.bound {
+        // `j2 < B` and `j2 + 1 < B`: `jv + 1 < B`, so `j2` cannot wrap, and
+        // `j2 + 1` wraps only when `j2` is `u64::MAX`, which fails `j2 < B`.
+        Some(bound) => {
+            let j3 = pos.ins().iadd_imm(jv, 3);
+            let a = pos.ins().icmp(IntCC::UnsignedLessThan, j2, bound);
+            let b = pos.ins().icmp(IntCC::UnsignedLessThan, j3, bound);
+            pos.ins().band(a, b)
+        }
+        None => pos.ins().icmp_imm(IntCC::UnsignedGreaterThanOrEqual, j2, 2),
+    };
     pos.ins().brif(
         more,
         lanes,

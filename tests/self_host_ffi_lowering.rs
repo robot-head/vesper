@@ -1015,6 +1015,15 @@ fn corpus() -> &'static [Case] {
             let mut found = vec![];
             libraries_of(s, &mut found);
             for d in found {
+                // Foreign memory viewed in place (pinned buffers and
+                // mappings, #1505) is not in the port yet: handed to SH4
+                // lane 13 (#1287). The native `ffi` hook is not offered
+                // those calls.
+                if d.functions().iter().any(|f| f.uses_foreign_memory())
+                    || d.extern_types().iter().any(|t| t.mapping().is_some())
+                {
+                    continue;
+                }
                 if seen.insert(d.canonical_bytes().to_vec()) {
                     libraries.push((label.clone(), d));
                 }

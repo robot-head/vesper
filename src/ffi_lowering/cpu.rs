@@ -46,7 +46,26 @@ const RDRAND64: [u8; 14] = [
     0x48, 0x0f, 0xc7, 0xf0, 0x0f, 0x92, 0xc1, 0x48, 0x89, 0x07, 0x0f, 0xb6, 0xc1, 0xc3,
 ];
 
+/// `xor ecx, ecx; rdpkru; ret` (the result is `eax`; `edx` is cleared).
+const RDPKRU: [u8; 6] = [0x31, 0xc9, 0x0f, 0x01, 0xee, 0xc3];
+/// `mov eax, edi; xor ecx, ecx; xor edx, edx; wrpkru; ret`.
+const WRPKRU: [u8; 10] = [0x89, 0xf8, 0x31, 0xc9, 0x31, 0xd2, 0x0f, 0x01, 0xef, 0xc3];
+/// `lfence; ret`.
+const LFENCE: [u8; 4] = [0x0f, 0xae, 0xe8, 0xc3];
+/// `mfence; ret`.
+const MFENCE: [u8; 4] = [0x0f, 0xae, 0xf0, 0xc3];
+/// `sfence; ret`.
+const SFENCE: [u8; 4] = [0x0f, 0xae, 0xf8, 0xc3];
+
 const ISB: u32 = 0xd503_3fdf;
+/// `dmb ish`.
+const DMB_ISH: u32 = 0xd503_3bbf;
+/// `dsb sy`.
+const DSB_SY: u32 = 0xd503_3f9f;
+/// `mrs x0, por_el0` (S3_3_C10_C2_4, FEAT_S1POE).
+const MRS_POR: u32 = 0xd53b_a280;
+/// `msr por_el0, x0`.
+const MSR_POR: u32 = 0xd51b_a280;
 const RET: u32 = 0xd65f_03c0;
 /// `mrs x0, cntvct_el0`.
 const MRS_CNTVCT: u32 = 0xd53b_e040;
@@ -78,6 +97,16 @@ pub fn function(symbol: &str) -> Option<(Arch, Vec<u8>)> {
         "rdtsc" => (Arch::X86_64, RDTSC.to_vec()),
         "rdpmc" => (Arch::X86_64, RDPMC.to_vec()),
         "rdrand64" => (Arch::X86_64, RDRAND64.to_vec()),
+        "rdpkru" => (Arch::X86_64, RDPKRU.to_vec()),
+        "wrpkru" => (Arch::X86_64, WRPKRU.to_vec()),
+        "lfence" => (Arch::X86_64, LFENCE.to_vec()),
+        "mfence" => (Arch::X86_64, MFENCE.to_vec()),
+        "sfence" => (Arch::X86_64, SFENCE.to_vec()),
+        "isb" => (Arch::Aarch64, words(&[ISB, RET])),
+        "dmb_ish" => (Arch::Aarch64, words(&[DMB_ISH, RET])),
+        "dsb_sy" => (Arch::Aarch64, words(&[DSB_SY, RET])),
+        "rdpor" => (Arch::Aarch64, words(&[MRS_POR, RET])),
+        "wrpor" => (Arch::Aarch64, words(&[MSR_POR, ISB, RET])),
         "cntvct" => (Arch::Aarch64, words(&[ISB, MRS_CNTVCT, RET])),
         "pmccntr" => (Arch::Aarch64, words(&[ISB, MRS_PMCCNTR, ISB, RET])),
         "pmevcntr" => (
@@ -128,7 +157,9 @@ mod tests {
     #[test]
     fn every_listed_function_has_code() {
         for name in [
-            "cpuid", "rdtsc", "rdpmc", "rdrand64", "cntvct", "pmccntr", "pmevcntr", "rndr",
+            "cpuid", "rdtsc", "rdpmc", "rdrand64", "rdpkru", "wrpkru", "lfence", "mfence",
+            "sfence", "cntvct", "pmccntr", "pmevcntr", "rndr", "isb", "dmb_ish", "dsb_sy", "rdpor",
+            "wrpor",
         ] {
             let (arch, code) = function(&format!("{PREFIX}{name}")).expect(name);
             assert!(!code.is_empty());

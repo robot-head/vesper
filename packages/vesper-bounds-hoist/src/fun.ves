@@ -43,6 +43,7 @@ const B_ADD: u32 = 5;
 const B_WADD: u32 = 6;
 const B_SUB: u32 = 7;
 const B_WSUB: u32 = 8;
+const B_EQ: u32 = 9;
 
 // Callee classes: a path (`E::op`), `Fail::raise`.
 const C_PATH: u32 = 1;
@@ -786,6 +787,9 @@ fn binary_class(in f: Fun, s: u32) -> u64 {
     if f.name_is(s, "wrapping_sub") {
         return w(B_WSUB);
     }
+    if f.name_is(s, "==") {
+        return w(B_EQ);
+    }
     w(B_OTHER)
 }
 
@@ -860,6 +864,8 @@ fn read_inst(inout f: Fun, inout r: Reader, in b: Slice[u8]) {
     } else if op == Word::Write {
         i.a = n32(r.word(in b));
         uses.push(i.a);
+        // 1 for a compound assignment
+        i.sub = r.word(in b);
         i.place = read_place(inout f, inout r, in b);
     } else if op == Word::One {
         i.a = n32(r.word(in b));

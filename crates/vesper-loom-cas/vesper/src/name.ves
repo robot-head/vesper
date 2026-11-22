@@ -61,19 +61,92 @@ pub fn seq_len(in s: Slice[u8], i: u64) -> u64 {
     0
 }
 
+// SWAR masks over the 8 bytes of a little-endian word.
+const HIGH: u64 = 9259542123273814144;
+const ONES: u64 = 72340172838076673;
+const ALL: u64 = 18446744073709551615;
+
+// Whether the 8 bytes at `i` are all ASCII and none is a control character
+// (below 32 or 127), or false when fewer than 8 bytes are left.
+fn plain8(in s: Slice[u8], i: u64) -> bool {
+    match s.try_read_u64_le(i) {
+        Option::Some(w) => {
+            let below = wrapping_sub(w, wrapping_mul(ONES, 32)) & (w ^ ALL);
+            let x = w ^ wrapping_mul(ONES, 127);
+            let del = wrapping_sub(x, ONES) & (x ^ ALL);
+            ((w | below | del) & HIGH) == 0
+        },
+        Option::None => false,
+    }
+}
+
+// Whether the 8 bytes at `i` are all ASCII, or false when fewer are left.
+fn ascii8(in s: Slice[u8], i: u64) -> bool {
+    match s.try_read_u64_le(i) {
+        Option::Some(w) => (w & HIGH) == 0,
+        Option::None => false,
+    }
+}
+
 // Whether `s` is valid UTF-8.
 pub fn is_utf8(in s: Slice[u8]) -> bool {
-    let mut i: u64 = 0;
+    let len = s.len();
+    let mut i = ascii_prefix(in s, false);
+    if i >= len {
+        return true;
+    }
     loop {
-        if i >= s.len() {
+        if i >= len {
             return true;
         }
-        let n = seq_len(in s, i);
-        if n == 0 {
-            return false;
+        if byte(in s, i) < 128 {
+            i = wrapping_add(i, 1);
+        } else {
+            let n = seq_len(in s, i);
+            if n == 0 {
+                return false;
+            }
+            i = wrapping_add(i, n);
         }
-        i = wrapping_add(i, n);
     }
+}
+
+// The length of the leading run of whole 8-byte words of `s` that are ASCII
+// (and, with `plain`, hold no control character), or `s.len()` when the
+// rest of `s` after that run passes the same test, read as the overlapping
+// last word.
+fn ascii_prefix(in s: Slice[u8], plain: bool) -> u64 {
+    let len = s.len();
+    let mut i: u64 = 0;
+    loop {
+        if wrapping_add(i, 8) > len {
+            break;
+        }
+        let ok = if plain {
+            plain8(in s, i)
+        } else {
+            ascii8(in s, i)
+        };
+        if !ok {
+            return i;
+        }
+        i = wrapping_add(i, 8);
+    }
+    if i >= len {
+        return len;
+    }
+    if len >= 8 {
+        let last = wrapping_sub(len, 8);
+        let ok = if plain {
+            plain8(in s, last)
+        } else {
+            ascii8(in s, last)
+        };
+        if ok {
+            return len;
+        }
+    }
+    i
 }
 
 // Whether the character at `i` (of UTF-8 length `n`) is a control
@@ -91,10 +164,19 @@ pub fn is_control_at(in s: Slice[u8], i: u64, n: u64) -> bool {
 
 // Whether valid UTF-8 `s` holds a control character.
 pub fn has_control(in s: Slice[u8]) -> bool {
-    let mut i: u64 = 0;
+    let len = s.len();
+    let mut i = ascii_prefix(in s, true);
     loop {
-        if i >= s.len() {
+        if i >= len {
             return false;
+        }
+        let b = byte(in s, i);
+        if b < 128 {
+            if b < 32 || b == 127 {
+                return true;
+            }
+            i = wrapping_add(i, 1);
+            continue;
         }
         let n = seq_len(in s, i);
         if n == 0 {
@@ -143,12 +225,61 @@ fn reserved(in s: Slice[u8]) -> bool {
     false
 }
 
-// 0 for a valid name, else the NameError code (see `name_error`).
-pub fn name_code(in s: Slice[u8]) -> u64 {
-    if !is_utf8(in s) {
-        return 9;
+// The ASCII bytes a name may not hold, as bits of two masks (bytes 0..63
+// and 64..127): the separators, the Windows-reserved punctuation and the
+// control characters.
+const ASCII_BAD_LO: u64 = 15276355093050425343;
+const ASCII_BAD_HI: u64 = 10376293541730058240;
+
+fn ascii_bad(b: u8) -> bool {
+    let w = widen_u32(b);
+    if w < 64 {
+        (wrapping_shr_u64(ASCII_BAD_LO, w) & 1) != 0
+    } else {
+        (wrapping_shr_u64(ASCII_BAD_HI, wrapping_sub(w, 64)) & 1) != 0
     }
+}
+
+// The NameError code of a bad ASCII byte: 4 a separator, 5 reserved
+// punctuation, 6 a control character.
+fn ascii_code(b: u8) -> u64 {
+    if b == 47 || b == 92 {
+        4
+    } else if b < 32 || b == 127 {
+        6
+    } else {
+        5
+    }
+}
+
+// 0 for a valid name, else the NameError code (see `name_error`). One pass
+// checks UTF-8 and finds the first bad character; UTF-8 (9) and the length
+// and dot checks (1, 2, 3) come before it, as in `validate_name`.
+pub fn name_code(in s: Slice[u8]) -> u64 {
     let n = s.len();
+    let mut code: u64 = 0;
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let b = byte(in s, i);
+        if b < 128 {
+            if code == 0 && ascii_bad(b) {
+                code = ascii_code(b);
+            }
+            i = wrapping_add(i, 1);
+        } else {
+            let len = seq_len(in s, i);
+            if len == 0 {
+                return 9;
+            }
+            if code == 0 && is_control_at(in s, i, len) {
+                code = 6;
+            }
+            i = wrapping_add(i, len);
+        }
+    }
     if n == 0 {
         return 1;
     }
@@ -158,23 +289,8 @@ pub fn name_code(in s: Slice[u8]) -> u64 {
     if (n == 1 && byte(in s, 0) == 46) || (n == 2 && byte(in s, 0) == 46 && byte(in s, 1) == 46) {
         return 3;
     }
-    let mut i: u64 = 0;
-    loop {
-        if i >= n {
-            break;
-        }
-        let len = seq_len(in s, i);
-        let b = byte(in s, i);
-        if b == 47 || b == 92 {
-            return 4;
-        }
-        if b == 58 || b == 60 || b == 62 || b == 34 || b == 124 || b == 63 || b == 42 {
-            return 5;
-        }
-        if is_control_at(in s, i, len) {
-            return 6;
-        }
-        i = wrapping_add(i, len);
+    if code != 0 {
+        return code;
     }
     let last = byte(in s, wrapping_sub(n, 1));
     if last == 46 || last == 32 {
