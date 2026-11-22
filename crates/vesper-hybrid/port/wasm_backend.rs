@@ -20,6 +20,7 @@ unsafe extern "C" {
     fn vesper_hybrid_wasm_backend_box_new(size: i64) -> i64;
     fn vesper_hybrid_wasm_backend_compile_words(input: *mut u64) -> i64;
     fn vesper_hybrid_wasm_backend_format() -> i64;
+    fn vesper_hybrid_wasm_backend_wrap_words(input: *mut u64) -> i64;
 }
 
 /// The sequence runtime of the Vesper library `hybrid_wasm_backend`.
@@ -50,4 +51,13 @@ pub fn format() -> u64 {
     // every handle passed is owned or borrowed as its mode requires.
     let raw = unsafe { vesper_hybrid_wasm_backend_format() };
     raw as u64
+}
+
+/// Calls `wrap_words` of the Vesper library `hybrid_wasm_backend` (`vesper_hybrid_wasm_backend_wrap_words`).
+pub fn wrap_words(input: &[u8]) -> Vec<u64> {
+    // SAFETY: `vesper_hybrid_wasm_backend_wrap_words` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(input, |view_input| unsafe { vesper_hybrid_wasm_backend_wrap_words(view_input) });
+    unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
 }

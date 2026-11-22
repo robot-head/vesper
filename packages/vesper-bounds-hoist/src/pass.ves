@@ -497,8 +497,9 @@ fn guard_and_copy(
 // `hoist_function`: returns how many loops it versioned.
 pub fn hoist_function(inout p: Program, inout t: Types, inout names: Names, inout cx: Ctx2, fi: u64)
     -> u64 {
-    let f0 = fun_of(in p, inout t, in names, inout cx, fi);
-    let compared = compared_list(in f0);
+    // The function is encoded afresh only after a rewrite changed it.
+    let mut f = fun_of(in p, inout t, in names, inout cx, fi);
+    let compared = compared_list(in f);
     if compared.len() > 0 {
         let mut at: ChunkSeq[u64] = ChunkSeq::new[u64]();
         for q in 0..compared.len() {
@@ -506,8 +507,8 @@ pub fn hoist_function(inout p: Program, inout t: Types, inout names: Names, inou
             at.push(wrapping_shl_u64(x >> 40, 32) | ((x >> 8) & 4294967295));
         }
         make_unchecked(inout p, in names, fi, in at);
+        f = fun_of(in p, inout t, in names, inout cx, fi);
     }
-    let mut f = fun_of(in p, inout t, in names, inout cx, fi);
     let ord = order_list(in f);
     let mut versioned: u64 = 0;
     for j in 0..ord.hs.len() {
@@ -522,35 +523,28 @@ pub fn hoist_function(inout p: Program, inout t: Types, inout names: Names, inou
         if plan.ok {
             clone_loop(inout p, inout names, inout cx, fi, in f, in plan);
             versioned = inc(versioned);
-            let h = f.header;
-            let has = f.has_enclosing;
-            let mut encl: ChunkSeq[u32] = ChunkSeq::new[u32]();
-            for q in 0..f.enclosing.len() {
-                encl.push(u32_at(in f.enclosing, q));
-            }
             f = fun_of(in p, inout t, in names, inout cx, fi);
-            f.header = h;
-            f.has_enclosing = has;
-            f.enclosing = encl;
         }
     }
+    f.header = 0;
+    f.has_enclosing = false;
+    f.enclosing.clear();
     // Compared loops, one at a time.
     let mut tried: ChunkSeq[u32] = ChunkSeq::new[u32]();
     loop {
-        let fl = fun_of(in p, inout t, in names, inout cx, fi);
-        let lp = next_loop(in fl, inout tried);
+        let lp = next_loop(in f, inout tried);
         if !lp.ok {
             break;
         }
         let base = p.function(fi).bc;
-        guard_and_copy(inout p, inout names, inout cx, fi, in fl, in lp);
+        guard_and_copy(inout p, inout names, inout cx, fi, in f, in lp);
         for b in base..p.function(fi).bc {
             let new = insert(inout tried, n32(b));
         }
         versioned = inc(versioned);
+        f = fun_of(in p, inout t, in names, inout cx, fi);
     }
-    let fd = fun_of(in p, inout t, in names, inout cx, fi);
-    let dominated = dominated_list(in fd);
+    let dominated = dominated_list(in f);
     if dominated.len() > 0 {
         make_unchecked(inout p, in names, fi, in dominated);
     }

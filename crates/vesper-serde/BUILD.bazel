@@ -10,6 +10,9 @@ vesper_package(
     name = "port_package",
     srcs = glob(["vesper/src/**/*.ves"]),
     manifest = "vesper/Loom.toml",
+    # @vesper/loom-calculus prints TOML floats with its decimal conversion
+    # and shortest digits (Rust exit SH6 lane 12, #1407).
+    visibility = ["//crates/vesper-loom-calculus:__pkg__"],
 )
 
 vesper_port_object(
