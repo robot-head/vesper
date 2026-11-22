@@ -92,8 +92,8 @@ struct Options {
 }
 
 /// The record's version (`record_format` in @vesper/driver).
-const RECORD_FORMAT: u64 = 1;
-const SLOTS: usize = 13;
+const RECORD_FORMAT: u64 = 2;
+const SLOTS: usize = 14;
 // Slot numbers (`slot_*` in @vesper/driver).
 const INPUT: usize = 0;
 const OUTPUT: usize = 1;
@@ -108,6 +108,7 @@ const LIB_NAME: usize = 9;
 const INTERFACE: usize = 10;
 const RUST_BINDING: usize = 11;
 const RUST_TYPES: usize = 12;
+const TARGET_FEATURES: usize = 13;
 // List kinds (`list_*`).
 const LINK_SEARCH: u64 = 0;
 const INSTANCE: u64 = 1;
@@ -814,7 +815,13 @@ pub mod host {
         // SAFETY: lent for the call.
         let record = unsafe { bytes(record, len) };
         match Options::decode(record) {
-            Some(o) => Box::into_raw(Box::new(Session {
+            Some(o) => {
+                // `cli()` sets them once the argument checks reach them; the
+                // driver's checks have all passed here.
+                if let Some(features) = o.slot(TARGET_FEATURES) {
+                    vesper::native::set_target_features(features);
+                }
+                Box::into_raw(Box::new(Session {
                 o,
                 package: false,
                 loaded: None,
@@ -822,7 +829,8 @@ pub mod host {
                 parsed: None,
                 checked: None,
                 text: vec![],
-            })),
+            }))
+            }
             None => std::ptr::null_mut(),
         }
     }

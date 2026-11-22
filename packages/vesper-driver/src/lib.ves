@@ -106,8 +106,12 @@ pub fn slot_rust_types() -> u64 {
     12
 }
 
-pub fn slot_count() -> u64 {
+pub fn slot_target_features() -> u64 {
     13
+}
+
+pub fn slot_count() -> u64 {
+    14
 }
 
 // List kinds (`Options::items`).
@@ -575,6 +579,9 @@ fn value_slot(in a: Slice[u8]) -> u64 {
     if eq(in a, in "--target") {
         return slot_target();
     }
+    if eq(in a, in "--target-features") {
+        return slot_target_features();
+    }
     if eq(in a, in "--linker") {
         return slot_linker();
     }
@@ -602,6 +609,9 @@ fn missing_value(k: u64) -> Str {
     }
     if k == slot_target() {
         return "--target requires a target triple";
+    }
+    if k == slot_target_features() {
+        return "--target-features requires a comma-separated list";
     }
     if k == slot_linker() {
         return "--linker requires a path";
@@ -794,6 +804,9 @@ fn validate(sink o: Options) -> Parsed {
     if has(in o, slot_target()) && !native {
         return fail_str(o, in "--target requires build or emit --emit object/clif");
     }
+    if has(in o, slot_target_features()) && !has(in o, slot_target()) {
+        return fail_str(o, in "--target-features requires --target");
+    }
     if (o.verifiers != 0 || has(in o, slot_policy())) && !native {
         return fail_str(o, in "--verify flags require build or emit --emit object/clif");
     }
@@ -979,7 +992,7 @@ pub fn with_extension(in path: Slice[u8], in ext: Str, windows: bool) -> ChunkSe
 //     item count, then each: kind, length, bytes
 
 pub fn record_format() -> u64 {
-    1
+    2
 }
 
 fn push_word(inout out: ChunkSeq[u8], v: u64) {
