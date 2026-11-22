@@ -108,6 +108,21 @@ impl Default for ParseLimits {
 /// Compatibility API. Oversized input yields E0003, an empty AST and a lossless
 /// bounded UTF-8 prefix CST. Within the byte budget all failure CSTs retain the
 /// complete source. Explicit callers should use parse_with_limits for preflight.
+/// Keyword tokens that are names wherever a name is expected (manuscript
+/// "Contextual names"): `state`, `linear`, `with`, `eff`, `effect`,
+/// `handle`, `sink` and `inout`. `handle` is a name only where it does not
+/// start a handle expression (`Parser::handle_starts`).
+/// The magnitude of `i128::MIN`: the one literal above `i128::MAX` that may
+/// be negated.
+const WIDE_NEG_MIN: u128 = 1 << 127;
+
+fn contextual_kind(k: K) -> bool {
+    matches!(
+        k,
+        K::State | K::Linear | K::With | K::Eff | K::Effect | K::Handle | K::Sink | K::Inout
+    )
+}
+
 pub fn parse(source: &str) -> Parse {
     (parse_table().parse)(source)
 }
@@ -598,9 +613,6 @@ impl Parser<'_> {
                 | K::Affine
                 | K::Mod
                 | K::In
-                | K::Inout
-                | K::Sink
-                | K::Handle
                 | K::Return
                 | K::Match
                 | K::If
@@ -609,7 +621,6 @@ impl Parser<'_> {
                 | K::Fn
                 | K::Struct
                 | K::Enum
-                | K::Effect
                 | K::Impl => {
                     let word = self.text(0).to_owned();
                     self.error(format!(
@@ -628,8 +639,64 @@ impl Parser<'_> {
     /// forms start; wherever a name is expected they are names (manuscript
     /// "Contextual keywords"). `eff` opens an effect row only after a
     /// signature (`Self::effects`) and as the `e: eff` row bound.
+    ///
+    /// `effect`, `handle`, `sink` and `inout` are contextual too: `effect`
+    /// starts only an item, `handle` starts an expression only before an
+    /// effect (`Self::handle_starts`), and the pass modes are modes only
+    /// before an operand (`Self::pass_word_is_mode`).
     fn at_contextual_name(&self) -> bool {
-        matches!(self.kind(), K::State | K::Linear | K::With | K::Eff)
+        contextual_kind(self.kind()) && !(self.at(K::Handle) && self.handle_starts())
+    }
+    /// Whether `handle` at the cursor starts a handle expression: the next
+    /// token starts its effect (`handle E`, `handle self::m::E`,
+    /// `handle @p/q::E`) or its label (`handle l: E`). A value named
+    /// `handle` is never followed by one of these.
+    fn handle_starts(&self) -> bool {
+        match self.nth(1) {
+            K::Upper | K::SelfKw | K::At => true,
+            k => (k == K::Lower || contextual_kind(k)) && self.nth(2) == K::Colon,
+        }
+    }
+    /// Whether the `sink` or `inout` at the cursor is a pass mode. In an
+    /// argument list it is a mode only before a token that starts an operand
+    /// and cannot continue a value named `sink`: `f(sink x)` sinks `x`, while
+    /// `f(sink)`, `f(sink.a)`, `f(sink(x))`, `f(sink[i])` and `f(sink - 1)`
+    /// use a value named `sink`; before a closure (`|` or `||`) it is a mode.
+    /// In a parameter list it is a mode before the
+    /// parameter's name (`sink x: T`), and a name before `:` (`sink: T`).
+    fn pass_word_is_mode(&self, params: bool) -> bool {
+        let next = self.nth(1);
+        if params {
+            return next == K::Lower || next == K::SelfKw || contextual_kind(next);
+        }
+        match next {
+            K::Lower => self.text(1) != "as",
+            K::Upper
+            | K::SelfKw
+            | K::At
+            | K::Int
+            | K::Float
+            | K::String
+            | K::True
+            | K::False
+            | K::LBrace
+            | K::Bang
+            | K::Tilde
+            // A closure (`sink |x| e`, `sink || e`): a value named `sink`
+            // is not or-ed (`(sink) | x` writes that).
+            | K::Pipe
+            | K::Or
+            | K::Match
+            | K::If
+            | K::State
+            | K::Linear
+            | K::Eff
+            | K::Effect
+            | K::Handle
+            | K::Sink
+            | K::Inout => true,
+            _ => false,
+        }
     }
     /// At the root of a qualified path: `self::`, `super::` or
     /// `@scope/name::` (manuscript ch 11.3, "Qualified paths").
@@ -661,10 +728,7 @@ impl Parser<'_> {
             self.bump()
         };
         while self.at(K::ColonColon)
-            && matches!(
-                self.nth(1),
-                K::Lower | K::Upper | K::State | K::Linear | K::With | K::Eff
-            )
+            && (matches!(self.nth(1), K::Lower | K::Upper) || contextual_kind(self.nth(1)))
         {
             self.bump();
             path.push_str("::");
@@ -695,22 +759,26 @@ impl Parser<'_> {
             _ => None,
         }
     }
+    /// A pass mode (`in`, `inout`, `sink`) in a function type, where one is
+    /// always a mode.
     fn pass(&mut self) -> (Pass, bool) {
-        match self.kind() {
-            K::In => {
-                self.bump();
-                (Pass::In, true)
-            }
-            K::Inout => {
-                self.bump();
-                (Pass::Inout, true)
-            }
-            K::Sink => {
-                self.bump();
-                (Pass::Sink, true)
-            }
-            _ => (Pass::In, false),
+        self.pass_in(None)
+    }
+    /// A pass mode in a parameter (`Some(true)`) or argument (`Some(false)`)
+    /// list, where `inout` and `sink` may also be names
+    /// (`Self::pass_word_is_mode`).
+    fn pass_in(&mut self, list: Option<bool>) -> (Pass, bool) {
+        let pass = match self.kind() {
+            K::In => Pass::In,
+            K::Inout => Pass::Inout,
+            K::Sink => Pass::Sink,
+            _ => return (Pass::In, false),
+        };
+        if pass != Pass::In && list.is_some_and(|params| !self.pass_word_is_mode(params)) {
+            return (Pass::In, false);
         }
+        self.bump();
+        (pass, true)
     }
     fn generics(&mut self) -> Vec<Generic> {
         let mut out = vec![];
@@ -1453,7 +1521,7 @@ impl Parser<'_> {
         let mut out = vec![];
         while !self.at(end) && !self.at(K::Eof) {
             let start = self.start();
-            let (pass, _) = self.pass();
+            let (pass, _) = self.pass_in(Some(true));
             let name = self.lower();
             let projections = if self.eat(K::Dot) {
                 self.place_tree()
@@ -2137,10 +2205,8 @@ impl Parser<'_> {
         out
     }
     fn statement_anchor(&self) -> bool {
-        matches!(
-            self.kind(),
-            K::Let | K::Match | K::Handle | K::Return | K::If
-        )
+        matches!(self.kind(), K::Let | K::Match | K::Return | K::If)
+            || (self.at(K::Handle) && self.handle_starts())
     }
     fn recover_statement(&mut self) {
         if self.at(K::Semi) {
@@ -2306,7 +2372,7 @@ impl Parser<'_> {
     fn expr_inner(&mut self) -> Expr {
         self.builder.start_node(EXPR);
         let e = match self.kind() {
-            K::Handle => self.handle(),
+            K::Handle if self.handle_starts() => self.handle(),
             K::Lower
                 if self.at_word(0, "region")
                     && self.nth(1) == K::Lower
@@ -2342,10 +2408,10 @@ impl Parser<'_> {
     /// Whether `for` starts a `ForExpr` (`for Pat in`), not a value named `for`.
     fn for_header(&self) -> bool {
         !self.bound_values.contains("for")
-            && matches!(
+            && (matches!(
                 self.nth(1),
-                K::Lower | K::Upper | K::LParen | K::Int | K::True | K::False | K::Eff
-            )
+                K::Lower | K::Upper | K::LParen | K::Int | K::True | K::False
+            ) || contextual_kind(self.nth(1)))
     }
     /// `for pat in start..end { body }` (manuscript `ForExpr`). The iterable
     /// is any restricted expression; `a..b` and `a..=b` build a range.
@@ -2557,7 +2623,7 @@ impl Parser<'_> {
     fn handle(&mut self) -> Expr {
         let start = self.start();
         self.expect(K::Handle);
-        let label = if self.at(K::Lower) {
+        let label = if self.at(K::Lower) || self.at_contextual_name() {
             let l = self.lower();
             self.expect(K::Colon);
             Some(l)
@@ -2690,10 +2756,17 @@ impl Parser<'_> {
             let op = self.bump();
             let v = self.binary(12);
             let kind = if op == "-" {
-                if let ExprKind::Literal(Literal::Int(n)) = v.kind {
-                    ExprKind::Literal(Literal::Int(-n))
-                } else {
-                    ExprKind::Unary(op, Box::new(v))
+                match v.kind {
+                    // `i128::MIN` has no negation: `- -170..728` stays a
+                    // unary minus (and overflows when checked).
+                    ExprKind::Literal(Literal::Int(n)) if n != i128::MIN => {
+                        ExprKind::Literal(Literal::Int(-n))
+                    }
+                    // `-170141183460469231731687303715884105728` is `i128::MIN`.
+                    ExprKind::Literal(Literal::WideInt(n)) if n == WIDE_NEG_MIN => {
+                        ExprKind::Literal(Literal::Int(i128::MIN))
+                    }
+                    kind => ExprKind::Unary(op, Box::new(Expr { kind, span: v.span })),
                 }
             } else {
                 ExprKind::Unary(op, Box::new(v))
@@ -2894,7 +2967,7 @@ impl Parser<'_> {
     fn args(&mut self) -> Vec<Arg> {
         let mut args = vec![];
         while !self.at(K::RParen) && !self.at(K::Eof) {
-            let (pass, explicit) = self.pass();
+            let (pass, explicit) = self.pass_in(Some(false));
             args.push(Arg {
                 pass,
                 explicit,
@@ -2911,18 +2984,17 @@ impl Parser<'_> {
             K::Int => {
                 let text = self.bump().replace('_', "");
                 let n = if text.starts_with("0x") || text.starts_with("0X") {
-                    i128::from_str_radix(&text[2..], 16)
+                    u128::from_str_radix(&text[2..], 16)
                 } else {
                     text.parse()
                 };
-                Some(Literal::Int(
-                    n.ok()
-                        .filter(|n| *n <= u64::MAX as i128)
-                        .unwrap_or_else(|| {
-                            self.error("integer literal exceeds u64 range");
-                            0
-                        }),
-                ))
+                Some(match n {
+                    Ok(n) => Literal::int(n),
+                    Err(_) => {
+                        self.error("integer literal exceeds u128 range");
+                        Literal::Int(0)
+                    }
+                })
             }
             K::Float => {
                 let s = self.bump();
@@ -2976,9 +3048,8 @@ impl Parser<'_> {
                         ExprKind::Name(name)
                     }
                 }
-                K::Lower | K::SelfKw | K::State | K::Linear | K::With | K::Eff => {
-                    ExprKind::Name(self.bump())
-                }
+                K::Lower | K::SelfKw => ExprKind::Name(self.bump()),
+                _ if self.at_contextual_name() => ExprKind::Name(self.bump()),
                 K::Upper => {
                     let mut name = self.bump();
                     while self.eat(K::ColonColon) {
@@ -3192,6 +3263,11 @@ impl Parser<'_> {
             PatternKind::Literal(if negative {
                 match l {
                     Literal::Int(n) => Literal::Int(-n),
+                    Literal::WideInt(n) if n == WIDE_NEG_MIN => Literal::Int(i128::MIN),
+                    Literal::WideInt(n) => {
+                        self.error("integer literal exceeds i128 range when negated");
+                        Literal::WideInt(n)
+                    }
                     Literal::Float(n) => Literal::Float(-n),
                     l => {
                         self.error("only numeric patterns can be negative");
@@ -3210,7 +3286,7 @@ impl Parser<'_> {
                     let name = self.qualified_path();
                     self.constructor_pattern(name)
                 }
-                K::Lower | K::State | K::Linear | K::With | K::Eff => {
+                k if k == K::Lower || contextual_kind(k) => {
                     let name = self.bump();
                     if name == "_" {
                         PatternKind::Wild
@@ -3401,8 +3477,8 @@ fn int_value(e: &Expr) -> Option<i128> {
 }
 
 /// The literal value of a module constant's function, when its initializer
-/// is an integer or `bool` literal (possibly negated): such a constant may
-/// be a match pattern.
+/// is an integer (possibly negated) or `bool` literal: such a constant may
+/// be a match pattern. A literal past `i128::MAX` is kept as `WideInt`.
 pub fn const_literal(f: &Function) -> Option<Literal> {
     let body = f.body.as_ref()?;
     if let Some(n) = int_value(body) {
@@ -3413,7 +3489,7 @@ pub fn const_literal(f: &Function) -> Option<Literal> {
             statements,
             tail: Some(t),
         } if statements.is_empty() => match &t.kind {
-            ExprKind::Literal(l @ Literal::Bool(_)) => Some(l.clone()),
+            ExprKind::Literal(l @ (Literal::Bool(_) | Literal::WideInt(_))) => Some(l.clone()),
             _ => None,
         },
         _ => None,

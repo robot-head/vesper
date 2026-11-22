@@ -589,15 +589,15 @@ impl Abi for crate::ported::types::WireError {
 /// Owned handle of a Vesper `Tcb` value: its words, which own the Vesper
 /// allocations they point to. Dropping it calls `vesper_tcp_Tcb_drop`.
 pub struct Tcb {
-    words: [u64; 129],
+    words: [u64; 131],
 }
 
 impl Tcb {
     /// # Safety
     /// `words` must hold a `Tcb` value of this library that the caller owns.
     unsafe fn from_words(words: &[u64]) -> Self {
-        let mut owned = [0u64; 129];
-        owned.copy_from_slice(&words[..129]);
+        let mut owned = [0u64; 131];
+        owned.copy_from_slice(&words[..131]);
         Self { words: owned }
     }
 
@@ -749,153 +749,161 @@ impl<'a> TcbRef<'a> {
         let w: &'a [u64] = self.words;
         <u64 as Abi>::get(&w[52..])
     }
-    pub fn next_pn(&self) -> u64 {
+    pub fn sent_pipe(&self) -> u64 {
         let w: &'a [u64] = self.words;
         <u64 as Abi>::get(&w[53..])
     }
+    pub fn sent_lost(&self) -> u64 {
+        let w: &'a [u64] = self.words;
+        <u64 as Abi>::get(&w[54..])
+    }
+    pub fn next_pn(&self) -> u64 {
+        let w: &'a [u64] = self.words;
+        <u64 as Abi>::get(&w[55..])
+    }
     pub fn rtt(&self) -> crate::ported::types::RttEstimator {
         let w: &'a [u64] = self.words;
-        <crate::ported::types::RttEstimator as Abi>::get(&w[54..])
+        <crate::ported::types::RttEstimator as Abi>::get(&w[56..])
     }
     pub fn timed(&self) -> Option<u64> {
         let w: &'a [u64] = self.words;
-        <Option<u64> as Abi>::get(&w[64..])
+        <Option<u64> as Abi>::get(&w[66..])
     }
     pub fn rto_deadline(&self) -> Option<u64> {
         let w: &'a [u64] = self.words;
-        <Option<u64> as Abi>::get(&w[66..])
+        <Option<u64> as Abi>::get(&w[68..])
     }
     pub fn retries(&self) -> u32 {
         let w: &'a [u64] = self.words;
-        <u32 as Abi>::get(&w[68..])
+        <u32 as Abi>::get(&w[70..])
     }
     pub fn persist_deadline(&self) -> Option<u64> {
         let w: &'a [u64] = self.words;
-        <Option<u64> as Abi>::get(&w[69..])
+        <Option<u64> as Abi>::get(&w[71..])
     }
     pub fn persist_backoff(&self) -> u32 {
         let w: &'a [u64] = self.words;
-        <u32 as Abi>::get(&w[71..])
+        <u32 as Abi>::get(&w[73..])
     }
     pub fn probe_due(&self) -> bool {
         let w: &'a [u64] = self.words;
-        <bool as Abi>::get(&w[72..])
+        <bool as Abi>::get(&w[74..])
     }
     pub fn dupacks(&self) -> u32 {
         let w: &'a [u64] = self.words;
-        <u32 as Abi>::get(&w[73..])
+        <u32 as Abi>::get(&w[75..])
     }
     pub fn recovery_point(&self) -> Option<u64> {
         let w: &'a [u64] = self.words;
-        <Option<u64> as Abi>::get(&w[74..])
+        <Option<u64> as Abi>::get(&w[76..])
     }
     pub fn force_retx(&self) -> bool {
         let w: &'a [u64] = self.words;
-        <bool as Abi>::get(&w[76..])
+        <bool as Abi>::get(&w[78..])
     }
     pub fn rcv_isn(&self) -> u32 {
         let w: &'a [u64] = self.words;
-        <u32 as Abi>::get(&w[77..])
+        <u32 as Abi>::get(&w[79..])
     }
     pub fn have_irs(&self) -> bool {
         let w: &'a [u64] = self.words;
-        <bool as Abi>::get(&w[78..])
+        <bool as Abi>::get(&w[80..])
     }
     pub fn rcv_nxt(&self) -> u64 {
         let w: &'a [u64] = self.words;
-        <u64 as Abi>::get(&w[79..])
+        <u64 as Abi>::get(&w[81..])
     }
     pub fn rcv_adv_right(&self) -> u64 {
         let w: &'a [u64] = self.words;
-        <u64 as Abi>::get(&w[80..])
+        <u64 as Abi>::get(&w[82..])
     }
     pub fn read_off(&self) -> u64 {
         let w: &'a [u64] = self.words;
-        <u64 as Abi>::get(&w[81..])
+        <u64 as Abi>::get(&w[83..])
     }
     pub fn ooo(&self) -> vesper_port_abi::SeqRef<'a, crate::ported::types::OooRange> {
         let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[82]) }
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[84]) }
     }
     pub fn ooo_stamp(&self) -> u64 {
         let w: &'a [u64] = self.words;
-        <u64 as Abi>::get(&w[83..])
+        <u64 as Abi>::get(&w[85..])
     }
     pub fn ooo_fin(&self) -> Option<u64> {
         let w: &'a [u64] = self.words;
-        <Option<u64> as Abi>::get(&w[84..])
+        <Option<u64> as Abi>::get(&w[86..])
     }
     pub fn fin_received(&self) -> bool {
         let w: &'a [u64] = self.words;
-        <bool as Abi>::get(&w[86..])
+        <bool as Abi>::get(&w[88..])
     }
     pub fn urgent_off(&self) -> Option<u64> {
         let w: &'a [u64] = self.words;
-        <Option<u64> as Abi>::get(&w[87..])
+        <Option<u64> as Abi>::get(&w[89..])
     }
     pub fn ts_recent(&self) -> u32 {
         let w: &'a [u64] = self.words;
-        <u32 as Abi>::get(&w[89..])
+        <u32 as Abi>::get(&w[91..])
     }
     pub fn ts_recent_valid(&self) -> bool {
         let w: &'a [u64] = self.words;
-        <bool as Abi>::get(&w[90..])
+        <bool as Abi>::get(&w[92..])
     }
     pub fn last_ack_sent(&self) -> u64 {
         let w: &'a [u64] = self.words;
-        <u64 as Abi>::get(&w[91..])
+        <u64 as Abi>::get(&w[93..])
     }
     pub fn ack_now(&self) -> bool {
         let w: &'a [u64] = self.words;
-        <bool as Abi>::get(&w[92..])
+        <bool as Abi>::get(&w[94..])
     }
     pub fn ack_pending(&self) -> u32 {
         let w: &'a [u64] = self.words;
-        <u32 as Abi>::get(&w[93..])
+        <u32 as Abi>::get(&w[95..])
     }
     pub fn delack_deadline(&self) -> Option<u64> {
         let w: &'a [u64] = self.words;
-        <Option<u64> as Abi>::get(&w[94..])
+        <Option<u64> as Abi>::get(&w[96..])
     }
     pub fn challenge_window_ns(&self) -> u64 {
         let w: &'a [u64] = self.words;
-        <u64 as Abi>::get(&w[96..])
+        <u64 as Abi>::get(&w[98..])
     }
     pub fn challenge_count(&self) -> u32 {
         let w: &'a [u64] = self.words;
-        <u32 as Abi>::get(&w[97..])
+        <u32 as Abi>::get(&w[99..])
     }
     pub fn pending_rst(&self) -> Option<crate::ported::types::RstSpec> {
         let w: &'a [u64] = self.words;
-        <Option<crate::ported::types::RstSpec> as Abi>::get(&w[98..])
+        <Option<crate::ported::types::RstSpec> as Abi>::get(&w[100..])
     }
     pub fn time_wait_deadline(&self) -> Option<u64> {
         let w: &'a [u64] = self.words;
-        <Option<u64> as Abi>::get(&w[109..])
+        <Option<u64> as Abi>::get(&w[111..])
     }
     pub fn events(&self) -> u8 {
         let w: &'a [u64] = self.words;
-        <u8 as Abi>::get(&w[111..])
+        <u8 as Abi>::get(&w[113..])
     }
     pub fn close_reason(&self) -> Option<crate::ported::types::CloseReason> {
         let w: &'a [u64] = self.words;
-        <Option<crate::ported::types::CloseReason> as Abi>::get(&w[112..])
+        <Option<crate::ported::types::CloseReason> as Abi>::get(&w[114..])
     }
     pub fn stats(&self) -> crate::ported::types::Stats {
         let w: &'a [u64] = self.words;
-        <crate::ported::types::Stats as Abi>::get(&w[114..])
+        <crate::ported::types::Stats as Abi>::get(&w[116..])
     }
     pub fn cmds(&self) -> vesper_port_abi::SeqRef<'a, crate::ported::types::CcCmd> {
         let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[125]) }
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[127]) }
     }
     pub fn edt_entry(&self) -> Option<u64> {
         let w: &'a [u64] = self.words;
-        <Option<u64> as Abi>::get(&w[126..])
+        <Option<u64> as Abi>::get(&w[128..])
     }
     pub fn edt_armed_rto(&self) -> bool {
         let w: &'a [u64] = self.words;
-        <bool as Abi>::get(&w[128..])
+        <bool as Abi>::get(&w[130..])
     }
 }
 
@@ -1504,7 +1512,7 @@ pub fn tcb_listen(t: &mut Tcb, iss_base: u32) -> Result<(), crate::ported::types
 
 /// Calls `tcb_new` of the Vesper library `tcp` (`vesper_tcp_tcb_new`).
 pub fn tcb_new(cfg: crate::ported::types::Config) -> Tcb {
-    let mut result = [0u64; 129];
+    let mut result = [0u64; 131];
     let mut arg_cfg = [0u64; <crate::ported::types::Config as Abi>::WORDS];
     Abi::put(&cfg, &mut arg_cfg);
     // SAFETY: `vesper_tcp_tcb_new` has exactly this signature in the export ABI; every

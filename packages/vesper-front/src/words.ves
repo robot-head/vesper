@@ -139,9 +139,10 @@ pub fn w_TiledSeq() -> u8 {
     50
 }
 
-// Builtin scalar names (`is_scalar_name` without `Unit` and `Never`).
+// Builtin scalar names (`is_scalar_name` without `Unit` and `Never`):
+// 30..=42, and 43 `u128` and 44 `i128`.
 pub fn is_primitive_word(w: u8) -> bool {
-    w >= 30 && w <= 42
+    w >= 30 && w <= 44
 }
 
 // The kind of the lower-case identifier `b[s..s + n]` whose first bytes
@@ -293,6 +294,10 @@ pub fn lower_word_of(w: u64) -> u8 {
         7630696 => 14,
         // mut
         7632237 => 16,
+        // i128
+        942813545 => 44,
+        // u128
+        942813557 => 43,
         // cold
         1684828003 => 15,
         // type

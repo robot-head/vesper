@@ -641,7 +641,11 @@ fn scalar_word(e: &Expr, ty: &Type) -> Option<u64> {
         (Literal::Float(x), "f64") => Some(if negative { -*x } else { *x }.to_bits()),
         (Literal::Int(n), name) => {
             let kind = crate::numeric::IntegerKind::from_name(name)?;
-            let n = if negative { -*n } else { *n };
+            // A 128-bit scalar takes two words: such tables are not encoded.
+            if kind.wide() {
+                return None;
+            }
+            let n = if negative { n.checked_neg()? } else { *n };
             kind.fits(n).then_some(n as i64 as u64)
         }
         _ => None,

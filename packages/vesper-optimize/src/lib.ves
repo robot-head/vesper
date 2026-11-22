@@ -69,6 +69,13 @@ fn put(inout o: ChunkSeq[u8], in s: Str) {
     o.extend(in s.as_bytes());
 }
 
+fn put_u128(inout o: ChunkSeq[u8], v: u128) {
+    if v >= 10 {
+        put_u128(inout o, v / 10);
+    }
+    o.push(wrapping_u8(wrapping_add(v % 10, 48)));
+}
+
 fn put_u64(inout o: ChunkSeq[u8], v: u64) {
     if v >= 10 {
         put_u64(inout o, v / 10);
@@ -106,10 +113,14 @@ pub fn dump_expr(inout o: ChunkSeq[u8], in t: Tree, e: u32) {
         if l.kind != 1 {
             put(inout o, "lit");
         } else {
-            if l.neg && l.bits != 0 {
+            if l.neg && (l.bits != 0 || l.hi != 0) {
                 o.push(45);
             }
-            put_u64(inout o, l.bits);
+            if l.hi == 0 {
+                put_u64(inout o, l.bits);
+            } else {
+                put_u128(inout o, wrapping_shl_u128(widen_u128(l.hi), 64) | widen_u128(l.bits));
+            }
         }
         put_span(inout o, x.start, x.end);
     } else if x.kind == 2 {

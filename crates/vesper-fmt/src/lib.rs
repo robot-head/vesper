@@ -74,9 +74,13 @@ pub const DEFAULT_MAX_TOKENS: usize = 128 * 1024;
 /// Work units charged per lexed token for each ordinary parser call. Parsing
 /// is linear in the token count, so the charge is too (it used to be N²).
 const PARSE_UNITS_PER_TOKEN: usize = 64;
-/// Expression-chain components the preflight accepts before refusing input
-/// that the parser's own height limit would reject anyway.
-const MAX_CHAIN: usize = 128;
+/// Expression height (summed over the delimiter levels of the path) the
+/// preflight accepts before refusing input that the parser's own height
+/// limit (128) would reject anyway. The estimate also counts the enclosing
+/// levels' structural steps (a parameter list, `->`, a body `{`), so it
+/// keeps some slack over the parser's limit: every chain the parser admits
+/// formats, and the parser refuses the few the slack lets through.
+const MAX_CHAIN: usize = 160;
 impl Default for Limits {
     fn default() -> Self {
         Self {
@@ -188,7 +192,14 @@ fn guarded_lex(
         return Err(Error::TokenLimit);
     }
     let mut stack = Vec::new();
+    // Per delimiter level: an estimate of the expression height there, the
+    // binary operators of the current chain plus the postfix steps of its
+    // current operand (`ChainStep`). A long homogeneous chain such as
+    // `f(x) || f(x) || ..` counts one per operator, as the parser's own
+    // height limit does, not one per token.
     let mut path_counts = vec![0usize];
+    // Per level: the postfix steps of the current operand, included above.
+    let mut operand_steps = vec![0usize];
     // Per delimiter level: the chain count where the latest `if` that does
     // not continue an `else` started.
     let mut if_bases: Vec<Option<usize>> = vec![None];
@@ -212,6 +223,7 @@ fn guarded_lex(
         // into one parent component. Child commas/semicolons cannot reset an
         // ancestor's expression chain (e.g. f(1,2)+f(1,2)+...).
         let counter = path_counts.last_mut().ok_or(Error::Conservation)?;
+        let steps = operand_steps.last_mut().ok_or(Error::Conservation)?;
         let closed_block = std::mem::take(&mut after_block);
         if closed_block && token.kind == K::Else {
             // `} else` goes back to where its `if` started: every arm of an
@@ -219,9 +231,11 @@ fn guarded_lex(
             // chain of any length counts like a single `if`.
             if let Some(base) = if_bases.last().copied().flatten() {
                 *counter = base;
+                *steps = 0;
             }
         } else if closed_block && !continues_chain(token.kind, text) {
             *counter = 0;
+            *steps = 0;
         }
         if token.kind == K::If
             && previous != Some(K::Else)
@@ -229,10 +243,25 @@ fn guarded_lex(
         {
             *base = Some(*counter);
         }
-        if matches!(token.kind, K::Semi | K::Comma) {
-            *counter = 0;
-        } else {
-            *counter = counter.checked_add(1).ok_or(Error::Overflow)?;
+        match chain_step(token.kind, text) {
+            ChainStep::End => {
+                *counter = 0;
+                *steps = 0;
+            }
+            // A new operand of the chain: the previous operand's postfix
+            // steps no longer add to the height.
+            ChainStep::Operator => {
+                *counter = counter
+                    .checked_sub(*steps)
+                    .and_then(|c| c.checked_add(1))
+                    .ok_or(Error::Overflow)?;
+                *steps = 0;
+            }
+            ChainStep::Postfix => {
+                *counter = counter.checked_add(1).ok_or(Error::Overflow)?;
+                *steps = steps.checked_add(1).ok_or(Error::Overflow)?;
+            }
+            ChainStep::Operand => {}
         }
         if path_counts
             .iter()
@@ -246,6 +275,7 @@ fn guarded_lex(
             K::LParen | K::LBracket | K::LBrace => {
                 stack.push(token.kind);
                 path_counts.push(0);
+                operand_steps.push(0);
                 if_bases.push(None);
                 if stack.len() > limits.max_depth.min(24) {
                     return Err(Error::DepthLimit);
@@ -263,9 +293,11 @@ fn guarded_lex(
                     });
                 }
                 path_counts.pop();
+                operand_steps.pop();
                 if_bases.pop();
                 if stack.is_empty() {
                     path_counts[0] = 0;
+                    operand_steps[0] = 0;
                 }
                 after_block = token.kind == K::RBrace;
             }
@@ -288,6 +320,54 @@ fn guarded_lex(
             .ok_or(Error::Overflow)?,
     )?;
     Ok(tokens)
+}
+/// How a token changes the preflight's height estimate at its level.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ChainStep {
+    /// `;` or `,`: the expression at this level ends.
+    End,
+    /// An infix or prefix operator, `else`, a range or an arm arrow: the
+    /// chain gains a level and a new operand starts.
+    Operator,
+    /// A postfix step of the current operand: `.f`, a call or index group,
+    /// `?`, `as`, `with`.
+    Postfix,
+    /// A name, literal, keyword or closing delimiter: no height.
+    Operand,
+}
+fn chain_step(kind: K, text: &str) -> ChainStep {
+    if matches!(kind, K::Semi | K::Comma) {
+        ChainStep::End
+    } else if is_binary_operator(kind)
+        || matches!(
+            kind,
+            K::Bang
+                | K::Tilde
+                | K::Else
+                | K::DotDot
+                | K::DotDotEq
+                | K::Eq
+                | K::PlusEq
+                | K::MinusEq
+                | K::StarEq
+                | K::SlashEq
+                | K::PercentEq
+                | K::PipeEq
+                | K::AmpEq
+                | K::Arrow
+                | K::FatArrow
+        )
+    {
+        ChainStep::Operator
+    } else if matches!(
+        kind,
+        K::Dot | K::LParen | K::LBracket | K::LBrace | K::Question | K::With
+    ) || text == "as"
+    {
+        ChainStep::Postfix
+    } else {
+        ChainStep::Operand
+    }
 }
 /// Whether a token right after a closing `}` extends the same expression, so
 /// the preflight keeps counting its chain. Anything else starts a new item or
@@ -608,11 +688,27 @@ fn gap(previous: Piece<'_>, current: Piece<'_>, block: bool, after_block: bool) 
         return Gap::None;
     }
     // `eff (` never starts an effect row, so `eff` is a name there
-    // (`fn eff(..)`, `r.eff()`; contextual `eff`, #1175).
-    if current.kind == K::LParen && previous.kind == K::Eff {
+    // (`fn eff(..)`, `r.eff()`; contextual `eff`, #1175). `effect (`,
+    // `handle (`, `sink (` and `inout (` are calls of a value of that name
+    // too (#1244).
+    if current.kind == K::LParen
+        && matches!(
+            previous.kind,
+            K::Eff | K::Effect | K::Handle | K::Sink | K::Inout
+        )
+    {
         return Gap::None;
     }
     Gap::Soft
+}
+/// Whether `effect`, `handle`, `sink` or `inout` is a name for spacing: after
+/// `.`, `fn` or `let`, or before an infix operator or `?` (a pass mode or
+/// keyword is never followed by one), so `s.sink[0]` and `sink - 1` keep
+/// their usual spacing (#1244).
+fn word_used_as_name(previous: Option<K>, current: K, next: Option<K>) -> bool {
+    matches!(current, K::Effect | K::Handle | K::Sink | K::Inout)
+        && (matches!(previous, Some(K::Dot | K::Fn | K::Let))
+            || next.is_some_and(|n| is_binary_operator(n) || n == K::Question))
 }
 fn sequence<'a>(
     atoms: &[Piece<'a>],
@@ -748,11 +844,18 @@ fn sequence<'a>(
         // A prefix `-`/`!` binds to its operand with no space.
         previous_unary = matches!(current.kind, K::Minus | K::Bang | K::Tilde)
             && previous.is_none_or(|p| !ends_operand(p.kind));
+        let used_as_name = word_used_as_name(
+            previous.map(|p| p.kind),
+            current.kind,
+            atoms.get(*pos).map(|a| a.kind),
+        );
         previous = Some(Piece {
             kind: match current.kind {
                 K::LParen => K::RParen,
                 K::LBracket => K::RBracket,
                 K::LBrace => K::RBrace,
+                // A contextual keyword used as a name spaces like one.
+                _ if used_as_name => K::Lower,
                 _ => current.kind,
             },
             text: current.text,
