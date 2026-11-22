@@ -439,16 +439,9 @@ impl Dec {
         if n.kind == K_NAMED && n.name == self.s.dyn_ && n.n == 1 {
             return true;
         }
-        if n
-            .kind
-            == K_NAMED
-            && n
-            .n
-            == 0
-            && self
-            .c
-            .names
-            .has_prefix(n.name, in "__dyn__".as_bytes()) {
+        if n.kind == K_NAMED
+            && n.n == 0
+            && self.c.names.has_prefix(n.name, in "__dyn__".as_bytes()) {
             return true;
         }
         if n.kind == K_TUPLE {
@@ -470,17 +463,10 @@ impl Dec {
             let ai = self.c.world.lookup(n.name);
             if ai == NONE32 {
                 return unknown
-                    && !self
-                    .is_scalar_name(n.name)
-                    && n
-                    .name
-                    != self
-                    .s
-                    .never
-                    && !self
-                    .is_text(ty)
-                    && vector_words(in self.c.types, in self.c.names, self.c.world.k, ty)
-                    == 0;
+                    && !self.is_scalar_name(n.name)
+                    && n.name != self.s.never
+                    && !self.is_text(ty)
+                    && vector_words(in self.c.types, in self.c.names, self.c.world.k, ty) == 0;
             }
             let a = self.c.world.adt(ai);
             if w(a.gn) != w(n.n) {
@@ -813,8 +799,7 @@ impl Dec {
                 D_STR
             } else if param && self.needs_drop(ty) {
                 D_OWNED
-            } else if self
-                .is_adt(ty)
+            } else if self.is_adt(ty)
                 && !param
                 && (self.holds_sequence(ty) || self.needs_drop(ty)) {
                 D_FIELDS
@@ -841,14 +826,9 @@ impl Dec {
                     let path = p.op(inc(a));
                     let pass = p.op(add(a, 2));
                     if pass == P_SINK {
-                        let partial = p
-                            .path(path)
-                            .n
-                            != 0
-                            && self
-                            .may_need_drop(inst.ty)
-                            && !self
-                            .owned_or_fields(root);
+                        let partial = p.path(path).n != 0
+                            && self.may_need_drop(inst.ty)
+                            && !self.owned_or_fields(root);
                         if partial || self.plan_is(root, D_STR) {
                             self.refuse(root);
                         }
@@ -858,10 +838,7 @@ impl Dec {
                     let op = n32(p.op(inc(a)));
                     let root = self.place_root(place);
                     if (place != root && !self.owned_or_fields(root))
-                        || op
-                        != self
-                        .s
-                        .assign
+                        || op != self.s.assign
                         || (self.plan_is(root, D_STR) && self.fn_.is_param(root)) {
                         if root != NONE32 {
                             self.refuse(root);
