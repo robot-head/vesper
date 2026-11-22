@@ -93,6 +93,7 @@ use self::drv::{
     drv_scan
 };
 use self::store::StoreErr;
+use self::fold::fold_into;
 use @vesper-std/hash-sys::{
     hasher_new_derive_key,
     update,
@@ -109,6 +110,14 @@ use @vesper-std/hash::blake3::{
 // (1 Empty .. 8 TrailingDotOrSpace, 9 NotUtf8).
 pub fn name_error(in name: Slice[u8]) -> u64 {
     name_code(in name)
+}
+
+// `name.to_lowercase()` of the valid UTF-8 `name` (the tree's
+// case-collision check).
+pub fn name_fold(in name: Slice[u8]) -> ChunkSeq[u8] {
+    let mut out = ChunkSeq::with_capacity[u8](name.len());
+    fold_into(in name, inout out);
+    out
 }
 
 // The 32-byte digest of `bytes` under the object context of `domain` and
@@ -436,6 +445,143 @@ pub fn store_sweep(in root: Slice[u8], min_s: u64, min_ns: u64) -> ChunkSeq[u8] 
     let mut r = reply_of(0);
     handle Fail[StoreErr] in {
         self::store::sweep(inout r, in root, min_s, min_ns);
+    } with {
+        return v => v,
+        raise(_e, _k) => {},
+    };
+    r
+}
+
+// `Store::put_file`.
+pub fn store_put_file(in root: Slice[u8], durable: bool, domain: u8, in path: Slice[u8])
+    -> ChunkSeq[u8] eff [Ffi[CasFs], Ffi[Blake3]] {
+    let mut r = reply_of(0);
+    handle Fail[StoreErr] in {
+        self::store::put_file(inout r, in root, durable, domain, in path);
+    } with {
+        return v => v,
+        raise(_e, _k) => {},
+    };
+    r
+}
+
+// `Store::ingest_dir`.
+pub fn store_ingest_dir(in root: Slice[u8], durable: bool, domain: u8, in path: Slice[u8])
+    -> ChunkSeq[u8] eff [Ffi[CasFs], Ffi[Blake3]] {
+    let mut r = reply_of(0);
+    handle Fail[StoreErr] in {
+        self::store::ingest_dir(inout r, in root, durable, domain, in path);
+    } with {
+        return v => v,
+        raise(_e, _k) => {},
+    };
+    r
+}
+
+// `Store::materialize` into `dest` (whose parent is `parent`), with the
+// `CopyStrategy` code `strategy` (0 ReflinkOrCopy, 1 CopyOnly, 2
+// ReflinkOnly): the `MaterializeReport` words.
+pub fn store_materialize(
+    in root: Slice[u8],
+    durable: bool,
+    in tree: Slice[u8],
+    in dest: Slice[u8],
+    in parent: Slice[u8],
+    strategy: u8,
+    verify_reflinks: bool
+) -> ChunkSeq[u8] eff [Ffi[CasFs], Ffi[Blake3]] {
+    let mut r = reply_of(0);
+    handle Fail[StoreErr] in {
+        self::store::materialize(
+            inout r,
+            in root,
+            durable,
+            in tree,
+            in dest,
+            in parent,
+            strategy,
+            verify_reflinks
+        );
+    } with {
+        return v => v,
+        raise(_e, _k) => {},
+    };
+    r
+}
+
+// `Store::verify_all`: the `StoreReport`.
+pub fn store_verify_all(in root: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[CasFs], Ffi[Blake3]] {
+    let mut r = reply_of(0);
+    handle Fail[StoreErr] in {
+        self::store::verify_all(inout r, in root);
+    } with {
+        return v => v,
+        raise(_e, _k) => {},
+    };
+    r
+}
+
+// `export_pack` of the closure of `root_id` from the store at `root`
+// under the limits (pack bytes, objects, depth, tree entries, metadata
+// bytes, work): the pack bytes.
+pub fn store_export_pack(
+    in root: Slice[u8],
+    in root_id: Slice[u8],
+    pack: u64,
+    objects: u64,
+    depth: u64,
+    entries: u64,
+    meta: u64,
+    work: u64
+) -> ChunkSeq[u8] eff [Ffi[CasFs], Ffi[Blake3]] {
+    let mut r = reply_of(0);
+    handle Fail[StoreErr] in {
+        self::store::export_pack(
+            inout r,
+            in root,
+            in root_id,
+            pack,
+            objects,
+            depth,
+            entries,
+            meta,
+            work
+        );
+    } with {
+        return v => v,
+        raise(_e, _k) => {},
+    };
+    r
+}
+
+// `import_pack` of `bytes` (whose root must be `expected`) into the store
+// at `store_path`, under the limits as for `store_export_pack`: the
+// `TransferReport`.
+pub fn store_import_pack(
+    in store_path: Slice[u8],
+    in expected: Slice[u8],
+    in bytes: Slice[u8],
+    pack: u64,
+    objects: u64,
+    depth: u64,
+    entries: u64,
+    meta: u64,
+    work: u64
+) -> ChunkSeq[u8] eff [Ffi[CasFs], Ffi[Blake3]] {
+    let mut r = reply_of(0);
+    handle Fail[StoreErr] in {
+        self::store::import_pack(
+            inout r,
+            in store_path,
+            in expected,
+            in bytes,
+            pack,
+            objects,
+            depth,
+            entries,
+            meta,
+            work
+        );
     } with {
         return v => v,
         raise(_e, _k) => {},

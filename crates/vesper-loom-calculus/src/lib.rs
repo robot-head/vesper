@@ -19,6 +19,11 @@ mod port;
 #[path = "../port/binding.rs"]
 mod port_binding;
 
+/// The Vesper TOML reader's canonical dump, for the differential tests.
+#[cfg(vesper_port)]
+#[doc(hidden)]
+pub use port::{manifest_toml, read_toml, semver_text, toml_accepts};
+
 /// Which build this is: `"vesper"` for the port-backed package
 /// `vesper-loom-calculus`, `"rust"` for the seed copy
 /// `vesper-loom-calculus-seed` that the compiler links.
@@ -220,14 +225,26 @@ pub fn validate_manifest(manifest: &Manifest) -> Vec<Diagnostic> {
     }
 }
 pub fn parse_manifest(source: &str) -> Result<Manifest, Vec<Diagnostic>> {
-    let manifest: Manifest = toml::from_str(source).map_err(|error| {
+    let syntax = |message: String| {
         vec![Diagnostic {
             code: Code::ManifestSyntax,
             package: None,
             subject: "Loom.toml".into(),
-            message: error.to_string(),
+            message,
         }]
-    })?;
+    };
+    // The port reads the TOML and decodes the manifest itself, with
+    // `toml::from_str`'s error text, and hands back its JSON.
+    #[cfg(vesper_port)]
+    let manifest: Manifest = {
+        let json = port::manifest_toml(source);
+        match json.strip_prefix('!') {
+            Some(message) => return Err(syntax(message.to_owned())),
+            None => serde_json::from_str(&json).expect("the port writes a manifest's JSON"),
+        }
+    };
+    #[cfg(not(vesper_port))]
+    let manifest: Manifest = toml::from_str(source).map_err(|error| syntax(error.to_string()))?;
     let errors = validate_manifest(&manifest);
     if errors.is_empty() {
         Ok(manifest)
