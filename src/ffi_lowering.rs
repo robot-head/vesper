@@ -111,7 +111,7 @@ pub const MAX_SLICE_ELEMENTS: usize = 4096;
 /// The one field of a generated extern-type handle struct: the C handle
 /// word. `$` is not a source identifier character, so source code can
 /// never name, read, build or destructure it.
-pub const HANDLE_FIELD: &str = "$handle";
+pub const HANDLE_FIELD: &str = crate::check::FOREIGN_HANDLE_FIELD;
 /// Slice-length marker of a `CSlice` argument that is a source `Slice[T]`
 /// lent in place as `(ptr, len)` (its length is a run-time value).
 pub(crate) const SOURCE_SLICE: usize = usize::MAX;

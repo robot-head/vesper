@@ -4,6 +4,7 @@
 resolver = "2"
 members = [
     ".",
+    "website/wasm",
     "crates/vesper-core",
     "crates/vesper-syntax",
     "crates/vesper-span",
