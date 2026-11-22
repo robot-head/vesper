@@ -1546,12 +1546,12 @@ extern "C" fn report() {
         crate::driver::PASSES.load(Relaxed)
     );
     eprintln!(
-        "vesper-hybrid: the command layers printed {} times from Vesper",
-        crate::commands::PRINTS.load(Relaxed)
-    );
-    eprintln!(
         "vesper-hybrid: doc answered {} calls from Vesper",
         DOC_CALLS.load(Relaxed)
+    );
+    eprintln!(
+        "vesper-hybrid: the command layers printed {} times from Vesper",
+        crate::commands::PRINTS.load(Relaxed)
     );
 }
 

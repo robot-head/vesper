@@ -271,6 +271,24 @@ fn staged() -> Stage {
         q.push(";;");
         q.push(quoted(&path2));
         paths.push((";path1;;\"path2\"", Some(q)));
+        // A bare drive (`C:`) names that drive's current directory, here the
+        // run directory, where `run` stages `vesper-cwdtool`; it must not
+        // become the drive's root (`C:\vesper-cwdtool.exe`). By contrast, a
+        // verbatim drive (`\\?\C:`) takes a separator (`\\?\C:\vesper-cwdtool.exe`).
+        let drive: String = root.to_string_lossy().chars().take(2).collect();
+        assert!(drive.ends_with(':'), "{} has no drive", root.display());
+        let _ = CWD_TOOL.set(default.clone());
+        paths.push(("C:", Some(OsString::from(&drive))));
+        let mut q = OsString::from(&drive);
+        q.push(";");
+        q.push(&path1);
+        paths.push(("C:;path1", Some(q)));
+        let verbatim_drive = format!(r"\\?\{drive}");
+        paths.push((r"\\?\C:", Some(OsString::from(&verbatim_drive))));
+        let mut q = OsString::from(&verbatim_drive);
+        q.push(";");
+        q.push(&path1);
+        paths.push((r"\\?\C:;path1", Some(q)));
     }
     Stage {
         root,
@@ -331,6 +349,7 @@ fn vectors() -> Vec<Vec<OsString>> {
         s(&["nointerp"]),
         s(&["dir"]),
         s(&["hybrid", "--version"]),
+        s(&["cwdtool", "--version"]),
     ];
     for t in TOOLS {
         // The tools are the default compiler, so give them a command that
@@ -360,6 +379,10 @@ fn vectors() -> Vec<Vec<OsString>> {
     v
 }
 
+/// A tool `run` stages in each run directory (Windows: the bare-drive
+/// `PATH` entry).
+static CWD_TOOL: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
 /// Every file under `dir`, by relative path.
 fn snapshot(dir: &Path) -> BTreeMap<String, Vec<u8>> {
     let mut files = BTreeMap::new();
@@ -371,6 +394,9 @@ fn snapshot(dir: &Path) -> BTreeMap<String, Vec<u8>> {
                 stack.push(p);
             } else {
                 let rel = p.strip_prefix(dir).unwrap().display().to_string();
+                if rel.starts_with("vesper-cwdtool") {
+                    continue;
+                }
                 files.insert(rel, std::fs::read(&p).unwrap());
             }
         }
@@ -394,6 +420,9 @@ fn run(
     let _ = std::fs::remove_dir_all(dir);
     std::fs::create_dir_all(dir).unwrap();
     std::fs::write(dir.join("input"), b"fn main() -> i64 { 0 }\n").unwrap();
+    if let Some(tool) = CWD_TOOL.get() {
+        stage(tool, &dir.join(format!("vesper-cwdtool{EXE}")));
+    }
     let mut c = Command::new(compiler);
     c.current_dir(dir).args(args).env("RUST_BACKTRACE", "0");
     match path {
