@@ -55,7 +55,7 @@ Representation (all values stay one `i64`):
 Operations lowered: `New`, `WithCapacity`, `Len`, `Push`, `Pop`, `Get`,
 `Set`, `TryGet`, `Last`, `TrySet`, `Clear`, `Truncate`, `Reserve`, `Extend`,
 `Finish`, `AsSlice`, `SubSlice`, `SliceLen`, `SliceGet`, `SliceSet`, `Swap`,
-`Replace` (element views too), `BytesEq`, `Fill`, all ten `StrOp`s
+`Replace`, `BytesEq`, `Fill`, all ten `StrOp`s
 (`SubStr` checks char boundaries, `PushChar` encodes UTF-8 and rejects
 surrogates), and every `Wide` access (`try_read_u64_le`, `write_u32_be`, ...).
 `Atomic` operations (src/atomics.rs), whose prelude bodies recurse so that
@@ -80,10 +80,10 @@ port differential), not a difference: loops, sequences and conversions.
 
 ## Numbers
 
-- tests/wasm_seed_breadth.rs: 13 programs (seq growth, strings, sub-strings,
+- tests/wasm_seed_breadth.rs: 17 programs (seq growth, strings, sub-strings,
   UTF-8, wide reads, inout growth, struct fields, swap/replace, sequences of
   structs, literal copy-on-write, atomics) run under Wasmtime equal to the evaluator.
-  Rust refuses all 13.
+  Rust refuses all 17.
 - tests/self_host_wasm_backend.rs: `loops_run_like_the_evaluator` and
   `hook_artifact_matches_rust` pass. Port differential and hybrid
   differential: see the PR (run after merging main).
@@ -117,8 +117,11 @@ None. Lane 2 (#1397) needs no runner change.
    `ExtendAsciiLowercase`, `MakeAsciiLowercase`, `Vector`, `Resize`,
    `FillRange`, `ExtendFromWithin`, `ExtendReversed`. They raise
    `Unsupported(Operation)` site 233.
-4. An element view passed as an `inout` call argument (`f(inout s[i])`)
-   writes back through the receiver's place, not the element.
+4. Mutable element views (`match s.try_get_mut(i) { Some(x) => .. }`, an
+   `inout s[i]` argument) bind a sequence element in place. The input
+   encoding (tests/common/wasm_words.rs) leaves a world with a mutable view
+   to Rust for now, so the port never miscompiles one; lowering them needs
+   the checker's `element_views` spans in the wasm section.
 5. Float to integer conversions are refused (site 194).
 
 ## What is left

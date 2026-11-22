@@ -158,6 +158,20 @@ fn main() -> u64 { let mut s = ChunkSeq::new[P](); for i in 0..20 { s.push(P { x
     r#"struct Job { chunk: u64, total: Atomic[u64] }
 fn add(in job: Job, i: u64) { job.total.fetch_add(i, MemoryOrder::Relaxed); }
 fn main() -> u64 { let job = Job { chunk: 1000, total: Atomic::new(0) }; for i in 0..4 { add(job, i); } job.total.load(MemoryOrder::SeqCst) }"#,
+    // A `Str` view sliced off a char boundary faults, as the evaluator does.
+    r#"fn n(in s: Str) -> u64 { s.len() }
+fn cut(in s: Str) -> u64 { n(s[1..2]) }
+fn main() -> u64 { cut("aéb") }"#,
+    // A `Str` view sliced on char boundaries.
+    r#"fn n(in s: Str) -> u64 { s.len() }
+fn cut(in s: Str) -> u64 { n(s[1..3]) }
+fn main() -> u64 { cut("aéb") }"#,
+    // An atomic update in tail position.
+    r#"fn main() -> u64 { let a: Atomic[u64] = Atomic::new(5); a.fetch_add(1, MemoryOrder::Relaxed) }"#,
+    // A temporary mutable view passed `inout`.
+    r#"fn bump(inout v: Slice[u64]) { for i in 0..v.len() { let ok = v.try_set(i, wrapping_add(i, 7)); } }
+fn main() -> u64 { let mut s = ChunkSeq::new[u64](); s.push(1); s.push(2); s.push(3); bump(inout s.as_slice_mut());
+  let mut t: u64 = 0; for i in 0..s.len() { match s.try_get(i) { Option::Some(x) => { t = wrapping_add(wrapping_mul(t, 10), x); }, Option::None => {} } } t }"#,
 ];
 
 #[test]

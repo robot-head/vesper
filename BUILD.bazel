@@ -958,7 +958,7 @@ vesper_crate(
         "test/self_host_ebpf_backend": "long",
         # The wasm backend differential: about 10 min in a debug build.
         "test/self_host_wasm_backend": "long",
-        # Loads the port package, then 13 compilations and Wasmtime runs.
+        # Loads the port package, then 17 compilations and Wasmtime runs.
         "test/wasm_seed_breadth": "long",
         "test/self_host_codegen_scalar": "long",
         "test/self_host_check_harness": "long",
