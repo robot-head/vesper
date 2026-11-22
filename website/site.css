@@ -331,3 +331,28 @@ footer { border-top: 1px solid var(--line); }
 .terminal-command { color: var(--ink); }
 .terminal-failure { color: #ffa3ac; }
 [data-vesper-theme="dawn"] .terminal-failure { color: #9e2438; }
+
+.editor-tooltip {
+  position: fixed;
+  z-index: 5;
+  width: max-content;
+  max-width: min(26rem, calc(100vw - 1rem));
+  padding: .5rem .75rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--ink);
+  box-shadow: 0 .25rem .75rem #0004;
+  font-size: .88rem;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+}
+.editor-tooltip strong { font-family: var(--mono); }
+.editor-tooltip strong, .editor-diagnostics {
+  color: #ffa3ac;
+}
+[data-vesper-theme="dawn"] :is(.editor-tooltip strong, .editor-diagnostics) { color: #9e2438; }
+.editor-diagnostics, .editor-check-status { white-space: pre-line; font-size: .88rem; }
+.editor-diagnostics, .editor-check-status:not(:empty):not(.sr-only) { margin-top: .5rem; }
+.editor-diagnostics summary { cursor: pointer; }
+::highlight(vesper-error) { text-decoration: underline wavy #e45161; }

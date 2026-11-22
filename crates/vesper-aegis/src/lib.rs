@@ -87,3 +87,11 @@ pub use error::{AegisVerifyError, AttestError, ParseError, TeeError};
 pub use gpa::{GpaAcceptanceTracker, PrivatePageSlab, UnacceptedGpaRange};
 pub use host::{HostBounceGrant, HostBounceSlice, PrivateRegion, PrivateSlice, UntrustedHostVal};
 pub use policy::{RelyingPartyPolicy, verify_attestation_claims, verify_ra_tls};
+
+/// The port's CBOR decoder: one item at the start of `input` and the bytes
+/// it used, or `None` when ciborium would reject it. For
+/// tests/cbor_differential.rs only.
+#[doc(hidden)]
+pub fn __port_cbor_value(input: &[u8]) -> Option<(coset::cbor::value::Value, usize)> {
+    port::cbor_value(input)
+}

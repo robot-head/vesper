@@ -5,11 +5,22 @@ const mirror = form.querySelector('.editor-highlight');
 const run = form.querySelector('button[type="submit"]');
 const format = form.querySelector('[data-format]');
 const output = form.querySelector('.editor-output');
-const status = form.querySelector('[role="status"]');
+const status = form.querySelector('.editor-status');
+const checkStatus = form.querySelector('.editor-check-status');
+const diagnostics = form.querySelector('.editor-diagnostics');
+const diagnosticSummary = diagnostics.querySelector('summary');
+const diagnosticItems = diagnostics.querySelector('ul');
+const tooltip = form.querySelector('.editor-tooltip');
+const tooltipCode = tooltip.querySelector('strong');
+const tooltipMessage = tooltip.querySelector('div');
 
 if ('Worker' in globalThis && 'WebAssembly' in globalThis) {
   editor.hidden = false;
-  let worker, timer, highlightTimer, pending;
+  let worker, timer, highlightTimer, checkTimer, checkTimeout, checking, pending;
+  let diagnosticList = [];
+  let diagnosticRanges = [];
+  let hoveredRange;
+  let leaveOnTab = false;
   let revision = 0;
   const template = document.createElement('template');
   const painted = document.createElement('span');
@@ -49,12 +60,86 @@ if ('Worker' in globalThis && 'WebAssembly' in globalThis) {
     syncScroll();
   }
 
+  function diagnosticRange({ start, end }) {
+    if (start === end) {
+      const next = paintedSource.slice(start).match(/^[^\n]/u);
+      const previous = paintedSource.slice(0, start).match(/[^\n](?![\s\S])/u);
+      if (next) end += next[0].length;
+      else if (previous) start -= previous[0].length;
+      else return null;
+    }
+    const range = document.createRange();
+    range.setStart(...boundary(start));
+    range.setEnd(...boundary(end));
+    return range;
+  }
+
+  function drawLens() {
+    hideTooltip();
+    diagnosticRanges = [];
+    globalThis.CSS?.highlights?.delete('vesper-error');
+    if (mirror.hidden || !diagnosticList.length || !globalThis.CSS?.highlights
+      || !('Highlight' in globalThis)) return;
+    for (const diagnostic of diagnosticList) {
+      const range = diagnosticRange(diagnostic);
+      if (range) diagnosticRanges.push({ diagnostic, range });
+    }
+    CSS.highlights.set('vesper-error', new Highlight(...diagnosticRanges.map(entry => entry.range)));
+  }
+
+  function hideTooltip() {
+    tooltip.hidden = true;
+    hoveredRange = undefined;
+  }
+
+  function showTooltip({ clientX: x, clientY: y }) {
+    for (const { diagnostic, range } of diagnosticRanges) {
+      const rect = Array.from(range.getClientRects()).find(rect => rect.width > 0
+        && x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom + 3);
+      if (!rect) continue;
+      if (hoveredRange === range) return;
+      hoveredRange = range;
+      tooltipCode.textContent = diagnostic.code;
+      tooltipMessage.textContent = diagnostic.message;
+      tooltip.hidden = false;
+      const { offsetWidth: width, offsetHeight: height } = tooltip;
+      const { clientWidth, clientHeight } = document.documentElement;
+      const below = rect.bottom + 6;
+      tooltip.style.left = Math.max(8, Math.min(x, clientWidth - width - 8)) + 'px';
+      tooltip.style.top = (below + height + 8 <= clientHeight
+        ? below : Math.max(8, rect.top - height - 6)) + 'px';
+      return;
+    }
+    hideTooltip();
+  }
+
+  function showDiagnostics(list = [], message = '') {
+    diagnosticList = list;
+    const summary = list.length === 1 ? '1 compiler error' : list.length + ' compiler errors';
+    diagnostics.hidden = !list.length;
+    if (diagnostics.hidden) diagnostics.open = false;
+    checkStatus.classList.toggle('sr-only', Boolean(list.length));
+    const announcement = list.length ? summary : message;
+    if (checkStatus.textContent !== announcement) checkStatus.textContent = announcement;
+    diagnosticSummary.textContent = summary;
+    diagnosticItems.replaceChildren(...list.map(({ start, code, message }) => {
+      const line = source.value.slice(0, start).split('\n').length;
+      const item = document.createElement('li');
+      item.textContent = 'Line ' + line + ' · ' + code + ' · ' + message;
+      return item;
+    }));
+    drawLens();
+  }
+
   function syncScroll() {
     mirror.scrollTop = source.scrollTop;
     mirror.scrollLeft = source.scrollLeft;
+    hideTooltip();
   }
 
   function stop() {
+    clearTimeout(checkTimeout);
+    checking = undefined;
     worker?.terminate();
     worker = undefined;
   }
@@ -101,6 +186,7 @@ if ('Worker' in globalThis && 'WebAssembly' in globalThis) {
     mirror.hidden = false;
     source.classList.add('has-highlight');
     syncScroll();
+    drawLens();
   }
 
   function startWorker() {
@@ -108,7 +194,18 @@ if ('Worker' in globalThis && 'WebAssembly' in globalThis) {
     next.onmessage = ({ data }) => {
       if (worker !== next) return;
       if (data.mode === 'highlight') receiveHighlight(data);
-      else if (pending) finish(data);
+      else if (data.live) {
+        if (checking !== data.id) return;
+        clearTimeout(checkTimeout);
+        checking = undefined;
+        if (data.id === revision) {
+          const message = data.ok ? (form.dataset.repair ? 'Checks passed.' : '') : data.output;
+          showDiagnostics(data.diagnostics, message);
+        }
+      } else if (pending) {
+        if (pending.revision === revision && data.diagnostics) showDiagnostics(data.diagnostics);
+        finish(data);
+      }
     };
     next.onerror = () => {
       if (worker !== next) return;
@@ -118,9 +215,13 @@ if ('Worker' in globalThis && 'WebAssembly' in globalThis) {
     return next;
   }
 
-  function refreshHighlight() {
+  function refreshHighlight({ immediate = false } = {}) {
     revision++;
+    showDiagnostics();
     updatePaint(source.value);
+    clearTimeout(checkTimer);
+    if (immediate) check();
+    else checkTimer = setTimeout(check, 300);
     clearTimeout(highlightTimer);
     highlightTimer = setTimeout(() => {
       try {
@@ -130,6 +231,23 @@ if ('Worker' in globalThis && 'WebAssembly' in globalThis) {
         // The textarea remains readable if a worker could not start.
       }
     }, 50);
+  }
+
+  function check() {
+    if (pending || checking !== undefined) {
+      checkTimer = setTimeout(check, 300);
+      return;
+    }
+    try {
+      worker ??= startWorker();
+      const mode = ['test', 'test-case'].includes(form.dataset.mode) ? 'check-tests'
+        : ['macro', 'expand', 'format'].includes(form.dataset.mode) ? 'expand' : 'check';
+      checking = revision;
+      checkTimeout = setTimeout(() => { if (!pending) stop(); }, 10000);
+      worker.postMessage({ source: source.value, mode, id: revision, live: true });
+    } catch {
+      stop();
+    }
   }
 
   function start(mode) {
@@ -168,22 +286,34 @@ if ('Worker' in globalThis && 'WebAssembly' in globalThis) {
   });
   source.addEventListener('input', refreshHighlight);
   source.addEventListener('scroll', syncScroll);
+  source.addEventListener('pointermove', showTooltip);
+  source.addEventListener('pointerleave', hideTooltip);
+  window.addEventListener('scroll', hideTooltip);
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape') hideTooltip();
+  });
+  if ('ResizeObserver' in globalThis) new ResizeObserver(syncScroll).observe(source);
+  source.addEventListener('blur', () => { leaveOnTab = false; });
   source.addEventListener('keydown', event => {
-    if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && !event.isComposing) {
+    if (event.isComposing) return;
+    const moveFocus = leaveOnTab;
+    leaveOnTab = event.key === 'Escape';
+    if (event.key === 'Tab' && !moveFocus
+      && !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey) {
+      event.preventDefault();
+      const indent = '    ';
+      const { selectionStart, selectionEnd, value, maxLength } = source;
+      if (value.length - (selectionEnd - selectionStart) + indent.length > maxLength) return;
+      // Insert through the browser so undo and the standard input event work.
+      if (!document.execCommand('insertText', false, indent)) {
+        source.setRangeText(indent, selectionStart, selectionEnd, 'end');
+        source.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+    } else if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
       event.preventDefault();
       form.requestSubmit();
     }
   });
 
-  if ('IntersectionObserver' in globalThis) {
-    const observer = new IntersectionObserver(entries => {
-      if (entries.some(entry => entry.isIntersecting)) {
-        observer.disconnect();
-        refreshHighlight();
-      }
-    });
-    observer.observe(source);
-  } else {
-    refreshHighlight();
-  }
+  refreshHighlight({ immediate: true });
 }
