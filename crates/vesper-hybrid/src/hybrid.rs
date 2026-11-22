@@ -765,7 +765,7 @@ fn scalar_plan(
     if let Some((input, _)) = ir_words::program_input(world, program) {
         let names: Vec<&String> = program.functions.keys().collect();
         let words = codegen_scalar_binding::plan(&input);
-        for r in words.chunks_exact(RECORD) {
+        for r in words.as_chunks::<RECORD>().0 {
             let Some(name) = names.get(r[0] as usize) else {
                 continue;
             };
