@@ -25,10 +25,11 @@
 
 use std::mem;
 
-use crate::protect::{HeaderKey, LONG_HEADER_BIT, PacketKey, Unprotected};
-use crate::schedule::TrafficSecret;
-use crate::ticket::{NonceTicket, SealError, Sealer, TicketAudit};
-use crate::{Cipher, CryptoError, check_pn};
+use super::check_pn;
+use super::protect::{HeaderKey, LONG_HEADER_BIT, PacketKey, Unprotected};
+use super::schedule::TrafficSecret;
+use super::ticket::{NonceTicket, SealError, Sealer, TicketAudit};
+use crate::{Cipher, CryptoError};
 
 struct RecvPhase {
     key: PacketKey,

@@ -3,9 +3,10 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::protect::{KEY_PHASE_BIT, LONG_HEADER_BIT, PacketKey, Unprotected, truncated_matches};
-use crate::schedule::DirectionalKeys;
-use crate::{Cipher, CryptoError, PACKET_NUMBER_LIMIT, SAMPLE_LEN, TAG_LEN, check_pn};
+use super::check_pn;
+use super::protect::{KEY_PHASE_BIT, LONG_HEADER_BIT, PacketKey, Unprotected, truncated_matches};
+use super::schedule::DirectionalKeys;
+use crate::{Cipher, CryptoError, PACKET_NUMBER_LIMIT, SAMPLE_LEN, TAG_LEN};
 
 static NEXT_SEALER_ID: AtomicU64 = AtomicU64::new(1);
 static LEAKED_TICKETS: AtomicU64 = AtomicU64::new(0);

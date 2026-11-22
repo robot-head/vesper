@@ -13,7 +13,8 @@ use chacha20::cipher::consts::U10;
 use chacha20poly1305::ChaCha20Poly1305;
 use zeroize::Zeroize;
 
-use crate::{Cipher, CryptoError, IV_LEN, SAMPLE_LEN, TAG_LEN, check_pn};
+use super::check_pn;
+use crate::{Cipher, CryptoError, IV_LEN, SAMPLE_LEN, TAG_LEN};
 
 /// First-byte bit that marks a long header (RFC 9000 §17.2).
 pub const LONG_HEADER_BIT: u8 = 0x80;

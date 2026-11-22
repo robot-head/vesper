@@ -1,0 +1,1251 @@
+// @vesper/warp-crypto: the Vesper port of vesper-warp-crypto (Rust-exit
+// SH6 lane 17, #1412), QUIC packet protection for Warp (RFC 9001).
+//
+// Every protocol rule is here: the §5.1/§5.2 key schedule and the §6.1
+// "quic ku" update, the §5.3 nonce, the bounds of every buffer offset, the
+// §5.4 header-protection masks and their application, the ticket rules of
+// the per-key sealer (strictly increasing packet numbers, the §6.6
+// confidentiality limit, stale tickets, the key-phase bit), the opener's
+// §6.6 integrity limit, the §6 key-update state machine (which receive key
+// a packet's phase bit and packet number select, promotion, retirement)
+// and the §5.8 Retry integrity tag. The primitives (AES-GCM,
+// ChaCha20-Poly1305, AES, ChaCha20, HKDF) are calls of `@vesper/crypto`.
+//
+// The Rust crate keeps its public types and what the export ABI cannot
+// carry: the AEAD and AES keys, held inline in its key structs and lent to
+// the calls here (export ABI 4), the `NonceTicket` owner with its drop
+// accounting, the packet-number reconstruction closure (open_packet is
+// split around it) and the swaps of key values on an update. The calls on
+// the packet path allocate nothing: the caller lends a scratch buffer of
+// `SCRATCH` bytes for the nonce, the sample and the HKDF labels.
+//
+// @export abi 4 options
+use @vesper/crypto::{
+    Aead,
+    Block,
+    CryptoError,
+    aead_free,
+    aead_new,
+    aead_open,
+    aead_seal,
+    aes_encrypt_block,
+    chacha20_block,
+    hkdf_expand,
+    hkdf_extract,
+    wipe
+};
+
+// ---------------------------------------------------------------------------
+// Constants and cipher suites.
+
+// One past the largest packet number, 2^62 (RFC 9000 §12.3).
+const PN_LIMIT: u64 = 4611686018427387904;
+const TAG_LEN: u64 = 16;
+const IV_LEN: u64 = 12;
+const SAMPLE_LEN: u64 = 16;
+const MAX_CID_LEN: u64 = 20;
+const LONG_HEADER_BIT: u8 = 128;
+const KEY_PHASE_BIT: u8 = 4;
+// Bytes of the scratch buffer every packet-path call borrows: a 64-byte
+// ChaCha20 block, and room for the largest HkdfLabel used here.
+const SCRATCH: u64 = 64;
+const U64_MAX: u64 = 18446744073709551615;
+
+// The packet protection cipher suites.
+pub copy enum Cipher {
+    Aes128Gcm,
+    Aes256Gcm,
+    ChaCha20Poly1305
+}
+
+// The crate's `CryptoError` (lengths as u64).
+pub copy enum WcErr {
+    SecretLength {
+        expected: u64,
+        actual: u64
+    },
+    CipherMismatch,
+    ConnectionIdTooLong {
+        len: u64
+    },
+    BufferTooShort {
+        needed: u64,
+        available: u64
+    },
+    PayloadTooLarge,
+    InvalidPacketNumberOffset,
+    SampleOutOfBounds {
+        sample_end: u64,
+        packet_len: u64
+    },
+    InvalidHeaderForm,
+    PacketNumberOutOfRange {
+        pn: u64
+    },
+    PacketNumberReused {
+        pn: u64
+    },
+    PacketNumberRegression {
+        requested: u64,
+        next_allowed: u64
+    },
+    PacketNumberMismatch,
+    PacketNumbersExhausted,
+    ConfidentialityLimitReached,
+    IntegrityLimitReached,
+    StaleTicket,
+    KeyPhaseMismatch,
+    AuthenticationFailed,
+    KeyUpdateNotPermitted,
+    KeyRetired,
+    PacketNumberReconstruction
+}
+
+// AEAD and header-protection key length.
+pub fn cipher_key_len(c: Cipher) -> u64 {
+    match c {
+        Cipher::Aes128Gcm => 16,
+        Cipher::Aes256Gcm => 32,
+        Cipher::ChaCha20Poly1305 => 32,
+    }
+}
+
+// Traffic secret length: the TLS hash output length.
+pub fn cipher_secret_len(c: Cipher) -> u64 {
+    match c {
+        Cipher::Aes128Gcm => 32,
+        Cipher::Aes256Gcm => 48,
+        Cipher::ChaCha20Poly1305 => 32,
+    }
+}
+
+// RFC 9001 §6.6: packets one key may seal. ChaCha20-Poly1305's limit
+// exceeds the packet-number space.
+pub fn cipher_confidentiality_limit(c: Cipher) -> u64 {
+    match c {
+        Cipher::ChaCha20Poly1305 => PN_LIMIT,
+        _ => 8388608,
+    }
+}
+
+// RFC 9001 §6.6: failed openings tolerated across all keys.
+pub fn cipher_integrity_limit(c: Cipher) -> u64 {
+    match c {
+        Cipher::ChaCha20Poly1305 => 68719476736,
+        _ => 4503599627370496,
+    }
+}
+
+// The `@vesper/crypto` AEAD code.
+pub fn cipher_aead(c: Cipher) -> u32 {
+    match c {
+        Cipher::Aes128Gcm => 1,
+        Cipher::Aes256Gcm => 2,
+        Cipher::ChaCha20Poly1305 => 3,
+    }
+}
+
+// The `@vesper/crypto` hash code of the suite's HKDF.
+fn cipher_hash(c: Cipher) -> u32 {
+    match c {
+        Cipher::Aes256Gcm => 2,
+        _ => 1,
+    }
+}
+
+fn check_pn(pn: u64) eff [Fail[WcErr]] {
+    if pn >= PN_LIMIT {
+        Fail::raise(
+            WcErr::PacketNumberOutOfRange {
+                pn: pn
+            }
+        );
+    }
+}
+
+fn too_short(needed: u64, available: u64) eff [Fail[WcErr]] {
+    Fail::raise(
+        WcErr::BufferTooShort {
+            needed: needed,
+            available: available
+        }
+    );
+}
+
+// `start + len`, raising `BufferTooShort` past `available` (or on
+// overflow, with `needed` saturated).
+fn checked_end(start: u64, len: u64, available: u64) -> u64 eff [Fail[WcErr]] {
+    let end = wrapping_add(start, len);
+    if end < start {
+        too_short(U64_MAX, available);
+    }
+    if end > available {
+        too_short(end, available);
+    }
+    end
+}
+
+fn byte(in buf: Slice[u8], at: u64) -> u8 {
+    match buf.try_get(at) {
+        Option::Some(b) => b,
+        Option::None => 0,
+    }
+}
+
+fn put(inout buf: Slice[u8], at: u64, v: u8) {
+    let _ok = buf.try_set(at, v);
+}
+
+// ---------------------------------------------------------------------------
+// Key schedule (RFC 9001 §5.1, §5.2, §6.1).
+
+// `HKDF-Expand-Label(secret, label, "", len(out))` (RFC 8446 §7.1) with the
+// HkdfLabel built in `scratch`, so nothing is allocated.
+fn expand_label(
+    c: Cipher,
+    in secret: Slice[u8],
+    in label: Slice[u8],
+    inout out: Slice[u8],
+    inout scratch: Slice[u8]
+) eff [Ffi[Crypto], Fail[CryptoError]] {
+    let n = out.len();
+    let full = wrapping_add(6, label.len());
+    put(inout scratch, 0, wrapping_u8(n >> 8));
+    put(inout scratch, 1, wrapping_u8(n));
+    put(inout scratch, 2, wrapping_u8(full));
+    let _a = scratch.try_copy_from(3, in "tls13 ".as_bytes());
+    let _b = scratch.try_copy_from(9, in label);
+    let info_len = wrapping_add(full, 4);
+    put(inout scratch, wrapping_sub(info_len, 1), 0);
+    hkdf_expand(cipher_hash(c), in secret, in scratch[0..info_len], inout out);
+    wipe(inout scratch[0..info_len]);
+}
+
+// Raises `SecretLength` unless `len` is the suite's secret length.
+pub fn secret_check(c: Cipher, len: u64) eff [Fail[WcErr]] {
+    let expected = cipher_secret_len(c);
+    if len != expected {
+        Fail::raise(
+            WcErr::SecretLength {
+                expected: expected,
+                actual: len
+            }
+        );
+    }
+}
+
+// RFC 9001 §6.1: `out = HKDF-Expand-Label(secret, "quic ku", "",
+// Hash.length)`.
+pub fn next_phase(
+    c: Cipher,
+    in secret: Slice[u8],
+    inout out: Slice[u8],
+    inout scratch: Slice[u8]
+) eff [Ffi[Crypto], Fail[CryptoError]] {
+    expand_label(c, in secret, in "quic ku".as_bytes(), inout out, inout scratch);
+}
+
+// RFC 9001 §5.1: the packet key, IV and header-protection key of `secret`.
+pub fn key_material(
+    c: Cipher,
+    in secret: Slice[u8],
+    inout key: Slice[u8],
+    inout iv: Slice[u8],
+    inout hp: Slice[u8],
+    inout scratch: Slice[u8]
+) eff [Ffi[Crypto], Fail[CryptoError]] {
+    expand_label(c, in secret, in "quic key".as_bytes(), inout key, inout scratch);
+    expand_label(c, in secret, in "quic iv".as_bytes(), inout iv, inout scratch);
+    expand_label(c, in secret, in "quic hp".as_bytes(), inout hp, inout scratch);
+}
+
+fn check_cid(len: u64) eff [Fail[WcErr]] {
+    if len > MAX_CID_LEN {
+        Fail::raise(
+            WcErr::ConnectionIdTooLong {
+                len: len
+            }
+        );
+    }
+}
+
+// The QUIC v1 Initial salt (RFC 9001 §5.2).
+fn initial_salt(inout out: Slice[u8]) {
+    let salt = "38762cf7f55934b34d179ae6a4c80cadccbb7f0a".as_bytes();
+    let mut i: u64 = 0;
+    loop {
+        if i >= 20 {
+            break;
+        }
+        let hi = nibble(byte(in salt, wrapping_mul(i, 2)));
+        let lo = nibble(byte(in salt, wrapping_add(wrapping_mul(i, 2), 1)));
+        put(inout out, i, wrapping_u8(wrapping_add(wrapping_mul(hi, 16), lo)));
+        i = wrapping_add(i, 1);
+    }
+}
+
+fn nibble(c: u8) -> u64 {
+    let v = widen_u64(c);
+    if v >= 97 {
+        wrapping_sub(v, 87)
+    } else {
+        wrapping_sub(v, 48)
+    }
+}
+
+// `out = HKDF-Extract(initial_salt, client_dcid)`, the common Initial
+// secret (32 bytes). `scratch` holds the salt.
+pub fn initial_secret(in dcid: Slice[u8], inout out: Slice[u8], inout scratch: Slice[u8]) eff [
+    Ffi[Crypto],
+    Fail[WcErr],
+    Fail[CryptoError]
+] {
+    check_cid(dcid.len());
+    initial_salt(inout scratch[0..20]);
+    hkdf_extract(1, in scratch[0..20], in dcid, inout out);
+}
+
+// RFC 9001 §5.2: the client and server Initial secrets (32 bytes each) for
+// the client's first Destination Connection ID. `prk` (32 bytes) is wiped.
+pub fn initial_secrets(
+    in dcid: Slice[u8],
+    inout client: Slice[u8],
+    inout server: Slice[u8],
+    inout prk: Slice[u8],
+    inout scratch: Slice[u8]
+) eff [Ffi[Crypto], Fail[WcErr], Fail[CryptoError]] {
+    initial_secret(in dcid, inout prk, inout scratch);
+    expand_label(Cipher::Aes128Gcm, in prk, in "client in".as_bytes(), inout client, inout scratch);
+    expand_label(Cipher::Aes128Gcm, in prk, in "server in".as_bytes(), inout server, inout scratch);
+    wipe(inout prk);
+}
+
+// ---------------------------------------------------------------------------
+// AEAD in place (RFC 9001 §5.3).
+
+// The nonce for `pn`: the IV XORed with the packet number, left-padded to
+// 12 bytes in network byte order, in `scratch[0..12]`.
+fn nonce_into(in iv: Slice[u8], pn: u64, inout scratch: Slice[u8]) {
+    let mut i: u64 = 0;
+    loop {
+        if i >= IV_LEN {
+            break;
+        }
+        let b = byte(in iv, i);
+        let m = if i < 4 {
+            0
+        } else {
+            wrapping_u8(wrapping_shr_u64(pn, wrapping_u32(wrapping_mul(wrapping_sub(11, i), 8))))
+        };
+        put(inout scratch, i, b ^ m);
+        i = wrapping_add(i, 1);
+    }
+}
+
+// The nonce for `pn` in `out` (12 bytes), for the crate's `nonce`.
+pub fn nonce(in iv: Slice[u8], pn: u64, inout out: Slice[u8]) {
+    nonce_into(in iv, pn, inout out);
+}
+
+// Seals `buf[header_len..header_len + payload_len]` in place with
+// `buf[..header_len]` as associated data and the tag after it. Returns the
+// protected length. Nothing is written on error.
+pub fn packet_seal(
+    in a: Aead,
+    in iv: Slice[u8],
+    pn: u64,
+    inout buf: Slice[u8],
+    header_len: u64,
+    payload_len: u64,
+    inout scratch: Slice[u8]
+) -> u64 eff [Ffi[Crypto], Fail[WcErr]] {
+    check_pn(pn);
+    let payload_end = checked_end(header_len, payload_len, buf.len());
+    let end = checked_end(payload_end, TAG_LEN, buf.len());
+    nonce_into(in iv, pn, inout scratch);
+    let ok = handle Fail[CryptoError] in {
+        aead_seal(in a, in scratch[0..IV_LEN], inout buf[0..end], header_len, payload_len);
+        true
+    } with {
+        return v => v,
+        raise(_e, _) => false,
+    };
+    if !ok {
+        // Only payloads beyond the AEADs' multi-GiB maxima.
+        Fail::raise(WcErr::PayloadTooLarge);
+    }
+    end
+}
+
+// Opens `buf[header_len..]` (ciphertext, then the tag) in place and returns
+// the plaintext length. The tag is checked first, so on error `buf` is
+// unchanged.
+pub fn packet_open(
+    in a: Aead,
+    in iv: Slice[u8],
+    pn: u64,
+    inout buf: Slice[u8],
+    header_len: u64,
+    inout scratch: Slice[u8]
+) -> u64 eff [Ffi[Crypto], Fail[WcErr]] {
+    check_pn(pn);
+    let min = checked_end(header_len, TAG_LEN, buf.len());
+    if !open_in_place(in a, in iv, pn, inout buf, header_len, inout scratch) {
+        Fail::raise(WcErr::AuthenticationFailed);
+    }
+    wrapping_sub(buf.len(), min)
+}
+
+// The AEAD step of an open, after the bounds checks: false when the tag
+// does not verify (the buffer is then unchanged).
+fn open_in_place(
+    in a: Aead,
+    in iv: Slice[u8],
+    pn: u64,
+    inout buf: Slice[u8],
+    header_len: u64,
+    inout scratch: Slice[u8]
+) -> bool eff [Ffi[Crypto]] {
+    nonce_into(in iv, pn, inout scratch);
+    handle Fail[CryptoError] in {
+        aead_open(in a, in scratch[0..IV_LEN], inout buf, header_len);
+        true
+    } with {
+        return v => v,
+        raise(_e, _) => false,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Header protection (RFC 9001 §5.4).
+
+// What removing header protection reports: the packet-number field and its
+// truncated value, the unprotected first byte, and the 5-byte mask (packed
+// big-endian) so protection can be restored.
+pub copy struct Unprot {
+    pn_offset: u64,
+    pn_len: u64,
+    truncated_pn: u64,
+    first_byte: u8,
+    mask: u64
+}
+
+// The start of the §5.4.2 sample, after checking that it fits.
+fn sample_start(len: u64, pn_offset: u64) -> u64 eff [Fail[WcErr]] {
+    if pn_offset == 0 {
+        Fail::raise(WcErr::InvalidPacketNumberOffset);
+    }
+    let start = wrapping_add(pn_offset, 4);
+    let end = wrapping_add(start, SAMPLE_LEN);
+    if start < pn_offset || end < start {
+        Fail::raise(
+            WcErr::SampleOutOfBounds {
+                sample_end: U64_MAX,
+                packet_len: len
+            }
+        );
+    }
+    if end > len {
+        Fail::raise(
+            WcErr::SampleOutOfBounds {
+                sample_end: end,
+                packet_len: len
+            }
+        );
+    }
+    start
+}
+
+// The first five bytes of `b`, big-endian.
+fn pack5(in b: Slice[u8]) -> u64 {
+    match b.try_read_u64_be(0) {
+        Option::Some(v) => v >> 24,
+        Option::None => 0,
+    }
+}
+
+fn mask_byte(mask: u64, i: u64) -> u8 {
+    wrapping_u8(wrapping_shr_u64(mask, wrapping_u32(wrapping_mul(wrapping_sub(4, i), 8))))
+}
+
+// The AES header-protection mask (RFC 9001 §5.4.3) of the sample of `buf`
+// for a packet number at `pn_offset`.
+pub fn hp_mask_aes(in hp: Block, in buf: Slice[u8], pn_offset: u64, inout scratch: Slice[u8])
+    -> u64 eff [Ffi[Crypto], Fail[WcErr]] {
+    let start = sample_start(buf.len(), pn_offset);
+    let _c = scratch.try_copy_from(0, in buf[start..wrapping_add(start, SAMPLE_LEN)]);
+    let ok = handle Fail[CryptoError] in {
+        aes_encrypt_block(in hp, inout scratch[0..SAMPLE_LEN]);
+        true
+    } with {
+        return v => v,
+        raise(_e, _) => false,
+    };
+    // The block is the mask itself, which only hides header bits the
+    // receiver reveals anyway; unlike a ChaCha20 block it is not wiped.
+    let m = pack5(in scratch);
+    if !ok {
+        // A key of the right length always encrypts.
+        Fail::raise(WcErr::InvalidHeaderForm);
+    }
+    m
+}
+
+// The ChaCha20 header-protection mask (RFC 9001 §5.4.4): counter
+// `sample[0..4]` little-endian, nonce `sample[4..16]`, the first five
+// keystream bytes. One block is defined at every 32-bit counter, including
+// the attacker-chosen 2^32 - 1.
+pub fn hp_mask_chacha(
+    in key: Slice[u8],
+    in buf: Slice[u8],
+    pn_offset: u64,
+    inout scratch: Slice[u8]
+) -> u64 eff [Ffi[Crypto], Fail[WcErr]] {
+    let start = sample_start(buf.len(), pn_offset);
+    let mut counter: u32 = 0;
+    let mut i: u64 = 4;
+    loop {
+        if i == 0 {
+            break;
+        }
+        i = wrapping_sub(i, 1);
+        counter = wrapping_shl_u32(counter, 8) | widen_u32(byte(in buf, wrapping_add(start, i)));
+    }
+    let ok = handle Fail[CryptoError] in {
+        chacha20_block(
+            in key,
+            counter,
+            in buf[wrapping_add(start, 4)..wrapping_add(start, SAMPLE_LEN)],
+            inout scratch[0..SCRATCH]
+        );
+        true
+    } with {
+        return v => v,
+        raise(_e, _) => false,
+    };
+    let m = pack5(in scratch);
+    wipe(inout scratch[0..SCRATCH]);
+    if !ok {
+        // A 32-byte key and a 64-byte scratch always produce a block.
+        Fail::raise(WcErr::InvalidHeaderForm);
+    }
+    m
+}
+
+fn first_byte_mask(first: u8) -> u8 {
+    if first & LONG_HEADER_BIT != 0 {
+        15
+    } else {
+        31
+    }
+}
+
+// The top `pn_len` bytes of a 32-bit word.
+fn field_keep(pn_len: u64) -> u32 {
+    wrapping_shl_u32(4294967295, wrapping_u32(wrapping_mul(wrapping_sub(4, pn_len), 8)))
+}
+
+fn apply_mask(inout buf: Slice[u8], pn_offset: u64, pn_len: u64, mask: u64) {
+    let first = byte(in buf, 0);
+    put(inout buf, 0, first ^ (mask_byte(mask, 0) & first_byte_mask(first)));
+    // The four bytes at `pn_offset` lie before the sample, so one 32-bit
+    // access covers the packet-number field (mask bytes 1-4 are the low
+    // word of `mask`).
+    match buf.try_read_u32_be(pn_offset) {
+        Option::Some(field) => {
+            let _w = buf
+                .try_write_u32_be(pn_offset, field ^ (wrapping_u32(mask) & field_keep(pn_len)));
+        },
+        Option::None => {
+            let mut i: u64 = 0;
+            loop {
+                if i >= pn_len {
+                    break;
+                }
+                let at = wrapping_add(pn_offset, i);
+                put(inout buf, at, byte(in buf, at) ^ mask_byte(mask, wrapping_add(i, 1)));
+                i = wrapping_add(i, 1);
+            }
+        },
+    }
+}
+
+// Applies header protection in place with `mask` (from `hp_mask_*` over
+// the sealed packet). The first byte's low two bits, still unprotected,
+// give the packet-number length.
+pub fn hp_apply(inout buf: Slice[u8], pn_offset: u64, mask: u64) eff [Fail[WcErr]] {
+    let _s = sample_start(buf.len(), pn_offset);
+    let pn_len = wrapping_add(widen_u64(byte(in buf, 0) & 3), 1);
+    apply_mask(inout buf, pn_offset, pn_len, mask);
+}
+
+// Removes header protection in place (RFC 9001 §5.4.1) with `mask` (from
+// `hp_mask_*` over the protected packet) and reports the packet-number
+// field. On error nothing is written.
+pub fn hp_remove(inout buf: Slice[u8], pn_offset: u64, mask: u64) -> Unprot eff [Fail[WcErr]] {
+    let _s = sample_start(buf.len(), pn_offset);
+    let protected = byte(in buf, 0);
+    let first = protected ^ (mask_byte(mask, 0) & first_byte_mask(protected));
+    let pn_len = wrapping_add(widen_u64(first & 3), 1);
+    // pn_offset + 4 <= the sample start < buf.len(): the field is in bounds.
+    apply_mask(inout buf, pn_offset, pn_len, mask);
+    let truncated = match buf.try_read_u32_be(pn_offset) {
+        Option::Some(field) => widen_u64(
+            wrapping_shr_u32(field, wrapping_u32(wrapping_mul(wrapping_sub(4, pn_len), 8)))
+        ),
+        Option::None => 0,
+    };
+    Unprot {
+        pn_offset: pn_offset,
+        pn_len: pn_len,
+        truncated_pn: truncated,
+        first_byte: first,
+        mask: mask
+    }
+}
+
+// `hp_apply` with the AES mask of the sealed packet: one call per packet.
+pub fn hp_apply_aes(
+    in hp: Block,
+    inout buf: Slice[u8],
+    pn_offset: u64,
+    inout scratch: Slice[u8]
+) eff [Ffi[Crypto], Fail[WcErr]] {
+    let mask = hp_mask_aes(in hp, in buf, pn_offset, inout scratch);
+    hp_apply(inout buf, pn_offset, mask);
+}
+
+// `hp_apply` with the ChaCha20 mask of the sealed packet.
+pub fn hp_apply_chacha(
+    in key: Slice[u8],
+    inout buf: Slice[u8],
+    pn_offset: u64,
+    inout scratch: Slice[u8]
+) eff [Ffi[Crypto], Fail[WcErr]] {
+    let mask = hp_mask_chacha(in key, in buf, pn_offset, inout scratch);
+    hp_apply(inout buf, pn_offset, mask);
+}
+
+// `hp_remove` with the AES mask of the protected packet.
+pub fn hp_remove_aes(in hp: Block, inout buf: Slice[u8], pn_offset: u64, inout scratch: Slice[u8])
+    -> Unprot eff [Ffi[Crypto], Fail[WcErr]] {
+    let mask = hp_mask_aes(in hp, in buf, pn_offset, inout scratch);
+    hp_remove(inout buf, pn_offset, mask)
+}
+
+// `hp_remove` with the ChaCha20 mask of the protected packet.
+pub fn hp_remove_chacha(
+    in key: Slice[u8],
+    inout buf: Slice[u8],
+    pn_offset: u64,
+    inout scratch: Slice[u8]
+) -> Unprot eff [Ffi[Crypto], Fail[WcErr]] {
+    let mask = hp_mask_chacha(in key, in buf, pn_offset, inout scratch);
+    hp_remove(inout buf, pn_offset, mask)
+}
+
+// Re-applies removed protection, restoring `buf` byte for byte.
+pub fn hp_reapply(inout buf: Slice[u8], in h: Unprot) {
+    apply_mask(inout buf, h.pn_offset, h.pn_len, h.mask);
+}
+
+// Whether `full_pn`'s low `pn_len` bytes equal the truncated value.
+pub fn unprot_encodes(in h: Unprot, full_pn: u64) -> bool {
+    let bits = wrapping_mul(h.pn_len, 8);
+    let low = if bits >= 64 {
+        full_pn
+    } else {
+        full_pn & wrapping_sub(wrapping_shl_u64(1, wrapping_u32(bits)), 1)
+    };
+    low == h.truncated_pn
+}
+
+// Whether the packet-number field of `buf` encodes the low bytes of `pn`.
+pub fn truncated_matches(in buf: Slice[u8], pn_offset: u64, pn_len: u64, pn: u64) -> bool {
+    let end = wrapping_add(pn_offset, pn_len);
+    if end < pn_offset || end > buf.len() || pn_len > 8 {
+        return false;
+    }
+    let mut i: u64 = 0;
+    loop {
+        if i >= pn_len {
+            break;
+        }
+        let shift = wrapping_u32(wrapping_mul(wrapping_sub(wrapping_sub(pn_len, 1), i), 8));
+        if byte(in buf, wrapping_add(pn_offset, i)) != wrapping_u8(wrapping_shr_u64(pn, shift)) {
+            return false;
+        }
+        i = wrapping_add(i, 1);
+    }
+    true
+}
+
+// ---------------------------------------------------------------------------
+// The sealer: tickets for strictly increasing packet numbers.
+
+// One key's sealer. `key_phase` is 0 for Initial/Handshake/0-RTT keys
+// (any header), 1 for 1-RTT keys whose phase bit is clear, 2 when set.
+pub copy struct SealerSt {
+    id: u64,
+    generation: u64,
+    next_pn: u64,
+    issued_this_key: u64,
+    confidentiality_limit: u64,
+    issued: u64,
+    sealed: u64,
+    abandoned: u64,
+    key_phase: u8
+}
+
+pub fn sealer_new(id: u64, c: Cipher, key_phase: u8) -> SealerSt {
+    SealerSt {
+        id: id,
+        generation: 0,
+        next_pn: 0,
+        issued_this_key: 0,
+        confidentiality_limit: cipher_confidentiality_limit(c),
+        issued: 0,
+        sealed: 0,
+        abandoned: 0,
+        key_phase: key_phase
+    }
+}
+
+// Lowers (never raises) the per-key confidentiality limit.
+pub fn sealer_lower_limit(inout s: SealerSt, limit: u64) {
+    if limit < s.confidentiality_limit {
+        s.confidentiality_limit = limit;
+    }
+}
+
+// Tickets still available under the current key.
+pub fn sealer_remaining(in s: SealerSt) -> u64 {
+    let by_limit = if s.issued_this_key >= s.confidentiality_limit {
+        0
+    } else {
+        wrapping_sub(s.confidentiality_limit, s.issued_this_key)
+    };
+    let by_space = wrapping_sub(PN_LIMIT, s.next_pn);
+    if by_limit < by_space {
+        by_limit
+    } else {
+        by_space
+    }
+}
+
+// Issues the ticket for `pn`, which must exceed every packet number issued
+// so far and be below 2^62.
+pub fn sealer_ticket(inout s: SealerSt, pn: u64) eff [Fail[WcErr]] {
+    check_pn(pn);
+    if pn < s.next_pn {
+        if wrapping_add(pn, 1) == s.next_pn {
+            Fail::raise(
+                WcErr::PacketNumberReused {
+                    pn: pn
+                }
+            );
+        }
+        Fail::raise(
+            WcErr::PacketNumberRegression {
+                requested: pn,
+                next_allowed: s.next_pn
+            }
+        );
+    }
+    if s.issued_this_key >= s.confidentiality_limit {
+        Fail::raise(WcErr::ConfidentialityLimitReached);
+    }
+    s.next_pn = wrapping_add(pn, 1);
+    s.issued_this_key = wrapping_add(s.issued_this_key, 1);
+    s.issued = wrapping_add(s.issued, 1);
+}
+
+// Issues the ticket for the next packet number and returns it.
+pub fn sealer_next_ticket(inout s: SealerSt) -> u64 eff [Fail[WcErr]] {
+    if s.next_pn >= PN_LIMIT {
+        Fail::raise(WcErr::PacketNumbersExhausted);
+    }
+    let pn = s.next_pn;
+    sealer_ticket(inout s, pn);
+    pn
+}
+
+// Every check of a seal before any byte is written; returns the header
+// length.
+fn check_seal(
+    in s: SealerSt,
+    t_sealer: u64,
+    t_generation: u64,
+    pn: u64,
+    in buf: Slice[u8],
+    pn_offset: u64,
+    payload_len: u64
+) -> u64 eff [Fail[WcErr]] {
+    if t_sealer != s.id || t_generation != s.generation {
+        Fail::raise(WcErr::StaleTicket);
+    }
+    if pn_offset == 0 {
+        Fail::raise(WcErr::InvalidPacketNumberOffset);
+    }
+    if buf.len() == 0 {
+        too_short(1, 0);
+    }
+    let first = byte(in buf, 0);
+    if s.key_phase != 0 {
+        if first & LONG_HEADER_BIT != 0 {
+            Fail::raise(WcErr::InvalidHeaderForm);
+        }
+        if (first & KEY_PHASE_BIT != 0) != (s.key_phase == 2) {
+            Fail::raise(WcErr::KeyPhaseMismatch);
+        }
+    }
+    let pn_len = wrapping_add(widen_u64(first & 3), 1);
+    let header_len = wrapping_add(pn_offset, pn_len);
+    if header_len < pn_offset {
+        too_short(U64_MAX, buf.len());
+    }
+    let with_payload = wrapping_add(header_len, payload_len);
+    let total = wrapping_add(with_payload, TAG_LEN);
+    if with_payload < header_len || total < with_payload {
+        too_short(U64_MAX, buf.len());
+    }
+    if total > buf.len() {
+        too_short(total, buf.len());
+    }
+    // pn_offset < total, so this cannot overflow.
+    let sample_end = wrapping_add(wrapping_add(pn_offset, 4), SAMPLE_LEN);
+    if sample_end > total {
+        Fail::raise(
+            WcErr::SampleOutOfBounds {
+                sample_end: sample_end,
+                packet_len: total
+            }
+        );
+    }
+    if !truncated_matches(in buf, pn_offset, pn_len, pn) {
+        Fail::raise(WcErr::PacketNumberMismatch);
+    }
+    header_len
+}
+
+// Seals one packet in place under the ticket (`t_sealer`, `t_generation`,
+// `pn`) and counts it: the AEAD step of `Sealer::seal`. Returns the
+// protected length; the caller then applies header protection with the
+// mask of the sealed bytes. On error nothing is written or counted.
+pub fn sealer_seal(
+    inout s: SealerSt,
+    t_sealer: u64,
+    t_generation: u64,
+    pn: u64,
+    in a: Aead,
+    in iv: Slice[u8],
+    inout buf: Slice[u8],
+    pn_offset: u64,
+    payload_len: u64,
+    inout scratch: Slice[u8]
+) -> u64 eff [Ffi[Crypto], Fail[WcErr]] {
+    let header_len = check_seal(in s, t_sealer, t_generation, pn, in buf, pn_offset, payload_len);
+    let len = packet_seal(in a, in iv, pn, inout buf, header_len, payload_len, inout scratch);
+    s.sealed = wrapping_add(s.sealed, 1);
+    len
+}
+
+// Counts an abandoned ticket; false for another sealer's ticket.
+pub fn sealer_abandon(inout s: SealerSt, t_sealer: u64) -> bool {
+    if t_sealer != s.id {
+        return false;
+    }
+    s.abandoned = wrapping_add(s.abandoned, 1);
+    true
+}
+
+// Moves to the next key phase (the caller installs the next packet key;
+// the header key is unchanged, RFC 9001 §6). Outstanding tickets go stale.
+pub fn sealer_rekey(inout s: SealerSt) {
+    s.generation = wrapping_add(s.generation, 1);
+    s.issued_this_key = 0;
+    if s.key_phase == 1 {
+        s.key_phase = 2;
+    } else if s.key_phase == 2 {
+        s.key_phase = 1;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The opener (Initial, Handshake and 0-RTT keys).
+
+pub copy struct OpenerSt {
+    failures: u64,
+    integrity_limit: u64,
+    has_largest: bool,
+    largest: u64
+}
+
+// A successfully opened packet: the plaintext is
+// `buf[header_len..header_len + payload_len]`.
+pub copy struct Opened {
+    packet_number: u64,
+    header_len: u64,
+    payload_len: u64,
+    first_byte: u8
+}
+
+pub fn opener_new(c: Cipher) -> OpenerSt {
+    OpenerSt {
+        failures: 0,
+        integrity_limit: cipher_integrity_limit(c),
+        has_largest: false,
+        largest: 0
+    }
+}
+
+pub fn opener_lower_limit(inout o: OpenerSt, limit: u64) {
+    if limit < o.integrity_limit {
+        o.integrity_limit = limit;
+    }
+}
+
+// Raises `IntegrityLimitReached` once the failures reach the limit.
+pub fn opener_check_limit(in o: OpenerSt) eff [Fail[WcErr]] {
+    if o.failures >= o.integrity_limit {
+        Fail::raise(WcErr::IntegrityLimitReached);
+    }
+}
+
+// Opens `buf[h.header_len..]` with the full packet number. On error the
+// payload is unchanged; an authentication failure is counted.
+pub fn opener_open(
+    inout o: OpenerSt,
+    in a: Aead,
+    in iv: Slice[u8],
+    inout buf: Slice[u8],
+    in h: Unprot,
+    full_pn: u64,
+    inout scratch: Slice[u8]
+) -> Opened eff [Ffi[Crypto], Fail[WcErr]] {
+    opener_check_limit(in o);
+    check_pn(full_pn);
+    if !unprot_encodes(in h, full_pn) {
+        Fail::raise(WcErr::PacketNumberMismatch);
+    }
+    let header_len = wrapping_add(h.pn_offset, h.pn_len);
+    let min = checked_end(header_len, TAG_LEN, buf.len());
+    if !open_in_place(in a, in iv, full_pn, inout buf, header_len, inout scratch) {
+        o.failures = wrapping_add(o.failures, 1);
+        Fail::raise(WcErr::AuthenticationFailed);
+    }
+    let payload_len = wrapping_sub(buf.len(), min);
+    if !o.has_largest || full_pn > o.largest {
+        o.largest = full_pn;
+    }
+    o.has_largest = true;
+    Opened {
+        packet_number: full_pn,
+        header_len: header_len,
+        payload_len: payload_len,
+        first_byte: h.first_byte
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 1-RTT keys with key updates (RFC 9001 §6).
+//
+// Generation g (the number of key updates) uses phase bit g & 1. The Rust
+// keys hold the packet keys: the sealer's, the current, previous and next
+// receive keys. This state decides which one a packet uses and when they
+// rotate.
+
+pub copy struct OneRttSt {
+    send_phase_first_pn: u64,
+    send_phase_acked: bool,
+    recv_generation: u64,
+    recv_has_first: bool,
+    recv_first_pn: u64,
+    has_previous: bool,
+    previous_generation: u64,
+    previous_deadline: u64,
+    failures: u64,
+    integrity_limit: u64,
+    retire_window_ns: u64
+}
+
+// Which receive key opens a packet.
+pub copy enum Choice {
+    Current,
+    Previous,
+    Next
+}
+
+// What opening a 1-RTT packet did. `promoted`: the receive side moved to
+// the next phase (the caller rotates the receive keys); `rotate_send`: the
+// peer initiated, so the send side follows (§6.2).
+pub copy struct OneRttOpened {
+    packet_number: u64,
+    header_len: u64,
+    payload_len: u64,
+    first_byte: u8,
+    generation: u64,
+    promoted: bool,
+    rotate_send: bool
+}
+
+pub fn onertt_new(c: Cipher, retire_window_ns: u64) -> OneRttSt {
+    OneRttSt {
+        send_phase_first_pn: 0,
+        send_phase_acked: false,
+        recv_generation: 0,
+        recv_has_first: false,
+        recv_first_pn: 0,
+        has_previous: false,
+        previous_generation: 0,
+        previous_deadline: 0,
+        failures: 0,
+        integrity_limit: cipher_integrity_limit(c),
+        retire_window_ns: retire_window_ns
+    }
+}
+
+pub fn onertt_lower_limit(inout k: OneRttSt, limit: u64) {
+    if limit < k.integrity_limit {
+        k.integrity_limit = limit;
+    }
+}
+
+// An acknowledgement of a packet sent under the current send keys permits
+// the next key update.
+pub fn onertt_on_acked(inout k: OneRttSt, in s: SealerSt, pn: u64) {
+    if pn >= k.send_phase_first_pn && pn < s.next_pn {
+        k.send_phase_acked = true;
+    }
+}
+
+// RFC 9001 §6.1: the peer has answered the previous update and a packet
+// under the current send keys was acknowledged.
+pub fn onertt_update_permitted(in k: OneRttSt, in s: SealerSt) -> bool {
+    s.generation == k.recv_generation && k.send_phase_acked
+}
+
+// The send side's move to the next phase, after the caller installed the
+// next packet key.
+pub fn onertt_rotated_send(inout k: OneRttSt, inout s: SealerSt) {
+    sealer_rekey(inout s);
+    k.send_phase_first_pn = s.next_pn;
+    k.send_phase_acked = false;
+}
+
+// Starts a key update; the caller then installs the next send key and
+// calls `onertt_rotated_send`.
+pub fn onertt_check_update(in k: OneRttSt, in s: SealerSt) eff [Fail[WcErr]] {
+    if !onertt_update_permitted(in k, in s) {
+        Fail::raise(WcErr::KeyUpdateNotPermitted);
+    }
+}
+
+// Whether the previous receive key's window has passed (the caller drops
+// it).
+pub fn onertt_discard_expired(inout k: OneRttSt, now_ns: u64) -> bool {
+    if k.has_previous && now_ns >= k.previous_deadline {
+        k.has_previous = false;
+        return true;
+    }
+    false
+}
+
+// The checks before packet-number reconstruction: the integrity limit.
+pub fn onertt_check_limit(in k: OneRttSt) eff [Fail[WcErr]] {
+    if k.failures >= k.integrity_limit {
+        Fail::raise(WcErr::IntegrityLimitReached);
+    }
+}
+
+// After header protection is removed: 1-RTT packets have short headers.
+pub fn onertt_check_form(in h: Unprot) eff [Fail[WcErr]] {
+    if h.first_byte & LONG_HEADER_BIT != 0 {
+        Fail::raise(WcErr::InvalidHeaderForm);
+    }
+}
+
+// Selects the receive key for the reconstructed packet number `pn`
+// (RFC 9001 §6.4, §6.5): a phase bit other than the current one opens with
+// the previous key below the first packet number of the current phase,
+// and with the next key otherwise.
+pub fn onertt_choose(in k: OneRttSt, in h: Unprot, pn: u64) -> Choice eff [Fail[WcErr]] {
+    check_pn(pn);
+    if !unprot_encodes(in h, pn) {
+        Fail::raise(WcErr::PacketNumberMismatch);
+    }
+    let phase = h.first_byte & KEY_PHASE_BIT != 0;
+    let current_phase = k.recv_generation & 1 == 1;
+    if phase == current_phase {
+        return Choice::Current;
+    }
+    if k.recv_has_first && pn < k.recv_first_pn {
+        if !k.has_previous {
+            Fail::raise(WcErr::KeyRetired);
+        }
+        return Choice::Previous;
+    }
+    Choice::Next
+}
+
+// Opens with the key `choice` selected (the caller lends it) and updates
+// the phase state. On error the payload is unchanged and only an
+// authentication failure is counted.
+pub fn onertt_open(
+    inout k: OneRttSt,
+    in s: SealerSt,
+    choice: Choice,
+    in a: Aead,
+    in iv: Slice[u8],
+    inout buf: Slice[u8],
+    in h: Unprot,
+    pn: u64,
+    now_ns: u64,
+    inout scratch: Slice[u8]
+) -> OneRttOpened eff [Ffi[Crypto], Fail[WcErr]] {
+    let header_len = wrapping_add(h.pn_offset, h.pn_len);
+    check_pn(pn);
+    let min = checked_end(header_len, TAG_LEN, buf.len());
+    if !open_in_place(in a, in iv, pn, inout buf, header_len, inout scratch) {
+        k.failures = wrapping_add(k.failures, 1);
+        Fail::raise(WcErr::AuthenticationFailed);
+    }
+    let payload_len = wrapping_sub(buf.len(), min);
+    let mut generation = k.recv_generation;
+    let mut promoted = false;
+    let mut rotate_send = false;
+    match choice {
+        Choice::Current => {
+            if !k.recv_has_first || pn < k.recv_first_pn {
+                k.recv_first_pn = pn;
+            }
+            k.recv_has_first = true;
+        },
+        Choice::Previous => {
+            generation = k.previous_generation;
+        },
+        Choice::Next => {
+            generation = wrapping_add(k.recv_generation, 1);
+            promoted = true;
+            k.has_previous = true;
+            k.previous_generation = k.recv_generation;
+            let deadline = wrapping_add(now_ns, k.retire_window_ns);
+            k.previous_deadline = if deadline < now_ns {
+                U64_MAX
+            } else {
+                deadline
+            };
+            k.recv_generation = generation;
+            k.recv_has_first = true;
+            k.recv_first_pn = pn;
+            // Peer-initiated update: answer with our next keys (§6.2).
+            rotate_send = s.generation < generation;
+        },
+    }
+    OneRttOpened {
+        packet_number: pn,
+        header_len: header_len,
+        payload_len: payload_len,
+        first_byte: h.first_byte,
+        generation: generation,
+        promoted: promoted,
+        rotate_send: rotate_send
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Retry integrity (RFC 9001 §5.8, QUIC v1). Off the packet path, so the
+// pseudo-packet is a fresh buffer.
+
+fn retry_key(inout out: ChunkSeq[u8]) {
+    hex_into(in "be0c690b9f66575a1d766b54e368c84e".as_bytes(), inout out);
+}
+
+fn retry_nonce(inout out: ChunkSeq[u8]) {
+    hex_into(in "461599d35d632bf2239825bb".as_bytes(), inout out);
+}
+
+fn hex_into(in h: Slice[u8], inout out: ChunkSeq[u8]) {
+    let mut i: u64 = 0;
+    loop {
+        if wrapping_add(i, 1) >= h.len() {
+            break;
+        }
+        let hi = nibble(byte(in h, i));
+        let lo = nibble(byte(in h, wrapping_add(i, 1)));
+        out.push(wrapping_u8(wrapping_add(wrapping_mul(hi, 16), lo)));
+        i = wrapping_add(i, 2);
+    }
+}
+
+// `odcid_len || odcid || retry_without_tag`, then 16 bytes for the tag.
+fn pseudo_packet(in odcid: Slice[u8], in body: Slice[u8]) -> ChunkSeq[u8] eff [Fail[WcErr]] {
+    check_cid(odcid.len());
+    let mut p: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](
+        wrapping_add(wrapping_add(odcid.len(), body.len()), 17)
+    );
+    p.push(wrapping_u8(odcid.len()));
+    p.extend(in odcid);
+    p.extend(in body);
+    p
+}
+
+// AEAD_AES_128_GCM with the v1 key and nonce over an empty plaintext: seals
+// (`open` false) or opens `buf` = `aad || tag`; false on any failure.
+fn retry_aead(inout buf: ChunkSeq[u8], aad_len: u64, open: bool) -> bool eff [Ffi[Crypto]] {
+    let mut key: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](16);
+    retry_key(inout key);
+    let mut n: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](12);
+    retry_nonce(inout n);
+    let a = match aead_new(1, in key.as_slice()) {
+        Option::Some(a) => a,
+        Option::None => return false,
+    };
+    let ok = handle Fail[CryptoError] in {
+        if open {
+            aead_open(in a, in n.as_slice(), inout buf.as_slice_mut(), aad_len);
+        } else {
+            aead_seal(in a, in n.as_slice(), inout buf.as_slice_mut(), aad_len, 0);
+        }
+        true
+    } with {
+        return v => v,
+        raise(_e, _) => false,
+    };
+    aead_free(a);
+    ok
+}
+
+// The Retry Integrity Tag of `retry_without_tag` for the client's original
+// Destination Connection ID, into `tag` (16 bytes).
+pub fn retry_integrity_tag(
+    in odcid: Slice[u8],
+    in retry_without_tag: Slice[u8],
+    inout tag: Slice[u8]
+) eff [Ffi[Crypto], Fail[WcErr]] {
+    let mut p = pseudo_packet(in odcid, in retry_without_tag);
+    let aad_len = p.len();
+    p.resize(wrapping_add(aad_len, TAG_LEN), 0);
+    if !retry_aead(inout p, aad_len, false) {
+        Fail::raise(WcErr::AuthenticationFailed);
+    }
+    let _c = tag.try_copy_from(0, in p[aad_len..wrapping_add(aad_len, TAG_LEN)]);
+}
+
+// Verifies a received Retry packet, tag included, against the original
+// Destination Connection ID; the tag check is the AEAD's constant-time one.
+pub fn verify_retry_integrity(in odcid: Slice[u8], in retry_packet: Slice[u8]) eff [
+    Ffi[Crypto],
+    Fail[WcErr]
+] {
+    if retry_packet.len() < TAG_LEN {
+        too_short(TAG_LEN, retry_packet.len());
+    }
+    let body_len = wrapping_sub(retry_packet.len(), TAG_LEN);
+    let mut p = pseudo_packet(in odcid, in retry_packet[0..body_len]);
+    let aad_len = p.len();
+    p.extend(in retry_packet[body_len..retry_packet.len()]);
+    if !retry_aead(inout p, aad_len, true) {
+        Fail::raise(WcErr::AuthenticationFailed);
+    }
+}

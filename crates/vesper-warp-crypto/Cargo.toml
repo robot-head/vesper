@@ -6,16 +6,25 @@ license = "MIT OR Apache-2.0"
 description = "Vesper Warp QUIC packet protection with linear nonce tickets (design section 35.1, RFC 9001)"
 publish = false
 
+[features]
+# Applies the divergence edits of build.rs (port/check.sh).
+vesper-port-divergent = []
+
 [dependencies]
+vesper-crypto-sys = { path = "../vesper-crypto-sys" }
+vesper-port-abi = { path = "../vesper-port-abi" }
+zeroize = { workspace = true }
+
+[build-dependencies]
+vesper-port-harness = { path = "../vesper-port-harness" }
+
+# The reference of src/differential.rs: the Rust implementation the port
+# replaced (src/reference/), over the same libraries the shim wraps.
+[dev-dependencies]
 aes = { workspace = true }
 aes-gcm = { workspace = true }
 chacha20 = { workspace = true }
 chacha20poly1305 = { workspace = true }
 hkdf = { workspace = true }
-# Not called directly: enable zeroize-on-drop of the GHASH/Poly1305 state
-# inside aes-gcm and chacha20poly1305 through Cargo feature unification.
-poly1305 = { workspace = true }
-polyval = { workspace = true }
 sha2 = { workspace = true }
-subtle = { workspace = true }
-zeroize = { workspace = true }
+vesper-bench = { path = "../vesper-bench" }

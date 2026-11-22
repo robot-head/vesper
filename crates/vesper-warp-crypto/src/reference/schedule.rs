@@ -5,7 +5,7 @@ use hkdf::Hkdf;
 use sha2::{Sha256, Sha384};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use crate::protect::{HeaderKey, PacketKey};
+use super::protect::{HeaderKey, PacketKey};
 use crate::{Cipher, CryptoError, IV_LEN, MAX_CID_LEN};
 
 /// QUIC v1 Initial salt (RFC 9001 §5.2).
@@ -17,12 +17,7 @@ pub const INITIAL_SALT_V1: [u8; 20] = [
 const MAX_SECRET_LEN: usize = 48;
 const MAX_KEY_LEN: usize = 32;
 
-/// Which endpoint a set of keys belongs to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Side {
-    Client,
-    Server,
-}
+pub use crate::Side;
 
 /// TLS 1.3 HKDF-Expand-Label with an empty context (RFC 8446 §7.1), built
 /// without allocation. `out.len()` must fit in a `u16` and `label` (with the
