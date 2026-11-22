@@ -153,7 +153,8 @@ Vesper can do itself.
 | **SH6** | Flip gate and census; Stage 2, the wasm seed and the retirement; the compiler's closure; finish and flip every ported library; the OS and C-API crates on `.vsys`; one crypto shim; Rust-only libraries replaced; Rust tests to Vesper | #1396-#1414 ([plan](../agent-prompts/self-host-sh6/README.md)) |
 | SH6b | The verified backend widened to the compiler (DDC check of §10.2) | after SH6 lane 2 |
 | SH7 (optional) | Vesper-native backend; replaces Cranelift only at its level | after SH6 |
-| Gap waves | Compiler gaps the SH6 lanes report, planned by lane 1 from the reports | as they come |
+| Gap wave 1 | The code-generation and interop gaps the SH6 reports name (Option results, cold inlining, vectors, export calls, slices, platform interop, foreign memory), the wasm seed's breadth, the native walk, and the unowned rows | #1498-#1506, #1508-#1510 ([plan](../agent-prompts/rust-exit-gaps-1/README.md)) |
+| Later gap waves | Planned from each wave's reports | as they come |
 
 ## Scoreboard
 

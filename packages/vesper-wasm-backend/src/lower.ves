@@ -259,6 +259,10 @@ pub struct Em {
     generics: ChunkSeq[u32],
     vars: Vars,
     mark: u32,
+    // The label targets of the open `block`/`loop` frames, innermost last,
+    // when the body is structured (a cyclic block graph, `structured_body`).
+    frames: ChunkSeq[u64],
+    structured: bool,
 }
 
 fn em_new(inst: Inst, info: FnInfo) -> Em {
@@ -273,6 +277,8 @@ fn em_new(inst: Inst, info: FnInfo) -> Em {
         generics: ChunkSeq::new[u32](),
         vars: vars_new(),
         mark: NONE32,
+        frames: ChunkSeq::new[u64](),
+        structured: false,
     }
 }
 
@@ -516,8 +522,9 @@ pub fn body_each(in locals: ChunkSeq[ValTy], in c: Code) -> ChunkSeq[u8] {
     function_bytes(in counts, in locals, in c)
 }
 
-// Reachable blocks from 0 in a topological order (`topological`); the
-// second result is false when the graph is cyclic.
+// Reachable blocks from 0 in a topological order (`topological`), or in
+// reverse postorder when the graph is cyclic; the second result is false
+// then.
 fn topological(in l: L, fi: u64) -> (ChunkSeq[u64], bool) {
     let row = l.cx.ir.p.function(fi);
     let n = row.bc;
@@ -526,6 +533,7 @@ fn topological(in l: L, fi: u64) -> (ChunkSeq[u64], bool) {
         state.push(0);
     }
     let mut post = ChunkSeq::new[u64]();
+    let mut acyclic = true;
     let mut sb = ChunkSeq::new[u64]();
     let mut si = ChunkSeq::new[u64]();
     if n == 0 {
@@ -560,7 +568,8 @@ fn topological(in l: L, fi: u64) -> (ChunkSeq[u64], bool) {
                 sb.push(t);
                 si.push(0);
             } else if st == 1 {
-                return (post, false);
+                // A back edge: the order is still a reverse postorder.
+                acyclic = false;
             }
         } else {
             let ok3 = state.try_set(b, 2);
@@ -576,7 +585,114 @@ fn topological(in l: L, fi: u64) -> (ChunkSeq[u64], bool) {
         k = wrapping_sub(k, 1);
         order.push(u64_at(in post, k));
     }
-    (order, true)
+    (order, acyclic)
+}
+
+// The reachable block graph of a cyclic body: reverse postorder, immediate
+// dominators and loop headers (`structured_body`).
+struct Cfg {
+    order: ChunkSeq[u64],
+    idom: ChunkSeq[u64],
+    // block -> 1 when a back edge enters it
+    header: ChunkSeq[u8],
+}
+
+// Immediate dominators by Cooper, Harvey and Kennedy's iteration over the
+// reverse postorder `order`, and the loop headers.
+fn cfg_of(in l: L, fi: u64, in order: ChunkSeq[u64]) -> Cfg {
+    let row = l.cx.ir.p.function(fi);
+    let n = row.bc;
+    let mut pos = ChunkSeq::new[u64]();
+    let mut idom = ChunkSeq::new[u64]();
+    let mut header = ChunkSeq::new[u8]();
+    for i in 0..n {
+        pos.push(NONE64);
+        idom.push(NONE64);
+        header.push(0);
+    }
+    for p in 0..order.len() {
+        let ok = pos.try_set(u64_at(in order, p), p);
+    }
+    let mut es = ChunkSeq::new[u64]();
+    let mut ed = ChunkSeq::new[u64]();
+    for p in 0..order.len() {
+        let b = u64_at(in order, p);
+        let (s0, sn) = successors(in l, fi, b);
+        for i in 0..sn {
+            let t = successor(in l, fi, b, i);
+            es.push(b);
+            ed.push(t);
+            if u64_at(in pos, t) <= p {
+                let ok = header.try_set(t, 1);
+            }
+        }
+    }
+    let entry = u64_at(in order, 0);
+    let ok = idom.try_set(entry, entry);
+    let mut changed = true;
+    loop {
+        if !changed {
+            break;
+        }
+        changed = false;
+        for p in 1..order.len() {
+            let b = u64_at(in order, p);
+            let mut next = NONE64;
+            for e in 0..es.len() {
+                if u64_at(in ed, e) == b {
+                    let s = u64_at(in es, e);
+                    if u64_at(in idom, s) != NONE64 {
+                        if next == NONE64 {
+                            next = s;
+                        } else {
+                            next = intersect(in idom, in pos, s, next);
+                        }
+                    }
+                }
+            }
+            if next != u64_at(in idom, b) {
+                let ok2 = idom.try_set(b, next);
+                changed = true;
+            }
+        }
+    }
+    Cfg {
+        order: copy_u64s(in order),
+        idom: idom,
+        header: header
+    }
+}
+
+// The nearest common dominator of `a` and `b`.
+fn intersect(in idom: ChunkSeq[u64], in pos: ChunkSeq[u64], a0: u64, b0: u64) -> u64 {
+    let mut a = a0;
+    let mut b = b0;
+    loop {
+        if a == b {
+            break;
+        }
+        loop {
+            if u64_at(in pos, a) <= u64_at(in pos, b) {
+                break;
+            }
+            a = u64_at(in idom, a);
+        }
+        loop {
+            if u64_at(in pos, b) <= u64_at(in pos, a) {
+                break;
+            }
+            b = u64_at(in idom, b);
+        }
+    }
+    a
+}
+
+fn copy_u64s(in xs: ChunkSeq[u64]) -> ChunkSeq[u64] {
+    let mut out = ChunkSeq::new[u64]();
+    for i in 0..xs.len() {
+        out.push(u64_at(in xs, i));
+    }
+    out
 }
 
 // The successor count of block `b` (and its first operand index).
@@ -1473,18 +1589,30 @@ impl L {
         if row.bc > MAX_BLOCKS {
             Fail::raise(werr(K_LIMIT, 0, 150));
         }
+        let mut loops = false;
         for bi in 0..row.bc {
             let blk = self.cx.ir.p.block(add(row.b0, bi));
             for ii in 0..blk.ic {
                 let op = self.cx.ir.p.inst(add(blk.i0, ii)).op;
-                if op == IR_LOOP || op == IR_EXIT {
-                    Fail::raise(werr(K_UNSUPPORTED, U_OPERATION, 151));
+                if op == IR_LOOP {
+                    loops = true;
                 }
             }
         }
         let (order, acyclic) = topological(in self, fi);
-        if !acyclic {
-            Fail::raise(werr(K_INVALID, 0, 152));
+        if loops || !acyclic {
+            for bi in 0..row.bc {
+                let (p0, pn) = self.cx.ir.block_params(fi, bi);
+                for k in 0..pn {
+                    let v = self.cx.ir.word(add(p0, k));
+                    let d = self.dest(v);
+                }
+            }
+            let cfg = cfg_of(in self, fi, in order);
+            self.e.structured = true;
+            self.do_tree(fi, u64_at(in order, 0), in cfg);
+            self.e.code.op(OP_END);
+            return;
         }
         let mut position = ChunkSeq::new[u64]();
         for i in 0..row.bc {
@@ -1508,30 +1636,105 @@ impl L {
                 self.e.code.op(OP_END);
             }
             let bi = u64_at(in order, pos);
-            let blk = self.cx.ir.p.block(add(row.b0, bi));
-            let mut tail_call = false;
-            if blk.ic > 0 {
-                let last = self.cx.ir.p.inst(add(blk.i0, wrapping_sub(blk.ic, 1)));
-                tail_call = self.tail_callable(add(blk.i0, wrapping_sub(blk.ic, 1)))
-                    && self.flows_to_return(fi, bi, widen_u64(last.dest), 0);
-            }
-            for ii in 0..blk.ic {
-                let at = add(blk.i0, ii);
-                if tail_call && inc(ii) == blk.ic {
-                    self.tail_call(at);
-                    continue;
-                }
-                self.instruction(at);
-            }
-            if tail_call {
-                continue;
-            }
-            self.terminator(fi, bi, pos, in position);
+            self.block_code(fi, bi, pos, in position);
         }
         self.e.code.op(OP_END);
     }
 
+    // One block's instructions and its terminator (or its tail call).
+    fn block_code(inout self, fi: u64, bi: u64, pos: u64, in position: ChunkSeq[u64]) eff [
+        Fail[WErr]
+    ] {
+        let row = self.cx.ir.p.function(fi);
+        let blk = self.cx.ir.p.block(add(row.b0, bi));
+        let mut tail_call = false;
+        if blk.ic > 0 {
+            let last = self.cx.ir.p.inst(add(blk.i0, wrapping_sub(blk.ic, 1)));
+            tail_call = self.tail_callable(add(blk.i0, wrapping_sub(blk.ic, 1)))
+                && self.flows_to_return(fi, bi, widen_u64(last.dest), 0);
+        }
+        for ii in 0..blk.ic {
+            let at = add(blk.i0, ii);
+            if tail_call && inc(ii) == blk.ic {
+                self.tail_call(at);
+                continue;
+            }
+            if self.cx.ir.p.inst(at).op == IR_LOOP {
+                // The loop-header marker: the `loop` frame is the loop.
+                continue;
+            }
+            self.instruction(at);
+        }
+        if tail_call {
+            return;
+        }
+        self.terminator(fi, bi, pos, in position);
+    }
+
+    // `do_tree` of "Beyond Relooper" (Ramsey, ICFP 2022) for block `x`: a
+    // `loop` frame when a back edge enters `x`, then `x` within a `block`
+    // frame for each of its dominator-tree children.
+    fn do_tree(inout self, fi: u64, x: u64, in cfg: Cfg) eff [Fail[WErr]] {
+        let mut ys = ChunkSeq::new[u64]();
+        let mut k = cfg.order.len();
+        loop {
+            if k == 0 {
+                break;
+            }
+            k = wrapping_sub(k, 1);
+            let y = u64_at(in cfg.order, k);
+            if y != x && u64_at(in cfg.idom, y) == x {
+                ys.push(y);
+            }
+        }
+        let head = match cfg.header.try_get(x) {
+            Option::Some(h) => h != 0,
+            Option::None => false,
+        };
+        if head {
+            self.e.code.open(OP_LOOP);
+            self.e.frames.push(x);
+            self.node_within(fi, x, in ys, 0, in cfg);
+            self.e.frames.truncate(wrapping_sub(self.e.frames.len(), 1));
+            self.e.code.op(OP_END);
+            // Every path through the loop ends in a branch or a return.
+            self.e.code.op(OP_UNREACHABLE);
+        } else {
+            self.node_within(fi, x, in ys, 0, in cfg);
+        }
+    }
+
+    // `node_within`: the children `ys[k..]` (latest in reverse postorder
+    // first) as `block` frames around `x`, each followed by its subtree.
+    fn node_within(inout self, fi: u64, x: u64, in ys: ChunkSeq[u64], k: u64, in cfg: Cfg) eff [
+        Fail[WErr]
+    ] {
+        if k >= ys.len() {
+            let empty = ChunkSeq::new[u64]();
+            self.block_code(fi, x, 0, in empty);
+            return;
+        }
+        let y = u64_at(in ys, k);
+        self.e.code.open(OP_BLOCK);
+        self.e.frames.push(y);
+        self.node_within(fi, x, in ys, inc(k), in cfg);
+        self.e.frames.truncate(wrapping_sub(self.e.frames.len(), 1));
+        self.e.code.op(OP_END);
+        self.do_tree(fi, y, in cfg);
+    }
+
     fn depth(in self, in position: ChunkSeq[u64], target: u64, pos: u64) -> u32 eff [Fail[WErr]] {
+        if self.e.structured {
+            // The innermost frame for `target`: a `loop` for a back edge,
+            // the `block` that ends just before `target` otherwise.
+            let n = self.e.frames.len();
+            for i in 0..n {
+                if u64_at(in self.e.frames, wrapping_sub(wrapping_sub(n, 1), i)) == target {
+                    return wrapping_u32(i);
+                }
+            }
+            Fail::raise(werr(K_INVALID, 0, 154));
+        }
         let p = u64_at(in position, target);
         if p == NONE64 || p <= pos {
             Fail::raise(werr(K_INVALID, 0, 153));
@@ -2080,6 +2283,17 @@ impl L {
                 self.e.code.i64_const(c);
                 self.e.code.set(d);
             }
+        } else if op == IR_EXIT {
+            // `return value` from this function (`Op::Exit`); one that
+            // leaves an enclosing function from a handled body is not
+            // lowered here yet.
+            let row = self.cx.ir.p.function(self.e.inst.fi);
+            if n32(self.cx.ir.word(inc(a))) != row.name {
+                Fail::raise(werr(K_UNSUPPORTED, U_OPERATION, 151));
+            }
+            let x = self.value(self.cx.ir.word(a));
+            self.e.code.get(x);
+            self.e.code.op(OP_RETURN);
         } else if op == IR_UNIT {
             let d = self.dest(dv);
             self.e.code.i64_const(0);
