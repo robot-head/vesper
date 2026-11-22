@@ -1522,6 +1522,11 @@ fn define_instances_observed_with_trace<M: Module>(
         linkage.normalize_references(&mut ctx.func);
         if operands_only {
             crate::native_clif_opt::run(&mut ctx.func);
+            let simd = matches!(
+                m.isa().triple().architecture,
+                target_lexicon::Architecture::X86_64 | target_lexicon::Architecture::Aarch64(_)
+            );
+            crate::native_vectorize::run(&mut ctx.func, simd);
         }
         // No JIT caller reads the CLIF text, and printing it costs as much
         // as half of Cranelift's own work on a large function (#1151).
