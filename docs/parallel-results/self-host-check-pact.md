@@ -7,7 +7,8 @@ Claim: #1185. Base: `main` at `e43a56f`. Lane prompt:
 [`docs/agent-prompts/self-host-sh2/13-pact.md`](../agent-prompts/self-host-sh2/13-pact.md).
 Rust stays the default checker, and no Rust code was deleted.
 
-This is part 1 of the lane: the declaration pass. The lane ports about
+Part 1 is the declaration pass; part 2a (below) swaps it into the
+hybrid build. The lane ports about
 5,100 lines (`src/pact_frontend.rs`, `src/pact_frontend/mono.rs`,
 `src/pact_frontend/builtin_traits.rs`) and needs several PRs; "What is
 left" lists the rest.
@@ -42,6 +43,9 @@ left" lists the rest.
 | --- | --- |
 | Package | `packages/vesper-check-pact/{Loom.toml,README.md,src/*.ves}` |
 | Rust reference (additive) | `src/pact_frontend.rs`: `declaration_pass` |
+| Swap point (part 2a) | `src/pact_frontend.rs`: `DeclarationPassTable`, `install_declaration_pass`, `rust_declaration_diagnostics`, `Frontend::with_base` |
+| Hybrid module (part 2a) | `crates/vesper-hybrid/{modules/pact/**,port/pact.rs,build.rs,Cargo.toml,BUILD.bazel,src/hybrid.rs,tests/differential.rs}`, `.github/workflows/hybrid.yml` (divergent step), `//:check_pact_package` |
+| Shared encoder (part 2a) | `tests/common/pact_words.rs` |
 | Test | `tests/self_host_check_pact.rs` |
 | Bazel data and timeout | `BUILD.bazel` |
 | Scoreboard row | `docs/maintenance/self-hosting-plan.md` |
@@ -124,13 +128,67 @@ None new. The workarounds this part needed are known gaps:
    ranges into shared pools (the census state-pool pattern), not a struct
    holding its own `ChunkSeq`s.
 
+## Part 2a: the hybrid swap
+
+The declaration pass now runs from Vesper in the hybrid build
+(`crates/vesper-hybrid/modules/pact`, library `hybrid_pact`). Rust stays
+the default compiler, which installs nothing and behaves as before.
+
+**Swap point.** `pact_frontend::DeclarationPassTable` with one entry,
+`diagnostics(module, base_world, identity)`, installed by
+`install_declaration_pass`; `RUST_DECLARATION_PASS` is the Rust table
+(`rust_declaration_diagnostics`). `check_package` now builds the base
+world once and hands it to both the table and `Frontend::new`
+(`Frontend::with_base`), so the swap adds no second `World::collect`.
+For a package without dependencies, non-empty Vesper diagnostics reject
+the package (with empty bindings, which no caller reads on failure); a
+clean answer leaves collecting, the bindings and the Pact session to Rust.
+A module with a literal over 64 bits stays in Rust.
+
+**Encoder.** The part-1 test's encoder moved to `tests/common/pact_words.rs`
+(on `check_words::Enc`, the format the other checker swaps use), shared by
+the test and the hybrid, with the text decoder.
+
+| Check | Result |
+| --- | --- |
+| `declaration_pass_matches_rust`, `unoptimized_jit_agrees` (shared encoder) | 0 of 1,874 cases differ |
+| `check_package_agrees_through_the_swap_point`: the checker tests and their mutants, `check_package` diagnostics compared as values with the Vesper pass installed | 0 differ |
+| Hybrid differential harness (`check`, `emit ir`, `emit object` over 553 files) | 0 of 2,212 runs differ |
+| `pact_module_runs_from_vesper` | Vesper answers the shapes example and rejects `overlap_rejected.ves` |
+| `VESPER_HYBRID_STATS=time` over the corpus (30 packages) | 0 answers differ |
+| `divergent-pact` (every trait package gets a made-up E0600) | the harness must fail (Hybrid workflow step and Bazel divergent build) |
+
+No port-harness shard entry: shard 7 runs `crates/*` ports, and hybrid
+modules are tested by the Hybrid compiler workflow, as for every other
+checker swap.
+
+**Numbers.** Release build, Linux x86-64, 4 cores, the 33 corpus worlds the
+pass runs on, ABBA best of 6 (`CHECK_HARNESS_SPEED=1 cargo test --release
+--test self_host_check_pact -- --ignored`), both sides behind the swap point
+with the base world already built:
+
+| Side | What is timed | Best of 6 | Ratio |
+| --- | --- | --: | --: |
+| Rust | `rust_declaration_diagnostics`: `Frontend::with_base` (it clones the base world it owns, collects, validates and builds the binding DTOs) | 446 ms | 1 |
+| Vesper, as the hybrid calls it | encoding, the pass, decoding | 17.7 ms | 0.04x |
+| Vesper, the pass alone | decoding the input and the pass | 3.4 ms | 0.01x |
+
+The Rust figure includes cloning the base world, which `check_package`
+avoids by moving it, so the ratio flatters Vesper; the like-for-like
+claim is only that the swap's whole cost is small. The hybrid does not get
+faster from it yet: on a clean answer Rust still runs `Frontend::new` for
+the bindings and the session (part 2b). Whole corpus, debug hybrid against
+the debug default (`tests/differential.rs`, every swap on): 42.60 s against
+41.20 s (1.034x). `VESPER_HYBRID_STATS=time` over the corpus (debug): 30
+packages, encode 14.7 ms, Vesper 4.0 ms, decode 0.4 ms against 48.7 ms of
+debug Rust.
+
 ## What is left
 
-- **Part 2: the session and the hybrid swap.** Lower the declarations to
-  `@vesper/pact` programs directly (no `vesper-pact-binding` DTOs) and run
-  coherence; swap the pass into `crates/vesper-hybrid` as the non-default
-  module `pact` behind `declaration_pass`; like-for-like ABBA and callgrind;
-  the shard 7 entry.
+- **Part 2b: the session.** Lower the declarations to `@vesper/pact`
+  programs directly (no `vesper-pact-binding` DTOs) and run coherence, so
+  a clean answer no longer needs Rust's `Frontend::new` and the swap
+  replaces Rust work instead of checking ahead of it.
 - **Part 3: call resolution** (`Elaborator`: query contexts, `select`,
   `normalize`, `TraitCalls::resolve`) through `@vesper/pact`'s solver.
 - **Part 4: monomorphization and the builtin traits** (`mono.rs`,

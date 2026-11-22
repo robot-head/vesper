@@ -24,6 +24,8 @@
 mod check_harness;
 #[path = "common/check_words.rs"]
 mod check_words;
+#[path = "common/corpus_shard.rs"]
+mod corpus_shard;
 #[path = "common/ir_opt_words.rs"]
 mod ir_opt_words;
 #[path = "common/ir_words.rs"]
@@ -168,7 +170,8 @@ fn compare(mode: u64) -> (usize, usize, usize) {
     std::panic::set_hook(Box::new(|_| {}));
     let (mut bad, mut skipped, mut done) = (0, 0, 0);
     let (mut forwarded, mut errors, mut egglog_errors) = (0, 0, 0);
-    for c in inputs() {
+    // Bazel shards the inputs (BUILD.bazel `test_shards`).
+    for c in corpus_shard::Shard::from_environment().keep(inputs()) {
         let rust = std::panic::catch_unwind(|| rust_pass(c.world, &c.program, mode));
         let Ok((rr, rp)) = rust else {
             skipped += 1;
@@ -216,14 +219,16 @@ fn compare(mode: u64) -> (usize, usize, usize) {
 #[test]
 fn optimize_matches_rust() {
     let (done, _, bad) = compare(MODE_OPTIMIZE);
-    assert!(done > 50, "only {done} inputs");
+    let least = corpus_shard::Shard::from_environment().share(50);
+    assert!(done > least, "only {done} inputs");
     assert_eq!(bad, 0);
 }
 
 #[test]
 fn fip_reuse_matches_rust() {
     let (done, _, bad) = compare(MODE_REUSE);
-    assert!(done > 50, "only {done} inputs");
+    let least = corpus_shard::Shard::from_environment().share(50);
+    assert!(done > least, "only {done} inputs");
     assert_eq!(bad, 0);
 }
 
