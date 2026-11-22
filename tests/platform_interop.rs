@@ -851,3 +851,21 @@ fn objects_link_only_through_a_called_static_library() {
     let bytes = fs::read(&exe).unwrap();
     assert!(!bytes.windows(10).any(|w| w == b"twice_plus"));
 }
+
+#[test]
+fn test_runner_refuses_a_called_assembly_backed_library() {
+    if !host_jit() {
+        return;
+    }
+    let t = Temp::new("asm-test");
+    let dir = objects_app(&t, PER_TARGET_OBJECTS);
+    t.write(
+        "app/src/main.ves",
+        "pub fn test_twice() -> bool eff [Ffi[Twice]] { Twice::twice_plus(20, 3) == 43 }\n",
+    );
+    let err = fails(vesper().arg("test").arg(&dir));
+    assert!(
+        err.contains("objects of @t/app") && err.contains("only `vesper build` links"),
+        "{err}"
+    );
+}
