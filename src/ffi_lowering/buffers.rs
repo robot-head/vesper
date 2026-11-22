@@ -197,9 +197,7 @@ impl<'a> Walk<'a> {
         match &e.kind {
             ExprKind::Field(..) => self.buffer_of(e),
             // A slice interval `b.data[a..c]` indexes with the binary `..`.
-            ExprKind::Index(base, index)
-                if matches!(&index.kind, ExprKind::Binary(op, ..) if op == "..") =>
-            {
+            ExprKind::Index(base, index) if matches!(&index.kind, ExprKind::Binary(op, ..) if op == "..") => {
                 self.buffer_of(base)
             }
             ExprKind::Call { callee, .. } => match &callee.kind {
@@ -294,15 +292,10 @@ impl<'a> Walk<'a> {
                                         Statement::Expr(e) => e,
                                     })
                                     .chain(tail.as_deref());
-                                if let Some(call) = later
-                                    .into_iter()
-                                    .find(|e| w.may_call_foreign(e))
+                                if let Some(call) =
+                                    later.into_iter().find(|e| w.may_call_foreign(e))
                                 {
-                                    w.refuse_view(
-                                        &buffer,
-                                        call,
-                                        "may not stay bound across one",
-                                    );
+                                    w.refuse_view(&buffer, call, "may not stay bound across one");
                                 }
                             }
                             w.expr(value, false);
@@ -326,7 +319,8 @@ impl<'a> Walk<'a> {
                     }
                     _ => self.expr(callee, false),
                 }
-                let import = matches!(&callee.kind, ExprKind::Name(n) if n.starts_with(EFFECT_PREFIX));
+                let import =
+                    matches!(&callee.kind, ExprKind::Name(n) if n.starts_with(EFFECT_PREFIX));
                 if !import && self.calls_foreign(callee) {
                     for a in args {
                         if let Some(buffer) = self.view_of(&a.expr) {
