@@ -17,16 +17,29 @@
 
 // Generated and committed, kept outside src/ so formatters never reflow it
 // (see docs/maintenance/porting-a-crate.md).
-#[cfg(feature = "vesper-port")]
+// The virtqueue walks always run the port; the other ported modules only
+// under `vesper-port`.
 #[rustfmt::skip]
 #[allow(unsafe_code, missing_docs)]
+#[cfg_attr(not(feature = "vesper-port"), allow(dead_code))]
 #[path = "../port/binding.rs"]
 mod binding;
-#[cfg(feature = "vesper-port")]
+// The hardware random-number instructions (vesper-rng/, built for the
+// target by build.rs).
+#[cfg(any(
+    target_arch = "x86_64",
+    all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos"))
+))]
+#[rustfmt::skip]
+#[allow(unsafe_code, missing_docs)]
+#[path = "../port/rng_binding.rs"]
+mod rng_binding;
+#[cfg_attr(not(feature = "vesper-port"), allow(dead_code))]
 #[path = "port/types.rs"]
 mod port_types;
 
-/// Which implementation the ported modules run.
+/// Which implementation the ported modules other than the virtqueue walks
+/// run (those are Vesper in every build).
 pub const IMPLEMENTATION: &str = if cfg!(feature = "vesper-port") {
     "vesper"
 } else {
@@ -40,9 +53,15 @@ pub mod guest_mem;
 pub mod host;
 pub mod hotset;
 pub mod hotset_store;
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg(any(
+    target_arch = "x86_64",
+    all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos"))
+))]
 mod hw_rng;
-#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+#[cfg(not(any(
+    target_arch = "x86_64",
+    all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos"))
+)))]
 mod hw_rng {
     pub fn instruction() -> Option<&'static str> {
         None

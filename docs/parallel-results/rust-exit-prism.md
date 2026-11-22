@@ -7,8 +7,8 @@ Claim: [#1400](https://github.com/robot-head/vesper/issues/1400). Base:
 | Part | Scope | State |
 |---|---|---|
 | 1 | `vesper-prism`: close the speed gap, then flip (the Vesper port is the only build, the Rust implementation deleted) | #1434 |
-| 2 | `vesper-prism-h3`: close the encode and message gaps, flip the ported modules | this PR |
-| 3 | `vesper-prism-h3` drivers (`connection.rs`, `client.rs`, `transport.rs`, `warp.rs`, `prism.rs`, `session.rs`) on the ported Warp | after part 2 |
+| 2 | `vesper-prism-h3`: close the encode and message gaps, flip the ported modules | #1472 |
+| 3 | `vesper-prism-h3` drivers (`connection.rs`, `client.rs`, `transport.rs`, `warp.rs`, `prism.rs`, `session.rs`) on the ported Warp | 3a: this PR |
 
 ## Part 1: vesper-prism
 
@@ -272,8 +272,70 @@ drivers (`connection.rs`, `client.rs`, `session.rs`, `transport.rs`,
    encoder's `field_line` reloaded and stored seven values per byte
    (27 instructions per byte).
 
+## Part 3: the drivers
+
+The drivers are a sans-I/O state machine over the `Transport` trait, which
+Warp, quinn and the test transports implement in Rust. Warp's connection
+is not ported (lane 4), and the compiler cannot yet call Rust through a
+callback (#1296), so the Vesper code cannot call `Transport` itself.
+
+The plan, one PR per piece:
+
+- The Vesper code owns the protocol state and decides.
+- It returns typed commands, such as STOP_SENDING, bytes for a QPACK
+  codec, or a stream handed to the session layer.
+- The Rust driver carries the commands out against the transport.
+
+The Rust that stays is the transport glue and the public API types, such as
+the linear `Responder`. It shrinks as each piece moves.
+
+### 3a: the peer's unidirectional streams and control stream
+
+- **What moved.** `vesper/src/control.ves` (`UniCore`) now holds the
+  peer's unidirectional streams, in stream ID order. It does what
+  connection.rs's `Uni` map, `accept_uni`, `uni_bytes`, `uni_closed` and
+  `control_frame` did:
+  - It routes each stream by its type varint. The control stream, the two
+    QPACK streams and WebTransport streams are recognised; push streams
+    are an error; unknown types get STOP_SENDING.
+  - It holds at most 16 bytes of a stream whose type has not arrived.
+  - It owns the control stream's frame reader and its rules (§6.2.1, §7):
+    - SETTINGS must come first.
+    - A server's GOAWAY must be a client bidi ID, and GOAWAY never
+      increases.
+    - MAX_PUSH_ID never decreases.
+    - CANCEL_PUSH beyond MAX_PUSH_ID is an error.
+    - PRIORITY_UPDATE must name a client bidi stream and never a push.
+- **What the Rust driver still does.** It carries out the commands:
+  - feeds the QPACK codecs;
+  - records the peer's SETTINGS and GOAWAY;
+  - bounds and stores priority updates;
+  - hands WebTransport streams to the session layer;
+  - sends STOP_SENDING.
+- **The shared error type.** `ConnectionError` and `TransportError` are
+  now Vesper types too, variant for variant, so the binding returns the
+  Rust enums directly.
+- **Tests.**
+  - Every test passes: h3_mem's control-stream and GOAWAY tests,
+    priority_bodies, and the WebTransport stream tests through the router.
+  - `bad_priority_updates_are_connection_errors` now also covers a
+    server-initiated bidirectional element ID (1). Before, it had only
+    unidirectional IDs, which the stream-direction check alone rejects.
+  - The divergence check gains a `control` module. Dropping the
+    server-initiated check from PRIORITY_UPDATE fails that test, and
+    `priority_update_overrides_the_header` still passes.
+- **Rust lines.** 182 deleted and 124 added, so 58 fewer, not counting the
+  generated binding. The added lines are the command executor and the
+  boundary types.
+- **Speed.** No ABBA workload goes through the router. Its hot path is
+  QPACK encoder-stream instructions, which are copied once into `out` and
+  read back. A connection-level workload in `examples/abba.rs` comes with
+  part 3b, the request streams, where the per-request cost is.
+
 ## What is left
 
-- Part 3 (the drivers).
+- Part 3b and later: server request streams, the client, the session
+  layer (WebTransport and HTTP Datagrams), and then the Warp and Prism
+  adapters (`warp.rs`, `prism.rs`) once Warp is ported.
 - The census row (`scripts/rust-census.py`, STATUS tables) is updated once
   the plan PR (#1415) that adds the script has merged.

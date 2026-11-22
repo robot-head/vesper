@@ -17,6 +17,7 @@ while read -r module failing passing; do
     if VESPER_H3_DIVERGE=$module cargo test --locked -p vesper-prism-h3 \
         --features vesper-port-divergent --no-fail-fast \
         --test qpack_rfc --test qpack_qifs --test qpack_encode_golden --test frame_codec --test message_rules \
+        --test priority_bodies \
         -- --test-threads=1 >"$log" 2>&1; then
         cat "$log"
         echo "the divergent prism-h3 port ($module) passed its tests" >&2
@@ -40,4 +41,5 @@ frame malformed_frames_are_typed_errors capsules_round_trip_split_anywhere
 priority rfc9218_priorities malformed_frames_are_typed_errors
 capsule capsules_round_trip_split_anywhere appendix_b_decoder_side
 message content_length_and_host_rules response_statuses
+control bad_priority_updates_are_connection_errors priority_update_overrides_the_header
 CHECKS

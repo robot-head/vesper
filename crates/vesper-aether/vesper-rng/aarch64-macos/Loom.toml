@@ -1,0 +1,8 @@
+[package]
+name = "@vesper/aether-rng"
+version = "0.1.0"
+edition = "2026"
+capability_ceiling = ["Ffi[StdCpu]", "Ffi[SysctlC]"]
+
+[dependencies]
+"@vesper-std/cpu" = { version = "^0.1", path = "../../../../packages/vesper-std/cpu" }

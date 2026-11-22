@@ -404,6 +404,31 @@ pub fn forward_program(
     in cls: ChunkSeq[u8],
     inout orig: ChunkSeq[u64]
 ) -> (u8, u64) {
+    let all: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    forward_program_kept(inout p, in names, in cls, inout orig, in all)
+}
+
+fn kept_block(in keep: ChunkSeq[u8], b: u64) -> bool {
+    if keep.len() == 0 {
+        return true;
+    }
+    match keep.try_get(b) {
+        Option::Some(x) => x != 0,
+        Option::None => false,
+    }
+}
+
+// `forward_program` over the blocks `keep` selects (per block row, 1 to
+// forward; empty selects every block). The native optimizer policy
+// (@vesper/ir-opt-policy, src/ir_opt_policy.rs) skips the blocks its screen
+// proves forwarding leaves alone.
+pub fn forward_program_kept(
+    inout p: Program,
+    in names: Names,
+    in cls: ChunkSeq[u8],
+    inout orig: ChunkSeq[u64],
+    in keep: ChunkSeq[u8]
+) -> (u8, u64) {
     let mut sc = scratch_new(names.len());
     let mut total: u64 = 0;
     for fi in 0..p.fn_count() {
@@ -416,6 +441,9 @@ pub fn forward_program(
         aliases.resize(v.next_value, NONE);
         let mut found: u64 = 0;
         for bi in 0..f.bc {
+            if !kept_block(in keep, add(f.b0, bi)) {
+                continue;
+            }
             let bk = p.block(add(f.b0, bi));
             let (st, n) = forward_block(in p, in names, in cls, in v, inout sc, bk, inout aliases);
             if st != S_OK {

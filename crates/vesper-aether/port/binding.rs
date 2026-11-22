@@ -307,16 +307,103 @@ impl Abi for crate::port_types::SlotError {
     }
 }
 
+impl Abi for crate::port_types::VqFault {
+    const WORDS: usize = 1;
+    fn put(&self, out: &mut [u64]) {
+        match self {
+            crate::port_types::VqFault::Limit => {
+                out[0] = 0;
+            }
+            crate::port_types::VqFault::Overflow => {
+                out[0] = 1;
+            }
+            crate::port_types::VqFault::Full => {
+                out[0] = 2;
+            }
+            crate::port_types::VqFault::IncompleteChain => {
+                out[0] = 3;
+            }
+            crate::port_types::VqFault::UnsupportedFlags => {
+                out[0] = 4;
+            }
+            crate::port_types::VqFault::EmptyBuffer => {
+                out[0] = 5;
+            }
+            crate::port_types::VqFault::ReadAfterWrite => {
+                out[0] = 6;
+            }
+            crate::port_types::VqFault::UnauthorizedRange => {
+                out[0] = 7;
+            }
+            crate::port_types::VqFault::InvalidBufferId => {
+                out[0] = 8;
+            }
+            crate::port_types::VqFault::BufferIdInUse => {
+                out[0] = 9;
+            }
+            crate::port_types::VqFault::IndirectNotNegotiated => {
+                out[0] = 10;
+            }
+            crate::port_types::VqFault::IndirectPlacement => {
+                out[0] = 11;
+            }
+            crate::port_types::VqFault::IndirectNested => {
+                out[0] = 12;
+            }
+            crate::port_types::VqFault::IndirectTableLength => {
+                out[0] = 13;
+            }
+            crate::port_types::VqFault::AvailOverrun => {
+                out[0] = 14;
+            }
+            crate::port_types::VqFault::InvalidNext => {
+                out[0] = 15;
+            }
+            crate::port_types::VqFault::ChainLoop => {
+                out[0] = 16;
+            }
+            crate::port_types::VqFault::DescriptorInUse => {
+                out[0] = 17;
+            }
+        }
+    }
+    fn get(words: &[u64]) -> Self {
+        match words[0] {
+            0 => crate::port_types::VqFault::Limit,
+            1 => crate::port_types::VqFault::Overflow,
+            2 => crate::port_types::VqFault::Full,
+            3 => crate::port_types::VqFault::IncompleteChain,
+            4 => crate::port_types::VqFault::UnsupportedFlags,
+            5 => crate::port_types::VqFault::EmptyBuffer,
+            6 => crate::port_types::VqFault::ReadAfterWrite,
+            7 => crate::port_types::VqFault::UnauthorizedRange,
+            8 => crate::port_types::VqFault::InvalidBufferId,
+            9 => crate::port_types::VqFault::BufferIdInUse,
+            10 => crate::port_types::VqFault::IndirectNotNegotiated,
+            11 => crate::port_types::VqFault::IndirectPlacement,
+            12 => crate::port_types::VqFault::IndirectNested,
+            13 => crate::port_types::VqFault::IndirectTableLength,
+            14 => crate::port_types::VqFault::AvailOverrun,
+            15 => crate::port_types::VqFault::InvalidNext,
+            16 => crate::port_types::VqFault::ChainLoop,
+            17 => crate::port_types::VqFault::DescriptorInUse,
+            tag => panic!("invalid VqFault tag {tag} from Vesper"),
+        }
+    }
+}
+
 const _: () = assert!(<Option<crate::port_types::SlotError> as Abi>::WORDS == 6);
 const _: () = assert!(<Result<(u32, u64), crate::port_types::PvhFault> as Abi>::WORDS == 4);
 const _: () = assert!(<Result<u64, crate::port_types::HotFault> as Abi>::WORDS == 3);
 const _: () = assert!(<Result<u64, crate::port_types::PackedFault> as Abi>::WORDS == 2);
+const _: () = assert!(<Result<u64, crate::port_types::VqFault> as Abi>::WORDS == 2);
 const _: () = assert!(<crate::port_types::HotFault as Abi>::WORDS == 2);
 const _: () = assert!(<crate::port_types::KvmHostLimits as Abi>::WORDS == 3);
 const _: () = assert!(<crate::port_types::PackedFault as Abi>::WORDS == 1);
 const _: () = assert!(<crate::port_types::PlannedRegion as Abi>::WORDS == 5);
 const _: () = assert!(<crate::port_types::PvhFault as Abi>::WORDS == 3);
 const _: () = assert!(<crate::port_types::SlotError as Abi>::WORDS == 5);
+const _: () = assert!(<crate::port_types::VqFault as Abi>::WORDS == 1);
 
 unsafe extern "C" {
     fn vesper_aether_seq_new(capacity: i64, stride: i64) -> i64;
@@ -328,6 +415,8 @@ unsafe extern "C" {
     fn vesper_aether_pvh_parse(result: *mut u64, elf: *mut u64, ram: *mut u64, out: *mut u64) -> i64;
     fn vesper_aether_slot_plan_verify(result: *mut u64, regions: *mut u64, limits: *mut u64) -> i64;
     fn vesper_aether_slot_plan_verify_cross_vm(result: *mut u64, vm_ids: *mut u64, regions: *mut u64, region_vm: *mut u64) -> i64;
+    fn vesper_aether_vq_packed_walk(result: *mut u64, mem: *mut u64, regions: *mut u64, busy: *mut u64, desc: i64, size: i64, index: i64, wrap: i64, occupied: i64, hint: i64, indirect_ok: i64, max_desc: i64, max_bytes: i64, max_work: i64, out: *mut u64) -> i64;
+    fn vesper_aether_vq_split_walk(result: *mut u64, mem: *mut u64, regions: *mut u64, busy: *mut u64, desc: i64, driver: i64, size: i64, last_avail: i64, hint: i64, indirect_ok: i64, max_desc: i64, max_bytes: i64, max_work: i64, out: *mut u64) -> i64;
 }
 
 /// The sequence runtime of the Vesper library `aether`.
@@ -402,4 +491,24 @@ pub fn slot_plan_verify_cross_vm(vm_ids: &[u64], regions: &[crate::port_types::P
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_slice(vm_ids, |view_vm_ids| vesper_port_abi::with_slice(regions, |view_regions| vesper_port_abi::with_slice(region_vm, |view_region_vm| unsafe { vesper_aether_slot_plan_verify_cross_vm(result.as_mut_ptr(), view_vm_ids, view_regions, view_region_vm) })));
     <Option<crate::port_types::SlotError> as Abi>::get(&result[0..])
+}
+
+/// Calls `vq_packed_walk` of the Vesper library `aether` (`vesper_aether_vq_packed_walk`).
+pub fn vq_packed_walk(mem: &[u8], regions: &[u64], busy: &[u8], desc: u64, size: u64, index: u64, wrap: u64, occupied: u64, hint: u64, indirect_ok: u64, max_desc: u64, max_bytes: u64, max_work: u64, out: &mut [u64]) -> Result<u64, crate::port_types::VqFault> {
+    let mut result = [0u64; 2];
+    // SAFETY: `vesper_aether_vq_packed_walk` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(mem, |view_mem| vesper_port_abi::with_slice(regions, |view_regions| vesper_port_abi::with_slice(busy, |view_busy| vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_aether_vq_packed_walk(result.as_mut_ptr(), view_mem, view_regions, view_busy, desc as i64, size as i64, index as i64, wrap as i64, occupied as i64, hint as i64, indirect_ok as i64, max_desc as i64, max_bytes as i64, max_work as i64, view_out) }))));
+    <Result<u64, crate::port_types::VqFault> as Abi>::get(&result[0..])
+}
+
+/// Calls `vq_split_walk` of the Vesper library `aether` (`vesper_aether_vq_split_walk`).
+pub fn vq_split_walk(mem: &[u8], regions: &[u64], busy: &[u8], desc: u64, driver: u64, size: u64, last_avail: u64, hint: u64, indirect_ok: u64, max_desc: u64, max_bytes: u64, max_work: u64, out: &mut [u64]) -> Result<u64, crate::port_types::VqFault> {
+    let mut result = [0u64; 2];
+    // SAFETY: `vesper_aether_vq_split_walk` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(mem, |view_mem| vesper_port_abi::with_slice(regions, |view_regions| vesper_port_abi::with_slice(busy, |view_busy| vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_aether_vq_split_walk(result.as_mut_ptr(), view_mem, view_regions, view_busy, desc as i64, driver as i64, size as i64, last_avail as i64, hint as i64, indirect_ok as i64, max_desc as i64, max_bytes as i64, max_work as i64, view_out) }))));
+    <Result<u64, crate::port_types::VqFault> as Abi>::get(&result[0..])
 }
