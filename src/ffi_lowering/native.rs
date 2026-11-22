@@ -125,8 +125,11 @@ impl<M: Module> Codegen<'_, '_, M> {
         }
         // SH4 swap point (#1287): the `ffi` hook may emit this call
         // (`codegen_swap::ffi`); none is installed by default. A callback
-        // type's call is not offered: the steps name a symbol.
+        // type's call is not offered: the steps name a symbol. Foreign
+        // memory viewed in place (pinned buffers and mappings) is lowered
+        // here only, so the hook is not offered such calls either.
         if !plan.function.is_indirect()
+            && !plan.function.uses_foreign_memory()
             && let Some(v) = self.foreign_perform_swapped(&plan, &signature, args)?
         {
             return Ok(v);
@@ -138,7 +141,19 @@ impl<M: Module> Codegen<'_, '_, M> {
         // Per `CStr` argument: its malloc'd buffer, and the offset of its
         // first NUL byte (or -1).
         let mut strings: Vec<(ir::Value, ir::Value)> = vec![];
-        for ((arg, param), descriptor) in args.iter().zip(&signature.params).zip(descriptors) {
+        // The sequence headers of mappings consumed by this call, freed
+        // after it, and the length argument of a mapping result.
+        let mut released = vec![];
+        let mut mapping_length = None;
+        for (index, ((arg, param), descriptor)) in args
+            .iter()
+            .zip(&signature.params)
+            .zip(descriptors)
+            .enumerate()
+        {
+            if plan.function.mapping_length() == Some(index) {
+                mapping_length = Some(c_args.len());
+            }
             if let ParameterType::CStr = descriptor.ty() {
                 let (data, len) = self.foreign_view(&arg.expr, 1)?;
                 strings.push(self.foreign_cstr(data, len)?);
@@ -173,6 +188,24 @@ impl<M: Module> Codegen<'_, '_, M> {
                 ParameterType::Value(v) => c_args.push(self.foreign_value(v, source)?),
                 // The handle struct's one field is the C handle word, for
                 // every mode: C never replaces the handle itself.
+                // A pinned buffer or a mapping: its sequence's `(data, len)`.
+                // A consumed mapping's header is Vesper's, freed after the
+                // call; its memory is the library's.
+                ParameterType::Handle { handle, access } if handle.mapping().is_some() => {
+                    let header = self.foreign_word(source);
+                    let (data, len) = self.foreign_buffer(header);
+                    c_args.push(data);
+                    c_args.push(len);
+                    if *access == vesper_ffi::sys::HandleAccess::Sink {
+                        released.push(header);
+                    }
+                }
+                ParameterType::Pinned { .. } => {
+                    let header = self.foreign_word(source);
+                    let (data, len) = self.foreign_buffer(header);
+                    c_args.push(data);
+                    c_args.push(len);
+                }
                 ParameterType::Handle { .. } => c_args.push(self.foreign_word(source)),
                 ParameterType::CStr => unreachable!("C strings are lowered above"),
                 ParameterType::Pointer {
@@ -226,6 +259,9 @@ impl<M: Module> Codegen<'_, '_, M> {
                 }
             }
         }
+        // The length word is taken before any variadic padding shifts the
+        // argument positions.
+        let length = mapping_length.map(|i| c_args[i]);
         let abi = plan.function.abi();
         // Apple arm64 passes variadic arguments on the stack: zero words
         // fill the remaining argument registers first (`sys::Variadic`).
@@ -311,7 +347,16 @@ impl<M: Module> Codegen<'_, '_, M> {
             Callee::Direct(f) => self.b.ins().call(f, &c_args),
             Callee::Indirect(sig, pointer) => self.b.ins().call_indirect(sig, pointer, &c_args),
         };
-        let raw = self.b.inst_results(call).first().copied();
+        let mut raw = self.b.inst_results(call).first().copied();
+        if let (Some(len), Some(address)) = (length, raw) {
+            raw = Some(self.foreign_mapping(address, len)?);
+        }
+        if !released.is_empty() {
+            let free = self.foreign_libc("free", 1, false)?;
+            for header in released {
+                self.b.ins().call(free, &[header]);
+            }
+        }
         if let Some(saved) = saved {
             let wrpkru = self.foreign_helper(WRPKRU_SYMBOL, &[types::I32], None, &WRPKRU)?;
             self.b.ins().call(wrpkru, &[saved]);
@@ -397,6 +442,51 @@ impl<M: Module> Codegen<'_, '_, M> {
         let dummy = self.alloc(8);
         let empty = self.b.ins().icmp_imm(IntCC::Equal, data, 0);
         Ok((self.b.ins().select(empty, dummy, lent), len))
+    }
+    /// The `(data, len)` of the sequence header `header` of a pinned buffer
+    /// or a mapping: the address C receives (and may keep) and its length
+    /// in elements.
+    fn foreign_buffer(&mut self, header: ir::Value) -> (ir::Value, ir::Value) {
+        let flags = ir::MemFlags::new();
+        let data = self.b.ins().load(types::I64, flags, header, 16);
+        let len = self.b.ins().load(types::I64, flags, header, 0);
+        (data, len)
+    }
+    /// The handle word of a mapping result at `address` of `len` elements:
+    /// a fresh `{len, cap, data}` sequence header over the foreign memory,
+    /// or 0 (`None`) when the library returned `NULL` or `MAP_FAILED`
+    /// (all ones). The header is freed by the `sink` import that releases
+    /// the mapping; the memory is never Vesper's to free or grow.
+    fn foreign_mapping(&mut self, address: ir::Value, len: ir::Value) -> Result<ir::Value, String> {
+        let len = match self.b.func.dfg.value_type(len) {
+            types::I64 => len,
+            _ => self.b.ins().uextend(types::I64, len),
+        };
+        let null = self.b.ins().icmp_imm(IntCC::Equal, address, 0);
+        let failed = self.b.ins().icmp_imm(IntCC::Equal, address, -1);
+        let absent = self.b.ins().bor(null, failed);
+        let make = self.b.create_block();
+        let join = self.b.create_block();
+        self.b.append_block_param(join, types::I64);
+        let zero = self.b.ins().iconst(types::I64, 0);
+        self.branch(absent, join, &[ir::BlockArg::Value(zero)], make, &[]);
+        self.b.switch_to_block(make);
+        self.b.seal_block(make);
+        let malloc = self.foreign_libc("malloc", 1, true)?;
+        let size = self.b.ins().iconst(types::I64, 24);
+        let call = self.b.ins().call(malloc, &[size]);
+        let header = self.b.inst_results(call)[0];
+        self.b
+            .ins()
+            .trapz(header, ir::TrapCode::unwrap_user(ffi::MAPPING_ALLOC_TRAP));
+        let flags = ir::MemFlags::new();
+        self.b.ins().store(flags, len, header, 0);
+        self.b.ins().store(flags, len, header, 8);
+        self.b.ins().store(flags, address, header, 16);
+        self.jump(join, &[ir::BlockArg::Value(header)]);
+        self.b.switch_to_block(join);
+        self.b.seal_block(join);
+        Ok(self.b.block_params(join)[0])
     }
     /// A NUL-terminated `malloc` copy of `len` bytes at `data`, and the
     /// offset of the first NUL byte among them (-1 when there is none).
@@ -1359,6 +1449,9 @@ impl<M: Module> Codegen<'_, '_, M> {
                             value_words(v, &mut words);
                         }
                         ParameterType::Handle { .. } => words.push(1),
+                        ParameterType::Pinned { .. } => {
+                            return Err("pinned buffers are not offered to the ffi hook".into());
+                        }
                         ParameterType::CStr => unreachable!("C strings are lowered above"),
                         ParameterType::Pointer {
                             pointee,

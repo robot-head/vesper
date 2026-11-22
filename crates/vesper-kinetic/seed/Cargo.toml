@@ -12,14 +12,15 @@ build = false
 
 # The seed-copy rule (port wave P1 lane 2, #899; this crate's port is port
 # wave P3b lane 8, #1070): the compiler, and for now every other dependent,
-# links this package, the Rust build of ../src, under the library name
-# `vesper_kinetic`. Dependents use
+# links this package, the Rust build of ../src over the frozen Rust engine
+# in src/engine for the modules the port replaced (SH6 lane 9, #1404), under
+# the library name `vesper_kinetic`. Dependents use
 # `vesper-kinetic = { path = ".../seed", package = "vesper-kinetic-seed" }`.
 # The port-backed package `vesper-kinetic` is exercised by its own tests
 # until it reaches performance parity. The Rust code takes bug fixes only.
 [lib]
 name = "vesper_kinetic"
-path = "../src/lib.rs"
+path = "src/lib.rs"
 
 [dependencies]
 blake3 = "1.8"

@@ -580,3 +580,49 @@ fn vesper_locals_match_the_rust_lowering_across_blocks() {
         assert!(total.is_clean(), "{}", total.summary());
     });
 }
+
+/// Small enum values kept as words (#1330): with optimize on, the walk
+/// emits a rewritten copy of `main`, whose instruction indices are not the
+/// program's, so its requests carry no site and stay on Rust (found by
+/// the hybrid differential on tests/fixtures/verified_codegen/generics.ves).
+const SMALL_ENUMS: &str = "
+copy struct Pair[T: mod copy] { a: T, b: T }
+copy enum Choice[T: mod copy] { Left(T), Right(T, T) }
+fn pick[T: mod copy](c: Choice[T], right: bool) -> T {
+    match c {
+        Choice::Left(x) => x,
+        Choice::Right(x, y) => if right { y } else { x },
+    }
+}
+fn swap[T: mod copy](p: Pair[T]) -> Pair[T] { Pair { a: p.b, b: p.a } }
+fn main() -> (u8, Pair[u32], i64) {
+    let c: Choice[u8] = Choice::Right(7, 9);
+    let w: Pair[u32] = Pair { a: 10, b: 20 };
+    (pick(c, true), swap(w), 4)
+}
+";
+
+#[test]
+fn vesper_rewritten_graphs_stay_on_rust() {
+    big_stack(|| {
+        let parsed = vesper::parser::parse(SMALL_ENUMS);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = vesper::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        let mut total = Diff::default();
+        for optimize in [true, false] {
+            PLAN.with(|p| *p.borrow_mut() = None);
+            total.add(compare(
+                "small enums",
+                &checked.world,
+                "main",
+                hooks(),
+                optimize,
+                true,
+            ));
+        }
+        eprintln!("small enums: {}", total.summary());
+        assert_eq!(total.worlds, 2, "{}", total.summary());
+        assert!(total.is_clean(), "{}", total.summary());
+    });
+}

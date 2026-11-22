@@ -1,0 +1,12 @@
+[package]
+name = "@vesper/hybrid-codegen-scalar"
+version = "0.1.0"
+edition = "2026"
+# The plan only computes; emission reaches Cranelift through
+# @vesper/cranelift's `.vsys` library.
+capability_ceiling = ["Fail", "Alloc", "Ffi"]
+
+[dependencies]
+"@vesper/codegen-scalar" = { version = "^0.1", path = "../../../../packages/vesper-codegen-scalar" }
+"@vesper/codegen-scalar-emit" = { version = "^0.1", path = "../../../../packages/vesper-codegen-scalar/emit" }
+"@vesper/cranelift" = { version = "^0.1", path = "../../../../packages/vesper-cranelift" }

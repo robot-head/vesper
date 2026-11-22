@@ -148,23 +148,6 @@ fn validate(
     }
 }
 
-fn push_le(inout out: ChunkSeq[u8], v: u64, n: u64) {
-    let at = out.len();
-    out.resize(wrapping_add(at, n), 0);
-    if n == 4 {
-        out.try_write_u32_le(at, wrapping_u32(v));
-    } else {
-        out.try_write_u64_le(at, v);
-    }
-}
-
-fn push_span(inout out: ChunkSeq[u8], in buf: Slice[u8], in spans: Slice[u64], i: u64) {
-    let at = word(in spans, wrapping_mul(i, 2));
-    let n = word(in spans, wrapping_add(wrapping_mul(i, 2), 1));
-    push_le(inout out, n, 4);
-    out.extend(in buf[at..wrapping_add(at, n)]);
-}
-
 pub fn drv_encode_into(
     domain: u8,
     has_target: bool,
@@ -175,19 +158,10 @@ pub fn drv_encode_into(
     in ids: Slice[u8],
     inout info: u64
 ) -> ChunkSeq[u8] eff [Fail[DrvErr]] {
-    let mut spans: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](wrapping_mul(ends.len(), 2));
-    let mut start: u64 = 0;
-    let mut i: u64 = 0;
-    loop {
-        if i >= ends.len() {
-            break;
-        }
-        let end = word(in ends, i);
-        spans.push(start);
-        spans.push(wrapping_sub(end, start));
-        start = end;
-        i = wrapping_add(i, 1);
-    }
+    let n_strs = ends.len();
+    let mut spans: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](wrapping_mul(n_strs, 2));
+    spans.resize(wrapping_mul(n_strs, 2), 0);
+    fill_spans(inout spans.as_slice_mut(), in ends);
     let mut info2: u64 = 0;
     validate(
         domain,
@@ -199,42 +173,101 @@ pub fn drv_encode_into(
         inout info,
         inout info2
     );
-    let mut out: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](wrapping_add(64, strs.len()));
-    out.extend(in "VLDI".as_bytes());
-    push_le(inout out, 1, 4);
-    out.push(domain);
-    push_span(inout out, in strs, in spans.as_slice(), 0);
-    push_span(inout out, in strs, in spans.as_slice(), 1);
+    // The size of the encoding: 18 fixed bytes, a 4-byte length per string,
+    // the strings and a 34-byte id per input.
+    let total = wrapping_add(
+        wrapping_add(18, wrapping_mul(n_strs, 4)),
+        wrapping_add(strs.len(), wrapping_mul(n_inputs, 34))
+    );
+    let mut out: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](total);
+    out.resize(total, 0);
+    write_drv(
+        inout out.as_slice_mut(),
+        domain,
+        has_target,
+        n_options,
+        n_inputs,
+        in strs,
+        in spans.as_slice(),
+        in ids
+    );
+    out
+}
+
+// The (offset, length) span of each string `ends` delimits.
+fn fill_spans(inout spans: Slice[u64], in ends: Slice[u64]) {
+    let mut start: u64 = 0;
+    let mut i: u64 = 0;
+    loop {
+        if i >= ends.len() {
+            break;
+        }
+        let end = word(in ends, i);
+        spans.try_set(wrapping_mul(i, 2), start);
+        spans.try_set(wrapping_add(wrapping_mul(i, 2), 1), wrapping_sub(end, start));
+        start = end;
+        i = wrapping_add(i, 1);
+    }
+}
+
+// Write string `i` (its u32 length, then its bytes) at `at`; the offset
+// after it.
+fn put_str(inout o: Slice[u8], in buf: Slice[u8], in spans: Slice[u64], i: u64, at: u64) -> u64 {
+    let from = word(in spans, wrapping_mul(i, 2));
+    let n = word(in spans, wrapping_add(wrapping_mul(i, 2), 1));
+    o.try_write_u32_le(at, wrapping_u32(n));
+    o.try_copy_from(wrapping_add(at, 4), in buf[from..wrapping_add(from, n)]);
+    wrapping_add(wrapping_add(at, 4), n)
+}
+
+fn write_drv(
+    inout o: Slice[u8],
+    domain: u8,
+    has_target: bool,
+    n_options: u64,
+    n_inputs: u64,
+    in strs: Slice[u8],
+    in spans: Slice[u64],
+    in ids: Slice[u8]
+) {
+    o.try_copy_from(0, in "VLDI".as_bytes());
+    o.try_write_u32_le(4, 1);
+    o.try_set(8, domain);
+    let mut at = put_str(inout o, in strs, in spans, 0, 9);
+    at = put_str(inout o, in strs, in spans, 1, at);
     let mut base: u64 = 2;
     if has_target {
-        out.push(1);
-        push_span(inout out, in strs, in spans.as_slice(), 2);
+        o.try_set(at, 1);
+        at = put_str(inout o, in strs, in spans, 2, wrapping_add(at, 1));
         base = 3;
     } else {
-        out.push(0);
+        o.try_set(at, 0);
+        at = wrapping_add(at, 1);
     }
-    push_le(inout out, n_options, 4);
+    o.try_write_u32_le(at, wrapping_u32(n_options));
+    at = wrapping_add(at, 4);
     let mut j: u64 = 0;
     loop {
         if j >= wrapping_mul(n_options, 2) {
             break;
         }
-        push_span(inout out, in strs, in spans.as_slice(), wrapping_add(base, j));
+        at = put_str(inout o, in strs, in spans, wrapping_add(base, j), at);
         j = wrapping_add(j, 1);
     }
     let names = wrapping_add(base, wrapping_mul(n_options, 2));
-    push_le(inout out, n_inputs, 4);
+    o.try_write_u32_le(at, wrapping_u32(n_inputs));
+    at = wrapping_add(at, 4);
     j = 0;
     loop {
         if j >= n_inputs {
             break;
         }
-        push_span(inout out, in strs, in spans.as_slice(), wrapping_add(names, j));
+        at = put_str(inout o, in strs, in spans, wrapping_add(names, j), at);
         let id = wrapping_mul(j, 34);
-        out.extend(in ids[id..wrapping_add(id, 34)]);
+        o.try_copy_from(at, in ids[id..wrapping_add(id, 34)]);
+        at = wrapping_add(at, 34);
         j = wrapping_add(j, 1);
     }
-    out
 }
 
 fn read_le(in s: Slice[u8], at: u64, n: u64) -> u64 {

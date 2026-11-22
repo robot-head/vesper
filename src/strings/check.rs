@@ -198,11 +198,19 @@ impl Checker<'_> {
     /// itself a view, or an immutable owned binding (a `let` without `mut`
     /// holding a `String`, a `ChunkSeq` or an aggregate of them), which
     /// cannot be written and, while the view is in scope, cannot be moved
-    /// ([`Checker::check_view_sources`], SH3 lane 4). The bound view is a
+    /// ([`Checker::check_view_sources`], SH3 lane 4). With `changeable`, also
+    /// a place the function may change (a `let mut` local or an `inout` or
+    /// `sink` parameter), which then cannot be written, lent `inout` or
+    /// moved while the view is in scope (gap wave 1 lane 6). The bound view is a
     /// read-only `Str` or `Slice` local that cannot outlive its source: the
     /// binding is shared (`in`), so it cannot be moved, rebound mutably or
     /// written, and views are second-class (never returned or stored).
-    pub(in crate::check) fn bind_view(&mut self, value: &Expr, env: &Env) -> bool {
+    pub(in crate::check) fn bind_view(
+        &mut self,
+        value: &Expr,
+        env: &Env,
+        changeable: bool,
+    ) -> bool {
         let base = view_source(value);
         // A view of a string literal, or of the static text a `-> Str`
         // function returns, is a view of static bytes and never dangles.
@@ -218,8 +226,15 @@ impl Checker<'_> {
             return false;
         };
         let view = crate::seq::is_slice_type(&b.ty) || is_str_type(&b.ty);
+        // A view of an owned or `inout` place the function may change (a
+        // `let mut` local, an `inout` or `sink` parameter, or a field of
+        // one) freezes the overlapping places while the view is in scope
+        // ([`Checker::check_view_sources`]). Only a `let` (`changeable`)
+        // records that loan: a `for` over such a view lends the place
+        // through its own loop loan instead.
         let owned = b.frozen && b.pass == Pass::Sink;
-        let bound = b.pass == Pass::In || (b.frozen && view) || owned;
+        let changeable = changeable && matches!(b.pass, Pass::Sink | Pass::Inout);
+        let bound = b.pass == Pass::In || (b.frozen && view) || owned || changeable;
         if bound {
             self.slice_args
                 .insert((value.span.start, value.span.end), Pass::In);
@@ -237,6 +252,21 @@ impl Checker<'_> {
         }
     }
 
+    /// Whether the bound view `value`, bound to `name`, shadows its own
+    /// owned source (`let xs = xs.as_slice();`): rebinding the name drops
+    /// the source's value, so the view would outlive its bytes (`E1531`).
+    pub(in crate::check) fn view_shadows_source(
+        &self,
+        value: &Expr,
+        name: &str,
+        env: &Env,
+    ) -> bool {
+        view_source(value)
+            .and_then(Place::from_expr)
+            .is_some_and(|p| p.root == name)
+            && env.bindings.get(name).is_some_and(|b| b.pass == Pass::Sink)
+    }
+
     /// Records the bound view `name` (declared at `span`) of an immutable
     /// owned binding, whose source must not move while the view is in scope.
     pub(in crate::check) fn record_view_source(
@@ -249,25 +279,29 @@ impl Checker<'_> {
         let Some(source) = view_source(value).and_then(Place::from_expr) else {
             return;
         };
-        if env
-            .bindings
-            .get(&source.root)
-            .is_some_and(|b| b.pass == Pass::Sink)
+        if let Some(b) = env.bindings.get(&source.root)
+            && matches!(b.pass, Pass::Sink | Pass::Inout)
         {
-            self.view_sources.push((source, name.to_string(), span));
+            let at = b.span.clone();
+            self.view_sources.push((source, at, name.to_string(), span));
         }
     }
 
-    /// Rejects a move of `p` while a bound view of an overlapping place is
-    /// in scope (`E1531`).
+    /// Rejects a move, a write, an `inout` loan or a same-block rebinding of
+    /// `p` (`verb` names which) while a bound view of an overlapping place
+    /// is in scope (`E1531`).
     pub(in crate::check) fn check_view_sources(
         &mut self,
         p: &Place,
         env: &Env,
         span: &Span,
+        verb: &str,
     ) -> bool {
         let mut ok = true;
-        for (source, view, at) in self.view_sources.clone() {
+        // The accessed binding: a nested binding that shadows the source's
+        // name is another place.
+        let accessed = env.bindings.get(&p.root).map(|b| b.span.clone());
+        for (source, binding, view, at) in self.view_sources.clone() {
             // The view is live while its binding is in scope, also while a
             // nested block, loop or match arm shadows it (it comes back
             // when the shadow ends): conservatively, a later binding of
@@ -280,18 +314,19 @@ impl Checker<'_> {
                     .shadowed
                     .iter()
                     .any(|frame| frame.get(&view).is_some_and(|b| b.span == at));
-            if live && source.overlaps(p) {
+            if live && accessed.as_ref() == Some(&binding) && source.overlaps(p) {
                 ok = false;
                 self.error(
                     "E1531",
                     format!(
-                        "cannot move '{}' while the view '{view}' of it is in scope",
+                        "cannot {} '{}' while the view '{view}' of it is in scope",
+                        verb,
                         p.display()
                     ),
                     span.clone(),
                 );
                 self.related(at, "the view is bound here");
-                self.help("A bound view lives until the end of its block; move the source after that block, or copy what the view reads.");
+                self.help("A bound view lives until the end of its block; change or move the source after that block, or copy what the view reads.");
             }
         }
         ok

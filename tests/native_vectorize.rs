@@ -10,7 +10,7 @@ use std::{
     process::Command,
     sync::atomic::{AtomicU64, Ordering},
 };
-use vesper::{check, native, parser, runtime::Runtime};
+use vesper::{check, ir, ir_opt, native, parser, runtime::Runtime};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
@@ -230,4 +230,124 @@ fn a_range_ending_at_u64_max_stops_in_bounds() {
         let kernels = format!("top(inout d, wrapping_sub(18446744073709551615, {n}));");
         differential(&format!("top_{n}"), &program(helpers, &kernels));
     }
+}
+
+/// Count-down loops, as Bench writes its subset-sum step
+/// (`crates/vesper-bench/vesper/src/util.ves`): bounds hoisting versions
+/// them and the fast copy gets two lanes. A decrement after the accesses
+/// and one that skips are left scalar, and every form gives the
+/// evaluator's answer.
+#[test]
+fn count_down_loops_are_hoisted_and_vectorized() {
+    let helpers = "fn cu(in s: ChunkSeq[u64], i: u64) -> u64 { match s.try_get(i) { Option::Some(x) => x, Option::None => 0 } }
+fn inc(a: u64) -> u64 { wrapping_add(a, 1) }
+fn dec(a: u64) -> u64 { wrapping_sub(a, 1) }
+fn add(a: u64, b: u64) -> u64 { wrapping_add(a, b) }
+fn add_rank(inout dist: ChunkSeq[u64], max_sum: u64, rank: u64) {
+    let mut sum = inc(max_sum);
+    loop {
+        if sum == 0 {
+            break;
+        }
+        sum = dec(sum);
+        let v = cu(in dist, sum);
+        let t = add(sum, rank);
+        dist.try_set(t, add(cu(in dist, t), v));
+    }
+}
+fn late(inout d: ChunkSeq[u64], n: u64) {
+    let mut s = n;
+    loop {
+        if s == 0 {
+            break;
+        }
+        let v = cu(in d, s);
+        d.try_set(s, add(v, 1));
+        s = dec(s);
+    }
+}
+fn skips(inout d: ChunkSeq[u64], n: u64) {
+    let mut s = n;
+    loop {
+        if s == 0 {
+            break;
+        }
+        s = wrapping_sub(s, 2);
+        let v = cu(in d, s);
+        d.try_set(s, add(v, 1));
+    }
+}";
+    for (max, rank) in [(0, 1), (1, 1), (2, 2), (3, 1), (40, 0), (40, 1), (150, 99)] {
+        let kernels = format!("add_rank(inout d, {max}, {rank});");
+        let clif = differential(&format!("down_{max}_{rank}"), &program(helpers, &kernels));
+        let add_rank = clif.split("; add_rank").nth(1).unwrap_or_default();
+        let add_rank = add_rank.split("\n; ").next().unwrap_or_default();
+        assert!(
+            vectorized(add_rank),
+            "add_rank is not vectorized:\n{add_rank}"
+        );
+    }
+    let kernels = "let mut m: u64 = 0;
+    for k in 1..20 { add_rank(inout d, m, k); m = wrapping_add(m, k); }";
+    differential("down_ranks", &program(helpers, kernels));
+    for n in [0, 1, 2, 5, 100, 299] {
+        let kernels = format!("late(inout d, {n});");
+        differential(&format!("down_other_{n}"), &program(helpers, &kernels));
+    }
+    // `skips` steps by 2 from an even start, so it stops at 0.
+    for n in [0, 2, 4, 100, 298] {
+        let kernels = format!("skips(inout d, {n});");
+        differential(&format!("down_skips_{n}"), &program(helpers, &kernels));
+    }
+}
+
+/// How many loops bounds hoisting versions in `function` of `source`, on the
+/// optimized Place IR.
+fn versioned(source: &str, function: &str) -> usize {
+    let p = parser::parse(source);
+    assert!(p.diagnostics.is_empty(), "{:?}", p.diagnostics);
+    let c = check::check(&p.module);
+    assert!(c.diagnostics.is_empty(), "{:#?}", c.diagnostics);
+    let mut program = ir::lower_world(&c.world);
+    ir_opt::optimize(&c.world, &mut program).unwrap();
+    vesper::fip::elaborate_non_fip_drops(&c.world, &mut program);
+    let f = program.functions.get_mut(function).unwrap();
+    vesper::bounds_hoist::hoist_function(f)
+}
+
+/// A call that takes a count-down loop's index `inout` may move it past the
+/// range the one decrement keeps it in, so the loop keeps its checks. The
+/// same loop with the call taking the index `in` is versioned.
+#[test]
+fn a_call_that_borrows_the_count_down_index_keeps_its_checks() {
+    let source = |pass: &str| {
+        format!(
+            "fn bump({pass} s: u64, inout once: bool) {{
+    if once {{
+        once = false;
+    }}
+}}
+fn bumped(inout d: ChunkSeq[u64], n: u64) {{
+    let mut s = n;
+    let mut once = true;
+    loop {{
+        if s == 0 {{
+            break;
+        }}
+        s = wrapping_sub(s, 1);
+        bump({pass} s, inout once);
+        let v = match d.try_get(s) {{ Option::Some(x) => x, Option::None => 0 }};
+        d.try_set(s, wrapping_add(v, 1));
+    }}
+}}
+fn main() -> u64 {{
+    let mut d: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for i in 0..300 {{ d.push(i); }}
+    bumped(inout d, 50);
+    0
+}}"
+        )
+    };
+    assert_eq!(versioned(&source("in"), "bumped"), 1);
+    assert_eq!(versioned(&source("inout"), "bumped"), 0);
 }

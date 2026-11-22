@@ -1,7 +1,14 @@
-use crate::ast::Diagnostic;
+use crate::ast::{
+    Diagnostic, Expr, ExprKind, Function, Item, Mode as ValueMode, Module, Pass, Pattern,
+    PatternKind, Statement, Type, substitute,
+};
 use crate::check::World;
+use crate::forge_frontend::check_compiler_source;
 use crate::runtime::{Runtime, Value};
-use crate::tooling::frontend::{AnalysisLimits, check_source};
+use crate::tooling::frontend::{AnalysisLimits, CheckedSource, check_source};
+
+#[path = "../crates/vesper-tools/src/highlight/facts.rs"]
+mod highlight_facts;
 use serde::{Deserialize, Serialize};
 use std::{cell::RefCell, fmt::Write as _};
 
@@ -48,6 +55,7 @@ pub extern "C" fn vesper_tour_output_len() -> usize {
 struct Request {
     source: String,
     mode: Mode,
+    test_case: Option<String>,
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -60,6 +68,7 @@ enum Mode {
     CheckTests,
     Macro,
     Expand,
+    Lean,
     Format,
     Highlight,
 }
@@ -77,6 +86,15 @@ struct EditorDiagnostic {
     code: String,
     message: String,
     // JavaScript and DOM ranges use UTF-16 offsets. The compiler uses bytes.
+    start: usize,
+    end: usize,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    related: Vec<EditorLabel>,
+}
+
+#[derive(Serialize)]
+struct EditorLabel {
+    message: String,
     start: usize,
     end: usize,
 }
@@ -123,6 +141,15 @@ fn diagnostics(source: &str, errors: &[Diagnostic], fallback: impl ToString) -> 
                 message: error.message.clone(),
                 start: offset(error.span.start),
                 end: offset(error.span.end),
+                related: error
+                    .related
+                    .iter()
+                    .map(|label| EditorLabel {
+                        message: label.message.clone(),
+                        start: offset(label.span.start),
+                        end: offset(label.span.end),
+                    })
+                    .collect(),
             })
             .collect(),
     }
@@ -135,14 +162,26 @@ fn limits() -> AnalysisLimits {
     }
 }
 
-fn execute(Request { source, mode }: Request) -> Response {
+fn execute(
+    Request {
+        source,
+        mode,
+        test_case,
+    }: Request,
+) -> Response {
     if source.len() > MAX_SOURCE {
         return Response::error("This example exceeds the 16 KiB source limit.");
     }
     match mode {
-        Mode::Run | Mode::Check => match check_source(&source, limits()) {
+        Mode::Run | Mode::Check | Mode::Lean => match check_compiler_source(&source, limits()) {
             Ok(_) if matches!(mode, Mode::Check) => {
                 Response::success("Source checks successfully.")
+            }
+            Ok(checked) if matches!(mode, Mode::Lean) => {
+                match crate::lean::extract(checked.world()) {
+                    Ok(output) => Response::success(output),
+                    Err(error) => Response::error(error),
+                }
             }
             Ok(checked) => evaluate_entry(checked.world()),
             Err(error) => diagnostics(&source, error.diagnostics(), &error),
@@ -166,8 +205,26 @@ fn execute(Request { source, mode }: Request) -> Response {
             }
         }
         Mode::Highlight => {
-            use vesper_highlight::{FallbackReason, html, tier0_fallback};
-            match tier0_fallback(&source, FallbackReason::NotRequested) {
+            use vesper_highlight::{FallbackReason, highlight_tier1, html, tier0_fallback};
+            let highlight = match check_source(&source, limits()) {
+                Ok(checked) => {
+                    highlight_tier1(&source, &highlight_facts::collect_facts(&source, &checked))
+                }
+                Err(error) => tier0_fallback(
+                    &source,
+                    error.diagnostics().first().map_or_else(
+                        || FallbackReason::Budget {
+                            message: "source could not be checked".into(),
+                        },
+                        |d| FallbackReason::Check {
+                            code: d.code.as_str().into(),
+                            message: d.message.as_str().into(),
+                            span: d.span.clone(),
+                        },
+                    ),
+                ),
+            };
+            match highlight {
                 Ok(highlight) => Response::success(html::render(
                     &source,
                     &highlight,
@@ -183,11 +240,15 @@ fn execute(Request { source, mode }: Request) -> Response {
             Ok(result) => Response::success(result.output),
             Err(error) => Response::error(error.to_string()),
         },
-        Mode::Test | Mode::TestCase | Mode::CheckTests => tests(
-            &source,
-            matches!(mode, Mode::TestCase),
-            matches!(mode, Mode::CheckTests),
-        ),
+        Mode::Test | Mode::CheckTests => tests(&source, None, matches!(mode, Mode::CheckTests)),
+        Mode::TestCase => match test_case
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        {
+            Some(name) => tests(&source, Some(name), false),
+            None => Response::error("Enter the name of a test or table row."),
+        },
     }
 }
 
@@ -225,7 +286,7 @@ fn test_diagnostics(
     diagnostics(source, &errors, "Invalid test source.")
 }
 
-fn tests(source: &str, one_case: bool, check_only: bool) -> Response {
+fn tests(source: &str, test_case: Option<&str>, check_only: bool) -> Response {
     use crate::test_discovery::{case_rows, discover, finish_case_wrappers, location};
     use vesper_test::TestMode;
 
@@ -273,7 +334,7 @@ fn tests(source: &str, one_case: bool, check_only: bool) -> Response {
     let (mut passed, mut failed) = (0, 0);
     let mut output = String::new();
     for test in tests {
-        if test.plan.ignore || (one_case && test.name != "test_reserve::over") {
+        if test.plan.ignore || test_case.is_some_and(|name| test.name != name) {
             continue;
         }
         let entry = match &parsed.module.items[test.index] {
