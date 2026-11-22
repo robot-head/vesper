@@ -906,6 +906,9 @@ fn inline_into(
                 let target = copy.as_ref().unwrap_or(original);
                 let bindings = site_bindings(world, program, caller, target, inst.dest, args)
                     .map_err(Refusal::Site)?;
+                if owns_sequence(world, target) && cold_block(caller, b) {
+                    return Err(Refusal::Site("sequence owner on a cold path"));
+                }
                 let whole = cost_with_handlers(world, program, target);
                 let handlers = whole - cost(world, target);
                 let folded = site::fold(world, caller, target, &bindings)
@@ -1016,6 +1019,66 @@ fn inline_into(
         }
         b += 1;
     }
+}
+
+/// Whether `f` owns a sequence: a local, a by-value parameter included,
+/// whose type holds one. A slice local is a view (pointer and length) and
+/// owns nothing. Its copy would give the caller the sequence's
+/// stack slot, which the native backend zeroes in the prologue, the frame
+/// and callee-saved registers its calls need, and drop flags tested on
+/// every path (gap 8 of the Kinetic/Resonance report, #1499).
+fn owns_sequence(world: &World, f: &FunctionIr) -> bool {
+    f.locals.iter().any(|(name, t)| {
+        crate::seq::holds_sequence(world, t)
+            && !crate::seq::is_slice_type(t)
+            && f.params
+                .iter()
+                .find(|p| &p.name == name)
+                .is_none_or(|p| p.pass == Pass::Sink)
+    })
+}
+
+/// Whether block `b` of `f` runs on only some calls of `f`: it is on no
+/// cycle, and some path from the entry leaves `f` (a `return` terminator or
+/// an [`Op::Exit`] of `f`) without passing it. A sequence-owning callee
+/// spliced there would put its setup on the paths that skip it (#1499); a
+/// call keeps that setup in the callee's own frame.
+fn cold_block(f: &FunctionIr, b: usize) -> bool {
+    let exits = |k: usize| {
+        let block = &f.blocks[k];
+        matches!(block.terminator, Terminator::Return(_))
+            || block
+                .instructions
+                .iter()
+                .any(|i| matches!(&i.op, Op::Exit { owner, .. } if *owner == f.name))
+    };
+    let on_cycle = reaches(f, site::successors(&f.blocks[b].terminator), None, |k| {
+        k == b
+    });
+    b != 0 && !on_cycle && reaches(f, vec![0], Some(b), exits)
+}
+
+/// Whether a walk of `f`'s blocks from `from` that never enters `avoid`
+/// meets a block `stop` accepts.
+fn reaches(
+    f: &FunctionIr,
+    from: Vec<usize>,
+    avoid: Option<usize>,
+    stop: impl Fn(usize) -> bool,
+) -> bool {
+    let mut seen = vec![false; f.blocks.len()];
+    let mut work = from;
+    while let Some(k) = work.pop() {
+        if Some(k) == avoid || k >= f.blocks.len() || seen[k] {
+            continue;
+        }
+        seen[k] = true;
+        if stop(k) {
+            return true;
+        }
+        work.extend(site::successors(&f.blocks[k].terminator));
+    }
+    false
 }
 
 /// Partial inlining calls the callee again with the site's arguments, so

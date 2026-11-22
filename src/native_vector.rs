@@ -925,3 +925,321 @@ impl<M: Module> Codegen<'_, '_, M> {
         Ok(result)
     }
 }
+
+/// Vector temporaries in registers (#1500).
+///
+/// A vector is an aggregate in a stack slot, so every operation reads its
+/// operands from memory and writes its result to a fresh slot. The CLIF
+/// clean-up's mem2reg ([`crate::native_clif_opt::promote_slots`]) turns a
+/// slot into SSA values when each offset is accessed with one type, and
+/// two things kept vector slots from qualifying: an operation loads a chunk
+/// at the lane type (`i32x4`, `f32x4`) where a slice load stored bytes
+/// (`i8x16`), and an aggregate copy (a `let` of a vector, an argument or a
+/// result) moves the vector as 8-byte words. This pass, run on the
+/// optimized path just before the clean-up, fixes both on the slots that
+/// hold vectors: a copy's pair of word moves at a 16-byte boundary becomes
+/// one `i8x16` move, so does a pair of zero words, and every 128-bit access
+/// is made at `i8x16` with a register `bitcast` to the lane type. The
+/// clean-up then promotes the slot, and Cranelift spills a vector only
+/// where its register allocator decides to.
+pub(crate) fn registers(func: &mut ir::Function) {
+    // Fusing a copy into a vector slot can make the other end a vector
+    // slot, which may enable another copy: a short chain of `let`s.
+    for _ in 0..4 {
+        if !fuse_words(func) {
+            break;
+        }
+    }
+    retype_vector_accesses(func);
+}
+
+/// Stack-slot addresses: value -> (slot, offset), and the slots whose
+/// address is used other than as the base of a load or store.
+fn slot_addresses(
+    func: &ir::Function,
+) -> (
+    std::collections::HashMap<ir::Value, (ir::StackSlot, i64)>,
+    std::collections::HashSet<ir::StackSlot>,
+) {
+    use ir::{InstructionData as D, Opcode};
+    let mut addr = std::collections::HashMap::new();
+    let mut escaped = std::collections::HashSet::new();
+    let insts: Vec<ir::Inst> = func
+        .layout
+        .blocks()
+        .flat_map(|b| func.layout.block_insts(b))
+        .collect();
+    loop {
+        let before = addr.len();
+        for &inst in &insts {
+            match func.dfg.insts[inst] {
+                D::StackLoad {
+                    opcode: Opcode::StackAddr,
+                    stack_slot,
+                    offset,
+                } => {
+                    addr.insert(func.dfg.first_result(inst), (stack_slot, i64::from(offset)));
+                }
+                D::BinaryImm64 {
+                    opcode: Opcode::IaddImm,
+                    arg,
+                    imm,
+                } => {
+                    if let Some(&(slot, off)) = addr.get(&func.dfg.resolve_aliases(arg)) {
+                        addr.insert(
+                            func.dfg.first_result(inst),
+                            (slot, off.wrapping_add(imm.bits())),
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+        if addr.len() == before {
+            break;
+        }
+    }
+    for &inst in &insts {
+        match func.dfg.insts[inst] {
+            D::StackLoad {
+                opcode: Opcode::StackAddr,
+                ..
+            } => continue,
+            D::BinaryImm64 {
+                opcode: Opcode::IaddImm,
+                arg,
+                ..
+            } if addr.contains_key(&func.dfg.resolve_aliases(arg)) => continue,
+            D::StackLoad { stack_slot, .. } | D::StackStore { stack_slot, .. } => {
+                escaped.insert(stack_slot);
+                continue;
+            }
+            D::Load {
+                opcode: Opcode::Load,
+                ..
+            } => continue,
+            D::Store {
+                opcode: Opcode::Store,
+                args,
+                ..
+            } => {
+                // A slot address stored as a value escapes.
+                let value = func.dfg.resolve_aliases(args[0]);
+                if let Some(&(slot, _)) = addr.get(&value) {
+                    escaped.insert(slot);
+                }
+                continue;
+            }
+            _ => {}
+        }
+        for v in func.dfg.inst_values(inst) {
+            if let Some(&(slot, _)) = addr.get(&func.dfg.resolve_aliases(v)) {
+                escaped.insert(slot);
+            }
+        }
+    }
+    (addr, escaped)
+}
+
+/// A plain load or store: (base, offset, type, stored value).
+fn access(
+    func: &ir::Function,
+    inst: ir::Inst,
+) -> Option<(ir::Value, i64, ir::Type, Option<ir::Value>)> {
+    use ir::{InstructionData as D, Opcode};
+    match func.dfg.insts[inst] {
+        D::Load {
+            opcode: Opcode::Load,
+            arg,
+            offset,
+            ..
+        } => Some((
+            func.dfg.resolve_aliases(arg),
+            i64::from(i32::from(offset)),
+            func.dfg.value_type(func.dfg.first_result(inst)),
+            None,
+        )),
+        D::Store {
+            opcode: Opcode::Store,
+            args,
+            offset,
+            ..
+        } => {
+            let value = func.dfg.resolve_aliases(args[0]);
+            Some((
+                func.dfg.resolve_aliases(args[1]),
+                i64::from(i32::from(offset)),
+                func.dfg.value_type(value),
+                Some(value),
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn is_chunk(ty: ir::Type) -> bool {
+    ty.is_vector() && ty.bits() == 128
+}
+
+/// The slots accessed with a 128-bit vector at a 16-byte boundary.
+fn vector_slots(
+    func: &ir::Function,
+    addr: &std::collections::HashMap<ir::Value, (ir::StackSlot, i64)>,
+    escaped: &std::collections::HashSet<ir::StackSlot>,
+) -> std::collections::HashSet<ir::StackSlot> {
+    let mut out = std::collections::HashSet::new();
+    for block in func.layout.blocks() {
+        for inst in func.layout.block_insts(block) {
+            if let Some((base, offset, ty, _)) = access(func, inst)
+                && is_chunk(ty)
+                && let Some(&(slot, off)) = addr.get(&base)
+                && (off + offset) % 16 == 0
+                && !escaped.contains(&slot)
+            {
+                out.insert(slot);
+            }
+        }
+    }
+    out
+}
+
+/// Rewrites word pairs that move or zero 16 bytes of a vector slot into
+/// one `i8x16` access. Returns whether anything changed.
+fn fuse_words(func: &mut ir::Function) -> bool {
+    use cranelift_codegen::cursor::{Cursor, FuncCursor};
+    let (addr, escaped) = slot_addresses(func);
+    let vectors = vector_slots(func, &addr, &escaped);
+    if vectors.is_empty() {
+        return false;
+    }
+    // Uses of each value, to know a copied word has no other reader.
+    let mut uses: std::collections::HashMap<ir::Value, u32> = std::collections::HashMap::new();
+    for block in func.layout.blocks() {
+        for inst in func.layout.block_insts(block) {
+            for v in func.dfg.inst_values(inst) {
+                *uses.entry(func.dfg.resolve_aliases(v)).or_default() += 1;
+            }
+        }
+    }
+    // Whether `base + offset` is a 16-byte boundary of a vector slot, or
+    // (for the other end of a copy) not a slot this pass would pessimize.
+    let vector_at = |base: ir::Value, offset: i64| {
+        addr.get(&base)
+            .is_some_and(|&(slot, off)| vectors.contains(&slot) && (off + offset) % 16 == 0)
+    };
+    let other_ok = |base: ir::Value| {
+        addr.get(&base)
+            .is_none_or(|&(slot, _)| !escaped.contains(&slot))
+    };
+    let zero_word = |func: &ir::Function, v: ir::Value| {
+        matches!(
+            func.dfg.value_def(v).inst().map(|i| &func.dfg.insts[i]),
+            Some(ir::InstructionData::UnaryImm {
+                opcode: ir::Opcode::Iconst,
+                imm,
+            }) if imm.bits() == 0
+        )
+    };
+    let mut changed = false;
+    let blocks: Vec<ir::Block> = func.layout.blocks().collect();
+    for block in blocks {
+        let body: Vec<ir::Inst> = func.layout.block_insts(block).collect();
+        let mut i = 0;
+        while i + 1 < body.len() {
+            // Two zero words: `store 0, p+o; store 0, p+o+8`.
+            if let (Some((b0, o0, types::I64, Some(z0))), Some((b1, o1, types::I64, Some(z1)))) =
+                (access(func, body[i]), access(func, body[i + 1]))
+                && b0 == b1
+                && o1 == o0 + 8
+                && vector_at(b0, o0)
+                && zero_word(func, z0)
+                && zero_word(func, z1)
+            {
+                let mut pos = FuncCursor::new(func).at_inst(body[i]);
+                let zero = pos
+                    .func
+                    .dfg
+                    .constants
+                    .insert(ConstantData::from(vec![0u8; 16]));
+                let chunk = pos.ins().vconst(types::I8X16, zero);
+                pos.ins().store(little(), chunk, b0, o0 as i32);
+                pos.func.layout.remove_inst(body[i]);
+                pos.func.layout.remove_inst(body[i + 1]);
+                changed = true;
+                i += 2;
+                continue;
+            }
+            // A copy: `w0 = load p+o; store w0, q+r; w1 = load p+o+8;
+            // store w1, q+r+8`, each word read only by its store.
+            if i + 3 < body.len()
+                && let Some((src, so, types::I64, None)) = access(func, body[i])
+                && let Some((dst, d0, types::I64, Some(w0))) = access(func, body[i + 1])
+                && let Some((src1, so1, types::I64, None)) = access(func, body[i + 2])
+                && let Some((dst1, d1, types::I64, Some(w1))) = access(func, body[i + 3])
+                && src1 == src
+                && dst1 == dst
+                && so1 == so + 8
+                && d1 == d0 + 8
+                && w0 == func.dfg.first_result(body[i])
+                && w1 == func.dfg.first_result(body[i + 2])
+                && uses.get(&w0) == Some(&1)
+                && uses.get(&w1) == Some(&1)
+                && ((vector_at(src, so) && other_ok(dst)) || (vector_at(dst, d0) && other_ok(src)))
+            {
+                let mut pos = FuncCursor::new(func).at_inst(body[i]);
+                let chunk = pos.ins().load(types::I8X16, little(), src, so as i32);
+                pos.ins().store(little(), chunk, dst, d0 as i32);
+                for &inst in &body[i..i + 4] {
+                    pos.func.layout.remove_inst(inst);
+                }
+                changed = true;
+                i += 4;
+                continue;
+            }
+            i += 1;
+        }
+    }
+    changed
+}
+
+/// Every 128-bit access of a vector slot at `i8x16`, so each offset has one
+/// type; the lane type is a register `bitcast` away.
+fn retype_vector_accesses(func: &mut ir::Function) {
+    use cranelift_codegen::cursor::{Cursor, FuncCursor};
+    let (addr, escaped) = slot_addresses(func);
+    let vectors = vector_slots(func, &addr, &escaped);
+    if vectors.is_empty() {
+        return;
+    }
+    let blocks: Vec<ir::Block> = func.layout.blocks().collect();
+    for block in blocks {
+        let body: Vec<ir::Inst> = func.layout.block_insts(block).collect();
+        for inst in body {
+            let Some((base, offset, ty, value)) = access(func, inst) else {
+                continue;
+            };
+            if !is_chunk(ty)
+                || ty == types::I8X16
+                || !addr
+                    .get(&base)
+                    .is_some_and(|(slot, off)| vectors.contains(slot) && (off + offset) % 16 == 0)
+            {
+                continue;
+            }
+            let mut pos = FuncCursor::new(func).at_inst(inst);
+            match value {
+                None => {
+                    let raw = pos.ins().load(types::I8X16, little(), base, offset as i32);
+                    pos.func.dfg.replace(inst).bitcast(ty, little(), raw);
+                }
+                Some(v) => {
+                    let raw = pos.ins().bitcast(types::I8X16, little(), v);
+                    pos.func
+                        .dfg
+                        .replace(inst)
+                        .store(little(), raw, base, offset as i32);
+                }
+            }
+        }
+    }
+}

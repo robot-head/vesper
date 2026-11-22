@@ -10,27 +10,29 @@ use self::util::{
     put_text
 };
 
-const E_UNSUPPORTED_TARGET: u64 = 1;
-const E_UNRESOLVED_SYMBOL: u64 = 2;
-const E_DUPLICATE_SYMBOL: u64 = 3;
-const E_UNSUPPORTED_RELOCATION: u64 = 4;
-const E_UNSUPPORTED_SECTION: u64 = 5;
-const E_RELOCATION_OUT_OF_RANGE: u64 = 6;
-const E_IMAGE_TOO_LARGE: u64 = 7;
-const E_OBJECT: u64 = 8;
-const E_CODE_MISMATCH: u64 = 9;
+enum Code: _ {
+    UnsupportedTarget = 1,
+    UnresolvedSymbol = 2,
+    DuplicateSymbol = 3,
+    UnsupportedRelocation = 4,
+    UnsupportedSection = 5,
+    RelocationOutOfRange = 6,
+    ImageTooLarge = 7,
+    Object = 8,
+    CodeMismatch = 9,
+}
 
 // `FreestandingError::Object(msg)`.
 pub fn fail_object(inout err: ChunkSeq[u8], in msg: ChunkSeq[u8]) {
     err.clear();
-    push64(inout err, E_OBJECT);
+    push64(inout err, Code::Object);
     put_str(inout err, in msg.as_slice());
 }
 
 // `FreestandingError::Object` with a fixed message.
 pub fn fail_object_text(inout err: ChunkSeq[u8], in msg: Str) {
     err.clear();
-    push64(inout err, E_OBJECT);
+    push64(inout err, Code::Object);
     put_text(inout err, in msg);
 }
 
@@ -61,7 +63,7 @@ fn fail_two(inout err: ChunkSeq[u8], kind: u64, in a: Slice[u8], in b: Slice[u8]
 // `UnsupportedRelocation { object, r_type }`.
 pub fn fail_relocation(inout err: ChunkSeq[u8], in object: Slice[u8], r_type: u32) {
     err.clear();
-    push64(inout err, E_UNSUPPORTED_RELOCATION);
+    push64(inout err, Code::UnsupportedRelocation);
     put_str(inout err, in object);
     push64(inout err, widen_u64(r_type));
 }
@@ -74,7 +76,7 @@ pub fn fail_range(
     r_type: u32
 ) {
     err.clear();
-    push64(inout err, E_RELOCATION_OUT_OF_RANGE);
+    push64(inout err, Code::RelocationOutOfRange);
     put_str(inout err, in object);
     put_str(inout err, in symbol);
     push64(inout err, widen_u64(r_type));
@@ -83,7 +85,7 @@ pub fn fail_range(
 // `ImageTooLarge { needed, available }`.
 pub fn fail_too_large(inout err: ChunkSeq[u8], needed: u64, available: u64) {
     err.clear();
-    push64(inout err, E_IMAGE_TOO_LARGE);
+    push64(inout err, Code::ImageTooLarge);
     push64(inout err, needed);
     push64(inout err, available);
 }
@@ -91,7 +93,7 @@ pub fn fail_too_large(inout err: ChunkSeq[u8], needed: u64, available: u64) {
 // `UnsupportedTarget(msg)` as a whole result.
 pub fn error_target(in msg: Str) -> ChunkSeq[u8] {
     let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    push64(inout out, E_UNSUPPORTED_TARGET);
+    push64(inout out, Code::UnsupportedTarget);
     put_text(inout out, in msg);
     out
 }
@@ -105,20 +107,20 @@ pub fn error_object(in msg: Str) -> ChunkSeq[u8] {
 
 // `DuplicateSymbol(name)`.
 pub fn fail_duplicate(inout err: ChunkSeq[u8], in name: Slice[u8]) {
-    fail_one(inout err, E_DUPLICATE_SYMBOL, in name);
+    fail_one(inout err, Code::DuplicateSymbol, in name);
 }
 
 // `UnresolvedSymbol { symbol, object }`.
 pub fn fail_unresolved(inout err: ChunkSeq[u8], in symbol: Slice[u8], in object: Slice[u8]) {
-    fail_two(inout err, E_UNRESOLVED_SYMBOL, in symbol, in object);
+    fail_two(inout err, Code::UnresolvedSymbol, in symbol, in object);
 }
 
 // `UnsupportedSection { object, section }`.
 pub fn fail_section(inout err: ChunkSeq[u8], in object: Slice[u8], in section: Slice[u8]) {
-    fail_two(inout err, E_UNSUPPORTED_SECTION, in object, in section);
+    fail_two(inout err, Code::UnsupportedSection, in object, in section);
 }
 
 // `CodeMismatch { function }`.
 pub fn fail_mismatch(inout err: ChunkSeq[u8], in function: Slice[u8]) {
-    fail_one(inout err, E_CODE_MISMATCH, in function);
+    fail_one(inout err, Code::CodeMismatch, in function);
 }

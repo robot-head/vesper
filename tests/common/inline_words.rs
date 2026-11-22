@@ -845,6 +845,7 @@ pub const REASONS: &[&str] = &[
     "borrowed sequence argument is not a local place",
     "handled callee borrows a field place",
     "callee re-binds a borrowed parameter",
+    "sequence owner on a cold path",
 ];
 
 /// The first reason code of `Refusal::Site`.

@@ -11,6 +11,29 @@ use vesper_ffi::sys::{
 };
 use vesper_ffi::{FieldKind, WireLayout};
 
+/// The one field of a pinned buffer or a mapping: the sequence over its
+/// memory (`p.data`).
+pub(super) const BUFFER_FIELD: &str = "data";
+/// The generated pinned-buffer type (`linear struct Pinned[T] { data:
+/// ChunkSeq[T] }`), declared when an import takes one.
+pub(super) const PINNED_TYPE: &str = "Pinned";
+/// `Pinned[T]` as a source declaration.
+fn pinned_adt() -> Adt {
+    let parsed = crate::parser::parse("linear struct Pinned[T] { data: ChunkSeq[T] }");
+    debug_assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    parsed
+        .module
+        .items
+        .into_iter()
+        .find_map(|i| match i {
+            Item::Adt(mut a) => {
+                a.span = 0..0;
+                Some(a)
+            }
+            _ => None,
+        })
+        .expect("Pinned declaration")
+}
 /// Pass-1 placeholder of a slice parameter (not a source identifier).
 const OPEN: &str = "$open";
 /// Built-in source type names a generated declaration may not take.
@@ -147,6 +170,8 @@ pub(super) struct Generated {
     enums: BTreeMap<String, Adt>,
     /// Opaque extern-type handles by name.
     handles: BTreeMap<String, Adt>,
+    /// `Pinned[T]`, when an import takes a pinned buffer.
+    pinned: Option<Adt>,
     /// Library names, for demangling.
     libraries: Vec<String>,
     /// Per library: symbol -> shape.
@@ -190,6 +215,32 @@ fn struct_adt(layout: &WireLayout) -> Result<Adt, String> {
 /// whose one field (the C handle word) no source identifier can spell, so
 /// source code can neither build, read nor destructure it.
 fn handle_adt(t: &ExternTypeDescriptor) -> Adt {
+    if let Some(element) = t.mapping() {
+        // A mapping is viewed in place: its one field is a sequence over
+        // the foreign memory, which source code may read, write and view
+        // but never grow, shrink, move or free (`buffers::check`).
+        return Adt {
+            name: t.name().to_owned(),
+            mode: Mode::Linear,
+            generics: vec![],
+            variants: vec![Variant {
+                name: t.name().to_owned(),
+                fields: vec![Field {
+                    name: BUFFER_FIELD.into(),
+                    ty: Type::Named(
+                        crate::seq::CHUNK_SEQ_TYPE.into(),
+                        vec![Type::named(element.name())],
+                    ),
+                    modality: None,
+                    temperature: None,
+                }],
+                named: true,
+            }],
+            is_enum: false,
+            tile_width: None,
+            span: 0..0,
+        };
+    }
     Adt {
         name: t.name().to_owned(),
         mode: match t.linearity() {
@@ -229,6 +280,7 @@ impl Generated {
             structs: BTreeMap::new(),
             enums: BTreeMap::new(),
             handles: BTreeMap::new(),
+            pinned: None,
             libraries: imports.libraries.keys().cloned().collect(),
             shapes: BTreeMap::new(),
             invalid: false,
@@ -295,6 +347,15 @@ impl Generated {
                 }
                 g.handles.insert(t.name().to_owned(), adt);
             }
+        }
+        if imports.libraries.values().any(|i| {
+            i.descriptor.functions().iter().any(|f| {
+                f.parameters()
+                    .iter()
+                    .any(|p| matches!(p.ty(), ParameterType::Pinned { .. }))
+            })
+        }) {
+            g.pinned = Some(pinned_adt());
         }
         for (name, import) in &imports.libraries {
             let mut shapes = BTreeMap::new();
@@ -385,6 +446,16 @@ impl Generated {
                     },
                     ParamKind::Value(Type::named(handle.name())),
                 ),
+                ParameterType::Pinned { element, access } => (
+                    match access {
+                        Access::In => Pass::In,
+                        Access::Inout => Pass::Inout,
+                    },
+                    ParamKind::Value(Type::Named(
+                        PINNED_TYPE.into(),
+                        vec![Type::named(parameter_scalar(*element)?)],
+                    )),
+                ),
                 // A C string is the caller's bytes, copied and terminated.
                 ParameterType::CStr => (
                     Pass::In,
@@ -429,9 +500,24 @@ impl Generated {
             result: wrap_result(f, result),
         })
     }
-    /// Whether `name` is a generated extern-type handle.
+    /// Whether `name` is a generated extern-type handle (or mapping).
     pub fn is_handle(&self, name: &str) -> bool {
         self.handles.contains_key(name)
+    }
+    /// Whether any generated type holds foreign memory viewed in place.
+    pub fn has_buffers(&self) -> bool {
+        self.pinned.is_some() || self.handles.keys().any(|n| self.is_buffer(n))
+    }
+    /// Whether values of the source type `name` hold foreign memory viewed
+    /// in place: a mapping or `Pinned`.
+    pub fn is_buffer(&self, name: &str) -> bool {
+        (self.pinned.is_some() && name == PINNED_TYPE)
+            || self.handles.get(name).is_some_and(|a| {
+                a.variants
+                    .first()
+                    .and_then(|v| v.fields.first())
+                    .is_some_and(|f| f.name == BUFFER_FIELD)
+            })
     }
     pub fn shape(&self, library: &str, f: &FunctionDescriptor) -> Result<&OpShape, String> {
         match self.shapes.get(library).and_then(|s| s.get(f.symbol())) {
@@ -449,6 +535,9 @@ impl Generated {
             .collect();
         names.extend(self.enums.keys().cloned());
         names.extend(self.handles.keys().cloned());
+        if self.pinned.is_some() {
+            names.insert(PINNED_TYPE.into());
+        }
         if self.invalid {
             names.insert(INVALID_TYPE.into());
         }
@@ -505,7 +594,12 @@ impl Generated {
         for adt in self.structs.values().flatten() {
             module.items.push(Item::Adt(adt.clone()));
         }
-        for adt in self.enums.values().chain(self.handles.values()) {
+        for adt in self
+            .enums
+            .values()
+            .chain(self.handles.values())
+            .chain(&self.pinned)
+        {
             module.items.push(Item::Adt(adt.clone()));
         }
         if self.invalid {

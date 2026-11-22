@@ -106,3 +106,59 @@ pair takes one compare and one branch, gave the figures above.
 - `cargo +1.100.0 clippy` and `cargo fmt` are clean.
 - Stage 1 guard: no guarded path is touched, and the verified pipeline does
   not run the pass.
+
+## Part 2: count-down loops
+
+Bench's subset-sum step (`add_rank` in `crates/vesper-bench/vesper/src/util.ves`) is written as a count-down `loop`:
+
+```vesper
+let mut sum = inc(max_sum);
+loop {
+    if sum == 0 {
+        break;
+    }
+    sum = dec(sum);
+    ...
+}
+```
+
+Bounds hoisting used to take only the `for` lowering's index and bound slots as a counted loop, so this loop had no unchecked copy for the vectorizer to work on. It now does.
+
+### What changed
+
+- **`src/bounds_hoist.rs`:** `header` also takes a count-down header, `read s; 0; s == 0` leaving the loop when it holds, as `Header { down: true }`, with `s` as both the index and the bound. `counted_plan` accepts one when all of these hold:
+  - The loop writes `s` exactly once, with a plain `=` and no path.
+  - The written value is a read of `s` minus 1 (`-` or `wrapping_sub`), through the block parameters and once-bound locals that the inliner leaves.
+  - The read's block dominates the write's block, the read comes before the write in that block, and neither block can be reached from the write without passing the header.
+
+  Then `s` only goes down by one, from a value the header proved nonzero. So the decremented value, and every read of `s` after the decrement, holds an index of `0..s`, with `s` as it stood on entry. The guard checks that range: its start is the constant 0 and its end is a read of `s` in the preheader. The trip count is `s` when `s` is a constant. The plan's text says ` down=true`.
+- **`packages/vesper-bounds-hoist`:** `plans.ves` (`header`, `countdown_step`, `trip_count`, the plan text) and `pass.ves` (the guard's constant start) carry the same rule.
+  - `fun.ves` classes `==` as a binary operator.
+  - The decision words of a write now say whether it is compound (`encode.ves`, `fun.ves`, and `tests/self_host_bounds_hoist/words.rs`). Without that, `s -= x` would look like `s = x` to the port.
+- **`src/native_vectorize.rs`:** it takes a header that branches on `j == 0` to the exit, and a back edge that passes `j - 1`.
+  - "The next iteration" is `j + delta`.
+  - Counting down, the prologue needs `j0 >= 2`, and the lane loop goes on while `jv - 2 >= 2`.
+- **`tests/native_vectorize.rs`:** `count_down_loops_are_hoisted_and_vectorized` covers four cases:
+  - Bench's `add_rank` form, with its `inc`/`dec`/`cu`/`add` helpers inlined, for trip counts 1 to 151. Its CLIF must hold `i64x2`.
+  - 19 ranks in a row.
+  - A decrement after the accesses, which is left unversioned.
+  - A decrement by 2, also left unversioned.
+
+### Speed
+
+Bench's `add_rank` form, 199 ranks over 21,000 cells, 160 times, as standalone executables. Each figure is the minimum of 14 alternating runs:
+
+| Build | Time | vs before |
+| --- | --- | --- |
+| Before this change | 0.180 s | 1.00x |
+| Count-down hoisting, `VESPER_VECTORIZE=off` | 0.103 s | 1.75x |
+| Count-down hoisting and the vectorizer | 0.096 s | 1.88x |
+
+Most of the gain is hoisting. Here `main` inlines `add_rank`, and in the inlined copy the store reloads the sequence's data pointer on every iteration. That reload is not a `readonly` load, so the vectorizer leaves the inlined copy scalar. The non-inlined `add_rank` gets two lanes. Getting the inlined copy to two lanes needs the header hoisting of a local sequence's store receiver, which is the codegen thread's header-reload gap (#1426).
+
+### Validation
+
+- `self_host_bounds_hoist`: 0 of 28,036 steps differ over 3,213 functions. There were 291 counted plans, and Bench's `add_rank` is now one of them.
+- `self_host_bounds_hoist_pass` (`BOUNDS_HOIST_PASS_STRIDE=1`): 0 of 337 programs differ, and Rust versions 3,541 loops.
+- `self_host_bounds_hoist_jit` passes.
+- `native_vectorize`: 6 of 6 pass.

@@ -13,6 +13,7 @@
 // |     fn vesper_blake3_finalize(in h: Hasher, nocapture inout out: CSlice[u8]) -> ForeignVal[Unit];
 // |     fn vesper_blake3_free(sink h: Hasher) -> ForeignVal[Unit];
 // |     fn vesper_blake3_hash(nocapture in data: CSlice[u8], nocapture inout out: CSlice[u8]) -> ForeignVal[Unit];
+// |     fn vesper_blake3_derive_key_hash(nocapture in context: CSlice[u8], nocapture in data: CSlice[u8], nocapture inout out: CSlice[u8]) -> ForeignVal[u32];
 // | }
 //
 // The `.vsys` library above is @vesper-std/hash-sys's (`.vsys` imports are

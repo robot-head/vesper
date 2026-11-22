@@ -1,9 +1,6 @@
 // Byte helpers: total little-endian reads, appends and in-place writes, the
 // request reader, and the encodings of strings and errors in results.
 
-// "no such row" for u64 indices.
-const NONE64: u64 = 18446744073709551615;
-
 pub fn add(a: u64, b: u64) -> u64 {
     wrapping_add(a, b)
 }
