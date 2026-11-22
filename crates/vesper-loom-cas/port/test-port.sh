@@ -36,4 +36,5 @@ expect store "--test store" "corrupted_objects_are_rejected_reported_and_repaire
 expect fold --lib "test port::tests::name_fold_is_to_lowercase ... FAILED"
 expect fold "--test store" "ingest_rejects_nonportable_names ... FAILED"
 expect walk "--test store" "ingest_rejects_nonportable_names ... FAILED"
-echo "divergent loom-cas port detected (name, id, tree, drv, store, fold and walk each caught)"
+expect pack "--test transfer_acceptance" "complete_valid_hashes_do_not_authorize_duplicate_extra_missing_or_reordered_records ... FAILED"
+echo "divergent loom-cas port detected (name, id, tree, drv, store, fold, walk and pack each caught)"

@@ -5,6 +5,7 @@
 use std::hint::black_box;
 use std::time::Instant;
 
+use vesper_loom_cas::transfer::{TransferLimits, export_pack, import_pack};
 use vesper_loom_cas::{
     CopyStrategy, DerivationInputs, Domain, MaterializeOptions, Store, Tree, blob_id, validate_name,
 };
@@ -63,9 +64,18 @@ fn main() {
         strategy: CopyStrategy::CopyOnly,
         verify_reflinks: false,
     };
+    let limits = TransferLimits::default();
+    // Import admission charges ~640 KiB of metadata per object: one
+    // directory of 20 files fits the default limits.
+    let sub_tree = store
+        .ingest_dir(Domain::Source, src.join("dir0"))
+        .unwrap()
+        .id;
+    let pack = export_pack(&store, sub_tree, limits).unwrap();
     let mut fresh = 0u64;
     let mut workspace = 0u64;
-    let rows: [(&str, f64); 15] = [
+    let mut imported = 0u64;
+    let rows: [(&str, f64); 17] = [
         (
             "validate_name x1000",
             median(|| {
@@ -163,6 +173,20 @@ fn main() {
                 workspace += 1;
                 let dest = dir.join(format!("ws{workspace}"));
                 black_box(store.materialize(&src_tree, &dest, copy)).unwrap();
+            }),
+        ),
+        (
+            "export_pack 21 objects",
+            median(|| {
+                black_box(export_pack(&store, sub_tree, limits)).unwrap();
+            }),
+        ),
+        (
+            "import_pack 21 objects",
+            median(|| {
+                imported += 1;
+                let to = dir.join(format!("import{imported}"));
+                black_box(import_pack(&to, sub_tree, &pack, limits)).unwrap();
             }),
         ),
         (

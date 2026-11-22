@@ -17,10 +17,11 @@ use crate::port_fs::{self, Reader};
 use crate::store::{
     CopyStrategy, DerivationOutcome, Ingested, MaterializeOptions, MaterializeReport, StoreReport,
 };
+use crate::transfer::{TransferError, TransferLimits, TransferReport};
 use crate::tree::{MAX_TREE_DEPTH, Tree};
 
 /// The operations of `CasError::Io`, by the port's `OP_*` code.
-const OPS: [&str; 42] = [
+const OPS: [&str; 44] = [
     "create store root",
     "resolve store root",
     "create store directory",
@@ -63,6 +64,8 @@ const OPS: [&str; 42] = [
     "write",
     "create file",
     "open",
+    "inspect transfer object",
+    "read transfer object",
 ];
 
 /// `UnsupportedFileType` kinds, by the port's code.
@@ -140,11 +143,90 @@ fn domain_of(tag: u8) -> Domain {
 /// The reply's payload, or its error.
 fn reply(mut bytes: Vec<u8>) -> Result<Reply> {
     let code = bytes.pop().expect("a reply ends with its code");
-    let mut r = Reply { bytes, at: 0 };
+    let r = Reply { bytes, at: 0 };
     if code == 0 {
         return Ok(r);
     }
+    Err(cas_error(code, r))
+}
+
+/// The names of transfer limits and pack faults, by the port's `N_*` code.
+const TRANSFER_NAMES: [&str; 48] = [
+    "",
+    "work",
+    "metadata bytes",
+    "tree entries",
+    "payload bytes",
+    "payload capacity requests",
+    "pack bytes",
+    "pack capacity requests",
+    "object path",
+    "object scratch",
+    "object bytes",
+    "object work",
+    "depth",
+    "graph work",
+    "objects",
+    "graph metadata",
+    "tree bytes",
+    "tree name bytes",
+    "tree metadata",
+    "tree work",
+    "hash work",
+    "publication metadata",
+    "publication work",
+    "tree header",
+    "tree version",
+    "truncated tree entries",
+    "tree name length",
+    "truncated tree entry",
+    "tree trailing bytes",
+    "cyclic object closure",
+    "tree file size mismatch",
+    "source object grew while reading",
+    "source object shrank while reading",
+    "truncated record",
+    "object identity tags",
+    "missing child object",
+    "recorded file size",
+    "noncanonical closure order",
+    "truncated header",
+    "magic",
+    "version",
+    "empty closure",
+    "truncated records",
+    "duplicate object",
+    "noncanonical tree",
+    "trailing bytes",
+    "root is not last",
+    "unreachable records",
+];
+
+/// A transfer call's payload, or its `TransferError` (codes 30-34; a store
+/// error code is `TransferError::Cas`).
+fn transfer_reply(mut bytes: Vec<u8>) -> std::result::Result<Reply, TransferError> {
+    let code = bytes.pop().expect("a reply ends with its code");
+    let mut r = Reply { bytes, at: 0 };
     Err(match code {
+        0 => return Ok(r),
+        30 => TransferError::InvalidLimits(TRANSFER_NAMES[r.u8() as usize]),
+        31 => TransferError::Limit(TRANSFER_NAMES[r.u8() as usize]),
+        32 => TransferError::InvalidPack(TRANSFER_NAMES[r.u8() as usize]),
+        33 => TransferError::UnexpectedRoot {
+            expected: r.id(),
+            found: r.id(),
+        },
+        34 => TransferError::DigestMismatch {
+            expected: r.id(),
+            actual: r.id(),
+        },
+        code => TransferError::Cas(cas_error(code, r)),
+    })
+}
+
+/// The store error of the reply `r` with `code`.
+fn cas_error(code: u8, mut r: Reply) -> CasError {
+    match code {
         1 => {
             let op = OPS[r.u8() as usize];
             let path = r.path();
@@ -240,7 +322,7 @@ fn reply(mut bytes: Vec<u8>) -> Result<Reply> {
         },
         18 => CasError::PublishContention(r.id()),
         other => unreachable!("unknown store reply code {other}"),
-    })
+    }
 }
 
 /// Call the port with a fresh error list.
@@ -481,5 +563,67 @@ pub(crate) fn verify_all(root: &Path) -> Result<StoreReport> {
         verified_derivations,
         corrupt_derivations,
         stray_paths,
+    })
+}
+
+fn limit_words(l: TransferLimits) -> [u64; 6] {
+    [
+        l.max_pack_bytes as u64,
+        l.max_objects as u64,
+        l.max_depth as u64,
+        l.max_tree_entries as u64,
+        l.max_metadata_bytes as u64,
+        l.max_work as u64,
+    ]
+}
+
+/// `export_pack`.
+pub(crate) fn export_pack(
+    root: &Path,
+    id: &ObjectId,
+    limits: TransferLimits,
+) -> std::result::Result<Vec<u8>, TransferError> {
+    let [pack, objects, depth, entries, meta, work] = limit_words(limits);
+    port_fs::clear_errors();
+    let r = transfer_reply(binding::store_export_pack(
+        root_bytes(root),
+        &id_bytes(id),
+        pack,
+        objects,
+        depth,
+        entries,
+        meta,
+        work,
+    ))?;
+    Ok(r.rest())
+}
+
+/// `import_pack`.
+pub(crate) fn import_pack(
+    store_path: &Path,
+    expected: &ObjectId,
+    bytes: &[u8],
+    limits: TransferLimits,
+) -> std::result::Result<TransferReport, TransferError> {
+    let [pack, objects, depth, entries, meta, work] = limit_words(limits);
+    port_fs::clear_errors();
+    let mut r = transfer_reply(binding::store_import_pack(
+        root_bytes(store_path),
+        &id_bytes(expected),
+        bytes,
+        pack,
+        objects,
+        depth,
+        entries,
+        meta,
+        work,
+    ))?;
+    Ok(TransferReport {
+        root: r.id(),
+        objects: r.u64() as usize,
+        pack_bytes: r.u64() as usize,
+        payload_bytes: r.u64() as usize,
+        inserted: r.u64() as usize,
+        reused: r.u64() as usize,
     })
 }

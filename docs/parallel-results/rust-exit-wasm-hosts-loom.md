@@ -367,8 +367,25 @@ noise of Rust (0.9-1.8x and 1.1-1.25x). `materialize` swings 1.5-8x
 because the file system dominates. These still need ABBA runs on a
 quiet machine.
 
-Left for part 2d: the pack transfer module (`src/transfer`, about 870
-lines, including the exporter's bounded read).
+## Part 2d: closure packs
+
+`export_pack` and `import_pack` (`src/transfer`) run in Vesper too, along
+with the exporter's bounded no-follow read, the closure walks, the
+canonical-order and tree checks, and admission before the destination
+opens.
+
+* The Rust budget charges what its vectors ask for, so the port tracks
+  the capacities those vectors would have as numbers. It charges Rust's
+  record sizes (72, 112 and 16 bytes), which Rust unit tests pin
+  (`port_sizes_export`, `port_sizes_import`).
+* Every `TransferError` comes back exactly, with its limit or fault name.
+  Store errors become `TransferError::Cas`.
+* The transfer suites (acceptance 15, export 10, import 14) pass against
+  the port. `port/test-port.sh` also catches an import that accepts any
+  closure order (`pack`).
+
+Rough timings: exporting a 21-object closure is ~1.1x Rust. Import is
+dominated by the durable store's syncs and varies 1.3-2.3x between runs.
 
 ## Flip verdicts
 
@@ -377,6 +394,7 @@ lines, including the exporter's bounded read).
 | `vesper-loom-cas` (codecs) | 0 diffs | not run (1.2-3.5x rough) | 0 | part 2a |
 | `vesper-loom-cas` (store, 12 calls) | crate suites pass | not run (~1.0-1.1x small, 1.8x 1 MiB read) | 0 | part 2b |
 | `vesper-loom-cas` (ingest, materialize, verify_all) | crate suites pass; fold = `to_lowercase` on every char | not run (file-system bound, noisy) | 0 | part 2c |
+| `vesper-loom-cas` (transfer) | transfer suites pass | not run (export ~1.1x; import sync-bound) | 0 | part 2d |
 
 ## Coordination asks
 
@@ -388,8 +406,10 @@ lines, including the exporter's bounded read).
 
 ## What is left
 
-* Part 2d: the transfer module, then a speed pass on the codecs
-  to the 1.5x bar and the loom-cas flip.
+* A speed pass on the codecs (1.2-3.5x) and the 1 MiB read to the 1.5x
+  bar, ABBA runs, then the loom-cas flip (the compiler moves to a seed
+  copy, which needs the codegen-verified and loom-trust type sharing
+  settled).
 * Moving `CasFs` onto `@vesper-std/fs` once lane 13 has no-follow opens,
   no-replace renames, modes, locks and reflinks.
 * Then admission, tuf, and the Wasmtime crates once gap 1 is closed.

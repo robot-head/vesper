@@ -520,3 +520,71 @@ pub fn store_verify_all(in root: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[CasFs], Ffi
     };
     r
 }
+
+// `export_pack` of the closure of `root_id` from the store at `root`
+// under the limits (pack bytes, objects, depth, tree entries, metadata
+// bytes, work): the pack bytes.
+pub fn store_export_pack(
+    in root: Slice[u8],
+    in root_id: Slice[u8],
+    pack: u64,
+    objects: u64,
+    depth: u64,
+    entries: u64,
+    meta: u64,
+    work: u64
+) -> ChunkSeq[u8] eff [Ffi[CasFs], Ffi[Blake3]] {
+    let mut r = reply_of(0);
+    handle Fail[StoreErr] in {
+        self::store::export_pack(
+            inout r,
+            in root,
+            in root_id,
+            pack,
+            objects,
+            depth,
+            entries,
+            meta,
+            work
+        );
+    } with {
+        return v => v,
+        raise(_e, _k) => {},
+    };
+    r
+}
+
+// `import_pack` of `bytes` (whose root must be `expected`) into the store
+// at `store_path`, under the limits as for `store_export_pack`: the
+// `TransferReport`.
+pub fn store_import_pack(
+    in store_path: Slice[u8],
+    in expected: Slice[u8],
+    in bytes: Slice[u8],
+    pack: u64,
+    objects: u64,
+    depth: u64,
+    entries: u64,
+    meta: u64,
+    work: u64
+) -> ChunkSeq[u8] eff [Ffi[CasFs], Ffi[Blake3]] {
+    let mut r = reply_of(0);
+    handle Fail[StoreErr] in {
+        self::store::import_pack(
+            inout r,
+            in store_path,
+            in expected,
+            in bytes,
+            pack,
+            objects,
+            depth,
+            entries,
+            meta,
+            work
+        );
+    } with {
+        return v => v,
+        raise(_e, _k) => {},
+    };
+    r
+}

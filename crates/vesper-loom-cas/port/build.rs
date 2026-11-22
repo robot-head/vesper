@@ -49,4 +49,6 @@ const DIVERGENT_EDITS: &[(&str, &str, &str)] = &[
     ("fold", "encode(inout out, 962);", "encode(inout out, 963);"),
     // store.ves: ingesting a directory skips the case-collision check.
     ("walk", "if prev != 0 {", "if prev == 0 && prev != 0 {"),
+    // store.ves: an import accepts records in any closure order.
+    ("pack", "    if index != next {", "    if index != next && index == next {"),
 ];

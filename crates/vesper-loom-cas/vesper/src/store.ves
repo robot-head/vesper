@@ -1845,7 +1845,9 @@ fn put_core_bytes(
     durable: bool,
     domain: u8,
     kind: u8,
-    in bytes: Slice[u8]
+    in bytes: Slice[u8],
+    has_expected: bool,
+    in expected: Slice[u8]
 ) eff [Ffi[CasFs], Ffi[Blake3], Fail[StoreErr]] {
     let mut path: ChunkSeq[u8] = ChunkSeq::new[u8]();
     let mut f = new_staging(inout r, in root, inout path);
@@ -1871,8 +1873,8 @@ fn put_core_bytes(
         bytes.len(),
         op,
         err,
-        false,
-        in "".as_bytes()
+        has_expected,
+        in expected
     );
 }
 
@@ -2209,7 +2211,16 @@ fn ingest_at(
         in ssizes.as_slice()
     );
     check_children(inout r, in root, domain, in enc.as_slice());
-    put_core_bytes(inout r, in root, durable, domain, 2, in enc.as_slice());
+    put_core_bytes(
+        inout r,
+        in root,
+        durable,
+        domain,
+        2,
+        in enc.as_slice(),
+        false,
+        in "".as_bytes()
+    );
 }
 
 // Whether the tree encoding `enc` decodes (`Tree::decode`), the case
@@ -2944,5 +2955,1102 @@ pub fn verify_all(inout r: ChunkSeq[u8], in root: Slice[u8]) eff [
     rep_u64(inout r, verified_drv);
     rep_paths(inout r, in bad.as_slice(), in bad_ends.as_slice());
     rep_paths(inout r, in stray.as_slice(), in stray_ends.as_slice());
+    r.push(0);
+}
+
+// ---------------------------------------------------------------------------
+// Closure packs (src/transfer): `export_pack` and `import_pack`, with the
+// same logical budget as the Rust build. The budget charges what the Rust
+// code asks its vectors for, so the vector capacities it would have are
+// tracked here as numbers, and record sizes are Rust's `size_of` values
+// (checked by the Rust tests `port_sizes_*`).
+
+// `TransferError` replies (the error's code, the last byte); a store error
+// keeps its own code and the wrapper makes it `TransferError::Cas`.
+const X_INVALID_LIMITS: u8 = 30;
+const X_LIMIT: u8 = 31;
+const X_INVALID_PACK: u8 = 32;
+const X_UNEXPECTED_ROOT: u8 = 33;
+const X_DIGEST_MISMATCH: u8 = 34;
+
+// The names of limits and pack faults, by their position in the wrapper's
+// `TRANSFER_NAMES`.
+const N_WORK: u8 = 1;
+const N_METADATA_BYTES: u8 = 2;
+const N_TREE_ENTRIES: u8 = 3;
+const N_PAYLOAD_BYTES: u8 = 4;
+const N_PAYLOAD_CAPACITY: u8 = 5;
+const N_PACK_BYTES: u8 = 6;
+const N_PACK_CAPACITY: u8 = 7;
+const N_OBJECT_PATH: u8 = 8;
+const N_OBJECT_SCRATCH: u8 = 9;
+const N_OBJECT_BYTES: u8 = 10;
+const N_OBJECT_WORK: u8 = 11;
+const N_DEPTH: u8 = 12;
+const N_GRAPH_WORK: u8 = 13;
+const N_OBJECTS: u8 = 14;
+const N_GRAPH_METADATA: u8 = 15;
+const N_TREE_BYTES: u8 = 16;
+const N_TREE_NAME_BYTES: u8 = 17;
+const N_TREE_METADATA: u8 = 18;
+const N_TREE_WORK: u8 = 19;
+const N_HASH_WORK: u8 = 20;
+const N_PUBLICATION_METADATA: u8 = 21;
+const N_PUBLICATION_WORK: u8 = 22;
+const N_TREE_HEADER: u8 = 23;
+const N_TREE_VERSION: u8 = 24;
+const N_TRUNCATED_TREE_ENTRIES: u8 = 25;
+const N_TREE_NAME_LENGTH: u8 = 26;
+const N_TRUNCATED_TREE_ENTRY: u8 = 27;
+const N_TREE_TRAILING_BYTES: u8 = 28;
+const N_CYCLIC: u8 = 29;
+const N_TREE_FILE_SIZE: u8 = 30;
+const N_SOURCE_GREW: u8 = 31;
+const N_SOURCE_SHRANK: u8 = 32;
+const N_TRUNCATED_RECORD: u8 = 33;
+const N_IDENTITY_TAGS: u8 = 34;
+const N_MISSING_CHILD: u8 = 35;
+const N_RECORDED_FILE_SIZE: u8 = 36;
+const N_NONCANONICAL_ORDER: u8 = 37;
+const N_TRUNCATED_HEADER: u8 = 38;
+const N_MAGIC: u8 = 39;
+const N_VERSION: u8 = 40;
+const N_EMPTY_CLOSURE: u8 = 41;
+const N_TRUNCATED_RECORDS: u8 = 42;
+const N_DUPLICATE_OBJECT: u8 = 43;
+const N_NONCANONICAL_TREE: u8 = 44;
+const N_TRAILING_BYTES: u8 = 45;
+const N_ROOT_NOT_LAST: u8 = 46;
+const N_UNREACHABLE: u8 = 47;
+
+const OP_INSPECT_TRANSFER: u8 = 42;
+const OP_READ_TRANSFER: u8 = 43;
+
+const PACK_HEADER_BYTES: u64 = 54;
+const PACK_RECORD_BYTES: u64 = 42;
+const HARD_MAX_PACK_BYTES: u64 = 268435456;
+
+// `size_of` of the Rust records the budget charges for.
+const EXPORT_RECORD_SIZE: u64 = 72;
+const IMPORT_RECORD_SIZE: u64 = 112;
+const VISIT_SIZE: u64 = 16;
+
+// The budget's words: the six limits, then what has been charged.
+const L_PACK: u64 = 0;
+const L_OBJECTS: u64 = 1;
+const L_DEPTH: u64 = 2;
+const L_ENTRIES: u64 = 3;
+const L_METADATA: u64 = 4;
+const L_WORK: u64 = 5;
+const B_WORK: u64 = 6;
+const B_METADATA: u64 = 7;
+const B_PAYLOAD: u64 = 8;
+const B_PACK: u64 = 9;
+const B_ENTRIES: u64 = 10;
+
+fn fail_named(inout r: ChunkSeq[u8], code: u8, name: u8) eff [Fail[StoreErr]] {
+    begin(inout r);
+    r.push(name);
+    raise_code(inout r, code);
+}
+
+fn fail_limit(inout r: ChunkSeq[u8], name: u8) eff [Fail[StoreErr]] {
+    fail_named(inout r, X_LIMIT, name);
+}
+
+fn fail_pack(inout r: ChunkSeq[u8], name: u8) eff [Fail[StoreErr]] {
+    fail_named(inout r, X_INVALID_PACK, name);
+}
+
+// Checked arithmetic (`add` and `mul`): an overflow is `Limit(name)`.
+fn t_add(inout r: ChunkSeq[u8], a: u64, b: u64, name: u8) -> u64 eff [Fail[StoreErr]] {
+    let s = wrapping_add(a, b);
+    if s < a {
+        fail_limit(inout r, name);
+    }
+    s
+}
+
+fn mul_overflows(a: u64, b: u64) -> bool {
+    if a == 0 || b == 0 {
+        return false;
+    }
+    // a * b fits exactly when dividing back by `a` (not 0 here) gives `b`.
+    wrapping_mul(a, b) / a != b
+}
+
+fn t_mul(inout r: ChunkSeq[u8], a: u64, b: u64, name: u8) -> u64 eff [Fail[StoreErr]] {
+    if mul_overflows(a, b) {
+        fail_limit(inout r, name);
+    }
+    wrapping_mul(a, b)
+}
+
+fn lim(in b: Slice[u64], i: u64) -> u64 {
+    word(in b, i)
+}
+
+// `charge`: add `amount` to the budget word `used`, at most `limit`. 0, or
+// the limit's name when it is exceeded.
+fn try_charge(inout b: ChunkSeq[u64], used: u64, amount: u64, limit: u64, name: u8) -> u8 {
+    let now = word(in b.as_slice(), used);
+    let next = wrapping_add(now, amount);
+    if next < now || next > limit {
+        return name;
+    }
+    b.try_set(used, next);
+    0
+}
+
+fn try_work(inout b: ChunkSeq[u64], amount: u64) -> u8 {
+    let limit = lim(in b.as_slice(), L_WORK);
+    try_charge(inout b, B_WORK, amount, limit, N_WORK)
+}
+
+fn try_metadata(inout b: ChunkSeq[u64], amount: u64) -> u8 {
+    let limit = lim(in b.as_slice(), L_METADATA);
+    try_charge(inout b, B_METADATA, amount, limit, N_METADATA_BYTES)
+}
+
+fn checked(inout r: ChunkSeq[u8], status: u8) eff [Fail[StoreErr]] {
+    if status != 0 {
+        fail_limit(inout r, status);
+    }
+}
+
+fn work(inout r: ChunkSeq[u8], inout b: ChunkSeq[u64], amount: u64) eff [Fail[StoreErr]] {
+    checked(inout r, try_work(inout b, amount));
+}
+
+fn metadata(inout r: ChunkSeq[u8], inout b: ChunkSeq[u64], amount: u64) eff [Fail[StoreErr]] {
+    checked(inout r, try_metadata(inout b, amount));
+}
+
+fn charge_entries(inout r: ChunkSeq[u8], inout b: ChunkSeq[u64], amount: u64) eff [Fail[StoreErr]] {
+    let limit = lim(in b.as_slice(), L_ENTRIES);
+    checked(inout r, try_charge(inout b, B_ENTRIES, amount, limit, N_TREE_ENTRIES));
+}
+
+// `reserve_metadata` of `additional` elements of `size` bytes for a vector
+// of `len` elements with capacity `cap` (updated as `try_reserve_exact`).
+fn reserve_metadata(
+    inout r: ChunkSeq[u8],
+    inout b: ChunkSeq[u64],
+    len: u64,
+    inout cap: u64,
+    additional: u64,
+    size: u64
+) eff [Fail[StoreErr]] {
+    let target = t_add(inout r, len, additional, N_METADATA_BYTES);
+    if target <= cap {
+        return;
+    }
+    let bytes = t_mul(inout r, target, size, N_METADATA_BYTES);
+    metadata(inout r, inout b, bytes);
+    work(inout r, inout b, bytes);
+    cap = target;
+}
+
+// `reserve_payload` (`pack` false) or `reserve_pack` of `additional` bytes
+// for an empty vector: 0, or the failed limit's name.
+fn try_reserve_bytes(inout b: ChunkSeq[u64], additional: u64, pack: bool) -> u8 {
+    let max = lim(in b.as_slice(), L_PACK);
+    if additional > max {
+        if pack {
+            return N_PACK_BYTES;
+        }
+        return N_PAYLOAD_BYTES;
+    }
+    if additional == 0 {
+        return 0;
+    }
+    let status = if pack {
+        try_charge(inout b, B_PACK, additional, max, N_PACK_CAPACITY)
+    } else {
+        try_charge(inout b, B_PAYLOAD, additional, max, N_PAYLOAD_CAPACITY)
+    };
+    if status != 0 {
+        return status;
+    }
+    try_work(inout b, additional)
+}
+
+// `Budget::new`: the budget words, after `TransferLimits::validate`.
+fn new_budget(
+    inout r: ChunkSeq[u8],
+    pack: u64,
+    objects: u64,
+    depth: u64,
+    entries: u64,
+    meta: u64,
+    max_work: u64
+) -> ChunkSeq[u64] eff [Fail[StoreErr]] {
+    if pack == 0 || pack > HARD_MAX_PACK_BYTES {
+        fail_named(inout r, X_INVALID_LIMITS, N_PACK_BYTES);
+    }
+    if objects == 0 || objects > 16384 {
+        fail_named(inout r, X_INVALID_LIMITS, N_OBJECTS);
+    }
+    if depth == 0 || depth > 128 {
+        fail_named(inout r, X_INVALID_LIMITS, N_DEPTH);
+    }
+    if entries == 0 || entries > 65536 {
+        fail_named(inout r, X_INVALID_LIMITS, N_TREE_ENTRIES);
+    }
+    if meta == 0 || meta > 67108864 {
+        fail_named(inout r, X_INVALID_LIMITS, N_METADATA_BYTES);
+    }
+    if max_work == 0 || max_work > 2147483648 {
+        fail_named(inout r, X_INVALID_LIMITS, N_WORK);
+    }
+    let mut b: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](11);
+    b.push(pack);
+    b.push(objects);
+    b.push(depth);
+    b.push(entries);
+    b.push(meta);
+    b.push(max_work);
+    b.resize(11, 0);
+    b
+}
+
+fn read_u16_at(in s: Slice[u8], at: u64) -> u64 {
+    match s.try_read_u16_le(at) {
+        Option::Some(v) => widen_u64(v),
+        Option::None => 0,
+    }
+}
+
+fn read_u32_at(in s: Slice[u8], at: u64) -> u64 {
+    match s.try_read_u32_le(at) {
+        Option::Some(v) => widen_u64(v),
+        Option::None => 0,
+    }
+}
+
+fn bit_length(n: u64) -> u64 {
+    let mut bits: u64 = 0;
+    let mut v = n;
+    loop {
+        if v == 0 {
+            return bits;
+        }
+        v = v >> 1;
+        bits = wrapping_add(bits, 1);
+    }
+}
+
+// `decode_tree`: the prepaid checks, then the strict decoder.
+fn transfer_decode_tree(
+    inout r: ChunkSeq[u8],
+    inout b: ChunkSeq[u64],
+    domain: u8,
+    in bytes: Slice[u8]
+) eff [Fail[StoreErr]] {
+    let len = bytes.len();
+    work(inout r, inout b, len);
+    if len < 16
+        || byte(in bytes, 0) != 86
+        || byte(in bytes, 1) != 76
+        || byte(in bytes, 2) != 84
+        || byte(in bytes, 3) != 82 {
+        fail_pack(inout r, N_TREE_HEADER);
+    }
+    if read_u32_at(in bytes, 4) != 1 {
+        fail_pack(inout r, N_TREE_VERSION);
+    }
+    let count = read_word(in bytes, 8);
+    charge_entries(inout r, inout b, count);
+    if count > wrapping_sub(len, 16) / 44 {
+        fail_pack(inout r, N_TRUNCATED_TREE_ENTRIES);
+    }
+    let mut pos: u64 = 16;
+    let mut names: u64 = 0;
+    let mut k: u64 = 0;
+    loop {
+        if k >= count {
+            break;
+        }
+        let length_end = t_add(inout r, pos, 2, N_TREE_BYTES);
+        if length_end > len {
+            fail_pack(inout r, N_TREE_NAME_LENGTH);
+        }
+        let length = read_u16_at(in bytes, pos);
+        if length == 0 || length > 255 {
+            fail_pack(inout r, N_TREE_NAME_LENGTH);
+        }
+        names = t_add(inout r, names, length, N_TREE_NAME_BYTES);
+        let step = t_add(inout r, length, 41, N_TREE_BYTES);
+        pos = t_add(inout r, length_end, step, N_TREE_BYTES);
+        if pos > len {
+            fail_pack(inout r, N_TRUNCATED_TREE_ENTRY);
+        }
+        k = wrapping_add(k, 1);
+    }
+    if pos != len {
+        fail_pack(inout r, N_TREE_TRAILING_BYTES);
+    }
+    let per = t_mul(inout r, count, 64, N_TREE_METADATA);
+    let encode0 = t_add(inout r, 16, per, N_TREE_METADATA);
+    let encode = t_add(inout r, encode0, len, N_TREE_METADATA);
+    let nodes = t_mul(inout r, count, 2048, N_TREE_METADATA);
+    let name_bytes = t_mul(inout r, names, 32, N_TREE_METADATA);
+    let encodes = t_mul(inout r, encode, 16, N_TREE_METADATA);
+    let partial = t_add(inout r, nodes, name_bytes, N_TREE_METADATA);
+    let meta = t_add(inout r, partial, encodes, N_TREE_METADATA);
+    metadata(inout r, inout b, meta);
+    let levels = wrapping_add(bit_length(count), 1);
+    let per_level = t_mul(inout r, count, levels, N_TREE_WORK);
+    let comparisons = t_mul(inout r, per_level, 16320, N_TREE_WORK);
+    let total = t_add(inout r, comparisons, meta, N_TREE_WORK);
+    work(inout r, inout b, total);
+    if !tree_ok(in bytes) {
+        begin(inout r);
+        r.push(T_UNDECODABLE);
+        r.push(domain);
+        rep_bytes(inout r, in bytes);
+        raise_code(inout r, E_INVALID_TREE);
+    }
+}
+
+// The position of the 34-byte `id` in `ids`, or `ids.len() / 34`.
+fn id_position(in ids: Slice[u8], in id: Slice[u8]) -> u64 {
+    let n = ids.len() / ID_BYTES;
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            return n;
+        }
+        let at = wrapping_mul(i, ID_BYTES);
+        if same(in ids[at..wrapping_add(at, ID_BYTES)], in id) {
+            return i;
+        }
+        i = wrapping_add(i, 1);
+    }
+}
+
+// `grow`: the explicit geometric request for a vector of `len` elements
+// of `size` bytes with capacity `cap`, at most `max` elements.
+fn grow(
+    inout r: ChunkSeq[u8],
+    inout b: ChunkSeq[u64],
+    len: u64,
+    inout cap: u64,
+    max: u64,
+    size: u64
+) eff [Fail[StoreErr]] {
+    if len < cap {
+        return;
+    }
+    let mut target: u64 = 0;
+    if cap == 0 {
+        target = if max < 4 {
+            max
+        } else {
+            4
+        };
+    } else {
+        target = t_mul(inout r, cap, 2, N_GRAPH_METADATA);
+        if target > max {
+            target = max;
+        }
+    }
+    if target <= len {
+        fail_limit(inout r, N_GRAPH_METADATA);
+    }
+    reserve_metadata(inout r, inout b, len, inout cap, wrapping_sub(target, len), size);
+}
+
+// `read_verified_bounded`: the verified bytes of the stored `id` (at most
+// `max_bytes`), read and hashed from one no-follow handle.
+fn read_bounded(
+    inout r: ChunkSeq[u8],
+    inout b: ChunkSeq[u64],
+    in root: Slice[u8],
+    in id: Slice[u8],
+    max_bytes: u64
+) -> ChunkSeq[u8] eff [Ffi[CasFs], Ffi[Blake3], Fail[StoreErr]] {
+    let path_bytes = t_add(inout r, root.len(), 256, N_OBJECT_PATH);
+    let paths = t_mul(inout r, path_bytes, 16, N_OBJECT_SCRATCH);
+    let scratch = t_add(inout r, 65536, paths, N_OBJECT_SCRATCH);
+    metadata(inout r, inout b, scratch);
+    work(inout r, inout b, scratch);
+    let path = object_path(in root, in id);
+    let mut f = open_object_or_fail(inout r, in id, in path.as_slice());
+    let mut err: u64 = 0;
+    let length = CasFs::cfs_file_len(in f, inout err);
+    // What stopped the read: 0 nothing, else the failure to raise after the
+    // handle is closed.
+    let mut failure: u8 = 0;
+    let mut failed_name: u8 = 0;
+    let mut bytes: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut h = object_hasher(byte(in id, 0), byte(in id, 1));
+    if err != 0 {
+        failure = 1;
+    } else if length > max_bytes {
+        failure = 2;
+        failed_name = N_OBJECT_BYTES;
+    } else {
+        failed_name = try_reserve_bytes(inout b, length, false);
+        if failed_name != 0 {
+            failure = 2;
+        }
+    }
+    if failure == 0 {
+        bytes = ChunkSeq::with_capacity[u8](length);
+        let mut buf = zeros(BUF);
+        loop {
+            let remaining = wrapping_sub(length, bytes.len());
+            let request = if remaining >= BUF {
+                BUF
+            } else {
+                wrapping_add(remaining, 1)
+            };
+            if mul_overflows(request, 3) {
+                failure = 2;
+                failed_name = N_OBJECT_WORK;
+                break;
+            }
+            failed_name = try_work(inout b, wrapping_add(wrapping_mul(request, 3), 1));
+            if failed_name != 0 {
+                failure = 2;
+                break;
+            }
+            let n = CasFs::cfs_read(inout f, inout buf[0..request], inout err);
+            if err != 0 {
+                failure = 3;
+                break;
+            }
+            if n == 0 {
+                break;
+            }
+            if n > remaining {
+                failure = 4;
+                break;
+            }
+            bytes.extend(in buf[0..n]);
+            update(inout h, in buf[0..n]);
+        }
+    }
+    CasFs::cfs_close(f);
+    let actual = finish_id(byte(in id, 0), byte(in id, 1), h);
+    if failure == 1 {
+        fail_io(inout r, OP_INSPECT_TRANSFER, in path.as_slice(), err);
+    }
+    if failure == 2 {
+        fail_limit(inout r, failed_name);
+    }
+    if failure == 3 {
+        fail_io(inout r, OP_READ_TRANSFER, in path.as_slice(), err);
+    }
+    if failure == 4 {
+        fail_pack(inout r, N_SOURCE_GREW);
+    }
+    if bytes.len() != length {
+        fail_pack(inout r, N_SOURCE_SHRANK);
+    }
+    if !same(in actual.as_slice(), in id) {
+        begin(inout r);
+        r.extend(in id);
+        r.extend(in actual.as_slice());
+        raise_code(inout r, X_DIGEST_MISMATCH);
+    }
+    bytes
+}
+
+// The exporter's records: their ids (34 bytes each), payloads (each ending
+// at its `ends` word) and heights.
+fn export_visit(
+    inout r: ChunkSeq[u8],
+    inout b: ChunkSeq[u64],
+    in root: Slice[u8],
+    in id: Slice[u8],
+    depth: u64,
+    inout ids: ChunkSeq[u8],
+    inout data: ChunkSeq[u8],
+    inout ends: ChunkSeq[u64],
+    inout heights: ChunkSeq[u64],
+    inout records_cap: u64,
+    inout active: ChunkSeq[u8],
+    inout active_cap: u64,
+    inout pack_bytes: u64
+) -> u64 eff [Ffi[CasFs], Ffi[Blake3], Fail[StoreErr]] {
+    work(inout r, inout b, 1);
+    let max_depth = lim(in b.as_slice(), L_DEPTH);
+    if depth > max_depth {
+        fail_limit(inout r, N_DEPTH);
+    }
+    let records = heights.len();
+    let scan_work = t_mul(inout r, records, 34, N_GRAPH_WORK);
+    work(inout r, inout b, scan_work);
+    let found = id_position(in ids.as_slice(), in id);
+    if found < records {
+        let height = word(in heights.as_slice(), found);
+        let deepest = t_add(inout r, depth, wrapping_sub(height, 1), N_DEPTH);
+        if deepest > max_depth {
+            fail_limit(inout r, N_DEPTH);
+        }
+        return found;
+    }
+    let open = active.len() / ID_BYTES;
+    let active_work = t_mul(inout r, open, 34, N_GRAPH_WORK);
+    work(inout r, inout b, active_work);
+    if id_position(in active.as_slice(), in id) < open {
+        fail_pack(inout r, N_CYCLIC);
+    }
+    if t_add(inout r, records, open, N_OBJECTS) >= lim(in b.as_slice(), L_OBJECTS) {
+        fail_limit(inout r, N_OBJECTS);
+    }
+    grow(inout r, inout b, open, inout active_cap, max_depth, ID_BYTES);
+    active.extend(in id);
+    let base = t_add(inout r, pack_bytes, PACK_RECORD_BYTES, N_PACK_BYTES);
+    let max_pack = lim(in b.as_slice(), L_PACK);
+    if base > max_pack {
+        fail_limit(inout r, N_PACK_BYTES);
+    }
+    let payload = read_bounded(inout r, inout b, in root, in id, wrapping_sub(max_pack, base));
+    pack_bytes = t_add(inout r, base, payload.len(), N_PACK_BYTES);
+    let mut height: u64 = 1;
+    if byte(in id, 1) == 2 {
+        transfer_decode_tree(inout r, inout b, byte(in id, 0), in payload.as_slice());
+        let scan = tree_scan(in payload.as_slice());
+        let entries = wrapping_sub(scan.len(), 3) / 5;
+        let mut i: u64 = 0;
+        loop {
+            if i >= entries {
+                break;
+            }
+            work(inout r, inout b, 64);
+            let w = wrapping_mul(i, 5);
+            let at = word(in scan.as_slice(), w);
+            let nlen = word(in scan.as_slice(), wrapping_add(w, 1));
+            let tag = word(in scan.as_slice(), wrapping_add(w, 2));
+            let size = word(in scan.as_slice(), wrapping_add(w, 3));
+            let d = wrapping_add(wrapping_add(at, nlen), 1);
+            let mut child = ChunkSeq::with_capacity[u8](ID_BYTES);
+            child.push(byte(in id, 0));
+            if tag == 3 {
+                child.push(2);
+            } else {
+                child.push(1);
+            }
+            child.extend(in payload[d..wrapping_add(d, 32)]);
+            let next_depth = t_add(inout r, depth, 1, N_DEPTH);
+            let index = export_visit(
+                inout r,
+                inout b,
+                in root,
+                in child.as_slice(),
+                next_depth,
+                inout ids,
+                inout data,
+                inout ends,
+                inout heights,
+                inout records_cap,
+                inout active,
+                inout active_cap,
+                inout pack_bytes
+            );
+            let length = wrapping_sub(
+                word(in ends.as_slice(), index),
+                start_of(in ends.as_slice(), index)
+            );
+            if tag != 3 && length != size {
+                fail_pack(inout r, N_TREE_FILE_SIZE);
+            }
+            let up = t_add(inout r, word(in heights.as_slice(), index), 1, N_DEPTH);
+            if up > height {
+                height = up;
+            }
+            i = wrapping_add(i, 1);
+        }
+    }
+    active.truncate(wrapping_sub(active.len(), ID_BYTES));
+    grow(
+        inout r,
+        inout b,
+        heights.len(),
+        inout records_cap,
+        lim(in b.as_slice(), L_OBJECTS),
+        EXPORT_RECORD_SIZE
+    );
+    let index = heights.len();
+    ids.extend(in id);
+    data.extend(in payload.as_slice());
+    ends.push(data.len());
+    heights.push(height);
+    index
+}
+
+fn push_u32(inout r: ChunkSeq[u8], v: u64) {
+    let at = r.len();
+    r.resize(wrapping_add(at, 4), 0);
+    r.try_write_u32_le(at, wrapping_u32(v));
+}
+
+// `export_pack`: the pack bytes.
+pub fn export_pack(
+    inout r: ChunkSeq[u8],
+    in root: Slice[u8],
+    in root_id: Slice[u8],
+    pack: u64,
+    objects: u64,
+    depth: u64,
+    entries: u64,
+    meta: u64,
+    max_work: u64
+) eff [Ffi[CasFs], Ffi[Blake3], Fail[StoreErr]] {
+    let mut b = new_budget(inout r, pack, objects, depth, entries, meta, max_work);
+    if pack < PACK_HEADER_BYTES {
+        fail_limit(inout r, N_PACK_BYTES);
+    }
+    let mut ids: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut data: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut ends: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut heights: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut records_cap: u64 = 0;
+    let mut active: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut active_cap: u64 = 0;
+    let mut pack_bytes = PACK_HEADER_BYTES;
+    let i = export_visit(
+        inout r,
+        inout b,
+        in root,
+        in root_id,
+        1,
+        inout ids,
+        inout data,
+        inout ends,
+        inout heights,
+        inout records_cap,
+        inout active,
+        inout active_cap,
+        inout pack_bytes
+    );
+    checked(inout r, try_reserve_bytes(inout b, pack_bytes, true));
+    work(inout r, inout b, pack_bytes);
+    begin(inout r);
+    r.extend(in "VSPACK01".as_bytes());
+    push_u32(inout r, 1);
+    push_u32(inout r, 1);
+    r.extend(in root_id);
+    let count = heights.len();
+    push_u32(inout r, count);
+    let mut k: u64 = 0;
+    loop {
+        if k >= count {
+            break;
+        }
+        let at = wrapping_mul(k, ID_BYTES);
+        r.extend(in ids[at..wrapping_add(at, ID_BYTES)]);
+        let a = start_of(in ends.as_slice(), k);
+        let e = word(in ends.as_slice(), k);
+        rep_u64(inout r, wrapping_sub(e, a));
+        r.extend(in data[a..e]);
+        k = wrapping_add(k, 1);
+    }
+    r.push(0);
+}
+
+// Whether the 34 bytes at `at` are an object id with valid tags
+// (`ObjectId::decode`).
+fn valid_id_at(in s: Slice[u8], at: u64) -> bool {
+    let d = byte(in s, at);
+    let k = byte(in s, wrapping_add(at, 1));
+    d >= 1 && d <= 3 && k >= 1 && k <= 2
+}
+
+// The importer's pack reader: take `len` bytes at `pos`.
+fn take(inout r: ChunkSeq[u8], inout pos: u64, len: u64, total: u64) -> u64 eff [Fail[StoreErr]] {
+    let at = pos;
+    let end = t_add(inout r, pos, len, N_PACK_BYTES);
+    if end > total {
+        fail_pack(inout r, N_TRUNCATED_RECORD);
+    }
+    pos = end;
+    at
+}
+
+fn take_id(inout r: ChunkSeq[u8], in bytes: Slice[u8], inout pos: u64) -> u64 eff [Fail[StoreErr]] {
+    let at = take(inout r, inout pos, ID_BYTES, bytes.len());
+    if !valid_id_at(in bytes, at) {
+        fail_pack(inout r, N_IDENTITY_TAGS);
+    }
+    at
+}
+
+fn depth_check(inout r: ChunkSeq[u8], in b: Slice[u64], depth: u64, height: u64) eff [
+    Fail[StoreErr]
+] {
+    let deepest = t_add(inout r, depth, wrapping_sub(height, 1), N_DEPTH);
+    if deepest > lim(in b, L_DEPTH) {
+        fail_limit(inout r, N_DEPTH);
+    }
+}
+
+// The import closure walk (`Closure::visit`): records are the pack's
+// `ats` (id offsets, each followed by its payload of `lens` bytes at
+// `payloads`), visits their `states` and `heights`.
+fn import_visit(
+    inout r: ChunkSeq[u8],
+    inout b: ChunkSeq[u64],
+    in bytes: Slice[u8],
+    in ats: Slice[u64],
+    in payloads: Slice[u64],
+    in lens: Slice[u64],
+    inout states: ChunkSeq[u8],
+    inout heights: ChunkSeq[u64],
+    inout next: u64,
+    index: u64,
+    depth: u64
+) -> u64 eff [Fail[StoreErr]] {
+    work(inout r, inout b, 1);
+    depth_check(inout r, in b.as_slice(), depth, 1);
+    let state = byte(in states.as_slice(), index);
+    if state == 1 {
+        fail_pack(inout r, N_CYCLIC);
+    }
+    if state == 2 {
+        let h = word(in heights.as_slice(), index);
+        depth_check(inout r, in b.as_slice(), depth, h);
+        return h;
+    }
+    states.try_set(index, 1);
+    let mut height: u64 = 1;
+    let at = word(in ats, index);
+    if byte(in bytes, wrapping_add(at, 1)) == 2 {
+        let p = word(in payloads, index);
+        let pe = wrapping_add(p, word(in lens, index));
+        let scan = tree_scan(in bytes[p..pe]);
+        let entries = wrapping_sub(scan.len(), 3) / 5;
+        let count = ats.len();
+        let mut i: u64 = 0;
+        loop {
+            if i >= entries {
+                break;
+            }
+            work(inout r, inout b, 1);
+            let w = wrapping_mul(i, 5);
+            let nat = word(in scan.as_slice(), w);
+            let nlen = word(in scan.as_slice(), wrapping_add(w, 1));
+            let tag = word(in scan.as_slice(), wrapping_add(w, 2));
+            let size = word(in scan.as_slice(), wrapping_add(w, 3));
+            let d = wrapping_add(wrapping_add(p, wrapping_add(nat, nlen)), 1);
+            let mut child_id = ChunkSeq::with_capacity[u8](ID_BYTES);
+            child_id.push(byte(in bytes, at));
+            if tag == 3 {
+                child_id.push(2);
+            } else {
+                child_id.push(1);
+            }
+            child_id.extend(in bytes[d..wrapping_add(d, 32)]);
+            // `lookup`: one unit of work per comparison.
+            let mut child = count;
+            let mut j: u64 = 0;
+            loop {
+                if j >= count {
+                    break;
+                }
+                work(inout r, inout b, 1);
+                let cat = word(in ats, j);
+                if same(in bytes[cat..wrapping_add(cat, ID_BYTES)], in child_id.as_slice()) {
+                    child = j;
+                    break;
+                }
+                j = wrapping_add(j, 1);
+            }
+            if child >= count {
+                fail_pack(inout r, N_MISSING_CHILD);
+            }
+            if tag != 3 && word(in lens, child) != size {
+                fail_pack(inout r, N_RECORDED_FILE_SIZE);
+            }
+            let next_depth = t_add(inout r, depth, 1, N_DEPTH);
+            let ch = import_visit(
+                inout r,
+                inout b,
+                in bytes,
+                in ats,
+                in payloads,
+                in lens,
+                inout states,
+                inout heights,
+                inout next,
+                child,
+                next_depth
+            );
+            let up = t_add(inout r, ch, 1, N_DEPTH);
+            if up > height {
+                height = up;
+            }
+            i = wrapping_add(i, 1);
+        }
+    }
+    depth_check(inout r, in b.as_slice(), depth, height);
+    if index != next {
+        fail_pack(inout r, N_NONCANONICAL_ORDER);
+    }
+    next = t_add(inout r, next, 1, N_OBJECTS);
+    states.try_set(index, 2);
+    heights.try_set(index, height);
+    height
+}
+
+// The canonical re-encoding of the decoded tree `enc`.
+fn reencode_tree(in enc: Slice[u8]) -> ChunkSeq[u8] {
+    let scan = tree_scan(in enc);
+    let entries = wrapping_sub(scan.len(), 3) / 5;
+    let mut names: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut ends: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](entries);
+    let mut kinds: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](entries);
+    let mut digests: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](wrapping_mul(entries, 32));
+    let mut sizes: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](entries);
+    let mut i: u64 = 0;
+    loop {
+        if i >= entries {
+            break;
+        }
+        let w = wrapping_mul(i, 5);
+        let at = word(in scan.as_slice(), w);
+        let nlen = word(in scan.as_slice(), wrapping_add(w, 1));
+        let end = wrapping_add(at, nlen);
+        names.extend(in enc[at..end]);
+        ends.push(names.len());
+        kinds.push(wrapping_u8(word(in scan.as_slice(), wrapping_add(w, 2))));
+        let d = wrapping_add(end, 1);
+        digests.extend(in enc[d..wrapping_add(d, 32)]);
+        sizes.push(word(in scan.as_slice(), wrapping_add(w, 3)));
+        i = wrapping_add(i, 1);
+    }
+    tree_encode_into(
+        in names.as_slice(),
+        in ends.as_slice(),
+        in kinds.as_slice(),
+        in digests.as_slice(),
+        in sizes.as_slice()
+    )
+}
+
+// `import_pack` into the store at `store_path`: the `TransferReport`
+// (counts after the root id).
+pub fn import_pack(
+    inout r: ChunkSeq[u8],
+    in store_path: Slice[u8],
+    in expected: Slice[u8],
+    in bytes: Slice[u8],
+    pack: u64,
+    objects: u64,
+    depth: u64,
+    entries: u64,
+    meta: u64,
+    max_work: u64
+) eff [Ffi[CasFs], Ffi[Blake3], Fail[StoreErr]] {
+    let mut b = new_budget(inout r, pack, objects, depth, entries, meta, max_work);
+    let total = bytes.len();
+    if total > pack {
+        fail_limit(inout r, N_PACK_BYTES);
+    }
+    if total < PACK_HEADER_BYTES {
+        fail_pack(inout r, N_TRUNCATED_HEADER);
+    }
+    work(inout r, inout b, PACK_HEADER_BYTES);
+    if !same(in bytes[0..8], in "VSPACK01".as_bytes()) {
+        fail_pack(inout r, N_MAGIC);
+    }
+    if read_u32_at(in bytes, 8) != 1 || read_u32_at(in bytes, 12) != 1 {
+        fail_pack(inout r, N_VERSION);
+    }
+    if !valid_id_at(in bytes, 16) {
+        fail_pack(inout r, N_IDENTITY_TAGS);
+    }
+    if !same(in bytes[16..50], in expected) {
+        begin(inout r);
+        r.extend(in expected);
+        r.extend(in bytes[16..50]);
+        raise_code(inout r, X_UNEXPECTED_ROOT);
+    }
+    let count = read_u32_at(in bytes, 50);
+    if count == 0 {
+        fail_pack(inout r, N_EMPTY_CLOSURE);
+    }
+    if count > objects {
+        fail_limit(inout r, N_OBJECTS);
+    }
+    if count > wrapping_sub(total, PACK_HEADER_BYTES) / PACK_RECORD_BYTES {
+        fail_pack(inout r, N_TRUNCATED_RECORDS);
+    }
+    let mut records_cap: u64 = 0;
+    reserve_metadata(inout r, inout b, 0, inout records_cap, count, IMPORT_RECORD_SIZE);
+    let mut ats: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](count);
+    let mut payloads: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](count);
+    let mut lens: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](count);
+    let mut pos = PACK_HEADER_BYTES;
+    let mut payload_bytes: u64 = 0;
+    let mut k: u64 = 0;
+    loop {
+        if k >= count {
+            break;
+        }
+        work(inout r, inout b, PACK_RECORD_BYTES);
+        let at = take_id(inout r, in bytes, inout pos);
+        let mut e: u64 = 0;
+        loop {
+            if e >= k {
+                break;
+            }
+            work(inout r, inout b, 1);
+            let other = word(in ats.as_slice(), e);
+            if same(
+                in bytes[other..wrapping_add(other, ID_BYTES)],
+                in bytes[at..wrapping_add(at, ID_BYTES)]
+            ) {
+                fail_pack(inout r, N_DUPLICATE_OBJECT);
+            }
+            e = wrapping_add(e, 1);
+        }
+        let len_at = take(inout r, inout pos, 8, total);
+        let len = read_word(in bytes, len_at);
+        let p = take(inout r, inout pos, len, total);
+        payload_bytes = t_add(inout r, payload_bytes, len, N_PAYLOAD_BYTES);
+        let hash_work = t_add(inout r, len, 2048, N_HASH_WORK);
+        work(inout r, inout b, hash_work);
+        let domain = byte(in bytes, at);
+        let kind = byte(in bytes, wrapping_add(at, 1));
+        let pe = wrapping_add(p, len);
+        let mut h = object_hasher(domain, kind);
+        update(inout h, in bytes[p..pe]);
+        let actual = finish_id(domain, kind, h);
+        if !same(in actual.as_slice(), in bytes[at..wrapping_add(at, ID_BYTES)]) {
+            begin(inout r);
+            r.extend(in bytes[at..wrapping_add(at, ID_BYTES)]);
+            r.extend(in actual.as_slice());
+            raise_code(inout r, X_DIGEST_MISMATCH);
+        }
+        if kind == 2 {
+            transfer_decode_tree(inout r, inout b, domain, in bytes[p..pe]);
+            let canonical = reencode_tree(in bytes[p..pe]);
+            if !same(in canonical.as_slice(), in bytes[p..pe]) {
+                fail_pack(inout r, N_NONCANONICAL_TREE);
+            }
+        }
+        ats.push(at);
+        payloads.push(p);
+        lens.push(len);
+        k = wrapping_add(k, 1);
+    }
+    if pos != total {
+        fail_pack(inout r, N_TRAILING_BYTES);
+    }
+    let last = word(in ats.as_slice(), wrapping_sub(count, 1));
+    if !same(in bytes[last..wrapping_add(last, ID_BYTES)], in bytes[16..50]) {
+        fail_pack(inout r, N_ROOT_NOT_LAST);
+    }
+    let mut visits_cap: u64 = 0;
+    reserve_metadata(inout r, inout b, 0, inout visits_cap, count, VISIT_SIZE);
+    let mut states: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](count);
+    states.resize(count, 0);
+    let mut heights: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](count);
+    heights.resize(count, 0);
+    let mut next: u64 = 0;
+    let top = import_visit(
+        inout r,
+        inout b,
+        in bytes,
+        in ats.as_slice(),
+        in payloads.as_slice(),
+        in lens.as_slice(),
+        inout states,
+        inout heights,
+        inout next,
+        wrapping_sub(count, 1),
+        1
+    );
+    if next != count {
+        fail_pack(inout r, N_UNREACHABLE);
+    }
+    // `publication_resources`.
+    let path_bytes = t_mul(inout r, store_path.len(), 32, N_PUBLICATION_METADATA);
+    let initialization = t_add(inout r, 65536, path_bytes, N_PUBLICATION_METADATA);
+    metadata(inout r, inout b, initialization);
+    work(inout r, inout b, initialization);
+    let mut i: u64 = 0;
+    loop {
+        if i >= count {
+            break;
+        }
+        let at = word(in ats.as_slice(), i);
+        let len = word(in lens.as_slice(), i);
+        let buffers = t_mul(inout r, 65536, 9, N_PUBLICATION_METADATA);
+        let paths = t_add(inout r, 65536, path_bytes, N_PUBLICATION_METADATA);
+        let mut child_paths: u64 = 0;
+        if byte(in bytes, wrapping_add(at, 1)) == 2 {
+            let tree_entries = read_word(
+                in bytes,
+                wrapping_add(word(in payloads.as_slice(), i), 8)
+            );
+            child_paths = t_mul(inout r, tree_entries, 4096, N_PUBLICATION_METADATA);
+        }
+        let first = t_add(inout r, buffers, paths, N_PUBLICATION_METADATA);
+        let publication = t_add(inout r, first, child_paths, N_PUBLICATION_METADATA);
+        metadata(inout r, inout b, publication);
+        work(inout r, inout b, publication);
+        let staging = t_mul(inout r, len, 3, N_PUBLICATION_WORK);
+        let probe = t_add(inout r, len, 1, N_PUBLICATION_WORK);
+        let checks = t_mul(inout r, probe, 8, N_PUBLICATION_WORK);
+        let verification = t_mul(inout r, checks, 2, N_PUBLICATION_WORK);
+        let both = t_add(inout r, staging, verification, N_PUBLICATION_WORK);
+        work(inout r, inout b, both);
+        work(inout r, inout b, 4096);
+        i = wrapping_add(i, 1);
+    }
+    // Admission ends here: only store operations follow.
+    open(inout r, in store_path, true);
+    let root = copy_of(in r[0..wrapping_sub(r.len(), 1)]);
+    let mut inserted: u64 = 0;
+    i = 0;
+    loop {
+        if i >= count {
+            break;
+        }
+        let at = word(in ats.as_slice(), i);
+        let p = word(in payloads.as_slice(), i);
+        let pe = wrapping_add(p, word(in lens.as_slice(), i));
+        let domain = byte(in bytes, at);
+        if byte(in bytes, wrapping_add(at, 1)) == 2 {
+            check_children(inout r, in root.as_slice(), domain, in bytes[p..pe]);
+            put_core_bytes(
+                inout r,
+                in root.as_slice(),
+                true,
+                domain,
+                2,
+                in bytes[p..pe],
+                false,
+                in "".as_bytes()
+            );
+        } else {
+            put_core_bytes(
+                inout r,
+                in root.as_slice(),
+                true,
+                domain,
+                1,
+                in bytes[p..pe],
+                true,
+                in bytes[at..wrapping_add(at, ID_BYTES)]
+            );
+        }
+        if byte(in r.as_slice(), wrapping_add(ID_BYTES, 8)) == 1 {
+            inserted = wrapping_add(inserted, 1);
+        }
+        i = wrapping_add(i, 1);
+    }
+    begin(inout r);
+    r.extend(in bytes[16..50]);
+    rep_u64(inout r, count);
+    rep_u64(inout r, total);
+    rep_u64(inout r, payload_bytes);
+    rep_u64(inout r, inserted);
+    rep_u64(inout r, wrapping_sub(count, inserted));
     r.push(0);
 }
