@@ -64,6 +64,8 @@ pub copy struct DeclRow {
     drop: u32,
     owns_sequence: bool,
     mirror: u8,
+    // the converted mirror's reason: symbol + 1, 0 for none
+    reason: u32,
     // vars[v0..v0+vn]
     v0: u64,
     vn: u64,
@@ -88,6 +90,8 @@ pub copy struct ParamRow {
     pointer: bool,
     // the raw `pass` field: 0 none, else P_*
     raw: u8,
+    // a P_OTHER pass's spelling: symbol + 1, 0 for none
+    other: u32,
     in_place: bool,
 }
 
@@ -105,6 +109,8 @@ pub copy struct FnRow {
     en: u64,
     // fail record words + 1, 0 for none
     fail: u64,
+    // symbol + 1, 0 for none
+    instance_of: u32,
     // fn_libs[l0..l0+ln]
     l0: u64,
     ln: u64,
@@ -113,6 +119,7 @@ pub copy struct FnRow {
 
 pub copy struct LibRow {
     name: u32,
+    handler: u32,
     // lib_syms[s0..s0+sn]
     s0: u64,
     sn: u64,
@@ -265,7 +272,7 @@ pub fn read_iface(in b: Slice[u8]) -> Iface {
         let drop = osym(in nmap, r.word(in b));
         let owns_sequence = flag(r.word(in b));
         let mirror = wrapping_u8(r.word(in b));
-        let reason = r.word(in b);
+        let reason = osym(in nmap, r.word(in b));
         let vn = r.word(in b);
         let v0 = vars.len();
         for j in 0..vn {
@@ -305,6 +312,7 @@ pub fn read_iface(in b: Slice[u8]) -> Iface {
                 drop: drop,
                 owns_sequence: owns_sequence,
                 mirror: mirror,
+                reason: reason,
                 v0: v0,
                 vn: vn
             }
@@ -325,8 +333,9 @@ pub fn read_iface(in b: Slice[u8]) -> Iface {
             let pty = n32(r.word(in b));
             let pointer = flag(r.word(in b));
             let raw = wrapping_u8(r.word(in b));
+            let mut other: u32 = 0;
             if raw == P_OTHER {
-                let other = r.word(in b);
+                other = osym(in nmap, r.word(in b));
             }
             let in_place = flag(r.word(in b));
             params
@@ -336,6 +345,7 @@ pub fn read_iface(in b: Slice[u8]) -> Iface {
                     ty: pty,
                     pointer: pointer,
                     raw: raw,
+                    other: other,
                     in_place: in_place
                 }
             );
@@ -349,7 +359,7 @@ pub fn read_iface(in b: Slice[u8]) -> Iface {
             errs.push(n32(r.word(in b)));
         }
         let fail = r.word(in b);
-        let instance_of = r.word(in b);
+        let instance_of = osym(in nmap, r.word(in b));
         let ln = r.word(in b);
         let l0 = fn_libs.len();
         for j in 0..ln {
@@ -369,6 +379,7 @@ pub fn read_iface(in b: Slice[u8]) -> Iface {
                 e0: e0,
                 en: en,
                 fail: fail,
+                instance_of: instance_of,
                 l0: l0,
                 ln: ln,
                 result_in_place: result_in_place
@@ -380,7 +391,7 @@ pub fn read_iface(in b: Slice[u8]) -> Iface {
     let lcount = r.word(in b);
     for i in 0..lcount {
         let name = nsym(in nmap, r.word(in b));
-        let handler = r.word(in b);
+        let handler = nsym(in nmap, r.word(in b));
         let sn = r.word(in b);
         let s0 = lib_syms.len();
         for j in 0..sn {
@@ -391,6 +402,7 @@ pub fn read_iface(in b: Slice[u8]) -> Iface {
             .push(
             LibRow {
                 name: name,
+                handler: handler,
                 s0: s0,
                 sn: sn,
                 rust_path: rust_path
@@ -442,6 +454,7 @@ fn decl_at(in decls: ChunkSeq[DeclRow], i: u64) -> DeclRow {
             drop: 0,
             owns_sequence: false,
             mirror: 0,
+            reason: 0,
             v0: 0,
             vn: 0
         },
@@ -513,6 +526,7 @@ impl Iface {
                 e0: 0,
                 en: 0,
                 fail: 0,
+                instance_of: 0,
                 l0: 0,
                 ln: 0,
                 result_in_place: false
@@ -528,6 +542,7 @@ impl Iface {
                 ty: 0,
                 pointer: false,
                 raw: 0,
+                other: 0,
                 in_place: false
             },
         }
@@ -538,6 +553,7 @@ impl Iface {
             Option::Some(l) => l,
             Option::None => LibRow {
                 name: 0,
+                handler: 0,
                 s0: 0,
                 sn: 0,
                 rust_path: 0
