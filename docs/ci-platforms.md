@@ -57,6 +57,9 @@ and the blocks of the crates that depend on them run; a documentation-only
 change runs none. Any other change (the compiler, std packages, a seed copy
 the compiler links, the harness, CI, the root manifests or lockfile) runs
 every port, and so do pushes to main, merge queue groups and the nightly.
+Since #1479 the shards do not run for pull requests at all: the Platforms run
+that `Native platform checks` dispatches for a pull request sets the plan's
+ports to `none`. The selection still applies to manual `pr` runs.
 Each block of the script names its crate directory with `if ported vesper-x;
 then ... fi` or `skip_port vesper-x || ...`; a line without a guard always
 runs.
@@ -71,18 +74,36 @@ every push to a pull request reruns its workflows. On 2026-11-21 that left 78
 runs queued and every Platforms run cancelled by the next push before it
 finished (#1321). To keep pull requests within the limit:
 
-- `Hybrid compiler` runs only its Linux leg on pull requests; main, the
-  nightly schedule and manual runs add macOS and Windows.
+- `Hybrid compiler` and the `Vesper ports` jobs (the compiler build and its
+  seven shards, about nine Linux runners) run only on pushes to main, the
+  nightly schedule and manual runs, not on pull requests (#1479). Neither is
+  a required check, and Bazel builds and tests both crates on every pull
+  request.
 - The narrow integration lanes (Kafka, lavapipe GPU, Ignis Vulkan, Aura GTK,
   QEMU vectors) are not triggered on pull requests by `Cargo.toml` or
   `Cargo.lock` alone; pushes to main still run them on those changes.
 - A push to main cancels the older main run of the same workflow.
-- `Merge gate` (`.github/workflows/merge-gate.yml`, `scripts/ci/merge_gate.py`)
+- The merge gate (`.github/actions/merge-gate`, `scripts/ci/merge_gate.py`)
   enforces the project rule that pull requests which cannot merge yet get no
   CI: when a pull request's base is not main, its branch carries another open
   pull request's commits (a merged-in parent that has not landed), or it
-  conflicts with main, the gate cancels the other Actions runs for that push
-  and fails with the reason. Push again once the parent has merged.
+  conflicts with main, the gate cancels every Actions run for that push and
+  fails with the reason. Push again once the parent has merged. It is the
+  first step of every job that runs on pull requests, so it takes no runner
+  of its own; as a separate `Merge gate` job it waited over an hour for a
+  Linux runner ahead of everything else (#1479).
+- `macOS (AArch64)` and `Windows (x86_64 MSVC)` start only when a pull
+  request is ready to merge. Platforms no longer runs on pull request pushes;
+  `Native platform checks` (`.github/workflows/native-checks.yml`) runs on
+  each BuildBuddy status and, once `Test all targets` and `Native and
+  acceptance scripts` are both green on the head commit and the merge gate
+  passes, dispatches Platforms on the branch with `pull_request` set. That
+  run tests `refs/pull/<n>/merge`, as pull request runs did, and reports both
+  required checks on the head commit; until then they show as expected and
+  the pull request cannot merge. A new push starts over when its own
+  BuildBuddy checks go green. To start them by hand, run Platforms from the
+  Actions tab on the branch with profile `pr`, `checkout_ref`
+  `refs/pull/<n>/merge` and `pull_request` `<n>`.
 
 The native executable cases are shared with `scripts/test-native-host.sh`;
 `scripts/ci/test-native-executables.sh` runs them with the Cargo-built compiler.
