@@ -576,3 +576,374 @@ fn ordinary_check_and_lsp_never_implicitly_expand_unchecked_original_source() {
         -32003
     );
 }
+
+#[test]
+fn mixed_expansion_enforces_sugar_and_macro_effect_authority() {
+    let src = |effects: &str| {
+        format!(
+            "effect Log {{ fn event(); }} fn log() eff [Log] {{ Log::event(); }} \
+         macro leaky() -> expr {{ quote {{ log() }} }} \
+         sugar wrapped: expr{effects} {{ rule (wrapped {{}}) => {{ leaky!() }} }} \
+         fn main() eff [Log] {{ wrapped {{}} }}"
+        )
+    };
+    let source = src("");
+    let denied = Fixture::new(&source).reject(&[]);
+    assert_eq!(denied["stage"], "check");
+    let d = &denied["diagnostics"][0];
+    assert_eq!(d["code"], "E0144");
+    assert_eq!(&source[range(&d["span"], &source)], "wrapped {}");
+    assert!(source[range(&d["related"][0]["span"], &source)].starts_with("rule"));
+    let allowed_sugar = Fixture::new(&src(" emits eff [Log]"));
+    assert_eq!(allowed_sugar.reject(&[])["stage"], "authority");
+}
+
+#[test]
+fn source_sugar_runs_and_builds_through_the_normal_compiler() {
+    let source = "sugar take_right: infix(`.+`, additive, left) { rule ($a:expr .+ $b:expr) => { $b } }\nfn main() -> i64 { 1 .+ 42 }";
+    let snapshot =
+        vesper::forge_frontend::check_compiler_source(source, Default::default()).unwrap();
+    assert!(snapshot.world().functions.contains_key("main"));
+    assert!(!snapshot.source().contains("sugar take_right"));
+    assert!(vesper::tooling::frontend::check_source(source, Default::default()).is_err());
+    let fixture = Fixture::new(source);
+    let checked = output(
+        Command::new(binary())
+            .arg("check")
+            .arg(&fixture.path)
+            .arg("--json"),
+    );
+    assert!(
+        checked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
+    let evaluated = output(Command::new(binary()).arg("run").arg(&fixture.path));
+    assert!(
+        evaluated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&evaluated.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&evaluated.stdout).trim(), "42");
+
+    let object = fixture.dir.join("main.wasm");
+    let built = output(
+        Command::new(binary())
+            .args(["build", "--target", "wasm32-wasip2"])
+            .arg(&fixture.path)
+            .arg("-o")
+            .arg(&object),
+    );
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    assert!(fs::read(object).unwrap().starts_with(b"\0asm"));
+
+    let bad = Fixture::new(&source.replace("1 .+ 42", "1 .+ true"));
+    let rejected = output(
+        Command::new(binary())
+            .arg("check")
+            .arg(&bad.path)
+            .arg("--json"),
+    );
+    assert!(!rejected.status.success());
+    let diagnostics: Vec<Value> = serde_json::from_slice(&rejected.stdout).unwrap();
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d["code"].as_str().is_some_and(|c| c.starts_with("E02"))),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn expression_macros_and_sugar_compose_in_both_directions() {
+    let keep = "macro keep($x:expr) -> expr { quote { $x } }";
+    let inputs = [
+        format!(
+            "{keep}\nsugar select: infix(`.+`, additive, left) {{ rule ($a:expr .+ $b:expr) => {{ $b }} }}\nfn main() -> i64 {{ keep!(0 .+ 42) }}"
+        ),
+        format!(
+            "{keep}\nsugar select: infix(`.+`, additive, left) {{ rule ($a:expr .+ $b:expr) => {{ keep!($b) }} }}\nfn main() -> i64 {{ 0 .+ 42 }}"
+        ),
+    ];
+    for source in &inputs {
+        let fixture = Fixture::new(source);
+        let report = fixture.command("check", &[]);
+        assert!(
+            report.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&report.stderr),
+            String::from_utf8_lossy(&report.stdout)
+        );
+        let report: Value = serde_json::from_slice(&report.stdout).unwrap();
+        assert_eq!(
+            report["source_blake3"],
+            blake3::hash(source.as_bytes()).to_hex().as_str()
+        );
+        assert_eq!(report["invocations"], 1);
+        assert_eq!(report["audits"].as_array().unwrap().len(), 1);
+        for mapping in report["source_map"].as_array().unwrap() {
+            range(&mapping["original"], source);
+        }
+        let expanded = fixture.expand(&[]);
+        fixture.run_expanded(&expanded);
+        let evaluated = output(Command::new(binary()).arg("run").arg(&fixture.path));
+        assert!(
+            evaluated.status.success(),
+            "{}",
+            String::from_utf8_lossy(&evaluated.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&evaluated.stdout).trim(), "42");
+    }
+}
+
+fn assert_sugar_run(source: &str, expected: i64) {
+    let fixture = Fixture::new(source);
+    let result = output(Command::new(binary()).arg("run").arg(&fixture.path));
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout).trim(),
+        expected.to_string()
+    );
+}
+
+#[test]
+fn sugar_repeated_expression_evaluates_an_inout_call_once() {
+    let source = r#"sugar twice: expr {
+    rule (twice $x:expr $body:block) => { wrapping_add($x, $x) }
+}
+fn tick(inout calls: i64) -> i64 {
+    calls = wrapping_add(calls, 1);
+    calls
+}
+fn main() -> i64 {
+    let mut calls: i64 = 0;
+    let value = twice tick(inout calls) {};
+    wrapping_add(wrapping_mul(calls, 10), value)
+}"#;
+    assert_sugar_run(source, 12);
+}
+
+#[test]
+fn sugar_template_binder_does_not_capture_a_caller_local() {
+    let source = r#"sugar combine: expr {
+    rule (combine $x:expr $body:block) => {{
+        let shadow: i64 = 1000;
+        wrapping_add($x, shadow)
+    }}
+}
+fn main() -> i64 {
+    let shadow: i64 = 17;
+    combine shadow {}
+}"#;
+    assert_sugar_run(source, 1017);
+}
+
+#[test]
+fn sugar_statement_tail_stops_at_the_inner_block() {
+    let source = r#"sugar bias: stmt {
+    rule (bias $amount:expr; $..rest:stmts) => {{
+        let left = $amount;
+        let right = { $..rest };
+        wrapping_add(left, right)
+    }}
+}
+fn main() -> i64 {
+    let result = { bias 5; let base: i64 = 7; base };
+    wrapping_mul(result, 2)
+}"#;
+    assert_sugar_run(source, 24);
+}
+
+#[test]
+fn scope_cleanup_runs_once_before_resuming_each_exit() {
+    let source = r#"sugar defer:stmt {
+ rule (defer $cleanup:block $..rest:scope) => {{
+     let exit = $..rest;
+     $cleanup;
+     exit.resume()
+ }}
+}
+fn early(inout n:i64, flag: bool)->i64 {
+ defer { n = wrapping_add(n,1); }
+ if flag { return 3; } 4
+}
+fn failed(inout n:i64)->i64 eff [Fail[RuntimeError]] {
+ defer { n = wrapping_add(n,1); }
+ Fail::raise(RuntimeError::DivisionByZero)
+}
+fn main()->i64 {
+ let mut n:i64=0;
+ let a=early(inout n, true);
+ let b=early(inout n, false);
+ let v = loop {
+     defer { n = wrapping_add(n,1); }
+     if n < 4 {continue;} break 5;
+ };
+ let d=handle Fail[RuntimeError] in { failed(inout n) } with {return v=>v, raise(e,_)=>7,};
+ wrapping_add(wrapping_add(a,b),wrapping_add(wrapping_add(v,d), n))
+}"#;
+    assert_sugar_run(source, 25);
+}
+
+#[test]
+fn memoized_holes_keep_their_evaluation_order_in_calls_branches_and_loops() {
+    let source = r#"
+sugar sampled:expr {
+    rule (sampled $before:expr then $sample:expr $b:block) => {
+        digits($before, $sample, $sample)
+    }
+}
+sugar sum_three:expr {
+    rule (sum_three $sample:expr $b:block) => {{
+        let mut sum: i64 = 0;
+        for i in 0..3 { sum = wrapping_add(sum, $sample); }
+        sum
+    }}
+}
+sugar skipped:expr {
+    rule (skipped $sample:expr $b:block) => {
+        if false { wrapping_add($sample, $sample) } else { 0 }
+    }
+}
+fn tick(inout count: i64) -> i64 { count = wrapping_add(count, 1); count }
+fn digits(first: i64, second: i64, third: i64) -> i64 {
+    wrapping_add(wrapping_mul(first, 100), wrapping_add(wrapping_mul(second, 10), third))
+}
+fn main()->i64 {
+    let mut count: i64 = 0;
+    let ordered = sampled tick(inout count) then tick(inout count) {};
+    let sum = sum_three tick(inout count) {};
+    let zero = skipped tick(inout count) {};
+    wrapping_add(wrapping_add(ordered, sum), wrapping_add(zero, count))
+}"#;
+    // digits(1, 2, 2), three uses of 3, zero skipped uses, final counter 3.
+    assert_sugar_run(source, 134);
+}
+
+#[test]
+fn sugar_definition_free_helper_survives_a_same_named_caller_binding() {
+    assert_sugar_run(
+        "fn helper(x:i64)->i64{wrapping_mul(x,2)} sugar apply:expr {rule(apply $x:expr $body:block)=>{helper($x)}} fn main()->i64{let helper=21;apply helper {} }",
+        42,
+    );
+}
+
+#[test]
+fn nested_scope_cleanups_use_lifo_order_on_return_and_option_question() {
+    let source = r#"sugar defer:stmt {
+ rule (defer $cleanup:block $..rest:scope) => {{
+     let exit = $..rest;
+     $cleanup;
+     exit.resume()
+ }}
+}
+fn f(inout n:i64,x:Option[i64])->Option[i64] {
+ defer {n=wrapping_add(wrapping_mul(n,10),1);}
+ defer {n=wrapping_add(wrapping_mul(n,10),2);}
+ loop {let v=x?; return Some(wrapping_add(v,1));}
+}
+fn main()->i64 {
+ let mut n:i64=0;
+ let a=f(inout n,Some(3));
+ let b=f(inout n,None);
+ match a { Some(4) => match b { None => n, Some(_) => 0, }, _ => 0, }
+}"#;
+    assert_sugar_run(source, 2121);
+}
+
+#[test]
+fn generated_item_defines_a_function_called_by_main() {
+    assert_sugar_run(
+        r#"sugar define : item {
+        rule (define $name:ident $body:block) => { fn $name() -> i64 $body }
+    }
+    define answer { 42 }
+    fn main() -> i64 { answer() }"#,
+        42,
+    );
+}
+
+#[test]
+fn tagged_strings_and_braces_execute_the_declared_rules() {
+    assert_sugar_run(
+        r#"sugar num : tag { rule (num{ $n:expr }) => { $n } }
+    sugar text : tag { rule (text $s:expr) => { $s } }
+    fn main() -> i64 { if text"alpha" == "alpha" { num{42} } else { 0 } }"#,
+        42,
+    );
+}
+
+#[test]
+fn repeated_arguments_keep_each_value_and_position() {
+    assert_sugar_run(
+        r#"sugar tuple : tag {
+        rule (tuple{ $( $x:expr ),+ }) => { ($( $x ),+) }
+    }
+    fn main() -> i64 {
+        let (a, b, c) = tuple{12, 16, 14};
+        if a == 12 && b == 16 && c == 14 { 42 } else { 0 }
+    }"#,
+        42,
+    );
+}
+
+#[test]
+fn standalone_test_file_discovers_and_runs_core_sugar_and_macro_cases() {
+    let fixture = Fixture::new(
+        r#"macro keep($x:expr) -> expr { quote { $x } }
+    sugar literal : tag { rule (literal{ $n:expr }) => { $n } }
+    test {
+        fn test_mixed() -> bool { keep!(literal{true}) }
+        // @case positive(true)
+        fn test_case_mixed(value: bool) -> bool { keep!(literal{value}) }
+    }"#,
+    );
+    let result = output(
+        Command::new(binary())
+            .arg("test")
+            .arg(&fixture.path)
+            .arg("--json"),
+    );
+    let report: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert!(result.status.success(), "{report}");
+    assert_eq!(report["total"], 2);
+    assert_eq!(report["passed"], true);
+}
+
+#[test]
+fn sugar_expands_in_match_pattern_and_exposes_the_callers_binder() {
+    assert_sugar_run(
+        "sugar present:pat {rule(present $p:pat)=>{Option::Some($p)}} fn main()->i64{match Option::Some(42) { present found => found, Option::None => 0 }}",
+        42,
+    );
+}
+
+#[test]
+fn ordinary_builds_skip_unresolved_sugar_in_disabled_test_blocks() {
+    let source = r#"sugar literal: tag { rule (literal{ $n:expr }) => { $n } }
+    test { fn test_future() -> bool { missing_sugar {} } }
+    fn main() -> i64 { literal{42} }"#;
+    assert_sugar_run(source, 42);
+    let fixture = Fixture::new(source);
+    let enabled = output(
+        Command::new(binary())
+            .args(["check", "--include-tests", "--json"])
+            .arg(&fixture.path),
+    );
+    assert!(!enabled.status.success());
+    let diagnostics: Vec<Value> = serde_json::from_slice(&enabled.stdout).unwrap();
+    assert_eq!(diagnostics[0]["code"], "E0142");
+    let mixed = r#"macro keep($x:expr) -> expr { quote { $x } }
+    sugar literal: tag { rule (literal{ $n:expr }) => { $n } }
+    test { fn broken() { let missing = ; } }
+    fn main() -> i64 { keep!(literal{42}) }"#;
+    assert_sugar_run(mixed, 42);
+}

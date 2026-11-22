@@ -87,9 +87,11 @@ fn build(
     input: &Path,
     out: &Path,
     optimize: bool,
+    env: &[(&str, &str)],
 ) -> (Vec<u8>, Vec<u8>, String) {
     let json = out.with_extension("json");
     let mut c = Command::new(compiler);
+    c.envs(env.iter().copied());
     c.arg("build");
     if !optimize {
         c.arg("--no-opt");
@@ -123,6 +125,14 @@ fn stat(stderr: &str, prefix: &str) -> u64 {
 /// not depend on it, but the module's flags do).
 const OPTIMIZED: &[&str] = &["alloc", "semver", "wheel"];
 
+/// Optimized libraries where the Vesper AST optimizer meets an equal-cost
+/// extraction tie (SH3 lane 10, #1249; accepted by the owner): in `semver`
+/// it keeps `wrapping_add(wrapping_add(start, acc), seg)` where egg picks
+/// the same-size `acc, start` order. Such a build is compared again with
+/// the Rust search (`VESPER_HYBRID_RUST_PRODUCER=1`), so the glue is still
+/// checked byte for byte.
+const OPTIMIZE_EQUAL_COST_TIES: &[&str] = &["semver"];
+
 /// What one library's builds found: objects compared, glues the hook
 /// emitted, and the builds whose objects differ.
 #[derive(Default)]
@@ -144,8 +154,13 @@ fn compare(port: &Port, repo: &Path, scratch: &Path, default: &Path, hybrid: &Pa
         }
         let a = scratch.join(format!("{library}-{optimize}-rust.o"));
         let b = scratch.join(format!("{library}-{optimize}-hybrid.o"));
-        let (rust, rust_json, _) = build(default, library, &input, &a, optimize);
-        let (vesper, vesper_json, stderr) = build(hybrid, library, &input, &b, optimize);
+        let (rust, rust_json, _) = build(default, library, &input, &a, optimize, &[]);
+        let (mut vesper, mut vesper_json, mut stderr) =
+            build(hybrid, library, &input, &b, optimize, &[]);
+        if rust != vesper && optimize && OPTIMIZE_EQUAL_COST_TIES.contains(&library) {
+            let env = [("VESPER_HYBRID_RUST_PRODUCER", "1")];
+            (vesper, vesper_json, stderr) = build(hybrid, library, &input, &b, optimize, &env);
+        }
         out.builds += 1;
         out.swapped += stat(
             &stderr,

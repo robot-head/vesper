@@ -88,28 +88,23 @@ test {
         value: Option[u64],
         error: Option[u8]
     ) -> bool {
-        is_ok(input)
-            == success
-            && is_err(input)
-            != success
-            && ok(input)
-            == value
-            && err(input)
-            == error
+        is_ok(input) == success
+            && is_err(input) != success
+            && ok(input) == value
+            && err(input) == error
     }
 
     // @case success(Result::Ok(4), 4, 4)
     // @case error(Result::Err(7), 99, 8)
     fn test_result_fallback(input: Result[u64, u8], eager: u64, lazy: u64) -> bool {
-        unwrap_or(input, 99)
-            == eager
+        unwrap_or(input, 99) == eager
             && unwrap_or_else(
-            input,
-            | x: u8 | -> u64 {
-                wrapping_add(widen_u64(x), 1)
-            }
-        )
-            == lazy
+                input,
+                | x: u8 | -> u64 {
+                    wrapping_add(widen_u64(x), 1)
+                }
+            )
+                == lazy
     }
 
     // @case success(Result::Ok(4), Result::Ok(5), Result::Ok(4))

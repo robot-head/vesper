@@ -142,42 +142,18 @@ pub fn known_new(inout n: Names) -> Known {
 
 impl Known {
     pub fn is_integer(self, s: u32) -> bool {
-        s
-            == self
-            .u8_
-            || s
-            == self
-            .u16_
-            || s
-            == self
-            .u32_
-            || s
-            == self
-            .u64_
-            || s
-            == self
-            .usize_
-            || s
-            == self
-            .i8_
-            || s
-            == self
-            .i16_
-            || s
-            == self
-            .i32_
-            || s
-            == self
-            .i64_
-            || s
-            == self
-            .isize_
-            || s
-            == self
-            .i128_
-            || s
-            == self
-            .u128_
+        s == self.u8_
+            || s == self.u16_
+            || s == self.u32_
+            || s == self.u64_
+            || s == self.usize_
+            || s == self.i8_
+            || s == self.i16_
+            || s == self.i32_
+            || s == self.i64_
+            || s == self.isize_
+            || s == self.i128_
+            || s == self.u128_
     }
 
     // `numeric::is_wide_name`: the two-word integers (#1174), which
@@ -188,25 +164,13 @@ impl Known {
 
     // `numeric::is_scalar_name`.
     pub fn is_scalar(self, s: u32) -> bool {
-        self
-            .is_integer(s)
-            || self
-            .is_wide(s)
-            || s
-            == self
-            .f32_
-            || s
-            == self
-            .f64_
-            || s
-            == self
-            .bool_
-            || s
-            == self
-            .unit
-            || s
-            == self
-            .never
+        self.is_integer(s)
+            || self.is_wide(s)
+            || s == self.f32_
+            || s == self.f64_
+            || s == self.bool_
+            || s == self.unit
+            || s == self.never
     }
 
     // Bits of a vector element (`vector::Elem::from_name`), or 0.

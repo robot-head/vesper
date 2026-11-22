@@ -1520,6 +1520,9 @@ fn define_instances_observed_with_trace<M: Module>(
             rewrite(key, &mut ctx.func)?;
         }
         linkage.normalize_references(&mut ctx.func);
+        if operands_only {
+            crate::native_clif_opt::run(&mut ctx.func);
+        }
         // No JIT caller reads the CLIF text, and printing it costs as much
         // as half of Cranelift's own work on a large function (#1151).
         if matches!(linkage, DefinitionLinkage::Object) {

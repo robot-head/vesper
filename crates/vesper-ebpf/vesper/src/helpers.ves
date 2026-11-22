@@ -31,68 +31,41 @@ pub enum Helper: _ {
 
 // Whether `prog_type` may call helper `id` (helpers::allowed).
 pub fn allowed(prog_type: ProgramType, id: i32) -> bool {
-    let common = id
-        == Helper::MapLookupElem
-        || id
-        == Helper::MapUpdateElem
-        || id
-        == Helper::MapDeleteElem
-        || id
-        == Helper::KtimeGetNs
-        || id
-        == Helper::GetPrandomU32
-        || id
-        == Helper::GetSmpProcessorId
-        || id
-        == Helper::TailCall
-        || id
-        == Helper::RingbufOutput
-        || id
-        == Helper::RingbufReserve
-        || id
-        == Helper::RingbufSubmit
-        || id
-        == Helper::RingbufDiscard
-        || id
-        == Helper::Loop;
+    let common = id == Helper::MapLookupElem
+        || id == Helper::MapUpdateElem
+        || id == Helper::MapDeleteElem
+        || id == Helper::KtimeGetNs
+        || id == Helper::GetPrandomU32
+        || id == Helper::GetSmpProcessorId
+        || id == Helper::TailCall
+        || id == Helper::RingbufOutput
+        || id == Helper::RingbufReserve
+        || id == Helper::RingbufSubmit
+        || id == Helper::RingbufDiscard
+        || id == Helper::Loop;
     if common {
         return true;
     }
     match prog_type {
-        ProgramType::Xdp => id
-            == Helper::XdpAdjustHead
-            || id
-            == Helper::SkLookupTcp
-            || id
-            == Helper::SkRelease,
+        ProgramType::Xdp => id == Helper::XdpAdjustHead
+            || id == Helper::SkLookupTcp
+            || id == Helper::SkRelease,
         ProgramType::SchedCls => id == Helper::SkLookupTcp || id == Helper::SkRelease,
-        ProgramType::Tracepoint => id
-            == Helper::GetCurrentPidTgid
-            || id
-            == Helper::GetCurrentUidGid
-            || id
-            == Helper::GetCurrentComm,
-        ProgramType::Kprobe => id
-            == Helper::GetCurrentPidTgid
-            || id
-            == Helper::GetCurrentUidGid
-            || id
-            == Helper::GetCurrentComm,
+        ProgramType::Tracepoint => id == Helper::GetCurrentPidTgid
+            || id == Helper::GetCurrentUidGid
+            || id == Helper::GetCurrentComm,
+        ProgramType::Kprobe => id == Helper::GetCurrentPidTgid
+            || id == Helper::GetCurrentUidGid
+            || id == Helper::GetCurrentComm,
     }
 }
 
 // `license_is_gpl_compatible` (helpers::gpl_compatible).
 pub fn gpl_compatible(in license: Str) -> bool {
-    license
-        == "GPL"
-        || license
-        == "GPL v2"
-        || license
-        == "GPL and additional rights"
-        || license
-        == "Dual BSD/GPL"
-        || license
-        == "Dual MIT/GPL"
-        || license
-        == "Dual MPL/GPL"
+    license == "GPL"
+        || license == "GPL v2"
+        || license == "GPL and additional rights"
+        || license == "Dual BSD/GPL"
+        || license == "Dual MIT/GPL"
+        || license == "Dual MPL/GPL"
 }

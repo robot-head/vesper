@@ -489,12 +489,12 @@ pub fn let_local(
     b.w(S_LET);
     b
         .w(
-        if mutable {
-            1
-        } else {
-            0
-        }
-    );
+            if mutable {
+                1
+            } else {
+                0
+            }
+        );
     b.w(P_BIND);
     b.sym(name);
     if has_ty {

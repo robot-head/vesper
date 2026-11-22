@@ -116,6 +116,11 @@ impl<M: Module> Codegen<'_, '_, M> {
                 plan.function.symbol()
             ));
         }
+        // SH4 swap point (#1287): the `ffi` hook may emit this call
+        // (`codegen_swap::ffi`); none is installed by default.
+        if let Some(v) = self.foreign_perform_swapped(&plan, &signature, args)? {
+            return Ok(v);
+        }
         let pointer = self.m.target_config().pointer_type();
         let mut c_args = vec![];
         let mut copies = vec![];
@@ -1063,5 +1068,561 @@ impl<M: Module> Codegen<'_, '_, M> {
         let wrpkru = self.foreign_helper(WRPKRU_SYMBOL, &[types::I32], None, &WRPKRU)?;
         self.b.ins().call(wrpkru, &[revoked]);
         Ok(saved)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SH4 swap point (#1287): `foreign_perform` in steps through the `ffi` hook
+// of `codegen_swap` (none is installed by default). Only the requests and
+// their word encodings live here; a declined `BEGIN` runs the Rust
+// emission above unchanged.
+
+use crate::codegen_swap::{NO_VALUE, ffi as swap, word};
+
+fn scalar_word(s: Scalar) -> u64 {
+    u64::from(s.bits()) | u64::from(s.signed()) << 8
+}
+fn value_words(v: &ValueType, out: &mut Vec<u64>) {
+    match v {
+        ValueType::Unit => out.push(0),
+        ValueType::Scalar(s) => out.extend([1, scalar_word(*s)]),
+        ValueType::Bool => out.push(2),
+        ValueType::Enum(e) => {
+            out.extend([3, scalar_word(e.scalar()), e.variants().len() as u64]);
+            out.extend(e.variants().iter().map(|(_, raw)| *raw));
+        }
+        ValueType::Address { .. } => out.push(4),
+        ValueType::Handle { nullable, .. } => out.extend([5, u64::from(*nullable)]),
+        ValueType::NonNullHandle { .. } => out.push(6),
+    }
+}
+fn integer_word(int: &vesper_ffi::Integer) -> u64 {
+    u64::from(int.bits) | u64::from(int.signed) << 8
+}
+fn endian_word(e: Endian) -> u64 {
+    match e {
+        Endian::Native => 0,
+        Endian::Little => 1,
+        Endian::Big => 2,
+    }
+}
+/// `W` with the source offsets of `native` (`foreign_write_struct`'s
+/// field lookups, and its errors).
+fn wire_words(wire: &WireLayout, native: &Layout, out: &mut Vec<u64>) -> Result<(), String> {
+    out.extend([wire.size() as u64, wire.fields().len() as u64]);
+    for f in wire.fields() {
+        let field = || {
+            native
+                .field(f.name())
+                .ok_or_else(|| format!("source struct lacks wire field '{}'", f.name()))
+        };
+        match f.kind() {
+            FieldKind::Integer(int) => {
+                let nf = field()?;
+                u8::try_from(int.bits).map_err(|_| "wire integer too wide")?;
+                out.extend([
+                    0,
+                    f.offset() as u64,
+                    integer_word(int),
+                    endian_word(int.endian),
+                    nf.offset as i64 as u64,
+                ]);
+            }
+            FieldKind::Bytes => {
+                let nf = field()?;
+                let LayoutKind::Product(bytes) = &nf.layout.kind else {
+                    return Err("ByteArray field is not a tuple".into());
+                };
+                let n = bytes.len().min(f.size());
+                out.extend([1, f.offset() as u64, n as u64]);
+                out.extend(
+                    bytes
+                        .iter()
+                        .take(n)
+                        .map(|b| (nf.offset + b.offset) as i64 as u64),
+                );
+            }
+            FieldKind::Padding => out.extend([2, f.offset() as u64]),
+            FieldKind::Struct(inner) => {
+                let nf = field()?;
+                out.extend([3, f.offset() as u64, nf.offset as i64 as u64]);
+                wire_words(inner, &nf.layout, out)?;
+            }
+        }
+    }
+    Ok(())
+}
+/// `P`; a struct pointee's source offsets come from `native` when its
+/// layout is not already the C layout (`identical`), else they are unused.
+fn pointee_words(
+    p: &Pointee,
+    native: Option<&Layout>,
+    little: bool,
+    out: &mut Vec<u64>,
+) -> Result<(), String> {
+    match p {
+        Pointee::Scalar(s) => out.extend([0, scalar_word(*s)]),
+        Pointee::Struct(w) => {
+            out.push(1);
+            match native {
+                Some(n) if !identical(p, little) => wire_words(w.layout(), n, out)?,
+                _ => wire_shape_words(w.layout(), out),
+            }
+        }
+    }
+    Ok(())
+}
+/// `W` without source offsets (an identical struct is passed in place).
+fn wire_shape_words(wire: &WireLayout, out: &mut Vec<u64>) {
+    out.extend([wire.size() as u64, wire.fields().len() as u64]);
+    for f in wire.fields() {
+        match f.kind() {
+            FieldKind::Integer(int) => out.extend([
+                0,
+                f.offset() as u64,
+                integer_word(int),
+                endian_word(int.endian),
+                0,
+            ]),
+            FieldKind::Bytes => out.extend([1, f.offset() as u64, 0]),
+            FieldKind::Padding => out.extend([2, f.offset() as u64]),
+            FieldKind::Struct(inner) => {
+                out.extend([3, f.offset() as u64, 0]);
+                wire_shape_words(inner, out);
+            }
+        }
+    }
+}
+fn source_words(source: Source) -> [u64; 2] {
+    match source {
+        Source::Scalar(v) => [0, word(v)],
+        Source::Memory(p) => [1, word(p)],
+    }
+}
+fn value_of_word(w: u64) -> Result<ir::Value, String> {
+    u32::try_from(w)
+        .map(ir::Value::from_u32)
+        .map_err(|_| format!("ffi hook answered {w}, which is not a value"))
+}
+
+impl<M: Module> Codegen<'_, '_, M> {
+    /// One `ffi` request of a call the hook took (`BEGIN` handled): a
+    /// decline here fails the compile.
+    fn foreign_request(&mut self, op: u32, args: &[u64]) -> Result<Vec<u64>, String> {
+        crate::codegen_swap::request(
+            crate::codegen_swap::Family::Ffi,
+            &mut self.b,
+            &mut *self.m,
+            self.world,
+            self.program,
+            crate::codegen_swap::Site::NONE,
+            op,
+            args,
+            None,
+        )?
+        .ok_or_else(|| format!("the ffi hook declined step {op} of a call it began"))
+    }
+    /// The Option payload of a nullable argument, as `foreign_option`
+    /// reads it: `(payload source, Some tag, payload offset, payload type)`.
+    fn foreign_option_words(
+        &mut self,
+        source: Source,
+        ty: &Type,
+        nullable: bool,
+    ) -> Result<(Source, u64, u64, Type), String> {
+        if !nullable {
+            return Ok((source, NO_VALUE, 0, ty.clone()));
+        }
+        let Type::Named(n, args) = ty else {
+            return Err("nullable foreign argument is not an Option".into());
+        };
+        if n != "Option" || args.len() != 1 {
+            return Err("nullable foreign argument is not an Option".into());
+        }
+        let Source::Memory(_) = source else {
+            return Err("Option foreign argument is not in memory".into());
+        };
+        let layout = Layout::of(self.world, ty)?;
+        let (index, fields) = layout.variant("Some").ok_or("Option lacks Some")?;
+        let offset = fields.first().ok_or("Some lacks a payload")?.offset;
+        Ok((source, index as u64, offset as i64 as u64, args[0].clone()))
+    }
+    /// `foreign_perform` through the `ffi` hook: `None` when no hook is in
+    /// effect or it declined the call.
+    pub(super) fn foreign_perform_swapped(
+        &mut self,
+        plan: &ffi::OpPlan,
+        signature: &Function,
+        args: &[Arg],
+    ) -> Result<Option<ir::Value>, String> {
+        if crate::codegen_swap::hook(crate::codegen_swap::Family::Ffi).is_none() {
+            return Ok(None);
+        }
+        let descriptors = plan.function.parameters();
+        let handler = match plan.handler {
+            Handler::Direct => 0,
+            Handler::IsolatedMpk => 1,
+        };
+        if crate::codegen_swap::request(
+            crate::codegen_swap::Family::Ffi,
+            &mut self.b,
+            &mut *self.m,
+            self.world,
+            self.program,
+            crate::codegen_swap::Site::NONE,
+            swap::BEGIN,
+            &[handler, descriptors.len() as u64],
+            None,
+        )?
+        .is_none()
+        {
+            return Ok(None);
+        }
+        let little = u64::from(self.m.isa().endianness() == ir::Endianness::Little);
+        let mut c_args = vec![];
+        let mut copies: Vec<Vec<u64>> = vec![];
+        let mut restores = vec![];
+        let mut strings: Vec<(u64, u64)> = vec![];
+        for (i, ((arg, param), descriptor)) in args
+            .iter()
+            .zip(&signature.params)
+            .zip(descriptors)
+            .enumerate()
+        {
+            let mut words = vec![i as u64];
+            match descriptor.ty() {
+                ParameterType::CStr => {
+                    let view = self.expr(&arg.expr)?;
+                    words.extend([2, word(view), little, 2]);
+                }
+                ParameterType::Slice { element, .. } if crate::seq::is_slice_type(&param.ty) => {
+                    let view = self.expr(&arg.expr)?;
+                    words.extend([2, word(view), little, 5, element.size() as u64]);
+                }
+                ty => {
+                    let value = self.expr(&arg.expr)?;
+                    let aggregate = Layout::of(self.world, &param.ty)?.aggregate();
+                    let source = if param.pass == Pass::Inout {
+                        let place = self.address(&arg.expr)?;
+                        if !aggregate && let ExprKind::Name(n) = &arg.expr.kind {
+                            let var =
+                                *self.vars.get(n).ok_or("unknown mutable foreign argument")?;
+                            restores.push((var, place, param.ty.clone()));
+                        }
+                        Source::Memory(place)
+                    } else if aggregate {
+                        Source::Memory(value)
+                    } else {
+                        Source::Scalar(value)
+                    };
+                    words.extend(source_words(source));
+                    words.push(little);
+                    match ty {
+                        ParameterType::Value(v) => {
+                            match v {
+                                ValueType::Enum(_) if matches!(source, Source::Scalar(_)) => {
+                                    return Err("foreign enum argument is not in memory".into());
+                                }
+                                ValueType::Unit
+                                | ValueType::Address { .. }
+                                | ValueType::Handle { .. }
+                                | ValueType::NonNullHandle { .. } => {
+                                    return Err(
+                                        "foreign parameter type has no native lowering".into()
+                                    );
+                                }
+                                _ => {}
+                            }
+                            words.push(0);
+                            value_words(v, &mut words);
+                        }
+                        ParameterType::Handle { .. } => words.push(1),
+                        ParameterType::CStr => unreachable!("C strings are lowered above"),
+                        ParameterType::Pointer {
+                            pointee,
+                            access,
+                            nullable,
+                        } => {
+                            let (payload, some, offset, payload_ty) =
+                                self.foreign_option_words(source, &param.ty, *nullable)?;
+                            let writes = *access != PointerAccess::In;
+                            let native = match pointee {
+                                Pointee::Struct(_) => {
+                                    if !matches!(payload, Source::Memory(_)) {
+                                        return Err(
+                                            "foreign struct argument is not in memory".into()
+                                        );
+                                    }
+                                    if identical(pointee, little == 1) {
+                                        None
+                                    } else {
+                                        Some(Layout::of(self.world, &payload_ty)?)
+                                    }
+                                }
+                                Pointee::Scalar(_) => {
+                                    if writes && matches!(payload, Source::Scalar(_)) {
+                                        return Err("writable foreign pointer lacks a place".into());
+                                    }
+                                    None
+                                }
+                            };
+                            words.extend([
+                                3,
+                                u64::from(writes),
+                                u64::from(*nullable),
+                                some,
+                                offset,
+                            ]);
+                            pointee_words(pointee, native.as_ref(), little == 1, &mut words)?;
+                        }
+                        ParameterType::Slice {
+                            element,
+                            access,
+                            nullable,
+                        } => {
+                            let (payload, some, offset, payload_ty) =
+                                self.foreign_option_words(source, &param.ty, *nullable)?;
+                            let writes = *access == Access::Inout;
+                            let n = match &payload_ty {
+                                Type::Tuple(ts) => ts.len(),
+                                _ => 0,
+                            };
+                            let mut offsets = vec![];
+                            let mut native = None;
+                            if n > 0 {
+                                if !matches!(payload, Source::Memory(_)) {
+                                    return Err("foreign slice argument is not in memory".into());
+                                }
+                                if !identical(element, little == 1) {
+                                    let layout = Layout::of(self.world, &payload_ty)?;
+                                    n.checked_mul(element.size())
+                                        .and_then(|b| u32::try_from(b).ok())
+                                        .ok_or("foreign slice buffer is too large")?;
+                                    let LayoutKind::Product(fields) = &layout.kind else {
+                                        return Err("foreign slice is not a tuple".into());
+                                    };
+                                    offsets = fields
+                                        .iter()
+                                        .take(n)
+                                        .map(|f| f.offset as i64 as u64)
+                                        .collect();
+                                    native = fields.first().map(|f| (*f.layout).clone());
+                                }
+                            }
+                            words.extend([
+                                4,
+                                u64::from(writes),
+                                u64::from(*nullable),
+                                some,
+                                offset,
+                                n as u64,
+                                element.size() as u64,
+                            ]);
+                            pointee_words(element, native.as_ref(), little == 1, &mut words)?;
+                            words.extend(offsets);
+                        }
+                    }
+                }
+            }
+            let r = self.foreign_request(swap::ARG, &words)?;
+            let bad = || "malformed ffi ARG answer".to_string();
+            let k = *r.first().ok_or_else(bad)? as usize;
+            let c = r.get(1..1 + k).ok_or_else(bad)?;
+            for w in c {
+                c_args.push(value_of_word(*w)?);
+            }
+            let m = *r.get(1 + k).ok_or_else(bad)? as usize;
+            let copy = r.get(2 + k..2 + k + m).ok_or_else(bad)?;
+            if m > 0 {
+                copies.push(copy.to_vec());
+            }
+            let s = *r.get(2 + k + m).ok_or_else(bad)? as usize;
+            if s == 2 {
+                strings.push((r[3 + k + m], r[4 + k + m]));
+            }
+        }
+        let abi = plan.function.abi();
+        let pointer = self.m.target_config().pointer_type();
+        let mut sig = self.m.make_signature();
+        for t in &abi.parameters {
+            sig.params.push(abi_param(*t, pointer));
+        }
+        if let Some(t) = abi.result {
+            sig.returns.push(abi_param(t, pointer));
+        }
+        self.foreign_symbol_free(plan.function.symbol(), Linkage::Import)?;
+        let callee = self
+            .m
+            .declare_function(plan.function.symbol(), Linkage::Import, &sig)
+            .map_err(|e| format!("foreign symbol '{}': {e}", plan.function.symbol()))?;
+        let callee = self.m.declare_func_in_func(callee, self.b.func);
+        let refusal = if strings.is_empty() {
+            None
+        } else {
+            let layout = Layout::of(self.world, &signature.result)?;
+            let (err, err_fields) = layout.variant("Err").ok_or("Result lacks Err")?;
+            let err_offset = err_fields.first().ok_or("Err lacks a payload")?.offset;
+            let mut words = vec![u64::from(layout.size), err as u64, err_offset as i64 as u64];
+            words.extend(strings.iter().map(|(_, at)| *at));
+            let r = self.foreign_request(swap::REFUSE, &words)?;
+            let [slot, join] = r[..] else {
+                return Err("malformed ffi REFUSE answer".into());
+            };
+            let join = u32::try_from(join)
+                .map(ir::Block::from_u32)
+                .map_err(|_| "malformed ffi REFUSE answer")?;
+            Some((layout, value_of_word(slot)?, join))
+        };
+        let errno = if plan.function.reads_errno() {
+            match ffi::os_error_symbol(self.m.isa().triple())? {
+                ("__errno_location", _) => 1,
+                ("__error", _) => 2,
+                _ => 3,
+            }
+        } else {
+            0
+        };
+        let mut words = vec![
+            u64::from(callee.as_u32()),
+            errno,
+            u64::from(abi.result.is_some()),
+            little,
+            c_args.len() as u64,
+        ];
+        words.extend(c_args.iter().map(|v| word(*v)));
+        words.push(copies.len() as u64);
+        for c in &copies {
+            words.push(c.len() as u64);
+            words.extend(c);
+        }
+        let r = self.foreign_request(swap::CALL, &words)?;
+        let [raw, os] = r[..] else {
+            return Err("malformed ffi CALL answer".into());
+        };
+        let raw = if raw == NO_VALUE {
+            None
+        } else {
+            Some(value_of_word(raw)?)
+        };
+        let os_error = if os == NO_VALUE {
+            None
+        } else {
+            Some(value_of_word(os)?)
+        };
+        for (var, ptr, ty) in restores {
+            let value = self.load(ptr, &ty)?;
+            self.def_var(var, value);
+            if let Some(destination) = self.pointer(var) {
+                self.b
+                    .ins()
+                    .store(ir::MemFlags::new(), value, destination, 0);
+            }
+        }
+        let mut ty = signature.result.clone();
+        if refusal.is_some() {
+            ty = result_ok(&ty)?;
+        }
+        let value_ty = match (&ty, os_error) {
+            (Type::Tuple(ts), Some(_)) if ts.len() == 2 => ts[0].clone(),
+            (_, Some(_)) => return Err("errno result is not a pair".into()),
+            (t, None) => t.clone(),
+        };
+        let mut words = vec![raw.map_or(NO_VALUE, word)];
+        let result = plan.function.result();
+        value_words(result, &mut words);
+        self.foreign_result_layout(result, raw.is_some(), &value_ty, &mut words)?;
+        let r = self.foreign_request(swap::RESULT, &words)?;
+        let mut value = value_of_word(*r.first().ok_or("malformed ffi RESULT answer")?)?;
+        if let Some(code) = os_error {
+            let layout = Layout::of(self.world, &ty)?;
+            let LayoutKind::Product(fields) = &layout.kind else {
+                return Err("errno result is not a pair".into());
+            };
+            let (first, second) = (fields[0].offset, fields[1].offset);
+            let pair = self.alloc(layout.size);
+            let at = self.offset(pair, first);
+            self.store(at, value, &value_ty)?;
+            let at = self.offset(pair, second);
+            self.store(at, code, &Type::named("u32"))?;
+            value = pair;
+        }
+        if let Some((layout, slot, join)) = refusal {
+            let (ok, ok_fields) = layout.variant("Ok").ok_or("Result lacks Ok")?;
+            let ok_offset = ok_fields.first().ok_or("Ok lacks a payload")?.offset;
+            let tag = self.b.ins().iconst(types::I64, ok as i64);
+            self.b.ins().store(ir::MemFlags::new(), tag, slot, 0);
+            let at = self.offset(slot, ok_offset);
+            self.store(at, value, &ty)?;
+            self.jump(join, &[]);
+            self.b.switch_to_block(join);
+            self.b.seal_block(join);
+            value = slot;
+        }
+        if !strings.is_empty() {
+            let buffers: Vec<u64> = strings.iter().map(|(b, _)| *b).collect();
+            self.foreign_request(swap::FINISH, &buffers)?;
+        }
+        Ok(Some(value))
+    }
+    /// The layout words `RESULT` needs for result `v` of source type `ty`,
+    /// with `foreign_result`'s errors: `[size, ok, ok offset, err, err
+    /// offset]` for a validated result (bool, enum, non-null handle),
+    /// `[aggregate, size]` for a `NonNull` handle and `[size, some, some
+    /// offset, none]` for a nullable handle.
+    fn foreign_result_layout(
+        &mut self,
+        v: &ValueType,
+        raw: bool,
+        ty: &Type,
+        out: &mut Vec<u64>,
+    ) -> Result<(), String> {
+        let needs_raw = !matches!(v, ValueType::Unit | ValueType::Address { .. });
+        if needs_raw && !raw {
+            return Err("foreign call returned no value".into());
+        }
+        let validated = |world: &World, out: &mut Vec<u64>| -> Result<(), String> {
+            let layout = Layout::of(world, ty)?;
+            let (ok_index, ok_fields) = layout.variant("Ok").ok_or("Result lacks Ok")?;
+            let ok_offset = ok_fields.first().ok_or("Ok lacks a payload")?.offset;
+            let (err_index, err_fields) = layout.variant("Err").ok_or("Result lacks Err")?;
+            let err_offset = err_fields.first().ok_or("Err lacks a payload")?.offset;
+            if ok_offset != err_offset {
+                return Err("Result payload offsets differ".into());
+            }
+            out.extend([
+                u64::from(layout.size),
+                ok_index as u64,
+                ok_offset as i64 as u64,
+                err_index as u64,
+                err_offset as i64 as u64,
+            ]);
+            Ok(())
+        };
+        match v {
+            ValueType::Unit | ValueType::Scalar(_) => Ok(()),
+            ValueType::Bool | ValueType::Enum(_) => validated(self.world, out),
+            ValueType::Address { .. } => Err("foreign address results have no lowering".into()),
+            ValueType::NonNullHandle { .. } => {
+                let layout = Layout::of(self.world, ty)?;
+                out.extend([u64::from(layout.aggregate()), u64::from(layout.size)]);
+                Ok(())
+            }
+            ValueType::Handle { nullable, .. } => {
+                if !nullable {
+                    return validated(self.world, out);
+                }
+                let layout = Layout::of(self.world, ty)?;
+                let (some, fields) = layout.variant("Some").ok_or("Option lacks Some")?;
+                let offset = fields.first().ok_or("Some lacks a payload")?.offset;
+                let (none, _) = layout.variant("None").ok_or("Option lacks None")?;
+                out.extend([
+                    u64::from(layout.size),
+                    some as u64,
+                    offset as i64 as u64,
+                    none as u64,
+                ]);
+                Ok(())
+            }
+        }
     }
 }
