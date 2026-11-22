@@ -86,6 +86,45 @@ binding at call sites. The port raises `K_NOT_PORTED` for these, and the
 harness counts them separately. Without handlers or host frames the evidence
 set is empty, so every effect operation traps as it does in Rust.
 
+## Seed breadth 1: loops (SH6 lane 2, #1397)
+
+The wasm seed needs the compiler packages to build to wasm, and they use
+`loop`, `for`, `break`, `continue` and `return`. The Rust backend refuses
+these (`loops::WASM_REFUSAL`) and is retired with Rust, so the port now
+lowers them on its own:
+
+- A body with a loop header (`Op::Loop`) or a cyclic block graph is laid
+  out by the dominator-tree method of Ramsey's "Beyond Relooper" (ICFP
+  2022): each block opens a `block` frame for each child in the dominator
+  tree (the latest in reverse postorder outermost), and a `loop` frame
+  when a back edge enters it. Every jump, branch arm and match arm is a
+  `br` to the innermost frame for its target. Immediate dominators come
+  from Cooper, Harvey and Kennedy's iteration.
+- `return` in non-tail position (`Op::Exit` whose owner is the function
+  itself) is a wasm `return`. A `return` that leaves an enclosing function
+  from a handled body stays refused, with handlers.
+- Loop-free bodies keep the topological layout, so their bytes still equal
+  Rust's.
+
+Tests (tests/self_host_wasm_backend.rs):
+
+- `loops_run_like_the_evaluator`: ten loop programs (counters, ranges,
+  nested `for` with `break`, `loop` values, `continue`, early `return`,
+  `match` in a body, a struct across iterations, a loop in a callee) under
+  the four option sets: 40 compilations, each run under Wasmtime with the
+  evaluator's result.
+- `port_matches_rust` counts the corpus programs Rust refuses for loops: the
+  port compiles 8 of them (the 2 with a nullary `main` under the first
+  option set run like the evaluator) and refuses 12 for a later construct.
+  Everything Rust accepts is still byte-identical (640), with 0
+  differences.
+- `hook_artifact_matches_rust` accepts the hook answering a loop program
+  that Rust refuses.
+- The hybrid differential (crates/vesper-hybrid/tests/differential.rs)
+  accepts a wasm build the default compiler refuses for loops and the
+  hybrid compiles: 553 files, 2,206 runs per compiler, 0 differ, and 6 wasm
+  builds with loops that only the hybrid compiles.
+
 ## Results
 
 Cases: the programs of tests/wasm_backend.rs that define `main` and check,
