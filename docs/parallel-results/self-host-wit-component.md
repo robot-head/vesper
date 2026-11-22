@@ -327,6 +327,45 @@ writes, with 0 declines and 0 differences, at under 5% of its time. That
 meets the standing parity bar, in both function and speed. Rust stays the
 default until the owner decides the flip.
 
+## Part 4: the flip
+
+The port is at parity (part 3), so by the standing rule (full function and
+within 1.5x of Rust) it flips.
+
+### What changed
+
+- `src/codegen_swap.rs` gains a `component` hook:
+  `fn(&[u8], &str, WasmWorld) -> Option<Vec<u8>>`.
+- `src/wasm_backend/component.rs` `encode` asks the installed hook first and
+  falls back to wit-component only when the hook declines.
+- `crates/vesper-hybrid` installs `vesper_component`, which wraps through
+  `@vesper/wit-component` and counts wraps and declines
+  (`VESPER_HYBRID_STATS`). Before this, the hybrid wrapped only the
+  components its own Vesper wasm backend wrote, which declines host
+  capabilities. Now every component the hybrid writes, including the ones
+  whose core module the Rust backend wrote, comes from the port.
+- New hybrid test `host_import_component_wraps_from_vesper`: a Stdout and
+  Clock program, built by the hybrid and by the default compiler, gives the
+  same bytes, and the stats line reports 1 wrap from Vesper and 0 declines.
+- `scripts/ci/flip-gate/wit-component.toml` and an ignored `flip_gate` test
+  in `tests/self_host_wit_component.rs` with two ABBA workloads: `wrap`
+  (Rust `encode` against the port on all 1,383 inputs) and `build` (the
+  whole `wasm_backend::compile` of every job, without and with the hook).
+
+### Gate
+
+```
+flip-gate wit-component: PASS (bar: 0 differences, every test, 95% upper <= 1.50x) | tests 1/1 pass | differential 0 differences on 1,383 cases | ABBA vesper/rust wrap 0.05x [0.05x, 0.05x] n=12; build 0.67x [0.65x, 0.68x] n=12
+```
+
+### What stays
+
+`src/wasm_backend/component.rs` and the `wit-component` dependency stay for
+now. They are part of the root compiler, which is still the default build,
+and a compiler module's Rust goes at the compiler's retirement (SH6 lane 2,
+see [rust-exit-plan.md](../maintenance/rust-exit-plan.md)). At that point
+the port is the only writer and the 933 lines go with the compiler.
+
 ## Stage 1 guard
 
 This lane adds a Vesper package, a test, and the hybrid hunks. It does not
@@ -350,11 +389,8 @@ None blocked the port. Two notes for whoever writes the next one:
 
 ## What is left
 
-- **The flip.** It is the owner's call, now that the port is at parity.
-  Today `src/wasm_backend/component.rs` `encode` wraps in the default
-  build, and the port wraps only in the hybrid. The hybrid's Vesper backend
-  declines host capabilities, so the hybrid still reaches only the
-  no-import shapes until lane 15 ports host frames.
+- At the compiler's retirement, delete `src/wasm_backend/component.rs`
+  (933 lines) and the `wit-component` dependency; the hook becomes the
+  only path.
 - If host.rs's WIT changes, the instance types in `host.ves` must change
   with it. The differential fails until they do.
-- Rust stays the default; nothing is deleted.

@@ -779,6 +779,24 @@ fn artifact(
     }
 }
 
+/// The `component` hook of `vesper::codegen_swap` (#1334): every component
+/// the Rust wasm backend wraps (programs the Vesper backend leaves to it,
+/// host imports among them) is written by `@vesper/wit-component`, with
+/// wit-component where the port declines.
+fn vesper_component(
+    core: &[u8],
+    wit: &str,
+    world: vesper::wasm_backend::WasmWorld,
+) -> Option<Vec<u8>> {
+    let component = wrap_component(core, wit, world);
+    if component.is_some() {
+        WRAP_CALLS.fetch_add(1, Relaxed);
+    } else {
+        WRAP_DECLINED.fetch_add(1, Relaxed);
+    }
+    component
+}
+
 /// `@vesper/wit-component`'s component for a core module and its WIT, or
 /// `None` where it declines (modules/wasm_backend `wrap_words`).
 fn wrap_component(
@@ -1309,6 +1327,7 @@ extern "C" fn install() {
     let hooks = vesper::codegen_swap::CodegenHooks {
         aggregate: Some(vesper_aggregate),
         wasm: Some(vesper_wasm),
+        component: Some(vesper_component),
         numeric: Some(vesper_numeric),
         // `VESPER_HYBRID_SCALAR=0` leaves scalars to Rust (the scoreboard's
         // before side).
