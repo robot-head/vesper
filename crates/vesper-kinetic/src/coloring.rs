@@ -25,7 +25,7 @@ pub struct ConstraintBodies {
 
 impl ConstraintBodies {
     #[cfg_attr(vesper_port, allow(dead_code))]
-    fn key(self) -> (BodyId, BodyId) {
+    pub(crate) fn key(self) -> (BodyId, BodyId) {
         match self.b {
             Some(b) if b < self.a => (b, self.a),
             Some(b) => (self.a, b),
@@ -96,19 +96,20 @@ impl std::error::Error for ColoringError {}
 /// [`Colorer::color`] does not allocate.
 #[derive(Debug)]
 pub struct Colorer {
-    body_masks: Vec<u64>,
-    order: Vec<u32>,
-    colors: Vec<u8>,
-    layer_offsets: Vec<u32>,
-    sorted: Vec<u32>,
-    layer_count: usize,
+    pub(crate) body_masks: Vec<u64>,
+    pub(crate) order: Vec<u32>,
+    pub(crate) colors: Vec<u8>,
+    pub(crate) layer_offsets: Vec<u32>,
+    pub(crate) sorted: Vec<u32>,
+    pub(crate) layer_count: usize,
     #[cfg(vesper_port)]
     port: PortScratch,
 }
 
 /// The port-backed build's argument buffers: the constraints as flat `a`
 /// and `b` columns (`b` above `u32::MAX` is `None`) and the packed sort
-/// keys, reserved at construction so colouring stays allocation-free.
+/// keys (two words per constraint: the port's radix sort ping-pongs between
+/// the halves), reserved at construction so colouring stays allocation-free.
 #[cfg(vesper_port)]
 #[derive(Debug)]
 struct PortScratch {
@@ -123,7 +124,7 @@ impl PortScratch {
         Self {
             a: Vec::with_capacity(n),
             b: Vec::with_capacity(n),
-            keys: vec![0; n],
+            keys: vec![0; 2 * n],
         }
     }
 }
@@ -154,7 +155,7 @@ impl Colorer {
         }
         #[cfg(not(vesper_port))]
         {
-            self.color_rust(constraints)
+            crate::engine::coloring::color(self, constraints)
         }
     }
 
@@ -189,7 +190,7 @@ impl Colorer {
             &p.b,
             capacity as u64,
             &mut self.body_masks,
-            &mut p.keys[..n],
+            &mut p.keys[..2 * n],
             &mut self.order,
             &mut self.colors,
             &mut self.layer_offsets,
@@ -197,74 +198,6 @@ impl Colorer {
         )? as usize;
         self.layer_offsets.truncate(used + 1);
         self.layer_count = used;
-        Ok(())
-    }
-
-    #[cfg(not(vesper_port))]
-    fn color_rust(&mut self, constraints: &[ConstraintBodies]) -> Result<(), ColoringError> {
-        let capacity = self.colors.len();
-        if constraints.len() > capacity || constraints.len() > u32::MAX as usize {
-            return Err(ColoringError::CapacityExceeded {
-                constraints: constraints.len(),
-                capacity,
-            });
-        }
-        let bodies = self.body_masks.len();
-        for (constraint, c) in constraints.iter().enumerate() {
-            for body in [Some(c.a), c.b].into_iter().flatten() {
-                if body as usize >= bodies {
-                    return Err(ColoringError::BodyOutOfRange { constraint, body });
-                }
-            }
-            if c.b == Some(c.a) {
-                return Err(ColoringError::SelfConstraint {
-                    constraint,
-                    body: c.a,
-                });
-            }
-        }
-        self.body_masks.fill(0);
-        self.order.clear();
-        self.order.extend(0..constraints.len() as u32);
-        // Keys are unique (index breaks ties), so an unstable sort is
-        // deterministic and allocation-free.
-        self.order
-            .sort_unstable_by_key(|&i| (constraints[i as usize].key(), i));
-        let mut used_colors = 0usize;
-        for &i in &self.order {
-            let c = constraints[i as usize];
-            let mut busy = self.body_masks[c.a as usize];
-            if let Some(b) = c.b {
-                busy |= self.body_masks[b as usize];
-            }
-            let free = !busy;
-            if free == 0 {
-                return Err(ColoringError::TooManyColors {
-                    constraint: i as usize,
-                });
-            }
-            let color = free.trailing_zeros();
-            let bit = 1u64 << color;
-            self.body_masks[c.a as usize] |= bit;
-            if let Some(b) = c.b {
-                self.body_masks[b as usize] |= bit;
-            }
-            self.colors[i as usize] = color as u8;
-            used_colors = used_colors.max(color as usize + 1);
-        }
-        // Bucket by colour, keeping visiting order inside each colour.
-        self.layer_offsets.clear();
-        self.sorted.clear();
-        for color in 0..used_colors {
-            self.layer_offsets.push(self.sorted.len() as u32);
-            for &i in &self.order {
-                if self.colors[i as usize] as usize == color {
-                    self.sorted.push(i);
-                }
-            }
-        }
-        self.layer_offsets.push(self.sorted.len() as u32);
-        self.layer_count = used_colors;
         Ok(())
     }
 
@@ -338,17 +271,18 @@ pub const MAX_CONSTRAINT_BODIES: usize = 4;
 /// compares the Rust colours with the model's on concrete inputs.
 #[derive(Debug)]
 pub struct MultiColorer {
-    body_masks: Vec<u64>,
-    order: Vec<u32>,
+    pub(crate) body_masks: Vec<u64>,
+    pub(crate) order: Vec<u32>,
     #[cfg(not(vesper_port))]
-    keys: Vec<(BodyId, BodyId)>,
-    /// `(min << 32) | max`, the port's packed sort key.
+    pub(crate) keys: Vec<(BodyId, BodyId)>,
+    /// `(min << 32) | max`, the port's packed sort key, two words per
+    /// constraint (the port's radix sort ping-pongs between the halves).
     #[cfg(vesper_port)]
     keys: Vec<u64>,
-    colors: Vec<u8>,
-    layer_offsets: Vec<u32>,
-    sorted: Vec<u32>,
-    layer_count: usize,
+    pub(crate) colors: Vec<u8>,
+    pub(crate) layer_offsets: Vec<u32>,
+    pub(crate) sorted: Vec<u32>,
+    pub(crate) layer_count: usize,
 }
 
 impl MultiColorer {
@@ -358,7 +292,10 @@ impl MultiColorer {
         Self {
             body_masks: vec![0; body_count],
             order: Vec::with_capacity(max_constraints),
+            #[cfg(not(vesper_port))]
             keys: vec![Default::default(); max_constraints],
+            #[cfg(vesper_port)]
+            keys: vec![0; 2 * max_constraints],
             colors: vec![0; max_constraints],
             layer_offsets: Vec::with_capacity(MAX_COLORS + 1),
             sorted: Vec::with_capacity(max_constraints),
@@ -375,7 +312,7 @@ impl MultiColorer {
         }
         #[cfg(not(vesper_port))]
         {
-            self.color_rust(bodies, offsets)
+            crate::engine::coloring::color_sets(self, bodies, offsets)
         }
     }
 
@@ -401,90 +338,13 @@ impl MultiColorer {
             offsets,
             capacity as u64,
             &mut self.body_masks,
-            &mut self.keys[..count],
+            &mut self.keys[..2 * count],
             &mut self.order,
             &mut self.colors,
             &mut self.layer_offsets,
             &mut self.sorted,
         )? as usize;
         self.layer_offsets.truncate(used + 1);
-        self.layer_count = used;
-        Ok(())
-    }
-
-    #[cfg(not(vesper_port))]
-    fn color_rust(&mut self, bodies: &[BodyId], offsets: &[u32]) -> Result<(), ColoringError> {
-        let count = offsets.len().saturating_sub(1);
-        let capacity = self.colors.len();
-        if count > capacity || count > u32::MAX as usize {
-            return Err(ColoringError::CapacityExceeded {
-                constraints: count,
-                capacity,
-            });
-        }
-        if offsets.first().is_some_and(|o| *o != 0) {
-            return Err(ColoringError::BadArity { constraint: 0 });
-        }
-        let n = self.body_masks.len();
-        for i in 0..count {
-            let (lo, hi) = (offsets[i] as usize, offsets[i + 1] as usize);
-            if hi <= lo || hi - lo > MAX_CONSTRAINT_BODIES || hi > bodies.len() {
-                return Err(ColoringError::BadArity { constraint: i });
-            }
-            let set = &bodies[lo..hi];
-            for (k, &b) in set.iter().enumerate() {
-                if b as usize >= n {
-                    return Err(ColoringError::BodyOutOfRange {
-                        constraint: i,
-                        body: b,
-                    });
-                }
-                if set[..k].contains(&b) {
-                    return Err(ColoringError::SelfConstraint {
-                        constraint: i,
-                        body: b,
-                    });
-                }
-            }
-            let min = set.iter().copied().min().unwrap_or(0);
-            let max = set.iter().copied().max().unwrap_or(0);
-            self.keys[i] = (min, max);
-        }
-        self.body_masks.fill(0);
-        self.order.clear();
-        self.order.extend(0..count as u32);
-        let keys = &self.keys;
-        self.order.sort_unstable_by_key(|&i| (keys[i as usize], i));
-        let mut used = 0usize;
-        for &i in &self.order {
-            let set = &bodies[offsets[i as usize] as usize..offsets[i as usize + 1] as usize];
-            let busy = set
-                .iter()
-                .fold(0u64, |m, &b| m | self.body_masks[b as usize]);
-            let free = !busy;
-            if free == 0 {
-                return Err(ColoringError::TooManyColors {
-                    constraint: i as usize,
-                });
-            }
-            let color = free.trailing_zeros();
-            for &b in set {
-                self.body_masks[b as usize] |= 1u64 << color;
-            }
-            self.colors[i as usize] = color as u8;
-            used = used.max(color as usize + 1);
-        }
-        self.layer_offsets.clear();
-        self.sorted.clear();
-        for color in 0..used {
-            self.layer_offsets.push(self.sorted.len() as u32);
-            for &i in &self.order {
-                if self.colors[i as usize] as usize == color {
-                    self.sorted.push(i);
-                }
-            }
-        }
-        self.layer_offsets.push(self.sorted.len() as u32);
         self.layer_count = used;
         Ok(())
     }

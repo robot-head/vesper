@@ -78,6 +78,42 @@ pub(crate) mod abi {
         Unknown(u64),
     }
 
+    pub use crate::connection::ConnectionError;
+    pub use crate::transport::TransportError;
+
+    /// What the stream router (`vesper/src/control.ves`) asks the driver to
+    /// do; bytes are the router's `out[at..at + len]`.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum UniCmd {
+        None,
+        StopSending {
+            stream_id: u64,
+            code: u64,
+        },
+        /// Bytes of the peer's QPACK encoder stream, for our decoder.
+        ToDecoder {
+            at: u64,
+            len: u64,
+        },
+        /// Bytes of the peer's QPACK decoder stream, for our encoder.
+        ToEncoder {
+            at: u64,
+            len: u64,
+        },
+        /// A WebTransport stream and the bytes after its header.
+        WebTransportStream {
+            stream_id: u64,
+            session: u64,
+            at: u64,
+            len: u64,
+        },
+        PeerSettings(Settings),
+        PriorityUpdate(PriorityUpdate),
+        UnknownFrame,
+        UnknownStream,
+        GoAway(u64),
+    }
+
     /// A decoded prefixed integer and the bytes it used.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct IntRead {

@@ -1,13 +1,7 @@
 // Object identities (src/id.rs): the domain-separated BLAKE3 contexts,
 // the 34-byte binary id and the `b3v1:<domain>:<kind>:<hex>` text form.
 use self::IdErr;
-use @vesper-std/hash-sys::{
-    hasher_new_derive_key,
-    update,
-    finalize,
-    hasher_free
-};
-use @vesper-std/hash::blake3::digest_bytes;
+use @vesper-std/hash-sys::derive_key_hash;
 
 fn byte(in s: Slice[u8], i: u64) -> u8 {
     match s.try_get(i) {
@@ -41,16 +35,7 @@ pub fn context(domain: u8, kind: u8) -> Str {
 
 pub fn object_hash(domain: u8, kind: u8, in bytes: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[Blake3]] {
     let mut out = ChunkSeq::with_capacity[u8](32);
-    match hasher_new_derive_key(in context(domain, kind).as_bytes()) {
-        Option::Some(h) => {
-            let mut h = h;
-            update(inout h, in bytes);
-            let d = finalize(in h);
-            hasher_free(h);
-            digest_bytes(d, inout out);
-        },
-        Option::None => {},
-    }
+    derive_key_hash(in context(domain, kind).as_bytes(), in bytes, 32, inout out);
     out
 }
 

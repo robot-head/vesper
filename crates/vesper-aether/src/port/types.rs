@@ -208,3 +208,52 @@ impl From<PackedFault> for crate::virtio::QueueError {
         }
     }
 }
+
+/// The `QueueError`s the Vesper virtqueue walks raise.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum VqFault {
+    Limit,
+    Overflow,
+    Full,
+    IncompleteChain,
+    UnsupportedFlags,
+    EmptyBuffer,
+    ReadAfterWrite,
+    UnauthorizedRange,
+    InvalidBufferId,
+    BufferIdInUse,
+    IndirectNotNegotiated,
+    IndirectPlacement,
+    IndirectNested,
+    IndirectTableLength,
+    AvailOverrun,
+    InvalidNext,
+    ChainLoop,
+    DescriptorInUse,
+}
+
+impl From<VqFault> for crate::virtio::QueueError {
+    fn from(e: VqFault) -> Self {
+        use crate::virtio::QueueError as Q;
+        match e {
+            VqFault::Limit => Q::Limit,
+            VqFault::Overflow => Q::Overflow,
+            VqFault::Full => Q::Full,
+            VqFault::IncompleteChain => Q::IncompleteChain,
+            VqFault::UnsupportedFlags => Q::UnsupportedFlags,
+            VqFault::EmptyBuffer => Q::EmptyBuffer,
+            VqFault::ReadAfterWrite => Q::ReadAfterWrite,
+            VqFault::UnauthorizedRange => Q::UnauthorizedRange,
+            VqFault::InvalidBufferId => Q::InvalidBufferId,
+            VqFault::BufferIdInUse => Q::BufferIdInUse,
+            VqFault::IndirectNotNegotiated => Q::IndirectNotNegotiated,
+            VqFault::IndirectPlacement => Q::IndirectPlacement,
+            VqFault::IndirectNested => Q::IndirectNested,
+            VqFault::IndirectTableLength => Q::IndirectTableLength,
+            VqFault::AvailOverrun => Q::AvailOverrun,
+            VqFault::InvalidNext => Q::InvalidNext,
+            VqFault::ChainLoop => Q::ChainLoop,
+            VqFault::DescriptorInUse => Q::DescriptorInUse,
+        }
+    }
+}

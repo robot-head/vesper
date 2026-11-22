@@ -1,6 +1,8 @@
 # The frozen Rust seed copy of vesper-kinetic (package vesper-kinetic-seed,
 # library vesper_kinetic) that the compiler and every other dependent link:
-# ../src built without the port, so cfg(vesper_port) is off. Written by hand
+# ../src built without the port, so cfg(vesper_port) is off, over the frozen
+# Rust engine in src/engine for the modules the port replaced (SH6 lane 9,
+# #1404). Written by hand
 # because its sources live in the parent package; see "Crates the compiler
 # links" in docs/maintenance/porting-a-crate.md (port wave P3b lane 8, #1070).
 load("@rules_rs//rs:rust_library.bzl", "rust_library")
@@ -24,9 +26,9 @@ _ENV = {
 
 rust_library(
     name = "seed",
-    srcs = ["//crates/vesper-kinetic:rust_srcs"],
+    srcs = glob(["src/**/*.rs"]) + ["//crates/vesper-kinetic:rust_srcs"],
     crate_name = "vesper_kinetic",
-    crate_root = "//crates/vesper-kinetic:src/lib.rs",
+    crate_root = "src/lib.rs",
     edition = "2024",
     rustc_env = _ENV,
     version = "0.1.0",

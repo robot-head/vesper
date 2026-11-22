@@ -2,7 +2,10 @@
 // the hybrid Stage 2 build (self-hosting SH3 lane 9, #1248), through the
 // `opt` hook of `vesper::ir_swap`.
 //
-// `opt_words` takes the pass's input as little-endian words (the Place IR
+// `opt_words` is the native optimizer policy (src/ir_opt_policy.rs, the
+// default compiler's `opt` path) of `@vesper/ir-opt-policy`: its block
+// screen, then `@vesper/ir-opt` on the blocks it keeps (Rust-exit gap wave
+// 1 lane 12, #1510). It takes the pass's input as little-endian words (the Place IR
 // input of `ir_words::program_input`, the mode and the `@fip` reuse facts;
 // written by `prepare` in tests/common/ir_opt_words.rs) and returns the
 // status, the count, the new `BoxReuse` payloads and the optimized program
@@ -10,8 +13,8 @@
 
 // @export abi 4
 
-use @vesper/ir-opt::{
-    ir_opt_words
+use @vesper/ir-opt-policy::{
+    policy_words
 };
 
 // The layout version of `opt_words`.
@@ -20,7 +23,7 @@ pub fn format() -> u64 {
 }
 
 pub fn opt_words(in input: Slice[u8]) -> ChunkSeq[u64] {
-    ir_opt_words(in input)
+    policy_words(in input)
 }
 
 // The divergent build's stream (build.rs `divergent-ir-opt`): status 1

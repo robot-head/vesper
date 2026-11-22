@@ -16,6 +16,13 @@
 // skipped and left out of the program. Closures and handlers nest
 // functions (`add_nested`), lowered after the world's.
 
+use @vesper/place-ir::codes::{
+    Lit,
+    Op,
+    Pat,
+    Tag,
+    Term
+};
 use @vesper/check-data::util::{
     add,
     inc,
@@ -79,57 +86,6 @@ const M_LINEAR: u8 = 2;
 // Passes.
 const P_IN: u8 = 0;
 const P_SINK: u8 = 2;
-
-// Operand tags (@vesper/place-ir).
-const T_RAW: u8 = 0;
-const T_NAME: u8 = 1;
-const T_OPT_NAME: u8 = 2;
-const T_TYPE: u8 = 3;
-const T_PATH: u8 = 4;
-const T_POOL: u8 = 5;
-const T_VALUE: u8 = 6;
-const T_BLOCK: u8 = 7;
-
-// Opcodes (@vesper/place-ir), in `Op` order.
-const OP_CONST: u8 = 0;
-const OP_UNIT: u8 = 1;
-const OP_READ: u8 = 2;
-const OP_BIND: u8 = 3;
-const OP_WRITE: u8 = 4;
-const OP_UNARY: u8 = 5;
-const OP_BINARY: u8 = 6;
-const OP_TUPLE: u8 = 7;
-const OP_DATA: u8 = 8;
-const OP_PROJECT: u8 = 9;
-const OP_INDEX: u8 = 10;
-const OP_CALL: u8 = 11;
-const OP_INDIRECT: u8 = 12;
-const OP_TRY: u8 = 13;
-const OP_CLOSURE: u8 = 14;
-const OP_HANDLE: u8 = 15;
-const OP_TILED: u8 = 17;
-const OP_SEQ: u8 = 18;
-const OP_FIP: u8 = 19;
-const OP_LOOP: u8 = 20;
-const OP_EXIT: u8 = 21;
-
-// Terminators.
-const TERM_RETURN: u8 = 0;
-const TERM_JUMP: u8 = 1;
-const TERM_BRANCH: u8 = 2;
-const TERM_MATCH: u8 = 3;
-const TERM_UNREACHABLE: u8 = 4;
-
-// Pattern kinds.
-const PT_BIND: u8 = 1;
-const PT_LITERAL: u8 = 2;
-const PT_TUPLE: u8 = 3;
-const PT_CTOR: u8 = 4;
-
-// Literal kinds.
-const LIT_INT: u64 = 0;
-const LIT_BOOL: u64 = 2;
-const LIT_STRING: u64 = 3;
 
 // Expression kinds (ast.ves).
 const X_FOREIGN: u8 = 0;
@@ -427,7 +383,7 @@ fn bk(in l: L, i: u64) -> Bk {
         Option::Some(b) => b,
         Option::None => Bk {
             param: NONE32,
-            term: TERM_UNREACHABLE,
+            term: Term::Unreachable,
             ta: 0,
             tn: 0
         },
@@ -441,7 +397,7 @@ fn new_block(inout l: L) -> u64 {
         .push(
             Bk {
                 param: NONE32,
-                term: TERM_UNREACHABLE,
+                term: Term::Unreachable,
                 ta: 0,
                 tn: 0
             }
@@ -466,22 +422,22 @@ fn set_term(inout l: L, b: u64, term: u8, a: u64) {
 
 fn jump(inout l: L, from: u64, to: u64, arg: u32) {
     let a = l.sops.len();
-    put(inout l, to, T_BLOCK);
+    put(inout l, to, Tag::Block);
     if arg == NONE32 {
-        put(inout l, 0, T_RAW);
+        put(inout l, 0, Tag::Raw);
     } else {
-        put(inout l, 1, T_RAW);
-        put(inout l, w(arg), T_VALUE);
+        put(inout l, 1, Tag::Raw);
+        put(inout l, w(arg), Tag::Value);
     }
-    set_term(inout l, from, TERM_JUMP, a);
+    set_term(inout l, from, Term::Jump, a);
 }
 
 fn branch(inout l: L, from: u64, condition: u32, yes: u64, no: u64) {
     let a = l.sops.len();
-    put(inout l, w(condition), T_VALUE);
-    put(inout l, yes, T_BLOCK);
-    put(inout l, no, T_BLOCK);
-    set_term(inout l, from, TERM_BRANCH, a);
+    put(inout l, w(condition), Tag::Value);
+    put(inout l, yes, Tag::Block);
+    put(inout l, no, Tag::Block);
+    set_term(inout l, from, Term::Branch, a);
 }
 
 // The program path of input path `i` (parameter projections).
@@ -620,22 +576,22 @@ fn is_fn(in l: L, s: u32) -> bool {
 // ----- emitting -------------------------------------------------------------------
 
 fn state_action(in l: L, op: u8, a: u64, fallible: bool) -> bool {
-    if op == OP_BIND
-        || op == OP_WRITE
-        || op == OP_CALL
-        || op == OP_INDIRECT
-        || op == OP_TRY
-        || op == OP_HANDLE
-        || op == OP_CLOSURE
-        || op == OP_INDEX
-        || op == OP_TILED
-        || op == OP_SEQ
-        || op == OP_FIP
-        || op == OP_EXIT
+    if op == Op::Bind
+        || op == Op::Write
+        || op == Op::Call
+        || op == Op::Indirect
+        || op == Op::Try
+        || op == Op::Handle
+        || op == Op::Closure
+        || op == Op::Index
+        || op == Op::Tiled
+        || op == Op::Seq
+        || op == Op::Fip
+        || op == Op::Exit
         || fallible {
         return true;
     }
-    if op == OP_BINARY {
+    if op == Op::Binary {
         let s = n32(sop(in l, a));
         return s == l.s_div || s == l.s_rem || s == l.s_shl || s == l.s_shr;
     }
@@ -654,7 +610,7 @@ fn push_inst(inout l: L, op: u8, a: u64, s0: u64, s1: u64, ty: u32, fallible: bo
         s1: s1,
         fallible: fallible,
         action: action,
-        read: op == OP_READ,
+        read: op == Op::Read,
         op: op,
         a: a,
         n: wrapping_sub(l.sops.len(), a)
@@ -667,7 +623,7 @@ fn push_inst(inout l: L, op: u8, a: u64, s0: u64, s1: u64, ty: u32, fallible: bo
 fn emit(inout l: L, op: u8, a: u64, s0: u64, s1: u64) -> u32 {
     let infer = l.c.types.infer;
     let mut ty = type_at(inout l, s0, s1);
-    if ty == infer && op == OP_READ {
+    if ty == infer && op == Op::Read {
         let root_ty = local_of(in l, n32(sop(in l, a)));
         if root_ty != NONE32 {
             let t = field_type(inout l, root_ty, sop(in l, inc(a)));
@@ -676,11 +632,11 @@ fn emit(inout l: L, op: u8, a: u64, s0: u64, s1: u64) -> u32 {
             }
         }
     }
-    if op == OP_BIND || op == OP_WRITE || op == OP_LOOP {
+    if op == Op::Bind || op == Op::Write || op == Op::Loop {
         ty = l.c.types.unit;
     }
     let fallible = (
-        op == OP_BINARY || op == OP_UNARY || op == OP_WRITE || op == OP_INDEX || op == OP_SEQ
+        op == Op::Binary || op == Op::Unary || op == Op::Write || op == Op::Index || op == Op::Seq
     )
         && (l.c.world.is_partial(s0, s1) || l.c.world.may_overflow(s0, s1));
     push_inst(inout l, op, a, s0, s1, ty, fallible)
@@ -693,17 +649,17 @@ fn emit_at(inout l: L, op: u8, a: u64, s0: u64, s1: u64, ty: u32) -> u32 {
 
 fn unit(inout l: L, s0: u64, s1: u64) -> u32 {
     let a = l.sops.len();
-    emit(inout l, OP_UNIT, a, s0, s1)
+    emit(inout l, Op::Unit, a, s0, s1)
 }
 
 fn put_literal(inout l: L, kind: u64, lo: u64, hi: u64) {
-    put(inout l, kind, T_RAW);
-    if kind == LIT_STRING {
-        put(inout l, lo, T_NAME);
+    put(inout l, kind, Tag::Raw);
+    if kind == Lit::String {
+        put(inout l, lo, Tag::Name);
     } else {
-        put(inout l, lo, T_RAW);
+        put(inout l, lo, Tag::Raw);
     }
-    put(inout l, hi, T_RAW);
+    put(inout l, hi, Tag::Raw);
 }
 
 // A `Read` of root `root` and program path `path`; projections are input
@@ -716,14 +672,14 @@ fn read(inout l: L, root: u32, path: u64, pass: u8, qa: u64, qn: u64, s0: u64, s
         ps.push(id);
     }
     let a = l.sops.len();
-    put(inout l, w(root), T_NAME);
-    put(inout l, path, T_PATH);
-    put(inout l, widen_u64(pass), T_RAW);
-    put(inout l, qn, T_RAW);
+    put(inout l, w(root), Tag::Name);
+    put(inout l, path, Tag::Path);
+    put(inout l, widen_u64(pass), Tag::Raw);
+    put(inout l, qn, Tag::Raw);
     for i in 0..qn {
-        put(inout l, u64_at(in ps, i), T_PATH);
+        put(inout l, u64_at(in ps, i), Tag::Path);
     }
-    emit(inout l, OP_READ, a, s0, s1)
+    emit(inout l, Op::Read, a, s0, s1)
 }
 
 // ----- patterns -------------------------------------------------------------------
@@ -744,10 +700,10 @@ fn slot_name(inout l: L, in prefix: Str, k: u32, src: u32, in suffix: Str) -> u3
 // `ty` (bindings get fresh slots, recorded in `names` and `locals`).
 fn pattern(inout l: L, pid: u64, ty: u32, rename: bool) {
     let p = l.a.pt(pid);
-    put(inout l, widen_u64(p.kind), T_RAW);
-    put(inout l, p.s0, T_RAW);
-    put(inout l, p.s1, T_RAW);
-    if p.kind == PT_BIND {
+    put(inout l, widen_u64(p.kind), Tag::Raw);
+    put(inout l, p.s0, Tag::Raw);
+    put(inout l, p.s1, Tag::Raw);
+    if p.kind == Pat::Bind {
         let src = n32(p.a);
         if rename {
             let k = fresh(inout l);
@@ -755,14 +711,14 @@ fn pattern(inout l: L, pid: u64, ty: u32, rename: bool) {
             set_alias(inout l, src, unique);
             let t = default_type(inout l.c.types, ty);
             set_local(inout l, unique, t);
-            put(inout l, w(unique), T_NAME);
+            put(inout l, w(unique), Tag::Name);
         } else {
-            put(inout l, p.a, T_NAME);
+            put(inout l, p.a, Tag::Name);
         }
-    } else if p.kind == PT_LITERAL {
+    } else if p.kind == Pat::Literal {
         put_literal(inout l, p.a, p.b, p.c);
-    } else if p.kind == PT_TUPLE {
-        put(inout l, p.n, T_RAW);
+    } else if p.kind == Pat::Tuple {
+        put(inout l, p.n, Tag::Raw);
         let tuple = rename && l.c.types.kind(ty) == K_TUPLE;
         let m = if tuple {
             l.c.types.arity(ty)
@@ -778,17 +734,17 @@ fn pattern(inout l: L, pid: u64, ty: u32, rename: bool) {
                 pattern(inout l, kid, 0, false);
             }
         }
-    } else if p.kind == PT_CTOR {
-        put(inout l, p.a, T_NAME);
-        put(inout l, p.c, T_RAW);
-        put(inout l, p.n, T_RAW);
+    } else if p.kind == Pat::Constructor {
+        put(inout l, p.a, Tag::Name);
+        put(inout l, p.c, Tag::Raw);
+        put(inout l, p.n, Tag::Raw);
         let mut ci = NONE64;
         if rename {
             ci = ctor_of(inout l, n32(p.a));
         }
         if ci == NONE64 {
             for i in 0..p.n {
-                put(inout l, l.a.px(add(p.b, wrapping_mul(i, 2))), T_NAME);
+                put(inout l, l.a.px(add(p.b, wrapping_mul(i, 2))), Tag::Name);
                 pattern(inout l, l.a.px(add(p.b, inc(wrapping_mul(i, 2)))), 0, false);
             }
             return;
@@ -803,7 +759,7 @@ fn pattern(inout l: L, pid: u64, ty: u32, rename: bool) {
         for i in 0..p.n {
             let f = n32(l.a.px(add(p.b, wrapping_mul(i, 2))));
             let kid = l.a.px(add(p.b, inc(wrapping_mul(i, 2))));
-            put(inout l, w(f), T_NAME);
+            put(inout l, w(f), Tag::Name);
             let fi = l.c.world.find_field(v, f);
             if fi == NONE32 {
                 pattern(inout l, kid, 0, false);
@@ -870,14 +826,14 @@ fn argument(inout l: L, id: u64, pass: u8, qa: u64, qn: u64) -> Arg {
 }
 
 fn put_args(inout l: L, in args: ChunkSeq[Arg]) {
-    put(inout l, args.len(), T_RAW);
+    put(inout l, args.len(), Tag::Raw);
     for i in 0..args.len() {
         match args.try_get(i) {
             Option::Some(x) => {
-                put(inout l, widen_u64(x.pass), T_RAW);
-                put(inout l, w(x.value), T_VALUE);
-                put(inout l, w(x.root), T_OPT_NAME);
-                put(inout l, x.path, T_PATH);
+                put(inout l, widen_u64(x.pass), Tag::Raw);
+                put(inout l, w(x.value), Tag::Value);
+                put(inout l, w(x.root), Tag::OptName);
+                put(inout l, x.path, Tag::Path);
             },
             Option::None => {},
         }
@@ -903,15 +859,15 @@ pub fn expr(inout l: L, id: u64) -> u32 {
     if k == X_LITERAL {
         let a = l.sops.len();
         put_literal(inout l, e.a, e.b, e.c);
-        return emit(inout l, OP_CONST, a, e.s0, e.s1);
+        return emit(inout l, Op::Const, a, e.s0, e.s1);
     }
     if k == X_NAME {
         let s = n32(e.a);
         if !has_alias(in l, s) && ctor_of(inout l, s) != NONE64 {
             let a = l.sops.len();
-            put(inout l, e.a, T_NAME);
-            put(inout l, 0, T_RAW);
-            return emit(inout l, OP_DATA, a, e.s0, e.s1);
+            put(inout l, e.a, Tag::Name);
+            put(inout l, 0, Tag::Raw);
+            return emit(inout l, Op::Data, a, e.s0, e.s1);
         }
         let mut root = alias_of(in l, s);
         if root == NONE32 {
@@ -926,11 +882,11 @@ pub fn expr(inout l: L, id: u64) -> u32 {
             vs.push(v);
         }
         let a = l.sops.len();
-        put(inout l, e.n, T_RAW);
+        put(inout l, e.n, Tag::Raw);
         for i in 0..e.n {
-            put(inout l, w(u32_at(in vs, i)), T_VALUE);
+            put(inout l, w(u32_at(in vs, i)), Tag::Value);
         }
-        return emit(inout l, OP_TUPLE, a, e.s0, e.s1);
+        return emit(inout l, Op::Tuple, a, e.s0, e.s1);
     }
     if k == X_STRUCT {
         let mut vs: ChunkSeq[u32] = ChunkSeq::new[u32]();
@@ -939,13 +895,13 @@ pub fn expr(inout l: L, id: u64) -> u32 {
             vs.push(v);
         }
         let a = l.sops.len();
-        put(inout l, e.a, T_NAME);
-        put(inout l, e.n, T_RAW);
+        put(inout l, e.a, Tag::Name);
+        put(inout l, e.n, Tag::Raw);
         for i in 0..e.n {
-            put(inout l, l.a.x(add(e.b, wrapping_mul(i, 2))), T_NAME);
-            put(inout l, w(u32_at(in vs, i)), T_VALUE);
+            put(inout l, l.a.x(add(e.b, wrapping_mul(i, 2))), Tag::Name);
+            put(inout l, w(u32_at(in vs, i)), Tag::Value);
         }
-        return emit(inout l, OP_DATA, a, e.s0, e.s1);
+        return emit(inout l, Op::Data, a, e.s0, e.s1);
     }
     if k == X_FIELD {
         let mut syms: ChunkSeq[u32] = ChunkSeq::new[u32]();
@@ -956,24 +912,24 @@ pub fn expr(inout l: L, id: u64) -> u32 {
         }
         let v = expr(inout l, e.a);
         let a = l.sops.len();
-        put(inout l, w(v), T_VALUE);
-        put(inout l, e.b, T_NAME);
-        return emit(inout l, OP_PROJECT, a, e.s0, e.s1);
+        put(inout l, w(v), Tag::Value);
+        put(inout l, e.b, Tag::Name);
+        return emit(inout l, Op::Project, a, e.s0, e.s1);
     }
     if k == X_INDEX {
         let x = expr(inout l, e.a);
         let y = expr(inout l, e.b);
         let a = l.sops.len();
-        put(inout l, w(x), T_VALUE);
-        put(inout l, w(y), T_VALUE);
-        return emit(inout l, OP_INDEX, a, e.s0, e.s1);
+        put(inout l, w(x), Tag::Value);
+        put(inout l, w(y), Tag::Value);
+        return emit(inout l, Op::Index, a, e.s0, e.s1);
     }
     if k == X_UNARY {
         let v = expr(inout l, e.b);
         let a = l.sops.len();
-        put(inout l, e.a, T_NAME);
-        put(inout l, w(v), T_VALUE);
-        return emit(inout l, OP_UNARY, a, e.s0, e.s1);
+        put(inout l, e.a, Tag::Name);
+        put(inout l, w(v), Tag::Value);
+        return emit(inout l, Op::Unary, a, e.s0, e.s1);
     }
     if k == X_BINARY {
         let op = n32(e.a);
@@ -986,10 +942,10 @@ pub fn expr(inout l: L, id: u64) -> u32 {
         let x = operand(inout l, op, e.b);
         let y = operand(inout l, op, e.c);
         let a = l.sops.len();
-        put(inout l, e.a, T_NAME);
-        put(inout l, w(x), T_VALUE);
-        put(inout l, w(y), T_VALUE);
-        return emit(inout l, OP_BINARY, a, e.s0, e.s1);
+        put(inout l, e.a, Tag::Name);
+        put(inout l, w(x), Tag::Value);
+        put(inout l, w(y), Tag::Value);
+        return emit(inout l, Op::Binary, a, e.s0, e.s1);
     }
     if k == X_ASSIGN {
         let v = expr(inout l, e.c);
@@ -1005,10 +961,10 @@ pub fn expr(inout l: L, id: u64) -> u32 {
         }
         let display = intern_bytes(inout l, in text);
         let a = l.sops.len();
-        put(inout l, w(display), T_NAME);
-        put(inout l, e.a, T_NAME);
-        put(inout l, w(v), T_VALUE);
-        return emit(inout l, OP_WRITE, a, e.s0, e.s1);
+        put(inout l, w(display), Tag::Name);
+        put(inout l, e.a, Tag::Name);
+        put(inout l, w(v), Tag::Value);
+        return emit(inout l, Op::Write, a, e.s0, e.s1);
     }
     if k == X_BLOCK {
         return block(inout l, e);
@@ -1019,8 +975,8 @@ pub fn expr(inout l: L, id: u64) -> u32 {
     if k == X_TRY {
         let v = expr(inout l, e.a);
         let a = l.sops.len();
-        put(inout l, w(v), T_VALUE);
-        return emit(inout l, OP_TRY, a, e.s0, e.s1);
+        put(inout l, w(v), Tag::Value);
+        return emit(inout l, Op::Try, a, e.s0, e.s1);
     }
     if k == X_IF {
         if e.c == NONE64 {
@@ -1058,8 +1014,8 @@ fn arm(inout l: L, kind: u8, x: u64, s0: u64, s1: u64) -> u32 {
     }
     if kind == BR_LIT {
         let a = l.sops.len();
-        put_literal(inout l, LIT_BOOL, x, 0);
-        return emit(inout l, OP_CONST, a, s0, s1);
+        put_literal(inout l, Lit::Bool, x, 0);
+        return emit(inout l, Op::Const, a, s0, s1);
     }
     unit(inout l, s0, s1)
 }
@@ -1097,13 +1053,13 @@ fn lower_match(inout l: L, e: Ex) -> u32 {
         let b = new_block(inout l);
     }
     let a = l.sops.len();
-    put(inout l, w(value), T_VALUE);
-    put(inout l, e.n, T_RAW);
+    put(inout l, w(value), Tag::Value);
+    put(inout l, e.n, Tag::Raw);
     for i in 0..e.n {
         pattern(inout l, l.a.x(add(e.b, wrapping_mul(i, 2))), 0, false);
-        put(inout l, add(first, i), T_BLOCK);
+        put(inout l, add(first, i), Tag::Block);
     }
-    set_term(inout l, l.cur, TERM_MATCH, a);
+    set_term(inout l, l.cur, Term::Match, a);
     // Every arm's `Bind` has the first arm body's span.
     let body0 = l.a.ex(l.a.x(inc(e.b)));
     let mark = l.trail.len();
@@ -1112,9 +1068,9 @@ fn lower_match(inout l: L, e: Ex) -> u32 {
         l.cur = add(first, i);
         restore(inout l, mark);
         let b = l.sops.len();
-        put(inout l, w(value), T_VALUE);
+        put(inout l, w(value), Tag::Value);
         pattern(inout l, l.a.x(add(e.b, wrapping_mul(i, 2))), vt, true);
-        let bind = emit(inout l, OP_BIND, b, body0.s0, body0.s1);
+        let bind = emit(inout l, Op::Bind, b, body0.s0, body0.s1);
         let v = expr(inout l, l.a.x(add(e.b, inc(wrapping_mul(i, 2)))));
         jump(inout l, l.cur, join, v);
     }
@@ -1133,10 +1089,10 @@ fn block(inout l: L, e: Ex) -> u32 {
             let v = expr(inout l, x);
             let t = val_ty(in l, v);
             let a = l.sops.len();
-            put(inout l, w(v), T_VALUE);
+            put(inout l, w(v), Tag::Value);
             pattern(inout l, l.a.x(inc(at)), t, true);
             let s = l.a.ex(x);
-            let bind = emit(inout l, OP_BIND, a, s.s0, s.s1);
+            let bind = emit(inout l, Op::Bind, a, s.s0, s.s1);
         } else {
             let v = expr(inout l, x);
             let s = l.a.ex(x);
@@ -1159,18 +1115,18 @@ fn binary_call(inout l: L, e: Ex, op: u32) -> u32 {
     let x = expr(inout l, l.a.x(inc(e.b)));
     let y = expr(inout l, l.a.x(add(e.b, 3)));
     let a = l.sops.len();
-    put(inout l, w(op), T_NAME);
-    put(inout l, w(x), T_VALUE);
-    put(inout l, w(y), T_VALUE);
-    emit(inout l, OP_BINARY, a, e.s0, e.s1)
+    put(inout l, w(op), Tag::Name);
+    put(inout l, w(x), Tag::Value);
+    put(inout l, w(y), Tag::Value);
+    emit(inout l, Op::Binary, a, e.s0, e.s1)
 }
 
 fn unary_call(inout l: L, e: Ex, op: u32) -> u32 {
     let x = expr(inout l, l.a.x(inc(e.b)));
     let a = l.sops.len();
-    put(inout l, w(op), T_NAME);
-    put(inout l, w(x), T_VALUE);
-    emit(inout l, OP_UNARY, a, e.s0, e.s1)
+    put(inout l, w(op), Tag::Name);
+    put(inout l, w(x), Tag::Value);
+    emit(inout l, Op::Unary, a, e.s0, e.s1)
 }
 
 // "{a}::{b}" of two symbols' spellings, as bytes.
@@ -1301,13 +1257,13 @@ fn call(inout l: L, e: Ex) -> u32 {
             fields.push(s);
         }
         let a = l.sops.len();
-        put(inout l, w(name), T_NAME);
-        put(inout l, e.n, T_RAW);
+        put(inout l, w(name), Tag::Name);
+        put(inout l, e.n, Tag::Raw);
         for i in 0..e.n {
-            put(inout l, w(u32_at(in fields, i)), T_NAME);
-            put(inout l, w(u32_at(in vs, i)), T_VALUE);
+            put(inout l, w(u32_at(in fields, i)), Tag::Name);
+            put(inout l, w(u32_at(in vs, i)), Tag::Value);
         }
-        return emit(inout l, OP_DATA, a, e.s0, e.s1);
+        return emit(inout l, Op::Data, a, e.s0, e.s1);
     }
     let range = callee_params(inout l, name);
     let pa = wrapping_shr_u64(range, 32);
@@ -1325,14 +1281,14 @@ fn call(inout l: L, e: Ex) -> u32 {
         i = inc(i);
     }
     let a = l.sops.len();
-    put(inout l, w(name), T_NAME);
+    put(inout l, w(name), Tag::Name);
     put_args(inout l, in args);
-    put(inout l, e.m, T_RAW);
+    put(inout l, e.m, Tag::Raw);
     for j in 0..e.m {
-        put(inout l, l.a.x(add(e.c, j)), T_TYPE);
+        put(inout l, l.a.x(add(e.c, j)), Tag::Type);
     }
-    put(inout l, w(capability), T_OPT_NAME);
-    emit(inout l, OP_CALL, a, e.s0, e.s1)
+    put(inout l, w(capability), Tag::OptName);
+    emit(inout l, Op::Call, a, e.s0, e.s1)
 }
 
 // Argument `i` of a call whose callee has parameters pms[pa..pa+pn]:
@@ -1364,9 +1320,9 @@ fn indirect(inout l: L, e: Ex, callee: Ex) -> u32 {
         args.push(x);
     }
     let a = l.sops.len();
-    put(inout l, w(callable), T_VALUE);
+    put(inout l, w(callable), Tag::Value);
     put_args(inout l, in args);
-    emit(inout l, OP_INDIRECT, a, e.s0, e.s1)
+    emit(inout l, Op::Indirect, a, e.s0, e.s1)
 }
 
 // ----- loops and exits (src/loops/ir.rs) ---------------------------------------------
@@ -1379,11 +1335,11 @@ fn after_jump(inout l: L, e: Ex) -> u32 {
 
 fn read_slot(inout l: L, slot: u32, s0: u64, ty: u32) -> u32 {
     let a = l.sops.len();
-    put(inout l, w(slot), T_NAME);
-    put(inout l, 0, T_PATH);
-    put(inout l, widen_u64(P_SINK), T_RAW);
-    put(inout l, 0, T_RAW);
-    emit_at(inout l, OP_READ, a, s0, s0, ty)
+    put(inout l, w(slot), Tag::Name);
+    put(inout l, 0, Tag::Path);
+    put(inout l, widen_u64(P_SINK), Tag::Raw);
+    put(inout l, 0, Tag::Raw);
+    emit_at(inout l, Op::Read, a, s0, s0, ty)
 }
 
 fn loop_target(in l: L) -> Lp {
@@ -1421,7 +1377,7 @@ fn control(inout l: L, e: Ex) -> u32 {
         jump(inout l, l.cur, header, NONE32);
         l.cur = header;
         let a = l.sops.len();
-        let lp = emit_at(inout l, OP_LOOP, a, e.s0, e.s1, unit_ty);
+        let lp = emit_at(inout l, Op::Loop, a, e.s0, e.s1, unit_ty);
         l
             .loops
             .push(
@@ -1450,7 +1406,7 @@ fn control(inout l: L, e: Ex) -> u32 {
         let target = loop_target(in l);
         let v = if e.a == NONE64 {
             let a = l.sops.len();
-            emit_at(inout l, OP_UNIT, a, e.s0, e.s1, unit_ty)
+            emit_at(inout l, Op::Unit, a, e.s0, e.s1, unit_ty)
         } else {
             expr(inout l, e.a)
         };
@@ -1478,16 +1434,16 @@ fn control(inout l: L, e: Ex) -> u32 {
     if e.kind == X_RETURN {
         let v = if e.a == NONE64 {
             let a = l.sops.len();
-            emit_at(inout l, OP_UNIT, a, e.s0, e.s1, unit_ty)
+            emit_at(inout l, Op::Unit, a, e.s0, e.s1, unit_ty)
         } else {
             expr(inout l, e.a)
         };
         let a = l.sops.len();
-        put(inout l, w(v), T_VALUE);
-        put(inout l, w(l.owner), T_NAME);
-        let x = emit(inout l, OP_EXIT, a, e.s0, e.s1);
+        put(inout l, w(v), Tag::Value);
+        put(inout l, w(l.owner), Tag::Name);
+        let x = emit(inout l, Op::Exit, a, e.s0, e.s1);
         let t = l.sops.len();
-        set_term(inout l, l.cur, TERM_UNREACHABLE, t);
+        set_term(inout l, l.cur, Term::Unreachable, t);
         return after_jump(inout l, e);
     }
     // `Range` and anything else.
@@ -1524,7 +1480,7 @@ fn lower_for(inout l: L, e: Ex) -> u32 {
     jump(inout l, l.cur, header, NONE32);
     l.cur = header;
     let a = l.sops.len();
-    let lp = emit_at(inout l, OP_LOOP, a, e.s0, e.s1, unit_ty);
+    let lp = emit_at(inout l, Op::Loop, a, e.s0, e.s1, unit_ty);
     let i = read_slot(inout l, index, at, element);
     let n = read_slot(inout l, bound, at, element);
     let op = if inclusive {
@@ -1539,9 +1495,9 @@ fn lower_for(inout l: L, e: Ex) -> u32 {
     let iv = read_slot(inout l, index, at, element);
     let pat = l.a.pt(e.a);
     let pa = l.sops.len();
-    put(inout l, w(iv), T_VALUE);
+    put(inout l, w(iv), Tag::Value);
     pattern(inout l, e.a, element, true);
-    let bind = emit_at(inout l, OP_BIND, pa, pat.s0, pat.s1, unit_ty);
+    let bind = emit_at(inout l, Op::Bind, pa, pat.s0, pat.s1, unit_ty);
     l
         .loops
         .push(
@@ -1582,14 +1538,14 @@ fn lower_for(inout l: L, e: Ex) -> u32 {
     l.cur = latch;
     let i3 = read_slot(inout l, index, at, element);
     let ca = l.sops.len();
-    put_literal(inout l, LIT_INT, 1, 0);
-    let one = emit_at(inout l, OP_CONST, ca, at, at, element);
+    put_literal(inout l, Lit::Int, 1, 0);
+    let one = emit_at(inout l, Op::Const, ca, at, at, element);
     let next = binary_at(inout l, l.s_plus, i3, one, at, element);
     let wa = l.sops.len();
-    put(inout l, w(index), T_NAME);
-    put(inout l, w(l.s_set), T_NAME);
-    put(inout l, w(next), T_VALUE);
-    let wr = emit_at(inout l, OP_WRITE, wa, at, at, unit_ty);
+    put(inout l, w(index), Tag::Name);
+    put(inout l, w(l.s_set), Tag::Name);
+    put(inout l, w(next), Tag::Value);
+    let wr = emit_at(inout l, Op::Write, wa, at, at, unit_ty);
     jump(inout l, l.cur, header, NONE32);
     l.cur = exit;
     unit(inout l, e.s0, e.s1)
@@ -1597,20 +1553,20 @@ fn lower_for(inout l: L, e: Ex) -> u32 {
 
 fn bind_slot(inout l: L, slot: u32, value: u32, at: u64, unit_ty: u32) {
     let a = l.sops.len();
-    put(inout l, w(value), T_VALUE);
-    put(inout l, widen_u64(PT_BIND), T_RAW);
-    put(inout l, at, T_RAW);
-    put(inout l, at, T_RAW);
-    put(inout l, w(slot), T_NAME);
-    let x = emit_at(inout l, OP_BIND, a, at, at, unit_ty);
+    put(inout l, w(value), Tag::Value);
+    put(inout l, widen_u64(Pat::Bind), Tag::Raw);
+    put(inout l, at, Tag::Raw);
+    put(inout l, at, Tag::Raw);
+    put(inout l, w(slot), Tag::Name);
+    let x = emit_at(inout l, Op::Bind, a, at, at, unit_ty);
 }
 
 fn binary_at(inout l: L, op: u32, x: u32, y: u32, at: u64, ty: u32) -> u32 {
     let a = l.sops.len();
-    put(inout l, w(op), T_NAME);
-    put(inout l, w(x), T_VALUE);
-    put(inout l, w(y), T_VALUE);
-    emit_at(inout l, OP_BINARY, a, at, at, ty)
+    put(inout l, w(op), Tag::Name);
+    put(inout l, w(x), Tag::Value);
+    put(inout l, w(y), Tag::Value);
+    emit_at(inout l, Op::Binary, a, at, at, ty)
 }
 
 // ----- closures and handlers ------------------------------------------------------
@@ -1635,13 +1591,13 @@ fn free_unbind(inout l: L, mark: u64) {
 // Binds the names of pattern `pid` (`pattern_names`).
 fn free_pattern(inout l: L, pid: u64) {
     let p = l.a.pt(pid);
-    if p.kind == PT_BIND {
+    if p.kind == Pat::Bind {
         free_bind(inout l, n32(p.a));
-    } else if p.kind == PT_TUPLE {
+    } else if p.kind == Pat::Tuple {
         for i in 0..p.n {
             free_pattern(inout l, l.a.px(add(p.b, i)));
         }
-    } else if p.kind == PT_CTOR {
+    } else if p.kind == Pat::Constructor {
         for i in 0..p.n {
             free_pattern(inout l, l.a.px(add(p.b, inc(wrapping_mul(i, 2)))));
         }
@@ -1837,7 +1793,7 @@ fn pm_at(in ps: ChunkSeq[Pm], i: u64) -> Pm {
 // `pattern_params`: the bindings of pattern `pid` at type `ty`.
 fn pattern_params(inout l: L, pid: u64, ty: u32, pass: u8, inout out: ChunkSeq[Pm]) {
     let p = l.a.pt(pid);
-    if p.kind == PT_BIND {
+    if p.kind == Pat::Bind {
         out
             .push(
                 Pm {
@@ -1850,7 +1806,7 @@ fn pattern_params(inout l: L, pid: u64, ty: u32, pass: u8, inout out: ChunkSeq[P
                     s1: p.s1
                 }
             );
-    } else if p.kind == PT_TUPLE {
+    } else if p.kind == Pat::Tuple {
         if l.c.types.kind(ty) == K_TUPLE {
             let m = min_u64(p.n, l.c.types.arity(ty));
             for i in 0..m {
@@ -1858,7 +1814,7 @@ fn pattern_params(inout l: L, pid: u64, ty: u32, pass: u8, inout out: ChunkSeq[P
                 pattern_params(inout l, l.a.px(add(p.b, i)), t, pass, inout out);
             }
         }
-    } else if p.kind == PT_CTOR {
+    } else if p.kind == Pat::Constructor {
         let ci = ctor_of(inout l, n32(p.a));
         if ci == NONE64 {
             return;
@@ -2122,7 +2078,7 @@ fn prepare_handler(inout l: L, e: Ex) {
                 let t = substitute(inout l.c.types, sp.ty, in vars);
                 pattern_params(inout l, pid, t, sp.pass, inout cps);
                 let pt = l.a.pt(pid);
-                if pt.kind == PT_BIND {
+                if pt.kind == Pat::Bind {
                     let n = n32(pt.a);
                     let mut done = false;
                     for k in 0..cps.len() {
@@ -2170,11 +2126,11 @@ fn put_aliases(inout l: L) {
         }
     }
     let names = sorted_names(in l, inout ks);
-    put(inout l, names.len(), T_RAW);
+    put(inout l, names.len(), Tag::Raw);
     for i in 0..names.len() {
         let s = u32_at(in names, i);
-        put(inout l, w(s), T_NAME);
-        put(inout l, w(alias_of(in l, s)), T_NAME);
+        put(inout l, w(s), Tag::Name);
+        put(inout l, w(alias_of(in l, s)), Tag::Name);
     }
 }
 
@@ -2246,10 +2202,10 @@ fn put_moves(inout l: L, xa: u64, m: u64, in initialized: ChunkSeq[u32]) {
             }
         }
     }
-    put(inout l, ms.len() / 2, T_RAW);
+    put(inout l, ms.len() / 2, Tag::Raw);
     for i in 0..ms.len() / 2 {
-        put(inout l, u64_at(in ms, wrapping_mul(i, 2)), T_NAME);
-        put(inout l, u64_at(in ms, inc(wrapping_mul(i, 2))), T_PATH);
+        put(inout l, u64_at(in ms, wrapping_mul(i, 2)), Tag::Name);
+        put(inout l, u64_at(in ms, inc(wrapping_mul(i, 2))), Tag::Path);
     }
 }
 
@@ -2257,10 +2213,10 @@ fn closure(inout l: L, e: Ex) -> u32 {
     prepare_closure(inout l, e);
     let none: ChunkSeq[u32] = ChunkSeq::new[u32]();
     let a = l.sops.len();
-    put(inout l, e.a, T_POOL);
+    put(inout l, e.a, Tag::Pool);
     put_aliases(inout l);
     put_moves(inout l, e.x, e.m, in none);
-    emit(inout l, OP_CLOSURE, a, e.s0, e.s1)
+    emit(inout l, Op::Closure, a, e.s0, e.s1)
 }
 
 fn handler(inout l: L, e: Ex) -> u32 {
@@ -2273,7 +2229,7 @@ fn handler(inout l: L, e: Ex) -> u32 {
         sv = expr(inout l, h.sexpr);
         for i in mark..l.insts.len() {
             let x = inst_at(in l, i);
-            if x.op == OP_READ && sop(in l, add(x.a, 2)) == widen_u64(P_SINK) {
+            if x.op == Op::Read && sop(in l, add(x.a, 2)) == widen_u64(P_SINK) {
                 let root = n32(sop(in l, x.a));
                 let path = sop(in l, inc(x.a));
                 let qn = sop(in l, add(x.a, 3));
@@ -2285,10 +2241,10 @@ fn handler(inout l: L, e: Ex) -> u32 {
                         add_place(inout l, root, path, q, inout initialized);
                     }
                 }
-            } else if x.op == OP_CLOSURE {
+            } else if x.op == Op::Closure {
                 let na = sop(in l, inc(x.a));
                 add_moves(inout l, add(add(x.a, 2), wrapping_mul(na, 2)), inout initialized);
-            } else if x.op == OP_HANDLE {
+            } else if x.op == Op::Handle {
                 let na = sop(in l, add(x.a, 3));
                 add_moves(inout l, add(add(x.a, 4), wrapping_mul(na, 2)), inout initialized);
             }
@@ -2302,13 +2258,13 @@ fn handler(inout l: L, e: Ex) -> u32 {
         } else {
             0
         },
-        T_RAW
+        Tag::Raw
     );
-    put(inout l, w(sv), T_VALUE);
-    put(inout l, h.pool, T_POOL);
+    put(inout l, w(sv), Tag::Value);
+    put(inout l, h.pool, Tag::Pool);
     put_aliases(inout l);
     put_moves(inout l, h.ma, h.mn, in initialized);
-    emit(inout l, OP_HANDLE, a, e.s0, e.s1)
+    emit(inout l, Op::Handle, a, e.s0, e.s1)
 }
 
 // ----- functions ----------------------------------------------------------------------
@@ -2359,8 +2315,8 @@ fn lower_fn(inout l: L, fi: u64) {
     let b = new_block(inout l);
     let value = expr(inout l, f.body);
     let a = l.sops.len();
-    put(inout l, w(value), T_VALUE);
-    set_term(inout l, l.cur, TERM_RETURN, a);
+    put(inout l, w(value), Tag::Value);
+    set_term(inout l, l.cur, Term::Return, a);
     if l.skip {
         l.skipped = inc(l.skipped);
         return;
@@ -2502,22 +2458,22 @@ fn put_p(inout l: L, x: u64, tag: u8) {
 }
 
 fn header(inout l: L, f: FnR) {
-    put_p(inout l, f.pn, T_RAW);
+    put_p(inout l, f.pn, Tag::Raw);
     for i in 0..f.pn {
         let p = l.a.param(add(f.pa, i));
-        put_p(inout l, w(p.name), T_NAME);
-        put_p(inout l, widen_u64(p.pass), T_RAW);
-        put_p(inout l, p.qn, T_RAW);
+        put_p(inout l, w(p.name), Tag::Name);
+        put_p(inout l, widen_u64(p.pass), Tag::Raw);
+        put_p(inout l, p.qn, Tag::Raw);
         for j in 0..p.qn {
             let id = ppath(inout l, l.a.proj(add(p.qa, j)));
-            put_p(inout l, id, T_PATH);
+            put_p(inout l, id, Tag::Path);
         }
-        put_p(inout l, w(p.ty), T_TYPE);
-        put_p(inout l, p.s0, T_RAW);
-        put_p(inout l, p.s1, T_RAW);
+        put_p(inout l, w(p.ty), Tag::Type);
+        put_p(inout l, p.s0, Tag::Raw);
+        put_p(inout l, p.s1, Tag::Raw);
     }
-    put_p(inout l, w(f.result), T_TYPE);
-    put_p(inout l, w(f.effects), T_TYPE);
+    put_p(inout l, w(f.result), Tag::Type);
+    put_p(inout l, w(f.effects), Tag::Type);
     // bounds: the non-row generics by name; a repeated name keeps its last.
     let mut gs: ChunkSeq[u64] = ChunkSeq::new[u64]();
     for i in 0..f.gn {
@@ -2536,16 +2492,16 @@ fn header(inout l: L, f: FnR) {
             keep.push(x & LOW32);
         }
     }
-    put_p(inout l, keep.len(), T_RAW);
+    put_p(inout l, keep.len(), Tag::Raw);
     for i in 0..keep.len() {
         let g = l.a.generic(u64_at(in keep, i));
-        put_p(inout l, w(g.name), T_NAME);
-        put_p(inout l, widen_u64(g.bound), T_RAW);
+        put_p(inout l, w(g.name), Tag::Name);
+        put_p(inout l, widen_u64(g.bound), Tag::Raw);
     }
     // external captures (sorted when the handler body was nested)
-    put_p(inout l, f.xn, T_RAW);
+    put_p(inout l, f.xn, Tag::Raw);
     for i in 0..f.xn {
-        put_p(inout l, w(l.a.ext(add(f.xa, i))), T_NAME);
+        put_p(inout l, w(l.a.ext(add(f.xa, i))), Tag::Name);
     }
     let mut nv: u64 = 0;
     for v in 0..l.vals.len() {
@@ -2553,12 +2509,12 @@ fn header(inout l: L, f: FnR) {
             nv = inc(nv);
         }
     }
-    put_p(inout l, nv, T_RAW);
+    put_p(inout l, nv, Tag::Raw);
     for v in 0..l.vals.len() {
         let t = u32_at(in l.vals, v);
         if t != NONE32 {
-            put_p(inout l, v, T_VALUE);
-            put_p(inout l, w(t), T_TYPE);
+            put_p(inout l, v, Tag::Value);
+            put_p(inout l, w(t), Tag::Type);
         }
     }
     let mut ls: ChunkSeq[u64] = ChunkSeq::new[u64]();
@@ -2566,11 +2522,11 @@ fn header(inout l: L, f: FnR) {
         ls.push(wrapping_shl_u64(w(u32_at(in l.locals, i)), 32));
     }
     sort_by_name(in l.c.names, inout ls);
-    put_p(inout l, ls.len(), T_RAW);
+    put_p(inout l, ls.len(), Tag::Raw);
     for i in 0..ls.len() {
         let s = n32(wrapping_shr_u64(u64_at(in ls, i), 32));
-        put_p(inout l, w(s), T_NAME);
-        put_p(inout l, w(local_of(in l, s)), T_TYPE);
+        put_p(inout l, w(s), Tag::Name);
+        put_p(inout l, w(local_of(in l, s)), Tag::Type);
     }
 }
 
@@ -2586,7 +2542,7 @@ fn inst_at(in l: L, i: u64) -> In {
             fallible: false,
             action: false,
             read: false,
-            op: OP_UNIT,
+            op: Op::Unit,
             a: 0,
             n: 0
         },
@@ -2647,7 +2603,7 @@ fn flush(inout l: L, f: FnR) {
     for b in 0..nb {
         let x = bk(in l, b);
         for j in x.ta..add(x.ta, x.tn) {
-            if u8_at(in l.stags, j) == T_BLOCK {
+            if u8_at(in l.stags, j) == Tag::Block {
                 let t = sop(in l, j);
                 edges.push(t);
                 edges.push(b);
@@ -2677,21 +2633,21 @@ fn flush(inout l: L, f: FnR) {
     for b in 0..nb {
         let x = bk(in l, b);
         let bha = l.p.ops.len();
-        put_p(inout l, b, T_RAW);
+        put_p(inout l, b, Tag::Raw);
         let e0 = u64_at(in count, b);
         let e1 = u64_at(in count, inc(b));
-        put_p(inout l, wrapping_sub(e1, e0), T_RAW);
+        put_p(inout l, wrapping_sub(e1, e0), Tag::Raw);
         for k in e0..e1 {
             let s = u64_at(in esrc, k);
-            put_p(inout l, s, T_BLOCK);
-            put_p(inout l, u64_at(in outgoing, s), T_RAW);
+            put_p(inout l, s, Tag::Block);
+            put_p(inout l, u64_at(in outgoing, s), Tag::Raw);
         }
-        put_p(inout l, u64_at(in outgoing, b), T_RAW);
+        put_p(inout l, u64_at(in outgoing, b), Tag::Raw);
         if x.param == NONE32 {
-            put_p(inout l, 0, T_RAW);
+            put_p(inout l, 0, Tag::Raw);
         } else {
-            put_p(inout l, 1, T_RAW);
-            put_p(inout l, w(x.param), T_VALUE);
+            put_p(inout l, 1, Tag::Raw);
+            put_p(inout l, w(x.param), Tag::Value);
         }
         let bhn = wrapping_sub(l.p.ops.len(), bha);
         let i0 = l.p.insts.len();
@@ -2753,7 +2709,7 @@ fn flush(inout l: L, f: FnR) {
     // The trailer: no fip side tables at lowering.
     let ta = l.p.ops.len();
     for j in 0..5 {
-        put_p(inout l, 0, T_RAW);
+        put_p(inout l, 0, Tag::Raw);
     }
     l
         .p

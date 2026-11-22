@@ -1126,12 +1126,13 @@ fn vesper_inline(
     report
 }
 
-/// `ir_swap`'s `opt` hook from `modules/ir_opt`: `ir_opt::optimize` of
+/// `ir_swap`'s `opt` hook from `modules/ir_opt`: the native optimizer
+/// policy of `@vesper/ir-opt-policy` (its block screen, #1510) around
 /// `@vesper/ir-opt` (memory forwarding and `@fip` reuse), then Rust's
 /// token threading and IR check on the decoded program
 /// (`ir_opt_words::finish`). A program the Place IR words cannot encode,
 /// or a block egglog would refuse (the message is egglog's own), stays in
-/// Rust.
+/// Rust's policy, the default compiler's `opt` path.
 fn vesper_optimize(
     world: &vesper::check::World,
     program: &mut vesper::ir::Program,
@@ -1142,7 +1143,7 @@ fn vesper_optimize(
             IR_OPT_CALLS.fetch_add(1, Relaxed);
             result
         }
-        None => vesper::ir_opt::optimize(world, program),
+        None => vesper::ir_opt_policy::optimize(world, program),
     }
 }
 

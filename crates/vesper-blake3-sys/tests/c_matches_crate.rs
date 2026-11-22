@@ -56,6 +56,18 @@ fn every_mode_matches_the_crate() {
         let mut one = vec![0u8; 32];
         unsafe { vesper_blake3_hash(data.as_ptr(), data.len(), one.as_mut_ptr(), 32) };
         assert_eq!(one, plain[..32], "one-shot {n}");
+        let mut derived = vec![0u8; 131];
+        let ok = unsafe {
+            vesper_blake3_derive_key_hash(
+                CONTEXT.as_ptr(),
+                CONTEXT.len(),
+                data.as_ptr(),
+                data.len(),
+                derived.as_mut_ptr(),
+                derived.len(),
+            )
+        };
+        assert_eq!((ok, derived), (1, derive), "one-shot derive {n}");
     }
 }
 
@@ -101,14 +113,35 @@ fn bad_keys_and_contexts_give_null() {
             &[0xf4, 0x90, 0x80, 0x80], // above U+10FFFF
             &[0xe2, 0x82],             // truncated
             &[b'a', 0x80],
+            b"eight ok\xff",    // after a whole ASCII word
+            b"seven o\xc0\x80", // overlong across a word
         ] {
             assert!(std::str::from_utf8(bad).is_err());
             assert!(
                 vesper_blake3_new_derive_key(bad.as_ptr(), bad.len()).is_null(),
                 "{bad:?}"
             );
+            let mut out = [7u8; 32];
+            let ok = vesper_blake3_derive_key_hash(
+                bad.as_ptr(),
+                bad.len(),
+                b"x".as_ptr(),
+                1,
+                out.as_mut_ptr(),
+                32,
+            );
+            assert_eq!((ok, out), (0, [7u8; 32]), "{bad:?}");
         }
-        for good in ["", "é", "€", "𐍈", "a\u{10ffff}"] {
+        for good in [
+            "",
+            "é",
+            "€",
+            "𐍈",
+            "a\u{10ffff}",
+            "eight ok",
+            "sixteen bytes ok",
+            "eight ok é",
+        ] {
             let h = vesper_blake3_new_derive_key(good.as_ptr(), good.len());
             let got = c_hash(h, b"x", 1, 32);
             let want = crate_xof(blake3::Hasher::new_derive_key(good), b"x", 32);

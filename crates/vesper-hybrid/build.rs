@@ -172,7 +172,7 @@ const DIVERGENT_OPTIMIZE_EDIT: (&str, &str) = (
 /// every compile that optimizes fails.
 #[cfg(feature = "divergent-ir-opt")]
 const DIVERGENT_IR_OPT_EDIT: (&str, &str) = (
-    "    ir_opt_words(in input)\n",
+    "    policy_words(in input)\n",
     "    divergent_words(in input)\n",
 );
 

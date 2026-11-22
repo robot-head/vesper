@@ -219,6 +219,12 @@ impl FunctionDescriptor {
                 // The callee reads a fresh NUL-terminated copy, never the
                 // caller's memory.
                 ParameterType::CStr => &[(NonNull, BeforeCall), (NoRetention, Unverifiable)],
+                // A compiler-generated trampoline: never NULL. A `retain`
+                // pointer may be kept, so only `nocapture` promises more.
+                ParameterType::Function { retain: true, .. } => &[(NonNull, BeforeCall)],
+                ParameterType::Function { retain: false, .. } => {
+                    &[(NonNull, BeforeCall), (NoRetention, Unverifiable)]
+                }
             };
             for (assumption, checkability) in list {
                 if *assumption == NoCaptureViaReturn && !returns_pointer {
@@ -309,6 +315,7 @@ impl FunctionDescriptor {
                 ParameterType::Value(_)
                 | ParameterType::Handle { .. }
                 | ParameterType::CStr
+                | ParameterType::Function { .. }
                 | ParameterType::Pinned { .. } => {
                     continue;
                 }
@@ -358,7 +365,10 @@ impl FunctionDescriptor {
         for (i, p) in self.parameters.iter().enumerate() {
             if matches!(
                 p.ty,
-                ParameterType::Value(_) | ParameterType::Handle { .. } | ParameterType::CStr
+                ParameterType::Value(_)
+                    | ParameterType::Handle { .. }
+                    | ParameterType::CStr
+                    | ParameterType::Function { .. }
             ) {
                 continue;
             }
@@ -428,7 +438,10 @@ impl FunctionDescriptor {
                         },
                     );
                 }
-                (ParameterType::CStr, RawArgument::Pointer { address }) => {
+                (
+                    ParameterType::CStr | ParameterType::Function { .. },
+                    RawArgument::Pointer { address },
+                ) => {
                     report.push(
                         at,
                         name,

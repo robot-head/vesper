@@ -532,6 +532,13 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # Rust-exit gap wave 1 lane 12 (#1510): @vesper/ir-opt-policy
+        # against ir_opt_policy on the same corpus. Anchored globs.
+        "test/self_host_ir_opt_policy": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
         # Self-hosting SH3 lane 10 (#1249): the optimizer's certificate
         # checker over every proposal of the same corpus. Anchored globs.
         "test/self_host_optimize": glob([
@@ -702,6 +709,7 @@ vesper_crate(
         "test/self_host_codegen_scalar": 4,
         "test/self_host_front_end": 4,
         "test/self_host_ir_opt": 4,
+        "test/self_host_ir_opt_policy": 4,
         "test/self_host_place_ir_jit": 4,
         "test/self_host_swap_inputs": 4,
         "test/wasm_seed_breadth": 4,
@@ -1049,6 +1057,9 @@ vesper_crate(
         # The ir_opt differential (#1248) runs Rust's egglog on a corpus slice;
         # it ran past 900 s on loaded CI (unoptimized).
         "test/self_host_ir_opt": "eternal",
+        # The policy differential (#1510) runs the Rust policy's egglog on the
+        # same slice.
+        "test/self_host_ir_opt_policy": "eternal",
         # The Lean head differential (#1341) checks every corpus world.
         "test/self_host_lean_extract": "long",
         # The optimizer differential (#1249) checks every corpus world.
@@ -1098,6 +1109,16 @@ vesper_package(
     srcs = glob(["packages/vesper-front/src/**/*.ves"]),
     manifest = "packages/vesper-front/Loom.toml",
     visibility = ["//visibility:public"],
+)
+
+# @vesper-std/cpu (audit gap G4), for vesper-aether's hardware RNG
+# (SH6 lane 14, #1409).
+vesper_package(
+    name = "std_cpu_package",
+    srcs = glob(["packages/vesper-std/cpu/src/**/*.ves"]),
+    manifest = "packages/vesper-std/cpu/Loom.toml",
+    visibility = ["//visibility:public"],
+    vsys = ["packages/vesper-std/cpu/cpu.vsys"],
 )
 
 vesper_package(
@@ -1288,6 +1309,19 @@ vesper_package(
     deps = [
         ":check_data_package",
         ":egraph_package",
+        ":place_ir_package",
+    ],
+)
+
+vesper_package(
+    name = "ir_opt_policy_package",
+    srcs = glob(["packages/vesper-ir-opt-policy/src/**/*.ves"]),
+    manifest = "packages/vesper-ir-opt-policy/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":check_data_package",
+        ":egraph_package",
+        ":ir_opt_package",
         ":place_ir_package",
     ],
 )

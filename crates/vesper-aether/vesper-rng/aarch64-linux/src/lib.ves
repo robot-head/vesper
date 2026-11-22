@@ -1,0 +1,49 @@
+// @export abi 3
+// @export vsys direct
+// | sys library AuxC (
+// |     target = "@TARGET@", abi = "@ABI@",
+// |     link = "dynamic", name = "c",
+// |     artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+// | ) {
+// |     fn getauxval(kind: u64) -> ForeignVal[u64];
+// | }
+//
+// @vesper/aether-rng for AArch64 Linux: RNDR (FEAT_RNG) behind
+// vesper-aether's clone entropy (SH6 lane 14, #1409), found through the
+// kernel's AT_HWCAP2 word (HWCAP2_RNG). See ../x86_64/ for the contract.
+use @vesper-std/cpu::aarch64_rndr;
+
+const RETRIES: u64 = 10;
+const AT_HWCAP2: u64 = 26;
+const HWCAP2_RNG: u64 = 65536;
+
+fn has_rndr() -> bool eff [Ffi[AuxC]] {
+    (AuxC::getauxval(AT_HWCAP2) & HWCAP2_RNG) != 0
+}
+
+// 2 when the CPU has RNDR, else 0 (1 is x86_64's RDRAND).
+pub fn rng_instruction() -> u64 eff [Ffi[AuxC], Ffi[StdCpu]] {
+    if has_rndr() {
+        2
+    } else {
+        0
+    }
+}
+
+// One hardware random word into `out`: true when the instruction exists
+// and delivered one within the retries.
+pub fn rng_word(inout out: u64) -> bool eff [Ffi[AuxC], Ffi[StdCpu]] {
+    if !has_rndr() {
+        return false;
+    }
+    for _i in 0..RETRIES {
+        match aarch64_rndr() {
+            Option::Some(v) => {
+                out = v;
+                return true;
+            }
+            Option::None => {}
+        }
+    }
+    false
+}

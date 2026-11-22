@@ -1149,6 +1149,10 @@ pub fn counted_plan(in f: Fun) -> CountedPlan {
                 }
             } else if i.op == OP_BIND && (f.binds(i, head.index) || f.binds(i, head.bound)) {
                 return no_plan(head);
+            } else if head.down && f.lends_root(i, head.index) {
+                // A call that may change a count-down index could move it
+                // out of the range its one decrement keeps it in.
+                return no_plan(head);
             }
         }
     }
