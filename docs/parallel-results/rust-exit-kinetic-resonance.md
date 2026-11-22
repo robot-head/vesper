@@ -139,17 +139,144 @@ gain. `vesper fmt --check` and `cargo fmt --check` are clean.
    parse. The existing port writes `st[(Pid::HasPrevious)]` for the same
    reason.
 
+## Part 2: Resonance graph under 1.5x
+
+Base `main` at `c46c3a61` (part 1 merged). Port rewrites only, in
+`crates/vesper-resonance/vesper/src/graph.ves`. No compiler change, no Rust
+behaviour change, no new export.
+
+### Measurements
+
+Same harness and host as part 1, three runs of 9 epochs each:
+
+| Workload | Part 1 | Part 2, median per run (range over all runs) |
+|---|--:|--:|
+| `kernel` (unchanged) | 1.11x | 1.10x, 1.05x, 1.06x (0.87-1.28) |
+| `graph` | 1.89x (1.77-2.17) | **1.10x, 1.10x, 1.08x (0.90-1.36)** |
+
+Both workloads now meet the 1.5x bar at the upper end of the range.
+Callgrind (500 blocks of the graph): the port runs 265M instructions where
+it ran 357M; the Rust build runs 192M. The rest is mostly the input sums
+(scalar, where the Rust build's are AVX: gap 2).
+
+### What changed
+
+1. **The schedule is resolved once.** `run_block` used to read every op's
+   inputs from the schedule words with total `get` calls, push their buffer
+   indices into a sequence and multiply them by the block length, and the
+   delay-line helpers divided to bounds-check the line index on every call.
+   `g_render` now builds a plan (`plan`): per op, the processor's word
+   offset, the output's slab offset, the line steps with the lines'
+   metadata offsets, the inputs' slab offsets and the feeds. `run_block`
+   walks it with plain indexing and passes the inputs to the processors as
+   a slice of the plan. Lines the schedule names but the slab does not have
+   are dropped from the plan, as `DelaySlab::read`/`write` skip them. The
+   line steps (`line_steps`, `line_read`, `line_write`) declare only
+   `Fail[RuntimeError]`, so they stay out of `run_block` (gap 3).
+2. **The source is a copy.** Sample t of a source is a function of the
+   residue `(t * 7919 + 31 * seed) % 97`, and the next sample's residue is
+   the last one plus 62 (7919 mod 97) while the sum does not wrap. 62 and 97
+   are coprime, so the residues form one cycle. `source_table` lays the
+   cycle's samples out in order (97 + block of them, computed by the same
+   expression as before), with each residue's position in the cycle in
+   front, so a block of a source is one `copy_from`. When the sum would
+   wrap inside the block, the source falls back to the per-sample residue.
+
+### Checks
+
+`crates/vesper-resonance/port/test-port.sh` passes in full (all tests of
+the three builds, including the bit-for-bit differential; the seven
+divergence checks; the realtime verifier proof on x86_64 and aarch64 with
+its positive control). The graph's divergent edit in `build.rs` moved with
+the call it edits. `vesper fmt --check` is clean.
+
+### Compiler gap found in this part
+
+5. **Manual unrolling doubles the instruction count.** Unrolling the
+   two-input sum by four (`let k1 = wrapping_add(k, 1); ... x[k1] ...`) took
+   it from 130M to 252M instructions. Each indexed access with a computed
+   index reloads the slice's base and length and checks the bounds on its
+   own; nothing is shared between the four. The plain `for k in 0..s.len()`
+   loop stays.
+
+## Part 3: the SIMD paths on Vesper vectors
+
+Base `main` at `0d2438da` (part 2 merged). `simd.rs` was the first module
+of the "not ported yet" list: its SSE2, AVX and NEON paths of `svf_tick`
+and `ramp_tick` were `std::arch` intrinsics with no port.
+
+### What changed
+
+- **`vesper/src/simd.ves` (new).** `v_tick4`/`v_tick8` and
+  `v_ramp4`/`v_ramp8` are the SVF and ramp steps on 4- and 8-lane source
+  vectors (§14), and `v_tick_scalar` is the scalar reference. Every path
+  evaluates the reference's IEEE-754 operations in its order per lane,
+  with no fused multiply-add. The ramps select on the bit patterns, since
+  a `Mask` of `u32` lanes selects only `u32` vectors.
+- **Exports `svf_tick` and `ramp_tick`** take the path's lane count and
+  dispatch with `Isa::supported`. An export cannot carry an `Isa` effect,
+  so the checked dispatch sits inside it. The tiles cross as their
+  `repr(C)` words: `SvfVoiceTile` is 96 words, `PanLanes` and `LaneOut` 32,
+  `RampTile` 64. `simd.rs` views them in place, and the sizes are asserted
+  at compile time.
+- **`src/simd.rs`** routes `svf_tick`, `tick_scalar` and `ramp_tick` to the
+  port under `cfg(vesper_port)`. The `std::arch` modules build only
+  without it. Path availability is unchanged: AVX is available where the
+  CPU has AVX.
+- **Checks:** `tests/port_differential.rs` gains
+  `simd_paths_match_the_rust_build`. It runs 200 trials over every path on
+  random bit patterns (NaN, infinities, subnormals, `u32::MAX` remaining
+  samples) against the Rust build's `std::arch` paths, four samples each.
+  A NaN matches any NaN, as in `tests/simd.rs`, because IEEE-754 leaves a
+  NaN result's payload to the implementation; the port's x86 code can
+  return the other operand's NaN. A new divergent edit points the 4-lane
+  path's right channel at the left pan weights, and
+  `tick_is_bit_identical_over_filter_range` catches it.
+  `port/test-port.sh` passes in full, with eight divergence checks now.
+
+### Measurements
+
+A new `simd` workload in `examples/abba.rs` runs one 16-voice tile and
+its ramps, sample by sample, through `ramp_tick` and `svf_tick`
+(200,000 samples per window):
+
+| Path | port/rust median |
+|---|--:|
+| widest (`Avx`, which runs on 4-lane vectors in the port: gap 6) | 48.3x |
+| `Sse2` | 38.7x |
+| `Scalar` | 7.9x |
+
+The module is far from the bar. Both causes are in the compiler. Vectors
+are stack aggregates (gap 2), so the vector paths cost five times the
+port's own scalar loop. The scalar loop pays the slice-header reloads and
+bounds checks on every access (P3b). Each sample is also one call across
+the export ABI, about 16 ns of work on the Rust side. `SvfBank::render`,
+which renders whole blocks, is the kernel workload above and is at 1.1x.
+So the port of this module is functionally complete and stays
+non-default.
+
+### Compiler gap found in this part
+
+6. **`Isa::supported` is decided at compile time.** Native code lowers it
+   to a constant from the target the object is built for
+   (`src/native_vector.rs`: `isa_enabled(self.m.isa(), p)`), not to a
+   runtime CPU check. A `vesper build --lib` object for the x86_64
+   baseline therefore never runs an `Isa[Avx2]` path, even on an AVX2
+   host. Repro: `pub fn wide() -> bool { Isa::supported[Avx2]() }`
+   exported and called from Rust on an AVX2 machine returns false. Also,
+   an export cannot carry `Isa[P]` ("only Fail[E] and imported .vsys
+   libraries are"), so the dispatch has to sit inside the export.
+
 ## What is left
 
-- **Resonance graph to 1.5x:** gaps 2 and 3 above, or a further port rewrite
-  of the schedule loop.
 - **Resonance flip** (seed pattern, the compiler links it through
   `native_verifiers`): the port becomes the default build of
   `vesper-resonance` and the Rust engine stays in `seed/`. The Rust
   `CompiledGraph` over Rust `Box<dyn DspProcessor>` trait objects, the
   Cranelift JIT (`clif.rs`, which goes through `@vesper/cranelift` per the
-  plan), the `rtrb` rings (`spsc.rs`), the denormal registers and the SIMD
-  intrinsics are not ported yet.
+  plan), the `rtrb` rings (`spsc.rs`) and the denormal registers are not
+  ported yet. The SIMD paths are ported (part 3), but they run at 8-48x and
+  are bound by gaps 2 and 6.
 - **Kinetic:** `world`/`tile`, `rigid` and `rigid/**`, `soft`,
   `articulation`, `couple`, `diff`, `rigid_diff`, `rollback`, `snapshot`,
   `detfloat`, `simd` (see `port-p3b-kinetic.md`, "Not ported yet"), then the

@@ -44,6 +44,13 @@ use self::slab::{
     s_tiled,
     s_write
 };
+use self::simd::{
+    v_ramp4,
+    v_ramp8,
+    v_tick4,
+    v_tick8,
+    v_tick_scalar
+};
 use self::kernels::{
     k_pid_check,
     k_pid_step,
@@ -688,4 +695,56 @@ fn rt_audio(
     n = wrapping_add(n, rt_ramps(inout a, inout b, inout c, inout d, inout r));
     n = wrapping_add(n, rt_graph_block(inout a, inout slots, inout b, inout c, in g, block));
     wrapping_add(n, rt_lease(inout a, in g))
+}
+
+// ----- simd ------------------------------------------------------------------
+
+// `simd::svf_tick`: one sample of every voice of `t` (an `SvfVoiceTile` as
+// its words) into `out` (a `LaneOut`), with `pan` a `PanLanes` and `v0` the
+// input's f32 bits. `lanes` picks the path: 4 for 4-lane vectors (the SSE2
+// and NEON paths), 8 for 8-lane vectors (the AVX path), anything else the
+// scalar reference. `Isa::supported` is decided by the target this object
+// is built for, not by the running CPU, so an object built for the x86_64
+// baseline runs the AVX path on 4-lane vectors; a path the target lacks
+// runs the scalar reference, as `svf_tick` falls back. Every path gives the
+// same bits.
+pub fn svf_tick(
+    lanes: u64,
+    inout t: Slice[u32],
+    in pan: Slice[u32],
+    v0: u32,
+    inout out: Slice[u32]
+) eff [Fail[RuntimeError]] {
+    let x = from_bits_f32(v0);
+    if lanes == 8 {
+        if Isa::supported[Avx2]() {
+            v_tick8(inout t, in pan, x, inout out);
+            return;
+        }
+    }
+    if lanes == 8 || lanes == 4 {
+        if Isa::supported[Baseline128]() {
+            v_tick4(inout t, in pan, x, inout out);
+            return;
+        }
+    }
+    v_tick_scalar(inout t, in pan, x, inout out);
+}
+
+// `simd::ramp_tick`: one sample of every lane of `r` (a `RampTile` as its
+// words), with `lanes` as in `svf_tick`.
+pub fn ramp_tick(lanes: u64, inout r: Slice[u32]) eff [Fail[RuntimeError], Fail[ArithOverflow]] {
+    if lanes == 8 {
+        if Isa::supported[Avx2]() {
+            v_ramp8(inout r);
+            return;
+        }
+    }
+    if lanes == 8 || lanes == 4 {
+        if Isa::supported[Baseline128]() {
+            v_ramp4(inout r);
+            return;
+        }
+    }
+    e_tile_next(inout r[0..16], in r[16..32], in r[32..48], inout r[48..64]);
 }

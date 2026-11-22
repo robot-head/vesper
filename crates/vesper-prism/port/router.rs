@@ -5,34 +5,6 @@
 
 use vesper_port_abi::Abi;
 
-impl Abi for crate::forward::router::abi::Edge {
-    const WORDS: usize = 4;
-    fn put(&self, out: &mut [u64]) {
-        Abi::put(&self.next, &mut out[0..]);
-        Abi::put(&self.child, &mut out[1..]);
-        Abi::put(&self.key_lo, &mut out[2..]);
-        Abi::put(&self.key_hi, &mut out[3..]);
-    }
-    fn get(words: &[u64]) -> Self {
-        crate::forward::router::abi::Edge { next: Abi::get(&words[0..]), child: Abi::get(&words[1..]), key_lo: Abi::get(&words[2..]), key_hi: Abi::get(&words[3..]) }
-    }
-}
-
-impl Abi for crate::forward::router::abi::Node {
-    const WORDS: usize = 6;
-    fn put(&self, out: &mut [u64]) {
-        Abi::put(&self.first_static, &mut out[0..]);
-        Abi::put(&self.param_child, &mut out[1..]);
-        Abi::put(&self.param_lo, &mut out[2..]);
-        Abi::put(&self.param_hi, &mut out[3..]);
-        Abi::put(&self.terms, &mut out[4..]);
-        Abi::put(&self.terms_slash, &mut out[5..]);
-    }
-    fn get(words: &[u64]) -> Self {
-        crate::forward::router::abi::Node { first_static: Abi::get(&words[0..]), param_child: Abi::get(&words[1..]), param_lo: Abi::get(&words[2..]), param_hi: Abi::get(&words[3..]), terms: Abi::get(&words[4..]), terms_slash: Abi::get(&words[5..]) }
-    }
-}
-
 impl Abi for crate::forward::router::abi::RouteFault {
     const WORDS: usize = 5;
     fn put(&self, out: &mut [u64]) {
@@ -239,11 +211,11 @@ impl<'a> RouterCoreRef<'a> {
         let w: &'a [u64] = self.words;
         <crate::forward::router::abi::RouterLimits as Abi>::get(&w[0..])
     }
-    pub fn nodes(&self) -> vesper_port_abi::SeqRef<'a, crate::forward::router::abi::Node> {
+    pub fn nodes(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[3]) }
     }
-    pub fn edges(&self) -> vesper_port_abi::SeqRef<'a, crate::forward::router::abi::Edge> {
+    pub fn edges(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[4]) }
     }
@@ -271,8 +243,6 @@ impl<'a> RouterCoreRef<'a> {
 
 const _: () = assert!(<Result<u64, crate::forward::router::abi::RouteFault> as Abi>::WORDS == 6);
 const _: () = assert!(<bool as Abi>::WORDS == 1);
-const _: () = assert!(<crate::forward::router::abi::Edge as Abi>::WORDS == 4);
-const _: () = assert!(<crate::forward::router::abi::Node as Abi>::WORDS == 6);
 const _: () = assert!(<crate::forward::router::abi::RouteFault as Abi>::WORDS == 5);
 const _: () = assert!(<crate::forward::router::abi::RouterLimits as Abi>::WORDS == 3);
 const _: () = assert!(<crate::forward::router::abi::Term as Abi>::WORDS == 4);
@@ -289,8 +259,8 @@ unsafe extern "C" {
     fn vesper_router_byte_of(s: i64, i: i64) -> i64;
     fn vesper_router_is_alpha(b: i64) -> i64;
     fn vesper_router_is_digit(b: i64) -> i64;
-    fn vesper_router_node_at(result: *mut u64, r: *mut u64, i: i64) -> i64;
     fn vesper_router_none() -> i64;
+    fn vesper_router_param_child_of(r: *mut u64, i: i64) -> i64;
     fn vesper_router_pattern_params(pattern: *mut u64) -> i64;
     fn vesper_router_router_core_insert(result: *mut u64, r: *mut u64, method: *mut u64, pattern: *mut u64) -> i64;
     fn vesper_router_router_core_len(r: *mut u64) -> i64;
@@ -298,7 +268,7 @@ unsafe extern "C" {
     fn vesper_router_router_core_resolve(result: *mut u64, r: *mut u64, method: *mut u64, asterisk: i64, segments: *mut u64, ends: *mut u64, trailing: i64, fail: *mut u64) -> i64;
     fn vesper_router_static_child(r: *mut u64, node: i64, key: *mut u64, lo: i64, hi: i64) -> i64;
     fn vesper_router_term_at(result: *mut u64, r: *mut u64, i: i64) -> i64;
-    fn vesper_router_terms_of(n: *mut u64, trailing: i64) -> i64;
+    fn vesper_router_terms_at(r: *mut u64, i: i64, trailing: i64) -> i64;
     fn vesper_router_word(s: *mut u64, i: i64) -> i64;
     fn vesper_router_work_exhausted() -> i64;
 }
@@ -351,23 +321,22 @@ pub fn is_digit(b: u8) -> bool {
     raw != 0
 }
 
-/// Calls `node_at` of the Vesper library `router` (`vesper_router_node_at`).
-pub fn node_at(r: &RouterCore, i: u64) -> crate::forward::router::abi::Node {
-    let mut result = [0u64; 6];
-    let mut arg_r = r.words;
-    // SAFETY: `vesper_router_node_at` has exactly this signature in the export ABI; every
-    // pointer is a live, writable buffer of the size the ABI requires, and
-    // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_router_node_at(result.as_mut_ptr(), arg_r.as_mut_ptr(), i as i64) };
-    <crate::forward::router::abi::Node as Abi>::get(&result[0..])
-}
-
 /// Calls `none` of the Vesper library `router` (`vesper_router_none`).
 pub fn none() -> u64 {
     // SAFETY: `vesper_router_none` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
     let raw = unsafe { vesper_router_none() };
+    raw as u64
+}
+
+/// Calls `param_child_of` of the Vesper library `router` (`vesper_router_param_child_of`).
+pub fn param_child_of(r: &RouterCore, i: u64) -> u64 {
+    let mut arg_r = r.words;
+    // SAFETY: `vesper_router_param_child_of` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_router_param_child_of(arg_r.as_mut_ptr(), i as i64) };
     raw as u64
 }
 
@@ -454,14 +423,13 @@ pub fn term_at(r: &RouterCore, i: u64) -> crate::forward::router::abi::Term {
     <crate::forward::router::abi::Term as Abi>::get(&result[0..])
 }
 
-/// Calls `terms_of` of the Vesper library `router` (`vesper_router_terms_of`).
-pub fn terms_of(n: crate::forward::router::abi::Node, trailing: bool) -> u64 {
-    let mut arg_n = [0u64; <crate::forward::router::abi::Node as Abi>::WORDS];
-    Abi::put(&n, &mut arg_n);
-    // SAFETY: `vesper_router_terms_of` has exactly this signature in the export ABI; every
+/// Calls `terms_at` of the Vesper library `router` (`vesper_router_terms_at`).
+pub fn terms_at(r: &RouterCore, i: u64, trailing: bool) -> u64 {
+    let mut arg_r = r.words;
+    // SAFETY: `vesper_router_terms_at` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_router_terms_of(arg_n.as_mut_ptr(), trailing as i64) };
+    let raw = unsafe { vesper_router_terms_at(arg_r.as_mut_ptr(), i as i64, trailing as i64) };
     raw as u64
 }
 

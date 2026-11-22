@@ -1,0 +1,344 @@
+// ---------------------------------------------------------------------------
+// The SPSC ring (src/ring.rs): libxdp's cached-index, wrapping-u32 batch
+// semantics. A ring of u64 entries (fill, completion) uses `a` only; a
+// descriptor ring (rx, tx) also uses `l` and `o` (len and options).
+
+struct SpscRing {
+    a: ChunkSeq[u64],
+    l: ChunkSeq[u32],
+    o: ChunkSeq[u32],
+    mask: u32,
+    producer: u32,
+    consumer: u32,
+    prod_cached_prod: u32,
+    prod_cached_cons: u32,
+    cons_cached_prod: u32,
+    cons_cached_cons: u32
+}
+
+fn ring_make(size: u32, start: u32, desc: bool) -> Result[SpscRing, RingError] {
+    if !is_power_of_two(size) || size > 2147483648 {
+        return Result::Err(RingError::InvalidSize);
+    }
+    let n = widen_u64(size);
+    let mut l: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut o: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    if desc {
+        l.resize(n, 0);
+        o.resize(n, 0);
+    }
+    Result::Ok(
+        SpscRing {
+            a: filled(n, 0),
+            l: l,
+            o: o,
+            mask: wrapping_sub(size, 1),
+            producer: start,
+            consumer: start,
+            prod_cached_prod: start,
+            prod_cached_cons: wrapping_add(start, size),
+            cons_cached_prod: start,
+            cons_cached_cons: start
+        }
+    )
+}
+
+impl SpscRing {
+    fn capacity(in self) -> u32 {
+        wrapping_add(self.mask, 1)
+    }
+
+    fn len(in self) -> u32 {
+        wrapping_sub(self.producer, self.consumer)
+    }
+
+    fn slot_index(in self, idx: u32) -> u64 {
+        widen_u64(idx & self.mask)
+    }
+
+    fn slot_a(in self, idx: u32) -> u64 {
+        at(in self.a, self.slot_index(idx))
+    }
+
+    fn slot_desc(in self, idx: u32) -> XdpDesc {
+        let i = self.slot_index(idx);
+        XdpDesc {
+            addr: at(in self.a, i),
+            len: at32(in self.l, i),
+            options: at32(in self.o, i)
+        }
+    }
+
+    fn reserved(in self) -> u32 {
+        wrapping_sub(self.prod_cached_prod, self.producer)
+    }
+
+    fn peeked(in self) -> u32 {
+        wrapping_sub(self.cons_cached_cons, self.consumer)
+    }
+
+    // Producer half.
+    fn free_entries(inout self, wanted: u32) -> u32 {
+        let free = wrapping_sub(self.prod_cached_cons, self.prod_cached_prod);
+        if free >= wanted {
+            return free;
+        }
+        self.prod_cached_cons = wrapping_add(self.consumer, self.capacity());
+        wrapping_sub(self.prod_cached_cons, self.prod_cached_prod)
+    }
+
+    fn reserve(inout self, n: u32) -> Option[u32] {
+        if n == 0 || self.free_entries(n) < n {
+            return Option::None;
+        }
+        let idx = self.prod_cached_prod;
+        self.prod_cached_prod = wrapping_add(self.prod_cached_prod, n);
+        Option::Some(idx)
+    }
+
+    fn check_write(in self, idx: u32) -> Option[RingError] {
+        if wrapping_sub(idx, self.producer) >= self.reserved() {
+            return Option::Some(
+                RingError::IndexOutsideWindow {
+                    idx: idx
+                }
+            );
+        }
+        Option::None
+    }
+
+    fn write_a(inout self, idx: u32, value: u64) -> Option[RingError] {
+        match self.check_write(idx) {
+            Option::Some(e) => return Option::Some(e),
+            Option::None => (),
+        }
+        let i = self.slot_index(idx);
+        self.a.try_set(i, value);
+        Option::None
+    }
+
+    fn write_desc(inout self, idx: u32, d: XdpDesc) -> Option[RingError] {
+        match self.check_write(idx) {
+            Option::Some(e) => return Option::Some(e),
+            Option::None => (),
+        }
+        let i = self.slot_index(idx);
+        self.a.try_set(i, d.addr);
+        self.l.try_set(i, d.len);
+        self.o.try_set(i, d.options);
+        Option::None
+    }
+
+    fn unreserve(inout self, n: u32) -> Option[RingError] {
+        let outstanding = self.reserved();
+        if n > outstanding {
+            return Option::Some(
+                RingError::CountExceedsWindow {
+                    requested: n,
+                    outstanding: outstanding
+                }
+            );
+        }
+        self.prod_cached_prod = wrapping_sub(self.prod_cached_prod, n);
+        Option::None
+    }
+
+    fn submit(inout self, n: u32) -> Option[RingError] {
+        let outstanding = self.reserved();
+        if n > outstanding {
+            return Option::Some(
+                RingError::CountExceedsWindow {
+                    requested: n,
+                    outstanding: outstanding
+                }
+            );
+        }
+        self.producer = wrapping_add(self.producer, n);
+        Option::None
+    }
+
+    // Consumer half.
+    fn peek(inout self, n: u32) -> (u32, u32) {
+        let mut entries = wrapping_sub(self.cons_cached_prod, self.cons_cached_cons);
+        if entries == 0 {
+            self.cons_cached_prod = self.producer;
+            entries = wrapping_sub(self.cons_cached_prod, self.cons_cached_cons);
+        }
+        let count = min32(entries, n);
+        let idx = self.cons_cached_cons;
+        self.cons_cached_cons = wrapping_add(self.cons_cached_cons, count);
+        (count, idx)
+    }
+
+    fn check_read(in self, idx: u32) -> Option[RingError] {
+        if wrapping_sub(idx, self.consumer) >= self.peeked() {
+            return Option::Some(
+                RingError::IndexOutsideWindow {
+                    idx: idx
+                }
+            );
+        }
+        Option::None
+    }
+
+    fn unpeek(inout self, n: u32) -> Option[RingError] {
+        let outstanding = self.peeked();
+        if n > outstanding {
+            return Option::Some(
+                RingError::CountExceedsWindow {
+                    requested: n,
+                    outstanding: outstanding
+                }
+            );
+        }
+        self.cons_cached_cons = wrapping_sub(self.cons_cached_cons, n);
+        Option::None
+    }
+
+    fn release(inout self, n: u32) -> Option[RingError] {
+        let outstanding = self.peeked();
+        if n > outstanding {
+            return Option::Some(
+                RingError::CountExceedsWindow {
+                    requested: n,
+                    outstanding: outstanding
+                }
+            );
+        }
+        self.consumer = wrapping_add(self.consumer, n);
+        Option::None
+    }
+
+    // push_one / pop_one.
+    fn push_a(inout self, value: u64) -> bool {
+        match self.reserve(1) {
+            Option::Some(idx) => {
+                let i = self.slot_index(idx);
+                self.a.try_set(i, value);
+                self.producer = wrapping_add(self.producer, 1);
+                true
+            },
+            Option::None => false,
+        }
+    }
+
+    fn push_desc(inout self, d: XdpDesc) -> bool {
+        match self.reserve(1) {
+            Option::Some(idx) => {
+                let i = self.slot_index(idx);
+                self.a.try_set(i, d.addr);
+                self.l.try_set(i, d.len);
+                self.o.try_set(i, d.options);
+                self.producer = wrapping_add(self.producer, 1);
+                true
+            },
+            Option::None => false,
+        }
+    }
+
+    fn pop_a(inout self) -> Option[u64] {
+        let (count, idx) = self.peek(1);
+        if count == 0 {
+            return Option::None;
+        }
+        let v = self.slot_a(idx);
+        self.consumer = wrapping_add(self.consumer, 1);
+        Option::Some(v)
+    }
+
+    fn pop_desc(inout self) -> Option[XdpDesc] {
+        let (count, idx) = self.peek(1);
+        if count == 0 {
+            return Option::None;
+        }
+        let d = self.slot_desc(idx);
+        self.consumer = wrapping_add(self.consumer, 1);
+        Option::Some(d)
+    }
+
+    // Published entry `i` (0 = oldest), for the census and the auditor.
+    fn committed_a(in self, i: u32) -> u64 {
+        self.slot_a(wrapping_add(self.consumer, i))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The public `Ring<u64>` (tests/rings.rs and any caller that builds one).
+
+struct RingCore {
+    ring: SpscRing
+}
+
+pub fn ring_core_new(size: u32, start: u32) -> RingCore eff [Fail[RingError]] {
+    match ring_make(size, start, false) {
+        Result::Ok(r) => RingCore {
+            ring: r
+        },
+        Result::Err(e) => Fail::raise(e),
+    }
+}
+
+pub fn ring_core_capacity(in r: RingCore) -> u32 {
+    r.ring.capacity()
+}
+
+pub fn ring_core_len(in r: RingCore) -> u32 {
+    r.ring.len()
+}
+
+pub fn ring_core_producer_index(in r: RingCore) -> u32 {
+    r.ring.producer
+}
+
+pub fn ring_core_consumer_index(in r: RingCore) -> u32 {
+    r.ring.consumer
+}
+
+pub fn ring_core_free_entries(inout r: RingCore, wanted: u32) -> u32 {
+    r.ring.free_entries(wanted)
+}
+
+pub fn ring_core_reserve(inout r: RingCore, n: u32) -> Option[u32] {
+    r.ring.reserve(n)
+}
+
+pub fn ring_core_write(inout r: RingCore, idx: u32, value: u64) -> Option[RingError] {
+    r.ring.write_a(idx, value)
+}
+
+pub fn ring_core_unreserve(inout r: RingCore, n: u32) -> Option[RingError] {
+    r.ring.unreserve(n)
+}
+
+pub fn ring_core_submit(inout r: RingCore, n: u32) -> Option[RingError] {
+    r.ring.submit(n)
+}
+
+pub fn ring_core_peek(inout r: RingCore, n: u32) -> (u32, u32) {
+    r.ring.peek(n)
+}
+
+pub fn ring_core_read(in r: RingCore, idx: u32) -> Result[u64, RingError] {
+    match r.ring.check_read(idx) {
+        Option::Some(e) => Result::Err(e),
+        Option::None => Result::Ok(r.ring.slot_a(idx)),
+    }
+}
+
+pub fn ring_core_unpeek(inout r: RingCore, n: u32) -> Option[RingError] {
+    r.ring.unpeek(n)
+}
+
+pub fn ring_core_release(inout r: RingCore, n: u32) -> Option[RingError] {
+    r.ring.release(n)
+}
+
+// Published entries in ring order.
+pub fn ring_core_committed(in r: RingCore) -> ChunkSeq[u64] {
+    let n = r.ring.len();
+    let mut out: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](widen_u64(n));
+    for i in 0..widen_u64(n) {
+        out.push(r.ring.committed_a(wrapping_u32(i)));
+    }
+    out
+}

@@ -14,13 +14,16 @@
 //! SH6 lane 3 (#1398) moved `attest`, `cas`, `fuzz`, `verify --refute`,
 //! `migrate`, `replay`, `semver`, `simd`, `top` and `traceparent` here, so
 //! vesper-simd, vesper-migrate, vesper-loom-trust and vesper-loom-admission
-//! left the compiler's closure (tests/compiler_closure.rs guards it).
+//! left the compiler's closure (tests/compiler_closure.rs guards it). Part 2
+//! moved `highlight` and `shot`, so vesper-highlight (with its rasterizer)
+//! left too.
 pub mod attest;
 pub mod audit;
 pub mod bench;
 pub mod cas;
 pub mod fuzz;
 pub mod grammar;
+pub mod highlight;
 pub mod json;
 pub mod migrate;
 pub mod publish;
@@ -28,6 +31,7 @@ pub mod replay;
 pub mod resolve;
 pub mod sbom;
 pub mod semver;
+pub mod shot;
 pub mod simd;
 pub mod tee;
 pub mod top;

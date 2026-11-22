@@ -6,10 +6,6 @@
 
 use std::fmt;
 
-#[cfg(not(feature = "vesper-port"))]
-pub use crate::reference::response::ResponseBuilder;
-
-#[cfg(feature = "vesper-port")]
 pub use crate::forward::response::ResponseBuilder;
 
 /// Independent limits on representation bytes and actual encoded wire bytes.

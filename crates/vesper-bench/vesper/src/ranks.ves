@@ -47,6 +47,7 @@ use self::util::{
 };
 use self::wide::{
     w,
+    w_to_i128,
     w_add,
     w_eq,
     w_i64,
@@ -242,7 +243,7 @@ pub fn do_signed_rank_exact_paired_samples(in samples: Slice[Sample])
 
 // One centered observation of the inversion: |4d - location4| and its sign.
 copy struct CObs {
-    mag: W,
+    mag: u128,
     positive: bool
 }
 
@@ -250,7 +251,7 @@ fn cco(in s: ChunkSeq[CObs], i: u64) -> CObs {
     match s.try_get(i) {
         Option::Some(x) => x,
         Option::None => CObs {
-            mag: w_zero(),
+            mag: widen_u128(0),
             positive: false
         },
     }
@@ -265,7 +266,7 @@ fn sort_cobs(inout s: ChunkSeq[CObs], n: u64) {
                 break;
             }
             let p = cco(in s, dec(j));
-            if w_ult(x.mag, p.mag) {
+            if x.mag < p.mag {
                 s.try_set(j, p);
                 j = dec(j);
             } else {
@@ -278,6 +279,19 @@ fn sort_cobs(inout s: ChunkSeq[CObs], n: u64) {
 
 // Whether the exact two-sided p-value at `location_times_four` is strictly
 // greater than 0.05. `obs` and `dist` are scratch the caller reuses.
+// One past the last observation tied with obs[start].
+fn tie_end(in obs: ChunkSeq[CObs], start: u64, n: u64) -> u64 {
+    let first = cco(in obs, start).mag;
+    let mut end = inc(start);
+    loop {
+        if end >= n || cco(in obs, end).mag != first {
+            break;
+        }
+        end = inc(end);
+    }
+    end
+}
+
 fn accepts(
     in differences: Slice[i64],
     location_times_four: W,
@@ -286,15 +300,24 @@ fn accepts(
 ) -> bool {
     obs.truncate(0);
     let len = differences.len();
+    let location = w_to_i128(location_times_four);
     for i in 0..len {
-        let d4 = w_twice(w_twice(w_i64(gi(in differences, i))));
-        let centered = w_sub(d4, location_times_four);
-        if !w_is_zero(centered) {
+        let centered = wrapping_sub(
+            wrapping_mul(widen_i128(gi(in differences, i)), widen_i128(4)),
+            location
+        );
+        if centered != widen_i128(0) {
+            let negative = centered < widen_i128(0);
+            let mag = if negative {
+                wrapping_u128(wrapping_neg_i128(centered))
+            } else {
+                wrapping_u128(centered)
+            };
             obs
                 .push(
                 CObs {
-                    mag: w_uabs(centered),
-                    positive: !w_is_neg(centered)
+                    mag: mag,
+                    positive: !negative
                 }
             );
         }
@@ -304,11 +327,8 @@ fn accepts(
         return true;
     }
     sort_cobs(inout obs, n);
-    let cells = inc(mul(n, inc(n)));
-    for i in 0..cells {
-        dist.try_set(i, 0);
-    }
-    dist.try_set(0, 1);
+    // The ranks first: the tail only needs dist[0..=tail_limit], and those
+    // cells depend on no cell above them, so the subset-sum stops there.
     let mut total_rank: u64 = 0;
     let mut positive_rank: u64 = 0;
     let mut start: u64 = 0;
@@ -316,25 +336,37 @@ fn accepts(
         if start >= n {
             break;
         }
-        let first = cco(in obs, start).mag;
-        let mut end = inc(start);
-        loop {
-            if end >= n || !w_eq(cco(in obs, end).mag, first) {
-                break;
-            }
-            end = inc(end);
-        }
+        let end = tie_end(in obs, start, n);
         let rank = add(inc(start), end);
         for k in start..end {
             if cco(in obs, k).positive {
                 positive_rank = add(positive_rank, rank);
             }
-            add_rank(inout dist, total_rank, rank);
             total_rank = add(total_rank, rank);
         }
         start = end;
     }
     let tail_limit = min_u64(positive_rank, sub(total_rank, positive_rank));
+    dist.resize(0, 0);
+    dist.resize(inc(tail_limit), 0);
+    dist.try_set(0, 1);
+    let mut reached: u64 = 0;
+    start = 0;
+    loop {
+        if start >= n {
+            break;
+        }
+        let end = tie_end(in obs, start, n);
+        let rank = add(inc(start), end);
+        for k in start..end {
+            // dist[s + rank] += dist[s] for s + rank <= tail_limit.
+            if rank <= tail_limit {
+                add_rank(inout dist, min_u64(reached, sub(tail_limit, rank)), rank);
+            }
+            reached = add(reached, rank);
+        }
+        start = end;
+    }
     let tail = tail_sum(in dist, tail_limit);
     // 2*tail / total > 1/20; both sides fit u64 for n <= 32.
     mul(TAIL_LIMIT_SCALE, tail) > pow2(n)
@@ -435,7 +467,7 @@ fn confidence_core(in differences: Slice[i64]) -> ChunkSeq[Segment] {
     }
     let mut result: ChunkSeq[Segment] = ChunkSeq::with_capacity[Segment](inc(mul(2, unique)));
     let mut obs: ChunkSeq[CObs] = ChunkSeq::with_capacity[CObs](n);
-    let mut dist = zeros(inc(mul(n, inc(n))));
+    let mut dist: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](inc(mul(n, inc(n))));
     let mut left: Option[W] = Option::None;
     for k in 0..unique {
         let right = cw(in bps, k);

@@ -1,0 +1,114 @@
+name: Native platform checks
+# Starts the required `macOS (AArch64)` and `Windows (x86_64 MSVC)` checks for
+# a pull request only once it is ready to merge (#1479): the merge gate passes
+# (scripts/ci/merge_gate.py, #1321) and both BuildBuddy checks, `Test all
+# targets` and `Native and acceptance scripts`, are green on its head commit.
+# Before, every push queued for one of the account's 5 macOS runners at once,
+# and a pull request waited hours behind runs that later pushes replaced.
+#
+# BuildBuddy reports commit statuses, so this runs on each `status` event
+# (from main's copy of this file). It dispatches Platforms (platforms.yml) on
+# the pull request's branch with `pull_request` set; that run tests GitHub's
+# merge of the head into main, as pull request runs did, and its macOS and
+# Windows jobs report on the head commit under the required names. Until
+# then those checks show as expected, so the pull request cannot merge.
+#
+# To start them by hand, run Platforms from the Actions tab on the branch
+# with profile `pr`, `checkout_ref` refs/pull/<n>/merge and `pull_request` <n>.
+
+on:
+  status:
+
+permissions:
+  actions: write
+  contents: read
+  pull-requests: read
+  statuses: read
+
+# Both BuildBuddy checks turning green send two events; the second waits here
+# and then sees the run the first one started.
+concurrency:
+  group: native-checks-${{ github.event.sha }}
+  cancel-in-progress: false
+
+jobs:
+  start:
+    name: Start macOS and Windows checks
+    if: >-
+      github.event.state == 'success' &&
+      (github.event.context == 'Test all targets' || github.event.context == 'Native and acceptance scripts')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Find a pull request whose head is green on BuildBuddy
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.event.sha }}
+        run: |
+          set -euo pipefail
+          states=$(gh api "repos/$REPO/commits/$SHA/status" \
+            --jq '[.statuses[] | select(.context == "Test all targets" or .context == "Native and acceptance scripts") | .state] | map(select(. == "success")) | length')
+          if [ "$states" != 2 ]; then
+            echo "BuildBuddy is not green on both checks yet ($states of 2)"
+            exit 0
+          fi
+          pr=$(gh api "repos/$REPO/commits/$SHA/pulls" --jq "[.[] | select(.state == \"open\" and .head.sha == \"$SHA\" and .head.repo.full_name == \"$REPO\")] | first // empty")
+          if [ -z "$pr" ]; then
+            echo "no open pull request has $SHA as its head"
+            exit 0
+          fi
+          number=$(jq -r .number <<<"$pr")
+          started=$(gh api "repos/$REPO/actions/workflows/platforms.yml/runs?event=workflow_dispatch&head_sha=$SHA&per_page=100" \
+            --jq '[.workflow_runs[] | select(.conclusion != "cancelled")] | length')
+          if [ "$started" != 0 ]; then
+            echo "Platforms already started for PR #$number at $SHA"
+            exit 0
+          fi
+          {
+            echo "number=$number"
+            echo "base=$(jq -r .base.ref <<<"$pr")"
+            echo "branch=$(jq -r .head.ref <<<"$pr")"
+          } >> "$GITHUB_OUTPUT"
+      - name: Check out the pull request head for the merge gate
+        if: steps.pr.outputs.number != ''
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.sha }}
+          path: .gate
+          fetch-depth: 0
+          sparse-checkout: |
+            .github/actions
+            scripts/ci
+      - name: Merge gate
+        if: steps.pr.outputs.number != ''
+        uses: ./.gate/.github/actions/merge-gate
+        with:
+          number: ${{ steps.pr.outputs.number }}
+          base-ref: ${{ steps.pr.outputs.base }}
+          head-sha: ${{ github.event.sha }}
+      - name: Start Platforms on the pull request branch
+        if: steps.pr.outputs.number != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.event.sha }}
+          NUMBER: ${{ steps.pr.outputs.number }}
+          BRANCH: ${{ steps.pr.outputs.branch }}
+        run: |
+          set -euo pipefail
+          # The run reports on the branch head, so it must still be this commit.
+          head=$(gh api "repos/$REPO/pulls/$NUMBER" --jq .head.sha)
+          if [ "$head" != "$SHA" ]; then
+            echo "PR #$NUMBER moved on to $head; its own BuildBuddy results start it"
+            exit 0
+          fi
+          if ! gh workflow run platforms.yml --repo "$REPO" --ref "$BRANCH" \
+              -f profile=pr -f checkout_ref="refs/pull/$NUMBER/merge" -f pull_request="$NUMBER"; then
+            # A branch from before #1479 has no `pull_request` input; its own
+            # pull request runs of Platforms already include macOS and Windows.
+            echo "::warning::could not dispatch Platforms on $BRANCH; merge main into it"
+            exit 0
+          fi
+          echo "started macOS and Windows for PR #$NUMBER at $SHA" >> "$GITHUB_STEP_SUMMARY"

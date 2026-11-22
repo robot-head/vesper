@@ -57,15 +57,39 @@ use crate::{
 };
 use semver::{Op, Version, VersionReq};
 use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
 use vesper_loom_calculus::{Manifest, PackageName, Solution, validate_solution};
+
+/// A word-at-a-time multiplicative hasher (FxHash's mixing) for the string
+/// interner: every string occurrence of the input is hashed, where SipHash
+/// cost about a twentieth of the call.
+#[derive(Default)]
+struct Fx(u64);
+
+impl Hasher for Fx {
+    fn finish(&self) -> u64 {
+        self.0 ^ (self.0 >> 29)
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        const K: u64 = 0x51_7c_c1_b7_27_22_0a_95;
+        let (words, rest) = bytes.as_chunks::<8>();
+        for w in words {
+            self.0 = (self.0.rotate_left(5) ^ u64::from_le_bytes(*w)).wrapping_mul(K);
+        }
+        let mut tail = [0u8; 8];
+        tail[..rest.len()].copy_from_slice(rest);
+        self.0 =
+            (self.0.rotate_left(5) ^ u64::from_le_bytes(tail) ^ bytes.len() as u64).wrapping_mul(K);
+    }
+}
 
 #[derive(Default)]
 struct Enc<'a> {
     body: Vec<u64>,
     text: Vec<u8>,
     occ: Vec<(u64, u64)>,
-    interned: HashMap<&'a str, u64>,
-    owned: HashMap<String, u64>,
+    interned: HashMap<&'a str, u64, BuildHasherDefault<Fx>>,
+    owned: HashMap<String, u64, BuildHasherDefault<Fx>>,
     vers: Vec<u64>,
     nver: u64,
     reqs: Vec<u64>,
@@ -74,6 +98,17 @@ struct Enc<'a> {
 }
 
 impl<'a> Enc<'a> {
+    /// An encoder with room for about `strings` distinct strings and
+    /// `words` body words, so that the tables rarely grow.
+    fn with_room(strings: usize, words: usize) -> Self {
+        Enc {
+            body: Vec::with_capacity(words),
+            text: Vec::with_capacity(strings * 32),
+            occ: Vec::with_capacity(strings),
+            interned: HashMap::with_capacity_and_hasher(strings, Default::default()),
+            ..Enc::default()
+        }
+    }
     fn w(&mut self, x: u64) {
         self.body.push(x);
     }
@@ -124,7 +159,9 @@ impl<'a> Enc<'a> {
             v.patch,
             self.intern(v.pre.as_str()),
             self.intern(v.build.as_str()),
-            self.intern_owned(v.to_string()),
+            // The text field is unused: the port writes a version's
+            // text from its components (`put_ver`).
+            self.intern(""),
         ];
         self.vers.extend(entry);
         self.versions.push(v);
@@ -337,12 +374,20 @@ impl<'a> Enc<'a> {
     }
     fn words(&self) -> Vec<u64> {
         let mut words = Vec::with_capacity(
-            3 + 2 * self.occ.len() + self.vers.len() + self.reqs.len() + self.body.len(),
+            3 + 3 * self.occ.len() + self.vers.len() + self.reqs.len() + self.body.len(),
         );
-        words.push(self.occ.len() as u64);
+        // The top bit says the occurrences in byte order follow the pairs.
+        words.push(self.occ.len() as u64 | 1 << 63);
         for &(off, len) in &self.occ {
             words.extend([off, len]);
         }
+        let text = |i: &u64| {
+            let (off, len) = self.occ[*i as usize];
+            &self.text[off as usize..(off + len) as usize]
+        };
+        let at = words.len();
+        words.extend(0..self.occ.len() as u64);
+        words[at..].sort_unstable_by(|a, b| text(a).cmp(text(b)));
         words.push(self.nver);
         words.extend(&self.vers);
         words.push(self.nreq);
@@ -493,7 +538,8 @@ pub(crate) fn audit(
         }
         return Err(Error::Limit("programmatic input bytes".into()));
     }
-    let mut enc = Enc::default();
+    let (adv, pkgs) = (catalog.advisories.len(), solution.packages.len());
+    let mut enc = Enc::with_room(16 + 2 * adv + 8 * pkgs, 64 + 16 * adv + 64 * pkgs);
     enc.head(limits, true, true, true);
     enc.catalog(catalog);
     enc.policy(policy);

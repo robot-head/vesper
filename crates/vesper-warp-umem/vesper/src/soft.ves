@@ -1,0 +1,544 @@
+// ---------------------------------------------------------------------------
+// The software NIC (src/soft.rs): the kernel/device half of an AF_XDP socket.
+// Transitions are recorded as `kind << 32 | chunk`, kind in TransitionKind
+// order (src/trace.rs).
+
+const T_NIC_PULL_FILL: u64 = 0;
+const T_NIC_DELIVER: u64 = 1;
+const T_HARVEST: u64 = 2;
+const T_HARVEST_REJECT: u64 = 3;
+const T_RECYCLE: u64 = 4;
+const T_REJECT_TO_FREE: u64 = 5;
+const T_RECYCLE_TO_FREE: u64 = 6;
+const T_TURN_AROUND: u64 = 7;
+const T_ALLOC_TX: u64 = 8;
+const T_ABANDON_TX: u64 = 9;
+const T_SUBMIT: u64 = 10;
+const T_NIC_CONSUME_TX: u64 = 11;
+const T_NIC_COMPLETE: u64 = 12;
+const T_COMPLETE_LEASED: u64 = 13;
+const T_COMPLETE_RETIRED: u64 = 14;
+const T_COMPLETE_LEAKED: u64 = 15;
+const T_RETIRE: u64 = 16;
+const T_REPLENISH: u64 = 17;
+const T_LEAK_RX: u64 = 18;
+const T_LEAK_TX: u64 = 19;
+const T_LEAK_IN_FLIGHT: u64 = 20;
+
+// Fault codes (`Fault` order) in the queue: `code << 32 | argument`.
+const F_RX_OUT_OF_RANGE: u64 = 0;
+const F_RX_HEADROOM_OVERLAP: u64 = 1;
+const F_RX_OVER_LENGTH: u64 = 2;
+const F_RX_ZERO_LENGTH: u64 = 3;
+const F_COMPLETION_OUT_OF_RANGE: u64 = 4;
+const F_STALL_TX: u64 = 5;
+const F_STALL_COMPLETION: u64 = 6;
+
+fn fault_word(f: Fault) -> u64 {
+    match f {
+        Fault::RxOutOfRange => shl(F_RX_OUT_OF_RANGE, 32),
+        Fault::RxHeadroomOverlap => shl(F_RX_HEADROOM_OVERLAP, 32),
+        Fault::RxOverLength => shl(F_RX_OVER_LENGTH, 32),
+        Fault::RxZeroLength => shl(F_RX_ZERO_LENGTH, 32),
+        Fault::CompletionOutOfRange => shl(F_COMPLETION_OUT_OF_RANGE, 32),
+        Fault::StallTx(n) => shl(F_STALL_TX, 32) | widen_u64(n),
+        Fault::StallCompletion(n) => shl(F_STALL_COMPLETION, 32) | widen_u64(n),
+    }
+}
+
+struct Nic {
+    config: UmemConfig,
+    umem_len: u64,
+    shift: u64,
+    fill: SpscRing,
+    rx: SpscRing,
+    tx: SpscRing,
+    completion: SpscRing,
+    mode: SoftNicMode,
+    // A stack: the last pulled buffer is used first.
+    rx_pool: ChunkSeq[u64],
+    // FIFO queues: live entries are `[head..len)`.
+    nic_tx: ChunkSeq[u64],
+    nic_tx_head: u64,
+    ingress: ChunkSeq[u8],
+    ingress_start: ChunkSeq[u64],
+    ingress_len: ChunkSeq[u64],
+    ingress_head: u64,
+    faults: ChunkSeq[u64],
+    faults_head: u64,
+    stall_tx: u32,
+    stall_completion: u32,
+    stats: SoftNicStats,
+    tracing: bool,
+    trace: ChunkSeq[u64]
+}
+
+fn no_soft_stats() -> SoftNicStats {
+    SoftNicStats {
+        rx_delivered: 0,
+        rx_dropped_no_buffer: 0,
+        rx_dropped_ring_full: 0,
+        rx_dropped_oversize: 0,
+        tx_consumed: 0,
+        tx_invalid: 0,
+        completions_posted: 0,
+        faults_applied: 0
+    }
+}
+
+fn nic_make(c: UmemConfig, mode: SoftNicMode) -> Result[Nic, PortError] {
+    match config_error(c) {
+        Option::Some(code) => return Result::Err(PortError::InvalidConfig(code)),
+        Option::None => (),
+    }
+    let fill = match ring_make(c.fill_size, 0, false) {
+        Result::Ok(r) => r,
+        Result::Err(e) => return Result::Err(PortError::Ring(e)),
+    };
+    let rx = match ring_make(c.rx_size, 0, true) {
+        Result::Ok(r) => r,
+        Result::Err(e) => return Result::Err(PortError::Ring(e)),
+    };
+    let tx = match ring_make(c.tx_size, 0, true) {
+        Result::Ok(r) => r,
+        Result::Err(e) => return Result::Err(PortError::Ring(e)),
+    };
+    let completion = match ring_make(c.completion_size, 0, false) {
+        Result::Ok(r) => r,
+        Result::Err(e) => return Result::Err(PortError::Ring(e)),
+    };
+    let frames = widen_u64(c.frame_count);
+    Result::Ok(
+        Nic {
+            config: c,
+            umem_len: chunk_base(c, c.frame_count),
+            shift: frame_shift(c),
+            fill: fill,
+            rx: rx,
+            tx: tx,
+            completion: completion,
+            mode: mode,
+            rx_pool: ChunkSeq::with_capacity[u64](frames),
+            nic_tx: ChunkSeq::with_capacity[u64](frames),
+            nic_tx_head: 0,
+            ingress: ChunkSeq::new[u8](),
+            ingress_start: ChunkSeq::new[u64](),
+            ingress_len: ChunkSeq::new[u64](),
+            ingress_head: 0,
+            faults: ChunkSeq::with_capacity[u64](16),
+            faults_head: 0,
+            stall_tx: 0,
+            stall_completion: 0,
+            stats: no_soft_stats(),
+            tracing: false,
+            trace: ChunkSeq::new[u64]()
+        }
+    )
+}
+
+impl Nic {
+    fn note(inout self, kind: u64, chunk: u32) {
+        if self.tracing {
+            self.trace.push(shl(kind, 32) | widen_u64(chunk));
+        }
+    }
+
+    fn chunk_of(in self, addr: u64) -> Option[u32] {
+        if addr < self.umem_len {
+            // addr < frame_count << shift: the quotient fits u32.
+            Option::Some(wrapping_u32(wrapping_shr_u64(addr, wrapping_u32(self.shift))))
+        } else {
+            Option::None
+        }
+    }
+
+    fn frame_mask(in self) -> u64 {
+        widen_u64(wrapping_sub(self.config.frame_size, 1))
+    }
+
+    fn base_of(in self, addr: u64) -> u64 {
+        addr & (self.frame_mask() ^ 18446744073709551615)
+    }
+
+    fn nic_tx_len(in self) -> u64 {
+        wrapping_sub(self.nic_tx.len(), self.nic_tx_head)
+    }
+
+    fn nic_tx_front(in self) -> Option[u64] {
+        if self.nic_tx_head < self.nic_tx.len() {
+            Option::Some(at(in self.nic_tx, self.nic_tx_head))
+        } else {
+            Option::None
+        }
+    }
+
+    fn nic_tx_pop_front(inout self) {
+        self.nic_tx_head = wrapping_add(self.nic_tx_head, 1);
+        let len = self.nic_tx.len();
+        if self.nic_tx_head == len {
+            self.nic_tx.clear();
+            self.nic_tx_head = 0;
+        } else if wrapping_add(self.nic_tx_head, self.nic_tx_head) >= len {
+            // Drop the consumed half so a queue that never empties stays
+            // bounded (amortized O(1), like `VecDeque::pop_front`).
+            self.nic_tx.try_copy_within(self.nic_tx_head, len, 0);
+            self.nic_tx.truncate(wrapping_sub(len, self.nic_tx_head));
+            self.nic_tx_head = 0;
+        }
+    }
+
+    fn pull_fill(inout self, max: u32) -> u32 {
+        let mut pulled: u32 = 0;
+        loop {
+            if pulled >= max {
+                break;
+            }
+            let addr = match self.fill.pop_a() {
+                Option::Some(a) => a,
+                Option::None => break,
+            };
+            // Aligned-chunk mode: the kernel masks the address to its chunk.
+            let base = self.base_of(addr);
+            // The kernel ignores fill addresses outside the UMEM.
+            match self.chunk_of(base) {
+                Option::Some(chunk) => {
+                    self.rx_pool.push(base);
+                    self.note(T_NIC_PULL_FILL, chunk);
+                    pulled = wrapping_add(pulled, 1);
+                },
+                Option::None => (),
+            }
+        }
+        pulled
+    }
+
+    fn take_rx_buffer(inout self) -> Option[u64] {
+        if self.rx_pool.len() == 0 {
+            self.pull_fill(1);
+        }
+        self.rx_pool.pop()
+    }
+
+    // Publishes an rx descriptor for a pool buffer (space already checked).
+    fn publish_rx(inout self, base: u64, offset: u32, len: u32) {
+        let d = XdpDesc {
+            addr: wrapping_add(base, widen_u64(offset)),
+            len: len,
+            options: 0
+        };
+        self.rx.push_desc(d);
+        match self.chunk_of(base) {
+            Option::Some(chunk) => self.note(T_NIC_DELIVER, chunk),
+            Option::None => (),
+        }
+    }
+
+    fn room(in self) -> u64 {
+        widen_u64(wrapping_sub(self.config.frame_size, self.config.headroom))
+    }
+
+    // The checks of `deliver` before the copy: the buffer to fill, or why not.
+    fn admit(inout self, len: u64) -> Result[u64, DeliverOutcome] {
+        if len == 0 || len > self.room() {
+            self.stats.rx_dropped_oversize = wrapping_add(self.stats.rx_dropped_oversize, 1);
+            return Result::Err(DeliverOutcome::Oversize);
+        }
+        if self.rx.free_entries(1) == 0 {
+            self.stats.rx_dropped_ring_full = wrapping_add(self.stats.rx_dropped_ring_full, 1);
+            return Result::Err(DeliverOutcome::RxRingFull);
+        }
+        match self.take_rx_buffer() {
+            Option::Some(base) => Result::Ok(base),
+            Option::None => {
+                self.stats.rx_dropped_no_buffer = wrapping_add(self.stats.rx_dropped_no_buffer, 1);
+                Result::Err(DeliverOutcome::NoBuffer)
+            },
+        }
+    }
+
+    fn delivered(inout self, base: u64, len: u64) -> DeliverOutcome {
+        let headroom = self.config.headroom;
+        self.publish_rx(base, headroom, wrapping_u32(len));
+        self.stats.rx_delivered = wrapping_add(self.stats.rx_delivered, 1);
+        match self.chunk_of(base) {
+            Option::Some(chunk) => DeliverOutcome::Delivered {
+                chunk: chunk
+            },
+            Option::None => DeliverOutcome::NoBuffer,
+        }
+    }
+
+    fn tx_desc_valid(in self, d: XdpDesc) -> bool {
+        let offset = d.addr & self.frame_mask();
+        d
+            .addr
+            < self
+            .umem_len
+            && d
+            .len
+            > 0
+            && wrapping_add(offset, widen_u64(d.len))
+            <= widen_u64(self.config.frame_size)
+    }
+
+    // A real fill buffer published with a forged window.
+    fn real_fault(inout self, offset: u32, len: u32) -> bool {
+        if self.rx.free_entries(1) == 0 {
+            return false;
+        }
+        match self.take_rx_buffer() {
+            Option::Some(base) => {
+                self.publish_rx(base, offset, len);
+                true
+            },
+            Option::None => false,
+        }
+    }
+
+    fn apply_fault(inout self, word: u64) -> bool {
+        let code = shr(word, 32);
+        let arg = wrapping_u32(word & 4294967295);
+        let headroom = self.config.headroom;
+        let frame = self.config.frame_size;
+        if code == F_RX_OUT_OF_RANGE {
+            let d = XdpDesc {
+                addr: wrapping_add(self.umem_len, widen_u64(headroom)),
+                len: 64,
+                options: 0
+            };
+            return self.rx.push_desc(d);
+        }
+        if code == F_RX_HEADROOM_OVERLAP {
+            if headroom > 0 {
+                return self.real_fault(wrapping_sub(headroom, 1), 1);
+            }
+            return self.real_fault(wrapping_sub(frame, 1), 2);
+        }
+        if code == F_RX_OVER_LENGTH {
+            return self.real_fault(headroom, wrapping_add(wrapping_sub(frame, headroom), 1));
+        }
+        if code == F_RX_ZERO_LENGTH {
+            return self.real_fault(headroom, 0);
+        }
+        if code == F_COMPLETION_OUT_OF_RANGE {
+            let len = self.umem_len;
+            return self.completion.push_a(len);
+        }
+        if code == F_STALL_TX {
+            self.stall_tx = sat_add32(self.stall_tx, arg);
+            return true;
+        }
+        self.stall_completion = sat_add32(self.stall_completion, arg);
+        true
+    }
+
+    fn pending_faults(in self) -> u64 {
+        wrapping_sub(self.faults.len(), self.faults_head)
+    }
+
+    fn kernel_census(in self) -> KernelCensus {
+        let mut census = KernelCensus {
+            fill_ring: self.fill.len(),
+            nic_rx: wrapping_u32(self.rx_pool.len()),
+            rx_ring: 0,
+            tx_ring: self.tx.len(),
+            nic_tx: wrapping_u32(self.nic_tx_len()),
+            completion_ring: 0,
+            spurious_rx: 0,
+            spurious_completion: 0
+        };
+        for i in 0..widen_u64(self.rx.len()) {
+            if self.rx.committed_a(wrapping_u32(i)) < self.umem_len {
+                census.rx_ring = wrapping_add(census.rx_ring, 1);
+            } else {
+                census.spurious_rx = wrapping_add(census.spurious_rx, 1);
+            }
+        }
+        for i in 0..widen_u64(self.completion.len()) {
+            if self.completion.committed_a(wrapping_u32(i)) < self.umem_len {
+                census.completion_ring = wrapping_add(census.completion_ring, 1);
+            } else {
+                census.spurious_completion = wrapping_add(census.spurious_completion, 1);
+            }
+        }
+        census
+    }
+}
+
+// One device step (`SoftNic::step`), with the batch sizes the wrapper keeps.
+fn nic_step(inout n: Nic, inout mem: Slice[u8], fill_batch: u32, tx_batch: u32, rx_batch: u32)
+    -> SoftStepReport {
+    let mut report = SoftStepReport {
+        completed: 0,
+        fill_pulled: 0,
+        tx_consumed: 0,
+        rx_delivered: 0,
+        faults_applied: 0
+    };
+    // 1. Completions.
+    if n.stall_completion > 0 {
+        n.stall_completion = wrapping_sub(n.stall_completion, 1);
+    } else {
+        loop {
+            let addr = match n.nic_tx_front() {
+                Option::Some(a) => a,
+                Option::None => break,
+            };
+            if !n.completion.push_a(addr) {
+                break;
+            }
+            n.nic_tx_pop_front();
+            n.stats.completions_posted = wrapping_add(n.stats.completions_posted, 1);
+            report.completed = wrapping_add(report.completed, 1);
+            match n.chunk_of(addr) {
+                Option::Some(chunk) => n.note(T_NIC_COMPLETE, chunk),
+                Option::None => (),
+            }
+        }
+    }
+    // 2. Fill.
+    report.fill_pulled = n.pull_fill(fill_batch);
+    // 3. Transmit: only take a descriptor when its completion slot is
+    //    guaranteed, like the kernel.
+    if n.stall_tx > 0 {
+        n.stall_tx = wrapping_sub(n.stall_tx, 1);
+    } else {
+        for _ in 0..widen_u64(tx_batch) {
+            let reserved = wrapping_add(widen_u64(n.completion.len()), n.nic_tx_len());
+            if reserved >= widen_u64(n.completion.capacity()) {
+                break;
+            }
+            let d = match n.tx.pop_desc() {
+                Option::Some(d) => d,
+                Option::None => break,
+            };
+            n.stats.tx_consumed = wrapping_add(n.stats.tx_consumed, 1);
+            report.tx_consumed = wrapping_add(report.tx_consumed, 1);
+            let valid = n.tx_desc_valid(d);
+            if !valid {
+                n.stats.tx_invalid = wrapping_add(n.stats.tx_invalid, 1);
+            }
+            match n.chunk_of(d.addr) {
+                Option::Some(chunk) => n.note(T_NIC_CONSUME_TX, chunk),
+                Option::None => (),
+            }
+            if valid && n.mode == SoftNicMode::Loopback {
+                loop_back(inout n, inout mem, d.addr, widen_u64(d.len));
+            }
+            n.nic_tx.push(d.addr);
+        }
+    }
+    // 4. Scripted ingress.
+    if n.mode == SoftNicMode::Scripted {
+        for _ in 0..widen_u64(rx_batch) {
+            if n.ingress_head >= n.ingress_len.len() {
+                break;
+            }
+            let start = at(in n.ingress_start, n.ingress_head);
+            let len = at(in n.ingress_len, n.ingress_head);
+            n.ingress_head = wrapping_add(n.ingress_head, 1);
+            match n.admit(len) {
+                Result::Ok(base) => {
+                    let dst = wrapping_add(base, widen_u64(n.config.headroom));
+                    mem.try_copy_from(dst, in n.ingress[start..wrapping_add(start, len)]);
+                    n.delivered(base, len);
+                    report.rx_delivered = wrapping_add(report.rx_delivered, 1);
+                },
+                Result::Err(_) => (),
+            }
+        }
+        compact_ingress(inout n);
+    }
+    // 5. Faults; one that cannot apply yet waits for a later step.
+    let pending = n.pending_faults();
+    for _ in 0..pending {
+        let word = at(in n.faults, n.faults_head);
+        n.faults_head = wrapping_add(n.faults_head, 1);
+        if n.apply_fault(word) {
+            n.stats.faults_applied = wrapping_add(n.stats.faults_applied, 1);
+            report.faults_applied = wrapping_add(report.faults_applied, 1);
+        } else {
+            n.faults.push(word);
+        }
+    }
+    compact_faults(inout n);
+    report
+}
+
+// Reclaims consumed ingress packets: all of them once the queue is empty,
+// else the consumed prefix once it is at least half the queue, so a queue
+// that never empties stays bounded (amortized O(1)).
+fn compact_ingress(inout n: Nic) {
+    let count = n.ingress_len.len();
+    let head = n.ingress_head;
+    if head >= count {
+        n.ingress.clear();
+        n.ingress_start.clear();
+        n.ingress_len.clear();
+        n.ingress_head = 0;
+        return;
+    }
+    if head == 0 || wrapping_add(head, head) < count {
+        return;
+    }
+    let base = at(in n.ingress_start, head);
+    let bytes = n.ingress.len();
+    n.ingress.try_copy_within(base, bytes, 0);
+    n.ingress.truncate(wrapping_sub(bytes, base));
+    for i in head..count {
+        let j = wrapping_sub(i, head);
+        n.ingress_start.try_set(j, wrapping_sub(at(in n.ingress_start, i), base));
+        n.ingress_len.try_set(j, at(in n.ingress_len, i));
+    }
+    n.ingress_start.truncate(wrapping_sub(count, head));
+    n.ingress_len.truncate(wrapping_sub(count, head));
+    n.ingress_head = 0;
+}
+
+fn compact_faults(inout n: Nic) {
+    if n.faults_head == 0 {
+        return;
+    }
+    let len = n.faults.len();
+    n.faults.try_copy_within(n.faults_head, len, 0);
+    n.faults.truncate(wrapping_sub(len, n.faults_head));
+    n.faults_head = 0;
+}
+
+// Loopback delivery of `len` bytes at UMEM offset `src`.
+fn loop_back(inout n: Nic, inout mem: Slice[u8], src: u64, len: u64) {
+    if len > n.room() {
+        n.stats.rx_dropped_oversize = wrapping_add(n.stats.rx_dropped_oversize, 1);
+        return;
+    }
+    if n.rx.free_entries(1) == 0 {
+        n.stats.rx_dropped_ring_full = wrapping_add(n.stats.rx_dropped_ring_full, 1);
+        return;
+    }
+    let base = match n.take_rx_buffer() {
+        Option::Some(b) => b,
+        Option::None => {
+            n.stats.rx_dropped_no_buffer = wrapping_add(n.stats.rx_dropped_no_buffer, 1);
+            return;
+        },
+    };
+    let dst = wrapping_add(base, widen_u64(n.config.headroom));
+    // Different chunks: one is on the tx side, the other on the rx side.
+    mem.try_copy_within(src, wrapping_add(src, len), dst);
+    let headroom = n.config.headroom;
+    n.publish_rx(base, headroom, wrapping_u32(len));
+    n.stats.rx_delivered = wrapping_add(n.stats.rx_delivered, 1);
+}
+
+// Delivers one ingress packet now (`SoftNic::deliver`).
+fn nic_deliver(inout n: Nic, inout mem: Slice[u8], in packet: Slice[u8]) -> DeliverOutcome {
+    let len = packet.len();
+    match n.admit(len) {
+        Result::Ok(base) => {
+            let dst = wrapping_add(base, widen_u64(n.config.headroom));
+            mem.try_copy_from(dst, in packet);
+            n.delivered(base, len)
+        },
+        Result::Err(outcome) => outcome,
+    }
+}

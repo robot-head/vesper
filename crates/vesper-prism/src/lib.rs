@@ -22,16 +22,10 @@ pub mod target;
 
 use std::fmt;
 
-// The implementation: the Rust reference build, or the Vesper port
-// (the packages in vesper/) behind thin forwarding adapters (`vesper-port`).
-#[cfg(not(feature = "vesper-port"))]
-mod reference;
-#[cfg(not(feature = "vesper-port"))]
-pub use reference::decoder::Decoder;
-
-#[cfg(feature = "vesper-port")]
+// The implementation: the Vesper port (the packages in vesper/) behind thin
+// forwarding adapters. It replaced the Rust implementation in SH6 lane 5
+// (#1400); that implementation is in git history before this change.
 mod forward;
-#[cfg(feature = "vesper-port")]
 pub use forward::decoder::Decoder;
 
 /// Logical byte/count limits, checked before retaining input or copying bodies.

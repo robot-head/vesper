@@ -7,13 +7,16 @@
 //!
 //! Every string is an occurrence: an index into the string table at the
 //! front, whose entries are `(offset, length)` ranges of the text bytes.
-//! Vesper sorts the table by bytes, so the rank of a string (its id) orders
-//! like the string; sets are written in `BTreeSet` order, which is then
+//! The rank of a string in byte order is its id, so ids order like the
+//! strings. The top bit of `nocc` says the occurrence indices in byte order
+//! follow the pairs (`order*`); Vesper checks that order and sorts the table
+//! itself when it is wrong or missing. Sets are written in `BTreeSet` order, which is then
 //! ascending by id.
 //!
 //! ```text
-//! nocc, (off, len)*
-//! nver, (major, minor, patch, pre, build, text)*          strings: pre, build, text
+//! nocc | 1 << 63, (off, len)*, order*
+//! nver, (major, minor, patch, pre, build, text)*          strings: pre, build, and text
+//!                                                        (always "": the port writes a version's text)
 //! nreq, (text, ncmp, (op, major, minor, has_minor, patch, has_patch, pre)*)*
 //! body
 //! ```
@@ -69,6 +72,7 @@ use crate::{
 };
 use semver::{Op, Version, VersionReq};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::hash::{BuildHasherDefault, Hasher};
 
 const NONE: u64 = u64::MAX;
 
@@ -110,12 +114,51 @@ pub(crate) fn name_valid(name: &str) -> bool {
     binding::package_name_valid(name)
 }
 
+/// No interned occurrence (the end of a `chain`).
+const NO_OCC: u32 = u32::MAX;
+
+/// A word-at-a-time multiplicative hash of a string (FxHash's mixing).
+/// Interning hashes every string occurrence of the input, where SipHash
+/// cost about a tenth of the call on small graphs.
+fn fx_hash(bytes: &[u8]) -> u64 {
+    const K: u64 = 0x51_7c_c1_b7_27_22_0a_95;
+    let mut h = bytes.len() as u64;
+    let (words, rest) = bytes.as_chunks::<8>();
+    for c in words {
+        h = (h.rotate_left(5) ^ u64::from_le_bytes(*c)).wrapping_mul(K);
+    }
+    let mut tail = [0u8; 8];
+    tail[..rest.len()].copy_from_slice(rest);
+    h = (h.rotate_left(5) ^ u64::from_le_bytes(tail)).wrapping_mul(K);
+    h ^ (h >> 29)
+}
+
+/// A hasher for keys that are already hashes.
+#[derive(Default)]
+struct Identity(u64);
+
+impl Hasher for Identity {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, _: &[u8]) {
+        unreachable!("only u64 keys are hashed")
+    }
+    fn write_u64(&mut self, x: u64) {
+        self.0 = x;
+    }
+}
+
 #[derive(Default)]
 struct Enc<'a> {
     body: Vec<u64>,
     text: Vec<u8>,
     occ: Vec<(u64, u64)>,
-    interned: HashMap<String, u64>,
+    /// Interned strings by their hash: the first occurrence with that hash,
+    /// then `chain` links the others. Comparing against `text` avoids
+    /// owning a copy of every string.
+    interned: HashMap<u64, u32, BuildHasherDefault<Identity>>,
+    chain: Vec<u32>,
     vers: Vec<u64>,
     nver: u64,
     reqs: Vec<u64>,
@@ -132,14 +175,21 @@ impl<'a> Enc<'a> {
         self.w(u64::from(x));
     }
     fn intern(&mut self, s: &str) -> u64 {
-        if let Some(&i) = self.interned.get(s) {
-            return i;
+        let h = fx_hash(s.as_bytes());
+        let mut at = self.interned.get(&h).copied().unwrap_or(NO_OCC);
+        while at != NO_OCC {
+            let (off, len) = self.occ[at as usize];
+            if &self.text[off as usize..(off + len) as usize] == s.as_bytes() {
+                return u64::from(at);
+            }
+            at = self.chain[at as usize];
         }
-        let i = self.occ.len() as u64;
+        let i = self.occ.len() as u32;
         self.occ.push((self.text.len() as u64, s.len() as u64));
         self.text.extend_from_slice(s.as_bytes());
-        self.interned.insert(s.to_owned(), i);
-        i
+        self.chain
+            .push(self.interned.insert(h, i).unwrap_or(NO_OCC));
+        u64::from(i)
     }
     fn s(&mut self, s: &str) {
         let i = self.intern(s);
@@ -158,7 +208,9 @@ impl<'a> Enc<'a> {
             v.patch,
             self.intern(v.pre.as_str()),
             self.intern(v.build.as_str()),
-            self.intern(&v.to_string()),
+            // The text field is unused: the port writes a version's
+            // text from its components (`put_ver`).
+            self.intern(""),
         ];
         self.vers.extend(entry);
         self.versions.push(v);
@@ -283,12 +335,20 @@ impl<'a> Enc<'a> {
     }
     fn words(&self) -> Vec<u64> {
         let mut words = Vec::with_capacity(
-            3 + 2 * self.occ.len() + self.vers.len() + self.reqs.len() + self.body.len(),
+            3 + 3 * self.occ.len() + self.vers.len() + self.reqs.len() + self.body.len(),
         );
-        words.push(self.occ.len() as u64);
+        // The top bit says the occurrences in byte order follow the pairs.
+        words.push(self.occ.len() as u64 | 1 << 63);
         for &(off, len) in &self.occ {
             words.extend([off, len]);
         }
+        let text = |i: &u64| {
+            let (off, len) = self.occ[*i as usize];
+            &self.text[off as usize..(off + len) as usize]
+        };
+        let at = words.len();
+        words.extend(0..self.occ.len() as u64);
+        words[at..].sort_unstable_by(|a, b| text(a).cmp(text(b)));
         words.push(self.nver);
         words.extend(&self.vers);
         words.push(self.nreq);
@@ -525,4 +585,66 @@ pub(crate) fn check_upgrade(baseline: &Solution, candidate: &Solution) -> Upgrad
 /// Live Vesper allocations, for leak tests.
 pub fn live_allocations() -> i64 {
     binding::live_allocations()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The raw result words and pool of `validate_manifest` on `words`.
+    fn raw(words: &[u64], text: &[u8]) -> (Vec<u64>, Vec<u8>) {
+        let l = binding::validate_manifest(words, text);
+        let r = l.as_ref();
+        (r.out().to_vec(), r.pool().to_vec())
+    }
+
+    /// A wrong or missing string order makes the port sort the table
+    /// itself, with the same result as the order the wrapper sends.
+    #[test]
+    fn a_wrong_or_missing_string_order_is_sorted_by_the_port() {
+        // Parsed without validation, so the port reports the errors.
+        let manifest: Manifest = toml::from_str(
+            r#"
+[package]
+name = "@robot-head/krabka-wal"
+version = "0.4.0-rc.1+b7"
+edition = "2026"
+capability_ceiling = ["Storage", "Net", "Clock", "Fail", "Fail"]
+[features]
+io_uring = { enables_effects = ["Storage", "Bogus"], sys_deps = ["liburing ^2.6.0", "bad dep"] }
+compression = { deps = ["@vesper-compression/lz4-pure", "@missing/dep"] }
+[dependencies]
+"std/bytes" = { version = "^1.3.0", effects = [] }
+"@vesper-compression/lz4-pure" = { version = "^2.1.0", effects = [], optional = true }
+"@vesper-io/uring-reactor" = { version = "^0.9.2", effects = ["Storage", "Fail", "Nope"] }
+"#,
+        )
+        .unwrap();
+        let mut enc = Enc::default();
+        enc.manifest(&manifest);
+        let words = enc.words();
+        let n = enc.occ.len();
+        assert!(n > 8 && words[0] == n as u64 | 1 << 63);
+        let given = raw(&words, &enc.text);
+        assert!(!given.0.is_empty());
+        let order = 1 + 2 * n..1 + 3 * n;
+        // Reversed, repeated, out of range, and left out.
+        let mut reversed = words.clone();
+        reversed[order.clone()].reverse();
+        let mut repeated = words.clone();
+        repeated[order.clone()].fill(words[order.start]);
+        let mut out_of_range = words.clone();
+        out_of_range[order.end - 1] = n as u64;
+        let mut missing = words.clone();
+        missing.drain(order);
+        missing[0] = n as u64;
+        for (what, w) in [
+            ("reversed", reversed),
+            ("repeated", repeated),
+            ("out of range", out_of_range),
+            ("missing", missing),
+        ] {
+            assert_eq!(raw(&w, &enc.text), given, "{what} order");
+        }
+    }
 }
