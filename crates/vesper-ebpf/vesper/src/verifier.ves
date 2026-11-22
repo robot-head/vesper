@@ -1161,8 +1161,7 @@ fn state_includes(
             if li != 0 {
                 let ci = gw(in cws, link_at(f, i));
                 for j in wrapping_add(i, 1)..eleven {
-                    if li
-                        == gw(in ows, link_at(f, j))
+                    if li == gw(in ows, link_at(f, j))
                         && (ci == 0 || ci != gw(in cws, link_at(f, j))) {
                         return false;
                     }

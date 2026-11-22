@@ -159,8 +159,7 @@ pub fn parse_whole(in b: Slice[u8], inout w: Slice[u64], inout d: Slice[u8])
         put(inout w, 0);
     }
     reserved_at(in b, 520, ETCBS_AT, 33);
-    let venice = version
-        >= SNP_REPORT_VERSION_CPUID
+    let venice = version >= SNP_REPORT_VERSION_CPUID
         && is_venice(byte(in b, CPUID_AT), byte(in b, wrapping_add(CPUID_AT, 1)));
     if version >= SNP_REPORT_VERSION_ETCB && venice {
         put(inout w, 1);

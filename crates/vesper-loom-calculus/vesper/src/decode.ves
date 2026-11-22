@@ -260,16 +260,16 @@ pub fn decode_tables(inout l: L) {
     l.k = k;
     l
         .pos = add(
-        1,
-        mul(
-            nocc,
-            if given {
-                3
-            } else {
-                2
-            }
-        )
-    );
+            1,
+            mul(
+                nocc,
+                if given {
+                    3
+                } else {
+                    2
+                }
+            )
+        );
     let nver = rd(inout l);
     l.vers.reserve(nver);
     for i in 0..nver {

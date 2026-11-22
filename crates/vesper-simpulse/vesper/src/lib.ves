@@ -410,14 +410,9 @@ impl Kernel {
     fn token_fault(in self, task: u64, own: bool) -> u64 {
         if !own {
             Code::ForeignToken
-        } else if self
-            .running
-            != task
-            || !self
-            .known(task)
-            || self
-            .state_of(task)
-            != State::Running {
+        } else if self.running != task
+            || !self.known(task)
+            || self.state_of(task) != State::Running {
             Code::InvalidToken
         } else {
             Code::Ok

@@ -195,13 +195,13 @@ pub fn check_checkpoint(in b: Slice[u8], rope_base: u32, rms_epsilon: u32, inout
     }
     out
         .set(
-        7,
-        if shared {
-            1
-        } else {
-            0
-        }
-    );
+            7,
+            if shared {
+                1
+            } else {
+                0
+            }
+        );
     let dim = out[0];
     let hidden = out[1];
     let layers = out[2];
@@ -340,14 +340,10 @@ pub fn decode_piece(in piece: Slice[u8], after_bos: bool, inout out: Slice[u64])
         return single(widen_u64(piece[start]), inout out);
     }
     // `<0xHH>` (`start + 5 < len`, so the offsets cannot wrap).
-    if piece[start]
-        == LESS
-        && piece[wrapping_add(start, 1)]
-        == DIGIT_0
-        && piece[wrapping_add(start, 2)]
-        == LOWER_X
-        && piece[wrapping_add(start, 5)]
-        == GREATER {
+    if piece[start] == LESS
+        && piece[wrapping_add(start, 1)] == DIGIT_0
+        && piece[wrapping_add(start, 2)] == LOWER_X
+        && piece[wrapping_add(start, 5)] == GREATER {
         // `u8::from_str_radix` also takes a leading `+`.
         let lo = hex_digit(piece[wrapping_add(start, 4)]);
         let h = piece[wrapping_add(start, 3)];
@@ -368,16 +364,11 @@ pub fn decode_piece(in piece: Slice[u8], after_bos: bool, inout out: Slice[u64])
 // `is_ascii_whitespace`: tab, newline, form feed, carriage return, space).
 fn single(b: u64, inout out: Slice[u64]) -> u64 eff [Fail[RuntimeError]] {
     if (b >= GRAPHIC_FIRST && b <= GRAPHIC_LAST)
-        || b
-        == TAB
-        || b
-        == LF
-        || b
-        == FF
-        || b
-        == CR
-        || b
-        == SPACE_U64 {
+        || b == TAB
+        || b == LF
+        || b == FF
+        || b == CR
+        || b == SPACE_U64 {
         out.set(1, b);
         return 1;
     }
