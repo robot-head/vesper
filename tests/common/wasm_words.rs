@@ -16,7 +16,10 @@ use super::ir_words::{self, Payload, Tables};
 use vesper::ast::{Effect, Effects, Expr, ExprKind, Function, Literal, Pattern, PatternKind};
 use vesper::check::World;
 use vesper::ir::Program;
-use vesper::wasm_backend::{ENTRY_INTERFACE, EffectLowering, WasmArtifact, WasmOptions, WasmWorld};
+use vesper::wasm_backend::{
+    ENTRY_INTERFACE, EffectLowering, HandlerLowering, HandlerMode, WasmArtifact, WasmOptions,
+    WasmWorld,
+};
 
 // ------------------------------------------------------------------ input
 
@@ -353,11 +356,22 @@ pub enum Outcome {
         wit: String,
         /// `Builder::function_count` (imports and defined functions).
         functions: usize,
+        /// The plan's handlers, in plan order.
+        handlers: Vec<PortHandler>,
     },
     /// An error class as `error_class` spells it, and its site.
     Error(String, u64),
     /// A construct this port does not lower yet (handlers, host frames).
     NotPorted(u64),
+}
+
+/// One handler the port lowered: its site instance, its effect and each
+/// clause's operation index and mode (0 Abort, 1 Tail).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortHandler {
+    pub site: String,
+    pub effect: String,
+    pub clauses: Vec<(usize, u64)>,
 }
 
 fn unpack_bytes(words: &[u64]) -> (Vec<u8>, usize) {
@@ -375,11 +389,30 @@ pub fn outcome(words: &[u64]) -> Outcome {
     if words[0] == 0 {
         let functions = words[1] as usize;
         let (core, used) = unpack_bytes(&words[2..]);
-        let (wit, _) = unpack_bytes(&words[2 + used..]);
+        let (wit, more) = unpack_bytes(&words[2 + used..]);
+        let mut at = 2 + used + more;
+        let mut handlers = vec![];
+        for _ in 0..words[at] {
+            at += 1;
+            let (site, n) = unpack_bytes(&words[at..]);
+            at += n;
+            let (effect, n) = unpack_bytes(&words[at..]);
+            at += n;
+            let clauses = (0..words[at] as usize)
+                .map(|k| (words[at + 1 + 2 * k] as usize, words[at + 2 + 2 * k]))
+                .collect::<Vec<_>>();
+            at += 2 * clauses.len();
+            handlers.push(PortHandler {
+                site: String::from_utf8(site).unwrap(),
+                effect: String::from_utf8(effect).unwrap(),
+                clauses,
+            });
+        }
         return Outcome::Module {
             core,
             wit: String::from_utf8(wit).unwrap(),
             functions,
+            handlers,
         };
     }
     let (kind, construct, site) = (words[1], words[2] as usize, words[3]);
@@ -550,9 +583,35 @@ pub fn wrap(mut core: Vec<u8>, wit: &str, world: WasmWorld) -> Vec<u8> {
         .unwrap()
 }
 
+/// The artifact's `handlers` for the port's report: operation names from
+/// the world, as `wasm_backend::compile` writes them.
+pub fn handler_lowerings(w: &World, handlers: &[PortHandler]) -> Vec<HandlerLowering> {
+    handlers
+        .iter()
+        .map(|h| HandlerLowering {
+            effect: h.effect.clone(),
+            function: h.site.clone(),
+            clauses: h
+                .clauses
+                .iter()
+                .map(|&(op, mode)| {
+                    (
+                        w.effects[&h.effect].ops[op].name.clone(),
+                        if mode == 0 {
+                            HandlerMode::Abort
+                        } else {
+                            HandlerMode::Tail
+                        },
+                    )
+                })
+                .collect(),
+        })
+        .collect()
+}
+
 /// `wasm_backend::compile`'s artifact for a module the port returned, as the
-/// `wasm` hook hands it back. Part 1 lowers no handler and no host
-/// capability, so the module uses no WasmFX and imports nothing.
+/// `wasm` hook hands it back. The port lowers no host capability and no
+/// WasmFX, so the module imports nothing.
 pub fn artifact(
     w: &World,
     entry: &str,
@@ -560,6 +619,7 @@ pub fn artifact(
     core: Vec<u8>,
     wit: String,
     functions: usize,
+    handlers: &[PortHandler],
 ) -> WasmArtifact {
     let f = &w.functions[entry];
     let component = wrap(core.clone(), &wit, o.world);
@@ -576,7 +636,7 @@ pub fn artifact(
         result: vesper::numeric::default_type(&f.result),
         stack_switching: false,
         imports: vec![],
-        handlers: vec![],
+        handlers: handler_lowerings(w, handlers),
         functions,
     }
 }
@@ -600,7 +660,8 @@ pub fn compile_with(
             core,
             wit,
             functions,
-        } => Some(artifact(w, entry, o, core, wit, functions)),
+            handlers,
+        } => Some(artifact(w, entry, o, core, wit, functions, &handlers)),
         _ => None,
     }
 }
