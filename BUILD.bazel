@@ -686,6 +686,7 @@ vesper_crate(
         "test/self_host_ir_opt": 4,
         "test/self_host_place_ir_jit": 4,
         "test/self_host_swap_inputs": 4,
+        "test/wasm_seed_breadth": 4,
     },
     # Reservations include subprocess overhead; they do not enforce RSS limits.
     # `lean_replay` marks the Lean/Logos suite run by "Native and acceptance
