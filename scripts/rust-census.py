@@ -53,7 +53,7 @@ CRATES = {
     "vesper-grammar": ("partial", "in crate", "4.7-6.3x", "speed", "7"),
     "vesper-bench": ("partial", "in crate", "2.2-3.2x", "timers via bench-pmu", "7"),
     "vesper-aegis": ("partial", "in crate", "unmeasured", "X.509, webpki, ECDSA stay behind the crypto shim; rest ports", "8"),
-    "vesper-kinetic": ("partial", "in crate", "1.83x+", "detfloat, simd, threaded world", "9"),
+    "vesper-kinetic": ("partial", "in crate (+ seed)", "colorer 0.78x, multi-colorer 1.35x; fastmath 1.42x, gjk 1.70x, sap 1.84x, morton 2.03x, lbvh 2.07x, crmath 2.65x", "coloring flipped (Rust in seed/src/engine); fastmath, gjk, sap, morton, lbvh, crmath above the bar; world/tile, rigid, soft, articulation, couple, diff, rollback, snapshot, detfloat, simd unported", "9"),
     "vesper-resonance": ("partial", "in crate (+ seed)", "kernel 1.07x, graph 1.07x; schedule 1.50x, confine 1.66x, pid/slab 2.1x, events 5.6x, simd 8-48x", "kernel render and built-in graph flipped (Rust in seed/src/engine); schedule, confine, pid, slab, events, simd above the bar; clif, spsc rings, denorm, dyn CompiledGraph unported", "9"),
     "vesper-silicon": ("partial", "in crate", "unmeasured", "SVD model, stack/prologue/hazard analysis (Cranelift IR), mmio", "10"),
     "vesper-ebpf": ("partial", "in crate", "1.2-4.7x", "BTF writers, ELF, bpf() syscalls", "10"),

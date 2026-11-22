@@ -361,12 +361,35 @@ wall-clock gap is mostly that function's spills (gap 3).
   `x86_64-pc-windows-msvc` and `aarch64-unknown-linux-gnu` gives the
   committed binding, so the macOS and Windows jobs can build the package.
 
-### Kinetic, measured on the same compiler
+### Kinetic: the colouring, flipped
 
-`abba compare 12 1` (`crates/vesper-kinetic/examples/abba.rs`, host CPU),
-median port/rust: fastmath 1.42x, scene 1.20x, colorer 1.60x, gjk 1.70x,
-sap 1.84x, morton 2.03x, lbvh 2.07x, multi-colorer 2.21x, pile-lbvh 2.21x,
-crmath 2.65x. None is flipped yet.
+`abba compare 12 1` (`crates/vesper-kinetic/examples/abba.rs`, host CPU) on
+the same compiler, median port/rust before this part: fastmath 1.42x,
+scene 1.20x, colorer 1.60x, gjk 1.70x, sap 1.84x, morton 2.03x, lbvh
+2.07x, multi-colorer 2.21x, pile-lbvh 2.21x, crmath 2.65x.
+
+**Colouring.** The port ran only 1.11x Rust's instructions on `colorer`,
+but 2.6x its mispredicted branches (cachegrind: 356k against 138k for five
+runs). Nearly all of them were in the comparison sort of the visiting
+order (`@vesper-std/sort` keyed quicksort). `coloring.ves` now packs each
+constraint's `(min, max, index)` into one word when it fits
+(`(min << (bb + nb)) | (max << nb) | index`, which orders as the pair does
+and is unique), and sorts those words with an LSD radix sort that
+ping-pongs between the two halves of a 2n-word key buffer and counts
+digits in the (not yet used) `sorted` buffer. Short inputs (under 256
+constraints) and body counts too wide to pack keep the comparison sort.
+The Rust adapter now lends a key buffer of two words per constraint.
+Mispredicts fell to 100k, under Rust's.
+
+The frozen Rust colourers (`Colorer::color`, `MultiColorer::color`) moved
+to `seed/src/engine/coloring.rs` under a new seed crate root, as in
+Resonance. `tests/port_differential.rs` compares both colourers with the
+seed (visiting order, colours and layers) over 600 cases, from small
+graphs to large ones and from 2 bodies to 4 million.
+
+```
+flip-gate vesper-kinetic: PASS (bar: 0 differences, every test, 95% upper <= 1.50x) | tests 1/1 pass | differential 0 differences on 600 cases | ABBA vesper/rust colorer 0.78x [0.78x, 0.79x] n=30; multi-colorer 1.35x [1.29x, 1.36x] n=30 | RUSTFLAGS=-C target-cpu=native
+```
 
 ### Compiler gap found in this part
 
@@ -414,7 +437,8 @@ crmath 2.65x. None is flipped yet.
   plan), the `rtrb` rings (`spsc.rs`) and the denormal registers are not
   ported yet. The SIMD paths are ported (part 3), but they run at 8-48x and
   are bound by gaps 2 and 6.
-- **Kinetic:** `world`/`tile`, `rigid` and `rigid/**`, `soft`,
+- **Kinetic:** speed up fastmath (gap 8), gjk, sap, morton, lbvh and
+  crmath to the bar and flip them, then port `world`/`tile`, `rigid` and `rigid/**`, `soft`,
   `articulation`, `couple`, `diff`, `rigid_diff`, `rollback`, `snapshot`,
   `detfloat`, `simd` (see `port-p3b-kinetic.md`, "Not ported yet"), then the
   speed of the ported modules (1.3-2.8x in P3b).

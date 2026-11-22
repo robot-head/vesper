@@ -10,7 +10,8 @@ use self::util::{
     g64,
     g8,
     inc,
-    shl_u64
+    shl_u64,
+    shr_u64
 };
 use @vesper-std/sort::keyed::{
     sort_by_key
@@ -46,6 +47,89 @@ fn bucket(
         }
     }
     offsets.try_set(used, wrapping_u32(len));
+}
+
+// Digits of the visiting-order radix sort.
+const ORDER_RADIX_BITS: u64 = 8;
+const ORDER_RADIX_BUCKETS: u64 = 256;
+const ORDER_RADIX_MASK: u64 = 255;
+// Below this many constraints the comparison sort is as fast.
+const ORDER_RADIX_MIN: u64 = 256;
+
+// The bit width of `v` (0 for 0).
+fn width(v: u64) -> u64 {
+    if v == 0 {
+        return 0;
+    }
+    widen_u64(wrapping_sub(64, leading_zeros_u64(v)))
+}
+
+// Sorts `order[0..n]` (the identity) by `(keys[i], i)`, where `keys[i]` is
+// `(min << 32) | max` of bodies below `bodies`. When `min`, `max` and `i`
+// pack into one word (`(min << (bb + nb)) | (max << nb) | i`, which orders
+// as the pair does and is unique), this is an LSD radix sort of the packed
+// words in `keys[0..n]`, ping-ponging with `keys[n..2n]` and counting digits
+// in `hist[0..256]`: no comparison branches. Otherwise, or when the scratch
+// is short, it is the comparison sort.
+fn sort_order(
+    inout keys: Slice[u64],
+    inout order: Slice[u32],
+    n: u64,
+    bodies: u64,
+    inout hist: Slice[u32]
+) {
+    let bb = width(wrapping_sub(bodies, 1));
+    let nb = width(wrapping_sub(n, 1));
+    let bits = wrapping_add(wrapping_mul(bb, 2), nb);
+    if bodies == 0 || n < ORDER_RADIX_MIN || bits > 64 || keys.len() < wrapping_mul(n, 2)
+        || hist.len() < ORDER_RADIX_BUCKETS {
+        sort_by_key(in keys[0..n], inout order[0..n]);
+        return;
+    }
+    let hi_shift = wrapping_u32(wrapping_add(bb, nb));
+    let lo_shift = wrapping_u32(nb);
+    for i in 0..n {
+        let k = g64(in keys, i);
+        keys.try_set(i, shl_u64(k >> 32, hi_shift) | shl_u64(k & U32_MAX, lo_shift) | i);
+    }
+    let passes = wrapping_add(bits, ORDER_RADIX_BITS - 1) / ORDER_RADIX_BITS;
+    for pass in 0..passes {
+        let shift = wrapping_u32(wrapping_mul(pass, ORDER_RADIX_BITS));
+        let mut src: u64 = 0;
+        let mut dst: u64 = n;
+        if (pass & 1) == 1 {
+            src = n;
+            dst = 0;
+        }
+        for d in 0..ORDER_RADIX_BUCKETS {
+            hist.try_set(d, 0);
+        }
+        for i in 0..n {
+            let d = shr_u64(g64(in keys, wrapping_add(src, i)), shift) & ORDER_RADIX_MASK;
+            hist.try_set(d, wrapping_add(g32(in hist, d), 1));
+        }
+        let mut run: u32 = 0;
+        for d in 0..ORDER_RADIX_BUCKETS {
+            let c = g32(in hist, d);
+            hist.try_set(d, run);
+            run = wrapping_add(run, c);
+        }
+        for i in 0..n {
+            let k = g64(in keys, wrapping_add(src, i));
+            let d = shr_u64(k, shift) & ORDER_RADIX_MASK;
+            let at = g32(in hist, d);
+            hist.try_set(d, wrapping_add(at, 1));
+            keys.try_set(wrapping_add(dst, widen_u64(at)), k);
+        }
+    }
+    let mut fin: u64 = 0;
+    if (passes & 1) == 1 {
+        fin = n;
+    }
+    let imask = wrapping_sub(shl_u64(1, wrapping_u32(nb)), 1);
+    for i in 0..n {
+        order.try_set(i, wrapping_u32(g64(in keys, wrapping_add(fin, i)) & imask));
+    }
 }
 
 // Colorer::color over two-body constraints: `a[i]` and `b[i]`, where `b[i]`
@@ -115,7 +199,7 @@ pub fn color_pairs(
     for i in 0..bodies {
         masks.try_set(i, 0);
     }
-    sort_by_key(in keys[0..n], inout order[0..n]);
+    sort_order(inout keys, inout order, n, bodies, inout sorted);
     let mut used: u64 = 0;
     for k in 0..n {
         let i = g32(in order, k);
@@ -229,7 +313,7 @@ pub fn color_sets(
     for i in 0..n {
         masks.try_set(i, 0);
     }
-    sort_by_key(in keys, inout order[0..count]);
+    sort_order(inout keys, inout order, count, n, inout sorted);
     let mut used: u64 = 0;
     for k in 0..count {
         let i = widen_u64(g32(in order, k));
