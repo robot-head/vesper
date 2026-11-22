@@ -5,10 +5,24 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Vesper Loom immutable BLAKE3 content-addressed store (design section 8.2.6)"
 publish = false
+build = "build.rs"
+
+[features]
+# The Vesper port of the codecs (vesper/, Rust-exit SH6 lane 16, #1411):
+# names, object ids, tree and derivation encodings. Off by default: this
+# crate is in the compiler's closure, so its default build stays Rust and
+# no port harness is resolved unless the feature is on.
+vesper-port = ["dep:vesper-port-harness", "dep:vesper-port-abi", "dep:vesper-blake3-sys"]
+# A deliberately wrong port, one edit per module picked by
+# VESPER_CAS_DIVERGE (port/test-port.sh asserts that the tests catch each).
+vesper-port-divergent = ["vesper-port"]
 
 [dependencies]
 blake3 = "1.8"
 reflink-copy = "0.1"
+vesper-port-abi = { path = "../vesper-port-abi", optional = true }
+# The `.vsys` library `Blake3` in C, which the port links.
+vesper-blake3-sys = { path = "../vesper-blake3-sys", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -18,3 +32,6 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage
 
 [dev-dependencies]
 tempfile = "3"
+
+[build-dependencies]
+vesper-port-harness = { path = "../vesper-port-harness", optional = true }

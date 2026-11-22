@@ -262,25 +262,57 @@ Each step runs the crate's Rust tests against the Vesper build as a
 differential, then flips at the bar (0 differences, ABBA upper bound at or
 below 1.5x).
 
-## Flip verdicts
+## Part 2a: loom-cas codecs
 
-None yet: nothing is ported in part 1.
+`crates/vesper-loom-cas/vesper/` (`@vesper/loom-cas`) ports the pure half of
+the crate: the entry-name policy, object ids (BLAKE3 derive-key contexts,
+hex and the `b3v1:<domain>:<kind>:<hex>` text form), the canonical tree
+encoding and decoder, and the derivation encoding, decoder and key. It
+hashes through the shared BLAKE3 C package (`@vesper-std/hash-sys`).
+
+* The port is behind the non-default `vesper-port` feature. The default
+  build is still Rust, and the port harness stays an optional build
+  dependency so the compiler's closure has no port-backed package.
+* `tests/codec_differential.rs` runs a seeded corpus through every codec
+  (valid and broken inputs, every error kind) and pins the transcript's
+  hash. Rust and the port give the same transcript: 0 differences.
+* `port/test-port.sh` runs both builds, then one deliberate bug per module
+  (name, id, tree, derivation). Each is caught. It runs in shard 7 of
+  `scripts/test-port-harness.sh`.
+
+Rough timings (`examples/codec_timing.rs`, median of 15, port / Rust):
+
+| Codec | Port vs Rust |
+|---|---|
+| `validate_name` | ~2.0x |
+| `blob_id`, small blob | ~2.7x |
+| `blob_id`, 1 MiB | ~1.2x |
+| tree encode | ~3.5x |
+| tree decode | ~1.6x |
+| derivation key | ~3.3x |
+| derivation decode | ~2.3x |
+
+The small-input costs are mostly the ABI-3 crossing and `ChunkSeq` growth,
+so these codecs flip together with the store (part 2b), when the whole
+crate runs in Vesper and no crossing is left per call.
+
+## Flip verdicts
 
 | Crate | Differential | ABBA (95% interval) | Rust deleted | PR |
 |---|---|---|---|---|
-| (none) | | | 0 | |
+| `vesper-loom-cas` (codecs) | 0 diffs | not run (1.2-3.5x rough) | 0 | part 2a |
 
 ## Coordination asks
 
 * Gap 1 (C callbacks) needs an owner and a manuscript decision. It blocks
   three of these crates and part of lane 13.
-* Gap 9: one shared BLAKE3 C package with lane 12.
-* Gap 11: RSA-PSS verify in lane 17's shim, or an owner decision that
-  loom-tuf drops RSA keys.
+* Gap 11: RSA-PSS verify is done in lane 17's shim.
 * Gap 12: lane 3 moving the CAS/admission commands out of the compiler, and
   a decision on where the DDC auditor's copy of the object-id scheme lives.
 
 ## What is left
 
-All of part 2 (the ports) and part 3 (the flips). The census row update in
-`scripts/rust-census.py` waits for plan PR #1415, which adds that file.
+* Part 2b: the loom-cas store and file layer on libc (`Store::open`, blob
+  reads and writes, no-replace renames, reflink), then a speed pass to the
+  1.5x bar and the loom-cas flip.
+* Then admission, tuf, and the Wasmtime crates once gap 1 is closed.
