@@ -34,7 +34,37 @@ actions:
           scripts/ci/reclaim-disk.sh watch &
           disk_watch=$!
           trap 'kill "$disk_watch" 2>/dev/null || true; scripts/ci/reclaim-disk.sh report' EXIT
-          bazel test --config=ci --config=rbe_build --config=ci_tests --remote_download_outputs=minimal --build_tag_filters=-lean_replay --test_tag_filters=-lean_replay //...
+          bazel test --config=ci --config=rbe_build --config=ci_tests --remote_download_outputs=minimal --build_tag_filters=-lean_replay,-self_host --test_tag_filters=-lean_replay,-self_host //...
+
+  # The corpus differentials (test/self_host_*, tagged `self_host` by
+  # tools/bazel/defs.bzl) on their own runner: on one runner with the rest of
+  # the suite they pushed "Test all targets" past the one-hour limit (#1519).
+  - name: "Self-host differentials"
+    container_image: "ubuntu-24.04"
+    resource_requests:
+      cpu: 8
+      memory: 22GB
+      disk: 60GB
+    timeout: 60m
+    triggers:
+      push:
+        branches:
+          - "main"
+      pull_request:
+        branches:
+          - "*"
+    steps:
+      - run: "scripts/ci/reclaim-disk.sh"
+      - run: "scripts/ci/install-lean.sh"
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential
+      - run: |
+          export VESPER_LEAN="$(cat .ci-lean-path)"
+          scripts/ci/reclaim-disk.sh watch &
+          disk_watch=$!
+          trap 'kill "$disk_watch" 2>/dev/null || true; scripts/ci/reclaim-disk.sh report' EXIT
+          bazel test --config=ci --config=rbe_build --config=ci_tests --remote_download_outputs=minimal --build_tests_only --test_tag_filters=self_host,-lean_replay //...
 
   - name: "Native and acceptance scripts"
     container_image: "ubuntu-24.04"

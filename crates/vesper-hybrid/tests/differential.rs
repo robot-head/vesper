@@ -9,9 +9,10 @@
 //! `cargo build -p vesper --bin vesper` into this build's target directory.
 //!
 //! Under the `divergent` (or `divergent-parse`, `divergent-ir-check`,
-//! `divergent-ir-inline`, `divergent-ir-opt`, `divergent-optimize`) feature
-//! the hybrid's layout (or parse, IR-check, inliner, IR optimizer, AST
-//! optimizer) module is deliberately wrong (build.rs), and the harness must
+//! `divergent-ir-inline`, `divergent-ir-opt`, `divergent-optimize`,
+//! `divergent-pact`) feature the hybrid's layout (or parse, IR-check,
+//! inliner, IR optimizer, AST optimizer, trait declaration pass) module is
+//! deliberately wrong (build.rs), and the harness must
 //! report differences instead: that is the proof it can fail.
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -319,7 +320,8 @@ fn hybrid_matches_the_default_compiler() {
         feature = "divergent-ir-check",
         feature = "divergent-ir-inline",
         feature = "divergent-ir-opt",
-        feature = "divergent-optimize"
+        feature = "divergent-optimize",
+        feature = "divergent-pact"
     )) {
         assert!(
             !mismatches.is_empty(),
@@ -404,6 +406,53 @@ fn pilot_module_runs_from_vesper() {
     assert!(
         hoisted > 0,
         "the Vesper bounds-hoist module hoisted no program"
+    );
+}
+
+/// The trait declaration pass (#1185) really runs from Vesper in the hybrid
+/// build: it answers the accepted shapes example, and it rejects an impl
+/// that leaves out an associated type. The stats report is read from the
+/// command that succeeds: a failing command exits before the report on
+/// Windows (#1486).
+#[test]
+fn pact_module_runs_from_vesper() {
+    let root = repository();
+    let output = Command::new(hybrid())
+        .current_dir(&root)
+        .env("VESPER_HYBRID_STATS", "1")
+        .args(["check", "examples/traits/shapes.ves"])
+        .output()
+        .expect("run vesper-hybrid");
+    assert!(output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let calls: u64 = stderr
+        .lines()
+        .find_map(|l| l.strip_prefix("vesper-hybrid: pact answered "))
+        .and_then(|l| l.split(' ').next())
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| panic!("no pact report in {stderr:?}"));
+    assert!(calls > 0, "the Vesper pact module answered no calls");
+    let bad = std::env::temp_dir().join(format!("vesper-hybrid-pact-{}.ves", std::process::id()));
+    std::fs::write(
+        &bad,
+        "struct Point { x: i64, y: i64 }\n\
+         trait Show { type Out: mod copy; fn show(in self) -> Self::Out; }\n\
+         impl Show for Point { fn show(in self) -> i64 { 1 } }\n\
+         fn main() -> i64 { 0 }\n",
+    )
+    .expect("write the rejected source");
+    let output = Command::new(hybrid())
+        .current_dir(&root)
+        .arg("check")
+        .arg(&bad)
+        .output()
+        .expect("run vesper-hybrid");
+    let _ = std::fs::remove_file(&bad);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        stderr.contains("missing associated type 'Out'"),
+        "{stderr:?}"
     );
 }
 

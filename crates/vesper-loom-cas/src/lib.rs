@@ -45,11 +45,25 @@
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![warn(missing_debug_implementations)]
+// Under the port the Rust codecs it replaces are kept for the default build.
+#![cfg_attr(vesper_port, allow(dead_code, unused_imports))]
+
+// @vesper-std/hash-sys's `.vsys` library `Blake3` (the official BLAKE3 C
+// implementation, built by vesper-blake3-sys), which the Vesper port of the
+// codecs imports for object ids and derivation keys.
+#[cfg(vesper_port)]
+use vesper_blake3_sys as blake3_shim;
 
 mod derivation;
 mod error;
 mod fsutil;
 mod id;
+#[cfg(vesper_port)]
+mod port;
+#[cfg(vesper_port)]
+mod port_fs;
+#[cfg(vesper_port)]
+mod port_store;
 mod store;
 pub mod transfer;
 mod tree;

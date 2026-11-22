@@ -1,0 +1,7 @@
+# vesper-loom-cas-port (Rust-exit SH6 lane 16, #1411): the crate's sources
+# in the parent package built with cfg(vesper_port) over the Vesper port in
+# ../vesper. It is Cargo-only for now: no crate depends on it, and
+# scripts/test-port-harness.sh runs its tests (port/test-port.sh). It
+# declares no Bazel targets, so the compiler's Bazel graph never reaches
+# the port harness through vesper-loom-cas.
+exports_files(glob(["*"]))
