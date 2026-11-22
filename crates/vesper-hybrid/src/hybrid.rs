@@ -731,18 +731,18 @@ fn scalar_request(op: u32) -> Option<u32> {
 /// One program's scalar plan: per `(function, block, instruction)`, the
 /// `scalar_hook` request and its two immediates.
 struct ScalarPlan {
-    key: (usize, usize, usize),
+    key: ((usize, usize, usize), bool),
     sites: std::collections::HashMap<(String, u32, u32), (u32, u64, u64)>,
 }
 
-thread_local! {
-    /// The plan of the program being lowered on this thread.
-    static SCALAR_PLAN: std::cell::RefCell<Option<ScalarPlan>> =
-        const { std::cell::RefCell::new(None) };
-}
+/// The plans of one compilation, kept in its encode-once scope
+/// (`vesper::swap_input`), so they are dropped when the compilation ends
+/// and a later compilation's program at a reused address is planned anew.
+#[derive(Default)]
+struct ScalarPlans(Vec<ScalarPlan>);
 
-/// Identifies a lent program for the plan cache: its address, function
-/// count and instruction count (a later compile may reuse the address).
+/// Identifies a lent program within one compilation: its address,
+/// function count and instruction count.
 fn program_key(p: &vesper::ir::Program) -> (usize, usize, usize) {
     let insts = p
         .functions
@@ -755,7 +755,11 @@ fn program_key(p: &vesper::ir::Program) -> (usize, usize, usize) {
 
 /// The plan of `program` from `modules/codegen_scalar`. A program the
 /// Place IR words cannot encode has no sites, so it stays on Rust.
-fn scalar_plan(world: &vesper::check::World, program: &vesper::ir::Program) -> ScalarPlan {
+fn scalar_plan(
+    world: &vesper::check::World,
+    program: &vesper::ir::Program,
+    optimize: bool,
+) -> ScalarPlan {
     const RECORD: usize = 6;
     let mut sites = std::collections::HashMap::new();
     if let Some((input, _)) = ir_words::program_input(world, program) {
@@ -772,7 +776,7 @@ fn scalar_plan(world: &vesper::check::World, program: &vesper::ir::Program) -> S
         }
     }
     ScalarPlan {
-        key: program_key(program),
+        key: (program_key(program), optimize),
         sites,
     }
 }
@@ -785,24 +789,29 @@ fn scalar_plan(world: &vesper::check::World, program: &vesper::ir::Program) -> S
 /// value for, stay on Rust.
 fn vesper_scalar(lent: &mut vesper::codegen_swap::Lent<'_, '_>) -> Result<bool, String> {
     let (request, args) = if lent.op == vesper::codegen_swap::INSTRUCTION {
-        let planned = SCALAR_PLAN.with(|cell| {
-            let mut cell = cell.borrow_mut();
-            if cell
-                .as_ref()
-                .is_none_or(|p| p.key != program_key(lent.program))
-            {
-                *cell = Some(scalar_plan(lent.world, lent.program));
-            }
-            cell.as_ref().and_then(|p| {
-                p.sites
-                    .get(&(
-                        lent.site.function.to_string(),
-                        lent.site.block,
-                        lent.site.inst,
-                    ))
-                    .copied()
-            })
-        });
+        // Outside a compilation's scope (`VESPER_HYBRID_SCOPES=0`, or a
+        // re-entrant call) there is no plan, so scalars stay on Rust.
+        let key = (program_key(lent.program), lent.optimize);
+        let planned = vesper::swap_input::with(lent.world, ScalarPlans::default, |plans| {
+            let at = match plans.0.iter().position(|p| p.key == key) {
+                Some(at) => at,
+                None => {
+                    plans
+                        .0
+                        .push(scalar_plan(lent.world, lent.program, lent.optimize));
+                    plans.0.len() - 1
+                }
+            };
+            plans.0[at]
+                .sites
+                .get(&(
+                    lent.site.function.to_string(),
+                    lent.site.block,
+                    lent.site.inst,
+                ))
+                .copied()
+        })
+        .flatten();
         let Some((request, a, b)) = planned else {
             SCALAR_DECLINED.fetch_add(1, Relaxed);
             return Ok(false);
