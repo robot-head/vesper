@@ -1,0 +1,768 @@
+// Module simnet of @vesper/chorus (see lib.ves): SplitMix64 PRNG and the
+// SimNet packet delivery / min-heap scheduling queue state machine (src/simnet.rs).
+
+const MAX_U64: u64 = 18446744073709551615;
+const SM_GAMMA: u64 = 11400714819323198485;
+const SM_MUL1: u64 = 13787848793156543929;
+const SM_MUL2: u64 = 10723151780598845931;
+const NET_SEED_MASK: u64 = 7954892373139548961;
+const FNV_OFFSET: u64 = 14695981039346656037;
+const FNV_PRIME: u64 = 1099511628211;
+const MIN_HT_CAP: u64 = 32;
+
+// ---------------------------------------------------------------------------
+// SplitMix64
+
+fn rem(a: u64, b: u64) -> u64 {
+    if b == 0 {
+        return 0;
+    }
+    handle Fail[RuntimeError] in {
+        a % b
+    } with {
+        return v => v,
+        raise(e, k) => 0,
+    }
+}
+
+pub fn sm_next(inout state: u64) -> u64 {
+    state = wrapping_add(state, SM_GAMMA);
+    let mut z = state;
+    z = wrapping_mul(z ^ (z >> 30), SM_MUL1);
+    z = wrapping_mul(z ^ (z >> 27), SM_MUL2);
+    z ^ (z >> 31)
+}
+
+pub fn sm_range(inout state: u64, lo: u64, hi: u64) -> u64 {
+    if hi <= lo {
+        return lo;
+    }
+    let span = wrapping_sub(hi, lo);
+    if span == MAX_U64 {
+        return sm_next(inout state);
+    }
+    let m = wrapping_add(span, 1);
+    let r = sm_next(inout state);
+    wrapping_add(lo, rem(r, m))
+}
+
+pub fn sm_chance(inout state: u64, per_mille: u64) -> bool {
+    rem(sm_next(inout state), 1000) < per_mille
+}
+
+// ---------------------------------------------------------------------------
+// SimNetCore
+
+pub copy struct SimDeliverOut {
+    delivered: bool,
+    has_next: bool,
+    next_at: u64
+}
+
+pub copy struct NetStatsOut {
+    sent: u64,
+    delivered: u64,
+    duplicated: u64,
+    undelivered: u64
+}
+
+pub struct SimNetCore {
+    now: u64,
+    rng: u64,
+    min_lat: u64,
+    max_lat: u64,
+    dup_pm: u64,
+    next_id: u64,
+    sent: u64,
+    delivered: u64,
+    duplicated: u64,
+    earliest_new: u64,
+    abandon_event: bool,
+    // Frame pool
+    f_chan: ChunkSeq[u64],
+    f_from: ChunkSeq[u64],
+    f_to: ChunkSeq[u64],
+    f_seq: ChunkSeq[u64],
+    f_label: ChunkSeq[u64],
+    f_pty: ChunkSeq[u64],
+    f_boff: ChunkSeq[u64],
+    f_blen: ChunkSeq[u64],
+    f_ref: ChunkSeq[u64],
+    f_free: ChunkSeq[u64],
+    f_bytes: ChunkSeq[u8],
+    // Mailbox queue nodes (distinct from frame slots so duplicate deliveries stay disjoint)
+    q_fid: ChunkSeq[u64],
+    q_next: ChunkSeq[u64],
+    q_free: ChunkSeq[u64],
+    // Min-heap keyed by (at, id)
+    h_at: ChunkSeq[u64],
+    h_id: ChunkSeq[u64],
+    h_fid: ChunkSeq[u64],
+    // Mailboxes keyed by (chan, from, to)
+    mb_chan: ChunkSeq[u64],
+    mb_from: ChunkSeq[u64],
+    mb_to: ChunkSeq[u64],
+    mb_head: ChunkSeq[u64],
+    mb_tail: ChunkSeq[u64],
+    mb_ht: ChunkSeq[u64],
+    mb_mask: u64,
+    mb_total: u64,
+    // Abandoned (chan, role) set
+    ab_chan: ChunkSeq[u64],
+    ab_role: ChunkSeq[u64],
+    ab_ht: ChunkSeq[u64],
+    ab_mask: u64,
+    // Interned strings for frame labels and payload types
+    sy_off: ChunkSeq[u64],
+    sy_len: ChunkSeq[u64],
+    sy_hash: ChunkSeq[u64],
+    sy_ht: ChunkSeq[u64],
+    sy_txt: ChunkSeq[u8],
+    sy_mask: u64,
+    // Staging output for try_recv
+    rx_seq: u64,
+    rx_label: ChunkSeq[u8],
+    rx_pty: ChunkSeq[u8],
+    rx_body: ChunkSeq[u8]
+}
+
+fn sw(in q: ChunkSeq[u64], i: u64) -> u64 {
+    match q.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn setw(inout q: ChunkSeq[u64], i: u64, v: u64) {
+    let _ = q.try_set(i, v);
+}
+
+fn sb(in q: ChunkSeq[u8], i: u64) -> u8 {
+    match q.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn sib(in q: Slice[u8], i: u64) -> u8 {
+    match q.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn mix(h: u64, x: u64) -> u64 {
+    wrapping_mul(h ^ x, FNV_PRIME)
+}
+
+fn hash_bytes(in b: Slice[u8]) -> u64 {
+    let mut h = FNV_OFFSET;
+    for i in 0..b.len() {
+        h = mix(h, widen_u64(sib(in b, i)));
+    }
+    h
+}
+
+fn sym_eq(in net: SimNetCore, y: u64, in b: Slice[u8]) -> bool {
+    let len = b.len();
+    if sw(in net.sy_len, y) != len {
+        return false;
+    }
+    let off = sw(in net.sy_off, y);
+    for i in 0..len {
+        if sb(in net.sy_txt, wrapping_add(off, i)) != sib(in b, i) {
+            return false;
+        }
+    }
+    true
+}
+
+fn sym_grow(inout net: SimNetCore) {
+    let cap = if net.sy_mask == 0 {
+        MIN_HT_CAP
+    } else {
+        wrapping_mul(wrapping_add(net.sy_mask, 1), 2)
+    };
+    net.sy_ht.resize(cap, 0);
+    net.sy_ht.fill(0);
+    net.sy_mask = wrapping_sub(cap, 1);
+    let n = net.sy_off.len();
+    for j in 0..n {
+        let mut at = sw(in net.sy_hash, j) & net.sy_mask;
+        loop {
+            if sw(in net.sy_ht, at) == 0 {
+                setw(inout net.sy_ht, at, wrapping_add(j, 1));
+                break;
+            }
+            at = wrapping_add(at, 1) & net.sy_mask;
+        }
+    }
+}
+
+fn intern_bytes(inout net: SimNetCore, in b: Slice[u8]) -> u64 {
+    if wrapping_mul(wrapping_add(net.sy_off.len(), 1), 2) > net.sy_mask {
+        sym_grow(inout net);
+    }
+    let h = hash_bytes(in b);
+    let mut at = h & net.sy_mask;
+    loop {
+        let e = sw(in net.sy_ht, at);
+        if e == 0 {
+            break;
+        }
+        let y = wrapping_sub(e, 1);
+        if sw(in net.sy_hash, y) == h && sym_eq(in net, y, in b) {
+            return y;
+        }
+        at = wrapping_add(at, 1) & net.sy_mask;
+    }
+    let y = net.sy_off.len();
+    let off = net.sy_txt.len();
+    net.sy_off.push(off);
+    net.sy_len.push(b.len());
+    net.sy_hash.push(h);
+    net.sy_txt.extend(in b);
+    setw(inout net.sy_ht, at, wrapping_add(y, 1));
+    y
+}
+
+fn ab_hash(chan: u64, role: u64) -> u64 {
+    let h = mix(mix(FNV_OFFSET, chan), role);
+    h ^ (h >> 29)
+}
+
+fn ab_grow(inout net: SimNetCore) {
+    let cap = if net.ab_mask == 0 {
+        MIN_HT_CAP
+    } else {
+        wrapping_mul(wrapping_add(net.ab_mask, 1), 2)
+    };
+    net.ab_ht.resize(cap, 0);
+    net.ab_ht.fill(0);
+    net.ab_mask = wrapping_sub(cap, 1);
+    let n = net.ab_chan.len();
+    for j in 0..n {
+        let h = ab_hash(sw(in net.ab_chan, j), sw(in net.ab_role, j));
+        let mut at = h & net.ab_mask;
+        loop {
+            if sw(in net.ab_ht, at) == 0 {
+                setw(inout net.ab_ht, at, wrapping_add(j, 1));
+                break;
+            }
+            at = wrapping_add(at, 1) & net.ab_mask;
+        }
+    }
+}
+
+fn ab_contains(in net: SimNetCore, chan: u64, role: u64) -> bool {
+    if net.ab_mask == 0 {
+        return false;
+    }
+    let mut at = ab_hash(chan, role) & net.ab_mask;
+    loop {
+        let e = sw(in net.ab_ht, at);
+        if e == 0 {
+            return false;
+        }
+        let j = wrapping_sub(e, 1);
+        if sw(in net.ab_chan, j) == chan && sw(in net.ab_role, j) == role {
+            return true;
+        }
+        at = wrapping_add(at, 1) & net.ab_mask;
+    }
+}
+
+fn ab_insert(inout net: SimNetCore, chan: u64, role: u64) {
+    if wrapping_mul(wrapping_add(net.ab_chan.len(), 1), 2) > net.ab_mask {
+        ab_grow(inout net);
+    }
+    let mut at = ab_hash(chan, role) & net.ab_mask;
+    loop {
+        let e = sw(in net.ab_ht, at);
+        if e == 0 {
+            break;
+        }
+        let j = wrapping_sub(e, 1);
+        if sw(in net.ab_chan, j) == chan && sw(in net.ab_role, j) == role {
+            return;
+        }
+        at = wrapping_add(at, 1) & net.ab_mask;
+    }
+    let j = net.ab_chan.len();
+    net.ab_chan.push(chan);
+    net.ab_role.push(role);
+    setw(inout net.ab_ht, at, wrapping_add(j, 1));
+}
+
+fn mb_hash(chan: u64, from_r: u64, to_r: u64) -> u64 {
+    let h = mix(mix(mix(FNV_OFFSET, chan), from_r), to_r);
+    h ^ (h >> 29)
+}
+
+fn mb_grow(inout net: SimNetCore) {
+    let cap = if net.mb_mask == 0 {
+        MIN_HT_CAP
+    } else {
+        wrapping_mul(wrapping_add(net.mb_mask, 1), 2)
+    };
+    net.mb_ht.resize(cap, 0);
+    net.mb_ht.fill(0);
+    net.mb_mask = wrapping_sub(cap, 1);
+    let n = net.mb_chan.len();
+    for j in 0..n {
+        let h = mb_hash(sw(in net.mb_chan, j), sw(in net.mb_from, j), sw(in net.mb_to, j));
+        let mut at = h & net.mb_mask;
+        loop {
+            if sw(in net.mb_ht, at) == 0 {
+                setw(inout net.mb_ht, at, wrapping_add(j, 1));
+                break;
+            }
+            at = wrapping_add(at, 1) & net.mb_mask;
+        }
+    }
+}
+
+fn mb_find(in net: SimNetCore, chan: u64, from_r: u64, to_r: u64) -> u64 {
+    if net.mb_mask == 0 {
+        return MAX_U64;
+    }
+    let mut at = mb_hash(chan, from_r, to_r) & net.mb_mask;
+    loop {
+        let e = sw(in net.mb_ht, at);
+        if e == 0 {
+            return MAX_U64;
+        }
+        let j = wrapping_sub(e, 1);
+        if sw(in net.mb_chan, j) == chan
+            && sw(in net.mb_from, j) == from_r
+            && sw(in net.mb_to, j) == to_r {
+            return j;
+        }
+        at = wrapping_add(at, 1) & net.mb_mask;
+    }
+}
+
+fn mb_get_or_insert(inout net: SimNetCore, chan: u64, from_r: u64, to_r: u64) -> u64 {
+    if wrapping_mul(wrapping_add(net.mb_chan.len(), 1), 2) > net.mb_mask {
+        mb_grow(inout net);
+    }
+    let mut at = mb_hash(chan, from_r, to_r) & net.mb_mask;
+    loop {
+        let e = sw(in net.mb_ht, at);
+        if e == 0 {
+            break;
+        }
+        let j = wrapping_sub(e, 1);
+        if sw(in net.mb_chan, j) == chan
+            && sw(in net.mb_from, j) == from_r
+            && sw(in net.mb_to, j) == to_r {
+            return j;
+        }
+        at = wrapping_add(at, 1) & net.mb_mask;
+    }
+    let j = net.mb_chan.len();
+    net.mb_chan.push(chan);
+    net.mb_from.push(from_r);
+    net.mb_to.push(to_r);
+    net.mb_head.push(MAX_U64);
+    net.mb_tail.push(MAX_U64);
+    setw(inout net.mb_ht, at, wrapping_add(j, 1));
+    j
+}
+
+fn heap_less(in net: SimNetCore, a: u64, b: u64) -> bool {
+    let ta = sw(in net.h_at, a);
+    let tb = sw(in net.h_at, b);
+    if ta != tb {
+        ta < tb
+    } else {
+        sw(in net.h_id, a) < sw(in net.h_id, b)
+    }
+}
+
+fn heap_swap(inout net: SimNetCore, a: u64, b: u64) {
+    let ta = sw(in net.h_at, a);
+    let ia = sw(in net.h_id, a);
+    let fa = sw(in net.h_fid, a);
+    let tb = sw(in net.h_at, b);
+    let ib = sw(in net.h_id, b);
+    let fb = sw(in net.h_fid, b);
+    setw(inout net.h_at, a, tb);
+    setw(inout net.h_id, a, ib);
+    setw(inout net.h_fid, a, fb);
+    setw(inout net.h_at, b, ta);
+    setw(inout net.h_id, b, ia);
+    setw(inout net.h_fid, b, fa);
+}
+
+fn heap_push(inout net: SimNetCore, at: u64, id: u64, fid: u64) {
+    net.h_at.push(at);
+    net.h_id.push(id);
+    net.h_fid.push(fid);
+    let mut i = wrapping_sub(net.h_at.len(), 1);
+    loop {
+        if i == 0 {
+            break;
+        }
+        let parent = wrapping_sub(i, 1) >> 1;
+        if !heap_less(in net, i, parent) {
+            break;
+        }
+        heap_swap(inout net, i, parent);
+        i = parent;
+    }
+}
+
+fn heap_pop(inout net: SimNetCore) -> u64 {
+    let fid = sw(in net.h_fid, 0);
+    let last = wrapping_sub(net.h_at.len(), 1);
+    let lt = sw(in net.h_at, last);
+    let li = sw(in net.h_id, last);
+    let lf = sw(in net.h_fid, last);
+    setw(inout net.h_at, 0, lt);
+    setw(inout net.h_id, 0, li);
+    setw(inout net.h_fid, 0, lf);
+    net.h_at.truncate(last);
+    net.h_id.truncate(last);
+    net.h_fid.truncate(last);
+    let mut i: u64 = 0;
+    loop {
+        let l = wrapping_add(wrapping_add(i, i), 1);
+        if l >= last {
+            break;
+        }
+        let r = wrapping_add(l, 1);
+        let mut m = l;
+        if r < last && heap_less(in net, r, l) {
+            m = r;
+        }
+        if !heap_less(in net, m, i) {
+            break;
+        }
+        heap_swap(inout net, i, m);
+        i = m;
+    }
+    fid
+}
+
+fn alloc_frame(
+    inout net: SimNetCore,
+    chan: u64,
+    from_r: u64,
+    to_r: u64,
+    seq: u64,
+    label_sym: u64,
+    pty_sym: u64,
+    in body: Slice[u8],
+    refs: u64
+) -> u64 {
+    let boff = net.f_bytes.len();
+    let blen = body.len();
+    net.f_bytes.extend(in body);
+    match net.f_free.pop() {
+        Option::Some(fid) => {
+            setw(inout net.f_chan, fid, chan);
+            setw(inout net.f_from, fid, from_r);
+            setw(inout net.f_to, fid, to_r);
+            setw(inout net.f_seq, fid, seq);
+            setw(inout net.f_label, fid, label_sym);
+            setw(inout net.f_pty, fid, pty_sym);
+            setw(inout net.f_boff, fid, boff);
+            setw(inout net.f_blen, fid, blen);
+            setw(inout net.f_ref, fid, refs);
+            fid
+        },
+        Option::None => {
+            let fid = net.f_chan.len();
+            net.f_chan.push(chan);
+            net.f_from.push(from_r);
+            net.f_to.push(to_r);
+            net.f_seq.push(seq);
+            net.f_label.push(label_sym);
+            net.f_pty.push(pty_sym);
+            net.f_boff.push(boff);
+            net.f_blen.push(blen);
+            net.f_ref.push(refs);
+            fid
+        },
+    }
+}
+
+fn release_frame(inout net: SimNetCore, fid: u64) {
+    let r = sw(in net.f_ref, fid);
+    if r <= 1 {
+        setw(inout net.f_ref, fid, 0);
+        net.f_free.push(fid);
+        if net.h_at.len() == 0 && net.mb_total == 0 {
+            net.f_chan.clear();
+            net.f_from.clear();
+            net.f_to.clear();
+            net.f_seq.clear();
+            net.f_label.clear();
+            net.f_pty.clear();
+            net.f_boff.clear();
+            net.f_blen.clear();
+            net.f_ref.clear();
+            net.f_free.clear();
+            net.f_bytes.clear();
+            net.q_fid.clear();
+            net.q_next.clear();
+            net.q_free.clear();
+        }
+    } else {
+        setw(inout net.f_ref, fid, wrapping_sub(r, 1));
+    }
+}
+
+fn alloc_qnode(inout net: SimNetCore, fid: u64) -> u64 {
+    match net.q_free.pop() {
+        Option::Some(qn) => {
+            setw(inout net.q_fid, qn, fid);
+            setw(inout net.q_next, qn, MAX_U64);
+            qn
+        },
+        Option::None => {
+            let qn = net.q_fid.len();
+            net.q_fid.push(fid);
+            net.q_next.push(MAX_U64);
+            qn
+        },
+    }
+}
+
+fn push_mailbox(inout net: SimNetCore, fid: u64) {
+    let chan = sw(in net.f_chan, fid);
+    let from_r = sw(in net.f_from, fid);
+    let to_r = sw(in net.f_to, fid);
+    let mb = mb_get_or_insert(inout net, chan, from_r, to_r);
+    let qn = alloc_qnode(inout net, fid);
+    let tail = sw(in net.mb_tail, mb);
+    if tail == MAX_U64 {
+        setw(inout net.mb_head, mb, qn);
+        setw(inout net.mb_tail, mb, qn);
+    } else {
+        setw(inout net.q_next, tail, qn);
+        setw(inout net.mb_tail, mb, qn);
+    }
+    net.mb_total = wrapping_add(net.mb_total, 1);
+}
+
+fn copy_sym_to_rx_label(inout net: SimNetCore, y: u64) {
+    net.rx_label.clear();
+    let off = sw(in net.sy_off, y);
+    let len = sw(in net.sy_len, y);
+    for i in 0..len {
+        let b = sb(in net.sy_txt, wrapping_add(off, i));
+        net.rx_label.push(b);
+    }
+}
+
+fn copy_sym_to_rx_pty(inout net: SimNetCore, y: u64) {
+    net.rx_pty.clear();
+    let off = sw(in net.sy_off, y);
+    let len = sw(in net.sy_len, y);
+    for i in 0..len {
+        let b = sb(in net.sy_txt, wrapping_add(off, i));
+        net.rx_pty.push(b);
+    }
+}
+
+fn sat_add(a: u64, b: u64) -> u64 {
+    let s = wrapping_add(a, b);
+    if s < a {
+        MAX_U64
+    } else {
+        s
+    }
+}
+
+pub fn simnet_core_new(seed: u64, min_lat: u64, max_lat: u64, dup_pm: u64) -> SimNetCore {
+    SimNetCore {
+        now: 0,
+        rng: seed ^ NET_SEED_MASK,
+        min_lat: min_lat,
+        max_lat: max_lat,
+        dup_pm: dup_pm,
+        next_id: 0,
+        sent: 0,
+        delivered: 0,
+        duplicated: 0,
+        earliest_new: MAX_U64,
+        abandon_event: false,
+        f_chan: ChunkSeq::new[u64](),
+        f_from: ChunkSeq::new[u64](),
+        f_to: ChunkSeq::new[u64](),
+        f_seq: ChunkSeq::new[u64](),
+        f_label: ChunkSeq::new[u64](),
+        f_pty: ChunkSeq::new[u64](),
+        f_boff: ChunkSeq::new[u64](),
+        f_blen: ChunkSeq::new[u64](),
+        f_ref: ChunkSeq::new[u64](),
+        f_free: ChunkSeq::new[u64](),
+        f_bytes: ChunkSeq::new[u8](),
+        q_fid: ChunkSeq::new[u64](),
+        q_next: ChunkSeq::new[u64](),
+        q_free: ChunkSeq::new[u64](),
+        h_at: ChunkSeq::new[u64](),
+        h_id: ChunkSeq::new[u64](),
+        h_fid: ChunkSeq::new[u64](),
+        mb_chan: ChunkSeq::new[u64](),
+        mb_from: ChunkSeq::new[u64](),
+        mb_to: ChunkSeq::new[u64](),
+        mb_head: ChunkSeq::new[u64](),
+        mb_tail: ChunkSeq::new[u64](),
+        mb_ht: ChunkSeq::new[u64](),
+        mb_mask: 0,
+        mb_total: 0,
+        ab_chan: ChunkSeq::new[u64](),
+        ab_role: ChunkSeq::new[u64](),
+        ab_ht: ChunkSeq::new[u64](),
+        ab_mask: 0,
+        sy_off: ChunkSeq::new[u64](),
+        sy_len: ChunkSeq::new[u64](),
+        sy_hash: ChunkSeq::new[u64](),
+        sy_ht: ChunkSeq::new[u64](),
+        sy_txt: ChunkSeq::new[u8](),
+        sy_mask: 0,
+        rx_seq: 0,
+        rx_label: ChunkSeq::new[u8](),
+        rx_pty: ChunkSeq::new[u8](),
+        rx_body: ChunkSeq::new[u8]()
+    }
+}
+
+pub fn simnet_core_set_now(inout net: SimNetCore, now: u64) {
+    net.now = now;
+}
+
+// Returns 0 = Ok, 1 = PeerGone.
+pub fn simnet_core_send(
+    inout net: SimNetCore,
+    chan: u64,
+    from_r: u64,
+    to_r: u64,
+    seq: u64,
+    in label: Str,
+    in pty: Str,
+    in body: Slice[u8]
+) -> u64 {
+    if ab_contains(in net, chan, to_r) {
+        return 1;
+    }
+    let dup_pm = net.dup_pm;
+    let copies: u64 = if sm_chance(inout net.rng, dup_pm) {
+        2
+    } else {
+        1
+    };
+    net.sent = wrapping_add(net.sent, 1);
+    if copies == 2 {
+        net.duplicated = wrapping_add(net.duplicated, 1);
+    }
+    let label_sym = intern_bytes(inout net, in label.as_bytes());
+    let pty_sym = intern_bytes(inout net, in pty.as_bytes());
+    let fid = alloc_frame(inout net, chan, from_r, to_r, seq, label_sym, pty_sym, in body, copies);
+    let lo = net.min_lat;
+    let hi = net.max_lat;
+    let now = net.now;
+    for _ in 0..copies {
+        let d = sm_range(inout net.rng, lo, hi);
+        let at = sat_add(now, d);
+        let id = net.next_id;
+        net.next_id = wrapping_add(id, 1);
+        heap_push(inout net, at, id, fid);
+        if at < net.earliest_new {
+            net.earliest_new = at;
+        }
+    }
+    0
+}
+
+// Returns 0 = Empty, 1 = Frame (staged in rx_*), 2 = PeerGone.
+pub fn simnet_core_try_recv(inout net: SimNetCore, chan: u64, from_r: u64, to_r: u64) -> u64 {
+    let mb = mb_find(in net, chan, from_r, to_r);
+    if mb != MAX_U64 {
+        let qn = sw(in net.mb_head, mb);
+        if qn != MAX_U64 {
+            let next_qn = sw(in net.q_next, qn);
+            setw(inout net.mb_head, mb, next_qn);
+            if next_qn == MAX_U64 {
+                setw(inout net.mb_tail, mb, MAX_U64);
+            }
+            let fid = sw(in net.q_fid, qn);
+            net.q_free.push(qn);
+            net.mb_total = wrapping_sub(net.mb_total, 1);
+            net.rx_seq = sw(in net.f_seq, fid);
+            let lsym = sw(in net.f_label, fid);
+            let psym = sw(in net.f_pty, fid);
+            copy_sym_to_rx_label(inout net, lsym);
+            copy_sym_to_rx_pty(inout net, psym);
+            let boff = sw(in net.f_boff, fid);
+            let blen = sw(in net.f_blen, fid);
+            net.rx_body.clear();
+            for i in 0..blen {
+                let b = sb(in net.f_bytes, wrapping_add(boff, i));
+                net.rx_body.push(b);
+            }
+            release_frame(inout net, fid);
+            return 1;
+        }
+    }
+    if ab_contains(in net, chan, from_r) {
+        return 2;
+    }
+    0
+}
+
+pub fn simnet_core_abandon(inout net: SimNetCore, chan: u64, me: u64) {
+    ab_insert(inout net, chan, me);
+    net.abandon_event = true;
+}
+
+pub fn simnet_core_deliver_due(inout net: SimNetCore, now: u64) -> SimDeliverOut {
+    net.now = now;
+    net.earliest_new = MAX_U64;
+    let mut delivered = false;
+    loop {
+        if net.h_at.len() == 0 {
+            break;
+        }
+        if sw(in net.h_at, 0) > now {
+            break;
+        }
+        let fid = heap_pop(inout net);
+        net.delivered = wrapping_add(net.delivered, 1);
+        push_mailbox(inout net, fid);
+        delivered = true;
+    }
+    let has_next = net.h_at.len() > 0;
+    let next_at = if has_next {
+        sw(in net.h_at, 0)
+    } else {
+        0
+    };
+    SimDeliverOut {
+        delivered: delivered,
+        has_next: has_next,
+        next_at: next_at
+    }
+}
+
+pub fn simnet_core_take_abandon(inout net: SimNetCore) -> bool {
+    let ev = net.abandon_event;
+    net.abandon_event = false;
+    ev
+}
+
+pub fn simnet_core_earliest_new(in net: SimNetCore) -> u64 {
+    net.earliest_new
+}
+
+pub fn simnet_core_stats(in net: SimNetCore) -> NetStatsOut {
+    NetStatsOut {
+        sent: net.sent,
+        delivered: net.delivered,
+        duplicated: net.duplicated,
+        undelivered: wrapping_add(net.h_at.len(), net.mb_total)
+    }
+}

@@ -17,13 +17,15 @@ use crate::check::{ExploreError, ExploreLimits, ExploreReport};
 use crate::chor::{Choreography, GBranch, GlobalChor, RoleId, WellFormedError};
 use crate::parse::{ParseError, ParseErrorKind};
 use crate::project::{LBranch, LocalType, PayloadMismatch, ProjectionError, Unmergeable};
+use crate::raft::{Violation, WireError};
+use std::collections::BTreeMap;
 
 // Generated and committed, but kept outside src/ so formatters, which
 // check every file under src/, never reflow it (see the porting recipe).
 #[allow(unsafe_code, missing_docs, dead_code, unused_variables, clippy::all)]
 #[rustfmt::skip]
 #[path = "../port/binding.rs"]
-mod binding;
+pub(crate) mod binding;
 
 /// Live sequence allocations of the Vesper library (for leak tests).
 pub fn live_allocations() -> i64 {
@@ -198,14 +200,23 @@ struct Out<'a> {
 }
 
 impl<'a> Out<'a> {
-    fn new(c: &'a binding::CRef<'a>) -> Self {
+    fn from_slices(w: &'a [u64], off: &'a [u64], len: &'a [u64], txt: &'a [u8]) -> Self {
         Self {
-            w: c.out().as_slice(),
+            w,
             pos: 0,
-            off: c.sy_off().as_slice(),
-            len: c.sy_len().as_slice(),
-            txt: c.sy_txt().as_slice(),
+            off,
+            len,
+            txt,
         }
+    }
+
+    fn new(c: &'a binding::CRef<'a>) -> Self {
+        Self::from_slices(
+            c.out().as_slice(),
+            c.sy_off().as_slice(),
+            c.sy_len().as_slice(),
+            c.sy_txt().as_slice(),
+        )
     }
 
     fn word(&mut self) -> u64 {
@@ -580,4 +591,112 @@ pub(crate) fn explore(
         }
         _ => ExploreError::StateBudgetExceeded { states: o.usize() },
     })
+}
+
+// ---------------------------------------------------------------------------
+// Part 2 representation adapters (simnet, session, wire/checker, raft, replog)
+
+pub(crate) fn encode_chor(chor: &Choreography) -> (Vec<u64>, Vec<u8>) {
+    let mut e = Enc::default();
+    e.chor(chor);
+    (e.w, e.t)
+}
+
+pub(crate) fn encode_chor_with_local(
+    chor: &Choreography,
+    local: &LocalType,
+) -> (Vec<u64>, Vec<u8>) {
+    let mut e = Enc::default();
+    e.chor(chor);
+    e.local(local);
+    (e.w, e.t)
+}
+
+pub(crate) fn mon_projection_error(
+    r: &binding::vesper__chorus__session__MonRef<'_>,
+) -> ProjectionError {
+    let mut o = Out::from_slices(
+        r.err_words().as_slice(),
+        r.sy_off().as_slice(),
+        r.sy_len().as_slice(),
+        r.sy_txt().as_slice(),
+    );
+    o.projection()
+}
+
+pub(crate) fn mon_decode_local(r: &binding::vesper__chorus__session__MonRef<'_>) -> LocalType {
+    let ew = r.err_words().as_slice();
+    let mut o = Out::from_slices(
+        ew,
+        r.sy_off().as_slice(),
+        r.sy_len().as_slice(),
+        r.sy_txt().as_slice(),
+    );
+    o.local(ew.len())
+}
+
+pub(crate) fn mon_decode_err_a(r: &binding::vesper__chorus__session__MonRef<'_>) -> String {
+    String::from_utf8_lossy(r.err_a().as_slice()).into_owned()
+}
+
+pub(crate) fn mon_decode_err_b(r: &binding::vesper__chorus__session__MonRef<'_>) -> String {
+    String::from_utf8_lossy(r.err_b().as_slice()).into_owned()
+}
+
+pub(crate) fn wire_err_to_raft(e: binding::vesper__chorus__wire__WireErr) -> WireError {
+    match e {
+        binding::vesper__chorus__wire__WireErr::Length { expected, found } => WireError::Length {
+            expected: expected as usize,
+            found: found as usize,
+        },
+        binding::vesper__chorus__wire__WireErr::TooManyEntries(n) => WireError::TooManyEntries(n),
+        binding::vesper__chorus__wire__WireErr::BadFlag(b) => WireError::BadFlag(b),
+    }
+}
+
+pub(crate) fn checker_violation(
+    r: &binding::vesper__chorus__wire__CheckerCoreRef<'_>,
+) -> Option<(u64, Violation)> {
+    if !r.has_violation() {
+        return None;
+    }
+    let v = match r.v_kind() {
+        0 => Violation::ElectionSafety {
+            term: r.v_a(),
+            first: r.v_b() as u32,
+            second: r.v_c() as u32,
+        },
+        1 => Violation::LogMatching {
+            a: r.v_a() as u32,
+            b: r.v_b() as u32,
+            index: r.v_c() as usize,
+        },
+        2 => Violation::CommittedDivergence {
+            node: r.v_a() as u32,
+            index: r.v_b() as usize,
+        },
+        3 => Violation::CompactedEntryChanged {
+            node: r.v_a() as u32,
+            index: r.v_b() as usize,
+        },
+        4 => Violation::RecoveryLostState {
+            node: r.v_a() as u32,
+        },
+        _ => Violation::RecoveryInconsistent {
+            node: r.v_a() as u32,
+        },
+    };
+    Some((r.v_time(), v))
+}
+
+pub(crate) fn checker_leaders(
+    r: &binding::vesper__chorus__wire__CheckerCoreRef<'_>,
+) -> BTreeMap<u64, u32> {
+    let mut map = BTreeMap::new();
+    let terms = r.leader_terms().as_slice();
+    let nodes = r.leader_nodes().as_slice();
+    for (&t, &n) in terms.iter().zip(nodes.iter()) {
+        map.insert(t, n as u32);
+    }
+    map
 }

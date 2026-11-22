@@ -100,7 +100,8 @@ fn check_source(file: &str, theorems: &[&str]) {
             "{file}: missing {t}"
         );
         assert!(
-            code.contains(&format!("#print axioms {t}\n")),
+            code.lines()
+                .any(|line| line.trim_end() == format!("#print axioms {t}")),
             "{file}: {t} not audited"
         );
     }

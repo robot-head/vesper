@@ -1,14 +1,12 @@
-// @vesper/chorus: Vesper port of the choreography front end of
-// vesper-chorus (port wave P3b lane 6, #1068): parsing, well-formedness,
-// endpoint projection with merging, binary duality and the bounded
-// asynchronous explorer (design section 25.1, 25.5).
+// @export abi 3
+// @vesper/chorus: Vesper port of vesper-chorus (Part 1 #1068 & Part 2 #1407):
+// choreography front end (parsing, well-formedness, endpoint projection with
+// merging, binary duality, bounded async explorer), plus SimNetCore,
+// Session Monitor/Auditor/Endpoint, Raft wire codecs & CheckerCore, RaftCluster,
+// and ReplogCore.
 //
-// All state lives in one handle `C`: the symbol table (util.ves), the
-// global tree arena (tree.ves), the hash-consed local-type arena
-// (local.ves), the projector (project.ves), the explorer (explore.ves) and
-// the parser (parse.ves). The Rust wrapper (src/port.rs) encodes its
-// inputs as words and text, calls one entry point below and rebuilds its
-// own types from `out` and the symbol table.
+// All front-end state lives in one handle `C`; Part 2 adds handles
+// `SimNetCore`, `Auditor`, `Mon`, `CheckerCore`, `RaftCluster`, `ReplogCore`.
 //
 // Input words. A string is two words, `(offset, length)` into the text
 // argument. A choreography is `nroles, role strings.., ntree, tree..`; a
@@ -46,6 +44,130 @@ use self::explore::{
 };
 use self::parse::{
     parse_src
+};
+use self::simnet::{
+    sm_chance,
+    sm_next,
+    sm_range,
+    simnet_core_abandon,
+    simnet_core_deliver_due,
+    simnet_core_earliest_new,
+    simnet_core_new,
+    simnet_core_send,
+    simnet_core_set_now,
+    simnet_core_stats,
+    simnet_core_take_abandon,
+    simnet_core_try_recv,
+    NetStatsOut,
+    SimDeliverOut,
+    SimNetCore
+};
+use self::session::{
+    auditor_closed,
+    auditor_counts,
+    auditor_dup,
+    auditor_faulted,
+    auditor_leak,
+    auditor_new,
+    auditor_open,
+    auditor_opened,
+    mon_awaiting,
+    mon_bind,
+    mon_clone,
+    mon_emit_current,
+    mon_ep_on_frame,
+    mon_ep_pre_recv,
+    mon_ep_send,
+    mon_expected,
+    mon_is_end,
+    mon_new,
+    mon_on_action,
+    mon_on_recv,
+    mon_on_send,
+    mon_role_bytes,
+    mon_role_id,
+    mon_status,
+    AuditOut,
+    Auditor,
+    EpPreRecvOut,
+    EpSendOut,
+    Mon
+};
+use self::wire::{
+    ack_decode,
+    ack_encode,
+    batch_decode,
+    batch_encode,
+    checker_core_committed,
+    checker_core_compacted_changed,
+    checker_core_leader_elected,
+    checker_core_logs_changed_arena,
+    checker_core_new,
+    config_index_slice,
+    header_decode,
+    header_encode,
+    log_matching_slice,
+    quorum_size,
+    raft_config_of,
+    term_decode,
+    votereq_decode,
+    votereq_encode,
+    CheckerCore,
+    RaftEntry,
+    WireAck,
+    WireErr,
+    WireHeader,
+    WireVoteReq
+};
+use self::raft::{
+    raft_chaos_finish_restart,
+    raft_finish_node_persist,
+    raft_has_violation,
+    raft_new,
+    raft_node_members,
+    raft_node_persistent,
+    raft_node_synced,
+    raft_open_sessions,
+    raft_part_blocked,
+    raft_shutdown_and_digest,
+    raft_stats,
+    raft_step_chaos,
+    raft_step_network,
+    raft_step_node,
+    raft_validate_cfg,
+    RaftCfg,
+    RaftCluster,
+    RaftPersistOut,
+    RaftStatsOut,
+    RaftStepOut
+};
+use self::replog::{
+    replog_begin_lead,
+    replog_check_follower,
+    replog_converged,
+    replog_digest,
+    replog_finish_elect,
+    replog_new,
+    replog_on_append_fault,
+    replog_on_append_req,
+    replog_on_append_resp,
+    replog_on_vote_fault,
+    replog_on_vote_req,
+    replog_on_vote_resp,
+    replog_partition,
+    replog_prep_append,
+    replog_prep_vote,
+    replog_propose_round,
+    replog_start_elect,
+    replog_stats,
+    replog_validate_cfg,
+    ReplogAppPrep,
+    ReplogAppReqOut,
+    ReplogAppRespOut,
+    ReplogCore,
+    ReplogStatsOut,
+    ReplogVoteDec,
+    ReplogVotePrep
 };
 
 pub struct C {
@@ -135,7 +257,7 @@ pub struct C {
     failed: bool
 }
 
-fn new_c() -> C {
+pub fn new_c() -> C {
     let mut c = C {
         sy_off: ChunkSeq::new[u64](),
         sy_len: ChunkSeq::new[u64](),
@@ -352,4 +474,481 @@ pub fn dual(in w: Slice[u64], in t: Slice[u8], a: u64, b: u64) -> bool {
     let lb = iw(in w, at);
     let y = read_local(inout c, in w, in t, inc(at), lb);
     are_dual(inout c, a, x, b, y)
+}
+
+// ---------------------------------------------------------------------------
+// Part 2 exports: simnet, session, wire/checker, raft, replog
+
+pub fn p2_sm_next(inout state: u64) -> u64 {
+    sm_next(inout state)
+}
+
+pub fn p2_sm_range(inout state: u64, lo: u64, hi: u64) -> u64 {
+    sm_range(inout state, lo, hi)
+}
+
+pub fn p2_sm_chance(inout state: u64, per_mille: u64) -> bool {
+    sm_chance(inout state, per_mille)
+}
+
+pub fn p2_simnet_new(seed: u64, min_lat: u64, max_lat: u64, dup_pm: u64) -> SimNetCore {
+    simnet_core_new(seed, min_lat, max_lat, dup_pm)
+}
+
+pub fn p2_simnet_set_now(inout net: SimNetCore, now: u64) {
+    simnet_core_set_now(inout net, now);
+}
+
+pub fn p2_simnet_send(
+    inout net: SimNetCore,
+    chan: u64,
+    from_r: u64,
+    to_r: u64,
+    seq: u64,
+    in label: Str,
+    in pty: Str,
+    in body: Slice[u8]
+) -> u64 {
+    simnet_core_send(inout net, chan, from_r, to_r, seq, in label, in pty, in body)
+}
+
+pub fn p2_simnet_try_recv(inout net: SimNetCore, chan: u64, from_r: u64, to_r: u64) -> u64 {
+    simnet_core_try_recv(inout net, chan, from_r, to_r)
+}
+
+pub fn p2_simnet_abandon(inout net: SimNetCore, chan: u64, me: u64) {
+    simnet_core_abandon(inout net, chan, me);
+}
+
+pub fn p2_simnet_deliver_due(inout net: SimNetCore, now: u64) -> SimDeliverOut {
+    simnet_core_deliver_due(inout net, now)
+}
+
+pub fn p2_simnet_take_abandon(inout net: SimNetCore) -> bool {
+    simnet_core_take_abandon(inout net)
+}
+
+pub fn p2_simnet_earliest_new(in net: SimNetCore) -> u64 {
+    simnet_core_earliest_new(in net)
+}
+
+pub fn p2_simnet_stats(in net: SimNetCore) -> NetStatsOut {
+    simnet_core_stats(in net)
+}
+
+pub fn p2_auditor_new() -> Auditor {
+    auditor_new()
+}
+
+pub fn p2_auditor_opened(inout a: Auditor) {
+    auditor_opened(inout a);
+}
+
+pub fn p2_auditor_closed(inout a: Auditor) {
+    auditor_closed(inout a);
+}
+
+pub fn p2_auditor_faulted(inout a: Auditor) {
+    auditor_faulted(inout a);
+}
+
+pub fn p2_auditor_dup(inout a: Auditor) {
+    auditor_dup(inout a);
+}
+
+pub fn p2_auditor_leak(inout a: Auditor, channel: u64, in role: Str, in state: Str) {
+    auditor_leak(inout a, channel, in role, in state);
+}
+
+pub fn p2_auditor_counts(in a: Auditor) -> AuditOut {
+    auditor_counts(in a)
+}
+
+pub fn p2_auditor_open(in a: Auditor) -> u64 {
+    auditor_open(in a)
+}
+
+pub fn p2_mon_new(in w: Slice[u64], in t: Slice[u8], in role: Str) -> Mon {
+    mon_new(in w, in t, in role)
+}
+
+pub fn p2_mon_bind(in w: Slice[u64], in t: Slice[u8], in role: Str) -> Mon {
+    mon_bind(in w, in t, in role)
+}
+
+pub fn p2_mon_clone(in m: Mon) -> Mon {
+    mon_clone(in m)
+}
+
+pub fn p2_mon_status(in m: Mon) -> u64 {
+    mon_status(in m)
+}
+
+pub fn p2_mon_role_id(in m: Mon, in name: Str) -> u64 {
+    mon_role_id(in m, in name)
+}
+
+pub fn p2_mon_is_end(in m: Mon) -> bool {
+    mon_is_end(in m)
+}
+
+pub fn p2_mon_awaiting(in m: Mon) -> u64 {
+    mon_awaiting(in m)
+}
+
+pub fn p2_mon_expected(inout m: Mon) {
+    mon_expected(inout m);
+}
+
+pub fn p2_mon_role_bytes(inout m: Mon) {
+    mon_role_bytes(inout m);
+}
+
+pub fn p2_mon_emit_current(inout m: Mon) {
+    mon_emit_current(inout m);
+}
+
+pub fn p2_mon_on_send(inout m: Mon, peer: u64, in label: Str, in payload: Str) -> u64 {
+    mon_on_send(inout m, peer, in label, in payload)
+}
+
+pub fn p2_mon_on_recv(inout m: Mon, peer: u64, in label: Str, in payload: Str) -> u64 {
+    mon_on_recv(inout m, peer, in label, in payload)
+}
+
+pub fn p2_mon_on_action(inout m: Mon, in name: Str) -> u64 {
+    mon_on_action(inout m, in name)
+}
+
+pub fn p2_mon_ep_send(inout m: Mon, in to_name: Str, in label: Str, in payload: Str) -> EpSendOut {
+    mon_ep_send(inout m, in to_name, in label, in payload)
+}
+
+pub fn p2_mon_ep_pre_recv(inout m: Mon, in from_name: Str) -> EpPreRecvOut {
+    mon_ep_pre_recv(inout m, in from_name)
+}
+
+pub fn p2_mon_ep_on_frame(
+    inout m: Mon,
+    chan: u64,
+    me: u64,
+    exp_from: u64,
+    f_chan: u64,
+    f_from: u64,
+    f_to: u64,
+    f_seq: u64,
+    in f_label: Str,
+    in f_pty: Str,
+    next_slot: u64
+) -> u64 {
+    mon_ep_on_frame(
+        inout m,
+        chan,
+        me,
+        exp_from,
+        f_chan,
+        f_from,
+        f_to,
+        f_seq,
+        in f_label,
+        in f_pty,
+        next_slot
+    )
+}
+
+pub fn p2_header_encode(in h: WireHeader, inout out: Slice[u8]) {
+    header_encode(in h, inout out);
+}
+
+pub fn p2_header_decode(in b: Slice[u8]) -> WireHeader eff [Fail[WireErr]] {
+    header_decode(in b)
+}
+
+pub fn p2_batch_encode(in h: WireHeader, in entries: Slice[RaftEntry], inout out: Slice[u8]) {
+    batch_encode(in h, in entries, inout out);
+}
+
+pub fn p2_batch_decode(in b: Slice[u8], inout out_entries: ChunkSeq[RaftEntry])
+    -> WireHeader eff [Fail[WireErr]] {
+    batch_decode(in b, inout out_entries)
+}
+
+pub fn p2_ack_encode(in a: WireAck, inout out: Slice[u8]) {
+    ack_encode(in a, inout out);
+}
+
+pub fn p2_ack_decode(in b: Slice[u8]) -> WireAck eff [Fail[WireErr]] {
+    ack_decode(in b)
+}
+
+pub fn p2_votereq_encode(in v: WireVoteReq, inout out: Slice[u8]) {
+    votereq_encode(in v, inout out);
+}
+
+pub fn p2_votereq_decode(in b: Slice[u8]) -> WireVoteReq eff [Fail[WireErr]] {
+    votereq_decode(in b)
+}
+
+pub fn p2_term_decode(in b: Slice[u8]) -> u64 eff [Fail[WireErr]] {
+    term_decode(in b)
+}
+
+pub fn p2_quorum_size(rule: u64, n: u64) -> u64 {
+    quorum_size(rule, n)
+}
+
+pub fn p2_raft_config_of(in log: Slice[RaftEntry], initial: u64) -> u64 {
+    raft_config_of(in log, initial)
+}
+
+pub fn p2_config_index(in log: Slice[RaftEntry]) -> u64 {
+    config_index_slice(in log)
+}
+
+pub fn p2_log_matching(in x: Slice[RaftEntry], in y: Slice[RaftEntry]) -> u64 {
+    log_matching_slice(in x, in y)
+}
+
+pub fn p2_checker_new() -> CheckerCore {
+    checker_core_new()
+}
+
+pub fn p2_checker_leader_elected(inout chk: CheckerCore, now: u64, term: u64, node: u64) -> bool {
+    checker_core_leader_elected(inout chk, now, term, node)
+}
+
+pub fn p2_checker_logs_changed(
+    inout chk: CheckerCore,
+    now: u64,
+    a: u64,
+    in arena: Slice[RaftEntry],
+    in offs: Slice[u64],
+    in lens: Slice[u64]
+) {
+    checker_core_logs_changed_arena(inout chk, now, a, in arena, in offs, in lens);
+}
+
+pub fn p2_checker_committed(
+    inout chk: CheckerCore,
+    now: u64,
+    node: u64,
+    in log: Slice[RaftEntry],
+    commit: u64
+) {
+    checker_core_committed(inout chk, now, node, in log, commit);
+}
+
+pub fn p2_checker_compacted_changed(inout chk: CheckerCore, now: u64, node: u64, index: u64) {
+    checker_core_compacted_changed(inout chk, now, node, index);
+}
+
+pub fn p2_raft_validate_cfg(in cfg: RaftCfg) -> u64 {
+    raft_validate_cfg(in cfg)
+}
+
+pub fn p2_raft_new(seed: u64, in cfg: RaftCfg) -> RaftCluster {
+    raft_new(seed, in cfg)
+}
+
+pub fn p2_raft_step_network(inout rc: RaftCluster, now: u64) -> RaftStepOut {
+    raft_step_network(inout rc, now)
+}
+
+pub fn p2_raft_step_chaos(inout rc: RaftCluster, now: u64) -> RaftStepOut {
+    raft_step_chaos(inout rc, now)
+}
+
+pub fn p2_raft_chaos_finish_restart(
+    inout rc: RaftCluster,
+    node: u64,
+    now: u64,
+    ok: bool,
+    term: u64,
+    voted_for: u64,
+    snap_index: u64,
+    snap_term: u64,
+    in log_s: Slice[RaftEntry]
+) -> RaftStepOut {
+    raft_chaos_finish_restart(
+        inout rc,
+        node,
+        now,
+        ok,
+        term,
+        voted_for,
+        snap_index,
+        snap_term,
+        in log_s
+    )
+}
+
+pub fn p2_raft_step_node(inout rc: RaftCluster, i: u64, now: u64) -> RaftStepOut {
+    raft_step_node(inout rc, i, now)
+}
+
+pub fn p2_raft_node_persistent(in rc: RaftCluster, i: u64) -> RaftPersistOut {
+    raft_node_persistent(in rc, i)
+}
+
+pub fn p2_raft_node_synced(in rc: RaftCluster, i: u64) -> RaftPersistOut {
+    raft_node_synced(in rc, i)
+}
+
+pub fn p2_raft_finish_node_persist(
+    inout rc: RaftCluster,
+    i: u64,
+    now: u64,
+    err_kind: u64,
+    torn: bool,
+    rec_term: u64,
+    rec_vf: u64,
+    rec_si: u64,
+    rec_st: u64,
+    in rec_log: Slice[RaftEntry]
+) -> RaftStepOut {
+    raft_finish_node_persist(
+        inout rc,
+        i,
+        now,
+        err_kind,
+        torn,
+        rec_term,
+        rec_vf,
+        rec_si,
+        rec_st,
+        in rec_log
+    )
+}
+
+pub fn p2_raft_shutdown_and_digest(inout rc: RaftCluster) -> u64 {
+    raft_shutdown_and_digest(inout rc)
+}
+
+pub fn p2_raft_stats(in rc: RaftCluster) -> RaftStatsOut {
+    raft_stats(in rc)
+}
+
+pub fn p2_raft_node_members(in rc: RaftCluster, i: u64) -> u64 {
+    raft_node_members(in rc, i)
+}
+
+pub fn p2_raft_open_sessions(in rc: RaftCluster) -> u64 {
+    raft_open_sessions(in rc)
+}
+
+pub fn p2_raft_has_violation(in rc: RaftCluster) -> bool {
+    raft_has_violation(in rc)
+}
+
+pub fn p2_raft_part_blocked(in rc: RaftCluster, src: u64, dst: u64, now: u64) -> bool {
+    raft_part_blocked(in rc, src, dst, now)
+}
+
+pub fn p2_replog_validate_cfg(n: u64, max_batch: u64) -> u64 {
+    replog_validate_cfg(n, max_batch)
+}
+
+pub fn p2_replog_new(
+    seed: u64,
+    n: u64,
+    max_batch: u64,
+    proposals_per_round: u64,
+    partition_per_mille: u64
+) -> ReplogCore {
+    replog_new(seed, n, max_batch, proposals_per_round, partition_per_mille)
+}
+
+pub fn p2_replog_partition(inout rp: ReplogCore, on: bool) {
+    replog_partition(inout rp, on);
+}
+
+pub fn p2_replog_start_elect(inout rp: ReplogCore, c: u64, term: u64) -> bool {
+    replog_start_elect(inout rp, c, term)
+}
+
+pub fn p2_replog_prep_vote(inout rp: ReplogCore, c: u64) -> ReplogVotePrep {
+    replog_prep_vote(inout rp, c)
+}
+
+pub fn p2_replog_on_vote_req(inout rp: ReplogCore, v: u64, in r: WireVoteReq) -> ReplogVoteDec {
+    replog_on_vote_req(inout rp, v, in r)
+}
+
+pub fn p2_replog_on_vote_fault(inout rp: ReplogCore) {
+    replog_on_vote_fault(inout rp);
+}
+
+pub fn p2_replog_on_vote_resp(
+    inout rp: ReplogCore,
+    c: u64,
+    term: u64,
+    granted: bool,
+    resp_term: u64
+) -> bool {
+    replog_on_vote_resp(inout rp, c, term, granted, resp_term)
+}
+
+pub fn p2_replog_finish_elect(inout rp: ReplogCore, now_ns: u64, c: u64, term: u64, votes: u64)
+    -> bool {
+    replog_finish_elect(inout rp, now_ns, c, term, votes)
+}
+
+pub fn p2_replog_begin_lead(inout rp: ReplogCore, l: u64) {
+    replog_begin_lead(inout rp, l);
+}
+
+pub fn p2_replog_propose_round(inout rp: ReplogCore, now_ns: u64, l: u64) {
+    replog_propose_round(inout rp, now_ns, l);
+}
+
+pub fn p2_replog_prep_append(inout rp: ReplogCore, l: u64, f: u64) -> ReplogAppPrep {
+    replog_prep_append(inout rp, l, f)
+}
+
+pub fn p2_replog_on_append_req(
+    inout rp: ReplogCore,
+    f: u64,
+    in h: WireHeader,
+    in entries: Slice[RaftEntry]
+) -> ReplogAppReqOut {
+    replog_on_append_req(inout rp, f, in h, in entries)
+}
+
+pub fn p2_replog_check_follower(
+    inout rp: ReplogCore,
+    now_ns: u64,
+    f: u64,
+    changed: bool,
+    committed: bool
+) {
+    replog_check_follower(inout rp, now_ns, f, changed, committed);
+}
+
+pub fn p2_replog_on_append_fault(inout rp: ReplogCore) {
+    replog_on_append_fault(inout rp);
+}
+
+pub fn p2_replog_on_append_resp(
+    inout rp: ReplogCore,
+    now_ns: u64,
+    l: u64,
+    f: u64,
+    term: u64,
+    sent_last: u64,
+    in ack: WireAck,
+    ok: bool
+) -> ReplogAppRespOut {
+    replog_on_append_resp(inout rp, now_ns, l, f, term, sent_last, in ack, ok)
+}
+
+pub fn p2_replog_converged(in rp: ReplogCore, l: u64) -> bool {
+    replog_converged(in rp, l)
+}
+
+pub fn p2_replog_digest(in rp: ReplogCore, datagrams: u64, dropped: u64) -> u64 {
+    replog_digest(in rp, datagrams, dropped)
+}
+
+pub fn p2_replog_stats(in rp: ReplogCore) -> ReplogStatsOut {
+    replog_stats(in rp)
 }
