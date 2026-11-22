@@ -479,40 +479,64 @@ pub fn verify_by_certificate(
     leaf_ec_key(cert, curve)?.verify_fixed(message, r_s, what)
 }
 
+fn ec_key_from_spki(
+    spki_der: &[u8],
+    required_curve: Option<Curve>,
+    what_spki: &'static str,
+    what_alg: &'static str,
+    what_curve: &'static str,
+    what_bits: &'static str,
+) -> Result<EcPublicKey, AttestError> {
+    let spki = spki::SubjectPublicKeyInfoRef::try_from(spki_der)
+        .map_err(|_| AttestError::UnexpectedKeyType { what: what_spki })?;
+    if spki.algorithm.oid != ID_EC_PUBLIC_KEY {
+        return Err(AttestError::UnexpectedKeyType { what: what_alg });
+    }
+    let curve = match (required_curve, spki.algorithm.parameters_oid()) {
+        (Some(Curve::P256), Ok(o)) if o == SECP256R1 => Curve::P256,
+        (Some(Curve::P384), Ok(o)) if o == SECP384R1 => Curve::P384,
+        (None, Ok(o)) if o == SECP256R1 => Curve::P256,
+        (None, Ok(o)) if o == SECP384R1 => Curve::P384,
+        _ => return Err(AttestError::UnexpectedKeyType { what: what_curve }),
+    };
+    let point = spki
+        .subject_public_key
+        .as_bytes()
+        .ok_or(AttestError::UnexpectedKeyType { what: what_bits })?;
+    EcPublicKey::from_sec1(curve, point)
+}
+
 fn leaf_ec_key(leaf: &[u8], curve: Curve) -> Result<EcPublicKey, AttestError> {
     let leaf_der = CertificateDer::from(leaf);
     let ee = webpki::EndEntityCert::try_from(&leaf_der)
         .map_err(|e| AttestError::CertificateChain(format!("leaf: {e:?}")))?;
-    let spki_der = ee.subject_public_key_info();
-    let spki = spki::SubjectPublicKeyInfoRef::try_from(spki_der.as_ref()).map_err(|_| {
+    ec_key_from_spki(
+        ee.subject_public_key_info().as_ref(),
+        Some(curve),
+        "leaf SubjectPublicKeyInfo",
+        "leaf key is not id-ecPublicKey",
+        "leaf key curve",
+        "leaf key bit string",
+    )
+}
+
+/// Decode a PEM `PUBLIC KEY` holding an uncompressed P-256 or P-384 point.
+pub fn ec_public_key_from_pem(pem: &str) -> Result<EcPublicKey, AttestError> {
+    use rustls_pki_types::SubjectPublicKeyInfoDer;
+    use rustls_pki_types::pem::PemObject;
+    let der = SubjectPublicKeyInfoDer::from_pem_slice(pem.as_bytes()).map_err(|_| {
         AttestError::UnexpectedKeyType {
-            what: "leaf SubjectPublicKeyInfo",
+            what: "PKIX public key is not a PEM PUBLIC KEY",
         }
     })?;
-    if spki.algorithm.oid != ID_EC_PUBLIC_KEY {
-        return Err(AttestError::UnexpectedKeyType {
-            what: "leaf key is not id-ecPublicKey",
-        });
-    }
-    let want = match curve {
-        Curve::P256 => SECP256R1,
-        Curve::P384 => SECP384R1,
-    };
-    match spki.algorithm.parameters_oid() {
-        Ok(oid) if oid == want => {}
-        _ => {
-            return Err(AttestError::UnexpectedKeyType {
-                what: "leaf key curve",
-            });
-        }
-    }
-    let point = spki
-        .subject_public_key
-        .as_bytes()
-        .ok_or(AttestError::UnexpectedKeyType {
-            what: "leaf key bit string",
-        })?;
-    EcPublicKey::from_sec1(curve, point)
+    ec_key_from_spki(
+        der.as_ref(),
+        None,
+        "PKIX public key DER",
+        "PKIX public key is not an EC key",
+        "PKIX public key curve (P-256 or P-384 only)",
+        "PKIX public key bit string",
+    )
 }
 
 /// Split concatenated PEM certificates (leaf first) into DER blobs.
