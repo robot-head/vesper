@@ -330,8 +330,10 @@ pub fn differential_run(step: usize, execute: bool) -> Tally {
                         core,
                         wit,
                         functions,
+                        handlers,
                     },
                 ) => {
+                    let lowered = handler_lowerings(&c.world, handlers);
                     if a.functions != *functions {
                         t.diffs
                             .push(format!("{tag}: {} vs {functions} functions", a.functions));
@@ -344,6 +346,9 @@ pub fn differential_run(step: usize, execute: bool) -> Tally {
                     } else if &a.wit != wit {
                         t.diffs
                             .push(format!("{tag}: WIT differs\n{}\n---\n{wit}", a.wit));
+                    } else if a.handlers != lowered {
+                        t.diffs
+                            .push(format!("{tag}: handlers {:?} vs {lowered:?}", a.handlers));
                     } else {
                         let component = wrap(core.clone(), wit, o.world);
                         if component != a.component {

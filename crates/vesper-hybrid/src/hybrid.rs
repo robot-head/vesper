@@ -697,8 +697,8 @@ fn vesper_aggregate(lent: &mut vesper::codegen_swap::Lent<'_, '_>) -> Result<boo
 /// `@vesper/wasm-backend` writes the core module and the WIT, and
 /// `@vesper/wit-component` wraps them into the component (#1334), with
 /// Rust's wit-component where it declines (host imports). Errors (so the
-/// messages stay Rust's) and programs with handlers or host capabilities
-/// (not ported yet) decline to the Rust backend.
+/// messages stay Rust's) and constructs not ported yet (host capabilities,
+/// CPS clauses, stack switching) decline to the Rust backend.
 fn vesper_wasm(
     world: &vesper::check::World,
     entry: &str,
@@ -732,6 +732,7 @@ fn compile_wasm(
         core,
         wit,
         functions,
+        handlers,
     } = wasm_words::outcome(&wasm_backend_binding::compile_words(&input))
     else {
         return None;
@@ -739,17 +740,22 @@ fn compile_wasm(
     match wrap_component(&core, &wit, o.world) {
         Some(component) => {
             WRAP_CALLS.fetch_add(1, Relaxed);
-            Some(artifact(w, entry, o, core, component, wit, functions))
+            Some(artifact(
+                w, entry, o, core, component, wit, functions, &handlers,
+            ))
         }
         None => {
             WRAP_DECLINED.fetch_add(1, Relaxed);
-            Some(wasm_words::artifact(w, entry, o, core, wit, functions))
+            Some(wasm_words::artifact(
+                w, entry, o, core, wit, functions, &handlers,
+            ))
         }
     }
 }
 
 /// `wasm_words::artifact` with the component given: the artifact of a
-/// module without handlers or host capabilities.
+/// module without host capabilities.
+#[allow(clippy::too_many_arguments)]
 fn artifact(
     w: &vesper::check::World,
     entry: &str,
@@ -758,6 +764,7 @@ fn artifact(
     component: Vec<u8>,
     wit: String,
     functions: usize,
+    handlers: &[wasm_words::PortHandler],
 ) -> vesper::wasm_backend::WasmArtifact {
     use vesper::wasm_backend::{ENTRY_INTERFACE, WasmWorld};
     let f = &w.functions[entry];
@@ -774,7 +781,7 @@ fn artifact(
         result: vesper::numeric::default_type(&f.result),
         stack_switching: false,
         imports: vec![],
-        handlers: vec![],
+        handlers: wasm_words::handler_lowerings(w, handlers),
         functions,
     }
 }

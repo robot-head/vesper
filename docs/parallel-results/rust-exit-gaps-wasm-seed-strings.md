@@ -176,8 +176,10 @@ checks that Rust refuses it, compiles it through the port in both
 configurations (optimized and not) and runs `main` (a place-IR round trip)
 under Wasmtime: 75 words, equal to the evaluator.
 
-The hybrid artifact's `handlers` list stays empty: it is informational
-and the hybrid never reads it.
+The port also reports its handlers (site, effect, each clause's operation
+and mode) after the WIT, so the hybrid's artifact carries the same
+`handlers` list as Rust's (`hook_artifact_matches_rust`), and the port
+differential compares it.
 
 ## What is left
 
