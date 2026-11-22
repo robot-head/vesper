@@ -12,6 +12,8 @@
 mod check_harness;
 #[path = "common/check_words.rs"]
 mod check_words;
+#[path = "common/corpus_shard.rs"]
+mod corpus_shard;
 #[path = "common/ir_words.rs"]
 mod ir_words;
 
@@ -67,6 +69,11 @@ fn mains() -> Vec<&'static Case> {
                 .is_some_and(|f| f.params.is_empty())
         })
         .step_by(step)
+        // Bazel shards the mains (BUILD.bazel `test_shards`); the children
+        // inherit the shard variables.
+        .enumerate()
+        .filter(|(i, _)| corpus_shard::Shard::from_environment().contains(*i))
+        .map(|(_, c)| c)
         .collect()
 }
 
@@ -115,7 +122,8 @@ fn child_runs_corpus_mains() {
         // The hook runs on the optimized path only (`opt=true` runs).
         let n = HOISTED.load(std::sync::atomic::Ordering::Relaxed);
         eprintln!("jit child: @vesper/bounds-hoist hoisted {n} programs");
-        assert!(n > 20, "the hoist hook ran only {n} times");
+        let least = corpus_shard::Shard::from_environment().share(20);
+        assert!(n > least, "the hoist hook ran only {n} times");
     }
 }
 
@@ -156,7 +164,8 @@ fn jit_results_match_through_the_vesper_hoist_hook() {
     eprintln!(
         "jit: {runs} runs ({ok} returned a value) with Rust bounds hoisting and through @vesper/bounds-hoist"
     );
-    assert!(ok > 20, "only {ok} corpus mains ran");
+    let least = corpus_shard::Shard::from_environment().share(20);
+    assert!(ok > least, "only {ok} corpus mains ran");
     if let Some(d) = first_difference(&rust, &vesper) {
         panic!("jit results differ at {d}");
     }
