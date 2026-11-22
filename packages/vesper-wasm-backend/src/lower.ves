@@ -39,6 +39,15 @@ use self::module::{
     Builder,
     builder_new
 };
+use self::host::{
+    Host,
+    host_new,
+    host_fn,
+    op_index,
+    returns_handle,
+    takes_handle,
+    takes_meta
+};
 use self::plan::{
     Cx,
     Inst,
@@ -259,6 +268,7 @@ const SK_VIEW: u8 = 2;
 const LOW32: u64 = 4294967295;
 const HIGH32: u64 = 18446744069414584320;
 const IR_SEQ: u8 = 18;
+const IR_FIP: u8 = 19;
 const TERM_RETURN: u8 = 0;
 const TERM_JUMP: u8 = 1;
 const TERM_BRANCH: u8 = 2;
@@ -366,6 +376,8 @@ pub struct L {
     h_seq_reserve: u32,
     h_bytes_eq: u32,
     h_utf8: u32,
+    // the WASI imports and shims of the standard I/O libraries
+    host: Host,
     // The program has `Op::Seq` operations, so a string may be a buffer
     // with a capacity (`seq`); Rust lowers none, and without them every
     // helper stays byte-equal to its.
@@ -439,6 +451,8 @@ fn lo_mask(n: u64) -> u64 {
 
 pub fn lowerer_new(sink cx: Cx, sink plan: Plan, max_instructions: u64) -> L eff [Fail[WErr]] {
     let mut b = builder_new();
+    // Imports precede every declared function.
+    let host = host_new(inout b, in plan.host);
     let heap = b.global(0);
     b.set_heap_global(heap);
     let abort = b.global(0);
@@ -483,6 +497,7 @@ pub fn lowerer_new(sink cx: Cx, sink plan: Plan, max_instructions: u64) -> L eff
         h_seq_reserve: NONE32,
         h_bytes_eq: NONE32,
         h_utf8: NONE32,
+        host: host,
         seqs: seqs,
         strings: ChunkSeq::new[u64](),
         copies: ChunkSeq::new[u32](),
@@ -2659,6 +2674,19 @@ impl L {
             self.e.code.op(OP_END);
         } else if op == IR_SEQ {
             self.seq(at, ty, dv);
+        } else if op == IR_FIP {
+            // `Box::new(v)` (and its `@fip` forms, `new_in_caller` and slot
+            // reuse): a `Box[T]` is the one-field struct of the prelude, a
+            // block holding `v`. The heap is a bump region that tail loops
+            // evacuate, so a reused slot is a fresh block too and the
+            // `box_drops` reclamation points need no code.
+            if self.cx.ir.word(inc(a)) != 1 {
+                Fail::raise(werr(K_UNSUPPORTED, U_OPERATION, 245));
+            }
+            let v = self.seq_val(a, 0);
+            let block = self.alloc_block(8);
+            self.store(block, 0, v);
+            self.set_value(dv, block);
         } else if op == IR_HANDLE {
             Fail::raise(werr(K_NOT_PORTED, 0, 198));
         } else if op == IR_CLOSURE {
@@ -3086,6 +3114,10 @@ impl L {
             return;
         }
         let (ename, opname) = self.split_op(callee);
+        if ename != NONE32 && (ename == self.cx.s.ffi_env || ename == self.cx.s.ffi_fs) {
+            self.host_call(dv, ename, opname, a);
+            return;
+        }
         if ename == NONE32 || self.cx.f.decl_of(ename) == 0 {
             Fail::raise(werr(K_UNSUPPORTED, U_EXTERNAL_FUNCTION, 221));
         }
@@ -3123,6 +3155,204 @@ impl L {
         self.writeback(in cells);
         self.abort_check();
         self.set_value(dv, r);
+    }
+
+    // A call of a StdEnv or StdFs function: its shim (src/host.ves) on the
+    // argument words, with handles, `FsMeta` and `Option` results built
+    // here.
+    fn host_call(inout self, dv: u64, ename: u32, opname: u32, a: u64) eff [Fail[WErr]] {
+        let di = self.cx.f.decl_of(ename);
+        if di == 0 {
+            Fail::raise(werr(K_UNSUPPORTED, U_EXTERNAL_FUNCTION, 243));
+        }
+        let decl = self.cx.f.decl(wrapping_sub(di, 1));
+        let mut passes = ChunkSeq::new[u8]();
+        let mut tys = ChunkSeq::new[u32]();
+        let mut result = NONE32;
+        for o in 0..decl.on {
+            let od = self.cx.f.op(add(decl.o0, o));
+            if od.name == opname {
+                let sig = self.cx.f.sig(od.sig);
+                for k in 0..sig.pn {
+                    let p = self.cx.f.param(add(sig.p0, k));
+                    passes.push(p.pass);
+                    tys.push(p.ty);
+                }
+                result = sig.result;
+                break;
+            }
+        }
+        if result == NONE32 {
+            Fail::raise(werr(K_UNSUPPORTED, U_EXTERNAL_FUNCTION, 244));
+        }
+        let mut name = ChunkSeq::new[u8]();
+        for i in 0..self.cx.names.size(opname) {
+            name.push(self.cx.names.byte(opname, i));
+        }
+        let lib: u8 = if ename == self.cx.s.ffi_env {
+            3
+        } else {
+            4
+        };
+        let k = op_index(in name.as_slice(), lib, in passes);
+        let mut cells = ChunkSeq::new[Cell]();
+        let vals = self.host_args(inc(a), in passes, in tys, inout cells);
+        let mut args = ChunkSeq::new[u32]();
+        for i in 0..vals.len() {
+            args.push(u32_at(in vals, i));
+        }
+        if takes_handle(k) {
+            // An `FsFile` / `FsDir` is a one-field struct: its handle.
+            let v = u32_at(in vals, 0);
+            let x = self.local();
+            let p0 = match passes.try_get(0) {
+                Option::Some(p) => p,
+                Option::None => 0,
+            };
+            if p0 == P_INOUT {
+                self.load(v, 0);
+                self.e.code.set(x);
+                self.load(x, 0);
+            } else {
+                self.load(v, 0);
+            }
+            self.e.code.set(x);
+            let ok = args.try_set(0, x);
+        }
+        let mut meta = NONE32;
+        let mut fresh = NONE32;
+        if takes_meta(k) {
+            meta = u32_at(in vals, 2);
+            let old = self.local();
+            self.load(meta, 0);
+            self.e.code.set(old);
+            fresh = self.alloc_block(32);
+            let t = self.local();
+            for f in 0..4 {
+                self.load(old, wrapping_mul(f, 8));
+                self.e.code.set(t);
+                self.store(fresh, wrapping_mul(f, 8), t);
+            }
+            let ok = args.try_set(2, fresh);
+        }
+        for i in 0..args.len() {
+            self.e.code.get(u32_at(in args, i));
+        }
+        let f = host_fn(inout self.b, inout self.host, k);
+        let r = self.local();
+        self.e.code.call(f);
+        self.e.code.set(r);
+        if meta != NONE32 {
+            self.store(meta, 0, fresh);
+        }
+        self.writeback(in cells);
+        if returns_handle(k) {
+            let rty = self.subst(result);
+            let (some, e1, s1) = self.cx.variant_of(rty, self.cx.s.some);
+            let (none, e2, s2) = self.cx.variant_of(rty, self.cx.s.none);
+            let sb = self.alloc_block(8);
+            self.store(sb, 0, r);
+            let blk = self.alloc_block(16);
+            let tag = self.local();
+            self.e.code.u64_const(some);
+            self.e.code.u64_const(none);
+            self.e.code.get(r);
+            self.e.code.i64_const(0);
+            self.e.code.op(OP_I64_NE);
+            self.e.code.op(OP_SELECT);
+            self.e.code.set(tag);
+            self.store(blk, 0, tag);
+            self.store(blk, 8, sb);
+            let d = self.dest(dv);
+            self.e.code.get(blk);
+            self.e.code.set(d);
+        } else {
+            self.set_value(dv, r);
+        }
+    }
+
+    // `call_args` for a foreign call, where an `inout` argument may be a
+    // temporary view (`inout buf.as_slice_mut()`): it gets a cell of its
+    // own, with nothing to write back (the shim writes through the view).
+    fn host_args(
+        inout self,
+        at: u64,
+        in passes: ChunkSeq[u8],
+        in tys: ChunkSeq[u32],
+        inout cells: ChunkSeq[Cell]
+    ) -> ChunkSeq[u32] eff [Fail[WErr]] {
+        let n = self.cx.ir.word(at);
+        let mut temps = ChunkSeq::new[u32]();
+        let mut any = false;
+        for i in 0..n {
+            let q = add(inc(at), wrapping_mul(i, 4));
+            let pinout = match passes.try_get(i) {
+                Option::Some(p) => p == P_INOUT,
+                Option::None => false,
+            };
+            let root = self.cx.ir.word(add(q, 2));
+            if (self.cx.ir.word(q) == 1 || pinout) && root == 0 {
+                let v = self.value(self.cx.ir.word(inc(q)));
+                let cell = self.alloc_block(8);
+                self.store(cell, 0, v);
+                temps.push(cell);
+                any = true;
+            } else {
+                temps.push(NONE32);
+            }
+        }
+        if !any {
+            return self.call_args(at, in passes, in tys, inout cells);
+        }
+        // Lower each remaining argument on its own: a one-argument list
+        // at a copy of its words is not available, so the place arguments
+        // here are read and celled like `call_args` does.
+        let mut out = ChunkSeq::new[u32]();
+        for i in 0..n {
+            let t = u32_at(in temps, i);
+            if t != NONE32 {
+                out.push(t);
+                continue;
+            }
+            let q = add(inc(at), wrapping_mul(i, 4));
+            let pass = self.cx.ir.word(q);
+            let vid = self.cx.ir.word(inc(q));
+            let root = self.cx.ir.word(add(q, 2));
+            let path = self.cx.ir.word(add(q, 3));
+            let pinout = match passes.try_get(i) {
+                Option::Some(p) => p == P_INOUT,
+                Option::None => false,
+            };
+            if !(pass == 1 || pinout) {
+                out.push(self.value(vid));
+                continue;
+            }
+            let rs = n32(wrapping_sub(root, 1));
+            if path == 0 {
+                let si = self.slot_index(rs);
+                if si != NONE64 {
+                    let s = self.name_slot(rs);
+                    if s.cell {
+                        out.push(s.local);
+                        continue;
+                    }
+                }
+            }
+            let segs = self.path_names(path);
+            let (v, t) = self.read_place(rs, in segs);
+            let cell = self.alloc_block(8);
+            self.store(cell, 0, v);
+            out.push(cell);
+            cells
+                .push(
+                    Cell {
+                        cell: cell,
+                        root: rs,
+                        path: path
+                    }
+                );
+        }
+        out
     }
 
     // `callee.split_once("::")`: (ename, op), or NONE32.
