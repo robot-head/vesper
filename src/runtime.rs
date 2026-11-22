@@ -461,7 +461,10 @@ impl<'a> Runtime<'a> {
         Self {
             world,
             stack: vec![],
+            #[cfg(not(target_arch = "wasm32"))]
             program: crate::ffi_lowering::drops::lower_world(world),
+            #[cfg(target_arch = "wasm32")]
+            program: crate::ir::lower_world(world),
             next_capability: 1,
             fuel: 10_000_000,
             optimize: true,
@@ -471,7 +474,7 @@ impl<'a> Runtime<'a> {
             resource_trace: None,
             resource_fuel_exhausted: false,
             denorm: std::sync::Arc::new(crate::capability_effects::const_denorm_spans(world)),
-            canonical_nans: crate::native::needs_nan_canonicalization(world),
+            canonical_nans: crate::source_analysis::needs_nan_canonicalization(world),
             regions: Default::default(),
         }
     }
@@ -1012,6 +1015,7 @@ impl<'a> Runtime<'a> {
         self.stack.clear();
         self.external.clear();
         if self.optimize && !self.optimized {
+            #[cfg(not(target_arch = "wasm32"))]
             crate::ir_opt::optimize(self.world, &mut self.program)?;
             self.optimized = true;
         }
@@ -1047,6 +1051,7 @@ impl<'a> Runtime<'a> {
         self.stack.clear();
         self.external.clear();
         if self.optimize && !self.optimized {
+            #[cfg(not(target_arch = "wasm32"))]
             crate::ir_opt::optimize(self.world, &mut self.program)?;
             self.optimized = true;
         }

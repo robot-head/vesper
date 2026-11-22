@@ -1,0 +1,29 @@
+[package]
+name = "vesper-tour-wasm"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+blake3 = "1.8"
+vesper-core = { path = "../../crates/vesper-core" }
+vesper-syntax = { path = "../../crates/vesper-syntax" }
+vesper-pact = { path = "../../crates/vesper-pact/seed", package = "vesper-pact-seed" }
+vesper-pact-binding = { path = "../../crates/vesper-pact-binding" }
+vesper-loom-calculus = { path = "../../crates/vesper-loom-calculus/seed", package = "vesper-loom-calculus-seed" }
+vesper-test = { path = "../../crates/vesper-test" }
+vesper-forge = { path = "../../crates/vesper-forge/seed", package = "vesper-forge-seed", default-features = false }
+vesper-fmt = { path = "../../crates/vesper-fmt/seed", package = "vesper-fmt-seed" }
+vesper-lean-syntax = { path = "../../crates/vesper-lean-syntax/seed", package = "vesper-lean-syntax-seed" }
+vesper-doc = { path = "../../crates/vesper-doc" }
+vesper-alloc = { path = "../../crates/vesper-alloc/seed", package = "vesper-alloc-seed" }
+vesper-tensor = { path = "../../crates/vesper-tensor/seed", package = "vesper-tensor-seed" }
+vesper-beacon = { path = "../../crates/vesper-beacon/seed", package = "vesper-beacon-seed" }
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+petgraph = "0.8"
+vesper-ffi = { path = "../../crates/vesper-ffi" }
+vesper-highlight = { path = "../../crates/vesper-highlight/seed", package = "vesper-highlight-seed" }
