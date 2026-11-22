@@ -57,6 +57,7 @@ enum Mode {
     Check,
     Test,
     TestCase,
+    CheckTests,
     Macro,
     Expand,
     Format,
@@ -67,6 +68,17 @@ enum Mode {
 struct Response {
     ok: bool,
     output: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    diagnostics: Vec<EditorDiagnostic>,
+}
+
+#[derive(Serialize)]
+struct EditorDiagnostic {
+    code: String,
+    message: String,
+    // JavaScript and DOM ranges use UTF-16 offsets. The compiler uses bytes.
+    start: usize,
+    end: usize,
 }
 
 impl Response {
@@ -74,6 +86,7 @@ impl Response {
         Self {
             ok: true,
             output: output.into(),
+            diagnostics: Vec::new(),
         }
     }
 
@@ -81,6 +94,7 @@ impl Response {
         Self {
             ok: false,
             output: output.into(),
+            diagnostics: Vec::new(),
         }
     }
 }
@@ -94,7 +108,24 @@ fn diagnostics(source: &str, errors: &[Diagnostic], fallback: impl ToString) -> 
         let (line, column) = crate::test_discovery::location(source, error.span.start);
         let _ = writeln!(output, "{line}:{column}  {}  {}", error.code, error.message);
     }
-    Response::error(output)
+    let offset = |byte: usize| {
+        source[..source.floor_char_boundary(byte.min(source.len()))]
+            .encode_utf16()
+            .count()
+    };
+    Response {
+        ok: false,
+        output,
+        diagnostics: errors
+            .iter()
+            .map(|error| EditorDiagnostic {
+                code: error.code.clone(),
+                message: error.message.clone(),
+                start: offset(error.span.start),
+                end: offset(error.span.end),
+            })
+            .collect(),
+    }
 }
 
 fn limits() -> AnalysisLimits {
@@ -123,7 +154,15 @@ fn execute(Request { source, mode }: Request) -> Response {
                     Response::success(expanded.expanded_source())
                 }
                 Ok(expanded) => evaluate_entry(expanded.checked().world()),
-                Err(error) => diagnostics(&source, error.diagnostics(), &error),
+                Err(error) => {
+                    let mut errors = error.diagnostics().to_vec();
+                    for (diagnostic, origin) in errors.iter_mut().zip(error.origins()) {
+                        if let Some(origin) = origin {
+                            diagnostic.span = origin.original.start..origin.original.end;
+                        }
+                    }
+                    diagnostics(&source, &errors, &error)
+                }
             }
         }
         Mode::Highlight => {
@@ -144,7 +183,11 @@ fn execute(Request { source, mode }: Request) -> Response {
             Ok(result) => Response::success(result.output),
             Err(error) => Response::error(error.to_string()),
         },
-        Mode::Test | Mode::TestCase => tests(&source, matches!(mode, Mode::TestCase)),
+        Mode::Test | Mode::TestCase | Mode::CheckTests => tests(
+            &source,
+            matches!(mode, Mode::TestCase),
+            matches!(mode, Mode::CheckTests),
+        ),
     }
 }
 
@@ -166,7 +209,23 @@ fn evaluate_entry(world: &World) -> Response {
     }
 }
 
-fn tests(source: &str, one_case: bool) -> Response {
+fn test_diagnostics(
+    source: &str,
+    errors: &[Diagnostic],
+    rows: &[crate::test_discovery::CaseRow],
+) -> Response {
+    let mut errors = errors.to_vec();
+    for error in &mut errors {
+        if let Some(row) = rows.iter().find(|row| {
+            row.generated.start <= error.span.start && error.span.start <= row.generated.end
+        }) {
+            error.span = row.span.clone();
+        }
+    }
+    diagnostics(source, &errors, "Invalid test source.")
+}
+
+fn tests(source: &str, one_case: bool, check_only: bool) -> Response {
     use crate::test_discovery::{case_rows, discover, finish_case_wrappers, location};
     use vesper_test::TestMode;
 
@@ -188,7 +247,7 @@ fn tests(source: &str, one_case: bool) -> Response {
     let parsed = if cases.expanded.is_some() {
         let mut lowered = crate::parser::parse_for_tests(expanded);
         if !lowered.diagnostics.is_empty() {
-            return diagnostics(expanded, &lowered.diagnostics, "Invalid test source.");
+            return test_diagnostics(source, &lowered.diagnostics, &cases.rows);
         }
         if let Err(error) =
             finish_case_wrappers(source, &parsed.module, &mut lowered.module, &cases.rows)
@@ -201,7 +260,10 @@ fn tests(source: &str, one_case: bool) -> Response {
     };
     let checked = crate::check::check(&parsed.module);
     if !checked.diagnostics.is_empty() {
-        return diagnostics(expanded, &checked.diagnostics, "Invalid test source.");
+        return test_diagnostics(source, &checked.diagnostics, &cases.rows);
+    }
+    if check_only {
+        return Response::success("Test source checks successfully.");
     }
     let tests = match discover(source, &parsed.module.items, &cases.rows) {
         Ok(tests) => tests,
@@ -255,5 +317,6 @@ fn tests(source: &str, one_case: bool) -> Response {
     Response {
         ok: failed == 0,
         output,
+        diagnostics: Vec::new(),
     }
 }

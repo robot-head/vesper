@@ -31,11 +31,12 @@ export function tourPrograms(lessons) {
     'define-your-own-sugar': 'macro',
     'format-a-user-defined-spelling': 'format',
   };
-  return lessons.map(({ file }) => {
+  return lessons.map(({ file, body }) => {
     const slug = file.slice(0, -5);
     if (slug === 'read-a-proposed-sugar-declaration') return null;
-    const program = withSource[slug] ?? source[file];
+    const repair = body.match(/^~~~vesper ([A-Z0-9_]+)\n([\s\S]*?)\n~~~$/m);
+    const program = repair?.[2] ?? withSource[slug] ?? source[file];
     if (!program) throw new Error(`Tour lesson ${slug} has no editable example`);
-    return { source: program, mode: modes[slug] ?? 'run' };
+    return { source: program, mode: modes[slug] ?? 'run', error: repair?.[1] };
   });
 }

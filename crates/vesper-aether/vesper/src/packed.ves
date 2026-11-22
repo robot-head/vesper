@@ -1,0 +1,225 @@
+// ---------------------------------------------------------------------------
+// The packed-ring chain walk of src/virtio.rs (`PackedQueue::capture`).
+//
+// Rust keeps the queue state and the checks before and after the walk
+// (ring length, `Full`, identity, buffer id). This walks one chain from
+// the next available cursor and validates every descriptor before
+// anything is committed.
+
+const PACKED_FLAG_NEXT: u64 = 1;
+const PACKED_FLAG_WRITE: u64 = 2;
+const PACKED_FLAG_AVAIL: u64 = 128;
+const PACKED_FLAG_USED: u64 = 32768;
+// Every u16 flag bit outside NEXT | WRITE | AVAIL | USED.
+const PACKED_UNSUPPORTED: u64 = 32636;
+// Words of `out` before the first descriptor.
+const PACKED_HEADER_WORDS: u64 = 5;
+
+// The `QueueError`s the walk can raise.
+copy enum PackedFault {
+    Limit,
+    Overflow,
+    Full,
+    NotAvailable,
+    IncompleteChain,
+    UnsupportedFlags,
+    EmptyBuffer,
+    ReadAfterWrite,
+    UnauthorizedRange
+}
+
+fn word(in s: Slice[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+// `Work::charge`: false once the budget is spent.
+fn charge(inout work: u64) -> bool {
+    if work == 0 {
+        return false;
+    }
+    work = wrapping_sub(work, 1);
+    true
+}
+
+// `GuestAuthorization::permits` over `(start, end, access)` triples sorted
+// by start, access 0 = read, 1 = write, 2 = read-write. Returns 0 when
+// permitted, 1 for `Limit` and 2 for `UnauthorizedRange`.
+fn packed_permits(in regions: Slice[u64], start: u64, end: u64, write: bool, inout work: u64)
+    -> u64 {
+    let mut lo: u64 = 0;
+    let mut hi = regions.len() / 3;
+    loop {
+        if lo >= hi {
+            break;
+        }
+        if !charge(inout work) {
+            return 1;
+        }
+        let mid = wrapping_add(lo, wrapping_sub(hi, lo) / 2);
+        if word(in regions, wrapping_mul(mid, 3)) <= start {
+            lo = wrapping_add(mid, 1);
+        } else {
+            hi = mid;
+        }
+    }
+    if lo == 0 {
+        return 2;
+    }
+    let base = wrapping_mul(wrapping_sub(lo, 1), 3);
+    let access = word(in regions, wrapping_add(base, 2));
+    let denied = if write {
+        access == 0
+    } else {
+        access == 1
+    };
+    if end > word(in regions, wrapping_add(base, 1)) || denied {
+        return 2;
+    }
+    0
+}
+
+fn permit_fault(code: u64) -> PackedFault {
+    if code == 1 {
+        PackedFault::Limit
+    } else {
+        PackedFault::UnauthorizedRange
+    }
+}
+
+// Walks one chain starting at `(index, wrap)`. `free` is `size - occupied`.
+// On success returns the descriptor count and fills `out`:
+// `[buffer_id, readable, writable, next_index, next_wrap]`, then four words
+// per descriptor: `index | wrap << 16`, address, length,
+// `buffer_id | flags << 16`. `out` holds at least
+// `5 + 4 * min(free, max_desc)` words.
+pub fn packed_capture(
+    in ring: Slice[u8],
+    in regions: Slice[u64],
+    size: u64,
+    free: u64,
+    index: u64,
+    wrap: u64,
+    max_desc: u64,
+    max_bytes: u64,
+    max_work: u64,
+    inout out: Slice[u64]
+) -> Result[u64, PackedFault] {
+    let mut work = max_work;
+    let mut n: u64 = 0;
+    let mut readable: u64 = 0;
+    let mut writable: u64 = 0;
+    let mut saw_write = false;
+    let mut ci = index;
+    let mut cw = wrap != 0;
+    let mut buffer_id: u64 = 0;
+    loop {
+        if !charge(inout work) {
+            return Result::Err(PackedFault::Limit);
+        }
+        if n >= free {
+            return Result::Err(PackedFault::Full);
+        }
+        if n >= max_desc {
+            return Result::Err(PackedFault::Limit);
+        }
+        let off = wrapping_mul(ci, 16);
+        let addr = match ring.try_read_u64_le(off) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        // `len: u32, buffer_id: u16, flags: u16` in one little-endian word.
+        let tail = match ring.try_read_u64_le(wrapping_add(off, 8)) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        let len = tail & 4294967295;
+        let id = wrapping_shr_u64(tail, 32) & 65535;
+        let flags = wrapping_shr_u64(tail, 48);
+        if flags & PACKED_UNSUPPORTED != 0 {
+            return Result::Err(PackedFault::UnsupportedFlags);
+        }
+        let avail = (flags & PACKED_FLAG_AVAIL != 0) == cw;
+        let used = (flags & PACKED_FLAG_USED != 0) == cw;
+        if !avail || used {
+            if n == 0 {
+                return Result::Err(PackedFault::NotAvailable);
+            }
+            return Result::Err(PackedFault::IncompleteChain);
+        }
+        if len == 0 {
+            return Result::Err(PackedFault::EmptyBuffer);
+        }
+        if add_overflows(addr, len) {
+            return Result::Err(PackedFault::Overflow);
+        }
+        let end = wrapping_add(addr, len);
+        let write = flags & PACKED_FLAG_WRITE != 0;
+        if saw_write && !write {
+            return Result::Err(PackedFault::ReadAfterWrite);
+        }
+        if write {
+            saw_write = true;
+        }
+        let code = packed_permits(in regions, addr, end, write, inout work);
+        if code != 0 {
+            return Result::Err(permit_fault(code));
+        }
+        if add_overflows(readable, writable) {
+            return Result::Err(PackedFault::Overflow);
+        }
+        let held = wrapping_add(readable, writable);
+        if add_overflows(held, len) {
+            return Result::Err(PackedFault::Overflow);
+        }
+        if wrapping_add(held, len) > max_bytes {
+            return Result::Err(PackedFault::Limit);
+        }
+        if write {
+            writable = wrapping_add(writable, len);
+        } else {
+            readable = wrapping_add(readable, len);
+        }
+        let slot = wrapping_add(PACKED_HEADER_WORDS, wrapping_mul(n, 4));
+        let wrap_bit: u64 = if cw {
+            65536
+        } else {
+            0
+        };
+        out.try_set(slot, ci | wrap_bit);
+        out.try_set(wrapping_add(slot, 1), addr);
+        out.try_set(wrapping_add(slot, 2), len);
+        out.try_set(wrapping_add(slot, 3), id | (flags << 16));
+        n = wrapping_add(n, 1);
+        let next = wrapping_add(ci, 1);
+        if next >= size {
+            ci = wrapping_sub(next, size);
+            cw = !cw;
+        } else {
+            ci = next;
+        }
+        if flags & PACKED_FLAG_NEXT == 0 {
+            buffer_id = id;
+            break;
+        }
+        if n == size {
+            return Result::Err(PackedFault::IncompleteChain);
+        }
+    }
+    out.try_set(0, buffer_id);
+    out.try_set(1, readable);
+    out.try_set(2, writable);
+    out.try_set(3, ci);
+    out
+        .try_set(
+        4,
+        if cw {
+            1
+        } else {
+            0
+        }
+    );
+    Result::Ok(n)
+}

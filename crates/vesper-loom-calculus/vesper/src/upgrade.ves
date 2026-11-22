@@ -119,17 +119,17 @@ fn udiag_at(inout l: L, code: u64, pkg: u64, dep: u64, snap: u64, mo: u64) {
     l
         .udiags
         .push(
-        Diag {
-            snap: snap,
-            code: code,
-            pkg: pkg,
-            dep: dep,
-            so: 0,
-            sl: 0,
-            mo: mo,
-            ml: ml
-        }
-    );
+            Diag {
+                snap: snap,
+                code: code,
+                pkg: pkg,
+                dep: dep,
+                so: 0,
+                sl: 0,
+                mo: mo,
+                ml: ml
+            }
+        );
 }
 
 fn udiag(inout l: L, code: u64, pkg: u64, dep: u64, snap: u64, in msg: Str) {
@@ -276,23 +276,23 @@ fn sets(inout l: L, scope: u64, pkg: u64, dep: u64) {
     l
         .changes
         .push(
-        Change {
-            scope: scope,
-            pkg: pkg,
-            dep: dep,
-            b_at: b_at,
-            b_n: l.sa.len(),
-            a_at: a_at,
-            a_n: l.sb.len(),
-            add_at: add_at,
-            add_n: add_n,
-            rem_at: rem_at,
-            rem_n: rem_n,
-            bf: Forbid::Unset,
-            af: Forbid::Unset,
-            relaxed: false
-        }
-    );
+            Change {
+                scope: scope,
+                pkg: pkg,
+                dep: dep,
+                b_at: b_at,
+                b_n: l.sa.len(),
+                a_at: a_at,
+                a_n: l.sb.len(),
+                add_at: add_at,
+                add_n: add_n,
+                rem_at: rem_at,
+                rem_n: rem_n,
+                bf: Forbid::Unset,
+                af: Forbid::Unset,
+                relaxed: false
+            }
+        );
 }
 
 fn node_sets(inout l: L, has_a: bool, in a: GNode, has_b: bool, in b: GNode, name: u64) {
@@ -333,31 +333,31 @@ fn node_sets(inout l: L, has_a: bool, in a: GNode, has_b: bool, in b: GNode, nam
             l
                 .changes
                 .push(
-                Change {
-                    scope: Scope::UnsafeFfiPolicy,
-                    pkg: name,
-                    dep: none(),
-                    b_at: at,
-                    b_n: 0,
-                    a_at: at,
-                    a_n: 0,
-                    add_at: at,
-                    add_n: 0,
-                    rem_at: at,
-                    rem_n: 0,
-                    bf: if old_forbid {
-                        Forbid::Forbidden
-                    } else {
-                        Forbid::Allowed
-                    },
-                    af: if new_forbid {
-                        Forbid::Forbidden
-                    } else {
-                        Forbid::Allowed
-                    },
-                    relaxed: relaxed
-                }
-            );
+                    Change {
+                        scope: Scope::UnsafeFfiPolicy,
+                        pkg: name,
+                        dep: none(),
+                        b_at: at,
+                        b_n: 0,
+                        a_at: at,
+                        a_n: 0,
+                        add_at: at,
+                        add_n: 0,
+                        rem_at: at,
+                        rem_n: 0,
+                        bf: if old_forbid {
+                            Forbid::Forbidden
+                        } else {
+                            Forbid::Allowed
+                        },
+                        af: if new_forbid {
+                            Forbid::Forbidden
+                        } else {
+                            Forbid::Allowed
+                        },
+                        relaxed: relaxed
+                    }
+                );
             if relaxed {
                 udiag(
                     inout l,

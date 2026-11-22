@@ -1,7 +1,8 @@
 # The flip gate for vesper-aegis (scripts/ci/flip_gate.py, SH6 lane 1,
 # #1396; this crate's lane: SH6 lane 8, #1403). The ported modules are the
 # quote, report and claims parsers, the timestamp parser and the policy
-# check, whose Rust SH6 lane 8 deleted (the report counts the lines).
+# check (part 1), and the CBOR decoding and CCA claim parsers (part 2),
+# whose Rust SH6 lane 8 deleted (the report counts the lines).
 name = "vesper-aegis"
 lane = "SH6-8"
 env = { CARGO_PROFILE_DEV_DEBUG = "0", CARGO_PROFILE_TEST_DEBUG = "0" }
@@ -10,8 +11,9 @@ build = ["cargo build --locked --release -p vesper-aegis --example abba"]
 [[tests]]
 run = "cargo test --locked --release -p vesper-aegis"
 
-# Every ported parser on the vendor samples and 4,000 mutations of each,
-# and 200,000 random claims/policy pairs, against the Rust build.
+# Every ported parser on the vendor samples and thousands of mutations of
+# each, 200,000 random claims/policy pairs and 20,000 random CCA claim
+# sets, against the recorded results of the Rust builds.
 [differential]
 run = "cargo test --locked --release -p vesper-aegis --test port_differential"
 
@@ -33,3 +35,15 @@ run = "crates/vesper-aegis/bench-abba.sh flip-gate sgx"
 [[abba]]
 workload = "policy"
 run = "crates/vesper-aegis/bench-abba.sh flip-gate policy"
+
+[[abba]]
+workload = "cca_claims"
+run = "crates/vesper-aegis/bench-abba.sh flip-gate cca_claims"
+
+[[abba]]
+workload = "cca_token"
+run = "crates/vesper-aegis/bench-abba.sh flip-gate cca_token"
+
+[[abba]]
+workload = "corim"
+run = "crates/vesper-aegis/bench-abba.sh flip-gate corim"

@@ -227,7 +227,7 @@ pub fn huff_len(in h: Huff, in data: Slice[u8]) -> u64 {
 }
 
 pub fn huff_append(in h: Huff, in data: Slice[u8], inout out: ChunkSeq[u8]) {
-    huff_encode(in h, in data, inout out);
+    huff_encode(in h, in data, huff_encoded_len(in h, in data), inout out);
 }
 
 // Decodes into `out` (cleared first); the error, if any.

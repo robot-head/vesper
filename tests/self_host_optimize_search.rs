@@ -18,15 +18,17 @@
 
 #[path = "common/check_harness.rs"]
 mod check_harness;
+#[path = "common/optimize_words.rs"]
+mod optimize_words;
 
 use check_harness::*;
+use optimize_words::*;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::sync::OnceLock;
-use vesper::ast::{Arg, Expr, ExprKind, Literal, Type, TypeMap};
+use vesper::ast::{Arg, Expr, ExprKind, Literal, TypeMap};
 use vesper::optimize::witness::{
-    self, Equality, IntOp, Reason, RewriteCertificate, Spent, Substitution, Term, TermNode,
-    WitnessError, WitnessLimits,
+    self, Equality, Reason, RewriteCertificate, Term, TermNode, WitnessError, WitnessLimits,
 };
 use vesper::optimize::{self, OptimizeTable, Produced, Proposal};
 
@@ -56,32 +58,6 @@ fn take_visits() -> Vec<Visit> {
     VISITS.with(|v| std::mem::take(&mut *v.borrow_mut()))
 }
 
-fn spans(e: &Expr, out: &mut Vec<(usize, usize)>) {
-    out.push((e.span.start, e.span.end));
-    match &e.kind {
-        ExprKind::Binary(_, a, b) => {
-            spans(a, out);
-            spans(b, out);
-        }
-        ExprKind::Call { callee, args, .. } => {
-            spans(callee, out);
-            for a in args {
-                spans(&a.expr, out);
-            }
-        }
-        _ => {}
-    }
-}
-
-/// The entries of `types` the producer can look up for `source`.
-fn relevant_types(source: &Expr, types: &TypeMap) -> TypeMap {
-    let mut s = vec![];
-    spans(source, &mut s);
-    s.into_iter()
-        .filter_map(|k| types.get(&k).map(|t| (k, t.clone())))
-        .collect()
-}
-
 fn recording_propose(
     source: &Expr,
     types: &TypeMap,
@@ -93,7 +69,7 @@ fn recording_propose(
     }
     let visit = Visit {
         source: source.clone(),
-        types: relevant_types(source, types),
+        types: relevant_types(&[source], types),
         limits,
         text: rust_text(&result),
         result: result.clone(),
@@ -301,177 +277,13 @@ fn all_visits() -> &'static (Vec<Visit>, [usize; 3]) {
 
 // ------------------------------------------------------------ encoding
 
-#[derive(Default)]
-struct Words {
-    names: Vec<String>,
-    index: BTreeMap<String, u64>,
-    exprs: Vec<u64>,
-    count: u64,
-}
-
-impl Words {
-    fn name(&mut self, s: &str) -> u64 {
-        if let Some(i) = self.index.get(s) {
-            return *i;
-        }
-        let i = self.names.len() as u64;
-        self.names.push(s.to_owned());
-        self.index.insert(s.to_owned(), i);
-        i
-    }
-
-    /// Appends `e` children first; returns its input index (the input
-    /// format of `read_exprs` in input.ves).
-    fn expr(&mut self, e: &Expr) -> u64 {
-        let mut w = vec![];
-        let kind = match &e.kind {
-            ExprKind::Literal(l) => {
-                match l {
-                    Literal::Int(v) => {
-                        let m = v.unsigned_abs();
-                        w.extend([1, (*v < 0) as u64, m as u64, (m >> 64) as u64]);
-                    }
-                    Literal::Float(_) => w.extend([2, 0, 0, 0]),
-                    Literal::Bool(_) => w.extend([3, 0, 0, 0]),
-                    Literal::String(_) => w.extend([4, 0, 0, 0]),
-                    Literal::WideInt(_) => w.extend([5, 0, 0, 0]),
-                }
-                1
-            }
-            ExprKind::Name(n) => {
-                w.extend([self.name(n), n.capacity() as u64]);
-                2
-            }
-            ExprKind::Call {
-                callee,
-                types,
-                args,
-            } => {
-                let c = self.expr(callee);
-                let mut a = vec![];
-                for arg in args {
-                    let x = self.expr(&arg.expr);
-                    a.extend([pass_word(arg.pass), arg.explicit as u64, x]);
-                }
-                w.extend([
-                    c,
-                    types.len() as u64,
-                    types.capacity() as u64,
-                    args.len() as u64,
-                    args.capacity() as u64,
-                ]);
-                w.extend(a);
-                6
-            }
-            ExprKind::Binary(op, a, b) => {
-                let x = self.expr(a);
-                let y = self.expr(b);
-                w.extend([self.name(op), op.capacity() as u64, x, y]);
-                11
-            }
-            k => kind_number(k),
-        };
-        self.exprs
-            .extend([kind, e.span.start as u64, e.span.end as u64]);
-        self.exprs.extend(w);
-        self.count += 1;
-        self.count - 1
-    }
-}
-
-fn kind_number(k: &ExprKind) -> u64 {
-    match k {
-        ExprKind::Literal(_) => 1,
-        ExprKind::Name(_) => 2,
-        ExprKind::Tuple(_) => 3,
-        ExprKind::Struct { .. } => 4,
-        ExprKind::Block { .. } => 5,
-        ExprKind::Call { .. } => 6,
-        ExprKind::Field(..) => 7,
-        ExprKind::Index(..) => 8,
-        ExprKind::Try(_) => 9,
-        ExprKind::Unary(..) => 10,
-        ExprKind::Binary(..) => 11,
-        ExprKind::Assign(..) => 12,
-        ExprKind::If { .. } => 13,
-        ExprKind::Match { .. } => 14,
-        ExprKind::Closure { .. } => 15,
-        ExprKind::Handle { .. } => 16,
-        ExprKind::Loop(_) => 17,
-        ExprKind::For { .. } => 18,
-        ExprKind::Range { .. } => 19,
-        ExprKind::Break(_) => 20,
-        ExprKind::Return(_) => 21,
-        ExprKind::Continue => 22,
-    }
-}
-
-fn type_code(t: &Type) -> u64 {
-    match t {
-        Type::Named(n, args) if args.is_empty() => match n.as_str() {
-            "u8" => 1,
-            "u32" => 2,
-            "u64" => 3,
-            "i64" => 4,
-            _ => 6,
-        },
-        Type::IntLiteral(_) => 5,
-        _ => 6,
-    }
-}
-
-fn put(out: &mut Vec<u8>, x: u64) {
-    out.extend(x.to_le_bytes());
-}
-
-/// One case's input (`optimize_propose` in lib.ves), appended to `out`.
-fn case_bytes(v: &Visit, out: &mut Vec<u8>) {
-    let l = v.limits;
-    for x in [
-        l.max_terms,
-        l.max_proofs,
-        l.max_input_nodes,
-        l.max_output_nodes,
-        l.max_depth,
-        l.max_variables,
-        l.max_name_bytes,
-        l.max_metadata_bytes,
-        l.max_work,
-        0,
-        0,
-        0,
-    ] {
-        put(out, x as u64);
-    }
-    let mut w = Words::default();
-    let source = w.expr(&v.source);
-    put(out, w.names.len() as u64);
-    for n in &w.names {
-        put(out, n.len() as u64);
-        out.extend(n.as_bytes());
-        while !out.len().is_multiple_of(8) {
-            out.push(0);
-        }
-    }
-    let mut words = vec![v.types.len() as u64];
-    for ((s, e), t) in &v.types {
-        words.extend([*s as u64, *e as u64, type_code(t)]);
-    }
-    words.push(w.count);
-    words.extend(&w.exprs);
-    words.push(source);
-    for x in words {
-        put(out, x);
-    }
-}
-
+/// The input bytes of a batch of visits (`optimize_propose` in lib.ves).
 fn encode_cases(cases: &[&Visit]) -> Vec<u8> {
-    let mut out = vec![];
-    put(&mut out, cases.len() as u64);
+    let mut batch = Batch::new(cases.len(), false);
     for v in cases {
-        case_bytes(v, &mut out);
+        batch.propose(&v.source, &v.types, v.limits);
     }
-    out
+    batch.bytes
 }
 
 // ------------------------------------------------------------ expected text
@@ -503,7 +315,7 @@ fn dump(e: &Expr, o: &mut String) {
                 expr,
             } in args
             {
-                write!(o, " {}", pass_word(*pass)).unwrap();
+                write!(o, " {}", optimize_words::pass_word(*pass)).unwrap();
                 if *explicit {
                     o.push('!');
                 }
@@ -513,14 +325,6 @@ fn dump(e: &Expr, o: &mut String) {
             o.push(')');
         }
         k => write!(o, "?{}{span}", kind_number(k)).unwrap(),
-    }
-}
-
-fn op_word(op: IntOp) -> u64 {
-    match op {
-        IntOp::Add => 0,
-        IntOp::Sub => 1,
-        IntOp::Mul => 2,
     }
 }
 
@@ -638,93 +442,6 @@ fn vesper_texts(entry: &Entry, cases: &[&Visit]) -> Vec<String> {
     out
 }
 
-/// Decodes a Vesper candidate proposal's certificate.
-fn parse_certificate(text: &str) -> (RewriteCertificate, Spent) {
-    let mut lines = text.lines();
-    let p: Vec<u64> = lines.next().unwrap()[4..]
-        .split(' ')
-        .map(|x| x.parse().unwrap())
-        .collect();
-    let _candidate = lines.next().unwrap();
-    let terms_line = lines.next().unwrap();
-    let proofs_line = lines.next().unwrap();
-    let kind_of = |k: u64| match k {
-        0 => vesper::numeric::IntegerKind::U8,
-        1 => vesper::numeric::IntegerKind::U32,
-        2 => vesper::numeric::IntegerKind::U64,
-        _ => vesper::numeric::IntegerKind::I64,
-    };
-    let op_of = |k: u64| match k {
-        0 => IntOp::Add,
-        1 => IntOp::Sub,
-        _ => IntOp::Mul,
-    };
-    let mut terms = vec![];
-    for t in terms_line[1..].split_whitespace() {
-        let f: Vec<&str> = t.split(':').collect();
-        let n = |i: usize| f[i].parse::<u64>().unwrap();
-        let node = match n(1) {
-            0 => TermNode::Const(f[3].parse::<i128>().unwrap()),
-            1 => TermNode::InputVar(n(4) as u32),
-            2 => TermNode::Checked {
-                op: op_of(n(2)),
-                children: [n(4) as u32, n(5) as u32],
-            },
-            _ => TermNode::Wrapping {
-                op: op_of(n(2)),
-                children: [n(4) as u32, n(5) as u32],
-            },
-        };
-        terms.push(Term {
-            kind: kind_of(n(0)),
-            node,
-        });
-    }
-    let mut proofs = vec![];
-    for q in proofs_line[1..].split_whitespace() {
-        let f: Vec<u64> = q.split(':').map(|x| x.parse().unwrap()).collect();
-        let reason = match f[2] {
-            0 => Reason::Refl,
-            1 => Reason::Rule {
-                rule: f[3] as u16,
-                substitution: Substitution {
-                    bindings: [f[4] as u32, f[5] as u32, f[6] as u32],
-                    len: f[7] as u8,
-                },
-                guard: (f[8] != 0).then(|| (f[8] - 1) as u32),
-            },
-            2 => Reason::Congruence {
-                children: [f[9] as u32, f[10] as u32],
-            },
-            3 => Reason::Symmetry { proof: f[9] as u32 },
-            _ => Reason::Transitivity {
-                first: f[9] as u32,
-                second: f[10] as u32,
-            },
-        };
-        proofs.push(Equality {
-            from: f[0] as u32,
-            to: f[1] as u32,
-            reason,
-        });
-    }
-    let cert = RewriteCertificate {
-        schema_version: 1,
-        arithmetic_version: 1,
-        terms,
-        proofs,
-        input: p[5] as u32,
-        output: p[6] as u32,
-        conclusion: p[7] as u32,
-    };
-    let spent = Spent {
-        work: p[0] as usize,
-        metadata: p[1] as usize,
-        names: p[2] as usize,
-    };
-    (cert, spent)
-}
-
 /// The number of AST nodes of a candidate dump (`AstSize` of its term).
 fn dump_size(line: &str) -> usize {
     line.matches('@').count()
@@ -769,7 +486,7 @@ fn every_visit_is_proposed_like_rust() {
         // Rust gate on the spent budget it reports, and it is as small.
         let accepted = match &v.result {
             Ok(Proposal::Candidate(p)) if got.starts_with("P C ") => {
-                let (cert, mut spent) = parse_certificate(got);
+                let (cert, mut spent, _) = parse_certificate(got);
                 let rust_size = dump_size(want.lines().nth(1).unwrap());
                 let vesper_size = dump_size(got.lines().nth(1).unwrap());
                 let candidate = vesper_candidate(v, &cert);

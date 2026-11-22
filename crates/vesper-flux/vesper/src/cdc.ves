@@ -123,8 +123,7 @@ pub fn cdc_decode(
         if flags != 0 {
             Fail::raise(CdcErr::Flags);
         }
-        if weight
-            == 0
+        if weight == 0
             || (word_at(in binds, wrapping_add(b, 2)) == 1 && weight != 1 && weight != -1) {
             Fail::raise(CdcErr::Weight);
         }

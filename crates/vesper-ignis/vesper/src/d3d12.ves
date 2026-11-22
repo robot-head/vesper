@@ -334,10 +334,8 @@ pub fn queue_supports_layout(kind: QueueKind, layout: Layout) -> bool {
 }
 
 pub fn queue_can_transition(kind: QueueKind, before: Layout, after: Layout) -> bool {
-    kind
-        != QueueKind::Copy
-        && after
-        != Layout::Undefined
+    kind != QueueKind::Copy
+        && after != Layout::Undefined
         && (before == Layout::Undefined || queue_supports_layout(kind, before))
         && queue_supports_layout(kind, after)
 }

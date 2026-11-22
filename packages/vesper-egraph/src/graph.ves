@@ -144,12 +144,9 @@ fn key_less(in k: Keys, a: u32, b: u32) -> bool {
 }
 
 fn key_same(in k: Keys, a: u32, b: u32) -> bool {
-    at64(in k.hi, w(a))
-        == at64(in k.hi, w(b))
-        && ati(in k.data, w(a))
-        == ati(in k.data, w(b))
-        && at64(in k.lo, w(a))
-        == at64(in k.lo, w(b))
+    at64(in k.hi, w(a)) == at64(in k.hi, w(b))
+        && ati(in k.data, w(a)) == ati(in k.data, w(b))
+        && at64(in k.lo, w(a)) == at64(in k.lo, w(b))
 }
 
 // A stable bottom-up merge sort of `idx` by `k`.
@@ -286,16 +283,11 @@ impl EGraph {
                 return (at, NONE);
             }
             let k = w(wrapping_sub(s, 1));
-            if at64(in self.m_hash, k)
-                == h
-                && at32(in self.m_op, k)
-                == op
-                && ati(in self.m_data, k)
-                == data
-                && at32(in self.m_c0, k)
-                == c0
-                && at32(in self.m_c1, k)
-                == c1 {
+            if at64(in self.m_hash, k) == h
+                && at32(in self.m_op, k) == op
+                && ati(in self.m_data, k) == data
+                && at32(in self.m_c0, k) == c0
+                && at32(in self.m_c1, k) == c1 {
                 return (at, n32(k));
             }
             at = inc(at) & self.mask;

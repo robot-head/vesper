@@ -231,14 +231,8 @@ impl B {
                 }
             }
             if c == 239 && wrapping_add(i, 2) < n {
-                if self
-                    .names
-                    .byte(s, wrapping_add(i, 1))
-                    == 187
-                    && self
-                    .names
-                    .byte(s, wrapping_add(i, 2))
-                    == 191 {
+                if self.names.byte(s, wrapping_add(i, 1)) == 187
+                    && self.names.byte(s, wrapping_add(i, 2)) == 191 {
                     return false;
                 }
             }
