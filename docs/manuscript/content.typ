@@ -47,7 +47,8 @@
   #body
 ]
 
-#let manuscript(chapter-deck) = [
+#let manuscript(chapter-deck, infer: _infer) = [
+#let _infer = infer
 
 = Specification Overview
 <overview>

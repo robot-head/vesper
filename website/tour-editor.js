@@ -4,6 +4,7 @@ const source = form.elements.source;
 const mirror = form.querySelector('.editor-highlight');
 const run = form.querySelector('button[type="submit"]');
 const format = form.querySelector('[data-format]');
+const expand = form.querySelector('[data-expand]');
 const output = form.querySelector('.editor-output');
 const status = form.querySelector('.editor-status');
 const checkStatus = form.querySelector('.editor-check-status');
@@ -83,6 +84,10 @@ if ('Worker' in globalThis && 'WebAssembly' in globalThis) {
     for (const diagnostic of diagnosticList) {
       const range = diagnosticRange(diagnostic);
       if (range) diagnosticRanges.push({ diagnostic, range });
+      for (const label of diagnostic.related ?? []) {
+        const range = diagnosticRange(label);
+        if (range) diagnosticRanges.push({ diagnostic: { ...label, code: diagnostic.code }, range });
+      }
     }
     CSS.highlights.set('vesper-error', new Highlight(...diagnosticRanges.map(entry => entry.range)));
   }
@@ -122,10 +127,20 @@ if ('Worker' in globalThis && 'WebAssembly' in globalThis) {
     const announcement = list.length ? summary : message;
     if (checkStatus.textContent !== announcement) checkStatus.textContent = announcement;
     diagnosticSummary.textContent = summary;
-    diagnosticItems.replaceChildren(...list.map(({ start, code, message }) => {
+    diagnosticItems.replaceChildren(...list.map(({ start, code, message, related }) => {
       const line = source.value.slice(0, start).split('\n').length;
       const item = document.createElement('li');
       item.textContent = 'Line ' + line + ' · ' + code + ' · ' + message;
+      if (related?.length) {
+        const notes = document.createElement('ul');
+        for (const label of related) {
+          const note = document.createElement('li');
+          const line = source.value.slice(0, label.start).split('\n').length;
+          note.textContent = 'Line ' + line + ' · ' + label.message;
+          notes.append(note);
+        }
+        item.append(notes);
+      }
       return item;
     }));
     drawLens();
@@ -150,6 +165,7 @@ if ('Worker' in globalThis && 'WebAssembly' in globalThis) {
     pending = undefined;
     run.disabled = false;
     if (format) format.disabled = false;
+    if (expand) expand.disabled = false;
     if (result.restart) stop();
 
     if (action.mode === 'format' && result.ok) {
@@ -202,6 +218,7 @@ if ('Worker' in globalThis && 'WebAssembly' in globalThis) {
           const message = data.ok ? (form.dataset.repair ? 'Checks passed.' : '') : data.output;
           showDiagnostics(data.diagnostics, message);
         }
+        if (data.restart && !pending) stop();
       } else if (pending) {
         if (pending.revision === revision && data.diagnostics) showDiagnostics(data.diagnostics);
         finish(data);
@@ -241,7 +258,7 @@ if ('Worker' in globalThis && 'WebAssembly' in globalThis) {
     try {
       worker ??= startWorker();
       const mode = ['test', 'test-case'].includes(form.dataset.mode) ? 'check-tests'
-        : ['macro', 'expand', 'format'].includes(form.dataset.mode) ? 'expand' : 'check';
+        : ['macro', 'expand'].includes(form.dataset.mode) ? 'expand' : 'check';
       checking = revision;
       checkTimeout = setTimeout(() => { if (!pending) stop(); }, 10000);
       worker.postMessage({ source: source.value, mode, id: revision, live: true });
@@ -257,12 +274,13 @@ if ('Worker' in globalThis && 'WebAssembly' in globalThis) {
     output.hidden = true;
     run.disabled = true;
     if (format) format.disabled = true;
+    if (expand) expand.disabled = true;
     try {
       worker ??= startWorker();
       timer = setTimeout(() => finish({
         ok: false, restart: true, output: 'The example exceeded the time limit.',
       }), 10000);
-      worker.postMessage({ source: source.value, mode });
+      worker.postMessage({ source: source.value, mode, test_case: form.elements.test_case?.value });
     } catch {
       finish({ ok: false, restart: true, output: 'Could not start the Vesper compiler.' });
     }
@@ -273,6 +291,7 @@ if ('Worker' in globalThis && 'WebAssembly' in globalThis) {
     start(form.dataset.mode);
   });
   format?.addEventListener('click', () => start('format'));
+  expand?.addEventListener('click', () => start('expand'));
 
   form.addEventListener('reset', () => {
     clearTimeout(timer);
@@ -280,6 +299,7 @@ if ('Worker' in globalThis && 'WebAssembly' in globalThis) {
     pending = undefined;
     run.disabled = false;
     if (format) format.disabled = false;
+    if (expand) expand.disabled = false;
     output.hidden = true;
     status.textContent = 'Example restored.';
     queueMicrotask(refreshHighlight);
@@ -315,5 +335,22 @@ if ('Worker' in globalThis && 'WebAssembly' in globalThis) {
     }
   });
 
-  refreshHighlight({ immediate: true });
+  const example = new URLSearchParams(location.search).get('example');
+  if (['transaction.ves', 'projections.ves', 'checked_math.ves'].includes(example)) {
+    fetch(new URL('examples/' + example, import.meta.url)).then(response => {
+      if (!response.ok) throw new Error('Example unavailable');
+      return response.text();
+    }).then(code => {
+      if (revision || pending) return;
+      source.defaultValue = source.value = code;
+      delete form.dataset.repair;
+      editor.parentElement.querySelector('.tour-solution')?.setAttribute('hidden', '');
+    }).catch(() => {
+      status.textContent = 'Could not load the repository example.';
+    }).finally(() => {
+      if (!revision) refreshHighlight({ immediate: true });
+    });
+  } else {
+    refreshHighlight({ immediate: true });
+  }
 }

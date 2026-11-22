@@ -5,5 +5,5 @@
     <polygon points="128,127 143,119.5 143,200 128,230 113,200 113,119.5" fill="#5CCFE6"/>
     <polygon points="196.67,92.67 155,113.5 155,176" fill="#D2A6FF"/>
   </g>
-  <text x="148" y="95" fill="#E2E8F5" font-family="'Space Grotesk', 'Inter', system-ui, sans-serif" font-size="84" font-weight="700" letter-spacing="-3">vesper</text>
+  <text x="148" y="95" fill="#E2E8F5" font-family="'Space Grotesk', 'Inter', system-ui, sans-serif" font-size="84" font-weight="700" letter-spacing="-.035em">vesper</text>
 </svg>

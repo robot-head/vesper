@@ -21,7 +21,7 @@ for (const file of ['index.html', 'language.html', ...docs, ...tour]) {
 let chromaListings = 0, annotatedListings = 0;
 for (const [file, { source, ids }] of pages) {
   for (const [, attrs, codeAttrs, code] of source.matchAll(/<pre\b([^>]*)><code([^>]*)>([\s\S]*?)<\/code><\/pre>/g)) {
-    assert.match(codeAttrs, /data-lang="(?:vesper|rust|text|sh)"/, `Unclassified listing in ${file}`);
+    assert.match(codeAttrs, /data-lang="(?:vesper|rust|lean|text|sh|toml|vsys|ebnf|svg|css|xml)"/, `Unclassified listing in ${file}`);
     if (!codeAttrs.includes('data-lang="vesper"')) continue;
     assert.match(attrs, /data-vc-tier="[01]"/, `Missing Chroma output in ${file}`);
     assert.match(code, /class="vc-/, `Missing Chroma token in ${file}`);
@@ -33,7 +33,8 @@ for (const [file, { source, ids }] of pages) {
   }
   for (const [, url] of source.matchAll(/(?:href|src)="([^"]+)"/g)) {
     if (/^(https?:|data:|mailto:)/.test(url)) continue;
-    const [path, anchor] = url.split('#');
+    const [withQuery, anchor] = url.split('#');
+    const path = withQuery.split('?')[0];
     const target = path ? posix.join(posix.dirname(file), path) : file;
     if (path) await access(resolve(dist, target));
     if (anchor !== undefined && target === 'vesper-specification.pdf') {
@@ -47,7 +48,8 @@ for (const [file, { source, ids }] of pages) {
   }
 }
 const catalog = pages.get('docs/index.html').source;
-const topics = JSON.parse(catalog.match(/<script type="application\/json" id="search-index">([^<]+)<\/script>/)[1]);
+const searchIndex = JSON.parse(await readFile(resolve(dist, 'docs/search-index.json'), 'utf8'));
+const topics = searchIndex.filter(topic => topic.id);
 const expected = [...manuscript.matchAll(/^=== ([\dAB]+\.\d+) /gm)].map(m => m[1]);
 assert.deepEqual(topics.map(topic => topic.id), expected, 'Search must cover the manuscript sections in order');
 for (const { id, url } of topics) {
@@ -56,14 +58,27 @@ for (const { id, url } of topics) {
   assert(catalog.includes(`href="${page}"`), `Missing chapter link to ${page}`);
 }
 const sitemap = await readFile(resolve(dist, 'sitemap.xml'), 'utf8');
+const reference = pages.get('docs/reference.html');
+const listingCount = (manuscript.match(/^```[^\r\n]*\r?$/gm) ?? []).length / 2;
+assert.equal((reference.source.match(/<pre\b/g) ?? []).length, listingCount, 'Manuscript listings drifted in the HTML export');
+assert.equal((reference.source.match(/class="infer-rule"/g) ?? []).length,
+  (manuscript.match(/^#_infer\(/gm) ?? []).length, 'Manuscript inference rules drifted in the HTML export');
+assert(reference.source.includes('<table>') && reference.source.includes('<math>'), 'Reference tables and mathematics must remain in HTML');
+assert(searchIndex.some(topic => topic.chapter === 'Language guide' && topic.url.endsWith('#sugar')));
+assert(searchIndex.some(topic => topic.chapter === 'Tour' && topic.text.includes('E0301')));
 for (const file of [...docs, ...tour]) {
   const url = 'https://vesper-lang.org/' + file.replace(/index\.html$/, '');
-  assert(sitemap.includes(`<loc>${url}</loc>`), `Missing sitemap URL ${url}`);
+  const moved = file.startsWith('tour/') && movedLessons[file.slice(5)];
+  assert.equal(sitemap.includes(`<loc>${url}</loc>`), !moved, `Wrong sitemap entry for ${url}`);
+  if (moved) {
+    const [target] = moved.split('#');
+    const canonical = new URL(target === 'index.html' ? '' : target, 'https://vesper-lang.org/tour/');
+    assert(pages.get(file).source.includes(`rel="canonical" href="${canonical}"`));
+  }
 }
 const tourEditors = tour.filter(file => pages.get(file).source.includes('data-tour-editor'));
 const lessonCount = tour.length - Object.keys(movedLessons).length;
-assert.equal(tourEditors.length, lessonCount - 1, 'Incorrect number of tour editors');
-assert(!tourEditors.includes('tour/read-a-proposed-sugar-declaration.html'), 'Proposed syntax is a reference listing');
+assert.equal(tourEditors.length, lessonCount, 'Each active lesson needs an editor');
 const { source: html } = pages.get('index.html');
 const visited = new Set();
 let current = 'tour/index.html', previous;
@@ -80,9 +95,9 @@ while (current) {
 assert.equal(visited.size, lessonCount, 'Tour should reach every lesson');
 await checkTourWasm(dist, tour, pages);
 for (const file of ['transaction.ves', 'projections.ves', 'checked_math.ves']) {
-  const actual = await readFile(resolve(dist, 'examples', file), 'utf8');
-  const original = (await readFile(resolve(root, '..', 'examples', file), 'utf8')).replaceAll('\r\n', '\n').trimEnd() + '\n';
-  assert.equal(actual.replace(/\s/g, ''), original.replace(/\s/g, ''), `${file} tokens drifted from the compiler example`);
+  const actual = await readFile(resolve(dist, 'examples', file));
+  const original = await readFile(resolve(root, '..', 'examples', file));
+  assert.deepEqual(actual, original, `${file} bytes drifted from the compiler example`);
 }
 assert.equal((await readFile(resolve(dist, 'CNAME'), 'utf8')).trim(), 'vesper-lang.org');
 assert(html.includes('https://vesper-lang.org/'), 'Canonical domain missing');
@@ -91,4 +106,4 @@ const designActions = [...html.matchAll(/<a\b[^>]*href="([^"]+)"[^>]*>Read the d
 assert(designActions.length > 0 && designActions.every(([, url]) => url === 'vesper-specification.pdf'), 'Every design action must open the manuscript');
 const specification = await readFile(resolve(dist, 'vesper-specification.pdf'));
 assert(specification.subarray(0, 5).equals(Buffer.from('%PDF-')), 'Specification is not a PDF');
-console.log(`PASS: ${pages.size} pages, ${chromaListings} Chroma listings, ${annotatedListings} annotated failures, ${topics.length} searchable manuscript sections, local links, assets, anchors, examples, PDF destinations, sitemap, and custom domain.`);
+console.log(`PASS: ${pages.size} pages, ${chromaListings} Chroma listings, ${annotatedListings} annotated failures, ${searchIndex.length} search entries, manuscript listings and rules, local links, assets, anchors, examples, PDF destinations, sitemap, and custom domain.`);

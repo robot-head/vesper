@@ -18,22 +18,45 @@ Read the parameter modes to find who can read, change, initialize, or consume th
 
 ## 1.4 Follow a transaction through a broker
 
-Imagine a broker with an index, counters, and configuration. A helper can update the index and counters while reading configuration through a shared loan. The caller still owns the transaction until it passes it to a consuming method. Follow both the normal branch and the failure branch and locate the last owner on each.
-
-In the repository’s broker example, compare the function’s parameter list with the arguments at its call site.
+The caller owns the transaction until a consuming method takes it. Both branches transfer ownership. The success path returns the receipt from §1.3's ownership contract. The rollback path consumes the same transaction and returns zero. The runnable example uses a slot number as the receipt.
 
 ~~~vesper
-fn append(inout broker.{index, metrics}: Broker, in config: u64) {
-    broker.index = wrapping_add(broker.index, config);
-    broker.metrics = wrapping_add(broker.metrics, 1);
+linear struct WriteTxn {
+    wal_slot: u64
+}
+
+impl WriteTxn {
+    fn commit(sink self) -> u64 {
+        let WriteTxn {
+            wal_slot
+        } = self;
+        wal_slot
+    }
+    fn abort(sink self) {
+        let WriteTxn {
+            wal_slot
+        } = self;
+    }
+}
+
+fn finish(in ready: bool) -> u64 {
+    let tx = WriteTxn {
+        wal_slot: 42
+    };
+    if ready {
+        tx.commit()
+    } else {
+        tx.abort();
+        0
+    }
+}
+
+fn main() -> u64 {
+    finish(true)
 }
 ~~~
 
-~~~vesper
-append(inout broker, in broker.config);
-~~~
-
-The callee can update exactly two fields through its first parameter. Its second parameter supplies a readable configuration value. Starting with index 1, metrics 0, and config 41 yields index 42, metrics 1, and config 41.
+There is a separate loan contract on the broker. A helper that mutates `broker.{index, metrics}` may also read `broker.config`. Two arguments asking for exclusive access to the same projected field produce `E0301`. [Try repairing a conflicting loan](../tour/find-a-conflicting-loan.html).
 
 # 2 Reading and parsing Vesper source
 
@@ -61,9 +84,16 @@ A value’s usage mode determines whether you may copy it, drop it, or must cons
 
 Usage tracks whether a value can be copied, dropped, or must be consumed. Portability distinguishes transferable and pinned values. Contention records whether another participant can interfere. Exchange order distinguishes freely ordered values from last-in, first-out obligations. A separate presence index distinguishes runtime values from erased proof material.
 
+| Axis | Less restricted | More restricted | Example |
+| --- | --- | --- | --- |
+| Usage | `copy` | `affine`, `linear` | A transaction must finish exactly once. |
+| Portability | `portable` | `pinned` | A pinned handle stays with its worker. |
+| Contention | `uncontended` | `contended` | Another participant can invalidate a fact about shared state. |
+| Exchange order | `unordered` | `lifo` | Release the last acquired guard first. |
+
 ## 3.2 Derive a record’s mode from its fields
 
-A record containing a linear ticket must protect the ticket even if its other fields are copyable. A field annotation can impose a stricter floor. The record combines the field requirements with its declared mode. Conversely, after consuming the record, a plain integer field can be used at its own intrinsic kind. This recovery of a known type’s permissions is called mode crossing.
+A record containing a linear ticket must protect the ticket even if its other fields are copyable. A field annotation can impose a stricter floor. The record combines the field requirements with its declared mode. Keep the fields of a linear type module-private if callers must use consuming methods to commit or roll back. Public fields can let a caller discharge the linear obligation by destructuring. Conversely, after consuming the record, a plain integer field can be used at its own intrinsic kind. This recovery of a known type’s permissions is called mode crossing.
 
 ## 3.3 Seal a capsule or release a guard
 
@@ -71,7 +101,7 @@ A `Capsule[T]` packages an isolated owner for transfer. Sealing needs evidence t
 
 ## 3.4 Erase a proof without changing the run
 
-A ghost value marked `@0` exists during checking. A proof can consume a ghost permission to justify an operation. Runtime control flow cannot depend on that permission. The erasure argument checks termination, freedom from runtime effects, and discharge of ghost obligations. The operational model proves erasure for ghost computations that satisfy these conditions and capture no outside resources.
+In the proposed ghost calculus, a value marked `@0` exists only during checking. The production AST has no ghost-binding representation. A proof can consume a ghost permission to justify an operation. Runtime control flow cannot depend on that permission. The erasure argument checks termination, freedom from runtime effects, and discharge of ghost obligations. The operational model proves erasure for ghost computations that satisfy these conditions and capture no outside resources.
 
 # 4 Borrowing parts of a value
 
