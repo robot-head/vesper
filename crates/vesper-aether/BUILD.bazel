@@ -2,25 +2,41 @@ load("@rules_rs//rs/private:all_crate_deps.bzl", "all_crate_deps")
 load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
 load("@vesper_cargo//:packages.bzl", "PACKAGES")
 load("//tools/bazel:defs.bzl", "vesper_crate")
-load("//tools/bazel:vesper_port.bzl", "VESPER_TARGET", "vesper_port_object")
+load("//tools/bazel:vesper_port.bzl", "VESPER_TARGET", "vesper_package", "vesper_port_object")
 
-# The Rust build (default features), with its tests.
+# The default build, with its tests. The virtqueue walks are Vesper-only
+# (SH6 lane 14, #1409): build.rs links the object built below and checks
+# port/binding.rs against the generated binding, as for vesper-flux. The
+# other ported modules run Rust here.
 vesper_crate(
+    build_script_data = [
+        ":aether_vesper",
+        ":aether_vesper_binding",
+        ":aether_rng",
+        ":aether_rng_binding",
+    ],
+    build_script_env = {
+        # rules_rust already makes these execpaths absolute.
+        "VESPER_PORT_OBJECT_AETHER": "$(execpath :aether_vesper)",
+        "VESPER_PORT_GENERATED_BINDING_AETHER": "$(execpath :aether_vesper_binding)",
+        "VESPER_PORT_OBJECT_AETHER_RNG": "$(execpath :aether_rng)",
+        "VESPER_PORT_GENERATED_BINDING_AETHER_RNG": "$(execpath :aether_rng_binding)",
+    },
     # tests/lean_model.rs reads lean/AetherMemory.lean; Lean rejects symlinked
     # runfiles outside --root, so it runs in a regular copy.
     copy_test_cwd = ["test/lean_model"],
     extra_test_data = ["//:lean"],
 )
 
-# The Vesper build (SH6 lane 14, #1409): the ported modules forward to
-# vesper/src/ through the committed binding. The port's files joined in
-# order, as build.rs does (PARTS).
+# The `vesper-port` build: the other ported modules forward to vesper/src/
+# too. The port's files joined in order, as build.rs does (PARTS).
 AETHER_PARTS = [
     "vesper/src/util.ves",
     "vesper/src/slot_plan.ves",
     "vesper/src/pvh.ves",
     "vesper/src/hotset.ves",
     "vesper/src/packed.ves",
+    "vesper/src/vq.ves",
 ]
 
 genrule(
@@ -34,7 +50,44 @@ vesper_port_object(
     name = "aether_vesper",
     src = ":aether_source",
     library = "aether",
+    # As build.rs: the binding names the crate's boundary types.
+    rust_types = "crate::port_types",
     target = VESPER_TARGET,
+)
+
+filegroup(
+    name = "aether_vesper_binding",
+    srcs = [":aether_vesper"],
+    output_group = "rust_binding",
+)
+
+# The hardware RNG (src/hw_rng.rs): one package per target, as build.rs
+# picks them, all with the same exports and binding (port/rng_binding.rs).
+[
+    vesper_package(
+        name = "rng_package_" + variant.replace("-", "_"),
+        srcs = glob(["vesper-rng/%s/src/**/*.ves" % variant]),
+        manifest = "vesper-rng/%s/Loom.toml" % variant,
+        deps = ["//:std_cpu_package"],
+    )
+    for variant in ["x86_64", "aarch64-linux", "aarch64-macos"]
+]
+
+vesper_port_object(
+    name = "aether_rng",
+    library = "aether_rng",
+    package = select({
+        "//tools/bazel:vesper_linux_aarch64": ":rng_package_aarch64_linux",
+        "//tools/bazel:vesper_macos_aarch64": ":rng_package_aarch64_macos",
+        "//conditions:default": ":rng_package_x86_64",
+    }),
+    target = VESPER_TARGET,
+)
+
+filegroup(
+    name = "aether_rng_binding",
+    srcs = [":aether_rng"],
+    output_group = "rust_binding",
 )
 
 # The divergence check (one bug per ported module, DIVERGENT_EDITS in
@@ -44,12 +97,16 @@ _CRATE_DATA = PACKAGES["crates/vesper-aether"].crate_data()
 
 rust_library(
     name = "port",
-    srcs = glob(["src/**/*.rs"]) + ["port/binding.rs"],
+    srcs = glob(["src/**/*.rs"]) + [
+        "port/binding.rs",
+        "port/rng_binding.rs",
+    ],
     crate_features = ["vesper-port"],
     crate_name = "vesper_aether",
     crate_root = "src/lib.rs",
     edition = "2024",
-    deps = ["//crates/vesper-port-abi"] + all_crate_deps(
+    # vesper-port-abi is a normal dependency now, so all_crate_deps has it.
+    deps = all_crate_deps(
         _CRATE_DATA,
         normal = True,
         platforms = _CRATE_DATA["platforms"],
@@ -59,13 +116,19 @@ rust_library(
 [
     rust_test(
         name = "port_%s_test" % test,
-        srcs = ["tests/%s.rs" % test],
-        compile_data = [":aether_vesper"] + AETHER_PARTS,
+        srcs = ["tests/%s.rs" % test] + glob(["tests/common/*.rs"]),
+        compile_data = [
+            ":aether_vesper",
+            ":aether_rng",
+        ] + AETHER_PARTS,
         crate_features = ["vesper-port"],
         crate_name = test,
         crate_root = "tests/%s.rs" % test,
         edition = "2024",
-        rustc_flags = ["-Clink-arg=$(location :aether_vesper)"],
+        rustc_flags = [
+            "-Clink-arg=$(location :aether_vesper)",
+            "-Clink-arg=$(location :aether_rng)",
+        ],
         deps = [":port"] + extra,
     )
     for test, extra in [
@@ -81,5 +144,8 @@ rust_library(
         ("virtio_packed", ["//crates/vesper-loom-cas"]),
         ("packed_port", []),
         ("abba_packed", ["//crates/vesper-bench"]),
+        ("virtqueue", []),
+        ("devices", []),
+        ("device_features", []),
     ]
 ]
