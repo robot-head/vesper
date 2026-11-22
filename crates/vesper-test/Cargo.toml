@@ -10,4 +10,5 @@ publish = false
 blake3 = "1.8"
 serde = { workspace = true }
 serde_json = { workspace = true }
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 vesper-vault = { path = "../vesper-vault" }

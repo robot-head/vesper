@@ -495,7 +495,7 @@ fn fail_row_only(effects: &Effects) -> bool {
 }
 
 fn mentions_function(world: &World, t: &Type) -> bool {
-    crate::native::contains_function(world, t)
+    crate::source_analysis::contains_function(world, t)
 }
 
 /// Callee properties that do not depend on the call site.

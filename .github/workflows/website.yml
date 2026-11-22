@@ -10,6 +10,9 @@ on:
 
 permissions:
   contents: read
+  # The merge gate reads open pull requests and cancels blocked runs.
+  actions: write
+  pull-requests: read
 
 concurrency:
   group: website-${{ github.event_name == 'pull_request' && github.ref || 'pages' }}
@@ -23,11 +26,31 @@ jobs:
       run:
         working-directory: website
     steps:
+      # Merge gate (#1321, #1479): a pull request that cannot merge yet runs no CI.
+      - name: Check out the pull request head for the merge gate
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: .gate
+          fetch-depth: 0
+          sparse-checkout: |
+            .github/actions
+            scripts/ci
+      - name: Merge gate
+        if: github.event_name == 'pull_request'
+        uses: ./.gate/.github/actions/merge-gate
+        with:
+          number: ${{ github.event.pull_request.number }}
+          base-ref: ${{ github.event.pull_request.base.ref }}
+          head-sha: ${{ github.event.pull_request.head.sha }}
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
         with:
           key: website-chroma
@@ -49,6 +72,7 @@ jobs:
         run: |
           python -m unittest discover -s ../docs/manuscript -p 'test_*.py'
           python ../docs/manuscript/verify.py --pdf vesper-specification.pdf
+      - run: npm run build:wasm
       - run: npm run build
       - run: npm run check
       - uses: actions/upload-pages-artifact@v3
