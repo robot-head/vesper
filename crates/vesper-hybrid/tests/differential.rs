@@ -9,8 +9,9 @@
 //! `cargo build -p vesper --bin vesper` into this build's target directory.
 //!
 //! Under the `divergent` (or `divergent-parse`, `divergent-ir-check`,
-//! `divergent-ir-inline`, `divergent-ir-opt`) feature the hybrid's layout
-//! (or parse, IR-check, inliner, IR optimizer) module is deliberately wrong (build.rs), and the harness must
+//! `divergent-ir-inline`, `divergent-ir-opt`, `divergent-pact`) feature the
+//! hybrid's layout (or parse, IR-check, inliner, IR optimizer, trait
+//! declaration pass) module is deliberately wrong (build.rs), and the harness must
 //! report differences instead: that is the proof it can fail.
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -226,7 +227,8 @@ fn hybrid_matches_the_default_compiler() {
         feature = "divergent-parse",
         feature = "divergent-ir-check",
         feature = "divergent-ir-inline",
-        feature = "divergent-ir-opt"
+        feature = "divergent-ir-opt",
+        feature = "divergent-pact"
     )) {
         assert!(
             !mismatches.is_empty(),
@@ -300,6 +302,37 @@ fn pilot_module_runs_from_vesper() {
         hoisted > 0,
         "the Vesper bounds-hoist module hoisted no program"
     );
+}
+
+/// The trait declaration pass (#1185) really runs from Vesper in the hybrid
+/// build: it answers the accepted shapes example and rejects the
+/// overlapping impls of `overlap_rejected.ves`.
+#[test]
+fn pact_module_runs_from_vesper() {
+    let root = repository();
+    for (file, ok) in [
+        ("examples/traits/shapes.ves", true),
+        ("examples/traits/overlap_rejected.ves", false),
+    ] {
+        let output = Command::new(hybrid())
+            .current_dir(&root)
+            .env("VESPER_HYBRID_STATS", "1")
+            .args(["check", file])
+            .output()
+            .expect("run vesper-hybrid");
+        assert_eq!(output.status.success(), ok, "{file}: {output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let calls: u64 = stderr
+            .lines()
+            .find_map(|l| l.strip_prefix("vesper-hybrid: pact answered "))
+            .and_then(|l| l.split(' ').next())
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_else(|| panic!("no pact report in {stderr:?}"));
+        assert!(
+            calls > 0,
+            "the Vesper pact module answered no calls on {file}"
+        );
+    }
 }
 
 /// The wasm backend module (#1289) really compiles from Vesper in the

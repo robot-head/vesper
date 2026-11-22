@@ -1073,6 +1073,16 @@ vesper_package(
     deps = [":check_data_package"],
 )
 
+# The trait declaration pass as a dependency of the hybrid compiler's pact
+# module (self-hosting SH2 lane 13, #1185).
+vesper_package(
+    name = "check_pact_package",
+    srcs = glob(["packages/vesper-check-pact/src/**/*.ves"]),
+    manifest = "packages/vesper-check-pact/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [":check_data_package"],
+)
+
 vesper_package(
     name = "check_loops_atomics_package",
     srcs = glob(["packages/vesper-check-loops-atomics/src/**/*.ves"]),
