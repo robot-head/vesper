@@ -18,11 +18,19 @@ run = "cargo test --locked --release --test self_host_bounds_hoist_jit"
 [differential]
 run = "BOUNDS_HOIST_PASS_STRIDE=1 cargo test --locked --release --test self_host_bounds_hoist_pass pass_matches_bounds_hoist_run -- --nocapture"
 
-# One epoch of a workload is about 35 s over the whole corpus.
+# The module's own speed: the pass on input bytes, the place-ir identity
+# read and write subtracted. One epoch is about a minute over the corpus.
 [[abba]]
 workload = "pass"
 run = "BOUNDS_HOIST_GATE_WORKLOAD=pass CHECK_HARNESS_SPEED=1 cargo test --locked --release --test self_host_bounds_hoist_pass flip_gate -- --nocapture"
 
+# The plan's compiler-module bar: the whole native optimize pipeline of
+# every corpus `main` with the swap against without it (about 2 s an arm).
 [[abba]]
-workload = "hook"
-run = "BOUNDS_HOIST_GATE_WORKLOAD=hook CHECK_HARNESS_SPEED=1 cargo test --locked --release --test self_host_bounds_hoist_pass flip_gate -- --nocapture"
+workload = "build"
+run = "BOUNDS_HOIST_GATE_EPOCHS=30 BOUNDS_HOIST_GATE_WORKLOAD=build CHECK_HARNESS_SPEED=1 cargo test --locked --release --test self_host_bounds_hoist_pass flip_gate -- --nocapture"
+
+# Not gated: the `hook` workload (BOUNDS_HOIST_GATE_WORKLOAD=hook) times the
+# hybrid hook alone, with the whole program encoded to words and decoded
+# back around the pass. That boundary is the hybrid's, and it goes away
+# once the IR pipeline around the pass is Vesper too.
