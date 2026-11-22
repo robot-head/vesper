@@ -841,7 +841,17 @@ impl Parser {
                 self.expect(b']')?;
             }
             self.expect(b']')?;
-            RawType::OptionHandle(name)
+            if name == "CStr" && length.is_none() {
+                if keyword == "callback" {
+                    return Err(self.error(
+                        ErrorKind::Unsupported,
+                        "a callback cannot return a C string: nothing would own or free it",
+                    ));
+                }
+                RawType::OptionCStr
+            } else {
+                RawType::OptionHandle(name)
+            }
         } else if self.is_word("NonNull") && self.peek_punct(1) == Some(b'[') {
             self.bump();
             self.expect(b'[')?;
@@ -1005,6 +1015,8 @@ enum RawType {
     OptionHandle(String),
     /// `NonNull[H]` of an extern type, as a result.
     NonNullHandle(String),
+    /// `Option[CStr]`, as a result: a C string copied at the call.
+    OptionCStr,
 }
 enum RawParameterType {
     Value(RawType),
@@ -1128,6 +1140,7 @@ fn resolve(
 ) -> Result<ValueType, Error> {
     match t {
         RawType::Address { pointee, nullable } => Ok(ValueType::Address { pointee, nullable }),
+        RawType::OptionCStr => Ok(ValueType::CStr),
         RawType::OptionHandle(n) => match externs.iter().find(|e| e.name() == n) {
             Some(handle) => Ok(ValueType::Handle {
                 handle: handle.clone(),

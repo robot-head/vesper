@@ -490,6 +490,9 @@ impl Generated {
                         ValueType::Handle { .. } | ValueType::NonNullHandle { .. } => {
                             return Err("a handle parameter needs a mode".into());
                         }
+                        ValueType::CStr => {
+                            return Err("a C string result is not a parameter".into());
+                        }
                         ValueType::Address { .. } => {
                             return Err(
                                 "address parameters have no source carrier (source code has no raw pointers)"
@@ -595,6 +598,10 @@ impl Generated {
                 nullable: false,
             } => Type::Named("Result".into(), vec![Type::named(handle.name()), invalid()]),
             ValueType::NonNullHandle { handle } => Type::named(handle.name()),
+            ValueType::CStr => Type::Named(
+                "Option".into(),
+                vec![Type::Named("ChunkSeq".into(), vec![Type::named("u8")])],
+            ),
         };
         Ok(OpShape {
             params,
