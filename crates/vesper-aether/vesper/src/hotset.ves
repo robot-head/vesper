@@ -1,0 +1,114 @@
+// ---------------------------------------------------------------------------
+// Hot-set decoding and prefetch runs (src/hotset.rs).
+
+const MAX_HOT_PAGES: u64 = 1048576;
+const HOTSET_HEADER_BYTES: u64 = 16;
+
+// `HotSetError` with the index as u64.
+copy enum HotFault {
+    OutOfRange {
+        index: u64
+    },
+    TooMany,
+    BadBatch,
+    Truncated,
+    BadMagic,
+    TrailingBytes,
+    NotCanonical
+}
+
+// `HotSet::decode`: the page count, with the pages in `pages` (room for
+// `(bytes.len() - 16) / 4`).
+pub fn hotset_decode(in bytes: Slice[u8], expected: u64, inout pages: Slice[u64])
+    -> Result[u64, HotFault] {
+    let n = bytes.len();
+    if n < HOTSET_HEADER_BYTES {
+        return Result::Err(HotFault::Truncated);
+    }
+    let magic = match bytes.try_read_u32_le(0) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    };
+    // "AHS1" little-endian.
+    if magic != 827541569 {
+        return Result::Err(HotFault::BadMagic);
+    }
+    let page_count = match bytes.try_read_u64_le(4) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    };
+    if page_count != expected {
+        return Result::Err(
+            HotFault::OutOfRange {
+                index: expected
+            }
+        );
+    }
+    let count = match bytes.try_read_u32_le(12) {
+        Option::Some(v) => widen_u64(v),
+        Option::None => 0,
+    };
+    if count > MAX_HOT_PAGES {
+        return Result::Err(HotFault::TooMany);
+    }
+    let body = wrapping_sub(n, HOTSET_HEADER_BYTES);
+    let need = wrapping_mul(count, 4);
+    if body < need {
+        return Result::Err(HotFault::Truncated);
+    }
+    if body > need {
+        return Result::Err(HotFault::TrailingBytes);
+    }
+    let mut have = false;
+    let mut last: u64 = 0;
+    for k in 0..count {
+        let i = match bytes.try_read_u32_le(wrapping_add(HOTSET_HEADER_BYTES, wrapping_mul(k, 4))) {
+            Option::Some(v) => widen_u64(v),
+            Option::None => return Result::Err(HotFault::Truncated),
+        };
+        if i >= expected {
+            return Result::Err(
+                HotFault::OutOfRange {
+                    index: i
+                }
+            );
+        }
+        if have && last >= i {
+            return Result::Err(HotFault::NotCanonical);
+        }
+        pages.try_set(k, i);
+        have = true;
+        last = i;
+    }
+    Result::Ok(count)
+}
+
+// `HotSet::runs`: maximal contiguous runs of the sorted `pages`, each at
+// most `batch` pages, as `(start, pages)` word pairs in `out` (room for
+// `2 * pages.len()`); returns the number of runs.
+pub fn hotset_runs(in pages: Slice[u64], batch: u64, inout out: Slice[u64])
+    -> Result[u64, HotFault] {
+    if batch == 0 {
+        return Result::Err(HotFault::BadBatch);
+    }
+    let mut runs: u64 = 0;
+    let mut start: u64 = 0;
+    let mut len: u64 = 0;
+    for k in 0..pages.len() {
+        let p = match pages.try_get(k) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        if runs > 0 && wrapping_add(start, len) == p && len < batch {
+            len = wrapping_add(len, 1);
+            out.try_set(wrapping_sub(wrapping_add(runs, runs), 1), len);
+        } else {
+            start = p;
+            len = 1;
+            out.try_set(wrapping_add(runs, runs), start);
+            out.try_set(wrapping_add(wrapping_add(runs, runs), 1), len);
+            runs = wrapping_add(runs, 1);
+        }
+    }
+    Result::Ok(runs)
+}

@@ -293,6 +293,15 @@ replaces (ABBA, port-compiler profile, Vesper time divided by Rust time).
 |---|---|---|---|--:|---|---|
 | eBPF backend (`ebpf_backend` surface + lowering + assembler; stack bound with lane 17) | SH4-16 (#1290) | part 1: surface, lowering, assembler | 0 of 243 cases (137 accepted, ELF objects equal) and 0 of 292 corpus worlds | 3.61x backend alone; 0.93x with the verifier model, 1.10x with encoding | after SH4-1 | [self-host-ebpf-backend.md](../parallel-results/self-host-ebpf-backend.md) |
 
+**SH4 backend swaps.** Each row is one backend family swapped into the
+hybrid build through `src/codegen_swap.rs` (#1275). The differential counts
+are against the Rust backend; the times are the swapped part alone (ABBA,
+release) and the hybrid CLI against the default.
+
+| Swap | Lane | Ported so far | Differential | Swapped part alone | Hybrid CLI | Report |
+|---|---|---|---|--:|---|---|
+| `wasm` (`wasm_backend::compile`; wit-component wrapping stays Rust) | SH4-15 (#1289) | all but handlers, host frames and evidence (part 1) | 640 of 1,292 compilations byte-identical, 136 equal errors, 516 declined, 0 differ; hybrid differential 0 of 2,152 runs | 0.27x (0.38x with encoding) | `build --target wasm32-wasip2` 1.51x (debug; declined programs compile twice) | [self-host-wasm-backend.md](../parallel-results/self-host-wasm-backend.md) |
+
 ## Estimates
 
 These are rough. They come from the port waves so far, where one lane ported

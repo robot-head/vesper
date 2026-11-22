@@ -48,6 +48,11 @@ mod codegen_binding;
 
 #[rustfmt::skip]
 #[allow(clippy::all)]
+#[path = "../port/wasm_backend.rs"]
+mod wasm_backend_binding;
+
+#[rustfmt::skip]
+#[allow(clippy::all)]
 #[path = "../port/codegen_numeric.rs"]
 mod codegen_numeric_binding;
 
@@ -129,6 +134,11 @@ mod ir_opt_words;
 #[path = "../../../tests/common/ir_words.rs"]
 mod ir_words;
 
+// The wasm backend swap's input encoder (#1289): the Place IR words above
+// and the wasm section, shared with tests/self_host_wasm_backend.rs.
+#[path = "../../../tests/common/wasm_words.rs"]
+mod wasm_words;
+
 /// Calls answered by the Vesper word-layout module.
 static LAYOUT_CALLS: AtomicU64 = AtomicU64::new(0);
 /// Sources parsed by the Vesper parse module.
@@ -142,6 +152,9 @@ static STACK_BOUND_CALLS: AtomicU64 = AtomicU64::new(0);
 /// `aggregate` requests the Vesper codegen module emitted, and declined.
 static CODEGEN_CALLS: AtomicU64 = AtomicU64::new(0);
 static CODEGEN_DECLINED: AtomicU64 = AtomicU64::new(0);
+/// Programs the Vesper wasm backend compiled, and left to Rust.
+static WASM_CALLS: AtomicU64 = AtomicU64::new(0);
+static WASM_DECLINED: AtomicU64 = AtomicU64::new(0);
 /// `numeric` requests (vectors, `TiledSeq`) the Vesper module emitted, and
 /// declined.
 static NUMERIC_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -614,6 +627,28 @@ fn vesper_aggregate(lent: &mut vesper::codegen_swap::Lent<'_, '_>) -> Result<boo
     }
 }
 
+/// The `wasm` hook of `vesper::codegen_swap` from `modules/wasm_backend`:
+/// `@vesper/wasm-backend` writes the core module and the WIT, and
+/// wit-component wraps them here. Errors (so the messages stay Rust's) and
+/// programs with handlers or host capabilities (not ported yet) decline to
+/// the Rust backend.
+fn vesper_wasm(
+    world: &vesper::check::World,
+    entry: &str,
+    options: &vesper::wasm_backend::WasmOptions,
+) -> Option<Result<vesper::wasm_backend::WasmArtifact, vesper::wasm_backend::WasmError>> {
+    match wasm_words::compile_with(world, entry, options, wasm_backend_binding::compile_words) {
+        Some(artifact) => {
+            WASM_CALLS.fetch_add(1, Relaxed);
+            Some(Ok(artifact))
+        }
+        None => {
+            WASM_DECLINED.fetch_add(1, Relaxed);
+            None
+        }
+    }
+}
+
 /// The `numeric` hook of `vesper::codegen_swap` from
 /// `modules/codegen_numeric` (#1285): vector and `TiledSeq` operations
 /// emitted in Vesper. The graph walk's `INSTRUCTION` requests are declined
@@ -877,6 +912,7 @@ extern "C" fn install() {
     }
     let hooks = vesper::codegen_swap::CodegenHooks {
         aggregate: Some(vesper_aggregate),
+        wasm: Some(vesper_wasm),
         numeric: Some(vesper_numeric),
         export: Some(vesper_export),
         plan: Some(vesper_plan),
@@ -930,6 +966,11 @@ extern "C" fn report() {
         "vesper-hybrid: codegen emitted {} aggregate requests from Vesper ({} declined)",
         CODEGEN_CALLS.load(Relaxed),
         CODEGEN_DECLINED.load(Relaxed)
+    );
+    eprintln!(
+        "vesper-hybrid: wasm backend compiled {} programs from Vesper ({} declined)",
+        WASM_CALLS.load(Relaxed),
+        WASM_DECLINED.load(Relaxed)
     );
     eprintln!(
         "vesper-hybrid: codegen emitted {} numeric requests from Vesper ({} declined)",

@@ -1,0 +1,137 @@
+// Arrow IPC stream messages (format/Message.fbs, format/Schema.fbs), built
+// with the FlatBuffers builder in the field order `arrow-ipc` 56 uses, and
+// the encapsulated stream framing: a continuation marker, the metadata
+// length, the metadata padded to the stream alignment, then the body.
+use self::fb::{
+    Fb,
+    padding
+};
+
+// Message.fbs: MetadataVersion V5, MessageHeader Schema and RecordBatch.
+const VERSION_V5: u64 = 4;
+const HEADER_SCHEMA: u64 = 1;
+const HEADER_RECORD_BATCH: u64 = 3;
+// Schema.fbs: Type Int.
+const TYPE_INT: u64 = 2;
+pub const CONTINUATION: u64 = 4294967295;
+
+// An `Int` field with no children, dictionary or custom metadata.
+pub fn int_field(inout fb: Fb, in name: Slice[u8], bits: u64, signed: bool, nullable: bool) -> u64 {
+    let name_at = fb.create_string(in name);
+    let none: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let children = fb.create_offsets(in none);
+    let t = fb.start_table();
+    // Int: bitWidth (i32, 4), is_signed (bool, 6).
+    fb
+        .add_scalar(
+        6,
+        if signed {
+            1
+        } else {
+            0
+        },
+        1,
+        0
+    );
+    fb.add_scalar(4, bits, 4, 0);
+    let int_at = fb.end_table(t);
+    let f = fb.start_table();
+    // Field: name 4, nullable 6, type_type 8, type 10, children 14.
+    fb.add_offset(4, name_at);
+    fb.add_scalar(8, TYPE_INT, 1, 0);
+    fb
+        .add_scalar(
+        6,
+        if nullable {
+            1
+        } else {
+            0
+        },
+        1,
+        0
+    );
+    fb.add_offset(14, children);
+    fb.add_offset(10, int_at);
+    fb.end_table(f)
+}
+
+// A `KeyValue` table (key 4, value 6).
+pub fn key_value(inout fb: Fb, in key: Slice[u8], in value: Slice[u8]) -> u64 {
+    let k = fb.create_string(in key);
+    let v = fb.create_string(in value);
+    let t = fb.start_table();
+    fb.add_offset(4, k);
+    fb.add_offset(6, v);
+    fb.end_table(t)
+}
+
+// Finishes a `Schema` message over a vector of field tables and an optional
+// (nonzero) vector of key-value tables. `arrow-ipc` builds the fields, their
+// vector, the key-value tables and then their vector, in that order.
+pub fn schema_message(inout fb: Fb, fields: u64, metadata: u64) {
+    let s = fb.start_table();
+    // Schema: fields 6, custom_metadata 8.
+    fb.add_offset(6, fields);
+    if metadata != 0 {
+        fb.add_offset(8, metadata);
+    }
+    let schema = fb.end_table(s);
+    message(inout fb, HEADER_SCHEMA, 0, schema);
+}
+
+// Finishes a `RecordBatch` message: `nodes` and `buffers` are (length,
+// null count) and (offset, length) word pairs.
+pub fn batch_message(
+    inout fb: Fb,
+    rows: u64,
+    in nodes: ChunkSeq[u64],
+    in buffers: ChunkSeq[u64],
+    body: u64
+) {
+    let b = fb.create_pairs(in buffers);
+    let n = fb.create_pairs(in nodes);
+    let t = fb.start_table();
+    // RecordBatch: length 4, nodes 6, buffers 8.
+    fb.add_scalar(4, rows, 8, 0);
+    fb.add_offset(6, n);
+    fb.add_offset(8, b);
+    let batch = fb.end_table(t);
+    message(inout fb, HEADER_RECORD_BATCH, body, batch);
+}
+
+fn message(inout fb: Fb, header_type: u64, body: u64, header: u64) {
+    let t = fb.start_table();
+    // Message: version 4, header_type 6, header 8, bodyLength 10.
+    fb.add_scalar(4, VERSION_V5, 2, 0);
+    fb.add_scalar(6, header_type, 1, 0);
+    fb.add_scalar(10, body, 8, 0);
+    fb.add_offset(8, header);
+    let root = fb.end_table(t);
+    fb.finish(root);
+}
+
+// Bytes of a framed message whose metadata is `meta` bytes, before its body.
+pub fn framed_len(meta: u64, align: u64) -> u64 {
+    let n = wrapping_add(meta, 8);
+    wrapping_add(n, padding(n, align))
+}
+
+// Writes the framed metadata of `fb` at `at`; returns the end.
+pub fn write_framed(in fb: Fb, align: u64, inout out: Slice[u8], at: u64) -> u64 {
+    let meta = wrapping_sub(fb.end(), fb.start());
+    let total = framed_len(meta, align);
+    out.try_write_u32_le(at, wrapping_u32(CONTINUATION));
+    out.try_write_u32_le(wrapping_add(at, 4), wrapping_u32(wrapping_sub(total, 8)));
+    fb.copy_to(inout out, wrapping_add(at, 8));
+    let pad_at = wrapping_add(wrapping_add(at, 8), meta);
+    let end = wrapping_add(at, total);
+    out.try_fill(pad_at, end, 0);
+    end
+}
+
+// The end-of-stream marker: a continuation and a zero length.
+pub fn write_eos(inout out: Slice[u8], at: u64) -> u64 {
+    out.try_write_u32_le(at, wrapping_u32(CONTINUATION));
+    out.try_write_u32_le(wrapping_add(at, 4), 0);
+    wrapping_add(at, 8)
+}

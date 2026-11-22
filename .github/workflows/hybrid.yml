@@ -43,9 +43,12 @@ on:
 permissions:
   contents: read
 
+# Main runs are not cancelled by the next merge (#1479): pull requests do not
+# run this workflow, so a main run must finish to catch a regression. GitHub
+# keeps only the newest waiting push behind the running one.
 concurrency:
   group: hybrid-${{ github.event_name == 'push' && 'main' || github.run_id }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 env:
   CARGO_PROFILE_DEV_DEBUG: 0

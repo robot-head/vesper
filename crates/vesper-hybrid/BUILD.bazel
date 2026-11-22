@@ -125,6 +125,12 @@ vesper_hybrid(
             "//:front_package",
             "//:std_intern_package",
         ],
+        # The wasm backend swap (#1289) builds on the Place IR data.
+        "hybrid_wasm_backend": [
+            "//:check_data_package",
+            "//:place_ir_package",
+            "//:wasm_backend_package",
+        ],
         # Test discovery (#1337) builds on @vesper/test-runner.
         "hybrid_test_runner": [
             "//:front_package",
@@ -142,6 +148,7 @@ vesper_hybrid(
         "hybrid_ir_opt": "modules/ir_opt",
         "hybrid_layout": "modules/layout",
         "hybrid_parse": "modules/parse",
+        "hybrid_wasm_backend": "modules/wasm_backend",
         "hybrid_test_runner": "modules/test_runner",
         "hybrid_place_ir": "modules/place_ir",
         "hybrid_stack_bound": "modules/stack_bound",

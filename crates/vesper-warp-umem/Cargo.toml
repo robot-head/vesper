@@ -5,14 +5,24 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Vesper Warp linear UMEM frames, AF_XDP four-ring model, software NIC and conservation auditor (design section 35)"
 publish = false
+build = "build.rs"
 
 [features]
 default = []
 # Real Linux AF_XDP backend (one audited unsafe module, Linux only).
 af-xdp = ["dep:libc"]
+# Forward the public API to the Vesper build of the port in vesper/src/
+# (SH6 lane 14, #1409). The AF_XDP backend stays Rust-only until its port.
+vesper-port = ["dep:vesper-port-abi", "dep:vesper-port-harness"]
+# A deliberately wrong Vesper build: the port test run must fail.
+vesper-port-divergent = ["vesper-port"]
 
 [dependencies]
 vesper-ffi = { path = "../vesper-ffi" }
+vesper-port-abi = { path = "../vesper-port-abi", optional = true }
+
+[build-dependencies]
+vesper-port-harness = { path = "../vesper-port-harness", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = { version = "0.2", optional = true }
@@ -21,6 +31,7 @@ libc = { version = "0.2", optional = true }
 # pass features); its tests probe the host and report "unavailable" when the
 # kernel or privileges refuse AF_XDP.
 [dev-dependencies]
+vesper-bench = { path = "../vesper-bench" }
 vesper-warp-umem = { path = ".", features = ["af-xdp"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
