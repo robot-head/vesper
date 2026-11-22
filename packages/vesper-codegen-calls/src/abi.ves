@@ -264,18 +264,12 @@ fn register_result_words(
         return NONE32;
     }
     let info = d.fn_info(f.f);
-    if !l
-        .aggregate
-        || l
-        .size
-        == 0
-        || l
-        .size
-        > 16
+    if !l.aggregate
+        || l.size == 0
+        || l.size > 16
         || contains_function(inout t, in wd, f.result)
         || uses_caller_slot(in d, info)
-        || info
-        .fip {
+        || info.fip {
         return 0;
     }
     wrapping_add(l.size, 7) / 8
@@ -358,9 +352,9 @@ pub fn check_entry(
         err
             .text
             .extend(
-            in "native entry cannot expose specialized closure values; invoke them within the entry function"
-                .as_bytes()
-        );
+                in "native entry cannot expose specialized closure values; invoke them within the entry function"
+                    .as_bytes()
+            );
         return false;
     }
     true

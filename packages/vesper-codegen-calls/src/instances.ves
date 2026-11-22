@@ -135,38 +135,17 @@ impl Syms {
 
     // `numeric::is_integer_name`.
     pub fn is_integer(self, s: u32) -> bool {
-        s
-            == self
-            .u8_
-            || s
-            == self
-            .u16_
-            || s
-            == self
-            .u32_
-            || s
-            == self
-            .u64_
-            || s
-            == self
-            .usize_
-            || s
-            == self
-            .i8_
-            || s
-            == self
-            .i16_
-            || s
-            == self
-            .i32_
-            || s
-            == self
-            .i64_
-            || s
-            == self
-            .isize_
-            || self
-            .is_wide(s)
+        s == self.u8_
+            || s == self.u16_
+            || s == self.u32_
+            || s == self.u64_
+            || s == self.usize_
+            || s == self.i8_
+            || s == self.i16_
+            || s == self.i32_
+            || s == self.i64_
+            || s == self.isize_
+            || self.is_wide(s)
     }
 
     pub fn is_float(self, s: u32) -> bool {
@@ -175,38 +154,20 @@ impl Syms {
 
     // `numeric::is_scalar_name`.
     pub fn is_scalar(self, s: u32) -> bool {
-        self
-            .is_integer(s)
-            || self
-            .is_float(s)
-            || s
-            == self
-            .bool_
-            || s
-            == self
-            .unit
-            || s
-            == self
-            .never
+        self.is_integer(s)
+            || self.is_float(s)
+            || s == self.bool_
+            || s == self.unit
+            || s == self.never
     }
 
     // `capability_effects::is_capability_effect`.
     pub fn is_capability(self, s: u32) -> bool {
-        s
-            == self
-            .const_time
-            || s
-            == self
-            .realtime
-            || s
-            == self
-            .det_float
-            || s
-            == self
-            .const_denorm
-            || s
-            == self
-            .isa
+        s == self.const_time
+            || s == self.realtime
+            || s == self.det_float
+            || s == self.const_denorm
+            || s == self.isa
     }
 }
 
@@ -443,12 +404,12 @@ pub fn concrete(inout t: Types, inout names: Names, in d: Calls, name: u32, in v
             let pt = substitute(inout t, p.ty, in v);
             params
                 .push(
-                ParamInfo {
-                    name: p.name,
-                    pass: p.pass,
-                    ty: pt
-                }
-            );
+                    ParamInfo {
+                        name: p.name,
+                        pass: p.pass,
+                        ty: pt
+                    }
+                );
         }
     }
     let result = substitute(inout t, f.result, in v);
@@ -577,8 +538,10 @@ pub fn fail_only(inout t: Types, in names: Names, in wd: World, k: Syms, in f: C
         }
         let ok = (e.name == k.fail && e.label == 0 && e.n == 1)
             || (
-            (k.is_capability(e.name) || is_foreign(in names, e.name)) && e.label == 0 && e.n == 0
-        );
+                (k.is_capability(e.name) || is_foreign(in names, e.name))
+                    && e.label == 0
+                    && e.n == 0
+            );
         if !ok {
             return false;
         }
@@ -607,9 +570,7 @@ pub fn specialized(inout t: Types, in names: Names, in wd: World, k: Syms, in f:
     let r = t.row(f.row);
     (
         !capability_only(in t, in names, k, f.row)
-            || r
-            .tail
-            != 0
+            || r.tail != 0
             || contains_function(inout t, in wd, f.result)
             || any_param_contains_function(inout t, in wd, in f.params)
     )
@@ -852,12 +813,12 @@ pub fn program_facts(in names: Names, in d: Calls, in p: Program) -> ProgramFact
                         facts
                             .refs
                             .push(
-                            Ref {
-                                s0: inst.s0,
-                                s1: inst.s1,
-                                sym: root
-                            }
-                        );
+                                Ref {
+                                    s0: inst.s0,
+                                    s1: inst.s1,
+                                    sym: root
+                                }
+                            );
                     }
                 } else if inst.op == OP_CALL {
                     let callee = n32(p.op(inst.a));
@@ -1316,13 +1277,13 @@ pub fn discover(
             found
                 .insts
                 .push(
-                Inst {
-                    key: key,
-                    name: name,
-                    a: n32(found.keys.len()),
-                    n: n32(vars.len())
-                }
-            );
+                    Inst {
+                        key: key,
+                        name: name,
+                        a: n32(found.keys.len()),
+                        n: n32(vars.len())
+                    }
+                );
             for i in 0..vars.len() {
                 found.keys.push(vars.key(i));
                 found.tys.push(vars.ty(i));

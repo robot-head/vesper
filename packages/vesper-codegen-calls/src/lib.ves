@@ -99,23 +99,20 @@ pub fn codegen_calls_text(in input: Str) -> ChunkSeq[u64] {
             text: ChunkSeq::new[u8]()
         };
         let ok = check_entry(inout c.types, in c.names, in c.world, in d, task.entry, inout err)
-            && found
-            .err
-            .len()
-            == 0
+            && found.err.len() == 0
             && declare(
-            inout ls,
-            inout c.types,
-            inout c.names,
-            in c.world,
-            in d,
-            k,
-            in found,
-            task.entry,
-            task.optimize,
-            inout o,
-            inout err
-        );
+                inout ls,
+                inout c.types,
+                inout c.names,
+                in c.world,
+                in d,
+                k,
+                in found,
+                task.entry,
+                task.optimize,
+                inout o,
+                inout err
+            );
         if !ok {
             o.extend(in "X ".as_bytes());
             if err.failed() {

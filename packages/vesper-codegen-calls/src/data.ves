@@ -358,12 +358,12 @@ pub fn read_calls(inout r: Reader, in b: Slice[u8], in c: Ctx) -> Calls {
             d
                 .params
                 .push(
-                ParamInfo {
-                    name: pname,
-                    pass: pass,
-                    ty: pty
-                }
-            );
+                    ParamInfo {
+                        name: pname,
+                        pass: pass,
+                        ty: pty
+                    }
+                );
         }
         let result = ty(in c, r.word(in b));
         let row_ty = ty(in c, r.word(in b));
@@ -378,20 +378,20 @@ pub fn read_calls(inout r: Reader, in b: Slice[u8], in c: Ctx) -> Calls {
         d
             .fns
             .push(
-            FnInfo {
-                name: name,
-                fip: fip,
-                s0: s0,
-                s1: s1,
-                ga: ga,
-                gn: n32(ng),
-                pa: pa,
-                pn: n32(np),
-                result: result,
-                row: row,
-                body: root
-            }
-        );
+                FnInfo {
+                    name: name,
+                    fip: fip,
+                    s0: s0,
+                    s1: s1,
+                    ga: ga,
+                    gn: n32(ng),
+                    pa: pa,
+                    pn: n32(np),
+                    result: result,
+                    row: row,
+                    body: root
+                }
+            );
     }
     let ne = r.word(in b);
     for i in 0..ne {
@@ -409,15 +409,15 @@ pub fn read_calls(inout r: Reader, in b: Slice[u8], in c: Ctx) -> Calls {
         d
             .exprs
             .push(
-            ExprNode {
-                kind: kind,
-                s0: s0,
-                s1: s1,
-                sym: s,
-                children: children,
-                size: size
-            }
-        );
+                ExprNode {
+                    kind: kind,
+                    s0: s0,
+                    s1: s1,
+                    sym: s,
+                    children: children,
+                    size: size
+                }
+            );
     }
     let nc = r.word(in b);
     for i in 0..nc {
@@ -428,14 +428,14 @@ pub fn read_calls(inout r: Reader, in b: Slice[u8], in c: Ctx) -> Calls {
         d
             .calls
             .push(
-            VarsRow {
-                s0: s0,
-                s1: s1,
-                name: 0,
-                a: a,
-                n: n32(k)
-            }
-        );
+                VarsRow {
+                    s0: s0,
+                    s1: s1,
+                    name: 0,
+                    a: a,
+                    n: n32(k)
+                }
+            );
     }
     let nd = r.word(in b);
     for i in 0..nd {
@@ -446,14 +446,14 @@ pub fn read_calls(inout r: Reader, in b: Slice[u8], in c: Ctx) -> Calls {
         d
             .dyn_params
             .push(
-            VarsRow {
-                s0: 0,
-                s1: 0,
-                name: f,
-                a: a,
-                n: n32(k)
-            }
-        );
+                VarsRow {
+                    s0: 0,
+                    s1: 0,
+                    name: f,
+                    a: a,
+                    n: n32(k)
+                }
+            );
     }
     read_names_into(inout r, in b, in c, inout d.stubs);
     let nv = r.word(in b);
@@ -469,25 +469,25 @@ pub fn read_calls(inout r: Reader, in b: Slice[u8], in c: Ctx) -> Calls {
             d
                 .methods
                 .push(
-                VarsRow {
-                    s0: 0,
-                    s1: 0,
-                    name: method,
-                    a: a,
-                    n: n32(k)
-                }
-            );
+                    VarsRow {
+                        s0: 0,
+                        s1: 0,
+                        name: method,
+                        a: a,
+                        n: n32(k)
+                    }
+                );
         }
         d
             .vtables
             .push(
-            VTableRow {
-                object: object,
-                self_ty: self_ty,
-                ma: ma,
-                mn: n32(m)
-            }
-        );
+                VTableRow {
+                    object: object,
+                    self_ty: self_ty,
+                    ma: ma,
+                    mn: n32(m)
+                }
+            );
     }
     read_names_into(inout r, in b, in c, inout d.caller_slot);
     let nt = r.word(in b);
@@ -497,11 +497,11 @@ pub fn read_calls(inout r: Reader, in b: Slice[u8], in c: Ctx) -> Calls {
         d
             .tasks
             .push(
-            Task {
-                entry: entry,
-                optimize: optimize
-            }
-        );
+                Task {
+                    entry: entry,
+                    optimize: optimize
+                }
+            );
     }
     d
 }
