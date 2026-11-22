@@ -37,16 +37,23 @@ impl std::fmt::Display for MemError {
 }
 impl std::error::Error for MemError {}
 
-#[derive(Clone, Debug)]
+/// One region: its guest address, and where its bytes sit in `bytes`.
+#[derive(Clone, Copy, Debug)]
 struct Region {
     gpa: u64,
-    bytes: Vec<u8>,
+    offset: usize,
+    len: usize,
 }
 
-/// Guest RAM: sorted, page-aligned, non-overlapping regions.
+/// Guest RAM: sorted, page-aligned, non-overlapping regions, stored one
+/// after another in a single host buffer (so the Vesper device code can
+/// take all of guest RAM as one slice).
 #[derive(Clone, Debug)]
 pub struct GuestMemory {
     regions: Vec<Region>,
+    bytes: Vec<u8>,
+    /// `regions` as `(gpa, offset, len)` words for the Vesper port.
+    table: Vec<u64>,
 }
 
 impl GuestMemory {
@@ -79,31 +86,44 @@ impl GuestMemory {
                 return Err(MemError::TooLarge);
             }
             prev_end = end;
+            let offset = regions.last().map_or(0, |r: &Region| r.offset + r.len);
             regions.push(Region {
                 gpa,
-                bytes: vec![0; usize::try_from(len).map_err(|_| MemError::TooLarge)?],
+                offset,
+                len: usize::try_from(len).map_err(|_| MemError::TooLarge)?,
             });
         }
-        Ok(Self { regions })
+        let total = regions.last().map_or(0, |r| r.offset + r.len);
+        Ok(Self {
+            table: regions
+                .iter()
+                .flat_map(|r| [r.gpa, r.offset as u64, r.len as u64])
+                .collect(),
+            regions,
+            bytes: vec![0; total],
+        })
     }
 
     /// `(gpa, len)` of every region, ascending.
     pub fn layout(&self) -> Vec<(u64, u64)> {
-        self.regions
-            .iter()
-            .map(|r| (r.gpa, r.bytes.len() as u64))
-            .collect()
+        self.regions.iter().map(|r| (r.gpa, r.len as u64)).collect()
     }
 
     /// The layout as `(gpa, len)` word pairs in `out`, without allocating;
     /// returns the number of words written.
-    #[cfg(feature = "vesper-port")]
+    #[cfg_attr(not(feature = "vesper-port"), allow(dead_code))]
     pub(crate) fn layout_words(&self, out: &mut [u64; 2 * MAX_GUEST_REGIONS]) -> usize {
         for (i, r) in self.regions.iter().enumerate() {
             out[2 * i] = r.gpa;
-            out[2 * i + 1] = r.bytes.len() as u64;
+            out[2 * i + 1] = r.len as u64;
         }
         2 * self.regions.len()
+    }
+
+    /// All of guest RAM as one slice, with its `(gpa, offset, len)` region
+    /// words, for the Vesper device code.
+    pub(crate) fn port_view(&self) -> (&[u8], &[u64]) {
+        (&self.bytes, &self.table)
     }
 
     /// Read-write device authorizations covering exactly the guest RAM.
@@ -118,13 +138,15 @@ impl GuestMemory {
             .collect()
     }
 
-    fn locate(&self, gpa: u64, len: u64) -> Result<(usize, usize), MemError> {
+    /// The offset in `bytes` of `[gpa, gpa + len)`, which must lie inside
+    /// one region.
+    fn locate(&self, gpa: u64, len: u64) -> Result<usize, MemError> {
         let oob = MemError::OutOfBounds { gpa, len };
         let end = gpa.checked_add(len).ok_or(oob)?;
-        for (i, r) in self.regions.iter().enumerate() {
-            let r_end = r.gpa + r.bytes.len() as u64;
+        for r in &self.regions {
+            let r_end = r.gpa + r.len as u64;
             if r.gpa <= gpa && end <= r_end {
-                return Ok((i, usize::try_from(gpa - r.gpa).map_err(|_| oob)?));
+                return Ok(r.offset + usize::try_from(gpa - r.gpa).map_err(|_| oob)?);
             }
         }
         Err(oob)
@@ -136,22 +158,22 @@ impl GuestMemory {
     }
 
     pub fn read(&self, gpa: u64, out: &mut [u8]) -> Result<(), MemError> {
-        let (i, off) = self.locate(gpa, out.len() as u64)?;
-        out.copy_from_slice(&self.regions[i].bytes[off..off + out.len()]);
+        let off = self.locate(gpa, out.len() as u64)?;
+        out.copy_from_slice(&self.bytes[off..off + out.len()]);
         Ok(())
     }
 
     pub fn write(&mut self, gpa: u64, bytes: &[u8]) -> Result<(), MemError> {
-        let (i, off) = self.locate(gpa, bytes.len() as u64)?;
-        self.regions[i].bytes[off..off + bytes.len()].copy_from_slice(bytes);
+        let off = self.locate(gpa, bytes.len() as u64)?;
+        self.bytes[off..off + bytes.len()].copy_from_slice(bytes);
         Ok(())
     }
 
     /// Zero-fills `[gpa, gpa + len)`.
     pub fn fill_zero(&mut self, gpa: u64, len: u64) -> Result<(), MemError> {
-        let (i, off) = self.locate(gpa, len)?;
+        let off = self.locate(gpa, len)?;
         let n = usize::try_from(len).map_err(|_| MemError::TooLarge)?;
-        self.regions[i].bytes[off..off + n].fill(0);
+        self.bytes[off..off + n].fill(0);
         Ok(())
     }
 
@@ -173,6 +195,8 @@ impl GuestMemory {
 
     /// Borrow of one whole region's bytes, for copying into a real mapping.
     pub fn region_bytes(&self, index: usize) -> Option<(u64, &[u8])> {
-        self.regions.get(index).map(|r| (r.gpa, r.bytes.as_slice()))
+        self.regions
+            .get(index)
+            .map(|r| (r.gpa, &self.bytes[r.offset..r.offset + r.len]))
     }
 }

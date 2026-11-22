@@ -1,0 +1,591 @@
+// ---------------------------------------------------------------------------
+// The virtqueue engine's chain walks (src/devices/queue.rs,
+// `VirtQueue::capture`): split and packed rings over guest RAM, with
+// indirect tables.
+//
+// Guest RAM is one slice, `mem`, with a region table of
+// `(gpa, offset, len)` words (GuestMemory's layout). Rust keeps the queue
+// state and commits the walked chain; these functions read the rings and
+// validate the whole chain first, changing nothing.
+
+const VQ_FLAG_NEXT: u64 = 1;
+const VQ_FLAG_WRITE: u64 = 2;
+const VQ_FLAG_INDIRECT: u64 = 4;
+const VQ_FLAG_AVAIL: u64 = 128;
+const VQ_FLAG_USED: u64 = 32768;
+// Words of `out` before the buffers.
+const VQ_HEADER: u64 = 8;
+
+// The `QueueError`s the walks raise.
+copy enum VqFault {
+    Limit,
+    Overflow,
+    Full,
+    IncompleteChain,
+    UnsupportedFlags,
+    EmptyBuffer,
+    ReadAfterWrite,
+    UnauthorizedRange,
+    InvalidBufferId,
+    BufferIdInUse,
+    IndirectNotNegotiated,
+    IndirectPlacement,
+    IndirectNested,
+    IndirectTableLength,
+    AvailOverrun,
+    InvalidNext,
+    ChainLoop,
+    DescriptorInUse
+}
+
+// The offset in `mem` of `[gpa, gpa + len)`, which must lie inside one
+// region (`GuestMemory::locate`).
+fn vq_locate(in regions: Slice[u64], gpa: u64, len: u64) -> Option[u64] {
+    if add_overflows(gpa, len) {
+        return Option::None;
+    }
+    let end = wrapping_add(gpa, len);
+    let n = regions.len() / 3;
+    for i in 0..n {
+        let base = wrapping_mul(i, 3);
+        let r0 = word(in regions, base);
+        let rl = word(in regions, wrapping_add(base, 2));
+        if r0 <= gpa && end <= wrapping_add(r0, rl) {
+            return Option::Some(
+                wrapping_add(word(in regions, wrapping_add(base, 1)), wrapping_sub(gpa, r0))
+            );
+        }
+    }
+    Option::None
+}
+
+fn vq_u16(in mem: Slice[u8], in regions: Slice[u64], gpa: u64) -> Option[u64] {
+    match vq_locate(in regions, gpa, 2) {
+        Option::Some(off) => match mem.try_read_u16_le(off) {
+            Option::Some(v) => Option::Some(widen_u64(v)),
+            Option::None => Option::None,
+        },
+        Option::None => Option::None,
+    }
+}
+
+fn byte_at(in s: Slice[u8], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => widen_u64(v),
+        Option::None => 0,
+    }
+}
+
+// `ChainBuilder::push`'s checks of one buffer against the running totals
+// of the chain (`count` buffers, `total` bytes, `saw` whether a writable
+// buffer came already). Returns 0 when it fits, else a `vq_fault` code.
+fn vq_check(
+    in regions: Slice[u64],
+    max_desc: u64,
+    max_bytes: u64,
+    gpa: u64,
+    len: u64,
+    writable: bool,
+    count: u64,
+    total: u64,
+    saw: bool
+) -> u64 {
+    if count >= max_desc {
+        return 1;
+    }
+    if len == 0 {
+        return 2;
+    }
+    if add_overflows(gpa, len) {
+        return 3;
+    }
+    if saw && !writable {
+        return 4;
+    }
+    match vq_locate(in regions, gpa, len) {
+        Option::Some(_) => {},
+        Option::None => {
+            return 5;
+        },
+    }
+    if add_overflows(total, len) {
+        return 3;
+    }
+    if wrapping_add(total, len) > max_bytes {
+        return 1;
+    }
+    0
+}
+
+fn vq_fault(code: u64) -> VqFault {
+    if code == 1 {
+        VqFault::Limit
+    } else if code == 2 {
+        VqFault::EmptyBuffer
+    } else if code == 3 {
+        VqFault::Overflow
+    } else if code == 4 {
+        VqFault::ReadAfterWrite
+    } else {
+        VqFault::UnauthorizedRange
+    }
+}
+
+// Stores buffer `count` in `out` as four words from word 8: `gpa`, `len`,
+// `writable`, `tag`.
+fn vq_store(inout out: Slice[u64], count: u64, gpa: u64, len: u64, writable: bool, tag: u64) {
+    let at = wrapping_add(VQ_HEADER, wrapping_mul(count, 4));
+    out.try_set(at, gpa);
+    out.try_set(wrapping_add(at, 1), len);
+    out
+        .try_set(
+            wrapping_add(at, 2),
+            if writable {
+                1
+            } else {
+                0
+            }
+        );
+    out.try_set(wrapping_add(at, 3), tag);
+}
+
+// Stores a walked chain's totals in `out` words 2..4.
+fn vq_totals(inout out: Slice[u64], count: u64, total: u64, wlen: u64) {
+    out.try_set(2, count);
+    out.try_set(3, total);
+    out.try_set(4, wlen);
+}
+
+// One 16-byte descriptor at `off` in `mem`: address, length, and the
+// `(flags, next)` (split) or `(id, flags)` (packed) halfwords as one word.
+fn vq_desc_addr(in mem: Slice[u8], off: u64) -> u64 {
+    match mem.try_read_u64_le(off) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn vq_desc_tail(in mem: Slice[u8], off: u64) -> u64 {
+    match mem.try_read_u64_le(wrapping_add(off, 8)) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+// Reads an indirect table's placement (`read_table`): its offset in
+// `mem`, or the fault.
+fn vq_table(in regions: Slice[u64], max_desc: u64, addr: u64, len: u64) -> Result[u64, VqFault] {
+    if len == 0 || len & 15 != 0 {
+        return Result::Err(VqFault::IndirectTableLength);
+    }
+    if len / 16 > max_desc {
+        return Result::Err(VqFault::Limit);
+    }
+    match vq_locate(in regions, addr, len) {
+        Option::Some(off) => Result::Ok(off),
+        Option::None => Result::Err(VqFault::UnauthorizedRange),
+    }
+}
+
+// Whether entry `i` was already pushed from this indirect table (tags of
+// the `count` buffers so far).
+fn vq_seen(in out: Slice[u64], count: u64, i: u64) -> bool {
+    let mut k: u64 = 0;
+    loop {
+        if k >= count {
+            return false;
+        }
+        if word(in out, wrapping_add(wrapping_add(VQ_HEADER, wrapping_mul(k, 4)), 3)) == i {
+            return true;
+        }
+        k = wrapping_add(k, 1);
+    }
+}
+
+// The split walk (`capture_split`). `busy` holds `id_busy` then
+// `desc_busy`, one byte per entry. Returns 0 when nothing is available,
+// 1 when the ring holds more than the notification announced, and 2 for
+// a chain: `out` then holds `[head, indirect, buffers, total, writable,
+// 0, descriptors, 0]`, the buffers (four words each, at most
+// `max_desc`), then the descriptor indices from word `8 + 4 * max_desc`.
+pub fn vq_split_walk(
+    in mem: Slice[u8],
+    in regions: Slice[u64],
+    in busy: Slice[u8],
+    desc: u64,
+    driver: u64,
+    size: u64,
+    last_avail: u64,
+    hint: u64,
+    indirect_ok: u64,
+    max_desc: u64,
+    max_bytes: u64,
+    max_work: u64,
+    inout out: Slice[u64]
+) -> Result[u64, VqFault] {
+    for k in 0..VQ_HEADER {
+        out.try_set(k, 0);
+    }
+    let avail_idx = match vq_u16(in mem, in regions, wrapping_add(driver, 2)) {
+        Option::Some(v) => v,
+        Option::None => {
+            return Result::Err(VqFault::UnauthorizedRange);
+        },
+    };
+    let pending = wrapping_sub(avail_idx, last_avail) & 65535;
+    if pending > size {
+        return Result::Err(VqFault::AvailOverrun);
+    }
+    if pending == 0 {
+        return Result::Ok(0);
+    }
+    // `hint` is `next_idx + 1`, or 0 without a split hint.
+    if hint != 0 && wrapping_sub(hint, 1) == last_avail {
+        return Result::Ok(1);
+    }
+    // Split sizes are powers of two (RingLayout::validate).
+    let slot = last_avail & wrapping_sub(size, 1);
+    let head = match vq_u16(
+        in mem,
+        in regions,
+        wrapping_add(wrapping_add(driver, 4), wrapping_add(slot, slot))
+    ) {
+        Option::Some(v) => v,
+        Option::None => {
+            return Result::Err(VqFault::UnauthorizedRange);
+        },
+    };
+    if head >= size {
+        return Result::Err(VqFault::InvalidBufferId);
+    }
+    if byte_at(in busy, head) != 0 {
+        return Result::Err(VqFault::BufferIdInUse);
+    }
+    out.try_set(0, head);
+    let descs = wrapping_add(VQ_HEADER, wrapping_mul(max_desc, 4));
+    let mut work = max_work;
+    let mut count: u64 = 0;
+    let mut total: u64 = 0;
+    let mut wlen: u64 = 0;
+    let mut saw = false;
+    let mut n: u64 = 0;
+    let mut index = head;
+    loop {
+        if !charge(inout work) {
+            return Result::Err(VqFault::Limit);
+        }
+        if n >= size {
+            return Result::Err(VqFault::ChainLoop);
+        }
+        for k in 0..n {
+            if word(in out, wrapping_add(descs, k)) == index {
+                return Result::Err(VqFault::ChainLoop);
+            }
+        }
+        if byte_at(in busy, wrapping_add(size, index)) != 0 {
+            return Result::Err(VqFault::DescriptorInUse);
+        }
+        let off = match vq_locate(in regions, wrapping_add(desc, wrapping_mul(index, 16)), 16) {
+            Option::Some(v) => v,
+            Option::None => {
+                return Result::Err(VqFault::UnauthorizedRange);
+            },
+        };
+        let addr = vq_desc_addr(in mem, off);
+        let tail = vq_desc_tail(in mem, off);
+        let len = tail & 4294967295;
+        let flags = wrapping_shr_u64(tail, 32) & 65535;
+        let next = wrapping_shr_u64(tail, 48);
+        out.try_set(wrapping_add(descs, n), index);
+        n = wrapping_add(n, 1);
+        out.try_set(6, n);
+        if flags & (65535 ^ (VQ_FLAG_NEXT | VQ_FLAG_WRITE | VQ_FLAG_INDIRECT)) != 0 {
+            return Result::Err(VqFault::UnsupportedFlags);
+        }
+        if flags & VQ_FLAG_INDIRECT != 0 {
+            if indirect_ok == 0 {
+                return Result::Err(VqFault::IndirectNotNegotiated);
+            }
+            if index != head || flags & VQ_FLAG_NEXT != 0 {
+                return Result::Err(VqFault::IndirectPlacement);
+            }
+            out.try_set(1, 1);
+            let table = match vq_table(in regions, max_desc, addr, len) {
+                Result::Ok(v) => v,
+                Result::Err(e) => {
+                    return Result::Err(e);
+                },
+            };
+            let entries = len / 16;
+            let mut i: u64 = 0;
+            loop {
+                if !charge(inout work) {
+                    return Result::Err(VqFault::Limit);
+                }
+                if vq_seen(in out, count, i) {
+                    return Result::Err(VqFault::ChainLoop);
+                }
+                let at = wrapping_add(table, wrapping_mul(i, 16));
+                let e_addr = vq_desc_addr(in mem, at);
+                let e_tail = vq_desc_tail(in mem, at);
+                let e_flags = wrapping_shr_u64(e_tail, 32) & 65535;
+                if e_flags & VQ_FLAG_INDIRECT != 0 {
+                    return Result::Err(VqFault::IndirectNested);
+                }
+                if e_flags & (65535 ^ (VQ_FLAG_NEXT | VQ_FLAG_WRITE)) != 0 {
+                    return Result::Err(VqFault::UnsupportedFlags);
+                }
+                let b_len = e_tail & 4294967295;
+                let b_write = e_flags & VQ_FLAG_WRITE != 0;
+                let code = vq_check(
+                    in regions,
+                    max_desc,
+                    max_bytes,
+                    e_addr,
+                    b_len,
+                    b_write,
+                    count,
+                    total,
+                    saw
+                );
+                if code != 0 {
+                    return Result::Err(vq_fault(code));
+                }
+                vq_store(inout out, count, e_addr, b_len, b_write, i);
+                count = wrapping_add(count, 1);
+                total = wrapping_add(total, b_len);
+                if b_write {
+                    wlen = wrapping_add(wlen, b_len);
+                    saw = true;
+                }
+                if e_flags & VQ_FLAG_NEXT == 0 {
+                    vq_totals(inout out, count, total, wlen);
+                    return Result::Ok(2);
+                }
+                i = wrapping_shr_u64(e_tail, 48);
+                if i >= entries {
+                    return Result::Err(VqFault::InvalidNext);
+                }
+            }
+        }
+        let b_len = len;
+        let b_write = flags & VQ_FLAG_WRITE != 0;
+        let code = vq_check(
+            in regions,
+            max_desc,
+            max_bytes,
+            addr,
+            b_len,
+            b_write,
+            count,
+            total,
+            saw
+        );
+        if code != 0 {
+            return Result::Err(vq_fault(code));
+        }
+        vq_store(inout out, count, addr, b_len, b_write, index);
+        count = wrapping_add(count, 1);
+        total = wrapping_add(total, b_len);
+        if b_write {
+            wlen = wrapping_add(wlen, b_len);
+            saw = true;
+        }
+        if flags & VQ_FLAG_NEXT == 0 {
+            vq_totals(inout out, count, total, wlen);
+            return Result::Ok(2);
+        }
+        if next >= size {
+            return Result::Err(VqFault::InvalidNext);
+        }
+        index = next;
+    }
+}
+
+// The packed walk (`capture_packed`), from `(index, wrap)` with `occupied`
+// slots in use; `busy` holds `id_busy`. `hint` is
+// `1 + next_off + (next_wrap << 16)`, or 0 without a packed hint.
+// Returns 0 when nothing is available and 2 for a chain: `out` then holds
+// `[id, indirect, buffers, total, writable, 0, slots,
+// next_index | next_wrap << 16]` and the buffers.
+pub fn vq_packed_walk(
+    in mem: Slice[u8],
+    in regions: Slice[u64],
+    in busy: Slice[u8],
+    desc: u64,
+    size: u64,
+    index: u64,
+    wrap: u64,
+    occupied: u64,
+    hint: u64,
+    indirect_ok: u64,
+    max_desc: u64,
+    max_bytes: u64,
+    max_work: u64,
+    inout out: Slice[u64]
+) -> Result[u64, VqFault] {
+    for k in 0..VQ_HEADER {
+        out.try_set(k, 0);
+    }
+    if hint != 0 && wrapping_sub(hint, 1) == (index | wrapping_mul(wrap, 65536)) {
+        return Result::Ok(0);
+    }
+    if occupied == size {
+        return Result::Ok(0);
+    }
+    let mut work = max_work;
+    let mut count: u64 = 0;
+    let mut total: u64 = 0;
+    let mut wlen: u64 = 0;
+    let mut saw = false;
+    let mut ci = index;
+    let mut cw = wrap != 0;
+    let mut slots: u64 = 0;
+    let mut id: u64 = 0;
+    loop {
+        if !charge(inout work) {
+            return Result::Err(VqFault::Limit);
+        }
+        if wrapping_add(occupied, slots) >= size {
+            if slots == 0 {
+                return Result::Err(VqFault::Full);
+            }
+            return Result::Err(VqFault::IncompleteChain);
+        }
+        let off = match vq_locate(in regions, wrapping_add(desc, wrapping_mul(ci, 16)), 16) {
+            Option::Some(v) => v,
+            Option::None => {
+                return Result::Err(VqFault::UnauthorizedRange);
+            },
+        };
+        let addr = vq_desc_addr(in mem, off);
+        let tail = vq_desc_tail(in mem, off);
+        let len = tail & 4294967295;
+        let tag = wrapping_shr_u64(tail, 32) & 65535;
+        let flags = wrapping_shr_u64(tail, 48);
+        let avail = (flags & VQ_FLAG_AVAIL != 0) == cw;
+        let used = (flags & VQ_FLAG_USED != 0) == cw;
+        if used || !avail {
+            if slots == 0 {
+                return Result::Ok(0);
+            }
+            return Result::Err(VqFault::IncompleteChain);
+        }
+        if flags
+            & (
+                65535
+                    ^ (
+                        VQ_FLAG_NEXT | VQ_FLAG_WRITE | VQ_FLAG_INDIRECT | VQ_FLAG_AVAIL | VQ_FLAG_USED
+                    )
+            )
+            != 0 {
+            return Result::Err(VqFault::UnsupportedFlags);
+        }
+        slots = wrapping_add(slots, 1);
+        let next = wrapping_add(ci, 1);
+        if next >= size {
+            ci = wrapping_sub(next, size);
+            cw = !cw;
+        } else {
+            ci = next;
+        }
+        if flags & VQ_FLAG_INDIRECT != 0 {
+            if indirect_ok == 0 {
+                return Result::Err(VqFault::IndirectNotNegotiated);
+            }
+            if slots != 1 || flags & VQ_FLAG_NEXT != 0 {
+                return Result::Err(VqFault::IndirectPlacement);
+            }
+            out.try_set(1, 1);
+            let table = match vq_table(in regions, max_desc, addr, len) {
+                Result::Ok(v) => v,
+                Result::Err(e) => {
+                    return Result::Err(e);
+                },
+            };
+            for i in 0..len / 16 {
+                if !charge(inout work) {
+                    return Result::Err(VqFault::Limit);
+                }
+                let at = wrapping_add(table, wrapping_mul(i, 16));
+                let e_addr = vq_desc_addr(in mem, at);
+                let e_tail = vq_desc_tail(in mem, at);
+                let e_flags = wrapping_shr_u64(e_tail, 48);
+                if e_flags & VQ_FLAG_INDIRECT != 0 {
+                    return Result::Err(VqFault::IndirectNested);
+                }
+                if e_flags & (65535 ^ (VQ_FLAG_WRITE | VQ_FLAG_NEXT)) != 0 {
+                    return Result::Err(VqFault::UnsupportedFlags);
+                }
+                let b_len = e_tail & 4294967295;
+                let b_write = e_flags & VQ_FLAG_WRITE != 0;
+                let code = vq_check(
+                    in regions,
+                    max_desc,
+                    max_bytes,
+                    e_addr,
+                    b_len,
+                    b_write,
+                    count,
+                    total,
+                    saw
+                );
+                if code != 0 {
+                    return Result::Err(vq_fault(code));
+                }
+                vq_store(inout out, count, e_addr, b_len, b_write, i);
+                count = wrapping_add(count, 1);
+                total = wrapping_add(total, b_len);
+                if b_write {
+                    wlen = wrapping_add(wlen, b_len);
+                    saw = true;
+                }
+            }
+            id = tag;
+            break;
+        }
+        let b_len = len;
+        let b_write = flags & VQ_FLAG_WRITE != 0;
+        let code = vq_check(
+            in regions,
+            max_desc,
+            max_bytes,
+            addr,
+            b_len,
+            b_write,
+            count,
+            total,
+            saw
+        );
+        if code != 0 {
+            return Result::Err(vq_fault(code));
+        }
+        vq_store(inout out, count, addr, b_len, b_write, 0);
+        count = wrapping_add(count, 1);
+        total = wrapping_add(total, b_len);
+        if b_write {
+            wlen = wrapping_add(wlen, b_len);
+            saw = true;
+        }
+        if flags & VQ_FLAG_NEXT == 0 {
+            id = tag;
+            break;
+        }
+    }
+    if id >= size {
+        return Result::Err(VqFault::InvalidBufferId);
+    }
+    if byte_at(in busy, id) != 0 {
+        return Result::Err(VqFault::BufferIdInUse);
+    }
+    out.try_set(0, id);
+    vq_totals(inout out, count, total, wlen);
+    out.try_set(6, slots);
+    let wrap_bit: u64 = if cw {
+        65536
+    } else {
+        0
+    };
+    out.try_set(7, ci | wrap_bit);
+    Result::Ok(2)
+}

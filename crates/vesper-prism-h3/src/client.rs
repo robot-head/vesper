@@ -549,7 +549,7 @@ impl ClientConnection {
                 return Err(ConnectionError::StreamCreation { stream_id: id });
             }
         }
-        self.core.read_uni(t, false)?;
+        self.core.read_uni(t)?;
         self.read_sniffed(t)?;
         // A server may lower its cutoff in later GOAWAY frames; each
         // decrease rejects the requests it newly excludes.

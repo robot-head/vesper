@@ -212,6 +212,7 @@ fn priority_update_overrides_the_header() {
 fn bad_priority_updates_are_connection_errors() {
     // A server-initiated or unidirectional element ID: H3_ID_ERROR.
     for (push, id, err) in [
+        (false, 1, ConnectionError::BadStreamId(1)),
         (false, 3, ConnectionError::BadStreamId(3)),
         (false, 2, ConnectionError::BadStreamId(2)),
         // Push is never enabled.
