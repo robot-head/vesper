@@ -165,6 +165,15 @@ pub(super) fn diagnostic_parts_bounded(
     source: &str,
     limits: AnalysisLimits,
 ) -> Result<(), AnalysisFailure> {
+    diagnostic_parts_with_origins(parts, source, limits, &[])
+}
+
+fn diagnostic_parts_with_origins(
+    parts: &[&[Diagnostic]],
+    source: &str,
+    limits: AnalysisLimits,
+    origins: &[SugarEffectRegion],
+) -> Result<(), AnalysisFailure> {
     let count = parts
         .iter()
         .try_fold(0usize, |n, part| n.checked_add(part.len()))
@@ -198,7 +207,18 @@ pub(super) fn diagnostic_parts_bounded(
         )?;
         charge_diagnostic_bytes(&mut bytes, d.code.len(), limits.max_diagnostic_bytes)?;
         charge_diagnostic_bytes(&mut bytes, d.message.len(), limits.max_diagnostic_bytes)?;
-        diagnostic_span_bounded(&d.span, source)?;
+        // Sugar authority errors point into the original use and definition
+        // documents. Their spans must be the ones recorded by the expander.
+        let sugar = matches!(d.code.as_str(), "E0143" | "E0144")
+            .then(|| {
+                origins.iter().find(|region| {
+                    region.call == d.span && d.related.iter().all(|label| label.span == region.rule)
+                })
+            })
+            .flatten();
+        if sugar.is_none() {
+            diagnostic_span_bounded(&d.span, source)?;
+        }
         let label_bytes = d
             .related
             .len()
@@ -207,7 +227,9 @@ pub(super) fn diagnostic_parts_bounded(
         charge_diagnostic_bytes(&mut bytes, label_bytes, limits.max_diagnostic_bytes)?;
         for label in &d.related {
             charge_diagnostic_bytes(&mut bytes, label.message.len(), limits.max_diagnostic_bytes)?;
-            diagnostic_span_bounded(&label.span, source)?;
+            if sugar.is_none() {
+                diagnostic_span_bounded(&label.span, source)?;
+            }
         }
         if let Some(help) = &d.help {
             charge_diagnostic_bytes(&mut bytes, help.len(), limits.max_diagnostic_bytes)?;
@@ -323,6 +345,14 @@ pub fn check_source(
     source: &str,
     limits: AnalysisLimits,
 ) -> Result<CheckedSource, AnalysisFailure> {
+    check_source_with_sugar(source, limits, Vec::new())
+}
+
+pub(crate) fn check_source_with_sugar(
+    source: &str,
+    limits: AnalysisLimits,
+    sugar_origins: Vec<SugarEffectRegion>,
+) -> Result<CheckedSource, AnalysisFailure> {
     limits.validate()?;
     if source.len() > limits.max_source_bytes {
         return Err(resource("analysis source byte budget exceeded"));
@@ -359,7 +389,7 @@ pub fn check_source(
     };
     vesper_doc::source_preflight_with(source, doc_limits, preflight_limits(limits))
         .map_err(guard_failure)?;
-    let parsed = parser::parse_with_limits(
+    let mut parsed = parser::parse_with_limits(
         source,
         parser::ParseLimits {
             max_source_bytes: limits.max_source_bytes,
@@ -378,12 +408,18 @@ pub fn check_source(
             diagnostics: parsed.diagnostics,
         });
     }
+    parsed.module.sugar_origins = sugar_origins;
     editor_ast_guard(&parsed.module, limits).map_err(guard_failure)?;
     super::doc::surface_expansion(&parsed.module, limits.max_type_nodes).map_err(guard_failure)?;
     let mut bytes = limits.max_metadata_bytes;
     metadata(&parsed.module, &mut bytes)?;
     let checked = check::check(&parsed.module);
-    diagnostics_bounded(&checked.diagnostics, source, limits)?;
+    diagnostic_parts_with_origins(
+        &[&checked.diagnostics],
+        source,
+        limits,
+        &parsed.module.sugar_origins,
+    )?;
     if !checked.diagnostics.is_empty() {
         return Err(AnalysisFailure::Semantic {
             diagnostics: checked.diagnostics,

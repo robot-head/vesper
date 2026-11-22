@@ -691,13 +691,13 @@ impl S {
         self
             .tns
             .push(
-            Tn {
-                kind: TK_NAMED,
-                name: name,
-                a: a,
-                n: args.len()
-            }
-        );
+                Tn {
+                    kind: TK_NAMED,
+                    name: name,
+                    a: a,
+                    n: args.len()
+                }
+            );
         t
     }
 
@@ -1054,13 +1054,13 @@ pub fn read_library(in b: Slice[u8], a: u64, e: u64, handler: u64, inout s: S) {
         s
             .enums
             .push(
-            EnumRow {
-                name: en,
-                scalar: sc,
-                v0: v0,
-                vn: nv
-            }
-        );
+                EnumRow {
+                    name: en,
+                    scalar: sc,
+                    v0: v0,
+                    vn: nv
+                }
+            );
     }
     let f0 = s.funs.len();
     let nf = r.count(in b);
@@ -1080,15 +1080,15 @@ pub fn read_library(in b: Slice[u8], a: u64, e: u64, handler: u64, inout s: S) {
         s
             .funs
             .push(
-            Fun {
-                sym: sym,
-                p0: p0,
-                pn: np,
-                result: result,
-                errno: errno,
-                lib: lib
-            }
-        );
+                Fun {
+                    sym: sym,
+                    p0: p0,
+                    pn: np,
+                    result: result,
+                    errno: errno,
+                    lib: lib
+                }
+            );
     }
     let w0 = s.wss.len();
     if peek_is(in r, in b, in "wire-structs") {
@@ -1144,14 +1144,14 @@ pub fn read_library(in b: Slice[u8], a: u64, e: u64, handler: u64, inout s: S) {
             s
                 .wss
                 .push(
-                Ws {
-                    name: wn,
-                    size: size,
-                    align: align,
-                    f0: fa,
-                    fc: nfl
-                }
-            );
+                    Ws {
+                        name: wn,
+                        size: size,
+                        align: align,
+                        f0: fa,
+                        fc: nfl
+                    }
+                );
         }
     }
     let wn = wrapping_sub(s.wss.len(), w0);
@@ -1185,12 +1185,12 @@ pub fn read_library(in b: Slice[u8], a: u64, e: u64, handler: u64, inout s: S) {
             s
                 .xts
                 .push(
-                Xt {
-                    name: xn,
-                    linear: field_is(in b, c, d, in "linear"),
-                    drop: NONE
-                }
-            );
+                    Xt {
+                        name: xn,
+                        linear: field_is(in b, c, d, in "linear"),
+                        drop: NONE
+                    }
+                );
         }
         if peek_is(in r, in b, in "drop-imports") {
             let marker2 = r.field(in b);
@@ -1207,20 +1207,20 @@ pub fn read_library(in b: Slice[u8], a: u64, e: u64, handler: u64, inout s: S) {
     s
         .libs
         .push(
-        Lib {
-            name: name,
-            handler: handler,
-            triple: triple,
-            e0: e0,
-            en: ne,
-            f0: f0,
-            fc: nf,
-            w0: w0,
-            wn: wn,
-            x0: x0,
-            xn: wrapping_sub(s.xts.len(), x0)
-        }
-    );
+            Lib {
+                name: name,
+                handler: handler,
+                triple: triple,
+                e0: e0,
+                en: ne,
+                f0: f0,
+                fc: nf,
+                w0: w0,
+                wn: wn,
+                x0: x0,
+                xn: wrapping_sub(s.xts.len(), x0)
+            }
+        );
 }
 
 // ----- the type mapping (types.rs) --------------------------------------------
@@ -1334,11 +1334,11 @@ fn struct_adt(inout s: S, lib: u64, row: u64, depth: u64) -> Gs {
         if f.kind != F_PAD {
             fields
                 .push(
-                Gf {
-                    name: f.name,
-                    ty: ty
-                }
-            );
+                    Gf {
+                        name: f.name,
+                        ty: ty
+                    }
+                );
         }
     }
     g.f0 = s.gfs.len();
@@ -1444,11 +1444,11 @@ pub fn generate(inout s: S) -> Err {
                 s
                     .ges
                     .push(
-                    Ge {
-                        name: name,
-                        row: row
-                    }
-                );
+                        Ge {
+                            name: name,
+                            row: row
+                        }
+                    );
             } else if !enum_eq(in s, s.ge(at).row, row) {
                 return duplicate(inout s, name);
             }
@@ -1458,22 +1458,19 @@ pub fn generate(inout s: S) -> Err {
         let l = s.lib(li);
         for i in 0..l.xn {
             let x = s.xt(add(l.x0, i));
-            if find_gh(in s, x.name)
-                != NONE64
-                || find_gs(in s, x.name)
-                != NONE64
-                || find_ge(in s, x.name)
-                != NONE64 {
+            if find_gh(in s, x.name) != NONE64
+                || find_gs(in s, x.name) != NONE64
+                || find_ge(in s, x.name) != NONE64 {
                 return duplicate(inout s, x.name);
             }
             s
                 .ghs
                 .push(
-                Gh {
-                    name: x.name,
-                    linear: x.linear
-                }
-            );
+                    Gh {
+                        name: x.name,
+                        linear: x.linear
+                    }
+                );
         }
     }
     for fi in 0..s.funs.len() {
@@ -1521,11 +1518,14 @@ fn pointee(inout s: S, p: Par) -> u32 {
 }
 
 fn in_place_element(p: Par) -> bool {
-    !p
-        .pstruct
+    !p.pstruct
         && (
-        p.psc == SC_U8 || p.psc == SC_U32 || p.psc == SC_U64 || p.psc == SC_I64 || p.psc == SC_USIZE
-    )
+            p.psc == SC_U8
+                || p.psc == SC_U32
+                || p.psc == SC_U64
+                || p.psc == SC_I64
+                || p.psc == SC_USIZE
+        )
 }
 
 fn handle_pass(access: u8) -> u8 {
@@ -1570,8 +1570,8 @@ pub fn compute_shape(inout s: S, fi: u64) -> Sh {
             } else {
                 s
                     .put(
-                    in "address parameters have no source carrier (source code has no raw pointers)"
-                );
+                        in "address parameters have no source carrier (source code has no raw pointers)"
+                    );
                 return shape_err(inout s, mark);
             }
         } else if p.tag == P_POINTER {
@@ -1630,8 +1630,8 @@ pub fn compute_shape(inout s: S, fi: u64) -> Sh {
     } else if v.tag == VT_ADDRESS {
         s
             .put(
-            in "ForeignVal[Ptr[..]] results have no source carrier (source code has no raw pointers)"
-        );
+                in "ForeignVal[Ptr[..]] results have no source carrier (source code has no raw pointers)"
+            );
         return shape_err(inout s, mark);
     } else if v.tag == VT_HANDLE && v.nullable {
         let t = s.ty_name(v.name);
@@ -2079,22 +2079,14 @@ pub copy struct Item {
 }
 
 fn is_reserved(in s: S, x: u32) -> bool {
-    s
-        .spells(x, in "Option".as_bytes())
-        || s
-        .spells(x, in "Result".as_bytes())
-        || s
-        .spells(x, in "RuntimeError".as_bytes())
-        || s
-        .spells(x, in "Unit".as_bytes())
-        || s
-        .spells(x, in "Never".as_bytes())
-        || s
-        .spells(x, in "String".as_bytes())
-        || s
-        .spells(x, in "ArithOverflow".as_bytes())
-        || s
-        .spells(x, in "Fail".as_bytes())
+    s.spells(x, in "Option".as_bytes())
+        || s.spells(x, in "Result".as_bytes())
+        || s.spells(x, in "RuntimeError".as_bytes())
+        || s.spells(x, in "Unit".as_bytes())
+        || s.spells(x, in "Never".as_bytes())
+        || s.spells(x, in "String".as_bytes())
+        || s.spells(x, in "ArithOverflow".as_bytes())
+        || s.spells(x, in "Fail".as_bytes())
 }
 
 fn is_library(in s: S, x: u32) -> bool {
@@ -2504,14 +2496,9 @@ pub fn op_plan(inout s: S, t: u32, eff_name: u32, op: u32) {
         let name = s.lib(li).name;
         let n = s.size(name);
         let a = s.start(eff_name);
-        if s
-            .size(eff_name)
-            == add(n, 4)
-            && s
-            .text[a..add(a, 4)]
-            .eq(in "Ffi$".as_bytes())
-            && s
-            .spells(name, in s.text[add(a, 4)..s.end(eff_name)]) {
+        if s.size(eff_name) == add(n, 4)
+            && s.text[a..add(a, 4)].eq(in "Ffi$".as_bytes())
+            && s.spells(name, in s.text[add(a, 4)..s.end(eff_name)]) {
             lib = li;
         }
     }
@@ -2717,13 +2704,13 @@ fn run(in b: Slice[u8], inout s: S) {
             }
             insts
                 .push(
-                Inst {
-                    lib: lib,
-                    sym: sym,
-                    a: a,
-                    n: n
-                }
-            );
+                    Inst {
+                        lib: lib,
+                        sym: sym,
+                        a: a,
+                        n: n
+                    }
+                );
         }
     }
     let g = generate(inout s);
@@ -2753,12 +2740,12 @@ fn run(in b: Slice[u8], inout s: S) {
             let end = r.word(in b);
             items
                 .push(
-                Item {
-                    name: name,
-                    start: start,
-                    end: end
-                }
-            );
+                    Item {
+                        name: name,
+                        start: start,
+                        end: end
+                    }
+                );
         }
         if g.msg == NONE {
             let e = check_collisions(inout s, in items);

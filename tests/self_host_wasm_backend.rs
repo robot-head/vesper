@@ -132,6 +132,43 @@ pub fn configs() -> [WasmOptions; 4] {
     ]
 }
 
+/// Rust's refusal of `loop`, `for`, `break` and `return`, which the port
+/// lowers (structured control flow over the cyclic block graph).
+fn loop_refusal(e: &WasmError) -> bool {
+    matches!(e, WasmError::Unsupported { detail, .. } if detail == vesper::loops::WASM_REFUSAL)
+}
+
+/// `main` on the evaluator: its value's display, or "trap".
+fn evaluate(world: &World) -> String {
+    let mut r = vesper::runtime::Runtime::new(world);
+    r.fuel = 10_000_000;
+    match r.run("main", vec![]) {
+        Ok(v) => v.to_string(),
+        Err(_) => "trap".into(),
+    }
+}
+
+/// A `run_main` result (`[S64(3)]`, `[Bool(true)]`, "trap") against the
+/// evaluator's display of a scalar (`3`, `true`, "trap").
+fn same_run(wasm: &str, evaluator: &str) -> bool {
+    if wasm == "trap" || evaluator == "trap" {
+        return wasm == evaluator;
+    }
+    if wasm == "[]" {
+        return evaluator == "()";
+    }
+    let inner = wasm
+        .strip_prefix('[')
+        .and_then(|w| w.strip_suffix(']'))
+        .and_then(|w| w.split_once('('))
+        .and_then(|(_, v)| v.strip_suffix(')'));
+    match inner {
+        Some(v) => v == evaluator,
+        // Not a scalar: only a trap on both sides counts as equal here.
+        None => false,
+    }
+}
+
 fn error_class(e: &WasmError) -> String {
     match e {
         WasmError::Unsupported { construct, .. } => format!("Unsupported({construct:?})"),
@@ -227,6 +264,12 @@ pub struct Tally {
     pub not_ported: usize,
     pub not_encodable: usize,
     pub ran: usize,
+    /// Programs with loops, which Rust refuses: the port compiles them
+    /// (`loops`, and `loops_ran` of them ran like the evaluator) or refuses
+    /// a later construct (`loops_refused`).
+    pub loops: usize,
+    pub loops_ran: usize,
+    pub loops_refused: usize,
     pub diffs: Vec<String>,
 }
 
@@ -249,6 +292,19 @@ pub fn differential_run(step: usize, execute: bool) -> Tally {
             let tag = format!("{} [{k}]", c.name);
             match (&rust, &port) {
                 (_, Outcome::NotPorted(_)) => t.not_ported += 1,
+                (Err(e), Outcome::Module { core, wit, .. }) if loop_refusal(e) => {
+                    t.loops += 1;
+                    if execute && k == 0 && c.world.functions["main"].params.is_empty() {
+                        let component = wrap(core.clone(), wit, o.world);
+                        let ours = run_main(&component, false);
+                        let theirs = evaluate(&c.world);
+                        if !same_run(&ours, &theirs) {
+                            t.diffs.push(format!("{tag}: run {ours} vs evaluator {theirs}"));
+                        }
+                        t.loops_ran += 1;
+                    }
+                }
+                (Err(e), Outcome::Error(..)) if loop_refusal(e) => t.loops_refused += 1,
                 (
                     Ok(a),
                     Outcome::Module {
@@ -321,8 +377,17 @@ fn step() -> usize {
 fn port_matches_rust() {
     let t = differential_run(step(), true);
     eprintln!(
-        "compared {} identical {} errors agree {} not ported {} not encodable {} ran {}",
-        t.compared, t.identical, t.errors_agree, t.not_ported, t.not_encodable, t.ran
+        "compared {} identical {} errors agree {} not ported {} not encodable {} ran {}; \
+         loops {} (ran {}, refused later {})",
+        t.compared,
+        t.identical,
+        t.errors_agree,
+        t.not_ported,
+        t.not_encodable,
+        t.ran,
+        t.loops,
+        t.loops_ran,
+        t.loops_refused
     );
     for d in t.diffs.iter().take(40) {
         eprintln!("DIFF {d}");
@@ -426,10 +491,89 @@ fn hook_artifact_matches_rust() {
                     assert_eq!(format!("{a:?}"), format!("{b:?}"), "{}", c.name);
                 }
                 (_, None) => declined += 1,
+                // Loops: Rust refuses them, the port lowers them
+                // (`loops_run_like_the_evaluator`).
+                (Err(e), Some(_)) if loop_refusal(e) => answered += 1,
                 (Err(e), Some(_)) => panic!("{}: the hook answered where Rust fails: {e}", c.name),
             }
         }
     }
     eprintln!("hook answered {answered}, declined {declined}");
     assert!(answered > 100, "the hook answered only {answered}");
+}
+
+/// Loop programs, which Rust refuses: the port's module (structured control
+/// flow over the cyclic block graph) runs under Wasmtime like the evaluator,
+/// under every option set.
+const LOOP_PROGRAMS: &[&str] = &[
+    // `loop` with a counter and `break`.
+    "fn main() -> i64 { let mut i: i64 = 0; let mut s: i64 = 0; \
+     loop { if i == 10 { break; } s = wrapping_add(s, i); i = wrapping_add(i, 1); } s }",
+    // `for` over exclusive and inclusive ranges.
+    "fn main() -> i64 { let mut s: i64 = 0; for i in 0..5 { s = wrapping_add(s, i); } \
+     for j in 1..=4 { s = wrapping_mul(s, j); } s }",
+    // Nested `for` with an inner `break`.
+    "fn tri(n: i64) -> i64 { let mut c: i64 = 0; for i in 0..n { for j in 0..n { \
+     if j > i { break; } c = wrapping_add(c, 1); } } c } fn main() -> i64 { tri(9) }",
+    // Nested `loop`s that leave with values.
+    "fn main() -> i64 { let mut a: i64 = 0; let found = loop { let inner = loop { \
+     a = wrapping_add(a, 3); if a % 7 == 0 { break a; } }; if inner > 50 { break inner; } }; \
+     wrapping_add(found, a) }",
+    // `continue` in a `for` and in a `loop`.
+    "fn main() -> i64 { let mut s: i64 = 0; for i in 0..20 { if i % 3 == 0 { continue; } \
+     s = wrapping_add(s, i); } let mut k: i64 = 0; loop { k = wrapping_add(k, 1); \
+     if k < 5 { continue; } break; } wrapping_add(s, k) }",
+    // `return` from inside a loop, not in tail position.
+    "fn find(n: i64) -> i64 { for i in 0..100 { if wrapping_mul(i, i) > n { return i; } } -1 } \
+     fn main() -> i64 { wrapping_add(find(50), find(100000)) }",
+    // Early `return` before a loop, and a `match` in the body.
+    "enum Step { Up, Down, Stay } \
+     fn step(i: i64) -> Step { if i % 3 == 0 { Step::Up } else if i % 3 == 1 { Step::Down } else { Step::Stay } } \
+     fn walk(n: i64) -> i64 { if n < 0 { return 0; } let mut x: i64 = 0; for i in 0..n { \
+     x = match step(i) { Step::Up => wrapping_add(x, 2), Step::Down => wrapping_sub(x, 1), Step::Stay => x }; } x } \
+     fn main() -> i64 { wrapping_add(walk(30), walk(-1)) }",
+    // A struct updated across iterations, and a `while`-style loop.
+    "struct P { a: i64, b: i64 } fn main() -> i64 { let mut p = P { a: 0, b: 1 }; \
+     let mut n: i64 = 0; loop { if n >= 20 { break; } let t = wrapping_add(p.a, p.b); \
+     p = P { a: p.b, b: t }; n = wrapping_add(n, 1); } p.a }",
+    // A loop whose `break` carries a bool.
+    "fn main() -> bool { let mut i: i64 = 1; loop { i = wrapping_mul(i, 2); if i > 1000 { break i % 2 == 0; } } }",
+    // Many iterations, a loop in a callee, and a loop-carried call.
+    "fn collatz(n0: i64) -> i64 { let mut n = n0; let mut k: i64 = 0; loop { if n == 1 { break; } \
+     if n % 2 == 0 { n = n / 2; } else { n = wrapping_add(wrapping_mul(n, 3), 1); } k = wrapping_add(k, 1); } k } \
+     fn main() -> i64 { let mut best: i64 = 0; for i in 1..300 { let c = collatz(i); if c > best { best = c; } } best }",
+];
+
+#[test]
+fn loops_run_like_the_evaluator() {
+    let f = package().entry("wasm_backend_compile", true);
+    let mut ran = 0;
+    for (i, src) in LOOP_PROGRAMS.iter().enumerate() {
+        let p = vesper::parser::parse(src);
+        assert!(p.diagnostics.is_empty(), "#{i}: {:?}", p.diagnostics);
+        let c = vesper::check::check(&p.module);
+        assert!(c.diagnostics.is_empty(), "#{i}: {:?}", c.diagnostics);
+        let expected = evaluate(&c.world);
+        for (k, o) in configs().iter().enumerate() {
+            let rust = wasm_backend::compile(&c.world, "main", o);
+            assert!(
+                matches!(&rust, Err(e) if loop_refusal(e)),
+                "#{i} [{k}]: Rust now accepts loops; compare byte for byte instead"
+            );
+            let program = backend_program(&c.world, o).expect("program");
+            let input = wasm_input(&c.world, &program, "main", o).expect("input");
+            let (core, wit) = match outcome(&f.words(&input)) {
+                Outcome::Module { core, wit, .. } => (core, wit),
+                o => panic!("#{i} [{k}]: the port refused {src}: {o:?}"),
+            };
+            let component = wrap(core, &wit, o.world);
+            let got = run_main(&component, false);
+            assert!(
+                same_run(&got, &expected),
+                "#{i} [{k}]: wasm {got} vs evaluator {expected}\n{src}"
+            );
+            ran += 1;
+        }
+    }
+    eprintln!("{ran} loop compilations ran like the evaluator");
 }

@@ -84,18 +84,12 @@ pub fn days_from_civil(year: u64, month: u64, day: u64) -> u64 {
 
 pub fn iso8601_utc_to_unix(in s: Slice[u8]) -> Option[u64] {
     let n = s.len();
-    if n
-        < SHORTEST
-        || byte(in s, 4)
-        != MINUS
-        || byte(in s, 7)
-        != MINUS
-        || byte(in s, 10)
-        != UPPER_T
-        || byte(in s, 13)
-        != COLON
-        || byte(in s, 16)
-        != COLON {
+    if n < SHORTEST
+        || byte(in s, 4) != MINUS
+        || byte(in s, 7) != MINUS
+        || byte(in s, 10) != UPPER_T
+        || byte(in s, 13) != COLON
+        || byte(in s, 16) != COLON {
         return Option::None;
     }
     let year = num(in s, 0, 4);
@@ -104,45 +98,30 @@ pub fn iso8601_utc_to_unix(in s: Slice[u8]) -> Option[u64] {
     let hour = num(in s, 11, 13);
     let minute = num(in s, 14, 16);
     let second = num(in s, 17, 19);
-    if year
-        == bad()
-        || month
-        == bad()
-        || day
-        == bad()
-        || hour
-        == bad()
-        || minute
-        == bad()
-        || second
-        == bad() {
+    if year == bad()
+        || month == bad()
+        || day == bad()
+        || hour == bad()
+        || minute == bad()
+        || second == bad() {
         return Option::None;
     }
     // "Z", or "." with one or more digits and then "Z".
     let ok_tail = if n == SHORTEST {
         byte(in s, 19) == UPPER_Z
     } else {
-        byte(in s, 19)
-            == DOT
-            && byte(in s, wrapping_sub(n, 1))
-            == UPPER_Z
-            && n
-            > wrapping_add(SHORTEST, 1)
+        byte(in s, 19) == DOT
+            && byte(in s, wrapping_sub(n, 1)) == UPPER_Z
+            && n > wrapping_add(SHORTEST, 1)
             && num_ok(in s, 20, wrapping_sub(n, 1))
     };
     if !ok_tail
-        || year
-        < UNIX_EPOCH_YEAR
-        || month
-        < 1
-        || month
-        > 12
-        || hour
-        > 23
-        || minute
-        > 59
-        || second
-        > 59 {
+        || year < UNIX_EPOCH_YEAR
+        || month < 1
+        || month > 12
+        || hour > 23
+        || minute > 59
+        || second > 59 {
         return Option::None;
     }
     if day == 0 || day > month_days(year, month) {

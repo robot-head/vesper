@@ -119,31 +119,14 @@ impl Gen {
     pub fn cell(in self, t: u32, in path: ChunkSeq[u8], inout o: ChunkSeq[u8]) {
         let n = self.i.node(t);
         let k = self.i.known;
-        if n
-            .kind
-            == K_SCALAR
+        if n.kind == K_SCALAR
             && (
-            n
-                .name
-                == k
-                .i64
-                || n
-                .name
-                == k
-                .u64
-                || n
-                .name
-                == k
-                .isize
-                || n
-                .name
-                == k
-                .usize
-                || n
-                .name
-                == k
-                .f64
-        ) {
+                n.name == k.i64
+                    || n.name == k.u64
+                    || n.name == k.isize
+                    || n.name == k.usize
+                    || n.name == k.f64
+            ) {
             self.put_name(inout o, n.name);
         } else if n.kind == K_SCALAR {
             put(inout o, "vesper_port_abi::Word<");
