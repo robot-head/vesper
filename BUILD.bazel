@@ -318,6 +318,13 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # Rust-exit gap wave 1 lane 11 (#1509): @vesper/native-walk's
+        # function plans against the native walk over the same corpus.
+        "test/self_host_native_walk": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
         "test/self_host_place_ir_jit": glob([
             "examples/**",
             "packages/**",
@@ -980,6 +987,7 @@ vesper_crate(
         # The wasm backend differential: about 10 min in a debug build.
         "test/self_host_wasm_backend": "long",
         "test/self_host_codegen_scalar": "long",
+        "test/self_host_native_walk": "long",
         "test/self_host_check_harness": "long",
         # The trait declaration differential (#1185) checks every corpus world.
         "test/self_host_check_pact": "long",
