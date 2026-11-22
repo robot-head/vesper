@@ -5275,6 +5275,8 @@ impl Checker<'_> {
 pub fn literal_type(l: &Literal) -> Type {
     match l {
         Literal::Int(n) => Type::IntLiteral(*n),
+        // Above `i128::MAX` only `u128` holds the literal.
+        Literal::WideInt(_) => Type::named("u128"),
         Literal::Float(_) => Type::named("f64"),
         Literal::Bool(_) => Type::named("bool"),
         Literal::String(_) => Type::named("String"),
@@ -6271,9 +6273,11 @@ fn ok_tx() -> i64 {
         assert_eq!(world.functions.len(), orig_fn_count);
         assert!(!world.functions.contains_key("leak_tx"));
         assert!(!world.functions.contains_key("alias_mut"));
-        // Sanity check latency (sub-millisecond in release, very fast in debug).
+        // Sanity check latency: sub-millisecond in release and a few ms in
+        // debug, but a loaded CI runner (BuildBuddy, #1353) has taken 87 ms
+        // for one check, so the bound only catches a pathological slowdown.
         assert!(
-            d_e0302.as_millis() < 50 && d_e0301.as_millis() < 50,
+            d_e0302.as_millis() < 2000 && d_e0301.as_millis() < 2000,
             "isolated checks unexpectedly slow: e0302={d_e0302:?}, e0301={d_e0301:?}"
         );
     }

@@ -56,7 +56,10 @@ use @vesper/check-data::diag::{
     diags_new
 };
 use @vesper/check-data::input::{
+    Ctx,
     Reader,
+    ctx_new,
+    extend_ctx,
     read_ctx
 };
 
@@ -3386,6 +3389,12 @@ pub fn ir_check_words(in input: Slice[u8]) -> ChunkSeq[u64] {
         pos: 0
     };
     let mut c = read_ctx(inout r, in input);
+    ir_check_task(inout r, in input, inout c)
+}
+
+// The program part of `ir_check_words` over a context already read, `r` at
+// the name ranks (the hybrid's encode-once input, SH4 lane 2, #1276).
+pub fn ir_check_task(inout r: Reader, in input: Slice[u8], inout c: Ctx) -> ChunkSeq[u64] {
     let p = read_program(inout r, in input, in c.names, in c.nmap, in c.tmap);
     let mut fl = flow_new();
     let mut pool = pool_new();
@@ -3407,6 +3416,42 @@ pub fn ir_check_words(in input: Slice[u8]) -> ChunkSeq[u64] {
     );
     let mut o: ChunkSeq[u64] = ChunkSeq::new[u64]();
     put_diags(in fl.d, in kept, inout o);
+    o
+}
+
+// One part of an input that arrives in parts (self-hosting SH4 lane 2,
+// #1276): `extend_ctx` adds the part's names, types, ADTs and effects to
+// `c`, then the IR check of the part's program, as `ir_check_words` writes
+// it.
+pub fn ir_check_part(inout c: Ctx, in part: Slice[u8]) -> ChunkSeq[u64] {
+    let mut r = Reader {
+        pos: 0
+    };
+    extend_ctx(inout r, in part, inout c);
+    ir_check_task(inout r, in part, inout c)
+}
+
+// The harness entry of `ir_check_part` (tests/self_host_swap_inputs.rs): a
+// count, then each part as a byte length and its bytes padded to words;
+// returns each part's answer as a word count and the words.
+pub fn check_ir_parts(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut r = Reader {
+        pos: 0
+    };
+    let mut c = ctx_new();
+    let mut o: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let n = r.word(in b);
+    for i in 0..n {
+        let len = r.word(in b);
+        let start = r.pos;
+        let answer = ir_check_part(inout c, in b[start..wrapping_add(start, len)]);
+        o.push(answer.len());
+        for j in 0..answer.len() {
+            o.push(u64_at(in answer, j));
+        }
+        r.pos = wrapping_add(start, wrapping_mul(wrapping_add(len, 7) / 8, 8));
+    }
     o
 }
 
