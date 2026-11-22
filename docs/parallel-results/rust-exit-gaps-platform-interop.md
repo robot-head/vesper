@@ -151,6 +151,12 @@ one target must have one (else a manifest error, as for a bad extension, a
   `clang` for `.s`/`.S`, on Windows), links the objects after the program's
   object, and removes the assembled files. A MASM source for a non-Windows
   target is refused by name.
+- **Confinement:** a package with `objects` must declare a `link = "static"`
+  `.vsys` library (a manifest error otherwise), and an executable links a
+  package's objects only when it calls one of those libraries. Native code
+  therefore always arrives under `Ffi[Lib]`, which the capability ceiling
+  names (§16.3 supply-chain confinement), and no constructor slips in from a
+  pure package.
 - **Which library they are:** a package's objects provide its own
   `link = "static"` libraries, so the executable drops `-l<name>` (or
   `<name>.lib`) for them. `Imports::provide_by_objects` records this when
@@ -158,7 +164,7 @@ one target must have one (else a manifest error, as for a bad extension, a
 - **JIT, `run`, `test`:** refused before running: "library Twice is provided
   by the assembly objects of @t/app (`[package] objects`), which only
   `vesper build` links; build an executable instead".
-- **Tests** (`tests/platform_interop.rs`, 6 new): a per-target package
+- **Tests** (`tests/platform_interop.rs`, 7 new; one checks that objects without a static library are refused and that an uncalled library links nothing): a per-target package
   (`twice_plus = 2x + y` in x86_64 and AArch64 GNU syntax, Darwin syntax and
   MASM) builds and exits 43 on each host, and leaves no assembled files; a
   prebuilt `.o` links as it is; `jit` and `run` refuse; MASM is refused off

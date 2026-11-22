@@ -403,12 +403,21 @@ fn build(
     fs::write(&object, bytes).map_err(|e| e.to_string())?;
     // A package's assembly objects provide its static libraries
     // (manuscript §16.3): they link in place of `lib<name>.a`.
+    // A package's objects link only when the executable calls one of the
+    // static libraries they provide.
     let mut names = checked.link_names();
-    names.retain(|(name, mode)| {
-        *mode != vesper_ffi::sys::LinkMode::Static || imports.objects_provider(name).is_none()
-    });
+    let mut used = std::collections::BTreeSet::new();
+    names.retain(
+        |(name, mode)| match (*mode, imports.objects_provider(name)) {
+            (vesper_ffi::sys::LinkMode::Static, Some(package)) => {
+                used.insert(package.to_owned());
+                false
+            }
+            _ => true,
+        },
+    );
     let mut temporary = vec![object.clone()];
-    let objects = package_objects(c, &path, &mut temporary);
+    let objects = package_objects(c, &path, &used, &mut temporary);
     let result = objects.and_then(|objects| link_executable(c, &object, &objects, &path, &names));
     for file in temporary {
         let _ = fs::remove_file(file);
@@ -417,17 +426,21 @@ fn build(
     Ok(())
 }
 
-/// The objects of every loaded package's `[package] objects` for the build
-/// target: a prebuilt object as it is, and an assembly source assembled
-/// beside `output` (each such file is added to `temporary`).
+/// The `[package] objects` of each package in `used` for the build target:
+/// a prebuilt object as it is, and an assembly source assembled beside
+/// `output` (each such file is added to `temporary`).
 fn package_objects(
     c: &Command<'_>,
     output: &std::path::Path,
+    used: &std::collections::BTreeSet<String>,
     temporary: &mut Vec<PathBuf>,
 ) -> Result<Vec<PathBuf>, String> {
     let windows = vesper::native::windows::is_windows_target(c.target);
     let mut out = vec![];
     for (i, o) in c.package.objects.iter().enumerate() {
+        if !used.contains(&o.package) {
+            continue;
+        }
         let Some(file) = o.file_for(c.target)? else {
             continue;
         };

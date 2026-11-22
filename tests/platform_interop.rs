@@ -813,13 +813,11 @@ fn per_target_objects_select_each_targets_file() {
     }
 }
 
-/// A package with objects and no `.vsys` imports still links them (a
-/// constructor, or code another object calls).
+/// Objects link only through a static library the program calls, which
+/// its `Ffi[Lib]` ceiling confines (manuscript §16.3): a package cannot slip
+/// native code, such as a constructor, into an executable without one.
 #[test]
-fn objects_link_without_vsys_imports() {
-    if cfg!(windows) || !host_jit() || Command::new("cc").arg("--version").output().is_err() {
-        return;
-    }
+fn objects_link_only_through_a_called_static_library() {
     let t = Temp::new("asm-only");
     for (path, text) in TWICE_ASM {
         t.write(&format!("app/{path}"), text);
@@ -830,12 +828,26 @@ fn objects_link_without_vsys_imports() {
         "pub fn main() -> u64 {\n    7\n}\n",
         "",
     );
-    let exe = t.0.join("only.bin");
+    let assembled = vesper::packages::load(&dir).unwrap();
+    let messages: Vec<String> = assembled
+        .manifest_errors
+        .iter()
+        .map(|(_, d)| d.message.clone())
+        .collect();
+    assert!(
+        messages.iter().any(|m| m.contains("it names none")),
+        "{messages:?}"
+    );
+    if cfg!(windows) || !host_jit() || Command::new("cc").arg("--version").output().is_err() {
+        return;
+    }
+    // With the library imported but not called, nothing is linked.
+    let t = Temp::new("asm-unused");
+    let dir = objects_app(&t, PER_TARGET_OBJECTS);
+    t.write("app/src/main.ves", "pub fn main() -> u64 {\n    7\n}\n");
+    let exe = t.0.join("unused.bin");
     run(vesper().arg("build").arg(&dir).arg("-o").arg(&exe));
     assert_eq!(Command::new(&exe).status().unwrap().code(), Some(7));
     let bytes = fs::read(&exe).unwrap();
-    assert!(
-        bytes.windows(10).any(|w| w == b"twice_plus"),
-        "the object's symbol is linked in"
-    );
+    assert!(!bytes.windows(10).any(|w| w == b"twice_plus"));
 }

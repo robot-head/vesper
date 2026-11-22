@@ -1013,6 +1013,22 @@ impl Loader<'_> {
         manifest_shown: &str,
         manifest: &Manifest,
     ) {
+        // Objects link only through one of the package's own static `.vsys`
+        // libraries, which its capability ceiling must name (`Ffi[Lib]`), so
+        // a package cannot link native code without that capability.
+        let package = manifest.package.name.as_str();
+        let has_static_library = self.vsys.iter().filter(|v| v.package == package).any(|v| {
+            let (triple, text) = v
+                .targets
+                .first()
+                .map_or((VSYS_TARGETS[0].triple, v.text.as_str()), |(t, _, text)| {
+                    (*t, text.as_str())
+                });
+            let abi = target_of(triple).abi;
+            let source = text.replace("@TARGET@", triple).replace("@ABI@", abi);
+            vesper_ffi::sys::parse(&source, vesper_ffi::sys::Limits::default())
+                .is_ok_and(|d| d.link().mode() == vesper_ffi::sys::LinkMode::Static)
+        });
         let mut seen = BTreeSet::new();
         for path in &manifest.package.objects {
             let bad = |why: &str| {
@@ -1065,6 +1081,13 @@ impl Loader<'_> {
                     "no such file"
                 };
                 self.manifest_errors.push((manifest_shown.into(), bad(why)));
+                continue;
+            }
+            if !has_static_library {
+                self.manifest_errors.push((
+                    manifest_shown.into(),
+                    bad("objects provide a `link = \"static\"` .vsys library of this package, and it names none"),
+                ));
                 continue;
             }
             self.objects.push(PackageObject {
