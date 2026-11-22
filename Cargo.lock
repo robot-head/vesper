@@ -5601,6 +5601,7 @@ dependencies = [
  "vesper-chrono",
  "vesper-core",
  "vesper-crucible-seed",
+ "vesper-crypto-sys",
  "vesper-diagnostics-seed",
  "vesper-doc",
  "vesper-ebpf-seed",
@@ -5894,6 +5895,28 @@ dependencies = [
  "vesper-alloc-seed",
  "vesper-bench-seed",
  "vesper-simpulse-seed",
+]
+
+[[package]]
+name = "vesper-crypto-sys"
+version = "0.1.0"
+dependencies = [
+ "aes",
+ "aes-gcm",
+ "chacha20 0.9.1",
+ "chacha20poly1305",
+ "ed25519-dalek",
+ "getrandom 0.4.3",
+ "hkdf",
+ "hmac",
+ "libcrux-ml-kem",
+ "poly1305",
+ "polyval",
+ "ring",
+ "sha2",
+ "subtle",
+ "x25519-dalek",
+ "zeroize",
 ]
 
 [[package]]
