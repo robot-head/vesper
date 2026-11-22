@@ -1185,8 +1185,7 @@ impl Checker<'_> {
                 self.world.adts.get(n).is_some_and(|a| {
                     a.variants.iter().any(|v| {
                         v.fields.iter().any(|f| {
-                            f.name == FOREIGN_HANDLE_FIELD
-                                || self.holds_extern_handle(&f.ty, seen)
+                            f.name == FOREIGN_HANDLE_FIELD || self.holds_extern_handle(&f.ty, seen)
                         })
                     })
                 })
@@ -6282,7 +6281,6 @@ fn ok_tx() -> i64 {
         );
     }
 }
-
 
 pub const USE_OUTSIDE_PACKAGE: &str = "E0110";
 pub(crate) const FOREIGN_DROP_PREFIX: &str = "$drop$";

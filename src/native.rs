@@ -305,8 +305,8 @@ fn call_vars(world: &World, e: &Expr, vars: &BTreeMap<String, Type>) -> BTreeMap
         })
         .unwrap_or_default()
 }
-use crate::source_analysis::{contains_function, visit};
 pub use crate::source_analysis::{closure_capabilities, needs_nan_canonicalization};
+use crate::source_analysis::{contains_function, visit};
 fn specialized_function(world: &World, f: &Function) -> bool {
     (!capability_only(f)
         || f.effects.tail.is_some()

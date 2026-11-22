@@ -73,10 +73,10 @@ pub mod proof_commands;
 pub mod regions;
 pub mod runtime;
 pub mod seq;
+mod source_analysis;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod stack_bound;
 pub mod strings;
-mod source_analysis;
 pub mod swap_input;
 pub mod tensor_types;
 pub mod test_discovery;
