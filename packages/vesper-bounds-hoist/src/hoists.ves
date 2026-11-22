@@ -193,9 +193,7 @@ fn only_access_receivers(
         }
         if !has_receiver(u.sub)
             || !(any_receiver || keeps_length(u.sub) || is_hoisted(u.sub))
-            || u
-            .gn
-            == 0 {
+            || u.gn == 0 {
             return false;
         }
         let first = f.arg(w(u.g0));
@@ -301,15 +299,15 @@ fn stable_views(in f: Fun, in us: Users, inout out: Hoists) {
             let pass = wrapping_u8(i.sub);
             if (pass == P_IN || pass == P_INOUT)
                 && only_access_receivers(
-                in f,
-                in us,
-                i.dest,
-                pass,
-                place,
-                false,
-                in none,
-                (q.flags & TY_SLICE) != 0
-            ) {
+                    in f,
+                    in us,
+                    i.dest,
+                    pass,
+                    place,
+                    false,
+                    in none,
+                    (q.flags & TY_SLICE) != 0
+                ) {
                 out.reads.push(wrapping_shl_u64(k, 32) | w(i.dest));
                 any = true;
             }
