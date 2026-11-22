@@ -20,8 +20,7 @@ fn accumulate(inout acc: u64, x: u64) -> Unit eff [ConstTime] {
 fn digest(s: Secret[u64]) -> Secret[u64] eff [ConstTime] {
     let Secret {
         value
-    }
-    = s;
+    } = s;
     let mut acc: u64 = 7;
     accumulate(inout acc, value);
     Secret {
@@ -32,8 +31,7 @@ fn digest(s: Secret[u64]) -> Secret[u64] eff [ConstTime] {
 fn declassify(s: Secret[u64]) -> u64 eff [ConstTime] {
     let Secret {
         value
-    }
-    = s;
+    } = s;
     value
 }
 

@@ -450,12 +450,12 @@ fn visit(inout l: L, p: u64) {
                     l
                         .se
                         .push(
-                        SEdge {
-                            name: s.name,
-                            text: rt,
-                            req: s.req
-                        }
-                    );
+                            SEdge {
+                                name: s.name,
+                                text: rt,
+                                req: s.req
+                            }
+                        );
                 }
             }
         }
@@ -839,29 +839,29 @@ fn commit_node(inout l: L, p: u64) {
             l
                 .gs
                 .push(
-                SEdge {
-                    name: sname,
-                    text: text,
-                    req: r
-                }
-            );
+                    SEdge {
+                        name: sname,
+                        text: text,
+                        req: r
+                    }
+                );
         }
         l
             .gn
             .push(
-            GNode {
-                name: sw(in l.pname, p),
-                man: sw(in l.psel, p),
-                req_at: req_at,
-                req_n: req_n,
-                feat_at: feat_at,
-                feat_n: feat_n,
-                e_at: e_at,
-                e_n: n,
-                s_at: gs_at,
-                s_n: s_n
-            }
-        );
+                GNode {
+                    name: sw(in l.pname, p),
+                    man: sw(in l.psel, p),
+                    req_at: req_at,
+                    req_n: req_n,
+                    feat_at: feat_at,
+                    feat_n: feat_n,
+                    e_at: e_at,
+                    e_n: n,
+                    s_at: gs_at,
+                    s_n: s_n
+                }
+            );
     }
 }
 
@@ -896,18 +896,18 @@ fn commit_rest(inout l: L, diag_at: u64, diag_n: u64, node_at: u64) {
     l
         .snaps
         .push(
-        Snap {
-            node_at: node_at,
-            node_n: node_n,
-            root_at: root_at,
-            root_n: root_n,
-            unused_at: unused_at,
-            unused_n: unused_n,
-            sys_at: sys_at,
-            sys_n: sys_n,
-            diag_at: diag_at,
-            diag_n: diag_n,
-            graph: diag_n == 0
-        }
-    );
+            Snap {
+                node_at: node_at,
+                node_n: node_n,
+                root_at: root_at,
+                root_n: root_n,
+                unused_at: unused_at,
+                unused_n: unused_n,
+                sys_at: sys_at,
+                sys_n: sys_n,
+                diag_at: diag_at,
+                diag_n: diag_n,
+                graph: diag_n == 0
+            }
+        );
 }

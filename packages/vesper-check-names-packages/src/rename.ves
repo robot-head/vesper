@@ -314,25 +314,25 @@ fn effects_at(in a: Ast, e: u32) -> EffectsNode {
     a
         .effects
         .get_or(
-        idx_from_raw[EffectsNode](e),
-        EffectsNode {
-            instances: 0,
-            tail: ast_none()
-        }
-    )
+            idx_from_raw[EffectsNode](e),
+            EffectsNode {
+                instances: 0,
+                tail: ast_none()
+            }
+        )
 }
 
 fn effect_at(in a: Ast, e: u32) -> EffectNode {
     a
         .effect_nodes
         .get_or(
-        idx_from_raw[EffectNode](e),
-        EffectNode {
-            label: ast_none(),
-            name: ast_none(),
-            args: 0
-        }
-    )
+            idx_from_raw[EffectNode](e),
+            EffectNode {
+                label: ast_none(),
+                name: ast_none(),
+                args: 0
+            }
+        )
 }
 
 fn effects(inout s: St, inout a: Ast, e: u32, start: u32, end: u32) {
@@ -467,13 +467,13 @@ fn clause(inout s: St, inout a: Ast, c: u32) {
     let n = a
         .clauses
         .get_or(
-        idx_from_raw[ClauseNode](c),
-        ClauseNode {
-            name: ast_none(),
-            pats: 0,
-            body: ast_none()
-        }
-    );
+            idx_from_raw[ClauseNode](c),
+            ClauseNode {
+                name: ast_none(),
+                pats: 0,
+                body: ast_none()
+            }
+        );
     let mark = s.values.len();
     for i in 0..list_len(in a, n.pats) {
         let x = list_at(in a, n.pats, i);
@@ -487,16 +487,16 @@ fn param(inout s: St, inout a: Ast, p: u32) {
     let mut n = a
         .params
         .get_or(
-        idx_from_raw[ParamNode](p),
-        ParamNode {
-            name: ast_none(),
-            pass: 0,
-            projections: 0,
-            ty: ast_none(),
-            start: 0,
-            end: 0
-        }
-    );
+            idx_from_raw[ParamNode](p),
+            ParamNode {
+                name: ast_none(),
+                pass: 0,
+                projections: 0,
+                ty: ast_none(),
+                start: 0,
+                end: 0
+            }
+        );
     if revisit(inout s.seen_param, p) {
         n.start = wrapping_sub(n.start, s.shift);
         n.end = wrapping_sub(n.end, s.shift);
@@ -515,15 +515,15 @@ fn stmt(inout s: St, inout a: Ast, st: u32) {
     let n = a
         .stmts
         .get_or(
-        idx_from_raw[StmtNode](st),
-        StmtNode {
-            kind: 0,
-            pat: ast_none(),
-            ty: ast_none(),
-            value: ast_none(),
-            mutable: false
-        }
-    );
+            idx_from_raw[StmtNode](st),
+            StmtNode {
+                kind: 0,
+                pat: ast_none(),
+                ty: ast_none(),
+                value: ast_none(),
+                mutable: false
+            }
+        );
     if n.kind == 1 {
         expr(inout s, inout a, n.value);
         let pn = pat_at(in a, n.pat);
@@ -588,17 +588,17 @@ fn name_expr(inout s: St, inout a: Ast, node: ExprNode) -> ExprNode {
         let callee = a
             .exprs
             .alloc(
-            ExprNode {
-                kind: 2,
-                start: at,
-                end: at,
-                a: n.a,
-                b: ast_none(),
-                c: ast_none(),
-                d: ast_none(),
-                e: ast_none()
-            }
-        )
+                ExprNode {
+                    kind: 2,
+                    start: at,
+                    end: at,
+                    a: n.a,
+                    b: ast_none(),
+                    c: ast_none(),
+                    d: ast_none(),
+                    e: ast_none()
+                }
+            )
             .raw();
         n.kind = 6;
         n.a = callee;
@@ -651,13 +651,13 @@ fn expr(inout s: St, inout a: Ast, e: u32) {
             let arg = a
                 .args
                 .get_or(
-                idx_from_raw[ArgNode](x),
-                ArgNode {
-                    pass: 0,
-                    explicit: false,
-                    expr: ast_none()
-                }
-            );
+                    idx_from_raw[ArgNode](x),
+                    ArgNode {
+                        pass: 0,
+                        explicit: false,
+                        expr: ast_none()
+                    }
+                );
             expr(inout s, inout a, arg.expr);
         }
     } else if k == 7 || k == 9 {
@@ -781,15 +781,15 @@ pub fn trait_ref(inout s: St, inout a: Ast, t: u32) {
     let mut n = a
         .trait_refs
         .get_or(
-        idx_from_raw[TraitRefNode](t),
-        TraitRefNode {
-            package: ast_none(),
-            name: ast_none(),
-            args: 0,
-            start: 0,
-            end: 0
-        }
-    );
+            idx_from_raw[TraitRefNode](t),
+            TraitRefNode {
+                package: ast_none(),
+                name: ast_none(),
+                args: 0,
+                start: 0,
+                end: 0
+            }
+        );
     if revisit(inout s.seen_tref, t) {
         n.start = wrapping_sub(n.start, s.shift);
         n.end = wrapping_sub(n.end, s.shift);
@@ -830,13 +830,13 @@ pub fn item(inout s: St, inout a: Ast, kind: u8, node: u32) {
             let mut v = a
                 .variants
                 .get_or(
-                idx_from_raw[VariantNode](vi),
-                VariantNode {
-                    name: ast_none(),
-                    fields: 0,
-                    named: false
-                }
-            );
+                    idx_from_raw[VariantNode](vi),
+                    VariantNode {
+                        name: ast_none(),
+                        fields: 0,
+                        named: false
+                    }
+                );
             if !x.is_enum && v.name == old && x.name != old {
                 v.name = x.name;
                 a.variants.set(idx_from_raw[VariantNode](vi), v);
@@ -846,14 +846,14 @@ pub fn item(inout s: St, inout a: Ast, kind: u8, node: u32) {
                 let f = a
                     .fields
                     .get_or(
-                    idx_from_raw[FieldNode](fi),
-                    FieldNode {
-                        name: ast_none(),
-                        ty: ast_none(),
-                        modality: 3,
-                        temperature: 0
-                    }
-                );
+                        idx_from_raw[FieldNode](fi),
+                        FieldNode {
+                            name: ast_none(),
+                            ty: ast_none(),
+                            modality: 3,
+                            temperature: 0
+                        }
+                    );
                 ty(inout s, inout a, f.ty, x.start, x.end);
             }
         }
@@ -879,13 +879,13 @@ pub fn item(inout s: St, inout a: Ast, kind: u8, node: u32) {
         let x = a
             .impls
             .get_or(
-            idx_from_raw[ImplNode](node),
-            ImplNode {
-                ty: ast_none(),
-                generics: 0,
-                methods: 0
-            }
-        );
+                idx_from_raw[ImplNode](node),
+                ImplNode {
+                    ty: ast_none(),
+                    generics: 0,
+                    methods: 0
+                }
+            );
         let mark = s.types.len();
         generics(inout s, in a, x.generics);
         let mut start: u32 = 0;
@@ -902,17 +902,17 @@ pub fn item(inout s: St, inout a: Ast, kind: u8, node: u32) {
         let mut x = a
             .traits
             .get_or(
-            idx_from_raw[TraitNode](node),
-            TraitNode {
-                name: ast_none(),
-                public: false,
-                generics: 0,
-                assoc: 0,
-                methods: 0,
-                start: 0,
-                end: 0
-            }
-        );
+                idx_from_raw[TraitNode](node),
+                TraitNode {
+                    name: ast_none(),
+                    public: false,
+                    generics: 0,
+                    assoc: 0,
+                    methods: 0,
+                    start: 0,
+                    end: 0
+                }
+            );
         let mark = s.types.len();
         s.types.push(s.s_self_ty);
         generics(inout s, in a, x.generics);
@@ -945,14 +945,14 @@ pub fn item(inout s: St, inout a: Ast, kind: u8, node: u32) {
             let mut wn = a
                 .wheres
                 .get_or(
-                idx_from_raw[WhereNode](wi),
-                WhereNode {
-                    ty: ast_none(),
-                    trait_ref: ast_none(),
-                    start: 0,
-                    end: 0
-                }
-            );
+                    idx_from_raw[WhereNode](wi),
+                    WhereNode {
+                        ty: ast_none(),
+                        trait_ref: ast_none(),
+                        start: 0,
+                        end: 0
+                    }
+                );
             ty(inout s, inout a, wn.ty, x.start, x.end);
             trait_ref(inout s, inout a, wn.trait_ref);
             wn.start = sh(in s, wn.start);
@@ -964,14 +964,14 @@ pub fn item(inout s: St, inout a: Ast, kind: u8, node: u32) {
             let mut b = a
                 .assoc_binds
                 .get_or(
-                idx_from_raw[AssocBindNode](bi),
-                AssocBindNode {
-                    name: ast_none(),
-                    ty: ast_none(),
-                    start: 0,
-                    end: 0
-                }
-            );
+                    idx_from_raw[AssocBindNode](bi),
+                    AssocBindNode {
+                        name: ast_none(),
+                        ty: ast_none(),
+                        start: 0,
+                        end: 0
+                    }
+                );
             ty(inout s, inout a, b.ty, x.start, x.end);
             b.start = sh(in s, b.start);
             b.end = sh(in s, b.end);
@@ -989,34 +989,34 @@ pub fn assoc_decl_at(in a: Ast, i: u32) -> AssocDeclNode {
     a
         .assoc_decls
         .get_or(
-        idx_from_raw[AssocDeclNode](i),
-        AssocDeclNode {
-            name: ast_none(),
-            bound: 0,
-            start: 0,
-            end: 0
-        }
-    )
+            idx_from_raw[AssocDeclNode](i),
+            AssocDeclNode {
+                name: ast_none(),
+                bound: 0,
+                start: 0,
+                end: 0
+            }
+        )
 }
 
 pub fn conf_at(in a: Ast, i: u32) -> ConfNode {
     a
         .confs
         .get_or(
-        idx_from_raw[ConfNode](i),
-        ConfNode {
-            model: ast_none(),
-            public: false,
-            generics: 0,
-            trait_ref: ast_none(),
-            self_ty: ast_none(),
-            wheres: 0,
-            assoc: 0,
-            methods: 0,
-            start: 0,
-            end: 0
-        }
-    )
+            idx_from_raw[ConfNode](i),
+            ConfNode {
+                model: ast_none(),
+                public: false,
+                generics: 0,
+                trait_ref: ast_none(),
+                self_ty: ast_none(),
+                wheres: 0,
+                assoc: 0,
+                methods: 0,
+                start: 0,
+                end: 0
+            }
+        )
 }
 
 // `Renamer::owner`: the owner of a trait bound, `f`, `Type::method` or

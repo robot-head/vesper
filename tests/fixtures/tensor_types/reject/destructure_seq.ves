@@ -4,7 +4,6 @@
 fn f(s: ActiveKvSeq[2, 4]) -> u64 {
     let ActiveKvSeq {
         seq
-    }
-    = s;
+    } = s;
     seq
 }

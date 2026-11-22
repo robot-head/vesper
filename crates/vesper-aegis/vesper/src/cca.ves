@@ -355,20 +355,14 @@ fn sw_component(in n: Slice[u64], c: u64, inout w: Slice[u64]) -> Unit eff [Fail
             break;
         }
         let key = int_key(in n, at);
-        if kind(in n, at)
-            != K_UINT
+        if kind(in n, at) != K_UINT
             || (
-            key
-                != SW_MEASUREMENT_TYPE
-                && key
-                != SW_MEASUREMENT_VALUE
-                && key
-                != SW_VERSION
-                && key
-                != SW_SIGNER_ID
-                && key
-                != SW_MEASUREMENT_DESCRIPTION
-        ) {
+                key != SW_MEASUREMENT_TYPE
+                    && key != SW_MEASUREMENT_VALUE
+                    && key != SW_VERSION
+                    && key != SW_SIGNER_ID
+                    && key != SW_MEASUREMENT_DESCRIPTION
+            ) {
             cbor_err(F_SW_COMPONENT, R_UNKNOWN_KEY);
         }
         at = skip(in n, skip(in n, at));

@@ -238,9 +238,58 @@ pub enum Item {
     /// declaration (§16.3). Its methods become private generated functions.
     Conformance(Conformance),
 }
+/// Permissions written on the caller's place in an unexpanded sugar form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SugarPass {
+    In,
+    Inout,
+    Out,
+    Sink,
+}
+
+impl SugarPass {
+    /// The pass-visibility relation for a use introduced by a sugar rule.
+    pub fn permits(self, requested: Self) -> bool {
+        self == requested
+            || matches!(
+                (self, requested),
+                (Self::Inout, Self::In) | (Self::Sink, Self::In | Self::Inout)
+            )
+    }
+}
+
+impl std::str::FromStr for SugarPass {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "in" => Ok(Self::In),
+            "inout" => Ok(Self::Inout),
+            "out" => Ok(Self::Out),
+            "sink" => Ok(Self::Sink),
+            _ => Err(()),
+        }
+    }
+}
+
+/// The checker compares operations introduced by a rule with its declared
+/// effect row. Substituted expressions retain their caller's effect allowance.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SugarEffectRegion {
+    /// Operation and capture ranges are offsets into the expanded program.
+    pub expanded: Span,
+    pub holes: Vec<Span>,
+    pub places: Vec<(Span, SugarPass)>,
+    pub emits: Effects,
+    /// Diagnostic locations in the original call and definition sources.
+    pub call: Span,
+    pub rule: Span,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Module {
     pub items: Vec<Item>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sugar_origins: Vec<SugarEffectRegion>,
     /// Frontend-only lexical `use model M;` declarations.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub model_uses: Vec<ModelUse>,

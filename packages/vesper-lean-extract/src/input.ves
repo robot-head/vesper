@@ -120,35 +120,35 @@ pub fn read_effects(
                 out
                     .params
                     .push(
-                    Param {
-                        pass: pass,
-                        ty: ty
-                    }
-                );
+                        Param {
+                            pass: pass,
+                            ty: ty
+                        }
+                    );
             }
             let result = u32_at(in tmap, r.word(in b));
             out
                 .ops
                 .push(
-                Op {
-                    name: op,
-                    pa: pa,
-                    pn: n32(pn),
-                    result: result
-                }
-            );
+                    Op {
+                        name: op,
+                        pa: pa,
+                        pn: n32(pn),
+                        result: result
+                    }
+                );
         }
         out
             .effects
             .push(
-            Effect {
-                name: name,
-                ga: ga,
-                gn: n32(gn),
-                oa: oa,
-                on: n32(on)
-            }
-        );
+                Effect {
+                    name: name,
+                    ga: ga,
+                    gn: n32(gn),
+                    oa: oa,
+                    on: n32(on)
+                }
+            );
     }
     out
 }

@@ -132,12 +132,9 @@ fn number(in b: Slice[u8], at: u64) -> (u8, u64) {
     }
     // Float: `[0-9]+\.[0-9]+([eE][+-]?[0-9]+)?` or `[0-9]+[eE][+-]?[0-9]+`.
     let mut float_end = at;
-    if digits
-        < n
-        && byte(in b, digits)
-        == 46
-        && inc(digits)
-        < n
+    if digits < n
+        && byte(in b, digits) == 46
+        && inc(digits) < n
         && is_digit(byte(in b, inc(digits))) {
         float_end = exponent(in b, scan_digits(in b, inc(digits)));
     } else {
@@ -746,8 +743,7 @@ fn intern(inout t: Tokens, in b: Slice[u8], s: u64, e: u64, kind: u8, w: u64) ->
 fn same_symbol(in t: Tokens, in b: Slice[u8], tag: u64, s: u64, n: u64) -> bool {
     let k = widen_u64(wrapping_sub(wrapping_u32(tag), 1));
     let ks = w32(in t.sym_start, k);
-    wrapping_sub(w32(in t.sym_end, k), ks)
-        == n
+    wrapping_sub(w32(in t.sym_end, k), ks) == n
         && same_bytes(in b, add(ks, 8), add(s, 8), wrapping_sub(n, 8))
 }
 

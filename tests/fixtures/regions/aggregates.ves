@@ -20,33 +20,33 @@ fn main() -> i64 {
     region r(512) {
         let p = r
             .box(
-            Point {
-                x: 1,
-                y: 2
-            }
-        );
+                Point {
+                    x: 1,
+                    y: 2
+                }
+            );
         let s = r
             .box(
-            Shape::Segment(
-                Point {
-                    x: 0,
-                    y: 0
-                },
-                Point {
-                    x: 3,
-                    y: 4
-                }
-            )
-        );
+                Shape::Segment(
+                    Point {
+                        x: 0,
+                        y: 0
+                    },
+                    Point {
+                        x: 3,
+                        y: 4
+                    }
+                )
+            );
         let d = r.box(Shape::Dot);
         r
             .set(
-            p,
-            Point {
-                x: 30,
-                y: 2
-            }
-        );
+                p,
+                Point {
+                    x: 30,
+                    y: 2
+                }
+            );
         let q = r.get(p);
         wrapping_add(wrapping_add(q.x, q.y), wrapping_add(length(r.get(s)), length(r.get(d))))
     }

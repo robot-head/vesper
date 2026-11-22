@@ -366,12 +366,8 @@ pub fn enc_encode(
         Option::Some(_f) => true,
         Option::None => false,
     };
-    let use_dynamic = e
-        .table
-        .capacity
-        > 0
-        && sections(in e)
-        < wrapping_u64(e.cfg.max_outstanding_sections)
+    let use_dynamic = e.table.capacity > 0
+        && sections(in e) < wrapping_u64(e.cfg.max_outstanding_sections)
         && !failed;
     let may_block = use_dynamic && may_block(in e, stream_id);
     e.lines.clear();
