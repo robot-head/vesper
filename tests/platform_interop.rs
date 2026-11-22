@@ -637,3 +637,178 @@ fn the_jit_runs_fences_and_protection_keys() {
         }
     }
 }
+
+// ---- Assembly objects (G10) -------------------------------------------
+
+/// `twice_plus(x, y) = 2 * x + y` in each target's assembly.
+const TWICE_ASM: [(&str, &str); 4] = [
+    (
+        "asm/twice-x86_64-unknown-linux-gnu.s",
+        "    .text\n    .globl twice_plus\n    .type twice_plus, @function\ntwice_plus:\n    movl %esi, %eax\n    leaq (%rax,%rdi,2), %rax\n    ret\n    .section .note.GNU-stack,\"\",@progbits\n",
+    ),
+    (
+        "asm/twice-aarch64-unknown-linux-gnu.s",
+        "    .text\n    .globl twice_plus\n    .type twice_plus, %function\ntwice_plus:\n    add x0, x0, x0\n    add x0, x0, w1, uxtw\n    ret\n    .section .note.GNU-stack,\"\",%progbits\n",
+    ),
+    (
+        "asm/twice-aarch64-apple-darwin.s",
+        "    .text\n    .globl _twice_plus\n    .p2align 2\n_twice_plus:\n    add x0, x0, x0\n    add x0, x0, w1, uxtw\n    ret\n",
+    ),
+    (
+        "asm/twice-x86_64-pc-windows-msvc.asm",
+        ".code\ntwice_plus PROC\n    mov eax, edx\n    lea rax, [rax+rcx*2]\n    ret\ntwice_plus ENDP\nEND\n",
+    ),
+];
+
+/// A package whose `objects` define the static library its `.vsys` names.
+fn objects_app(t: &Temp, objects: &str) -> PathBuf {
+    for (path, text) in TWICE_ASM {
+        t.write(&format!("app/{path}"), text);
+    }
+    t.write(
+        "app/sys/twice.vsys",
+        "sys library Twice (target = \"@TARGET@\", abi = \"@ABI@\", link = \"static\", name = \"twice_asm\", \
+         artifact = \"blake3:0000000000000000000000000000000000000000000000000000000000000000\") {\n    \
+         fn twice_plus(x: u64, y: u32) -> ForeignVal[u64];\n}\n",
+    );
+    app(
+        t,
+        &format!("vsys = [\"sys/twice.vsys\"]\nobjects = {objects}"),
+        "pub fn main() -> u64 eff [Ffi[Twice]] {\n    Twice::twice_plus(20, 3)\n}\n",
+        "\"Ffi[Twice]\"",
+    )
+}
+
+const PER_TARGET_OBJECTS: &str = "[\"asm/twice-@TARGET@.s\", \"asm/twice-@TARGET@.asm\"]";
+
+/// G10: `vesper build` assembles each target's source and links it in
+/// place of the static library.
+#[test]
+fn executables_link_package_assembly() {
+    if !host_jit() || (!cfg!(windows) && Command::new("cc").arg("--version").output().is_err()) {
+        return;
+    }
+    let t = Temp::new("asm");
+    let dir = objects_app(&t, PER_TARGET_OBJECTS);
+    let exe = t.0.join(if cfg!(windows) {
+        "twice.exe"
+    } else {
+        "twice.bin"
+    });
+    run(vesper().arg("build").arg(&dir).arg("-o").arg(&exe));
+    let status = Command::new(&exe).status().unwrap();
+    assert_eq!(status.code(), Some(43));
+    // The assembled objects beside the output are removed.
+    let left: Vec<_> = fs::read_dir(&t.0)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains("vesper-asm") || n.contains("vesper.o"))
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
+}
+
+/// A prebuilt object links as it is.
+#[test]
+fn executables_link_a_prebuilt_object() {
+    if cfg!(windows) || !host_jit() || Command::new("cc").arg("--version").output().is_err() {
+        return;
+    }
+    let t = Temp::new("prebuilt");
+    let dir = objects_app(&t, "[\"obj/twice.o\"]");
+    let (source, _) = TWICE_ASM
+        .iter()
+        .find(|(p, _)| p.contains(vesper::packages::vsys_target(None).unwrap().0))
+        .unwrap();
+    fs::create_dir_all(dir.join("obj")).unwrap();
+    let status = Command::new("cc")
+        .arg("-c")
+        .arg(dir.join(source))
+        .arg("-o")
+        .arg(dir.join("obj/twice.o"))
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let exe = t.0.join("twice.bin");
+    run(vesper().arg("build").arg(&dir).arg("-o").arg(&exe));
+    assert_eq!(Command::new(&exe).status().unwrap().code(), Some(43));
+}
+
+/// The JIT and the evaluator do not load assembly objects; they say so
+/// rather than looking for a `twice_asm` library.
+#[test]
+fn jit_and_run_refuse_assembly_objects() {
+    if !host_jit() {
+        return;
+    }
+    let t = Temp::new("asm-jit");
+    let dir = objects_app(&t, PER_TARGET_OBJECTS);
+    for command in ["jit", "run"] {
+        let err = fails(vesper().arg(command).arg(&dir));
+        assert!(
+            err.contains("assembly objects of @t/app") && err.contains("only `vesper build` links"),
+            "{command}: {err}"
+        );
+    }
+}
+
+/// MASM source assembles only for Windows.
+#[test]
+fn masm_source_is_refused_for_other_targets() {
+    if cfg!(windows) || !host_jit() {
+        return;
+    }
+    let t = Temp::new("masm");
+    let dir = objects_app(&t, "[\"asm/twice-x86_64-pc-windows-msvc.asm\"]");
+    let err = fails(vesper().arg("build").arg(&dir).arg("-o").arg(t.0.join("x")));
+    assert!(err.contains("assembles only for Windows targets"), "{err}");
+}
+
+#[test]
+fn bad_object_paths_are_manifest_errors() {
+    for (objects, want) in [
+        ("[\"asm/twice.c\"]", "expected an assembly source"),
+        ("[\"asm/none.s\"]", "no such file"),
+        ("[\"asm/none-@OS@.s\"]", "no such file for any target"),
+        ("[\"../x.s\"]", "no `..`"),
+        (
+            "[\"asm/twice-@TARGET@.s\", \"./asm/twice-@TARGET@.s\"]",
+            "named twice",
+        ),
+    ] {
+        let t = Temp::new("bad-objects");
+        let dir = objects_app(&t, objects);
+        let assembled = vesper::packages::load(&dir).unwrap();
+        let messages: Vec<String> = assembled
+            .manifest_errors
+            .iter()
+            .map(|(_, d)| d.message.clone())
+            .collect();
+        assert!(
+            messages.iter().any(|m| m.contains(want)),
+            "{objects}: {messages:?}"
+        );
+    }
+}
+
+/// A per-target entry names a file for each target that has one.
+#[test]
+fn per_target_objects_select_each_targets_file() {
+    let t = Temp::new("asm-targets");
+    let dir = objects_app(&t, PER_TARGET_OBJECTS);
+    let assembled = vesper::packages::load(&dir).unwrap();
+    assert!(assembled.ok(), "{:?}", assembled.manifest_errors);
+    assert_eq!(assembled.objects.len(), 2);
+    for target in VSYS_TARGETS {
+        let files: Vec<PathBuf> = assembled
+            .objects
+            .iter()
+            .filter_map(|o| o.file_for(Some(target.triple)).unwrap())
+            .map(Path::to_path_buf)
+            .collect();
+        assert_eq!(files.len(), 1, "{}", target.triple);
+        assert!(
+            files[0].to_string_lossy().contains(target.triple),
+            "{files:?}"
+        );
+    }
+}
