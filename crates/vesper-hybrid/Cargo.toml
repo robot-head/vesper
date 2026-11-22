@@ -41,6 +41,9 @@ divergent-ir-inline = []
 divergent-optimize = []
 # The same check for the IR optimizer (#1248): every optimizing compile fails.
 divergent-ir-opt = []
+# The same check for the trait declaration pass (#1185): every package with
+# trait declarations gets one made-up E0600.
+divergent-pact = []
 
 [dependencies]
 vesper = { path = "../.." }

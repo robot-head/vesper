@@ -100,6 +100,8 @@ jobs:
         run: cargo test --locked -p vesper-hybrid --features divergent-optimize --test differential hybrid_matches_the_default_compiler -- --nocapture
       - name: The differential harness catches a divergent IR optimizer
         run: cargo test --locked -p vesper-hybrid --features divergent-ir-opt --test differential hybrid_matches_the_default_compiler -- --nocapture
+      - name: The differential harness catches a divergent trait declaration pass
+        run: cargo test --locked -p vesper-hybrid --features divergent-pact --test differential hybrid_matches_the_default_compiler -- --nocapture
       - name: The differential harness catches a divergent parse module
         # A wrong parse cannot compile the pilot test's program, so only the
         # harness runs here.
