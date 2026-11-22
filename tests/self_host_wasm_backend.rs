@@ -299,7 +299,8 @@ pub fn differential_run(step: usize, execute: bool) -> Tally {
                         let ours = run_main(&component, false);
                         let theirs = evaluate(&c.world);
                         if !same_run(&ours, &theirs) {
-                            t.diffs.push(format!("{tag}: run {ours} vs evaluator {theirs}"));
+                            t.diffs
+                                .push(format!("{tag}: run {ours} vs evaluator {theirs}"));
                         }
                         t.loops_ran += 1;
                     }
