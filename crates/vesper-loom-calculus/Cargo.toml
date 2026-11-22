@@ -22,11 +22,14 @@ vesper-port-divergent = []
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 semver = { version = "1", features = ["serde"] }
-toml = "0.8"
 vesper-port-abi = { path = "../vesper-port-abi" }
 
 [dev-dependencies]
+# The differential tests compare the port's TOML reader and manifest
+# decoder with the `toml` crate the seed uses.
+toml = "0.8"
 vesper-bench = { path = "../vesper-bench" }
+toml_edit = "0.22"
 
 [build-dependencies]
 vesper-port-harness = { path = "../vesper-port-harness" }

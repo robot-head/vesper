@@ -1,0 +1,1677 @@
+// `toml::from_str::<Manifest>`: a parsed TOML document (@vesper-std/toml)
+// decoded as serde's derived `Deserialize` impls decode it through
+// toml_edit's deserializer (toml_edit 0.22 src/de), with the same error
+// text and span. On success the result is the manifest as
+// `serde_json::to_string(&Manifest)` writes it.
+//
+// serde visits a table's entries in document order, so errors come in
+// document order; a missing required field is reported at the end of its
+// table, the first one in declaration order. JSON is written in
+// declaration order, and maps and sets in key order, so each table's
+// fields are decoded into `out` and then reassembled.
+//
+// Error spans follow toml_edit: a key's error takes the key's span, a
+// value's error the value's span (or its key's, for a table without one),
+// and an error keeps the first span it gets. Each entry an error passes
+// through adds its key at the front of `keys`.
+
+use @vesper-std/toml::{
+    Doc,
+    Node,
+    Ent,
+    NONE,
+    K_STRING,
+    K_INTEGER,
+    K_FLOAT,
+    K_BOOL,
+    K_DATETIME,
+    K_ARRAY,
+    K_INLINE,
+    K_TABLE,
+    K_AOT,
+    F_FINITE,
+    F_INF,
+    F_NEG_INF,
+    F_NAN,
+    node,
+    ent,
+    render_error,
+    parse
+};
+use @vesper/serde::dragon::{
+    shortest,
+    shortest_len,
+    put_shortest
+};
+use @vesper/serde::lemire::{
+    decode_bits
+};
+use @vesper/serde::pow5::{
+    pow5_table
+};
+use @vesper-std/toml::debug::{
+    put_debug_str
+};
+use self::semver_text::{
+    SCmp,
+    SVer,
+    OP_EXACT,
+    OP_GREATER,
+    OP_GREATER_EQ,
+    OP_LESS,
+    OP_LESS_EQ,
+    OP_TILDE,
+    OP_CARET,
+    OP_WILDCARD,
+    parse_version,
+    parse_req
+};
+
+// Structs.
+const S_MANIFEST: u64 = 0;
+const S_PACKAGE: u64 = 1;
+const S_DEPENDENCY: u64 = 2;
+const S_FEATURE: u64 = 3;
+const S_SANDBOX: u64 = 4;
+const S_POLICY: u64 = 5;
+const S_RESOLVER: u64 = 6;
+const S_VERIFICATION: u64 = 7;
+
+// Field types.
+const T_STRING: u64 = 0;
+const T_NAME: u64 = 1;
+const T_VERSION: u64 = 2;
+const T_REQ: u64 = 3;
+const T_OPT_STRING: u64 = 4;
+const T_STRING_SET: u64 = 5;
+const T_STRING_VEC: u64 = 6;
+const T_NAME_SET: u64 = 7;
+const T_BOOL: u64 = 8;
+const T_BOOL_TRUE: u64 = 9;
+const T_OPT_U64: u64 = 10;
+const T_OPT_U32: u64 = 11;
+const T_FEATURES: u64 = 12;
+const T_DEPENDENCIES: u64 = 13;
+// T_STRUCT + s is struct s; T_OPT_STRUCT + s is Option of it.
+const T_STRUCT: u64 = 100;
+const T_OPT_STRUCT: u64 = 200;
+
+const DATETIME_KEY: Str = "$__toml_private_datetime";
+
+pub struct D {
+    doc: Doc,
+    failed: bool,
+    has_span: bool,
+    s: u64,
+    e: u64,
+    msg: ChunkSeq[u8],
+    // Keys outermost first, each `text` offset and length.
+    keys: ChunkSeq[u64],
+    out: ChunkSeq[u8]
+}
+
+fn put(inout m: ChunkSeq[u8], in t: Str) {
+    m.extend(in t.as_bytes());
+}
+
+fn put_dec(inout out: ChunkSeq[u8], v: u64) {
+    if v >= 10 {
+        put_dec(inout out, v / 10);
+    }
+    out.push(wrapping_u8(wrapping_add(v % 10, 48)));
+}
+
+fn put_i64(inout out: ChunkSeq[u8], v: u64) {
+    if wrapping_shr_u64(v, 63) == 1 {
+        out.push(45);
+        put_dec(inout out, wrapping_sub(0, v));
+    } else {
+        put_dec(inout out, v);
+    }
+}
+
+fn tbyte(in d: D, i: u64) -> u8 {
+    match d.doc.text.try_get(i) {
+        Option::Some(b) => b,
+        Option::None => 0,
+    }
+}
+
+fn sbyte(in s: Slice[u8], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(b) => widen_u64(b),
+        Option::None => 256,
+    }
+}
+
+// ---------------------------------------------------------- schema
+
+fn struct_name(k: u64) -> Str {
+    if k == S_MANIFEST {
+        "Manifest"
+    } else if k == S_PACKAGE {
+        "Package"
+    } else if k == S_DEPENDENCY {
+        "Dependency"
+    } else if k == S_FEATURE {
+        "Feature"
+    } else if k == S_SANDBOX {
+        "BuildSandbox"
+    } else if k == S_POLICY {
+        "ResolverPolicy"
+    } else if k == S_RESOLVER {
+        "Resolver"
+    } else {
+        "Verification"
+    }
+}
+
+fn field_count(k: u64) -> u64 {
+    if k == S_MANIFEST {
+        6
+    } else if k == S_PACKAGE {
+        7
+    } else if k == S_DEPENDENCY {
+        5
+    } else if k == S_FEATURE {
+        4
+    } else if k == S_SANDBOX {
+        4
+    } else if k == S_POLICY {
+        3
+    } else {
+        1
+    }
+}
+
+fn field_name(k: u64, i: u64) -> Str {
+    if k == S_MANIFEST {
+        if i == 0 {
+            "package"
+        } else if i == 1 {
+            "features"
+        } else if i == 2 {
+            "dependencies"
+        } else if i == 3 {
+            "build-sandbox"
+        } else if i == 4 {
+            "resolver"
+        } else {
+            "verification"
+        }
+    } else if k == S_PACKAGE {
+        if i == 0 {
+            "name"
+        } else if i == 1 {
+            "version"
+        } else if i == 2 {
+            "edition"
+        } else if i == 3 {
+            "license"
+        } else if i == 4 {
+            "capability_ceiling"
+        } else if i == 5 {
+            "forbid_unsafe_ffi"
+        } else {
+            "vsys"
+        }
+    } else if k == S_DEPENDENCY {
+        if i == 0 {
+            "version"
+        } else if i == 1 {
+            "effects"
+        } else if i == 2 {
+            "optional"
+        } else if i == 3 {
+            "features"
+        } else {
+            "path"
+        }
+    } else if k == S_FEATURE {
+        if i == 0 {
+            "enables_effects"
+        } else if i == 1 {
+            "deps"
+        } else if i == 2 {
+            "features"
+        } else {
+            "sys_deps"
+        }
+    } else if k == S_SANDBOX {
+        if i == 0 {
+            "script"
+        } else if i == 1 {
+            "wasi_read_paths"
+        } else if i == 2 {
+            "fuel_limit"
+        } else {
+            "allow_network"
+        }
+    } else if k == S_POLICY {
+        if i == 0 {
+            "optimize"
+        } else if i == 1 {
+            "min_repro_attestations"
+        } else {
+            "block_unvetted_namespaces"
+        }
+    } else if k == S_RESOLVER {
+        "policy"
+    } else {
+        "export_lean4_specs"
+    }
+}
+
+fn field_type(k: u64, i: u64) -> u64 {
+    if k == S_MANIFEST {
+        if i == 0 {
+            wrapping_add(T_STRUCT, S_PACKAGE)
+        } else if i == 1 {
+            T_FEATURES
+        } else if i == 2 {
+            T_DEPENDENCIES
+        } else if i == 3 {
+            wrapping_add(T_OPT_STRUCT, S_SANDBOX)
+        } else if i == 4 {
+            wrapping_add(T_OPT_STRUCT, S_RESOLVER)
+        } else {
+            wrapping_add(T_OPT_STRUCT, S_VERIFICATION)
+        }
+    } else if k == S_PACKAGE {
+        if i == 0 {
+            T_NAME
+        } else if i == 1 {
+            T_VERSION
+        } else if i == 2 {
+            T_STRING
+        } else if i == 3 {
+            T_OPT_STRING
+        } else if i == 4 {
+            T_STRING_SET
+        } else if i == 5 {
+            T_BOOL_TRUE
+        } else {
+            T_STRING_VEC
+        }
+    } else if k == S_DEPENDENCY {
+        if i == 0 {
+            T_REQ
+        } else if i == 1 {
+            T_STRING_SET
+        } else if i == 2 {
+            T_BOOL
+        } else if i == 3 {
+            T_STRING_SET
+        } else {
+            T_OPT_STRING
+        }
+    } else if k == S_FEATURE {
+        if i == 1 {
+            T_NAME_SET
+        } else {
+            T_STRING_SET
+        }
+    } else if k == S_SANDBOX {
+        if i == 0 {
+            T_OPT_STRING
+        } else if i == 1 {
+            T_STRING_SET
+        } else if i == 2 {
+            T_OPT_U64
+        } else {
+            T_BOOL
+        }
+    } else if k == S_POLICY {
+        if i == 0 {
+            T_STRING_VEC
+        } else if i == 1 {
+            T_OPT_U32
+        } else {
+            T_BOOL_TRUE
+        }
+    } else if k == S_RESOLVER {
+        wrapping_add(T_STRUCT, S_POLICY)
+    } else {
+        T_STRING_SET
+    }
+}
+
+// The JSON of a field that is not in its table (`#[serde(default)]` or
+// `None`), or false when the field is required.
+fn put_default(inout out: ChunkSeq[u8], t: u64) -> bool {
+    if t == T_OPT_STRING || t == T_OPT_U64 || t == T_OPT_U32 || t >= T_OPT_STRUCT {
+        put(inout out, "null");
+    } else if t == T_STRING_SET || t == T_STRING_VEC || t == T_NAME_SET {
+        put(inout out, "[]");
+    } else if t == T_BOOL {
+        put(inout out, "false");
+    } else if t == T_BOOL_TRUE {
+        put(inout out, "true");
+    } else if t == T_FEATURES || t == T_DEPENDENCIES {
+        put(inout out, "{}");
+    } else {
+        return false;
+    }
+    true
+}
+
+// `skip_serializing_if`: an empty `vsys` and a `None` dependency path.
+fn skipped(k: u64, i: u64, in json: Slice[u8]) -> bool {
+    if k == S_PACKAGE && i == 6 {
+        return json.len() == 2;
+    }
+    if k == S_DEPENDENCY && i == 4 {
+        return json.len() == 4 && sbyte(in json, 0) == 110;
+    }
+    false
+}
+
+// ---------------------------------------------------------- errors
+
+fn fail(inout d: D) -> bool {
+    d.failed = true;
+    false
+}
+
+// The span an error gets when it has none yet.
+fn span_if_none(inout d: D, has: bool, s: u64, e: u64) {
+    if !d.has_span && has {
+        d.has_span = true;
+        d.s = s;
+        d.e = e;
+    }
+}
+
+fn at_item(inout d: D, id: u32) -> bool {
+    let n = node(in d.doc.nodes, id);
+    span_if_none(inout d, n.has_span, n.s, n.e);
+    false
+}
+
+// `Unexpected` for a node: what serde says it found.
+fn put_unexpected(inout d: D, in src: Slice[u8], id: u32) {
+    let n = node(in d.doc.nodes, id);
+    let k = n.kind;
+    if k == K_STRING {
+        put(inout d.msg, "string ");
+        put_debug_str(inout d.msg, in d.doc.text.as_slice(), n.a, wrapping_add(n.a, n.b));
+    } else if k == K_INTEGER {
+        put(inout d.msg, "integer `");
+        put_i64(inout d.msg, n.a);
+        put(inout d.msg, "`");
+    } else if k == K_FLOAT {
+        put(inout d.msg, "floating point `");
+        put_float(inout d.msg, in src, n);
+        put(inout d.msg, "`");
+    } else if k == K_BOOL {
+        if n.a == 1 {
+            put(inout d.msg, "boolean `true`");
+        } else {
+            put(inout d.msg, "boolean `false`");
+        }
+    } else if k == K_ARRAY || k == K_AOT {
+        put(inout d.msg, "sequence");
+    } else {
+        put(inout d.msg, "map");
+    }
+}
+
+fn invalid_type(inout d: D, in src: Slice[u8], id: u32, in expected: Str) -> bool {
+    put(inout d.msg, "invalid type: ");
+    put_unexpected(inout d, in src, id);
+    put(inout d.msg, ", expected ");
+    put(inout d.msg, expected);
+    fail(inout d);
+    at_item(inout d, id)
+}
+
+fn invalid_type_struct(inout d: D, in src: Slice[u8], id: u32, k: u64) -> bool {
+    put(inout d.msg, "invalid type: ");
+    put_unexpected(inout d, in src, id);
+    put(inout d.msg, ", expected struct ");
+    put(inout d.msg, struct_name(k));
+    fail(inout d);
+    at_item(inout d, id)
+}
+
+// `Error::unknown_field(field, FIELDS)`.
+fn unknown_field(inout d: D, in field: ChunkSeq[u8], k: u64) -> bool {
+    put(inout d.msg, "unknown field `");
+    d.msg.extend(in field.as_slice());
+    put(inout d.msg, "`, expected ");
+    let n = field_count(k);
+    if n == 1 {
+        put(inout d.msg, "`");
+        put(inout d.msg, field_name(k, 0));
+        put(inout d.msg, "`");
+    } else if n == 2 {
+        put(inout d.msg, "`");
+        put(inout d.msg, field_name(k, 0));
+        put(inout d.msg, "` or `");
+        put(inout d.msg, field_name(k, 1));
+        put(inout d.msg, "`");
+    } else {
+        put(inout d.msg, "one of ");
+        for i in 0..n {
+            if i > 0 {
+                put(inout d.msg, ", ");
+            }
+            put(inout d.msg, "`");
+            put(inout d.msg, field_name(k, i));
+            put(inout d.msg, "`");
+        }
+    }
+    fail(inout d)
+}
+
+// ---------------------------------------------------------- floats and datetimes
+
+// `f64`'s Display through serde's `WithDecimalPoint`: shortest digits,
+// positional, `.0` when there is no point; `NaN`, `inf`, `-inf`.
+fn put_float(inout m: ChunkSeq[u8], in src: Slice[u8], n: Node) {
+    if n.b == F_INF {
+        put(inout m, "inf");
+        return;
+    }
+    if n.b == F_NEG_INF {
+        put(inout m, "-inf");
+        return;
+    }
+    if n.b != F_FINITE {
+        put(inout m, "NaN");
+        return;
+    }
+    // The text as a JSON number (no `_`, no `+`), converted like
+    // `str::parse::<f64>`, then printed like `{}`.
+    let mut num: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for i in n.s..n.e {
+        let c = sbyte(in src, i);
+        if c != 95 && c != 43 {
+            num.push(wrapping_u8(c));
+        }
+    }
+    let pow5 = pow5_table();
+    let dec = decode_bits(in num.as_slice(), in pow5.as_slice());
+    let bits = if dec.path == 3 {
+        exact_bits(in num.as_slice())
+    } else {
+        dec.bits
+    };
+    let s = shortest(bits);
+    let len = shortest_len(s);
+    let mut text: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for i in 0..len {
+        text.push(48);
+    }
+    put_shortest(inout text.as_slice_mut(), 0, s);
+    m.extend(in text.as_slice());
+    let mut point = false;
+    for i in 0..len {
+        if sbyte(in text.as_slice(), i) == 46 {
+            point = true;
+        }
+    }
+    if !point {
+        put(inout m, ".0");
+    }
+}
+
+// ------------------------------------------- exact decimal to binary64
+// decode_bits's undecided case (more than 19 digits on a rounding boundary,
+// or a product too close to call), which Rust's `str::parse` settles with its
+// big-decimal path. The double is found by exact comparison: big integers of
+// 32-bit limbs (held in u64 words, least significant first).
+
+const LIMB_MASK: u64 = 4294967295;
+const POW5_13: u64 = 1220703125;
+const INF_BITS: u64 = 9218868437227405312;
+const HIDDEN: u64 = 4503599627370496;
+
+fn limb(in a: Slice[u64], i: u64) -> u64 {
+    match a.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+// a = a * k + add, for k and add below 2^32.
+fn big_mul_add(inout a: ChunkSeq[u64], k: u64, add: u64) {
+    let mut carry = add;
+    let mut out: ChunkSeq[u64] = ChunkSeq::with_capacity(wrapping_add(a.len(), 1));
+    for i in 0..a.len() {
+        let v = wrapping_add(wrapping_mul(limb(in a.as_slice(), i), k), carry);
+        out.push(v & LIMB_MASK);
+        carry = v >> 32;
+    }
+    if carry != 0 {
+        out.push(carry);
+    }
+    a = out;
+}
+
+fn big_mul_pow5(inout a: ChunkSeq[u64], k: i64) {
+    let mut left = k;
+    loop {
+        if !(left >= 13) {
+            break;
+        }
+        big_mul_add(inout a, POW5_13, 0);
+        left = wrapping_sub(left, 13);
+    }
+    let mut p: u64 = 1;
+    loop {
+        if !(left > 0) {
+            break;
+        }
+        p = wrapping_mul(p, 5);
+        left = wrapping_sub(left, 1);
+    }
+    big_mul_add(inout a, p, 0);
+}
+
+fn big_shl(in a: Slice[u64], bits: u64) -> ChunkSeq[u64] {
+    let words = bits >> 5;
+    let r = bits & 31;
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for i in 0..words {
+        out.push(0);
+    }
+    let mut carry: u64 = 0;
+    for i in 0..a.len() {
+        let v = (limb(in a, i) << r) | carry;
+        out.push(v & LIMB_MASK);
+        carry = v >> 32;
+    }
+    if carry != 0 {
+        out.push(carry);
+    }
+    out
+}
+
+fn big_top(in a: Slice[u64]) -> u64 {
+    let mut n = a.len();
+    loop {
+        if !(n > 0 && limb(in a, wrapping_sub(n, 1)) == 0) {
+            break;
+        }
+        n = wrapping_sub(n, 1);
+    }
+    n
+}
+
+fn big_cmp(in a: Slice[u64], in b: Slice[u64]) -> i64 {
+    let na = big_top(in a);
+    let nb = big_top(in b);
+    if na != nb {
+        return if na < nb {
+            -1
+        } else {
+            1
+        };
+    }
+    let mut i = na;
+    loop {
+        if !(i > 0) {
+            break;
+        }
+        i = wrapping_sub(i, 1);
+        let x = limb(in a, i);
+        let y = limb(in b, i);
+        if x != y {
+            return if x < y {
+                -1
+            } else {
+                1
+            };
+        }
+    }
+    0
+}
+
+// The sign of `digits * 10^k - m * 2^e`.
+fn exact_cmp(in digits: Slice[u64], k: i64, m: u64, e: i64) -> i64 {
+    let mut a: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    a.extend(in digits);
+    let mut b: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    b.push(m & LIMB_MASK);
+    b.push(m >> 32);
+    let mut pa: i64 = 0;
+    let mut pb: i64 = e;
+    if k >= 0 {
+        big_mul_pow5(inout a, k);
+        pa = k;
+    } else {
+        big_mul_pow5(inout b, wrapping_sub(0, k));
+        pb = wrapping_sub(e, k);
+    }
+    if pa > pb {
+        let a2 = big_shl(in a.as_slice(), wrapping_u64(wrapping_sub(pa, pb)));
+        return big_cmp(in a2.as_slice(), in b.as_slice());
+    }
+    let b2 = big_shl(in b.as_slice(), wrapping_u64(wrapping_sub(pb, pa)));
+    big_cmp(in a.as_slice(), in b2.as_slice())
+}
+
+// A positive double's bits as `m * 2^e`.
+fn bits_parts(x: u64) -> (u64, i64) {
+    let biased = x >> 52;
+    let frac = x & wrapping_sub(HIDDEN, 1);
+    if biased == 0 {
+        return (frac, -1074);
+    }
+    (frac | HIDDEN, wrapping_sub(wrapping_i64(biased), 1075))
+}
+
+// A JSON number's correctly rounded double (round half to even).
+fn exact_bits(in text: Slice[u8]) -> u64 {
+    let mut i: u64 = 0;
+    let n = text.len();
+    let mut sign: u64 = 0;
+    if sbyte(in text, 0) == 45 {
+        sign = 9223372036854775808;
+        i = 1;
+    }
+    let mut digits: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut count: i64 = 0;
+    let mut frac: i64 = 0;
+    let mut in_frac = false;
+    loop {
+        if !(i < n) {
+            break;
+        }
+        let c = sbyte(in text, i);
+        if c == 46 {
+            in_frac = true;
+        } else if c >= 48 && c <= 57 {
+            if count > 0 || c != 48 {
+                big_mul_add(inout digits, 10, wrapping_sub(c, 48));
+                count = wrapping_add(count, 1);
+            }
+            if in_frac {
+                frac = wrapping_add(frac, 1);
+            }
+        } else {
+            break;
+        }
+        i = wrapping_add(i, 1);
+    }
+    let mut exp: i64 = 0;
+    if i < n {
+        i = wrapping_add(i, 1);
+        let mut neg = false;
+        let c = sbyte(in text, i);
+        if c == 45 || c == 43 {
+            neg = c == 45;
+            i = wrapping_add(i, 1);
+        }
+        loop {
+            if !(i < n) {
+                break;
+            }
+            let d = sbyte(in text, i);
+            if exp < 100000 {
+                exp = wrapping_add(wrapping_mul(exp, 10), wrapping_i64(wrapping_sub(d, 48)));
+            }
+            i = wrapping_add(i, 1);
+        }
+        if neg {
+            exp = wrapping_sub(0, exp);
+        }
+    }
+    if count == 0 {
+        return sign;
+    }
+    let k = wrapping_sub(exp, frac);
+    let magnitude = wrapping_add(k, count);
+    if magnitude > 310 {
+        return INF_BITS | sign;
+    }
+    if magnitude < -330 {
+        return sign;
+    }
+    // The largest double at or below the value: value(lo) <= input, and
+    // hi is +inf or above the input.
+    let mut lo: u64 = 0;
+    let mut hi: u64 = INF_BITS;
+    loop {
+        if !(wrapping_sub(hi, lo) > 1) {
+            break;
+        }
+        let mid = wrapping_add(lo, wrapping_sub(hi, lo) >> 1);
+        let (m, e) = bits_parts(mid);
+        if exact_cmp(in digits.as_slice(), k, m, e) >= 0 {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    let (m, e) = bits_parts(lo);
+    if exact_cmp(in digits.as_slice(), k, m, e) == 0 {
+        return lo | sign;
+    }
+    let half = exact_cmp(
+        in digits.as_slice(),
+        k,
+        wrapping_add(wrapping_mul(m, 2), 1),
+        wrapping_sub(e, 1)
+    );
+    if half > 0 || (half == 0 && lo & 1 == 1) {
+        return wrapping_add(lo, 1) | sign;
+    }
+    lo | sign
+}
+
+// `Datetime`'s Display: the date, `T`, the time with at most nine
+// fraction digits and no trailing zeros, then `Z` or `+hh:mm`.
+fn put_datetime(inout m: ChunkSeq[u8], in src: Slice[u8], n: Node) {
+    let mut i = n.s;
+    let b = n.e;
+    let has_date = wrapping_add(i, 4) < b && sbyte(in src, wrapping_add(i, 4)) == 45;
+    if has_date {
+        for j in i..wrapping_add(i, 10) {
+            m.push(wrapping_u8(sbyte(in src, j)));
+        }
+        i = wrapping_add(i, 10);
+        if i < b {
+            m.push(84);
+            i = wrapping_add(i, 1);
+        }
+    }
+    if i < b {
+        for j in i..wrapping_add(i, 8) {
+            m.push(wrapping_u8(sbyte(in src, j)));
+        }
+        i = wrapping_add(i, 8);
+        if sbyte(in src, i) == 46 {
+            i = wrapping_add(i, 1);
+            let mut frac: ChunkSeq[u8] = ChunkSeq::new[u8]();
+            loop {
+                let c = sbyte(in src, i);
+                if c < 48 || c > 57 {
+                    break;
+                }
+                if frac.len() < 9 {
+                    frac.push(wrapping_u8(c));
+                }
+                i = wrapping_add(i, 1);
+            }
+            loop {
+                match frac.pop() {
+                    Option::Some(c) => {
+                        if c != 48 {
+                            frac.push(c);
+                            break;
+                        }
+                    }
+                    Option::None => {
+                        break;
+                    }
+                }
+            }
+            if frac.len() > 0 {
+                m.push(46);
+                m.extend(in frac.as_slice());
+            }
+        }
+        let c = sbyte(in src, i);
+        if c == 90 || c == 122 {
+            m.push(90);
+        } else if c == 43 || c == 45 {
+            let zero = sbyte(in src, wrapping_add(i, 1)) == 48
+                && sbyte(in src, wrapping_add(i, 2)) == 48
+                && sbyte(in src, wrapping_add(i, 4)) == 48
+                && sbyte(in src, wrapping_add(i, 5)) == 48;
+            if zero {
+                m.push(43);
+            } else {
+                m.push(wrapping_u8(c));
+            }
+            for j in wrapping_add(i, 1)..wrapping_add(i, 6) {
+                m.push(wrapping_u8(sbyte(in src, j)));
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------- JSON
+
+// serde_json's string escape: runs of plain bytes are copied whole.
+fn json_str(inout out: ChunkSeq[u8], in t: Slice[u8], a: u64, b: u64) {
+    out.push(34);
+    let mut run = a;
+    let mut i = a;
+    loop {
+        if i >= b {
+            break;
+        }
+        let c = match t.try_get(i) {
+            Option::Some(v) => widen_u64(v),
+            Option::None => 0,
+        };
+        if c >= 32 && c != 34 && c != 92 {
+            i = wrapping_add(i, 1);
+            continue;
+        }
+        if i > run {
+            out.extend(in t[run..i]);
+        }
+        if c == 34 {
+            put(inout out, "\\\"");
+        } else if c == 92 {
+            put(inout out, "\\\\");
+        } else if c == 10 {
+            put(inout out, "\\n");
+        } else if c == 13 {
+            put(inout out, "\\r");
+        } else if c == 9 {
+            put(inout out, "\\t");
+        } else if c == 8 {
+            put(inout out, "\\b");
+        } else if c == 12 {
+            put(inout out, "\\f");
+        } else {
+            put(inout out, "\\u00");
+            out.push(hex(wrapping_shr_u64(c, 4)));
+            out.push(hex(c & 15));
+        }
+        i = wrapping_add(i, 1);
+        run = i;
+    }
+    if b > run {
+        out.extend(in t[run..b]);
+    }
+    out.push(34);
+}
+
+fn hex(v: u64) -> u8 {
+    if v < 10 {
+        wrapping_u8(wrapping_add(v, 48))
+    } else {
+        wrapping_u8(wrapping_add(v, 87))
+    }
+}
+
+// Whether text[a..a+an] sorts before text[b..b+bn] (byte order).
+fn text_less(in t: Slice[u8], a: u64, an: u64, b: u64, bn: u64) -> bool {
+    let n = if an < bn {
+        an
+    } else {
+        bn
+    };
+    for i in 0..n {
+        let x = sbyte(in t, wrapping_add(a, i));
+        let y = sbyte(in t, wrapping_add(b, i));
+        if x != y {
+            return x < y;
+        }
+    }
+    an < bn
+}
+
+// Sorts (offset, length, payload, payload2) quads of `q` by their text;
+// insertion sort, the lists are short. Stable.
+fn sort_quads(inout q: ChunkSeq[u64], in t: Slice[u8]) {
+    let n = wrapping_shr_u64(q.len(), 2);
+    for i in 1..n {
+        let mut j = i;
+        loop {
+            if j == 0 {
+                break;
+            }
+            let p = wrapping_mul(wrapping_sub(j, 1), 4);
+            let c = wrapping_mul(j, 4);
+            let pa = qw(in q, p);
+            let pn = qw(in q, wrapping_add(p, 1));
+            let ca = qw(in q, c);
+            let cn = qw(in q, wrapping_add(c, 1));
+            if !text_less(in t, ca, cn, pa, pn) {
+                break;
+            }
+            for f in 0..4 {
+                let x = qw(in q, wrapping_add(p, f));
+                let y = qw(in q, wrapping_add(c, f));
+                q.try_set(wrapping_add(p, f), y);
+                q.try_set(wrapping_add(c, f), x);
+            }
+            j = wrapping_sub(j, 1);
+        }
+    }
+}
+
+fn qw(in q: ChunkSeq[u64], i: u64) -> u64 {
+    match q.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn same_text(in t: Slice[u8], a: u64, an: u64, b: u64, bn: u64) -> bool {
+    if an != bn {
+        return false;
+    }
+    for i in 0..an {
+        if sbyte(in t, wrapping_add(a, i)) != sbyte(in t, wrapping_add(b, i)) {
+            return false;
+        }
+    }
+    true
+}
+
+// ---------------------------------------------------------- values
+
+fn string_of(inout d: D, in src: Slice[u8], id: u32, in expected: Str) -> bool {
+    let n = node(in d.doc.nodes, id);
+    if n.kind != K_STRING {
+        return invalid_type(inout d, in src, id, expected);
+    }
+    true
+}
+
+// `PackageName::parse` on text[a..b].
+fn name_ok(in d: D, a: u64, b: u64) -> bool {
+    let at = b > a && tbyte(in d, a) == 64;
+    let start = if at {
+        wrapping_add(a, 1)
+    } else {
+        a
+    };
+    let mut slash = b;
+    let mut slashes: u64 = 0;
+    for i in start..b {
+        if tbyte(in d, i) == 47 {
+            slashes = wrapping_add(slashes, 1);
+            slash = i;
+        }
+    }
+    if slashes != 1 {
+        return false;
+    }
+    if !component(in d, start, slash) || !component(in d, wrapping_add(slash, 1), b) {
+        return false;
+    }
+    if at {
+        return true;
+    }
+    wrapping_sub(slash, a) == 3
+        && tbyte(in d, a) == 115
+        && tbyte(in d, wrapping_add(a, 1)) == 116
+        && tbyte(in d, wrapping_add(a, 2)) == 100
+}
+
+fn component(in d: D, from: u64, to: u64) -> bool {
+    if from >= to {
+        return false;
+    }
+    let c0 = tbyte(in d, from);
+    if c0 < 97 || c0 > 122 {
+        return false;
+    }
+    for i in from..to {
+        let c = tbyte(in d, i);
+        if !((c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c == 45 || c == 95) {
+            return false;
+        }
+    }
+    true
+}
+
+fn name_error(inout d: D, a: u64, b: u64) -> bool {
+    let mut name: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for i in a..b {
+        name.push(tbyte(in d, i));
+    }
+    put(inout d.msg, "invalid package name '");
+    d.msg.extend(in name.as_slice());
+    put(inout d.msg, "'; use @org/name or reserved std/name");
+    fail(inout d)
+}
+
+// One value of field type `t` (not a struct) into `d.out`.
+fn value(inout d: D, in src: Slice[u8], id: u32, t: u64) -> bool {
+    let n = node(in d.doc.nodes, id);
+    if t >= T_OPT_STRUCT {
+        return struct_value(inout d, in src, id, wrapping_sub(t, T_OPT_STRUCT));
+    }
+    if t >= T_STRUCT {
+        return struct_value(inout d, in src, id, wrapping_sub(t, T_STRUCT));
+    }
+    if t == T_STRING || t == T_OPT_STRING {
+        if !string_of(inout d, in src, id, "a string") {
+            return false;
+        }
+        json_str(inout d.out, in d.doc.text.as_slice(), n.a, wrapping_add(n.a, n.b));
+        return true;
+    }
+    if t == T_NAME {
+        if !string_of(inout d, in src, id, "a string") {
+            return false;
+        }
+        let b = wrapping_add(n.a, n.b);
+        if !name_ok(in d, n.a, b) {
+            // PackageName::deserialize fails after the string's own
+            // deserializer returned: the caller's span applies.
+            return name_error(inout d, n.a, b);
+        }
+        json_str(inout d.out, in d.doc.text.as_slice(), n.a, b);
+        return true;
+    }
+    if t == T_VERSION || t == T_REQ {
+        if !string_of(inout d, in src, id, "semver version") {
+            return false;
+        }
+        return semver_value(inout d, id, t == T_REQ);
+    }
+    if t == T_BOOL || t == T_BOOL_TRUE {
+        if n.kind != K_BOOL {
+            return invalid_type(inout d, in src, id, "a boolean");
+        }
+        if n.a == 1 {
+            put(inout d.out, "true");
+        } else {
+            put(inout d.out, "false");
+        }
+        return true;
+    }
+    if t == T_OPT_U64 || t == T_OPT_U32 {
+        if n.kind != K_INTEGER {
+            if t == T_OPT_U64 {
+                return invalid_type(inout d, in src, id, "u64");
+            }
+            return invalid_type(inout d, in src, id, "u32");
+        }
+        let negative = wrapping_shr_u64(n.a, 63) == 1;
+        if negative || (t == T_OPT_U32 && n.a > 4294967295) {
+            put(inout d.msg, "invalid value: integer `");
+            put_i64(inout d.msg, n.a);
+            if t == T_OPT_U64 {
+                put(inout d.msg, "`, expected u64");
+            } else {
+                put(inout d.msg, "`, expected u32");
+            }
+            fail(inout d);
+            return at_item(inout d, id);
+        }
+        put_dec(inout d.out, n.a);
+        return true;
+    }
+    if t == T_FEATURES || t == T_DEPENDENCIES {
+        return map_value(inout d, in src, id, t == T_DEPENDENCIES);
+    }
+    seq_value(inout d, in src, id, t)
+}
+
+// Version and VersionReq: their parse error as the custom message, or the
+// Display text as JSON.
+fn semver_value(inout d: D, id: u32, req: bool) -> bool {
+    let n = node(in d.doc.nodes, id);
+    let a = n.a;
+    let b = wrapping_add(n.a, n.b);
+    let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    if !req {
+        let (ok, _) = parse_version(inout m, in d.doc.text.as_slice(), a, b);
+        if !ok {
+            d.msg.extend(in m.as_slice());
+            fail(inout d);
+            return at_item(inout d, id);
+        }
+        // A valid version's Display is its text.
+        json_str(inout d.out, in d.doc.text.as_slice(), a, b);
+        return true;
+    }
+    let mut cs: ChunkSeq[SCmp] = ChunkSeq::new[SCmp]();
+    if !parse_req(inout m, in d.doc.text.as_slice(), a, b, inout cs) {
+        d.msg.extend(in m.as_slice());
+        fail(inout d);
+        return at_item(inout d, id);
+    }
+    let mut text: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    if cs.len() == 0 {
+        text.push(42);
+    }
+    for i in 0..cs.len() {
+        match cs.try_get(i) {
+            Option::Some(c) => {
+                if i > 0 {
+                    put(inout text, ", ");
+                }
+                put_comparator(inout text, in d.doc.text.as_slice(), c);
+            }
+            Option::None => (),
+        }
+    }
+    json_str(inout d.out, in text.as_slice(), 0, text.len());
+    true
+}
+
+// `Comparator`'s Display.
+fn put_comparator(inout m: ChunkSeq[u8], in t: Slice[u8], c: SCmp) {
+    if c.op == OP_EXACT {
+        m.push(61);
+    } else if c.op == OP_GREATER {
+        m.push(62);
+    } else if c.op == OP_GREATER_EQ {
+        put(inout m, ">=");
+    } else if c.op == OP_LESS {
+        m.push(60);
+    } else if c.op == OP_LESS_EQ {
+        put(inout m, "<=");
+    } else if c.op == OP_TILDE {
+        m.push(126);
+    } else if c.op == OP_CARET {
+        m.push(94);
+    }
+    put_dec(inout m, c.major);
+    if c.has_minor {
+        m.push(46);
+        put_dec(inout m, c.minor);
+        if c.has_patch {
+            m.push(46);
+            put_dec(inout m, c.patch);
+            if c.pre_b > c.pre_a {
+                m.push(45);
+                m.extend(in t[c.pre_a..c.pre_b]);
+            }
+        } else if c.op == OP_WILDCARD {
+            put(inout m, ".*");
+        }
+    } else if c.op == OP_WILDCARD {
+        put(inout m, ".*");
+    }
+}
+
+// Vec<String> and the BTreeSets: an array (or array of tables) of
+// strings; a set is sorted and deduplicated.
+fn seq_value(inout d: D, in src: Slice[u8], id: u32, t: u64) -> bool {
+    let n = node(in d.doc.nodes, id);
+    if n.kind != K_ARRAY && n.kind != K_AOT {
+        return invalid_type(inout d, in src, id, "a sequence");
+    }
+    let mut q: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut e = n.first;
+    loop {
+        if e == NONE {
+            break;
+        }
+        let x = ent(in d.doc.ents, e);
+        let v = node(in d.doc.nodes, x.child);
+        if v.kind != K_STRING {
+            return invalid_type(inout d, in src, x.child, "a string");
+        }
+        let b = wrapping_add(v.a, v.b);
+        if t == T_NAME_SET && !name_ok(in d, v.a, b) {
+            // PackageName::deserialize fails after the element's own
+            // deserializer returned, so the array's span applies.
+            name_error(inout d, v.a, b);
+            return at_item(inout d, id);
+        }
+        q.push(v.a);
+        q.push(v.b);
+        q.push(0);
+        q.push(0);
+        e = x.next;
+    }
+    if t != T_STRING_VEC {
+        sort_quads(inout q, in d.doc.text.as_slice());
+    }
+    d.out.push(91);
+    let count = wrapping_shr_u64(q.len(), 2);
+    let mut written: u64 = 0;
+    let mut last_a: u64 = 0;
+    let mut last_n: u64 = 0;
+    for i in 0..count {
+        let a = qw(in q, wrapping_mul(i, 4));
+        let len = qw(in q, wrapping_add(wrapping_mul(i, 4), 1));
+        if t != T_STRING_VEC
+            && written > 0
+            && same_text(in d.doc.text.as_slice(), a, len, last_a, last_n) {
+            continue;
+        }
+        if written > 0 {
+            d.out.push(44);
+        }
+        json_str(inout d.out, in d.doc.text.as_slice(), a, wrapping_add(a, len));
+        written = wrapping_add(written, 1);
+        last_a = a;
+        last_n = len;
+    }
+    d.out.push(93);
+    true
+}
+
+// BTreeMap<String, Feature> and BTreeMap<PackageName, Dependency>.
+fn map_value(inout d: D, in src: Slice[u8], id: u32, deps: bool) -> bool {
+    let n = node(in d.doc.nodes, id);
+    let k = if deps {
+        S_DEPENDENCY
+    } else {
+        S_FEATURE
+    };
+    if n.kind == K_DATETIME {
+        return datetime_as_map(inout d, in src, id, k);
+    }
+    if n.kind != K_TABLE && n.kind != K_INLINE {
+        return invalid_type(inout d, in src, id, "a map");
+    }
+    // Entries: key offset, key length, JSON start, JSON end (in `scratch`).
+    let mut q: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut scratch: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut e = n.first;
+    loop {
+        if e == NONE {
+            break;
+        }
+        let x = ent(in d.doc.ents, e);
+        if deps && !name_ok(in d, x.koff, wrapping_add(x.koff, x.klen)) {
+            name_error(inout d, x.koff, wrapping_add(x.koff, x.klen));
+            span_if_none(inout d, true, x.ks, x.ke);
+            return false;
+        }
+        let mark = d.out.len();
+        if !entry_value(inout d, in src, x, wrapping_add(T_STRUCT, k)) {
+            return false;
+        }
+        let a = scratch.len();
+        scratch.extend(in d.out[mark..d.out.len()]);
+        d.out.truncate(mark);
+        q.push(x.koff);
+        q.push(x.klen);
+        q.push(a);
+        q.push(scratch.len());
+        e = x.next;
+    }
+    sort_quads(inout q, in d.doc.text.as_slice());
+    d.out.push(123);
+    let count = wrapping_shr_u64(q.len(), 2);
+    for i in 0..count {
+        let base = wrapping_mul(i, 4);
+        if i > 0 {
+            d.out.push(44);
+        }
+        let a = qw(in q, base);
+        json_str(
+            inout d.out,
+            in d.doc.text.as_slice(),
+            a,
+            wrapping_add(a, qw(in q, wrapping_add(base, 1)))
+        );
+        d.out.push(58);
+        d.out.extend(in scratch[qw(in q, wrapping_add(base, 2))..qw(in q, wrapping_add(base, 3))]);
+    }
+    d.out.push(125);
+    true
+}
+
+// A datetime where a map is expected: one entry, `$__toml_private_datetime`
+// mapped to the datetime's text.
+fn datetime_as_map(inout d: D, in src: Slice[u8], id: u32, k: u64) -> bool {
+    let n = node(in d.doc.nodes, id);
+    if k == S_DEPENDENCY {
+        put(inout d.msg, "invalid package name '");
+        put(inout d.msg, DATETIME_KEY);
+        put(inout d.msg, "'; use @org/name or reserved std/name");
+    } else {
+        put(inout d.msg, "invalid type: string \"");
+        put_datetime(inout d.msg, in src, n);
+        put(inout d.msg, "\", expected struct ");
+        put(inout d.msg, struct_name(k));
+    }
+    fail(inout d);
+    at_item(inout d, id)
+}
+
+// `next_value_seed`: the entry's value, its errors spanned by the value
+// (or the key) and keyed by the key.
+fn entry_value(inout d: D, in src: Slice[u8], x: Ent, t: u64) -> bool {
+    if value(inout d, in src, x.child, t) {
+        return true;
+    }
+    let v = node(in d.doc.nodes, x.child);
+    if v.has_span {
+        span_if_none(inout d, true, v.s, v.e);
+    } else {
+        span_if_none(inout d, true, x.ks, x.ke);
+    }
+    // add_key inserts at the front: the outermost key ends up first.
+    let mut keys: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    keys.push(x.koff);
+    keys.push(x.klen);
+    keys.extend(in d.keys.as_slice());
+    d.keys = keys;
+    false
+}
+
+// A derived struct with `deny_unknown_fields`.
+fn struct_value(inout d: D, in src: Slice[u8], id: u32, k: u64) -> bool {
+    let n = node(in d.doc.nodes, id);
+    if n.kind == K_DATETIME {
+        // visit_map over DatetimeDeserializer: its one key is unknown.
+        let mut key: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        put(inout key, DATETIME_KEY);
+        unknown_field(inout d, in key, k);
+        return at_item(inout d, id);
+    }
+    if n.kind == K_ARRAY || n.kind == K_AOT {
+        return struct_from_seq(inout d, in src, id, k);
+    }
+    if n.kind != K_TABLE && n.kind != K_INLINE {
+        return invalid_type_struct(inout d, in src, id, k);
+    }
+    let count = field_count(k);
+    // Per field: JSON start and end in `d.out`, or NONE.
+    let mut at: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for i in 0..count {
+        at.push(4294967295);
+        at.push(0);
+    }
+    let mark = d.out.len();
+    let mut e = n.first;
+    loop {
+        if e == NONE {
+            break;
+        }
+        let x = ent(in d.doc.ents, e);
+        let mut f = field_of(k, x.hash);
+        if f < count
+            && !same_name(
+                in d.doc.text.as_slice(),
+                x.koff,
+                x.klen,
+                in field_name(k, f).as_bytes()
+            ) {
+            f = count;
+        }
+        if f == count {
+            let mut key: ChunkSeq[u8] = ChunkSeq::new[u8]();
+            for j in x.koff..wrapping_add(x.koff, x.klen) {
+                key.push(tbyte(in d, j));
+            }
+            unknown_field(inout d, in key, k);
+            span_if_none(inout d, true, x.ks, x.ke);
+            return false;
+        }
+        let start = d.out.len();
+        if !entry_value(inout d, in src, x, field_type(k, f)) {
+            return false;
+        }
+        at.try_set(wrapping_mul(f, 2), start);
+        at.try_set(wrapping_add(wrapping_mul(f, 2), 1), d.out.len());
+        e = x.next;
+    }
+    // Required fields, in declaration order.
+    let mut json: ChunkSeq[u8] = ChunkSeq::with_capacity(
+        wrapping_add(wrapping_sub(d.out.len(), mark), 128)
+    );
+    json.push(123);
+    let mut first = true;
+    for i in 0..count {
+        let s = qw(in at, wrapping_mul(i, 2));
+        let t = field_type(k, i);
+        let absent = s == 4294967295;
+        if absent && !has_default_json(t) {
+            put(inout d.msg, "missing field `");
+            put(inout d.msg, field_name(k, i));
+            put(inout d.msg, "`");
+            fail(inout d);
+            return at_item(inout d, id);
+        }
+        let e = qw(in at, wrapping_add(wrapping_mul(i, 2), 1));
+        // `skip_serializing_if`: a missing `vsys` or `path` is skipped too.
+        if (absent && skippable(k, i)) || (!absent && skipped(k, i, in d.out[s..e])) {
+            continue;
+        }
+        if !first {
+            json.push(44);
+        }
+        first = false;
+        json.push(34);
+        put(inout json, field_name(k, i));
+        json.push(34);
+        json.push(58);
+        if absent {
+            put_default(inout json, t);
+        } else {
+            json.extend(in d.out[s..e]);
+        }
+    }
+    json.push(125);
+    d.out.truncate(mark);
+    d.out.extend(in json.as_slice());
+    true
+}
+
+fn has_default_json(t: u64) -> bool {
+    !(
+        t == T_NAME
+            || t == T_VERSION
+            || t == T_REQ
+            || t == T_STRING
+            || (t >= T_STRUCT && t < T_OPT_STRUCT)
+    )
+}
+
+fn skippable(k: u64, i: u64) -> bool {
+    (k == S_PACKAGE && i == 6) || (k == S_DEPENDENCY && i == 4)
+}
+
+// Whether field i has `#[serde(default)]` (an `Option` without it is
+// still required in a sequence).
+fn has_default(k: u64, i: u64) -> bool {
+    let t = field_type(k, i);
+    if t == T_OPT_STRING {
+        return k == S_DEPENDENCY;
+    }
+    if t == T_OPT_U64 || t == T_OPT_U32 || t >= T_OPT_STRUCT {
+        return false;
+    }
+    has_default_json(t)
+}
+
+// The derived `visit_seq`: fields in declaration order from the elements;
+// a missing one takes its default or is `invalid length`.
+fn struct_from_seq(inout d: D, in src: Slice[u8], id: u32, k: u64) -> bool {
+    let n = node(in d.doc.nodes, id);
+    let count = field_count(k);
+    let mut json: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    json.push(123);
+    let mut first = true;
+    let mut e = n.first;
+    for i in 0..count {
+        let t = field_type(k, i);
+        let mark = d.out.len();
+        if e != NONE {
+            let x = ent(in d.doc.ents, e);
+            if !value(inout d, in src, x.child, t) {
+                return false;
+            }
+            e = x.next;
+        } else if has_default(k, i) {
+            put_default(inout d.out, t);
+        } else {
+            put(inout d.msg, "invalid length ");
+            put_dec(inout d.msg, i);
+            put(inout d.msg, ", expected struct ");
+            put(inout d.msg, struct_name(k));
+            put(inout d.msg, " with ");
+            put_dec(inout d.msg, count);
+            if count == 1 {
+                put(inout d.msg, " element");
+            } else {
+                put(inout d.msg, " elements");
+            }
+            fail(inout d);
+            return at_item(inout d, id);
+        }
+        let mut field: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        field.extend(in d.out[mark..d.out.len()]);
+        d.out.truncate(mark);
+        if skipped(k, i, in field.as_slice()) {
+            continue;
+        }
+        if !first {
+            json.push(44);
+        }
+        first = false;
+        let name = field_name(k, i).as_bytes();
+        json_str(inout json, in name, 0, name.len());
+        json.push(58);
+        json.extend(in field.as_slice());
+    }
+    json.push(125);
+    d.out.extend(in json.as_slice());
+    true
+}
+
+// The field whose name has FNV-1a hash `h` (the key's `Ent.hash`), or
+// `field_count(k)`; the caller confirms the bytes.
+fn field_of(k: u64, h: u64) -> u64 {
+    if k == S_MANIFEST {
+        if h == 0x53cf3eec39cf731b {
+            0
+        } else if h == 0xbe45a3a6ee3c626a {
+            1
+        } else if h == 0xccfa12bb6c45a400 {
+            2
+        } else if h == 0x98376ace5443af45 {
+            3
+        } else if h == 0x805a48bccf7b6723 {
+            4
+        } else if h == 0xf43118ca9bca7b5e {
+            5
+        } else {
+            6
+        }
+    } else if k == S_PACKAGE {
+        if h == 0xc4bcadba8e631b86 {
+            0
+        } else if h == 0xbb62c62c9808ea37 {
+            1
+        } else if h == 0xe04368a1e3ac3611 {
+            2
+        } else if h == 0x31c81591587fa9c4 {
+            3
+        } else if h == 0xe634574e501326a7 {
+            4
+        } else if h == 0xeb33229df80f9daa {
+            5
+        } else if h == 0xdeb11201459a3a32 {
+            6
+        } else {
+            7
+        }
+    } else if k == S_DEPENDENCY {
+        if h == 0xbb62c62c9808ea37 {
+            0
+        } else if h == 0xfd8b23cc3ea96185 {
+            1
+        } else if h == 0x629576c6b305d539 {
+            2
+        } else if h == 0xbe45a3a6ee3c626a {
+            3
+        } else if h == 0x3c52d0debd70676 {
+            4
+        } else {
+            5
+        }
+    } else if k == S_FEATURE {
+        if h == 0x5a42afb309cdbbde {
+            0
+        } else if h == 0xa5ef07674280b91f {
+            1
+        } else if h == 0xbe45a3a6ee3c626a {
+            2
+        } else if h == 0x2f0e67c72f983a81 {
+            3
+        } else {
+            4
+        }
+    } else if k == S_SANDBOX {
+        if h == 0xacfc82293c04634a {
+            0
+        } else if h == 0xd31b719dc8463f9 {
+            1
+        } else if h == 0x27e4f776d66eea15 {
+            2
+        } else if h == 0xf51cc97a59d8acf {
+            3
+        } else {
+            4
+        }
+    } else if k == S_POLICY {
+        if h == 0x64a3f8b478e4050e {
+            0
+        } else if h == 0xc1b9146a605edd62 {
+            1
+        } else if h == 0xc05393167fba7945 {
+            2
+        } else {
+            3
+        }
+    } else if k == S_RESOLVER {
+        if h == 0xbfe9e4a0d3aa473f {
+            0
+        } else {
+            1
+        }
+    } else if k == S_VERIFICATION {
+        if h == 0xf3ad96d5ad67d22f {
+            0
+        } else {
+            1
+        }
+    } else {
+        0
+    }
+}
+
+fn same_name(in t: Slice[u8], a: u64, n: u64, in name: Slice[u8]) -> bool {
+    if n != name.len() {
+        return false;
+    }
+    for i in 0..n {
+        if sbyte(in t, wrapping_add(a, i)) != sbyte(in name, i) {
+            return false;
+        }
+    }
+    true
+}
+
+// ---------------------------------------------------------- entry
+
+// `toml::from_str::<Manifest>(src)`: (true, JSON) or (false, the error's
+// Display text).
+pub fn manifest_from_toml(in src: Slice[u8]) -> (bool, ChunkSeq[u8]) {
+    let doc = parse(in src);
+    if !doc.ok {
+        let m = doc.message;
+        return (false, m);
+    }
+    let root = doc.root;
+    let mut d = D {
+        doc: doc,
+        failed: false,
+        has_span: false,
+        s: 0,
+        e: 0,
+        msg: ChunkSeq::new[u8](),
+        keys: ChunkSeq::new[u64](),
+        out: ChunkSeq::new[u8]()
+    };
+    if struct_value(inout d, in src, root, S_MANIFEST) {
+        return (true, d.out);
+    }
+    let mut keys: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let nk = wrapping_shr_u64(d.keys.len(), 1);
+    for i in 0..nk {
+        if i > 0 {
+            keys.push(46);
+        }
+        let a = qw(in d.keys, wrapping_mul(i, 2));
+        let len = qw(in d.keys, wrapping_add(wrapping_mul(i, 2), 1));
+        for j in a..wrapping_add(a, len) {
+            keys.push(tbyte(in d, j));
+        }
+    }
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    render_error(inout out, in src, d.has_span, d.s, d.e, in d.msg, in keys);
+    (false, out)
+}

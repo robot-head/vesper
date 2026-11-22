@@ -164,3 +164,4 @@ the Rust lines deleted.
 | Flip | Lane | Differential | Speed (ABBA) | Rust deleted | PR |
 |---|---|---|---|--:|---|
 | `bounds-hoist` (PASS; compiler module, its 2,017 lines go at the retirement) | SH3-12 | 0 differences on 325 cases; tests 2/2 pass | pass 1.15x [1.06x, 1.22x] n=12; build 1.07x [1.01x, 1.09x] n=30 | 0 | #1251 part 4 |
+| `optimize` (PASS, compiler module) | G1-4 | 0 differences; tests 2/2 pass | checker 1.12x [1.00x, 1.19x] n=12; producer 0.70x [0.64x, 0.74x] n=12; pass 0.79x [0.70x, 0.83x] n=12 | 0 (2,867 at the retirement) | #1501 |
