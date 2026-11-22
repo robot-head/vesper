@@ -15,8 +15,9 @@ const tooltip = form.querySelector('.editor-tooltip');
 const tooltipCode = tooltip.querySelector('strong');
 const tooltipMessage = tooltip.querySelector('div');
 
-if ('Worker' in globalThis && 'WebAssembly' in globalThis) {
+if (typeof Worker === 'function' && typeof WebAssembly === 'object') {
   editor.hidden = false;
+  editor.parentElement.querySelector('[data-tour-fallback]').hidden = true;
   let worker, timer, highlightTimer, checkTimer, checkTimeout, checking, pending;
   let diagnosticList = [];
   let diagnosticRanges = [];

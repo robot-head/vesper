@@ -22,8 +22,8 @@ export async function checkTourWasm(dist, tour, pages) {
     const testCase = pages.get(file).source.match(/name="test_case" value="([^"]+)"/)?.[1];
     const result = invoke(source, mode, testCase);
     const expected = repair ?? expectedErrors.get(file);
+    assert.match(pages.get(file).source, /<section data-tour-fallback><h2>Starting code<\/h2>/, file + ' · missing visible static fallback');
     if (repair) {
-      assert.match(pages.get(file).source, /<noscript><h2>Starting code<\/h2>/, file + ' · missing no-script fallback');
       assert(result.diagnostics?.some(d => d.code === repair && d.end >= d.start), file + ' · inline diagnostic');
       const solution = pages.get(file).source.match(/class="tour-solution">[\s\S]*?<code data-lang="vesper">([\s\S]*?)<\/code>/)?.[1];
       assert(solution, file + ' · missing solution');

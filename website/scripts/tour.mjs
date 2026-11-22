@@ -119,13 +119,14 @@ function editor(program) {
 
 function fallbackListings(body, program) {
   const { error: repair, source } = program;
-  if (!repair) return `<noscript><h2>Starting code</h2><pre tabindex="0"><code data-lang="vesper">${escape(source.trimEnd())}</code></pre></noscript>`;
+  const fallback = listing => `<section data-tour-fallback><h2>Starting code</h2>${listing}</section>`;
+  if (!repair) return fallback(`<pre tabindex="0"><code data-lang="vesper">${escape(source.trimEnd())}</code></pre>`);
   const fences = [...body.matchAll(/^~~~vesper(?: ([A-Z0-9_]+))?\n([\s\S]*?)^~~~$/gm)];
   const listing = ([, error, code]) =>
     `<pre tabindex="0"><code data-lang="vesper"${error ? ` data-error="${error}"` : ''}>${escape(code.trimEnd())}</code></pre>`;
   const starter = fences.find(([, error]) => error === repair);
   const solution = fences.find(([, error]) => !error);
-  return `<noscript><h2>Starting code</h2>${listing(starter)}</noscript>${
+  return `${fallback(listing(starter))}${
     solution ? `<details class="tour-solution"><summary>Show solution</summary>${listing(solution)}</details>` : ''
   }`;
 }

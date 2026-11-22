@@ -80,6 +80,7 @@ const tourEditors = tour.filter(file => pages.get(file).source.includes('data-to
 const lessonCount = tour.length - Object.keys(movedLessons).length;
 assert.equal(tourEditors.length, lessonCount, 'Each active lesson needs an editor');
 const { source: html } = pages.get('index.html');
+assert.match(html, /id="copy-status" role="status"/, 'Copy controls need a live status region');
 const visited = new Set();
 let current = 'tour/index.html', previous;
 while (current) {

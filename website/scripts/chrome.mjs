@@ -20,6 +20,7 @@ export function siteChrome(html, prefix = '', current = '') {
   const footer = `<footer><div class="wrap site-footer">
     <img data-brand-mark src="${prefix}brand/vesper-wordmark-dusk.svg" width="130" height="35" alt="Vesper">
     <nav aria-label="Footer navigation">${navigation}</nav>
+    <div class="sr-only" id="copy-status" role="status"></div>
   </div></footer>`;
   return html.replace('</head>', `<script src="${prefix}theme.js"></script>\n</head>`)
     .replace('<!-- site-header -->', header).replace('<!-- site-footer -->', footer);
