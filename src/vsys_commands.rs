@@ -106,16 +106,9 @@ pub fn run(c: Command<'_>) -> Result<(), String> {
     }
 }
 
-/// Bind the CLI's foreign functions to evaluator calls.
-pub(crate) fn eval_host(
-    imports: &Imports,
-    command: &str,
-) -> Result<ffi_lowering::EvalHost, String> {
-    eval_host_in(imports, command, &[])
-}
-
-/// [`eval_host`], loading libraries from `search` first.
-fn eval_host_in(
+/// Bind the CLI's foreign functions to evaluator calls, loading libraries
+/// from `search` first.
+pub(crate) fn eval_host_in(
     imports: &Imports,
     command: &str,
     search: &[PathBuf],
@@ -159,7 +152,7 @@ fn host_symbols(
                         lib.shown()
                     )
                 })?;
-                out.push((f.symbol().to_owned(), address));
+                bind(&mut out, f.symbol(), address, command)?;
             }
             continue;
         }
@@ -171,10 +164,32 @@ fn host_symbols(
                     f.symbol()
                 )
             })?;
-            out.push(((*name).to_owned(), *address));
+            bind(&mut out, name, *address, command)?;
         }
     }
     Ok(out)
+}
+
+/// Add `symbol` at `address` to the host table. The JIT and the evaluator
+/// bind by symbol name, as a C linker does, so two libraries that resolve
+/// one name to different addresses are refused rather than letting one
+/// library's calls reach the other's function.
+fn bind(
+    out: &mut Vec<(String, *const u8)>,
+    symbol: &str,
+    address: *const u8,
+    command: &str,
+) -> Result<(), String> {
+    match out.iter().find(|(n, _)| n == symbol) {
+        Some((_, a)) if *a == address => Ok(()),
+        Some(_) => Err(format!(
+            "{command}: symbol '{symbol}' resolves to different functions in two imported libraries"
+        )),
+        None => {
+            out.push((symbol.to_owned(), address));
+            Ok(())
+        }
+    }
 }
 
 /// The shared libraries `jit`, `run` and `test` bind foreign symbols from
@@ -289,11 +304,11 @@ mod host_libraries {
 
     #[cfg(windows)]
     mod sys {
-        use std::{ffi::CStr, ffi::c_void, path::Path};
+        use std::{ffi::CStr, ffi::c_void, os::windows::ffi::OsStrExt, path::Path};
 
         #[link(name = "kernel32")]
         unsafe extern "system" {
-            fn LoadLibraryA(name: *const i8) -> *mut c_void;
+            fn LoadLibraryW(name: *const u16) -> *mut c_void;
             fn GetProcAddress(module: *mut c_void, name: *const i8) -> *mut c_void;
             fn GetLastError() -> u32;
         }
@@ -312,10 +327,14 @@ mod host_libraries {
         }
 
         pub fn load(path: &Path) -> Result<*mut c_void, String> {
-            let c = std::ffi::CString::new(path.to_string_lossy().as_bytes())
-                .map_err(|_| "a path with a NUL byte".to_owned())?;
-            // SAFETY: `c` is a terminated path; the module is never freed.
-            let h = unsafe { LoadLibraryA(c.as_ptr().cast()) };
+            // A wide path, so a directory outside the ANSI code page loads.
+            let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+            if wide[..wide.len() - 1].contains(&0) {
+                return Err("a path with a NUL character".into());
+            }
+            // SAFETY: `wide` is a terminated UTF-16 path; the module is
+            // never freed.
+            let h = unsafe { LoadLibraryW(wide.as_ptr()) };
             if h.is_null() {
                 // SAFETY: reads the thread's last error code.
                 return Err(format!("LoadLibrary error {}", unsafe { GetLastError() }));

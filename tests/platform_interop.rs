@@ -361,6 +361,50 @@ fn jit_loads_a_shared_library_from_link_search() {
             .arg(t.0.join("lib")));
         assert_eq!(out.trim(), "43", "{command}");
     }
+    // `vesper test` takes the same directories.
+    t.write(
+        "app/src/main.ves",
+        "pub fn main() -> u64 eff [Ffi[Twice]] {\n    Twice::twice_plus(20, 3)\n}\n\n\
+         fn test_twice() -> bool eff [Ffi[Twice]] {\n    Twice::twice_plus(20, 3) == 43\n}\n",
+    );
+    let err = fails(vesper().arg("test").arg(&dir));
+    assert!(err.contains("could not be loaded"), "{err}");
+    run(vesper()
+        .arg("test")
+        .arg(&dir)
+        .arg("--link-search")
+        .arg(t.0.join("lib")));
+    // A second library that defines the same symbol differently is refused:
+    // the JIT and the evaluator bind by name, as a C linker does.
+    t.write(
+        "lib/other.c",
+        "unsigned long long twice_plus(unsigned long long x, unsigned int y) { return x + y; }\n",
+    );
+    let status = Command::new("cc")
+        .args(["-shared", "-fPIC", "-o"])
+        .arg(t.0.join(format!("lib/libother.{ext}")))
+        .arg(t.0.join("lib/other.c"))
+        .status()
+        .unwrap();
+    assert!(status.success());
+    t.write(
+        "app/sys/other.vsys",
+        "sys library Other (target = \"@TARGET@\", abi = \"@ABI@\", link = \"dynamic\", name = \"other\", \
+         artifact = \"blake3:0000000000000000000000000000000000000000000000000000000000000000\") {\n    \
+         fn twice_plus(x: u64, y: u32) -> ForeignVal[u64];\n}\n",
+    );
+    t.write(
+        "app/Loom.toml",
+        "[package]\nname = \"@t/app\"\nversion = \"0.1.0\"\nedition = \"2026\"\ncapability_ceiling = [\"Ffi[Twice]\", \"Ffi[Other]\"]\nvsys = [\"sys/twice.vsys\", \"sys/other.vsys\"]\n",
+    );
+    let err = fails(
+        vesper()
+            .arg("jit")
+            .arg(&dir)
+            .arg("--link-search")
+            .arg(t.0.join("lib")),
+    );
+    assert!(err.contains("resolves to different functions"), "{err}");
 }
 
 /// G11: an executable with `.vsys` imports builds for Windows. It links

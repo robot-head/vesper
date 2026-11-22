@@ -54,8 +54,11 @@ every other library from a shared library:
   then `msvcrt.dll`.
 - any other link name: `lib<name>.so` / `lib<name>.dylib` / `<name>.dll`
   from the `--link-search` directories first, then the system search path
-  (`dlopen(RTLD_NOW | RTLD_GLOBAL)`, `LoadLibraryA`). The handle stays open
-  for the process.
+  (`dlopen(RTLD_NOW | RTLD_GLOBAL)`, `LoadLibraryW`). The handle stays open
+  for the process. `vesper test` takes `--link-search` too.
+- the JIT and the evaluator bind by symbol name, as a C linker does, so two
+  imported libraries that resolve one name to different functions are
+  refused.
 - a library that does not load, or lacks a symbol, is refused before
   running, with the loader's error.
 
