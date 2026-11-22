@@ -196,7 +196,8 @@ fn policy_matches_rust() {
     }
     std::panic::set_hook(quiet);
     eprintln!("policy: {bad} of {done} inputs differ ({skipped} skipped)");
-    let least = corpus_shard::Shard::from_environment().share(20);
+    // The slice has 28 inputs; shards take four-input blocks (8, 8, 8, 4).
+    let least = corpus_shard::Shard::from_environment().share(12);
     assert!(done > least, "only {done} inputs");
     assert_eq!(bad, 0);
 }
