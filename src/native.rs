@@ -2612,6 +2612,48 @@ struct Codegen<'a, 'b, M: Module> {
     /// written back when the call or place primitive that borrows them ends.
     element_writebacks: Vec<(ir::Value, ir::Value, Type)>,
 }
+/// The most place re-entries one hook request may make
+/// ([`Codegen::walk_instruction`]).
+const WALK_REENTRIES: usize = 64;
+/// The graph walk's plans for one instruction, lent to a hook
+/// ([`crate::codegen_swap::walk::plan`]).
+#[derive(Clone, Copy)]
+struct WalkPlans {
+    hoisted: bool,
+    homed: bool,
+    split_source: bool,
+    array: bool,
+    bound_early: bool,
+    placed: bool,
+}
+/// The walk's maps, lent to a hook for one request.
+struct WalkMaps<'r> {
+    pointers: &'r BTreeMap<u32, Variable>,
+    narrow: &'r BTreeMap<u32, (Variable, Type)>,
+    registers: &'r BTreeSet<u32>,
+    split: &'r BTreeMap<u32, aggregates::Split>,
+    operands: Vec<Option<u32>>,
+}
+impl crate::codegen_swap::walk::Maps for WalkMaps<'_> {
+    fn home(&self, var: u32) -> Option<u32> {
+        self.pointers.get(&var).map(|v| v.as_u32())
+    }
+    fn narrow(&self, var: u32) -> bool {
+        self.narrow.contains_key(&var)
+    }
+    fn register(&self, var: u32) -> bool {
+        self.registers.contains(&var)
+    }
+    fn split_words(&self, var: u32) -> Vec<u32> {
+        self.split
+            .get(&var)
+            .map(|s| s.leaves.iter().map(|l| l.var.as_u32()).collect())
+            .unwrap_or_default()
+    }
+    fn operand_var(&self, index: usize) -> Option<u32> {
+        self.operands.get(index).copied().flatten()
+    }
+}
 /// The Cranelift source location of source byte `offset`. Locations are
 /// byte offsets into the checked module's source; the all-ones value is
 /// Cranelift's "no location", so larger offsets saturate below it.
@@ -4031,15 +4073,42 @@ impl<M: Module> Codegen<'_, '_, M> {
                 };
                 // SH4 swap point (#1275): a family hook may emit this
                 // instruction (`codegen_swap`); none is installed by default.
-                let swapped = crate::codegen_swap::instruction(
-                    &mut self.b,
-                    &mut *self.m,
-                    self.world,
-                    self.program,
-                    (&f.name, i, inst_idx, inst),
-                    &values,
-                    &ty,
-                )?;
+                // The hook is lent the walk's state and may re-enter it
+                // (`codegen_swap::walk`, SH5 lane 1, #1324): `reentered`
+                // asks it again once the Rust arm below has emitted.
+                let mut walk_kept = Vec::new();
+                let (swapped, reentered) =
+                    if crate::codegen_swap::walk::wanted(self.world, &inst.op) {
+                        let plans = WalkPlans {
+                            hoisted: hoisted_reads.contains_key(&inst.dest),
+                            homed: matches!(&inst.op, Op::Read { root, .. }
+                            if homes.contains_key(&inst.dest) && self.vars.contains_key(root)),
+                            split_source: split_sources.contains_key(&inst.dest),
+                            array: match &inst.op {
+                                Op::Read { .. } => native_arrays::read_in_place(f, i, inst_idx),
+                                Op::Write { op, value, .. } => {
+                                    op.starts_with(crate::arrays::WRITE_PREFIX)
+                                        && native_arrays::written_pair(f, *value).is_some()
+                                }
+                                _ => false,
+                            },
+                            bound_early: matches!(&inst.op, Op::Bind { value, .. }
+                            if bound_early.contains(value)),
+                            placed: matches!(&inst.op, Op::Write { value, .. }
+                            if aggregates::placed(&home_pointers, *value)),
+                        };
+                        self.walk_instruction(
+                            f,
+                            (i, inst_idx, inst),
+                            &values,
+                            &ty,
+                            &registers,
+                            plans,
+                            &mut walk_kept,
+                        )?
+                    } else {
+                        (None, None)
+                    };
                 let value = match &inst.op {
                     _ if swapped.is_some() => swapped.expect("guarded by is_some"),
                     Op::Loop => self.zero(),
@@ -4596,6 +4665,19 @@ impl<M: Module> Codegen<'_, '_, M> {
                         self.local_types = old_types;
                         result?
                     }
+                };
+                let value = match reentered {
+                    Some(facts) => self.walk_resume(
+                        f,
+                        (i, inst_idx, inst),
+                        &values,
+                        &ty,
+                        &registers,
+                        &facts,
+                        &mut walk_kept,
+                        value,
+                    )?,
+                    None => value,
                 };
                 let value = self.coerce(value, Some(&ty));
                 let value = if matches!(ty, Type::Function { .. })
@@ -5398,6 +5480,350 @@ impl<M: Module> Codegen<'_, '_, M> {
             op,
             args,
         )
+    }
+    /// The facts of instruction `inst` that a hook reads through the lent
+    /// walk state ([`crate::codegen_swap::walk::query`]): built only when a
+    /// hook of the instruction's family is in effect.
+    fn walk_facts(
+        &self,
+        f: &crate::ir::FunctionIr,
+        (block, index, inst): (usize, usize, &crate::ir::Instruction),
+        ty: &Type,
+        plans: WalkPlans,
+    ) -> Result<crate::codegen_swap::walk::Facts, String> {
+        use crate::codegen_swap::walk::{Facts, NONE, flags, kind, plan};
+        use crate::ir::Op;
+        let var_word = |n: &str| self.vars.get(n).map_or(NONE, |v| u64::from(v.as_u32()));
+        let type_flags = |t: &Type, aggregate: u64, function: u64| -> Result<u64, String> {
+            let mut bits = 0;
+            if Layout::of(self.world, t)?.aggregate() {
+                bits |= aggregate;
+            }
+            if matches!(t, Type::Function { .. }) {
+                bits |= function;
+            }
+            Ok(bits)
+        };
+        // `Codegen::coerce` changes a value of type `t`.
+        let coerces = |t: &Type| {
+            crate::numeric::IntegerKind::from_type(t).is_some_and(|k| k.wide() || k.bits() < 64)
+        };
+        let place_flags = |root: &str, path: &[String]| -> Result<u64, String> {
+            let p = crate::check::Place {
+                root: root.into(),
+                path: path.to_vec(),
+            };
+            let t = self.ty(&ir_place_expr(&p, inst.span.clone()));
+            let mut bits = type_flags(&t, flags::PLACE_AGGREGATE, flags::PLACE_FUNCTION)?;
+            if coerces(&t) {
+                bits |= flags::PLACE_COERCES;
+            }
+            if self.world.constructor(root).is_some() {
+                bits |= flags::PLACE_CONSTRUCTOR;
+            }
+            Ok(bits)
+        };
+        let value_type = |id: &crate::ir::ValueId| {
+            f.values
+                .get(id)
+                .map(|t| crate::numeric::default_type(&substitute(t, &self.generic_vars)))
+                .ok_or_else(|| format!("undefined native IR value %{id}"))
+        };
+        let mut facts = Facts::default();
+        let mut bits = 0;
+        for (on, bit) in [
+            (plans.hoisted, plan::HOISTED),
+            (plans.homed, plan::HOMED),
+            (plans.split_source, plan::SPLIT_SOURCE),
+            (plans.array, plan::ARRAY),
+            (plans.bound_early, plan::BOUND_EARLY),
+            (plans.placed, plan::PLACED),
+            (!self.world.element_views.is_empty(), plan::ELEMENT_VIEWS),
+        ] {
+            if on {
+                bits |= bit;
+            }
+        }
+        let root_plan = |root: &str, bits: &mut u64| {
+            if self.split_of(root).is_some() {
+                *bits |= plan::SPLIT;
+            }
+        };
+        match &inst.op {
+            Op::Read {
+                root, path, pass, ..
+            } => {
+                facts.kind = kind::READ;
+                facts.place_var = var_word(root);
+                facts.path_len = path.len() as u64;
+                facts.pass = match pass {
+                    Pass::In => 0,
+                    Pass::Inout => 1,
+                    Pass::Sink => 2,
+                };
+                facts.flags = type_flags(ty, flags::RESULT_AGGREGATE, flags::RESULT_FUNCTION)?
+                    | place_flags(root, path)?;
+                root_plan(root, &mut bits);
+                if self.seq_drop_slot_kind(root).is_some() {
+                    bits |= plan::DROP_SLOT;
+                }
+            }
+            Op::Bind { pattern, value } => {
+                facts.kind = kind::BIND;
+                if let PatternKind::Bind(n) = &pattern.kind {
+                    facts.place_var = var_word(n);
+                    facts.path_len = 0;
+                    root_plan(n, &mut bits);
+                    if self.seq_drop_slot_kind(n).is_some() {
+                        bits |= plan::DROP_SLOT;
+                    }
+                }
+                facts.flags = type_flags(
+                    &value_type(value)?,
+                    flags::RESULT_AGGREGATE,
+                    flags::RESULT_FUNCTION,
+                )?;
+                if self.seq_is_fused(*value) {
+                    bits |= plan::FUSED;
+                }
+            }
+            Op::Write { place, op, value } => {
+                facts.kind = kind::WRITE;
+                let mut parts = place.split('.');
+                let root = parts.next().unwrap_or("");
+                let path: Vec<String> = parts.map(str::to_owned).collect();
+                facts.place_var = var_word(root);
+                facts.path_len = path.len() as u64;
+                facts.assign = u64::from(op == "=");
+                facts.flags = type_flags(
+                    &value_type(value)?,
+                    flags::RESULT_AGGREGATE,
+                    flags::RESULT_FUNCTION,
+                )? | place_flags(root, &path)?;
+                // `ir_temp` names the value with its substituted type, and
+                // `expr` of the assignment reads the checker's type of
+                // the span.
+                let temp = substitute(
+                    f.values.get(value).ok_or("IR value lacks a type")?,
+                    &self.generic_vars,
+                );
+                if coerces(&temp) {
+                    facts.flags |= flags::RESULT_COERCES;
+                }
+                let statement = crate::numeric::default_type(&substitute(
+                    self.world
+                        .types
+                        .get(&(inst.span.start, inst.span.end))
+                        .unwrap_or(&Type::Infer),
+                    &self.generic_vars,
+                ));
+                if coerces(&statement) {
+                    facts.flags |= flags::STATEMENT_COERCES;
+                }
+                root_plan(root, &mut bits);
+                if self.seq_drop_slot_kind(place).is_some() {
+                    bits |= plan::DROP_SLOT;
+                }
+                if op == "="
+                    && self.drops_enabled()
+                    && self
+                        .exits
+                        .last()
+                        .is_some_and(|t| t.replace.contains(&(block, index)))
+                {
+                    bits |= plan::REPLACES;
+                }
+            }
+            _ => {}
+        }
+        facts.plan = bits;
+        facts.optimize = u64::from(self.operands_only);
+        Ok(facts)
+    }
+    /// Asks the hook of `inst`'s family to emit it with the walk lent
+    /// ([`crate::codegen_swap::walk`]), emitting the places it re-enters
+    /// for. Answers the hook's value, or `None` for the Rust arm; with
+    /// `Some(facts)` second the hook re-entered the whole instruction and
+    /// is asked again after the Rust arm ([`Codegen::walk_resume`]).
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    fn walk_instruction(
+        &mut self,
+        f: &crate::ir::FunctionIr,
+        at: (usize, usize, &crate::ir::Instruction),
+        values: &BTreeMap<crate::ir::ValueId, ir::Value>,
+        ty: &Type,
+        registers: &BTreeMap<crate::ir::ValueId, Variable>,
+        plans: WalkPlans,
+        kept: &mut Vec<u64>,
+    ) -> Result<(Option<ir::Value>, Option<crate::codegen_swap::walk::Facts>), String> {
+        use crate::codegen_swap::walk::{Answer, reentry};
+        let facts = self.walk_facts(f, at, ty, plans)?;
+        for _ in 0..=WALK_REENTRIES {
+            match self.walk_call(f, at, values, ty, registers, &facts, kept)? {
+                Answer::Rust => return Ok((None, None)),
+                Answer::Value(v) => return Ok((Some(v), None)),
+                Answer::Reenter(reentry::INSTRUCTION) => return Ok((None, Some(facts))),
+                Answer::Reenter(kind) => {
+                    let v = self.walk_place(at.2, kind)?;
+                    kept.push(crate::codegen_swap::word(v));
+                }
+            }
+        }
+        Err(format!(
+            "codegen hook re-entered one instruction more than {WALK_REENTRIES} times"
+        ))
+    }
+    /// The hook's answer once the Rust arm emitted the instruction it
+    /// re-entered for, as `value`.
+    #[allow(clippy::too_many_arguments)]
+    fn walk_resume(
+        &mut self,
+        f: &crate::ir::FunctionIr,
+        at: (usize, usize, &crate::ir::Instruction),
+        values: &BTreeMap<crate::ir::ValueId, ir::Value>,
+        ty: &Type,
+        registers: &BTreeMap<crate::ir::ValueId, Variable>,
+        facts: &crate::codegen_swap::walk::Facts,
+        kept: &mut Vec<u64>,
+        value: ir::Value,
+    ) -> Result<ir::Value, String> {
+        use crate::codegen_swap::walk::Answer;
+        kept.push(crate::codegen_swap::word(value));
+        match self.walk_call(f, at, values, ty, registers, facts, kept)? {
+            Answer::Value(v) => Ok(v),
+            other => Err(format!(
+                "codegen hook re-entered an instruction and then answered {other:?}"
+            )),
+        }
+    }
+    /// One call of the hook with the walk lent, its effects applied.
+    #[allow(clippy::too_many_arguments)]
+    fn walk_call(
+        &mut self,
+        f: &crate::ir::FunctionIr,
+        (block, index, inst): (usize, usize, &crate::ir::Instruction),
+        values: &BTreeMap<crate::ir::ValueId, ir::Value>,
+        ty: &Type,
+        registers: &BTreeMap<crate::ir::ValueId, Variable>,
+        facts: &crate::codegen_swap::walk::Facts,
+        kept: &mut Vec<u64>,
+    ) -> Result<crate::codegen_swap::walk::Answer, String> {
+        let maps = WalkMaps {
+            pointers: &self.pointers,
+            narrow: &self.narrow_homes,
+            registers: &self.register_locals,
+            split: &self.split,
+            operands: crate::ir_inline::operands(&inst.op)
+                .iter()
+                .map(|id| registers.get(id).map(|v| v.as_u32()))
+                .collect(),
+        };
+        let (answer, effects) = crate::codegen_swap::walk::instruction(
+            &mut self.b,
+            &mut *self.m,
+            self.world,
+            self.program,
+            (&f.name, block, index, inst),
+            values,
+            ty,
+            facts,
+            &maps,
+            kept,
+        )?;
+        self.walk_apply(f, inst, &effects)?;
+        Ok(answer)
+    }
+    /// Applies a hook's walk effects: the bookkeeping of the Rust helpers
+    /// they stand for.
+    fn walk_apply(
+        &mut self,
+        f: &crate::ir::FunctionIr,
+        inst: &crate::ir::Instruction,
+        effects: &[crate::codegen_swap::walk::Effect],
+    ) -> Result<(), String> {
+        use crate::codegen_swap::walk::Effect;
+        for effect in effects {
+            match *effect {
+                // `use_var`
+                Effect::Used { var, value } => {
+                    let mut info = self.info(value);
+                    if let Some(stored) = self.variable_infos.get(&var) {
+                        info.merge(stored);
+                    }
+                    self.infos.insert(value, info);
+                }
+                // `def_var`
+                Effect::Defined { var, value } => {
+                    let info = self.info(value);
+                    self.variable_infos.entry(var).or_default().merge(&info);
+                }
+                // `store`, and `def_var`'s home store
+                Effect::Stored { pointer, value } => {
+                    let info = self.info(value);
+                    self.write_info(pointer, info);
+                }
+                // `edge_info`, through `jump` and `branch`
+                Effect::Edge {
+                    block,
+                    param,
+                    value,
+                } => {
+                    if block.as_u32() as usize >= self.b.func.dfg.num_blocks() {
+                        return Err(format!("codegen hook named no block {block}"));
+                    }
+                    let p = *self.b.block_params(block).get(param).ok_or_else(|| {
+                        format!("codegen hook named no parameter {param} of {block}")
+                    })?;
+                    let mut info = self.info(p);
+                    info.merge(&self.info(value));
+                    self.infos.insert(p, info);
+                }
+                // `ir_temp`
+                Effect::Temp { operand, var } => {
+                    let id = *crate::ir_inline::operands(&inst.op)
+                        .get(operand)
+                        .ok_or_else(|| format!("codegen hook named no operand {operand}"))?;
+                    let ty = substitute(
+                        f.values.get(&id).ok_or("IR value lacks a type")?,
+                        &self.generic_vars,
+                    );
+                    let name = format!("$ir_value{id}");
+                    self.vars.insert(name.clone(), Variable::from_u32(var));
+                    self.local_types.insert(name, ty);
+                }
+            }
+        }
+        Ok(())
+    }
+    /// The place of a `Read` or `Write`, emitted for a hook's re-entry.
+    fn walk_place(
+        &mut self,
+        inst: &crate::ir::Instruction,
+        kind: u32,
+    ) -> Result<ir::Value, String> {
+        use crate::codegen_swap::walk::reentry;
+        let p = match &inst.op {
+            crate::ir::Op::Read { root, path, .. } => crate::check::Place {
+                root: root.clone(),
+                path: path.clone(),
+            },
+            crate::ir::Op::Write { place, .. } => {
+                let mut parts = place.split('.');
+                crate::check::Place {
+                    root: parts.next().ok_or("empty IR place")?.into(),
+                    path: parts.map(str::to_owned).collect(),
+                }
+            }
+            _ => {
+                return Err("codegen hook re-entered a place of an instruction without one".into());
+            }
+        };
+        let e = ir_place_expr(&p, inst.span.clone());
+        match kind {
+            reentry::PLACE_VALUE => self.expr(&e),
+            reentry::PLACE_ADDRESS => self.address(&e),
+            _ => Err(format!("codegen hook asked for unknown re-entry {kind}")),
+        }
     }
     /// A `scalar` family request outside the graph walk (SH4 lane 6,
     /// #1280), answering one value; `None` emits the Rust code.

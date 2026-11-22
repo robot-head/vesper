@@ -3,11 +3,9 @@ mod doctest_commands;
 mod ebpf_commands;
 mod fmt_commands;
 mod forge_commands;
-mod highlight_commands;
 mod lib_commands;
 mod lint_commands;
 mod package_graph;
-mod shot_commands;
 mod tool_commands;
 mod verify_commands;
 mod vsys_commands;
@@ -40,13 +38,11 @@ const COMPILER_COMMANDS: &[&str] = &[
     "fmt",
     "forge",
     "graph",
-    "highlight",
     "jit",
     "lint",
     "lsp",
     "proof-audit",
     "run",
-    "shot",
     "test",
     "verify",
 ];
@@ -96,9 +92,6 @@ fn cli() -> Result<(), String> {
     if command == "fmt" {
         return fmt_commands::run(args.collect());
     }
-    if command == "highlight" {
-        return highlight_commands::run(args.collect());
-    }
     if command == "ebpf" {
         return ebpf_commands::run(args.collect());
     }
@@ -120,9 +113,6 @@ fn cli() -> Result<(), String> {
     }
     if command == "test" {
         return doctest_commands::run(args.collect());
-    }
-    if command == "shot" {
-        return shot_commands::run(args.collect());
     }
     if command == "doc" {
         return doc_commands::run(args.collect());
