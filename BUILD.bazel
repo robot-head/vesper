@@ -304,6 +304,13 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]) + ["tests/wasm_backend.rs"],
+        # SH5 lane 11 (#1334): @vesper/wit-component against wit-component
+        # over the same programs.
+        "test/self_host_wit_component": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]) + ["tests/wasm_backend.rs"],
         # SH4 lane 8 (#1282): the aggregate decisions of native lowering in
         # Vesper against src/native_aggregates.rs over the same corpus.
         "test/self_host_codegen_aggregates": glob([
@@ -314,6 +321,13 @@ vesper_crate(
         # SH4 lane 6 (#1280): @vesper/codegen-scalar's decisions against the
         # native Codegen core over the same corpus.
         "test/self_host_codegen_scalar": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
+        # Rust-exit gap wave 1 lane 11 (#1509): @vesper/native-walk's
+        # function plans against the native walk over the same corpus.
+        "test/self_host_native_walk": glob([
             "examples/**",
             "packages/**",
             "tests/fixtures/**",
@@ -979,7 +993,10 @@ vesper_crate(
         "test/self_host_codegen_seq": "long",
         # The wasm backend differential: about 10 min in a debug build.
         "test/self_host_wasm_backend": "long",
+        # The component wrapping differential (#1334): ~2 min release.
+        "test/self_host_wit_component": "long",
         "test/self_host_codegen_scalar": "long",
+        "test/self_host_native_walk": "long",
         "test/self_host_check_harness": "long",
         # The trait declaration differential (#1185) checks every corpus world.
         "test/self_host_check_pact": "long",
@@ -1077,6 +1094,15 @@ vesper_package(
     name = "std_hash_package",
     srcs = glob(["packages/vesper-std/hash/src/**/*.ves"]),
     manifest = "packages/vesper-std/hash/Loom.toml",
+    visibility = ["//visibility:public"],
+)
+
+# @vesper-std/toml, the TOML reader of @vesper/loom-calculus (Rust exit SH6
+# lane 12, #1407; #965).
+vesper_package(
+    name = "std_toml_package",
+    srcs = glob(["packages/vesper-std/toml/src/**/*.ves"]),
+    manifest = "packages/vesper-std/toml/Loom.toml",
     visibility = ["//visibility:public"],
 )
 
@@ -1195,6 +1221,14 @@ vesper_package(
         ":check_data_package",
         ":place_ir_package",
     ],
+)
+
+vesper_package(
+    name = "wit_component_package",
+    srcs = glob(["packages/vesper-wit-component/src/**/*.ves"]),
+    manifest = "packages/vesper-wit-component/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [":check_data_package"],
 )
 
 vesper_package(

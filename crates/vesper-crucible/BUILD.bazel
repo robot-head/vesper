@@ -42,7 +42,7 @@ vesper_port_object(
 vesper_port_object(
     name = "crucible_vesper_divergent_draws",
     edit_src = "vesper/src/lib.ves",
-    edits = {"            value: min_u64(v, max)\n": "            value: v\n"},
+    edits = {"            value: min_u64(replay, max)\n": "            value: replay\n"},
     library = "crucible",
     package = ":port_package",
     target = VESPER_TARGET,
@@ -51,7 +51,7 @@ vesper_port_object(
 vesper_port_object(
     name = "crucible_vesper_divergent_tape",
     edit_src = "vesper/src/lib.ves",
-    edits = {"wrapping_u8(wrapping_add(d, HEX_LETTER_BIAS))": "wrapping_u8(wrapping_add(d, HEX_LETTER_BIAS + 1))"},
+    edits = {"wrapping_mul(letter, wrapping_sub(HEX_LETTER_BIAS, DIGIT_ZERO))": "wrapping_mul(letter, wrapping_sub(HEX_LETTER_BIAS + 1, DIGIT_ZERO))"},
     library = "crucible",
     package = ":port_package",
     target = VESPER_TARGET,

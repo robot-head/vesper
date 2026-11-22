@@ -96,6 +96,63 @@ impl Abi for Stats {
     }
 }
 
+/// Owned handle of a Vesper `Drawn` value: its words, which own the Vesper
+/// allocations they point to. Dropping it calls `vesper_crucible_Drawn_drop`.
+pub struct Drawn {
+    words: [u64; 2],
+}
+
+impl Drawn {
+    /// # Safety
+    /// `words` must hold a `Drawn` value of this library that the caller owns.
+    unsafe fn from_words(words: &[u64]) -> Self {
+        let mut owned = [0u64; 2];
+        owned.copy_from_slice(&words[..2]);
+        Self { words: owned }
+    }
+
+    /// A borrowed view of the value.
+    pub fn as_ref(&self) -> DrawnRef<'_> {
+        DrawnRef { words: &self.words }
+    }
+}
+
+impl Drop for Drawn {
+    fn drop(&mut self) {
+        // SAFETY: the handle owns its words and is dropped once.
+        unsafe { vesper_crucible_Drawn_drop(self.words.as_mut_ptr()) };
+    }
+}
+
+impl core::fmt::Debug for Drawn {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("Drawn { .. }")
+    }
+}
+
+// SAFETY: the handle owns its Vesper allocations exclusively (no Vesper
+// code keeps a reference to them), and they are plain heap memory.
+unsafe impl Send for Drawn {}
+// SAFETY: shared access only reads the words and the memory they own.
+unsafe impl Sync for Drawn {}
+
+/// A borrowed view of a Vesper `Drawn` value, read in place.
+#[derive(Clone, Copy)]
+pub struct DrawnRef<'a> {
+    words: &'a [u64],
+}
+
+impl<'a> DrawnRef<'a> {
+    pub fn code(&self) -> u64 {
+        let w: &'a [u64] = self.words;
+        <u64 as Abi>::get(&w[0..])
+    }
+    pub fn values(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[1]) }
+    }
+}
+
 /// Owned handle of a Vesper `Fuzzer` value: its words, which own the Vesper
 /// allocations they point to. Dropping it calls `vesper_crucible_Fuzzer_drop`.
 pub struct Fuzzer {
@@ -638,15 +695,15 @@ impl<'a> SearchRef<'a> {
 /// Owned handle of a Vesper `Shrinker` value: its words, which own the Vesper
 /// allocations they point to. Dropping it calls `vesper_crucible_Shrinker_drop`.
 pub struct Shrinker {
-    words: [u64; 23],
+    words: [u64; 26],
 }
 
 impl Shrinker {
     /// # Safety
     /// `words` must hold a `Shrinker` value of this library that the caller owns.
     unsafe fn from_words(words: &[u64]) -> Self {
-        let mut owned = [0u64; 23];
-        owned.copy_from_slice(&words[..23]);
+        let mut owned = [0u64; 26];
+        owned.copy_from_slice(&words[..26]);
         Self { words: owned }
     }
 
@@ -686,77 +743,81 @@ impl<'a> ShrinkerRef<'a> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[0]) }
     }
+    pub fn best_key(&self) -> Key {
+        let w: &'a [u64] = self.words;
+        <Key as Abi>::get(&w[1..])
+    }
     pub fn cand(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[1]) }
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[4]) }
     }
     pub fn max_runs(&self) -> u64 {
         let w: &'a [u64] = self.words;
-        <u64 as Abi>::get(&w[2..])
+        <u64 as Abi>::get(&w[5..])
     }
     pub fn stats(&self) -> Stats {
         let w: &'a [u64] = self.words;
-        <Stats as Abi>::get(&w[3..])
+        <Stats as Abi>::get(&w[6..])
     }
     pub fn pc(&self) -> u64 {
         let w: &'a [u64] = self.words;
-        <u64 as Abi>::get(&w[8..])
+        <u64 as Abi>::get(&w[11..])
     }
     pub fn after(&self) -> u64 {
         let w: &'a [u64] = self.words;
-        <u64 as Abi>::get(&w[9..])
+        <u64 as Abi>::get(&w[12..])
     }
     pub fn res(&self) -> bool {
         let w: &'a [u64] = self.words;
-        <bool as Abi>::get(&w[10..])
+        <bool as Abi>::get(&w[13..])
     }
     pub fn improved(&self) -> bool {
         let w: &'a [u64] = self.words;
-        <bool as Abi>::get(&w[11..])
+        <bool as Abi>::get(&w[14..])
     }
     pub fn chunk(&self) -> u64 {
         let w: &'a [u64] = self.words;
-        <u64 as Abi>::get(&w[12..])
+        <u64 as Abi>::get(&w[15..])
     }
     pub fn idx(&self) -> u64 {
         let w: &'a [u64] = self.words;
-        <u64 as Abi>::get(&w[13..])
+        <u64 as Abi>::get(&w[16..])
     }
     pub fn wi(&self) -> u64 {
         let w: &'a [u64] = self.words;
-        <u64 as Abi>::get(&w[14..])
+        <u64 as Abi>::get(&w[17..])
     }
     pub fn width(&self) -> u64 {
         let w: &'a [u64] = self.words;
-        <u64 as Abi>::get(&w[15..])
+        <u64 as Abi>::get(&w[18..])
     }
     pub fn i(&self) -> u64 {
         let w: &'a [u64] = self.words;
-        <u64 as Abi>::get(&w[16..])
+        <u64 as Abi>::get(&w[19..])
     }
     pub fn small(&self) -> u64 {
         let w: &'a [u64] = self.words;
-        <u64 as Abi>::get(&w[17..])
+        <u64 as Abi>::get(&w[20..])
     }
     pub fn small_end(&self) -> u64 {
         let w: &'a [u64] = self.words;
-        <u64 as Abi>::get(&w[18..])
+        <u64 as Abi>::get(&w[21..])
     }
     pub fn lo(&self) -> u64 {
         let w: &'a [u64] = self.words;
-        <u64 as Abi>::get(&w[19..])
+        <u64 as Abi>::get(&w[22..])
     }
     pub fn hi(&self) -> u64 {
         let w: &'a [u64] = self.words;
-        <u64 as Abi>::get(&w[20..])
+        <u64 as Abi>::get(&w[23..])
     }
     pub fn mid(&self) -> u64 {
         let w: &'a [u64] = self.words;
-        <u64 as Abi>::get(&w[21..])
+        <u64 as Abi>::get(&w[24..])
     }
     pub fn k(&self) -> u64 {
         let w: &'a [u64] = self.words;
-        <u64 as Abi>::get(&w[22..])
+        <u64 as Abi>::get(&w[25..])
     }
 }
 
@@ -1010,6 +1071,7 @@ unsafe extern "C" {
     fn vesper_crucible_seq_new(capacity: i64, stride: i64) -> i64;
     fn vesper_crucible_seq_free(seq: i64) -> i64;
     fn vesper_crucible_live_allocations() -> i64;
+    fn vesper_crucible_Drawn_drop(value: *mut u64) -> i64;
     fn vesper_crucible_Fuzzer_drop(value: *mut u64) -> i64;
     fn vesper_crucible_Parsed_drop(value: *mut u64) -> i64;
     fn vesper_crucible_Search_drop(value: *mut u64) -> i64;
@@ -1046,7 +1108,8 @@ unsafe extern "C" {
     fn vesper_crucible_shrinker_next(s: *mut u64) -> i64;
     fn vesper_crucible_shrinker_record(s: *mut u64, outcome: i64, realized: *mut u64) -> i64;
     fn vesper_crucible_shrinker_stats(result: *mut u64, s: *mut u64) -> i64;
-    fn vesper_crucible_source_draw(result: *mut u64, r: *mut u64, prefix: *mut u64, pos: i64, max_draws: i64, max: i64, random: i64, bernoulli: i64, n: i64) -> i64;
+    fn vesper_crucible_source_draw(result: *mut u64, r: *mut u64, replayed: i64, replay: i64, pos: i64, max_draws: i64, max: i64, random: i64, bernoulli: i64, n: i64) -> i64;
+    fn vesper_crucible_source_draw_bytes(result: *mut u64, r: *mut u64, prefix: *mut u64, pos: i64, max_draws: i64, random: i64, max_len: i64, flag_n: i64) -> i64;
     fn vesper_crucible_tape_key(result: *mut u64, values: *mut u64) -> i64;
     fn vesper_crucible_tape_parse(result: *mut u64, text: *mut u64, max_len: i64) -> i64;
     fn vesper_crucible_tape_to_text(values: *mut u64) -> i64;
@@ -1323,7 +1386,7 @@ pub fn shrinker_candidate(s: &Shrinker) -> Vec<u64> {
 
 /// Calls `shrinker_new` of the Vesper library `crucible` (`vesper_crucible_shrinker_new`).
 pub fn shrinker_new(best: Vec<u64>, max_runs: u64) -> Shrinker {
-    let mut result = [0u64; 23];
+    let mut result = [0u64; 26];
     // SAFETY: RUNTIME is this library's runtime.
     let seq_best = unsafe { vesper_port_abi::seq_from(RUNTIME, &best) };
     // SAFETY: `vesper_crucible_shrinker_new` has exactly this signature in the export ABI; every
@@ -1362,13 +1425,23 @@ pub fn shrinker_stats(s: &Shrinker) -> repr::Stats {
 }
 
 /// Calls `source_draw` of the Vesper library `crucible` (`vesper_crucible_source_draw`).
-pub fn source_draw(r: &mut repr::Rng, prefix: &[u64], pos: u64, max_draws: u64, max: u64, random: bool, bernoulli: bool, n: u64) -> repr::Draw {
+pub fn source_draw(r: &mut repr::Rng, replayed: bool, replay: u64, pos: u64, max_draws: u64, max: u64, random: bool, bernoulli: bool, n: u64) -> repr::Draw {
     let mut result = [0u64; 2];
     // SAFETY: `vesper_crucible_source_draw` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = vesper_port_abi::with_slice(prefix, |view_prefix| unsafe { vesper_crucible_source_draw(result.as_mut_ptr(), (r as *mut repr::Rng).cast::<u64>(), view_prefix, pos as i64, max_draws as i64, max as i64, random as i64, bernoulli as i64, n as i64) });
+    let raw = unsafe { vesper_crucible_source_draw(result.as_mut_ptr(), (r as *mut repr::Rng).cast::<u64>(), replayed as i64, replay as i64, pos as i64, max_draws as i64, max as i64, random as i64, bernoulli as i64, n as i64) };
     vesper_port_abi::mirror_from_words::<repr::Draw>(&result[0..])
+}
+
+/// Calls `source_draw_bytes` of the Vesper library `crucible` (`vesper_crucible_source_draw_bytes`).
+pub fn source_draw_bytes(r: &mut repr::Rng, prefix: &[u64], pos: u64, max_draws: u64, random: bool, max_len: u64, flag_n: u64) -> Drawn {
+    let mut result = [0u64; 2];
+    // SAFETY: `vesper_crucible_source_draw_bytes` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(prefix, |view_prefix| unsafe { vesper_crucible_source_draw_bytes(result.as_mut_ptr(), (r as *mut repr::Rng).cast::<u64>(), view_prefix, pos as i64, max_draws as i64, random as i64, max_len as i64, flag_n as i64) });
+    unsafe { Drawn::from_words(&result[0..]) }
 }
 
 /// Calls `tape_key` of the Vesper library `crucible` (`vesper_crucible_tape_key`).

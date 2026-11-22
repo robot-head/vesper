@@ -1,0 +1,616 @@
+// @vesper-std/toml: a TOML reader with the `toml` crate's behaviour (0.8,
+// `toml_edit` 0.22, `winnow` 0.7): the same documents are accepted, the
+// same tree is built (in `toml_edit`'s IndexMap entry order, with its item
+// spans), and a rejected document gets the same error text, position and
+// highlighted span.
+//
+// The grammar (module `grammar`) is a transliteration of
+// toml_edit/src/parser. Winnow's error model is kept exactly:
+//
+// - A failing leaf parser starts a fresh error (`fresh`): no contexts, no
+//   cause, a backtrack. Leaves never consume on failure except where
+//   winnow's do (`any` inside a `dispatch!`).
+// - `cut_err` makes it a cut; `.context(c)` appends `c` on the way out,
+//   to backtracks and cuts alike.
+// - `alt` resets the input before each branch and keeps the last branch's
+//   error; `opt`, `repeat` and `separated` reset on a backtrack and stop.
+// - `try_map`, `verify` and `and_then` reset to their start on failure;
+//   a `try_map` error carries a cause (the external error's text).
+//
+// The error's offset is where the input stood when it reached the top. Its
+// text is `ContextError`'s Display: `invalid {first label}`, `expected
+// {expected values}`, and the cause, one per line.
+//
+// Tree: items are nodes. A table's entries, and an array's elements, are a
+// linked list of `Ent`s in insertion order; `unlink` is IndexMap's
+// `shift_remove`.
+
+use self::grammar::{
+    parse_document
+};
+
+pub const NONE: u32 = 4294967295;
+// End of input for `byte_at`.
+pub const EOF: u64 = 256;
+
+// Node kinds: the `Value` variants, then `Item::Table` and
+// `Item::ArrayOfTables`.
+pub const K_STRING: u8 = 1;
+pub const K_INTEGER: u8 = 2;
+pub const K_FLOAT: u8 = 3;
+pub const K_BOOL: u8 = 4;
+pub const K_DATETIME: u8 = 5;
+pub const K_ARRAY: u8 = 6;
+pub const K_INLINE: u8 = 7;
+pub const K_TABLE: u8 = 8;
+pub const K_AOT: u8 = 9;
+
+// A float's special value (`Node.b` of a K_FLOAT node).
+pub const F_FINITE: u64 = 0;
+pub const F_INF: u64 = 1;
+pub const F_NEG_INF: u64 = 2;
+pub const F_NAN: u64 = 3;
+pub const F_NEG_NAN: u64 = 4;
+
+pub copy struct Node {
+    kind: u8,
+    implicit: bool,
+    dotted: bool,
+    // `Item::span()`: tables and arrays of tables can have none.
+    has_span: bool,
+    s: u64,
+    e: u64,
+    // A table, inline table, array or array of tables: its entries.
+    first: u32,
+    last: u32,
+    count: u32,
+    // A string: its decoded bytes `text[a..a + b]`. An integer: its value
+    // (two's complement). A boolean: 0 or 1. A float: `a` is the start of
+    // its text in the source (`s..e` is all of it) and `b` its `F_*`.
+    a: u64,
+    b: u64
+}
+
+pub copy struct Ent {
+    // The key's decoded bytes `text[koff..koff + klen]` and their hash; an
+    // array element has no key (`klen` 0, `has_key` false).
+    has_key: bool,
+    koff: u64,
+    klen: u64,
+    hash: u64,
+    // The key's raw span in the source (quotes included).
+    ks: u64,
+    ke: u64,
+    child: u32,
+    next: u32
+}
+
+// One part of a parsed key path.
+pub copy struct Part {
+    koff: u64,
+    klen: u64,
+    hash: u64,
+    ks: u64,
+    ke: u64
+}
+
+// A parsed document, or the error that rejected it.
+pub struct Doc {
+    ok: bool,
+    // The error's full `Display` text (`TOML parse error at line ...`).
+    message: ChunkSeq[u8],
+    nodes: ChunkSeq[Node],
+    ents: ChunkSeq[Ent],
+    text: ChunkSeq[u8],
+    root: u32
+}
+
+// Parses `src` (valid UTF-8, as a Rust `&str`).
+pub fn parse(in src: Slice[u8]) -> Doc {
+    parse_document(in src)
+}
+
+// ------------------------------------------------------------- the tree
+
+pub fn byte_at(in s: Slice[u8], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => widen_u64(v),
+        Option::None => EOF,
+    }
+}
+
+pub fn empty_node(kind: u8) -> Node {
+    Node {
+        kind: kind,
+        implicit: false,
+        dotted: false,
+        has_span: false,
+        s: 0,
+        e: 0,
+        first: NONE,
+        last: NONE,
+        count: 0,
+        a: 0,
+        b: 0
+    }
+}
+
+pub fn node(in nodes: ChunkSeq[Node], id: u32) -> Node {
+    match nodes.try_get(widen_u64(id)) {
+        Option::Some(n) => n,
+        Option::None => empty_node(0),
+    }
+}
+
+pub fn ent(in ents: ChunkSeq[Ent], id: u32) -> Ent {
+    match ents.try_get(widen_u64(id)) {
+        Option::Some(e) => e,
+        Option::None => Ent {
+            has_key: false,
+            koff: 0,
+            klen: 0,
+            hash: 0,
+            ks: 0,
+            ke: 0,
+            child: NONE,
+            next: NONE
+        },
+    }
+}
+
+const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+const FNV_PRIME: u64 = 0x100000001b3;
+
+pub fn fnv(in text: ChunkSeq[u8], off: u64, len: u64) -> u64 {
+    let mut h: u64 = FNV_OFFSET;
+    for i in 0..len {
+        let c = match text.try_get(wrapping_add(off, i)) {
+            Option::Some(v) => widen_u64(v),
+            Option::None => 0,
+        };
+        h = wrapping_mul(h ^ c, FNV_PRIME);
+    }
+    h
+}
+
+pub fn text_eq(in text: ChunkSeq[u8], a: u64, alen: u64, b: u64, blen: u64) -> bool {
+    if alen != blen {
+        return false;
+    }
+    for i in 0..alen {
+        if text.try_get(wrapping_add(a, i)) != text.try_get(wrapping_add(b, i)) {
+            return false;
+        }
+    }
+    true
+}
+
+// The entry of table `c` with key `p`, or NONE.
+pub fn lookup(
+    in nodes: ChunkSeq[Node],
+    in ents: ChunkSeq[Ent],
+    in text: ChunkSeq[u8],
+    c: u32,
+    p: Part
+) -> u32 {
+    let mut e = node(in nodes, c).first;
+    loop {
+        if e == NONE {
+            break;
+        }
+        let x = ent(in ents, e);
+        if x.hash == p.hash && text_eq(in text, x.koff, x.klen, p.koff, p.klen) {
+            return e;
+        }
+        e = x.next;
+    }
+    NONE
+}
+
+// Appends entry `e` (already in `ents`, unlinked) to container `c`.
+pub fn link(inout nodes: ChunkSeq[Node], inout ents: ChunkSeq[Ent], c: u32, e: u32) {
+    let mut n = node(in nodes, c);
+    if n.last == NONE {
+        n.first = e;
+    } else {
+        let mut l = ent(in ents, n.last);
+        l.next = e;
+        ents.try_set(widen_u64(n.last), l);
+    }
+    n.last = e;
+    n.count = wrapping_add(n.count, 1);
+    nodes.try_set(widen_u64(c), n);
+}
+
+// Unlinks entry `e` from container `c`, keeping the order of the rest.
+pub fn unlink(inout nodes: ChunkSeq[Node], inout ents: ChunkSeq[Ent], c: u32, e: u32) {
+    let mut n = node(in nodes, c);
+    let mut prev = NONE;
+    let mut cur = n.first;
+    loop {
+        if cur == NONE {
+            return;
+        }
+        if cur == e {
+            break;
+        }
+        prev = cur;
+        cur = ent(in ents, cur).next;
+    }
+    let next = ent(in ents, e).next;
+    if prev == NONE {
+        n.first = next;
+    } else {
+        let mut p = ent(in ents, prev);
+        p.next = next;
+        ents.try_set(widen_u64(prev), p);
+    }
+    if n.last == e {
+        n.last = prev;
+    }
+    n.count = wrapping_sub(n.count, 1);
+    nodes.try_set(widen_u64(c), n);
+    let mut x = ent(in ents, e);
+    x.next = NONE;
+    ents.try_set(widen_u64(e), x);
+}
+
+pub fn put(inout out: ChunkSeq[u8], in t: Str) {
+    out.extend(in t.as_bytes());
+}
+
+// `Value::type_name`.
+pub fn put_type_name(inout out: ChunkSeq[u8], kind: u8) {
+    if kind == K_STRING {
+        out.extend(in "string".as_bytes());
+    } else if kind == K_INTEGER {
+        out.extend(in "integer".as_bytes());
+    } else if kind == K_FLOAT {
+        out.extend(in "float".as_bytes());
+    } else if kind == K_BOOL {
+        out.extend(in "boolean".as_bytes());
+    } else if kind == K_DATETIME {
+        out.extend(in "datetime".as_bytes());
+    } else if kind == K_ARRAY {
+        out.extend(in "array".as_bytes());
+    } else {
+        out.extend(in "inline table".as_bytes());
+    }
+}
+
+// ------------------------------------------------------------- errors
+
+// `ParseError::char_span`: the byte range of the character at `offset`.
+pub fn char_span(in s: Slice[u8], offset: u64) -> (u64, u64) {
+    let len = s.len();
+    if offset == len {
+        return (offset, offset);
+    }
+    let mut start: u64 = 0;
+    let mut i = min_u64(wrapping_add(offset, 1), len);
+    loop {
+        if i == 0 {
+            break;
+        }
+        i = wrapping_sub(i, 1);
+        if is_boundary(byte_at(in s, i)) {
+            start = i;
+            break;
+        }
+    }
+    let mut end = len;
+    let mut j = wrapping_add(offset, 1);
+    loop {
+        if j >= len {
+            break;
+        }
+        if is_boundary(byte_at(in s, j)) {
+            end = j;
+            break;
+        }
+        j = wrapping_add(j, 1);
+    }
+    (start, end)
+}
+
+fn is_boundary(b: u64) -> bool {
+    b < 128 || b >= 192
+}
+
+pub fn min_u64(a: u64, b: u64) -> u64 {
+    if a < b {
+        a
+    } else {
+        b
+    }
+}
+
+// Whether `s[a..b]` is valid UTF-8 (`std::str::from_utf8`); the source is
+// valid UTF-8, so only the ends can split a character.
+fn utf8_whole(in s: Slice[u8], a: u64, b: u64) -> bool {
+    if a < b && !is_boundary(byte_at(in s, a)) {
+        return false;
+    }
+    if b < s.len() && !is_boundary(byte_at(in s, b)) {
+        return false;
+    }
+    true
+}
+
+fn count_chars(in s: Slice[u8], a: u64, b: u64) -> u64 {
+    let mut n: u64 = 0;
+    for i in a..b {
+        if is_boundary(byte_at(in s, i)) {
+            n = wrapping_add(n, 1);
+        }
+    }
+    n
+}
+
+// `translate_position`: the 0-based line and column of byte `index`.
+fn translate_position(in s: Slice[u8], index: u64) -> (u64, u64) {
+    let len = s.len();
+    if len == 0 {
+        return (0, index);
+    }
+    let safe = min_u64(index, wrapping_sub(len, 1));
+    let column_offset = wrapping_sub(index, safe);
+    let mut line_start: u64 = 0;
+    let mut i = safe;
+    loop {
+        if i == 0 {
+            break;
+        }
+        i = wrapping_sub(i, 1);
+        if byte_at(in s, i) == 10 {
+            line_start = wrapping_add(i, 1);
+            break;
+        }
+    }
+    let mut line: u64 = 0;
+    for k in 0..line_start {
+        if byte_at(in s, k) == 10 {
+            line = wrapping_add(line, 1);
+        }
+    }
+    let end = wrapping_add(safe, 1);
+    let column = if utf8_whole(in s, line_start, end) {
+        wrapping_sub(count_chars(in s, line_start, end), 1)
+    } else {
+        wrapping_sub(safe, line_start)
+    };
+    (line, wrapping_add(column, column_offset))
+}
+
+pub fn put_u64(inout out: ChunkSeq[u8], v: u64) {
+    if v >= 10 {
+        put_u64(inout out, v / 10);
+    }
+    out.push(wrapping_u8(wrapping_add(v % 10, 48)));
+}
+
+fn digits_of(v: u64) -> u64 {
+    if v >= 10 {
+        wrapping_add(digits_of(v / 10), 1)
+    } else {
+        1
+    }
+}
+
+fn spaces(inout out: ChunkSeq[u8], n: u64) {
+    for i in 0..n {
+        out.push(32);
+    }
+}
+
+// `TomlError`'s Display. With a span the position, the line and the
+// highlight come first; `message` is the error's own text. Without one,
+// `keys` (`k1.k2`, may be empty) follows as `in `...``.
+pub fn render_error(
+    inout out: ChunkSeq[u8],
+    in s: Slice[u8],
+    has_span: bool,
+    start: u64,
+    end: u64,
+    in message: ChunkSeq[u8],
+    in keys: ChunkSeq[u8]
+) {
+    if has_span {
+        let (line, column) = translate_position(in s, start);
+        let line_num = wrapping_add(line, 1);
+        let gutter = digits_of(line_num);
+        // `raw.split('\n').nth(line)`.
+        let mut ls: u64 = 0;
+        let mut seen: u64 = 0;
+        let mut i: u64 = 0;
+        loop {
+            if seen == line || i >= s.len() {
+                break;
+            }
+            if byte_at(in s, i) == 10 {
+                seen = wrapping_add(seen, 1);
+                ls = wrapping_add(i, 1);
+            }
+            i = wrapping_add(i, 1);
+        }
+        let mut le = ls;
+        loop {
+            if le >= s.len() || byte_at(in s, le) == 10 {
+                break;
+            }
+            le = wrapping_add(le, 1);
+        }
+        let content_len = wrapping_sub(le, ls);
+        let room = if content_len > column {
+            wrapping_sub(content_len, column)
+        } else {
+            0
+        };
+        let highlight = min_u64(wrapping_sub(end, start), room);
+        out.extend(in "TOML parse error at line ".as_bytes());
+        put_u64(inout out, line_num);
+        out.extend(in ", column ".as_bytes());
+        put_u64(inout out, wrapping_add(column, 1));
+        out.push(10);
+        spaces(inout out, wrapping_add(gutter, 1));
+        out.push(124);
+        out.push(10);
+        put_u64(inout out, line_num);
+        out.extend(in " | ".as_bytes());
+        for k in ls..le {
+            out.push(wrapping_u8(byte_at(in s, k)));
+        }
+        out.push(10);
+        spaces(inout out, wrapping_add(gutter, 1));
+        out.push(124);
+        spaces(inout out, wrapping_add(column, 1));
+        out.push(94);
+        let mut h: u64 = 1;
+        loop {
+            if h >= highlight {
+                break;
+            }
+            out.push(94);
+            h = wrapping_add(h, 1);
+        }
+        out.push(10);
+    }
+    out.extend(in message.as_slice());
+    out.push(10);
+    if !has_span && keys.len() > 0 {
+        out.extend(in "in `".as_bytes());
+        out.extend(in keys.as_slice());
+        out.extend(in "`".as_bytes());
+        out.push(10);
+    }
+}
+
+// ------------------------------------------------------------- the dump
+
+// A canonical text form of `d` for differential tests: `!` and the error
+// text, or the root table. Each item is `@s,e` (or `@-` without a span)
+// and then its value: `s"bytes"`, `i123`, `f<source text>/special`, `b1`,
+// `d<source text>`, `[items]`, `{entries}` (inline), `T<flags>{entries}` (flags `i` implicit, `d` dotted; an inline
+// table shows only `d`)
+// and `A[tables]`. An entry is `"key"@ks,ke=item;`. Bytes outside
+// printable ASCII, `"` and `\` are `\xHH`.
+pub fn dump(in d: Doc, in src: Slice[u8]) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    if !d.ok {
+        out.push(33);
+        out.extend(in d.message.as_slice());
+        return out;
+    }
+    dump_item(inout out, in d, in src, d.root);
+    out
+}
+
+fn dump_bytes(inout out: ChunkSeq[u8], in t: Slice[u8], a: u64, n: u64) {
+    out.push(34);
+    for i in a..wrapping_add(a, n) {
+        let c = byte_at(in t, i);
+        if c < 32 || c > 126 || c == 34 || c == 92 {
+            out.push(92);
+            out.push(120);
+            out.push(hex_digit(wrapping_shr_u64(c, 4)));
+            out.push(hex_digit(c & 15));
+        } else {
+            out.push(wrapping_u8(c));
+        }
+    }
+    out.push(34);
+}
+
+fn hex_digit(v: u64) -> u8 {
+    if v < 10 {
+        wrapping_u8(wrapping_add(v, 48))
+    } else {
+        wrapping_u8(wrapping_add(v, 87))
+    }
+}
+
+fn dump_span(inout out: ChunkSeq[u8], has: bool, s: u64, e: u64) {
+    out.push(64);
+    if has {
+        put_u64(inout out, s);
+        out.push(44);
+        put_u64(inout out, e);
+    } else {
+        out.push(45);
+    }
+}
+
+fn dump_entries(inout out: ChunkSeq[u8], in d: Doc, in src: Slice[u8], n: Node, keyed: bool) {
+    let mut e = n.first;
+    loop {
+        if e == NONE {
+            break;
+        }
+        let x = ent(in d.ents, e);
+        if keyed {
+            dump_bytes(inout out, in d.text.as_slice(), x.koff, x.klen);
+            dump_span(inout out, true, x.ks, x.ke);
+            out.push(61);
+        }
+        dump_item(inout out, in d, in src, x.child);
+        out.push(59);
+        e = x.next;
+    }
+}
+
+fn dump_item(inout out: ChunkSeq[u8], in d: Doc, in src: Slice[u8], id: u32) {
+    let n = node(in d.nodes, id);
+    dump_span(inout out, n.has_span, n.s, n.e);
+    let k = n.kind;
+    if k == K_STRING {
+        out.push(115);
+        dump_bytes(inout out, in d.text.as_slice(), n.a, n.b);
+    } else if k == K_INTEGER {
+        out.push(105);
+        if wrapping_shr_u64(n.a, 63) == 1 {
+            out.push(45);
+            put_u64(inout out, wrapping_sub(0, n.a));
+        } else {
+            put_u64(inout out, n.a);
+        }
+    } else if k == K_FLOAT || k == K_DATETIME {
+        out
+            .push(
+                if k == K_FLOAT {
+                    102
+                } else {
+                    100
+                }
+            );
+        for i in n.s..n.e {
+            out.push(wrapping_u8(byte_at(in src, i)));
+        }
+        if k == K_FLOAT {
+            out.push(47);
+            put_u64(inout out, n.b);
+        }
+    } else if k == K_BOOL {
+        out.push(98);
+        put_u64(inout out, n.a);
+    } else if k == K_ARRAY || k == K_AOT {
+        if k == K_AOT {
+            out.push(65);
+        }
+        out.push(91);
+        dump_entries(inout out, in d, in src, n, false);
+        out.push(93);
+    } else {
+        if k == K_TABLE {
+            out.push(84);
+        }
+        if k == K_TABLE && n.implicit {
+            out.push(105);
+        }
+        if n.dotted {
+            out.push(100);
+        }
+        out.push(123);
+        dump_entries(inout out, in d, in src, n, true);
+        out.push(125);
+    }
+}

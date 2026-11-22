@@ -51,16 +51,13 @@ const LF: u64 = 0x0a;
 const CR: u64 = 0x0d;
 const SPACE: u64 = 0x20;
 const DIGIT_ZERO: u64 = 0x30;
-const DIGIT_NINE: u64 = 0x39;
-const LOWER_A: u64 = 0x61;
-const LOWER_F: u64 = 0x66;
 // `a` minus 10: the hex digit d >= 10 is the byte d + HEX_LETTER_BIAS.
 const HEX_LETTER_BIAS: u64 = 87;
+const LOWER_A: u64 = 0x61;
 const HEX_DIGIT_BITS: u64 = 4;
 const HEX_DIGIT_MASK: u64 = 15;
 // A value line holds 1 to MAX_HEX_DIGITS digits.
 const MAX_HEX_DIGITS: u64 = 16;
-const NOT_HEX: u64 = 16;
 
 // ---------------------------------------------------------------------------
 // Helpers.
@@ -76,6 +73,10 @@ const BYTE_MASK: u64 = 0xff;
 const DECIMAL_DIGITS: u64 = 10;
 // `rng_chance` numerators are out of CHANCE_MAX + 1.
 const CHANCE_MAX: u64 = 1023;
+// The largest byte draw, and the byte strings `source_draw_bytes`
+// reserves room for up front.
+const BYTE_MAX: u64 = 255;
+const BYTES_RESERVE: u64 = 64;
 
 fn at(in s: Slice[u64], i: u64) -> u64 {
     match s.try_get(i) {
@@ -125,9 +126,7 @@ fn rem(a: u64, b: u64) -> u64 {
 
 fn copy_of(in s: Slice[u64]) -> ChunkSeq[u64] {
     let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    for i in 0..s.len() {
-        out.push(at(in s, i));
-    }
+    out.extend(in s);
     out
 }
 
@@ -191,6 +190,12 @@ pub fn rng_below_inclusive(inout r: Rng, max_inclusive: u64) -> u64 {
         return rng_next(inout r);
     }
     let bound = inc(max_inclusive);
+    // A power-of-two bound (bytes, flags) needs no division: nothing is
+    // rejected and the residue is the low bits. Same values as below.
+    let low = wrapping_sub(bound, 1);
+    if bound & low == 0 {
+        return rng_next(inout r) & low;
+    }
     let threshold = rem(wrapping_sub(0, bound), bound);
     loop {
         let value = rng_next(inout r);
@@ -215,11 +220,14 @@ pub copy struct Draw {
     value: u64
 }
 
-// `random` false is strict replay. `bernoulli` true draws 1 with
-// probability `n / 1024`, else the draw is uniform in `0..=max`.
+// `replayed` says the tape has a value at `pos`, which is `replay` (the
+// wrapper reads that one word instead of passing the whole tape). `random`
+// false is strict replay. `bernoulli` true draws 1 with probability
+// `n / 1024`, else the draw is uniform in `0..=max`.
 pub fn source_draw(
     inout r: Rng,
-    in prefix: Slice[u64],
+    replayed: bool,
+    replay: u64,
     pos: u64,
     max_draws: u64,
     max: u64,
@@ -233,12 +241,13 @@ pub fn source_draw(
             value: 0
         };
     }
-    match prefix.try_get(pos) {
-        Option::Some(v) => Draw {
+    if replayed {
+        Draw {
             code: DrawCode::Ok,
-            value: min_u64(v, max)
-        },
-        Option::None => {
+            value: min_u64(replay, max)
+        }
+    } else {
+        {
             if !random {
                 Draw {
                     code: DrawCode::Overrun,
@@ -261,6 +270,72 @@ pub fn source_draw(
                 }
             }
         }
+    }
+}
+
+// `Source::draw_bytes` (src/source.rs) in one call: continuation flags
+// (Bernoulli with numerator `flag_n`) and bytes, alternating, until a flag
+// of 0 or `max_len` bytes. `values` holds every realized draw in order, so
+// the wrapper records flag, byte, flag, ...; `code` is `Overrun` when a draw
+// failed, and the draws before it stay realized.
+pub struct Drawn {
+    code: u64,
+    values: ChunkSeq[u64]
+}
+
+pub fn source_draw_bytes(
+    inout r: Rng,
+    in prefix: Slice[u64],
+    pos: u64,
+    max_draws: u64,
+    random: bool,
+    max_len: u64,
+    flag_n: u64
+) -> Drawn {
+    let mut values: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    values.reserve(wrapping_add(wrapping_mul(min_u64(max_len, BYTES_RESERVE), 2), 1));
+    let mut p = pos;
+    let mut len: u64 = 0;
+    loop {
+        if len >= max_len {
+            break;
+        }
+        // The slice is read here with `try_get`: a function with a slice
+        // parameter (`at`) is never inlined, and this loop is the hot path.
+        let (replayed, replay) = match prefix.try_get(p) {
+            Option::Some(v) => (true, v),
+            Option::None => (false, 0),
+        };
+        let flag = source_draw(inout r, replayed, replay, p, max_draws, 1, random, true, flag_n);
+        if flag.code != DrawCode::Ok {
+            return Drawn {
+                code: DrawCode::Overrun,
+                values: values
+            };
+        }
+        values.push(flag.value);
+        p = inc(p);
+        if flag.value != 1 {
+            break;
+        }
+        let (replayed, replay) = match prefix.try_get(p) {
+            Option::Some(v) => (true, v),
+            Option::None => (false, 0),
+        };
+        let b = source_draw(inout r, replayed, replay, p, max_draws, BYTE_MAX, random, false, 0);
+        if b.code != DrawCode::Ok {
+            return Drawn {
+                code: DrawCode::Overrun,
+                values: values
+            };
+        }
+        values.push(b.value);
+        p = inc(p);
+        len = inc(len);
+    }
+    Drawn {
+        code: DrawCode::Ok,
+        values: values
     }
 }
 
@@ -295,12 +370,16 @@ fn header() -> ChunkSeq[u8] {
     h
 }
 
+// Without a branch: random digits would mispredict about half the time.
+// `(9 - d) >> 63` is 1 exactly when `d > 9`.
 fn hex_digit(d: u64) -> u8 {
-    if d < DECIMAL_DIGITS {
-        wrapping_u8(wrapping_add(d, DIGIT_ZERO))
-    } else {
-        wrapping_u8(wrapping_add(d, HEX_LETTER_BIAS))
-    }
+    let letter = wrapping_sub(wrapping_sub(DECIMAL_DIGITS, 1), d) >> 63;
+    wrapping_u8(
+        wrapping_add(
+            wrapping_add(d, DIGIT_ZERO),
+            wrapping_mul(letter, wrapping_sub(HEX_LETTER_BIAS, DIGIT_ZERO))
+        )
+    )
 }
 
 // The header line, then one lowercase hex value per line.
@@ -308,34 +387,18 @@ pub fn tape_to_text(in values: Slice[u64]) -> ChunkSeq[u8] {
     let mut out = header();
     out.push(wrapping_u8(LF));
     for i in 0..values.len() {
-        let mut v = at(in values, i);
-        let start = out.len();
+        let v = at(in values, i);
+        // The number of digits, most significant first: one for 0.
+        let bits = wrapping_sub(64, widen_u64(leading_zeros_u64(v | 1)));
+        // Four bits per digit, rounded up.
+        let mut k = wrapping_add(bits, 3) >> 2;
         loop {
-            out.push(hex_digit(v & HEX_DIGIT_MASK));
-            v = v >> HEX_DIGIT_BITS;
-            if v == 0 {
+            k = wrapping_sub(k, 1);
+            let shift = wrapping_u32(wrapping_mul(k, HEX_DIGIT_BITS));
+            out.push(hex_digit(wrapping_shr_u64(v, shift) & HEX_DIGIT_MASK));
+            if k == 0 {
                 break;
             }
-        }
-        // The digits went in least significant first.
-        let mut lo = start;
-        let mut hi = wrapping_sub(out.len(), 1);
-        loop {
-            if lo >= hi {
-                break;
-            }
-            let x = match out.try_get(lo) {
-                Option::Some(d) => d,
-                Option::None => 0,
-            };
-            let y = match out.try_get(hi) {
-                Option::Some(d) => d,
-                Option::None => 0,
-            };
-            out.try_set(lo, y);
-            out.try_set(hi, x);
-            lo = inc(lo);
-            hi = wrapping_sub(hi, 1);
         }
         out.push(wrapping_u8(LF));
     }
@@ -428,16 +491,20 @@ fn hex_value(in s: Slice[u8], start: u64, end: u64) -> (bool, u64) {
             break(true, v);
         }
         let c = byte(in s, i);
-        let d = if c >= DIGIT_ZERO && c <= DIGIT_NINE {
-            wrapping_sub(c, DIGIT_ZERO)
-        } else if c >= LOWER_A && c <= LOWER_F {
-            wrapping_sub(c, HEX_LETTER_BIAS)
-        } else {
-            NOT_HEX
-        };
-        if d == NOT_HEX {
+        // `0-9` or `a-f`: one unsigned range check each.
+        let digit = wrapping_sub(c, DIGIT_ZERO) < DECIMAL_DIGITS;
+        let letter = wrapping_sub(c, LOWER_A) < 6;
+        if !(digit || letter) {
             break(false, 0);
         }
+        let d = wrapping_sub(
+            c,
+            if letter {
+                HEX_LETTER_BIAS
+            } else {
+                DIGIT_ZERO
+            }
+        );
         v = (v << HEX_DIGIT_BITS) | d;
         i = inc(i);
     }
@@ -573,6 +640,8 @@ pub copy struct Stats {
 
 pub struct Shrinker {
     best: ChunkSeq[u64],
+    // `tape_key(best)`, kept up to date when `best` changes.
+    best_key: Key,
     cand: ChunkSeq[u64],
     max_runs: u64,
     stats: Stats,
@@ -596,8 +665,10 @@ pub struct Shrinker {
 // The shrinker for a tape that failed on its first run (which counts as
 // one run).
 pub fn shrinker_new(sink best: ChunkSeq[u64], max_runs: u64) -> Shrinker {
+    let best_key = tape_key(in best.as_slice());
     Shrinker {
         best: best,
+        best_key: best_key,
         cand: ChunkSeq::new[u64](),
         max_runs: max_runs,
         stats: Stats {
@@ -649,31 +720,23 @@ impl Shrinker {
 
     fn cand_from_best(inout self) {
         self.cand.clear();
-        let n = self.best.len();
-        for j in 0..n {
-            self.cand.push(at(in self.best.as_slice(), j));
-        }
+        self.cand.extend(in self.best.as_slice());
     }
 
     // `cand` = `best` without `best[from..to]`.
     fn cand_without(inout self, from: u64, to: u64) {
+        // Callers keep `from <= to <= best.len()`.
         self.cand.clear();
         let n = self.best.len();
-        for j in 0..n {
-            if j < from || j >= to {
-                self.cand.push(at(in self.best.as_slice(), j));
-            }
-        }
+        self.cand.extend(in self.best[0..from]);
+        self.cand.extend(in self.best[to..n]);
     }
 
     // Start an attempt of `cand`, to continue at `after`. True when the
     // property must run on it; otherwise the attempt failed without a run.
     fn attempt(inout self, after: u64) -> bool {
         self.after = after;
-        let smaller = key_smaller(
-            tape_key(in self.cand.as_slice()),
-            tape_key(in self.best.as_slice())
-        );
+        let smaller = key_smaller(tape_key(in self.cand.as_slice()), self.best_key);
         if !smaller || self.out_of_budget() {
             self.res = false;
             self.pc = after;
@@ -929,13 +992,13 @@ pub fn shrinker_record(inout s: Shrinker, outcome: u64, in realized: Slice[u64])
     }
     let mut accepted = false;
     if outcome == Outcome::FailedSameKind {
-        if key_smaller(tape_key(in realized), tape_key(in s.best.as_slice())) {
+        let key = tape_key(in realized);
+        if key_smaller(key, s.best_key) {
+            s.best_key = key;
             // Refilled in place: the buffer is reused and nothing is
             // dropped by assignment.
             s.best.clear();
-            for j in 0..realized.len() {
-                s.best.push(at(in realized, j));
-            }
+            s.best.extend(in realized);
             s.stats.accepted = inc(s.stats.accepted);
             accepted = true;
         }
@@ -5075,11 +5138,11 @@ test {
         let mut rng = Rng {
             word: 0
         };
-        let mut prefix = ChunkSeq::new[u64]();
-        prefix.push(prefix_value);
+        // The tape holds one value, at position 0.
         let draw = source_draw(
             inout rng,
-            in prefix.as_slice(),
+            position == 0,
+            prefix_value,
             position,
             budget,
             max,
