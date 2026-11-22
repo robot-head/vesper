@@ -10,7 +10,8 @@
 //! `blake3` crate's output (itself checked against official vectors) and of
 //! Rust references; the portable driver runs in the JIT with and without
 //! `optimize`, as an executable and (on short inputs) in the evaluator. The
-//! `.vsys` driver runs in the JIT bound to `hash/sys/shim.rs` and in the
+//! `.vsys` driver runs in the JIT bound to the C library in `hash/sys/c`
+//! (the official BLAKE3 C implementation) and in the
 //! evaluator with the same crate standing in.
 use std::{
     fs,
@@ -21,8 +22,9 @@ use std::{
 use vesper::ffi_lowering::{self, Handler, Imports};
 use vesper::{check, native, packages, runtime::Runtime, runtime::Value};
 
-#[path = "../packages/vesper-std/hash/sys/shim.rs"]
-mod blake3_shim;
+// The `.vsys` library `Blake3` in C (packages/vesper-std/hash/sys/c), built
+// by vesper-blake3-sys.
+use vesper_blake3_sys as blake3_shim;
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 

@@ -54,14 +54,25 @@ pub fn filled64(n: u64, v: u64) -> ChunkSeq[u64] {
     s
 }
 
+// FNV-1a's 64-bit offset basis and prime.
+pub enum Fnv: _ {
+    Offset = 14695981039346656037,
+    Prime = 1099511628211
+}
+
+// The multiplier of `finish`'s avalanche.
+const AVALANCHE: u64 = 13787848793156543929;
+
+const MAX_U64: u64 = 18446744073709551615;
+
 // FNV-1a over one word.
 pub fn fold(h: u64, x: u64) -> u64 {
-    wrapping_mul(h ^ x, 1099511628211)
+    wrapping_mul(h ^ x, Fnv::Prime)
 }
 
 // The final avalanche of a hash-cons key.
 pub fn finish(h: u64) -> u64 {
-    let a = wrapping_mul(h ^ (h >> 32), 13787848793156543929);
+    let a = wrapping_mul(h ^ (h >> 32), AVALANCHE);
     a ^ (a >> 29)
 }
 
@@ -69,7 +80,7 @@ pub fn finish(h: u64) -> u64 {
 pub fn sat_add(a: u64, b: u64) -> u64 {
     let s = wrapping_add(a, b);
     if s < a {
-        18446744073709551615
+        MAX_U64
     } else {
         s
     }
