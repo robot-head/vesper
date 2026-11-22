@@ -1,39 +1,17 @@
 //! The host side of `@vesper/driver-commands` (self-hosting SH5 lane 13,
 //! #1336): the `HybridCommands` import (packages/vesper-driver-commands/
-//! commands.vsys), which reaches the engines the command layers call that
-//! are still Rust. The command layers themselves (arguments, checks,
-//! messages, output) are Vesper; the driver hands them every command that
-//! is not on the compile path.
-use std::cell::RefCell;
+//! commands.vsys). The routing in front of every command (help, version,
+//! the unknown-command error, the hand-off to `vesper-<tool>`) is Vesper;
+//! this prints for it as Rust's macros do and answers the few questions
+//! @vesper-std cannot (the running executable's directory, the help text,
+//! whether a file is executable).
 use std::io;
+use std::path::Path;
 
 /// Prints of the Vesper command layers (`hc_print` and `hc_help`);
 /// `VESPER_HYBRID_STATS=1` reports it. A command handed back to the Rust
 /// CLI makes none.
 pub static PRINTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-thread_local! {
-    /// The scanner `hc_simd_compile` made, and the last error message.
-    static STATE: RefCell<State> = const { RefCell::new(State { scanner: None, error: String::new() }) };
-}
-
-struct State {
-    scanner: Option<vesper_simd::JitScanner>,
-    error: String,
-}
-
-/// `IsaProfileKind` in the order of `profile_code` in the package.
-fn profile(code: u32) -> Option<vesper_simd::IsaProfileKind> {
-    use vesper_simd::IsaProfileKind as K;
-    Some(match code {
-        0 => K::Baseline128,
-        1 => K::Avx2,
-        2 => K::Avx512,
-        3 => K::Sve2,
-        4 => K::Rvv1,
-        _ => return None,
-    })
-}
 
 /// The `io::Error` with @vesper-std's error word (the kind in the low 8
 /// bits, the raw OS error in the high 32), as the driver's host builds it.
@@ -125,52 +103,28 @@ pub mod host {
         rust_print(|| print!("{}", crate::HELP));
     }
 
-    /// Text `which` (item `index` of a list): see `text_*` in the package.
+    /// Text `which`: see `text_*` in the package. `index` is unused.
     ///
     /// # Safety
     /// `buf` is a lent writable slice.
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn hc_text(which: u32, index: u64, buf: *mut u8, len: usize) -> i64 {
-        STATE.with_borrow(|st| {
-            let index = usize::try_from(index).unwrap_or(usize::MAX);
-            let meta = st.scanner.as_ref().map(|s| s.metadata());
-            let text: Option<&[u8]> = match which {
-                0 => Some(st.error.as_bytes()),
-                1 => Some(env!("CARGO_PKG_VERSION").as_bytes()),
-                2 => Some(std::env::consts::ARCH.as_bytes()),
-                3 => Some(std::env::consts::OS.as_bytes()),
-                10 => meta.map(|m| m.target.as_bytes()),
-                11 => meta.map(|m| m.tail_strategy.as_bytes()),
-                12 => meta.map(|m| m.abi.as_bytes()),
-                13 => meta.map(|m| m.codegen_version.as_bytes()),
-                14 => meta
-                    .and_then(|m| m.codegen_settings.get(index))
-                    .map(|s| s.as_bytes()),
-                15 => meta
-                    .and_then(|m| m.enabled_isa_flags.get(index))
-                    .map(|s| s.as_bytes()),
-                _ => None,
-            };
-            // SAFETY: lent for the call.
-            unsafe { copy_out(text, buf, len) }
-        })
-    }
-
-    /// Count `which`: the scanner's vector bits (1), its settings (2) or
-    /// its enabled ISA flags (3); 0 without a scanner.
-    #[unsafe(no_mangle)]
-    pub extern "C" fn hc_count(which: u32) -> u64 {
-        STATE.with_borrow(|st| {
-            let Some(m) = st.scanner.as_ref().map(|s| s.metadata()) else {
-                return 0;
-            };
-            match which {
-                1 => u64::from(m.vector_bits),
-                2 => m.codegen_settings.len() as u64,
-                3 => m.enabled_isa_flags.len() as u64,
-                _ => 0,
-            }
-        })
+    pub unsafe extern "C" fn hc_text(which: u32, _index: u64, buf: *mut u8, len: usize) -> i64 {
+        let exe = std::env::current_exe().ok();
+        let dir = |p: Option<std::path::PathBuf>| p.and_then(|p| p.parent().map(Path::to_path_buf));
+        let owned = match which {
+            4 => dir(exe.clone()),
+            5 => dir(exe.and_then(|e| e.canonicalize().ok())),
+            _ => None,
+        };
+        let text: Option<&[u8]> = match which {
+            1 => Some(env!("CARGO_PKG_VERSION").as_bytes()),
+            2 => Some(std::env::consts::ARCH.as_bytes()),
+            3 => Some(std::env::consts::OS.as_bytes()),
+            4 | 5 => owned.as_ref().map(|p| p.as_os_str().as_encoded_bytes()),
+            _ => None,
+        };
+        // SAFETY: lent for the call.
+        unsafe { copy_out(text, buf, len) }
     }
 
     /// Rust's `Display` of the `io::Error` with this error word.
@@ -184,42 +138,26 @@ pub mod host {
         unsafe { copy_out(Some(text.as_bytes()), buf, len) }
     }
 
-    /// `JitScanner::compile_profile`: 0, or -1 with the error as text 0.
-    #[unsafe(no_mangle)]
-    pub extern "C" fn hc_simd_compile(code: u32) -> i64 {
-        STATE.with_borrow_mut(|st| {
-            let Some(kind) = profile(code) else {
-                st.error = format!("unknown SIMD profile {code}");
-                return -1;
-            };
-            match vesper_simd::JitScanner::compile_profile(kind) {
-                Ok(scanner) => {
-                    st.scanner = Some(scanner);
-                    0
-                }
-                Err(e) => {
-                    st.error = e.to_string();
-                    -1
-                }
-            }
-        })
-    }
-
-    /// One `scan` of the compiled scanner: `matches << 8 | xor` (a chunk
-    /// is at most 64 KiB, so the matches fit).
+    /// 1 when `path` is a regular file the host would run (on Unix, with an
+    /// execute bit), as `tool_commands::executable` decides.
     ///
     /// # Safety
-    /// `data` is a lent byte slice.
+    /// `path` is a lent byte slice.
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn hc_simd_scan(data: *const u8, len: usize, delimiter: u32) -> u64 {
-        // SAFETY: lent for the call.
-        let data = unsafe { bytes(data, len) };
-        STATE.with_borrow(|st| match &st.scanner {
-            Some(scanner) => {
-                let r = scanner.scan(data, delimiter as u8);
-                (r.matches << 8) | u64::from(r.xor)
-            }
-            None => 0,
-        })
+    pub unsafe extern "C" fn hc_executable(path: *const u8, len: usize) -> u32 {
+        // SAFETY: lent for the call; the bytes came from the OS (the
+        // executable's directory or PATH) or from the command line.
+        let path = unsafe { std::ffi::OsStr::from_encoded_bytes_unchecked(bytes(path, len)) };
+        let Ok(meta) = Path::new(path).metadata() else {
+            return 0;
+        };
+        #[cfg(unix)]
+        let ok = {
+            use std::os::unix::fs::PermissionsExt;
+            meta.is_file() && meta.permissions().mode() & 0o111 != 0
+        };
+        #[cfg(not(unix))]
+        let ok = meta.is_file();
+        u32::from(ok)
     }
 }

@@ -12,8 +12,6 @@ vesper_package(
     name = "port_package",
     srcs = glob(["vesper/src/**/*.ves"]),
     manifest = "vesper/Loom.toml",
-    # @vesper/driver-commands imports the traceparent parser (#1336).
-    visibility = ["//visibility:public"],
 )
 
 vesper_port_object(

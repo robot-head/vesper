@@ -49,7 +49,7 @@ pub fn main_code() -> i64 {
     // Keep the crate's `HybridDriver` symbols linked: the Vesper object calls them.
     let _ = core::hint::black_box([crate::driver::host::hd_free as *const (), crate::driver::host::hd_help as *const (), crate::driver::host::hd_print as *const (), crate::driver::host::hd_session as *const (), crate::driver::host::hd_step as *const (), crate::driver::host::hd_text as *const ()]);
     // Keep the crate's `HybridCommands` symbols linked: the Vesper object calls them.
-    let _ = core::hint::black_box([crate::commands::host::hc_count as *const (), crate::commands::host::hc_help as *const (), crate::commands::host::hc_io_error as *const (), crate::commands::host::hc_print as *const (), crate::commands::host::hc_simd_compile as *const (), crate::commands::host::hc_simd_scan as *const (), crate::commands::host::hc_text as *const ()]);
+    let _ = core::hint::black_box([crate::commands::host::hc_executable as *const (), crate::commands::host::hc_help as *const (), crate::commands::host::hc_io_error as *const (), crate::commands::host::hc_print as *const (), crate::commands::host::hc_text as *const ()]);
     // SAFETY: `vesper_hybrid_driver_main_code` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.

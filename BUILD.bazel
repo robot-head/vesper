@@ -1176,9 +1176,9 @@ vesper_package(
     vsys = ["packages/vesper-driver-commands/commands.vsys"],
     deps = [
         ":driver_package",
-        ":std_fmt_package",
+        ":std_env_package",
         ":std_fs_package",
-        "//crates/vesper-beacon:port_package",
+        ":std_process_package",
     ],
 )
 

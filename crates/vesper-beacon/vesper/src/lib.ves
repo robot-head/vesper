@@ -58,7 +58,7 @@ copy struct ExpState {
     max: u64
 }
 
-pub copy enum TraceError {
+copy enum TraceError {
     InvalidLength {
         actual: usize
     },
@@ -76,7 +76,7 @@ pub copy enum TraceError {
 }
 
 // W3cSpanContext with the 128-bit trace ID as two words.
-pub copy struct SpanContext {
+copy struct SpanContext {
     trace_hi: u64,
     trace_lo: u64,
     span_id: u64,

@@ -1,18 +1,17 @@
-// @vesper/driver-commands: the `vesper` CLI's command layers beyond the
-// compile path, in Vesper (self-hosting SH5 lane 13, #1336). The hybrid
-// compiler's driver (crates/vesper-hybrid/modules/driver) hands every
-// command that is not `check`, `run`, `jit`, `build` or `emit` to `run`
-// below, which either runs it and returns the exit code, or returns
-// `delegate()` so that the Rust CLI runs it.
+// @vesper/driver-commands: the `vesper` CLI's routing beyond the compile
+// path, in Vesper (self-hosting SH5 lane 13, #1336). The hybrid compiler's
+// driver (crates/vesper-hybrid/modules/driver) hands every command that is
+// not `check`, `run`, `jit`, `build` or `emit` to `run` below, which either
+// finishes it and returns the exit code, or returns `delegate()` so that
+// the Rust CLI runs it.
 //
-// Each command layer is the argument loop, the checks, the messages and
-// the output of its `src/*_commands.rs`, byte for byte; the engine is the
-// Vesper port where it is importable (traceparent: @vesper/beacon) and the
-// hybrid's Rust otherwise, through `HybridCommands` (commands.vsys).
-//
-// Ported: no arguments, `--help`/`-h`, `--version`/`-V`, `traceparent`,
-// `simd`. The rest are listed in docs/parallel-results/
-// self-host-cli-commands.md with their lane or blocker.
+// Part 1 is everything in front of the command layers: no arguments,
+// `--help`/`-h`, `--version`/`-V`, the unknown-command error, and the tool
+// dispatch of src/tool_commands.rs (`vesper <tool>` runs `vesper-<tool>`
+// beside the executable or on `PATH`, with the same arguments, streams and
+// exit status). The compiler's own commands (`COMPILER_COMMANDS` in
+// src/main.rs) are handed back; docs/parallel-results/
+// self-host-cli-commands.md lists each with its lane or blocker.
 use @vesper/driver::{
     Args,
     args_count,
@@ -20,18 +19,20 @@ use @vesper/driver::{
     arg_end,
     eq
 };
-use @vesper/beacon::{
-    SpanContext,
-    TraceError,
-    parse_traceparent_55,
-    format_traceparent
+use @vesper-std/env::{
+    var_bytes,
+    os,
+    os_windows
+};
+use @vesper-std/process::{
+    command_path,
+    arg_bytes as proc_arg,
+    spawn,
+    wait,
+    release
 };
 use @vesper-std/fs::{
-    interrupted
-};
-use @vesper-std/fmt::{
-    write_u64,
-    write_hex_u64
+    IoError
 };
 
 // `run`'s result when the Rust CLI should run the command instead (the
@@ -49,10 +50,6 @@ fn stderr_stream() -> u32 {
 }
 
 // `hc_text` keys.
-fn text_error() -> u32 {
-    0
-}
-
 fn text_version() -> u32 {
     1
 }
@@ -65,41 +62,13 @@ fn text_os() -> u32 {
     3
 }
 
-fn text_simd_target() -> u32 {
-    10
+// The directory of `env::current_exe()`, and of its canonical path.
+fn text_exe_dir() -> u32 {
+    4
 }
 
-fn text_simd_tail() -> u32 {
-    11
-}
-
-fn text_simd_abi() -> u32 {
-    12
-}
-
-fn text_simd_codegen_version() -> u32 {
-    13
-}
-
-fn text_simd_setting() -> u32 {
-    14
-}
-
-fn text_simd_isa_flag() -> u32 {
-    15
-}
-
-// `hc_count` keys.
-fn count_simd_vector_bits() -> u32 {
-    1
-}
-
-fn count_simd_settings() -> u32 {
-    2
-}
-
-fn count_simd_isa_flags() -> u32 {
-    3
+fn text_exe_canonical_dir() -> u32 {
+    5
 }
 
 // ---------------------------------------------------------------------------
@@ -107,7 +76,8 @@ fn count_simd_isa_flags() -> u32 {
 
 // The exit code of the command in `args` (every argument after the
 // program name), or `delegate()`.
-pub fn run(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands]] {
+pub fn run(in args: Args)
+    -> i64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Ffi[HybridCommands]] {
     let n = args_count(in args);
     if n == 0 {
         HybridCommands::hc_help();
@@ -115,20 +85,116 @@ pub fn run(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands]] {
     }
     let command = arg(in args, 0);
     let c = command.as_slice();
-    if eq(in c, in "--help") || eq(in c, in "-h") {
-        HybridCommands::hc_help();
-        return 0;
+    // A command with a byte outside ASCII is never a tool's, and the Rust
+    // CLI decides what it is (it panics on one that is not UTF-8).
+    if !ascii(in c) {
+        return delegate();
     }
-    if eq(in c, in "--version") || eq(in c, in "-V") {
-        return version();
+    // `tool_commands::dispatch` leaves options and the compiler's own
+    // commands to the CLI.
+    if byte_at(in c, 0) == 45 {
+        if eq(in c, in "--help") || eq(in c, in "-h") {
+            HybridCommands::hc_help();
+            return 0;
+        }
+        if eq(in c, in "--version") || eq(in c, in "-V") {
+            return version();
+        }
+        return unknown_command(in c);
     }
-    if eq(in c, in "traceparent") {
-        return traceparent(in args);
+    if compiler_command(in c) {
+        return delegate();
     }
-    if eq(in c, in "simd") {
-        return simd(in args);
+    if !tool(in c) {
+        // Unknown commands keep the compiler's error unless a tool exists.
+        if !tool_name(in c) {
+            return unknown_command(in c);
+        }
+        let found = locate(in c);
+        if found.len() == 0 {
+            return unknown_command(in c);
+        }
+        return run_tool(in found.as_slice(), in args);
     }
-    delegate()
+    let found = locate(in c);
+    if found.len() == 0 {
+        return missing(in c);
+    }
+    run_tool(in found.as_slice(), in args)
+}
+
+// Whether every byte of `c` is ASCII.
+fn ascii(in c: Slice[u8]) -> bool {
+    for i in 0..c.len() {
+        if byte_at(in c, i) >= 128 {
+            return false;
+        }
+    }
+    true
+}
+
+// `COMPILER_COMMANDS` of src/main.rs: the commands the compiler binary runs
+// itself (the compile commands never reach `run`).
+fn compiler_command(in c: Slice[u8]) -> bool {
+    eq(in c, in "build")
+        || eq(in c, in "check")
+        || eq(in c, in "doc")
+        || eq(in c, in "ebpf")
+        || eq(in c, in "emit")
+        || eq(in c, in "fmt")
+        || eq(in c, in "forge")
+        || eq(in c, in "graph")
+        || eq(in c, in "highlight")
+        || eq(in c, in "jit")
+        || eq(in c, in "lint")
+        || eq(in c, in "lsp")
+        || eq(in c, in "proof-audit")
+        || eq(in c, in "run")
+        || eq(in c, in "shot")
+        || eq(in c, in "test")
+        || eq(in c, in "verify")
+}
+
+// `tool_commands::TOOLS`: subcommands served by `vesper-<name>` binaries.
+fn tool(in c: Slice[u8]) -> bool {
+    eq(in c, in "attest")
+        || eq(in c, in "audit")
+        || eq(in c, in "bench")
+        || eq(in c, in "cas")
+        || eq(in c, in "fuzz")
+        || eq(in c, in "grammar")
+        || eq(in c, in "json")
+        || eq(in c, in "migrate")
+        || eq(in c, in "publish")
+        || eq(in c, in "replay")
+        || eq(in c, in "resolve")
+        || eq(in c, in "sbom")
+        || eq(in c, in "semver")
+        || eq(in c, in "simd")
+        || eq(in c, in "top")
+        || eq(in c, in "traceparent")
+}
+
+// A name an external `vesper-<name>` may have: nonempty ASCII letters,
+// digits, `-` and `_`.
+fn tool_name(in c: Slice[u8]) -> bool {
+    if c.len() == 0 {
+        return false;
+    }
+    for i in 0..c.len() {
+        let b = byte_at(in c, i);
+        let ok = (b >= 48 && b <= 57)
+            || (b >= 65 && b <= 90)
+            || (b >= 97 && b <= 122)
+            || b
+            == 45
+            || b
+            == 95;
+        if !ok {
+            return false;
+        }
+    }
+    true
 }
 
 // ---------------------------------------------------------------------------
@@ -153,10 +219,6 @@ fn print(stream: u32, in text: Slice[u8]) eff [Ffi[HybridCommands]] {
     HybridCommands::hc_print(stream, in text);
 }
 
-fn print_str(stream: u32, in text: Str) eff [Ffi[HybridCommands]] {
-    HybridCommands::hc_print(stream, in text.as_bytes());
-}
-
 // `vesper: <message>` on stderr (`main`'s `Err` arm); exit code 1.
 fn fail(in message: Slice[u8]) -> i64 eff [Ffi[HybridCommands]] {
     let mut line: ChunkSeq[u8] = ChunkSeq::new[u8]();
@@ -167,15 +229,22 @@ fn fail(in message: Slice[u8]) -> i64 eff [Ffi[HybridCommands]] {
     1
 }
 
-fn fail_str(in message: Str) -> i64 eff [Ffi[HybridCommands]] {
-    fail(in message.as_bytes())
+// `unknown command '<c>'; see --help` (the end of `cli()`).
+fn unknown_command(in c: Slice[u8]) -> i64 eff [Ffi[HybridCommands]] {
+    let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    m.extend(in "unknown command '".as_bytes());
+    m.extend(in c);
+    m.extend(in "'; see --help".as_bytes());
+    fail(in m.as_slice())
 }
 
 // The host's copy-out protocol: whether `buf` had to grow (call again);
-// otherwise `buf` is cut to the length (empty for none).
-fn grown(n: i64, inout buf: ChunkSeq[u8]) -> bool {
+// otherwise `buf` is cut to the length. `none` is set for a negative
+// length (no text).
+fn grown(n: i64, inout buf: ChunkSeq[u8], inout none: bool) -> bool {
     if n < 0 {
         buf.truncate(0);
+        none = true;
         return false;
     }
     let len = wrapping_u64(n);
@@ -187,151 +256,36 @@ fn grown(n: i64, inout buf: ChunkSeq[u8]) -> bool {
     false
 }
 
-fn host_text(which: u32, index: u64) -> ChunkSeq[u8] eff [Ffi[HybridCommands]] {
+// Host text `which`, and whether it exists.
+fn host_text(which: u32, inout none: bool) -> ChunkSeq[u8] eff [Ffi[HybridCommands]] {
     let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
     buf.resize(256, 0);
     loop {
-        let n = HybridCommands::hc_text(which, index, inout buf.as_slice_mut());
-        if !grown(n, inout buf) {
+        let n = HybridCommands::hc_text(which, 0, inout buf.as_slice_mut());
+        if !grown(n, inout buf, inout none) {
             break;
         }
     }
     buf
+}
+
+fn host_text_or_empty(which: u32) -> ChunkSeq[u8] eff [Ffi[HybridCommands]] {
+    let mut none = false;
+    host_text(which, inout none)
 }
 
 // Rust's `Display` of the `io::Error` with this host error word.
 fn io_error_text(word: u64) -> ChunkSeq[u8] eff [Ffi[HybridCommands]] {
     let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
     buf.resize(128, 0);
+    let mut none = false;
     loop {
         let n = HybridCommands::hc_io_error(word, inout buf.as_slice_mut());
-        if !grown(n, inout buf) {
+        if !grown(n, inout buf, inout none) {
             break;
         }
     }
     buf
-}
-
-// ---------------------------------------------------------------------------
-// JSON in serde_json's `to_string_pretty` shape: two-space indent, `": "`
-// after keys, `{}`/`[]` when empty. `json!` objects are sorted maps, so
-// callers write keys in byte order.
-
-struct Json {
-    out: ChunkSeq[u8],
-    depth: u64,
-    fresh: bool,
-}
-
-fn json_new() -> Json {
-    Json {
-        out: ChunkSeq::new[u8](),
-        depth: 0,
-        fresh: true,
-    }
-}
-
-fn json_indent(inout j: Json) {
-    j.out.push(10);
-    for _ in 0..j.depth {
-        j.out.push(32);
-        j.out.push(32);
-    }
-}
-
-fn json_open(inout j: Json, bracket: u8) {
-    j.out.push(bracket);
-    j.depth = wrapping_add(j.depth, 1);
-    j.fresh = true;
-}
-
-fn json_close(inout j: Json, bracket: u8) {
-    j.depth = wrapping_sub(j.depth, 1);
-    if !j.fresh {
-        json_indent(inout j);
-    }
-    j.out.push(bracket);
-    j.fresh = false;
-}
-
-// The separator before the next element of an array.
-fn json_item(inout j: Json) {
-    if !j.fresh {
-        j.out.push(44);
-    }
-    json_indent(inout j);
-    j.fresh = false;
-}
-
-fn json_key(inout j: Json, in key: Str) {
-    json_item(inout j);
-    json_string(inout j, in key.as_bytes());
-    j.out.push(58);
-    j.out.push(32);
-}
-
-fn hex_digit(d: u8) -> u8 {
-    if d < 10 {
-        wrapping_add(d, 48)
-    } else {
-        wrapping_add(d, 87)
-    }
-}
-
-// A JSON string with serde_json's escapes.
-fn json_string(inout j: Json, in s: Slice[u8]) {
-    j.out.push(34);
-    for i in 0..s.len() {
-        let b = byte_at(in s, i);
-        if b == 34 || b == 92 {
-            j.out.push(92);
-            j.out.push(b);
-        } else if b == 8 {
-            j.out.push(92);
-            j.out.push(98);
-        } else if b == 9 {
-            j.out.push(92);
-            j.out.push(116);
-        } else if b == 10 {
-            j.out.push(92);
-            j.out.push(110);
-        } else if b == 12 {
-            j.out.push(92);
-            j.out.push(102);
-        } else if b == 13 {
-            j.out.push(92);
-            j.out.push(114);
-        } else if b < 32 {
-            j.out.extend(in "\\u00".as_bytes());
-            j.out.push(hex_digit(b >> 4));
-            j.out.push(hex_digit(b & 15));
-        } else {
-            j.out.push(b);
-        }
-    }
-    j.out.push(34);
-}
-
-fn json_str(inout j: Json, in s: Str) {
-    json_string(inout j, in s.as_bytes());
-}
-
-fn json_u64(inout j: Json, x: u64) {
-    write_u64(inout j.out, x);
-}
-
-fn json_bool(inout j: Json, b: bool) {
-    if b {
-        j.out.extend(in "true".as_bytes());
-    } else {
-        j.out.extend(in "false".as_bytes());
-    }
-}
-
-// `println!` of the document.
-fn json_println(inout j: Json) eff [Ffi[HybridCommands]] {
-    j.out.push(10);
-    print(stdout_stream(), in j.out.as_slice());
 }
 
 // ---------------------------------------------------------------------------
@@ -340,13 +294,13 @@ fn json_println(inout j: Json) eff [Ffi[HybridCommands]] {
 fn version() -> i64 eff [Ffi[HybridCommands]] {
     let mut b: ChunkSeq[u8] = ChunkSeq::new[u8]();
     b.extend(in "  \\\\    //   vesper ".as_bytes());
-    let v = host_text(text_version(), 0);
+    let v = host_text_or_empty(text_version());
     b.extend(in v.as_slice());
     b.extend(in " (stage3-ddc)\n   \\\\  //    target: ".as_bytes());
-    let arch = host_text(text_arch(), 0);
+    let arch = host_text_or_empty(text_arch());
     b.extend(in arch.as_slice());
     b.push(45);
-    let os = host_text(text_os(), 0);
+    let os = host_text_or_empty(text_os());
     b.extend(in os.as_slice());
     b
         .extend(
@@ -358,450 +312,198 @@ fn version() -> i64 eff [Ffi[HybridCommands]] {
 }
 
 // ---------------------------------------------------------------------------
-// `traceparent` (src/trace_commands.rs) over @vesper/beacon.
+// Tool dispatch (src/tool_commands.rs).
 
-fn traceparent_help() -> Str {
-    "Usage: vesper traceparent HEADER [--json]\n\nValidate an exact W3C TraceContext version-00 header and emit its canonical form.\nOnly lowercase hexadecimal and nonzero trace/parent IDs are accepted.\nUnknown flag bits are preserved; sampled is bit zero. No tracing state is created.\n"
+// `binary_name`: `vesper-<tool>` plus the host's executable suffix.
+fn binary_name(in t: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[StdEnv]] {
+    let mut name: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    name.extend(in "vesper-".as_bytes());
+    name.extend(in t);
+    if os() == os_windows() {
+        name.extend(in ".exe".as_bytes());
+    }
+    name
 }
 
-// A `TraceError` as one nonzero word: the variant plus one in the low
-// byte, its field above.
-fn trace_error_word(e: TraceError) -> u64 {
-    match e {
-        TraceError::InvalidLength {
-            actual
-        }
-        => 1 | (widen_u64(actual) << 8),
-        TraceError::MissingHyphen {
-            offset
-        }
-        => 2 | (widen_u64(offset) << 8),
-        TraceError::InvalidHex {
-            offset
-        }
-        => 3 | (widen_u64(offset) << 8),
-        TraceError::UnsupportedVersion {
-            version
-        }
-        => 4 | (widen_u64(version) << 8),
-        TraceError::ZeroTraceId => 5,
-        TraceError::ZeroSpanId => 6,
-    }
+fn is_separator(b: u8, windows: bool) -> bool {
+    b == 47 || (windows && b == 92)
 }
 
-// `TraceError`'s `Display`, from its word.
-fn trace_error_text(word: u64, inout m: ChunkSeq[u8]) {
-    let tag = word & 255;
-    let field = word >> 8;
-    if tag == 1 {
-        m.extend(in "traceparent v00 requires 55 bytes, received ".as_bytes());
-        write_u64(inout m, field);
-    } else if tag == 2 {
-        m.extend(in "traceparent missing hyphen at byte ".as_bytes());
-        write_u64(inout m, field);
-    } else if tag == 3 {
-        m.extend(in "traceparent requires lowercase hex at byte ".as_bytes());
-        write_u64(inout m, field);
-    } else if tag == 4 {
-        m.extend(in "unsupported traceparent version ".as_bytes());
-        write_hex_u64(inout m, field, 2);
-        m.extend(in "; only 00 is supported".as_bytes());
-    } else if tag == 5 {
-        m.extend(in "traceparent trace ID must be nonzero".as_bytes());
-    } else {
-        m.extend(in "traceparent span ID must be nonzero".as_bytes());
-    }
-}
-
-// The failure of `traceparent`: the JSON report first under `--json`.
-fn traceparent_invalid(json: bool, in message: Slice[u8]) -> i64 eff [Ffi[HybridCommands]] {
-    if json {
-        let mut j = json_new();
-        json_open(inout j, 123);
-        json_key(inout j, in "error");
-        json_string(inout j, in message);
-        json_key(inout j, in "schema_version");
-        json_u64(inout j, 1);
-        json_key(inout j, in "status");
-        json_str(inout j, in "invalid");
-        json_close(inout j, 125);
-        json_println(inout j);
-    }
-    fail(in message)
-}
-
-fn traceparent(in args: Args) -> i64 eff [Ffi[HybridCommands]] {
-    let n = args_count(in args);
-    let mut json = false;
-    for i in 1..n {
-        let a = arg(in args, i);
-        if eq(in a.as_slice(), in "--json") {
-            json = true;
+// `Path::join` of a relative `name`: an empty directory gives the name,
+// and a separator is added unless the directory ends with one.
+fn join(in dir: Slice[u8], in name: Slice[u8], windows: bool) -> ChunkSeq[u8] {
+    let mut p: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    p.extend(in dir);
+    if dir.len() != 0 && !is_separator(byte_at(in dir, wrapping_sub(dir.len(), 1)), windows) {
+        if windows {
+            p.push(92);
+        } else {
+            p.push(47);
         }
     }
-    let mut header: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    let mut has_header = false;
-    for i in 1..n {
-        let a = arg(in args, i);
-        let s = a.as_slice();
-        if eq(in s, in "--help") || eq(in s, in "-h") {
-            print_str(stdout_stream(), in traceparent_help());
-            return 0;
-        }
-        if eq(in s, in "--json") {
-            continue;
-        }
-        if byte_at(in s, 0) == 45 {
-            let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
-            m.extend(in "unknown traceparent option '".as_bytes());
-            m.extend(in s);
-            m.push(39);
-            return traceparent_invalid(json, in m.as_slice());
-        }
-        if has_header {
-            return traceparent_invalid(json, in "traceparent accepts one header".as_bytes());
-        }
-        header.extend(in s);
-        has_header = true;
-    }
-    if !has_header {
-        return traceparent_invalid(json, in "traceparent requires a header; see --help".as_bytes());
-    }
-    // The error as a word (`trace_error_word`): a handler whose result is
-    // an enum has no native layout yet (see the report's compiler gaps).
-    let mut context = SpanContext {
-        trace_hi: 0,
-        trace_lo: 0,
-        span_id: 0,
-        trace_flags: 0
-    };
-    let failed = handle Fail[TraceError] in {
-        context = parse_traceparent_55(in header.as_slice());
-        0
-    } with {
-        return v => v,
-        raise(e, _) => trace_error_word(e),
-    };
-    if failed != 0 {
-        let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
-        m.extend(in "invalid traceparent: ".as_bytes());
-        trace_error_text(failed, inout m);
-        return traceparent_invalid(json, in m.as_slice());
-    }
-    let mut canonical: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    canonical.resize(55, 0);
-    format_traceparent(in context, inout canonical.as_slice_mut());
-    if json {
-        let mut j = json_new();
-        json_open(inout j, 123);
-        json_key(inout j, in "canonical");
-        json_string(inout j, in canonical.as_slice());
-        json_key(inout j, in "parent_span_id");
-        let mut span: ChunkSeq[u8] = ChunkSeq::new[u8]();
-        write_hex_u64(inout span, context.span_id, 16);
-        json_string(inout j, in span.as_slice());
-        json_key(inout j, in "sampled");
-        json_bool(inout j, (context.trace_flags & 1) != 0);
-        json_key(inout j, in "schema_version");
-        json_u64(inout j, 1);
-        json_key(inout j, in "status");
-        json_str(inout j, in "valid");
-        json_key(inout j, in "trace_flags");
-        let mut flags: ChunkSeq[u8] = ChunkSeq::new[u8]();
-        write_hex_u64(inout flags, widen_u64(context.trace_flags), 2);
-        json_string(inout j, in flags.as_slice());
-        json_key(inout j, in "trace_id");
-        let mut id: ChunkSeq[u8] = ChunkSeq::new[u8]();
-        write_hex_u64(inout id, context.trace_hi, 16);
-        write_hex_u64(inout id, context.trace_lo, 16);
-        json_string(inout j, in id.as_slice());
-        json_key(inout j, in "version");
-        json_str(inout j, in "00");
-        json_close(inout j, 125);
-        json_println(inout j);
-    } else {
-        canonical.push(10);
-        print(stdout_stream(), in canonical.as_slice());
-    }
-    0
+    p.extend(in name);
+    p
 }
 
-// ---------------------------------------------------------------------------
-// `simd` (src/simd_commands.rs): the scanner is vesper-simd's Cranelift
-// JIT, reached through the host.
-
-fn simd_help() -> Str {
-    "Usage: vesper simd scan <file> --delimiter <0..255> [--profile baseline128] [--json]\n\nCount delimiter bytes and XOR all input bytes with a runtime-checked native\nBaseline128 scanner. Reads in bounded chunks. Unsupported CPU profiles fail\nexplicitly. This host tool does not implement source-language Isa effects.\n"
-}
-
-// `IsaProfileKind`, in the host's order; `profile_none()` for an unknown
-// name.
-fn profile_none() -> u32 {
-    255
-}
-
-fn profile_code(in s: Slice[u8]) -> u32 {
-    if eq(in s, in "baseline128") {
-        0
-    } else if eq(in s, in "avx2") {
-        1
-    } else if eq(in s, in "avx512") {
-        2
-    } else if eq(in s, in "sve2") {
-        3
-    } else if eq(in s, in "rvv1") {
-        4
-    } else {
-        profile_none()
+fn same(in a: Slice[u8], in b: Slice[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
     }
-}
-
-// `value.parse::<u8>()` of a string of ASCII digits: the byte, or 256 when
-// it exceeds 255.
-fn decimal_byte(in s: Slice[u8]) -> u64 {
-    let mut v: u64 = 0;
-    for i in 0..s.len() {
-        let d = wrapping_sub(widen_u64(byte_at(in s, i)), 48);
-        v = wrapping_add(wrapping_mul(v, 10), d);
-        if v > 255 {
-            return 256;
-        }
-    }
-    v
-}
-
-fn all_digits(in s: Slice[u8]) -> bool {
-    for i in 0..s.len() {
-        let b = byte_at(in s, i);
-        if b < 48 || b > 57 {
+    for i in 0..a.len() {
+        if byte_at(in a, i) != byte_at(in b, i) {
             return false;
         }
     }
     true
 }
 
-fn simd(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands]] {
-    let n = args_count(in args);
-    if n < 2 {
-        return simd_expected();
-    }
-    let sub = arg(in args, 1);
-    let s = sub.as_slice();
-    if eq(in s, in "--help") || eq(in s, in "-h") {
-        print_str(stdout_stream(), in simd_help());
-        return 0;
-    }
-    if !eq(in s, in "scan") {
-        return simd_expected();
-    }
-    let mut input: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    let mut has_input = false;
-    let mut delimiter: u64 = 0;
-    let mut has_delimiter = false;
-    let mut profile: u32 = 0;
-    let mut has_profile = false;
-    let mut json = false;
-    let mut positional_only = false;
-    let mut i: u64 = 2;
-    // `while i < n {` does not parse yet (SH5 lane 4).
-    loop {
-        if i >= n {
-            break;
-        }
-        let a = arg(in args, i);
-        i = wrapping_add(i, 1);
-        if !positional_only {
-            let s = a.as_slice();
-            if eq(in s, in "--help") || eq(in s, in "-h") {
-                print_str(stdout_stream(), in simd_help());
-                return 0;
-            }
-            if eq(in s, in "--") {
-                positional_only = true;
-                continue;
-            }
-            if eq(in s, in "--delimiter") {
-                if has_delimiter {
-                    return fail_str(in "--delimiter may only be supplied once");
-                }
-                if i >= n {
-                    return fail_str(in "--delimiter requires a byte (0..255)");
-                }
-                let v = arg(in args, i);
-                i = wrapping_add(i, 1);
-                if v.len() == 0 || !all_digits(in v.as_slice()) {
-                    return fail_str(in "--delimiter requires a decimal byte (0..255)");
-                }
-                let d = decimal_byte(in v.as_slice());
-                if d > 255 {
-                    return fail_str(in "delimiter exceeds 255");
-                }
-                delimiter = d;
-                has_delimiter = true;
-                continue;
-            }
-            if eq(in s, in "--profile") {
-                if has_profile {
-                    return fail_str(in "--profile may only be supplied once");
-                }
-                let mut p = profile_none();
-                if i < n {
-                    let v = arg(in args, i);
-                    p = profile_code(in v.as_slice());
-                }
-                i = wrapping_add(i, 1);
-                if p == profile_none() {
-                    return fail_str(in "unknown or missing SIMD profile");
-                }
-                profile = p;
-                has_profile = true;
-                continue;
-            }
-            if eq(in s, in "--json") {
-                if json {
-                    return fail_str(in "--json may only be supplied once");
-                }
-                json = true;
-                continue;
-            }
-            if byte_at(in s, 0) == 45 {
-                let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
-                m.extend(in "unknown simd option '".as_bytes());
-                m.extend(in s);
-                m.push(39);
-                return fail(in m.as_slice());
-            }
-        }
-        if has_input {
-            return fail_str(in "simd scan accepts one input file");
-        }
-        input = a;
-        has_input = true;
-    }
-    if !has_input {
-        return fail_str(in "simd scan requires an input file");
-    }
-    if !has_delimiter {
-        return fail_str(in "simd scan requires --delimiter <0..255>");
-    }
-    if HybridCommands::hc_simd_compile(profile) != 0 {
-        let m = host_text(text_error(), 0);
-        return fail(in m.as_slice());
-    }
-    let mut err: u64 = 0;
-    let mut f = match StdFs::vstd_fs_open(in input.as_slice(), 0, inout err) {
-        Option::Some(f) => f,
-        Option::None => return simd_io_failed(in input.as_slice(), err),
-    };
-    let mut buffer: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    buffer.resize(65536, 0);
-    let mut bytes: u64 = 0;
-    let mut matches: u64 = 0;
-    let mut xor: u64 = 0;
-    loop {
-        err = 0;
-        let len = StdFs::vstd_fs_read(inout f, inout buffer.as_slice_mut(), inout err);
-        if err != 0 {
-            if wrapping_u32(err & 255) == interrupted() {
-                continue;
-            }
-            StdFs::vstd_fs_close(f);
-            return simd_io_failed(in input.as_slice(), err);
-        }
-        if len == 0 {
-            break;
-        }
-        let r = HybridCommands::hc_simd_scan(in buffer[0..len], widen_u32(wrapping_u8(delimiter)));
-        bytes = wrapping_add(bytes, len);
-        matches = wrapping_add(matches, r >> 8);
-        xor = xor ^ (r & 255);
-    }
-    StdFs::vstd_fs_close(f);
-    if json {
-        simd_json(bytes, delimiter, matches, xor);
-    } else {
-        let mut line: ChunkSeq[u8] = ChunkSeq::new[u8]();
-        line.extend(in "bytes=".as_bytes());
-        write_u64(inout line, bytes);
-        line.extend(in " delimiter=".as_bytes());
-        write_u64(inout line, delimiter);
-        line.extend(in " matches=".as_bytes());
-        write_u64(inout line, matches);
-        line.extend(in " xor=".as_bytes());
-        write_u64(inout line, xor);
-        line.push(10);
-        print(stdout_stream(), in line.as_slice());
-    }
-    0
+fn executable(in path: Slice[u8]) -> bool eff [Ffi[HybridCommands]] {
+    HybridCommands::hc_executable(in path) != 0
 }
 
-fn simd_expected() -> i64 eff [Ffi[HybridCommands]] {
+// The candidates in one directory beside the executable: Cargo puts the
+// tools beside `vesper`, Bazel at `<bin>/crates/vesper-tools/bin/`.
+fn in_exe_dir(in dir: Slice[u8], in name: Slice[u8], windows: bool)
+    -> ChunkSeq[u8] eff [Ffi[HybridCommands]] {
+    let direct = join(in dir, in name, windows);
+    if executable(in direct.as_slice()) {
+        return direct;
+    }
+    let tools = join(in dir, in "../crates/vesper-tools/bin".as_bytes(), windows);
+    let bazel = join(in tools.as_slice(), in name, windows);
+    if executable(in bazel.as_slice()) {
+        return bazel;
+    }
+    ChunkSeq::new[u8]()
+}
+
+// `env::split_paths` of one entry boundary: Unix splits on `:`; Windows
+// on `;` outside double quotes, and drops the quotes.
+fn path_entries(in path: Slice[u8], windows: bool) -> ChunkSeq[u64] {
+    // Each entry as (start, end) into `path`; quotes are stripped later.
+    let mut spans: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut start: u64 = 0;
+    let mut quoted = false;
+    for i in 0..path.len() {
+        let b = byte_at(in path, i);
+        if windows && b == 34 {
+            quoted = !quoted;
+        } else if (!windows && b == 58) || (windows && !quoted && b == 59) {
+            spans.push(start);
+            spans.push(i);
+            start = wrapping_add(i, 1);
+        }
+    }
+    spans.push(start);
+    spans.push(path.len());
+    spans
+}
+
+fn span_at(in spans: Slice[u64], i: u64) -> u64 {
+    match spans.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+// `locate`: the tool's executable, or empty when there is none.
+fn locate(in t: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[StdEnv], Ffi[HybridCommands]] {
+    let windows = os() == os_windows();
+    let name = binary_name(in t);
+    let mut no_exe = false;
+    let exe_dir = host_text(text_exe_dir(), inout no_exe);
+    if !no_exe {
+        let found = in_exe_dir(in exe_dir.as_slice(), in name.as_slice(), windows);
+        if found.len() != 0 {
+            return found;
+        }
+        // A symlinked `vesper` (an install prefix, a Bazel runfiles tree)
+        // also finds tools beside its target.
+        let mut no_canonical = false;
+        let canonical = host_text(text_exe_canonical_dir(), inout no_canonical);
+        if !no_canonical && !same(in canonical.as_slice(), in exe_dir.as_slice()) {
+            let found = in_exe_dir(in canonical.as_slice(), in name.as_slice(), windows);
+            if found.len() != 0 {
+                return found;
+            }
+        }
+    }
+    let path = match var_bytes(in "PATH") {
+        Option::Some(p) => p,
+        Option::None => return ChunkSeq::new[u8](),
+    };
+    let spans = path_entries(in path.as_slice(), windows);
+    let count = spans.len() / 2;
+    for k in 0..count {
+        let a = span_at(in spans.as_slice(), wrapping_mul(k, 2));
+        let b = span_at(in spans.as_slice(), wrapping_add(wrapping_mul(k, 2), 1));
+        let mut dir: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        for i in a..b {
+            let c = byte_at(in path.as_slice(), i);
+            if !(windows && c == 34) {
+                dir.push(c);
+            }
+        }
+        let candidate = join(in dir.as_slice(), in name.as_slice(), windows);
+        if executable(in candidate.as_slice()) {
+            return candidate;
+        }
+    }
+    ChunkSeq::new[u8]()
+}
+
+// `missing`: a known tool whose binary is not there.
+fn missing(in t: Slice[u8]) -> i64 eff [Ffi[HybridCommands]] {
     let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    m.extend(in "expected 'simd scan'; ".as_bytes());
-    m.extend(in simd_help().as_bytes());
+    m.extend(in "`vesper ".as_bytes());
+    m.extend(in t);
+    m.extend(in "` is provided by the `vesper-".as_bytes());
+    m.extend(in t);
+    m
+        .extend(
+        in "` tool, which was not found next to the vesper executable or on PATH; build it with `cargo build -p vesper-tools` (or `bazel build //crates/vesper-tools:all`) and install it beside vesper"
+            .as_bytes()
+    );
     fail(in m.as_slice())
 }
 
-// `{input}: {e}`.
-fn simd_io_failed(in input: Slice[u8], err: u64) -> i64 eff [Ffi[HybridCommands]] {
+// `run` and `exit_code`: the tool with the arguments after the command,
+// inheriting the standard streams; its exit code, 128 plus the signal that
+// killed it, or 1.
+fn run_tool(in binary: Slice[u8], in args: Args) -> i64 eff [Ffi[StdProcess], Ffi[HybridCommands]] {
+    let mut c = command_path(in binary);
+    let n = args_count(in args);
+    for i in 1..n {
+        let a = arg(in args, i);
+        proc_arg(inout c, in a.as_slice());
+    }
+    let mut ch = match spawn(c) {
+        Result::Ok(ch) => ch,
+        Result::Err(e) => return spawn_failed(in binary, e),
+    };
+    let waited = wait(inout ch);
+    release(ch);
+    match waited {
+        Result::Ok(st) => {
+            if st.exited {
+                st.code
+            } else if st.signal != 0 {
+                wrapping_add(128, widen_i64(st.signal))
+            } else {
+                1
+            }
+        },
+        Result::Err(e) => spawn_failed(in binary, e),
+    }
+}
+
+// `{binary}: {e}`.
+fn spawn_failed(in binary: Slice[u8], e: IoError) -> i64 eff [Ffi[HybridCommands]] {
     let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    m.extend(in input);
+    m.extend(in binary);
     m.extend(in ": ".as_bytes());
-    let t = io_error_text(err);
+    let word = widen_u64(e.kind) | (widen_u64(e.os) << 32);
+    let t = io_error_text(word);
     m.extend(in t.as_slice());
     fail(in m.as_slice())
-}
-
-fn json_host_list(inout j: Json, count: u32, which: u32) eff [Ffi[HybridCommands]] {
-    json_open(inout j, 91);
-    let n = HybridCommands::hc_count(count);
-    for k in 0..n {
-        json_item(inout j);
-        let t = host_text(which, k);
-        json_string(inout j, in t.as_slice());
-    }
-    json_close(inout j, 93);
-}
-
-fn json_host_text(inout j: Json, which: u32) eff [Ffi[HybridCommands]] {
-    let t = host_text(which, 0);
-    json_string(inout j, in t.as_slice());
-}
-
-fn simd_json(bytes: u64, delimiter: u64, matches: u64, xor: u64) eff [Ffi[HybridCommands]] {
-    let mut j = json_new();
-    json_open(inout j, 123);
-    json_key(inout j, in "bytes");
-    json_u64(inout j, bytes);
-    json_key(inout j, in "code");
-    json_open(inout j, 123);
-    json_key(inout j, in "abi");
-    json_host_text(inout j, text_simd_abi());
-    json_key(inout j, in "codegen_settings");
-    json_host_list(inout j, count_simd_settings(), text_simd_setting());
-    json_key(inout j, in "codegen_version");
-    json_host_text(inout j, text_simd_codegen_version());
-    json_key(inout j, in "enabled_isa_flags");
-    json_host_list(inout j, count_simd_isa_flags(), text_simd_isa_flag());
-    json_key(inout j, in "profile");
-    json_str(inout j, in "baseline128");
-    json_key(inout j, in "tail_strategy");
-    json_host_text(inout j, text_simd_tail());
-    json_key(inout j, in "target");
-    json_host_text(inout j, text_simd_target());
-    json_key(inout j, in "vector_bits");
-    json_u64(inout j, HybridCommands::hc_count(count_simd_vector_bits()));
-    json_close(inout j, 125);
-    json_key(inout j, in "delimiter");
-    json_u64(inout j, delimiter);
-    json_key(inout j, in "execution");
-    json_str(inout j, in "native_jit");
-    json_key(inout j, in "matches");
-    json_u64(inout j, matches);
-    json_key(inout j, in "schema_version");
-    json_u64(inout j, 1);
-    json_key(inout j, in "xor");
-    json_u64(inout j, xor);
-    json_close(inout j, 125);
-    json_println(inout j);
 }

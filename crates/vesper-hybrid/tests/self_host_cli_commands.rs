@@ -1,18 +1,45 @@
-//! The Vesper command layers end to end (self-hosting SH5 lane 13, #1336):
-//! the hybrid's driver hands every command off the compile path to
+//! The Vesper CLI routing end to end (self-hosting SH5 lane 13, #1336): the
+//! hybrid's driver hands every command off the compile path to
 //! `@vesper/driver-commands` (packages/vesper-driver-commands), which runs
-//! the ported ones and hands the rest back to the Rust CLI. Here the hybrid
-//! and the default compiler run every argument vector of each ported
-//! command's CLI tests, plus the edge cases of its argument loop, each in a
-//! fresh directory with the same fixture files, and must agree on exit
-//! status, stdout, stderr and every file in the directory afterwards.
+//! what is in front of the command layers (no arguments, `--help`/`-h`,
+//! `--version`/`-V`, the unknown-command error and the hand-off to
+//! `vesper-<tool>` programs of src/tool_commands.rs) and hands the
+//! compiler's own commands back to the Rust CLI.
 //!
-//! Ported: no arguments, `--help`/`-h`, `--version`/`-V`, `traceparent`
-//! (tests/foundation_cli.rs) and `simd` (tests/simd_cli.rs).
+//! The hybrid and the default compiler are staged side by side in scratch
+//! layouts (tools beside them, none, the Bazel `crates/vesper-tools/bin`
+//! tree) and run every argument vector under several `PATH`s, each in a
+//! fresh directory. They must agree on exit status, stdout, stderr and
+//! every file in the directory afterwards. A tool here is a hard link of
+//! the default compiler (so it runs on every host), plus on Unix shell
+//! scripts for exit codes, signals, shadows and spawn errors.
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, Instant};
+
+const EXE: &str = std::env::consts::EXE_SUFFIX;
+
+/// `tool_commands::TOOLS`.
+const TOOLS: &[&str] = &[
+    "attest",
+    "audit",
+    "bench",
+    "cas",
+    "fuzz",
+    "grammar",
+    "json",
+    "migrate",
+    "publish",
+    "replay",
+    "resolve",
+    "sbom",
+    "semver",
+    "simd",
+    "top",
+    "traceparent",
+];
 
 fn repository() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -22,7 +49,7 @@ fn repository() -> PathBuf {
 }
 
 fn which(name: &Path) -> Option<PathBuf> {
-    let suffixed = format!("{}{}", name.display(), std::env::consts::EXE_SUFFIX);
+    let suffixed = format!("{}{EXE}", name.display());
     std::env::split_paths(&std::env::var_os("PATH")?)
         .flat_map(|dir| [dir.join(name), dir.join(&suffixed)])
         .find(|p| p.is_file())
@@ -30,11 +57,12 @@ fn which(name: &Path) -> Option<PathBuf> {
 }
 
 fn resolve(path: PathBuf) -> PathBuf {
-    if path.is_absolute() {
+    let path = if path.is_absolute() {
         path
     } else {
         which(&path).unwrap_or(path)
-    }
+    };
+    path.canonicalize().unwrap_or(path)
 }
 
 fn hybrid() -> PathBuf {
@@ -64,59 +92,192 @@ fn default_compiler() -> PathBuf {
         .status()
         .expect("run cargo build --bin vesper");
     assert!(status.success(), "cargo build --bin vesper failed");
-    target
-        .join("debug")
-        .join(format!("vesper{}", std::env::consts::EXE_SUFFIX))
+    target.join("debug").join(format!("vesper{EXE}"))
 }
 
-const VALID: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-ff";
+/// A scratch directory on the target's file system where one exists, so
+/// that the compilers can be hard linked rather than copied.
+fn scratch(name: &str) -> PathBuf {
+    let base = option_env!("CARGO_TARGET_TMPDIR")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("TEST_TMPDIR").map(PathBuf::from))
+        .unwrap_or_else(std::env::temp_dir);
+    let dir = base.join(format!("{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
 
-/// Headers for `traceparent`: every error of the parser, in its order.
-fn headers() -> Vec<String> {
-    let mut h: Vec<String> = [
-        VALID,
-        "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
-        "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00",
-        "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-fe",
-        "00-00000000000000000000000000000001-0000000000000001-01",
-        "00-00000000000000010000000000000000-0000000000000001-01",
-        "",
-        "00",
-        "00-00000000000000000000000000000000-00f067aa0ba902b7-01",
-        "00-4bf92f3577b34da6a3ce929d0e0e4736-0000000000000000-01",
-        "00-00000000000000000000000000000000-0000000000000000-01",
-        "01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
-        "ff-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
-        "0g-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
-        "00-4BF92F3577B34DA6A3CE929D0E0E4736-00f067aa0ba902b7-01",
-        "00-4bf92f3577b34da6a3ce929d0e0e473G-00f067aa0ba902b7-01",
-        "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902bZ-01",
-        "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-0x",
-        "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01-extra",
-        "00_4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
-        "00-4bf92f3577b34da6a3ce929d0e0e4736_00f067aa0ba902b7-01",
-        "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7_01",
-        "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-1",
-        " 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-1",
-        "00-4bf92f3577b34da6a3ce929d0e0é4736-00f067aa0ba902b7-1",
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect();
-    // An invalid digit at every hex offset.
-    for at in [0usize, 1, 3, 10, 18, 19, 34, 36, 44, 51, 53, 54] {
-        let mut b = VALID.as_bytes().to_vec();
-        b[at] = b'x';
-        h.push(String::from_utf8(b).unwrap());
+/// `to` as `from`: a hard link, else a copy.
+fn stage(from: &Path, to: &Path) {
+    if let Some(dir) = to.parent() {
+        std::fs::create_dir_all(dir).unwrap();
     }
-    h
+    if std::fs::hard_link(from, to).is_err() {
+        std::fs::copy(from, to)
+            .unwrap_or_else(|e| panic!("copy {} to {}: {e}", from.display(), to.display()));
+    }
 }
 
-/// Argument vectors (after the program name). `{in}` is the fixture
-/// `input`, written before each run.
-fn vectors() -> Vec<Vec<String>> {
-    let s = |v: &[&str]| v.iter().map(|a| a.to_string()).collect::<Vec<_>>();
-    let mut v: Vec<Vec<String>> = vec![
+#[cfg(unix)]
+fn script(path: &Path, body: &str, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(path, body).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+}
+
+/// The compilers and tools, staged.
+struct Layout {
+    name: &'static str,
+    default: PathBuf,
+    hybrid: PathBuf,
+}
+
+struct Stage {
+    root: PathBuf,
+    layouts: Vec<Layout>,
+    /// `PATH` values to run under (`None` unsets it), by name.
+    paths: Vec<(&'static str, Option<OsString>)>,
+}
+
+fn staged() -> Stage {
+    let (default, hybrid) = (default_compiler(), hybrid());
+    let root = scratch("vesper-cli-routing");
+    let compilers = |dir: &Path| {
+        let (d, h) = (
+            dir.join(format!("vesper{EXE}")),
+            dir.join(format!("vesper-hybrid{EXE}")),
+        );
+        stage(&default, &d);
+        stage(&hybrid, &h);
+        (d, h)
+    };
+    let tool = |dir: &Path, name: &str| stage(&default, &dir.join(format!("vesper-{name}{EXE}")));
+    let mut layouts = vec![];
+    // Every tool beside the compilers, as Cargo builds them, plus an
+    // external one.
+    let full = root.join("full");
+    let (d, h) = compilers(&full);
+    for t in TOOLS {
+        tool(&full, t);
+    }
+    tool(&full, "extra");
+    layouts.push(Layout {
+        name: "tools beside",
+        default: d,
+        hybrid: h,
+    });
+    // No tools anywhere but PATH.
+    let (d, h) = compilers(&root.join("bare"));
+    layouts.push(Layout {
+        name: "no tools",
+        default: d,
+        hybrid: h,
+    });
+    // Bazel's tree: `<bin>/bin/vesper` with the tools at
+    // `<bin>/crates/vesper-tools/bin/`.
+    let (d, h) = compilers(&root.join("bazel/bin"));
+    let tools = root.join("bazel/crates/vesper-tools/bin");
+    tool(&tools, "semver");
+    tool(&tools, "extra");
+    layouts.push(Layout {
+        name: "Bazel tree",
+        default: d,
+        hybrid: h,
+    });
+
+    let (path1, path2) = (root.join("path1"), root.join("path2"));
+    std::fs::create_dir_all(&path1).unwrap();
+    std::fs::create_dir_all(&path2).unwrap();
+    tool(&path2, "pathtool");
+    tool(&path2, "json");
+    let join = |dirs: &[&Path]| std::env::join_paths(dirs).unwrap();
+    let mut paths = vec![
+        ("unset", None),
+        ("empty", Some(OsString::new())),
+        ("path2", Some(join(&[&path2]))),
+    ];
+    #[cfg(unix)]
+    {
+        let shell = |dir: &Path, name: &str, body: &str, mode: u32| {
+            script(&dir.join(format!("vesper-{name}")), body, mode)
+        };
+        let echo =
+            "#!/bin/sh\nprintf 'out:%s\\n' \"$0\" \"$@\"\nprintf 'err:%s\\n' \"$#\" >&2\nexit 3\n";
+        shell(&path1, "mytool", echo, 0o755);
+        shell(&path1, "shadow", "#!/bin/sh\necho path1\nexit 4\n", 0o644);
+        shell(&path2, "shadow", "#!/bin/sh\necho path2\nexit 5\n", 0o755);
+        shell(&path1, "noexec", "#!/bin/sh\necho never\n", 0o644);
+        shell(
+            &path1,
+            "ownerexec",
+            "#!/bin/sh\necho owner\nexit 6\n",
+            0o700,
+        );
+        shell(&path1, "sig", "#!/bin/sh\nkill -TERM $$\nsleep 5\n", 0o755);
+        shell(&path1, "abort", "#!/bin/sh\nkill -KILL $$\n", 0o755);
+        shell(
+            &path1,
+            "writes",
+            "#!/bin/sh\necho made > made.txt\nexit 0\n",
+            0o755,
+        );
+        // An executable the kernel refuses (no `#!`, not an object).
+        script(&path1.join("vesper-bad"), "\u{0}\u{1}\u{2}", 0o755);
+        // An executable script whose interpreter does not exist.
+        shell(&path1, "nointerp", "#!/nonexistent/interpreter\n", 0o755);
+        std::fs::create_dir_all(path1.join("vesper-dir")).unwrap();
+        // The shadowing semver on PATH: beside wins where there is one.
+        shell(
+            &path1,
+            "semver",
+            "#!/bin/sh\necho path-semver \"$@\"\n",
+            0o755,
+        );
+        let mut trailing = path1.clone().into_os_string();
+        trailing.push("/");
+        paths.push(("path1:path2", Some(join(&[&path1, &path2]))));
+        paths.push(("path1/:path2", Some(join(&[Path::new(&trailing), &path2]))));
+        let mut lead = OsString::from(":");
+        lead.push(join(&[&path1, &path2]));
+        paths.push((":path1:path2", Some(lead)));
+        let mut trail = join(&[&path1]);
+        trail.push("::");
+        trail.push(&path2);
+        paths.push(("path1::path2", Some(trail)));
+        paths.push(("relative", Some(OsString::from("../path1"))));
+    }
+    #[cfg(windows)]
+    {
+        tool(&path1, "mytool");
+        // Quoted entries, and a `;` inside quotes.
+        let quoted = |p: &Path| {
+            let mut s = OsString::from("\"");
+            s.push(p);
+            s.push("\"");
+            s
+        };
+        let mut q = quoted(&path2);
+        q.push(";");
+        q.push(&path1);
+        paths.push(("\"path2\";path1", Some(q)));
+        let mut q = OsString::from(";");
+        q.push(&path1);
+        q.push(";;");
+        q.push(quoted(&path2));
+        paths.push((";path1;;\"path2\"", Some(q)));
+    }
+    Stage {
+        root,
+        layouts,
+        paths,
+    }
+}
+
+/// Argument vectors (after the program name).
+fn vectors() -> Vec<Vec<OsString>> {
+    let s = |v: &[&str]| v.iter().map(OsString::from).collect::<Vec<_>>();
+    let mut v: Vec<Vec<OsString>> = vec![
         // Top level.
         s(&[]),
         s(&["--help"]),
@@ -125,148 +286,73 @@ fn vectors() -> Vec<Vec<String>> {
         s(&["--version"]),
         s(&["-V"]),
         s(&["--version", "check"]),
-        // traceparent: tests/foundation_cli.rs and the argument loop.
-        s(&["traceparent"]),
-        s(&["traceparent", "--json"]),
-        s(&["traceparent", "--bad"]),
-        s(&["traceparent", "--json", "--bad"]),
-        s(&["traceparent", "--bad", "--json"]),
-        s(&["traceparent", "first", "second"]),
-        s(&["traceparent", "one", "two", "--json"]),
-        s(&["traceparent", "--help"]),
-        s(&["traceparent", "-h"]),
-        s(&["traceparent", "--json", "--help"]),
-        s(&["traceparent", "--bad", "--help"]),
-        s(&["traceparent", "--help", "--bad"]),
-        s(&["traceparent", "one", "--help"]),
-        s(&["traceparent", "one", "two", "--help"]),
-        s(&["traceparent", "-"]),
-        s(&["traceparent", "-x", "--json"]),
-        s(&["traceparent", "--é", "--json"]),
-        s(&["traceparent", "--a\tb\nc\"d\\e\u{1}\u{1f}\u{7f}", "--json"]),
-        s(&["traceparent", "--json", "--json", VALID]),
-        s(&["traceparent", VALID, "--json", "extra"]),
-        // simd: tests/simd_cli.rs and the argument loop.
-        s(&["simd"]),
-        s(&["simd", "unknown"]),
-        s(&["simd", "--help"]),
-        s(&["simd", "-h"]),
-        s(&["simd", "scan"]),
-        s(&["simd", "scan", "input"]),
-        s(&["simd", "scan", "input", "--delimiter"]),
-        s(&["simd", "scan", "input", "--delimiter", "256"]),
-        s(&["simd", "scan", "input", "--delimiter", "-1"]),
-        s(&["simd", "scan", "input", "--delimiter", "+1"]),
-        s(&["simd", "scan", "input", "--delimiter", ""]),
-        s(&["simd", "scan", "input", "--delimiter", "1x"]),
-        s(&["simd", "scan", "input", "--delimiter", "007"]),
-        s(&[
-            "simd",
-            "scan",
-            "input",
-            "--delimiter",
-            "000000000000000000000255",
-        ]),
-        s(&[
-            "simd",
-            "scan",
-            "input",
-            "--delimiter",
-            "99999999999999999999999",
-        ]),
-        s(&[
-            "simd",
-            "scan",
-            "input",
-            "--delimiter",
-            "1",
-            "--delimiter",
-            "2",
-        ]),
-        s(&[
-            "simd",
-            "scan",
-            "input",
-            "--profile",
-            "avx2",
-            "--profile",
-            "baseline128",
-        ]),
-        s(&["simd", "scan", "input", "--profile"]),
-        s(&[
-            "simd",
-            "scan",
-            "input",
-            "--profile",
-            "nope",
-            "--delimiter",
-            "1",
-        ]),
-        s(&["simd", "scan", "input", "--json", "--json"]),
-        s(&["simd", "scan", "input", "extra", "--delimiter", "1"]),
-        s(&["simd", "scan", "input", "--unknown"]),
-        s(&["simd", "scan", "--delimiter", "1"]),
-        s(&["simd", "scan", "--delimiter", "1", "--", "-input"]),
-        s(&["simd", "scan", "--delimiter", "1", "--", "--help"]),
-        s(&["simd", "scan", "--delimiter", "1", "--", "input", "--"]),
-        s(&["simd", "scan", "input", "--delimiter", "0", "--help"]),
-        s(&["simd", "scan", "missing", "--delimiter", "0", "--json"]),
-        s(&["simd", "scan", ".", "--delimiter", "0", "--json"]),
-        s(&["simd", "scan", ".", "--delimiter", "0"]),
-        s(&[
-            "simd",
-            "scan",
-            "input",
-            "--delimiter",
-            "0",
-            "--profile",
-            "baseline128",
-        ]),
-        s(&[
-            "simd",
-            "scan",
-            "input",
-            "--delimiter",
-            "0",
-            "--profile",
-            "baseline128",
-            "--json",
-        ]),
-        s(&["simd", "help", "scan"]),
-        // Handed back to the Rust CLI.
-        s(&["fmt", "--help"]),
+        s(&["-x"]),
+        s(&["-"]),
+        s(&["--"]),
+        s(&["--bogus", "semver"]),
+        s(&["--HELP"]),
+        // Unknown commands: invalid names never look for a tool.
+        s(&[""]),
         s(&["nope"]),
+        s(&["nope", "--help"]),
+        s(&["bad$name"]),
+        s(&["bad name"]),
+        s(&["a/b"]),
+        s(&["../path1/vesper-mytool"]),
+        s(&["my-tool_9"]),
+        s(&["Semver"]),
+        s(&["é"]),
+        s(&["\u{7f}"]),
+        // Compiler commands go back to the Rust CLI.
+        s(&["fmt", "--help"]),
+        s(&["check"]),
+        s(&["lint", "--help"]),
+        s(&["check", "--version"]),
+        // External tools: beside, on PATH, absent.
+        s(&["extra", "--version"]),
+        s(&["extra", "nope"]),
+        s(&["extra", "-V", "x"]),
+        s(&["pathtool", "--version"]),
+        s(&["pathtool", "nope", "two words", ""]),
+        s(&["mytool"]),
+        s(&["mytool", "a", "b c", "", "-x", "--help"]),
+        s(&["shadow"]),
+        s(&["noexec"]),
+        s(&["ownerexec"]),
+        s(&["sig"]),
+        s(&["abort"]),
+        s(&["writes"]),
+        s(&["bad"]),
+        s(&["nointerp"]),
+        s(&["dir"]),
+        s(&["hybrid", "--version"]),
     ];
-    for profile in ["avx2", "avx512", "sve2", "rvv1"] {
-        v.push(s(&[
-            "simd",
-            "scan",
-            "missing",
-            "--delimiter",
-            "0",
-            "--profile",
-            profile,
-            "--json",
-        ]));
+    for t in TOOLS {
+        // The tools are the default compiler, so give them a command that
+        // does not name a tool again.
+        v.push(s(&[t, "--version"]));
+        v.push(s(&[t, "nope", "x"]));
     }
-    for d in ["0", "7", "255"] {
-        v.push(s(&["simd", "scan", "input", "--delimiter", d, "--json"]));
-        v.push(s(&["simd", "scan", "input", "--delimiter", d]));
-    }
-    for h in headers() {
-        v.push(vec!["traceparent".into(), h.clone()]);
-        v.push(vec!["traceparent".into(), h.clone(), "--json".into()]);
-        v.push(vec!["traceparent".into(), "--json".into(), h]);
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        // Not UTF-8: the command is the Rust CLI's (it panics); a tool's
+        // arguments pass through.
+        v.push(vec![OsString::from_vec(vec![0xff, b'x'])]);
+        v.push(vec![
+            OsString::from("--help"),
+            OsString::from_vec(vec![0xff]),
+        ]);
+        v.push(vec![
+            OsString::from("mytool"),
+            OsString::from_vec(vec![0xc3, 0x28, b'a']),
+        ]);
+        v.push(vec![
+            OsString::from("extra"),
+            OsString::from_vec(vec![0xff]),
+        ]);
     }
     v
-}
-
-/// Fixture inputs: each argument vector runs once per input.
-fn inputs() -> Vec<Vec<u8>> {
-    [0usize, 1, 15, 16, 17, 65535, 65536, 65537, 131089]
-        .iter()
-        .map(|&len| (0..len).map(|i| ((i * 131 + 7) % 256) as u8).collect())
-        .collect()
 }
 
 /// Every file under `dir`, by relative path.
@@ -293,13 +379,22 @@ struct Run {
     time: Duration,
 }
 
-fn run(compiler: &Path, dir: &Path, input: &[u8], args: &[String], stats: bool) -> Run {
+fn run(
+    compiler: &Path,
+    dir: &Path,
+    args: &[OsString],
+    path: Option<&OsString>,
+    stats: bool,
+) -> Run {
     let _ = std::fs::remove_dir_all(dir);
     std::fs::create_dir_all(dir).unwrap();
-    std::fs::write(dir.join("input"), input).unwrap();
-    std::fs::write(dir.join("-input"), [1u8, 2, 1]).unwrap();
+    std::fs::write(dir.join("input"), b"fn main() -> i64 { 0 }\n").unwrap();
     let mut c = Command::new(compiler);
-    c.current_dir(dir).args(args);
+    c.current_dir(dir).args(args).env("RUST_BACKTRACE", "0");
+    match path {
+        Some(p) => c.env("PATH", p),
+        None => c.env_remove("PATH"),
+    };
     if stats {
         c.env("VESPER_HYBRID_STATS", "1");
     } else {
@@ -319,55 +414,69 @@ fn run(compiler: &Path, dir: &Path, input: &[u8], args: &[String], stats: bool) 
 }
 
 #[test]
-fn command_layers_match_the_default_compiler() {
-    let default = default_compiler();
-    let hybrid = hybrid();
-    let scratch =
-        std::env::temp_dir().join(format!("vesper-hybrid-commands-{}", std::process::id()));
-    let (d_dir, h_dir) = (scratch.join("default"), scratch.join("hybrid"));
-    let inputs = inputs();
+fn routing_matches_the_default_compiler() {
+    let stage = staged();
     let vectors = vectors();
     let mut mismatches = vec![];
     let (mut d_time, mut h_time, mut runs) = (Duration::ZERO, Duration::ZERO, 0);
-    for args in &vectors {
-        // Only `simd scan input` reads the input; the others run once.
-        let reads = args.first().is_some_and(|a| a == "simd") && args.iter().any(|a| a == "input");
-        let count = if reads { inputs.len() } else { 1 };
-        for input in &inputs[inputs.len() - count..] {
-            let d = run(&default, &d_dir, input, args, false);
-            let h = run(&hybrid, &h_dir, input, args, false);
-            d_time += d.time;
-            h_time += h.time;
-            runs += 1;
-            let mut diff = vec![];
-            if d.output.status.code() != h.output.status.code() {
-                diff.push("exit status");
-            }
-            if d.output.stdout != h.output.stdout {
-                diff.push("stdout");
-            }
-            if d.output.stderr != h.output.stderr {
-                diff.push("stderr");
-            }
-            if d.files != h.files {
-                diff.push("files");
-            }
-            if !diff.is_empty() {
-                mismatches.push(format!(
-                    "{args:?} on {} bytes: {} (default {:?} {:?}, hybrid {:?} {:?})",
-                    input.len(),
-                    diff.join(", "),
-                    String::from_utf8_lossy(&d.output.stdout),
-                    String::from_utf8_lossy(&d.output.stderr),
-                    String::from_utf8_lossy(&h.output.stdout),
-                    String::from_utf8_lossy(&h.output.stderr),
-                ));
+    // Each layout's run directory sits beside `path1`, so the relative
+    // `../path1` entry names it.
+    let (d_dir, h_dir) = (
+        stage.root.join("run-default"),
+        stage.root.join("run-hybrid"),
+    );
+    for layout in &stage.layouts {
+        for (path_name, path) in &stage.paths {
+            for args in &vectors {
+                let d = run(&layout.default, &d_dir, args, path.as_ref(), false);
+                let h = run(&layout.hybrid, &h_dir, args, path.as_ref(), false);
+                d_time += d.time;
+                h_time += h.time;
+                runs += 1;
+                let mut diff = vec![];
+                if d.output.status.code() != h.output.status.code() {
+                    diff.push("exit status");
+                }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::process::ExitStatusExt;
+                    if d.output.status.signal() != h.output.status.signal() {
+                        diff.push("signal");
+                    }
+                }
+                if d.output.stdout != h.output.stdout {
+                    diff.push("stdout");
+                }
+                // A Rust panic names its thread's id; the rest must agree.
+                if !d.output.status.code().is_some_and(|c| c == 101)
+                    && d.output.stderr != h.output.stderr
+                {
+                    diff.push("stderr");
+                }
+                if d.files != h.files {
+                    diff.push("files");
+                }
+                if !diff.is_empty() {
+                    mismatches.push(format!(
+                        "{} / PATH {path_name} / {args:?}: {} (default {:?} {:?} {:?}, hybrid {:?} {:?} {:?})",
+                        layout.name,
+                        diff.join(", "),
+                        d.output.status,
+                        String::from_utf8_lossy(&d.output.stdout),
+                        String::from_utf8_lossy(&d.output.stderr),
+                        h.output.status,
+                        String::from_utf8_lossy(&h.output.stdout),
+                        String::from_utf8_lossy(&h.output.stderr),
+                    ));
+                }
             }
         }
     }
-    let _ = std::fs::remove_dir_all(&scratch);
+    let _ = std::fs::remove_dir_all(&stage.root);
     eprintln!(
-        "command layers differential: {} argument vectors, {runs} runs; default {:.2} s, hybrid {:.2} s ({:.3}x); {} differ",
+        "routing differential: {} layouts, {} PATHs, {} argument vectors, {runs} runs; default {:.2} s, hybrid {:.2} s ({:.3}x); {} differ",
+        stage.layouts.len(),
+        stage.paths.len(),
         vectors.len(),
         d_time.as_secs_f64(),
         h_time.as_secs_f64(),
@@ -376,24 +485,23 @@ fn command_layers_match_the_default_compiler() {
     );
     assert!(
         mismatches.is_empty(),
-        "the Vesper command layers differ from the default CLI on {} runs:\n{}",
+        "the Vesper routing differs from the default CLI on {} runs:\n{}",
         mismatches.len(),
         mismatches.join("\n")
     );
 }
 
-/// The ported commands really run in Vesper (they print through the
-/// `HybridCommands` import), and the others in the Rust CLI.
+/// The routing really runs in Vesper (it prints through the
+/// `HybridCommands` import), and the compiler's commands in the Rust CLI.
 #[test]
-fn ported_commands_run_in_vesper() {
+fn routing_runs_in_vesper() {
     let hybrid = hybrid();
-    let dir = std::env::temp_dir().join(format!(
-        "vesper-hybrid-commands-stats-{}",
-        std::process::id()
-    ));
-    let prints = |args: &[&str]| -> u64 {
-        let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
-        let r = run(&hybrid, &dir, b"abc", &args, true);
+    let dir = scratch("vesper-cli-routing-stats");
+    let bare = dir.join(format!("bare/vesper-hybrid{EXE}"));
+    stage(&hybrid, &bare);
+    let prints = |compiler: &Path, args: &[&str]| -> u64 {
+        let args: Vec<OsString> = args.iter().map(OsString::from).collect();
+        let r = run(compiler, &dir.join("run"), &args, None, true);
         let stderr = String::from_utf8_lossy(&r.output.stderr);
         stderr
             .lines()
@@ -402,43 +510,28 @@ fn ported_commands_run_in_vesper() {
             .and_then(|n| n.parse().ok())
             .unwrap_or_else(|| panic!("no command-layer report in {stderr:?}"))
     };
-    assert_eq!(prints(&[]), 1);
-    assert_eq!(prints(&["--help"]), 1);
-    assert_eq!(prints(&["--version"]), 1);
-    assert_eq!(prints(&["traceparent", VALID]), 1);
-    assert_eq!(prints(&["traceparent", "--json", "bad"]), 2);
-    assert_eq!(prints(&["simd", "--help"]), 1);
-    assert_eq!(prints(&["simd", "scan", "input", "--delimiter", "97"]), 1);
+    assert_eq!(prints(&bare, &[]), 1);
+    assert_eq!(prints(&bare, &["--help"]), 1);
+    assert_eq!(prints(&bare, &["--version"]), 1);
+    assert_eq!(prints(&bare, &["-x"]), 1);
+    assert_eq!(prints(&bare, &["nope"]), 1);
+    assert_eq!(prints(&bare, &["semver", "--help"]), 1);
     // Handed back: the Rust CLI prints.
-    assert_eq!(prints(&["fmt", "--help"]), 0);
-    assert_eq!(prints(&["check", "--fuel"]), 0);
+    assert_eq!(prints(&bare, &["fmt", "--help"]), 0);
+    assert_eq!(prints(&bare, &["check", "--fuel"]), 0);
+    assert_eq!(prints(&bare, &["é"]), 0);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A failed write of the output is the Rust CLI's panic and exit 101, not
-/// a silent success (`println!` panics when stdout is full).
+/// a silent success (`print!` panics when stdout is full).
 #[cfg(target_os = "linux")]
 #[test]
 fn full_stdout_fails_as_in_rust() {
     let default = default_compiler();
     let hybrid = hybrid();
-    let dir = std::env::temp_dir().join(format!(
-        "vesper-hybrid-commands-full-{}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("input"), b"abc").unwrap();
-    for args in [
-        &[][..],
-        &["--help"],
-        &["--version"],
-        &["traceparent", VALID],
-        &["traceparent", VALID, "--json"],
-        &["traceparent", "bad", "--json"],
-        &["simd", "--help"],
-        &["simd", "scan", "input", "--delimiter", "97"],
-        &["simd", "scan", "input", "--delimiter", "97", "--json"],
-    ] {
+    let dir = scratch("vesper-cli-routing-full");
+    for args in [&[][..], &["--help"], &["--version"], &["-V"]] {
         let mut both = vec![];
         for compiler in [&default, &hybrid] {
             let full = std::fs::OpenOptions::new()

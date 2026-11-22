@@ -11,8 +11,6 @@ sys library HybridCommands (
     fn hc_print(stream: u32, nocapture in text: CSlice[u8]) -> ForeignVal[Unit];
     fn hc_help() -> ForeignVal[Unit];
     fn hc_text(which: u32, index: u64, nocapture inout buf: CSlice[u8]) -> ForeignVal[i64];
-    fn hc_count(which: u32) -> ForeignVal[u64];
     fn hc_io_error(word: u64, nocapture inout buf: CSlice[u8]) -> ForeignVal[i64];
-    fn hc_simd_compile(profile: u32) -> ForeignVal[i64];
-    fn hc_simd_scan(nocapture in data: CSlice[u8], delimiter: u32) -> ForeignVal[u64];
+    fn hc_executable(nocapture in path: CSlice[u8]) -> ForeignVal[u32];
 }
