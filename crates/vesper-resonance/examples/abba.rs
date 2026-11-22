@@ -339,6 +339,41 @@ macro_rules! arm {
                 sum
             }
 
+            /// `n` verifications of a 256-function graph where every function
+            /// (half reachable, half unreachable) carries a distinct
+            /// `Effect::Other` name (`confine::verify_realtime`).
+            pub fn confine_many(n: usize) -> u64 {
+                use $lib::confine::{
+                    CallGraph, Effect, FnId, FnNode, RealtimePolicy, verify_realtime,
+                };
+                let mut g = CallGraph::default();
+                let mut policy = RealtimePolicy::root(FnId(0));
+                for i in 0..256u32 {
+                    let custom = Effect::Other(format!("custom_{i}"));
+                    if i < 64 {
+                        policy.allowed_effects.insert(custom.clone());
+                    }
+                    let effects = if i == 0 {
+                        vec![Effect::Realtime, custom]
+                    } else {
+                        vec![custom]
+                    };
+                    g.add(FnNode::new(format!("f{i}"), effects, 64 + u64::from(i)))
+                        .unwrap();
+                }
+                for i in 0..127u32 {
+                    g.call(FnId(i), FnId(i + 1));
+                }
+                let mut sum = 0u64;
+                for _ in 0..n {
+                    let f = verify_realtime(&g, &policy).unwrap();
+                    sum = sum.wrapping_add(
+                        f.len() as u64 + f.iter().map(|x| x.message.len() as u64).sum::<u64>(),
+                    );
+                }
+                sum
+            }
+
             pub struct Graph {
                 nodes: Vec<NodeSpec>,
                 kinds: Vec<BuiltinKind>,
@@ -483,10 +518,12 @@ fn main() {
             ("port", "pid") => p::pid(small * 100),
             ("rust", "confine") => r::confine(small),
             ("port", "confine") => p::confine(small),
+            ("rust", "confine-many") => r::confine_many(small / 4),
+            ("port", "confine-many") => p::confine_many(small / 4),
             ("rust", "simd") => r::tick(&mut rt, simd_ticks),
             ("port", "simd") => p::tick(&mut pt, simd_ticks),
             _ => panic!(
-                "ABBA_ONLY=rust|port, ABBA_WORKLOAD=kernel|graph|simd|schedule|events|slab|pid|confine"
+                "ABBA_ONLY=rust|port, ABBA_WORKLOAD=kernel|graph|simd|schedule|events|slab|pid|confine|confine-many"
             ),
         };
         println!("{only} {workload}: {v}");
@@ -563,6 +600,15 @@ fn main() {
             "confine (64-function call graph)",
             &mut || r::confine(small),
             &mut || p::confine(small),
+        );
+    }
+    if on("confine-many") {
+        abba(
+            &mode,
+            "confine-many",
+            "confine-many (256-function graph, distinct custom effects)",
+            &mut || r::confine_many(small / 4),
+            &mut || p::confine_many(small / 4),
         );
     }
     if on("simd") {
