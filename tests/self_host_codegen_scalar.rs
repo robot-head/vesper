@@ -447,6 +447,8 @@ fn function(w: &World, f: &FunctionIr, out: &mut String) {
                     Literal::Float(_) => "const f64".into(),
                     Literal::Bool(_) => "const bool".into(),
                     Literal::String(_) => "const string".into(),
+                    // A literal above i128::MAX (#1244) is always u128.
+                    Literal::WideInt(_) => "const wide".into(),
                 },
                 Op::Unary(op, v) => format!("unary {op} {}", unary(w, f, op, *v, &inst.span)),
                 Op::Binary(op, a, b) => {

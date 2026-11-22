@@ -1010,6 +1010,8 @@ impl Ast<'_> {
         use vesper::ast::Literal;
         match l {
             Literal::Int(n) => out.extend([0, *n as u64, (*n >> 64) as u64]),
+            // A literal above i128::MAX (#1244): its bits, as an Int's.
+            Literal::WideInt(n) => out.extend([0, *n as u64, (*n >> 64) as u64]),
             Literal::Float(x) => out.extend([1, x.to_bits(), 0]),
             Literal::Bool(b) => out.extend([2, *b as u64, 0]),
             Literal::String(s) => {
