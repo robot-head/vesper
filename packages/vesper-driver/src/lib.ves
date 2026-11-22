@@ -352,9 +352,7 @@ pub fn native_output(in o: Options) -> bool {
     if o.command == cmd_build() {
         return true;
     }
-    o
-        .command
-        == cmd_emit()
+    o.command == cmd_emit()
         && (is(in o, slot_format(), in "object") || is(in o, slot_format(), in "clif"))
 }
 
@@ -530,8 +528,8 @@ fn verifier_list(in list: Slice[u8], inout err: ChunkSeq[u8]) -> u64 {
                 err.extend(in item);
                 err
                     .extend(
-                    in "'; expected const-time, stack, realtime, detfloat or all".as_bytes()
-                );
+                        in "'; expected const-time, stack, realtime, detfloat or all".as_bytes()
+                    );
                 return 0;
             }
             bits = bits | v;
@@ -850,17 +848,17 @@ pub fn lib_job_checks(in o: Options, inout err: ChunkSeq[u8]) {
     if o.command != cmd_build() || !o.lib {
         err
             .extend(
-            in "--lib-name, --interface, --rust-binding and --instance require build --lib"
-                .as_bytes()
-        );
+                in "--lib-name, --interface, --rust-binding and --instance require build --lib"
+                    .as_bytes()
+            );
         return;
     }
     if exclusive(in o) {
         err
             .extend(
-            in "--verify, --verify-policy, --tee and --codegen do not apply to build --lib yet"
-                .as_bytes()
-        );
+                in "--verify, --verify-policy, --tee and --codegen do not apply to build --lib yet"
+                    .as_bytes()
+            );
         return;
     }
     if has(in o, slot_rust_types()) && !has(in o, slot_rust_binding()) {
@@ -919,12 +917,9 @@ fn file_name(in path: Slice[u8], windows: bool) -> Span {
         }
         start = wrapping_sub(start, 1);
     }
-    let dotdot = wrapping_sub(end, start)
-        == 2
-        && at(in path, start)
-        == 46
-        && at(in path, wrapping_add(start, 1))
-        == 46;
+    let dotdot = wrapping_sub(end, start) == 2
+        && at(in path, start) == 46
+        && at(in path, wrapping_add(start, 1)) == 46;
     Span {
         found: end > start && !dotdot,
         start: start,
