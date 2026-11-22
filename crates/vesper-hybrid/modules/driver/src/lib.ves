@@ -1,0 +1,648 @@
+// @vesper/hybrid-driver: the hybrid compiler's `main` for the compile
+// commands (self-hosting SH5 lane 12, #1335). `vesper check`, `run`, `jit`,
+// `build` and `emit` are parsed and validated by @vesper/driver, and their
+// pass sequence is decided here: each compiler pass is the hybrid's Rust,
+// called through the `HybridDriver` import below (one `hd_step` per pass,
+// crates/vesper-hybrid/src/driver.rs), and the linker runs through
+// @vesper-std/process. Every other command, and arguments that are not
+// UTF-8, go back to the Rust CLI (`main_code` returns `delegate()`).
+//
+// @export vsys StdFs rust=crate::driver::std_host::fs
+// @export vsys StdProcess rust=crate::driver::std_host::process
+// @export vsys StdEnv rust=crate::driver::std_host::env
+// @export vsys direct rust=crate::driver::host
+// | sys library HybridDriver (
+// |     target = "@TARGET@", abi = "@ABI@",
+// |     link = "static", name = "vesper_hybrid",
+// |     artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+// | ) {
+// |     linear extern type Session;
+// |     fn hd_print(stream: u32, nocapture in text: CSlice[u8]) -> ForeignVal[Unit];
+// |     fn hd_help() -> ForeignVal[Unit];
+// |     fn hd_session(nocapture in record: CSlice[u8]) -> ForeignVal[Option[Session]];
+// |     fn hd_free(sink s: Session) -> ForeignVal[Unit];
+// |     fn hd_step(inout s: Session, step: u32, nocapture in arg: CSlice[u8]) -> ForeignVal[i64];
+// |     fn hd_text(in s: Session, nocapture inout buf: CSlice[u8]) -> ForeignVal[i64];
+// | }
+use @vesper/driver::{
+    Args,
+    Options,
+    Parsed,
+    args_new,
+    args_push,
+    parse,
+    parsed_ok,
+    parsed_help,
+    command_code,
+    cmd_none,
+    cmd_check,
+    cmd_run,
+    cmd_jit,
+    cmd_build,
+    cmd_emit,
+    slot_input,
+    slot_output,
+    slot_format,
+    slot_entry,
+    slot_target,
+    slot_linker,
+    slot_codegen,
+    slot_policy,
+    has,
+    is,
+    value_start,
+    value_end,
+    lib_mode,
+    exclusive,
+    package_checks,
+    lib_job_checks,
+    record,
+    record_format as driver_record_format,
+    with_extension
+};
+use @vesper-std/env::{
+    arg_count,
+    arg_bytes,
+    os,
+    os_windows
+};
+use @vesper-std/process::{
+    command_path,
+    arg_bytes as proc_arg,
+    spawn,
+    wait,
+    release,
+    success
+};
+use @vesper-std/fs::{
+    IoError,
+    remove_file
+};
+use @vesper-std/fmt::{
+    write_u64
+};
+
+// `main_code`'s result when the Rust CLI should run the command instead.
+pub fn delegate() -> i64 {
+    -1
+}
+
+// The exit code of a pass that panicked (Rust's); the panic message was
+// already printed.
+fn panicked() -> i64 {
+    101
+}
+
+// The passes (`Step` in crates/vesper-hybrid/src/driver.rs). A pass
+// returns a count or 0, `fail_code()` when its error message is the
+// session's text, or `panic_code()`.
+fn step_is_package() -> u32 {
+    1
+}
+
+fn step_load() -> u32 {
+    2
+}
+
+fn step_ebpf_build() -> u32 {
+    3
+}
+
+fn step_parse() -> u32 {
+    4
+}
+
+fn step_emit_cst() -> u32 {
+    5
+}
+
+fn step_report_syntax() -> u32 {
+    6
+}
+
+fn step_package_vsys() -> u32 {
+    7
+}
+
+fn step_vsys_run() -> u32 {
+    8
+}
+
+fn step_check() -> u32 {
+    9
+}
+
+fn step_lib_build() -> u32 {
+    10
+}
+
+fn step_emit_interface() -> u32 {
+    11
+}
+
+fn step_optimize() -> u32 {
+    12
+}
+
+fn step_run() -> u32 {
+    13
+}
+
+fn step_jit() -> u32 {
+    14
+}
+
+fn step_verified_build() -> u32 {
+    15
+}
+
+fn step_wasm_build() -> u32 {
+    16
+}
+
+fn step_check_main() -> u32 {
+    17
+}
+
+fn step_native_object() -> u32 {
+    18
+}
+
+fn step_is_windows_target() -> u32 {
+    19
+}
+
+fn step_windows_link() -> u32 {
+    20
+}
+
+fn step_tee() -> u32 {
+    21
+}
+
+fn step_emit_hir() -> u32 {
+    22
+}
+
+fn step_emit_ir() -> u32 {
+    23
+}
+
+fn step_emit_lean() -> u32 {
+    24
+}
+
+fn step_emit_object() -> u32 {
+    25
+}
+
+fn step_emit_clif() -> u32 {
+    26
+}
+
+fn step_io_error() -> u32 {
+    27
+}
+
+fn fail_code() -> i64 {
+    -1
+}
+
+fn panic_code() -> i64 {
+    -2
+}
+
+fn stdout_stream() -> u32 {
+    1
+}
+
+fn stderr_stream() -> u32 {
+    2
+}
+
+// The arguments after the program name, or `None` when one is not UTF-8
+// (the Rust CLI's `env::args()` panics on it; the Rust CLI runs instead).
+fn read_args() -> Option[Args] eff [Ffi[StdEnv]] {
+    let mut a = args_new();
+    let n = arg_count();
+    for i in 1..n {
+        match arg_bytes(i) {
+            Option::Some(b) => {
+                match String::from_utf8(in b.as_slice()) {
+                    Option::Some(_) => args_push(inout a, in b.as_slice()),
+                    Option::None => return Option::None,
+                }
+            },
+            Option::None => return Option::None,
+        }
+    }
+    Option::Some(a)
+}
+
+fn print(stream: u32, in text: Slice[u8]) eff [Ffi[HybridDriver]] {
+    HybridDriver::hd_print(stream, in text);
+}
+
+// `vesper: <message>` on stderr; exit code 1.
+fn error(in message: Slice[u8]) -> i64 eff [Ffi[HybridDriver]] {
+    let mut line: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    line.extend(in "vesper: ".as_bytes());
+    line.extend(in message);
+    line.push(10);
+    print(stderr_stream(), in line.as_slice());
+    1
+}
+
+// The session's text (a pass's error message or result).
+fn text(in s: Session) -> ChunkSeq[u8] eff [Ffi[HybridDriver]] {
+    let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    buf.resize(256, 0);
+    loop {
+        let n = HybridDriver::hd_text(in s, inout buf.as_slice_mut());
+        let len = wrapping_u64(n);
+        if n >= 0 && len > buf.len() {
+            buf.resize(len, 0);
+            continue;
+        }
+        if n >= 0 {
+            buf.truncate(len);
+        } else {
+            buf.truncate(0);
+        }
+        break;
+    }
+    buf
+}
+
+fn step(inout s: Session, which: u32) -> i64 eff [Ffi[HybridDriver]] {
+    HybridDriver::hd_step(inout s, which, in "".as_bytes())
+}
+
+fn step_with(inout s: Session, which: u32, in a: Slice[u8]) -> i64 eff [Ffi[HybridDriver]] {
+    HybridDriver::hd_step(inout s, which, in a)
+}
+
+// A pass's failure as the exit code: the message for `fail_code()`, the
+// panic for `panic_code()`.
+fn pass_failed(in s: Session, r: i64) -> i64 eff [Ffi[HybridDriver]] {
+    if r == panic_code() {
+        return panicked();
+    }
+    let m = text(in s);
+    error(in m.as_slice())
+}
+
+fn is_failure(r: i64) -> bool {
+    r == fail_code() || r == panic_code()
+}
+
+// `<n> <what>` as an error.
+fn count_error(n: i64, in what: Str) -> i64 eff [Ffi[HybridDriver]] {
+    let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    write_u64(inout m, wrapping_u64(n));
+    m.push(32);
+    m.extend(in what.as_bytes());
+    error(in m.as_slice())
+}
+
+fn value(in o: Options, k: u64) -> ChunkSeq[u8] {
+    let mut v: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    if has(in o, k) {
+        let a = value_start(in o, k);
+        let b = value_end(in o, k);
+        v.extend(in o.text[a..b]);
+    }
+    v
+}
+
+// The hybrid's `main` for the compile commands: the process exit code, or
+// `delegate()`.
+pub fn main_code() -> i64 eff [Ffi[StdFs], Ffi[StdProcess], Ffi[StdEnv], Ffi[HybridDriver]] {
+    let args = match read_args() {
+        Option::Some(a) => a,
+        Option::None => return delegate(),
+    };
+    if args.ends.len() == 0 {
+        return delegate();
+    }
+    let first = match args.ends.try_get(0) {
+        Option::Some(e) => e,
+        Option::None => 0,
+    };
+    if command_code(in args.bytes[0..first]) == cmd_none() {
+        return delegate();
+    }
+    let p = parse(in args);
+    if p.status == parsed_help() {
+        HybridDriver::hd_help();
+        return 0;
+    }
+    if p.status != parsed_ok() {
+        return error(in p.message.as_slice());
+    }
+    let o = p.options;
+    let rec = record(in o);
+    match HybridDriver::hd_session(in rec.as_slice()) {
+        Option::Some(s) => {
+            let mut s = s;
+            let code = drive(inout s, in o);
+            HybridDriver::hd_free(s);
+            code
+        },
+        Option::None => panicked(),
+    }
+}
+
+// `cli()` of src/main.rs from loading the input on, pass by pass.
+fn drive(inout s: Session, in o: Options)
+    -> i64 eff [Ffi[StdFs], Ffi[StdProcess], Ffi[StdEnv], Ffi[HybridDriver]] {
+    let c = o.command;
+    let r = step(inout s, step_is_package());
+    if is_failure(r) {
+        return pass_failed(in s, r);
+    }
+    if r == 1 {
+        let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        package_checks(in o, inout err);
+        if err.len() != 0 {
+            return error(in err.as_slice());
+        }
+    }
+    let r = step(inout s, step_load());
+    if is_failure(r) {
+        return pass_failed(in s, r);
+    }
+    if r > 0 {
+        return count_error(r, in "package error(s)");
+    }
+    if c == cmd_build() && is(in o, slot_target(), in "bpf") {
+        return pass(inout s, step_ebpf_build());
+    }
+    let r = step(inout s, step_parse());
+    if is_failure(r) {
+        return pass_failed(in s, r);
+    }
+    if c == cmd_emit() && is(in o, slot_format(), in "cst") {
+        return pass(inout s, step_emit_cst());
+    }
+    if r > 0 {
+        let q = step(inout s, step_report_syntax());
+        if is_failure(q) {
+            return pass_failed(in s, q);
+        }
+        return count_error(r, in "syntax error(s)");
+    }
+    let lib = lib_mode(in o);
+    let r = step(inout s, step_package_vsys());
+    if is_failure(r) {
+        return pass_failed(in s, r);
+    }
+    if r > 0 && !lib {
+        return pass(inout s, step_vsys_run());
+    }
+    let r = step(inout s, step_check());
+    if is_failure(r) {
+        return pass_failed(in s, r);
+    }
+    if r > 0 {
+        return count_error(r, in "semantic error(s)");
+    }
+    if lib {
+        let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        lib_job_checks(in o, inout err);
+        if err.len() != 0 {
+            return error(in err.as_slice());
+        }
+        return pass(inout s, step_lib_build());
+    }
+    if c == cmd_check() {
+        if o.json {
+            print(stdout_stream(), in "[]\n".as_bytes());
+        } else {
+            let mut line: ChunkSeq[u8] = ChunkSeq::new[u8]();
+            line.extend(in "checked ".as_bytes());
+            let input = value(in o, slot_input());
+            line.extend(in input.as_slice());
+            line.push(10);
+            print(stdout_stream(), in line.as_slice());
+        }
+        return 0;
+    }
+    if c == cmd_emit() && is(in o, slot_format(), in "interface") {
+        return pass(inout s, step_emit_interface());
+    }
+    if o.optimize {
+        let r = step(inout s, step_optimize());
+        if is_failure(r) {
+            return pass_failed(in s, r);
+        }
+    }
+    if c == cmd_run() {
+        return pass(inout s, step_run());
+    }
+    if c == cmd_jit() {
+        return pass(inout s, step_jit());
+    }
+    if c == cmd_build() {
+        return build(inout s, in o);
+    }
+    emit(inout s, in o)
+}
+
+// Run a pass that ends the command: its exit code.
+fn pass(inout s: Session, which: u32) -> i64 eff [Ffi[HybridDriver]] {
+    let r = step(inout s, which);
+    if is_failure(r) {
+        return pass_failed(in s, r);
+    }
+    0
+}
+
+fn pass_with(inout s: Session, which: u32, in a: Slice[u8]) -> i64 eff [Ffi[HybridDriver]] {
+    let r = step_with(inout s, which, in a);
+    if is_failure(r) {
+        return pass_failed(in s, r);
+    }
+    0
+}
+
+fn build(inout s: Session, in o: Options)
+    -> i64 eff [Ffi[StdFs], Ffi[StdProcess], Ffi[StdEnv], Ffi[HybridDriver]] {
+    // Wave-eight lane 2: the direct verified code generator (§42).
+    if has(in o, slot_codegen()) {
+        if !is(in o, slot_codegen(), in "verified") {
+            return error(in "--codegen accepts only 'verified'".as_bytes());
+        }
+        if o.verifiers != 0 || has(in o, slot_policy()) || o.tee {
+            return error(in "--verify and --tee do not apply to --codegen verified".as_bytes());
+        }
+        return pass(inout s, step_verified_build());
+    }
+    // Wave-seven lane 25: `--target wasm32-wasip2` builds a component.
+    if is(in o, slot_target(), in "wasm32-wasip2") {
+        if o.verifiers != 0 || has(in o, slot_policy()) || o.tee {
+            return error(in "--verify and --tee apply to native targets only".as_bytes());
+        }
+        return pass(inout s, step_wasm_build());
+    }
+    if !is(in o, slot_entry(), in "main") {
+        return error(in "build currently requires entry 'main'".as_bytes());
+    }
+    let r = step(inout s, step_check_main());
+    if is_failure(r) {
+        return pass_failed(in s, r);
+    }
+    let mut path = value(in o, slot_output());
+    if !has(in o, slot_output()) {
+        path.extend(in "a.out".as_bytes());
+    }
+    let windows_host = os() == os_windows();
+    let object = with_extension(in path.as_slice(), in "vesper.o", windows_host);
+    let r = step_with(inout s, step_native_object(), in object.as_slice());
+    if is_failure(r) {
+        return pass_failed(in s, r);
+    }
+    // Windows targets link with link.exe/lld-link (lane 24, #347); the
+    // default `cc` there means "find the MSVC linker".
+    let r = step(inout s, step_is_windows_target());
+    if is_failure(r) {
+        return pass_failed(in s, r);
+    }
+    let mut built = path;
+    if r == 1 {
+        let q = step_with(inout s, step_windows_link(), in object.as_slice());
+        if is_failure(q) {
+            return pass_failed(in s, q);
+        }
+        built = text(in s);
+    } else {
+        let linker = value(in o, slot_linker());
+        let failed = link(in linker.as_slice(), in object.as_slice(), in built.as_slice());
+        if failed != 0 {
+            return link_failed(inout s, in linker.as_slice(), failed);
+        }
+    }
+    let r = remove(inout s, in object.as_slice());
+    if r != 0 {
+        return r;
+    }
+    let mut line: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    line.extend(in "built ".as_bytes());
+    line.extend(in built.as_slice());
+    line.push(10);
+    print(stdout_stream(), in line.as_slice());
+    if o.tee {
+        return pass_with(inout s, step_tee(), in built.as_slice());
+    }
+    0
+}
+
+// Run `<linker> <object> -o <path> -lm` with the CLI's stdio: 0 when it
+// succeeded, 1 when it failed, or 2 plus the spawn error's word (kind in
+// the low byte, the OS error in the high half) when it could not start.
+fn link(in linker: Slice[u8], in object: Slice[u8], in path: Slice[u8])
+    -> u64 eff [Ffi[StdProcess]] {
+    let mut c = command_path(in linker);
+    proc_arg(inout c, in object);
+    proc_arg(inout c, in "-o".as_bytes());
+    proc_arg(inout c, in path);
+    proc_arg(inout c, in "-lm".as_bytes());
+    let mut ch = match spawn(c) {
+        Result::Ok(ch) => ch,
+        Result::Err(e) => return error_word(e),
+    };
+    let waited = wait(inout ch);
+    release(ch);
+    match waited {
+        Result::Ok(st) => {
+            if success(st) {
+                0
+            } else {
+                1
+            }
+        },
+        Result::Err(e) => error_word(e),
+    }
+}
+
+fn error_word(e: IoError) -> u64 {
+    wrapping_add(2, widen_u64(e.kind) | wrapping_shl_u64(widen_u64(e.os), 32))
+}
+
+fn link_failed(inout s: Session, in linker: Slice[u8], failed: u64) -> i64 eff [Ffi[HybridDriver]] {
+    if failed == 1 {
+        return error(in "native linker failed".as_bytes());
+    }
+    let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    m.extend(in "could not invoke native linker '".as_bytes());
+    m.extend(in linker);
+    m.extend(in "': ".as_bytes());
+    let t = io_error_text(inout s, wrapping_sub(failed, 2));
+    m.extend(in t.as_slice());
+    error(in m.as_slice())
+}
+
+// Rust's `Display` of an `io::Error` with this word.
+fn io_error_text(inout s: Session, word: u64) -> ChunkSeq[u8] eff [Ffi[HybridDriver]] {
+    let mut w: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut x = word;
+    for _ in 0..8 {
+        w.push(wrapping_u8(x & 255));
+        x = wrapping_shr_u64(x, 8);
+    }
+    let r = step_with(inout s, step_io_error(), in w.as_slice());
+    text(in s)
+}
+
+// Remove the object file: 0, or the exit code of the error.
+fn remove(inout s: Session, in object: Slice[u8]) -> i64 eff [Ffi[StdFs], Ffi[HybridDriver]] {
+    let path = match String::from_utf8(in object) {
+        Option::Some(p) => p,
+        Option::None => String::new(),
+    };
+    let failed = handle Fail[IoError] in {
+        remove_file(in path);
+        0
+    } with {
+        return v => v,
+        raise(e, _) => error_word(e),
+    };
+    if failed == 0 {
+        return 0;
+    }
+    let m = io_error_text(inout s, wrapping_sub(failed, 2));
+    error(in m.as_slice())
+}
+
+fn emit(inout s: Session, in o: Options) -> i64 eff [Ffi[HybridDriver]] {
+    if is(in o, slot_format(), in "hir") {
+        return pass(inout s, step_emit_hir());
+    }
+    if is(in o, slot_format(), in "ir") {
+        return pass(inout s, step_emit_ir());
+    }
+    if is(in o, slot_format(), in "lean") {
+        return pass(inout s, step_emit_lean());
+    }
+    if is(in o, slot_format(), in "object") {
+        if !has(in o, slot_output()) {
+            return error(in "object output requires -o <path>".as_bytes());
+        }
+        return pass(inout s, step_emit_object());
+    }
+    if is(in o, slot_format(), in "clif") {
+        return pass(inout s, step_emit_clif());
+    }
+    let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    m.extend(in "unknown output format '".as_bytes());
+    let format = value(in o, slot_format());
+    m.extend(in format.as_slice());
+    m.extend(in "'".as_bytes());
+    error(in m.as_slice())
+}
+
+// The version of the options record (`record_format` of @vesper/driver);
+// the host checks it before decoding.
+pub fn record_format() -> u64 {
+    driver_record_format()
+}
