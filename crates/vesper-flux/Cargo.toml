@@ -5,11 +5,12 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Bounded checked host DBSP circuits, owned frontier holds, LSM-spine CAS checkpoints, a durable input log, an exactly-once Quarry sink and simulated multi-worker recovery and rescaling"
 
-# The Z-set kernels, the frontier, the accumulator and the CDC decoder are
-# the Vesper port: build.rs links the Loom package in vesper/ (library
-# `flux`). It replaced their Rust code once it matched it in tests and beat
-# it on every ABBA workload (#1069, #1401). The log, checkpoints, the
-# cluster driver and Kafka are still Rust, over the kernels. vesper-flux is outside `cargo tree -p vesper -e normal,build`, so
+# The Z-set kernels, the frontier, the accumulator, the CDC decoder and the
+# input log's frame codec are the Vesper port: build.rs links the Loom
+# package in vesper/ (library `flux`). It replaced their Rust code once it
+# matched it in tests and beat it on every ABBA workload (#1069, #1401).
+# Checkpoints, the cluster driver and Kafka are still Rust, over the
+# kernels. vesper-flux is outside `cargo tree -p vesper -e normal,build`, so
 # it needs no seed copy.
 
 [features]
@@ -19,6 +20,8 @@ vesper-port-divergent = []
 
 [dependencies]
 vesper-port-abi = { path = "../vesper-port-abi" }
+# The `.vsys` library `Blake3` in C, which the port links.
+vesper-blake3-sys = { path = "../vesper-blake3-sys" }
 blake3 = "1.8"
 # The Kafka wire client (src/kafka_wire.rs, src/kafka_client.rs) is Flux's
 # own; these are its vetted building blocks: CRC-32C of record batches,

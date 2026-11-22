@@ -15,6 +15,16 @@
 //!   pre-encoded batches of [`INGEST_RECORDS`] width-4 records over 1024
 //!   keys (repeats and cancellations), ingested by a fresh executor whose
 //!   circuit is its input.
+//! - `log`: the input log: [`LOG_EPOCHS`] epochs of two width-3 sets of
+//!   [`LOG_ROWS`] rows appended to a fresh log, read back, and the log
+//!   reopened (every frame verified). Point `TMPDIR` at a RAM disk so that
+//!   `sync_all` does not dominate.
+//! - `image`: checkpoint images on their own: an executor of two width-3
+//!   inputs holding [`IMAGE_TICKS`] ticks of [`LOG_ROWS`]-row sets is
+//!   checkpointed and restored into a fresh executor [`IMAGE_ROUNDS`] times.
+//! - `durable`: the same state checkpointed durably (manifest and one spine
+//!   batch per node) into a fresh store and restored into a fresh executor
+//!   [`IMAGE_ROUNDS`] times. Point `TMPDIR` at a RAM disk.
 //!
 //! The two arms are two builds of this example, in separate worker
 //! processes: before #1069 replaced the Rust kernels they were the Rust
@@ -26,8 +36,8 @@
 //! both builds agree.
 //!
 //! ```text
-//! abba worker <join|example|resume|ingest>                  # one arm
-//! abba drive <join|example|resume|ingest> <rust-worker> <vesper-worker>
+//! abba worker <join|example|resume|ingest|log|image|durable>                 # one arm
+//! abba drive <join|example|resume|ingest|log|image|durable> <rust-worker> <vesper-worker>
 //! ```
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -46,6 +56,13 @@ const RESUME_TICKS: u64 = 16;
 /// CDC batches per `ingest` batch, and records per CDC batch.
 const INGEST_TICKS: u64 = 8;
 const INGEST_RECORDS: u64 = 4096;
+/// Epochs per `log` batch, and rows per set.
+const LOG_EPOCHS: u64 = 16;
+const LOG_ROWS: u64 = 1024;
+/// Ticks of the `image` executor's state, and checkpoint/restore rounds per
+/// `image` batch.
+const IMAGE_TICKS: u64 = 8;
+const IMAGE_ROUNDS: u64 = 8;
 
 fn fnv(mut h: u64, bytes: &[u8]) -> u64 {
     for &b in bytes {
@@ -302,6 +319,132 @@ fn ingest_batch(batches: &[Vec<u8>]) -> u64 {
     h
 }
 
+/// The `log` workload's epochs, built once per worker.
+fn log_inputs() -> Vec<TickInput> {
+    let mut rng = Lcg(0x10_6e57);
+    (0..LOG_EPOCHS)
+        .map(|_| TickInput {
+            deltas: (0..2)
+                .map(|_| {
+                    let entries: Vec<(Vec<i64>, i64)> = (0..LOG_ROWS)
+                        .map(|_| {
+                            let k = rng.next() as i64;
+                            (vec![k % 1000, k, -k], 1 + (k % 3))
+                        })
+                        .collect();
+                    ZSet::consolidate(3, &entries, wide()).expect("set")
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+/// One `log` batch: append every epoch, read each back, reopen the log.
+fn log_batch(inputs: &[TickInput], n: u64) -> u64 {
+    let path = std::env::temp_dir().join(format!("vesper-flux-abba-{}-{n}", std::process::id()));
+    let limits = vesper_flux::LogLimits {
+        max_frame_bytes: 1 << 24,
+        max_rows_per_frame: 1 << 16,
+        ..vesper_flux::LogLimits::default()
+    };
+    let mut log = vesper_flux::InputLog::create(&path, &[3, 3], limits).expect("create");
+    let mut h = 0xcbf2_9ce4_8422_2325;
+    for input in inputs {
+        log.append(input).expect("append");
+    }
+    for epoch in 0..log.len() {
+        for d in &log.read(epoch).expect("read").deltas {
+            h = digest_set(h, d);
+        }
+    }
+    drop(log);
+    let (log, recovery) = vesper_flux::InputLog::open(&path, limits).expect("open");
+    h = fnv(h, &recovery.epochs.to_le_bytes());
+    drop(log);
+    std::fs::remove_file(&path).expect("remove");
+    h
+}
+
+fn image_executor() -> Executor {
+    let mut b = CircuitBuilder::new(wide()).expect("builder");
+    let a = b.input(3).expect("input");
+    b.input(3).expect("input");
+    b.finish(a).expect("finish").executor()
+}
+
+/// The `image` workload's executor, built once per worker.
+fn image_state() -> Executor {
+    let mut e = image_executor();
+    let mut rng = Lcg(0x1a_6e57);
+    for _ in 0..IMAGE_TICKS {
+        let deltas = (0..2)
+            .map(|_| {
+                let entries: Vec<(Vec<i64>, i64)> = (0..LOG_ROWS)
+                    .map(|_| {
+                        let k = rng.next() as i64;
+                        (vec![k % 1000, k, -k], 1 + (k % 3))
+                    })
+                    .collect();
+                ZSet::consolidate(3, &entries, wide()).expect("set")
+            })
+            .collect();
+        e.tick(&TickInput { deltas }).expect("tick");
+    }
+    e
+}
+
+/// One `image` batch: checkpoint and restore into a fresh executor.
+fn image_batch(e: &Executor) -> u64 {
+    let limits = CheckpointLimits {
+        max_bytes: 1 << 24,
+        max_total_rows: 1_000_000,
+        max_total_cells: 4_000_000,
+        max_work: 16_000_000,
+        ..CheckpointLimits::default()
+    };
+    let mut h = 0xcbf2_9ce4_8422_2325;
+    for _ in 0..IMAGE_ROUNDS {
+        let image = e.checkpoint(limits).expect("checkpoint");
+        let mut fresh = image_executor();
+        fresh.restore_checkpoint(&image, limits).expect("restore");
+        h = fnv(h, &image[image.len() - 32..]);
+        h = fnv(h, &fresh.ticks().to_le_bytes());
+    }
+    h
+}
+
+/// One `durable` batch: a durable checkpoint into a fresh store, restored
+/// into a fresh executor.
+fn durable_batch(e: &Executor, n: u64) -> u64 {
+    let limits = CheckpointLimits {
+        max_bytes: 1 << 24,
+        max_total_rows: 1_000_000,
+        max_total_cells: 4_000_000,
+        max_work: 16_000_000,
+        ..CheckpointLimits::default()
+    };
+    let mut h = 0xcbf2_9ce4_8422_2325;
+    for round in 0..IMAGE_ROUNDS {
+        let dir = std::env::temp_dir().join(format!(
+            "vesper-flux-abba-cas-{}-{n}-{round}",
+            std::process::id()
+        ));
+        let store = vesper_loom_cas::Store::open(&dir).expect("store");
+        let report = vesper_flux::DurableCheckpointer::new()
+            .checkpoint(e, &store, limits)
+            .expect("checkpoint");
+        let mut fresh = image_executor();
+        let restored = vesper_flux::DurableCheckpointer::new()
+            .restore(&mut fresh, &store, &report.manifest, limits)
+            .expect("restore");
+        h = fnv(h, report.manifest.digest.as_bytes());
+        h = fnv(h, &restored.ticks.to_le_bytes());
+        drop(store);
+        std::fs::remove_dir_all(&dir).expect("remove");
+    }
+    h
+}
+
 /// Serve batches: each stdin line `go <n>` runs batch `n` and answers with
 /// its digest.
 fn worker(workload: &str) {
@@ -312,6 +455,12 @@ fn worker(workload: &str) {
     } else {
         Vec::new()
     };
+    let epochs = if workload == "log" {
+        log_inputs()
+    } else {
+        Vec::new()
+    };
+    let image = (workload == "image" || workload == "durable").then(image_state);
     for line in stdin.lock().lines() {
         let line = line.expect("read request");
         let n: u64 = line
@@ -323,6 +472,9 @@ fn worker(workload: &str) {
             "example" => example_batch(),
             "resume" => resume_batch(n + 1),
             "ingest" => ingest_batch(&batches),
+            "log" => log_batch(&epochs, n),
+            "image" => image_batch(image.as_ref().expect("image state")),
+            "durable" => durable_batch(image.as_ref().expect("image state"), n),
             other => panic!("unknown workload {other}"),
         };
         writeln!(out, "{digest}").expect("answer");
@@ -387,6 +539,9 @@ fn drive(workload: &str, rust: &str, vesper: &str) {
         "example" => (4, EXAMPLE_RUNS * 3),
         "resume" => (4, RESUME_TICKS),
         "ingest" => (4, INGEST_TICKS),
+        "log" => (4, LOG_EPOCHS),
+        "image" => (4, IMAGE_ROUNDS),
+        "durable" => (4, IMAGE_ROUNDS),
         other => panic!("unknown workload {other}"),
     };
     let config = RunConfig {
@@ -466,7 +621,7 @@ fn main() {
         ["drive", workload, rust, vesper] => drive(workload, rust, vesper),
         _ => {
             eprintln!(
-                "usage: abba worker <join|example|resume|ingest> | abba drive <join|example|resume|ingest> <rust-worker> <vesper-worker>"
+                "usage: abba worker <join|example|resume|ingest|log|image|durable>| abba drive <join|example|resume|ingest|log|image|durable> <rust-worker> <vesper-worker>"
             );
             std::process::exit(2);
         }

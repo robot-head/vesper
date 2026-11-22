@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "build": "node scripts/build.mjs",
-    "check": "node scripts/check.mjs"
+    "check": "node scripts/check.mjs",
+    "build:wasm": "cargo rustc --locked -p vesper-tour-wasm --target wasm32-unknown-unknown --profile port-compiler -- -C strip=symbols -C link-arg=--max-memory=134217728"
   },
   "engines": { "node": ">=22" }
 }
