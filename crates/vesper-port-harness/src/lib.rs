@@ -326,6 +326,10 @@ pub fn package_objects(source: &Path, target: &str) -> Result<Vec<PathBuf>, Stri
     for manifest in
         std::env::split_paths(&std::env::var_os(OBJECT_PACKAGES_ENV).unwrap_or_default())
     {
+        // An empty value (or entry) names nothing.
+        if manifest.as_os_str().is_empty() {
+            continue;
+        }
         let dir = manifest.parent().ok_or_else(|| {
             format!(
                 "{OBJECT_PACKAGES_ENV}: {} is not a Loom.toml",
