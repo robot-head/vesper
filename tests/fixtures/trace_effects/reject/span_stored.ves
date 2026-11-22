@@ -9,8 +9,7 @@ fn main() -> u64 eff [Trace] {
     };
     let Holder {
         span
-    }
-    = h;
+    } = h;
     Trace::emit_ok(span, 0);
     0
 }

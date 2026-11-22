@@ -15,8 +15,7 @@ fn area(s: Shape) -> i64 eff [Fail[ArithOverflow]] {
         Shape::Rect {
             w,
             h
-        }
-        => w * h,
+        } => w * h,
     }
 }
 
@@ -28,11 +27,11 @@ fn total(n: i64, acc: i64) -> i64 eff [Fail[ArithOverflow]] {
             n - 1,
             acc
                 + area(
-                Shape::Rect {
-                    w: n,
-                    h: 2
-                }
-            )
+                    Shape::Rect {
+                        w: n,
+                        h: 2
+                    }
+                )
         )
     }
 }

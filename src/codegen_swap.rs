@@ -619,6 +619,65 @@ pub mod drops {
     pub const DROP_BOX: u32 = 1;
 }
 
+/// The `ffi` family's requests (SH4 lane 13, #1287): one foreign (`.vsys`)
+/// call, emitted in steps by `Codegen::foreign_perform`
+/// (src/ffi_lowering/native.rs). The Rust code keeps what needs its own
+/// state (argument evaluation, the callee's declaration, `inout` restores,
+/// the `errno` pair and a refused call's `Ok` store); the hook emits the
+/// marshalling, the call, the copy-backs and the result mapping.
+///
+/// A call starts with [`BEGIN`](ffi::BEGIN). A hook that declines it
+/// leaves the whole call to Rust; one that handles it must handle every
+/// later step of the call (a later decline fails the compile).
+///
+/// Word encodings, used by the steps below:
+/// - scalar `S`: `bits | signed << 8`;
+/// - value type `V`: `[0]` unit, `[1, S]`, `[2]` bool,
+///   `[3, S, n, raw...]` enum (raw values in variant order), `[4]`
+///   address, `[5, nullable]` handle, `[6]` non-null handle;
+/// - wire struct `W`: `[size, n, field...]`; a field is
+///   `[0, offset, S, endian, native]` integer (endian 0 native, 1 little,
+///   2 big), `[1, offset, n, native...]` bytes (one native offset per
+///   copied byte), `[2, offset]` padding or `[3, offset, native, W]` a
+///   nested struct, where `native` is the field's offset in the source
+///   layout;
+/// - pointee `P`: `[0, S]` or `[1, W]`.
+pub mod ffi {
+    /// Starts a call. Args `[handler, parameters]` (handler 0 direct, 1
+    /// `isolated(mpk)`); no result.
+    pub const BEGIN: u32 = 1;
+    /// Marshals argument `index` after Rust evaluated it. Args `[index,
+    /// source kind, source, little-endian, kind, ...]`: source kind 0 a
+    /// scalar value, 1 an address of the source value, 2 a slice view's
+    /// value. Kinds: `[0, V]` value, `[1]` handle, `[2]` C string,
+    /// `[3, writes, nullable, some, offset, P]` pointer, `[4, writes,
+    /// nullable, some, offset, n, element size, P, element offset...]`
+    /// copied slice (`P` with offsets relative to an element), `[5,
+    /// stride]` a slice lent in place. Result `[k, c argument..., m, copy
+    /// word..., s, string word...]`: the C arguments, the copy-back record
+    /// to pass to [`CALL`] (empty when none) and a C string's `[buffer,
+    /// NUL offset]`.
+    pub const ARG: u32 = 2;
+    /// A call with C string arguments: the refusal of a string holding a
+    /// NUL byte. Args `[size, err tag, err offset, NUL offset...]`; result
+    /// `[slot, join block]`, emitting into the call block.
+    pub const REFUSE: u32 = 3;
+    /// The call. Args `[callee, errno, returns, little-endian, n, c
+    /// argument..., copies, (m, copy word...)...]`, errno 0 none, 1
+    /// `__errno_location`, 2 `__error`, 3 `GetLastError`, returns 1 when
+    /// the C function has a result; result `[raw, os error]` (`NO_VALUE` for none), after the
+    /// copy-backs. A copy-back record is `[guard, buffer, target, shape]`
+    /// with shape `[0, S]`, `[1, W]` or `[2, n, element size, P, element
+    /// offset...]` (guard `NO_VALUE` for none).
+    pub const CALL: u32 = 4;
+    /// The source value of the result. Args `[raw, V, layout...]`, the
+    /// layout words of the source result type that `V` needs (see
+    /// `foreign_result_layout`); result `[value]`.
+    pub const RESULT: u32 = 5;
+    /// Frees the C string buffers. Args `[buffer...]`; no result.
+    pub const FINISH: u32 = 6;
+}
+
 /// The `numeric` family's requests (lane 11, #1285). `Op::Vector` and
 /// `Op::Tiled` instructions arrive as [`INSTRUCTION`] first; a hook that
 /// declines those gets the typed requests below from `Codegen::vector_op`

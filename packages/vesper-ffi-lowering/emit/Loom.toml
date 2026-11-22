@@ -1,0 +1,11 @@
+[package]
+name = "@vesper/ffi-emit"
+version = "0.1.0"
+edition = "2026"
+# The native emission of foreign (`.vsys`) calls (SH4 lane 13, #1287): the
+# `ffi` hook of `codegen_swap`, emitting through @vesper/cranelift.
+capability_ceiling = ["Fail", "Ffi"]
+
+[dependencies]
+"@vesper/cranelift" = { version = "^0.1", path = "../../vesper-cranelift" }
+"@vesper/codegen-base" = { version = "^0.1", path = "../../vesper-codegen-base" }

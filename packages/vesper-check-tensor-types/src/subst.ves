@@ -129,14 +129,8 @@ pub fn set_ty(inout s: Subst, v: u32, t: u32) {
 pub fn dim_flexible(in st: St, d: u32) -> bool {
     for i in 0..widen_u64(dim_node(in st, d).n) {
         if (
-            st
-                .names
-                .size((dim_var_at(in st, d, i)))
-                > 0
-                && st
-                .names
-                .byte((dim_var_at(in st, d, i)), 0)
-                == 63
+            st.names.size((dim_var_at(in st, d, i))) > 0
+                && st.names.byte((dim_var_at(in st, d, i)), 0) == 63
         ) {
             return true;
         }
@@ -307,29 +301,17 @@ pub fn unify_dtype(inout st: St, inout s: Subst, a0: u32, b0: u32) -> u32 {
     }
     if (a >= 2 && (a & 1) == 1)
         && (
-        st
-            .names
-            .size(((wrapping_sub(a, 2) >> 1)))
-            > 0
-            && st
-            .names
-            .byte(((wrapping_sub(a, 2) >> 1)), 0)
-            == 63
-    ) {
+            st.names.size(((wrapping_sub(a, 2) >> 1))) > 0
+                && st.names.byte(((wrapping_sub(a, 2) >> 1)), 0) == 63
+        ) {
         set_dtype(inout s, (wrapping_sub(a, 2) >> 1), b);
         return 0;
     }
     if (b >= 2 && (b & 1) == 1)
         && (
-        st
-            .names
-            .size(((wrapping_sub(b, 2) >> 1)))
-            > 0
-            && st
-            .names
-            .byte(((wrapping_sub(b, 2) >> 1)), 0)
-            == 63
-    ) {
+            st.names.size(((wrapping_sub(b, 2) >> 1))) > 0
+                && st.names.byte(((wrapping_sub(b, 2) >> 1)), 0) == 63
+        ) {
         set_dtype(inout s, (wrapping_sub(b, 2) >> 1), a);
         return 0;
     }

@@ -198,8 +198,7 @@ pub fn access_paths_run(inout q: Q, inout ds: D, in prog: Slice[u64], in text: S
                     let at = wrapping_add(base, wrapping_mul(i, 6));
                     let no = ex(in q, at);
                     let nl = ex(in q, wrapping_add(at, 1));
-                    if c
-                        < cost
+                    if c < cost
                         || (c == cost && kind == 1 && name_before(in q, no, nl, ioff, ilen)) {
                         kind = 1;
                         ioff = no;
@@ -260,15 +259,12 @@ pub fn access_paths_run(inout q: Q, inout ds: D, in prog: Slice[u64], in text: S
                                         let at = wrapping_add(base, wrapping_mul(i, 6));
                                         let no = ex(in q, at);
                                         let nl = ex(in q, wrapping_add(at, 1));
-                                        if c
-                                            < cost
+                                        if c < cost
                                             || (
-                                            c
-                                                == cost
-                                                && kind
-                                                == 2
-                                                && name_before(in q, no, nl, ioff, ilen)
-                                        ) {
+                                                c == cost
+                                                    && kind == 2
+                                                    && name_before(in q, no, nl, ioff, ilen)
+                                            ) {
                                             kind = 2;
                                             ioff = no;
                                             ilen = nl;

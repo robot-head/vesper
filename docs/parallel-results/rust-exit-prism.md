@@ -6,8 +6,8 @@ Claim: [#1400](https://github.com/robot-head/vesper/issues/1400). Base:
 
 | Part | Scope | State |
 |---|---|---|
-| 1 | `vesper-prism`: close the speed gap, then flip (the Vesper port is the only build, the Rust implementation deleted) | this PR |
-| 2 | `vesper-prism-h3`: close the encode and message gaps, flip the ported modules | next |
+| 1 | `vesper-prism`: close the speed gap, then flip (the Vesper port is the only build, the Rust implementation deleted) | #1434 |
+| 2 | `vesper-prism-h3`: close the encode and message gaps, flip the ported modules | this PR |
 | 3 | `vesper-prism-h3` drivers (`connection.rs`, `client.rs`, `transport.rs`, `warp.rs`, `prism.rs`, `session.rs`) on the ported Warp | after part 2 |
 
 ## Part 1: vesper-prism
@@ -173,8 +173,107 @@ against 47.3 M (0.97x).
    length the code knows, where Rust inlines the copy. In `route` the port
    makes about 13 `memcpy` calls per operation against Rust's 0.4.
 
-### What is left
+## Part 2: vesper-prism-h3
 
-- Part 2 (`vesper-prism-h3`) and part 3 (the drivers), below.
+### Flip-gate verdict
+
+1. **Full function.** Every test of the crate passes against the Vesper
+   build, which is now the only build: the QPACK corpora and golden files,
+   frames, priorities, capsules, message rules, HTTP/3 and WebTransport end
+   to end, and the quinn and wtransport interop tests. The three unit tests
+   of deleted Rust items are now integration tests of the public API in
+   `tests/qpack_tables.rs`:
+   - the Huffman code is complete (Kraft equality over the code lengths) and
+     every symbol round-trips;
+   - static-table spot checks (indices 0, 17, 25, 31);
+   - the Required Insert Count wraps modulo `2 * MaxEntries` (40 sections
+     through a 100-byte table).
+
+   Each of the ten divergent modules still fails its guarding test
+   (`port/check.sh`).
+2. **Speed.** `taskset -c 3 sh crates/vesper-prism-h3/scripts/bench.sh`
+   against the Rust build (12 ABBA epochs of 16 batches, pinned to one CPU):
+
+   | Workload | Rust | Vesper | Ratio | 95% interval | Before this lane | Bar (upper end <= 1.5x) |
+   |---|--:|--:|--:|---|--:|---|
+   | decode | 2,374 ns/section | 2,366 ns | 0.99x | 0.97x..1.03x | 0.98x | pass |
+   | encode | 3,261 ns/section | 4,257 ns | 1.34x | 1.26x..1.40x | 1.45x (upper 1.47x) | pass |
+   | frames | 2,980 ns/frame | 2,904 ns | 0.99x | 0.96x..1.01x | 1.00x | pass |
+   | messages | 631 ns/message | 861 ns | 1.36x | 1.33x..1.40x | 1.64x (upper 1.68x) | pass |
+
+   Instructions, five batches (callgrind): encode 71.8 M against Rust's
+   63.7 M (1.13x), messages 72.2 M against 57.5 M (1.25x; 1.63x before).
+3. **Tests.** No test was deleted. The three unit tests above were
+   converted.
+
+Verdict: **flip.** Rust deleted (2,679 lines): the Rust build of QPACK
+(decoder 420 lines, encoder 393, the table code in `qpack/mod.rs` 148,
+Huffman 151 and its 265-line table, prefix 120, the static table 115 and
+the wire constants 65), frames 321, priorities 329, capsules 151 and the
+message rules 201. `tests/fixtures/gen_tables.py` now
+writes the Vesper tables (`vesper/src/static_table.ves`,
+`huffman_codes.ves`) straight from the RFC 9204 text and the h2 crate's
+Huffman table, so the Rust tables and `vesper/gen_tables.py` are gone (its
+output for the committed tables is unchanged).
+
+What stays Rust: the adapters that turn the public types into the port's
+flat buffers and back (`src/qpack/port.rs`, the forwarding halves of
+`frame.rs`, `priority.rs`, `capsule.rs`, `message.rs`), `error.rs`, and the
+drivers (`connection.rs`, `client.rs`, `session.rs`, `transport.rs`,
+`warp.rs`, `prism.rs`), which are part 3.
+
+### What changed
+
+- **Message rules.** The field-name, field-value and pseudo-header scans
+  use `@vesper/prism-bytes`, which gained `first_nul_or_line_break`,
+  `first_not_visible` and `first_not_lower_token`. The adapter puts each
+  field's start offset in `meta` (the third word was the unused `sensitive`
+  flag), so the port no longer builds a starts sequence per message, and it
+  reuses per-thread buffers for the flattened fields.
+- **`@vesper/prism-bytes`** reads a slice's last bytes as one more word: the
+  final eight bytes (overlapping bytes already found clean), or for a slice
+  under eight bytes its bytes padded with `a` (two overlapping 4-, 2- or
+  1-byte reads). Before, the tail went to the scalar `find_not_in`. The
+  exact scans (controls, line breaks, invisible bytes) use the classic
+  first-match test `(x - 0x01..) & ~x & 0x80..`, whose lowest flag is exact,
+  instead of the 7-bit-lane tests. Prism's decoder and response scans use
+  the same code.
+- **Huffman encoding** grows the output once to the encoded length (already
+  computed to choose between Huffman and raw) and writes the code bits 32
+  at a time with `try_write_u32_be`, instead of one `push` per byte.
+- **The static table's name hash** mixes the name's first and last words
+  and its length instead of an FNV-1a step per byte.
+
+### The flip
+
+- The `vesper-port` feature is gone; `vesper-port-abi` and
+  `vesper-port-harness` are plain dependencies, and `build.rs` always builds
+  the library.
+- Bazel: the default crate target runs `build.rs` with the prebuilt object
+  (`VESPER_PORT_OBJECT_H3`) and checks the generated binding, so every test
+  file runs against the port as in Cargo. The per-file `port_*_test`
+  targets are gone; the divergent binaries remain. The package depends on
+  `//crates/vesper-prism:bytes_package`.
+- `scripts/bench.sh` builds the Rust baseline from `7dd51a8` in a temporary
+  worktree, with this branch's `examples/abba.rs`.
+
+### Compiler gaps (part 2)
+
+5. **`Option` results of `try_read_*` and `try_get` go through the stack.**
+   Each read of a word in a scan loop stores the tag and value to a stack
+   slot and reloads them (about 15 instructions where Rust has one load).
+   The scans here pay it once per word.
+6. **Loop-invariant setup is hoisted into every call.** A function whose
+   short-slice branch needs a few shifted constants computes them in the
+   prologue even when the branch is not taken (about 50 instructions per
+   call of `first_not_lower_token` before its short path moved out of the
+   loop).
+7. **Register pressure spills scalar loops.** The FNV loop inlined into the
+   encoder's `field_line` reloaded and stored seven values per byte
+   (27 instructions per byte).
+
+## What is left
+
+- Part 3 (the drivers).
 - The census row (`scripts/rust-census.py`, STATUS tables) is updated once
   the plan PR (#1415) that adds the script has merged.

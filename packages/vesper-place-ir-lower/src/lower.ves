@@ -439,13 +439,13 @@ fn new_block(inout l: L) -> u64 {
     l
         .blocks
         .push(
-        Bk {
-            param: NONE32,
-            term: TERM_UNREACHABLE,
-            ta: 0,
-            tn: 0
-        }
-    );
+            Bk {
+                param: NONE32,
+                term: TERM_UNREACHABLE,
+                ta: 0,
+                tn: 0
+            }
+        );
     n
 }
 
@@ -535,13 +535,8 @@ fn is_never(in l: L, t: u32) -> bool {
 // `strings::is_text`: `String` or `Str` without arguments.
 fn is_text(in l: L, t: u32) -> bool {
     let k = l.c.world.k;
-    t
-        != NONE32
-        && l
-        .c
-        .types
-        .arity(t)
-        == 0
+    t != NONE32
+        && l.c.types.arity(t) == 0
         && (is_named(in l, t, k.string) || is_named(in l, t, k.str_))
 }
 
@@ -625,30 +620,18 @@ fn is_fn(in l: L, s: u32) -> bool {
 // ----- emitting -------------------------------------------------------------------
 
 fn state_action(in l: L, op: u8, a: u64, fallible: bool) -> bool {
-    if op
-        == OP_BIND
-        || op
-        == OP_WRITE
-        || op
-        == OP_CALL
-        || op
-        == OP_INDIRECT
-        || op
-        == OP_TRY
-        || op
-        == OP_HANDLE
-        || op
-        == OP_CLOSURE
-        || op
-        == OP_INDEX
-        || op
-        == OP_TILED
-        || op
-        == OP_SEQ
-        || op
-        == OP_FIP
-        || op
-        == OP_EXIT
+    if op == OP_BIND
+        || op == OP_WRITE
+        || op == OP_CALL
+        || op == OP_INDIRECT
+        || op == OP_TRY
+        || op == OP_HANDLE
+        || op == OP_CLOSURE
+        || op == OP_INDEX
+        || op == OP_TILED
+        || op == OP_SEQ
+        || op == OP_FIP
+        || op == OP_EXIT
         || fallible {
         return true;
     }
@@ -1053,24 +1036,12 @@ pub fn expr(inout l: L, id: u64) -> u32 {
 
 // A binary operand: string comparisons borrow their operands (§13).
 fn operand(inout l: L, op: u32, id: u64) -> u32 {
-    let comparison = op
-        == l
-        .s_eq
-        || op
-        == l
-        .s_ne
-        || op
-        == l
-        .s_lt
-        || op
-        == l
-        .s_le
-        || op
-        == l
-        .s_gt
-        || op
-        == l
-        .s_ge;
+    let comparison = op == l.s_eq
+        || op == l.s_ne
+        || op == l.s_lt
+        || op == l.s_le
+        || op == l.s_gt
+        || op == l.s_ge;
     if comparison {
         let x = l.a.ex(id);
         let t = l.c.world.expr_type(x.s0, x.s1);
@@ -1454,13 +1425,13 @@ fn control(inout l: L, e: Ex) -> u32 {
         l
             .loops
             .push(
-            Lp {
-                exit: exit,
-                value: true,
-                next: header,
-                cs: l.conts.len()
-            }
-        );
+                Lp {
+                    exit: exit,
+                    value: true,
+                    next: header,
+                    cs: l.conts.len()
+                }
+            );
         let mark = l.trail.len();
         let body = expr(inout l, e.a);
         restore(inout l, mark);
@@ -1574,13 +1545,13 @@ fn lower_for(inout l: L, e: Ex) -> u32 {
     l
         .loops
         .push(
-        Lp {
-            exit: exit,
-            value: false,
-            next: NONE64,
-            cs: l.conts.len()
-        }
-    );
+            Lp {
+                exit: exit,
+                value: false,
+                next: NONE64,
+                cs: l.conts.len()
+            }
+        );
     let body = expr(inout l, e.c);
     let t = pop_loop(inout l);
     let mut continues: ChunkSeq[u64] = ChunkSeq::new[u64]();
@@ -1869,16 +1840,16 @@ fn pattern_params(inout l: L, pid: u64, ty: u32, pass: u8, inout out: ChunkSeq[P
     if p.kind == PT_BIND {
         out
             .push(
-            Pm {
-                name: n32(p.a),
-                pass: pass,
-                qa: 0,
-                qn: 0,
-                ty: ty,
-                s0: p.s0,
-                s1: p.s1
-            }
-        );
+                Pm {
+                    name: n32(p.a),
+                    pass: pass,
+                    qa: 0,
+                    qn: 0,
+                    ty: ty,
+                    s0: p.s0,
+                    s1: p.s1
+                }
+            );
     } else if p.kind == PT_TUPLE {
         if l.c.types.kind(ty) == K_TUPLE {
             let m = min_u64(p.n, l.c.types.arity(ty));
@@ -1972,24 +1943,24 @@ fn add_nested(inout l: L, kind: u8, body: u64, in ps: ChunkSeq[Pm], result: u32,
     l
         .a
         .add_function(
-        FnR {
-            key: name,
-            name: name,
-            has_body: true,
-            body: body,
-            pa: pa,
-            pn: ps.len(),
-            result: result,
-            effects: effects,
-            ga: l.fga,
-            gn: l.fgn,
-            ca: ca,
-            cn: cn,
-            owner: owner,
-            xa: xa,
-            xn: xn
-        }
-    );
+            FnR {
+                key: name,
+                name: name,
+                has_body: true,
+                body: body,
+                pa: pa,
+                pn: ps.len(),
+                result: result,
+                effects: effects,
+                ga: l.fga,
+                gn: l.fgn,
+                ca: ca,
+                cn: cn,
+                owner: owner,
+                xa: xa,
+                xn: xn
+            }
+        );
 }
 
 // The free names of `body` (minus the bound ones), or false when a
@@ -2406,11 +2377,11 @@ pub fn lower_all(inout l: L) {
             .p
             .pool
             .push(
-            PoolRow {
-                kind: POOL_EXPR,
-                label: 0
-            }
-        );
+                PoolRow {
+                    kind: POOL_EXPR,
+                    label: 0
+                }
+            );
     }
     let mut fi: u64 = 0;
     loop {
@@ -2559,11 +2530,8 @@ fn header(inout l: L, f: FnR) {
     let mut keep: ChunkSeq[u64] = ChunkSeq::new[u64]();
     for i in 0..gs.len() {
         let x = u64_at(in gs, i);
-        let last = inc(i)
-            >= gs
-            .len()
-            || wrapping_shr_u64(u64_at(in gs, inc(i)), 32)
-            != wrapping_shr_u64(x, 32);
+        let last = inc(i) >= gs.len()
+            || wrapping_shr_u64(u64_at(in gs, inc(i)), 32) != wrapping_shr_u64(x, 32);
         if last {
             keep.push(x & LOW32);
         }
@@ -2743,24 +2711,24 @@ fn flush(inout l: L, f: FnR) {
                 .p
                 .insts
                 .push(
-                InstRow {
-                    dest: y.dest,
-                    ty: y.ty,
-                    s0: y.s0,
-                    s1: y.s1,
-                    has_token: has,
-                    tin: u64_at(in tin, i),
-                    tout: u64_at(in tout, i),
-                    fallible: if y.fallible {
-                        1
-                    } else {
-                        0
-                    },
-                    op: y.op,
-                    a: a,
-                    n: y.n
-                }
-            );
+                    InstRow {
+                        dest: y.dest,
+                        ty: y.ty,
+                        s0: y.s0,
+                        s1: y.s1,
+                        has_token: has,
+                        tin: u64_at(in tin, i),
+                        tout: u64_at(in tout, i),
+                        fallible: if y.fallible {
+                            1
+                        } else {
+                            0
+                        },
+                        op: y.op,
+                        a: a,
+                        n: y.n
+                    }
+                );
         }
         let ic = wrapping_sub(l.p.insts.len(), i0);
         let ta = l.p.ops.len();
@@ -2771,16 +2739,16 @@ fn flush(inout l: L, f: FnR) {
             .p
             .blocks
             .push(
-            BlockRow {
-                ha: bha,
-                hn: bhn,
-                i0: i0,
-                ic: ic,
-                term: x.term,
-                ta: ta,
-                tn: wrapping_sub(l.p.ops.len(), ta)
-            }
-        );
+                BlockRow {
+                    ha: bha,
+                    hn: bhn,
+                    i0: i0,
+                    ic: ic,
+                    term: x.term,
+                    ta: ta,
+                    tn: wrapping_sub(l.p.ops.len(), ta)
+                }
+            );
     }
     // The trailer: no fip side tables at lowering.
     let ta = l.p.ops.len();
@@ -2791,14 +2759,14 @@ fn flush(inout l: L, f: FnR) {
         .p
         .fns
         .push(
-        FnRow {
-            name: f.name,
-            ha: ha,
-            hn: hn,
-            b0: b0,
-            bc: nb,
-            ta: ta,
-            tn: wrapping_sub(l.p.ops.len(), ta)
-        }
-    );
+            FnRow {
+                name: f.name,
+                ha: ha,
+                hn: hn,
+                b0: b0,
+                bc: nb,
+                ta: ta,
+                tn: wrapping_sub(l.p.ops.len(), ta)
+            }
+        );
 }

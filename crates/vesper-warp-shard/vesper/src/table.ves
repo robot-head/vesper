@@ -286,33 +286,33 @@ impl TableCore {
         self.occupied.try_set(t, bits & ~bit(i % LANES));
         self
             .set_key(
-            i,
-            CidKey {
-                w0: 0,
-                w1: 0,
-                w2: 0,
-                w3: 0,
-                w4: 0
-            }
-        );
+                i,
+                CidKey {
+                    w0: 0,
+                    w1: 0,
+                    w2: 0,
+                    w3: 0,
+                    w4: 0
+                }
+            );
         self
             .write_state(
-            i,
-            CoreState {
-                rx_p1: 0,
-                next_tx_pn: 0,
-                bbr_bw: 0,
-                bbr_min_rtt_ns: 0,
-                cwnd_bytes: 0,
-                bytes_in_flight: 0,
-                next_edt_ns: 0,
-                idle_deadline_ns: 0,
-                peer0: 0,
-                peer1: 0,
-                peer2: 0,
-                peer_len: 0
-            }
-        );
+                i,
+                CoreState {
+                    rx_p1: 0,
+                    next_tx_pn: 0,
+                    bbr_bw: 0,
+                    bbr_min_rtt_ns: 0,
+                    cwnd_bytes: 0,
+                    bytes_in_flight: 0,
+                    next_edt_ns: 0,
+                    idle_deadline_ns: 0,
+                    peer0: 0,
+                    peer1: 0,
+                    peer2: 0,
+                    peer_len: 0
+                }
+            );
         let g = self.gen_of(i);
         self.generation.try_set(i, wrapping_u32(wrapping_add(g, 1)));
     }

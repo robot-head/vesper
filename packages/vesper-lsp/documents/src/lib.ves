@@ -323,23 +323,23 @@ pub fn lsp_documents(in input: Str) -> ChunkSeq[u64] {
                 let t_len = word(in b, inout r);
                 changes
                     .push(
-                    Change {
-                        has_range: has_range,
-                        range: Range {
-                            start: Position {
-                                line: sl,
-                                character: sc
+                        Change {
+                            has_range: has_range,
+                            range: Range {
+                                start: Position {
+                                    line: sl,
+                                    character: sc
+                                },
+                                end: Position {
+                                    line: el,
+                                    character: ec
+                                }
                             },
-                            end: Position {
-                                line: el,
-                                character: ec
-                            }
-                        },
-                        has_len: has_len,
-                        len: len,
-                        text: text_at(in pool, t_off, t_len)
-                    }
-                );
+                            has_len: has_len,
+                            len: len,
+                            text: text_at(in pool, t_off, t_len)
+                        }
+                    );
             }
             let got = try_change(inout s, in uri, version, in changes);
             after(inout out, in s, got);

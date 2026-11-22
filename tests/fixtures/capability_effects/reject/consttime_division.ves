@@ -6,8 +6,7 @@ copy struct Secret[T] {
 fn halve(s: Secret[u64]) -> Secret[u64] eff [ConstTime] {
     let Secret {
         value
-    }
-    = s;
+    } = s;
     Secret {
         value: value / 2
     }

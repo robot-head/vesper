@@ -3,8 +3,7 @@ fn make() -> Tx {
     Tx {}
 }
 fn consume(sink tx: Tx) {
-    let Tx {}
-    = tx;
+    let Tx {} = tx;
 }
 macro duplicate($x: expr) -> expr {
     quote {

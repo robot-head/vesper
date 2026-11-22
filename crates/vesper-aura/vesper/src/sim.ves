@@ -433,12 +433,12 @@ pub fn do_encode_tree(in words: Slice[u64], in text: Slice[u8], in limits: Slice
             q
                 .values
                 .push(
-                if tree_prop(in q.tree, node, property) == NONE_ID {
-                    0
-                } else {
-                    1
-                }
-            );
+                    if tree_prop(in q.tree, node, property) == NONE_ID {
+                        0
+                    } else {
+                        1
+                    }
+                );
             slots = inc(slots);
         }
         if node.ccount > U16_MAX {
