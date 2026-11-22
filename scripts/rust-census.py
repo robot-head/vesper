@@ -142,7 +142,7 @@ MODULES = {
     "proof_commands": ("SH5-18", "", ""),
     "native": ("G1-11", "vesper-codegen-base", "family hooks swapped by SH4; the walk itself ports in gap wave 1 lane 11"),
     "seq": ("SH4-9", "", ""),
-    "wasm_backend": ("SH4-15, SH5-11, G1-9", "vesper-wasm-backend, vesper-wit-component", "0 diffs (#1311); component wrap: flip gate PASS, wrap 0.05x, build 0.67x; swapped in the hybrid (`component`); the port alone lowers loops (#1492), sequences, strings and conversions (#1506); handlers next"),
+    "wasm_backend": ("SH4-15, SH5-11, G1-9, G1-10", "vesper-wasm-backend, vesper-wit-component", "0 diffs (#1311); component wrap: flip gate PASS, wrap 0.05x, build 0.67x; swapped in the hybrid (`component`); the port alone lowers loops (#1492), sequences, strings and conversions (#1506), StdEnv/StdFs over WASI and Box (#1508); handlers next"),
     "check": ("SH2-7", "vesper-check-core-typing", ""),
     "tooling": ("SH5-15, SH5-17", "", ""),
     "lsp": ("SH5-16, SH5-17", "", ""),
