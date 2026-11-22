@@ -4,6 +4,8 @@ use crate::{
     lexer::{self, Token, TokenKind as K},
 };
 use std::{fmt, mem::size_of, sync::Arc};
+mod mixed;
+pub(crate) use mixed::validate_surface;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
     pub max_source_bytes: usize,
@@ -346,7 +348,33 @@ struct SourceParser<'a> {
     support_items: Module,
     budget: Budget,
 }
-impl SourceParser<'_> {
+impl<'a> SourceParser<'a> {
+    fn new(source: &'a str, tokens: Vec<Token>, budget: Budget) -> Result<Self, Error> {
+        let mut significant = Vec::new();
+        significant
+            .try_reserve_exact(tokens.len())
+            .map_err(|_| Error::new(ErrorKind::Allocation, None))?;
+        significant.extend(
+            tokens
+                .iter()
+                .enumerate()
+                .filter_map(|(i, token)| (!token.kind.trivia()).then_some(i)),
+        );
+        Ok(Self {
+            source,
+            hash: *blake3::hash(source.as_bytes()).as_bytes(),
+            tokens,
+            significant,
+            pos: 0,
+            definitions: vec![],
+            functions: vec![],
+            parameter_names: vec![],
+            invocations: vec![],
+            support_items: Module::default(),
+            budget,
+        })
+    }
+
     fn token(&self) -> &Token {
         &self.tokens[self.significant[self.pos]]
     }
@@ -964,31 +992,8 @@ pub fn parse(source: &str, limits: Limits) -> Result<MacroSource, Error> {
     if let Some(d) = lexed.diagnostics.first() {
         return Err(Error::new(ErrorKind::Lexical, Some(d.span.clone())));
     }
-    let mut significant = Vec::new();
-    significant
-        .try_reserve_exact(lexed.tokens.len())
-        .map_err(|_| Error::new(ErrorKind::Allocation, None))?;
-    significant.extend(
-        lexed
-            .tokens
-            .iter()
-            .enumerate()
-            .filter_map(|(i, t)| (!t.kind.trivia()).then_some(i)),
-    );
-    let hash = *blake3::hash(source.as_bytes()).as_bytes();
-    let mut p = SourceParser {
-        source,
-        hash,
-        tokens: lexed.tokens,
-        significant,
-        pos: 0,
-        definitions: vec![],
-        functions: vec![],
-        parameter_names: vec![],
-        invocations: vec![],
-        support_items: Module::default(),
-        budget,
-    };
+    let mut p = SourceParser::new(source, lexed.tokens, budget)?;
+    let hash = p.hash;
     while p.kind() != K::Eof {
         if p.word("macro") {
             p.push_def()?;

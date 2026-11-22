@@ -695,18 +695,12 @@ fn put_intrinsic(inout o: ChunkSeq[u8], i: u32) {
 
 pub fn takes_shape_arguments(i: u32) -> bool {
     let f = family_of(i);
-    f
-        == I_SPLAT
-        || f
-        == I_FROM
-        || f
-        == I_LOAD_MASKED
-        || f
-        == I_LOAD
-        || f
-        == I_IN_BOUNDS
-        || f
-        == I_ACTIVE
+    f == I_SPLAT
+        || f == I_FROM
+        || f == I_LOAD_MASKED
+        || f == I_LOAD
+        || f == I_IN_BOUNDS
+        || f == I_ACTIVE
 }
 pub fn mask_result(i: u32) -> bool {
     let f = family_of(i);
@@ -714,20 +708,13 @@ pub fn mask_result(i: u32) -> bool {
 }
 pub fn mask_operand(i: u32) -> bool {
     let f = family_of(i);
-    f
-        == I_SELECT
-        || f
-        == I_MASK_BINARY
-        || f
-        == I_MASK_NOT
-        || f
-        == I_MASK_COUNT
-        || f
-        == I_MASK_BITMASK
-        || f
-        == I_MASK_ANY
-        || f
-        == I_MASK_ALL
+    f == I_SELECT
+        || f == I_MASK_BINARY
+        || f == I_MASK_NOT
+        || f == I_MASK_COUNT
+        || f == I_MASK_BITMASK
+        || f == I_MASK_ANY
+        || f == I_MASK_ALL
 }
 // `constant_positions(args)` as `start..end`.
 pub fn constants_start(i: u32) -> u64 {
@@ -777,13 +764,11 @@ pub fn lane_error(i: u32, e: u32) -> Str {
         "saturating lane arithmetic is defined for u8 lanes only"
     } else if elem_is_float(e)
         && (
-        (f == I_BINARY && (op == B_AND || op == B_OR || op == B_XOR))
-            || f
-            == I_NOT
-            || f
-            == I_SHIFT
-            || (f == I_REDUCE && (op == RD_AND || op == RD_OR || op == RD_XOR))
-    ) {
+            (f == I_BINARY && (op == B_AND || op == B_OR || op == B_XOR))
+                || f == I_NOT
+                || f == I_SHIFT
+                || (f == I_REDUCE && (op == RD_AND || op == RD_OR || op == RD_XOR))
+        ) {
         "bitwise lane operations are not defined for float lanes"
     } else if (f == I_LOAD_MASKED || f == I_IN_BOUNDS) && e != E_U8 {
         "string loads produce u8 lanes"

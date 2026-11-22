@@ -589,6 +589,7 @@ fn generated_name(c: &Conformance, method: &str) -> String {
 
 fn base_module(module: &Module) -> Module {
     Module {
+        sugar_origins: module.sugar_origins.clone(),
         items: module
             .items
             .iter()

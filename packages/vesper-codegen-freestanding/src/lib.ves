@@ -146,12 +146,12 @@ pub fn freestanding_link(in req: Slice[u8]) -> ChunkSeq[u8] {
         let offset = r.word(in req);
         entries
             .push(
-            TrapEntry {
-                object: object,
-                function: function,
-                offset: offset
-            }
-        );
+                TrapEntry {
+                    object: object,
+                    function: function,
+                    offset: offset
+                }
+            );
     }
     if r.bad {
         return bad_request();

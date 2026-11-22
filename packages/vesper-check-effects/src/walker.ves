@@ -308,42 +308,18 @@ fn is_secret_name(k: Syms, s: u32) -> bool {
 
 // `REALTIME_FORBIDDEN`.
 pub fn forbidden(in c: Ctx, s: u32) -> bool {
-    c
-        .names
-        .spells(s, in "Alloc".as_bytes())
-        || c
-        .names
-        .spells(s, in "Async".as_bytes())
-        || c
-        .names
-        .spells(s, in "Net".as_bytes())
-        || c
-        .names
-        .spells(s, in "Storage".as_bytes())
-        || c
-        .names
-        .spells(s, in "Scope".as_bytes())
-        || c
-        .names
-        .spells(s, in "Mutex".as_bytes())
-        || c
-        .names
-        .spells(s, in "Lock".as_bytes())
-        || c
-        .names
-        .spells(s, in "Block".as_bytes())
-        || c
-        .names
-        .spells(s, in "Blocking".as_bytes())
-        || c
-        .names
-        .spells(s, in "Ffi".as_bytes())
-        || c
-        .names
-        .spells(s, in "Io".as_bytes())
-        || c
-        .names
-        .spells(s, in "Sleep".as_bytes())
+    c.names.spells(s, in "Alloc".as_bytes())
+        || c.names.spells(s, in "Async".as_bytes())
+        || c.names.spells(s, in "Net".as_bytes())
+        || c.names.spells(s, in "Storage".as_bytes())
+        || c.names.spells(s, in "Scope".as_bytes())
+        || c.names.spells(s, in "Mutex".as_bytes())
+        || c.names.spells(s, in "Lock".as_bytes())
+        || c.names.spells(s, in "Block".as_bytes())
+        || c.names.spells(s, in "Blocking".as_bytes())
+        || c.names.spells(s, in "Ffi".as_bytes())
+        || c.names.spells(s, in "Io".as_bytes())
+        || c.names.spells(s, in "Sleep".as_bytes())
 }
 
 fn secret_visit(in c: Ctx, k: Syms, ty: u32, inout seen: ChunkSeq[u32]) -> bool {
@@ -415,13 +391,13 @@ pub fn secret_type(in c: Ctx, inout s: Walk, ty: u32) -> bool {
     let ok = s
         .secret_memo
         .try_set(
-        w(ty),
-        if r {
-            2
-        } else {
-            1
-        }
-    );
+            w(ty),
+            if r {
+                2
+            } else {
+                1
+            }
+        );
     r
 }
 
@@ -530,22 +506,10 @@ fn int_kind_after(in c: Ctx, s: u32, skip: u64) -> bool {
     if rest == 5 {
         // usize, isize
         return (b0 == 117 || b0 == 105)
-            && c
-            .names
-            .byte(s, add(skip, 1))
-            == 115
-            && c
-            .names
-            .byte(s, add(skip, 2))
-            == 105
-            && c
-            .names
-            .byte(s, add(skip, 3))
-            == 122
-            && c
-            .names
-            .byte(s, add(skip, 4))
-            == 101;
+            && c.names.byte(s, add(skip, 1)) == 115
+            && c.names.byte(s, add(skip, 2)) == 105
+            && c.names.byte(s, add(skip, 3)) == 122
+            && c.names.byte(s, add(skip, 4)) == 101;
     }
     if b0 != 117 && b0 != 105 {
         return false;
@@ -560,18 +524,9 @@ fn int_kind_after(in c: Ctx, s: u32, skip: u64) -> bool {
     }
     if rest == 4 {
         // i128, u128
-        return c
-            .names
-            .byte(s, add(skip, 1))
-            == 49
-            && c
-            .names
-            .byte(s, add(skip, 2))
-            == 50
-            && c
-            .names
-            .byte(s, add(skip, 3))
-            == 56;
+        return c.names.byte(s, add(skip, 1)) == 49
+            && c.names.byte(s, add(skip, 2)) == 50
+            && c.names.byte(s, add(skip, 3)) == 56;
     }
     false
 }
@@ -596,15 +551,9 @@ fn prefixed_float(in c: Ctx, s: u32, in prefix: Str) -> bool {
 
 // `numeric::wrapping_intrinsic(name).is_some()`.
 fn wrapping_intrinsic(in c: Ctx, s: u32) -> bool {
-    c
-        .names
-        .spells(s, in "wrapping_add".as_bytes())
-        || c
-        .names
-        .spells(s, in "wrapping_sub".as_bytes())
-        || c
-        .names
-        .spells(s, in "wrapping_mul".as_bytes())
+    c.names.spells(s, in "wrapping_add".as_bytes())
+        || c.names.spells(s, in "wrapping_sub".as_bytes())
+        || c.names.spells(s, in "wrapping_mul".as_bytes())
 }
 
 // `bit_intrinsic`, `numeric::conversion`, `numeric::rotate_intrinsic` or
@@ -616,60 +565,28 @@ fn other_intrinsic(in c: Ctx, s: u32) -> bool {
 }
 
 fn bit_or_int_intrinsic(in c: Ctx, s: u32) -> bool {
-    c
-        .names
-        .spells(s, in "bit_and".as_bytes())
-        || c
-        .names
-        .spells(s, in "bit_or".as_bytes())
-        || c
-        .names
-        .spells(s, in "bit_xor".as_bytes())
-        || c
-        .names
-        .spells(s, in "bit_shl".as_bytes())
-        || c
-        .names
-        .spells(s, in "bit_shr".as_bytes())
+    c.names.spells(s, in "bit_and".as_bytes())
+        || c.names.spells(s, in "bit_or".as_bytes())
+        || c.names.spells(s, in "bit_xor".as_bytes())
+        || c.names.spells(s, in "bit_shl".as_bytes())
+        || c.names.spells(s, in "bit_shr".as_bytes())
         || prefixed_int(in c, s, "widen_")
         || prefixed_int(in c, s, "narrow_")
         || prefixed_int(in c, s, "wrapping_")
-        || c
-        .names
-        .spells(s, in "rotate_left".as_bytes())
-        || c
-        .names
-        .spells(s, in "rotate_right".as_bytes())
+        || c.names.spells(s, in "rotate_left".as_bytes())
+        || c.names.spells(s, in "rotate_right".as_bytes())
 }
 
 fn float_intrinsic(in c: Ctx, s: u32) -> bool {
-    c
-        .names
-        .spells(s, in "sqrt".as_bytes())
-        || c
-        .names
-        .spells(s, in "abs".as_bytes())
-        || c
-        .names
-        .spells(s, in "floor".as_bytes())
-        || c
-        .names
-        .spells(s, in "ceil".as_bytes())
-        || c
-        .names
-        .spells(s, in "round".as_bytes())
-        || c
-        .names
-        .spells(s, in "trunc".as_bytes())
-        || c
-        .names
-        .spells(s, in "min".as_bytes())
-        || c
-        .names
-        .spells(s, in "max".as_bytes())
-        || c
-        .names
-        .spells(s, in "fma".as_bytes())
+    c.names.spells(s, in "sqrt".as_bytes())
+        || c.names.spells(s, in "abs".as_bytes())
+        || c.names.spells(s, in "floor".as_bytes())
+        || c.names.spells(s, in "ceil".as_bytes())
+        || c.names.spells(s, in "round".as_bytes())
+        || c.names.spells(s, in "trunc".as_bytes())
+        || c.names.spells(s, in "min".as_bytes())
+        || c.names.spells(s, in "max".as_bytes())
+        || c.names.spells(s, in "fma".as_bytes())
         || prefixed_float(in c, s, "widen_")
         || prefixed_float(in c, s, "nearest_")
         || prefixed_int(in c, s, "saturating_")
@@ -771,15 +688,15 @@ fn finish(inout s: Walk, a: u64, in help: Str, start: u64, end: u64) {
     s
         .rows
         .push(
-        DRow {
-            start: start,
-            end: end,
-            a: a,
-            m: add(a, 5),
-            h: h,
-            z: s.text.len()
-        }
-    );
+            DRow {
+                start: start,
+                end: end,
+                a: a,
+                m: add(a, 5),
+                h: h,
+                z: s.text.len()
+            }
+        );
 }
 
 // " (in '<function>')"
@@ -853,13 +770,13 @@ fn edge(inout s: Walk, callee: u32, start: u64, end: u64) {
         s
             .edges
             .push(
-            Edge {
-                node: s.node,
-                callee: callee,
-                start: start,
-                end: end
-            }
-        );
+                Edge {
+                    node: s.node,
+                    callee: callee,
+                    start: start,
+                    end: end
+                }
+            );
     }
 }
 
@@ -984,11 +901,11 @@ pub fn function_body(inout c: Ctx, in p: Prog, inout s: Walk) -> bool {
     s
         .returns
         .push(
-        Ret {
-            ty: g.result,
-            tainted: false
-        }
-    );
+            Ret {
+                ty: g.result,
+                tainted: false
+            }
+        );
     let t = expr(inout c, in p, inout s, g.body);
     let returned = pop_return(inout s);
     coerce(inout c, in p, inout s, g.body, g.result);
@@ -1502,12 +1419,12 @@ pub fn expr(inout c: Ctx, in p: Prog, inout s: Walk, e: u32) -> bool {
                 let ok = s
                     .returns
                     .try_set(
-                    last,
-                    Ret {
-                        ty: r.ty,
-                        tainted: r.tainted || t
-                    }
-                );
+                        last,
+                        Ret {
+                            ty: r.ty,
+                            tainted: r.tainted || t
+                        }
+                    );
             }
         }
         false
@@ -1771,11 +1688,11 @@ fn closure(inout c: Ctx, in p: Prog, inout s: Walk, e: u32, x: ExprNode) -> bool
     s
         .returns
         .push(
-        Ret {
-            ty: x.c,
-            tainted: false
-        }
-    );
+            Ret {
+                ty: x.c,
+                tainted: false
+            }
+        );
     open_scope(inout s);
     for i in 0..w(x.b) {
         let at = add(w(x.a), wrapping_mul(i, 3));
@@ -1797,11 +1714,11 @@ fn closure(inout c: Ctx, in p: Prog, inout s: Walk, e: u32, x: ExprNode) -> bool
         } else {
             NONE32
         };
-        if declared
-            == NONE32
+        if declared == NONE32
             || (
-            !secret_type(in c, inout s, declared) && !carries_no_information(in c, s.k, declared)
-        ) {
+                !secret_type(in c, inout s, declared)
+                    && !carries_no_information(in c, s.k, declared)
+            ) {
             let tx = tail_span(in p, x.e);
             let a = begin(inout s, "E0706");
             put(inout s, "eff [ConstTime] closure returns a secret-derived value as non-secret");
@@ -2344,8 +2261,7 @@ fn call_value(
                 && has(in s, CT)
                 && !lexical
                 && !secret_type(in c, inout s, pty)
-                && s
-                .emit {
+                && s.emit {
                 let ax = p.expr(arg);
                 let a = begin(inout s, "E0705");
                 put(inout s, "eff [ConstTime] passes a secret-derived value to public parameter '");

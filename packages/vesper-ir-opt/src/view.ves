@@ -53,38 +53,22 @@ pub const C_NEVER: u8 = 2;
 
 // The scalar names of `numeric::is_scalar_name` other than `Never`.
 fn scalar_name(in names: Names, s: u32) -> bool {
-    names
-        .spells(s, in "u8".as_bytes())
-        || names
-        .spells(s, in "u16".as_bytes())
-        || names
-        .spells(s, in "u32".as_bytes())
-        || names
-        .spells(s, in "u64".as_bytes())
-        || names
-        .spells(s, in "usize".as_bytes())
-        || names
-        .spells(s, in "i8".as_bytes())
-        || names
-        .spells(s, in "i16".as_bytes())
-        || names
-        .spells(s, in "i32".as_bytes())
-        || names
-        .spells(s, in "i64".as_bytes())
-        || names
-        .spells(s, in "isize".as_bytes())
-        || names
-        .spells(s, in "i128".as_bytes())
-        || names
-        .spells(s, in "u128".as_bytes())
-        || names
-        .spells(s, in "f32".as_bytes())
-        || names
-        .spells(s, in "f64".as_bytes())
-        || names
-        .spells(s, in "bool".as_bytes())
-        || names
-        .spells(s, in "Unit".as_bytes())
+    names.spells(s, in "u8".as_bytes())
+        || names.spells(s, in "u16".as_bytes())
+        || names.spells(s, in "u32".as_bytes())
+        || names.spells(s, in "u64".as_bytes())
+        || names.spells(s, in "usize".as_bytes())
+        || names.spells(s, in "i8".as_bytes())
+        || names.spells(s, in "i16".as_bytes())
+        || names.spells(s, in "i32".as_bytes())
+        || names.spells(s, in "i64".as_bytes())
+        || names.spells(s, in "isize".as_bytes())
+        || names.spells(s, in "i128".as_bytes())
+        || names.spells(s, in "u128".as_bytes())
+        || names.spells(s, in "f32".as_bytes())
+        || names.spells(s, in "f64".as_bytes())
+        || names.spells(s, in "bool".as_bytes())
+        || names.spells(s, in "Unit".as_bytes())
 }
 
 // Per type id: `C_SCALAR` when ir_opt's `scalar` holds (a scalar name other

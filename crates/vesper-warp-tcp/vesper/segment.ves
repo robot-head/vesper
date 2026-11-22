@@ -77,15 +77,13 @@ pub fn ips_default_mss(ips: Ips) -> u16 {
         Ips::V4 {
             src,
             dst
-        }
-        => DEFAULT_IPV4_MSS,
+        } => DEFAULT_IPV4_MSS,
         Ips::V6 {
             s0,
             s1,
             d0,
             d1
-        }
-        => DEFAULT_IPV6_MSS,
+        } => DEFAULT_IPV6_MSS,
     }
 }
 
@@ -94,8 +92,7 @@ pub fn ips_reversed(ips: Ips) -> Ips {
         Ips::V4 {
             src,
             dst
-        }
-        => Ips::V4 {
+        } => Ips::V4 {
             src: dst,
             dst: src
         },
@@ -104,8 +101,7 @@ pub fn ips_reversed(ips: Ips) -> Ips {
             s1,
             d0,
             d1
-        }
-        => Ips::V6 {
+        } => Ips::V6 {
             s0: d0,
             s1: d1,
             d0: s0,
@@ -119,40 +115,34 @@ fn ips_eq(a: Ips, b: Ips) -> bool {
         Ips::V4 {
             src,
             dst
-        }
-        => match b {
+        } => match b {
             Ips::V4 {
                 src: s2,
                 dst: d2
-            }
-            => src == s2 && dst == d2,
+            } => src == s2 && dst == d2,
             Ips::V6 {
                 s0,
                 s1,
                 d0,
                 d1
-            }
-            => false,
+            } => false,
         },
         Ips::V6 {
             s0,
             s1,
             d0,
             d1
-        }
-        => match b {
+        } => match b {
             Ips::V4 {
                 src,
                 dst
-            }
-            => false,
+            } => false,
             Ips::V6 {
                 s0: t0,
                 s1: t1,
                 d0: e0,
                 d1: e1
-            }
-            => s0 == t0 && s1 == t1 && d0 == e0 && d1 == e1,
+            } => s0 == t0 && s1 == t1 && d0 == e0 && d1 == e1,
         },
     }
 }

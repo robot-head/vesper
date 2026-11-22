@@ -438,13 +438,13 @@ pub fn decode(in b: Slice[u8], inout w: Slice[u64], inout st: Slice[u64]) -> u64
             if kind != K_TAG {
                 w
                     .try_set(
-                    st_get(in st, depth, S_SLOT),
-                    if kind == K_MAP {
-                        seen >> 1
-                    } else {
-                        seen
-                    }
-                );
+                        st_get(in st, depth, S_SLOT),
+                        if kind == K_MAP {
+                            seen >> 1
+                        } else {
+                            seen
+                        }
+                    );
             }
             depth = wrapping_sub(depth, 1);
         }
@@ -489,15 +489,9 @@ pub fn decode(in b: Slice[u8], inout w: Slice[u64], inout st: Slice[u64]) -> u64
                 }
                 if h.arg == TAG_BIGPOS || h.arg == TAG_BIGNEG {
                     let inner = head(in b, h.end);
-                    if inner
-                        .major
-                        == M_BYTES
-                        && inner
-                        .ai
-                        != AI_INDEFINITE
-                        && inner
-                        .arg
-                        <= BIGNUM_MAX_BYTES {
+                    if inner.major == M_BYTES
+                        && inner.ai != AI_INDEFINITE
+                        && inner.arg <= BIGNUM_MAX_BYTES {
                         p = bignum(in b, h.arg, inner, inout w);
                         continue;
                     }

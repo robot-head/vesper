@@ -201,18 +201,10 @@ pub fn image_check(in image: Slice[u8]) eff [Ffi[Blake3], Fail[CpErr]] {
     }
     let split = wrapping_sub(len, SUM);
     let d = hash(in image[0..split]);
-    if d
-        .w0
-        != le64(in image, split)
-        || d
-        .w1
-        != le64(in image, wrapping_add(split, 8))
-        || d
-        .w2
-        != le64(in image, wrapping_add(split, 16))
-        || d
-        .w3
-        != le64(in image, wrapping_add(split, 24)) {
+    if d.w0 != le64(in image, split)
+        || d.w1 != le64(in image, wrapping_add(split, 8))
+        || d.w2 != le64(in image, wrapping_add(split, 16))
+        || d.w3 != le64(in image, wrapping_add(split, 24)) {
         Fail::raise(CpErr::Checksum);
     }
 }
@@ -272,10 +264,8 @@ pub fn image_head(
         }
     }
     if !ok
-        || read_int(in body, inout cursor, 2, inout budget)
-        != 1
-        || read_int(in body, inout cursor, 2, inout budget)
-        != 0 {
+        || read_int(in body, inout cursor, 2, inout budget) != 1
+        || read_int(in body, inout cursor, 2, inout budget) != 0 {
         Fail::raise(version);
     }
     let id = take(in body, inout cursor, SUM, inout budget);

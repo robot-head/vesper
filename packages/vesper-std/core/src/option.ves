@@ -171,16 +171,15 @@ test {
                 wrapping_add(wrapping_u16(x), 1)
             }
         );
-        actual
-            == mapped
+        actual == mapped
             && map_or(
-            input,
-            99,
-            | x: u8 | -> u16 {
-                wrapping_add(wrapping_u16(x), 1)
-            }
-        )
-            == resolved
+                input,
+                99,
+                | x: u8 | -> u16 {
+                    wrapping_add(wrapping_u16(x), 1)
+                }
+            )
+                == resolved
     }
 
     // @case maps_even(Option::Some(8), Option::Some(4))

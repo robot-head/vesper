@@ -66,15 +66,15 @@ fn finish(inout s: Walk, a: u64, in help: Str, start: u64, end: u64) {
     s
         .rows
         .push(
-        DRow {
-            start: start,
-            end: end,
-            a: a,
-            m: add(a, 5),
-            h: h,
-            z: s.text.len()
-        }
-    );
+            DRow {
+                start: start,
+                end: end,
+                a: a,
+                m: add(a, 5),
+                h: h,
+                z: s.text.len()
+            }
+        );
 }
 
 // `summarise`: the facts to a fixpoint; left in `s.cur`.
@@ -168,13 +168,9 @@ pub fn check_world(inout c: Ctx, in p: Prog, inout s: Walk) -> ChunkSeq[u64] {
             let nn = s.nodes.len();
             start(inout c, in p, inout s, n32(i), caps, infer);
             let tainted = function_body(inout c, in p, inout s);
-            if f
-                .body
-                != NONE32
+            if f.body != NONE32
                 && !infer
-                && caps
-                & CT
-                != 0
+                && caps & CT != 0
                 && tainted
                 && !secret_type(in c, inout s, f.result)
                 && !carries_no_information(in c, in s, f.result)
@@ -304,13 +300,13 @@ fn realtime_recursion(inout c: Ctx, inout s: Walk, in indirect: Keys) {
     for i in 0..indirect.len() {
         extra
             .push(
-            Edge {
-                node: ind,
-                callee: n32(indirect.get(i)),
-                start: 0,
-                end: 0
-            }
-        );
+                Edge {
+                    node: ind,
+                    callee: n32(indirect.get(i)),
+                    start: 0,
+                    end: 0
+                }
+            );
     }
     let total = add(s.edges.len(), extra.len());
     for i in 0..total {
@@ -539,8 +535,7 @@ fn sorted_rows(in s: Walk) -> ChunkSeq[u64] {
                 if k >= hi {
                     break;
                 }
-                let take_left = j
-                    >= hi
+                let take_left = j >= hi
                     || (i < mid && cmp_rows(in s, u64_at(in v, i), u64_at(in v, j)) <= 0);
                 if take_left {
                     let ok = tmp.try_set(k, u64_at(in v, i));

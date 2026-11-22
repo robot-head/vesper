@@ -483,8 +483,7 @@ pub fn occurs(in s: S, n: u64, x: u64) -> bool {
     let tag = tg(in s, n);
     let v = vinf(x);
     if (tag == t_var() || tag == m_var() || tag == b_var() || tag == g_cap() || tag == l_cap())
-        && fa(in s, n)
-        == v {
+        && fa(in s, n) == v {
         return true;
     }
     if tag == g_row() && fa(in s, n) == v {
