@@ -332,9 +332,9 @@ fn is_separator(b: u8, windows: bool) -> bool {
 fn join(in dir: Slice[u8], in name: Slice[u8], windows: bool) -> ChunkSeq[u8] {
     let mut p: ChunkSeq[u8] = ChunkSeq::new[u8]();
     p.extend(in dir);
-    // `PathBuf::push` adds no separator after a bare drive (`C:` or
-    // `\\?\C:`): `C:vesper-x.exe` is relative to drive C's current
-    // directory, not its root.
+    // `PathBuf::push` adds no separator after a bare drive (`C:`):
+    // `C:vesper-x.exe` is relative to drive C's current directory, not its
+    // root. A verbatim drive (`\\?\C:`) still gets one.
     if windows && bare_drive(in dir) {
         p.extend(in name);
         return p;
@@ -350,23 +350,10 @@ fn join(in dir: Slice[u8], in name: Slice[u8], windows: bool) -> ChunkSeq[u8] {
     p
 }
 
-// Whether `dir` is a Windows drive prefix and nothing else: `X:` (a
-// `Prefix::Disk`) or `\\?\X:` (a `Prefix::VerbatimDisk`), with `X` an
-// ASCII letter.
+// Whether `dir` is a Windows drive prefix and nothing else: `X:` with `X`
+// an ASCII letter (a `Prefix::Disk`, the only prefix `is_drive()` accepts).
 fn bare_drive(in dir: Slice[u8]) -> bool {
-    let n = dir.len();
-    if n == 2 {
-        return ascii_letter(byte_at(in dir, 0)) && byte_at(in dir, 1) == 58;
-    }
-    if n == 6 {
-        return byte_at(in dir, 0) == 92
-            && byte_at(in dir, 1) == 92
-            && byte_at(in dir, 2) == 63
-            && byte_at(in dir, 3) == 92
-            && ascii_letter(byte_at(in dir, 4))
-            && byte_at(in dir, 5) == 58;
-    }
-    false
+    dir.len() == 2 && ascii_letter(byte_at(in dir, 0)) && byte_at(in dir, 1) == 58
 }
 
 fn ascii_letter(b: u8) -> bool {

@@ -280,6 +280,12 @@ fn staged() -> Stage {
         q.push(";");
         q.push(&path1);
         paths.push(("C:;path1", Some(q)));
+        // A verbatim drive keeps its separator: `\\?\C:\vesper-x.exe`.
+        let mut q = OsString::from(r"\\?\");
+        q.push(&drive);
+        q.push(";");
+        q.push(&path1);
+        paths.push((r"\\?\C:;path1", Some(q)));
     }
     Stage {
         root,
