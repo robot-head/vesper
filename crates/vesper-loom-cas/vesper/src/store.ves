@@ -34,7 +34,7 @@ use self::derivation_hash;
 use @vesper-std/hash-sys::{
     hasher_new_derive_key,
     update,
-    finalize,
+    finalize_xof,
     hasher_free
 };
 
@@ -549,13 +549,8 @@ fn finish_id(domain: u8, kind: u8, sink h: Hasher) -> ChunkSeq[u8] eff [Ffi[Blak
     let mut id = ChunkSeq::with_capacity[u8](ID_BYTES);
     id.push(domain);
     id.push(kind);
-    let d = finalize(in h);
+    finalize_xof(in h, 32, inout id);
     hasher_free(h);
-    id.resize(ID_BYTES, 0);
-    id.try_write_u64_le(2, d.w0);
-    id.try_write_u64_le(10, d.w1);
-    id.try_write_u64_le(18, d.w2);
-    id.try_write_u64_le(26, d.w3);
     id
 }
 
