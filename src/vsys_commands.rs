@@ -137,7 +137,9 @@ fn host_symbols(
         }
         // Assembly objects are linked by `vesper build` only; the JIT and
         // the evaluator have no loader for them (manuscript §16.3).
-        if let Some(package) = imports.objects_provider(library.link().name()) {
+        if library.link().mode() == vesper_ffi::sys::LinkMode::Static
+            && let Some(package) = imports.objects_provider(library.link().name())
+        {
             return Err(format!(
                 "{command}: library {} is provided by the assembly objects of {package} (`[package] objects`), which only `vesper build` links; build an executable instead",
                 library.name()
@@ -402,7 +404,9 @@ fn build(
     // A package's assembly objects provide its static libraries
     // (manuscript §16.3): they link in place of `lib<name>.a`.
     let mut names = checked.link_names();
-    names.retain(|(name, _)| imports.objects_provider(name).is_none());
+    names.retain(|(name, mode)| {
+        *mode != vesper_ffi::sys::LinkMode::Static || imports.objects_provider(name).is_none()
+    });
     let mut temporary = vec![object.clone()];
     let objects = package_objects(c, &path, &mut temporary);
     let result = objects.and_then(|objects| link_executable(c, &object, &objects, &path, &names));

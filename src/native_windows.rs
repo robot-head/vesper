@@ -589,12 +589,17 @@ pub fn assemble(source: &Path, output: &Path) -> Result<(), String> {
     let mut command = if masm {
         let mut command = match find_ml64() {
             Some(command) => command,
-            None => Command::new(
-                ["llvm-ml", "llvm-ml.exe"]
-                    .iter()
-                    .find_map(|n| find_on_path(n))
-                    .ok_or("no MASM assembler found: install the Visual Studio C++ build tools (x64) or put llvm-ml on PATH")?,
-            ),
+            None => {
+                let mut command = Command::new(
+                    ["llvm-ml", "llvm-ml.exe"]
+                        .iter()
+                        .find_map(|n| find_on_path(n))
+                        .ok_or("no MASM assembler found: install the Visual Studio C++ build tools (x64) or put llvm-ml on PATH")?,
+                );
+                // `llvm-ml` assembles 32-bit MASM unless told otherwise.
+                command.arg("--m64");
+                command
+            }
         };
         let mut out = OsString::from("/Fo");
         out.push(output.as_os_str());

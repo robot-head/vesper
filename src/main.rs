@@ -314,8 +314,11 @@ fn cli() -> Result<(), String> {
         return Err(format!("{} syntax error(s)", parsed.diagnostics.len()));
     }
     // `.vsys` libraries the loaded packages carry (`[package] vsys`).
+    // Assembly objects (`[package] objects`) link through the same path,
+    // with or without imports.
     let package_vsys = loaded.as_ref().map_or(&[][..], |p| &p.vsys[..]);
-    if !package_vsys.is_empty() && !(lib.enabled || lib.any_option()) {
+    let package_objects = loaded.as_ref().is_some_and(|p| !p.objects.is_empty());
+    if (!package_vsys.is_empty() || package_objects) && !(lib.enabled || lib.any_option()) {
         // Programs over package-carried imports check and run only through
         // the Bridge lowering (#1150).
         let p = loaded.as_ref().expect("package_vsys comes from a package");

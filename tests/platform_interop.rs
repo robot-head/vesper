@@ -812,3 +812,30 @@ fn per_target_objects_select_each_targets_file() {
         );
     }
 }
+
+/// A package with objects and no `.vsys` imports still links them (a
+/// constructor, or code another object calls).
+#[test]
+fn objects_link_without_vsys_imports() {
+    if cfg!(windows) || !host_jit() || Command::new("cc").arg("--version").output().is_err() {
+        return;
+    }
+    let t = Temp::new("asm-only");
+    for (path, text) in TWICE_ASM {
+        t.write(&format!("app/{path}"), text);
+    }
+    let dir = app(
+        &t,
+        &format!("objects = {PER_TARGET_OBJECTS}"),
+        "pub fn main() -> u64 {\n    7\n}\n",
+        "",
+    );
+    let exe = t.0.join("only.bin");
+    run(vesper().arg("build").arg(&dir).arg("-o").arg(&exe));
+    assert_eq!(Command::new(&exe).status().unwrap().code(), Some(7));
+    let bytes = fs::read(&exe).unwrap();
+    assert!(
+        bytes.windows(10).any(|w| w == b"twice_plus"),
+        "the object's symbol is linked in"
+    );
+}
