@@ -13,8 +13,6 @@
 //! that allocates passes it. Here confinement is reachability.
 
 use crate::VerifierFinding;
-#[cfg(not(vesper_port))]
-use std::collections::VecDeque;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
@@ -185,11 +183,6 @@ impl CallGraph {
             .and_then(|i| u32::try_from(i).ok())
             .map(FnId)
     }
-
-    #[cfg(not(vesper_port))]
-    fn node(&self, id: FnId) -> &FnNode {
-        &self.functions[id.0 as usize]
-    }
 }
 
 /// A realtime root and its budgets (the `@realtime(...)` attribute).
@@ -292,459 +285,189 @@ pub mod rules {
     pub const STACK_BUDGET: &str = "rt-stack-budget";
 }
 
-#[cfg(not(vesper_port))]
-struct Adjacency {
-    /// Successors per function: (callee, instruction index of the call).
-    succ: Vec<Vec<(FnId, Option<u32>)>>,
-    /// Unresolved indirect sites per function.
-    unresolved: Vec<Vec<u32>>,
-}
-
-#[cfg(not(vesper_port))]
-fn adjacency(graph: &CallGraph, policy: &RealtimePolicy) -> Result<Adjacency, GraphError> {
-    let n = graph.functions.len();
-    let check = |id: FnId| {
-        if (id.0 as usize) < n {
-            Ok(id)
-        } else {
-            Err(GraphError::UnknownFnId(id))
-        }
-    };
-    let mut succ: Vec<Vec<(FnId, Option<u32>)>> = vec![Vec::new(); n];
-    let mut unresolved: Vec<Vec<u32>> = vec![Vec::new(); n];
-    for &(caller, callee) in &graph.calls {
-        check(caller)?;
-        check(callee)?;
-        let inst = graph
-            .node(caller)
-            .call_sites
-            .iter()
-            .find(|(c, _)| *c == callee)
-            .map(|&(_, i)| i);
-        succ[caller.0 as usize].push((callee, inst));
-    }
-    let mut sites = BTreeSet::new();
-    for ic in &graph.indirect_calls {
-        check(ic.caller)?;
-        sites.insert((ic.caller, ic.site));
-        match policy.indirect_targets.get(&(ic.caller, ic.site)) {
-            // An empty target list resolves nothing: still unresolved.
-            Some(targets) if targets.is_empty() => {
-                unresolved[ic.caller.0 as usize].push(ic.site);
-            }
-            Some(targets) => {
-                for &t in targets {
-                    check(t)?;
-                    succ[ic.caller.0 as usize].push((t, Some(ic.site)));
-                }
-            }
-            None => unresolved[ic.caller.0 as usize].push(ic.site),
-        }
-    }
-    for &(caller, site) in policy.indirect_targets.keys() {
-        check(caller)?;
-        if !sites.contains(&(caller, site)) {
-            return Err(GraphError::UnknownIndirectSite { caller, site });
-        }
-    }
-    for root in &policy.roots {
-        check(root.function)?;
-    }
-    Ok(Adjacency { succ, unresolved })
-}
-
 /// Verify every realtime root of `policy` against `graph`.
 ///
 /// Returns one finding per (root, reachable violation). An empty vector means
 /// every root is confined. Malformed graphs are an error, never success.
-#[cfg(vesper_port)]
+///
+/// The seed runs the Rust verifier (`seed/src/engine/confine.rs`); this
+/// package calls `vesper/src/confine.ves`.
 pub fn verify_realtime(
     graph: &CallGraph,
     policy: &RealtimePolicy,
 ) -> Result<Vec<VerifierFinding>, GraphError> {
-    // Number the distinct effects; the port compares codes.
-    let mut effects: Vec<&Effect> = Vec::new();
-    fn intern<'a>(effects: &mut Vec<&'a Effect>, e: &'a Effect) -> u64 {
-        match effects.iter().position(|x| *x == e) {
-            Some(i) => i as u64,
-            None => {
-                effects.push(e);
-                (effects.len() - 1) as u64
+    #[cfg(vesper_port)]
+    {
+        // Number the distinct effects; the port compares codes.
+        let mut effects: Vec<&Effect> = Vec::new();
+        fn intern<'a>(effects: &mut Vec<&'a Effect>, e: &'a Effect) -> u64 {
+            match effects.iter().position(|x| *x == e) {
+                Some(i) => i as u64,
+                None => {
+                    effects.push(e);
+                    (effects.len() - 1) as u64
+                }
             }
         }
-    }
-    let mut fns = Vec::with_capacity(8 * graph.functions.len());
-    let mut pool = Vec::new();
-    for f in &graph.functions {
-        let (loops, bound) = match f.loops {
-            LoopBound::NoLoops => (0, 0),
-            LoopBound::Bounded(b) => (1, b),
-            LoopBound::Unbounded => (2, 0),
-        };
-        let eff_first = pool.len() as u64;
-        for e in &f.effects {
-            let c = intern(&mut effects, e);
-            pool.push(c);
+        let mut fns = Vec::with_capacity(8 * graph.functions.len());
+        let mut pool = Vec::new();
+        for f in &graph.functions {
+            let (loops, bound) = match f.loops {
+                LoopBound::NoLoops => (0, 0),
+                LoopBound::Bounded(b) => (1, b),
+                LoopBound::Unbounded => (2, 0),
+            };
+            let eff_first = pool.len() as u64;
+            for e in &f.effects {
+                let c = intern(&mut effects, e);
+                pool.push(c);
+            }
+            let site_first = pool.len() as u64;
+            for &(callee, inst) in &f.call_sites {
+                pool.extend_from_slice(&[u64::from(callee.0), u64::from(inst)]);
+            }
+            fns.extend_from_slice(&[
+                u64::from(f.known),
+                f.frame_bytes,
+                loops,
+                bound,
+                eff_first,
+                f.effects.len() as u64,
+                site_first,
+                f.call_sites.len() as u64,
+            ]);
         }
-        let site_first = pool.len() as u64;
-        for &(callee, inst) in &f.call_sites {
-            pool.extend_from_slice(&[u64::from(callee.0), u64::from(inst)]);
+        let calls: Vec<u64> = graph
+            .calls
+            .iter()
+            .flat_map(|&(a, b)| [u64::from(a.0), u64::from(b.0)])
+            .collect();
+        let indirect: Vec<u64> = graph
+            .indirect_calls
+            .iter()
+            .flat_map(|ic| [u64::from(ic.caller.0), u64::from(ic.site)])
+            .collect();
+        let mut entries = Vec::with_capacity(4 * policy.indirect_targets.len());
+        for (&(caller, site), targets) in &policy.indirect_targets {
+            entries.extend_from_slice(&[
+                u64::from(caller.0),
+                u64::from(site),
+                pool.len() as u64,
+                targets.len() as u64,
+            ]);
+            pool.extend(targets.iter().map(|t| u64::from(t.0)));
         }
-        fns.extend_from_slice(&[
-            u64::from(f.known),
-            f.frame_bytes,
-            loops,
-            bound,
-            eff_first,
-            f.effects.len() as u64,
-            site_first,
-            f.call_sites.len() as u64,
-        ]);
-    }
-    let calls: Vec<u64> = graph
-        .calls
-        .iter()
-        .flat_map(|&(a, b)| [u64::from(a.0), u64::from(b.0)])
-        .collect();
-    let indirect: Vec<u64> = graph
-        .indirect_calls
-        .iter()
-        .flat_map(|ic| [u64::from(ic.caller.0), u64::from(ic.site)])
-        .collect();
-    let mut entries = Vec::with_capacity(4 * policy.indirect_targets.len());
-    for (&(caller, site), targets) in &policy.indirect_targets {
-        entries.extend_from_slice(&[
-            u64::from(caller.0),
-            u64::from(site),
-            pool.len() as u64,
-            targets.len() as u64,
-        ]);
-        pool.extend(targets.iter().map(|t| u64::from(t.0)));
-    }
-    let roots: Vec<u64> = policy
-        .roots
-        .iter()
-        .flat_map(|r| {
-            [
-                u64::from(r.function.0),
-                u64::from(r.stack_budget_bytes.is_some()),
-                r.stack_budget_bytes.unwrap_or(0),
-            ]
-        })
-        .collect();
-    let allowed: Vec<u64> = policy
-        .allowed_effects
-        .iter()
-        .map(|e| intern(&mut effects, e))
-        .collect();
-    let w = crate::port::verify_realtime(
-        &fns,
-        &pool,
-        &calls,
-        &indirect,
-        &entries,
-        &roots,
-        &allowed,
-        policy.reject_unbounded_loops,
-        policy.max_loop_iterations.is_some(),
-        policy.max_loop_iterations.unwrap_or(0),
-    );
-    match w[0] {
-        0 => {}
-        1 => return Err(GraphError::UnknownFnId(FnId(w[1] as u32))),
-        2 => {
-            return Err(GraphError::UnknownIndirectSite {
-                caller: FnId(w[1] as u32),
-                site: w[2] as u32,
+        let roots: Vec<u64> = policy
+            .roots
+            .iter()
+            .flat_map(|r| {
+                [
+                    u64::from(r.function.0),
+                    u64::from(r.stack_budget_bytes.is_some()),
+                    r.stack_budget_bytes.unwrap_or(0),
+                ]
+            })
+            .collect();
+        let allowed: Vec<u64> = policy
+            .allowed_effects
+            .iter()
+            .map(|e| intern(&mut effects, e))
+            .collect();
+        let w = crate::port::verify_realtime(
+            &fns,
+            &pool,
+            &calls,
+            &indirect,
+            &entries,
+            &roots,
+            &allowed,
+            policy.reject_unbounded_loops,
+            policy.max_loop_iterations.is_some(),
+            policy.max_loop_iterations.unwrap_or(0),
+        );
+        match w[0] {
+            0 => {}
+            1 => return Err(GraphError::UnknownFnId(FnId(w[1] as u32))),
+            2 => {
+                return Err(GraphError::UnknownIndirectSite {
+                    caller: FnId(w[1] as u32),
+                    site: w[2] as u32,
+                });
+            }
+            status => {
+                panic!("the Vesper port of vesper-resonance returned verifier status {status}")
+            }
+        }
+        let name = |f: u64| graph.functions[f as usize].name.as_str();
+        let mut findings = Vec::with_capacity(w[1] as usize);
+        let mut k = 2;
+        for _ in 0..w[1] {
+            let f = &w[k..k + 8];
+            let path_len = f[7] as usize;
+            let path = w[k + 8..k + 8 + path_len]
+                .iter()
+                .map(|&p| name(p))
+                .collect::<Vec<_>>()
+                .join(" -> ");
+            k += 8 + path_len;
+            let (rule, what) = match f[3] {
+                0 => (
+                    rules::FORBIDDEN_EFFECT,
+                    format!(
+                        "forbidden effect `{}` in `{}`",
+                        effects[f[5] as usize],
+                        name(f[4])
+                    ),
+                ),
+                1 => (
+                    rules::UNKNOWN_CALLEE,
+                    format!("unknown callee `{}` with no effect declaration", name(f[4])),
+                ),
+                2 => (
+                    rules::UNRESOLVED_INDIRECT,
+                    format!(
+                        "indirect call site {} in `{}` with no policy-listed targets",
+                        f[5],
+                        name(f[4])
+                    ),
+                ),
+                3 => (
+                    rules::UNBOUNDED_LOOP,
+                    format!("a loop with no known bound in `{}`", name(f[4])),
+                ),
+                4 => (
+                    rules::LOOP_BOUND,
+                    format!(
+                        "a loop bounded by {} > policy maximum {} in `{}`",
+                        f[5],
+                        f[6],
+                        name(f[4])
+                    ),
+                ),
+                5 => (
+                    rules::RECURSION,
+                    format!("recursion through `{}` (unbounded stack depth)", name(f[4])),
+                ),
+                6 => (
+                    rules::STACK_BUDGET,
+                    format!("worst-case stack depth {} bytes over budget {}", f[5], f[6]),
+                ),
+                7 => (
+                    rules::STACK_BUDGET,
+                    "a worst-case stack depth that overflows u64".to_string(),
+                ),
+                rule => panic!("the Vesper port of vesper-resonance returned rule {rule}"),
+            };
+            let root_name = name(f[0]);
+            findings.push(VerifierFinding {
+                function: root_name.to_string(),
+                inst: (f[1] == 1).then_some(f[2] as u32),
+                rule,
+                message: format!("@realtime root `{root_name}` reaches {what} via {path}"),
             });
         }
-        status => panic!("the Vesper port of vesper-resonance returned verifier status {status}"),
+        Ok(findings)
     }
-    let name = |f: u64| graph.functions[f as usize].name.as_str();
-    let mut findings = Vec::with_capacity(w[1] as usize);
-    let mut k = 2;
-    for _ in 0..w[1] {
-        let f = &w[k..k + 8];
-        let path_len = f[7] as usize;
-        let path = w[k + 8..k + 8 + path_len]
-            .iter()
-            .map(|&p| name(p))
-            .collect::<Vec<_>>()
-            .join(" -> ");
-        k += 8 + path_len;
-        let (rule, what) = match f[3] {
-            0 => (
-                rules::FORBIDDEN_EFFECT,
-                format!(
-                    "forbidden effect `{}` in `{}`",
-                    effects[f[5] as usize],
-                    name(f[4])
-                ),
-            ),
-            1 => (
-                rules::UNKNOWN_CALLEE,
-                format!("unknown callee `{}` with no effect declaration", name(f[4])),
-            ),
-            2 => (
-                rules::UNRESOLVED_INDIRECT,
-                format!(
-                    "indirect call site {} in `{}` with no policy-listed targets",
-                    f[5],
-                    name(f[4])
-                ),
-            ),
-            3 => (
-                rules::UNBOUNDED_LOOP,
-                format!("a loop with no known bound in `{}`", name(f[4])),
-            ),
-            4 => (
-                rules::LOOP_BOUND,
-                format!(
-                    "a loop bounded by {} > policy maximum {} in `{}`",
-                    f[5],
-                    f[6],
-                    name(f[4])
-                ),
-            ),
-            5 => (
-                rules::RECURSION,
-                format!("recursion through `{}` (unbounded stack depth)", name(f[4])),
-            ),
-            6 => (
-                rules::STACK_BUDGET,
-                format!("worst-case stack depth {} bytes over budget {}", f[5], f[6]),
-            ),
-            7 => (
-                rules::STACK_BUDGET,
-                "a worst-case stack depth that overflows u64".to_string(),
-            ),
-            rule => panic!("the Vesper port of vesper-resonance returned rule {rule}"),
-        };
-        let root_name = name(f[0]);
-        findings.push(VerifierFinding {
-            function: root_name.to_string(),
-            inst: (f[1] == 1).then_some(f[2] as u32),
-            rule,
-            message: format!("@realtime root `{root_name}` reaches {what} via {path}"),
-        });
-    }
-    Ok(findings)
-}
-
-/// Verify every realtime root of `policy` against `graph`.
-///
-/// Returns one finding per (root, reachable violation). An empty vector means
-/// every root is confined. Malformed graphs are an error, never success.
-#[cfg(not(vesper_port))]
-pub fn verify_realtime(
-    graph: &CallGraph,
-    policy: &RealtimePolicy,
-) -> Result<Vec<VerifierFinding>, GraphError> {
-    let adj = adjacency(graph, policy)?;
-    let mut findings = Vec::new();
-    for root in &policy.roots {
-        verify_root(graph, policy, &adj, root, &mut findings);
-    }
-    Ok(findings)
-}
-
-#[cfg(not(vesper_port))]
-fn verify_root(
-    graph: &CallGraph,
-    policy: &RealtimePolicy,
-    adj: &Adjacency,
-    root: &RealtimeRoot,
-    findings: &mut Vec<VerifierFinding>,
-) {
-    let n = graph.functions.len();
-    // BFS for shortest call paths; `parent[v] = (u, inst of call u->v)`.
-    let mut parent: Vec<Option<(FnId, Option<u32>)>> = vec![None; n];
-    let mut seen = vec![false; n];
-    let mut order = Vec::new();
-    let mut queue = VecDeque::new();
-    seen[root.function.0 as usize] = true;
-    queue.push_back(root.function);
-    while let Some(u) = queue.pop_front() {
-        order.push(u);
-        for &(v, inst) in &adj.succ[u.0 as usize] {
-            if !seen[v.0 as usize] {
-                seen[v.0 as usize] = true;
-                parent[v.0 as usize] = Some((u, inst));
-                queue.push_back(v);
-            }
-        }
-    }
-    let root_name = &graph.node(root.function).name;
-    let path_to = |v: FnId| -> (String, Option<u32>) {
-        let mut names = vec![graph.node(v).name.as_str()];
-        let mut cur = v;
-        let mut first_inst = None;
-        while let Some((p, inst)) = parent[cur.0 as usize] {
-            names.push(graph.node(p).name.as_str());
-            if p == root.function {
-                first_inst = inst;
-            }
-            cur = p;
-        }
-        names.reverse();
-        (names.join(" -> "), first_inst)
-    };
-    // Findings name the rejected root; `inst` is the root's call instruction
-    // that starts the offending path (None for the root's own body).
-    let push = |findings: &mut Vec<VerifierFinding>, v: FnId, rule, what: String| {
-        let (path, root_inst) = path_to(v);
-        findings.push(VerifierFinding {
-            function: root_name.clone(),
-            inst: root_inst,
-            rule,
-            message: format!("@realtime root `{root_name}` reaches {what} via {path}"),
-        });
-    };
-
-    for &v in &order {
-        let node = graph.node(v);
-        if !node.known {
-            push(
-                findings,
-                v,
-                rules::UNKNOWN_CALLEE,
-                format!("unknown callee `{}` with no effect declaration", node.name),
-            );
-            continue;
-        }
-        let mut reported = BTreeSet::new();
-        for eff in &node.effects {
-            if !policy.allowed_effects.contains(eff) && reported.insert(eff) {
-                push(
-                    findings,
-                    v,
-                    rules::FORBIDDEN_EFFECT,
-                    format!("forbidden effect `{eff}` in `{}`", node.name),
-                );
-            }
-        }
-        for &site in &adj.unresolved[v.0 as usize] {
-            push(
-                findings,
-                v,
-                rules::UNRESOLVED_INDIRECT,
-                format!(
-                    "indirect call site {site} in `{}` with no policy-listed targets",
-                    node.name
-                ),
-            );
-        }
-        match node.loops {
-            LoopBound::NoLoops => {}
-            LoopBound::Unbounded if policy.reject_unbounded_loops => push(
-                findings,
-                v,
-                rules::UNBOUNDED_LOOP,
-                format!("a loop with no known bound in `{}`", node.name),
-            ),
-            LoopBound::Unbounded => {}
-            LoopBound::Bounded(b) => {
-                if let Some(max) = policy.max_loop_iterations
-                    && b > max
-                {
-                    push(
-                        findings,
-                        v,
-                        rules::LOOP_BOUND,
-                        format!(
-                            "a loop bounded by {b} > policy maximum {max} in `{}`",
-                            node.name
-                        ),
-                    );
-                }
-            }
-        }
-    }
-
-    // Worst-case stack depth over the reachable subgraph (iterative DFS,
-    // recursion detection, checked sums).
-    match worst_case_stack(graph, adj, root.function, &seen) {
-        Ok(depth) => {
-            if let Some(budget) = root.stack_budget_bytes
-                && depth > budget
-            {
-                push(
-                    findings,
-                    root.function,
-                    rules::STACK_BUDGET,
-                    format!("worst-case stack depth {depth} bytes over budget {budget}"),
-                );
-            }
-        }
-        Err(StackError::Recursion(v)) => push(
-            findings,
-            v,
-            rules::RECURSION,
-            format!(
-                "recursion through `{}` (unbounded stack depth)",
-                graph.node(v).name
-            ),
-        ),
-        Err(StackError::Overflow) => push(
-            findings,
-            root.function,
-            rules::STACK_BUDGET,
-            "a worst-case stack depth that overflows u64".to_string(),
-        ),
-    }
-}
-
-#[cfg(not(vesper_port))]
-enum StackError {
-    Recursion(FnId),
-    Overflow,
-}
-
-/// Longest frame-byte path from `root` (inclusive), or the recursion found.
-#[cfg(not(vesper_port))]
-fn worst_case_stack(
-    graph: &CallGraph,
-    adj: &Adjacency,
-    root: FnId,
-    reachable: &[bool],
-) -> Result<u64, StackError> {
-    const WHITE: u8 = 0;
-    const GREY: u8 = 1;
-    const BLACK: u8 = 2;
-    let n = graph.functions.len();
-    let mut color = vec![WHITE; n];
-    let mut depth = vec![0u64; n];
-    // Stack of (node, next successor index).
-    let mut stack: Vec<(FnId, usize)> = vec![(root, 0)];
-    color[root.0 as usize] = GREY;
-    while let Some(&mut (u, ref mut next)) = stack.last_mut() {
-        let succ = &adj.succ[u.0 as usize];
-        if *next < succ.len() {
-            let (v, _) = succ[*next];
-            *next += 1;
-            debug_assert!(reachable[v.0 as usize]);
-            match color[v.0 as usize] {
-                WHITE => {
-                    color[v.0 as usize] = GREY;
-                    stack.push((v, 0));
-                }
-                GREY => return Err(StackError::Recursion(v)),
-                _ => {}
-            }
-        } else {
-            let deepest_callee = succ
-                .iter()
-                .map(|&(v, _)| depth[v.0 as usize])
-                .max()
-                .unwrap_or(0);
-            depth[u.0 as usize] = graph
-                .node(u)
-                .frame_bytes
-                .checked_add(deepest_callee)
-                .ok_or(StackError::Overflow)?;
-            color[u.0 as usize] = BLACK;
-            stack.pop();
-        }
-    }
-    Ok(depth[root.0 as usize])
+    #[cfg(not(vesper_port))]
+    crate::engine::confine::verify_realtime(graph, policy)
 }

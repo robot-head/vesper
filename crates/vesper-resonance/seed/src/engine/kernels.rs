@@ -1,8 +1,9 @@
 //! The frozen Rust SVF bank render loops (`SvfBank::render` and
-//! `SvfBank::render_reference`), which the Vesper port (vesper/src/kernels.ves)
-//! replaced in the package vesper-resonance (SH6 lane 9, #1404).
+//! `SvfBank::render_reference`) and `PidController`, which the Vesper port
+//! (`vesper/src/kernels.ves`) replaced in the package `vesper-resonance`
+//! (SH6 lane 9, #1404).
 
-use crate::kernels::{LANES, SvfBank, param};
+use crate::kernels::{LANES, PidController, PidFault, PidGains, SvfBank, param};
 use crate::simd::{ramp_tick, svf_tick};
 
 /// Render frames `[start, end)` of `input` into `left`/`right` with the
@@ -70,4 +71,53 @@ pub(crate) fn render_reference(
         left[i] = l;
         right[i] = r;
     }
+}
+
+pub(crate) fn pid_new(gains: PidGains) -> Result<PidController, PidFault> {
+    let all = [
+        gains.kp,
+        gains.ki,
+        gains.kd,
+        gains.dt,
+        gains.torque_limit,
+        gains.integral_limit,
+    ];
+    if all.iter().any(|g| !g.is_finite() || *g < 0.0) || gains.dt <= 0.0 {
+        return Err(PidFault::BadGains);
+    }
+    Ok(PidController {
+        gains,
+        integral: 0.0,
+        prev_measurement: None,
+    })
+}
+
+pub(crate) fn pid_step(
+    me: &mut PidController,
+    setpoint: f32,
+    measurement: f32,
+) -> Result<f32, PidFault> {
+    if !setpoint.is_finite() || !measurement.is_finite() {
+        return Err(PidFault::NonFiniteInput);
+    }
+    let g = me.gains;
+    // Compute every intermediate first; commit state only if all are
+    // finite, so an overflow (e.g. `f32::MAX - -f32::MAX`) is a fault and
+    // never poisons the integrator or yields an unclamped NaN torque.
+    let error = setpoint - measurement;
+    let integral = (me.integral + g.ki * error * g.dt).clamp(-g.integral_limit, g.integral_limit);
+    let derivative = match me.prev_measurement {
+        Some(prev) => -(measurement - prev) / g.dt,
+        None => 0.0,
+    };
+    let u = g.kp * error + integral + g.kd * derivative;
+    if ![error, integral, derivative, u]
+        .iter()
+        .all(|x| x.is_finite())
+    {
+        return Err(PidFault::NonFiniteIntermediate);
+    }
+    me.integral = integral;
+    me.prev_measurement = Some(measurement);
+    Ok(u.clamp(-g.torque_limit, g.torque_limit))
 }
