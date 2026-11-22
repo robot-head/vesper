@@ -63,7 +63,6 @@ use vesper_loom_calculus::{Manifest, PackageName, Solution, validate_solution};
 /// A word-at-a-time multiplicative hasher (FxHash's mixing) for the string
 /// interner: every string occurrence of the input is hashed, where SipHash
 /// cost about a twentieth of the call.
-
 #[derive(Default)]
 struct Fx(u64);
 
