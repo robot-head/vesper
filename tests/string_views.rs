@@ -212,9 +212,9 @@ fn views_of_changing_or_moved_sources_are_refused() {
             "while the view 'v'",
         ),
         (
-            "fn f() -> u64 { let mut s = String::new(); let v = s.as_bytes(); v.len() }",
+            "fn f() -> u64 { let mut s = String::new(); let v = s.as_bytes(); s.push_str(\"x\"); v.len() }",
             "E1531",
-            "second-class",
+            "while the view 'v'",
         ),
         (
             "fn f() -> u64 { let s = String::new(); let v = s.as_bytes(); s.push_str(\"x\"); v.len() }",

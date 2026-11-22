@@ -384,6 +384,26 @@ fn foreign_memory_never_moves_while_c_may_hold_it() {
         }}"
     );
     ffi_lowering::check_source(&ok, &imports(LINUX)).unwrap_or_else(|e| panic!("{e}"));
+    // A bound view of a `let mut` owner or an `inout` parameter is
+    // accepted; the owner is written and released after the view's block.
+    let ok = format!(
+        "{PRELUDE}
+        fn g(inout r: Ring) -> u64 {{
+            let v = r.data.as_slice();
+            v.len()
+        }}
+        pub fn f() -> u64 {{
+            let mut u = umem();
+            let n = {{
+                let v = u.data.as_slice();
+                v.len()
+            }};
+            u.data.try_write_u32_le(0, 1);
+            release(u);
+            n
+        }}"
+    );
+    ffi_lowering::check_source(&ok, &imports(LINUX)).unwrap_or_else(|e| panic!("{e}"));
 }
 
 #[test]
@@ -428,9 +448,21 @@ fn mappings_and_pinned_buffers_are_linear_and_views_cannot_escape() {
                 .to_owned(),
             "E1520",
         ),
-        // A view of a mapping the function may write is refused.
+        // A bound view of a `let mut` mapping freezes it while in scope:
+        // no release and no write through it.
         (
             format!("pub fn f() -> u64 eff [Ffi[Xsk]] {{ {socket} let mut r = {ring}; let v = r.data.as_slice(); let n = v.len(); Xsk::xsk_ring_unmap(r); Xsk::xsk_socket_free(s); release(u); n }}"),
+            "E1531",
+        ),
+        (
+            "pub fn f() -> u64 { let mut u = umem(); let v = u.data.as_slice(); u.data.try_write_u32_le(0, 1); let n = v.len(); release(u); n }"
+                .to_owned(),
+            "E1531",
+        ),
+        // A mutable binding of a view stays refused.
+        (
+            "pub fn f() -> u64 { let u = umem(); let mut v = u.data.as_slice(); let n = v.len(); release(u); n }"
+                .to_owned(),
             "E1521",
         ),
         // A live mapping may not cross an abortable effect.
