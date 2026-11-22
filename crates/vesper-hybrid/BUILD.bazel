@@ -24,6 +24,15 @@ vesper_hybrid(
                 "    ir_check_part(inout s.c, in part)\n": "    divergent_words(in part)\n",
             },
         },
+        # SH5 lane 10 (#1333): the shared-world module gets both
+        # divergences (the bzl applies every edit in the divergent build).
+        "hybrid_checks": {
+            "edit_src": "modules/checks/src/lib.ves",
+            "edits": {
+                "        self.body.push(w(n.size));\n": "        self.body.push(inc(w(n.size)));\n",
+                "    ir_check_task(inout r, in part, inout s.c)\n": "    divergent_words(in part)\n",
+            },
+        },
         "hybrid_stack_bound": {
             "edit_src": "modules/stack_bound/src/lib.ves",
             "edits": {"    stack_bound_words(in input)\n": "    divergent_words(in input)\n"},
@@ -58,6 +67,11 @@ vesper_hybrid(
         "hybrid_check_layout": [
             "//:check_data_package",
             "//:check_layout_package",
+        ],
+        "hybrid_checks": [
+            "//:check_data_package",
+            "//:check_layout_package",
+            "//:ir_check_package",
         ],
         # The codegen swap (#1275) emits through the Cranelift shim.
         "hybrid_codegen": [
@@ -114,6 +128,7 @@ vesper_hybrid(
     },
     modules = {
         "hybrid_check_layout": "modules/check_layout",
+        "hybrid_checks": "modules/checks",
         "hybrid_codegen": "modules/codegen",
         "hybrid_codegen_export": "modules/codegen_export",
         "hybrid_ir_check": "modules/ir_check",
@@ -194,5 +209,7 @@ vesper_hybrid(
         ],
         # SH4 lane 2 (#1276): the hybrid's own cost report.
         "test/swap_inputs": [":bin/vesper-hybrid"],
+        # SH5 lane 10 (#1333): the shared-world cost report.
+        "test/swap_crossing": [":bin/vesper-hybrid"],
     },
 )

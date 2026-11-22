@@ -32,7 +32,9 @@ jobs:
         with:
           key: website-chroma
       - name: Build Vesper for highlighting and diagnostics
-        run: cargo build --locked --bin vesper
+        # `vesper highlight` runs the `vesper-highlight` tool beside `vesper`
+        # (crates/vesper-tools, SH6 lane 3, #1398).
+        run: cargo build --locked -p vesper -p vesper-tools --bin vesper --bin vesper-highlight
         env:
           CARGO_PROFILE_DEV_DEBUG: '0'
           CARGO_INCREMENTAL: '0'

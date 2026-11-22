@@ -21,6 +21,9 @@ const MODULES: &[(&str, &str, &str)] = &[
         "port/check_layout.rs",
     ),
     ("hybrid_ir_check", "modules/ir_check", "port/ir_check.rs"),
+    // SH5 lane 10 (#1333): both checker swaps in one library over one
+    // shared world, with word answers.
+    ("hybrid_checks", "modules/checks", "port/checks.rs"),
     // SH2 lane 10 (#1182): the stack-bound report.
     (
         "hybrid_stack_bound",
@@ -81,6 +84,14 @@ const DIVERGENT_SCOPED_LAYOUT_EDIT: (&str, &str) = (
     "    layout_part(inout s.c, in part[0..0])\n",
 );
 
+/// The same divergence on the shared-world path (#1333): every layout
+/// answer is one byte larger than the layout.
+#[cfg(feature = "divergent")]
+const DIVERGENT_SHARED_LAYOUT_EDIT: (&str, &str) = (
+    "        self.body.push(w(n.size));\n",
+    "        self.body.push(inc(w(n.size)));\n",
+);
+
 /// The IR check's divergence check: every program gets one made-up E0410
 /// (`divergent_words` in modules/ir_check), so every checked file fails.
 #[cfg(feature = "divergent-ir-check")]
@@ -101,6 +112,13 @@ const DIVERGENT_STACK_BOUND_EDIT: (&str, &str) = (
 #[cfg(feature = "divergent-ir-check")]
 const DIVERGENT_SCOPED_IR_CHECK_EDIT: (&str, &str) = (
     "    ir_check_part(inout s.c, in part)\n",
+    "    divergent_words(in part)\n",
+);
+
+/// The same on the shared-world path (#1333).
+#[cfg(feature = "divergent-ir-check")]
+const DIVERGENT_SHARED_IR_CHECK_EDIT: (&str, &str) = (
+    "    ir_check_task(inout r, in part, inout s.c)\n",
     "    divergent_words(in part)\n",
 );
 
@@ -174,6 +192,24 @@ fn main() {
                     DIVERGENT_SCOPED_IR_CHECK_EDIT.0,
                     DIVERGENT_SCOPED_IR_CHECK_EDIT.1,
                 )
+        } else {
+            port
+        };
+        #[cfg(feature = "divergent")]
+        let port = if *library == "hybrid_checks" {
+            port.edit(
+                DIVERGENT_SHARED_LAYOUT_EDIT.0,
+                DIVERGENT_SHARED_LAYOUT_EDIT.1,
+            )
+        } else {
+            port
+        };
+        #[cfg(feature = "divergent-ir-check")]
+        let port = if *library == "hybrid_checks" {
+            port.edit(
+                DIVERGENT_SHARED_IR_CHECK_EDIT.0,
+                DIVERGENT_SHARED_IR_CHECK_EDIT.1,
+            )
         } else {
             port
         };

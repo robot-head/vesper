@@ -9,23 +9,7 @@ use crate::target::Target;
 pub(crate) mod abi {
     pub use crate::router::RouterLimits;
 
-    /// Trie arena records (`RouterCore::nodes`, `edges`, `terms`).
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub struct Node {
-        pub first_static: u64,
-        pub param_child: u64,
-        pub param_lo: u64,
-        pub param_hi: u64,
-        pub terms: u64,
-        pub terms_slash: u64,
-    }
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub struct Edge {
-        pub next: u64,
-        pub child: u64,
-        pub key_lo: u64,
-        pub key_hi: u64,
-    }
+    /// Terminal records (`RouterCore::terms`).
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct Term {
         pub next: u64,
@@ -63,6 +47,12 @@ pub(crate) mod abi {
 mod binding;
 
 use abi::RouteFault;
+
+thread_local! {
+    /// `Router::resolve`'s segment buffer and end offsets.
+    static SCRATCH: std::cell::RefCell<(Vec<u8>, Vec<u64>)> =
+        const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
+}
 
 /// What `Resolved::kind` means (see the `vesper/router` package).
 const MATCHED: u64 = 0;
@@ -129,23 +119,29 @@ impl<T> Router<T> {
         method: &str,
         target: &'a Target,
     ) -> Result<Resolution<'a, T>, RouteError> {
-        let (mut bytes, mut ends, mut trailing) = (Vec::new(), Vec::new(), false);
-        if let Target::Origin(origin) = target {
-            for segment in &origin.segments {
-                bytes.extend_from_slice(segment.as_bytes());
-                ends.push(bytes.len() as u64);
-            }
-            trailing = origin.trailing_slash;
-        }
-        let resolved = self
-            .core
-            .resolve(
-                method.as_bytes(),
-                matches!(target, Target::Asterisk),
-                &bytes,
-                &ends,
-                trailing,
-            )
+        // The segments go to Vesper as one byte buffer and their end
+        // offsets, kept per thread so a resolve allocates neither.
+        let resolved = SCRATCH
+            .with(|scratch| {
+                let (bytes, ends) = &mut *scratch.borrow_mut();
+                bytes.clear();
+                ends.clear();
+                let mut trailing = false;
+                if let Target::Origin(origin) = target {
+                    for segment in &origin.segments {
+                        bytes.extend_from_slice(segment.as_bytes());
+                        ends.push(bytes.len() as u64);
+                    }
+                    trailing = origin.trailing_slash;
+                }
+                self.core.resolve(
+                    method.as_bytes(),
+                    matches!(target, Target::Asterisk),
+                    bytes,
+                    ends,
+                    trailing,
+                )
+            })
             .map_err(|fault| route_error(fault, &[], ""))?;
         let view = resolved.as_ref();
         Ok(match (view.kind(), target) {

@@ -32,6 +32,10 @@ name = "vesper-grammar"
 path = "src/bin/vesper-grammar.rs"
 
 [[bin]]
+name = "vesper-highlight"
+path = "src/bin/vesper-highlight.rs"
+
+[[bin]]
 name = "vesper-json"
 path = "src/bin/vesper-json.rs"
 
@@ -62,6 +66,10 @@ path = "src/bin/vesper-sbom.rs"
 [[bin]]
 name = "vesper-semver"
 path = "src/bin/vesper-semver.rs"
+
+[[bin]]
+name = "vesper-shot"
+path = "src/bin/vesper-shot.rs"
 
 [[bin]]
 name = "vesper-simd"
@@ -111,6 +119,8 @@ vesper-crucible = { path = "../vesper-crucible/seed", package = "vesper-crucible
 # Only the tools link these (SH6 lane 3, #1398): they left the compiler's
 # closure, so their Rust can flip before Stage 2.
 vesper-simd = { path = "../vesper-simd" }
+vesper-highlight = { path = "../vesper-highlight/seed", package = "vesper-highlight-seed", features = ["shot"] }
+vesper-span = { path = "../vesper-span/seed", package = "vesper-span-seed" }
 vesper-migrate = { path = "../vesper-migrate" }
 vesper-loom-trust = { path = "../vesper-loom-trust" }
 vesper-loom-admission = { path = "../vesper-loom-admission" }

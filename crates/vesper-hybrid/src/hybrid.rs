@@ -33,6 +33,11 @@ mod ir_check_binding;
 
 #[rustfmt::skip]
 #[allow(clippy::all)]
+#[path = "../port/checks.rs"]
+mod checks_binding;
+
+#[rustfmt::skip]
+#[allow(clippy::all)]
 #[path = "../port/stack_bound.rs"]
 mod stack_bound_binding;
 
@@ -73,6 +78,10 @@ mod bounds_hoist_binding;
 
 #[path = "parse_words.rs"]
 mod parse_words;
+
+// One shared world and word answers for the checker swaps (SH5 lane 10).
+#[path = "crossing.rs"]
+mod crossing;
 
 // The export glue's interface encoder (#1286), shared with the root
 // package's tests/self_host_codegen_export.rs.
@@ -207,6 +216,45 @@ struct Inputs {
     /// type: `Layout::of` depends only on the world and the type, so a
     /// repeated type reuses the answer instead of crossing again.
     layouts: LayoutMemo,
+    /// The one world both swaps share (SH5 lane 10, #1333): `modules/checks`
+    /// holds the layout and the IR check in one Vesper library.
+    shared: SharedState,
+}
+
+/// The shared input of one compilation, opened on first use.
+enum SharedState {
+    /// Not opened yet, or off (`VESPER_HYBRID_SHARED=0`).
+    Unopened,
+    Open(Box<crossing::Shared>),
+    /// An ADT cannot be encoded: each swap keeps its own input, as before.
+    Refused,
+}
+
+/// Whether the swaps share one world (on unless `VESPER_HYBRID_SHARED=0`,
+/// the before side of the SH5 lane 10 measurement).
+fn shared_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| !std::env::var_os("VESPER_HYBRID_SHARED").is_some_and(|v| v == "0"))
+}
+
+impl Inputs {
+    /// The shared input, opened the first time; `None` when it is off or
+    /// refused.
+    fn shared(&mut self, world: &vesper::check::World) -> Option<&mut crossing::Shared> {
+        if !shared_on() {
+            return None;
+        }
+        if matches!(self.shared, SharedState::Unopened) {
+            self.shared = match crossing::Shared::open(&mut self.log, world) {
+                Some(s) => SharedState::Open(Box::new(s)),
+                None => SharedState::Refused,
+            };
+        }
+        match &mut self.shared {
+            SharedState::Open(s) => Some(s),
+            _ => None,
+        }
+    }
 }
 
 type LayoutMemo = std::collections::HashMap<
@@ -222,6 +270,7 @@ impl Inputs {
             layout: None,
             ir: None,
             layouts: LayoutMemo::default(),
+            shared: SharedState::Unopened,
         }
     }
 }
@@ -246,6 +295,29 @@ const VESPER_LAYOUT: vesper::layout::LayoutTable = vesper::layout::LayoutTable {
                 {
                     timer.lap(&stats::LAYOUT.encode);
                     return Some((layout.clone(), true));
+                }
+                if inputs.shared(world).is_some() {
+                    let Inputs {
+                        log,
+                        shared: SharedState::Open(sh),
+                        ..
+                    } = inputs
+                    else {
+                        unreachable!("opened above")
+                    };
+                    let part = log.layout_part(world, &mut sh.cur, ty)?;
+                    let timer = timer.lap(&stats::LAYOUT.encode);
+                    sh.checks.layout_of(&part);
+                    let timer = timer.lap(&stats::LAYOUT.vesper);
+                    stats::LAYOUT.shared.fetch_add(1, Relaxed);
+                    let layout = crossing::decode_layout(sh.checks.as_ref().out(), log);
+                    timer.lap(&stats::LAYOUT.decode);
+                    inputs
+                        .layouts
+                        .entry(key)
+                        .or_default()
+                        .push((ty.clone(), layout.clone()));
+                    return Some((layout, false));
                 }
                 let (cur, input) = inputs.layout.get_or_insert_with(|| {
                     (
@@ -307,6 +379,21 @@ const VESPER_IR_CHECK: vesper::ir_check::IrCheckTable = vesper::ir_check::IrChec
             world,
             || Inputs::new(world),
             |inputs| {
+                if inputs.shared(world).is_some() {
+                    let Inputs {
+                        log,
+                        shared: SharedState::Open(sh),
+                        ..
+                    } = inputs
+                    else {
+                        unreachable!("opened above")
+                    };
+                    let part = log.ir_part(world, &mut sh.cur, program)?;
+                    let timer = timer.lap(&stats::IR_CHECK.encode);
+                    let words = sh.checks.validate(&part);
+                    stats::IR_CHECK.shared.fetch_add(1, Relaxed);
+                    return Some((timer.lap(&stats::IR_CHECK.vesper), words));
+                }
                 let (cur, input) = inputs.ir.get_or_insert_with(|| {
                     (
                         check_words::Cursor::default(),
@@ -388,6 +475,8 @@ mod stats {
         pub calls: AtomicU64,
         pub scoped: AtomicU64,
         pub reused: AtomicU64,
+        /// Calls that crossed into the shared world (SH5 lane 10).
+        pub shared: AtomicU64,
         pub encode: AtomicU64,
         pub vesper: AtomicU64,
         pub decode: AtomicU64,
@@ -402,6 +491,7 @@ mod stats {
                 calls: AtomicU64::new(0),
                 scoped: AtomicU64::new(0),
                 reused: AtomicU64::new(0),
+                shared: AtomicU64::new(0),
                 encode: AtomicU64::new(0),
                 vesper: AtomicU64::new(0),
                 decode: AtomicU64::new(0),
@@ -436,7 +526,8 @@ mod stats {
             let ms = |a: &AtomicU64| a.load(Relaxed) as f64 / 1e6;
             eprintln!(
                 "vesper-hybrid: cost {}: {} calls ({} in a compilation scope), encode {:.3} ms, \
-                 vesper {:.3} ms, decode {:.3} ms, rust {:.3} ms, {} differ, {} reused",
+                 vesper {:.3} ms, decode {:.3} ms, rust {:.3} ms, {} differ, {} reused, \
+                 {} shared",
                 self.name,
                 self.calls.load(Relaxed),
                 self.scoped.load(Relaxed),
@@ -446,6 +537,7 @@ mod stats {
                 ms(&self.rust),
                 self.differ.load(Relaxed),
                 self.reused.load(Relaxed),
+                self.shared.load(Relaxed),
             );
         }
     }
