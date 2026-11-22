@@ -284,6 +284,7 @@ fn main() -> u64 eff [Ffi[StdFs]] {
     acc = mix(acc, dir("d2/x/y", true));
     acc = mix(acc, dir("d2/x/y", true));
     acc = mix(acc, put("d1/f.txt", 1, "0123456789".as_bytes()));
+    acc = mix(acc, dir("d1/f.txt", true));
     acc = mix(acc, put("d1/a-much-longer-file-name.txt", 1, "z".as_bytes()));
     acc = mix(acc, meta("d1/f.txt", true));
     acc = mix(acc, meta("d1", false));
@@ -381,6 +382,11 @@ fn relative_paths_use_the_dot_preopen() {
         Option::Some(f) => { StdFs::vstd_fs_close(f); },
         Option::None => {},
     }
+    acc = mix(acc, err);
+    match StdFs::vstd_fs_open(in "".as_bytes(), 0, inout err) {
+        Option::Some(f) => { StdFs::vstd_fs_close(f); },
+        Option::None => {},
+    }
     mix(acc, err)
 }"#
     );
@@ -400,7 +406,7 @@ fn relative_paths_use_the_dot_preopen() {
     };
     let put = mix(0, 0);
     let get = mix(mix(mix(mix(8, 8), sum(b"relative")), 0), 0);
-    let want = mix(mix(mix(0, put), get), 1 | (2 << 32));
+    let want = mix(mix(mix(mix(0, put), get), 1 | (2 << 32)), 1 | (2 << 32));
     assert_eq!(got, want);
     let _ = std::fs::remove_dir_all(&dir);
 }

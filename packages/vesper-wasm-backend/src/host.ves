@@ -1014,6 +1014,12 @@ fn emit_resolve(inout a: A, in h: Host, pre: u32) {
     a.op(OP_DROP);
     a.view_addr(0, pa);
     a.view_len(0, pn);
+    // An empty path names nothing (ENOENT, as natively).
+    a.get(pn);
+    a.op(OP_I64_EQZ);
+    a.open(OP_IF);
+    a.retk(-1);
+    a.end();
     // NUL check
     a.setk(i, 0);
     a.open(OP_BLOCK);
@@ -2061,6 +2067,7 @@ fn emit_fs(inout b: Builder, inout h: Host, inout a: A, k: u64) eff [Fail[WErr]]
         a.call(h.i_write);
         failed(inout a, in h);
         a.open(OP_IF);
+        keep_pos(inout a, off, done);
         put_wasi_err(inout b, inout h, inout a, 2, add(h.scr, 8));
         a.retk(1);
         a.end();
@@ -2069,6 +2076,7 @@ fn emit_fs(inout b: Builder, inout h: Host, inout a: A, k: u64) eff [Fail[WErr]]
         a.get(n);
         a.op(OP_I64_EQZ);
         a.open(OP_IF);
+        keep_pos(inout a, off, done);
         put_errk(inout a, 2, 10);
         a.retk(1);
         a.end();
@@ -2224,6 +2232,16 @@ fn emit_fs(inout b: Builder, inout h: Host, inout a: A, k: u64) eff [Fail[WErr]]
 // `create_dir(path, true, err)`: create each prefix ending before a `/`
 // and the whole path, accepting `exist` (create_dir_all). Returns from
 // the shim.
+// The file slot's position after a write that stopped early: the bytes
+// already written still move it, as natively.
+fn keep_pos(inout a: A, off: u32, done: u32) {
+    a.st_begin(0);
+    a.get(off);
+    a.get(done);
+    a.op(OP_I64_ADD);
+    a.st_end(8);
+}
+
 fn create_dir_all(inout b: Builder, inout h: Host, inout a: A) eff [Fail[WErr]] {
     let desc = a.loc();
     let ra = a.loc();
@@ -2267,6 +2285,31 @@ fn create_dir_all(inout b: Builder, inout h: Host, inout a: A) eff [Fail[WErr]] 
     a.open(OP_IF);
     put_wasi_err(inout b, inout h, inout a, 2, add(h.scr, 1));
     a.retk(1);
+    a.end();
+    // The whole path exists: fine only when it is a directory.
+    a.get(j);
+    a.get(rn);
+    a.op(OP_I64_EQ);
+    a.open(OP_IF);
+    a.w32(desc);
+    a.c.i32_const(1);
+    a.w32(ra);
+    a.w32(rn);
+    a.i32k(h.scr);
+    a.call(h.i_stat_at);
+    failed(inout a, in h);
+    a.open(OP_IF);
+    put_wasi_err(inout b, inout h, inout a, 2, add(h.scr, 8));
+    a.retk(1);
+    a.end();
+    a.lda(add(h.scr, 8), OP_I64_LOAD8_U);
+    a.k(3);
+    a.op(OP_I64_NE);
+    a.open(OP_IF);
+    // AlreadyExists | EEXIST << 32
+    put_errk(inout a, 2, 73014444035);
+    a.retk(1);
+    a.end();
     a.end();
     a.end();
     a.end();
