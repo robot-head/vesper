@@ -44,4 +44,18 @@ const DIVERGENT: &[(&str, &str, &str)] = &[
         "let relaxed = !new_forbid;",
         "let relaxed = false;",
     ),
+    // manifest_toml.ves: a missing field is reported under another name
+    // (manifest_toml manifest_cases_match_the_toml_crate).
+    (
+        "manifest_toml",
+        "put(inout d.msg, \"missing field `\");",
+        "put(inout d.msg, \"missing key `\");",
+    ),
+    // semver_text.ves: build metadata errors name the wrong part
+    // (semver_text semver_cases_match_the_semver_crate).
+    (
+        "semver_text",
+        "put(inout m, \"build metadata\");",
+        "put(inout m, \"build\");",
+    ),
 ];

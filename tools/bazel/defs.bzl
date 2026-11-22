@@ -55,6 +55,20 @@ _NEVER = [
     "MODULE.bazel.lock",
 ]
 
+# Name prefixes, after `self_host_`, of the codegen differentials: the codegen
+# swap point and the backends, which BuildBuddy runs as "Self-host codegen
+# differentials" (#1519).
+_SELF_HOST_CODEGEN = (
+    "bounds_hoist",
+    "codegen_",
+    "ebpf_backend",
+    "ffi_",
+    "freestanding",
+    "native_walk",
+    "walk_state",
+    "wasm_backend",
+)
+
 def _fix_label(label):
     # rules_rs renders a path dependency on the workspace root crate as
     # "//" + <absolute workspace path>; the root crate is //:vesper.
@@ -263,9 +277,14 @@ def vesper_crate(
 
     def execution_tags(label):
         # `self_host` marks the corpus differentials (test/self_host_*), which
-        # BuildBuddy runs as their own "Self-host differentials" check so
-        # neither check passes its one-hour limit (#1519).
-        self_host = ["self_host"] if label.split("/")[-1].startswith("self_host_") else []
+        # BuildBuddy runs apart from "Test all targets" so no check passes its
+        # one-hour limit (#1519). The codegen differentials (_SELF_HOST_CODEGEN)
+        # also get `self_host_codegen` and run as "Self-host codegen
+        # differentials"; the rest run as "Self-host differentials".
+        test_name = label.split("/")[-1]
+        self_host = ["self_host"] if test_name.startswith("self_host_") else []
+        if self_host and test_name[len("self_host_"):].startswith(_SELF_HOST_CODEGEN):
+            self_host.append("self_host_codegen")
         return test_tags.get(label, []) + self_host + ([] if "*" in remote_tests or label in remote_tests else ["no-remote-exec"])
 
     def wrapped_test(label, path_binaries = [], **kwargs):

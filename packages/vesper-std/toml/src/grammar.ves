@@ -1,0 +1,2519 @@
+// The TOML grammar of toml_edit 0.22's parser (src/parser), parser for
+// parser, with winnow 0.7's error model (see lib.ves). Function names
+// follow toml_edit's. A parser returns `true` on success; on failure the
+// error is in `P` (`cut`, `ctx`, `cause`) and `pos` is where winnow's
+// input would stand.
+
+use self::{
+    Doc,
+    Node,
+    Ent,
+    Part,
+    NONE,
+    EOF,
+    K_STRING,
+    K_INTEGER,
+    K_FLOAT,
+    K_BOOL,
+    K_DATETIME,
+    K_ARRAY,
+    K_INLINE,
+    K_TABLE,
+    K_AOT,
+    F_FINITE,
+    F_INF,
+    F_NEG_INF,
+    F_NAN,
+    F_NEG_NAN,
+    byte_at,
+    empty_node,
+    node,
+    ent,
+    fnv,
+    lookup,
+    link,
+    unlink,
+    put_type_name,
+    put,
+    char_span,
+    render_error,
+    min_u64,
+    put_u64
+};
+
+// Contexts. Labels (`StrContext::Label`) are 1..=31; expected values are
+// `E_CHAR + c` (`CharLiteral`), the two string literals, and the two
+// descriptions.
+const L_KEY: u64 = 1;
+const L_STRING: u64 = 2;
+const L_TABLE_HEADER: u64 = 3;
+const L_ARRAY: u64 = 4;
+const L_INLINE: u64 = 5;
+const L_BASIC: u64 = 6;
+const L_ML_BASIC: u64 = 7;
+const L_LITERAL: u64 = 8;
+const L_ML_LITERAL: u64 = 9;
+const L_ESCAPE: u64 = 10;
+const L_UNICODE4: u64 = 11;
+const L_UNICODE8: u64 = 12;
+const L_INTEGER: u64 = 13;
+const L_HEX: u64 = 14;
+const L_OCT: u64 = 15;
+const L_BIN: u64 = 16;
+const L_FLOAT: u64 = 17;
+const L_DATETIME: u64 = 18;
+const L_TIME: u64 = 19;
+const L_OFFSET: u64 = 20;
+const LABEL_END: u64 = 32;
+const E_CHAR: u64 = 0x1000;
+const E_CLOSE: u64 = 0x2000;
+const E_CLOSE2: u64 = 0x2001;
+const E_DIGIT: u64 = 0x3000;
+const E_LEADING: u64 = 0x3001;
+
+const LIMIT: u64 = 80;
+
+// Bytes.
+const TAB: u64 = 9;
+const LF: u64 = 10;
+const CR: u64 = 13;
+const SPACE: u64 = 32;
+const QUOTE: u64 = 34;
+const HASH: u64 = 35;
+const APOS: u64 = 39;
+const PLUS: u64 = 43;
+const COMMA: u64 = 44;
+const MINUS: u64 = 45;
+const DOT: u64 = 46;
+const ZERO: u64 = 48;
+const COLON: u64 = 58;
+const EQUALS: u64 = 61;
+const OPEN: u64 = 91;
+const BACKSLASH: u64 = 92;
+const CLOSE: u64 = 93;
+const UNDERSCORE: u64 = 95;
+const BRACE_OPEN: u64 = 123;
+const BRACE_CLOSE: u64 = 125;
+
+struct P {
+    pos: u64,
+    // The error under construction.
+    cut: bool,
+    ctx: ChunkSeq[u64],
+    has_cause: bool,
+    cause: ChunkSeq[u8],
+    depth: u64,
+    nodes: ChunkSeq[Node],
+    ents: ChunkSeq[Ent],
+    text: ChunkSeq[u8],
+    // Key paths being parsed, and inline-table pairs (path start, path
+    // length, value) waiting for `table_from_pairs`.
+    path: ChunkSeq[Part],
+    pairs: ChunkSeq[u64],
+    // ParseState.
+    root: u32,
+    current: u32,
+    current_is_array: bool,
+    current_path: ChunkSeq[Part]
+}
+
+// ---------------------------------------------------------- errors
+
+fn fresh(inout p: P) -> bool {
+    p.ctx.clear();
+    p.has_cause = false;
+    p.cause.clear();
+    p.cut = false;
+    false
+}
+
+fn cause_err(inout p: P, in msg: Str) -> bool {
+    fresh(inout p);
+    p.has_cause = true;
+    p.cause.extend(in msg.as_bytes());
+    false
+}
+
+fn cx(inout p: P, c: u64) {
+    p.ctx.push(c);
+}
+
+fn cut(inout p: P) -> bool {
+    p.cut = true;
+    false
+}
+
+fn put_label(inout out: ChunkSeq[u8], c: u64) {
+    if c == L_KEY {
+        put(inout out, "key");
+    } else if c == L_STRING {
+        put(inout out, "string");
+    } else if c == L_TABLE_HEADER {
+        put(inout out, "table header");
+    } else if c == L_ARRAY {
+        put(inout out, "array");
+    } else if c == L_INLINE {
+        put(inout out, "inline table");
+    } else if c == L_BASIC {
+        put(inout out, "basic string");
+    } else if c == L_ML_BASIC {
+        put(inout out, "multiline basic string");
+    } else if c == L_LITERAL {
+        put(inout out, "literal string");
+    } else if c == L_ML_LITERAL {
+        put(inout out, "multiline literal string");
+    } else if c == L_ESCAPE {
+        put(inout out, "escape sequence");
+    } else if c == L_UNICODE4 {
+        put(inout out, "unicode 4-digit hex code");
+    } else if c == L_UNICODE8 {
+        put(inout out, "unicode 8-digit hex code");
+    } else if c == L_INTEGER {
+        put(inout out, "integer");
+    } else if c == L_HEX {
+        put(inout out, "hexadecimal integer");
+    } else if c == L_OCT {
+        put(inout out, "octal integer");
+    } else if c == L_BIN {
+        put(inout out, "binary integer");
+    } else if c == L_FLOAT {
+        put(inout out, "floating-point number");
+    } else if c == L_DATETIME {
+        put(inout out, "date-time");
+    } else if c == L_TIME {
+        put(inout out, "time");
+    } else {
+        put(inout out, "time offset");
+    }
+}
+
+// `StrContextValue`'s Display.
+fn put_expected(inout out: ChunkSeq[u8], c: u64) {
+    if c == E_CLOSE {
+        out.extend(in "`]`".as_bytes());
+    } else if c == E_CLOSE2 {
+        out.extend(in "`]]`".as_bytes());
+    } else if c == E_DIGIT {
+        out.extend(in "digit".as_bytes());
+    } else if c == E_LEADING {
+        out.extend(in "leading digit".as_bytes());
+    } else {
+        let ch = wrapping_sub(c, E_CHAR);
+        if ch == LF {
+            out.extend(in "newline".as_bytes());
+        } else {
+            out.push(96);
+            out.push(wrapping_u8(ch));
+            out.push(96);
+        }
+    }
+}
+
+// `ContextError`'s Display.
+fn put_context_error(inout out: ChunkSeq[u8], in p: P) {
+    let mut newline = false;
+    for i in 0..p.ctx.len() {
+        let c = match p.ctx.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        if c > 0 && c < LABEL_END {
+            out.extend(in "invalid ".as_bytes());
+            put_label(inout out, c);
+            newline = true;
+            break;
+        }
+    }
+    let mut first = true;
+    for i in 0..p.ctx.len() {
+        let c = match p.ctx.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        if c >= LABEL_END {
+            if first {
+                if newline {
+                    out.push(10);
+                }
+                newline = true;
+                out.extend(in "expected ".as_bytes());
+                first = false;
+            } else {
+                out.extend(in ", ".as_bytes());
+            }
+            put_expected(inout out, c);
+        }
+    }
+    if p.has_cause {
+        if newline {
+            out.push(10);
+        }
+        out.extend(in p.cause.as_slice());
+    }
+}
+
+// ---------------------------------------------------------- bytes
+
+fn cur(in s: Slice[u8], in p: P) -> u64 {
+    byte_at(in s, p.pos)
+}
+
+fn ahead(in s: Slice[u8], in p: P, k: u64) -> u64 {
+    byte_at(in s, wrapping_add(p.pos, k))
+}
+
+fn bump(inout p: P) {
+    p.pos = wrapping_add(p.pos, 1);
+}
+
+fn is_digit(c: u64) -> bool {
+    c >= 48 && c <= 57
+}
+
+fn is_hex(c: u64) -> bool {
+    is_digit(c) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102)
+}
+
+fn hex_val(c: u64) -> u64 {
+    if c <= 57 {
+        wrapping_sub(c, 48)
+    } else if c <= 70 {
+        wrapping_sub(c, 55)
+    } else {
+        wrapping_sub(c, 87)
+    }
+}
+
+fn is_ws(c: u64) -> bool {
+    c == SPACE || c == TAB
+}
+
+fn non_ascii(c: u64) -> bool {
+    c >= 128 && c < EOF
+}
+
+// ---------------------------------------------------------- trivia
+
+fn ws(in s: Slice[u8], inout p: P) {
+    loop {
+        if !is_ws(cur(in s, p)) {
+            break;
+        }
+        bump(inout p);
+    }
+}
+
+fn non_eol(c: u64) -> bool {
+    c == TAB || (c >= 32 && c <= 126) || non_ascii(c)
+}
+
+fn comment(in s: Slice[u8], inout p: P) -> bool {
+    if cur(in s, p) != HASH {
+        return fresh(inout p);
+    }
+    bump(inout p);
+    loop {
+        if !non_eol(cur(in s, p)) {
+            break;
+        }
+        bump(inout p);
+    }
+    true
+}
+
+// `dispatch! {any; ...}`: `any` consumes the byte even when the branch
+// fails.
+fn newline(in s: Slice[u8], inout p: P) -> bool {
+    let c = cur(in s, p);
+    if c == EOF {
+        return fresh(inout p);
+    }
+    bump(inout p);
+    if c == LF {
+        return true;
+    }
+    if c == CR {
+        if cur(in s, p) == LF {
+            bump(inout p);
+            return true;
+        }
+        return fresh(inout p);
+    }
+    fresh(inout p)
+}
+
+fn line_ending(in s: Slice[u8], inout p: P) -> bool {
+    let start = p.pos;
+    if newline(in s, inout p) {
+        return true;
+    }
+    p.pos = start;
+    if cur(in s, p) == EOF {
+        return true;
+    }
+    fresh(inout p)
+}
+
+fn line_trailing(in s: Slice[u8], inout p: P) -> bool {
+    ws(in s, inout p);
+    let save = p.pos;
+    if !comment(in s, inout p) {
+        p.pos = save;
+    }
+    line_ending(in s, inout p)
+}
+
+fn ws_newline(in s: Slice[u8], inout p: P) {
+    loop {
+        let start = p.pos;
+        if newline(in s, inout p) {
+            continue;
+        }
+        p.pos = start;
+        if is_ws(cur(in s, p)) {
+            ws(in s, inout p);
+            continue;
+        }
+        p.pos = start;
+        break;
+    }
+}
+
+fn ws_newlines(in s: Slice[u8], inout p: P) -> bool {
+    if !newline(in s, inout p) {
+        return false;
+    }
+    ws_newline(in s, inout p);
+    true
+}
+
+fn ws_comment_newline(in s: Slice[u8], inout p: P) -> bool {
+    loop {
+        let start = p.pos;
+        ws(in s, inout p);
+        let c = cur(in s, p);
+        if c == HASH {
+            if !comment(in s, inout p) {
+                return false;
+            }
+            if !newline(in s, inout p) {
+                return false;
+            }
+        } else if c == LF || c == CR {
+            if !newline(in s, inout p) {
+                return false;
+            }
+        } else {
+            break;
+        }
+        if p.pos == start {
+            break;
+        }
+    }
+    true
+}
+
+// ---------------------------------------------------------- strings
+
+// Appends the UTF-8 encoding of `c` to the decoded text.
+fn push_char(inout p: P, c: u64) {
+    if c < 0x80 {
+        p.text.push(wrapping_u8(c));
+    } else if c < 0x800 {
+        p.text.push(wrapping_u8(0xc0 | (c >> 6)));
+        p.text.push(wrapping_u8(0x80 | (c & 0x3f)));
+    } else if c < 0x10000 {
+        p.text.push(wrapping_u8(0xe0 | (c >> 12)));
+        p.text.push(wrapping_u8(0x80 | ((c >> 6) & 0x3f)));
+        p.text.push(wrapping_u8(0x80 | (c & 0x3f)));
+    } else {
+        p.text.push(wrapping_u8(0xf0 | (c >> 18)));
+        p.text.push(wrapping_u8(0x80 | ((c >> 12) & 0x3f)));
+        p.text.push(wrapping_u8(0x80 | ((c >> 6) & 0x3f)));
+        p.text.push(wrapping_u8(0x80 | (c & 0x3f)));
+    }
+}
+
+fn basic_unescaped(c: u64) -> bool {
+    is_ws(c) || c == 0x21 || (c >= 0x23 && c <= 0x5b) || (c >= 0x5d && c <= 0x7e) || non_ascii(c)
+}
+
+// `hexescape::<n>` under `cut_err(..).context(label)`.
+fn hexescape(in s: Slice[u8], inout p: P, n: u64, label: u64) -> (bool, u64) {
+    let start = p.pos;
+    let mut v: u64 = 0;
+    let mut k: u64 = 0;
+    loop {
+        if k == n || !is_hex(cur(in s, p)) {
+            break;
+        }
+        v = wrapping_add(v << 4, hex_val(cur(in s, p)));
+        bump(inout p);
+        k = wrapping_add(k, 1);
+    }
+    if k != n {
+        p.pos = start;
+        fresh(inout p);
+        cut(inout p);
+        cx(inout p, label);
+        return (false, 0);
+    }
+    if v > 0x10ffff || (v >= 0xd800 && v <= 0xdfff) {
+        p.pos = start;
+        cause_err(inout p, "value is out of range");
+        cut(inout p);
+        cx(inout p, label);
+        return (false, 0);
+    }
+    (true, v)
+}
+
+// `escape_seq_char` (after the backslash): the character, or an error.
+fn escape_seq_char(in s: Slice[u8], inout p: P) -> (bool, u64) {
+    let c = cur(in s, p);
+    if c == EOF {
+        fresh(inout p);
+        return (false, 0);
+    }
+    bump(inout p);
+    if c == 98 {
+        return (true, 8);
+    }
+    if c == 102 {
+        return (true, 12);
+    }
+    if c == 110 {
+        return (true, LF);
+    }
+    if c == 114 {
+        return (true, CR);
+    }
+    if c == 116 {
+        return (true, TAB);
+    }
+    if c == 117 {
+        return hexescape(in s, inout p, 4, L_UNICODE4);
+    }
+    if c == 85 {
+        return hexescape(in s, inout p, 8, L_UNICODE8);
+    }
+    if c == BACKSLASH || c == QUOTE {
+        return (true, c);
+    }
+    fresh(inout p);
+    cut(inout p);
+    cx(inout p, L_ESCAPE);
+    cx(inout p, wrapping_add(E_CHAR, 98));
+    cx(inout p, wrapping_add(E_CHAR, 102));
+    cx(inout p, wrapping_add(E_CHAR, 110));
+    cx(inout p, wrapping_add(E_CHAR, 114));
+    cx(inout p, wrapping_add(E_CHAR, 116));
+    cx(inout p, wrapping_add(E_CHAR, 117));
+    cx(inout p, wrapping_add(E_CHAR, 85));
+    cx(inout p, wrapping_add(E_CHAR, BACKSLASH));
+    cx(inout p, wrapping_add(E_CHAR, QUOTE));
+    (false, 0)
+}
+
+// `escaped`: a backslash and an escape. 0: no match (a backtrack), 1: a
+// match (pushed), 2: a cut.
+fn escaped(in s: Slice[u8], inout p: P) -> u64 {
+    if cur(in s, p) != BACKSLASH {
+        fresh(inout p);
+        return 0;
+    }
+    bump(inout p);
+    let (ok, c) = escape_seq_char(in s, inout p);
+    if ok {
+        push_char(inout p, c);
+        return 1;
+    }
+    if p.cut {
+        2
+    } else {
+        0
+    }
+}
+
+fn basic_string(in s: Slice[u8], inout p: P) -> bool {
+    if cur(in s, p) != QUOTE {
+        return fresh(inout p);
+    }
+    bump(inout p);
+    loop {
+        let save = p.pos;
+        let c = cur(in s, p);
+        if basic_unescaped(c) {
+            loop {
+                let d = cur(in s, p);
+                if !basic_unescaped(d) {
+                    break;
+                }
+                p.text.push(wrapping_u8(d));
+                bump(inout p);
+            }
+            continue;
+        }
+        let r = escaped(in s, inout p);
+        if r == 1 {
+            continue;
+        }
+        if r == 2 {
+            return false;
+        }
+        p.pos = save;
+        break;
+    }
+    if cur(in s, p) != QUOTE {
+        fresh(inout p);
+        cut(inout p);
+        cx(inout p, L_BASIC);
+        return false;
+    }
+    bump(inout p);
+    true
+}
+
+fn literal_char(c: u64) -> bool {
+    c == TAB || (c >= 0x20 && c <= 0x26) || (c >= 0x28 && c <= 0x7e) || non_ascii(c)
+}
+
+fn literal_string(in s: Slice[u8], inout p: P) -> bool {
+    if cur(in s, p) != APOS {
+        fresh(inout p);
+        cx(inout p, L_LITERAL);
+        return false;
+    }
+    bump(inout p);
+    loop {
+        let c = cur(in s, p);
+        if !literal_char(c) {
+            break;
+        }
+        p.text.push(wrapping_u8(c));
+        bump(inout p);
+    }
+    if cur(in s, p) != APOS {
+        fresh(inout p);
+        cut(inout p);
+        cx(inout p, L_LITERAL);
+        return false;
+    }
+    bump(inout p);
+    true
+}
+
+fn tag3(in s: Slice[u8], in p: P, c: u64) -> bool {
+    cur(in s, p) == c && ahead(in s, p, 1) == c && ahead(in s, p, 2) == c
+}
+
+// `mlb_quotes(term)` / `mll_quotes(term)`: two or one quote `q` followed
+// by `term` (`delim`: three more quotes; otherwise: any byte but `q`).
+// The number of quotes, or 0 (a backtrack; `pos` unchanged).
+fn ml_quotes(in s: Slice[u8], inout p: P, q: u64, delim: bool) -> u64 {
+    let start = p.pos;
+    let mut n: u64 = 2;
+    loop {
+        p.pos = start;
+        let mut ok = true;
+        for i in 0..n {
+            if cur(in s, p) != q {
+                ok = false;
+            } else {
+                bump(inout p);
+            }
+        }
+        if ok {
+            let t = if delim {
+                tag3(in s, p, q)
+            } else {
+                let c = cur(in s, p);
+                c != EOF && c != q
+            };
+            if t {
+                return n;
+            }
+        }
+        if n == 1 {
+            break;
+        }
+        n = 1;
+    }
+    p.pos = start;
+    fresh(inout p);
+    0
+}
+
+fn mlb_unescaped(c: u64) -> bool {
+    basic_unescaped(c)
+}
+
+// `mlb_content`: 1 match, 0 backtrack, 2 cut.
+fn mlb_content(in s: Slice[u8], inout p: P) -> u64 {
+    let start = p.pos;
+    if mlb_unescaped(cur(in s, p)) {
+        loop {
+            let d = cur(in s, p);
+            if !mlb_unescaped(d) {
+                break;
+            }
+            p.text.push(wrapping_u8(d));
+            bump(inout p);
+        }
+        return 1;
+    }
+    // mlb_escaped_nl: repeat(1.., (ESCAPE, ws, ws_newlines)).
+    let mut runs: u64 = 0;
+    loop {
+        let save = p.pos;
+        if cur(in s, p) != BACKSLASH {
+            p.pos = save;
+            break;
+        }
+        bump(inout p);
+        ws(in s, inout p);
+        if !ws_newlines(in s, inout p) {
+            p.pos = save;
+            break;
+        }
+        runs = wrapping_add(runs, 1);
+    }
+    if runs > 0 {
+        return 1;
+    }
+    p.pos = start;
+    let r = escaped(in s, inout p);
+    if r != 0 {
+        return r;
+    }
+    p.pos = start;
+    if newline(in s, inout p) {
+        p.text.push(10);
+        return 1;
+    }
+    0
+}
+
+// `opt(mlb_content)`.
+fn opt_mlb_content(in s: Slice[u8], inout p: P) -> u64 {
+    let save = p.pos;
+    let r = mlb_content(in s, inout p);
+    if r == 0 {
+        p.pos = save;
+    }
+    r
+}
+
+fn ml_basic_body(in s: Slice[u8], inout p: P) -> bool {
+    loop {
+        let r = opt_mlb_content(in s, inout p);
+        if r == 2 {
+            return false;
+        }
+        if r == 0 {
+            break;
+        }
+    }
+    loop {
+        let q = ml_quotes(in s, inout p, QUOTE, false);
+        if q == 0 {
+            break;
+        }
+        let mark = p.text.len();
+        for i in 0..q {
+            p.text.push(34);
+        }
+        let r = opt_mlb_content(in s, inout p);
+        if r == 2 {
+            return false;
+        }
+        if r == 0 {
+            p.text.truncate(mark);
+            break;
+        }
+        loop {
+            let r2 = opt_mlb_content(in s, inout p);
+            if r2 == 2 {
+                return false;
+            }
+            if r2 == 0 {
+                break;
+            }
+        }
+    }
+    let q = ml_quotes(in s, inout p, QUOTE, true);
+    for i in 0..q {
+        p.text.push(34);
+    }
+    true
+}
+
+fn ml_basic_string(in s: Slice[u8], inout p: P) -> bool {
+    if !tag3(in s, p, QUOTE) {
+        return fresh(inout p);
+    }
+    p.pos = wrapping_add(p.pos, 3);
+    let save = p.pos;
+    if !newline(in s, inout p) {
+        p.pos = save;
+    }
+    if !ml_basic_body(in s, inout p) {
+        cut(inout p);
+        cx(inout p, L_ML_BASIC);
+        return false;
+    }
+    if !tag3(in s, p, QUOTE) {
+        fresh(inout p);
+        cut(inout p);
+        cx(inout p, L_ML_BASIC);
+        return false;
+    }
+    p.pos = wrapping_add(p.pos, 3);
+    true
+}
+
+fn mll_content(in s: Slice[u8], inout p: P) -> bool {
+    if literal_char(cur(in s, p)) {
+        bump(inout p);
+        return true;
+    }
+    let save = p.pos;
+    if newline(in s, inout p) {
+        return true;
+    }
+    p.pos = save;
+    false
+}
+
+fn ml_literal_string(in s: Slice[u8], inout p: P) -> bool {
+    if !tag3(in s, p, APOS) {
+        return fresh(inout p);
+    }
+    p.pos = wrapping_add(p.pos, 3);
+    let save = p.pos;
+    if !newline(in s, inout p) {
+        p.pos = save;
+    }
+    let body = p.pos;
+    loop {
+        if !mll_content(in s, inout p) {
+            break;
+        }
+    }
+    loop {
+        let save2 = p.pos;
+        if ml_quotes(in s, inout p, APOS, false) == 0 {
+            p.pos = save2;
+            break;
+        }
+        if !mll_content(in s, inout p) {
+            p.pos = save2;
+            break;
+        }
+        loop {
+            if !mll_content(in s, inout p) {
+                break;
+            }
+        }
+    }
+    let save3 = p.pos;
+    if ml_quotes(in s, inout p, APOS, true) == 0 {
+        p.pos = save3;
+    }
+    // The body's text, with `\r\n` as `\n`.
+    let mut i = body;
+    loop {
+        if i >= p.pos {
+            break;
+        }
+        let c = byte_at(in s, i);
+        if c == CR && byte_at(in s, wrapping_add(i, 1)) == LF {
+            i = wrapping_add(i, 1);
+            continue;
+        }
+        p.text.push(wrapping_u8(c));
+        i = wrapping_add(i, 1);
+    }
+    if !tag3(in s, p, APOS) {
+        fresh(inout p);
+        cut(inout p);
+        cx(inout p, L_ML_LITERAL);
+        return false;
+    }
+    p.pos = wrapping_add(p.pos, 3);
+    true
+}
+
+// `string`: alt((ml_basic_string, basic_string, ml_literal_string,
+// literal_string)), decoded onto `text`.
+fn string(in s: Slice[u8], inout p: P) -> bool {
+    let start = p.pos;
+    let mark = p.text.len();
+    if ml_basic_string(in s, inout p) {
+        return true;
+    }
+    if p.cut {
+        return false;
+    }
+    p.pos = start;
+    p.text.truncate(mark);
+    if basic_string(in s, inout p) {
+        return true;
+    }
+    if p.cut {
+        return false;
+    }
+    p.pos = start;
+    p.text.truncate(mark);
+    if ml_literal_string(in s, inout p) {
+        return true;
+    }
+    if p.cut {
+        return false;
+    }
+    p.pos = start;
+    p.text.truncate(mark);
+    literal_string(in s, inout p)
+}
+
+// ---------------------------------------------------------- keys
+
+fn unquoted_char(c: u64) -> bool {
+    (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || is_digit(c) || c == MINUS || c == UNDERSCORE
+}
+
+fn simple_key(in s: Slice[u8], inout p: P) -> bool {
+    let c = cur(in s, p);
+    if c == EOF {
+        return fresh(inout p);
+    }
+    let ks = p.pos;
+    let koff = p.text.len();
+    if c == QUOTE {
+        if !basic_string(in s, inout p) {
+            return false;
+        }
+    } else if c == APOS {
+        if !literal_string(in s, inout p) {
+            return false;
+        }
+    } else {
+        if !unquoted_char(c) {
+            return fresh(inout p);
+        }
+        loop {
+            let d = cur(in s, p);
+            if !unquoted_char(d) {
+                break;
+            }
+            p.text.push(wrapping_u8(d));
+            bump(inout p);
+        }
+    }
+    let klen = wrapping_sub(p.text.len(), koff);
+    let hash = fnv(in p.text, koff, klen);
+    p
+        .path
+        .push(
+            Part {
+                koff: koff,
+                klen: klen,
+                hash: hash,
+                ks: ks,
+                ke: p.pos
+            }
+        );
+    true
+}
+
+// `key`: a dotted key, pushed onto `path` (its parts start at the length
+// `path` had on entry).
+fn key(in s: Slice[u8], inout p: P) -> bool {
+    let start = p.pos;
+    let base = p.path.len();
+    ws(in s, inout p);
+    if !simple_key(in s, inout p) {
+        p.path.truncate(base);
+        cx(inout p, L_KEY);
+        return false;
+    }
+    ws(in s, inout p);
+    loop {
+        let save = p.pos;
+        let mark = p.text.len();
+        if cur(in s, p) != DOT {
+            break;
+        }
+        bump(inout p);
+        ws(in s, inout p);
+        let parts = p.path.len();
+        if !simple_key(in s, inout p) {
+            p.path.truncate(parts);
+            if p.cut {
+                p.path.truncate(base);
+                cx(inout p, L_KEY);
+                return false;
+            }
+            p.pos = save;
+            p.text.truncate(mark);
+            break;
+        }
+        ws(in s, inout p);
+    }
+    if wrapping_sub(p.path.len(), base) >= LIMIT {
+        p.path.truncate(base);
+        p.pos = start;
+        return cause_err(inout p, "recursion limit exceeded");
+    }
+    true
+}
+
+fn part_at(in path: ChunkSeq[Part], i: u64) -> Part {
+    match path.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => Part {
+            koff: 0,
+            klen: 0,
+            hash: 0,
+            ks: 0,
+            ke: 0
+        },
+    }
+}
+
+// ---------------------------------------------------------- numbers
+
+// `zero_prefixable_int`: digits with single underscores between them.
+fn zero_prefixable_int(in s: Slice[u8], inout p: P) -> bool {
+    if !is_digit(cur(in s, p)) {
+        return fresh(inout p);
+    }
+    bump(inout p);
+    loop {
+        let c = cur(in s, p);
+        if is_digit(c) {
+            bump(inout p);
+        } else if c == UNDERSCORE {
+            bump(inout p);
+            if !is_digit(cur(in s, p)) {
+                fresh(inout p);
+                cut(inout p);
+                cx(inout p, E_DIGIT);
+                return false;
+            }
+            bump(inout p);
+        } else {
+            break;
+        }
+    }
+    true
+}
+
+fn dec_int(in s: Slice[u8], inout p: P) -> bool {
+    let c0 = cur(in s, p);
+    if c0 == PLUS || c0 == MINUS {
+        bump(inout p);
+    }
+    let c = cur(in s, p);
+    if c >= 49 && c <= 57 {
+        bump(inout p);
+        loop {
+            let d = cur(in s, p);
+            if is_digit(d) {
+                bump(inout p);
+            } else if d == UNDERSCORE {
+                bump(inout p);
+                if !is_digit(cur(in s, p)) {
+                    fresh(inout p);
+                    cut(inout p);
+                    cx(inout p, E_DIGIT);
+                    cx(inout p, L_INTEGER);
+                    return false;
+                }
+                bump(inout p);
+            } else {
+                break;
+            }
+        }
+        return true;
+    }
+    if is_digit(c) {
+        bump(inout p);
+        return true;
+    }
+    fresh(inout p);
+    cx(inout p, L_INTEGER);
+    false
+}
+
+// The digits of `s[a..b]` (skipping `_`) as an i64 in `radix`, like
+// `i64::from_str_radix` (with an optional sign in base 10): 0 ok,
+// 1 too large, 2 too small.
+fn parse_i64(in s: Slice[u8], a: u64, b: u64, radix: u64) -> (u64, u64) {
+    let mut i = a;
+    let mut neg = false;
+    let c = byte_at(in s, i);
+    if c == PLUS || c == MINUS {
+        neg = c == MINUS;
+        i = wrapping_add(i, 1);
+    }
+    // Accumulate the magnitude; the limit is 2^63 - 1, or 2^63 when
+    // negative.
+    let limit: u64 = if neg {
+        0x8000000000000000
+    } else {
+        0x7fffffffffffffff
+    };
+    let mut v: u64 = 0;
+    loop {
+        if i >= b {
+            break;
+        }
+        let d = byte_at(in s, i);
+        i = wrapping_add(i, 1);
+        if d == UNDERSCORE {
+            continue;
+        }
+        let dv = hex_val(d);
+        // v * radix + dv > limit?
+        let lo = match checked_mul_u64(v, radix) {
+            Some(x) => x,
+            None => wrapping_add(limit, 1),
+        };
+        if lo > limit || wrapping_sub(limit, lo) < dv {
+            return (
+                if neg {
+                    2
+                } else {
+                    1
+                },
+                0
+            );
+        }
+        v = wrapping_add(lo, dv);
+    }
+    if neg {
+        (0, wrapping_sub(0, v))
+    } else {
+        (0, v)
+    }
+}
+
+fn overflow_message(code: u64) -> Str {
+    if code == 1 {
+        "number too large to fit in target type"
+    } else {
+        "number too small to fit in target type"
+    }
+}
+
+// `hex_int` / `oct_int` / `bin_int` under `cut_err(.. .try_map(..))`.
+fn radix_int(in s: Slice[u8], inout p: P, radix: u64, label: u64) -> (bool, u64) {
+    let start = p.pos;
+    p.pos = wrapping_add(p.pos, 2);
+    let digits = p.pos;
+    if !radix_digit(cur(in s, p), radix) {
+        fresh(inout p);
+        cut(inout p);
+        cx(inout p, label);
+        return (false, 0);
+    }
+    bump(inout p);
+    loop {
+        let c = cur(in s, p);
+        if radix_digit(c, radix) {
+            bump(inout p);
+        } else if c == UNDERSCORE {
+            bump(inout p);
+            if !radix_digit(cur(in s, p), radix) {
+                fresh(inout p);
+                cut(inout p);
+                cx(inout p, E_DIGIT);
+                cx(inout p, label);
+                return (false, 0);
+            }
+            bump(inout p);
+        } else {
+            break;
+        }
+    }
+    let (code, v) = parse_i64(in s, digits, p.pos, radix);
+    if code != 0 {
+        p.pos = start;
+        cause_err(inout p, overflow_message(code));
+        cut(inout p);
+        return (false, 0);
+    }
+    (true, v)
+}
+
+fn radix_digit(c: u64, radix: u64) -> bool {
+    if radix == 16 {
+        is_hex(c)
+    } else if radix == 8 {
+        c >= 48 && c <= 55
+    } else {
+        c == 48 || c == 49
+    }
+}
+
+fn integer(in s: Slice[u8], inout p: P) -> (bool, u64) {
+    if cur(in s, p) == ZERO {
+        let c = ahead(in s, p, 1);
+        if c == 120 {
+            return radix_int(in s, inout p, 16, L_HEX);
+        }
+        if c == 111 {
+            return radix_int(in s, inout p, 8, L_OCT);
+        }
+        if c == 98 {
+            return radix_int(in s, inout p, 2, L_BIN);
+        }
+    }
+    let start = p.pos;
+    if !dec_int(in s, inout p) {
+        return (false, 0);
+    }
+    let (code, v) = parse_i64(in s, start, p.pos, 10);
+    if code != 0 {
+        p.pos = start;
+        cause_err(inout p, overflow_message(code));
+        cut(inout p);
+        return (false, 0);
+    }
+    (true, v)
+}
+
+fn tag(in s: Slice[u8], in p: P, in t: Str) -> bool {
+    let b = t.as_bytes();
+    for i in 0..b.len() {
+        let want = match b.try_get(i) {
+            Option::Some(x) => widen_u64(x),
+            Option::None => EOF,
+        };
+        if ahead(in s, p, i) != want {
+            return false;
+        }
+    }
+    true
+}
+
+fn exp(in s: Slice[u8], inout p: P) -> bool {
+    let c = cur(in s, p);
+    if c != 101 && c != 69 {
+        return fresh(inout p);
+    }
+    bump(inout p);
+    let d = cur(in s, p);
+    if d == PLUS || d == MINUS {
+        bump(inout p);
+    }
+    if !zero_prefixable_int(in s, inout p) {
+        cut(inout p);
+        return false;
+    }
+    true
+}
+
+fn frac(in s: Slice[u8], inout p: P) -> bool {
+    if cur(in s, p) != DOT {
+        return fresh(inout p);
+    }
+    bump(inout p);
+    if !zero_prefixable_int(in s, inout p) {
+        cut(inout p);
+        cx(inout p, E_DIGIT);
+        return false;
+    }
+    true
+}
+
+// `float`. On success the node payload: the text's start and the
+// special value.
+fn float(in s: Slice[u8], inout p: P) -> (bool, u64) {
+    let start = p.pos;
+    // float_.and_then(cut_err(rest.try_map(parse).verify(!= INFINITY)))
+    if dec_int(in s, inout p) {
+        let save = p.pos;
+        let mut ok = false;
+        if exp(in s, inout p) {
+            ok = true;
+        } else if p.cut {
+            cx(inout p, L_FLOAT);
+            return (false, 0);
+        } else {
+            p.pos = save;
+            if frac(in s, inout p) {
+                ok = true;
+                let save2 = p.pos;
+                if !exp(in s, inout p) {
+                    if p.cut {
+                        cx(inout p, L_FLOAT);
+                        return (false, 0);
+                    }
+                    p.pos = save2;
+                }
+            } else if p.cut {
+                cx(inout p, L_FLOAT);
+                return (false, 0);
+            }
+        }
+        if ok {
+            if overflows_to_inf(in s, start, p.pos) {
+                // `verify(|f| *f != f64::INFINITY)` lets -inf through.
+                if byte_at(in s, start) == MINUS {
+                    return (true, F_NEG_INF);
+                }
+                p.pos = start;
+                fresh(inout p);
+                cut(inout p);
+                cx(inout p, L_FLOAT);
+                return (false, 0);
+            }
+            return (true, F_FINITE);
+        }
+    } else if p.cut {
+        cx(inout p, L_FLOAT);
+        return (false, 0);
+    }
+    // special_float
+    p.pos = start;
+    let mut neg = false;
+    let c = cur(in s, p);
+    if c == PLUS || c == MINUS {
+        neg = c == MINUS;
+        bump(inout p);
+    }
+    if tag(in s, p, "inf") {
+        p.pos = wrapping_add(p.pos, 3);
+        return (
+            true,
+            if neg {
+                F_NEG_INF
+            } else {
+                F_INF
+            }
+        );
+    }
+    if tag(in s, p, "nan") {
+        p.pos = wrapping_add(p.pos, 3);
+        return (
+            true,
+            if neg {
+                F_NEG_NAN
+            } else {
+                F_NAN
+            }
+        );
+    }
+    fresh(inout p);
+    cx(inout p, L_FLOAT);
+    (false, 0)
+}
+
+// Whether the float text `s[a..b]` (grammar-valid, with `_`) is at least
+// 2^1024 - 2^970 in magnitude, the least one Rust's `f64` parse rounds to
+// infinity.
+fn overflows_to_inf(in s: Slice[u8], a: u64, b: u64) -> bool {
+    // Significant digits (leading zeros dropped) and the decimal exponent
+    // of the first of them.
+    let mut digits: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut point: i64 = 0;
+    let mut seen_point = false;
+    let mut e: i64 = 0;
+    let mut e_neg = false;
+    let mut in_exp = false;
+    for i in a..b {
+        let c = byte_at(in s, i);
+        if in_exp {
+            if c == MINUS {
+                e_neg = true;
+            } else if is_digit(c) {
+                if e < 100000 {
+                    e = wrapping_add(wrapping_mul(e, 10), wrapping_i64(wrapping_sub(c, 48)));
+                }
+            }
+        } else if c == 101 || c == 69 {
+            in_exp = true;
+        } else if c == DOT {
+            seen_point = true;
+        } else if is_digit(c) {
+            if digits.len() == 0 && c == 48 {
+                if seen_point {
+                    point = wrapping_sub(point, 1);
+                }
+            } else {
+                digits.push(wrapping_u8(c));
+                if !seen_point {
+                    point = wrapping_add(point, 1);
+                }
+            }
+        }
+    }
+    if digits.len() == 0 {
+        return false;
+    }
+    let exp10 = if e_neg {
+        wrapping_sub(point, e)
+    } else {
+        wrapping_add(point, e)
+    };
+    // The threshold has 309 digits before the point.
+    let t = inf_threshold();
+    let tn = t.as_bytes().len();
+    if exp10 != wrapping_i64(tn) {
+        return exp10 > wrapping_i64(tn);
+    }
+    let n = digits.len();
+    let tb = t.as_bytes();
+    for i in 0..tn {
+        let d = if i < n {
+            match digits.try_get(i) {
+                Option::Some(x) => widen_u64(x),
+                Option::None => 48,
+            }
+        } else {
+            48
+        };
+        let want = match tb.try_get(i) {
+            Option::Some(x) => widen_u64(x),
+            Option::None => 48,
+        };
+        if d != want {
+            return d > want;
+        }
+    }
+    true
+}
+
+// 2^1024 - 2^970.
+fn inf_threshold() -> Str {
+    "179769313486231580793728971405303415079934132710037826936173778980444968292764750946649017977587207096330286416692887910946555547851940402630657488671505820681908902000708383676273854845817711531764475730270069855571366959622842914819860834936475292719074168444365510704342711559699508093042880177904174497792"
+}
+
+// ---------------------------------------------------------- datetime
+
+// `unsigned_digits::<n, n>`: exactly `n` digits (no more are taken),
+// their value; a backtrack with no input consumed otherwise.
+fn digits_n(in s: Slice[u8], inout p: P, n: u64) -> (bool, u64) {
+    let mut v: u64 = 0;
+    for i in 0..n {
+        let c = ahead(in s, p, i);
+        if !is_digit(c) {
+            fresh(inout p);
+            return (false, 0);
+        }
+        v = wrapping_add(wrapping_mul(v, 10), wrapping_sub(c, 48));
+    }
+    p.pos = wrapping_add(p.pos, n);
+    (true, v)
+}
+
+// Two digits in `lo..=hi` (`try_map`; `OutOfRange` resets).
+fn two_digits_in(in s: Slice[u8], inout p: P, lo: u64, hi: u64) -> (bool, u64) {
+    let start = p.pos;
+    let (ok, v) = digits_n(in s, inout p, 2);
+    if !ok {
+        return (false, 0);
+    }
+    if v < lo || v > hi {
+        p.pos = start;
+        cause_err(inout p, "value is out of range");
+        return (false, 0);
+    }
+    (true, v)
+}
+
+fn full_date(in s: Slice[u8], inout p: P) -> bool {
+    let (yok, year) = digits_n(in s, inout p, 4);
+    if !yok {
+        return false;
+    }
+    if cur(in s, p) != MINUS {
+        return fresh(inout p);
+    }
+    bump(inout p);
+    let (mok, month) = two_digits_in(in s, inout p, 1, 12);
+    if !mok {
+        return cut(inout p);
+    }
+    if cur(in s, p) != MINUS {
+        fresh(inout p);
+        return cut(inout p);
+    }
+    bump(inout p);
+    let day_start = p.pos;
+    let (dok, day) = two_digits_in(in s, inout p, 1, 31);
+    if !dok {
+        return cut(inout p);
+    }
+    let leap = (year % 4 == 0) && ((year % 100 != 0) || (year % 400 == 0));
+    let max: u64 = if month == 2 {
+        if leap {
+            29
+        } else {
+            28
+        }
+    } else if month == 4 || month == 6 || month == 9 || month == 11 {
+        30
+    } else {
+        31
+    };
+    if max < day {
+        p.pos = day_start;
+        cause_err(inout p, "value is out of range");
+        return cut(inout p);
+    }
+    true
+}
+
+fn partial_time(in s: Slice[u8], inout p: P) -> bool {
+    let (hok, h) = two_digits_in(in s, inout p, 0, 23);
+    if !hok {
+        return false;
+    }
+    if cur(in s, p) != COLON {
+        return fresh(inout p);
+    }
+    bump(inout p);
+    let (mok, m) = two_digits_in(in s, inout p, 0, 59);
+    if !mok {
+        return cut(inout p);
+    }
+    if cur(in s, p) != COLON {
+        fresh(inout p);
+        return cut(inout p);
+    }
+    bump(inout p);
+    let (sok, sec) = two_digits_in(in s, inout p, 0, 60);
+    if !sok {
+        return cut(inout p);
+    }
+    // opt(time_secfrac): '.' and one or more digits.
+    if cur(in s, p) == DOT && is_digit(ahead(in s, p, 1)) {
+        bump(inout p);
+        loop {
+            if !is_digit(cur(in s, p)) {
+                break;
+            }
+            bump(inout p);
+        }
+    }
+    true
+}
+
+fn time_offset(in s: Slice[u8], inout p: P) -> bool {
+    let c = cur(in s, p);
+    if c == 90 || c == 122 {
+        bump(inout p);
+        return true;
+    }
+    if c != PLUS && c != MINUS {
+        fresh(inout p);
+        cx(inout p, L_OFFSET);
+        return false;
+    }
+    bump(inout p);
+    let (hok, h) = two_digits_in(in s, inout p, 0, 23);
+    if !hok {
+        cut(inout p);
+        cx(inout p, L_OFFSET);
+        return false;
+    }
+    if cur(in s, p) != COLON {
+        fresh(inout p);
+        cut(inout p);
+        cx(inout p, L_OFFSET);
+        return false;
+    }
+    bump(inout p);
+    let (mok, m) = two_digits_in(in s, inout p, 0, 59);
+    if !mok {
+        cut(inout p);
+        cx(inout p, L_OFFSET);
+        return false;
+    }
+    true
+}
+
+fn date_time(in s: Slice[u8], inout p: P) -> bool {
+    let start = p.pos;
+    if full_date(in s, inout p) {
+        let save = p.pos;
+        let c = cur(in s, p);
+        if c == 84 || c == 116 || c == SPACE {
+            bump(inout p);
+            if partial_time(in s, inout p) {
+                let save2 = p.pos;
+                if !time_offset(in s, inout p) {
+                    if p.cut {
+                        cx(inout p, L_DATETIME);
+                        return false;
+                    }
+                    p.pos = save2;
+                }
+            } else {
+                if p.cut {
+                    cx(inout p, L_DATETIME);
+                    return false;
+                }
+                p.pos = save;
+            }
+        }
+        return true;
+    }
+    if p.cut {
+        cx(inout p, L_DATETIME);
+        return false;
+    }
+    p.pos = start;
+    if partial_time(in s, inout p) {
+        return true;
+    }
+    cx(inout p, L_TIME);
+    false
+}
+
+// ---------------------------------------------------------- values
+
+fn new_node(inout p: P, n: Node) -> u32 {
+    let id = wrapping_u32(p.nodes.len());
+    p.nodes.push(n);
+    id
+}
+
+fn set_span(inout p: P, id: u32, s: u64, e: u64) {
+    let mut n = node(in p.nodes, id);
+    n.has_span = true;
+    n.s = s;
+    n.e = e;
+    p.nodes.try_set(widen_u64(id), n);
+}
+
+// Pushes an entry (keyed by part `k`, or keyless) for `child`, and links
+// it into container `c`.
+fn add_entry(inout p: P, c: u32, keyed: bool, k: Part, child: u32) -> u32 {
+    let e = wrapping_u32(p.ents.len());
+    p
+        .ents
+        .push(
+            Ent {
+                has_key: keyed,
+                koff: k.koff,
+                klen: k.klen,
+                hash: k.hash,
+                ks: k.ks,
+                ke: k.ke,
+                child: child,
+                next: NONE
+            }
+        );
+    link(inout p.nodes, inout p.ents, c, e);
+    e
+}
+
+fn no_part() -> Part {
+    Part {
+        koff: 0,
+        klen: 0,
+        hash: 0,
+        ks: 0,
+        ke: 0
+    }
+}
+
+// `value`: a node, or NONE.
+fn value(in s: Slice[u8], inout p: P) -> u32 {
+    let start = p.pos;
+    let c = cur(in s, p);
+    if c == EOF {
+        fresh(inout p);
+        return NONE;
+    }
+    let mut id = NONE;
+    if c == QUOTE || c == APOS {
+        let mark = p.text.len();
+        if !string(in s, inout p) {
+            return NONE;
+        }
+        let mut n = empty_node(K_STRING);
+        n.a = mark;
+        n.b = wrapping_sub(p.text.len(), mark);
+        id = new_node(inout p, n);
+    } else if c == OPEN || c == BRACE_OPEN {
+        // check_recursion
+        if wrapping_add(p.depth, 1) >= LIMIT {
+            cause_err(inout p, "recursion limit exceeded");
+            cut(inout p);
+            return NONE;
+        }
+        p.depth = wrapping_add(p.depth, 1);
+        id = if c == OPEN {
+            array(in s, inout p)
+        } else {
+            inline_table(in s, inout p)
+        };
+        p.depth = wrapping_sub(p.depth, 1);
+        if id == NONE {
+            return NONE;
+        }
+    } else if c == PLUS || c == MINUS || is_digit(c) {
+        if date_time(in s, inout p) {
+            id = new_node(inout p, empty_node(K_DATETIME));
+        } else {
+            if p.cut {
+                return NONE;
+            }
+            p.pos = start;
+            let (fok, special) = float(in s, inout p);
+            if fok {
+                let mut n = empty_node(K_FLOAT);
+                n.a = start;
+                n.b = special;
+                id = new_node(inout p, n);
+            } else {
+                if p.cut {
+                    return NONE;
+                }
+                p.pos = start;
+                let (iok, v) = integer(in s, inout p);
+                if !iok {
+                    return NONE;
+                }
+                let mut n = empty_node(K_INTEGER);
+                n.a = v;
+                id = new_node(inout p, n);
+            }
+        }
+    } else if c == UNDERSCORE {
+        let (iok, v) = integer(in s, inout p);
+        if !iok {
+            cx(inout p, E_LEADING);
+            return NONE;
+        }
+        let mut n = empty_node(K_INTEGER);
+        n.a = v;
+        id = new_node(inout p, n);
+    } else if c == DOT {
+        let (fok, special) = float(in s, inout p);
+        if !fok {
+            cx(inout p, E_LEADING);
+            return NONE;
+        }
+        let mut n = empty_node(K_FLOAT);
+        n.a = start;
+        n.b = special;
+        id = new_node(inout p, n);
+    } else if c == 116 || c == 102 || c == 105 || c == 110 {
+        // true / false (after the peek, a cut) and inf / nan.
+        let matched = if c == 116 {
+            tag(in s, p, "true")
+        } else if c == 102 {
+            tag(in s, p, "false")
+        } else if c == 105 {
+            tag(in s, p, "inf")
+        } else {
+            tag(in s, p, "nan")
+        };
+        if !matched {
+            fresh(inout p);
+            if c == 116 || c == 102 {
+                cut(inout p);
+            }
+            cx(inout p, L_STRING);
+            cx(inout p, wrapping_add(E_CHAR, QUOTE));
+            cx(inout p, wrapping_add(E_CHAR, APOS));
+            return NONE;
+        }
+        p
+            .pos = wrapping_add(
+                p.pos,
+                if c == 102 {
+                    5
+                } else if c == 116 {
+                    4
+                } else {
+                    3
+                }
+            );
+        if c == 116 || c == 102 {
+            let mut n = empty_node(K_BOOL);
+            n.a = if c == 116 {
+                1
+            } else {
+                0
+            };
+            id = new_node(inout p, n);
+        } else {
+            let mut n = empty_node(K_FLOAT);
+            n.a = start;
+            n.b = if c == 105 {
+                F_INF
+            } else {
+                F_NAN
+            };
+            id = new_node(inout p, n);
+        }
+    } else {
+        fresh(inout p);
+        cx(inout p, L_STRING);
+        cx(inout p, wrapping_add(E_CHAR, QUOTE));
+        cx(inout p, wrapping_add(E_CHAR, APOS));
+        return NONE;
+    }
+    set_span(inout p, id, start, p.pos);
+    id
+}
+
+fn array_value(in s: Slice[u8], inout p: P) -> u32 {
+    if !ws_comment_newline(in s, inout p) {
+        return NONE;
+    }
+    let v = value(in s, inout p);
+    if v == NONE {
+        return NONE;
+    }
+    if !ws_comment_newline(in s, inout p) {
+        return NONE;
+    }
+    v
+}
+
+fn array(in s: Slice[u8], inout p: P) -> u32 {
+    bump(inout p);
+    let id = new_node(inout p, empty_node(K_ARRAY));
+    // cut_err(array_values)
+    if cur(in s, p) != CLOSE {
+        let save = p.pos;
+        let v = array_value(in s, inout p);
+        if v == NONE {
+            if p.cut {
+                return NONE;
+            }
+            p.pos = save;
+        } else {
+            add_entry(inout p, id, false, no_part(), v);
+            loop {
+                let save2 = p.pos;
+                if cur(in s, p) != COMMA {
+                    break;
+                }
+                bump(inout p);
+                let w = array_value(in s, inout p);
+                if w == NONE {
+                    if p.cut {
+                        return NONE;
+                    }
+                    p.pos = save2;
+                    break;
+                }
+                add_entry(inout p, id, false, no_part(), w);
+            }
+            if cur(in s, p) == COMMA {
+                bump(inout p);
+            }
+        }
+        if !ws_comment_newline(in s, inout p) {
+            cut(inout p);
+            return NONE;
+        }
+    }
+    if cur(in s, p) != CLOSE {
+        fresh(inout p);
+        cut(inout p);
+        cx(inout p, L_ARRAY);
+        cx(inout p, wrapping_add(E_CHAR, CLOSE));
+        return NONE;
+    }
+    bump(inout p);
+    id
+}
+
+// Inline `keyval`: pushes (path start, path length, value) onto `pairs`.
+fn inline_keyval(in s: Slice[u8], inout p: P) -> bool {
+    let base = p.path.len();
+    if !key(in s, inout p) {
+        return false;
+    }
+    if cur(in s, p) != EQUALS {
+        fresh(inout p);
+        cx(inout p, wrapping_add(E_CHAR, DOT));
+        cx(inout p, wrapping_add(E_CHAR, EQUALS));
+        return cut(inout p);
+    }
+    bump(inout p);
+    ws(in s, inout p);
+    let v = value(in s, inout p);
+    if v == NONE {
+        return cut(inout p);
+    }
+    ws(in s, inout p);
+    p.pairs.push(base);
+    p.pairs.push(wrapping_sub(p.path.len(), base));
+    p.pairs.push(widen_u64(v));
+    true
+}
+
+fn inline_table(in s: Slice[u8], inout p: P) -> u32 {
+    bump(inout p);
+    let start = p.pos;
+    let path_base = p.path.len();
+    let pair_base = p.pairs.len();
+    let save = p.pos;
+    if !inline_keyval(in s, inout p) {
+        if p.cut {
+            return NONE;
+        }
+        p.pos = save;
+    } else {
+        loop {
+            let save2 = p.pos;
+            let paths = p.path.len();
+            let pairs = p.pairs.len();
+            if cur(in s, p) != COMMA {
+                break;
+            }
+            bump(inout p);
+            if !inline_keyval(in s, inout p) {
+                if p.cut {
+                    return NONE;
+                }
+                p.pos = save2;
+                p.path.truncate(paths);
+                p.pairs.truncate(pairs);
+                break;
+            }
+        }
+    }
+    ws(in s, inout p);
+    let id = new_node(inout p, empty_node(K_INLINE));
+    if !table_from_pairs(inout p, id, pair_base) {
+        // cut_err(... .try_map(table_from_pairs))
+        p.pos = start;
+        cut(inout p);
+        return NONE;
+    }
+    p.path.truncate(path_base);
+    p.pairs.truncate(pair_base);
+    if cur(in s, p) != BRACE_CLOSE {
+        fresh(inout p);
+        cut(inout p);
+        cx(inout p, L_INLINE);
+        cx(inout p, wrapping_add(E_CHAR, BRACE_CLOSE));
+        return NONE;
+    }
+    bump(inout p);
+    id
+}
+
+fn pair_word(in p: P, i: u64) -> u64 {
+    match p.pairs.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+// The decoded text of a key part, joined with `.` for a path.
+fn put_key(inout out: ChunkSeq[u8], in p: P, k: Part) {
+    for i in 0..k.klen {
+        match p.text.try_get(wrapping_add(k.koff, i)) {
+            Option::Some(b) => out.push(b),
+            Option::None => (),
+        }
+    }
+}
+
+// `Key::display_repr` of a parsed key, which keeps no raw text: toml_write's
+// default key form. Bare when it is all `A-Za-z0-9_-` (and not empty),
+// else a basic string if it needs no `\`, `"` or control escape, else a
+// literal string if it has no `'` or control, else a basic string.
+fn put_key_repr(inout out: ChunkSeq[u8], in p: P, k: Part) {
+    let mut bare = k.klen > 0;
+    let mut single = false;
+    let mut double = false;
+    let mut escape = false;
+    let mut codes = false;
+    for i in 0..k.klen {
+        let c = byte_at(in p.text.as_slice(), wrapping_add(k.koff, i));
+        let alnum = wrapping_sub(c | 32, 97) < 26 || wrapping_sub(c, 48) < 10;
+        if !(alnum || c == MINUS || c == UNDERSCORE) {
+            bare = false;
+        }
+        if c == APOS {
+            single = true;
+        } else if c == QUOTE {
+            double = true;
+        } else if c == 92 {
+            escape = true;
+        } else if c != 9 && (c <= 31 || c == 127) {
+            codes = true;
+        }
+    }
+    if bare {
+        put_key(inout out, p, k);
+        return;
+    }
+    // A basic string, escaped (a tab too), unless a literal string is the
+    // only form that needs no escape.
+    if (codes || escape || double) && !(codes || single) {
+        out.push(39);
+        put_key(inout out, p, k);
+        out.push(39);
+        return;
+    }
+    out.push(34);
+    for i in 0..k.klen {
+        let c = byte_at(in p.text.as_slice(), wrapping_add(k.koff, i));
+        if c == QUOTE {
+            put(inout out, "\\\"");
+        } else if c == 92 {
+            put(inout out, "\\\\");
+        } else if c == 8 {
+            put(inout out, "\\b");
+        } else if c == 9 {
+            put(inout out, "\\t");
+        } else if c == 10 {
+            put(inout out, "\\n");
+        } else if c == 12 {
+            put(inout out, "\\f");
+        } else if c == 13 {
+            put(inout out, "\\r");
+        } else if c <= 31 || c == 127 {
+            put(inout out, "\\u00");
+            out.push(upper_hex(wrapping_shr_u64(c, 4)));
+            out.push(upper_hex(c & 15));
+        } else {
+            out.push(wrapping_u8(c));
+        }
+    }
+    out.push(34);
+}
+
+fn upper_hex(v: u64) -> u8 {
+    if v < 10 {
+        wrapping_u8(wrapping_add(v, 48))
+    } else {
+        wrapping_u8(wrapping_add(v, 55))
+    }
+}
+
+fn put_path(inout out: ChunkSeq[u8], in p: P, in path: ChunkSeq[Part], from: u64, to: u64) {
+    for i in from..to {
+        if i > from {
+            out.push(46);
+        }
+        put_key(inout out, p, part_at(in path, i));
+    }
+}
+
+// `CustomError::DuplicateKey { key, table: None }`.
+fn dup_key_err(inout p: P, k: Part) -> bool {
+    let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    m.extend(in "duplicate key `".as_bytes());
+    put_key(inout m, p, k);
+    m.extend(in "`".as_bytes());
+    fresh(inout p);
+    p.has_cause = true;
+    p.cause.extend(in m.as_slice());
+    false
+}
+
+// `CustomError::extend_wrong_type(path, i, actual)`; `path` parts are
+// `path[from..]`.
+fn extend_wrong_type_err(inout p: P, from: u64, i: u64, kind: u8) -> bool {
+    let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    m.extend(in "dotted key `".as_bytes());
+    put_path(inout m, p, in p.path, from, wrapping_add(wrapping_add(from, i), 1));
+    m.extend(in "` attempted to extend non-table type (".as_bytes());
+    put_type_name(inout m, kind);
+    m.extend(in ")".as_bytes());
+    fresh(inout p);
+    p.has_cause = true;
+    p.cause.extend(in m.as_slice());
+    false
+}
+
+// `inline_table::descend_path` (dotted): the table for `path[from..to]`.
+fn descend_inline(inout p: P, root: u32, from: u64, to: u64) -> u32 {
+    let mut t = root;
+    for i in from..to {
+        let k = part_at(in p.path, i);
+        let e = lookup(in p.nodes, in p.ents, in p.text, t, k);
+        if e == NONE {
+            let mut n = empty_node(K_INLINE);
+            n.implicit = true;
+            n.dotted = true;
+            let c = new_node(inout p, n);
+            add_entry(inout p, t, true, k, c);
+            t = c;
+        } else {
+            let c = ent(in p.ents, e).child;
+            let cn = node(in p.nodes, c);
+            if cn.kind == K_INLINE {
+                if !cn.implicit {
+                    dup_key_err(inout p, k);
+                    return NONE;
+                }
+                t = c;
+            } else {
+                extend_wrong_type_err(inout p, from, wrapping_sub(i, from), cn.kind);
+                return NONE;
+            }
+        }
+    }
+    t
+}
+
+fn table_from_pairs(inout p: P, root: u32, pair_base: u64) -> bool {
+    let mut i = pair_base;
+    loop {
+        if i >= p.pairs.len() {
+            break;
+        }
+        let base = pair_word(p, i);
+        let len = pair_word(p, wrapping_add(i, 1));
+        let v = wrapping_u32(pair_word(p, wrapping_add(i, 2)));
+        i = wrapping_add(i, 3);
+        let leaf_at = wrapping_add(base, wrapping_sub(len, 1));
+        let leaf = part_at(in p.path, leaf_at);
+        let t = descend_inline(inout p, root, base, leaf_at);
+        if t == NONE {
+            return false;
+        }
+        let tn = node(in p.nodes, t);
+        if tn.dotted == (len == 1) {
+            return dup_key_err(inout p, leaf);
+        }
+        let e = lookup(in p.nodes, in p.ents, in p.text, t, leaf);
+        if e != NONE {
+            let x = ent(in p.ents, e);
+            return dup_key_err(
+                inout p,
+                Part {
+                    koff: x.koff,
+                    klen: x.klen,
+                    hash: x.hash,
+                    ks: x.ks,
+                    ke: x.ke
+                }
+            );
+        }
+        add_entry(inout p, t, true, leaf, v);
+    }
+    true
+}
+
+// ---------------------------------------------------------- tables
+
+// `CustomError::duplicate_key(path, i)` over `current`-style paths held
+// in `path` (`path[from..]`): the key's raw text and the table path.
+fn duplicate_key_err(inout p: P, in s: Slice[u8], in path: ChunkSeq[Part], i: u64) -> bool {
+    let k = part_at(in path, i);
+    let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    m.extend(in "duplicate key `".as_bytes());
+    put_key_repr(inout m, p, k);
+    if i == 0 {
+        m.extend(in "` in document root".as_bytes());
+    } else {
+        m.extend(in "` in table `".as_bytes());
+        put_path(inout m, p, in path, 0, i);
+        m.extend(in "`".as_bytes());
+    }
+    fresh(inout p);
+    p.has_cause = true;
+    p.cause.extend(in m.as_slice());
+    false
+}
+
+// `ParseState::descend_path(table, path[from..to], dotted)`.
+fn descend(inout p: P, in path: ChunkSeq[Part], table: u32, from: u64, to: u64, dotted: bool)
+    -> u32 {
+    let mut t = table;
+    for i in from..to {
+        let k = part_at(in path, i);
+        let e = lookup(in p.nodes, in p.ents, in p.text, t, k);
+        if e == NONE {
+            let mut n = empty_node(K_TABLE);
+            n.implicit = true;
+            n.dotted = dotted;
+            let c = new_node(inout p, n);
+            add_entry(inout p, t, true, k, c);
+            t = c;
+        } else {
+            let c = ent(in p.ents, e).child;
+            let cn = node(in p.nodes, c);
+            if cn.kind == K_AOT {
+                t = ent(in p.ents, cn.last).child;
+            } else if cn.kind == K_TABLE {
+                if dotted && !cn.implicit {
+                    dup_key_err(inout p, k);
+                    return NONE;
+                }
+                t = c;
+            } else {
+                // extend_wrong_type over `path[from..]`
+                let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
+                m.extend(in "dotted key `".as_bytes());
+                put_path(inout m, p, in path, from, wrapping_add(i, 1));
+                m.extend(in "` attempted to extend non-table type (".as_bytes());
+                put_type_name(inout m, cn.kind);
+                m.extend(in ")".as_bytes());
+                fresh(inout p);
+                p.has_cause = true;
+                p.cause.extend(in m.as_slice());
+                return NONE;
+            }
+        }
+    }
+    t
+}
+
+fn copy_path(in from: ChunkSeq[Part], a: u64, b: u64) -> ChunkSeq[Part] {
+    let mut out: ChunkSeq[Part] = ChunkSeq::new[Part]();
+    for i in a..b {
+        out.push(part_at(in from, i));
+    }
+    out
+}
+
+fn new_table(inout p: P) -> u32 {
+    new_node(inout p, empty_node(K_TABLE))
+}
+
+// `on_keyval`, for the keyval whose path is `path[base..]` and value `v`.
+fn on_keyval(inout p: P, base: u64, v: u32) -> bool {
+    let n = wrapping_sub(p.path.len(), base);
+    let leaf_at = wrapping_add(base, wrapping_sub(n, 1));
+    let leaf = part_at(in p.path, leaf_at);
+    let vn = node(in p.nodes, v);
+    let mut cn = node(in p.nodes, p.current);
+    if cn.has_span && vn.has_span {
+        cn.e = vn.e;
+        p.nodes.try_set(widen_u64(p.current), cn);
+    }
+    let path = copy_path(in p.path, 0, p.path.len());
+    let t = descend(inout p, in path, p.current, base, leaf_at, true);
+    if t == NONE {
+        return false;
+    }
+    let tn = node(in p.nodes, t);
+    if tn.dotted == (n == 1) {
+        return dup_key_err(inout p, leaf);
+    }
+    let e = lookup(in p.nodes, in p.ents, in p.text, t, leaf);
+    if e != NONE {
+        let x = ent(in p.ents, e);
+        let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        m.extend(in "duplicate key `".as_bytes());
+        put_key(
+            inout m,
+            p,
+            Part {
+                koff: x.koff,
+                klen: x.klen,
+                hash: x.hash,
+                ks: x.ks,
+                ke: x.ke
+            }
+        );
+        if p.current_path.len() == 0 {
+            m.extend(in "` in document root".as_bytes());
+        } else {
+            m.extend(in "` in table `".as_bytes());
+            put_path(inout m, p, in p.current_path, 0, p.current_path.len());
+            m.extend(in "`".as_bytes());
+        }
+        fresh(inout p);
+        p.has_cause = true;
+        p.cause.extend(in m.as_slice());
+        return false;
+    }
+    add_entry(inout p, t, true, leaf, v);
+    true
+}
+
+// The aot's span: its first table's start to its last table's end.
+fn aot_span(inout p: P, a: u32) {
+    let an = node(in p.nodes, a);
+    let f = node(in p.nodes, ent(in p.ents, an.first).child);
+    let l = node(in p.nodes, ent(in p.ents, an.last).child);
+    let mut n = an;
+    if f.has_span && l.has_span {
+        n.has_span = true;
+        n.s = f.s;
+        n.e = l.e;
+    } else {
+        n.has_span = false;
+    }
+    p.nodes.try_set(widen_u64(a), n);
+}
+
+fn finalize_table(inout p: P, in s: Slice[u8]) -> bool {
+    let table = p.current;
+    p.current = new_table(inout p);
+    let path = copy_path(in p.current_path, 0, p.current_path.len());
+    p.current_path.clear();
+    let n = path.len();
+    if n == 0 {
+        p.root = table;
+        return true;
+    }
+    let parent = descend(inout p, in path, p.root, 0, wrapping_sub(n, 1), false);
+    if parent == NONE {
+        return false;
+    }
+    let k = part_at(in path, wrapping_sub(n, 1));
+    let e = lookup(in p.nodes, in p.ents, in p.text, parent, k);
+    if p.current_is_array {
+        let mut a = NONE;
+        if e == NONE {
+            a = new_node(inout p, empty_node(K_AOT));
+            add_entry(inout p, parent, true, k, a);
+        } else {
+            a = ent(in p.ents, e).child;
+            if node(in p.nodes, a).kind != K_AOT {
+                return duplicate_key_err(inout p, in s, in path, wrapping_sub(n, 1));
+            }
+        }
+        add_entry(inout p, a, false, no_part(), table);
+        aot_span(inout p, a);
+        return true;
+    }
+    if e == NONE {
+        add_entry(inout p, parent, true, k, table);
+        return true;
+    }
+    let mut x = ent(in p.ents, e);
+    let cn = node(in p.nodes, x.child);
+    if cn.kind == K_TABLE && cn.implicit {
+        x.child = table;
+        p.ents.try_set(widen_u64(e), x);
+        return true;
+    }
+    duplicate_key_err(inout p, in s, in path, wrapping_sub(n, 1))
+}
+
+// `start_table` / `start_array_table` for the header path `path[base..]`
+// with span `hs..he`.
+fn start_table(inout p: P, in s: Slice[u8], base: u64, hs: u64, he: u64, is_array: bool) -> bool {
+    let path = copy_path(in p.path, base, p.path.len());
+    let n = path.len();
+    let parent = descend(inout p, in path, p.root, 0, wrapping_sub(n, 1), false);
+    if parent == NONE {
+        return false;
+    }
+    let k = part_at(in path, wrapping_sub(n, 1));
+    let e = lookup(in p.nodes, in p.ents, in p.text, parent, k);
+    if is_array {
+        if e == NONE {
+            let a = new_node(inout p, empty_node(K_AOT));
+            add_entry(inout p, parent, true, k, a);
+        } else if node(in p.nodes, ent(in p.ents, e).child).kind != K_AOT {
+            return duplicate_key_err(inout p, in s, in path, wrapping_sub(n, 1));
+        }
+    } else if e != NONE {
+        let c = ent(in p.ents, e).child;
+        let cn = node(in p.nodes, c);
+        unlink(inout p.nodes, inout p.ents, parent, e);
+        if cn.kind == K_TABLE && cn.implicit && !cn.dotted {
+            p.current = c;
+        } else {
+            return duplicate_key_err(inout p, in s, in path, wrapping_sub(n, 1));
+        }
+    }
+    let mut cn = node(in p.nodes, p.current);
+    cn.implicit = false;
+    cn.dotted = false;
+    cn.has_span = true;
+    cn.s = hs;
+    cn.e = he;
+    p.nodes.try_set(widen_u64(p.current), cn);
+    p.current_is_array = is_array;
+    p.current_path = path;
+    true
+}
+
+// `table`: a `[std]` or `[[array]]` header.
+fn table(in s: Slice[u8], inout p: P) -> bool {
+    let start = p.pos;
+    if wrapping_add(p.pos, 2) > s.len() {
+        fresh(inout p);
+        cx(inout p, L_TABLE_HEADER);
+        return false;
+    }
+    let is_array = ahead(in s, p, 1) == OPEN;
+    let width: u64 = if is_array {
+        2
+    } else {
+        1
+    };
+    p.pos = wrapping_add(p.pos, width);
+    let base = p.path.len();
+    if !key(in s, inout p) {
+        cut(inout p);
+        cx(inout p, L_TABLE_HEADER);
+        return false;
+    }
+    let closed = if is_array {
+        cur(in s, p) == CLOSE && ahead(in s, p, 1) == CLOSE
+    } else {
+        cur(in s, p) == CLOSE
+    };
+    if !closed {
+        p.path.truncate(base);
+        fresh(inout p);
+        cut(inout p);
+        cx(inout p, wrapping_add(E_CHAR, DOT));
+        cx(
+            inout p,
+            if is_array {
+                E_CLOSE2
+            } else {
+                E_CLOSE
+            }
+        );
+        cx(inout p, L_TABLE_HEADER);
+        return false;
+    }
+    p.pos = wrapping_add(p.pos, width);
+    let he = p.pos;
+    if !line_trailing(in s, inout p) {
+        p.path.truncate(base);
+        cut(inout p);
+        cx(inout p, wrapping_add(E_CHAR, LF));
+        cx(inout p, wrapping_add(E_CHAR, HASH));
+        cx(inout p, L_TABLE_HEADER);
+        return false;
+    }
+    // try_map(on_std_header / on_array_header)
+    let mut ok = finalize_table(inout p, in s);
+    if ok {
+        ok = start_table(inout p, in s, base, start, he, is_array);
+    }
+    p.path.truncate(base);
+    if !ok {
+        p.pos = start;
+        cx(inout p, L_TABLE_HEADER);
+        return false;
+    }
+    true
+}
+
+// Document `keyval`.
+fn keyval(in s: Slice[u8], inout p: P) -> bool {
+    let start = p.pos;
+    let base = p.path.len();
+    if !key(in s, inout p) {
+        return false;
+    }
+    if cur(in s, p) != EQUALS {
+        p.path.truncate(base);
+        fresh(inout p);
+        cx(inout p, wrapping_add(E_CHAR, DOT));
+        cx(inout p, wrapping_add(E_CHAR, EQUALS));
+        return cut(inout p);
+    }
+    bump(inout p);
+    ws(in s, inout p);
+    let v = value(in s, inout p);
+    if v == NONE {
+        p.path.truncate(base);
+        return cut(inout p);
+    }
+    if !line_trailing(in s, inout p) {
+        p.path.truncate(base);
+        cx(inout p, wrapping_add(E_CHAR, LF));
+        cx(inout p, wrapping_add(E_CHAR, HASH));
+        return cut(inout p);
+    }
+    let ok = on_keyval(inout p, base, v);
+    p.path.truncate(base);
+    if !ok {
+        p.pos = start;
+        return false;
+    }
+    true
+}
+
+fn document(in s: Slice[u8], inout p: P) -> bool {
+    if byte_at(in s, 0) == 0xef && byte_at(in s, 1) == 0xbb && byte_at(in s, 2) == 0xbf {
+        p.pos = 3;
+    }
+    ws(in s, inout p);
+    loop {
+        let c = cur(in s, p);
+        let save = p.pos;
+        if c == EOF {
+            break;
+        }
+        if c == HASH {
+            if !comment(in s, inout p) || !line_ending(in s, inout p) {
+                return cut(inout p);
+            }
+        } else if c == OPEN {
+            if !table(in s, inout p) {
+                return cut(inout p);
+            }
+        } else if c == LF || c == CR {
+            if !newline(in s, inout p) {
+                p.pos = save;
+                break;
+            }
+        } else {
+            if !keyval(in s, inout p) {
+                return cut(inout p);
+            }
+        }
+        ws(in s, inout p);
+    }
+    if cur(in s, p) != EOF {
+        return fresh(inout p);
+    }
+    true
+}
+
+pub fn parse_document(in s: Slice[u8]) -> Doc {
+    let mut p = P {
+        pos: 0,
+        cut: false,
+        ctx: ChunkSeq::new[u64](),
+        has_cause: false,
+        cause: ChunkSeq::new[u8](),
+        depth: 0,
+        nodes: ChunkSeq::new[Node](),
+        ents: ChunkSeq::new[Ent](),
+        text: ChunkSeq::new[u8](),
+        path: ChunkSeq::new[Part](),
+        pairs: ChunkSeq::new[u64](),
+        root: 0,
+        current: 0,
+        current_is_array: false,
+        current_path: ChunkSeq::new[Part]()
+    };
+    p.root = new_table(inout p);
+    let mut cur_table = empty_node(K_TABLE);
+    cur_table.has_span = true;
+    p.current = new_node(inout p, cur_table);
+    let mut message: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let empty_keys: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut ok = document(in s, inout p);
+    if !ok {
+        let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        put_context_error(inout m, p);
+        let (a, b) = char_span(in s, p.pos);
+        render_error(inout message, in s, true, a, b, in m, in empty_keys);
+    } else if !finalize_table(inout p, in s) {
+        ok = false;
+        let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        put_context_error(inout m, p);
+        render_error(inout message, in s, false, 0, 0, in m, in empty_keys);
+    }
+    Doc {
+        ok: ok,
+        message: message,
+        nodes: p.nodes,
+        ents: p.ents,
+        text: p.text,
+        root: p.root
+    }
+}
