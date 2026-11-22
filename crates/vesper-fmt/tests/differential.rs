@@ -48,9 +48,9 @@ fn under_bazel() -> bool {
     std::env::var_os("TEST_SRCDIR").is_some()
 }
 
-/// The printed result of the seed, the printed result of the port, or
-/// `None` when the port hands the source to the Rust code.
-fn both(source: &str, limits: Limits) -> (String, Option<String>) {
+/// Compare each standalone result with the seed. For a grammar the standalone
+/// port hands back, compare the result returned by the public formatter.
+fn compare(source: &str, limits: Limits, handed: &mut usize) -> Option<String> {
     let seed = match fmt_seed::format_source(source, seed_limits(limits)) {
         Ok(r) => format!("Ok(changed={}) {:?}", r.changed, r.output),
         Err(e) => format!("Err({e:?})"),
@@ -59,16 +59,21 @@ fn both(source: &str, limits: Limits) -> (String, Option<String>) {
         Ok(r) => format!("Ok(changed={}) {:?}", r.changed, r.output),
         Err(e) => format!("Err({e:?})"),
     };
-    let mut port = port_format_source(source, limits).map(describe);
-    if let Some(raw) = &port
-        && raw != &seed
-        && has_surface_syntax(source)
-    {
-        // The standalone Vesper parser handles the executable grammar. Check
-        // the actual port-backed entry point on the host surface profile.
-        port = Some(describe(vesper_fmt::format_source(source, limits)));
+    let port = match port_format_source(source, limits).map(describe) {
+        None => {
+            *handed += 1;
+            describe(vesper_fmt::format_source(source, limits))
+        }
+        Some(raw) if raw != seed && has_surface_syntax(source) => {
+            describe(vesper_fmt::format_source(source, limits))
+        }
+        Some(raw) => raw,
+    };
+    if port == seed {
+        return None;
     }
-    (seed, port)
+    let cut = |s: &str| s.chars().take(300).collect::<String>();
+    Some(format!("seed {}\nport {}", cut(&seed), cut(&port)))
 }
 
 /// The two parsers intentionally differ on quoted operator delimiters, on
@@ -102,22 +107,6 @@ fn seed_limits(l: Limits) -> fmt_seed::Limits {
         max_doc_nodes: l.max_doc_nodes,
         max_depth: l.max_depth,
         max_work: l.max_work,
-    }
-}
-
-/// Compares one source; returns the difference, if any. `handed` counts
-/// the sources the port gave back to the Rust code.
-fn compare(source: &str, limits: Limits, handed: &mut usize) -> Option<String> {
-    match both(source, limits) {
-        (_, None) => {
-            *handed += 1;
-            None
-        }
-        (seed, Some(port)) if seed == port => None,
-        (seed, Some(port)) => {
-            let cut = |s: &str| s.chars().take(300).collect::<String>();
-            Some(format!("seed {}\nport {}", cut(&seed), cut(&port)))
-        }
     }
 }
 
@@ -183,6 +172,36 @@ fn repository_sources_format_byte_identically() {
         "{} sources, {formatted} formatted, {handed} in the macro profile",
         files.len()
     );
+}
+
+/// Cover both sides of the fixed-expression macro profile and the boundary
+/// where a valid expansion's formatted output exceeds the requested limit.
+#[test]
+fn macro_formatting_and_refusals_match_the_seed() {
+    let source = "macro keep($x:expr)->expr{quote{/* é */$x}}fn main()->i64{keep!(42)}";
+    let output = fmt_seed::format_source(source, fmt_seed::Limits::default())
+        .unwrap()
+        .output;
+    let mut handed = 0;
+    for max_output_bytes in [output.len() - 1, output.len(), output.len() + 1] {
+        let limits = Limits {
+            max_output_bytes,
+            ..Limits::default()
+        };
+        if let Some(diff) = compare(source, limits, &mut handed) {
+            panic!("output limit {max_output_bytes}: {diff}");
+        }
+    }
+    for malformed in [
+        source.replace("expr)->", "pat)->"),
+        source.replace("keep!(42)", "keep!(42,1)"),
+        source.replace("/* é */$x", "/* é */$unbound"),
+    ] {
+        assert!(fmt_seed::format_source(&malformed, fmt_seed::Limits::default()).is_err());
+        if let Some(diff) = compare(&malformed, Limits::default(), &mut handed) {
+            panic!("{malformed}: {diff}");
+        }
+    }
 }
 
 /// The same files with every run of whitespace replaced, so the layout

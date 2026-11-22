@@ -2226,3 +2226,917 @@ pub fn rec_free(in d: Dev, in r: Rec) eff [Ffi[Vk], Fail[RuntimeError]] {
     }
     Vk::PfnDestroyCommandPool(pfn_destroy_command_pool(d.library), d.device, r.pool, 0);
 }
+
+// ---------------------------------------------------------------------------
+// The Kinetic broadphase (src/broadphase.rs): sort and sweep on the device.
+// The crate keeps the buffers and kernels; this part checks the boxes,
+// records the whole schedule in one submission, waits for it and reads the
+// pair count back.
+
+// The broadphase's four kernels (keys, bitonic sort step, sweep, scan).
+pub copy struct BpKernels {
+    pub keys: Kern,
+    pub sort: Kern,
+    pub sweep: Kern,
+    pub scan: Kern,
+}
+
+// The broadphase's device buffers: 6 words per box, the padded keys and
+// ids, per-box counts, their exclusive prefix sums (plus the total) and the
+// pair words.
+pub copy struct BpBuffers {
+    pub boxes: Buf,
+    pub keys: Buf,
+    pub ids: Buf,
+    pub counts: Buf,
+    pub offsets: Buf,
+    pub pairs: Buf,
+}
+
+// A call that may have failed (handlers return it, so the recording is
+// freed outside them).
+copy struct Outcome {
+    failed: bool,
+    value: u64,
+    err: GpuErr,
+}
+
+fn no_error() -> GpuErr {
+    GpuErr {
+        kind: 0,
+        detail: 0,
+        code: 0
+    }
+}
+
+// One run: the timeline value it submitted (0 when nothing was submitted),
+// the pair count the device wrote, and the wait's error (`kind` 0 when the
+// wait succeeded).
+pub copy struct BpRun {
+    pub value: u64,
+    pub total: u64,
+    pub err: GpuErr,
+}
+
+const F32_EXPONENT: u32 = 2139095040;
+const F32_SIGN: u32 = 2147483648;
+
+fn word_at(in words: Slice[u8], i: u64) -> u32 eff [Fail[RuntimeError], Fail[ArithOverflow]] {
+    let at = i * 4;
+    widen_u32(words[at]) | (widen_u32(words[at + 1]) << 8) | (widen_u32(words[at + 2]) << 16) | (
+        widen_u32(words[at + 3]) << 24
+    )
+}
+
+// The order-preserving encoding of a finite f32's bits (-0 as +0), the one
+// the kernels compare (`order_key` in src/broadphase.rs).
+pub fn order_key(bits: u32) -> u32 {
+    let b = if bits == F32_SIGN {
+        0
+    } else {
+        bits
+    };
+    if b & F32_SIGN != 0 {
+        b ^ 4294967295
+    } else {
+        b | F32_SIGN
+    }
+}
+
+fn finite(bits: u32) -> bool {
+    bits & F32_EXPONENT != F32_EXPONENT
+}
+
+// 1 + the index of the first box that is not finite or has min > max on an
+// axis (the CPU broadphase's `InvalidBox`), or 0 when every one of the `n`
+// boxes (6 f32 bit patterns each: min xyz, max xyz) is valid.
+pub fn bp_check(in words: Slice[u8], n: u64) -> u64 eff [Fail[RuntimeError], Fail[ArithOverflow]] {
+    let mut bad: u64 = 0;
+    for i in 0..n {
+        let mut ok = true;
+        for a in 0..3 {
+            let lo = word_at(in words, i * 6 + a);
+            let hi = word_at(in words, i * 6 + 3 + a);
+            if !(finite(lo) && finite(hi) && order_key(lo) <= order_key(hi)) {
+                ok = false;
+            }
+        }
+        if !ok {
+            bad = i + 1;
+            break;
+        }
+    }
+    bad
+}
+
+fn imm4(a: u32, b: u32, c: u32, e: u32)
+    -> ChunkSeq[u8] eff [Fail[RuntimeError], Fail[ArithOverflow]] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    out.resize(16, 0);
+    let mut s = Scratch {
+        base: 0,
+        image: out
+    };
+    put32(inout s, 0, a);
+    put32(inout s, 4, b);
+    put32(inout s, 8, c);
+    put32(inout s, 12, e);
+    s.image
+}
+
+fn groups64(items: u64) -> u32 eff [Fail[ArithOverflow]] {
+    narrow_u32((items + 63) / 64)
+}
+
+fn next_power_of_two(n: u64) -> u64 eff [Fail[ArithOverflow]] {
+    let mut p: u64 = 1;
+    loop {
+        if p >= n {
+            break;
+        }
+        p = p * 2;
+    }
+    p
+}
+
+// Records the broadphase over `n` (2 or more) checked boxes whose words are
+// `words`: keys, the bitonic sort over the padded length, the counting
+// sweep, the scan and the writing sweep. Leaves the recording to the caller.
+fn bp_record(
+    in d: Dev,
+    inout r: Rec,
+    in k: BpKernels,
+    in b: BpBuffers,
+    n: u64,
+    max_pairs: u64
+) eff [Ffi[Vk], Ffi[LibC], Fail[GpuErr], Fail[RuntimeError], Fail[ArithOverflow]] {
+    let padded = next_power_of_two(n);
+    let n32 = narrow_u32(n);
+    let padded32 = narrow_u32(padded);
+    let cap = narrow_u32(max_pairs);
+    let mut keys_bufs: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    keys_bufs.push(b.boxes.buffer);
+    keys_bufs.push(b.keys.buffer);
+    keys_bufs.push(b.ids.buffer);
+    let imm = imm4(n32, padded32, 0, 0);
+    rec_dispatch(
+        in d,
+        inout r,
+        in k.keys,
+        in keys_bufs.as_slice(),
+        in imm.as_slice(),
+        groups64(padded),
+        1,
+        1
+    );
+    let mut sort_bufs: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    sort_bufs.push(b.keys.buffer);
+    sort_bufs.push(b.ids.buffer);
+    let mut kk: u32 = 2;
+    loop {
+        if kk > padded32 {
+            break;
+        }
+        let mut j = kk / 2;
+        loop {
+            if j == 0 {
+                break;
+            }
+            let imm = imm4(n32, padded32, j, kk);
+            rec_dispatch(
+                in d,
+                inout r,
+                in k.sort,
+                in sort_bufs.as_slice(),
+                in imm.as_slice(),
+                groups64(padded),
+                1,
+                1
+            );
+            j = j / 2;
+        }
+        kk = kk * 2;
+    }
+    let mut sweep_bufs: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    sweep_bufs.push(b.boxes.buffer);
+    sweep_bufs.push(b.keys.buffer);
+    sweep_bufs.push(b.ids.buffer);
+    sweep_bufs.push(b.counts.buffer);
+    sweep_bufs.push(b.offsets.buffer);
+    sweep_bufs.push(b.pairs.buffer);
+    let count = imm4(n32, 0, cap, 0);
+    rec_dispatch(
+        in d,
+        inout r,
+        in k.sweep,
+        in sweep_bufs.as_slice(),
+        in count.as_slice(),
+        groups64(n),
+        1,
+        1
+    );
+    let mut scan_bufs: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    scan_bufs.push(b.counts.buffer);
+    scan_bufs.push(b.offsets.buffer);
+    let scan = imm4(n32, 0, 0, 0);
+    rec_dispatch(in d, inout r, in k.scan, in scan_bufs.as_slice(), in scan.as_slice(), 1, 1, 1);
+    let write = imm4(n32, 1, cap, 0);
+    rec_dispatch(
+        in d,
+        inout r,
+        in k.sweep,
+        in sweep_bufs.as_slice(),
+        in write.as_slice(),
+        groups64(n),
+        1,
+        1
+    );
+}
+
+// Writes the `n` boxes' words, runs the whole broadphase in one submission
+// after timeline value `previous`, waits for it and returns its value and
+// the pair count (which may exceed `max_pairs`: the caller reports that).
+// A failed wait is returned in `err`, not raised, with the submitted value.
+// The caller holds the queue lock and owns every buffer and kernel, none of
+// which a pending submission uses. Fewer than 2 boxes submit nothing.
+pub fn bp_run(
+    in d: Dev,
+    in k: BpKernels,
+    in b: BpBuffers,
+    in words: Slice[u8],
+    n: u64,
+    max_pairs: u64,
+    previous: u64,
+) -> BpRun eff [Ffi[Vk], Ffi[LibC], Fail[GpuErr], Fail[RuntimeError], Fail[ArithOverflow]] {
+    if n < 2 {
+        return BpRun {
+            value: 0,
+            total: 0,
+            err: no_error(),
+        };
+    }
+    buffer_write(in b.boxes, 0, in words);
+    let mut r = rec_new(in d);
+    let submitted = handle Fail[GpuErr] in {
+        bp_record(in d, inout r, in k, in b, n, max_pairs);
+        Outcome {
+            failed: false,
+            value: rec_submit(in d, in r, previous),
+            err: no_error()
+        }
+    } with {
+        return v => v,
+        raise(e, k2) => Outcome {
+            failed: true,
+            value: 0,
+            err: e
+        },
+    };
+    if submitted.failed {
+        rec_free(in d, in r);
+        fail(submitted.err.kind, submitted.err.detail, submitted.err.code);
+    }
+    let value = submitted.value;
+    let waited = handle Fail[GpuErr] in {
+        wait_value(in d, value);
+        Outcome {
+            failed: false,
+            value: value,
+            err: no_error()
+        }
+    } with {
+        return v => v,
+        raise(e, k3) => Outcome {
+            failed: true,
+            value: 0,
+            err: e
+        },
+    };
+    if waited.failed {
+        // The value was signalled or the device is lost: report it with the
+        // error, so the crate still advances its timeline past it.
+        wait_idle(in d);
+        rec_free(in d, in r);
+        return BpRun {
+            value: value,
+            total: 0,
+            err: waited.err
+        };
+    }
+    rec_free(in d, in r);
+    let mut total: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    total.resize(4, 0);
+    buffer_read(in b.offsets, n * 4, inout total.as_slice_mut());
+    BpRun {
+        value: value,
+        total: widen_u64(word_at(in total.as_slice(), 0)),
+        err: no_error(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The tensor kernels' checks and dispatches (src/tensor.rs) and the whole
+// llama2.c decode step. The crate owns every buffer and kernel and passes
+// their handles; each function here checks the shapes exactly as the CPU
+// kernels' contract states, then records the dispatch.
+
+// `Kind::Shape` details of the tensor kernels' checks (src/tensor.rs).
+enum TensorShape: _ {
+    MatmulA = 8,
+    MatmulW = 9,
+    MatmulOut = 10,
+    RmsEpsilon = 11,
+    RmsX = 12,
+    RmsOut = 13,
+    RmsWeight = 14,
+    RopeHeads = 15,
+    RopeX = 16,
+    RopeFreqs = 17,
+    SwigluGate = 18,
+    SwigluUp = 19,
+    KvK = 20,
+    KvV = 21,
+    KvPosition = 22,
+    KvKeys = 23,
+    KvValues = 24,
+    AttEmpty = 25,
+    AttQ = 26,
+    AttOut = 27,
+    AttTable = 28,
+    AttKeys = 29,
+    AttValues = 30,
+}
+
+// `Kind::Limit` details of the tensor kernels' checks.
+enum TensorLimit: _ {
+    OperandSize = 5,
+    MK = 6,
+    NK = 7,
+    MN = 8,
+    RowsN = 9,
+    AttHeadDim = 10,
+    AttTokens = 11,
+    AttWidth = 12,
+    M = 13,
+    N = 14,
+    K = 15,
+    MatmulRows = 16,
+    RmsRows = 17,
+    Len = 18,
+    HeadDim = 19,
+    Position = 20,
+    KvDim = 21,
+    QueryHeads = 22,
+    KvHeads = 23,
+    Tokens = 24,
+}
+// The six tensor kernels.
+pub copy struct TensorKs {
+    pub matmul: Kern,
+    pub rms_norm: Kern,
+    pub rope: Kern,
+    pub swiglu: Kern,
+    pub kv_write: Kern,
+    pub attention: Kern,
+}
+
+// 16-token K/V pages (`vesper_tensor::kv::TOKENS_PER_PAGE`).
+const TOKENS_PER_PAGE: u64 = 16;
+// The attention kernel's workgroup score buffer and head width limits.
+const MAX_ATTENTION_TOKENS: u64 = 2048;
+const MAX_HEAD_DIM: u64 = 1024;
+const U32_MAX: u64 = 4294967295;
+
+// `a * b`, or `Kind::Limit` `what` when it overflows.
+fn mul_or(a: u64, b: u64, what: u32) -> u64 eff [Fail[GpuErr], Fail[ArithOverflow]] {
+    let r = handle Fail[ArithOverflow] in {
+        Outcome {
+            failed: false,
+            value: a * b,
+            err: no_error()
+        }
+    } with {
+        return v => v,
+        raise(e, k) => Outcome {
+            failed: true,
+            value: 0,
+            err: no_error()
+        },
+    };
+    if r.failed {
+        fail(Kind::Limit, what, 0);
+    }
+    r.value
+}
+
+// `v` as a u32, or `Kind::Limit` `what`.
+fn u32_of(v: u64, what: u32) -> u32 eff [Fail[GpuErr], Fail[ArithOverflow]] {
+    if v > U32_MAX {
+        fail(Kind::Limit, what, 0);
+    }
+    narrow_u32(v)
+}
+
+// `buffer` holds `floats` (more than zero) f32s, or `Kind::Shape` `what`.
+fn need(in b: Buf, floats: u64, what: u32) eff [Fail[GpuErr], Fail[ArithOverflow]] {
+    let bytes = mul_or(floats, 4, TensorLimit::OperandSize);
+    if floats == 0 || bytes > b.len {
+        fail(Kind::Shape, what, 0);
+    }
+}
+
+fn groups_for(n: u64, per: u64) -> u32 eff [Fail[GpuErr], Fail[RuntimeError], Fail[ArithOverflow]] {
+    let g = n / per + if n % per == 0 {
+        0
+    } else {
+        1
+    };
+    u32_of(g, OverLimit::Groups)
+}
+
+fn immediates(in words: Slice[u32]) -> ChunkSeq[u8] eff [Fail[RuntimeError], Fail[ArithOverflow]] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    out.resize(words.len() * 4, 0);
+    let mut s = Scratch {
+        base: 0,
+        image: out
+    };
+    for i in 0..words.len() {
+        put32(inout s, i * 4, words[i]);
+    }
+    s.image
+}
+
+// With `dry`, every tensor function makes all of its checks and records
+// nothing, so a caller can report a shape error before an ownership one.
+fn dispatch(
+    in d: Dev,
+    inout r: Rec,
+    in k: Kern,
+    in buffers: Slice[u64],
+    in imm: Slice[u32],
+    gx: u32,
+    gy: u32,
+    dry: bool,
+) eff [Ffi[Vk], Ffi[LibC], Fail[GpuErr], Fail[RuntimeError], Fail[ArithOverflow]] {
+    if dry {
+        return;
+    }
+    let bytes = immediates(in imm);
+    rec_dispatch(in d, inout r, in k, in buffers, in bytes.as_slice(), gx, gy, 1);
+}
+
+fn handles3(in a: Buf, in b: Buf, in c: Buf) -> ChunkSeq[u64] {
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    out.push(a.buffer);
+    out.push(b.buffer);
+    out.push(c.buffer);
+    out
+}
+
+fn handles2(in a: Buf, in b: Buf) -> ChunkSeq[u64] {
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    out.push(a.buffer);
+    out.push(b.buffer);
+    out
+}
+
+fn handles5(in a: Buf, in b: Buf, in c: Buf, in e: Buf, in f: Buf) -> ChunkSeq[u64] {
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    out.push(a.buffer);
+    out.push(b.buffer);
+    out.push(c.buffer);
+    out.push(e.buffer);
+    out.push(f.buffer);
+    out
+}
+
+// `out[r, c] = sum_i w[c, i] * a[r, i]` for `a: [m, k]`, `w: [n, k]`; with
+// `accumulate` the sum is added to `out`.
+pub fn tk_matmul(
+    in d: Dev,
+    inout r: Rec,
+    in kern: Kern,
+    in a: Buf,
+    in w: Buf,
+    in out: Buf,
+    m: u64,
+    n: u64,
+    k: u64,
+    accumulate: bool,
+    dry: bool,
+) eff [Ffi[Vk], Ffi[LibC], Fail[GpuErr], Fail[RuntimeError], Fail[ArithOverflow]] {
+    need(in a, mul_or(m, k, TensorLimit::MK), TensorShape::MatmulA);
+    need(in w, mul_or(n, k, TensorLimit::NK), TensorShape::MatmulW);
+    need(in out, mul_or(m, n, TensorLimit::MN), TensorShape::MatmulOut);
+    let mut imm: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    imm.push(u32_of(m, TensorLimit::M));
+    imm.push(u32_of(n, TensorLimit::N));
+    imm.push(u32_of(k, TensorLimit::K));
+    imm
+        .push(
+            if accumulate {
+                1
+            } else {
+                0
+            }
+        );
+    let gx = groups_for(n, 64);
+    let gy = u32_of(m, TensorLimit::MatmulRows);
+    let bufs = handles3(in a, in w, in out);
+    dispatch(in d, inout r, in kern, in bufs.as_slice(), in imm.as_slice(), gx, gy, dry);
+}
+
+// RMSNorm of each of `rows` rows of width `n`; `epsilon` is an f32's bits
+// and must be finite and above zero.
+pub fn tk_rms_norm(
+    in d: Dev,
+    inout r: Rec,
+    in kern: Kern,
+    in x: Buf,
+    in weight: Buf,
+    in out: Buf,
+    rows: u64,
+    n: u64,
+    epsilon: u32,
+    dry: bool,
+) eff [Ffi[Vk], Ffi[LibC], Fail[GpuErr], Fail[RuntimeError], Fail[ArithOverflow]] {
+    if !(finite(epsilon) && epsilon & F32_SIGN == 0 && epsilon != 0) {
+        fail(Kind::Shape, TensorShape::RmsEpsilon, 0);
+    }
+    let total = mul_or(rows, n, TensorLimit::RowsN);
+    need(in x, total, TensorShape::RmsX);
+    need(in out, total, TensorShape::RmsOut);
+    need(in weight, n, TensorShape::RmsWeight);
+    let mut imm: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    imm.push(u32_of(n, TensorLimit::N));
+    imm.push(epsilon);
+    let gx = u32_of(rows, TensorLimit::RmsRows);
+    let bufs = handles3(in x, in weight, in out);
+    dispatch(in d, inout r, in kern, in bufs.as_slice(), in imm.as_slice(), gx, 1, dry);
+}
+
+// RoPE in place over `len` floats of whole heads of width `head_dim`, with
+// `head_dim / 2` frequencies in `freqs`.
+pub fn tk_rope(
+    in d: Dev,
+    inout r: Rec,
+    in kern: Kern,
+    in x: Buf,
+    in freqs: Buf,
+    len: u64,
+    head_dim: u64,
+    position: u64,
+    dry: bool,
+) eff [Ffi[Vk], Ffi[LibC], Fail[GpuErr], Fail[RuntimeError], Fail[ArithOverflow]] {
+    let whole = head_dim != 0 && head_dim % 2 == 0 && len % head_dim == 0;
+    if !whole {
+        fail(Kind::Shape, TensorShape::RopeHeads, 0);
+    }
+    need(in x, len, TensorShape::RopeX);
+    need(in freqs, head_dim / 2, TensorShape::RopeFreqs);
+    let mut imm: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    imm.push(u32_of(len, TensorLimit::Len));
+    imm.push(u32_of(head_dim, TensorLimit::HeadDim));
+    imm.push(u32_of(position, TensorLimit::Position));
+    let gx = groups_for(len / 2, 64);
+    let bufs = handles2(in x, in freqs);
+    dispatch(in d, inout r, in kern, in bufs.as_slice(), in imm.as_slice(), gx, 1, dry);
+}
+
+// `gate[i] = silu(gate[i]) * up[i]` for `n` elements.
+pub fn tk_swiglu(
+    in d: Dev,
+    inout r: Rec,
+    in kern: Kern,
+    in gate: Buf,
+    in up: Buf,
+    n: u64,
+    dry: bool
+) eff [Ffi[Vk], Ffi[LibC], Fail[GpuErr], Fail[RuntimeError], Fail[ArithOverflow]] {
+    need(in gate, n, TensorShape::SwigluGate);
+    need(in up, n, TensorShape::SwigluUp);
+    let mut imm: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    imm.push(u32_of(n, TensorLimit::N));
+    let gx = groups_for(n, 64);
+    let bufs = handles2(in gate, in up);
+    dispatch(in d, inout r, in kern, in bufs.as_slice(), in imm.as_slice(), gx, 1, dry);
+}
+
+// Stores `k` and `v` (`kv_dim` floats each) at `position` of the paged
+// sequence whose page table is `table`.
+pub fn tk_kv_write(
+    in d: Dev,
+    inout r: Rec,
+    in kern: Kern,
+    in k: Buf,
+    in v: Buf,
+    in table: Buf,
+    in keys: Buf,
+    in values: Buf,
+    position: u64,
+    kv_dim: u64,
+    dry: bool,
+) eff [Ffi[Vk], Ffi[LibC], Fail[GpuErr], Fail[RuntimeError], Fail[ArithOverflow]] {
+    need(in k, kv_dim, TensorShape::KvK);
+    need(in v, kv_dim, TensorShape::KvV);
+    if (position / TOKENS_PER_PAGE + 1) * 4 > table.len {
+        fail(Kind::Shape, TensorShape::KvPosition, 0);
+    }
+    let page_floats = TOKENS_PER_PAGE * kv_dim;
+    need(in keys, page_floats, TensorShape::KvKeys);
+    need(in values, page_floats, TensorShape::KvValues);
+    let mut imm: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    imm.push(u32_of(position, TensorLimit::Position));
+    imm.push(u32_of(kv_dim, TensorLimit::KvDim));
+    let gx = groups_for(kv_dim, 64);
+    let bufs = handles5(in k, in v, in table, in keys, in values);
+    dispatch(in d, inout r, in kern, in bufs.as_slice(), in imm.as_slice(), gx, 1, dry);
+}
+
+// Paged grouped-query attention of `q` (`[query_heads, head_dim]`) over
+// `tokens` tokens into `out`. The caller checked the head ratio
+// (`vesper_tensor::shape::gqa_ratio`, whose error type the crate keeps).
+pub fn tk_attention(
+    in d: Dev,
+    inout r: Rec,
+    in kern: Kern,
+    in q: Buf,
+    in keys: Buf,
+    in values: Buf,
+    in table: Buf,
+    in out: Buf,
+    query_heads: u64,
+    kv_heads: u64,
+    head_dim: u64,
+    tokens: u64,
+    dry: bool,
+) eff [Ffi[Vk], Ffi[LibC], Fail[GpuErr], Fail[RuntimeError], Fail[ArithOverflow]] {
+    if head_dim == 0 || head_dim > MAX_HEAD_DIM {
+        fail(Kind::Limit, TensorLimit::AttHeadDim, 0);
+    }
+    if tokens == 0 {
+        fail(Kind::Shape, TensorShape::AttEmpty, 0);
+    }
+    if tokens > MAX_ATTENTION_TOKENS {
+        fail(Kind::Limit, TensorLimit::AttTokens, 0);
+    }
+    let width = mul_or(query_heads, head_dim, TensorLimit::AttWidth);
+    need(in q, width, TensorShape::AttQ);
+    need(in out, width, TensorShape::AttOut);
+    let pages = tokens / TOKENS_PER_PAGE + if tokens % TOKENS_PER_PAGE == 0 {
+        0
+    } else {
+        1
+    };
+    if pages * 4 > table.len {
+        fail(Kind::Shape, TensorShape::AttTable, 0);
+    }
+    let page_floats = TOKENS_PER_PAGE * kv_heads * head_dim;
+    need(in keys, page_floats, TensorShape::AttKeys);
+    need(in values, page_floats, TensorShape::AttValues);
+    let mut imm: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    imm.push(u32_of(query_heads, TensorLimit::QueryHeads));
+    imm.push(u32_of(kv_heads, TensorLimit::KvHeads));
+    imm.push(u32_of(head_dim, TensorLimit::HeadDim));
+    imm.push(u32_of(tokens, TensorLimit::Tokens));
+    let gx = u32_of(query_heads, TensorLimit::QueryHeads);
+    let bufs = handles5(in q, in keys, in values, in table, in out);
+    dispatch(in d, inout r, in kern, in bufs.as_slice(), in imm.as_slice(), gx, 1, dry);
+}
+
+// A model's shape for one decode step.
+pub copy struct StepShape {
+    pub dim: u64,
+    pub kv_dim: u64,
+    pub head_dim: u64,
+    pub heads: u64,
+    pub kv_heads: u64,
+    pub hidden_dim: u64,
+    pub vocab: u64,
+    pub layers: u64,
+    pub position: u64,
+    pub epsilon: u32,
+}
+
+// One session's activation buffers and page table.
+pub copy struct StepSession {
+    pub table: Buf,
+    pub x: Buf,
+    pub xb: Buf,
+    pub q: Buf,
+    pub k: Buf,
+    pub v: Buf,
+    pub att: Buf,
+    pub hb: Buf,
+    pub hb2: Buf,
+    pub logits: Buf,
+}
+
+// The model's global buffers.
+pub copy struct StepModel {
+    pub rms_final: Buf,
+    pub classifier: Buf,
+    pub freqs: Buf,
+}
+
+// Words per layer in `tk_step`'s `layers`: (buffer, length) of rms_attention,
+// wq, wk, wv, wo, rms_ffn, w1, w2, w3, then the cache's keys and values.
+const LAYER_WORDS: u64 = 22;
+
+fn layer_buf(in layers: Slice[u64], l: u64, slot: u64)
+    -> Buf eff [Fail[RuntimeError], Fail[ArithOverflow]] {
+    let at = l * LAYER_WORDS + slot * 2;
+    Buf {
+        buffer: layers[at],
+        memory: 0,
+        ptr: 0,
+        len: layers[at + 1]
+    }
+}
+
+// Records one llama2.c decode step at `shape.position` (`14 * layers + 2`
+// dispatches): per layer RMSNorm, the Q/K/V projections, RoPE, the K/V
+// write, paged attention, the output projection, RMSNorm and the SwiGLU
+// feed-forward; then the final RMSNorm and the classifier into `logits`.
+pub fn tk_step(
+    in d: Dev,
+    inout r: Rec,
+    in ks: TensorKs,
+    in c: StepShape,
+    in s: StepSession,
+    in m: StepModel,
+    in layers: Slice[u64],
+    dry: bool,
+) eff [Ffi[Vk], Ffi[LibC], Fail[GpuErr], Fail[RuntimeError], Fail[ArithOverflow]] {
+    for l in 0..c.layers {
+        let rms_attention = layer_buf(in layers, l, 0);
+        let wq = layer_buf(in layers, l, 1);
+        let wk = layer_buf(in layers, l, 2);
+        let wv = layer_buf(in layers, l, 3);
+        let wo = layer_buf(in layers, l, 4);
+        let rms_ffn = layer_buf(in layers, l, 5);
+        let w1 = layer_buf(in layers, l, 6);
+        let w2 = layer_buf(in layers, l, 7);
+        let w3 = layer_buf(in layers, l, 8);
+        let keys = layer_buf(in layers, l, 9);
+        let values = layer_buf(in layers, l, 10);
+        tk_rms_norm(
+            in d,
+            inout r,
+            in ks.rms_norm,
+            in s.x,
+            in rms_attention,
+            in s.xb,
+            1,
+            c.dim,
+            c.epsilon,
+            dry
+        );
+        tk_matmul(in d, inout r, in ks.matmul, in s.xb, in wq, in s.q, 1, c.dim, c.dim, false, dry);
+        tk_matmul(
+            in d,
+            inout r,
+            in ks.matmul,
+            in s.xb,
+            in wk,
+            in s.k,
+            1,
+            c.kv_dim,
+            c.dim,
+            false,
+            dry
+        );
+        tk_matmul(
+            in d,
+            inout r,
+            in ks.matmul,
+            in s.xb,
+            in wv,
+            in s.v,
+            1,
+            c.kv_dim,
+            c.dim,
+            false,
+            dry
+        );
+        tk_rope(in d, inout r, in ks.rope, in s.q, in m.freqs, c.dim, c.head_dim, c.position, dry);
+        tk_rope(
+            in d,
+            inout r,
+            in ks.rope,
+            in s.k,
+            in m.freqs,
+            c.kv_dim,
+            c.head_dim,
+            c.position,
+            dry
+        );
+        tk_kv_write(
+            in d,
+            inout r,
+            in ks.kv_write,
+            in s.k,
+            in s.v,
+            in s.table,
+            in keys,
+            in values,
+            c.position,
+            c.kv_dim,
+            dry
+        );
+        tk_attention(
+            in d,
+            inout r,
+            in ks.attention,
+            in s.q,
+            in keys,
+            in values,
+            in s.table,
+            in s.att,
+            c.heads,
+            c.kv_heads,
+            c.head_dim,
+            c.position + 1,
+            dry
+        );
+        tk_matmul(in d, inout r, in ks.matmul, in s.att, in wo, in s.x, 1, c.dim, c.dim, true, dry);
+        tk_rms_norm(
+            in d,
+            inout r,
+            in ks.rms_norm,
+            in s.x,
+            in rms_ffn,
+            in s.xb,
+            1,
+            c.dim,
+            c.epsilon,
+            dry
+        );
+        tk_matmul(
+            in d,
+            inout r,
+            in ks.matmul,
+            in s.xb,
+            in w1,
+            in s.hb,
+            1,
+            c.hidden_dim,
+            c.dim,
+            false,
+            dry
+        );
+        tk_matmul(
+            in d,
+            inout r,
+            in ks.matmul,
+            in s.xb,
+            in w3,
+            in s.hb2,
+            1,
+            c.hidden_dim,
+            c.dim,
+            false,
+            dry
+        );
+        tk_swiglu(in d, inout r, in ks.swiglu, in s.hb, in s.hb2, c.hidden_dim, dry);
+        tk_matmul(
+            in d,
+            inout r,
+            in ks.matmul,
+            in s.hb,
+            in w2,
+            in s.x,
+            1,
+            c.dim,
+            c.hidden_dim,
+            true,
+            dry
+        );
+    }
+    tk_rms_norm(
+        in d,
+        inout r,
+        in ks.rms_norm,
+        in s.x,
+        in m.rms_final,
+        in s.xb,
+        1,
+        c.dim,
+        c.epsilon,
+        dry
+    );
+    tk_matmul(
+        in d,
+        inout r,
+        in ks.matmul,
+        in s.xb,
+        in m.classifier,
+        in s.logits,
+        1,
+        c.vocab,
+        c.dim,
+        false,
+        dry
+    );
+}

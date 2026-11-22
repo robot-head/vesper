@@ -410,9 +410,44 @@ on lavapipe. Its ABBA arm (`port/bench-abba.sh`) builds the Rust runtime at
 0787bb71, the last commit that had it, in a worktree. A run with
 `abba.py` directly (no native CPU flags) gave 1.098 [1.051, 1.146].
 
-The rest of the crate remains Rust: `shader.rs` (naga, to be replaced by
-committed SPIR-V), and `tensor.rs` and `broadphase.rs`, the host-side
-orchestration over the runtime, which port next.
+The rest of the crate remained Rust: `shader.rs` (naga), and the
+`tensor.rs` and `broadphase.rs` drivers, which part 2b ports.
+
+## Part 2b: the broadphase and tensor drivers in Vesper
+
+The host-side drivers of `src/broadphase.rs` and `src/tensor.rs` move into
+the same package, next to the runtime they call:
+
+- **Broadphase.** `bp_check` validates the boxes from their f32 bits (finite
+  exponent, ordered through `order_key`, so no float arithmetic), and
+  `bp_run` writes them, records the key pass, the bitonic network, both
+  sweeps and the scan into one command buffer, submits it, waits, and reads
+  the pair count back. `order_key` is the Vesper function too.
+- **Tensor kernels.** `tk_matmul`, `tk_rms_norm`, `tk_rope`, `tk_swiglu`,
+  `tk_kv_write` and `tk_attention` do every shape and limit check in the
+  same order, with the same messages, and record the dispatch. `tk_step`
+  records the whole llama2.c decode step (`14 * layers + 2` dispatches). The
+  head-ratio check stays a call to `vesper_tensor::shape::gqa_ratio`, so
+  its error keeps its type.
+- **What Rust keeps.** The structs that own buffers, kernels, pages and
+  sessions; packing `Aabb`s and weights into words; the page lease and
+  the embedding row write; sorting the returned pairs; and the RoPE
+  frequencies, whose `powf` must match `vesper-tensor`'s CPU formula bit for
+  bit. Two crate-internal runtime hooks connect them:
+  `Recording::record_with` (a Vesper-recorded dispatch that keeps its
+  buffers and kernels alive) and `Context::submit_with` (a Vesper-made
+  submission under the queue lock).
+
+| Module | Differential | ABBA (Vesper/Rust) | Verdict |
+|---|---|---|---|
+| broadphase driver | 0 differences: the 6 broadphase tests (exact pair sets against the CPU LBVH and brute force, typed errors, determinism) | 1.02x [0.96x, 1.05x], n = 10 | **PASS** |
+| tensor driver | 0 differences: the 6 kernel tests and 3 generation tests (200 greedy tokens equal to the CPU decoder and the llama2.c reference text) | 1.00x [0.96x, 1.05x], n = 10 | **PASS** |
+
+The baselines (`port/bench-abba.sh broadphase` and `generation`) are the
+examples built at 6628b18a, the last commit with the Rust drivers. One
+compiler gap showed up while porting: a handler whose result is a
+`Result[T, E]` built in its clauses fails in codegen ("native layout is not
+yet defined for _"), so `bp_run` returns a small copy struct instead.
 
 ### Gap 10: a callback handle in an exported value
 
@@ -429,9 +464,9 @@ so one package cannot import `dlopen` on Unix and `LoadLibraryA` and
 
 ## Plan for the remaining parts
 
-1. **Part 2b: the rest of `vesper-gpu-compute`.** `tensor.rs` and
-   `broadphase.rs` in Vesper over the runtime, then the committed SPIR-V
-   and manifest in place of naga.
+1. **Part 2d: naga.** Committed SPIR-V and a manifest in place of
+   `shader.rs`, which narrows `Context::kernel` to bundled kernels (or a
+   one-function naga shim).
 2. **Part 3: `vesper-ignis-vulkan`.** The core paths (barriers, timelines,
    formats, depth/stencil, split barriers, ranges, ownership) first, binding
    with ordinary descriptor sets. Presentation over libxcb. Sync fds and the

@@ -25,7 +25,7 @@ use crate::shader::{self, ShaderError};
 #[allow(unsafe_code)]
 #[rustfmt::skip]
 #[path = "../port/binding.rs"]
-mod binding;
+pub(crate) mod binding;
 use binding::{Buf, Dev, GpuErr, Kern, Rec};
 
 /// Number of [`Submission`]s dropped without [`Submission::wait`] in this
@@ -106,7 +106,7 @@ const CALLS: [&str; 23] = [
     "vkDeviceWaitIdle",
 ];
 /// `s_*` details.
-const SHAPES: [&str; 8] = [
+const SHAPES: [&str; 31] = [
     "?",
     "zero-sized buffer",
     "buffer range",
@@ -115,14 +115,59 @@ const SHAPES: [&str; 8] = [
     "dispatch with zero workgroups",
     "descriptor pool",
     "kernel entry point contains NUL",
+    // The tensor kernels' checks (`TensorShape` in vesper/src/lib.ves).
+    "matmul a",
+    "matmul w",
+    "matmul out",
+    "rms_norm epsilon",
+    "rms_norm x",
+    "rms_norm out",
+    "rms_norm weight",
+    "rope needs whole heads of even width",
+    "rope x",
+    "rope frequencies",
+    "swiglu gate",
+    "swiglu up",
+    "kv_write k",
+    "kv_write v",
+    "kv_write position beyond the page table",
+    "kv_write keys",
+    "kv_write values",
+    "attention over an empty sequence",
+    "attention q",
+    "attention out",
+    "attention page table too short",
+    "attention keys",
+    "attention values",
 ];
 /// `l_*` details.
-const LIMITS: [&str; 5] = [
+const LIMITS: [&str; 25] = [
     "?",
     "buffer size",
     "kernel storage bindings",
     "kernel immediate bytes",
     "workgroup count",
+    // The tensor kernels' checks (`TensorLimit`).
+    "operand size",
+    "m * k",
+    "n * k",
+    "m * n",
+    "rows * n",
+    "attention head_dim",
+    "attention tokens",
+    "attention width",
+    "m",
+    "n",
+    "k",
+    "matmul rows",
+    "rms_norm rows",
+    "len",
+    "head_dim",
+    "position",
+    "kv_dim",
+    "query_heads",
+    "kv_heads",
+    "tokens",
 ];
 
 fn api_parts(v: u64) -> (u32, u32, u32) {
@@ -209,6 +254,11 @@ fn gpu_error(e: GpuErr, wanted: Option<&str>) -> GpuError {
         4 => GpuError::Limit(pick(&LIMITS, e.detail)),
         _ => GpuError::Unsupported("no host-visible coherent memory type for storage buffers"),
     }
+}
+
+/// A Vesper `GpuErr` from another module of the crate as the crate's error.
+pub(crate) fn port_error(e: GpuErr) -> GpuError {
+    gpu_error(e, None)
 }
 
 /// Converts a Vesper failure. Arithmetic or indexing failures inside the
@@ -390,6 +440,48 @@ impl Context {
         })
     }
 
+    /// Runs a whole submission made by another Vesper-driven module of the
+    /// crate (`run` records, submits and waits inside the Vesper library).
+    /// Under the queue lock, once every submission that bound `buffers` has
+    /// completed, `run` gets the device and the last issued timeline value,
+    /// and returns the value it signalled (0 if it submitted nothing). That
+    /// value becomes the issued value and every buffer's busy value, so the
+    /// runtime's ordering holds as for [`Recording::submit`], also when
+    /// `run` fails after submitting (it returns that value with its error).
+    /// Every buffer
+    /// and kernel `run` uses must be one of `buffers` or owned by the caller
+    /// for the whole call, and `run` must not return before its submission
+    /// completed.
+    pub(crate) fn submit_with<R>(
+        &self,
+        buffers: &[&Buffer],
+        run: impl FnOnce(Dev, u64) -> (u64, Result<R, GpuError>),
+    ) -> Result<R, GpuError> {
+        let inner = &self.inner;
+        if buffers.iter().any(|b| !b.same_device(self)) {
+            return Err(GpuError::ForeignObject);
+        }
+        let _queue = inner
+            .queue
+            .lock()
+            .map_err(|_| GpuError::Shape("queue mutex poisoned"))?;
+        for b in buffers {
+            let value = b.inner.busy_until.load(Ordering::Acquire);
+            if value != 0 {
+                binding::wait_value(inner.dev, value).map_err(wait_error)?;
+            }
+        }
+        let previous = inner.issued.load(Ordering::Acquire);
+        let (value, result) = run(inner.dev, previous);
+        if value != 0 {
+            for b in buffers {
+                b.inner.busy_until.fetch_max(value, Ordering::AcqRel);
+            }
+            inner.issued.store(value, Ordering::Release);
+        }
+        result
+    }
+
     /// Starts recording a command buffer.
     pub fn record(&self) -> Result<Recording<'_>, GpuError> {
         let rec = vesper!(binding::rec_new(self.inner.dev), RecNewError)?;
@@ -494,6 +586,12 @@ impl Buffer {
         Ok(out)
     }
 
+    /// The Vesper library's handle, for the crate's other Vesper-driven
+    /// modules (the buffer stays owned by this `Buffer`).
+    pub(crate) fn raw(&self) -> Buf {
+        self.inner.buf
+    }
+
     fn same_device(&self, ctx: &Context) -> bool {
         Arc::ptr_eq(&self.inner.ctx, &ctx.inner)
     }
@@ -533,6 +631,12 @@ impl std::fmt::Debug for Kernel {
 impl Kernel {
     pub fn name(&self) -> &str {
         &self.inner.name
+    }
+
+    /// The Vesper library's handle, for the crate's other Vesper-driven
+    /// modules (the handle stays owned by this kernel).
+    pub(crate) fn raw(&self) -> Kern {
+        self.inner.kern
     }
 }
 
@@ -624,6 +728,51 @@ impl<'a> Recording<'a> {
             .buffers
             .extend(buffers.iter().map(|b| b.inner.clone()));
         self.dispatches += 1;
+        Ok(())
+    }
+
+    /// Records `dispatches` dispatches made by another Vesper-driven module
+    /// of the crate: `record` gets the device, the command buffer and `dry`,
+    /// and may bind only `kernels` and `buffers`, which the recording then
+    /// keeps alive as [`Recording::dispatch`] does. It is called first with
+    /// `dry` set, to make every check of its own without recording, so its
+    /// shape errors come before an ownership error as they did in Rust; then
+    /// once to record.
+    pub(crate) fn record_with(
+        &mut self,
+        kernels: &[&'a Kernel],
+        buffers: &[&'a Buffer],
+        dispatches: usize,
+        record: impl Fn(Dev, &mut Rec, bool) -> Result<(), GpuError>,
+    ) -> Result<(), GpuError> {
+        let dev = self.ctx.inner.dev;
+        if let Some(rec) = self.commands.rec.as_mut() {
+            // A dry run records nothing, so nothing is retained on failure.
+            record(dev, rec, true)?;
+        }
+        if kernels
+            .iter()
+            .any(|k| !Arc::ptr_eq(&k.inner.ctx, &self.ctx.inner))
+            || buffers.iter().any(|b| !b.same_device(self.ctx))
+        {
+            return Err(GpuError::ForeignObject);
+        }
+        let rec = self
+            .commands
+            .rec
+            .as_mut()
+            .ok_or(GpuError::Shape("recording already submitted"))?;
+        let recorded = record(dev, rec, false);
+        // Kept even when `record` failed part way: the command buffer may
+        // already name them.
+        self.commands
+            .kernels
+            .extend(kernels.iter().map(|k| k.inner.clone()));
+        self.commands
+            .buffers
+            .extend(buffers.iter().map(|b| b.inner.clone()));
+        recorded?;
+        self.dispatches += dispatches;
         Ok(())
     }
 
