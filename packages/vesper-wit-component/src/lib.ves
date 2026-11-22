@@ -3,29 +3,30 @@
 // and WIT world into a `wasm32-wasip2` component, byte for byte as
 // src/wasm_backend/component.rs `encode` does.
 //
-// It writes the component directly (see comp.ves) and covers the worlds
-// the backend writes without host imports. A WIT outside that subset is
-// declined, and the caller wraps the module with Rust's wit-component.
+// It writes the component directly (see comp.ves) and covers every world
+// the backend writes: commands with their host imports (host.ves) and
+// string parameters, and Nexus plugins. A WIT or core module outside that
+// is declined, and the caller wraps the module with Rust's wit-component.
 
 use self::wit::{
     Wit,
     parse
 };
-use self::comp::{
-    encode,
-    needs_realloc
-};
+use self::comp::encode;
 use @vesper/check-data::pack_text;
 
 // The world kinds of `WasmWorld`.
 const W_COMMAND: u8 = 0;
+const W_PLUGIN: u8 = 1;
 
 // Why the port declined (the second word of a declined answer).
 const D_INPUT: u64 = 1;
-const D_PLUGIN: u64 = 2;
-const D_REALLOC: u64 = 5;
+// The world kind and the WIT's world disagree.
+const D_WORLD: u64 = 2;
 // WIT reasons (wit.ves `E_*`) are answered as 16 + reason.
 const D_WIT: u64 = 16;
+// comp.ves `encode`'s reasons (`X_*`) as 32 + reason.
+const D_ENCODE: u64 = 32;
 
 fn byte(in b: Slice[u8], i: u64) -> u8 {
     match b.try_get(i) {
@@ -55,8 +56,9 @@ pub fn wit_component_wrap_bytes(in input: Slice[u8]) -> ChunkSeq[u64] {
     if n < 5 {
         return declined(D_INPUT);
     }
-    if byte(in input, 0) != W_COMMAND {
-        return declined(D_PLUGIN);
+    let kind = byte(in input, 0);
+    if kind != W_COMMAND && kind != W_PLUGIN {
+        return declined(D_INPUT);
     }
     let mut len: u64 = 0;
     for k in 0..4 {
@@ -73,10 +75,14 @@ pub fn wit_component_wrap_bytes(in input: Slice[u8]) -> ChunkSeq[u64] {
     if w.err != 0 {
         return declined(wrapping_add(D_WIT, w.err));
     }
-    if needs_realloc(in w) {
-        return declined(D_REALLOC);
+    if w.plugin != (kind == W_PLUGIN) {
+        return declined(D_WORLD);
     }
-    let component = encode(in input[wit_end..n], in w);
+    let mut component = ChunkSeq::new[u8]();
+    let x = encode(in input[wit_end..n], in w, inout component);
+    if x != 0 {
+        return declined(wrapping_add(D_ENCODE, x));
+    }
     let packed = pack_text(in component);
     let mut out = ChunkSeq::with_capacity[u64](wrapping_add(packed.len(), 1));
     out.push(0);

@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 340" width="560" height="340" role="img" aria-labelledby="title description">
+  <title id="title">Chrono effect recording and transcript replay</title>
+  <desc id="description">The design records effect completions between keyframes. Transcript replay does not reconstruct nondeterminism outside the captured events.</desc>
+  <style>
+    :root { --canvas: #111a25; --inset: #15202d; --panel: #1b2735; --border: #536479; --shared: #83dacc; --muted: #bac7d6; --text: #e8edf5; --error: #ff9fae; --exclusive: #ffbf7f; }
+    @media (prefers-color-scheme: light) { :root { --canvas: #f7f5f0; --inset: #f0efe9; --panel: #eeede7; --border: #747874; --shared: #006b80; --muted: #535852; --text: #1b2030; --error: #9e2438; --exclusive: #a24800; } }
+  </style>
+  <defs><marker id="teal" viewBox="0 0 9 9" markerWidth="7" markerHeight="7" refX="8" refY="4.5" orient="auto"><path d="M0 0 L9 4.5 L0 9 Z" fill="var(--shared)"/></marker><marker id="gold" viewBox="0 0 9 9" markerWidth="7" markerHeight="7" refX="8" refY="4.5" orient="auto"><path d="M0 0 L9 4.5 L0 9 Z" fill="var(--exclusive)"/></marker><marker id="red" viewBox="0 0 9 9" markerWidth="7" markerHeight="7" refX="8" refY="4.5" orient="auto"><path d="M0 0 L9 4.5 L0 9 Z" fill="var(--error)"/></marker></defs>
+  <rect width="560" height="340" fill="var(--canvas)" rx="10"/>
+  <g font-family="Inter, Arial, sans-serif">
+  <rect x="24" y="22" width="152" height="58" rx="8" fill="var(--panel)" stroke="var(--exclusive)" stroke-width="1.6"/>
+  <text x="100" y="47" text-anchor="middle" font-size="15" font-weight="500" fill="var(--exclusive)" font-family="JetBrains Mono, ui-monospace, monospace">eff [Clock]</text>
+  <text x="100" y="67" text-anchor="middle" font-size="12" font-weight="500" fill="var(--muted)">now() timestamps</text>
+  <rect x="204" y="22" width="152" height="58" rx="8" fill="var(--panel)" stroke="var(--exclusive)" stroke-width="1.6"/>
+  <text x="280" y="47" text-anchor="middle" font-size="15" font-weight="500" fill="var(--exclusive)" font-family="JetBrains Mono, ui-monospace, monospace">eff [Net]</text>
+  <text x="280" y="67" text-anchor="middle" font-size="12" font-weight="500" fill="var(--muted)">wire packet slices</text>
+  <rect x="384" y="22" width="152" height="58" rx="8" fill="var(--panel)" stroke="var(--exclusive)" stroke-width="1.6"/>
+  <text x="460" y="47" text-anchor="middle" font-size="15" font-weight="500" fill="var(--exclusive)" font-family="JetBrains Mono, ui-monospace, monospace">eff [Rng]</text>
+  <text x="460" y="67" text-anchor="middle" font-size="12" font-weight="500" fill="var(--muted)">entropy seeds</text>
+  <path d="M100 80 V110" fill="none" stroke="var(--exclusive)" stroke-width="2.5" stroke-linejoin="round" marker-end="url(#gold)"/>
+  <path d="M280 80 V110" fill="none" stroke="var(--exclusive)" stroke-width="2.5" stroke-linejoin="round" marker-end="url(#gold)"/>
+  <path d="M460 80 V110" fill="none" stroke="var(--exclusive)" stroke-width="2.5" stroke-linejoin="round" marker-end="url(#gold)"/>
+  <rect x="24" y="114" width="512" height="92" rx="8" fill="var(--panel)" stroke="var(--border)" stroke-width="1.6"/>
+  <text x="280" y="137" text-anchor="middle" font-size="14" font-weight="500" fill="var(--text)">ChronoTape · 32B ChronoEventWireHeader + CoW keyframes</text>
+  <rect x="40" y="148" width="96" height="44" rx="6" fill="var(--inset)" stroke="var(--shared)" stroke-width="1.6"/>
+  <text x="88" y="175" text-anchor="middle" font-size="12" font-weight="500" fill="var(--shared)" font-family="JetBrains Mono, ui-monospace, monospace">Keyframe K0</text>
+  <rect x="148" y="148" width="82" height="44" rx="6" fill="var(--inset)" stroke="var(--exclusive)" stroke-width="1.6"/>
+  <text x="189" y="175" text-anchor="middle" font-size="12" font-weight="500" fill="var(--exclusive)" font-family="JetBrains Mono, ui-monospace, monospace">seq #101</text>
+  <rect x="242" y="148" width="82" height="44" rx="6" fill="var(--inset)" stroke="var(--exclusive)" stroke-width="1.6"/>
+  <text x="283" y="175" text-anchor="middle" font-size="12" font-weight="500" fill="var(--exclusive)" font-family="JetBrains Mono, ui-monospace, monospace">seq #102</text>
+  <rect x="336" y="148" width="82" height="44" rx="6" fill="var(--inset)" stroke="var(--exclusive)" stroke-width="1.6"/>
+  <text x="377" y="175" text-anchor="middle" font-size="12" font-weight="500" fill="var(--exclusive)" font-family="JetBrains Mono, ui-monospace, monospace">seq #103</text>
+  <rect x="430" y="148" width="90" height="44" rx="6" fill="var(--inset)" stroke="var(--shared)" stroke-width="1.6"/>
+  <text x="475" y="175" text-anchor="middle" font-size="12" font-weight="500" fill="var(--shared)" font-family="JetBrains Mono, ui-monospace, monospace">Keyframe K1</text>
+  <path d="M150 206 V236" fill="none" stroke="var(--shared)" stroke-width="2.5" stroke-linejoin="round" marker-end="url(#teal)"/>
+  <path d="M410 206 V236" fill="none" stroke="var(--exclusive)" stroke-width="2.5" stroke-linejoin="round" marker-end="url(#gold)"/>
+  <rect x="24" y="240" width="240" height="78" rx="8" fill="var(--panel)" stroke="var(--shared)" stroke-width="1.6"/>
+  <text x="144" y="266" text-anchor="middle" font-size="15" font-weight="500" fill="var(--shared)">Deterministic replay</text>
+  <text x="144" y="287" text-anchor="middle" font-size="13" font-weight="500" fill="var(--text)">Pure code at native speed</text>
+  <text x="144" y="306" text-anchor="middle" font-size="12" font-weight="500" fill="var(--muted)">0 syscall ptrace overhead</text>
+  <rect x="296" y="240" width="240" height="78" rx="8" fill="var(--panel)" stroke="var(--exclusive)" stroke-width="1.6"/>
+  <text x="416" y="266" text-anchor="middle" font-size="15" font-weight="500" fill="var(--exclusive)">Reverse watchpoints</text>
+  <text x="416" y="287" text-anchor="middle" font-size="13" font-weight="500" fill="var(--text)" font-family="JetBrains Mono, ui-monospace, monospace">reverse_watch_inout</text>
+  <text x="416" y="306" text-anchor="middle" font-size="12" font-weight="500" fill="var(--muted)">Jump K0 + replay to mutation</text>
+  </g>
+</svg>

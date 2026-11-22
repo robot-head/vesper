@@ -7,7 +7,12 @@
 //     variant %name { %case, %case(ty), ... }
 //     main: func(%param: ty, ...) -> ty;
 //   }
-//   world program { export wasi:cli/run@0.2.0; export entry; }
+//   world program { import <host>; export wasi:cli/run@0.2.0; export entry; }
+//
+// with the host imports of host.ves, or the Nexus plugin world
+//
+//   package vesper:program@0.1.0;
+//   world plugin { export run: func(%p: ty, ...) -> ty; }
 //
 // where `ty` is a scalar, `string`, `tuple<ty, ...>` or a `%name`
 // defined above it. Anything else sets `err`, and the caller hands the
@@ -23,6 +28,7 @@ use @vesper/check-data::util::{
     inc,
     w
 };
+use self::host::host_import;
 
 pub const NONE32: u32 = 4294967295;
 
@@ -121,6 +127,10 @@ pub struct Wit {
     funcs: ChunkSeq[Func],
     // The world's exports in order: 0 = wasi:cli/run, 1 = entry.
     exports: ChunkSeq[u8],
+    // The world's host imports in order (host.ves `H_*`).
+    imports: ChunkSeq[u8],
+    // `world plugin { export run: func(...) -> ...; }`: funcs[e0..].
+    plugin: bool,
     // `funcs` row of wasi:cli/run's `run`.
     run_func: u64,
     // `funcs[e0..]` are the entry interface's functions.
@@ -137,6 +147,8 @@ pub fn wit_new() -> Wit {
         fields: ChunkSeq::new[Field](),
         funcs: ChunkSeq::new[Func](),
         exports: ChunkSeq::new[u8](),
+        imports: ChunkSeq::new[u8](),
+        plugin: false,
         run_func: 0,
         e0: 0,
         err: 0,
@@ -600,11 +612,20 @@ fn world(inout c: Cur, in b: Slice[u8], inout w: Wit) {
         }
         let (s, e) = word(inout c, in b, inout w);
         let it = item(inout c, in b, inout w);
+        let x = it.as_slice();
+        if same(in b, s, e, in "import".as_bytes()) {
+            let h = host_import(in x);
+            if h == 255 {
+                w.err = E_IMPORT;
+                return;
+            }
+            w.imports.push(h);
+            continue;
+        }
         if !same(in b, s, e, in "export".as_bytes()) {
-            w.err = E_IMPORT;
+            w.err = E_WORLD;
             return;
         }
-        let x = it.as_slice();
         if same(in x, 0, x.len(), in "wasi:cli/run@0.2.0".as_bytes()) {
             w.exports.push(0);
         } else if same(in x, 0, x.len(), in "entry".as_bytes()) {
@@ -615,6 +636,29 @@ fn world(inout c: Cur, in b: Slice[u8], inout w: Wit) {
         }
     }
     punct(inout c, in b, inout w, C_RBRACE);
+}
+
+// `world plugin { export run: func(...) -> ...; }` after `world` (the
+// Nexus plugin world: its functions are `funcs[e0..]`).
+fn plugin(inout c: Cur, in b: Slice[u8], inout w: Wit) {
+    w.plugin = true;
+    keyword(inout c, in b, inout w, in "plugin".as_bytes());
+    punct(inout c, in b, inout w, C_LBRACE);
+    loop {
+        if w.err != 0 || peek(inout c, in b) == C_RBRACE {
+            break;
+        }
+        keyword(inout c, in b, inout w, in "export".as_bytes());
+        let (s, e) = word(inout c, in b, inout w);
+        func(inout c, in b, inout w, s, e);
+    }
+    punct(inout c, in b, inout w, C_RBRACE);
+    if w.err == 0 && w.funcs.len() == w.e0 {
+        w.err = E_WORLD;
+    }
+    if w.err == 0 && peek(inout c, in b) != 0 {
+        w.err = E_SYNTAX;
+    }
 }
 
 // Read the backend's WIT; `err` is 0 when it is inside the subset.
@@ -647,7 +691,14 @@ pub fn parse(in b: Slice[u8]) -> Wit {
             }
         );
     w.e0 = w.funcs.len();
-    keyword(inout c, in b, inout w, in "interface".as_bytes());
+    let (ks, ke) = word(inout c, in b, inout w);
+    if same(in b, ks, ke, in "world".as_bytes()) {
+        plugin(inout c, in b, inout w);
+        return w;
+    }
+    if !same(in b, ks, ke, in "interface".as_bytes()) {
+        w.err = E_SYNTAX;
+    }
     keyword(inout c, in b, inout w, in "entry".as_bytes());
     punct(inout c, in b, inout w, C_LBRACE);
     loop {

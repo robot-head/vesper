@@ -1399,7 +1399,12 @@ pub fn codegen_scalar_decisions(in input: Str) -> ChunkSeq[u64] {
 // `scalar_hook` protocol of @vesper/codegen-scalar-emit; an instruction
 // with no record is left to the Rust lowering.
 pub fn codegen_scalar_plan(in input: Str) -> ChunkSeq[u64] {
-    let b = input.as_bytes();
+    codegen_scalar_plan_bytes(in input.as_bytes())
+}
+
+// `codegen_scalar_plan` of the input's bytes (the hybrid's `scalar` hook,
+// crates/vesper-hybrid/modules/codegen_scalar).
+pub fn codegen_scalar_plan_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
     let mut r = Reader {
         pos: 0
     };
