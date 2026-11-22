@@ -1,0 +1,151 @@
+// The case folding of the tree's case-collision check: `str::to_lowercase`
+// of a valid UTF-8 name, from the generated table in `lower`.
+use self::lower::{
+    lower_char,
+    case_class
+};
+use self::name::seq_len;
+
+fn byte(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(b) => b,
+        Option::None => 0,
+    }
+}
+
+fn low6(in s: Slice[u8], i: u64) -> u64 {
+    widen_u64(byte(in s, i)) & 63
+}
+
+// The code point of the `n`-byte sequence at `i`.
+fn decode(in s: Slice[u8], i: u64, n: u64) -> u64 {
+    let b0 = widen_u64(byte(in s, i));
+    if n == 1 {
+        return b0;
+    }
+    if n == 2 {
+        return ((b0 & 31) << 6) | low6(in s, wrapping_add(i, 1));
+    }
+    if n == 3 {
+        return ((b0 & 15) << 12) | (low6(in s, wrapping_add(i, 1)) << 6) | low6(
+            in s,
+            wrapping_add(i, 2)
+        );
+    }
+    ((b0 & 7) << 18) | (low6(in s, wrapping_add(i, 1)) << 12) | (
+        low6(in s, wrapping_add(i, 2)) << 6
+    ) | low6(in s, wrapping_add(i, 3))
+}
+
+fn encode(inout out: ChunkSeq[u8], c: u64) {
+    if c < 128 {
+        out.push(wrapping_u8(c));
+    } else if c < 2048 {
+        out.push(wrapping_u8(192 | (c >> 6)));
+        out.push(wrapping_u8(128 | (c & 63)));
+    } else if c < 65536 {
+        out.push(wrapping_u8(224 | (c >> 12)));
+        out.push(wrapping_u8(128 | ((c >> 6) & 63)));
+        out.push(wrapping_u8(128 | (c & 63)));
+    } else {
+        out.push(wrapping_u8(240 | (c >> 18)));
+        out.push(wrapping_u8(128 | ((c >> 12) & 63)));
+        out.push(wrapping_u8(128 | ((c >> 6) & 63)));
+        out.push(wrapping_u8(128 | (c & 63)));
+    }
+}
+
+// The start of the char that ends just before `i`.
+fn back(in s: Slice[u8], i: u64) -> u64 {
+    let mut j = wrapping_sub(i, 1);
+    loop {
+        if j == 0 {
+            return 0;
+        }
+        let b = byte(in s, j);
+        if b < 128 || b >= 192 {
+            return j;
+        }
+        j = wrapping_sub(j, 1);
+    }
+}
+
+fn char_len(in s: Slice[u8], i: u64) -> u64 {
+    let n = seq_len(in s, i);
+    if n == 0 {
+        1
+    } else {
+        n
+    }
+}
+
+// Whether the first char before `i` that is not case-ignorable is cased.
+fn cased_before(in s: Slice[u8], i: u64) -> bool {
+    let mut at = i;
+    loop {
+        if at == 0 {
+            return false;
+        }
+        let j = back(in s, at);
+        let class = case_class(decode(in s, j, char_len(in s, j)));
+        if class != 1 {
+            return class == 2;
+        }
+        at = j;
+    }
+}
+
+// Whether the first char from `i` on that is not case-ignorable is cased.
+fn cased_after(in s: Slice[u8], i: u64) -> bool {
+    let mut at = i;
+    loop {
+        if at >= s.len() {
+            return false;
+        }
+        let n = char_len(in s, at);
+        let class = case_class(decode(in s, at, n));
+        if class != 1 {
+            return class == 2;
+        }
+        at = wrapping_add(at, n);
+    }
+}
+
+// Append `s.to_lowercase()` of the valid UTF-8 `s` to `out`: U+03A3 lowers
+// to the final sigma U+03C2 at the end of a word (a cased char before it
+// and none after it, skipping case-ignorable chars), as in Rust.
+pub fn fold_into(in s: Slice[u8], inout out: ChunkSeq[u8]) {
+    let len = s.len();
+    let mut i: u64 = 0;
+    loop {
+        if i >= len {
+            break;
+        }
+        let b0 = byte(in s, i);
+        if b0 < 128 {
+            if b0 >= 65 && b0 <= 90 {
+                out.push(wrapping_add(b0, 32));
+            } else {
+                out.push(b0);
+            }
+            i = wrapping_add(i, 1);
+        } else {
+            let n = char_len(in s, i);
+            let c = decode(in s, i, n);
+            if c == 304 {
+                // U+0130 lowers to "i" and U+0307.
+                out.push(105);
+                encode(inout out, 775);
+            } else if c == 931 {
+                if cased_before(in s, i) && !cased_after(in s, wrapping_add(i, n)) {
+                    encode(inout out, 962);
+                } else {
+                    encode(inout out, 963);
+                }
+            } else {
+                encode(inout out, lower_char(c));
+            }
+            i = wrapping_add(i, n);
+        }
+    }
+}

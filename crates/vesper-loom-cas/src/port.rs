@@ -38,7 +38,7 @@ const NAME_ERRORS: [NameError; 9] = [
     NameError::NotUtf8,
 ];
 
-fn name_error(code: u64) -> NameError {
+pub(crate) fn name_error(code: u64) -> NameError {
     NAME_ERRORS[(code - 1) as usize]
 }
 
@@ -135,8 +135,7 @@ pub(crate) fn tree_decode(domain: Domain, bytes: &[u8]) -> Result<Tree, TreeErro
     let (entries, end) = words.split_at(words.len() - 3);
     let mut tree = Tree::new(domain);
     let mut previous: Option<(u64, u64)> = None;
-    for e in entries.chunks_exact(5) {
-        let (at, len, tag, size, local) = (e[0], e[1], e[2], e[3], e[4]);
+    for &[at, len, tag, size, local] in entries.as_chunks::<5>().0 {
         let entry_name = name(bytes, at, len);
         match local {
             0 => {}
@@ -363,4 +362,85 @@ pub(crate) fn drv_decode(bytes: &[u8]) -> Result<DerivationInputs, DerivationErr
         options,
         inputs,
     })
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../examples/lower_table.rs"]
+mod lower_table;
+
+#[cfg(test)]
+mod tests {
+    use super::binding;
+    use super::lower_table;
+
+    /// The port's case folding (`fold.ves`, from the generated `lower.ves`)
+    /// against `str::to_lowercase`, on seeded strings that mix ASCII, the
+    /// sigmas and the chars around them (case-ignorable marks and
+    /// punctuation, cased letters), U+0130 and arbitrary chars. Only on a
+    /// toolchain with the table's Unicode version.
+    #[test]
+    fn name_fold_is_to_lowercase() {
+        if !lower_table::same_unicode(include_str!("../vesper/src/lower.ves")) {
+            return;
+        }
+        const POOL: &[char] = &[
+            'A',
+            'z',
+            '.',
+            '\'',
+            ':',
+            ' ',
+            '\u{3a3}',
+            '\u{3c3}',
+            '\u{3c2}',
+            '\u{391}',
+            '\u{3b1}',
+            '\u{301}',
+            '\u{345}',
+            '\u{2b0}',
+            '\u{2019}',
+            '\u{130}',
+            '\u{1e9e}',
+            '\u{2126}',
+            '\u{10400}',
+            '\u{1f600}',
+            '\u{fb03}',
+        ];
+        let mut state: u64 = 0x5eed;
+        let mut next = move || {
+            state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            z ^ (z >> 31)
+        };
+        for _ in 0..50_000 {
+            let len = next() % 8;
+            let s: String = (0..len)
+                .map(|_| {
+                    let r = next();
+                    if r % 4 == 0 {
+                        char::from_u32((r >> 8) as u32 % 0x11_0000).unwrap_or('x')
+                    } else {
+                        POOL[(r >> 8) as usize % POOL.len()]
+                    }
+                })
+                .collect();
+            let folded = binding::name_fold(s.as_bytes());
+            assert_eq!(String::from_utf8_lossy(&folded), s.to_lowercase(), "{s:?}");
+        }
+        // Every char on its own and before a final sigma position.
+        for c in (0..=0x10_ffffu32).filter_map(char::from_u32) {
+            for s in [
+                c.to_string(),
+                format!("{c}\u{3a3}"),
+                format!("A{c}\u{3a3}"),
+                format!("A\u{3a3}{c}"),
+            ] {
+                let folded = binding::name_fold(s.as_bytes());
+                assert_eq!(String::from_utf8_lossy(&folded), s.to_lowercase(), "{s:?}");
+            }
+        }
+    }
 }

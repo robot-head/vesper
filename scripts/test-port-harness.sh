@@ -219,7 +219,7 @@ if cargo test --locked -p vesper-loom-calculus --features vesper-port-divergent 
     echo "the divergent loom-calculus port passed its tests" >&2
     exit 1
 fi
-for t in manifest_corpus_matches_the_rust_build semver_matrix_matches_the_rust_build authority_reaches_ancestors_that_sort_before_their_dependencies unsafe_ffi_policy_relaxation_is_rejected_for_existing_and_new_packages; do
+for t in manifest_corpus_matches_the_rust_build semver_matrix_matches_the_rust_build authority_reaches_ancestors_that_sort_before_their_dependencies unsafe_ffi_policy_relaxation_is_rejected_for_existing_and_new_packages manifest_cases_match_the_toml_crate semver_cases_match_the_semver_crate; do
     grep -q "test $t ... FAILED" "$log" || { cat "$log"; echo "the divergent loom-calculus port did not fail $t" >&2; exit 1; }
 done
 grep -q 'test documented_manifest_is_declarative_and_secure_by_default ... ok' "$log" || { cat "$log"; echo "the divergent loom-calculus port failed an unchanged test" >&2; exit 1; }

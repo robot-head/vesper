@@ -992,6 +992,7 @@ pub fn check_module(module: &Module, imports: &Imports) -> Result<ForeignChecked
         return Err(e);
     }
     drops::check_rows(&checked.world)?;
+    check_isolated_workers(&checked.world, imports, &generated)?;
     let mut plan = Plan::default();
     for (name, import) in &imports.libraries {
         plan.libraries.insert(
@@ -1008,6 +1009,52 @@ pub fn check_module(module: &Module, imports: &Imports) -> Result<ForeignChecked
         calls,
         plan,
     })
+}
+
+/// A `parallel_for` body may carry `Ffi[Lib]` only for a direct library
+/// (§15.4): an isolated call needs the calling thread's protection-key
+/// gate, which a pool worker does not have (`E0823`).
+fn check_isolated_workers(
+    world: &World,
+    imports: &Imports,
+    generated: &types::Generated,
+) -> Result<(), FfiError> {
+    let mut diagnostics = vec![];
+    for (span, body) in crate::atomics::worker_bodies(world) {
+        let Some(f) = world.functions.get(&body) else {
+            continue;
+        };
+        for effect in &f.effects.instances {
+            let isolated = effect
+                .name
+                .strip_prefix(EFFECT_PREFIX)
+                .and_then(|library| imports.libraries.get(library))
+                .is_some_and(|import| import.handler == Handler::IsolatedMpk);
+            if isolated {
+                diagnostics.push(
+                    Diagnostic::new(
+                        "E0823",
+                        generated.demangle(&format!(
+                            "the body of 'parallel_for' may not call the isolated library {}",
+                            effect.name
+                        )),
+                        span.clone(),
+                    )
+                    .with_help("call isolated libraries on the calling thread, outside the loop"),
+                );
+            }
+        }
+    }
+    if diagnostics.is_empty() {
+        return Ok(());
+    }
+    let mut e = FfiError::new(
+        FfiErrorKind::Check,
+        format!("{} semantic error(s)", diagnostics.len()),
+        None,
+    );
+    e.diagnostics = diagnostics;
+    Err(e)
 }
 
 fn slice_length(
