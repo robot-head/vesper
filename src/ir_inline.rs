@@ -30,8 +30,10 @@
 //!   single call site in the program and is at most
 //!   [`Budget::single_site_callee`] instructions;
 //! * its effect row is empty, or it is exactly the caller's row and holds only
-//!   unlabeled `Fail[E]` instances, or the callee has no loop and its
-//!   unlabeled `Fail[E]` instances are all in the caller's row (#1502).
+//!   unlabeled `Fail[E]` instances, or its unlabeled `Fail[E]` instances are
+//!   all in the caller's row and it has no loop, handler or effect operation
+//!   (`Fail::raise` performs the innermost `Fail` in scope, see `row_within`;
+//!   #1502).
 //!   A raise in the inlined body then performs the caller's `Fail[E]`
 //!   capability, which is what the caller's re-raise after the call did.
 //!   Rows with labels, tails or capability effects are not inlined, and callers whose row names a capability effect
@@ -496,24 +498,34 @@ fn fail_row_only(effects: &Effects) -> bool {
 }
 
 /// Whether `callee` may be inlined into a caller whose row is `caller`:
-/// the callee's row is empty or equal to the caller's, or the callee has no
-/// loop and every instance of its row (unlabeled `Fail[E]` only, see
-/// [`fail_row_only`]) is also in the caller's row (#1502). A raise in the
-/// inlined body then performs the caller's `Fail[E]`, the instance that the
-/// caller's re-raise after the call selected by its error type. A narrower
-/// callee with a loop stays a call: such kernels are kept apart on purpose,
-/// since a merged loop nest spills in the native backend (Resonance's
-/// `accumulate2` into `sum_inputs`, 1.0G to 1.8G instructions).
-fn row_within(callee: &FunctionIr, caller: &Effects) -> bool {
+/// the callee's row is empty or equal to the caller's, or every instance of
+/// its row (unlabeled `Fail[E]` only, see [`fail_row_only`]) is also in the
+/// caller's row and its body raises only through typed paths (#1502). Its
+/// fallible primitives raise by error type and its calls re-raise by error
+/// type, so in the caller they perform the caller's instance of the same
+/// `Fail[E]`. An effect operation (`Fail::raise(e)`) records no type: the
+/// native backend performs the innermost `Fail` in scope, which is the
+/// callee's own instance only while the rows are equal, so a callee with an
+/// effect operation (a call of anything that is not a program function) or
+/// a handler stays a call. So does a callee with a loop: such kernels are
+/// kept apart on purpose, since a merged loop nest spills in the native
+/// backend (Resonance's `accumulate2` into `sum_inputs`, 1.0G to 1.8G
+/// instructions).
+fn row_within(program: &Program, callee: &FunctionIr, caller: &Effects) -> bool {
     let row = &callee.effects;
     if row.instances.is_empty() || row == caller {
         return true;
     }
-    let looped = callee
+    let untyped = callee
         .blocks
         .iter()
-        .any(|b| b.instructions.iter().any(|i| matches!(i.op, Op::Loop)));
-    !looped && fail_row_only(row) && row.instances.iter().all(|e| caller.instances.contains(e))
+        .flat_map(|b| &b.instructions)
+        .any(|i| match &i.op {
+            Op::Loop | Op::Handle { .. } => true,
+            Op::Call { callee, .. } => !program.functions.contains_key(callee),
+            _ => false,
+        });
+    !untyped && fail_row_only(row) && row.instances.iter().all(|e| caller.instances.contains(e))
 }
 
 fn mentions_function(world: &World, t: &Type) -> bool {
@@ -734,6 +746,7 @@ fn mentions_names(t: &Type, names: &BTreeSet<&String>) -> bool {
 /// The bindings for a call, or `None` when the site must stay a call.
 fn site_bindings(
     world: &World,
+    program: &Program,
     caller: &FunctionIr,
     callee: &FunctionIr,
     dest: ValueId,
@@ -742,7 +755,7 @@ fn site_bindings(
     if args.len() != callee.params.len() || caller.values.get(&dest) != Some(&callee.result) {
         return Err("signature");
     }
-    if !row_within(callee, &caller.effects) {
+    if !row_within(program, callee, &caller.effects) {
         return Err("effect row differs from the caller's");
     }
     if !caller.bounds.is_empty() {
@@ -891,8 +904,8 @@ fn inline_into(
                     None
                 };
                 let target = copy.as_ref().unwrap_or(original);
-                let bindings =
-                    site_bindings(world, caller, target, inst.dest, args).map_err(Refusal::Site)?;
+                let bindings = site_bindings(world, program, caller, target, inst.dest, args)
+                    .map_err(Refusal::Site)?;
                 let whole = cost_with_handlers(world, program, target);
                 let handlers = whole - cost(world, target);
                 let folded = site::fold(world, caller, target, &bindings)

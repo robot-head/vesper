@@ -48,20 +48,28 @@ differs from the caller's"). Inlining `f` by hand took the workload from
 ## The fixes
 
 1. **Inliner: a callee whose row is within the caller's.** `site_bindings`
-   (`src/ir_inline.rs`, `row_within`) now also inlines a loop-free callee
-   whose unlabeled `Fail[E]` instances are all in the caller's row. The raise
-   in the inlined body performs the caller's `Fail[E]`, which the native
-   backend selects by error type (`instance_capability_key`), the same
-   instance the caller's re-raise after the call selected. Callees with a
-   loop keep the equal-row rule: inlining Resonance's `accumulate2` kernel
-   into `sum_inputs` took the `graph` workload from 1.00G to 1.80G Ir
-   (the merged loop nest spills, the "spills in large functions" item of
-   #1426), so narrower-row kernels stay calls. The Vesper port
-   (`packages/vesper-ir-inline`, `row_within` and `has_loop`) makes the same
-   decision; the input stream now carries an instance index per row entry
-   (`tests/common/inline_words.rs`, four words per instance), so the port
-   compares instances without reading their types. Lane 2 (#1499) agreed to
-   this split: its cold-path check sits after `site_bindings`.
+   (`src/ir_inline.rs`, `row_within`) now also inlines a callee whose
+   unlabeled `Fail[E]` instances are all in the caller's row, when it has no
+   loop, no handler and no effect operation. Its fallible primitives raise by
+   error type, and its calls re-raise by error type
+   (`instance_capability_key`), so in the caller they perform the caller's
+   instance of the same `Fail[E]`. The other cases stay calls:
+   - An effect operation records no type: `Fail::raise(e)` performs the
+     innermost `Fail` in scope, which is the callee's own instance only while
+     the rows are equal. The first version of this PR missed this. CI
+     caught it: `tests/verified_codegen.rs` (`fail_try.ves`), two
+     vesper-warp-crypto tests and a vesper-beacon port test raised the
+     caller's last instance (`ArithOverflow`) instead of the callee's.
+     `tests/export_call_cost.rs` now has that case.
+   - A loop: inlining Resonance's `accumulate2` kernel into `sum_inputs` took
+     the `graph` workload from 1.00G to 1.80G Ir (the merged loop nest
+     spills, the "spills in large functions" item of #1426).
+   The Vesper port (`packages/vesper-ir-inline`, `row_within` and
+   `raises_untyped`) makes the same decision. The inliner input now carries
+   an instance index per row entry (`tests/common/inline_words.rs`, four
+   words per instance), so the port compares instances without reading their
+   types. Lane 2 (#1499) agreed to this split: its cold-path check sits after
+   `site_bindings`.
 2. **vesper-port-abi.** `seq_copy`/`seq_take` (returned `ChunkSeq`s),
    `seq_from` and `with_seq_mut` copy packed scalar elements (`u8`, `u32`,
    `u64`, `i64`, `usize`, `isize`, `f64`) as one block instead of element by
@@ -137,16 +145,22 @@ vesper-span test passes.
 
 ## Stage 1 guard
 
-The inliner reaches the compiler. `bootstrap/run.sh stage1 --reproduce
---outcome`: see the PR body for the result.
+With Rust 1.100, `bootstrap/run.sh stage1 --reproduce --outcome` exits 0.
+The two clean builds recorded identical locks, the cross-backend gate is
+ok, and every program result and verified status matches
+`bootstrap/stage1.lock`. The digests are reported stale, verified artifacts
+included. The lock was last recorded at #1190, so that staleness predates
+this PR.
 
 ## Tests
 
 - `tests/export_call_cost.rs` (new): a narrower `Fail` row is inlined and
   each of three errors (two built-in, one with a payload) reaches its own
   handler in the evaluator and the JIT, optimized and not; a narrower row
-  with a loop stays a call; a callee with an instance the caller lacks
-  still works.
+  with a loop, or with a `Fail::raise`, stays a call; a callee with an
+  instance the caller lacks still works.
+- `tests/verified_codegen.rs`, `cargo test -p vesper-warp-crypto`,
+  `cargo test -p vesper-beacon --features vesper-port --lib`.
 - `tests/self_host_ir_inline.rs`: the Vesper inliner's decisions and
   programs match Rust over the corpus (5 tests).
 - `tests/native_inline*.rs`, `cargo test -p vesper-port-abi`,

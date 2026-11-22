@@ -6,9 +6,10 @@
 //! the inliner kept as calls: a callee whose `Fail` row is narrower than its
 //! caller's (Resonance's slice accessor `f`, row `Fail[RuntimeError],
 //! Fail[ArithOverflow]`, called from `k_pid_step`, which also raises
-//! `Fail[PidFault]`). A loop-free callee whose row is within the caller's is
-//! now inlined; its raises perform the caller's instance of the same error
-//! type. These tests check the decisions and that every backend still
+//! `Fail[PidFault]`). A callee whose row is within the caller's is now
+//! inlined when it has no loop, handler or `Fail::raise`; its fallible
+//! operations and calls raise by error type, so they perform the caller's
+//! instance of the same error type. These tests check the decisions and that every backend still
 //! computes the same values, each error reaching its own handler.
 use vesper::{
     check,
@@ -146,4 +147,27 @@ const WIDER: &str = "enum Fault { Bad } \
 #[test]
 fn a_callee_row_the_caller_lacks_keeps_working() {
     agree(WIDER, "106");
+}
+
+/// A callee that raises with `Fail::raise` stays a call when its row is
+/// narrower than the caller's: the raise records no error type, and the
+/// native backend performs the innermost `Fail` in scope, which inlined
+/// would be the caller's last instance (`Fail[ArithOverflow]` here) rather
+/// than `Fail[Limit]` (tests/fixtures/verified_codegen/fail_try.ves).
+const RAISES: &str = "copy struct Limit { at: i64, max: i64 } copy enum Bad { Zero } \
+    fn over(x: i64) -> i64 eff [Fail[Limit]] { Fail::raise(Limit { at: x, max: 100 }) } \
+    fn wide(x: i64) -> i64 eff [Fail[Limit], Fail[Bad], Fail[ArithOverflow]] { if x > 10 { over(x) } else { x } } \
+    fn main() -> i64 { \
+        handle Fail[ArithOverflow] in { \
+            handle Fail[Bad] in { \
+                handle Fail[Limit] in { wide(70) } with { return v => v, raise(l, k) => l.at * 10000 + l.max, } \
+            } with { return v => v, raise(e, k) => 5, } \
+        } with { return v => v, raise(e, k) => 99, } \
+    }";
+
+#[test]
+fn a_narrower_row_with_a_raise_stays_a_call() {
+    agree(RAISES, "700100");
+    let program = inlined(RAISES);
+    assert_eq!(calls(&program, "wide", "over"), 1);
 }

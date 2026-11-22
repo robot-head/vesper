@@ -1979,14 +1979,16 @@ impl Bindings {
 }
 
 // `row_within`: callee `fi` with row `row` may be inlined into a caller
-// with row `caller`. Its row is empty or the caller's, or the callee has no
-// loop and every instance of its row (unlabeled `Fail` only) is in the
-// caller's row (#1502).
+// with row `caller`. Its row is empty or the caller's, or every instance of
+// its row (unlabeled `Fail` only) is in the caller's row and the callee
+// raises only by error type: no loop, no handler and no effect operation
+// (a call of anything that is not a program function), since `Fail::raise`
+// performs the innermost `Fail` in scope (#1502).
 fn row_within(in p: Prog, fi: u32, row: u32, caller: u32) -> bool {
     if p.row_count(row) == 0 || row == caller {
         return true;
     }
-    if !fail_row_only(in p, row) || has_loop(in p, fi) {
+    if !fail_row_only(in p, row) || raises_untyped(in p, fi) {
         return false;
     }
     let at = w(u32_at(in p.row_a, w(row)));
@@ -2007,13 +2009,18 @@ fn row_within(in p: Prog, fi: u32, row: u32, caller: u32) -> bool {
     true
 }
 
-// Whether function `fi`'s body has a loop header.
-fn has_loop(in p: Prog, fi: u32) -> bool {
+// Whether function `fi`'s body has a loop header, a handler or an effect
+// operation.
+fn raises_untyped(in p: Prog, fi: u32) -> bool {
     let f = p.fun(fi);
     for b in 0..w(f.fc) {
         let bk = p.block(f, b);
         for k in 0..w(bk.ic) {
-            if p.inst_of(bk, k).op == O_LOOP {
+            let i = p.inst_of(bk, k);
+            if i.op == O_LOOP || i.op == O_HANDLE {
+                return true;
+            }
+            if i.op == O_CALL && p.fun_index(n32(p.op(w(i.a)))) == NONE32 {
                 return true;
             }
         }
