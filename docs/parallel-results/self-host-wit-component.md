@@ -234,6 +234,99 @@ is still most of it: the port writes what wit-component writes and nothing
 else. The port's time includes packing the component into words for the
 harness (`pack_text`).
 
+## Part 3: every world the backend writes
+
+Part 2 left three shapes to Rust: host imports, string parameters and the
+Nexus plugin world. Part 3 ports all three, so the port now declines only
+input that the Rust backend never writes.
+
+### What changed
+
+- `host.ves` (new) covers the host interfaces of src/wasm_backend/host.rs:
+  `wasi:cli/stdout`, the `wasi:io/error` and `wasi:io/streams` interfaces it
+  uses, `wasi:clocks/monotonic-clock` and `vesper:beacon/trace`. It holds:
+  - their instance types as wit-component writes them. host.rs's WIT is
+    fixed, so these are constants, and the differential pins them against
+    Rust;
+  - how each host function lowers: directly, through the shim with
+    `memory`, through the shim with `memory` and `utf8`, or `canon
+    resource.drop`;
+  - a reader for the core module's function types and imports;
+  - wit-component's two indirect-lowering modules. In
+    `wit-component-shim-module`, function k does a `call_indirect` through
+    table slot k. `wit-component-fixup` imports the real lowerings and fills
+    that table.
+- `comp.ves` writes the import half in wit-component's order:
+  1. each host instance type and its import, and the types that later
+     interfaces alias (`error`, `output-stream`);
+  2. the core module, then the shim module and its instance;
+  3. the exported interfaces' root types;
+  4. one core instance per imported core module, in order of first import.
+     Each export in it is a shim slot alias, a direct `canon lower`, or
+     `resource.drop`;
+  5. the main instance, instantiated with those core instances, and the
+     `memory` alias;
+  6. the fixup module. Its `canon lower`s get `memory`, plus `utf8` when a
+     string is passed. Then come the `actual` and `fixup` instances.
+
+  The export half is unchanged, except that a string parameter adds the
+  `cabi_realloc` core alias and the `realloc` option to `canon lift`. The
+  plugin world lifts its functions and exports them at the root.
+- `wit.ves` reads the world's `import`s and the `plugin` world. `lib.ves`
+  accepts both world kinds.
+- The test's inputs also cover:
+  - every function of a case as a command entry, which brings in
+    parameters and strings;
+  - every function as a Nexus plugin `run`;
+  - tests/wasm_backend.rs's hosted programs (`HOST_PRELUDE` in front);
+  - a few literals the cases miss (`EXTRA`: string parameters, hosted
+    string writes, plugins).
+
+  The reference model used to pin the layout first was a Python script,
+  kept out of the repository. It matched all inputs before the Vesper code
+  was written.
+
+### Results
+
+`port_matches_wit_component` at `WIT_COMPONENT_STEP=1` compared all 1,383
+inputs Rust wraps:
+
+| World | Inputs | Byte-identical |
+|---|---|---|
+| Command, no imports | 1,321 | 1,321 |
+| Command importing `vesper:beacon/trace` | 28 | 28 |
+| Command importing `wasi:cli/stdout` | 17 | 17 |
+| Command importing `wasi:cli/stdout` and `wasi:clocks/monotonic-clock` | 8 | 8 |
+| Command importing `wasi:clocks/monotonic-clock` | 4 | 4 |
+| Nexus plugin | 5 | 5 |
+| **All** | **1,383** | **1,383** |
+
+27 of the command entries take string parameters, so their components use
+`realloc`. The port declined none of the inputs, and none differ. 273
+components (nullary entry, first option set, no stack switching, no
+imports) also ran under Wasmtime with the same result as Rust's.
+
+### Speed
+
+Same harness as part 2, over all 1,383 components, five times each:
+
+| Side | Time | Per component | vs Rust |
+|---|---|---|---|
+| Rust `component::encode` | 2,242 ms | 324 µs | 1.00x |
+| Port | 101 ms | 15 µs | **0.045x** |
+
+The components with imports cost the port more than part 2's: it reads the
+core module's import section and writes two more modules. Rust pays more
+for them too, because it parses the host WIT packages and validates the
+shim and fixup modules.
+
+### Parity
+
+The port now matches Rust's wit-component on every world the backend
+writes, with 0 declines and 0 differences, at under 5% of its time. That
+meets the standing parity bar, in both function and speed. Rust stays the
+default until the owner decides the flip.
+
 ## Stage 1 guard
 
 This lane adds a Vesper package, a test, and the hybrid hunks. It does not
@@ -257,14 +350,11 @@ None blocked the port. Two notes for whoever writes the next one:
 
 ## What is left
 
-- **Host imports.** The 24 Beacon `trace` inputs: the import's instance
-  type, `canon lower` with `memory` and `string-encoding`, and
-  wit-component's indirect lowering (the shim module with its `funcref`
-  table and `call_indirect` trampolines, and the fixup module filling it).
-  Lane 15 does not port host frames yet, so the hook never needs this
-  today; it is the next part once it does. `wasi:cli/stdout` (a resource)
-  and `wasi:clocks` are not reached by any case yet.
-- **String parameters** (`realloc` = the module's `cabi_realloc` alias) and
-  the **Nexus plugin** world (a root `run` export, no interface): neither is
-  reached by the cases; both are declined.
-- Rust stays the default; deleting nothing.
+- **The flip.** It is the owner's call, now that the port is at parity.
+  Today `src/wasm_backend/component.rs` `encode` wraps in the default
+  build, and the port wraps only in the hybrid. The hybrid's Vesper backend
+  declines host capabilities, so the hybrid still reaches only the
+  no-import shapes until lane 15 ports host frames.
+- If host.rs's WIT changes, the instance types in `host.ves` must change
+  with it. The differential fails until they do.
+- Rust stays the default; nothing is deleted.
