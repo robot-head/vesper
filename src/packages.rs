@@ -206,7 +206,40 @@ pub struct Assembled {
     /// The `.vsys` libraries every loaded package names in its manifest
     /// (`[package] vsys`, manuscript §16.3), in load order.
     pub vsys: Vec<PackageVsys>,
+    /// The assembly sources and objects every loaded package names in its
+    /// manifest (`[package] objects`, manuscript §16.3), in load order.
+    pub objects: Vec<PackageObject>,
 }
+
+/// One entry of a package's `[package] objects`: an assembly source (`.s`,
+/// `.S`, or `.asm` for Windows) or a prebuilt object (`.o`, `.obj`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageObject {
+    /// The package that carries it.
+    pub package: String,
+    /// The manifest path, for messages (lexical, relative to the CLI input).
+    pub display: String,
+    /// The file for every target, or for a per-target path (with `@OS@`,
+    /// `@ARCH@` or `@TARGET@`) the file of each target that has one, in
+    /// [`VSYS_TARGETS`] order. A target without one links nothing for this
+    /// entry.
+    pub files: Vec<(Option<&'static str>, PathBuf)>,
+}
+
+impl PackageObject {
+    /// The file an executable for `target` (the host when `None`) links.
+    pub fn file_for(&self, target: Option<&str>) -> Result<Option<&Path>, String> {
+        let (triple, _) = vsys_target(target)?;
+        Ok(self
+            .files
+            .iter()
+            .find(|(t, _)| t.is_none_or(|t| t == triple))
+            .map(|(_, f)| f.as_path()))
+    }
+}
+
+/// The file kinds `[package] objects` accepts.
+pub const OBJECT_EXTENSIONS: [&str; 5] = ["s", "S", "asm", "o", "obj"];
 
 /// One `.vsys` library a package's manifest names.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -394,9 +427,18 @@ impl Assembled {
             let source = v
                 .source_for(target)
                 .map_err(|e| format!("{}: {e}", v.display))?;
-            imports
+            let library = imports
                 .add(&source, crate::ffi_lowering::Handler::Direct)
                 .map_err(|e| format!("{}: {e}", v.display_for(target)))?;
+            // A package's assembly objects provide its own static libraries
+            // (manuscript §16.3).
+            let link = library.link();
+            if link.mode() == vesper_ffi::sys::LinkMode::Static
+                && self.objects.iter().any(|o| o.package == v.package)
+            {
+                let name = link.name().to_owned();
+                imports.provide_by_objects(&name, &v.package);
+            }
         }
         Ok(imports)
     }
@@ -511,6 +553,7 @@ fn load_with_parser(
             root_module,
             root_package_files,
             vsys: loader.vsys,
+            objects: loader.objects,
         });
     }
     let module = loader.assemble(root.unwrap_or_default());
@@ -523,6 +566,7 @@ fn load_with_parser(
         root_module,
         root_package_files,
         vsys: loader.vsys,
+        objects: loader.objects,
     })
 }
 
@@ -535,6 +579,7 @@ struct Loader<'a> {
     diagnostics: Vec<PackageDiagnostic>,
     manifest_errors: Vec<(String, Diagnostic)>,
     vsys: Vec<PackageVsys>,
+    objects: Vec<PackageObject>,
     replacement: Option<(&'a Path, &'a str)>,
 }
 
@@ -784,6 +829,7 @@ impl Loader<'_> {
             ));
         }
         let foreign_types = self.package_vsys(dir, &shown, &manifest_shown, &manifest)?;
+        self.package_objects(dir, &shown, &manifest_shown, &manifest);
         let index = self.packages.len();
         self.packages.push(Package {
             name: name.clone(),
@@ -957,6 +1003,99 @@ impl Loader<'_> {
             self.vsys.push(v);
         }
         Ok(types)
+    }
+
+    /// Record the package's `[package] objects` (manuscript §16.3).
+    fn package_objects(
+        &mut self,
+        dir: &Path,
+        shown: &Path,
+        manifest_shown: &str,
+        manifest: &Manifest,
+    ) {
+        // Objects link only through one of the package's own static `.vsys`
+        // libraries, which its capability ceiling must name (`Ffi[Lib]`), so
+        // a package cannot link native code without that capability.
+        let package = manifest.package.name.as_str();
+        let has_static_library = self.vsys.iter().filter(|v| v.package == package).any(|v| {
+            let (triple, text) = v
+                .targets
+                .first()
+                .map_or((VSYS_TARGETS[0].triple, v.text.as_str()), |(t, _, text)| {
+                    (*t, text.as_str())
+                });
+            let abi = target_of(triple).abi;
+            let source = text.replace("@TARGET@", triple).replace("@ABI@", abi);
+            vesper_ffi::sys::parse(&source, vesper_ffi::sys::Limits::default())
+                .is_ok_and(|d| d.link().mode() == vesper_ffi::sys::LinkMode::Static)
+        });
+        let mut seen = BTreeSet::new();
+        for path in &manifest.package.objects {
+            let bad = |why: &str| {
+                manifest_error(INVALID_PACKAGE, format!("package.objects '{path}': {why}"))
+            };
+            let relative = Path::new(path);
+            if !relative
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| OBJECT_EXTENSIONS.contains(&e))
+            {
+                self.manifest_errors.push((
+                    manifest_shown.into(),
+                    bad("expected an assembly source (.s, .S, .asm) or an object (.o, .obj)"),
+                ));
+                continue;
+            }
+            if path.contains('\\')
+                || !relative
+                    .components()
+                    .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+            {
+                self.manifest_errors.push((
+                    manifest_shown.into(),
+                    bad("expected a relative path inside the package, with `/` separators and no `..`"),
+                ));
+                continue;
+            }
+            if !seen.insert(normalize(relative)) {
+                self.manifest_errors
+                    .push((manifest_shown.into(), bad("named twice")));
+                continue;
+            }
+            let files: Vec<(Option<&'static str>, PathBuf)> = if is_per_target_path(path) {
+                VSYS_TARGETS
+                    .iter()
+                    .map(|t| (Some(t.triple), dir.join(expand_vsys_path(path, *t))))
+                    .filter(|(_, f)| f.is_file())
+                    .collect()
+            } else {
+                Some((None, dir.join(relative)))
+                    .filter(|(_, f)| f.is_file())
+                    .into_iter()
+                    .collect()
+            };
+            if files.is_empty() {
+                let why = if is_per_target_path(path) {
+                    "no such file for any target"
+                } else {
+                    "no such file"
+                };
+                self.manifest_errors.push((manifest_shown.into(), bad(why)));
+                continue;
+            }
+            if !has_static_library {
+                self.manifest_errors.push((
+                    manifest_shown.into(),
+                    bad("objects provide a `link = \"static\"` .vsys library of this package, and it names none"),
+                ));
+                continue;
+            }
+            self.objects.push(PackageObject {
+                package: manifest.package.name.as_str().to_owned(),
+                display: display(&normalize(&shown.join(relative))),
+                files,
+            });
+        }
     }
 
     fn add_file(&mut self, display: String, text: String) -> usize {

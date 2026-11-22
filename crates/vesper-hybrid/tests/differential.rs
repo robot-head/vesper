@@ -382,6 +382,14 @@ fn pilot_module_runs_from_vesper() {
             .unwrap_or_else(|| panic!("no {module} report in {stderr:?}"));
         assert!(calls > 0, "the Vesper {module} module answered no calls");
     }
+    // SH4 lane 7 (#1281): the `call` hook is installed (counter.ves makes
+    // no direct calls; tests/self_host_codegen_calls_emit.rs counts them).
+    assert!(
+        stderr
+            .lines()
+            .any(|l| l.starts_with("vesper-hybrid: codegen_calls emitted ")),
+        "no codegen_calls report in {stderr:?}"
+    );
     // SH3 lane 10 (#1249): the AST optimizer's producer runs on every
     // visited expression of the optimized module.
     let proposed: u64 = stderr
