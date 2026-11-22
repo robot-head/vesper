@@ -304,7 +304,12 @@ pub fn differential_run(step: usize, execute: bool) -> Tally {
             t.compared += 1;
             let tag = format!("{} [{k}]", c.name);
             match (&rust, &port) {
-                (_, Outcome::NotPorted(_)) => t.not_ported += 1,
+                (_, Outcome::NotPorted(site)) => {
+                    t.not_ported += 1;
+                    if std::env::var_os("WASM_PORT_SITES").is_some() {
+                        eprintln!("not ported site {site}: {tag}");
+                    }
+                }
                 (Err(e), Outcome::Module { core, wit, .. }) if operation_refusal(e) => {
                     t.loops += 1;
                     if execute && k == 0 && c.world.functions["main"].params.is_empty() {

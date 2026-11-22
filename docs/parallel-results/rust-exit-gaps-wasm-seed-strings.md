@@ -1,8 +1,11 @@
 # Rust exit gap wave 1, lane 9: wasm seed strings (#1506)
 
-Status: part 1. Slices, `Str`/`String` bytes, `ChunkSeq` and the integer
-conversions lower in the Vesper wasm backend (`packages/vesper-wasm-backend`).
-A compiler package does not build yet: it needs `Fail` handlers (below).
+Status: done. Part 1 (#1528): slices, `Str`/`String` bytes, `ChunkSeq` and
+the integer conversions lower in the Vesper wasm backend
+(`packages/vesper-wasm-backend`). Part 2 (this PR): `Fail` and other
+handlers (`Op::Handle`, Abort and Tail modes), the bit operators and
+`Resize`, and a compiler package (`@vesper/place-ir` over
+`@vesper/check-data`) builds to wasm and runs like the evaluator.
 
 Base: `origin/main` 76a27738. Prompt:
 docs/agent-prompts/rust-exit-gaps-1/09-wasm-seed-strings.md.
@@ -109,7 +112,7 @@ None. Lane 2 (#1397) needs no runner change.
    the total forms, and compiler packages, which use `Fail` everywhere, do
    not build yet. Minimal repro:
    `fn main() -> u64 { handle Fail[RuntimeError] in { 1 } with { return v => v, raise(e, k) => 0 } }`
-   is `NotPorted` (site 198).
+   was `NotPorted` (site 198). Part 2 lowers it.
 2. `match` on string literal patterns over a `Str` is rejected by the
    checker (E0200), so `Str` comparison goes through `as_bytes().eq(..)`.
 3. Not lowered yet: `CopyFrom`, `CopyWithin`, `SumBe16`, `BytesCmp`,
@@ -124,10 +127,60 @@ None. Lane 2 (#1397) needs no runner change.
    the checker's `element_views` spans in the wasm section.
 5. Float to integer conversions are refused (site 194).
 
+## Part 2: handlers and a compiler package
+
+### Handlers
+
+`Op::Handle` lowers as src/wasm_backend/lower.rs does, mirrored function for
+function (plan.ves `handler`, `clause_mode`; lower.ves `handle`,
+`define_dispatch`, `define_ret`, `define_abort`, `resume_call`):
+
+- Each handler gets a frame in linear memory: dispatch slot, state, abort
+  op and args, then the pending result, the saved environment, the
+  captures (in Rust's order) and the body cells. Three functions per
+  handler: `$dispatch(frame, op, args..)` in the table, `$ret(frame, r)`
+  and `$abort(frame)`.
+- A clause whose resumption is never called, or only in tail position, is
+  Abort or Tail mode, as in Rust. Abort stores the op and its arguments and
+  unwinds through the abort global; Tail calls the clause with the frame as
+  a hidden parameter. CPS clauses (site 54) and stack switching (site 44)
+  stay refused, as they were.
+- Evidence is a global per key (`$effect:E`, `$effect:E[T, ..]`,
+  `$label:l`, byte-sorted). `perform` takes the exact key, else the
+  by-name key, and traps on an unbound one. Row label bindings, trampoline
+  bindings and `bind_evidence` save and restore around calls, as in Rust.
+
+Port differential after handlers: compared 1300, identical 816 (was 640),
+errors agree 118, not ported 320 (was 520), 0 diffs. The 320 left are
+stack switching (238, site 44), host frames for Stdout/Clock/Trace (44,
+site 32, left to lane 10 #1508 so #1533 does not conflict) and CPS clauses
+(38, site 54).
+
+### Bit operators and `Resize`
+
+The package build found two gaps, both refused by Rust too:
+
+- `&`, `|`, `^` (total), `<<` and `>>` (amount checked against the left
+  kind's width, else `Fail[ArithOverflow]`; `<<` drops the bits shifted
+  out, `>>` is arithmetic on `i64`), and `rotate_left`/`rotate_right` (the
+  amount modulo the width), which the `wrapping_shl_k` prelude bodies use.
+  Semantics follow `IntegerKind::bit`, `shift` and `rotate`
+  (crates/vesper-core/src/numeric.rs).
+- `ChunkSeq::resize(n, v)` (`SeqOp::Resize`).
+
+### The package
+
+tests/wasm_seed_breadth.rs `place_ir_package_builds_and_runs` assembles a
+package over `packages/vesper-place-ir` (and so `packages/vesper-check-data`),
+checks that Rust refuses it, compiles it through the port in both
+configurations (optimized and not) and runs `main` (a place-IR round trip)
+under Wasmtime: 75 words, equal to the evaluator.
+
+The hybrid artifact's `handlers` list stays empty: it is informational
+and the hybrid never reads it.
+
 ## What is left
 
-- Part 2: lower `Fail` handlers (`Op::Handle`), then build one compiler
-  package (the hybrid's `packages/vesper-place-ir` reader is the first
-  candidate: slices, strings and `ChunkSeq` throughout).
-- The operations in gap 3, as the package build finds them.
+- CPS clauses and WasmFX stack switching (sites 54 and 44).
+- The rest of gap 3 (`Resize` is done), as later package builds find them.
 - Input on `main` (`cabi_realloc`) is lane 10 (#1508).
