@@ -1,8 +1,7 @@
 //! Divergence checks of the Vesper port (port wave P3b lane 9, #1071): every
 //! ported module against the frozen Rust seed copy, `vesper-resonance-seed`,
-//! sample for sample and bit for bit. In the default (Rust) build both sides
-//! are the same code, so these tests pass trivially there; under
-//! `vesper-port` they compare the port with the Rust build.
+//! sample for sample and bit for bit. This package is port-backed, so the
+//! tests compare the port with the Rust build.
 
 use vesper_resonance as port;
 use vesper_resonance_rust as rust;
@@ -31,13 +30,8 @@ fn bits(s: &[f32]) -> Vec<u32> {
 }
 
 #[test]
-fn the_build_is_the_one_the_feature_selects() {
-    let expected = if cfg!(feature = "vesper-port") {
-        "vesper"
-    } else {
-        "rust"
-    };
-    assert_eq!(port::IMPLEMENTATION, expected);
+fn the_package_is_port_backed_and_the_seed_is_rust() {
+    assert_eq!(port::IMPLEMENTATION, "vesper");
     assert_eq!(rust::IMPLEMENTATION, "rust");
 }
 

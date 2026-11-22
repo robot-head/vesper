@@ -1,0 +1,183 @@
+// The ELF64 numbers that the object reader and stub writer (obj.ves), the
+// linker (link.ves), the executable writer (elf.ves) and the boot stubs
+// (stub.ves) share: the ELF spec's names, as value enums so every module
+// folds them to the same literals.
+
+// The page size of image layout and `p_align`.
+pub enum Page: _ {
+    Bytes = 4096,
+}
+
+// "No such row" for u64 indices (`usize::MAX` in src/freestanding).
+pub enum Absent: _ {
+    Row = 18446744073709551615,
+}
+
+// `e_ident`: the magic, ELFCLASS64, ELFDATA2LSB and EV_CURRENT.
+pub enum Ident: _ {
+    Mag0 = 127,
+    Mag1 = 69,
+    Mag2 = 76,
+    Mag3 = 70,
+    Class64 = 2,
+    Data2Lsb = 1,
+    Current = 1,
+}
+
+// `e_type`.
+pub enum Et: _ {
+    Rel = 1,
+    Exec = 2,
+}
+
+// `e_machine`.
+pub enum Em: _ {
+    Aarch64 = 183,
+    Riscv = 243,
+}
+
+// ELF64 file header field offsets, and its size.
+pub enum Ehdr: _ {
+    Class = 4,
+    Data = 5,
+    Version = 6,
+    Kind = 16,
+    Machine = 18,
+    Entry = 24,
+    Phoff = 32,
+    Shoff = 40,
+    Flags = 48,
+    Phentsize = 54,
+    Phnum = 56,
+    Shentsize = 58,
+    Shnum = 60,
+    Shstrndx = 62,
+    Bytes = 64,
+}
+
+// ELF64 program header field offsets, and its size.
+pub enum Phdr: _ {
+    Flags = 4,
+    Offset = 8,
+    Vaddr = 16,
+    Filesz = 32,
+    Memsz = 40,
+    Bytes = 56,
+}
+
+// ELF64 section header field offsets, and its size.
+pub enum Shdr: _ {
+    Kind = 4,
+    Flags = 8,
+    Offset = 24,
+    Size = 32,
+    Link = 40,
+    Info = 44,
+    Addralign = 48,
+    Entsize = 56,
+    Bytes = 64,
+}
+
+// ELF64 symbol field offsets, and its size.
+pub enum SymEnt: _ {
+    Info = 4,
+    Shndx = 6,
+    Value = 8,
+    Size = 16,
+    Bytes = 24,
+}
+
+// ELF64 relocation field offsets (`r_info`, `r_addend`), and the sizes.
+pub enum RelEnt: _ {
+    Info = 8,
+    Addend = 16,
+    RelBytes = 16,
+    RelaBytes = 24,
+}
+
+// `p_type`.
+pub enum Pt: _ {
+    Load = 1,
+}
+
+// `p_flags`.
+pub enum Pf: _ {
+    X = 1,
+    W = 2,
+    R = 4,
+}
+
+// `sh_type`.
+pub enum Sht: _ {
+    Progbits = 1,
+    Symtab = 2,
+    Strtab = 3,
+    Rela = 4,
+    Nobits = 8,
+    Rel = 9,
+    Crel = 1073741844,
+}
+
+// `sh_flags`.
+pub enum Shf: _ {
+    Write = 1,
+    Alloc = 2,
+    Execinstr = 4,
+    Strings = 32,
+    InfoLink = 64,
+    Tls = 1024,
+}
+
+// Special section indices.
+pub enum Shn: _ {
+    Undef = 0,
+    Loreserve = 65280,
+    Abs = 65521,
+    Xindex = 65535,
+}
+
+// `st_info`: the binding (high nibble) and type (low nibble).
+pub enum Stb: _ {
+    Local = 0,
+    Global = 1,
+    Shift = 4,
+}
+pub enum Stt: _ {
+    Notype = 0,
+    Func = 2,
+    Section = 3,
+    File = 4,
+    Mask = 15,
+}
+
+// `st_other`.
+pub enum Stv: _ {
+    Hidden = 2,
+}
+
+// Relocation types.
+pub enum RelType: _ {
+    Riscv64 = 2,
+    RiscvCall = 18,
+    RiscvCallPlt = 19,
+    RiscvRelax = 51,
+    Aarch64Abs64 = 257,
+    Aarch64Jump26 = 282,
+    Aarch64Call26 = 283,
+}
+
+// RISC-V major opcodes (bits 0..7 of an instruction): the stub encodes
+// them, and `R_RISCV_CALL` must point at `auipc` then `jalr`.
+pub enum RvOpcode: _ {
+    Load = 3,
+    OpImm = 19,
+    Auipc = 23,
+    Store = 35,
+    Op = 51,
+    Lui = 55,
+    Branch = 99,
+    Jalr = 103,
+    Jal = 111,
+    System = 115,
+    Mask = 127,
+}

@@ -23,7 +23,7 @@ use crate::events::RampTile;
 use crate::events::{EventError, ParamTable, RtParamEvent, decode_events, process_with_events};
 use crate::lease::{RtBufferLease, RtOutputPort};
 #[cfg(not(vesper_port))]
-use crate::simd::{LaneOut, ramp_tick, svf_tick};
+use crate::simd::LaneOut;
 use crate::simd::{PanLanes, SimdUnavailable, SvfLanes};
 use crate::spsc::{MailboxReceiver, RtRetirementSink, SwapOutcome};
 
@@ -92,15 +92,15 @@ pub struct SvfBank {
     /// Filter state.
     pub tile: SvfVoiceTile,
     #[cfg(not(vesper_port))]
-    ramps: [RampTile; 3],
+    pub(crate) ramps: [RampTile; 3],
     /// The port build keeps the three ramp tiles as the words the port
     /// reads: tile `p` is current, target, step and remaining (16 each).
     #[cfg(vesper_port)]
     ramps: [[u32; 4 * LANES]; 3],
-    lanes: SvfLanes,
-    pan: PanLanes,
+    pub(crate) lanes: SvfLanes,
+    pub(crate) pan: PanLanes,
     #[cfg(not(vesper_port))]
-    scratch: LaneOut,
+    pub(crate) scratch: LaneOut,
 }
 
 impl SvfBank {
@@ -202,9 +202,9 @@ impl SvfBank {
     }
 
     /// Render frames `[start, end)` of `input` into `left`/`right` with the
-    /// selected lane path. (The port build runs the Vesper kernel, which is
-    /// bit-identical to every lane path.)
-    #[cfg(vesper_port)]
+    /// selected lane path. (This package runs the Vesper kernel, which is
+    /// bit-identical to every lane path; the seed runs the frozen Rust loop
+    /// in `seed/src/engine/kernels.rs`.)
     pub fn render(
         &mut self,
         input: &[f32],
@@ -213,85 +213,32 @@ impl SvfBank {
         start: usize,
         end: usize,
     ) {
-        use crate::port::{bits, bits_mut};
-        let t = &mut self.tile;
-        crate::port::ok(crate::port::svf_render(
-            bits_mut(&mut t.ic1eq),
-            bits_mut(&mut t.ic2eq),
-            bits_mut(&mut t.g_coeff),
-            bits_mut(&mut t.k_damping),
-            bits_mut(&mut t.gain),
-            self.ramps.as_flattened_mut(),
-            bits(&self.pan.left),
-            bits(&self.pan.right),
-            bits(input),
-            bits_mut(left),
-            bits_mut(right),
-            start as u64,
-            end as u64,
-        ));
-    }
-
-    /// The original fused scalar loop (wave five), kept as the reference
-    /// every lane path is tested against bit for bit.
-    #[cfg(vesper_port)]
-    pub fn render_reference(
-        &mut self,
-        input: &[f32],
-        left: &mut [f32],
-        right: &mut [f32],
-        start: usize,
-        end: usize,
-    ) {
-        use crate::port::{bits, bits_mut};
-        let t = &mut self.tile;
-        crate::port::ok(crate::port::svf_render_reference(
-            bits_mut(&mut t.ic1eq),
-            bits_mut(&mut t.ic2eq),
-            bits_mut(&mut t.g_coeff),
-            bits_mut(&mut t.k_damping),
-            bits_mut(&mut t.gain),
-            self.ramps.as_flattened_mut(),
-            bits(input),
-            bits_mut(left),
-            bits_mut(right),
-            start as u64,
-            end as u64,
-        ));
-    }
-
-    /// Render frames `[start, end)` of `input` into `left`/`right` with the
-    /// selected lane path.
-    #[cfg(not(vesper_port))]
-    pub fn render(
-        &mut self,
-        input: &[f32],
-        left: &mut [f32],
-        right: &mut [f32],
-        start: usize,
-        end: usize,
-    ) {
-        for i in start..end {
-            ramp_tick(self.lanes, &mut self.ramps[param::GAIN as usize]);
-            ramp_tick(self.lanes, &mut self.ramps[param::G as usize]);
-            ramp_tick(self.lanes, &mut self.ramps[param::K as usize]);
-            self.tile.gain = self.ramps[param::GAIN as usize].current;
-            self.tile.g_coeff = self.ramps[param::G as usize].current;
-            self.tile.k_damping = self.ramps[param::K as usize].current;
-            svf_tick(
-                self.lanes,
-                &mut self.tile,
-                &self.pan,
-                input[i],
-                &mut self.scratch,
-            );
-            (left[i], right[i]) = self.scratch.sum();
+        #[cfg(not(vesper_port))]
+        crate::engine::kernels::render(self, input, left, right, start, end);
+        #[cfg(vesper_port)]
+        {
+            use crate::port::{bits, bits_mut};
+            let t = &mut self.tile;
+            crate::port::ok(crate::port::svf_render(
+                bits_mut(&mut t.ic1eq),
+                bits_mut(&mut t.ic2eq),
+                bits_mut(&mut t.g_coeff),
+                bits_mut(&mut t.k_damping),
+                bits_mut(&mut t.gain),
+                self.ramps.as_flattened_mut(),
+                bits(&self.pan.left),
+                bits(&self.pan.right),
+                bits(input),
+                bits_mut(left),
+                bits_mut(right),
+                start as u64,
+                end as u64,
+            ));
         }
     }
 
     /// The original fused scalar loop (wave five), kept as the reference
     /// every lane path is tested against bit for bit.
-    #[cfg(not(vesper_port))]
     pub fn render_reference(
         &mut self,
         input: &[f32],
@@ -300,33 +247,25 @@ impl SvfBank {
         start: usize,
         end: usize,
     ) {
-        let t = &mut self.tile;
-        for i in start..end {
-            let v0 = input[i];
-            let mut l = 0.0f32;
-            let mut r = 0.0f32;
-            for v in 0..LANES {
-                let gain = self.ramps[param::GAIN as usize].advance_lane_scalar(v);
-                let g = self.ramps[param::G as usize].advance_lane_scalar(v);
-                let k = self.ramps[param::K as usize].advance_lane_scalar(v);
-                t.gain[v] = gain;
-                t.g_coeff[v] = g;
-                t.k_damping[v] = k;
-                let a1 = 1.0 / (1.0 + g * (g + k));
-                let a2 = g * a1;
-                let a3 = g * a2;
-                let v3 = v0 - t.ic2eq[v];
-                let v1 = a1 * t.ic1eq[v] + a2 * v3;
-                let v2 = t.ic2eq[v] + a2 * t.ic1eq[v] + a3 * v3;
-                t.ic1eq[v] = 2.0 * v1 - t.ic1eq[v];
-                t.ic2eq[v] = 2.0 * v2 - t.ic2eq[v];
-                let y = gain * v2;
-                let (pl, pr) = Self::pan(v);
-                l += y * pl;
-                r += y * pr;
-            }
-            left[i] = l;
-            right[i] = r;
+        #[cfg(not(vesper_port))]
+        crate::engine::kernels::render_reference(self, input, left, right, start, end);
+        #[cfg(vesper_port)]
+        {
+            use crate::port::{bits, bits_mut};
+            let t = &mut self.tile;
+            crate::port::ok(crate::port::svf_render_reference(
+                bits_mut(&mut t.ic1eq),
+                bits_mut(&mut t.ic2eq),
+                bits_mut(&mut t.g_coeff),
+                bits_mut(&mut t.k_damping),
+                bits_mut(&mut t.gain),
+                self.ramps.as_flattened_mut(),
+                bits(input),
+                bits_mut(left),
+                bits_mut(right),
+                start as u64,
+                end as u64,
+            ));
         }
     }
 }

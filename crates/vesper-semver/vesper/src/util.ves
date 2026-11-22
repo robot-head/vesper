@@ -45,12 +45,7 @@ pub fn cb(in s: ChunkSeq[u8], i: u64) -> u8 {
 }
 
 pub fn put(inout m: ChunkSeq[u8], in s: Str) {
-    for i in 0..s.len() {
-        match s.try_byte_at(i) {
-            Option::Some(b) => m.push(b),
-            Option::None => (),
-        }
-    }
+    m.extend(in s.as_bytes());
 }
 
 // Append `len` bytes of `t` from `off`.

@@ -9,9 +9,10 @@
 //! `cargo build -p vesper --bin vesper` into this build's target directory.
 //!
 //! Under the `divergent` (or `divergent-parse`, `divergent-ir-check`,
-//! `divergent-ir-inline`, `divergent-ir-opt`, `divergent-optimize`) feature
-//! the hybrid's layout (or parse, IR-check, inliner, IR optimizer, AST
-//! optimizer) module is deliberately wrong (build.rs), and the harness must
+//! `divergent-ir-inline`, `divergent-ir-opt`, `divergent-optimize`,
+//! `divergent-pact`) feature the hybrid's layout (or parse, IR-check,
+//! inliner, IR optimizer, AST optimizer, trait declaration pass) module is
+//! deliberately wrong (build.rs), and the harness must
 //! report differences instead: that is the proof it can fail.
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -178,14 +179,12 @@ fn run_with(
 /// goes beyond Rust here, so the runs cannot agree (the port's loop
 /// lowering is checked against the evaluator in
 /// tests/self_host_wasm_backend.rs).
-fn loop_extension(command: &[&str], default: &Run, hybrid: &Run) -> bool {
-    let refusal = vesper::loops::WASM_REFUSAL
-        .split(';')
-        .next()
-        .unwrap_or_default();
+fn port_extension(command: &[&str], default: &Run, hybrid: &Run) -> bool {
+    // Rust refuses an operation the port lowers: loops (`WASM_REFUSAL`),
+    // sequences, strings and integer conversions (#1506).
     command.contains(&"wasm32-wasip2")
         && !default.output.status.success()
-        && String::from_utf8_lossy(&default.output.stderr).contains(refusal)
+        && String::from_utf8_lossy(&default.output.stderr).contains("unsupported Operation")
         && hybrid.output.status.success()
 }
 
@@ -236,7 +235,7 @@ fn hybrid_matches_the_default_compiler() {
                         let b = a.clone();
                         let d = run(&default, &root, command, file, &a);
                         let h = run(&hybrid, &root, command, file, &b);
-                        if loop_extension(command, &d, &h) {
+                        if port_extension(command, &d, &h) {
                             *extended.lock().unwrap() += 1;
                             continue;
                         }
@@ -305,7 +304,7 @@ fn hybrid_matches_the_default_compiler() {
     );
     eprintln!(
         "differential: {} files, {runs} runs per compiler; default {:.2} s, hybrid {:.2} s ({:.3}x); \
-         {} differ; {} wasm builds with loops only the hybrid compiles",
+         {} differ; {} wasm builds only the hybrid compiles (loops, sequences, conversions)",
         files.len(),
         d.as_secs_f64(),
         h.as_secs_f64(),
@@ -319,7 +318,8 @@ fn hybrid_matches_the_default_compiler() {
         feature = "divergent-ir-check",
         feature = "divergent-ir-inline",
         feature = "divergent-ir-opt",
-        feature = "divergent-optimize"
+        feature = "divergent-optimize",
+        feature = "divergent-pact"
     )) {
         assert!(
             !mismatches.is_empty(),
@@ -407,8 +407,56 @@ fn pilot_module_runs_from_vesper() {
     );
 }
 
+/// The trait declaration pass (#1185) really runs from Vesper in the hybrid
+/// build: it answers the accepted shapes example, and it rejects an impl
+/// that leaves out an associated type. The stats report is read from the
+/// command that succeeds: a failing command exits before the report on
+/// Windows (#1486).
+#[test]
+fn pact_module_runs_from_vesper() {
+    let root = repository();
+    let output = Command::new(hybrid())
+        .current_dir(&root)
+        .env("VESPER_HYBRID_STATS", "1")
+        .args(["check", "examples/traits/shapes.ves"])
+        .output()
+        .expect("run vesper-hybrid");
+    assert!(output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let calls: u64 = stderr
+        .lines()
+        .find_map(|l| l.strip_prefix("vesper-hybrid: pact answered "))
+        .and_then(|l| l.split(' ').next())
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| panic!("no pact report in {stderr:?}"));
+    assert!(calls > 0, "the Vesper pact module answered no calls");
+    let bad = std::env::temp_dir().join(format!("vesper-hybrid-pact-{}.ves", std::process::id()));
+    std::fs::write(
+        &bad,
+        "struct Point { x: i64, y: i64 }\n\
+         trait Show { type Out: mod copy; fn show(in self) -> Self::Out; }\n\
+         impl Show for Point { fn show(in self) -> i64 { 1 } }\n\
+         fn main() -> i64 { 0 }\n",
+    )
+    .expect("write the rejected source");
+    let output = Command::new(hybrid())
+        .current_dir(&root)
+        .arg("check")
+        .arg(&bad)
+        .output()
+        .expect("run vesper-hybrid");
+    let _ = std::fs::remove_file(&bad);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        stderr.contains("missing associated type 'Out'"),
+        "{stderr:?}"
+    );
+}
+
 /// The wasm backend module (#1289) really compiles from Vesper in the
-/// hybrid build: `transaction.ves` has no handler and no host capability.
+/// hybrid build, and its component is wrapped from Vesper (#1334):
+/// `transaction.ves` has no handler and no host capability.
 #[test]
 fn wasm_module_runs_from_vesper() {
     let root = repository();
@@ -430,4 +478,64 @@ fn wasm_module_runs_from_vesper() {
         .and_then(|l| l.split(' ').next())
         .and_then(|n| n.parse().ok());
     assert_eq!(compiled, Some(1), "{stderr}");
+    // ... and @vesper/wit-component wraps its component (#1334).
+    let wrapped: Option<u64> = stderr
+        .lines()
+        .find_map(|l| l.strip_prefix("vesper-hybrid: wit-component wrapped "))
+        .and_then(|l| l.split(' ').next())
+        .and_then(|n| n.parse().ok());
+    assert_eq!(wrapped, Some(1), "{stderr}");
+}
+
+/// A program with a host import, which the Vesper wasm backend leaves to
+/// Rust's: the hybrid's `component` hook still wraps it with
+/// `@vesper/wit-component` (#1334), and the component is the default
+/// compiler's byte for byte.
+#[test]
+fn host_import_component_wraps_from_vesper() {
+    let root = repository();
+    let dir = std::env::temp_dir().join(format!("vesper-hybrid-host-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("hosted.ves");
+    std::fs::write(
+        &source,
+        "linear effect Stdout { fn write(s: String); } linear effect Clock { fn now_ns() -> u64; } \
+         fn main() -> u64 eff [Stdout, Clock] { Stdout::write(\"hello\\n\"); Clock::now_ns() }\n",
+    )
+    .unwrap();
+    let build = |compiler: &Path, out: &Path, stats: bool| {
+        let mut c = Command::new(compiler);
+        c.current_dir(&root);
+        if stats {
+            c.env("VESPER_HYBRID_STATS", "1");
+        }
+        let output = c
+            .args(["build", "--target", "wasm32-wasip2", "-o"])
+            .arg(out)
+            .arg(&source)
+            .output()
+            .expect("run the compiler");
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8_lossy(&output.stderr).into_owned()
+    };
+    let (ours, theirs) = (dir.join("hybrid.wasm"), dir.join("default.wasm"));
+    let stderr = build(&hybrid(), &ours, true);
+    build(&default_compiler(), &theirs, false);
+    let (a, b) = (
+        std::fs::read(&ours).unwrap(),
+        std::fs::read(&theirs).unwrap(),
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    let line = stderr
+        .lines()
+        .find(|l| l.starts_with("vesper-hybrid: wit-component wrapped "))
+        .unwrap_or_default();
+    assert_eq!(
+        line, "vesper-hybrid: wit-component wrapped 1 components from Vesper (0 declined)",
+        "{stderr}"
+    );
+    assert!(
+        a == b,
+        "the hybrid's component differs from the default compiler's"
+    );
 }

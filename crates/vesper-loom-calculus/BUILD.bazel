@@ -10,6 +10,10 @@ vesper_package(
     name = "port_package",
     srcs = glob(["vesper/src/**/*.ves"]),
     manifest = "vesper/Loom.toml",
+    deps = [
+        "//:std_toml_package",
+        "//crates/vesper-serde:port_package",
+    ],
     # @vesper/loom-solver (port wave P1 lane 17, #914) and @vesper/loom-audit
     # (port wave P3a lane 4, #1039) import this package.
     visibility = [
@@ -50,6 +54,8 @@ filegroup(
         ("semver", "return v.minor >= c.minor;", "return v.minor > c.minor;"),
         ("solve", "if grew && !sbool(in l.queued, parent) {", "if false && grew {"),
         ("upgrade", "let relaxed = !new_forbid;", "let relaxed = false;"),
+        ("manifest_toml", "put(inout d.msg, \"missing field `\");", "put(inout d.msg, \"missing key `\");"),
+        ("semver_text", "put(inout m, \"build metadata\");", "put(inout m, \"build\");"),
     ]
 ]
 

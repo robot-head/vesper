@@ -1,0 +1,127 @@
+// The handler ABI's reading of types and effect rows
+// (src/native_handlers/lower.rs): `Kind::of`, the machine kind of a source
+// type, and `effect_key`, the capability key of an effect instance (its
+// written label, or its name and arguments).
+
+use @vesper/check-data::util::{
+    add,
+    u32_at,
+    w
+};
+use @vesper/check-data::names::{
+    Names
+};
+use @vesper/check-data::types::{
+    EffNode,
+    Types,
+    debug_type,
+    display
+};
+
+const K_LIT: u8 = 0;
+const K_NAMED: u8 = 1;
+const K_FN: u8 = 3;
+
+fn put(inout o: ChunkSeq[u8], in s: Str) {
+    o.extend(in s.as_bytes());
+}
+
+// `{:?}` of `Kind::of(ty)`.
+pub fn write_kind(in t: Types, in names: Names, ty: u32, inout o: ChunkSeq[u8]) {
+    let n = t.node(ty);
+    if n.kind == K_NAMED && n.n == 0 {
+        let text = if names.spells(n.name, in "i64".as_bytes()) {
+            "I64"
+        } else if names.spells(n.name, in "u64".as_bytes()) {
+            "U64"
+        } else if names.spells(n.name, in "u32".as_bytes()) {
+            "U32"
+        } else if names.spells(n.name, in "u8".as_bytes()) {
+            "U8"
+        } else if names.spells(n.name, in "bool".as_bytes()) {
+            "Bool"
+        } else if names.spells(n.name, in "Never".as_bytes()) {
+            "Never"
+        } else {
+            ""
+        };
+        if text.len() > 0 {
+            put(inout o, in text);
+            return;
+        }
+    } else if ty == t.unit {
+        put(inout o, "Unit");
+        return;
+    } else if n.kind == K_LIT {
+        put(inout o, "I64");
+        return;
+    } else if n.kind == K_FN {
+        put(inout o, "Function(");
+        debug_type(in t, in names, ty, inout o);
+        put(inout o, ")");
+        return;
+    }
+    put(inout o, "Opaque(");
+    debug_type(in t, in names, ty, inout o);
+    put(inout o, ")");
+}
+
+// `source_label`: the label a program wrote, as a byte range of the label
+// symbol, or false for none (`$latent:origin:label:Name` keeps its written
+// label; other `$` labels are the checker's own).
+fn source_label(in names: Names, label: u32, inout start: u64, inout end: u64) -> bool {
+    let size = names.size(label);
+    if names.has_prefix(label, in "$latent:".as_bytes()) {
+        // `split(':').nth(1)` of the rest: the second colon-separated part.
+        let mut part: u64 = 0;
+        let mut a: u64 = 8;
+        for i in 8..size {
+            if names.byte(label, i) == 58 {
+                if part == 1 {
+                    start = a;
+                    end = i;
+                    return end > start;
+                }
+                part = wrapping_add(part, 1);
+                a = wrapping_add(i, 1);
+            }
+        }
+        if part == 1 {
+            start = a;
+            end = size;
+            return end > start;
+        }
+        return false;
+    }
+    if size > 0 && names.byte(label, 0) == 36 {
+        return false;
+    }
+    start = 0;
+    end = size;
+    true
+}
+
+// `effect_key(e)`.
+pub fn write_effect_key(in t: Types, in names: Names, e: EffNode, inout o: ChunkSeq[u8]) {
+    if e.label != 0 {
+        let label = wrapping_sub(e.label, 1);
+        let mut start: u64 = 0;
+        let mut end: u64 = 0;
+        if source_label(in names, label, inout start, inout end) {
+            put(inout o, "label:");
+            for i in start..end {
+                o.push(names.byte(label, i));
+            }
+            return;
+        }
+    }
+    names.write(e.name, inout o);
+    o.push(91);
+    for i in 0..w(e.n) {
+        if i > 0 {
+            o.push(44);
+        }
+        display(in t, in names, u32_at(in t.items, add(w(e.a), i)), inout o);
+    }
+    o.push(93);
+}

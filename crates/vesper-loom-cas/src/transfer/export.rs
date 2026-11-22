@@ -27,6 +27,18 @@ pub fn export_pack(
     root: ObjectId,
     limits: TransferLimits,
 ) -> Result<Vec<u8>, TransferError> {
+    #[cfg(vesper_port)]
+    return crate::port_store::export_pack(store.root(), &root, limits);
+    #[cfg(not(vesper_port))]
+    export_pack_rust(store, root, limits)
+}
+
+#[cfg(not(vesper_port))]
+fn export_pack_rust(
+    store: &Store,
+    root: ObjectId,
+    limits: TransferLimits,
+) -> Result<Vec<u8>, TransferError> {
     let budget = Budget::new(limits)?;
     if limits.max_pack_bytes < HEADER_BYTES {
         return Err(TransferError::Limit("pack bytes"));
@@ -141,4 +153,15 @@ fn grow<T>(budget: &mut Budget, values: &mut Vec<T>, max: usize) -> Result<(), T
         return Err(TransferError::Limit("graph metadata"));
     }
     budget.reserve_metadata(values, target - values.len())
+}
+
+#[cfg(test)]
+mod tests {
+    /// The Vesper port charges `size_of` of this record (vesper/src/store.ves,
+    /// `EXPORT_RECORD_SIZE`).
+    #[test]
+    fn port_sizes_export() {
+        assert_eq!(std::mem::size_of::<super::Record>(), 72);
+        assert_eq!(std::mem::size_of::<crate::ObjectId>(), 34);
+    }
 }

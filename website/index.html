@@ -32,29 +32,14 @@
   </head>
   <body>
     <a class="skip" href="#top">Skip to content</a>
-    <header class="nav">
-      <div class="wrap nav-bar">
-        <a class="brand" href="#top" aria-label="Vesper home"><img data-brand-mark src="brand/vesper-mark-dusk.svg" width="34" height="34" alt="">vesper</a>
-        <nav id="navigation" aria-label="Main navigation">
-          <a href="tour/index.html">Language tour</a>
-          <a href="docs/index.html">Documentation</a>
-          <a href="#learn">Rust comparison</a>
-          <a href="#compiler">Compiler</a>
-          <a href="vesper-specification.pdf" aria-label="Vesper language specification (PDF)">Specification <svg width="12" height="12" viewbox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7M7 7h10v10"></path></svg></a>
-        </nav>
-        <div class="nav-end">
-          <label class="theme" title="Switch between dusk and dawn"><input type="checkbox" id="theme-toggle" role="switch" aria-label="Dawn theme"><svg width="18" height="18" viewbox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"></path></svg></label>
-          <a class="github" aria-label="GitHub repository" href="https://github.com/robot-head/vesper"><svg width="17" height="17" viewbox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path fill="currentColor" stroke="none" d="M12 .9a11 11 0 0 0-3.48 21.44c.55.1.75-.24.75-.53v-2.06c-3.06.66-3.7-1.3-3.7-1.3-.5-1.26-1.22-1.6-1.22-1.6-1-.68.08-.67.08-.67 1.1.08 1.68 1.14 1.68 1.14.98 1.68 2.57 1.2 3.2.92.1-.71.38-1.2.7-1.47-2.44-.28-5-1.22-5-5.44 0-1.2.43-2.18 1.13-2.94-.11-.28-.49-1.4.1-2.91 0 0 .92-.3 3.02 1.13a10.5 10.5 0 0 1 5.49 0c2.1-1.43 3.02-1.13 3.02-1.13.6 1.51.22 2.63.11 2.91.7.76 1.12 1.74 1.12 2.94 0 4.23-2.57 5.15-5.02 5.43.4.35.75 1.02.75 2.05v3c0 .29.2.64.76.53A11 11 0 0 0 12 .9Z"></path></svg> <span>GitHub</span> <svg width="12" height="12" viewbox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7M7 7h10v10"></path></svg></a>
-          <button class="nav__toggle" type="button" aria-label="Navigation menu" aria-controls="navigation" aria-expanded="false"><svg width="18" height="18" viewbox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7h18M3 17h18"></path></svg></button>
-        </div>
-      </div>
-    </header>
+    <!-- site-header -->
     <main id="top">
       <section class="hero wrap" aria-labelledby="hero-title">
         <div class="hero-copy">
           <p class="eyebrow"><span class="signal" aria-hidden="true"></span> The Vesper programming language</p>
           <h1 id="hero-title">Ownership and effects<br><em>in systems code</em></h1>
-          <p class="lead">Vesper is a systems language without a garbage collector. A function declares which resources it consumes, which fields it may change, and which effects it may perform. The compiler checks those declarations at each call.</p>
+          <p class="lead">Vesper is a systems language without a garbage collector. A function declares which resources it consumes, which fields it may change, and which effects it may perform. The compiler checks those declarations at each call. Borrowing uses lexical loans without lifetime parameters.</p>
+          <p>Pulse uses effect types to track suspension while calls use ordinary function syntax. Loom package policies bound authority. Lean 4 extraction models supported calls with explicit state, so those models can compute updated values at the call boundary.</p>
           <div class="actions">
             <a class="button primary" href="tour/index.html">Take the tour <svg width="18" height="18" viewbox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12h15m-6-6 6 6-6 6"></path></svg></a>
             <a class="button" href="#learn">Compare with Rust <svg width="18" height="18" viewbox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12h15m-6-6 6 6-6 6"></path></svg></a>
@@ -109,7 +94,7 @@ fn main() {
     let _tx = WriteTxn;
     // Forgot to commit or abort.
 }</code></pre>
-                <p>This program exits successfully. The transaction goes out of scope and its type has no cleanup code. Libraries often use <code>Drop</code> to roll back an unfinished transaction.</p>
+                <p>This program exits successfully. The transaction goes out of scope and its type has no cleanup code. Libraries often use <code>Drop</code> to roll back an unfinished transaction. A destructor cannot return a commit receipt or suspend to finish I/O.</p>
               </article>
               <article>
                 <h4>Vesper · rejected at scope exit</h4>
@@ -150,7 +135,7 @@ fn main() {
               <article>
                 <h4>Vesper</h4>
                 <pre tabindex="0"><code data-lang="vesper">fn divide(divisor: i64) -&gt; i64 eff [Fail[RuntimeError]]</code></pre>
-                <p>The division declares <code>Fail[RuntimeError]</code> in its effect row. A caller can propagate that effect or install a lexical handler. The example handles division by zero and supplies a fallback value.</p>
+                <p>The division declares <code>Fail[RuntimeError]</code> in its effect row. A caller can propagate that effect or install a lexical handler. A one-shot handler can resume an operation once with a value, as in the <a href="tour/use-the-resumed-result.html">injected clock example</a>. The checker can also remove an arithmetic failure from the effect row when <a href="tour/prove-a-divisor-is-nonzero.html">a range proves the operation safe</a>.</p>
                 <a href="https://github.com/robot-head/vesper/blob/main/tests/fixtures/self_host_check/effect_missing.ves" class="evidence">See an undeclared effect ↗</a>
               </article>
             </div>
@@ -177,6 +162,7 @@ fn main() {
                   <pre id="code-linear" tabindex="0" aria-label="transaction.ves source"><code data-lang="vesper"><!-- source:transaction.ves --></code></pre>
                   <div class="editor-foot">
                     <button class="copy-source" data-copy="code-linear" type="button">Copy source</button>
+                    <a href="tour/index.html?example=transaction.ves">Open in Tour</a>
                     <a href="examples/transaction.ves" download>Download transaction.ves</a>
                   </div>
                 </div>
@@ -192,6 +178,7 @@ fn main() {
                   <pre id="code-projections" tabindex="0" aria-label="projections.ves source"><code data-lang="vesper"><!-- source:projections.ves --></code></pre>
                   <div class="editor-foot">
                     <button class="copy-source" data-copy="code-projections" type="button">Copy source</button>
+                    <a href="tour/index.html?example=projections.ves">Open in Tour</a>
                     <a href="examples/projections.ves" download>Download projections.ves</a>
                   </div>
                 </div>
@@ -207,6 +194,7 @@ fn main() {
                   <pre id="code-effects" tabindex="0" aria-label="checked_math.ves source"><code data-lang="vesper"><!-- source:checked_math.ves --></code></pre>
                   <div class="editor-foot">
                     <button class="copy-source" data-copy="code-effects" type="button">Copy source</button>
+                    <a href="tour/index.html?example=checked_math.ves">Open in Tour</a>
                     <a href="examples/checked_math.ves" download>Download checked_math.ves</a>
                   </div>
                 </div>
@@ -225,43 +213,42 @@ fn main() {
           <h2>Check, run, or verify a program</h2>
           <a class="inline-link" href="https://github.com/robot-head/vesper/tree/main/src">Compiler source <svg width="14" height="14" viewbox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7M7 7h10v10"></path></svg></a>
         </div>
-        <div class="pipeline">
-          <article>
-            <code>vesper check</code>
-            <h3>Check the contract</h3>
-            <p>The checker reports type errors, unfinished transactions, conflicting loans, and missing effects before the program runs.</p>
-          </article>
-          <article>
-            <code>vesper build</code>
-            <h3>Compile to native code</h3>
-            <p>Vesper uses Cranelift to turn a checked program into machine code. That skips LLVM’s optimization pipeline during native builds. Cranelift prioritizes quick code generation, which helps when you edit and rerun a program. Build time and executable speed depend on the workload. <a href="https://cranelift.dev/">Cranelift’s performance trade-offs</a>.</p>
-          </article>
-          <article>
-            <code>vesper emit --emit lean</code>
-            <h3>Inspect the proof model</h3>
-            <p>Extract a Lean 4 model of a supported program, then prove properties about its definitions. Applying that proof to the native executable also requires showing that compilation preserves the modeled behavior.</p>
-          </article>
-        </div>
+        <ol class="pipeline">
+          <li><h3>Parse</h3><p>Read the source into a syntax tree that retains the original text.</p></li>
+          <li><h3>Expand and resolve</h3><p>Lower sugar and Forge rules, and resolve names, types, and trait calls.</p></li>
+          <li><h3>Check places and effects</h3><p>Track ownership, initialized storage, loans, and obligations across control flow.</p></li>
+          <li><h3>Optimize</h3><p>Use type, range, and effect information to choose equivalent operations.</p></li>
+          <li><h3>Emit or extract</h3><p>Build native code with Cranelift, or select <code>vesper build --codegen verified</code> for the supported scalar subset. <a href="tour/extract-a-lean-model.html">Extract a Lean model</a> from supported source.</p></li>
+        </ol>
+        <p><a href="docs/chapter-08.html">Read how these stages map to the compiler</a>. Cranelift avoids LLVM’s optimization pipeline. Build time and executable speed depend on the workload.</p>
       </section>
       <section id="guide" class="surface">
         <div class="wrap band guide">
           <div>
             <p class="eyebrow section-label">Getting started</p>
             <h2>Build Vesper and run a transaction</h2>
-            <p>Install a compatible Rust toolchain and a system C linker. The commands build Vesper, check the transaction example, and run it. A successful run prints <code>42</code>, the slot returned by <code>commit</code>.</p>
-            <a class="inline-link" href="https://github.com/robot-head/vesper/blob/main/docs/bazel.md">Bazel build instructions <svg width="14" height="14" viewbox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7M7 7h10v10"></path></svg></a>
+            <p>Bazel builds with the repository’s pinned toolchain. Cargo requires a toolchain that supports Rust 2024 and a system C linker. The transaction prints <code>42</code>.</p>
+            <a class="inline-link" href="https://github.com/robot-head/vesper/blob/main/docs/bazel.md">Bazel setup and Windows instructions</a>
           </div>
           <div class="terminal">
-            <div class="window-bar">
-              <span><svg width="16" height="16" viewbox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4 6 6 6-6 6m9 0h7"></path></svg> Shell</span>
-              <button type="button" class="copy-source" data-copy="setup-code">Copy commands</button>
+            <div role="tablist" class="tab-bar" aria-label="Build tool">
+              <button role="tab" type="button" id="setup-bazel-tab" aria-selected="true" aria-controls="setup-bazel">Bazel</button>
+              <button role="tab" type="button" id="setup-cargo-tab" aria-selected="false" aria-controls="setup-cargo">Cargo</button>
             </div>
-            <pre id="setup-code" tabindex="0"><code data-lang="sh">git clone https://github.com/robot-head/vesper.git
+            <div role="tabpanel" id="setup-bazel" aria-labelledby="setup-bazel-tab">
+              <pre tabindex="0"><code data-lang="sh">git clone https://github.com/robot-head/vesper.git
+cd vesper
+bazel build //:bin/vesper
+bazel-bin/bin/vesper check examples/transaction.ves
+bazel-bin/bin/vesper run examples/transaction.ves</code></pre>
+            </div>
+            <div role="tabpanel" id="setup-cargo" aria-labelledby="setup-cargo-tab" hidden>
+              <pre tabindex="0"><code data-lang="sh">git clone https://github.com/robot-head/vesper.git
 cd vesper
 cargo build --locked -p vesper
-
-./target/debug/vesper check examples/transaction.ves
-./target/debug/vesper run examples/transaction.ves</code></pre>
+target/debug/vesper check examples/transaction.ves
+target/debug/vesper run examples/transaction.ves</code></pre>
+            </div>
           </div>
         </div>
       </section>
@@ -271,6 +258,10 @@ cargo build --locked -p vesper
           <h2>Documentation and source code</h2>
         </div>
         <div class="resource-list">
+          <a href="docs/index.html#part-2">Compiler, verification, and Loom packages</a>
+          <a href="docs/index.html#part-3">Memory, SIMD, and concurrency</a>
+          <a href="docs/index.html#part-4">Developer tools</a>
+          <a href="docs/index.html#part-5">System, data, and compute libraries</a>
           <a href="docs/index.html">Vesper documentation</a>
           <a href="language.html">Language guide</a>
           <a href="vesper-specification.pdf" aria-label="Read the Vesper language specification (PDF)">Read the design</a>
@@ -280,15 +271,7 @@ cargo build --locked -p vesper
         </div>
       </section>
     </main>
-    <footer id="contact">
-      <div class="wrap footer-bar">
-        <a class="brand" href="#top" aria-label="Vesper home"><img data-brand-mark src="brand/vesper-mark-dusk.svg" width="34" height="34" alt="">vesper</a>
-        <span>Vesper programming language</span>
-        <a href="https://github.com/robot-head/vesper/blob/main/README.md#license">MIT / Apache-2.0 <svg width="13" height="13" viewbox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7M7 7h10v10"></path></svg></a>
-      </div>
-      <div id="copy-status" class="sr-only" role="status"></div>
-    </footer>
-    <script type="module" src="assets/system.js"></script>
+    <!-- site-footer -->
     <script type="module" src="site.js"></script>
   </body>
 </html>
