@@ -214,12 +214,12 @@ pub fn packed_capture(
     out.try_set(3, ci);
     out
         .try_set(
-        4,
-        if cw {
-            1
-        } else {
-            0
-        }
-    );
+            4,
+            if cw {
+                1
+            } else {
+                0
+            }
+        );
     Result::Ok(n)
 }
