@@ -822,14 +822,14 @@ pub mod host {
                     vesper::native::set_target_features(features);
                 }
                 Box::into_raw(Box::new(Session {
-                o,
-                package: false,
-                loaded: None,
-                source: String::new(),
-                parsed: None,
-                checked: None,
-                text: vec![],
-            }))
+                    o,
+                    package: false,
+                    loaded: None,
+                    source: String::new(),
+                    parsed: None,
+                    checked: None,
+                    text: vec![],
+                }))
             }
             None => std::ptr::null_mut(),
         }
