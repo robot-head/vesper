@@ -95,6 +95,7 @@ Test and harness Rust (all lines, tracked files): `tests/` 166,163, `crates/*/te
 | `vesper-simd` | 1,573 | `c-api` |  |  | out of the compiler's closure (#1398); Cranelift JIT host: through vesper-cranelift-sys | 13 |
 | `vesper-std-host` | 801 | `c-api` |  |  | libc fs/process/env: import libc directly | 13 |
 | `vesper-loom-admission` | 370 | `c-api` |  |  | out of the compiler's closure (#1398); glue over CAS + trust | 16 |
+| `vesper-blake3-sys` | 156 | `c-api` |  |  | BLAKE3 C library: import it straight from .vsys | G1-12 |
 | `vesper-beacon-arrow` | 7,938 | `rust-lib` |  |  | arrow-rs, tonic, prost: Arrow IPC and gRPC on Prism | 18 |
 | `vesper-migrate` | 4,469 | `rust-lib` |  |  | out of the compiler's closure (#1398); lang-c, syn: C and Rust readers in Vesper | 18 |
 | `vesper-fusion` | 2,490 | `rust-lib` |  |  | egglog: move rule sets onto @vesper/egraph | 18 |

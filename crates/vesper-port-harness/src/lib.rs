@@ -51,6 +51,11 @@ pub const COMPILER_ENV: &str = "VESPER_PORT_COMPILER";
 pub const OBJECT_ENV: &str = "VESPER_PORT_OBJECT";
 /// With [`OBJECT_ENV`]: the binding generated for that object, to check.
 pub const GENERATED_BINDING_ENV: &str = "VESPER_PORT_GENERATED_BINDING";
+/// The `Loom.toml` files (absolute, joined like `PATH`) of packages whose
+/// `[package] objects` the port links, for builds where its path
+/// dependencies are not beside the crate (Bazel passes execpaths). They add
+/// to the package closure found from the source.
+pub const OBJECT_PACKAGES_ENV: &str = "VESPER_PORT_OBJECT_PACKAGES";
 /// Set on the nested compiler build. A port build script that sees it is
 /// inside the compiler's own dependency closure, which the seed-copy rule
 /// forbids, and fails instead of recursing.
@@ -128,6 +133,7 @@ impl Port {
             OBJECT_ENV,
             GENERATED_BINDING_ENV,
             IN_COMPILER_BUILD_ENV,
+            OBJECT_PACKAGES_ENV,
             &object_env,
             &binding_env,
         ] {
@@ -309,14 +315,31 @@ fn expand(entry: &str, (triple, os, arch): (&str, &str, &str)) -> String {
 /// The files the `[package] objects` of the port's package closure name
 /// for the Rust `target`, in closure order: a per-target entry
 /// (`@TARGET@`, `@OS@`, `@ARCH@`) gives the target's file when it has one.
-/// A `.ves` file source has none. The compiler checks the entries
-/// themselves when it loads the packages.
+/// A `.ves` file source has none. The packages whose manifests
+/// [`OBJECT_PACKAGES_ENV`] names come after the closure. The compiler
+/// checks the entries themselves when it loads the packages.
 pub fn package_objects(source: &Path, target: &str) -> Result<Vec<PathBuf>, String> {
     if !is_package(source) {
         return Ok(Vec::new());
     }
+    let mut packages = package_closure(source)?;
+    for manifest in
+        std::env::split_paths(&std::env::var_os(OBJECT_PACKAGES_ENV).unwrap_or_default())
+    {
+        let dir = manifest.parent().ok_or_else(|| {
+            format!(
+                "{OBJECT_PACKAGES_ENV}: {} is not a Loom.toml",
+                manifest.display()
+            )
+        })?;
+        let dir = std::fs::canonicalize(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        println!("cargo:rerun-if-changed={}", dir.display());
+        if !packages.contains(&dir) {
+            packages.push(dir);
+        }
+    }
     let mut out = Vec::new();
-    for package in package_closure(source)? {
+    for package in packages {
         let entries = manifest_objects(&package)?;
         if entries.is_empty() {
             continue;

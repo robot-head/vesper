@@ -791,6 +791,170 @@ fn sys_hashes_match_rust_natively() {
     assert_eq!(executable_exit(&dir.0), Some(0), "C BLAKE3 digests differ");
 }
 
+/// The C that hash-sys's `[package] objects` name for the host (the
+/// wrappers, in manifest order), read from its Loom.toml.
+fn host_c_objects() -> Vec<PathBuf> {
+    let dir = Path::new(STD).join("hash/sys");
+    let manifest = fs::read_to_string(dir.join("Loom.toml")).unwrap();
+    let list = manifest.split("objects = [").nth(1).unwrap();
+    let list = &list[..list.find(']').unwrap()];
+    let arch = std::env::consts::ARCH;
+    list.split('"')
+        .skip(1)
+        .step_by(2)
+        .map(|e| dir.join(e.replace("@ARCH@", arch)))
+        .filter(|f| f.is_file())
+        .collect()
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn c_bytes(bytes: &[u8]) -> String {
+    let items: Vec<String> = bytes.iter().map(|b| format!("0x{b:02x}")).collect();
+    format!(
+        "{{{}}}",
+        if items.is_empty() {
+            "0".into()
+        } else {
+            items.join(", ")
+        }
+    )
+}
+
+/// The refusal rules of the `.vsys` library, against the C compiled from
+/// hash-sys's `[package] objects`: a key that is not 32 bytes or a context
+/// that is not UTF-8 gives NULL (`None`), and the one-shot derivation
+/// returns 0 and leaves its output as it was. Good contexts (multi-byte
+/// UTF-8, U+10FFFF, words of ASCII) match the `blake3` crate. Carried over
+/// from the deleted vesper-blake3-sys crate's tests.
+#[test]
+fn sys_c_refuses_bad_keys_and_contexts() {
+    if !links_executables() || host_target().is_none() {
+        eprintln!("no C compiler or .vsys target; C refusal evidence unavailable");
+        return;
+    }
+    const KEY: &[u8; 32] = b"whats the Elvish word for friend";
+    let bad: [&[u8]; 9] = [
+        &[0xff],
+        &[0xc0, 0x80],             // overlong
+        &[0xe0, 0x80, 0x80],       // overlong
+        &[0xed, 0xa0, 0x80],       // surrogate
+        &[0xf4, 0x90, 0x80, 0x80], // above U+10FFFF
+        &[0xe2, 0x82],             // truncated
+        &[b'a', 0x80],
+        b"eight ok\xff",    // after a whole ASCII word
+        b"seven o\xc0\x80", // overlong across a word
+    ];
+    let good = [
+        "",
+        "é",
+        "€",
+        "𐍈",
+        "a\u{10ffff}",
+        "eight ok",
+        "sixteen bytes ok",
+        "eight ok é",
+    ];
+    let mut c = String::from(
+        "#include <stdint.h>\n#include <stdio.h>\n#include <stddef.h>\n\
+         void *vesper_blake3_new_keyed(const uint8_t *, size_t);\n\
+         void *vesper_blake3_new_derive_key(const uint8_t *, size_t);\n\
+         void vesper_blake3_update(void *, const uint8_t *, size_t);\n\
+         void vesper_blake3_finalize(const void *, uint8_t *, size_t);\n\
+         void vesper_blake3_free(void *);\n\
+         uint32_t vesper_blake3_derive_key_hash(const uint8_t *, size_t, const uint8_t *, size_t, uint8_t *, size_t);\n\
+         static void put(const uint8_t *b, size_t n) { for (size_t i = 0; i < n; i++) printf(\"%02x\", b[i]); printf(\"\\n\"); }\n\
+         static void keyed(const uint8_t *k, size_t n) {\n\
+           void *h = vesper_blake3_new_keyed(k, n);\n\
+           if (h == NULL) { printf(\"null\\n\"); return; }\n\
+           uint8_t out[32]; vesper_blake3_update(h, (const uint8_t *)\"x\", 1); vesper_blake3_finalize(h, out, 32); vesper_blake3_free(h); put(out, 32);\n\
+         }\n\
+         static void derive(const uint8_t *c, size_t n) {\n\
+           void *h = vesper_blake3_new_derive_key(c, n);\n\
+           if (h == NULL) { printf(\"null\\n\"); } else {\n\
+             uint8_t out[32]; vesper_blake3_update(h, (const uint8_t *)\"x\", 1); vesper_blake3_finalize(h, out, 32); vesper_blake3_free(h); put(out, 32);\n\
+           }\n\
+           uint8_t once[32]; for (int i = 0; i < 32; i++) once[i] = 7;\n\
+           uint32_t ok = vesper_blake3_derive_key_hash(c, n, (const uint8_t *)\"x\", 1, once, 32);\n\
+           printf(\"%u \", ok); put(once, 32);\n\
+         }\n\
+         int main(void) {\n",
+    );
+    let key = c_bytes(KEY);
+    c.push_str(&format!(
+        "  {{ static const uint8_t k[] = {key}; keyed(k, 31); keyed(k, 32); }}\n  {{ static const uint8_t k[33] = {key}; keyed(k, 33); }}\n"
+    ));
+    let mut want = vec!["null".to_string()];
+    let crate_derive = |ctx: &str| {
+        let mut h = blake3::Hasher::new_derive_key(ctx);
+        h.update(b"x");
+        hex(h.finalize().as_bytes())
+    };
+    let mut h = blake3::Hasher::new_keyed(KEY);
+    h.update(b"x");
+    want.push(hex(h.finalize().as_bytes()));
+    want.push("null".into());
+    for b in bad {
+        assert!(std::str::from_utf8(b).is_err());
+        c.push_str(&format!(
+            "  {{ static const uint8_t c[] = {}; derive(c, {}); }}\n",
+            c_bytes(b),
+            b.len()
+        ));
+        want.push("null".into());
+        // The sentinel: a refused derivation writes nothing.
+        want.push(format!("0 {}", hex(&[7u8; 32])));
+    }
+    for g in good {
+        c.push_str(&format!(
+            "  {{ static const uint8_t c[] = {}; derive(c, {}); }}\n",
+            c_bytes(g.as_bytes()),
+            g.len()
+        ));
+        want.push(crate_derive(g));
+        want.push(format!("1 {}", crate_derive(g)));
+    }
+    c.push_str("  return 0;\n}\n");
+    let t = Temp::new();
+    let main = t.0.join("refusals.c");
+    fs::write(&main, c).unwrap();
+    let exe = t.0.join("refusals");
+    let built = Command::new("cc")
+        .arg("-O2")
+        .arg(&main)
+        .args(host_c_objects())
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .unwrap();
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let out = Command::new(&exe).output().unwrap();
+    assert!(out.status.success());
+    let got: Vec<String> = String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(got, want);
+}
+
+/// The vendored C is the release the `blake3` dev-dependency pins, so the
+/// crate is a valid reference for it.
+#[test]
+fn vendored_c_is_the_crate_version() {
+    let header = fs::read_to_string(Path::new(STD).join("hash/sys/c/blake3.h")).unwrap();
+    assert!(
+        header.contains("#define BLAKE3_VERSION_STRING \"1.8.7\""),
+        "the vendored C and the pinned blake3 dev-dependency must be the same release"
+    );
+}
+
 /// The JIT does not load hash-sys's C objects; it says to build instead.
 #[test]
 fn sys_jit_points_to_vesper_build() {

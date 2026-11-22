@@ -1393,6 +1393,14 @@ vesper_package(
     ],
 )
 
+# The manifest alone, so a port build script can name the package's
+# `[package] objects` (VESPER_PORT_OBJECT_PACKAGES).
+filegroup(
+    name = "std_hash_sys_manifest",
+    srcs = ["packages/vesper-std/hash/sys/Loom.toml"],
+    visibility = ["//visibility:public"],
+)
+
 vesper_package(
     name = "std_hash_sys_package",
     srcs = glob(["packages/vesper-std/hash/sys/src/**/*.ves"]),

@@ -108,6 +108,12 @@ sources into `vesper_std_blake3`, the link name of `@vesper-std/hash-sys`'s
   official vectors and every split, checked against the `blake3` crate)
   in place of the JIT run over the crate's symbols, and checks that
   `vesper run` points to `vesper build`. The evaluator test is unchanged.
+  The crate's refusal oracle moved there too: `cc` builds the host's
+  `objects` with a generated C driver, and a 31- or 33-byte key, nine
+  invalid UTF-8 contexts (each also leaving the one-shot output's `7`
+  sentinel as it was) and eight valid ones are checked against the crate.
+- Bazel does not lay path dependencies out beside the crate, so the build
+  scripts also get hash-sys's manifest in `VESPER_PORT_OBJECT_PACKAGES`.
 
 Checked: gcc and clang give BLAKE3("abc") =
 `6437b3ac…5bd9d85` and the same 100 KB digest, with no unrenamed global

@@ -74,12 +74,15 @@ vesper_crate(
         ":fmt_vesper_binding",
         # hash-sys's `[package] objects` (the BLAKE3 C library), which the
         # harness compiles into the port's archive.
+        "//:std_hash_sys_manifest",
         "//:std_hash_sys_package",
     ],
     build_script_env = {
         # rules_rust already makes these execpaths absolute.
         "VESPER_PORT_OBJECT": "$(execpath :fmt_vesper)",
         "VESPER_PORT_GENERATED_BINDING": "$(execpath :fmt_vesper_binding)",
+        # Path dependencies are not beside the crate in Bazel.
+        "VESPER_PORT_OBJECT_PACKAGES": "$(execpath //:std_hash_sys_manifest)",
     },
     extra_compile_data = [
         "//:examples",
