@@ -49,6 +49,10 @@ unsafe extern "C" {
     fn vesper_aegis_seq_free(seq: i64) -> i64;
     fn vesper_aegis_live_allocations() -> i64;
     fn vesper_aegis_cbor_decode(b: *mut u64, w: *mut u64, st: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_aegis_cca_platform_claims(b: *mut u64, n: *mut u64, st: *mut u64, w: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_aegis_cca_platform_profile(b: *mut u64, n: *mut u64, st: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_aegis_cca_realm_claims(b: *mut u64, n: *mut u64, st: *mut u64, w: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_aegis_cca_realm_profile(b: *mut u64, n: *mut u64, st: *mut u64, fail: *mut u64) -> i64;
     fn vesper_aegis_claims_wire_decode(b: *mut u64, w: *mut u64, fail: *mut u64) -> i64;
     fn vesper_aegis_iso8601_utc_to_unix(result: *mut u64, s: *mut u64) -> i64;
     fn vesper_aegis_sgx_parse(b: *mut u64, mode: i64, w: *mut u64, fail: *mut u64) -> i64;
@@ -81,6 +85,62 @@ pub fn cbor_decode(b: &[u8], w: &mut [u64], st: &mut [u64]) -> Result<u64, AErr>
         0 => Ok(raw as u64),
         1 => Err(<AErr as Abi>::get(&fail[1..])),
         status => panic!("invalid failure status {status} from vesper_aegis_cbor_decode"),
+    }
+}
+
+/// Calls `cca_platform_claims` of the Vesper library `aegis` (`vesper_aegis_cca_platform_claims`).
+pub fn cca_platform_claims(b: &[u8], n: &mut [u64], st: &mut [u64], w: &mut [u64]) -> Result<(), AErr> {
+    let mut fail = [0u64; 6];
+    // SAFETY: `vesper_aegis_cca_platform_claims` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(b, |view_b| vesper_port_abi::with_slice_mut(n, |view_n| vesper_port_abi::with_slice_mut(st, |view_st| vesper_port_abi::with_slice_mut(w, |view_w| unsafe { vesper_aegis_cca_platform_claims(view_b, view_n, view_st, view_w, fail.as_mut_ptr()) }))));
+    match fail[0] {
+        0 => Ok({ let _ = raw; }),
+        1 => Err(<AErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_aegis_cca_platform_claims"),
+    }
+}
+
+/// Calls `cca_platform_profile` of the Vesper library `aegis` (`vesper_aegis_cca_platform_profile`).
+pub fn cca_platform_profile(b: &[u8], n: &mut [u64], st: &mut [u64]) -> Result<u64, AErr> {
+    let mut fail = [0u64; 6];
+    // SAFETY: `vesper_aegis_cca_platform_profile` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(b, |view_b| vesper_port_abi::with_slice_mut(n, |view_n| vesper_port_abi::with_slice_mut(st, |view_st| unsafe { vesper_aegis_cca_platform_profile(view_b, view_n, view_st, fail.as_mut_ptr()) })));
+    match fail[0] {
+        0 => Ok(raw as u64),
+        1 => Err(<AErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_aegis_cca_platform_profile"),
+    }
+}
+
+/// Calls `cca_realm_claims` of the Vesper library `aegis` (`vesper_aegis_cca_realm_claims`).
+pub fn cca_realm_claims(b: &[u8], n: &mut [u64], st: &mut [u64], w: &mut [u64]) -> Result<(), AErr> {
+    let mut fail = [0u64; 6];
+    // SAFETY: `vesper_aegis_cca_realm_claims` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(b, |view_b| vesper_port_abi::with_slice_mut(n, |view_n| vesper_port_abi::with_slice_mut(st, |view_st| vesper_port_abi::with_slice_mut(w, |view_w| unsafe { vesper_aegis_cca_realm_claims(view_b, view_n, view_st, view_w, fail.as_mut_ptr()) }))));
+    match fail[0] {
+        0 => Ok({ let _ = raw; }),
+        1 => Err(<AErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_aegis_cca_realm_claims"),
+    }
+}
+
+/// Calls `cca_realm_profile` of the Vesper library `aegis` (`vesper_aegis_cca_realm_profile`).
+pub fn cca_realm_profile(b: &[u8], n: &mut [u64], st: &mut [u64]) -> Result<u64, AErr> {
+    let mut fail = [0u64; 6];
+    // SAFETY: `vesper_aegis_cca_realm_profile` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(b, |view_b| vesper_port_abi::with_slice_mut(n, |view_n| vesper_port_abi::with_slice_mut(st, |view_st| unsafe { vesper_aegis_cca_realm_profile(view_b, view_n, view_st, fail.as_mut_ptr()) })));
+    match fail[0] {
+        0 => Ok(raw as u64),
+        1 => Err(<AErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_aegis_cca_realm_profile"),
     }
 }
 

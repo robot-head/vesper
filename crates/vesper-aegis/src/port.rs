@@ -183,7 +183,163 @@ pub(crate) fn parse_error(e: vesper::AErr) -> ParseError {
             limit: e.a as usize,
             value: e.b,
         },
+        5 => ParseError::Cbor {
+            field: CBOR_FIELDS[e.field as usize],
+            reason: CBOR_REASONS[e.a as usize],
+        },
         kind => unreachable!("ParseError variant {kind} from the Vesper port"),
+    }
+}
+
+/// Field names of ParseError::Cbor, by the index the port raises
+/// (vesper/src/cca.ves). A malformed item is raised with field
+/// [`CBOR_WHAT`], the item the call decodes.
+const CBOR_FIELDS: [&str; 30] = [
+    "realm claims",                         // 0
+    "platform claims",                      // 1
+    "realm hash algo",                      // 2
+    "RIM",                                  // 3
+    "REMs",                                 // 4
+    "REM",                                  // 5
+    "realm challenge",                      // 6
+    "realm personalization",                // 7
+    "RAK",                                  // 8
+    "RAK hash algo",                        // 9
+    "lifecycle",                            // 10
+    "software components",                  // 11
+    "platform config",                      // 12
+    "platform manufacturing config",        // 13
+    "TBB RoTPK",                            // 14
+    "platform challenge",                   // 15
+    "instance id",                          // 16
+    "implementation id",                    // 17
+    "platform hash algo",                   // 18
+    "TBB RoTPK name",                       // 19
+    "TBB RoTPK index",                      // 20
+    "TBB RoTPK hash",                       // 21
+    "software component",                   // 22
+    "software component measurement value", // 23
+    "software component signer ID",         // 24
+    "software component type",              // 25
+    "software component version",           // 26
+    "software component description",       // 27
+    "platform profile",                     // 28
+    "realm profile",                        // 29
+];
+
+/// The field index of a malformed CBOR item (cbor::WHAT).
+const CBOR_WHAT: u64 = 1000;
+
+/// Reasons of ParseError::Cbor, by the index the port raises.
+const CBOR_REASONS: [&str; 22] = [
+    "malformed CBOR",                       // 0
+    "trailing bytes",                       // 1
+    "expected map",                         // 2
+    "non-integer claim key",                // 3
+    "duplicate claim key",                  // 4
+    "missing claim",                        // 5
+    "expected text",                        // 6
+    "unsupported hash algorithm",           // 7
+    "expected byte string",                 // 8
+    "wrong byte-string length",             // 9
+    "length does not match hash algorithm", // 10
+    "expected array",                       // 11
+    "expected four registers",              // 12
+    "expected unsigned integer",            // 13
+    "too many components",                  // 14
+    "too many entries",                     // 15
+    "expected name, index and hash",        // 16
+    "expected CM or DM",                    // 17
+    "expected 0..=5",                       // 18
+    "length is not 32, 48 or 64",           // 19
+    "unknown key",                          // 20
+    "unknown profile",                      // 21
+];
+
+/// A failure of a port call that decodes the CBOR item `what`.
+pub(crate) fn cbor_parse_error(mut e: vesper::AErr, what: usize) -> ParseError {
+    if e.kind == 5 && e.field == CBOR_WHAT {
+        e.field = what as u64;
+    }
+    parse_error(e)
+}
+
+/// The CBOR field index of `realm claims` and `platform claims`.
+pub(crate) const CBOR_REALM_CLAIMS: usize = 0;
+pub(crate) const CBOR_PLATFORM_CLAIMS: usize = 1;
+
+/// Run a port call that decodes `input` as CBOR: it gets the node buffer,
+/// the decoder's stack and the output words, and fails as the item
+/// `what`. Returns the call's result and the output words after the count.
+pub(crate) fn cbor_call<T>(
+    input: &[u8],
+    what: usize,
+    run: impl FnOnce(&mut [u64], &mut [u64], &mut [u64]) -> Result<T, vesper::AErr>,
+) -> Result<(T, Vec<u64>), ParseError> {
+    let mut n = vec![0u64; 4 * input.len() + 8];
+    let mut st = [0u64; CBOR_STACK_WORDS];
+    // Output words copy node words or add a presence or count word per
+    // claim, well within twice the node buffer.
+    let mut w = vec![0u64; 2 * n.len() + 512];
+    let out = run(&mut n, &mut st, &mut w).map_err(|e| cbor_parse_error(e, what))?;
+    let count = w[0] as usize;
+    assert!(
+        count < w.len(),
+        "the port wrote {count} words, more than the adapter's buffer holds"
+    );
+    w.truncate(count + 1);
+    w.remove(0);
+    Ok((out, w))
+}
+
+/// A cursor over the output words of a CBOR call: strings come as their
+/// chunks (cbor::put_str) into `input`.
+pub(crate) struct CborFields<'a> {
+    w: &'a [u64],
+    input: &'a [u8],
+}
+
+impl<'a> CborFields<'a> {
+    pub(crate) fn new(w: &'a [u64], input: &'a [u8]) -> Self {
+        CborFields { w, input }
+    }
+
+    pub(crate) fn word(&mut self) -> u64 {
+        cbor_word(&mut self.w)
+    }
+
+    /// A string: its chunk count, then each chunk's offset and length.
+    pub(crate) fn bytes(&mut self) -> Vec<u8> {
+        let k = self.word();
+        cbor_chunks(&mut self.w, k, self.input)
+    }
+
+    pub(crate) fn text(&mut self) -> String {
+        String::from_utf8(self.bytes()).expect("the port checked UTF-8")
+    }
+
+    pub(crate) fn opt_bytes(&mut self) -> Option<Vec<u8>> {
+        (self.word() != 0).then(|| self.bytes())
+    }
+
+    pub(crate) fn opt_text(&mut self) -> Option<String> {
+        (self.word() != 0).then(|| self.text())
+    }
+
+    pub(crate) fn array<const N: usize>(&mut self) -> [u8; N] {
+        self.bytes()
+            .try_into()
+            .expect("the port checked the length")
+    }
+
+    pub(crate) fn hash(&mut self) -> crate::claims::RegisterHash {
+        use crate::claims::RegisterHash;
+        match self.word() {
+            0 => RegisterHash::Sha256,
+            1 => RegisterHash::Sha384,
+            2 => RegisterHash::Sha512,
+            h => unreachable!("hash algorithm {h} from the Vesper port"),
+        }
     }
 }
 
@@ -593,5 +749,218 @@ mod cbor_differential {
             let b: Vec<u8> = (0..n).map(|_| rng.next() as u8).collect();
             same(&b);
         }
+    }
+}
+
+/// The port's CCA claim parsers against the Rust ones they replace
+/// (`cca::reference`): the same claims or the same error, on the vendor
+/// tokens' payloads, payloads re-encoded from them and mutations of both.
+#[cfg(test)]
+mod cca_differential {
+    use crate::cca::{CcaPlatformClaims, CcaRealmClaims, CcaToken, reference};
+
+    fn payloads() -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/vendor");
+        let (mut platform, mut realm) = (Vec::new(), Vec::new());
+        let mut files = Vec::new();
+        for dir in std::fs::read_dir(&root).unwrap() {
+            let dir = dir.unwrap().path();
+            if !dir
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("cca-")
+            {
+                continue;
+            }
+            for f in std::fs::read_dir(&dir).unwrap() {
+                let f = f.unwrap().path();
+                if f.extension().is_some_and(|e| e == "cbor") {
+                    files.push(std::fs::read(&f).unwrap());
+                }
+            }
+        }
+        files.sort();
+        for f in &files {
+            if let Ok(t) = CcaToken::parse(f) {
+                let p = t.platform.payload.clone().unwrap();
+                let r = t.realm.payload.clone().unwrap();
+                platform.push(t.platform_claims.to_cbor());
+                realm.push(t.realm_claims.to_cbor());
+                platform.push(p);
+                realm.push(r);
+            }
+        }
+        assert!(platform.len() >= 4, "{} platform payloads", platform.len());
+        (platform, realm)
+    }
+
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n as u64) as usize
+        }
+    }
+
+    fn mutate(rng: &mut Rng, s: &[u8]) -> Vec<u8> {
+        let mut m = s.to_vec();
+        for _ in 0..=rng.below(2) {
+            match rng.below(5) {
+                0 if !m.is_empty() => {
+                    let i = rng.below(m.len());
+                    m[i] ^= 1 << rng.below(8);
+                }
+                1 if !m.is_empty() => {
+                    let i = rng.below(m.len());
+                    m[i] = rng.next() as u8;
+                }
+                2 => m.truncate(rng.below(m.len() + 1)),
+                3 if !m.is_empty() => {
+                    // Small integers and short headers are where claim
+                    // keys and lengths live.
+                    let i = rng.below(m.len());
+                    m[i] = (rng.next() % 0x60) as u8;
+                }
+                _ => {
+                    let i = rng.below(m.len() + 1);
+                    m.insert(i, rng.next() as u8);
+                }
+            }
+        }
+        m
+    }
+
+    fn same(platform: bool, b: &[u8]) {
+        if platform {
+            assert_eq!(
+                format!("{:?}", CcaPlatformClaims::from_cbor(b)),
+                format!("{:?}", reference::platform_claims(b)),
+                "platform claims"
+            );
+            assert_eq!(
+                format!("{:?}", crate::cca::platform_profile_for_test(b)),
+                format!("{:?}", reference::platform_profile(b)),
+                "platform profile"
+            );
+        } else {
+            assert_eq!(
+                format!("{:?}", CcaRealmClaims::from_cbor(b)),
+                format!("{:?}", reference::realm_claims(b)),
+                "realm claims"
+            );
+            assert_eq!(
+                format!("{:?}", crate::cca::realm_profile_for_test(b)),
+                format!("{:?}", reference::realm_profile(b)),
+                "realm profile"
+            );
+        }
+    }
+
+    /// Random claims with lengths, names, indexes and counts on both sides
+    /// of every limit, encoded by `to_cbor` (which checks nothing).
+    fn random_platform(rng: &mut Rng) -> CcaPlatformClaims {
+        use crate::cca::{CcaSwComponent, CcaTbbRotpk};
+        use crate::claims::RegisterHash;
+        let lens = [0, 31, 32, 33, 48, 64, 65];
+        let b = |rng: &mut Rng| vec![rng.next() as u8; lens[rng.below(lens.len())]];
+        let text = |rng: &mut Rng| ["BL", "CM", "DM", "", "sha-256", "x"][rng.below(6)].to_owned();
+        let opt = |rng: &mut Rng| (rng.below(2) == 0).then(|| text(rng));
+        let comps = [0, 1, 2, 63, 64, 65][rng.below(6)];
+        let rotpks = [0, 1, 3, 12, 13][rng.below(5)];
+        CcaPlatformClaims {
+            challenge: b(rng),
+            instance_id: b(rng),
+            implementation_id: b(rng),
+            lifecycle: [0, 0x3000, u64::MAX][rng.below(3)],
+            hash_algo: [
+                RegisterHash::Sha256,
+                RegisterHash::Sha384,
+                RegisterHash::Sha512,
+            ][rng.below(3)],
+            sw_components: (0..comps)
+                .map(|_| CcaSwComponent {
+                    measurement_type: opt(rng),
+                    measurement_value: b(rng),
+                    version: opt(rng),
+                    signer_id: b(rng),
+                    measurement_description: opt(rng),
+                })
+                .collect(),
+            config: (rng.below(2) == 0).then(|| b(rng)),
+            manufacturing_config: (rng.below(2) == 0).then(|| b(rng)),
+            tbb_rotpks: (0..rotpks)
+                .map(|_| CcaTbbRotpk {
+                    name: text(rng),
+                    index: [0, 5, 6, u64::MAX][rng.below(4)],
+                    hash: b(rng),
+                })
+                .collect(),
+        }
+    }
+
+    fn random_realm(rng: &mut Rng) -> CcaRealmClaims {
+        use crate::claims::RegisterHash;
+        let lens = [0, 31, 32, 48, 63, 64, 65];
+        let b = |rng: &mut Rng| vec![rng.next() as u8; lens[rng.below(lens.len())]];
+        let algo = |rng: &mut Rng| {
+            [
+                RegisterHash::Sha256,
+                RegisterHash::Sha384,
+                RegisterHash::Sha512,
+            ][rng.below(3)]
+        };
+        CcaRealmClaims {
+            challenge: [7; 64],
+            personalization: [8; 64],
+            hash_algo: algo(rng),
+            public_key: b(rng),
+            public_key_hash_algo: algo(rng),
+            initial_measurement: b(rng),
+            extensible_measurements: std::array::from_fn(|_| b(rng)),
+        }
+    }
+
+    #[test]
+    fn random_claims_match_the_rust_parsers() {
+        let mut rng = Rng(0xda94_2042_e4dd_58b5);
+        for _ in 0..20_000 {
+            let p = random_platform(&mut rng).to_cbor();
+            same(true, &p);
+            same(true, &mutate(&mut rng, &p));
+            let r = random_realm(&mut rng).to_cbor();
+            same(false, &r);
+            same(false, &mutate(&mut rng, &r));
+        }
+    }
+
+    #[test]
+    fn claims_and_mutations_match_the_rust_parsers() {
+        let (platform, realm) = payloads();
+        let mut rng = Rng(0x853c_49e6_748f_ea9b);
+        let mut accepted = 0;
+        for (is_platform, set) in [(true, &platform), (false, &realm)] {
+            for s in set {
+                same(is_platform, s);
+                for _ in 0..4_000 {
+                    let m = mutate(&mut rng, s);
+                    same(is_platform, &m);
+                    accepted += usize::from(if is_platform {
+                        CcaPlatformClaims::from_cbor(&m).is_ok()
+                    } else {
+                        CcaRealmClaims::from_cbor(&m).is_ok()
+                    });
+                }
+            }
+        }
+        assert!(accepted > 100, "only {accepted} mutations parsed");
     }
 }

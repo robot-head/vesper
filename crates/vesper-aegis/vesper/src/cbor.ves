@@ -31,17 +31,17 @@
 use self::AErr;
 use self::reader::put;
 
-const K_UINT: u64 = 0;
-const K_NINT: u64 = 1;
-const K_BYTES: u64 = 2;
-const K_TEXT: u64 = 3;
-const K_ARRAY: u64 = 4;
-const K_MAP: u64 = 5;
-const K_TAG: u64 = 6;
-const K_FLOAT: u64 = 7;
-const K_BOOL: u64 = 8;
-const K_NULL: u64 = 9;
-const K_BIGNUM: u64 = 10;
+pub const K_UINT: u64 = 0;
+pub const K_NINT: u64 = 1;
+pub const K_BYTES: u64 = 2;
+pub const K_TEXT: u64 = 3;
+pub const K_ARRAY: u64 = 4;
+pub const K_MAP: u64 = 5;
+pub const K_TAG: u64 = 6;
+pub const K_FLOAT: u64 = 7;
+pub const K_BOOL: u64 = 8;
+pub const K_NULL: u64 = 9;
+pub const K_BIGNUM: u64 = 10;
 
 // Major types.
 const M_BYTES: u64 = 2;
@@ -90,17 +90,29 @@ const F64_MAN: u64 = 4503599627370495;
 const F16_REBIAS: u64 = 1008;
 const F32_REBIAS: u64 = 896;
 
-// A failed decode: every CBOR error is one error to the caller.
-fn bad() -> Never eff [Fail[AErr]] {
+// ParseError::Cbor (kind 5): `field` indexes CBOR_FIELDS and `a`
+// CBOR_REASONS of src/port.rs. A malformed item is reported with the
+// field WHAT, the item the caller is decoding.
+pub const K_CBOR_ERROR: u64 = 5;
+pub const WHAT: u64 = 1000;
+pub const R_MALFORMED: u64 = 0;
+pub const R_TRAILING: u64 = 1;
+
+pub fn cbor_err(field: u64, reason: u64) -> Never eff [Fail[AErr]] {
     Fail::raise(
         AErr {
-            kind: 0,
+            kind: K_CBOR_ERROR,
             format: 0,
-            field: 0,
-            a: 0,
+            field: field,
+            a: reason,
             b: 0
         }
     )
+}
+
+// A failed decode: every CBOR error is one error to the caller.
+fn bad() -> Never eff [Fail[AErr]] {
+    cbor_err(WHAT, R_MALFORMED)
 }
 
 fn byte(in b: Slice[u8], i: u64) -> u64 eff [Fail[AErr]] {
@@ -551,5 +563,125 @@ pub fn decode(in b: Slice[u8], inout w: Slice[u64], inout st: Slice[u64]) -> u64
             }
             p = h.end;
         }
+    }
+}
+
+// Node accessors over a decoded buffer `n` (nodes from index 1).
+
+// The node kind at `i`.
+pub fn kind(in n: Slice[u64], i: u64) -> u64 {
+    match n.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => INDEFINITE,
+    }
+}
+
+// The node's first argument: an integer, a count, a tag or float bits.
+pub fn arg(in n: Slice[u64], i: u64) -> u64 {
+    match n.try_get(wrapping_add(i, 1)) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+// The index of the node after the item at `i`, children included.
+pub fn skip(in n: Slice[u64], i: u64) -> u64 {
+    let mut at = i;
+    let mut pending = 1;
+    loop {
+        if pending == 0 {
+            return at;
+        }
+        pending = wrapping_sub(pending, 1);
+        let k = kind(in n, at);
+        let a = arg(in n, at);
+        if k == K_BYTES || k == K_TEXT {
+            at = wrapping_add(at, wrapping_add(2, wrapping_mul(a, 2)));
+        } else if k == K_ARRAY {
+            pending = wrapping_add(pending, a);
+            at = wrapping_add(at, 2);
+        } else if k == K_MAP {
+            pending = wrapping_add(pending, wrapping_mul(a, 2));
+            at = wrapping_add(at, 2);
+        } else if k == K_TAG {
+            pending = wrapping_add(pending, 1);
+            at = wrapping_add(at, 2);
+        } else if k == K_BIGNUM {
+            at = wrapping_add(at, 4);
+        } else {
+            at = wrapping_add(at, 2);
+        }
+    }
+}
+
+// The total length of a string node's chunks.
+pub fn str_len(in n: Slice[u64], i: u64) -> u64 {
+    let k = arg(in n, i);
+    let mut total = 0;
+    let mut c = 0;
+    loop {
+        if c == k {
+            return total;
+        }
+        total = wrapping_add(
+            total,
+            arg(in n, wrapping_add(i, wrapping_add(2, wrapping_mul(c, 2))))
+        );
+        c = wrapping_add(c, 1);
+    }
+}
+
+// Whether the text node at `i` reads `lit`.
+pub fn text_eq(in b: Slice[u8], in n: Slice[u64], i: u64, in lit: Slice[u8]) -> bool {
+    if kind(in n, i) != K_TEXT || str_len(in n, i) != lit.len() {
+        return false;
+    }
+    let k = arg(in n, i);
+    let mut c = 0;
+    let mut at = 0;
+    loop {
+        if c == k {
+            return true;
+        }
+        let slot = wrapping_add(i, wrapping_add(2, wrapping_mul(c, 2)));
+        let off = kind(in n, slot);
+        let len = arg(in n, slot);
+        let mut j = 0;
+        loop {
+            if j == len {
+                break;
+            }
+            let x = match b.try_get(wrapping_add(off, j)) {
+                Option::Some(v) => v,
+                Option::None => return false,
+            };
+            let y = match lit.try_get(wrapping_add(at, j)) {
+                Option::Some(v) => v,
+                Option::None => return false,
+            };
+            if x != y {
+                return false;
+            }
+            j = wrapping_add(j, 1);
+        }
+        at = wrapping_add(at, len);
+        c = wrapping_add(c, 1);
+    }
+}
+
+// Copy the string node at `i` to the output words: its chunk count, then
+// each chunk's offset and length.
+pub fn put_str(in n: Slice[u64], i: u64, inout w: Slice[u64]) {
+    let k = arg(in n, i);
+    put(inout w, k);
+    let mut c = 0;
+    loop {
+        if c == k {
+            return;
+        }
+        let slot = wrapping_add(i, wrapping_add(2, wrapping_mul(c, 2)));
+        put(inout w, kind(in n, slot));
+        put(inout w, arg(in n, slot));
+        c = wrapping_add(c, 1);
     }
 }

@@ -40,3 +40,4 @@ check policy port_differential policy_decisions_agree snp_reports_agree
 check time port_differential timestamps_agree snp_reports_agree
 # One container fewer than ciborium's recursion limit.
 check cbor lib port::cbor_differential::edge_cases_match_ciborium port::cbor_differential::random_items_match_ciborium
+check cca lib port::cca_differential::random_claims_match_the_rust_parsers port::cbor_differential::random_items_match_ciborium
