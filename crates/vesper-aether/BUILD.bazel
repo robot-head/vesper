@@ -50,6 +50,8 @@ vesper_port_object(
     name = "aether_vesper",
     src = ":aether_source",
     library = "aether",
+    # As build.rs: the binding names the crate's boundary types.
+    rust_types = "crate::port_types",
     target = VESPER_TARGET,
 )
 
