@@ -1,4 +1,9 @@
-# Rust-exit SH6 lane 8: Aegis (#1403), part 1
+# Rust-exit SH6 lane 8: Aegis (#1403)
+
+Part 1 (#1433) flipped the parsers and the policy check. Part 2a (below,
+after part 1) flips the CBOR decoding and the CCA claim parsers.
+
+## Part 1
 
 The quote, report and claims parsers, the collateral timestamp parser and
 the relying-party policy check of `crates/vesper-aegis` passed the flip
@@ -141,13 +146,68 @@ edits).
    `extend_reversed` exists now (gap 2), but the SNP signature is written
    with `try_write_u64_be` into the lent buffer, which needs no sequence.
 
+## Part 2a: CBOR decoding and CCA claims
+
+Base: `main` at `11cdaefa` (part 1 merged).
+
+1. **CBOR decoder.** `vesper/src/cbor.ves` decodes one item into preorder
+   nodes in a word buffer the adapter lends: integers, floats, booleans
+   and null as two words, strings as their chunks (offset and length into
+   the input), arrays, maps and tags as a count or tag followed by their
+   items. It accepts exactly what ciborium 0.2's `Value` deserializer
+   accepts, quirks included: nested indefinite strings, the one-byte form
+   of simple values (only 20 to 23 are accepted), floats widened as
+   `half` and the hardware widen them, bignums (tags 2 and 3 over at most
+   16 definite bytes) folded to integers when they fit in 64 bits, and the
+   256-level recursion limit. `cca::decode_value`, which the CCA token,
+   CoRIM, CoMID and corim-meta parsers share, now uses it; the adapter
+   rebuilds the `Value` the Rust structure code still walks.
+2. **CCA claims.** `vesper/src/cca.ves` is `CcaRealmClaims::from_cbor`,
+   `CcaPlatformClaims::from_cbor` (software components, TBB RoTPK
+   entries), and the platform and realm profile checks, over the port's
+   nodes. Each claim comes back as chunks of the payload, and every
+   `ParseError::Cbor` is a field and reason index into tables in
+   `src/port.rs`. The Rust claim parsers are deleted.
+3. **Tests.** `tests/port_differential.rs` gains `cca_tokens_agree`,
+   `corims_agree` and `cca_claims_agree` (434,086 results: every CCA and
+   CoRIM vendor sample, 2,000 or 4,000 mutations of each, the tokens'
+   payloads, and 20,000 random claim sets on both sides of every limit,
+   encoded by `to_cbor`). Their digests were recorded from the Rust build
+   at `11cdaefa`, and the port matches them. The decoder also keeps a live
+   differential against ciborium, which coset still links
+   (`tests/cbor_differential.rs`): edge
+   cases, the vendor samples and the byte strings inside them with 2,000
+   mutations each, and 200,000 random inputs. Two divergence checks join
+   `port/check.sh`: one level less nesting (`cbor`) and TBB RoTPK index 5
+   refused (`cca`).
+4. **Benchmark.** Three workloads join `examples/abba.rs`: `cca_claims`
+   (both claim parsers on the vendor tokens' payloads), `cca_token`
+   (`CcaToken::parse`, whose COSE_Sign1 structure is still Rust) and
+   `corim` (`Corim::parse_unsigned`, whose structure is still Rust).
+   `bench-abba.sh` builds their Rust arm at `11cdaefa` from this
+   checkout's `examples/abba.rs`, which uses only the public API.
+
+Flip gate on the flipped tree (same machine and script as part 1):
+
+```
+flip-gate vesper-aegis: PASS (bar: 0 differences, every test, 95% upper <= 1.50x) | tests 1/1 pass | differential 0 differences | ABBA vesper/rust snp 1.19x [1.16x, 1.22x] n=30; tdx 1.21x [1.19x, 1.23x] n=30; sgx 1.36x [1.30x, 1.39x] n=30; policy 0.51x [0.50x, 0.56x] n=30; cca_claims 1.30x [1.27x, 1.35x] n=30; cca_token 1.08x [1.03x, 1.12x] n=30; corim 0.80x [0.75x, 0.94x] n=30
+```
+
+The CoRIM parse got faster (0.80x) because the decoder hands back chunk
+offsets instead of building through serde. The claims parsers are 1.30x,
+mostly because the output is written twice (once as nodes, then as claim
+words) and because of the `Option` reloads of gap 1. 234 lines of Rust
+were deleted, and the adapter added 438. About half of those are the
+decoder's live differential and the field and reason tables. The
+ciborium `Value` the CoRIM structure code walks goes away with part 2b.
+
 ## What is left
 
 The crate's remaining Rust, by the part that will move it:
 
 | Rust | Lines | Part | Needs |
 | --- | --: | --- | --- |
-| `cca.rs`, `corim.rs`: CBOR token and CoRIM structure, appraisal | 2,484 | part 2 | a CBOR reader in Vesper; COSE signatures go behind lane 17's shim |
+| `cca.rs`, `corim.rs`: COSE_Sign1 and COSE_Key structure, token collection, CoRIM structure, appraisal | 2,458 | part 2b | the CBOR reader of part 2a; COSE signatures go behind lane 17's shim |
 | `gate.rs`: frame and ring logic | 497 | part 3 | ChaCha20-Poly1305 behind lane 17's shim; the evaluator callbacks stay as Rust adapters while callers are Rust |
 | `gpa.rs`, `host.rs`, `linear.rs` | 1,012 | part 3 | atomics in source (#1037) for the leak ledger |
 | `intel.rs`, `amd.rs`: collateral, TCB status, CRL floors | 1,655 | part 4 | JSON collateral in Vesper; X.509 and ECDSA behind lane 17's shim |

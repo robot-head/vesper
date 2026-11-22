@@ -16,6 +16,8 @@ vesper_crate(
     test_timeouts = {
         "test/self_host_codegen_aggregates_drops": "long",
         "test/self_host_codegen_swap": "long",
+        # SH4 lane 13 (#1287): the foreign-call emission differential.
+        "test/self_host_ffi_emission": "long",
         "test/self_host_walk_state": "long",
         # SH4 lane 11 (#1285): the vector and TiledSeq differentials.
         "test/self_host_codegen_numeric_swap": "long",
