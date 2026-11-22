@@ -78,6 +78,14 @@ Pipelining lets a fiber submit several requests before awaiting their results. W
 
 A nursery bounds the lifetime of child fibers. A join handle represents the obligation to collect a child. Siblings can receive disjoint writable projections or communicate through a linear channel. Portable work can move between workers, while a pinned shard stays attached to its thread.
 
+### Source atomics {#ch-14-4-atomics}
+
+`Atomic[T]` provides operations with explicit memory orders. For example, a relaxed load observes the atomic cell without synchronizing access to other storage. The checker rejects invalid order combinations. [Read the source atomic rules](reference.html#ch-14-4-atomics).
+
+### Scoped host workers {#ch-14-4-workers}
+
+A `parallel_for` body gets shared data and its iteration index. Use an atomic cell for a shared reduction. The call joins the workers before returning, so a temporary shared loan stays inside the scope. [Read the worker rules](reference.html#ch-14-4-workers).
+
 An `Atomic[T]` has one owner and can be shared through reads of the cell. Atomic loads, stores, swaps, and compare-exchange specify a memory order. The order determines what other memory accesses become visible between workers. `parallel_for` joins scoped workers before the data loan ends. The worker body and available execution backend constrain which programs can use this operation.
 
 ## 15.5 Suspend with a stack and handler evidence

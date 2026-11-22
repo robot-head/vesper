@@ -6097,7 +6097,6 @@ dependencies = [
 name = "vesper-gpu-compute"
 version = "0.1.0"
 dependencies = [
- "ash",
  "bytemuck",
  "naga",
  "vesper-kinetic-seed",

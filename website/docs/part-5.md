@@ -116,7 +116,7 @@ A bounce-buffer grant bounds a host-visible memory transfer. Page acceptance rec
 
 ## 29.3 Admit an inference request
 
-The chapter’s inference example stages input, validates it, checks the authorization evidence, then permits computation over private state. A model file’s digest can be included in the policy so that changing the model changes the admission decision. Keep host-provided lengths and offsets tied to the validated snapshot.
+The chapter’s inference example stages input, validates it, checks the authorization evidence, then permits computation over private state. The relying-party policy binds `mr_enclave_sha384`, `loom_lock_blake3` in RTMR[2], and `olean_spec_mif` in RTMR[3]. The channel check uses the complete 48-byte SHA-384 binding. Keep host-provided lengths and offsets tied to the validated snapshot.
 
 ## 29.4 Bind the full claim to the checked request
 

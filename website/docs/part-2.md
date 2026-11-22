@@ -8,7 +8,7 @@ The proposed pipeline parses a lossless syntax tree, expands notation and resolv
 
 ## 8.2 Find the implementation of a stage
 
-Several compiler stages can share a Rust crate. The checkout’s root compiler includes the checker and Place IR. Run `cargo metadata --no-deps --format-version 1` in the repository to find the actual workspace members before looking for an illustrative crate name.
+Several compiler stages can share a Rust crate. The checkout implements the checker, Place IR, optimizer and code generation under `src/` and uses self-hosted code in `packages/vesper-*` through `crates/vesper-hybrid`. Names like `vesper-hir`, `vesper-mir-pcg`, `vesper-codegen-clif` and `vesper-verify-lean` describe roles in the proposed decomposition. Run `cargo metadata --no-deps --format-version 1` in the repository to find the actual workspace members before looking for an illustrative crate name.
 
 ## 8.3 Represent an operation in high-level IR
 
@@ -32,13 +32,13 @@ Specify inputs, assumptions, and an observable result. For a buffer update you m
 
 ## 9.2 Turn mutation into a returned value
 
-A lens pairs a getter with an operation that rebuilds a larger value after changing one part. Extraction can represent a write to a record field by returning the updated record. Mutable parameters become additional outputs. Effects need an explicit model, and a recursive translation of a loop needs a termination argument for a total function. Suggested Lean notation can preserve the shape of a source expression.
+A lens pairs a getter with an operation that rebuilds a larger value after changing one part. Extraction can represent a write to a record field by returning the updated record. Mutable parameters become additional outputs. Effects need an explicit model, and a recursive translation of a loop needs a termination argument for a total function. The manuscript sketches a `Notations.lean` layer to preserve the shape of source expressions. That layer is a proposal.
 
 Suppose a pair starts as (4, 9) and the callee writes 7 to its first field. The functional result is (7, 9). Reading back the changed field gives 7, and the sibling stays 9. The bounded loan ends at the call, so the caller receives the actual new pair. The chapter calls this translation “prophecy-free” because the model can compute the final value at the call boundary.
 
 ## 9.3 Specify what a batch append changes
 
-For a write-ahead log append, name the starting log position and the batch length. The postcondition can relate them to the new position and state which fields remain intact. A transaction’s consuming operation also needs to appear in the model. A proof of the position calculation alone says little about whether a real device persisted the batch.
+The `KrabkaWal.appendBatch` illustration models `walSlot`, `dirtyPages` and `batchesWritten`. Its `appendBatch_crc_err_aborts_cleanly` theorem states that a failed CRC takes the abort path and preserves the original modeled state. Device durability still depends on the storage implementation.
 
 ## 9.4 Admit a compiled proof artifact
 
@@ -48,7 +48,14 @@ A compiled Lean module has the extension `.olean`. The gate replays artifacts an
 
 Extraction starts from a checked source module and produces a Lean bundle. An artifact audit starts from compiled proof evidence. Publication can apply an admission policy to evidence attached to a release. Follow the artifact and identify which gate checked it before treating a proof report as evidence for a particular source contract.
 
-For an existing module called `Model`, an explicit `vesper proof-audit` request names the theorem, such as `Example.correct`, and the directory holding its artifacts. In contrast, `vesper verify --extract` starts with the Vesper file. Both paths need the pinned Lean toolchain. The linked section gives complete command lines and explains the axiom policy.
+For an existing module called `Model`, an explicit `vesper proof-audit` request names the theorem, such as `Example.correct`, and the directory holding its artifacts. In contrast, `vesper verify --extract` starts with the Vesper file. Both paths need the pinned Lean toolchain. The default axiom policy is empty. Explicitly allowed mathematical axioms remain assumptions. Compiler and proof escape axioms are rejected.
+
+~~~sh
+vesper proof-audit Model --root ./artifacts \
+  --theorem Example.correct --lean /path/to/lean --json
+vesper verify program.ves --extract --proofs proofs.lean \
+  --theorem Example.correct --lean /path/to/lean --json
+~~~
 
 # 10 Bootstrapping a compiler
 
@@ -107,7 +114,7 @@ Use the checkout’s `vesper --help` and the relevant subcommand help for availa
 
 ## 11.5 Retrieve an artifact by content
 
-A content-addressed store keys bytes by their digest. A sandbox controls what a generator can read and produce, while a store index helps locate the resulting artifact. A matching digest establishes identity with the requested bytes. Check who published the artifact and whether your policy permits the capabilities it requests.
+The checkout’s `vesper-loom-cas` stores bytes on the filesystem under domain-separated BLAKE3 digests. Loom splits this work from package trust and resolution across the `vesper-loom-*` crates. A sandbox controls what a generator can read and produce, while a store index helps locate the resulting artifact. A matching digest establishes identity with the requested bytes. Check who published the artifact and whether your policy permits the capabilities it requests.
 
 # 12 Will a library change break its callers?
 

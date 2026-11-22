@@ -20,7 +20,7 @@ StreamVByte separates compact length information from integer payload bytes so a
 
 ## 30.5 Ingest a batch into columns
 
-Read newline-delimited JSON into a bounded region, decode each row, and append selected fields to an AoSoA tile. Decide what a malformed row does to the unfinished batch. A round-trip proof compares a value with its decoded encoding. The ingestion path also needs bounds and cleanup checks.
+The Serde float formatter uses Grisu3 with a 1,280-bit Dragon fallback. Read newline-delimited JSON into a bounded region, decode each row, and append selected fields to an AoSoA tile. Decide what a malformed row does to the unfinished batch. A round-trip proof compares a value with its decoded encoding. The ingestion path also needs bounds and cleanup checks.
 
 ## 30.6 Select a decoder for the host
 
@@ -42,9 +42,9 @@ Parsing a field returns a value and a remainder. An `UnconsumedTail` lease makes
 
 Read the message metadata, check every referenced buffer, and only then project the selected column. A canonical integer decoder or a Distinguished Encoding Rules (DER) decoder can reject redundant encodings as the bytes arrive. A zero-copy view saves materialization but still needs validation over the borrowed bytes.
 
-## 31.4 Test the two round-trip directions
+## 31.4 Prove the two round-trip directions
 
-Decoding an encoded value should recover that value. Encoding an accepted byte sequence’s decoded value should recover the same bytes. The second direction exposes alternate encodings. Together these laws describe a bijection on the explicitly supported domain.
+Decoding an encoded value should recover that value. Encoding an accepted byte sequence’s decoded value should recover the same bytes. The second direction exposes alternate encodings. Together these laws describe a bijection on the supported domain. [GrammarNonMalleability.lean](https://github.com/robot-head/vesper/blob/main/lean/GrammarNonMalleability.lean) mechanizes the result in `canonical_roundtrip_implies_non_malleable` and proves `canonical_leb128_injective` for the modeled LEB128 encoding.
 
 ## 31.5 Check a variable-length integer
 
@@ -126,7 +126,7 @@ A simulated client can disconnect before headers, during a body, or after an upg
 
 ## 34.6 Match a route in a radix tree
 
-A radix tree shares common prefixes between route paths. Matching consumes a literal prefix or binds a parameter until it reaches a handler. Define precedence and validation for ambiguous paths, and keep extracted route values within the request lifetime.
+A radix tree shares common prefixes between route paths. Matching consumes a literal prefix or binds a parameter until it reaches a handler. Define precedence and validation for ambiguous paths, and keep extracted route values within the request lifetime. `CompiledRouteEntry::verify_zero_heap_budget` audits the handler effect row and rejects a global `Alloc` effect when the route promises a zero-heap budget.
 
 # 35 Chorus protocols and distributed ownership
 
