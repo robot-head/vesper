@@ -107,7 +107,9 @@ impl HotSet {
             let n = crate::binding::hotset_runs(&pages, batch as u64, &mut out)
                 .map_err(HotSetError::from)?;
             Ok(out
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .take(n as usize)
                 .map(|w| PageRun {
                     start: w[0] as usize,

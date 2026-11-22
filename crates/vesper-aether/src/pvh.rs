@@ -176,7 +176,9 @@ pub fn parse_pvh_elf(elf: &[u8], memory: &GuestMemory) -> Result<PvhImage, PvhEr
         let (entry, count) =
             crate::binding::pvh_parse(elf, &ram[..words], &mut out).map_err(PvhError::from)?;
         let segments = out
-            .chunks_exact(5)
+            .as_chunks::<5>()
+            .0
+            .iter()
             .take(count as usize)
             .map(|w| LoadSegment {
                 paddr: w[0],
