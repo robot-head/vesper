@@ -304,6 +304,41 @@ impl Imports {
         });
         Ok(&import.descriptor)
     }
+    /// Imports needed by a host binding this module's foreign calls. Include
+    /// other declarations of a called C symbol so the host still detects
+    /// conflicting addresses across libraries.
+    pub fn for_host_calls(&self, calls: &[ForeignCall]) -> Self {
+        let mut called = BTreeSet::new();
+        let mut symbols = BTreeSet::new();
+        for call in calls {
+            called.insert(call.library.as_str());
+            if let Some(f) = self
+                .libraries
+                .get(&call.library)
+                .and_then(|import| import.descriptor.function(&call.symbol))
+                && !f.is_indirect()
+            {
+                symbols.insert(f.link_symbol());
+            }
+        }
+        let libraries = self
+            .libraries
+            .iter()
+            .filter(|(name, import)| {
+                called.contains(name.as_str())
+                    || import
+                        .descriptor
+                        .functions()
+                        .iter()
+                        .any(|f| !f.is_indirect() && symbols.contains(f.link_symbol()))
+            })
+            .map(|(name, import)| (name.clone(), import.clone()))
+            .collect();
+        Self {
+            libraries,
+            objects: self.objects.clone(),
+        }
+    }
     pub fn libraries(&self) -> impl Iterator<Item = (&LibraryDescriptor, Handler)> {
         self.libraries.values().map(|i| (&i.descriptor, i.handler))
     }
