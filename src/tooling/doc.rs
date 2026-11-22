@@ -1,4 +1,5 @@
 //! Pure checked-source adapter for the root-free documentation library.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod certs;
 mod links;
 pub mod sources;
@@ -423,6 +424,7 @@ fn trait_args(module: &Module, path: &str) -> Vec<String> {
 
 /// [`document_source`] plus the body-level [`Analysis`] of the same checked
 /// snapshot.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn document_with_analysis(
     source: &str,
     limits: Limits,
@@ -434,6 +436,7 @@ pub fn document_with_analysis(
 /// [`document_with_analysis`], plus optional Cranelift WCSD stack bounds for
 /// every documented closed-row `eff [Realtime]` function when `wcsd_target` is
 /// `Some(target)`.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn document_with_analysis_and_wcsd(
     source: &str,
     limits: Limits,

@@ -326,23 +326,12 @@ fn prepare_tests(source: &mut String) -> Result<(parser::Parse, Vec<TestCase>), 
             lowered.diagnostics.len(),
         ));
     }
-    let first_wrapper = parsed.module.items.len();
-    for (test, index) in tests.iter().zip(first_wrapper..) {
-        let wrapper = &test.wrapper;
-        let Item::Function(target) = &parsed.module.items[wrapper.function_index] else {
-            unreachable!("only functions can declare cases");
-        };
-        // A row must parse as one direct call, contained in its own wrapper.
-        let Some(Item::Function(f)) = lowered.module.items.get_mut(index) else {
-            return Err(test.error(source, "expected a single argument list"));
-        };
-        let valid_body = test_discovery::is_case_wrapper_body(f, &target.name);
-        if f.span != wrapper.generated || f.name != wrapper.entry || !valid_body {
-            return Err(test.error(source, "expected a single argument list"));
-        }
-        f.result = target.result.clone();
-        f.effects = target.effects.clone();
-    }
+    test_discovery::finish_case_wrappers(
+        source,
+        &parsed.module,
+        &mut lowered.module,
+        tests.iter().map(|test| &test.wrapper),
+    )?;
     *source = expanded;
     Ok((lowered, tests))
 }

@@ -40,7 +40,7 @@ use std::{
 use vesper_loom_calculus::{Manifest, PackageName};
 
 /// `use` in a single-file module, which has no package to import from.
-pub const USE_OUTSIDE_PACKAGE: &str = "E0110";
+pub use crate::check::USE_OUTSIDE_PACKAGE;
 /// Unknown package, module or item in an import, or an unimported name.
 pub const UNKNOWN_IMPORT: &str = "E0111";
 /// Import of an item that is not `pub`.

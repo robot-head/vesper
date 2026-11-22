@@ -6893,6 +6893,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "vesper-tour-wasm"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "petgraph",
+ "serde",
+ "serde_json",
+ "vesper-alloc-seed",
+ "vesper-beacon-seed",
+ "vesper-core",
+ "vesper-doc",
+ "vesper-ffi",
+ "vesper-fmt-seed",
+ "vesper-forge-seed",
+ "vesper-highlight-seed",
+ "vesper-lean-syntax-seed",
+ "vesper-loom-calculus-seed",
+ "vesper-pact-binding",
+ "vesper-pact-seed",
+ "vesper-syntax",
+ "vesper-tensor-seed",
+ "vesper-test",
+]
+
+[[package]]
 name = "vesper-vault"
 version = "0.1.0"
 dependencies = [

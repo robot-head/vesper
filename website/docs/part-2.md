@@ -89,7 +89,11 @@ A resolver chooses versions satisfying all dependency constraints. A policy can 
 
 ## 11.2 Follow authority through the build
 
-Capability ceilings limit what a package may request. Sandboxed generators get explicit inputs. An interface fingerprint can spare consumers a rebuild when a private implementation changes. A fast solver handles ordinary dependency constraints. A policy solver can compare several valid choices. Scoped identities identify publishers, quorum review requires agreement from multiple reviewers, and a content-addressed store shares artifacts with identical content.
+Capability ceilings limit what a package may request. Sandboxed generators get explicit inputs. An interface fingerprint can spare consumers a rebuild when a private implementation changes. A fast solver handles ordinary dependency constraints. A policy solver can compare several valid choices. Loom's design reserves `std/*` for the standard platform and gives third-party packages names such as `@acme/parser`. A publisher identity answers who controls `@acme`. A package URL would instead tell a client where to fetch the code. They answer different questions.
+
+The proposed name check can quarantine a name close to one already in use. It considers how similar the names are, how long the namespace has existed, and what the trust policy requires. A close match is a reason to review a package before installing it.
+
+Cached binaries have a separate check. Independent builders sign statements naming the digest of the bytes they produced, and the policy can require more than one builder to agree. The manuscript names this part of the design after Lila, a reproducible-builds project. The current offline verifier checks signatures and the configured quorum.
 
 ## 11.3 Read a manifest and trace an import
 

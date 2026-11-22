@@ -117,7 +117,7 @@ pub(super) fn plain(world: &World, t: &Type) -> bool {
     !crate::fip::may_need_drop(world, t)
         && !crate::fip::mentions_box(world, t)
         && !crate::fip::type_contains_box(world, t)
-        && !crate::native::contains_function(world, t)
+        && !crate::source_analysis::contains_function(world, t)
         && crate::layout::Layout::of(world, t).is_ok()
 }
 

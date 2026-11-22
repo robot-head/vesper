@@ -33,9 +33,11 @@ for (const file of ['search.js', 'docs.css']) {
 const sitemap = await readFile(resolve(root, 'sitemap.xml'), 'utf8');
 const chapterUrls = [...chapters, ...tour].map(path => `  <url><loc>https://vesper-lang.org/${path.replace(/index\.html$/, '')}</loc></url>`).join('\n');
 await writeFile(resolve(out, 'sitemap.xml'), sitemap.replace('</urlset>', `${chapterUrls}\n</urlset>`));
-for (const path of ['assets', 'brand', 'diagrams', 'site.css', 'site.js', 'favicon.svg', 'vesper-specification.pdf', 'CNAME', 'robots.txt']) {
+for (const path of ['assets', 'brand', 'diagrams', 'site.css', 'site.js', 'tour-editor.js', 'tour-worker.js', 'tour-wasm.js', 'favicon.svg', 'vesper-specification.pdf', 'CNAME', 'robots.txt']) {
   await cp(resolve(root, path), resolve(out, path), { recursive: true });
 }
+const wasm = resolve(root, '../target/wasm32-unknown-unknown/port-compiler/vesper_tour_wasm.wasm');
+await cp(wasm, resolve(out, 'vesper-tour.wasm'));
 const css = await highlightSite(out, ['index.html', 'language.html', 'docs/index.html', ...chapters, ...tour]);
 await appendFile(resolve(out, 'site.css'), '\n' + css);
 try { await cp(resolve(root, 'share.jpg'), resolve(out, 'share.jpg')); } catch (e) { if (e.code !== 'ENOENT') throw e; }

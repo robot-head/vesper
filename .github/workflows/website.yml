@@ -28,6 +28,8 @@ jobs:
         with:
           node-version: '24'
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
         with:
           key: website-chroma
@@ -47,6 +49,7 @@ jobs:
         run: |
           python -m unittest discover -s ../docs/manuscript -p 'test_*.py'
           python ../docs/manuscript/verify.py --pdf vesper-specification.pdf
+      - run: npm run build:wasm
       - run: npm run build
       - run: npm run check
       - uses: actions/upload-pages-artifact@v3

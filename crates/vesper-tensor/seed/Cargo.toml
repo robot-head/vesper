@@ -25,6 +25,7 @@ path = "src/lib.rs"
 
 [dependencies]
 # Already in Cargo.lock (cranelift-jit uses it); read-only weight mapping.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 memmap2 = "=0.2.3"
 
 [[test]]

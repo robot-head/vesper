@@ -53,7 +53,9 @@ use crate::ast::*;
 use crate::check::Checked;
 use std::borrow::Cow;
 
+#[cfg(not(target_arch = "wasm32"))]
 pub mod host;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod native_runtime;
 mod rules;
 mod telemetry;

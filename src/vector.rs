@@ -33,6 +33,7 @@ use crate::ast::*;
 use crate::check::World;
 use crate::runtime::Value;
 use serde::Serialize;
+#[cfg(not(target_arch = "wasm32"))]
 use std::collections::BTreeMap;
 
 #[path = "vector/eval.rs"]
@@ -347,6 +348,7 @@ pub fn isa_row_entry(effect: &Effect, span: Span) -> Option<Diagnostic> {
 }
 
 /// Whether a code generator for `isa` targets profile `p`.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn isa_enabled(isa: &dyn cranelift_codegen::isa::TargetIsa, p: Profile) -> bool {
     let Some((arch, flags)) = p.cranelift_requirements() else {
         return false;
@@ -370,6 +372,7 @@ pub fn isa_enabled(isa: &dyn cranelift_codegen::isa::TargetIsa, p: Profile) -> b
     })
 }
 /// [`isa_enabled`] for the host code generator the JIT uses.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn host_enabled(p: Profile) -> bool {
     use std::sync::OnceLock;
     static HOST: OnceLock<BTreeMap<Profile, bool>> = OnceLock::new();
@@ -388,6 +391,12 @@ pub fn host_enabled(p: Profile) -> bool {
     .get(&p)
     .copied()
     .unwrap_or(false)
+}
+
+// Browser WebAssembly exposes no native Cranelift host ISA profiles.
+#[cfg(target_arch = "wasm32")]
+pub fn host_enabled(_: Profile) -> bool {
+    false
 }
 
 /// Lane-wise binary operations producing a vector.
