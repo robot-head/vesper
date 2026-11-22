@@ -23,6 +23,7 @@
 
 use @vesper/ast::{
     Ast,
+    Lit,
     ExprNode,
     PatNode,
     TypeNode,
@@ -64,6 +65,7 @@ use @vesper/ffi-lowering::{
     Err,
     Sh,
     Sp,
+    ConstRow,
     Reader,
     s_new,
     read_library,
@@ -116,6 +118,7 @@ const E_BREAK: u8 = 20;
 const E_RETURN: u8 = 21;
 
 // Pattern kinds.
+const P_LIT: u8 = 3;
 const P_TUPLE: u8 = 4;
 const P_CONSTRUCTOR: u8 = 5;
 
@@ -633,12 +636,49 @@ fn expr(inout r: R, x: u32) {
     if k == E_NAME {
         let (lib, at) = foreign_path(inout r, e.a);
         if lib != NONE64 {
-            let mark = r.s.out.len();
-            r.s.put(in "foreign function ");
-            put_sym(inout r, e.a);
-            r.s.put(in " can only be called");
-            let m = message(inout r, mark);
-            raise(inout r, K_FOREIGN_VALUE, m, e.start, e.end);
+            let ci = const_row(inout r, lib, at, e.a);
+            if ci != NONE64 {
+                let cname = r.s.const_row(ci).name;
+                let fn_name = const_fn_sym(inout r, lib, cname);
+                let callee_idx = r
+                    .ast
+                    .exprs
+                    .alloc(
+                        ExprNode {
+                            kind: E_NAME,
+                            start: e.start,
+                            end: e.start,
+                            a: fn_name,
+                            b: 0,
+                            c: 0,
+                            d: 0,
+                            e: 0
+                        }
+                    );
+                let ok = r
+                    .ast
+                    .exprs
+                    .set(
+                        idx_from_raw[ExprNode](x),
+                        ExprNode {
+                            kind: E_CALL,
+                            start: e.start,
+                            end: e.end,
+                            a: callee_idx.raw(),
+                            b: 0,
+                            c: 0,
+                            d: 0,
+                            e: 0
+                        }
+                    );
+            } else {
+                let mark = r.s.out.len();
+                r.s.put(in "foreign function ");
+                put_sym(inout r, e.a);
+                r.s.put(in " can only be called");
+                let m = message(inout r, mark);
+                raise(inout r, K_FOREIGN_VALUE, m, e.start, e.end);
+            }
         } else if is_handle(inout r, e.a) {
             handle_misuse(inout r, e.a, in "constructed", e.start, e.end);
         }
@@ -657,8 +697,10 @@ fn expr(inout r: R, x: u32) {
         let mut at: u64 = 0;
         if callee.kind == E_NAME {
             let (l, s) = foreign_path(inout r, callee.a);
-            lib = l;
-            at = s;
+            if l != NONE64 && const_row(inout r, l, s, callee.a) == NONE64 {
+                lib = l;
+                at = s;
+            }
         }
         if lib != NONE64 {
             let name = call(inout r, lib, callee.a, at, e.c, e.start, e.end);
@@ -785,6 +827,41 @@ fn pattern(inout r: R, p: u32) {
     }
     let n = pat_at(in r.ast, p);
     if n.kind == P_CONSTRUCTOR {
+        if list_len(in r.ast, n.b) == 0 {
+            let (lib, at) = foreign_path(inout r, n.a);
+            if lib != NONE64 {
+                let ci = const_row(inout r, lib, at, n.a);
+                if ci != NONE64 {
+                    let c = r.s.const_row(ci);
+                    let lit = r
+                        .ast
+                        .lits
+                        .alloc(
+                            Lit {
+                                kind: 1,
+                                neg: c.neg,
+                                bits: c.value,
+                                hi: 0
+                            }
+                        );
+                    let ok = r
+                        .ast
+                        .pats
+                        .set(
+                            idx_from_raw[PatNode](p),
+                            PatNode {
+                                kind: P_LIT,
+                                start: n.start,
+                                end: n.end,
+                                a: lit.raw(),
+                                b: 0,
+                                c: 0
+                            }
+                        );
+                    return;
+                }
+            }
+        }
         if is_handle(inout r, n.a) {
             handle_misuse(inout r, n.a, in "destructured", n.start, n.end);
         }
@@ -800,6 +877,30 @@ fn pattern(inout r: R, p: u32) {
 }
 
 // ---------------------------------------------------------------- calls
+
+// The constant row of library `lib` whose symbol is `x`'s bytes from `at`,
+// or NONE64.
+fn const_row(inout r: R, lib: u64, at: u64, x: u32) -> u64 {
+    load_bytes(inout r, x);
+    let l = r.s.lib(lib);
+    let n = r.bytes.len();
+    for i in 0..l.cn {
+        let ci = wrapping_add(l.c0, i);
+        if r.s.spells(r.s.const_row(ci).name, in r.bytes[at..n]) {
+            return ci;
+        }
+    }
+    NONE64
+}
+
+fn const_fn_sym(inout r: R, lib: u64, cname: u32) -> u32 {
+    r.buf.push_str(in "const$FfiConst$");
+    let lname = r.s.lib(lib).name;
+    buf_name(inout r, lname);
+    r.buf.push_str(in "$");
+    buf_name(inout r, cname);
+    intern_buf(inout r)
+}
 
 // The function row of library `lib` whose symbol is `r.bytes[at..]`, or
 // NONE64 (`LibraryDescriptor::function`).
