@@ -1,9 +1,8 @@
-//! The Vulkan compute runtime over the Vesper port (feature `vesper-port`,
-//! SH6 lane 15, #1410). Every Vulkan call is made by the Vesper library in
-//! `vesper/` (`vesper/src/lib.ves`), which imports the loader and libc
-//! through `.vsys` with no Rust in between. This module keeps the crate's
-//! public API and its ownership rules on top of it, so the crate's tests run
-//! unchanged against both builds:
+//! The Vulkan compute runtime (SH6 lane 15, #1410). Every Vulkan call is made
+//! by the Vesper library in `vesper/` (`vesper/src/lib.ves`), which opens the
+//! loader at run time (`dlopen`) and calls it and libc through `.vsys` with no
+//! Rust in between. The Rust runtime over `ash` it replaced is deleted. This
+//! module keeps the crate's public API and its ownership rules on top of it:
 //!
 //! * every Vulkan object is owned through an [`Arc`], and each owner holds an
 //!   `Arc` of the device, so the device outlives all its objects;
@@ -131,15 +130,72 @@ fn api_parts(v: u64) -> (u32, u32, u32) {
     ((v >> 22) & 0x7f, (v >> 12) & 0x3ff, v & 0xfff)
 }
 
+/// The entry points `@vesper/gpu-compute` looks up, in `Fns` order
+/// (`Unavailable::MissingEntryPoint` codes).
+const ENTRY_POINTS: [&str; 47] = [
+    "vkEnumerateInstanceVersion",
+    "vkCreateInstance",
+    "vkDestroyInstance",
+    "vkEnumeratePhysicalDevices",
+    "vkGetPhysicalDeviceProperties2",
+    "vkGetPhysicalDeviceFeatures2",
+    "vkGetPhysicalDeviceQueueFamilyProperties",
+    "vkGetPhysicalDeviceMemoryProperties",
+    "vkCreateDevice",
+    "vkDestroyDevice",
+    "vkDeviceWaitIdle",
+    "vkGetDeviceQueue",
+    "vkCreateSemaphore",
+    "vkDestroySemaphore",
+    "vkGetSemaphoreCounterValue",
+    "vkWaitSemaphores",
+    "vkCreateBuffer",
+    "vkDestroyBuffer",
+    "vkGetBufferMemoryRequirements",
+    "vkAllocateMemory",
+    "vkFreeMemory",
+    "vkBindBufferMemory",
+    "vkMapMemory",
+    "vkUnmapMemory",
+    "vkCreateDescriptorSetLayout",
+    "vkDestroyDescriptorSetLayout",
+    "vkCreatePipelineLayout",
+    "vkDestroyPipelineLayout",
+    "vkCreateShaderModule",
+    "vkDestroyShaderModule",
+    "vkCreateComputePipelines",
+    "vkDestroyPipeline",
+    "vkCreateCommandPool",
+    "vkDestroyCommandPool",
+    "vkAllocateCommandBuffers",
+    "vkBeginCommandBuffer",
+    "vkEndCommandBuffer",
+    "vkCreateDescriptorPool",
+    "vkDestroyDescriptorPool",
+    "vkAllocateDescriptorSets",
+    "vkUpdateDescriptorSets",
+    "vkCmdBindPipeline",
+    "vkCmdBindDescriptorSets",
+    "vkCmdPushConstants",
+    "vkCmdDispatch",
+    "vkCmdPipelineBarrier",
+    "vkQueueSubmit",
+];
+
 fn gpu_error(e: GpuErr, wanted: Option<&str>) -> GpuError {
     let pick = |table: &[&'static str], i: u32| table.get(i as usize).copied().unwrap_or("?");
     match e.kind {
         1 => GpuError::Unavailable(match e.detail {
+            1 => "no Vulkan loader: none of libvulkan.so.1, libvulkan.so, libvulkan.1.dylib, libvulkan.dylib or libMoltenVK.dylib could be opened".into(),
             2 => {
                 let (major, minor, _) = api_parts(e.code as u64);
                 format!("Vulkan instance version {major}.{minor} is below 1.2")
             }
             3 => format!("vkCreateInstance failed: VkResult {}", e.code),
+            5 => format!(
+                "the Vulkan loader lacks {}",
+                pick(&ENTRY_POINTS, u32::try_from(e.code).unwrap_or(u32::MAX))
+            ),
             _ => match wanted {
                 Some(w) => format!("no Vulkan 1.2 compute device whose name contains {w:?}"),
                 None => "no Vulkan 1.2 compute device with timeline semaphores".into(),
@@ -214,8 +270,8 @@ impl Context {
     ///
     /// No instance or no suitable device is [`GpuError::Unavailable`];
     /// callers (and the tests) report that instead of claiming a result.
-    /// The loader itself is linked, so a host without it cannot run this
-    /// build at all (docs/parallel-results/rust-exit-graphics.md, gap 7).
+    /// The loader is opened at run time, so a host without one gets
+    /// [`GpuError::Unavailable`] too.
     pub fn new() -> Result<Self, GpuError> {
         let wanted = std::env::var("VESPER_GPU_DEVICE").ok();
         let dev = vesper!(
