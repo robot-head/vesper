@@ -30,9 +30,11 @@
 //!
 //! Two lanes compute what two scalar iterations compute when the earlier
 //! iteration's stores do not write an element the later iteration loads
-//! (loads of both lanes happen before stores of both). Every access moves
+//! (loads of both lanes happen before stores of both), and no store of the
+//! earlier iteration overlaps an earlier store of the later one (each store
+//! runs for both lanes before the next store does). Every access moves
 //! by the same 8 bytes per iteration, so the distance from a store of
-//! iteration `j` to a load of iteration `j + 1` is the same for every `j`:
+//! iteration `j` to an access of iteration `j + 1` is the same for every `j`:
 //! the prologue checks once, before the loop, that each such distance is at
 //! least 8 bytes (no two 8-byte elements even partly overlap), and goes to
 //! the scalar loop if not. Lanes are in memory order: a loop whose
@@ -675,7 +677,7 @@ fn emit(func: &mut ir::Function, plan: &Plan) {
     let j01 = FuncCursor::new(func).at_bottom(pre).ins().iadd_imm(j0, 1);
     let mut second = invariants.clone();
     second.insert(plan.j, j01);
-    let (loads1, _) = addresses(func, plan, pre, &mut second);
+    let (loads1, stores1) = addresses(func, plan, pre, &mut second);
     {
         let mut pos = FuncCursor::new(func).at_bottom(pre);
         // Two iterations left: `j0 < B` and `j0 + 1 < B` (which cannot
@@ -683,14 +685,28 @@ fn emit(func: &mut ir::Function, plan: &Plan) {
         let a = pos.ins().icmp(IntCC::UnsignedLessThan, j0, plan.bound);
         let b = pos.ins().icmp(IntCC::UnsignedLessThan, j01, plan.bound);
         let mut ok = pos.ins().band(a, b);
+        // The pairs of accesses whose order the lanes change: a store of
+        // the first iteration and a load of the next (the lanes load both
+        // iterations first), and a later store of the first iteration and
+        // an earlier store of the next (the lanes run each store for both
+        // iterations before the next store).
+        let mut pairs: Vec<(Value, Value)> = vec![];
         for &s in &stores0 {
             for &l in &loads1 {
-                // `|s - l| >= 8`: the two 8-byte elements do not overlap.
-                let gap = pos.ins().isub(s, l);
-                let gap = pos.ins().iadd_imm(gap, 7);
-                let apart = pos.ins().icmp_imm(IntCC::UnsignedGreaterThan, gap, 14);
-                ok = pos.ins().band(ok, apart);
+                pairs.push((s, l));
             }
+        }
+        for (y, &later) in stores0.iter().enumerate() {
+            for &earlier in &stores1[..y] {
+                pairs.push((later, earlier));
+            }
+        }
+        for (a, b) in pairs {
+            // `|a - b| >= 8`: the two 8-byte elements do not overlap.
+            let gap = pos.ins().isub(a, b);
+            let gap = pos.ins().iadd_imm(gap, 7);
+            let apart = pos.ins().icmp_imm(IntCC::UnsignedGreaterThan, gap, 14);
+            ok = pos.ins().band(ok, apart);
         }
         pos.ins().brif(
             ok,
@@ -783,12 +799,15 @@ fn emit(func: &mut ir::Function, plan: &Plan) {
             _ => {}
         }
     }
-    // On while two more iterations are left: `jv + 1 < B`, so `jv + 2 <= B`
-    // and `jv + 3` cannot wrap.
+    // On while two more iterations are left: `j2 < B` and `j2 + 1 < B`.
+    // `jv + 1 < B`, so `j2 = jv + 2` cannot wrap, and `j2 + 1` wraps only
+    // when `j2` is `u64::MAX`, which fails `j2 < B`.
     let mut pos = FuncCursor::new(func).at_bottom(lanes);
     let j2 = pos.ins().iadd_imm(jv, 2);
     let j3 = pos.ins().iadd_imm(jv, 3);
-    let more = pos.ins().icmp(IntCC::UnsignedLessThan, j3, plan.bound);
+    let a = pos.ins().icmp(IntCC::UnsignedLessThan, j2, plan.bound);
+    let b = pos.ins().icmp(IntCC::UnsignedLessThan, j3, plan.bound);
+    let more = pos.ins().band(a, b);
     pos.ins().brif(
         more,
         lanes,

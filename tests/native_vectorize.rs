@@ -190,3 +190,44 @@ fn scan_down(inout d: ChunkSeq[u64], top: u64) {
         differential(&format!("scan_{n}"), &program(helpers, &kernels));
     }
 }
+
+/// Two stores of one iteration where the later one writes what the next
+/// iteration's earlier one does: the lanes would run both iterations' first
+/// store before the second, so the prologue must fall back (Codex review on
+/// #1535).
+#[test]
+fn stores_that_overlap_across_iterations_fall_back() {
+    let helpers = "fn pairs(inout d: ChunkSeq[u64], n: u64, k: u64) {
+    for j in 0..n {
+        d.try_set(j, k);
+        d.try_set(wrapping_add(j, 1), wrapping_add(k, 1));
+    }
+}
+fn pairs_apart(inout d: ChunkSeq[u64], n: u64, k: u64) {
+    for j in 0..n {
+        d.try_set(j, k);
+        d.try_set(wrapping_add(j, 100), wrapping_add(k, 1));
+    }
+}";
+    for n in [0, 1, 2, 3, 4, 7, 150] {
+        let kernels = format!("pairs(inout d, {n}, 5); pairs_apart(inout d, {n}, 9);");
+        differential(&format!("pairs_{n}"), &program(helpers, &kernels));
+    }
+}
+
+/// A range that ends at `u64::MAX`: the lane loop's test for two more
+/// iterations must not wrap past it (Codex review on #1535).
+#[test]
+fn a_range_ending_at_u64_max_stops_in_bounds() {
+    let helpers = "fn top(inout d: ChunkSeq[u64], lo: u64) {
+    for j in lo..18446744073709551615 {
+        let i = wrapping_sub(j, lo);
+        let a = match d.try_get(i) { Option::Some(x) => x, Option::None => 0 };
+        d.try_set(i, wrapping_add(a, 3));
+    }
+}";
+    for n in [1, 2, 3, 8, 9, 200] {
+        let kernels = format!("top(inout d, wrapping_sub(18446744073709551615, {n}));");
+        differential(&format!("top_{n}"), &program(helpers, &kernels));
+    }
+}
