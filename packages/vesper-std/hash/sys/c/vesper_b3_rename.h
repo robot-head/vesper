@@ -1,0 +1,40 @@
+/* The official BLAKE3 C implementation, renamed for @vesper-std/hash-sys
+ * (packages/vesper-std/hash/sys). Every global the C sources define becomes
+ * `vesper_b3_*`, so the library never collides with the copies of the same
+ * kernels that a Rust host's `blake3` crate links. Each `b3-*.c` wrapper
+ * includes this first, then one upstream source.
+ */
+#ifndef VESPER_B3_RENAME_H
+#define VESPER_B3_RENAME_H
+#define blake3_compress_in_place vesper_b3_compress_in_place
+#define blake3_compress_in_place_avx512 vesper_b3_compress_in_place_avx512
+#define blake3_compress_in_place_portable vesper_b3_compress_in_place_portable
+#define blake3_compress_in_place_sse2 vesper_b3_compress_in_place_sse2
+#define blake3_compress_in_place_sse41 vesper_b3_compress_in_place_sse41
+#define blake3_compress_subtree_wide vesper_b3_compress_subtree_wide
+#define blake3_compress_xof vesper_b3_compress_xof
+#define blake3_compress_xof_avx512 vesper_b3_compress_xof_avx512
+#define blake3_compress_xof_portable vesper_b3_compress_xof_portable
+#define blake3_compress_xof_sse2 vesper_b3_compress_xof_sse2
+#define blake3_compress_xof_sse41 vesper_b3_compress_xof_sse41
+#define blake3_hash_many vesper_b3_hash_many
+#define blake3_hash_many_avx2 vesper_b3_hash_many_avx2
+#define blake3_hash_many_avx512 vesper_b3_hash_many_avx512
+#define blake3_hash_many_neon vesper_b3_hash_many_neon
+#define blake3_hash_many_portable vesper_b3_hash_many_portable
+#define blake3_hash_many_sse2 vesper_b3_hash_many_sse2
+#define blake3_hash_many_sse41 vesper_b3_hash_many_sse41
+#define blake3_hasher_finalize vesper_b3_hasher_finalize
+#define blake3_hasher_finalize_seek vesper_b3_hasher_finalize_seek
+#define blake3_hasher_init vesper_b3_hasher_init
+#define blake3_hasher_init_derive_key vesper_b3_hasher_init_derive_key
+#define blake3_hasher_init_derive_key_raw vesper_b3_hasher_init_derive_key_raw
+#define blake3_hasher_init_keyed vesper_b3_hasher_init_keyed
+#define blake3_hasher_reset vesper_b3_hasher_reset
+#define blake3_hasher_update vesper_b3_hasher_update
+#define blake3_simd_degree vesper_b3_simd_degree
+#define blake3_version vesper_b3_version
+#define blake3_xof_many vesper_b3_xof_many
+#define blake3_xof_many_avx512 vesper_b3_xof_many_avx512
+#define blake3_xof_many_neon vesper_b3_xof_many_neon
+#endif

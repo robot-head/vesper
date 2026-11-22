@@ -525,8 +525,6 @@ pub fn cdc_ingest(a: &mut ZAcc, bytes: &[u8], parts: &[u64], binds: &[u64], next
 
 /// Calls `cp_check` of the Vesper library `flux` (`vesper_flux_cp_check`).
 pub fn cp_check(image: &[u8]) -> Result<(), CpErr> {
-    // Keep the crate's `Blake3` symbols linked: the Vesper object calls them.
-    let _ = core::hint::black_box([crate::blake3_shim::vesper_blake3_derive_key_hash as *const (), crate::blake3_shim::vesper_blake3_finalize as *const (), crate::blake3_shim::vesper_blake3_free as *const (), crate::blake3_shim::vesper_blake3_hash as *const (), crate::blake3_shim::vesper_blake3_new as *const (), crate::blake3_shim::vesper_blake3_new_derive_key as *const (), crate::blake3_shim::vesper_blake3_new_keyed as *const (), crate::blake3_shim::vesper_blake3_update as *const ()]);
     let mut fail = [0u64; 2];
     // SAFETY: `vesper_flux_cp_check` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
@@ -558,8 +556,6 @@ pub fn cp_head(body: &[u8], expected: &[u8], max_sources: u64, budget: &mut u64)
 
 /// Calls `cp_identity` of the Vesper library `flux` (`vesper_flux_cp_identity`).
 pub fn cp_identity(words: &[u64], budget: &mut u64) -> Result<Vec<u8>, CpErr> {
-    // Keep the crate's `Blake3` symbols linked: the Vesper object calls them.
-    let _ = core::hint::black_box([crate::blake3_shim::vesper_blake3_derive_key_hash as *const (), crate::blake3_shim::vesper_blake3_finalize as *const (), crate::blake3_shim::vesper_blake3_free as *const (), crate::blake3_shim::vesper_blake3_hash as *const (), crate::blake3_shim::vesper_blake3_new as *const (), crate::blake3_shim::vesper_blake3_new_derive_key as *const (), crate::blake3_shim::vesper_blake3_new_keyed as *const (), crate::blake3_shim::vesper_blake3_update as *const ()]);
     let mut arg_budget = [0u64; <u64 as Abi>::WORDS];
     Abi::put(&*budget, &mut arg_budget);
     let mut fail = [0u64; 2];
@@ -577,8 +573,6 @@ pub fn cp_identity(words: &[u64], budget: &mut u64) -> Result<Vec<u8>, CpErr> {
 
 /// Calls `cp_image` of the Vesper library `flux` (`vesper_flux_cp_image`).
 pub fn cp_image(id: &[u8], ticks: u64, source: &[u64], widths: &[u64], counts: &[u64], cells: &[i64], limit: u64, budget: &mut u64) -> Result<Vec<u8>, CpErr> {
-    // Keep the crate's `Blake3` symbols linked: the Vesper object calls them.
-    let _ = core::hint::black_box([crate::blake3_shim::vesper_blake3_derive_key_hash as *const (), crate::blake3_shim::vesper_blake3_finalize as *const (), crate::blake3_shim::vesper_blake3_free as *const (), crate::blake3_shim::vesper_blake3_hash as *const (), crate::blake3_shim::vesper_blake3_new as *const (), crate::blake3_shim::vesper_blake3_new_derive_key as *const (), crate::blake3_shim::vesper_blake3_new_keyed as *const (), crate::blake3_shim::vesper_blake3_update as *const ()]);
     let mut arg_budget = [0u64; <u64 as Abi>::WORDS];
     Abi::put(&*budget, &mut arg_budget);
     let mut fail = [0u64; 2];
@@ -778,8 +772,6 @@ pub fn log_decode(payload: &[u8], epoch: u64, widths: &[u64], max_rows: u64) -> 
 
 /// Calls `log_frame` of the Vesper library `flux` (`vesper_flux_log_frame`).
 pub fn log_frame(epoch: u64, schema_at: u64, cells: &[i64], counts: &[u64], widths: &[u64], max_rows: u64, max_frame: u64) -> Result<Vec<u8>, LogErr> {
-    // Keep the crate's `Blake3` symbols linked: the Vesper object calls them.
-    let _ = core::hint::black_box([crate::blake3_shim::vesper_blake3_derive_key_hash as *const (), crate::blake3_shim::vesper_blake3_finalize as *const (), crate::blake3_shim::vesper_blake3_free as *const (), crate::blake3_shim::vesper_blake3_hash as *const (), crate::blake3_shim::vesper_blake3_new as *const (), crate::blake3_shim::vesper_blake3_new_derive_key as *const (), crate::blake3_shim::vesper_blake3_new_keyed as *const (), crate::blake3_shim::vesper_blake3_update as *const ()]);
     let mut fail = [0u64; 2];
     // SAFETY: `vesper_flux_log_frame` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
@@ -794,8 +786,6 @@ pub fn log_frame(epoch: u64, schema_at: u64, cells: &[i64], counts: &[u64], widt
 
 /// Calls `log_frame_ok` of the Vesper library `flux` (`vesper_flux_log_frame_ok`).
 pub fn log_frame_ok(body: &[u8], len: u64) -> bool {
-    // Keep the crate's `Blake3` symbols linked: the Vesper object calls them.
-    let _ = core::hint::black_box([crate::blake3_shim::vesper_blake3_derive_key_hash as *const (), crate::blake3_shim::vesper_blake3_finalize as *const (), crate::blake3_shim::vesper_blake3_free as *const (), crate::blake3_shim::vesper_blake3_hash as *const (), crate::blake3_shim::vesper_blake3_new as *const (), crate::blake3_shim::vesper_blake3_new_derive_key as *const (), crate::blake3_shim::vesper_blake3_new_keyed as *const (), crate::blake3_shim::vesper_blake3_update as *const ()]);
     // SAFETY: `vesper_flux_log_frame_ok` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
@@ -805,8 +795,6 @@ pub fn log_frame_ok(body: &[u8], len: u64) -> bool {
 
 /// Calls `log_header` of the Vesper library `flux` (`vesper_flux_log_header`).
 pub fn log_header(widths: &[u64]) -> Vec<u8> {
-    // Keep the crate's `Blake3` symbols linked: the Vesper object calls them.
-    let _ = core::hint::black_box([crate::blake3_shim::vesper_blake3_derive_key_hash as *const (), crate::blake3_shim::vesper_blake3_finalize as *const (), crate::blake3_shim::vesper_blake3_free as *const (), crate::blake3_shim::vesper_blake3_hash as *const (), crate::blake3_shim::vesper_blake3_new as *const (), crate::blake3_shim::vesper_blake3_new_derive_key as *const (), crate::blake3_shim::vesper_blake3_new_keyed as *const (), crate::blake3_shim::vesper_blake3_update as *const ()]);
     // SAFETY: `vesper_flux_log_header` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
