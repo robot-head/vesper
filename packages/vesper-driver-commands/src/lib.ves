@@ -186,10 +186,8 @@ fn tool_name(in c: Slice[u8]) -> bool {
         let ok = (b >= 48 && b <= 57)
             || (b >= 65 && b <= 90)
             || (b >= 97 && b <= 122)
-            || b
-            == 45
-            || b
-            == 95;
+            || b == 45
+            || b == 95;
         if !ok {
             return false;
         }
@@ -304,9 +302,9 @@ fn version() -> i64 eff [Ffi[HybridCommands]] {
     b.extend(in os.as_slice());
     b
         .extend(
-        in " (cranelift + lean4)\n    \\\\||/    modes: copy <= affine <= linear | 0 sorryAx\n     \\/\n"
-            .as_bytes()
-    );
+            in " (cranelift + lean4)\n    \\\\||/    modes: copy <= affine <= linear | 0 sorryAx\n     \\/\n"
+                .as_bytes()
+        );
     print(stdout_stream(), in b.as_slice());
     0
 }
@@ -461,9 +459,9 @@ fn missing(in t: Slice[u8]) -> i64 eff [Ffi[HybridCommands]] {
     m.extend(in t);
     m
         .extend(
-        in "` tool, which was not found next to the vesper executable or on PATH; build it with `cargo build -p vesper-tools` (or `bazel build //crates/vesper-tools:all`) and install it beside vesper"
-            .as_bytes()
-    );
+            in "` tool, which was not found next to the vesper executable or on PATH; build it with `cargo build -p vesper-tools` (or `bazel build //crates/vesper-tools:all`) and install it beside vesper"
+                .as_bytes()
+        );
     fail(in m.as_slice())
 }
 
