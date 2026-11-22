@@ -266,7 +266,12 @@ pub struct Session {
     o: Options,
     package: bool,
     loaded: Option<packages::Assembled>,
+    /// The input as read (`original` in `cli()`).
+    original: String,
+    /// The compiled text: `original`, or its sugar expansion (`source`).
     source: String,
+    /// Maps the expansion's spans back to `original` (`source_map`).
+    source_map: Vec<vesper::forge_frontend::SourceMapSegment>,
     parsed: Option<parser::Parse>,
     checked: Option<check::Checked>,
     /// The last error message or pass result (`hd_text`).
@@ -391,10 +396,11 @@ impl Session {
                             assembled.diagnostics.len() + assembled.manifest_errors.len(),
                         ));
                     }
-                    self.source = assembled.sources.combined();
+                    self.original = assembled.sources.combined();
                     self.loaded = Some(assembled);
                 } else {
-                    self.source = fs::read_to_string(input).map_err(|e| format!("{input}: {e}"))?;
+                    self.original =
+                        fs::read_to_string(input).map_err(|e| format!("{input}: {e}"))?;
                 }
                 Ok(0)
             }
@@ -402,7 +408,7 @@ impl Session {
                 // Compiler eBPF target (§27): verified BPF ELF object with BTF.
                 let summary = vesper::ebpf_backend::build_command(
                     o.input(),
-                    &self.source,
+                    &self.original,
                     o.entry(),
                     o.output().as_deref(),
                 )?;
@@ -411,29 +417,65 @@ impl Session {
             }
             Step::Parse => {
                 let parsed = match &self.loaded {
-                    Some(p) => parser::Parse {
-                        module: p.module.clone(),
-                        green: parser::parse("").green,
-                        diagnostics: vec![],
-                    },
-                    None if o.include_tests => parser::parse_for_tests(&self.source),
-                    None => parser::parse(&self.source),
+                    Some(p) => {
+                        self.source = self.original.clone();
+                        parser::Parse {
+                            module: p.module.clone(),
+                            green: parser::parse("").green,
+                            diagnostics: vec![],
+                        }
+                    }
+                    // `--emit cst` parses in its own pass.
+                    None if o.command == "emit" && o.format() == "cst" => return Ok(0),
+                    None => {
+                        let (source, parsed, map) = vesper::forge_frontend::parse_compiler_input(
+                            &self.original,
+                            o.include_tests,
+                        )
+                        .map_err(|diagnostic| {
+                            crate::diagnostics(
+                                o.input(),
+                                &self.original,
+                                std::slice::from_ref(&diagnostic),
+                                o.json,
+                            );
+                            format!("{}: {}", diagnostic.code, diagnostic.message)
+                        })?;
+                        self.source = source.into_owned();
+                        self.source_map = map;
+                        parsed
+                    }
                 };
                 let n = count(parsed.diagnostics.len());
                 self.parsed = Some(parsed);
                 Ok(n)
             }
             Step::EmitCst => {
-                let parsed = self.parsed()?;
-                if !parsed.diagnostics.is_empty() {
-                    crate::diagnostics(o.input(), &self.source, &parsed.diagnostics, o.json);
-                }
-                crate::write(o.output(), format!("{:#?}\n", parsed.syntax()).as_bytes())?;
+                let original = &self.original;
+                let core = parser::parse(original);
+                let syntax = if core.diagnostics.is_empty() {
+                    core.syntax()
+                } else if let Ok(surface) =
+                    parser::parse_surface_with_limits(original, Default::default())
+                    && surface.diagnostics.is_empty()
+                {
+                    surface.syntax()
+                } else {
+                    crate::diagnostics(o.input(), original, &core.diagnostics, o.json);
+                    core.syntax()
+                };
+                crate::write(o.output(), format!("{syntax:#?}\n").as_bytes())?;
                 Ok(0)
             }
             Step::ReportSyntax => {
                 let parsed = self.parsed()?;
-                crate::diagnostics(o.input(), &self.source, &parsed.diagnostics, o.json);
+                crate::compiler_diagnostics(
+                    o.input(),
+                    &self.original,
+                    &parsed.diagnostics,
+                    &self.source_map,
+                    o.json,
+                );
                 Ok(0)
             }
             Step::PackageVsys => Ok(count(self.package_vsys().len())),
@@ -462,8 +504,13 @@ impl Session {
                 let lib = o.lib_flags()?;
                 // A library with `.vsys` imports checks only through the
                 // Bridge lowering, which the export path runs.
+                let sugar_rejection = checked
+                    .diagnostics
+                    .iter()
+                    .any(|d| matches!(d.code.as_str(), "E0143" | "E0144"));
                 let n = if !checked.diagnostics.is_empty()
-                    && !lib.needs_module(&self.source, !self.package_vsys().is_empty())
+                    && (sugar_rejection
+                        || !lib.needs_module(&self.source, !self.package_vsys().is_empty()))
                 {
                     match &self.loaded {
                         Some(p) => {
@@ -474,10 +521,11 @@ impl Session {
                                 .collect();
                             crate::package_diagnostics(p, &localized, o.json);
                         }
-                        None => crate::diagnostics(
+                        None => crate::compiler_diagnostics(
                             o.input(),
-                            &self.source,
+                            &self.original,
                             &checked.diagnostics,
+                            &self.source_map,
                             o.json,
                         ),
                     }
@@ -825,7 +873,9 @@ pub mod host {
                     o,
                     package: false,
                     loaded: None,
+                    original: String::new(),
                     source: String::new(),
+                    source_map: Vec::new(),
                     parsed: None,
                     checked: None,
                     text: vec![],

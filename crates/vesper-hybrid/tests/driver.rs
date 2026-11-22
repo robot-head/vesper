@@ -81,6 +81,16 @@ const PROGRAMS: &[(&str, &str)] = &[
         "lib.ves",
         "pub fn add(a: u64, b: u64) -> u64 {\n    wrapping_add(a, b)\n}\n",
     ),
+    // Source sugar (#1313): expanded before checking, and diagnostics
+    // mapped back through the expansion's source map.
+    (
+        "sugar.ves",
+        "sugar take_right: infix(`.+`, additive, left) { rule ($a:expr .+ $b:expr) => { $b } }\nfn main() -> i64 {\n    1 .+ 42\n}\n",
+    ),
+    (
+        "sugar_error.ves",
+        "sugar take_right: infix(`.+`, additive, left) { rule ($a:expr .+ $b:expr) => { $b } }\nfn main() -> i64 {\n    1 .+ nope\n}\n",
+    ),
 ];
 
 /// Option sets, each run on every input. `{out}` is a fresh output path
