@@ -240,10 +240,8 @@ pub fn utf8_ok(in s: Slice[u8], start: u64, end: u64)
                 n = 2;
                 lo = UTF8_E0_SECOND_MIN;
             } else if (c >= UTF8_LEAD_E1 && c <= UTF8_LEAD_EC)
-                || c
-                == UTF8_LEAD_EE
-                || c
-                == UTF8_LEAD_EF {
+                || c == UTF8_LEAD_EE
+                || c == UTF8_LEAD_EF {
                 n = 2;
             } else if c == UTF8_LEAD_ED {
                 n = 2;
@@ -294,20 +292,10 @@ fn read_string(in b: Slice[u8], at: u64, inout strs: Slice[u8], sp: u64)
     loop {
         // Eight bytes with no quote, backslash or control byte are copied
         // as one word (both offsets are bounded first, so they cannot wrap).
-        if i
-            <= b
-            .len()
-            && b
-            .len()
-            - i
-            >= WORD_BYTES
-            && o
-            <= strs
-            .len()
-            && strs
-            .len()
-            - o
-            >= WORD_BYTES {
+        if i <= b.len()
+            && b.len() - i >= WORD_BYTES
+            && o <= strs.len()
+            && strs.len() - o >= WORD_BYTES {
             let x = b.read_u64_le(i);
             let mask = escape_mask(x);
             high = high | (x & HIGHS);

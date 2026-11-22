@@ -569,47 +569,27 @@ fn vx_load_masked(inout b: Builder, in m: Module, string: Value, offset: Value, 
 fn vx_well_formed(call: u64, i: u32, e: u32, lanes: u32) -> bool eff [Ffi[Cranelift]] {
     let family = family_of(i);
     let wide = widen_u64(lanes);
-    let needs = if family
-        == I_SPLAT
-        || family
-        == I_NOT
-        || family
-        == I_UNARY
-        || family
-        == I_CONVERT
-        || family
-        == I_MASK_NOT
-        || family
-        == I_MASK_COUNT
-        || family
-        == I_MASK_BITMASK
-        || family
-        == I_MASK_ANY
-        || family
-        == I_MASK_ALL
-        || family
-        == I_REDUCE
-        || family
-        == I_EXTRACT
-        || family
-        == I_SHUFFLE {
+    let needs = if family == I_SPLAT
+        || family == I_NOT
+        || family == I_UNARY
+        || family == I_CONVERT
+        || family == I_MASK_NOT
+        || family == I_MASK_COUNT
+        || family == I_MASK_BITMASK
+        || family == I_MASK_ANY
+        || family == I_MASK_ALL
+        || family == I_REDUCE
+        || family == I_EXTRACT
+        || family == I_SHUFFLE {
         1
-    } else if family
-        == I_BINARY
-        || family
-        == I_SHIFT
-        || family
-        == I_COMPARE
-        || family
-        == I_MASK_BINARY
-        || family
-        == I_REPLACE
-        || family
-        == I_LOAD_MASKED
-        || family
-        == I_IN_BOUNDS
-        || family
-        == I_ACTIVE {
+    } else if family == I_BINARY
+        || family == I_SHIFT
+        || family == I_COMPARE
+        || family == I_MASK_BINARY
+        || family == I_REPLACE
+        || family == I_LOAD_MASKED
+        || family == I_IN_BOUNDS
+        || family == I_ACTIVE {
         2
     } else if family == I_MUL_ADD || family == I_SELECT {
         3

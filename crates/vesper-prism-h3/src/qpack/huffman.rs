@@ -4,9 +4,6 @@
 //! code and the index of its first symbol in length order. Those tables are
 //! built at compile time from [`CODES`].
 
-#[cfg(not(feature = "vesper-port"))]
-use super::huffman_table::CODES;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HuffmanError {
     /// The EOS symbol appeared in the data (RFC 7541 §5.2: an error).
@@ -17,151 +14,16 @@ pub enum HuffmanError {
     TooLong,
 }
 
-#[cfg(not(feature = "vesper-port"))]
-const EOS: u16 = 256;
-#[cfg(not(feature = "vesper-port"))]
-const MAX_LEN: usize = 30;
-
-#[cfg(not(feature = "vesper-port"))]
-struct Canonical {
-    /// First code of each length (index = length).
-    first: [u32; MAX_LEN + 1],
-    /// Number of codes of each length.
-    count: [u16; MAX_LEN + 1],
-    /// Index into `symbols` of each length's first code.
-    offset: [u16; MAX_LEN + 1],
-    /// Symbols sorted by (length, code).
-    symbols: [u16; 257],
-}
-
-#[cfg(not(feature = "vesper-port"))]
-const fn canonical() -> Canonical {
-    let mut count = [0u16; MAX_LEN + 1];
-    let mut s = 0;
-    while s < 257 {
-        count[CODES[s].0 as usize] += 1;
-        s += 1;
-    }
-    let mut offset = [0u16; MAX_LEN + 1];
-    let mut first = [0u32; MAX_LEN + 1];
-    let mut len = 1;
-    let mut code = 0u32;
-    let mut index = 0u16;
-    while len <= MAX_LEN {
-        first[len] = code;
-        offset[len] = index;
-        index += count[len];
-        code = (code + count[len] as u32) << 1;
-        len += 1;
-    }
-    // Place symbols: within a length, codes are consecutive in symbol order.
-    let mut symbols = [0u16; 257];
-    let mut len = 1;
-    while len <= MAX_LEN {
-        let mut s = 0;
-        while s < 257 {
-            if CODES[s].0 as usize == len {
-                let slot = offset[len] as u32 + (CODES[s].1 - first[len]);
-                symbols[slot as usize] = s as u16;
-            }
-            s += 1;
-        }
-        len += 1;
-    }
-    Canonical {
-        first,
-        count,
-        offset,
-        symbols,
-    }
-}
-
-#[cfg(not(feature = "vesper-port"))]
-static TABLE: Canonical = canonical();
-
-#[cfg(not(feature = "vesper-port"))]
-/// Encoded length in bytes.
-pub fn encoded_len(data: &[u8]) -> usize {
-    let bits: usize = data.iter().map(|&b| usize::from(CODES[b as usize].0)).sum();
-    bits.div_ceil(8)
-}
-
-#[cfg(not(feature = "vesper-port"))]
-/// Appends the Huffman coding of `data`, padded with the EOS prefix.
-pub fn encode(data: &[u8], out: &mut Vec<u8>) {
-    let mut acc: u64 = 0;
-    let mut nbits: u32 = 0;
-    for &b in data {
-        let (len, code) = CODES[b as usize];
-        acc = (acc << len) | u64::from(code);
-        nbits += u32::from(len);
-        while nbits >= 8 {
-            nbits -= 8;
-            out.push((acc >> nbits) as u8);
-        }
-        acc &= (1 << nbits) - 1;
-    }
-    if nbits > 0 {
-        let pad = 8 - nbits;
-        out.push(((acc << pad) | ((1 << pad) - 1)) as u8);
-    }
-}
-
-#[cfg(not(feature = "vesper-port"))]
-/// Decodes Huffman data into at most `max_len` bytes.
-pub fn decode(data: &[u8], max_len: usize) -> Result<Vec<u8>, HuffmanError> {
-    let mut out = Vec::with_capacity(data.len().saturating_mul(8).div_ceil(5).min(max_len));
-    let mut code: u32 = 0;
-    let mut len: usize = 0;
-    // Bits since the last complete symbol, and whether they were all 1.
-    let mut all_ones = true;
-    for &byte in data {
-        for i in (0..8).rev() {
-            let bit = u32::from(byte >> i & 1);
-            code = code << 1 | bit;
-            len += 1;
-            all_ones &= bit == 1;
-            if len > MAX_LEN {
-                // Every 30-bit prefix is a code (the code is complete), so
-                // this cannot happen for valid tables; refuse defensively.
-                return Err(HuffmanError::BadPadding);
-            }
-            let rel = code.wrapping_sub(TABLE.first[len]);
-            if code >= TABLE.first[len] && rel < u32::from(TABLE.count[len]) {
-                let sym = TABLE.symbols[(u32::from(TABLE.offset[len]) + rel) as usize];
-                if sym == EOS {
-                    return Err(HuffmanError::Eos);
-                }
-                if out.len() == max_len {
-                    return Err(HuffmanError::TooLong);
-                }
-                out.push(sym as u8);
-                code = 0;
-                len = 0;
-                all_ones = true;
-            }
-        }
-    }
-    // Padding: fewer than 8 bits, all 1 (a prefix of EOS).
-    if len > 7 || !all_ones {
-        return Err(HuffmanError::BadPadding);
-    }
-    Ok(out)
-}
-
 // The Vesper build: the same functions over the port's Huffman tables.
 
-#[cfg(feature = "vesper-port")]
 pub fn encoded_len(data: &[u8]) -> usize {
     super::port::huff().len(data) as usize
 }
 
-#[cfg(feature = "vesper-port")]
 pub fn encode(data: &[u8], out: &mut Vec<u8>) {
     super::port::huff().append(data, out)
 }
 
-#[cfg(feature = "vesper-port")]
 pub fn decode(data: &[u8], max_len: usize) -> Result<Vec<u8>, HuffmanError> {
     let mut out = Vec::new();
     match super::port::huff().unpack(data, max_len as u64, &mut out) {
@@ -183,27 +45,6 @@ mod tests {
     }
 
     // Reads the Rust build's canonical tables.
-    #[cfg(not(feature = "vesper-port"))]
-    #[test]
-    fn code_is_canonical_and_complete() {
-        // Kraft equality: the code is complete (sum 2^-len == 1).
-        let kraft: u64 = CODES
-            .iter()
-            .map(|(l, _)| 1u64 << (MAX_LEN - *l as usize))
-            .sum();
-        assert_eq!(kraft, 1 << MAX_LEN);
-        for (s, &(len, code)) in CODES.iter().enumerate() {
-            let len = len as usize;
-            let rel = code - TABLE.first[len];
-            assert!(rel < u32::from(TABLE.count[len]));
-            assert_eq!(
-                TABLE.symbols[(u32::from(TABLE.offset[len]) + rel) as usize] as usize,
-                s
-            );
-        }
-        // EOS is thirty 1 bits.
-        assert_eq!(CODES[256], (30, 0x3fff_ffff));
-    }
 
     #[test]
     fn rfc7541_appendix_c4_and_c6_strings() {

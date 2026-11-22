@@ -12,8 +12,8 @@ The lane lands in several PRs. This report grows with each one.
 | Part | PR | What |
 | --- | --- | --- |
 | 1 | #1300 | the certificate checker and candidate builder (`optimize/witness.rs`), the swap point |
-| 2 | this PR | the search on `@vesper/egraph`: language, rules and guards, islands, refusals, the proof forest of `optimize/certificate.rs` |
-| 3 | | the swap into the hybrid build (`optimize` module), the full suite on it, the scoreboard row |
+| 2 | #1375 | the search on `@vesper/egraph`: language, rules and guards, islands, refusals, the proof forest of `optimize/certificate.rs` |
+| 3 | this PR | the swap into the hybrid build (`optimize` module), the full suite on it, the scoreboard row |
 
 ## Part 1: the certificate checker
 
@@ -322,8 +322,90 @@ that egg hashes every e-node into its memo and class maps, while
 No file under `src/verified_codegen/**`, `src/ir.rs`, `ir_opt::optimize`,
 `lean/**`, `bootstrap/**` or `packages/vesper-compiler/**` changed.
 
+## Part 3: the hybrid swap
+
+### What changed
+
+- `crates/vesper-hybrid/modules/optimize` (`@vesper/hybrid-optimize`) wraps
+  `@vesper/optimize` in two export ABI v4 entries, `propose_words` and
+  `verify_words`. The hybrid installs both through `install_optimize`, so
+  the Vesper search proposes each rewrite and the Vesper checker checks it.
+  Rust stays the default compiler's optimizer.
+- The input is split. The case words carry each name's length only, and
+  the names' text crosses as one `Str` (`read_names_text` in `input.ves`,
+  entries `optimize_propose_split` and `optimize_verify_split`). The old
+  entries, which pack names into the words, stay for the part 1 and 2
+  tests.
+- The Rust side of the swap builds the candidate from the certificate
+  Vesper returns (`witness::rebuild_candidate`), with the certificate's
+  term and proof capacities reserved as Vesper reported them, so the
+  checker's metadata budget is spent the same way.
+- The word encoders of the part 1 and 2 tests moved to
+  `tests/common/optimize_words.rs`, which the hybrid reuses.
+- A `divergent-optimize` feature makes the module propose `B` for every
+  case. `hybrid.yml` checks that the differential catches it.
+
+### Differential
+
+`crates/vesper-hybrid/tests/differential.rs` runs 538 files, 1,614 runs per
+compiler (`check`, `emit --emit ir`, object). 0 runs differ.
+
+6 runs differed before the tie rule: `emit --emit ir` and the object for
+`examples/traits/shapes.ves`, `tests/fixtures/bounded_generics/nested.ves`
+and `tests/fixtures/native_handlers/shared_locals.ves`. These are the
+equal-cost extraction ties of part 2 (spans 1049:1135, 532:611,
+1201:1320), which the owner accepted. Main later added
+`tests/fixtures/wide_literals.ves` (#1264), whose
+`wrapping_add(score, wrapping_add(wrapping_mul(c, 10), ...))` is the same
+kind of tie (span 1522:1598), so the list has four files. On that main the harness runs 553 files,
+1,659 runs per compiler: 0 differ, 8 are accepted ties. The harness lists these files in
+`OPTIMIZE_EQUAL_COST_TIES`. For a mismatch on one of them, it reruns the
+hybrid with `VESPER_HYBRID_RUST_PRODUCER=1` (Rust search, Vesper checker).
+If that run equals the default, it counts the run as a tie. A mismatch on
+any other file, or one the Rust search does not explain, still fails. A
+run is eligible only when both compilers succeed with the same
+diagnostics and only the emitted IR or object differs.
+
+The export glue test (`crates/vesper-hybrid/tests/codegen_export.rs`)
+meets one more tie: `semver` built with the optimizer, where the Vesper
+search keeps `wrapping_add(wrapping_add(start, acc), seg)` and egg picks
+the same-size `acc, start` order. That build is compared again with the
+Rust search, so its glue is still checked byte for byte.
+
+The split entries take a batch of several cases. Each case's names follow
+the previous case's in the one `Str`, and a cursor carries the offset
+across cases. A hybrid unit test (`split_batches_keep_the_names_cursor`)
+checks that a two-case batch answers as the two cases do one by one.
+
+The divergent build is caught: 10 runs differ, the first on
+`emit --emit ir tests/fixtures/bounded_generics/hash.ves`. The rest of the
+hybrid tests pass. The pilot test checks that the module proposed for at
+least one expression (21 on its program).
+
+### Numbers
+
+Whole corpus, wall clock of the differential's 1,614 runs per compiler
+(debug builds, 4 cores, both compilers run file by file), three runs:
+
+| Run | Default | Hybrid | Ratio |
+| --- | --: | --: | --: |
+| 1 | 30.11 s | 29.32 s | 0.97x |
+| 2 | 28.29 s | 28.22 s | 1.00x |
+| 3 | 27.73 s | 26.89 s | 0.97x |
+| 4, on main with #1371 (553 files) | 29.31 s | 25.40 s | 0.87x |
+
+The optimizer is a small part of a whole compile, so this mostly says the
+swap costs nothing measurable end to end. The pass alone is part 2's
+producer (release, ABBA 0.68x; callgrind 0.97x) plus part 1's checker
+(ABBA 1.94x; callgrind 2.06x).
+
+### Stage 1 guard
+
+No file under `src/verified_codegen/**`, `src/ir.rs`, `ir_opt::optimize`,
+`lean/**`, `bootstrap/**` or `packages/vesper-compiler/**` changed.
+
 ## What is left
 
-- Part 3: the hybrid `optimize` module through `install_optimize`, the full
-  suite on the hybrid build, and the SH3 scoreboard row (whole corpus and
-  the pass alone, ABBA and callgrind).
+- Nothing for this lane. Deleting the Rust optimizer is a later call under
+  the 1.5x rule: the producer is within it, and the checker is not yet
+  (1.94x alone).

@@ -128,11 +128,11 @@ pub fn decode_plan(inout q: Q, p: u64) -> (u64, u64) {
             q
                 .links
                 .push(
-                Link {
-                    expr: e,
-                    next: none()
-                }
-            );
+                    Link {
+                        expr: e,
+                        next: none()
+                    }
+                );
             let l = wrapping_sub(q.links.len(), 1);
             if last == none() {
                 first = l;
@@ -150,17 +150,17 @@ pub fn decode_plan(inout q: Q, p: u64) -> (u64, u64) {
         q
             .plan
             .push(
-            Node {
-                kind: 0,
-                a: ta,
-                b: tb,
-                c: tc,
-                d: slots_at,
-                e: nslots,
-                f: first,
-                g: last
-            }
-        );
+                Node {
+                    kind: 0,
+                    a: ta,
+                    b: tb,
+                    c: tc,
+                    d: slots_at,
+                    e: nslots,
+                    f: first,
+                    g: last
+                }
+            );
         (wrapping_sub(q.plan.len(), 1), e)
     } else if kind == 1 {
         let pred = wrapping_add(p, 1);
@@ -169,17 +169,17 @@ pub fn decode_plan(inout q: Q, p: u64) -> (u64, u64) {
         q
             .plan
             .push(
-            Node {
-                kind: 1,
-                a: pred,
-                b: input,
-                c: 0,
-                d: 0,
-                e: 0,
-                f: none(),
-                g: none()
-            }
-        );
+                Node {
+                    kind: 1,
+                    a: pred,
+                    b: input,
+                    c: 0,
+                    d: 0,
+                    e: 0,
+                    f: none(),
+                    g: none()
+                }
+            );
         (wrapping_sub(q.plan.len(), 1), end)
     } else {
         let (lhs, l_end) = decode_plan(inout q, wrapping_add(p, 2));
@@ -188,17 +188,17 @@ pub fn decode_plan(inout q: Q, p: u64) -> (u64, u64) {
         q
             .plan
             .push(
-            Node {
-                kind: 2,
-                a: jk,
-                b: lhs,
-                c: rhs,
-                d: r_end,
-                e: 0,
-                f: none(),
-                g: none()
-            }
-        );
+                Node {
+                    kind: 2,
+                    a: jk,
+                    b: lhs,
+                    c: rhs,
+                    d: r_end,
+                    e: 0,
+                    f: none(),
+                    g: none()
+                }
+            );
         (wrapping_sub(q.plan.len(), 1), ex_end(in q, r_end))
     }
 }
@@ -239,17 +239,17 @@ pub fn new_filter(inout q: Q, pred: u64, input: u64) -> u64 {
     q
         .plan
         .push(
-        Node {
-            kind: 1,
-            a: pred,
-            b: input,
-            c: 0,
-            d: 0,
-            e: 0,
-            f: none(),
-            g: none()
-        }
-    );
+            Node {
+                kind: 1,
+                a: pred,
+                b: input,
+                c: 0,
+                d: 0,
+                e: 0,
+                f: none(),
+                g: none()
+            }
+        );
     wrapping_sub(q.plan.len(), 1)
 }
 
@@ -266,11 +266,11 @@ pub fn place(inout q: Q, p: u64, n: u64) -> u64 {
         q
             .links
             .push(
-            Link {
-                expr: p,
-                next: none()
-            }
-        );
+                Link {
+                    expr: p,
+                    next: none()
+                }
+            );
         let l = wrapping_sub(q.links.len(), 1);
         if x.g == none() {
             x.f = l;
@@ -425,17 +425,17 @@ pub fn prepare_q(
         q
             .plan
             .push(
-            Node {
-                kind: 2,
-                a: b.kind,
-                b: plan,
-                c: rhs,
-                d: on,
-                e: 0,
-                f: none(),
-                g: none()
-            }
-        );
+                Node {
+                    kind: 2,
+                    a: b.kind,
+                    b: plan,
+                    c: rhs,
+                    d: on,
+                    e: 0,
+                    f: none(),
+                    g: none()
+                }
+            );
         plan = wrapping_sub(q.plan.len(), 1);
     }
     if q.err != 0 {

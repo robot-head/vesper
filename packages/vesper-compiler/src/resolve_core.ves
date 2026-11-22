@@ -30,17 +30,11 @@ fn c_type(at: i64, depth: i64) -> CTypeAt eff [Fail[CheckError], Fail[Diag], Fai
                 next: c_next(t.end)
             }
         } else if t.kind == 3 || t.kind == 4 {
-            let builtin = t
-                .end
-                - t
-                .start
-                > 6
+            let builtin = t.end - t.start > 6
                 && (
-                word(t.start, t.start + 6)
-                    == 0x41726974684f
-                    || word(t.start, t.start + 6)
-                    == 0x52756e74696d
-            );
+                    word(t.start, t.start + 6) == 0x41726974684f
+                        || word(t.start, t.start + 6) == 0x52756e74696d
+                );
             let unsupported = if builtin
                 || c_word(at, 0x7538)
                 || c_word(at, 0x753332)
@@ -310,16 +304,15 @@ fn c_same(a: CType, b: CType, depth: i64)
     } else if a.tag == 4 {
         let sa = c_signature(a.at, c_kind(c_next(a.at)) == 4, depth + 1);
         let sb = c_signature(b.at, c_kind(c_next(b.at)) == 4, depth + 1);
-        c_mode(a, 0)
-            == c_mode(b, 0)
+        c_mode(a, 0) == c_mode(b, 0)
             && c_same(sa.result, sb.result, depth + 1)
             && c_same_params(
-            sa.params,
-            sb.params,
-            c_kind(c_next(a.at)) == 4,
-            c_kind(c_next(b.at)) == 4,
-            depth + 1
-        )
+                sa.params,
+                sb.params,
+                c_kind(c_next(a.at)) == 4,
+                c_kind(c_next(b.at)) == 4,
+                depth + 1
+            )
             && c_row_subset(sa.effects, sb.effects)
             && c_row_subset(sb.effects, sa.effects)
     } else {
@@ -333,26 +326,23 @@ fn c_same_params(a: i64, b: i64, an: bool, bn: bool, depth: i64)
     } else {
         let pa = c_param(a, an, depth);
         let pb = c_param(b, bn, depth);
-        pa
-            .pass
-            == pb
-            .pass
+        pa.pass == pb.pass
             && c_same(pa.ty, pb.ty, depth + 1)
             && c_same_params(
-            if c_kind(pa.next) == 38 {
-                c_next(pa.next)
-            } else {
-                pa.next
-            },
-            if c_kind(pb.next) == 38 {
-                c_next(pb.next)
-            } else {
-                pb.next
-            },
-            an,
-            bn,
-            depth
-        )
+                if c_kind(pa.next) == 38 {
+                    c_next(pa.next)
+                } else {
+                    pa.next
+                },
+                if c_kind(pb.next) == 38 {
+                    c_next(pb.next)
+                } else {
+                    pb.next
+                },
+                an,
+                bn,
+                depth
+            )
     }
 }
 fn c_expect_type(expected: CType, actual: CType, start: i64, end: i64)
@@ -388,12 +378,12 @@ fn c_row_subset(a: i64, b: i64) -> bool eff [Fail[CheckError], Fail[Diag], Fail[
         let next = c_take(ty.next, 37);
         c_row_has(b, ty.ty)
             && (
-            if c_kind(next) == 38 {
-                c_row_subset(c_next(next), b)
-            } else {
-                true
-            }
-        )
+                if c_kind(next) == 38 {
+                    c_row_subset(c_next(next), b)
+                } else {
+                    true
+                }
+            )
     }
 }
 
@@ -407,8 +397,7 @@ fn c_compatible(expected: CType, actual: CType, depth: i64)
         let an = c_kind(c_next(actual.at)) == 4;
         let e = c_signature(expected.at, en, depth + 1);
         let a = c_signature(actual.at, an, depth + 1);
-        c_mode(actual, 0)
-            <= c_mode(expected, 0)
+        c_mode(actual, 0) <= c_mode(expected, 0)
             && c_row_subset(a.effects, e.effects)
             && c_compatible(e.result, a.result, depth + 1)
             && c_compatible_params(e.params, a.params, en, an, depth + 1)
@@ -423,26 +412,23 @@ fn c_compatible_params(e: i64, a: i64, en: bool, an: bool, depth: i64)
     } else {
         let ep = c_param(e, en, depth);
         let ap = c_param(a, an, depth);
-        ep
-            .pass
-            == ap
-            .pass
+        ep.pass == ap.pass
             && c_compatible(ap.ty, ep.ty, depth + 1)
             && c_compatible_params(
-            if c_kind(ep.next) == 38 {
-                c_next(ep.next)
-            } else {
-                ep.next
-            },
-            if c_kind(ap.next) == 38 {
-                c_next(ap.next)
-            } else {
-                ap.next
-            },
-            en,
-            an,
-            depth
-        )
+                if c_kind(ep.next) == 38 {
+                    c_next(ep.next)
+                } else {
+                    ep.next
+                },
+                if c_kind(ap.next) == 38 {
+                    c_next(ap.next)
+                } else {
+                    ap.next
+                },
+                en,
+                an,
+                depth
+            )
     }
 }
 
@@ -494,12 +480,12 @@ fn c_params_have_effects(at: i64, named: bool, depth: i64)
         let param = c_param(at, named, depth);
         c_type_has_effects(param.ty, depth + 1)
             || (
-            if c_kind(param.next) == 38 {
-                c_params_have_effects(c_next(param.next), named, depth)
-            } else {
-                false
-            }
-        )
+                if c_kind(param.next) == 38 {
+                    c_params_have_effects(c_next(param.next), named, depth)
+                } else {
+                    false
+                }
+            )
     }
 }
 

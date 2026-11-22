@@ -728,6 +728,7 @@ impl<'a> Ast<'a> {
 
     fn module(&self) -> Module {
         Module {
+            sugar_origins: Vec::new(),
             items: self.m_items.iter().map(|&i| self.item(i)).collect(),
             model_uses: self
                 .m_model_uses

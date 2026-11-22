@@ -24,20 +24,17 @@ fn area(in s: Shape) -> i64 eff [Fail[ArithOverflow]] {
             id: _,
             wide: true,
             side
-        }
-        => side * 2,
+        } => side * 2,
         Shape::Labeled {
             id: 4,
             wide: false,
             side
-        }
-        => side + 4,
+        } => side + 4,
         Shape::Labeled {
             id: _,
             wide: false,
             side
-        }
-        => side,
+        } => side,
     }
 }
 

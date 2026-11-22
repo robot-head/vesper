@@ -301,16 +301,16 @@ pub fn ck_new(sink c: Ctx) -> Ck {
     ck
         .px
         .push(
-        PatX {
-            start: 0,
-            end: 0,
-            name: 0,
-            qual: 0,
-            lit: 0,
-            neg: false,
-            mag: 0
-        }
-    );
+            PatX {
+                start: 0,
+                end: 0,
+                name: 0,
+                qual: 0,
+                lit: 0,
+                neg: false,
+                mag: 0
+            }
+        );
     ck
 }
 
@@ -567,24 +567,24 @@ fn read_expr(inout r: Reader, in b: Slice[u8], inout ck: Ck) -> u32 {
                 let v = read_expr(inout r, in b, inout ck);
                 ss
                     .push(
-                    Stmt {
-                        is_let: true,
-                        pat: p,
-                        ty: ty,
-                        value: v
-                    }
-                );
+                        Stmt {
+                            is_let: true,
+                            pat: p,
+                            ty: ty,
+                            value: v
+                        }
+                    );
             } else {
                 let v = read_expr(inout r, in b, inout ck);
                 ss
                     .push(
-                    Stmt {
-                        is_let: false,
-                        pat: 0,
-                        ty: 0,
-                        value: v
-                    }
-                );
+                        Stmt {
+                            is_let: false,
+                            pat: 0,
+                            ty: 0,
+                            value: v
+                        }
+                    );
             }
         }
         x.a = n32(ck.stmts.len());
@@ -615,12 +615,12 @@ fn read_expr(inout r: Reader, in b: Slice[u8], inout ck: Ck) -> u32 {
             let e = read_expr(inout r, in b, inout ck);
             as_
                 .push(
-                Arg {
-                    pass: pass,
-                    explicit: explicit,
-                    expr: e
-                }
-            );
+                    Arg {
+                        pass: pass,
+                        explicit: explicit,
+                        expr: e
+                    }
+                );
         }
         x.a = n32(ck.args.len());
         x.n = n32(n);
@@ -655,11 +655,11 @@ fn read_expr(inout r: Reader, in b: Slice[u8], inout ck: Ck) -> u32 {
             let e = read_expr(inout r, in b, inout ck);
             ms
                 .push(
-                Arm {
-                    pat: p,
-                    body: e
-                }
-            );
+                    Arm {
+                        pat: p,
+                        body: e
+                    }
+                );
         }
         x.a = n32(ck.arms.len());
         x.n = n32(n);
@@ -708,17 +708,17 @@ pub fn read_fns(inout r: Reader, in b: Slice[u8], inout ck: Ck) {
         ck
             .fns
             .push(
-            FnSig {
-                name: name,
-                ga: ga,
-                gn: n32(gn),
-                pa: pa,
-                pn: n32(pn),
-                result: result,
-                effectful: effectful,
-                inferred: inferred
-            }
-        );
+                FnSig {
+                    name: name,
+                    ga: ga,
+                    gn: n32(gn),
+                    pa: pa,
+                    pn: n32(pn),
+                    result: result,
+                    effectful: effectful,
+                    inferred: inferred
+                }
+            );
         set_by_symbol(inout ck.fn_by_name, name, inc32w(id));
     }
 }
@@ -754,42 +754,18 @@ fn foreign(in ck: Ck, ty: u32) -> bool {
     if n.kind == K_NAMED {
         let k = ck.c.world.k;
         let s = n.name;
-        if s
-            == k
-            .string
-            || s
-            == k
-            .str_
-            || s
-            == k
-            .chunk_seq
-            || s
-            == k
-            .slice
-            || s
-            == k
-            .tiled_seq
-            || s
-            == k
-            .vec
-            || s
-            == k
-            .mask
-            || s
-            == k
-            .box_
-            || s
-            == k
-            .region_box
-            || s
-            == k
-            .f32_
-            || s
-            == k
-            .dyn_
-            || s
-            == ck
-            .s_atomic {
+        if s == k.string
+            || s == k.str_
+            || s == k.chunk_seq
+            || s == k.slice
+            || s == k.tiled_seq
+            || s == k.vec
+            || s == k.mask
+            || s == k.box_
+            || s == k.region_box
+            || s == k.f32_
+            || s == k.dyn_
+            || s == ck.s_atomic {
             return true;
         }
     }
@@ -853,12 +829,12 @@ fn bind_name(inout ck: Ck, name: u32, ty: u32, pass: u8) {
     ck
         .env
         .push(
-        Bind {
-            name: name,
-            ty: ty,
-            pass: pass
-        }
-    );
+            Bind {
+                name: name,
+                ty: ty,
+                pass: pass
+            }
+        );
 }
 
 fn named(inout ck: Ck, s: u32) -> u32 {

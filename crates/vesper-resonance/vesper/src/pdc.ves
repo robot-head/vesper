@@ -210,6 +210,15 @@ pub fn p_compile(in g: Slice[u64], n: u64) -> ChunkSeq[u64] {
 
     // Forward in-degrees and dependents (in spec order, as the Rust build
     // pushes them); the first unknown source or zero-delay feedback.
+    // Each input's source as a spec index, found once (`srcs`, by input).
+    let mut ninputs: u64 = 0;
+    for i in 0..n {
+        let end = wrapping_add(node_first(in g, i), node_count(in g, i));
+        if end > ninputs {
+            ninputs = end;
+        }
+    }
+    let mut srcs = filled(ninputs, NONE);
     let mut indegree = filled(n, 0);
     let mut dep_count = filled(wrapping_add(n, 1), 0);
     for i in 0..n {
@@ -220,6 +229,7 @@ pub fn p_compile(in g: Slice[u64], n: u64) -> ChunkSeq[u64] {
             if s == NONE {
                 return fail1(PdcCode::UnknownNode, src);
             }
+            set(inout srcs, j, s);
             if input_word(in g, n, j, GraphInput::Kind) == InputKind::Forward {
                 let v_w = wrapping_add(get(in indegree, i), 1);
                 set(inout indegree, i, v_w);
@@ -241,7 +251,7 @@ pub fn p_compile(in g: Slice[u64], n: u64) -> ChunkSeq[u64] {
         let first = node_first(in g, i);
         for j in first..wrapping_add(first, node_count(in g, i)) {
             if input_word(in g, n, j, GraphInput::Kind) == InputKind::Forward {
-                let s = index_of(in keys, input_word(in g, n, j, GraphInput::Source));
+                let s = get(in srcs, j);
                 let at_s = wrapping_add(get(in dep_start, s), get(in dep_fill, s));
                 set(inout dependents, at_s, i);
                 let v_w = wrapping_add(get(in dep_fill, s), 1);
@@ -298,10 +308,7 @@ pub fn p_compile(in g: Slice[u64], n: u64) -> ChunkSeq[u64] {
         let first = node_first(in g, i);
         for j in first..wrapping_add(first, node_count(in g, i)) {
             if input_word(in g, n, j, GraphInput::Kind) == InputKind::Forward {
-                let l = get(
-                    in out_lat,
-                    index_of(in keys, input_word(in g, n, j, GraphInput::Source))
-                );
+                let l = get(in out_lat, get(in srcs, j));
                 if l > a {
                     a = l;
                 }
@@ -325,7 +332,7 @@ pub fn p_compile(in g: Slice[u64], n: u64) -> ChunkSeq[u64] {
         let first = node_first(in g, i);
         for j in first..wrapping_add(first, node_count(in g, i)) {
             if input_word(in g, n, j, GraphInput::Kind) == InputKind::Forward {
-                let s = index_of(in keys, input_word(in g, n, j, GraphInput::Source));
+                let s = get(in srcs, j);
                 let lr = get(in last_read, s);
                 let pi = get(in pos, i);
                 if lr == NONE || pi > lr {
@@ -384,7 +391,7 @@ pub fn p_compile(in g: Slice[u64], n: u64) -> ChunkSeq[u64] {
         let first = node_first(in g, i);
         for j in first..wrapping_add(first, count) {
             let src = input_word(in g, n, j, GraphInput::Source);
-            let s = index_of(in keys, src);
+            let s = get(in srcs, j);
             if input_word(in g, n, j, GraphInput::Kind) == InputKind::Forward {
                 let comp = wrapping_sub(get(in arrival, i), get(in out_lat, s));
                 if comp > U32_MAX {

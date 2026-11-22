@@ -226,11 +226,11 @@ fn put_ast(inout o: ChunkSeq[u64], in a: Ast) {
     for i in 0..wrapping_add(nsyms, 1) {
         o
             .push(
-            match a.names.starts.try_get(i) {
-                Option::Some(v) => v,
-                Option::None => 0,
-            }
-        );
+                match a.names.starts.try_get(i) {
+                    Option::Some(v) => v,
+                    Option::None => 0,
+                }
+            );
     }
     let text = a.names.text.as_bytes();
     o.push(text.len());

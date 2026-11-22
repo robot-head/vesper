@@ -30,6 +30,8 @@ filegroup(
 # the tests catch each edit.
 DIVERGENT = {
     "reader": ("reader", {"all_zero(in b[start..end])": "all_zero(in b[start..start])"}),
+    "cbor": ("cbor", {"const MAX_DEPTH: u64 = 256;": "const MAX_DEPTH: u64 = 255;"}),
+    "cca": ("cca", {"const ROTPK_MAX_INDEX: u64 = 5;": "const ROTPK_MAX_INDEX: u64 = 4;"}),
     "snp": ("snp", {"const SNP_REPORT_MAX_VERSION: u64 = 6;": "const SNP_REPORT_MAX_VERSION: u64 = 7;"}),
     "tdx": ("tdx", {"const TDX_BODY_TD15_EX_LEN: u64 = 885;": "const TDX_BODY_TD15_EX_LEN: u64 = 884;"}),
     "sgx": ("sgx", {"if cert_type != CERT_DATA_PCK_CHAIN_PEM {": "if cert_type != 6 {"}),

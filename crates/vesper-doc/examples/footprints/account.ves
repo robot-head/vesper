@@ -58,8 +58,7 @@ fn remaining(in hold: Hold, in amount: u64) -> u64 eff [Fail[ArithOverflow]] {
 fn release(sink hold: Hold) -> u64 {
     let Hold {
         amount
-    }
-    = hold;
+    } = hold;
     amount
 }
 

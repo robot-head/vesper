@@ -339,11 +339,11 @@ impl G {
         self
             .current
             .push(
-            Cur {
-                id: id,
-                sym: sym
-            }
-        );
+                Cur {
+                    id: id,
+                    sym: sym
+                }
+            );
     }
 }
 
@@ -419,12 +419,12 @@ fn declare_as(inout g: G, name: u32, ty: u32, lean: u32) -> u64 {
     g
         .scope
         .push(
-        Local {
-            name: name,
-            id: id,
-            ty: ty
-        }
-    );
+            Local {
+                name: name,
+                id: id,
+                ty: ty
+            }
+        );
     g.set_cur(id, lean);
     id
 }
@@ -1139,11 +1139,11 @@ fn pattern_types(
     if k == PK_BIND {
         out
             .push(
-            NameTy {
-                name: y.a.pxs(p, 0),
-                ty: ty
-            }
-        );
+                NameTy {
+                    name: y.a.pxs(p, 0),
+                    ty: ty
+                }
+            );
     } else if k == PK_TUPLE {
         if is_tuple(in t, ty) {
             let n = y.a.px(p, 0);
@@ -1193,11 +1193,11 @@ fn pat(inout b: B, in t: Types, in y: Y, inout g: G, p: u64, inout rs: ChunkSeq[
         let tmp = fresh(inout b, inout g, base);
         rs
             .push(
-            Rename {
-                name: n,
-                tmp: tmp
-            }
-        );
+                Rename {
+                    name: n,
+                    tmp: tmp
+                }
+            );
         return p_bind(inout b, tmp);
     }
     if k == PK_LITERAL {
@@ -1246,12 +1246,8 @@ fn pat(inout b: B, in t: Types, in y: Y, inout g: G, p: u64, inout rs: ChunkSeq[
                     let fname = y.x.wd.field(add(w(v.fa), j)).name;
                     let mut found = NONE64;
                     for i in 0..n {
-                        if found
-                            == NONE64
-                            && y
-                            .a
-                            .sym(y.a.px(p, add(3, wrapping_mul(i, 2))))
-                            == fname {
+                        if found == NONE64
+                            && y.a.sym(y.a.px(p, add(3, wrapping_mul(i, 2)))) == fname {
                             found = y.a.px(p, add(4, wrapping_mul(i, 2)));
                         }
                     }
@@ -1834,12 +1830,12 @@ fn binary_expr(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout ou
         b.w(T_BOOL);
         b
             .w(
-            if and {
-                0
-            } else {
-                1
-            }
-        );
+                if and {
+                    0
+                } else {
+                    1
+                }
+            );
         let lit = b.since(m);
         let other = pure(inout b, lit);
         let it = if and {
@@ -2466,11 +2462,11 @@ fn call(
                 if !(skip_first && i == 0) {
                     es
                         .push(
-                        match args.try_get(i) {
-                            Option::Some(x) => x,
-                            Option::None => 0,
-                        }
-                    );
+                            match args.try_get(i) {
+                                Option::Some(x) => x,
+                                Option::None => 0,
+                            }
+                        );
                 }
             }
             let terms = operands(inout b, inout t, in y, inout g, in es, inout out);
@@ -2522,11 +2518,11 @@ fn call(
                 for i in 0..args.len() {
                     actual
                         .push(
-                        match args.try_get(i) {
-                            Option::Some(x) => x,
-                            Option::None => 0,
-                        }
-                    );
+                            match args.try_get(i) {
+                                Option::Some(x) => x,
+                                Option::None => 0,
+                            }
+                        );
                 }
                 return call(inout b, inout t, in y, inout g, e, callee, mn, in actual, inout out);
             }
@@ -2817,12 +2813,12 @@ fn closure(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out: C
         let_local(inout b, inout ss, lean, r, false, none, true);
         g
             .set_cur(
-            match ids.try_get(i) {
-                Option::Some(x) => x,
-                Option::None => 0,
-            },
-            lean
-        );
+                match ids.try_get(i) {
+                    Option::Some(x) => x,
+                    Option::None => 0,
+                },
+                lean
+            );
     }
     for i in 0..pcount {
         let pname = y.a.xs(e, add(2, i));

@@ -260,238 +260,238 @@ pub fn paramn(in a: Ast, i: u32) -> ParamNode {
     a
         .params
         .get_or(
-        idx_from_raw[ParamNode](i),
-        ParamNode {
-            name: NONE,
-            pass: 0,
-            projections: 0,
-            ty: NONE,
-            start: 0,
-            end: 0
-        }
-    )
+            idx_from_raw[ParamNode](i),
+            ParamNode {
+                name: NONE,
+                pass: 0,
+                projections: 0,
+                ty: NONE,
+                start: 0,
+                end: 0
+            }
+        )
 }
 
 pub fn fnn(in a: Ast, i: u32) -> FnNode {
     a
         .fns
         .get_or(
-        idx_from_raw[FnNode](i),
-        FnNode {
-            name: NONE,
-            fip: false,
-            generics: 0,
-            params: 0,
-            result: NONE,
-            effects: NONE,
-            body: NONE,
-            start: 0,
-            end: 0
-        }
-    )
+            idx_from_raw[FnNode](i),
+            FnNode {
+                name: NONE,
+                fip: false,
+                generics: 0,
+                params: 0,
+                result: NONE,
+                effects: NONE,
+                body: NONE,
+                start: 0,
+                end: 0
+            }
+        )
 }
 
 pub fn adtn(in a: Ast, i: u32) -> AdtNode {
     a
         .adts
         .get_or(
-        idx_from_raw[AdtNode](i),
-        AdtNode {
-            name: NONE,
-            mode: 0,
-            generics: 0,
-            variants: 0,
-            is_enum: false,
-            tiled: false,
-            tile_width: 0,
-            start: 0,
-            end: 0
-        }
-    )
+            idx_from_raw[AdtNode](i),
+            AdtNode {
+                name: NONE,
+                mode: 0,
+                generics: 0,
+                variants: 0,
+                is_enum: false,
+                tiled: false,
+                tile_width: 0,
+                start: 0,
+                end: 0
+            }
+        )
 }
 
 pub fn variantn(in a: Ast, i: u32) -> VariantNode {
     a
         .variants
         .get_or(
-        idx_from_raw[VariantNode](i),
-        VariantNode {
-            name: NONE,
-            fields: 0,
-            named: false
-        }
-    )
+            idx_from_raw[VariantNode](i),
+            VariantNode {
+                name: NONE,
+                fields: 0,
+                named: false
+            }
+        )
 }
 
 pub fn fieldn(in a: Ast, i: u32) -> FieldNode {
     a
         .fields
         .get_or(
-        idx_from_raw[FieldNode](i),
-        FieldNode {
-            name: NONE,
-            ty: NONE,
-            modality: 3,
-            temperature: 0
-        }
-    )
+            idx_from_raw[FieldNode](i),
+            FieldNode {
+                name: NONE,
+                ty: NONE,
+                modality: 3,
+                temperature: 0
+            }
+        )
 }
 
 pub fn genericn(in a: Ast, i: u32) -> GenericNode {
     a
         .generics
         .get_or(
-        idx_from_raw[GenericNode](i),
-        GenericNode {
-            name: NONE,
-            bound: 0,
-            row: false
-        }
-    )
+            idx_from_raw[GenericNode](i),
+            GenericNode {
+                name: NONE,
+                bound: 0,
+                row: false
+            }
+        )
 }
 
 pub fn effectsn(in a: Ast, i: u32) -> EffectsNode {
     a
         .effects
         .get_or(
-        idx_from_raw[EffectsNode](i),
-        EffectsNode {
-            instances: 0,
-            tail: NONE
-        }
-    )
+            idx_from_raw[EffectsNode](i),
+            EffectsNode {
+                instances: 0,
+                tail: NONE
+            }
+        )
 }
 
 pub fn effectn(in a: Ast, i: u32) -> EffectNode {
     a
         .effect_nodes
         .get_or(
-        idx_from_raw[EffectNode](i),
-        EffectNode {
-            label: NONE,
-            name: NONE,
-            args: 0
-        }
-    )
+            idx_from_raw[EffectNode](i),
+            EffectNode {
+                label: NONE,
+                name: NONE,
+                args: 0
+            }
+        )
 }
 
 pub fn stmtn(in a: Ast, i: u32) -> StmtNode {
     a
         .stmts
         .get_or(
-        idx_from_raw[StmtNode](i),
-        StmtNode {
-            kind: 0,
-            pat: NONE,
-            ty: NONE,
-            value: NONE,
-            mutable: false
-        }
-    )
+            idx_from_raw[StmtNode](i),
+            StmtNode {
+                kind: 0,
+                pat: NONE,
+                ty: NONE,
+                value: NONE,
+                mutable: false
+            }
+        )
 }
 
 pub fn argn(in a: Ast, i: u32) -> ArgNode {
     a
         .args
         .get_or(
-        idx_from_raw[ArgNode](i),
-        ArgNode {
-            pass: 0,
-            explicit: false,
-            expr: NONE
-        }
-    )
+            idx_from_raw[ArgNode](i),
+            ArgNode {
+                pass: 0,
+                explicit: false,
+                expr: NONE
+            }
+        )
 }
 
 pub fn clausen(in a: Ast, i: u32) -> ClauseNode {
     a
         .clauses
         .get_or(
-        idx_from_raw[ClauseNode](i),
-        ClauseNode {
-            name: NONE,
-            pats: 0,
-            body: NONE
-        }
-    )
+            idx_from_raw[ClauseNode](i),
+            ClauseNode {
+                name: NONE,
+                pats: 0,
+                body: NONE
+            }
+        )
 }
 
 pub fn itemn(in a: Ast, i: u32) -> ItemNode {
     a
         .items
         .get_or(
-        idx_from_raw[ItemNode](i),
-        ItemNode {
-            kind: 0,
-            node: NONE
-        }
-    )
+            idx_from_raw[ItemNode](i),
+            ItemNode {
+                kind: 0,
+                node: NONE
+            }
+        )
 }
 
 pub fn effdecln(in a: Ast, i: u32) -> EffectDeclNode {
     a
         .effect_decls
         .get_or(
-        idx_from_raw[EffectDeclNode](i),
-        EffectDeclNode {
-            name: NONE,
-            linear: false,
-            generics: 0,
-            ops: 0,
-            start: 0,
-            end: 0
-        }
-    )
+            idx_from_raw[EffectDeclNode](i),
+            EffectDeclNode {
+                name: NONE,
+                linear: false,
+                generics: 0,
+                ops: 0,
+                start: 0,
+                end: 0
+            }
+        )
 }
 
 pub fn impln(in a: Ast, i: u32) -> ImplNode {
     a
         .impls
         .get_or(
-        idx_from_raw[ImplNode](i),
-        ImplNode {
-            ty: NONE,
-            generics: 0,
-            methods: 0
-        }
-    )
+            idx_from_raw[ImplNode](i),
+            ImplNode {
+                ty: NONE,
+                generics: 0,
+                methods: 0
+            }
+        )
 }
 
 pub fn traitn(in a: Ast, i: u32) -> TraitNode {
     a
         .traits
         .get_or(
-        idx_from_raw[TraitNode](i),
-        TraitNode {
-            name: NONE,
-            public: false,
-            generics: 0,
-            assoc: 0,
-            methods: 0,
-            start: 0,
-            end: 0
-        }
-    )
+            idx_from_raw[TraitNode](i),
+            TraitNode {
+                name: NONE,
+                public: false,
+                generics: 0,
+                assoc: 0,
+                methods: 0,
+                start: 0,
+                end: 0
+            }
+        )
 }
 
 pub fn confn(in a: Ast, i: u32) -> ConfNode {
     a
         .confs
         .get_or(
-        idx_from_raw[ConfNode](i),
-        ConfNode {
-            model: NONE,
-            public: false,
-            generics: 0,
-            trait_ref: NONE,
-            self_ty: NONE,
-            wheres: 0,
-            assoc: 0,
-            methods: 0,
-            start: 0,
-            end: 0
-        }
-    )
+            idx_from_raw[ConfNode](i),
+            ConfNode {
+                model: NONE,
+                public: false,
+                generics: 0,
+                trait_ref: NONE,
+                self_ty: NONE,
+                wheres: 0,
+                assoc: 0,
+                methods: 0,
+                start: 0,
+                end: 0
+            }
+        )
 }
 
 // The module's items.
@@ -528,30 +528,14 @@ pub fn targs(in a: Ast, t: u32) -> u32 {
 
 // `RESERVED`.
 pub fn is_reserved(in st: St, n: u32) -> bool {
-    n
-        == st
-        .s_tensor
-        || n
-        == st
-        .s_kv
-        || n
-        == st
-        .s_lease
-        || n
-        == st
-        .s_seq
-        || n
-        == st
-        .s_kverr
-        || n
-        == st
-        .s_dims
-        || n
-        == st
-        .s_f32
-        || n
-        == st
-        .s_bf16
+    n == st.s_tensor
+        || n == st.s_kv
+        || n == st.s_lease
+        || n == st.s_seq
+        || n == st.s_kverr
+        || n == st.s_dims
+        || n == st.s_f32
+        || n == st.s_bf16
 }
 
 // `wire_integer(n).is_some()`: `[ui](16|32|64)(le|be)`.
@@ -572,15 +556,9 @@ pub fn is_wire_integer(in st: St, n: u32) -> bool {
 
 fn reserved_or_wire(in st: St, n: u32) -> bool {
     is_reserved(in st, n)
-        || n
-        == st
-        .s_shape
-        || n
-        == st
-        .s_bytes
-        || n
-        == st
-        .s_pad
+        || n == st.s_shape
+        || n == st.s_bytes
+        || n == st.s_pad
         || is_wire_integer(in st, n)
 }
 
@@ -803,9 +781,7 @@ pub fn expr_mentions(inout st: St, in a: Ast, e: u32) -> bool {
         if effect_mentions(in st, in a, n.a) {
             return true;
         }
-        if n
-            .b
-            != NONE
+        if n.b != NONE
             && (pattern_mentions(inout st, in a, n.b) || expr_mentions(inout st, in a, n.c)) {
             return true;
         }
@@ -917,12 +893,8 @@ fn wire_only(in st: St, in a: Ast, t: u32) -> bool {
     }
     let name = nm(in st, n.a);
     (list_len(in a, n.b) == 0 && is_wire_integer(in st, name))
-        || name
-        == st
-        .s_bytes
-        || name
-        == st
-        .s_pad
+        || name == st.s_bytes
+        || name == st.s_pad
 }
 
 // `wire_struct_names`.
