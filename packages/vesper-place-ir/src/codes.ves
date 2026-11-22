@@ -67,3 +67,18 @@ pub enum Lit: _ {
     // An integer past `i128::MAX`.
     WideInt = 4,
 }
+
+// Payload pool row kinds (`POOL_KINDS` and `made_payload` of tests/common/ir_words.rs).
+pub enum PoolKind: _ {
+    Seq = 0,
+    Vector = 1,
+    Tiled = 2,
+    Fip = 3,
+    Expr = 4,
+    Hoisted = 5,
+    Guard = 6,
+    MakeSeq = 7,
+    MakeVector = 8,
+    MakeTiled = 9,
+    MakeFip = 10,
+}

@@ -34,12 +34,7 @@
 //!
 //! **What stays on the Rust side.** The closure and handler expressions
 //! `Op::Closure` and `Op::Handle` carry are payloads: the section names
-//! them by index into the [`Pool`] `lower_input` returns. Calls and
-//! indexing that `seq::resolve`, `tiled::resolve_ir_call`,
-//! `VectorOp::resolve` or the `Box` builtins route to a payload operation
-//! are written as [`X_FOREIGN`], and the port skips the function. Which call
-//! or index is routed is read off the Rust lowering (`foreign`, the spans
-//! of its `Seq`, `Tiled`, `Vector` and `Fip` instructions). The intrinsic
+//! them by index into the [`Pool`] `lower_input` returns. The intrinsic
 //! name tables of `vesper-core::numeric` and `capability_effects` are
 //! written per call as a class word ([`intrinsic_class`]).
 #![allow(dead_code)]
@@ -135,7 +130,6 @@ pub fn foreign(program: &Program) -> BTreeSet<(usize, usize)> {
 pub struct Lw<'a> {
     pub enc: &'a mut Enc,
     world: &'a World,
-    foreign: &'a BTreeSet<(usize, usize)>,
     /// The closure and handler expressions `Op::Closure` and `Op::Handle`
     /// refer to, in the order the section names them.
     pub pool: Pool,
@@ -146,11 +140,10 @@ pub struct Lw<'a> {
 }
 
 impl<'a> Lw<'a> {
-    pub fn new(enc: &'a mut Enc, world: &'a World, foreign: &'a BTreeSet<(usize, usize)>) -> Self {
+    pub fn new(enc: &'a mut Enc, world: &'a World) -> Self {
         Self {
             enc,
             world,
-            foreign,
             pool: Pool::default(),
             pats: vec![],
             pat_count: 0,
@@ -306,223 +299,217 @@ impl<'a> Lw<'a> {
     /// - moves (`world.moves` at the span): n, n x (root, path).
     pub fn expr(&mut self, e: &Expr) -> u64 {
         let key = (e.span.start, e.span.end);
-        let routed = matches!(e.kind, ExprKind::Call { .. } | ExprKind::Index(..))
-            && self.foreign.contains(&key);
         let mut w: Vec<u64> = vec![];
-        let kind = if routed {
-            X_FOREIGN
-        } else {
-            match &e.kind {
-                ExprKind::Literal(l) => {
-                    self.literal(l, &mut w);
-                    X_LITERAL
+        let kind = match &e.kind {
+            ExprKind::Literal(l) => {
+                self.literal(l, &mut w);
+                X_LITERAL
+            }
+            ExprKind::Name(n) => {
+                w.push(self.name(n));
+                X_NAME
+            }
+            ExprKind::Tuple(es) => {
+                let kids: Vec<u64> = es.iter().map(|c| self.expr(c)).collect();
+                w.push(kids.len() as u64);
+                w.extend(kids);
+                X_TUPLE
+            }
+            ExprKind::Struct { name, fields } => {
+                let kids: Vec<(u64, u64)> = fields
+                    .iter()
+                    .map(|(f, c)| {
+                        let c = self.expr(c);
+                        (self.name(f), c)
+                    })
+                    .collect();
+                w.push(self.name(name));
+                w.push(kids.len() as u64);
+                for (f, c) in kids {
+                    w.extend([f, c]);
                 }
-                ExprKind::Name(n) => {
-                    w.push(self.name(n));
-                    X_NAME
-                }
-                ExprKind::Tuple(es) => {
-                    let kids: Vec<u64> = es.iter().map(|c| self.expr(c)).collect();
-                    w.push(kids.len() as u64);
-                    w.extend(kids);
-                    X_TUPLE
-                }
-                ExprKind::Struct { name, fields } => {
-                    let kids: Vec<(u64, u64)> = fields
-                        .iter()
-                        .map(|(f, c)| {
-                            let c = self.expr(c);
-                            (self.name(f), c)
-                        })
-                        .collect();
-                    w.push(self.name(name));
-                    w.push(kids.len() as u64);
-                    for (f, c) in kids {
-                        w.extend([f, c]);
-                    }
-                    X_STRUCT
-                }
-                ExprKind::Field(base, f) => {
-                    let b = self.expr(base);
-                    w.extend([b, self.name(f)]);
-                    X_FIELD
-                }
-                ExprKind::Index(base, index) => {
-                    let b = self.expr(base);
-                    let i = self.expr(index);
-                    w.extend([b, i]);
-                    X_INDEX
-                }
-                ExprKind::Unary(op, v) => {
-                    let v = self.expr(v);
-                    w.extend([self.name(op), v]);
-                    X_UNARY
-                }
-                ExprKind::Binary(op, a, b) => {
-                    let a = self.expr(a);
-                    let b = self.expr(b);
-                    w.extend([self.name(op), a, b]);
-                    X_BINARY
-                }
-                ExprKind::Assign(op, p, v) => {
-                    let p = self.expr(p);
-                    let v = self.expr(v);
-                    w.extend([self.name(op), p, v]);
-                    X_ASSIGN
-                }
-                ExprKind::Block { statements, tail } => {
-                    let mut ss = vec![];
-                    for s in statements {
-                        match s {
-                            Statement::Expr(x) => {
-                                let x = self.expr(x);
-                                ss.extend([0, x]);
-                            }
-                            Statement::Let { pat, value, .. } => {
-                                let p = self.pattern(pat);
-                                let v = self.expr(value);
-                                ss.extend([1, p, v]);
-                            }
+                X_STRUCT
+            }
+            ExprKind::Field(base, f) => {
+                let b = self.expr(base);
+                w.extend([b, self.name(f)]);
+                X_FIELD
+            }
+            ExprKind::Index(base, index) => {
+                let b = self.expr(base);
+                let i = self.expr(index);
+                w.extend([b, i]);
+                X_INDEX
+            }
+            ExprKind::Unary(op, v) => {
+                let v = self.expr(v);
+                w.extend([self.name(op), v]);
+                X_UNARY
+            }
+            ExprKind::Binary(op, a, b) => {
+                let a = self.expr(a);
+                let b = self.expr(b);
+                w.extend([self.name(op), a, b]);
+                X_BINARY
+            }
+            ExprKind::Assign(op, p, v) => {
+                let p = self.expr(p);
+                let v = self.expr(v);
+                w.extend([self.name(op), p, v]);
+                X_ASSIGN
+            }
+            ExprKind::Block { statements, tail } => {
+                let mut ss = vec![];
+                for s in statements {
+                    match s {
+                        Statement::Expr(x) => {
+                            let x = self.expr(x);
+                            ss.extend([0, x]);
+                        }
+                        Statement::Let { pat, value, .. } => {
+                            let p = self.pattern(pat);
+                            let v = self.expr(value);
+                            ss.extend([1, p, v]);
                         }
                     }
-                    let t = self.opt(tail);
-                    w.push(statements.len() as u64);
-                    w.extend(ss);
+                }
+                let t = self.opt(tail);
+                w.push(statements.len() as u64);
+                w.extend(ss);
+                w.push(t);
+                X_BLOCK
+            }
+            ExprKind::Call {
+                callee,
+                types,
+                args,
+            } => {
+                let c = self.expr(callee);
+                let class = match &callee.kind {
+                    ExprKind::Name(n) => intrinsic_class(n),
+                    _ => 0,
+                };
+                let kids: Vec<(u64, u64)> = args
+                    .iter()
+                    .map(|a| (pass_word(a.pass), self.expr(&a.expr)))
+                    .collect();
+                let ts: Vec<u64> = types.iter().map(|t| self.enc.ty(t)).collect();
+                w.extend([c, class, kids.len() as u64]);
+                for (p, x) in kids {
+                    w.extend([p, x]);
+                }
+                w.push(ts.len() as u64);
+                w.extend(ts);
+                X_CALL
+            }
+            ExprKind::Try(v) => {
+                w.push(self.expr(v));
+                X_TRY
+            }
+            ExprKind::If {
+                condition,
+                then,
+                otherwise,
+            } => {
+                let c = self.expr(condition);
+                let t = self.expr(then);
+                let o = self.opt(otherwise);
+                w.extend([c, t, o]);
+                X_IF
+            }
+            ExprKind::Match { value, arms } => {
+                let v = self.expr(value);
+                let kids: Vec<(u64, u64)> = arms
+                    .iter()
+                    .map(|(p, b)| {
+                        let p = self.pattern(p);
+                        (p, self.expr(b))
+                    })
+                    .collect();
+                w.extend([v, kids.len() as u64]);
+                for (p, b) in kids {
+                    w.extend([p, b]);
+                }
+                X_MATCH
+            }
+            ExprKind::Loop(body) => {
+                w.push(self.expr(body));
+                X_LOOP
+            }
+            ExprKind::For { pat, iter, body } => {
+                let p = self.pattern(pat);
+                let i = self.expr(iter);
+                let b = self.expr(body);
+                w.extend([p, i, b]);
+                X_FOR
+            }
+            ExprKind::Range {
+                start,
+                end,
+                inclusive,
+            } => {
+                let s = self.expr(start);
+                let t = self.expr(end);
+                w.extend([s, t, *inclusive as u64]);
+                X_RANGE
+            }
+            ExprKind::Break(v) => {
+                w.push(self.opt(v));
+                X_BREAK
+            }
+            ExprKind::Return(v) => {
+                w.push(self.opt(v));
+                X_RETURN
+            }
+            ExprKind::Continue => X_CONTINUE,
+            ExprKind::Closure { params, body, .. } => {
+                let b = self.expr(body);
+                w.push(self.payload(e));
+                w.push(params.len() as u64);
+                for p in params {
+                    self.param(p, &mut w);
+                }
+                w.push(b);
+                self.moves(key, &mut w);
+                X_CLOSURE
+            }
+            ExprKind::Handle {
+                effect,
+                state,
+                body,
+                ret,
+                ops,
+            } => {
+                let st = state.as_ref().map(|(p, s)| (self.pattern(p), self.expr(s)));
+                let b = self.expr(body);
+                let mut clauses = vec![];
+                for c in std::iter::once(ret.as_ref()).chain(ops) {
+                    self.clause(c, &mut clauses);
+                }
+                w.push(self.payload(e));
+                w.push(self.enc.opt_name(&effect.label));
+                w.push(self.name(&effect.name));
+                w.push(effect.args.len() as u64);
+                for t in &effect.args {
+                    let t = self.enc.ty(t);
                     w.push(t);
-                    X_BLOCK
                 }
-                ExprKind::Call {
-                    callee,
-                    types,
-                    args,
-                } => {
-                    let c = self.expr(callee);
-                    let class = match &callee.kind {
-                        ExprKind::Name(n) => intrinsic_class(n),
-                        _ => 0,
-                    };
-                    let kids: Vec<(u64, u64)> = args
-                        .iter()
-                        .map(|a| (pass_word(a.pass), self.expr(&a.expr)))
-                        .collect();
-                    let ts: Vec<u64> = types.iter().map(|t| self.enc.ty(t)).collect();
-                    w.extend([c, class, kids.len() as u64]);
-                    for (p, x) in kids {
-                        w.extend([p, x]);
-                    }
-                    w.push(ts.len() as u64);
-                    w.extend(ts);
-                    X_CALL
+                match st {
+                    Some((p, s)) => w.extend([1, p, s]),
+                    None => w.extend([0, NONE, NONE]),
                 }
-                ExprKind::Try(v) => {
-                    w.push(self.expr(v));
-                    X_TRY
-                }
-                ExprKind::If {
-                    condition,
-                    then,
-                    otherwise,
-                } => {
-                    let c = self.expr(condition);
-                    let t = self.expr(then);
-                    let o = self.opt(otherwise);
-                    w.extend([c, t, o]);
-                    X_IF
-                }
-                ExprKind::Match { value, arms } => {
-                    let v = self.expr(value);
-                    let kids: Vec<(u64, u64)> = arms
-                        .iter()
-                        .map(|(p, b)| {
-                            let p = self.pattern(p);
-                            (p, self.expr(b))
-                        })
-                        .collect();
-                    w.extend([v, kids.len() as u64]);
-                    for (p, b) in kids {
-                        w.extend([p, b]);
-                    }
-                    X_MATCH
-                }
-                ExprKind::Loop(body) => {
-                    w.push(self.expr(body));
-                    X_LOOP
-                }
-                ExprKind::For { pat, iter, body } => {
-                    let p = self.pattern(pat);
-                    let i = self.expr(iter);
-                    let b = self.expr(body);
-                    w.extend([p, i, b]);
-                    X_FOR
-                }
-                ExprKind::Range {
-                    start,
-                    end,
-                    inclusive,
-                } => {
-                    let s = self.expr(start);
-                    let t = self.expr(end);
-                    w.extend([s, t, *inclusive as u64]);
-                    X_RANGE
-                }
-                ExprKind::Break(v) => {
-                    w.push(self.opt(v));
-                    X_BREAK
-                }
-                ExprKind::Return(v) => {
-                    w.push(self.opt(v));
-                    X_RETURN
-                }
-                ExprKind::Continue => X_CONTINUE,
-                ExprKind::Closure { params, body, .. } => {
-                    let b = self.expr(body);
-                    w.push(self.payload(e));
-                    w.push(params.len() as u64);
-                    for p in params {
-                        self.param(p, &mut w);
-                    }
-                    w.push(b);
-                    self.moves(key, &mut w);
-                    X_CLOSURE
-                }
-                ExprKind::Handle {
-                    effect,
-                    state,
-                    body,
-                    ret,
-                    ops,
-                } => {
-                    let st = state.as_ref().map(|(p, s)| (self.pattern(p), self.expr(s)));
-                    let b = self.expr(body);
-                    let mut clauses = vec![];
-                    for c in std::iter::once(ret.as_ref()).chain(ops) {
-                        self.clause(c, &mut clauses);
-                    }
-                    w.push(self.payload(e));
-                    w.push(self.enc.opt_name(&effect.label));
-                    w.push(self.name(&effect.name));
-                    w.push(effect.args.len() as u64);
-                    for t in &effect.args {
-                        let t = self.enc.ty(t);
-                        w.push(t);
-                    }
-                    match st {
-                        Some((p, s)) => w.extend([1, p, s]),
-                        None => w.extend([0, NONE, NONE]),
-                    }
-                    w.push(b);
-                    w.push(ops.len() as u64);
-                    w.extend(clauses);
-                    let outgoing = self
-                        .world
-                        .handler_effects
-                        .get(&key)
-                        .cloned()
-                        .unwrap_or_default();
-                    w.push(self.enc.ty(&Type::Row(outgoing)));
-                    self.moves(key, &mut w);
-                    X_HANDLE
-                }
+                w.push(b);
+                w.push(ops.len() as u64);
+                w.extend(clauses);
+                let outgoing = self
+                    .world
+                    .handler_effects
+                    .get(&key)
+                    .cloned()
+                    .unwrap_or_default();
+                w.push(self.enc.ty(&Type::Row(outgoing)));
+                self.moves(key, &mut w);
+                X_HANDLE
             }
         };
         self.exprs
@@ -599,17 +586,15 @@ impl<'a> Lw<'a> {
 
 /// The input of `ir_lower_words`: check-data's names, types and world,
 /// then the lowering section; and the payload pool its closures and
-/// handlers refer to. `reference` is Rust's lowering of `w`, read only for
-/// [`foreign`]. `None` when a type literal does not fit 64 bits.
+/// handlers refer to. `None` when a type literal does not fit 64 bits.
 pub fn lower_input(w: &World, reference: &Program) -> Option<(Vec<u8>, Pool)> {
     if !super::ir_words::encodable(w, reference) {
         return None;
     }
-    let routed = foreign(reference);
     let mut enc = Enc::default();
     // The lowering section first: its types and names must be in the
     // tables `finish` writes ahead of every section.
-    let mut lw = Lw::new(&mut enc, w, &routed);
+    let mut lw = Lw::new(&mut enc, w);
     let section = lw.section(w);
     let pool = std::mem::take(&mut lw.pool);
     let world = enc.world(w);
