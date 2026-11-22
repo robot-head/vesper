@@ -1,7 +1,8 @@
-//! Differential tests of the Vesper accumulator and CDC decoder against the
-//! Rust code they replaced (the last Rust commit's `zset::Accumulator` and
-//! `Executor::ingest_cdc` record loop, kept here as the reference). Every
-//! case runs both and compares the outcome, the sets and the work left.
+//! Differential tests of the Vesper accumulator, CDC decoder and input-log
+//! codec against the Rust code they replaced (the last Rust commit's
+//! `zset::Accumulator`, `Executor::ingest_cdc` record loop and `log.rs`
+//! codec, kept here as the reference). Every case runs both and compares
+//! the outcome, the sets, the bytes and the work left.
 use crate::zset::Accumulator;
 use crate::{Budget, CdcHeader, CdcPolicy, Error, Limits, Row, SourceBinding, WeightPolicy, ZSet};
 use std::collections::BTreeMap;
@@ -336,6 +337,223 @@ fn cdc_decoder_matches_the_rust_loop() {
         assert!(errors.get(e).copied().unwrap_or(0) > 5, "{e}: {errors:?}");
     }
     assert!(errors.keys().any(|e| e.contains("truncated")), "{errors:?}");
+}
+
+mod log_reference {
+    //! `log.rs`'s header, frame and decoder before the port.
+    use crate::{Error, LogLimits, Row, ZSet};
+    use std::collections::BTreeMap;
+
+    pub(super) fn header(widths: &[usize]) -> Vec<u8> {
+        let mut h = Vec::new();
+        h.extend_from_slice(b"VFLUXIL1");
+        h.extend_from_slice(&1u16.to_le_bytes());
+        h.extend_from_slice(&0u16.to_le_bytes());
+        h.extend_from_slice(&(widths.len() as u32).to_le_bytes());
+        for w in widths {
+            h.extend_from_slice(&(*w as u32).to_le_bytes());
+        }
+        let sum = blake3::hash(&h);
+        h.extend_from_slice(sum.as_bytes());
+        h
+    }
+
+    pub(super) fn frame_sum(len: u32, payload: &[u8]) -> [u8; 32] {
+        let mut h = blake3::Hasher::new();
+        h.update(b"vesper.flux.input-log.frame/1");
+        h.update(&len.to_le_bytes());
+        h.update(payload);
+        *h.finalize().as_bytes()
+    }
+
+    pub(super) fn frame(
+        epoch: u64,
+        deltas: &[ZSet],
+        widths: &[usize],
+        limits: LogLimits,
+    ) -> Result<Vec<u8>, Error> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&epoch.to_le_bytes());
+        let mut rows = 0usize;
+        for (delta, width) in deltas.iter().zip(widths) {
+            if delta.width != *width {
+                return Err(Error::Schema);
+            }
+            rows = rows.checked_add(delta.len()).ok_or(Error::Overflow)?;
+            if rows > limits.max_rows_per_frame {
+                return Err(Error::Limit("log rows"));
+            }
+            payload.extend_from_slice(&(delta.len() as u32).to_le_bytes());
+            for (row, weight) in delta.iter() {
+                for cell in row {
+                    payload.extend_from_slice(&cell.to_le_bytes());
+                }
+                payload.extend_from_slice(&weight.to_le_bytes());
+            }
+            if payload.len() > limits.max_frame_bytes {
+                return Err(Error::Limit("log frame bytes"));
+            }
+        }
+        let len = payload.len() as u32;
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&len.to_le_bytes());
+        frame.extend_from_slice(&payload);
+        frame.extend_from_slice(&frame_sum(len, &payload));
+        Ok(frame)
+    }
+
+    pub(super) fn decode(
+        payload: &[u8],
+        epoch: u64,
+        widths: &[usize],
+        limits: LogLimits,
+    ) -> Result<Vec<ZSet>, Error> {
+        let mut cursor = 0usize;
+        let mut take = |n: usize| -> Result<&[u8], Error> {
+            let end = cursor.checked_add(n).ok_or(Error::Overflow)?;
+            let bytes = payload
+                .get(cursor..end)
+                .ok_or(Error::Storage("log frame"))?;
+            cursor = end;
+            Ok(bytes)
+        };
+        let stored = u64::from_le_bytes(take(8)?.try_into().map_err(|_| Error::Overflow)?);
+        if stored != epoch {
+            return Err(Error::Storage("log epoch"));
+        }
+        let mut deltas = Vec::with_capacity(widths.len());
+        let mut total = 0usize;
+        for width in widths {
+            let count = u32::from_le_bytes(take(4)?.try_into().map_err(|_| Error::Overflow)?);
+            let count = count as usize;
+            total = total.checked_add(count).ok_or(Error::Overflow)?;
+            if total > limits.max_rows_per_frame {
+                return Err(Error::Limit("log rows"));
+            }
+            let mut rows: BTreeMap<Row, i64> = BTreeMap::new();
+            for _ in 0..count {
+                let bytes = take((width + 1) * 8)?;
+                let cells = bytes.as_chunks::<8>().0;
+                let row: Vec<i64> = cells[..*width]
+                    .iter()
+                    .map(|c| i64::from_le_bytes(*c))
+                    .collect();
+                let weight = i64::from_le_bytes(cells[*width]);
+                if weight == 0 || rows.last_key_value().is_some_and(|(last, _)| last >= &row) {
+                    return Err(Error::Storage("noncanonical log rows"));
+                }
+                rows.insert(row, weight);
+            }
+            deltas.push(ZSet::from_rows(*width, rows));
+        }
+        if cursor != payload.len() {
+            return Err(Error::Storage("log frame"));
+        }
+        Ok(deltas)
+    }
+}
+
+#[test]
+fn input_log_codec_matches_the_rust_codec() {
+    let mut rng = Rng(0x5eed_1061);
+    let mut errors = BTreeMap::new();
+    let mut ok = 0;
+    for case in 0..6_000 {
+        let widths: Vec<usize> = (0..1 + rng.below(3))
+            .map(|_| rng.below(4) as usize)
+            .collect();
+        assert_eq!(
+            crate::port::log_header(&widths),
+            log_reference::header(&widths)
+        );
+        let limits = crate::LogLimits {
+            max_rows_per_frame: rng.below(40) as usize,
+            max_frame_bytes: 16 + rng.below(1200) as usize,
+            ..crate::LogLimits::default()
+        };
+        let set_limits = Limits {
+            max_rows: 64,
+            ..Limits::default()
+        };
+        let deltas: Vec<ZSet> = widths
+            .iter()
+            .map(|w| {
+                let w = if rng.below(30) == 0 { w + 1 } else { *w };
+                let entries: Vec<(Row, i64)> = (0..rng.below(16))
+                    .map(|_| {
+                        (
+                            (0..w).map(|_| rng.cell()).collect(),
+                            rng.below(5) as i64 - 2,
+                        )
+                    })
+                    .collect();
+                ZSet::consolidate(w, &entries, set_limits).expect("set")
+            })
+            .collect();
+        let epoch = rng.below(1 << 40);
+        let p = crate::port::log_frame(epoch, &deltas, &widths, limits);
+        let r = log_reference::frame(epoch, &deltas, &widths, limits);
+        assert_eq!(p, r, "case {case}");
+        let mut frame = match r {
+            Ok(f) => f,
+            Err(e) => {
+                *errors.entry(format!("{e:?}")).or_insert(0) += 1;
+                continue;
+            }
+        };
+        // Damage some frames: a flipped byte, a cut, a forged checksum.
+        let len = u32::from_le_bytes(frame[..4].try_into().unwrap());
+        match rng.below(6) {
+            0 => {
+                let i = 4 + rng.below(frame.len() as u64 - 4) as usize;
+                frame[i] ^= 1 << rng.below(8);
+            }
+            1 => {
+                // A wrong payload with a valid checksum reaches the decoder.
+                let i = 4 + rng.below(u64::from(len)) as usize;
+                frame[i] ^= 1 << rng.below(8);
+                let sum = log_reference::frame_sum(len, &frame[4..4 + len as usize]);
+                let at = frame.len() - 32;
+                frame[at..].copy_from_slice(&sum);
+            }
+            _ => {}
+        }
+        let body = &frame[4..];
+        let checks = crate::port::log_frame_ok(body, len);
+        let expected = log_reference::frame_sum(len, &body[..len as usize]) == body[len as usize..];
+        assert_eq!(checks, expected, "case {case}");
+        if !checks {
+            *errors.entry("checksum".to_string()).or_insert(0) += 1;
+            continue;
+        }
+        let read_epoch = if rng.below(20) == 0 { epoch + 1 } else { epoch };
+        let payload = &body[..len as usize];
+        let p = crate::port::log_decode(payload, read_epoch, &widths, limits);
+        let r = log_reference::decode(payload, read_epoch, &widths, limits);
+        assert_eq!(p, r, "case {case}");
+        match r {
+            Ok(_) => ok += 1,
+            Err(e) => *errors.entry(format!("{e:?}")).or_insert(0) += 1,
+        }
+    }
+    assert!(ok > 1_000, "{ok}: {errors:?}");
+    for e in [
+        "Schema",
+        "Limit(\"log rows\")",
+        "Limit(\"log frame bytes\")",
+        "checksum",
+        "Storage(\"log epoch\")",
+    ] {
+        assert!(errors.get(e).copied().unwrap_or(0) > 10, "{e}: {errors:?}");
+    }
+    assert!(
+        errors
+            .keys()
+            .filter(|e| e.contains("log frame\"") || e.contains("noncanonical"))
+            .count()
+            == 2,
+        "{errors:?}"
+    );
 }
 
 /// Rows that all collide under a fixed multiplicative hash
