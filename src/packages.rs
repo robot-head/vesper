@@ -351,7 +351,9 @@ fn target_of(triple: &str) -> VsysTarget {
 
 /// Whether a manifest `.vsys` path is per-target.
 fn is_per_target_path(path: &str) -> bool {
-    ["@TARGET@", "@OS@", "@ARCH@"].iter().any(|t| path.contains(t))
+    ["@TARGET@", "@OS@", "@ARCH@"]
+        .iter()
+        .any(|t| path.contains(t))
 }
 
 /// A per-target manifest path with its tokens replaced for `target`.
@@ -913,13 +915,9 @@ impl Loader<'_> {
                     if !file.is_file() {
                         continue;
                     }
-                    let text =
-                        fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
-                    targets.push((
-                        t.triple,
-                        display(&normalize(&shown.join(&expanded))),
-                        text,
-                    ));
+                    let text = fs::read_to_string(&file)
+                        .map_err(|e| format!("{}: {e}", file.display()))?;
+                    targets.push((t.triple, display(&normalize(&shown.join(&expanded))), text));
                 }
                 if targets.is_empty() {
                     self.manifest_errors
