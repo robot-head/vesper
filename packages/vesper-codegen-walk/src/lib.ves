@@ -1,0 +1,1004 @@
+// @vesper/native-walk: the native graph walk of src/native.rs (Rust-exit
+// gap wave 1, lane 11, #1509).
+//
+// SH4 ported native lowering family by family through the codegen swap
+// hooks (src/codegen_swap.rs); the walk that drives them is still Rust.
+// Part 1 ports the register plan the walk makes for each graph before it
+// emits it, over the @vesper/place-ir tables and the @vesper/check-data
+// world: `register_locals`, `keeps_in_home` and `in_param_registers`, the
+// scalar locals and `in` parameters the optimize path keeps in Cranelift
+// variables instead of home slots, with `aggregates::cyclic_blocks` for
+// the loop weights and `bounds_hoist::calls_out`.
+//
+// The plan asks two things of each callee: whether its row is empty and
+// whether it is specialized into its callers (`specialized_function`,
+// with `capability_only`, `fail_only` and
+// `source_analysis::contains_function`). Those predicates belong to the
+// calls family's @vesper/codegen-calls (SH4 lane 7, #1281, PR #1306);
+// the copies here are private and go once that package merges.
+//
+// `native_walk_decisions` is the harness entry: one text dump per program,
+// line for line `decisions` of tests/self_host_native_walk.rs.
+//
+// The input is `@vesper/place-ir`'s (names, types, world, program), then
+// two sections of this package:
+//
+//   signatures: n, n x (name, generics, result type, effects row type,
+//               np, np x (name, pass, type))      world.functions, by name
+//   handles:    one per program function: k, k names, the free names of
+//               its `Op::Handle` bodies (the bodies stay Rust payloads)
+
+use @vesper/check-data::pack_text;
+use @vesper/check-data::util::{
+    add,
+    inc,
+    n32,
+    push_decimal,
+    u32_at,
+    u64_at,
+    u8_at,
+    w
+};
+use @vesper/check-data::names::{
+    Names
+};
+use @vesper/check-data::types::{
+    Types,
+    default_type,
+    substitute
+};
+use @vesper/check-data::input::{
+    Ctx,
+    Reader,
+    read_ctx
+};
+use @vesper/check-layout::{
+    Layouts,
+    layout_of,
+    layouts_new
+};
+use @vesper/place-ir::{
+    FnRow,
+    InstRow,
+    Program,
+    read_program
+};
+
+const NONE32: u32 = 4294967295;
+const NONE64: u64 = 18446744073709551615;
+
+// check-data's type kinds.
+const K_NAMED: u8 = 1;
+const K_TUPLE: u8 = 2;
+const K_FN: u8 = 3;
+const K_ROW: u8 = 4;
+
+// Passes.
+const PASS_IN: u64 = 0;
+
+// Operand tags and opcodes of @vesper/place-ir.
+const T_BLOCK: u8 = 7;
+const OP_READ: u8 = 2;
+const OP_BIND: u8 = 3;
+const OP_WRITE: u8 = 4;
+const OP_CALL: u8 = 11;
+const OP_INDIRECT: u8 = 12;
+const OP_CLOSURE: u8 = 14;
+const OP_HANDLE: u8 = 15;
+const OP_TILED: u8 = 17;
+const OP_SEQ: u8 = 18;
+const OP_FIP: u8 = 19;
+
+// Pattern and literal kinds.
+const PAT_BIND: u64 = 1;
+const PAT_LITERAL: u64 = 2;
+const PAT_TUPLE: u64 = 3;
+const PAT_CONSTRUCTOR: u64 = 4;
+
+// Pool kinds: 0 seq, 5 a hoisted header read, 6 a bounds guard.
+const POOL_SEQ: u64 = 0;
+
+// `aggregates::LOOP_WEIGHT`: a use inside a loop counts this many times.
+const LOOP_WEIGHT: u64 = 8;
+
+// Patterns nested deeper than this are corrupt input.
+const MAX_DEPTH: u64 = 512;
+
+// ----- small helpers ------------------------------------------------------------
+
+fn put(inout o: ChunkSeq[u8], in s: Str) {
+    o.extend(in s.as_bytes());
+}
+
+fn flag(inout o: ChunkSeq[u8], b: bool) {
+    if b {
+        o.push(49);
+    } else {
+        o.push(48);
+    }
+}
+
+fn zeros64(n: u64) -> ChunkSeq[u64] {
+    let mut s: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+    s.resize(n, 0);
+    s
+}
+
+fn zeros8(n: u64) -> ChunkSeq[u8] {
+    let mut s: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](n);
+    s.resize(n, 0);
+    s
+}
+
+fn set64(inout s: ChunkSeq[u64], i: u64, x: u64) {
+    let ok = s.try_set(i, x);
+}
+
+fn set8(inout s: ChunkSeq[u8], i: u64, x: u8) {
+    let ok = s.try_set(i, x);
+}
+
+// A per-symbol mark, grown on demand.
+fn mark(inout s: ChunkSeq[u8], sym: u32) {
+    if w(sym) >= s.len() {
+        s.resize(inc(w(sym)), 0);
+    }
+    set8(inout s, w(sym), 1);
+}
+
+fn marked(in s: ChunkSeq[u8], sym: u32) -> bool {
+    u8_at(in s, w(sym)) != 0
+}
+
+// A per-symbol count, grown on demand.
+fn bump(inout s: ChunkSeq[u64], sym: u32, by: u64) {
+    if w(sym) >= s.len() {
+        s.resize(inc(w(sym)), 0);
+    }
+    set64(inout s, w(sym), add(u64_at(in s, w(sym)), by));
+}
+
+// ----- signatures -----------------------------------------------------------------
+
+// A function of `world.functions` (its declared signature).
+copy struct Sig {
+    name: u32,
+    generics: u64,
+    result: u32,
+    // the effects row id (RowNode)
+    row: u32,
+    // params: pname/ppass/pty[pa..pa+pn]
+    pa: u64,
+    pn: u64,
+}
+
+struct Sigs {
+    rows: ChunkSeq[Sig],
+    pname: ChunkSeq[u32],
+    ppass: ChunkSeq[u64],
+    pty: ChunkSeq[u32],
+    // symbol -> signature index + 1
+    by_name: ChunkSeq[u64],
+}
+
+fn sig_at(in s: Sigs, i: u64) -> Sig {
+    match s.rows.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => Sig {
+            name: 0,
+            generics: 0,
+            result: 0,
+            row: 0,
+            pa: 0,
+            pn: 0
+        },
+    }
+}
+
+// The signature index of `name`, or NONE64.
+fn sig_of(in s: Sigs, name: u32) -> u64 {
+    let k = u64_at(in s.by_name, w(name));
+    if k == 0 {
+        NONE64
+    } else {
+        wrapping_sub(k, 1)
+    }
+}
+
+fn name_word(inout r: Reader, in b: Slice[u8], in c: Ctx) -> u32 {
+    u32_at(in c.nmap, r.word(in b))
+}
+
+fn type_word(inout r: Reader, in b: Slice[u8], in c: Ctx) -> u32 {
+    u32_at(in c.tmap, r.word(in b))
+}
+
+fn read_sigs(inout r: Reader, in b: Slice[u8], in c: Ctx) -> Sigs {
+    let mut s = Sigs {
+        rows: ChunkSeq::new[Sig](),
+        pname: ChunkSeq::new[u32](),
+        ppass: ChunkSeq::new[u64](),
+        pty: ChunkSeq::new[u32](),
+        by_name: ChunkSeq::new[u64]()
+    };
+    let n = r.word(in b);
+    for i in 0..n {
+        let name = name_word(inout r, in b, in c);
+        let generics = r.word(in b);
+        let result = type_word(inout r, in b, in c);
+        let effects = type_word(inout r, in b, in c);
+        let row = c.types.node(effects).r2;
+        let pa = s.pname.len();
+        let np = r.word(in b);
+        for j in 0..np {
+            s.pname.push(name_word(inout r, in b, in c));
+            s.ppass.push(r.word(in b));
+            s.pty.push(type_word(inout r, in b, in c));
+        }
+        s
+            .rows
+            .push(
+                Sig {
+                    name: name,
+                    generics: generics,
+                    result: result,
+                    row: row,
+                    pa: pa,
+                    pn: np
+                }
+            );
+        if w(name) >= s.by_name.len() {
+            s.by_name.resize(inc(w(name)), 0);
+        }
+        set64(inout s.by_name, w(name), inc(i));
+    }
+    s
+}
+
+// `ffi_lowering::is_foreign_effect`: the `Ffi$` prefix.
+fn is_foreign(in names: Names, e: u32) -> bool {
+    names.has_prefix(e, in "Ffi$".as_bytes())
+}
+
+// `capability_effects::is_capability_effect`: the four capabilities and
+// `Isa` (§14.2).
+fn is_capability(in names: Names, e: u32) -> bool {
+    names.spells(e, in "ConstTime".as_bytes())
+        || names.spells(e, in "Realtime".as_bytes())
+        || names.spells(e, in "DetFloat".as_bytes())
+        || names.spells(e, in "ConstDenorm".as_bytes())
+        || names.spells(e, in "Isa".as_bytes())
+}
+
+fn is_fail(in names: Names, e: u32) -> bool {
+    names.spells(e, in "Fail".as_bytes())
+}
+
+struct Gen {
+    c: Ctx,
+    p: Program,
+    s: Sigs,
+    ls: Layouts,
+    o: ChunkSeq[u8],
+    // `contains_function`'s names being visited
+    seen: ChunkSeq[u32],
+}
+
+impl Gen {
+    // `source_analysis::contains_function`.
+    fn contains_function(inout self, t: u32) -> bool {
+        self.seen.clear();
+        self.visit(t)
+    }
+
+    fn visit(inout self, t: u32) -> bool {
+        let n = self.c.types.node(t);
+        if n.kind == K_FN {
+            return true;
+        }
+        if n.kind == K_TUPLE {
+            for i in 0..w(n.n) {
+                let a = self.c.types.arg(t, i);
+                if self.visit(a) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        if n.kind != K_NAMED {
+            return false;
+        }
+        for i in 0..self.seen.len() {
+            if u32_at(in self.seen, i) == n.name {
+                for j in 0..w(n.n) {
+                    let a = self.c.types.arg(t, j);
+                    if self.c.types.kind(a) == K_FN {
+                        return true;
+                    }
+                }
+                return false;
+            }
+        }
+        let ai = self.c.world.lookup(n.name);
+        if ai == NONE32 {
+            return false;
+        }
+        let adt = self.c.world.adt(ai);
+        let vars = self.c.world.vars_of(in self.c.types, adt, t);
+        self.seen.push(n.name);
+        let mut found = false;
+        for vi in 0..w(adt.vn) {
+            if found {
+                break;
+            }
+            let v = self.c.world.variant(add(w(adt.va), vi));
+            for fi in 0..w(v.fc) {
+                let f = self.c.world.field(add(w(v.fa), fi));
+                let ft = substitute(inout self.c.types, f.ty, in vars);
+                if self.visit(ft) {
+                    found = true;
+                    break;
+                }
+            }
+        }
+        let k = self.seen.len();
+        self.seen.truncate(wrapping_sub(k, 1));
+        found
+    }
+
+    fn any_param_contains_function(inout self, g: Sig) -> bool {
+        for i in 0..g.pn {
+            let t = u32_at(in self.s.pty, add(g.pa, i));
+            if self.contains_function(t) {
+                return true;
+            }
+        }
+        false
+    }
+
+    // `capability_only`: every effect of the row is a capability or a
+    // foreign library (the empty row included).
+    fn capability_only(in self, g: Sig) -> bool {
+        let row = self.c.types.row(g.row);
+        for i in 0..w(row.n) {
+            let e = self.c.types.effect_at(add(w(row.a), i));
+            if !(is_capability(in self.c.names, e.name) || is_foreign(in self.c.names, e.name)) {
+                return false;
+            }
+        }
+        true
+    }
+
+    // `fail_only`.
+    fn fail_only(inout self, g: Sig) -> bool {
+        let row = self.c.types.row(g.row);
+        if row.tail != 0 {
+            return false;
+        }
+        let mut any_fail = false;
+        for i in 0..w(row.n) {
+            let e = self.c.types.effect_at(add(w(row.a), i));
+            if is_fail(in self.c.names, e.name) {
+                any_fail = true;
+            }
+        }
+        if !any_fail {
+            return false;
+        }
+        for i in 0..w(row.n) {
+            let e = self.c.types.effect_at(add(w(row.a), i));
+            let fail = is_fail(in self.c.names, e.name) && e.label == 0 && e.n == 1;
+            let cap = (
+                is_capability(in self.c.names, e.name) || is_foreign(in self.c.names, e.name)
+            )
+                && e.label == 0
+                && e.n == 0;
+            if !(fail || cap) {
+                return false;
+            }
+        }
+        if self.contains_function(g.result) {
+            return false;
+        }
+        ! self.any_param_contains_function(g)
+    }
+
+    // `specialized_function`.
+    fn specialized(inout self, g: Sig) -> bool {
+        let row = self.c.types.row(g.row);
+        let first = !self.capability_only(g)
+            || row.tail != 0
+            || self.contains_function(g.result)
+            || self.any_param_contains_function(g);
+        first && !self.fail_only(g)
+    }
+
+    // The callee facts `register_locals` reads: whether a call of it is
+    // pure (an empty row) and whether it is specialized into its callers.
+    fn signature_line(inout self, i: u64) {
+        let g = sig_at(in self.s, i);
+        put(inout self.o, in "sig ");
+        self.c.names.write(g.name, inout self.o);
+        self.o.push(32);
+        let row = self.c.types.row(g.row);
+        flag(inout self.o, row.n == 0 && row.tail == 0);
+        let spec = self.specialized(g);
+        flag(inout self.o, spec);
+        self.o.push(10);
+    }
+}
+
+// ----- one graph ------------------------------------------------------------------
+
+// A parameter of a lowered graph.
+copy struct Param {
+    name: u32,
+    pass: u64,
+    ty: u32,
+}
+
+// What the register plan reads of one graph: its parameters and locals
+// (from the header words), the blocks on a cycle and the handler names.
+struct Graph {
+    params: ChunkSeq[Param],
+    lname: ChunkSeq[u32],
+    lty: ChunkSeq[u32],
+    cyclic: ChunkSeq[u8],
+    // the free names of its handler bodies
+    handles: ChunkSeq[u32],
+}
+
+fn param_at(in g: Graph, i: u64) -> Param {
+    match g.params.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => Param {
+            name: 0,
+            pass: 0,
+            ty: 0
+        },
+    }
+}
+
+// The header words of `f` (place-ir `header`): parameters, result,
+// effects, bounds, captures, values, locals.
+fn read_header(in p: Program, f: FnRow, inout g: Graph) {
+    let mut i = f.ha;
+    let np = p.op(i);
+    i = inc(i);
+    for k in 0..np {
+        let name = n32(p.op(i));
+        let pass = p.op(inc(i));
+        let nproj = p.op(add(i, 2));
+        i = add(add(i, 3), nproj);
+        let ty = n32(p.op(i));
+        // type, span start, span end
+        i = add(i, 3);
+        g
+            .params
+            .push(
+                Param {
+                    name: name,
+                    pass: pass,
+                    ty: ty
+                }
+            );
+    }
+    // result, effects
+    i = add(i, 2);
+    let nb = p.op(i);
+    i = add(inc(i), wrapping_mul(nb, 2));
+    let nc = p.op(i);
+    i = add(inc(i), nc);
+    let nv = p.op(i);
+    i = add(inc(i), wrapping_mul(nv, 2));
+    let nl = p.op(i);
+    i = inc(i);
+    for k in 0..nl {
+        g.lname.push(n32(p.op(i)));
+        g.lty.push(n32(p.op(inc(i))));
+        i = add(i, 2);
+    }
+}
+
+// `aggregates::cyclic_blocks`: the blocks on a cycle of the terminators'
+// edges (petgraph's `tarjan_scc`, components of more than one block or
+// with a self edge), by an iterative Tarjan.
+fn cyclic_blocks(in p: Program, f: FnRow) -> ChunkSeq[u8] {
+    let n = f.bc;
+    let mut out = zeros8(n);
+    // edges of block b: to[at[b]..at[b + 1]]
+    let mut at = zeros64(inc(n));
+    let mut to: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for b in 0..n {
+        set64(inout at, b, to.len());
+        let row = p.block(add(f.b0, b));
+        for i in row.ta..add(row.ta, row.tn) {
+            if p.tag(i) == T_BLOCK {
+                let x = p.op(i);
+                if x < n {
+                    to.push(x);
+                    if x == b {
+                        set8(inout out, b, 1);
+                    }
+                }
+            }
+        }
+    }
+    set64(inout at, n, to.len());
+    let mut index = zeros64(n);
+    let mut low = zeros64(n);
+    let mut on = zeros8(n);
+    let mut stack: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    // the DFS: (node, next edge)
+    let mut dn: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut de: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    // index + 1; 0 = unvisited
+    let mut next: u64 = 1;
+    for root in 0..n {
+        if u64_at(in index, root) != 0 {
+            continue;
+        }
+        set64(inout index, root, next);
+        set64(inout low, root, next);
+        next = inc(next);
+        stack.push(root);
+        set8(inout on, root, 1);
+        dn.push(root);
+        de.push(u64_at(in at, root));
+        loop {
+            let depth = dn.len();
+            if depth == 0 {
+                break;
+            }
+            let v = u64_at(in dn, wrapping_sub(depth, 1));
+            let e = u64_at(in de, wrapping_sub(depth, 1));
+            if e < u64_at(in at, inc(v)) {
+                set64(inout de, wrapping_sub(depth, 1), inc(e));
+                let x = u64_at(in to, e);
+                if u64_at(in index, x) == 0 {
+                    set64(inout index, x, next);
+                    set64(inout low, x, next);
+                    next = inc(next);
+                    stack.push(x);
+                    set8(inout on, x, 1);
+                    dn.push(x);
+                    de.push(u64_at(in at, x));
+                } else if u8_at(in on, x) != 0 {
+                    let lx = u64_at(in index, x);
+                    if lx < u64_at(in low, v) {
+                        set64(inout low, v, lx);
+                    }
+                }
+                continue;
+            }
+            // v is finished
+            dn.truncate(wrapping_sub(depth, 1));
+            de.truncate(wrapping_sub(depth, 1));
+            if depth > 1 {
+                let parent = u64_at(in dn, wrapping_sub(depth, 2));
+                let lv = u64_at(in low, v);
+                if lv < u64_at(in low, parent) {
+                    set64(inout low, parent, lv);
+                }
+            }
+            if u64_at(in low, v) == u64_at(in index, v) {
+                // pop the component of v
+                let mut size: u64 = 0;
+                let top = stack.len();
+                let mut k = top;
+                loop {
+                    k = wrapping_sub(k, 1);
+                    size = inc(size);
+                    if u64_at(in stack, k) == v {
+                        break;
+                    }
+                }
+                for j in k..top {
+                    let x = u64_at(in stack, j);
+                    set8(inout on, x, 0);
+                    if size > 1 {
+                        set8(inout out, x, 1);
+                    }
+                }
+                stack.truncate(k);
+            }
+        }
+    }
+    out
+}
+
+// The words after a pattern starting at `i` (place-ir `pattern`), marking
+// the names it binds in `out` (`bound_names`).
+fn pattern_names(in p: Program, i: u64, depth: u64, inout out: ChunkSeq[u8]) -> u64 {
+    let kind = p.op(i);
+    let mut j = add(i, 3);
+    if depth > MAX_DEPTH {
+        return j;
+    }
+    if kind == PAT_BIND {
+        mark(inout out, n32(p.op(j)));
+        j = inc(j);
+    } else if kind == PAT_LITERAL {
+        j = add(j, 3);
+    } else if kind == PAT_TUPLE {
+        let n = p.op(j);
+        j = inc(j);
+        for k in 0..n {
+            j = pattern_names(in p, j, inc(depth), inout out);
+        }
+    } else if kind == PAT_CONSTRUCTOR {
+        let n = p.op(add(j, 2));
+        j = add(j, 3);
+        for k in 0..n {
+            j = pattern_names(in p, inc(j), inc(depth), inout out);
+        }
+    }
+    j
+}
+
+// The root symbol of a written place (`place.split('.').next()`).
+fn place_root(inout names: Names, place: u32) -> u32 {
+    let size = names.size(place);
+    let mut text: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for k in 0..size {
+        let c = names.byte(place, k);
+        if c == 46 {
+            return names.intern(in text.as_slice());
+        }
+        text.push(c);
+    }
+    place
+}
+
+// An argument list at `i` is n, then n x (pass, value, root, path); the
+// pass of argument k:
+fn arg_pass(in p: Program, i: u64, k: u64) -> u64 {
+    p.op(add(inc(i), wrapping_mul(k, 4)))
+}
+
+// The place root of argument k, as symbol + 1 (0 when it has no place).
+fn arg_root(in p: Program, i: u64, k: u64) -> u64 {
+    p.op(add(add(inc(i), wrapping_mul(k, 4)), 2))
+}
+
+// The argument list of instruction `inst` that the register plans read
+// (NONE64 when it has none).
+fn inst_args(in p: Program, inst: InstRow) -> u64 {
+    if inst.op == OP_CALL
+        || inst.op == OP_INDIRECT
+        || inst.op == OP_TILED
+        || inst.op == OP_SEQ
+        || inst.op == OP_FIP {
+        inc(inst.a)
+    } else {
+        NONE64
+    }
+}
+
+// The aliases list (n, n x (key, value)) of a closure or handler.
+fn alias_list(inst: InstRow) -> u64 {
+    if inst.op == OP_HANDLE {
+        add(inst.a, 3)
+    } else {
+        inc(inst.a)
+    }
+}
+
+// Marks the names a closure or handler keeps in memory: its moves' roots
+// and, for a handler, its aliases (both sides) and its body's free names.
+fn mark_capture(in p: Program, inst: InstRow, in g: Graph, inout out: ChunkSeq[u8]) {
+    let al = alias_list(inst);
+    let na = p.op(al);
+    if inst.op == OP_HANDLE {
+        for k in 0..g.handles.len() {
+            mark(inout out, u32_at(in g.handles, k));
+        }
+        for k in 0..na {
+            let at = add(inc(al), wrapping_mul(k, 2));
+            mark(inout out, n32(p.op(at)));
+            mark(inout out, n32(p.op(inc(at))));
+        }
+    }
+    let ml = add(inc(al), wrapping_mul(na, 2));
+    let nm = p.op(ml);
+    for k in 0..nm {
+        mark(inout out, n32(p.op(add(inc(ml), wrapping_mul(k, 2)))));
+    }
+}
+
+// `bounds_hoist::calls_out`.
+fn calls_out(in p: Program, in names: Names, inst: InstRow) -> bool {
+    if inst.op == OP_CALL
+        || inst.op == OP_TILED
+        || inst.op == OP_FIP
+        || inst.op == OP_INDIRECT
+        || inst.op == OP_CLOSURE
+        || inst.op == OP_HANDLE {
+        return true;
+    }
+    if inst.op != OP_SEQ {
+        return false;
+    }
+    let pool = p.pool_row(p.op(inst.a));
+    if pool.kind != POOL_SEQ {
+        // a hoisted header read or a bounds guard
+        return false;
+    }
+    // Rust's encoder keeps `Hoisted` and `BoundsGuard` as seq payloads
+    // labelled with their `Debug` text.
+    !(
+        keeps_length(in names, pool.label)
+            || names.has_prefix(pool.label, in "Hoisted(".as_bytes())
+            || names.has_prefix(pool.label, in "BoundsGuard".as_bytes())
+    )
+}
+
+// `bounds_hoist::keeps_length` of a `SeqOp`'s `Debug` text.
+fn keeps_length(in names: Names, s: u32) -> bool {
+    names.spells(s, in "Get".as_bytes())
+        || names.spells(s, in "SliceGet".as_bytes())
+        || names.spells(s, in "Set".as_bytes())
+        || names.spells(s, in "SliceSet".as_bytes())
+        || names.spells(s, in "TryGet".as_bytes())
+        || names.spells(s, in "TrySet".as_bytes())
+        || names.spells(s, in "Len".as_bytes())
+        || names.spells(s, in "SliceLen".as_bytes())
+        || names.spells(s, in "AsSlice".as_bytes())
+        || names.spells(s, in "SubSlice".as_bytes())
+}
+
+// `keeps_in_home` (#1330).
+fn keeps_in_home(others: u64, loans: u64) -> bool {
+    loans >= LOOP_WEIGHT && others > 0
+}
+
+impl Gen {
+    fn is_register_scalar(inout self, t: u32) -> bool {
+        let d = default_type(inout self.c.types, t);
+        let n = self.c.types.node(d);
+        if n.kind != K_NAMED || n.n != 0 {
+            return false;
+        }
+        let k = self.c.world.k;
+        k.is_integer(n.name) || n.name == k.f32_ || n.name == k.f64_ || n.name == k.bool_
+    }
+
+    // `in_param_registers`: marks the parameters in `out`.
+    fn in_param_registers(
+        inout self,
+        f: FnRow,
+        in g: Graph,
+        nested: bool,
+        inout out: ChunkSeq[u8]
+    ) {
+        let mut kept: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        let mut calls = false;
+        for bi in 0..f.bc {
+            let row = self.p.block(add(f.b0, bi));
+            for ii in row.i0..add(row.i0, row.ic) {
+                let inst = self.p.inst(ii);
+                if calls_out(in self.p, in self.c.names, inst) {
+                    calls = true;
+                }
+                if inst.op == OP_WRITE {
+                    let root = place_root(inout self.c.names, n32(self.p.op(inst.a)));
+                    mark(inout kept, root);
+                } else if inst.op == OP_BIND {
+                    let end = pattern_names(in self.p, inc(inst.a), 0, inout kept);
+                } else if inst.op == OP_READ {
+                    let root = n32(self.p.op(inst.a));
+                    let path = self.p.op(inc(inst.a));
+                    let pass = self.p.op(add(inst.a, 2));
+                    if pass != PASS_IN && !(path == 0 && self.callback(in g, root)) {
+                        mark(inout kept, root);
+                    }
+                } else if inst.op == OP_CLOSURE || inst.op == OP_HANDLE {
+                    mark_capture(in self.p, inst, in g, inout kept);
+                } else {
+                    let a = inst_args(in self.p, inst);
+                    if a != NONE64 {
+                        for k in 0..self.p.op(a) {
+                            let root = arg_root(in self.p, a, k);
+                            if root != 0 && arg_pass(in self.p, a, k) != PASS_IN {
+                                mark(inout kept, n32(wrapping_sub(root, 1)));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let all = !nested && calls;
+        for i in 0..g.params.len() {
+            let pr = param_at(in g, i);
+            if pr.pass != PASS_IN || all || marked(in kept, pr.name) {
+                continue;
+            }
+            let mut local = false;
+            for k in 0..g.lname.len() {
+                if u32_at(in g.lname, k) == pr.name {
+                    local = true;
+                }
+            }
+            if !local {
+                continue;
+            }
+            let d = default_type(inout self.c.types, pr.ty);
+            let l = layout_of(
+                inout self.ls,
+                inout self.c.types,
+                inout self.c.names,
+                in self.c.world,
+                d
+            );
+            if l != NONE32 && !self.ls.aggregate(l) {
+                mark(inout out, pr.name);
+            }
+        }
+    }
+
+    // Whether `name` is a function-typed parameter (a lent callback).
+    fn callback(inout self, in g: Graph, name: u32) -> bool {
+        for i in 0..g.params.len() {
+            let pr = param_at(in g, i);
+            if pr.name == name {
+                let d = default_type(inout self.c.types, pr.ty);
+                if self.c.types.kind(d) == K_FN {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    // `register_locals`: marks the locals kept in registers in `out`.
+    fn register_locals(inout self, f: FnRow, in g: Graph, nested: bool, inout out: ChunkSeq[u8]) {
+        let mut memory: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        let mut lent_in: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let mut touched: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        for bi in 0..f.bc {
+            let weight = if u8_at(in g.cyclic, bi) != 0 {
+                LOOP_WEIGHT
+            } else {
+                1
+            };
+            let row = self.p.block(add(f.b0, bi));
+            for ii in row.i0..add(row.i0, row.ic) {
+                let inst = self.p.inst(ii);
+                if inst.op == OP_READ {
+                    bump(inout touched, n32(self.p.op(inst.a)), weight);
+                } else if inst.op == OP_WRITE {
+                    let root = place_root(inout self.c.names, n32(self.p.op(inst.a)));
+                    bump(inout touched, root, weight);
+                } else if inst.op == OP_CALL {
+                    let callee = n32(self.p.op(inst.a));
+                    let si = sig_of(in self.s, callee);
+                    let mut pure = false;
+                    let mut inlined = false;
+                    if si != NONE64 {
+                        let sg = sig_at(in self.s, si);
+                        let rw = self.c.types.row(sg.row);
+                        pure = rw.n == 0 && rw.tail == 0;
+                        inlined = self.specialized(sg);
+                    }
+                    if !pure {
+                        let a = inc(inst.a);
+                        for k in 0..self.p.op(a) {
+                            let root = arg_root(in self.p, a, k);
+                            if root == 0 {
+                                continue;
+                            }
+                            let sym = n32(wrapping_sub(root, 1));
+                            if arg_pass(in self.p, a, k) != PASS_IN {
+                                mark(inout memory, sym);
+                            } else if !inlined {
+                                bump(inout lent_in, sym, weight);
+                            }
+                        }
+                    }
+                } else if inst.op == OP_INDIRECT || inst.op == OP_TILED {
+                    let a = inc(inst.a);
+                    for k in 0..self.p.op(a) {
+                        let root = arg_root(in self.p, a, k);
+                        if root != 0 {
+                            mark(inout memory, n32(wrapping_sub(root, 1)));
+                        }
+                    }
+                } else if inst.op == OP_CLOSURE || inst.op == OP_HANDLE {
+                    mark_capture(in self.p, inst, in g, inout memory);
+                }
+            }
+        }
+        for s in 0..lent_in.len() {
+            let loans = u64_at(in lent_in, s);
+            if loans == 0 {
+                continue;
+            }
+            let t = u64_at(in touched, s);
+            let others = if t > loans {
+                wrapping_sub(t, loans)
+            } else {
+                0
+            };
+            if keeps_in_home(others, loans) {
+                mark(inout memory, n32(s));
+            }
+        }
+        for k in 0..g.lname.len() {
+            let name = u32_at(in g.lname, k);
+            if !marked(in memory, name) && self.is_register_scalar(u32_at(in g.lty, k)) {
+                mark(inout out, name);
+            }
+        }
+        self.in_param_registers(f, in g, nested, inout out);
+    }
+
+    fn registers_line(inout self, in label: Str, f: FnRow, in g: Graph, nested: bool) {
+        let mut regs: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        self.register_locals(f, in g, nested, inout regs);
+        put(inout self.o, in label);
+        for k in 0..g.lname.len() {
+            let name = u32_at(in g.lname, k);
+            if marked(in regs, name) {
+                self.o.push(32);
+                self.c.names.write(name, inout self.o);
+            }
+        }
+        self.o.push(10);
+    }
+
+    fn function(inout self, fi: u64, sink handles: ChunkSeq[u32]) {
+        let f = self.p.function(fi);
+        let mut g = Graph {
+            params: ChunkSeq::new[Param](),
+            lname: ChunkSeq::new[u32](),
+            lty: ChunkSeq::new[u32](),
+            cyclic: cyclic_blocks(in self.p, f),
+            handles: handles
+        };
+        read_header(in self.p, f, inout g);
+        put(inout self.o, in "fn ");
+        self.c.names.write(f.name, inout self.o);
+        self.o.push(10);
+        put(inout self.o, in "cyclic");
+        for b in 0..f.bc {
+            if u8_at(in g.cyclic, b) != 0 {
+                self.o.push(32);
+                push_decimal(inout self.o, b);
+            }
+        }
+        self.o.push(10);
+        self.registers_line(in "registers", f, in g, false);
+        self.registers_line(in "nested", f, in g, true);
+    }
+}
+
+// The harness entry: the signature lines, then each function's plan.
+pub fn native_walk_decisions(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut r = Reader {
+        pos: 0
+    };
+    let c = read_ctx(inout r, in b);
+    let p = read_program(inout r, in b, in c);
+    let s = read_sigs(inout r, in b, in c);
+    let mut g = Gen {
+        c: c,
+        p: p,
+        s: s,
+        ls: layouts_new(),
+        o: ChunkSeq::new[u8](),
+        seen: ChunkSeq::new[u32]()
+    };
+    for i in 0..g.s.rows.len() {
+        g.signature_line(i);
+    }
+    for fi in 0..g.p.fn_count() {
+        let mut handles: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        let k = r.word(in b);
+        for j in 0..k {
+            handles.push(u32_at(in g.c.nmap, r.word(in b)));
+        }
+        g.function(fi, sink handles);
+    }
+    pack_text(in g.o)
+}
