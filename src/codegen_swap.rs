@@ -210,6 +210,15 @@ pub type VerifierHook = fn(
     &crate::native_verifiers::NativeVerifierPolicy,
 )
     -> Option<Result<crate::native_verifiers::NativeVerifierReport, String>>;
+/// The native walk's register-local plan (`native::register_locals`),
+/// called once per lowered graph on the optimize path (`#1509` part 2):
+/// `None` leaves the decision to Rust.
+pub type RegisterLocalsHook = fn(
+    &World,
+    &crate::ir::FunctionIr,
+    &std::collections::BTreeMap<String, Type>,
+    bool,
+) -> Option<std::collections::BTreeSet<String>>;
 
 /// The SH4 families. Each port lane installs the hooks of its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -293,6 +302,7 @@ pub struct CodegenHooks {
     pub component: Option<ComponentHook>,
     pub ebpf: Option<EbpfHook>,
     pub verifiers: Option<VerifierHook>,
+    pub register_locals: Option<RegisterLocalsHook>,
 }
 
 impl CodegenHooks {
@@ -319,6 +329,7 @@ impl CodegenHooks {
             || self.component.is_some()
             || self.ebpf.is_some()
             || self.verifiers.is_some()
+            || self.register_locals.is_some()
     }
 }
 

@@ -45,7 +45,7 @@ const K_LIMIT: u8 = 2;
 
 // `wasm_backend::compile` up to the core module: the core bytes and the
 // WIT text, or the error. Component encoding stays in Rust.
-fn compile(in b: Slice[u8]) -> (ChunkSeq[u8], ChunkSeq[u8], u64) eff [Fail[WErr]] {
+fn compile(in b: Slice[u8]) -> (ChunkSeq[u8], ChunkSeq[u8], u64, ChunkSeq[u64]) eff [Fail[WErr]] {
     let mut r = Reader {
         pos: 0
     };
@@ -69,11 +69,46 @@ fn compile(in b: Slice[u8]) -> (ChunkSeq[u8], ChunkSeq[u8], u64) eff [Fail[WErr]
     let wit = exports(inout l);
     l.define_all();
     let functions = l.b.function_count();
+    let handlers = handler_report(in l);
     let core = l.b.finish(max_pages);
-    (core, wit, functions)
+    (core, wit, functions, handlers)
 }
 
-// The harness entry: `[0, function count, packed core, packed WIT]` on
+// The artifact's `handlers` (`HandlerLowering`, in plan order): their count,
+// then per handler the packed site instance and effect names, the clause
+// count and each clause's operation index and mode (0 Abort, 1 Tail).
+fn handler_report(in l: L) -> ChunkSeq[u64] {
+    let mut out = ChunkSeq::new[u64]();
+    out.push(l.plan.handlers.len());
+    for i in 0..l.plan.handlers.len() {
+        let h = l.plan.handler(i);
+        let mut site = ChunkSeq::new[u8]();
+        l.cx.write_name(h.site, inout site);
+        push_all(inout out, in pack_text(in site));
+        let mut effect = ChunkSeq::new[u8]();
+        l.cx.write_name(h.ename, inout effect);
+        push_all(inout out, in pack_text(in effect));
+        out.push(h.cn);
+        for k in 0..h.cn {
+            let c = l.plan.clause(wrapping_add(h.c0, k));
+            out.push(c.op);
+            out.push(widen_u64(c.mode));
+        }
+    }
+    out
+}
+
+fn push_all(inout out: ChunkSeq[u64], in a: ChunkSeq[u64]) {
+    for i in 0..a.len() {
+        match a.try_get(i) {
+            Option::Some(x) => out.push(x),
+            Option::None => {},
+        }
+    }
+}
+
+// The harness entry: `[0, function count, packed core, packed WIT,
+// handler report]` on
 // success, else `[1, kind, construct, site]`.
 pub fn wasm_backend_compile(in input: Str) -> ChunkSeq[u64] {
     wasm_backend_compile_bytes(in input.as_bytes())
@@ -82,7 +117,7 @@ pub fn wasm_backend_compile(in input: Str) -> ChunkSeq[u64] {
 // The same over a byte slice (the hybrid module's entry, export ABI 4).
 pub fn wasm_backend_compile_bytes(in input: Slice[u8]) -> ChunkSeq[u64] {
     handle Fail[WErr] in {
-        let (core, wit, functions) = compile(in input);
+        let (core, wit, functions, handlers) = compile(in input);
         let mut out = ChunkSeq::new[u64]();
         out.push(0);
         out.push(functions);
@@ -100,6 +135,7 @@ pub fn wasm_backend_compile_bytes(in input: Slice[u8]) -> ChunkSeq[u64] {
                 Option::None => {},
             }
         }
+        push_all(inout out, in handlers);
         out
     } with {
         return value => value,

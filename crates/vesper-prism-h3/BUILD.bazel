@@ -57,6 +57,10 @@ DIVERGENT = {
     "message": ("message", "if hosts > 1 {", "if hosts > 2 {"),
     "capsule": ("capsule", "(widen_u64(byte(in v, 0)) << 24)", "(widen_u64(byte(in v, 0)) << 16)"),
     "control": ("control", "if is_uni(u.element_id) || is_server_initiated(u.element_id) {", "if is_uni(u.element_id) {"),
+    "session": ("session", "const MAX_HELD_STREAMS: u64 = 16;", "const MAX_HELD_STREAMS: u64 = 1;"),
+    "core": ("core", "c.fl_bidi.push(widen_u64(p.urgency));", "c.fl_bidi.push(0);"),
+    "server": ("server", "if !goaway_allows(s.goaway_sent, id) || s.r_id.len() >= s.conn.cfg.max_concurrent_requests {", "if s.r_id.len() >= s.conn.cfg.max_concurrent_requests {"),
+    "client": ("client", "Option::Some(prev) => g < prev,", "Option::Some(prev) => g > prev,"),
 }
 
 [
@@ -103,6 +107,10 @@ CHECKS = {
     "capsule": "frame_codec",
     "message": "message_rules",
     "control": "priority_bodies",
+    "session": "webtransport_mem",
+    "core": "priority_bodies",
+    "server": "h3_mem",
+    "client": "h3_mem",
 }
 
 [

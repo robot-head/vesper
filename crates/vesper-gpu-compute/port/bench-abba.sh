@@ -7,7 +7,8 @@
 #   6628b18a (part 2b).
 #
 # Each baseline is the example built at the last commit that had the Rust
-# code, from this checkout's example (it uses only the crate's public API),
+# code, from the example as it was at 086e3684 (the last commit whose
+# Context::kernel took WGSL; the examples use only the crate's public API),
 # in a git worktree under the target directory, kept between runs. Needs a
 # Vulkan device (Mesa lavapipe in CI).
 # Usage: crates/vesper-gpu-compute/port/bench-abba.sh <workload> [pairs]
@@ -28,7 +29,8 @@ if [ ! -x "$rust" ]; then
     tree="$baseline/tree-$commit"
     git worktree prune
     [ -d "$tree" ] || git worktree add --detach -q "$tree" "$commit"
-    cp "crates/vesper-gpu-compute/examples/$example.rs" "$tree/crates/vesper-gpu-compute/examples/$example.rs"
+    git show "${GPU_EXAMPLE_COMMIT:-086e3684361b70921b5492f0274bf20f92f9c97d}:crates/vesper-gpu-compute/examples/$example.rs" \
+        > "$tree/crates/vesper-gpu-compute/examples/$example.rs"
     (cd "$tree" && CARGO_TARGET_DIR="$baseline" \
         cargo build --locked --release -q -p vesper-gpu-compute --example "$example") >&2
     cp "$baseline/release/examples/$example" "$rust"

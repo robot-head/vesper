@@ -37,6 +37,9 @@ enum Slot {
     /// A slice or pointee buffer (8-byte aligned), and the element count of
     /// a slice. `None` when a nullable argument was `None`.
     Buffer(Option<(Vec<u64>, usize)>),
+    /// A `CStrList`: the terminated bytes, the start offset of each string,
+    /// and the pointer array (filled once the bytes no longer move).
+    List(Vec<u64>, Vec<usize>, Vec<u64>),
 }
 
 impl EvalHost {
@@ -166,6 +169,17 @@ impl EvalHost {
                     as_bytes(&mut buf)[..bytes.len()].copy_from_slice(&bytes);
                     Slot::Buffer(Some((buf, bytes.len())))
                 }
+                ParameterType::CStrList => {
+                    let bytes = elements(v)?
+                        .iter()
+                        .map(|b| int(b).map(|b| b as u8))
+                        .collect::<Result<Vec<u8>, _>>()?;
+                    let mut buf = vec![0u64; (bytes.len() + 1).div_ceil(8)];
+                    as_bytes(&mut buf)[..bytes.len()].copy_from_slice(&bytes);
+                    let starts = cstr_list_starts(&bytes);
+                    let array = vec![0u64; starts.len() + 1];
+                    Slot::List(buf, starts, array)
+                }
                 ParameterType::Slice {
                     element, nullable, ..
                 } => match option(v, *nullable)? {
@@ -218,6 +232,13 @@ impl EvalHost {
                     words.push(*n as u64);
                 }
                 (ParameterType::Slice { .. }, _) => words.extend([0, 0]),
+                (_, Slot::List(buf, starts, array)) => {
+                    let base = buf.as_mut_ptr() as u64;
+                    for (entry, start) in array.iter_mut().zip(starts.iter()) {
+                        *entry = base + *start as u64;
+                    }
+                    words.push(array.as_mut_ptr() as u64);
+                }
                 (_, Slot::Buffer(Some((buf, _)))) => words.push(buf.as_mut_ptr() as u64),
                 (_, _) => words.push(0),
             }
@@ -576,4 +597,21 @@ unsafe fn call_words(address: usize, w: &[u64]) -> Result<u64, String> {
             _ => return Err(format!("{} argument words", w.len())),
         })
     }
+}
+
+/// Where each string of a `CStrList` argument starts: every string ends at
+/// a NUL byte, and a last one without its NUL still counts.
+pub(crate) fn cstr_list_starts(bytes: &[u8]) -> Vec<usize> {
+    let mut starts = vec![];
+    let mut start = 0;
+    for (i, b) in bytes.iter().enumerate() {
+        if *b == 0 {
+            starts.push(start);
+            start = i + 1;
+        }
+    }
+    if start < bytes.len() {
+        starts.push(start);
+    }
+    starts
 }

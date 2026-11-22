@@ -38,3 +38,6 @@ check time port_differential timestamps_agree snp_reports_agree
 # One container fewer than ciborium's recursion limit.
 check cbor cbor_differential edge_cases_match_ciborium random_items_match_ciborium
 check cca port_differential cca_claims_agree snp_reports_agree
+check cose port_differential cose_sign1_agrees snp_reports_agree
+check corim port_differential corims_agree snp_reports_agree
+check corim_cca port_differential corim_store_agrees snp_reports_agree

@@ -1,0 +1,1060 @@
+// Shared HTTP/3 connection core (`Core` in `src/connection.rs`),
+// uniting `UniCore`, `SessionTable`, `BytePool`, outgoing stream
+// queues, RFC 9218 priorities, QPACK unblocked storage, and transport
+// flush scheduling.
+
+use self::{
+    Settings,
+    FrameError,
+    QpackError,
+    Priority,
+    PriorityUpdate,
+    TransportError,
+    ConnectionError,
+    ConnectionStats,
+    H3ConfigAbi,
+    EncoderCore,
+    DecoderCore,
+    Huff,
+    UniCmd,
+    FlushStep,
+    ConnCore,
+    UnpackedFields
+};
+use self::int::{
+    inc,
+    min64,
+    sat_add,
+    word,
+    byte,
+    remove_word
+};
+use self::varint::{
+    vput,
+    put_record
+};
+use self::frame::{
+    goaway_type,
+    settings_write
+};
+use self::priority::{
+    priority_default,
+    priority_parse_value,
+    schedule_into
+};
+use self::encoder::{
+    enc_on_decoder_stream,
+    enc_apply_peer_settings
+};
+use self::decoder::{
+    dec_on_encoder_stream,
+    dec_cancel_stream,
+    dec_take_decoder_stream
+};
+use self::control::{
+    uni_new,
+    uni_clear,
+    uni_accept,
+    uni_contains,
+    uni_closed,
+    uni_bytes
+};
+use self::pool::{
+    BytePool,
+    PoolRange,
+    CMD_STOP_SENDING,
+    CMD_RESET,
+    CMD_FINISH,
+    CMD_CLOSE,
+    CMD_SET_PRIORITY,
+    pool_new,
+    q_len,
+    q_push,
+    q_consume,
+    q_head_range,
+    q_drain_all_to,
+    put_u64_le,
+    get_u64_le,
+    bsearch_u64,
+    insert_word,
+    set_u64_contains,
+    set_u64_insert,
+    set_u64_remove,
+    out_map_new,
+    out_queued,
+    out_queue,
+    out_queue_fin,
+    out_discard,
+    out_remove_at,
+    cmd_buf_new,
+    cmd_clear,
+    push_cmd,
+    sev_buf_new,
+    hev_buf_new
+};
+use self::session::{
+    session_table_new,
+    session_known_gone,
+    incoming_wt_stream_fin,
+    wt_peer_fin
+};
+
+const STREAM_CONTROL: u64 = 0x00;
+const STREAM_QPACK_ENCODER: u64 = 0x02;
+const STREAM_QPACK_DECODER: u64 = 0x03;
+
+pub const FLUSH_STATUS_OK: u64 = 0;
+pub const FLUSH_STATUS_BLOCKED: u64 = 1;
+pub const FLUSH_STATUS_RESET: u64 = 2;
+pub const FLUSH_STATUS_NOT_READY: u64 = 3;
+pub const FLUSH_STATUS_UNKNOWN: u64 = 4;
+pub const FLUSH_STATUS_CLOSED: u64 = 5;
+pub const FLUSH_STATUS_UNSUPPORTED: u64 = 6;
+pub const FLUSH_STATUS_TOO_LARGE: u64 = 7;
+
+const FL_PHASE_IDLE: u64 = 0;
+const FL_PHASE_UNI: u64 = 1;
+const FL_PHASE_SCHED: u64 = 2;
+
+const MAX_U64: u64 = 18446744073709551615;
+const ASCII_ZERO: u8 = 48;
+const ASCII_COMMA: u8 = 44;
+const ASCII_SPACE: u8 = 32;
+
+pub fn conn_core_new(cfg: H3ConfigAbi, server: bool) -> ConnCore {
+    let s = cfg.settings;
+    let wt = match s.webtransport_max_sessions {
+        Option::Some(_) => true,
+        Option::None => false,
+    };
+    ConnCore {
+        cfg: cfg,
+        sent_settings: s,
+        server: server,
+        next_peer_bidi: 0,
+        unparsed: ChunkSeq::new[u64](),
+        sess: session_table_new(),
+        pool: pool_new(),
+        prio_id: ChunkSeq::new[u64](),
+        prio_urg: ChunkSeq::new[u64](),
+        prio_inc: ChunkSeq::new[u64](),
+        prio_upd: ChunkSeq::new[u64](),
+        hint_id: ChunkSeq::new[u64](),
+        hint_urg: ChunkSeq::new[u64](),
+        hint_inc: ChunkSeq::new[u64](),
+        rr: 0,
+        has_local: false,
+        local_control: 0,
+        local_encoder: 0,
+        local_decoder: 0,
+        opening: ChunkSeq::new[u64](),
+        peer_settings: Option::None,
+        uni: uni_new(server, wt, cfg.max_frame_payload, cfg.max_peer_uni_streams),
+        out: out_map_new(),
+        error: Option::None,
+        goaway_received: Option::None,
+        stats: ConnectionStats {
+            requests: 0,
+            responses: 0,
+            resets_sent: 0,
+            resets_received: 0,
+            rejected: 0,
+            malformed: 0,
+            unknown_frames: 0,
+            unknown_streams: 0,
+            blocked_sections: 0,
+            leaked_responders: 0,
+            budget_resets: 0,
+            priority_updates: 0,
+            interim_responses: 0,
+        },
+        cmd: cmd_buf_new(),
+        sev: sev_buf_new(),
+        hev: hev_buf_new(),
+        scratch: ChunkSeq::new[u8](),
+        cap_out: ChunkSeq::new[u8](),
+        msg_meta: ChunkSeq::new[u64](),
+        unb_kind: ChunkSeq::new[u64](),
+        unb_stream: ChunkSeq::new[u64](),
+        unb_count: ChunkSeq::new[u64](),
+        unb_boff: ChunkSeq::new[u64](),
+        unb_moff: ChunkSeq::new[u64](),
+        unb_meta: ChunkSeq::new[u64](),
+        unb_bytes: ChunkSeq::new[u8](),
+        write_fail_ids: ChunkSeq::new[u64](),
+        write_fail_codes: ChunkSeq::new[u64](),
+        fl_phase: FL_PHASE_IDLE,
+        fl_uni: ChunkSeq::new[u64](),
+        fl_bidi: ChunkSeq::new[u64](),
+        fl_sched: ChunkSeq::new[u64](),
+        fl_uni_pos: 0,
+        fl_sched_pos: 0,
+        fl_grp_start: 0,
+        fl_grp_len: 0,
+        fl_grp_idx: 0,
+        fl_cur_id: 0,
+        fl_cur_limit: 0,
+        fl_cur_wrote: 0,
+        fl_grp_wrote: 0,
+        fl_round_wrote: 0,
+        fl_has_failure: false,
+        fl_failure: TransportError::Closed,
+    }
+}
+
+pub fn connection_error_code(e: ConnectionError) -> u64 {
+    match e {
+        ConnectionError::Frame {
+            stream_id: _sid,
+            error: error
+        } => match error {
+            FrameError::Malformed => 0x106,
+            FrameError::TooLarge {
+                frame_type: _ft,
+                len: _len
+            } => 0x107,
+            FrameError::Http2Frame(_) => 0x105,
+            FrameError::BadSetting(_) => 0x109,
+        },
+        ConnectionError::Qpack(q) => match q {
+            QpackError::Decompression(_) => 0x200,
+            QpackError::EncoderStream(_) => 0x201,
+            QpackError::DecoderStream(_) => 0x202,
+            QpackError::FieldSectionTooLarge {
+                stream_id: _sid
+            } => 0x107,
+        },
+        ConnectionError::FrameUnexpected {
+            stream_id: _sid,
+            frame_type: _ft
+        } => 0x105,
+        ConnectionError::MissingSettings => 0x10a,
+        ConnectionError::StreamCreation {
+            stream_id: _sid
+        } => 0x103,
+        ConnectionError::ClosedCriticalStream {
+            stream_id: _sid
+        } => 0x104,
+        ConnectionError::BadGoaway(_) => 0x108,
+        ConnectionError::BadPushId(_) => 0x108,
+        ConnectionError::BadStreamId(_) => 0x108,
+        ConnectionError::Transport(_) => 0x102,
+        ConnectionError::Datagram => 0x33,
+    }
+}
+
+pub fn core_fail(inout c: ConnCore, e: ConnectionError) {
+    match c.error {
+        Option::Some(_) => {}
+        Option::None => {
+            c.error = Option::Some(e);
+            push_cmd(inout c.cmd, CMD_CLOSE, connection_error_code(e), 0);
+        }
+    }
+}
+
+pub fn core_open_local_push(inout c: ConnCore, id: u64, has_dgram: bool) -> bool {
+    if c.has_local {
+        return true;
+    }
+    c.opening.push(id);
+    if c.opening.len() < 3 {
+        return false;
+    }
+    let control = word(in c.opening.as_slice(), 0);
+    let encoder = word(in c.opening.as_slice(), 1);
+    let decoder = word(in c.opening.as_slice(), 2);
+    c.opening.clear();
+    c.has_local = true;
+    c.local_control = control;
+    c.local_encoder = encoder;
+    c.local_decoder = decoder;
+
+    let mut sent = c.cfg.settings;
+    sent.h3_datagram = sent.h3_datagram && has_dgram;
+    c.sent_settings = sent;
+
+    c.scratch.clear();
+    let _ok1 = vput(inout c.scratch, STREAM_CONTROL);
+    let _ok2 = settings_write(sent, inout c.scratch);
+    out_queue(inout c.out, inout c.pool, control, in c.scratch.as_slice());
+
+    c.scratch.clear();
+    let _ok3 = vput(inout c.scratch, STREAM_QPACK_ENCODER);
+    out_queue(inout c.out, inout c.pool, encoder, in c.scratch.as_slice());
+
+    c.scratch.clear();
+    let _ok4 = vput(inout c.scratch, STREAM_QPACK_DECODER);
+    out_queue(inout c.out, inout c.pool, decoder, in c.scratch.as_slice());
+    true
+}
+
+pub fn core_queue_control(inout c: ConnCore, in bytes: Slice[u8]) -> bool {
+    if !c.has_local {
+        return false;
+    }
+    out_queue(inout c.out, inout c.pool, c.local_control, in bytes);
+    true
+}
+
+pub fn core_send_goaway(inout c: ConnCore, id: u64) {
+    if !c.has_local {
+        return;
+    }
+    let mut payload = ChunkSeq::new[u8]();
+    let _ok1 = vput(inout payload, id);
+    c.scratch.clear();
+    let _ok2 = put_record(inout c.scratch, goaway_type(), in payload.as_slice());
+    out_queue(inout c.out, inout c.pool, c.local_control, in c.scratch.as_slice());
+}
+
+pub fn core_priority(in c: ConnCore, id: u64) -> Priority {
+    let f = bsearch_u64(in c.prio_id.as_slice(), id);
+    if f.found {
+        Priority {
+            urgency: wrapping_u8(word(in c.prio_urg.as_slice(), f.idx)),
+            incremental: word(in c.prio_inc.as_slice(), f.idx) != 0,
+        }
+    } else {
+        priority_default()
+    }
+}
+
+fn set_priority(inout c: ConnCore, id: u64, p: Priority) {
+    let f = bsearch_u64(in c.prio_id.as_slice(), id);
+    let inc_u64 = if p.incremental {
+        1
+    } else {
+        0
+    };
+    if f.found {
+        let _a = c.prio_urg.try_set(f.idx, widen_u64(p.urgency));
+        let _b = c.prio_inc.try_set(f.idx, inc_u64);
+    } else {
+        insert_word(inout c.prio_id, f.idx, id);
+        insert_word(inout c.prio_urg, f.idx, widen_u64(p.urgency));
+        insert_word(inout c.prio_inc, f.idx, inc_u64);
+    }
+}
+
+pub fn core_forget_priority(inout c: ConnCore, id: u64) {
+    let fp = bsearch_u64(in c.prio_id.as_slice(), id);
+    if fp.found {
+        remove_word(inout c.prio_id, fp.idx);
+        remove_word(inout c.prio_urg, fp.idx);
+        remove_word(inout c.prio_inc, fp.idx);
+    }
+    set_u64_remove(inout c.prio_upd, id);
+    let fh = bsearch_u64(in c.hint_id.as_slice(), id);
+    if fh.found {
+        remove_word(inout c.hint_id, fh.idx);
+        remove_word(inout c.hint_urg, fh.idx);
+        remove_word(inout c.hint_inc, fh.idx);
+    }
+}
+
+fn slice_eq_priority(in b: Slice[u8], lo: u64, nlen: u64) -> bool {
+    if nlen != 8 {
+        return false;
+    }
+    let target = "priority".as_bytes();
+    for i in 0..8 {
+        if byte(in b, wrapping_add(lo, i)) != byte(in target, i) {
+            return false;
+        }
+    }
+    true
+}
+
+// Extracts `priority` field values from a decoded field section (`meta` holds
+// `[name_len, value_len, sensitive]`).
+pub fn core_header_priority(
+    inout c: ConnCore,
+    id: u64,
+    in bytes: Slice[u8],
+    in meta: Slice[u64],
+    meta_start: u64,
+    count: u64,
+    byte_start: u64,
+) {
+    if set_u64_contains(in c.prio_upd, id) {
+        return;
+    }
+    c.scratch.clear();
+    let mut at = byte_start;
+    for k in 0..count {
+        let m = wrapping_mul(wrapping_add(meta_start, k), 3);
+        let nl = word(in meta, m);
+        let vl = word(in meta, inc(m));
+        if slice_eq_priority(in bytes, at, nl) {
+            if c.scratch.len() > 0 {
+                c.scratch.push(ASCII_COMMA);
+                c.scratch.push(ASCII_SPACE);
+            }
+            let vlo = wrapping_add(at, nl);
+            c.scratch.extend(in bytes[vlo..wrapping_add(vlo, vl)]);
+        }
+        at = wrapping_add(at, wrapping_add(nl, vl));
+    }
+    if c.scratch.len() > 0 {
+        let p = priority_parse_value(in c.scratch.as_slice());
+        set_priority(inout c, id, p);
+    }
+}
+
+fn harvest_unblocked(inout c: ConnCore, inout dec: DecoderCore) {
+    let n = dec.sec.heads.len() / 4;
+    let mut at: u64 = 0;
+    let mut field_at: u64 = 0;
+    for i in 0..n {
+        let hbase = wrapping_mul(i, 4);
+        let kind = word(in dec.sec.heads.as_slice(), hbase);
+        let stream_id = word(in dec.sec.heads.as_slice(), inc(hbase));
+        let count = word(in dec.sec.heads.as_slice(), wrapping_add(hbase, 3));
+        if kind == 0 {
+            let boff = c.unb_bytes.len();
+            let moff = c.unb_meta.len() / 3;
+            let mut cur = at;
+            for k in 0..count {
+                let m = wrapping_mul(wrapping_add(field_at, k), 3);
+                let nl = word(in dec.sec.fields.as_slice(), m);
+                let vl = word(in dec.sec.fields.as_slice(), inc(m));
+                let sens = word(in dec.sec.fields.as_slice(), wrapping_add(m, 2));
+                c.unb_meta.push(nl);
+                c.unb_meta.push(vl);
+                c.unb_meta.push(sens);
+                cur = wrapping_add(cur, wrapping_add(nl, vl));
+            }
+            c.unb_bytes.extend(in dec.sec.bytes[at..cur]);
+            c.unb_kind.push(0);
+            c.unb_stream.push(stream_id);
+            c.unb_count.push(count);
+            c.unb_boff.push(boff);
+            c.unb_moff.push(moff);
+            at = cur;
+            field_at = wrapping_add(field_at, count);
+        } else if kind == 1 {
+            c.unb_kind.push(1);
+            c.unb_stream.push(stream_id);
+            c.unb_count.push(0);
+            c.unb_boff.push(0);
+            c.unb_moff.push(0);
+        }
+    }
+    dec.sec.heads.clear();
+    dec.sec.fields.clear();
+    dec.sec.bytes.clear();
+}
+
+pub fn core_cancel_stream(inout c: ConnCore, inout dec: DecoderCore, stream_id: u64) {
+    dec_cancel_stream(inout dec, stream_id);
+    dec.sec.heads.clear();
+    dec.sec.fields.clear();
+    dec.sec.bytes.clear();
+    for i in 0..c.unb_kind.len() {
+        let k = word(in c.unb_kind.as_slice(), i);
+        let sid = word(in c.unb_stream.as_slice(), i);
+        if k == 0 && sid == stream_id {
+            let _x = c.unb_kind.try_set(i, 99);
+        }
+    }
+}
+
+pub fn build_msg_meta(in meta: Slice[u64], meta_start: u64, count: u64, inout out: ChunkSeq[u64]) {
+    out.clear();
+    let mut cur: u64 = 0;
+    for k in 0..count {
+        let m = wrapping_mul(wrapping_add(meta_start, k), 3);
+        let nl = word(in meta, m);
+        let vl = word(in meta, inc(m));
+        out.push(nl);
+        out.push(vl);
+        out.push(cur);
+        cur = wrapping_add(cur, wrapping_add(nl, vl));
+    }
+}
+
+pub fn sec_total_bytes(in meta: Slice[u64], meta_start: u64, count: u64) -> u64 {
+    let mut total: u64 = 0;
+    for k in 0..count {
+        let m = wrapping_mul(wrapping_add(meta_start, k), 3);
+        let nl = word(in meta, m);
+        let vl = word(in meta, inc(m));
+        total = wrapping_add(total, wrapping_add(nl, vl));
+    }
+    total
+}
+
+fn run_uni_cmds(
+    inout c: ConnCore,
+    inout enc: EncoderCore,
+    inout dec: DecoderCore,
+    in h: Huff,
+) -> Result[Unit, ConnectionError] {
+    let n = c.uni.cmds.len();
+    for i in 0..n {
+        let cmd = match c.uni.cmds.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => UniCmd::None,
+        };
+        match cmd {
+            UniCmd::None => {}
+            UniCmd::StopSending {
+                stream_id,
+                code
+            } => {
+                push_cmd(inout c.cmd, CMD_STOP_SENDING, stream_id, code);
+            }
+            UniCmd::UnknownStream => {
+                c.stats.unknown_streams = inc(c.stats.unknown_streams);
+            }
+            UniCmd::UnknownFrame => {
+                c.stats.unknown_frames = inc(c.stats.unknown_frames);
+            }
+            UniCmd::ToDecoder {
+                at,
+                len
+            } => {
+                let hi = wrapping_add(at, len);
+                match dec_on_encoder_stream(inout dec, in h, in c.uni.out[at..hi]) {
+                    Result::Ok(_) => harvest_unblocked(inout c, inout dec),
+                    Result::Err(e) => return Result::Err(ConnectionError::Qpack(e)),
+                }
+            }
+            UniCmd::ToEncoder {
+                at,
+                len
+            } => {
+                let hi = wrapping_add(at, len);
+                match enc_on_decoder_stream(inout enc, in c.uni.out[at..hi]) {
+                    Result::Ok(_) => {}
+                    Result::Err(e) => return Result::Err(ConnectionError::Qpack(e)),
+                }
+            }
+            UniCmd::WebTransportStream {
+                stream_id,
+                session,
+                at,
+                len
+            } => {
+                let hi = wrapping_add(at, len);
+                let rest_q = q_push(inout c.pool, 0, in c.uni.out[at..hi]);
+                let gone = session_known_gone(
+                    in c.sess,
+                    in c.unparsed,
+                    c.server,
+                    c.next_peer_bidi,
+                    session,
+                );
+                match incoming_wt_stream_fin(
+                    inout c.sess,
+                    inout c.pool,
+                    inout c.cmd,
+                    inout c.sev,
+                    stream_id,
+                    session,
+                    false,
+                    rest_q,
+                    gone,
+                    false,
+                ) {
+                    Result::Ok(_) => {}
+                    Result::Err(e) => return Result::Err(e),
+                }
+            }
+            UniCmd::PeerSettings(s) => {
+                c.peer_settings = Option::Some(s);
+                enc_apply_peer_settings(
+                    inout enc,
+                    s.qpack_max_table_capacity,
+                    s.qpack_blocked_streams,
+                );
+            }
+            UniCmd::GoAway(v) => {
+                c.goaway_received = Option::Some(v);
+            }
+            UniCmd::PriorityUpdate(u) => {
+                c.stats.priority_updates = inc(c.stats.priority_updates);
+                let bound = wrapping_add(wrapping_mul(c.cfg.max_concurrent_requests, 2), 16);
+                let f = bsearch_u64(in c.prio_id.as_slice(), u.element_id);
+                if f.found || c.prio_id.len() < bound {
+                    set_priority(inout c, u.element_id, u.priority);
+                    set_u64_insert(inout c.prio_upd, u.element_id);
+                }
+            }
+        }
+    }
+    Result::Ok(())
+}
+
+pub fn core_accept_uni(
+    inout c: ConnCore,
+    inout enc: EncoderCore,
+    inout dec: DecoderCore,
+    in h: Huff,
+    id: u64,
+) {
+    uni_clear(inout c.uni);
+    let _ok = uni_accept(inout c.uni, id);
+    let _r = run_uni_cmds(inout c, inout enc, inout dec, in h);
+}
+
+pub fn core_uni_closed(inout c: ConnCore, id: u64) -> Result[Unit, ConnectionError] {
+    uni_clear(inout c.uni);
+    match uni_closed(inout c.uni, id) {
+        Result::Ok(_) => Result::Ok(()),
+        Result::Err(e) => Result::Err(e),
+    }
+}
+
+pub fn core_uni_bytes(
+    inout c: ConnCore,
+    inout enc: EncoderCore,
+    inout dec: DecoderCore,
+    in h: Huff,
+    id: u64,
+    in bytes: Slice[u8],
+    fin: bool,
+) -> Result[Unit, ConnectionError] {
+    if bytes.len() > 0 {
+        uni_clear(inout c.uni);
+        let routed = uni_bytes(inout c.uni, id, in bytes);
+        match run_uni_cmds(inout c, inout enc, inout dec, in h) {
+            Result::Ok(_) => {}
+            Result::Err(e) => return Result::Err(e),
+        }
+        match routed {
+            Result::Ok(_) => {}
+            Result::Err(e) => return Result::Err(e),
+        }
+        if !uni_contains(in c.uni, id) {
+            if fin {
+                wt_peer_fin(inout c.sess, in c.pool, id);
+            }
+            return Result::Ok(());
+        }
+    }
+    if fin {
+        return core_uni_closed(inout c, id);
+    }
+    Result::Ok(())
+}
+
+fn is_uni(id: u64) -> bool {
+    (id & 2) != 0
+}
+
+fn is_critical(in c: ConnCore, id: u64) -> bool {
+    c.has_local && (id == c.local_control || id == c.local_encoder || id == c.local_decoder)
+}
+
+fn hint_changed(inout c: ConnCore, id: u64, p: Priority) {
+    let f = bsearch_u64(in c.hint_id.as_slice(), id);
+    let inc_u64 = if p.incremental {
+        1
+    } else {
+        0
+    };
+    let u_u64 = widen_u64(p.urgency);
+    if f.found {
+        let cu = word(in c.hint_urg.as_slice(), f.idx);
+        let ci = word(in c.hint_inc.as_slice(), f.idx);
+        if cu == u_u64 && ci == inc_u64 {
+            return;
+        }
+        let _a = c.hint_urg.try_set(f.idx, u_u64);
+        let _b = c.hint_inc.try_set(f.idx, inc_u64);
+    } else {
+        insert_word(inout c.hint_id, f.idx, id);
+        insert_word(inout c.hint_urg, f.idx, u_u64);
+        insert_word(inout c.hint_inc, f.idx, inc_u64);
+    }
+    let b = u_u64 | (inc_u64 << 8);
+    push_cmd(inout c.cmd, CMD_SET_PRIORITY, id, b);
+}
+
+fn status_to_transport_error(status: u64, code: u64) -> TransportError {
+    if status == FLUSH_STATUS_RESET {
+        TransportError::Reset(code)
+    } else if status == FLUSH_STATUS_NOT_READY {
+        TransportError::NotReady
+    } else if status == FLUSH_STATUS_UNKNOWN {
+        TransportError::UnknownStream
+    } else if status == FLUSH_STATUS_UNSUPPORTED {
+        TransportError::Unsupported
+    } else if status == FLUSH_STATUS_TOO_LARGE {
+        TransportError::TooLarge
+    } else {
+        TransportError::Closed
+    }
+}
+
+fn offer_stream_chunk(inout c: ConnCore, id: u64, limit: u64) -> Option[FlushStep] {
+    let f = bsearch_u64(in c.out.ids.as_slice(), id);
+    if !f.found {
+        return Option::None;
+    }
+    let q = word(in c.out.q.as_slice(), f.idx);
+    let hr = q_head_range(in c.pool, q);
+    if hr.len == 0 {
+        return Option::None;
+    }
+    let rem = wrapping_sub(limit, c.fl_cur_wrote);
+    if rem == 0 {
+        return Option::None;
+    }
+    c.fl_cur_id = id;
+    c.fl_cur_limit = limit;
+    Option::Some(
+        FlushStep::Write {
+            stream_id: id,
+            off: hr.off,
+            len: min64(hr.len, rem),
+        }
+    )
+}
+
+fn finish_flush(inout c: ConnCore) -> FlushStep {
+    c.fl_phase = FL_PHASE_IDLE;
+    let mut i: u64 = 0;
+    loop {
+        if i >= c.out.ids.len() {
+            break;
+        }
+        let q = word(in c.out.q.as_slice(), i);
+        if q_len(in c.pool, q) == 0 {
+            let id = word(in c.out.ids.as_slice(), i);
+            let fin = word(in c.out.fin.as_slice(), i) != 0;
+            if fin {
+                push_cmd(inout c.cmd, CMD_FINISH, id, 0);
+                out_remove_at(inout c.out, inout c.pool, i);
+            } else if !is_critical(in c, id) {
+                out_remove_at(inout c.out, inout c.pool, i);
+            } else {
+                i = inc(i);
+            }
+        } else {
+            i = inc(i);
+        }
+    }
+    let mut hi: u64 = 0;
+    loop {
+        if hi >= c.hint_id.len() {
+            break;
+        }
+        let hid = word(in c.hint_id.as_slice(), hi);
+        if bsearch_u64(in c.out.ids.as_slice(), hid).found {
+            hi = inc(hi);
+        } else {
+            remove_word(inout c.hint_id, hi);
+            remove_word(inout c.hint_urg, hi);
+            remove_word(inout c.hint_inc, hi);
+        }
+    }
+    if c.fl_has_failure {
+        core_fail(inout c, ConnectionError::Transport(c.fl_failure));
+    }
+    FlushStep::Done
+}
+
+fn group_has_queued(in c: ConnCore) -> bool {
+    for k in 0..c.fl_grp_len {
+        let sid = word(in c.fl_sched.as_slice(), wrapping_add(c.fl_grp_start, k));
+        if out_queued(in c.out, in c.pool, sid) > 0 {
+            return true;
+        }
+    }
+    false
+}
+
+fn advance_flush(inout c: ConnCore) -> FlushStep {
+    loop {
+        if c.fl_phase == FL_PHASE_UNI {
+            if c.fl_uni_pos < c.fl_uni.len() {
+                let id = word(in c.fl_uni.as_slice(), c.fl_uni_pos);
+                c.fl_uni_pos = inc(c.fl_uni_pos);
+                c.fl_cur_wrote = 0;
+                match offer_stream_chunk(inout c, id, MAX_U64) {
+                    Option::Some(step) => return step,
+                    Option::None => {}
+                }
+            } else {
+                c.fl_phase = FL_PHASE_SCHED;
+                c.fl_sched_pos = 0;
+                c.fl_grp_len = 0;
+            }
+        } else if c.fl_phase == FL_PHASE_SCHED {
+            if c.fl_grp_len == 0 {
+                if c.fl_sched_pos >= c.fl_sched.len() {
+                    return finish_flush(inout c);
+                }
+                c.fl_grp_len = word(in c.fl_sched.as_slice(), c.fl_sched_pos);
+                c.fl_grp_start = inc(c.fl_sched_pos);
+                c.fl_sched_pos = wrapping_add(c.fl_grp_start, c.fl_grp_len);
+                c.fl_grp_idx = 0;
+                c.fl_grp_wrote = 0;
+                c.fl_round_wrote = 0;
+                c.fl_cur_wrote = 0;
+                if c.fl_grp_len == 1 {
+                    let id = word(in c.fl_sched.as_slice(), c.fl_grp_start);
+                    c.fl_grp_idx = 1;
+                    match offer_stream_chunk(inout c, id, MAX_U64) {
+                        Option::Some(step) => return step,
+                        Option::None => {
+                            c.fl_grp_len = 0;
+                        }
+                    }
+                }
+            } else if c.fl_grp_len == 1 {
+                // Singleton group finished its single write turn.
+                if !c.cfg.work_conserving && c.fl_grp_wrote > 0 && group_has_queued(in c) {
+                    return finish_flush(inout c);
+                }
+                c.fl_grp_len = 0;
+            } else {
+                if c.fl_grp_idx >= c.fl_grp_len {
+                    if c.fl_round_wrote == 0 {
+                        if !c.cfg.work_conserving && c.fl_grp_wrote > 0 && group_has_queued(in c) {
+                            return finish_flush(inout c);
+                        }
+                        c.fl_grp_len = 0;
+                    } else {
+                        c.fl_grp_idx = 0;
+                        c.fl_round_wrote = 0;
+                    }
+                } else {
+                    let id = word(
+                        in c.fl_sched.as_slice(),
+                        wrapping_add(c.fl_grp_start, c.fl_grp_idx),
+                    );
+                    c.fl_grp_idx = inc(c.fl_grp_idx);
+                    c.fl_cur_wrote = 0;
+                    let q = if c.cfg.incremental_quantum > 0 {
+                        c.cfg.incremental_quantum
+                    } else {
+                        1
+                    };
+                    match offer_stream_chunk(inout c, id, q) {
+                        Option::Some(step) => return step,
+                        Option::None => {}
+                    }
+                }
+            }
+        } else {
+            return FlushStep::Done;
+        }
+    }
+}
+
+pub fn core_flush_begin(
+    inout c: ConnCore,
+    inout enc: EncoderCore,
+    inout dec: DecoderCore,
+) -> FlushStep {
+    if c.has_local {
+        if enc.out.len() > 0 {
+            out_queue(inout c.out, inout c.pool, c.local_encoder, in enc.out.as_slice());
+            enc.out.clear();
+        }
+        if dec.out.len() > 0 || dec.table.inserted > dec.acknowledged {
+            let db = dec_take_decoder_stream(inout dec);
+            if db.len() > 0 {
+                out_queue(inout c.out, inout c.pool, c.local_decoder, in db.as_slice());
+            }
+        }
+    }
+    c.rr = wrapping_add(c.rr, 1);
+    if c.out.ids.len() == 0 {
+        return FlushStep::Done;
+    }
+
+    c.fl_uni.clear();
+    c.fl_bidi.clear();
+    for i in 0..c.out.ids.len() {
+        let id = word(in c.out.ids.as_slice(), i);
+        if is_uni(id) {
+            c.fl_uni.push(id);
+        } else {
+            let p = core_priority(in c, id);
+            hint_changed(inout c, id, p);
+            c.fl_bidi.push(id);
+            c.fl_bidi.push(widen_u64(p.urgency));
+            c
+                .fl_bidi
+                .push(
+                    if p.incremental {
+                        1
+                    } else {
+                        0
+                    }
+                );
+        }
+    }
+    if c.fl_bidi.len() == 0 {
+        c.fl_sched.clear();
+    } else if c.fl_bidi.len() == 3 {
+        c.fl_sched.clear();
+        c.fl_sched.push(1);
+        c.fl_sched.push(word(in c.fl_bidi.as_slice(), 0));
+    } else {
+        schedule_into(in c.fl_bidi.as_slice(), c.rr, inout c.fl_sched);
+    }
+
+    c.fl_phase = FL_PHASE_UNI;
+    c.fl_uni_pos = 0;
+    c.fl_sched_pos = 0;
+    c.fl_grp_start = 0;
+    c.fl_grp_len = 0;
+    c.fl_grp_idx = 0;
+    c.fl_cur_id = 0;
+    c.fl_cur_limit = 0;
+    c.fl_cur_wrote = 0;
+    c.fl_grp_wrote = 0;
+    c.fl_round_wrote = 0;
+    c.fl_has_failure = false;
+    advance_flush(inout c)
+}
+
+pub fn core_flush_step(inout c: ConnCore, status: u64, wrote: u64, err_code: u64) -> FlushStep {
+    let id = c.fl_cur_id;
+    if status == FLUSH_STATUS_OK {
+        let f = bsearch_u64(in c.out.ids.as_slice(), id);
+        if f.found {
+            let q = word(in c.out.q.as_slice(), f.idx);
+            let nq = q_consume(inout c.pool, q, wrote);
+            let _s = c.out.q.try_set(f.idx, nq);
+            c.fl_cur_wrote = wrapping_add(c.fl_cur_wrote, wrote);
+            c.fl_grp_wrote = wrapping_add(c.fl_grp_wrote, wrote);
+            c.fl_round_wrote = wrapping_add(c.fl_round_wrote, wrote);
+            if nq != 0 && c.fl_cur_wrote < c.fl_cur_limit {
+                match offer_stream_chunk(inout c, id, c.fl_cur_limit) {
+                    Option::Some(step) => return step,
+                    Option::None => {}
+                }
+            }
+        }
+    } else if status != FLUSH_STATUS_BLOCKED {
+        if is_critical(in c, id) {
+            c.fl_has_failure = true;
+            c.fl_failure = status_to_transport_error(status, err_code);
+        } else if c.server && status == FLUSH_STATUS_RESET {
+            c.write_fail_ids.push(id);
+            c.write_fail_codes.push(err_code);
+        }
+        out_discard(inout c.out, inout c.pool, id);
+    }
+    advance_flush(inout c)
+}
+
+// ---------------------------------------------------------------------
+// Shared field formatting, headers bound, and trailer serialization
+// ---------------------------------------------------------------------
+
+pub fn push_status_ascii(inout bytes: ChunkSeq[u8], status: u16) {
+    let s = widen_u64(status);
+    let d0 = s / 100;
+    let d1 = (s / 10) % 10;
+    let d2 = s % 10;
+    bytes.push(wrapping_u8(wrapping_add(widen_u64(ASCII_ZERO), d0)));
+    bytes.push(wrapping_u8(wrapping_add(widen_u64(ASCII_ZERO), d1)));
+    bytes.push(wrapping_u8(wrapping_add(widen_u64(ASCII_ZERO), d2)));
+}
+
+pub fn push_u64_ascii(inout bytes: ChunkSeq[u8], n: u64) -> u64 {
+    if n == 0 {
+        bytes.push(ASCII_ZERO);
+        return 1;
+    }
+    let mut digits = ChunkSeq::with_capacity[u8](20);
+    let mut v = n;
+    loop {
+        if v == 0 {
+            break;
+        }
+        let d = v % 10;
+        digits.push(wrapping_u8(wrapping_add(widen_u64(ASCII_ZERO), d)));
+        v = v / 10;
+    }
+    let len = digits.len();
+    let mut i = len;
+    loop {
+        if i == 0 {
+            break;
+        }
+        i = wrapping_sub(i, 1);
+        bytes.push(byte(in digits.as_slice(), i));
+    }
+    len
+}
+
+// Mirrors `headers_frame_bound`: 29 + sum(21 + name.len() + value.len()).
+pub fn headers_frame_bound_meta(in meta: Slice[u64], count: u64) -> u64 {
+    let mut n: u64 = 29;
+    for i in 0..count {
+        let base = wrapping_mul(i, 3);
+        let nl = word(in meta, base);
+        let vl = word(in meta, inc(base));
+        n = sat_add(n, sat_add(21, sat_add(nl, vl)));
+    }
+    n
+}
+
+pub fn pack_trailers_to_pool(
+    inout pool: BytePool,
+    inout scratch: ChunkSeq[u8],
+    in bytes: Slice[u8],
+    byte_off: u64,
+    in meta: Slice[u64],
+    meta_start: u64,
+    count: u64,
+) -> u64 {
+    scratch.clear();
+    put_u64_le(inout scratch, count);
+    let mut cur = byte_off;
+    for k in 0..count {
+        let m = wrapping_mul(wrapping_add(meta_start, k), 3);
+        let nl = word(in meta, m);
+        let vl = word(in meta, inc(m));
+        let sens = word(in meta, wrapping_add(m, 2));
+        put_u64_le(inout scratch, nl);
+        put_u64_le(inout scratch, vl);
+        put_u64_le(inout scratch, sens);
+        cur = wrapping_add(cur, wrapping_add(nl, vl));
+    }
+    scratch.extend(in bytes[byte_off..cur]);
+    q_push(inout pool, 0, in scratch.as_slice())
+}
+
+// Unpacks trailers stored by `pack_trailers_to_pool` into `(hev.meta, hev.bytes)`
+// and returns the field count; leaves `trl_q` cleared.
+pub fn unpack_fields_to_hev(inout c: ConnCore, q: u64) -> UnpackedFields {
+    let moff = c.hev.meta.len() / 3;
+    let boff = c.hev.bytes.len();
+    if q == 0 {
+        return UnpackedFields {
+            count: 0,
+            meta_off: moff,
+            byte_off: boff
+        };
+    }
+    c.scratch.clear();
+    let _r = q_drain_all_to(inout c.pool, q, inout c.scratch);
+    let count = get_u64_le(in c.scratch.as_slice(), 0);
+    let mut at: u64 = 8;
+    for _k in 0..count {
+        let nl = get_u64_le(in c.scratch.as_slice(), at);
+        let vl = get_u64_le(in c.scratch.as_slice(), wrapping_add(at, 8));
+        let sens = get_u64_le(in c.scratch.as_slice(), wrapping_add(at, 16));
+        c.hev.meta.push(nl);
+        c.hev.meta.push(vl);
+        c.hev.meta.push(sens);
+        at = wrapping_add(at, 24);
+    }
+    let slen = c.scratch.len();
+    c.hev.bytes.extend(in c.scratch[at..slen]);
+    UnpackedFields {
+        count: count,
+        meta_off: moff,
+        byte_off: boff,
+    }
+}

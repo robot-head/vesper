@@ -5598,7 +5598,6 @@ dependencies = [
  "vesper-alloc-seed",
  "vesper-beacon-seed",
  "vesper-bench-seed",
- "vesper-blake3-sys",
  "vesper-chrono",
  "vesper-core",
  "vesper-crucible-seed",
@@ -5777,14 +5776,6 @@ dependencies = [
 [[package]]
 name = "vesper-bench-seed"
 version = "0.1.0"
-
-[[package]]
-name = "vesper-blake3-sys"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "cc",
-]
 
 [[package]]
 name = "vesper-chorus"
@@ -6009,7 +6000,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "vesper-bench",
- "vesper-blake3-sys",
  "vesper-loom-cas",
  "vesper-port-abi",
  "vesper-port-harness",
@@ -6024,7 +6014,6 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "vesper-bench",
- "vesper-blake3-sys",
  "vesper-fmt-seed",
  "vesper-lean-syntax-seed",
  "vesper-port-abi",
@@ -6431,7 +6420,6 @@ dependencies = [
  "libc",
  "reflink-copy",
  "tempfile",
- "vesper-blake3-sys",
  "vesper-port-abi",
  "vesper-port-harness",
  "windows-sys 0.61.2",

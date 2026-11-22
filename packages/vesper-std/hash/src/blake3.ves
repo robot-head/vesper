@@ -4,9 +4,9 @@
 // of chaining values, the 7-round compression in `compress`): `hash`,
 // keyed hashing and key derivation, one-shot and incremental, with
 // extendable output. It is the portable fallback and the reference for
-// evaluator and executable builds; code linked into a Rust host should use
-// `@vesper-std/hash-sys`, which calls the vetted `blake3` crate through
-// `.vsys`. Both produce the official test vectors.
+// evaluator and JIT builds; executables and code linked into a Rust host
+// can use `@vesper-std/hash-sys`, which calls the official BLAKE3 C
+// implementation through `.vsys`. Both produce the official test vectors.
 use self::compress::compress;
 
 fn chunk_start() -> u32 {

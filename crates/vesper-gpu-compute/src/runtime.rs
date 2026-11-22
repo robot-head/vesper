@@ -13,14 +13,14 @@
 //!   [`Buffer::write`]), in Vesper, under the queue lock, after waiting for
 //!   the last submission that bound the buffer.
 //!
-//! WGSL is still compiled with naga here ([`crate::shader`]); the Vesper
-//! library takes the SPIR-V words.
+//! Kernels are SPIR-V modules ([`crate::shader`]); the Vesper library reads
+//! their binding interface and creates the pipelines.
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::error::GpuError;
-use crate::shader::{self, ShaderError};
+use crate::shader;
 
 #[allow(unsafe_code)]
 #[rustfmt::skip]
@@ -396,41 +396,69 @@ impl Context {
         Ok(buffer)
     }
 
-    /// Compiles `wgsl` with naga and creates a compute pipeline for `entry`.
-    /// The module must bind exactly `bindings` storage buffers at
-    /// `@group(0) @binding(0..bindings)` and may declare one
-    /// `var<immediate>` block of at most `immediate_bytes` bytes.
-    pub fn kernel(
+    /// Creates a compute pipeline for one of the crate's own kernels: the
+    /// committed SPIR-V that `tests/spirv.rs` checks is naga's validated
+    /// output for the WGSL beside it.
+    pub(crate) fn kernel(
         &self,
-        wgsl: &str,
+        spirv: &[u8],
         entry: &str,
         bindings: u32,
         immediate_bytes: u32,
     ) -> Result<Kernel, GpuError> {
-        let compiled = shader::compile_wgsl(wgsl, entry)?;
-        if compiled.storage_bindings != bindings {
-            return Err(GpuError::Shader(ShaderError::Interface(format!(
-                "kernel {entry} binds {} storage buffers, expected {bindings}",
-                compiled.storage_bindings
-            ))));
-        }
-        if compiled.immediate_bytes > immediate_bytes {
-            return Err(GpuError::Shader(ShaderError::Interface(format!(
-                "kernel {entry} declares {} immediate bytes, expected at most {immediate_bytes}",
-                compiled.immediate_bytes
-            ))));
-        }
-        let spirv: &[u8] = bytemuck::cast_slice(&compiled.spirv);
-        let kern = vesper!(
-            binding::kernel_new(
-                self.inner.dev,
-                spirv,
-                entry,
-                u64::from(bindings),
-                u64::from(immediate_bytes)
-            ),
-            KernelNewError
-        )?;
+        self.create_kernel(spirv, entry, bindings, immediate_bytes)
+    }
+
+    /// Creates a compute pipeline for entry point `entry` of the SPIR-V 1.3
+    /// module `spirv` (little-endian words, as `include_bytes!` of a `.spv`
+    /// file gives them). The module must bind exactly `bindings` storage
+    /// buffers at set 0, bindings `0..bindings`, and may declare one
+    /// immediate block of at most `immediate_bytes` bytes
+    /// ([`shader::interface`] reads what it declares, and a module that
+    /// differs is a typed error). The device is created with
+    /// `robustBufferAccess`, so a valid module without bounds checks of its
+    /// own still cannot reach memory outside the buffers it binds.
+    ///
+    /// # Safety
+    ///
+    /// `spirv` must be a valid SPIR-V module for this device, as
+    /// `vkCreateShaderModule` requires: it passes `spirv-val
+    /// --target-env vulkan1.2`, and it declares only capabilities and
+    /// extensions the device supports. The interface check reads
+    /// declarations only, not function bodies. naga's SPIR-V output for
+    /// WGSL it has validated meets this (`tests/support/wgsl.rs`).
+    #[allow(unsafe_code)]
+    pub unsafe fn kernel_from_spirv(
+        &self,
+        spirv: &[u8],
+        entry: &str,
+        bindings: u32,
+        immediate_bytes: u32,
+    ) -> Result<Kernel, GpuError> {
+        self.create_kernel(spirv, entry, bindings, immediate_bytes)
+    }
+
+    fn create_kernel(
+        &self,
+        spirv: &[u8],
+        entry: &str,
+        bindings: u32,
+        immediate_bytes: u32,
+    ) -> Result<Kernel, GpuError> {
+        let kern = binding::kernel_new(
+            self.inner.dev,
+            spirv,
+            entry,
+            u64::from(bindings),
+            u64::from(immediate_bytes),
+        )
+        .map_err(|e| match e {
+            binding::KernelNewError::GpuErr(g) if g.kind == 6 => {
+                GpuError::Shader(shader::shader_error(g.detail, g.code, entry))
+            }
+            binding::KernelNewError::GpuErr(g) => gpu_error(g, None),
+            other => panic!("the Vesper GPU runtime failed internally: {other:?}"),
+        })?;
         Ok(Kernel {
             inner: Arc::new(KernelInner {
                 ctx: self.inner.clone(),

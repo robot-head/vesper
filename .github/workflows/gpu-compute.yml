@@ -3,7 +3,7 @@ name: GPU compute on lavapipe
 # Differential tests of crates/vesper-gpu-compute against the CPU Tensor and
 # Kinetic references on Mesa lavapipe (llvmpipe), Vulkan's software
 # implementation. Bazel and the other platform jobs build the crate and run
-# its naga compile tests, but have no Vulkan device; this job is where the
+# its SPIR-V tests (tests/spirv.rs), but have no Vulkan device; this job is where the
 # device tests actually run (VESPER_GPU_REQUIRE=1 makes a missing device a
 # failure instead of a skip). No performance is measured here.
 #

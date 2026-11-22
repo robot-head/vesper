@@ -333,6 +333,24 @@ impl EnumDescriptor {
         &self.shared.variants
     }
 }
+/// A typed integer constant declared inside a `.vsys` library (`const NAME: <int> = <value>;`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConstDescriptor {
+    name: String,
+    scalar: Scalar,
+    value: i128,
+}
+impl ConstDescriptor {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    pub fn scalar(&self) -> Scalar {
+        self.scalar
+    }
+    pub fn value(&self) -> i128 {
+        self.value
+    }
+}
 /// Logical validity refinements over explicitly specified total-bit C carriers.
 /// Bool uses uint8_t, enums their stated unsigned integer, never C `_Bool`/enum.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -559,6 +577,13 @@ pub enum ParameterType {
         handle: ExternTypeDescriptor,
         access: HandleAccess,
     },
+    /// `nocapture in argv: CStrList`: a borrowed, noncapturing pointer to a
+    /// NULL-terminated array of NUL-terminated strings (`char *const
+    /// argv[]`). In source it takes one `Slice[u8]` holding the strings one
+    /// after another, each ended by a NUL byte (a last one without its NUL
+    /// is ended too); the lowering copies the bytes and builds the array,
+    /// both freed after the call. It never refuses a call.
+    CStrList,
     /// `nocapture in s: CStr`: a borrowed, noncapturing pointer to a
     /// NUL-terminated byte string, passed as one C pointer. The caller's
     /// bytes are copied into a fresh buffer with the terminator appended; an
@@ -778,6 +803,7 @@ impl FunctionDescriptor {
                 ParameterType::Pointer { .. }
                 | ParameterType::Handle { .. }
                 | ParameterType::CStr
+                | ParameterType::CStrList
                 | ParameterType::Function { .. } => parameters.push(AbiType::Pointer),
             }
         }
@@ -826,6 +852,7 @@ pub struct LibraryDescriptor {
     wire_structs: Vec<WireStructDescriptor>,
     extern_types: Vec<ExternTypeDescriptor>,
     functions: Vec<FunctionDescriptor>,
+    consts: Vec<ConstDescriptor>,
     canonical: Vec<u8>,
     identity: DescriptorId,
 }
@@ -855,6 +882,16 @@ impl LibraryDescriptor {
     }
     pub fn extern_type(&self, name: &str) -> Option<&ExternTypeDescriptor> {
         self.extern_types.iter().find(|t| t.name() == name)
+    }
+    /// Declared integer constants, sorted by name.
+    pub fn consts(&self) -> &[ConstDescriptor] {
+        &self.consts
+    }
+    pub fn constant(&self, name: &str) -> Option<&ConstDescriptor> {
+        self.consts
+            .binary_search_by(|c| c.name.as_str().cmp(name))
+            .ok()
+            .map(|i| &self.consts[i])
     }
     pub fn wire_struct(&self, name: &str) -> Option<&WireStructDescriptor> {
         self.wire_structs.iter().find(|w| w.name() == name)
@@ -987,6 +1024,7 @@ fn canonicalize(library: &LibraryDescriptor, limit: usize) -> Result<Vec<u8>, Er
                         e.text(handle.name())?;
                     }
                     ParameterType::CStr => e.text("nocapture-cstr")?,
+                    ParameterType::CStrList => e.text("nocapture-cstr-list")?,
                     ParameterType::Function { callback, retain } => {
                         e.text("callback-function")?;
                         e.text(if *retain { "retain" } else { "nocapture" })?;
@@ -1181,6 +1219,17 @@ fn canonicalize(library: &LibraryDescriptor, limit: usize) -> Result<Vec<u8>, Er
             for t in &library.extern_types {
                 e.text(t.mapping.map_or("", Scalar::name))?;
             }
+        }
+    }
+    // Appended only when declared, so libraries without constants keep their
+    // canonical bytes and descriptor identities.
+    if !library.consts.is_empty() {
+        e.text("consts")?;
+        e.count(library.consts.len())?;
+        for c in &library.consts {
+            e.text(c.name())?;
+            e.text(c.scalar().name())?;
+            e.text(&c.value().to_string())?;
         }
     }
     Ok(e.bytes)
