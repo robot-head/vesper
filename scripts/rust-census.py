@@ -37,7 +37,7 @@ CLASSES = {
 # crate -> (class, Vesper port, last measured speed, what is left, SH6 lane)
 CRATES = {
     "vesper-aura": ("gone", "in crate", "0.29-0.53x", "", "-"),
-    "vesper-pact": ("gone", "in crate (+ seed)", "1.10x / 0.33x", "seed until Stage 2; check_orphan, conformance_env, validate_query still Rust in src/", "12"),
+    "vesper-pact": ("gone", "in crate (+ seed)", "1.10x / 0.33x", "seed until Stage 2", "12"),
     "vesper-simpulse": ("gone", "in crate (+ seed)", "0.29-1.00x", "seed until Stage 2", "-"),
     "vesper-loom-solver": ("gone", "in crate (+ seed)", "0.21-1.27x", "seed until Stage 2", "-"),
     "vesper-chorus": ("partial", "in crate", "0.70x parse+project", "front end Vesper-only; simulated network, Raft driver", "12"),
@@ -45,8 +45,8 @@ CRATES = {
     "vesper-warp-tcp": ("partial", "in crate", "codec 0.72x Ir, transfer 1.47x Ir", "harness/simulator still Rust", "4"),
     "vesper-warp-bbr": ("partial", "in crate", "2.2-2.9x", "on_event dispatch Rust", "4"),
     "vesper-warp-wheel": ("partial", "in crate", "1.73-1.77x", "speed only", "4"),
-    "vesper-prism": ("partial", "in crate", "1.18-2.65x", "route 2.65x, encode 1.79x", "5"),
-    "vesper-prism-h3": ("partial", "in crate", "1.29-1.41x", "connection, client, transport drivers unported", "5"),
+    "vesper-prism": ("gone", "in crate", "0.96-1.34x", "", "5"),
+    "vesper-prism-h3": ("partial", "in crate", "0.99-1.36x", "protocol core Vesper-only; connection, client, session drivers and Warp adapter still Rust", "5"),
     "vesper-quarry": ("partial", "in crate", "1.80x", "buffer pool, executor, online DDL", "6"),
     "vesper-flux": ("partial", "in crate", "unmeasured", "CDC, Kafka wire, durable state, cluster driver", "6"),
     "vesper-ignis": ("partial", "in crate", "0.68-3.1x", "build 2.5x, lower 2.7-3.1x", "7"),
@@ -61,9 +61,9 @@ CRATES = {
     "vesper-tensor": ("partial", "in crate", "unmeasured", "safetensors, memmap, simd kernels", "11"),
     "vesper-alloc": ("partial", "in crate", "unmeasured", "cache B-tree, arena keys, OS pages", "11"),
     "vesper-crucible": ("partial", "in crate", "unmeasured", "fuzzer, schedule explorers, DPOR, arena", "12"),
-    "vesper-semver": ("partial", "in crate", "4.4-5.2x", "speed", "12"),
-    "vesper-loom-calculus": ("partial", "in crate", "1.4-2.3x", "speed; TOML reader #965", "12"),
-    "vesper-loom-audit": ("partial", "in crate", "unmeasured", "BLAKE3 digest (C impl via .vsys)", "12"),
+    "vesper-semver": ("partial", "in crate", "2.2-3.0x", "speed: the Rust encoder hash-conses every node", "12"),
+    "vesper-loom-calculus": ("gone", "in crate (+ seed)", "1.12x @8 / 0.80x @64 pkgs", "seed until Stage 2; TOML, JSON and SemVer text readers (#965)", "12"),
+    "vesper-loom-audit": ("gone", "in crate (+ seed)", "1.37x @8 / 1.15x @64 / 0.96x @256 pkgs", "seed until Stage 2; size checks and BLAKE3 digests (vesper-blake3-sys)", "12"),
     "vesper-beacon": ("partial", "in crate", "2.1-7.1x", "speed", "12"),
     "vesper-sim-session": ("partial", "in crate", "unmeasured", "umem, warp, JSON, driver (SH5 lane 19)", "SH5-19"),
     # The compiler's own crates.

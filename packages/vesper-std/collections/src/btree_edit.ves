@@ -339,22 +339,10 @@ test {
             let value = key;
             tree.insert(key, value);
         }
-        if tree
-            .lcount
-            .len()
-            < 3
-            || tree
-            .lkeys
-            .len()
-            != wrapping_mul(tree.lcount.len(), 16)
-            || tree
-            .ikeys
-            .len()
-            != wrapping_mul(tree.icount.len(), 16)
-            || tree
-            .ikids
-            .len()
-            != wrapping_mul(tree.icount.len(), 17) {
+        if tree.lcount.len() < 3
+            || tree.lkeys.len() != wrapping_mul(tree.lcount.len(), 16)
+            || tree.ikeys.len() != wrapping_mul(tree.icount.len(), 16)
+            || tree.ikids.len() != wrapping_mul(tree.icount.len(), 17) {
             return false;
         }
         let mut leaf = tree.cursor_first().leaf;
@@ -381,17 +369,9 @@ test {
         tree.split_kids.push(16);
         tree.write_internal(left, 0, 16, 42, 0);
         let right_base = wrapping_mul(right, 16);
-        tree
-            .ikeys
-            .try_get(right_base)
-            == Option::Some(99)
-            && tree
-            .ikeys
-            .try_get(15)
-            == Option::Some(15)
-            && tree
-            .kid(left, 16)
-            == 16
+        tree.ikeys.try_get(right_base) == Option::Some(99)
+            && tree.ikeys.try_get(15) == Option::Some(15)
+            && tree.kid(left, 16) == 16
     }
 
     // @case empty(0)

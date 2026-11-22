@@ -111,20 +111,20 @@ pub fn patch_bind_slot(inout s: RState, lim: Lim, in w: Slice[u64], base: u64, i
     s
         .slots
         .push(
-        RSlot {
-            serial: slot,
-            widget: widget,
-            property: property,
-            tag: vtag,
-            payload: payload,
-            tstart: at,
-            tlen: if vtag == ValueTag::Text {
-                tlen
-            } else {
-                0
+            RSlot {
+                serial: slot,
+                widget: widget,
+                property: property,
+                tag: vtag,
+                payload: payload,
+                tstart: at,
+                tlen: if vtag == ValueTag::Text {
+                    tlen
+                } else {
+                    0
+                }
             }
-        }
-    );
+        );
     s.slive.push(true);
     s.nslots = inc(s.nslots);
     record(inout s, lim, op(EV_SLOT_BOUND, slot, 0, 0, 0))
@@ -173,21 +173,21 @@ pub fn patch_set_slot(inout s: RState, lim: Lim, in w: Slice[u64], base: u64, in
     s
         .slots
         .try_set(
-        k,
-        RSlot {
-            serial: old.serial,
-            widget: old.widget,
-            property: old.property,
-            tag: vtag,
-            payload: payload,
-            tstart: at,
-            tlen: if vtag == ValueTag::Text {
-                tlen
-            } else {
-                0
+            k,
+            RSlot {
+                serial: old.serial,
+                widget: old.widget,
+                property: old.property,
+                tag: vtag,
+                payload: payload,
+                tstart: at,
+                tlen: if vtag == ValueTag::Text {
+                    tlen
+                } else {
+                    0
+                }
             }
-        }
-    );
+        );
     record(inout s, lim, op(EV_SLOT_CHANGED, slot, 0, 0, 0))
 }
 
@@ -202,15 +202,10 @@ pub fn patch_unbind_slot(inout s: RState, lim: Lim, in w: Slice[u64], base: u64,
     let slot = word(in w, base, 5);
     let k = slot_index(in s, slot);
     let owner = rslot(in s.slots, k);
-    if k
-        == NONE_ID
+    if k == NONE_ID
         || !session_ok(in s, widget_session)
-        || owner
-        .widget
-        != widget
-        || owner
-        .property
-        != property {
+        || owner.widget != widget
+        || owner.property != property {
         return Option::Some(BackendFault::StaleSlot);
     }
     if widget_index(in s, widget) == NONE_ID {
@@ -252,13 +247,13 @@ pub fn patch_subscribe(inout s: RState, lim: Lim, in w: Slice[u64], base: u64, i
     s
         .subs
         .push(
-        RSub {
-            serial: sub,
-            widget: widget,
-            event: event,
-            handler: handler
-        }
-    );
+            RSub {
+                serial: sub,
+                widget: widget,
+                event: event,
+                handler: handler
+            }
+        );
     s.blive.push(true);
     s.nsubs = inc(s.nsubs);
     if s.created == MAX_U64 {

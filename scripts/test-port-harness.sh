@@ -29,7 +29,7 @@
 # Shards (#1019, #1100): the Linux job runs the ports in seven parallel
 # shards, VESPER_PORT_HARNESS_SHARD=1 to 7 (unset runs all of them), each a
 # run of consecutive blocks below: 1 the ABI tier through Ignis, 2 Quarry
-# through pact, 3 semver through Crucible, 4 serde, 5 aegis through bench,
+# through pact, 3 semver through Crucible, 4 serde, warp-umem and aether, 5 aegis through bench,
 # 6 eBPF and silicon, 7 prism-h3 and every line new ports append. With a
 # debug compiler, the jobs took 21, 17, 19, 21, 24, 30 and 6 minutes on
 # #1101 (November 2026); the shared optimized compiler (#1103) cuts most of
@@ -272,9 +272,11 @@ fi
 skip_port vesper-simpulse || . crates/vesper-simpulse/port/check.sh  # port P1 lane 5 (#902): vesper-simpulse, both builds and the divergence check
 skip_port vesper-crucible || . crates/vesper-crucible/port/check.sh  # port P1 lane 18 (#915): vesper-crucible, both builds and the divergence checks
 fi
-# Shard 4: serde.
+# Shard 4: serde, warp-umem and aether.
 if part 4; then
 skip_port vesper-serde || sh crates/vesper-serde/port/check.sh  # port P1 lane 19 (#916): vesper-serde, both builds and one divergence check per ported module
+skip_port vesper-warp-umem || sh crates/vesper-warp-umem/port/test-port.sh  # self-hosting SH6 lane 14 (#1409): vesper-warp-umem, both builds, its consumers on the port and one divergence check per ported module
+skip_port vesper-aether || sh crates/vesper-aether/port/test-port.sh  # self-hosting SH6 lane 14 (#1409): vesper-aether, both builds and one divergence check per ported module
 fi
 # Shard 5: aegis through bench.
 if part 5; then
@@ -290,7 +292,7 @@ fi
 # Shard 7: every later port. New ports append their lines below.
 part 7 || exit 0
 skip_port vesper-warp || . crates/vesper-warp/port/check.sh  # port P3b lane 4 (#1066): vesper-warp, both builds and one divergence check per ported module
-skip_port vesper-prism-h3 || sh crates/vesper-prism-h3/port/check.sh  # port P3b lane 5 (#1067): vesper-prism-h3, both builds and one divergence check per ported module
+skip_port vesper-prism-h3 || sh crates/vesper-prism-h3/port/check.sh  # port P3b lane 5 (#1067), Vesper-only since SH6 lane 5 (#1400): vesper-prism-h3 tests and one divergence check per ported module
 skip_port vesper-chorus || sh crates/vesper-chorus/port/test-port.sh  # port P3b lane 6 (#1068): vesper-chorus (the Vesper library is its only build) and one divergence check per ported module
 skip_port vesper-resonance || sh crates/vesper-resonance/port/test-port.sh  # port P3b lane 9 (#1071): vesper-resonance, both builds, one divergence check per ported module and the realtime verifier proof
 skip_port vesper-kinetic || . crates/vesper-kinetic/port/check.sh  # port P3b lane 8 (#1070): vesper-kinetic, both builds and one divergence check per ported module
@@ -305,4 +307,5 @@ skip_port vesper-lint || sh crates/vesper-lint/port/test-port.sh  # self-hosting
 skip_port vesper-sim-session || sh crates/vesper-sim-session/port/test-port.sh  # self-hosting SH5 lane 19 (#1342): vesper-sim-session, both builds, the transcript differential and the divergence check
 skip_port vesper-fusion || sh crates/vesper-fusion/port/test-port.sh  # Rust-exit SH6 lane 18 (#1413): vesper-fusion on its Vesper engine (the only build) and one divergence check
 skip_port vesper-warp-crypto || . crates/vesper-warp-crypto/port/check.sh  # Rust-exit SH6 lane 17 (#1412): vesper-warp-crypto on its Vesper port (the only build), the differential against the Rust reference and one divergence check per ported area
-skip_port vesper-loom-trust || . crates/vesper-loom-trust/port/check.sh  # Rust-exit SH6 lane 17 (#1412): vesper-loom-trust on its Vesper port (the only build), the differential against the Rust reference and one divergence check per ported area
+skip_port vesper-loom-trust || . crates/vesper-loom-trust/port/check.sh  # Rust-exit SH6 lane 17 (#1412): vesper-loom-trust on its Vesper port (its users outside the compiler's build; the tools link the Rust seed), the differential against the Rust reference and one divergence check per ported area
+skip_port vesper-beacon-arrow || sh crates/vesper-beacon-arrow/port/test-port.sh  # Rust-exit SH6 lane 18 (#1413): vesper-beacon-arrow span stream on its Vesper writer (the only build) and one divergence check

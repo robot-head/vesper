@@ -1,0 +1,115 @@
+// @vesper/wasm-backend: the Wasm backend of src/wasm_backend.rs in Vesper.
+// Ported: the plan, layout, lowering, module encoder and the component
+// boundary (WIT text and export wrappers). Not yet: handlers, WASI host
+// frames, evidence binding (`K_NOT_PORTED`); wit-component stays in Rust.
+
+use self::enc::{
+    Code,
+    code_new
+};
+use self::err::{
+    WErr,
+    werr
+};
+use self::module::{
+    Builder,
+    builder_new
+};
+use self::ir::{
+    Facts,
+    read_facts,
+    ir_new
+};
+use self::plan::{
+    Cx,
+    Plan,
+    cx_new,
+    plan
+};
+use self::lower::{
+    L,
+    lowerer_new
+};
+use self::component::{
+    exports
+};
+use @vesper/check-data::pack_text;
+use @vesper/check-data::input::{
+    Reader,
+    read_ctx
+};
+use @vesper/place-ir::read_program;
+
+const K_ENTRY: u8 = 1;
+const K_LIMIT: u8 = 2;
+
+// `wasm_backend::compile` up to the core module: the core bytes and the
+// WIT text, or the error. Component encoding stays in Rust.
+fn compile(in b: Slice[u8]) -> (ChunkSeq[u8], ChunkSeq[u8], u64) eff [Fail[WErr]] {
+    let mut r = Reader {
+        pos: 0
+    };
+    let c = read_ctx(inout r, in b);
+    let p = read_program(inout r, in b, in c);
+    let pool = p.pool.len();
+    let f = read_facts(inout r, in b, in c, pool);
+    if f.max_pages == 0 || f.max_pages > 65536 {
+        Fail::raise(werr(K_LIMIT, 0, 1));
+    }
+    let max_pages = wrapping_u32(f.max_pages);
+    let max_instructions = f.max_instructions;
+    let ir = ir_new(p);
+    let mut cx = cx_new(c, f, ir);
+    if cx.fn_sig(cx.f.entry) == 0 {
+        Fail::raise(werr(K_ENTRY, 0, 2));
+    }
+    let pl = plan(inout cx);
+    let mut l = lowerer_new(cx, pl, max_instructions);
+    l.declare_all();
+    let wit = exports(inout l);
+    l.define_all();
+    let functions = l.b.function_count();
+    let core = l.b.finish(max_pages);
+    (core, wit, functions)
+}
+
+// The harness entry: `[0, function count, packed core, packed WIT]` on
+// success, else `[1, kind, construct, site]`.
+pub fn wasm_backend_compile(in input: Str) -> ChunkSeq[u64] {
+    wasm_backend_compile_bytes(in input.as_bytes())
+}
+
+// The same over a byte slice (the hybrid module's entry, export ABI 4).
+pub fn wasm_backend_compile_bytes(in input: Slice[u8]) -> ChunkSeq[u64] {
+    handle Fail[WErr] in {
+        let (core, wit, functions) = compile(in input);
+        let mut out = ChunkSeq::new[u64]();
+        out.push(0);
+        out.push(functions);
+        let a = pack_text(in core);
+        for i in 0..a.len() {
+            match a.try_get(i) {
+                Option::Some(x) => out.push(x),
+                Option::None => {},
+            }
+        }
+        let t = pack_text(in wit);
+        for i in 0..t.len() {
+            match t.try_get(i) {
+                Option::Some(x) => out.push(x),
+                Option::None => {},
+            }
+        }
+        out
+    } with {
+        return value => value,
+        raise(e, resume) => {
+            let mut out = ChunkSeq::new[u64]();
+            out.push(1);
+            out.push(widen_u64(e.kind));
+            out.push(widen_u64(e.construct));
+            out.push(e.site);
+            out
+        },
+    }
+}

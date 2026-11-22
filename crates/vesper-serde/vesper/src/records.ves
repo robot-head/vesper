@@ -644,12 +644,9 @@ pub fn ndjson_frame(in input: Slice[u8], inout c: NdCursor, b: BatchLimits, r: L
         },
         Option::None => (len, len),
     };
-    let payload_end = if body_end
-        < end
-        && body_end
-        > start
-        && at(in input, wrapping_sub(body_end, 1))
-        == Ascii::Cr {
+    let payload_end = if body_end < end
+        && body_end > start
+        && at(in input, wrapping_sub(body_end, 1)) == Ascii::Cr {
         wrapping_sub(body_end, 1)
     } else {
         body_end
@@ -718,12 +715,9 @@ pub fn ndjson_account(inout c: NdCursor, tokens: u64, index: u64, work: u64)
     if work > c.remaining_work {
         here(in c, 6);
     }
-    if tokens
-        > wrapping_sub(max64(), c.tokens)
-        || index
-        > wrapping_sub(max64(), c.index_bytes)
-        || work
-        > wrapping_sub(max64(), c.work) {
+    if tokens > wrapping_sub(max64(), c.tokens)
+        || index > wrapping_sub(max64(), c.index_bytes)
+        || work > wrapping_sub(max64(), c.work) {
         here(in c, 9);
     }
     c.tokens = wrapping_add(c.tokens, tokens);

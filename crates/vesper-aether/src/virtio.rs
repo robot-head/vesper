@@ -182,8 +182,29 @@ struct Region {
 pub struct GuestAuthorization {
     vm_id: u64,
     regions: Vec<Region>,
+    /// `regions` as `(start, end, access)` words for the Vesper port.
+    #[cfg(feature = "vesper-port")]
+    words: Vec<u64>,
 }
 impl GuestAuthorization {
+    fn from_regions(vm_id: u64, regions: Vec<Region>) -> Self {
+        Self {
+            vm_id,
+            #[cfg(feature = "vesper-port")]
+            words: regions
+                .iter()
+                .flat_map(|r| {
+                    let access = match r.access {
+                        DeviceAccess::Read => 0,
+                        DeviceAccess::Write => 1,
+                        DeviceAccess::ReadWrite => 2,
+                    };
+                    [r.start, r.end, access]
+                })
+                .collect(),
+            regions,
+        }
+    }
     pub fn new(
         map: &SnapshotMap,
         vm_id: u64,
@@ -235,7 +256,7 @@ impl GuestAuthorization {
                 return Err(QueueError::OverlappingAuthorization);
             }
         }
-        Ok(Self { vm_id, regions })
+        Ok(Self::from_regions(vm_id, regions))
     }
     /// Authorizes device read/write access to exactly the RAM of a VMM-owned
     /// [`crate::guest_mem::GuestMemory`] (whose regions are already validated,
@@ -260,7 +281,7 @@ impl GuestAuthorization {
                 })
             })
             .collect::<Result<Vec<_>, QueueError>>()?;
-        Ok(Self { vm_id, regions })
+        Ok(Self::from_regions(vm_id, regions))
     }
     pub fn vm_id(&self) -> u64 {
         self.vm_id
@@ -402,6 +423,15 @@ struct Reservation {
     buffer_id: u16,
 }
 
+/// One walked chain, before the buffer id checks and the commit.
+struct Walked {
+    descriptors: Vec<CapturedDescriptor>,
+    buffer_id: u16,
+    readable_bytes: u64,
+    writable_bytes: u64,
+    cursor: RingCursor,
+}
+
 /// Device-side capture and in-order completion policy. No IN_ORDER feature or
 /// batch completion is negotiated: each direct chain gets one used descriptor.
 /// The externally supplied ring is ordinary host bytes, not mapped device memory.
@@ -417,6 +447,9 @@ pub struct PackedQueue {
     occupied: usize,
     reservations: VecDeque<Reservation>,
     ids_in_use: Vec<bool>,
+    /// The Vesper walk's output words, `5 + 4 * min(size, max chain)`.
+    #[cfg(feature = "vesper-port")]
+    walk_out: Vec<u64>,
 }
 impl PackedQueue {
     pub fn new(
@@ -448,6 +481,8 @@ impl PackedQueue {
             occupied: 0,
             reservations: VecDeque::new(),
             ids_in_use: vec![false; size],
+            #[cfg(feature = "vesper-port")]
+            walk_out: vec![0; 5 + 4 * size.min(limits.max_chain_descriptors)],
         })
     }
     pub fn state(&self) -> QueueState {
@@ -474,6 +509,19 @@ impl PackedQueue {
     /// This policy limits terminal IDs to queue size and rejects live duplicates.
     /// Zero-length elements are conservatively unsupported, not a spec ban.
     pub fn capture(&mut self, ring: &[u8]) -> Result<DescriptorLease, QueueError> {
+        self.capture_with(ring, Self::walk)
+    }
+    /// The Rust implementation of [`Self::capture`], kept for the
+    /// differential and ABBA tests until the port flips.
+    #[doc(hidden)]
+    pub fn capture_reference(&mut self, ring: &[u8]) -> Result<DescriptorLease, QueueError> {
+        self.capture_with(ring, Self::walk_reference)
+    }
+    fn capture_with(
+        &mut self,
+        ring: &[u8],
+        walk: fn(&mut Self, &[u8], usize) -> Result<Walked, QueueError>,
+    ) -> Result<DescriptorLease, QueueError> {
         self.validate_ring(ring)?;
         if self.occupied == self.size {
             return Err(QueueError::Full);
@@ -483,6 +531,96 @@ impl PackedQueue {
             .checked_add(1)
             .ok_or(QueueError::IdentityExhausted)?;
         let free = self.size - self.occupied;
+        let Walked {
+            descriptors,
+            buffer_id,
+            readable_bytes,
+            writable_bytes,
+            cursor,
+        } = walk(self, ring, free)?;
+        let id = usize::from(buffer_id);
+        if id >= self.size {
+            return Err(QueueError::InvalidBufferId);
+        }
+        if self.ids_in_use[id] {
+            return Err(QueueError::BufferIdInUse);
+        }
+        let count = descriptors.len();
+        let lease = DescriptorLease {
+            origin: self.origin,
+            generation: self.next_generation,
+            start: self.available,
+            chain: CapturedChain {
+                vm_id: self.authorization.vm_id,
+                descriptors,
+                buffer_id,
+                readable_bytes,
+                writable_bytes,
+            },
+        };
+        self.reservations.push_back(Reservation {
+            generation: lease.generation,
+            start: lease.start,
+            count,
+            buffer_id,
+        });
+        self.available = cursor;
+        self.occupied += count; // count <= size - occupied was checked before every read.
+        self.ids_in_use[id] = true;
+        self.next_generation = next_generation;
+        Ok(lease)
+    }
+    /// Walks one chain from the next available cursor (the Vesper port).
+    #[cfg(feature = "vesper-port")]
+    fn walk(&mut self, ring: &[u8], free: usize) -> Result<Walked, QueueError> {
+        let n = crate::binding::packed_capture(
+            ring,
+            &self.authorization.words,
+            self.size as u64,
+            free as u64,
+            u64::from(self.available.index),
+            u64::from(self.available.wrap),
+            self.limits.max_chain_descriptors as u64,
+            self.limits.max_chain_bytes,
+            self.limits.max_work as u64,
+            &mut self.walk_out,
+        )
+        .map_err(QueueError::from)? as usize;
+        let out = &self.walk_out;
+        let cursor = |bits: u64| RingCursor {
+            index: bits as u16,
+            wrap: bits & (1 << 16) != 0,
+        };
+        let descriptors = out[5..5 + 4 * n]
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|w| CapturedDescriptor {
+                cursor: cursor(w[0]),
+                descriptor: PackedDescriptor {
+                    guest_address: w[1],
+                    byte_len: w[2] as u32,
+                    buffer_id: w[3] as u16,
+                    flags: (w[3] >> 16) as u16,
+                },
+            })
+            .collect();
+        Ok(Walked {
+            descriptors,
+            buffer_id: out[0] as u16,
+            readable_bytes: out[1],
+            writable_bytes: out[2],
+            cursor: RingCursor {
+                index: out[3] as u16,
+                wrap: out[4] != 0,
+            },
+        })
+    }
+    #[cfg(not(feature = "vesper-port"))]
+    fn walk(&mut self, ring: &[u8], free: usize) -> Result<Walked, QueueError> {
+        self.walk_reference(ring, free)
+    }
+    fn walk_reference(&mut self, ring: &[u8], free: usize) -> Result<Walked, QueueError> {
         let mut work = Work(self.limits.max_work);
         let mut cursor = self.available;
         let mut descriptors = Vec::new();
@@ -551,37 +689,13 @@ impl PackedQueue {
                 return Err(QueueError::IncompleteChain);
             }
         }
-        let id = usize::from(buffer_id);
-        if id >= self.size {
-            return Err(QueueError::InvalidBufferId);
-        }
-        if self.ids_in_use[id] {
-            return Err(QueueError::BufferIdInUse);
-        }
-        let count = descriptors.len();
-        let lease = DescriptorLease {
-            origin: self.origin,
-            generation: self.next_generation,
-            start: self.available,
-            chain: CapturedChain {
-                vm_id: self.authorization.vm_id,
-                descriptors,
-                buffer_id,
-                readable_bytes,
-                writable_bytes,
-            },
-        };
-        self.reservations.push_back(Reservation {
-            generation: lease.generation,
-            start: lease.start,
-            count,
+        Ok(Walked {
+            descriptors,
             buffer_id,
-        });
-        self.available = cursor;
-        self.occupied += count; // count <= size - occupied was checked before every read.
-        self.ids_in_use[id] = true;
-        self.next_generation = next_generation;
-        Ok(lease)
+            readable_bytes,
+            writable_bytes,
+            cursor,
+        })
     }
     /// Uses only the validated captured chain, never refetching guest metadata.
     /// Checks every fallible condition before either ring bytes or queue state

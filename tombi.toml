@@ -1,0 +1,12 @@
+toml-version = "v1.0.0"
+
+[files]
+include = ["**/*.toml"]
+# tools/logos42 manifests are templates that setup.py copies into a staged
+# tree beside a fresh vendor/logos checkout; their paths only resolve there.
+exclude = ["tools/logos42/**"]
+
+[lint.rules]
+# Manifests keep each target.'cfg(..)' table beside the dependency kind it
+# extends, which splits the `target` table across the file.
+tables-out-of-order = "off"

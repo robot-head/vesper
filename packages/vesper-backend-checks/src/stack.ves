@@ -132,10 +132,8 @@ fn clobber_store_len(in c: Cx, at: u64, len: u64, i: u64) -> u64 {
         if byte(in c, at, len, wrapping_add(i, 1)) == 68 {
             k = 2;
         }
-        if byte(in c, at, len, wrapping_add(i, k))
-            != 15
-            || byte(in c, at, len, wrapping_add(i, wrapping_add(k, 1)))
-            != 127 {
+        if byte(in c, at, len, wrapping_add(i, k)) != 15
+            || byte(in c, at, len, wrapping_add(i, wrapping_add(k, 1))) != 127 {
             return 0;
         }
         let l = modrm_rsp_disp(in c, at, len, wrapping_add(i, wrapping_add(k, 2)));

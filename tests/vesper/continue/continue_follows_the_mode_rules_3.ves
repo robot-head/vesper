@@ -7,8 +7,7 @@ linear struct Token {
 fn eat(sink t: Token) -> i64 {
     let Token {
         n
-    }
-    = t;
+    } = t;
     n
 }
 

@@ -343,16 +343,11 @@ pub fn refs(tag: u64) -> u64 {
         REF_A | REF_B | REF_C
     } else if tag >= q_ambig() && tag <= q_unsup() {
         REF_A
-    } else if tag
-        == am_stalled()
-        || tag
-        == un_mixed()
-        || tag
-        == f_node()
-        || tag
-        == c_nested()
-        || tag
-        == ce_nosol() {
+    } else if tag == am_stalled()
+        || tag == un_mixed()
+        || tag == f_node()
+        || tag == c_nested()
+        || tag == ce_nosol() {
         if tag == f_node() {
             REF_A | REF_B
         } else {
@@ -536,18 +531,12 @@ pub fn mkl(inout s: S, tag: u64, a: u64, b: u64, c: u64, from: u64) -> u64 {
             break;
         }
         let m = dec(e);
-        if sw(in s.hs, m)
-            == h
-            && sw(in s.tg, m)
-            == tag
-            && sw(in s.fa, m)
-            == a
-            && sw(in s.fb, m)
-            == b
-            && sw(in s.fc, m)
-            == c
-            && sw(in s.ln, m)
-            == len {
+        if sw(in s.hs, m) == h
+            && sw(in s.tg, m) == tag
+            && sw(in s.fa, m) == a
+            && sw(in s.fb, m) == b
+            && sw(in s.fc, m) == c
+            && sw(in s.ln, m) == len {
             let base = sw(in s.ls, m);
             let mut same = true;
             let mut j: u64 = 0;

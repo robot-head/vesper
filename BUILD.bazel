@@ -133,6 +133,8 @@ vesper_crate(
             "packages/vesper-std/*/Loom.toml",
             "packages/vesper-std/*/src/*.ves",
         ]) + [
+            # @vesper/prism-h3 depends on @vesper/prism-bytes.
+            "//crates/vesper-prism:files",
             "//crates/vesper-prism-h3:files",
             "//crates/vesper-semver:files",
         ],
@@ -190,6 +192,13 @@ vesper_crate(
             "tests/fixtures/**",
         ]),
         "test/self_host_check_harness": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
+        # Self-hosting SH2 lane 13 (#1185): the trait frontend's declaration
+        # pass in Vesper over the same corpus. Anchored globs.
+        "test/self_host_check_pact": glob([
             "examples/**",
             "packages/**",
             "tests/fixtures/**",
@@ -288,6 +297,13 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # SH4 lane 15 (#1289): @vesper/wasm-backend against src/wasm_backend
+        # over the tests/wasm_backend.rs programs and the corpus.
+        "test/self_host_wasm_backend": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]) + ["tests/wasm_backend.rs"],
         # SH4 lane 8 (#1282): the aggregate decisions of native lowering in
         # Vesper against src/native_aggregates.rs over the same corpus.
         "test/self_host_codegen_aggregates": glob([
@@ -314,10 +330,43 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # Self-hosting SH4 lane 13 (#1287): the .vsys type mapping and call
+        # plans in Vesper against src/ffi_lowering over every .vsys source the
+        # root package can declare (crates/* are their own Bazel packages;
+        # Cargo also reads theirs). Anchored globs.
+        "test/self_host_ffi_lowering": glob([
+            "packages/**",
+            "tests/fixtures/**",
+            "tests/borrowed_box_match.rs",
+            "tests/dyn_effects.rs",
+            "tests/ffi_affine_drops.rs",
+            "tests/ffi_handles.rs",
+            "tests/ffi_lowering.rs",
+            "tests/package_submodule_exports.rs",
+            "tests/test_runner_cli.rs",
+            "tests/tree_abi.rs",
+            "tests/vsys_packages.rs",
+            "src/native_export/directives.rs",
+        ]),
+        # SH4 lane 13 part 2 (#1287): the FFI rewriter in Vesper against
+        # src/ffi_lowering's over the FFI suites' sources and fixtures, and
+        # the repository's .ves files. Anchored globs.
+        "test/self_host_ffi_lowering_rewrite": glob([
+            "packages/**",
+            "tests/fixtures/**",
+            "tests/borrowed_box_match.rs",
+            "tests/dyn_effects.rs",
+            "tests/ffi_affine_drops.rs",
+            "tests/ffi_handles.rs",
+            "tests/ffi_lowering.rs",
+            "tests/package_submodule_exports.rs",
+            "tests/test_runner_cli.rs",
+            "tests/tree_abi.rs",
+            "tests/vsys_packages.rs",
+        ]),
         # Self-hosting SH2 lane 9 (#1181): the region, sequence, tiled and
         # vector rules over the same corpus. Anchored globs.
         "test/self_host_check_regions_seqs": glob([
-            "examples/**",
             "packages/**",
             "tests/fixtures/**",
         ]),
@@ -904,8 +953,12 @@ vesper_crate(
         "test/self_host_ir_lower": "long",
         # The eBPF backend differential (#1290) loads every corpus world.
         "test/self_host_ebpf_backend": "long",
+        # The wasm backend differential: about 10 min in a debug build.
+        "test/self_host_wasm_backend": "long",
         "test/self_host_codegen_scalar": "long",
         "test/self_host_check_harness": "long",
+        # The trait declaration differential (#1185) checks every corpus world.
+        "test/self_host_check_pact": "long",
         # The loops and atomics differential (#1182) passed 900 s on loaded CI.
         "test/self_host_check_loops_atomics": "eternal",
         # The tensor types differential (#1186) JIT-compiles the port and
@@ -929,6 +982,9 @@ vesper_crate(
         # The capability-effect differential (#1180): corpus, fixtures, mutants.
         "test/self_host_check_effects": "long",
         "test/self_host_check_fip": "long",
+        # The FFI type mapping differential (#1287) compiles its package once.
+        "test/self_host_ffi_lowering": "long",
+        "test/self_host_ffi_lowering_rewrite": "long",
         # The LSP core differential (#1339) records live `vesper lsp` sessions
         # and JIT-compiles three packages: about 2.5 min unoptimized.
         "test/self_host_lsp_core": "long",
@@ -1095,6 +1151,17 @@ vesper_package(
 )
 
 vesper_package(
+    name = "wasm_backend_package",
+    srcs = glob(["packages/vesper-wasm-backend/src/**/*.ves"]),
+    manifest = "packages/vesper-wasm-backend/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":check_data_package",
+        ":place_ir_package",
+    ],
+)
+
+vesper_package(
     name = "ir_inline_package",
     srcs = glob(["packages/vesper-ir-inline/src/**/*.ves"]),
     manifest = "packages/vesper-ir-inline/Loom.toml",
@@ -1102,8 +1169,8 @@ vesper_package(
     deps = [":check_data_package"],
 )
 
-# The IR optimizer for the hybrid compiler's ir_opt module (SH3 lane 9,
-# #1248).
+# The e-graph and the optimizers for the hybrid compiler's ir_opt (SH3
+# lane 9, #1248) and optimize (SH3 lane 10, #1249) modules.
 vesper_package(
     name = "egraph_package",
     srcs = glob(["packages/vesper-egraph/src/**/*.ves"]),
@@ -1120,6 +1187,19 @@ vesper_package(
         ":check_data_package",
         ":egraph_package",
         ":place_ir_package",
+    ],
+)
+
+vesper_package(
+    name = "optimize_package",
+    srcs = glob(["packages/vesper-optimize/src/**/*.ves"]),
+    manifest = "packages/vesper-optimize/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":ast_package",
+        ":egraph_package",
+        ":std_arena_package",
+        ":std_intern_package",
     ],
 )
 

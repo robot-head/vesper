@@ -148,24 +148,15 @@ fn add(a: u64, b: u64) -> u64 eff [Fail[GErr]] {
 }
 
 fn validate_limits(in lim: Slice[u64]) -> Unit eff [Fail[GErr]] {
-    if sw(in lim, 0)
-        > MAX_BYTES
-        || sw(in lim, 1)
-        > MAX_BYTES
-        || sw(in lim, 7)
-        > MAX_BYTES
-        || sw(in lim, 2)
-        > MAX_NODES
-        || sw(in lim, 3)
-        > MAX_SCHEMA_NODES
-        || sw(in lim, 4)
-        > MAX_DEPTH
-        || sw(in lim, 5)
-        > MAX_WORK
-        || sw(in lim, 6)
-        > MAX_METADATA_BYTES
-        || sw(in lim, 8)
-        > MAX_INTERMEDIATE_BYTES {
+    if sw(in lim, 0) > MAX_BYTES
+        || sw(in lim, 1) > MAX_BYTES
+        || sw(in lim, 7) > MAX_BYTES
+        || sw(in lim, 2) > MAX_NODES
+        || sw(in lim, 3) > MAX_SCHEMA_NODES
+        || sw(in lim, 4) > MAX_DEPTH
+        || sw(in lim, 5) > MAX_WORK
+        || sw(in lim, 6) > MAX_METADATA_BYTES
+        || sw(in lim, 8) > MAX_INTERMEDIATE_BYTES {
         fail(0, 0);
     }
 }
@@ -395,30 +386,18 @@ fn printable(b: u64) -> bool {
     (b >= DIGIT_0 && b <= DIGIT_9)
         || (b >= UPPER_A && b <= UPPER_Z)
         || (b >= LOWER_A && b <= LOWER_Z)
-        || b
-        == SPACE
-        || b
-        == APOSTROPHE
-        || b
-        == LEFT_PAREN
-        || b
-        == RIGHT_PAREN
-        || b
-        == PLUS
-        || b
-        == COMMA
-        || b
-        == MINUS
-        || b
-        == DOT
-        || b
-        == SLASH
-        || b
-        == COLON
-        || b
-        == EQUALS
-        || b
-        == QUESTION
+        || b == SPACE
+        || b == APOSTROPHE
+        || b == LEFT_PAREN
+        || b == RIGHT_PAREN
+        || b == PLUS
+        || b == COMMA
+        || b == MINUS
+        || b == DOT
+        || b == SLASH
+        || b == COLON
+        || b == EQUALS
+        || b == QUESTION
 }
 
 // primitive: checks `s[start..end]` as content of `kind`; errors at `offset`.
@@ -433,11 +412,11 @@ fn primitive(kind: u64, in s: Slice[u8], start: u64, end: u64, offset: u64, inou
     if kind == 0 {
         invalid = len != 1 || !(c0 == 0 || c0 == TRUE);
     } else if kind == 1 {
-        invalid = len
-            == 0
+        invalid = len == 0
             || (
-            len > 1 && ((c0 == 0 && c1 & SIGN_BIT == 0) || (c0 == ALL_ONES && c1 & SIGN_BIT != 0))
-        );
+                len > 1
+                    && ((c0 == 0 && c1 & SIGN_BIT == 0) || (c0 == ALL_ONES && c1 & SIGN_BIT != 0))
+            );
     } else if kind == 2 {
         if len == 0 || c0 > MAX_UNUSED_BITS || (len == 1 && c0 != 0) {
             invalid = true;
@@ -703,8 +682,7 @@ fn measure(
         let len = vw(in vals, vid, 3);
         charge(inout m, len);
         let last = sb(in arena, wrapping_add(start, wrapping_sub(len, 1)));
-        if unused
-            > 7
+        if unused > 7
             || (len == 0 && unused != 0)
             || (len != 0 && last & wrapping_sub(shl(1, unused), 1) != 0) {
             fail(20, 0);
@@ -966,13 +944,13 @@ fn build(
         let start = put_header(inout out, at, 0, 1);
         out
             .try_set(
-            start,
-            if vw(in vals, vid, 1) != 0 {
-                wrapping_u8(TRUE)
-            } else {
-                0
-            }
-        );
+                start,
+                if vw(in vals, vid, 1) != 0 {
+                    wrapping_u8(TRUE)
+                } else {
+                    0
+                }
+            );
         return wrapping_add(start, 1);
     }
     if kind == 4 {

@@ -561,14 +561,14 @@ pub fn m_add_aplic(
     f
         .dom
         .push(
-        DomTopo {
-            parent: none(),
-            child_off: 0,
-            nchild: 0,
-            idc_off: idc_off,
-            nidc: idcs.len()
-        }
-    );
+            DomTopo {
+                parent: none(),
+                child_off: 0,
+                nchild: 0,
+                idc_off: idc_off,
+                nidc: idcs.len()
+            }
+        );
 }
 
 // The domain's parent (none() for a root, or a parent not modelled) and its
@@ -600,38 +600,14 @@ pub fn m_root_of(in f: Fabric, d: u64) -> u64 {
 }
 
 fn cfg_eq(a: MsiCfg, b: MsiCfg) -> bool {
-    a
-        .m_ppn
-        == b
-        .m_ppn
-        && a
-        .s_ppn
-        == b
-        .s_ppn
-        && a
-        .hhxs
-        == b
-        .hhxs
-        && a
-        .lhxs_m
-        == b
-        .lhxs_m
-        && a
-        .lhxs_s
-        == b
-        .lhxs_s
-        && a
-        .hhxw
-        == b
-        .hhxw
-        && a
-        .lhxw
-        == b
-        .lhxw
-        && a
-        .locked
-        == b
-        .locked
+    a.m_ppn == b.m_ppn
+        && a.s_ppn == b.s_ppn
+        && a.hhxs == b.hhxs
+        && a.lhxs_m == b.lhxs_m
+        && a.lhxs_s == b.lhxs_s
+        && a.hhxw == b.hhxw
+        && a.lhxw == b.lhxw
+        && a.locked == b.locked
 }
 
 // Delegation and the root's MSI configuration flow from parents to
@@ -790,11 +766,11 @@ pub fn m_add_imsic(
         f
             .mslot
             .push(
-            ImsicSlot {
-                first: first,
-                nguest: guests
-            }
-        );
+                ImsicSlot {
+                    first: first,
+                    nguest: guests
+                }
+            );
     }
     f.m_tgt.extend(in targets);
     f.m_addr.extend(in addrs);
@@ -1553,8 +1529,7 @@ fn wired_level(in f: Fabric, want: u64) -> bool {
     for d in 0..f.dom.len() {
         let t = topo(in f, d);
         for i in 0..t.nidc {
-            if w_at(in f.d_idc, wrapping_add(t.idc_off, i))
-                == want
+            if w_at(in f.d_idc, wrapping_add(t.idc_off, i)) == want
                 && m_aplic_idc_asserted(in f.aplic, d, i) {
                 return true;
             }
@@ -1605,10 +1580,8 @@ pub fn m_level(in f: Fabric, hart: u64, cause: u64) -> bool {
                     mtime_at(in f, h.mtime)
                 };
                 for k in 0..h.nslot {
-                    if now
-                        >= w_at(in f.c_cmp, wrapping_add(h.slot_off, k))
-                        && timer_target(in f, h, k)
-                        == want {
+                    if now >= w_at(in f.c_cmp, wrapping_add(h.slot_off, k))
+                        && timer_target(in f, h, k) == want {
                         return true;
                     }
                 }
@@ -1683,8 +1656,7 @@ pub fn m_claim_external(inout f: Fabric, hart: u64, cause: u64) -> Claim {
     for d in 0..f.dom.len() {
         let t = topo(in f, d);
         for i in 0..t.nidc {
-            if w_at(in f.d_idc, wrapping_add(t.idc_off, i))
-                == want
+            if w_at(in f.d_idc, wrapping_add(t.idc_off, i)) == want
                 && m_aplic_idc_asserted(in f.aplic, d, i) {
                 let v = m_aplic_claimi(inout f.aplic, d, i);
                 return claimed(1, d, 0, v >> 16);

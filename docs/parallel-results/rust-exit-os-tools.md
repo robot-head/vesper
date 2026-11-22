@@ -243,6 +243,130 @@ In order, one crate per PR:
 Each flip pastes the flip-gate verdict (0 differences over the crate's
 tests; ABBA upper bound at or below 1.5x).
 
+## Part 2a: `vesper-warp-umem` in Vesper (no flip yet)
+
+The rings, soft NIC, driver ledger and conservation audit are Vesper
+(`crates/vesper-warp-umem/vesper/src/*.ves`, about 2,400 lines), behind the
+`vesper-port` feature with the usual harness: a committed binding,
+`port/test-port.sh`, Bazel port targets, and shard 7 of
+`scripts/test-port-harness.sh`. The AF_XDP backend (`af_xdp.rs`) is part
+2b and stays Rust; under `vesper-port` it is compiled out.
+
+Function, checked on this branch:
+
+- All of the crate's tests pass against both builds: rings 5, soft NIC 14,
+  wire 3, Lean count model 3, zero allocation 1 (the port's steady-state
+  echo loop allocates nothing).
+- The consumers pass against the port: `vesper-warp` and
+  `vesper-sim-session` with `--features vesper-warp-umem/vesper-port`.
+- Divergence check: one bug per module (`DIVERGENT_EDITS` in build.rs)
+  fails rings 3, soft NIC 7, zero allocation 1 and Lean 1.
+- Errors map back to the Rust types (`UmemError`, `ConservationError`) with
+  the same first error the Rust auditor reports.
+
+Speed: `tests/abba.rs` runs the echo loop of `zero_alloc.rs` (step,
+harvest, turn around, submit, retire, complete, replenish, then an exact
+audit) on both builds in one process; the Rust build is compiled beside
+the port as `rust_reference`.
+
+| Version | Vesper/Rust median | 95% interval |
+|---|---|---|
+| straight port | 2.43x | [2.36, 2.47] |
+| fast audit path, epoch stamps | 2.10x | [2.05, 2.13] |
+
+The bar is 1.5x, so the crate does not flip. The fast audit decides "clean"
+without building any error, and falls back to the exact pass otherwise, so
+error reports are unchanged. Instruction counts (callgrind, whole run) put
+Vesper at 1.87x Rust's instructions. Each function costs 1.5x to 2.6x its
+Rust twin with the same algorithm: audit 1.8x, device step 1.8x,
+`replenish_fill` 2.6x, `harvest_rx` 1.6x. The cause is generated code,
+not the port. Every `Option` that a `try_get` or a helper returns lives in
+a stack slot and is tested again at each `match`, and live values spill
+across loop bodies (a 3 KB frame in the audit). That is gap G10 below. The
+port is ready to flip once G10 closes; re-run the ABBA test then.
+
+## Part 2b: `vesper-aether` slot plans, PVH parsing and hot sets in Vesper (no flip yet)
+
+`slot_plan` (the KVM memory-slot plan verifier and the cross-VM host
+check) is Vesper (`crates/vesper-aether/vesper/src/{util,slot_plan}.ves`)
+behind `vesper-port`. The public `verify` and `verify_cross_vm` forward to
+the port, and the Rust code stays as `verify_reference` and
+`verify_cross_vm_reference` (hidden) for the differential test and the ABBA
+test. The flip deletes those.
+
+- The whole aether suite passes on the port.
+- `tests/slot_plan_port.rs` compares both builds on 40,000 random plans
+  that hit every rule, error by error.
+- The divergence check (touching ranges count as overlapping) fails the
+  slot-plan tests and the differential test.
+- One known difference that no test can observe: when the cross-VM check
+  sees several regions with the same host range, the port reports them in
+  input order. The Rust sort leaves that order unspecified.
+
+Speed: `tests/abba_slot_plan.rs` verifies four 32-slot plans, then runs
+the cross-VM check, at 4.8x Rust with a heap sort and 4.0x
+([3.97, 4.12]) with run-and-merge sorts. The sort costs about 400
+instructions per element in Vesper against about 60 in Rust's small sort.
+This is G10 again: every element access goes through an `Option` kept in
+memory. The port waits on the same codegen fix as umem.
+
+`pvh::parse_pvh_elf` (the bounds-checked PVH ELF parser and note scan)
+is Vesper too (`vesper/src/pvh.ves`), with the Rust kept as
+`parse_pvh_elf_reference`. The boot tests pass on the port.
+`tests/pvh_port.rs` compares both builds on every truncation and single
+bit flip of the test kernel, plus 20,000 images with random header and
+note fields. The divergence check (a segment may end one byte past the
+file) fails that test. `load_pvh` (the writes into guest memory) stays
+Rust for now.
+
+PVH speed (`tests/abba_pvh.rs`: parse the test kernel and every
+truncation of it) is 10x Rust ([9.8, 10.2]). Each call is about 100 ns,
+so the fixed cost of crossing the binding is a large share, and the parser
+body alone costs 5.7x the Rust instructions. Reading fields through
+`try_read_u64_le` and returning segments in a caller buffer (instead of
+an `inout ChunkSeq`, which allocates a sequence per call) took it down
+from 17x.
+
+`hotset::HotSet::decode` (the untrusted on-disk form) and `runs` (the
+prefetch batches) are Vesper (`vesper/src/hotset.ves`), with the Rust kept
+as `decode_reference` and `runs_reference`. The hotset and hotset_store
+tests pass on the port, `tests/hotset_port.rs` compares both builds on
+5,000 random sets and 5,000 mutated encodings, and the divergence check
+(equal indices count as increasing) fails both. ABBA (`tests/abba_hotset.rs`:
+decode a 1,000-page set, then build its runs) is 1.9x ([1.87, 1.93]), the
+closest yet. Part of the gap is copying pages between the crate's `usize`
+and the port's `u64` at the boundary, which a safe-code crate cannot avoid.
+
+## Part 2c: the packed virtqueue capture in Vesper (no flip yet)
+
+`virtio::PackedQueue::capture` (the bounded packed-ring model of
+virtio 1.2 §2.8) walks its chain in Vesper (`vesper/src/packed.ves`).
+Rust keeps the queue state and the checks before and after the walk: the
+ring length, `Full`, the lease identity and the buffer id. The walk itself
+is in Vesper: phase bits, flags, the read-after-write rule, the
+authorization search, byte and work budgets, and the cursor advance. It
+writes the chain into a scratch buffer that the queue owns.
+`capture_reference` keeps the Rust walk.
+
+- `tests/virtio_packed.rs` passes on the port.
+- `tests/packed_port.rs` runs 6,000 random queues through the same
+  random captures, completions and driver writes in both builds. It
+  compares every lease, error, state and ring byte.
+- The divergence check (a used descriptor counts as available) fails that
+  test.
+
+ABBA (`tests/abba_packed.rs`, which captures and completes two laps of
+two-descriptor chains on a 256-entry ring) was 1.7x ([1.70, 1.81]) and is
+1.57x ([1.55, 1.59]) on the main of 2026-11-22 06:05 UTC. Two changes
+brought it down from 3.2x:
+- The output buffer belongs to the queue, so a call no longer zeroes a
+  fresh buffer.
+- One `try_read_u64_le` now reads each descriptor's length, id and flags.
+
+Under callgrind the Vesper walk costs 720 instructions per chain against
+390 for Rust. The listing shows G10: each `try_read` result goes to a
+stack slot and is tested twice.
+
 ## Compiler gaps (for the coordinator)
 
 | Gap | Blocks | Owner of the fix |
@@ -254,6 +378,7 @@ tests; ABBA upper bound at or below 1.5x).
 | G5 C function pointers / callbacks | threads, signal handlers, `dlsym` | manuscript §16.3 + compiler |
 | G6 atomics on foreign memory | macOS rings (none here) | compiler builtins |
 | G8 effectful workers | aether's vCPU and uffd threads (lazy guest memory needs a concurrent fault resolver) | manuscript §15 + compiler |
+| G10 `Option` results kept in memory and retested; heavy spills in loops | the 1.5x bar for umem (2.1x), aether slot plans (4.0x), PVH parsing (10x) and the packed virtqueue (1.57x), likely every branchy port | compiler codegen (native backend) |
 
 ## Census rows
 

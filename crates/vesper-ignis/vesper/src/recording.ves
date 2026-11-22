@@ -84,16 +84,11 @@ const MAX_WORK_PER_POLL: u64 = 1000000;
 
 pub fn recorder_bounds_ok(history_limit: u64, pending_limit: u64, work_per_poll: u64) -> bool {
     !(
-        history_limit
-            == 0
-            || history_limit
-            > MAX_HISTORY
-            || pending_limit
-            == 0
-            || pending_limit
-            > MAX_PENDING
-            || work_per_poll
-            > MAX_WORK_PER_POLL
+        history_limit == 0
+            || history_limit > MAX_HISTORY
+            || pending_limit == 0
+            || pending_limit > MAX_PENDING
+            || work_per_poll > MAX_WORK_PER_POLL
     )
 }
 
@@ -200,14 +195,14 @@ pub fn recorder_submit(
                 r
                     .streams
                     .push(
-                    ActiveStream {
-                        runtime: s.runtime,
-                        index: s.index,
-                        first: first,
-                        count: s.count,
-                        cursor: 0
-                    }
-                );
+                        ActiveStream {
+                            runtime: s.runtime,
+                            index: s.index,
+                            first: first,
+                            count: s.count,
+                            cursor: 0
+                        }
+                    );
             },
             Option::None => (),
         }
@@ -215,16 +210,14 @@ pub fn recorder_submit(
     r
         .active
         .push(
-        ActiveSub {
-            first_stream: first_stream,
-            stream_count: keep
-        }
-    );
+            ActiveSub {
+                first_stream: first_stream,
+                stream_count: keep
+            }
+        );
     RecorderVerdict::Recorded {
-        uncertain: mode
-            == SubmitMode::AcceptUncertain
-            || mode
-            == SubmitMode::AcceptFirstQueueUncertain,
+        uncertain: mode == SubmitMode::AcceptUncertain
+            || mode == SubmitMode::AcceptFirstQueueUncertain,
         panic: mode == SubmitMode::PanicAfterAcceptance
     }
 }
@@ -315,12 +308,9 @@ fn step(inout r: Recorder) -> Step {
                             },
                         };
                         let blocked = blocked_by_earlier(in r, i, q.runtime, q.index);
-                        let waiting = cmd
-                            .wait
+                        let waiting = cmd.wait
                             && signal_value(in r, cmd.point.runtime, cmd.point.index)
-                            < cmd
-                            .point
-                            .value;
+                                < cmd.point.value;
                         if !blocked && !waiting {
                             let mut next = q;
                             next.cursor = wrapping_add(q.cursor, 1);
@@ -386,11 +376,11 @@ pub fn recorder_poll(inout r: Recorder, max_events: u64) -> ChunkSeq[Point] {
                     }
                     active
                         .push(
-                        ActiveSub {
-                            first_stream: first_stream,
-                            stream_count: a.stream_count
-                        }
-                    );
+                            ActiveSub {
+                                first_stream: first_stream,
+                                stream_count: a.stream_count
+                            }
+                        );
                 }
             },
             Option::None => (),
