@@ -1,0 +1,63 @@
+// @export abi 3
+// @export vsys direct
+// | sys library SysctlC (
+// |     target = "@TARGET@", abi = "@ABI@",
+// |     link = "dynamic", name = "c",
+// |     artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+// | ) {
+// |     wire struct SysctlName { a: u64, b: u64, c: u64, d: u64 }
+// |     fn sysctlbyname(
+// |         nocapture inout name: SysctlName,
+// |         nocapture inout value: u32,
+// |         nocapture inout len: u64,
+// |         new_value: u64,
+// |         new_len: u64,
+// |     ) -> ForeignVal[i32];
+// | }
+//
+// @vesper/aether-rng for AArch64 macOS: RNDR (FEAT_RNG) behind
+// vesper-aether's clone entropy (SH6 lane 14, #1409), found through the
+// `hw.optional.arm.FEAT_RNG` sysctl. See ../x86_64/ for the contract.
+use @vesper-std/cpu::aarch64_rndr;
+
+const RETRIES: u64 = 10;
+
+fn has_rndr() -> bool eff [Ffi[SysctlC]] {
+    // "hw.optional.arm.FEAT_RNG", NUL-terminated, as little-endian words.
+    let mut name = SysctlName {
+        a: 0x6f6974706f2e7768,
+        b: 0x2e6d72612e6c616e,
+        c: 0x474e525f54414546,
+        d: 0,
+    };
+    let mut value: u32 = 0;
+    let mut len: u64 = 4;
+    SysctlC::sysctlbyname(inout name, inout value, inout len, 0, 0) == 0 && len == 4 && value == 1
+}
+
+// 2 when the CPU has RNDR, else 0 (1 is x86_64's RDRAND).
+pub fn rng_instruction() -> u64 eff [Ffi[SysctlC], Ffi[StdCpu]] {
+    if has_rndr() {
+        2
+    } else {
+        0
+    }
+}
+
+// One hardware random word into `out`: true when the instruction exists
+// and delivered one within the retries.
+pub fn rng_word(inout out: u64) -> bool eff [Ffi[SysctlC], Ffi[StdCpu]] {
+    if !has_rndr() {
+        return false;
+    }
+    for _i in 0..RETRIES {
+        match aarch64_rndr() {
+            Option::Some(v) => {
+                out = v;
+                return true;
+            }
+            Option::None => {}
+        }
+    }
+    false
+}

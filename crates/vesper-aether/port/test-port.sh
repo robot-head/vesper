@@ -8,10 +8,15 @@ cargo test --locked -p vesper-aether
 cargo test --locked -p vesper-aether --features vesper-port
 log=$(mktemp)
 trap 'rm -f "$log"' EXIT HUP INT TERM
-expect() { # <test file> <tests that must fail> -- <tests that must pass>
+expect() { # <test file, or lib> <tests that must fail> -- <tests that must pass>
     file=$1
     shift
-    if cargo test --locked -p vesper-aether --features vesper-port-divergent --test "$file" -- --test-threads=1 >"$log" 2>&1; then
+    target="--test $file"
+    if [ "$file" = lib ]; then
+        target=--lib
+    fi
+    # shellcheck disable=SC2086 # $target is two words or one.
+    if cargo test --locked -p vesper-aether --features vesper-port-divergent $target -- --test-threads=1 >"$log" 2>&1; then
         cat "$log"
         echo "the divergent aether port passed tests/$file.rs" >&2
         exit 1
@@ -39,3 +44,6 @@ expect hotset_port decode_matches_on_valid_and_mutated_encodings -- runs_match
 expect hotset encoded_form_is_validated -- runs_coalesce_and_split_at_the_batch_size
 # packed: a used descriptor counts as available.
 expect packed_port capture_matches_the_rust_capture
+# vq (Vesper-only; the Rust reference is a unit-test module): a chain may
+# hold one buffer more than the limit.
+expect lib devices::queue::reference::differential::capture_matches_the_rust_capture -- devices::queue::reference::abba::both_builds_compute_the_same_workload

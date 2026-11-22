@@ -1,0 +1,470 @@
+// SemVer text: `Version::from_str` and `VersionReq::from_str` of the semver
+// crate (1.0, src/parse.rs), with its error text (src/error.rs). Text is
+// `s[a..b]`, valid UTF-8. Identifiers are kept as ranges of `s`.
+
+use @vesper-std/toml::debug::{
+    utf8_at,
+    put_debug_char
+};
+
+pub const OP_EXACT: u64 = 0;
+pub const OP_GREATER: u64 = 1;
+pub const OP_GREATER_EQ: u64 = 2;
+pub const OP_LESS: u64 = 3;
+pub const OP_LESS_EQ: u64 = 4;
+pub const OP_TILDE: u64 = 5;
+pub const OP_CARET: u64 = 6;
+pub const OP_WILDCARD: u64 = 7;
+
+const POS_MAJOR: u64 = 0;
+const POS_MINOR: u64 = 1;
+const POS_PATCH: u64 = 2;
+const POS_PRE: u64 = 3;
+const POS_BUILD: u64 = 4;
+
+const MAX_COMPARATORS: u64 = 32;
+
+pub copy struct SVer {
+    major: u64,
+    minor: u64,
+    patch: u64,
+    pre_a: u64,
+    pre_b: u64,
+    build_a: u64,
+    build_b: u64
+}
+
+pub copy struct SCmp {
+    op: u64,
+    major: u64,
+    has_minor: bool,
+    minor: u64,
+    has_patch: bool,
+    patch: u64,
+    pre_a: u64,
+    pre_b: u64
+}
+
+fn at(in s: Slice[u8], i: u64, b: u64) -> u64 {
+    if i >= b {
+        return 256;
+    }
+    match s.try_get(i) {
+        Option::Some(v) => widen_u64(v),
+        Option::None => 256,
+    }
+}
+
+fn put(inout m: ChunkSeq[u8], in t: Str) {
+    m.extend(in t.as_bytes());
+}
+
+fn put_pos(inout m: ChunkSeq[u8], pos: u64) {
+    if pos == POS_MAJOR {
+        put(inout m, "major version number");
+    } else if pos == POS_MINOR {
+        put(inout m, "minor version number");
+    } else if pos == POS_PATCH {
+        put(inout m, "patch version number");
+    } else if pos == POS_PRE {
+        put(inout m, "pre-release identifier");
+    } else {
+        put(inout m, "build metadata");
+    }
+}
+
+// `QuotedChar`: `'\0'`, else the char's Debug text.
+fn put_quoted(inout m: ChunkSeq[u8], in s: Slice[u8], i: u64) {
+    let (c, _) = utf8_at(in s, i);
+    if c == 0 {
+        put(inout m, "'\\0'");
+    } else {
+        put_debug_char(inout m, c);
+    }
+}
+
+fn unexpected_char(inout m: ChunkSeq[u8], in s: Slice[u8], i: u64, pos: u64) -> bool {
+    put(inout m, "unexpected character ");
+    put_quoted(inout m, in s, i);
+    put(inout m, " while parsing ");
+    put_pos(inout m, pos);
+    false
+}
+
+fn unexpected_char_after(inout m: ChunkSeq[u8], in s: Slice[u8], i: u64, pos: u64) -> bool {
+    put(inout m, "unexpected character ");
+    put_quoted(inout m, in s, i);
+    put(inout m, " after ");
+    put_pos(inout m, pos);
+    false
+}
+
+fn unexpected_end(inout m: ChunkSeq[u8], pos: u64) -> bool {
+    put(inout m, "unexpected end of input while parsing ");
+    put_pos(inout m, pos);
+    false
+}
+
+fn empty_segment(inout m: ChunkSeq[u8], pos: u64) -> bool {
+    put(inout m, "empty identifier segment in ");
+    put_pos(inout m, pos);
+    false
+}
+
+fn leading_zero(inout m: ChunkSeq[u8], pos: u64) -> bool {
+    put(inout m, "invalid leading zero in ");
+    put_pos(inout m, pos);
+    false
+}
+
+// `numeric_identifier`: (ok, value, end).
+fn numeric(inout m: ChunkSeq[u8], in s: Slice[u8], i0: u64, b: u64, pos: u64) -> (bool, u64, u64) {
+    let mut i = i0;
+    let mut v: u64 = 0;
+    loop {
+        let d = at(in s, i, b);
+        if d < 48 || d > 57 {
+            break;
+        }
+        if v == 0 && i > i0 {
+            return (leading_zero(inout m, pos), 0, i);
+        }
+        let dv = wrapping_sub(d, 48);
+        let next = match checked_mul_u64(v, 10) {
+            Option::Some(x) => checked_add_u64(x, dv),
+            Option::None => Option::None,
+        };
+        match next {
+            Option::Some(x) => {
+                v = x;
+            }
+            Option::None => {
+                put(inout m, "value of ");
+                put_pos(inout m, pos);
+                put(inout m, " exceeds u64::MAX");
+                return (false, 0, i);
+            }
+        }
+        i = wrapping_add(i, 1);
+    }
+    if i > i0 {
+        (true, v, i)
+    } else if i < b {
+        (unexpected_char(inout m, in s, i, pos), 0, i)
+    } else {
+        (unexpected_end(inout m, pos), 0, i)
+    }
+}
+
+// `identifier`: (ok, end of the identifier).
+fn identifier(inout m: ChunkSeq[u8], in s: Slice[u8], a: u64, b: u64, pos: u64) -> (bool, u64) {
+    let mut acc = a;
+    let mut seg: u64 = 0;
+    let mut nondigit = false;
+    loop {
+        let c = at(in s, wrapping_add(acc, seg), b);
+        if (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 45 {
+            seg = wrapping_add(seg, 1);
+            nondigit = true;
+        } else if c >= 48 && c <= 57 {
+            seg = wrapping_add(seg, 1);
+        } else {
+            if seg == 0 {
+                if acc == a && c != 46 {
+                    return (true, a);
+                }
+                return (empty_segment(inout m, pos), a);
+            }
+            if pos == POS_PRE && seg > 1 && !nondigit && at(in s, acc, b) == 48 {
+                return (leading_zero(inout m, pos), a);
+            }
+            acc = wrapping_add(acc, seg);
+            if c == 46 {
+                acc = wrapping_add(acc, 1);
+                seg = 0;
+                nondigit = false;
+            } else {
+                return (true, acc);
+            }
+        }
+    }
+}
+
+// `Version::from_str`.
+pub fn parse_version(inout m: ChunkSeq[u8], in s: Slice[u8], a: u64, b: u64) -> (bool, SVer) {
+    let mut v = SVer {
+        major: 0,
+        minor: 0,
+        patch: 0,
+        pre_a: 0,
+        pre_b: 0,
+        build_a: 0,
+        build_b: 0
+    };
+    if a >= b {
+        put(inout m, "empty string, expected a semver version");
+        return (false, v);
+    }
+    let mut pos = POS_MAJOR;
+    let (ok, major, i1) = numeric(inout m, in s, a, b, pos);
+    if !ok {
+        return (false, v);
+    }
+    v.major = major;
+    if !dot(inout m, in s, i1, b, pos) {
+        return (false, v);
+    }
+    pos = POS_MINOR;
+    let (ok2, minor, i2) = numeric(inout m, in s, wrapping_add(i1, 1), b, pos);
+    if !ok2 {
+        return (false, v);
+    }
+    v.minor = minor;
+    if !dot(inout m, in s, i2, b, pos) {
+        return (false, v);
+    }
+    pos = POS_PATCH;
+    let (ok3, patch, i3) = numeric(inout m, in s, wrapping_add(i2, 1), b, pos);
+    if !ok3 {
+        return (false, v);
+    }
+    v.patch = patch;
+    let mut i = i3;
+    v.pre_a = i;
+    v.pre_b = i;
+    if at(in s, i, b) == 45 {
+        pos = POS_PRE;
+        let (ok4, end) = identifier(inout m, in s, wrapping_add(i, 1), b, pos);
+        if !ok4 {
+            return (false, v);
+        }
+        if end == wrapping_add(i, 1) {
+            return (empty_segment(inout m, pos), v);
+        }
+        v.pre_a = wrapping_add(i, 1);
+        v.pre_b = end;
+        i = end;
+    }
+    v.build_a = i;
+    v.build_b = i;
+    if at(in s, i, b) == 43 {
+        pos = POS_BUILD;
+        let (ok5, end) = identifier(inout m, in s, wrapping_add(i, 1), b, pos);
+        if !ok5 {
+            return (false, v);
+        }
+        if end == wrapping_add(i, 1) {
+            return (empty_segment(inout m, pos), v);
+        }
+        v.build_a = wrapping_add(i, 1);
+        v.build_b = end;
+        i = end;
+    }
+    if i < b {
+        return (unexpected_char_after(inout m, in s, i, pos), v);
+    }
+    (true, v)
+}
+
+fn dot(inout m: ChunkSeq[u8], in s: Slice[u8], i: u64, b: u64, pos: u64) -> bool {
+    if at(in s, i, b) == 46 {
+        true
+    } else if i < b {
+        unexpected_char_after(inout m, in s, i, pos)
+    } else {
+        unexpected_end(inout m, pos)
+    }
+}
+
+fn spaces(in s: Slice[u8], i0: u64, b: u64) -> u64 {
+    let mut i = i0;
+    loop {
+        if at(in s, i, b) != 32 {
+            break i;
+        }
+        i = wrapping_add(i, 1);
+    }
+}
+
+fn is_wildcard(c: u64) -> bool {
+    c == 42 || c == 120 || c == 88
+}
+
+// `comparator`: (ok, comparator, position, rest).
+fn comparator(inout m: ChunkSeq[u8], in s: Slice[u8], a: u64, b: u64) -> (bool, SCmp, u64, u64) {
+    let mut c = SCmp {
+        op: OP_CARET,
+        major: 0,
+        has_minor: false,
+        minor: 0,
+        has_patch: false,
+        patch: 0,
+        pre_a: 0,
+        pre_b: 0
+    };
+    let c0 = at(in s, a, b);
+    let c1 = at(in s, wrapping_add(a, 1), b);
+    let mut i = a;
+    if c0 == 61 {
+        c.op = OP_EXACT;
+        i = wrapping_add(a, 1);
+    } else if c0 == 62 {
+        if c1 == 61 {
+            c.op = OP_GREATER_EQ;
+            i = wrapping_add(a, 2);
+        } else {
+            c.op = OP_GREATER;
+            i = wrapping_add(a, 1);
+        }
+    } else if c0 == 60 {
+        if c1 == 61 {
+            c.op = OP_LESS_EQ;
+            i = wrapping_add(a, 2);
+        } else {
+            c.op = OP_LESS;
+            i = wrapping_add(a, 1);
+        }
+    } else if c0 == 126 {
+        c.op = OP_TILDE;
+        i = wrapping_add(a, 1);
+    } else if c0 == 94 {
+        c.op = OP_CARET;
+        i = wrapping_add(a, 1);
+    }
+    let default_op = i == a;
+    i = spaces(in s, i, b);
+    let mut pos = POS_MAJOR;
+    let (ok, major, i1) = numeric(inout m, in s, i, b, pos);
+    if !ok {
+        return (false, c, pos, i1);
+    }
+    c.major = major;
+    i = i1;
+    let mut has_wildcard = false;
+    if at(in s, i, b) == 46 {
+        i = wrapping_add(i, 1);
+        pos = POS_MINOR;
+        if is_wildcard(at(in s, i, b)) {
+            has_wildcard = true;
+            if default_op {
+                c.op = OP_WILDCARD;
+            }
+            i = wrapping_add(i, 1);
+        } else {
+            let (ok2, minor, i2) = numeric(inout m, in s, i, b, pos);
+            if !ok2 {
+                return (false, c, pos, i2);
+            }
+            c.has_minor = true;
+            c.minor = minor;
+            i = i2;
+        }
+    }
+    if at(in s, i, b) == 46 {
+        i = wrapping_add(i, 1);
+        pos = POS_PATCH;
+        if is_wildcard(at(in s, i, b)) {
+            if default_op {
+                c.op = OP_WILDCARD;
+            }
+            i = wrapping_add(i, 1);
+        } else if has_wildcard {
+            put(inout m, "unexpected character after wildcard in version req");
+            return (false, c, pos, i);
+        } else {
+            let (ok3, patch, i3) = numeric(inout m, in s, i, b, pos);
+            if !ok3 {
+                return (false, c, pos, i3);
+            }
+            c.has_patch = true;
+            c.patch = patch;
+            i = i3;
+        }
+    }
+    c.pre_a = i;
+    c.pre_b = i;
+    if c.has_patch && at(in s, i, b) == 45 {
+        pos = POS_PRE;
+        let (ok4, end) = identifier(inout m, in s, wrapping_add(i, 1), b, pos);
+        if !ok4 {
+            return (false, c, pos, i);
+        }
+        if end == wrapping_add(i, 1) {
+            return (empty_segment(inout m, pos), c, pos, i);
+        }
+        c.pre_a = wrapping_add(i, 1);
+        c.pre_b = end;
+        i = end;
+    }
+    if c.has_patch && at(in s, i, b) == 43 {
+        pos = POS_BUILD;
+        let (ok5, end) = identifier(inout m, in s, wrapping_add(i, 1), b, pos);
+        if !ok5 {
+            return (false, c, pos, i);
+        }
+        if end == wrapping_add(i, 1) {
+            return (empty_segment(inout m, pos), c, pos, i);
+        }
+        i = end;
+    }
+    (true, c, pos, spaces(in s, i, b))
+}
+
+// `VersionReq::from_str`: the comparators go to `out` (none for `*`).
+pub fn parse_req(inout m: ChunkSeq[u8], in s: Slice[u8], a0: u64, b: u64, inout out: ChunkSeq[SCmp])
+    -> bool {
+    let a = spaces(in s, a0, b);
+    let w = at(in s, a, b);
+    if is_wildcard(w) {
+        let rest = spaces(in s, wrapping_add(a, 1), b);
+        if rest >= b {
+            return true;
+        }
+        if at(in s, rest, b) == 44 {
+            return wildcard_alone(inout m, w);
+        }
+        put(inout m, "unexpected character after wildcard in version req");
+        return false;
+    }
+    let mut i = a;
+    let mut depth: u64 = 0;
+    loop {
+        let mut scratch: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        let (ok, c, pos, rest) = comparator(inout scratch, in s, i, b);
+        if !ok {
+            let w2 = at(in s, i, b);
+            if is_wildcard(w2) {
+                let r = spaces(in s, wrapping_add(i, 1), b);
+                if r >= b || at(in s, r, b) == 44 {
+                    return wildcard_alone(inout m, w2);
+                }
+            }
+            m.extend(in scratch.as_slice());
+            return false;
+        }
+        out.push(c);
+        if rest >= b {
+            return true;
+        }
+        if at(in s, rest, b) != 44 {
+            put(inout m, "expected comma after ");
+            put_pos(inout m, pos);
+            put(inout m, ", found ");
+            put_quoted(inout m, in s, rest);
+            return false;
+        }
+        i = spaces(in s, wrapping_add(rest, 1), b);
+        if wrapping_add(depth, 1) == MAX_COMPARATORS {
+            put(inout m, "excessive number of version comparators");
+            return false;
+        }
+        depth = wrapping_add(depth, 1);
+    }
+}
+
+fn wildcard_alone(inout m: ChunkSeq[u8], w: u64) -> bool {
+    put(inout m, "wildcard req (");
+    m.push(wrapping_u8(w));
+    put(inout m, ") must be the only comparator in the version req");
+    false
+}

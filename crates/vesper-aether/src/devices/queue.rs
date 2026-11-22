@@ -25,11 +25,12 @@
 
 use super::mmio::DeviceError;
 use crate::guest_mem::GuestMemory;
-use crate::virtio::{
-    DESCRIPTOR_BYTES, FLAG_AVAIL, FLAG_INDIRECT, FLAG_NEXT, FLAG_USED, FLAG_WRITE, QueueError,
-    QueueLimits,
-};
+use crate::virtio::{DESCRIPTOR_BYTES, FLAG_AVAIL, FLAG_USED, FLAG_WRITE, QueueError, QueueLimits};
 use std::collections::VecDeque;
+
+// The Rust walks the port replaced, for the tests (SH6 lane 14, #1409).
+#[cfg(test)]
+mod reference;
 
 pub const VIRTIO_F_INDIRECT_DESC: u64 = 1 << 28;
 pub const VIRTIO_F_EVENT_IDX: u64 = 1 << 29;
@@ -227,120 +228,29 @@ pub struct VirtQueue {
     limits: QueueLimits,
     next_seq: u64,
     in_flight: VecDeque<InFlight>,
-    id_busy: Vec<bool>,
+    /// `id_busy` (buffer ids in flight) then `desc_busy` (split
+    /// descriptors in flight), one byte per entry: `size * 2` bytes.
+    busy: Vec<u8>,
     batch: Vec<Done>,
     stats: QueueStats,
     // Split state.
     last_avail: u16,
     used_idx: u16,
     signalled_used: u16,
-    desc_busy: Vec<bool>,
     // Packed state: (index, wrap counter).
     avail: (u16, bool),
     used: (u16, bool),
     signalled: (u16, bool),
     occupied: usize,
+    /// The Vesper walk's output words (`vq_split_walk`):
+    /// `8 + 4 * max_chain_descriptors + size`.
+    walk_out: Vec<u64>,
 }
 
 fn origin() -> u64 {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(1);
     NEXT.fetch_add(1, Ordering::Relaxed)
-}
-
-struct Work(usize);
-impl Work {
-    fn charge(&mut self) -> Result<(), QueueError> {
-        self.0 = self.0.checked_sub(1).ok_or(QueueError::Limit)?;
-        Ok(())
-    }
-}
-
-/// Builds a chain's buffer list with the checks every format shares.
-struct ChainBuilder<'m> {
-    memory: &'m GuestMemory,
-    limits: QueueLimits,
-    buffers: Vec<Buffer>,
-    readable: Vec<u8>,
-    writable_len: u64,
-    total: u64,
-    saw_write: bool,
-}
-impl<'m> ChainBuilder<'m> {
-    fn new(memory: &'m GuestMemory, limits: QueueLimits) -> Self {
-        Self {
-            memory,
-            limits,
-            buffers: Vec::new(),
-            readable: Vec::new(),
-            writable_len: 0,
-            total: 0,
-            saw_write: false,
-        }
-    }
-    fn push(&mut self, gpa: u64, len: u32, writable: bool) -> Result<(), QueueError> {
-        if self.buffers.len() >= self.limits.max_chain_descriptors {
-            return Err(QueueError::Limit);
-        }
-        if len == 0 {
-            return Err(QueueError::EmptyBuffer);
-        }
-        gpa.checked_add(u64::from(len))
-            .ok_or(QueueError::Overflow)?;
-        if self.saw_write && !writable {
-            return Err(QueueError::ReadAfterWrite);
-        }
-        self.saw_write |= writable;
-        if !self.memory.contains(gpa, u64::from(len)) {
-            return Err(QueueError::UnauthorizedRange);
-        }
-        self.total = self
-            .total
-            .checked_add(u64::from(len))
-            .ok_or(QueueError::Overflow)?;
-        if self.total > self.limits.max_chain_bytes {
-            return Err(QueueError::Limit);
-        }
-        if writable {
-            self.writable_len += u64::from(len);
-        } else {
-            // Single fetch: the readable bytes are copied out now, once.
-            let at = self.readable.len();
-            self.readable.resize(at + len as usize, 0);
-            self.memory
-                .read(gpa, &mut self.readable[at..])
-                .map_err(|_| QueueError::UnauthorizedRange)?;
-        }
-        self.buffers.push(Buffer { gpa, len, writable });
-        Ok(())
-    }
-}
-
-/// A decoded 16-byte descriptor (either format's field order).
-#[derive(Clone, Copy, Debug)]
-struct RawDesc {
-    addr: u64,
-    len: u32,
-    /// Split: `flags`. Packed: `flags`.
-    flags: u16,
-    /// Split: `next`. Packed: buffer id.
-    tail: u16,
-}
-fn decode_split(b: &[u8]) -> RawDesc {
-    RawDesc {
-        addr: u64::from_le_bytes(b[0..8].try_into().expect("8")),
-        len: u32::from_le_bytes(b[8..12].try_into().expect("4")),
-        flags: u16::from_le_bytes(b[12..14].try_into().expect("2")),
-        tail: u16::from_le_bytes(b[14..16].try_into().expect("2")),
-    }
-}
-fn decode_packed(b: &[u8]) -> RawDesc {
-    RawDesc {
-        addr: u64::from_le_bytes(b[0..8].try_into().expect("8")),
-        len: u32::from_le_bytes(b[8..12].try_into().expect("4")),
-        tail: u16::from_le_bytes(b[12..14].try_into().expect("2")),
-        flags: u16::from_le_bytes(b[14..16].try_into().expect("2")),
-    }
 }
 
 /// `vring_need_event` (§2.7.10): true if `event` lies in `[old, new)`
@@ -365,17 +275,17 @@ impl VirtQueue {
             limits,
             next_seq: 0,
             in_flight: VecDeque::new(),
-            id_busy: vec![false; size],
+            busy: vec![0; 2 * size],
             batch: Vec::new(),
             stats: QueueStats::default(),
             last_avail: 0,
             used_idx: 0,
             signalled_used: 0,
-            desc_busy: vec![false; size],
             avail: (0, true),
             used: (0, true),
             signalled: (0, true),
             occupied: 0,
+            walk_out: vec![0; 8 + 4 * limits.max_chain_descriptors + size],
         })
     }
     pub fn layout(&self) -> RingLayout {
@@ -415,151 +325,145 @@ impl VirtQueue {
         memory: &GuestMemory,
         hint: Option<AvailHint>,
     ) -> Result<Option<Chain>, QueueError> {
-        match self.layout.format {
-            RingFormat::Split => self.capture_split(memory, hint),
-            RingFormat::Packed => self.capture_packed(memory, hint),
-        }
+        self.capture_port(memory, hint)
     }
 
-    fn capture_split(
+    /// [`Self::capture`] through the Vesper walks (`vesper/src/vq.ves`):
+    /// Vesper reads the rings and validates the chain, Rust copies the
+    /// readable bytes out and commits.
+    fn capture_port(
         &mut self,
         memory: &GuestMemory,
         hint: Option<AvailHint>,
     ) -> Result<Option<Chain>, QueueError> {
+        let (mem, regions) = memory.port_view();
         let size = self.layout.size;
-        let read16 = |gpa| {
-            memory
-                .read_u16(gpa)
-                .map_err(|_| QueueError::UnauthorizedRange)
+        let limits = (
+            self.limits.max_chain_descriptors as u64,
+            self.limits.max_chain_bytes,
+            self.limits.max_work as u64,
+        );
+        let indirect_ok = u64::from(self.features.indirect);
+        let status = match self.layout.format {
+            RingFormat::Split => {
+                let hint = match hint {
+                    Some(AvailHint::Split { next_idx }) => u64::from(next_idx) + 1,
+                    _ => 0,
+                };
+                crate::binding::vq_split_walk(
+                    mem,
+                    regions,
+                    &self.busy,
+                    self.layout.desc,
+                    self.layout.driver,
+                    u64::from(size),
+                    u64::from(self.last_avail),
+                    hint,
+                    indirect_ok,
+                    limits.0,
+                    limits.1,
+                    limits.2,
+                    &mut self.walk_out,
+                )
+            }
+            RingFormat::Packed => {
+                let hint = match hint {
+                    Some(AvailHint::Packed {
+                        next_off,
+                        next_wrap,
+                    }) => 1 + (u64::from(next_off) | u64::from(next_wrap) << 16),
+                    _ => 0,
+                };
+                crate::binding::vq_packed_walk(
+                    mem,
+                    regions,
+                    &self.busy[..usize::from(size)],
+                    self.layout.desc,
+                    u64::from(size),
+                    u64::from(self.avail.0),
+                    u64::from(self.avail.1),
+                    self.occupied as u64,
+                    hint,
+                    indirect_ok,
+                    limits.0,
+                    limits.1,
+                    limits.2,
+                    &mut self.walk_out,
+                )
+            }
+        }
+        .map_err(QueueError::from)?;
+        match status {
+            0 => return Ok(None),
+            1 => {
+                self.stats.hint_mismatches += 1;
+                return Ok(None);
+            }
+            _ => {}
+        }
+        let out = &self.walk_out;
+        let (id, indirect, count) = (out[0] as u16, out[1] != 0, out[2] as usize);
+        let writable_len = out[4];
+        let mut buffers = Vec::with_capacity(count);
+        let mut readable = Vec::with_capacity((out[3] - writable_len) as usize);
+        for w in out[8..8 + 4 * count].as_chunks::<4>().0 {
+            let b = Buffer {
+                gpa: w[0],
+                len: w[1] as u32,
+                writable: w[2] != 0,
+            };
+            if !b.writable {
+                // Single fetch: the walk checked the range, and the bytes
+                // are copied out once, here.
+                let at = readable.len();
+                readable.resize(at + b.len as usize, 0);
+                memory
+                    .read(b.gpa, &mut readable[at..])
+                    .map_err(|_| QueueError::UnauthorizedRange)?;
+            }
+            buffers.push(b);
+        }
+        let chain = match self.layout.format {
+            RingFormat::Split => {
+                let descs = 8 + 4 * self.limits.max_chain_descriptors;
+                let descriptors: Vec<u16> = out[descs..descs + out[6] as usize]
+                    .iter()
+                    .map(|&i| i as u16)
+                    .collect();
+                for &i in &descriptors {
+                    self.busy[usize::from(size) + usize::from(i)] = 1;
+                }
+                self.busy[usize::from(id)] = 1;
+                self.last_avail = self.last_avail.wrapping_add(1);
+                self.commit_parts(
+                    id,
+                    1,
+                    indirect,
+                    buffers,
+                    readable,
+                    writable_len,
+                    descriptors,
+                )
+            }
+            RingFormat::Packed => {
+                let (slots, next) = (out[6] as u16, out[7]);
+                self.busy[usize::from(id)] = 1;
+                self.occupied += usize::from(slots);
+                self.avail = (next as u16, next & (1 << 16) != 0);
+                self.commit_parts(
+                    id,
+                    slots,
+                    indirect,
+                    buffers,
+                    readable,
+                    writable_len,
+                    Vec::new(),
+                )
+            }
         };
-        let avail_idx = read16(self.layout.driver + 2)?;
-        let pending = avail_idx.wrapping_sub(self.last_avail);
-        if pending > size {
-            return Err(QueueError::AvailOverrun);
-        }
-        if pending == 0 {
-            return Ok(None);
-        }
-        if let Some(AvailHint::Split { next_idx }) = hint
-            && next_idx == self.last_avail
-        {
-            // The ring holds more than the notification announced.
-            self.stats.hint_mismatches += 1;
-            return Ok(None);
-        }
-        let slot = u64::from(self.last_avail % size);
-        let head = read16(self.layout.driver + 4 + 2 * slot)?;
-        if head >= size {
-            return Err(QueueError::InvalidBufferId);
-        }
-        if self.id_busy[usize::from(head)] {
-            return Err(QueueError::BufferIdInUse);
-        }
-        let mut work = Work(self.limits.max_work);
-        let mut builder = ChainBuilder::new(memory, self.limits);
-        let mut descriptors: Vec<u16> = Vec::new();
-        let mut indirect = false;
-        let mut index = head;
-        loop {
-            work.charge()?;
-            if descriptors.len() >= usize::from(size) || descriptors.contains(&index) {
-                return Err(QueueError::ChainLoop);
-            }
-            if self.desc_busy[usize::from(index)] {
-                return Err(QueueError::DescriptorInUse);
-            }
-            let mut raw = [0u8; DESCRIPTOR_BYTES];
-            memory
-                .read(self.layout.desc + DESC * u64::from(index), &mut raw)
-                .map_err(|_| QueueError::UnauthorizedRange)?;
-            let d = decode_split(&raw);
-            descriptors.push(index);
-            if d.flags & !(FLAG_NEXT | FLAG_WRITE | FLAG_INDIRECT) != 0 {
-                return Err(QueueError::UnsupportedFlags);
-            }
-            if d.flags & FLAG_INDIRECT != 0 {
-                if !self.features.indirect {
-                    return Err(QueueError::IndirectNotNegotiated);
-                }
-                if index != head || d.flags & FLAG_NEXT != 0 {
-                    return Err(QueueError::IndirectPlacement);
-                }
-                indirect = true;
-                self.walk_split_indirect(memory, d, &mut builder, &mut work)?;
-                break;
-            }
-            builder.push(d.addr, d.len, d.flags & FLAG_WRITE != 0)?;
-            if d.flags & FLAG_NEXT == 0 {
-                break;
-            }
-            if d.tail >= size {
-                return Err(QueueError::InvalidNext);
-            }
-            index = d.tail;
-        }
-        // Commit.
-        for &i in &descriptors {
-            self.desc_busy[usize::from(i)] = true;
-        }
-        self.id_busy[usize::from(head)] = true;
-        self.last_avail = self.last_avail.wrapping_add(1);
-        Ok(Some(self.commit(head, 1, indirect, builder, descriptors)))
+        Ok(Some(chain))
     }
 
-    /// Reads a split indirect table once and walks it from entry 0 (§2.7.5.3).
-    fn walk_split_indirect(
-        &self,
-        memory: &GuestMemory,
-        d: RawDesc,
-        builder: &mut ChainBuilder<'_>,
-        work: &mut Work,
-    ) -> Result<(), QueueError> {
-        let table = self.read_table(memory, d)?;
-        let entries = table.len() / DESCRIPTOR_BYTES;
-        let mut seen = vec![false; entries];
-        let mut i = 0usize;
-        loop {
-            work.charge()?;
-            if seen[i] {
-                return Err(QueueError::ChainLoop);
-            }
-            seen[i] = true;
-            let e = decode_split(&table[i * DESCRIPTOR_BYTES..(i + 1) * DESCRIPTOR_BYTES]);
-            if e.flags & FLAG_INDIRECT != 0 {
-                return Err(QueueError::IndirectNested);
-            }
-            if e.flags & !(FLAG_NEXT | FLAG_WRITE) != 0 {
-                return Err(QueueError::UnsupportedFlags);
-            }
-            builder.push(e.addr, e.len, e.flags & FLAG_WRITE != 0)?;
-            if e.flags & FLAG_NEXT == 0 {
-                return Ok(());
-            }
-            i = usize::from(e.tail);
-            if i >= entries {
-                return Err(QueueError::InvalidNext);
-            }
-        }
-    }
-
-    fn read_table(&self, memory: &GuestMemory, d: RawDesc) -> Result<Vec<u8>, QueueError> {
-        let len = d.len as usize;
-        if len == 0 || !len.is_multiple_of(DESCRIPTOR_BYTES) {
-            return Err(QueueError::IndirectTableLength);
-        }
-        if len / DESCRIPTOR_BYTES > self.limits.max_chain_descriptors {
-            return Err(QueueError::Limit);
-        }
-        let mut table = vec![0u8; len];
-        memory
-            .read(d.addr, &mut table)
-            .map_err(|_| QueueError::UnauthorizedRange)?;
-        Ok(table)
-    }
-
-    fn packed_available(flags: u16, wrap: bool) -> bool {
-        (flags & FLAG_AVAIL != 0) == wrap && (flags & FLAG_USED != 0) != wrap
-    }
     fn advance(&self, (index, wrap): (u16, bool), by: u16) -> (u16, bool) {
         let next = u32::from(index) + u32::from(by);
         let size = u32::from(self.layout.size);
@@ -570,103 +474,15 @@ impl VirtQueue {
         }
     }
 
-    fn capture_packed(
-        &mut self,
-        memory: &GuestMemory,
-        hint: Option<AvailHint>,
-    ) -> Result<Option<Chain>, QueueError> {
-        if let Some(AvailHint::Packed {
-            next_off,
-            next_wrap,
-        }) = hint
-            && (next_off, next_wrap) == self.avail
-        {
-            return Ok(None);
-        }
-        let size = usize::from(self.layout.size);
-        if self.occupied == size {
-            return Ok(None);
-        }
-        let mut work = Work(self.limits.max_work);
-        let mut builder = ChainBuilder::new(memory, self.limits);
-        let mut cursor = self.avail;
-        let mut slots = 0u16;
-        let mut indirect = false;
-        let id;
-        loop {
-            work.charge()?;
-            if self.occupied + usize::from(slots) >= size {
-                return Err(if slots == 0 {
-                    QueueError::Full
-                } else {
-                    QueueError::IncompleteChain
-                });
-            }
-            let mut raw = [0u8; DESCRIPTOR_BYTES];
-            memory
-                .read(self.layout.desc + DESC * u64::from(cursor.0), &mut raw)
-                .map_err(|_| QueueError::UnauthorizedRange)?;
-            let d = decode_packed(&raw);
-            if !Self::packed_available(d.flags, cursor.1) {
-                if slots == 0 {
-                    return Ok(None);
-                }
-                return Err(QueueError::IncompleteChain);
-            }
-            if d.flags & !(FLAG_NEXT | FLAG_WRITE | FLAG_INDIRECT | FLAG_AVAIL | FLAG_USED) != 0 {
-                return Err(QueueError::UnsupportedFlags);
-            }
-            slots += 1;
-            cursor = self.advance(cursor, 1);
-            if d.flags & FLAG_INDIRECT != 0 {
-                if !self.features.indirect {
-                    return Err(QueueError::IndirectNotNegotiated);
-                }
-                if slots != 1 || d.flags & FLAG_NEXT != 0 {
-                    return Err(QueueError::IndirectPlacement);
-                }
-                indirect = true;
-                // §2.8.19: the table's entries are used in order; their
-                // buffer ids are reserved and ignored.
-                let table = self.read_table(memory, d)?;
-                for e in table.as_chunks::<DESCRIPTOR_BYTES>().0 {
-                    work.charge()?;
-                    let e = decode_packed(e);
-                    if e.flags & FLAG_INDIRECT != 0 {
-                        return Err(QueueError::IndirectNested);
-                    }
-                    if e.flags & !(FLAG_WRITE | FLAG_NEXT) != 0 {
-                        return Err(QueueError::UnsupportedFlags);
-                    }
-                    builder.push(e.addr, e.len, e.flags & FLAG_WRITE != 0)?;
-                }
-                id = d.tail;
-                break;
-            }
-            builder.push(d.addr, d.len, d.flags & FLAG_WRITE != 0)?;
-            if d.flags & FLAG_NEXT == 0 {
-                id = d.tail;
-                break;
-            }
-        }
-        if usize::from(id) >= size {
-            return Err(QueueError::InvalidBufferId);
-        }
-        if self.id_busy[usize::from(id)] {
-            return Err(QueueError::BufferIdInUse);
-        }
-        self.id_busy[usize::from(id)] = true;
-        self.occupied += usize::from(slots);
-        self.avail = cursor;
-        Ok(Some(self.commit(id, slots, indirect, builder, Vec::new())))
-    }
-
-    fn commit(
+    #[allow(clippy::too_many_arguments)]
+    fn commit_parts(
         &mut self,
         id: u16,
         slots: u16,
         indirect: bool,
-        builder: ChainBuilder<'_>,
+        buffers: Vec<Buffer>,
+        readable: Vec<u8>,
+        writable_len: u64,
         descriptors: Vec<u16>,
     ) -> Chain {
         let seq = self.next_seq;
@@ -679,7 +495,7 @@ impl VirtQueue {
             seq,
             id,
             slots,
-            writable_len: builder.writable_len,
+            writable_len,
             descriptors,
         });
         Chain {
@@ -688,9 +504,9 @@ impl VirtQueue {
             id,
             slots,
             indirect,
-            buffers: builder.buffers,
-            readable: builder.readable,
-            writable_len: builder.writable_len,
+            buffers,
+            readable,
+            writable_len,
         }
     }
 
@@ -732,9 +548,10 @@ impl VirtQueue {
             return Err(CompleteError::Rejected(e, chain));
         }
         let f = self.in_flight.pop_front().expect("checked above");
-        self.id_busy[usize::from(f.id)] = false;
+        self.busy[usize::from(f.id)] = 0;
+        let size = usize::from(self.layout.size);
         for i in f.descriptors {
-            self.desc_busy[usize::from(i)] = false;
+            self.busy[size + usize::from(i)] = 0;
         }
         let done = Done {
             id: f.id,

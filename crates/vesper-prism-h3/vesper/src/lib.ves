@@ -80,6 +80,15 @@ use self::decoder::{
 use self::wire::{
     ENTRY_OVERHEAD
 };
+use self::control::{
+    uni_new,
+    uni_clear,
+    uni_accept,
+    uni_ids,
+    uni_contains,
+    uni_closed,
+    uni_bytes
+};
 
 // RFC 9204 §3.2.1: the per-entry overhead (MaxEntries is capacity / 32).
 
@@ -708,4 +717,155 @@ pub fn h3_parse_response(in bytes: Slice[u8], in meta: Slice[u64])
 
 pub fn h3_check_trailers(in bytes: Slice[u8], in meta: Slice[u64]) -> Option[MessageError] {
     message_check_trailers(in bytes, in meta)
+}
+
+// ---------------------------------------------------------------------
+// Part 4: the connection driver (connection.rs). The peer's
+// unidirectional streams and its control stream.
+// ---------------------------------------------------------------------
+
+pub copy enum TransportError {
+    NotReady,
+    Reset(u64),
+    UnknownStream,
+    Closed,
+    Unsupported,
+    TooLarge
+}
+
+// Why the connection failed (`ConnectionError` in connection.rs, variant
+// for variant).
+pub copy enum ConnectionError {
+    Frame {
+        stream_id: u64,
+        error: FrameError
+    },
+    Qpack(QpackError),
+    FrameUnexpected {
+        stream_id: u64,
+        frame_type: u64
+    },
+    MissingSettings,
+    StreamCreation {
+        stream_id: u64
+    },
+    ClosedCriticalStream {
+        stream_id: u64
+    },
+    BadGoaway(u64),
+    BadPushId(u64),
+    BadStreamId(u64),
+    Transport(TransportError),
+    Datagram
+}
+
+// What the stream router asks the Rust driver to do; bytes are
+// `out[at..at + len]`.
+pub copy enum UniCmd {
+    None,
+    // Send STOP_SENDING with this error code.
+    StopSending {
+        stream_id: u64,
+        code: u64
+    },
+    // Bytes of the peer's QPACK encoder stream, for our decoder.
+    ToDecoder {
+        at: u64,
+        len: u64
+    },
+    // Bytes of the peer's QPACK decoder stream, for our encoder.
+    ToEncoder {
+        at: u64,
+        len: u64
+    },
+    // A WebTransport stream and the bytes after its header; the router has
+    // forgotten it.
+    WebTransportStream {
+        stream_id: u64,
+        session: u64,
+        at: u64,
+        len: u64
+    },
+    PeerSettings(Settings),
+    // A PRIORITY_UPDATE for a request stream (already checked).
+    PriorityUpdate(PriorityUpdate),
+    // A frame of unknown type was skipped.
+    UnknownFrame,
+    // A stream of unknown type was refused.
+    UnknownStream,
+    GoAway(u64)
+}
+
+// The peer's unidirectional streams, in stream ID order: `kinds` says what
+// each one is, and a stream whose type has not arrived holds its first
+// bytes in `held` (16 per stream). Each call leaves commands for the Rust
+// driver in `cmds` and their bytes in `out` (control.ves); a failure comes
+// after the commands before it, which the driver carries out first.
+pub struct UniCore {
+    server: bool,
+    webtransport: bool,
+    max_streams: u64,
+    ids: ChunkSeq[u64],
+    kinds: ChunkSeq[u64],
+    held_len: ChunkSeq[u64],
+    held: ChunkSeq[u8],
+    reader: FrameReaderCore,
+    peer_control: Option[u64],
+    peer_encoder: Option[u64],
+    peer_decoder: Option[u64],
+    peer_settings: Option[Settings],
+    goaway: Option[u64],
+    max_push_id: Option[u64],
+    cmds: ChunkSeq[UniCmd],
+    out: ChunkSeq[u8]
+}
+
+pub fn uni_core_new(server: bool, webtransport: bool, max_frame_payload: u64, max_streams: u64)
+    -> UniCore {
+    uni_new(server, webtransport, max_frame_payload, max_streams)
+}
+
+pub fn uni_core_accept(inout c: UniCore, id: u64) -> bool {
+    uni_clear(inout c);
+    uni_accept(inout c, id)
+}
+
+pub fn uni_core_ids(in c: UniCore) -> ChunkSeq[u64] {
+    uni_ids(in c)
+}
+
+pub fn uni_core_contains(in c: UniCore, id: u64) -> bool {
+    uni_contains(in c, id)
+}
+
+pub fn uni_core_len(in c: UniCore) -> u64 {
+    c.ids.len()
+}
+
+pub fn uni_core_closed(inout c: UniCore, id: u64) -> Result[bool, ConnectionError] {
+    uni_clear(inout c);
+    uni_closed(inout c, id)
+}
+
+pub fn uni_core_bytes(inout c: UniCore, id: u64, in bytes: Slice[u8])
+    -> Result[bool, ConnectionError] {
+    uni_clear(inout c);
+    uni_bytes(inout c, id, in bytes)
+}
+
+pub fn uni_core_cmd_count(in c: UniCore) -> u64 {
+    c.cmds.len()
+}
+
+pub fn uni_core_cmd(in c: UniCore, i: u64) -> UniCmd {
+    match c.cmds.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => UniCmd::None,
+    }
+}
+
+pub fn uni_core_out(in c: UniCore) -> ChunkSeq[u8] {
+    let mut out = ChunkSeq::new[u8]();
+    out.extend(in c.out.as_slice());
+    out
 }

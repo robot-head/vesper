@@ -193,20 +193,6 @@ pub fn build(
     axis
 }
 
-fn sweep_overlaps(in smin: Slice[u32], in smax: Slice[u32], s: u64, t: u64) -> bool {
-    let bs = wrapping_mul(s, 3);
-    let bt = wrapping_mul(t, 3);
-    for a in 0..u(3) {
-        if !(
-            gf(in smin, wrapping_add(bs, a)) <= gf(in smax, wrapping_add(bt, a))
-                && gf(in smin, wrapping_add(bt, a)) <= gf(in smax, wrapping_add(bs, a))
-        ) {
-            return false;
-        }
-    }
-    true
-}
-
 // SweepAndPrune::overlapping_pairs kernels 6 and 7: each sorted box's
 // pair count, scanned in place to its output offset. Returns the total,
 // which the wrapper checks against `max_pairs` and sizes `out` by.
@@ -217,15 +203,31 @@ pub fn pair_total(in smin: Slice[u32], in smax: Slice[u32], axis: u64, inout cou
     for s in 0..n {
         let mut c: u32 = 0;
         let mut t = inc(s);
-        let up = gf(in smax, wrapping_add(wrapping_mul(s, 3), axis));
+        // Box `s`'s bounds, read once per row.
+        let bs = wrapping_mul(s, 3);
+        let min0 = gf(in smin, bs);
+        let min1 = gf(in smin, wrapping_add(bs, 1));
+        let min2 = gf(in smin, wrapping_add(bs, 2));
+        let max0 = gf(in smax, bs);
+        let max1 = gf(in smax, wrapping_add(bs, 1));
+        let max2 = gf(in smax, wrapping_add(bs, 2));
+        let up = gf(in smax, wrapping_add(bs, axis));
+        let mut bt = wrapping_add(bs, 3);
         loop {
-            if !(t < n && gf(in smin, wrapping_add(wrapping_mul(t, 3), axis)) <= up) {
+            if !(t < n && gf(in smin, wrapping_add(bt, axis)) <= up) {
                 break;
             }
-            if sweep_overlaps(in smin, in smax, s, t) && c != U32_MAX {
+            if min0 <= gf(in smax, bt)
+                && gf(in smin, bt) <= max0
+                && min1 <= gf(in smax, wrapping_add(bt, 1))
+                && gf(in smin, wrapping_add(bt, 1)) <= max1
+                && min2 <= gf(in smax, wrapping_add(bt, 2))
+                && gf(in smin, wrapping_add(bt, 2)) <= max2
+                && c != U32_MAX {
                 c = wrapping_add(c, 1);
             }
             t = inc(t);
+            bt = wrapping_add(bt, 3);
         }
         counts.try_set(s, wrapping_u32(total));
         total = wrapping_add(total, widen_u64(c));
@@ -253,13 +255,26 @@ pub fn write_pairs(
     for s in 0..n {
         let mut at = widen_u64(g32(in counts, s));
         let mut t = inc(s);
-        let up = gf(in smax, wrapping_add(wrapping_mul(s, 3), axis));
+        let bs = wrapping_mul(s, 3);
+        let min0 = gf(in smin, bs);
+        let min1 = gf(in smin, wrapping_add(bs, 1));
+        let min2 = gf(in smin, wrapping_add(bs, 2));
+        let max0 = gf(in smax, bs);
+        let max1 = gf(in smax, wrapping_add(bs, 1));
+        let max2 = gf(in smax, wrapping_add(bs, 2));
+        let up = gf(in smax, wrapping_add(bs, axis));
+        let mut bt = wrapping_add(bs, 3);
+        let a = widen_u64(g32(in order, s));
         loop {
-            if !(t < n && gf(in smin, wrapping_add(wrapping_mul(t, 3), axis)) <= up) {
+            if !(t < n && gf(in smin, wrapping_add(bt, axis)) <= up) {
                 break;
             }
-            if sweep_overlaps(in smin, in smax, s, t) {
-                let a = widen_u64(g32(in order, s));
+            if min0 <= gf(in smax, bt)
+                && gf(in smin, bt) <= max0
+                && min1 <= gf(in smax, wrapping_add(bt, 1))
+                && gf(in smin, wrapping_add(bt, 1)) <= max1
+                && min2 <= gf(in smax, wrapping_add(bt, 2))
+                && gf(in smin, wrapping_add(bt, 2)) <= max2 {
                 let b = widen_u64(g32(in order, t));
                 if a < b {
                     out.try_set(at, (a << 32) | b);
@@ -269,6 +284,7 @@ pub fn write_pairs(
                 at = inc(at);
             }
             t = inc(t);
+            bt = wrapping_add(bt, 3);
         }
     }
     let mut passes: u64 = PAIR_PASSES;
