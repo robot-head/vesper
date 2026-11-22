@@ -139,53 +139,44 @@ impl std::fmt::Debug for ZSet {
             .finish()
     }
 }
+/// Builds sets from decoded records one row at a time, for every input of
+/// a circuit at once (`widths`). The rows and their i128 sums live in the
+/// Vesper accumulator (`vesper/src/acc.ves`); this wrapper charges the work
+/// and checks the width first, as the Rust accumulator did.
 pub(crate) struct Accumulator {
-    width: usize,
-    limits: Limits,
-    rows: BTreeMap<Row, i128>,
+    widths: Vec<usize>,
+    pub(crate) acc: crate::port::Acc,
 }
 impl Accumulator {
-    pub(crate) fn new(width: usize, limits: Limits) -> Result<Self, Error> {
-        if width > limits.max_columns {
+    pub(crate) fn new(widths: &[usize], limits: Limits) -> Result<Self, Error> {
+        if widths.iter().any(|w| *w > limits.max_columns) {
             return Err(Error::Limit("columns"));
         }
         Ok(Self {
-            width,
-            limits,
-            rows: BTreeMap::new(),
+            widths: widths.to_vec(),
+            acc: crate::port::Acc::new(widths, limits.max_rows),
         })
     }
     pub(crate) fn add(
         &mut self,
+        input: usize,
         row: &[i64],
         weight: i128,
         budget: &mut Budget,
     ) -> Result<(), Error> {
         budget.charge(1usize.checked_add(row.len()).ok_or(Error::Overflow)?)?;
-        if row.len() != self.width {
+        if row.len() != self.widths[input] {
             return Err(Error::Schema);
         }
-        if weight == 0 {
-            return Ok(());
-        }
-        if !self.rows.contains_key(row) && self.rows.len() >= self.limits.max_rows {
-            return Err(Error::Limit("rows"));
-        }
-        let old = self.rows.get(row).copied().unwrap_or(0);
-        self.rows.insert(
-            row.to_vec(),
-            old.checked_add(weight).ok_or(Error::Overflow)?,
-        );
-        Ok(())
+        self.acc.add(input, row, weight)
     }
-    pub(crate) fn finish(self) -> Result<ZSet, Error> {
-        let mut rows = BTreeMap::new();
-        for (row, w) in self.rows {
-            if w != 0 {
-                rows.insert(row, i64::try_from(w).map_err(|_| Error::Overflow)?);
-            }
-        }
-        Ok(ZSet::from_rows(self.width, rows))
+    /// Every input's set, in input order.
+    pub(crate) fn finish(self) -> Result<Vec<ZSet>, Error> {
+        self.widths
+            .iter()
+            .enumerate()
+            .map(|(i, w)| Ok(ZSet::from_cells(*w, self.acc.finish(i)?)))
+            .collect()
     }
 }
 /// Up to three sets per kernel call; a set of another width is a schema

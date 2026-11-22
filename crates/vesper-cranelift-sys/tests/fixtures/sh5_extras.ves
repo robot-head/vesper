@@ -1,0 +1,230 @@
+// The SH5 lane 2 shim calls from Vesper (#1325). Appended to
+// packages/vesper-cranelift/src/lib.ves by tests/sh5_extras.rs, which runs
+// the entries under the JIT with the shim bound and compares the published
+// object with the one its Rust lowering builds (`rust_readback`).
+
+// Typed entity words round-trip, and the invalid word reads as invalid.
+pub fn typed_words() -> u64 {
+    let w: u64 = 41;
+    let ok = var_word(var_of_word(w))
+        == w
+        && slot_word(slot_of_word(w))
+        == w
+        && func_ref_word(func_ref_of_word(w))
+        == w
+        && sig_ref_word(sig_ref_of_word(w))
+        == w
+        && global_value_word(global_value_of_word(w))
+        == w
+        && func_word(func_of_word(w))
+        == w
+        && data_word(data_of_word(w))
+        == w
+        && sig_word(sig_of_word(w))
+        == w
+        && ty_word(ty_of_word(w))
+        == w
+        && value_word(value_of_word(w))
+        == w
+        && block_word(block_of_word(w))
+        == w
+        && is_invalid_func(func_of_word(4294967295))
+        && is_invalid_data(data_of_word(4294967295))
+        && is_invalid_var(var_of_word(4294967295))
+        && !is_invalid_var(var_of_word(w));
+    if ok {
+        1
+    } else {
+        0
+    }
+}
+
+fn sig_i64(inout m: Module) -> SigId eff [Ffi[Cranelift]] {
+    let s = sig_new(inout m, call_conv_default());
+    sig_param(inout m, s, ty_i64());
+    sig_return(inout m, s, ty_i64());
+    s
+}
+
+// Extension attributes, declaration listing and the vector float
+// conversions, in a scratch module that is freed: true if all answer as
+// tests/sh5_extras.rs expects.
+fn scratch_checks() -> bool eff [Ffi[Cranelift]] {
+    let mut m = match module_new(
+        in "x86_64-unknown-linux-gnu".as_bytes(),
+        in "is_pic=true".as_bytes(),
+        in "scratch".as_bytes()
+    ) {
+        Some(m) => m,
+        None => return false,
+    };
+    let s = sig_new(inout m, call_conv_default());
+    sig_param_ext(inout m, s, ty_i8(), ext_sext());
+    sig_param_ext(inout m, s, ty_i16(), ext_uext());
+    sig_return_ext(inout m, s, ty_i32(), ext_sext());
+    let f = declare_function(inout m, in "scratch_f".as_bytes(), linkage_export(), s);
+    let d = declare_data(inout m, in "scratch_d".as_bytes(), linkage_local(), true);
+    let first_f = match module_function_at(inout m, 0) {
+        Some(g) => g.id == f.id,
+        None => false,
+    };
+    let first_d = match module_data_at(inout m, 0) {
+        Some(e) => e.id == d.id,
+        None => false,
+    };
+    let past_end = match module_function_at(inout m, 1) {
+        Some(_) => false,
+        None => true,
+    };
+    let name = module_data_name(in m, d);
+    let listed = module_function_count(in m)
+        == 1
+        && module_data_count(in m)
+        == 1
+        && module_function_linkage(inout m, f)
+        == linkage_export()
+        && module_data_linkage(inout m, d)
+        == 257
+        && name
+        .len()
+        == 9
+        && first_f
+        && first_d
+        && past_end;
+    let v = sig_new(inout m, call_conv_default());
+    sig_param(inout m, v, ty_vector(ty_f32(), 2));
+    let again = module_function_signature(inout m, f);
+    let mut b = match builder_new(in m, v) {
+        Some(b) => b,
+        None => {
+            module_free(m);
+            return false;
+        },
+    };
+    let entry = create_block(inout b);
+    append_block_params_for_function_params(inout b, entry);
+    switch_to_block(inout b, entry);
+    let x = block_param(inout b, entry, 0);
+    let wide = ins_fvpromote_low(inout b, x);
+    let narrow = ins_fvdemote(inout b, wide);
+    let types_ok = value_type(inout b, wide)
+        .code
+        == ty_vector(ty_f64(), 1)
+        .code
+        && value_type(inout b, narrow)
+        .code
+        == ty_vector(ty_f32(), 2)
+        .code;
+    builder_free(b);
+    let mut c = match builder_new(in m, again) {
+        Some(c) => c,
+        None => {
+            module_free(m);
+            return false;
+        },
+    };
+    let e = create_block(inout c);
+    let params_ok = append_block_params_for_function_params(inout c, e) == 2;
+    builder_free(c);
+    let clean = module_error_len(in m) == 0;
+    module_free(m);
+    listed && types_ok && params_ok && clean
+}
+
+// The probe of tests/sh5_extras.rs: compiled without defining, read back,
+// then defined from its own bytes and relocations. Returns the published
+// object's id (0 on failure).
+pub fn extras() -> u64 eff [Ffi[Cranelift]] {
+    if !scratch_checks() {
+        return 0;
+    }
+    let mut m = match module_new(
+        in "x86_64-unknown-linux-gnu".as_bytes(),
+        in "is_pic=true".as_bytes(),
+        in "sh5".as_bytes()
+    ) {
+        Some(m) => m,
+        None => return 0,
+    };
+    module_keep_clif(inout m, true);
+    let sig = sig_i64(inout m);
+    let callee = declare_function(inout m, in "probe_callee".as_bytes(), linkage_import(), sig);
+    let table = declare_data(inout m, in "probe_table".as_bytes(), linkage_local(), false);
+    let probe = declare_function(inout m, in "probe".as_bytes(), linkage_export(), sig);
+    let mut d = match data_new() {
+        Some(d) => d,
+        None => {
+            module_free(m);
+            return 0;
+        },
+    };
+    data_zeroinit(inout d, 16);
+    if !define_data(inout m, table, d) {
+        module_free(m);
+        return 0;
+    }
+    let mut b = match builder_new(in m, sig) {
+        Some(b) => b,
+        None => {
+            module_free(m);
+            return 0;
+        },
+    };
+    let cr = import_function(inout b, inout m, callee);
+    let tg = import_data(inout b, in m, table);
+    let entry = create_block(inout b);
+    append_block_params_for_function_params(inout b, entry);
+    switch_to_block(inout b, entry);
+    let x = block_param(inout b, entry, 0);
+    let slot = create_stack_slot(inout b, 32, 3);
+    ins_stack_store(inout b, x, slot, 8);
+    ins_trapz(inout b, x, trap_stack_overflow());
+    let y = ins_stack_load(inout b, ty_i64(), slot, 8);
+    let args = vals1(y);
+    let r = ins_call1(inout b, cr, in args.as_slice());
+    let t = ins_symbol_value(inout b, ty_i64(), tg);
+    let v = ins_iadd(inout b, r, t);
+    ins_return1(inout b, v);
+    seal_all_blocks(inout b);
+    let size = match compile(inout m, b) {
+        Some(n) => n,
+        None => {
+            module_free(m);
+            return 0;
+        },
+    };
+    let code = module_last_code(in m);
+    let relocs = module_last_relocs(in m);
+    let calls = module_last_call_sites(in m);
+    let clif = module_last_clif(in m);
+    let traps = module_last_traps(in m);
+    let read_ok = code
+        .len()
+        == size
+        && relocs
+        .len()
+        >= 10
+        && calls
+        .len()
+        == 2
+        && traps
+        .len()
+        == 2
+        && module_last_frame_size(in m)
+        >= 32
+        && clif
+        .len()
+        > 0;
+    if !read_ok {
+        module_free(m);
+        return 0;
+    }
+    if !define_function_bytes(inout m, probe, 16, in code.as_slice(), in relocs.as_slice()) {
+        module_free(m);
+        return 0;
+    }
+    match module_finish(m) {
+        Some(o) => object_publish(o),
+        None => 0,
+    }
+}
