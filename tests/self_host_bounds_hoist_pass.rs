@@ -113,6 +113,46 @@ fn pass_matches_bounds_hoist_run() {
     assert_eq!(bad, 0);
 }
 
+/// Moving the only decrement across the access changes which induction
+/// value the access sees. Compare the complete IR for both arrangements.
+#[test]
+fn count_down_decrement_placement_matches_rust() {
+    let dec = "i = wrapping_sub(i, 1);";
+    for (before, after, should_version) in [(dec, "", true), ("", dec, false)] {
+        let source = format!(
+            "fn step(inout d: ChunkSeq[u64], n: u64) {{
+                let mut i = n;
+                loop {{
+                    if i == 0 {{ break; }}
+                    {before}
+                    let v = match d.try_get(i) {{ Option::Some(x) => x, Option::None => 0 }};
+                    d.try_set(i, wrapping_add(v, 1));
+                    {after}
+                }}
+            }}"
+        );
+        let parsed = vesper::parser::parse(&source);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = vesper::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        let program = corpus::at_hoist(&checked.world).unwrap();
+        let mut probe = program.clone();
+        assert_eq!(bounds_hoist::run(&mut probe) != 0, should_version);
+        let compared = ir_words::compare_pass(
+            &checked.world,
+            &program,
+            |p| {
+                bounds_hoist::run(p);
+            },
+            |input| entry().words(input),
+        );
+        assert!(
+            !compared.skipped && compared.agrees(),
+            "{source}: {compared:?}"
+        );
+    }
+}
+
 /// The flip gate's ABBA workloads (scripts/ci/flip-gate/bounds-hoist.toml;
 /// `CHECK_HARNESS_SPEED` set, release build). Each epoch runs Rust, Vesper,
 /// Vesper, Rust over every corpus program and prints one pair per epoch in

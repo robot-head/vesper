@@ -206,13 +206,14 @@ pub struct Assembled {
     /// The `.vsys` libraries every loaded package names in its manifest
     /// (`[package] vsys`, manuscript §16.3), in load order.
     pub vsys: Vec<PackageVsys>,
-    /// The assembly sources and objects every loaded package names in its
+    /// The C and assembly sources and objects every loaded package names in its
     /// manifest (`[package] objects`, manuscript §16.3), in load order.
     pub objects: Vec<PackageObject>,
 }
 
-/// One entry of a package's `[package] objects`: an assembly source (`.s`,
-/// `.S`, or `.asm` for Windows) or a prebuilt object (`.o`, `.obj`).
+/// One entry of a package's `[package] objects`: a C source (`.c`), an
+/// assembly source (`.s`, `.S`, or `.asm` for Windows) or a prebuilt object
+/// (`.o`, `.obj`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackageObject {
     /// The package that carries it.
@@ -239,7 +240,7 @@ impl PackageObject {
 }
 
 /// The file kinds `[package] objects` accepts.
-pub const OBJECT_EXTENSIONS: [&str; 5] = ["s", "S", "asm", "o", "obj"];
+pub const OBJECT_EXTENSIONS: [&str; 6] = ["c", "s", "S", "asm", "o", "obj"];
 
 /// One `.vsys` library a package's manifest names.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -430,7 +431,7 @@ impl Assembled {
             let library = imports
                 .add(&source, crate::ffi_lowering::Handler::Direct)
                 .map_err(|e| format!("{}: {e}", v.display_for(target)))?;
-            // A package's assembly objects provide its own static libraries
+            // A package's objects provide its own static libraries
             // (manuscript §16.3).
             let link = library.link();
             if link.mode() == vesper_ffi::sys::LinkMode::Static
@@ -1042,7 +1043,7 @@ impl Loader<'_> {
             {
                 self.manifest_errors.push((
                     manifest_shown.into(),
-                    bad("expected an assembly source (.s, .S, .asm) or an object (.o, .obj)"),
+                    bad("expected a C source (.c), an assembly source (.s, .S, .asm) or an object (.o, .obj)"),
                 ));
                 continue;
             }
