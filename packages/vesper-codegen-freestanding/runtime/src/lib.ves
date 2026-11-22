@@ -950,9 +950,9 @@ fn isa_flags(target: u64) -> ChunkSeq[u8] {
     // `vesper_silicon::stack::target_isa_with`: the ISA Silicon measures.
     f
         .extend(
-        in "opt_level=speed;enable_probestack=false;unwind_info=true;preserve_frame_pointers=true"
-            .as_bytes()
-    );
+            in "opt_level=speed;enable_probestack=false;unwind_info=true;preserve_frame_pointers=true"
+                .as_bytes()
+        );
     if target == TARGET_RISCV {
         // `FreestandingTarget::isa_flags`.
         f.extend(in ";has_zca=true;has_zcd=false".as_bytes());

@@ -22,10 +22,6 @@ const ASCII_CASE_OFFSET: u8 = 32;
 // bit `b` of LOW for bytes 0-63, bit `b - 64` of HIGH for 64-127.
 const TCHAR_MASK_LOW: u64 = 288068722172624896;
 const TCHAR_MASK_HIGH: u64 = 6341068274398134270;
-// RFC 9110 §5.5 field-value bytes: VCHAR and SP (LOW) and 64-126 (HIGH);
-// bytes 128-255 (obs-text) pass with `find_not_in`'s high flag.
-const FIELD_VCHAR_MASK_LOW: u64 = 18446744069414584320;
-const FIELD_VCHAR_MASK_HIGH: u64 = 9223372036854775807;
 
 copy struct ResponseLimits {
     max_head_bytes: u64,
@@ -395,7 +391,7 @@ pub fn response_plan_header(inout p: ResponsePlan, in name: Slice[u8], in value:
         },
         Option::None => (),
     }
-    match first_control(in value, false, FIELD_VCHAR_MASK_LOW, FIELD_VCHAR_MASK_HIGH) {
+    match first_control(in value, false) {
         Option::Some(i) => {
             return Option::Some(ResponseError::InvalidHeaderValue);
         },

@@ -313,11 +313,8 @@ fn check_expr(
     let mut receiver = NONE32;
     // The first argument of `rest`, as a child index of `e`.
     let mut rest: u64 = 1;
-    if cr
-        .kind
-        == E_FIELD
-        && cell_type(in t, in a.sy, ty_of(in w, in x, x.kid(callee, 0)))
-        != NONE32 {
+    if cr.kind == E_FIELD
+        && cell_type(in t, in a.sy, ty_of(in w, in x, x.kid(callee, 0))) != NONE32 {
         method = cr.name;
         receiver = ty_of(in w, in x, x.kid(callee, 0));
     } else if cr.kind == E_NAME && names.has_prefix(cr.name, in "Atomic::".as_bytes()) {
@@ -409,11 +406,8 @@ fn worker_body(in names: Names, in x: Exprs, in a: Atomics, body: u32) -> bool {
         return false;
     }
     let f = x.function(i);
-    f
-        .generics
-        == 0
-        && f
-        .pure_row
+    f.generics == 0
+        && f.pure_row
         && !is_prelude_function(in names, in a.sy, a.atomic, a.workers, f.name)
 }
 
@@ -523,10 +517,8 @@ fn path_mentions(in names: Names, in sy: Syms, n: u32) -> bool {
     if n == sy.atomic || n == sy.memory_order {
         return true;
     }
-    names
-        .has_prefix(n, in "Atomic::".as_bytes())
-        || names
-        .has_prefix(n, in "MemoryOrder::".as_bytes())
+    names.has_prefix(n, in "Atomic::".as_bytes())
+        || names.has_prefix(n, in "MemoryOrder::".as_bytes())
 }
 
 // `type_mentions`.
@@ -591,12 +583,11 @@ fn expr_mentions(in names: Names, in t: Types, in x: Exprs, in sy: Syms, e: u32)
     } else if k == E_BLOCK {
         for i in 0..x.kid_count(e) {
             let s = x.row(x.kid(e, i));
-            if s
-                .is_let
+            if s.is_let
                 && (
-                type_mentions(in t, in sy, s.let_ty)
-                    || pattern_mentions(in names, in x, in sy, s.pat)
-            ) {
+                    type_mentions(in t, in sy, s.let_ty)
+                        || pattern_mentions(in names, in x, in sy, s.pat)
+                ) {
                 return true;
             }
         }
@@ -879,11 +870,11 @@ fn read_typed(
         ir
             .typed
             .push(
-            Typed {
-                key: key,
-                ty: at32(in tmap, r.word(in b))
-            }
-        );
+                Typed {
+                    key: key,
+                    ty: at32(in tmap, r.word(in b))
+                }
+            );
     }
     wrapping_u32(n)
 }
@@ -935,18 +926,18 @@ pub fn read_ir(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], in tmap
         ir
             .fns
             .push(
-            IrFn {
-                name: name,
-                la: la,
-                ln: ln,
-                pa: pa,
-                pn: pn,
-                va: va,
-                vn: vn,
-                ia: ia,
-                in_: wrapping_u32(k)
-            }
-        );
+                IrFn {
+                    name: name,
+                    la: la,
+                    ln: ln,
+                    pa: pa,
+                    pn: pn,
+                    va: va,
+                    vn: vn,
+                    ia: ia,
+                    in_: wrapping_u32(k)
+                }
+            );
     }
     ir
 }
@@ -1087,23 +1078,13 @@ pub fn check_program(
                 },
             };
             let private = if inst.tag == 0 {
-                inst
-                    .seg
-                    == a
-                    .sy
-                    .cell
-                    && cell_type(in t, in a.sy, root_type(in ir, f, inst.name))
-                    != NONE32
+                inst.seg == a.sy.cell
+                    && cell_type(in t, in a.sy, root_type(in ir, f, inst.name)) != NONE32
             } else if inst.tag == 1 {
                 writes_cell(in names, in t, in ir, in a.sy, f, inst.name)
             } else if inst.tag == 2 {
-                inst
-                    .seg
-                    == a
-                    .sy
-                    .cell
-                    && cell_type(in t, in a.sy, value_type(in ir, f, inst.value))
-                    != NONE32
+                inst.seg == a.sy.cell
+                    && cell_type(in t, in a.sy, value_type(in ir, f, inst.value)) != NONE32
             } else {
                 false
             };

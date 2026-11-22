@@ -213,15 +213,10 @@ test {
         let mut wides = ChunkSeq::new[u64]();
         wides.push(4294967296);
         wides.push(18446744073709551615);
-        byte(in bytes.as_slice(), index)
-            == byte_value
-            && u8_at(in bytes, index)
-            == byte_value
-            && u32_at(in words, index)
-            == word
-            && w32(in words, index)
-            == widened
-            && u64_at(in wides, index)
-            == wide
+        byte(in bytes.as_slice(), index) == byte_value
+            && u8_at(in bytes, index) == byte_value
+            && u32_at(in words, index) == word
+            && w32(in words, index) == widened
+            && u64_at(in wides, index) == wide
     }
 }

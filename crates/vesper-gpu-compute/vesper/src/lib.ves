@@ -838,8 +838,7 @@ fn open_on(instance: u64, in wanted: Str)
         let p = properties(physical);
         let api = get32(in p, Properties2::ApiVersion);
         let name = c_string(in p, Properties2::DeviceName);
-        let fits = api
-            >= Api::Version1_2
+        let fits = api >= Api::Version1_2
             && contains(in name.as_slice(), in wanted.as_bytes())
             && timeline_supported(physical);
         if fits {
@@ -1033,15 +1032,12 @@ pub fn buffer_new(in d: Dev, bytes: u64)
             in s,
             BufferBlock::Properties
                 + MemoryProperties::MemoryTypes
-                + i
-                * MemoryType::Bytes
+                + i * MemoryType::Bytes
                 + MemoryType::PropertyFlags
         );
         let allowed = (bits >> narrow_u32(i)) & 1 != 0;
         if allowed
-            && flags
-            & MemoryProperty::HostVisibleCoherent
-            == MemoryProperty::HostVisibleCoherent {
+            && flags & MemoryProperty::HostVisibleCoherent == MemoryProperty::HostVisibleCoherent {
             chosen = Option::Some(narrow_u32(i));
             break;
         }

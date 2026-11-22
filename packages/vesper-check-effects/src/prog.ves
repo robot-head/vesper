@@ -328,12 +328,12 @@ fn read_fun(inout r: Reader, in b: Slice[u8], in c: Ctx, inout params: ChunkSeq[
         let ty = u32_at(in c.tmap, r.word(in b));
         params
             .push(
-            ParamRow {
-                name: pname,
-                pass: pass,
-                ty: ty
-            }
-        );
+                ParamRow {
+                    name: pname,
+                    pass: pass,
+                    ty: ty
+                }
+            );
     }
     Fun {
         key: key,
@@ -402,17 +402,17 @@ pub fn read_prog(inout r: Reader, in b: Slice[u8], in c: Ctx) -> Prog {
         }
         exprs
             .push(
-            ExprNode {
-                kind: kind,
-                start: start,
-                end: end,
-                a: n32(a),
-                b: n32(bb),
-                c: n32(cc),
-                d: n32(d),
-                e: n32(e)
-            }
-        );
+                ExprNode {
+                    kind: kind,
+                    start: start,
+                    end: end,
+                    a: n32(a),
+                    b: n32(bb),
+                    c: n32(cc),
+                    d: n32(d),
+                    e: n32(e)
+                }
+            );
     }
     let np = r.word(in b);
     let mut pats: ChunkSeq[PatNode] = ChunkSeq::with_capacity[PatNode](np);
@@ -428,15 +428,15 @@ pub fn read_prog(inout r: Reader, in b: Slice[u8], in c: Ctx) -> Prog {
         }
         pats
             .push(
-            PatNode {
-                kind: kind,
-                start: start,
-                end: end,
-                a: n32(a),
-                b: n32(pb),
-                c: n32(pc)
-            }
-        );
+                PatNode {
+                    kind: kind,
+                    start: start,
+                    end: end,
+                    a: n32(a),
+                    b: n32(pb),
+                    c: n32(pc)
+                }
+            );
     }
     // The pool holds expression and pattern indices and passes, and the
     // names and types of the lists that have them, which are mapped to
@@ -523,17 +523,17 @@ pub fn read_prog(inout r: Reader, in b: Slice[u8], in c: Ctx) -> Prog {
         set_by_symbol(inout eff_by_name, name, inc32(n32(effs.len())));
         effs
             .push(
-            EffDecl {
-                name: name,
-                linear: linear,
-                start: start,
-                end: end,
-                ga: ga,
-                gn: n32(gn),
-                oa: oa,
-                on: n32(on)
-            }
-        );
+                EffDecl {
+                    name: name,
+                    linear: linear,
+                    start: start,
+                    end: end,
+                    ga: ga,
+                    gn: n32(gn),
+                    oa: oa,
+                    on: n32(on)
+                }
+            );
     }
     let nc = r.word(in b);
     let mut calls: ChunkSeq[CallRow] = ChunkSeq::with_capacity[CallRow](nc);
@@ -549,13 +549,13 @@ pub fn read_prog(inout r: Reader, in b: Slice[u8], in c: Ctx) -> Prog {
         }
         calls
             .push(
-            CallRow {
-                start: start,
-                end: end,
-                va: va,
-                vn: n32(vn)
-            }
-        );
+                CallRow {
+                    start: start,
+                    end: end,
+                    va: va,
+                    vn: n32(vn)
+                }
+            );
     }
     Prog {
         exprs: exprs,

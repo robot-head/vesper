@@ -221,17 +221,17 @@ pub fn graph_add_buffer(inout g: Graph, size: u64) -> ResourceOutcome {
         g
             .resources
             .push(
-            Resource {
-                texture: false,
-                size: size,
-                mips: 0,
-                slices: 0,
-                planes: 0,
-                initial_layout: Layout::Undefined,
-                has_final: false,
-                final_layout: Layout::Undefined
-            }
-        );
+                Resource {
+                    texture: false,
+                    size: size,
+                    mips: 0,
+                    slices: 0,
+                    planes: 0,
+                    initial_layout: Layout::Undefined,
+                    has_final: false,
+                    final_layout: Layout::Undefined
+                }
+            );
         ResourceOutcome::Added(index)
     }
 }
@@ -263,17 +263,17 @@ pub fn graph_add_texture(
             g
                 .resources
                 .push(
-                Resource {
-                    texture: true,
-                    size: 0,
-                    mips: mips,
-                    slices: slices,
-                    planes: planes,
-                    initial_layout: initial_layout,
-                    has_final: has_final,
-                    final_layout: final_layout
-                }
-            );
+                    Resource {
+                        texture: true,
+                        size: 0,
+                        mips: mips,
+                        slices: slices,
+                        planes: planes,
+                        initial_layout: initial_layout,
+                        has_final: has_final,
+                        final_layout: final_layout
+                    }
+                );
             ResourceOutcome::Added(index)
         }
     }
@@ -335,10 +335,8 @@ fn resolve_range(r: SubresourceRange, res: Resource) -> Option[SubresourceRange]
 }
 
 fn axis_overlaps(a0: u32, an: u32, b0: u32, bn: u32) -> bool {
-    widen_u64(a0)
-        < wrapping_add(widen_u64(b0), widen_u64(bn))
-        && widen_u64(b0)
-        < wrapping_add(widen_u64(a0), widen_u64(an))
+    widen_u64(a0) < wrapping_add(widen_u64(b0), widen_u64(bn))
+        && widen_u64(b0) < wrapping_add(widen_u64(a0), widen_u64(an))
 }
 
 // `overlaps`: byte ranges or subresource boxes intersect.
@@ -348,17 +346,17 @@ fn uses_overlap(a: Use, b: Use) -> bool {
     } else if !a.bytes && !b.bytes {
         axis_overlaps(a.range.first_mip, a.range.mip_count, b.range.first_mip, b.range.mip_count)
             && axis_overlaps(
-            a.range.first_slice,
-            a.range.slice_count,
-            b.range.first_slice,
-            b.range.slice_count
-        )
+                a.range.first_slice,
+                a.range.slice_count,
+                b.range.first_slice,
+                b.range.slice_count
+            )
             && axis_overlaps(
-            a.range.first_plane,
-            a.range.plane_count,
-            b.range.first_plane,
-            b.range.plane_count
-        )
+                a.range.first_plane,
+                a.range.plane_count,
+                b.range.first_plane,
+                b.range.plane_count
+            )
     } else {
         false
     }
@@ -605,12 +603,12 @@ pub fn graph_add_pass(inout g: Graph, queue: u64, in descs: Slice[UseDesc]) -> P
     g
         .passes
         .push(
-        PassInfo {
-            queue: wrapping_u32(queue),
-            first_use: first,
-            use_count: uses.len()
-        }
-    );
+            PassInfo {
+                queue: wrapping_u32(queue),
+                first_use: first,
+                use_count: uses.len()
+            }
+        );
     PassOutcome::Added(wrapping_u32(index))
 }
 
@@ -638,10 +636,10 @@ pub fn graph_add_dependency(inout g: Graph, before: u64, after: u64) -> Dependen
     g
         .explicit
         .push(
-        Edge2 {
-            before: b,
-            after: a
-        }
-    );
+            Edge2 {
+                before: b,
+                after: a
+            }
+        );
     DependencyOutcome::Added
 }

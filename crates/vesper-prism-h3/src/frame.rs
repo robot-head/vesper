@@ -6,9 +6,6 @@
 //! skipped without buffering (§9); every other frame's payload must fit
 //! `max_payload`, checked from its length before any byte is retained.
 
-#[cfg(not(feature = "vesper-port"))]
-use vesper_warp::varint;
-
 use crate::error::Code;
 
 pub const DATA: u64 = 0x00;
@@ -137,140 +134,15 @@ pub struct Settings {
 }
 
 impl Settings {
-    /// Parses a SETTINGS payload. Unknown and reserved identifiers are
-    /// ignored; HTTP/2 identifiers and duplicates are errors.
-    #[cfg(not(feature = "vesper-port"))]
-    pub fn parse(payload: &[u8]) -> Result<Self, FrameError> {
-        let mut s = Self::default();
-        let mut seen: Vec<u64> = Vec::new();
-        let mut at = 0;
-        while at < payload.len() {
-            let (id, n) = varint::decode(&payload[at..]).map_err(|_| FrameError::Malformed)?;
-            at += n;
-            let (value, n) = varint::decode(&payload[at..]).map_err(|_| FrameError::Malformed)?;
-            at += n;
-            if is_http2_setting(id) || seen.contains(&id) {
-                return Err(FrameError::BadSetting(id));
-            }
-            // Bounded: each pair is at least two bytes of a bounded payload.
-            seen.push(id);
-            // Boolean settings other than 0 or 1 are H3_SETTINGS_ERROR
-            // (RFC 9220 §3, RFC 9297 §2.1.1, RFC 9218 §2.1).
-            let flag = |v: u64| match v {
-                0 => Ok(false),
-                1 => Ok(true),
-                _ => Err(FrameError::BadSetting(id)),
-            };
-            match id {
-                SETTINGS_QPACK_MAX_TABLE_CAPACITY => s.qpack_max_table_capacity = value,
-                SETTINGS_QPACK_BLOCKED_STREAMS => s.qpack_blocked_streams = value,
-                SETTINGS_MAX_FIELD_SECTION_SIZE => s.max_field_section_size = Some(value),
-                SETTINGS_ENABLE_CONNECT_PROTOCOL => s.enable_connect_protocol = flag(value)?,
-                SETTINGS_H3_DATAGRAM => s.h3_datagram = flag(value)?,
-                crate::priority::SETTINGS_NO_RFC7540_PRIORITIES => {
-                    s.no_rfc7540_priorities = flag(value)?
-                }
-                SETTINGS_ENABLE_WEBTRANSPORT if flag(value)? => {
-                    s.webtransport_max_sessions =
-                        Some(s.webtransport_max_sessions.unwrap_or(0).max(1));
-                }
-                SETTINGS_WEBTRANSPORT_MAX_SESSIONS_DRAFT07 | SETTINGS_WT_MAX_SESSIONS
-                    if value > 0 =>
-                {
-                    s.webtransport_max_sessions =
-                        Some(s.webtransport_max_sessions.unwrap_or(0).max(value));
-                }
-                _ => {}
-            }
-        }
-        Ok(s)
-    }
-
     /// Parses a SETTINGS payload (the Vesper build).
-    #[cfg(feature = "vesper-port")]
     pub fn parse(payload: &[u8]) -> Result<Self, FrameError> {
         port::h3_settings_parse(payload)
     }
 
     /// The SETTINGS frame (the Vesper build).
-    #[cfg(feature = "vesper-port")]
     pub fn encode(&self, out: &mut Vec<u8>) {
         written(out, port::h3_settings_encode(*self));
     }
-
-    /// The SETTINGS payload, with one reserved identifier as grease.
-    #[cfg(not(feature = "vesper-port"))]
-    pub fn encode(&self, out: &mut Vec<u8>) {
-        let mut payload = Vec::new();
-        for (id, value) in [
-            (
-                SETTINGS_QPACK_MAX_TABLE_CAPACITY,
-                Some(self.qpack_max_table_capacity),
-            ),
-            (
-                SETTINGS_QPACK_BLOCKED_STREAMS,
-                Some(self.qpack_blocked_streams),
-            ),
-            (SETTINGS_MAX_FIELD_SECTION_SIZE, self.max_field_section_size),
-            (
-                SETTINGS_ENABLE_CONNECT_PROTOCOL,
-                self.enable_connect_protocol.then_some(1),
-            ),
-            (SETTINGS_H3_DATAGRAM, self.h3_datagram.then_some(1)),
-            (
-                crate::priority::SETTINGS_NO_RFC7540_PRIORITIES,
-                self.no_rfc7540_priorities.then_some(1),
-            ),
-            (
-                SETTINGS_ENABLE_WEBTRANSPORT,
-                self.webtransport_max_sessions.map(|_| 1),
-            ),
-            (
-                SETTINGS_WEBTRANSPORT_MAX_SESSIONS_DRAFT07,
-                self.webtransport_max_sessions,
-            ),
-            (SETTINGS_WT_MAX_SESSIONS, self.webtransport_max_sessions),
-            // A reserved setting exercises the peer's tolerance (§7.2.4.1).
-            (GREASE_STEP * 7 + GREASE_BASE, Some(0)),
-        ] {
-            if let Some(v) = value {
-                put_varint(&mut payload, id);
-                put_varint(&mut payload, v);
-            }
-        }
-        write_frame(out, SETTINGS, &payload);
-    }
-}
-
-/// Appends a varint (values above 2^62 - 1 are a caller bug).
-#[cfg(not(feature = "vesper-port"))]
-pub fn put_varint(out: &mut Vec<u8>, value: u64) {
-    let mut buf = [0u8; 8];
-    let n = varint::encode(value, &mut buf).expect("value fits a varint");
-    out.extend_from_slice(&buf[..n]);
-}
-
-/// Appends a frame header and payload.
-#[cfg(not(feature = "vesper-port"))]
-pub fn write_frame(out: &mut Vec<u8>, ty: u64, payload: &[u8]) {
-    put_varint(out, ty);
-    put_varint(out, payload.len() as u64);
-    out.extend_from_slice(payload);
-}
-
-/// Appends a DATA frame header for a payload of `len` bytes.
-#[cfg(not(feature = "vesper-port"))]
-pub fn write_data_header(out: &mut Vec<u8>, len: usize) {
-    put_varint(out, DATA);
-    put_varint(out, len as u64);
-}
-
-/// Appends a frame whose payload is one varint (GOAWAY, MAX_PUSH_ID, ...).
-#[cfg(not(feature = "vesper-port"))]
-pub fn write_varint_frame(out: &mut Vec<u8>, ty: u64, value: u64) {
-    let mut payload = Vec::with_capacity(8);
-    put_varint(&mut payload, value);
-    write_frame(out, ty, &payload);
 }
 
 /// A decoded frame.
@@ -317,202 +189,6 @@ impl Frame {
     }
 }
 
-#[cfg(not(feature = "vesper-port"))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum State {
-    Header,
-    Data {
-        remaining: u64,
-    },
-    Skip {
-        remaining: u64,
-    },
-    Payload {
-        ty: u64,
-        len: usize,
-    },
-    /// After WEBTRANSPORT_STREAM: no more frames.
-    Opaque,
-}
-
-#[cfg(not(feature = "vesper-port"))]
-/// Incremental frame decoder for one stream.
-#[derive(Debug)]
-pub struct FrameReader {
-    buf: Vec<u8>,
-    state: State,
-    max_payload: usize,
-    /// A DATA frame's header was announced (for the caller's state machine).
-    data_started: bool,
-    /// Type 0x41 is the WEBTRANSPORT_STREAM signal (WebTransport was
-    /// offered); otherwise it is an unknown frame type like any other.
-    webtransport: bool,
-}
-
-#[cfg(not(feature = "vesper-port"))]
-impl FrameReader {
-    pub fn new(max_payload: usize) -> Self {
-        Self {
-            buf: Vec::new(),
-            state: State::Header,
-            max_payload,
-            data_started: false,
-            webtransport: false,
-        }
-    }
-
-    /// A reader for a stream that may start with WEBTRANSPORT_STREAM.
-    pub fn with_webtransport(max_payload: usize) -> Self {
-        Self {
-            webtransport: true,
-            ..Self::new(max_payload)
-        }
-    }
-
-    /// Bytes held: at most one frame header or one bounded payload.
-    pub fn buffered(&self) -> usize {
-        self.buf.len()
-    }
-
-    pub fn push(&mut self, bytes: &[u8]) {
-        self.buf.extend_from_slice(bytes);
-    }
-
-    /// The bytes held after a [`Frame::WebTransportStream`] signal: the
-    /// first stream data, which are not frames.
-    pub fn take_rest(&mut self) -> Vec<u8> {
-        std::mem::take(&mut self.buf)
-    }
-
-    /// True between frames: the end of the stream is allowed here (§7.1).
-    pub fn at_boundary(&self) -> bool {
-        self.state == State::Header && self.buf.is_empty()
-    }
-
-    /// The next frame or DATA chunk, or `None` until more bytes arrive.
-    pub fn next_frame(&mut self) -> Result<Option<Frame>, FrameError> {
-        loop {
-            match self.state {
-                State::Header => {
-                    let Ok((ty, a)) = varint::decode(&self.buf) else {
-                        return Ok(None);
-                    };
-                    let Ok((len, b)) = varint::decode(&self.buf[a..]) else {
-                        return Ok(None);
-                    };
-                    self.buf.drain(..a + b);
-                    if is_http2_frame(ty) {
-                        return Err(FrameError::Http2Frame(ty));
-                    }
-                    if ty == WEBTRANSPORT_STREAM && self.webtransport {
-                        // The second varint is a session ID, not a length;
-                        // the rest of the stream is not framed.
-                        self.state = State::Opaque;
-                        return Ok(Some(Frame::WebTransportStream(len)));
-                    }
-                    self.state = match ty {
-                        DATA => {
-                            self.data_started = true;
-                            State::Data { remaining: len }
-                        }
-                        HEADERS
-                        | SETTINGS
-                        | GOAWAY
-                        | CANCEL_PUSH
-                        | MAX_PUSH_ID
-                        | PUSH_PROMISE
-                        | crate::priority::PRIORITY_UPDATE_REQUEST
-                        | crate::priority::PRIORITY_UPDATE_PUSH => {
-                            let len = usize::try_from(len)
-                                .ok()
-                                .filter(|l| *l <= self.max_payload)
-                                .ok_or(FrameError::TooLarge {
-                                    frame_type: ty,
-                                    len,
-                                })?;
-                            State::Payload { ty, len }
-                        }
-                        _ => {
-                            self.state = State::Skip { remaining: len };
-                            return Ok(Some(Frame::Unknown(ty)));
-                        }
-                    };
-                    if let State::Data { remaining: 0 } = self.state {
-                        self.state = State::Header;
-                        return Ok(Some(Frame::Data(Vec::new())));
-                    }
-                }
-                State::Data { remaining } => {
-                    if self.buf.is_empty() {
-                        return Ok(None);
-                    }
-                    let n = remaining.min(self.buf.len() as u64) as usize;
-                    let chunk: Vec<u8> = self.buf.drain(..n).collect();
-                    let left = remaining - n as u64;
-                    self.state = if left == 0 {
-                        State::Header
-                    } else {
-                        State::Data { remaining: left }
-                    };
-                    return Ok(Some(Frame::Data(chunk)));
-                }
-                State::Skip { remaining } => {
-                    let n = remaining.min(self.buf.len() as u64) as usize;
-                    self.buf.drain(..n);
-                    let left = remaining - n as u64;
-                    if left > 0 {
-                        self.state = State::Skip { remaining: left };
-                        return Ok(None);
-                    }
-                    self.state = State::Header;
-                }
-                State::Opaque => return Err(FrameError::Malformed),
-                State::Payload { ty, len } => {
-                    if self.buf.len() < len {
-                        return Ok(None);
-                    }
-                    let payload: Vec<u8> = self.buf.drain(..len).collect();
-                    self.state = State::Header;
-                    return parse_payload(ty, payload).map(Some);
-                }
-            }
-        }
-    }
-
-    /// The stream ended: an error unless it ended between frames.
-    pub fn finish(&self) -> Result<(), FrameError> {
-        if self.at_boundary() {
-            Ok(())
-        } else {
-            Err(FrameError::Malformed)
-        }
-    }
-}
-
-#[cfg(not(feature = "vesper-port"))]
-fn single_varint(payload: &[u8]) -> Result<u64, FrameError> {
-    match varint::decode(payload) {
-        Ok((v, n)) if n == payload.len() => Ok(v),
-        _ => Err(FrameError::Malformed),
-    }
-}
-
-#[cfg(not(feature = "vesper-port"))]
-fn parse_payload(ty: u64, payload: Vec<u8>) -> Result<Frame, FrameError> {
-    Ok(match ty {
-        HEADERS => Frame::Headers(payload),
-        SETTINGS => Frame::Settings(Settings::parse(&payload)?),
-        GOAWAY => Frame::GoAway(single_varint(&payload)?),
-        CANCEL_PUSH => Frame::CancelPush(single_varint(&payload)?),
-        MAX_PUSH_ID => Frame::MaxPushId(single_varint(&payload)?),
-        PUSH_PROMISE => Frame::PushPromise,
-        crate::priority::PRIORITY_UPDATE_REQUEST | crate::priority::PRIORITY_UPDATE_PUSH => {
-            Frame::PriorityUpdate(crate::priority::PriorityUpdate::parse(ty, &payload)?)
-        }
-        _ => unreachable!("only buffered types are parsed"),
-    })
-}
-
 /// Reads the stream type at the start of a unidirectional stream.
 pub fn stream_type(buf: &[u8]) -> Option<(u64, usize)> {
     vesper_warp::varint::decode(buf).ok()
@@ -523,49 +199,41 @@ pub fn stream_type(buf: &[u8]) -> Option<(u64, usize)> {
 // reader forward to vesper/src/frame.ves through the binding.
 // ---------------------------------------------------------------------
 
-#[cfg(feature = "vesper-port")]
 use crate::qpack::port::binding as port;
 
 /// The bytes a port writer returned: empty when a value does not fit a
 /// varint, which is a caller bug.
-#[cfg(feature = "vesper-port")]
 pub(crate) fn written(out: &mut Vec<u8>, bytes: Vec<u8>) {
     assert!(!bytes.is_empty(), "value fits a varint");
     out.extend_from_slice(&bytes);
 }
 
 /// Appends a varint (values above 2^62 - 1 are a caller bug).
-#[cfg(feature = "vesper-port")]
 pub fn put_varint(out: &mut Vec<u8>, value: u64) {
     written(out, port::h3_put_varint(value));
 }
 
 /// Appends a frame header and payload.
-#[cfg(feature = "vesper-port")]
 pub fn write_frame(out: &mut Vec<u8>, ty: u64, payload: &[u8]) {
     written(out, port::h3_record_header(ty, payload.len() as u64));
     out.extend_from_slice(payload);
 }
 
 /// Appends a DATA frame header for a payload of `len` bytes.
-#[cfg(feature = "vesper-port")]
 pub fn write_data_header(out: &mut Vec<u8>, len: usize) {
     written(out, port::h3_record_header(DATA, len as u64));
 }
 
 /// Appends a frame whose payload is one varint (GOAWAY, MAX_PUSH_ID, ...).
-#[cfg(feature = "vesper-port")]
 pub fn write_varint_frame(out: &mut Vec<u8>, ty: u64, value: u64) {
     written(out, port::h3_varint_frame(ty, value));
 }
 
 /// Incremental frame decoder for one stream (the Vesper build).
-#[cfg(feature = "vesper-port")]
 pub struct FrameReader {
     core: port::FrameReaderCore,
 }
 
-#[cfg(feature = "vesper-port")]
 impl std::fmt::Debug for FrameReader {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FrameReader")
@@ -574,7 +242,6 @@ impl std::fmt::Debug for FrameReader {
     }
 }
 
-#[cfg(feature = "vesper-port")]
 impl FrameReader {
     pub fn new(max_payload: usize) -> Self {
         Self {

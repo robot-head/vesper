@@ -196,9 +196,9 @@ impl TableCore {
                 self
                     .rx_p1
                     .try_set(
-                    slot,
-                    max64(get64(in self.rx_p1, slot), get64(in self.st_max_pn_p1, at))
-                );
+                        slot,
+                        max64(get64(in self.rx_p1, slot), get64(in self.st_max_pn_p1, at))
+                    );
                 m = m & wrapping_sub(m, 1);
             }
         }
