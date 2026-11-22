@@ -305,3 +305,4 @@ skip_port vesper-lint || sh crates/vesper-lint/port/test-port.sh  # self-hosting
 skip_port vesper-sim-session || sh crates/vesper-sim-session/port/test-port.sh  # self-hosting SH5 lane 19 (#1342): vesper-sim-session, both builds, the transcript differential and the divergence check
 skip_port vesper-fusion || sh crates/vesper-fusion/port/test-port.sh  # Rust-exit SH6 lane 18 (#1413): vesper-fusion on its Vesper engine (the only build) and one divergence check
 skip_port vesper-warp-crypto || . crates/vesper-warp-crypto/port/check.sh  # Rust-exit SH6 lane 17 (#1412): vesper-warp-crypto on its Vesper port (the only build), the differential against the Rust reference and one divergence check per ported area
+skip_port vesper-loom-trust || . crates/vesper-loom-trust/port/check.sh  # Rust-exit SH6 lane 17 (#1412): vesper-loom-trust on its Vesper port (the only build), the differential against the Rust reference and one divergence check per ported area

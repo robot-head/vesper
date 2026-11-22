@@ -6466,8 +6466,12 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "vesper-bench",
+ "vesper-crypto-sys",
  "vesper-loom-calculus-seed",
  "vesper-loom-cas",
+ "vesper-port-abi",
+ "vesper-port-harness",
 ]
 
 [[package]]

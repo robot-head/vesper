@@ -54,7 +54,8 @@ Base: `main` at `ab965f2a`.
 
 | | Lines | Non-comment, non-blank |
 |---|--:|--:|
-| `crates/vesper-crypto-sys/src/lib.rs` | 1,137 | 888 |
+| `crates/vesper-crypto-sys/src/lib.rs` (part 1) | 1,137 | 888 |
+| `crates/vesper-crypto-sys/src/lib.rs` (after part 4: `Aead::new`, `Block::new`, `vcr_ed25519_check_public`) | 1,178 | 915 |
 
 That is inside the plan's 1-2k estimate. TLS 1.3 (rustls) and X.509 path
 validation (webpki) are not in the shim yet; they come with the
@@ -172,13 +173,77 @@ package and C build support lanes 12 and 16 asked for (#1421).
   `_`". Worked around with a `bool` helper.
 - Header-protection code is about 2x Rust's instruction count (above).
 
+## Part 4: vesper-loom-trust on Vesper
+
+### What changed
+
+- **`crates/vesper-loom-trust/vesper/`** (`@vesper/loom-trust`, depends on
+  `@vesper/crypto`): every rule of the crate. The attestation verifier: the
+  bounded labels and lowercase hex of a policy, the exact canonical SemVer
+  check (semver 1.0.28's grammar, written out), the CAS object and
+  derivation identities of a build, the signing message (domain, the
+  little-endian payload length and serde_json's compact encoding of the
+  statement), every policy, interval, quorum and signature check with its
+  diagnostic and their order, and the sorted, de-duplicated report. The
+  admission screen: the conflation keys, the bounded optimal-string-alignment
+  distance (computed in the band within the limit, which gives the same
+  answer), the namespace, trust-cost and provenance findings and the
+  decision. Export ABI 4 trees carry the attestation values; the catalog is
+  lent as one text pool and a slice of offsets, with no per-entry encoding.
+- **`vesper-crypto-sys`** gains one call, `vcr_ed25519_check_public`
+  (`OK`, `AUTH` for a non-point, the new `WEAK` for a small-order point).
+  That replaces dalek's `VerifyingKey::from_bytes` and `is_weak` in the
+  crate. The shim now has 34 calls.
+- **The Rust crate** keeps its public API, serde types and JSON parsing,
+  and converts its values to the trees and back (`src/port.rs`).
+  ed25519-dalek, semver and loom-cas are dev-only now (the reference and
+  the tests). Non-comment Rust lines: 791 before, 374 now.
+- loom-trust is out of the compiler's closure (lane 3, #1398), so it flips
+  outright, with no seed.
+
+### Flip-gate verdict (hand-run recipe)
+
+| Workload | Differential | Every test | ABBA (Vesper/Rust, 95% interval) | Verdict |
+|---|---|---|---|---|
+| `verify`: 16 verifications each of an accepted three-operator bundle and of one with a tampered extra | 0 differences | all 18 crate tests | **1.16x** (0.986x..1.316x) | flipped |
+| `screen`: 32 admission screens against a 200-entry catalog of lookalike names | 0 differences | | **0.70x** (0.681x..0.706x) | flipped |
+| `signing`: 2,048 signing messages | 0 differences | | **1.23x** (1.160x..1.345x) | flipped |
+
+- **Differential**: `src/differential.rs` keeps the deleted Rust as
+  `src/reference/` (test-only) and compares on seeded cases: 4,000 random
+  policies, bundles and clocks (weak, non-point, duplicate and uppercase
+  keys, bad labels, empty and short key intervals, revoked keys, unknown,
+  repeated and re-dated statements, wrong signers, tampered and short
+  signatures, 65 builders, 129 attestations, every quorum and TTL edge);
+  20,000 statements through the signing message; 20,000 version strings
+  against the semver crate itself; 6,000 screens over catalogs of
+  delimiter, digit and namespace lookalikes, oversized names and every
+  threshold; and 20,000 strings (non-ASCII included) through the distance,
+  the conflation key and the split. Each test asserts that every
+  diagnostic code, identity error, finding and decision occurred.
+- **Divergence checks**: eight edits (`semver`, `object`, `message`,
+  `quorum`, `interval`, `conflation`, `distance`, `screen`) in `build.rs`
+  and `BUILD.bazel`; `port/check.sh` asserts that each fails its
+  differential test while another passes.
+- **ABBA**: `examples/abba.rs`, 12 epochs of A/B/B/A on a 4 vCPU cloud
+  container, release builds. The Rust arm is this branch's base with the
+  same example file.
+
+### Compiler gaps
+
+- A byte loop over a `Slice[u8]` (`try_get`, or `for x in s`) costs about
+  40 instructions a byte, so the first port spent 1.75x Rust's time on the
+  signing message's JSON escape scan. The port now skips the scan for the
+  fields its checks already limit to plain ASCII; the codegen-size thread
+  (#1426) owns the loop itself.
+- `let k = key.as_slice();` of a `let mut` sequence is refused (E1521,
+  as specified): a helper taking `in k: Slice[u8]` does it.
+
 ### What is left
 
 1. `vesper-warp-crypto`: done (part 3), except the header micro-benchmark,
    which waits on codegen.
-2. `vesper-loom-trust`: the attestation quorum and slopsquat checks to
-   Vesper over `ed25519_verify` (compiler-linked: seed pattern until lane 3
-   or the retirement).
+2. `vesper-loom-trust`: done (part 4).
 3. `vesper-vault`: AEAD slots, the hybrid X25519 + ML-KEM-768 KEM and the
    secret slots to Vesper (compiler-linked: seed pattern). Its
    constant-time verifier over Cranelift IR is compiler code, not crypto,
@@ -187,4 +252,5 @@ package and C build support lanes 12 and 16 asked for (#1421).
    API as linear handles) and the session layer (transport parameters,
    reassembly, configuration) in Vesper.
 5. The shared BLAKE3 C package: done (part 2, PR #1462).
-6. The census row in `scripts/rust-census.py` once plan PR #1415 lands.
+6. The census rows in `scripts/rust-census.py`: warp-crypto and loom-trust
+   updated in part 4; vault and warp-tls with their flips.
