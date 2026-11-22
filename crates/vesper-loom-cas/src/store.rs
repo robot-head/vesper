@@ -361,6 +361,14 @@ impl Store {
     /// Ingest a regular file. Symlinks and special files are rejected.
     pub fn put_file(&self, domain: Domain, path: impl AsRef<Path>) -> Result<Ingested> {
         let path = path.as_ref();
+        #[cfg(vesper_port)]
+        return crate::port_store::put_file(&self.root, self.durable, domain, path);
+        #[cfg(not(vesper_port))]
+        self.put_file_rust(domain, path)
+    }
+
+    #[cfg(not(vesper_port))]
+    fn put_file_rust(&self, domain: Domain, path: &Path) -> Result<Ingested> {
         let file = open_input_file(path)?;
         self.put_reader(domain, ObjectKind::Blob, file, None)
     }
@@ -413,6 +421,14 @@ impl Store {
     /// read like any other file; the store never hard-links them.
     pub fn ingest_dir(&self, domain: Domain, path: impl AsRef<Path>) -> Result<Ingested> {
         let path = path.as_ref();
+        #[cfg(vesper_port)]
+        return crate::port_store::ingest_dir(&self.root, self.durable, domain, path);
+        #[cfg(not(vesper_port))]
+        self.ingest_dir_rust(domain, path)
+    }
+
+    #[cfg(not(vesper_port))]
+    fn ingest_dir_rust(&self, domain: Domain, path: &Path) -> Result<Ingested> {
         let meta =
             fs::symlink_metadata(path).map_err(|e| CasError::io("inspect directory", path, e))?;
         if !meta.is_dir() {
@@ -1035,6 +1051,25 @@ impl Store {
                 reason: NameError::DotOrDotDot,
             });
         }
+        #[cfg(vesper_port)]
+        {
+            let parent = match dest.parent() {
+                Some(p) if !p.as_os_str().is_empty() => p.to_owned(),
+                _ => PathBuf::from("."),
+            };
+            crate::port_store::materialize(&self.root, self.durable, tree, dest, &parent, options)
+        }
+        #[cfg(not(vesper_port))]
+        self.materialize_rust(tree, dest, options)
+    }
+
+    #[cfg(not(vesper_port))]
+    fn materialize_rust(
+        &self,
+        tree: &ObjectId,
+        dest: &Path,
+        options: MaterializeOptions,
+    ) -> Result<MaterializeReport> {
         match fs::symlink_metadata(dest) {
             Ok(_) => return Err(CasError::DestinationExists(dest.to_owned())),
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
@@ -1248,6 +1283,14 @@ impl Store {
 
     /// Rehash every object and revalidate every derivation record.
     pub fn verify_all(&self) -> Result<StoreReport> {
+        #[cfg(vesper_port)]
+        return crate::port_store::verify_all(&self.root);
+        #[cfg(not(vesper_port))]
+        self.verify_all_rust()
+    }
+
+    #[cfg(not(vesper_port))]
+    fn verify_all_rust(&self) -> Result<StoreReport> {
         let mut report = StoreReport::default();
         for domain in Domain::ALL {
             for kind in ObjectKind::ALL {
