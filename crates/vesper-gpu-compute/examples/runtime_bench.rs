@@ -33,7 +33,8 @@ const DISPATCHES: u32 = 4;
 fn main() {
     let start = Instant::now();
     let ctx = Context::new().expect("a Vulkan device");
-    let kernel = ctx.kernel(&wgsl::spirv(ADD, "add"), "add", 2, 8).unwrap();
+    // SAFETY: naga's SPIR-V for WGSL it validated.
+    let kernel = unsafe { ctx.kernel_from_spirv(&wgsl::spirv(ADD, "add"), "add", 2, 8) }.unwrap();
     let mut a = ctx.buffer((N * 4) as u64).unwrap();
     let b = ctx.buffer((N * 4) as u64).unwrap();
     let mut digest = 0u64;

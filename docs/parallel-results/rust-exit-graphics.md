@@ -495,8 +495,14 @@ Rust and naga's dependency tree). It is replaced by:
   binds a different number of buffers or more immediate bytes than the
   caller asked for is a typed `ShaderError`, as before. A test checks that
   it agrees with naga's own metadata on every kernel.
-- **API.** `Context::kernel(spirv: &[u8], entry, bindings, immediate_bytes)`
-  takes a SPIR-V module instead of WGSL. `ShaderError` keeps `EntryPoint`
+- **API.** The crate's own kernels use the committed SPIR-V. A caller's own
+  module goes through `unsafe fn Context::kernel_from_spirv(spirv: &[u8],
+  entry, bindings, immediate_bytes)`, whose safety contract is that the
+  module is valid SPIR-V for the device (`vkCreateShaderModule`'s
+  precondition, which reading the declarations cannot establish); the
+  tests and the runtime example pass naga's output. The safe
+  `Context::kernel` that took WGSL is gone. Storage-buffer descriptor
+  arrays are refused, since the runtime binds one descriptor per binding. `ShaderError` keeps `EntryPoint`
   and `Interface`, gains `Malformed`, and loses `Parse`, `Validation` and
   `Backend` (those are naga errors, now caught by `tests/spirv.rs`).
   `shader::interface` exposes the reader. The only callers outside the crate

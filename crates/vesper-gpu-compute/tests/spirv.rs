@@ -176,22 +176,44 @@ fn the_reader_refuses_what_the_runtime_does_not_bind() {
             "{source}"
         );
     }
+    // An array of storage buffers at one binding is a descriptor array,
+    // which the runtime (one descriptor per binding) cannot bind.
+    let array = "enable wgpu_binding_array;
+        struct B { v: array<u32> }
+        @group(0) @binding(0) var<storage, read_write> bs: binding_array<B, 2>;
+        @compute @workgroup_size(1) fn m() { bs[0].v[0] = 1u; }";
+    let caps = naga::valid::Capabilities::BUFFER_BINDING_ARRAY
+        | naga::valid::Capabilities::STORAGE_BUFFER_BINDING_ARRAY;
+    assert!(matches!(
+        shader::interface(&naga_spirv(array, caps, Some("m")), "m"),
+        Err(ShaderError::Interface(_))
+    ));
     // A fragment entry point is not a compute entry point.
     let fragment = "@fragment fn f() -> @location(0) vec4<f32> { return vec4<f32>(0.0); }";
-    let module = naga::front::wgsl::parse_str(fragment).unwrap();
-    let info = naga::valid::Validator::new(
-        naga::valid::ValidationFlags::all(),
-        naga::valid::Capabilities::empty(),
-    )
-    .validate(&module)
-    .unwrap();
-    let words =
-        naga::back::spv::write_vec(&module, &info, &naga::back::spv::Options::default(), None)
-            .unwrap();
+    let words = naga_spirv(fragment, naga::valid::Capabilities::empty(), None);
     assert!(matches!(
-        shader::interface(&wgsl::bytes(&words), "f"),
+        shader::interface(&words, "f"),
         Err(ShaderError::EntryPoint(_))
     ));
+}
+
+/// naga's SPIR-V for `source` with `caps`, for modules the test compiler
+/// refuses (no compute entry point, descriptor arrays).
+fn naga_spirv(source: &str, caps: naga::valid::Capabilities, compute: Option<&str>) -> Vec<u8> {
+    let module = naga::front::wgsl::parse_str(source).unwrap();
+    let info = naga::valid::Validator::new(naga::valid::ValidationFlags::all(), caps)
+        .validate(&module)
+        .unwrap();
+    let pipeline = compute.map(|entry| naga::back::spv::PipelineOptions {
+        shader_stage: naga::ShaderStage::Compute,
+        entry_point: entry.to_owned(),
+    });
+    let options = naga::back::spv::Options {
+        lang_version: (1, 3),
+        ..naga::back::spv::Options::default()
+    };
+    let words = naga::back::spv::write_vec(&module, &info, &options, pipeline.as_ref()).unwrap();
+    wgsl::bytes(&words)
 }
 
 #[test]

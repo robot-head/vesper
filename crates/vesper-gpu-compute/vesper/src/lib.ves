@@ -1915,6 +1915,7 @@ pub fn spirv_interface(in spirv: Slice[u8], in entry: Str)
     let name = entry.as_bytes();
     let mut pointee = id_table(bound, UNSET);
     let mut sizes = id_table(bound, 0);
+    let mut is_struct = id_table(bound, 0);
     let mut set_of = id_table(bound, UNSET);
     let mut binding_of = id_table(bound, UNSET);
     let mut vars: ChunkSeq[u64] = ChunkSeq::new[u64]();
@@ -1946,6 +1947,7 @@ pub fn spirv_interface(in spirv: Slice[u8], in entry: Str)
             }
         } else if op == Spv::TypeStruct && count >= 2 {
             let id = id_at(in spirv, at + 1, bound);
+            is_struct.set(id, 1);
             let bytes = struct_bytes(in spirv, at, id, bound, in sizes, in offsets);
             if bytes <= Max::ImmediateBytes {
                 sizes.set(id, narrow_u32(bytes));
@@ -1982,6 +1984,13 @@ pub fn spirv_interface(in spirv: Slice[u8], in entry: Str)
         let id = id_at(in spirv, w + 2, bound);
         let class = word_at(in spirv, w + 3);
         if class == Spv::StorageBuffer {
+            // One buffer per binding: the pointee must be the block struct
+            // itself, not an array of them (a descriptor array, which the
+            // runtime's descriptorCount of 1 cannot bind).
+            let block = pointee[ty];
+            if block == UNSET || is_struct[widen_u64(block)] == 0 {
+                return raise(Kind::Shader, BadSpirv::Layout, 0);
+            }
             let b = widen_u64(binding_of[id]);
             if set_of[id] != 0 || b >= Max::Bindings || mask & (one << b) != 0 {
                 return raise(Kind::Shader, BadSpirv::Layout, 0);

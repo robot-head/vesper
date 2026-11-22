@@ -8,6 +8,18 @@ mod wgsl;
 use vesper_gpu_compute::shader::ShaderError;
 use vesper_gpu_compute::{Context, GpuError, leaked_submissions, test_context};
 
+/// A pipeline for naga's output (`tests/support/wgsl.rs`).
+fn kernel(
+    ctx: &Context,
+    spirv: &[u8],
+    entry: &str,
+    bindings: u32,
+    immediate_bytes: u32,
+) -> Result<vesper_gpu_compute::Kernel, GpuError> {
+    // SAFETY: every module here is naga's SPIR-V for WGSL it validated.
+    unsafe { ctx.kernel_from_spirv(spirv, entry, bindings, immediate_bytes) }
+}
+
 const ADD: &str = "
 struct P { n: u32, add: u32 }
 var<immediate> p: P;
@@ -22,7 +34,7 @@ fn add(@builtin(global_invocation_id) id: vec3<u32>) {
 #[test]
 fn chained_submissions_complete_in_timeline_order() {
     let Some(ctx) = test_context() else { return };
-    let kernel = ctx.kernel(&wgsl::spirv(ADD, "add"), "add", 2, 8).unwrap();
+    let kernel = kernel(&ctx, &wgsl::spirv(ADD, "add"), "add", 2, 8).unwrap();
     let n = 1000u32;
     let a = ctx.buffer_from(&(0..n).collect::<Vec<u32>>()).unwrap();
     let b = ctx.buffer((n * 4) as u64).unwrap();
@@ -54,7 +66,7 @@ fn chained_submissions_complete_in_timeline_order() {
 #[test]
 fn a_dropped_submission_is_counted_and_still_completes() {
     let Some(ctx) = test_context() else { return };
-    let kernel = ctx.kernel(&wgsl::spirv(ADD, "add"), "add", 2, 8).unwrap();
+    let kernel = kernel(&ctx, &wgsl::spirv(ADD, "add"), "add", 2, 8).unwrap();
     let a = ctx.buffer_from(&[1u32, 2, 3, 4]).unwrap();
     let b = ctx.buffer(16).unwrap();
     let before = leaked_submissions();
@@ -78,7 +90,7 @@ fn a_dropped_submission_is_counted_and_still_completes() {
 #[test]
 fn a_forgotten_submission_keeps_its_resources_alive() {
     let Some(ctx) = test_context() else { return };
-    let kernel = ctx.kernel(&wgsl::spirv(ADD, "add"), "add", 2, 8).unwrap();
+    let kernel = kernel(&ctx, &wgsl::spirv(ADD, "add"), "add", 2, 8).unwrap();
     let n = 1 << 16;
     let a = ctx.buffer_from(&vec![5u32; n as usize]).unwrap();
     let b = ctx.buffer((n * 4) as u64).unwrap();
@@ -103,7 +115,7 @@ fn out_of_bounds_kernel_accesses_are_clamped() {
     let Some(ctx) = test_context() else { return };
     let wild = "@group(0) @binding(0) var<storage, read_write> b: array<u32>;
         @compute @workgroup_size(1) fn m() { b[1000000u] = 7u; }";
-    let kernel = ctx.kernel(&wgsl::spirv(wild, "m"), "m", 1, 0).unwrap();
+    let kernel = kernel(&ctx, &wgsl::spirv(wild, "m"), "m", 1, 0).unwrap();
     let b = ctx.buffer(16).unwrap();
     let mut rec = ctx.record().unwrap();
     rec.dispatch(&kernel, &[&b], &[], [1, 1, 1]).unwrap();
@@ -120,9 +132,7 @@ fn unchecked_out_of_bounds_writes_are_discarded() {
     let Some(ctx) = test_context() else { return };
     let wild = "@group(0) @binding(0) var<storage, read_write> b: array<u32>;
         @compute @workgroup_size(1) fn m() { b[1000000u] = 7u; b[4u] = 9u; }";
-    let kernel = ctx
-        .kernel(&wgsl::spirv_unbounded(wild, "m"), "m", 1, 0)
-        .unwrap();
+    let kernel = kernel(&ctx, &wgsl::spirv_unbounded(wild, "m"), "m", 1, 0).unwrap();
     let b = ctx.buffer(16).unwrap();
     let next = ctx.buffer_from(&[1u32, 2, 3, 4]).unwrap();
     let mut rec = ctx.record().unwrap();
@@ -152,22 +162,18 @@ fn runtime_arguments_are_validated() {
     let mut two = [0u32; 3];
     assert!(b.read(0, &mut two).is_err());
     assert!(matches!(
-        ctx.kernel(&wgsl::spirv(ADD, "add"), "add", 3, 8),
+        kernel(&ctx, &wgsl::spirv(ADD, "add"), "add", 3, 8),
         Err(GpuError::Shader(ShaderError::Interface(_)))
     ));
     assert!(matches!(
-        ctx.kernel(&wgsl::spirv(ADD, "add"), "add", 2, 4),
+        kernel(&ctx, &wgsl::spirv(ADD, "add"), "add", 2, 4),
         Err(GpuError::Shader(ShaderError::Interface(_)))
     ));
     assert!(matches!(
-        ctx.kernel(&[0; 8], "add", 2, 8),
-        Err(GpuError::Shader(ShaderError::Malformed(_)))
-    ));
-    assert!(matches!(
-        ctx.kernel(&wgsl::spirv(ADD, "add"), "missing", 2, 8),
+        kernel(&ctx, &wgsl::spirv(ADD, "add"), "missing", 2, 8),
         Err(GpuError::Shader(ShaderError::EntryPoint(_)))
     ));
-    let kernel = ctx.kernel(&wgsl::spirv(ADD, "add"), "add", 2, 8).unwrap();
+    let kernel = kernel(&ctx, &wgsl::spirv(ADD, "add"), "add", 2, 8).unwrap();
     let other = Context::new().unwrap();
     let foreign = other.buffer(16).unwrap();
     let a = ctx.buffer(16).unwrap();

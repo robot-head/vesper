@@ -396,18 +396,49 @@ impl Context {
         Ok(buffer)
     }
 
+    /// Creates a compute pipeline for one of the crate's own kernels: the
+    /// committed SPIR-V that `tests/spirv.rs` checks is naga's validated
+    /// output for the WGSL beside it.
+    pub(crate) fn kernel(
+        &self,
+        spirv: &[u8],
+        entry: &str,
+        bindings: u32,
+        immediate_bytes: u32,
+    ) -> Result<Kernel, GpuError> {
+        self.create_kernel(spirv, entry, bindings, immediate_bytes)
+    }
+
     /// Creates a compute pipeline for entry point `entry` of the SPIR-V 1.3
     /// module `spirv` (little-endian words, as `include_bytes!` of a `.spv`
     /// file gives them). The module must bind exactly `bindings` storage
     /// buffers at set 0, bindings `0..bindings`, and may declare one
     /// immediate block of at most `immediate_bytes` bytes
-    /// ([`shader::interface`] reads what it declares). The device is created
-    /// with `robustBufferAccess`, so a module without bounds checks of its
-    /// own still cannot reach memory outside the buffers it binds: an
-    /// out-of-bounds write is discarded and a read returns a value from the
-    /// buffer or zero. The crate's kernels also clamp every index themselves
-    /// (naga's `Restrict` policy).
-    pub fn kernel(
+    /// ([`shader::interface`] reads what it declares, and a module that
+    /// differs is a typed error). The device is created with
+    /// `robustBufferAccess`, so a valid module without bounds checks of its
+    /// own still cannot reach memory outside the buffers it binds.
+    ///
+    /// # Safety
+    ///
+    /// `spirv` must be a valid SPIR-V module for this device, as
+    /// `vkCreateShaderModule` requires: it passes `spirv-val
+    /// --target-env vulkan1.2`, and it declares only capabilities and
+    /// extensions the device supports. The interface check reads
+    /// declarations only, not function bodies. naga's SPIR-V output for
+    /// WGSL it has validated meets this (`tests/support/wgsl.rs`).
+    #[allow(unsafe_code)]
+    pub unsafe fn kernel_from_spirv(
+        &self,
+        spirv: &[u8],
+        entry: &str,
+        bindings: u32,
+        immediate_bytes: u32,
+    ) -> Result<Kernel, GpuError> {
+        self.create_kernel(spirv, entry, bindings, immediate_bytes)
+    }
+
+    fn create_kernel(
         &self,
         spirv: &[u8],
         entry: &str,
