@@ -253,6 +253,9 @@ impl FunctionDescriptor {
                 assumption: ValidBits,
                 checkability: AfterReturn,
             }),
+            // A C string result is read up to its NUL at the call: that it
+            // is one is trusted, like a pointer parameter's extent.
+            ValueType::CStr => {}
             ValueType::Address { nullable, .. } => {
                 if !nullable {
                     out.push(DeclaredAssumption {

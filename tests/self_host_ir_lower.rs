@@ -2,11 +2,10 @@
 //! port of `ir::lower_world` and `thread_tokens`) against the Rust
 //! lowering, over every corpus world.
 //!
-//! The port lowers each world function it covers; it leaves out a
-//! function that reaches a construct it does not lower yet (closures,
-//! handlers, sequence, tiled, vector and `Box` operations). Every function
-//! it lowers must be `Debug`-equal to Rust's `FunctionIr`, and must pass
-//! the IR check as Rust's does.
+//! The port lowers every world function, including closures, handlers,
+//! sequence, tiled, vector and `Box` operations. Every lowered function
+//! must be `Debug`-equal to Rust's `FunctionIr`, and must pass the IR
+//! check as Rust's does.
 #[path = "common/check_harness.rs"]
 mod check_harness;
 #[path = "common/check_words.rs"]
@@ -24,9 +23,8 @@ use vesper::check::World;
 use vesper::ir::Program;
 
 /// What a world function's body holds: 0 neither of the below, 1 a closure
-/// or handler (lowered, with nested functions), 2 a routed sequence, tiled,
-/// vector or `Box` operation anywhere (part 3; the function, or the nested
-/// function holding it, is skipped).
+/// or handler, 2 a sequence, tiled, vector or `Box` payload operation
+/// anywhere (all lowered in Part 3).
 fn skip_reason(e: &Expr, routed: &BTreeSet<(usize, usize)>) -> u8 {
     let mut reason = 0;
     let mut visit = |x: &Expr| {
@@ -235,6 +233,8 @@ fn vesper_lowering_matches_rust() {
         "coverage floor: only {lowered_fns} functions lowered"
     );
     assert_eq!(bad, 0);
+    assert_eq!(skipped_fns, 0);
+    assert_eq!(vesper_nested, rust_nested);
     assert_eq!(ir_check_differs, 0);
 }
 

@@ -135,6 +135,15 @@ pub copy struct Lib {
     wn: u64,
     x0: u64,
     xn: u64,
+    c0: u64,
+    cn: u64,
+}
+
+pub copy struct ConstRow {
+    name: u32,
+    scalar: u8,
+    neg: bool,
+    value: u64,
 }
 
 pub copy struct EnumRow {
@@ -283,6 +292,7 @@ pub struct S {
     wss: ChunkSeq[Ws],
     wfs: ChunkSeq[Wf],
     xts: ChunkSeq[Xt],
+    consts: ChunkSeq[ConstRow],
     tns: ChunkSeq[Tn],
     targs: ChunkSeq[u32],
     gss: ChunkSeq[Gs],
@@ -379,6 +389,7 @@ pub fn s_new() -> S {
         wss: ChunkSeq::new[Ws](),
         wfs: ChunkSeq::new[Wf](),
         xts: ChunkSeq::new[Xt](),
+        consts: ChunkSeq::new[ConstRow](),
         tns: ChunkSeq::new[Tn](),
         targs: ChunkSeq::new[u32](),
         gss: ChunkSeq::new[Gs](),
@@ -540,7 +551,9 @@ impl S {
                 w0: 0,
                 wn: 0,
                 x0: 0,
-                xn: 0
+                xn: 0,
+                c0: 0,
+                cn: 0
             },
         }
     }
@@ -626,6 +639,18 @@ impl S {
                 copy: false,
                 drop: NONE,
                 mapping: NONE
+            },
+        }
+    }
+
+    pub fn const_row(in self, i: u64) -> ConstRow {
+        match self.consts.try_get(i) {
+            Option::Some(x) => x,
+            Option::None => ConstRow {
+                name: NONE,
+                scalar: 0,
+                neg: false,
+                value: 0
             },
         }
     }
@@ -1175,6 +1200,32 @@ fn sort_fun_rows(inout s: S, f0: u64, n: u64) {
     }
 }
 
+fn parse_const_int(in b: Slice[u8], a: u64, e: u64) -> (bool, u64) {
+    let first = match b.try_get(a) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    };
+    let neg = a < e && first == 45;
+    let mut i = if neg {
+        inc(a)
+    } else {
+        a
+    };
+    let mut mag: u64 = 0;
+    loop {
+        if i >= e {
+            break;
+        }
+        let d = match b.try_get(i) {
+            Option::Some(x) => x,
+            Option::None => 48,
+        };
+        mag = wrapping_add(wrapping_mul(mag, 10), widen_u64(wrapping_sub(d, 48)));
+        i = inc(i);
+    }
+    (neg, mag)
+}
+
 // One canonical descriptor `b[a..e]` with its handler tier, as a library row.
 pub fn read_library(in b: Slice[u8], a: u64, e: u64, handler: u64, inout s: S) {
     let mut r = Reader {
@@ -1400,6 +1451,27 @@ pub fn read_library(in b: Slice[u8], a: u64, e: u64, handler: u64, inout s: S) {
                 );
         }
     }
+    let c0 = s.consts.len();
+    if peek_is(in r, in b, in "consts") {
+        let marker3 = r.field(in b);
+        let nc = r.count(in b);
+        for i in 0..nc {
+            let cname = field_sym(inout r, in b, inout s);
+            let csc = scalar_code(field_sym(inout r, in b, inout s));
+            let (va, ve) = r.field(in b);
+            let (neg, value) = parse_const_int(in b, va, ve);
+            s
+                .consts
+                .push(
+                    ConstRow {
+                        name: cname,
+                        scalar: csc,
+                        neg: neg,
+                        value: value
+                    }
+                );
+        }
+    }
     s
         .libs
         .push(
@@ -1414,7 +1486,9 @@ pub fn read_library(in b: Slice[u8], a: u64, e: u64, handler: u64, inout s: S) {
                 w0: w0,
                 wn: wn,
                 x0: x0,
-                xn: wrapping_sub(s.xts.len(), x0)
+                xn: wrapping_sub(s.xts.len(), x0),
+                c0: c0,
+                cn: wrapping_sub(s.consts.len(), c0)
             }
         );
 }
@@ -2188,6 +2262,43 @@ pub fn append(inout s: S, pass2: bool, in insts: ChunkSeq[Inst], in lens: ChunkS
                     Option::None => {},
                 }
             }
+        }
+    }
+    let mut next_span: u64 = 1;
+    for li in 0..s.libs.len() {
+        let l = s.lib(li);
+        for ci in 0..l.cn {
+            let cr = s.const_row(add(l.c0, ci));
+            s.indent(1);
+            s.put(in "fn \"const$FfiConst$");
+            s.put_name(l.name);
+            s.put(in "$");
+            s.put_name(cr.name);
+            s.put(in "\" fip=0 @0..0");
+            s.nl();
+            s.indent(2);
+            s.put(in "result");
+            s.nl();
+            let cty = s.ty_name(sym8(cr.scalar));
+            s.dump_ty(cty, 3);
+            s.indent(2);
+            s.put(in "effects tail=-");
+            s.nl();
+            s.indent(2);
+            s.put(in "body");
+            s.nl();
+            s.indent(3);
+            s.put(in "E lit int ");
+            if cr.neg && cr.value != 0 {
+                s.put(in "-");
+            }
+            s.put_u64(cr.value);
+            s.put(in " @");
+            s.put_u64(next_span);
+            s.put(in "..");
+            s.put_u64(next_span);
+            s.nl();
+            next_span = add(next_span, 1);
         }
     }
 }

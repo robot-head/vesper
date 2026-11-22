@@ -549,6 +549,30 @@ fn dump_item(o: &mut String, item: &Item, d: usize) {
                 line(o, d + 2, "effects tail=-");
             }
         }
+        Item::Function(f) => {
+            assert!(
+                f.generics.is_empty()
+                    && f.params.is_empty()
+                    && f.effects.instances.is_empty()
+                    && f.effects.tail.is_none()
+            );
+            line(
+                o,
+                d,
+                &format!("fn {} fip={}{}", q(&f.name), u8::from(f.fip), sp(&f.span)),
+            );
+            line(o, d + 1, "result");
+            dump_ty(o, &f.result, d + 2);
+            line(o, d + 1, "effects tail=-");
+            let Some(body) = &f.body else {
+                panic!("generated function lacking body {f:?}");
+            };
+            let ExprKind::Literal(Literal::Int(value)) = body.kind else {
+                panic!("generated function unexpected body {body:?}");
+            };
+            line(o, d + 1, "body");
+            line(o, d + 2, &format!("E lit int {value}{}", sp(&body.span)));
+        }
         other => panic!("generated item {other:?}"),
     }
 }
@@ -927,7 +951,7 @@ fn embedded_sources(text: &str) -> Vec<String> {
 /// address, unit and handle parameters, pointer results, nested and
 /// byte-array structs, every slice and pointer form, `errno`, `CStr`,
 /// reserved and duplicate names.
-const HANDWRITTEN: [&str; 9] = [
+const HANDWRITTEN: [&str; 10] = [
     r#"sys library Shapes (
     target = "x86_64-unknown-linux-gnu", abi = "sysv64",
     link = "dynamic", name = "shapes", artifact = "blake3:@DIGEST@",
@@ -1056,6 +1080,19 @@ const HANDWRITTEN: [&str; 9] = [
     fn execv(nocapture in path: CStr, nocapture in argv: CStrList) -> ForeignVal[i32] errno;
     fn spawn(nocapture in argv: CStrList, nocapture in envp: CStrList, flags: u32) -> ForeignVal[i32];
     fn count(nocapture in argv: CStrList) -> ForeignVal[u64];
+}"#,
+    r#"sys library ConstProbe (
+    target = "x86_64-unknown-linux-gnu", abi = "sysv64",
+    link = "static", name = "constprobe", artifact = "blake3:@DIGEST@"
+) {
+    const BYTE_MAX: u8 = 255;
+    const O_CREAT: i32 = 0o100;
+    const NEG: i32 = -1;
+    const FLAG: u64 = 0x200;
+    const PAGE: usize = 4096;
+    const I64_MIN: i64 = -9223372036854775808;
+    const U64_MAX: u64 = 18446744073709551615;
+    fn check_flags(flags: i32) -> ForeignVal[i32];
 }"#,
 ];
 

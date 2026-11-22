@@ -35,6 +35,14 @@ pub fn sat_add(a: u64, b: u64) -> u64 {
     }
 }
 
+pub fn sat_sub(a: u64, b: u64) -> u64 {
+    if a > b {
+        wrapping_sub(a, b)
+    } else {
+        0
+    }
+}
+
 pub fn sat_mul(a: u64, b: u64) -> u64 {
     let (lo, hi) = mul_wide(a, b);
     if hi != 0 {

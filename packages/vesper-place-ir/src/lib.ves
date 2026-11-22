@@ -781,6 +781,10 @@ fn pool_kind(inout o: ChunkSeq[u8], k: u64) {
         1 => put(inout o, "vector"),
         2 => put(inout o, "tiled"),
         3 => put(inout o, "fip"),
+        7 => put(inout o, "seq"),
+        8 => put(inout o, "vector"),
+        9 => put(inout o, "tiled"),
+        10 => put(inout o, "fip"),
         _ => put(inout o, "expr"),
     }
 }
