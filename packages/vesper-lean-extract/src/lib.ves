@@ -24,6 +24,9 @@
 // - fn_input.ves: signatures, call types and lifted closures (part 2).
 // - cfg.ves: the CFG extractor's gate and liveness.
 // - emit.ves: the CFG extractor's definitions.
+// - ast.ves: the source AST section (part 3).
+// - tm.ves: terms as word ranges of the builder.
+// - gen.ves: the structured extractor over `Id`.
 
 use @vesper/check-data::input::{
     Reader,
@@ -76,6 +79,15 @@ use @vesper/check-data::util::{
     n32,
     u32_at,
     u64_at
+};
+use self::ast::{
+    read_ast
+};
+use self::gen::{
+    G,
+    Y,
+    function,
+    gen_new
 };
 use self::prelude::{
     arithmetic_semantics,
@@ -298,6 +310,140 @@ pub fn extract_cfg_functions(in input: Str) -> ChunkSeq[u64] {
         let z = u64_at(in ends, k);
         if st == ST_NONE {
             put(inout out, in "none\n");
+        } else if st == ST_ERROR {
+            put(inout out, in "error: ");
+            put_part(inout out, in errs.as_slice(), a, z);
+            put(inout out, in "\n");
+        } else {
+            let rendered = render_part(in all.as_slice(), a, z, in pool.as_str());
+            match rendered {
+                Result::Ok(text) => out.extend(in text.as_bytes()),
+                Result::Err(e) => {
+                    put(inout out, in "error: ");
+                    put(inout out, in printer_error(e));
+                    put(inout out, in "\n");
+                },
+            }
+        }
+    }
+    pack_text(in out)
+}
+
+// ----- part 3: the structured extractor ----------------------------------------------
+
+const ST_SKIP: u64 = 3;
+
+// Per source function with IR (name order), `fn <name>` and what
+// `lean::structured_function_nodes` gives: `none` (the CFG extractor's, or
+// one that needs the ambient monad), `error: <message>`, or the definition
+// as a module without imports; `skip` where this part does not port the
+// function yet (tests/self_host_lean_extract.rs `rust_structured_text`).
+pub fn extract_structured_functions(in input: Str) -> ChunkSeq[u64] {
+    let bytes = input.as_bytes();
+    let mut r = Reader {
+        pos: 0
+    };
+    let c = read_ctx(inout r, in bytes);
+    let p = read_program(inout r, in bytes, in c);
+    let fx = read_fns(inout r, in bytes, in c.nmap, in c.tmap);
+    let ast = read_ast(inout r, in bytes, in c.nmap, in c.tmap);
+    let mut b = builder(names_new());
+    b.names = c.names;
+    let mut t = c.types;
+    let wd = c.world;
+    let rec = recursive_structs(in b, in t, in wd);
+    let mut by_name: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..p.fn_count() {
+        set_by_symbol(inout by_name, p.function(i).name, n32(inc(i)));
+    }
+    let fip = wd.box_active;
+    let infer = t.infer;
+    let x = X {
+        p: p,
+        wd: wd,
+        fx: fx,
+        fip: fip,
+        rec: rec,
+        fn_by_name: by_name
+    };
+    let fip_ast = ast.fip;
+    let y = Y {
+        x: x,
+        a: ast,
+        fip: fip_ast,
+        infer: infer
+    };
+    let mut g = gen_new();
+    let mut names: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut status: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut starts: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut ends: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut all: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut errs: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for i in 0..y.a.fns.len() {
+        let f = y.a.function(i);
+        let pi = u32_at(in y.x.fn_by_name, widen_u64(f.name));
+        if pi != 0 {
+            names.push(f.name);
+            b.words.clear();
+            b.failed = false;
+            b.err.clear();
+            b.quiet = 0;
+            let mut count: u64 = 0;
+            let taken = extract(
+                inout b,
+                inout t,
+                in y.x,
+                wrapping_sub(widen_u64(pi), 1),
+                inout count
+            );
+            b.words.clear();
+            b.failed = false;
+            b.err.clear();
+            b.quiet = 0;
+            if taken || f.polymorphic {
+                status.push(ST_NONE);
+                starts.push(0);
+                ends.push(0);
+            } else {
+                g.reset();
+                let m = function(inout b, inout t, in y, inout g, i);
+                if g.skip {
+                    status.push(ST_SKIP);
+                    starts.push(0);
+                    ends.push(0);
+                } else if b.failed {
+                    status.push(ST_ERROR);
+                    starts.push(errs.len());
+                    errs.extend(in b.err.as_slice());
+                    ends.push(errs.len());
+                } else {
+                    status.push(ST_OK);
+                    starts.push(all.len());
+                    for k in 0..m.n {
+                        all.push(u64_at(in b.words, add(m.a, k)));
+                    }
+                    ends.push(all.len());
+                }
+            }
+        }
+    }
+    let pool = match String::from_utf8(in b.names.text.as_slice()) {
+        Option::Some(s) => s,
+        Option::None => String::new(),
+    };
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for k in 0..names.len() {
+        put(inout out, in "fn ");
+        b.names.write(u32_at(in names, k), inout out);
+        put(inout out, in "\n");
+        let st = u64_at(in status, k);
+        let a = u64_at(in starts, k);
+        let z = u64_at(in ends, k);
+        if st == ST_NONE {
+            put(inout out, in "none\n");
+        } else if st == ST_SKIP {
+            put(inout out, in "skip\n");
         } else if st == ST_ERROR {
             put(inout out, in "error: ");
             put_part(inout out, in errs.as_slice(), a, z);

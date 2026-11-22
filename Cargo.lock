@@ -5601,6 +5601,7 @@ dependencies = [
  "vesper-chrono",
  "vesper-core",
  "vesper-crucible-seed",
+ "vesper-crypto-sys",
  "vesper-diagnostics-seed",
  "vesper-doc",
  "vesper-ebpf-seed",
@@ -5612,12 +5613,9 @@ dependencies = [
  "vesper-kinetic-seed",
  "vesper-lean-syntax-seed",
  "vesper-lint-seed",
- "vesper-loom-admission",
  "vesper-loom-calculus-seed",
  "vesper-loom-cas",
- "vesper-loom-trust",
  "vesper-lsp",
- "vesper-migrate",
  "vesper-nexus",
  "vesper-pact-binding",
  "vesper-pact-seed",
@@ -5897,6 +5895,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "vesper-crypto-sys"
+version = "0.1.0"
+dependencies = [
+ "aes",
+ "aes-gcm",
+ "chacha20 0.9.1",
+ "chacha20poly1305",
+ "ed25519-dalek",
+ "getrandom 0.4.3",
+ "hkdf",
+ "hmac",
+ "libcrux-ml-kem",
+ "poly1305",
+ "polyval",
+ "ring",
+ "sha2",
+ "subtle",
+ "x25519-dalek",
+ "zeroize",
+]
+
+[[package]]
 name = "vesper-diagnostics"
 version = "0.1.0"
 dependencies = [
@@ -6072,6 +6092,8 @@ name = "vesper-fusion"
 version = "0.1.0"
 dependencies = [
  "egglog",
+ "vesper-port-abi",
+ "vesper-port-harness",
  "vesper-resonance-seed",
  "vesper-tensor-seed",
 ]
@@ -6084,6 +6106,8 @@ dependencies = [
  "bytemuck",
  "naga",
  "vesper-kinetic-seed",
+ "vesper-port-abi",
+ "vesper-port-harness",
  "vesper-tensor-seed",
 ]
 
@@ -6517,6 +6541,7 @@ dependencies = [
  "serde",
  "serde_json",
  "vesper-bench",
+ "vesper-pact-seed",
  "vesper-port-abi",
  "vesper-port-harness",
 ]
@@ -6837,16 +6862,24 @@ dependencies = [
  "serde_json",
  "vesper",
  "vesper-aegis-seed",
+ "vesper-beacon-seed",
  "vesper-bench-pmu",
  "vesper-bench-seed",
+ "vesper-chrono",
+ "vesper-crucible-seed",
+ "vesper-ffi",
+ "vesper-fmt-seed",
  "vesper-grammar-seed",
+ "vesper-loom-admission",
  "vesper-loom-audit-seed",
  "vesper-loom-calculus-seed",
  "vesper-loom-cas",
  "vesper-loom-solver-seed",
  "vesper-loom-trust",
+ "vesper-migrate",
  "vesper-semver-seed",
  "vesper-serde-seed",
+ "vesper-simd",
 ]
 
 [[package]]

@@ -9,7 +9,8 @@
 // - lib.ves: the entries, and `lsp_serve`, the transport half of the stdio
 //   loop of src/lsp.rs (`dispatch`).
 use self::limits::{
-    LIMIT_WORDS,
+    Le,
+    LimitWord,
     Perr,
     Plimits,
     perr_code,
@@ -17,9 +18,9 @@ use self::limits::{
     read_limits
 };
 use self::envelope::{
-    ENV_NOTIFICATION,
-    ENV_REQUEST,
     Env,
+    Envelope,
+    Id,
     NO_TOKEN,
     decoded,
     new_doc,
@@ -34,9 +35,21 @@ use self::frame::{
     read_frame
 };
 
-const STATUS_BODY: u64 = 0;
-const STATUS_END: u64 = 1;
-const STATUS_ERROR: u64 = 2;
+// A `read_frame` step's status.
+enum Status: _ {
+    Body = 0,
+    End = 1,
+    Error = 2
+}
+
+// A task result's first word.
+enum Outcome: _ {
+    Ok = 0,
+    Err = 1
+}
+
+// Where the client stream starts in a task input: after the limits.
+const STREAM_AT: u64 = LimitWord::Count * Le::WordBytes;
 
 // One `read_frame` call as three words (`lsp_frames`).
 copy struct Step {
@@ -49,12 +62,12 @@ fn frame_step(in s: Slice[u8], inout c: Cursor, l: Plimits) -> Step {
     handle Fail[Perr] in {
         match read_frame(in s, inout c, l) {
             Option::Some(body) => Step {
-                status: STATUS_BODY,
+                status: Status::Body,
                 a: body.start,
                 b: body.len
             },
             Option::None => Step {
-                status: STATUS_END,
+                status: Status::End,
                 a: 0,
                 b: 0
             },
@@ -62,7 +75,7 @@ fn frame_step(in s: Slice[u8], inout c: Cursor, l: Plimits) -> Step {
     } with {
         return v => v,
         raise(e, resume) => Step {
-            status: STATUS_ERROR,
+            status: Status::Error,
             a: perr_code(e),
             b: 0
         },
@@ -70,12 +83,12 @@ fn frame_step(in s: Slice[u8], inout c: Cursor, l: Plimits) -> Step {
 }
 
 // Task "frames": the input is the limits, then the client byte stream.
-// Every frame gives three words: `STATUS_BODY` with the body's start and
-// length, then `STATUS_END`, or `STATUS_ERROR` with the error's index.
+// Every frame gives three words: `Status::Body` with the body's start and
+// length, then `Status::End`, or `Status::Error` with the error's index.
 pub fn lsp_frames(in input: Str) -> ChunkSeq[u64] {
     let b = input.as_bytes();
     let l = read_limits(in b, 0);
-    let at = LIMIT_WORDS * 8;
+    let at = STREAM_AT;
     let s = b[at..b.len()];
     let mut out: ChunkSeq[u64] = ChunkSeq::new();
     let mut c = Cursor {
@@ -85,12 +98,12 @@ pub fn lsp_frames(in input: Str) -> ChunkSeq[u64] {
         let step = frame_step(in s, inout c, l);
         out.push(step.status);
         out.push(step.a);
-        if step.status == STATUS_ERROR {
+        if step.status == Status::Error {
             out.push(c.pos);
         } else {
             out.push(step.b);
         }
-        if step.status != STATUS_BODY {
+        if step.status != Status::Body {
             return out;
         }
     }
@@ -131,7 +144,7 @@ fn put_bytes(inout out: ChunkSeq[u64], in bytes: Slice[u8]) {
         };
         x = x | wrapping_shl_u64(c, wrapping_mul(k, 8));
         k = wrapping_add(k, 1);
-        if k == 8 {
+        if k == Le::WordBytes {
             out.push(x);
             x = 0;
             k = 0;
@@ -157,13 +170,13 @@ fn put_decoded(inout out: ChunkSeq[u64], in doc: Doc, in body: Slice[u8], i: u64
 pub fn lsp_envelope(in input: Str) -> ChunkSeq[u64] {
     let b = input.as_bytes();
     let l = read_limits(in b, 0);
-    let at = LIMIT_WORDS * 8;
+    let at = STREAM_AT;
     let body = b[at..b.len()];
     let mut out: ChunkSeq[u64] = ChunkSeq::new();
     let mut doc = new_doc();
     match envelope_step(inout doc, in body, l) {
         Result::Ok(env) => {
-            out.push(0);
+            out.push(Outcome::Ok);
             out.push(env.kind);
             out.push(env.id_tag);
             out.push(wrapping_u64(env.id_int));
@@ -171,7 +184,7 @@ pub fn lsp_envelope(in input: Str) -> ChunkSeq[u64] {
             put_span(inout out, in doc, env.result);
             out.push(wrapping_u64(env.code));
             put_span(inout out, in doc, env.data);
-            if env.id_tag == 2 {
+            if env.id_tag == Id::String {
                 put_decoded(inout out, in doc, in body, env.id);
             } else {
                 put_decoded(inout out, in doc, in body, NO_TOKEN);
@@ -180,7 +193,7 @@ pub fn lsp_envelope(in input: Str) -> ChunkSeq[u64] {
             put_decoded(inout out, in doc, in body, env.message);
         }
         Result::Err(e) => {
-            out.push(1);
+            out.push(Outcome::Err);
             out.push(perr_code(e));
         }
     }
@@ -202,21 +215,21 @@ fn encode_step(in w: Slice[u64], in pool: Slice[u8], l: Plimits) -> Result[Chunk
 pub fn lsp_encode(in input: Str) -> ChunkSeq[u64] {
     let b = input.as_bytes();
     let l = read_limits(in b, 0);
-    let at = LIMIT_WORDS * 8;
+    let at = STREAM_AT;
     let n = self::limits::le(in b, at, 0);
     let mut w: ChunkSeq[u64] = ChunkSeq::with_capacity(n);
     for i in 0..n {
         w.push(self::limits::le(in b, at, wrapping_add(i, 1)));
     }
-    let pool = b[wrapping_add(at, wrapping_mul(wrapping_add(n, 1), 8))..b.len()];
+    let pool = b[wrapping_add(at, wrapping_mul(wrapping_add(n, 1), Le::WordBytes))..b.len()];
     let mut out: ChunkSeq[u64] = ChunkSeq::new();
     match encode_step(in w[0..w.len()], in pool, l) {
         Result::Ok(frame) => {
-            out.push(0);
+            out.push(Outcome::Ok);
             put_bytes(inout out, in frame[0..frame.len()]);
         }
         Result::Err(e) => {
-            out.push(1);
+            out.push(Outcome::Err);
             out.push(perr_code(e));
         }
     }
@@ -225,13 +238,22 @@ pub fn lsp_encode(in input: Str) -> ChunkSeq[u64] {
 
 // What `dispatch` (src/lsp.rs) does with each frame of the client stream,
 // as `lsp_serve` records it.
-const SERVE_REPLY: u64 = 0;
-const SERVE_REQUEST: u64 = 1;
-const SERVE_NOTIFICATION: u64 = 2;
-const SERVE_CANCEL: u64 = 3;
-const SERVE_RESPONSE: u64 = 4;
-const SERVE_FATAL: u64 = 5;
-const SERVE_EOF: u64 = 6;
+enum Serve: _ {
+    Reply = 0,
+    Request = 1,
+    Notification = 2,
+    Cancel = 3,
+    Response = 4,
+    Fatal = 5,
+    Eof = 6
+}
+
+// A refusal that cannot be encoded ends the server with this plus the
+// error's index.
+const FATAL_ENCODE_BASE: u64 = 100;
+
+// encode.ves's `Payload::Error`.
+const PAYLOAD_ERROR: u64 = 1;
 
 // JSON-RPC's parse error and invalid request codes.
 const PARSE_ERROR: i64 = -32700;
@@ -264,32 +286,36 @@ fn refusal(e: Perr, l: Plimits) -> Result[ChunkSeq[u8], Perr] {
         _ => INVALID_REQUEST,
     };
     let mut w: ChunkSeq[u64] = ChunkSeq::new();
-    // A response without an id, its error code, message and no data.
-    w.push(2);
+    // A response without an id, its error code, message and no data
+    // (encode.ves's word stream).
+    w.push(Envelope::Response);
+    w.push(Id::Null);
+    // The id's integer, offset and length.
     w.push(0);
     w.push(0);
     w.push(0);
-    w.push(0);
-    w.push(1);
+    w.push(PAYLOAD_ERROR);
     w.push(wrapping_u64(code));
+    // The message is the whole pool.
     w.push(0);
     w.push(pool.len());
+    // No data.
     w.push(0);
     encode_step(in w[0..w.len()], in pool[0..pool.len()], l)
 }
 
 // Task "serve": the input is the limits, then the client byte stream. Each
-// frame gives a record: `SERVE_REPLY` and the packed frame `dispatch`
-// writes at once for a refused body; `SERVE_REQUEST`, `SERVE_NOTIFICATION`,
-// `SERVE_CANCEL` (`$/cancelRequest`) or `SERVE_RESPONSE` with the body's
+// frame gives a record: `Serve::Reply` and the packed frame `dispatch`
+// writes at once for a refused body; `Serve::Request`, `Serve::Notification`,
+// `Serve::Cancel` (`$/cancelRequest`) or `Serve::Response` with the body's
 // start and length for what goes on to the session or the pending table.
-// The stream ends with `SERVE_EOF`, or `SERVE_FATAL` and the framing
+// The stream ends with `Serve::Eof`, or `Serve::Fatal` and the framing
 // error's index. (A refusal that cannot be encoded ends the server:
-// `SERVE_FATAL` and 100 plus the index.)
+// `Serve::Fatal` and `FATAL_ENCODE_BASE` plus the index.)
 pub fn lsp_serve(in input: Str) -> ChunkSeq[u64] {
     let b = input.as_bytes();
     let l = read_limits(in b, 0);
-    let at = LIMIT_WORDS * 8;
+    let at = STREAM_AT;
     let s = b[at..b.len()];
     let mut out: ChunkSeq[u64] = ChunkSeq::new();
     let mut c = Cursor {
@@ -297,12 +323,12 @@ pub fn lsp_serve(in input: Str) -> ChunkSeq[u64] {
     };
     loop {
         let step = frame_step(in s, inout c, l);
-        if step.status == STATUS_END {
-            out.push(SERVE_EOF);
+        if step.status == Status::End {
+            out.push(Serve::Eof);
             return out;
         }
-        if step.status == STATUS_ERROR {
-            out.push(SERVE_FATAL);
+        if step.status == Status::Error {
+            out.push(Serve::Fatal);
             out.push(step.a);
             return out;
         }
@@ -311,26 +337,26 @@ pub fn lsp_serve(in input: Str) -> ChunkSeq[u64] {
         match envelope_step(inout doc, in body, l) {
             Result::Err(e) => match refusal(e, l) {
                 Result::Ok(frame) => {
-                    out.push(SERVE_REPLY);
+                    out.push(Serve::Reply);
                     put_bytes(inout out, in frame[0..frame.len()]);
                 }
                 Result::Err(f) => {
-                    out.push(SERVE_FATAL);
-                    out.push(wrapping_add(100, perr_code(f)));
+                    out.push(Serve::Fatal);
+                    out.push(wrapping_add(FATAL_ENCODE_BASE, perr_code(f)));
                     return out;
                 }
             },
             Result::Ok(env) => {
-                let kind = if env.kind == ENV_REQUEST {
-                    SERVE_REQUEST
-                } else if env.kind == ENV_NOTIFICATION {
+                let kind = if env.kind == Envelope::Request {
+                    Serve::Request
+                } else if env.kind == Envelope::Notification {
                     if method_is(in doc, in body, env.method, "$/cancelRequest") {
-                        SERVE_CANCEL
+                        Serve::Cancel
                     } else {
-                        SERVE_NOTIFICATION
+                        Serve::Notification
                     }
                 } else {
-                    SERVE_RESPONSE
+                    Serve::Response
                 };
                 out.push(kind);
                 out.push(step.a);

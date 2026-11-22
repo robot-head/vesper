@@ -1,0 +1,106 @@
+// `effect`, `handle`, `sink` and `inout` as names (#1244). The front end v2
+// and AST differentials parse every repository .ves file, so this fixture
+// covers each name position; tests/contextual_names.rs runs it.
+effect Log {
+    fn log(x: u64) -> u64;
+}
+
+struct Port {
+    effect: u64,
+    handle: u64,
+    sink: u64,
+    inout: u8
+}
+
+fn effect() -> u64 {
+    1
+}
+
+fn handle(x: u64) -> u64 {
+    x
+}
+
+fn sink(x: u64) -> u64 {
+    wrapping_add(x, 2)
+}
+
+fn take(sink port: Port) -> u64 {
+    port.sink
+}
+
+fn bump(inout sink: u64) {
+    sink = wrapping_add(sink, 1);
+}
+
+fn pair(sink: u64, inout: u64) -> u64 {
+    wrapping_add(sink, inout)
+}
+
+fn logs() -> u64 eff [Log] {
+    Log::log(1)
+}
+
+fn pick(p: Port) -> u64 {
+    match p {
+        Port {
+            effect: 0,
+            handle,
+            sink: _,
+            inout: _
+        }
+        => handle,
+        Port {
+            effect,
+            handle: _,
+            sink: _,
+            inout: _
+        }
+        => effect,
+    }
+}
+
+fn run() -> u64 {
+    let effect = effect();
+    let mut inout = 2;
+    bump(inout inout);
+    let handle = handle(inout);
+    let port = Port {
+        effect: effect,
+        handle: handle,
+        sink: sink(1),
+        inout: 4
+    };
+    let n = handle Log in {
+        logs()
+    } with {
+        return v => v,
+        log(x, resume) => resume(wrapping_add(x, 1)),
+    };
+    let m = handle l: Log in {
+        logs()
+    } with {
+        return v => v,
+        log(x, resume) => resume(x),
+    };
+    // A contextual word as a handler label.
+    let k = handle sink: Log in {
+        logs()
+    } with {
+        return v => v,
+        log(x, resume) => resume(wrapping_add(x, 2)),
+    };
+    let both = pair(effect, handle);
+    let picked = pick(port);
+    let total = wrapping_add(wrapping_add(wrapping_add(n, m), k), wrapping_add(both, picked));
+    let sink = Port {
+        effect: 0,
+        handle: 5,
+        sink: 6,
+        inout: 7
+    };
+    wrapping_add(total, take(sink sink))
+}
+
+fn main() -> u64 {
+    run()
+}

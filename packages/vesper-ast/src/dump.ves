@@ -61,6 +61,13 @@ fn put_u64(inout o: ChunkSeq[u8], v: u64) {
     o.push(wrapping_u8(wrapping_add(v % 10, 48)));
 }
 
+fn put_u128(inout o: ChunkSeq[u8], v: u128) {
+    if v >= 10 {
+        put_u128(inout o, v / 10);
+    }
+    o.push(wrapping_u8(wrapping_add(v % 10, 48)));
+}
+
 fn hex_char(v: u64) -> u8 {
     if v < 10 {
         wrapping_u8(wrapping_add(v, 48))
@@ -143,12 +150,16 @@ fn put_pass(inout o: ChunkSeq[u8], p: u8) {
 
 fn put_lit(inout o: ChunkSeq[u8], in a: Ast, li: u32) {
     let v = lit_at(in a, li);
-    if v.kind == 1 {
+    if v.kind == 1 || v.kind == 5 {
         put(inout o, in "int ");
         if v.neg {
             o.push(45);
         }
-        put_u64(inout o, v.bits);
+        if v.hi == 0 {
+            put_u64(inout o, v.bits);
+        } else {
+            put_u128(inout o, (widen_u128(v.hi) << 64) | widen_u128(v.bits));
+        }
     } else if v.kind == 2 {
         put(inout o, in "float 0x");
         let mut k: u64 = 16;

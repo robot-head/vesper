@@ -83,12 +83,15 @@ impl Words {
         let kind = match &e.kind {
             ExprKind::Literal(l) => {
                 match l {
+                    // Kind, sign, then the magnitude's low and high words.
                     Literal::Int(v) => {
-                        w.extend([1, (*v < 0) as u64, v.unsigned_abs() as u64]);
+                        let m = v.unsigned_abs();
+                        w.extend([1, (*v < 0) as u64, m as u64, (m >> 64) as u64]);
                     }
-                    Literal::Float(_) => w.extend([2, 0, 0]),
-                    Literal::Bool(_) => w.extend([3, 0, 0]),
-                    Literal::String(_) => w.extend([4, 0, 0]),
+                    Literal::Float(_) => w.extend([2, 0, 0, 0]),
+                    Literal::Bool(_) => w.extend([3, 0, 0, 0]),
+                    Literal::String(_) => w.extend([4, 0, 0, 0]),
+                    Literal::WideInt(_) => w.extend([5, 0, 0, 0]),
                 }
                 1
             }

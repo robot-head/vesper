@@ -1,0 +1,371 @@
+// The AST section of the structured extractor's input (part 3), after the
+// sections of fn_input.ves: the source functions, their patterns and
+// expressions as rows of words (`Ast` in tests/self_host_lean_extract.rs
+// documents each payload). Names and types stay input indices in the rows;
+// the accessors map them to symbols and type ids.
+
+use @vesper/check-data::input::{
+    Reader
+};
+use @vesper/check-data::util::{
+    add,
+    u32_at,
+    u64_at
+};
+
+pub const NONE: u64 = 18446744073709551615;
+pub const NONE32: u32 = 4294967295;
+
+// Expression kinds.
+pub const X_LITERAL: u64 = 1;
+pub const X_NAME: u64 = 2;
+pub const X_TUPLE: u64 = 3;
+pub const X_STRUCT: u64 = 4;
+pub const X_FIELD: u64 = 5;
+pub const X_INDEX: u64 = 6;
+pub const X_UNARY: u64 = 7;
+pub const X_BINARY: u64 = 8;
+pub const X_ASSIGN: u64 = 9;
+pub const X_BLOCK: u64 = 10;
+pub const X_CALL: u64 = 11;
+pub const X_TRY: u64 = 12;
+pub const X_IF: u64 = 13;
+pub const X_MATCH: u64 = 14;
+pub const X_LOOP: u64 = 15;
+pub const X_CLOSURE: u64 = 21;
+pub const X_HANDLE: u64 = 22;
+
+// Pattern kinds.
+pub const PK_WILD: u64 = 0;
+pub const PK_BIND: u64 = 1;
+pub const PK_LITERAL: u64 = 2;
+pub const PK_TUPLE: u64 = 3;
+pub const PK_CTOR: u64 = 4;
+
+// Literal kinds.
+pub const L_INT: u64 = 0;
+pub const L_FLOAT: u64 = 1;
+pub const L_BOOL: u64 = 2;
+pub const L_STRING: u64 = 3;
+
+// Sequence operations (`seq_code` in the test).
+pub const Q_NEW: u64 = 1;
+pub const Q_WITH_CAPACITY: u64 = 2;
+pub const Q_LEN: u64 = 3;
+pub const Q_PUSH: u64 = 4;
+pub const Q_POP: u64 = 5;
+pub const Q_GET: u64 = 6;
+pub const Q_SET: u64 = 7;
+pub const Q_TRY_GET: u64 = 8;
+pub const Q_LAST: u64 = 9;
+pub const Q_TRY_SET: u64 = 10;
+pub const Q_CLEAR: u64 = 11;
+pub const Q_TRUNCATE: u64 = 12;
+pub const Q_RESERVE: u64 = 13;
+pub const Q_EXTEND: u64 = 14;
+pub const Q_FINISH: u64 = 15;
+pub const Q_AS_SLICE: u64 = 16;
+pub const Q_SUB_SLICE: u64 = 17;
+
+// Tiled operations.
+pub const TO_NEW: u64 = 1;
+pub const TO_WITH_CAPACITY: u64 = 2;
+pub const TO_WITH_REGION: u64 = 3;
+pub const TO_LEN: u64 = 4;
+pub const TO_TILE_COUNT: u64 = 5;
+pub const TO_GET: u64 = 6;
+pub const TO_COL_GET: u64 = 7;
+pub const TO_PUSH: u64 = 8;
+pub const TO_SET: u64 = 9;
+pub const TO_COL_SET: u64 = 10;
+pub const TO_LOAD_TILE_VEC: u64 = 11;
+
+pub copy struct SrcFn {
+    name: u32,
+    body: u64,
+    // params: pnames/ppass/ptys[pa..pa+pn]
+    pa: u64,
+    pn: u64,
+    result: u32,
+    polymorphic: bool,
+}
+
+pub struct Ast {
+    fip: bool,
+    fns: ChunkSeq[SrcFn],
+    pnames: ChunkSeq[u32],
+    ppass: ChunkSeq[u64],
+    ptys: ChunkSeq[u32],
+    // rows: words[at[i]..]
+    pw: ChunkSeq[u64],
+    pat_at: ChunkSeq[u64],
+    ew: ChunkSeq[u64],
+    expr_at: ChunkSeq[u64],
+    nmap: ChunkSeq[u32],
+    tmap: ChunkSeq[u32],
+}
+
+fn copy_words(inout r: Reader, in b: Slice[u8], n: u64, inout out: ChunkSeq[u64]) {
+    for i in 0..n {
+        out.push(r.word(in b));
+    }
+}
+
+// A pattern row's payload length.
+fn pattern_len(inout r: Reader, in b: Slice[u8], inout out: ChunkSeq[u64]) {
+    let kind = r.word(in b);
+    out.push(kind);
+    copy_words(inout r, in b, 3, inout out);
+    if kind == PK_BIND {
+        copy_words(inout r, in b, 1, inout out);
+    } else if kind == PK_LITERAL {
+        copy_words(inout r, in b, 3, inout out);
+    } else if kind == PK_TUPLE {
+        let n = r.word(in b);
+        out.push(n);
+        copy_words(inout r, in b, n, inout out);
+    } else if kind == PK_CTOR {
+        copy_words(inout r, in b, 2, inout out);
+        let n = r.word(in b);
+        out.push(n);
+        copy_words(inout r, in b, add(n, n), inout out);
+    }
+}
+
+fn count_then(inout r: Reader, in b: Slice[u8], per: u64, inout out: ChunkSeq[u64]) {
+    let n = r.word(in b);
+    out.push(n);
+    copy_words(inout r, in b, wrapping_mul(n, per), inout out);
+}
+
+fn expr_row(inout r: Reader, in b: Slice[u8], inout out: ChunkSeq[u64]) {
+    let kind = r.word(in b);
+    out.push(kind);
+    copy_words(inout r, in b, 3, inout out);
+    if kind == X_LITERAL {
+        copy_words(inout r, in b, 3, inout out);
+    } else if kind == X_NAME || kind == X_TRY {
+        copy_words(inout r, in b, 1, inout out);
+    } else if kind == X_TUPLE {
+        count_then(inout r, in b, 1, inout out);
+    } else if kind == X_STRUCT {
+        copy_words(inout r, in b, 1, inout out);
+        count_then(inout r, in b, 2, inout out);
+    } else if kind == X_FIELD {
+        copy_words(inout r, in b, 2, inout out);
+    } else if kind == X_INDEX {
+        copy_words(inout r, in b, 2, inout out);
+        let route = r.word(in b);
+        out.push(route);
+        if route == 4 {
+            copy_words(inout r, in b, 1, inout out);
+        }
+    } else if kind == X_UNARY {
+        copy_words(inout r, in b, 2, inout out);
+    } else if kind == X_BINARY || kind == X_ASSIGN || kind == X_IF {
+        copy_words(inout r, in b, 3, inout out);
+    } else if kind == X_BLOCK {
+        let n = r.word(in b);
+        out.push(n);
+        for i in 0..n {
+            let k = r.word(in b);
+            out.push(k);
+            if k == 0 {
+                copy_words(inout r, in b, 1, inout out);
+            } else {
+                copy_words(inout r, in b, 4, inout out);
+            }
+        }
+        copy_words(inout r, in b, 1, inout out);
+    } else if kind == X_CALL {
+        copy_words(inout r, in b, 1, inout out);
+        count_then(inout r, in b, 2, inout out);
+        count_then(inout r, in b, 1, inout out);
+        copy_words(inout r, in b, 10, inout out);
+    } else if kind == X_MATCH {
+        copy_words(inout r, in b, 1, inout out);
+        count_then(inout r, in b, 2, inout out);
+    } else if kind == X_CLOSURE {
+        copy_words(inout r, in b, 1, inout out);
+        count_then(inout r, in b, 1, inout out);
+        copy_words(inout r, in b, 1, inout out);
+        count_then(inout r, in b, 1, inout out);
+    }
+}
+
+pub fn read_ast(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], in tmap: ChunkSeq[u32])
+    -> Ast {
+    let mut a = Ast {
+        fip: false,
+        fns: ChunkSeq::new[SrcFn](),
+        pnames: ChunkSeq::new[u32](),
+        ppass: ChunkSeq::new[u64](),
+        ptys: ChunkSeq::new[u32](),
+        pw: ChunkSeq::new[u64](),
+        pat_at: ChunkSeq::new[u64](),
+        ew: ChunkSeq::new[u64](),
+        expr_at: ChunkSeq::new[u64](),
+        nmap: ChunkSeq::new[u32](),
+        tmap: ChunkSeq::new[u32](),
+    };
+    for i in 0..nmap.len() {
+        a.nmap.push(u32_at(in nmap, i));
+    }
+    for i in 0..tmap.len() {
+        a.tmap.push(u32_at(in tmap, i));
+    }
+    a.fip = r.word(in b) != 0;
+    let nf = r.word(in b);
+    for i in 0..nf {
+        let name = u32_at(in a.nmap, r.word(in b));
+        let body = r.word(in b);
+        let pa = a.pnames.len();
+        let pn = r.word(in b);
+        for j in 0..pn {
+            let n = u32_at(in a.nmap, r.word(in b));
+            a.pnames.push(n);
+            a.ppass.push(r.word(in b));
+            let t = u32_at(in a.tmap, r.word(in b));
+            a.ptys.push(t);
+        }
+        let result = u32_at(in a.tmap, r.word(in b));
+        let polymorphic = r.word(in b) != 0;
+        a
+            .fns
+            .push(
+            SrcFn {
+                name: name,
+                body: body,
+                pa: pa,
+                pn: pn,
+                result: result,
+                polymorphic: polymorphic
+            }
+        );
+    }
+    let np = r.word(in b);
+    for i in 0..np {
+        a.pat_at.push(a.pw.len());
+        pattern_len(inout r, in b, inout a.pw);
+    }
+    let ne = r.word(in b);
+    for i in 0..ne {
+        a.expr_at.push(a.ew.len());
+        expr_row(inout r, in b, inout a.ew);
+    }
+    a
+}
+
+impl Ast {
+    pub fn function(in self, i: u64) -> SrcFn {
+        match self.fns.try_get(i) {
+            Option::Some(f) => f,
+            Option::None => SrcFn {
+                name: 0,
+                body: NONE,
+                pa: 0,
+                pn: 0,
+                result: 0,
+                polymorphic: false
+            },
+        }
+    }
+
+    pub fn param_name(in self, f: SrcFn, i: u64) -> u32 {
+        u32_at(in self.pnames, add(f.pa, i))
+    }
+
+    pub fn param_pass(in self, f: SrcFn, i: u64) -> u64 {
+        u64_at(in self.ppass, add(f.pa, i))
+    }
+
+    pub fn param_ty(in self, f: SrcFn, i: u64) -> u32 {
+        u32_at(in self.ptys, add(f.pa, i))
+    }
+
+    // Word `k` of expression `e`'s row: 0 kind, 1 start, 2 end, 3 type,
+    // then the payload.
+    pub fn ew(in self, e: u64, k: u64) -> u64 {
+        u64_at(in self.ew, add(u64_at(in self.expr_at, e), k))
+    }
+
+    pub fn kind(in self, e: u64) -> u64 {
+        self.ew(e, 0)
+    }
+
+    pub fn start(in self, e: u64) -> u64 {
+        self.ew(e, 1)
+    }
+
+    pub fn end(in self, e: u64) -> u64 {
+        self.ew(e, 2)
+    }
+
+    // The checked type (after `default_type`), or NONE32.
+    pub fn ty(in self, e: u64) -> u32 {
+        let x = self.ew(e, 3);
+        if x == NONE {
+            NONE32
+        } else {
+            u32_at(in self.tmap, x)
+        }
+    }
+
+    // Payload word `k`.
+    pub fn x(in self, e: u64, k: u64) -> u64 {
+        self.ew(e, add(4, k))
+    }
+
+    // Payload word `k` as a symbol (NONE32 for NONE).
+    pub fn xs(in self, e: u64, k: u64) -> u32 {
+        let x = self.x(e, k);
+        if x == NONE {
+            NONE32
+        } else {
+            u32_at(in self.nmap, x)
+        }
+    }
+
+    // Payload word `k` as a type (NONE32 for NONE).
+    pub fn xt(in self, e: u64, k: u64) -> u32 {
+        let x = self.x(e, k);
+        if x == NONE {
+            NONE32
+        } else {
+            u32_at(in self.tmap, x)
+        }
+    }
+
+    pub fn pw(in self, p: u64, k: u64) -> u64 {
+        u64_at(in self.pw, add(u64_at(in self.pat_at, p), k))
+    }
+
+    pub fn pkind(in self, p: u64) -> u64 {
+        self.pw(p, 0)
+    }
+
+    pub fn is_box(in self, p: u64) -> bool {
+        self.pw(p, 3) != 0
+    }
+
+    // Pattern payload word `k`.
+    pub fn px(in self, p: u64, k: u64) -> u64 {
+        self.pw(p, add(4, k))
+    }
+
+    pub fn pxs(in self, p: u64, k: u64) -> u32 {
+        u32_at(in self.nmap, self.px(p, k))
+    }
+
+    pub fn sym(in self, x: u64) -> u32 {
+        u32_at(in self.nmap, x)
+    }
+
+    pub fn tyw(in self, x: u64) -> u32 {
+        if x == NONE {
+            NONE32
+        } else {
+            u32_at(in self.tmap, x)
+        }
+    }
+}

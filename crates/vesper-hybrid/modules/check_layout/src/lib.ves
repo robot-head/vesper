@@ -9,7 +9,12 @@
 
 // @export abi 4
 
+use @vesper/check-data::input::{
+    Ctx,
+    ctx_new
+};
 use @vesper/check-layout::{
+    layout_part,
     layout_words
 };
 
@@ -20,4 +25,25 @@ pub fn format() -> u64 {
 
 pub fn layout_of_words(in input: Slice[u8]) -> ChunkSeq[u64] {
     layout_words(in input)
+}
+
+// One compilation's world, decoded once (self-hosting SH4 lane 2, #1276).
+// The hybrid build keeps one per compilation (src/swap_input.rs) and sends
+// each `layout_input_layout_of` call only what this input does not have
+// yet: the new names and types, the ADTs the type reaches that were not
+// sent before, then the type's index (`WorldLog::part` in
+// tests/common/check_words.rs).
+pub struct LayoutInput {
+    c: Ctx,
+}
+
+pub fn layout_input_new() -> LayoutInput {
+    LayoutInput {
+        c: ctx_new()
+    }
+}
+
+// `layout_of_words` over the world this input holds, after adding `part`.
+pub fn layout_input_layout_of(inout s: LayoutInput, in part: Slice[u8]) -> ChunkSeq[u64] {
+    layout_part(inout s.c, in part)
 }

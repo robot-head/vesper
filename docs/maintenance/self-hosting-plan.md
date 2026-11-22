@@ -9,6 +9,19 @@
 > ("Verified Bootstrap") defines Stage 0 to Stage 2. This plan orders the work
 > to get there. Confirm live ownership on the issue board before acting.
 
+## Status (2026-11-21, Rust exit)
+
+**The owner's goal is now no Rust left except the irreducible minimum**
+(2026-11-21), and **the bar changed**: a module's Rust is deleted once its
+Vesper port has full function and is within 1.5x of Rust's speed
+(optimization later). This replaces the "match in both function and
+performance" rule below wherever they differ. **Bootstrap:** once the Rust
+compiler is gone, the repository builds from a committed wasm seed,
+Zig-style. The program, the irreducible minimum and the census are in
+[rust-exit-plan.md](rust-exit-plan.md) and [rust-census.md](rust-census.md);
+the first wave is [SH6](../agent-prompts/self-host-sh6/README.md)
+(#1396-#1414), which folds in SH5 lane 20 (#1343).
+
 ## Status (2026-11-20)
 
 SH0 has merged except the `vesper-diagnostics` port (#1128 part 2), which
@@ -214,7 +227,7 @@ measures them on compiler code before SH1 and SH2 are claimed.
 | **SH3** | The Place IR data package, harness and native-path swap point; `@vesper/egraph`; six gap lanes (S20); ports of `ir_opt`, the AST optimizer and its certificates, the inliner, bounds hoisting and Place IR lowering (the IR check moved to SH2 lane 5); SH2 and SH3 scoreboard and SH4 plan | ~9.8k | started 2026-11-20 on top of open SH2 PRs ([plan](../agent-prompts/self-host-sh3/README.md), #1240-#1253) |
 | **SH4** | Backends: a codegen swap point with lent Cranelift handles and a CLIF/object differential, encode-once swap inputs, three gap lanes (S21), nine native lowering families (scalars, calls and ABI, aggregates, sequences, control, numeric, export ABI, FFI lowering, freestanding and Windows), wasm, eBPF, checks on emitted code; SH4 scoreboard and SH5 plan | ~49k | started 2026-11-21 on top of open SH3 PRs ([plan](../agent-prompts/self-host-sh4/README.md), #1275-#1292) |
 | **SH5** | Backend infrastructure SH4 could not finish in its own packages (lent walk state and re-entry, shim extras); six gap lanes (S22); build time and native code (callback follow-ups, `World::mode`, optimizer build time, shared swap world); WIT component wrapping (owner: measure first); driver and tools: the driver, CLI commands, test runner and doctests, docs, LSP core and features, Lean extraction, sim-session; SH4 and SH5 scoreboard and SH6 plan | ~50k | planned 2026-11-21 stacked on open SH4 PRs ([plan](../agent-prompts/self-host-sh5/README.md), #1324-#1343); code lanes start after the CI-trim PR #1322 |
-| **SH6** | Stage 2: the Vesper compiler built by the Rust compiler (Stage 1) rebuilds itself; stage 2 and stage 3 are bit-identical; `bootstrap/stage2.lock` and a CI gate; compile-time parity scoreboard against the Rust compiler; seed copies lose their users. SH6b: widen the verified backend to the compiler for the DDC check of §10.2 | none new | after SH5's driver lane |
+| **SH6** | Rust exit: flip gate and census; Stage 2 and the wasm seed, then the retirement of the Rust compiler; the compiler's closure; every ported library finished and flipped at the 1.5x bar; OS and C-API crates on `.vsys`; one crypto shim; Rust-only libraries replaced; Rust tests to Vesper. SH6b: widen the verified backend to the compiler for the DDC check of §10.2 | all of what is left ([census](rust-census.md)) | planned 2026-11-21 ([plan](../agent-prompts/self-host-sh6/README.md), #1396-#1414) |
 | **SH7** | Vesper-native backend (register allocation, instruction selection and encoding for x86-64, AArch64, RV64), growing out of the verified emitter's design. Replaces Cranelift only at parity | new code | after SH6 (owner decision 2026-11-19) |
 
 **Order inside the compiler.** Each wave swaps modules into the hybrid build
@@ -262,7 +275,7 @@ time divided by Rust time, input decode subtracted).
 | Port | Lane | Ported so far | Differential | Rules alone | Hybrid swap | Report |
 |---|---|---|---|--:|---|---|
 | regions, sequences, strings, arrays, tiled, vectors | SH2-9 (#1181) | type and world rules (part 1) | 0 of 282 worlds; E0200, E0792, E0797, E1404, E1501-E1503, E1520 on mutants | 1.12x types, 1.17x world | with the expression rules | [self-host-check-regions-seqs.md](../parallel-results/self-host-check-regions-seqs.md) |
-| loops (control rules, `?` on `Option`), atomics, stack bound | SH2-10 (#1182) | control frames (E0213, E0200), atomics (E0820-E0824, preludes), stack bound | 0 of 903 control worlds, 535 atomics worlds, 4,000 call graphs | atomics 2.31x, stack bound 2.54x (decode included); control pass 80 ms over the corpus | not yet (follow-up) | [self-host-check-loops-atomics.md](../parallel-results/self-host-check-loops-atomics.md) |
+| loops (control rules, `?` on `Option`), atomics, stack bound | SH2-10 (#1182) | control frames (E0213, E0200), atomics (E0820-E0824, preludes), stack bound | 0 of 903 control worlds, 535 atomics worlds, 4,000 call graphs | atomics 2.31x, stack bound 2.54x (decode included); control pass 80 ms over the corpus | stack bound swapped (`stack_bound_report`): 0 of 26 `--verify-stack` and `ebpf check` commands differ; control and atomics not yet | [self-host-check-loops-atomics.md](../parallel-results/self-host-check-loops-atomics.md) |
 
 **SH3 IR ports.** Each row is one IR pass port, measured like the SH2
 checker ports until its hybrid swap lands (the pass alone against the Rust
@@ -296,7 +309,6 @@ about 2k to 6k lines of Rust in a day, including the gap reports.
 
 ## Not in this plan
 
-- Deleting any Rust module or seed copy. Each is an owner call at parity.
-- Porting the stays-Rust crates.
+- (Superseded 2026-11-21: deletion at the 1.5x bar and the stays-Rust crates are now in [rust-exit-plan.md](rust-exit-plan.md).)
 - The test oracles in `src/bin/*42`: they are diverse oracles, like
   `vesper-codegen-verified`, and keep their value by staying Rust.

@@ -1,0 +1,286 @@
+// Module acc of @vesper/flux: the accumulator of zset.rs (`Accumulator`),
+// which builds sets from decoded records one row at a time, for any
+// number of inputs at once.
+//
+// The Rust accumulator kept a BTreeMap<Row, i128> per input. This one keeps
+// every distinct row once, in insertion order, with its i128 sum as two
+// words, and finds rows through one open-addressing table keyed by
+// (input, row) under SipHash-1-3 with a per-accumulator random key (from
+// the Rust side's `RandomState`), so that rows chosen to collide cannot
+// turn lookups linear, as with Rust's own `HashMap`. `finish` sorts an input's rows once. The errors match the
+// Rust code exactly: a new distinct row over `max_rows` fails before it is
+// inserted (rows whose sums later cancel still count), an i128 sum that
+// overflows fails at that addition, and an i64 range failure is reported
+// when the input finishes.
+use self::util::{
+    cell,
+    push_row,
+    word
+};
+use self::sort::sort_rows;
+use self::{
+    ZAcc,
+    ZErr
+};
+
+const START_SLOTS: u64 = 16;
+
+pub const INSERTED: u64 = 0;
+pub const ROWS_FULL: u64 = 1;
+pub const SUM_OVERFLOW: u64 = 2;
+
+pub fn acc_new(in widths: Slice[u64], max_rows: u64, k0: u64, k1: u64) -> ZAcc {
+    let mut w = ChunkSeq::with_capacity[u64](widths.len());
+    let mut counts = ChunkSeq::with_capacity[u64](widths.len());
+    for i in 0..widths.len() {
+        w
+            .push(
+            match widths.try_get(i) {
+                Option::Some(v) => v,
+                Option::None => 0,
+            }
+        );
+        counts.push(0);
+    }
+    let mut table = ChunkSeq::with_capacity[u64](START_SLOTS);
+    for _ in 0..START_SLOTS {
+        table.push(0);
+    }
+    ZAcc {
+        widths: w,
+        max_rows: max_rows,
+        k0: k0,
+        k1: k1,
+        counts: counts,
+        tags: ChunkSeq::new[u64](),
+        offs: ChunkSeq::new[u64](),
+        rows: ChunkSeq::new[i64](),
+        his: ChunkSeq::new[i64](),
+        los: ChunkSeq::new[u64](),
+        table: table
+    }
+}
+
+// SipHash-1-3 state.
+copy struct Sip {
+    v0: u64,
+    v1: u64,
+    v2: u64,
+    v3: u64
+}
+
+fn rotl(x: u64, r: u32) -> u64 {
+    wrapping_shl_u64(x, r) | wrapping_shr_u64(x, wrapping_sub(64, r))
+}
+
+fn sip_round(s: Sip) -> Sip {
+    let mut v0 = wrapping_add(s.v0, s.v1);
+    let mut v1 = rotl(s.v1, 13) ^ v0;
+    v0 = rotl(v0, 32);
+    let mut v2 = wrapping_add(s.v2, s.v3);
+    let mut v3 = rotl(s.v3, 16) ^ v2;
+    v0 = wrapping_add(v0, v3);
+    v3 = rotl(v3, 21) ^ v0;
+    v2 = wrapping_add(v2, v1);
+    v1 = rotl(v1, 17) ^ v2;
+    v2 = rotl(v2, 32);
+    Sip {
+        v0: v0,
+        v1: v1,
+        v2: v2,
+        v3: v3
+    }
+}
+
+fn sip_word(s: Sip, m: u64) -> Sip {
+    let t = sip_round(
+        Sip {
+            v0: s.v0,
+            v1: s.v1,
+            v2: s.v2,
+            v3: s.v3 ^ m
+        }
+    );
+    Sip {
+        v0: t.v0 ^ m,
+        v1: t.v1,
+        v2: t.v2,
+        v3: t.v3
+    }
+}
+
+// SipHash-1-3 under (k0, k1) of the words `input, row[at..at + width]`.
+fn hash_row(k0: u64, k1: u64, input: u64, in row: Slice[i64], at: u64, width: u64) -> u64 {
+    let mut s = Sip {
+        v0: k0 ^ 8317987319222330741,
+        v1: k1 ^ 7237128888997146477,
+        v2: k0 ^ 7816392313619706465,
+        v3: k1 ^ 8387220255154660723
+    };
+    s = sip_word(s, input);
+    for k in 0..width {
+        s = sip_word(s, wrapping_u64(cell(in row, wrapping_add(at, k))));
+    }
+    // The final block: the message length in bytes, in the top byte.
+    let b = wrapping_shl_u64(wrapping_mul(wrapping_add(width, 1), 8) & 255, 56);
+    s = sip_word(s, b);
+    let f = sip_round(
+        sip_round(
+            sip_round(
+                Sip {
+                    v0: s.v0,
+                    v1: s.v1,
+                    v2: s.v2 ^ 255,
+                    v3: s.v3
+                }
+            )
+        )
+    );
+    f.v0 ^ f.v1 ^ f.v2 ^ f.v3
+}
+
+// Whether distinct row d holds `row[at..at + width]` of `input`.
+fn holds(in a: ZAcc, d: u64, input: u64, in row: Slice[i64], at: u64, width: u64) -> bool {
+    if word(in a.tags, d) != input {
+        return false;
+    }
+    let off = word(in a.offs, d);
+    for k in 0..width {
+        if cell(in a.rows.as_slice(), wrapping_add(off, k)) != cell(in row, wrapping_add(at, k)) {
+            return false;
+        }
+    }
+    true
+}
+
+// The table slot of the row: its entry, or the empty slot it would take.
+fn probe(in a: ZAcc, h: u64, input: u64, in row: Slice[i64], at: u64, width: u64) -> u64 {
+    let mask = wrapping_sub(a.table.len(), 1);
+    let mut s = h & mask;
+    loop {
+        let e = word(in a.table, s);
+        if e == 0 {
+            return s;
+        }
+        if holds(in a, wrapping_sub(e, 1), input, in row, at, width) {
+            return s;
+        }
+        s = wrapping_add(s, 1) & mask;
+    }
+}
+
+// Doubles the table and reinserts every distinct row.
+fn grow(inout a: ZAcc) {
+    let size = wrapping_mul(a.table.len(), 2);
+    let mask = wrapping_sub(size, 1);
+    let mut table = ChunkSeq::with_capacity[u64](size);
+    for _ in 0..size {
+        table.push(0);
+    }
+    let n = a.tags.len();
+    for d in 0..n {
+        let input = word(in a.tags, d);
+        let width = word(in a.widths, input);
+        let h = hash_row(a.k0, a.k1, input, in a.rows.as_slice(), word(in a.offs, d), width);
+        let mut s = h & mask;
+        loop {
+            if word(in table, s) == 0 {
+                break;
+            }
+            s = wrapping_add(s, 1) & mask;
+        }
+        table.try_set(s, wrapping_add(d, 1));
+    }
+    a.table = table;
+}
+
+// Adds `weight` (the i128 whi:wlo) to `row[at..at + width]` of `input`,
+// as `Accumulator::add` does after its work charge and width check.
+// Returns INSERTED, or the failure: ROWS_FULL or SUM_OVERFLOW (nothing
+// changes then).
+pub fn acc_insert(inout a: ZAcc, input: u64, in row: Slice[i64], at: u64, whi: i64, wlo: u64)
+    -> u64 {
+    if whi == 0 && wlo == 0 {
+        return INSERTED;
+    }
+    let width = word(in a.widths, input);
+    let h = hash_row(a.k0, a.k1, input, in row, at, width);
+    let s = probe(in a, h, input, in row, at, width);
+    let e = word(in a.table, s);
+    if e != 0 {
+        let d = wrapping_sub(e, 1);
+        let hi = match a.his.try_get(d) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        let lo = word(in a.los, d);
+        let nlo = wrapping_add(lo, wlo);
+        let carry: i64 = if nlo < lo {
+            1
+        } else {
+            0
+        };
+        let nhi = wrapping_add(wrapping_add(hi, whi), carry);
+        // i128 overflow: both addends of one sign, the sum of the other.
+        if (hi < 0) == (whi < 0) && (nhi < 0) != (hi < 0) {
+            return SUM_OVERFLOW;
+        }
+        a.his.try_set(d, nhi);
+        a.los.try_set(d, nlo);
+        return INSERTED;
+    }
+    let count = word(in a.counts, input);
+    if count >= a.max_rows {
+        return ROWS_FULL;
+    }
+    a.counts.try_set(input, wrapping_add(count, 1));
+    let d = a.tags.len();
+    a.tags.push(input);
+    a.offs.push(a.rows.len());
+    push_row(inout a.rows, in row, at, width);
+    a.his.push(whi);
+    a.los.push(wlo);
+    a.table.try_set(s, wrapping_add(d, 1));
+    if wrapping_mul(wrapping_add(d, 1), 2) > a.table.len() {
+        grow(inout a);
+    }
+    INSERTED
+}
+
+// `Accumulator::finish` of one input: its nonzero sums in row order.
+pub fn acc_finish(in a: ZAcc, input: u64) -> ChunkSeq[i64] eff [Fail[ZErr]] {
+    let width = word(in a.widths, input);
+    let stride = wrapping_add(width, 1);
+    // The input's rows as entries, each with its distinct-row number.
+    let mut ent = ChunkSeq::new[i64]();
+    let mut n: u64 = 0;
+    let all = a.tags.len();
+    for d in 0..all {
+        if word(in a.tags, d) == input {
+            push_row(inout ent, in a.rows.as_slice(), word(in a.offs, d), width);
+            ent.push(wrapping_i64(d));
+            n = wrapping_add(n, 1);
+        }
+    }
+    let order = sort_rows(in ent.as_slice(), n, width);
+    let mut out = ChunkSeq::with_capacity[i64](wrapping_mul(n, stride));
+    for i in 0..n {
+        let at = wrapping_mul(word(in order, i), stride);
+        let d = wrapping_u64(cell(in ent.as_slice(), wrapping_add(at, width)));
+        let hi = match a.his.try_get(d) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        let lo = word(in a.los, d);
+        if hi == 0 && lo == 0 {
+            continue;
+        }
+        // i64::try_from: hi is the sign extension of lo.
+        if !((hi == 0 && lo < 9223372036854775808) || (hi == -1 && lo >= 9223372036854775808)) {
+            Fail::raise(ZErr::Overflow);
+        }
+        push_row(inout out, in ent.as_slice(), at, width);
+        out.push(wrapping_i64(lo));
+    }
+    out
+}

@@ -3,7 +3,8 @@
 
 use crate::derivation::{ConformanceSource, Derivation, DerivationError, Step};
 use crate::engine::mode::{ModeVerdict, decide, mode_atoms};
-use crate::program::{ConformanceDecl, Env, Program, QueryDto, Scope, Validator, validate_query};
+use crate::engine::validate::{Scope, Validator, validate_query};
+use crate::program::{ConformanceDecl, Env, Program, QueryDto};
 use crate::term::*;
 
 impl Derivation {

@@ -1,9 +1,9 @@
-//! CLI adapter for the versioned interface library. `vesper resolve` lives in
-//! the `vesper-resolve` tool (crates/vesper-tools, self-hosting SH0 lane 2).
+//! `vesper semver`: compare two versioned interface files (moved out of the
+//! compiler binary by SH6 lane 3, #1398). `vesper resolve` is `vesper-resolve`.
 use std::fs;
 use vesper_semver::{Interface, Report};
 
-pub fn semver(args: Vec<String>) -> Result<(), String> {
+pub fn run(args: Vec<String>) -> Result<(), String> {
     let mut paths = vec![];
     let mut json = false;
     let mut old_version = None;
@@ -106,6 +106,3 @@ fn print_report(report: &Report) {
         );
     }
 }
-
-/// Atomic output for `build`, `emit` and `top`; shared with the tools.
-pub use vesper::atomic_file::atomic_write;
