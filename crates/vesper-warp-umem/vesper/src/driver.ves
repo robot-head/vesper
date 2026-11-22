@@ -393,34 +393,13 @@ pub fn xsk_attach(inout d: Device, config: UmemConfig) -> Option[PortError] {
         Option::None => (),
     }
     let n = d.nic.config;
-    let same = config
-        .frame_count
-        == n
-        .frame_count
-        && config
-        .frame_size
-        == n
-        .frame_size
-        && config
-        .headroom
-        == n
-        .headroom
-        && config
-        .fill_size
-        == n
-        .fill_size
-        && config
-        .rx_size
-        == n
-        .rx_size
-        && config
-        .tx_size
-        == n
-        .tx_size
-        && config
-        .completion_size
-        == n
-        .completion_size;
+    let same = config.frame_count == n.frame_count
+        && config.frame_size == n.frame_size
+        && config.headroom == n.headroom
+        && config.fill_size == n.fill_size
+        && config.rx_size == n.rx_size
+        && config.tx_size == n.tx_size
+        && config.completion_size == n.completion_size;
     if !same {
         return Option::Some(PortError::InvalidConfig(6));
     }

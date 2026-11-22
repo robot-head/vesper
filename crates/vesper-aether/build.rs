@@ -7,7 +7,7 @@
 
 /// The files of the port, in order.
 #[cfg(feature = "vesper-port")]
-const PARTS: &[&str] = &["util", "slot_plan", "pvh", "hotset"];
+const PARTS: &[&str] = &["util", "slot_plan", "pvh", "hotset", "packed"];
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
@@ -53,4 +53,6 @@ const DIVERGENT_EDITS: &[(&str, &str)] = &[
         "        if have && last >= i {",
         "        if have && last > i {",
     ),
+    // packed: a used descriptor counts as available.
+    ("        if !avail || used {", "        if !avail {"),
 ];

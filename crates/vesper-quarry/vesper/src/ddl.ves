@@ -142,12 +142,12 @@ pub fn parse_ddl(inout q: Q) -> u64 {
                 q
                     .words
                     .push(
-                    if nullable {
-                        1
-                    } else {
-                        0
-                    }
-                );
+                        if nullable {
+                            1
+                        } else {
+                            0
+                        }
+                    );
                 ncols = wrapping_add(ncols, 1);
                 if !sym(inout q, COMMA) {
                     break;
@@ -224,13 +224,13 @@ pub fn ddl_apply_q(
             q
                 .tabs
                 .push(
-                CTab {
-                    noff: noff,
-                    nlen: nlen,
-                    start: 0,
-                    n: 0
-                }
-            );
+                    CTab {
+                        noff: noff,
+                        nlen: nlen,
+                        start: 0,
+                        n: 0
+                    }
+                );
             live = wrapping_add(live, 1);
             p = wrapping_add(
                 wrapping_add(p, 4),

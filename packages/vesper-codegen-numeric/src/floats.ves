@@ -133,13 +133,10 @@ pub fn float_known(call: u64, op: u32) -> bool eff [Ffi[Cranelift]] {
     if op == NUM_FLOAT_CONVERT {
         let to = arg(call, 0);
         let from = arg(call, 1);
-        return n
-            == 3
+        return n == 3
             && (to == FROM_F32 || to == FROM_F64)
-            && from
-            >= FROM_F32
-            && from
-            <= FROM_UNSIGNED;
+            && from >= FROM_F32
+            && from <= FROM_UNSIGNED;
     }
     if op == NUM_FLOAT_TO_INT {
         return n == 5;

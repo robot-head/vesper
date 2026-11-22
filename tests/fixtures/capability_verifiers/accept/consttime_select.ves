@@ -7,12 +7,10 @@ copy struct Secret[T] {
 fn ct_eq(a: Secret[u8], b: Secret[u8]) -> Secret[bool] eff [ConstTime] {
     let Secret {
         value: x
-    }
-    = a;
+    } = a;
     let Secret {
         value: y
-    }
-    = b;
+    } = b;
     Secret {
         value: wrapping_sub(x, y) == 0
     }
@@ -21,8 +19,7 @@ fn ct_eq(a: Secret[u8], b: Secret[u8]) -> Secret[bool] eff [ConstTime] {
 fn ct_not(a: Secret[bool]) -> Secret[bool] eff [ConstTime] {
     let Secret {
         value
-    }
-    = a;
+    } = a;
     Secret {
         value: !value
     }
@@ -31,8 +28,7 @@ fn ct_not(a: Secret[bool]) -> Secret[bool] eff [ConstTime] {
 fn declassify_bool(s: Secret[bool]) -> bool eff [ConstTime] {
     let Secret {
         value
-    }
-    = s;
+    } = s;
     value
 }
 

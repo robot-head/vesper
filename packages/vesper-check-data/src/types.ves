@@ -253,27 +253,13 @@ impl Types {
         lit: i64
     ) -> bool {
         let n = self.node(id);
-        if n
-            .kind
-            != kind
-            || n
-            .mode
-            != mode
-            || n
-            .name
-            != name
-            || n
-            .r
-            != r
-            || n
-            .r2
-            != r2
-            || n
-            .lit
-            != lit
-            || w(n.n)
-            != items
-            .len() {
+        if n.kind != kind
+            || n.mode != mode
+            || n.name != name
+            || n.r != r
+            || n.r2 != r2
+            || n.lit != lit
+            || w(n.n) != items.len() {
             return false;
         }
         for i in 0..items.len() {
@@ -313,10 +299,8 @@ impl Types {
                 break;
             }
             let id = wrapping_sub(slot, 1);
-            if u64_at(in self.hashes, w(id))
-                == h
-                && self
-                .same(id, kind, mode, name, in items, in passes, r, r2, lit) {
+            if u64_at(in self.hashes, w(id)) == h
+                && self.same(id, kind, mode, name, in items, in passes, r, r2, lit) {
                 return id;
             }
             at = inc(at) & self.mask;
@@ -334,17 +318,17 @@ impl Types {
         self
             .nodes
             .push(
-            TypeNode {
-                kind: kind,
-                mode: mode,
-                name: name,
-                a: a,
-                n: n32(items.len()),
-                r: r,
-                r2: r2,
-                lit: lit
-            }
-        );
+                TypeNode {
+                    kind: kind,
+                    mode: mode,
+                    name: name,
+                    a: a,
+                    n: n32(items.len()),
+                    r: r,
+                    r2: r2,
+                    lit: lit
+                }
+            );
         self.hashes.push(h);
         let ok = self.slots.try_set(at, inc32(id));
         if wrapping_mul(self.hashes.len(), 2) > self.mask {
@@ -386,18 +370,18 @@ impl Types {
         let no: ChunkSeq[u32] = ChunkSeq::new[u32]();
         self
             .mk(
-            K_LIT,
-            if neg {
-                1
-            } else {
-                0
-            },
-            0,
-            in no,
-            0,
-            0,
-            wrapping_i64(magnitude)
-        )
+                K_LIT,
+                if neg {
+                    1
+                } else {
+                    0
+                },
+                0,
+                in no,
+                0,
+                0,
+                wrapping_i64(magnitude)
+            )
     }
 
     pub fn row_type(inout self, row: u32) -> u32 {
@@ -456,23 +440,23 @@ impl Types {
             self
                 .effs
                 .push(
-                EffNode {
-                    label: e.label,
-                    name: e.name,
-                    a: ea,
-                    n: e.n
-                }
-            );
+                    EffNode {
+                        label: e.label,
+                        name: e.name,
+                        a: ea,
+                        n: e.n
+                    }
+                );
         }
         self
             .rows
             .push(
-            RowNode {
-                a: a,
-                n: n32(es.len()),
-                tail: tail
-            }
-        );
+                RowNode {
+                    a: a,
+                    n: n32(es.len()),
+                    tail: tail
+                }
+            );
         self.row_hashes.push(h);
         let ok = self.row_slots.try_set(at, inc32(id));
         if wrapping_mul(self.row_hashes.len(), 2) > self.row_mask {
@@ -934,13 +918,13 @@ fn default_row(inout t: Types, r: u32) -> u32 {
         }
         es
             .push(
-            EffNode {
-                label: e.label,
-                name: e.name,
-                a: a,
-                n: e.n
-            }
-        );
+                EffNode {
+                    label: e.label,
+                    name: e.name,
+                    a: a,
+                    n: e.n
+                }
+            );
     }
     t.mk_row(in es, in args, row.tail)
 }

@@ -149,13 +149,13 @@ pub fn dump_expr(inout o: ChunkSeq[u8], in t: Tree, e: u32) {
                 .ast
                 .args
                 .get_or(
-                idx_from_raw[ArgNode](list_at(in t.ast, x.c, i)),
-                ArgNode {
-                    pass: 255,
-                    explicit: false,
-                    expr: none()
-                }
-            );
+                    idx_from_raw[ArgNode](list_at(in t.ast, x.c, i)),
+                    ArgNode {
+                        pass: 255,
+                        explicit: false,
+                        expr: none()
+                    }
+                );
             o.push(32);
             put_u64(inout o, widen_u64(a.pass));
             if a.explicit {

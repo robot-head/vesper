@@ -145,14 +145,14 @@ pub fn fun(in p: Program, in fx: Fns, fi: u64) -> Fun {
         f
             .params
             .push(
-            PRow {
-                name: name,
-                pass: pass,
-                qa: qa,
-                qn: qn,
-                ty: ty
-            }
-        );
+                PRow {
+                    name: name,
+                    pass: pass,
+                    qa: qa,
+                    qn: qn,
+                    ty: ty
+                }
+            );
     }
     f.result = n32(p.op(i));
     f.effects = n32(p.op(inc(i)));
@@ -474,13 +474,9 @@ pub fn takes(in p: Program, in t: Types, in wd: World, in fx: Fns, in f: Fun) ->
         let blk = f.block(in p, bi);
         for ii in 0..blk.ic {
             let ins = p.inst(add(blk.i0, ii));
-            if ins
-                .fallible
-                != 0
-                || wd
-                .is_partial(ins.s0, ins.s1)
-                || wd
-                .may_overflow(ins.s0, ins.s1) {
+            if ins.fallible != 0
+                || wd.is_partial(ins.s0, ins.s1)
+                || wd.may_overflow(ins.s0, ins.s1) {
                 return false;
             }
             if ins.op == OP_HANDLE || ins.op == OP_TRY || ins.op == OP_INDEX || ins.op == OP_SEQ {

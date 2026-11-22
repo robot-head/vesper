@@ -198,19 +198,22 @@ pub fn exp(x: f64) -> f64 {
     let t = r * r;
     let c = r
         - t
-        * (
-        from_bits_f64(EXP_P1_BITS)
-            + t
             * (
-            from_bits_f64(EXP_P2_BITS)
-                + t
-                * (
-                from_bits_f64(EXP_P3_BITS)
+                from_bits_f64(EXP_P1_BITS)
                     + t
-                    * (from_bits_f64(EXP_P4_BITS) + t * from_bits_f64(EXP_P5_BITS))
-            )
-        )
-    );
+                        * (
+                            from_bits_f64(EXP_P2_BITS)
+                                + t
+                                    * (
+                                        from_bits_f64(EXP_P3_BITS)
+                                            + t
+                                                * (
+                                                    from_bits_f64(EXP_P4_BITS)
+                                                        + t * from_bits_f64(EXP_P5_BITS)
+                                                )
+                                    )
+                        )
+            );
     let y = 1.0 - ((lo - (r * c) / (2.0 - c)) - hi);
     if k == 0 {
         y
@@ -275,12 +278,13 @@ pub fn log(x0: f64) -> f64 {
         * (from_bits_f64(LG2_BITS) + w * (from_bits_f64(LG4_BITS) + w * from_bits_f64(LG6_BITS)));
     let t2 = z
         * (
-        from_bits_f64(LG1_BITS)
-            + w
-            * (
-            from_bits_f64(LG3_BITS) + w * (from_bits_f64(LG5_BITS) + w * from_bits_f64(LG7_BITS))
-        )
-    );
+            from_bits_f64(LG1_BITS)
+                + w
+                    * (
+                        from_bits_f64(LG3_BITS)
+                            + w * (from_bits_f64(LG5_BITS) + w * from_bits_f64(LG7_BITS))
+                    )
+        );
     ii = ii | j;
     let r = t2 + t1;
     if ii > 0 {
@@ -301,11 +305,8 @@ fn k_sin(x: f64, y: f64, has_tail: bool) -> f64 {
     let z = x * x;
     let w = z * z;
     let r = from_bits_f64(S2_BITS)
-        + z
-        * (from_bits_f64(S3_BITS) + z * from_bits_f64(S4_BITS))
-        + z
-        * w
-        * (from_bits_f64(S5_BITS) + z * from_bits_f64(S6_BITS));
+        + z * (from_bits_f64(S3_BITS) + z * from_bits_f64(S4_BITS))
+        + z * w * (from_bits_f64(S5_BITS) + z * from_bits_f64(S6_BITS));
     let v = z * x;
     let s1 = from_bits_f64(S1_BITS);
     if !has_tail {
@@ -318,11 +319,10 @@ fn k_sin(x: f64, y: f64, has_tail: bool) -> f64 {
 fn k_cos(x: f64, y: f64) -> f64 {
     let z = x * x;
     let w = z * z;
-    let r = z
-        * (from_bits_f64(C1_BITS) + z * (from_bits_f64(C2_BITS) + z * from_bits_f64(C3_BITS)))
+    let r = z * (from_bits_f64(C1_BITS) + z * (from_bits_f64(C2_BITS) + z * from_bits_f64(C3_BITS)))
         + w
-        * w
-        * (from_bits_f64(C4_BITS) + z * (from_bits_f64(C5_BITS) + z * from_bits_f64(C6_BITS)));
+            * w
+            * (from_bits_f64(C4_BITS) + z * (from_bits_f64(C5_BITS) + z * from_bits_f64(C6_BITS)));
     let hz = 0.5 * z;
     let w2 = 1.0 - hz;
     w2 + (((1.0 - w2) - hz) + (z * r - x * y))
@@ -481,36 +481,42 @@ fn atan(x0: f64) -> f64 {
     let w = z * z;
     let s1 = z
         * (
-        from_bits_f64(AT0_BITS)
-            + w
-            * (
-            from_bits_f64(AT2_BITS)
+            from_bits_f64(AT0_BITS)
                 + w
-                * (
-                from_bits_f64(AT4_BITS)
-                    + w
                     * (
-                    from_bits_f64(AT6_BITS)
-                        + w
-                        * (from_bits_f64(AT8_BITS) + w * from_bits_f64(AT10_BITS))
-                )
-            )
-        )
-    );
+                        from_bits_f64(AT2_BITS)
+                            + w
+                                * (
+                                    from_bits_f64(AT4_BITS)
+                                        + w
+                                            * (
+                                                from_bits_f64(AT6_BITS)
+                                                    + w
+                                                        * (
+                                                            from_bits_f64(AT8_BITS)
+                                                                + w * from_bits_f64(AT10_BITS)
+                                                        )
+                                            )
+                                )
+                    )
+        );
     let s2 = w
         * (
-        from_bits_f64(AT1_BITS)
-            + w
-            * (
-            from_bits_f64(AT3_BITS)
+            from_bits_f64(AT1_BITS)
                 + w
-                * (
-                from_bits_f64(AT5_BITS)
-                    + w
-                    * (from_bits_f64(AT7_BITS) + w * from_bits_f64(AT9_BITS))
-            )
-        )
-    );
+                    * (
+                        from_bits_f64(AT3_BITS)
+                            + w
+                                * (
+                                    from_bits_f64(AT5_BITS)
+                                        + w
+                                            * (
+                                                from_bits_f64(AT7_BITS)
+                                                    + w * from_bits_f64(AT9_BITS)
+                                            )
+                                )
+                    )
+        );
     if id == ATAN_NO_REDUCTION {
         return x - x * (s1 + s2);
     }

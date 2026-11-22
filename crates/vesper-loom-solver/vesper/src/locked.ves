@@ -117,17 +117,9 @@ pub fn locked(inout s: S) {
     let mut root_ok = s.l.root_n == 1;
     if root_ok {
         let r = root(in s.l, s.l.root_at);
-        root_ok = r
-            .name
-            == rname
-            && req(in s.l, r.req)
-            .text
-            == req(in s.l, s.rexact)
-            .text
-            && r
-            .feat_n
-            == s
-            .rf_n;
+        root_ok = r.name == rname
+            && req(in s.l, r.req).text == req(in s.l, s.rexact).text
+            && r.feat_n == s.rf_n;
         if root_ok {
             for i in 0..s.rf_n {
                 if id_at(in s.l, add(r.feat_at, i)) != id_at(in s.l, add(s.rf_at, i)) {

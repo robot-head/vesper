@@ -289,12 +289,12 @@ fn read_env(inout r: Reader, in b: Slice[u8], inout names: Names, functions: u64
         e
             .views
             .push(
-            SpanRow {
-                start: start,
-                end: end,
-                ty: 0
-            }
-        );
+                SpanRow {
+                    start: start,
+                    end: end,
+                    ty: 0
+                }
+            );
     }
     for f in 0..functions {
         e.free_a.push(e.free.len());
@@ -483,34 +483,13 @@ fn dyn_generic_name(in c: Ctx, s: u32) -> bool {
         return false;
     }
     // "__dyn__"
-    c
-        .names
-        .byte(s, 0)
-        == 95
-        && c
-        .names
-        .byte(s, 1)
-        == 95
-        && c
-        .names
-        .byte(s, 2)
-        == 100
-        && c
-        .names
-        .byte(s, 3)
-        == 121
-        && c
-        .names
-        .byte(s, 4)
-        == 110
-        && c
-        .names
-        .byte(s, 5)
-        == 95
-        && c
-        .names
-        .byte(s, 6)
-        == 95
+    c.names.byte(s, 0) == 95
+        && c.names.byte(s, 1) == 95
+        && c.names.byte(s, 2) == 100
+        && c.names.byte(s, 3) == 121
+        && c.names.byte(s, 4) == 110
+        && c.names.byte(s, 5) == 95
+        && c.names.byte(s, 6) == 95
 }
 
 // `fip::drop_visit`: `needs_drop` (`unknown` false) and `may_need_drop`
@@ -529,27 +508,17 @@ fn drop_visit(inout c: Ctx, ty0: u32, inout seen: ChunkSeq[u32], unknown: bool) 
         if is_box(in c, ty)
             || (n.name == k.slice && n.n == 1)
             || (n.name == k.tiled_seq && (n.n == 1 || n.n == 2))
-            || n
-            .name
-            == k
-            .region_box
-            || n
-            .name
-            == k
-            .watermark {
+            || n.name == k.region_box
+            || n.name == k.watermark {
             return false;
         }
         let ai = c.world.lookup(n.name);
         if ai == NO_ADT {
             return unknown
                 && !(c.world.k.is_scalar(n.name) || is_wide_name(in c, n.name))
-                && n
-                .name
-                != k
-                .never
+                && n.name != k.never
                 && !is_text(in c, ty)
-                && vector_words(in c.types, in c.names, k, ty)
-                == 0;
+                && vector_words(in c.types, in c.names, k, ty) == 0;
         }
         let a = c.world.adt(ai);
         if w(a.gn) != w(n.n) {
@@ -587,21 +556,11 @@ fn drop_visit(inout c: Ctx, ty0: u32, inout seen: ChunkSeq[u32], unknown: bool) 
 
 fn is_wide_name(in c: Ctx, s: u32) -> bool {
     let size = c.names.size(s);
-    size
-        == 4
+    size == 4
         && (c.names.byte(s, 0) == 105 || c.names.byte(s, 0) == 117)
-        && c
-        .names
-        .byte(s, 1)
-        == 49
-        && c
-        .names
-        .byte(s, 2)
-        == 50
-        && c
-        .names
-        .byte(s, 3)
-        == 56
+        && c.names.byte(s, 1) == 49
+        && c.names.byte(s, 2) == 50
+        && c.names.byte(s, 3) == 56
 }
 
 // `fip::needs_drop`.
@@ -914,8 +873,7 @@ fn product_type(in c: Ctx, ty: u32) -> bool {
         && !(n.kind == K_NAMED && n.name == k.slice && n.n == 1)
         && !(n.kind == K_NAMED && n.name == k.dyn_ && n.n == 1)
         && !is_text(in c, ty)
-        && vector_words(in c.types, in c.names, k, ty)
-        == 0
+        && vector_words(in c.types, in c.names, k, ty) == 0
 }
 
 fn split_walk(inout e: Env, inout c: Ctx, l: u32, base: i64, inout out: Leaves) -> bool {
@@ -924,27 +882,14 @@ fn split_walk(inout e: Env, inout c: Ctx, l: u32, base: i64, inout out: Leaves) 
         let ty = default_type(inout c.types, node.ty);
         let n = c.types.node(ty);
         let k = c.world.k;
-        let word = n
-            .kind
-            == K_NAMED
-            && n
-            .n
-            == 0
+        let word = n.kind == K_NAMED
+            && n.n == 0
             && (
-            integer_name(in e, in c, n.name)
-                || n
-                .name
-                == k
-                .f32_
-                || n
-                .name
-                == k
-                .f64_
-                || n
-                .name
-                == k
-                .bool_
-        );
+                integer_name(in e, in c, n.name)
+                    || n.name == k.f32_
+                    || n.name == k.f64_
+                    || n.name == k.bool_
+            );
         if word {
             out.pa.push(out.syms.len());
             out.pn.push(out.stack.len());
@@ -993,14 +938,8 @@ fn split_words(inout e: Env, inout c: Ctx, ty: u32, inout out: Leaves) -> bool {
         return false;
     }
     split_walk(inout e, inout c, l, 0, inout out)
-        && out
-        .pa
-        .len()
-        > 0
-        && out
-        .pa
-        .len()
-        <= MAX_SPLIT_WORDS
+        && out.pa.len() > 0
+        && out.pa.len() <= MAX_SPLIT_WORDS
 }
 
 // The symbol after the last "::" of `s` (`name.rsplit("::").next()`).
@@ -1803,16 +1742,11 @@ fn pass_through(
     }
     let name = n32(p.op(add(q, 3)));
     let li = s.local_of(name);
-    if li
-        == NONE32_64
-        || u64_at(in g.mentions, li)
-        != 2
-        || u8_at(in g.split, li)
-        != 0
-        || s
-        .has(name, S_PARAM)
-        || s
-        .has(name, S_CAPTURE) {
+    if li == NONE32_64
+        || u64_at(in g.mentions, li) != 2
+        || u8_at(in g.split, li) != 0
+        || s.has(name, S_PARAM)
+        || s.has(name, S_CAPTURE) {
         return NO_THROUGH;
     }
     let lt = default_type(inout c.types, u32_at(in g.lty, li));
@@ -1822,17 +1756,10 @@ fn pass_through(
     let blk = p.block(add(g.b0, b));
     for k in inc(at)..blk.ic {
         let inst = p.inst(add(blk.i0, k));
-        if inst
-            .op
-            == OP_READ
-            && n32(p.op(inst.a))
-            == name
-            && p
-            .op(inc(inst.a))
-            == 0
-            && p
-            .op(add(inst.a, 2))
-            == PASS_SINK {
+        if inst.op == OP_READ
+            && n32(p.op(inst.a)) == name
+            && p.op(inc(inst.a)) == 0
+            && p.op(add(inst.a, 2)) == PASS_SINK {
             return Through {
                 found: true,
                 k: k,
@@ -2141,8 +2068,7 @@ fn value_aggregate(inout e: Env, inout c: Ctx, in g: G, v: u32) -> bool {
 // `window_ok`'s `fresh`.
 fn fresh(inout e: Env, inout c: Ctx, in p: Program, in g: G, in members: ChunkSeq[u8], v: u32)
     -> bool {
-    u8_at(in members, w(v))
-        != 0
+    u8_at(in members, w(v)) != 0
         || !value_aggregate(inout e, inout c, in g, v)
         || def_candidate(in p, in e, in g, v)
 }
@@ -2250,11 +2176,11 @@ fn window_ok(
             } else if op == OP_BIND {
                 ok = u8_at(in members, p.op(a)) != 0;
             } else if op == OP_READ {
-                ok = u8_at(in members, w(inst.dest))
-                    != 0
+                ok = u8_at(in members, w(inst.dest)) != 0
                     || (
-                    p.op(inc(a)) == 0 && scalar_local(inout e, inout c, in g, in s, n32(p.op(a)))
-                );
+                        p.op(inc(a)) == 0
+                            && scalar_local(inout e, inout c, in g, in s, n32(p.op(a)))
+                    );
             } else if op == OP_DATA {
                 ok = true;
                 for j in 0..p.op(inc(a)) {
@@ -2564,9 +2490,7 @@ fn plan(inout e: Env, inout c: Ctx, in p: Program, inout g: G, in s: Syms) {
             let inst = p.inst(ii);
             let own = default_type(inout c.types, inst.ty);
             if !candidate(in p, in e, ii)
-                || g
-                .uses_of(inst.dest)
-                != 1
+                || g.uses_of(inst.dest) != 1
                 || !aggregate(inout e, inout c, own) {
                 continue;
             }
@@ -2662,11 +2586,8 @@ fn plan(inout e: Env, inout c: Ctx, in p: Program, inout g: G, in s: Syms) {
                 continue;
             }
             let own = default_type(inout c.types, inst.ty);
-            if !g
-                .split_local(in s, n32(p.op(inst.a)))
-                || g
-                .uses_of(inst.dest)
-                != 1
+            if !g.split_local(in s, n32(p.op(inst.a)))
+                || g.uses_of(inst.dest) != 1
                 || !aggregate(inout e, inout c, own) {
                 continue;
             }
@@ -2915,14 +2836,10 @@ fn split_locals(inout e: Env, inout c: Ctx, in p: Program, inout g: G, in s: Sym
     };
     for li in 0..nl {
         let sym = u32_at(in g.lsym, li);
-        if u8_at(in memory, li)
-            != 0
-            || u8_at(in fields, li)
-            == 0
-            || s
-            .has(sym, S_PARAM)
-            || s
-            .has(sym, S_CAPTURE) {
+        if u8_at(in memory, li) != 0
+            || u8_at(in fields, li) == 0
+            || s.has(sym, S_PARAM)
+            || s.has(sym, S_CAPTURE) {
             continue;
         }
         let t = default_type(inout c.types, u32_at(in g.lty, li));
@@ -3230,29 +3147,19 @@ fn borrowed_scrutinees(in e: Env, in p: Program, in g: G, in s: Syms) -> ChunkSe
             let a = inst.a;
             if inst.op == OP_READ {
                 let li = s.local_of(n32(p.op(a)));
-                if d
-                    < g
-                    .nv
-                    && u8_at(in matched, d)
-                    != 0
-                    && li
-                    != NONE32_64
-                    && u8_at(in names, li)
-                    != 0
-                    && u8_at(in out, d)
-                    == 0 {
+                if d < g.nv
+                    && u8_at(in matched, d) != 0
+                    && li != NONE32_64
+                    && u8_at(in names, li) != 0
+                    && u8_at(in out, d) == 0 {
                     set8(inout out, d, 1);
                     grew = true;
                 }
             } else if inst.op == OP_SEQ {
                 let label = p.pool_row(p.op(a)).label;
-                if d
-                    < g
-                    .nv
-                    && u8_at(in matched, d)
-                    != 0
-                    && u8_at(in out, d)
-                    == 0
+                if d < g.nv
+                    && u8_at(in matched, d) != 0
+                    && u8_at(in out, d) == 0
                     && (label == e.s_try_get || label == e.s_hoisted_try_get) {
                     set8(inout out, d, 1);
                     grew = true;
@@ -3316,13 +3223,8 @@ fn seq_drop_plan(inout e: Env, inout c: Ctx, in p: Program, in g: G, in s: Syms)
             kind = SD_STR;
         } else if param && needs_drop(inout c, ty) {
             kind = SD_OWNED;
-        } else if n
-            .kind
-            == K_NAMED
-            && c
-            .world
-            .lookup(n.name)
-            != NO_ADT
+        } else if n.kind == K_NAMED
+            && c.world.lookup(n.name) != NO_ADT
             && !param
             && (holds_sequence(inout c, ty) || needs_drop(inout c, ty)) {
             kind = SD_FIELDS;
@@ -3350,8 +3252,7 @@ fn seq_drop_plan(inout e: Env, inout c: Ctx, in p: Program, in g: G, in s: Syms)
             let pk = plan_kind(in plan, in s, root);
             let pr = p.path(p.op(inc(a)));
             if (pr.n > 0 && may_need_drop(inout c, inst.ty) && !owned_or_fields(pk))
-                || pk
-                == SD_STR {
+                || pk == SD_STR {
                 mark_sym(in s, inout refused, root);
             }
         } else if op == OP_WRITE {
@@ -3359,9 +3260,7 @@ fn seq_drop_plan(inout e: Env, inout c: Ctx, in p: Program, in g: G, in s: Syms)
             let root = place_root(inout c.names, place);
             let pk = plan_kind(in plan, in s, root);
             if (has_dot(in c.names, place) && !owned_or_fields(pk))
-                || n32(p.op(inc(a)))
-                != e
-                .s_eq
+                || n32(p.op(inc(a))) != e.s_eq
                 || (pk == SD_STR && s.has(root, S_PARAM)) {
                 mark_sym(in s, inout refused, root);
             }
@@ -3369,10 +3268,8 @@ fn seq_drop_plan(inout e: Env, inout c: Ctx, in p: Program, in g: G, in s: Syms)
             let v = n32(p.op(a));
             let q = inc(a);
             let dop = def_op(in p, in g, in defs, v);
-            let borrow_read = dop
-                == OP_READ
-                && read_pass(in p, p.inst(add(g.i0, u64_at(in defs, w(v)))).a)
-                != PASS_SINK;
+            let borrow_read = dop == OP_READ
+                && read_pass(in p, p.inst(add(g.i0, u64_at(in defs, w(v)))).a) != PASS_SINK;
             if borrow_read
                 || (w(v) < g.nv && u8_at(in borrowed, w(v)) != 0)
                 || (p.op(q) != PAT_BIND && pattern_has_box(inout e, inout c, in p, q)) {
@@ -3491,15 +3388,9 @@ fn closure_refusals(
 // of a field that owns nothing moves nothing out).
 fn replace_moves(inout c: Ctx, in p: Program, ii: u64) -> bool {
     let inst = p.inst(ii);
-    if inst
-        .op
-        == OP_READ
-        && read_pass(in p, inst.a)
-        == PASS_SINK
-        && p
-        .path(p.op(inc(inst.a)))
-        .n
-        > 0 {
+    if inst.op == OP_READ
+        && read_pass(in p, inst.a) == PASS_SINK
+        && p.path(p.op(inc(inst.a))).n > 0 {
         return may_need_drop(inout c, inst.ty);
     }
     true
@@ -3655,8 +3546,7 @@ fn replace_drops(inout e: Env, inout c: Ctx, in p: Program, in g: G, in s: Syms)
                 let li = s.local_of(root);
                 if li != NONE32_64 {
                     let ci = u64_at(in cidx, li);
-                    if u8_at(in borrowed, li)
-                        != 0
+                    if u8_at(in borrowed, li) != 0
                         || (ci != NONE32_64 && u8_at(in state, ci) == 0) {
                         set8(inout out, wrapping_sub(ii, g.i0), 1);
                     }
@@ -3800,13 +3690,9 @@ fn temporary_drops(
         }
         let v = n32(p.op(inst.a));
         let q = inc(inst.a);
-        if p
-            .op(q)
-            == PAT_BIND
-            && def_op(in p, in g, in defs, v)
-            == OP_READ
-            && read_pass(in p, p.inst(add(g.i0, u64_at(in defs, w(v)))).a)
-            != PASS_SINK {
+        if p.op(q) == PAT_BIND
+            && def_op(in p, in g, in defs, v) == OP_READ
+            && read_pass(in p, p.inst(add(g.i0, u64_at(in defs, w(v)))).a) != PASS_SINK {
             mark_sym(in s, inout borrow_bound, n32(p.op(add(q, 3))));
         }
         if w(v) < nv && u8_at(in borrowed, w(v)) != 0 {
@@ -3864,13 +3750,10 @@ fn temporary_drops(
                         owned = true;
                     } else if pk == SD_NONE {
                         let li = s.local_of(root);
-                        owned = li
-                            != NONE32_64
+                        owned = li != NONE32_64
                             && named0(in c, u32_at(in g.lty, li), c.world.k.string)
-                            && !s
-                            .has(root, S_PARAM)
-                            && u8_at(in borrow_bound, li)
-                            == 0;
+                            && !s.has(root, S_PARAM)
+                            && u8_at(in borrow_bound, li) == 0;
                     }
                 }
             }

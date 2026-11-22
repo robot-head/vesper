@@ -480,9 +480,7 @@ impl Counted {
             }
             return fail_lin();
         }
-        if i
-            .op
-            == OP_BINARY
+        if i.op == OP_BINARY
             && (i.sub == B_ADD || i.sub == B_WADD || i.sub == B_SUB || i.sub == B_WSUB) {
             let negate = i.sub == B_SUB || i.sub == B_WSUB;
             let a = self.linear (in f, i.a, inc(depth));
@@ -613,12 +611,8 @@ fn constant_value(in f: Fun, v: u32, depth: u64) -> SlotConst {
                     hi: i.hi
                 };
             }
-            if i
-                .op
-                == OP_READ
-                && f
-                .depth(i.place)
-                == 1
+            if i.op == OP_READ
+                && f.depth(i.place) == 1
                 && single_binding(in f, f.root_of(i.place)) {
                 let root = f.root_of(i.place);
                 for x in 0..f.insts.len() {
@@ -992,14 +986,9 @@ pub fn counted_plan(in f: Fun) -> CountedPlan {
         let k = f.block(w(b));
         for j in 0..w(k.ic) {
             let i = f.inst(add(w(k.i0), j));
-            if i
-                .op
-                == OP_READ
-                && b
-                != h
-                && f
-                .depth(i.place)
-                == 1
+            if i.op == OP_READ
+                && b != h
+                && f.depth(i.place) == 1
                 && has(in locals, f.root_of(i.place)) {
                 let new = insert(inout c.induction, i.dest);
             }
@@ -1307,10 +1296,9 @@ fn loop_candidate(in f: Fun, inout fa: Facts, in g: Graph, h: u32, in blocks: Ch
                     let root = n32(rn.a);
                     if invariant_local(in f, in blocks, root)
                         && (
-                        has(in blocks, n32(rn.b))
-                            || fa
-                            .unchanged(in f, root, n32(rn.b), rn.c, pre, pre_len)
-                    ) {
+                            has(in blocks, n32(rn.b))
+                                || fa.unchanged(in f, root, n32(rn.b), rn.c, pre, pre_len)
+                        ) {
                         bound = BoundRow {
                             kind: 0,
                             a: rn.a,
@@ -1357,20 +1345,10 @@ fn loop_candidate(in f: Fun, inout fa: Facts, in g: Graph, h: u32, in blocks: Ch
                     Option::Some(x) => x,
                     Option::None => bound,
                 };
-                if u32_at(in gplace, q)
-                    == len
-                    && gb
-                    .kind
-                    == bound
-                    .kind
-                    && gb
-                    .a
-                    == bound
-                    .a
-                    && gb
-                    .b
-                    == bound
-                    .b {
+                if u32_at(in gplace, q) == len
+                    && gb.kind == bound.kind
+                    && gb.a == bound.a
+                    && gb.b == bound.b {
                     dup = true;
                 }
             }
@@ -1627,22 +1605,22 @@ pub fn dominated_list(in f: Fun) -> ChunkSeq[u64] {
             ap.push(recv.place);
             aconst
                 .push(
-                if is_const {
-                    1
-                } else {
-                    0
-                }
-            );
+                    if is_const {
+                        1
+                    } else {
+                        0
+                    }
+                );
             alo.push(lo);
             ahi.push(hi);
             achecked
                 .push(
-                if i.sub >= S_GET && i.sub <= S_SLICE_SET {
-                    1
-                } else {
-                    0
-                }
-            );
+                    if i.sub >= S_GET && i.sub <= S_SLICE_SET {
+                        1
+                    } else {
+                        0
+                    }
+                );
         }
     }
     // Facts per block: the checked accesses of the blocks that strictly

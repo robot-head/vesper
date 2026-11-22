@@ -373,12 +373,9 @@ fn push_text(inout d: Doc, in src: Slice[u8], s: u64, e: u64, comment: bool)
     begin(inout d);
     charge(inout d.w, wrapping_sub(e, s));
     let line_comment = comment
-        && wrapping_sub(e, s)
-        >= 2
-        && byte(in src, s)
-        == 47
-        && byte(in src, wrapping_add(s, 1))
-        == 47;
+        && wrapping_sub(e, s) >= 2
+        && byte(in src, s) == 47
+        && byte(in src, wrapping_add(s, 1)) == 47;
     let width = if line_comment || has_break(in src, s, e) {
         NONE
     } else {
@@ -427,8 +424,13 @@ fn push_group(inout d: Doc, inner: u64) -> u64 eff [Fail[FmtFail]] {
 }
 
 fn push_concat(inout d: Doc, in ids: Slice[u32]) -> u64 eff [Fail[FmtFail]] {
+    push_concat_range(inout d, in ids, 0, ids.len())
+}
+
+fn push_concat_range(inout d: Doc, in ids: Slice[u32], start: u64, end: u64)
+    -> u64 eff [Fail[FmtFail]] {
     begin(inout d);
-    let n = ids.len();
+    let n = wrapping_sub(end, start);
     if n > d.max_nodes {
         fail(E_NODE);
     }
@@ -436,7 +438,7 @@ fn push_concat(inout d: Doc, in ids: Slice[u32]) -> u64 eff [Fail[FmtFail]] {
     let mut width: u64 = 0;
     let mut depth: u64 = 1;
     let first = d.kids.len();
-    for i in 0..n {
+    for i in start..end {
         let id = match ids.try_get(i) {
             Option::Some(v) => widen_u64(v),
             Option::None => 0,
@@ -756,41 +758,33 @@ fn trivia(k: u8) -> bool {
     k <= K_BLOCK_COMMENT
 }
 
+// Weakest to strongest, matching the parser. A pipe can also open a closure.
+fn infix_precedence(k: u8) -> u8 {
+    if k == K_OR {
+        2
+    } else if k == K_AND {
+        3
+    } else if k == K_EQ_EQ || k == K_NE {
+        4
+    } else if k == K_LT || k == K_LE || k == K_GT || k == K_GE {
+        5
+    } else if k == K_CARET {
+        7
+    } else if k == K_AMP {
+        8
+    } else if k == K_SHL || k == K_SHR {
+        9
+    } else if k == K_PLUS || k == K_MINUS {
+        10
+    } else if k == K_STAR || k == K_SLASH || k == K_PERCENT {
+        11
+    } else {
+        0
+    }
+}
+
 fn is_binary_operator(k: u8) -> bool {
-    k
-        == K_PLUS
-        || k
-        == K_MINUS
-        || k
-        == K_STAR
-        || k
-        == K_SLASH
-        || k
-        == K_PERCENT
-        || k
-        == K_EQ_EQ
-        || k
-        == K_NE
-        || k
-        == K_LT
-        || k
-        == K_LE
-        || k
-        == K_GT
-        || k
-        == K_GE
-        || k
-        == K_AND
-        || k
-        == K_OR
-        || k
-        == K_AMP
-        || k
-        == K_CARET
-        || k
-        == K_SHL
-        || k
-        == K_SHR
+    infix_precedence(k) != 0
 }
 
 fn text_is(in src: Slice[u8], s: u64, e: u64, in word: Slice[u8]) -> bool {
@@ -817,42 +811,24 @@ fn text_is(in src: Slice[u8], s: u64, e: u64, in word: Slice[u8]) -> bool {
 // same expression.
 fn continues_chain(k: u8, in src: Slice[u8], s: u64, e: u64) -> bool {
     is_binary_operator(k)
-        || k
-        == K_DOT
-        || k
-        == K_QUESTION
-        || k
-        == K_ELSE
-        || k
-        == K_WITH
-        || k
-        == K_L_PAREN
-        || k
-        == K_L_BRACKET
-        || k
-        == K_DOT_DOT
-        || k
-        == K_DOT_DOT_EQ
-        || k
-        == K_EQ
-        || k
-        == K_PLUS_EQ
-        || k
-        == K_MINUS_EQ
-        || k
-        == K_STAR_EQ
-        || k
-        == K_SLASH_EQ
-        || k
-        == K_PERCENT_EQ
-        || k
-        == K_ARROW
-        || k
-        == K_FAT_ARROW
-        || k
-        == K_COLON
-        || k
-        == K_COLON_COLON
+        || k == K_DOT
+        || k == K_QUESTION
+        || k == K_ELSE
+        || k == K_WITH
+        || k == K_L_PAREN
+        || k == K_L_BRACKET
+        || k == K_DOT_DOT
+        || k == K_DOT_DOT_EQ
+        || k == K_EQ
+        || k == K_PLUS_EQ
+        || k == K_MINUS_EQ
+        || k == K_STAR_EQ
+        || k == K_SLASH_EQ
+        || k == K_PERCENT_EQ
+        || k == K_ARROW
+        || k == K_FAT_ARROW
+        || k == K_COLON
+        || k == K_COLON_COLON
         || text_is(in src, s, e, in "as".as_bytes())
 }
 
@@ -871,51 +847,30 @@ fn chain_step(k: u8, in src: Slice[u8], s: u64, e: u64) -> u8 {
 }
 
 fn operator_step(k: u8) -> bool {
-    k
-        == K_BANG
-        || k
-        == K_TILDE
-        || k
-        == K_ELSE
-        || k
-        == K_DOT_DOT
-        || k
-        == K_DOT_DOT_EQ
-        || k
-        == K_EQ
-        || k
-        == K_PLUS_EQ
-        || k
-        == K_MINUS_EQ
-        || k
-        == K_STAR_EQ
-        || k
-        == K_SLASH_EQ
-        || k
-        == K_PERCENT_EQ
-        || k
-        == K_PIPE_EQ
-        || k
-        == K_AMP_EQ
-        || k
-        == K_ARROW
-        || k
-        == K_FAT_ARROW
+    k == K_BANG
+        || k == K_TILDE
+        || k == K_ELSE
+        || k == K_DOT_DOT
+        || k == K_DOT_DOT_EQ
+        || k == K_EQ
+        || k == K_PLUS_EQ
+        || k == K_MINUS_EQ
+        || k == K_STAR_EQ
+        || k == K_SLASH_EQ
+        || k == K_PERCENT_EQ
+        || k == K_PIPE_EQ
+        || k == K_AMP_EQ
+        || k == K_ARROW
+        || k == K_FAT_ARROW
 }
 
 fn postfix_step(k: u8) -> bool {
-    k
-        == K_DOT
-        || k
-        == K_L_PAREN
-        || k
-        == K_L_BRACKET
-        || k
-        == K_L_BRACE
-        || k
-        == K_QUESTION
-        || k
-        == K_WITH
+    k == K_DOT
+        || k == K_L_PAREN
+        || k == K_L_BRACKET
+        || k == K_L_BRACE
+        || k == K_QUESTION
+        || k == K_WITH
 }
 
 fn opaque_word(in src: Slice[u8], s: u64, e: u64) -> bool {
@@ -1144,45 +1099,28 @@ fn aflags(in a: Atoms, i: u64) -> u8 {
 }
 
 fn starts_range_bound(k: u8) -> bool {
-    k
-        == K_INT
-        || k
-        == K_FLOAT
-        || k
-        == K_LOWER
-        || k
-        == K_UPPER
-        || k
-        == K_L_PAREN
-        || k
-        == K_MINUS
-        || k
-        == K_SELF_KW
+    k == K_INT
+        || k == K_FLOAT
+        || k == K_LOWER
+        || k == K_UPPER
+        || k == K_L_PAREN
+        || k == K_MINUS
+        || k == K_SELF_KW
 }
 
 fn ends_operand(k: u8) -> bool {
-    k
-        == K_LOWER
-        || k
-        == K_UPPER
-        || k
-        == K_INT
-        || k
-        == K_FLOAT
-        || k
-        == K_STRING
-        || k
-        == K_TRUE
-        || k
-        == K_FALSE
-        || k
-        == K_SELF_KW
-        || k
-        == K_R_PAREN
-        || k
-        == K_R_BRACKET
-        || k
-        == K_R_BRACE
+    k == K_LOWER
+        || k == K_UPPER
+        || k == K_INT
+        || k == K_FLOAT
+        || k == K_STRING
+        || k == K_TRUE
+        || k == K_FALSE
+        || k == K_SELF_KW
+        || k == K_R_PAREN
+        || k == K_R_BRACKET
+        || k == K_R_BRACE
+        || k == K_QUESTION
 }
 
 fn gap(p: u8, c: u8, block: bool, after_block: bool) -> u8 {
@@ -1201,23 +1139,17 @@ fn gap(p: u8, c: u8, block: bool, after_block: bool) -> u8 {
     }
     if after_block
         && !(
-        c
-            == K_COMMA
-            || c
-            == K_SEMI
-            || c
-            == K_R_PAREN
-            || c
-            == K_R_BRACKET
-            || c
-            == K_DOT
-            || c
-            == K_QUESTION
-            || c
-            == K_ELSE
-            || c
-            == K_WITH
-    ) {
+            c == K_COMMA
+                || c == K_SEMI
+                || c == K_R_PAREN
+                || c == K_R_BRACKET
+                || c == K_DOT
+                || c == K_QUESTION
+                || c == K_ELSE
+                || c == K_WITH
+                || c == K_EQ
+                || c == K_FAT_ARROW
+        ) {
         return G_HARD;
     }
     if c == K_COMMENT || c == K_BLOCK_COMMENT || p == K_BLOCK_COMMENT {
@@ -1232,10 +1164,8 @@ fn gap(p: u8, c: u8, block: bool, after_block: bool) -> u8 {
     if c == K_COLON_COLON {
         return G_NONE;
     }
-    if (c == K_DOT_DOT || c == K_DOT_DOT_EQ)
-        && ends_operand(p)
-        || (p == K_DOT_DOT || p == K_DOT_DOT_EQ)
-        && starts_range_bound(c) {
+    if (c == K_DOT_DOT || c == K_DOT_DOT_EQ) && ends_operand(p)
+        || (p == K_DOT_DOT || p == K_DOT_DOT_EQ) && starts_range_bound(c) {
         return G_NONE;
     }
     if c == K_ARROW {
@@ -1244,22 +1174,14 @@ fn gap(p: u8, c: u8, block: bool, after_block: bool) -> u8 {
     if is_binary_operator(c) && ends_operand(p) {
         return G_OPERATOR;
     }
-    if c
-        == K_COMMA
-        || c
-        == K_SEMI
-        || c
-        == K_COLON
-        || c
-        == K_DOT
-        || c
-        == K_COLON_COLON
-        || c
-        == K_QUESTION
-        || c
-        == K_R_PAREN
-        || c
-        == K_R_BRACKET {
+    if c == K_COMMA
+        || c == K_SEMI
+        || c == K_COLON
+        || c == K_DOT
+        || c == K_COLON_COLON
+        || c == K_QUESTION
+        || c == K_R_PAREN
+        || c == K_R_BRACKET {
         return G_NONE;
     }
     if p == K_DOT || p == K_COLON_COLON || p == K_AT || p == K_AT_AT {
@@ -1276,22 +1198,96 @@ fn gap(p: u8, c: u8, block: bool, after_block: bool) -> u8 {
     // (`fn eff(..)`, `r.eff()`; contextual `eff`, #1175). `effect (`,
     // `handle (`, `sink (` and `inout (` are calls of a value of that name
     // too (#1244).
-    if c
-        == K_L_PAREN
+    if c == K_L_PAREN
         && (p == K_EFF || p == K_EFFECT || p == K_HANDLE || p == K_SINK || p == K_INOUT) {
         return G_NONE;
     }
     G_SOFT
 }
 
-// `concat_group`: a non-empty line becomes one group of the output.
-fn concat_group(inout ids: ChunkSeq[u32], inout d: Doc, inout out: ChunkSeq[u32]) eff [
-    Fail[FmtFail]
-] {
+copy struct LayoutBreak {
+    offset: u64,
+    level: u8
+}
+
+fn break_at(in breaks: ChunkSeq[LayoutBreak], i: u64) -> LayoutBreak {
+    match breaks.try_get(i) {
+        Option::Some(b) => b,
+        Option::None => LayoutBreak {
+            offset: 0,
+            level: 0
+        },
+    }
+}
+
+fn nest_continuation(inout d: Doc, lead: u64, content: u64) -> u64 eff [Fail[FmtFail]] {
+    if lead == NONE {
+        content
+    } else {
+        let continuation = push_concat2(inout d, lead, content);
+        push_nest(inout d, 4, continuation)
+    }
+}
+
+// Each recursive operand contains only stronger breaks, bounding the
+// stack by the number of precedence levels even for long chains.
+fn layout_line(
+    in ids: ChunkSeq[u32],
+    in breaks: ChunkSeq[LayoutBreak],
+    start: u64,
+    end: u64,
+    first: u64,
+    last: u64,
+    inout d: Doc
+) -> u64 eff [Fail[FmtFail]] {
+    if first == last {
+        return push_concat_range(inout d, in ids.as_slice(), start, end);
+    }
+    let mut weakest: u8 = 255;
+    for i in first..last {
+        let b = break_at(in breaks, i);
+        if b.level < weakest {
+            weakest = b.level;
+        }
+    }
+    let mut segments = ChunkSeq::new[u32]();
+    let mut operand = start;
+    let mut child = first;
+    let mut lead = NONE;
+    for i in first..last {
+        let b = break_at(in breaks, i);
+        if b.level == weakest {
+            if operand < b.offset {
+                let rhs = layout_line(in ids, in breaks, operand, b.offset, child, i, inout d);
+                segments.push(wrapping_u32(nest_continuation(inout d, lead, rhs)));
+            }
+            lead = w32(in ids, b.offset);
+            operand = wrapping_add(b.offset, 1);
+            child = wrapping_add(i, 1);
+        }
+    }
+    let rhs = layout_line(in ids, in breaks, operand, end, child, last, inout d);
+    segments.push(wrapping_u32(nest_continuation(inout d, lead, rhs)));
+    let concat = push_concat(inout d, in segments.as_slice());
+    push_group(inout d, concat)
+}
+
+fn concat_group(
+    inout ids: ChunkSeq[u32],
+    inout breaks: ChunkSeq[LayoutBreak],
+    inout d: Doc,
+    inout out: ChunkSeq[u32]
+) eff [Fail[FmtFail]] {
     if ids.len() != 0 {
-        let node = push_concat(inout d, in ids.as_slice());
+        let group = if breaks.len() == 0 {
+            let concat = push_concat(inout d, in ids.as_slice());
+            push_group(inout d, concat)
+        } else {
+            layout_line(in ids, in breaks, 0, ids.len(), 0, breaks.len(), inout d)
+        };
+        out.push(wrapping_u32(group));
         ids.truncate(0);
-        out.push(wrapping_u32(push_group(inout d, node)));
+        breaks.truncate(0);
     }
 }
 
@@ -1326,15 +1322,13 @@ fn word_used_as_name(has_prev: bool, prev: u8, c: u8, next: u8) -> bool {
     let modal = c == K_COPY || c == K_AFFINE;
     (c == K_EFFECT || c == K_HANDLE || c == K_SINK || c == K_INOUT || modal)
         && (
-        has_prev
-            && (prev == K_DOT || prev == K_FN || prev == K_LET)
-            || is_binary_operator(next)
-            || next
-            == K_QUESTION
-            || modal
-            && (next == K_L_PAREN || next == K_L_BRACKET)
-            && !(has_prev && (prev == K_AT || prev == K_AT_AT))
-    )
+            has_prev && (prev == K_DOT || prev == K_FN || prev == K_LET)
+                || is_binary_operator(next)
+                || next == K_QUESTION
+                || modal
+                    && (next == K_L_PAREN || next == K_L_BRACKET)
+                    && !(has_prev && (prev == K_AT || prev == K_AT_AT))
+        )
 }
 
 // `sequence`: the atoms from `pos` up to the closing delimiter `end`.
@@ -1344,10 +1338,12 @@ fn sequence(in at: Atoms, inout pos: u64, end: u8, block: bool, inout d: Doc, in
     let list = end != NO_END && !block;
     let mut output = ChunkSeq::new[u32]();
     let mut line = ChunkSeq::new[u32]();
+    let mut breaks = ChunkSeq::new[LayoutBreak]();
     let mut has_prev = false;
     let mut prev: u8 = 0;
     let mut previous_block = false;
     let mut previous_unary = false;
+    let mut previous_ends_operand = false;
     let mut package = false;
     loop {
         if pos >= n {
@@ -1364,13 +1360,9 @@ fn sequence(in at: Atoms, inout pos: u64, end: u8, block: bool, inout d: Doc, in
         package = glued
             && has_prev
             && (
-            prev
-                == K_AT
-                && c
-                == K_LOWER
-                || package
-                && (c == K_LOWER || c == K_MINUS || c == K_SLASH || c == K_INT)
-        );
+                prev == K_AT && c == K_LOWER
+                    || package && (c == K_LOWER || c == K_MINUS || c == K_SLASH || c == K_INT)
+            );
         let spacing = if previous_unary || package {
             G_NONE
         } else if list && has_prev && prev == K_SEMI {
@@ -1381,30 +1373,33 @@ fn sequence(in at: Atoms, inout pos: u64, end: u8, block: bool, inout d: Doc, in
             G_NONE
         };
         let after_comma = has_prev && prev == K_COMMA;
-        let near_comment = c
-            == K_COMMENT
-            || c
-            == K_BLOCK_COMMENT
-            || has_prev
-            && prev
-            == K_BLOCK_COMMENT;
+        let near_comment = c == K_COMMENT
+            || c == K_BLOCK_COMMENT
+            || has_prev && prev == K_BLOCK_COMMENT;
         if spacing == G_HARD {
-            concat_group(inout line, inout d, inout output);
+            concat_group(inout line, inout breaks, inout d, inout output);
             if blank {
                 output.push(wrapping_u32(push_leaf(inout d, D_NEWLINE)));
             }
             output.push(wrapping_u32(push_leaf(inout d, D_HARD)));
         } else if spacing == G_SOFT && list && after_comma {
-            concat_group(inout line, inout d, inout output);
+            concat_group(inout line, inout breaks, inout d, inout output);
             output.push(wrapping_u32(push_leaf(inout d, D_SOFT_SPACE)));
         } else if spacing == G_SOFT && !is_block && near_comment {
             line.push(wrapping_u32(push_leaf(inout d, D_SOFT_SPACE)));
         } else if spacing == G_SOFT && !is_block {
             line.push(wrapping_u32(push_leaf(inout d, D_SPACE)));
         } else if spacing == G_RETURN {
-            concat_group(inout line, inout d, inout output);
+            concat_group(inout line, inout breaks, inout d, inout output);
             let lead = push_leaf(inout d, D_SOFT_SPACE);
-            line.push(wrapping_u32(push_nest(inout d, 4, lead)));
+            breaks
+                .push(
+                    LayoutBreak {
+                        offset: line.len(),
+                        level: 1
+                    }
+                );
+            line.push(wrapping_u32(lead));
         } else if spacing == G_EMPTY || spacing == G_OPERATOR {
             let lead = push_leaf(
                 inout d,
@@ -1414,10 +1409,22 @@ fn sequence(in at: Atoms, inout pos: u64, end: u8, block: bool, inout d: Doc, in
                     D_SOFT_SPACE
                 }
             );
-            line.push(wrapping_u32(push_nest(inout d, 4, lead)));
+            let level: u8 = if spacing == G_EMPTY {
+                12
+            } else {
+                infix_precedence(c)
+            };
+            breaks
+                .push(
+                    LayoutBreak {
+                        offset: line.len(),
+                        level: level
+                    }
+                );
+            line.push(wrapping_u32(lead));
         }
         if is_block {
-            concat_group(inout line, inout d, inout output);
+            concat_group(inout line, inout breaks, inout d, inout output);
             if spacing == G_SOFT {
                 output.push(wrapping_u32(push_leaf(inout d, D_SPACE)));
             }
@@ -1431,11 +1438,20 @@ fn sequence(in at: Atoms, inout pos: u64, end: u8, block: bool, inout d: Doc, in
             let start = push_text(inout d, in src, cs, ce, false);
             let inner = sequence(in at, inout pos, close, is_block, inout d, in src);
             let last_is_line_comment = pos > 0 && akind(in at, wrapping_sub(pos, 1)) == K_COMMENT;
+            let mut before_close = pos;
+            loop {
+                if before_close == 0 {
+                    break;
+                }
+                let last = akind(in at, wrapping_sub(before_close, 1));
+                if last != K_COMMENT && last != K_BLOCK_COMMENT {
+                    break;
+                }
+                before_close = wrapping_sub(before_close, 1);
+            }
             let trailing_comma = !is_block
-                && pos
-                > 0
-                && akind(in at, wrapping_sub(pos, 1))
-                == K_COMMA;
+                && before_close > 0
+                && akind(in at, wrapping_sub(before_close, 1)) == K_COMMA;
             if !(pos < n && akind(in at, pos) == close) {
                 fail(E_CONSERVATION);
             }
@@ -1476,8 +1492,7 @@ fn sequence(in at: Atoms, inout pos: u64, end: u8, block: bool, inout d: Doc, in
             line.push(wrapping_u32(node));
         }
         previous_block = is_block;
-        previous_unary = (c == K_MINUS || c == K_BANG || c == K_TILDE)
-            && (!has_prev || !ends_operand(prev));
+        previous_unary = (c == K_MINUS || c == K_BANG || c == K_TILDE) && !previous_ends_operand;
         let used_as_name = word_used_as_name(has_prev, prev, c, akind(in at, pos));
         has_prev = true;
         prev = if c == K_L_PAREN || c == K_L_BRACKET || c == K_L_BRACE {
@@ -1488,8 +1503,11 @@ fn sequence(in at: Atoms, inout pos: u64, end: u8, block: bool, inout d: Doc, in
         } else {
             c
         };
+        if prev != K_COMMENT && prev != K_BLOCK_COMMENT {
+            previous_ends_operand = ends_operand(prev);
+        }
     }
-    concat_group(inout line, inout d, inout output);
+    concat_group(inout line, inout breaks, inout d, inout output);
     push_concat(inout d, in output.as_slice())
 }
 

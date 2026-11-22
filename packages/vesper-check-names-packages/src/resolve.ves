@@ -361,8 +361,8 @@ pub fn lookup(inout s: St, tm: u32, name: u32, same: bool, in shown: String, sta
         s
             .err_help
             .push_str(
-            in "a `.vsys` library is not an item: every module names it directly, as `Lib::f(..)` and `eff [Ffi[Lib]]`, with no import"
-        );
+                in "a `.vsys` library is not an item: every module names it directly, as `Lib::f(..)` and `eff [Ffi[Lib]]`, with no import"
+            );
         s.err_has_help = true;
     }
     (no_key(), 0)
@@ -771,17 +771,11 @@ pub fn qualified(inout s: St, cur: u32, path: u32, start: u32, end: u32) -> u32 
     let (key, kind) = lookup(inout s, module, item, same, in shown, start, end);
     if key == no_key() {
         let c = sym_byte(in s, item, 0);
-        if s
-            .err_code
-            == unknown_import()
-            && inc(j)
-            < rest
-            && sym_len(in s, item)
-            > 0
-            && c
-            >= 97
-            && c
-            <= 122 {
+        if s.err_code == unknown_import()
+            && inc(j) < rest
+            && sym_len(in s, item) > 0
+            && c >= 97
+            && c <= 122 {
             err(inout s, unknown_import(), start, end);
             let mut msg = String::new();
             msg.push_str(in "no module ");
