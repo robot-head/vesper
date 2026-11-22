@@ -111,15 +111,15 @@ impl Abi for crate::forward::target::abi::Utf8Policy {
 /// Owned handle of a Vesper `ParsedTarget` value: its words, which own the Vesper
 /// allocations they point to. Dropping it calls `vesper_target_ParsedTarget_drop`.
 pub struct ParsedTarget {
-    words: [u64; 10],
+    words: [u64; 6],
 }
 
 impl ParsedTarget {
     /// # Safety
     /// `words` must hold a `ParsedTarget` value of this library that the caller owns.
     unsafe fn from_words(words: &[u64]) -> Self {
-        let mut owned = [0u64; 10];
-        owned.copy_from_slice(&words[..10]);
+        let mut owned = [0u64; 6];
+        owned.copy_from_slice(&words[..6]);
         Self { words: owned }
     }
 
@@ -159,41 +159,25 @@ impl<'a> ParsedTargetRef<'a> {
         let w: &'a [u64] = self.words;
         <bool as Abi>::get(&w[0..])
     }
-    pub fn segments(&self) -> vesper_port_abi::SeqRef<'a, u8> {
-        let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[1]) }
-    }
-    pub fn segment_ends(&self) -> vesper_port_abi::SeqRef<'a, u64> {
-        let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[2]) }
-    }
     pub fn trailing_slash(&self) -> bool {
         let w: &'a [u64] = self.words;
-        <bool as Abi>::get(&w[3..])
+        <bool as Abi>::get(&w[1..])
     }
     pub fn has_query(&self) -> bool {
         let w: &'a [u64] = self.words;
-        <bool as Abi>::get(&w[4..])
+        <bool as Abi>::get(&w[2..])
     }
-    pub fn keys(&self) -> vesper_port_abi::SeqRef<'a, u8> {
+    pub fn segments(&self) -> u64 {
+        let w: &'a [u64] = self.words;
+        <u64 as Abi>::get(&w[3..])
+    }
+    pub fn bytes(&self) -> vesper_port_abi::SeqRef<'a, u8> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[4]) }
+    }
+    pub fn ends(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[5]) }
-    }
-    pub fn key_ends(&self) -> vesper_port_abi::SeqRef<'a, u64> {
-        let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[6]) }
-    }
-    pub fn values(&self) -> vesper_port_abi::SeqRef<'a, u8> {
-        let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[7]) }
-    }
-    pub fn value_ends(&self) -> vesper_port_abi::SeqRef<'a, u64> {
-        let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[8]) }
-    }
-    pub fn value_present(&self) -> vesper_port_abi::SeqRef<'a, bool> {
-        let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[9]) }
     }
 }
 
@@ -223,7 +207,7 @@ pub fn live_allocations() -> i64 {
 
 /// Calls `target_parse` of the Vesper library `target` (`vesper_target_target_parse`).
 pub fn target_parse(raw: &[u8], limits: crate::forward::target::abi::TargetLimits) -> Result<ParsedTarget, crate::forward::target::abi::TargetError> {
-    let mut result = [0u64; 10];
+    let mut result = [0u64; 6];
     let mut arg_limits = [0u64; <crate::forward::target::abi::TargetLimits as Abi>::WORDS];
     Abi::put(&limits, &mut arg_limits);
     let mut fail = [0u64; 2];

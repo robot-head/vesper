@@ -116,10 +116,38 @@ impl Default for ParseLimits {
 /// be negated.
 const WIDE_NEG_MIN: u128 = 1 << 127;
 
+/// The keywords that are never names (manuscript "Contextual names": "The
+/// other keywords cannot be names").
+fn reserved_kind(k: K) -> bool {
+    matches!(
+        k,
+        K::Mod
+            | K::In
+            | K::Return
+            | K::Match
+            | K::If
+            | K::Else
+            | K::Let
+            | K::Fn
+            | K::Struct
+            | K::Enum
+            | K::Impl
+    )
+}
+
 fn contextual_kind(k: K) -> bool {
     matches!(
         k,
-        K::State | K::Linear | K::With | K::Eff | K::Effect | K::Handle | K::Sink | K::Inout
+        K::State
+            | K::Linear
+            | K::Copy
+            | K::Affine
+            | K::With
+            | K::Eff
+            | K::Effect
+            | K::Handle
+            | K::Sink
+            | K::Inout
     )
 }
 
@@ -608,26 +636,15 @@ impl Parser<'_> {
             return self.bump();
         }
         if !matches!(self.kind(), K::Lower | K::SelfKw) {
-            match self.kind() {
-                K::Copy
-                | K::Affine
-                | K::Mod
-                | K::In
-                | K::Return
-                | K::Match
-                | K::If
-                | K::Else
-                | K::Let
-                | K::Fn
-                | K::Struct
-                | K::Enum
-                | K::Impl => {
-                    let word = self.text(0).to_owned();
-                    self.error(format!(
-                        "expected a lower-case identifier, found the keyword `{word}`, which cannot be a name"
-                    ));
-                }
-                _ => self.error("expected a lower-case identifier"),
+            if reserved_kind(self.kind()) {
+                let word = self.text(0).to_owned();
+                self.error(format!(
+                    "expected a lower-case identifier, found the keyword `{word}`, which cannot be a name"
+                ));
+                // One diagnostic: the keyword stands in for the name.
+                return self.bump();
+            } else {
+                self.error("expected a lower-case identifier");
             }
         }
         self.ident()
@@ -690,6 +707,9 @@ impl Parser<'_> {
             | K::If
             | K::State
             | K::Linear
+            | K::Copy
+            | K::Affine
+            | K::With
             | K::Eff
             | K::Effect
             | K::Handle
@@ -2320,6 +2340,7 @@ impl Parser<'_> {
                         | ExprKind::For { .. }
                         | ExprKind::If { .. }
                         | ExprKind::Match { .. }
+                        | ExprKind::Handle { .. }
                 ) && self.source[..e.span.end.min(self.source.len())].ends_with('}')
                     && !matches!(self.kind(), K::RBrace | K::Eof)
                 {
@@ -3087,6 +3108,11 @@ impl Parser<'_> {
                 }
                 K::LBracket => self.array_literal(start),
                 K::LBrace => return self.block(),
+                // `a && if b { x } else { y }`, `a || match v { .. }`: an
+                // `if` or `match` is an operand (manuscript `PrimaryExpr`).
+                // At a statement start `expr_inner` takes them first.
+                K::If => return self.if_expr(),
+                K::Match => return self.match_expr(),
                 _ => {
                     self.error("expected expression");
                     if self.editor
@@ -3307,6 +3333,16 @@ impl Parser<'_> {
                     let p = self.pattern_list(K::RParen);
                     self.expect(K::RParen);
                     PatternKind::Tuple(p)
+                }
+                k if reserved_kind(k) => {
+                    // `let in = ..`: one diagnostic that names the keyword;
+                    // the keyword is taken as the pattern, so no cascade.
+                    let word = self.text(0).to_owned();
+                    self.error(format!(
+                        "expected pattern, found the keyword `{word}`, which cannot be a name"
+                    ));
+                    self.bump();
+                    PatternKind::Wild
                 }
                 _ => {
                     self.error("expected pattern");

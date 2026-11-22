@@ -1,6 +1,10 @@
 use self::ascii::{
     Ascii
 };
+use @vesper/prism-bytes::{
+    first_control,
+    first_not_token
+};
 // Vesper port of the fixed-length HTTP/1.1 response encoder of
 // crates/vesper-prism (`ResponseBuilder` in src/response.rs, port wave P1
 // lane 14, #911).
@@ -68,10 +72,9 @@ struct ResponsePlan {
     close: bool,
     representation_length: u64,
     limits: ResponseLimits,
-    names: ChunkSeq[u8],
-    name_ends: ChunkSeq[u64],
-    values: ChunkSeq[u8],
-    value_ends: ChunkSeq[u64],
+    // The ordinary fields as they go on the wire: each lowercase name, `: `,
+    // the value and CRLF.
+    fields: ChunkSeq[u8],
     head_length: u64,
     header_count: u64
 }
@@ -193,21 +196,21 @@ fn push_text(inout out: ChunkSeq[u8], in text: Str) {
     out.extend(in text.as_bytes());
 }
 
+// The digits are written in place, last first, so nothing is allocated.
 fn push_decimal(inout out: ChunkSeq[u8], value: u64) {
-    let mut digits: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let start = out.len();
+    let mut i = wrapping_add(start, decimal_length(value));
+    out.resize(i, Ascii::Digit0);
     let mut rest = value;
     loop {
-        digits.push(wrapping_u8(wrapping_add(rest % 10, widen_u64(Ascii::Digit0))));
+        i = wrapping_sub(i, 1);
+        let digit = wrapping_u8(wrapping_add(rest % 10, widen_u64(Ascii::Digit0)));
+        if !out.try_set(i, digit) {
+            break;
+        }
         rest = rest / 10;
         if rest == 0 {
             break;
-        }
-    }
-    let n = digits.len();
-    for i in 0..n {
-        match digits.try_get(wrapping_sub(wrapping_sub(n, 1), i)) {
-            Option::Some(d) => out.push(d),
-            Option::None => (),
         }
     }
 }
@@ -374,10 +377,7 @@ pub fn response_plan_new(
         close: close,
         representation_length: representation_length,
         limits: limits,
-        names: ChunkSeq::new[u8](),
-        name_ends: ChunkSeq::new[u64](),
-        values: ChunkSeq::new[u8](),
-        value_ends: ChunkSeq::new[u64](),
+        fields: ChunkSeq::new[u8](),
         head_length: head_length,
         header_count: header_count
     }
@@ -389,13 +389,13 @@ pub fn response_plan_header(inout p: ResponsePlan, in name: Slice[u8], in value:
     if name.len() == 0 {
         return Option::Some(ResponseError::InvalidHeaderName);
     }
-    match name.find_not_in(TCHAR_MASK_LOW, TCHAR_MASK_HIGH, false) {
+    match first_not_token(in name, TCHAR_MASK_LOW, TCHAR_MASK_HIGH) {
         Option::Some(i) => {
             return Option::Some(ResponseError::InvalidHeaderName);
         },
         Option::None => (),
     }
-    match value.find_not_in(FIELD_VCHAR_MASK_LOW, FIELD_VCHAR_MASK_HIGH, true) {
+    match first_control(in value, false, FIELD_VCHAR_MASK_LOW, FIELD_VCHAR_MASK_HIGH) {
         Option::Some(i) => {
             return Option::Some(ResponseError::InvalidHeaderValue);
         },
@@ -436,20 +436,15 @@ pub fn response_plan_header(inout p: ResponsePlan, in name: Slice[u8], in value:
         },
         Option::None => (),
     }
-    p.names.extend_ascii_lowercase(in name);
-    p.name_ends.push(p.names.len());
-    p.values.extend(in value);
-    p.value_ends.push(p.values.len());
+    p.fields.extend_ascii_lowercase(in name);
+    p.fields.push(Ascii::Colon);
+    p.fields.push(Ascii::Space);
+    p.fields.extend(in value);
+    p.fields.push(Ascii::Cr);
+    p.fields.push(Ascii::Lf);
     p.head_length = head_length;
     p.header_count = header_count;
     Option::None
-}
-
-fn at(in s: ChunkSeq[u64], i: u64) -> u64 {
-    match s.try_get(i) {
-        Option::Some(v) => v,
-        Option::None => 0,
-    }
 }
 
 // `ResponseBuilder::finish`: the exact wire bytes. No partial output on an
@@ -480,18 +475,7 @@ pub fn response_plan_finish(in p: ResponsePlan, in body: Slice[u8])
     out.push(Ascii::Space);
     push_reason(inout out, p.status);
     push_text(inout out, "\r\n");
-    let mut name_at: u64 = 0;
-    let mut value_at: u64 = 0;
-    for f in 0..p.name_ends.len() {
-        let name_end = at(in p.name_ends, f);
-        let value_end = at(in p.value_ends, f);
-        out.extend(in p.names[name_at..name_end]);
-        push_text(inout out, ": ");
-        out.extend(in p.values[value_at..value_end]);
-        push_text(inout out, "\r\n");
-        name_at = name_end;
-        value_at = value_end;
-    }
+    out.extend(in p.fields.as_slice());
     if carries_length(p.status) {
         push_text(inout out, "Content-Length: ");
         push_decimal(inout out, p.representation_length);

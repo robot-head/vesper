@@ -131,7 +131,7 @@ impl Connection {
             return Err(ConnectionError::InvalidLimits);
         }
         let decoder = Decoder::new(limits.request).map_err(ConnectionError::Decoder)?;
-        // The reference build reserves every slot up front and reports a
+        // The replaced Rust build reserved every slot up front and reported a
         // failed reservation; Vesper aborts on allocation failure, so the same
         // fallible check runs here and Vesper grows its slots on demand.
         Vec::<abi::Slot>::new()

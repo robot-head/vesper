@@ -11,21 +11,21 @@
 // checks it on its own and compares `vector_decisions` with the Rust API.
 
 // Elem, in `Elem::ALL` order.
-const E_U8: u32 = 0;
+pub const E_U8: u32 = 0;
 const E_U32: u32 = 1;
 const E_U64: u32 = 2;
 const E_I64: u32 = 3;
-const E_F32: u32 = 4;
+pub const E_F32: u32 = 4;
 const E_F64: u32 = 5;
-const ELEMS: u32 = 6;
+pub const ELEMS: u32 = 6;
 
 // `CHUNK_BITS`: every vector lowers as 1, 2 or 4 128-bit chunks.
 const CHUNK_BITS: u32 = 128;
 
 // Shim type codes of the lanes.
-const TY_I8: u32 = 1;
-const TY_I32: u32 = 3;
-const TY_I64: u32 = 4;
+pub const TY_I8: u32 = 1;
+pub const TY_I32: u32 = 3;
+pub const TY_I64: u32 = 4;
 const TY_F32: u32 = 6;
 const TY_F64: u32 = 7;
 
@@ -201,8 +201,8 @@ fn put_requirements(inout o: ChunkSeq[u8], p: u32) {
 // Conversions (`Conv`).
 const C_TO_BITS: u32 = 0;
 const C_FROM_BITS: u32 = 1;
-const C_WIDEN: u32 = 2;
-const C_NARROW: u32 = 3;
+pub const C_WIDEN: u32 = 2;
+pub const C_NARROW: u32 = 3;
 
 fn conv_name(c: u32) -> Str {
     if c == C_TO_BITS {
@@ -239,61 +239,61 @@ pub fn conv_target(c: u32, e: u32) -> u32 {
 // Intrinsics: a family and an operation within it.
 const I_NONE: u32 = 0;
 const I_UNKNOWN: u32 = 1;
-const I_SPLAT: u32 = 2;
-const I_FROM: u32 = 3;
-const I_BINARY: u32 = 4;
-const I_NOT: u32 = 5;
-const I_UNARY: u32 = 6;
-const I_MUL_ADD: u32 = 7;
-const I_CONVERT: u32 = 8;
-const I_SHIFT: u32 = 9;
-const I_COMPARE: u32 = 10;
-const I_SELECT: u32 = 11;
-const I_MASK_BINARY: u32 = 12;
-const I_MASK_NOT: u32 = 13;
-const I_MASK_COUNT: u32 = 14;
-const I_MASK_BITMASK: u32 = 15;
-const I_MASK_ANY: u32 = 16;
-const I_MASK_ALL: u32 = 17;
-const I_REDUCE: u32 = 18;
-const I_EXTRACT: u32 = 19;
-const I_REPLACE: u32 = 20;
-const I_SHUFFLE: u32 = 21;
-const I_LOAD_MASKED: u32 = 22;
+pub const I_SPLAT: u32 = 2;
+pub const I_FROM: u32 = 3;
+pub const I_BINARY: u32 = 4;
+pub const I_NOT: u32 = 5;
+pub const I_UNARY: u32 = 6;
+pub const I_MUL_ADD: u32 = 7;
+pub const I_CONVERT: u32 = 8;
+pub const I_SHIFT: u32 = 9;
+pub const I_COMPARE: u32 = 10;
+pub const I_SELECT: u32 = 11;
+pub const I_MASK_BINARY: u32 = 12;
+pub const I_MASK_NOT: u32 = 13;
+pub const I_MASK_COUNT: u32 = 14;
+pub const I_MASK_BITMASK: u32 = 15;
+pub const I_MASK_ANY: u32 = 16;
+pub const I_MASK_ALL: u32 = 17;
+pub const I_REDUCE: u32 = 18;
+pub const I_EXTRACT: u32 = 19;
+pub const I_REPLACE: u32 = 20;
+pub const I_SHUFFLE: u32 = 21;
+pub const I_LOAD_MASKED: u32 = 22;
 const I_LOAD: u32 = 23;
 const I_STORE: u32 = 24;
 const I_STORE_MASKED: u32 = 25;
-const I_IN_BOUNDS: u32 = 26;
-const I_ACTIVE: u32 = 27;
+pub const I_IN_BOUNDS: u32 = 26;
+pub const I_ACTIVE: u32 = 27;
 const I_ISA_SUPPORTED: u32 = 28;
 
 // BinOp, in declaration order.
-const B_ADD: u32 = 0;
-const B_SUB: u32 = 1;
-const B_MUL: u32 = 2;
-const B_DIV: u32 = 3;
-const B_MIN: u32 = 4;
-const B_MAX: u32 = 5;
-const B_AND: u32 = 6;
-const B_OR: u32 = 7;
-const B_XOR: u32 = 8;
-const B_SATURATING_ADD: u32 = 9;
-const B_SATURATING_SUB: u32 = 10;
+pub const B_ADD: u32 = 0;
+pub const B_SUB: u32 = 1;
+pub const B_MUL: u32 = 2;
+pub const B_DIV: u32 = 3;
+pub const B_MIN: u32 = 4;
+pub const B_MAX: u32 = 5;
+pub const B_AND: u32 = 6;
+pub const B_OR: u32 = 7;
+pub const B_XOR: u32 = 8;
+pub const B_SATURATING_ADD: u32 = 9;
+pub const B_SATURATING_SUB: u32 = 10;
 
 // ReduceOp, in declaration order.
-const RD_ADD: u32 = 0;
-const RD_XOR: u32 = 1;
-const RD_OR: u32 = 2;
-const RD_AND: u32 = 3;
+pub const RD_ADD: u32 = 0;
+pub const RD_XOR: u32 = 1;
+pub const RD_OR: u32 = 2;
+pub const RD_AND: u32 = 3;
 
 // An intrinsic as `family << 8 | op`.
 fn intr(family: u32, op: u32) -> u32 {
     wrapping_shl_u32(family, 8) | op
 }
-fn family_of(i: u32) -> u32 {
+pub fn family_of(i: u32) -> u32 {
     i >> 8
 }
-fn op_of(i: u32) -> u32 {
+pub fn op_of(i: u32) -> u32 {
     i & 255
 }
 

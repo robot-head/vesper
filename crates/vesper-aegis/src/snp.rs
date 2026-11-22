@@ -26,11 +26,7 @@ use crate::claims::{
     AttestationClaims, ENCLAVE_FLAG_DEBUG_DISABLED, ENCLAVE_FLAG_SMT_MITIGATED, GuestRuntimeClaims,
     SnpTcbVersion, SupplyChainEvidence, TeeArch, ct_eq,
 };
-#[cfg(not(vesper_port))]
-use crate::error::Format;
 use crate::error::{AttestError, ParseError};
-#[cfg(not(vesper_port))]
-use crate::reader::Reader;
 
 pub const SNP_REPORT_LEN: usize = 0x4A0;
 pub const SNP_SIGNED_LEN: usize = 0x2A0;
@@ -44,15 +40,11 @@ pub const SNP_REPORT_VERSION_MIT_VECTORS: u32 = 5;
 pub const SNP_REPORT_VERSION_ETCB: u32 = 6;
 /// First version with the CPUID family, model and stepping fields.
 pub const SNP_REPORT_VERSION_CPUID: u32 = 3;
-/// `FLAGS` bits 4:0 (`AUTHOR_KEY_EN`, `MASK_CHIP_KEY`, `SIGNING_KEY`); the
-/// rest are reserved. `SIGNING_KEY` is bits 4:2.
-#[cfg_attr(vesper_port, allow(dead_code))]
-const SNP_FLAGS_KNOWN: u32 = 0x1F;
+/// `FLAGS.SIGNING_KEY`, bits 4:2.
 const SNP_FLAGS_SIGNING_KEY_SHIFT: u32 = 2;
 const SNP_FLAGS_SIGNING_KEY_MASK: u32 = 7;
 /// A signature component: a 72-byte little-endian field holding a 48-byte
 /// P-384 scalar, zero-extended.
-#[cfg_attr(vesper_port, allow(dead_code))]
 const SIG_COMPONENT_LE_LEN: usize = 72;
 const P384_SCALAR_LEN: usize = 48;
 /// Length of one `ETCB_VERSION` field.
@@ -105,9 +97,9 @@ pub struct SnpReport {
 }
 
 impl SnpReport {
-    #[cfg(vesper_port)]
     pub fn parse(bytes: &[u8]) -> Result<Self, ParseError> {
-        let ((), p) = crate::port::parse(|w, d| crate::port::vesper::snp_parse(bytes, w, d))?;
+        let ((), p) =
+            crate::port::parse(bytes, |w, d| crate::port::vesper::snp_parse(bytes, w, d))?;
         let mut f = p.fields();
         let version = f.u32();
         let guest_svn = f.u32();
@@ -174,124 +166,7 @@ impl SnpReport {
             current_etcb,
             launch_etcb,
             committed_etcb,
-            signature_r_s: f.array(),
-        })
-    }
-
-    #[cfg(not(vesper_port))]
-    pub fn parse(bytes: &[u8]) -> Result<Self, ParseError> {
-        let mut r = Reader::new(bytes, Format::SnpReport);
-        let version = r.u32("version")?;
-        if !(SNP_REPORT_MIN_VERSION..=SNP_REPORT_MAX_VERSION).contains(&version) {
-            return Err(unsupported("version", version.into()));
-        }
-        let guest_svn = r.u32("guest_svn")?;
-        let policy = r.u64("policy")?;
-        let family_id = r.array("family_id")?;
-        let image_id = r.array("image_id")?;
-        let vmpl = r.u32("vmpl")?;
-        let signature_algo = r.u32("signature_algo")?;
-        if signature_algo != SNP_SIG_ALGO_ECDSA_P384_SHA384 {
-            return Err(unsupported("signature_algo", signature_algo.into()));
-        }
-        let current_tcb = r.u64("current_tcb")?;
-        let platform_info = r.u64("platform_info")?;
-        let flags = r.u32("flags")?;
-        if flags & !SNP_FLAGS_KNOWN != 0 {
-            return Err(unsupported("flags", flags.into()));
-        }
-        r.reserved(4, "reserved0")?;
-        let report_data = r.array("report_data")?;
-        let measurement = r.array("measurement")?;
-        let host_data = r.array("host_data")?;
-        let id_key_digest = r.array("id_key_digest")?;
-        let author_key_digest = r.array("author_key_digest")?;
-        let report_id = r.array("report_id")?;
-        let report_id_ma = r.array("report_id_ma")?;
-        let reported_tcb = r.u64("reported_tcb")?;
-        let cpuid: [u8; 3] = r.array("cpuid")?;
-        if version == SNP_REPORT_MIN_VERSION && cpuid != [0; 3] {
-            return Err(ParseError::NonZeroReserved {
-                format: Format::SnpReport,
-                field: "reserved1 (v2 cpuid)",
-            });
-        }
-        r.reserved(21, "reserved1")?;
-        let chip_id = r.array("chip_id")?;
-        let committed_tcb = r.u64("committed_tcb")?;
-        let current_version: [u8; 3] = r.array("current_version")?;
-        r.reserved(1, "reserved2")?;
-        let committed_version: [u8; 3] = r.array("committed_version")?;
-        r.reserved(1, "reserved3")?;
-        let launch_tcb = r.u64("launch_tcb")?;
-        let (launch_mit_vector, current_mit_vector) = if version >= SNP_REPORT_VERSION_MIT_VECTORS {
-            (r.u64("launch_mit_vector")?, r.u64("current_mit_vector")?)
-        } else {
-            r.reserved(16, "reserved4 (pre-v5 mitigation vectors)")?;
-            (0, 0)
-        };
-        r.reserved(24, "reserved5")?;
-        let venice = version >= SNP_REPORT_VERSION_CPUID && is_venice_cpuid(cpuid);
-        let (current_etcb, launch_etcb, committed_etcb) =
-            if version >= SNP_REPORT_VERSION_ETCB && venice {
-                (
-                    Some(SnpEtcb::parse(r.array("current_etcb")?)?),
-                    Some(SnpEtcb::parse(r.array("launch_etcb")?)?),
-                    Some(SnpEtcb::parse(r.array("committed_etcb")?)?),
-                )
-            } else {
-                r.reserved(3 * SNP_ETCB_LEN, "reserved6 (ETCBs: v6 Venice only)")?;
-                (None, None, None)
-            };
-        r.reserved(32, "reserved7")?;
-        debug_assert_eq!(r.position(), SNP_SIGNED_LEN);
-        let r_le: [u8; SIG_COMPONENT_LE_LEN] = r.array("signature.r")?;
-        let s_le: [u8; SIG_COMPONENT_LE_LEN] = r.array("signature.s")?;
-        r.reserved(368, "signature.reserved")?;
-        r.finish()?;
-        let mut signature_r_s = [0u8; 96];
-        for (dst, src) in [(0usize, &r_le), (P384_SCALAR_LEN, &s_le)] {
-            if src[P384_SCALAR_LEN..].iter().any(|&b| b != 0) {
-                return Err(ParseError::NonZeroReserved {
-                    format: Format::SnpReport,
-                    field: "signature component high bytes",
-                });
-            }
-            for i in 0..P384_SCALAR_LEN {
-                signature_r_s[dst + i] = src[P384_SCALAR_LEN - 1 - i];
-            }
-        }
-        Ok(SnpReport {
-            version,
-            guest_svn,
-            policy,
-            family_id,
-            image_id,
-            vmpl,
-            signature_algo,
-            current_tcb,
-            platform_info,
-            flags,
-            report_data,
-            measurement,
-            host_data,
-            id_key_digest,
-            author_key_digest,
-            report_id,
-            report_id_ma,
-            reported_tcb,
-            cpuid,
-            chip_id,
-            committed_tcb,
-            current_version,
-            committed_version,
-            launch_tcb,
-            launch_mit_vector,
-            current_mit_vector,
-            current_etcb,
-            launch_etcb,
-            committed_etcb,
-            signature_r_s,
+            signature_r_s: f.derived(),
         })
     }
 
@@ -504,14 +379,12 @@ pub struct SnpEtcb {
 }
 
 impl SnpEtcb {
-    #[cfg(vesper_port)]
     pub fn parse(b: [u8; SNP_ETCB_LEN]) -> Result<Self, ParseError> {
-        let ((), p) = crate::port::parse(|_, d| crate::port::vesper::snp_etcb_parse(&b, d))?;
+        let ((), p) = crate::port::parse(&b, |w, _| crate::port::vesper::snp_etcb_parse(&b, w))?;
         Ok(SnpEtcb::from_svns(p.fields().array()))
     }
 
     /// The SVNs in wire order (the inverse of [`SnpEtcb::svns`]).
-    #[cfg(vesper_port)]
     fn from_svns(b: [u8; 14]) -> Self {
         SnpEtcb {
             ip_key_manager: b[0],
@@ -529,32 +402,6 @@ impl SnpEtcb {
             dpe_driver: b[12],
             arg: b[13],
         }
-    }
-
-    #[cfg(not(vesper_port))]
-    pub fn parse(b: [u8; SNP_ETCB_LEN]) -> Result<Self, ParseError> {
-        if b[14..].iter().any(|&x| x != 0) {
-            return Err(ParseError::NonZeroReserved {
-                format: Format::SnpReport,
-                field: "ETCB bits 255:112",
-            });
-        }
-        Ok(SnpEtcb {
-            ip_key_manager: b[0],
-            mp1: b[1],
-            art_fmc: b[2],
-            art_rt: b[3],
-            had_driver: b[4],
-            boot_driver: b[5],
-            pre_esid: b[6],
-            tmpm: b[7],
-            microcode: b[8],
-            soc_driver: b[9],
-            asp_os_driver: b[10],
-            fhp_driver: b[11],
-            dpe_driver: b[12],
-            arg: b[13],
-        })
     }
 
     pub fn to_bytes(self) -> [u8; SNP_ETCB_LEN] {
@@ -587,14 +434,5 @@ impl SnpEtcb {
     /// lexicographic, comparison).
     pub fn at_least(&self, floor: &SnpEtcb) -> bool {
         self.svns().iter().zip(floor.svns()).all(|(h, f)| *h >= f)
-    }
-}
-
-#[cfg(not(vesper_port))]
-fn unsupported(field: &'static str, value: u64) -> ParseError {
-    ParseError::UnsupportedValue {
-        format: Format::SnpReport,
-        field,
-        value,
     }
 }

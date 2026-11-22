@@ -37,6 +37,19 @@ pub use PortEncoded as vesper__ebpf__insn__Encoded;
 pub use PortEthWire as vesper__ebpf__wire__EthIpv4TcpWire;
 pub use PortInsn as vesper__ebpf__insn__Insn;
 pub use PortOperand as vesper__ebpf__insn__Operand;
+pub use PortVerifierWord as vesper__ebpf__verifier__R;
+
+/// The port verifier's register or stack-slot word: Rust only holds these
+/// inside the reused verifier pools and never reads them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PortVerifierWord {
+    pub tag: u64,
+    pub x: u64,
+    pub y: u64,
+    pub z: u64,
+    pub off: i64,
+    pub var: crate::scalar::Scalar,
+}
 
 /// `insn::Operand` with a register number.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -720,6 +733,14 @@ pub(crate) fn verify(
         ]);
         text.extend_from_slice(k.name.as_bytes());
     }
+    thread_local! {
+        // The verifier's record pools, reused between runs on this thread.
+        static POOLS: std::cell::RefCell<Option<ffi::vesper__ebpf__verifier__Pools>> =
+            const { std::cell::RefCell::new(None) };
+    }
+    let mut pools = POOLS
+        .with(|p| p.borrow_mut().take())
+        .unwrap_or_else(ffi::verifier_new_pools);
     let out = ffi::verifier_verify(
         &prog.insns,
         prog.prog_type,
@@ -731,7 +752,9 @@ pub(crate) fn verify(
         policy.max_insns_processed,
         policy.max_states_per_insn as u64,
         policy.widen_loops,
+        &mut pools,
     );
+    POOLS.with(|p| *p.borrow_mut() = Some(pools));
     let out = out.as_ref();
     let w = out.words().to_vec();
     match w[0] {
@@ -798,35 +821,74 @@ pub(crate) fn verify(
 }
 
 /// The interpreter's persistent state in the port's layout (the header of
-/// `vesper/src/interp.ves`): words, key bytes, region bytes and spill words.
-#[derive(Clone, Debug, Default)]
+/// `vesper/src/interp.ves`), held in the port's `Mach` handle between runs
+/// with the main program's decoded code: a run changes it in place, and a
+/// run of the same slots reuses the code without passing or decoding them.
 pub(crate) struct InterpState {
-    pub st: Vec<u64>,
-    pub keys: Vec<u8>,
-    pub mem: Vec<u8>,
-    pub spill: Vec<u64>,
+    mach: ffi::vesper__ebpf__interp__Mach,
+    /// The slots whose decoded code the handle holds (`Mach.cached`).
+    code: Vec<RawInsn>,
 }
 
 impl InterpState {
-    fn from_out(out: &ffi::vesper__ebpf__interp__RunOutRef<'_>) -> Self {
+    /// `Env::map_get` of a hash or array map.
+    pub(crate) fn map_get(&self, map: usize, key: &[u8]) -> Option<Vec<u8>> {
+        ffi::interp_map_has(&self.mach, map as u64, key)
+            .then(|| ffi::interp_map_value(&self.mach, map as u64, key))
+    }
+
+    /// `Env::map_keys` of a hash or array map, sorted.
+    pub(crate) fn map_keys(&self, map: usize) -> Vec<Vec<u8>> {
+        let spans = ffi::interp_map_key_spans(&self.mach, map as u64);
+        let m = self.mach.as_ref();
+        let keys = m.i().keys().as_slice();
+        let mut out: Vec<Vec<u8>> = spans
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|s| keys[s[0] as usize..(s[0] + s[1]) as usize].to_vec())
+            .collect();
+        out.sort();
+        out
+    }
+}
+
+impl Clone for InterpState {
+    fn clone(&self) -> Self {
         InterpState {
-            st: out.st().to_vec(),
-            keys: out.keys().to_vec(),
-            mem: out.mem().to_vec(),
-            spill: out.spill().to_vec(),
+            mach: ffi::interp_clone(&self.mach),
+            code: self.code.clone(),
         }
+    }
+}
+
+impl Default for InterpState {
+    fn default() -> Self {
+        interp_new_env(&[])
+    }
+}
+
+impl std::fmt::Debug for InterpState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let m = self.mach.as_ref();
+        f.debug_struct("InterpState")
+            .field("regions", &(m.i().rt().as_slice().len() / 8))
+            .field("entries", &(m.i().ent().as_slice().len() / 4))
+            .field("bytes", &m.i().mem().as_slice().len())
+            .finish()
     }
 }
 
 /// `interp::Env::new`: the state for maps of 7 words each.
 pub(crate) fn interp_new_env(maps: &[u64]) -> InterpState {
-    let out = ffi::interp_new_env(maps);
-    InterpState::from_out(&out.as_ref())
+    InterpState {
+        mach: ffi::interp_new_env(maps),
+        code: Vec::new(),
+    }
 }
 
-/// One `interp::run` in the port: the result words and bytes, and the new
-/// state (none after a decode error or a bad input, which leave it as it
-/// was).
+/// One `interp::run` in the port: the result words and bytes. A decode
+/// error or a bad input leaves the state as it was.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn interp_run(
     slots: &[RawInsn],
@@ -839,10 +901,11 @@ pub(crate) fn interp_run(
     maps: &[u64],
     nmain: u64,
     tails: (&[u64], &[RawInsn], &[u64]),
-    state: &InterpState,
-) -> (Vec<u64>, Vec<u8>, Option<InterpState>) {
-    let out = ffi::interp_run(
-        slots,
+    state: &mut InterpState,
+) -> (Vec<u64>, Vec<u8>) {
+    let reuse = state.mach.as_ref().cached() && state.code == slots;
+    ffi::interp_run(
+        if reuse { &[] } else { slots },
         kfuncs,
         ptype,
         input,
@@ -854,15 +917,14 @@ pub(crate) fn interp_run(
         tails.0,
         tails.1,
         tails.2,
-        &state.st,
-        &state.keys,
-        &state.mem,
-        &state.spill,
+        reuse,
+        &mut state.mach,
     );
-    let out = out.as_ref();
-    let words = out.words().to_vec();
-    let next = (words[0] <= 1).then(|| InterpState::from_out(&out));
-    (words, out.bytes().to_vec(), next)
+    let out = state.mach.as_ref();
+    if !reuse && out.cached() {
+        state.code = slots.to_vec();
+    }
+    (out.words().to_vec(), out.bytes().to_vec())
 }
 
 /// The decode error of the port's words (variant, position, field).

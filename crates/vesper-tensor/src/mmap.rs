@@ -14,6 +14,7 @@
 //! the same bytes into memory instead, with identical parsing.
 #![allow(unsafe_code)]
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
@@ -35,6 +36,7 @@ mod open_code {
 
 #[derive(Debug)]
 enum Backing {
+    #[cfg(not(target_arch = "wasm32"))]
     Mapped(memmap2::Mmap),
     Owned(Vec<u8>),
 }
@@ -61,7 +63,7 @@ impl Mapping {
         Ok(Arc::new(Self { backing }))
     }
     /// Maps `path` read-only.
-    #[cfg(not(vesper_port))]
+    #[cfg(all(not(vesper_port), not(target_arch = "wasm32")))]
     pub fn open(path: &Path) -> Result<Arc<Self>, Error> {
         let file = File::open(path).map_err(|_| Error::Io("open weight file"))?;
         let len = file
@@ -86,6 +88,11 @@ impl Mapping {
             backing: Backing::Mapped(map),
         }))
     }
+    #[cfg(target_arch = "wasm32")]
+    pub fn open(_path: &Path) -> Result<Arc<Self>, Error> {
+        Err(Error::Io("file mappings are unavailable in WebAssembly"))
+    }
+
     /// Reads `path` into memory (the non-mapped path, same parsing).
     pub fn read(path: &Path) -> Result<Arc<Self>, Error> {
         let len = std::fs::metadata(path)
@@ -105,6 +112,7 @@ impl Mapping {
     }
     pub fn bytes(&self) -> &[u8] {
         match &self.backing {
+            #[cfg(not(target_arch = "wasm32"))]
             Backing::Mapped(m) => m,
             Backing::Owned(v) => v,
         }
@@ -117,7 +125,11 @@ impl Mapping {
     }
     /// Whether the bytes are an operating-system file mapping.
     pub fn is_mapped(&self) -> bool {
-        matches!(self.backing, Backing::Mapped(_))
+        match self.backing {
+            #[cfg(not(target_arch = "wasm32"))]
+            Backing::Mapped(_) => true,
+            Backing::Owned(_) => false,
+        }
     }
 }
 
