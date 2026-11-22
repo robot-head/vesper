@@ -6,28 +6,17 @@
 // Typed entity words round-trip, and the invalid word reads as invalid.
 pub fn typed_words() -> u64 {
     let w: u64 = 41;
-    let ok = var_word(var_of_word(w))
-        == w
-        && slot_word(slot_of_word(w))
-        == w
-        && func_ref_word(func_ref_of_word(w))
-        == w
-        && sig_ref_word(sig_ref_of_word(w))
-        == w
-        && global_value_word(global_value_of_word(w))
-        == w
-        && func_word(func_of_word(w))
-        == w
-        && data_word(data_of_word(w))
-        == w
-        && sig_word(sig_of_word(w))
-        == w
-        && ty_word(ty_of_word(w))
-        == w
-        && value_word(value_of_word(w))
-        == w
-        && block_word(block_of_word(w))
-        == w
+    let ok = var_word(var_of_word(w)) == w
+        && slot_word(slot_of_word(w)) == w
+        && func_ref_word(func_ref_of_word(w)) == w
+        && sig_ref_word(sig_ref_of_word(w)) == w
+        && global_value_word(global_value_of_word(w)) == w
+        && func_word(func_of_word(w)) == w
+        && data_word(data_of_word(w)) == w
+        && sig_word(sig_of_word(w)) == w
+        && ty_word(ty_of_word(w)) == w
+        && value_word(value_of_word(w)) == w
+        && block_word(block_of_word(w)) == w
         && is_invalid_func(func_of_word(4294967295))
         && is_invalid_data(data_of_word(4294967295))
         && is_invalid_var(var_of_word(4294967295))
@@ -77,17 +66,11 @@ fn scratch_checks() -> bool eff [Ffi[Cranelift]] {
         None => true,
     };
     let name = module_data_name(in m, d);
-    let listed = module_function_count(in m)
-        == 1
-        && module_data_count(in m)
-        == 1
-        && module_function_linkage(inout m, f)
-        == linkage_export()
-        && module_data_linkage(inout m, d)
-        == 257
-        && name
-        .len()
-        == 9
+    let listed = module_function_count(in m) == 1
+        && module_data_count(in m) == 1
+        && module_function_linkage(inout m, f) == linkage_export()
+        && module_data_linkage(inout m, d) == 257
+        && name.len() == 9
         && first_f
         && first_d
         && past_end;
@@ -107,14 +90,8 @@ fn scratch_checks() -> bool eff [Ffi[Cranelift]] {
     let x = block_param(inout b, entry, 0);
     let wide = ins_fvpromote_low(inout b, x);
     let narrow = ins_fvdemote(inout b, wide);
-    let types_ok = value_type(inout b, wide)
-        .code
-        == ty_vector(ty_f64(), 1)
-        .code
-        && value_type(inout b, narrow)
-        .code
-        == ty_vector(ty_f32(), 2)
-        .code;
+    let types_ok = value_type(inout b, wide).code == ty_vector(ty_f64(), 1).code
+        && value_type(inout b, narrow).code == ty_vector(ty_f32(), 2).code;
     builder_free(b);
     let mut c = match builder_new(in m, again) {
         Some(c) => c,
@@ -198,23 +175,12 @@ pub fn extras() -> u64 eff [Ffi[Cranelift]] {
     let calls = module_last_call_sites(in m);
     let clif = module_last_clif(in m);
     let traps = module_last_traps(in m);
-    let read_ok = code
-        .len()
-        == size
-        && relocs
-        .len()
-        >= 10
-        && calls
-        .len()
-        == 2
-        && traps
-        .len()
-        == 2
-        && module_last_frame_size(in m)
-        >= 32
-        && clif
-        .len()
-        > 0;
+    let read_ok = code.len() == size
+        && relocs.len() >= 10
+        && calls.len() == 2
+        && traps.len() == 2
+        && module_last_frame_size(in m) >= 32
+        && clif.len() > 0;
     if !read_ok {
         module_free(m);
         return 0;

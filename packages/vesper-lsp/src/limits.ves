@@ -143,58 +143,19 @@ pub fn hard() -> Plimits {
 // `ProtocolLimits::validate`.
 pub fn validate(l: Plimits) -> Unit eff [Fail[Perr]] {
     let h = hard();
-    if l
-        .max_body_bytes
-        > h
-        .max_body_bytes
-        || l
-        .max_reply_bytes
-        > h
-        .max_reply_bytes
-        || l
-        .max_header_bytes
-        > h
-        .max_header_bytes
-        || l
-        .max_header_line_bytes
-        > h
-        .max_header_line_bytes
-        || l
-        .max_headers
-        > h
-        .max_headers
-        || l
-        .max_json_depth
-        > h
-        .max_json_depth
-        || l
-        .max_json_nodes
-        > h
-        .max_json_nodes
-        || l
-        .max_json_string_bytes
-        > h
-        .max_json_string_bytes
-        || l
-        .max_json_total_string_bytes
-        > h
-        .max_json_total_string_bytes
-        || l
-        .max_json_index_bytes
-        > h
-        .max_json_index_bytes
-        || l
-        .max_json_work
-        > h
-        .max_json_work
-        || l
-        .max_id_bytes
-        > h
-        .max_id_bytes
-        || l
-        .max_method_bytes
-        > h
-        .max_method_bytes {
+    if l.max_body_bytes > h.max_body_bytes
+        || l.max_reply_bytes > h.max_reply_bytes
+        || l.max_header_bytes > h.max_header_bytes
+        || l.max_header_line_bytes > h.max_header_line_bytes
+        || l.max_headers > h.max_headers
+        || l.max_json_depth > h.max_json_depth
+        || l.max_json_nodes > h.max_json_nodes
+        || l.max_json_string_bytes > h.max_json_string_bytes
+        || l.max_json_total_string_bytes > h.max_json_total_string_bytes
+        || l.max_json_index_bytes > h.max_json_index_bytes
+        || l.max_json_work > h.max_json_work
+        || l.max_id_bytes > h.max_id_bytes
+        || l.max_method_bytes > h.max_method_bytes {
         Fail::raise(Perr::PInvalidLimits);
     }
 }

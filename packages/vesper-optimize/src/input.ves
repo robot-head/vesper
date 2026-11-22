@@ -130,11 +130,11 @@ fn push_list(inout a: Ast, in words: ChunkSeq[u32]) -> u32 {
     let r = a
         .lists
         .alloc(
-        ListRef {
-            first: first,
-            len: wrapping_u32(n)
-        }
-    );
+            ListRef {
+                first: first,
+                len: wrapping_u32(n)
+            }
+        );
     r.raw()
 }
 
@@ -176,13 +176,13 @@ pub fn add_int(inout t: Tree, v: i128, start: u32, end: u32) -> u32 {
         .ast
         .lits
         .alloc(
-        Lit {
-            kind: 1,
-            neg: neg,
-            bits: wrapping_u64(m),
-            hi: wrapping_u64(m >> 64)
-        }
-    );
+            Lit {
+                kind: 1,
+                neg: neg,
+                bits: wrapping_u64(m),
+                hi: wrapping_u64(m >> 64)
+            }
+        );
     add_expr(inout t, node(1, start, end, l.raw(), 0, 0), 0, 0)
 }
 
@@ -201,22 +201,22 @@ pub fn add_call2(inout t: Tree, callee: u32, left: u32, right: u32, start: u32, 
         .ast
         .args
         .alloc(
-        ArgNode {
-            pass: 0,
-            explicit: false,
-            expr: left
-        }
-    );
+            ArgNode {
+                pass: 0,
+                explicit: false,
+                expr: left
+            }
+        );
     let y = t
         .ast
         .args
         .alloc(
-        ArgNode {
-            pass: 0,
-            explicit: false,
-            expr: right
-        }
-    );
+            ArgNode {
+                pass: 0,
+                explicit: false,
+                expr: right
+            }
+        );
     let mut words = ChunkSeq::new[u32]();
     words.push(x.raw());
     words.push(y.raw());
@@ -299,13 +299,13 @@ pub fn read_exprs(inout r: Reader, in b: Slice[u8], inout t: Tree, inout map: Ch
                 .ast
                 .lits
                 .alloc(
-                Lit {
-                    kind: lk,
-                    neg: neg,
-                    bits: bits,
-                    hi: hi
-                }
-            );
+                    Lit {
+                        kind: lk,
+                        neg: neg,
+                        bits: bits,
+                        hi: hi
+                    }
+                );
             add_expr(inout t, node(1, start, end, l.raw(), 0, 0), 0, 0)
         } else if kind == 2 {
             let s = sym_of(in t, r.word(in b));
@@ -323,14 +323,14 @@ pub fn read_exprs(inout r: Reader, in b: Slice[u8], inout t: Tree, inout map: Ch
                     .ast
                     .types
                     .alloc(
-                    TypeNode {
-                        kind: 5,
-                        a: 0,
-                        b: 0,
-                        c: 0,
-                        d: 0
-                    }
-                );
+                        TypeNode {
+                            kind: 5,
+                            a: 0,
+                            b: 0,
+                            c: 0,
+                            d: 0
+                        }
+                    );
                 tw.push(ty.raw());
             }
             let types = push_list(inout t.ast, in tw);
@@ -343,12 +343,12 @@ pub fn read_exprs(inout r: Reader, in b: Slice[u8], inout t: Tree, inout map: Ch
                     .ast
                     .args
                     .alloc(
-                    ArgNode {
-                        pass: pass,
-                        explicit: explicit,
-                        expr: e
-                    }
-                );
+                        ArgNode {
+                            pass: pass,
+                            explicit: explicit,
+                            expr: e
+                        }
+                    );
                 aw.push(x.raw());
             }
             let args = push_list(inout t.ast, in aw);
@@ -383,12 +383,12 @@ pub fn read_types(inout r: Reader, in b: Slice[u8], inout types: ChunkSeq[TypeRo
         let code = wrapping_u8(r.word(in b));
         types
             .push(
-            TypeRow {
-                start: start,
-                end: end,
-                code: code
-            }
-        );
+                TypeRow {
+                    start: start,
+                    end: end,
+                    code: code
+                }
+            );
     }
 }
 

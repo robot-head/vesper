@@ -231,7 +231,8 @@ impl Compiled {
 
 /// Parse, check, lower, assemble and verify `source`.
 pub fn compile_source(source: &str, options: &Options) -> Result<Compiled, EbpfBackendError> {
-    let parsed = crate::parser::parse(source);
+    let (source, parsed) = crate::forge_frontend::parse_compiler_source(source, false)
+        .map_err(|d| EbpfBackendError::Source(vec![d]))?;
     if !parsed.diagnostics.is_empty() {
         return Err(EbpfBackendError::Source(parsed.diagnostics));
     }
@@ -239,7 +240,7 @@ pub fn compile_source(source: &str, options: &Options) -> Result<Compiled, EbpfB
     if !checked.diagnostics.is_empty() {
         return Err(EbpfBackendError::Source(checked.diagnostics));
     }
-    compile_world(&checked.world, Some(source), options)
+    compile_world(&checked.world, Some(&source), options)
 }
 
 /// Lower an already checked world. `source`, when given, provides BTF

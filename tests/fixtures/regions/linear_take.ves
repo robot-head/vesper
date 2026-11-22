@@ -9,17 +9,16 @@ fn main() -> u64 {
         let keep = r.box(5);
         let t = r
             .box(
-            Ticket {
-                id: 9,
-                weight: 3
-            }
-        );
+                Ticket {
+                    id: 9,
+                    weight: 3
+                }
+            );
         let before = r.used();
         let Ticket {
             id,
             weight
-        }
-        = r.take(t);
+        } = r.take(t);
         let after = r.used();
         if before == 24 && after == 8 && wrapping_add(wrapping_add(id, weight), r.get(keep)) == 17 {
             after

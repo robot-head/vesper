@@ -5,8 +5,7 @@ linear struct Token {
 fn spend(sink t: Token) -> i64 {
     let Token {
         id
-    }
-    = t;
+    } = t;
     id
 }
 fn main() -> i64 {

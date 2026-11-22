@@ -9,12 +9,8 @@ fn config_error(c: UmemConfig) -> Option[u32] {
         return Option::Some(0);
     }
     if !is_power_of_two(c.frame_size)
-        || c
-        .frame_size
-        < MIN_FRAME_SIZE
-        || c
-        .frame_size
-        > MAX_FRAME_SIZE {
+        || c.frame_size < MIN_FRAME_SIZE
+        || c.frame_size > MAX_FRAME_SIZE {
         return Option::Some(1);
     }
     if c.headroom > c.frame_size || wrapping_sub(c.frame_size, c.headroom) < MIN_FRAME_PAYLOAD {

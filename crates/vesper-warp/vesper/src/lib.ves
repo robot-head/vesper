@@ -1055,9 +1055,9 @@ fn tk_put_be64(inout b: Slice[u8], at: u64, v: u64) {
         }
         b
             .try_set(
-            wrapping_add(at, i),
-            wrapping_u8(wrapping_shr_u64(v, wrapping_u32(wrapping_mul(wrapping_sub(7, i), 8))))
-        );
+                wrapping_add(at, i),
+                wrapping_u8(wrapping_shr_u64(v, wrapping_u32(wrapping_mul(wrapping_sub(7, i), 8))))
+            );
         i = wrapping_add(i, 1);
     }
 }

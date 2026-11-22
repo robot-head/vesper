@@ -53,10 +53,8 @@ pub fn pn_decode_with_largest(largest: Option[u64], truncated: u64, nbits: u32)
     let hwin = win / 2;
     let mask = wrapping_sub(win, 1);
     let candidate = expected & ~mask | truncated;
-    let result = if wrapping_add(candidate, hwin)
-        <= expected
-        && wrapping_add(candidate, win)
-        < pn_limit() {
+    let result = if wrapping_add(candidate, hwin) <= expected
+        && wrapping_add(candidate, win) < pn_limit() {
         wrapping_add(candidate, win)
     } else if candidate > wrapping_add(expected, hwin) && candidate >= win {
         wrapping_sub(candidate, win)

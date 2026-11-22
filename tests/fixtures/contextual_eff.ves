@@ -30,8 +30,7 @@ fn main() -> u64 {
     };
     let Row {
         eff: inner
-    }
-    = row;
+    } = row;
     let g = | x: u64 | eff;
     let h = | x: u64 | -> u64 eff [] {
         wrapping_add(x, inner)
