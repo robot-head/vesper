@@ -1,0 +1,63 @@
+// The input words of tests/self_host_bounds_hoist/words.rs that
+// encode.ves writes and fun.ves reads: an instruction's kind (`Op` in
+// `Encoder::op`) and a sequence operation's class (`seq_word`).
+
+// Instruction kinds.
+pub enum Word: _ {
+    // An integer constant: sign, then the magnitude's two words.
+    Int = 0,
+    // Any other constant.
+    Other = 1,
+    Loop = 2,
+    Read = 3,
+    Bind = 4,
+    Write = 5,
+    // Unary, try, project or exit: one value.
+    One = 6,
+    Binary = 7,
+    // Index, tuple, vector or data: a value list.
+    List = 8,
+    Call = 9,
+    Seq = 10,
+    Tiled = 11,
+    Fip = 12,
+    Indirect = 13,
+    Closure = 14,
+    Handle = 15,
+    // The unit value; also what the encoder writes for a non-opcode.
+    Unit = 16,
+}
+
+// Sequence operation classes (`seq_word`).
+pub enum SeqWord: _ {
+    // Has a receiver and may change its length.
+    Any = 0,
+    NoReceiver = 1,
+    Get = 2,
+    SliceGet = 3,
+    Set = 4,
+    SliceSet = 5,
+    TryGet = 6,
+    TrySet = 7,
+    Len = 8,
+    SliceLen = 9,
+    AsSlice = 10,
+    SubSlice = 11,
+    AsBytes = 12,
+    StrLen = 13,
+    // `Hoisted + access_word(a)`: get, set, try_get, try_set.
+    Hoisted = 14,
+    Guard = 18,
+}
+
+// The ASCII bytes the decoder and encoder look for in names.
+pub enum Ascii: _ {
+    Dollar = 36,
+    Dot = 46,
+    Zero = 48,
+    Nine = 57,
+    Colon = 58,
+    LowerI = 105,
+    LowerL = 108,
+    LowerN = 110,
+}
