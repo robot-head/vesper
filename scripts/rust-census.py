@@ -47,7 +47,7 @@ CRATES = {
     "vesper-pact": ("gone", "in crate (+ seed)", "1.10x / 0.33x", "seed until Stage 2", "12"),
     "vesper-simpulse": ("gone", "in crate (+ seed)", "0.29-1.00x", "seed until Stage 2", "-"),
     "vesper-loom-solver": ("gone", "in crate (+ seed)", "0.21-1.27x", "seed until Stage 2", "-"),
-    "vesper-chorus": ("partial", "in crate", "0.70x parse+project", "front end Vesper-only; simulated network, Raft driver", "12"),
+    "vesper-chorus": ("gone", "in crate", "raft 0.41x, replog 0.14x, project 0.70x, explore 0.004x", "front end, Raft/replog, Session/Monitor and SimNet flipped (part 2); DurableLog/Transport trait glue stays Rust", "12"),
     "vesper-warp": ("partial", "in crate", "1.08-5.39x", "recovery 5.4x, frames 2.3x; crypto via warp-crypto shim", "4"),
     "vesper-warp-tcp": ("partial", "in crate", "codec 0.72x Ir, transfer 1.47x Ir", "harness/simulator still Rust", "4"),
     "vesper-warp-bbr": ("partial", "in crate", "2.2-2.9x", "on_event dispatch Rust", "4"),

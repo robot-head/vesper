@@ -10,8 +10,8 @@
 //! run is reproducible and its SimPulse journal can be replayed.
 
 use crate::chor::RoleId;
+use crate::port::binding;
 use crate::session::{Frame, NetFail, Transport};
-use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use vesper_simpulse::{CompletionId, IoResult, Journal, Simulator};
 
@@ -21,21 +21,14 @@ pub struct SplitMix(pub u64);
 
 impl SplitMix {
     pub fn next_u64(&mut self) -> u64 {
-        self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
-        let mut z = self.0;
-        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-        z ^ (z >> 31)
+        binding::p2_sm_next(&mut self.0)
     }
     /// Uniform in `lo..=hi` (modulo bias is irrelevant for simulation).
     pub fn range(&mut self, lo: u64, hi: u64) -> u64 {
-        if hi <= lo {
-            return lo;
-        }
-        lo + self.next_u64() % (hi - lo + 1)
+        binding::p2_sm_range(&mut self.0, lo, hi)
     }
     pub fn chance(&mut self, per_mille: u32) -> bool {
-        self.next_u64() % 1000 < u64::from(per_mille)
+        binding::p2_sm_chance(&mut self.0, u64::from(per_mille))
     }
 }
 
@@ -64,57 +57,40 @@ pub struct NetStats {
     pub duplicated: u64,
 }
 
-struct NetState {
-    now: u64,
-    rng: SplitMix,
-    cfg: SimNetConfig,
-    next_id: u64,
-    in_flight: BTreeMap<(u64, u64), Frame>,
-    mailboxes: HashMap<(u64, RoleId, RoleId), VecDeque<Frame>>,
-    abandoned: Vec<(u64, RoleId)>,
-    stats: NetStats,
-    /// Earliest delivery time added since the network task last ran.
-    earliest_new: Option<u64>,
-    /// A channel end was abandoned since the driver last looked: blocked
-    /// peers must be woken to observe `PeerGone`.
-    abandon_event: bool,
-}
-
 #[derive(Clone)]
 pub struct SimNet {
-    inner: Arc<Mutex<NetState>>,
+    inner: Arc<Mutex<binding::vesper__chorus__simnet__SimNetCore>>,
 }
 
 impl SimNet {
     pub fn new(seed: u64, cfg: SimNetConfig) -> Self {
+        let core = binding::p2_simnet_new(
+            seed,
+            cfg.min_latency_ns,
+            cfg.max_latency_ns,
+            u64::from(cfg.duplicate_per_mille),
+        );
         Self {
-            inner: Arc::new(Mutex::new(NetState {
-                now: 0,
-                rng: SplitMix(seed ^ 0x6e65_7477_6f72_6b21),
-                cfg,
-                next_id: 0,
-                in_flight: BTreeMap::new(),
-                mailboxes: HashMap::new(),
-                abandoned: Vec::new(),
-                stats: NetStats::default(),
-                earliest_new: None,
-                abandon_event: false,
-            })),
+            inner: Arc::new(Mutex::new(core)),
         }
     }
     pub fn handle(&self) -> Box<dyn Transport> {
         Box::new(self.clone())
     }
     pub fn stats(&self) -> NetStats {
-        self.lock().stats.clone()
+        let st = binding::p2_simnet_stats(&self.lock());
+        NetStats {
+            sent: st.sent,
+            delivered: st.delivered,
+            duplicated: st.duplicated,
+        }
     }
     /// Frames delivered to a mailbox but never received, plus frames in
     /// flight.
     pub fn undelivered(&self) -> usize {
-        let g = self.lock();
-        g.in_flight.len() + g.mailboxes.values().map(VecDeque::len).sum::<usize>()
+        binding::p2_simnet_stats(&self.lock()).undelivered as usize
     }
-    fn lock(&self) -> std::sync::MutexGuard<'_, NetState> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, binding::vesper__chorus__simnet__SimNetCore> {
         self.inner.lock().unwrap_or_else(|p| p.into_inner())
     }
 }
@@ -122,24 +98,21 @@ impl SimNet {
 impl Transport for SimNet {
     fn send(&mut self, frame: Frame) -> Result<(), NetFail> {
         let mut g = self.lock();
-        if g.abandoned.contains(&(frame.channel, frame.to)) {
-            return Err(NetFail::PeerGone);
+        let rc = binding::p2_simnet_send(
+            &mut g,
+            frame.channel,
+            u64::from(frame.from.0),
+            u64::from(frame.to.0),
+            frame.seq,
+            &frame.label,
+            &frame.payload_ty,
+            &frame.body,
+        );
+        if rc == 1 {
+            Err(NetFail::PeerGone)
+        } else {
+            Ok(())
         }
-        let (lo, hi) = (g.cfg.min_latency_ns, g.cfg.max_latency_ns);
-        let dup = g.cfg.duplicate_per_mille;
-        let copies = if g.rng.chance(dup) { 2 } else { 1 };
-        g.stats.sent += 1;
-        for _ in 0..copies {
-            let at = g.now.saturating_add(g.rng.range(lo, hi));
-            let id = g.next_id;
-            g.next_id += 1;
-            g.in_flight.insert((at, id), frame.clone());
-            g.earliest_new = Some(g.earliest_new.map_or(at, |e| e.min(at)));
-        }
-        if copies == 2 {
-            g.stats.duplicated += 1;
-        }
-        Ok(())
     }
     fn try_recv(
         &mut self,
@@ -148,22 +121,26 @@ impl Transport for SimNet {
         to: RoleId,
     ) -> Result<Option<Frame>, NetFail> {
         let mut g = self.lock();
-        if let Some(f) = g
-            .mailboxes
-            .get_mut(&(channel, from, to))
-            .and_then(VecDeque::pop_front)
-        {
-            return Ok(Some(f));
+        match binding::p2_simnet_try_recv(&mut g, channel, u64::from(from.0), u64::from(to.0)) {
+            1 => {
+                let r = g.as_ref();
+                Ok(Some(Frame {
+                    channel,
+                    from,
+                    to,
+                    seq: r.rx_seq(),
+                    label: String::from_utf8_lossy(r.rx_label().as_slice()).into_owned(),
+                    payload_ty: String::from_utf8_lossy(r.rx_pty().as_slice()).into_owned(),
+                    body: r.rx_body().as_slice().to_vec(),
+                }))
+            }
+            2 => Err(NetFail::PeerGone),
+            _ => Ok(None),
         }
-        if g.abandoned.contains(&(channel, from)) {
-            return Err(NetFail::PeerGone);
-        }
-        Ok(None)
     }
     fn abandon(&mut self, channel: u64, me: RoleId) {
         let mut g = self.lock();
-        g.abandoned.push((channel, me));
-        g.abandon_event = true;
+        binding::p2_simnet_abandon(&mut g, channel, u64::from(me.0));
     }
 }
 
@@ -241,14 +218,16 @@ pub fn run_roles(
             if sim.is_complete() {
                 // A replayed journal must be consumed completely.
                 sim.finish_replay().map_err(SimRunError::Sim)?;
-                let g = net.lock();
-                let undelivered =
-                    g.in_flight.len() + g.mailboxes.values().map(VecDeque::len).sum::<usize>();
+                let st = binding::p2_simnet_stats(&net.lock());
                 return Ok(SimRunReport {
                     journal: sim.journal().clone(),
                     end_ns: sim.now_ns(),
-                    stats: g.stats.clone(),
-                    undelivered,
+                    stats: NetStats {
+                        sent: st.sent,
+                        delivered: st.delivered,
+                        duplicated: st.duplicated,
+                    },
+                    undelivered: st.undelivered as usize,
                 });
             }
             return Err(SimRunError::Deadlock {
@@ -256,28 +235,13 @@ pub fn run_roles(
             });
         };
         let now = sim.now_ns();
-        net.lock().now = now;
+        binding::p2_simnet_set_now(&mut net.lock(), now);
         match *token.payload() {
             Task::Network => {
                 net_wait = None;
-                let mut g = net.lock();
-                g.earliest_new = None;
-                let due: Vec<(u64, u64)> = g
-                    .in_flight
-                    .range(..=(now, u64::MAX))
-                    .map(|(k, _)| *k)
-                    .collect();
-                let delivered = !due.is_empty();
-                for k in due {
-                    let f = g.in_flight.remove(&k).expect("due frame");
-                    g.stats.delivered += 1;
-                    g.mailboxes
-                        .entry((f.channel, f.from, f.to))
-                        .or_default()
-                        .push_back(f);
-                }
-                let next = g.in_flight.keys().next().map(|(t, _)| *t);
-                drop(g);
+                let out = binding::p2_simnet_deliver_due(&mut net.lock(), now);
+                let delivered = out.delivered.get();
+                let next = out.has_next.get().then_some(out.next_at);
                 if delivered {
                     for w in waits.iter_mut() {
                         if let Some(c) = w.take() {
@@ -312,7 +276,7 @@ pub fn run_roles(
                 }
                 // An abandoned channel end is a readiness event for every
                 // parked role (it may be the peer that now sees `PeerGone`).
-                if std::mem::take(&mut net.lock().abandon_event) {
+                if binding::p2_simnet_take_abandon(&mut net.lock()) {
                     for w in waits.iter_mut() {
                         if let Some(c) = w.take() {
                             sim.complete_io(c, IoResult::Success { bytes: 0 })
@@ -322,7 +286,8 @@ pub fn run_roles(
                 }
                 // Wake the network early if a new frame is due before its
                 // current deadline, or if everyone is done.
-                let earliest = net.lock().earliest_new;
+                let en = binding::p2_simnet_earliest_new(&net.lock());
+                let earliest = (en != u64::MAX).then_some(en);
                 if let Some((c, deadline)) = net_wait {
                     let wake = match (earliest, deadline) {
                         (Some(e), Some(d)) => e < d,

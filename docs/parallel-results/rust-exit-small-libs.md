@@ -235,5 +235,19 @@ the `Manifest` value.
 ## Census
 
 `scripts/rust-census.py` STATUS rows are updated for pact, loom-calculus,
-loom-audit and semver. `docs/maintenance/rust-census.md` is left for the
+loom-audit, semver, and chorus. `docs/maintenance/rust-census.md` is left for the
 scoreboard lane to regenerate, as its line counts move with every PR.
+
+## Chorus Part 2 (`#1407`: `raft`, `replog`, `session`, `simnet`)
+
+- Ported Part 2 state machines and codecs into `@vesper/chorus` (`wire.ves`,
+  `raft.ves`, `replog.ves`, `session.ves`, `simnet.ves`), deleting `1,999`
+  lines (`970` net lines removed across `crates/vesper-chorus/src/{raft,replog,session,simnet,port}.rs`)
+  while keeping `DurableLog`/`Transport` trait glue in Rust.
+- **Differential (`tests/part2_differential.rs`)**: `0` differences across
+  `583` cases against pinned `cf28be7a` Rust digests; `port_live_allocations() == 0`.
+- **Divergence (`port/test-port.sh`)**: `simnet`, `session`, `wire`, `raft`, and
+  `replog` each fail their guarding test while an unrelated test passes.
+- **ABBA (`examples/abba.rs`, `n = 30`, `RUSTFLAGS="-C target-cpu=native"` vs `origin/main`)**:
+  `raft` **0.41x** `[0.388x, 0.440x]` (`240` batches agreed), `replog` **0.14x**
+  `[0.130x, 0.143x]` (`240` batches agreed).

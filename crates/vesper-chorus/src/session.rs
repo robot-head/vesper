@@ -19,11 +19,12 @@
 //! typing rules for `Session[P]`.
 
 use crate::chor::{Choreography, RoleId};
+use crate::port::{self, binding};
 use crate::project::{LBranch, LocalType, ProjectionError, project};
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::marker::PhantomData;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 // ---------------------------------------------------------------- errors
 
@@ -571,106 +572,155 @@ pub struct AuditCounts {
 }
 
 /// Counts every session owner's exit. A dropped owner is a counted leak.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct LeakAuditor {
-    inner: Arc<Mutex<(AuditCounts, Vec<LeakRecord>)>>,
+    inner: Arc<Mutex<binding::vesper__chorus__session__Auditor>>,
+}
+
+impl Default for LeakAuditor {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl LeakAuditor {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            inner: Arc::new(Mutex::new(binding::p2_auditor_new())),
+        }
     }
     pub fn counts(&self) -> AuditCounts {
-        self.lock().0.clone()
+        let c = binding::p2_auditor_counts(&self.lock());
+        AuditCounts {
+            opened: c.opened,
+            closed: c.closed,
+            faulted: c.faulted,
+            leaked: c.leaked,
+            duplicates_discarded: c.duplicates_discarded,
+        }
     }
     pub fn leaks(&self) -> Vec<LeakRecord> {
-        self.lock().1.clone()
+        let g = self.lock();
+        let r = g.as_ref();
+        let chans = r.leak_chan().as_slice();
+        let roff = r.leak_role_off().as_slice();
+        let rlen = r.leak_role_len().as_slice();
+        let soff = r.leak_state_off().as_slice();
+        let slen = r.leak_state_len().as_slice();
+        let txt = r.txt().as_slice();
+        chans
+            .iter()
+            .enumerate()
+            .map(|(i, &channel)| {
+                let role =
+                    String::from_utf8_lossy(&txt[roff[i] as usize..(roff[i] + rlen[i]) as usize])
+                        .into_owned();
+                let state =
+                    String::from_utf8_lossy(&txt[soff[i] as usize..(soff[i] + slen[i]) as usize])
+                        .into_owned();
+                LeakRecord {
+                    channel,
+                    role,
+                    state,
+                }
+            })
+            .collect()
     }
     /// Sessions opened but not yet closed, faulted or leaked.
     pub fn open(&self) -> u64 {
-        let c = self.counts();
-        c.opened - c.closed - c.faulted - c.leaked
+        binding::p2_auditor_open(&self.lock())
     }
-    fn lock(&self) -> std::sync::MutexGuard<'_, (AuditCounts, Vec<LeakRecord>)> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, binding::vesper__chorus__session__Auditor> {
         // A poisoned auditor still holds valid counters.
         self.inner.lock().unwrap_or_else(|p| p.into_inner())
     }
-    fn update(&self, f: impl FnOnce(&mut AuditCounts)) {
-        f(&mut self.lock().0);
+    fn opened(&self) {
+        binding::p2_auditor_opened(&mut self.lock());
+    }
+    fn closed(&self) {
+        binding::p2_auditor_closed(&mut self.lock());
+    }
+    fn faulted(&self) {
+        binding::p2_auditor_faulted(&mut self.lock());
+    }
+    fn dup(&self) {
+        binding::p2_auditor_dup(&mut self.lock());
     }
     fn leak(&self, rec: LeakRecord) {
-        let mut g = self.lock();
-        g.0.leaked += 1;
-        g.1.push(rec);
+        binding::p2_auditor_leak(&mut self.lock(), rec.channel, &rec.role, &rec.state);
     }
 }
 
 // ---------------------------------------------------------------- monitor
 
 /// Dynamic checker for one role's projected local type.
-#[derive(Clone, Debug)]
 pub struct Monitor {
     role: String,
-    current: LocalType,
-    roles: Vec<String>,
+    mon: binding::vesper__chorus__session__Mon,
+    cached_current: OnceLock<LocalType>,
+}
+
+impl Clone for Monitor {
+    fn clone(&self) -> Self {
+        Self {
+            role: self.role.clone(),
+            mon: binding::p2_mon_clone(&self.mon),
+            cached_current: OnceLock::new(),
+        }
+    }
+}
+
+impl fmt::Debug for Monitor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Monitor")
+            .field("role", &self.role)
+            .field("current", self.current())
+            .finish()
+    }
 }
 
 impl Monitor {
     pub fn new(chor: &Choreography, role: &str) -> Result<Self, ChorusError> {
-        let t = project(chor, role)?;
-        Ok(Self {
-            role: role.to_owned(),
-            current: t.unfold(),
-            roles: chor.roles().to_vec(),
-        })
+        let (w, t) = port::encode_chor(chor);
+        let mon = binding::p2_mon_new(&w, &t, role);
+        match mon.as_ref().status() {
+            0 => Ok(Self::from_mon(role.to_owned(), mon)),
+            1 => Err(ChorusError::UnknownRole(role.to_owned())),
+            _ => Err(ChorusError::Projection(port::mon_projection_error(
+                &mon.as_ref(),
+            ))),
+        }
+    }
+
+    fn from_mon(role: String, mon: binding::vesper__chorus__session__Mon) -> Self {
+        Self {
+            role,
+            mon,
+            cached_current: OnceLock::new(),
+        }
     }
 
     pub fn current(&self) -> &LocalType {
-        &self.current
+        self.cached_current.get_or_init(|| {
+            let mut m = binding::p2_mon_clone(&self.mon);
+            binding::p2_mon_emit_current(&mut m);
+            port::mon_decode_local(&m.as_ref())
+        })
     }
 
     pub fn is_end(&self) -> bool {
-        self.current == LocalType::End
-    }
-
-    fn name(&self, r: RoleId) -> &str {
-        self.roles.get(usize::from(r.0)).map_or("?", String::as_str)
+        binding::p2_mon_is_end(&self.mon)
     }
 
     pub fn role_id(&self, name: &str) -> Option<RoleId> {
-        self.roles
-            .iter()
-            .position(|r| r == name)
-            .map(|i| RoleId(i as u16))
+        let r = binding::p2_mon_role_id(&self.mon, name);
+        (r != u64::MAX).then_some(RoleId(r as u16))
     }
 
     fn expected(&self) -> String {
-        match &self.current {
-            LocalType::Send {
-                peer,
-                label,
-                payload,
-                ..
-            } => format!("send {label}({payload}) to {}", self.name(*peer)),
-            LocalType::Recv {
-                peer,
-                label,
-                payload,
-                ..
-            } => format!("receive {label}({payload}) from {}", self.name(*peer)),
-            LocalType::Select { peer, branches } | LocalType::Offer { peer, branches } => {
-                let kw = if matches!(self.current, LocalType::Select { .. }) {
-                    "select"
-                } else {
-                    "offer"
-                };
-                let ls: Vec<_> = branches.iter().map(|b| b.label.as_str()).collect();
-                format!("{kw} {} with {}", ls.join("|"), self.name(*peer))
-            }
-            LocalType::Action { name, .. } => format!("local action {name}"),
-            LocalType::End => "end".to_owned(),
-            LocalType::Rec { .. } | LocalType::Var(_) => "unguarded recursion".to_owned(),
-        }
+        let mut m = binding::p2_mon_clone(&self.mon);
+        binding::p2_mon_expected(&mut m);
+        port::mon_decode_err_a(&m.as_ref())
     }
 
     fn violation(&self, found: String) -> ChorusError {
@@ -681,74 +731,46 @@ impl Monitor {
         }
     }
 
-    fn step(
-        &mut self,
-        send: bool,
-        peer: RoleId,
-        label: &str,
-        payload: &str,
-    ) -> Result<(), ChorusError> {
-        let next = match &self.current {
-            LocalType::Send {
-                peer: p,
-                label: l,
-                payload: t,
-                next,
-            } if send && *p == peer && l == label && t == payload => Some((**next).clone()),
-            LocalType::Recv {
-                peer: p,
-                label: l,
-                payload: t,
-                next,
-            } if !send && *p == peer && l == label && t == payload => Some((**next).clone()),
-            LocalType::Select { peer: p, branches } if send && *p == peer => branches
-                .iter()
-                .find(|b| b.label == label && b.payload == payload)
-                .map(|b| b.next.clone()),
-            LocalType::Offer { peer: p, branches } if !send && *p == peer => branches
-                .iter()
-                .find(|b| b.label == label && b.payload == payload)
-                .map(|b| b.next.clone()),
-            _ => None,
-        };
-        match next {
-            Some(n) => {
-                self.current = n.unfold();
-                Ok(())
-            }
-            None => Err(self.violation(format!(
-                "{} {label}({payload}) {} {}",
-                if send { "send" } else { "receive" },
-                if send { "to" } else { "from" },
-                self.name(peer)
-            ))),
+    fn last_violation(&self) -> ChorusError {
+        let r = self.mon.as_ref();
+        ChorusError::ProtocolViolation {
+            role: self.role.clone(),
+            expected: port::mon_decode_err_a(&r),
+            found: port::mon_decode_err_b(&r),
         }
     }
 
     pub fn on_send(&mut self, peer: RoleId, label: &str, payload: &str) -> Result<(), ChorusError> {
-        self.step(true, peer, label, payload)
+        if binding::p2_mon_on_send(&mut self.mon, u64::from(peer.0), label, payload) == 0 {
+            self.cached_current.take();
+            Ok(())
+        } else {
+            Err(self.last_violation())
+        }
     }
 
     pub fn on_recv(&mut self, peer: RoleId, label: &str, payload: &str) -> Result<(), ChorusError> {
-        self.step(false, peer, label, payload)
+        if binding::p2_mon_on_recv(&mut self.mon, u64::from(peer.0), label, payload) == 0 {
+            self.cached_current.take();
+            Ok(())
+        } else {
+            Err(self.last_violation())
+        }
     }
 
     pub fn on_action(&mut self, name: &str) -> Result<(), ChorusError> {
-        match &self.current {
-            LocalType::Action { name: n, next } if n == name => {
-                self.current = next.unfold();
-                Ok(())
-            }
-            _ => Err(self.violation(format!("local action {name}"))),
+        if binding::p2_mon_on_action(&mut self.mon, name) == 0 {
+            self.cached_current.take();
+            Ok(())
+        } else {
+            Err(self.last_violation())
         }
     }
 
     /// The role this monitor is waiting to receive from, if any.
     pub fn awaiting(&self) -> Option<RoleId> {
-        match &self.current {
-            LocalType::Recv { peer, .. } | LocalType::Offer { peer, .. } => Some(*peer),
-            _ => None,
-        }
+        let r = binding::p2_mon_awaiting(&self.mon);
+        (r != u64::MAX).then_some(RoleId(r as u16))
     }
 }
 
@@ -786,7 +808,7 @@ impl RawSession {
         auditor: &LeakAuditor,
     ) -> Result<Self, ChorusError> {
         let monitor = Monitor::new(chor, role)?;
-        auditor.update(|c| c.opened += 1);
+        auditor.opened();
         Ok(Self {
             channel,
             monitor: Some(Box::new(monitor)),
@@ -829,14 +851,14 @@ impl RawSession {
             return Err((e, self));
         }
         self.monitor = None;
-        self.auditor.update(|c| c.closed += 1);
+        self.auditor.closed();
         Ok(())
     }
 
     /// The recovery exit: abandon the exchange explicitly.
     pub fn fault(mut self, _reason: FaultReason) {
         self.monitor = None;
-        self.auditor.update(|c| c.faulted += 1);
+        self.auditor.faulted();
     }
 }
 
@@ -1008,53 +1030,54 @@ struct Endpoint {
     me: RoleId,
     monitor: Monitor,
     transport: Box<dyn Transport>,
-    send_seq: BTreeMap<RoleId, u64>,
-    recv_seq: BTreeMap<RoleId, u64>,
-    reorder: BTreeMap<(RoleId, u64), Frame>,
+    frames: Vec<Option<Frame>>,
     auditor: LeakAuditor,
 }
 
 impl Endpoint {
-    fn peer(&self, name: &str) -> Result<RoleId, ChorusError> {
-        self.monitor
-            .role_id(name)
-            .ok_or_else(|| ChorusError::UnknownRole(name.to_owned()))
-    }
-
     fn send<M: Message>(&mut self, to: &str, msg: &M) -> Result<(), ChorusError> {
-        let peer = self.peer(to)?;
-        self.monitor.on_send(peer, M::LABEL, M::PAYLOAD)?;
-        let seq = self.send_seq.entry(peer).or_insert(0);
-        let mut body = Vec::new();
-        msg.encode(&mut body);
-        let frame = Frame {
-            channel: self.channel,
-            from: self.me,
-            to: peer,
-            seq: *seq,
-            label: M::LABEL.to_owned(),
-            payload_ty: M::PAYLOAD.to_owned(),
-            body,
-        };
-        *seq = seq
-            .checked_add(1)
-            .ok_or(ChorusError::Net(NetFail::Closed))?;
-        self.transport.send(frame).map_err(ChorusError::Net)
+        let out = binding::p2_mon_ep_send(&mut self.monitor.mon, to, M::LABEL, M::PAYLOAD);
+        match out.status {
+            0 => {
+                self.monitor.cached_current.take();
+                let mut body = Vec::new();
+                msg.encode(&mut body);
+                let frame = Frame {
+                    channel: self.channel,
+                    from: self.me,
+                    to: RoleId(out.peer as u16),
+                    seq: out.seq,
+                    label: M::LABEL.to_owned(),
+                    payload_ty: M::PAYLOAD.to_owned(),
+                    body,
+                };
+                self.transport.send(frame).map_err(ChorusError::Net)
+            }
+            1 => Err(ChorusError::UnknownRole(to.to_owned())),
+            2 => Err(self.monitor.last_violation()),
+            _ => Err(ChorusError::Net(NetFail::Closed)),
+        }
     }
 
-    /// Next in-sequence frame from `from`. `Ok(None)` only when non-blocking
-    /// and nothing is ready.
-    fn next_frame(&mut self, from: RoleId, blocking: bool) -> Result<Option<Frame>, ChorusError> {
-        let want = *self.recv_seq.get(&from).unwrap_or(&0);
-        loop {
-            if let Some(f) = self.reorder.remove(&(from, want)) {
-                self.recv_seq.insert(from, want + 1);
-                return Ok(Some(f));
+    /// Receive one frame from `from` and check it against the monitor.
+    fn recv_checked(&mut self, from: &str, blocking: bool) -> Result<Option<Frame>, ChorusError> {
+        let pre = binding::p2_mon_ep_pre_recv(&mut self.monitor.mon, from);
+        match pre.status {
+            1 => {
+                self.monitor.cached_current.take();
+                let slot = pre.slot as usize;
+                return Ok(Some(self.frames[slot].take().expect("buffered frame")));
             }
+            2 => return Err(ChorusError::UnknownRole(from.to_owned())),
+            3 => return Err(self.monitor.last_violation()),
+            _ => {}
+        }
+        let exp_from = RoleId(pre.peer as u16);
+        loop {
             let got = if blocking {
-                Some(self.transport.recv(self.channel, from, self.me))
+                Some(self.transport.recv(self.channel, exp_from, self.me))
             } else {
-                match self.transport.try_recv(self.channel, from, self.me) {
+                match self.transport.try_recv(self.channel, exp_from, self.me) {
                     Ok(Some(f)) => Some(Ok(f)),
                     Ok(None) => None,
                     Err(e) => Some(Err(e)),
@@ -1065,32 +1088,43 @@ impl Endpoint {
                 Some(Err(e)) => return Err(ChorusError::Net(e)),
                 Some(Ok(f)) => f,
             };
-            if frame.channel != self.channel || frame.to != self.me || frame.from != from {
-                return Err(ChorusError::Misrouted {
-                    channel: frame.channel,
-                });
-            }
-            if frame.seq < want || self.reorder.contains_key(&(from, frame.seq)) {
-                self.auditor.update(|c| c.duplicates_discarded += 1);
-                continue;
-            }
-            if frame.seq - want > 1024 {
-                return Err(self
-                    .monitor
-                    .violation(format!("frame sequence {} far ahead of {want}", frame.seq)));
-            }
-            self.reorder.insert((from, frame.seq), frame);
-        }
-    }
-
-    /// Receive one frame from `from` and check it against the monitor.
-    fn recv_checked(&mut self, from: &str, blocking: bool) -> Result<Option<Frame>, ChorusError> {
-        let peer = self.peer(from)?;
-        match self.next_frame(peer, blocking)? {
-            None => Ok(None),
-            Some(f) => {
-                self.monitor.on_recv(peer, &f.label, &f.payload_ty)?;
-                Ok(Some(f))
+            let slot = self
+                .frames
+                .iter()
+                .position(Option::is_none)
+                .unwrap_or(self.frames.len());
+            let res = binding::p2_mon_ep_on_frame(
+                &mut self.monitor.mon,
+                self.channel,
+                u64::from(self.me.0),
+                pre.peer,
+                frame.channel,
+                u64::from(frame.from.0),
+                u64::from(frame.to.0),
+                frame.seq,
+                &frame.label,
+                &frame.payload_ty,
+                slot as u64,
+            );
+            match res {
+                0 => {
+                    self.monitor.cached_current.take();
+                    return Ok(Some(frame));
+                }
+                1 => {
+                    if slot == self.frames.len() {
+                        self.frames.push(Some(frame));
+                    } else {
+                        self.frames[slot] = Some(frame);
+                    }
+                }
+                2 => self.auditor.dup(),
+                3 => {
+                    return Err(ChorusError::Misrouted {
+                        channel: frame.channel,
+                    });
+                }
+                _ => return Err(self.monitor.last_violation()),
             }
         }
     }
@@ -1125,7 +1159,7 @@ impl Fault {
     }
     pub fn into_error(mut self) -> ChorusError {
         if let Some(armed) = self.armed.take() {
-            armed.0.update(|c| c.faulted += 1);
+            armed.0.faulted();
         }
         self.error.clone()
     }
@@ -1213,27 +1247,40 @@ impl<P: Protocol> Session<P, ()> {
         let me = chor
             .role_id(role)
             .ok_or_else(|| ChorusError::UnknownRole(role.to_owned()))?;
-        let projected = project(chor, role)?;
-        let rust = describe::<P>(chor)?;
-        if !projected.alpha_eq(&rust) {
-            return Err(ChorusError::TypestateMismatch {
-                role: role.to_owned(),
-                projected: projected.render(chor),
-                rust_type: rust.render(chor),
-            });
+        let rust = match describe::<P>(chor) {
+            Ok(r) => r,
+            Err(e) => {
+                project(chor, role)?;
+                return Err(e);
+            }
+        };
+        let (w, t) = port::encode_chor_with_local(chor, &rust);
+        let mon = binding::p2_mon_bind(&w, &t, role);
+        match mon.as_ref().status() {
+            0 => {
+                auditor.opened();
+                Ok(Session::wrap(Endpoint {
+                    channel,
+                    me,
+                    monitor: Monitor::from_mon(role.to_owned(), mon),
+                    transport,
+                    frames: Vec::new(),
+                    auditor: auditor.clone(),
+                }))
+            }
+            1 => Err(ChorusError::UnknownRole(role.to_owned())),
+            2 => Err(ChorusError::Projection(port::mon_projection_error(
+                &mon.as_ref(),
+            ))),
+            _ => {
+                let projected = port::mon_decode_local(&mon.as_ref());
+                Err(ChorusError::TypestateMismatch {
+                    role: role.to_owned(),
+                    projected: projected.render(chor),
+                    rust_type: rust.render(chor),
+                })
+            }
         }
-        let monitor = Monitor::new(chor, role)?;
-        auditor.update(|c| c.opened += 1);
-        Ok(Session::wrap(Endpoint {
-            channel,
-            me,
-            monitor,
-            transport,
-            send_seq: BTreeMap::new(),
-            recv_seq: BTreeMap::new(),
-            reorder: BTreeMap::new(),
-            auditor: auditor.clone(),
-        }))
     }
 }
 
@@ -1371,7 +1418,7 @@ impl<E> Session<End, E> {
         let mut ep = self.take();
         debug_assert!(ep.monitor.is_end());
         ep.transport.finish(ep.channel, ep.me);
-        ep.auditor.update(|c| c.closed += 1);
+        ep.auditor.closed();
     }
 }
 

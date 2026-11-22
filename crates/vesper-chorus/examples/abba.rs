@@ -24,7 +24,10 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use vesper_bench::{BenchCase, Invocation, RunConfig, analyze_pairs, run_abba};
 use vesper_chorus::check::{ExploreLimits, explore};
-use vesper_chorus::raft::{APPEND_CHOREOGRAPHY, SNAPSHOT_CHOREOGRAPHY, VOTE_CHOREOGRAPHY};
+use vesper_chorus::raft::{
+    APPEND_CHOREOGRAPHY, RaftConfig, SNAPSHOT_CHOREOGRAPHY, VOTE_CHOREOGRAPHY, run_cluster,
+};
+use vesper_chorus::replog::{ReplogConfig, run_replicated_log};
 use vesper_chorus::{parse_choreography, project_all};
 
 const PROJECT_SOURCES: usize = 24;
@@ -131,10 +134,33 @@ fn explore_batch(srcs: &[String]) -> u64 {
     h
 }
 
+fn raft_batch() -> u64 {
+    let mut h = 0xcbf2_9ce4_8422_2325;
+    let cfg = RaftConfig::new(5);
+    for seed in 1..=8u64 {
+        let out = run_cluster(seed, &cfg, None).expect("raft runs");
+        h = fnv(h, format!("{out:?}").as_bytes());
+    }
+    h
+}
+
+fn replog_batch() -> u64 {
+    let mut h = 0xcbf2_9ce4_8422_2325;
+    let mut cfg = ReplogConfig::default();
+    for seed in 1..=8u64 {
+        cfg.net.seed = seed;
+        let out = run_replicated_log(&cfg, None).expect("replog runs");
+        h = fnv(h, format!("{out:?}").as_bytes());
+    }
+    h
+}
+
 fn batch(workload: &str, project: &[String], expl: &[String]) -> u64 {
     match workload {
         "project" => project_batch(project),
         "explore" => explore_batch(expl),
+        "raft" => raft_batch(),
+        "replog" => replog_batch(),
         other => panic!("unknown workload {other}"),
     }
 }
@@ -210,10 +236,12 @@ fn drive(workload: &str, rust: &str, vesper: &str) {
     let (operations, per_batch) = match workload {
         "project" => (16, PROJECT_SOURCES as u64),
         "explore" => (8, EXPLORE_SOURCES as u64),
+        "raft" => (4, 8),
+        "replog" => (4, 8),
         other => panic!("unknown workload {other}"),
     };
     let config = RunConfig {
-        epochs: 12,
+        epochs: 30,
         warmup_epochs: 1,
         operations_per_window: operations,
         max_elapsed_nanos: 600_000_000_000,
@@ -298,7 +326,7 @@ fn main() {
         }
         _ => {
             eprintln!(
-                "usage: abba worker <project|explore> | abba drive <project|explore> <rust-worker> <vesper-worker> | abba once <project|explore> <batches>"
+                "usage: abba worker <project|explore|raft|replog> | abba drive <project|explore|raft|replog> <rust-worker> <vesper-worker> | abba once <project|explore|raft|replog> <batches>"
             );
             std::process::exit(2);
         }
