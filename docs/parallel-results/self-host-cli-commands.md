@@ -83,12 +83,10 @@ does not touch).
 | Command | Rust layer | Engine | Owner or blocker |
 |---|---|---|---|
 | `fmt` | src/fmt_commands.rs (544 lines) | `vesper-fmt` (Vesper port in crates/vesper-fmt/vesper) | this lane, part 2: the layer over the Vesper formatter |
-| `highlight` | src/highlight_commands.rs (681) | `vesper-highlight` (port) plus the compiler's check | this lane, later part; needs the checked world (`check`, lowering) from the hybrid's Rust |
 | `lint` | src/lint_commands.rs (509) | `vesper::tooling::lint` (compiler) and `vesper-lint` (port) | this lane, later part; needs the checked world |
 | `forge` | src/forge_commands.rs (380) | `vesper-forge` (port) over the parser | this lane, later part |
 | `ebpf` | src/ebpf_commands.rs (189) | `vesper-ebpf` (port) and `vesper::stack_bound` | this lane, later part |
 | `verify --refute` | src/main.rs (runs the `vesper-refute` tool) | `vesper-crucible` | this lane, later part: the same spawn as tool dispatch |
-| `shot` | src/shot_commands.rs (415) | `vesper-highlight`'s `shot` (seed, PNG/SVG) | this lane, later part |
 | `graph` | src/package_graph.rs | the package graph | this lane, later part |
 | `doc` | src/doc_commands.rs | `vesper-doc` | lane 15 (#1338) |
 | `test` (and `--doc`) | src/doctest_commands.rs | test runner, doctests | lane 14 (#1337) |
@@ -97,8 +95,8 @@ does not touch).
 | top-level `--help` text | `HELP` in src/main.rs | | printed by the host (`hc_help`), shared with the driver's `hd_help`; the routing to it is Vesper |
 
 The tool commands (`attest`, `audit`, `bench`, `cas`, `fuzz`, `grammar`,
-`json`, `migrate`, `publish`, `replay`, `resolve`, `sbom`, `semver`,
-`simd`, `top`, `traceparent`) are separate `vesper-<tool>` programs since
+`highlight`, `json`, `migrate`, `publish`, `replay`, `resolve`, `sbom`,
+`semver`, `shot`, `simd`, `top`, `traceparent`) are separate `vesper-<tool>` programs since
 #1398. The hybrid reaches them through the Vesper dispatch above; porting
 each tool is SH6's Rust-exit work, not the compiler CLI's.
 

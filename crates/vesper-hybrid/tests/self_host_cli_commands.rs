@@ -29,6 +29,7 @@ const TOOLS: &[&str] = &[
     "cas",
     "fuzz",
     "grammar",
+    "highlight",
     "json",
     "migrate",
     "publish",
@@ -36,6 +37,7 @@ const TOOLS: &[&str] = &[
     "resolve",
     "sbom",
     "semver",
+    "shot",
     "simd",
     "top",
     "traceparent",
@@ -519,6 +521,8 @@ fn routing_runs_in_vesper() {
     assert_eq!(prints(&bare, &["-x"]), 1);
     assert_eq!(prints(&bare, &["nope"]), 1);
     assert_eq!(prints(&bare, &["semver", "--help"]), 1);
+    assert_eq!(prints(&bare, &["highlight", "--help"]), 1);
+    assert_eq!(prints(&bare, &["shot", "--help"]), 1);
     // Handed back: the Rust CLI prints.
     assert_eq!(prints(&bare, &["fmt", "--help"]), 0);
     assert_eq!(prints(&bare, &["check", "--fuel"]), 0);
