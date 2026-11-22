@@ -23,6 +23,32 @@ use crate::{
     ReleaseVersionError, ReleaseVersionSide,
 };
 use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
+
+/// A word-at-a-time multiplicative hasher (FxHash's mixing) for the string
+/// interner, where SipHash cost about a seventh of a comparison.
+#[derive(Default)]
+struct Fx(u64);
+
+impl Hasher for Fx {
+    fn finish(&self) -> u64 {
+        self.0 ^ (self.0 >> 29)
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        const K: u64 = 0x51_7c_c1_b7_27_22_0a_95;
+        let (words, rest) = bytes.as_chunks::<8>();
+        for w in words {
+            self.0 = (self.0.rotate_left(5) ^ u64::from_le_bytes(*w)).wrapping_mul(K);
+        }
+        let mut tail = [0u8; 8];
+        tail[..rest.len()].copy_from_slice(rest);
+        self.0 =
+            (self.0.rotate_left(5) ^ u64::from_le_bytes(tail) ^ bytes.len() as u64).wrapping_mul(K);
+    }
+    fn write_u8(&mut self, b: u8) {
+        self.0 = (self.0.rotate_left(5) ^ u64::from(b)).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+    }
+}
 
 /// Node classes (`vesper/src/check.ves`). Two nodes share an offset only
 /// when their class and words are equal.
@@ -45,7 +71,8 @@ enum Class {
 /// The header: old root, new root, string count, string table offset.
 const HEADER: usize = 4;
 
-/// One slot of the hash-consing table: a node's hash, offset and length.
+/// One slot of the hash-consing table: a node's hash, offset, length and
+/// class. A free slot has `at == u32::MAX` ([`EMPTY`]).
 #[derive(Clone, Copy)]
 struct Slot {
     hash: u64,
@@ -53,6 +80,13 @@ struct Slot {
     len: u32,
     class: Class,
 }
+
+const EMPTY: Slot = Slot {
+    hash: 0,
+    at: u32::MAX,
+    len: 0,
+    class: Class::Generics,
+};
 
 /// A single-pass encoder. Nodes are built on a stack: a node begins, pushes
 /// its words (encoding each child first, which pushes and pops above it),
@@ -62,16 +96,24 @@ struct Encoder<'a> {
     /// Stream positions holding provisional string ids.
     string_words: Vec<usize>,
     /// Provisional string ids, in first-use order.
-    ids: HashMap<&'a str, u64>,
+    ids: HashMap<&'a str, u64, BuildHasherDefault<Fx>>,
     strings: Vec<&'a str>,
     stack: Vec<u64>,
-    /// Whether each stack word is a string id.
-    marks: Vec<bool>,
+    /// Stack positions holding string ids, ascending.
+    marks: Vec<usize>,
     /// Open-addressing table of written nodes.
-    slots: Vec<Option<Slot>>,
+    slots: Vec<Slot>,
     used: usize,
     /// How many `ty` calls are open, so deep input cannot overflow the stack.
     depth: usize,
+    /// The deepest `depth` reached since it was last reset.
+    max_depth: usize,
+    /// The first interface's declarations by export name, with their
+    /// offsets, when they are shallow enough to compare with `==`.
+    memo: HashMap<&'a str, (&'a Declaration, u64), BuildHasherDefault<Fx>>,
+    /// Whether `interface` records declarations in `memo` (the first
+    /// interface) or reuses them (the second).
+    reuse: bool,
     /// The distinct subtrees cut at `DEEP`, by Rust equality.
     deep: Vec<&'a Type>,
 }
@@ -83,18 +125,32 @@ struct Encoder<'a> {
 /// distinct cut subtrees, so offsets stay equal exactly when the subtrees are.
 const DEEP: usize = 256;
 
+/// Declarations whose types nest at most this deep are compared with the
+/// derived (recursive) `==` to reuse an equal declaration's node.
+const MEMO_DEPTH: usize = 64;
+
 impl<'a> Encoder<'a> {
-    fn new() -> Self {
+    /// An encoder sized for about `items` declarations or projections, so
+    /// small inputs do not pay for large buffers.
+    fn with_room(items: usize) -> Self {
+        let slots = (4 * (items + 4) * 8).next_power_of_two().min(1024);
         Self {
-            words: vec![0; HEADER],
-            string_words: Vec::new(),
-            ids: HashMap::new(),
-            strings: Vec::new(),
-            stack: Vec::new(),
-            marks: Vec::new(),
-            slots: vec![None; 256],
+            words: {
+                let mut w = Vec::with_capacity(HEADER + 64 * (items + 1));
+                w.resize(HEADER, 0);
+                w
+            },
+            string_words: Vec::with_capacity(8 * (items + 1)),
+            ids: HashMap::with_capacity_and_hasher(4 * (items + 1), Default::default()),
+            strings: Vec::with_capacity(4 * (items + 1)),
+            stack: Vec::with_capacity(256),
+            marks: Vec::with_capacity(64),
+            slots: vec![EMPTY; slots],
             used: 0,
             depth: 0,
+            max_depth: 0,
+            memo: HashMap::default(),
+            reuse: false,
             deep: Vec::new(),
         }
     }
@@ -105,7 +161,6 @@ impl<'a> Encoder<'a> {
 
     fn w(&mut self, word: u64) {
         self.stack.push(word);
-        self.marks.push(false);
     }
 
     fn s(&mut self, text: &'a str) {
@@ -114,8 +169,8 @@ impl<'a> Encoder<'a> {
         if id == next {
             self.strings.push(text);
         }
+        self.marks.push(self.stack.len());
         self.stack.push(id);
-        self.marks.push(true);
     }
 
     fn hash(class: Class, words: &[u64]) -> u64 {
@@ -134,33 +189,40 @@ impl<'a> Encoder<'a> {
         let len = self.stack.len() - start;
         let mask = self.slots.len() - 1;
         let mut i = hash as usize & mask;
-        while let Some(slot) = self.slots[i] {
-            if slot.hash == hash
-                && slot.class == class
-                && slot.len as usize == len
-                && self.words[slot.at as usize..][..len] == self.stack[start..]
-            {
-                self.stack.truncate(start);
-                self.marks.truncate(start);
-                return u64::from(slot.at);
+        // The string ids among this node's words.
+        let first_mark = self.marks.partition_point(|&p| p < start);
+        loop {
+            let slot = self.slots[i];
+            if slot.at == u32::MAX {
+                break;
+            }
+            if slot.hash == hash && slot.class == class && slot.len as usize == len {
+                let at = slot.at as usize;
+                if self.words[at..at + len]
+                    .iter()
+                    .zip(&self.stack[start..])
+                    .all(|(a, b)| a == b)
+                {
+                    self.stack.truncate(start);
+                    self.marks.truncate(first_mark);
+                    return at as u64;
+                }
             }
             i = (i + 1) & mask;
         }
         let at = self.words.len();
-        for (k, &mark) in self.marks[start..].iter().enumerate() {
-            if mark {
-                self.string_words.push(at + k);
-            }
+        for &p in &self.marks[first_mark..] {
+            self.string_words.push(at + p - start);
         }
+        self.marks.truncate(first_mark);
         self.words.extend_from_slice(&self.stack[start..]);
         self.stack.truncate(start);
-        self.marks.truncate(start);
-        self.slots[i] = Some(Slot {
+        self.slots[i] = Slot {
             hash,
             at: at as u32,
             len: len as u32,
             class,
-        });
+        };
         self.used += 1;
         if self.used * 2 > self.slots.len() {
             self.grow();
@@ -170,14 +232,14 @@ impl<'a> Encoder<'a> {
 
     fn grow(&mut self) {
         let size = self.slots.len() * 2;
-        let old = std::mem::replace(&mut self.slots, vec![None; size]);
+        let old = std::mem::replace(&mut self.slots, vec![EMPTY; size]);
         let mask = self.slots.len() - 1;
-        for slot in old.into_iter().flatten() {
+        for slot in old.into_iter().filter(|s| s.at != u32::MAX) {
             let mut i = slot.hash as usize & mask;
-            while self.slots[i].is_some() {
+            while self.slots[i].at != u32::MAX {
                 i = (i + 1) & mask;
             }
-            self.slots[i] = Some(slot);
+            self.slots[i] = slot;
         }
     }
 
@@ -343,6 +405,7 @@ impl<'a> Encoder<'a> {
             return self.end(Class::Type, n);
         }
         self.depth += 1;
+        self.max_depth = self.max_depth.max(self.depth);
         let at = self.ty_node(t, n);
         self.depth -= 1;
         at
@@ -572,11 +635,26 @@ impl<'a> Encoder<'a> {
         self.w(u64::from(i.schema_version));
         self.w(u64::from(i.semantics_version));
         self.w(i.exports.len() as u64);
+        let reuse = self.reuse;
         for (name, d) in &i.exports {
             self.s(name);
-            let d = self.declaration(d);
-            self.w(d);
+            // An export equal to the first interface's has the same node,
+            // so its offset is reused without encoding it again.
+            let at = match self.memo.get(name.as_str()) {
+                Some(&(old, at)) if reuse && old == d => at,
+                _ => {
+                    self.max_depth = self.depth;
+                    let at = self.declaration(d);
+                    // `==` recurses: only shallow declarations are kept.
+                    if !reuse && self.max_depth <= self.depth + MEMO_DEPTH {
+                        self.memo.insert(name, (d, at));
+                    }
+                    at
+                }
+            };
+            self.w(at);
         }
+        self.reuse = true;
         self.w(i.external_types.len() as u64);
         for (name, e) in &i.external_types {
             self.s(name);
@@ -593,12 +671,13 @@ fn text(pool: &[u8], off: u64, len: u64) -> String {
 }
 
 pub(crate) fn compare(old: &Interface, new: &Interface) -> Report {
-    let mut enc = Encoder::new();
+    let items = old.exports.len() + new.exports.len();
+    let mut enc = Encoder::with_room(items + old.external_types.len() + new.external_types.len());
     let (a, b) = (enc.interface(old), enc.interface(new));
     let (words, text_pool) = enc.finish(a, b);
     let q = port_binding::compare(&words, &text_pool);
     let q = q.as_ref();
-    let pool = q.pool().to_vec();
+    let pool = q.pool().as_slice();
     let classification = match q.class() {
         0 => Classification::Patch,
         1 => Classification::Minor,
@@ -612,15 +691,15 @@ pub(crate) fn compare(old: &Interface, new: &Interface) -> Report {
         .0
         .iter()
         .map(|w| Issue {
-            path: text(&pool, w[1], w[2]),
-            rule: text(&pool, w[3], w[4]),
+            path: text(pool, w[1], w[2]),
+            rule: text(pool, w[3], w[4]),
             kind: if w[0] == 0 {
                 IssueKind::Breaking
             } else {
                 IssueKind::Unsupported
             },
-            message: text(&pool, w[5], w[6]),
-            caller_witness: text(&pool, w[7], w[8]),
+            message: text(pool, w[5], w[6]),
+            caller_witness: text(pool, w[7], w[8]),
         })
         .collect();
     let required_adapters = q
@@ -630,7 +709,7 @@ pub(crate) fn compare(old: &Interface, new: &Interface) -> Report {
         .0
         .iter()
         .map(|w| ReborrowAdapter {
-            function_path: text(&pool, w[0], w[1]),
+            function_path: text(pool, w[0], w[1]),
             parameter: w[2] as usize,
         })
         .collect();
@@ -642,7 +721,7 @@ pub(crate) fn compare(old: &Interface, new: &Interface) -> Report {
 }
 
 pub(crate) fn is_subset_of(new: &Projection, old: &Projection) -> bool {
-    let mut enc = Encoder::new();
+    let mut enc = Encoder::with_room(0);
     let (a, b) = (enc.projection(new), enc.projection(old));
     let (words, _) = enc.finish(a, b);
     port_binding::is_subset_of(&words, words[0], words[1])
@@ -674,7 +753,7 @@ pub(crate) fn check_release(
     };
     let r = port_binding::release(old_version.as_bytes(), new_version.as_bytes(), class);
     let r = r.as_ref();
-    let pool = r.pool().to_vec();
+    let pool = r.pool().as_slice();
     if r.err() != 0 {
         let (side, version) = if r.err() == 1 {
             (ReleaseVersionSide::Old, old_version)
@@ -684,7 +763,7 @@ pub(crate) fn check_release(
         return Err(ReleaseVersionError {
             side,
             version: version.into(),
-            message: String::from_utf8_lossy(&pool).into_owned(),
+            message: String::from_utf8_lossy(pool).into_owned(),
         });
     }
     let w = r.words().to_vec();
@@ -699,13 +778,13 @@ pub(crate) fn check_release(
                 2 => ReleaseIssueCode::NonIncreasingVersion,
                 _ => ReleaseIssueCode::InsufficientBump,
             },
-            message: text(&pool, i[1], i[2]),
+            message: text(pool, i[1], i[2]),
         })
         .collect::<Vec<_>>();
     Ok(ReleaseReport {
         policy_version: RELEASE_POLICY_VERSION,
-        old_version: text(&pool, w[1], w[2]),
-        new_version: text(&pool, w[3], w[4]),
+        old_version: text(pool, w[1], w[2]),
+        new_version: text(pool, w[3], w[4]),
         required_bump: comparison.classification,
         comparison,
         actual_bump: bump(w[0]),

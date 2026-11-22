@@ -897,6 +897,10 @@ fn library_pool() -> Vec<LibraryDescriptor> {
     for s in &sources {
         if let Ok(d) = sys::parse(&fill(s, TARGETS[0]), sys::Limits::default())
             && !pool.iter().any(|p| p.name() == d.name())
+            // Foreign memory viewed in place (pinned buffers and mappings,
+            // #1505) is not in the port yet: handed to SH4 lane 13 (#1287).
+            && !d.functions().iter().any(|f| f.uses_foreign_memory())
+            && !d.extern_types().iter().any(|t| t.mapping().is_some())
         {
             pool.push(d);
         }

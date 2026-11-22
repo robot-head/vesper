@@ -176,6 +176,19 @@ pub fn import_pack(
     bytes: &[u8],
     limits: TransferLimits,
 ) -> Result<TransferReport, TransferError> {
+    #[cfg(vesper_port)]
+    return crate::port_store::import_pack(store_path.as_ref(), &expected_root, bytes, limits);
+    #[cfg(not(vesper_port))]
+    import_pack_rust(store_path.as_ref(), expected_root, bytes, limits)
+}
+
+#[cfg(not(vesper_port))]
+fn import_pack_rust(
+    store_path: &Path,
+    expected_root: ObjectId,
+    bytes: &[u8],
+    limits: TransferLimits,
+) -> Result<TransferReport, TransferError> {
     let mut budget = Budget::new(limits)?;
     if bytes.len() > limits.max_pack_bytes {
         return Err(TransferError::Limit("pack bytes"));
@@ -270,7 +283,6 @@ pub fn import_pack(
     if closure.next != count {
         return Err(TransferError::InvalidPack("unreachable records"));
     }
-    let store_path = store_path.as_ref();
     publication_resources(
         &records,
         store_path.as_os_str().as_encoded_bytes().len(),
@@ -299,4 +311,15 @@ pub fn import_pack(
         inserted,
         reused: count - inserted,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    /// The Vesper port charges `size_of` of these (vesper/src/store.ves,
+    /// `IMPORT_RECORD_SIZE` and `VISIT_SIZE`).
+    #[test]
+    fn port_sizes_import() {
+        assert_eq!(std::mem::size_of::<super::Record<'_>>(), 112);
+        assert_eq!(std::mem::size_of::<super::Visit>(), 16);
+    }
 }

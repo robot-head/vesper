@@ -412,6 +412,15 @@ impl Enc {
             // place (dotted), op, value
             self.put(Word::Write);
             self.put(p.op(add(a, 2)));
+            // 0 for a plain `=`, 1 for a compound assignment
+            let mut optext: ChunkSeq[u8] = ChunkSeq::new[u8]();
+            names.write(n32(p.op(inc(a))), inout optext);
+            let compound: u64 = if optext.len() == 1 && u8_at(in optext, 0) == 61 {
+                0
+            } else {
+                1
+            };
+            self.put(compound);
             let mut text: ChunkSeq[u8] = ChunkSeq::new[u8]();
             names.write(n32(p.op(a)), inout text);
             let mut dots: u64 = 0;

@@ -462,3 +462,36 @@ fn isolated_callee_writing_protected_memory_faults() {
     assert!(!unset.status.success());
     assert_eq!(unset.status.code(), None, "terminated by a signal");
 }
+
+/// A `parallel_for` body may call a direct library (§15.4): the object
+/// (whose loop is the sequential schedule) imports the C symbol. An
+/// isolated library needs the calling thread's protection-key gate, so its
+/// body is refused (`E0823`).
+#[test]
+fn parallel_for_bodies_call_direct_libraries() {
+    let source = "\
+fn tick(in seed: u64, i: u64) eff [Ffi[Bridge]] { let _ = Bridge::bridge_tick(); }
+fn entry() -> u64 eff [Ffi[Bridge]] {
+    let seed: u64 = 1;
+    parallel_for(in seed, 4, tick);
+    seed
+}
+";
+    let direct = ffi_lowering::check_source(source, &bridge_imports(Handler::Direct)).unwrap();
+    let object = direct
+        .object("entry", Some("x86_64-unknown-linux-gnu"))
+        .unwrap();
+    assert!(
+        object.bytes.windows(11).any(|w| w == b"bridge_tick"),
+        "the object imports the C symbol"
+    );
+    let e = error_kind(source, &bridge_imports(Handler::IsolatedMpk));
+    assert_eq!(e.kind, FfiErrorKind::Check, "{e}");
+    assert!(
+        e.diagnostics
+            .iter()
+            .any(|d| d.code == "E0823" && d.message.contains("isolated library Ffi[Bridge]")),
+        "{:#?}",
+        e.diagnostics
+    );
+}
