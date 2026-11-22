@@ -714,76 +714,75 @@ impl<M: Module> Codegen<'_, '_, M> {
         let end = self.b.ins().iadd(buffer, len);
         let nul = self.b.ins().iconst(types::I8, 0);
         self.b.ins().store(flags, nul, end, 0);
-        // At most `len + 1` strings and the NULL: no counting pass.
-        let slots = self.b.ins().iadd_imm(len, 2);
+        // Count the strings first, so the array holds just them and the NULL.
+        let count = self.cstr_list_walk(buffer, len, None)?;
+        let slots = self.b.ins().iadd_imm(count, 1);
         let bytes = self.b.ins().imul_imm(slots, 8);
         let call = self.b.ins().call(malloc, &[bytes]);
         let array = self.b.inst_results(call)[0];
         self.b
             .ins()
             .trapz(array, ir::TrapCode::unwrap_user(ffi::CSTR_ALLOC_TRAP));
-        // scan(i, start, k): array[k] = buffer + start for the string being
-        // read; a NUL at i ends it.
-        let scan = self.b.create_block();
-        let body = self.b.create_block();
-        let tail = self.b.create_block();
-        for block in [scan, body] {
-            for _ in 0..3 {
-                self.b.append_block_param(block, types::I64);
-            }
-        }
-        for _ in 0..2 {
-            self.b.append_block_param(tail, types::I64);
-        }
+        let count = self.cstr_list_walk(buffer, len, Some(array))?;
+        let slot = self.b.ins().imul_imm(count, 8);
+        let slot = self.b.ins().iadd(array, slot);
         let zero = self.b.ins().iconst(types::I64, 0);
-        let start_args = [ir::BlockArg::Value(zero); 3];
-        self.jump(scan, &start_args);
-        self.b.switch_to_block(scan);
-        let (i, start, k) = {
-            let p = self.b.block_params(scan);
-            (p[0], p[1], p[2])
+        self.b.ins().store(flags, zero, slot, 0);
+        Ok((buffer, array))
+    }
+    /// Walks the strings of a `CStrList` copy (`len` bytes at `buffer`,
+    /// NUL at `buffer + len`) with `memchr`, one step per string, storing
+    /// each start into `array` when given; returns the number of strings.
+    fn cstr_list_walk(
+        &mut self,
+        buffer: ir::Value,
+        len: ir::Value,
+        array: Option<ir::Value>,
+    ) -> Result<ir::Value, String> {
+        let memchr = self.foreign_libc("memchr", 3, true)?;
+        let walk = self.b.create_block();
+        let body = self.b.create_block();
+        let done = self.b.create_block();
+        for _ in 0..2 {
+            self.b.append_block_param(walk, types::I64);
+            self.b.append_block_param(body, types::I64);
+        }
+        self.b.append_block_param(done, types::I64);
+        let zero = self.b.ins().iconst(types::I64, 0);
+        self.jump(walk, &[ir::BlockArg::Value(zero); 2]);
+        self.b.switch_to_block(walk);
+        let (start, k) = {
+            let p = self.b.block_params(walk);
+            (p[0], p[1])
         };
-        let more = self.b.ins().icmp(IntCC::UnsignedLessThan, i, len);
-        let args = [i, start, k].map(ir::BlockArg::Value);
-        let tail_args = [start, k].map(ir::BlockArg::Value);
-        self.branch(more, body, &args, tail, &tail_args);
+        let more = self.b.ins().icmp(IntCC::UnsignedLessThan, start, len);
+        let args = [start, k].map(ir::BlockArg::Value);
+        self.branch(more, body, &args, done, &[ir::BlockArg::Value(k)]);
         self.b.switch_to_block(body);
         self.b.seal_block(body);
-        let (i, start, k) = {
-            let p = self.b.block_params(body);
-            (p[0], p[1], p[2])
-        };
-        let here = self.b.ins().iadd(buffer, start);
-        let slot = self.b.ins().imul_imm(k, 8);
-        let slot = self.b.ins().iadd(array, slot);
-        self.b.ins().store(flags, here, slot, 0);
-        let at = self.b.ins().iadd(buffer, i);
-        let byte = self.b.ins().uload8(types::I64, flags, at, 0);
-        let ends = self.b.ins().icmp_imm(IntCC::Equal, byte, 0);
-        let next = self.b.ins().iadd_imm(i, 1);
-        let k_next = self.b.ins().iadd_imm(k, 1);
-        let k = self.b.ins().select(ends, k_next, k);
-        let start = self.b.ins().select(ends, next, start);
-        let args = [next, start, k].map(ir::BlockArg::Value);
-        self.jump(scan, &args);
-        self.b.seal_block(scan);
-        self.b.switch_to_block(tail);
-        self.b.seal_block(tail);
         let (start, k) = {
-            let p = self.b.block_params(tail);
+            let p = self.b.block_params(body);
             (p[0], p[1])
         };
         let here = self.b.ins().iadd(buffer, start);
-        let slot = self.b.ins().imul_imm(k, 8);
-        let slot = self.b.ins().iadd(array, slot);
-        self.b.ins().store(flags, here, slot, 0);
-        let open = self.b.ins().icmp(IntCC::UnsignedLessThan, start, len);
-        let k_next = self.b.ins().iadd_imm(k, 1);
-        let k = self.b.ins().select(open, k_next, k);
-        let slot = self.b.ins().imul_imm(k, 8);
-        let slot = self.b.ins().iadd(array, slot);
-        self.b.ins().store(flags, zero, slot, 0);
-        Ok((buffer, array))
+        if let Some(array) = array {
+            let slot = self.b.ins().imul_imm(k, 8);
+            let slot = self.b.ins().iadd(array, slot);
+            self.b.ins().store(ir::MemFlags::new(), here, slot, 0);
+        }
+        // The copy's terminator at `len` bounds every search.
+        let rest = self.b.ins().isub(len, start);
+        let rest = self.b.ins().iadd_imm(rest, 1);
+        let call = self.b.ins().call(memchr, &[here, zero, rest]);
+        let found = self.b.inst_results(call)[0];
+        let end = self.b.ins().isub(found, buffer);
+        let next = self.b.ins().iadd_imm(end, 1);
+        let k = self.b.ins().iadd_imm(k, 1);
+        self.jump(walk, &[next, k].map(ir::BlockArg::Value));
+        self.b.seal_block(walk);
+        self.b.switch_to_block(done);
+        self.b.seal_block(done);
+        Ok(self.b.block_params(done)[0])
     }
     /// A NUL-terminated `malloc` copy of `len` bytes at `data`, and the
     /// offset of the first NUL byte among them (-1 when there is none).

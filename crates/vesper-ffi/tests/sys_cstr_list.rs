@@ -48,3 +48,16 @@ fn a_cstr_list_has_its_own_identity() {
     let string = parse_body("fn f(nocapture in argv: CStr) -> ForeignVal[i32];").unwrap();
     assert_ne!(list.identity(), string.identity());
 }
+
+#[test]
+fn the_cstr_list_name_is_reserved() {
+    for body in [
+        "affine extern type CStrList; fn f() -> ForeignVal[Unit];",
+        "enum CStrList: u8 { X = 1 } fn f() -> ForeignVal[Unit];",
+        "wire struct CStrList { x: u8 } fn f() -> ForeignVal[Unit];",
+    ] {
+        let e = parse_body(body).unwrap_err();
+        assert_eq!(e.kind, ErrorKind::Type, "{body}: {e}");
+        assert!(e.to_string().contains("reserved"), "{body}: {e}");
+    }
+}

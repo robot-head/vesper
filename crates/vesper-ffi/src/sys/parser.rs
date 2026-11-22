@@ -985,6 +985,7 @@ fn reject_reserved_type(n: &str) -> Result<(), Error> {
                 | "bool"
                 | "CSlice"
                 | "CStr"
+                | "CStrList"
                 | "NonNull"
                 | "ForeignVal"
                 | "Ptr"
