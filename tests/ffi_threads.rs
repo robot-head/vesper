@@ -92,3 +92,32 @@ fn vesper_functions_run_on_new_threads() {
     let object = checked.object("main", Some(target().0)).unwrap();
     assert!(object.bytes.windows(14).any(|w| w == b"pthread_create"));
 }
+
+/// A fault the function raises on the C thread reaches the JIT entry's
+/// result instead of vanishing with that thread.
+#[test]
+fn faults_on_c_threads_reach_the_entry() {
+    if !cfg!(any(
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "aarch64"),
+        all(target_os = "macos", target_arch = "aarch64"),
+    )) {
+        return;
+    }
+    let source = SOURCE.replace(
+        "fn work(n: usize) -> usize {",
+        "fn total(in s: Str) -> u64 { s.len() }\nfn work(n: usize) -> usize {\n    let s = \"a\u{e9}b\";\n    if n == 100 { let _ = total(s[1..2]); }",
+    );
+    let mut imports = Imports::new();
+    imports.add(&library(), Handler::Direct).unwrap();
+    let checked =
+        ffi_lowering::check_source(&source, &imports).unwrap_or_else(|e| panic!("{e:#?}"));
+    let symbols = [
+        ("pthread_create", pthread_create as *const u8),
+        ("pthread_join", pthread_join as *const u8),
+    ];
+    let e = checked
+        .jit_with_options("main", &symbols, true)
+        .expect_err("the fault on the C thread was lost");
+    assert!(e.to_string().contains("char boundaries"), "{e}");
+}
