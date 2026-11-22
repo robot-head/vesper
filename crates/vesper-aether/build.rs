@@ -1,17 +1,17 @@
-//! Under `vesper-port`, compile the Vesper port into a static library and
-//! check the committed binding (see docs/maintenance/porting-a-crate.md).
+//! Compile the Vesper port into a static library and check the committed
+//! binding (see docs/maintenance/porting-a-crate.md). Every build links it:
+//! the virtqueue walks are Vesper-only, and `vesper-port` switches the other
+//! ported modules to it.
 //!
 //! The port is one library written as several files (`PARTS`), which this
 //! script joins into `$OUT_DIR/aether.ves` in order (BUILD.bazel's
 //! `:aether_source` does the same).
 
 /// The files of the port, in order.
-#[cfg(feature = "vesper-port")]
-const PARTS: &[&str] = &["util", "slot_plan", "pvh", "hotset", "packed"];
+const PARTS: &[&str] = &["util", "slot_plan", "pvh", "hotset", "packed", "vq"];
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    #[cfg(feature = "vesper-port")]
     {
         let mut source = String::new();
         for part in PARTS {
@@ -31,6 +31,22 @@ fn main() {
             .iter()
             .fold(port, |port, (from, to)| port.edit(from, to));
         port.build();
+    }
+    // The hardware random-number instructions: one package per target,
+    // all with the same exports (src/hw_rng.rs; BUILD.bazel selects the
+    // same way). Other targets have none.
+    let arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+    let os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let rng = match (arch.as_str(), os.as_str()) {
+        ("x86_64", _) => Some("x86_64"),
+        ("aarch64", "linux") => Some("aarch64-linux"),
+        ("aarch64", "macos") => Some("aarch64-macos"),
+        _ => None,
+    };
+    if let Some(dir) = rng {
+        vesper_port_harness::Port::new("aether_rng", format!("vesper-rng/{dir}"))
+            .binding("port/rng_binding.rs")
+            .build();
     }
 }
 
@@ -55,4 +71,6 @@ const DIVERGENT_EDITS: &[(&str, &str)] = &[
     ),
     // packed: a used descriptor counts as available.
     ("        if !avail || used {", "        if !avail {"),
+    // vq: a chain may hold one buffer more than the limit.
+    ("    if count >= max_desc {", "    if count > max_desc {"),
 ];

@@ -1466,6 +1466,10 @@ extern "C" fn report() {
         "vesper-hybrid: bounds-hoist hoisted {} programs in Vesper",
         BOUNDS_HOIST_CALLS.load(Relaxed)
     );
+    eprintln!(
+        "vesper-hybrid: the driver ran {} passes from Vesper",
+        crate::driver::PASSES.load(Relaxed)
+    );
 }
 
 // Run `install` before `main` (the platform's static-constructor section).
