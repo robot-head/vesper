@@ -10,6 +10,7 @@
  */
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "blake3.h"
 
@@ -19,6 +20,15 @@ static blake3_hasher *fresh(void) { return (blake3_hasher *)malloc(sizeof(blake3
  * shortest forms only, no surrogates, nothing above U+10FFFF). */
 static int is_utf8(const uint8_t *s, size_t len) {
   size_t i = 0;
+  /* Skip whole 8-byte words of ASCII first. */
+  while (len - i >= 8) {
+    uint64_t w;
+    memcpy(&w, s + i, 8);
+    if ((w & UINT64_C(0x8080808080808080)) != 0) {
+      break;
+    }
+    i += 8;
+  }
   while (i < len) {
     uint8_t b = s[i];
     size_t n;
@@ -107,4 +117,20 @@ void vesper_blake3_hash(const uint8_t *data, size_t len, uint8_t *out, size_t ou
   blake3_hasher_init(&h);
   blake3_hasher_update(&h, data, len);
   blake3_hasher_finalize(&h, out, out_len);
+}
+
+/* One-shot key derivation: `out_len` bytes of the derive-key hash of `data`
+ * under `context`, with the hasher on the stack. Returns 0 (writing
+ * nothing) unless `context` is UTF-8, else 1. */
+uint32_t vesper_blake3_derive_key_hash(const uint8_t *context, size_t context_len,
+                                       const uint8_t *data, size_t len, uint8_t *out,
+                                       size_t out_len) {
+  if (!is_utf8(context, context_len)) {
+    return 0;
+  }
+  blake3_hasher h;
+  blake3_hasher_init_derive_key_raw(&h, context, context_len);
+  blake3_hasher_update(&h, data, len);
+  blake3_hasher_finalize(&h, out, out_len);
+  return 1;
 }
