@@ -93,8 +93,8 @@ pub copy struct PatRow {
 pub copy struct FnRow {
     name: u32,
     generics: u32,
-    // `effects.instances.is_empty() && effects.tail.is_none()`
-    pure_row: bool,
+    // `atomics::worker_row`: the row holds only stateless capabilities
+    worker_row: bool,
     // params: passes[pa..pa+pn] and types tys[pa'..]
     pa: u32,
     pn: u32,
@@ -214,7 +214,7 @@ impl Exprs {
             Option::None => FnRow {
                 name: NONE32,
                 generics: 0,
-                pure_row: true,
+                worker_row: true,
                 pa: 0,
                 pn: 0,
                 result: NONE32,
@@ -481,7 +481,7 @@ pub fn read_fn(
 ) -> FnRow {
     let name = sym(in nmap, r.word(in b));
     let generics = wrapping_u32(r.word(in b));
-    let pure_row = r.word(in b) != 0;
+    let worker_row = r.word(in b) != 0;
     let pn = r.word(in b);
     let pa = wrapping_u32(x.param_passes.len());
     for i in 0..pn {
@@ -497,7 +497,7 @@ pub fn read_fn(
     FnRow {
         name: name,
         generics: generics,
-        pure_row: pure_row,
+        worker_row: worker_row,
         pa: pa,
         pn: wrapping_u32(pn),
         result: result,
