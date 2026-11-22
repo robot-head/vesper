@@ -55,6 +55,18 @@ impl UmemConfig {
         }
     }
 
+    #[cfg(feature = "vesper-port")]
+    pub fn validate(&self) -> Result<(), UmemError> {
+        if let Some(code) = crate::binding::config_validate(*self) {
+            return Err(UmemError::InvalidConfig(crate::port_error::config_message(
+                code,
+            )));
+        }
+        self.umem_len()?;
+        Ok(())
+    }
+
+    #[cfg(not(feature = "vesper-port"))]
     pub fn validate(&self) -> Result<(), UmemError> {
         let bad = |why| Err(UmemError::InvalidConfig(why));
         if self.frame_count == 0 || self.frame_count > MAX_FRAMES {

@@ -260,21 +260,11 @@ pub fn single_bindings(in f: Fun) -> ChunkSeq[u32] {
             }
         } else if i.op == OP_WRITE {
             let new = insert(inout spoiled, f.write_root(i));
-        } else if i
-            .op
-            == OP_CALL
-            || i
-            .op
-            == OP_INDIRECT
-            || i
-            .op
-            == OP_SEQ
-            || i
-            .op
-            == OP_TILED
-            || i
-            .op
-            == OP_FIP {
+        } else if i.op == OP_CALL
+            || i.op == OP_INDIRECT
+            || i.op == OP_SEQ
+            || i.op == OP_TILED
+            || i.op == OP_FIP {
             for j in 0..w(i.gn) {
                 let a = f.arg(add(w(i.g0), j));
                 if a.pass != P_IN && a.pass != P_SINK && a.place != 0 {
@@ -302,17 +292,10 @@ pub fn opaque(in f: Fun, in blocks: ChunkSeq[u32]) -> bool {
         let k = f.block(w(u32_at(in blocks, bi)));
         for j in 0..w(k.ic) {
             let i = f.inst(add(w(k.i0), j));
-            if i
-                .op
-                == OP_CLOSURE
-                || i
-                .op
-                == OP_HANDLE
-                || i
-                .op
-                == OP_INDIRECT
-                || f
-                .has_call_slot(i.dest) {
+            if i.op == OP_CLOSURE
+                || i.op == OP_HANDLE
+                || i.op == OP_INDIRECT
+                || f.has_call_slot(i.dest) {
                 return true;
             }
         }

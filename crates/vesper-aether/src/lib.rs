@@ -15,6 +15,24 @@
 //! filesystem permissions are not a defence against a privileged concurrent writer.
 #![deny(unsafe_code)]
 
+// Generated and committed, kept outside src/ so formatters never reflow it
+// (see docs/maintenance/porting-a-crate.md).
+#[cfg(feature = "vesper-port")]
+#[rustfmt::skip]
+#[allow(unsafe_code, missing_docs)]
+#[path = "../port/binding.rs"]
+mod binding;
+#[cfg(feature = "vesper-port")]
+#[path = "port/types.rs"]
+mod port_types;
+
+/// Which implementation the ported modules run.
+pub const IMPLEMENTATION: &str = if cfg!(feature = "vesper-port") {
+    "vesper"
+} else {
+    "rust"
+};
+
 pub mod devices;
 pub mod entropy;
 pub mod fork;

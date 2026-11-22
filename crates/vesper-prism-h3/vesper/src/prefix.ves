@@ -179,7 +179,7 @@ pub fn encode_string(
     let huff_len = huff_encoded_len(in h, in value);
     if huff_len < value.len() {
         encode_int(inout out, flags | wrapping_u8(bit(bits)), bits, huff_len);
-        huff_encode(in h, in value, inout out);
+        huff_encode(in h, in value, huff_len, inout out);
     } else {
         encode_int(inout out, flags, bits, value.len());
         out.extend(in value);

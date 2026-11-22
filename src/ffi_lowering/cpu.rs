@@ -24,6 +24,14 @@ pub enum Arch {
     Aarch64,
 }
 
+/// `mov r8, rdx; mov r9, rbx; mov eax, edi; mov ecx, esi; cpuid;
+/// mov [r8], eax; mov [r8+4], ebx; mov [r8+8], ecx; mov [r8+12], edx;
+/// mov rbx, r9; ret`. `cpuid` clobbers the callee-saved `rbx`, which is
+/// kept in the volatile `r9`, so the function stays frameless.
+const CPUID: [u8; 31] = [
+    0x49, 0x89, 0xd0, 0x49, 0x89, 0xd9, 0x89, 0xf8, 0x89, 0xf1, 0x0f, 0xa2, 0x41, 0x89, 0x00, 0x41,
+    0x89, 0x58, 0x04, 0x41, 0x89, 0x48, 0x08, 0x41, 0x89, 0x50, 0x0c, 0x4c, 0x89, 0xcb, 0xc3,
+];
 /// `lfence; rdtsc; shl rdx, 32; or rax, rdx; ret`.
 const RDTSC: [u8; 13] = [
     0x0f, 0xae, 0xe8, 0x0f, 0x31, 0x48, 0xc1, 0xe2, 0x20, 0x48, 0x09, 0xd0, 0xc3,
@@ -66,6 +74,7 @@ fn words(ws: &[u32]) -> Vec<u8> {
 pub fn function(symbol: &str) -> Option<(Arch, Vec<u8>)> {
     let name = symbol.strip_prefix(PREFIX)?;
     Some(match name {
+        "cpuid" => (Arch::X86_64, CPUID.to_vec()),
         "rdtsc" => (Arch::X86_64, RDTSC.to_vec()),
         "rdpmc" => (Arch::X86_64, RDPMC.to_vec()),
         "rdrand64" => (Arch::X86_64, RDRAND64.to_vec()),
@@ -119,7 +128,7 @@ mod tests {
     #[test]
     fn every_listed_function_has_code() {
         for name in [
-            "rdtsc", "rdpmc", "rdrand64", "cntvct", "pmccntr", "pmevcntr", "rndr",
+            "cpuid", "rdtsc", "rdpmc", "rdrand64", "cntvct", "pmccntr", "pmevcntr", "rndr",
         ] {
             let (arch, code) = function(&format!("{PREFIX}{name}")).expect(name);
             assert!(!code.is_empty());

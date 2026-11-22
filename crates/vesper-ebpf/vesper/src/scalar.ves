@@ -205,38 +205,18 @@ pub fn scalar_unknown_bits(width: u32) -> Scalar {
 }
 
 pub fn scalar_contains(s: Scalar, v: u64) -> bool {
-    s
-        .umin
-        <= v
-        && v
-        <= s
-        .umax
-        && s
-        .smin
-        <= signed(v)
-        && signed(v)
-        <= s
-        .smax
+    s.umin <= v
+        && v <= s.umax
+        && s.smin <= signed(v)
+        && signed(v) <= s.smax
         && tnum_contains(s.var, v)
 }
 
 pub fn scalar_includes(s: Scalar, other: Scalar) -> bool {
-    s
-        .umin
-        <= other
-        .umin
-        && other
-        .umax
-        <= s
-        .umax
-        && s
-        .smin
-        <= other
-        .smin
-        && other
-        .smax
-        <= s
-        .smax
+    s.umin <= other.umin
+        && other.umax <= s.umax
+        && s.smin <= other.smin
+        && other.smax <= s.smax
         && tnum_includes(s.var, other.var)
 }
 

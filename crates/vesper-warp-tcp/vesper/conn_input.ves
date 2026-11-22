@@ -185,14 +185,14 @@ fn on_syn_sent(
 fn rst_to_peer(inout t: Tcb, seq: u32) {
     t
         .pending_rst = Option::Some(
-        RstSpec {
-            ips: some_ips(t.ips),
-            src_port: t.cfg.local_port,
-            dst_port: t.remote_port,
-            seq: seq,
-            ack: Option::None
-        }
-    );
+            RstSpec {
+                ips: some_ips(t.ips),
+                src_port: t.cfg.local_port,
+                dst_port: t.remote_port,
+                seq: seq,
+                ack: Option::None
+            }
+        );
 }
 
 fn on_synchronized(inout t: Tcb, now: u64, seg0: Seg, in bytes: Slice[u8], inout ring: Slice[u8])
@@ -219,17 +219,11 @@ fn on_synchronized(inout t: Tcb, now: u64, seg0: Seg, in bytes: Slice[u8], inout
     }
 
     // Duplicate SYN while our SYN,ACK is unacknowledged: resend it.
-    if t
-        .st
-        == State::SynReceived
+    if t.st == State::SynReceived
         && has(f, syn_bit())
         && !has(f, ack_bit())
         && !is_rst
-        && seg
-        .h
-        .seq
-        == t
-        .rcv_isn {
+        && seg.h.seq == t.rcv_isn {
         mark_first_lost(inout t);
         return no_recv();
     }
@@ -294,14 +288,10 @@ fn on_synchronized(inout t: Tcb, now: u64, seg0: Seg, in bytes: Slice[u8], inout
                 t.st = State::Listen;
             } else if s == State::SynReceived {
                 enter_closed(inout t, Option::Some(CloseReason::Refused));
-            } else if s
-                == State::Established
-                || s
-                == State::FinWait1
-                || s
-                == State::FinWait2
-                || s
-                == State::CloseWait {
+            } else if s == State::Established
+                || s == State::FinWait1
+                || s == State::FinWait2
+                || s == State::CloseWait {
                 enter_closed(inout t, Option::Some(CloseReason::Reset));
             } else {
                 enter_closed(inout t, Option::None);

@@ -228,14 +228,10 @@ pub fn list_pointer(in segment: Slice[u8], pointer_word: u64) -> P4 eff [Fail[GE
 // capnp_packed.rs
 
 fn validate_limits(in lim: Slice[u64]) -> Unit eff [Fail[GErr]] {
-    if sw(in lim, 0)
-        > HARD_BYTES
-        || sw(in lim, 1)
-        > HARD_BYTES
-        || sw(in lim, 2)
-        > HARD_WORDS
-        || sw(in lim, 3)
-        > HARD_WORK {
+    if sw(in lim, 0) > HARD_BYTES
+        || sw(in lim, 1) > HARD_BYTES
+        || sw(in lim, 2) > HARD_WORDS
+        || sw(in lim, 3) > HARD_WORK {
         fail(0, 0);
     }
 }

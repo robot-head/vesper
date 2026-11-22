@@ -436,3 +436,175 @@ fn policy_decisions_agree() {
     }
     results.check();
 }
+
+/// Every CBOR sample of the CCA and CoRIM vendor sets, sorted by path.
+fn cbor_samples() -> Vec<Vec<u8>> {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/vendor");
+    let mut paths = Vec::new();
+    for dir in std::fs::read_dir(&root).unwrap() {
+        let dir = dir.unwrap().path();
+        if !dir
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("cca-")
+        {
+            continue;
+        }
+        for f in std::fs::read_dir(&dir).unwrap() {
+            let f = f.unwrap().path();
+            if f.extension().is_some_and(|e| e == "cbor") {
+                paths.push(f);
+            }
+        }
+    }
+    paths.sort();
+    paths.iter().map(|p| std::fs::read(p).unwrap()).collect()
+}
+
+/// CBOR-aware mutations: the byte-level ones, and small values written
+/// over a byte (claim keys, short lengths and headers live there).
+fn mutate_cbor(rng: &mut SplitMix, seed: &[u8]) -> Vec<u8> {
+    if rng.below(3) == 0 && !seed.is_empty() {
+        let mut v = seed.to_vec();
+        let i = rng.below(v.len() as u64) as usize;
+        v[i] = rng.below(0x60) as u8;
+        return v;
+    }
+    mutate(rng, seed)
+}
+
+fn cca_token(r: &mut Results, b: &[u8]) -> bool {
+    r.add("CcaToken::parse", port::cca::CcaToken::parse(b))
+}
+
+fn corim(r: &mut Results, b: &[u8]) -> bool {
+    r.add(
+        "Corim::parse_unsigned",
+        port::corim::Corim::parse_unsigned(b),
+    )
+}
+
+fn cca_claims(r: &mut Results, b: &[u8]) -> bool {
+    let p = r.add(
+        "CcaPlatformClaims::from_cbor",
+        port::cca::CcaPlatformClaims::from_cbor(b),
+    );
+    let q = r.add(
+        "CcaRealmClaims::from_cbor",
+        port::cca::CcaRealmClaims::from_cbor(b),
+    );
+    p || q
+}
+
+/// A sweep over CBOR seeds (any seed may fail to parse whole, as a signed
+/// CoRIM does for `parse_unsigned`).
+fn cbor_sweep(
+    r: &mut Results,
+    seeds: &[Vec<u8>],
+    n: usize,
+    check: fn(&mut Results, &[u8]) -> bool,
+) -> usize {
+    let mut rng = SplitMix(0xC0B0_0000 ^ r.name.len() as u64);
+    let mut accepted = 0;
+    for seed in seeds {
+        accepted += usize::from(check(r, seed));
+        for _ in 0..n {
+            accepted += usize::from(check(r, &mutate_cbor(&mut rng, seed)));
+        }
+    }
+    accepted
+}
+
+#[test]
+fn cca_tokens_agree() {
+    let mut r = Results::new("cca_tokens_agree");
+    let accepted = cbor_sweep(&mut r, &cbor_samples(), 2_000, cca_token);
+    assert!(accepted > 4, "{accepted} tokens parsed");
+    r.check();
+}
+
+#[test]
+fn corims_agree() {
+    let mut r = Results::new("corims_agree");
+    let accepted = cbor_sweep(&mut r, &cbor_samples(), 2_000, corim);
+    assert!(accepted > 4, "{accepted} CoRIMs parsed");
+    r.check();
+}
+
+/// Random claim sets on both sides of every limit, encoded by `to_cbor`
+/// (which checks nothing), and the vendor tokens' payloads.
+#[test]
+fn cca_claims_agree() {
+    use port::cca::{CcaPlatformClaims, CcaRealmClaims, CcaSwComponent, CcaTbbRotpk};
+    use port::claims::RegisterHash;
+    let mut r = Results::new("cca_claims_agree");
+    let mut payloads = Vec::new();
+    for s in cbor_samples() {
+        if let Ok(t) = port::cca::CcaToken::parse(&s) {
+            payloads.push(t.platform.payload.clone().unwrap());
+            payloads.push(t.realm.payload.clone().unwrap());
+        }
+    }
+    let accepted = cbor_sweep(&mut r, &payloads, 4_000, cca_claims);
+    assert!(accepted > 100, "{accepted} payloads parsed");
+    let mut rng = SplitMix(0xCCA0_C1A1);
+    let algos = [
+        RegisterHash::Sha256,
+        RegisterHash::Sha384,
+        RegisterHash::Sha512,
+    ];
+    let lens = [0u64, 31, 32, 33, 48, 63, 64, 65];
+    for _ in 0..20_000 {
+        let rng = &mut rng;
+        let b = |rng: &mut SplitMix| vec![rng.next() as u8; lens[rng.below(8) as usize] as usize];
+        let text = |rng: &mut SplitMix| {
+            ["BL", "CM", "DM", "", "sha-256", "x"][rng.below(6) as usize].to_owned()
+        };
+        let opt = |rng: &mut SplitMix| (rng.below(2) == 0).then(|| text(rng));
+        let comps = [0, 1, 2, 63, 64, 65][rng.below(6) as usize];
+        let rotpks = [0, 1, 3, 12, 13][rng.below(5) as usize];
+        let platform = CcaPlatformClaims {
+            challenge: b(rng),
+            instance_id: b(rng),
+            implementation_id: b(rng),
+            lifecycle: [0, 0x3000, u64::MAX][rng.below(3) as usize],
+            hash_algo: algos[rng.below(3) as usize],
+            sw_components: (0..comps)
+                .map(|_| CcaSwComponent {
+                    measurement_type: opt(rng),
+                    measurement_value: b(rng),
+                    version: opt(rng),
+                    signer_id: b(rng),
+                    measurement_description: opt(rng),
+                })
+                .collect(),
+            config: (rng.below(2) == 0).then(|| b(rng)),
+            manufacturing_config: (rng.below(2) == 0).then(|| b(rng)),
+            tbb_rotpks: (0..rotpks)
+                .map(|_| CcaTbbRotpk {
+                    name: text(rng),
+                    index: [0, 5, 6, u64::MAX][rng.below(4) as usize],
+                    hash: b(rng),
+                })
+                .collect(),
+        }
+        .to_cbor();
+        cca_claims(&mut r, &platform);
+        cca_claims(&mut r, &mutate_cbor(rng, &platform));
+        let realm = CcaRealmClaims {
+            challenge: [7; 64],
+            personalization: [8; 64],
+            hash_algo: algos[rng.below(3) as usize],
+            public_key: b(rng),
+            public_key_hash_algo: algos[rng.below(3) as usize],
+            initial_measurement: b(rng),
+            extensible_measurements: std::array::from_fn(|_| b(rng)),
+        }
+        .to_cbor();
+        cca_claims(&mut r, &realm);
+        cca_claims(&mut r, &mutate_cbor(rng, &realm));
+    }
+    r.check();
+}

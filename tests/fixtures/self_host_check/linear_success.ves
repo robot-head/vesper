@@ -4,8 +4,7 @@ linear struct Ticket {
 fn consume(sink ticket: Ticket) -> i64 {
     let Ticket {
         id
-    }
-    = ticket;
+    } = ticket;
     id
 }
 fn main() -> i64 {

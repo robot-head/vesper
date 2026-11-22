@@ -600,13 +600,13 @@ fn bump_count(inout counts: ChunkSeq[u32], sym: u32, up: bool) {
     let c = u32_at(in counts, i);
     counts
         .try_set(
-        i,
-        if up {
-            wrapping_add(c, 1)
-        } else {
-            wrapping_sub(c, 1)
-        }
-    );
+            i,
+            if up {
+                wrapping_add(c, 1)
+            } else {
+                wrapping_sub(c, 1)
+            }
+        );
 }
 
 fn val_insert(inout p: P, sym: u32) {
@@ -768,22 +768,14 @@ fn json_string(in p: P, i: u64) -> bool {
         }
         if c == 92 {
             let d = byte(in src, inc(j));
-            if d
-                == 34
-                || d
-                == 92
-                || d
-                == 47
-                || d
-                == 98
-                || d
-                == 102
-                || d
-                == 110
-                || d
-                == 114
-                || d
-                == 116 {
+            if d == 34
+                || d == 92
+                || d == 47
+                || d == 98
+                || d == 102
+                || d == 110
+                || d == 114
+                || d == 116 {
                 j = add(j, 2);
             } else if d == 117 {
                 let v = hex4(in src, add(j, 2), end);
@@ -947,28 +939,17 @@ fn keyword_err(inout p: P, in head: String) {
 
 // The keywords `lower` names in its message: never a name anywhere.
 fn reserved_word(k: u8) -> bool {
-    k
-        == k_mod()
-        || k
-        == k_in()
-        || k
-        == k_return()
-        || k
-        == k_match()
-        || k
-        == k_if()
-        || k
-        == k_else()
-        || k
-        == k_let()
-        || k
-        == k_fn()
-        || k
-        == k_struct()
-        || k
-        == k_enum()
-        || k
-        == k_impl()
+    k == k_mod()
+        || k == k_in()
+        || k == k_return()
+        || k == k_match()
+        || k == k_if()
+        || k == k_else()
+        || k == k_let()
+        || k == k_fn()
+        || k == k_struct()
+        || k == k_enum()
+        || k == k_impl()
 }
 
 // `state`, `linear`, `with` and `eff` are keywords only where their forms
@@ -980,26 +961,16 @@ fn reserved_word(k: u8) -> bool {
 // `handle` starts an expression only before an effect (`handle_starts`), and
 // the pass modes are modes only before an operand (`pass_word_is_mode`).
 fn contextual_name(k: u8) -> bool {
-    k
-        == k_state()
-        || k
-        == k_linear()
-        || k
-        == k_copy()
-        || k
-        == k_affine()
-        || k
-        == k_with()
-        || k
-        == k_eff()
-        || k
-        == k_effect()
-        || k
-        == k_handle()
-        || k
-        == k_sink()
-        || k
-        == k_inout()
+    k == k_state()
+        || k == k_linear()
+        || k == k_copy()
+        || k == k_affine()
+        || k == k_with()
+        || k == k_eff()
+        || k == k_effect()
+        || k == k_handle()
+        || k == k_sink()
+        || k == k_inout()
 }
 
 fn at_contextual_name(in p: P) -> bool {
@@ -1026,56 +997,31 @@ fn pass_word_is_mode(in p: P, params: bool) -> bool {
     if n == k_lower() {
         return !at_word(in p, 1, w_as());
     }
-    n
-        == k_upper()
-        || n
-        == k_self_kw()
-        || n
-        == k_at()
-        || n
-        == k_int()
-        || n
-        == k_float()
-        || n
-        == k_string()
-        || n
-        == k_true()
-        || n
-        == k_false()
-        || n
-        == k_l_brace()
-        || n
-        == k_bang()
-        || n
-        == k_tilde()
-        || n
-        == k_pipe()
-        || n
-        == k_or()
-        || n
-        == k_match()
-        || n
-        == k_if()
-        || n
-        == k_state()
-        || n
-        == k_linear()
-        || n
-        == k_copy()
-        || n
-        == k_affine()
-        || n
-        == k_with()
-        || n
-        == k_eff()
-        || n
-        == k_effect()
-        || n
-        == k_handle()
-        || n
-        == k_sink()
-        || n
-        == k_inout()
+    n == k_upper()
+        || n == k_self_kw()
+        || n == k_at()
+        || n == k_int()
+        || n == k_float()
+        || n == k_string()
+        || n == k_true()
+        || n == k_false()
+        || n == k_l_brace()
+        || n == k_bang()
+        || n == k_tilde()
+        || n == k_pipe()
+        || n == k_or()
+        || n == k_match()
+        || n == k_if()
+        || n == k_state()
+        || n == k_linear()
+        || n == k_copy()
+        || n == k_affine()
+        || n == k_with()
+        || n == k_eff()
+        || n == k_effect()
+        || n == k_handle()
+        || n == k_sink()
+        || n == k_inout()
 }
 
 // `Parser::at_path_root`: at `self::`, `super::` or `@scope/name::`.
@@ -1095,8 +1041,7 @@ fn at_path_root(in p: P) -> bool {
     loop {
         let kn = nth(in p, n);
         if !(kn == k_lower() || kn == k_minus() || kn == k_slash() || kn == k_int())
-            || tstart(in p, idx(in p, n))
-            != end {
+            || tstart(in p, idx(in p, n)) != end {
             break;
         }
         end = tend(in p, idx(in p, n));
@@ -1225,15 +1170,13 @@ fn fields(inout p: P) {
         }
         if at_word(in p, 0, w_pub())
             && (
-            (nth(in p, 1) == k_lower() && nth(in p, 2) == k_colon())
-                || (
-                (at_word(in p, 1, w_hot()) || at_word(in p, 1, w_cold()))
-                    && nth(in p, 2)
-                    == k_lower()
-                    && nth(in p, 3)
-                    == k_colon()
-            )
-        ) {
+                (nth(in p, 1) == k_lower() && nth(in p, 2) == k_colon())
+                    || (
+                        (at_word(in p, 1, w_hot()) || at_word(in p, 1, w_cold()))
+                            && nth(in p, 2) == k_lower()
+                            && nth(in p, 3) == k_colon()
+                    )
+            ) {
             bump(inout p);
         }
         if at_word(in p, 0, w_hot()) && nth(in p, 1) == k_lower() {
@@ -1331,19 +1274,17 @@ fn pub_item_follows(in p: P) -> bool {
     at_word(in p, 1, w_trait())
         || (at_word(in p, 1, w_const()) && nth(in p, 2) == k_upper())
         || at_word(in p, 1, w_model())
-        || nth(in p, 1)
-        == k_fn()
+        || nth(in p, 1) == k_fn()
         || is_type_decl_kind(nth(in p, 1))
         || (is_mode_kind(nth(in p, 1)) && is_type_decl_kind(nth(in p, 2)))
         || (
-        nth(in p, 1)
-            == k_at()
-            && (
-            at_word(in p, 2, w_fip())
-                || at_word(in p, 2, w_test())
-                || at_word(in p, 2, w_test_case())
+            nth(in p, 1) == k_at()
+                && (
+                    at_word(in p, 2, w_fip())
+                        || at_word(in p, 2, w_test())
+                        || at_word(in p, 2, w_test_case())
+                )
         )
-    )
 }
 
 // Keep inactive test declarations as lossless tokens in the ordinary CST.
@@ -1622,9 +1563,9 @@ fn function_header(inout p: P) -> bool {
 fn at_method(in p: P) -> bool {
     at(in p, k_fn())
         || (
-        at_word(in p, 0, w_pub())
-            && (nth(in p, 1) == k_fn() || (nth(in p, 1) == k_at() && at_word(in p, 2, w_fip())))
-    )
+            at_word(in p, 0, w_pub())
+                && (nth(in p, 1) == k_fn() || (nth(in p, 1) == k_at() && at_word(in p, 2, w_fip())))
+        )
         || (at(in p, k_at()) && at_word(in p, 1, w_fip()))
 }
 
@@ -1632,8 +1573,8 @@ fn method(inout p: P) {
     let mut fip = fip_attr(inout p);
     let public = at_word(in p, 0, w_pub())
         && (
-        nth(in p, 1) == k_fn() || (!fip && nth(in p, 1) == k_at() && at_word(in p, 2, w_fip()))
-    );
+            nth(in p, 1) == k_fn() || (!fip && nth(in p, 1) == k_at() && at_word(in p, 2, w_fip()))
+        );
     if public {
         bump(inout p);
     }
@@ -1683,21 +1624,21 @@ fn header_note(inout p: P, start: u64, clean: bool, nongeneric: bool) {
     p
         .hdr
         .push(
-        if clean {
-            1
-        } else {
-            0
-        }
-    );
+            if clean {
+                1
+            } else {
+                0
+            }
+        );
     p
         .hdr
         .push(
-        if nongeneric {
-            1
-        } else {
-            0
-        }
-    );
+            if nongeneric {
+                1
+            } else {
+                0
+            }
+        );
     for s in 0..p.rows.len() {
         if u32_at(in p.rows, s) != 0 {
             p.hdr_syms.push(narrow(s));
@@ -1985,8 +1926,7 @@ fn package_name(inout p: P) {
     loop {
         let k = kind(in p);
         if !(k == k_lower() || k == k_minus() || k == k_slash() || k == k_int())
-            || cur_start(in p)
-            != last_end(in p) {
+            || cur_start(in p) != last_end(in p) {
             return;
         }
         bump(inout p);
@@ -2110,8 +2050,8 @@ fn trait_decl(inout p: P) {
                 .d
                 .text
                 .extend(
-                in "trait parameters take modal or row bounds, not trait bounds".as_bytes()
-            );
+                    in "trait parameters take modal or row bounds, not trait bounds".as_bytes()
+                );
         }
         b = add(b, 2);
     }
@@ -2213,8 +2153,7 @@ fn type_args_inner(inout p: P) {
             break;
         }
         let cur = idx(in p, 0);
-        if tk(in p, cur)
-            == k_lower()
+        if tk(in p, cur) == k_lower()
             && !is_primitive_word(tword(in p, cur))
             && !at_path_root(in p)
             && !(tword(in p, cur) == w_dyn() && nth(in p, 1) == k_upper()) {
@@ -2350,8 +2289,7 @@ fn block_inner(inout p: P) -> Ex {
                 && !at(in p, k_r_brace())
                 && !at(in p, k_eof()) {
                 // A block-like statement needs no `;`.
-            } else if p
-                .editor
+            } else if p.editor
                 && !at(in p, k_r_brace())
                 && !at(in p, k_eof())
                 && (p.d.code.len() > diags || statement_anchor(in p)) {
@@ -2381,14 +2319,10 @@ fn block_inner(inout p: P) -> Ex {
 
 fn statement_anchor(in p: P) -> bool {
     let k = kind(in p);
-    k
-        == k_let()
-        || k
-        == k_match()
-        || k
-        == k_return()
-        || k
-        == k_if()
+    k == k_let()
+        || k == k_match()
+        || k == k_return()
+        || k == k_if()
         || (k == k_handle() && handle_starts(in p))
 }
 
@@ -2463,18 +2397,12 @@ fn expr(inout p: P) -> Ex {
 }
 
 fn jump_end(k: u8) -> bool {
-    k
-        == k_semi()
-        || k
-        == k_r_brace()
-        || k
-        == k_r_paren()
-        || k
-        == k_r_bracket()
-        || k
-        == k_comma()
-        || k
-        == k_eof()
+    k == k_semi()
+        || k == k_r_brace()
+        || k == k_r_paren()
+        || k == k_r_bracket()
+        || k == k_comma()
+        || k == k_eof()
 }
 
 fn expr_inner(inout p: P) -> Ex {
@@ -2488,10 +2416,8 @@ fn expr_inner(inout p: P) -> Ex {
     };
     let e = if k == k_handle() && handle_starts(in p) {
         handle_expr(inout p)
-    } else if w
-        == w_region()
-        && nth(in p, 1)
-        == k_lower()
+    } else if w == w_region()
+        && nth(in p, 1) == k_lower()
         && (nth(in p, 2) == k_l_brace() || nth(in p, 2) == k_l_paren()) {
         region(inout p)
     } else if k == k_match() {
@@ -2530,20 +2456,14 @@ fn for_header(in p: P, cur: u64) -> bool {
     let n = nth(in p, 1);
     !bound(in p, tsym(in p, cur))
         && (
-        n
-            == k_lower()
-            || n
-            == k_upper()
-            || n
-            == k_l_paren()
-            || n
-            == k_int()
-            || n
-            == k_true()
-            || n
-            == k_false()
-            || contextual_name(n)
-    )
+            n == k_lower()
+                || n == k_upper()
+                || n == k_l_paren()
+                || n == k_int()
+                || n == k_true()
+                || n == k_false()
+                || contextual_name(n)
+        )
 }
 
 fn for_expr(inout p: P) -> Ex {
@@ -2667,9 +2587,9 @@ fn match_expr(inout p: P) -> Ex {
         );
         p
             .expansion = saturating_add_u64(
-            p.expansion,
-            saturating_mul_u64(weight, wrapping_sub(alternatives, 1))
-        );
+                p.expansion,
+                saturating_mul_u64(weight, wrapping_sub(alternatives, 1))
+            );
         if p.expansion > or_pattern_expansion() {
             err(inout p, in "or-pattern alternatives copy too much code; split the match");
         }
@@ -3014,12 +2934,11 @@ fn generic_call(in p: P, e: Ex) -> bool {
     if (n1 == k_self_kw() || at_word(in p, 1, w_super())) && nth(in p, 2) == k_colon_colon() {
         return true;
     }
-    n1
-        == k_lower()
+    n1 == k_lower()
         && (
-        (tword(in p, t1) == w_dyn() && nth(in p, 2) == k_upper())
-            || is_primitive_word(tword(in p, t1))
-    )
+            (tword(in p, t1) == w_dyn() && nth(in p, 2) == k_upper())
+                || is_primitive_word(tword(in p, t1))
+        )
 }
 
 fn postfix_inner(inout p: P) -> Ex {
@@ -3246,15 +3165,10 @@ fn primary_inner(inout p: P) -> Ex {
         if segments == 1 {
             e.sym = tsym(in p, first);
         }
-        e
-            .tiled = segments
-            == 2
-            && tword(in p, first)
-            == w_TiledSeq()
-            && second
-            >= w_load_tile_vec()
-            && second
-            <= w_col_set();
+        e.tiled = segments == 2
+            && tword(in p, first) == w_TiledSeq()
+            && second >= w_load_tile_vec()
+            && second <= w_col_set();
         return e;
     }
     if k == k_l_paren() {
@@ -3303,24 +3217,16 @@ fn primary_inner(inout p: P) -> Ex {
     }
     err(inout p, in "expected expression");
     let k = kind(in p);
-    if p
-        .editor
+    if p.editor
         && (
-        k
-            == k_semi()
-            || k
-            == k_r_brace()
-            || k
-            == k_r_paren()
-            || k
-            == k_r_bracket()
-            || k
-            == k_comma()
-            || k
-            == k_eof()
-            || k
-            == k_let()
-    ) {
+            k == k_semi()
+                || k == k_r_brace()
+                || k == k_r_paren()
+                || k == k_r_bracket()
+                || k == k_comma()
+                || k == k_eof()
+                || k == k_let()
+        ) {
         site(inout p, start, start, 2, 0);
         return ex(x_tuple(), start, start, 0);
     }
@@ -3627,18 +3533,11 @@ fn contextual_item_names(inout p: P) {
     for j in 0..p.sig.len() {
         let i = w32(in p.sig, j);
         let k = tk(in p, i);
-        if depth
-            == 0
-            && k
-            == k_lower()
-            && tword(in p, i)
-            == w_test()
-            && inc(j)
-            < p
-            .sig
-            .len()
-            && tk(in p, w32(in p.sig, inc(j)))
-            == k_l_brace() {
+        if depth == 0
+            && k == k_lower()
+            && tword(in p, i) == w_test()
+            && inc(j) < p.sig.len()
+            && tk(in p, w32(in p.sig, inc(j))) == k_l_brace() {
             skipping_test = true;
         }
         if !skipping_test && previous == k_fn() && k == k_lower() {
