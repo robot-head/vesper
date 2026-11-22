@@ -21,6 +21,11 @@ use @vesper/check-data::types::{
 use @vesper/place-ir::{
     Program
 };
+use self::words::{
+    Ascii,
+    SeqWord,
+    Word,
+};
 use self::fun::{
     add,
     inc,
@@ -283,70 +288,70 @@ fn pattern_names(in p: Program, at: u64, inout out: ChunkSeq[u32], depth: u64) -
 pub fn seq_class(in p: Program, in names: Names, pool: u64) -> u64 {
     let row = p.pool_row(pool);
     if row.kind == POOL_HOISTED {
-        return add(14, w(row.label));
+        return add(SeqWord::Hoisted, w(row.label));
     }
     if row.kind == POOL_GUARD {
-        return 18;
+        return SeqWord::Guard;
     }
     let s = row.label;
     if names.spells(s, in "New".as_bytes())
         || names.spells(s, in "WithCapacity".as_bytes())
         || names.spells(s, in "Swap".as_bytes())
         || names.spells(s, in "Replace".as_bytes()) {
-        return 1;
+        return SeqWord::NoReceiver;
     }
     if names.spells(s, in "Get".as_bytes()) {
-        return 2;
+        return SeqWord::Get;
     }
     if names.spells(s, in "SliceGet".as_bytes()) {
-        return 3;
+        return SeqWord::SliceGet;
     }
     if names.spells(s, in "Set".as_bytes()) {
-        return 4;
+        return SeqWord::Set;
     }
     if names.spells(s, in "SliceSet".as_bytes()) {
-        return 5;
+        return SeqWord::SliceSet;
     }
     if names.spells(s, in "TryGet".as_bytes()) {
-        return 6;
+        return SeqWord::TryGet;
     }
     if names.spells(s, in "TrySet".as_bytes()) {
-        return 7;
+        return SeqWord::TrySet;
     }
     if names.spells(s, in "Len".as_bytes()) {
-        return 8;
+        return SeqWord::Len;
     }
     if names.spells(s, in "SliceLen".as_bytes()) {
-        return 9;
+        return SeqWord::SliceLen;
     }
     if names.spells(s, in "AsSlice".as_bytes()) {
-        return 10;
+        return SeqWord::AsSlice;
     }
     if names.spells(s, in "SubSlice".as_bytes()) {
-        return 11;
+        return SeqWord::SubSlice;
     }
     if names.spells(s, in "Str(AsBytes)".as_bytes()) {
-        return 12;
+        return SeqWord::AsBytes;
     }
     if names.spells(s, in "Str(Len)".as_bytes()) {
-        return 13;
+        return SeqWord::StrLen;
     }
     if names.spells(s, in "Hoisted(Get)".as_bytes()) {
-        return 14;
+        return add(SeqWord::Hoisted, 0);
     }
     if names.spells(s, in "Hoisted(Set)".as_bytes()) {
-        return 15;
+        return add(SeqWord::Hoisted, 1);
     }
     if names.spells(s, in "Hoisted(TryGet)".as_bytes()) {
-        return 16;
+        return add(SeqWord::Hoisted, 2);
     }
     if names.spells(s, in "Hoisted(TrySet)".as_bytes()) {
-        return 17;
+        return add(SeqWord::Hoisted, 3);
     }
     if names.has_prefix(s, in "BoundsGuard".as_bytes()) {
-        return 18;
+        return SeqWord::Guard;
     }
-    0
+    SeqWord::Any
 }
 
 impl Enc {
@@ -364,31 +369,31 @@ impl Enc {
                     } else {
                         0
                     };
-                    self.put(0);
+                    self.put(Word::Int);
                     self.put(1);
                     self.put(nlo);
                     self.put(wrapping_add(hi ^ 18446744073709551615, carry));
                 } else {
-                    self.put(0);
+                    self.put(Word::Int);
                     self.put(0);
                     self.put(lo);
                     self.put(hi);
                 }
             } else {
-                self.put(1);
+                self.put(Word::Other);
             }
         } else if op == OP_UNIT {
-            self.put(16);
+            self.put(Word::Unit);
         } else if op == OP_LOOP {
-            self.put(2);
+            self.put(Word::Loop);
         } else if op == OP_READ {
             // root, path, pass, projections
-            self.put(3);
+            self.put(Word::Read);
             self.name(in names, n32(p.op(a)));
             self.put(p.op(add(a, 2)));
             self.path(in p, in names, p.op(inc(a)));
         } else if op == OP_BIND {
-            self.put(4);
+            self.put(Word::Bind);
             self.put(p.op(a));
             let pat = inc(a);
             if p.op(pat) == PAT_BIND {
@@ -405,13 +410,13 @@ impl Enc {
             }
         } else if op == OP_WRITE {
             // place (dotted), op, value
-            self.put(5);
+            self.put(Word::Write);
             self.put(p.op(add(a, 2)));
             let mut text: ChunkSeq[u8] = ChunkSeq::new[u8]();
             names.write(n32(p.op(a)), inout text);
             let mut dots: u64 = 0;
             for i in 0..text.len() {
-                if u8_at(in text, i) == 46 {
+                if u8_at(in text, i) == Ascii::Dot {
                     dots = inc(dots);
                 }
             }
@@ -420,7 +425,7 @@ impl Enc {
             let mut first = true;
             for i in 0..text.len() {
                 let c = u8_at(in text, i);
-                if c == 46 {
+                if c == Ascii::Dot {
                     self.bytes_name(in part.as_slice());
                     if first {
                         self.put(dots);
@@ -436,7 +441,7 @@ impl Enc {
                 self.put(0);
             }
         } else if op == OP_UNARY || op == OP_PROJECT {
-            self.put(6);
+            self.put(Word::One);
             let v = if op == OP_UNARY {
                 p.op(inc(a))
             } else {
@@ -444,58 +449,58 @@ impl Enc {
             };
             self.put(v);
         } else if op == OP_TRY || op == OP_EXIT {
-            self.put(6);
+            self.put(Word::One);
             self.put(p.op(a));
         } else if op == OP_BINARY {
-            self.put(7);
+            self.put(Word::Binary);
             self.name(in names, n32(p.op(a)));
             self.put(p.op(inc(a)));
             self.put(p.op(add(a, 2)));
         } else if op == OP_INDEX {
-            self.put(8);
+            self.put(Word::List);
             self.put(2);
             self.put(p.op(a));
             self.put(p.op(inc(a)));
         } else if op == OP_TUPLE {
-            self.put(8);
+            self.put(Word::List);
             let end = self.values_at(in p, a);
         } else if op == OP_VECTOR {
-            self.put(8);
+            self.put(Word::List);
             let end = self.values_at(in p, inc(a));
         } else if op == OP_DATA {
-            self.put(8);
+            self.put(Word::List);
             let n = p.op(inc(a));
             self.put(n);
             for i in 0..n {
                 self.put(p.op(add(add(a, 3), wrapping_mul(i, 2))));
             }
         } else if op == OP_CALL {
-            self.put(9);
+            self.put(Word::Call);
             self.name(in names, n32(p.op(a)));
             let end = self.args(in p, in names, inc(a));
         } else if op == OP_SEQ {
-            self.put(10);
+            self.put(Word::Seq);
             self.put(seq_class(in p, in names, p.op(a)));
             let end = self.args(in p, in names, inc(a));
         } else if op == OP_TILED {
-            self.put(11);
+            self.put(Word::Tiled);
             let end = self.args(in p, in names, inc(a));
         } else if op == OP_FIP {
-            self.put(12);
+            self.put(Word::Fip);
             let end = self.args(in p, in names, inc(a));
         } else if op == OP_INDIRECT {
-            self.put(13);
+            self.put(Word::Indirect);
             self.put(p.op(a));
             let end = self.args(in p, in names, inc(a));
         } else if op == OP_CLOSURE {
-            self.put(14);
+            self.put(Word::Closure);
         } else if op == OP_HANDLE {
-            self.put(15);
+            self.put(Word::Handle);
             self.put(p.op(a));
             self.put(p.op(inc(a)));
         } else {
             // not an opcode
-            self.put(16);
+            self.put(Word::Unit);
         }
     }
 }
