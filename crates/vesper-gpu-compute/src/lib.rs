@@ -10,23 +10,14 @@
 //!
 //! The development and CI device is Mesa lavapipe, a CPU implementation of
 //! Vulkan; results validate the kernels and the runtime protocol, not GPU
-//! performance or a hardware driver. Unsafe code is confined to
-//! [`runtime`].
+//! performance or a hardware driver. Every Vulkan call is made by the
+//! Vesper library in `vesper/`; the only unsafe code is its generated
+//! binding (`port/binding.rs`), used by [`runtime`].
 #![deny(unsafe_code)]
 
 pub mod broadphase;
 pub mod error;
-#[cfg(not(vesper_port))]
-#[allow(unsafe_code)]
 pub mod runtime;
-/// The same API over the Vesper runtime in `vesper/` (feature `vesper-port`).
-#[cfg(vesper_port)]
-#[path = "runtime_port.rs"]
-pub mod runtime;
-// The Vesper build makes no ash call; ash stays a dependency of the default
-// Rust build until the flip.
-#[cfg(vesper_port)]
-use ash as _;
 pub mod shader;
 pub mod tensor;
 

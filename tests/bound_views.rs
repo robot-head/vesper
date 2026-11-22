@@ -3,8 +3,9 @@
 //! `t[a..b]`, `q.as_slice()`) of an `in` parameter or of another bound view,
 //! and a slice view may be the receiver of a reading `Slice` method
 //! (`b[a..c].find_byte(x)`). Views stay second-class: they cannot be
-//! returned, stored, moved or mutated, and views of places the function may
-//! change stay refused. The evaluator, both JIT configurations and an
+//! returned, stored, moved or mutated, and a view of a place the function
+//! may change freezes that place while the view is in scope
+//! (tests/slice_values.rs). The evaluator, both JIT configurations and an
 //! executable agree.
 use std::{
     fs,
@@ -186,17 +187,19 @@ fn main() -> u64 {
 }
 
 #[test]
-fn views_of_changing_places_stay_refused() {
+fn views_of_changing_places_freeze_them() {
     for (body, code, needle) in [
+        // A view of a place the function may change freezes the place
+        // while the view is in scope (tests/slice_values.rs).
         (
             "fn f() -> u64 { let mut s = String::new(); let b = s.as_bytes(); s.push_str(in \"x\"); b.len() }",
             "E1531",
-            "second-class",
+            "while the view 'b' of it is in scope",
         ),
         (
             "fn f(inout s: String) -> u64 { let b = s.as_bytes(); s.push_str(in \"x\"); b.len() }",
             "E1531",
-            "second-class",
+            "while the view 'b' of it is in scope",
         ),
         (
             "fn f(in s: Str) -> u64 { let mut b = s.as_bytes(); b.len() }",
@@ -204,14 +207,14 @@ fn views_of_changing_places_stay_refused() {
             "second-class",
         ),
         (
-            "fn f(sink s: ChunkSeq[u8]) -> u64 { let b = s[0..1]; b.len() }",
-            "E1521",
-            "second-class",
+            "fn f(inout s: ChunkSeq[u8]) -> u64 { let b = s.as_slice(); s.push(1); b.len() }",
+            "E1531",
+            "cannot write or lend 'inout' 's'",
         ),
         (
-            "fn f(inout s: ChunkSeq[u8]) -> u64 { let b = s.as_slice(); b.len() }",
-            "E1521",
-            "second-class",
+            "fn f(sink s: ChunkSeq[u8]) -> u64 { let b = s[0..1]; ChunkSeq::finish(s); b.len() }",
+            "E1531",
+            "cannot move 's'",
         ),
         (
             "fn f(in s: Str) -> Slice[u8] { let b = s.as_bytes(); b }",

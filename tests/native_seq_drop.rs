@@ -466,7 +466,8 @@ fn rejected(source: &str, code: &str) {
 
 /// The checker refuses every program that could reach a dropped sequence,
 /// so a drop never frees memory still in use: a use after a move or after a
-/// by-value call, a slice that outlives its statement, and a returned view.
+/// by-value call, a change to a sequence while a bound view of it is in
+/// scope, a mutable view binding, and a returned view.
 #[test]
 fn the_checker_refuses_use_after_drop() {
     let moved = rejected_code(
@@ -476,8 +477,13 @@ fn the_checker_refuses_use_after_drop() {
         "fn take(sink s: ChunkSeq[u64]) -> u64 { 0 }\nfn main() -> u64 { let mut a: ChunkSeq[u64] = ChunkSeq::new[u64](); let n = take(a); wrapping_add(n, a.len()) }",
     );
     assert_eq!(moved, consumed, "both are uses of a moved sequence");
+    // A bound view freezes its source until its block ends.
     rejected(
-        "fn main() -> u64 { let mut s: ChunkSeq[u64] = ChunkSeq::new[u64](); let v = s.as_slice(); 0 }",
+        "fn main() -> u64 { let mut s: ChunkSeq[u64] = ChunkSeq::new[u64](); let v = s.as_slice(); s.clear(); v.len() }",
+        "E1531",
+    );
+    rejected(
+        "fn main() -> u64 { let mut s: ChunkSeq[u64] = ChunkSeq::new[u64](); let mut v = s.as_slice(); 0 }",
         "E1521",
     );
     rejected("fn f(in x: Slice[u64]) -> Slice[u64] { x }", "E1520");

@@ -6097,7 +6097,6 @@ dependencies = [
 name = "vesper-gpu-compute"
 version = "0.1.0"
 dependencies = [
- "ash",
  "bytemuck",
  "naga",
  "vesper-kinetic-seed",
@@ -6396,6 +6395,7 @@ dependencies = [
  "serde",
  "serde_json",
  "toml 0.8.23",
+ "toml_edit 0.22.27",
  "vesper-bench",
  "vesper-port-abi",
  "vesper-port-harness",

@@ -856,6 +856,21 @@ fn measured_side(f: &mut dyn FnMut() -> std::time::Duration) {
     std::hint::black_box(f());
 }
 
+/// Copies of `all` for Rust's `verify_spent`, each certificate with the
+/// vector capacities the producer gave it (a clone's may differ).
+fn prepared(all: &[Recorded]) -> Vec<(Check, RewriteCertificate)> {
+    all.iter()
+        .map(|r| {
+            let mut cert = r.check.certificate.clone();
+            cert.terms
+                .reserve_exact(r.check.terms_cap - cert.terms.len());
+            cert.proofs
+                .reserve_exact(r.check.proofs_cap - cert.proofs.len());
+            (r.check.clone(), cert)
+        })
+        .collect()
+}
+
 /// ABBA over every genuine proposal: Rust's gate (`verify_spent` on
 /// prepared copies) against the Vesper checker, whole (with its input
 /// decode) and alone (decode subtracted). `CHECK_HARNESS_SPEED=1`.
@@ -866,17 +881,7 @@ fn speed_certificate_checker() {
         return;
     }
     let (all, _) = proposals();
-    let checks: Vec<(Check, RewriteCertificate)> = all
-        .iter()
-        .map(|r| {
-            let mut cert = r.check.certificate.clone();
-            cert.terms
-                .reserve_exact(r.check.terms_cap - cert.terms.len());
-            cert.proofs
-                .reserve_exact(r.check.proofs_cap - cert.proofs.len());
-            (r.check.clone(), cert)
-        })
-        .collect();
+    let checks = prepared(all);
     let cases: Vec<(&Check, bool)> = all.iter().map(|r| (&r.check, false)).collect();
     let input = encode_cases(&cases);
     let verify = verify_entry();
@@ -935,4 +940,86 @@ fn speed_certificate_checker() {
         "verify alone: rust {r:?} vesper {alone:?} (decode {d:?}) ratio {:.2}",
         alone.as_secs_f64() / r.as_secs_f64()
     );
+}
+
+/// The flip gate's checker workloads (scripts/ci/flip-gate/optimize.toml;
+/// `CHECK_HARNESS_SPEED` set, release build), over every genuine proposal.
+/// Each epoch runs Rust, Vesper, Vesper, Rust (`OPTIMIZE_GATE_EPOCHS`,
+/// default 12; `OPTIMIZE_GATE_WORKLOAD` runs only one) and prints one pair
+/// per epoch in the gate's `flip-gate pairs` format:
+/// - `checker`: the Vesper checker alone, its input decode (the
+///   `optimize_decode` entry on the same input, timed in the same epoch)
+///   subtracted, against `verify_spent` on prepared copies.
+/// - `checker-hook`: the Vesper checker with its decode, what the hybrid's
+///   install gate runs per proposal today.
+#[test]
+#[ignore]
+fn flip_gate() {
+    if !speed() {
+        return;
+    }
+    let epochs: usize = std::env::var("OPTIMIZE_GATE_EPOCHS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(12);
+    let (all, _) = proposals();
+    let checks = prepared(all);
+    let cases: Vec<(&Check, bool)> = all.iter().map(|r| (&r.check, false)).collect();
+    let input = encode_cases(&cases);
+    let verify = verify_entry();
+    let decode = package().entry("optimize_decode", true);
+    // One epoch side is about 15 ms of Rust.
+    let rounds = 20;
+    let rust = || {
+        time(|| {
+            for _ in 0..rounds {
+                for (c, cert) in &checks {
+                    let mut spent = c.spent;
+                    let r = witness::verify_spent(
+                        &c.source,
+                        &c.candidate,
+                        &c.types,
+                        cert,
+                        c.limits,
+                        &mut spent,
+                    );
+                    let _ = std::hint::black_box((r, spent));
+                }
+            }
+        })
+        .as_nanos()
+    };
+    let on_input = |e: &Entry| {
+        time(|| {
+            for _ in 0..rounds {
+                std::hint::black_box(e.words(&input));
+            }
+        })
+        .as_nanos()
+    };
+    // Warm-up, untimed.
+    rust();
+    on_input(verify);
+    on_input(&decode);
+    let only = std::env::var("OPTIMIZE_GATE_WORKLOAD").ok();
+    let wants = |w: &str| only.as_deref().is_none_or(|o| o == w);
+    let (mut alone, mut hook) = (String::new(), String::new());
+    for _ in 0..epochs {
+        if wants("checker") {
+            let (r1, v1, d1) = (rust(), on_input(verify), on_input(&decode));
+            let (d2, v2, r2) = (on_input(&decode), on_input(verify), rust());
+            let pass = (v1 + v2).saturating_sub(d1 + d2);
+            alone += &format!(" {}:{}", r1 + r2, pass);
+        }
+        if wants("checker-hook") {
+            let (r1, v1, v2, r2) = (rust(), on_input(verify), on_input(verify), rust());
+            hook += &format!(" {}:{}", r1 + r2, v1 + v2);
+        }
+    }
+    if wants("checker") {
+        println!("flip-gate pairs checker{alone}");
+    }
+    if wants("checker-hook") {
+        println!("flip-gate pairs checker-hook{hook}");
+    }
 }
