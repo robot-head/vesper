@@ -683,3 +683,17 @@ fn measure_in_place_against_copies() {
         b / a
     );
 }
+
+#[test]
+fn a_derived_pinned_view_ends_at_its_outer_block() {
+    let view = "let all = p.data.as_slice(); let tail = all[1..2]; tail.len()";
+    let header = "fn f(inout s: Socket, in p: Pinned[u8]) -> u64 eff [Ffi[Xsk]]";
+    let call = "Xsk::xsk_kernel_rx(inout s, 1);";
+    let ok = format!("{PRELUDE}\n{header} {{ let n = {{ {view} }}; {call} n }}");
+    ffi_lowering::check_source(&ok, &imports(LINUX)).unwrap_or_else(|e| panic!("{e}"));
+
+    let body = format!(
+        "{header} {{ let all = p.data.as_slice(); let n = {{ let tail = all[1..2]; tail.len() }}; {call} n }}"
+    );
+    assert_eq!(refused(&body).kind, FfiErrorKind::BufferMisuse);
+}

@@ -352,7 +352,7 @@ fn join(in dir: Slice[u8], in name: Slice[u8], windows: bool) -> ChunkSeq[u8] {
 }
 
 // Whether `dir` is an ordinary Windows drive prefix and nothing else: `X:`
-// (`Prefix::Disk`, with `X` an ASCII letter). Verbatim `\\?\X:` is excluded.
+// (`Prefix::Disk`, with `X` an ASCII letter; the only prefix `is_drive()` accepts).
 fn bare_drive(in dir: Slice[u8]) -> bool {
     dir.len() == 2 && ascii_letter(byte_at(in dir, 0)) && byte_at(in dir, 1) == 58
 }
