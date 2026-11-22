@@ -1,0 +1,1370 @@
+// HTTP/3 client-side connection state machine (`ClientConnection` in
+// `src/client.rs`): request/response lifecycle, interim responses,
+// server-initiated WebTransport bidi stream sniffing, GOAWAY cutoff, and
+// extended CONNECT sessions.
+
+use self::{
+    ConnectionError,
+    ClientError,
+    QpackError,
+    FrameError,
+    Priority,
+    PriorityUpdate,
+    H3ConfigAbi,
+    SessionKind,
+    SessionError,
+    ResponseParts,
+    EncoderCore,
+    DecoderCore,
+    Huff,
+    ClientCore
+};
+use self::int::{
+    inc,
+    sat_sub,
+    word,
+    remove_word
+};
+use self::varint::{
+    put_record
+};
+use self::frame::{
+    data_type,
+    headers_type
+};
+use self::priority::{
+    priority_update_write
+};
+use self::encoder::{
+    enc_encode
+};
+use self::decoder::{
+    dec_decode_section
+};
+use self::message::{
+    message_parse_response,
+    message_check_trailers
+};
+use self::pool::{
+    MODE_HEADER,
+    FRAME_NONE,
+    FRAME_DATA,
+    FRAME_HEADERS,
+    FRAME_WT_STREAM,
+    FRAME_UNKNOWN,
+    CMD_STOP_SENDING,
+    CMD_RESET,
+    HEV_CLIENT_RESPONSE,
+    HEV_CLIENT_INTERIM,
+    HEV_CLIENT_SESSION_EST,
+    HEV_CLIENT_FAILED,
+    HEV_CLIENT_GOAWAY,
+    q_len,
+    q_push,
+    q_consume,
+    q_clear,
+    q_transfer,
+    q_drain_all_to,
+    put_u64_le,
+    get_u64_le,
+    pooled_frame_at_boundary,
+    pooled_frame_next,
+    bsearch_u64,
+    insert_word,
+    out_queued,
+    out_queue,
+    out_queue_fin,
+    out_discard,
+    push_cmd
+};
+use self::session::{
+    CODE_EXCESSIVE_LOAD,
+    CODE_REQUEST_REJECTED,
+    CODE_REQUEST_CANCELLED,
+    CODE_REQUEST_INCOMPLETE,
+    CODE_MESSAGE_ERROR,
+    CODE_WT_BUFFERED_STREAM_REJECTED,
+    webtransport_negotiated,
+    session_known_gone,
+    add_session,
+    establish_session,
+    incoming_wt_stream_fin,
+    end_session,
+    forget_session,
+    session_data,
+    session_fin_ok,
+    queue_session_close
+};
+use self::core::{
+    conn_core_new,
+    core_cancel_stream,
+    build_msg_meta,
+    sec_total_bytes,
+    pack_trailers_to_pool,
+    unpack_fields_to_hev
+};
+
+const MAX_SNIFFED: u64 = 16;
+
+const C_PHASE_HEADERS: u64 = 0;
+const C_PHASE_BLOCKED_HDR: u64 = 1;
+const C_PHASE_BLOCKED_TRL: u64 = 2;
+const C_PHASE_BODY: u64 = 3;
+const C_PHASE_TRAILERS: u64 = 4;
+const C_PHASE_TUNNEL: u64 = 5;
+
+const CF_FIN: u64 = 1;
+const CF_HAS_CL: u64 = 2;
+const CF_HEAD_REQ: u64 = 4;
+const CF_CONNECT: u64 = 8;
+const CF_SENDING: u64 = 16;
+const CF_BODYLESS: u64 = 32;
+
+pub fn client_core_new(cfg: H3ConfigAbi) -> ClientCore {
+    ClientCore {
+        conn: conn_core_new(cfg, false),
+        c_id: ChunkSeq::new[u64](),
+        c_phase: ChunkSeq::new[u64](),
+        c_flags: ChunkSeq::new[u64](),
+        c_rx_q: ChunkSeq::new[u64](),
+        c_fr_mode: ChunkSeq::new[u64](),
+        c_fr_rem: ChunkSeq::new[u64](),
+        c_fr_ty: ChunkSeq::new[u64](),
+        c_fr_len: ChunkSeq::new[u64](),
+        c_body_q: ChunkSeq::new[u64](),
+        c_head_q: ChunkSeq::new[u64](),
+        c_trl_q: ChunkSeq::new[u64](),
+        c_cl: ChunkSeq::new[u64](),
+        c_status: ChunkSeq::new[u16](),
+        sn_id: ChunkSeq::new[u64](),
+        sn_rx_q: ChunkSeq::new[u64](),
+        sn_fr_mode: ChunkSeq::new[u64](),
+        sn_fr_rem: ChunkSeq::new[u64](),
+        sn_fr_ty: ChunkSeq::new[u64](),
+        sn_fr_len: ChunkSeq::new[u64](),
+        goaway_seen: Option::None,
+    }
+}
+
+fn phase_is_blocked(phase: u64) -> bool {
+    phase == C_PHASE_BLOCKED_HDR || phase == C_PHASE_BLOCKED_TRL
+}
+
+fn remove_stream_at(inout c: ClientCore, idx: u64) {
+    let rxq = word(in c.c_rx_q.as_slice(), idx);
+    let bq = word(in c.c_body_q.as_slice(), idx);
+    let hq = word(in c.c_head_q.as_slice(), idx);
+    let tq = word(in c.c_trl_q.as_slice(), idx);
+    let _c1 = q_clear(inout c.conn.pool, rxq);
+    let _c2 = q_clear(inout c.conn.pool, bq);
+    let _c3 = q_clear(inout c.conn.pool, hq);
+    let _c4 = q_clear(inout c.conn.pool, tq);
+    remove_word(inout c.c_id, idx);
+    remove_word(inout c.c_phase, idx);
+    remove_word(inout c.c_flags, idx);
+    remove_word(inout c.c_rx_q, idx);
+    remove_word(inout c.c_fr_mode, idx);
+    remove_word(inout c.c_fr_rem, idx);
+    remove_word(inout c.c_fr_ty, idx);
+    remove_word(inout c.c_fr_len, idx);
+    remove_word(inout c.c_body_q, idx);
+    remove_word(inout c.c_head_q, idx);
+    remove_word(inout c.c_trl_q, idx);
+    remove_word(inout c.c_cl, idx);
+    let n = c.c_status.len();
+    let _m = c.c_status.try_copy_within(inc(idx), n, idx);
+    c.c_status.truncate(wrapping_sub(n, 1));
+}
+
+fn insert_status_u16(inout s: ChunkSeq[u16], i: u64, v: u16) {
+    let n = s.len();
+    s.push(v);
+    if i < n {
+        let _m = s.try_copy_within(i, n, inc(i));
+        let _x = s.try_set(i, v);
+    }
+}
+
+fn remove_sniff_at(inout c: ClientCore, idx: u64, clear_q: bool) {
+    if clear_q {
+        let _c = q_clear(inout c.conn.pool, word(in c.sn_rx_q.as_slice(), idx));
+    }
+    remove_word(inout c.sn_id, idx);
+    remove_word(inout c.sn_rx_q, idx);
+    remove_word(inout c.sn_fr_mode, idx);
+    remove_word(inout c.sn_fr_rem, idx);
+    remove_word(inout c.sn_fr_ty, idx);
+    remove_word(inout c.sn_fr_len, idx);
+}
+
+fn push_hev_record(inout c: ClientCore, kind: u64, words: Slice[u64]) {
+    c.conn.hev.kinds.push(kind);
+    c.conn.hev.wpos.push(c.conn.hev.words.len());
+    for i in 0..words.len() {
+        c.conn.hev.words.push(word(in words, i));
+    }
+}
+
+fn push_hev_1(inout c: ClientCore, kind: u64, w0: u64) {
+    c.conn.hev.kinds.push(kind);
+    c.conn.hev.wpos.push(c.conn.hev.words.len());
+    c.conn.hev.words.push(w0);
+}
+
+fn push_hev_2(inout c: ClientCore, kind: u64, w0: u64, w1: u64) {
+    c.conn.hev.kinds.push(kind);
+    c.conn.hev.wpos.push(c.conn.hev.words.len());
+    c.conn.hev.words.push(w0);
+    c.conn.hev.words.push(w1);
+}
+
+pub fn client_ready_check(in c: ClientCore) -> Option[ClientError] {
+    match c.conn.error {
+        Option::Some(e) => return Option::Some(ClientError::Failed(e)),
+        Option::None => {}
+    }
+    match c.conn.goaway_received {
+        Option::Some(_) => return Option::Some(ClientError::GoingAway),
+        Option::None => {}
+    }
+    Option::None
+}
+
+pub fn client_check_open_session(
+    in c: ClientCore,
+    has_proto: bool,
+    is_connect: bool,
+    is_wt: bool,
+) -> Result[Unit, ClientError] {
+    match client_ready_check(in c) {
+        Option::Some(e) => return Result::Err(e),
+        Option::None => {}
+    }
+    if !c.conn.has_local {
+        return Result::Err(ClientError::NotReady);
+    }
+    let peer = match c.conn.peer_settings {
+        Option::Some(p) => p,
+        Option::None => return Result::Err(ClientError::NotReady),
+    };
+    if !has_proto {
+        return Result::Err(ClientError::Unsupported);
+    }
+    if !peer.enable_connect_protocol || !is_connect {
+        return Result::Err(ClientError::Unsupported);
+    }
+    if is_wt && !webtransport_negotiated(c.conn.sent_settings, c.conn.peer_settings) {
+        return Result::Err(ClientError::Unsupported);
+    }
+    Result::Ok(())
+}
+
+pub fn client_register_request(
+    inout c: ClientCore,
+    inout enc: EncoderCore,
+    in h: Huff,
+    id: u64,
+    fin: bool,
+    is_head: bool,
+    is_connect: bool,
+    is_session: bool,
+    wt_session: bool,
+    in bytes: Slice[u8],
+    in meta: Slice[u64],
+    in body: Slice[u8],
+) {
+    let block = enc_encode(inout enc, in h, id, in bytes, in meta);
+    c.conn.scratch.clear();
+    let _ok1 = put_record(inout c.conn.scratch, headers_type(), in block.as_slice());
+    if body.len() > 0 {
+        let _ok2 = put_record(inout c.conn.scratch, data_type(), in body);
+    }
+    out_queue(inout c.conn.out, inout c.conn.pool, id, in c.conn.scratch.as_slice());
+    if fin {
+        out_queue_fin(inout c.conn.out, id);
+    }
+    let flags = (
+        if is_head {
+            CF_HEAD_REQ
+        } else {
+            0
+        }
+    ) | (
+        if is_connect {
+            CF_CONNECT
+        } else {
+            0
+        }
+    ) | (
+        if !fin {
+            CF_SENDING
+        } else {
+            0
+        }
+    );
+    let f = bsearch_u64(in c.c_id.as_slice(), id);
+    if !f.found {
+        insert_word(inout c.c_id, f.idx, id);
+        insert_word(inout c.c_phase, f.idx, C_PHASE_HEADERS);
+        insert_word(inout c.c_flags, f.idx, flags);
+        insert_word(inout c.c_rx_q, f.idx, 0);
+        insert_word(inout c.c_fr_mode, f.idx, MODE_HEADER);
+        insert_word(inout c.c_fr_rem, f.idx, 0);
+        insert_word(inout c.c_fr_ty, f.idx, 0);
+        insert_word(inout c.c_fr_len, f.idx, 0);
+        insert_word(inout c.c_body_q, f.idx, 0);
+        insert_word(inout c.c_head_q, f.idx, 0);
+        insert_word(inout c.c_trl_q, f.idx, 0);
+        insert_word(inout c.c_cl, f.idx, 0);
+        insert_status_u16(inout c.c_status, f.idx, 0);
+    }
+    if is_session {
+        let kind = if wt_session {
+            SessionKind::WebTransport
+        } else {
+            SessionKind::Tunnel
+        };
+        add_session(inout c.conn.sess, id, kind);
+    }
+}
+
+pub fn client_send_body(inout c: ClientCore, id: u64, in data: Slice[u8])
+    -> Result[Unit, ClientError] {
+    let f = bsearch_u64(in c.c_id.as_slice(), id);
+    if !f.found || (word(in c.c_flags.as_slice(), f.idx) & CF_SENDING) == 0 {
+        return Result::Err(ClientError::UnknownStream);
+    }
+    if wrapping_add(wrapping_add(out_queued(in c.conn.out, in c.conn.pool, id), data.len()), 9)
+        > c.conn.cfg.max_stream_buffer {
+        return Result::Err(ClientError::BufferFull);
+    }
+    c.conn.scratch.clear();
+    let _ok = put_record(inout c.conn.scratch, data_type(), in data);
+    out_queue(inout c.conn.out, inout c.conn.pool, id, in c.conn.scratch.as_slice());
+    Result::Ok(())
+}
+
+pub fn client_finish_body(inout c: ClientCore, id: u64) -> Result[Unit, ClientError] {
+    let f = bsearch_u64(in c.c_id.as_slice(), id);
+    if !f.found {
+        return Result::Err(ClientError::UnknownStream);
+    }
+    let flags = word(in c.c_flags.as_slice(), f.idx);
+    if (flags & CF_SENDING) == 0 || (flags & CF_CONNECT) != 0 {
+        return Result::Err(ClientError::UnknownStream);
+    }
+    let _sf = c.c_flags.try_set(f.idx, flags & (~CF_SENDING));
+    out_queue_fin(inout c.conn.out, id);
+    Result::Ok(())
+}
+
+pub fn client_close_session(inout c: ClientCore, session: u64, code: u32, in reason: Slice[u8])
+    -> Result[Unit, SessionError] {
+    let f = bsearch_u64(in c.c_id.as_slice(), session);
+    let ok = if f.found {
+        let flags = word(in c.c_flags.as_slice(), f.idx);
+        (flags & CF_CONNECT) != 0 && (flags & CF_SENDING) != 0
+    } else {
+        false
+    };
+    if !ok {
+        return Result::Err(SessionError::NotEstablished);
+    }
+    match queue_session_close(
+        in c.conn.sess,
+        inout c.conn.pool,
+        inout c.conn.out,
+        session,
+        code,
+        in reason,
+    ) {
+        Result::Ok(_) => {}
+        Result::Err(e) => return Result::Err(e),
+    }
+    let f2 = bsearch_u64(in c.c_id.as_slice(), session);
+    if f2.found {
+        let flags = word(in c.c_flags.as_slice(), f2.idx);
+        let _sf = c.c_flags.try_set(f2.idx, flags & (~CF_SENDING));
+    }
+    let empty = ChunkSeq::new[u8]();
+    end_session(
+        inout c.conn.sess,
+        inout c.conn.pool,
+        inout c.conn.out,
+        inout c.conn.cmd,
+        inout c.conn.sev,
+        inout c.conn.unparsed,
+        session,
+        code,
+        in empty.as_slice(),
+        false,
+        0,
+        false,
+    );
+    Result::Ok(())
+}
+
+pub fn client_update_priority(inout c: ClientCore, stream_id: u64, priority: Priority)
+    -> Result[Unit, ClientError] {
+    if (stream_id & 2) != 0 || (stream_id & 1) != 0 {
+        return Result::Err(ClientError::UnknownStream);
+    }
+    match client_ready_check(in c) {
+        Option::Some(e) => return Result::Err(e),
+        Option::None => {}
+    }
+    if !c.conn.has_local {
+        return Result::Err(ClientError::NotReady);
+    }
+    let mut pbuf = ChunkSeq::new[u8]();
+    let u = PriorityUpdate {
+        push: false,
+        element_id: stream_id,
+        priority: priority,
+    };
+    let _ok = priority_update_write(u, inout pbuf);
+    out_queue(inout c.conn.out, inout c.conn.pool, c.conn.local_control, in pbuf.as_slice());
+    Result::Ok(())
+}
+
+pub fn client_cancel(inout c: ClientCore, inout dec: DecoderCore, id: u64) {
+    let f = bsearch_u64(in c.c_id.as_slice(), id);
+    if f.found {
+        let flags = word(in c.c_flags.as_slice(), f.idx);
+        let is_conn = (flags & CF_CONNECT) != 0;
+        remove_stream_at(inout c, f.idx);
+        core_cancel_stream(inout c.conn, inout dec, id);
+        out_discard(inout c.conn.out, inout c.conn.pool, id);
+        push_cmd(inout c.conn.cmd, CMD_STOP_SENDING, id, CODE_REQUEST_CANCELLED);
+        push_cmd(inout c.conn.cmd, CMD_RESET, id, CODE_REQUEST_CANCELLED);
+        if is_conn {
+            let empty = ChunkSeq::new[u8]();
+            end_session(
+                inout c.conn.sess,
+                inout c.conn.pool,
+                inout c.conn.out,
+                inout c.conn.cmd,
+                inout c.conn.sev,
+                inout c.conn.unparsed,
+                id,
+                0,
+                in empty.as_slice(),
+                false,
+                0,
+                false,
+            );
+            forget_session(inout c.conn.sess, inout c.conn.pool, id);
+        }
+    }
+}
+
+pub fn client_accept_bidi_need_sniff(in c: ClientCore, id: u64) -> Result[bool, ConnectionError] {
+    match c.conn.sent_settings.webtransport_max_sessions {
+        Option::Some(_) => Result::Ok(c.sn_id.len() >= MAX_SNIFFED),
+        Option::None => Result::Err(
+            ConnectionError::StreamCreation {
+                stream_id: id
+            }
+        ),
+    }
+}
+
+pub fn client_accept_bidi_finish(inout c: ClientCore, id: u64) {
+    if c.sn_id.len() < MAX_SNIFFED {
+        let f = bsearch_u64(in c.sn_id.as_slice(), id);
+        if !f.found {
+            insert_word(inout c.sn_id, f.idx, id);
+            insert_word(inout c.sn_rx_q, f.idx, 0);
+            insert_word(inout c.sn_fr_mode, f.idx, MODE_HEADER);
+            insert_word(inout c.sn_fr_rem, f.idx, 0);
+            insert_word(inout c.sn_fr_ty, f.idx, 0);
+            insert_word(inout c.sn_fr_len, f.idx, 0);
+        }
+    } else {
+        c.conn.sess.stats.streams_rejected = inc(c.conn.sess.stats.streams_rejected);
+        push_cmd(inout c.conn.cmd, CMD_STOP_SENDING, id, CODE_WT_BUFFERED_STREAM_REJECTED);
+        push_cmd(inout c.conn.cmd, CMD_RESET, id, CODE_WT_BUFFERED_STREAM_REJECTED);
+    }
+}
+
+pub fn client_sniff_err(inout c: ClientCore, id: u64) {
+    let f = bsearch_u64(in c.sn_id.as_slice(), id);
+    if f.found {
+        remove_sniff_at(inout c, f.idx, true);
+    }
+}
+
+pub fn client_sniff_data(inout c: ClientCore, id: u64, in bytes: Slice[u8], fin: bool)
+    -> Result[Unit, ConnectionError] {
+    let f = bsearch_u64(in c.sn_id.as_slice(), id);
+    if !f.found {
+        return Result::Ok(());
+    }
+    let rxq = q_push(inout c.conn.pool, word(in c.sn_rx_q.as_slice(), f.idx), in bytes);
+    let _uq = c.sn_rx_q.try_set(f.idx, rxq);
+    let mode = word(in c.sn_fr_mode.as_slice(), f.idx);
+    let rem = word(in c.sn_fr_rem.as_slice(), f.idx);
+    let ty = word(in c.sn_fr_ty.as_slice(), f.idx);
+    let flen = word(in c.sn_fr_len.as_slice(), f.idx);
+
+    let step = match pooled_frame_next(
+        inout c.conn.pool,
+        inout c.conn.scratch,
+        rxq,
+        mode,
+        rem,
+        ty,
+        flen,
+        c.conn.cfg.max_frame_payload,
+        true,
+    ) {
+        Result::Ok(st) => st,
+        Result::Err(_) => return Result::Err(
+            ConnectionError::StreamCreation {
+                stream_id: id
+            }
+        ),
+    };
+
+    if step.kind == FRAME_WT_STREAM {
+        let _uq2 = c.sn_rx_q.try_set(f.idx, step.rx_q);
+        remove_sniff_at(inout c, f.idx, false);
+        let session = step.val;
+        let gone = session_known_gone(
+            in c.conn.sess,
+            in c.conn.unparsed,
+            false,
+            c.conn.next_peer_bidi,
+            session,
+        );
+        return incoming_wt_stream_fin(
+            inout c.conn.sess,
+            inout c.conn.pool,
+            inout c.conn.cmd,
+            inout c.conn.sev,
+            id,
+            session,
+            true,
+            step.rx_q,
+            gone,
+            fin,
+        );
+    }
+    if step.kind == FRAME_NONE && !fin {
+        let _q = c.sn_rx_q.try_set(f.idx, step.rx_q);
+        let _m = c.sn_fr_mode.try_set(f.idx, step.mode);
+        let _r = c.sn_fr_rem.try_set(f.idx, step.rem);
+        let _t = c.sn_fr_ty.try_set(f.idx, step.ty);
+        let _l = c.sn_fr_len.try_set(f.idx, step.flen);
+        return Result::Ok(());
+    }
+    Result::Err(
+        ConnectionError::StreamCreation {
+            stream_id: id
+        }
+    )
+}
+
+pub fn client_handle_goaway(inout c: ClientCore) {
+    match c.conn.goaway_received {
+        Option::Some(g) => {
+            let need = match c.goaway_seen {
+                Option::Some(prev) => g < prev,
+                Option::None => true,
+            };
+            if need {
+                c.goaway_seen = Option::Some(g);
+                push_hev_1(inout c, HEV_CLIENT_GOAWAY, g);
+                let empty = ChunkSeq::new[u8]();
+                let mut i: u64 = 0;
+                loop {
+                    if i >= c.c_id.len() {
+                        break;
+                    }
+                    let sid = word(in c.c_id.as_slice(), i);
+                    if sid >= g {
+                        remove_stream_at(inout c, i);
+                        end_session(
+                            inout c.conn.sess,
+                            inout c.conn.pool,
+                            inout c.conn.out,
+                            inout c.conn.cmd,
+                            inout c.conn.sev,
+                            inout c.conn.unparsed,
+                            sid,
+                            0,
+                            in empty.as_slice(),
+                            false,
+                            0,
+                            false,
+                        );
+                        push_hev_2(inout c, HEV_CLIENT_FAILED, sid, CODE_REQUEST_REJECTED);
+                    } else {
+                        i = inc(i);
+                    }
+                }
+            }
+        }
+        Option::None => {}
+    }
+}
+
+fn malformed(inout c: ClientCore, inout dec: DecoderCore, id: u64, code: u64) {
+    c.conn.stats.malformed = inc(c.conn.stats.malformed);
+    core_cancel_stream(inout c.conn, inout dec, id);
+    let f = bsearch_u64(in c.c_id.as_slice(), id);
+    if f.found {
+        let flags = word(in c.c_flags.as_slice(), f.idx);
+        let is_conn = (flags & CF_CONNECT) != 0;
+        remove_stream_at(inout c, f.idx);
+        if is_conn {
+            let empty = ChunkSeq::new[u8]();
+            end_session(
+                inout c.conn.sess,
+                inout c.conn.pool,
+                inout c.conn.out,
+                inout c.conn.cmd,
+                inout c.conn.sev,
+                inout c.conn.unparsed,
+                id,
+                0,
+                in empty.as_slice(),
+                true,
+                code,
+                true,
+            );
+            forget_session(inout c.conn.sess, inout c.conn.pool, id);
+            push_cmd(inout c.conn.cmd, CMD_RESET, id, code);
+        }
+    }
+    out_discard(inout c.conn.out, inout c.conn.pool, id);
+    push_cmd(inout c.conn.cmd, CMD_STOP_SENDING, id, code);
+    push_hev_2(inout c, HEV_CLIENT_FAILED, id, code);
+}
+
+fn push_resp_head_event(
+    inout c: ClientCore,
+    event_kind: u64,
+    stream_id: u64,
+    parts: ResponseParts,
+    in bytes: Slice[u8],
+    byte_off: u64,
+    in meta: Slice[u64],
+    meta_start: u64,
+    count: u64,
+) {
+    let base = c.conn.hev.bytes.len();
+    let pseudo_bytes = sec_total_bytes(in meta, meta_start, parts.pseudo);
+    let total_bytes = sec_total_bytes(in meta, meta_start, count);
+    let reg_bytes_len = wrapping_sub(total_bytes, pseudo_bytes);
+    let src_lo = wrapping_add(byte_off, pseudo_bytes);
+    c.conn.hev.bytes.extend(in bytes[src_lo..wrapping_add(src_lo, reg_bytes_len)]);
+    let moff = c.conn.hev.meta.len() / 3;
+    let reg_count = wrapping_sub(count, parts.pseudo);
+    for k in parts.pseudo..count {
+        let m = wrapping_mul(wrapping_add(meta_start, k), 3);
+        c.conn.hev.meta.push(word(in meta, m));
+        c.conn.hev.meta.push(word(in meta, inc(m)));
+        c.conn.hev.meta.push(word(in meta, wrapping_add(m, 2)));
+    }
+    let mut has_cl: u64 = 0;
+    let mut cl: u64 = 0;
+    match parts.content_length {
+        Option::Some(v) => {
+            has_cl = 1;
+            cl = v;
+        }
+        Option::None => {}
+    }
+    let mut w = ChunkSeq::with_capacity[u64](7);
+    w.push(stream_id);
+    w.push(widen_u64(parts.status));
+    w.push(has_cl);
+    w.push(cl);
+    w.push(moff);
+    w.push(reg_count);
+    w.push(base);
+    push_hev_record(inout c, event_kind, w.as_slice());
+}
+
+fn pack_resp_head_to_pool(
+    inout c: ClientCore,
+    parts: ResponseParts,
+    in bytes: Slice[u8],
+    byte_off: u64,
+    in meta: Slice[u64],
+    meta_start: u64,
+    count: u64,
+) -> u64 {
+    let mut b = ChunkSeq::new[u8]();
+    put_u64_le(inout b, widen_u64(parts.status));
+    put_u64_le(inout b, parts.pseudo);
+    match parts.content_length {
+        Option::Some(cl) => {
+            put_u64_le(inout b, 1);
+            put_u64_le(inout b, cl);
+        }
+        Option::None => {
+            put_u64_le(inout b, 0);
+            put_u64_le(inout b, 0);
+        }
+    }
+    let reg_count = wrapping_sub(count, parts.pseudo);
+    let pseudo_bytes = sec_total_bytes(in meta, meta_start, parts.pseudo);
+    let total_bytes = sec_total_bytes(in meta, meta_start, count);
+    let reg_bytes = wrapping_sub(total_bytes, pseudo_bytes);
+    put_u64_le(inout b, reg_count);
+    put_u64_le(inout b, reg_bytes);
+    for k in parts.pseudo..count {
+        let m = wrapping_mul(wrapping_add(meta_start, k), 3);
+        put_u64_le(inout b, word(in meta, m));
+        put_u64_le(inout b, word(in meta, inc(m)));
+        put_u64_le(inout b, word(in meta, wrapping_add(m, 2)));
+    }
+    let src_lo = wrapping_add(byte_off, pseudo_bytes);
+    b.extend(in bytes[src_lo..wrapping_add(src_lo, reg_bytes)]);
+    q_push(inout c.conn.pool, 0, in b.as_slice())
+}
+
+fn fields(
+    inout c: ClientCore,
+    inout dec: DecoderCore,
+    id: u64,
+    trailers: bool,
+    in bytes: Slice[u8],
+    byte_off: u64,
+    in meta: Slice[u64],
+    meta_start: u64,
+    count: u64,
+) {
+    let f = bsearch_u64(in c.c_id.as_slice(), id);
+    if !f.found {
+        return;
+    }
+    build_msg_meta(in meta, meta_start, count, inout c.conn.msg_meta);
+    let total_bytes = sec_total_bytes(in meta, meta_start, count);
+    let bslice = bytes[byte_off..wrapping_add(byte_off, total_bytes)];
+
+    if trailers {
+        match message_check_trailers(in bslice, in c.conn.msg_meta.as_slice()) {
+            Option::Some(_) => {
+                malformed(inout c, inout dec, id, CODE_MESSAGE_ERROR);
+                return;
+            }
+            Option::None => {}
+        }
+        let old_tq = word(in c.c_trl_q.as_slice(), f.idx);
+        let _cl = q_clear(inout c.conn.pool, old_tq);
+        let tq = pack_trailers_to_pool(
+            inout c.conn.pool,
+            inout c.conn.scratch,
+            in bytes,
+            byte_off,
+            in meta,
+            meta_start,
+            count,
+        );
+        let _st = c.c_trl_q.try_set(f.idx, tq);
+        let _sp = c.c_phase.try_set(f.idx, C_PHASE_TRAILERS);
+        return;
+    }
+
+    let parts = match message_parse_response(in bslice, in c.conn.msg_meta.as_slice()) {
+        Result::Ok(p) => p,
+        Result::Err(_) => {
+            malformed(inout c, inout dec, id, CODE_MESSAGE_ERROR);
+            return;
+        }
+    };
+    if parts.status == 101 {
+        malformed(inout c, inout dec, id, CODE_MESSAGE_ERROR);
+        return;
+    }
+    if parts.status < 200 {
+        c.conn.stats.interim_responses = inc(c.conn.stats.interim_responses);
+        push_resp_head_event(
+            inout c,
+            HEV_CLIENT_INTERIM,
+            id,
+            parts,
+            in bytes,
+            byte_off,
+            in meta,
+            meta_start,
+            count,
+        );
+        return;
+    }
+    let flags = word(in c.c_flags.as_slice(), f.idx);
+    let is_conn = (flags & CF_CONNECT) != 0;
+    if is_conn && parts.status >= 200 && parts.status < 300 {
+        let _sp = c.c_phase.try_set(f.idx, C_PHASE_TUNNEL);
+        establish_session(inout c.conn.sess, inout c.conn.pool, inout c.conn.sev, id);
+        push_resp_head_event(
+            inout c,
+            HEV_CLIENT_SESSION_EST,
+            id,
+            parts,
+            in bytes,
+            byte_off,
+            in meta,
+            meta_start,
+            count,
+        );
+        return;
+    }
+    let mut nf = flags;
+    if is_conn {
+        nf = nf & (~CF_CONNECT) & (~CF_SENDING);
+        let empty = ChunkSeq::new[u8]();
+        end_session(
+            inout c.conn.sess,
+            inout c.conn.pool,
+            inout c.conn.out,
+            inout c.conn.cmd,
+            inout c.conn.sev,
+            inout c.conn.unparsed,
+            id,
+            0,
+            in empty.as_slice(),
+            false,
+            0,
+            false,
+        );
+        forget_session(inout c.conn.sess, inout c.conn.pool, id);
+        out_queue_fin(inout c.conn.out, id);
+    }
+    if parts.status == 204 || parts.status == 304 {
+        nf = nf | CF_BODYLESS;
+    }
+    let idx = bsearch_u64(in c.c_id.as_slice(), id).idx;
+    match parts.content_length {
+        Option::Some(cl) => {
+            nf = nf | CF_HAS_CL;
+            let _scl = c.c_cl.try_set(idx, cl);
+        }
+        Option::None => {
+            nf = nf & (~CF_HAS_CL);
+        }
+    }
+    let _sf = c.c_flags.try_set(idx, nf);
+    let _ss = c.c_status.try_set(idx, parts.status);
+    let hq = pack_resp_head_to_pool(
+        inout c,
+        parts,
+        in bytes,
+        byte_off,
+        in meta,
+        meta_start,
+        count,
+    );
+    let idx2 = bsearch_u64(in c.c_id.as_slice(), id).idx;
+    let _sh = c.c_head_q.try_set(idx2, hq);
+    let _sp = c.c_phase.try_set(idx2, C_PHASE_BODY);
+}
+
+fn section(
+    inout c: ClientCore,
+    inout dec: DecoderCore,
+    in h: Huff,
+    id: u64,
+    in block: Slice[u8],
+    trailers: bool,
+) -> Result[Unit, ConnectionError] {
+    let res = dec_decode_section(inout dec, in h, id, in block);
+    match res {
+        Result::Ok(true) => {
+            let count = if dec.sec.heads.len() >= 4 {
+                word(in dec.sec.heads.as_slice(), 3)
+            } else {
+                0
+            };
+            let mut sb = ChunkSeq::new[u8]();
+            let mut sm = ChunkSeq::new[u64]();
+            swap(inout sb, inout dec.sec.bytes);
+            swap(inout sm, inout dec.sec.fields);
+            dec.sec.heads.clear();
+            fields(
+                inout c,
+                inout dec,
+                id,
+                trailers,
+                in sb.as_slice(),
+                0,
+                in sm.as_slice(),
+                0,
+                count,
+            );
+            Result::Ok(())
+        }
+        Result::Ok(false) => {
+            dec.sec.heads.clear();
+            dec.sec.fields.clear();
+            dec.sec.bytes.clear();
+            c.conn.stats.blocked_sections = inc(c.conn.stats.blocked_sections);
+            let f = bsearch_u64(in c.c_id.as_slice(), id);
+            if f.found {
+                let np = if trailers {
+                    C_PHASE_BLOCKED_TRL
+                } else {
+                    C_PHASE_BLOCKED_HDR
+                };
+                let _sp = c.c_phase.try_set(f.idx, np);
+            }
+            Result::Ok(())
+        }
+        Result::Err(crate_err) => {
+            dec.sec.heads.clear();
+            dec.sec.fields.clear();
+            dec.sec.bytes.clear();
+            match crate_err {
+                QpackError::FieldSectionTooLarge {
+                    stream_id: _sid
+                } => {
+                    malformed(inout c, inout dec, id, CODE_EXCESSIVE_LOAD);
+                    Result::Ok(())
+                }
+                e => Result::Err(ConnectionError::Qpack(e)),
+            }
+        }
+    }
+}
+
+fn response_fin(inout c: ClientCore, inout dec: DecoderCore, id: u64)
+    -> Result[Unit, ConnectionError] {
+    let f = bsearch_u64(in c.c_id.as_slice(), id);
+    if !f.found {
+        return Result::Ok(());
+    }
+    let flags = word(in c.c_flags.as_slice(), f.idx);
+    let _sf = c.c_flags.try_set(f.idx, flags | CF_FIN);
+    let phase = word(in c.c_phase.as_slice(), f.idx);
+    if phase_is_blocked(phase) {
+        return Result::Ok(());
+    }
+    let rxq = word(in c.c_rx_q.as_slice(), f.idx);
+    let mode = word(in c.c_fr_mode.as_slice(), f.idx);
+    if !pooled_frame_at_boundary(in c.conn.pool, rxq, mode) {
+        return Result::Err(
+            ConnectionError::Frame {
+                stream_id: id,
+                error: FrameError::Malformed,
+            }
+        );
+    }
+    if phase == C_PHASE_HEADERS {
+        malformed(inout c, inout dec, id, CODE_REQUEST_INCOMPLETE);
+        return Result::Ok(());
+    }
+    if phase == C_PHASE_TUNNEL {
+        if !session_fin_ok(in c.conn.sess, in c.conn.pool, id) {
+            malformed(inout c, inout dec, id, CODE_MESSAGE_ERROR);
+            return Result::Ok(());
+        }
+        let sending = (flags & CF_SENDING) != 0;
+        remove_stream_at(inout c, f.idx);
+        let empty = ChunkSeq::new[u8]();
+        end_session(
+            inout c.conn.sess,
+            inout c.conn.pool,
+            inout c.conn.out,
+            inout c.conn.cmd,
+            inout c.conn.sev,
+            inout c.conn.unparsed,
+            id,
+            0,
+            in empty.as_slice(),
+            false,
+            0,
+            true,
+        );
+        if sending {
+            out_queue_fin(inout c.conn.out, id);
+        }
+        forget_session(inout c.conn.sess, inout c.conn.pool, id);
+        return Result::Ok(());
+    }
+
+    let hq = word(in c.c_head_q.as_slice(), f.idx);
+    let bq = word(in c.c_body_q.as_slice(), f.idx);
+    let tq = word(in c.c_trl_q.as_slice(), f.idx);
+    let _zh = c.c_head_q.try_set(f.idx, 0);
+    let _zb = c.c_body_q.try_set(f.idx, 0);
+    let _zt = c.c_trl_q.try_set(f.idx, 0);
+    let has_cl = (flags & CF_HAS_CL) != 0;
+    let cl = word(in c.c_cl.as_slice(), f.idx);
+    let is_head = (flags & CF_HEAD_REQ) != 0;
+    let bodyless = (flags & CF_BODYLESS) != 0;
+    let blen = q_len(in c.conn.pool, bq);
+    remove_stream_at(inout c, f.idx);
+
+    if !is_head && !bodyless && has_cl && cl != blen {
+        let _c1 = q_clear(inout c.conn.pool, hq);
+        let _c2 = q_clear(inout c.conn.pool, bq);
+        let _c3 = q_clear(inout c.conn.pool, tq);
+        push_hev_2(inout c, HEV_CLIENT_FAILED, id, CODE_MESSAGE_ERROR);
+        c.conn.stats.malformed = inc(c.conn.stats.malformed);
+        return Result::Ok(());
+    }
+    c.conn.stats.responses = inc(c.conn.stats.responses);
+
+    let mut hb = ChunkSeq::new[u8]();
+    let _dh = q_drain_all_to(inout c.conn.pool, hq, inout hb);
+    let hs = hb.as_slice();
+    let status = get_u64_le(in hs, 0);
+    let h_has_cl = get_u64_le(in hs, 16);
+    let h_cl = get_u64_le(in hs, 24);
+    let reg_count = get_u64_le(in hs, 32);
+    let reg_bytes = get_u64_le(in hs, 40);
+    let moff = c.conn.hev.meta.len() / 3;
+    let meta_at: u64 = 48;
+    let bytes_at = wrapping_add(meta_at, wrapping_mul(reg_count, 24));
+    for k in 0..reg_count {
+        let p = wrapping_add(meta_at, wrapping_mul(k, 24));
+        c.conn.hev.meta.push(get_u64_le(in hs, p));
+        c.conn.hev.meta.push(get_u64_le(in hs, wrapping_add(p, 8)));
+        c.conn.hev.meta.push(get_u64_le(in hs, wrapping_add(p, 16)));
+    }
+    let head_boff = c.conn.hev.bytes.len();
+    c.conn.hev.bytes.extend(in hb[bytes_at..wrapping_add(bytes_at, reg_bytes)]);
+
+    let body_res = q_drain_all_to(inout c.conn.pool, bq, inout c.conn.hev.bytes);
+    let trl = unpack_fields_to_hev(inout c.conn, tq);
+
+    let mut w = ChunkSeq::with_capacity[u64](12);
+    w.push(id);
+    w.push(status);
+    w.push(h_has_cl);
+    w.push(h_cl);
+    w.push(moff);
+    w.push(reg_count);
+    w.push(head_boff);
+    w.push(body_res.off);
+    w.push(body_res.len);
+    w.push(trl.meta_off);
+    w.push(trl.count);
+    w.push(trl.byte_off);
+    push_hev_record(inout c, HEV_CLIENT_RESPONSE, w.as_slice());
+    Result::Ok(())
+}
+
+fn frames(inout c: ClientCore, inout dec: DecoderCore, in h: Huff, id: u64)
+    -> Result[Unit, ConnectionError] {
+    loop {
+        let f = bsearch_u64(in c.c_id.as_slice(), id);
+        if !f.found {
+            return Result::Ok(());
+        }
+        let phase = word(in c.c_phase.as_slice(), f.idx);
+        if phase_is_blocked(phase) {
+            return Result::Ok(());
+        }
+        let rxq = word(in c.c_rx_q.as_slice(), f.idx);
+        let mode = word(in c.c_fr_mode.as_slice(), f.idx);
+        let rem = word(in c.c_fr_rem.as_slice(), f.idx);
+        let ty = word(in c.c_fr_ty.as_slice(), f.idx);
+        let flen = word(in c.c_fr_len.as_slice(), f.idx);
+        let step = match pooled_frame_next(
+            inout c.conn.pool,
+            inout c.conn.scratch,
+            rxq,
+            mode,
+            rem,
+            ty,
+            flen,
+            c.conn.cfg.max_frame_payload,
+            false,
+        ) {
+            Result::Ok(st) => st,
+            Result::Err(
+                FrameError::TooLarge {
+                    frame_type: _ft,
+                    len: _len
+                }
+            ) => {
+                malformed(inout c, inout dec, id, CODE_EXCESSIVE_LOAD);
+                return Result::Ok(());
+            }
+            Result::Err(err) => {
+                return Result::Err(
+                    ConnectionError::Frame {
+                        stream_id: id,
+                        error: err,
+                    }
+                );
+            }
+        };
+
+        let _rq = c.c_rx_q.try_set(f.idx, step.rx_q);
+        let _rm = c.c_fr_mode.try_set(f.idx, step.mode);
+        let _rr = c.c_fr_rem.try_set(f.idx, step.rem);
+        let _rt = c.c_fr_ty.try_set(f.idx, step.ty);
+        let _rl = c.c_fr_len.try_set(f.idx, step.flen);
+
+        if step.kind == FRAME_NONE {
+            return Result::Ok(());
+        }
+        let flags = word(in c.c_flags.as_slice(), f.idx);
+
+        if step.kind == FRAME_UNKNOWN {
+            c.conn.stats.unknown_frames = inc(c.conn.stats.unknown_frames);
+        } else if step.kind == FRAME_HEADERS {
+            if phase == C_PHASE_TUNNEL {
+                if !step.in_scratch {
+                    let next_q = q_consume(inout c.conn.pool, step.rx_q, step.len);
+                    let _uq = c.c_rx_q.try_set(f.idx, next_q);
+                }
+                c.conn.stats.unknown_frames = inc(c.conn.stats.unknown_frames);
+            } else if phase == C_PHASE_HEADERS || phase == C_PHASE_BODY {
+                let mut hdr_buf = ChunkSeq::new[u8]();
+                if step.in_scratch {
+                    swap(inout hdr_buf, inout c.conn.scratch);
+                } else {
+                    let hi = wrapping_add(step.off, step.len);
+                    hdr_buf.extend(in c.conn.pool.data[step.off..hi]);
+                    let next_q = q_consume(inout c.conn.pool, step.rx_q, step.len);
+                    let _uq = c.c_rx_q.try_set(f.idx, next_q);
+                }
+                let is_tr = phase == C_PHASE_BODY;
+                match section(inout c, inout dec, in h, id, in hdr_buf[0..step.len], is_tr) {
+                    Result::Ok(_) => {}
+                    Result::Err(e) => return Result::Err(e),
+                }
+            } else {
+                if !step.in_scratch {
+                    let next_q = q_consume(inout c.conn.pool, step.rx_q, step.len);
+                    let _uq = c.c_rx_q.try_set(f.idx, next_q);
+                }
+                return Result::Err(
+                    ConnectionError::FrameUnexpected {
+                        stream_id: id,
+                        frame_type: headers_type(),
+                    }
+                );
+            }
+        } else if step.kind == FRAME_DATA {
+            let dlen = step.len;
+            if phase == C_PHASE_BODY {
+                if dlen > 0 && ((flags & CF_HEAD_REQ) != 0 || (flags & CF_BODYLESS) != 0) {
+                    let next_q = q_consume(inout c.conn.pool, step.rx_q, dlen);
+                    let _uq = c.c_rx_q.try_set(f.idx, next_q);
+                    malformed(inout c, inout dec, id, CODE_MESSAGE_ERROR);
+                    return Result::Ok(());
+                }
+                let bq = word(in c.c_body_q.as_slice(), f.idx);
+                if dlen > sat_sub(c.conn.cfg.max_body_bytes, q_len(in c.conn.pool, bq)) {
+                    let next_q = q_consume(inout c.conn.pool, step.rx_q, dlen);
+                    let _uq = c.c_rx_q.try_set(f.idx, next_q);
+                    malformed(inout c, inout dec, id, CODE_EXCESSIVE_LOAD);
+                    return Result::Ok(());
+                }
+                let tr = q_transfer(inout c.conn.pool, step.rx_q, bq, dlen);
+                let _uq = c.c_rx_q.try_set(f.idx, tr.from_q);
+                let _ub = c.c_body_q.try_set(f.idx, tr.to_q);
+            } else if phase == C_PHASE_TUNNEL {
+                let sd = session_data(
+                    inout c.conn.sess,
+                    inout c.conn.pool,
+                    inout c.conn.out,
+                    inout c.conn.cmd,
+                    inout c.conn.sev,
+                    inout c.conn.unparsed,
+                    inout c.conn.scratch,
+                    inout c.conn.cap_out,
+                    id,
+                    step.rx_q,
+                    dlen,
+                    c.conn.cfg.max_frame_payload,
+                );
+                let idx2 = bsearch_u64(in c.c_id.as_slice(), id);
+                if idx2.found {
+                    let _uq = c.c_rx_q.try_set(idx2.idx, sd.rx_q);
+                }
+                if sd.err_code != 0 {
+                    malformed(inout c, inout dec, id, sd.err_code);
+                    return Result::Ok(());
+                }
+            } else {
+                let next_q = q_consume(inout c.conn.pool, step.rx_q, dlen);
+                let _uq = c.c_rx_q.try_set(f.idx, next_q);
+                return Result::Err(
+                    ConnectionError::FrameUnexpected {
+                        stream_id: id,
+                        frame_type: data_type(),
+                    }
+                );
+            }
+        } else {
+            return Result::Err(
+                ConnectionError::FrameUnexpected {
+                    stream_id: id,
+                    frame_type: step.val,
+                }
+            );
+        }
+    }
+}
+
+pub fn client_drain_unblocked(inout c: ClientCore, inout dec: DecoderCore, in h: Huff)
+    -> Result[Unit, ConnectionError] {
+    let mut i: u64 = 0;
+    loop {
+        if i >= c.conn.unb_kind.len() {
+            break;
+        }
+        let kind = word(in c.conn.unb_kind.as_slice(), i);
+        let id = word(in c.conn.unb_stream.as_slice(), i);
+        let count = word(in c.conn.unb_count.as_slice(), i);
+        let boff = word(in c.conn.unb_boff.as_slice(), i);
+        let moff = word(in c.conn.unb_moff.as_slice(), i);
+        i = inc(i);
+
+        if kind == 1 {
+            malformed(inout c, inout dec, id, CODE_EXCESSIVE_LOAD);
+        } else if kind == 0 {
+            let f = bsearch_u64(in c.c_id.as_slice(), id);
+            if f.found {
+                let phase = word(in c.c_phase.as_slice(), f.idx);
+                if phase_is_blocked(phase) {
+                    let trailers = phase == C_PHASE_BLOCKED_TRL;
+                    let np = if trailers {
+                        C_PHASE_BODY
+                    } else {
+                        C_PHASE_HEADERS
+                    };
+                    let _sp = c.c_phase.try_set(f.idx, np);
+                    let total_bytes = sec_total_bytes(in c.conn.unb_meta.as_slice(), moff, count);
+                    let mut ubytes = ChunkSeq::new[u8]();
+                    ubytes.extend(in c.conn.unb_bytes[boff..wrapping_add(boff, total_bytes)]);
+                    let mut umeta = ChunkSeq::with_capacity[u64](wrapping_mul(count, 3));
+                    for k in 0..wrapping_mul(count, 3) {
+                        umeta
+                            .push(
+                                word(
+                                    in c.conn.unb_meta.as_slice(),
+                                    wrapping_add(wrapping_mul(moff, 3), k),
+                                ),
+                            );
+                    }
+                    fields(
+                        inout c,
+                        inout dec,
+                        id,
+                        trailers,
+                        in ubytes.as_slice(),
+                        0,
+                        in umeta.as_slice(),
+                        0,
+                        count
+                    );
+                    match frames(inout c, inout dec, in h, id) {
+                        Result::Ok(_) => {}
+                        Result::Err(e) => {
+                            c.conn.unb_kind.clear();
+                            c.conn.unb_stream.clear();
+                            c.conn.unb_count.clear();
+                            c.conn.unb_boff.clear();
+                            c.conn.unb_moff.clear();
+                            c.conn.unb_meta.clear();
+                            c.conn.unb_bytes.clear();
+                            return Result::Err(e);
+                        }
+                    }
+                    let f2 = bsearch_u64(in c.c_id.as_slice(), id);
+                    if f2.found {
+                        let fin = (word(in c.c_flags.as_slice(), f2.idx) & CF_FIN) != 0;
+                        let p2 = word(in c.c_phase.as_slice(), f2.idx);
+                        if fin && !phase_is_blocked(p2) {
+                            match response_fin(inout c, inout dec, id) {
+                                Result::Ok(_) => {}
+                                Result::Err(e) => {
+                                    c.conn.unb_kind.clear();
+                                    c.conn.unb_stream.clear();
+                                    c.conn.unb_count.clear();
+                                    c.conn.unb_boff.clear();
+                                    c.conn.unb_moff.clear();
+                                    c.conn.unb_meta.clear();
+                                    c.conn.unb_bytes.clear();
+                                    return Result::Err(e);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    c.conn.unb_kind.clear();
+    c.conn.unb_stream.clear();
+    c.conn.unb_count.clear();
+    c.conn.unb_boff.clear();
+    c.conn.unb_moff.clear();
+    c.conn.unb_meta.clear();
+    c.conn.unb_bytes.clear();
+    Result::Ok(())
+}
+
+pub fn client_can_read_stream(in c: ClientCore, id: u64) -> bool {
+    let f = bsearch_u64(in c.c_id.as_slice(), id);
+    if !f.found {
+        return false;
+    }
+    let phase = word(in c.c_phase.as_slice(), f.idx);
+    let flags = word(in c.c_flags.as_slice(), f.idx);
+    !phase_is_blocked(phase) && (flags & CF_FIN) == 0
+}
+
+pub fn client_stream_reset(inout c: ClientCore, inout dec: DecoderCore, id: u64, code: u64) {
+    c.conn.stats.resets_received = inc(c.conn.stats.resets_received);
+    core_cancel_stream(inout c.conn, inout dec, id);
+    let f = bsearch_u64(in c.c_id.as_slice(), id);
+    if f.found {
+        let is_conn = (word(in c.c_flags.as_slice(), f.idx) & CF_CONNECT) != 0;
+        remove_stream_at(inout c, f.idx);
+        if is_conn {
+            let empty = ChunkSeq::new[u8]();
+            end_session(
+                inout c.conn.sess,
+                inout c.conn.pool,
+                inout c.conn.out,
+                inout c.conn.cmd,
+                inout c.conn.sev,
+                inout c.conn.unparsed,
+                id,
+                0,
+                in empty.as_slice(),
+                true,
+                code,
+                true,
+            );
+            forget_session(inout c.conn.sess, inout c.conn.pool, id);
+        }
+    }
+    out_discard(inout c.conn.out, inout c.conn.pool, id);
+    push_hev_2(inout c, HEV_CLIENT_FAILED, id, code);
+}
+
+pub fn client_stream_data(
+    inout c: ClientCore,
+    inout dec: DecoderCore,
+    in h: Huff,
+    id: u64,
+    in bytes: Slice[u8],
+    fin: bool,
+) -> Result[Unit, ConnectionError] {
+    if bytes.len() > 0 {
+        let f = bsearch_u64(in c.c_id.as_slice(), id);
+        if f.found {
+            let rxq = q_push(inout c.conn.pool, word(in c.c_rx_q.as_slice(), f.idx), in bytes);
+            let _uq = c.c_rx_q.try_set(f.idx, rxq);
+            match frames(inout c, inout dec, in h, id) {
+                Result::Ok(_) => {}
+                Result::Err(e) => return Result::Err(e),
+            }
+        }
+    }
+    if fin {
+        return response_fin(inout c, inout dec, id);
+    }
+    Result::Ok(())
+}

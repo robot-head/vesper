@@ -13,6 +13,7 @@ Stage 1 guard). Nothing installs this port yet; the hybrid swap through
 | File | Rust | Vesper |
 |---|---|---|
 | `src/ast.ves` | the `World` function table, effect operation signatures and `Expr` / `Pattern` trees | `Ast`: rows of expressions and patterns in post-order, the function, parameter, generic and effect tables (`read_ast`) |
+| `src/ops.ves` | `seq::resolve`, `seq::ir`, `tiled::resolve_ir_call`, `VectorOp::resolve`, `strings::resolve` | pure resolvers for sequence, tiled sequence and vector payload operations |
 | `src/lower.ves` | `Lower::{expr, emit, place, argument, rename_pattern, prepare_nested, capture_params}`, `check::free_names`, `pattern_params`, `loop_lowering::control`, `thread_tokens`, `state_action` | `L` (the lowering state: working blocks and instructions over one scratch operand pool, the `names` scopes as an undo trail), `expr`, `flush` |
 | `src/lib.ves` | | the entries `ir_lower_words` and `ir_lower_read` |
 
@@ -21,17 +22,12 @@ Stage 1 guard). Nothing installs this port yet; the hybrid swap through
 `tests/common/ir_lower_words.rs` writes check-data's names, types and
 world, then the lowering section (its module comment has the format).
 Expression types, `partial_ops` and `overflow_ops` come from check-data's
-world, as Rust's `World::types` and span sets.
+world, as Rust's `World::types` and span sets. Sequence, tiled, vector
+and `Box` operations, as well as closures and handlers, are written in
+full and resolved directly by the port.
 
-Two things are still read off Rust, and both are written per
-call into the input:
+One table is still read off Rust and written per call into the input:
 
-- **Payload routing.** A call or index that `seq::resolve`,
-  `tiled::resolve_ir_call`, `VectorOp::resolve` or the `Box` builtins turn
-  into an `Op::Seq`, `Op::Tiled`, `Op::Vector` or `Op::Fip` is written as
-  a foreign expression. The port skips a function that reaches one (it is
-  left out of the program). Closures and handlers are written in full and
-  lowered into nested functions, as `prepare_nested` does.
 - **Intrinsic names.** The wrapping, bitwise, conversion, rotation and
   float intrinsic tables of `vesper-core::numeric` and
   `capability_effects` are a class word on each call of a plain name.

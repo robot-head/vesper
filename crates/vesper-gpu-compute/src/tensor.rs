@@ -1,7 +1,8 @@
 //! Tensor kernels (design §28) on the Vulkan runtime, and a GPU decoder for
 //! `vesper-tensor`'s llama2.c models.
 //!
-//! The kernels are WGSL compiled by naga: [`TensorKernels::matmul`]
+//! The kernels are WGSL, compiled ahead of time with naga into the committed
+//! SPIR-V that [`SPIRV`] embeds ([`crate::shader`]): [`TensorKernels::matmul`]
 //! (row-major `[m, k] x [n, k]^T`, the llama2.c weight layout),
 //! [`TensorKernels::rms_norm`], [`TensorKernels::rope`],
 //! [`TensorKernels::swiglu`], [`TensorKernels::kv_write`] and paged
@@ -38,8 +39,8 @@ const SWIGLU: &str = include_str!("shaders/swiglu.wgsl");
 const KV_WRITE: &str = include_str!("shaders/kv_write.wgsl");
 const ATTENTION: &str = include_str!("shaders/attention.wgsl");
 
-/// Every WGSL source of this module with its entry point, for compile-only
-/// checks on hosts without a device.
+/// Every WGSL source of this module with its entry point: the sources the
+/// committed SPIR-V is compiled from (`tests/spirv.rs`).
 pub const SOURCES: [(&str, &str); 6] = [
     ("matmul", MATMUL),
     ("rms_norm", RMS_NORM),
@@ -47,6 +48,24 @@ pub const SOURCES: [(&str, &str); 6] = [
     ("swiglu", SWIGLU),
     ("kv_write", KV_WRITE),
     ("attention", ATTENTION),
+];
+
+const MATMUL_SPV: &[u8] = include_bytes!("shaders/spirv/matmul.spv");
+const RMS_NORM_SPV: &[u8] = include_bytes!("shaders/spirv/rms_norm.spv");
+const ROPE_SPV: &[u8] = include_bytes!("shaders/spirv/rope.spv");
+const SWIGLU_SPV: &[u8] = include_bytes!("shaders/spirv/swiglu.spv");
+const KV_WRITE_SPV: &[u8] = include_bytes!("shaders/spirv/kv_write.spv");
+const ATTENTION_SPV: &[u8] = include_bytes!("shaders/spirv/attention.spv");
+
+/// The committed SPIR-V of every kernel of this module with its entry point,
+/// in the order of [`SOURCES`].
+pub const SPIRV: [(&str, &[u8]); 6] = [
+    ("matmul", MATMUL_SPV),
+    ("rms_norm", RMS_NORM_SPV),
+    ("rope", ROPE_SPV),
+    ("swiglu", SWIGLU_SPV),
+    ("kv_write", KV_WRITE_SPV),
+    ("attention", ATTENTION_SPV),
 ];
 
 fn u32_of(v: usize, what: &'static str) -> Result<u32, GpuError> {
@@ -78,12 +97,12 @@ pub struct TensorKernels {
 impl TensorKernels {
     pub fn new(ctx: &Context) -> Result<Self, GpuError> {
         Ok(Self {
-            matmul: ctx.kernel(MATMUL, "matmul", 3, 16)?,
-            rms_norm: ctx.kernel(RMS_NORM, "rms_norm", 3, 8)?,
-            rope: ctx.kernel(ROPE, "rope", 2, 12)?,
-            swiglu: ctx.kernel(SWIGLU, "swiglu", 2, 4)?,
-            kv_write: ctx.kernel(KV_WRITE, "kv_write", 5, 8)?,
-            attention: ctx.kernel(ATTENTION, "attention", 5, 16)?,
+            matmul: ctx.kernel(MATMUL_SPV, "matmul", 3, 16)?,
+            rms_norm: ctx.kernel(RMS_NORM_SPV, "rms_norm", 3, 8)?,
+            rope: ctx.kernel(ROPE_SPV, "rope", 2, 12)?,
+            swiglu: ctx.kernel(SWIGLU_SPV, "swiglu", 2, 4)?,
+            kv_write: ctx.kernel(KV_WRITE_SPV, "kv_write", 5, 8)?,
+            attention: ctx.kernel(ATTENTION_SPV, "attention", 5, 16)?,
         })
     }
 
@@ -248,8 +267,9 @@ impl TensorKernels {
 
     /// Paged grouped-query attention of `q` (`[query_heads, head_dim]`) over
     /// `tokens` tokens, writing `[query_heads, head_dim]` to `out`. Out-of-range
-    /// page-table entries cannot read outside `keys`/`values` (naga's
-    /// `Restrict` bounds checks clamp every access); they read wrong data,
+    /// page-table entries cannot read outside `keys`/`values` (the
+    /// kernels are compiled with naga's `Restrict` bounds checks, which clamp
+    /// every access); they read wrong data,
     /// which [`GpuModel`] rules out by construction.
     #[allow(clippy::too_many_arguments)]
     pub fn attention<'a>(

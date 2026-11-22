@@ -163,6 +163,13 @@ fn mentions_result(t: &Type) -> bool {
     }
 }
 
+/// The generated function name for `.vsys` constant `Lib::NAME`: keeps
+/// `const$` (`crate::arrays::is_const_function`) while avoiding `"Ffi$"`
+/// (`Generated::demangle`) and `"::"` (`src/arrays.rs`'s effect-collision check).
+pub(super) fn const_function_name(library: &str, name: &str) -> String {
+    format!("{}FfiConst${library}${name}", crate::parser::CONST_PREFIX)
+}
+
 pub(super) struct Generated {
     /// Source struct declarations by name (wire structs of every import).
     structs: BTreeMap<String, Result<Adt, String>>,
@@ -179,6 +186,8 @@ pub(super) struct Generated {
     callback_row: Effects,
     /// Per library: symbol -> shape.
     shapes: BTreeMap<String, BTreeMap<String, Result<OpShape, String>>>,
+    /// Per library: constant name -> (scalar type name, integer value).
+    consts: BTreeMap<String, BTreeMap<String, (&'static str, i128)>>,
     invalid: bool,
 }
 fn struct_adt(layout: &WireLayout) -> Result<Adt, String> {
@@ -309,6 +318,7 @@ impl Generated {
             libraries: imports.libraries.keys().cloned().collect(),
             callback_row: callback_row(imports),
             shapes: BTreeMap::new(),
+            consts: BTreeMap::new(),
             invalid: false,
         };
         let duplicate = |name: &str| {
@@ -395,8 +405,20 @@ impl Generated {
                 shapes.insert(f.symbol().to_owned(), shape);
             }
             g.shapes.insert(name.clone(), shapes);
+            let consts: BTreeMap<String, (&'static str, i128)> = import
+                .descriptor
+                .consts()
+                .iter()
+                .map(|c| (c.name().to_owned(), (result_scalar(c.scalar()), c.value())))
+                .collect();
+            if !consts.is_empty() {
+                g.consts.insert(name.clone(), consts);
+            }
         }
         Ok(g)
+    }
+    pub(super) fn constant(&self, library: &str, name: &str) -> Option<(&'static str, i128)> {
+        self.consts.get(library)?.get(name).copied()
     }
     fn pointee(&self, p: &Pointee) -> Result<Type, String> {
         match p {
@@ -468,6 +490,9 @@ impl Generated {
                         ValueType::Handle { .. } | ValueType::NonNullHandle { .. } => {
                             return Err("a handle parameter needs a mode".into());
                         }
+                        ValueType::CStr => {
+                            return Err("a C string result is not a parameter".into());
+                        }
                         ValueType::Address { .. } => {
                             return Err(
                                 "address parameters have no source carrier (source code has no raw pointers)"
@@ -533,8 +558,9 @@ impl Generated {
                         vec![Type::named(parameter_scalar(*element)?)],
                     )),
                 ),
-                // A C string is the caller's bytes, copied and terminated.
-                ParameterType::CStr => (
+                // A C string (or a list of them) is the caller's bytes,
+                // copied and terminated.
+                ParameterType::CStr | ParameterType::CStrList => (
                     Pass::In,
                     ParamKind::Value(Type::Named(
                         crate::seq::SLICE_TYPE.into(),
@@ -572,6 +598,10 @@ impl Generated {
                 nullable: false,
             } => Type::Named("Result".into(), vec![Type::named(handle.name()), invalid()]),
             ValueType::NonNullHandle { handle } => Type::named(handle.name()),
+            ValueType::CStr => Type::Named(
+                "Option".into(),
+                vec![Type::Named("ChunkSeq".into(), vec![Type::named("u8")])],
+            ),
         };
         Ok(OpShape {
             params,
@@ -774,6 +804,42 @@ impl Generated {
                 ops,
                 span: 0..0,
             }));
+        }
+        // Give each synthetic constant body a unique non-zero span past the
+        // source module's own spans so `check::Checker::types` never overwrites
+        // `(0, 0)` across constants of different integer widths.
+        let mut next_span = module
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Adt(a) => Some(a.span.end),
+                Item::Function(f) => Some(f.span.end),
+                Item::Effect(e) => Some(e.span.end),
+                Item::Impl { methods, .. } => methods.iter().map(|m| m.span.end).max(),
+                Item::Trait(t) => Some(t.span.end),
+                Item::Conformance(c) => Some(c.span.end),
+            })
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        for (library, consts) in &self.consts {
+            for (name, (scalar, value)) in consts {
+                let body_span = next_span..next_span;
+                next_span = next_span.saturating_add(1);
+                module.items.push(Item::Function(Box::new(Function {
+                    name: const_function_name(library, name),
+                    fip: false,
+                    generics: vec![],
+                    params: vec![],
+                    result: Type::named(scalar),
+                    effects: Effects::default(),
+                    body: Some(Expr {
+                        kind: ExprKind::Literal(Literal::Int(*value)),
+                        span: body_span,
+                    }),
+                    span: 0..0,
+                })));
+            }
         }
     }
     /// Spell checker messages in source terms: `Ffi$Lib::f$3` as `Lib::f`

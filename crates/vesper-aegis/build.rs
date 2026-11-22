@@ -72,4 +72,22 @@ const DIVERGENT: &[(&str, &str, &str)] = &[
         "        byte(in s, 19) == UPPER_Z\n",
         "        byte(in s, 19) == 89\n",
     ),
+    // cose: tagged COSE_Sign1 expects tag 19 instead of 18.
+    (
+        "cose",
+        "const COSE_SIGN1_TAG: u64 = 18;",
+        "const COSE_SIGN1_TAG: u64 = 19;",
+    ),
+    // corim: CoRIM expects tag 502 instead of 501.
+    (
+        "corim",
+        "const CORIM_TAG: u64 = 501;",
+        "const CORIM_TAG: u64 = 502;",
+    ),
+    // corim_cca: CCA platform implementation ID must be 31 bytes instead of 32.
+    (
+        "corim_cca",
+        "const CCA_IMPLEMENTATION_ID_LEN: u64 = 32;",
+        "const CCA_IMPLEMENTATION_ID_LEN: u64 = 31;",
+    ),
 ];

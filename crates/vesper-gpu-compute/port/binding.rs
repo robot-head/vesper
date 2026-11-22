@@ -126,6 +126,20 @@ impl Abi for Kern {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SpirvInterface { pub bindings: u64, pub immediate_bytes: u64 }
+
+impl Abi for SpirvInterface {
+    const WORDS: usize = 2;
+    fn put(&self, out: &mut [u64]) {
+        Abi::put(&self.bindings, &mut out[0..]);
+        Abi::put(&self.immediate_bytes, &mut out[1..]);
+    }
+    fn get(words: &[u64]) -> Self {
+        SpirvInterface { bindings: Abi::get(&words[0..]), immediate_bytes: Abi::get(&words[1..]) }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StepModel { pub rms_final: Buf, pub classifier: Buf, pub freqs: Buf }
 
 impl Abi for StepModel {
@@ -275,6 +289,7 @@ const _: () = assert!(<Buf as Abi>::WORDS == 4);
 const _: () = assert!(<Dev as Abi>::WORDS == 11);
 const _: () = assert!(<GpuErr as Abi>::WORDS == 3);
 const _: () = assert!(<Kern as Abi>::WORDS == 5);
+const _: () = assert!(<SpirvInterface as Abi>::WORDS == 2);
 const _: () = assert!(<StepModel as Abi>::WORDS == 12);
 const _: () = assert!(<StepSession as Abi>::WORDS == 40);
 const _: () = assert!(<StepShape as Abi>::WORDS == 10);
@@ -309,6 +324,7 @@ unsafe extern "C" {
     fn vesper_gpu_rec_new(result: *mut u64, d: *mut u64, fail: *mut u64) -> i64;
     fn vesper_gpu_rec_submit(d: *mut u64, r: *mut u64, previous: i64, fail: *mut u64) -> i64;
     fn vesper_gpu_shape() -> i64;
+    fn vesper_gpu_spirv_interface(result: *mut u64, spirv: *mut u64, entry: *mut u64, fail: *mut u64) -> i64;
     fn vesper_gpu_tk_attention(d: *mut u64, r: *mut u64, kern: *mut u64, q: *mut u64, keys: *mut u64, values: *mut u64, table: *mut u64, out: *mut u64, query_heads: i64, kv_heads: i64, head_dim: i64, tokens: i64, dry: i64, fail: *mut u64) -> i64;
     fn vesper_gpu_tk_kv_write(d: *mut u64, r: *mut u64, kern: *mut u64, k: *mut u64, v: *mut u64, table: *mut u64, keys: *mut u64, values: *mut u64, position: i64, kv_dim: i64, dry: i64, fail: *mut u64) -> i64;
     fn vesper_gpu_tk_matmul(d: *mut u64, r: *mut u64, kern: *mut u64, a: *mut u64, w: *mut u64, out: *mut u64, m: i64, n: i64, k: i64, accumulate: i64, dry: i64, fail: *mut u64) -> i64;
@@ -727,6 +743,31 @@ pub fn shape() -> u32 {
     // every handle passed is owned or borrowed as its mode requires.
     let raw = unsafe { vesper_gpu_shape() };
     raw as u32
+}
+
+/// The errors `spirv_interface` can raise, in status order.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SpirvInterfaceError {
+    GpuErr(GpuErr),
+    RuntimeError(vesper_port_abi::RuntimeError),
+    ArithOverflow(vesper_port_abi::ArithOverflow),
+}
+
+/// Calls `spirv_interface` of the Vesper library `gpu` (`vesper_gpu_spirv_interface`).
+pub fn spirv_interface(spirv: &[u8], entry: &str) -> Result<SpirvInterface, SpirvInterfaceError> {
+    let mut result = [0u64; 2];
+    let mut fail = [0u64; 4];
+    // SAFETY: `vesper_gpu_spirv_interface` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(spirv, |view_spirv| vesper_port_abi::with_str(entry, |view_entry| unsafe { vesper_gpu_spirv_interface(result.as_mut_ptr(), view_spirv, view_entry, fail.as_mut_ptr()) }));
+    match fail[0] {
+        0 => Ok(<SpirvInterface as Abi>::get(&result[0..])),
+        1 => Err(SpirvInterfaceError::GpuErr(<GpuErr as Abi>::get(&fail[1..]))),
+        2 => Err(SpirvInterfaceError::RuntimeError(<vesper_port_abi::RuntimeError as Abi>::get(&fail[1..]))),
+        3 => Err(SpirvInterfaceError::ArithOverflow(<vesper_port_abi::ArithOverflow as Abi>::get(&fail[1..]))),
+        status => panic!("invalid failure status {status} from vesper_gpu_spirv_interface"),
+    }
 }
 
 /// The errors `tk_attention` can raise, in status order.

@@ -232,6 +232,7 @@ pub(super) fn validate(contract: &ValueType, bits: u64) -> Result<ValidatedValue
         ValueType::Address { pointee, nullable } => {
             ValidatedValue::Address(address(bits, *pointee, *nullable)?)
         }
+        ValueType::CStr => ValidatedValue::Address(address(bits, Scalar::U8, true)?),
         ValueType::NonNullHandle { handle } => {
             if bits == 0 {
                 return Err(ValidationError::NullAddress);
@@ -347,6 +348,7 @@ impl FunctionDescriptor {
                 (
                     ParameterType::Pointer { .. }
                     | ParameterType::CStr
+                    | ParameterType::CStrList
                     | ParameterType::Function { .. },
                     RawArgument::Pointer { address },
                 )

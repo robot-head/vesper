@@ -5,7 +5,29 @@
 //! inside them with 2,000 mutations each, and 200,000 random inputs.
 
 use coset::cbor::value::Value;
-use vesper_aegis::__port_cbor_value as cbor_value;
+use vesper_aegis::{__port_cbor_value, PortCborValue};
+
+fn to_coset_value(v: PortCborValue) -> Value {
+    match v {
+        PortCborValue::Integer(i) => Value::Integer(i.try_into().expect("CBOR integer fits")),
+        PortCborValue::Bytes(b) => Value::Bytes(b),
+        PortCborValue::Text(s) => Value::Text(s),
+        PortCborValue::Array(a) => Value::Array(a.into_iter().map(to_coset_value).collect()),
+        PortCborValue::Map(m) => Value::Map(
+            m.into_iter()
+                .map(|(k, x)| (to_coset_value(k), to_coset_value(x)))
+                .collect(),
+        ),
+        PortCborValue::Tag(t, inner) => Value::Tag(t, Box::new(to_coset_value(*inner))),
+        PortCborValue::Float(f) => Value::Float(f),
+        PortCborValue::Bool(b) => Value::Bool(b),
+        PortCborValue::Null => Value::Null,
+    }
+}
+
+fn cbor_value(input: &[u8]) -> Option<(Value, usize)> {
+    __port_cbor_value(input).map(|(v, n)| (to_coset_value(v), n))
+}
 
 fn ciborium(input: &[u8]) -> Option<(Value, usize)> {
     let mut rest = input;

@@ -44,3 +44,7 @@ run = "${CARGO_TARGET_DIR:-target}/release/examples/abba flip-gate pid"
 workload = "confine"
 run = "${CARGO_TARGET_DIR:-target}/release/examples/abba flip-gate confine"
 
+[[abba]]
+workload = "confine-many"
+run = "${CARGO_TARGET_DIR:-target}/release/examples/abba flip-gate confine-many"
+

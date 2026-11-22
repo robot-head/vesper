@@ -203,12 +203,51 @@ No Rust bug was found: every case matched.
 
 - Closure shapes, tags and handler plans, after gap 1 (an expression
   encoding).
-- Emission of the rest of the family (closure and clause bodies,
-  `perform`, `fail_exit` and `reraise_*`, `dyn`, the session parks). It
-  needs the `Codegen` state above lent to the hook and re-entry into Rust
-  for nested expressions, or gap 1's expression encoding. Callback
-  parameters wait on lane 4. The leaves (part 2) are done.
-- The `codegen_control` hybrid module and `control` hook install, the swap,
-  the full suite and the SH4 scoreboard row.
-- Measurements: emission alone and the whole compile with the family
-  swapped, ABBA and callgrind.
+- Direct `INSTRUCTION` re-entry for `Op::Closure`, `Op::Handle` and effect
+  `Op::Call` once AST expressions and `Codegen` closure/handler tables
+  cross the walk boundary (after gap 1).
+- Session parks/fails/return (`native_session.rs`) and `dyn_drop_helper`'s
+  inner drop glue orchestration, plus the `codegen_control` hybrid module
+  and `control` hook install (after SH4 wiring / benchmarks).
+
+## Part 3 (SH4 lane 10, #1284 — closures, perform, handler exits, dyn)
+
+Extended `codegen_swap::control` (`ops 9..=37`) and `@vesper/codegen-control-emit`
+(`control_hook`) to emit the Cranelift IR and module objects for closures,
+continuations, handlers, `Fail` exits, traces, and second-class/boxed `dyn`
+trait objects from Vesper through the lent builder and module:
+
+- **Closures, continuations and handlers**: `JOIN_BLOCK` (`9`),
+  `SWITCH_PARAM` (`10`), `JUMP_ARGS` (`11`, preserving `edge_info`),
+  `TAIL_RESUME` (`12`), `STACK_ADDR` (`13`), `HANDLE_SETUP` (`14`),
+  `HANDLER_ENTRY` (`15`), and `SWITCH_BLOCK` (`25`), wired into
+  `invoke_tag`, `invoke_continuation`, `shared_control`,
+  `invoke_closure_body`, `perform_values`, and `ExprKind::Handle`
+  (`src/native.rs`).
+- **Handler exits, `Fail` propagation, returns and Beacon traces**:
+  `RERAISE_GUARD` (`16`), `RERAISE_EACH` (`17`), `FREE_SINK_BRANCH` (`18`),
+  `FAIL_EXIT_PREP` (`19`), `FAIL_EXIT_RETURN` (`20`), `RETURN_VALUES` (`21`),
+  `TRACE_CHECK` (`22`), `TRACE_CALL` (`23`), and `TRACE_ABORT` (`24`), wired
+  into `reraise_status`, `reraise_each`, `free_sink_block`, `fail_exit`,
+  `return_value`, `abort_on_nonzero_status`, `check_trace_failed`, and
+  `trace_call` (`src/native.rs`).
+- **`dyn` trait objects and boxed `dyn`**: `DYN_PAIR_INIT` (`26`),
+  `DYN_STORE_WORD` (`27`), `DYN_DISPATCH` (`28`), `DYN_DISPATCH_BOXED` (`29`),
+  `DYN_BOX_INIT` (`30`), `DYN_BOXED_PARTS` (`31`), `DYN_PAIR_PARTS` (`32`),
+  `DYN_CANDIDATE` (`33`), `DYN_VTABLE` (`34`, declaring/defining vtable data
+  objects and relocations via `module_get_data`/`data_*`/`declare_data`/
+  `define_data`/`import_data`/`ins_symbol_value`), `DYN_SLOT_ADAPTER` (`35`,
+  declaring and compiling by-value scalar `self` adapter functions via
+  `builder_new`/`define_function`), `DYN_DROP_OBJECT` (`36`), and
+  `DYN_DROP_BOXED` (`37`) in `src/dyn_trait/native.rs` (`request_control_builder`
+  when called without a `Codegen` context, reusing shared `fip_box_free_id`).
+
+### Results (Part 3)
+
+- `CODEGEN_SWAP_STEP=1 cargo +1.100.0 test --locked --release -p vesper-codegen-swap-test --test self_host_codegen_control -- --nocapture`:
+  `2 passed, 0 failed` (`a_divergent_control_hook_is_caught` + `the_control_leaves_match_the_rust_lowering` in `21.65s`):
+  - **312 worlds, 966 functions, 312 runs (optimize `true` and `false`): `0` CLIF differences, `0` object byte differences, `0` run differences, `0` one-sided differences.**
+  - Every op `1..=37` answered from Vesper: `tag` `1944`, `capture slot` `4`, `qualify` `56`, `dispatch` `608`, `trap` `1162`, `resume save` `158`, `resume restore` `158`, `return to` `586`, `join block` `3712`, `switch param` `6688`, `jump args` `3734`, `tail resume` `336`, `stack addr` `4`, `handle setup` `570`, `handler entry` `1892`, `reraise guard` `62`, `reraise each` `384`, `free sink branch` `48`, `fail exit prep` `586`, `fail exit return` `586`, `return values` `1970`, `trace check` `8`, `trace call` `8`, `trace abort` `8`, `switch block` `1308`, `dyn pair init` `28`, `dyn store word` `4`, `dyn dispatch` `16`, `dyn dispatch boxed` `24`, `dyn box init` `32`, `dyn boxed parts` `16`, `dyn pair parts` `16`, `dyn candidate` `32`, `dyn vtable` `76`, `dyn slot adapter` `8`, `dyn drop object` `52`, `dyn drop boxed` `28`.
+- Unhooked Rust regression suites (`cargo +1.100.0 test --locked -p vesper`): `dyn_box` (`13 passed, 1 ignored`), `dyn_effects` (`8 passed, 1 ignored`), `dyn_trait` (`16 passed, 1 ignored`), `native_fail_exit_drops` (`9 passed`), `trace_effects` (`20 passed`).
+- Pre-push checks: `D:\vesper.exe check packages/vesper-codegen-control-emit`, `D:\vesper.exe fmt --check packages/vesper-codegen-control-emit/src/lib.ves`, `rustfmt +1.100.0 --edition 2024 --check` on all changed `.rs` files, `python tools/bazel/sync_build_files.py --check`, and `cargo +1.100.0 clippy --locked` on `vesper` (`--lib` + tests) and `vesper-codegen-swap-test` (`--tests`) passed with `-D warnings`.
+- No Rust lowering was deleted (`Rule 8` awaits hybrid hook installation and full-family parity).

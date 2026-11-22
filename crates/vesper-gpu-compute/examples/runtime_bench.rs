@@ -9,6 +9,11 @@
 //! `DISPATCHES` dispatches, wait, and read the result back.
 use std::time::Instant;
 
+// The WGSL compiler the tests use (naga), so the timed run still compiles
+// the kernel as the Rust baseline did.
+#[path = "../tests/support/wgsl.rs"]
+mod wgsl;
+
 use vesper_gpu_compute::Context;
 
 const ADD: &str = "
@@ -28,7 +33,8 @@ const DISPATCHES: u32 = 4;
 fn main() {
     let start = Instant::now();
     let ctx = Context::new().expect("a Vulkan device");
-    let kernel = ctx.kernel(ADD, "add", 2, 8).unwrap();
+    // SAFETY: naga's SPIR-V for WGSL it validated.
+    let kernel = unsafe { ctx.kernel_from_spirv(&wgsl::spirv(ADD, "add"), "add", 2, 8) }.unwrap();
     let mut a = ctx.buffer((N * 4) as u64).unwrap();
     let b = ctx.buffer((N * 4) as u64).unwrap();
     let mut digest = 0u64;

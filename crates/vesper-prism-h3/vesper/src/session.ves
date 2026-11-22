@@ -1,0 +1,1101 @@
+// Extended CONNECT sessions (RFC 9220), HTTP Datagrams (RFC 9297), and
+// WebTransport over HTTP/3 (`src/session.rs`), shared by server and client.
+
+use self::{
+    Settings,
+    ConnectionError,
+    CapsuleError,
+    SessionKind,
+    SessionError,
+    SessionStats,
+    SessionTable,
+    DatagramPath,
+    WtReadPre,
+    DgramSendPlan
+};
+use self::int::{
+    inc,
+    min64,
+    word,
+    remove_word
+};
+use self::varint::{
+    vdec,
+    vput,
+    put_record
+};
+use self::frame::{
+    data_type,
+    webtransport_stream_type
+};
+use self::capsule::{
+    datagram_type,
+    valid_utf8,
+    max_close_reason,
+    capsule_write_close
+};
+use self::pool::{
+    BytePool,
+    OutMap,
+    CmdBuf,
+    SevBuf,
+    MODE_HEADER,
+    CAPSULE_NONE,
+    CAPSULE_DATAGRAM,
+    CAPSULE_CLOSE,
+    CAPSULE_DRAIN,
+    CMD_STOP_SENDING,
+    CMD_RESET,
+    SEV_STREAM,
+    SEV_DATAGRAM,
+    SEV_DRAINING,
+    SEV_CLOSED,
+    q_len,
+    q_push,
+    q_consume,
+    q_clear,
+    q_transfer,
+    q_drain_to,
+    q_drain_all_to,
+    pooled_capsule_at_boundary,
+    pooled_capsule_next,
+    bsearch_u64,
+    insert_word,
+    set_u64_contains,
+    set_u64_remove,
+    out_queued,
+    out_queue,
+    out_queue_fin,
+    out_discard,
+    push_cmd,
+    push_sev
+};
+
+const STREAM_WEBTRANSPORT: u64 = 0x54;
+const MAX_HELD_STREAMS: u64 = 16;
+const MAX_PENDING_DATAGRAMS: u64 = 16;
+
+// `1 << 60`: upper bound on quarter stream IDs (RFC 9297 §2.1).
+const QUARTER_STREAM_LIMIT: u64 = 1152921504606846976;
+
+pub const CODE_NO_ERROR: u64 = 0x100;
+pub const CODE_EXCESSIVE_LOAD: u64 = 0x107;
+pub const CODE_REQUEST_REJECTED: u64 = 0x10b;
+pub const CODE_REQUEST_CANCELLED: u64 = 0x10c;
+pub const CODE_REQUEST_INCOMPLETE: u64 = 0x10d;
+pub const CODE_MESSAGE_ERROR: u64 = 0x10e;
+pub const CODE_DATAGRAM_ERROR: u64 = 0x33;
+pub const CODE_WT_BUFFERED_STREAM_REJECTED: u64 = 0x3994bd84;
+pub const CODE_WT_SESSION_GONE: u64 = 0x170d7b68;
+const WT_APPLICATION_FIRST: u64 = 0x52e4a40fa8db;
+const WT_GREASE_STEP: u64 = 0x1e;
+
+const SESS_KIND_WT: u64 = 0;
+const SESS_KIND_TUNNEL: u64 = 1;
+const SESS_ESTABLISHED: u64 = 1;
+const SESS_CLOSED: u64 = 2;
+
+const WT_FLAG_RECV_DONE: u64 = 1;
+const WT_FLAG_SEND_DONE: u64 = 2;
+
+const HELD_FLAG_BIDI: u64 = 1;
+const HELD_FLAG_FIN: u64 = 2;
+
+pub fn wt_code(n: u32) -> u64 {
+    let v = widen_u64(n);
+    wrapping_add(wrapping_add(WT_APPLICATION_FIRST, v), v / WT_GREASE_STEP)
+}
+
+pub fn session_table_new() -> SessionTable {
+    SessionTable {
+        s_id: ChunkSeq::new[u64](),
+        s_kind: ChunkSeq::new[u64](),
+        s_flags: ChunkSeq::new[u64](),
+        s_cap_q: ChunkSeq::new[u64](),
+        s_cap_mode: ChunkSeq::new[u64](),
+        s_cap_rem: ChunkSeq::new[u64](),
+        s_cap_ty: ChunkSeq::new[u64](),
+        s_cap_len: ChunkSeq::new[u64](),
+        w_id: ChunkSeq::new[u64](),
+        w_session: ChunkSeq::new[u64](),
+        w_held_q: ChunkSeq::new[u64](),
+        w_flags: ChunkSeq::new[u64](),
+        h_id: ChunkSeq::new[u64](),
+        h_session: ChunkSeq::new[u64](),
+        h_rest_q: ChunkSeq::new[u64](),
+        h_flags: ChunkSeq::new[u64](),
+        pd_session: ChunkSeq::new[u64](),
+        pd_q: ChunkSeq::new[u64](),
+        stats: SessionStats {
+            sessions: 0,
+            datagrams_received: 0,
+            datagrams_sent: 0,
+            datagrams_dropped: 0,
+            streams_accepted: 0,
+            streams_rejected: 0,
+        },
+    }
+}
+
+fn kind_code(kind: SessionKind) -> u64 {
+    match kind {
+        SessionKind::WebTransport => SESS_KIND_WT,
+        SessionKind::Tunnel => SESS_KIND_TUNNEL,
+    }
+}
+
+pub fn webtransport_negotiated(sent: Settings, peer: Option[Settings]) -> bool {
+    let local_ok = match sent.webtransport_max_sessions {
+        Option::Some(_) => true,
+        Option::None => false,
+    };
+    let peer_ok = match peer {
+        Option::Some(p) => match p.webtransport_max_sessions {
+            Option::Some(_) => true,
+            Option::None => false,
+        },
+        Option::None => false,
+    };
+    local_ok && peer_ok
+}
+
+pub fn quic_datagrams(sent: Settings, peer: Option[Settings], has_max_dgram: bool) -> bool {
+    let peer_ok = match peer {
+        Option::Some(p) => p.h3_datagram,
+        Option::None => false,
+    };
+    sent.h3_datagram && peer_ok && has_max_dgram
+}
+
+pub fn live_webtransport_sessions(in st: SessionTable) -> u64 {
+    let mut n: u64 = 0;
+    for i in 0..st.s_id.len() {
+        let kind = word(in st.s_kind.as_slice(), i);
+        let flags = word(in st.s_flags.as_slice(), i);
+        if kind == SESS_KIND_WT && (flags & SESS_CLOSED) == 0 {
+            n = inc(n);
+        }
+    }
+    n
+}
+
+pub fn session_known_gone(
+    in st: SessionTable,
+    in unparsed: ChunkSeq[u64],
+    server: bool,
+    next_peer_bidi: u64,
+    session: u64,
+) -> bool {
+    if bsearch_u64(in st.s_id.as_slice(), session).found {
+        return false;
+    }
+    ! server || (session < next_peer_bidi && !set_u64_contains(in unparsed, session))
+}
+
+pub fn add_session(inout st: SessionTable, id: u64, kind: SessionKind) {
+    let f = bsearch_u64(in st.s_id.as_slice(), id);
+    let k = kind_code(kind);
+    if f.found {
+        let _a = st.s_kind.try_set(f.idx, k);
+        let _b = st.s_flags.try_set(f.idx, 0);
+        let _c = st.s_cap_mode.try_set(f.idx, MODE_HEADER);
+        let _d = st.s_cap_rem.try_set(f.idx, 0);
+        let _e = st.s_cap_ty.try_set(f.idx, 0);
+        let _g = st.s_cap_len.try_set(f.idx, 0);
+    } else {
+        insert_word(inout st.s_id, f.idx, id);
+        insert_word(inout st.s_kind, f.idx, k);
+        insert_word(inout st.s_flags, f.idx, 0);
+        insert_word(inout st.s_cap_q, f.idx, 0);
+        insert_word(inout st.s_cap_mode, f.idx, MODE_HEADER);
+        insert_word(inout st.s_cap_rem, f.idx, 0);
+        insert_word(inout st.s_cap_ty, f.idx, 0);
+        insert_word(inout st.s_cap_len, f.idx, 0);
+    }
+    st.stats.sessions = inc(st.stats.sessions);
+}
+
+fn adopt_stream(
+    inout st: SessionTable,
+    inout sev: SevBuf,
+    id: u64,
+    session: u64,
+    rest_q: u64,
+    bidi: bool,
+    fin: bool,
+) {
+    st.stats.streams_accepted = inc(st.stats.streams_accepted);
+    let flags = (
+        if fin {
+            WT_FLAG_RECV_DONE
+        } else {
+            0
+        }
+    ) | (
+        if !bidi {
+            WT_FLAG_SEND_DONE
+        } else {
+            0
+        }
+    );
+    let f = bsearch_u64(in st.w_id.as_slice(), id);
+    if f.found {
+        let _a = st.w_session.try_set(f.idx, session);
+        let _b = st.w_held_q.try_set(f.idx, rest_q);
+        let _c = st.w_flags.try_set(f.idx, flags);
+    } else {
+        insert_word(inout st.w_id, f.idx, id);
+        insert_word(inout st.w_session, f.idx, session);
+        insert_word(inout st.w_held_q, f.idx, rest_q);
+        insert_word(inout st.w_flags, f.idx, flags);
+    }
+    push_sev(
+        inout sev,
+        SEV_STREAM,
+        session,
+        id,
+        if bidi {
+            1
+        } else {
+            0
+        },
+        0,
+        0,
+        0
+    );
+}
+
+fn refuse(inout cmd: CmdBuf, id: u64, bidi: bool, code: u64) {
+    push_cmd(inout cmd, CMD_STOP_SENDING, id, code);
+    if bidi {
+        push_cmd(inout cmd, CMD_RESET, id, code);
+    }
+}
+
+pub fn establish_session(inout st: SessionTable, inout pool: BytePool, inout sev: SevBuf, id: u64) {
+    let f = bsearch_u64(in st.s_id.as_slice(), id);
+    if !f.found {
+        return;
+    }
+    let old_flags = word(in st.s_flags.as_slice(), f.idx);
+    let _s = st.s_flags.try_set(f.idx, old_flags | SESS_ESTABLISHED);
+
+    let hn = st.h_id.len();
+    let mut keep_h: u64 = 0;
+    for i in 0..hn {
+        let hid = word(in st.h_id.as_slice(), i);
+        let hsess = word(in st.h_session.as_slice(), i);
+        let hq = word(in st.h_rest_q.as_slice(), i);
+        let hflags = word(in st.h_flags.as_slice(), i);
+        if hsess == id {
+            let bidi = (hflags & HELD_FLAG_BIDI) != 0;
+            let fin = (hflags & HELD_FLAG_FIN) != 0;
+            adopt_stream(inout st, inout sev, hid, hsess, hq, bidi, fin);
+        } else {
+            if keep_h != i {
+                let _a = st.h_id.try_set(keep_h, hid);
+                let _b = st.h_session.try_set(keep_h, hsess);
+                let _c = st.h_rest_q.try_set(keep_h, hq);
+                let _d = st.h_flags.try_set(keep_h, hflags);
+            }
+            keep_h = inc(keep_h);
+        }
+    }
+    st.h_id.truncate(keep_h);
+    st.h_session.truncate(keep_h);
+    st.h_rest_q.truncate(keep_h);
+    st.h_flags.truncate(keep_h);
+
+    let pn = st.pd_session.len();
+    let mut keep_p: u64 = 0;
+    for i in 0..pn {
+        let ps = word(in st.pd_session.as_slice(), i);
+        let pq = word(in st.pd_q.as_slice(), i);
+        if ps == id {
+            let drained = q_drain_all_to(inout pool, pq, inout sev.bytes);
+            st.stats.datagrams_received = inc(st.stats.datagrams_received);
+            push_sev(inout sev, SEV_DATAGRAM, ps, drained.off, drained.len, 0, 0, 0);
+        } else {
+            if keep_p != i {
+                let _a = st.pd_session.try_set(keep_p, ps);
+                let _b = st.pd_q.try_set(keep_p, pq);
+            }
+            keep_p = inc(keep_p);
+        }
+    }
+    st.pd_session.truncate(keep_p);
+    st.pd_q.truncate(keep_p);
+}
+
+fn hold_stream(
+    inout st: SessionTable,
+    inout pool: BytePool,
+    inout cmd: CmdBuf,
+    id: u64,
+    session: u64,
+    bidi: bool,
+    rest_q: u64,
+    fin: bool,
+) {
+    if st.h_id.len() >= MAX_HELD_STREAMS {
+        st.stats.streams_rejected = inc(st.stats.streams_rejected);
+        let _c = q_clear(inout pool, rest_q);
+        refuse(inout cmd, id, bidi, CODE_WT_BUFFERED_STREAM_REJECTED);
+    } else {
+        let flags = (
+            if bidi {
+                HELD_FLAG_BIDI
+            } else {
+                0
+            }
+        ) | (
+            if fin {
+                HELD_FLAG_FIN
+            } else {
+                0
+            }
+        );
+        st.h_id.push(id);
+        st.h_session.push(session);
+        st.h_rest_q.push(rest_q);
+        st.h_flags.push(flags);
+    }
+}
+
+pub fn incoming_wt_stream_fin(
+    inout st: SessionTable,
+    inout pool: BytePool,
+    inout cmd: CmdBuf,
+    inout sev: SevBuf,
+    id: u64,
+    session: u64,
+    bidi: bool,
+    rest_q: u64,
+    known_gone: bool,
+    fin: bool,
+) -> Result[Unit, ConnectionError] {
+    if (session & 3) != 0 {
+        let _c = q_clear(inout pool, rest_q);
+        return Result::Err(ConnectionError::BadStreamId(session));
+    }
+    let f = bsearch_u64(in st.s_id.as_slice(), session);
+    if f.found {
+        let kind = word(in st.s_kind.as_slice(), f.idx);
+        let flags = word(in st.s_flags.as_slice(), f.idx);
+        let is_wt = kind == SESS_KIND_WT;
+        let est = (flags & SESS_ESTABLISHED) != 0;
+        let closed = (flags & SESS_CLOSED) != 0;
+        if is_wt && est && !closed {
+            adopt_stream(inout st, inout sev, id, session, rest_q, bidi, fin);
+        } else if is_wt && !closed {
+            hold_stream(inout st, inout pool, inout cmd, id, session, bidi, rest_q, fin);
+        } else {
+            st.stats.streams_rejected = inc(st.stats.streams_rejected);
+            let _c = q_clear(inout pool, rest_q);
+            refuse(inout cmd, id, bidi, CODE_WT_SESSION_GONE);
+        }
+    } else if !known_gone {
+        hold_stream(inout st, inout pool, inout cmd, id, session, bidi, rest_q, fin);
+    } else {
+        st.stats.streams_rejected = inc(st.stats.streams_rejected);
+        let _c = q_clear(inout pool, rest_q);
+        refuse(inout cmd, id, bidi, CODE_WT_SESSION_GONE);
+    }
+    Result::Ok(())
+}
+
+pub fn drop_held_for(
+    inout st: SessionTable,
+    inout pool: BytePool,
+    inout cmd: CmdBuf,
+    inout unparsed: ChunkSeq[u64],
+    session: u64,
+) {
+    set_u64_remove(inout unparsed, session);
+    let hn = st.h_id.len();
+    let mut keep: u64 = 0;
+    for i in 0..hn {
+        let hid = word(in st.h_id.as_slice(), i);
+        let hsess = word(in st.h_session.as_slice(), i);
+        let hq = word(in st.h_rest_q.as_slice(), i);
+        let hflags = word(in st.h_flags.as_slice(), i);
+        if hsess == session {
+            st.stats.streams_rejected = inc(st.stats.streams_rejected);
+            let _c = q_clear(inout pool, hq);
+            refuse(inout cmd, hid, (hflags & HELD_FLAG_BIDI) != 0, CODE_WT_SESSION_GONE);
+        } else {
+            if keep != i {
+                let _a = st.h_id.try_set(keep, hid);
+                let _b = st.h_session.try_set(keep, hsess);
+                let _c = st.h_rest_q.try_set(keep, hq);
+                let _d = st.h_flags.try_set(keep, hflags);
+            }
+            keep = inc(keep);
+        }
+    }
+    st.h_id.truncate(keep);
+    st.h_session.truncate(keep);
+    st.h_rest_q.truncate(keep);
+    st.h_flags.truncate(keep);
+}
+
+pub fn end_session(
+    inout st: SessionTable,
+    inout pool: BytePool,
+    inout out: OutMap,
+    inout cmd: CmdBuf,
+    inout sev: SevBuf,
+    inout unparsed: ChunkSeq[u64],
+    session: u64,
+    code: u32,
+    in reason: Slice[u8],
+    has_reset: bool,
+    reset_code: u64,
+    notify: bool,
+) {
+    let f = bsearch_u64(in st.s_id.as_slice(), session);
+    if !f.found {
+        return;
+    }
+    let flags = word(in st.s_flags.as_slice(), f.idx);
+    if (flags & SESS_CLOSED) != 0 {
+        return;
+    }
+    let _s = st.s_flags.try_set(f.idx, flags | SESS_CLOSED);
+
+    let wn = st.w_id.len();
+    let mut keep_w: u64 = 0;
+    for i in 0..wn {
+        let wid = word(in st.w_id.as_slice(), i);
+        let wsess = word(in st.w_session.as_slice(), i);
+        let whq = word(in st.w_held_q.as_slice(), i);
+        let wflags = word(in st.w_flags.as_slice(), i);
+        if wsess == session {
+            let _c = q_clear(inout pool, whq);
+            if (wflags & WT_FLAG_SEND_DONE) == 0 {
+                push_cmd(inout cmd, CMD_RESET, wid, CODE_WT_SESSION_GONE);
+            }
+            if (wflags & WT_FLAG_RECV_DONE) == 0 {
+                push_cmd(inout cmd, CMD_STOP_SENDING, wid, CODE_WT_SESSION_GONE);
+            }
+            out_discard(inout out, inout pool, wid);
+        } else {
+            if keep_w != i {
+                let _a = st.w_id.try_set(keep_w, wid);
+                let _b = st.w_session.try_set(keep_w, wsess);
+                let _c = st.w_held_q.try_set(keep_w, whq);
+                let _d = st.w_flags.try_set(keep_w, wflags);
+            }
+            keep_w = inc(keep_w);
+        }
+    }
+    st.w_id.truncate(keep_w);
+    st.w_session.truncate(keep_w);
+    st.w_held_q.truncate(keep_w);
+    st.w_flags.truncate(keep_w);
+
+    drop_held_for(inout st, inout pool, inout cmd, inout unparsed, session);
+
+    let pn = st.pd_session.len();
+    let mut keep_p: u64 = 0;
+    for i in 0..pn {
+        let ps = word(in st.pd_session.as_slice(), i);
+        let pq = word(in st.pd_q.as_slice(), i);
+        if ps == session {
+            let _c = q_clear(inout pool, pq);
+        } else {
+            if keep_p != i {
+                let _a = st.pd_session.try_set(keep_p, ps);
+                let _b = st.pd_q.try_set(keep_p, pq);
+            }
+            keep_p = inc(keep_p);
+        }
+    }
+    st.pd_session.truncate(keep_p);
+    st.pd_q.truncate(keep_p);
+
+    if notify {
+        let off = sev.bytes.len();
+        let len = reason.len();
+        sev.bytes.extend(in reason);
+        push_sev(
+            inout sev,
+            SEV_CLOSED,
+            session,
+            widen_u64(code),
+            off,
+            len,
+            if has_reset {
+                1
+            } else {
+                0
+            },
+            reset_code,
+        );
+    }
+}
+
+pub fn forget_session(inout st: SessionTable, inout pool: BytePool, session: u64) {
+    let f = bsearch_u64(in st.s_id.as_slice(), session);
+    if f.found {
+        let cq = word(in st.s_cap_q.as_slice(), f.idx);
+        let _c = q_clear(inout pool, cq);
+        remove_word(inout st.s_id, f.idx);
+        remove_word(inout st.s_kind, f.idx);
+        remove_word(inout st.s_flags, f.idx);
+        remove_word(inout st.s_cap_q, f.idx);
+        remove_word(inout st.s_cap_mode, f.idx);
+        remove_word(inout st.s_cap_rem, f.idx);
+        remove_word(inout st.s_cap_ty, f.idx);
+        remove_word(inout st.s_cap_len, f.idx);
+    }
+}
+
+// Processes `len` bytes from `rx_q` belonging to `session`'s CONNECT DATA
+// stream. Returns `0` on success or an HTTP/3 stream error code on failure,
+// plus updated `rx_q`.
+pub copy struct SessionDataRes {
+    rx_q: u64,
+    err_code: u64,
+}
+
+pub fn session_data(
+    inout st: SessionTable,
+    inout pool: BytePool,
+    inout out: OutMap,
+    inout cmd: CmdBuf,
+    inout sev: SevBuf,
+    inout unparsed: ChunkSeq[u64],
+    inout scratch: ChunkSeq[u8],
+    inout cap_out: ChunkSeq[u8],
+    session: u64,
+    rx_q_in: u64,
+    len: u64,
+    max_frame_payload: u64,
+) -> SessionDataRes {
+    let f0 = bsearch_u64(in st.s_id.as_slice(), session);
+    if !f0.found {
+        let next_rx = q_consume(inout pool, rx_q_in, len);
+        return SessionDataRes {
+            rx_q: next_rx,
+            err_code: 0
+        };
+    }
+    let cq0 = word(in st.s_cap_q.as_slice(), f0.idx);
+    let tr = q_transfer(inout pool, rx_q_in, cq0, len);
+    let _set = st.s_cap_q.try_set(f0.idx, tr.to_q);
+    let next_rx = tr.from_q;
+
+    loop {
+        let f = bsearch_u64(in st.s_id.as_slice(), session);
+        if !f.found {
+            return SessionDataRes {
+                rx_q: next_rx,
+                err_code: 0
+            };
+        }
+        let cq = word(in st.s_cap_q.as_slice(), f.idx);
+        let cm = word(in st.s_cap_mode.as_slice(), f.idx);
+        let cr = word(in st.s_cap_rem.as_slice(), f.idx);
+        let ct = word(in st.s_cap_ty.as_slice(), f.idx);
+        let cl = word(in st.s_cap_len.as_slice(), f.idx);
+        let kind = word(in st.s_kind.as_slice(), f.idx);
+        let flags = word(in st.s_flags.as_slice(), f.idx);
+        let closed = (flags & SESS_CLOSED) != 0;
+
+        let step = match pooled_capsule_next(
+            inout pool,
+            inout scratch,
+            inout cap_out,
+            cq,
+            cm,
+            cr,
+            ct,
+            cl,
+            max_frame_payload,
+        ) {
+            Result::Ok(s) => s,
+            Result::Err(
+                CapsuleError::TooLarge {
+                    capsule_type,
+                    len: _len
+                }
+            ) => {
+                let code = if capsule_type == datagram_type() {
+                    CODE_DATAGRAM_ERROR
+                } else {
+                    CODE_MESSAGE_ERROR
+                };
+                return SessionDataRes {
+                    rx_q: next_rx,
+                    err_code: code
+                };
+            }
+            Result::Err(
+                CapsuleError::Malformed {
+                    capsule_type
+                }
+            ) => {
+                let code = if capsule_type == datagram_type() {
+                    CODE_DATAGRAM_ERROR
+                } else {
+                    CODE_MESSAGE_ERROR
+                };
+                return SessionDataRes {
+                    rx_q: next_rx,
+                    err_code: code
+                };
+            }
+            Result::Err(CapsuleError::Truncated) => {
+                return SessionDataRes {
+                    rx_q: next_rx,
+                    err_code: CODE_MESSAGE_ERROR
+                };
+            }
+        };
+
+        let _q = st.s_cap_q.try_set(f.idx, step.cap_q);
+        let _m = st.s_cap_mode.try_set(f.idx, step.mode);
+        let _r = st.s_cap_rem.try_set(f.idx, step.rem);
+        let _t = st.s_cap_ty.try_set(f.idx, step.ty);
+        let _l = st.s_cap_len.try_set(f.idx, step.flen);
+
+        if step.kind == CAPSULE_NONE {
+            return SessionDataRes {
+                rx_q: next_rx,
+                err_code: 0
+            };
+        } else if step.kind == CAPSULE_DATAGRAM {
+            if closed {
+                st.stats.datagrams_dropped = inc(st.stats.datagrams_dropped);
+            } else {
+                st.stats.datagrams_received = inc(st.stats.datagrams_received);
+                let off = sev.bytes.len();
+                let plen = cap_out.len();
+                sev.bytes.extend(in cap_out.as_slice());
+                push_sev(inout sev, SEV_DATAGRAM, session, off, plen, 0, 0, 0);
+            }
+        } else if step.kind == CAPSULE_CLOSE {
+            if kind == SESS_KIND_WT {
+                end_session(
+                    inout st,
+                    inout pool,
+                    inout out,
+                    inout cmd,
+                    inout sev,
+                    inout unparsed,
+                    session,
+                    step.code,
+                    in cap_out.as_slice(),
+                    false,
+                    0,
+                    true,
+                );
+            }
+        } else if step.kind == CAPSULE_DRAIN {
+            if kind == SESS_KIND_WT && !closed {
+                push_sev(inout sev, SEV_DRAINING, session, 0, 0, 0, 0, 0);
+            }
+        }
+    }
+}
+
+pub fn session_fin_ok(in st: SessionTable, in pool: BytePool, session: u64) -> bool {
+    let f = bsearch_u64(in st.s_id.as_slice(), session);
+    if !f.found {
+        return true;
+    }
+    let cq = word(in st.s_cap_q.as_slice(), f.idx);
+    let cm = word(in st.s_cap_mode.as_slice(), f.idx);
+    pooled_capsule_at_boundary(in pool, cq, cm)
+}
+
+pub fn on_quic_datagram(
+    inout st: SessionTable,
+    inout pool: BytePool,
+    inout sev: SevBuf,
+    sent: Settings,
+    in d: Slice[u8],
+) -> Result[Unit, ConnectionError] {
+    if !sent.h3_datagram {
+        return Result::Err(ConnectionError::Datagram);
+    }
+    let n = match vdec(in d, 0) {
+        Option::Some(v) => v,
+        Option::None => return Result::Err(ConnectionError::Datagram),
+    };
+    if n.value >= QUARTER_STREAM_LIMIT {
+        return Result::Err(ConnectionError::Datagram);
+    }
+    let session = wrapping_mul(n.value, 4);
+    let payload = d[n.used..d.len()];
+    let f = bsearch_u64(in st.s_id.as_slice(), session);
+    if f.found {
+        let flags = word(in st.s_flags.as_slice(), f.idx);
+        let closed = (flags & SESS_CLOSED) != 0;
+        let est = (flags & SESS_ESTABLISHED) != 0;
+        if est && !closed {
+            st.stats.datagrams_received = inc(st.stats.datagrams_received);
+            let off = sev.bytes.len();
+            let plen = payload.len();
+            sev.bytes.extend(in payload);
+            push_sev(inout sev, SEV_DATAGRAM, session, off, plen, 0, 0, 0);
+        } else if !closed {
+            if st.pd_session.len() < MAX_PENDING_DATAGRAMS {
+                let pq = q_push(inout pool, 0, in payload);
+                st.pd_session.push(session);
+                st.pd_q.push(pq);
+            } else {
+                st.stats.datagrams_dropped = inc(st.stats.datagrams_dropped);
+            }
+        } else {
+            st.stats.datagrams_dropped = inc(st.stats.datagrams_dropped);
+        }
+    } else {
+        st.stats.datagrams_dropped = inc(st.stats.datagrams_dropped);
+    }
+    Result::Ok(())
+}
+
+pub fn live_session(in st: SessionTable, err: Option[ConnectionError], session: u64)
+    -> Result[u64, SessionError] {
+    match err {
+        Option::Some(_) => return Result::Err(SessionError::Connection),
+        Option::None => {}
+    }
+    let f = bsearch_u64(in st.s_id.as_slice(), session);
+    if !f.found {
+        return Result::Err(SessionError::NotEstablished);
+    }
+    let flags = word(in st.s_flags.as_slice(), f.idx);
+    if (flags & SESS_CLOSED) != 0 {
+        return Result::Err(SessionError::Closed);
+    }
+    if (flags & SESS_ESTABLISHED) == 0 {
+        return Result::Err(SessionError::NotEstablished);
+    }
+    Result::Ok(f.idx)
+}
+
+pub fn send_datagram_prepare(
+    inout st: SessionTable,
+    inout pool: BytePool,
+    inout out: OutMap,
+    inout scratch: ChunkSeq[u8],
+    err: Option[ConnectionError],
+    sent: Settings,
+    peer: Option[Settings],
+    max_dgram: Option[u64],
+    cfg_max_frame_payload: u64,
+    cfg_max_stream_buffer: u64,
+    session: u64,
+    in payload: Slice[u8],
+) -> Result[DgramSendPlan, SessionError] {
+    match live_session(in st, err, session) {
+        Result::Ok(_idx) => {}
+        Result::Err(e) => return Result::Err(e),
+    }
+    let has_max = match max_dgram {
+        Option::Some(_) => true,
+        Option::None => false,
+    };
+    if quic_datagrams(sent, peer, has_max) {
+        scratch.clear();
+        let _ok = vput(inout scratch, session >> 2);
+        scratch.extend(in payload);
+        match max_dgram {
+            Option::Some(m) => {
+                if scratch.len() > m {
+                    return Result::Err(SessionError::TooLarge);
+                }
+            }
+            Option::None => {}
+        }
+        return Result::Ok(DgramSendPlan::SendQuic);
+    }
+    if payload.len() > cfg_max_frame_payload {
+        return Result::Err(SessionError::TooLarge);
+    }
+    let mut cap = ChunkSeq::new[u8]();
+    let _ok1 = put_record(inout cap, datagram_type(), in payload);
+    if wrapping_add(wrapping_add(out_queued(in out, in pool, session), cap.len()), 9)
+        > cfg_max_stream_buffer {
+        return Result::Err(SessionError::TooLarge);
+    }
+    scratch.clear();
+    let _ok2 = put_record(inout scratch, data_type(), in cap.as_slice());
+    out_queue(inout out, inout pool, session, in scratch.as_slice());
+    st.stats.datagrams_sent = inc(st.stats.datagrams_sent);
+    Result::Ok(DgramSendPlan::SentCapsule)
+}
+
+pub fn queue_session_close(
+    in st: SessionTable,
+    inout pool: BytePool,
+    inout out: OutMap,
+    session: u64,
+    code: u32,
+    in reason: Slice[u8],
+) -> Result[Unit, SessionError] {
+    if reason.len() > max_close_reason() || !valid_utf8(in reason) {
+        return Result::Err(SessionError::BadReason);
+    }
+    let f = bsearch_u64(in st.s_id.as_slice(), session);
+    if f.found {
+        let kind = word(in st.s_kind.as_slice(), f.idx);
+        let flags = word(in st.s_flags.as_slice(), f.idx);
+        if kind == SESS_KIND_WT && (flags & SESS_CLOSED) == 0 {
+            let mut c = ChunkSeq::new[u8]();
+            let _ok1 = capsule_write_close(inout c, code, in reason);
+            let mut fbuf = ChunkSeq::new[u8]();
+            let _ok2 = put_record(inout fbuf, data_type(), in c.as_slice());
+            out_queue(inout out, inout pool, session, in fbuf.as_slice());
+        }
+    }
+    out_queue_fin(inout out, session);
+    Result::Ok(())
+}
+
+pub fn wt_can_open(
+    in st: SessionTable,
+    err: Option[ConnectionError],
+    session: u64,
+) -> Result[Unit, SessionError] {
+    let idx = match live_session(in st, err, session) {
+        Result::Ok(i) => i,
+        Result::Err(e) => return Result::Err(e),
+    };
+    if word(in st.s_kind.as_slice(), idx) != SESS_KIND_WT {
+        return Result::Err(SessionError::NotWebTransport);
+    }
+    Result::Ok(())
+}
+
+pub fn wt_register_opened(
+    inout st: SessionTable,
+    inout pool: BytePool,
+    inout out: OutMap,
+    id: u64,
+    session: u64,
+    bidi: bool,
+) {
+    let mut hdr = ChunkSeq::new[u8]();
+    let tag = if bidi {
+        webtransport_stream_type()
+    } else {
+        STREAM_WEBTRANSPORT
+    };
+    let _ok1 = vput(inout hdr, tag);
+    let _ok2 = vput(inout hdr, session);
+    out_queue(inout out, inout pool, id, in hdr.as_slice());
+
+    let flags = if !bidi {
+        WT_FLAG_RECV_DONE
+    } else {
+        0
+    };
+    let f = bsearch_u64(in st.w_id.as_slice(), id);
+    if f.found {
+        let _a = st.w_session.try_set(f.idx, session);
+        let _b = st.w_held_q.try_set(f.idx, 0);
+        let _c = st.w_flags.try_set(f.idx, flags);
+    } else {
+        insert_word(inout st.w_id, f.idx, id);
+        insert_word(inout st.w_session, f.idx, session);
+        insert_word(inout st.w_held_q, f.idx, 0);
+        insert_word(inout st.w_flags, f.idx, flags);
+    }
+}
+
+pub fn wt_session_of(in st: SessionTable, id: u64) -> Option[u64] {
+    let f = bsearch_u64(in st.w_id.as_slice(), id);
+    if f.found {
+        Option::Some(word(in st.w_session.as_slice(), f.idx))
+    } else {
+        Option::None
+    }
+}
+
+fn retire_wt(inout st: SessionTable, in pool: BytePool, idx: u64) {
+    let flags = word(in st.w_flags.as_slice(), idx);
+    let hq = word(in st.w_held_q.as_slice(), idx);
+    if (flags & WT_FLAG_RECV_DONE) != 0
+        && (flags & WT_FLAG_SEND_DONE) != 0
+        && q_len(in pool, hq) == 0 {
+        remove_word(inout st.w_id, idx);
+        remove_word(inout st.w_session, idx);
+        remove_word(inout st.w_held_q, idx);
+        remove_word(inout st.w_flags, idx);
+    }
+}
+
+fn retire_wt_by_id(inout st: SessionTable, in pool: BytePool, id: u64) {
+    let f = bsearch_u64(in st.w_id.as_slice(), id);
+    if f.found {
+        retire_wt(inout st, in pool, f.idx);
+    }
+}
+
+pub fn wt_can_write(in st: SessionTable, in out: OutMap, in pool: BytePool, id: u64)
+    -> Result[bool, SessionError] {
+    let f = bsearch_u64(in st.w_id.as_slice(), id);
+    if !f.found {
+        return Result::Err(SessionError::UnknownStream);
+    }
+    let flags = word(in st.w_flags.as_slice(), f.idx);
+    if (flags & WT_FLAG_SEND_DONE) != 0 {
+        return Result::Err(SessionError::UnknownStream);
+    }
+    Result::Ok(out_queued(in out, in pool, id) > 0)
+}
+
+pub fn wt_on_write_reset(inout st: SessionTable, in pool: BytePool, id: u64, code: u64)
+    -> Result[u64, SessionError] {
+    let f = bsearch_u64(in st.w_id.as_slice(), id);
+    if !f.found {
+        return Result::Err(SessionError::UnknownStream);
+    }
+    let flags = word(in st.w_flags.as_slice(), f.idx);
+    let _s = st.w_flags.try_set(f.idx, flags | WT_FLAG_SEND_DONE);
+    retire_wt(inout st, in pool, f.idx);
+    Result::Err(SessionError::StreamReset(code))
+}
+
+pub fn wt_finish_prepare(
+    inout st: SessionTable,
+    in pool: BytePool,
+    inout out: OutMap,
+    id: u64,
+) -> Result[bool, SessionError] {
+    let f = bsearch_u64(in st.w_id.as_slice(), id);
+    if !f.found {
+        return Result::Err(SessionError::UnknownStream);
+    }
+    let flags = word(in st.w_flags.as_slice(), f.idx);
+    if (flags & WT_FLAG_SEND_DONE) != 0 {
+        return Result::Err(SessionError::UnknownStream);
+    }
+    let _s = st.w_flags.try_set(f.idx, flags | WT_FLAG_SEND_DONE);
+    let need_flush = if out_queued(in out, in pool, id) > 0 {
+        out_queue_fin(inout out, id);
+        true
+    } else {
+        false
+    };
+    retire_wt(inout st, in pool, f.idx);
+    Result::Ok(need_flush)
+}
+
+pub fn wt_read_pre(
+    inout st: SessionTable,
+    inout pool: BytePool,
+    inout scratch: ChunkSeq[u8],
+    id: u64,
+    max_n: u64,
+) -> Result[WtReadPre, SessionError] {
+    let f = bsearch_u64(in st.w_id.as_slice(), id);
+    if !f.found {
+        return Result::Err(SessionError::UnknownStream);
+    }
+    let flags = word(in st.w_flags.as_slice(), f.idx);
+    let recv_done = (flags & WT_FLAG_RECV_DONE) != 0;
+    let hq = word(in st.w_held_q.as_slice(), f.idx);
+    let hlen = q_len(in pool, hq);
+    if recv_done && hlen == 0 {
+        return Result::Ok(
+            WtReadPre::Done {
+                len: 0,
+                fin: true
+            }
+        );
+    }
+    if hlen > 0 {
+        scratch.clear();
+        let d = q_drain_to(inout pool, hq, max_n, inout scratch);
+        let _s = st.w_held_q.try_set(f.idx, d.q);
+        let fin = recv_done && d.q == 0;
+        if fin {
+            retire_wt(inout st, in pool, f.idx);
+        }
+        return Result::Ok(
+            WtReadPre::Done {
+                len: d.len,
+                fin: fin
+            }
+        );
+    }
+    Result::Ok(WtReadPre::TryTransport)
+}
+
+pub fn wt_on_read_fin(inout st: SessionTable, in pool: BytePool, id: u64) -> bool {
+    let f = bsearch_u64(in st.w_id.as_slice(), id);
+    if !f.found {
+        return false;
+    }
+    let flags = word(in st.w_flags.as_slice(), f.idx);
+    let _s = st.w_flags.try_set(f.idx, flags | WT_FLAG_RECV_DONE);
+    retire_wt(inout st, in pool, f.idx);
+    true
+}
+
+pub fn wt_reset(
+    inout st: SessionTable,
+    inout pool: BytePool,
+    inout out: OutMap,
+    inout cmd: CmdBuf,
+    id: u64,
+    code: u32,
+) -> Result[Unit, SessionError] {
+    let f = bsearch_u64(in st.w_id.as_slice(), id);
+    if !f.found {
+        return Result::Err(SessionError::UnknownStream);
+    }
+    let flags = word(in st.w_flags.as_slice(), f.idx);
+    if (flags & WT_FLAG_SEND_DONE) == 0 {
+        let _s = st.w_flags.try_set(f.idx, flags | WT_FLAG_SEND_DONE);
+        push_cmd(inout cmd, CMD_RESET, id, wt_code(code));
+    }
+    out_discard(inout out, inout pool, id);
+    retire_wt(inout st, in pool, f.idx);
+    Result::Ok(())
+}
+
+pub fn wt_stop_sending(
+    inout st: SessionTable,
+    inout pool: BytePool,
+    inout cmd: CmdBuf,
+    id: u64,
+    code: u32,
+) -> Result[Unit, SessionError] {
+    let f = bsearch_u64(in st.w_id.as_slice(), id);
+    if !f.found {
+        return Result::Err(SessionError::UnknownStream);
+    }
+    let flags = word(in st.w_flags.as_slice(), f.idx);
+    if (flags & WT_FLAG_RECV_DONE) == 0 {
+        let _s = st.w_flags.try_set(f.idx, flags | WT_FLAG_RECV_DONE);
+        let hq = word(in st.w_held_q.as_slice(), f.idx);
+        let _c = q_clear(inout pool, hq);
+        let _h = st.w_held_q.try_set(f.idx, 0);
+        push_cmd(inout cmd, CMD_STOP_SENDING, id, wt_code(code));
+    }
+    retire_wt(inout st, in pool, f.idx);
+    Result::Ok(())
+}
+
+pub fn wt_peer_fin(inout st: SessionTable, in pool: BytePool, id: u64) {
+    let f = bsearch_u64(in st.w_id.as_slice(), id);
+    if f.found {
+        let flags = word(in st.w_flags.as_slice(), f.idx);
+        let _s = st.w_flags.try_set(f.idx, flags | WT_FLAG_RECV_DONE);
+        retire_wt(inout st, in pool, f.idx);
+        return;
+    }
+    for i in 0..st.h_id.len() {
+        if word(in st.h_id.as_slice(), i) == id {
+            let flags = word(in st.h_flags.as_slice(), i);
+            let _s = st.h_flags.try_set(i, flags | HELD_FLAG_FIN);
+            return;
+        }
+    }
+}

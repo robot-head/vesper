@@ -1,0 +1,972 @@
+// Module corim of @vesper/aegis (see lib.ves): CoRIM (tag 501), CoMID
+// (tag 506) and corim-meta CBOR parsing (draft-ietf-rats-corim).
+use self::AErr;
+use self::cbor::{
+    K_ARRAY,
+    K_BIGNUM,
+    K_BYTES,
+    K_MAP,
+    K_NINT,
+    K_TAG,
+    K_TEXT,
+    K_UINT,
+    Scratch,
+    arg,
+    cbor_err,
+    cur_len,
+    decode_span,
+    decode_whole_at,
+    i64_bits,
+    int_nodes_eq,
+    is_i64,
+    kind,
+    materialize_bytes,
+    put_str,
+    set_len,
+    skip,
+    str_len,
+    text_eq_s
+};
+use self::reader::{
+    k_over_budget,
+    put,
+    raise
+};
+
+const FORMAT_CORIM: u64 = 3;
+const FIELD_CORIM: u64 = 130;
+
+// CBOR_FIELDS of src/port.rs.
+const F_CORIM: u64 = 34;
+const F_CORIM_TAGS: u64 = 35;
+const F_COMID: u64 = 36;
+const F_PROFILE: u64 = 37;
+const F_CORIM_ID: u64 = 38;
+const F_CORIM_VALIDITY: u64 = 39;
+const F_ENTITIES: u64 = 40;
+const F_ENTITY: u64 = 41;
+const F_ENTITY_ROLES: u64 = 42;
+const F_ENTITY_ROLE: u64 = 43;
+const F_ENTITY_NAME: u64 = 44;
+const F_ENTITY_REGID: u64 = 45;
+const F_COMID_TAG_ID_MAP: u64 = 46;
+const F_COMID_TRIPLES: u64 = 47;
+const F_COMID_TAG_ID: u64 = 48;
+const F_TAG_VERSION: u64 = 49;
+const F_REF_TRIPLES: u64 = 50;
+const F_REF_TRIPLE: u64 = 51;
+const F_MEASUREMENTS: u64 = 52;
+const F_ATTEST_TRIPLES: u64 = 53;
+const F_ATTEST_TRIPLE: u64 = 54;
+const F_ATTEST_KEYS: u64 = 55;
+const F_ENV: u64 = 56;
+const F_CLASS: u64 = 57;
+const F_CLASS_ID: u64 = 58;
+const F_CLASS_VENDOR: u64 = 59;
+const F_CLASS_MODEL: u64 = 60;
+const F_CLASS_LAYER: u64 = 61;
+const F_CLASS_INDEX: u64 = 62;
+const F_INSTANCE: u64 = 63;
+const F_MEASUREMENT: u64 = 64;
+const F_MKEY: u64 = 65;
+const F_MVAL: u64 = 66;
+const F_VERSION: u64 = 67;
+const F_DIGESTS: u64 = 68;
+const F_DIGEST: u64 = 69;
+const F_DIGEST_ALG: u64 = 70;
+const F_DIGEST_VALUE: u64 = 71;
+const F_RAW_VALUE: u64 = 72;
+const F_MASKED_RAW_VALUE: u64 = 73;
+const F_RAW_VALUE_MASK: u64 = 74;
+const F_MEASUREMENT_NAME: u64 = 75;
+const F_CRYPTOKEYS: u64 = 76;
+const F_CRYPTO_KEY: u64 = 77;
+const F_PKIX_BASE64_KEY: u64 = 78;
+const F_CORIM_META: u64 = 79;
+const F_CORIM_META_SIGNER: u64 = 80;
+const F_SIGNER_NAME: u64 = 81;
+const F_SIGNER_URI: u64 = 82;
+const F_SIGNATURE_VALIDITY: u64 = 83;
+
+// CBOR_REASONS of src/port.rs.
+const R_EXPECTED_MAP: u64 = 2;
+const R_EXPECTED_TEXT: u64 = 6;
+const R_EXPECTED_BYTES: u64 = 8;
+const R_EXPECTED_ARRAY: u64 = 11;
+const R_EXPECTED_UNSIGNED: u64 = 13;
+const R_TOO_MANY_ENTRIES: u64 = 15;
+const R_UNKNOWN_KEY: u64 = 20;
+const R_NON_INT_KEY: u64 = 32;
+const R_DUP_KEY: u64 = 33;
+const R_MISSING_KEY: u64 = 34;
+const R_TOO_MANY_ITEMS: u64 = 35;
+const R_UUID_LEN: u64 = 36;
+const R_TEXT_OR_UUID: u64 = 37;
+const R_TAG1_TIME: u64 = 38;
+const R_NOT_BEFORE_AFTER: u64 = 39;
+const R_EXPECTED_URI: u64 = 40;
+const R_CLASS_ID: u64 = 41;
+const R_INSTANCE_TAG: u64 = 42;
+const R_EMPTY: u64 = 43;
+const R_OUT_OF_RANGE: u64 = 44;
+const R_UNKNOWN_ALG_NAME: u64 = 45;
+const R_INT_OR_TEXT: u64 = 46;
+const R_TAGGED_KEY: u64 = 47;
+const R_DIGEST_SHAPE: u64 = 48;
+const R_MASKED_SHAPE: u64 = 49;
+const R_RAW_TAG: u64 = 50;
+const R_NEGATIVE_INT: u64 = 51;
+const R_UNSUPPORTED_TYPE: u64 = 52;
+const R_REF_TRIPLE_SHAPE: u64 = 53;
+const R_AK_TRIPLE_SHAPE: u64 = 54;
+const R_MISSING_TAG_501: u64 = 55;
+const R_UNTAGGED_ENTRY: u64 = 56;
+const R_PROFILE_TAG: u64 = 57;
+
+// Tags & limits.
+const CORIM_TAG: u64 = 501;
+const COMID_TAG: u64 = 506;
+const TAG_EPOCH_TIME: u64 = 1;
+const TAG_URI: u64 = 32;
+const TAG_UUID: u64 = 37;
+const TAG_OID: u64 = 111;
+const TAG_UEID: u64 = 550;
+const TAG_PKIX_BASE64_KEY: u64 = 554;
+const TAG_BYTES: u64 = 560;
+const TAG_MASKED_RAW_VALUE: u64 = 563;
+const MAX_CORIM_LEN: u64 = 262144;
+const MAX_CORIM_ITEMS: u64 = 1024;
+const UUID_LEN: u64 = 16;
+const NONE: u64 = 18446744073709551615;
+
+// IANA Named Information hash algorithm IDs.
+const NI_SHA256: u64 = 1;
+const NI_SHA384: u64 = 7;
+const NI_SHA512: u64 = 8;
+
+// Map keys.
+const K_CORIM_ID: u64 = 0;
+const K_CORIM_TAGS: u64 = 1;
+const K_CORIM_PROFILE: u64 = 3;
+const K_CORIM_VALIDITY: u64 = 4;
+const K_CORIM_ENTITIES: u64 = 5;
+
+const K_META_SIGNER: u64 = 0;
+const K_META_SIG_VALIDITY: u64 = 1;
+const K_SIGNER_NAME: u64 = 0;
+const K_SIGNER_URI: u64 = 1;
+const K_VAL_NOT_BEFORE: u64 = 0;
+const K_VAL_NOT_AFTER: u64 = 1;
+const K_ENTITY_NAME: u64 = 0;
+const K_ENTITY_REGID: u64 = 1;
+const K_ENTITY_ROLES: u64 = 2;
+
+const K_COMID_TAG_ID: u64 = 1;
+const K_COMID_TRIPLES: u64 = 4;
+const K_TID_ID: u64 = 0;
+const K_TID_VERSION: u64 = 1;
+const K_TR_REF: u64 = 0;
+const K_TR_ATTEST: u64 = 3;
+const K_ENV_CLASS: u64 = 0;
+const K_ENV_INSTANCE: u64 = 1;
+const K_ENV_GROUP: u64 = 2;
+const K_CLS_ID: u64 = 0;
+const K_CLS_VENDOR: u64 = 1;
+const K_CLS_MODEL: u64 = 2;
+const K_CLS_LAYER: u64 = 3;
+const K_CLS_INDEX: u64 = 4;
+const K_MEAS_MKEY: u64 = 0;
+const K_MEAS_MVAL: u64 = 1;
+const K_MEAS_AUTH_BY: u64 = 2;
+const K_MVAL_VERSION: u64 = 0;
+const K_MVAL_DIGESTS: u64 = 2;
+const K_MVAL_RAW: u64 = 4;
+const K_MVAL_NAME: u64 = 11;
+const K_MVAL_CRYPTOKEYS: u64 = 13;
+const K_VER_VERSION: u64 = 0;
+const K_VER_SCHEME: u64 = 1;
+
+// IntMap::new: map with <= 1024 entries, i64 keys, no duplicate keys.
+fn int_map(in n: Slice[u64], i: u64, field: u64) -> Unit eff [Fail[AErr]] {
+    if kind(in n, i) != K_MAP {
+        cbor_err(field, R_EXPECTED_MAP);
+    }
+    let count = arg(in n, i);
+    if count > MAX_CORIM_ITEMS {
+        cbor_err(field, R_TOO_MANY_ENTRIES);
+    }
+    let mut e = 0;
+    let mut at = wrapping_add(i, 2);
+    loop {
+        if e == count {
+            return;
+        }
+        if !is_i64(in n, at) {
+            cbor_err(field, R_NON_INT_KEY);
+        }
+        let mut j = 0;
+        let mut prev = wrapping_add(i, 2);
+        loop {
+            if j == e {
+                break;
+            }
+            if int_nodes_eq(in n, prev, at) {
+                cbor_err(field, R_DUP_KEY);
+            }
+            prev = skip(in n, skip(in n, prev));
+            j = wrapping_add(j, 1);
+        }
+        at = skip(in n, skip(in n, at));
+        e = wrapping_add(e, 1);
+    }
+}
+
+fn map_find(in n: Slice[u64], m: u64, key: u64) -> u64 {
+    let count = arg(in n, m);
+    let mut e = 0;
+    let mut at = wrapping_add(m, 2);
+    loop {
+        if e == count {
+            return NONE;
+        }
+        let v = skip(in n, at);
+        if kind(in n, at) == K_UINT && arg(in n, at) == key {
+            return v;
+        }
+        at = skip(in n, v);
+        e = wrapping_add(e, 1);
+    }
+}
+
+fn map_req(in n: Slice[u64], m: u64, key: u64, field: u64) -> u64 eff [Fail[AErr]] {
+    let v = map_find(in n, m, key);
+    if v == NONE {
+        cbor_err(field, R_MISSING_KEY);
+    }
+    v
+}
+
+// IntMap::only when all allowed keys are uints < 64.
+fn map_only(in n: Slice[u64], m: u64, mask: u64, field: u64) -> Unit eff [Fail[AErr]] {
+    let count = arg(in n, m);
+    let mut e = 0;
+    let mut at = wrapping_add(m, 2);
+    loop {
+        if e == count {
+            return;
+        }
+        if kind(in n, at) != K_UINT {
+            cbor_err(field, R_UNKNOWN_KEY);
+        }
+        let k = arg(in n, at);
+        let bit = if k == 0 {
+            1
+        } else if k == 1 {
+            2
+        } else if k == 2 {
+            4
+        } else if k == 3 {
+            8
+        } else if k == 4 {
+            16
+        } else {
+            0
+        };
+        if (mask & bit) == 0 {
+            cbor_err(field, R_UNKNOWN_KEY);
+        }
+        at = skip(in n, skip(in n, at));
+        e = wrapping_add(e, 1);
+    }
+}
+
+fn check_array(in n: Slice[u64], v: u64, field: u64) -> u64 eff [Fail[AErr]] {
+    if kind(in n, v) != K_ARRAY {
+        cbor_err(field, R_EXPECTED_ARRAY);
+    }
+    let count = arg(in n, v);
+    if count > MAX_CORIM_ITEMS {
+        cbor_err(field, R_TOO_MANY_ITEMS);
+    }
+    count
+}
+
+fn req_text(in n: Slice[u64], v: u64, field: u64) -> Unit eff [Fail[AErr]] {
+    if kind(in n, v) != K_TEXT {
+        cbor_err(field, R_EXPECTED_TEXT);
+    }
+}
+
+fn req_bstr(in n: Slice[u64], v: u64, field: u64) -> Unit eff [Fail[AErr]] {
+    if kind(in n, v) != K_BYTES {
+        cbor_err(field, R_EXPECTED_BYTES);
+    }
+}
+
+fn req_uint(in n: Slice[u64], v: u64, field: u64) -> u64 eff [Fail[AErr]] {
+    if kind(in n, v) != K_UINT {
+        cbor_err(field, R_EXPECTED_UNSIGNED);
+    }
+    arg(in n, v)
+}
+
+fn req_uuid(in n: Slice[u64], v: u64, field: u64) -> Unit eff [Fail[AErr]] {
+    req_bstr(in n, v, field);
+    if str_len(in n, v) != UUID_LEN {
+        cbor_err(field, R_UUID_LEN);
+    }
+}
+
+fn is_tagged(in n: Slice[u64], v: u64) -> bool {
+    let k = kind(in n, v);
+    k == K_TAG || k == K_BIGNUM
+}
+
+// CorimId: 0 -> Text(str), 1 -> Uuid(16B str).
+fn put_id(in n: Slice[u64], v: u64, field: u64, inout w: Slice[u64]) -> Unit eff [Fail[AErr]] {
+    let k = kind(in n, v);
+    if k == K_TEXT {
+        put(inout w, 0);
+        put_str(in n, v, inout w);
+    } else if k == K_BYTES {
+        req_uuid(in n, v, field);
+        put(inout w, 1);
+        put_str(in n, v, inout w);
+    } else if k == K_TAG && arg(in n, v) == TAG_UUID {
+        let inner = wrapping_add(v, 2);
+        req_uuid(in n, inner, field);
+        put(inout w, 1);
+        put_str(in n, inner, inout w);
+    } else {
+        cbor_err(field, R_TEXT_OR_UUID);
+    }
+}
+
+fn parse_time(in n: Slice[u64], v: u64, field: u64) -> u64 eff [Fail[AErr]] {
+    if kind(in n, v) != K_TAG || arg(in n, v) != TAG_EPOCH_TIME {
+        cbor_err(field, R_TAG1_TIME);
+    }
+    req_uint(in n, wrapping_add(v, 2), field)
+}
+
+// CorimValidity: has_not_before, [nb], not_after.
+fn put_validity(in n: Slice[u64], v: u64, field: u64, inout w: Slice[u64])
+    -> Unit eff [Fail[AErr]] {
+    int_map(in n, v, field);
+    map_only(in n, v, 3, field);
+    let nb_node = map_find(in n, v, K_VAL_NOT_BEFORE);
+    let mut has_nb = 0;
+    let mut nb = 0;
+    if nb_node != NONE {
+        has_nb = 1;
+        nb = parse_time(in n, nb_node, field);
+    }
+    let na = parse_time(in n, map_req(in n, v, K_VAL_NOT_AFTER, field), field);
+    if has_nb == 1 && nb > na {
+        cbor_err(field, R_NOT_BEFORE_AFTER);
+    }
+    put(inout w, has_nb);
+    if has_nb == 1 {
+        put(inout w, nb);
+    }
+    put(inout w, na);
+}
+
+fn uri_text_node(in n: Slice[u64], v: u64, field: u64) -> u64 eff [Fail[AErr]] {
+    if kind(in n, v) == K_TAG && arg(in n, v) == TAG_URI {
+        let inner = wrapping_add(v, 2);
+        req_text(in n, inner, field);
+        inner
+    } else if is_tagged(in n, v) {
+        cbor_err(field, R_EXPECTED_URI)
+    } else {
+        req_text(in n, v, field);
+        v
+    }
+}
+
+// Entities array: count, then per entity: roles_count, roles..., name, opt regid.
+// Note parse_entities validates roles BEFORE name BEFORE regid.
+fn put_entities(in n: Slice[u64], v: u64, inout w: Slice[u64]) -> Unit eff [Fail[AErr]] {
+    let count = check_array(in n, v, F_ENTITIES);
+    put(inout w, count);
+    let mut i = 0;
+    let mut at = wrapping_add(v, 2);
+    loop {
+        if i == count {
+            return;
+        }
+        int_map(in n, at, F_ENTITY);
+        let roles_node = map_find(in n, at, K_ENTITY_ROLES);
+        if roles_node == NONE {
+            put(inout w, 0);
+        } else {
+            let rc = check_array(in n, roles_node, F_ENTITY_ROLES);
+            put(inout w, rc);
+            let mut r = 0;
+            let mut rat = wrapping_add(roles_node, 2);
+            loop {
+                if r == rc {
+                    break;
+                }
+                put(inout w, req_uint(in n, rat, F_ENTITY_ROLE));
+                rat = skip(in n, rat);
+                r = wrapping_add(r, 1);
+            }
+        }
+        let name = map_req(in n, at, K_ENTITY_NAME, F_ENTITY_NAME);
+        req_text(in n, name, F_ENTITY_NAME);
+        put_str(in n, name, inout w);
+        let regid_node = map_find(in n, at, K_ENTITY_REGID);
+        if regid_node == NONE {
+            put(inout w, 0);
+        } else {
+            let u = uri_text_node(in n, regid_node, F_ENTITY_REGID);
+            put(inout w, 1);
+            put_str(in n, u, inout w);
+        }
+        at = skip(in n, at);
+        i = wrapping_add(i, 1);
+    }
+}
+
+// Environment: has_class, class_id_kind (0=None,1=Uuid,2=Oid,3=Bytes), [str],
+// has_vendor, [str], has_model, [str], has_layer, [u64], has_index, [u64],
+// inst_kind (0=None,1=Ueid,2=Uuid,3=Bytes,4=Other(tag)), [payload], has_group.
+fn put_environment(in n: Slice[u64], v: u64, inout w: Slice[u64]) -> Unit eff [Fail[AErr]] {
+    int_map(in n, v, F_ENV);
+    map_only(in n, v, 7, F_ENV);
+    let cls = map_find(in n, v, K_ENV_CLASS);
+    let has_class = if cls == NONE {
+        0
+    } else {
+        1
+    };
+    put(inout w, has_class);
+    if has_class == 1 {
+        int_map(in n, cls, F_CLASS);
+        map_only(in n, cls, 31, F_CLASS);
+        let cid = map_find(in n, cls, K_CLS_ID);
+        if cid == NONE {
+            put(inout w, 0);
+        } else if kind(in n, cid) == K_TAG && arg(in n, cid) == TAG_UUID {
+            let inner = wrapping_add(cid, 2);
+            req_uuid(in n, inner, F_CLASS_ID);
+            put(inout w, 1);
+            put_str(in n, inner, inout w);
+        } else if kind(in n, cid) == K_TAG && arg(in n, cid) == TAG_OID {
+            let inner = wrapping_add(cid, 2);
+            req_bstr(in n, inner, F_CLASS_ID);
+            put(inout w, 2);
+            put_str(in n, inner, inout w);
+        } else if kind(in n, cid) == K_TAG && arg(in n, cid) == TAG_BYTES {
+            let inner = wrapping_add(cid, 2);
+            req_bstr(in n, inner, F_CLASS_ID);
+            put(inout w, 3);
+            put_str(in n, inner, inout w);
+        } else {
+            cbor_err(F_CLASS_ID, R_CLASS_ID);
+        }
+        let vendor = map_find(in n, cls, K_CLS_VENDOR);
+        if vendor == NONE {
+            put(inout w, 0);
+        } else {
+            req_text(in n, vendor, F_CLASS_VENDOR);
+            put(inout w, 1);
+            put_str(in n, vendor, inout w);
+        }
+        let model = map_find(in n, cls, K_CLS_MODEL);
+        if model == NONE {
+            put(inout w, 0);
+        } else {
+            req_text(in n, model, F_CLASS_MODEL);
+            put(inout w, 1);
+            put_str(in n, model, inout w);
+        }
+        let layer = map_find(in n, cls, K_CLS_LAYER);
+        if layer == NONE {
+            put(inout w, 0);
+        } else {
+            put(inout w, 1);
+            put(inout w, req_uint(in n, layer, F_CLASS_LAYER));
+        }
+        let index = map_find(in n, cls, K_CLS_INDEX);
+        if index == NONE {
+            put(inout w, 0);
+        } else {
+            put(inout w, 1);
+            put(inout w, req_uint(in n, index, F_CLASS_INDEX));
+        }
+    }
+    let inst = map_find(in n, v, K_ENV_INSTANCE);
+    let mut has_inst = 0;
+    if inst == NONE {
+        put(inout w, 0);
+    } else {
+        has_inst = 1;
+        if !is_tagged(in n, inst) {
+            cbor_err(F_INSTANCE, R_INSTANCE_TAG);
+        }
+        let t = arg(in n, inst);
+        if kind(in n, inst) == K_TAG && t == TAG_UEID {
+            let inner = wrapping_add(inst, 2);
+            req_bstr(in n, inner, F_INSTANCE);
+            put(inout w, 1);
+            put_str(in n, inner, inout w);
+        } else if kind(in n, inst) == K_TAG && t == TAG_UUID {
+            let inner = wrapping_add(inst, 2);
+            req_uuid(in n, inner, F_INSTANCE);
+            put(inout w, 2);
+            put_str(in n, inner, inout w);
+        } else if kind(in n, inst) == K_TAG && t == TAG_BYTES {
+            let inner = wrapping_add(inst, 2);
+            req_bstr(in n, inner, F_INSTANCE);
+            put(inout w, 3);
+            put_str(in n, inner, inout w);
+        } else {
+            put(inout w, 4);
+            put(inout w, t);
+        }
+    }
+    let has_group = if map_find(in n, v, K_ENV_GROUP) == NONE {
+        0
+    } else {
+        1
+    };
+    put(inout w, has_group);
+    if has_class == 0 && has_inst == 0 && has_group == 0 {
+        cbor_err(F_ENV, R_EMPTY);
+    }
+}
+
+fn alg_id(in b: Slice[u8], in s: Slice[u8], in n: Slice[u64], v: u64) -> u64 eff [Fail[AErr]] {
+    let k = kind(in n, v);
+    if is_i64(in n, v) {
+        i64_bits(in n, v)
+    } else if k == K_UINT || k == K_NINT {
+        cbor_err(F_DIGEST_ALG, R_OUT_OF_RANGE)
+    } else if k == K_TEXT {
+        if text_eq_s(in b, in s, in n, v, "sha-256".as_bytes()) {
+            NI_SHA256
+        } else if text_eq_s(in b, in s, in n, v, "sha-384".as_bytes()) {
+            NI_SHA384
+        } else if text_eq_s(in b, in s, in n, v, "sha-512".as_bytes()) {
+            NI_SHA512
+        } else {
+            cbor_err(F_DIGEST_ALG, R_UNKNOWN_ALG_NAME)
+        }
+    } else {
+        cbor_err(F_DIGEST_ALG, R_INT_OR_TEXT)
+    }
+}
+
+// CryptoKey: 0 -> PkixBase64Key(str), 1 -> Bytes(str), 2 -> Other(tag).
+fn put_crypto_key(in n: Slice[u64], v: u64, inout w: Slice[u64]) -> Unit eff [Fail[AErr]] {
+    if !is_tagged(in n, v) {
+        cbor_err(F_CRYPTO_KEY, R_TAGGED_KEY);
+    }
+    let t = arg(in n, v);
+    if kind(in n, v) == K_TAG && t == TAG_PKIX_BASE64_KEY {
+        let inner = wrapping_add(v, 2);
+        req_text(in n, inner, F_PKIX_BASE64_KEY);
+        put(inout w, 0);
+        put_str(in n, inner, inout w);
+    } else if kind(in n, v) == K_TAG && t == TAG_BYTES {
+        let inner = wrapping_add(v, 2);
+        req_bstr(in n, inner, F_CRYPTO_KEY);
+        put(inout w, 1);
+        put_str(in n, inner, inout w);
+    } else {
+        put(inout w, 2);
+        put(inout w, t);
+    }
+}
+
+// MeasurementValues: entry_count, then entries in map order:
+// 0 (version): str, version_has_scheme;
+// 1 (digests): count, [alg_bits, str]...;
+// 2 (raw_value): str, has_mask, [mask str];
+// 3 (name): str;
+// 4 (cryptokeys): count, cryptokeys...;
+// 5 (other): k_bits.
+fn put_mval(in b: Slice[u8], in s: Slice[u8], in n: Slice[u64], v: u64, inout w: Slice[u64])
+    -> Unit eff [Fail[AErr]] {
+    int_map(in n, v, F_MVAL);
+    let count = arg(in n, v);
+    put(inout w, count);
+    let mut e = 0;
+    let mut at = wrapping_add(v, 2);
+    loop {
+        if e == count {
+            return;
+        }
+        let val = skip(in n, at);
+        let k_bits = i64_bits(in n, at);
+        if kind(in n, at) == K_UINT && arg(in n, at) == K_MVAL_VERSION {
+            int_map(in n, val, F_VERSION);
+            map_only(in n, val, 3, F_VERSION);
+            let ver = map_req(in n, val, K_VER_VERSION, F_VERSION);
+            req_text(in n, ver, F_VERSION);
+            let has_scheme = if map_find(in n, val, K_VER_SCHEME) == NONE {
+                0
+            } else {
+                1
+            };
+            put(inout w, 0);
+            put_str(in n, ver, inout w);
+            put(inout w, has_scheme);
+        } else if kind(in n, at) == K_UINT && arg(in n, at) == K_MVAL_DIGESTS {
+            let dc = check_array(in n, val, F_DIGESTS);
+            if dc == 0 {
+                cbor_err(F_DIGESTS, R_EMPTY);
+            }
+            put(inout w, 1);
+            put(inout w, dc);
+            let mut d = 0;
+            let mut dat = wrapping_add(val, 2);
+            loop {
+                if d == dc {
+                    break;
+                }
+                if check_array(in n, dat, F_DIGEST) != 2 {
+                    cbor_err(F_DIGEST, R_DIGEST_SHAPE);
+                }
+                let d0 = wrapping_add(dat, 2);
+                let d1 = skip(in n, d0);
+                put(inout w, alg_id(in b, in s, in n, d0));
+                req_bstr(in n, d1, F_DIGEST_VALUE);
+                put_str(in n, d1, inout w);
+                dat = skip(in n, dat);
+                d = wrapping_add(d, 1);
+            }
+        } else if kind(in n, at) == K_UINT && arg(in n, at) == K_MVAL_RAW {
+            if kind(in n, val) == K_TAG && arg(in n, val) == TAG_BYTES {
+                let inner = wrapping_add(val, 2);
+                req_bstr(in n, inner, F_RAW_VALUE);
+                put(inout w, 2);
+                put_str(in n, inner, inout w);
+                put(inout w, 0);
+            } else if kind(in n, val) == K_TAG && arg(in n, val) == TAG_MASKED_RAW_VALUE {
+                let inner = wrapping_add(val, 2);
+                if check_array(in n, inner, F_MASKED_RAW_VALUE) != 2 {
+                    cbor_err(F_MASKED_RAW_VALUE, R_MASKED_SHAPE);
+                }
+                let m0 = wrapping_add(inner, 2);
+                let m1 = skip(in n, m0);
+                req_bstr(in n, m0, F_MASKED_RAW_VALUE);
+                req_bstr(in n, m1, F_RAW_VALUE_MASK);
+                put(inout w, 2);
+                put_str(in n, m0, inout w);
+                put(inout w, 1);
+                put_str(in n, m1, inout w);
+            } else {
+                cbor_err(F_RAW_VALUE, R_RAW_TAG);
+            }
+        } else if kind(in n, at) == K_UINT && arg(in n, at) == K_MVAL_NAME {
+            req_text(in n, val, F_MEASUREMENT_NAME);
+            put(inout w, 3);
+            put_str(in n, val, inout w);
+        } else if kind(in n, at) == K_UINT && arg(in n, at) == K_MVAL_CRYPTOKEYS {
+            let kc = check_array(in n, val, F_CRYPTOKEYS);
+            put(inout w, 4);
+            put(inout w, kc);
+            let mut k = 0;
+            let mut kat = wrapping_add(val, 2);
+            loop {
+                if k == kc {
+                    break;
+                }
+                put_crypto_key(in n, kat, inout w);
+                kat = skip(in n, kat);
+                k = wrapping_add(k, 1);
+            }
+        } else {
+            put(inout w, 5);
+            put(inout w, k_bits);
+        }
+        at = skip(in n, val);
+        e = wrapping_add(e, 1);
+    }
+}
+
+fn put_measurement(in b: Slice[u8], in s: Slice[u8], in n: Slice[u64], v: u64, inout w: Slice[u64])
+    -> Unit eff [Fail[AErr]] {
+    int_map(in n, v, F_MEASUREMENT);
+    map_only(in n, v, 7, F_MEASUREMENT);
+    let mkey = map_find(in n, v, K_MEAS_MKEY);
+    if mkey == NONE {
+        put(inout w, 0);
+    } else {
+        let mk = kind(in n, mkey);
+        if mk == K_TEXT {
+            put(inout w, 1);
+            put_str(in n, mkey, inout w);
+        } else if mk == K_UINT {
+            put(inout w, 2);
+            put(inout w, arg(in n, mkey));
+        } else if mk == K_NINT {
+            cbor_err(F_MKEY, R_NEGATIVE_INT);
+        } else if mk == K_TAG && arg(in n, mkey) == TAG_UUID {
+            let inner = wrapping_add(mkey, 2);
+            req_uuid(in n, inner, F_MKEY);
+            put(inout w, 3);
+            put_str(in n, inner, inout w);
+        } else if mk == K_TAG && arg(in n, mkey) == TAG_OID {
+            let inner = wrapping_add(mkey, 2);
+            req_bstr(in n, inner, F_MKEY);
+            put(inout w, 4);
+            put_str(in n, inner, inout w);
+        } else {
+            cbor_err(F_MKEY, R_UNSUPPORTED_TYPE);
+        }
+    }
+    let mval = map_req(in n, v, K_MEAS_MVAL, F_MVAL);
+    put_mval(in b, in s, in n, mval, inout w);
+    let has_auth = if map_find(in n, v, K_MEAS_AUTH_BY) == NONE {
+        0
+    } else {
+        1
+    };
+    put(inout w, has_auth);
+}
+
+fn parse_comid_node(
+    in b: Slice[u8],
+    in s: Slice[u8],
+    in n: Slice[u64],
+    root: u64,
+    inout w: Slice[u64]
+) -> Unit eff [Fail[AErr]] {
+    int_map(in n, root, F_COMID);
+    let ti = map_req(in n, root, K_COMID_TAG_ID, F_COMID_TAG_ID_MAP);
+    int_map(in n, ti, F_COMID_TAG_ID_MAP);
+    map_only(in n, ti, 3, F_COMID_TAG_ID_MAP);
+    let triples = map_req(in n, root, K_COMID_TRIPLES, F_COMID_TRIPLES);
+    int_map(in n, triples, F_COMID_TRIPLES);
+    put_id(in n, map_req(in n, ti, K_TID_ID, F_COMID_TAG_ID), F_COMID_TAG_ID, inout w);
+    let ver_node = map_find(in n, ti, K_TID_VERSION);
+    let ver = if ver_node == NONE {
+        0
+    } else {
+        req_uint(in n, ver_node, F_TAG_VERSION)
+    };
+    put(inout w, ver);
+
+    let tcount = arg(in n, triples);
+    put(inout w, tcount);
+    let mut e = 0;
+    let mut at = wrapping_add(triples, 2);
+    loop {
+        if e == tcount {
+            return;
+        }
+        let val = skip(in n, at);
+        if kind(in n, at) == K_UINT && arg(in n, at) == K_TR_REF {
+            let rc = check_array(in n, val, F_REF_TRIPLES);
+            put(inout w, 0);
+            put(inout w, rc);
+            let mut r = 0;
+            let mut rat = wrapping_add(val, 2);
+            loop {
+                if r == rc {
+                    break;
+                }
+                if check_array(in n, rat, F_REF_TRIPLE) != 2 {
+                    cbor_err(F_REF_TRIPLE, R_REF_TRIPLE_SHAPE);
+                }
+                let env = wrapping_add(rat, 2);
+                let ms = skip(in n, env);
+                put_environment(in n, env, inout w);
+                let mc = check_array(in n, ms, F_MEASUREMENTS);
+                if mc == 0 {
+                    cbor_err(F_MEASUREMENTS, R_EMPTY);
+                }
+                put(inout w, mc);
+                let mut m = 0;
+                let mut mat = wrapping_add(ms, 2);
+                loop {
+                    if m == mc {
+                        break;
+                    }
+                    put_measurement(in b, in s, in n, mat, inout w);
+                    mat = skip(in n, mat);
+                    m = wrapping_add(m, 1);
+                }
+                rat = skip(in n, rat);
+                r = wrapping_add(r, 1);
+            }
+        } else if kind(in n, at) == K_UINT && arg(in n, at) == K_TR_ATTEST {
+            let ac = check_array(in n, val, F_ATTEST_TRIPLES);
+            put(inout w, 1);
+            put(inout w, ac);
+            let mut a = 0;
+            let mut aat = wrapping_add(val, 2);
+            loop {
+                if a == ac {
+                    break;
+                }
+                let arity = check_array(in n, aat, F_ATTEST_TRIPLE);
+                if arity != 2 && arity != 3 {
+                    cbor_err(F_ATTEST_TRIPLE, R_AK_TRIPLE_SHAPE);
+                }
+                let env = wrapping_add(aat, 2);
+                let keys = skip(in n, env);
+                let has_cond = if arity == 3 {
+                    1
+                } else {
+                    0
+                };
+                put_environment(in n, env, inout w);
+                let kc = check_array(in n, keys, F_ATTEST_KEYS);
+                put(inout w, kc);
+                let mut k = 0;
+                let mut kat = wrapping_add(keys, 2);
+                loop {
+                    if k == kc {
+                        break;
+                    }
+                    put_crypto_key(in n, kat, inout w);
+                    kat = skip(in n, kat);
+                    k = wrapping_add(k, 1);
+                }
+                put(inout w, has_cond);
+                aat = skip(in n, aat);
+                a = wrapping_add(a, 1);
+            }
+        } else {
+            put(inout w, 2);
+            put(inout w, i64_bits(in n, at));
+        }
+        at = skip(in n, val);
+        e = wrapping_add(e, 1);
+    }
+}
+
+// Parse an unsigned CoRIM (tag 501).
+// Emits: other_tags, comid_count, comids..., id, profile, validity, entities.
+pub fn corim_parse(
+    in b: Slice[u8],
+    inout s: Slice[u8],
+    inout n: Slice[u64],
+    inout st: Slice[u64],
+    inout w: Slice[u64]
+) -> Unit eff [Fail[AErr]] {
+    if b.len() > MAX_CORIM_LEN {
+        raise(k_over_budget(), FORMAT_CORIM, FIELD_CORIM, MAX_CORIM_LEN, b.len());
+    }
+    decode_whole_at(in b, 0, F_CORIM, inout n, inout st);
+    if kind(in n, 1) != K_TAG || arg(in n, 1) != CORIM_TAG {
+        cbor_err(F_CORIM, R_MISSING_TAG_501);
+    }
+    let m = 3;
+    int_map(in n, m, F_CORIM);
+    let tags = map_req(in n, m, K_CORIM_TAGS, F_CORIM_TAGS);
+    let tc = check_array(in n, tags, F_CORIM_TAGS);
+    if tc == 0 {
+        cbor_err(F_CORIM_TAGS, R_EMPTY);
+    }
+    put(inout w, 0);
+    let slot_other = cur_len(in w);
+    put(inout w, 0);
+    let slot_comids = cur_len(in w);
+
+    let mut sc = Scratch {
+        pos: 0
+    };
+    let mut comids = 0;
+    let mut other_tags = 0;
+    let mut t = 0;
+    let mut tat = wrapping_add(tags, 2);
+    let saved = cur_len(in n);
+    loop {
+        if t == tc {
+            break;
+        }
+        if kind(in n, tat) == K_TAG && arg(in n, tat) == COMID_TAG {
+            let inner = wrapping_add(tat, 2);
+            req_bstr(in n, inner, F_COMID);
+            let sp = materialize_bytes(in b, inout s, inout sc, in n, inner);
+            let croot = decode_span(in b, in s, sp, F_COMID, inout n, inout st);
+            parse_comid_node(in b, in s, in n, croot, inout w);
+            set_len(inout n, saved);
+            comids = wrapping_add(comids, 1);
+        } else if is_tagged(in n, tat) {
+            other_tags = wrapping_add(other_tags, 1);
+        } else {
+            cbor_err(F_CORIM_TAGS, R_UNTAGGED_ENTRY);
+        }
+        tat = skip(in n, tat);
+        t = wrapping_add(t, 1);
+    }
+    w.try_set(slot_other, other_tags);
+    w.try_set(slot_comids, comids);
+
+    // Profile (0=None, 1=Uri(str), 2=Oid(str)).
+    let prof = map_find(in n, m, K_CORIM_PROFILE);
+    if prof == NONE {
+        put(inout w, 0);
+    } else if kind(in n, prof) == K_TAG && arg(in n, prof) == TAG_URI {
+        let inner = wrapping_add(prof, 2);
+        req_text(in n, inner, F_PROFILE);
+        put(inout w, 1);
+        put_str(in n, inner, inout w);
+    } else if kind(in n, prof) == K_TAG && arg(in n, prof) == TAG_OID {
+        let inner = wrapping_add(prof, 2);
+        req_bstr(in n, inner, F_PROFILE);
+        put(inout w, 2);
+        put_str(in n, inner, inout w);
+    } else {
+        cbor_err(F_PROFILE, R_PROFILE_TAG);
+    }
+
+    put_id(in n, map_req(in n, m, K_CORIM_ID, F_CORIM_ID), F_CORIM_ID, inout w);
+
+    let val_node = map_find(in n, m, K_CORIM_VALIDITY);
+    if val_node == NONE {
+        put(inout w, 0);
+    } else {
+        put(inout w, 1);
+        put_validity(in n, val_node, F_CORIM_VALIDITY, inout w);
+    }
+
+    let ent_node = map_find(in n, m, K_CORIM_ENTITIES);
+    if ent_node == NONE {
+        put(inout w, 0);
+    } else {
+        put_entities(in n, ent_node, inout w);
+    }
+}
+
+// Parse `corim-meta` byte string of a signed CoRIM:
+// name (str), has_uri (0/1), [uri str], has_sig_validity (0/1), [validity].
+pub fn corim_meta_parse(
+    in b: Slice[u8],
+    inout n: Slice[u64],
+    inout st: Slice[u64],
+    inout w: Slice[u64]
+) -> Unit eff [Fail[AErr]] {
+    decode_whole_at(in b, 0, F_CORIM_META, inout n, inout st);
+    int_map(in n, 1, F_CORIM_META);
+    map_only(in n, 1, 3, F_CORIM_META);
+    let signer = map_req(in n, 1, K_META_SIGNER, F_CORIM_META_SIGNER);
+    int_map(in n, signer, F_CORIM_META_SIGNER);
+    map_only(in n, signer, 3, F_CORIM_META_SIGNER);
+    let name = map_req(in n, signer, K_SIGNER_NAME, F_SIGNER_NAME);
+    req_text(in n, name, F_SIGNER_NAME);
+    put_str(in n, name, inout w);
+    let u = map_find(in n, signer, K_SIGNER_URI);
+    if u == NONE {
+        put(inout w, 0);
+    } else {
+        let unode = uri_text_node(in n, u, F_SIGNER_URI);
+        put(inout w, 1);
+        put_str(in n, unode, inout w);
+    }
+    let sv = map_find(in n, 1, K_META_SIG_VALIDITY);
+    if sv == NONE {
+        put(inout w, 0);
+    } else {
+        put(inout w, 1);
+        put_validity(in n, sv, F_SIGNATURE_VALIDITY, inout w);
+    }
+}

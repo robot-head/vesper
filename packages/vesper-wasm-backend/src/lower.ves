@@ -39,6 +39,9 @@ use self::module::{
     Builder,
     builder_new
 };
+use self::fmod::{
+    fmod_code
+};
 use self::host::{
     Host,
     host_new,
@@ -50,6 +53,8 @@ use self::host::{
 };
 use self::plan::{
     Cx,
+    HClause,
+    Handler,
     Inst,
     Plan,
     Shape,
@@ -59,7 +64,9 @@ use self::plan::{
     closure_operands,
     cmp_syms,
     contains32,
+    instance_key,
     instance_name,
+    prefixed_key,
     tvars_new
 };
 
@@ -148,6 +155,8 @@ const OP_I64_XOR: u8 = 133;
 const OP_I64_SHL: u8 = 134;
 const OP_I64_SHR_S: u8 = 135;
 const OP_I64_SHR_U: u8 = 136;
+const OP_I64_ROTL: u8 = 137;
+const OP_I64_ROTR: u8 = 138;
 const OP_F64_NEG: u8 = 154;
 const OP_F64_ADD: u8 = 160;
 const OP_F64_SUB: u8 = 161;
@@ -199,6 +208,11 @@ const SC_UNIT: u8 = 6;
 const SC_NEVER: u8 = 7;
 const R_ORDINARY: u8 = 0;
 const R_HANDLER_BODY: u8 = 1;
+const R_RETURN_CLAUSE: u8 = 2;
+const R_OP_CLAUSE: u8 = 3;
+// clause modes (plan.ves)
+const M_ABORT: u8 = 0;
+const M_TAIL: u8 = 1;
 // check-data type kinds
 const K_NAMED: u8 = 1;
 const K_TUPLE: u8 = 2;
@@ -261,6 +275,7 @@ const SQ_STR_PUSH_STR: u64 = 31;
 const SQ_STR_PUSH_CHAR: u64 = 32;
 const SQ_STR_CLEAR: u64 = 33;
 const SQ_STR_RESERVE: u64 = 34;
+const SQ_RESIZE: u64 = 35;
 const SQ_WIDE: u64 = 64;
 const SK_OTHER: u8 = 0;
 const SK_BUF: u8 = 1;
@@ -286,6 +301,14 @@ const LIT_STRING: u64 = 3;
 const LIT_WIDE: u64 = 4;
 // IntegerKind of a scalar: 0 none, else the scalar + 1
 const IK_NONE: u8 = 0;
+
+// Handler frame slots: the dispatch slot, the state, the aborting
+// operation, its arguments, then (`HFns`) the pending list, the evidence
+// snapshot, the captures and the body's cells.
+const F_DISPATCH: u64 = 0;
+const F_STATE: u64 = 8;
+const F_ABORT_OP: u64 = 16;
+const F_ARGS: u64 = 24;
 
 // Callable block slots.
 const C_EVIDENCE: u64 = 8;
@@ -320,6 +343,27 @@ pub struct Em {
     // value id -> (address local | stride << 32) + 1 of an element view
     // (`s[i]` read for `swap(inout s[i], ..)`)
     elems: ChunkSeq[u64],
+    // An operation clause: its continuation's name (NONE32: none), the
+    // values that read it, its handler and frame local (NONE: none).
+    resume: u32,
+    resume_reads: ChunkSeq[u64],
+    clause_handler: u64,
+    frame: u32,
+}
+
+// The functions and frame layout of one handler (`HandlerFns`).
+copy struct HFns {
+    dispatch_slot: u32,
+    dispatch: u32,
+    ret: u32,
+    abort: u32,
+    frame_size: u64,
+    pending_offset: u64,
+    env_offset: u64,
+    body_offset: u64,
+    // the captures' offsets, in name order: hcap_name/hcap_off[c0..c0+cn]
+    c0: u64,
+    cn: u64,
 }
 
 fn em_new(inst: Inst, info: FnInfo) -> Em {
@@ -337,12 +381,25 @@ fn em_new(inst: Inst, info: FnInfo) -> Em {
         frames: ChunkSeq::new[u64](),
         structured: false,
         elems: ChunkSeq::new[u64](),
+        resume: NONE32,
+        resume_reads: ChunkSeq::new[u64](),
+        clause_handler: NONE64,
+        frame: NONE32,
     }
 }
 
 copy struct Pending {
     idx: u32,
     ty: u32,
+}
+
+// `row_label_bindings`: labels[i], sources[i], targets[t0[i]..t0[i]+tn[i]].
+struct LabelBindings {
+    labels: ChunkSeq[u32],
+    sources: ChunkSeq[u32],
+    t0: ChunkSeq[u64],
+    tn: ChunkSeq[u64],
+    targets: ChunkSeq[u32],
 }
 
 copy struct Cell {
@@ -386,6 +443,9 @@ pub struct L {
     strings: ChunkSeq[u64],
     // type display -> `$copy` function + 1
     copies: ChunkSeq[u32],
+    hfns: ChunkSeq[HFns],
+    hcap_name: ChunkSeq[u32],
+    hcap_off: ChunkSeq[u64],
     arity: u64,
     instructions: u64,
     max_instructions: u64,
@@ -501,6 +561,9 @@ pub fn lowerer_new(sink cx: Cx, sink plan: Plan, max_instructions: u64) -> L eff
         seqs: seqs,
         strings: ChunkSeq::new[u64](),
         copies: ChunkSeq::new[u32](),
+        hfns: ChunkSeq::new[HFns](),
+        hcap_name: ChunkSeq::new[u32](),
+        hcap_off: ChunkSeq::new[u64](),
         arity: arity,
         instructions: 0,
         max_instructions: max_instructions,
@@ -876,9 +939,90 @@ impl L {
     pub fn declare_all(inout self) {
         for i in 0..self.plan.insts.len() {
             let inst = self.plan.inst(i);
-            let info = self.cx.ir.info(inst.fi);
-            let idx = self.b.declare(in i64s(info.pn), in i64s(1));
+            let n = self.signature(inst);
+            let idx = self.b.declare(in i64s(n), in i64s(1));
             set32(inout self.funcs, inst.key, inc32(idx));
+        }
+        for i in 0..self.plan.handlers.len() {
+            let h = self.plan.handler(i);
+            let dispatch = self.b.declare(in i64s(add(2, self.arity)), in i64s(1));
+            let dispatch_slot = self.b.table_slot(dispatch);
+            let ret = self.b.declare(in i64s(2), in i64s(1));
+            let abort = self.b.declare(in i64s(1), in i64s(1));
+            let pending_offset = add(F_ARGS, wrapping_mul(8, self.arity));
+            let env_offset = add(pending_offset, 8);
+            let mut offset = add(env_offset, wrapping_mul(8, self.env_globals.len()));
+            // captures in first-use order get the offsets; the map is
+            // iterated in name order
+            let mut names = ChunkSeq::new[u32]();
+            let mut offs = ChunkSeq::new[u64]();
+            for k in 0..h.rkn {
+                let n = self.plan.word(add(h.rk0, k));
+                if !contains32(in names, n) {
+                    names.push(n);
+                    offs.push(offset);
+                    offset = add(offset, 8);
+                }
+            }
+            for c in 0..h.cn {
+                let cl = self.plan.clause(add(h.c0, c));
+                for k in 0..cl.kn {
+                    let n = self.plan.word(add(cl.k0, k));
+                    if !contains32(in names, n) {
+                        names.push(n);
+                        offs.push(offset);
+                        offset = add(offset, 8);
+                    }
+                }
+            }
+            let c0 = self.hcap_name.len();
+            for k in 0..names.len() {
+                // insertion in name order
+                let n = u32_at(in names, k);
+                let o = u64_at(in offs, k);
+                let mut at = self.hcap_name.len();
+                for j in c0..self.hcap_name.len() {
+                    if cmp_syms(in self.cx.names, u32_at(in self.hcap_name, j), n) > 0 {
+                        at = j;
+                        break;
+                    }
+                }
+                self.hcap_name.push(n);
+                self.hcap_off.push(o);
+                let mut j = wrapping_sub(self.hcap_name.len(), 1);
+                loop {
+                    if j <= at {
+                        break;
+                    }
+                    let pn = u32_at(in self.hcap_name, wrapping_sub(j, 1));
+                    let po = u64_at(in self.hcap_off, wrapping_sub(j, 1));
+                    let ok1 = self.hcap_name.try_set(j, pn);
+                    let ok2 = self.hcap_off.try_set(j, po);
+                    j = wrapping_sub(j, 1);
+                }
+                let ok3 = self.hcap_name.try_set(at, n);
+                let ok4 = self.hcap_off.try_set(at, o);
+            }
+            let body_offset = offset;
+            let bi = self.inst_of(h.body);
+            let body_params = self.cx.ir.info(bi.fi).pn;
+            offset = add(offset, wrapping_mul(8, body_params));
+            self
+                .hfns
+                .push(
+                    HFns {
+                        dispatch_slot: dispatch_slot,
+                        dispatch: dispatch,
+                        ret: ret,
+                        abort: abort,
+                        frame_size: offset,
+                        pending_offset: pending_offset,
+                        env_offset: env_offset,
+                        body_offset: body_offset,
+                        c0: c0,
+                        cn: names.len()
+                    }
+                );
         }
     }
 
@@ -891,7 +1035,76 @@ impl L {
             let idx = self.func_of(inst.key);
             self.b.define(idx, in body);
         }
+        for i in 0..self.plan.handlers.len() {
+            self.define_dispatch(i);
+            self.define_ret(i);
+            self.define_abort(i);
+        }
         self.flush_helpers();
+    }
+
+    // `signature`: the Wasm parameter count of an instance under its role
+    // (an operation clause drops its continuation and, resuming in tail
+    // position, takes its handler's frame).
+    fn signature(in self, inst: Inst) -> u64 {
+        let info = self.cx.ir.info(inst.fi);
+        if inst.role != R_OP_CLAUSE {
+            return info.pn;
+        }
+        let c = self.plan.clause_of(inst.handler, inst.op);
+        let mut n: u64 = 0;
+        for i in 0..info.pn {
+            if self.cx.ir.param(add(info.p0, i)).name != c.resume {
+                n = inc(n);
+            }
+        }
+        if c.mode == M_TAIL {
+            n = inc(n);
+        }
+        n
+    }
+
+    fn hfn(in self, i: u64) -> HFns {
+        match self.hfns.try_get(i) {
+            Option::Some(h) => h,
+            Option::None => HFns {
+                dispatch_slot: 0,
+                dispatch: 0,
+                ret: 0,
+                abort: 0,
+                frame_size: 0,
+                pending_offset: 0,
+                env_offset: 0,
+                body_offset: 0,
+                c0: 0,
+                cn: 0
+            },
+        }
+    }
+
+    // The frame offset of handler `i`'s capture `name`.
+    fn capture_offset(in self, i: u64, name: u32) -> u64 eff [Fail[WErr]] {
+        let f = self.hfn(i);
+        for k in 0..f.cn {
+            if u32_at(in self.hcap_name, add(f.c0, k)) == name {
+                return u64_at(in self.hcap_off, add(f.c0, k));
+            }
+        }
+        Fail::raise(werr(K_INVALID, 0, 250));
+        0
+    }
+
+    // The evidence global of key `k`, or NONE32.
+    fn env_global(in self, k: u32) -> u32 {
+        if k == NONE32 {
+            return NONE32;
+        }
+        for n in 0..self.env_keys.len() {
+            if u32_at(in self.env_keys, n) == k {
+                return u32_at(in self.env_globals, n);
+            }
+        }
+        NONE32
     }
 
     fn flush_helpers(inout self) eff [Fail[WErr]] {
@@ -918,26 +1131,6 @@ impl L {
         self.b.func_type(in i64s(inc(arity)), in i64s(1))
     }
 
-    // `row_label_bindings` with no evidence keys installed: the callee's
-    // labelled row instances (each needs a handler that installs its
-    // label, and none does). Returns their labels.
-    fn row_labels_of(in self, callee: u32) -> ChunkSeq[u32] {
-        let mut out = ChunkSeq::new[u32]();
-        let base = self.base_of(callee);
-        let fs = self.cx.fn_sig(base);
-        if fs == 0 {
-            return out;
-        }
-        let sig = self.cx.f.sig(wrapping_sub(fs, 1));
-        for i in 0..sig.en {
-            let e = self.cx.f.eff(add(sig.e0, i));
-            if e.label != NONE32 && self.cx.names.byte(e.label, 0) != 36 {
-                out.push(e.label);
-            }
-        }
-        out
-    }
-
     // `trampoline`: the table slot of `$tramp(c, args...)` for `function`.
     fn trampoline(inout self, function: u32, ncaps: u64) -> u32 eff [Fail[WErr]] {
         let cached = get32(in self.trampolines, function);
@@ -956,7 +1149,8 @@ impl L {
         let ty = self.indirect_type(arity);
         let idx = self.b.declare_typed(ty);
         let nkeys = self.env_globals.len();
-        let bindings = self.row_labels_of(function);
+        let bindings = self.row_label_bindings(function, false);
+        let nb = bindings.labels.len();
         let first = wrapping_u32(inc(arity));
         let ev = first;
         let caps = wrapping_add(first, 1);
@@ -972,7 +1166,7 @@ impl L {
         c.load(C_EVIDENCE);
         c.tee(ev);
         c.op(OP_I64_EQZ);
-        if bindings.len() == 0 {
+        if nb == 0 {
             c.open(OP_IF);
             tramp_operands(inout c, ncaps, arity, caps);
             c.return_call(target);
@@ -1001,9 +1195,20 @@ impl L {
             c.op(OP_END);
         }
         c.op(OP_END);
-        if bindings.len() != 0 {
-            // no handler installs the label (no evidence keys yet)
-            Fail::raise(werr(K_INVALID, 0, 112));
+        let tmp = wrapping_add(saved, wrapping_u32(nkeys));
+        for n in 0..nb {
+            let source = u32_at(in bindings.sources, n);
+            if source == NONE32 {
+                Fail::raise(werr(K_INVALID, 0, 112));
+            }
+            c.global_get(source);
+            c.set(wrapping_add(tmp, wrapping_u32(n)));
+        }
+        for n in 0..nb {
+            for k in 0..u64_at(in bindings.tn, n) {
+                c.get(wrapping_add(tmp, wrapping_u32(n)));
+                c.global_set(u32_at(in bindings.targets, add(u64_at(in bindings.t0, n), k)));
+            }
         }
         tramp_operands(inout c, ncaps, arity, caps);
         c.call(target);
@@ -1014,7 +1219,7 @@ impl L {
         }
         c.get(r);
         c.op(OP_END);
-        let locals = add(add(3, nkeys), bindings.len());
+        let locals = add(add(3, nkeys), nb);
         self.b.define(idx, in body_n(locals, in c));
         let slot = self.b.table_slot(idx);
         set32(inout self.trampolines, function, inc32(slot));
@@ -1428,9 +1633,19 @@ impl L {
         for v in 0..info.vn {
             e.values.push(0);
         }
+        let mut mode: u8 = 255;
+        if inst.role == R_OP_CLAUSE {
+            let c = self.plan.clause_of(inst.handler, inst.op);
+            e.resume = c.resume;
+            e.clause_handler = inst.handler;
+            mode = c.mode;
+        }
         let mut index: u32 = 0;
         for i in 0..info.pn {
             let p = self.cx.ir.param(add(info.p0, i));
+            if p.name == e.resume {
+                continue;
+            }
             let cell = p.pass == P_INOUT || inst.role == R_HANDLER_BODY;
             e
                 .names
@@ -1441,6 +1656,10 @@ impl L {
                         cell: cell
                     }
                 );
+            index = wrapping_add(index, 1);
+        }
+        if mode == M_TAIL {
+            e.frame = index;
             index = wrapping_add(index, 1);
         }
         e.nparams = index;
@@ -1460,7 +1679,7 @@ impl L {
         }
         for i in 0..info.ln {
             let name = self.cx.ir.local(add(info.l0, i)).name;
-            if self.slot_index(name) == NONE64 {
+            if self.slot_index(name) == NONE64 && name != self.e.resume {
                 let x = self.local();
                 self
                     .e
@@ -2418,6 +2637,10 @@ impl L {
         } else if op == IR_READ {
             let root = n32(self.cx.ir.word(a));
             let path = self.cx.ir.word(inc(a));
+            if root == self.e.resume {
+                self.e.resume_reads.push(dv);
+                return;
+            }
             if self.slot_index(root) == NONE64 {
                 if path == 0 && self.has_func(root) {
                     let slot = self.trampoline(root, 0);
@@ -2647,7 +2870,18 @@ impl L {
         } else if op == IR_CALL {
             self.call(at);
         } else if op == IR_INDIRECT {
-            self.indirect(at);
+            let callee = self.cx.ir.word(a);
+            let mut resumes = false;
+            for k in 0..self.e.resume_reads.len() {
+                if u64_at(in self.e.resume_reads, k) == callee {
+                    resumes = true;
+                }
+            }
+            if resumes {
+                self.resume_call(dv, inc(a));
+            } else {
+                self.indirect(at);
+            }
         } else if op == IR_TRY {
             let vid = self.cx.ir.word(a);
             let x = self.value(vid);
@@ -2692,7 +2926,17 @@ impl L {
             self.store(block, 0, v);
             self.set_value(dv, block);
         } else if op == IR_HANDLE {
-            Fail::raise(werr(K_NOT_PORTED, 0, 198));
+            let id = self.plan.handler_at(self.e.inst.key, dv);
+            if id == NONE64 {
+                Fail::raise(werr(K_INVALID, 0, 198));
+            }
+            let sv = if self.cx.ir.word(a) != 0 {
+                self.cx.ir.word(inc(a))
+            } else {
+                NONE64
+            };
+            let r = self.handle(id, sv);
+            self.set_value(dv, r);
         } else if op == IR_CLOSURE {
             let (pool, aa, an) = closure_operands(in self.cx, a);
             let fact = self.cx.f.expr(pool);
@@ -2976,13 +3220,149 @@ impl L {
 
     // `bind_evidence` with no evidence keys installed: the callable as is.
     fn bind_evidence(inout self, c: u32, ty: u32) -> u32 eff [Fail[WErr]] {
-        if self.env_globals.len() != 0 {
-            let d = self.cx.default_ty(ty);
-            if self.cx.types.kind(d) == K_FN {
-                Fail::raise(werr(K_NOT_PORTED, 0, 210));
+        let d = self.cx.default_ty(ty);
+        let node = self.cx.types.node(d);
+        if node.kind != K_FN {
+            return c;
+        }
+        let nkeys = self.env_globals.len();
+        // key index -> (exact global, fallback global), NONE32 when unset;
+        // has[n] says whether a source was recorded
+        let mut first = ChunkSeq::new[u32]();
+        let mut fallback = ChunkSeq::new[u32]();
+        let mut has = ChunkSeq::new[bool]();
+        for n in 0..nkeys {
+            first.push(NONE32);
+            fallback.push(NONE32);
+            has.push(false);
+        }
+        let row = self.cx.types.row(node.r2);
+        if row.tail != 0 {
+            for n in 0..nkeys {
+                let ok1 = first.try_set(n, u32_at(in self.env_globals, n));
+                let ok2 = has.try_set(n, true);
             }
         }
-        c
+        for i in 0..w(row.n) {
+            let en = self.cx.types.effect_at(add(w(row.a), i));
+            let mut generic = false;
+            let mut args = ChunkSeq::new[u32]();
+            for k in 0..w(en.n) {
+                let t = u32_at(in self.cx.types.items, add(w(en.a), k));
+                if self.type_mentions(t) {
+                    generic = true;
+                }
+                args.push(t);
+            }
+            if generic {
+                continue;
+            }
+            let label = if en.label == 0 {
+                NONE32
+            } else {
+                let l = wrapping_sub(en.label, 1);
+                if self.has_prefix(l, "$latent:") {
+                    NONE32
+                } else {
+                    l
+                }
+            };
+            let exact = instance_key(inout self.cx, en.name, in args);
+            let (sa, sb) = if label != NONE32 {
+                let lk = prefixed_key(inout self.cx, true, label);
+                (self.env_global(lk), NONE32)
+            } else {
+                let nk = prefixed_key(inout self.cx, false, en.name);
+                (self.env_global(exact), self.env_global(nk))
+            };
+            if sa == NONE32 && sb == NONE32 {
+                continue;
+            }
+            let ek = prefixed_key(inout self.cx, false, en.name);
+            let lk2 = if label != NONE32 {
+                prefixed_key(inout self.cx, true, label)
+            } else {
+                NONE32
+            };
+            for n in 0..nkeys {
+                let key = u32_at(in self.env_keys, n);
+                if key == ek || (exact != NONE32 && key == exact) || (lk2 != NONE32 && key == lk2) {
+                    let ok1 = first.try_set(n, sa);
+                    let ok2 = fallback.try_set(n, sb);
+                    let ok3 = has.try_set(n, true);
+                }
+            }
+        }
+        let mut any = false;
+        for n in 0..nkeys {
+            match has.try_get(n) {
+                Option::Some(x) => {
+                    if x {
+                        any = true;
+                    }
+                },
+                Option::None => {},
+            }
+        }
+        if !any {
+            return c;
+        }
+        let old = self.local();
+        let ev = self.alloc_block(wrapping_mul(8, nkeys));
+        let t = self.local();
+        self.load(c, C_EVIDENCE);
+        self.e.code.set(old);
+        for n in 0..nkeys {
+            self.e.code.get(old);
+            self.e.code.op(OP_I64_EQZ);
+            self.e.code.open_result(OP_IF, vt(VT_I64));
+            self.e.code.i64_const(0);
+            self.e.code.op(OP_ELSE);
+            self.e.code.get(old);
+            self.e.code.op(OP_I32_WRAP_I64);
+            self.e.code.load(wrapping_mul(8, n));
+            self.e.code.op(OP_END);
+            self.e.code.set(t);
+            let recorded = match has.try_get(n) {
+                Option::Some(x) => x,
+                Option::None => false,
+            };
+            if recorded {
+                let a = u32_at(in first, n);
+                let b = u32_at(in fallback, n);
+                self.e.code.get(t);
+                self.e.code.op(OP_I64_EQZ);
+                self.e.code.open(OP_IF);
+                if a != NONE32 && b != NONE32 {
+                    self.e.code.global_get(a);
+                    self.e.code.tee(t);
+                    self.e.code.op(OP_I64_EQZ);
+                    self.e.code.open(OP_IF);
+                    self.e.code.global_get(b);
+                    self.e.code.set(t);
+                    self.e.code.op(OP_END);
+                } else if a != NONE32 || b != NONE32 {
+                    let g = if a != NONE32 {
+                        a
+                    } else {
+                        b
+                    };
+                    self.e.code.global_get(g);
+                    self.e.code.set(t);
+                }
+                self.e.code.op(OP_END);
+            }
+            self.store(ev, wrapping_mul(8, n), t);
+        }
+        let block = self.alloc_block(24);
+        self.load(c, 0);
+        self.e.code.set(t);
+        self.store(block, 0, t);
+        self.load(c, C_CAPTURES);
+        self.e.code.set(t);
+        self.store(block, C_CAPTURES, t);
+        self.store(block, C_EVIDENCE, ev);
+        block
     }
 
     // `params_of`: the passing modes and types of instance `callee`.
@@ -3391,26 +3771,145 @@ impl L {
         let (passes, tys) = self.params_of(callee);
         let mut cells = ChunkSeq::new[Cell]();
         let vals = self.call_args(args_at, in passes, in tys, inout cells);
-        self.bind_row_labels(callee);
+        let saved = self.bind_row_labels(callee);
         for k in 0..vals.len() {
             self.e.code.get(u32_at(in vals, k));
         }
         let d = self.dest(dv);
         self.e.code.call(self.func_of(callee));
         self.e.code.set(d);
+        // saved: (global, local) pairs
+        let mut k: u64 = 0;
+        loop {
+            if inc(k) >= saved.len() {
+                break;
+            }
+            self.e.code.get(u32_at(in saved, inc(k)));
+            self.e.code.global_set(u32_at(in saved, k));
+            k = add(k, 2);
+        }
         self.writeback(in cells);
         self.abort_check();
     }
 
-    // `bind_row_labels` with no evidence keys installed.
-    fn bind_row_labels(inout self, callee: u32) eff [Fail[WErr]] {
-        let labels = self.row_labels_of(callee);
-        for i in 0..labels.len() {
-            if !self.plan.has_label(self.e.inst, u32_at(in labels, i)) {
+    // `row_label_bindings`: for each label `l` of the callee's row
+    // (`eff [l: E]`), the `$label:l` global (NONE32: none installs it)
+    // and the globals `E` binds (`$effect:E`, `$label:l`, its instance
+    // key); `emit_vars` also substitutes the emitting instance's arguments.
+    fn row_label_bindings(inout self, callee: u32, emit_vars: bool) -> LabelBindings {
+        let mut out = LabelBindings {
+            labels: ChunkSeq::new[u32](),
+            sources: ChunkSeq::new[u32](),
+            t0: ChunkSeq::new[u64](),
+            tn: ChunkSeq::new[u64](),
+            targets: ChunkSeq::new[u32]()
+        };
+        let base = self.base_of(callee);
+        let fs = self.cx.fn_sig(base);
+        if fs == 0 {
+            return out;
+        }
+        let vars = self.vars_of_key(callee).vars();
+        let sig = self.cx.f.sig(wrapping_sub(fs, 1));
+        for i in 0..sig.en {
+            let e = self.cx.f.eff(add(sig.e0, i));
+            if e.label == NONE32 || self.cx.names.byte(e.label, 0) == 36 {
+                continue;
+            }
+            let lk = prefixed_key(inout self.cx, true, e.label);
+            let source = self.env_global(lk);
+            let mut args = ChunkSeq::new[u32]();
+            for k in 0..e.an {
+                let t0 = self.cx.subst(self.cx.f.ty_at(add(e.a0, k)), in vars);
+                let t = if emit_vars {
+                    self.subst(t0)
+                } else {
+                    self.cx.default_ty(t0)
+                };
+                args.push(t);
+            }
+            let ek = prefixed_key(inout self.cx, false, e.name);
+            let ik = instance_key(inout self.cx, e.name, in args);
+            out.labels.push(e.label);
+            out.sources.push(source);
+            out.t0.push(out.targets.len());
+            let ge = self.env_global(ek);
+            if ge != NONE32 {
+                out.targets.push(ge);
+            }
+            let gl = self.env_global(lk);
+            if gl != NONE32 {
+                out.targets.push(gl);
+            }
+            let gi = self.env_global(ik);
+            if gi != NONE32 {
+                out.targets.push(gi);
+            }
+            out
+                .tn
+                .push(
+                    wrapping_sub(
+                        out.targets.len(),
+                        u64_at(in out.t0, wrapping_sub(out.t0.len(), 1))
+                    )
+                );
+        }
+        out
+    }
+
+    // `bind_row_labels`: rebinds the keys of the callee's labelled row
+    // instances to the caller's handlers for the call; returns the saved
+    // (global, local) pairs to restore after it.
+    fn bind_row_labels(inout self, callee: u32) -> ChunkSeq[u32] eff [Fail[WErr]] {
+        let b = self.row_label_bindings(callee, true);
+        let mut sets = ChunkSeq::new[u32]();
+        for i in 0..b.labels.len() {
+            if !self.plan.has_label(self.e.inst, u32_at(in b.labels, i)) {
                 Fail::raise(werr(K_UNSUPPORTED, U_LABELLED_EFFECT_ROW, 230));
             }
-            Fail::raise(werr(K_INVALID, 0, 231));
+            let source = u32_at(in b.sources, i);
+            if source == NONE32 {
+                Fail::raise(werr(K_INVALID, 0, 231));
+            }
+            let s = self.local();
+            self.e.code.global_get(source);
+            self.e.code.set(s);
+            for k in 0..u64_at(in b.tn, i) {
+                sets.push(u32_at(in b.targets, add(u64_at(in b.t0, i), k)));
+                sets.push(s);
+            }
         }
+        let mut saved = ChunkSeq::new[u32]();
+        let mut k: u64 = 0;
+        loop {
+            if inc(k) >= sets.len() {
+                break;
+            }
+            let g = u32_at(in sets, k);
+            let s = u32_at(in sets, inc(k));
+            let mut have = false;
+            let mut j: u64 = 0;
+            loop {
+                if j >= saved.len() {
+                    break;
+                }
+                if u32_at(in saved, j) == g {
+                    have = true;
+                }
+                j = add(j, 2);
+            }
+            if !have {
+                let old = self.local();
+                self.e.code.global_get(g);
+                self.e.code.set(old);
+                saved.push(g);
+                saved.push(old);
+            }
+            self.e.code.get(s);
+            self.e.code.global_set(g);
+            k = add(k, 2);
+        }
+        saved
     }
 
     fn indirect(inout self, at: u64) eff [Fail[WErr]] {
@@ -3443,6 +3942,438 @@ impl L {
         self.e.code.set(d);
         self.writeback(in cells);
         self.abort_check();
+    }
+
+    // ----- handlers ----------------------------------------------------------
+
+    fn hop(in self, i: u64) -> u64 {
+        u64_at(in self.cx.f.hops, i)
+    }
+
+    // `expect_params`: `pushed` values for `key`'s parameters.
+    fn expect_params(in self, key: u32, pushed: u64) eff [Fail[WErr]] {
+        let i = self.plan.find(key);
+        if i == 0 {
+            Fail::raise(werr(K_INVALID, 0, 251));
+        }
+        if self.signature(self.plan.inst(wrapping_sub(i, 1))) != pushed {
+            Fail::raise(werr(K_INVALID, 0, 252));
+        }
+    }
+
+    // `flatten`: push the flattened parameters pattern `hops[at]` binds in
+    // `value` (a local of type `ty`), allocating temporaries.
+    fn flatten(
+        inout self,
+        inout c: Code,
+        inout locals: ChunkSeq[ValTy],
+        nparams: u32,
+        at: u64,
+        value: u32,
+        ty: u32,
+        inout count: u64
+    ) eff [Fail[WErr]] {
+        let kind = self.hop(at);
+        if kind == PAT_BIND {
+            c.get(value);
+            count = inc(count);
+        } else if kind == PAT_TUPLE {
+            let dt = self.cx.default_ty(ty);
+            if self.cx.types.kind(dt) != K_TUPLE {
+                return;
+            }
+            let n = self.hop(add(at, 3));
+            let m = self.cx.arity(dt);
+            let mut p = add(at, 4);
+            for i in 0..n {
+                if i >= m {
+                    break;
+                }
+                let tmp = wrapping_add(nparams, wrapping_u32(locals.len()));
+                locals.push(vt(VT_I64));
+                c.get(value);
+                c.op(OP_I32_WRAP_I64);
+                c.load(wrapping_mul(8, i));
+                c.set(tmp);
+                let t = self.cx.tuple_elem(dt, i);
+                self.flatten(inout c, inout locals, nparams, p, tmp, t, inout count);
+                p = pattern_end(in self.cx.f.hops, p, 0);
+            }
+        } else if kind == PAT_CONSTRUCTOR {
+            let name = n32(self.hop(add(at, 3)));
+            let (index, is_enum, sh) = self.cx.variant_of(ty, name);
+            let n = self.hop(add(at, 5));
+            let mut p = add(at, 6);
+            for k in 0..n {
+                let fname = n32(self.hop(p));
+                let fi = self.cx.field_index(sh, index, fname);
+                if fi != NONE64 {
+                    let tmp = wrapping_add(nparams, wrapping_u32(locals.len()));
+                    locals.push(vt(VT_I64));
+                    c.get(value);
+                    c.op(OP_I32_WRAP_I64);
+                    let slot = if is_enum {
+                        inc(fi)
+                    } else {
+                        fi
+                    };
+                    c.load(wrapping_mul(8, slot));
+                    c.set(tmp);
+                    let (fn2, t) = self.cx.variant_field(sh, index, fi);
+                    self.flatten(inout c, inout locals, nparams, inc(p), tmp, t, inout count);
+                }
+                p = pattern_end(in self.cx.f.hops, inc(p), 0);
+            }
+        }
+    }
+
+    // `capture_values`: push handler `i`'s captures `hw[k0..k0+kn]` from
+    // its frame.
+    fn capture_values(in self, inout c: Code, i: u64, k0: u64, kn: u64, frame: u32) eff [
+        Fail[WErr]
+    ] {
+        for k in 0..kn {
+            let off = self.capture_offset(i, self.plan.word(add(k0, k)));
+            c.get(frame);
+            c.op(OP_I32_WRAP_I64);
+            c.load(off);
+        }
+    }
+
+    fn save_env(in self, inout c: Code, first: u32) {
+        for n in 0..self.env_globals.len() {
+            c.global_get(u32_at(in self.env_globals, n));
+            c.set(wrapping_add(first, wrapping_u32(n)));
+        }
+    }
+
+    fn restore_env_locals(in self, inout c: Code, first: u32) {
+        for n in 0..self.env_globals.len() {
+            c.get(wrapping_add(first, wrapping_u32(n)));
+            c.global_set(u32_at(in self.env_globals, n));
+        }
+    }
+
+    // `restore_env_frame`: env := handler `i`'s frame snapshot.
+    fn restore_env_frame(in self, inout c: Code, frame: u32, i: u64) {
+        let base = self.hfn(i).env_offset;
+        for n in 0..self.env_globals.len() {
+            c.get(frame);
+            c.op(OP_I32_WRAP_I64);
+            c.load(add(base, wrapping_mul(8, n)));
+            c.global_set(u32_at(in self.env_globals, n));
+        }
+    }
+
+    // `call_clause`: push clause `cl`'s captures, flattened arguments
+    // (locals args0..) and state, then `hidden`, and call it.
+    fn call_clause(
+        inout self,
+        inout c: Code,
+        inout locals: ChunkSeq[ValTy],
+        nparams: u32,
+        i: u64,
+        cl: HClause,
+        frame: u32,
+        args0: u32,
+        in hidden: ChunkSeq[u32]
+    ) eff [Fail[WErr]] {
+        let h = self.plan.handler(i);
+        self.capture_values(inout c, i, cl.k0, cl.kn, frame);
+        let mut count = cl.kn;
+        let n = self.cx.f.sig(cl.sig).pn;
+        let mut p = cl.pats;
+        for j in 0..cl.npats {
+            if j >= n {
+                break;
+            }
+            let t = self.plan.word(add(cl.t0, j));
+            self
+                .flatten(
+                    inout c,
+                    inout locals,
+                    nparams,
+                    p,
+                    wrapping_add(args0, wrapping_u32(j)),
+                    t,
+                    inout count
+                );
+            p = pattern_end(in self.cx.f.hops, p, 0);
+        }
+        if h.state != NONE32 && n < cl.npats {
+            let s = wrapping_add(nparams, wrapping_u32(locals.len()));
+            locals.push(vt(VT_I64));
+            c.get(frame);
+            c.op(OP_I32_WRAP_I64);
+            c.load(F_STATE);
+            c.set(s);
+            self.flatten(inout c, inout locals, nparams, p, s, h.state, inout count);
+        }
+        for k in 0..hidden.len() {
+            c.get(u32_at(in hidden, k));
+            count = inc(count);
+        }
+        self.expect_params(cl.function, count);
+        c.call(self.func_of(cl.function));
+    }
+
+    // `$ret_i(frame, r)`: the return clause.
+    fn define_ret(inout self, i: u64) eff [Fail[WErr]] {
+        let h = self.plan.handler(i);
+        let frame: u32 = 0;
+        let r: u32 = 1;
+        let mut c = code_new();
+        let mut locals = ChunkSeq::new[ValTy]();
+        self.capture_values(inout c, i, h.rk0, h.rkn, frame);
+        let mut count = h.rkn;
+        let mut value = r;
+        let mut ty = h.body_type;
+        if h.state != NONE32 {
+            let t = wrapping_add(2, wrapping_u32(locals.len()));
+            locals.push(vt(VT_I64));
+            c.i64_const(16);
+            c.call(self.alloc);
+            c.tee(t);
+            c.op(OP_I32_WRAP_I64);
+            c.get(r);
+            c.store(0);
+            c.get(t);
+            c.op(OP_I32_WRAP_I64);
+            c.get(frame);
+            c.op(OP_I32_WRAP_I64);
+            c.load(F_STATE);
+            c.store(8);
+            let mut parts = ChunkSeq::new[u32]();
+            parts.push(h.body_type);
+            parts.push(h.state);
+            value = t;
+            ty = self.cx.types.tuple(in parts);
+        }
+        self.flatten(inout c, inout locals, 2, h.ret_pat, value, ty, inout count);
+        self.expect_params(h.ret, count);
+        c.call(self.func_of(h.ret));
+        c.op(OP_END);
+        let idx = self.hfn(i).ret;
+        self.b.define(idx, in body_each(in locals, in c));
+    }
+
+    // `$dispatch_i(frame, op, a0..)`: perform an operation on this handler.
+    fn define_dispatch(inout self, i: u64) eff [Fail[WErr]] {
+        let h = self.plan.handler(i);
+        let frame: u32 = 0;
+        let op: u32 = 1;
+        let nparams = wrapping_u32(add(2, self.arity));
+        let mut locals = i64s(self.env_globals.len());
+        let env_save = nparams;
+        let mut c = code_new();
+        for k in 0..h.cn {
+            let cl = self.plan.clause(add(h.c0, k));
+            c.get(op);
+            c.u64_const(cl.op);
+            c.op(OP_I64_EQ);
+            c.open(OP_IF);
+            if cl.mode == M_ABORT {
+                c.get(frame);
+                c.op(OP_I32_WRAP_I64);
+                c.get(op);
+                c.store(F_ABORT_OP);
+                for j in 0..self.arity {
+                    c.get(frame);
+                    c.op(OP_I32_WRAP_I64);
+                    c.get(wrapping_add(2, wrapping_u32(j)));
+                    c.store(add(F_ARGS, wrapping_mul(8, j)));
+                }
+                c.get(frame);
+                c.global_set(self.abort);
+                c.i64_const(0);
+                c.op(OP_RETURN);
+            } else {
+                self.save_env(inout c, env_save);
+                self.restore_env_frame(inout c, frame, i);
+                let mut hidden = ChunkSeq::new[u32]();
+                hidden.push(frame);
+                self.call_clause(inout c, inout locals, nparams, i, cl, frame, 2, in hidden);
+                self.restore_env_locals(inout c, env_save);
+                c.op(OP_RETURN);
+            }
+            c.op(OP_END);
+        }
+        c.op(OP_UNREACHABLE);
+        c.op(OP_END);
+        let idx = self.hfn(i).dispatch;
+        self.b.define(idx, in body_each(in locals, in c));
+    }
+
+    // `$abort_i(frame)`: run the aborting clause recorded in the frame.
+    fn define_abort(inout self, i: u64) eff [Fail[WErr]] {
+        let h = self.plan.handler(i);
+        let frame: u32 = 0;
+        let nparams: u32 = 1;
+        let mut locals = i64s(self.arity);
+        let mut c = code_new();
+        for j in 0..self.arity {
+            c.get(frame);
+            c.op(OP_I32_WRAP_I64);
+            c.load(add(F_ARGS, wrapping_mul(8, j)));
+            c.set(wrapping_add(1, wrapping_u32(j)));
+        }
+        for k in 0..h.cn {
+            let cl = self.plan.clause(add(h.c0, k));
+            if cl.mode != M_ABORT {
+                continue;
+            }
+            c.get(frame);
+            c.op(OP_I32_WRAP_I64);
+            c.load(F_ABORT_OP);
+            c.u64_const(cl.op);
+            c.op(OP_I64_EQ);
+            c.open(OP_IF);
+            let hidden = ChunkSeq::new[u32]();
+            self.call_clause(inout c, inout locals, nparams, i, cl, frame, 1, in hidden);
+            c.op(OP_RETURN);
+            c.op(OP_END);
+        }
+        c.op(OP_UNREACHABLE);
+        c.op(OP_END);
+        let idx = self.hfn(i).abort;
+        self.b.define(idx, in body_each(in locals, in c));
+    }
+
+    // `handle`: install handler `id` around its body (state value `sv`,
+    // NONE64: none) and return the handler's output.
+    fn handle(inout self, id: u64, sv: u64) -> u32 eff [Fail[WErr]] {
+        let h = self.plan.handler(id);
+        let f = self.hfn(id);
+        let frame = self.alloc_block(f.frame_size);
+        let t = self.local();
+        self.e.code.u64_const(widen_u64(f.dispatch_slot));
+        self.e.code.set(t);
+        self.store(frame, F_DISPATCH, t);
+        self.e.code.get(frame);
+        self.e.code.op(OP_I32_WRAP_I64);
+        self.e.code.i64_const(0);
+        self.e.code.store(f.pending_offset);
+        if sv != NONE64 {
+            let s = self.value(sv);
+            self.store(frame, F_STATE, s);
+        }
+        for n in 0..self.env_globals.len() {
+            self.e.code.get(frame);
+            self.e.code.op(OP_I32_WRAP_I64);
+            self.e.code.global_get(u32_at(in self.env_globals, n));
+            self.e.code.store(add(f.env_offset, wrapping_mul(8, n)));
+        }
+        for k in 0..f.cn {
+            let name = u32_at(in self.hcap_name, add(f.c0, k));
+            let off = u64_at(in self.hcap_off, add(f.c0, k));
+            let slot = alias_of(in self.cx, h.alias_at, h.alias_n, name);
+            if slot == NONE32 {
+                Fail::raise(werr(K_INVALID, 0, 259));
+            }
+            let v = self.read_name(slot);
+            self.store(frame, off, v);
+        }
+        // Body captures are cells.
+        let info = self.ir_info(h.body);
+        let mut body_args = ChunkSeq::new[u32]();
+        let mut cells = ChunkSeq::new[u32]();
+        let mut cell_slots = ChunkSeq::new[u32]();
+        for k in 0..info.pn {
+            let pname = self.cx.ir.param(add(info.p0, k)).name;
+            let slot = alias_of(in self.cx, h.alias_at, h.alias_n, pname);
+            if slot == NONE32 {
+                Fail::raise(werr(K_INVALID, 0, 254));
+            }
+            let si = self.slot_index(slot);
+            if si != NONE64 {
+                let ns = self.name_slot(slot);
+                if ns.cell {
+                    body_args.push(ns.local);
+                    continue;
+                }
+            }
+            let v = self.read_name(slot);
+            let cell = self.alloc_block(8);
+            self.store(cell, 0, v);
+            body_args.push(cell);
+            cells.push(cell);
+            cell_slots.push(slot);
+        }
+        let out = self.local();
+        for k in 0..h.en {
+            let g = self.env_global(self.plan.word(add(h.e0, k)));
+            self.e.code.get(frame);
+            self.e.code.global_set(g);
+        }
+        let r = self.local();
+        for k in 0..body_args.len() {
+            self.e.code.get(u32_at(in body_args, k));
+        }
+        self.e.code.call(self.func_of(h.body));
+        self.e.code.set(r);
+        let base = f.env_offset;
+        for n in 0..self.env_globals.len() {
+            self.e.code.get(frame);
+            self.e.code.op(OP_I32_WRAP_I64);
+            self.e.code.load(add(base, wrapping_mul(8, n)));
+            self.e.code.global_set(u32_at(in self.env_globals, n));
+        }
+        for k in 0..cells.len() {
+            let v = self.local();
+            self.load(u32_at(in cells, k), 0);
+            self.e.code.set(v);
+            self.write_name(u32_at(in cell_slots, k), v);
+        }
+        self.e.code.global_get(self.abort);
+        self.e.code.get(frame);
+        self.e.code.op(OP_I64_EQ);
+        self.e.code.open_result(OP_IF, vt(VT_I64));
+        self.e.code.i64_const(0);
+        self.e.code.global_set(self.abort);
+        self.e.code.get(frame);
+        self.e.code.call(f.abort);
+        self.e.code.op(OP_ELSE);
+        self.e.code.global_get(self.abort);
+        self.e.code.i64_const(0);
+        self.e.code.op(OP_I64_NE);
+        self.e.code.open(OP_IF);
+        self.e.code.i64_const(0);
+        self.e.code.op(OP_RETURN);
+        self.e.code.op(OP_END);
+        self.e.code.get(frame);
+        self.e.code.get(r);
+        self.e.code.call(f.ret);
+        self.e.code.op(OP_END);
+        self.e.code.set(out);
+        self.abort_check();
+        out
+    }
+
+    // `resume_call` of a tail-resumptive clause: the resumed value is the
+    // clause's result (a stateful handler also takes the new state).
+    fn resume_call(inout self, dv: u64, args_at: u64) eff [Fail[WErr]] {
+        let hid = self.e.clause_handler;
+        if hid == NONE64 {
+            Fail::raise(werr(K_INVALID, 0, 255));
+        }
+        let frame = self.e.frame;
+        if frame == NONE32 {
+            Fail::raise(werr(K_INVALID, 0, 256));
+        }
+        let stateful = self.plan.handler(hid).state != NONE32;
+        let n = self.cx.ir.word(args_at);
+        if n == 0 {
+            Fail::raise(werr(K_INVALID, 0, 257));
+        }
+        let v = self.value(self.cx.ir.word(add(args_at, 2)));
+        if stateful {
+            if n < 2 {
+                Fail::raise(werr(K_INVALID, 0, 258));
+            }
+            let s = self.value(self.cx.ir.word(add(args_at, 6)));
+            self.store(frame, F_STATE, s);
+        }
+        self.set_value(dv, v);
     }
 
     // ----- operations ------------------------------------------------------
@@ -3511,18 +4442,44 @@ impl L {
             if !self.plan.has_label(self.e.inst, label) {
                 Fail::raise(werr(K_UNSUPPORTED, U_LABELLED_EFFECT_ROW, 243));
             }
-            Fail::raise(werr(K_INVALID, 0, 244));
-        }
-        for i in 0..instance.len() {
-            if self.type_mentions(u32_at(in instance, i)) {
-                Fail::raise(werr(K_UNSUPPORTED, U_GENERIC_EFFECT_INSTANCE, 245));
+            let key = prefixed_key(inout self.cx, true, label);
+            let g = self.env_global(key);
+            if g == NONE32 {
+                Fail::raise(werr(K_INVALID, 0, 244));
+            }
+            self.e.code.global_get(g);
+            self.e.code.set(frame);
+        } else {
+            for i in 0..instance.len() {
+                if self.type_mentions(u32_at(in instance, i)) {
+                    Fail::raise(werr(K_UNSUPPORTED, U_GENERIC_EFFECT_INSTANCE, 245));
+                }
+            }
+            let ek = instance_key(inout self.cx, ename, in instance);
+            let exact = self.env_global(ek);
+            let nk = prefixed_key(inout self.cx, false, ename);
+            let by_name = self.env_global(nk);
+            if exact != NONE32 && by_name != NONE32 {
+                self.e.code.global_get(exact);
+                self.e.code.tee(frame);
+                self.e.code.op(OP_I64_EQZ);
+                self.e.code.open(OP_IF);
+                self.e.code.global_get(by_name);
+                self.e.code.set(frame);
+                self.e.code.op(OP_END);
+            } else if exact != NONE32 || by_name != NONE32 {
+                let g = if exact != NONE32 {
+                    exact
+                } else {
+                    by_name
+                };
+                self.e.code.global_get(g);
+                self.e.code.set(frame);
+            } else {
+                self.e.code.i64_const(0);
+                self.e.code.set(frame);
             }
         }
-        if self.env_globals.len() != 0 {
-            Fail::raise(werr(K_NOT_PORTED, 0, 246));
-        }
-        self.e.code.i64_const(0);
-        self.e.code.set(frame);
         self.e.code.get(frame);
         self.e.code.op(OP_I64_EQZ);
         self.e.code.open(OP_IF);
@@ -3769,6 +4726,110 @@ impl L {
             } else {
                 self.e.code.op(OP_I64_REM_U);
             }
+        } else if self.is_op(opn, "&") || self.is_op(opn, "|") || self.is_op(opn, "^") {
+            let ins = if self.is_op(opn, "&") {
+                OP_I64_AND
+            } else if self.is_op(opn, "|") {
+                OP_I64_OR
+            } else {
+                OP_I64_XOR
+            };
+            self.e.code.get(x);
+            self.e.code.get(y);
+            self.e.code.op(ins);
+        } else if self.is_op(opn, "<<") || self.is_op(opn, ">>") {
+            // The amount must be in 0..bits of the left operand's kind (a
+            // negative amount compares as a huge unsigned one), else
+            // Fail[ArithOverflow]; `<<` drops the bits shifted out.
+            let bits: u64 = if s1 == SC_U8 {
+                8
+            } else if s1 == SC_U32 {
+                32
+            } else {
+                64
+            };
+            self.e.code.get(y);
+            self.e.code.u64_const(bits);
+            self.e.code.op(OP_I64_GE_U);
+            self.e.code.open(OP_IF);
+            self.raise_overflow();
+            self.e.code.op(OP_END);
+            self.e.code.get(x);
+            self.e.code.get(y);
+            if self.is_op(opn, "<<") {
+                self.e.code.op(OP_I64_SHL);
+                if s1 == SC_U8 || s1 == SC_U32 {
+                    self.e.code.u64_const(ik_mask(s1));
+                    self.e.code.op(OP_I64_AND);
+                }
+            } else if s1 == SC_I64 {
+                self.e.code.op(OP_I64_SHR_S);
+            } else {
+                self.e.code.op(OP_I64_SHR_U);
+            }
+        } else if self.is_op(opn, "rotate_left") || self.is_op(opn, "rotate_right") {
+            // Total: the amount is taken modulo the width (two's complement
+            // makes `& (bits - 1)` the Euclidean remainder of an i64 amount).
+            let left = self.is_op(opn, "rotate_left");
+            if s1 == SC_U8 || s1 == SC_U32 {
+                let bits: u64 = if s1 == SC_U8 {
+                    8
+                } else {
+                    32
+                };
+                let low: u64 = if s1 == SC_U8 {
+                    7
+                } else {
+                    31
+                };
+                let n = self.local();
+                self.e.code.get(y);
+                self.e.code.u64_const(low);
+                self.e.code.op(OP_I64_AND);
+                self.e.code.set(n);
+                self.e.code.get(x);
+                self.e.code.get(n);
+                self
+                    .e
+                    .code
+                    .op(
+                        if left {
+                            OP_I64_SHL
+                        } else {
+                            OP_I64_SHR_U
+                        }
+                    );
+                self.e.code.get(x);
+                self.e.code.u64_const(bits);
+                self.e.code.get(n);
+                self.e.code.op(OP_I64_SUB);
+                self
+                    .e
+                    .code
+                    .op(
+                        if left {
+                            OP_I64_SHR_U
+                        } else {
+                            OP_I64_SHL
+                        }
+                    );
+                self.e.code.op(OP_I64_OR);
+                self.e.code.u64_const(ik_mask(s1));
+                self.e.code.op(OP_I64_AND);
+            } else {
+                self.e.code.get(x);
+                self.e.code.get(y);
+                self
+                    .e
+                    .code
+                    .op(
+                        if left {
+                            OP_I64_ROTL
+                        } else {
+                            OP_I64_ROTR
+                        }
+                    );
+            }
         } else {
             Fail::raise(werr(K_UNSUPPORTED, U_OPERATION, 253));
         }
@@ -3904,6 +4965,9 @@ impl L {
         }
         if self.cx.names.spells(l, in "WithCapacity".as_bytes()) {
             return 2;
+        }
+        if self.cx.names.spells(l, in "Resize".as_bytes()) {
+            return 35;
         }
         if self.cx.names.spells(l, in "Len".as_bytes()) {
             return 3;
@@ -4537,6 +5601,35 @@ impl L {
             self.e.code.get(yn);
             self.e.code.call(f);
             self.e.code.set(d);
+        } else if c == SQ_RESIZE {
+            // `resize(k, v)`: grow to k filling with v, or truncate.
+            let k = self.seq_val(a, 1);
+            let v = self.seq_val(a, 2);
+            let q = self.room(a, x, k, stride);
+            let qa = self.local();
+            self.e.code.get(q);
+            self.e.code.i64_const(8);
+            self.e.code.op(OP_I64_ADD);
+            self.e.code.set(qa);
+            let i = self.local();
+            self.e.code.get(n);
+            self.e.code.set(i);
+            self.e.code.open(OP_BLOCK);
+            self.e.code.open(OP_LOOP);
+            self.e.code.get(i);
+            self.e.code.get(k);
+            self.e.code.op(OP_I64_GE_U);
+            self.e.code.br_if(1);
+            self.elem_store(qa, i, stride, v);
+            self.e.code.get(i);
+            self.e.code.i64_const(1);
+            self.e.code.op(OP_I64_ADD);
+            self.e.code.set(i);
+            self.e.code.br(0);
+            self.e.code.op(OP_END);
+            self.e.code.op(OP_END);
+            self.set_len(q, k);
+            self.unit_into(dv);
         } else if c == SQ_FILL {
             let v = self.seq_val(a, 1);
             let i = self.const_local(0);
@@ -4966,193 +6059,6 @@ fn tramp_operands(inout c: Code, ncaps: u64, arity: u64, caps: u32) {
     for k in 0..arity {
         c.get(wrapping_u32(inc(k)));
     }
-}
-
-// The `$fmod` body: musl's integer `fmod`, instruction for instruction as
-// `Lowerer::fmod` in src/wasm_backend/lower.rs.
-const FM_ABS: i64 = 9223372036854775807;
-const FM_INF: i64 = 9218868437227405312;
-const FM_MANT: i64 = 4503599627370495;
-const FM_HIDDEN: i64 = 4503599627370496;
-
-fn fmod_zero_times_x(inout c: Code) {
-    c.f64_const(0);
-    c.get(7);
-    c.op(OP_F64_REINTERPRET_I64);
-    c.op(OP_F64_MUL);
-    c.op(OP_I64_REINTERPRET_F64);
-    c.op(OP_RETURN);
-}
-
-fn fmod_exp(inout c: Code, v: u32, e: u32) {
-    c.get(v);
-    c.i64_const(52);
-    c.op(OP_I64_SHR_U);
-    c.i64_const(2047);
-    c.op(OP_I64_AND);
-    c.set(e);
-}
-
-fn fmod_shl1(inout c: Code, v: u32) {
-    c.get(v);
-    c.i64_const(1);
-    c.op(OP_I64_SHL);
-}
-
-fn fmod_normalize(inout c: Code, v: u32, e: u32) {
-    c.get(e);
-    c.op(OP_I64_EQZ);
-    c.open(OP_IF);
-    c.get(v);
-    c.i64_const(12);
-    c.op(OP_I64_SHL);
-    c.op(OP_I64_CLZ);
-    c.set(6);
-    c.i64_const(0);
-    c.get(6);
-    c.op(OP_I64_SUB);
-    c.set(e);
-    c.get(v);
-    c.get(6);
-    c.i64_const(1);
-    c.op(OP_I64_ADD);
-    c.op(OP_I64_SHL);
-    c.set(v);
-    c.op(OP_ELSE);
-    c.get(v);
-    c.i64_const(FM_MANT);
-    c.op(OP_I64_AND);
-    c.i64_const(FM_HIDDEN);
-    c.op(OP_I64_OR);
-    c.set(v);
-    c.op(OP_END);
-}
-
-fn fmod_step(inout c: Code) {
-    c.get(0);
-    c.get(1);
-    c.op(OP_I64_SUB);
-    c.tee(5);
-    c.i64_const(0);
-    c.op(OP_I64_GE_S);
-    c.open(OP_IF);
-    c.get(5);
-    c.op(OP_I64_EQZ);
-    c.open(OP_IF);
-    fmod_zero_times_x(inout c);
-    c.op(OP_END);
-    c.get(5);
-    c.set(0);
-    c.op(OP_END);
-}
-
-fn fmod_code(inout c: Code) {
-    c.get(0);
-    c.set(7);
-    fmod_exp(inout c, 0, 2);
-    fmod_exp(inout c, 1, 3);
-    c.get(0);
-    c.i64_const(63);
-    c.op(OP_I64_SHR_U);
-    c.set(4);
-    // y == ±0, y is NaN or x is not finite: NaN.
-    fmod_shl1(inout c, 1);
-    c.op(OP_I64_EQZ);
-    c.get(1);
-    c.i64_const(FM_ABS);
-    c.op(OP_I64_AND);
-    c.i64_const(FM_INF);
-    c.op(OP_I64_GT_U);
-    c.op(OP_I32_OR);
-    c.get(2);
-    c.i64_const(2047);
-    c.op(OP_I64_EQ);
-    c.op(OP_I32_OR);
-    c.open(OP_IF);
-    for _k in 0..2 {
-        c.get(0);
-        c.op(OP_F64_REINTERPRET_I64);
-        c.get(1);
-        c.op(OP_F64_REINTERPRET_I64);
-        c.op(OP_F64_MUL);
-    }
-    c.op(OP_F64_DIV);
-    c.op(OP_I64_REINTERPRET_F64);
-    c.op(OP_RETURN);
-    c.op(OP_END);
-    // |x| <= |y|
-    fmod_shl1(inout c, 0);
-    fmod_shl1(inout c, 1);
-    c.op(OP_I64_LE_U);
-    c.open(OP_IF);
-    fmod_shl1(inout c, 0);
-    fmod_shl1(inout c, 1);
-    c.op(OP_I64_EQ);
-    c.open(OP_IF);
-    fmod_zero_times_x(inout c);
-    c.op(OP_END);
-    c.get(0);
-    c.op(OP_RETURN);
-    c.op(OP_END);
-    fmod_normalize(inout c, 0, 2);
-    fmod_normalize(inout c, 1, 3);
-    c.open(OP_BLOCK);
-    c.open(OP_LOOP);
-    c.get(2);
-    c.get(3);
-    c.op(OP_I64_LE_S);
-    c.br_if(1);
-    fmod_step(inout c);
-    fmod_shl1(inout c, 0);
-    c.set(0);
-    c.get(2);
-    c.i64_const(1);
-    c.op(OP_I64_SUB);
-    c.set(2);
-    c.br(0);
-    c.op(OP_END);
-    c.op(OP_END);
-    fmod_step(inout c);
-    // Renormalize: shift the leading bit back to bit 52.
-    c.get(0);
-    c.op(OP_I64_CLZ);
-    c.i64_const(11);
-    c.op(OP_I64_SUB);
-    c.set(6);
-    c.get(0);
-    c.get(6);
-    c.op(OP_I64_SHL);
-    c.set(0);
-    c.get(2);
-    c.get(6);
-    c.op(OP_I64_SUB);
-    c.set(2);
-    c.get(2);
-    c.i64_const(0);
-    c.op(OP_I64_GT_S);
-    c.open(OP_IF);
-    c.get(0);
-    c.i64_const(FM_HIDDEN);
-    c.op(OP_I64_SUB);
-    c.get(2);
-    c.i64_const(52);
-    c.op(OP_I64_SHL);
-    c.op(OP_I64_OR);
-    c.set(0);
-    c.op(OP_ELSE);
-    c.get(0);
-    c.i64_const(1);
-    c.get(2);
-    c.op(OP_I64_SUB);
-    c.op(OP_I64_SHR_U);
-    c.set(0);
-    c.op(OP_END);
-    c.get(0);
-    c.get(4);
-    c.i64_const(63);
-    c.op(OP_I64_SHL);
-    c.op(OP_I64_OR);
-    c.op(OP_END);
 }
 
 // The width of `Wide` variant `k` (bit 0 total, 1 write, 2 big, then the

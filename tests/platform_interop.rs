@@ -891,3 +891,167 @@ fn test_runner_refuses_a_called_assembly_backed_library() {
         "{err}"
     );
 }
+
+// ---- Per-target .vsys constants (#1504 part 3) ----------------------------
+
+fn flags_app(t: &Temp, source: &str) -> PathBuf {
+    for (os, o_creat, neg, big) in [
+        ("linux", "0o100", "-7", "0x10_00"),
+        ("macos", "0x200", "-11", "0x20_00"),
+        ("windows", "0x100", "-13", "0x30_00"),
+    ] {
+        t.write(
+            &format!("app/sys/flags-{os}.vsys"),
+            &format!(
+                "sys library Flags (target = \"@TARGET@\", abi = \"@ABI@\", link = \"dynamic\", name = \"c\", \
+                 artifact = \"blake3:0000000000000000000000000000000000000000000000000000000000000000\") {{\n    \
+                 const O_CREAT: i32 = {o_creat};\n    \
+                 const NEG: i64 = {neg};\n    \
+                 const BIG: u64 = {big};\n    \
+                 const SMALL: u8 = 0b101;\n    \
+                 const PAGE: usize = 4096;\n    \
+                 fn abs(x: i32) -> ForeignVal[i32];\n\
+                 }}\n"
+            ),
+        );
+    }
+    app(
+        t,
+        "vsys = [\"sys/flags-@OS@.vsys\"]",
+        source,
+        "\"Ffi[Flags]\"",
+    )
+}
+
+#[test]
+fn per_target_vsys_constants_work_across_targets_jit_run_and_patterns() {
+    let t = Temp::new("consts");
+    let dir = flags_app(
+        &t,
+        "const COMBINED: i32 = Flags::O_CREAT | 4;\n\n\
+         fn match_flag(x: i32) -> i64 {\n    \
+             match x {\n        \
+                 Flags::O_CREAT => 10,\n        \
+                 _ => 0,\n    \
+             }\n\
+         }\n\n\
+         fn match_neg(x: i64) -> i64 {\n    \
+             match x {\n        \
+                 Flags::NEG => 5,\n        \
+                 _ => 0,\n    \
+             }\n\
+         }\n\n\
+         pub fn pure_sum() -> i64 {\n    \
+             let c = Flags::O_CREAT;\n    \
+             let neg = Flags::NEG;\n    \
+             let ok_c: i32 = c;\n    \
+             let ok_comb: i32 = COMBINED;\n    \
+             let ok_big: u64 = Flags::BIG;\n    \
+             let ok_page: usize = Flags::PAGE;\n    \
+             let ok_small: u8 = Flags::SMALL;\n    \
+             let mut total: i64 = widen_i64(ok_comb);\n    \
+             total = wrapping_add(total, neg);\n    \
+             total = wrapping_add(total, match_flag(ok_c));\n    \
+             total = wrapping_add(total, match_neg(neg));\n    \
+             total = wrapping_add(total, widen_i64(ok_small));\n    \
+             total = wrapping_add(total, wrapping_i64(ok_big));\n    \
+             wrapping_add(total, wrapping_i64(ok_page))\n\
+         }\n\n\
+         pub fn main() -> u64 eff [Ffi[Flags]] {\n    \
+             let f = Flags::abs(Flags::O_CREAT);\n    \
+             wrapping_u64(wrapping_add(pure_sum(), widen_i64(f)))\n\
+         }\n",
+    );
+    let loaded = vesper::packages::load(&dir).unwrap();
+    assert!(
+        loaded.ok(),
+        "{:?} {:?}",
+        loaded.diagnostics,
+        loaded.manifest_errors
+    );
+
+    extern "C" fn test_abs(x: i32) -> i32 {
+        x.wrapping_abs()
+    }
+
+    for (triple, o_creat, want) in [
+        (
+            "x86_64-unknown-linux-gnu",
+            64_i64,
+            (64 | 4) + (-7) + 10 + 5 + 5 + 0x1000 + 4096 + 64,
+        ),
+        (
+            "aarch64-unknown-linux-gnu",
+            64_i64,
+            (64 | 4) + (-7) + 10 + 5 + 5 + 0x1000 + 4096 + 64,
+        ),
+        (
+            "aarch64-apple-darwin",
+            0x200_i64,
+            (0x200 | 4) + (-11) + 10 + 5 + 5 + 0x2000 + 4096 + 0x200,
+        ),
+        (
+            "x86_64-pc-windows-msvc",
+            0x100_i64,
+            (0x100 | 4) + (-13) + 10 + 5 + 5 + 0x3000 + 4096 + 0x100,
+        ),
+    ] {
+        let _ = o_creat;
+        let imports = loaded.imports(Some(triple)).unwrap();
+        let checked = ffi_lowering::check_module(&loaded.module, &imports)
+            .unwrap_or_else(|e| panic!("{triple}: {e}"));
+        let obj = checked.object("main", Some(triple)).unwrap();
+        assert!(!obj.bytes.is_empty(), "{triple}");
+        if vesper_ffi::sys::Target::LinuxX86_64.triple() == triple
+            && cfg!(all(target_os = "linux", target_arch = "x86_64"))
+            || vesper_ffi::sys::Target::LinuxAarch64.triple() == triple
+                && cfg!(all(target_os = "linux", target_arch = "aarch64"))
+            || vesper_ffi::sys::Target::DarwinAarch64.triple() == triple
+                && cfg!(all(target_os = "macos", target_arch = "aarch64"))
+            || vesper_ffi::sys::Target::WindowsX86_64.triple() == triple
+                && cfg!(all(target_os = "windows", target_arch = "x86_64"))
+        {
+            for optimize in [true, false] {
+                let v = checked
+                    .jit_with_options("main", &[("abs", test_abs as *const u8)], optimize)
+                    .unwrap();
+                assert_eq!(word(&v), want as u64, "{triple} optimize={optimize}");
+            }
+            let ev = checked
+                .evaluate("pure_sum", |_| Err("unused".into()))
+                .unwrap();
+            assert_eq!(word(&ev), (want - o_creat) as u64, "{triple} eval");
+            if host_jit() {
+                let run_out = run(vesper().arg("run").arg(&dir));
+                assert_eq!(run_out.trim(), want.to_string());
+                let jit_out = run(vesper().arg("jit").arg(&dir));
+                assert_eq!(jit_out.trim(), want.to_string());
+            }
+        }
+    }
+}
+
+#[test]
+fn vsys_constant_types_and_misuses_are_checked() {
+    let t = Temp::new("consts-bad");
+    // Declared `O_CREAT: i32` cannot be used where `u64` is expected.
+    let dir = flags_app(
+        &t,
+        "pub fn main() -> u64 {\n    let x: u64 = Flags::O_CREAT;\n    x\n}\n",
+    );
+    let loaded = vesper::packages::load(&dir).unwrap();
+    let imports = loaded.imports(None).unwrap();
+    assert!(ffi_lowering::check_module(&loaded.module, &imports).is_err());
+
+    // Calling a constant as a function is rejected.
+    let dir2 = flags_app(&t, "pub fn main() -> i32 {\n    Flags::O_CREAT(1)\n}\n");
+    let loaded2 = vesper::packages::load(&dir2).unwrap();
+    let imports2 = loaded2.imports(None).unwrap();
+    assert!(ffi_lowering::check_module(&loaded2.module, &imports2).is_err());
+
+    // Unknown constant name fails cleanly.
+    let dir3 = flags_app(&t, "pub fn main() -> i32 {\n    Flags::MISSING\n}\n");
+    let loaded3 = vesper::packages::load(&dir3).unwrap();
+    let imports3 = loaded3.imports(None).unwrap();
+    assert!(ffi_lowering::check_module(&loaded3.module, &imports3).is_err());
+}

@@ -75,4 +75,28 @@ const DIVERGENT_EDITS: &[(&str, &str, &str)] = &[
         "if is_uni(u.element_id) || is_server_initiated(u.element_id) {",
         "if is_uni(u.element_id) {",
     ),
+    // session.rs: cap held streams per unaccepted session at 1 instead of 16.
+    (
+        "session",
+        "const MAX_HELD_STREAMS: u64 = 16;",
+        "const MAX_HELD_STREAMS: u64 = 1;",
+    ),
+    // core.rs: force all bidirectional streams to urgency 0.
+    (
+        "core",
+        "c.fl_bidi.push(widen_u64(p.urgency));",
+        "c.fl_bidi.push(0);",
+    ),
+    // server.rs: ignore GOAWAY ID cutoff when accepting new requests.
+    (
+        "server",
+        "if !goaway_allows(s.goaway_sent, id) || s.r_id.len() >= s.conn.cfg.max_concurrent_requests {",
+        "if s.r_id.len() >= s.conn.cfg.max_concurrent_requests {",
+    ),
+    // client.rs: accept only strictly increasing GOAWAY IDs instead of decreasing.
+    (
+        "client",
+        "Option::Some(prev) => g < prev,",
+        "Option::Some(prev) => g > prev,",
+    ),
 ];
