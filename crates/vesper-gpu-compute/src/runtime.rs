@@ -446,14 +446,16 @@ impl Context {
     /// completed, `run` gets the device and the last issued timeline value,
     /// and returns the value it signalled (0 if it submitted nothing). That
     /// value becomes the issued value and every buffer's busy value, so the
-    /// runtime's ordering holds as for [`Recording::submit`]. Every buffer
+    /// runtime's ordering holds as for [`Recording::submit`], also when
+    /// `run` fails after submitting (it returns that value with its error).
+    /// Every buffer
     /// and kernel `run` uses must be one of `buffers` or owned by the caller
     /// for the whole call, and `run` must not return before its submission
     /// completed.
     pub(crate) fn submit_with<R>(
         &self,
         buffers: &[&Buffer],
-        run: impl FnOnce(Dev, u64) -> Result<(u64, R), GpuError>,
+        run: impl FnOnce(Dev, u64) -> (u64, Result<R, GpuError>),
     ) -> Result<R, GpuError> {
         let inner = &self.inner;
         if buffers.iter().any(|b| !b.same_device(self)) {
@@ -470,14 +472,14 @@ impl Context {
             }
         }
         let previous = inner.issued.load(Ordering::Acquire);
-        let (value, result) = run(inner.dev, previous)?;
+        let (value, result) = run(inner.dev, previous);
         if value != 0 {
             for b in buffers {
                 b.inner.busy_until.fetch_max(value, Ordering::AcqRel);
             }
             inner.issued.store(value, Ordering::Release);
         }
-        Ok(result)
+        result
     }
 
     /// Starts recording a command buffer.

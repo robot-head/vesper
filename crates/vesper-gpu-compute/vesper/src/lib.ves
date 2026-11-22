@@ -2269,11 +2269,13 @@ fn no_error() -> GpuErr {
     }
 }
 
-// One run: the timeline value it signalled (0 when nothing was submitted)
-// and the pair count the device wrote.
+// One run: the timeline value it submitted (0 when nothing was submitted),
+// the pair count the device wrote, and the wait's error (`kind` 0 when the
+// wait succeeded).
 pub copy struct BpRun {
     pub value: u64,
     pub total: u64,
+    pub err: GpuErr,
 }
 
 const F32_EXPONENT: u32 = 2139095040;
@@ -2454,6 +2456,7 @@ fn bp_record(
 // Writes the `n` boxes' words, runs the whole broadphase in one submission
 // after timeline value `previous`, waits for it and returns its value and
 // the pair count (which may exceed `max_pairs`: the caller reports that).
+// A failed wait is returned in `err`, not raised, with the submitted value.
 // The caller holds the queue lock and owns every buffer and kernel, none of
 // which a pending submission uses. Fewer than 2 boxes submit nothing.
 pub fn bp_run(
@@ -2468,7 +2471,8 @@ pub fn bp_run(
     if n < 2 {
         return BpRun {
             value: 0,
-            total: 0
+            total: 0,
+            err: no_error(),
         };
     }
     buffer_write(in b.boxes, 0, in words);
@@ -2509,9 +2513,15 @@ pub fn bp_run(
         },
     };
     if waited.failed {
+        // The value was signalled or the device is lost: report it with the
+        // error, so the crate still advances its timeline past it.
         wait_idle(in d);
         rec_free(in d, in r);
-        fail(waited.err.kind, waited.err.detail, waited.err.code);
+        return BpRun {
+            value: value,
+            total: 0,
+            err: waited.err
+        };
     }
     rec_free(in d, in r);
     let mut total: ChunkSeq[u8] = ChunkSeq::new[u8]();
@@ -2519,7 +2529,8 @@ pub fn bp_run(
     buffer_read(in b.offsets, n * 4, inout total.as_slice_mut());
     BpRun {
         value: value,
-        total: widen_u64(word_at(in total.as_slice(), 0))
+        total: widen_u64(word_at(in total.as_slice(), 0)),
+        err: no_error(),
     }
 }
 

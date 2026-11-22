@@ -195,8 +195,11 @@ impl GpuBroadphase {
         let max_pairs = self.max_pairs as u64;
         let total = self.ctx.submit_with(&buffers, |dev, previous| {
             match binding::bp_run(dev, kernels, raw, &words, n as u64, max_pairs, previous) {
-                Ok(run) => Ok((run.value, run.total)),
-                Err(binding::BpRunError::GpuErr(g)) => Err(port_error(g)),
+                // A failed wait still reports the value it submitted.
+                Ok(run) if run.err.kind != 0 => (run.value, Err(port_error(run.err))),
+                Ok(run) => (run.value, Ok(run.total)),
+                // Raised only before anything was submitted.
+                Err(binding::BpRunError::GpuErr(g)) => (0, Err(port_error(g))),
                 Err(e) => internal(e),
             }
         })?;

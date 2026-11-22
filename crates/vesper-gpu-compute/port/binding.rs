@@ -40,16 +40,17 @@ impl Abi for BpKernels {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct BpRun { pub value: u64, pub total: u64 }
+pub struct BpRun { pub value: u64, pub total: u64, pub err: GpuErr }
 
 impl Abi for BpRun {
-    const WORDS: usize = 2;
+    const WORDS: usize = 5;
     fn put(&self, out: &mut [u64]) {
         Abi::put(&self.value, &mut out[0..]);
         Abi::put(&self.total, &mut out[1..]);
+        Abi::put(&self.err, &mut out[2..]);
     }
     fn get(words: &[u64]) -> Self {
-        BpRun { value: Abi::get(&words[0..]), total: Abi::get(&words[1..]) }
+        BpRun { value: Abi::get(&words[0..]), total: Abi::get(&words[1..]), err: Abi::get(&words[2..]) }
     }
 }
 
@@ -269,7 +270,7 @@ impl<'a> RecRef<'a> {
 const _: () = assert!(<() as Abi>::WORDS == 1);
 const _: () = assert!(<BpBuffers as Abi>::WORDS == 24);
 const _: () = assert!(<BpKernels as Abi>::WORDS == 20);
-const _: () = assert!(<BpRun as Abi>::WORDS == 2);
+const _: () = assert!(<BpRun as Abi>::WORDS == 5);
 const _: () = assert!(<Buf as Abi>::WORDS == 4);
 const _: () = assert!(<Dev as Abi>::WORDS == 11);
 const _: () = assert!(<GpuErr as Abi>::WORDS == 3);
@@ -366,7 +367,7 @@ pub enum BpRunError {
 
 /// Calls `bp_run` of the Vesper library `gpu` (`vesper_gpu_bp_run`).
 pub fn bp_run(d: Dev, k: BpKernels, b: BpBuffers, words: &[u8], n: u64, max_pairs: u64, previous: u64) -> Result<BpRun, BpRunError> {
-    let mut result = [0u64; 2];
+    let mut result = [0u64; 5];
     let mut arg_d = [0u64; <Dev as Abi>::WORDS];
     Abi::put(&d, &mut arg_d);
     let mut arg_k = [0u64; <BpKernels as Abi>::WORDS];
