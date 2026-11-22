@@ -673,8 +673,17 @@ vesper_crate(
         },
     },
     test_path_binaries = {"test/self_host_front_end": []},
-    # The corpus implements TEST_TOTAL_SHARDS/TEST_SHARD_INDEX itself.
-    test_shards = {"test/self_host_front_end": 4},
+    # The corpus implements TEST_TOTAL_SHARDS/TEST_SHARD_INDEX itself
+    # (tests/common/corpus_shard.rs). The others were the slow tail of
+    # "Test all targets" (8-9 min each), which hit BuildBuddy's 1-hour limit.
+    test_shards = {
+        "test/self_host_bounds_hoist_jit": 4,
+        "test/self_host_codegen_scalar": 4,
+        "test/self_host_front_end": 4,
+        "test/self_host_ir_opt": 4,
+        "test/self_host_place_ir_jit": 4,
+        "test/self_host_swap_inputs": 4,
+    },
     # Reservations include subprocess overhead; they do not enforce RSS limits.
     # `lean_replay` marks the Lean/Logos suite run by "Native and acceptance
     # scripts" when Lean-facing paths change and on pushes to main

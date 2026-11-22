@@ -208,8 +208,48 @@ Results:
 
 Not done here: vectorizing these `try_get`/`try_set` loops. Cranelift does not vectorize loops, so that needs its own loop vectorizer in the native backend.
 
+## Part 4: under the bar, and the flip
+
+### What changed
+
+`hoist_function` (`pass.ves`) encoded each function at least four times, even when nothing changed it:
+
+- before the compared checks
+- after them
+- before each try at a compared loop
+- before the dominated checks
+
+It now encodes a function once, then again only after a rewrite changes it. A function that nothing hoists is read once. Each decision still runs on the function as it stands, so the output is unchanged.
+
+The gate's workloads (`scripts/ci/flip-gate/bounds-hoist.toml`):
+
+- **`pass`**: the pass on input bytes, with the place-ir identity read and write subtracted. This is the module's own speed.
+- **`build`** (new): the plan's compiler-module bar. It times the whole native optimize pipeline (`native::object_with_options`) of the 147 corpus `main`s, with the Vesper pass as the `hoist` hook against Rust's pass, in one process. The hook switches on an atomic, because `ir_swap::install` works only once per process.
+- **`hook`** is no longer gated. It times the hybrid hook alone, with the whole program encoded to words and decoded back around the pass (1.62x [1.57x, 1.69x] in the first part 4 run). That cost is the hybrid boundary's, and it goes away once the IR pipeline around the pass is Vesper too.
+
+### Verdict
+
+The run used a release build on the cloud host, after #1454 (`target-cpu=native` on both halves):
+
+```text
+flip-gate bounds-hoist: PASS (bar: 0 differences, every test, 95% upper <= 1.50x) | tests 2/2 pass | differential 0 differences on 325 cases | ABBA vesper/rust pass 1.15x [1.06x, 1.22x] n=12; build 1.07x [1.01x, 1.09x] n=30 | RUSTFLAGS=-C target-cpu=native
+| `bounds-hoist` (PASS) | SH3-12 | 0 differences on 325 cases; tests 2/2 pass | pass 1.15x [1.06x, 1.22x] n=12; build 1.07x [1.01x, 1.09x] n=30 | 2,017 | |
+```
+
+Before part 4, the pass was 1.53x [1.46x, 1.54x].
+
+### The flip
+
+Bounds hoisting is a compiler module:
+
+- The Vesper pass is already the hybrid's `hoist` hook (part 2).
+- Per the plan's "Where Rust can be deleted", `src/bounds_hoist.rs` stays until Stage 2, and the retirement PR (SH6 lane 2) deletes it. Until then the hybrid falls back to it for a program the words cannot carry.
+- The module also holds `stable_views`, `header_hoists` and `calls_out`, which native code generation uses.
+
+This part adds the gate's row to the scoreboard in `rust-exit-plan.md` and the module's STATUS in `scripts/rust-census.py`.
+
 ## What is left
 
-- Speed: update the tables in place instead of re-encoding the function after each rewrite. That should bring the `pass` workload under 1.5x. The hook also needs the IR pipeline around it in Vesper, so that it skips encoding and decoding.
-- Vectorizing `try_get`/`try_set` loops (part of gap 2).
+- Vectorizing `try_get`/`try_set` loops (#1474).
+- Port `stable_views`, `header_hoists` and `calls_out` with the native codegen lanes, before the retirement.
 - SH3 lane 14's single-build scoreboard measures the whole corpus through the hybrid with every SH3 swap installed.

@@ -146,7 +146,7 @@ MODULES = {
     "ffi_lowering": ("SH4-13", "", ""),
     "optimize": ("G1-4", "vesper-optimize", "search 0.68x; checker 1.94x"),
     "fip": ("SH2-12", "vesper-check-fip", "0.92x"),
-    "bounds_hoist": ("SH3-12", "vesper-bounds-hoist", ""),
+    "bounds_hoist": ("SH3-12", "vesper-bounds-hoist", "flip gate PASS: pass 1.15x, build 1.07x; swapped in the hybrid (`hoist`)"),
     "tiled": ("SH4-11", "vesper-codegen-numeric", ""),
     "capability_effects": ("SH2-8", "vesper-check-effects", "0.28x"),
     "test_runner": ("SH5-14", "vesper-test-runner", "1.69x"),
