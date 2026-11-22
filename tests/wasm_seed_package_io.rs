@@ -90,6 +90,8 @@ struct Ctx {
     env: Vec<(&'static str, &'static str)>,
     /// (host directory, guest name)
     dirs: Vec<(PathBuf, String)>,
+    /// Wasmtime fuel, 200 million by default.
+    fuel: Option<u64>,
 }
 
 /// Run the nullary `main` returning `u64` under Wasmtime with WASI.
@@ -118,7 +120,7 @@ fn run(component: &[u8], ctx: &Ctx) -> Result<u64, String> {
             table: Default::default(),
         },
     );
-    store.set_fuel(200_000_000).unwrap();
+    store.set_fuel(ctx.fuel.unwrap_or(200_000_000)).unwrap();
     let instance = linker
         .instantiate(&mut store, &component)
         .map_err(|e| format!("instantiate: {e:?}"))?;
@@ -618,4 +620,183 @@ fn heap_programs() {
             );
         }
     }
+}
+
+/// The driver of `front_end_parses_like_native`: for `BASE/in<i>.ves`,
+/// i = 0, 1, ... until one is missing, writes `@vesper/front`'s parse tables
+/// as little-endian words to `BASE/out<i>.bin`, and returns the file count.
+const FRONT_MAIN: &str = r#"use @vesper/front::{ parse_tables };
+use @vesper-std/fs::{ IoError, exists, read_string, write };
+
+fn name(in stem: Str, i: u64, in ext: Str) -> String {
+    let mut s = String::new();
+    s.push_str("BASE/");
+    s.push_str(stem);
+    let mut digits = ChunkSeq::new[u8]();
+    let mut n = i;
+    loop {
+        digits.push(wrapping_u8(wrapping_add(48, n % 10)));
+        n = n / 10;
+        if n == 0 { break; }
+    }
+    let mut k = digits.len();
+    loop {
+        if k == 0 { break; }
+        k = wrapping_sub(k, 1);
+        match digits.try_get(k) {
+            Option::Some(d) => { let b = s.push_char(widen_u32(d)); },
+            Option::None => {},
+        }
+    }
+    s.push_str(ext);
+    s
+}
+
+fn one(i: u64) -> u64 eff [Ffi[StdFs], Fail[IoError]] {
+    let src = read_string(name("input", i, ".ves"));
+    let t = parse_tables(src);
+    let mut out = ChunkSeq::new[u8]();
+    for j in 0..t.len() {
+        match t.try_get(j) {
+            Option::Some(w) => {
+                out.push(wrapping_u8(w & 255));
+                out.push(wrapping_u8((w >> 8) & 255));
+                out.push(wrapping_u8((w >> 16) & 255));
+                out.push(wrapping_u8((w >> 24) & 255));
+                out.push(wrapping_u8((w >> 32) & 255));
+                out.push(wrapping_u8((w >> 40) & 255));
+                out.push(wrapping_u8((w >> 48) & 255));
+                out.push(wrapping_u8((w >> 56) & 255));
+            },
+            Option::None => {},
+        }
+    }
+    write(name("output", i, ".bin"), out.as_slice());
+    t.len()
+}
+
+// A tail call, not a loop: the wasm heap is a bump heap that is reclaimed
+// only at self tail calls, so each file's garbage goes before the next.
+fn all(i: u64) -> u64 eff [Ffi[StdFs], Fail[IoError]] {
+    if !exists(name("input", i, ".ves")) { return i; }
+    let n = one(i);
+    all(wrapping_add(i, 1))
+}
+
+fn main() -> u64 eff [Ffi[StdFs]] {
+    handle Fail[IoError] in {
+        all(0)
+    } with {
+        return n => n,
+        raise(e, k) => wrapping_add(18446744073709551000, widen_u64(e.kind)),
+    }
+}
+"#;
+
+/// The corpus `front_end_parses_like_native` parses.
+fn front_corpus() -> Vec<PathBuf> {
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+        let mut entries: Vec<_> = std::fs::read_dir(dir)
+            .expect("corpus dir")
+            .map(|e| e.expect("entry").path())
+            .collect();
+        entries.sort();
+        for p in entries {
+            if p.is_dir() {
+                walk(&p, out);
+            } else if p.extension().is_some_and(|e| e == "ves") {
+                out.push(p);
+            }
+        }
+    }
+    let mut out = vec![];
+    for d in ["examples", "packages/vesper-front/src"] {
+        walk(Path::new(d), &mut out);
+    }
+    out
+}
+
+/// Lane 10 step 3 (#1508): a compiler package built to wasm. A package over
+/// `@vesper/front` and `@vesper-std/fs` reads each corpus file, parses it
+/// and writes the parse tables. It runs natively (JIT plus the std host
+/// shim) and as a wasm component under Wasmtime, and every output file
+/// must be byte-identical.
+#[test]
+fn front_end_parses_like_native() {
+    if !cfg!(target_os = "linux") {
+        // The native run binds crates/vesper-std-host through the JIT.
+        return;
+    }
+    let corpus = front_corpus();
+    assert!(corpus.len() > 10, "corpus: {corpus:?}");
+    let base = fresh("front");
+    for (i, p) in corpus.iter().enumerate() {
+        std::fs::copy(p, base.join(format!("input{i}.ves"))).expect("copy input");
+    }
+    let pkg = fresh("front-pkg");
+    std::fs::create_dir_all(pkg.join("src")).expect("package dir");
+    let dep = |p: &str| {
+        std::fs::canonicalize(p)
+            .expect("dependency")
+            .display()
+            .to_string()
+    };
+    std::fs::write(
+        pkg.join("Loom.toml"),
+        format!(
+            "[package]\nname = \"@wasm-seed/front-main\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\
+             capability_ceiling = [\"Fail\", \"Alloc\", \"Ffi[StdFs]\"]\n\n\
+             [dependencies]\n\"@vesper/front\" = {{ version = \"^0.1\", path = {:?} }}\n\
+             \"@vesper-std/fs\" = {{ version = \"^0.1\", path = {:?} }}\n",
+            dep("packages/vesper-front"),
+            dep("packages/vesper-std/fs"),
+        ),
+    )
+    .expect("Loom.toml");
+    std::fs::write(pkg.join("src/main.ves"), with_base(FRONT_MAIN, &base)).expect("main.ves");
+    let assembled = vesper::packages::load(&pkg).expect("load");
+    assert!(
+        assembled.ok(),
+        "{:?} {:?}",
+        assembled.diagnostics,
+        assembled.manifest_errors
+    );
+    let c = vesper::ffi_lowering::check_module(&assembled.module, &imports())
+        .unwrap_or_else(|e| panic!("{e}: {:?}", e.diagnostics));
+    let n = corpus.len().to_string();
+
+    let native = c
+        .jit_with_options("main", &vesper::ffi_lowering::std_host_symbols(), true)
+        .expect("native run")
+        .to_string();
+    assert_eq!(native, n, "native run");
+    let expected: Vec<Vec<u8>> = (0..corpus.len())
+        .map(|i| {
+            let p = base.join(format!("output{i}.bin"));
+            let b = std::fs::read(&p).expect("native output");
+            std::fs::remove_file(&p).expect("clear output");
+            b
+        })
+        .collect();
+
+    let component = port(&c, &options(true)).expect("port");
+    let ctx = Ctx {
+        dirs: vec![(base.clone(), base.to_str().unwrap().to_owned())],
+        fuel: Some(u64::MAX),
+        ..Ctx::default()
+    };
+    let got = run(&component, &ctx).expect("wasm run");
+    assert_eq!(got.to_string(), n, "wasm run");
+    for (i, want) in expected.iter().enumerate() {
+        let have = std::fs::read(base.join(format!("output{i}.bin"))).expect("wasm output");
+        assert!(
+            have == *want,
+            "{}: the wasm parse tables differ from native ({} vs {} bytes)",
+            corpus[i].display(),
+            have.len(),
+            want.len()
+        );
+    }
+    let _ = std::fs::remove_dir_all(&base);
+    let _ = std::fs::remove_dir_all(&pkg);
 }
