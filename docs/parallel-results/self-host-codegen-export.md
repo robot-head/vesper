@@ -112,6 +112,36 @@ Stacked on lane 1's #1309 (lent Cranelift handles and the `export` hook).
 The hybrid's stats show the hook emitted the glue of all 51 builds of v2
 libraries (48 unoptimized, 3 optimized); v1 libraries have no glue.
 
+## Part 3: the interface planner and the interface file
+
+### What changed
+
+- **`plan.ves`**: `native_export::plan_with` in Vesper. Rust hands it the
+  checker's answers for each type the planner asks about (class, mode,
+  layout, ADT shape and display text, from `world.mode` and `Layout::of`),
+  and the port makes every decision in Rust's order: refusals, positions,
+  result shapes, owning and linear handles, fail records, instances,
+  foreign libraries, owned sequences and mirrors. It answers status 0 and
+  the interface, or 1 and the refusals.
+- **`json.ves`**: `interface_json`, a pretty writer that matches
+  `serde_json::to_string_pretty` byte for byte (two-space indent, serde's
+  escapes, fields skipped as `skip_serializing_if` says, trailing newline).
+- **Swap points**: `plan` and `interface_json` hooks in
+  src/codegen_swap.rs. `plan_with` and `interface_json` ask the hook first
+  and fall back to the Rust body (`plan_native`) when none is installed.
+- **`crates/vesper-hybrid`**: both hooks installed from module
+  `codegen_export`. Its test builds every library with `--interface` too.
+
+### The differential
+
+| Check | Cases | Differences |
+|---|--:|--:|
+| In-process plans, ports plus 24 directed sources (13 refusals) | 33 | 0 |
+| Interface JSON, in-process (1,890,255 bytes) | 62 | 0 |
+| `vesper` vs `vesper-hybrid` objects and interface files, 51 libraries | 54 | 0 |
+
+The hybrid's stats show every build was planned and written by Vesper.
+
 ## Stage 1 guard
 
 Part 1 adds a package, a test and BUILD.bazel entries. Part 2's only Rust
@@ -153,10 +183,7 @@ branch is linked from the PR.
 
 ## What is left
 
-- Part 2: `plan_with` on @vesper/check-data's `World` and
-  @vesper/check-layout's layouts, compared as interface JSON over the same
-  corpus.
-- The export signatures (the wrappers `object` compiles per exported
-  function); 128-bit cells after lane 3.
-- The full `--lib` suite and the port harness's export tier on the hybrid,
-  and the SH4 scoreboard row.
+- The export wrapper signatures, `define_wide_entry` (128-bit adapters) and
+  the instance wrappers' source text; 128-bit cells after lane 3.
+- Timing each piece against Rust, then the flip and the Rust deletion.
+- The SH4 scoreboard row.

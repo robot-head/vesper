@@ -25,6 +25,9 @@ use vesper::{
     },
     tooling::doc::sources::{SourceLimits, discover},
 };
+#[path = "test_engines.rs"]
+mod test_engines;
+
 use vesper_test::{
     ExpectErrorOutcome, FaultProfile, HarnessPlan, ObligationLedger, ObservedDiagnostic, TestMode,
     VerdictKey, VerdictRecord, VerdictStatus, is_cacheable, verify_expect_error,
@@ -35,7 +38,7 @@ const DEFAULT_FUEL: u64 = 1_000_000;
 const DEFAULT_MAX_MUTANTS: usize = 256;
 const HARD_MAX_MUTANTS: usize = 2048;
 
-pub const USAGE: &str = "usage: vesper test --doc [FILE|DIR] [--json]\n       vesper test <FILE|DIR> [--mutate] [--mutate-dependency <FILE>] [--filter <PAT>] [--mutant-offset <N>] [--max-mutants <N>] [--no-opt] [--fuel <N>] [--no-cache] [--json]";
+pub const USAGE: &str = "usage: vesper test --doc [FILE|DIR] [--json]\n       vesper test <FILE|DIR> [--mutate] [--mutate-dependency <FILE>] [--filter <PAT>] [--mutant-offset <N>] [--max-mutants <N>] [--no-opt] [--fuel <N>] [--engines all|unit] [--no-cache] [--json]";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -114,6 +117,9 @@ struct Options {
     fuel: u64,
     no_cache: bool,
     json: bool,
+    /// `--engines all`: every passing unit test must pass on every engine
+    /// ([`test_engines::agree`]).
+    engines_all: bool,
 }
 
 impl Options {
@@ -145,6 +151,7 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
     let mut fuel = DEFAULT_FUEL;
     let mut no_cache = false;
     let mut json = false;
+    let mut engines = None;
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -156,6 +163,10 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
             }
             "--no-cache" if !no_cache => no_cache = true,
             "--json" if !json => json = true,
+            "--engines" if engines.is_none() => {
+                let value = it.next().ok_or("--engines requires `all` or `unit`")?;
+                engines = Some(test_engines::parse(value)?);
+            }
             "--filter" => {
                 if filter.is_some() {
                     return Err("duplicate --filter option".into());
@@ -212,6 +223,10 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
     if !optimize && !mutate {
         return Err("--no-opt requires --mutate".into());
     }
+    let engines_all = engines.unwrap_or(false);
+    if engines_all && mutate {
+        return Err("--engines all cannot be combined with --mutate".into());
+    }
     let path = path.ok_or_else(|| USAGE.to_string())?;
     Ok(Options {
         path,
@@ -224,6 +239,7 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
         fuel,
         no_cache,
         json,
+        engines_all,
     })
 }
 
@@ -651,6 +667,32 @@ fn run_tests_on_world(
         }
     }
     (all_passed, cases)
+}
+
+/// `--engines all` on one passing unit test: fails the report when another
+/// engine disagrees (tests with foreign imports run on the evaluator only
+/// and are left as they are).
+fn engines_agree(
+    rep: &mut UnitTestCaseReport,
+    selected: &[UnitEntry],
+    world: &World,
+    foreign: Option<(&ForeignChecked, &EvalHost)>,
+    standalone: Option<&str>,
+    fuel: u64,
+) {
+    if foreign.is_some() {
+        return;
+    }
+    let Some(entry) = selected.iter().find(|test| test.name == rep.name) else {
+        return;
+    };
+    match test_engines::agree(world, &entry.entry, standalone, fuel) {
+        Ok(()) => rep.message = format!("{} on every engine", rep.message),
+        Err(message) => {
+            rep.passed = false;
+            rep.message = format!("--engines all: {message}");
+        }
+    }
 }
 
 fn without_negative_tests(mut module: Module, negative: &BTreeSet<String>) -> Module {
@@ -1583,6 +1625,16 @@ impl TestExecution<'_> {
                         rep.message = format!(
                             "budget gate not enforced: this harness cannot yet check {} (the unit run passed)",
                             budget_gate_names(plan)
+                        );
+                    }
+                    if opts.engines_all && plan.primary_mode == TestMode::Unit && rep.passed {
+                        engines_agree(
+                            &mut rep,
+                            &unit_batch_selected,
+                            world,
+                            foreign,
+                            combined.is_none().then_some(source.as_str()),
+                            opts.fuel,
                         );
                     }
                 }

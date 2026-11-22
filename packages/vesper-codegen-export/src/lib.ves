@@ -31,6 +31,13 @@ use self::binding_v2::{
 use self::directives::{
     parse_directives
 };
+use self::json::{
+    interface_json
+};
+use self::plan::{
+    plan_bytes,
+    plan_words
+};
 
 // `rust_binding(interface, options)`.
 pub fn rust_binding(sink i: Iface) -> ChunkSeq[u8] {
@@ -49,6 +56,31 @@ pub fn binding_text(in input: Str) -> ChunkSeq[u64] {
     let i = read_iface(in input.as_bytes());
     let out = rust_binding(i);
     pack_text(in out)
+}
+
+// Harness entry: `plan_with` of the encoded inputs (plan.ves).
+pub fn export_plan(in input: Str) -> ChunkSeq[u64] {
+    plan_words(in input)
+}
+
+// Harness entry: `interface_json` of the encoded interface (json.ves).
+pub fn interface_text(in input: Str) -> ChunkSeq[u64] {
+    let i = read_iface(in input.as_bytes());
+    let out = interface_json(in i);
+    pack_text(in out)
+}
+
+// `interface_json` of the encoded interface's bytes (the hybrid's
+// `interface_json` hook).
+pub fn interface_text_bytes(in input: Slice[u8]) -> ChunkSeq[u8] {
+    let i = read_iface(in input);
+    interface_json(in i)
+}
+
+// `plan_with` of the encoded inputs' bytes, as words (the hybrid's
+// `plan` hook).
+pub fn export_plan_bytes(in input: Slice[u8]) -> ChunkSeq[u64] {
+    plan_bytes(in input)
 }
 
 // Harness entry: `Directives::parse` of the encoded source and target, as
