@@ -1,0 +1,9 @@
+[package]
+name = "@vesper-std/cpu"
+version = "0.1.0"
+edition = "2026"
+capability_ceiling = ["Ffi[StdCpu]"]
+# The `.vsys` library this package imports (manuscript §16.3). Its functions
+# have no host shim: the native backend defines each one from a few bytes of
+# machine code for the object's target (src/ffi_lowering/cpu.rs).
+vsys = ["cpu.vsys"]

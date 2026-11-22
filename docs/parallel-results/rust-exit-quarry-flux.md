@@ -62,12 +62,153 @@ Rust lines deleted in this part: the `BTreeMap` accumulator (~45 lines) and
 the CDC record loop (~55 lines); the adapters added in `src/port.rs` are
 ~110 lines.
 
+## Part 2: the Flux input log's frame codec
+
+Base: `main` at `979cfa8` (part 1, #1419, merged).
+
+### What changed
+
+- `log.rs`'s header, frame encoder, frame checksum and frame decoder run in
+  Vesper (`vesper/src/log.ves`, exported as `log_header`, `log_frame`,
+  `log_frame_ok` and `log_decode`). The checksums are BLAKE3 through
+  `@vesper-std/hash-sys` (the `.vsys` library `Blake3`, the BLAKE3 C
+  implementation that the crate links through `vesper-blake3-sys`, as
+  `vesper-fmt` does since #1462). `log.rs` keeps the file: create, open, scan, append, read and the
+  torn-tail cut. The Rust codec is deleted.
+- `src/accumulator_differential.rs` became `src/differential.rs` and gained
+  the deleted Rust codec as the reference of a third differential test.
+- New `tests/port_memory.rs`: repeated CDC ingest (accepted and rejected
+  batches), ticks, checkpoint and restore, and log appends, reads and
+  reopens leave no live port allocation (its own test binary, since the
+  runtime's live count is process-wide).
+
+### Flip-gate verdict
+
+| Module | Differential | Every test | ABBA (Vesper/Rust, 95% interval) | Verdict |
+|---|---|---|---|---|
+| input log codec (`log` workload) | 0 differences over 6,000 frames: headers, frames and errors byte for byte, flipped and forged-checksum payloads through the checker and the decoder | all 15 test binaries pass | **0.72x** (0.676x..0.749x) | flipped |
+
+The `log` workload appends 16 epochs of two width-3 sets of 1,024 rows to a
+fresh log, reads every epoch back and reopens the log, on `/dev/shm`. The
+divergent edit `log` writes header version 2.
+
+## Part 3: the Flux checkpoint image codec
+
+Stacked on part 2 (in the same PR, #1447: one crate).
+
+### What changed
+
+- `checkpoint.rs`'s image codec runs in Vesper: `vesper/src/image.ves`,
+  exported as `cp_identity` (the execution-identity digest, one charge per
+  word), `cp_image` (the parse-work reservation, the byte limit and the
+  whole image with its BLAKE3 checksum), `cp_check` (the checksum),
+  `cp_head` (magic, version, identity, ticks and the source section) and
+  `cp_sets` (node count, row schemas, totals, canonical rows, trailing
+  bytes). `checkpoint.rs` keeps the circuit and policy structures: it
+  flattens the circuit into identity words, rebuilds and validates the
+  policy between `cp_head` and `cp_sets` (so every error keeps its place),
+  and keeps `validate_state`, which calls the Vesper kernels. The Rust
+  writer, reader, identity hasher and image loops are deleted from it.
+- `checkpoint_reference.rs` keeps the deleted Rust codec as the reference
+  of the new differential test `checkpoint_differential.rs`.
+
+### Flip-gate verdict
+
+| Module | Differential | Every test | ABBA (Vesper/Rust, 95% interval) | Verdict |
+|---|---|---|---|---|
+| checkpoint image codec (`image` workload) | 0 differences over 1,500 seeded executors (circuits of filters, maps, unions and joins, with and without CDC sources): 7,500 checkpoints under seeded limits and 9,000 restores of flipped, truncated, extended and re-signed images, comparing images, errors and the restored state; every codec error occurs | all 15 test binaries pass | **0.75x** (0.740x..0.786x); `resume` 0.97x (0.910x..1.000x) | flipped |
+
+The `image` workload checkpoints an executor of two width-3 inputs holding
+8 ticks of 1,024-row sets and restores the image into a fresh executor, 8
+times per batch. The Rust arm is `main` at `468dced`. The divergent edit
+`image` skips the check of a node's row count against the row limit.
+
+## Part 4: the Flux durable checkpoint codecs
+
+In the same PR as parts 2 and 3 (#1447).
+
+### What changed
+
+- `durable.rs`'s manifest and spine-batch codecs run in Vesper:
+  `vesper/src/spine.ves`, exported as `dur_batch` (a batch blob and its
+  byte limit), `dur_batch_read` (a batch checked against its manifest
+  reference), `dur_manifest` (the restore parse-work reservation, the byte
+  limit and the manifest), `dur_head` (the manifest head through its
+  source, shared with the image's `image_head`) and `dur_nodes` (node
+  schemas, spine levels and ranges, batch rows, totals, the parent and the
+  trailing bytes; a batch named twice is found through the accumulator's
+  keyed table). `durable.rs` keeps the store, the spine policy (appends,
+  geometric merges, the fold that keeps a manifest restorable) and the sums,
+  which use the Vesper accumulator. The Rust `Writer`, `Reader`, source
+  codec, `parse_work` and blob loops are deleted.
+- The deleted Rust codecs join `checkpoint_reference.rs`; a second
+  differential test compares them.
+- `tests/port_memory.rs` adds durable checkpoints, a restore and a refused
+  restore to its leak cycle.
+
+### Flip-gate verdict
+
+| Module | Differential | Every test | ABBA (Vesper/Rust, 95% interval) | Verdict |
+|---|---|---|---|---|
+| durable manifest and batch codecs (`durable` workload) | 0 differences over 1,500 seeded executors: 4,500 manifest writes under seeded limits and budgets, 9,000 manifest reads of seeded spines (bad ranges, zero and oversized batches, repeated digests, nine levels) and mutations, and batch writes and reads against wrong references and mutated blobs, comparing bytes, errors, decoded state and the work left; every codec error occurs | all 15 test binaries pass | **0.86x** (0.812x..0.900x) | flipped |
+
+The `durable` workload checkpoints the `image` state durably into a fresh
+store on `/dev/shm` and restores it into a fresh executor, 8 times per
+batch. The divergent edit `spine` accepts a manifest batch of 0 rows.
+
+## Quarry planner, re-measured (not flipped)
+
+`examples/planner_abba.rs` on `main` at `ab965f2`, callgrind of `window 20`
+and the ABBA driver (9 epochs):
+
+| | Rust | Port | Ratio |
+|---|--:|--:|--:|
+| instructions | 19.47 M | 28.18 M | 1.45x |
+| instructions, decoding in place (local change) | | 27.66 M | 1.42x |
+| wall clock, ABBA median | | | 1.52x-1.59x (epochs from 1.09x to 2.02x) |
+
+Below the bar on instructions but not reliably on time, so Rust stays the
+default. Where the port's instructions go (named-symbol build):
+
+- malloc and free cost the same in both builds (11.3 M against 11.5 M); the
+  port makes fewer calls (50,880 against 60,369).
+- The Vesper code itself is 9.5 M, more than all of the Rust build's
+  non-allocator work (8.0 M). `lex::lex` alone is 3.1 M (the Rust lexer is
+  about 1 M): per byte it spills and reloads its locals and turns every
+  comparison into a 0/1 word before branching (see gap 2 below).
+- The Rust side of the port decodes the result into `PreparedQuery`
+  (strings, boxed expressions): about 5 M, which the Rust build does not
+  pay on top of its own construction.
+- `optimized()` is already faster in the port (2.9 M against 3.5 M).
+
 ## Compiler gaps
 
-- `let s = seq.as_slice();` is refused (E1521, a slice is a second-class
+1. `let s = seq.as_slice();` is refused (E1521, a slice is a second-class
   borrow). Every slice must be written at the call site
   (`f(in seq.as_slice(), ...)`). Not a blocker; it only makes loops that read
   one slice many times wordier.
+
+2. **Comparisons are materialized before branching, and loop locals are
+   spilled.** In Quarry's lexer, `if is_space(c)` with
+   `c == SPACE || c == TAB || ...` compiles to a `cmp`/`sete`/`movzbq`/
+   `test`/`jne` chain per operand, with `i`, `n` and the slice reloaded
+   from the stack each iteration. Repro: any byte loop over `in s: Slice[u8]`
+   with a `||` of comparisons, e.g.
+
+   ```vesper
+   fn spaces(in s: Slice[u8]) -> u64 {
+       let mut n: u64 = 0;
+       for i in 0..s.len() {
+           let c = match s.try_get(i) { Option::Some(x) => widen_u64(x), Option::None => 0 };
+           if c == 32 || c == 9 || c == 10 || c == 12 || c == 13 {
+               n = wrapping_add(n, 1);
+           }
+       }
+       n
+   }
+   ```
+
+   This is the largest single item between the Quarry planner and the bar.
 
 ## What is left
 
@@ -75,8 +216,9 @@ Flux (Rust still in `src/`):
 
 | Code | Lines | Plan |
 |---|--:|---|
-| `log.rs` (input log frames) | 430 | next part: frame encode/decode and scan in Vesper over `@vesper-std/hash` (BLAKE3) and `@vesper-std/fs` |
-| `checkpoint.rs`, `durable.rs` (checkpoint and spine encoding) | 1,347 | next parts |
+| `log.rs` (the file side of the input log) | ~250 | file I/O moves to `@vesper-std/fs` once lane 13's direct libc imports land |
+| `durable.rs` (store I/O, spine policy) | ~600 | with the cluster driver, which shares its store and GC |
+| `checkpoint.rs` (identity words, policy rebuild, state validation) | ~390 | with `circuit.rs` |
 | `circuit.rs` (builder, differentiation, staging) | 741 | with the cluster driver |
 | `cluster.rs` (multi-worker driver) | 3,314 | later part (`in dyn EpochSource`, `inout dyn CommitSink`) |
 | `kafka_wire.rs`, `kafka_group.rs` | 2,229 | later parts; CRC-32C and the codecs (zlib, LZ4, Snappy, zstd) are C libraries reachable through `.vsys` |

@@ -1,8 +1,29 @@
 // @export abi 3
+// @export vsys direct rust=crate::blake3_shim
+// | sys library Blake3 (
+// |     target = "@TARGET@", abi = "@ABI@",
+// |     link = "static", name = "vesper_std_blake3",
+// |     artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+// | ) {
+// |     linear extern type Hasher;
+// |     fn vesper_blake3_new() -> ForeignVal[Option[Hasher]];
+// |     fn vesper_blake3_new_keyed(nocapture in key: CSlice[u8]) -> ForeignVal[Option[Hasher]];
+// |     fn vesper_blake3_new_derive_key(nocapture in context: CSlice[u8]) -> ForeignVal[Option[Hasher]];
+// |     fn vesper_blake3_update(inout h: Hasher, nocapture in data: CSlice[u8]) -> ForeignVal[Unit];
+// |     fn vesper_blake3_finalize(in h: Hasher, nocapture inout out: CSlice[u8]) -> ForeignVal[Unit];
+// |     fn vesper_blake3_free(sink h: Hasher) -> ForeignVal[Unit];
+// |     fn vesper_blake3_hash(nocapture in data: CSlice[u8], nocapture inout out: CSlice[u8]) -> ForeignVal[Unit];
+// | }
+//
+// The `.vsys` library above is @vesper-std/hash-sys's (`.vsys` imports are
+// read from the root module of a library build only, #1150), provided in C
+// by packages/vesper-std/hash/sys/c, which the Rust crate links through
+// vesper-blake3-sys as `crate::blake3_shim`.
+//
 // @vesper/flux: Vesper port of the vesper-flux Z-set kernels and frontier
 // (port wave P3b lane 7, #1069), the accumulator that builds sets from
-// decoded records and the CDC batch decoder (Rust-exit wave SH6 lane 6,
-// #1401).
+// decoded records, the CDC batch decoder and the input log's frame codec
+// (Rust-exit wave SH6 lane 6, #1401).
 //
 // A Z-set crosses the boundary as one flat sequence of cells: each row is
 // `width` i64 columns followed by its i64 weight (stride width + 1), rows
@@ -38,6 +59,25 @@ use self::acc::{
     acc_new
 };
 use self::cdc::cdc_decode;
+use self::log::{
+    frame_bytes,
+    frame_decode,
+    frame_ok,
+    header_bytes
+};
+use self::image::{
+    identity,
+    image_bytes,
+    image_check,
+    image_head,
+    image_sets
+};
+use self::spine::{
+    batch_bytes,
+    batch_read,
+    manifest_bytes,
+    manifest_nodes
+};
 use self::wide::{
     Acc,
     acc_add,
@@ -836,4 +876,235 @@ pub fn cdc_ingest(
         inout budget,
         inout stats
     );
+}
+
+// ---------------------------------------------------------------------
+// the input log's frames (log.rs `InputLog`, module log)
+
+pub copy enum LogErr {
+    Overflow,
+    Schema,
+    Rows,
+    FrameBytes,
+    Frame,
+    Epoch,
+    Noncanonical
+}
+
+// The header of a log of inputs of these widths.
+pub fn log_header(in widths: Slice[u64]) -> ChunkSeq[u8] eff [Ffi[Blake3]] {
+    header_bytes(in widths)
+}
+
+// One whole frame of epoch `epoch` (see log.ves).
+pub fn log_frame(
+    epoch: u64,
+    schema_at: u64,
+    in cells: Slice[i64],
+    in counts: Slice[u64],
+    in widths: Slice[u64],
+    max_rows: u64,
+    max_frame: u64
+) -> ChunkSeq[u8] eff [Ffi[Blake3], Fail[LogErr]] {
+    frame_bytes(epoch, schema_at, in cells, in counts, in widths, max_rows, max_frame)
+}
+
+// Whether a frame's payload of `len` bytes and its digest check.
+pub fn log_frame_ok(in body: Slice[u8], len: u64) -> bool eff [Ffi[Blake3]] {
+    frame_ok(in body, len)
+}
+
+// A checked payload's sets: per input its row count, then its cells.
+pub fn log_decode(in payload: Slice[u8], epoch: u64, in widths: Slice[u64], max_rows: u64)
+    -> ChunkSeq[i64] eff [Fail[LogErr]] {
+    frame_decode(in payload, epoch, in widths, max_rows)
+}
+
+// ---------------------------------------------------------------------
+// checkpoint images (checkpoint.rs, module image)
+
+pub copy enum CpErr {
+    Work,
+    Overflow,
+    Bytes,
+    Truncated,
+    Checksum,
+    Version,
+    Identity,
+    SourceTag,
+    Sources,
+    WeightPolicy,
+    NodeCount,
+    RowSchema,
+    State,
+    Noncanonical,
+    Trailing,
+    ManifestVersion,
+    BatchVersion,
+    BatchIdentity,
+    BatchHeader,
+    SpineLevels,
+    SpineRanges,
+    BatchRows,
+    NamedTwice,
+    ParentTag
+}
+
+// The execution identity digest of a circuit's flattened words.
+pub fn cp_identity(in words: Slice[u64], inout budget: u64)
+    -> ChunkSeq[u8] eff [Ffi[Blake3], Fail[CpErr]] {
+    identity(in words, inout budget)
+}
+
+// A whole checkpoint image (see image.ves).
+pub fn cp_image(
+    in id: Slice[u8],
+    ticks: u64,
+    in source: Slice[u64],
+    in widths: Slice[u64],
+    in counts: Slice[u64],
+    in cells: Slice[i64],
+    limit: u64,
+    inout budget: u64
+) -> ChunkSeq[u8] eff [Ffi[Blake3], Fail[CpErr]] {
+    image_bytes(in id, ticks, in source, in widths, in counts, in cells, limit, inout budget)
+}
+
+// Checks an image's trailing digest.
+pub fn cp_check(in image: Slice[u8]) eff [Ffi[Blake3], Fail[CpErr]] {
+    image_check(in image)
+}
+
+// A checked body's head through its source.
+pub fn cp_head(in body: Slice[u8], in expected: Slice[u8], max_sources: u64, inout budget: u64)
+    -> ChunkSeq[u64] eff [Fail[CpErr]] {
+    image_head(
+        in body,
+        in "VFLUXCP1".as_bytes(),
+        CpErr::Version,
+        in expected,
+        max_sources,
+        inout budget
+    )
+}
+
+// A checked body's node sets from `cursor`.
+pub fn cp_sets(
+    in body: Slice[u8],
+    cursor: u64,
+    in widths: Slice[u64],
+    max_rows: u64,
+    max_nodes: u64,
+    max_total_rows: u64,
+    max_total_cells: u64,
+    inout budget: u64
+) -> ChunkSeq[i64] eff [Fail[CpErr]] {
+    image_sets(
+        in body,
+        cursor,
+        in widths,
+        max_rows,
+        max_nodes,
+        max_total_rows,
+        max_total_cells,
+        inout budget
+    )
+}
+
+// ---------------------------------------------------------------------
+// durable checkpoints (durable.rs, module spine)
+
+// One spine batch blob (see spine.ves).
+pub fn dur_batch(
+    in fingerprint: Slice[u8],
+    node: u64,
+    width: u64,
+    lo: u64,
+    hi: u64,
+    count: u64,
+    in cells: Slice[i64],
+    limit: u64
+) -> ChunkSeq[u8] eff [Fail[CpErr]] {
+    batch_bytes(in fingerprint, node, width, lo, hi, count, in cells, limit)
+}
+
+// A batch blob's cells, checked against its manifest reference.
+pub fn dur_batch_read(
+    in blob: Slice[u8],
+    in fingerprint: Slice[u8],
+    node: u64,
+    width: u64,
+    lo: u64,
+    hi: u64,
+    rows: u64,
+    inout budget: u64
+) -> ChunkSeq[i64] eff [Fail[CpErr]] {
+    batch_read(in blob, in fingerprint, node, width, lo, hi, rows, inout budget)
+}
+
+// A whole manifest blob.
+pub fn dur_manifest(
+    in fingerprint: Slice[u8],
+    ticks: u64,
+    in source: Slice[u64],
+    in widths: Slice[u64],
+    in counts: Slice[u64],
+    in spines: Slice[u64],
+    in parent: Slice[u64],
+    limit: u64,
+    inout budget: u64
+) -> ChunkSeq[u8] eff [Fail[CpErr]] {
+    manifest_bytes(
+        in fingerprint,
+        ticks,
+        in source,
+        in widths,
+        in counts,
+        in spines,
+        in parent,
+        limit,
+        inout budget
+    )
+}
+
+// A manifest's head through its source.
+pub fn dur_head(in body: Slice[u8], in expected: Slice[u8], max_sources: u64, inout budget: u64)
+    -> ChunkSeq[u64] eff [Fail[CpErr]] {
+    image_head(
+        in body,
+        in "VFLUXDM2".as_bytes(),
+        CpErr::ManifestVersion,
+        in expected,
+        max_sources,
+        inout budget
+    )
+}
+
+// A manifest's nodes and parent from `cursor`.
+pub fn dur_nodes(
+    in body: Slice[u8],
+    cursor: u64,
+    in widths: Slice[u64],
+    ticks: u64,
+    max_rows: u64,
+    max_nodes: u64,
+    max_total_rows: u64,
+    max_total_cells: u64,
+    k0: u64,
+    k1: u64,
+    inout budget: u64
+) -> ChunkSeq[u64] eff [Fail[CpErr]] {
+    manifest_nodes(
+        in body,
+        cursor,
+        in widths,
+        ticks,
+        max_rows,
+        max_nodes,
+        max_total_rows,
+        max_total_cells,
+        k0,
+        k1,
+        inout budget
+    )
 }

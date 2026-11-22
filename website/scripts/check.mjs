@@ -1,3 +1,5 @@
+import { checkTourWasm } from './check-tour-wasm.mjs';
+import { movedLessons } from './tour.mjs';
 import assert from 'node:assert/strict';
 import { access, readFile, readdir } from 'node:fs/promises';
 import { dirname, posix, resolve } from 'node:path';
@@ -58,6 +60,10 @@ for (const file of [...docs, ...tour]) {
   const url = 'https://vesper-lang.org/' + file.replace(/index\.html$/, '');
   assert(sitemap.includes(`<loc>${url}</loc>`), `Missing sitemap URL ${url}`);
 }
+const tourEditors = tour.filter(file => pages.get(file).source.includes('data-tour-editor'));
+const lessonCount = tour.length - Object.keys(movedLessons).length;
+assert.equal(tourEditors.length, lessonCount - 1, 'Incorrect number of tour editors');
+assert(!tourEditors.includes('tour/read-a-proposed-sugar-declaration.html'), 'Proposed syntax is a reference listing');
 const { source: html } = pages.get('index.html');
 const visited = new Set();
 let current = 'tour/index.html', previous;
@@ -65,14 +71,14 @@ while (current) {
   const { source } = pages.get(current);
   assert(!visited.has(current), 'Tour navigation contains a cycle');
   visited.add(current);
-  assert(source.includes(`Language tour · ${visited.size} of ${tour.length}`), 'Incorrect tour progress');
+  assert(source.includes(`Language tour · ${visited.size} of ${lessonCount}`), 'Incorrect tour progress');
   assert.equal(source.match(/rel="prev" href="([^"]+)"/)?.[1], previous);
   previous = posix.basename(current);
   const next = source.match(/rel="next" href="([^"]+)"/)?.[1];
   current = next ? `tour/${next}` : null;
 }
-assert.equal(visited.size, 50, 'Tour should reach all 50 lessons');
-assert.equal(visited.size, tour.length);
+assert.equal(visited.size, lessonCount, 'Tour should reach every lesson');
+await checkTourWasm(dist, tour, pages);
 for (const file of ['transaction.ves', 'projections.ves', 'checked_math.ves']) {
   const actual = await readFile(resolve(dist, 'examples', file), 'utf8');
   const original = (await readFile(resolve(root, '..', 'examples', file), 'utf8')).replaceAll('\r\n', '\n').trimEnd() + '\n';

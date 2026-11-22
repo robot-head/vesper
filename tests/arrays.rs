@@ -523,3 +523,59 @@ fn main() -> u64 { let mut a = [one, one]; a[0] = two; let f = a[0]; f() }",
         vesper::arrays::ARRAY_OPERATION,
     );
 }
+
+/// The CLIF of `source` (`vesper emit --emit clif`).
+fn clif(name: &str, source: &str) -> String {
+    let temp = Temp::new();
+    let file = temp.0.join(format!("{name}.ves"));
+    fs::write(&file, source).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_vesper"))
+        .args(["emit", file.to_str().unwrap(), "--emit", "clif"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{name}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// An index whose own instructions bound it (a mask, a constant, a
+/// remainder) gets no bounds check in native code, on reads and writes
+/// (lane 7 of SH6, #1402, gap 1); an index they do not bound keeps it.
+#[test]
+fn masked_and_constant_indices_need_no_native_check() {
+    let masked = "fn run(rank: u64, top: u64) -> u64 {
+    let mut dist: [u64; 2048] = [0; 2048];
+    dist[0] = 1;
+    let mut sum = wrapping_add(top, 1);
+    loop {
+        if sum == 0 { break; }
+        sum = wrapping_sub(sum, 1);
+        let t = wrapping_add(sum, rank);
+        dist[t & 2047] = wrapping_add(dist[t & 2047], dist[sum & 2047]);
+    }
+    wrapping_add(dist[top & 2047], dist[top % 2048])
+}
+fn main() -> u64 { run(3, 3) }";
+    differential("masked", masked, 2);
+    let code = clif("masked", masked);
+    assert!(
+        !code.contains("trap user2"),
+        "a masked index kept its bounds check:\n{code}"
+    );
+    // A mask wider than the array is checked and raises.
+    let wide = "fn get(i: u64) -> u64 eff [Fail[RuntimeError]] {
+    let a: [u64; 4] = [1, 2, 3, 4];
+    a[i & 7]
+}
+fn main() -> u64 {
+    handle Fail[RuntimeError] in { wrapping_add(get(2), get(5)) } with { return x => x, raise(e, k) => 9, }
+}";
+    differential("wide", wide, 9);
+    assert!(
+        clif("wide", wide).contains("icmp_imm ult"),
+        "a mask wider than the array lost its bounds check"
+    );
+}

@@ -17,7 +17,9 @@
 //!
 //! 1. [`OBJECT_ENV`]: a prebuilt object (Bazel builds it with
 //!    `vesper_port_object` and passes it, with the generated binding in
-//!    [`GENERATED_BINDING_ENV`], through `build_script_env`).
+//!    [`GENERATED_BINDING_ENV`], through `build_script_env`). A crate with
+//!    several libraries passes one per library, with the library's name in
+//!    upper case appended (`VESPER_PORT_OBJECT_DECODER`).
 //! 2. [`COMPILER_ENV`]: a `vesper` executable, run as `vesper build --lib`.
 //!    CI builds `vesper` once and passes it here.
 //! 3. Otherwise the in-tree compiler, built by a nested
@@ -111,15 +113,24 @@ impl Port {
         let dir = PathBuf::from(env("CARGO_MANIFEST_DIR")?);
         let out = PathBuf::from(env("OUT_DIR")?);
         let target = env("TARGET")?;
+        // A crate with several libraries names each prebuilt object by
+        // library: `VESPER_PORT_OBJECT_<LIBRARY>`, then the shared name.
+        let suffix = self.library.to_ascii_uppercase().replace('-', "_");
+        let object_env = format!("{OBJECT_ENV}_{suffix}");
+        let binding_env = format!("{GENERATED_BINDING_ENV}_{suffix}");
         for name in [
             BLESS_ENV,
             COMPILER_ENV,
             OBJECT_ENV,
             GENERATED_BINDING_ENV,
             IN_COMPILER_BUILD_ENV,
+            &object_env,
+            &binding_env,
         ] {
             println!("cargo:rerun-if-env-changed={name}");
         }
+        let prebuilt_env =
+            |own: &str, shared: &str| std::env::var_os(own).or_else(|| std::env::var_os(shared));
         if std::env::var_os(IN_COMPILER_BUILD_ENV).is_some() {
             return Err(format!(
                 "{} is port-backed but is being built inside the vesper compiler's own \
@@ -141,7 +152,7 @@ impl Port {
             "o"
         };
         let object = out.join(format!("vesper_{}.{extension}", self.library));
-        let generated = match std::env::var_os(OBJECT_ENV) {
+        let generated = match prebuilt_env(&object_env, OBJECT_ENV) {
             Some(prebuilt) => {
                 if !self.edits.is_empty() {
                     return Err(format!(
@@ -153,7 +164,8 @@ impl Port {
                 println!("cargo:rerun-if-changed={}", prebuilt.display());
                 std::fs::copy(&prebuilt, &object)
                     .map_err(|e| format!("{}: {e}", prebuilt.display()))?;
-                let generated = std::env::var_os(GENERATED_BINDING_ENV).map(PathBuf::from);
+                let generated =
+                    prebuilt_env(&binding_env, GENERATED_BINDING_ENV).map(PathBuf::from);
                 if let Some(path) = &generated {
                     println!("cargo:rerun-if-changed={}", path.display());
                 }
@@ -176,6 +188,18 @@ impl Port {
                     .arg(&binding);
                 if let Some(types) = &self.types_path {
                     command.args(["--rust-types", types]);
+                }
+                // The CPU features the Rust half is compiled for (baseline
+                // by default, every host feature under
+                // `-C target-cpu=native`): the port's object uses the same.
+                // x86-64's baseline list adds nothing, so a default build
+                // runs the same command as before.
+                if let Ok(features) = std::env::var("CARGO_CFG_TARGET_FEATURE")
+                    && features
+                        .split(',')
+                        .any(|f| !matches!(f, "" | "fxsr" | "sse" | "sse2" | "x87"))
+                {
+                    command.arg("--target-features").arg(features);
                 }
                 run(&mut command, &compiler)?;
                 Some(binding)
@@ -321,6 +345,17 @@ pub fn prepare_source(
         let rel = package.strip_prefix(&base).unwrap_or(package);
         let copy = scratch.join(rel);
         copy_file(&package.join("Loom.toml"), &copy.join("Loom.toml"))?;
+        // The `.vsys` files a manifest names (`[package] vsys`) sit beside it.
+        for entry in
+            std::fs::read_dir(package).map_err(|e| format!("{}: {e}", package.display()))?
+        {
+            let path = entry
+                .map_err(|e| format!("{}: {e}", package.display()))?
+                .path();
+            if path.is_file() && path.extension().is_some_and(|e| e == "vsys") {
+                copy_file(&path, &copy.join(path.file_name().unwrap_or_default()))?;
+            }
+        }
         let mut files = Vec::new();
         if package.join("src").is_dir() {
             walk(&package.join("src"), &mut files)?;

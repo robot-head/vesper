@@ -829,6 +829,19 @@ fn counted_plan(
             bound_locals.insert(name.clone(), *value);
         }
     }
+    // Parameters of loop blocks entered by one jump hold that jump's
+    // arguments: the result of an inlined call (`let s = sub(max, j)`) joins
+    // its return through one.
+    let mut passed: BTreeMap<ValueId, ValueId> = BTreeMap::new();
+    for &b in &blocks {
+        if let ([p], false) = (preds[b].as_slice(), f.blocks[b].params.is_empty())
+            && let Terminator::Jump { block, args } = &f.blocks[*p].terminator
+            && *block == b
+            && args.len() == f.blocks[b].params.len()
+        {
+            passed.extend(f.blocks[b].params.iter().copied().zip(args.iter().copied()));
+        }
+    }
     let analysis = Affine {
         f,
         blocks: &blocks,
@@ -837,6 +850,7 @@ fn counted_plan(
         reads: &reads,
         defs: &defs,
         bound_locals: &bound_locals,
+        passed: &passed,
     };
     let mut receivers: BTreeMap<String, Receiver> = BTreeMap::new();
     let mut candidates: BTreeMap<ValueId, (Access, String)> = BTreeMap::new();
@@ -1028,7 +1042,10 @@ fn constant_value(f: &FunctionIr, v: ValueId, depth: usize) -> Option<i128> {
 /// The most loop-invariant terms one guarded index may have.
 const MAX_TERMS: usize = 4;
 
-/// How deep [`Affine::linear`] follows `+` and `-` operands.
+/// How deep [`Affine::linear`] follows `+` and `-` operands. Reads of
+/// once-bound locals and parameters of once-entered blocks are aliases and
+/// cost nothing: a binding's value and a jump's argument are defined
+/// before them, so those chains end.
 const MAX_DEPTH: usize = 6;
 
 /// A loop-invariant `u64` term of an index.
@@ -1122,6 +1139,8 @@ struct Affine<'a> {
     reads: &'a BTreeMap<ValueId, &'a Instruction>,
     defs: &'a BTreeMap<ValueId, &'a Instruction>,
     bound_locals: &'a BTreeMap<String, ValueId>,
+    /// Block parameter -> the argument its block's one entering jump passes.
+    passed: &'a BTreeMap<ValueId, ValueId>,
 }
 
 impl Affine<'_> {
@@ -1147,6 +1166,9 @@ impl Affine<'_> {
         if !self.defined.contains(&v) {
             return Some(Linear::term(Offset::Value(v)));
         }
+        if let Some(&arg) = self.passed.get(&v) {
+            return self.linear(arg, depth);
+        }
         let def = self.defs.get(&v)?;
         match &def.op {
             Op::Constant(crate::ast::Literal::Int(n)) if *n >= 0 => {
@@ -1154,7 +1176,7 @@ impl Affine<'_> {
             }
             Op::Read { root, path, .. } if path.is_empty() => {
                 if let Some(bound) = self.bound_locals.get(root) {
-                    return self.linear(*bound, depth + 1);
+                    return self.linear(*bound, depth);
                 }
                 let read = self.reads.get(&v)?;
                 invariant_local(self.f, self.blocks, root)

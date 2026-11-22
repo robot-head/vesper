@@ -21,10 +21,6 @@ use std::fmt;
 
 use crate::target::Segment;
 
-#[cfg(not(feature = "vesper-port"))]
-pub use crate::reference::router::Router;
-
-#[cfg(feature = "vesper-port")]
 pub use crate::forward::router::Router;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

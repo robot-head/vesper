@@ -67,4 +67,23 @@ const DIVERGENT: &[(&str, &str, &str)] = &[
         "        if flags != 0 {\n",
         "        if flags > 1 {\n",
     ),
+    // log (vesper/src/log.ves): the header says version 2.
+    (
+        "log",
+        "    put_u16(inout h, 1);\n",
+        "    put_u16(inout h, 2);\n",
+    ),
+    // image (vesper/src/image.ves): a node's row count is not checked
+    // against the circuit's row limit.
+    (
+        "image",
+        "        if width != get(in widths, i) || count > max_rows {\n",
+        "        if width != get(in widths, i) {\n",
+    ),
+    // spine (vesper/src/spine.ves): a manifest batch of 0 rows is accepted.
+    (
+        "spine",
+        "            if n == 0 || n > max_rows {\n",
+        "            if n > max_rows {\n",
+    ),
 ];

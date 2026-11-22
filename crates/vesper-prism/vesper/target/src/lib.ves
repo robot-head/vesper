@@ -1,6 +1,9 @@
 use self::ascii::{
     Ascii
 };
+use @vesper/prism-bytes::{
+    first_not_path
+};
 // Vesper port of the single request-target interpretation of
 // crates/vesper-prism (`Target::parse` in src/target.rs, port wave P1 lane
 // 14, #911).
@@ -15,6 +18,10 @@ use self::ascii::{
 // ASCII bytes this module compares against (constants are per module).
 // 'a' - 10 and 'A' - 10: subtracting them gives a hex letter's value.
 const LOWER_HEX_OFFSET: u8 = 87;
+// The value end of a query entry without `=`.
+const ABSENT: u64 = 18446744073709551615;
+// `+`, a space in the query.
+const PLUS: u8 = 43;
 const UPPER_HEX_OFFSET: u8 = 55;
 // The bytes RFC 3986 lets an origin-form target carry unescaped (ALPHA,
 // DIGIT and -._~!$&'()*+,;=:@/?): bit `b` of LOW for bytes 0-63, bit
@@ -51,20 +58,18 @@ copy enum TargetError {
     AllocationFailed
 }
 
-// A decoded target. `segment_ends`, `key_ends` and `value_ends` are end
-// offsets into `segments`, `keys` and `values`; `value_present[i]` is false
-// for an entry written without `=`.
+// A decoded target in two buffers, so a parse allocates twice at most.
+// `bytes` holds the decoded segments, then each query entry's key and value.
+// `ends` holds the end offset in `bytes` of each of the `segments` segments,
+// then two words per query entry: its key's end and its value's end, or
+// `ABSENT` for an entry written without `=` (its value is then `None`).
 struct ParsedTarget {
     asterisk: bool,
-    segments: ChunkSeq[u8],
-    segment_ends: ChunkSeq[u64],
     trailing_slash: bool,
     has_query: bool,
-    keys: ChunkSeq[u8],
-    key_ends: ChunkSeq[u64],
-    values: ChunkSeq[u8],
-    value_ends: ChunkSeq[u64],
-    value_present: ChunkSeq[bool]
+    segments: u64,
+    bytes: ChunkSeq[u8],
+    ends: ChunkSeq[u64]
 }
 
 fn byte(in s: Slice[u8], i: u64) -> u8 {
@@ -155,7 +160,7 @@ fn count(in s: Slice[u8], lo: u64, hi: u64, b: u8) -> u64 {
 
 // The decoder's origin-form grammar (`valid_target` for a GET request).
 fn target_run(in t: Slice[u8]) -> Option[u64] {
-    t.find_not_in(TARGET_CHAR_MASK_LOW, TARGET_CHAR_MASK_HIGH, false)
+    first_not_path(in t, TARGET_CHAR_MASK_LOW, TARGET_CHAR_MASK_HIGH)
 }
 
 fn valid_origin(in t: Slice[u8]) -> bool {
@@ -339,8 +344,19 @@ fn require_utf8(policy: Utf8Policy) -> bool {
 }
 
 // Decode one query key or value into `out`.
-fn query_part(inout out: ChunkSeq[u8], in s: Slice[u8], lo: u64, hi: u64, utf8: bool)
+// `plain`: the whole query has neither `%` nor `+`.
+fn query_part(inout out: ChunkSeq[u8], in s: Slice[u8], lo: u64, hi: u64, utf8: bool, plain: bool)
     -> Option[TargetError] {
+    if lo
+        <= hi
+        && hi
+        <= s
+        .len()
+        && (plain || (find(in s, lo, hi, Ascii::Percent) == hi && find(in s, lo, hi, PLUS) == hi)) {
+        // Nothing to decode: ASCII without NUL, as the grammar keeps it.
+        out.extend(in s[lo..hi]);
+        return Option::None;
+    }
     let start = out.len();
     decode(inout out, in s, lo, hi, true);
     let end = out.len();
@@ -386,15 +402,11 @@ fn segment_fault(in decoded: Slice[u8], utf8: bool) -> Option[TargetError] {
 fn empty_target(asterisk: bool) -> ParsedTarget {
     ParsedTarget {
         asterisk: asterisk,
-        segments: ChunkSeq::new[u8](),
-        segment_ends: ChunkSeq::new[u64](),
         trailing_slash: false,
         has_query: false,
-        keys: ChunkSeq::new[u8](),
-        key_ends: ChunkSeq::new[u64](),
-        values: ChunkSeq::new[u8](),
-        value_ends: ChunkSeq::new[u64](),
-        value_present: ChunkSeq::new[bool]()
+        segments: 0,
+        bytes: ChunkSeq::new[u8](),
+        ends: ChunkSeq::new[u64]()
     }
 }
 
@@ -443,6 +455,22 @@ fn parse(in raw: Slice[u8], limits: TargetLimits) -> Result[ParsedTarget, Target
     let mut t = empty_target(false);
     t.trailing_slash = trailing;
     t.has_query = has_query;
+    t.segments = segment_count;
+    // One scan each for the whole path and query: without an escape (or a
+    // `+` in the query) no part needs its own.
+    let path_escapes = find(in raw, rest_lo, rest_hi, Ascii::Percent) < rest_hi;
+    let query_plain = has_query
+        && find(in raw, query_lo, n, Ascii::Percent)
+        == n
+        && find(in raw, query_lo, n, PLUS)
+        == n;
+    // Decoding never lengthens a part, so the target's length bounds
+    // `bytes`: one allocation each instead of growth by doubling.
+    let words = wrapping_add(segment_count, wrapping_mul(entry_count, 2));
+    if words > 0 {
+        t.bytes = ChunkSeq::with_capacity[u8](n);
+        t.ends = ChunkSeq::with_capacity[u64](words);
+    }
     if segment_count > 0 {
         let mut at = rest_lo;
         loop {
@@ -450,16 +478,31 @@ fn parse(in raw: Slice[u8], limits: TargetLimits) -> Result[ParsedTarget, Target
             if end == at {
                 return Result::Err(TargetError::EmptySegment);
             }
-            let start = t.segments.len();
-            decode(inout t.segments, in raw, at, end, false);
-            let seg_end = t.segments.len();
-            match segment_fault(in t.segments[start..seg_end], utf8) {
-                Option::Some(e) => {
-                    return Result::Err(e);
-                },
-                Option::None => (),
+            let start = t.bytes.len();
+            if !path_escapes || find(in raw, at, end, Ascii::Percent) == end {
+                // Without an escape the segment is its raw bytes, which the
+                // grammar keeps to ASCII without `/`, `\` or NUL: only the
+                // dot-segment check can fail.
+                t.bytes.extend(in raw[at..end]);
+                let n = wrapping_sub(end, at);
+                if (n == 1 || n == 2)
+                    && byte(in raw, at)
+                    == Ascii::Dot
+                    && byte(in raw, wrapping_sub(end, 1))
+                    == Ascii::Dot {
+                    return Result::Err(TargetError::DotSegment);
+                }
+            } else {
+                decode(inout t.bytes, in raw, at, end, false);
+                let seg_end = t.bytes.len();
+                match segment_fault(in t.bytes[start..seg_end], utf8) {
+                    Option::Some(e) => {
+                        return Result::Err(e);
+                    },
+                    Option::None => (),
+                }
             }
-            t.segment_ends.push(t.segments.len());
+            t.ends.push(t.bytes.len());
             if end >= rest_hi {
                 break;
             }
@@ -477,25 +520,31 @@ fn parse(in raw: Slice[u8], limits: TargetLimits) -> Result[ParsedTarget, Target
             if eq == at {
                 return Result::Err(TargetError::EmptyQueryKey);
             }
-            match query_part(inout t.keys, in raw, at, eq, utf8) {
+            match query_part(inout t.bytes, in raw, at, eq, utf8, query_plain) {
                 Option::Some(e) => {
                     return Result::Err(e);
                 },
                 Option::None => (),
             }
-            t.key_ends.push(t.keys.len());
+            t.ends.push(t.bytes.len());
             if eq < end {
-                match query_part(inout t.values, in raw, wrapping_add(eq, 1), end, utf8) {
+                match query_part(
+                    inout t.bytes,
+                    in raw,
+                    wrapping_add(eq, 1),
+                    end,
+                    utf8,
+                    query_plain
+                ) {
                     Option::Some(e) => {
                         return Result::Err(e);
                     },
                     Option::None => (),
                 }
-                t.value_present.push(true);
+                t.ends.push(t.bytes.len());
             } else {
-                t.value_present.push(false);
+                t.ends.push(ABSENT);
             }
-            t.value_ends.push(t.values.len());
             if end >= n {
                 break;
             }
