@@ -105,7 +105,8 @@ rust_library(
     crate_name = "vesper_aether",
     crate_root = "src/lib.rs",
     edition = "2024",
-    deps = ["//crates/vesper-port-abi"] + all_crate_deps(
+    # vesper-port-abi is a normal dependency now, so all_crate_deps has it.
+    deps = all_crate_deps(
         _CRATE_DATA,
         normal = True,
         platforms = _CRATE_DATA["platforms"],
