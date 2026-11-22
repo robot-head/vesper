@@ -56,6 +56,17 @@ fn write_layout(o: &mut String, l: &Layout) {
     }
 }
 
+/// The world's types the port lays out: `world_types` without those that
+/// reach `i128`/`u128`, which the hybrid build leaves to Rust
+/// (`wide_integers_stay_on_rust`). Corpus sources hold 128-bit types since
+/// integer literals reach `u128::MAX` (#1244).
+fn ported_types(w: &World) -> Vec<Type> {
+    world_types(w)
+        .into_iter()
+        .filter(|t| check_words::layout_input(w, t).is_some())
+        .collect()
+}
+
 fn rust_text(w: &World, types: &[Type]) -> String {
     let mut o = String::new();
     for t in types {
@@ -83,8 +94,8 @@ fn layout_text_matches_rust() {
     let f = package().entry("check_layout_text", true);
     let bad = differential(
         "layout text",
-        |c| rust_text(&c.world, &world_types(&c.world)),
-        |c| vesper_text(&f, &c.world, &world_types(&c.world)),
+        |c| rust_text(&c.world, &ported_types(&c.world)),
+        |c| vesper_text(&f, &c.world, &ported_types(&c.world)),
     );
     assert_eq!(bad, 0);
 }
@@ -95,7 +106,7 @@ fn layout_text_unoptimized_matches_rust() {
     let f = package().entry("check_layout_text", false);
     let mut bad = 0;
     for c in corpus().iter().step_by(10) {
-        let types = world_types(&c.world);
+        let types = ported_types(&c.world);
         if first_difference(
             &rust_text(&c.world, &types),
             &vesper_text(&f, &c.world, &types),
@@ -114,7 +125,7 @@ fn layout_words_decode_to_rust_layouts() {
     let f = package().entry("check_layout_words", true);
     let (mut bad, mut checked, mut errors) = (0, 0, 0);
     for c in corpus() {
-        for t in world_types(&c.world) {
+        for t in ported_types(&c.world) {
             let input = check_words::layout_input(&c.world, &t).expect("encodable corpus type");
             let vesper = check_words::decode_layout(&f.words(&input));
             let rust = Layout::of(&c.world, &t);
@@ -223,7 +234,7 @@ fn layout_speed() {
     let words = package().entry("check_layout_words", true);
     let cases: Vec<(&World, Vec<Type>)> = corpus()
         .iter()
-        .map(|c| (&c.world, world_types(&c.world)))
+        .map(|c| (&c.world, ported_types(&c.world)))
         .collect();
     abba(
         "layout per call (encode + Vesper + decode)",

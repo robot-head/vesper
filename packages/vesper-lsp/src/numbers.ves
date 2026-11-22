@@ -7,6 +7,11 @@
 // not correctly rounded: 1.7976931348623158e308 is refused although it
 // rounds to `f64::MAX`.
 
+use self::limits::{
+    Ascii,
+    F64
+};
+
 // serde_json's `POW10`: 1e0 ..= 1e308 as binary64 bits, then 1.0 to 512.
 const POW10_BITS: [u64; 512] = [
     4607182418800017408,
@@ -523,14 +528,18 @@ const POW10_BITS: [u64; 512] = [
     4607182418800017408,
 ];
 
-const MAX_POW10: u64 = 308;
+// The largest power of ten in `POW10_BITS`, and the index mask of the
+// padded table.
+enum Pow10: _ {
+    Max = 308,
+    IndexMask = 511
+}
 const U64_MAX_TENTH: u64 = 1844674407370955161;
 const U64_MAX_LAST_DIGIT: u64 = 5;
 const I32_MAX_TENTH: i64 = 214748364;
 const I32_MAX_LAST_DIGIT: i64 = 7;
 const I32_MAX: i64 = 2147483647;
 const I32_MIN: i64 = -2147483648;
-const INFINITE_EXPONENT: u64 = 2047;
 
 fn at(in t: Slice[u8], i: u64) -> u64 {
     match t.try_get(i) {
@@ -540,17 +549,18 @@ fn at(in t: Slice[u8], i: u64) -> u64 {
 }
 
 fn is_digit(c: u64) -> bool {
-    c >= 48 && c <= 57
+    c >= Ascii::Zero && c <= Ascii::Nine
 }
 
 fn pow10(e: u64) -> f64 {
     // A guard does not bound a constant-array index (a known gap): the
     // table is padded to 512 and the index masked.
-    from_bits_f64(POW10_BITS[e & 511])
+    from_bits_f64(POW10_BITS[e & Pow10::IndexMask])
 }
 
 fn infinite(f: f64) -> bool {
-    (to_bits_f64(f) >> 52) & INFINITE_EXPONENT == INFINITE_EXPONENT
+    // An infinity's exponent field is all ones.
+    (to_bits_f64(f) >> F64::SignificandBits) & F64::ExponentMask == F64::ExponentMask
 }
 
 // `overflow!(s * 10 + d, u64::MAX)`.
@@ -578,7 +588,7 @@ fn out_of_range(significand: u64, exponent: i64) -> bool {
         } else {
             wrapping_u64(e)
         };
-        if magnitude <= MAX_POW10 {
+        if magnitude <= Pow10::Max {
             if e >= 0 {
                 f = f * pow10(magnitude);
                 return infinite(f);
@@ -591,8 +601,8 @@ fn out_of_range(significand: u64, exponent: i64) -> bool {
         if e >= 0 {
             return true;
         }
-        f = f / pow10(MAX_POW10);
-        e = wrapping_add(e, 308);
+        f = f / pow10(Pow10::Max);
+        e = wrapping_add(e, Pow10::Max);
     }
 }
 
@@ -600,7 +610,7 @@ fn out_of_range(significand: u64, exponent: i64) -> bool {
 // the serde port) as out of range.
 pub fn number_out_of_range(in t: Slice[u8]) -> bool {
     let mut i: u64 = 0;
-    if at(in t, 0) == 45 {
+    if at(in t, 0) == Ascii::Dash {
         i = 1;
     }
     let mut s: u64 = 0;
@@ -614,7 +624,7 @@ pub fn number_out_of_range(in t: Slice[u8]) -> bool {
         if !is_digit(c) {
             break;
         }
-        let d = wrapping_sub(c, 48);
+        let d = wrapping_sub(c, Ascii::Zero);
         if long || overflows(s, d) {
             long = true;
             float = true;
@@ -626,7 +636,7 @@ pub fn number_out_of_range(in t: Slice[u8]) -> bool {
     }
     // The fraction: digits past the overflow are dropped
     // (`parse_decimal_overflow`).
-    if at(in t, i) == 46 {
+    if at(in t, i) == Ascii::Dot {
         float = true;
         i = wrapping_add(i, 1);
         let mut dropped = false;
@@ -635,7 +645,7 @@ pub fn number_out_of_range(in t: Slice[u8]) -> bool {
             if !is_digit(c) {
                 break;
             }
-            let d = wrapping_sub(c, 48);
+            let d = wrapping_sub(c, Ascii::Zero);
             if dropped || overflows(s, d) {
                 dropped = true;
             } else {
@@ -646,13 +656,13 @@ pub fn number_out_of_range(in t: Slice[u8]) -> bool {
         }
     }
     let c = at(in t, i);
-    if c == 101 || c == 69 {
+    if c == Ascii::LowerE || c == Ascii::UpperE {
         float = true;
         i = wrapping_add(i, 1);
         let mut positive = true;
-        if at(in t, i) == 43 {
+        if at(in t, i) == Ascii::Plus {
             i = wrapping_add(i, 1);
-        } else if at(in t, i) == 45 {
+        } else if at(in t, i) == Ascii::Dash {
             positive = false;
             i = wrapping_add(i, 1);
         }
@@ -662,7 +672,7 @@ pub fn number_out_of_range(in t: Slice[u8]) -> bool {
             if !is_digit(c) {
                 break;
             }
-            let d = wrapping_i64(wrapping_sub(c, 48));
+            let d = wrapping_i64(wrapping_sub(c, Ascii::Zero));
             // `parse_exponent_overflow`.
             if x >= I32_MAX_TENTH && (x > I32_MAX_TENTH || d > I32_MAX_LAST_DIGIT) {
                 return s != 0 && positive;

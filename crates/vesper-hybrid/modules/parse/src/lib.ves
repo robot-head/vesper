@@ -254,6 +254,7 @@ fn put_exprs_and_pats(inout o: ChunkSeq[u64], in a: Ast) {
                 o.push(widen_u64(r.kind));
                 o.push(bw(r.neg));
                 o.push(r.bits);
+                o.push(r.hi);
             },
             Option::None => {},
         }

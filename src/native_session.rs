@@ -852,6 +852,8 @@ fn compile_session_with_linkage<M: Module>(
     optimize: bool,
     linkage: super::DefinitionLinkage,
 ) -> Result<(FuncId, String), String> {
+    // One encode-once swap input per compilation (SH4 lane 2, #1276).
+    let _inputs = crate::swap_input::open(world);
     let instances: InstanceMap = super::instances(world, &plan.entry)?;
     let mut program = crate::ir_swap::lower(world);
     crate::integer_widths::lower_bit_builtin_calls(world, &mut program);

@@ -14,6 +14,9 @@ pub struct ExpectErrorSpec {
     pub primary: Option<String>,
     /// Optional expected substring in at least one related diagnostic label.
     pub related: Option<String>,
+    /// Optional expected substring in the diagnostic's message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 impl ExpectErrorSpec {
@@ -23,6 +26,7 @@ impl ExpectErrorSpec {
             code: code.into(),
             primary: None,
             related: None,
+            message: None,
         }
     }
 
@@ -35,6 +39,12 @@ impl ExpectErrorSpec {
     /// Require `related` to appear in a related diagnostic label.
     pub fn with_related(mut self, related: impl Into<String>) -> Self {
         self.related = Some(related.into());
+        self
+    }
+
+    /// Require `message` to appear in the diagnostic's message.
+    pub fn with_message(mut self, message: impl Into<String>) -> Self {
+        self.message = Some(message.into());
         self
     }
 }

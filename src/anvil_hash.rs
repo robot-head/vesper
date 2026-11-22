@@ -603,6 +603,10 @@ fn hash_literal(h: &mut blake3::Hasher, lit: &Literal) {
             hash_u8(h, 2);
             hash_bool(h, *b);
         }
+        Literal::WideInt(n) => {
+            hash_u8(h, 4);
+            h.update(&n.to_le_bytes());
+        }
         Literal::String(s) => {
             hash_u8(h, 3);
             hash_str(h, s);

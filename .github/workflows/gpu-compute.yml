@@ -6,6 +6,11 @@ name: GPU compute on lavapipe
 # its naga compile tests, but have no Vulkan device; this job is where the
 # device tests actually run (VESPER_GPU_REQUIRE=1 makes a missing device a
 # failure instead of a skip). No performance is measured here.
+#
+# Every test also runs against the Vesper runtime (feature `vesper-port`,
+# crates/vesper-gpu-compute/vesper/, SH6 lane 15, #1410), which calls the
+# Vulkan loader from Vesper. Its build script compiles the in-tree `vesper`
+# compiler first and links the system libvulkan (libvulkan-dev).
 
 on:
   workflow_dispatch:
@@ -46,7 +51,7 @@ env:
 jobs:
   lavapipe:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     env:
       VESPER_GPU_REQUIRE: '1'
       VESPER_GPU_DEVICE: llvmpipe
@@ -60,7 +65,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            mesa-vulkan-drivers libvulkan1 vulkan-tools vulkan-validationlayers
+            mesa-vulkan-drivers libvulkan1 libvulkan-dev vulkan-tools vulkan-validationlayers
       - name: Show the Vulkan device
         run: |
           dpkg -l mesa-vulkan-drivers libvulkan1 | tail -n 2
@@ -78,6 +83,20 @@ jobs:
           set -o pipefail
           cargo test --locked -p vesper-gpu-compute -p vesper-kinetic-gpu -- --nocapture --test-threads=1 2>&1 | tee validation.log
           if grep -q "Validation Error" validation.log; then
+            echo "::error::the Vulkan validation layer reported errors"
+            exit 1
+          fi
+      - name: Clippy with the Vesper runtime
+        run: cargo clippy --locked -p vesper-gpu-compute --features vesper-port --all-targets -- -D warnings
+      - name: Differential tests on lavapipe with the Vesper runtime
+        run: cargo test --locked -p vesper-gpu-compute -p vesper-kinetic-gpu --features vesper-gpu-compute/vesper-port -- --nocapture
+      - name: The Vesper runtime under the Khronos validation layer
+        env:
+          VK_INSTANCE_LAYERS: VK_LAYER_KHRONOS_validation
+        run: |
+          set -o pipefail
+          cargo test --locked -p vesper-gpu-compute -p vesper-kinetic-gpu --features vesper-gpu-compute/vesper-port -- --nocapture --test-threads=1 2>&1 | tee validation-vesper.log
+          if grep -q "Validation Error" validation-vesper.log; then
             echo "::error::the Vulkan validation layer reported errors"
             exit 1
           fi

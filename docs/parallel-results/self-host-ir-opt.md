@@ -121,12 +121,41 @@ None blocked the port; it compiled as written. Workarounds worth a gap entry:
 - **No sort in the package.** Call slots and join blocks are ordered by
   selection over short lists; `@vesper-std/sort` would do for longer ones.
 
+## Part 2: the hybrid swap
+
+The hybrid build (`crates/vesper-hybrid`) now fills `ir_swap`'s `opt` hook
+with the package (module `modules/ir_opt`, library `hybrid_ir_opt`; the
+package gained `ir_opt_words`, the byte-slice form of `ir_opt_entry`).
+
+- The encoder and decoder moved to `tests/common/ir_opt_words.rs`, shared by
+  the differential and `hybrid.rs`: `prepare` writes the Place IR input, the
+  mode and the `@fip` facts; `finish` reads the status, the new `BoxReuse`
+  payloads and the program, then runs Rust's `thread_tokens` and
+  `ir_check::validate` (the hybrid's own IR check, which is the Vesper one
+  where it covers the program).
+- The hook keeps Rust for a program the Place IR words cannot encode and
+  for a block egglog would refuse (status 2): that message is egglog's own,
+  so Rust's `ir_opt::optimize` reproduces it exactly. Every other result,
+  errors included, comes from Vesper.
+- Hybrid differential (`crates/vesper-hybrid/tests/differential.rs`, debug
+  build): **0 of 1,614 runs differ** (538 files, `check --json`,
+  `emit --emit ir` and `emit --emit object`). `pilot_module_runs_from_vesper`
+  now also requires `ir-opt answered N calls from Vesper` with N > 0 on the
+  optimized object of examples/counter.ves (`VESPER_HYBRID_STATS=1`: 1 call).
+- Divergence check: the `divergent-ir-opt` feature (build.rs and
+  BUILD.bazel) makes every program read back as "read lacks state
+  evidence", and the harness reports differences (first:
+  `emit --emit object bootstrap/corpus/ackermann.ves`, exit status, stderr
+  and object bytes). The Hybrid workflow runs it.
+- Rust stays the default: `vesper` and the verified pipeline still call
+  `ir_opt::optimize` (through `ir_opt_policy` on the native paths).
+
 ## Left
 
-- **Hybrid swap** (part 2): the `opt` hook in `crates/vesper-hybrid` (module
-  `ir_opt`) needs the hybrid's Place IR encode and decode, which SH3 lane 1's
-  part 2 adds after #1259 merges. Then the full suite on the hybrid build and
-  the scoreboard row.
+- Making the Vesper pass the default is the owner's call at parity (per
+  module, as the self-hosting plan says).
+- The package's local constant copies can go now that the Vesper package
+  assembler imports constants (#1310).
 - `thread_tokens` and `validate` in Vesper: lane 13 ports `thread_tokens`;
   the IR check's Vesper port is SH2 lane 5's (#1232).
 - The reuse facts from Vesper (`@vesper/check-layout` and

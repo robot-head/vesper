@@ -44,7 +44,14 @@ pub use {
     cranelift_object,
 };
 
+pub mod extras;
 pub mod lend;
+pub use extras::{
+    vcl_define_function_bytes, vcl_module_data_at, vcl_module_data_count, vcl_module_data_linkage,
+    vcl_module_data_name, vcl_module_function_at, vcl_module_function_linkage,
+    vcl_module_function_signature, vcl_module_last_call_sites, vcl_module_last_clif,
+    vcl_module_last_frame_size, vcl_module_last_relocs, vcl_sig_param_ext, vcl_sig_return_ext,
+};
 pub use lend::{
     Crossing, lend, lend_as, lend_module, lend_module_as, vcl_call_arg, vcl_call_arg_count,
     vcl_call_args, vcl_call_builder, vcl_call_module, vcl_call_op, vcl_call_result,
@@ -135,6 +142,14 @@ pub struct Module {
     /// JIT or object: what the backend is, or what the host says a lent
     /// module is ([`lend::lend_as`]).
     jit: bool,
+    /// Read-back of the last compiled or defined function (SH5 lane 2,
+    /// #1325): its relocations (five words each, [`extras::reloc_words`]),
+    /// call sites (return offset and frame offset words), frame size and,
+    /// with `keep_clif`, its CLIF text.
+    last_relocs: Vec<u64>,
+    last_call_sites: Vec<u64>,
+    last_frame_size: u64,
+    last_clif: String,
 }
 
 /// What kind of module a handle is (`vcl_module_kind`): Cranelift's
@@ -215,7 +230,22 @@ impl Module {
             last_code: Vec::new(),
             last_unwind: Vec::new(),
             last_traps: Vec::new(),
+            last_relocs: Vec::new(),
+            last_call_sites: Vec::new(),
+            last_frame_size: 0,
+            last_clif: String::new(),
         }
+    }
+    /// Keep what [`finished`] read back of the function just compiled or
+    /// defined.
+    fn keep_last(&mut self, done: Finished, clif: Option<String>) {
+        self.last_unwind = done.unwind;
+        self.last_traps = done.traps;
+        self.last_code = done.code;
+        self.last_relocs = extras::reloc_handles(self, done.relocs);
+        self.last_call_sites = done.call_sites;
+        self.last_frame_size = done.frame_size;
+        self.last_clif = clif.unwrap_or_default();
     }
 }
 
@@ -428,6 +458,12 @@ fn copy_out(src: &[u8], offset: u64, out: *mut u8, len: usize) -> u64 {
 /// The ISA for `triple` (empty: the host) with Cranelift `flags`.
 fn isa_for(triple: &str, flags: &str) -> Result<cranelift_codegen::isa::OwnedTargetIsa, String> {
     let mut fb = settings::builder();
+    let mut isa_builder = if triple.is_empty() {
+        cranelift_native::builder().map_err(str::to_string)?
+    } else {
+        let t: target_lexicon::Triple = triple.parse().map_err(|e| format!("triple: {e}"))?;
+        cranelift_codegen::isa::lookup(t).map_err(|e| e.to_string())?
+    };
     for line in flags
         .split([';', '\n'])
         .map(str::trim)
@@ -436,16 +472,15 @@ fn isa_for(triple: &str, flags: &str) -> Result<cranelift_codegen::isa::OwnedTar
         let (k, v) = line
             .split_once('=')
             .ok_or_else(|| format!("flag '{line}' is not key=value"))?;
-        fb.set(k.trim(), v.trim())
-            .map_err(|e| format!("flag {k}: {e}"))?;
+        // A shared flag, else one of the ISA's own (`has_zca` on RISC-V,
+        // SH4 lane 14): a name neither knows keeps the shared error.
+        if let Err(e) = fb.set(k.trim(), v.trim()) {
+            isa_builder
+                .set(k.trim(), v.trim())
+                .map_err(|_| format!("flag {k}: {e}"))?;
+        }
     }
     let flags = settings::Flags::new(fb);
-    let isa_builder = if triple.is_empty() {
-        cranelift_native::builder().map_err(str::to_string)?
-    } else {
-        let t: target_lexicon::Triple = triple.parse().map_err(|e| format!("triple: {e}"))?;
-        cranelift_codegen::isa::lookup(t).map_err(|e| e.to_string())?
-    };
     isa_builder.finish(flags).map_err(|e| e.to_string())
 }
 
@@ -751,13 +786,12 @@ pub unsafe extern "C" fn vcl_define_function(m: *mut Module, func: u32, b: *mut 
         let r = module.define_function(id, ctx);
         let r = finished(module.isa(), ctx, r);
         module.clear_context(ctx);
-        if let Some(clif) = clif {
-            m.clif.push_str(&clif);
+        if let Some(clif) = &clif {
+            m.clif.push_str(clif);
         }
         let done = r?;
         m.code_bytes += done.code.len() as u64;
-        m.last_unwind = done.unwind;
-        m.last_traps = done.traps;
+        m.keep_last(done, clif);
         Ok(0)
     })
 }
@@ -800,6 +834,12 @@ struct Finished {
     unwind: Vec<u8>,
     /// Offset and trap code words, one pair per trap.
     traps: Vec<u64>,
+    /// Relocations, five words each, naming functions and data by
+    /// Cranelift id (`Module::keep_last` makes them handle indices).
+    relocs: Vec<u64>,
+    /// Return offset and frame offset (`u64::MAX`: unknown) per call site.
+    call_sites: Vec<u64>,
+    frame_size: u64,
 }
 
 fn finished(
@@ -830,6 +870,18 @@ fn finished(
                 code: c.code_buffer().to_vec(),
                 unwind,
                 traps,
+                relocs: extras::reloc_words(&ctx.func, c.buffer.relocs()),
+                call_sites: c
+                    .buffer
+                    .call_sites()
+                    .flat_map(|s| {
+                        [
+                            u64::from(s.ret_addr),
+                            s.frame_offset.map_or(u64::MAX, u64::from),
+                        ]
+                    })
+                    .collect(),
+                frame_size: u64::from(c.frame_size),
             })
         }
         Err(cranelift_module::ModuleError::Compilation(
@@ -874,6 +926,12 @@ pub unsafe extern "C" fn vcl_module_finish(m: *mut Module) -> *mut Object {
         };
         lent.error.get_or_insert(e.into());
         *NEW_ERROR.lock().unwrap() = e.into();
+        if !lent.lent() {
+            // The `sink` import gave up the handle: free the JIT module and
+            // its code rather than leak them.
+            // SAFETY: an owned handle, consumed exactly once here.
+            unsafe { vcl_module_free(m) };
+        }
         return std::ptr::null_mut();
     }
     // SAFETY: the sink import consumes the module exactly once.
@@ -1316,6 +1374,9 @@ fn unary(fb: &mut FunctionBuilder<'static>, op: u32, x: ir::Value) -> Result<ir:
         16 => i.nearest(x),
         18 => i.vany_true(x),
         19 => i.vall_true(x),
+        // SH5 lane 2 (#1325): the vector float conversions.
+        20 => i.fvpromote_low(x),
+        21 => i.fvdemote(x),
         _ => return Err(unknown("unary", op)),
     })
 }
@@ -2030,6 +2091,7 @@ pub unsafe extern "C" fn vcl_compile(m: *mut Module, b: *mut Builder) -> u64 {
     };
     with_module(m, u64::MAX, |m| {
         let f = b.finish()?;
+        let clif = m.keep_clif.then(|| f.display().to_string());
         let (module, ctx) = m.parts();
         ctx.func = f;
         let isa = module.isa();
@@ -2043,9 +2105,7 @@ pub unsafe extern "C" fn vcl_compile(m: *mut Module, b: *mut Builder) -> u64 {
         let r = finished(isa, ctx, r);
         module.clear_context(ctx);
         let done = r?;
-        m.last_unwind = done.unwind;
-        m.last_traps = done.traps;
-        m.last_code = done.code;
+        m.keep_last(done, clif);
         Ok(m.last_code.len() as u64)
     })
 }
@@ -2441,5 +2501,19 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
         vcl_call_module,
         vcl_call_return_builder,
         vcl_call_return_module,
+        vcl_sig_param_ext,
+        vcl_sig_return_ext,
+        vcl_define_function_bytes,
+        vcl_module_function_at,
+        vcl_module_function_linkage,
+        vcl_module_function_signature,
+        vcl_module_data_count,
+        vcl_module_data_at,
+        vcl_module_data_name,
+        vcl_module_data_linkage,
+        vcl_module_last_clif,
+        vcl_module_last_relocs,
+        vcl_module_last_call_sites,
+        vcl_module_last_frame_size,
     ]
 }
