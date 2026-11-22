@@ -134,7 +134,7 @@ Every module has an owner lane. SHn-m is wave n lane m; G1-m is gap wave 1 lane 
 | `pact_frontend` | 4,642 | SH2-13 |  | #1225 part 1 |
 | `forge_frontend` | 4,574 | SH1-14 |  | #1157 |
 | `lean` | 4,390 | SH5-18 | vesper-lean-extract | part 3a 2.37x |
-| `optimize` | 3,903 | G1-4 | vesper-optimize | search 0.68x; checker 1.94x |
+| `optimize` | 3,903 | G1-4 | vesper-optimize | flip gate PASS: checker 1.12x, producer 0.70x, both 0.79x |
 | `native_export` | 3,845 | SH4-12 | vesper-codegen-export |  |
 | `fip` | 3,257 | SH2-12 | vesper-check-fip | 0.92x |
 | `tiled` | 3,033 | SH4-11 | vesper-codegen-numeric |  |

@@ -188,7 +188,10 @@ jobs:
     if: ${{ always() && !cancelled() }}
     name: Windows (x86_64 MSVC)${{ needs.plan.outputs.profile == 'full' && ' (full)' || '' }}
     runs-on: windows-latest
-    timeout-minutes: 60
+    # The codegen swap tests alone take about 20 minutes on windows-latest
+    # (self_host_codegen_seq is about 9.5), which pushed the job past 60
+    # (#1519). GitHub-hosted jobs allow up to 6 hours.
+    timeout-minutes: 120
     defaults:
       run:
         shell: bash

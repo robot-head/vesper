@@ -189,13 +189,20 @@ fn flip_gate() {
         .collect();
     let build = |vesper: bool| {
         HOOK_VESPER.store(vesper, std::sync::atomic::Ordering::Relaxed);
+        let mut failed = 0usize;
         let t = time(|| {
             for w in &mains {
-                std::hint::black_box(build_once(w));
+                failed += usize::from(!std::hint::black_box(build_once(w)));
             }
         })
         .as_nanos();
         HOOK_VESPER.store(false, std::sync::atomic::Ordering::Relaxed);
+        // A failed build is not a timing sample: every main that Rust's
+        // pass builds must build with the Vesper hook too.
+        assert_eq!(
+            failed, 0,
+            "{failed} corpus mains failed to build (vesper hook: {vesper})"
+        );
         t
     };
     let only = std::env::var("BOUNDS_HOIST_GATE_WORKLOAD").ok();

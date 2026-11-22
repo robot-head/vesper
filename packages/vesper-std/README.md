@@ -13,6 +13,7 @@ library half (port wave P0 lane 8, issue #897; survey in
 | `@vesper-std/fmt` | `fmt/` | `write_u64`, `write_i64`, `write_hex_u64`, `write_u64_radix`, `write_bool`, `write_bytes`, `parse_u64`, `parse_i64`, `parse_u64_radix` (`ParseIntError`), `fnv1a64`; module `text`: `push_u64`, `push_i64`, `push_hex_u64`, `push_u64_radix`, `push_bool` (append to a `String`), `u64_to_string`, `i64_to_string`, `parse_u64_str`, `parse_i64_str`, `parse_u64_radix_str` (from a `Str`) |
 | `@vesper-std/bytes` | `bytes/` | `read_u8`, `read_{u16,u32,u64,i64}_{le,be}` (an `Option`), `push_*` (append to a `ChunkSeq[u8]`), `put_*` (overwrite in a `Slice[u8]`, `false` when out of range) |
 | `@vesper-std/cpu` | `cpu/` | CPU instructions under `eff [Ffi[StdCpu]]`, emitted by the native backend: `x86_cpuid`, `x86_has_rdrand`, `x86_rdtsc`, `x86_rdpmc`, `x86_rdrand64`, `aarch64_cntvct`, `aarch64_pmccntr`, `aarch64_pmevcntr`, `aarch64_rndr` |
+| `@vesper-std/toml` | `toml/` | `parse` (a `Doc`: the `toml` crate's tree with toml_edit's entry order and spans, or its exact error text) and `dump` (a canonical text form for differential tests) |
 
 `tests/` is the `@vesper-std/tests` package: unit tests for every public
 function, and Vesper ports of the Strata conformance trace generators.

@@ -157,18 +157,25 @@ unsafe extern "C" {
     fn vesper_loom_cas_drv_encode(domain: i64, has_target: i64, n_options: i64, n_inputs: i64, strs: *mut u64, ends: *mut u64, ids: *mut u64, info: *mut u64, fail: *mut u64) -> i64;
     fn vesper_loom_cas_drv_key(domain: i64, has_target: i64, n_options: i64, n_inputs: i64, strs: *mut u64, ends: *mut u64, ids: *mut u64, info: *mut u64, fail: *mut u64) -> i64;
     fn vesper_loom_cas_name_error(name: *mut u64) -> i64;
+    fn vesper_loom_cas_name_fold(name: *mut u64) -> i64;
     fn vesper_loom_cas_object_digest(domain: i64, kind: i64, bytes: *mut u64) -> i64;
     fn vesper_loom_cas_parse_object_id(text: *mut u64, fail: *mut u64) -> i64;
     fn vesper_loom_cas_store_contains(root: *mut u64, id: *mut u64) -> i64;
+    fn vesper_loom_cas_store_export_pack(root: *mut u64, root_id: *mut u64, pack: i64, objects: i64, depth: i64, entries: i64, meta: i64, work: i64) -> i64;
+    fn vesper_loom_cas_store_import_pack(store_path: *mut u64, expected: *mut u64, bytes: *mut u64, pack: i64, objects: i64, depth: i64, entries: i64, meta: i64, work: i64) -> i64;
+    fn vesper_loom_cas_store_ingest_dir(root: *mut u64, durable: i64, domain: i64, path: *mut u64) -> i64;
     fn vesper_loom_cas_store_lookup_derivation(root: *mut u64, enc: *mut u64) -> i64;
+    fn vesper_loom_cas_store_materialize(root: *mut u64, durable: i64, tree: *mut u64, dest: *mut u64, parent: *mut u64, strategy: i64, verify_reflinks: i64) -> i64;
     fn vesper_loom_cas_store_open(root: *mut u64, durable: i64) -> i64;
     fn vesper_loom_cas_store_publish_derivation(root: *mut u64, durable: i64, enc: *mut u64, output: *mut u64) -> i64;
     fn vesper_loom_cas_store_put_blob(root: *mut u64, durable: i64, domain: i64, bytes: *mut u64, rd: *mut u64) -> i64;
+    fn vesper_loom_cas_store_put_file(root: *mut u64, durable: i64, domain: i64, path: *mut u64) -> i64;
     fn vesper_loom_cas_store_put_stream(root: *mut u64, durable: i64, domain: i64, rd: *mut u64, has_expected: i64, expected: *mut u64) -> i64;
     fn vesper_loom_cas_store_put_tree(root: *mut u64, durable: i64, domain: i64, enc: *mut u64, rd: *mut u64) -> i64;
     fn vesper_loom_cas_store_read(root: *mut u64, id: *mut u64, kind: i64) -> i64;
     fn vesper_loom_cas_store_sweep(root: *mut u64, min_s: i64, min_ns: i64) -> i64;
     fn vesper_loom_cas_store_verify(root: *mut u64, id: *mut u64) -> i64;
+    fn vesper_loom_cas_store_verify_all(root: *mut u64) -> i64;
     fn vesper_loom_cas_to_hex(bytes: *mut u64) -> i64;
     fn vesper_loom_cas_tree_decode(bytes: *mut u64) -> i64;
     fn vesper_loom_cas_tree_digest(domain: i64, names: *mut u64, ends: *mut u64, kinds: *mut u64, digests: *mut u64, sizes: *mut u64) -> i64;
@@ -277,6 +284,15 @@ pub fn name_error(name: &[u8]) -> u64 {
     raw as u64
 }
 
+/// Calls `name_fold` of the Vesper library `loom_cas` (`vesper_loom_cas_name_fold`).
+pub fn name_fold(name: &[u8]) -> Vec<u8> {
+    // SAFETY: `vesper_loom_cas_name_fold` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(name, |view_name| unsafe { vesper_loom_cas_name_fold(view_name) });
+    unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }
+}
+
 /// Calls `object_digest` of the Vesper library `loom_cas` (`vesper_loom_cas_object_digest`).
 pub fn object_digest(domain: u8, kind: u8, bytes: &[u8]) -> Vec<u8> {
     // Keep the crate's `Blake3` symbols linked: the Vesper object calls them.
@@ -313,6 +329,45 @@ pub fn store_contains(root: &[u8], id: &[u8]) -> Vec<u8> {
     unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }
 }
 
+/// Calls `store_export_pack` of the Vesper library `loom_cas` (`vesper_loom_cas_store_export_pack`).
+pub fn store_export_pack(root: &[u8], root_id: &[u8], pack: u64, objects: u64, depth: u64, entries: u64, meta: u64, work: u64) -> Vec<u8> {
+    // Keep the crate's `CasFs` symbols linked: the Vesper object calls them.
+    let _ = core::hint::black_box([crate::port_fs::cfs_canonicalize as *const (), crate::port_fs::cfs_close as *const (), crate::port_fs::cfs_create_dir as *const (), crate::port_fs::cfs_create_dir_all as *const (), crate::port_fs::cfs_create_new as *const (), crate::port_fs::cfs_dir_close as *const (), crate::port_fs::cfs_dir_next as *const (), crate::port_fs::cfs_file_exec as *const (), crate::port_fs::cfs_file_len as *const (), crate::port_fs::cfs_make_readonly as *const (), crate::port_fs::cfs_meta as *const (), crate::port_fs::cfs_now as *const (), crate::port_fs::cfs_open_lock as *const (), crate::port_fs::cfs_open_regular as *const (), crate::port_fs::cfs_publish as *const (), crate::port_fs::cfs_read as *const (), crate::port_fs::cfs_read_dir as *const (), crate::port_fs::cfs_reader_read as *const (), crate::port_fs::cfs_reflink as *const (), crate::port_fs::cfs_remove_dir_all as *const (), crate::port_fs::cfs_remove_file as *const (), crate::port_fs::cfs_remove_staged as *const (), crate::port_fs::cfs_rename as *const (), crate::port_fs::cfs_sep as *const (), crate::port_fs::cfs_set_workspace_mode as *const (), crate::port_fs::cfs_sync as *const (), crate::port_fs::cfs_sync_dir as *const (), crate::port_fs::cfs_unique as *const (), crate::port_fs::cfs_write as *const ()]);
+    // Keep the crate's `Blake3` symbols linked: the Vesper object calls them.
+    let _ = core::hint::black_box([crate::blake3_shim::vesper_blake3_finalize as *const (), crate::blake3_shim::vesper_blake3_free as *const (), crate::blake3_shim::vesper_blake3_hash as *const (), crate::blake3_shim::vesper_blake3_new as *const (), crate::blake3_shim::vesper_blake3_new_derive_key as *const (), crate::blake3_shim::vesper_blake3_new_keyed as *const (), crate::blake3_shim::vesper_blake3_update as *const ()]);
+    // SAFETY: `vesper_loom_cas_store_export_pack` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(root, |view_root| vesper_port_abi::with_slice(root_id, |view_root_id| unsafe { vesper_loom_cas_store_export_pack(view_root, view_root_id, pack as i64, objects as i64, depth as i64, entries as i64, meta as i64, work as i64) }));
+    unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }
+}
+
+/// Calls `store_import_pack` of the Vesper library `loom_cas` (`vesper_loom_cas_store_import_pack`).
+pub fn store_import_pack(store_path: &[u8], expected: &[u8], bytes: &[u8], pack: u64, objects: u64, depth: u64, entries: u64, meta: u64, work: u64) -> Vec<u8> {
+    // Keep the crate's `CasFs` symbols linked: the Vesper object calls them.
+    let _ = core::hint::black_box([crate::port_fs::cfs_canonicalize as *const (), crate::port_fs::cfs_close as *const (), crate::port_fs::cfs_create_dir as *const (), crate::port_fs::cfs_create_dir_all as *const (), crate::port_fs::cfs_create_new as *const (), crate::port_fs::cfs_dir_close as *const (), crate::port_fs::cfs_dir_next as *const (), crate::port_fs::cfs_file_exec as *const (), crate::port_fs::cfs_file_len as *const (), crate::port_fs::cfs_make_readonly as *const (), crate::port_fs::cfs_meta as *const (), crate::port_fs::cfs_now as *const (), crate::port_fs::cfs_open_lock as *const (), crate::port_fs::cfs_open_regular as *const (), crate::port_fs::cfs_publish as *const (), crate::port_fs::cfs_read as *const (), crate::port_fs::cfs_read_dir as *const (), crate::port_fs::cfs_reader_read as *const (), crate::port_fs::cfs_reflink as *const (), crate::port_fs::cfs_remove_dir_all as *const (), crate::port_fs::cfs_remove_file as *const (), crate::port_fs::cfs_remove_staged as *const (), crate::port_fs::cfs_rename as *const (), crate::port_fs::cfs_sep as *const (), crate::port_fs::cfs_set_workspace_mode as *const (), crate::port_fs::cfs_sync as *const (), crate::port_fs::cfs_sync_dir as *const (), crate::port_fs::cfs_unique as *const (), crate::port_fs::cfs_write as *const ()]);
+    // Keep the crate's `Blake3` symbols linked: the Vesper object calls them.
+    let _ = core::hint::black_box([crate::blake3_shim::vesper_blake3_finalize as *const (), crate::blake3_shim::vesper_blake3_free as *const (), crate::blake3_shim::vesper_blake3_hash as *const (), crate::blake3_shim::vesper_blake3_new as *const (), crate::blake3_shim::vesper_blake3_new_derive_key as *const (), crate::blake3_shim::vesper_blake3_new_keyed as *const (), crate::blake3_shim::vesper_blake3_update as *const ()]);
+    // SAFETY: `vesper_loom_cas_store_import_pack` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(store_path, |view_store_path| vesper_port_abi::with_slice(expected, |view_expected| vesper_port_abi::with_slice(bytes, |view_bytes| unsafe { vesper_loom_cas_store_import_pack(view_store_path, view_expected, view_bytes, pack as i64, objects as i64, depth as i64, entries as i64, meta as i64, work as i64) })));
+    unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }
+}
+
+/// Calls `store_ingest_dir` of the Vesper library `loom_cas` (`vesper_loom_cas_store_ingest_dir`).
+pub fn store_ingest_dir(root: &[u8], durable: bool, domain: u8, path: &[u8]) -> Vec<u8> {
+    // Keep the crate's `CasFs` symbols linked: the Vesper object calls them.
+    let _ = core::hint::black_box([crate::port_fs::cfs_canonicalize as *const (), crate::port_fs::cfs_close as *const (), crate::port_fs::cfs_create_dir as *const (), crate::port_fs::cfs_create_dir_all as *const (), crate::port_fs::cfs_create_new as *const (), crate::port_fs::cfs_dir_close as *const (), crate::port_fs::cfs_dir_next as *const (), crate::port_fs::cfs_file_exec as *const (), crate::port_fs::cfs_file_len as *const (), crate::port_fs::cfs_make_readonly as *const (), crate::port_fs::cfs_meta as *const (), crate::port_fs::cfs_now as *const (), crate::port_fs::cfs_open_lock as *const (), crate::port_fs::cfs_open_regular as *const (), crate::port_fs::cfs_publish as *const (), crate::port_fs::cfs_read as *const (), crate::port_fs::cfs_read_dir as *const (), crate::port_fs::cfs_reader_read as *const (), crate::port_fs::cfs_reflink as *const (), crate::port_fs::cfs_remove_dir_all as *const (), crate::port_fs::cfs_remove_file as *const (), crate::port_fs::cfs_remove_staged as *const (), crate::port_fs::cfs_rename as *const (), crate::port_fs::cfs_sep as *const (), crate::port_fs::cfs_set_workspace_mode as *const (), crate::port_fs::cfs_sync as *const (), crate::port_fs::cfs_sync_dir as *const (), crate::port_fs::cfs_unique as *const (), crate::port_fs::cfs_write as *const ()]);
+    // Keep the crate's `Blake3` symbols linked: the Vesper object calls them.
+    let _ = core::hint::black_box([crate::blake3_shim::vesper_blake3_finalize as *const (), crate::blake3_shim::vesper_blake3_free as *const (), crate::blake3_shim::vesper_blake3_hash as *const (), crate::blake3_shim::vesper_blake3_new as *const (), crate::blake3_shim::vesper_blake3_new_derive_key as *const (), crate::blake3_shim::vesper_blake3_new_keyed as *const (), crate::blake3_shim::vesper_blake3_update as *const ()]);
+    // SAFETY: `vesper_loom_cas_store_ingest_dir` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(root, |view_root| vesper_port_abi::with_slice(path, |view_path| unsafe { vesper_loom_cas_store_ingest_dir(view_root, durable as i64, domain as i64, view_path) }));
+    unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }
+}
+
 /// Calls `store_lookup_derivation` of the Vesper library `loom_cas` (`vesper_loom_cas_store_lookup_derivation`).
 pub fn store_lookup_derivation(root: &[u8], enc: &[u8]) -> Vec<u8> {
     // Keep the crate's `CasFs` symbols linked: the Vesper object calls them.
@@ -323,6 +378,19 @@ pub fn store_lookup_derivation(root: &[u8], enc: &[u8]) -> Vec<u8> {
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_slice(root, |view_root| vesper_port_abi::with_slice(enc, |view_enc| unsafe { vesper_loom_cas_store_lookup_derivation(view_root, view_enc) }));
+    unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }
+}
+
+/// Calls `store_materialize` of the Vesper library `loom_cas` (`vesper_loom_cas_store_materialize`).
+pub fn store_materialize(root: &[u8], durable: bool, tree: &[u8], dest: &[u8], parent: &[u8], strategy: u8, verify_reflinks: bool) -> Vec<u8> {
+    // Keep the crate's `CasFs` symbols linked: the Vesper object calls them.
+    let _ = core::hint::black_box([crate::port_fs::cfs_canonicalize as *const (), crate::port_fs::cfs_close as *const (), crate::port_fs::cfs_create_dir as *const (), crate::port_fs::cfs_create_dir_all as *const (), crate::port_fs::cfs_create_new as *const (), crate::port_fs::cfs_dir_close as *const (), crate::port_fs::cfs_dir_next as *const (), crate::port_fs::cfs_file_exec as *const (), crate::port_fs::cfs_file_len as *const (), crate::port_fs::cfs_make_readonly as *const (), crate::port_fs::cfs_meta as *const (), crate::port_fs::cfs_now as *const (), crate::port_fs::cfs_open_lock as *const (), crate::port_fs::cfs_open_regular as *const (), crate::port_fs::cfs_publish as *const (), crate::port_fs::cfs_read as *const (), crate::port_fs::cfs_read_dir as *const (), crate::port_fs::cfs_reader_read as *const (), crate::port_fs::cfs_reflink as *const (), crate::port_fs::cfs_remove_dir_all as *const (), crate::port_fs::cfs_remove_file as *const (), crate::port_fs::cfs_remove_staged as *const (), crate::port_fs::cfs_rename as *const (), crate::port_fs::cfs_sep as *const (), crate::port_fs::cfs_set_workspace_mode as *const (), crate::port_fs::cfs_sync as *const (), crate::port_fs::cfs_sync_dir as *const (), crate::port_fs::cfs_unique as *const (), crate::port_fs::cfs_write as *const ()]);
+    // Keep the crate's `Blake3` symbols linked: the Vesper object calls them.
+    let _ = core::hint::black_box([crate::blake3_shim::vesper_blake3_finalize as *const (), crate::blake3_shim::vesper_blake3_free as *const (), crate::blake3_shim::vesper_blake3_hash as *const (), crate::blake3_shim::vesper_blake3_new as *const (), crate::blake3_shim::vesper_blake3_new_derive_key as *const (), crate::blake3_shim::vesper_blake3_new_keyed as *const (), crate::blake3_shim::vesper_blake3_update as *const ()]);
+    // SAFETY: `vesper_loom_cas_store_materialize` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(root, |view_root| vesper_port_abi::with_slice(tree, |view_tree| vesper_port_abi::with_slice(dest, |view_dest| vesper_port_abi::with_slice(parent, |view_parent| unsafe { vesper_loom_cas_store_materialize(view_root, durable as i64, view_tree, view_dest, view_parent, strategy as i64, verify_reflinks as i64) }))));
     unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }
 }
 
@@ -363,6 +431,19 @@ pub fn store_put_blob(root: &[u8], durable: bool, domain: u8, bytes: &[u8], rd: 
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_slice(root, |view_root| vesper_port_abi::with_slice(bytes, |view_bytes| unsafe { vesper_loom_cas_store_put_blob(view_root, durable as i64, domain as i64, view_bytes, arg_rd.as_mut_ptr()) }));
+    unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }
+}
+
+/// Calls `store_put_file` of the Vesper library `loom_cas` (`vesper_loom_cas_store_put_file`).
+pub fn store_put_file(root: &[u8], durable: bool, domain: u8, path: &[u8]) -> Vec<u8> {
+    // Keep the crate's `CasFs` symbols linked: the Vesper object calls them.
+    let _ = core::hint::black_box([crate::port_fs::cfs_canonicalize as *const (), crate::port_fs::cfs_close as *const (), crate::port_fs::cfs_create_dir as *const (), crate::port_fs::cfs_create_dir_all as *const (), crate::port_fs::cfs_create_new as *const (), crate::port_fs::cfs_dir_close as *const (), crate::port_fs::cfs_dir_next as *const (), crate::port_fs::cfs_file_exec as *const (), crate::port_fs::cfs_file_len as *const (), crate::port_fs::cfs_make_readonly as *const (), crate::port_fs::cfs_meta as *const (), crate::port_fs::cfs_now as *const (), crate::port_fs::cfs_open_lock as *const (), crate::port_fs::cfs_open_regular as *const (), crate::port_fs::cfs_publish as *const (), crate::port_fs::cfs_read as *const (), crate::port_fs::cfs_read_dir as *const (), crate::port_fs::cfs_reader_read as *const (), crate::port_fs::cfs_reflink as *const (), crate::port_fs::cfs_remove_dir_all as *const (), crate::port_fs::cfs_remove_file as *const (), crate::port_fs::cfs_remove_staged as *const (), crate::port_fs::cfs_rename as *const (), crate::port_fs::cfs_sep as *const (), crate::port_fs::cfs_set_workspace_mode as *const (), crate::port_fs::cfs_sync as *const (), crate::port_fs::cfs_sync_dir as *const (), crate::port_fs::cfs_unique as *const (), crate::port_fs::cfs_write as *const ()]);
+    // Keep the crate's `Blake3` symbols linked: the Vesper object calls them.
+    let _ = core::hint::black_box([crate::blake3_shim::vesper_blake3_finalize as *const (), crate::blake3_shim::vesper_blake3_free as *const (), crate::blake3_shim::vesper_blake3_hash as *const (), crate::blake3_shim::vesper_blake3_new as *const (), crate::blake3_shim::vesper_blake3_new_derive_key as *const (), crate::blake3_shim::vesper_blake3_new_keyed as *const (), crate::blake3_shim::vesper_blake3_update as *const ()]);
+    // SAFETY: `vesper_loom_cas_store_put_file` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(root, |view_root| vesper_port_abi::with_slice(path, |view_path| unsafe { vesper_loom_cas_store_put_file(view_root, durable as i64, domain as i64, view_path) }));
     unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }
 }
 
@@ -428,6 +509,19 @@ pub fn store_verify(root: &[u8], id: &[u8]) -> Vec<u8> {
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_slice(root, |view_root| vesper_port_abi::with_slice(id, |view_id| unsafe { vesper_loom_cas_store_verify(view_root, view_id) }));
+    unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }
+}
+
+/// Calls `store_verify_all` of the Vesper library `loom_cas` (`vesper_loom_cas_store_verify_all`).
+pub fn store_verify_all(root: &[u8]) -> Vec<u8> {
+    // Keep the crate's `CasFs` symbols linked: the Vesper object calls them.
+    let _ = core::hint::black_box([crate::port_fs::cfs_canonicalize as *const (), crate::port_fs::cfs_close as *const (), crate::port_fs::cfs_create_dir as *const (), crate::port_fs::cfs_create_dir_all as *const (), crate::port_fs::cfs_create_new as *const (), crate::port_fs::cfs_dir_close as *const (), crate::port_fs::cfs_dir_next as *const (), crate::port_fs::cfs_file_exec as *const (), crate::port_fs::cfs_file_len as *const (), crate::port_fs::cfs_make_readonly as *const (), crate::port_fs::cfs_meta as *const (), crate::port_fs::cfs_now as *const (), crate::port_fs::cfs_open_lock as *const (), crate::port_fs::cfs_open_regular as *const (), crate::port_fs::cfs_publish as *const (), crate::port_fs::cfs_read as *const (), crate::port_fs::cfs_read_dir as *const (), crate::port_fs::cfs_reader_read as *const (), crate::port_fs::cfs_reflink as *const (), crate::port_fs::cfs_remove_dir_all as *const (), crate::port_fs::cfs_remove_file as *const (), crate::port_fs::cfs_remove_staged as *const (), crate::port_fs::cfs_rename as *const (), crate::port_fs::cfs_sep as *const (), crate::port_fs::cfs_set_workspace_mode as *const (), crate::port_fs::cfs_sync as *const (), crate::port_fs::cfs_sync_dir as *const (), crate::port_fs::cfs_unique as *const (), crate::port_fs::cfs_write as *const ()]);
+    // Keep the crate's `Blake3` symbols linked: the Vesper object calls them.
+    let _ = core::hint::black_box([crate::blake3_shim::vesper_blake3_finalize as *const (), crate::blake3_shim::vesper_blake3_free as *const (), crate::blake3_shim::vesper_blake3_hash as *const (), crate::blake3_shim::vesper_blake3_new as *const (), crate::blake3_shim::vesper_blake3_new_derive_key as *const (), crate::blake3_shim::vesper_blake3_new_keyed as *const (), crate::blake3_shim::vesper_blake3_update as *const ()]);
+    // SAFETY: `vesper_loom_cas_store_verify_all` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(root, |view_root| unsafe { vesper_loom_cas_store_verify_all(view_root) });
     unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }
 }
 
