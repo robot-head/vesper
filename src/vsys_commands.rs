@@ -170,7 +170,8 @@ fn host_symbols(
                 })?;
                 // The JIT keeps symbol names for the whole run; a CLI
                 // invocation binds each one once.
-                out.push((&*Box::leak(symbol.to_owned().into_boxed_str()), address));
+                let name: &'static str = Box::leak(symbol.to_owned().into_boxed_str());
+                out.push((name, address));
             }
             continue;
         }
