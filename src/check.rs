@@ -1723,10 +1723,15 @@ impl Checker<'_> {
         {
             transfer_allowed = false;
         }
-        if matches!(usage, Usage::Own)
-            && self.mode(&ty) != Mode::Copy
+        if (matches!(usage, Usage::Borrow(Pass::Inout))
+            || (matches!(usage, Usage::Own) && self.mode(&ty) != Mode::Copy))
             && !self.view_sources.is_empty()
-            && !self.check_view_sources(p, env, &span)
+            && !self.check_view_sources(
+                p,
+                env,
+                &span,
+                matches!(usage, Usage::Borrow(Pass::Inout)),
+            )
         {
             transfer_allowed = false;
         }
@@ -2032,7 +2037,7 @@ impl Checker<'_> {
                             self.valid_type(ty, &self.generics.clone(), value.span.clone());
                             let bound_view = !*mutable
                                 && matches!(pat.kind, PatternKind::Bind(_))
-                                && self.bind_view(value, env);
+                                && self.bind_view(value, env, true);
                             let actual = self.expr_expected(value, env, Usage::Own, ty);
                             self.expect_type(ty, &actual, value.span.clone());
                             let t = if *ty == Type::Infer {
