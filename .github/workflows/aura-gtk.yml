@@ -32,6 +32,12 @@ concurrency:
   group: aura-gtk-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+permissions:
+  contents: read
+  # The merge gate reads open pull requests and cancels blocked runs.
+  actions: write
+  pull-requests: read
+
 jobs:
   gtk4-xvfb:
     name: Aura GTK 4 (Xvfb)
@@ -48,6 +54,24 @@ jobs:
       # Fail (instead of skipping) if the AT-SPI bus cannot be reached.
       VESPER_REQUIRE_ATSPI: 1
     steps:
+      # Merge gate (#1321, #1479): a pull request that cannot merge yet runs no CI.
+      - name: Check out the pull request head for the merge gate
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: .gate
+          fetch-depth: 0
+          sparse-checkout: |
+            .github/actions
+            scripts/ci
+      - name: Merge gate
+        if: github.event_name == 'pull_request'
+        uses: ./.gate/.github/actions/merge-gate
+        with:
+          number: ${{ github.event.pull_request.number }}
+          base-ref: ${{ github.event.pull_request.base.ref }}
+          head-sha: ${{ github.event.pull_request.head.sha }}
       - uses: actions/checkout@v4
       - name: Install GTK 4, Xvfb and at-spi2-core
         run: |

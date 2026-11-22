@@ -14,9 +14,41 @@
 // - shapes.ves: the vector lane shapes and chunk plans of src/vector.rs
 //   and src/native_vector.rs.
 //
-// The test assembles @vesper/cranelift's source with these files into one
-// unit (the shim's own tests do the same) until a package can import a
-// `.vsys` library (shim report, gap 4).
+// Parts 2 and 3 hold the `numeric` hook of `vesper::codegen_swap`
+// (`numeric_hook` below), the in-function emission:
+// - vector.ves: vector operations (`Codegen::vector_op`) and the request
+//   dispatch.
+// - tiled_ops.ves: `TiledSeq` operations (`Codegen::tiled_op`).
+// - floats.ves: float intrinsics, conversions and the subnormal flush.
+//
+// The part 1 test (crates/vesper-codegen-numeric-test) assembles
+// @vesper/cranelift's source with these files into one unit, without their
+// `use` items; the hook tests and the hybrid build load the package.
+
+use @vesper/cranelift::{
+    module_finish,
+    module_free,
+    module_new,
+    object_publish,
+};
+use self::boxes::{
+    define_box_runtime,
+};
+use self::regions::{
+    define_region_runtime,
+};
+use self::tiled::{
+    define_tiled_runtime,
+};
+use self::vector::{
+    hook_entry,
+};
+
+// The `numeric` hook: `call` is the address of the lent call. Returns 1
+// when it emitted the request, 0 to leave it to the Rust code.
+pub fn numeric_hook(call: u64) -> u64 eff [Ffi[Cranelift]] {
+    hook_entry(call)
+}
 
 // Runtime families of `runtime_object`.
 pub const RT_REGIONS: u32 = 1;

@@ -355,6 +355,8 @@ pub struct Counted {
     reads: ChunkSeq[u64],
     // name -> 1 + the value a once-bound local of the loop holds
     bound_locals: ChunkSeq[u64],
+    // block parameter -> 1 + the argument its block's one entering jump passes
+    passed: ChunkSeq[u64],
     offs: ChunkSeq[u64],
 }
 
@@ -450,6 +452,10 @@ impl Counted {
         if !has(in self.defined, v) {
             return self.term(O_VALUE, w(v));
         }
+        let pa = u64_at(in self.passed, w(v));
+        if pa != 0 {
+            return self.linear (in f, n32(wrapping_sub(pa, 1)), depth);
+        }
         let d = u64_at(in self.defs, w(v));
         if d == 0 {
             return fail_lin();
@@ -463,7 +469,7 @@ impl Counted {
             let root = f.root_of(i.place);
             let bl = u64_at(in self.bound_locals, w(root));
             if bl != 0 {
-                return self.linear (in f, n32(wrapping_sub(bl, 1)), inc(depth));
+                return self.linear (in f, n32(wrapping_sub(bl, 1)), depth);
             }
             let r = u64_at(in self.reads, w(v));
             if r == 0 {
@@ -832,6 +838,7 @@ fn no_plan(head: Head) -> CountedPlan {
             defs: ChunkSeq::new[u64](),
             reads: ChunkSeq::new[u64](),
             bound_locals: ChunkSeq::new[u64](),
+            passed: ChunkSeq::new[u64](),
             offs: ChunkSeq::new[u64]()
         },
         keys: keys_new(),
@@ -943,6 +950,7 @@ pub fn counted_plan(in f: Fun) -> CountedPlan {
         defs: ChunkSeq::new[u64](),
         reads: ChunkSeq::new[u64](),
         bound_locals: ChunkSeq::new[u64](),
+        passed: ChunkSeq::new[u64](),
         offs: ChunkSeq::new[u64]()
     };
     // Induction values: reads of the index slot after the header test, and
@@ -1006,6 +1014,23 @@ pub fn counted_plan(in f: Fun) -> CountedPlan {
                 let name = wrapping_sub(i.bind, 1);
                 if !has(in locals, name) && f.is_u64(i.a) && single_binding(in f, name) {
                     set_grow(inout c.bound_locals, w(name), inc(w(i.a)));
+                }
+            }
+        }
+    }
+    // Parameters of loop blocks entered by one jump hold its arguments.
+    for bi in 0..c.blocks.len() {
+        let b = u32_at(in c.blocks, bi);
+        let k = f.block(w(b));
+        if k.pn != 0 && g.npreds(w(b)) == 1 {
+            let pk = f.block(w(g.pred(w(b), 0)));
+            if pk.term == T_JUMP && pk.yes == b && pk.tn == k.pn {
+                for j in 0..w(k.pn) {
+                    set_grow(
+                        inout c.passed,
+                        w(f.at(add(w(k.p0), j))),
+                        inc(w(f.at(add(w(pk.t0), j))))
+                    );
                 }
             }
         }

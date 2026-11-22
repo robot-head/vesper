@@ -228,6 +228,41 @@ pub fn rust_case_rows(source: &str, module: &Module) -> Result<CaseRows, String>
     })
 }
 
+/// Validate generated wrappers and give each call its test function's result
+/// type and effect row before the ordinary checker sees it.
+pub fn finish_case_wrappers(
+    source: &str,
+    original: &Module,
+    lowered: &mut Module,
+    rows: impl IntoIterator<Item = impl std::borrow::Borrow<CaseRow>>,
+) -> Result<(), String> {
+    for (row, index) in rows.into_iter().zip(original.items.len()..) {
+        let row = row.borrow();
+        let invalid = || {
+            let (line, column) = location(source, row.span.start);
+            format!(
+                "{line}:{column}: {}: expected a single argument list",
+                row.name
+            )
+        };
+        let Item::Function(target) = &original.items[row.function_index] else {
+            return Err(invalid());
+        };
+        let Some(Item::Function(wrapper)) = lowered.items.get_mut(index) else {
+            return Err(invalid());
+        };
+        if wrapper.span != row.generated
+            || wrapper.name != row.entry
+            || !is_case_wrapper_body(wrapper, &target.name)
+        {
+            return Err(invalid());
+        }
+        wrapper.result = target.result.clone();
+        wrapper.effects = target.effects.clone();
+    }
+    Ok(())
+}
+
 /// Whether a function's body is the single direct call a `@case` wrapper
 /// must parse as.
 pub fn is_case_wrapper_body(f: &Function, target: &str) -> bool {

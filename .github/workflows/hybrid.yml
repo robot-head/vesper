@@ -10,9 +10,10 @@ name: Hybrid compiler
 # stack-bound CLI check and the manifest guard. Then it rebuilds the hybrid
 # with a deliberately wrong layout (`--features divergent`), parse, IR check
 # and stack bound, which the
-# differential harness must catch. Pull requests run Linux only; main,
-# nightly and manual runs add macOS and Windows. Not a required check; Bazel
-# (Test all targets) builds the crate and runs the same tests on Linux.
+# differential harness must catch. It runs on pushes to main, nightly and
+# manual dispatch only, not on pull requests (#1479): it is not a required
+# check, and Bazel (Test all targets) builds the crate and runs the same
+# tests on Linux for every pull request.
 
 on:
   workflow_dispatch:
@@ -38,31 +39,12 @@ on:
       - '.github/workflows/hybrid.yml'
       - 'Cargo.toml'
       - 'Cargo.lock'
-  pull_request:
-    paths:
-      - 'src/**'
-      - 'crates/vesper-syntax/**'
-      - 'packages/vesper-front/**'
-      - 'packages/vesper-ast/**'
-      - 'packages/vesper-std/**'
-      - 'packages/vesper-check-data/**'
-      - 'packages/vesper-check-layout/**'
-      - 'packages/vesper-ir-check/**'
-      - 'packages/vesper-check-loops-atomics/**'
-      - 'tests/common/stack_words.rs'
-      - 'tests/common/check_words.rs'
-      - 'crates/vesper-hybrid/**'
-      - 'crates/vesper-port-harness/**'
-      - 'crates/vesper-port-abi/**'
-      - '.github/workflows/hybrid.yml'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
 
 permissions:
   contents: read
 
 concurrency:
-  group: hybrid-${{ github.event_name == 'pull_request' && github.ref || github.event_name == 'push' && 'main' || github.run_id }}
+  group: hybrid-${{ github.event_name == 'push' && 'main' || github.run_id }}
   cancel-in-progress: true
 
 env:
@@ -76,11 +58,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Pull requests run the Linux leg only (#1321): the macOS and Windows
-        # legs took ~30-45 min each and, with 5 macOS jobs per account, kept
-        # the required Platforms macOS job queued for hours. main, the
-        # nightly schedule and manual runs still cover all three hosts.
-        include: ${{ fromJSON(github.event_name == 'pull_request' && '[{"name":"Linux x86_64","os":"ubuntu-latest"}]' || '[{"name":"Linux x86_64","os":"ubuntu-latest"},{"name":"macOS AArch64","os":"macos-latest"},{"name":"Windows x86_64 MSVC","os":"windows-latest"}]') }}
+        include:
+          - name: Linux x86_64
+            os: ubuntu-latest
+          - name: macOS AArch64
+            os: macos-latest
+          - name: Windows x86_64 MSVC
+            os: windows-latest
     runs-on: ${{ matrix.os }}
     timeout-minutes: 75
     defaults:

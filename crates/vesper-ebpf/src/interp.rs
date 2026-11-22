@@ -843,7 +843,7 @@ impl Env {
     pub fn map_get(&self, map: usize, key: &[u8]) -> Option<Vec<u8>> {
         #[cfg(vesper_port)]
         if let MapState::Kv { .. } = &self.maps[map] {
-            return port::map_get(&self.port, map, key);
+            return self.port.map_get(map, key);
         }
         match &self.maps[map] {
             MapState::Kv { entries, .. } => entries
@@ -858,7 +858,7 @@ impl Env {
     pub fn map_keys(&self, map: usize) -> Vec<Vec<u8>> {
         #[cfg(vesper_port)]
         if let MapState::Kv { .. } = &self.maps[map] {
-            return port::map_keys(&self.port, map);
+            return self.port.map_keys(map);
         }
         let mut keys: Vec<Vec<u8>> = match &self.maps[map] {
             MapState::Kv { entries, .. } => entries.keys().cloned().collect(),
@@ -2111,43 +2111,6 @@ mod port {
         (w, slots, aux)
     }
 
-    /// `Env::map_keys` over the port's entries.
-    pub(super) fn map_keys(st: &crate::port::InterpState, map: usize) -> Vec<Vec<u8>> {
-        let w = &st.st;
-        let (nreg, nent, nmaps) = (w[1] as usize, w[2] as usize, w[4] as usize);
-        let eb = 5 + nmaps + 3 * nreg;
-        let mut keys: Vec<Vec<u8>> = w[eb..eb + 4 * nent]
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .filter(|e| e[0] == map as u64)
-            .map(|e| st.keys[e[1] as usize..(e[1] + e[2]) as usize].to_vec())
-            .collect();
-        keys.sort();
-        keys
-    }
-
-    /// `Env::map_get` over the port's entries.
-    pub(super) fn map_get(
-        st: &crate::port::InterpState,
-        map: usize,
-        key: &[u8],
-    ) -> Option<Vec<u8>> {
-        let w = &st.st;
-        let (nreg, nent, nmaps) = (w[1] as usize, w[2] as usize, w[4] as usize);
-        let rb = 5 + nmaps;
-        let eb = rb + 3 * nreg;
-        for e in w[eb..eb + 4 * nent].as_chunks::<4>().0 {
-            let (ko, kl) = (e[1] as usize, e[2] as usize);
-            if e[0] == map as u64 && &st.keys[ko..ko + kl] == key {
-                let r = rb + 3 * e[3] as usize;
-                let (off, len) = (w[r + 1] as usize, w[r + 2] as usize);
-                return Some(st.mem[off..off + len].to_vec());
-            }
-        }
-        None
-    }
-
     fn access(d: u64, a: u64, b: u64, c: u64, t: ProgramType) -> String {
         match d {
             1 => format!("dereference of scalar {a:#x}"),
@@ -2227,18 +2190,19 @@ mod port {
             Input::Kprobe(regs) => (3, &[], regs),
         };
         let tails = tail_words(env);
-        let (w, bytes, state) = crate::port::interp_run(
+        let (cfg, maps) = (cfg_words(env), map_words(env));
+        let (w, bytes) = crate::port::interp_run(
             &prog.insns,
             &kfunc_words(&prog.kfuncs),
             ptype_word(prog.prog_type),
             kind,
             pkt,
             ctx,
-            &cfg_words(env),
-            &map_words(env),
+            &cfg,
+            &maps,
             prog.maps.len() as u64,
             (&tails.0, &tails.1, &tails.2),
-            &env.port,
+            &mut env.port,
         );
         match w[0] {
             2 => {
@@ -2261,7 +2225,6 @@ mod port {
             }
             _ => {}
         }
-        env.port = state.expect("state after a run");
         env.prandom_state = w[12];
         let nmaps = w[13] as usize;
         for (m, &prod) in w[14..14 + nmaps].iter().enumerate() {

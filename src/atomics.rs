@@ -62,6 +62,7 @@
 //! `parallel_for` inside a worker runs on that worker.
 use crate::{ast::*, check::World, numeric::IntegerKind};
 
+#[cfg(not(target_arch = "wasm32"))]
 pub mod workers;
 
 /// The builtin fork-join loop over the Pulse pool (scoped workers).

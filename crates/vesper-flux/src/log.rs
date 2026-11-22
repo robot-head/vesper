@@ -1,5 +1,8 @@
 //! Durable, replayable input log: one frame per epoch in one append-only file.
 //!
+//! The frame codec and its checksums are the Vesper port's
+//! (`vesper/src/log.ves`); this module keeps the file.
+//!
 //! Layout: a header (`VFLUXIL1`, version, flags, input count, every input
 //! width, then a BLAKE3 checksum of those bytes), then frames. A frame is the
 //! payload length (u32 LE), the payload (epoch number, then per input the row
@@ -17,8 +20,7 @@
 //! path is not detected. Durability rests on the operating system honouring
 //! `File::sync_all`; nothing here is evidence about a particular disk.
 use super::TickInput;
-use crate::{Error, ZSet};
-use std::collections::BTreeMap;
+use crate::Error;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -87,33 +89,11 @@ fn io(_: std::io::Error) -> Error {
 }
 
 fn header(widths: &[usize]) -> Result<Vec<u8>, Error> {
-    let mut h = Vec::with_capacity(16 + 4 * widths.len() + SUM);
-    h.extend_from_slice(MAGIC);
-    h.extend_from_slice(&VERSION.to_le_bytes());
-    h.extend_from_slice(&0u16.to_le_bytes());
-    h.extend_from_slice(
-        &u32::try_from(widths.len())
-            .map_err(|_| Error::Overflow)?
-            .to_le_bytes(),
-    );
+    u32::try_from(widths.len()).map_err(|_| Error::Overflow)?;
     for w in widths {
-        h.extend_from_slice(
-            &u32::try_from(*w)
-                .map_err(|_| Error::Overflow)?
-                .to_le_bytes(),
-        );
+        u32::try_from(*w).map_err(|_| Error::Overflow)?;
     }
-    let sum = blake3::hash(&h);
-    h.extend_from_slice(sum.as_bytes());
-    Ok(h)
-}
-
-fn frame_sum(len: u32, payload: &[u8]) -> [u8; SUM] {
-    let mut h = blake3::Hasher::new();
-    h.update(b"vesper.flux.input-log.frame/1");
-    h.update(&len.to_le_bytes());
-    h.update(payload);
-    *h.finalize().as_bytes()
+    Ok(crate::port::log_header(widths))
 }
 
 #[cfg(unix)]
@@ -272,8 +252,8 @@ impl InputLog {
         }
         let mut body = vec![0u8; payload_len as usize + SUM];
         self.read_at(at + 4, &mut body)?;
-        let (payload, sum) = body.split_at(payload_len as usize);
-        if frame_sum(payload_len, payload) != sum {
+        let payload = &body[..payload_len as usize];
+        if !crate::port::log_frame_ok(&body, payload_len) {
             return if len - at == total {
                 Ok(Scan::Torn)
             } else {
@@ -315,37 +295,7 @@ impl InputLog {
         if input.deltas.len() != self.widths.len() {
             return Err(Error::InputCount);
         }
-        let mut payload = Vec::new();
-        payload.extend_from_slice(&epoch.to_le_bytes());
-        let mut rows = 0usize;
-        for (delta, width) in input.deltas.iter().zip(&self.widths) {
-            if delta.width != *width {
-                return Err(Error::Schema);
-            }
-            rows = rows.checked_add(delta.len()).ok_or(Error::Overflow)?;
-            if rows > self.limits.max_rows_per_frame {
-                return Err(Error::Limit("log rows"));
-            }
-            payload.extend_from_slice(
-                &u32::try_from(delta.len())
-                    .map_err(|_| Error::Overflow)?
-                    .to_le_bytes(),
-            );
-            for (row, weight) in delta.entries() {
-                for cell in row {
-                    payload.extend_from_slice(&cell.to_le_bytes());
-                }
-                payload.extend_from_slice(&weight.to_le_bytes());
-            }
-            if payload.len() > self.limits.max_frame_bytes {
-                return Err(Error::Limit("log frame bytes"));
-            }
-        }
-        let len = u32::try_from(payload.len()).map_err(|_| Error::Overflow)?;
-        let mut frame = Vec::with_capacity(4 + payload.len() + SUM);
-        frame.extend_from_slice(&len.to_le_bytes());
-        frame.extend_from_slice(&payload);
-        frame.extend_from_slice(&frame_sum(len, &payload));
+        let frame = crate::port::log_frame(epoch, &input.deltas, &self.widths, self.limits)?;
         let mut f = &self.file;
         let written = f
             .seek(SeekFrom::Start(self.end))
@@ -356,6 +306,7 @@ impl InputLog {
             let _ = self.file.set_len(self.end);
             return Err(Error::Storage("io"));
         }
+        let len = (frame.len() - 4 - SUM) as u32;
         self.frames.push((self.end, len));
         self.end += frame.len() as u64;
         Ok(epoch)
@@ -370,55 +321,14 @@ impl InputLog {
             .ok_or(Error::Storage("epoch past log end"))?;
         let mut body = vec![0u8; len as usize + SUM];
         self.read_at(at + 4, &mut body)?;
-        let (payload, sum) = body.split_at(len as usize);
-        if frame_sum(len, payload) != sum {
+        if !crate::port::log_frame_ok(&body, len) {
             return Err(Error::Storage("corrupt log"));
         }
-        self.decode(payload, epoch)
+        self.decode(&body[..len as usize], epoch)
     }
 
     fn decode(&self, payload: &[u8], epoch: u64) -> Result<TickInput, Error> {
-        let mut cursor = 0usize;
-        let mut take = |n: usize| -> Result<&[u8], Error> {
-            let end = cursor.checked_add(n).ok_or(Error::Overflow)?;
-            let bytes = payload
-                .get(cursor..end)
-                .ok_or(Error::Storage("log frame"))?;
-            cursor = end;
-            Ok(bytes)
-        };
-        let stored = u64::from_le_bytes(take(8)?.try_into().map_err(|_| Error::Overflow)?);
-        if stored != epoch {
-            return Err(Error::Storage("log epoch"));
-        }
-        let mut deltas = Vec::with_capacity(self.widths.len());
-        let mut total = 0usize;
-        for width in &self.widths {
-            let count = u32::from_le_bytes(take(4)?.try_into().map_err(|_| Error::Overflow)?);
-            let count = usize::try_from(count).map_err(|_| Error::Overflow)?;
-            total = total.checked_add(count).ok_or(Error::Overflow)?;
-            if total > self.limits.max_rows_per_frame {
-                return Err(Error::Limit("log rows"));
-            }
-            let mut rows = BTreeMap::new();
-            for _ in 0..count {
-                let bytes = take((width + 1) * 8)?;
-                let cells = bytes.as_chunks::<8>().0;
-                let row: Vec<i64> = cells[..*width]
-                    .iter()
-                    .map(|c| i64::from_le_bytes(*c))
-                    .collect();
-                let weight = i64::from_le_bytes(cells[*width]);
-                if weight == 0 || rows.last_key_value().is_some_and(|(last, _)| last >= &row) {
-                    return Err(Error::Storage("noncanonical log rows"));
-                }
-                rows.insert(row, weight);
-            }
-            deltas.push(ZSet::from_rows(*width, rows));
-        }
-        if cursor != payload.len() {
-            return Err(Error::Storage("log frame"));
-        }
+        let deltas = crate::port::log_decode(payload, epoch, &self.widths, self.limits)?;
         Ok(TickInput { deltas })
     }
 }
