@@ -1,0 +1,92 @@
+// Total reads of the flat tables, and small helpers. Table indices stay far
+// below 2^32, so index arithmetic uses wrapping_* (checked `+` is a Fail
+// effect).
+
+pub fn at32(in s: ChunkSeq[u32], i: u64) -> u32 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+pub fn at64(in s: ChunkSeq[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+pub fn ati(in s: ChunkSeq[i64], i: u64) -> i64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+pub fn at8(in s: ChunkSeq[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+pub fn w(x: u32) -> u64 {
+    widen_u64(x)
+}
+
+pub fn n32(x: u64) -> u32 {
+    wrapping_u32(x)
+}
+
+pub fn inc(x: u64) -> u64 {
+    wrapping_add(x, 1)
+}
+
+pub fn filled32(n: u64, v: u32) -> ChunkSeq[u32] {
+    let mut s: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](n);
+    s.resize(n, v);
+    s
+}
+
+pub fn filled64(n: u64, v: u64) -> ChunkSeq[u64] {
+    let mut s: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+    s.resize(n, v);
+    s
+}
+
+// FNV-1a over one word.
+pub fn fold(h: u64, x: u64) -> u64 {
+    wrapping_mul(h ^ x, 1099511628211)
+}
+
+// The final avalanche of a hash-cons key.
+pub fn finish(h: u64) -> u64 {
+    let a = wrapping_mul(h ^ (h >> 32), 13787848793156543929);
+    a ^ (a >> 29)
+}
+
+// Saturating cost addition (egglog's costs are u64 sums).
+pub fn sat_add(a: u64, b: u64) -> u64 {
+    let s = wrapping_add(a, b);
+    if s < a {
+        18446744073709551615
+    } else {
+        s
+    }
+}
+
+pub fn copy32(in s: ChunkSeq[u32]) -> ChunkSeq[u32] {
+    let mut o: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](s.len());
+    for i in 0..s.len() {
+        o.push(at32(in s, i));
+    }
+    o
+}
+
+pub fn copy64(in s: ChunkSeq[u64]) -> ChunkSeq[u64] {
+    let mut o: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](s.len());
+    for i in 0..s.len() {
+        o.push(at64(in s, i));
+    }
+    o
+}

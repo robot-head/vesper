@@ -36,6 +36,19 @@ The function reads the lowered program through `@vesper/place-ir`. Live
 sets are bitsets whose bit order is Rust's `BTreeSet<Local>` order, so
 block parameters come out in the same order.
 
+Part 3a ports the structured extractor (`Generator::function` in
+`src/lean.rs`) over the `Id` monad, for the functions the CFG gate refuses
+that use no effects:
+
+| Rust (`src/lean.rs`, `src/seq/lean.rs`) | Vesper |
+|---|---|
+| the function bodies (`Expr`, `Pattern`) and their types | `src/ast.ves` |
+| the term builders of `lean_nodes` | `src/tm.ves` |
+| `Generator` (scope, names, places, patterns, every expression form, sequence and tiled calls, closures) | `src/gen.ves` |
+
+Handlers, effect operations and effectful closures, calls and types come
+out as `skip`; the effects part ports them.
+
 ## Input
 
 The `@vesper/check-data` harness input (names, types, the world's ADTs),
@@ -53,6 +66,11 @@ lifted function) and adds the lifted function to the program, so Vesper
 needs no lowering of its own. It returns, per source function, `none`, the
 error, or the definitions as a module.
 
+The entry `extract_structured_functions` reads the same input followed by
+the AST section (`src/ast.ves`). It runs the CFG extractor as the gate and
+returns, per source function, `none` (CFG path or polymorphic), `skip`,
+the error, or the definition as a module.
+
 ## Test
 
 `tests/self_host_lean_extract.rs` compares the text with
@@ -68,3 +86,9 @@ corpus function with `lean::cfg_function_nodes` (a hidden hook over
 does the same for the Vesper programs in `tests/lean*.rs` and
 `tests/tiled.rs`, tiled-sequence programs, and mutants that rename
 functions to names Lean cannot spell.
+
+For part 3a, `structured_functions_match_rust_on_the_corpus` and
+`structured_functions_match_rust_on_test_sources` compare
+`extract_structured_functions` with `lean::structured_function_nodes`
+(a hidden hook over `Generator::function` with the `Id` monad). Skipped
+functions take Rust's text.
