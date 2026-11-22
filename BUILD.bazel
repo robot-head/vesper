@@ -304,6 +304,9 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]) + ["tests/wasm_backend.rs"],
+        # Rust exit gap wave 1 lane 9 (#1506): the port's sequences and
+        # strings under Wasmtime against the evaluator.
+        "test/wasm_seed_breadth": glob(["packages/**"]),
         # SH4 lane 8 (#1282): the aggregate decisions of native lowering in
         # Vesper against src/native_aggregates.rs over the same corpus.
         "test/self_host_codegen_aggregates": glob([
@@ -955,6 +958,8 @@ vesper_crate(
         "test/self_host_ebpf_backend": "long",
         # The wasm backend differential: about 10 min in a debug build.
         "test/self_host_wasm_backend": "long",
+        # Loads the port package, then 13 compilations and Wasmtime runs.
+        "test/wasm_seed_breadth": "long",
         "test/self_host_codegen_scalar": "long",
         "test/self_host_check_harness": "long",
         # The trait declaration differential (#1185) checks every corpus world.

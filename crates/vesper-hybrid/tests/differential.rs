@@ -178,14 +178,12 @@ fn run_with(
 /// goes beyond Rust here, so the runs cannot agree (the port's loop
 /// lowering is checked against the evaluator in
 /// tests/self_host_wasm_backend.rs).
-fn loop_extension(command: &[&str], default: &Run, hybrid: &Run) -> bool {
-    let refusal = vesper::loops::WASM_REFUSAL
-        .split(';')
-        .next()
-        .unwrap_or_default();
+fn port_extension(command: &[&str], default: &Run, hybrid: &Run) -> bool {
+    // Rust refuses an operation the port lowers: loops (`WASM_REFUSAL`),
+    // sequences, strings and integer conversions (#1506).
     command.contains(&"wasm32-wasip2")
         && !default.output.status.success()
-        && String::from_utf8_lossy(&default.output.stderr).contains(refusal)
+        && String::from_utf8_lossy(&default.output.stderr).contains("unsupported Operation")
         && hybrid.output.status.success()
 }
 
@@ -236,7 +234,7 @@ fn hybrid_matches_the_default_compiler() {
                         let b = a.clone();
                         let d = run(&default, &root, command, file, &a);
                         let h = run(&hybrid, &root, command, file, &b);
-                        if loop_extension(command, &d, &h) {
+                        if port_extension(command, &d, &h) {
                             *extended.lock().unwrap() += 1;
                             continue;
                         }
@@ -305,7 +303,7 @@ fn hybrid_matches_the_default_compiler() {
     );
     eprintln!(
         "differential: {} files, {runs} runs per compiler; default {:.2} s, hybrid {:.2} s ({:.3}x); \
-         {} differ; {} wasm builds with loops only the hybrid compiles",
+         {} differ; {} wasm builds only the hybrid compiles (loops, sequences, conversions)",
         files.len(),
         d.as_secs_f64(),
         h.as_secs_f64(),
