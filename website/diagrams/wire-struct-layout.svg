@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 344" width="560" height="344" role="img" aria-labelledby="title description">
+  <title id="title">Explicit wire layout and foreign-call boundary</title>
+  <desc id="description">The example labels each byte of a 12-byte wire record. The separate MPK transition illustrates one host protection mechanism.</desc>
+  <style>
+    :root { --canvas: #111a25; --panel: #1b2735; --arrow: #788b9e; --shared: #83dacc; --muted: #bac7d6; --text: #e8edf5; --error: #ff9fae; --exclusive: #ffbf7f; }
+    @media (prefers-color-scheme: light) { :root { --canvas: #f7f5f0; --panel: #eeede7; --arrow: #535852; --shared: #006b80; --muted: #535852; --text: #1b2030; --error: #9e2438; --exclusive: #a24800; } }
+  </style>
+  <defs><marker id="teal" viewBox="0 0 9 9" markerWidth="7" markerHeight="7" refX="8" refY="4.5" orient="auto"><path d="M0 0 L9 4.5 L0 9 Z" fill="var(--shared)"/></marker><marker id="gold" viewBox="0 0 9 9" markerWidth="7" markerHeight="7" refX="8" refY="4.5" orient="auto"><path d="M0 0 L9 4.5 L0 9 Z" fill="var(--exclusive)"/></marker><marker id="red" viewBox="0 0 9 9" markerWidth="7" markerHeight="7" refX="8" refY="4.5" orient="auto"><path d="M0 0 L9 4.5 L0 9 Z" fill="var(--error)"/></marker></defs>
+  <rect width="560" height="344" fill="var(--canvas)" rx="10"/>
+  <g font-family="Inter, Arial, sans-serif">
+  <text x="24" y="36" text-anchor="start" font-size="15" font-weight="500" fill="var(--text)">wire struct · 12 bytes exact, 0 implicit padding</text>
+  <text x="96" y="62" text-anchor="middle" font-size="13" font-weight="500" fill="var(--shared)" font-family="JetBrains Mono, ui-monospace, monospace">0..4</text>
+  <text x="222" y="62" text-anchor="middle" font-size="13" font-weight="500" fill="var(--shared)" font-family="JetBrains Mono, ui-monospace, monospace">4..6</text>
+  <text x="330" y="62" text-anchor="middle" font-size="13" font-weight="500" fill="var(--exclusive)" font-family="JetBrains Mono, ui-monospace, monospace">6..8</text>
+  <text x="458" y="62" text-anchor="middle" font-size="13" font-weight="500" fill="var(--exclusive)" font-family="JetBrains Mono, ui-monospace, monospace">8..12</text>
+  <rect x="24" y="72" width="144" height="84" rx="8" fill="var(--panel)" stroke="var(--shared)" stroke-width="1.6"/>
+  <text x="96" y="102" text-anchor="middle" font-size="16" font-weight="500" fill="var(--text)" font-family="JetBrains Mono, ui-monospace, monospace">magic</text>
+  <text x="96" y="124" text-anchor="middle" font-size="12" font-weight="500" fill="var(--shared)" font-family="JetBrains Mono, ui-monospace, monospace">ByteArray[4]</text>
+  <text x="96" y="143" text-anchor="middle" font-size="12" font-weight="500" fill="var(--arrow)">4 bytes</text>
+  <rect x="172" y="72" width="100" height="84" rx="8" fill="var(--panel)" stroke="var(--shared)" stroke-width="1.6"/>
+  <text x="222" y="102" text-anchor="middle" font-size="15" font-weight="500" fill="var(--text)" font-family="JetBrains Mono, ui-monospace, monospace">u16_be</text>
+  <text x="222" y="124" text-anchor="middle" font-size="12" font-weight="500" fill="var(--shared)" font-family="JetBrains Mono, ui-monospace, monospace">payload_len</text>
+  <text x="222" y="143" text-anchor="middle" font-size="12" font-weight="500" fill="var(--arrow)">2 bytes</text>
+  <rect x="276" y="72" width="108" height="84" rx="8" fill="var(--panel)" stroke="var(--exclusive)" stroke-width="1.6" stroke-dasharray="5 3"/>
+  <text x="330" y="102" text-anchor="middle" font-size="16" font-weight="500" fill="var(--exclusive)" font-family="JetBrains Mono, ui-monospace, monospace">_pad</text>
+  <text x="330" y="124" text-anchor="middle" font-size="12" font-weight="500" fill="var(--exclusive)" font-family="JetBrains Mono, ui-monospace, monospace">ZeroPad[2]</text>
+  <text x="330" y="143" text-anchor="middle" font-size="12" font-weight="500" fill="var(--muted)">explicit 0s</text>
+  <rect x="388" y="72" width="148" height="84" rx="8" fill="var(--panel)" stroke="var(--exclusive)" stroke-width="1.6"/>
+  <text x="462" y="102" text-anchor="middle" font-size="15" font-weight="500" fill="var(--exclusive)" font-family="JetBrains Mono, ui-monospace, monospace">Crc32Ticket</text>
+  <text x="462" y="124" text-anchor="middle" font-size="12" font-weight="500" fill="var(--text)" font-family="JetBrains Mono, ui-monospace, monospace">u32_be digest</text>
+  <text x="462" y="143" text-anchor="middle" font-size="12" font-weight="500" fill="var(--arrow)">4 bytes</text>
+  <path d="M96 156 V206" fill="none" stroke="var(--shared)" stroke-width="2.5" stroke-linejoin="round" marker-end="url(#teal)"/>
+  <rect x="24" y="210" width="152" height="108" rx="8" fill="var(--panel)" stroke="var(--shared)" stroke-width="1.6"/>
+  <text x="100" y="238" text-anchor="middle" font-size="15" font-weight="500" fill="var(--shared)">Vesper domain</text>
+  <text x="100" y="260" text-anchor="middle" font-size="13" font-weight="500" fill="var(--text)" font-family="JetBrains Mono, ui-monospace, monospace">view_wire[W]()</text>
+  <text x="100" y="281" text-anchor="middle" font-size="12" font-weight="500" fill="var(--muted)">Zero-copy slice</text>
+  <text x="100" y="300" text-anchor="middle" font-size="12" font-weight="500" fill="var(--arrow)">Trusted RAM</text>
+  <path d="M176 264 H204" fill="none" stroke="var(--exclusive)" stroke-width="2.5" stroke-linejoin="round" marker-end="url(#gold)"/>
+  <rect x="208" y="210" width="144" height="108" rx="8" fill="var(--panel)" stroke="var(--exclusive)" stroke-width="1.6"/>
+  <text x="280" y="238" text-anchor="middle" font-size="15" font-weight="500" fill="var(--exclusive)" font-family="JetBrains Mono, ui-monospace, monospace">MPK · PKRU</text>
+  <text x="280" y="260" text-anchor="middle" font-size="13" font-weight="500" fill="var(--text)" font-family="JetBrains Mono, ui-monospace, monospace">WRPKRU gate</text>
+  <text x="280" y="281" text-anchor="middle" font-size="12" font-weight="500" fill="var(--muted)">1.5 ns switch</text>
+  <text x="280" y="300" text-anchor="middle" font-size="12" font-weight="500" fill="var(--exclusive)" font-family="JetBrains Mono, ui-monospace, monospace">eff [Ffi[Lib]]</text>
+  <path d="M352 264 H380" fill="none" stroke="var(--error)" stroke-width="2.5" stroke-linejoin="round" stroke-dasharray="5 5" marker-end="url(#red)"/>
+  <rect x="384" y="210" width="152" height="108" rx="8" fill="var(--panel)" stroke="var(--error)" stroke-width="1.6"/>
+  <text x="460" y="238" text-anchor="middle" font-size="15" font-weight="500" fill="var(--error)">C FFI sandbox</text>
+  <text x="460" y="260" text-anchor="middle" font-size="13" font-weight="500" fill="var(--text)" font-family="JetBrains Mono, ui-monospace, monospace">ForeignVal[T]</text>
+  <text x="460" y="281" text-anchor="middle" font-size="12" font-weight="500" fill="var(--muted)">nocapture aperture</text>
+  <text x="460" y="300" text-anchor="middle" font-size="12" font-weight="500" fill="var(--arrow)">Validated on exit</text>
+  </g>
+</svg>

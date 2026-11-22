@@ -20,6 +20,21 @@ use @vesper/check-data::util::{
     inc,
     w
 };
+use self::host::{
+    Core,
+    Imp,
+    read_core,
+    imp_at,
+    import_ifaces,
+    host_name,
+    instance_type,
+    aliased_type,
+    lower_kind,
+    shim_module,
+    fixup_module,
+    put_decimal,
+    iface_of
+};
 use self::wit::{
     Wit,
     Ty,
@@ -45,6 +60,19 @@ const D_RECORD: u8 = 0;
 const P_STRING: u8 = 115;
 
 const NONE8: u8 = 255;
+
+// host.ves's constants.
+const IF_COUNT: u64 = 5;
+const L_NONE: u8 = 0;
+const L_DIRECT: u8 = 1;
+const L_MEMORY: u8 = 2;
+const L_MEMORY_UTF8: u8 = 3;
+const L_DROP: u8 = 4;
+
+// Why `encode` declines (lib.ves answers 32 + it).
+pub const X_CORE: u64 = 1;
+pub const X_IMPORT: u64 = 2;
+pub const X_PLUGIN: u64 = 3;
 
 // Section ids.
 const S_CUSTOM: u8 = 0;
@@ -91,6 +119,19 @@ const TY_FUNC: u8 = 64;
 // Canonical options.
 const OPT_UTF8: u8 = 0;
 const OPT_MEMORY: u8 = 3;
+const OPT_REALLOC: u8 = 4;
+
+// Canonical functions.
+const CANON_LIFT: u8 = 0;
+const CANON_LOWER: u8 = 1;
+const CANON_RESOURCE_DROP: u8 = 3;
+
+// Alias kinds, core instance forms and the instance extern sort.
+const ALIAS_EXPORT: u8 = 0;
+const ALIAS_CORE_EXPORT: u8 = 1;
+const INSTANTIATE: u8 = 0;
+const FROM_EXPORTS: u8 = 1;
+const EXTERN_INSTANCE: u8 = 5;
 
 // The name-section subsection of declaration names.
 const NAMES_DECLS: u8 = 1;
@@ -656,30 +697,148 @@ fn defs_of(in w: Wit, kind: u8) -> u64 {
     }
 }
 
-// Whether any function of the world takes a string: `canon lift` then
-// needs `realloc` (`cabi_realloc`), which this port does not write yet.
-pub fn needs_realloc(in w: Wit) -> bool {
-    for f in 0..w.funcs.len() {
-        let fu = func_at(in w, f);
-        for k in 0..fu.pn {
-            if has_string(in w, field_at(in w, add(fu.p0, k)).ty, 0) {
-                return true;
-            }
+fn takes_string(in w: Wit, fu: Func) -> bool {
+    for k in 0..fu.pn {
+        if has_string(in w, field_at(in w, add(fu.p0, k)).ty, 0) {
+            return true;
         }
     }
     false
 }
 
-// The component for core module `core` and the parsed world `w`.
-pub fn encode(in core: Slice[u8], in w: Wit) -> ChunkSeq[u8] {
-    let mut b = b_new();
+fn at32(in s: Slice[u32], i: u64) -> u32 {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => NONE32,
+    }
+}
+
+fn at64(in s: Slice[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+// The core module wit-component embeds: the input and the producers.
+fn main_module(inout b: B, in core: Slice[u8]) {
     let mut module = ChunkSeq::with_capacity[u8](add(core.len(), 64));
     module.extend(in core);
     producers(inout module);
     b.raw(S_CORE_MODULE, in module.as_slice());
     b.add(NS_CORE_MODULE, in "main".as_bytes());
+}
+
+fn alias_core_export(inout b: B, sort: u8, inst: u32, in name: Slice[u8]) {
+    b.item(S_ALIAS);
+    b.cur.push(SORT_CORE);
+    b.cur.push(sort);
+    b.cur.push(ALIAS_CORE_EXPORT);
+    uleb(inout b.cur, widen_u64(inst));
+    put_str(inout b.cur, in name);
+}
+
+fn alias_export(inout b: B, sort: u8, inst: u32, in name: Slice[u8]) {
+    b.item(S_ALIAS);
+    b.cur.push(sort);
+    b.cur.push(ALIAS_EXPORT);
+    uleb(inout b.cur, widen_u64(inst));
+    put_str(inout b.cur, in name);
+}
+
+fn memory_alias(inout b: B, inst: u32) -> u32 {
+    alias_core_export(inout b, CORE_MEMORY, inst, in "memory".as_bytes());
+    b.add(NS_CORE_MEMORY, in "memory".as_bytes())
+}
+
+// The component for core module `core` and the parsed world `w` into
+// `out`; 0, or why it declines (`X_*`).
+pub fn encode(in core: Slice[u8], in w: Wit, inout out: ChunkSeq[u8]) -> u64 {
+    if w.plugin {
+        return encode_plugin(in core, in w, inout out);
+    }
+    let mut b = b_new();
+    // The host interfaces: each instance type and import, and the types
+    // later interfaces alias (`encode_imports`).
+    let mut hinst = ChunkSeq::new[u32]();
+    for i in 0..IF_COUNT {
+        hinst.push(NONE32);
+    }
+    for x in 0..w.imports.len() {
+        let h = match w.imports.try_get(x) {
+            Option::Some(k) => k,
+            Option::None => 0,
+        };
+        let (first, n) = import_ifaces(h);
+        for k in 0..n {
+            let i = wrapping_add(first, wrapping_u8(k));
+            let mut name = ChunkSeq::new[u8]();
+            host_name(i, inout name);
+            let mut tname = ChunkSeq::new[u8]();
+            tname.extend(in "ty-".as_bytes());
+            tname.extend(in name.as_slice());
+            b.item(S_TYPE);
+            instance_type(i, inout b.cur);
+            let t = b.add(NS_TYPE, in tname.as_slice());
+            b.item(S_IMPORT);
+            b.cur.push(0);
+            put_str(inout b.cur, in name.as_slice());
+            b.cur.push(EXTERN_INSTANCE);
+            uleb(inout b.cur, widen_u64(t));
+            let ii = b.add(NS_INSTANCE, in name.as_slice());
+            hinst.try_set(widen_u64(i), ii);
+            let mut alias = ChunkSeq::new[u8]();
+            aliased_type(i, inout alias);
+            if alias.len() > 0 {
+                alias_export(inout b, SORT_TYPE, ii, in alias.as_slice());
+                b.add(NS_TYPE, in alias.as_slice());
+            }
+        }
+    }
+    main_module(inout b, in core);
+    let c = read_core(in core);
+    if !c.ok {
+        return X_CORE;
+    }
+    // Each import's interface and lowering; the indirect ones (through the
+    // shim) in order.
+    let mut ifs = ChunkSeq::new[u8]();
+    let mut kinds = ChunkSeq::new[u8]();
+    let mut indirect = ChunkSeq::new[u64]();
+    let mut sigs = ChunkSeq::new[u64]();
+    for k in 0..c.imps.len() {
+        let im = imp_at(in c, k);
+        let i = iface_of(in c.text[im.m0..add(im.m0, im.mn)]);
+        if i == NONE8 || at32(in hinst.as_slice(), widen_u64(i)) == NONE32 {
+            return X_IMPORT;
+        }
+        let l = lower_kind(i, in c.text[im.f0..add(im.f0, im.fl)]);
+        if l == L_NONE || im.ty >= c.sigs.len() {
+            return X_IMPORT;
+        }
+        if l == L_MEMORY || l == L_MEMORY_UTF8 {
+            indirect.push(k);
+            sigs.push(im.ty);
+        }
+        ifs.push(i);
+        kinds.push(l);
+    }
+    let mut p = ChunkSeq::new[u8]();
+    producers(inout p);
+    let mut shim_inst = NONE32;
+    if indirect.len() > 0 {
+        let mut m = ChunkSeq::new[u8]();
+        shim_module(in c, in sigs.as_slice(), in p.as_slice(), inout m);
+        b.raw(S_CORE_MODULE, in m.as_slice());
+        let sm = b.add(NS_CORE_MODULE, in "wit-component-shim-module".as_bytes());
+        b.item(S_CORE_INSTANCE);
+        b.cur.push(INSTANTIATE);
+        uleb(inout b.cur, widen_u64(sm));
+        uleb(inout b.cur, 0);
+        shim_inst = b.add(NS_CORE_INSTANCE, in "wit-component-shim-instance".as_bytes());
+    }
     let mut root = e_new(in w, M_ROOT);
-    // The exported interfaces' own types, before instantiation.
+    // The exported interfaces' own types.
     for x in 0..w.exports.len() {
         let kind = match w.exports.try_get(x) {
             Option::Some(k) => k,
@@ -689,36 +848,227 @@ pub fn encode(in core: Slice[u8], in w: Wit) -> ChunkSeq[u8] {
             index(inout root, inout b, in w, def_at(in w, d).ty);
         }
     }
-    // (core instance (instantiate 0))
+    // One core instance per imported module (in order of first import),
+    // then the main instance with them (`encode_core_instantiation`).
+    let mut args = ChunkSeq::new[u8]();
+    let mut nargs: u64 = 0;
+    let mut done = ChunkSeq::new[bool]();
+    for k in 0..c.imps.len() {
+        done.push(false);
+    }
+    for k in 0..c.imps.len() {
+        if match done.try_get(k) {
+            Option::Some(x) => x,
+            Option::None => true,
+        }
+        {
+            continue;
+        }
+        let head = imp_at(in c, k);
+        let i = byte(in ifs.as_slice(), k);
+        let mut exports = ChunkSeq::new[u8]();
+        let mut nex: u64 = 0;
+        for j in k..c.imps.len() {
+            let im = imp_at(in c, j);
+            if byte(in ifs.as_slice(), j) != i {
+                continue;
+            }
+            done.try_set(j, true);
+            let fe = add(im.f0, im.fl);
+            let l = byte(in kinds.as_slice(), j);
+            let ii = at32(in hinst.as_slice(), widen_u64(i));
+            let mut cf: u32 = 0;
+            if l == L_MEMORY || l == L_MEMORY_UTF8 {
+                let mut slot: u64 = 0;
+                for q in 0..indirect.len() {
+                    if at64(in indirect.as_slice(), q) == j {
+                        slot = q;
+                    }
+                }
+                let mut sname = ChunkSeq::new[u8]();
+                put_decimal(inout sname, slot);
+                alias_core_export(inout b, CORE_FUNC, shim_inst, in sname.as_slice());
+                let mut n = ChunkSeq::new[u8]();
+                indirect_name(in c, im, inout n);
+                cf = b.add(NS_CORE_FUNC, in n.as_slice());
+            } else if l == L_DROP {
+                // `[resource-drop]` and the resource's name
+                alias_export(inout b, SORT_TYPE, ii, in c.text[add(im.f0, 15)..fe]);
+                let t = b.add(NS_TYPE, in c.text[add(im.f0, 15)..fe]);
+                b.item(S_CANON);
+                b.cur.push(CANON_RESOURCE_DROP);
+                uleb(inout b.cur, widen_u64(t));
+                cf = b.add(NS_CORE_FUNC, in "resource.drop".as_bytes());
+            } else {
+                alias_export(inout b, SORT_FUNC, ii, in c.text[im.f0..fe]);
+                let fi = b.add(NS_FUNC, in c.text[im.f0..fe]);
+                b.item(S_CANON);
+                b.cur.push(CANON_LOWER);
+                b.cur.push(0);
+                uleb(inout b.cur, widen_u64(fi));
+                uleb(inout b.cur, 0);
+                cf = b.add(NS_CORE_FUNC, in c.text[im.f0..fe]);
+            }
+            put_str(inout exports, in c.text[im.f0..fe]);
+            exports.push(CORE_FUNC);
+            uleb(inout exports, widen_u64(cf));
+            nex = inc(nex);
+        }
+        b.item(S_CORE_INSTANCE);
+        b.cur.push(FROM_EXPORTS);
+        uleb(inout b.cur, nex);
+        b.cur.extend(in exports.as_slice());
+        let me = add(head.m0, head.mn);
+        let ci = b.add(NS_CORE_INSTANCE, in c.text[head.m0..me]);
+        put_str(inout args, in c.text[head.m0..me]);
+        args.push(CORE_INSTANCE);
+        uleb(inout args, widen_u64(ci));
+        nargs = inc(nargs);
+    }
+    // (core instance (instantiate 0 (with ...)))
     b.item(S_CORE_INSTANCE);
-    b.cur.push(0);
+    b.cur.push(INSTANTIATE);
     uleb(inout b.cur, 0);
-    uleb(inout b.cur, 0);
+    uleb(inout b.cur, nargs);
+    b.cur.extend(in args.as_slice());
     let inst = b.add(NS_CORE_INSTANCE, in "main".as_bytes());
-    b.item(S_ALIAS);
-    b.cur.push(SORT_CORE);
-    b.cur.push(CORE_MEMORY);
-    b.cur.push(1);
-    uleb(inout b.cur, widen_u64(inst));
-    put_str(inout b.cur, in "memory".as_bytes());
-    let mem = b.add(NS_CORE_MEMORY, in "memory".as_bytes());
+    let mem = memory_alias(inout b, inst);
+    // The fixup module fills the shim's table with the real lowerings.
+    if indirect.len() > 0 {
+        let mut m = ChunkSeq::new[u8]();
+        fixup_module(in c, in sigs.as_slice(), in p.as_slice(), inout m);
+        b.raw(S_CORE_MODULE, in m.as_slice());
+        let fm = b.add(NS_CORE_MODULE, in "wit-component-fixup".as_bytes());
+        let mut actual = ChunkSeq::new[u8]();
+        for q in 0..indirect.len() {
+            let j = at64(in indirect.as_slice(), q);
+            let im = imp_at(in c, j);
+            let fe = add(im.f0, im.fl);
+            let ii = at32(in hinst.as_slice(), widen_u64(byte(in ifs.as_slice(), j)));
+            alias_export(inout b, SORT_FUNC, ii, in c.text[im.f0..fe]);
+            let fi = b.add(NS_FUNC, in c.text[im.f0..fe]);
+            let utf8 = byte(in kinds.as_slice(), j) == L_MEMORY_UTF8;
+            b.item(S_CANON);
+            b.cur.push(CANON_LOWER);
+            b.cur.push(0);
+            uleb(inout b.cur, widen_u64(fi));
+            if utf8 {
+                uleb(inout b.cur, 2);
+            } else {
+                uleb(inout b.cur, 1);
+            }
+            b.cur.push(OPT_MEMORY);
+            uleb(inout b.cur, widen_u64(mem));
+            if utf8 {
+                b.cur.push(OPT_UTF8);
+            }
+            let mut n = ChunkSeq::new[u8]();
+            indirect_name(in c, im, inout n);
+            let cf = b.add(NS_CORE_FUNC, in n.as_slice());
+            let mut sname = ChunkSeq::new[u8]();
+            put_decimal(inout sname, q);
+            put_str(inout actual, in sname.as_slice());
+            actual.push(CORE_FUNC);
+            uleb(inout actual, widen_u64(cf));
+        }
+        b.item(S_CORE_INSTANCE);
+        b.cur.push(FROM_EXPORTS);
+        uleb(inout b.cur, indirect.len());
+        b.cur.extend(in actual.as_slice());
+        let a = b.add(NS_CORE_INSTANCE, in "actual".as_bytes());
+        b.item(S_CORE_INSTANCE);
+        b.cur.push(INSTANTIATE);
+        uleb(inout b.cur, widen_u64(fm));
+        uleb(inout b.cur, 2);
+        put_str(inout b.cur, in "actual".as_bytes());
+        b.cur.push(CORE_INSTANCE);
+        uleb(inout b.cur, widen_u64(a));
+        put_str(inout b.cur, in "shim".as_bytes());
+        b.cur.push(CORE_INSTANCE);
+        uleb(inout b.cur, widen_u64(shim_inst));
+        b.add(NS_CORE_INSTANCE, in "fixup".as_bytes());
+    }
+    let mut realloc = NONE32;
     for x in 0..w.exports.len() {
         let kind = match w.exports.try_get(x) {
             Option::Some(k) => k,
             Option::None => 0,
         };
-        export_iface(inout b, inout root, in w, iface(in w, kind), inst, mem);
+        export_iface(inout b, inout root, in w, iface(in w, kind), inst, mem, inout realloc);
+    }
+    b.append_names();
+    b.flush();
+    b.out.extend(in p.as_slice());
+    let r = b.finish();
+    out.extend(in r.as_slice());
+    0
+}
+
+// "indirect-<module>-<field>"
+fn indirect_name(in c: Core, im: Imp, inout out: ChunkSeq[u8]) {
+    out.extend(in "indirect-".as_bytes());
+    out.extend(in c.text[im.m0..add(im.m0, im.mn)]);
+    out.push(45);
+    out.extend(in c.text[im.f0..add(im.f0, im.fl)]);
+}
+
+// The Nexus plugin world: its functions lifted and exported at the root.
+fn encode_plugin(in core: Slice[u8], in w: Wit, inout out: ChunkSeq[u8]) -> u64 {
+    let mut b = b_new();
+    main_module(inout b, in core);
+    b.item(S_CORE_INSTANCE);
+    b.cur.push(INSTANTIATE);
+    uleb(inout b.cur, 0);
+    uleb(inout b.cur, 0);
+    let inst = b.add(NS_CORE_INSTANCE, in "main".as_bytes());
+    memory_alias(inout b, inst);
+    let mut root = e_new(in w, M_ROOT);
+    for f in w.e0..w.funcs.len() {
+        let fu = func_at(in w, f);
+        // The backend's plugin entry is fn(u32, u64) -> i64: no options.
+        if takes_string(in w, fu)
+            || (fu.res != NONE32 && (has_string(in w, fu.res, 0) || flat(in w, fu.res, 0) > 1)) {
+            return X_PLUGIN;
+        }
+        let ty = func_type(inout root, inout b, in w, f);
+        let ne = add(fu.n0, fu.nn);
+        alias_core_export(inout b, CORE_FUNC, inst, in w.text[fu.n0..ne]);
+        let cf = b.add(NS_CORE_FUNC, in w.text[fu.n0..ne]);
+        b.item(S_CANON);
+        b.cur.push(CANON_LIFT);
+        b.cur.push(0);
+        uleb(inout b.cur, widen_u64(cf));
+        uleb(inout b.cur, 0);
+        uleb(inout b.cur, widen_u64(ty));
+        let fi = b.add(NS_FUNC, in w.text[fu.n0..ne]);
+        b.item(S_EXPORT);
+        b.cur.push(0);
+        put_str(inout b.cur, in w.text[fu.n0..ne]);
+        b.cur.push(SORT_FUNC);
+        uleb(inout b.cur, widen_u64(fi));
+        b.cur.push(0);
+        b.add(NS_FUNC, in w.text[fu.n0..ne]);
     }
     b.append_names();
     let mut p = ChunkSeq::new[u8]();
     producers(inout p);
     b.flush();
     b.out.extend(in p.as_slice());
-    b.finish()
+    let r = b.finish();
+    out.extend(in r.as_slice());
+    0
 }
 
 // `encode_interface_export` for interface `it`.
-fn export_iface(inout b: B, inout root: E, in w: Wit, it: Iface, inst: u32, mem: u32) {
+fn export_iface(
+    inout b: B,
+    inout root: E,
+    in w: Wit,
+    it: Iface,
+    inst: u32,
+    mem: u32,
+    inout realloc: u32
+) {
     let mut full = ChunkSeq::new[u8]();
     iface_name(it.kind, inout full);
     // Instantiation arguments: (name, sort, index).
@@ -739,11 +1089,11 @@ fn export_iface(inout b: B, inout root: E, in w: Wit, it: Iface, inst: u32, mem:
         uleb(inout b.cur, widen_u64(inst));
         put_str(inout b.cur, in core_name.as_slice());
         let cf = b.add(NS_CORE_FUNC, in core_name.as_slice());
-        let mut strings = false;
-        for j in 0..fu.pn {
-            if has_string(in w, field_at(in w, add(fu.p0, j)).ty, 0) {
-                strings = true;
-            }
+        let params = takes_string(in w, fu);
+        let mut strings = params;
+        if params && realloc == NONE32 {
+            alias_core_export(inout b, CORE_FUNC, inst, in "cabi_realloc".as_bytes());
+            realloc = b.add(NS_CORE_FUNC, in "cabi_realloc".as_bytes());
         }
         let mut memory = false;
         if fu.res != NONE32 {
@@ -762,6 +1112,9 @@ fn export_iface(inout b: B, inout root: E, in w: Wit, it: Iface, inst: u32, mem:
         if memory || strings {
             opts = inc(opts);
         }
+        if params {
+            opts = inc(opts);
+        }
         if strings {
             opts = inc(opts);
         }
@@ -769,6 +1122,10 @@ fn export_iface(inout b: B, inout root: E, in w: Wit, it: Iface, inst: u32, mem:
         if memory || strings {
             b.cur.push(OPT_MEMORY);
             uleb(inout b.cur, widen_u64(mem));
+        }
+        if params {
+            b.cur.push(OPT_REALLOC);
+            uleb(inout b.cur, widen_u64(realloc));
         }
         if strings {
             b.cur.push(OPT_UTF8);

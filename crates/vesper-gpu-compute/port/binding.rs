@@ -22,10 +22,10 @@ impl Abi for Buf {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Dev { pub instance: u64, pub physical: u64, pub device: u64, pub queue: u64, pub family: u64, pub timeline: u64, pub api_version: u64, pub device_type: u64, pub max_invocations: u64, pub max_range: u64 }
+pub struct Dev { pub instance: u64, pub physical: u64, pub device: u64, pub queue: u64, pub family: u64, pub timeline: u64, pub api_version: u64, pub device_type: u64, pub max_invocations: u64, pub max_range: u64, pub library: u64 }
 
 impl Abi for Dev {
-    const WORDS: usize = 10;
+    const WORDS: usize = 11;
     fn put(&self, out: &mut [u64]) {
         Abi::put(&self.instance, &mut out[0..]);
         Abi::put(&self.physical, &mut out[1..]);
@@ -37,9 +37,10 @@ impl Abi for Dev {
         Abi::put(&self.device_type, &mut out[7..]);
         Abi::put(&self.max_invocations, &mut out[8..]);
         Abi::put(&self.max_range, &mut out[9..]);
+        Abi::put(&self.library, &mut out[10..]);
     }
     fn get(words: &[u64]) -> Self {
-        Dev { instance: Abi::get(&words[0..]), physical: Abi::get(&words[1..]), device: Abi::get(&words[2..]), queue: Abi::get(&words[3..]), family: Abi::get(&words[4..]), timeline: Abi::get(&words[5..]), api_version: Abi::get(&words[6..]), device_type: Abi::get(&words[7..]), max_invocations: Abi::get(&words[8..]), max_range: Abi::get(&words[9..]) }
+        Dev { instance: Abi::get(&words[0..]), physical: Abi::get(&words[1..]), device: Abi::get(&words[2..]), queue: Abi::get(&words[3..]), family: Abi::get(&words[4..]), timeline: Abi::get(&words[5..]), api_version: Abi::get(&words[6..]), device_type: Abi::get(&words[7..]), max_invocations: Abi::get(&words[8..]), max_range: Abi::get(&words[9..]), library: Abi::get(&words[10..]) }
     }
 }
 
@@ -142,7 +143,7 @@ impl<'a> RecRef<'a> {
 
 const _: () = assert!(<() as Abi>::WORDS == 1);
 const _: () = assert!(<Buf as Abi>::WORDS == 4);
-const _: () = assert!(<Dev as Abi>::WORDS == 10);
+const _: () = assert!(<Dev as Abi>::WORDS == 11);
 const _: () = assert!(<GpuErr as Abi>::WORDS == 3);
 const _: () = assert!(<Kern as Abi>::WORDS == 5);
 const _: () = assert!(<u32 as Abi>::WORDS == 1);
@@ -400,7 +401,7 @@ pub enum OpenError {
 
 /// Calls `open` of the Vesper library `gpu` (`vesper_gpu_open`).
 pub fn open(wanted: &str) -> Result<Dev, OpenError> {
-    let mut result = [0u64; 10];
+    let mut result = [0u64; 11];
     let mut fail = [0u64; 4];
     // SAFETY: `vesper_gpu_open` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and

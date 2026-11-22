@@ -234,10 +234,18 @@ fn clone_loop(
     let mut g = Guards {
         rows: ChunkSeq::new[InstRow](),
     };
-    let r1 = read_row(inout p, lo, cx.u64_ty, s0, s1, before, index_sym);
-    g.rows.push(r1);
-    let r2 = read_row(inout p, hi, cx.u64_ty, s0, s1, before, bound_sym);
-    g.rows.push(r2);
+    // A count-down loop's index runs over `0..s`, `s` as it stands here.
+    if plan.head.down {
+        let r1 = const_row(inout p, lo, cx.u64_ty, s0, s1, 0, 0);
+        g.rows.push(r1);
+        let r2 = read_row(inout p, hi, cx.u64_ty, s0, s1, before, index_sym);
+        g.rows.push(r2);
+    } else {
+        let r1 = read_row(inout p, lo, cx.u64_ty, s0, s1, before, index_sym);
+        g.rows.push(r1);
+        let r2 = read_row(inout p, hi, cx.u64_ty, s0, s1, before, bound_sym);
+        g.rows.push(r2);
+    }
     let mut guards: ChunkSeq[InstRow] = ChunkSeq::new[InstRow]();
     let mut previous = NONE64;
     let mut token = before;
