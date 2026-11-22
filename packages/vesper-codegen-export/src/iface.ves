@@ -33,6 +33,7 @@ pub const K_BOX: u8 = 5;
 pub const K_STR: u8 = 6;
 pub const K_OBJECT: u8 = 7;
 pub const K_EXTERN: u8 = 8;
+pub const K_CALLBACK: u8 = 9;
 
 // Passing modes: the parameter's `pass()` (none reads as `in`).
 pub const P_IN: u8 = 1;
@@ -616,7 +617,7 @@ impl Iface {
         if k == K_SEQ || k == K_SLICE || k == K_BOX || k == K_STR || k == K_OBJECT {
             return true;
         }
-        if k == K_SCALAR || k == K_EXTERN {
+        if k == K_SCALAR || k == K_EXTERN || k == K_CALLBACK {
             return false;
         }
         if k == K_NAMED {

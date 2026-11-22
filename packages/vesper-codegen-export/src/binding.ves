@@ -37,6 +37,7 @@ const K_BOX: u8 = 5;
 const K_STR: u8 = 6;
 const K_OBJECT: u8 = 7;
 const K_EXTERN: u8 = 8;
+const K_CALLBACK: u8 = 9;
 const P_IN: u8 = 1;
 const P_INOUT: u8 = 2;
 const P_SINK: u8 = 3;
@@ -240,6 +241,8 @@ impl Gen {
             }
         } else if k == K_OBJECT {
             put(inout o, "vesper_port_abi::OpaqueObject<'static>");
+        } else if k == K_CALLBACK {
+            put(inout o, "vesper_port_abi::FnPtr");
         } else {
             self.put_name(inout o, n.name);
             put(inout o, "<'static>");
@@ -533,6 +536,9 @@ impl Gen {
             put(inout o, "{ let () = ");
             put_seq(inout o, in name);
             put(inout o, "; 0 }");
+        } else if n.kind == K_CALLBACK {
+            put_seq(inout o, in name);
+            put(inout o, ".addr() as i64");
         } else {
             put_seq(inout o, in name);
             put(inout o, " as i64");
@@ -542,6 +548,12 @@ impl Gen {
     // `scalar_out(raw, ty)`.
     pub fn scalar_out(in self, in raw: ChunkSeq[u8], t: u32, inout o: ChunkSeq[u8]) {
         let n = self.i.node(t);
+        if n.kind == K_CALLBACK {
+            put(inout o, "<vesper_port_abi::FnPtr as vesper_port_abi::Abi>::get(&[");
+            put_seq(inout o, in raw);
+            put(inout o, " as u64])");
+            return;
+        }
         if n.kind != K_SCALAR {
             put_seq(inout o, in raw);
             return;

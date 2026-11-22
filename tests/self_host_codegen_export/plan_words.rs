@@ -47,6 +47,7 @@ pub const C_STR: u64 = 7;
 pub const C_BOX: u64 = 8;
 pub const C_NAMED: u64 = 9;
 pub const C_EXTERN: u64 = 10;
+pub const C_CALLBACK: u64 = 11;
 
 struct Enc<'a> {
     world: &'a World,
@@ -96,6 +97,12 @@ impl Enc<'_> {
         self.rows.push(vec![]);
         let world = self.world;
         let (class, name, flag, parts): (u64, &str, u64, Vec<Type>) = match ty {
+            // A `.vsys` callback type: a copy handle.
+            Type::Named(n, _)
+                if is_extern_handle(world, ty) && world.adts[n].mode == Mode::Copy =>
+            {
+                (C_CALLBACK, n, 0, vec![])
+            }
             _ if is_extern_handle(world, ty) => {
                 let Type::Named(n, _) = ty else {
                     unreachable!()
@@ -378,6 +385,9 @@ impl Dec<'_> {
                 name: self.string(),
             },
             8 => AbiType::Extern {
+                name: self.string(),
+            },
+            9 => AbiType::Callback {
                 name: self.string(),
             },
             k => panic!("plan words: type kind {k}"),

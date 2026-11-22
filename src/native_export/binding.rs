@@ -96,6 +96,7 @@ fn rust_type(ty: &AbiType, types_path: &str) -> String {
         AbiType::Str { owned: false } => "str".into(),
         AbiType::Object { .. } => "vesper_port_abi::OpaqueObject<'static>".into(),
         AbiType::Extern { name } => format!("{name}<'static>"),
+        AbiType::Callback { .. } => "vesper_port_abi::FnPtr".into(),
     }
 }
 
@@ -388,7 +389,7 @@ fn error_variant(ty: &AbiType) -> String {
         AbiType::Str { owned: true } => "String".into(),
         AbiType::Str { owned: false } => "Str".into(),
         AbiType::Object { .. } => "Object".into(),
-        AbiType::Extern { name } => name.clone(),
+        AbiType::Extern { name } | AbiType::Callback { name } => name.clone(),
     }
 }
 
@@ -509,6 +510,7 @@ fn scalar_in(name: &str, ty: &AbiType) -> String {
         AbiType::Scalar { name: s } if s == "Unit" => {
             format!("{{ let () = {name}; 0 }}")
         }
+        AbiType::Callback { .. } => format!("{name}.addr() as i64"),
         _ => format!("{name} as i64"),
     }
 }
@@ -521,6 +523,9 @@ fn scalar_out(raw: &str, ty: &AbiType) -> String {
             "Unit" => format!("{{ let _ = {raw}; }}"),
             other => format!("{raw} as {other}"),
         },
+        AbiType::Callback { .. } => {
+            format!("<vesper_port_abi::FnPtr as vesper_port_abi::Abi>::get(&[{raw} as u64])")
+        }
         _ => raw.into(),
     }
 }

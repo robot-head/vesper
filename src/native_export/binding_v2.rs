@@ -826,6 +826,8 @@ unsafe impl vesper_port_abi::Mirror for repr::{name} {{
                 format!("vesper_port_abi::Words<{}, 2>", rust_type(ty, path))
             }
             AbiType::Scalar { .. } => format!("vesper_port_abi::Word<{}>", rust_type(ty, path)),
+            // A callback handle is its address word, any bits a value.
+            AbiType::Callback { .. } => "vesper_port_abi::FnPtr".into(),
             AbiType::Named { name, .. } if self.interface.mirrored(ty) => name.clone(),
             // An array field (#1091) is its element cells in place.
             AbiType::Tuple { items } if super::array(items).is_some() => {

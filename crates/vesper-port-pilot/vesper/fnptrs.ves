@@ -1,0 +1,77 @@
+// The pilot's callback-handle library (#1502, graphics gap 10): a copy
+// struct that holds C function pointers the library looked up crosses the
+// export ABI, and Rust hands it back to be called through. Rust sees each
+// pointer as an opaque `vesper_port_abi::FnPtr`.
+// @export abi 3
+// @export vsys direct rust=crate::fnptrs::shim
+// | sys library Ops (
+// |     target = "@TARGET@", abi = "@ABI@",
+// |     link = "static", name = "vesper_port_pilot",
+// |     artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+// | ) {
+// |     callback Binary(a: u64, b: u64) -> ForeignVal[u64];
+// |     #[link_name = "pilot_ops_lookup"]
+// |     fn lookup(nocapture in name: CStr) -> ForeignVal[Option[Binary]];
+// | }
+
+// The function table: two looked-up pointers and a plain field.
+copy struct Table {
+    add: Binary,
+    mul: Binary,
+    scale: u64,
+}
+
+fn find(in name: Str) -> Option[Binary] eff [Ffi[Ops]] {
+    match Ops::lookup(in name.as_bytes()) {
+        Result::Ok(f) => f,
+        Result::Err(_) => Option::None,
+    }
+}
+
+// Looks both entry points up, once; None when either is missing.
+pub fn open(scale: u64) -> Option[Table] eff [Ffi[Ops]] {
+    match find(in "add") {
+        Option::Some(add) => match find(in "mul") {
+            Option::Some(mul) => Option::Some(
+                Table {
+                    add: add,
+                    mul: mul,
+                    scale: scale
+                }
+            ),
+            Option::None => Option::None,
+        },
+        Option::None => Option::None,
+    }
+}
+
+// A name the shim does not know.
+pub fn missing() -> Option[Binary] eff [Ffi[Ops]] {
+    find(in "nothing")
+}
+
+// `(a + b) * scale`, through the table's pointers.
+pub fn combine(in t: Table, a: u64, b: u64) -> u64 eff [Ffi[Ops]] {
+    Ops::Binary(t.mul, Ops::Binary(t.add, a, b), t.scale)
+}
+
+// One pointer out of the table, as a value of its own.
+pub fn pick(t: Table, mul: bool) -> Binary {
+    if mul {
+        t.mul
+    } else {
+        t.add
+    }
+}
+
+// Calls a pointer Rust handed back.
+pub fn call(f: Binary, a: u64, b: u64) -> u64 eff [Ffi[Ops]] {
+    Ops::Binary(f, a, b)
+}
+
+// Swaps the two pointers in place.
+pub fn swap(inout t: Table) -> Unit {
+    let add = t.add;
+    t.add = t.mul;
+    t.mul = add;
+}

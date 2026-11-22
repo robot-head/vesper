@@ -44,6 +44,7 @@ const K_BOX: u8 = 5;
 const K_STR: u8 = 6;
 const K_OBJECT: u8 = 7;
 const K_EXTERN: u8 = 8;
+const K_CALLBACK: u8 = 9;
 const P_IN: u8 = 1;
 const P_INOUT: u8 = 2;
 const P_SINK: u8 = 3;
@@ -132,6 +133,9 @@ impl Gen {
             put(inout o, "vesper_port_abi::Word<");
             self.rust_type(t, in path, inout o);
             put(inout o, ">");
+        } else if n.kind == K_CALLBACK {
+            // A callback handle is its address word, any bits a value.
+            put(inout o, "vesper_port_abi::FnPtr");
         } else if n.kind == K_NAMED && self.i.mirrored(t) {
             self.put_name(inout o, n.name);
         } else if n.kind == K_TUPLE && self.i.array_elem(t) != NONE32 {
