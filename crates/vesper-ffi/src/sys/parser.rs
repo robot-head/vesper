@@ -1316,11 +1316,13 @@ pub(super) fn parse(source: &str, limits: Limits) -> Result<LibraryDescriptor, E
                         ));
                     }
                     None => {
+                        // Unsupported, as before callback parameters: a
+                        // pointer is written `nocapture in`, `out` or `inout`.
                         return Err(Error::new(
-                            ErrorKind::Type,
+                            ErrorKind::Unsupported,
                             span,
                             format!(
-                                "`{} {name}: {callback}` needs `{callback}` to be a callback type",
+                                "`{} {name}: {callback}` needs `{callback}` to be a callback type; a pointer parameter is `nocapture` followed by in, out or inout",
                                 if retain { "retain" } else { "nocapture" }
                             ),
                         ));
