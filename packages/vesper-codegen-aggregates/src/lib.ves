@@ -24,6 +24,11 @@
 // Tables are dense and indexed by value id, block, local or symbol; a
 // Rust map of the decision functions is one of these tables here.
 
+use @vesper/place-ir::codes::{
+    Op,
+    Pat,
+    Term
+};
 use @vesper/check-data::pack_text;
 use @vesper/check-data::util::{
     add,
@@ -78,39 +83,6 @@ const K_INFER: u8 = 5;
 const L_SCALAR: u8 = 0;
 const L_PRODUCT: u8 = 1;
 const L_ENUM: u8 = 2;
-
-// Opcodes (tests/common/ir_words.rs `OP_NAMES`).
-const OP_CONST: u8 = 0;
-const OP_UNIT: u8 = 1;
-const OP_READ: u8 = 2;
-const OP_BIND: u8 = 3;
-const OP_WRITE: u8 = 4;
-const OP_UNARY: u8 = 5;
-const OP_BINARY: u8 = 6;
-const OP_TUPLE: u8 = 7;
-const OP_DATA: u8 = 8;
-const OP_PROJECT: u8 = 9;
-const OP_INDEX: u8 = 10;
-const OP_CALL: u8 = 11;
-const OP_INDIRECT: u8 = 12;
-const OP_TRY: u8 = 13;
-const OP_CLOSURE: u8 = 14;
-const OP_HANDLE: u8 = 15;
-const OP_VECTOR: u8 = 16;
-const OP_TILED: u8 = 17;
-const OP_SEQ: u8 = 18;
-const OP_FIP: u8 = 19;
-const OP_EXIT: u8 = 21;
-
-const TERM_RETURN: u8 = 0;
-const TERM_JUMP: u8 = 1;
-const TERM_BRANCH: u8 = 2;
-const TERM_MATCH: u8 = 3;
-
-const PAT_BIND: u64 = 1;
-const PAT_LITERAL: u64 = 2;
-const PAT_TUPLE: u64 = 3;
-const PAT_CONSTRUCTOR: u64 = 4;
 
 // `Pass` words.
 const PASS_INOUT: u64 = 1;
@@ -1233,13 +1205,13 @@ impl G {
 fn pattern_end(in p: Program, q: u64) -> u64 {
     let kind = p.op(q);
     let body = add(q, 3);
-    if kind == PAT_BIND {
+    if kind == Pat::Bind {
         return inc(body);
     }
-    if kind == PAT_LITERAL {
+    if kind == Pat::Literal {
         return add(body, 3);
     }
-    if kind == PAT_TUPLE {
+    if kind == Pat::Tuple {
         let n = p.op(body);
         let mut at = inc(body);
         for i in 0..n {
@@ -1247,7 +1219,7 @@ fn pattern_end(in p: Program, q: u64) -> u64 {
         }
         return at;
     }
-    if kind == PAT_CONSTRUCTOR {
+    if kind == Pat::Constructor {
         let n = p.op(add(body, 2));
         let mut at = add(body, 3);
         for i in 0..n {
@@ -1262,16 +1234,16 @@ fn pattern_end(in p: Program, q: u64) -> u64 {
 fn pattern_binds(in p: Program, q: u64, inout out: ChunkSeq[u32]) {
     let kind = p.op(q);
     let body = add(q, 3);
-    if kind == PAT_BIND {
+    if kind == Pat::Bind {
         out.push(n32(p.op(body)));
-    } else if kind == PAT_TUPLE {
+    } else if kind == Pat::Tuple {
         let n = p.op(body);
         let mut at = inc(body);
         for i in 0..n {
             pattern_binds(in p, at, inout out);
             at = pattern_end(in p, at);
         }
-    } else if kind == PAT_CONSTRUCTOR {
+    } else if kind == Pat::Constructor {
         let n = p.op(add(body, 2));
         let mut at = add(body, 3);
         for i in 0..n {
@@ -1293,7 +1265,7 @@ fn arg_word(a: u64, j: u64, k: u64) -> u64 {
 
 // Where an instruction's argument list starts, or NONE when it has none.
 fn args_at(op: u8, a: u64) -> u64 {
-    if op == OP_CALL || op == OP_INDIRECT || op == OP_TILED || op == OP_SEQ || op == OP_FIP {
+    if op == Op::Call || op == Op::Indirect || op == Op::Tiled || op == Op::Seq || op == Op::Fip {
         inc(a)
     } else {
         18446744073709551615
@@ -1305,43 +1277,43 @@ fn push_operands(in p: Program, ii: u64, inout out: ChunkSeq[u32]) {
     let inst = p.inst(ii);
     let a = inst.a;
     let op = inst.op;
-    if op == OP_HANDLE {
+    if op == Op::Handle {
         if p.op(a) != 0 {
             out.push(n32(p.op(inc(a))));
         }
-    } else if op == OP_BIND || op == OP_EXIT || op == OP_PROJECT || op == OP_TRY {
+    } else if op == Op::Bind || op == Op::Exit || op == Op::Project || op == Op::Try {
         out.push(n32(p.op(a)));
-    } else if op == OP_WRITE {
+    } else if op == Op::Write {
         out.push(n32(p.op(add(a, 2))));
-    } else if op == OP_UNARY {
+    } else if op == Op::Unary {
         out.push(n32(p.op(inc(a))));
-    } else if op == OP_BINARY {
+    } else if op == Op::Binary {
         out.push(n32(p.op(inc(a))));
         out.push(n32(p.op(add(a, 2))));
-    } else if op == OP_INDEX {
+    } else if op == Op::Index {
         out.push(n32(p.op(a)));
         out.push(n32(p.op(inc(a))));
-    } else if op == OP_TUPLE {
+    } else if op == Op::Tuple {
         let n = p.op(a);
         for i in 0..n {
             out.push(n32(p.op(add(inc(a), i))));
         }
-    } else if op == OP_VECTOR {
+    } else if op == Op::Vector {
         let n = p.op(inc(a));
         for i in 0..n {
             out.push(n32(p.op(add(add(a, 2), i))));
         }
-    } else if op == OP_DATA {
+    } else if op == Op::Data {
         let n = p.op(inc(a));
         for i in 0..n {
             out.push(n32(p.op(add(add(a, 3), wrapping_mul(i, 2)))));
         }
-    } else if op == OP_CALL || op == OP_TILED || op == OP_SEQ || op == OP_FIP {
+    } else if op == Op::Call || op == Op::Tiled || op == Op::Seq || op == Op::Fip {
         let at = inc(a);
         for j in 0..arg_count(in p, at) {
             out.push(n32(p.op(arg_word(at, j, 1))));
         }
-    } else if op == OP_INDIRECT {
+    } else if op == Op::Indirect {
         let at = inc(a);
         for j in 0..arg_count(in p, at) {
             out.push(n32(p.op(arg_word(at, j, 1))));
@@ -1360,12 +1332,12 @@ fn block_params_at(in p: Program, ha: u64) -> u64 {
 fn successors(in p: Program, bi: u64, inout out: ChunkSeq[u32]) {
     let blk = p.block(bi);
     let t = blk.ta;
-    if blk.term == TERM_JUMP {
+    if blk.term == Term::Jump {
         out.push(n32(p.op(t)));
-    } else if blk.term == TERM_BRANCH {
+    } else if blk.term == Term::Branch {
         out.push(n32(p.op(inc(t))));
         out.push(n32(p.op(add(t, 2))));
-    } else if blk.term == TERM_MATCH {
+    } else if blk.term == Term::Match {
         let n = p.op(inc(t));
         let mut at = add(t, 2);
         for i in 0..n {
@@ -1455,9 +1427,9 @@ fn graph_of(in p: Program, inout c: Ctx, inout s: Syms, fi: u64) -> G {
         let blk = p.block(add(f.b0, b));
         let start = tv.len();
         let t = blk.ta;
-        if blk.term == TERM_RETURN || blk.term == TERM_BRANCH || blk.term == TERM_MATCH {
+        if blk.term == Term::Return || blk.term == Term::Branch || blk.term == Term::Match {
             tv.push(n32(p.op(t)));
-        } else if blk.term == TERM_JUMP {
+        } else if blk.term == Term::Jump {
             let n = p.op(inc(t));
             for i in 0..n {
                 tv.push(n32(p.op(add(add(t, 2), i))));
@@ -1562,7 +1534,7 @@ fn graph_of(in p: Program, inout c: Ctx, inout s: Syms, fi: u64) -> G {
         sa.push(succ.len());
         let before = succ.len();
         successors(in p, add(f.b0, b), inout succ);
-        let jump = p.block(add(f.b0, b)).term == TERM_JUMP;
+        let jump = p.block(add(f.b0, b)).term == Term::Jump;
         for i in before..succ.len() {
             let t = w(u32_at(in succ, i));
             set64(inout count, t, inc(u64_at(in count, t)));
@@ -1673,10 +1645,10 @@ fn vtype(in g: G, inout c: Ctx, v: u32) -> u32 {
 // `Graph::candidate` of the instruction at global index `ii`.
 fn candidate(in p: Program, in e: Env, ii: u64) -> bool {
     let inst = p.inst(ii);
-    if inst.op == OP_DATA || inst.op == OP_TUPLE {
+    if inst.op == Op::Data || inst.op == Op::Tuple {
         return true;
     }
-    inst.op == OP_CALL && (e.fn_bits(n32(p.op(inst.a))) & FN_DEFINED) != 0
+    inst.op == Op::Call && (e.fn_bits(n32(p.op(inst.a))) & FN_DEFINED) != 0
 }
 
 // `Graph::candidate` of the definition of value `v`.
@@ -1737,7 +1709,7 @@ fn pass_through(
     at: u64,
     q: u64
 ) -> Through {
-    if p.op(q) != PAT_BIND {
+    if p.op(q) != Pat::Bind {
         return NO_THROUGH;
     }
     let name = n32(p.op(add(q, 3)));
@@ -1756,7 +1728,7 @@ fn pass_through(
     let blk = p.block(add(g.b0, b));
     for k in inc(at)..blk.ic {
         let inst = p.inst(add(blk.i0, k));
-        if inst.op == OP_READ
+        if inst.op == Op::Read
             && n32(p.op(inst.a)) == name
             && p.op(inc(inst.a)) == 0
             && p.op(add(inst.a, 2)) == PASS_SINK {
@@ -1810,7 +1782,7 @@ fn consumer_home(
     if found {
         let inst = p.inst(add(blk.i0, k));
         let a = inst.a;
-        if inst.op == OP_DATA {
+        if inst.op == Op::Data {
             let n = p.op(inc(a));
             for j in 0..n {
                 if n32(p.op(add(add(a, 3), wrapping_mul(j, 2)))) == id {
@@ -1825,7 +1797,7 @@ fn consumer_home(
             }
             return NO_HOME;
         }
-        if inst.op == OP_TUPLE {
+        if inst.op == Op::Tuple {
             let n = p.op(a);
             for j in 0..n {
                 if n32(p.op(add(inc(a), j))) == id {
@@ -1840,7 +1812,7 @@ fn consumer_home(
             }
             return NO_HOME;
         }
-        if inst.op == OP_EXIT {
+        if inst.op == Op::Exit {
             if n32(p.op(a)) == id && n32(p.op(inc(a))) == g.name && own == g.result {
                 return Home {
                     kind: H_RESULT,
@@ -1851,7 +1823,7 @@ fn consumer_home(
             }
             return NO_HOME;
         }
-        if inst.op == OP_BIND {
+        if inst.op == Op::Bind {
             if n32(p.op(a)) != id {
                 return NO_HOME;
             }
@@ -1875,7 +1847,7 @@ fn consumer_home(
                 inc(depth)
             );
         }
-        if inst.op == OP_WRITE {
+        if inst.op == Op::Write {
             let place = n32(p.op(a));
             if n32(p.op(inc(a))) != e.s_eq || n32(p.op(add(a, 2))) != id {
                 return NO_HOME;
@@ -1900,7 +1872,7 @@ fn consumer_home(
         return NO_HOME;
     }
     let t = blk.ta;
-    if blk.term == TERM_RETURN {
+    if blk.term == Term::Return {
         if n32(p.op(t)) == id && own == g.result {
             return Home {
                 kind: H_RESULT,
@@ -1911,7 +1883,7 @@ fn consumer_home(
         }
         return NO_HOME;
     }
-    if blk.term == TERM_JUMP {
+    if blk.term == Term::Jump {
         let target = p.op(t);
         let n = p.op(inc(t));
         let mut count: u64 = 0;
@@ -2005,7 +1977,7 @@ fn sources(
     for i in 0..np {
         let pred = w(u32_at(in g.preds, add(u64_at(in g.qa, tb), i)));
         let blk = p.block(add(g.b0, pred));
-        if blk.term != TERM_JUMP {
+        if blk.term != Term::Jump {
             return false;
         }
         if k >= p.op(inc(blk.ta)) {
@@ -2092,7 +2064,7 @@ fn arith_action(in e: Env, in p: Program, ii: u64) -> bool {
     if inst.fallible != 0 {
         return true;
     }
-    if inst.op == OP_BINARY {
+    if inst.op == Op::Binary {
         let o = n32(p.op(inst.a));
         return o == e.s_div || o == e.s_rem || o == e.s_shl || o == e.s_shr;
     }
@@ -2171,17 +2143,17 @@ fn window_ok(
             let a = inst.a;
             let op = inst.op;
             let mut ok = false;
-            if op == OP_CONST || op == OP_UNIT {
+            if op == Op::Const || op == Op::Unit {
                 ok = true;
-            } else if op == OP_BIND {
+            } else if op == Op::Bind {
                 ok = u8_at(in members, p.op(a)) != 0;
-            } else if op == OP_READ {
+            } else if op == Op::Read {
                 ok = u8_at(in members, w(inst.dest)) != 0
                     || (
                         p.op(inc(a)) == 0
                             && scalar_local(inout e, inout c, in g, in s, n32(p.op(a)))
                     );
-            } else if op == OP_DATA {
+            } else if op == Op::Data {
                 ok = true;
                 for j in 0..p.op(inc(a)) {
                     if !fresh(
@@ -2195,14 +2167,14 @@ fn window_ok(
                         ok = false;
                     }
                 }
-            } else if op == OP_TUPLE {
+            } else if op == Op::Tuple {
                 ok = true;
                 for j in 0..p.op(a) {
                     if !fresh(inout e, inout c, in p, in g, in members, n32(p.op(add(inc(a), j)))) {
                         ok = false;
                     }
                 }
-            } else if op == OP_CALL {
+            } else if op == Op::Call {
                 let callee = n32(p.op(a));
                 let fine = quiet(in e, callee, obs)
                     && scalar_args(inout e, inout c, in p, in g, inc(a));
@@ -2215,7 +2187,7 @@ fn window_ok(
                 } else {
                     ok = fine;
                 }
-            } else if op == OP_BINARY || op == OP_UNARY {
+            } else if op == Op::Binary || op == Op::Unary {
                 ok = !obs || !arith_action(in e, in p, ii);
             }
             if !ok {
@@ -2410,11 +2382,11 @@ fn count_mentions(inout c: Ctx, in p: Program, inout g: G, in s: Syms) {
         let a = inst.a;
         let op = inst.op;
         names.clear();
-        if op == OP_READ {
+        if op == Op::Read {
             names.push(n32(p.op(a)));
-        } else if op == OP_WRITE {
+        } else if op == Op::Write {
             names.push(place_root(inout c.names, n32(p.op(a))));
-        } else if op == OP_BIND {
+        } else if op == Op::Bind {
             bound.clear();
             pattern_binds(in p, inc(a), inout bound);
             // A set: each bound name once.
@@ -2438,8 +2410,8 @@ fn count_mentions(inout c: Ctx, in p: Program, inout g: G, in s: Syms) {
                     names.push(n32(wrapping_sub(root, 1)));
                 }
             }
-        } else if op == OP_CLOSURE || op == OP_HANDLE {
-            let mut at = if op == OP_HANDLE {
+        } else if op == Op::Closure || op == Op::Handle {
+            let mut at = if op == Op::Handle {
                 add(a, 3)
             } else {
                 inc(a)
@@ -2449,7 +2421,7 @@ fn count_mentions(inout c: Ctx, in p: Program, inout g: G, in s: Syms) {
                 names.push(n32(p.op(add(inc(at), wrapping_mul(j, 2)))));
                 names.push(n32(p.op(add(add(at, 2), wrapping_mul(j, 2)))));
             }
-            if op == OP_CLOSURE {
+            if op == Op::Closure {
                 at = add(inc(at), wrapping_mul(na, 2));
                 let nm = p.op(at);
                 for j in 0..nm {
@@ -2496,7 +2468,7 @@ fn plan(inout e: Env, inout c: Ctx, in p: Program, inout g: G, in s: Syms) {
             }
             // A value passed to a block parameter gets the parameter's home.
             let mut jumps = false;
-            if blk.term == TERM_JUMP {
+            if blk.term == Term::Jump {
                 let tb = u64_at(in g.ta, b);
                 for i in 0..u64_at(in g.tn, b) {
                     if u32_at(in g.tv, add(tb, i)) == inst.dest {
@@ -2558,7 +2530,7 @@ fn plan(inout e: Env, inout c: Ctx, in p: Program, inout g: G, in s: Syms) {
         let blk = p.block(add(g.b0, b));
         for at in 0..blk.ic {
             let inst = p.inst(add(blk.i0, at));
-            if inst.op != OP_BIND {
+            if inst.op != Op::Bind {
                 continue;
             }
             let h = g.home(n32(p.op(inst.a)));
@@ -2582,7 +2554,7 @@ fn plan(inout e: Env, inout c: Ctx, in p: Program, inout g: G, in s: Syms) {
         let blk = p.block(add(g.b0, b));
         for at in 0..blk.ic {
             let inst = p.inst(add(blk.i0, at));
-            if inst.op != OP_READ {
+            if inst.op != Op::Read {
                 continue;
             }
             let own = default_type(inout c.types, inst.ty);
@@ -2742,7 +2714,7 @@ fn split_locals(inout e: Env, inout c: Ctx, in p: Program, inout g: G, in s: Sym
         let inst = p.inst(add(g.i0, k));
         let a = inst.a;
         let op = inst.op;
-        if op == OP_READ {
+        if op == Op::Read {
             let li = s.local_of(n32(p.op(a)));
             let pr = p.path(p.op(inc(a)));
             if li != NONE32_64 {
@@ -2755,7 +2727,7 @@ fn split_locals(inout e: Env, inout c: Ctx, in p: Program, inout g: G, in s: Sym
                     set8(inout fields, li, 1);
                 }
             }
-        } else if op == OP_WRITE {
+        } else if op == Op::Write {
             path.clear();
             place_parts(inout c.names, n32(p.op(a)), inout path);
             let li = s.local_of(u32_at(in path, 0));
@@ -2767,7 +2739,7 @@ fn split_locals(inout e: Env, inout c: Ctx, in p: Program, inout g: G, in s: Sym
                     r.add(li, in path, 1);
                 }
             }
-        } else if op == OP_CALL || op == OP_INDIRECT {
+        } else if op == Op::Call || op == Op::Indirect {
             let at = inc(a);
             for j in 0..arg_count(in p, at) {
                 let root = p.op(arg_word(at, j, 2));
@@ -2775,7 +2747,7 @@ fn split_locals(inout e: Env, inout c: Ctx, in p: Program, inout g: G, in s: Sym
                     mark_memory(in s, inout memory, n32(wrapping_sub(root, 1)));
                 }
             }
-        } else if op == OP_SEQ || op == OP_FIP || op == OP_TILED {
+        } else if op == Op::Seq || op == Op::Fip || op == Op::Tiled {
             let at = inc(a);
             for j in 0..arg_count(in p, at) {
                 let root = p.op(arg_word(at, j, 2));
@@ -2783,9 +2755,9 @@ fn split_locals(inout e: Env, inout c: Ctx, in p: Program, inout g: G, in s: Sym
                     mark_memory(in s, inout memory, n32(wrapping_sub(root, 1)));
                 }
             }
-        } else if op == OP_CLOSURE || op == OP_HANDLE {
+        } else if op == Op::Closure || op == Op::Handle {
             has_closure = true;
-            let mut at = if op == OP_HANDLE {
+            let mut at = if op == Op::Handle {
                 add(a, 3)
             } else {
                 inc(a)
@@ -2813,14 +2785,14 @@ fn split_locals(inout e: Env, inout c: Ctx, in p: Program, inout g: G, in s: Sym
         let mut views: ChunkSeq[u8] = filled8(g.nv, 0);
         for k in 0..g.ni {
             let inst = p.inst(add(g.i0, k));
-            if inst.op == OP_SEQ && e.is_view(inst.s0, inst.s1) {
+            if inst.op == Op::Seq && e.is_view(inst.s0, inst.s1) {
                 set8(inout views, w(inst.dest), 1);
             }
         }
         let mut bound: ChunkSeq[u32] = ChunkSeq::new[u32]();
         for k in 0..g.ni {
             let inst = p.inst(add(g.i0, k));
-            if inst.op == OP_BIND && u8_at(in views, p.op(inst.a)) != 0 {
+            if inst.op == Op::Bind && u8_at(in views, p.op(inst.a)) != 0 {
                 bound.clear();
                 pattern_binds(in p, inc(inst.a), inout bound);
                 for i in 0..bound.len() {
@@ -2862,7 +2834,7 @@ fn split_locals(inout e: Env, inout c: Ctx, in p: Program, inout g: G, in s: Sym
     let mut elements: ChunkSeq[u8] = filled8(g.nv, 0);
     for k in 0..g.ni {
         let inst = p.inst(add(g.i0, k));
-        if inst.op == OP_SEQ {
+        if inst.op == Op::Seq {
             let label = p.pool_row(p.op(inst.a)).label;
             if label == e.s_try_get || label == e.s_hoisted_try_get {
                 set8(inout elements, w(inst.dest), 1);
@@ -2883,7 +2855,7 @@ fn split_locals(inout e: Env, inout c: Ctx, in p: Program, inout g: G, in s: Sym
         for at in 0..blk.ic {
             let inst = p.inst(add(blk.i0, at));
             let a = inst.a;
-            if inst.op == OP_READ {
+            if inst.op == Op::Read {
                 let li = s.local_of(n32(p.op(a)));
                 if li == NONE32_64 || u64_at(in cs.ln, li) == 0 {
                     continue;
@@ -2899,11 +2871,11 @@ fn split_locals(inout e: Env, inout c: Ctx, in p: Program, inout g: G, in s: Sym
                     if !found && g.reads(add(base, later), inst.dest) {
                         found = true;
                         let li2 = p.inst(add(blk.i0, later));
-                        if li2.op == OP_DATA || li2.op == OP_TUPLE || li2.op == OP_EXIT {
+                        if li2.op == Op::Data || li2.op == Op::Tuple || li2.op == Op::Exit {
                             placed = true;
-                        } else if li2.op == OP_BIND {
+                        } else if li2.op == Op::Bind {
                             let q = inc(li2.a);
-                            if p.op(q) == PAT_BIND {
+                            if p.op(q) == Pat::Bind {
                                 let bl = s.local_of(n32(p.op(add(q, 3))));
                                 placed = bl != NONE32_64 && u64_at(in cs.ln, bl) != 0;
                             }
@@ -2911,7 +2883,7 @@ fn split_locals(inout e: Env, inout c: Ctx, in p: Program, inout g: G, in s: Sym
                     }
                 }
                 if !found {
-                    placed = blk.term == TERM_RETURN && n32(p.op(blk.ta)) == inst.dest;
+                    placed = blk.term == Term::Return && n32(p.op(blk.ta)) == inst.dest;
                 }
                 if !placed {
                     let pid = p.op(inc(a));
@@ -2923,14 +2895,14 @@ fn split_locals(inout e: Env, inout c: Ctx, in p: Program, inout g: G, in s: Sym
                     let n = words_under(in cs, li, in path, 0, path.len());
                     set64(inout split, li, add(u64_at(in split, li), wrapping_mul(weight, n)));
                 }
-            } else if inst.op == OP_WRITE {
+            } else if inst.op == Op::Write {
                 let place = n32(p.op(a));
                 let root = place_root(inout c.names, place);
                 let li = s.local_of(root);
                 if li != NONE32_64 && u64_at(in cs.ln, li) != 0 && has_dot(in c.names, place) {
                     set64(inout in_memory, li, add(u64_at(in in_memory, li), weight));
                 }
-            } else if inst.op == OP_BIND {
+            } else if inst.op == Op::Bind {
                 bound.clear();
                 pattern_binds(in p, inc(a), inout bound);
                 let element = u8_at(in elements, p.op(a)) != 0;
@@ -3032,7 +3004,7 @@ fn holds_sequence(inout c: Ctx, ty: u32) -> bool {
 
 // `fip::is_box_pattern` of the pattern at word `q`.
 fn box_pattern(inout e: Env, inout c: Ctx, in p: Program, q: u64) -> bool {
-    if !c.world.box_active || p.op(q) != PAT_CONSTRUCTOR {
+    if !c.world.box_active || p.op(q) != Pat::Constructor {
         return false;
     }
     let body = add(q, 3);
@@ -3050,7 +3022,7 @@ fn pattern_has_box(inout e: Env, inout c: Ctx, in p: Program, q: u64) -> bool {
     }
     let kind = p.op(q);
     let body = add(q, 3);
-    if kind == PAT_TUPLE {
+    if kind == Pat::Tuple {
         let n = p.op(body);
         let mut at = inc(body);
         for i in 0..n {
@@ -3059,7 +3031,7 @@ fn pattern_has_box(inout e: Env, inout c: Ctx, in p: Program, q: u64) -> bool {
             }
             at = pattern_end(in p, at);
         }
-    } else if kind == PAT_CONSTRUCTOR {
+    } else if kind == Pat::Constructor {
         let n = p.op(add(body, 2));
         let mut at = add(body, 3);
         for i in 0..n {
@@ -3121,7 +3093,7 @@ fn borrowed_scrutinees(in e: Env, in p: Program, in g: G, in s: Syms) -> ChunkSe
     let mut matched = filled8(g.nv, 0);
     for b in 0..g.nb {
         let blk = p.block(add(g.b0, b));
-        if blk.term == TERM_MATCH {
+        if blk.term == Term::Match {
             let v = p.op(blk.ta);
             if v < g.nv {
                 set8(inout matched, v, 1);
@@ -3145,7 +3117,7 @@ fn borrowed_scrutinees(in e: Env, in p: Program, in g: G, in s: Syms) -> ChunkSe
             let inst = p.inst(add(g.i0, k));
             let d = w(inst.dest);
             let a = inst.a;
-            if inst.op == OP_READ {
+            if inst.op == Op::Read {
                 let li = s.local_of(n32(p.op(a)));
                 if d < g.nv
                     && u8_at(in matched, d) != 0
@@ -3155,7 +3127,7 @@ fn borrowed_scrutinees(in e: Env, in p: Program, in g: G, in s: Syms) -> ChunkSe
                     set8(inout out, d, 1);
                     grew = true;
                 }
-            } else if inst.op == OP_SEQ {
+            } else if inst.op == Op::Seq {
                 let label = p.pool_row(p.op(a)).label;
                 if d < g.nv
                     && u8_at(in matched, d) != 0
@@ -3164,7 +3136,7 @@ fn borrowed_scrutinees(in e: Env, in p: Program, in g: G, in s: Syms) -> ChunkSe
                     set8(inout out, d, 1);
                     grew = true;
                 }
-            } else if inst.op == OP_BIND {
+            } else if inst.op == Op::Bind {
                 let v = p.op(a);
                 if v < g.nv && u8_at(in out, v) != 0 {
                     let mut bound: ChunkSeq[u32] = ChunkSeq::new[u32]();
@@ -3247,7 +3219,7 @@ fn seq_drop_plan(inout e: Env, inout c: Ctx, in p: Program, in g: G, in s: Syms)
         let inst = p.inst(add(g.i0, ki));
         let a = inst.a;
         let op = inst.op;
-        if op == OP_READ && read_pass(in p, a) == PASS_SINK {
+        if op == Op::Read && read_pass(in p, a) == PASS_SINK {
             let root = n32(p.op(a));
             let pk = plan_kind(in plan, in s, root);
             let pr = p.path(p.op(inc(a)));
@@ -3255,7 +3227,7 @@ fn seq_drop_plan(inout e: Env, inout c: Ctx, in p: Program, in g: G, in s: Syms)
                 || pk == SD_STR {
                 mark_sym(in s, inout refused, root);
             }
-        } else if op == OP_WRITE {
+        } else if op == Op::Write {
             let place = n32(p.op(a));
             let root = place_root(inout c.names, place);
             let pk = plan_kind(in plan, in s, root);
@@ -3264,18 +3236,18 @@ fn seq_drop_plan(inout e: Env, inout c: Ctx, in p: Program, in g: G, in s: Syms)
                 || (pk == SD_STR && s.has(root, S_PARAM)) {
                 mark_sym(in s, inout refused, root);
             }
-        } else if op == OP_BIND {
+        } else if op == Op::Bind {
             let v = n32(p.op(a));
             let q = inc(a);
             let dop = def_op(in p, in g, in defs, v);
-            let borrow_read = dop == OP_READ
+            let borrow_read = dop == Op::Read
                 && read_pass(in p, p.inst(add(g.i0, u64_at(in defs, w(v)))).a) != PASS_SINK;
             if borrow_read
                 || (w(v) < g.nv && u8_at(in borrowed, w(v)) != 0)
-                || (p.op(q) != PAT_BIND && pattern_has_box(inout e, inout c, in p, q)) {
+                || (p.op(q) != Pat::Bind && pattern_has_box(inout e, inout c, in p, q)) {
                 mark_bound(in p, in s, inout refused, q);
             }
-        } else if op == OP_CLOSURE {
+        } else if op == Op::Closure {
             let ci = closure;
             closure = inc(closure);
             if u8_at(in e.cl_lent, ci) != 0 {
@@ -3303,7 +3275,7 @@ fn seq_drop_plan(inout e: Env, inout c: Ctx, in p: Program, in g: G, in s: Syms)
             for j in 0..p.op(mt) {
                 mark_sym(in s, inout refused, n32(p.op(add(inc(mt), wrapping_mul(j, 2)))));
             }
-        } else if op == OP_HANDLE {
+        } else if op == Op::Handle {
             let at = add(a, 3);
             let na = p.op(at);
             for j in 0..na {
@@ -3321,7 +3293,7 @@ fn seq_drop_plan(inout e: Env, inout c: Ctx, in p: Program, in g: G, in s: Syms)
     // A match arm binds through its pattern, not a `let`.
     for b in 0..g.nb {
         let blk = p.block(add(g.b0, b));
-        if blk.term == TERM_MATCH {
+        if blk.term == Term::Match {
             let n = p.op(inc(blk.ta));
             let mut at = add(blk.ta, 2);
             for i in 0..n {
@@ -3350,13 +3322,13 @@ fn closure_refusals(
 ) {
     let inst = p.inst(ii);
     let a = inst.a;
-    let at = if inst.op == OP_HANDLE {
+    let at = if inst.op == Op::Handle {
         add(a, 3)
     } else {
         inc(a)
     };
     let na = p.op(at);
-    let lent = inst.op == OP_CLOSURE && u8_at(in e.cl_lent, ci) != 0;
+    let lent = inst.op == Op::Closure && u8_at(in e.cl_lent, ci) != 0;
     if lent {
         return;
     }
@@ -3365,7 +3337,7 @@ fn closure_refusals(
     for j in 0..na {
         let name = n32(p.op(add(inc(at), wrapping_mul(j, 2))));
         let slot = n32(p.op(add(add(at, 2), wrapping_mul(j, 2))));
-        let mut used = inst.op == OP_HANDLE;
+        let mut used = inst.op == Op::Handle;
         if !used {
             for i in 0..un {
                 if u32_at(in e.cu, add(ua, i)) == name {
@@ -3388,7 +3360,7 @@ fn closure_refusals(
 // of a field that owns nothing moves nothing out).
 fn replace_moves(inout c: Ctx, in p: Program, ii: u64) -> bool {
     let inst = p.inst(ii);
-    if inst.op == OP_READ
+    if inst.op == Op::Read
         && read_pass(in p, inst.a) == PASS_SINK
         && p.path(p.op(inc(inst.a))).n > 0 {
         return may_need_drop(inout c, inst.ty);
@@ -3410,12 +3382,12 @@ fn replace_step(
 ) {
     let inst = p.inst(ii);
     let a = inst.a;
-    if inst.op == OP_READ && read_pass(in p, a) == PASS_SINK {
+    if inst.op == Op::Read && read_pass(in p, a) == PASS_SINK {
         let li = s.local_of(n32(p.op(a)));
         if li != NONE32_64 && u64_at(in cidx, li) != NONE32_64 {
             set8(inout state, add(base, u64_at(in cidx, li)), 1);
         }
-    } else if inst.op == OP_WRITE {
+    } else if inst.op == Op::Write {
         let place = n32(p.op(a));
         if n32(p.op(inc(a))) == e.s_eq && !has_dot(in c.names, place) {
             let li = s.local_of(place);
@@ -3423,7 +3395,7 @@ fn replace_step(
                 set8(inout state, add(base, u64_at(in cidx, li)), 0);
             }
         }
-    } else if inst.op == OP_BIND {
+    } else if inst.op == Op::Bind {
         let mut names: ChunkSeq[u32] = ChunkSeq::new[u32]();
         pattern_binds(in p, inc(a), inout names);
         for i in 0..names.len() {
@@ -3469,9 +3441,9 @@ fn replace_drops(inout e: Env, inout c: Ctx, in p: Program, in g: G, in s: Syms)
     for k in 0..g.ni {
         let ii = add(g.i0, k);
         let op = p.inst(ii).op;
-        if op == OP_CLOSURE || op == OP_HANDLE {
+        if op == Op::Closure || op == Op::Handle {
             let ci = closure;
-            if op == OP_CLOSURE {
+            if op == Op::Closure {
                 closure = inc(closure);
             }
             closure_refusals(inout e, in p, in s, ii, ci, inout refused);
@@ -3541,7 +3513,7 @@ fn replace_drops(inout e: Env, inout c: Ctx, in p: Program, in g: G, in s: Syms)
         for i in 0..blk.ic {
             let ii = add(blk.i0, i);
             let inst = p.inst(ii);
-            if inst.op == OP_WRITE && n32(p.op(inc(inst.a))) == e.s_eq {
+            if inst.op == Op::Write && n32(p.op(inc(inst.a))) == e.s_eq {
                 let root = place_root(inout c.names, n32(p.op(inst.a)));
                 let li = s.local_of(root);
                 if li != NONE32_64 {
@@ -3685,13 +3657,13 @@ fn temporary_drops(
     let mut borrow_bound = filled8(nl, 0);
     for k in 0..g.ni {
         let inst = p.inst(add(g.i0, k));
-        if inst.op != OP_BIND {
+        if inst.op != Op::Bind {
             continue;
         }
         let v = n32(p.op(inst.a));
         let q = inc(inst.a);
-        if p.op(q) == PAT_BIND
-            && def_op(in p, in g, in defs, v) == OP_READ
+        if p.op(q) == Pat::Bind
+            && def_op(in p, in g, in defs, v) == Op::Read
             && read_pass(in p, p.inst(add(g.i0, u64_at(in defs, w(v)))).a) != PASS_SINK {
             mark_sym(in s, inout borrow_bound, n32(p.op(add(q, 3))));
         }
@@ -3736,12 +3708,12 @@ fn temporary_drops(
                 set64(inout def_i, d, i);
             }
             let mut owned = false;
-            if inst.op == OP_CALL || inst.op == OP_INDIRECT {
+            if inst.op == Op::Call || inst.op == Op::Indirect {
                 owned = d >= nv || u8_at(in slot, d) == 0;
-            } else if inst.op == OP_SEQ {
+            } else if inst.op == Op::Seq {
                 let label = p.pool_row(p.op(a)).label;
                 owned = label == e.s_new || label == e.s_with_capacity;
-            } else if inst.op == OP_READ && read_pass(in p, a) == PASS_SINK {
+            } else if inst.op == Op::Read && read_pass(in p, a) == PASS_SINK {
                 let root = n32(p.op(a));
                 let pk = plan_kind(in plan, in s, root);
                 let path_empty = p.path(p.op(inc(a))).n == 0;
@@ -3761,14 +3733,14 @@ fn temporary_drops(
                 set8(inout produced, d, 1);
             }
             brw.clear();
-            if inst.op == OP_CALL || inst.op == OP_INDIRECT {
+            if inst.op == Op::Call || inst.op == Op::Indirect {
                 let at = inc(a);
                 for j in 0..arg_count(in p, at) {
                     if p.op(arg_word(at, j, 0)) != PASS_SINK && p.op(arg_word(at, j, 2)) == 0 {
                         brw.push(n32(p.op(arg_word(at, j, 1))));
                     }
                 }
-            } else if inst.op == OP_SEQ && scalar_result(inout e, inout c, inst.ty) {
+            } else if inst.op == Op::Seq && scalar_result(inout e, inout c, inst.ty) {
                 let at = inc(a);
                 for j in 0..arg_count(in p, at) {
                     if p.op(arg_word(at, j, 0)) == 0 && p.op(arg_word(at, j, 2)) == 0 {
@@ -3802,7 +3774,7 @@ fn temporary_drops(
                 }
             }
         }
-        if blk.term == TERM_JUMP {
+        if blk.term == Term::Jump {
             let target = p.op(blk.ta);
             let n = p.op(inc(blk.ta));
             for k in 0..n {
@@ -4097,12 +4069,12 @@ fn function_decisions(
         for at in 1..blk.ic {
             let first = p.inst(add(blk.i0, wrapping_sub(at, 1)));
             let second = p.inst(add(blk.i0, at));
-            if first.op != OP_READ || second.op != OP_BIND {
+            if first.op != Op::Read || second.op != Op::Bind {
                 continue;
             }
             let value = n32(p.op(second.a));
             let q = inc(second.a);
-            if value != first.dest || g.uses_of(value) != 1 || p.op(q) != PAT_BIND {
+            if value != first.dest || g.uses_of(value) != 1 || p.op(q) != Pat::Bind {
                 continue;
             }
             let n = n32(p.op(add(q, 3)));

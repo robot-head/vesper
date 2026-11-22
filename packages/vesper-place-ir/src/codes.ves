@@ -1,0 +1,69 @@
+// The Place IR word codes (src/place_ir/ir_words.rs) that this package
+// reads and the lowering, aggregates and backend packages write or read
+// again: value enums, so every package folds them to the same literals.
+
+// Operand tags (`T_*`): how a word after an opcode is read.
+pub enum Tag: _ {
+    Raw = 0,
+    Name = 1,
+    OptName = 2,
+    Type = 3,
+    Path = 4,
+    Pool = 5,
+    Value = 6,
+    Block = 7,
+}
+
+// Opcodes (`OP_NAMES`), in `Op` order.
+pub enum Op: _ {
+    Const = 0,
+    Unit = 1,
+    Read = 2,
+    Bind = 3,
+    Write = 4,
+    Unary = 5,
+    Binary = 6,
+    Tuple = 7,
+    Data = 8,
+    Project = 9,
+    Index = 10,
+    Call = 11,
+    Indirect = 12,
+    Try = 13,
+    Closure = 14,
+    Handle = 15,
+    Vector = 16,
+    Tiled = 17,
+    Seq = 18,
+    Fip = 19,
+    Loop = 20,
+    Exit = 21,
+}
+
+// Block terminators.
+pub enum Term: _ {
+    Return = 0,
+    Jump = 1,
+    Branch = 2,
+    Match = 3,
+    Unreachable = 4,
+}
+
+// Pattern kinds.
+pub enum Pat: _ {
+    Wild = 0,
+    Bind = 1,
+    Literal = 2,
+    Tuple = 3,
+    Constructor = 4,
+}
+
+// Literal kinds. A literal is three words: the kind and two payload words.
+pub enum Lit: _ {
+    Int = 0,
+    Float = 1,
+    Bool = 2,
+    String = 3,
+    // An integer past `i128::MAX`.
+    WideInt = 4,
+}
