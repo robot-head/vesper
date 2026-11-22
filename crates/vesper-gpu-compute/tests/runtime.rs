@@ -1,21 +1,12 @@
-//! The Vulkan runtime: shader compilation (runs everywhere, no device
-//! needed), timeline-ordered submissions, the submission obligation, bounds
-//! clamping and typed argument errors.
-use vesper_gpu_compute::shader::{ShaderError, compile_wgsl};
-use vesper_gpu_compute::{Context, GpuError, broadphase, leaked_submissions, tensor, test_context};
+//! The Vulkan runtime: timeline-ordered submissions, the submission
+//! obligation, bounds clamping and typed argument errors. The kernels here
+//! are compiled from WGSL by the test support compiler (`tests/spirv.rs`
+//! covers the interface reader without a device).
+#[path = "support/wgsl.rs"]
+mod wgsl;
 
-const SPIRV_MAGIC: u32 = 0x0723_0203;
-
-#[test]
-fn every_bundled_kernel_compiles_to_spirv() {
-    for (entry, source) in tensor::SOURCES.iter().chain(&broadphase::SOURCES) {
-        let compiled = compile_wgsl(source, entry).unwrap_or_else(|e| panic!("{entry}: {e}"));
-        assert_eq!(compiled.spirv[0], SPIRV_MAGIC, "{entry}");
-        assert!(compiled.storage_bindings >= 1, "{entry}");
-        assert!(compiled.immediate_bytes <= 16, "{entry}");
-        assert!(compiled.workgroup_size[0] >= 64, "{entry}");
-    }
-}
+use vesper_gpu_compute::shader::ShaderError;
+use vesper_gpu_compute::{Context, GpuError, leaked_submissions, test_context};
 
 const ADD: &str = "
 struct P { n: u32, add: u32 }
@@ -28,92 +19,10 @@ fn add(@builtin(global_invocation_id) id: vec3<u32>) {
 }
 ";
 
-/// No `ArrayStride` may decorate an array type that a Workgroup pointer
-/// reaches (VUID-StandaloneSpirv-None-10684, reported by recent validation
-/// layers); storage-buffer arrays keep theirs.
-#[test]
-fn workgroup_arrays_carry_no_explicit_layout() {
-    for (entry, source) in tensor::SOURCES.iter().chain(&broadphase::SOURCES) {
-        let words = compile_wgsl(source, entry).unwrap().spirv;
-        let mut at = 5;
-        let (mut arrays, mut strided, mut workgroup) = (Vec::new(), Vec::new(), Vec::new());
-        while at < words.len() {
-            let count = (words[at] >> 16) as usize;
-            let ops = &words[at + 1..at + count];
-            match words[at] & 0xffff {
-                28 => arrays.push(ops[0]),
-                32 if ops[1] == 4 => workgroup.push(ops[2]),
-                71 if ops[1] == 6 => strided.push(ops[0]),
-                _ => {}
-            }
-            at += count;
-        }
-        for t in &workgroup {
-            assert!(
-                !strided.contains(t),
-                "{entry}: workgroup array {t} has ArrayStride"
-            );
-        }
-        assert!(
-            !strided.is_empty(),
-            "{entry}: buffer arrays keep ArrayStride"
-        );
-        if ["rms_norm", "attention", "scan_main"].contains(entry) {
-            assert!(workgroup.iter().any(|t| arrays.contains(t)), "{entry}");
-        }
-    }
-}
-
-#[test]
-fn malformed_shaders_are_typed_errors() {
-    assert!(matches!(
-        compile_wgsl("fn (", "x"),
-        Err(ShaderError::Parse(_))
-    ));
-    assert!(matches!(
-        compile_wgsl(ADD, "missing"),
-        Err(ShaderError::EntryPoint(_))
-    ));
-    let not_compute = "@fragment fn f() -> @location(0) vec4<f32> { return vec4<f32>(0.0); }";
-    assert!(matches!(
-        compile_wgsl(not_compute, "f"),
-        Err(ShaderError::EntryPoint(_))
-    ));
-    let uniform = "@group(0) @binding(0) var<uniform> u: vec4<f32>;
-        @compute @workgroup_size(1) fn m() { _ = u; }";
-    assert!(matches!(
-        compile_wgsl(uniform, "m"),
-        Err(ShaderError::Interface(_))
-    ));
-    let gap = "@group(0) @binding(1) var<storage, read_write> b: array<u32>;
-        @compute @workgroup_size(1) fn m() { b[0] = 1u; }";
-    assert!(matches!(
-        compile_wgsl(gap, "m"),
-        Err(ShaderError::Interface(_))
-    ));
-    let group1 = "@group(1) @binding(0) var<storage, read_write> b: array<u32>;
-        @compute @workgroup_size(1) fn m() { b[0] = 1u; }";
-    assert!(matches!(
-        compile_wgsl(group1, "m"),
-        Err(ShaderError::Interface(_))
-    ));
-    let ill_typed = "@group(0) @binding(0) var<storage, read_write> b: array<u32>;
-        @compute @workgroup_size(1) fn m() { b[0] = 1.5; }";
-    assert!(matches!(
-        compile_wgsl(ill_typed, "m"),
-        Err(ShaderError::Parse(_) | ShaderError::Validation(_))
-    ));
-    let huge = "a".repeat((1 << 20) + 1);
-    assert!(matches!(
-        compile_wgsl(&huge, "m"),
-        Err(ShaderError::Parse(_))
-    ));
-}
-
 #[test]
 fn chained_submissions_complete_in_timeline_order() {
     let Some(ctx) = test_context() else { return };
-    let kernel = ctx.kernel(ADD, "add", 2, 8).unwrap();
+    let kernel = ctx.kernel(&wgsl::spirv(ADD, "add"), "add", 2, 8).unwrap();
     let n = 1000u32;
     let a = ctx.buffer_from(&(0..n).collect::<Vec<u32>>()).unwrap();
     let b = ctx.buffer((n * 4) as u64).unwrap();
@@ -145,7 +54,7 @@ fn chained_submissions_complete_in_timeline_order() {
 #[test]
 fn a_dropped_submission_is_counted_and_still_completes() {
     let Some(ctx) = test_context() else { return };
-    let kernel = ctx.kernel(ADD, "add", 2, 8).unwrap();
+    let kernel = ctx.kernel(&wgsl::spirv(ADD, "add"), "add", 2, 8).unwrap();
     let a = ctx.buffer_from(&[1u32, 2, 3, 4]).unwrap();
     let b = ctx.buffer(16).unwrap();
     let before = leaked_submissions();
@@ -169,7 +78,7 @@ fn a_dropped_submission_is_counted_and_still_completes() {
 #[test]
 fn a_forgotten_submission_keeps_its_resources_alive() {
     let Some(ctx) = test_context() else { return };
-    let kernel = ctx.kernel(ADD, "add", 2, 8).unwrap();
+    let kernel = ctx.kernel(&wgsl::spirv(ADD, "add"), "add", 2, 8).unwrap();
     let n = 1 << 16;
     let a = ctx.buffer_from(&vec![5u32; n as usize]).unwrap();
     let b = ctx.buffer((n * 4) as u64).unwrap();
@@ -194,7 +103,7 @@ fn out_of_bounds_kernel_accesses_are_clamped() {
     let Some(ctx) = test_context() else { return };
     let wild = "@group(0) @binding(0) var<storage, read_write> b: array<u32>;
         @compute @workgroup_size(1) fn m() { b[1000000u] = 7u; }";
-    let kernel = ctx.kernel(wild, "m", 1, 0).unwrap();
+    let kernel = ctx.kernel(&wgsl::spirv(wild, "m"), "m", 1, 0).unwrap();
     let b = ctx.buffer(16).unwrap();
     let mut rec = ctx.record().unwrap();
     rec.dispatch(&kernel, &[&b], &[], [1, 1, 1]).unwrap();
@@ -223,14 +132,22 @@ fn runtime_arguments_are_validated() {
     let mut two = [0u32; 3];
     assert!(b.read(0, &mut two).is_err());
     assert!(matches!(
-        ctx.kernel(ADD, "add", 3, 8),
+        ctx.kernel(&wgsl::spirv(ADD, "add"), "add", 3, 8),
         Err(GpuError::Shader(ShaderError::Interface(_)))
     ));
     assert!(matches!(
-        ctx.kernel(ADD, "add", 2, 4),
+        ctx.kernel(&wgsl::spirv(ADD, "add"), "add", 2, 4),
         Err(GpuError::Shader(ShaderError::Interface(_)))
     ));
-    let kernel = ctx.kernel(ADD, "add", 2, 8).unwrap();
+    assert!(matches!(
+        ctx.kernel(&[0; 8], "add", 2, 8),
+        Err(GpuError::Shader(ShaderError::Malformed(_)))
+    ));
+    assert!(matches!(
+        ctx.kernel(&wgsl::spirv(ADD, "add"), "missing", 2, 8),
+        Err(GpuError::Shader(ShaderError::EntryPoint(_)))
+    ));
+    let kernel = ctx.kernel(&wgsl::spirv(ADD, "add"), "add", 2, 8).unwrap();
     let other = Context::new().unwrap();
     let foreign = other.buffer(16).unwrap();
     let a = ctx.buffer(16).unwrap();

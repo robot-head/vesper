@@ -3,8 +3,9 @@
 # (Context, Buffer, Kernel, Recording, Submission) is the Vesper library in
 # vesper/; SH6 lane 15 deleted the Rust runtime over ash (part 2c). The
 # broadphase's and the tensor kernels' checks and dispatches, and the decode
-# step, are Vesper too (part 2b). The WGSL compiler (naga, src/shader.rs) is
-# still Rust.
+# step, are Vesper too (part 2b). The kernels are committed SPIR-V whose binding
+# interface the Vesper library reads; naga is only the tests' WGSL compiler
+# (part 2d).
 # Every check needs a Vulkan device: run it on Mesa lavapipe
 # (.github/workflows/gpu-compute.yml installs it).
 name = "vesper-gpu-compute"
@@ -19,7 +20,7 @@ run = "cargo test --locked -p vesper-gpu-compute -p vesper-kinetic-gpu"
 # references of vesper-tensor and vesper-kinetic (bit-exact pair sets,
 # matching tokens), the same tests the Rust runtime passed.
 [differential]
-run = "cargo test --locked -p vesper-gpu-compute --test runtime --test generation --test broadphase"
+run = "cargo test --locked -p vesper-gpu-compute --test runtime --test generation --test broadphase --test spirv"
 
 # A B B A in fresh processes against the Rust runtime at its last commit;
 # both arms must print the same digest.

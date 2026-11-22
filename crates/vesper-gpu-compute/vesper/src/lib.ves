@@ -31,6 +31,7 @@ enum Kind: _ {
     Shape = 3,
     Limit = 4,
     Unsupported = 5,
+    Shader = 6,
 }
 
 pub fn unavailable() -> u32 {
@@ -1764,6 +1765,231 @@ pub fn buffer_free(in d: Dev, in b: Buf) eff [Ffi[Vk]] {
     Vk::PfnFreeMemory(pfn_free_memory(d.library), d.device, b.memory, 0);
 }
 
+// `Kind::Shader` details: a SPIR-V module that is not one, lacks the entry
+// point, or binds something other than what the runtime binds.
+enum BadSpirv: _ {
+    Malformed = 1,
+    NoEntry = 2,
+    Bindings = 3,
+    Immediates = 4,
+    Layout = 5,
+}
+
+// The SPIR-V opcodes, decorations and storage classes the interface reader
+// looks at.
+enum Spv: _ {
+    Magic = 119734787,
+    MaxBound = 4194304,
+    EntryPoint = 15,
+    TypeInt = 21,
+    TypeFloat = 22,
+    TypeVector = 23,
+    TypeStruct = 30,
+    TypePointer = 32,
+    Variable = 59,
+    Decorate = 71,
+    MemberDecorate = 72,
+    GlCompute = 5,
+    Binding = 33,
+    DescriptorSet = 34,
+    Offset = 35,
+    UniformConstant = 0,
+    Uniform = 2,
+    PushConstant = 9,
+    StorageBuffer = 12,
+}
+
+const UNSET: u32 = 4294967295;
+
+// A kernel module's binding interface: how many storage buffers it binds
+// (all in set 0 at 0..n) and the size of its immediate block.
+pub copy struct SpirvInterface {
+    pub bindings: u64,
+    pub immediate_bytes: u64,
+}
+
+fn id_table(bound: u64, v: u32) -> ChunkSeq[u32] {
+    let mut t: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](bound);
+    t.resize(bound, v);
+    t
+}
+
+// The id in word `at`, which must be below the module's bound.
+fn id_at(in spirv: Slice[u8], at: u64, bound: u64)
+    -> u64 eff [Fail[GpuErr], Fail[RuntimeError], Fail[ArithOverflow]] {
+    let id = widen_u64(word_at(in spirv, at));
+    if id >= bound {
+        return raise(Kind::Shader, BadSpirv::Malformed, 0);
+    }
+    id
+}
+
+// Whether the NUL-terminated literal string from word `at` up to word `end`
+// is `name`.
+fn names(in spirv: Slice[u8], at: u64, end: u64, in name: Slice[u8])
+    -> bool eff [Fail[RuntimeError], Fail[ArithOverflow]] {
+    let start = at * 4;
+    if start + name.len() >= end * 4 {
+        return false;
+    }
+    for i in 0..name.len() {
+        if spirv[start + i] != name[i] {
+            return false;
+        }
+    }
+    spirv[start + name.len()] == 0
+}
+
+// The bytes a struct type `ty` (declared at word `at`) spans: the end of its
+// last member, rounded up to 4, or 0 when a member has no size (a runtime
+// array, a pointer) or no `Offset`. Member decorations come before the
+// types in a module, so every `Offset` is known here.
+fn struct_bytes(
+    in spirv: Slice[u8],
+    at: u64,
+    ty: u64,
+    bound: u64,
+    in sizes: ChunkSeq[u32],
+    in offsets: ChunkSeq[u64]
+) -> u64 eff [Fail[GpuErr], Fail[RuntimeError], Fail[ArithOverflow]] {
+    let members = widen_u64(word_at(in spirv, at) >> 16) - 2;
+    let mut end: u64 = 0;
+    for m in 0..members {
+        let size = widen_u64(sizes[id_at(in spirv, at + 2 + m, bound)]);
+        if size == 0 {
+            return 0;
+        }
+        let mut offset: u64 = widen_u64(UNSET);
+        for i in 0..offsets.len() {
+            let w = offsets[i];
+            if widen_u64(word_at(in spirv, w + 1)) == ty
+                && widen_u64(word_at(in spirv, w + 2)) == m {
+                offset = widen_u64(word_at(in spirv, w + 4));
+            }
+        }
+        if offset == widen_u64(UNSET) {
+            return 0;
+        }
+        if offset + size > end {
+            end = offset + size;
+        }
+    }
+    (end + 3) / 4 * 4
+}
+
+// Reads the binding interface of `spirv` for the compute entry point
+// `entry`: every storage buffer in set 0 at bindings 0..n without gaps, at
+// most one immediate block of scalars, vectors and structs of them, and no
+// uniform buffers, images or samplers.
+pub fn spirv_interface(in spirv: Slice[u8], in entry: Str)
+    -> SpirvInterface eff [Fail[GpuErr], Fail[RuntimeError], Fail[ArithOverflow]] {
+    let len = spirv.len();
+    if len < 20 || len % 4 != 0 {
+        return raise(Kind::Shader, BadSpirv::Malformed, 0);
+    }
+    if word_at(in spirv, 0) != Spv::Magic {
+        return raise(Kind::Shader, BadSpirv::Malformed, 0);
+    }
+    let bound = widen_u64(word_at(in spirv, 3));
+    if bound > Spv::MaxBound {
+        return raise(Kind::Shader, BadSpirv::Malformed, 0);
+    }
+    let words = len / 4;
+    let name = entry.as_bytes();
+    let mut pointee = id_table(bound, UNSET);
+    let mut sizes = id_table(bound, 0);
+    let mut set_of = id_table(bound, UNSET);
+    let mut binding_of = id_table(bound, UNSET);
+    let mut vars: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut offsets: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut found = false;
+    let mut at: u64 = 5;
+    loop {
+        if at >= words {
+            break;
+        }
+        let head = word_at(in spirv, at);
+        let count = widen_u64(head >> 16);
+        let op = head & 65535;
+        if count == 0 || count > words - at {
+            return raise(Kind::Shader, BadSpirv::Malformed, 0);
+        }
+        if op == Spv::EntryPoint && count >= 4 {
+            if word_at(in spirv, at + 1) == Spv::GlCompute
+                && names(in spirv, at + 3, at + count, in name) {
+                found = true;
+            }
+        } else if (op == Spv::TypeInt || op == Spv::TypeFloat) && count >= 3 {
+            sizes.set(id_at(in spirv, at + 1, bound), word_at(in spirv, at + 2) / 8);
+        } else if op == Spv::TypeVector && count >= 4 {
+            let component = widen_u64(sizes[id_at(in spirv, at + 2, bound)]);
+            let lanes = widen_u64(word_at(in spirv, at + 3));
+            if lanes <= 4 {
+                sizes.set(id_at(in spirv, at + 1, bound), narrow_u32(component * lanes));
+            }
+        } else if op == Spv::TypeStruct && count >= 2 {
+            let id = id_at(in spirv, at + 1, bound);
+            let bytes = struct_bytes(in spirv, at, id, bound, in sizes, in offsets);
+            if bytes <= Max::ImmediateBytes {
+                sizes.set(id, narrow_u32(bytes));
+            }
+        } else if op == Spv::TypePointer && count >= 4 {
+            pointee.set(id_at(in spirv, at + 1, bound), narrow_u32(id_at(in spirv, at + 3, bound)));
+        } else if op == Spv::Variable && count >= 4 {
+            vars.push(at);
+        } else if op == Spv::Decorate && count >= 4 {
+            let id = id_at(in spirv, at + 1, bound);
+            let decoration = word_at(in spirv, at + 2);
+            if decoration == Spv::Binding {
+                binding_of.set(id, word_at(in spirv, at + 3));
+            } else if decoration == Spv::DescriptorSet {
+                set_of.set(id, word_at(in spirv, at + 3));
+            }
+        } else if op == Spv::MemberDecorate && count >= 5 {
+            if word_at(in spirv, at + 3) == Spv::Offset {
+                offsets.push(at);
+            }
+        }
+        at = at + count;
+    }
+    if !found {
+        return raise(Kind::Shader, BadSpirv::NoEntry, 0);
+    }
+    let one: u64 = 1;
+    let mut mask: u64 = 0;
+    let mut bindings: u64 = 0;
+    let mut immediate_bytes: u64 = 0;
+    for v in 0..vars.len() {
+        let w = vars[v];
+        let ty = id_at(in spirv, w + 1, bound);
+        let id = id_at(in spirv, w + 2, bound);
+        let class = word_at(in spirv, w + 3);
+        if class == Spv::StorageBuffer {
+            let b = widen_u64(binding_of[id]);
+            if set_of[id] != 0 || b >= Max::Bindings || mask & (one << b) != 0 {
+                return raise(Kind::Shader, BadSpirv::Layout, 0);
+            }
+            mask = mask | (one << b);
+            bindings = bindings + 1;
+        } else if class == Spv::PushConstant {
+            let block = pointee[ty];
+            if immediate_bytes != 0 || block == UNSET || sizes[widen_u64(block)] == 0 {
+                return raise(Kind::Shader, BadSpirv::Layout, 0);
+            }
+            immediate_bytes = widen_u64(sizes[widen_u64(block)]);
+        } else if class == Spv::Uniform || class == Spv::UniformConstant {
+            return raise(Kind::Shader, BadSpirv::Layout, 0);
+        }
+    }
+    if mask != (one << bindings) - 1 {
+        return raise(Kind::Shader, BadSpirv::Layout, 0);
+    }
+    SpirvInterface {
+        bindings: bindings,
+        immediate_bytes: immediate_bytes,
+    }
+}
+
 // A compute pipeline for entry point `entry` of the SPIR-V module `spirv`
 // (little-endian words), binding `bindings` storage buffers at
 // group 0, bindings 0.., and an immediate block of `imm` bytes.
@@ -1780,6 +2006,13 @@ pub fn kernel_new(in d: Dev, in spirv: Slice[u8], in entry: Str, bindings: u64, 
         if name[i] == 0 {
             return raise(Kind::Shape, BadShape::EntryNul, 0);
         }
+    }
+    let interface = spirv_interface(in spirv, in entry);
+    if interface.bindings != bindings {
+        return raise(Kind::Shader, BadSpirv::Bindings, wrapping_i64(interface.bindings));
+    }
+    if interface.immediate_bytes > imm {
+        return raise(Kind::Shader, BadSpirv::Immediates, wrapping_i64(interface.immediate_bytes));
     }
     // Set-layout bindings at 0 (24 each, up to 8), VkDescriptorSetLayoutCreateInfo
     // at 192, VkPushConstantRange at 224, the set layout at 240,
