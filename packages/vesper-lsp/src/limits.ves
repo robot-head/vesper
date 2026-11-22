@@ -40,8 +40,84 @@ pub copy struct Plimits {
     max_method_bytes: u64
 }
 
-// The number of words of `Plimits` in the harness input.
-pub const LIMIT_WORDS: u64 = 13;
+// The words of `Plimits` in the harness input, field for field, and
+// their count.
+pub enum LimitWord: _ {
+    BodyBytes = 0,
+    ReplyBytes = 1,
+    HeaderBytes = 2,
+    HeaderLineBytes = 3,
+    Headers = 4,
+    JsonDepth = 5,
+    JsonNodes = 6,
+    JsonStringBytes = 7,
+    JsonTotalStringBytes = 8,
+    JsonIndexBytes = 9,
+    JsonWork = 10,
+    IdBytes = 11,
+    MethodBytes = 12,
+    Count = 13
+}
+
+// The harness's little-endian words.
+pub enum Le: _ {
+    WordBytes = 8
+}
+
+// The ASCII bytes the transport reads and writes, and `'a' - 10` for hex
+// digits.
+pub enum Ascii: _ {
+    Backspace = 0x08,
+    Tab = 0x09,
+    Lf = 0x0a,
+    FormFeed = 0x0c,
+    Cr = 0x0d,
+    Space = 0x20,
+    Quote = 0x22,
+    Plus = 0x2b,
+    Dash = 0x2d,
+    Dot = 0x2e,
+    Zero = 0x30,
+    Nine = 0x39,
+    Colon = 0x3a,
+    Semicolon = 0x3b,
+    Equals = 0x3d,
+    UpperA = 0x41,
+    UpperE = 0x45,
+    UpperZ = 0x5a,
+    Backslash = 0x5c,
+    LowerHexBase = 0x57,
+    LowerA = 0x61,
+    LowerE = 0x65,
+    LowerZ = 0x7a,
+    Tilde = 0x7e
+}
+
+// The binary64 fields: the significand width and mask, its hidden bit,
+// the exponent mask and bias, the sign bit and the magnitude mask.
+pub enum F64: _ {
+    SignificandBits = 52,
+    SignificandMask = 4503599627370495,
+    HiddenBit = 4503599627370496,
+    ExponentMask = 2047,
+    // The exponent of the significand's last bit at biased exponent 0.
+    ExponentBias = 1075,
+    SignShift = 63,
+    MagnitudeMask = 9223372036854775807
+}
+
+// `i32`'s bounds: `i32::MAX` and the magnitude of `i32::MIN`.
+pub enum I32: _ {
+    Max = 2147483647,
+    MinMagnitude = 2147483648
+}
+
+// A header line's CRLF.
+pub enum Crlf: _ {
+    Len = 2
+}
+
+const MAX_U64: u64 = 18446744073709551615;
 
 const MIB: u64 = 1048576;
 
@@ -132,7 +208,7 @@ pub fn bound(n: u64, max: u64, kind: Perr) -> Unit eff [Fail[Perr]] {
 
 // `add`: checked, `JsonLimit` on overflow.
 pub fn add(a: u64, b: u64) -> u64 eff [Fail[Perr]] {
-    if b > wrapping_sub(18446744073709551615, a) {
+    if b > wrapping_sub(MAX_U64, a) {
         Fail::raise(Perr::PJsonLimit);
     }
     wrapping_add(a, b)
@@ -147,8 +223,8 @@ pub fn sat_sub(a: u64, b: u64) -> u64 {
 }
 
 pub fn sat_add(a: u64, b: u64) -> u64 {
-    if b > wrapping_sub(18446744073709551615, a) {
-        18446744073709551615
+    if b > wrapping_sub(MAX_U64, a) {
+        MAX_U64
     } else {
         wrapping_add(a, b)
     }
@@ -212,28 +288,29 @@ pub fn perr_name(e: Perr) -> Str {
     }
 }
 
-// The harness input's limits: `LIMIT_WORDS` little-endian words at `at`.
+// The harness input's limits: `LimitWord::Count` little-endian words at
+// `at`.
 pub fn read_limits(in b: Slice[u8], at: u64) -> Plimits {
     Plimits {
-        max_body_bytes: le(in b, at, 0),
-        max_reply_bytes: le(in b, at, 1),
-        max_header_bytes: le(in b, at, 2),
-        max_header_line_bytes: le(in b, at, 3),
-        max_headers: le(in b, at, 4),
-        max_json_depth: le(in b, at, 5),
-        max_json_nodes: le(in b, at, 6),
-        max_json_string_bytes: le(in b, at, 7),
-        max_json_total_string_bytes: le(in b, at, 8),
-        max_json_index_bytes: le(in b, at, 9),
-        max_json_work: le(in b, at, 10),
-        max_id_bytes: le(in b, at, 11),
-        max_method_bytes: le(in b, at, 12)
+        max_body_bytes: le(in b, at, LimitWord::BodyBytes),
+        max_reply_bytes: le(in b, at, LimitWord::ReplyBytes),
+        max_header_bytes: le(in b, at, LimitWord::HeaderBytes),
+        max_header_line_bytes: le(in b, at, LimitWord::HeaderLineBytes),
+        max_headers: le(in b, at, LimitWord::Headers),
+        max_json_depth: le(in b, at, LimitWord::JsonDepth),
+        max_json_nodes: le(in b, at, LimitWord::JsonNodes),
+        max_json_string_bytes: le(in b, at, LimitWord::JsonStringBytes),
+        max_json_total_string_bytes: le(in b, at, LimitWord::JsonTotalStringBytes),
+        max_json_index_bytes: le(in b, at, LimitWord::JsonIndexBytes),
+        max_json_work: le(in b, at, LimitWord::JsonWork),
+        max_id_bytes: le(in b, at, LimitWord::IdBytes),
+        max_method_bytes: le(in b, at, LimitWord::MethodBytes)
     }
 }
 
 // The little-endian word `k` after byte `at` (0 past the end).
 pub fn le(in b: Slice[u8], at: u64, k: u64) -> u64 {
-    match b.try_read_u64_le(wrapping_add(at, wrapping_mul(k, 8))) {
+    match b.try_read_u64_le(wrapping_add(at, wrapping_mul(k, Le::WordBytes))) {
         Option::Some(x) => x,
         Option::None => 0,
     }

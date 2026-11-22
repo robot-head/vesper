@@ -156,7 +156,7 @@ structured extractor), the refusal, or the rendered definitions:
 | Test | Cases | Differences |
 |---|--:|--:|
 | `cfg_functions_match_rust_on_the_corpus` | 303 worlds, 22,058 functions; 13,547 on the CFG path, 2,899 of them refused; 111,846 lines | 0 |
-| `cfg_functions_match_rust_on_test_sources` | 149 programs from `tests/lean*.rs` and `tests/tiled.rs` plus mutants: 249 functions, 153 on the CFG path, 8 lifted closures, tiled operations, 6 name refusals | 0 |
+| `cfg_functions_match_rust_on_test_sources` | 155 programs from `tests/lean*.rs` and `tests/tiled.rs` plus mutants: 258 functions, 153 on the CFG path, 8 lifted closures, tiled operations, 6 name refusals | 0 |
 | `unoptimized_jit_agrees` | every 7th world | 0 |
 
 The corpus's refusals are mostly loops (1,758), bit operators (`&`, `>>`,
@@ -184,14 +184,76 @@ nodes) and packing the text. So the two sides are at parity, not a clear
 win. The next speedup is a symbol-indexed local table: `Fun::slot_bit` is
 currently a linear search over the function's locals.
 
+## Part 3a: the structured extractor over `Id`
+
+`Generator::function` extracts the functions the CFG gate refuses. Part 3a
+ports it for every function that is not polymorphic in its monad, that
+is, with no effects, no effectful arrow in its result and no effectful
+arrow among its parameters. Those use the `Id` monad.
+
+- `src/ast.ves`: the function bodies. The encoder (`Ast` in the test)
+  appends an AST section after the CFG input: per function its body,
+  parameters (name, passing mode, type) and result, then the patterns and
+  expressions. The encoder also precomputes what Rust looks up in
+  `World` tables: sequence and tiled routes (`lean::tiled_route`, a hidden
+  hook over `tiled::resolve_ir_call`), name classes (float refusal, integer
+  intrinsic, wrapping operator, `Box::new`), `Box` patterns, closures'
+  free names in `BTreeSet` order and each expression's type after
+  `default_type`.
+- `src/tm.ves`: term builders (references, applications, operators,
+  `ite`, matches, projections, records, binders, patterns and statements).
+- `src/gen.ves`: the generator. Its scope and current-value tables are
+  stacks where the last entry wins and a restore truncates. A block
+  restores only the scope; `if`, `match`, `&&`, `||` and closures restore
+  both, as in Rust. Names come from `fresh` and `temp` with Rust's
+  counters.
+- `src/build.ves`: terms are word ranges (`T { a, n }`) of the builder,
+  so a term can be built before the node that holds it and copied in
+  (`B::at`, `B::since`, `B::put`). Construction follows Rust's evaluation
+  order, so the first refusal is Rust's.
+- `src/lean.rs`: `#[doc(hidden)] pub fn structured_function_nodes`, which
+  runs `Generator::function` over `Id` per function. It adds no behaviour.
+
+The port writes `skip` for what the effects part will do: handlers,
+effect operations, effectful closures and calls, and types with an
+effectful arrow. The test replaces each skipped function's text with
+Rust's.
+
+### Differential
+
+`cargo test --test self_host_lean_extract structured_` (debug, Linux
+x86-64). Per source function, the text is `none` (CFG path or
+polymorphic), `skip`, the refusal, or the rendered definition:
+
+| Test | Cases | Differences |
+|---|--:|--:|
+| `structured_functions_match_rust_on_the_corpus` | 303 worlds, 22,319 functions: 2,274 definitions and 5,174 refusals from the structured extractor, 119 skipped; 46,912 lines | 0 |
+| `structured_functions_match_rust_on_test_sources` | 155 programs from `tests/lean*.rs` and `tests/tiled.rs` plus mutants (including tiled column operations and record patterns off the CFG path): 66 definitions, 10 refusals, 63 skipped | 0 |
+
+### Speed
+
+`CHECK_HARNESS_SPEED=1 cargo test --release --test self_host_lean_extract
+abba_structured -- --ignored --nocapture` runs ABBA (best of six per side)
+over all 303 worlds per run. Both sides run the CFG gate first.
+
+| | Rust `structured_function_nodes` | Vesper `extract_structured_functions` (optimized JIT) | Ratio |
+|---|--:|--:|--:|
+| Corpus functions | 1,924 ms | 4,562 ms | 2.37x |
+
+Taking out the CFG gate (about 1.25 s on each side, from part 2's timing)
+leaves roughly 0.6 s for Rust's structured extractor and 3.3 s for
+Vesper's, about 5x. Vesper's time also includes decoding the larger input
+and rendering each function's text, which Rust does not do here. This part
+is not at parity; profiling the generator (name lookup in `fresh`, the
+linear scope and current-value stacks, and term copies) is the next step
+before the swap.
+
 ## What is left
 
-- **The structured extractor.** `Generator::function` (about 3,000 lines
-  of `src/lean.rs` and `src/seq/lean.rs`) handles the 8,511 corpus
-  functions the CFG gate refuses. It needs the function bodies in the
-  input (an expression encoding like check-fip's, plus `handler_effects`)
-  and the monad form of `ty_with_fip`.
-- **Part 3: ordering, fuel companions, contracts.** `order_definitions`,
+- **Effects (part 3b).** The polymorphic monad `m`: `perform`,
+  `resume`, handlers, effectful closures and calls. This covers the 119
+  skipped corpus functions and the polymorphic ones.
+- **Part 3c: ordering, fuel companions, contracts.** `order_definitions`,
   the recursive family and `$fuel` companions, `Totality`, `contracts`,
   the proof module and `omitted_executable_definitions`. Then the full
   module differential over the corpus and the sources of `tests/lean*.rs`.

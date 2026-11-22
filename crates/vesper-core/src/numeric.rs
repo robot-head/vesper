@@ -206,8 +206,13 @@ impl IntegerKind {
         }
         Self::from_name(t.name())
     }
+    /// The kind of an unconstrained integer literal `n`: `i64`, else `u64`,
+    /// else `i128` (manuscript "Integer kinds"; a literal above `i128::MAX`
+    /// is a `u128`).
     pub fn default_for(n: i128) -> Self {
-        if n > i64::MAX as i128 {
+        if n > u64::MAX as i128 || n < i64::MIN as i128 {
+            Self::I128
+        } else if n > i64::MAX as i128 {
             Self::U64
         } else {
             Self::I64

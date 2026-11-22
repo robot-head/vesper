@@ -21,6 +21,12 @@ const MODULES: &[(&str, &str, &str)] = &[
         "port/check_layout.rs",
     ),
     ("hybrid_ir_check", "modules/ir_check", "port/ir_check.rs"),
+    // SH2 lane 10 (#1182): the stack-bound report.
+    (
+        "hybrid_stack_bound",
+        "modules/stack_bound",
+        "port/stack_bound.rs",
+    ),
     // SH4 lane 1 (#1275): the census lowering family, emitted through
     // lent Cranelift handles.
     ("hybrid_codegen", "modules/codegen", "port/codegen.rs"),
@@ -73,12 +79,35 @@ const DIVERGENT_CHECK_LAYOUT_EDIT: (&str, &str) = (
     "    layout_words(in input[0..0])\n",
 );
 
+/// The same divergence on the encode-once path (#1276): every part reads as
+/// empty, so each scoped layout is of the wrong type, with no ADTs.
+#[cfg(feature = "divergent")]
+const DIVERGENT_SCOPED_LAYOUT_EDIT: (&str, &str) = (
+    "    layout_part(inout s.c, in part)\n",
+    "    layout_part(inout s.c, in part[0..0])\n",
+);
+
 /// The IR check's divergence check: every program gets one made-up E0410
 /// (`divergent_words` in modules/ir_check), so every checked file fails.
 #[cfg(feature = "divergent-ir-check")]
 const DIVERGENT_IR_CHECK_EDIT: (&str, &str) = (
     "    ir_check_words(in input)\n",
     "    divergent_words(in input)\n",
+);
+
+/// The stack-bound divergence check: every graph is rejected as malformed
+/// (`divergent_words` in modules/stack_bound), so every report differs.
+#[cfg(feature = "divergent-stack-bound")]
+const DIVERGENT_STACK_BOUND_EDIT: (&str, &str) = (
+    "    stack_bound_words(in input)\n",
+    "    divergent_words(in input)\n",
+);
+
+/// The same on the encode-once path (#1276).
+#[cfg(feature = "divergent-ir-check")]
+const DIVERGENT_SCOPED_IR_CHECK_EDIT: (&str, &str) = (
+    "    ir_check_part(inout s.c, in part)\n",
+    "    divergent_words(in part)\n",
 );
 
 /// The inliner's divergence check: an empty report reads back as "nothing
@@ -137,12 +166,26 @@ fn main() {
         #[cfg(feature = "divergent")]
         let port = if *library == "hybrid_check_layout" {
             port.edit(DIVERGENT_CHECK_LAYOUT_EDIT.0, DIVERGENT_CHECK_LAYOUT_EDIT.1)
+                .edit(
+                    DIVERGENT_SCOPED_LAYOUT_EDIT.0,
+                    DIVERGENT_SCOPED_LAYOUT_EDIT.1,
+                )
         } else {
             port
         };
         #[cfg(feature = "divergent-ir-check")]
         let port = if *library == "hybrid_ir_check" {
             port.edit(DIVERGENT_IR_CHECK_EDIT.0, DIVERGENT_IR_CHECK_EDIT.1)
+                .edit(
+                    DIVERGENT_SCOPED_IR_CHECK_EDIT.0,
+                    DIVERGENT_SCOPED_IR_CHECK_EDIT.1,
+                )
+        } else {
+            port
+        };
+        #[cfg(feature = "divergent-stack-bound")]
+        let port = if *library == "hybrid_stack_bound" {
+            port.edit(DIVERGENT_STACK_BOUND_EDIT.0, DIVERGENT_STACK_BOUND_EDIT.1)
         } else {
             port
         };

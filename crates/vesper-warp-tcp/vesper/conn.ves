@@ -176,6 +176,11 @@ struct Tcb {
     sent_head: u64,
     sent_len: u64,
     sent_cap: u64,
+    // Kept by the sq_* helpers: the summed `seg_bytes` of the entries
+    // neither SACKed nor lost (what `pipe` adds up), and the number of
+    // entries lost and not SACKed (what `try_retransmit` looks for).
+    sent_pipe: u64,
+    sent_lost: u64,
     next_pn: u64,
     rtt: RttEstimator,
     timed: Option[u64],
@@ -344,17 +349,59 @@ fn sq_get(in t: Tcb, i: u64) -> SentSeg {
     }
 }
 
+// What an entry adds to `sent_pipe`.
+fn sq_pipe_part(s: SentSeg) -> u64 {
+    if !s.sacked && !s.lost {
+        widen_u64(seg_bytes(s))
+    } else {
+        0
+    }
+}
+
+// What an entry adds to `sent_lost`.
+fn sq_lost_part(s: SentSeg) -> u64 {
+    if s.lost && !s.sacked {
+        1
+    } else {
+        0
+    }
+}
+
+fn sq_count_in(inout t: Tcb, s: SentSeg) {
+    t.sent_pipe = wrapping_add(t.sent_pipe, sq_pipe_part(s));
+    t.sent_lost = wrapping_add(t.sent_lost, sq_lost_part(s));
+}
+
+fn sq_count_out(inout t: Tcb, s: SentSeg) {
+    t.sent_pipe = wrapping_sub(t.sent_pipe, sq_pipe_part(s));
+    t.sent_lost = wrapping_sub(t.sent_lost, sq_lost_part(s));
+}
+
 fn sq_set(inout t: Tcb, i: u64, s: SentSeg) {
     let k = sq_slot(in t, i);
-    t.sent.try_set(k, s);
+    match t.sent.try_get(k) {
+        Option::Some(old) => {
+            sq_count_out(inout t, old);
+            sq_count_in(inout t, s);
+            t.sent.try_set(k, s);
+        },
+        Option::None => (),
+    }
 }
 
 fn sq_push(inout t: Tcb, s: SentSeg) -> bool {
     if t.sent_len == t.sent_cap {
         false
     } else {
+        // Slots fill in order from 0, and the ring wraps only once all
+        // `sent_cap` slots exist, so a new slot is always the next one.
         let k = sq_slot(in t, t.sent_len);
-        t.sent.try_set(k, s);
+        if k == t.sent.len() {
+            t.sent.push(s);
+        } else {
+            t.sent.try_set(k, s);
+        }
+        sq_count_in(inout t, s);
         t.sent_len = wrapping_add(t.sent_len, 1);
         true
     }
@@ -362,6 +409,8 @@ fn sq_push(inout t: Tcb, s: SentSeg) -> bool {
 
 fn sq_pop_front(inout t: Tcb) {
     if t.sent_len > 0 {
+        let front = sq_get(in t, 0);
+        sq_count_out(inout t, front);
         t.sent_head = wrapping_add(t.sent_head, 1);
         if t.sent_head == t.sent_cap {
             t.sent_head = 0;
@@ -373,6 +422,8 @@ fn sq_pop_front(inout t: Tcb) {
 fn sq_clear(inout t: Tcb) {
     t.sent_head = 0;
     t.sent_len = 0;
+    t.sent_pipe = 0;
+    t.sent_lost = 0;
 }
 
 fn ooo_remove(inout t: Tcb, i: u64) {
@@ -436,10 +487,9 @@ pub fn config_validate(cfg: Config) -> Result[Unit, TcpFail] {
 // A closed connection for a configuration `config_validate` accepted.
 pub fn tcb_new(cfg: Config) -> Tcb {
     let cap = widen_u64(cfg.max_in_flight_segments);
-    let mut sent: ChunkSeq[SentSeg] = ChunkSeq::with_capacity[SentSeg](cap);
-    for i in 0..cap {
-        sent.push(no_seg());
-    }
+    // Slots are written on first use (see `sq_push`), so the queue's
+    // memory is not touched until segments are in flight.
+    let sent: ChunkSeq[SentSeg] = ChunkSeq::with_capacity[SentSeg](cap);
     Tcb {
         cfg: cfg,
         st: State::Closed,
@@ -470,6 +520,8 @@ pub fn tcb_new(cfg: Config) -> Tcb {
         sent_head: 0,
         sent_len: 0,
         sent_cap: cap,
+        sent_pipe: 0,
+        sent_lost: 0,
         next_pn: 0,
         rtt: rtt_new(cfg.rto),
         timed: Option::None,

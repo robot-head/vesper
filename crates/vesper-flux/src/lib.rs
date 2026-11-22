@@ -10,10 +10,12 @@
 //! or range failures can reject a computation whose final mathematical result fits.
 #![deny(unsafe_code)]
 
+#[cfg(test)]
+mod accumulator_differential;
 mod circuit;
 mod frontier;
 /// The adapters to the Vesper library `flux` (vesper/), where the Z-set
-/// kernels and the frontier run.
+/// kernels, the frontier, the accumulator and the CDC decoder run.
 mod port;
 mod zset;
 

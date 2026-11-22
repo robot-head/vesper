@@ -41,4 +41,29 @@ fn checker_swaps_free_their_allocations() {
     let before = ir_check_binding::live_allocations();
     let _ = ir_check_binding::validate_words(&ir);
     assert_eq!(ir_check_binding::live_allocations(), before);
+
+    // The encode-once inputs (#1276): a compilation's `LayoutInput` and
+    // `IrInput` keep their world until dropped, then free all of it.
+    let before = layout_binding::live_allocations();
+    {
+        let mut log = check_words::WorldLog::new(&w);
+        let mut cur = check_words::Cursor::default();
+        let mut input = layout_binding::LayoutInput::new();
+        for t in types.iter().chain(&types) {
+            let part = log.layout_part(&w, &mut cur, t).unwrap();
+            let _ = input.layout_of(&part);
+        }
+    }
+    assert_eq!(layout_binding::live_allocations(), before, "LayoutInput");
+    let before = ir_check_binding::live_allocations();
+    {
+        let mut log = check_words::WorldLog::new(&w);
+        let mut cur = check_words::Cursor::default();
+        let mut input = ir_check_binding::IrInput::new();
+        for _ in 0..3 {
+            let part = log.ir_part(&w, &mut cur, &program).unwrap();
+            let _ = input.validate(&part);
+        }
+    }
+    assert_eq!(ir_check_binding::live_allocations(), before, "IrInput");
 }

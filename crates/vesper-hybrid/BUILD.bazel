@@ -12,11 +12,21 @@ vesper_hybrid(
         },
         "hybrid_check_layout": {
             "edit_src": "modules/check_layout/src/lib.ves",
-            "edits": {"    layout_words(in input)\n": "    layout_words(in input[0..0])\n"},
+            "edits": {
+                "    layout_words(in input)\n": "    layout_words(in input[0..0])\n",
+                "    layout_part(inout s.c, in part)\n": "    layout_part(inout s.c, in part[0..0])\n",
+            },
         },
         "hybrid_ir_check": {
             "edit_src": "modules/ir_check/src/lib.ves",
-            "edits": {"    ir_check_words(in input)\n": "    divergent_words(in input)\n"},
+            "edits": {
+                "    ir_check_words(in input)\n": "    divergent_words(in input)\n",
+                "    ir_check_part(inout s.c, in part)\n": "    divergent_words(in part)\n",
+            },
+        },
+        "hybrid_stack_bound": {
+            "edit_src": "modules/stack_bound/src/lib.ves",
+            "edits": {"    stack_bound_words(in input)\n": "    divergent_words(in input)\n"},
         },
         "hybrid_ir_inline": {
             "edit_src": "modules/ir_inline/src/lib.ves",
@@ -60,14 +70,21 @@ vesper_hybrid(
             "//:codegen_calls_emit_package",
             "//packages/vesper-cranelift:cranelift_package",
         ],
-        # The export glue (#1286) emits through the Cranelift shim too.
+        # The export planner and glue (#1286); the glue emits through the
+        # Cranelift shim too.
         "hybrid_codegen_export": [
             "//:codegen_export_glue_package",
+            "//:codegen_export_package",
             "//packages/vesper-cranelift:cranelift_package",
         ],
         "hybrid_ir_check": [
             "//:check_data_package",
             "//:ir_check_package",
+        ],
+        # The stack-bound swap (#1182) builds on @vesper/check-loops-atomics.
+        "hybrid_stack_bound": [
+            "//:check_data_package",
+            "//:check_loops_atomics_package",
         ],
         "hybrid_ir_inline": [
             "//:check_data_package",
@@ -113,6 +130,7 @@ vesper_hybrid(
         "hybrid_parse": "modules/parse",
         "hybrid_test_runner": "modules/test_runner",
         "hybrid_place_ir": "modules/place_ir",
+        "hybrid_stack_bound": "modules/stack_bound",
         "hybrid_bounds_hoist": "modules/bounds_hoist",
     },
     # The export glue swap (#1286) builds every library a port crate links
@@ -176,5 +194,12 @@ vesper_hybrid(
             ":bin/vesper-hybrid",
             "//:bin/vesper",
         ],
+        # The stack-bound swap (#1182) through the CLI.
+        "test/stack_bound": [
+            ":bin/vesper-hybrid",
+            "//:bin/vesper",
+        ],
+        # SH4 lane 2 (#1276): the hybrid's own cost report.
+        "test/swap_inputs": [":bin/vesper-hybrid"],
     },
 )

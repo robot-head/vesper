@@ -1,0 +1,463 @@
+// The `numeric` hook's `TiledSeq` family: `Codegen::tiled_op` of
+// src/tiled/native.rs, emitted through the lent Cranelift builder and
+// module (self-hosting SH4 lane 11, #1285, part 2).
+//
+// The Rust code sends one `codegen_swap::numeric::TILED` request per
+// operation, with the layout it resolved (the words are documented there)
+// and with the tiled runtime already defined. Every emission makes the
+// Cranelift calls of the Rust function in the same order.
+
+pub const NUM_TILED: u32 = 1;
+
+// `numeric::TILED_*`.
+const TK_NEW: u64 = 1;
+const TK_WITH_CAPACITY: u64 = 2;
+const TK_WITH_REGION: u64 = 3;
+const TK_LEN: u64 = 4;
+const TK_TILE_COUNT: u64 = 5;
+const TK_PUSH: u64 = 6;
+const TK_GET: u64 = 7;
+const TK_SET: u64 = 8;
+const TK_COL_GET: u64 = 9;
+const TK_COL_SET: u64 = 10;
+const TK_LOAD_TILE_VEC: u64 = 11;
+
+// The request's first words: the kind, then 1 in a JIT module.
+const TW_KIND: u64 = 0;
+const TW_JIT: u64 = 1;
+const TW_FIRST: u64 = 2;
+
+// A cold field or column descriptor's first word (`COL_GET`/`COL_SET`).
+const TC_HOT: u64 = 0;
+
+// The shim's type codes of scalars `i64_word_to_type` converts to.
+const TT_I32: u32 = 3;
+const TT_I64: u32 = 4;
+const TT_F32: u32 = 6;
+const TT_F64: u32 = 7;
+// Bits of a shim type code's lane (`lane | log2(lanes) << 8`).
+const TT_LANE: u32 = 255;
+
+// `MemFlags::new()`, `little()`.
+const TF_PLAIN: u32 = 0;
+const TF_LITTLE: u32 = 16;
+// Convert ops: `bitcast` with `MemFlags::new()`, `uextend`, `ireduce`.
+const TV_UEXTEND: u32 = 1;
+const TV_IREDUCE: u32 = 3;
+const TV_BITCAST: u32 = 4;
+const TCC_NE: u32 = 1;
+const T_WORD: u64 = 8;
+
+// The request's words from `TW_FIRST`, read in order.
+struct Words {
+    call: u64,
+    at: u64,
+}
+
+fn tw_next(inout w: Words) -> u64 eff [Ffi[Cranelift]] {
+    let x = call_arg(w.call, w.at);
+    w.at = wrapping_add(w.at, 1);
+    x
+}
+fn tw_value(inout w: Words) -> Value eff [Ffi[Cranelift]] {
+    value_of_word(tw_next(inout w))
+}
+
+fn tt(code: u32) -> Ty {
+    Ty {
+        code: code
+    }
+}
+
+fn t_iconst(inout b: Builder, v: u64) -> Value eff [Ffi[Cranelift]] {
+    ins_iconst(inout b, tt(TT_I64), wrapping_i64(v))
+}
+
+// `tiled_runtime_call`: declare `name` with one `i64` per argument and an
+// `i64` result (imported in a JIT module, local otherwise), and call it.
+fn t_call(inout b: Builder, inout m: Module, jit: bool, in name: Str, in args: Slice[u32])
+    -> Value eff [Ffi[Cranelift]] {
+    let s = sig_new(inout m, call_conv_default());
+    for _ in 0..args.len() {
+        sig_param(inout m, s, tt(TT_I64));
+    }
+    sig_return(inout m, s, tt(TT_I64));
+    let linkage = if jit {
+        linkage_import()
+    } else {
+        linkage_local()
+    };
+    let f = declare_function(inout m, in name.as_bytes(), linkage, s);
+    let r = import_function(inout b, inout m, f);
+    ins_call(inout b, r, in args);
+    inst_result(inout b, 0)
+}
+
+fn t_vals(a: Value, c: Value, d: Value, e: Value, f: Value, n: u32) -> ChunkSeq[u32] {
+    let mut s = ChunkSeq::with_capacity[u32](5);
+    s.push(a.id);
+    if n > 1 {
+        s.push(c.id);
+    }
+    if n > 2 {
+        s.push(d.id);
+    }
+    if n > 3 {
+        s.push(e.id);
+    }
+    if n > 4 {
+        s.push(f.id);
+    }
+    s
+}
+
+// `alloc`: a zeroed stack slot of `max(size, 8)` bytes.
+fn t_alloc(inout b: Builder, inout m: Module, size: u32) -> Value eff [Ffi[Cranelift]] {
+    let bytes = if size < 8 {
+        8
+    } else {
+        size
+    };
+    let slot = create_stack_slot(inout b, bytes, 3);
+    let ptr = ins_stack_addr(inout b, module_pointer_type(in m), slot, 0);
+    for i in 0..(widen_u64(bytes) >> 3) {
+        let zero = ins_iconst(inout b, tt(TT_I64), 0);
+        ins_store(inout b, TF_PLAIN, zero, ptr, wrapping_i32(wrapping_mul(i, T_WORD)));
+    }
+    ptr
+}
+
+// `value_to_i64_word`.
+fn t_to_word(inout b: Builder, v: Value) -> Value eff [Ffi[Cranelift]] {
+    let ty = value_type(inout b, v).code;
+    if ty == TT_F64 {
+        ins_convert(inout b, TV_BITCAST, tt(TT_I64), v)
+    } else if ty == TT_F32 {
+        let bits = ins_convert(inout b, TV_BITCAST, tt(TT_I32), v);
+        ins_convert(inout b, TV_UEXTEND, tt(TT_I64), bits)
+    } else if ty != TT_I64 && (ty & TT_LANE) < TT_I64 {
+        ins_convert(inout b, TV_UEXTEND, tt(TT_I64), v)
+    } else {
+        v
+    }
+}
+
+// `i64_word_to_type` for a scalar of shim type `ty`.
+fn t_from_word(inout b: Builder, word: Value, ty: u32) -> Value eff [Ffi[Cranelift]] {
+    if ty == TT_F64 {
+        ins_convert(inout b, TV_BITCAST, tt(TT_F64), word)
+    } else if ty == TT_F32 {
+        let bits = ins_convert(inout b, TV_IREDUCE, tt(TT_I32), word);
+        ins_convert(inout b, TV_BITCAST, tt(TT_F32), bits)
+    } else if ty < TT_I64 {
+        ins_convert(inout b, TV_IREDUCE, tt(ty), word)
+    } else {
+        word
+    }
+}
+
+// `store_tiled_row`: the row layout follows in `w`.
+fn t_store_row(
+    inout b: Builder,
+    inout m: Module,
+    jit: bool,
+    inout w: Words,
+    seq: Value,
+    row: Value,
+    record: Value
+) eff [Ffi[Cranelift]] {
+    let hot = tw_next(inout w);
+    for _ in 0..hot {
+        let offset = wrapping_i32(tw_next(inout w));
+        let tile_offset = tw_next(inout w);
+        let elem_bytes = tw_next(inout w);
+        let word = ins_load(inout b, tt(TT_I64), TF_PLAIN, record, offset);
+        let col_off = t_iconst(inout b, tile_offset);
+        let eb = t_iconst(inout b, elem_bytes);
+        let args = t_vals(seq, row, col_off, eb, word, 5);
+        let _r = t_call(inout b, inout m, jit, in "vesper_tiled_hot_store", in args.as_slice());
+    }
+    let cold = tw_next(inout w);
+    for _ in 0..cold {
+        let aggregate = tw_next(inout w) != 0;
+        let words = tw_next(inout w);
+        let offset = wrapping_i32(tw_next(inout w));
+        let word_offset = tw_next(inout w);
+        let n = if aggregate {
+            words
+        } else {
+            1
+        };
+        for k in 0..n {
+            let off = wrapping_add(offset, wrapping_i32(wrapping_mul(k, T_WORD)));
+            let word = ins_load(inout b, tt(TT_I64), TF_PLAIN, record, off);
+            let woff = t_iconst(inout b, wrapping_add(word_offset, k));
+            let args = t_vals(seq, row, woff, word, word, 4);
+            let _r = t_call(
+                inout b,
+                inout m,
+                jit,
+                in "vesper_tiled_cold_store",
+                in args.as_slice()
+            );
+        }
+    }
+}
+
+// `load_tiled_row` into a fresh zeroed record of `size` bytes.
+fn t_load_row(
+    inout b: Builder,
+    inout m: Module,
+    jit: bool,
+    inout w: Words,
+    seq: Value,
+    row: Value,
+    size: u32
+) -> Value eff [Ffi[Cranelift]] {
+    let out = t_alloc(inout b, inout m, size);
+    let hot = tw_next(inout w);
+    for _ in 0..hot {
+        let offset = wrapping_i32(tw_next(inout w));
+        let tile_offset = tw_next(inout w);
+        let elem_bytes = tw_next(inout w);
+        let col_off = t_iconst(inout b, tile_offset);
+        let eb = t_iconst(inout b, elem_bytes);
+        let args = t_vals(seq, row, col_off, eb, eb, 4);
+        let word = t_call(inout b, inout m, jit, in "vesper_tiled_hot_load", in args.as_slice());
+        ins_store(inout b, TF_PLAIN, word, out, offset);
+    }
+    let cold = tw_next(inout w);
+    for _ in 0..cold {
+        let aggregate = tw_next(inout w) != 0;
+        let words = tw_next(inout w);
+        let offset = wrapping_i32(tw_next(inout w));
+        let word_offset = tw_next(inout w);
+        let n = if aggregate {
+            words
+        } else {
+            1
+        };
+        for k in 0..n {
+            let woff = t_iconst(inout b, wrapping_add(word_offset, k));
+            let args = t_vals(seq, row, woff, woff, woff, 3);
+            let word = t_call(
+                inout b,
+                inout m,
+                jit,
+                in "vesper_tiled_cold_load",
+                in args.as_slice()
+            );
+            let off = wrapping_add(offset, wrapping_i32(wrapping_mul(k, T_WORD)));
+            ins_store(inout b, TF_PLAIN, word, out, off);
+        }
+    }
+    out
+}
+
+// `TiledSeq::new`, `with_capacity` and `with_region`.
+fn t_new(inout b: Builder, inout m: Module, jit: bool, kind: u64, inout w: Words)
+    -> Value eff [Ffi[Cranelift]] {
+    let width = tw_next(inout w);
+    let stride = tw_next(inout w);
+    let cold = tw_next(inout w);
+    // `with_region` reads the region variable before the constants.
+    let region = if kind == TK_WITH_REGION {
+        let var = Var {
+            id: wrapping_u32(tw_next(inout w))
+        };
+        use_var(inout b, var)
+    } else {
+        Value {
+            id: 0
+        }
+    };
+    let wv = t_iconst(inout b, width);
+    let sv = t_iconst(inout b, stride);
+    let cv = t_iconst(inout b, cold);
+    let args = if kind == TK_NEW {
+        let zero = ins_iconst(inout b, tt(TT_I64), 0);
+        t_vals(wv, sv, cv, zero, zero, 5)
+    } else if kind == TK_WITH_CAPACITY {
+        let zero = ins_iconst(inout b, tt(TT_I64), 0);
+        let cap = tw_value(inout w);
+        t_vals(wv, sv, cv, zero, cap, 5)
+    } else {
+        let cap = tw_value(inout w);
+        t_vals(wv, sv, cv, region, cap, 5)
+    };
+    t_call(inout b, inout m, jit, in "vesper_tiled_new", in args.as_slice())
+}
+
+fn t_col_get(inout b: Builder, inout m: Module, jit: bool, inout w: Words)
+    -> Value eff [Ffi[Cranelift]] {
+    let seq = tw_value(inout w);
+    let row = tw_value(inout w);
+    if tw_next(inout w) == TC_HOT {
+        let col_off = t_iconst(inout b, tw_next(inout w));
+        let eb = t_iconst(inout b, tw_next(inout w));
+        let ty = wrapping_u32(tw_next(inout w));
+        let args = t_vals(seq, row, col_off, eb, eb, 4);
+        let word = t_call(inout b, inout m, jit, in "vesper_tiled_hot_load", in args.as_slice());
+        return t_from_word(inout b, word, ty);
+    }
+    let aggregate = tw_next(inout w) != 0;
+    let size = wrapping_u32(tw_next(inout w));
+    let words = tw_next(inout w);
+    let word_offset = tw_next(inout w);
+    let ty = wrapping_u32(tw_next(inout w));
+    if aggregate {
+        let ptr = t_alloc(inout b, inout m, size);
+        for k in 0..words {
+            let woff = t_iconst(inout b, wrapping_add(word_offset, k));
+            let args = t_vals(seq, row, woff, woff, woff, 3);
+            let word = t_call(
+                inout b,
+                inout m,
+                jit,
+                in "vesper_tiled_cold_load",
+                in args.as_slice()
+            );
+            ins_store(inout b, TF_PLAIN, word, ptr, wrapping_i32(wrapping_mul(k, T_WORD)));
+        }
+        ptr
+    } else {
+        let woff = t_iconst(inout b, word_offset);
+        let args = t_vals(seq, row, woff, woff, woff, 3);
+        let word = t_call(inout b, inout m, jit, in "vesper_tiled_cold_load", in args.as_slice());
+        t_from_word(inout b, word, ty)
+    }
+}
+
+fn t_col_set(inout b: Builder, inout m: Module, jit: bool, inout w: Words)
+    -> Value eff [Ffi[Cranelift]] {
+    let seq = tw_value(inout w);
+    let row = tw_value(inout w);
+    let val = tw_value(inout w);
+    if tw_next(inout w) == TC_HOT {
+        let col_off = t_iconst(inout b, tw_next(inout w));
+        let eb = t_iconst(inout b, tw_next(inout w));
+        let word = t_to_word(inout b, val);
+        let args = t_vals(seq, row, col_off, eb, word, 5);
+        let _r = t_call(inout b, inout m, jit, in "vesper_tiled_hot_store", in args.as_slice());
+        return ins_iconst(inout b, tt(TT_I64), 0);
+    }
+    let aggregate = tw_next(inout w) != 0;
+    let _size = tw_next(inout w);
+    let words = tw_next(inout w);
+    let word_offset = tw_next(inout w);
+    if aggregate {
+        for k in 0..words {
+            let word = ins_load(
+                inout b,
+                tt(TT_I64),
+                TF_PLAIN,
+                val,
+                wrapping_i32(wrapping_mul(k, T_WORD))
+            );
+            let woff = t_iconst(inout b, wrapping_add(word_offset, k));
+            let args = t_vals(seq, row, woff, word, word, 4);
+            let _r = t_call(
+                inout b,
+                inout m,
+                jit,
+                in "vesper_tiled_cold_store",
+                in args.as_slice()
+            );
+        }
+    } else {
+        let woff = t_iconst(inout b, word_offset);
+        let word = t_to_word(inout b, val);
+        let args = t_vals(seq, row, woff, word, word, 4);
+        let _r = t_call(inout b, inout m, jit, in "vesper_tiled_cold_store", in args.as_slice());
+    }
+    ins_iconst(inout b, tt(TT_I64), 0)
+}
+
+fn t_load_tile_vec(inout b: Builder, inout m: Module, jit: bool, inout w: Words)
+    -> Value eff [Ffi[Cranelift]] {
+    let seq = tw_value(inout w);
+    let tile = tw_value(inout w);
+    let col_off = t_iconst(inout b, tw_next(inout w));
+    let bytes = wrapping_u32(tw_next(inout w));
+    let chunks = tw_next(inout w);
+    let args = t_vals(seq, tile, col_off, col_off, col_off, 3);
+    let col_ptr = t_call(inout b, inout m, jit, in "vesper_tiled_tile_col_ptr", in args.as_slice());
+    let result = t_alloc(inout b, inout m, bytes);
+    let valid = ins_icmp_imm(inout b, TCC_NE, col_ptr, 0);
+    let ok_blk = create_block(inout b);
+    let zero_blk = create_block(inout b);
+    let done_blk = create_block(inout b);
+    ins_brif0(inout b, valid, ok_blk, zero_blk);
+    switch_to_block(inout b, ok_blk);
+    for c in 0..chunks {
+        let off = wrapping_i32(wrapping_mul(c, 16));
+        let chunk = ins_load(inout b, tt(chunk_ty(E_U8)), TF_LITTLE, col_ptr, off);
+        ins_store(inout b, TF_LITTLE, chunk, result, off);
+    }
+    ins_jump0(inout b, done_blk);
+    switch_to_block(inout b, zero_blk);
+    let zero = ins_iconst(inout b, tt(TT_I64), 0);
+    for k in 0..(widen_u64(bytes) >> 3) {
+        ins_store(inout b, TF_PLAIN, zero, result, wrapping_i32(wrapping_mul(k, T_WORD)));
+    }
+    ins_jump0(inout b, done_blk);
+    switch_to_block(inout b, done_blk);
+    result
+}
+
+// One `TILED` request; answers its value.
+fn tiled_request(call: u64, inout b: Builder, inout m: Module) -> Value eff [Ffi[Cranelift]] {
+    let kind = call_arg(call, TW_KIND);
+    let jit = call_arg(call, TW_JIT) != 0;
+    let mut w = Words {
+        call: call,
+        at: TW_FIRST
+    };
+    if kind == TK_NEW || kind == TK_WITH_CAPACITY || kind == TK_WITH_REGION {
+        return t_new(inout b, inout m, jit, kind, inout w);
+    }
+    if kind == TK_LEN || kind == TK_TILE_COUNT {
+        let seq = tw_value(inout w);
+        let args = t_vals(seq, seq, seq, seq, seq, 1);
+        return if kind == TK_LEN {
+            t_call(inout b, inout m, jit, in "vesper_tiled_len", in args.as_slice())
+        } else {
+            t_call(inout b, inout m, jit, in "vesper_tiled_tile_count", in args.as_slice())
+        };
+    }
+    if kind == TK_PUSH {
+        let seq = tw_value(inout w);
+        let record = tw_value(inout w);
+        let _size = tw_next(inout w);
+        let args = t_vals(seq, seq, seq, seq, seq, 1);
+        let row = t_call(inout b, inout m, jit, in "vesper_tiled_push_begin", in args.as_slice());
+        t_store_row(inout b, inout m, jit, inout w, seq, row, record);
+        return ins_iconst(inout b, tt(TT_I64), 0);
+    }
+    if kind == TK_GET {
+        let seq = tw_value(inout w);
+        let row = tw_value(inout w);
+        let size = wrapping_u32(tw_next(inout w));
+        return t_load_row(inout b, inout m, jit, inout w, seq, row, size);
+    }
+    if kind == TK_SET {
+        let seq = tw_value(inout w);
+        let row = tw_value(inout w);
+        let record = tw_value(inout w);
+        let _size = tw_next(inout w);
+        t_store_row(inout b, inout m, jit, inout w, seq, row, record);
+        return ins_iconst(inout b, tt(TT_I64), 0);
+    }
+    if kind == TK_COL_GET {
+        return t_col_get(inout b, inout m, jit, inout w);
+    }
+    if kind == TK_COL_SET {
+        return t_col_set(inout b, inout m, jit, inout w);
+    }
+    t_load_tile_vec(inout b, inout m, jit, inout w)
+}
+
+fn tiled_known(call: u64) -> bool eff [Ffi[Cranelift]] {
+    let kind = call_arg(call, TW_KIND);
+    call_arg_count(call) > TW_FIRST && kind >= TK_NEW && kind <= TK_LOAD_TILE_VEC
+}
