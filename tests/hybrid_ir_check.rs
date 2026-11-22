@@ -99,8 +99,12 @@ fn differential_cases(
          {rust_only} left to Rust, {:.1} s)",
         start.elapsed().as_secs_f64()
     );
+    // Under Bazel's sampling (CHECK_HARNESS_STRIDE, #1381) the unoptimized
+    // slice compares only a dozen cases, so one more world left to Rust
+    // moves the share by 8 points: allow a fifth there, a tenth otherwise.
+    let floor = if cases < 50 { 5 } else { 10 };
     assert!(
-        rust_only * 10 < cases,
+        rust_only * floor < cases,
         "{rust_only} cases left to Rust against {cases} compared"
     );
     (bad, diags, cases)

@@ -272,6 +272,61 @@ fn wal_ops(n: u64, states: bool) -> Vec<String> {
     log
 }
 
+/// The Warp QUIC wire codec: short headers of every first byte, ACK frames
+/// encoded and parsed back, and 20,000 pseudo-random mutations of ACK
+/// datagrams (bit flips, cuts, extensions and forged range counts) through
+/// `parse_ack`.
+fn quic_wire_transcript() -> String {
+    use vesper_sim_session::model::umem::{ack_frame_bytes, parse_ack, short_header};
+    use vesper_sim_session::model::warp::ack_datagram_len;
+    let mut out = vec![];
+    for first in 0..=255u8 {
+        let head = short_header(first, 0x0102_0304_0506_0708, 0x1_2345_6789);
+        out.push(format!("{first} {} {:?}", hex(&head), parse_ack(&head)));
+    }
+    for ranges in [0, 1, 2, 7, 64] {
+        out.push(format!("len {ranges} {}", ack_datagram_len(ranges)));
+    }
+    let mut rng = 0x9_u64;
+    let mut draw = |m: u64| {
+        rng = rng
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (rng >> 33) % m
+    };
+    for _ in 0..20_000 {
+        let count = draw(5) + 1;
+        let mut hi = (1u64 << 62) - 1 - draw(1_000_000);
+        let mut ranges = vec![];
+        for _ in 0..count {
+            let lo = hi.saturating_sub(draw(50));
+            ranges.push((lo, hi));
+            hi = lo.saturating_sub(draw(40) + 2);
+            if hi < 2 {
+                break;
+            }
+        }
+        let mut bytes = short_header(0x40 | draw(64) as u8, draw(u64::MAX), draw(1 << 40));
+        bytes.extend(ack_frame_bytes(&ranges, draw(1 << 20)));
+        match draw(6) {
+            0 => {}
+            1 => {
+                let i = draw(bytes.len() as u64) as usize;
+                bytes[i] ^= 1 << draw(8);
+            }
+            2 => bytes.truncate(draw(bytes.len() as u64) as usize),
+            3 => bytes.extend((0..draw(40)).map(|_| draw(256) as u8)),
+            4 if bytes.len() > 33 => bytes[30..34].copy_from_slice(&(draw(8) as u32).to_be_bytes()),
+            _ => {
+                let i = 13 + draw(bytes.len() as u64 - 13) as usize;
+                bytes[i] = draw(256) as u8;
+            }
+        }
+        out.push(format!("{} {:?}", hex(&bytes), parse_ack(&bytes)));
+    }
+    out.join("\n")
+}
+
 fn raw_frame(lsn: u64, payload: &[u8]) -> Vec<u8> {
     let mut input = lsn.to_le_bytes().to_vec();
     input.extend_from_slice(payload);
@@ -329,6 +384,12 @@ fn transcripts_match_the_rust_build() {
     match golden.iter().find(|(n, _)| *n == "wal_ops") {
         Some((_, expected)) if *expected == wal => {}
         expected => differences.push(format!("wal_ops: {wal}, expected {expected:?}")),
+    }
+    let quic = hex(&Sha256::digest(quic_wire_transcript().as_bytes()));
+    blessed.push_str(&format!("quic_wire {quic}\n"));
+    match golden.iter().find(|(n, _)| *n == "quic_wire") {
+        Some((_, expected)) if *expected == quic => {}
+        expected => differences.push(format!("quic_wire: {quic}, expected {expected:?}")),
     }
     let net = hex(&Sha256::digest(net_transcript().as_bytes()));
     blessed.push_str(&format!("net {net}\n"));
@@ -499,6 +560,40 @@ fn wal_ops_throughput() {
     }
     eprintln!(
         "wal_ops: {:.1} ns per operation (best of 5), checksum {check}",
+        best.as_nanos() as f64 / n as f64
+    );
+}
+
+/// The QUIC wire codec alone: encode and parse 10^5 ACK datagrams of 1 to 8
+/// ranges. `cargo test --release --test self_host_sim_session -- --ignored
+/// --nocapture`, with and without `--features vesper-port`.
+#[test]
+#[ignore = "timing; run by hand in release"]
+fn quic_throughput() {
+    use vesper_sim_session::model::umem::{ack_frame_bytes, parse_ack, short_header};
+    let n = 100_000u64;
+    let mut best = std::time::Duration::MAX;
+    let mut check = 0u64;
+    for _ in 0..5 {
+        let start = std::time::Instant::now();
+        let mut acc = 0u64;
+        for i in 0..n {
+            let top = 1_000_000 + i * 64;
+            let ranges: Vec<(u64, u64)> = (0..=(i % 8))
+                .map(|r| (top - r * 8 - 3, top - r * 8))
+                .collect();
+            let mut bytes = short_header(0x43, i, i);
+            bytes.extend(ack_frame_bytes(&ranges, i));
+            let ack = parse_ack(&bytes).unwrap();
+            acc = acc
+                .wrapping_add(ack.largest)
+                .wrapping_add(ack.ranges.len() as u64);
+        }
+        best = best.min(start.elapsed());
+        check = acc;
+    }
+    eprintln!(
+        "quic: {:.1} ns per encode + parse (best of 5), checksum {check}",
         best.as_nanos() as f64 / n as f64
     );
 }

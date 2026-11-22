@@ -441,6 +441,60 @@ Until then, keep such tests Rust-only by putting them in the module that is
 compiled only without `vesper-port`. The pilot's `in_range_is_inclusive` test
 in `src/reference.rs` shows this.
 
+## Moving the tests to Vesper
+
+**The rule: tests move, never vanish.** A PR that deletes Rust (a flip, a
+seed retirement, the compiler's retirement) may not delete a Rust test
+without a replacement in the same PR. The replacement is a Vesper test that
+checks the same thing, or the Rust test kept as a differential against the
+last Rust commit (the Aura pattern, #977). Say in the PR which tests moved
+where; the reviewer checks the counts.
+
+Rust tests come in three shapes. `python3 scripts/convert-rust-tests.py
+classify` sorts every file under `tests/` and `crates/*/tests/` and counts
+what is left (add `--files` for one row per file):
+
+| Shape | What the test does | Where it goes |
+|---|---|---|
+| program | embeds Vesper sources and checks them through the compiler: parse, check, the evaluator, the JIT, objects, an executable | one `.ves` file per case under `tests/vesper/<family>/`, run by `vesper test --engines all` |
+| cli | runs the `vesper` binary and compares its output or exit status | the same `.ves` files; the command is `vesper test` or the command the test ran |
+| rust-api | calls a Rust API: a library crate's functions, or the compiler's internal data structures | the flip lane of that crate rewrites it against the Vesper port's API as Anvil tests next to the port's sources (`crates/<crate>/vesper/`), or keeps it as a differential |
+
+### The recipe
+
+1. **Classify.** Run `scripts/convert-rust-tests.py classify --files` and
+   find the crate's or module's test files.
+2. **Convert what the converter knows.** Build the compiler
+   (`cargo build --release --bin vesper`) and run
+
+   ```sh
+   python3 scripts/convert-rust-tests.py convert tests/<file>.rs \
+       --out tests/vesper/<file> --vesper target/release/vesper --write
+   ```
+
+   It finds the file's helpers whose signature and body have a known shape
+   (a `differential(name, source, expected)` that runs `main` on the
+   evaluator and the JIT; a `rejects(source, code, message)` that looks for a
+   diagnostic), turns each call with literal arguments into a `.ves` file,
+   runs it with `vesper test --engines all`, and keeps only the files that
+   pass. It refuses a helper that checks something `--engines all` does not
+   (another backend, the IR, a Rust data structure). `converted.json`
+   records the cases and which `#[test]` functions they cover completely.
+3. **Convert the rest by hand** in the same layout, or teach the converter the
+   file's helper shape (one more entry in `helper_shapes`) when several files
+   share it.
+4. **Prune.** Delete the `#[test]` functions that `converted.json` lists as
+   covered, and the helpers nothing calls any more. A Rust test that checks
+   something no Vesper test can yet (a formatter call, an allocation count
+   read from Rust, an internal type) stays until its own Vesper replacement
+   exists; `kept_in_rust` lists them.
+5. **Run both suites** before pruning: the Rust file and
+   `cargo test --test vesper_suite` must both pass.
+
+`tests/vesper_suite.rs` runs the whole Vesper suite on every CI platform and
+checks each family's case count. When the Rust compiler retires (SH6 lane 2)
+CI runs `vesper test tests/vesper --engines all` directly.
+
 ## Proving the harness can fail
 
 A differential harness that cannot fail proves nothing. The pilot builds a

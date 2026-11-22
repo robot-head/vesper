@@ -49,6 +49,8 @@
 //! | `drops` (fip) | the same | [`INSTRUCTION`] for `Op::Fip` |
 //! | `ffi` | the same | [`INSTRUCTION`] for a call of a foreign (`.vsys`) effect operation |
 //! | `export` | `native_export::glue::define`, after the sequence runtime and `vesper_box_alloc` | the rest of the v2 glue over a lent module ([`ExportHook`]) |
+//! | `plan` | `native_export::plan_with` | the whole library interface ([`PlanHook`]) |
+//! | `interface_json` | `native_export::interface_json` | the whole interface file ([`InterfaceJsonHook`]) |
 //! | `freestanding` | `native_freestanding::build_image` | whole image ([`FreestandingHook`]) |
 //! | `wasm` | `wasm_backend::compile` | whole component ([`WasmHook`]) |
 //! | `ebpf` | `ebpf_backend::compile_world` | whole program ([`EbpfHook`]) |
@@ -138,6 +140,20 @@ pub type ExportHook = fn(
     &World,
     &crate::native::export::LibraryInterface,
 ) -> Option<Result<(), String>>;
+/// The export interface planner hook: `native_export::plan_with`'s
+/// signature (`native_export::plan_native` is the Rust planner); `None`
+/// declines.
+pub type PlanHook = fn(
+    &World,
+    &std::collections::BTreeSet<String>,
+    &str,
+    &crate::native::export::Directives,
+) -> Option<
+    Result<crate::native::export::LibraryInterface, Vec<crate::native::export::ExportError>>,
+>;
+/// The interface file hook: `native_export::interface_json`'s text (the
+/// pretty JSON and its trailing newline); `None` declines.
+pub type InterfaceJsonHook = fn(&crate::native::export::LibraryInterface) -> Option<String>;
 /// The whole-image hook: `native::freestanding::build_image`'s signature;
 /// `None` declines.
 pub type FreestandingHook = fn(
@@ -250,6 +266,8 @@ pub struct CodegenHooks {
     pub numeric: Option<Hook>,
     pub ffi: Option<Hook>,
     pub export: Option<ExportHook>,
+    pub plan: Option<PlanHook>,
+    pub interface_json: Option<InterfaceJsonHook>,
     pub freestanding: Option<FreestandingHook>,
     pub wasm: Option<WasmHook>,
     pub ebpf: Option<EbpfHook>,
@@ -273,6 +291,8 @@ impl CodegenHooks {
     fn any(&self) -> bool {
         Family::ALL.iter().any(|f| self.family(*f).is_some())
             || self.export.is_some()
+            || self.plan.is_some()
+            || self.interface_json.is_some()
             || self.freestanding.is_some()
             || self.wasm.is_some()
             || self.ebpf.is_some()
@@ -584,4 +604,117 @@ pub mod drops {
     /// Drop the `Box` contents a value owns (`Codegen::drop_box_value`).
     /// Args `[value]`, with the value's type; no result.
     pub const DROP_BOX: u32 = 1;
+}
+
+/// The `numeric` family's requests (lane 11, #1285). `Op::Vector` and
+/// `Op::Tiled` instructions arrive as [`INSTRUCTION`] first; a hook that
+/// declines those gets the typed requests below from `Codegen::vector_op`
+/// (src/native_vector.rs) and `Codegen::tiled_op` (src/tiled/native.rs).
+pub mod numeric {
+    /// One `TiledSeq` operation, with the tiled runtime already defined in
+    /// an object module. Args `[kind, jit, ...]`, where `kind` is one of the
+    /// `TILED_*` codes below and `jit` is 1 in a JIT module (the runtime
+    /// is then imported, not local). The rest, by kind (`v` is a value):
+    ///
+    /// - `NEW`: `[tile width, tile stride bytes, cold words per row]`;
+    /// - `WITH_CAPACITY`: those, then `[v capacity]`;
+    /// - `WITH_REGION`: those, then `[region variable, v capacity]`;
+    /// - `LEN`, `TILE_COUNT`: `[v seq]`;
+    /// - `PUSH`: `[v seq, v record]`, `GET`: `[v seq, v row]`, `SET`:
+    ///   `[v seq, v row, v record]`; each followed by the row layout:
+    ///   `[record size, hot count, (record offset, tile offset, element
+    ///   bytes)..., cold count, (aggregate, words, record offset, word
+    ///   offset)...]`;
+    /// - `COL_GET`: `[v seq, v row]`, `COL_SET`: `[v seq, v row, v value]`;
+    ///   then `[0, tile offset, element bytes, type]` for a hot column or
+    ///   `[1, aggregate, size, words, word offset, type]` for a cold field
+    ///   (type is a [`super::ty_code`], 0 for an aggregate);
+    /// - `LOAD_TILE_VEC`: `[v seq, v tile, tile offset, vector bytes,
+    ///   chunks]`.
+    ///
+    /// Result `[value]`.
+    pub const TILED: u32 = 1;
+    /// One vector operation (`Codegen::vector_op`, src/native_vector.rs):
+    /// `[intrinsic, element, lanes, constant count, constants...,
+    /// v operands...]`, with the codes of `request_intrinsic` and
+    /// `request_elem` there. Result `[value]`.
+    pub const VECTOR: u32 = 2;
+    /// `Isa::supported`: `[enabled]`. Result `[value]` (`iconst.i64`).
+    pub const ISA_SUPPORTED: u32 = 3;
+    pub const TILED_NEW: u32 = 1;
+    pub const TILED_WITH_CAPACITY: u32 = 2;
+    pub const TILED_WITH_REGION: u32 = 3;
+    pub const TILED_LEN: u32 = 4;
+    pub const TILED_TILE_COUNT: u32 = 5;
+    pub const TILED_PUSH: u32 = 6;
+    pub const TILED_GET: u32 = 7;
+    pub const TILED_SET: u32 = 8;
+    pub const TILED_COL_GET: u32 = 9;
+    pub const TILED_COL_SET: u32 = 10;
+    pub const TILED_LOAD_TILE_VEC: u32 = 11;
+}
+
+/// The `scalar` family's requests besides [`INSTRUCTION`] (SH4 lane 6,
+/// #1280): the run-time tests of `expr_at`'s raising arms. The hook
+/// answers the test's flag; the Rust code raises and emits the rest as it
+/// always has, so the hook never needs `Codegen`'s raise machinery.
+pub mod scalar {
+    use crate::numeric::IntegerKind;
+    /// `Codegen::checked_arithmetic`'s overflow test of a one-word kind.
+    /// Args `[op, kind, a, b]` (op [`ADD`], [`SUB`], [`MUL`] or [`DIV`];
+    /// kind [`kind_word`]); result `[overflow]`, an `i8` flag. A decline
+    /// leaves the test to the Rust code.
+    pub const OVERFLOW: u32 = 1;
+    /// `Codegen::check_divisor`'s test. Args `[divisor]`; result
+    /// `[nonzero]`, an `i8` flag.
+    pub const DIVISOR: u32 = 2;
+    /// `expr_at`'s checked negation of a one-word kind. Args `[kind, v]`;
+    /// result `[overflow]` (`v` is the signed minimum, or any nonzero
+    /// unsigned value).
+    pub const NEGATE: u32 = 3;
+    /// `Codegen::shift`'s range test. Args `[amount, bits]`; result
+    /// `[bad]` (the amount, as an unsigned lane, is at least `bits`).
+    pub const SHIFT_RANGE: u32 = 4;
+    /// `Codegen::convert`'s checked narrowing bounds. Args
+    /// `[from kind, to kind, v]`; result `[overflow]`. The hook declines
+    /// when the target holds every value of the source (no test).
+    pub const NARROW: u32 = 5;
+    /// The read of a plain scalar local (no home, pointer or split):
+    /// `use_var`, then `coerce` to the read's type. Args
+    /// `[var, kind]` (kind the [`kind_word`] of a kind narrower than 64
+    /// bits, else 0); result `[value, raw]`, the coerced value and the
+    /// `use_var` value (the Rust code keeps the variable's facts on it).
+    /// `raw` must be the `use_var` result itself, not a copy or a coerce
+    /// of it: any other value silently loses the variable's facts rather
+    /// than failing.
+    pub const READ_LOCAL: u32 = 6;
+    /// A fresh local bound to a value: `declare_var` of the value's type,
+    /// then `def_var`. Args `[value]`; result `[var]`.
+    pub const BIND_LOCAL: u32 = 7;
+    /// The definition of a plain local (no home or pointer): `def_var`.
+    /// Args `[var, value]`; no result.
+    pub const WRITE_LOCAL: u32 = 8;
+    /// [`OVERFLOW`]'s operators.
+    pub const ADD: u64 = 1;
+    pub const SUB: u64 = 2;
+    pub const MUL: u64 = 3;
+    pub const DIV: u64 = 4;
+    /// The word of operator `op`, when [`OVERFLOW`] takes it.
+    pub fn op_word(op: &str) -> Option<u64> {
+        match op {
+            "+" => Some(ADD),
+            "-" => Some(SUB),
+            "*" => Some(MUL),
+            "/" => Some(DIV),
+            _ => None,
+        }
+    }
+    /// The word of a one-word integer kind: its position in
+    /// [`crate::numeric::INTEGER_KINDS`] from 1 (`u8` 1 ... `isize` 10).
+    pub fn kind_word(kind: IntegerKind) -> Option<u64> {
+        crate::numeric::INTEGER_KINDS
+            .iter()
+            .position(|k| *k == kind)
+            .map(|i| i as u64 + 1)
+    }
 }

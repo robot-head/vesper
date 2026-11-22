@@ -314,3 +314,29 @@ pub fn read_ctx(inout r: Reader, in b: Slice[u8]) -> Ctx {
         nmap: nmap
     }
 }
+
+// An empty context, for inputs that arrive in parts (self-hosting SH4 lane
+// 2, #1276): `read_ctx` of an input with no names, types or world.
+pub fn ctx_new() -> Ctx {
+    let mut names = names_new();
+    let types = types_new(inout names);
+    let k = known_new(inout names);
+    Ctx {
+        names: names,
+        types: types,
+        world: world_new(k),
+        tmap: ChunkSeq::new[u32](),
+        nmap: ChunkSeq::new[u32]()
+    }
+}
+
+// Appends one part of an input to `c`: the names and types after the ones
+// `c` already has (indices continue from `c.nmap` and `c.tmap`), then a world
+// section whose ADTs, effects and span rows are added to `c.world`'s. The
+// hybrid build sends each compilation's world once in such parts
+// (`WorldLog` in tests/common/check_words.rs); `r` is left at the task.
+pub fn extend_ctx(inout r: Reader, in b: Slice[u8], inout c: Ctx) {
+    read_names(inout r, in b, inout c.names, inout c.nmap);
+    read_types(inout r, in b, inout c.types, in c.nmap, inout c.tmap);
+    read_world(inout r, in b, inout c.world, in c.nmap, in c.tmap);
+}

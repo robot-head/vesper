@@ -1,6 +1,3 @@
-mod attestation_commands;
-mod cas_commands;
-mod crucible_commands;
 mod doc_commands;
 mod doctest_commands;
 mod ebpf_commands;
@@ -9,15 +6,9 @@ mod forge_commands;
 mod highlight_commands;
 mod lib_commands;
 mod lint_commands;
-mod migrate_commands;
-mod package_commands;
 mod package_graph;
-mod replay_commands;
 mod shot_commands;
-mod simd_commands;
 mod tool_commands;
-mod top_commands;
-mod trace_commands;
 mod verify_commands;
 mod vsys_commands;
 use std::{
@@ -41,31 +32,22 @@ const CLI_STACK_BYTES: usize = 64 * 1024 * 1024;
 /// Commands the compiler binary runs itself; `tool_commands::TOOLS` and any
 /// other `vesper-<name>` executable are dispatched before the CLI starts.
 const COMPILER_COMMANDS: &[&str] = &[
-    "attest",
     "build",
-    "cas",
     "check",
     "doc",
     "ebpf",
     "emit",
     "fmt",
     "forge",
-    "fuzz",
     "graph",
     "highlight",
     "jit",
     "lint",
     "lsp",
-    "migrate",
     "proof-audit",
-    "replay",
     "run",
-    "semver",
     "shot",
-    "simd",
     "test",
-    "top",
-    "traceparent",
     "verify",
 ];
 
@@ -117,25 +99,16 @@ fn cli() -> Result<(), String> {
     if command == "highlight" {
         return highlight_commands::run(args.collect());
     }
-    if command == "migrate" {
-        return migrate_commands::run(args.collect());
-    }
-    if command == "replay" {
-        return replay_commands::run(args.collect());
-    }
-    if command == "top" {
-        return top_commands::run(args.collect());
-    }
     if command == "ebpf" {
         return ebpf_commands::run(args.collect());
-    }
-    if command == "fuzz" {
-        return crucible_commands::fuzz(args.collect());
     }
     if command == "verify" {
         let args: Vec<String> = args.collect();
         if args.iter().any(|a| a == "--refute") {
-            return crucible_commands::refute(args);
+            // Counterexample search links Crucible: the `vesper-refute` tool.
+            let args: Vec<std::ffi::OsString> = args.into_iter().map(Into::into).collect();
+            let status = tool_commands::run(tool_commands::REFUTE_TOOL, &args)?;
+            process::exit(tool_commands::exit_code(status));
         }
         return verify_commands::run(args);
     }
@@ -154,26 +127,11 @@ fn cli() -> Result<(), String> {
     if command == "doc" {
         return doc_commands::run(args.collect());
     }
-    if command == "traceparent" {
-        return trace_commands::run(args.collect());
-    }
-    if command == "attest" {
-        return attestation_commands::run(args.collect());
-    }
-    if command == "cas" {
-        return cas_commands::run(args.collect());
-    }
     if command == "proof-audit" {
         return proof_commands::run(args.collect());
     }
-    if command == "simd" {
-        return simd_commands::run(args.collect());
-    }
     if command == "graph" {
         return package_graph::run(args.collect());
-    }
-    if command == "semver" {
-        return package_commands::semver(args.collect());
     }
     if command == "lsp" {
         return lsp::serve(io::BufReader::new(io::stdin()), io::stdout());
@@ -460,7 +418,7 @@ fn cli() -> Result<(), String> {
         let interface = vesper::interface::export(&checked.world, &package)?;
         let bytes = serde_json::to_vec_pretty(&interface).map_err(|e| e.to_string())?;
         return if let Some(path) = output {
-            package_commands::atomic_write(&path, &bytes)
+            vesper::atomic_file::atomic_write(&path, &bytes)
         } else {
             write(None, &bytes)
         };
@@ -531,7 +489,7 @@ fn cli() -> Result<(), String> {
             let artifact = vesper::wasm_backend::compile(&checked.world, &entry, &options)
                 .map_err(|e| e.to_string())?;
             let path = output.unwrap_or_else(|| PathBuf::from("a.wasm"));
-            package_commands::atomic_write(&path, &artifact.component)?;
+            vesper::atomic_file::atomic_write(&path, &artifact.component)?;
             println!(
                 "built {} ({} component)",
                 path.display(),

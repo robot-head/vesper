@@ -16,11 +16,29 @@ use std::{
 /// Subcommands served by `vesper-<name>` tool binaries. `vesper --help` still
 /// lists each of them.
 pub const TOOLS: &[&str] = &[
-    "audit", "bench", "grammar", "json", "publish", "resolve", "sbom",
+    "attest",
+    "audit",
+    "bench",
+    "cas",
+    "fuzz",
+    "grammar",
+    "json",
+    "migrate",
+    "publish",
+    "replay",
+    "resolve",
+    "sbom",
+    "semver",
+    "simd",
+    "top",
+    "traceparent",
 ];
 
 /// The tool binary `vesper build --tee` runs to measure an executable.
 pub const TEE_TOOL: &str = "tee";
+
+/// The tool binary `vesper verify --refute` runs (it links Crucible).
+pub const REFUTE_TOOL: &str = "refute";
 
 /// The file name of the executable for `tool` on this host.
 pub fn binary_name(tool: &str) -> String {

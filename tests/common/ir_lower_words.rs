@@ -180,6 +180,8 @@ impl<'a> Lw<'a> {
                 let n = self.name(s);
                 out.extend([3, n, 0]);
             }
+            // A literal past `i128::MAX`: Place IR tag 4, two raw words.
+            Literal::WideInt(n) => out.extend([4, *n as u64, (*n >> 64) as u64]),
         }
     }
 
