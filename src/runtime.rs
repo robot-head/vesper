@@ -1202,19 +1202,13 @@ impl<'a> Runtime<'a> {
                 return self.exit_to(&state.function, &owner, value);
             }
             Op::Constant(l) => match l {
-                Literal::Int(n) => {
-                    if n > i64::MAX as i128 {
-                        Value::UInt(n as u64, 64)
-                    } else if n < i64::MIN as i128 {
-                        // Only an `i128` holds it (SH2 lane 2, #1174).
-                        Value::Wide {
-                            pattern: n as u128,
-                            signed: true,
-                        }
-                    } else {
-                        Value::Int(n as i64)
-                    }
-                }
+                // A 128-bit constant takes the kind of its type, so `i128`
+                // and `u128` literals keep their signedness.
+                Literal::Int(n) => match crate::numeric::IntegerKind::from_type(&instruction.ty) {
+                    Some(kind) if kind.wide() => integer_value(kind, n),
+                    _ => int_literal_value(n),
+                },
+                Literal::WideInt(n) => wide_value(crate::numeric::IntegerKind::U128, n),
                 Literal::Float(n) => Value::Float(n),
                 Literal::Bool(b) => Value::Bool(b),
                 Literal::String(s) => Value::String(s),
@@ -1690,19 +1684,8 @@ impl<'a> Runtime<'a> {
                             return Err("loops and early exits run only as lowered Place IR".into());
                         }
                         ExprKind::Literal(l) => Control::Return(match l {
-                            Literal::Int(n) => {
-                                if n > i64::MAX as i128 {
-                                    Value::UInt(n as u64, 64)
-                                } else if n < i64::MIN as i128 {
-                                    // Only an `i128` holds it (SH2 lane 2, #1174).
-                                    Value::Wide {
-                                        pattern: n as u128,
-                                        signed: true,
-                                    }
-                                } else {
-                                    Value::Int(n as i64)
-                                }
-                            }
+                            Literal::Int(n) => int_literal_value(n),
+                            Literal::WideInt(n) => wide_value(crate::numeric::IntegerKind::U128, n),
                             Literal::Float(n) => Value::Float(n),
                             Literal::Bool(b) => Value::Bool(b),
                             Literal::String(s) => Value::String(s),
@@ -2890,6 +2873,9 @@ fn bind_pattern(p: &Pattern, value: &Value, env: &mut Env) -> bool {
             (Literal::Int(a), Value::SInt(b, _)) => *a == *b as i128,
             (Literal::Int(a), Value::Wide { .. }) => exact_of(value)
                 .is_some_and(|(_, e)| e == crate::numeric::wide::Exact::from_i128(*a)),
+            (Literal::WideInt(a), Value::Wide { .. }) => exact_of(value).is_some_and(|(_, e)| {
+                e == crate::numeric::wide::Exact::of(crate::numeric::IntegerKind::U128, *a)
+            }),
             (Literal::Float(a), Value::Float(b)) => a == b,
             (Literal::Float(a), Value::Float32(b)) => (*a as f32) == *b,
             (Literal::Bool(a), Value::Bool(b)) => a == b,
@@ -3059,6 +3045,27 @@ fn atomic_call(op: crate::atomics::AtomicOp, args: &[Value]) -> Result<Value, St
         }
     };
     Ok(old)
+}
+/// The value of an untyped integer literal `n`: `i64` where it fits, then
+/// `u64`, then a 128-bit pattern (only an `i128` or `u128` holds it; the
+/// evaluator's coercion to the literal's checked type fixes the kind).
+fn int_literal_value(n: i128) -> Value {
+    if n > u64::MAX as i128 {
+        Value::Wide {
+            pattern: n as u128,
+            signed: true,
+        }
+    } else if n > i64::MAX as i128 {
+        Value::UInt(n as u64, 64)
+    } else if n < i64::MIN as i128 {
+        // Only an `i128` holds it (SH2 lane 2, #1174).
+        Value::Wide {
+            pattern: n as u128,
+            signed: true,
+        }
+    } else {
+        Value::Int(n as i64)
+    }
 }
 /// The 128-bit kind and bit pattern of a `Value::Wide`.
 fn wide_kind(v: &Value) -> Option<(crate::numeric::IntegerKind, u128)> {

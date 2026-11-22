@@ -60,6 +60,7 @@ pub mod runtime;
 pub mod seq;
 pub mod stack_bound;
 pub mod strings;
+pub mod swap_input;
 pub mod tensor_types;
 pub mod test_discovery;
 pub mod tiled;

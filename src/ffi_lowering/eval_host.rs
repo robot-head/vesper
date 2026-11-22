@@ -6,7 +6,8 @@
 //!
 //! A host function is called through a signature of 64-bit integer words,
 //! which every `.vsys` parameter is in the C ABI (an integer, a pointer, or a
-//! pointer and a `size_t` length); at most eight words.
+//! pointer and a `size_t` length); at most ten words, so a variadic call
+//! padded for Apple arm64 (`sys::Variadic`) still fits.
 use super::{EvalCall, Handler, INVALID_TYPE, Imports, handle_value, handle_word};
 use crate::runtime::Value;
 use std::collections::BTreeMap;
@@ -16,7 +17,7 @@ use vesper_ffi::sys::{
 use vesper_ffi::{Endian, FieldKind, WireLayout};
 
 /// Most argument words a host function may take.
-pub const MAX_WORDS: usize = 8;
+pub const MAX_WORDS: usize = 10;
 
 struct Foreign {
     descriptor: FunctionDescriptor,
@@ -173,6 +174,12 @@ impl EvalHost {
                 (_, Slot::Buffer(Some((buf, _)))) => words.push(buf.as_mut_ptr() as u64),
                 (_, _) => words.push(0),
             }
+        }
+        if let Some(v) = d.abi().variadic {
+            words.splice(
+                v.first - v.padding..v.first - v.padding,
+                std::iter::repeat_n(0, v.padding),
+            );
         }
         // SAFETY: `address` is the host function bound to this `.vsys`
         // signature; each parameter is one integer-class word in the C ABI
@@ -486,6 +493,8 @@ unsafe fn call_words(address: usize, w: &[u64]) -> Result<u64, String> {
     type F6 = extern "C" fn(u64, u64, u64, u64, u64, u64) -> u64;
     type F7 = extern "C" fn(u64, u64, u64, u64, u64, u64, u64) -> u64;
     type F8 = extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64) -> u64;
+    type F9 = extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64, u64) -> u64;
+    type F10 = extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64, u64, u64) -> u64;
     // SAFETY: the caller's contract.
     unsafe {
         Ok(match *w {
@@ -499,6 +508,12 @@ unsafe fn call_words(address: usize, w: &[u64]) -> Result<u64, String> {
             [a, b, c, d, e, f, g] => std::mem::transmute::<usize, F7>(address)(a, b, c, d, e, f, g),
             [a, b, c, d, e, f, g, h] => {
                 std::mem::transmute::<usize, F8>(address)(a, b, c, d, e, f, g, h)
+            }
+            [a, b, c, d, e, f, g, h, i] => {
+                std::mem::transmute::<usize, F9>(address)(a, b, c, d, e, f, g, h, i)
+            }
+            [a, b, c, d, e, f, g, h, i, j] => {
+                std::mem::transmute::<usize, F10>(address)(a, b, c, d, e, f, g, h, i, j)
             }
             _ => return Err(format!("{} argument words", w.len())),
         })

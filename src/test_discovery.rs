@@ -256,6 +256,7 @@ pub fn syntax_attr_to_anvil(
                     code: code.clone(),
                     primary: t.primary.clone().or_else(|| t.expected_span.clone()),
                     related: t.related.clone(),
+                    message: t.message.clone(),
                 });
             }
             attr.cases = t.cases.map(|n| n as u32);

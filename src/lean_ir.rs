@@ -608,6 +608,9 @@ impl Emitter<'_> {
             PatternKind::Literal(Literal::Float(_)) => {
                 return Err("floating-point patterns are unsupported in Lean extraction".into());
             }
+            PatternKind::Literal(Literal::WideInt(_)) => {
+                return Err("128-bit literal patterns are unsupported in Lean extraction".into());
+            }
             PatternKind::Tuple(ps) => tuple_pattern(
                 ps.iter()
                     .map(|p| self.pattern(p))
