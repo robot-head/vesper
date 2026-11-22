@@ -46,6 +46,13 @@ const MODULES: &[(&str, &str, &str)] = &[
         "modules/codegen_numeric",
         "port/codegen_numeric.rs",
     ),
+    // SH4 lane 6 (#1280): scalars, locals and control flow, through the
+    // `scalar` hook.
+    (
+        "hybrid_codegen_scalar",
+        "modules/codegen_scalar",
+        "port/codegen_scalar.rs",
+    ),
     // SH4 lane 12 (#1286): the export ABI v2 glue over the lent module.
     (
         "hybrid_codegen_export",
@@ -73,6 +80,8 @@ const MODULES: &[(&str, &str, &str)] = &[
         "modules/bounds_hoist",
         "port/bounds_hoist.rs",
     ),
+    // SH2 lane 13 (#1185): the declaration pass of the trait frontend.
+    ("hybrid_pact", "modules/pact", "port/pact.rs"),
     // SH5 lane 15 (#1338): the doc renderers.
     ("hybrid_doc", "modules/doc", "port/doc.rs"),
 ];
@@ -175,6 +184,15 @@ const DIVERGENT_IR_OPT_EDIT: (&str, &str) = (
     "    divergent_words(in input)\n",
 );
 
+/// The declaration pass's divergence check: every package with trait
+/// declarations is rejected with a made-up E0600 (`divergent_words` in
+/// modules/pact), so every trait program fails to check.
+#[cfg(feature = "divergent-pact")]
+const DIVERGENT_PACT_EDIT: (&str, &str) = (
+    "    declarations_words(in input)\n",
+    "    divergent_words(in input)\n",
+);
+
 /// The parse module's divergence check: every AST flag (`let mut`, `pub`,
 /// `@fip`, named fields, ...) reads back inverted (mirrored in BUILD.bazel).
 #[cfg(feature = "divergent-parse")]
@@ -269,6 +287,12 @@ fn main() {
         #[cfg(feature = "divergent-ir-opt")]
         let port = if *library == "hybrid_ir_opt" {
             port.edit(DIVERGENT_IR_OPT_EDIT.0, DIVERGENT_IR_OPT_EDIT.1)
+        } else {
+            port
+        };
+        #[cfg(feature = "divergent-pact")]
+        let port = if *library == "hybrid_pact" {
+            port.edit(DIVERGENT_PACT_EDIT.0, DIVERGENT_PACT_EDIT.1)
         } else {
             port
         };

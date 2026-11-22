@@ -230,6 +230,75 @@ differences, optimize on and off. The "left to Rust" counts still list
 `Read`, `Bind` and `Write`, because the instruction request is declined
 first and the Rust arm then asks the local requests.
 
+## Part 3: the swap into the hybrid build
+
+The hybrid compiler (crates/vesper-hybrid) now installs the `scalar` hook.
+`modules/codegen_scalar` (`@vesper/hybrid-codegen-scalar`) exports two
+functions. `plan` is `codegen_scalar_plan_bytes`, the plan over the
+program's Place IR words (`ir_words::program_input`). `scalar` is
+`scalar_hook`, the emission over the lent builder. `vesper_scalar` in
+src/hybrid.rs keeps one plan per program on each thread. A graph-walk
+`INSTRUCTION` request emits its instruction's planned request, and the typed
+requests of `codegen_swap::scalar` go to the hook renumbered (11-18), as in
+the swap test. `VESPER_HYBRID_SCALAR=0` leaves scalars to Rust, which is the
+before side of the numbers below.
+
+### A miscompile the hybrid differential found
+
+The first full hybrid differential run had one difference, in the object of
+`tests/fixtures/verified_codegen/generics.ves` with optimize on. Small enum
+values kept as words (#1330) make the walk emit a rewritten copy of the
+graph (`aggregates::scalar_enums`). That copy's instruction indices are not
+the program's, but its requests carried the program's function name. The
+plan of the program's instruction at the same index was emitted instead.
+The program then returned `(0, Pair { a: 1, b: 10 }, 4)` instead of
+`(9, Pair { a: 20, b: 10 }, 4)`.
+
+The corpus the swap test samples has no such graph. Now
+`Codegen::walk_call` (src/native.rs) gives a site only when the walked
+graph is the program's own graph (pointer-equal), so the requests of a
+rewritten copy carry an empty function and stay on Rust. The `Site` docs say
+so. `vesper_rewritten_graphs_stay_on_rust` in the swap test is the minimal
+repro. It fails without the fix (CLIF, object and run differ) and passes
+with it.
+
+### Results
+
+| Check | Result |
+|---|---|
+| Hybrid differential (tests/differential.rs) | 553 files, 2,212 runs per compiler, 0 differ |
+| `crates/vesper-hybrid/tests/scalar.rs` | objects equal, optimize on and off; 25-62 scalar requests from Vesper per program |
+| Swap test (`CODEGEN_SCALAR_STEP=4`) | 76 worlds, 0 CLIF, object or run differences; 5,121 requests from Vesper |
+| Requests from Vesper, 170 corpus objects (optimize on) | 7,931 |
+
+### Time
+
+The run used 170 files that `emit --emit object` builds (from
+bootstrap/corpus, examples/ and tests/), each emitted with optimize on and
+off, on a Linux x86-64 release build. Wall time is the mean of 6 ABBA rounds
+per side, and the Ir counts come from callgrind.
+
+| Measurement | Hook off | Hook on | Ratio |
+|---|--:|--:|--:|
+| Wall, 340 compiles (s) | 4.55 | 4.66 | 1.02x |
+| Ir, `integer_widths/kinds.ves` (469 requests) | 454.3M | 464.6M | 1.023x |
+| Ir, `strings/text.ves` (997 requests) | 797.5M | 815.0M | 1.022x |
+| Ir, `verified_codegen/syntax_pages.ves` (29 requests) | 357.1M | 381.6M | 1.069x |
+
+The default compiler took 4.04 s, so the whole hybrid runs at 1.15x of it.
+
+On `text.ves`, `vesper_scalar` costs 20.0M Ir inclusive:
+
+- 12.6M Ir is the plan: encoding the program and planning it in Vesper.
+- 4.2M Ir is the per-request lookup. `program_key` walks the whole program
+  on every request, and the site key allocates a `String`.
+- About 3.2M Ir, roughly 3.2k Ir per request, is the emission itself:
+  lending the builder, `scalar_hook` and returning it.
+
+The plan dominates when a program has few scalar requests, as in
+`syntax_pages.ves`. Two cheap follow-ups would help: plan only the functions
+that are walked, and key the cache once per compile.
+
 ## Stage 1 guard
 
 Parts 1 and 2a add two Vesper packages, two tests, a report and BUILD.bazel
@@ -293,6 +362,7 @@ Stage 1 run on the branch is linked from the PR.
 - Part 2b: reads of fields and aggregates, homes and split locals (Rust
   keeps them), `sdiv`'s guard, floats with lane 11, string constants
   with lane 9.
-- Part 3: the swap through the `scalar` hook, the full suite on the hybrid
-  build, and the SH4 scoreboard row (emission alone and the whole compile,
-  ABBA and callgrind).
+- Rewritten graphs (small enums as words, #1330) stay on Rust. Planning
+  them needs the walk's rewritten copy lent to the hook.
+- The plan and lookup costs above: plan per walked function, and key the
+  cache once per compile.

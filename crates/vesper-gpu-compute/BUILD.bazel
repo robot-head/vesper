@@ -1,6 +1,43 @@
 load("//tools/bazel:defs.bzl", "vesper_crate")
+load("//tools/bazel:vesper_port.bzl", "VESPER_TARGET", "vesper_package", "vesper_port_object")
+
+# The Vulkan runtime is the Loom package in vesper/ (SH6 lane 15, #1410):
+# build.rs links the object built here and checks port/binding.rs against
+# the generated binding. The library opens the Vulkan loader at run time
+# (dlopen), so nothing of Vulkan is linked.
+vesper_package(
+    name = "port_package",
+    srcs = glob(["vesper/src/**/*.ves"]),
+    manifest = "vesper/Loom.toml",
+    vsys = [
+        "vesper/libc.vsys",
+        "vesper/vk.vsys",
+    ],
+)
+
+vesper_port_object(
+    name = "gpu_vesper",
+    library = "gpu",
+    package = ":port_package",
+    target = VESPER_TARGET,
+)
+
+filegroup(
+    name = "gpu_vesper_binding",
+    srcs = [":gpu_vesper"],
+    output_group = "rust_binding",
+)
 
 vesper_crate(
+    build_script_data = [
+        ":gpu_vesper",
+        ":gpu_vesper_binding",
+    ],
+    build_script_env = {
+        # rules_rust already makes these execpaths absolute.
+        "VESPER_PORT_OBJECT": "$(execpath :gpu_vesper)",
+        "VESPER_PORT_GENERATED_BINDING": "$(execpath :gpu_vesper_binding)",
+    },
     # tests/generation.rs include_bytes! the bundled model, tokenizer and
     # reference text from vesper-tensor.
     extra_compile_data = ["//crates/vesper-tensor:files"],

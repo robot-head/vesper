@@ -341,6 +341,16 @@ pub struct Source {
 /// Default per-run draw budget.
 pub const DEFAULT_MAX_DRAWS: usize = 1 << 16;
 
+/// The mean length `draw_bytes` aims for.
+const BYTES_AVERAGE: usize = 24;
+
+/// The continuation numerator (out of 1024) for collections of mean length
+/// `average`: continue with probability `average / (average + 1)`.
+fn flag_numerator(average: usize) -> u64 {
+    let average = average.max(1) as u64;
+    (1024 * average) / (average + 1)
+}
+
 impl Source {
     /// Strictly replay `tape`. Strict replay can never draw past the tape,
     /// so its budget is the tape-length cap ([`MAX_TAPE_LEN`]), not the
@@ -423,10 +433,13 @@ impl Source {
             Gen::Uniform => (false, 0),
             Gen::Bernoulli(n) => (true, n),
         };
+        let pos = self.realized.len();
+        let replay = self.prefix.get(pos).copied();
         let draw = crate::binding::source_draw(
             &mut rng,
-            &self.prefix,
-            self.realized.len() as u64,
+            replay.is_some(),
+            replay.unwrap_or(0),
+            pos as u64,
             self.max_draws as u64,
             max,
             random,
@@ -539,10 +552,7 @@ impl Source {
         if len >= max_len {
             return Ok(false);
         }
-        // Continue with probability average / (average + 1).
-        let average = average.max(1) as u64;
-        let p = (1024 * average) / (average + 1);
-        Ok(self.raw(DrawKind::Flag, Gen::Bernoulli(p))? == 1)
+        Ok(self.raw(DrawKind::Flag, Gen::Bernoulli(flag_numerator(average)))? == 1)
     }
 
     /// A vector of at most `max_len` elements drawn by `element`.
@@ -560,8 +570,60 @@ impl Source {
 
     /// FuzzSource::draw_bytes: a byte string of at most `max_len` bytes.
     pub fn draw_bytes(&mut self, max_len: usize) -> Result<Vec<u8>, Invalid> {
+        #[cfg(vesper_port)]
+        {
+            self.draw_bytes_port(max_len)
+        }
+        #[cfg(not(vesper_port))]
+        {
+            self.draw_bytes_rust(max_len)
+        }
+    }
+
+    /// The Vesper build's byte-string draw (vesper/src/lib.ves
+    /// `source_draw_bytes`): the whole flag and byte loop in one call.
+    #[cfg(vesper_port)]
+    fn draw_bytes_port(&mut self, max_len: usize) -> Result<Vec<u8>, Invalid> {
+        let (random, mut rng) = match &self.extend {
+            Extend::Strict => (false, crate::binding::repr::Rng { word: 0 }),
+            Extend::Random(rng) => (true, crate::binding::repr::Rng { word: rng.0 }),
+        };
+        let drawn = crate::binding::source_draw_bytes(
+            &mut rng,
+            &self.prefix,
+            self.realized.len() as u64,
+            self.max_draws as u64,
+            random,
+            max_len as u64,
+            flag_numerator(BYTES_AVERAGE),
+        );
+        if let Extend::Random(state) = &mut self.extend {
+            state.0 = rng.word;
+        }
+        let view = drawn.as_ref();
+        let values = view.values();
+        let mut out = Vec::with_capacity(values.len() / 2);
+        self.realized.reserve(values.len());
+        self.kinds.reserve(values.len());
+        for (k, v) in values.iter().enumerate() {
+            self.realized.push(v);
+            if k % 2 == 0 {
+                self.kinds.push(DrawKind::Flag);
+            } else {
+                self.kinds.push(DrawKind::Byte);
+                out.push(u8::try_from(v).expect("bounded draw"));
+            }
+        }
+        match view.code() {
+            0 => Ok(out),
+            _ => Err(Invalid::Overrun),
+        }
+    }
+
+    #[cfg(not(vesper_port))]
+    fn draw_bytes_rust(&mut self, max_len: usize) -> Result<Vec<u8>, Invalid> {
         let mut out = Vec::new();
-        while self.more(out.len(), max_len, 24)? {
+        while self.more(out.len(), max_len, BYTES_AVERAGE)? {
             out.push(self.draw_u8()?);
         }
         Ok(out)

@@ -11,6 +11,11 @@ GTK 4.14 and Xvfb installed on the host.
 
 ## Headline
 
+**Update (part 2c):** `vesper-gpu-compute`'s Vulkan runtime is Vesper-only.
+It opens the loader with `dlopen`, now that #1457 fixed gaps 3, 6 and 7. The
+Rust runtime over ash is deleted, and the flip gate passes at 1.03x
+[0.98x, 1.11x]. See "Part 2c" below.
+
 Vesper can already call GTK 4 and Vulkan directly, with no Rust in between.
 Two probe programs built with `vesper build` ran on this host:
 
@@ -41,8 +46,8 @@ nothing outside the package sees a raw address. Gap 4 below proposes a typed
 replacement.
 
 What still blocks a full port is the work that needs C to call Vesper,
-Vesper to call a function pointer, floats by value, or threads (gaps 1-3 and
-8). With those gaps, each crate can be ported as follows:
+floats by value, or threads (gaps 1, 2 and 8; gap 3, calling a function
+pointer, is fixed). With those gaps, each crate can be ported as follows:
 
 | Crate | Rust (src / tests) | Needs | Blocked by | Plan |
 |---|--:|---|---|---|
@@ -251,6 +256,9 @@ from a run-time value. A form like `fn(ptr) vkCmdPushDescriptorSetKHR(...)`,
 calling through a `u64` the package resolved, would cover the Vulkan
 extensions and `dlsym` (gap 7). Needed by ignis-vulkan only.
 
+**Fixed** by #1457 (0787bb71): `.vsys` `callback` types, called as
+`Lib::Name(f, args)`, and typed `#[link_name = "..."]` lookups.
+
 ### Gap 4: pointers inside C structs, and foreign memory
 
 A `wire struct` field must be a total integer, so `pNext`, string arrays
@@ -287,6 +295,9 @@ symbol that lives in `glib-2.0` but is declared in the `gtk-4` library fails
 with `DSO missing from command line`. Allowing `.` in link names (it is
 neither a flag nor a path separator) is enough.
 
+**Partly fixed** by #1457: `#[link_name]` accepts versioned names. One
+library per `.vsys` stands.
+
 ### Gap 7: optional libraries
 
 `link = "dynamic"` makes the executable fail to load when the library is
@@ -295,6 +306,10 @@ skip on hosts without them (macOS, Windows, hermetic Bazel). A Vesper port can
 build its GPU tests only where the library exists (a `pkg-config` probe in
 the crate's build script) until there is weak linking or a `dlopen` path,
 which needs gap 3.
+
+**Fixed** by #1457: a package declares `dlopen` and one typed
+`#[link_name = "dlsym"]` lookup per entry point. Part 2c uses it to flip
+gpu-compute's runtime.
 
 ### Gap 8: threads
 
@@ -350,30 +365,73 @@ work that ash did not do: no extensions, callbacks or floats by value.
   is Vesper/Rust = **1.034, 95% interval [0.987, 1.081]**, and both builds
   print the same result digest. The runtime is within the 1.5x bar.
 
-### Flip-gate verdict
+### Flip-gate verdict (part 2, before the flip)
 
 | Module | Differential | ABBA (Vesper/Rust) | Verdict |
 |---|---|---|---|
-| `vesper-gpu-compute` runtime (`src/runtime.rs`, 1,093 lines) | 0 differences: 25 of 25 tests pass in both builds, and 0 validation-layer errors | 1.034 [0.987, 1.081] | passes the bar; **flip held back by gap 7** |
+| `vesper-gpu-compute` runtime (`src/runtime.rs`, 1,093 lines) | 0 differences: 25 of 25 tests pass in both builds, and 0 validation-layer errors | 1.034 [0.987, 1.081] | passed the bar; flip held back by gap 7 |
 
-The flip is held back because the Vesper build links libvulkan at link
-time. The default build has to link on macOS, Windows and the hermetic
-Bazel host, and none of them has a Vulkan loader. The Rust build `dlopen`s
-the loader and reports the device as unavailable there. Making the Vesper
-build the default needs gap 7 (an optional library, or `dlopen` plus gap
-3's calls through a function pointer). Until then the Vesper runtime is the
-tested non-default build, and `src/runtime.rs` stays. Nothing is deleted
-in this part.
+The flip was held back because that build linked libvulkan at link time,
+and the hermetic Bazel host has no Vulkan loader.
 
-The rest of the crate remains Rust: `shader.rs` (naga, replaced by
-committed SPIR-V at the flip), and `tensor.rs` and `broadphase.rs`. The
-last two are host-side orchestration over the runtime and port next.
+## Part 2c: the runtime flip (Rust runtime deleted)
+
+Gap 7 is fixed (#1457), so the runtime is now Vesper-only:
+
+- **The loader is optional.** `vk.vsys` declares no library: it imports
+  `dlopen`, `dlclose` and `dlsym` from libc, a `callback` type per entry
+  point (`PfnCreateBuffer`, ...) and a typed `#[link_name = "dlsym"]` lookup
+  for each. `open` tries `libvulkan.so.1`, `libvulkan.so`,
+  `libvulkan.1.dylib`, `libvulkan.dylib` and `libMoltenVK.dylib`, then checks
+  that all 47 entry points exist. A host without a loader gets
+  `GpuError::Unavailable("no Vulkan loader: ...")`, as the ash build did;
+  that was checked by hiding libvulkan in a mount namespace. Nothing of
+  Vulkan is linked, so Bazel builds the crate as any port
+  (`vesper_port_object` in `BUILD.bazel`).
+- **A lookup per call.** A callback handle cannot cross the export ABI
+  (`cannot export ...: type Pfn... is an opaque .vsys extern-type handle`), so
+  `Dev` cannot carry a table of function pointers. Each call looks its entry
+  point up again (`pfn_*`, one `dlsym`, about 44 ns on glibc). Letting a
+  callback handle cross as an opaque word would remove that (gap 10).
+- **Deleted.** `src/runtime.rs` (the ash runtime, 1,093 lines) and the
+  `ash` dependency of this crate; `src/runtime_port.rs` became
+  `src/runtime.rs`. The `vesper-port` feature is gone, and the lavapipe
+  workflow runs every test against the one build.
+- **Windows.** The ash build loaded `vulkan-1.dll`; the Vesper library uses
+  `dlopen`, which Windows lacks, and a `.vsys` has no per-target
+  declarations (gap 11). No CI job builds this crate on Windows or macOS.
+
+| Module | Differential | ABBA (Vesper/Rust) | Verdict |
+|---|---|---|---|
+| `vesper-gpu-compute` runtime | 0 differences: 25 of 25 tests pass, also under `VK_LAYER_KHRONOS_validation` (0 errors) | 1.03x [0.98x, 1.11x], n = 10 (flip gate, `-C target-cpu=native`) | **PASS: Rust deleted** |
+
+`flip-gate.toml` runs it: `python3 scripts/ci/flip_gate.py vesper-gpu-compute`
+on lavapipe. Its ABBA arm (`port/bench-abba.sh`) builds the Rust runtime at
+0787bb71, the last commit that had it, in a worktree. A run with
+`abba.py` directly (no native CPU flags) gave 1.098 [1.051, 1.146].
+
+The rest of the crate remains Rust: `shader.rs` (naga, to be replaced by
+committed SPIR-V), and `tensor.rs` and `broadphase.rs`, the host-side
+orchestration over the runtime, which port next.
+
+### Gap 10: a callback handle in an exported value
+
+See above: a `copy` struct holding a `callback` handle cannot be a
+parameter or result of an exported function, even when Rust never reads the
+field. An opaque word that Rust can only hand back would let the device
+keep its function table.
+
+### Gap 11: per-target `.vsys` declarations
+
+A `.vsys` is the same text for every target (`@TARGET@` and `@ABI@` aside),
+so one package cannot import `dlopen` on Unix and `LoadLibraryA` and
+`GetProcAddress` on Windows.
 
 ## Plan for the remaining parts
 
 1. **Part 2b: the rest of `vesper-gpu-compute`.** `tensor.rs` and
    `broadphase.rs` in Vesper over the runtime, then the committed SPIR-V
-   and manifest in place of naga. The flip waits for gap 7.
+   and manifest in place of naga.
 2. **Part 3: `vesper-ignis-vulkan`.** The core paths (barriers, timelines,
    formats, depth/stencil, split barriers, ranges, ownership) first, binding
    with ordinary descriptor sets. Presentation over libxcb. Sync fds and the
@@ -384,8 +442,8 @@ last two are host-side orchestration over the runtime and port next.
    tiny-skia subset, with OpenType outlines and the PNG writer, under the
    seed pattern.
 5. Each flip runs the flip gate (lane 1) and updates the crate's row in
-   `scripts/rust-census.py`. Parts 1 and 2 delete nothing, so the census
-   rows are unchanged.
+   `scripts/rust-census.py`. Part 2c moved `vesper-gpu-compute` to
+   `partial` (runtime Vesper-only).
 
 ## Checks run
 
@@ -401,4 +459,10 @@ last two are host-side orchestration over the runtime and port next.
 - The GTK probe: `vesper build --link-search <dir>` and a run under Xvfb
   (GTK 4.14.5).
 - The gap repros above, each with `vesper check` or `vesper build`.
+- Part 2c, at 0787bb71: `cargo test -p vesper-gpu-compute -p
+  vesper-kinetic-gpu` on lavapipe with `VESPER_GPU_REQUIRE=1` (25 passed),
+  again under the validation layer (0 errors) and with libvulkan hidden
+  (`Unavailable`), `python3 scripts/ci/flip_gate.py vesper-gpu-compute`
+  (PASS), `cargo +1.100.0 clippy --all-targets -D warnings`, `cargo fmt
+  --check`, `vesper fmt --check`.
 

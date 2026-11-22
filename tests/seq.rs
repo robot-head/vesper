@@ -242,13 +242,15 @@ fn overlapping_interval_loans_are_rejected() {
 
 #[test]
 fn slices_are_second_class() {
+    // A bound view of a `let mut` sequence freezes it (tests/slice_values.rs);
+    // a mutable view binding stays refused.
     rejected(
-        "fn main() -> u64 { let mut s: ChunkSeq[u64] = ChunkSeq::new[u64](); let v = s[0..1]; 0 }",
-        "E1521",
-        "second-class",
+        "fn main() -> u64 { let mut s: ChunkSeq[u64] = ChunkSeq::new[u64](); let v = s[0..1]; s.push(1); 0 }",
+        "E1531",
+        "while the view 'v' of it is in scope",
     );
     rejected(
-        "fn main() -> u64 { let mut s: ChunkSeq[u64] = ChunkSeq::new[u64](); let v = s.as_slice(); 0 }",
+        "fn main() -> u64 { let mut s: ChunkSeq[u64] = ChunkSeq::new[u64](); let mut v = s.as_slice(); 0 }",
         "E1521",
         "second-class",
     );

@@ -1,0 +1,36 @@
+# Flip gate for the compiler's AST arithmetic optimizer: the producer
+# (`optimize::certificate::propose_rewrite`) and the certificate checker
+# (`optimize::witness::verify_spent`), ported as @vesper/optimize (SH3 lane
+# 10, #1249; checker speed, Rust-exit gap wave 1 lane 4, #1501) and installed
+# as the hybrid's `optimize` module. A compiler module: its Rust is deleted
+# by the Rust compiler's retirement (SH6 lane 2), not by this flip.
+name = "optimize"
+lane = "G1-4"
+rust = ["src/optimize/certificate.rs", "src/optimize/witness.rs"]
+env = { CARGO_PROFILE_DEV_DEBUG = "0", CARGO_PROFILE_TEST_DEBUG = "0", CARGO_PROFILE_RELEASE_DEBUG = "0" }
+build = ["cargo test --locked --release --test self_host_optimize --test self_host_optimize_search --no-run"]
+
+# Every genuine proposal and its 59k mutants (answer and spent budget), and
+# every sampled visit of the corpus (proposal, certificate, budget).
+[[tests]]
+run = "cargo test --locked --release --test self_host_optimize"
+
+[[tests]]
+run = "cargo test --locked --release --test self_host_optimize_search"
+
+[differential]
+run = "cargo test --locked --release --test self_host_optimize mutated_proposals_are_refused_for_the_same_reason && cargo test --locked --release --test self_host_optimize_search every_visit_is_proposed_like_rust"
+
+# One epoch side is about 15 ms of Rust over the 266 proposals (20 rounds).
+[[abba]]
+workload = "checker"
+run = "OPTIMIZE_GATE_WORKLOAD=checker CHECK_HARNESS_SPEED=1 cargo test --locked --release --test self_host_optimize flip_gate -- --ignored --nocapture"
+
+# One epoch side is about 0.8 s of Rust over the corpus's sampled visits.
+[[abba]]
+workload = "producer"
+run = "OPTIMIZE_GATE_WORKLOAD=producer CHECK_HARNESS_SPEED=1 cargo test --locked --release --test self_host_optimize_search flip_gate -- --ignored --nocapture"
+
+[[abba]]
+workload = "pass"
+run = "OPTIMIZE_GATE_WORKLOAD=pass CHECK_HARNESS_SPEED=1 cargo test --locked --release --test self_host_optimize_search flip_gate -- --ignored --nocapture"

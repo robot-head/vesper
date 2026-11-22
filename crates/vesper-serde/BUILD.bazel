@@ -10,7 +10,9 @@ vesper_package(
     name = "port_package",
     srcs = glob(["vesper/src/**/*.ves"]),
     manifest = "vesper/Loom.toml",
-    # @vesper/doc reads JSON through this package's tape (#1338).
+    # @vesper/doc reads JSON through this package's tape (#1338), and
+    # @vesper/loom-calculus prints TOML floats with its decimal conversion
+    # and shortest digits (Rust exit SH6 lane 12, #1407).
     visibility = ["//visibility:public"],
 )
 

@@ -614,6 +614,59 @@ impl<'a> LRef<'a> {
     }
 }
 
+/// Owned handle of a Vesper `TomlRead` value: its words, which own the Vesper
+/// allocations they point to. Dropping it calls `vesper_loom_calculus_TomlRead_drop`.
+pub struct TomlRead {
+    words: [u64; 1],
+}
+
+impl TomlRead {
+    /// # Safety
+    /// `words` must hold a `TomlRead` value of this library that the caller owns.
+    unsafe fn from_words(words: &[u64]) -> Self {
+        let mut owned = [0u64; 1];
+        owned.copy_from_slice(&words[..1]);
+        Self { words: owned }
+    }
+
+    /// A borrowed view of the value.
+    pub fn as_ref(&self) -> TomlReadRef<'_> {
+        TomlReadRef { words: &self.words }
+    }
+}
+
+impl Drop for TomlRead {
+    fn drop(&mut self) {
+        // SAFETY: the handle owns its words and is dropped once.
+        unsafe { vesper_loom_calculus_TomlRead_drop(self.words.as_mut_ptr()) };
+    }
+}
+
+impl core::fmt::Debug for TomlRead {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("TomlRead { .. }")
+    }
+}
+
+// SAFETY: the handle owns its Vesper allocations exclusively (no Vesper
+// code keeps a reference to them), and they are plain heap memory.
+unsafe impl Send for TomlRead {}
+// SAFETY: shared access only reads the words and the memory they own.
+unsafe impl Sync for TomlRead {}
+
+/// A borrowed view of a Vesper `TomlRead` value, read in place.
+#[derive(Clone, Copy)]
+pub struct TomlReadRef<'a> {
+    words: &'a [u64],
+}
+
+impl<'a> TomlReadRef<'a> {
+    pub fn pool(&self) -> vesper_port_abi::SeqRef<'a, u8> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[0]) }
+    }
+}
+
 const _: () = assert!(<Change as Abi>::WORDS == 14);
 const _: () = assert!(<Cmp as Abi>::WORDS == 7);
 const _: () = assert!(<Dep as Abi>::WORDS == 7);
@@ -635,8 +688,13 @@ unsafe extern "C" {
     fn vesper_loom_calculus_seq_free(seq: i64) -> i64;
     fn vesper_loom_calculus_live_allocations() -> i64;
     fn vesper_loom_calculus_L_drop(value: *mut u64) -> i64;
+    fn vesper_loom_calculus_TomlRead_drop(value: *mut u64) -> i64;
     fn vesper_loom_calculus_check_upgrade(result: *mut u64, words: *mut u64, text: *mut u64) -> i64;
+    fn vesper_loom_calculus_manifest_toml(result: *mut u64, text: *mut u64) -> i64;
     fn vesper_loom_calculus_package_name_valid(s: *mut u64) -> i64;
+    fn vesper_loom_calculus_read_toml(result: *mut u64, text: *mut u64) -> i64;
+    fn vesper_loom_calculus_semver_text(result: *mut u64, text: *mut u64, kind: i64) -> i64;
+    fn vesper_loom_calculus_toml_accepts(text: *mut u64) -> i64;
     fn vesper_loom_calculus_validate_manifest(result: *mut u64, words: *mut u64, text: *mut u64) -> i64;
     fn vesper_loom_calculus_validate_solution(result: *mut u64, words: *mut u64, text: *mut u64) -> i64;
 }
@@ -663,12 +721,51 @@ pub fn check_upgrade(words: &[u64], text: &[u8]) -> L {
     unsafe { L::from_words(&result[0..]) }
 }
 
+/// Calls `manifest_toml` of the Vesper library `loom_calculus` (`vesper_loom_calculus_manifest_toml`).
+pub fn manifest_toml(text: &[u8]) -> TomlRead {
+    let mut result = [0u64; 1];
+    // SAFETY: `vesper_loom_calculus_manifest_toml` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(text, |view_text| unsafe { vesper_loom_calculus_manifest_toml(result.as_mut_ptr(), view_text) });
+    unsafe { TomlRead::from_words(&result[0..]) }
+}
+
 /// Calls `package_name_valid` of the Vesper library `loom_calculus` (`vesper_loom_calculus_package_name_valid`).
 pub fn package_name_valid(s: &str) -> bool {
     // SAFETY: `vesper_loom_calculus_package_name_valid` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_str(s, |view_s| unsafe { vesper_loom_calculus_package_name_valid(view_s) });
+    raw != 0
+}
+
+/// Calls `read_toml` of the Vesper library `loom_calculus` (`vesper_loom_calculus_read_toml`).
+pub fn read_toml(text: &[u8]) -> TomlRead {
+    let mut result = [0u64; 1];
+    // SAFETY: `vesper_loom_calculus_read_toml` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(text, |view_text| unsafe { vesper_loom_calculus_read_toml(result.as_mut_ptr(), view_text) });
+    unsafe { TomlRead::from_words(&result[0..]) }
+}
+
+/// Calls `semver_text` of the Vesper library `loom_calculus` (`vesper_loom_calculus_semver_text`).
+pub fn semver_text(text: &[u8], kind: u64) -> TomlRead {
+    let mut result = [0u64; 1];
+    // SAFETY: `vesper_loom_calculus_semver_text` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(text, |view_text| unsafe { vesper_loom_calculus_semver_text(result.as_mut_ptr(), view_text, kind as i64) });
+    unsafe { TomlRead::from_words(&result[0..]) }
+}
+
+/// Calls `toml_accepts` of the Vesper library `loom_calculus` (`vesper_loom_calculus_toml_accepts`).
+pub fn toml_accepts(text: &[u8]) -> bool {
+    // SAFETY: `vesper_loom_calculus_toml_accepts` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(text, |view_text| unsafe { vesper_loom_calculus_toml_accepts(view_text) });
     raw != 0
 }
 

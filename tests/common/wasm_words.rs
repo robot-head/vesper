@@ -227,6 +227,16 @@ fn capability_names(w: &World) -> Vec<String> {
 /// exprs: one per pool row: 0 | 1 closure fn, free | 2 handler (see `Sec::expr`)
 /// ```
 pub fn wasm_input(w: &World, program: &Program, entry: &str, o: &WasmOptions) -> Option<Vec<u8>> {
+    // A mutable element view (`match s.try_get_mut(i) { Some(x) => .. }`,
+    // an `inout s[i]` argument) binds a sequence element in place; the port
+    // does not lower one yet (#1506), so the program stays with Rust. A
+    // shared view reads the element, which is what the port binds.
+    if w.element_views
+        .values()
+        .any(|p| *p == vesper::ast::Pass::Inout)
+    {
+        return None;
+    }
     if !ir_words::encodable(w, program) {
         return None;
     }
