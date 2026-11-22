@@ -470,6 +470,47 @@ pub fn put_id(inout l: L, id: u64) {
     put_range(inout l, off, len);
 }
 
+// Append the decimal digits of n.
+pub fn put_u64(inout l: L, n: u64) {
+    let mut d: u64 = 1;
+    let mut x = n;
+    loop {
+        if x < 10 {
+            break;
+        }
+        x = x / 10;
+        d = inc(d);
+    }
+    let base = l.pool.len();
+    l.pool.resize(add(base, d), Ascii::Zero);
+    x = n;
+    for i in 0..d {
+        let _ = l
+            .pool
+            .try_set(wrapping_sub(add(base, d), inc(i)), wrapping_u8(add(x % 10, Ascii::Zero)));
+        x = x / 10;
+    }
+}
+
+// Append version vi's `Display` text, `major.minor.patch[-pre][+build]`
+// (the wrapper sends the components, not the text).
+pub fn put_ver(inout l: L, vi: u64) {
+    let v = ver(in l, vi);
+    put_u64(inout l, v.major);
+    l.pool.push(Ascii::Dot);
+    put_u64(inout l, v.minor);
+    l.pool.push(Ascii::Dot);
+    put_u64(inout l, v.patch);
+    if slen(in l, v.pre) > 0 {
+        l.pool.push(Ascii::Minus);
+        put_id(inout l, v.pre);
+    }
+    if slen(in l, v.build) > 0 {
+        l.pool.push(Ascii::Plus);
+        put_id(inout l, v.build);
+    }
+}
+
 // Append the ids of `list` joined by ", ".
 pub fn put_join(inout l: L, in list: ChunkSeq[u64]) {
     for i in 0..list.len() {
@@ -496,6 +537,51 @@ pub fn bytes_ord(in l: L, ao: u64, al: u64, bo: u64, bl: u64) -> u64 {
     ord(al, bl)
 }
 
+// Byte order of string occurrences a and b, straight from the pool.
+pub fn pool_ord(in l: L, a: u64, b: u64) -> u64 {
+    let ao = sw(in l.inw, add(mul(a, 2), 1));
+    let al = sw(in l.inw, add(mul(a, 2), 2));
+    let bo = sw(in l.inw, add(mul(b, 2), 1));
+    let bl = sw(in l.inw, add(mul(b, 2), 2));
+    let c = l.pool[ao..add(ao, al)].cmp(in l.pool[bo..add(bo, bl)]);
+    if c < 0 {
+        Order::Less
+    } else if c > 0 {
+        Order::Greater
+    } else {
+        Order::Equal
+    }
+}
+
+// Byte order of string occurrences a and b, over their big-endian words
+// (decode_tables): equal words up to the shorter one leave the length to
+// decide, as zero padding sorts before every byte.
+pub fn occ_ord(in l: L, a: u64, b: u64) -> u64 {
+    let la = sw(in l.inw, add(mul(a, 2), 2));
+    let lb = sw(in l.inw, add(mul(b, 2), 2));
+    let wa = sw(in l.skat, a);
+    let wb = sw(in l.skat, b);
+    let n = min(la, lb);
+    let mut j: u64 = 0;
+    let mut p: u64 = 0;
+    loop {
+        if p >= n {
+            break;
+        }
+        let x = sw(in l.sk, add(wa, j));
+        let y = sw(in l.sk, add(wb, j));
+        if x < y {
+            return Order::Less;
+        }
+        if x > y {
+            return Order::Greater;
+        }
+        j = inc(j);
+        p = add(p, 8);
+    }
+    ord(la, lb)
+}
+
 // Whether the pool range holds the literal s.
 pub fn is_lit(in l: L, off: u64, len: u64, in s: Str) -> bool {
     if len != s.len() {
@@ -519,7 +605,12 @@ pub fn is_lit(in l: L, off: u64, len: u64, in s: Str) -> bool {
 // the module that uses it (order.ves).
 
 pub fn sort(inout l: L, kind: u64) {
+    if kind == SortKind::Strings {
+        sort_strings(inout l);
+        return;
+    }
     let n = l.idx.len();
+    l.tmp.reserve(n);
     let mut width: u64 = 1;
     loop {
         if width >= n {
@@ -561,13 +652,76 @@ pub fn sort(inout l: L, kind: u64) {
             }
             i = hi;
         }
-        l.idx.clear();
-        for j in 0..n {
-            let x = sw(in l.tmp, j);
-            l.idx.push(x);
-        }
+        swap(inout l.idx, inout l.tmp);
         width = mul(width, 2);
     }
+}
+
+// `sort` of string occurrences by their bytes: the same merge, with the
+// first big-endian words compared in place before `occ_ord`.
+fn sort_strings(inout l: L) {
+    let n = l.idx.len();
+    l.tmp.reserve(n);
+    let mut width: u64 = 1;
+    loop {
+        if width >= n {
+            break;
+        }
+        l.tmp.clear();
+        let mut i: u64 = 0;
+        loop {
+            if i >= n {
+                break;
+            }
+            let mid = min(add(i, width), n);
+            let hi = min(add(i, mul(width, 2)), n);
+            let mut a = i;
+            let mut b = mid;
+            loop {
+                if a < mid {
+                    let xa = sw(in l.idx, a);
+                    if b < hi {
+                        let xb = sw(in l.idx, b);
+                        if str_before(in l, xb, xa) {
+                            l.tmp.push(xb);
+                            b = inc(b);
+                        } else {
+                            l.tmp.push(xa);
+                            a = inc(a);
+                        }
+                    } else {
+                        l.tmp.push(xa);
+                        a = inc(a);
+                    }
+                } else if b < hi {
+                    let xb = sw(in l.idx, b);
+                    l.tmp.push(xb);
+                    b = inc(b);
+                } else {
+                    break;
+                }
+            }
+            i = hi;
+        }
+        swap(inout l.idx, inout l.tmp);
+        width = mul(width, 2);
+    }
+}
+
+// Whether occurrence a sorts before b. Words are zero padded, so the first
+// pair of words that differs decides the order; equal words fall back to
+// `occ_ord` (an empty string has no word).
+fn str_before(in l: L, a: u64, b: u64) -> bool {
+    let la = sw(in l.inw, add(mul(a, 2), 2));
+    let lb = sw(in l.inw, add(mul(b, 2), 2));
+    if la != 0 && lb != 0 {
+        let x = sw(in l.sk, sw(in l.skat, a));
+        let y = sw(in l.sk, sw(in l.skat, b));
+        if x != y {
+            return x < y;
+        }
+    }
+    occ_ord(in l, a, b) == Order::Less
 }
 
 // Version order (`Ord for Version`).
@@ -721,15 +875,7 @@ pub fn before(in l: L, kind: u64, a: u64, b: u64) -> bool {
 
 pub fn order_of(in l: L, kind: u64, a: u64, b: u64) -> u64 {
     if kind == SortKind::Strings {
-        let ia = mul(a, 2);
-        let ib = mul(b, 2);
-        bytes_ord(
-            in l,
-            sw(in l.inw, inc(ia)),
-            sw(in l.inw, add(ia, 2)),
-            sw(in l.inw, inc(ib)),
-            sw(in l.inw, add(ib, 2))
-        )
+        occ_ord(in l, a, b)
     } else if kind == SortKind::Selections {
         let x = man(in l, a);
         let y = man(in l, b);
