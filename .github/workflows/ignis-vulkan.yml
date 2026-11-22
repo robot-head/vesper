@@ -31,6 +31,9 @@ on:
 
 permissions:
   contents: read
+  # The merge gate reads open pull requests and cancels blocked runs.
+  actions: write
+  pull-requests: read
 
 concurrency:
   group: ignis-vulkan-${{ github.event_name == 'pull_request' && github.ref || github.event_name == 'push' && 'main' || github.run_id }}
@@ -54,6 +57,24 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      # Merge gate (#1321, #1479): a pull request that cannot merge yet runs no CI.
+      - name: Check out the pull request head for the merge gate
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: .gate
+          fetch-depth: 0
+          sparse-checkout: |
+            .github/actions
+            scripts/ci
+      - name: Merge gate
+        if: github.event_name == 'pull_request'
+        uses: ./.gate/.github/actions/merge-gate
+        with:
+          number: ${{ github.event.pull_request.number }}
+          base-ref: ${{ github.event.pull_request.base.ref }}
+          head-sha: ${{ github.event.pull_request.head.sha }}
       - uses: actions/checkout@v4
       - name: Install Mesa lavapipe and the Vulkan validation layers
         run: |
