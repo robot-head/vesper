@@ -675,6 +675,10 @@ fn put_test(
         if t.related.has {
             put_text(inout out, in txt, t.related.a, t.related.b);
         }
+        out.push(bit(t.message.has));
+        if t.message.has {
+            put_text(inout out, in txt, t.message.a, t.message.b);
+        }
     }
     // `n as u32`.
     let property_cases = if !effective_property {

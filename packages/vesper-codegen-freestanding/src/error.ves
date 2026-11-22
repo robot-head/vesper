@@ -1,0 +1,124 @@
+// `FreestandingError` (src/native_freestanding.rs) as a result encoding: the
+// variant's code, then its fields in declaration order, strings
+// length-prefixed (`put_str`) and numbers as words. An empty error buffer
+// means success. The Rust half is `decode_error` in
+// tests/self_host_freestanding.rs.
+
+use self::util::{
+    push64,
+    put_str,
+    put_text
+};
+
+const E_UNSUPPORTED_TARGET: u64 = 1;
+const E_UNRESOLVED_SYMBOL: u64 = 2;
+const E_DUPLICATE_SYMBOL: u64 = 3;
+const E_UNSUPPORTED_RELOCATION: u64 = 4;
+const E_UNSUPPORTED_SECTION: u64 = 5;
+const E_RELOCATION_OUT_OF_RANGE: u64 = 6;
+const E_IMAGE_TOO_LARGE: u64 = 7;
+const E_OBJECT: u64 = 8;
+const E_CODE_MISMATCH: u64 = 9;
+
+// `FreestandingError::Object(msg)`.
+pub fn fail_object(inout err: ChunkSeq[u8], in msg: ChunkSeq[u8]) {
+    err.clear();
+    push64(inout err, E_OBJECT);
+    put_str(inout err, in msg.as_slice());
+}
+
+// `FreestandingError::Object` with a fixed message.
+pub fn fail_object_text(inout err: ChunkSeq[u8], in msg: Str) {
+    err.clear();
+    push64(inout err, E_OBJECT);
+    put_text(inout err, in msg);
+}
+
+// `FreestandingError::Object("{object}: {msg}")`.
+pub fn fail_object_in(inout err: ChunkSeq[u8], in object: Slice[u8], in msg: Str) {
+    let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    m.extend(in object);
+    m.extend(in ": ".as_bytes());
+    m.extend(in msg.as_bytes());
+    fail_object(inout err, in m);
+}
+
+// A variant with one string field.
+fn fail_one(inout err: ChunkSeq[u8], kind: u64, in a: Slice[u8]) {
+    err.clear();
+    push64(inout err, kind);
+    put_str(inout err, in a);
+}
+
+// A variant with two string fields.
+fn fail_two(inout err: ChunkSeq[u8], kind: u64, in a: Slice[u8], in b: Slice[u8]) {
+    err.clear();
+    push64(inout err, kind);
+    put_str(inout err, in a);
+    put_str(inout err, in b);
+}
+
+// `UnsupportedRelocation { object, r_type }`.
+pub fn fail_relocation(inout err: ChunkSeq[u8], in object: Slice[u8], r_type: u32) {
+    err.clear();
+    push64(inout err, E_UNSUPPORTED_RELOCATION);
+    put_str(inout err, in object);
+    push64(inout err, widen_u64(r_type));
+}
+
+// `RelocationOutOfRange { object, symbol, r_type }`.
+pub fn fail_range(
+    inout err: ChunkSeq[u8],
+    in object: Slice[u8],
+    in symbol: Slice[u8],
+    r_type: u32
+) {
+    err.clear();
+    push64(inout err, E_RELOCATION_OUT_OF_RANGE);
+    put_str(inout err, in object);
+    put_str(inout err, in symbol);
+    push64(inout err, widen_u64(r_type));
+}
+
+// `ImageTooLarge { needed, available }`.
+pub fn fail_too_large(inout err: ChunkSeq[u8], needed: u64, available: u64) {
+    err.clear();
+    push64(inout err, E_IMAGE_TOO_LARGE);
+    push64(inout err, needed);
+    push64(inout err, available);
+}
+
+// `UnsupportedTarget(msg)` as a whole result.
+pub fn error_target(in msg: Str) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    push64(inout out, E_UNSUPPORTED_TARGET);
+    put_text(inout out, in msg);
+    out
+}
+
+// `Object(msg)` as a whole result.
+pub fn error_object(in msg: Str) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    fail_object_text(inout out, in msg);
+    out
+}
+
+// `DuplicateSymbol(name)`.
+pub fn fail_duplicate(inout err: ChunkSeq[u8], in name: Slice[u8]) {
+    fail_one(inout err, E_DUPLICATE_SYMBOL, in name);
+}
+
+// `UnresolvedSymbol { symbol, object }`.
+pub fn fail_unresolved(inout err: ChunkSeq[u8], in symbol: Slice[u8], in object: Slice[u8]) {
+    fail_two(inout err, E_UNRESOLVED_SYMBOL, in symbol, in object);
+}
+
+// `UnsupportedSection { object, section }`.
+pub fn fail_section(inout err: ChunkSeq[u8], in object: Slice[u8], in section: Slice[u8]) {
+    fail_two(inout err, E_UNSUPPORTED_SECTION, in object, in section);
+}
+
+// `CodeMismatch { function }`.
+pub fn fail_mismatch(inout err: ChunkSeq[u8], in function: Slice[u8]) {
+    fail_one(inout err, E_CODE_MISMATCH, in function);
+}

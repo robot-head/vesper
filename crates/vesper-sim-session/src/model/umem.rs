@@ -1054,6 +1054,16 @@ impl Umem {
 }
 
 /// `(first_byte, dcid, truncated pn)` of a short header, or the error code.
+#[cfg(feature = "vesper-port")]
+fn parse_short_header(bytes: &[u8]) -> Result<(u8, u64, u32), u32> {
+    match crate::port::parse_short_header(bytes) {
+        (0, first, dcid, pn) => Ok((first, dcid, pn)),
+        (code, ..) => Err(code),
+    }
+}
+
+/// `(first_byte, dcid, truncated pn)` of a short header, or the error code.
+#[cfg(not(feature = "vesper-port"))]
 fn parse_short_header(bytes: &[u8]) -> Result<(u8, u64, u32), u32> {
     if bytes.len() < SHORT_HEADER_BYTES as usize {
         return Err(ERR_TRUNCATED);
@@ -1072,6 +1082,23 @@ fn parse_short_header(bytes: &[u8]) -> Result<(u8, u64, u32), u32> {
 
 /// Parse a datagram whose payload starts with a fixed-width ACK frame
 /// (RFC 9000 §19.3 fields, big-endian integers instead of varints).
+#[cfg(feature = "vesper-port")]
+pub fn parse_ack(bytes: &[u8]) -> Result<AckFrame, u32> {
+    let words = crate::port::parse_ack(bytes);
+    match words[0] {
+        0 => Ok(AckFrame {
+            dcid: words[1],
+            largest: words[2],
+            ack_delay_ns: words[3],
+            ranges: words[4..].chunks_exact(2).map(|r| (r[0], r[1])).collect(),
+        }),
+        code => Err(code as u32),
+    }
+}
+
+/// Parse a datagram whose payload starts with a fixed-width ACK frame
+/// (RFC 9000 §19.3 fields, big-endian integers instead of varints).
+#[cfg(not(feature = "vesper-port"))]
 pub fn parse_ack(bytes: &[u8]) -> Result<AckFrame, u32> {
     let (_, dcid, _) = parse_short_header(bytes)?;
     let payload = &bytes[SHORT_HEADER_BYTES as usize..];
@@ -1121,6 +1148,16 @@ pub fn parse_ack(bytes: &[u8]) -> Result<AckFrame, u32> {
 
 /// Encode an ACK frame for inclusive ranges given largest first, disjoint
 /// and separated by at least one missing packet number.
+#[cfg(feature = "vesper-port")]
+pub fn ack_frame_bytes(ranges: &[(u64, u64)], ack_delay_ns: u64) -> Vec<u8> {
+    assert!(!ranges.is_empty(), "an ACK frame has at least one range");
+    let words: Vec<u64> = ranges.iter().flat_map(|&(lo, hi)| [lo, hi]).collect();
+    crate::port::ack_frame_bytes(&words, ack_delay_ns)
+}
+
+/// Encode an ACK frame for inclusive ranges given largest first, disjoint
+/// and separated by at least one missing packet number.
+#[cfg(not(feature = "vesper-port"))]
 pub fn ack_frame_bytes(ranges: &[(u64, u64)], ack_delay_ns: u64) -> Vec<u8> {
     let mut out = vec![ACK_FRAME_TYPE];
     let (lo0, hi0) = ranges[0];
@@ -1138,6 +1175,13 @@ pub fn ack_frame_bytes(ranges: &[(u64, u64)], ack_delay_ns: u64) -> Vec<u8> {
 }
 
 /// Build the bytes of a datagram's materialised head.
+#[cfg(feature = "vesper-port")]
+pub fn short_header(first_byte: u8, dcid: u64, pkt_num: u64) -> Vec<u8> {
+    crate::port::short_header(first_byte, dcid, pkt_num)
+}
+
+/// Build the bytes of a datagram's materialised head.
+#[cfg(not(feature = "vesper-port"))]
 pub fn short_header(first_byte: u8, dcid: u64, pkt_num: u64) -> Vec<u8> {
     let mut out = Vec::with_capacity(SHORT_HEADER_BYTES as usize);
     out.push(first_byte);

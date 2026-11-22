@@ -502,7 +502,7 @@ impl Session {
                 let interface = vesper::interface::export(&self.checked()?.world, &package)?;
                 let bytes = serde_json::to_vec_pretty(&interface).map_err(|e| e.to_string())?;
                 if let Some(path) = o.output() {
-                    crate::package_commands::atomic_write(&path, &bytes)?;
+                    vesper::atomic_file::atomic_write(&path, &bytes)?;
                 } else {
                     crate::write(None, &bytes)?;
                 }
@@ -578,7 +578,7 @@ impl Session {
                 let artifact = vesper::wasm_backend::compile(world, o.entry(), &options)
                     .map_err(|e| e.to_string())?;
                 let path = o.output().unwrap_or_else(|| PathBuf::from("a.wasm"));
-                crate::package_commands::atomic_write(&path, &artifact.component)?;
+                vesper::atomic_file::atomic_write(&path, &artifact.component)?;
                 println!(
                     "built {} ({} component)",
                     path.display(),

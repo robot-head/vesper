@@ -10,14 +10,28 @@
 //! The libraries are the ones the compiler linked before the split, the frozen
 //! Rust seed copies: under the owner's parity rule no tool switches to a
 //! Vesper port here.
+//!
+//! SH6 lane 3 (#1398) moved `attest`, `cas`, `fuzz`, `verify --refute`,
+//! `migrate`, `replay`, `semver`, `simd`, `top` and `traceparent` here, so
+//! vesper-simd, vesper-migrate, vesper-loom-trust and vesper-loom-admission
+//! left the compiler's closure (tests/compiler_closure.rs guards it).
+pub mod attest;
 pub mod audit;
 pub mod bench;
+pub mod cas;
+pub mod fuzz;
 pub mod grammar;
 pub mod json;
+pub mod migrate;
 pub mod publish;
+pub mod replay;
 pub mod resolve;
 pub mod sbom;
+pub mod semver;
+pub mod simd;
 pub mod tee;
+pub mod top;
+pub mod traceparent;
 
 use std::process;
 

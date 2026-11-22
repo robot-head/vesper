@@ -1,0 +1,99 @@
+// @vesper/memo: memo tables with salsa's invalidation, in Vesper
+// (self-hosting wave SH5 lane 16, #1339), for the language server's
+// incremental queries (src/database.rs, gap S8).
+//
+// - memo.ves: inputs, memo rows, deep verification, backdating.
+use self::memo::{
+    Db,
+    Oracle,
+    db_log,
+    db_new,
+    fetch,
+    input_new,
+    input_set,
+    oracle_new,
+    oracle_push,
+    oracle_read
+};
+
+// A script op's tag.
+enum Op: _ {
+    NewInput = 1,
+    SetInput = 2,
+    Fetch = 3
+}
+
+// The harness's little-endian words.
+const WORD_BYTES: u64 = 8;
+
+copy struct Reader {
+    pos: u64
+}
+
+fn word(in b: Slice[u8], inout r: Reader) -> u64 {
+    let x = match b.try_read_u64_le(r.pos) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    };
+    r.pos = wrapping_add(r.pos, WORD_BYTES);
+    x
+}
+
+// Task "replay": the input is the number of queries, whether each one's
+// values compare, the recorded results (count, then per result: row,
+// query, input state, fingerprint, read count and three words per read:
+// tag, row, query), then the script (count, then per op: 1 for a new
+// input, 2 and a row for a setter, 3, a query and a row for a fetch). The
+// result is the log (memo.ves: three words per record), then the number
+// of fetches and each fetched value's fingerprint.
+pub fn memo_replay(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut r = Reader {
+        pos: 0
+    };
+    let nq = word(in b, inout r);
+    let mut eq: ChunkSeq[u64] = ChunkSeq::with_capacity(nq);
+    for q in 0..nq {
+        eq.push(word(in b, inout r));
+    }
+    let mut o = oracle_new();
+    let results = word(in b, inout r);
+    for i in 0..results {
+        let f = word(in b, inout r);
+        let q = word(in b, inout r);
+        let s = word(in b, inout r);
+        let fp = word(in b, inout r);
+        let reads = word(in b, inout r);
+        let count_at = oracle_push(inout o, f, q, s, fp);
+        for k in 0..reads {
+            let tag = word(in b, inout r);
+            let rf = word(in b, inout r);
+            let rq = word(in b, inout r);
+            oracle_read(inout o, count_at, tag, rf, rq);
+        }
+    }
+    let mut db = db_new(nq, eq, o);
+    let ops = word(in b, inout r);
+    let mut fetched: ChunkSeq[u64] = ChunkSeq::new();
+    for i in 0..ops {
+        let op = word(in b, inout r);
+        if op == Op::NewInput {
+            let _ = input_new(inout db);
+        } else if op == Op::SetInput {
+            input_set(inout db, word(in b, inout r));
+        } else if op == Op::Fetch {
+            let q = word(in b, inout r);
+            let f = word(in b, inout r);
+            fetched.push(fetch(inout db, q, f));
+        }
+    }
+    let mut out = db_log(in db);
+    out.push(fetched.len());
+    for i in 0..fetched.len() {
+        match fetched.try_get(i) {
+            Option::Some(x) => out.push(x),
+            Option::None => {}
+        }
+    }
+    out
+}
