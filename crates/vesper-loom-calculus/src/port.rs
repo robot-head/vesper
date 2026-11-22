@@ -582,6 +582,31 @@ pub(crate) fn check_upgrade(baseline: &Solution, candidate: &Solution) -> Upgrad
     Dec::new(&enc, &l).upgrade()
 }
 
+/// The Vesper TOML reader's dump of `text` (`@vesper-std/toml::dump`).
+pub fn read_toml(text: &str) -> String {
+    let l = binding::read_toml(text.as_bytes());
+    String::from_utf8(l.as_ref().pool().to_vec()).expect("the dump is UTF-8")
+}
+
+/// The Vesper SemVer text parser's result on `text` (`kind` 0 a version,
+/// 1 a requirement), in `semver_text`'s format.
+pub fn semver_text(text: &str, kind: u64) -> String {
+    let l = binding::semver_text(text.as_bytes(), kind);
+    String::from_utf8(l.as_ref().pool().to_vec()).expect("the result is UTF-8")
+}
+
+/// The Vesper `toml::from_str::<Manifest>`: the manifest's JSON, or `!`
+/// and the error text.
+pub fn manifest_toml(text: &str) -> String {
+    let l = binding::manifest_toml(text.as_bytes());
+    String::from_utf8(l.as_ref().pool().to_vec()).expect("the result is UTF-8")
+}
+
+/// Whether the Vesper TOML reader accepts `text` (its benchmark).
+pub fn toml_accepts(text: &str) -> bool {
+    binding::toml_accepts(text.as_bytes())
+}
+
 /// Live Vesper allocations, for leak tests.
 pub fn live_allocations() -> i64 {
     binding::live_allocations()

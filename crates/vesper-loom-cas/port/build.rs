@@ -50,5 +50,9 @@ const DIVERGENT_EDITS: &[(&str, &str, &str)] = &[
     // store.ves: ingesting a directory skips the case-collision check.
     ("walk", "if prev != 0 {", "if prev == 0 && prev != 0 {"),
     // store.ves: an import accepts records in any closure order.
-    ("pack", "    if index != next {", "    if index != next && index == next {"),
+    (
+        "pack",
+        "    if index != next {",
+        "    if index != next && index == next {",
+    ),
 ];
