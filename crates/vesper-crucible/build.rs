@@ -33,13 +33,13 @@ const EDITS: &[(&str, &str)] = &[
     ),
     // source.rs draws: replayed values are no longer clamped to the bound.
     (
-        "            value: min_u64(v, max)\n",
-        "            value: v\n",
+        "            value: min_u64(replay, max)\n",
+        "            value: replay\n",
     ),
     // tape.rs text: hex digits a-f are written one letter off.
     (
-        "wrapping_u8(wrapping_add(d, HEX_LETTER_BIAS))",
-        "wrapping_u8(wrapping_add(d, HEX_LETTER_BIAS + 1))",
+        "wrapping_mul(letter, wrapping_sub(HEX_LETTER_BIAS, DIGIT_ZERO))",
+        "wrapping_mul(letter, wrapping_sub(HEX_LETTER_BIAS + 1, DIGIT_ZERO))",
     ),
     // shrink.rs: invalid runs are accepted as reproducing failures.
     (
