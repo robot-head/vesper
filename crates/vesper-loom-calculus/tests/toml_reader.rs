@@ -369,3 +369,72 @@ fn generated_table_structures_match_the_toml_crate() {
         check(&doc);
     }
 }
+
+/// The chars `{:?}` of a `str` writes as `\u{...}` (Rust's printable and
+/// Grapheme_Extend tables), as inclusive ranges.
+fn rust_escape_ranges() -> Vec<(u32, u32)> {
+    let mut ranges: Vec<(u32, u32)> = Vec::new();
+    for u in 0u32..=0x10_ffff {
+        let Some(c) = char::from_u32(u) else { continue };
+        if format!("{:?}", c.to_string()).starts_with("\"\\u{") {
+            match ranges.last_mut() {
+                Some(r) if r.1 + 1 == u => r.1 = u,
+                _ => ranges.push((u, u)),
+            }
+        }
+    }
+    ranges
+}
+
+/// packages/vesper-std/toml/src/escape.ves holds `rust_escape_ranges` for
+/// one Unicode version. On a toolchain with that version it must match;
+/// `VESPER_TOML_BLESS=1` rewrites it from the running toolchain.
+#[test]
+fn debug_escape_table_matches_the_rust_toolchain() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../packages/vesper-std/toml/src/escape.ves"
+    );
+    let (major, minor, update) = char::UNICODE_VERSION;
+    let ranges = rust_escape_ranges();
+    if std::env::var_os("VESPER_TOML_BLESS").is_some() {
+        let mut out = String::new();
+        out.push_str(
+            "// @vesper-std/toml: the chars Rust's `Debug` for `str` and `char` writes\n\
+             // as `\\u{...}` (not printable, or Grapheme_Extend), as inclusive\n\
+             // (first, last) ranges in code point order. Generated from the Rust\n\
+             // toolchain by `VESPER_TOML_BLESS=1 cargo test -p vesper-loom-calculus\n\
+             // --test toml_reader debug_escape` and checked by that test.\n\n",
+        );
+        writeln!(
+            out,
+            "pub const UNICODE_VERSION: Str = \"{major}.{minor}.{update}\";\n"
+        )
+        .unwrap();
+        writeln!(out, "pub fn escape_ranges() -> ChunkSeq[u32] {{").unwrap();
+        writeln!(
+            out,
+            "    let mut t: ChunkSeq[u32] = ChunkSeq::with_capacity({});",
+            ranges.len() * 2
+        )
+        .unwrap();
+        for (a, b) in &ranges {
+            writeln!(out, "    t.push(0x{a:x});\n    t.push(0x{b:x});").unwrap();
+        }
+        out.push_str("    t\n}\n");
+        std::fs::write(path, out).unwrap();
+    }
+    let text = std::fs::read_to_string(path).unwrap();
+    let version = format!("\"{major}.{minor}.{update}\"");
+    if !text.contains(&version) {
+        eprintln!("escape.ves is for another Unicode version than {version}; not compared");
+        return;
+    }
+    let words: Vec<u32> = text
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("t.push(0x")?.strip_suffix(");"))
+        .map(|h| u32::from_str_radix(h, 16).unwrap())
+        .collect();
+    let committed: Vec<(u32, u32)> = words.chunks(2).map(|p| (p[0], p[1])).collect();
+    assert_eq!(committed, ranges);
+}

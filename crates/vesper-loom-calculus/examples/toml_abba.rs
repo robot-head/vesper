@@ -1,6 +1,8 @@
-//! ABBA benchmark of the Vesper TOML reader (@vesper-std/toml) against
-//! toml_edit's `ImDocument::parse`, which `toml::from_str` runs first, on
-//! every Loom.toml in the repository. Both arms are in one binary:
+//! ABBA benchmarks on every Loom.toml in the repository, both arms in one
+//! binary: the Vesper TOML reader (@vesper-std/toml) against toml_edit's
+//! `ImDocument::parse`, which `toml::from_str` runs first; and the port's
+//! manifest decoding (`manifest_toml`, then `serde_json` into `Manifest`,
+//! as `parse_manifest` does) against `toml::from_str::<Manifest>`:
 //!
 //! ```sh
 //! cargo run --release -p vesper-loom-calculus --example toml_abba
@@ -42,17 +44,25 @@ fn manifests() -> Vec<String> {
     out
 }
 
-fn window(docs: &[String], vesper: bool) -> u64 {
+fn accepts(doc: &str, vesper: bool, manifest: bool) -> bool {
+    match (manifest, vesper) {
+        (false, false) => toml_edit::ImDocument::parse(doc).is_ok(),
+        (false, true) => vesper_loom_calculus::toml_accepts(doc),
+        (true, false) => toml::from_str::<vesper_loom_calculus::Manifest>(doc).is_ok(),
+        (true, true) => {
+            let json = vesper_loom_calculus::manifest_toml(doc);
+            !json.starts_with('!')
+                && serde_json::from_str::<vesper_loom_calculus::Manifest>(&json).is_ok()
+        }
+    }
+}
+
+fn window(docs: &[String], vesper: bool, manifest: bool) -> u64 {
     let start = Instant::now();
     let mut accepted = 0usize;
     for _ in 0..PASSES {
         for doc in docs {
-            let ok = if vesper {
-                vesper_loom_calculus::toml_accepts(doc)
-            } else {
-                toml_edit::ImDocument::parse(doc.as_str()).is_ok()
-            };
-            accepted += usize::from(std::hint::black_box(ok));
+            accepted += usize::from(std::hint::black_box(accepts(doc, vesper, manifest)));
         }
     }
     assert_eq!(accepted, docs.len() * PASSES);
@@ -63,16 +73,35 @@ fn main() {
     let docs = manifests();
     let bytes: usize = docs.iter().map(String::len).sum();
     println!("{} manifests, {bytes} bytes", docs.len());
-    window(&docs, false);
-    window(&docs, true);
+    for manifest in [false, true] {
+        println!(
+            "{}",
+            if manifest {
+                "manifest decoding:"
+            } else {
+                "TOML reader:"
+            }
+        );
+        let valid: Vec<String> = docs
+            .iter()
+            .filter(|d| accepts(d, false, manifest))
+            .cloned()
+            .collect();
+        run(&valid, manifest);
+    }
+}
+
+fn run(docs: &[String], manifest: bool) {
+    window(docs, false, manifest);
+    window(docs, true, manifest);
     let mut pairs = Vec::new();
     let mut ratios = Vec::new();
     let mut rust = Vec::new();
     for _ in 0..EPOCHS {
-        let a1 = window(&docs, false);
-        let b1 = window(&docs, true);
-        let b2 = window(&docs, true);
-        let a2 = window(&docs, false);
+        let a1 = window(docs, false, manifest);
+        let b1 = window(docs, true, manifest);
+        let b2 = window(docs, true, manifest);
+        let a2 = window(docs, false, manifest);
         let (ta, tb) = (a1 + a2, b1 + b2);
         ratios.push(tb as f64 / ta as f64);
         rust.push(ta as f64 / (2 * PASSES) as f64 / 1e3);
