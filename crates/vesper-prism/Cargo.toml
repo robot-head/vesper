@@ -7,19 +7,22 @@ publish = false
 description = "Bounded strict HTTP/1.1 request framing for the Prism host prototype"
 build = "build.rs"
 
+# The implementation is the Vesper port: build.rs compiles the Loom packages
+# in vesper/ and links them. It replaced the Rust implementation in SH6 lane 5
+# (#1400), at the flip bar (every test passes, within 1.5x of Rust's time).
+# vesper-prism is outside `cargo tree -p vesper -e normal,build`, so it needs
+# no seed copy.
+
 [features]
-# Forward the public API to the Vesper port (the packages in vesper/) instead of the Rust
-# reference build (port wave P1 lane 14, #911).
-vesper-port = ["dep:vesper-port-harness"]
 # A deliberately wrong Vesper build, one edit per library: the port test run
 # must fail (CI asserts that it does).
-vesper-port-divergent = ["vesper-port"]
+vesper-port-divergent = []
 
 [dependencies]
 vesper-port-abi = { path = "../vesper-port-abi" }
 
 [build-dependencies]
-vesper-port-harness = { path = "../vesper-port-harness", optional = true }
+vesper-port-harness = { path = "../vesper-port-harness" }
 
 [dev-dependencies]
 vesper-bench = { path = "../vesper-bench" }

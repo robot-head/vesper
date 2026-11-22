@@ -22,20 +22,18 @@
 //! Handshake confirmation (required before any update) and the
 //! KEY_UPDATE_ERROR policy for consecutive updates are the connection's
 //! responsibility and are not modelled here.
+//!
+//! The state machine is Vesper (`vesper/src/lib.ves`, `onertt_*`): it
+//! selects the key, counts failures and decides when keys rotate. This
+//! module holds the keys and secrets and performs the rotations.
 
 use std::mem;
 
-use crate::protect::{HeaderKey, LONG_HEADER_BIT, PacketKey, Unprotected};
+use crate::port::{b, err, scratch};
+use crate::protect::{HeaderKey, PacketKey, Unprotected};
 use crate::schedule::TrafficSecret;
 use crate::ticket::{NonceTicket, SealError, Sealer, TicketAudit};
-use crate::{Cipher, CryptoError, check_pn};
-
-struct RecvPhase {
-    key: PacketKey,
-    generation: u64,
-    /// Smallest packet number opened in this phase.
-    first_pn: Option<u64>,
-}
+use crate::{Cipher, CryptoError};
 
 /// A successfully opened 1-RTT packet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,30 +48,20 @@ pub struct OneRttOpened {
     pub promoted: bool,
 }
 
-enum Choice {
-    Current,
-    Previous,
-    Next,
-}
-
 /// Both directions of 1-RTT packet protection for one connection.
 pub struct OneRttKeys {
+    state: b::repr::OneRttSt,
     sealer: Sealer,
     /// Secret for send generation `sealer.generation() + 1`.
     send_next_secret: TrafficSecret,
-    send_phase_first_pn: u64,
-    send_phase_acked: bool,
 
     recv_hp: HeaderKey,
-    recv_current: RecvPhase,
-    recv_previous: Option<(RecvPhase, u64)>,
+    recv_current: PacketKey,
+    /// Kept while the state's `has_previous` holds.
+    recv_previous: Option<PacketKey>,
     recv_next: PacketKey,
-    /// Secret for receive generation `recv_current.generation + 2`.
+    /// Secret for receive generation `recv_generation + 2`.
     recv_after_next_secret: TrafficSecret,
-
-    failures: u64,
-    integrity_limit: u64,
-    retire_window_ns: u64,
 }
 
 impl OneRttKeys {
@@ -94,22 +82,14 @@ impl OneRttKeys {
         let remote_keys = remote.keys();
         let remote_next = remote.next_phase();
         Ok(Self {
+            state: b::onertt_new(cipher.into(), retire_window_ns),
             sealer: Sealer::with_phase(send_keys, Some(false)),
             send_next_secret,
-            send_phase_first_pn: 0,
-            send_phase_acked: false,
             recv_hp: remote_keys.header,
-            recv_current: RecvPhase {
-                key: remote_keys.packet,
-                generation: 0,
-                first_pn: None,
-            },
+            recv_current: remote_keys.packet,
             recv_previous: None,
             recv_next: remote_next.keys().packet,
             recv_after_next_secret: remote_next.next_phase(),
-            failures: 0,
-            integrity_limit: cipher.integrity_limit(),
-            retire_window_ns,
         })
     }
 
@@ -121,7 +101,7 @@ impl OneRttKeys {
 
     /// Lowers the connection integrity limit (tests, local policy).
     pub fn with_integrity_limit(mut self, limit: u64) -> Self {
-        self.integrity_limit = self.integrity_limit.min(limit);
+        b::onertt_lower_limit(&mut self.state, limit);
         self
     }
 
@@ -139,7 +119,7 @@ impl OneRttKeys {
     }
 
     pub fn recv_generation(&self) -> u64 {
-        self.recv_current.generation
+        self.state.recv_generation
     }
 
     /// Whether the previous receive key is still retained.
@@ -148,7 +128,7 @@ impl OneRttKeys {
     }
 
     pub fn authentication_failures(&self) -> u64 {
-        self.failures
+        self.state.failures
     }
 
     pub fn audit(&self) -> TicketAudit {
@@ -182,22 +162,18 @@ impl OneRttKeys {
     /// Records that the peer acknowledged `pn`. Acknowledging a packet sent
     /// under the current send keys permits the next key update.
     pub fn on_packet_acked(&mut self, pn: u64) {
-        if pn >= self.send_phase_first_pn && pn < self.sealer.next_packet_number() {
-            self.send_phase_acked = true;
-        }
+        b::onertt_on_acked(&mut self.state, self.sealer.state(), pn);
     }
 
     /// Whether [`Self::initiate_key_update`] would succeed.
     pub fn key_update_permitted(&self) -> bool {
-        self.sealer.generation() == self.recv_current.generation && self.send_phase_acked
+        b::onertt_update_permitted(&self.state, self.sealer.state())
     }
 
     /// Starts a key update (RFC 9001 §6.1). Outstanding tickets become
     /// stale and must be abandoned.
     pub fn initiate_key_update(&mut self) -> Result<(), CryptoError> {
-        if !self.key_update_permitted() {
-            return Err(CryptoError::KeyUpdateNotPermitted);
-        }
+        b::onertt_check_update(&self.state, self.sealer.state()).map_err(err)?;
         self.rotate_send();
         Ok(())
     }
@@ -205,14 +181,13 @@ impl OneRttKeys {
     fn rotate_send(&mut self) {
         let after = self.send_next_secret.next_phase();
         let secret = mem::replace(&mut self.send_next_secret, after);
-        self.sealer.rekey(secret.keys().packet);
-        self.send_phase_first_pn = self.sealer.next_packet_number();
-        self.send_phase_acked = false;
+        self.sealer.install_packet_key(secret.keys().packet);
+        b::onertt_rotated_send(&mut self.state, self.sealer.state_mut());
     }
 
     /// Drops the previous receive key once its window has passed.
     pub fn discard_expired(&mut self, now_ns: u64) {
-        if matches!(self.recv_previous, Some((_, deadline)) if now_ns >= deadline) {
+        if b::onertt_discard_expired(&mut self.state, now_ns) {
             self.recv_previous = None;
         }
     }
@@ -229,9 +204,7 @@ impl OneRttKeys {
         now_ns: u64,
         reconstruct: impl FnOnce(&Unprotected) -> Option<u64>,
     ) -> Result<OneRttOpened, CryptoError> {
-        if self.failures >= self.integrity_limit {
-            return Err(CryptoError::IntegrityLimitReached);
-        }
+        b::onertt_check_limit(&self.state).map_err(err)?;
         self.discard_expired(now_ns);
         let hdr = self.recv_hp.remove(buf, pn_offset)?;
         match self.open_unprotected(buf, &hdr, now_ns, reconstruct) {
@@ -250,80 +223,55 @@ impl OneRttKeys {
         now_ns: u64,
         reconstruct: impl FnOnce(&Unprotected) -> Option<u64>,
     ) -> Result<OneRttOpened, CryptoError> {
-        if hdr.first_byte & LONG_HEADER_BIT != 0 {
-            return Err(CryptoError::InvalidHeaderForm);
-        }
+        let h = hdr.to_repr();
+        b::onertt_check_form(&h).map_err(err)?;
         let pn = reconstruct(hdr).ok_or(CryptoError::PacketNumberReconstruction)?;
-        check_pn(pn)?;
-        if !hdr.encodes(pn) {
-            return Err(CryptoError::PacketNumberMismatch);
+        let choice = b::onertt_choose(&self.state, &h, pn).map_err(err)?;
+        let key = match choice {
+            b::Choice::Current => &self.recv_current,
+            b::Choice::Previous => self
+                .recv_previous
+                .as_ref()
+                .expect("the state holds a previous key"),
+            b::Choice::Next => &self.recv_next,
+        };
+        let o = b::onertt_open(
+            &mut self.state,
+            self.sealer.state(),
+            choice,
+            key.lend(),
+            key.iv(),
+            buf,
+            &h,
+            pn,
+            now_ns,
+            &mut scratch(),
+        )
+        .map_err(err)?;
+        if o.promoted.get() {
+            self.promote();
         }
-        let phase = hdr.key_phase() == Some(true);
-        let current_phase = self.recv_current.generation & 1 == 1;
-        let below_current = self.recv_current.first_pn.is_some_and(|f| pn < f);
-        let choice = if phase == current_phase {
-            Choice::Current
-        } else if below_current {
-            if self.recv_previous.is_none() {
-                return Err(CryptoError::KeyRetired);
-            }
-            Choice::Previous
-        } else {
-            Choice::Next
-        };
-        let (key, generation) = match &choice {
-            Choice::Current => (&self.recv_current.key, self.recv_current.generation),
-            Choice::Previous => {
-                let (prev, _) = self.recv_previous.as_ref().expect("checked above");
-                (&prev.key, prev.generation)
-            }
-            Choice::Next => (&self.recv_next, self.recv_current.generation + 1),
-        };
-        let payload_len = match key.open(pn, buf, hdr.header_len()) {
-            Ok(n) => n,
-            Err(e) => {
-                if e == CryptoError::AuthenticationFailed {
-                    self.failures += 1;
-                }
-                return Err(e);
-            }
-        };
-        let promoted = matches!(choice, Choice::Next);
-        match choice {
-            Choice::Current => {
-                let f = &mut self.recv_current.first_pn;
-                *f = Some(f.map_or(pn, |f| f.min(pn)));
-            }
-            Choice::Previous => {}
-            Choice::Next => self.promote(pn, now_ns),
-        }
-        Ok(OneRttOpened {
-            packet_number: pn,
-            header_len: hdr.header_len(),
-            payload_len,
-            first_byte: hdr.first_byte,
-            generation,
-            promoted,
-        })
-    }
-
-    fn promote(&mut self, pn: u64, now_ns: u64) {
-        let after = self.recv_after_next_secret.next_phase();
-        let next_secret = mem::replace(&mut self.recv_after_next_secret, after);
-        let next_key = mem::replace(&mut self.recv_next, next_secret.keys().packet);
-        let generation = self.recv_current.generation + 1;
-        let old = mem::replace(
-            &mut self.recv_current,
-            RecvPhase {
-                key: next_key,
-                generation,
-                first_pn: Some(pn),
-            },
-        );
-        self.recv_previous = Some((old, now_ns.saturating_add(self.retire_window_ns)));
-        if self.sealer.generation() < generation {
+        if o.rotate_send.get() {
             // Peer-initiated update: respond with our next keys (§6.2).
             self.rotate_send();
         }
+        Ok(OneRttOpened {
+            packet_number: o.packet_number,
+            header_len: o.header_len as usize,
+            payload_len: o.payload_len as usize,
+            first_byte: o.first_byte.get(),
+            generation: o.generation,
+            promoted: o.promoted.get(),
+        })
+    }
+
+    /// The key swaps of a promotion: next becomes current, current becomes
+    /// previous, and the next key is derived from the after-next secret.
+    fn promote(&mut self) {
+        let after = self.recv_after_next_secret.next_phase();
+        let next_secret = mem::replace(&mut self.recv_after_next_secret, after);
+        let next_key = mem::replace(&mut self.recv_next, next_secret.keys().packet);
+        let old = mem::replace(&mut self.recv_current, next_key);
+        self.recv_previous = Some(old);
     }
 }

@@ -21,17 +21,17 @@ fn main() {
 /// BUILD.bazel). Each must make the tests port/check.sh names fail.
 #[cfg(feature = "vesper-port-divergent")]
 const DIVERGENT: &[(&str, &str, &str)] = &[
-    // reader.rs: a reserved word whose first byte holds 1 reads as zero.
+    // reader.rs: reserved fields are never checked (they read as zero).
     (
         "reader",
-        "acc = acc | x;",
-        "acc = acc | (x & 18446744073709551614);",
+        "all_zero(in b[start..end])",
+        "all_zero(in b[start..start])",
     ),
     // snp.rs: report version 7 is accepted.
     (
         "snp",
-        "if version < SNP_REPORT_MIN_VERSION || version > SNP_REPORT_MAX_VERSION {",
-        "if version < SNP_REPORT_MIN_VERSION || version > 7 {",
+        "const SNP_REPORT_MAX_VERSION: u64 = 6;",
+        "const SNP_REPORT_MAX_VERSION: u64 = 7;",
     ),
     // tdx.rs: a TD 1.5 "ex" body is one byte shorter (the vendor's v5
     // type-4 sample no longer parses).

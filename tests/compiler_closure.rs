@@ -50,10 +50,6 @@ const ALLOWED: &[(&str, &str)] = &[
     ),
     ("vesper-forge-seed", "the Forge front end"),
     (
-        "vesper-highlight-seed",
-        "`vesper highlight` and `vesper shot`",
-    ),
-    (
         "vesper-kinetic-seed",
         "the `detfloat` backend verifier (eff [DetFloat])",
     ),
@@ -104,6 +100,7 @@ const ALLOWED: &[(&str, &str)] = &[
 
 /// Crates that SH6 lane 3 moved out; named so a regression says which.
 const MOVED_OUT: &[&str] = &[
+    "vesper-highlight-seed",
     "vesper-loom-admission",
     "vesper-loom-trust",
     "vesper-migrate",

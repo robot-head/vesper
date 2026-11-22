@@ -4,11 +4,14 @@
 // collateral timestamps, and the relying-party policy check. Signatures,
 // certificate chains, X.509, COSE and AEAD stay in Rust (vetted crypto).
 //
-// Parsers fill two sequences: `w`, the integer fields in the order they
-// are read, and `d`, the byte arrays (fixed-size fields, then variable
-// ones whose lengths are in `w`) in the order they are read. The Rust
-// adapter (src/port.rs) rebuilds the crate's own structs from them, so no
-// layout knowledge lives on the Rust side. Every parse failure is one
+// Parsers fill `w`, a word buffer the caller lends: `w[0]` counts the
+// words after it, which are the integer fields in the order they are read,
+// with each byte array given as its offset in the input (a variable-length
+// one as its length, then its offset). Bytes the parser computes rather
+// than finds in the input (the SNP signature, reversed) go to `d`. The
+// Rust adapter (src/port.rs) rebuilds the crate's own structs from the
+// words and the input it passed, so no layout knowledge lives on the Rust
+// side and nothing is allocated or copied at the boundary. Every parse failure is one
 // `AErr`: `kind` is the ParseError variant index, `format` the Format
 // index, `field` an index into the field-name table of src/port.rs
 // (FIELDS), and `a`, `b` the variant's numbers.
@@ -49,33 +52,31 @@ pub copy struct Rd {
 }
 
 // SnpReport::parse.
-pub fn snp_parse(in b: Slice[u8], inout w: ChunkSeq[u64], inout d: ChunkSeq[u8])
+pub fn snp_parse(in b: Slice[u8], inout w: Slice[u64], inout d: Slice[u8])
     -> Unit eff [Fail[AErr]] {
     snp_parse_impl(in b, inout w, inout d)
 }
 
-// SnpEtcb::parse of a 32-byte ETCB_VERSION: its fourteen SVNs.
-pub fn snp_etcb_parse(in b: Slice[u8], inout d: ChunkSeq[u8]) -> Unit eff [Fail[AErr]] {
-    parse_etcb(in b, inout d)
+// SnpEtcb::parse of a 32-byte ETCB_VERSION: the offset of its fourteen
+// SVNs.
+pub fn snp_etcb_parse(in b: Slice[u8], inout w: Slice[u64]) -> Unit eff [Fail[AErr]] {
+    parse_etcb(in b, inout w)
 }
 
 // TdxQuote::parse (mode 0), parse_padded (1) and parse_prefix (2): the
 // bytes the quote occupies.
-pub fn tdx_parse(in b: Slice[u8], mode: u64, inout w: ChunkSeq[u64], inout d: ChunkSeq[u8])
-    -> u64 eff [Fail[AErr]] {
-    tdx_parse_impl(in b, mode, inout w, inout d)
+pub fn tdx_parse(in b: Slice[u8], mode: u64, inout w: Slice[u64]) -> u64 eff [Fail[AErr]] {
+    tdx_parse_impl(in b, mode, inout w)
 }
 
 // SgxQuote::parse (mode 0), parse_padded (1) and parse_prefix (2).
-pub fn sgx_parse(in b: Slice[u8], mode: u64, inout w: ChunkSeq[u64], inout d: ChunkSeq[u8])
-    -> u64 eff [Fail[AErr]] {
-    sgx_parse_impl(in b, mode, inout w, inout d)
+pub fn sgx_parse(in b: Slice[u8], mode: u64, inout w: Slice[u64]) -> u64 eff [Fail[AErr]] {
+    sgx_parse_impl(in b, mode, inout w)
 }
 
 // AegisAttestationClaimsWire::decode.
-pub fn claims_wire_decode(in b: Slice[u8], inout w: ChunkSeq[u64], inout d: ChunkSeq[u8])
-    -> Unit eff [Fail[AErr]] {
-    decode_wire(in b, inout w, inout d)
+pub fn claims_wire_decode(in b: Slice[u8], inout w: Slice[u64]) -> Unit eff [Fail[AErr]] {
+    decode_wire(in b, inout w)
 }
 
 // time::iso8601_utc_to_unix.

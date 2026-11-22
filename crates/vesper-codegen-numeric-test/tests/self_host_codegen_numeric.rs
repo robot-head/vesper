@@ -25,6 +25,39 @@ static SERIAL: Mutex<()> = Mutex::new(());
 /// Package files in assembly order after `@vesper/cranelift`.
 const FILES: [&str; 5] = ["rt.ves", "regions.ves", "tiled.ves", "boxes.ves", "lib.ves"];
 
+/// `source` without its `use` items and without the `numeric` hook's root
+/// entry: the test assembles the runtime files into one unit with
+/// `@vesper/cranelift`'s source, so the imports the package needs as a Loom
+/// package name items that are already in scope, and the hook's own files
+/// (vector, tiled_ops, floats) would take the unit past the parser's token
+/// cap. Each `use` item starts a line and ends at `;`; the hook entry ends
+/// at the next line that is `}`.
+fn without_uses(source: &str) -> String {
+    let mut out = String::new();
+    let mut in_use = false;
+    let mut in_hook = false;
+    for line in source.lines() {
+        if line.starts_with("use ") {
+            in_use = true;
+        }
+        if line.starts_with("pub fn numeric_hook(") {
+            in_hook = true;
+        }
+        if in_hook {
+            in_hook = line != "}";
+            continue;
+        }
+        if !in_use {
+            out.push_str(line);
+            out.push('\n');
+        }
+        if in_use && line.trim_end().ends_with(';') {
+            in_use = false;
+        }
+    }
+    out
+}
+
 /// The ELF targets compared (the reader is built with ELF support only).
 const TARGETS: [&str; 2] = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"];
 
@@ -229,10 +262,10 @@ fn checked() -> &'static ForeignChecked {
         let mut source = shim.clone();
         for f in FILES {
             source.push('\n');
-            source.push_str(
+            source.push_str(&without_uses(
                 &std::fs::read_to_string(repo.join("packages/vesper-codegen-numeric/src").join(f))
                     .unwrap(),
-            );
+            ));
         }
         for (i, (p, t, o)) in configurations().into_iter().enumerate() {
             source.push_str(&format!(

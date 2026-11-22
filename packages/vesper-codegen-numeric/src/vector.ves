@@ -10,6 +10,126 @@
 // `Codegen::vector_op` sends one request per operation (see
 // `codegen_swap::numeric`); this file reads it and never consults the IR.
 
+use @vesper/cranelift::{
+    Ty,
+    Value,
+    call_arg,
+    call_arg_count,
+    call_builder,
+    call_module,
+    call_op,
+    call_result_value,
+    call_return_builder,
+    call_return_module,
+    create_block,
+    create_stack_slot,
+    ins_binary,
+    ins_binary_imm,
+    ins_bitselect,
+    ins_brif0,
+    ins_convert,
+    ins_extractlane,
+    ins_fcmp,
+    ins_icmp,
+    ins_icmp_imm,
+    ins_iconst,
+    ins_insertlane,
+    ins_jump0,
+    ins_load,
+    ins_select,
+    ins_shuffle,
+    ins_stack_addr,
+    ins_store,
+    ins_uload8,
+    ins_unary,
+    ins_vconst,
+    module_pointer_type,
+    switch_to_block,
+    value_of_word,
+};
+use self::atomic_ops::{
+    atomic_known,
+    atomic_request,
+};
+use self::region_ops::{
+    NUM_REGION,
+    region_known,
+    region_request,
+};
+use self::floats::{
+    float_known,
+    float_request,
+};
+use self::shapes::{
+    B_ADD,
+    B_AND,
+    B_DIV,
+    B_MAX,
+    B_MIN,
+    B_MUL,
+    B_OR,
+    B_SATURATING_ADD,
+    B_SATURATING_SUB,
+    B_SUB,
+    B_XOR,
+    C_NARROW,
+    C_WIDEN,
+    ELEMS,
+    E_F32,
+    E_U8,
+    I_ACTIVE,
+    I_BINARY,
+    I_COMPARE,
+    I_CONVERT,
+    I_EXTRACT,
+    I_FROM,
+    I_IN_BOUNDS,
+    I_LOAD_MASKED,
+    I_MASK_ALL,
+    I_MASK_ANY,
+    I_MASK_BINARY,
+    I_MASK_BITMASK,
+    I_MASK_COUNT,
+    I_MASK_NOT,
+    I_MUL_ADD,
+    I_NOT,
+    I_REDUCE,
+    I_REPLACE,
+    I_SELECT,
+    I_SHIFT,
+    I_SHUFFLE,
+    I_SPLAT,
+    I_UNARY,
+    RD_ADD,
+    RD_AND,
+    RD_OR,
+    RD_XOR,
+    TY_I32,
+    TY_I64,
+    TY_I8,
+    chunk_ty,
+    conv_accepts,
+    conv_target,
+    elem_bits,
+    elem_bits_elem,
+    elem_is_float,
+    elem_is_signed,
+    elem_mask,
+    family_of,
+    lane_ty,
+    lanes_per_chunk,
+    mask_chunk_ty,
+    op_of,
+    shape_bytes,
+    shape_chunks,
+    shape_valid,
+};
+use self::tiled_ops::{
+    NUM_TILED,
+    tiled_known,
+    tiled_request,
+};
+
 // `codegen_swap::numeric::VECTOR` and `ISA_SUPPORTED`.
 pub const NUM_VECTOR: u32 = 2;
 pub const NUM_ISA_SUPPORTED: u32 = 3;
@@ -56,6 +176,8 @@ const UN_POPCNT: u32 = 5;
 const UN_FNEG: u32 = 10;
 const UN_FABS: u32 = 11;
 const UN_SQRT: u32 = 12;
+const UN_FVPROMOTE_LOW: u32 = 20;
+const UN_FVDEMOTE: u32 = 21;
 const CV_UEXTEND: u32 = 1;
 const CV_IREDUCE: u32 = 3;
 const CV_SPLAT: u32 = 13;
@@ -537,10 +659,8 @@ fn vx_well_formed(call: u64, i: u32, e: u32, lanes: u32) -> bool eff [Ffi[Cranel
         return false;
     }
     if family == I_CONVERT {
-        // `Widen` and `Narrow` need `fvpromote_low`/`fvdemote`, which the
-        // shim does not have yet: the Rust code emits them.
         let c = op_of(i);
-        if c == C_WIDEN || c == C_NARROW || !conv_accepts(c, e) {
+        if !conv_accepts(c, e) {
             return false;
         }
     }
@@ -656,13 +776,60 @@ fn vx_emit(call: u64, inout b: Builder, in m: Module, i: u32, e: u32, lanes: u32
         return vx_store_chunks(inout b, in m, e, lanes, in out.as_slice());
     }
     if family == I_CONVERT {
-        // `ToBits` and `FromBits`: one bitcast per chunk, same lane count.
         let target = conv_target(sub, e);
         let a = vx_load_chunks(inout b, vx_operand(call, 0), e, lanes, false);
-        let mut out = ChunkSeq::with_capacity[u32](n_chunks);
-        for c in 0..n_chunks {
-            let v = vx_bitcast(inout b, chunk_ty(target), vx_chunk(in a.as_slice(), c));
-            out.push(v.id);
+        let mut out = ChunkSeq::with_capacity[u32](wrapping_mul(n_chunks, 2));
+        if sub == C_WIDEN {
+            // Each f32x4 chunk widens to two f64x2 chunks: its low half,
+            // then its high half moved down.
+            let mut upper: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](16);
+            for _ in 0..2 {
+                for j in 8..16 {
+                    upper.push(wrapping_u8(j));
+                }
+            }
+            for c in 0..n_chunks {
+                let x = vx_chunk(in a.as_slice(), c);
+                let low = ins_unary(inout b, UN_FVPROMOTE_LOW, x);
+                out.push(low.id);
+                let bytes = vx_bitcast(inout b, chunk_ty(E_U8), x);
+                let moved = ins_shuffle(inout b, bytes, bytes, in upper.as_slice());
+                let moved = vx_bitcast(inout b, chunk_ty(E_F32), moved);
+                let high = ins_unary(inout b, UN_FVPROMOTE_LOW, moved);
+                out.push(high.id);
+            }
+        } else if sub == C_NARROW {
+            // Two f64x2 chunks narrow to one f32x4 chunk.
+            let mut joined: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](16);
+            for j in 0..8 {
+                joined.push(wrapping_u8(j));
+            }
+            for j in 16..24 {
+                joined.push(wrapping_u8(j));
+            }
+            for c in 0..(n_chunks >> 1) {
+                let lo = ins_unary(
+                    inout b,
+                    UN_FVDEMOTE,
+                    vx_chunk(in a.as_slice(), wrapping_mul(c, 2))
+                );
+                let hi = ins_unary(
+                    inout b,
+                    UN_FVDEMOTE,
+                    vx_chunk(in a.as_slice(), wrapping_add(wrapping_mul(c, 2), 1))
+                );
+                let lo = vx_bitcast(inout b, chunk_ty(E_U8), lo);
+                let hi = vx_bitcast(inout b, chunk_ty(E_U8), hi);
+                let both = ins_shuffle(inout b, lo, hi, in joined.as_slice());
+                let v = vx_bitcast(inout b, chunk_ty(E_F32), both);
+                out.push(v.id);
+            }
+        } else {
+            // `ToBits` and `FromBits`: one bitcast per chunk, same lane count.
+            for c in 0..n_chunks {
+                let v = vx_bitcast(inout b, chunk_ty(target), vx_chunk(in a.as_slice(), c));
+                out.push(v.id);
+            }
         }
         return vx_store_chunks(inout b, in m, target, lanes, in out.as_slice());
     }
@@ -824,6 +991,24 @@ fn numeric_request(call: u64, inout b: Builder, inout m: Module) -> u64 eff [Ffi
         call_result_value(call, v);
         return HOOK_HANDLED;
     }
+    if op == NUM_REGION {
+        if !region_known(call) {
+            return HOOK_DECLINED;
+        }
+        let v = region_request(call, inout b, inout m);
+        call_result_value(call, v);
+        return HOOK_HANDLED;
+    }
+    if atomic_known(call, op) {
+        let v = atomic_request(call, op, inout b, inout m);
+        call_result_value(call, v);
+        return HOOK_HANDLED;
+    }
+    if float_known(call, op) {
+        let v = float_request(call, op, inout b);
+        call_result_value(call, v);
+        return HOOK_HANDLED;
+    }
     if op == NUM_ISA_SUPPORTED {
         let v = ins_iconst(inout b, vx_i64(), wrapping_i64(vx_arg(call, 0)));
         call_result_value(call, v);
@@ -846,9 +1031,10 @@ fn numeric_request(call: u64, inout b: Builder, inout m: Module) -> u64 eff [Ffi
     HOOK_HANDLED
 }
 
-// The `numeric` hook: `call` is the address of the lent call. Returns 1
-// when it emitted the request, 0 to leave it to the Rust code.
-pub fn numeric_hook(call: u64) -> u64 eff [Ffi[Cranelift]] {
+// The `numeric` hook (exported from the package root as `numeric_hook`):
+// `call` is the address of the lent call. Returns 1 when it emitted the
+// request, 0 to leave it to the Rust code.
+pub fn hook_entry(call: u64) -> u64 eff [Ffi[Cranelift]] {
     let mut b = match call_builder(call) {
         Some(b) => b,
         None => return HOOK_DECLINED,
