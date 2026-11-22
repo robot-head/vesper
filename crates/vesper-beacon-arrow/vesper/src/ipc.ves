@@ -24,15 +24,15 @@ pub fn int_field(inout fb: Fb, in name: Slice[u8], bits: u64, signed: bool, null
     // Int: bitWidth (i32, 4), is_signed (bool, 6).
     fb
         .add_scalar(
-        6,
-        if signed {
-            1
-        } else {
+            6,
+            if signed {
+                1
+            } else {
+                0
+            },
+            1,
             0
-        },
-        1,
-        0
-    );
+        );
     fb.add_scalar(4, bits, 4, 0);
     let int_at = fb.end_table(t);
     let f = fb.start_table();
@@ -41,15 +41,15 @@ pub fn int_field(inout fb: Fb, in name: Slice[u8], bits: u64, signed: bool, null
     fb.add_scalar(8, TYPE_INT, 1, 0);
     fb
         .add_scalar(
-        6,
-        if nullable {
-            1
-        } else {
+            6,
+            if nullable {
+                1
+            } else {
+                0
+            },
+            1,
             0
-        },
-        1,
-        0
-    );
+        );
     fb.add_offset(14, children);
     fb.add_offset(10, int_at);
     fb.end_table(f)

@@ -47,9 +47,9 @@ pub fn v_tick_scalar(inout t: Slice[u32], in pan: Slice[u32], v0: f32, inout out
         out.set(v, to_bits_f32(y * from_bits_f32(pan[v])));
         out
             .set(
-            wrapping_add(v, LANES),
-            to_bits_f32(y * from_bits_f32(pan[wrapping_add(v, LANES)]))
-        );
+                wrapping_add(v, LANES),
+                to_bits_f32(y * from_bits_f32(pan[wrapping_add(v, LANES)]))
+            );
     }
 }
 
