@@ -82,7 +82,13 @@ finished (#1321). To keep pull requests within the limit:
 - The narrow integration lanes (Kafka, lavapipe GPU, Ignis Vulkan, Aura GTK,
   QEMU vectors) are not triggered on pull requests by `Cargo.toml` or
   `Cargo.lock` alone; pushes to main still run them on those changes.
-- A push to main cancels the older main run of the same workflow.
+- A push to main cancels the older main run of the same workflow, except
+  Platforms and `Hybrid compiler`: pull requests skip the port shards and the
+  hybrid job, so their main runs must finish. They run one at a time on main,
+  and a burst of merges waits as a single newest run (#1479). A pull request
+  that wants the port shards before merging can dispatch Platforms on its
+  branch with profile `pr` and `pull_request` left empty; that runs every
+  port shard.
 - The merge gate (`.github/actions/merge-gate`, `scripts/ci/merge_gate.py`)
   enforces the project rule that pull requests which cannot merge yet get no
   CI: when a pull request's base is not main, its branch carries another open

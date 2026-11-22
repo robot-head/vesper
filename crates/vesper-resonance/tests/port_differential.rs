@@ -675,3 +675,116 @@ fn leases_match_the_rust_build() {
         assert_eq!(bits(&po), bits(&ro));
     }
 }
+
+/// simd.rs: every SVF and ramp path of the port (4- and 8-lane source
+/// vectors and the scalar reference) against the Rust build's `std::arch`
+/// paths, bit for bit, on any bit pattern, including NaN, infinities and
+/// subnormals. As in tests/simd.rs, a NaN matches any NaN: IEEE-754 leaves
+/// the payload and sign of a NaN result to the implementation.
+#[test]
+fn simd_paths_match_the_rust_build() {
+    use port::simd::SvfLanes as P;
+    use rust::simd::SvfLanes as R;
+    let mut rng = Rng(0x5eed_0051);
+    let wild = |rng: &mut Rng| -> f32 {
+        match rng.below(6) {
+            0 => f32::from_bits(rng.next() as u32),
+            1 => f32::from_bits(rng.next() as u32 & 0x807f_ffff),
+            2 => [
+                0.0,
+                -0.0,
+                f32::INFINITY,
+                f32::NEG_INFINITY,
+                f32::NAN,
+                f32::MAX,
+            ][rng.below(6) as usize],
+            _ => rng.range(-4.0, 4.0),
+        }
+    };
+    let paths = [
+        (P::Scalar, R::Scalar),
+        (P::Sse2, R::Sse2),
+        (P::Avx, R::Avx),
+        (P::Neon, R::Neon),
+    ];
+    for trial in 0..200 {
+        let (pp, rp) = paths[trial % paths.len()];
+        assert_eq!(pp.is_available(), rp.is_available(), "{pp:?}");
+        let mut pt = port::kernels::SvfVoiceTile {
+            ic1eq: [0.0; 16],
+            ic2eq: [0.0; 16],
+            g_coeff: [0.0; 16],
+            k_damping: [0.0; 16],
+            gain: [0.0; 16],
+            patch_id: [0; 16],
+        };
+        let mut ppan = port::simd::PanLanes {
+            left: [0.0; 16],
+            right: [0.0; 16],
+        };
+        for v in 0..16 {
+            pt.ic1eq[v] = wild(&mut rng);
+            pt.ic2eq[v] = wild(&mut rng);
+            pt.g_coeff[v] = wild(&mut rng);
+            pt.k_damping[v] = wild(&mut rng);
+            pt.gain[v] = wild(&mut rng);
+            pt.patch_id[v] = rng.next() as u32;
+            ppan.left[v] = wild(&mut rng);
+            ppan.right[v] = wild(&mut rng);
+        }
+        let mut rt = rust::kernels::SvfVoiceTile {
+            ic1eq: pt.ic1eq,
+            ic2eq: pt.ic2eq,
+            g_coeff: pt.g_coeff,
+            k_damping: pt.k_damping,
+            gain: pt.gain,
+            patch_id: pt.patch_id,
+        };
+        let rpan = rust::simd::PanLanes {
+            left: ppan.left,
+            right: ppan.right,
+        };
+        let mut pout = port::simd::LaneOut::ZERO;
+        let mut rout = rust::simd::LaneOut::ZERO;
+        for _ in 0..4 {
+            let v0 = wild(&mut rng);
+            port::simd::svf_tick(pp, &mut pt, &ppan, v0, &mut pout);
+            rust::simd::svf_tick(rp, &mut rt, &rpan, v0, &mut rout);
+            assert_same(&pt.ic1eq, &rt.ic1eq, &format!("{pp:?} trial {trial}"));
+            assert_same(&pt.ic2eq, &rt.ic2eq, &format!("{pp:?} trial {trial}"));
+            assert_same(&pout.left, &rout.left, &format!("{pp:?} trial {trial}"));
+            assert_same(&pout.right, &rout.right, &format!("{pp:?} trial {trial}"));
+        }
+        assert_eq!(pt.patch_id, rt.patch_id);
+
+        let mut pr = port::events::RampTile::splat(0.0);
+        let mut rr = rust::events::RampTile::splat(0.0);
+        for l in 0..16 {
+            pr.current[l] = wild(&mut rng);
+            pr.target[l] = wild(&mut rng);
+            pr.step[l] = wild(&mut rng);
+            pr.remaining[l] = [0, 1, 2, 3, u32::MAX][rng.below(5) as usize];
+            rr.current[l] = pr.current[l];
+            rr.target[l] = pr.target[l];
+            rr.step[l] = pr.step[l];
+            rr.remaining[l] = pr.remaining[l];
+        }
+        for _ in 0..4 {
+            port::simd::ramp_tick(pp, &mut pr);
+            rust::simd::ramp_tick(rp, &mut rr);
+            assert_same(&pr.current, &rr.current, &format!("{pp:?} trial {trial}"));
+            assert_eq!(pr.remaining, rr.remaining, "{pp:?} trial {trial}");
+        }
+    }
+}
+
+/// Equal bit for bit, except that a NaN matches any NaN.
+#[track_caller]
+fn assert_same(a: &[f32], b: &[f32], what: &str) {
+    for (i, (x, y)) in a.iter().zip(b).enumerate() {
+        assert!(
+            x.to_bits() == y.to_bits() || (x.is_nan() && y.is_nan()),
+            "{what} lane {i}: {x:e} vs {y:e}"
+        );
+    }
+}

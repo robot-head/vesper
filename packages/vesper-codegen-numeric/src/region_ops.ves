@@ -8,6 +8,10 @@
 // the Cranelift calls of the Rust function in the same order. A 128-bit
 // payload (`isplit`/`iconcat`, which the shim lacks) is never requested.
 
+use @vesper/cranelift::codes::{
+    Cv,
+    TyCode,
+};
 use @vesper/cranelift::{
     Ty,
     Value,
@@ -54,16 +58,8 @@ const RW_JIT: u64 = 1;
 const RW_FIRST: u64 = 2;
 
 // The shim's type codes.
-const RT_I32: u32 = 3;
-const RT_I64: u32 = 4;
-const RT_I128: u32 = 5;
-const RT_F32: u32 = 6;
-const RT_F64: u32 = 7;
 // `MemFlags::new()`; convert ops `uextend`, `ireduce`, `bitcast`.
 const RF_PLAIN: u32 = 0;
-const RV_UEXTEND: u32 = 1;
-const RV_IREDUCE: u32 = 3;
-const RV_BITCAST: u32 = 4;
 
 fn rty(code: u32) -> Ty {
     Ty {
@@ -72,7 +68,7 @@ fn rty(code: u32) -> Ty {
 }
 
 fn r_iconst(inout b: Builder, v: u64) -> Value eff [Ffi[Cranelift]] {
-    ins_iconst(inout b, rty(RT_I64), wrapping_i64(v))
+    ins_iconst(inout b, rty(TyCode::I64), wrapping_i64(v))
 }
 
 // The operand words of each kind after `[kind, jit]`.
@@ -109,7 +105,7 @@ pub fn region_known(call: u64) -> bool eff [Ffi[Cranelift]] {
         // The payload's type: an aggregate (0) or a one-word scalar.
         let t = r_word(call, wrapping_sub(n, 1));
         let aggregate = r_word(call, wrapping_sub(n, 2));
-        if aggregate > 1 || t == widen_u64(RT_I128) || (aggregate == 0 && t == 0) {
+        if aggregate > 1 || t == widen_u64(TyCode::I128) || (aggregate == 0 && t == 0) {
             return false;
         }
     }
@@ -122,9 +118,9 @@ fn r_call(inout b: Builder, inout m: Module, jit: bool, in name: Str, in args: S
     -> Value eff [Ffi[Cranelift]] {
     let s = sig_new(inout m, call_conv_default());
     for _ in 0..args.len() {
-        sig_param(inout m, s, rty(RT_I64));
+        sig_param(inout m, s, rty(TyCode::I64));
     }
-    sig_return(inout m, s, rty(RT_I64));
+    sig_return(inout m, s, rty(TyCode::I64));
     let linkage = if jit {
         linkage_import()
     } else {
@@ -161,7 +157,7 @@ fn r_alloc(inout b: Builder, inout m: Module, size: u32) -> Value eff [Ffi[Crane
     let slot = create_stack_slot(inout b, bytes, 3);
     let ptr = ins_stack_addr(inout b, module_pointer_type(in m), slot, 0);
     for i in 0..(widen_u64(bytes) >> 3) {
-        let zero = ins_iconst(inout b, rty(RT_I64), 0);
+        let zero = ins_iconst(inout b, rty(TyCode::I64), 0);
         ins_store(inout b, RF_PLAIN, zero, ptr, wrapping_i32(wrapping_mul(i, 8)));
     }
     ptr
@@ -188,7 +184,7 @@ fn r_store_payload(
         for i in 0..r_words_of(size) {
             let w = ins_load(
                 inout b,
-                rty(RT_I64),
+                rty(TyCode::I64),
                 RF_PLAIN,
                 value,
                 wrapping_i32(wrapping_mul(i, 8))
@@ -197,13 +193,13 @@ fn r_store_payload(
         }
     } else {
         let ty = value_type(inout b, value).code;
-        let w = if ty == RT_F64 {
-            ins_convert(inout b, RV_BITCAST, rty(RT_I64), value)
-        } else if ty == RT_F32 {
-            let bits = ins_convert(inout b, RV_BITCAST, rty(RT_I32), value);
-            ins_convert(inout b, RV_UEXTEND, rty(RT_I64), bits)
-        } else if ty < RT_I64 {
-            ins_convert(inout b, RV_UEXTEND, rty(RT_I64), value)
+        let w = if ty == TyCode::F64 {
+            ins_convert(inout b, Cv::Bitcast, rty(TyCode::I64), value)
+        } else if ty == TyCode::F32 {
+            let bits = ins_convert(inout b, Cv::Bitcast, rty(TyCode::I32), value);
+            ins_convert(inout b, Cv::Uextend, rty(TyCode::I64), bits)
+        } else if ty < TyCode::I64 {
+            ins_convert(inout b, Cv::Uextend, rty(TyCode::I64), value)
         } else {
             value
         };
@@ -247,13 +243,13 @@ fn r_load_payload(
     let index = r_iconst(inout b, 0);
     let args = r_args(id, handle, index, index, 3);
     let w = r_call(inout b, inout m, jit, in "vesper_region_load", in args.as_slice());
-    if t == RT_F64 {
-        ins_convert(inout b, RV_BITCAST, rty(RT_F64), w)
-    } else if t == RT_F32 {
-        let bits = ins_convert(inout b, RV_IREDUCE, rty(RT_I32), w);
-        ins_convert(inout b, RV_BITCAST, rty(RT_F32), bits)
-    } else if t < RT_I64 {
-        ins_convert(inout b, RV_IREDUCE, rty(t), w)
+    if t == TyCode::F64 {
+        ins_convert(inout b, Cv::Bitcast, rty(TyCode::F64), w)
+    } else if t == TyCode::F32 {
+        let bits = ins_convert(inout b, Cv::Ireduce, rty(TyCode::I32), w);
+        ins_convert(inout b, Cv::Bitcast, rty(TyCode::F32), bits)
+    } else if t < TyCode::I64 {
+        ins_convert(inout b, Cv::Ireduce, rty(t), w)
     } else {
         w
     }

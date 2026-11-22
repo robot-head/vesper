@@ -14,9 +14,12 @@ use self::wire::{
     ENTRY_OVERHEAD
 };
 
-// 32-bit FNV-1a, folded to one of `buckets()` (256) buckets.
-const FNV_OFFSET_BASIS: u64 = 2166136261;
-const FNV_PRIME: u64 = 16777619;
+// `name_hash`: the name's first and last bytes (up to eight each) and its
+// length, multiplied by odd 64-bit constants, mixed and folded to one of
+// `buckets()` (256) buckets.
+const HASH_FIRST: u64 = 0x9e3779b97f4a7c15;
+const HASH_LAST: u64 = 0xc2b2ae3d27d4eb4f;
+const HASH_MIX: u64 = 0x165667b19e3779f9;
 const BUCKET_MASK: u64 = 255;
 // RFC 9204 §3.2.1: an entry's size is its name and value lengths plus 32.
 // compact() waits for at least this many evicted slots.
@@ -40,13 +43,44 @@ fn buckets() -> u64 {
     256
 }
 
-// FNV-1a over the name, folded to a bucket.
+// The name's bucket: its first and last bytes read as two words (each up to
+// eight bytes, overlapping for a short name) and its length, mixed. One read
+// of each word instead of a step per byte.
 fn name_hash(in name: Slice[u8]) -> u64 {
-    let mut h: u64 = FNV_OFFSET_BASIS;
-    for k in 0..name.len() {
-        h = wrapping_mul(h ^ widen_u64(byte(in name, k)), FNV_PRIME);
+    let n = name.len();
+    let (first, last) = if n >= 8 {
+        (read64(in name, 0), read64(in name, wrapping_sub(n, 8)))
+    } else if n >= 4 {
+        (read32(in name, 0), read32(in name, wrapping_sub(n, 4)))
+    } else if n >= 2 {
+        (read16(in name, 0), read16(in name, wrapping_sub(n, 2)))
+    } else {
+        (widen_u64(byte(in name, 0)), 0)
+    };
+    let h = wrapping_mul(first, HASH_FIRST) ^ wrapping_mul(last ^ n, HASH_LAST);
+    let h = wrapping_mul(h ^ (h >> 29), HASH_MIX);
+    (h ^ (h >> 32)) & BUCKET_MASK
+}
+
+fn read64(in s: Slice[u8], at: u64) -> u64 {
+    match s.try_read_u64_le(at) {
+        Option::Some(x) => x,
+        Option::None => 0,
     }
-    (h ^ (h >> 16)) & BUCKET_MASK
+}
+
+fn read32(in s: Slice[u8], at: u64) -> u64 {
+    match s.try_read_u32_le(at) {
+        Option::Some(x) => widen_u64(x),
+        Option::None => 0,
+    }
+}
+
+fn read16(in s: Slice[u8], at: u64) -> u64 {
+    match s.try_read_u16_le(at) {
+        Option::Some(x) => widen_u64(x),
+        Option::None => 0,
+    }
 }
 
 fn static_name_at(in s: Static, i: u64, in name: Slice[u8]) -> bool {

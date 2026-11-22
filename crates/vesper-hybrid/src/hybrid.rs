@@ -48,6 +48,11 @@ mod codegen_binding;
 
 #[rustfmt::skip]
 #[allow(clippy::all)]
+#[path = "../port/wasm_backend.rs"]
+mod wasm_backend_binding;
+
+#[rustfmt::skip]
+#[allow(clippy::all)]
 #[path = "../port/codegen_numeric.rs"]
 mod codegen_numeric_binding;
 
@@ -65,6 +70,11 @@ mod test_runner_binding;
 #[allow(clippy::all)]
 #[path = "../port/ir_inline.rs"]
 mod ir_inline_binding;
+
+#[rustfmt::skip]
+#[allow(clippy::all)]
+#[path = "../port/optimize.rs"]
+mod optimize_binding;
 
 #[rustfmt::skip]
 #[allow(clippy::all)]
@@ -120,6 +130,10 @@ mod test_runner_words;
 #[path = "../../../tests/common/inline_words.rs"]
 mod inline_words;
 
+// The AST optimizer swap's input encoder and answer readers (#1249),
+// shared with the root package's tests/self_host_optimize*.rs.
+#[path = "../../../tests/common/optimize_words.rs"]
+mod optimize_words;
 // The IR optimizer swap's encoder and decoder (#1248), shared with the root
 // package's tests/self_host_ir_opt.rs.
 #[path = "../../../tests/common/ir_opt_words.rs"]
@@ -128,6 +142,11 @@ mod ir_opt_words;
 // Place IR words both ways (#1240), shared with tests/self_host_place_ir*.rs.
 #[path = "../../../tests/common/ir_words.rs"]
 mod ir_words;
+
+// The wasm backend swap's input encoder (#1289): the Place IR words above
+// and the wasm section, shared with tests/self_host_wasm_backend.rs.
+#[path = "../../../tests/common/wasm_words.rs"]
+mod wasm_words;
 
 /// Calls answered by the Vesper word-layout module.
 static LAYOUT_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -142,6 +161,9 @@ static STACK_BOUND_CALLS: AtomicU64 = AtomicU64::new(0);
 /// `aggregate` requests the Vesper codegen module emitted, and declined.
 static CODEGEN_CALLS: AtomicU64 = AtomicU64::new(0);
 static CODEGEN_DECLINED: AtomicU64 = AtomicU64::new(0);
+/// Programs the Vesper wasm backend compiled, and left to Rust.
+static WASM_CALLS: AtomicU64 = AtomicU64::new(0);
+static WASM_DECLINED: AtomicU64 = AtomicU64::new(0);
 /// `numeric` requests (vectors, `TiledSeq`) the Vesper module emitted, and
 /// declined.
 static NUMERIC_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -157,6 +179,9 @@ static JSON_CALLS: AtomicU64 = AtomicU64::new(0);
 static TEST_RUNNER_CALLS: AtomicU64 = AtomicU64::new(0);
 /// Programs inlined by the Vesper inliner module.
 static IR_INLINE_CALLS: AtomicU64 = AtomicU64::new(0);
+/// Expressions the Vesper optimizer proposed for, and proposals it checked.
+static OPTIMIZE_PROPOSE_CALLS: AtomicU64 = AtomicU64::new(0);
+static OPTIMIZE_VERIFY_CALLS: AtomicU64 = AtomicU64::new(0);
 /// Programs optimized by the Vesper IR optimizer module.
 static IR_OPT_CALLS: AtomicU64 = AtomicU64::new(0);
 /// Programs the IR swap point's identity hooks sent through Vesper.
@@ -614,6 +639,28 @@ fn vesper_aggregate(lent: &mut vesper::codegen_swap::Lent<'_, '_>) -> Result<boo
     }
 }
 
+/// The `wasm` hook of `vesper::codegen_swap` from `modules/wasm_backend`:
+/// `@vesper/wasm-backend` writes the core module and the WIT, and
+/// wit-component wraps them here. Errors (so the messages stay Rust's) and
+/// programs with handlers or host capabilities (not ported yet) decline to
+/// the Rust backend.
+fn vesper_wasm(
+    world: &vesper::check::World,
+    entry: &str,
+    options: &vesper::wasm_backend::WasmOptions,
+) -> Option<Result<vesper::wasm_backend::WasmArtifact, vesper::wasm_backend::WasmError>> {
+    match wasm_words::compile_with(world, entry, options, wasm_backend_binding::compile_words) {
+        Some(artifact) => {
+            WASM_CALLS.fetch_add(1, Relaxed);
+            Some(Ok(artifact))
+        }
+        None => {
+            WASM_DECLINED.fetch_add(1, Relaxed);
+            None
+        }
+    }
+}
+
 /// The `numeric` hook of `vesper::codegen_swap` from
 /// `modules/codegen_numeric` (#1285): vector and `TiledSeq` operations
 /// emitted in Vesper. The graph walk's `INSTRUCTION` requests are declined
@@ -824,6 +871,88 @@ const VESPER_IR_PASSES: vesper::ir_swap::IrPasses = vesper::ir_swap::IrPasses {
     }),
 };
 
+/// `optimize`'s producer from `modules/optimize`: `propose_rewrite` of
+/// `@vesper/optimize` on `@vesper/egraph`. The package searches, extracts
+/// and proves; the candidate is rebuilt from the returned certificate by
+/// `witness::rebuild_candidate`, the builder the Rust producer uses.
+fn vesper_propose(
+    source: &vesper::ast::Expr,
+    types: &vesper::ast::TypeMap,
+    limits: vesper::optimize::witness::WitnessLimits,
+) -> Result<vesper::optimize::Proposal, vesper::optimize::witness::WitnessError> {
+    use vesper::optimize::{Produced, Proposal};
+    let types = optimize_words::relevant_types(&[source], types);
+    let mut batch = optimize_words::Batch::new(1, true);
+    batch.propose(source, &types, limits);
+    OPTIMIZE_PROPOSE_CALLS.fetch_add(1, Relaxed);
+    let words = optimize_binding::propose_words(&batch.bytes, &batch.names);
+    let text = optimize_words::unpack_text(&words);
+    let head = text.lines().next().unwrap_or("");
+    match head {
+        "P B" => Ok(Proposal::Barrier),
+        "P U" => Ok(Proposal::Unchanged),
+        _ if head.starts_with("P E ") => Err(optimize_words::error_of(
+            head[4..].parse().expect("an error code"),
+        )),
+        _ => {
+            let (mut certificate, spent, (terms_cap, proofs_cap)) =
+                optimize_words::parse_certificate(&text);
+            // The gate charges by the vectors' capacities, as the Rust
+            // producer leaves them.
+            certificate
+                .terms
+                .reserve_exact(terms_cap.saturating_sub(certificate.terms.len()));
+            certificate
+                .proofs
+                .reserve_exact(proofs_cap.saturating_sub(certificate.proofs.len()));
+            let candidate =
+                vesper::optimize::witness::rebuild_candidate(source, &types, &certificate, limits)?;
+            Ok(Proposal::Candidate(Box::new(Produced {
+                candidate,
+                certificate,
+                limits,
+                spent,
+            })))
+        }
+    }
+}
+
+/// `optimize`'s install gate from `modules/optimize`: the certificate
+/// checker of `@vesper/optimize`, continuing the producer's budget.
+fn vesper_verify(
+    source: &vesper::ast::Expr,
+    candidate: &vesper::ast::Expr,
+    types: &vesper::ast::TypeMap,
+    certificate: &vesper::optimize::witness::RewriteCertificate,
+    limits: vesper::optimize::witness::WitnessLimits,
+    spent: &mut vesper::optimize::witness::Spent,
+) -> Result<(), vesper::optimize::witness::WitnessError> {
+    let types = optimize_words::relevant_types(&[source, candidate], types);
+    let mut batch = optimize_words::Batch::new(1, true);
+    batch.verify(
+        source,
+        candidate,
+        &types,
+        certificate,
+        (certificate.terms.capacity(), certificate.proofs.capacity()),
+        limits,
+        *spent,
+        false,
+    );
+    OPTIMIZE_VERIFY_CALLS.fetch_add(1, Relaxed);
+    let words = optimize_binding::verify_words(&batch.bytes, &batch.names);
+    let text = optimize_words::unpack_text(&words);
+    let (result, after) =
+        optimize_words::parse_verify_line(text.lines().next().expect("an R line"));
+    *spent = after;
+    result
+}
+
+const VESPER_OPTIMIZE: vesper::optimize::OptimizeTable = vesper::optimize::OptimizeTable {
+    verify: vesper_verify,
+    propose: Some(vesper_propose),
+};
+
 /// The loops of `program` behind a bounds guard: branches on a
 /// `SeqOp::BoundsGuard` result of their own block, one per versioned loop
 /// (the count `bounds_hoist::run` returns, which no caller reads).
@@ -877,6 +1006,7 @@ extern "C" fn install() {
     }
     let hooks = vesper::codegen_swap::CodegenHooks {
         aggregate: Some(vesper_aggregate),
+        wasm: Some(vesper_wasm),
         numeric: Some(vesper_numeric),
         export: Some(vesper_export),
         plan: Some(vesper_plan),
@@ -890,6 +1020,20 @@ extern "C" fn install() {
         std::process::abort();
     }
     if vesper::ir_swap::install(VESPER_IR_PASSES).is_err() {
+        std::process::abort();
+    }
+    // `VESPER_HYBRID_RUST_PRODUCER=1` keeps the Rust producer behind the
+    // Vesper gate: the differential's check of the optimizer's accepted
+    // equal-cost ties (tests/differential.rs).
+    let table = if std::env::var_os("VESPER_HYBRID_RUST_PRODUCER").is_some_and(|v| v == "1") {
+        vesper::optimize::OptimizeTable {
+            propose: None,
+            ..VESPER_OPTIMIZE
+        }
+    } else {
+        VESPER_OPTIMIZE
+    };
+    if vesper::optimize::install_optimize(table).is_err() {
         std::process::abort();
     }
     if std::env::var_os("VESPER_HYBRID_STATS").is_some_and(|v| v == "1" || v == "time") {
@@ -932,6 +1076,11 @@ extern "C" fn report() {
         CODEGEN_DECLINED.load(Relaxed)
     );
     eprintln!(
+        "vesper-hybrid: wasm backend compiled {} programs from Vesper ({} declined)",
+        WASM_CALLS.load(Relaxed),
+        WASM_DECLINED.load(Relaxed)
+    );
+    eprintln!(
         "vesper-hybrid: codegen emitted {} numeric requests from Vesper ({} declined)",
         NUMERIC_CALLS.load(Relaxed),
         NUMERIC_DECLINED.load(Relaxed)
@@ -956,6 +1105,11 @@ extern "C" fn report() {
     eprintln!(
         "vesper-hybrid: ir-inline answered {} calls from Vesper",
         IR_INLINE_CALLS.load(Relaxed)
+    );
+    eprintln!(
+        "vesper-hybrid: optimize proposed for {} expressions and checked {} proposals from Vesper",
+        OPTIMIZE_PROPOSE_CALLS.load(Relaxed),
+        OPTIMIZE_VERIFY_CALLS.load(Relaxed)
     );
     eprintln!(
         "vesper-hybrid: ir-opt answered {} calls from Vesper",
@@ -998,3 +1152,75 @@ compile_error!(
 )]
 #[cfg_attr(windows, unsafe(link_section = ".CRT$XCU"))]
 static INSTALL: extern "C" fn() = install;
+
+#[cfg(test)]
+mod tests {
+    use vesper::ast::{Arg, Expr, ExprKind, Literal, Pass, Type, TypeMap};
+    use vesper::optimize::witness::WitnessLimits;
+
+    use super::{optimize_binding, optimize_words};
+
+    fn expr(kind: ExprKind, at: usize, len: usize) -> Expr {
+        Expr {
+            kind,
+            span: at..at + len,
+        }
+    }
+
+    fn typed(e: &Expr, t: &str, types: &mut TypeMap) {
+        types.insert((e.span.start, e.span.end), Type::Named(t.into(), vec![]));
+    }
+
+    /// A split batch of several cases reads each case's names after the
+    /// previous case's, so it answers as the cases do one by one.
+    #[test]
+    fn split_batches_keep_the_names_cursor() {
+        let mut types = TypeMap::new();
+        // x + 0
+        let x = expr(ExprKind::Name("x".into()), 0, 1);
+        let zero = expr(ExprKind::Literal(Literal::Int(0)), 4, 1);
+        typed(&x, "u32", &mut types);
+        typed(&zero, "u32", &mut types);
+        let first = expr(
+            ExprKind::Binary("+".into(), Box::new(x), Box::new(zero)),
+            0,
+            5,
+        );
+        typed(&first, "u32", &mut types);
+        // wrapping_add(y, 0)
+        let callee = expr(ExprKind::Name("wrapping_add".into()), 10, 12);
+        let y = expr(ExprKind::Name("y".into()), 23, 1);
+        let zero = expr(ExprKind::Literal(Literal::Int(0)), 26, 1);
+        typed(&y, "u32", &mut types);
+        typed(&zero, "u32", &mut types);
+        let arg = |expr| Arg {
+            pass: Pass::In,
+            explicit: false,
+            expr,
+        };
+        let second = expr(
+            ExprKind::Call {
+                callee: Box::new(callee),
+                types: vec![],
+                args: vec![arg(y), arg(zero)],
+            },
+            10,
+            18,
+        );
+        typed(&second, "u32", &mut types);
+        let limits = WitnessLimits::default();
+        let propose = |cases: &[&Expr]| {
+            let mut batch = optimize_words::Batch::new(cases.len(), true);
+            for e in cases {
+                batch.propose(e, &optimize_words::relevant_types(&[e], &types), limits);
+            }
+            optimize_words::unpack_text(&optimize_binding::propose_words(
+                &batch.bytes,
+                &batch.names,
+            ))
+        };
+        let one_by_one = propose(&[&first]) + &propose(&[&second]);
+        assert_eq!(propose(&[&first, &second]), one_by_one);
+        assert!(!one_by_one.contains("P E "), "{one_by_one}");
+    }
+}
