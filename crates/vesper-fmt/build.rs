@@ -37,11 +37,11 @@ const EDITS: &[(&str, &str, &str)] = &[
         "const LINE_WIDTH: u64 = 100;",
         "const LINE_WIDTH: u64 = 99;",
     ),
-    // The lexer gate: commas no longer end an expression chain.
+    // The lexer gate: the expression height ceiling drops to 16.
     (
         "gate",
-        "if k == K_SEMI || k == K_COMMA {\n            counter = 0;",
-        "if k == K_SEMI {\n            counter = 0;",
+        "const MAX_CHAIN: u64 = 160;",
+        "const MAX_CHAIN: u64 = 16;",
     ),
     // The layout: a source trailing comma no longer keeps a list vertical.
     (

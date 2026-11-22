@@ -725,8 +725,13 @@ const HARD_SOURCE_BYTES: u64 = 8388608;
 const HARD_TOKENS: u64 = 262144;
 // The parser charge per lexed token (`PARSE_UNITS_PER_TOKEN`).
 const PARSE_UNITS_PER_TOKEN: u64 = 64;
-// Chain components the preflight accepts (`MAX_CHAIN`).
-const MAX_CHAIN: u64 = 128;
+// Expression height the preflight accepts (`MAX_CHAIN`).
+const MAX_CHAIN: u64 = 160;
+// `ChainStep`: how a token changes the height estimate at its level.
+const STEP_END: u8 = 0;
+const STEP_OPERATOR: u8 = 1;
+const STEP_POSTFIX: u8 = 2;
+const STEP_OPERAND: u8 = 3;
 const MAX_NESTING: u64 = 24;
 
 fn tok_kind(in t: Tokens, i: u64) -> u8 {
@@ -851,6 +856,68 @@ fn continues_chain(k: u8, in src: Slice[u8], s: u64, e: u64) -> bool {
         || text_is(in src, s, e, in "as".as_bytes())
 }
 
+// `chain_step`: `;` and `,` end the expression, operators start a new
+// operand of the chain, postfix steps extend the current operand.
+fn chain_step(k: u8, in src: Slice[u8], s: u64, e: u64) -> u8 {
+    if k == K_SEMI || k == K_COMMA {
+        STEP_END
+    } else if is_binary_operator(k) || operator_step(k) {
+        STEP_OPERATOR
+    } else if postfix_step(k) || text_is(in src, s, e, in "as".as_bytes()) {
+        STEP_POSTFIX
+    } else {
+        STEP_OPERAND
+    }
+}
+
+fn operator_step(k: u8) -> bool {
+    k
+        == K_BANG
+        || k
+        == K_TILDE
+        || k
+        == K_ELSE
+        || k
+        == K_DOT_DOT
+        || k
+        == K_DOT_DOT_EQ
+        || k
+        == K_EQ
+        || k
+        == K_PLUS_EQ
+        || k
+        == K_MINUS_EQ
+        || k
+        == K_STAR_EQ
+        || k
+        == K_SLASH_EQ
+        || k
+        == K_PERCENT_EQ
+        || k
+        == K_PIPE_EQ
+        || k
+        == K_AMP_EQ
+        || k
+        == K_ARROW
+        || k
+        == K_FAT_ARROW
+}
+
+fn postfix_step(k: u8) -> bool {
+    k
+        == K_DOT
+        || k
+        == K_L_PAREN
+        || k
+        == K_L_BRACKET
+        || k
+        == K_L_BRACE
+        || k
+        == K_QUESTION
+        || k
+        == K_WITH
+}
+
 fn opaque_word(in src: Slice[u8], s: u64, e: u64) -> bool {
     text_is(in src, s, e, in "quote".as_bytes())
         || text_is(in src, s, e, in "quasiquote".as_bytes())
@@ -896,6 +963,9 @@ fn gate(in src: Slice[u8], in lim: Limits, inout w: Work) -> Tokens eff [Fail[Fm
     let mut stack = ChunkSeq::with_capacity[u8](32);
     let mut counts = ChunkSeq::with_capacity[u64](32);
     counts.push(0);
+    // Per level: the postfix steps of the current operand (`operand_steps`).
+    let mut steps = ChunkSeq::with_capacity[u64](32);
+    steps.push(0);
     // Per delimiter level: the chain count where the latest `if` that does
     // not continue an `else` started (NONE for none).
     let mut if_bases = ChunkSeq::with_capacity[u64](32);
@@ -921,6 +991,10 @@ fn gate(in src: Slice[u8], in lim: Limits, inout w: Work) -> Tokens eff [Fail[Fm
             Option::Some(c) => c,
             Option::None => 0,
         };
+        let mut step = match steps.try_get(top) {
+            Option::Some(c) => c,
+            Option::None => 0,
+        };
         total = wrapping_sub(total, counter);
         let ifs = wrapping_sub(if_bases.len(), 1);
         if after_block && k == K_ELSE {
@@ -933,20 +1007,29 @@ fn gate(in src: Slice[u8], in lim: Limits, inout w: Work) -> Tokens eff [Fail[Fm
             };
             if base != NONE {
                 counter = base;
+                step = 0;
             }
         } else if after_block && !continues_chain(k, in src, s, e) {
             counter = 0;
+            step = 0;
         }
         after_block = false;
         if k == K_IF && previous != K_ELSE {
             if_bases.try_set(ifs, counter);
         }
-        if k == K_SEMI || k == K_COMMA {
+        let kind_step = chain_step(k, in src, s, e);
+        if kind_step == STEP_END {
             counter = 0;
-        } else {
+            step = 0;
+        } else if kind_step == STEP_OPERATOR {
+            counter = cadd(wrapping_sub(counter, step), 1);
+            step = 0;
+        } else if kind_step == STEP_POSTFIX {
             counter = cadd(counter, 1);
+            step = cadd(step, 1);
         }
         counts.try_set(top, counter);
+        steps.try_set(top, step);
         total = cadd(total, counter);
         if total > MAX_CHAIN {
             fail(E_DEPTH);
@@ -954,6 +1037,7 @@ fn gate(in src: Slice[u8], in lim: Limits, inout w: Work) -> Tokens eff [Fail[Fm
         if k == K_L_PAREN || k == K_L_BRACKET || k == K_L_BRACE {
             stack.push(k);
             counts.push(0);
+            steps.push(0);
             if_bases.push(NONE);
             if stack.len() > max_depth {
                 fail(E_DEPTH);
@@ -986,6 +1070,7 @@ fn gate(in src: Slice[u8], in lim: Limits, inout w: Work) -> Tokens eff [Fail[Fm
             };
             total = wrapping_sub(total, dropped);
             counts.truncate(last);
+            steps.truncate(last);
             if_bases.truncate(wrapping_sub(if_bases.len(), 1));
             if stack.len() == 0 {
                 let base = match counts.try_get(0) {
@@ -994,6 +1079,7 @@ fn gate(in src: Slice[u8], in lim: Limits, inout w: Work) -> Tokens eff [Fail[Fm
                 };
                 total = wrapping_sub(total, base);
                 counts.try_set(0, 0);
+                steps.try_set(0, 0);
             }
             after_block = k == K_R_BRACE;
         }
@@ -1187,8 +1273,12 @@ fn gap(p: u8, c: u8, block: bool, after_block: bool) -> u8 {
         return G_NONE;
     }
     // `eff (` never starts an effect row, so `eff` is a name there
-    // (`fn eff(..)`, `r.eff()`; contextual `eff`, #1175).
-    if c == K_L_PAREN && p == K_EFF {
+    // (`fn eff(..)`, `r.eff()`; contextual `eff`, #1175). `effect (`,
+    // `handle (`, `sink (` and `inout (` are calls of a value of that name
+    // too (#1244).
+    if c
+        == K_L_PAREN
+        && (p == K_EFF || p == K_EFFECT || p == K_HANDLE || p == K_SINK || p == K_INOUT) {
         return G_NONE;
     }
     G_SOFT
@@ -1226,6 +1316,19 @@ fn concat4(inout d: Doc, a: u64, b: u64, c: u64, e: u64) -> u64 eff [Fail[FmtFai
         ids.push(wrapping_u32(e));
     }
     push_concat(inout d, in ids.as_slice())
+}
+
+// `word_used_as_name`: `effect`, `handle`, `sink` or `inout` after `.`,
+// `fn` or `let`, or before an infix operator or `?`, spaces as a name.
+fn word_used_as_name(has_prev: bool, prev: u8, c: u8, next: u8) -> bool {
+    (c == K_EFFECT || c == K_HANDLE || c == K_SINK || c == K_INOUT)
+        && (
+        has_prev
+            && (prev == K_DOT || prev == K_FN || prev == K_LET)
+            || is_binary_operator(next)
+            || next
+            == K_QUESTION
+    )
 }
 
 // `sequence`: the atoms from `pos` up to the closing delimiter `end`.
@@ -1369,9 +1472,13 @@ fn sequence(in at: Atoms, inout pos: u64, end: u8, block: bool, inout d: Doc, in
         previous_block = is_block;
         previous_unary = (c == K_MINUS || c == K_BANG || c == K_TILDE)
             && (!has_prev || !ends_operand(prev));
+        let used_as_name = word_used_as_name(has_prev, prev, c, akind(in at, pos));
         has_prev = true;
         prev = if c == K_L_PAREN || c == K_L_BRACKET || c == K_L_BRACE {
             close_of(c)
+        } else if used_as_name {
+            // A contextual keyword used as a name spaces like one.
+            K_LOWER
         } else {
             c
         };

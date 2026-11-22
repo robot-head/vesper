@@ -19,11 +19,13 @@ use self::term::{
 };
 use self::program::{
     index_impls,
+    rd_conformance,
     rd_der,
     rd_env,
     rd_program,
     rd_query,
-    validate_program
+    validate_program,
+    validate_query
 };
 use self::diag::{
     sort_diags,
@@ -34,7 +36,9 @@ use self::query::{
     solve_query
 };
 use self::coherence::{
-    check_coherence
+    check_coherence,
+    conformance_env,
+    orphan
 };
 use self::canon::{
     binders_slist,
@@ -438,6 +442,64 @@ pub fn derivation(in words: Slice[u64]) -> S {
         }
         let off = s.de_off;
         w(inout s, off);
+    }
+    s
+}
+
+// The input of `orphan_check` and `conformance_env_of` is a validated
+// program followed by one conformance (`ConformanceDecl` words), which is
+// decoded after the program's impls and models.
+// `check_orphan`: out is `0` when legal, `1` with the message in txt, or
+// `2` when the conformance names a trait or type constructor the program
+// does not declare (the Rust build panics there).
+pub fn orphan_check(in words: Slice[u64]) -> S {
+    let mut s = load(in words);
+    let c = s.cf_id.len();
+    rd_conformance(inout s, in words, 0);
+    let legal = orphan(inout s, c);
+    if s.oob {
+        w(inout s, 2);
+    } else if legal {
+        w(inout s, 0);
+    } else {
+        w(inout s, 1);
+    }
+    s
+}
+
+// `conformance_env`: out is `0 env`, or `2` when a mode bound names a
+// parameter the conformance does not declare (the Rust build panics
+// there).
+pub fn conformance_env_of(in words: Slice[u64]) -> S {
+    let mut s = load(in words);
+    let c = s.cf_id.len();
+    rd_conformance(inout s, in words, 0);
+    let e = conformance_env(inout s, c);
+    if s.oob {
+        w(inout s, 2);
+    } else {
+        w(inout s, 0);
+        w_env(inout s, e);
+    }
+    s
+}
+
+// `validate_query` of a validated program and a query: out is `0` when it
+// passes, else `1` and the sorted diagnostics.
+pub fn query_check(in words: Slice[u64]) -> S {
+    let mut s = load(in words);
+    rd_query(inout s, in words);
+    let base = s.dg_code.len();
+    let maj = s.qmaj;
+    let min = s.qmin;
+    let env = s.qenv;
+    let binders = s.qbinders;
+    let goal = s.qgoal;
+    if validate_query(inout s, maj, min, env, binders, goal) {
+        w(inout s, 0);
+    } else {
+        w(inout s, 1);
+        w_diags(inout s, base);
     }
     s
 }

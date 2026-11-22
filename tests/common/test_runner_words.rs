@@ -235,10 +235,12 @@ fn plan(r: &mut Reader) -> HarnessPlan {
         let code = r.text();
         let primary = r.flag().then(|| r.text());
         let related = r.flag().then(|| r.text());
+        let message = r.flag().then(|| r.text());
         ExpectErrorSpec {
             code,
             primary,
             related,
+            message,
         }
     });
     let property_cases = r.word() as u32;

@@ -431,7 +431,7 @@ fn function(w: &World, f: &FunctionIr, out: &mut String) {
         for (ii, inst) in block.instructions.iter().enumerate() {
             let d = match &inst.op {
                 Op::Constant(l) => match l {
-                    Literal::Int(_) => {
+                    Literal::Int(_) | Literal::WideInt(_) => {
                         let t = span_type(w, &inst.span);
                         if !matches!(t, Type::IntLiteral(_))
                             && IntegerKind::from_type(&t).is_some_and(IntegerKind::wide)

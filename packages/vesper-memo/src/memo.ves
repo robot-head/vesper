@@ -18,12 +18,41 @@
 
 pub const NONE: u64 = 18446744073709551615;
 // An edge: an input row, or a query instance.
-pub const EDGE_INPUT: u64 = 0;
-pub const EDGE_QUERY: u64 = 1;
+pub enum Edge: _ {
+    Input = 0,
+    Query = 1
+}
+
 // Log records, three words each: kind, query, row.
-pub const LOG_EXECUTE: u64 = 1;
-pub const LOG_VALIDATE: u64 = 2;
-pub const LOG_MISSING: u64 = 3;
+pub enum Log: _ {
+    Execute = 1,
+    Validate = 2,
+    Missing = 3
+}
+
+// An oracle key: row, query, input state.
+enum Key: _ {
+    Row = 0,
+    Query = 1,
+    State = 2,
+    Words = 3
+}
+
+// An oracle result in `data`: its fingerprint, its read count, then the
+// reads.
+enum Recorded: _ {
+    Fingerprint = 0,
+    Reads = 1,
+    First = 2
+}
+
+// A read (an edge): its tag, row and query.
+enum Read: _ {
+    Tag = 0,
+    Row = 1,
+    Query = 2,
+    Words = 3
+}
 
 // The recorded query results, sorted by (row, query, state): `keys` holds
 // three words per result, `at` where its fingerprint and reads start in
@@ -133,10 +162,10 @@ fn lookup(in o: Oracle, f: u64, q: u64, s: u64) -> u64 {
             return NONE;
         }
         let mid = wrapping_add(lo, wrapping_sub(hi, lo) >> 1);
-        let k = wrapping_mul(mid, 3);
-        let kf = w(in o.keys, k);
-        let kq = w(in o.keys, wrapping_add(k, 1));
-        let ks = w(in o.keys, wrapping_add(k, 2));
+        let k = wrapping_mul(mid, Key::Words);
+        let kf = w(in o.keys, wrapping_add(k, Key::Row));
+        let kq = w(in o.keys, wrapping_add(k, Key::Query));
+        let ks = w(in o.keys, wrapping_add(k, Key::State));
         if kf == f && kq == q && ks == s {
             return mid;
         }
@@ -153,7 +182,7 @@ fn lookup(in o: Oracle, f: u64, q: u64, s: u64) -> u64 {
 // it reads in order, and store the new memo, backdated when its value
 // equals the old one.
 fn execute(inout db: Db, q: u64, f: u64, m: u64) -> u64 {
-    note(inout db, LOG_EXECUTE, q, f);
+    note(inout db, Log::Execute, q, f);
     let r = lookup(in db.oracle, f, q, w(in db.in_state, f));
     let mut fp: u64 = 0;
     let mut changed: u64 = FIRST_REVISION;
@@ -161,17 +190,17 @@ fn execute(inout db: Db, q: u64, f: u64, m: u64) -> u64 {
     // edges: this memo's go to the pool after them.
     let mut reads_of: ChunkSeq[u64] = ChunkSeq::new();
     if r == NONE {
-        note(inout db, LOG_MISSING, q, f);
+        note(inout db, Log::Missing, q, f);
     } else {
         let at = w(in db.oracle.at, r);
-        fp = w(in db.oracle.data, at);
-        let reads = w(in db.oracle.data, wrapping_add(at, 1));
+        fp = w(in db.oracle.data, wrapping_add(at, Recorded::Fingerprint));
+        let reads = w(in db.oracle.data, wrapping_add(at, Recorded::Reads));
         for i in 0..reads {
-            let e = wrapping_add(wrapping_add(at, 2), wrapping_mul(i, 3));
-            let tag = w(in db.oracle.data, e);
-            let ef = w(in db.oracle.data, wrapping_add(e, 1));
-            let eq = w(in db.oracle.data, wrapping_add(e, 2));
-            if tag == EDGE_INPUT {
+            let e = wrapping_add(wrapping_add(at, Recorded::First), wrapping_mul(i, Read::Words));
+            let tag = w(in db.oracle.data, wrapping_add(e, Read::Tag));
+            let ef = w(in db.oracle.data, wrapping_add(e, Read::Row));
+            let eq = w(in db.oracle.data, wrapping_add(e, Read::Query));
+            if tag == Edge::Input {
                 changed = max64(changed, w(in db.in_changed, ef));
             } else {
                 let dm = fetch_memo(inout db, eq, ef);
@@ -220,10 +249,10 @@ fn deep_verify(inout db: Db, q: u64, f: u64, m: u64) -> bool {
         if i >= n {
             break;
         }
-        let tag = w(in db.edges, wrapping_add(at, i));
-        let ef = w(in db.edges, wrapping_add(at, wrapping_add(i, 1)));
-        let eq = w(in db.edges, wrapping_add(at, wrapping_add(i, 2)));
-        let changed = if tag == EDGE_INPUT {
+        let tag = w(in db.edges, wrapping_add(at, wrapping_add(i, Read::Tag)));
+        let ef = w(in db.edges, wrapping_add(at, wrapping_add(i, Read::Row)));
+        let eq = w(in db.edges, wrapping_add(at, wrapping_add(i, Read::Query)));
+        let changed = if tag == Edge::Input {
             w(in db.in_changed, ef) > verified
         } else {
             changed_after(inout db, eq, ef, verified)
@@ -231,10 +260,10 @@ fn deep_verify(inout db: Db, q: u64, f: u64, m: u64) -> bool {
         if changed {
             return false;
         }
-        i = wrapping_add(i, 3);
+        i = wrapping_add(i, Read::Words);
     }
     set(inout db.m_verified, m, db.revision);
-    note(inout db, LOG_VALIDATE, q, f);
+    note(inout db, Log::Validate, q, f);
     true
 }
 

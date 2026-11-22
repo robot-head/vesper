@@ -584,9 +584,31 @@ pub enum AbiType {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AbiSignature {
     pub convention: CallingConvention,
+    /// Machine argument words, including any [`Variadic::padding`].
     pub parameters: Vec<AbiType>,
     pub result: Option<AbiType>,
+    /// Where a variadic function's variadic words start (`None` when it is
+    /// not variadic).
+    pub variadic: Option<Variadic>,
 }
+/// The variadic tail of a C call (`fn f(a: i32, ..., b: i64)`).
+///
+/// Linux (SysV, AAPCS64) and Win64 pass variadic arguments exactly like
+/// fixed ones. Apple arm64 passes every variadic argument on the stack, in
+/// 8-byte slots, so a fixed signature that puts them in registers is wrong
+/// there: `padding` zero words fill the eight integer argument registers
+/// first, so the variadic words land at `[sp]` as the callee's `va_arg`
+/// expects. The words `parameters[first - padding..first]` are that
+/// padding; the caller passes zeros for them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Variadic {
+    /// Index in `parameters` of the first variadic word.
+    pub first: usize,
+    /// Zero words inserted right before `first`.
+    pub padding: usize,
+}
+/// Integer argument registers of the AAPCS64 (`x0`-`x7`).
+const ARM64_INTEGER_ARGUMENT_REGISTERS: usize = 8;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionDescriptor {
     symbol: String,
@@ -594,8 +616,14 @@ pub struct FunctionDescriptor {
     result: ValueType,
     convention: CallingConvention,
     errno: bool,
+    variadic: Option<usize>,
 }
 impl FunctionDescriptor {
+    /// Index of the first variadic parameter (`None` unless declared with
+    /// `...`).
+    pub fn variadic_from(&self) -> Option<usize> {
+        self.variadic
+    }
     pub fn symbol(&self) -> &str {
         &self.symbol
     }
@@ -618,7 +646,25 @@ impl FunctionDescriptor {
     }
     pub fn abi(&self) -> AbiSignature {
         let mut parameters = vec![];
-        for p in &self.parameters {
+        let mut variadic = None;
+        for (index, p) in self.parameters.iter().enumerate() {
+            if self.variadic == Some(index) {
+                // Every parameter is an integer or pointer word, so the
+                // fixed words so far are exactly the registers they use.
+                let padding = match self.convention {
+                    CallingConvention::Darwin64 => {
+                        ARM64_INTEGER_ARGUMENT_REGISTERS.saturating_sub(parameters.len())
+                    }
+                    CallingConvention::SysV64
+                    | CallingConvention::Aapcs64
+                    | CallingConvention::Win64 => 0,
+                };
+                parameters.extend(std::iter::repeat_n(AbiType::Integer(Scalar::U64), padding));
+                variadic = Some(Variadic {
+                    first: parameters.len(),
+                    padding,
+                });
+            }
             match &p.ty {
                 ParameterType::Value(t) => {
                     parameters.push(carrier(t).expect("validated non-unit parameter"))
@@ -636,6 +682,7 @@ impl FunctionDescriptor {
             convention: self.convention,
             parameters,
             result: carrier(&self.result),
+            variadic,
         }
     }
 }
@@ -902,6 +949,10 @@ fn canonicalize(library: &LibraryDescriptor, limit: usize) -> Result<Vec<u8>, Er
         // Appended only when declared, so other functions keep their bytes.
         if f.errno {
             e.text("errno/after-call")?;
+        }
+        if let Some(first) = f.variadic {
+            e.text("variadic/from")?;
+            e.count(first)?;
         }
     }
     // Appended only when present, so descriptors without wire structs keep

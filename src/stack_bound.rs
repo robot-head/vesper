@@ -249,8 +249,43 @@ impl StackGraph {
 }
 
 /// Analyse `graph` against `policy` with the shared algorithm, plus the
-/// kernel's rules for eBPF graphs. A malformed graph is an error.
+/// kernel's rules for eBPF graphs. A malformed graph is an error. Runs
+/// [`rust_stack_bound_report`], or the installed [`StackBoundTable`] (the
+/// hybrid build's Vesper analysis).
 pub fn stack_bound_report(
+    graph: &StackGraph,
+    policy: &StackBoundPolicy,
+) -> Result<StackBoundReport, String> {
+    (STACK_BOUND_TABLE.get().unwrap_or(&RUST_STACK_BOUND).report)(graph, policy)
+}
+
+/// [`stack_bound_report`] as a function table: the swap-in point of this
+/// module for the hybrid Stage 2 build (self-hosting SH2 lane 10, #1182),
+/// which installs `@vesper/check-loops-atomics` here. Nothing in the default
+/// compiler installs one, so it always runs [`rust_stack_bound_report`]. An
+/// installed `report` must return exactly what [`rust_stack_bound_report`]
+/// returns (the hybrid's tests check it).
+#[derive(Debug, Clone, Copy)]
+pub struct StackBoundTable {
+    /// [`stack_bound_report`].
+    pub report: fn(&StackGraph, &StackBoundPolicy) -> Result<StackBoundReport, String>,
+}
+
+/// The Rust analysis, the default [`StackBoundTable`].
+pub const RUST_STACK_BOUND: StackBoundTable = StackBoundTable {
+    report: rust_stack_bound_report,
+};
+
+static STACK_BOUND_TABLE: std::sync::OnceLock<StackBoundTable> = std::sync::OnceLock::new();
+
+/// Replace [`RUST_STACK_BOUND`] for the rest of the process. Only the first
+/// call takes effect; a later one returns its table back.
+pub fn install_stack_bound(table: StackBoundTable) -> Result<(), StackBoundTable> {
+    STACK_BOUND_TABLE.set(table)
+}
+
+/// [`stack_bound_report`] by the Rust analysis, whatever table is installed.
+pub fn rust_stack_bound_report(
     graph: &StackGraph,
     policy: &StackBoundPolicy,
 ) -> Result<StackBoundReport, String> {
