@@ -205,7 +205,12 @@ impl Checker<'_> {
     /// read-only `Str` or `Slice` local that cannot outlive its source: the
     /// binding is shared (`in`), so it cannot be moved, rebound mutably or
     /// written, and views are second-class (never returned or stored).
-    pub(in crate::check) fn bind_view(&mut self, value: &Expr, env: &Env, changeable: bool) -> bool {
+    pub(in crate::check) fn bind_view(
+        &mut self,
+        value: &Expr,
+        env: &Env,
+        changeable: bool,
+    ) -> bool {
         let base = view_source(value);
         // A view of a string literal, or of the static text a `-> Str`
         // function returns, is a view of static bytes and never dangles.
@@ -299,7 +304,11 @@ impl Checker<'_> {
                     "E1531",
                     format!(
                         "cannot {} '{}' while the view '{view}' of it is in scope",
-                        if write { "write or lend 'inout'" } else { "move" },
+                        if write {
+                            "write or lend 'inout'"
+                        } else {
+                            "move"
+                        },
                         p.display()
                     ),
                     span.clone(),

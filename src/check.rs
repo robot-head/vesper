@@ -1728,12 +1728,7 @@ impl Checker<'_> {
         if (matches!(usage, Usage::Borrow(Pass::Inout))
             || (matches!(usage, Usage::Own) && self.mode(&ty) != Mode::Copy))
             && !self.view_sources.is_empty()
-            && !self.check_view_sources(
-                p,
-                env,
-                &span,
-                matches!(usage, Usage::Borrow(Pass::Inout)),
-            )
+            && !self.check_view_sources(p, env, &span, matches!(usage, Usage::Borrow(Pass::Inout)))
         {
             transfer_allowed = false;
         }
