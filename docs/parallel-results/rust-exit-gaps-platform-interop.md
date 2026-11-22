@@ -114,7 +114,10 @@ Also passing: `std_cpu`, `vsys_packages`, `vsys_package_imports`,
 No guarded path is touched (`src/verified_codegen/**`, `src/ir.rs`,
 `ir_opt::optimize`, `lean/**`, `bootstrap/stage1*`,
 `packages/vesper-compiler/**`). The changes reach only programs with `.vsys`
-imports; the Stage 1 corpus has none.
+imports; the Stage 1 corpus has none. `bootstrap/run.sh stage1 --outcome`
+exits 0: all 11 programs give the locked results on the seed and on
+Cranelift. Its stale digests (`frontend_sources`, `seed_binary`, the
+artifacts) come from main moving since the lock was recorded.
 
 ### Measurements
 
