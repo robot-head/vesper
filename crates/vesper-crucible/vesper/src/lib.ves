@@ -51,9 +51,9 @@ const LF: u64 = 0x0a;
 const CR: u64 = 0x0d;
 const SPACE: u64 = 0x20;
 const DIGIT_ZERO: u64 = 0x30;
-const DIGIT_NINE: u64 = 0x39;
 // `a` minus 10: the hex digit d >= 10 is the byte d + HEX_LETTER_BIAS.
 const HEX_LETTER_BIAS: u64 = 87;
+const LOWER_A: u64 = 0x61;
 const HEX_DIGIT_BITS: u64 = 4;
 const HEX_DIGIT_MASK: u64 = 15;
 // A value line holds 1 to MAX_HEX_DIGITS digits.
@@ -374,10 +374,12 @@ fn header() -> ChunkSeq[u8] {
 // `(9 - d) >> 63` is 1 exactly when `d > 9`.
 fn hex_digit(d: u64) -> u8 {
     let letter = wrapping_sub(wrapping_sub(DECIMAL_DIGITS, 1), d) >> 63;
-    wrapping_u8(wrapping_add(
-        wrapping_add(d, DIGIT_ZERO),
-        wrapping_mul(letter, wrapping_sub(HEX_LETTER_BIAS, DIGIT_ZERO))
-    ))
+    wrapping_u8(
+        wrapping_add(
+            wrapping_add(d, DIGIT_ZERO),
+            wrapping_mul(letter, wrapping_sub(HEX_LETTER_BIAS, DIGIT_ZERO))
+        )
+    )
 }
 
 // The header line, then one lowercase hex value per line.
@@ -489,17 +491,20 @@ fn hex_value(in s: Slice[u8], start: u64, end: u64) -> (bool, u64) {
             break(true, v);
         }
         let c = byte(in s, i);
-        // Without a branch on the digit: `letter` is 1 when `c > '9'`, and
-        // the result is below 16 exactly for `0-9` and `a-f` (every other
-        // byte wraps or lands at 16 or above).
-        let letter = wrapping_sub(DIGIT_NINE, c) >> 63;
-        let d = wrapping_sub(
-            wrapping_sub(c, DIGIT_ZERO),
-            wrapping_mul(letter, wrapping_sub(HEX_LETTER_BIAS, DIGIT_ZERO))
-        );
-        if d > HEX_DIGIT_MASK {
+        // `0-9` or `a-f`: one unsigned range check each.
+        let digit = wrapping_sub(c, DIGIT_ZERO) < DECIMAL_DIGITS;
+        let letter = wrapping_sub(c, LOWER_A) < 6;
+        if !(digit || letter) {
             break(false, 0);
         }
+        let d = wrapping_sub(
+            c,
+            if letter {
+                HEX_LETTER_BIAS
+            } else {
+                DIGIT_ZERO
+            }
+        );
         v = (v << HEX_DIGIT_BITS) | d;
         i = inc(i);
     }

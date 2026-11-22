@@ -104,6 +104,20 @@ fn tape_text_and_keys_match_the_rust_build() {
     let spaced = "\u{3000}vesper-crucible-tape/1\u{a0}\r\n\u{2009}ff\u{85}\n\n";
     assert_eq!(ChoiceTape::from_text(spaced).unwrap().values, vec![0xff]);
     assert!(ChoiceTape::from_text("vesper-crucible-tape/1\nf\u{a0}f\n").is_err());
+    // Every byte outside 0-9 and a-f is an invalid digit, the ones between
+    // `9` and `a` (`W` to the backtick) and `A-F` included.
+    for c in (0u8..=127).filter(|c| !matches!(c, b'0'..=b'9' | b'a'..=b'f' | b'\n' | b'\r')) {
+        let text = format!("vesper-crucible-tape/1\n1{}\n", c as char);
+        if text.lines().nth(1).is_some_and(|l| l.trim() != "1") {
+            assert!(ChoiceTape::from_text(&text).is_err(), "{text:?}");
+        }
+    }
+    assert_eq!(
+        ChoiceTape::from_text("vesper-crucible-tape/1\n09af\n")
+            .unwrap()
+            .values,
+        vec![0x9af]
+    );
     let long = format!("  \u{2028}{}\n", "é".repeat(80));
     match ChoiceTape::from_text(&long) {
         Err(vesper_crucible::TapeError::UnknownHeader(shown)) => {
