@@ -197,8 +197,20 @@ package and C build support lanes 12 and 16 asked for (#1421).
 - **The Rust crate** keeps its public API, serde types and JSON parsing,
   and converts its values to the trees and back (`src/port.rs`).
   The port-backed build links no Rust engine: ed25519-dalek, semver and
-  loom-cas are dev-only there (the reference and the tests). Non-comment
-  Rust lines outside `src/reference/`: 791 before, 374 now.
+  loom-cas are dev-only there (the reference and the tests).
+- **Rust left in the crate** (the census's count, non-blank non-comment
+  lines outside `#[cfg(test)]` items): 791 hand-written lines before, 2,952
+  counted now. None of it counts as deleted:
+
+  | Part | Lines | Removed by |
+  |---|--:|---|
+  | API, serde types, JSON parsing, tree conversion (`src/lib.rs`, `src/slopsquat.rs`, `src/port.rs`) and `build.rs` | 470 | callers moving to Vesper (the API then is the Vesper package) |
+  | Frozen Rust engine, `src/reference/` (the seed's engine and the differential's reference) | 639 | Stage 2: the committed wasm seed (SH6 lane 2) builds the compiler, so Bazel no longer builds the tools from `//:bin/vesper` and they can link the port; the same plan as loom-calculus's seed |
+  | Generated binding, `port/binding.rs` | 1,253 | callers moving to Vesper (no Rust caller, no binding) |
+  | Test-only differential, `src/differential.rs` (gated in `lib.rs`, so the census counts it) | 590 | with the frozen engine |
+
+  The Rust engine is not gone: it moved behind the seed. What the flip
+  bought is that every user outside the compiler's build runs the port.
 - **The seed.** loom-trust is outside Cargo's compiler closure (lane 3,
   #1398), but Bazel builds the `vesper-<tool>` binaries as run-time data of
   `//:bin/vesper`, and `vesper attest` and `vesper publish` (vesper-tools)

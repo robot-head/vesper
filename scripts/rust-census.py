@@ -113,7 +113,7 @@ CRATES = {
     "vesper-fusion": ("rust-lib", "", "", "egglog: move rule sets onto @vesper/egraph", "18"),
     "vesper-beacon-arrow": ("rust-lib", "", "", "arrow-rs, tonic, prost: Arrow IPC and gRPC on Prism", "18"),
     "vesper-migrate": ("rust-lib", "", "", "out of the compiler's closure (#1398); lang-c, syn: C and Rust readers in Vesper", "18"),
-    "vesper-loom-trust": ("gone", "in crate (+ seed)", "0.70-1.23x", "seed until Stage 2 (vesper-tools is Bazel run-time data of //:bin/vesper); Rust keeps serde types, JSON parsing and tree conversion; Ed25519 via the crypto shim", "17"),
+    "vesper-loom-trust": ("gone", "in crate (+ seed)", "0.70-1.23x", "NOT deleted: frozen Rust engine (src/reference, 639) stays as the seed vesper-tools links (Bazel run-time data of //:bin/vesper) until the Stage 2 wasm seed (lane 2); API, serde, JSON and conversion 470 and generated binding 1,253 go when callers are Vesper; Ed25519 via the crypto shim", "17"),
     "vesper-warp-crypto": ("gone", "in crate", "1.04-1.89x", "header micro 1.89x (codegen, #1426); Rust holds the keys and NonceTicket; primitives via the crypto shim", "17"),
     "vesper-vault": ("shim", "", "", "libcrux ML-KEM, x25519, AEADs: crypto shim; Cranelift via its shim", "17"),
     "vesper-warp-tls": ("shim", "", "", "rustls: TLS shim (or the TLS 1.3 state machine ports over the crypto shim)", "17"),
