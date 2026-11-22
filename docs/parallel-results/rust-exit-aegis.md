@@ -201,21 +201,77 @@ were deleted, and the adapter added 438. About half of those are the
 decoder's live differential and the field and reason tables. The
 ciborium `Value` the CoRIM structure code walks goes away with part 2b.
 
+## Part 2b: COSE, CoRIM structure, and CCA appraisal
+
+Base: `main` at `0f5a9eba`.
+
+1. **COSE (`vesper/src/cose.ves`) & extended CBOR scratch (`vesper/src/cbor.ves`).**
+   `cose.ves` parses tagged `COSE_Sign1` (tag 18) with full `coset` 0.3.8
+   header/alg/crit/`content_type`/`kid`/`iv`/`partial_iv`/`counter_signature`
+   validation, builds RFC 8152 §4.4 `Sig_structure` TBS bytes (`cose_sig_structure`),
+   and decodes P-384 EC2 `COSE_Key` / raw 97-byte SEC1 RAKs (`cose_key_p384`).
+   `cbor.ves` gained `decode_at`, `decode_whole_at`, scratch-backed
+   `materialize_bytes` (so embedded indefinite-length byte strings resize a
+   caller scratch buffer on retry with zero scratch allocation for definite
+   CBOR), and string/integer helpers (`text_eq_s`, `str_nodes_eq`, `is_i64`,
+   `i64_bits`, `int_nodes_eq`).
+2. **CCA collections (`vesper/src/cca.ves`).** `cca_token_parse` handles Tag 399
+   and CMW Tag 907 (`[263, bstr]`) collections, validates both `COSE_Sign1`
+   envelopes, decodes each payload once for claims and profiles, and preserves
+   exact error precedence. A minimal internal CBOR encoder in `src/cca.rs`
+   replaces `coset` in test/simulator encoders (`to_cbor`, `encode_collection`,
+   `encode_realm_cose_key`, `build_sign1`).
+3. **CoRIM / CoMID & CCA profile appraisal (`vesper/src/corim.ves`, `vesper/src/corim_cca.ves`).**
+   `corim_parse` and `corim_meta_parse` parse unsigned CoRIMs (tag 501),
+   CoMIDs (tag 506), and `corim-meta` headers without building an intermediate
+   `Value` AST. `corim_validate_cca` implements all `CcaCorimStore::add` Arm
+   CCA platform and realm profile checks, and `cca_appraise` implements
+   `appraise_cca_with_options` with constant-time byte and 64-byte padded
+   measurement comparisons.
+4. **Crypto & dependencies.** `coset = "0.3"` moved out of `[dependencies]` in
+   `crates/vesper-aegis/Cargo.toml` into `[dev-dependencies]` (used by
+   `tests/cbor_differential.rs` and `tests/attestation.rs`).
+   `ec_public_key_from_pem` moved to `src/chain.rs` (re-exported in
+   `src/corim.rs`), keeping SPKI/PKIX parsing and `ring` ECDSA signature
+   verification (`EcPublicKey::verify_fixed`, `verify_chain`) in Rust.
+   1,527 lines of Rust were deleted across `src/cca.rs` (344 deleted, 693 left)
+   and `src/corim.rs` (1,183 deleted, 460 left), with `src/port.rs` expanded
+   to 1,696 lines for tables, `PortCborValue`, marshaling, and `AtErr`
+   mapping.
+5. **Differential & divergence.** `tests/port_differential.rs` now covers 14
+   tests: `cca_tokens_agree` projects `CcaToken` across `CoseSign1` (70,035
+   cases), plus five new Part 2b suites — `cose_sign1_agrees` (75,050),
+   `cose_keys_agree` (22,515), `signed_corims_agree` (9,012),
+   `corim_store_agrees` (86), and `cca_appraisal_agrees` (44) — all matching
+   recorded digests from `0f5a9eba809fd81ad7050d7d083a0e729ce009d4` with 0
+   differences while all 8 earlier digests stay unchanged. Three new
+   `DIVERGENT` checks (`cose`, `corim`, `corim_cca`) join `build.rs`,
+   `BUILD.bazel`, and `port/check.sh`.
+6. **ABBA benchmark** (`examples/abba.rs`, `flip-gate.toml`, `bench-abba.sh`,
+   `RUSTFLAGS="-C target-cpu=native"`, `n = 30` epochs against `0f5a9eba`):
+
+```
+cca_token:    0.37x [0.35x, 0.40x] n=30 decision=pass
+corim:        0.58x [0.54x, 0.61x] n=30 decision=pass
+corim_store:  1.12x [1.03x, 1.17x] n=30 decision=pass
+appraise_cca: 0.55x [0.52x, 0.56x] n=30 decision=pass
+```
+
 ## What is left
 
 The crate's remaining Rust, by the part that will move it:
 
 | Rust | Lines | Part | Needs |
 | --- | --: | --- | --- |
-| `cca.rs`, `corim.rs`: COSE_Sign1 and COSE_Key structure, token collection, CoRIM structure, appraisal | 2,458 | part 2b | the CBOR reader of part 2a; COSE signatures go behind lane 17's shim |
+| `cca.rs`, `corim.rs` rest: public types, ECDSA `verify_sign1`, `ec_public_key_from_pem`, test encoders, adapters | 1,153 | part 4 | SHA-2 and ECDSA behind lane 17's shim |
 | `gate.rs`: frame and ring logic | 497 | part 3 | ChaCha20-Poly1305 behind lane 17's shim; the evaluator callbacks stay as Rust adapters while callers are Rust |
 | `gpa.rs`, `host.rs`, `linear.rs` | 1,012 | part 3 | atomics in source (#1037) for the leak ledger |
 | `intel.rs`, `amd.rs`: collateral, TCB status, CRL floors | 1,655 | part 4 | JSON collateral in Vesper; X.509 and ECDSA behind lane 17's shim |
-| `chain.rs`, `roots.rs`: X.509 paths, pinned roots | 696 | part 4 | lane 17's shim (vetted crypto, never hand-rolled) |
+| `chain.rs`, `roots.rs`: X.509 paths, PKIX PEM keys, pinned roots | 772 | part 4 | lane 17's shim (vetted crypto, never hand-rolled) |
 | `claims.rs` rest: claim extraction, register replay (SHA-384) | 258 | parts 2-4 | SHA-2 behind lane 17's shim |
 | `snp.rs`, `tdx.rs`, `sgx.rs`: struct definitions, encoders, end-to-end verifiers | 1,400 | parts 2-4 | the verifiers call the crypto above; the structs stay while dependents are Rust |
 | `policy.rs` rest, `time.rs`: RA-TLS check (SPKI channel binding, SHA-384) and forwarding | 227 | part 4 | lane 17's shim |
-| `port.rs`, `error.rs`, `lib.rs`: adapter, error types | 629 | last | dependents in Vesper (`vesper-tools` tee, the root CLI test) |
+| `port.rs`, `error.rs`, `lib.rs`: adapter, error types | 2,053 | last | dependents in Vesper (`vesper-tools` tee, the root CLI test) |
 
 The census row (`scripts/rust-census.py` STATUS) moves to `partial` with
 the parsers and policy flipped once the census script is on `main` (plan
@@ -223,7 +279,4 @@ PR #1415).
 
 ## Platforms run
 
-Locally: Linux x86-64 (Cargo, Rust 1.97, `cargo test --release -p
-vesper-aegis`, `cargo test --release -p vesper --test
-native_verifiers_cli`, `cargo build -p vesper-tools`, the flip gate).
-CI: the four required checks.
+Part 2b locally on Windows x86-64 MSVC (Rust 1.100.0): `cargo test --locked -p vesper-aegis`, `port_differential` (14 suites, 0 differences vs `0f5a9eba809fd81ad7050d7d083a0e729ce009d4`), `DIVERGENT` checks (`cbor`, `cca`, `cose`, `corim`, `corim_cca`), ABBA (`bench-abba.sh flip-gate`, `n=30`, `RUSTFLAGS="-C target-cpu=native"`), `cargo +1.100.0 clippy`, `rustfmt --check`, `vesper fmt --check`, and `tools/bazel/sync_build_files.py --check`.
