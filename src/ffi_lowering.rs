@@ -1681,9 +1681,13 @@ impl<'a> Rewriter<'a> {
             PatternKind::Constructor { name, fields, .. } => {
                 if fields.is_empty()
                     && let Some((library, symbol)) = self.foreign_path(name)
-                    && let Some((_, value)) = self.generated.constant(library, symbol)
+                    && let Some((scalar, value)) = self.generated.constant(library, symbol)
                 {
                     p.kind = PatternKind::Literal(Literal::Int(value));
+                    p.integer_kind = Some(
+                        crate::numeric::IntegerKind::from_name(scalar)
+                            .expect(".vsys constant has an integer scalar"),
+                    );
                     return;
                 }
                 if self.generated.is_handle(name) {

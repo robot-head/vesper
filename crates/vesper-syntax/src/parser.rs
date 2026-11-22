@@ -797,6 +797,7 @@ impl Parser<'_> {
     }
     fn placeholder_pattern(&self) -> Pattern {
         Pattern {
+            integer_kind: None,
             kind: PatternKind::Wild,
             span: self.start()..self.start(),
         }
@@ -2956,6 +2957,7 @@ impl Parser<'_> {
         let ret = Box::new(Clause {
             name: "return".into(),
             pats: vec![Pattern {
+                integer_kind: None,
                 kind: PatternKind::Bind(marker.clone()),
                 span: at.clone(),
             }],
@@ -3596,6 +3598,7 @@ impl Parser<'_> {
         };
         self.builder.finish_node();
         Pattern {
+            integer_kind: None,
             kind,
             span: start..self.end(),
         }
@@ -3618,6 +3621,7 @@ impl Parser<'_> {
                     self.pattern()
                 } else {
                     Pattern {
+                        integer_kind: None,
                         kind: PatternKind::Bind(field.clone()),
                         span: start..self.end(),
                     }
@@ -3828,6 +3832,7 @@ fn splat(value: Expr, n: usize, span: Span) -> ExprKind {
     ExprKind::Block {
         statements: vec![Statement::Let {
             pat: Pattern {
+                integer_kind: None,
                 kind: PatternKind::Bind(ARRAY_SPLAT_BINDING.into()),
                 span: value.span.clone(),
             },

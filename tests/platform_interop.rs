@@ -1043,6 +1043,27 @@ fn vsys_constant_types_and_misuses_are_checked() {
     let imports = loaded.imports(None).unwrap();
     assert!(ffi_lowering::check_module(&loaded.module, &imports).is_err());
 
+    // Each value fits the scrutinee, but its declared integer kind must match.
+    for (ty, pattern, diagnostic) in [
+        ("u8", "Flags::O_CREAT", "expected u8, found i32"),
+        (
+            "(u32, u8)",
+            "(Flags::O_CREAT, _)",
+            "expected u32, found i32",
+        ),
+        ("u64", "Flags::PAGE", "expected u64, found usize"),
+    ] {
+        let source = format!("fn probe(x: {ty}) -> i32 {{ match x {{ {pattern} => 1, _ => 0 }} }}");
+        let error =
+            ffi_lowering::check_source(&source, &imports).expect_err("pattern type mismatch");
+        assert!(
+            error.diagnostics.iter().any(|d| d.code == "E0200"
+                && d.message == diagnostic
+                && source[d.span.clone()].starts_with("Flags::")),
+            "{error:?}"
+        );
+    }
+
     // Calling a constant as a function is rejected.
     let dir2 = flags_app(&t, "pub fn main() -> i32 {\n    Flags::O_CREAT(1)\n}\n");
     let loaded2 = vesper::packages::load(&dir2).unwrap();

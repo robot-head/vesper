@@ -194,7 +194,12 @@ impl Dump {
         match &p.kind {
             PatternKind::Wild => self.line(d, &format!("P _{s}")),
             PatternKind::Bind(n) => self.line(d, &format!("P bind {}{s}", q(n))),
-            PatternKind::Literal(l) => self.line(d, &format!("P lit {}{s}", lit(l))),
+            PatternKind::Literal(l) => {
+                let ty = p
+                    .integer_kind
+                    .map_or_else(String::new, |k| format!(" type={}", q(k.name())));
+                self.line(d, &format!("P lit {}{ty}{s}", lit(l)));
+            }
             PatternKind::Tuple(ps) => {
                 self.line(d, &format!("P tuple{s}"));
                 for p in ps {

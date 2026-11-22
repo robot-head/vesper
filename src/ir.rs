@@ -715,6 +715,8 @@ impl Lower<'_> {
     }
     fn rename_pattern(&mut self, p: &Pattern, ty: &Type) -> Pattern {
         let mut p = p.clone();
+        // Lower a checked constant to the same IR comparison as a literal.
+        p.integer_kind = None;
         match &mut p.kind {
             PatternKind::Bind(n) => {
                 let source = n.clone();

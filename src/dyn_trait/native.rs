@@ -287,6 +287,7 @@ impl<M: Module> Codegen<'_, '_, M> {
             }
             self.bind_alias(
                 &Pattern {
+                    integer_kind: None,
                     kind: PatternKind::Bind(name.clone()),
                     span: 0..0,
                 },

@@ -346,6 +346,7 @@ impl Rewriter<'_> {
                 for (suffix, value) in [("lo", *lo), ("hi", *hi)] {
                     let name = format!("{HIDDEN_PREFIX}{k}_{suffix}");
                     let pat = Pattern {
+                        integer_kind: None,
                         kind: PatternKind::Bind(name.clone()),
                         span: self.fresh(),
                     };
@@ -371,6 +372,7 @@ impl Rewriter<'_> {
             Plan::Array { place: false, ty } => {
                 let name = seq_name(k);
                 let pat = Pattern {
+                    integer_kind: None,
                     kind: PatternKind::Bind(name.clone()),
                     span: self.fresh(),
                 };
@@ -385,6 +387,7 @@ impl Rewriter<'_> {
             Plan::Seq { place: false, .. } => {
                 let name = seq_name(k);
                 let pat = Pattern {
+                    integer_kind: None,
                     kind: PatternKind::Bind(name.clone()),
                     span: self.fresh(),
                 };
@@ -411,7 +414,14 @@ impl Rewriter<'_> {
                         PatternKind::Literal(Literal::Int(i as i128))
                     };
                     let span = self.fresh();
-                    arms.push((Pattern { kind: p, span }, item));
+                    arms.push((
+                        Pattern {
+                            kind: p,
+                            span,
+                            integer_kind: None,
+                        },
+                        item,
+                    ));
                 }
                 let scrutinee = read_index(self);
                 let select = self.node(ExprKind::Match {
@@ -467,12 +477,14 @@ impl Rewriter<'_> {
                     (pat, None)
                 } else {
                     let payload = Pattern {
+                        integer_kind: None,
                         kind: PatternKind::Bind(element.clone()),
                         span: self.fresh(),
                     };
                     (payload, Some(pat))
                 };
                 let some = Pattern {
+                    integer_kind: None,
                     kind: PatternKind::Constructor {
                         name: "Option::Some".into(),
                         fields: vec![("0".into(), payload)],
@@ -482,6 +494,7 @@ impl Rewriter<'_> {
                 };
                 let value = self.name(&element);
                 let none = Pattern {
+                    integer_kind: None,
                     kind: PatternKind::Wild,
                     span: self.fresh(),
                 };
@@ -524,6 +537,7 @@ impl Rewriter<'_> {
         });
         let body = self.node(inner);
         let index_pat = Pattern {
+            integer_kind: None,
             kind: PatternKind::Bind(index),
             span: self.fresh(),
         };

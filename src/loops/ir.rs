@@ -113,6 +113,7 @@ impl Lower<'_> {
                     self.emit_at(
                         Op::Bind {
                             pattern: Pattern {
+                                integer_kind: None,
                                 kind: PatternKind::Bind(slot.clone()),
                                 span: at.clone(),
                             },

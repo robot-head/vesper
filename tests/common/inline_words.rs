@@ -1086,6 +1086,7 @@ impl Reader<'_> {
         let start = self.next() as usize;
         let end = self.next() as usize;
         Pattern {
+            integer_kind: None,
             kind,
             span: start..end,
         }
