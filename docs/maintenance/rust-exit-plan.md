@@ -163,4 +163,4 @@ the Rust lines deleted.
 
 | Flip | Lane | Differential | Speed (ABBA) | Rust deleted | PR |
 |---|---|---|---|--:|---|
-| | | | | | |
+| `optimize` (PASS, compiler module) | G1-4 | 0 differences; tests 2/2 pass | checker 1.12x [1.00x, 1.19x] n=12; producer 0.70x [0.64x, 0.74x] n=12; pass 0.79x [0.70x, 0.83x] n=12 | 0 (2,867 at the retirement) | #1501 |

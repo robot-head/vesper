@@ -144,7 +144,7 @@ MODULES = {
     "forge_frontend": ("SH1-14", "", "#1157"),
     "native_export": ("SH4-12", "vesper-codegen-export", ""),
     "ffi_lowering": ("SH4-13", "", ""),
-    "optimize": ("G1-4", "vesper-optimize", "search 0.68x; checker 1.94x"),
+    "optimize": ("G1-4", "vesper-optimize", "flip gate PASS: checker 1.12x, producer 0.70x, both 0.79x"),
     "fip": ("SH2-12", "vesper-check-fip", "0.92x"),
     "bounds_hoist": ("SH3-12", "vesper-bounds-hoist", ""),
     "tiled": ("SH4-11", "vesper-codegen-numeric", ""),

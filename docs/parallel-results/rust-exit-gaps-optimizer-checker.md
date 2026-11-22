@@ -19,7 +19,7 @@ build, `RUSTFLAGS=-C target-cpu=native`:
 
 ```text
 flip-gate optimize: PASS (bar: 0 differences, every test, 95% upper <= 1.50x) | tests 2/2 pass | differential 0 differences | ABBA vesper/rust checker 1.12x [1.00x, 1.19x] n=12; producer 0.70x [0.64x, 0.74x] n=12; pass 0.79x [0.70x, 0.83x] n=12 | RUSTFLAGS=-C target-cpu=native
-| `optimize` (PASS) | GW1-4 | 0 differences; tests 2/2 pass | checker 1.12x [1.00x, 1.19x] n=12; producer 0.70x [0.64x, 0.74x] n=12; pass 0.79x [0.70x, 0.83x] n=12 | 2,867 | |
+| `optimize` (PASS) | G1-4 | 0 differences; tests 2/2 pass | checker 1.12x [1.00x, 1.19x] n=12; producer 0.70x [0.64x, 0.74x] n=12; pass 0.79x [0.70x, 0.83x] n=12 | 2,867 | |
 ```
 
 | Workload | Before (`66255e17`) | After |
