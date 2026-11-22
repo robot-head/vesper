@@ -339,9 +339,12 @@ impl AstEnc<'_> {
     fn function(&mut self, f: &Function) {
         self.name(&f.name);
         self.w(f.generics.len() as u64);
-        self.w(u64::from(
-            f.effects.instances.is_empty() && f.effects.tail.is_none(),
-        ));
+        // Whether the row may run on a `parallel_for` worker, as
+        // `atomics::worker_row` decides from the world's effects.
+        self.w(u64::from(match self.world {
+            Some(w) => vesper::atomics::worker_row(w, &f.effects),
+            None => f.effects.instances.is_empty() && f.effects.tail.is_none(),
+        }));
         self.w(f.params.len() as u64);
         for p in &f.params {
             self.w(pass_word(p.pass));
