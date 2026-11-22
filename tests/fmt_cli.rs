@@ -171,3 +171,26 @@ fn replacement_preserves_unix_permissions() {
     assert!(f.run(&[]));
     assert_eq!(fs::metadata(f.file()).unwrap().mode() & 0o777, 0o640);
 }
+
+#[test]
+fn sugar_source_formats_in_place_and_malformed_sugar_is_read_only() {
+    let f = Fixture::new();
+    let source = b"fn f(){let b=hex\"de ad\";let r=frame |> parse(_, in cfg);r}";
+    f.write(source);
+    assert!(!f.run(&["--check"]));
+    f.unchanged(source);
+    assert!(f.run(&[]));
+    let canonical = fs::read_to_string(f.file()).unwrap();
+    assert!(canonical.contains("hex\"de ad\""), "{canonical}");
+    assert!(
+        canonical.contains("frame |> parse(_, in cfg)"),
+        "{canonical}"
+    );
+    assert!(f.run(&["--check"]));
+    f.unchanged(canonical.as_bytes());
+
+    let malformed = b"sugar invalid:expr {rule(bad $x:wrong)=>{x}}";
+    f.write(malformed);
+    assert!(!f.run(&[]));
+    f.unchanged(malformed);
+}

@@ -58,11 +58,11 @@ impl [K: mod copy + Ord, V: mod affine] CacheBTree[K, V] {
         }
         self
             .settle(
-            BTreeCursor {
-                leaf: node,
-                pos: 0
-            }
-        )
+                BTreeCursor {
+                    leaf: node,
+                    pos: 0
+                }
+            )
     }
 
     // The cursor at the first entry whose key is not below `k`.
@@ -76,11 +76,11 @@ impl [K: mod copy + Ord, V: mod affine] CacheBTree[K, V] {
         let leaf = self.find_leaf(k);
         self
             .settle(
-            BTreeCursor {
-                leaf: leaf,
-                pos: self.leaf_pos(leaf, k)
-            }
-        )
+                BTreeCursor {
+                    leaf: leaf,
+                    pos: self.leaf_pos(leaf, k)
+                }
+            )
     }
 
     // The key and value position (in `vals`) at `c`, or `None` at the end.
@@ -102,11 +102,11 @@ impl [K: mod copy + Ord, V: mod affine] CacheBTree[K, V] {
         }
         self
             .settle(
-            BTreeCursor {
-                leaf: c.leaf,
-                pos: wrapping_add(c.pos, 1)
-            }
-        )
+                BTreeCursor {
+                    leaf: c.leaf,
+                    pos: wrapping_add(c.pos, 1)
+                }
+            )
     }
 }
 
@@ -151,11 +151,11 @@ impl [K: mod copy + Ord, V: mod copy] CacheBTree[K, V] {
             if n > 0 {
                 break self
                     .entry(
-                    BTreeCursor {
-                        leaf: node,
-                        pos: wrapping_sub(n, 1)
-                    }
-                );
+                        BTreeCursor {
+                            leaf: node,
+                            pos: wrapping_sub(n, 1)
+                        }
+                    );
             }
             node = self.leaf_prev(node);
         }
@@ -177,20 +177,20 @@ impl [K: mod copy + Ord, V: mod copy] CacheBTree[K, V] {
             if left < room {
                 break self
                     .entry(
-                    BTreeCursor {
-                        leaf: c.leaf,
-                        pos: wrapping_add(c.pos, left)
-                    }
-                );
+                        BTreeCursor {
+                            leaf: c.leaf,
+                            pos: wrapping_add(c.pos, left)
+                        }
+                    );
             }
             left = wrapping_sub(left, room);
             c = self
                 .settle(
-                BTreeCursor {
-                    leaf: self.leaf_next(c.leaf),
-                    pos: 0
-                }
-            );
+                    BTreeCursor {
+                        leaf: self.leaf_next(c.leaf),
+                        pos: 0
+                    }
+                );
         }
     }
 
@@ -265,18 +265,10 @@ test {
             last = expected;
             cursor = tree.advance(cursor);
         }
-        tree
-            .entry(cursor)
-            == Option::None
-            && tree
-            .entry(tree.advance(cursor))
-            == Option::None
-            && tree
-            .last()
-            == last
-            && tree
-            .nth(count)
-            == Option::None
+        tree.entry(cursor) == Option::None
+            && tree.entry(tree.advance(cursor)) == Option::None
+            && tree.last() == last
+            && tree.nth(count) == Option::None
     }
 
     fn test_last_skips_empty_leaves() -> bool {
@@ -336,12 +328,8 @@ test {
             let key = wrapping_add(first, i << 1);
             let position = wrapping_add(i, 1);
             let value = wrapping_add(key, 100);
-            if keys
-                .try_get(position)
-                != Option::Some(key)
-                || values
-                .try_get(position)
-                != Option::Some(value) {
+            if keys.try_get(position) != Option::Some(key)
+                || values.try_get(position) != Option::Some(value) {
                 return false;
             }
         }

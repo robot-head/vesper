@@ -448,12 +448,12 @@ fn c_param_count(at: i64, named: bool)
         let p = c_param(at, named, 0);
         1
             + (
-            if c_kind(p.next) == 38 {
-                c_param_count(c_next(p.next), named)
-            } else {
-                0
-            }
-        )
+                if c_kind(p.next) == 38 {
+                    c_param_count(c_next(p.next), named)
+                } else {
+                    0
+                }
+            )
     }
 }
 fn c_args(at: i64, param: i64, named: bool, env: CEnv, row: i64, loans: CEnv, depth: i64)

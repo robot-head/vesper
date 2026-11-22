@@ -324,12 +324,9 @@ fn preflight(in doc: Doc, in body: Slice[u8], l: Plimits) -> Env eff [Fail[Perr]
 // serde_json reads an integer token `-0` as the float -0.0, which has no
 // `as_i64`.
 fn negative_zero(in body: Slice[u8], t: Token) -> bool {
-    wrapping_sub(t.end, t.start)
-        == NEGATIVE_ZERO_LEN
-        && byte(in body, t.start)
-        == Ascii::Dash
-        && byte(in body, wrapping_add(t.start, 1))
-        == Ascii::Zero
+    wrapping_sub(t.end, t.start) == NEGATIVE_ZERO_LEN
+        && byte(in body, t.start) == Ascii::Dash
+        && byte(in body, wrapping_add(t.start, 1)) == Ascii::Zero
 }
 
 // serde_json refuses a number its reader takes out of range

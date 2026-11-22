@@ -328,15 +328,10 @@ fn valid_offset(in t: Slice[u8], offset: u64) -> Unit eff [Fail[Failure]] {
     if offset < t.len() && is_continuation(byte(in t, offset)) {
         Fail::raise(Failure::Utf8Boundary);
     }
-    if offset
-        > 0
-        && byte(in t, wrapping_sub(offset, 1))
-        == Ascii::Cr
-        && offset
-        < t
-        .len()
-        && byte(in t, offset)
-        == Ascii::Lf {
+    if offset > 0
+        && byte(in t, wrapping_sub(offset, 1)) == Ascii::Cr
+        && offset < t.len()
+        && byte(in t, offset) == Ascii::Lf {
         Fail::raise(Failure::LineEndingInterior);
     }
 }
@@ -619,9 +614,9 @@ fn put_decimal(inout out: ChunkSeq[u8], n: u64) {
     for i in 0..d {
         let ok = out
             .try_set(
-            wrapping_sub(wrapping_add(base, d), wrapping_add(i, 1)),
-            wrapping_u8(wrapping_add(x % 10, Ascii::Zero))
-        );
+                wrapping_sub(wrapping_add(base, d), wrapping_add(i, 1)),
+                wrapping_u8(wrapping_add(x % 10, Ascii::Zero))
+            );
         x = x / 10;
     }
 }
@@ -640,20 +635,13 @@ fn quoted_size(in b: Slice[u8], off: u64, len: u64) -> u64 {
     let mut size = Json::Quotes;
     for i in off..wrapping_add(off, len) {
         let x = byte(in b, i);
-        size = if x
-            == Ascii::Quote
-            || x
-            == Ascii::Backslash
-            || x
-            == Ascii::Backspace
-            || x
-            == Ascii::Tab
-            || x
-            == Ascii::Lf
-            || x
-            == Ascii::FormFeed
-            || x
-            == Ascii::Cr {
+        size = if x == Ascii::Quote
+            || x == Ascii::Backslash
+            || x == Ascii::Backspace
+            || x == Ascii::Tab
+            || x == Ascii::Lf
+            || x == Ascii::FormFeed
+            || x == Ascii::Cr {
             wrapping_add(size, Json::Escape)
         } else if x < Ascii::Space {
             wrapping_add(size, Json::UnicodeEscape)
@@ -1125,14 +1113,10 @@ fn source_lines(in t: Slice[u8], n: u64, pad: u64) -> ChunkSeq[u64] {
         } else {
             wrapping_add(found, 1)
         };
-        if found
-            < total
-            && byte(in t, found)
-            == Ascii::Cr
-            && end
-            < n
-            && byte(in t, end)
-            == Ascii::Lf {
+        if found < total
+            && byte(in t, found) == Ascii::Cr
+            && end < n
+            && byte(in t, end) == Ascii::Lf {
             end = wrapping_add(end, 1);
         }
         let count = if end <= n {
@@ -1625,12 +1609,12 @@ fn report_labels(
         r
             .lab
             .push(
-            if first != last {
-                1
-            } else {
-                0
-            }
-        );
+                if first != last {
+                    1
+                } else {
+                    0
+                }
+            );
         if l == 0 {
             r.lab.push(d.message);
             r.lab.push(d.message_len);
@@ -2287,11 +2271,11 @@ pub fn terminal(
     }
     bound(work, caps.max_work, Res::Work);
     bound(metadata, caps.max_metadata_bytes, Res::Metadata);
-    let pad: u64 = if n
-        > 0
+    let pad: u64 = if n > 0
         && (
-        byte(in t, wrapping_sub(n, 1)) == Ascii::Cr || byte(in t, wrapping_sub(n, 1)) == Ascii::Lf
-    ) {
+            byte(in t, wrapping_sub(n, 1)) == Ascii::Cr
+                || byte(in t, wrapping_sub(n, 1)) == Ascii::Lf
+        ) {
         1
     } else {
         0
@@ -2346,8 +2330,7 @@ pub fn terminal(
         margin_draw,
         width,
         color: c
-    }
-    = r;
+    } = r;
     if full {
         Fail::raise(Failure::Output);
     }

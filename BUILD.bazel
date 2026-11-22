@@ -494,6 +494,13 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # Self-hosting SH4 lane 10 (#1284): @vesper/codegen-control's session
+        # plans and handler keys against the Rust compiler on the same corpus.
+        "test/self_host_codegen_control": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
         # Self-hosting SH3 lane 9 (#1248): @vesper/ir-opt against ir_opt on
         # the same corpus. Anchored globs.
         "test/self_host_ir_opt": glob([
@@ -589,13 +596,6 @@ vesper_crate(
         ]) + [
             "//crates/vesper-span:files",
         ],
-        # Self-hosting SH4 lane 10 (#1284): @vesper/codegen-control's session
-        # plans and handler keys against the Rust compiler on the same corpus.
-        "test/self_host_codegen_control": glob([
-            "examples/**",
-            "packages/**",
-            "tests/fixtures/**",
-        ]),
         # @vesper-std/fs, process and env (#1125): drivers over the packages
         # and their .vsys imports.
         # @vesper-std/cpu (audit gap G4): a driver over the package and its

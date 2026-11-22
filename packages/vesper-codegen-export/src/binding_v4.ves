@@ -275,13 +275,13 @@ impl Gen {
             put(inout out, "] = 1;\n");
             self
                 .encode(
-                self.i.kid(t, 0),
-                in text("x"),
-                in wv,
-                inc(at),
-                inout out,
-                wrapping_add(depth, 2)
-            );
+                    self.i.kid(t, 0),
+                    in text("x"),
+                    in wv,
+                    inc(at),
+                    inout out,
+                    wrapping_add(depth, 2)
+                );
             put_seq(inout out, in pad);
             put(inout out, "    }\n");
             put_seq(inout out, in pad);

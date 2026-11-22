@@ -119,13 +119,13 @@ impl Pats {
         self
             .pats
             .push(
-            Pat {
-                kind: kind,
-                name: name,
-                a: a,
-                n: n32(kids.len())
-            }
-        );
+                Pat {
+                    kind: kind,
+                    name: name,
+                    a: a,
+                    n: n32(kids.len())
+                }
+            );
         id
     }
 

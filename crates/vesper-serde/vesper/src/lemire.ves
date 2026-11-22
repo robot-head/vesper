@@ -395,17 +395,11 @@ fn eisel_lemire(q: i64, w: u64, in pow5: Slice[u64]) -> Fp {
         return fp(p2, mantissa & MANTISSA_MASK);
     }
     // A product exactly halfway between two doubles: round to even.
-    if lo
-        <= 1
-        && q
-        >= MIN_EXPONENT_ROUND_TO_EVEN
-        && q
-        <= MAX_EXPONENT_ROUND_TO_EVEN
-        && mantissa
-        & 3
-        == 1
-        && bit_shl(mantissa, shift)
-        == hi {
+    if lo <= 1
+        && q >= MIN_EXPONENT_ROUND_TO_EVEN
+        && q <= MAX_EXPONENT_ROUND_TO_EVEN
+        && mantissa & 3 == 1
+        && bit_shl(mantissa, shift) == hi {
         mantissa = mantissa & NOT_LOWEST_BIT;
     }
     mantissa = wrapping_add(mantissa, mantissa & 1);

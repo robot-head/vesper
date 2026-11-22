@@ -216,173 +216,173 @@ fn item_at(in a: Ast, i: u32) -> ItemNode {
     a
         .items
         .get_or(
-        idx_from_raw[ItemNode](i),
-        ItemNode {
-            kind: 0,
-            node: NONE
-        }
-    )
+            idx_from_raw[ItemNode](i),
+            ItemNode {
+                kind: 0,
+                node: NONE
+            }
+        )
 }
 
 fn fn_at(in a: Ast, f: u32) -> FnNode {
     a
         .fns
         .get_or(
-        idx_from_raw[FnNode](f),
-        FnNode {
-            name: NONE,
-            fip: false,
-            generics: 0,
-            params: 0,
-            result: NONE,
-            effects: NONE,
-            body: NONE,
-            start: 0,
-            end: 0
-        }
-    )
+            idx_from_raw[FnNode](f),
+            FnNode {
+                name: NONE,
+                fip: false,
+                generics: 0,
+                params: 0,
+                result: NONE,
+                effects: NONE,
+                body: NONE,
+                start: 0,
+                end: 0
+            }
+        )
 }
 
 fn adt_at(in a: Ast, i: u32) -> AdtNode {
     a
         .adts
         .get_or(
-        idx_from_raw[AdtNode](i),
-        AdtNode {
-            name: NONE,
-            mode: 0,
-            generics: 0,
-            variants: 0,
-            is_enum: false,
-            tiled: false,
-            tile_width: 0,
-            start: 0,
-            end: 0
-        }
-    )
+            idx_from_raw[AdtNode](i),
+            AdtNode {
+                name: NONE,
+                mode: 0,
+                generics: 0,
+                variants: 0,
+                is_enum: false,
+                tiled: false,
+                tile_width: 0,
+                start: 0,
+                end: 0
+            }
+        )
 }
 
 fn effect_decl_at(in a: Ast, i: u32) -> EffectDeclNode {
     a
         .effect_decls
         .get_or(
-        idx_from_raw[EffectDeclNode](i),
-        EffectDeclNode {
-            name: NONE,
-            linear: false,
-            generics: 0,
-            ops: 0,
-            start: 0,
-            end: 0
-        }
-    )
+            idx_from_raw[EffectDeclNode](i),
+            EffectDeclNode {
+                name: NONE,
+                linear: false,
+                generics: 0,
+                ops: 0,
+                start: 0,
+                end: 0
+            }
+        )
 }
 
 fn impl_at(in a: Ast, i: u32) -> ImplNode {
     a
         .impls
         .get_or(
-        idx_from_raw[ImplNode](i),
-        ImplNode {
-            ty: NONE,
-            generics: 0,
-            methods: 0
-        }
-    )
+            idx_from_raw[ImplNode](i),
+            ImplNode {
+                ty: NONE,
+                generics: 0,
+                methods: 0
+            }
+        )
 }
 
 fn trait_at(in a: Ast, i: u32) -> TraitNode {
     a
         .traits
         .get_or(
-        idx_from_raw[TraitNode](i),
-        TraitNode {
-            name: NONE,
-            public: false,
-            generics: 0,
-            assoc: 0,
-            methods: 0,
-            start: 0,
-            end: 0
-        }
-    )
+            idx_from_raw[TraitNode](i),
+            TraitNode {
+                name: NONE,
+                public: false,
+                generics: 0,
+                assoc: 0,
+                methods: 0,
+                start: 0,
+                end: 0
+            }
+        )
 }
 
 fn conf_at(in a: Ast, i: u32) -> ConfNode {
     a
         .confs
         .get_or(
-        idx_from_raw[ConfNode](i),
-        ConfNode {
-            model: NONE,
-            public: false,
-            generics: 0,
-            trait_ref: NONE,
-            self_ty: NONE,
-            wheres: 0,
-            assoc: 0,
-            methods: 0,
-            start: 0,
-            end: 0
-        }
-    )
+            idx_from_raw[ConfNode](i),
+            ConfNode {
+                model: NONE,
+                public: false,
+                generics: 0,
+                trait_ref: NONE,
+                self_ty: NONE,
+                wheres: 0,
+                assoc: 0,
+                methods: 0,
+                start: 0,
+                end: 0
+            }
+        )
 }
 
 fn stmt_at(in a: Ast, s: u32) -> StmtNode {
     a
         .stmts
         .get_or(
-        idx_from_raw[StmtNode](s),
-        StmtNode {
-            kind: 0,
-            pat: NONE,
-            ty: NONE,
-            value: NONE,
-            mutable: false
-        }
-    )
+            idx_from_raw[StmtNode](s),
+            StmtNode {
+                kind: 0,
+                pat: NONE,
+                ty: NONE,
+                value: NONE,
+                mutable: false
+            }
+        )
 }
 
 fn arg_at(in a: Ast, i: u32) -> ArgNode {
     a
         .args
         .get_or(
-        idx_from_raw[ArgNode](i),
-        ArgNode {
-            pass: 0,
-            explicit: false,
-            expr: NONE
-        }
-    )
+            idx_from_raw[ArgNode](i),
+            ArgNode {
+                pass: 0,
+                explicit: false,
+                expr: NONE
+            }
+        )
 }
 
 fn clause_at(in a: Ast, c: u32) -> ClauseNode {
     a
         .clauses
         .get_or(
-        idx_from_raw[ClauseNode](c),
-        ClauseNode {
-            name: NONE,
-            pats: 0,
-            body: NONE
-        }
-    )
+            idx_from_raw[ClauseNode](c),
+            ClauseNode {
+                name: NONE,
+                pats: 0,
+                body: NONE
+            }
+        )
 }
 
 fn param_at(in a: Ast, p: u32) -> ParamNode {
     a
         .params
         .get_or(
-        idx_from_raw[ParamNode](p),
-        ParamNode {
-            name: NONE,
-            pass: 0,
-            projections: 0,
-            ty: NONE,
-            start: 0,
-            end: 0
-        }
-    )
+            idx_from_raw[ParamNode](p),
+            ParamNode {
+                name: NONE,
+                pass: 0,
+                projections: 0,
+                ty: NONE,
+                start: 0,
+                end: 0
+            }
+        )
 }
 
 // ------------------------------------------------------------ names
@@ -946,21 +946,9 @@ pub fn index_new(sink src: String, in l: Limits) -> Ix {
     // at most 16,384 tokens before Eof. Otherwise `reindex` lexes under the
     // navigation limits for the exact refusal.
     x.t = lowered.p.t;
-    x
-        .lexed = lowered
-        .p
-        .d
-        .code
-        .len()
-        == 0
-        && !x
-        .t
-        .limited
-        && x
-        .t
-        .kind
-        .len()
-        <= wrapping_add(MAX_NODES, 1);
+    x.lexed = lowered.p.d.code.len() == 0
+        && !x.t.limited
+        && x.t.kind.len() <= wrapping_add(MAX_NODES, 1);
     reindex(inout x);
     x
 }

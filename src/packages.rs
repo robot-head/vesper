@@ -30,6 +30,8 @@
 //! - Each file's spans are shifted by its offset in a virtual concatenation
 //!   of all sources ([`SourceMap`]), so span-keyed checker tables never
 //!   collide and diagnostics map back to the right file.
+mod sugar;
+
 use crate::ast::*;
 use crate::parser::CONST_PREFIX;
 use std::{
@@ -116,6 +118,37 @@ impl SourceMap {
                 })
             })
             .collect();
+        if matches!(d.code.as_str(), "E0143" | "E0144") {
+            // DiagnosticLabel spans are relative to one file. Keep the other
+            // end of a cross-module expansion visible in textual diagnostics.
+            for label in &d.related {
+                if local(&label.span).is_some() {
+                    continue;
+                }
+                let Some(other) = self.file_at(label.span.start).map(|i| &self.files[i]) else {
+                    continue;
+                };
+                let offset = label.span.start - other.base;
+                let Some(prefix) = other.text.get(..offset) else {
+                    continue;
+                };
+                let line = 1 + prefix.bytes().filter(|&b| b == b'\n').count();
+                let column = 1 + prefix
+                    .rsplit('\n')
+                    .next()
+                    .unwrap_or_default()
+                    .chars()
+                    .count();
+                let help = out.help.get_or_insert_with(String::new);
+                if !help.is_empty() {
+                    help.push('\n');
+                }
+                help.push_str(&format!(
+                    "{}:{line}:{column}: {}",
+                    other.display, label.message
+                ));
+            }
+        }
         PackageDiagnostic {
             file: Some(index),
             diagnostic: self.demangle(out),
@@ -275,6 +308,8 @@ struct ModuleSource {
     path: Vec<String>,
     file: usize,
     parsed: Module,
+    disk_path: PathBuf,
+    sugar: sugar::ModuleSugar,
 }
 
 /// True when `path` is a package directory (it holds a `Loom.toml`).
@@ -286,17 +321,13 @@ pub fn is_package(path: &Path) -> bool {
 /// them into one module. `Err` is an I/O failure; language and manifest
 /// errors are reported in [`Assembled`].
 pub fn load(dir: &Path) -> Result<Assembled, String> {
-    load_with_parser(dir, None, None)
+    load_with_parser(dir, None, None, false, None)
 }
 
 /// Include test-only declarations in the root package. Dependencies are
 /// loaded in ordinary mode.
 pub fn load_for_tests(dir: &Path) -> Result<Assembled, String> {
-    load_with_root_parser(dir, &mut |path| {
-        let source = read_source(path)?;
-        let parsed = crate::parser::parse_for_tests(&source);
-        Ok((source, parsed))
-    })
+    load_with_parser(dir, None, None, true, None)
 }
 
 type RootParser<'a> = dyn FnMut(&Path) -> Result<(String, crate::parser::Parse), String> + 'a;
@@ -305,7 +336,7 @@ type RootParser<'a> = dyn FnMut(&Path) -> Result<(String, crate::parser::Parse),
 /// The callback may append synthetic source, but its AST must use offsets
 /// into the resulting text. Dependencies always use the ordinary parser.
 pub fn load_with_root_parser(dir: &Path, parse: &mut RootParser<'_>) -> Result<Assembled, String> {
-    load_with_parser(dir, Some(parse), None)
+    load_with_parser(dir, Some(parse), None, false, None)
 }
 
 /// Assemble tests against one changed dependency source held in memory.
@@ -314,7 +345,19 @@ pub fn load_with_dependency_replacement(
     parse: &mut RootParser<'_>,
     replacement: (&Path, &str),
 ) -> Result<Assembled, String> {
-    load_with_parser(dir, Some(parse), Some(replacement))
+    load_with_parser(dir, Some(parse), Some(replacement), false, None)
+}
+
+type PreparedParser<'a> =
+    dyn FnMut(&Path, &mut String) -> Result<crate::parser::Parse, String> + 'a;
+
+/// Discover test cases after the module's lexical sugar imports have been resolved.
+pub fn load_test_sources(
+    dir: &Path,
+    replacement: Option<(&Path, &str)>,
+    prepare: &mut PreparedParser<'_>,
+) -> Result<Assembled, String> {
+    load_with_parser(dir, None, replacement, true, Some(prepare))
 }
 
 fn read_source(path: &Path) -> Result<String, String> {
@@ -325,12 +368,19 @@ fn load_with_parser(
     dir: &Path,
     parse: Option<&mut RootParser<'_>>,
     replacement: Option<(&Path, &str)>,
+    root_tests: bool,
+    prepare: Option<&mut PreparedParser<'_>>,
 ) -> Result<Assembled, String> {
     let mut loader = Loader {
         replacement,
         ..Loader::default()
     };
-    let root = loader.package(dir, dir.to_path_buf(), &mut vec![], parse)?;
+    let root = loader.package(dir, dir.to_path_buf(), &mut vec![], parse, root_tests)?;
+    if let Some(root) = root
+        && loader.manifest_errors.is_empty()
+    {
+        loader.expand_sugars(root, prepare)?;
+    }
     let package = root
         .map(|i| loader.packages[i].name.as_str().to_owned())
         .unwrap_or_default();
@@ -488,6 +538,7 @@ impl Loader<'_> {
         shown: PathBuf,
         stack: &mut Vec<(PathBuf, String)>,
         mut parse: Option<&mut RootParser<'_>>,
+        include_tests: bool,
     ) -> Result<Option<usize>, String> {
         let canonical = fs::canonicalize(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         if let Some(i) = stack.iter().position(|(p, _)| *p == canonical) {
@@ -582,9 +633,15 @@ impl Loader<'_> {
                     Some((replaced, text)) if normalize(&path) == replaced => text.to_owned(),
                     _ => read_source(&path)?,
                 };
-                let parsed = crate::parser::parse(&text);
+                let parsed = if include_tests {
+                    crate::parser::parse_for_tests(&text)
+                } else {
+                    crate::parser::parse(&text)
+                };
                 (text, parsed)
             };
+            let mut parsed = parsed;
+            let sugar = sugar::ModuleSugar::discover(&text, &mut parsed, include_tests);
             let file = self.add_file(file_shown, text);
             for d in parsed.diagnostics {
                 self.diagnostics.push(PackageDiagnostic {
@@ -596,6 +653,8 @@ impl Loader<'_> {
                 path: segments,
                 file,
                 parsed: parsed.module,
+                disk_path: path,
+                sugar,
             });
         }
         if roots.len() > 1 {
@@ -650,7 +709,7 @@ impl Loader<'_> {
                 continue;
             }
             let Some(dep_index) =
-                self.package(&dep_dir, normalize(&shown.join(path)), stack, None)?
+                self.package(&dep_dir, normalize(&shown.join(path)), stack, None, false)?
             else {
                 continue;
             };
@@ -992,7 +1051,7 @@ impl Loader<'_> {
                             _ => {
                                 // A `.vsys` type is not a source item, so a
                                 // root module does not export it.
-                                if u.public && !resolver.is_foreign(&key) {
+                                if u.public && kind != Kind::Sugar && !resolver.is_foreign(&key) {
                                     exported.push(target.clone());
                                 }
                                 names.insert(local, (target, kind));
@@ -1010,13 +1069,50 @@ impl Loader<'_> {
                     resolver: &resolver,
                     package: p,
                     module: &m.path,
+                    sugar: &m.sugar,
+                    regions: &m.parsed.sugar_origins,
+                    effect_scope: None,
+                    auditing: false,
+                    own,
+
                     shift: base,
                     values: vec![],
                     types: vec![],
                     diagnostics: vec![],
                 };
+                for (region, (definition, rule)) in
+                    m.parsed.sugar_origins.iter().zip(&m.sugar.origins)
+                {
+                    let mut region = region.clone();
+                    renamer.effect_scope = Some(definition);
+                    renamer.effects(&mut region.emits, &region.expanded);
+                    renamer.effect_scope = None;
+                    renamer.span(&mut region.expanded);
+                    for hole in &mut region.holes {
+                        renamer.span(hole);
+                    }
+                    for (place, _) in &mut region.places {
+                        renamer.span(place);
+                    }
+                    let owner = packages[definition.0]
+                        .modules
+                        .iter()
+                        .find(|m| m.path == definition.1)
+                        .expect("resolved sugar definition");
+                    let rule_base =
+                        self.sources.files[owner.sugar.original.unwrap_or(owner.file)].base;
+                    let call_base = self.sources.files[m.sugar.original.unwrap_or(file)].base;
+                    region.rule = rule_base + rule.start..rule_base + rule.end;
+                    region.call = call_base + region.call.start..call_base + region.call.end;
+                    out.sugar_origins.push(region);
+                }
                 for item in &m.parsed.items {
                     let mut item = item.clone();
+                    renamer.auditing =
+                        m.sugar.audited.as_ref().is_some_and(|audited| match &item {
+                            Item::Function(f) => audited.contains(&f.name),
+                            _ => true,
+                        });
                     renamer.item(&mut item);
                     for (name, span) in global_names(&item) {
                         if let Some((owner, other_file, _)) = globals.get(&name) {
@@ -1091,6 +1187,7 @@ impl Loader<'_> {
 /// import never shadows a type of the same spelling (`use self::r::u64`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
+    Sugar,
     Value,
     Type,
     Both,
@@ -1153,8 +1250,31 @@ impl<'a> Resolver<'a> {
                 tables.insert(
                     (p, m.path.clone()),
                     Table {
-                        items: m.parsed.items.iter().filter_map(Kind::of).collect(),
-                        public: m.parsed.public_items.iter().cloned().collect(),
+                        items: m
+                            .parsed
+                            .items
+                            .iter()
+                            .filter_map(Kind::of)
+                            .chain(
+                                m.sugar
+                                    .declarations
+                                    .keys()
+                                    .map(|n| (n.clone(), Kind::Sugar)),
+                            )
+                            .collect(),
+                        public: m
+                            .parsed
+                            .public_items
+                            .iter()
+                            .cloned()
+                            .chain(
+                                m.sugar
+                                    .declarations
+                                    .iter()
+                                    .filter(|(_, d)| d.public)
+                                    .map(|(n, _)| n.clone()),
+                            )
+                            .collect(),
                     },
                 );
             }
@@ -1461,7 +1581,10 @@ impl<'a> Resolver<'a> {
             .map(|m| m.file)
             .unwrap_or(0);
         let mut renamed: BTreeMap<ItemKey, String> = BTreeMap::new();
-        for (local, (item, _)) in reexported {
+        for (local, (item, kind)) in reexported {
+            if *kind == Kind::Sugar {
+                continue;
+            }
             // `pub use self::f;` in the root module re-exports a root item
             // under its own name: nothing to rename. `pub use self::f as g;`
             // renames the root item `f` to `g` like any other re-export.
@@ -1669,6 +1792,11 @@ struct Renamer<'a> {
     package: usize,
     module: &'a [String],
     shift: usize,
+    sugar: &'a sugar::ModuleSugar,
+    regions: &'a [SugarEffectRegion],
+    effect_scope: Option<&'a ModuleKey>,
+    auditing: bool,
+    own: &'a BTreeMap<String, Kind>,
     /// Value bindings in scope.
     values: Vec<String>,
     /// Type and row parameters in scope.
@@ -1676,17 +1804,69 @@ struct Renamer<'a> {
     diagnostics: Vec<Diagnostic>,
 }
 impl Renamer<'_> {
+    fn definition(&self, span: &Span) -> Option<&ModuleKey> {
+        let scope = self.effect_scope.or_else(|| {
+            self.regions
+                .iter()
+                .zip(&self.sugar.origins)
+                .rev()
+                .filter(|(r, _)| {
+                    r.expanded.start <= span.start
+                        && span.end <= r.expanded.end
+                        && !r
+                            .holes
+                            .iter()
+                            .any(|h| h.start <= span.start && span.end <= h.end)
+                })
+                .min_by_key(|(r, _)| r.expanded.len())
+                .map(|(_, (scope, _))| scope)
+        })?;
+        (scope.0 != self.package || scope.1 != self.module).then_some(scope)
+    }
     fn span(&self, s: &mut Span) {
         *s = s.start + self.shift..s.end + self.shift;
+    }
+    fn audit_package_reference(&mut self, n: &str, span: &Span) {
+        if self.auditing {
+            self.diagnostics.push(Diagnostic::new("FORGE_AUTHORITY",
+                format!("the closed macro authority graph cannot resolve the external package binding '{n}'"),span.clone()));
+        }
     }
     /// A free name in namespace `ns`: imported/own item, else left for the
     /// checker. A root module item reached without an import is reported
     /// (local span).
     fn resolve(&mut self, n: &str, span: &Span, ns: Kind) -> Option<String> {
+        if let Some(scope) = self.definition(span) {
+            if let Some(target) = self.resolver.sugar_name(scope, n, ns) {
+                self.audit_package_reference(n, span);
+                return Some(target);
+            }
+            if !n.starts_with(&self.sugar.fresh_prefix)
+                && (self.names.get(n).is_some_and(|(_, kind)| kind.has(ns))
+                    || self
+                        .hidden
+                        .is_some_and(|h| h.get(n).is_some_and(|k| k.has(ns)))
+                    || (ns == Kind::Value && self.values.iter().any(|bound| bound == n))
+                    || (ns == Kind::Type && self.types.iter().any(|bound| bound == n)))
+            {
+                self.diagnostics.push(Diagnostic::new(
+                    UNKNOWN_IMPORT,
+                    format!(
+                        "'{n}' is not declared or imported in the module that defines this sugar"
+                    ),
+                    span.clone(),
+                ));
+            }
+            return None;
+        }
         if let Some((t, kind)) = self.names.get(n)
             && kind.has(ns)
         {
-            return Some(t.clone());
+            let target = t.clone();
+            if !self.own.contains_key(n) {
+                self.audit_package_reference(n, span);
+            }
+            return Some(target);
         }
         if let Some((owner, shown)) = self.variants.get(n)
             && !self.names.values().any(|(t, _)| t == owner)
@@ -1720,10 +1900,11 @@ impl Renamer<'_> {
     }
     /// A qualified path, resolved to its internal name (or reported).
     fn qualified(&mut self, n: &mut String, span: &Span) {
-        match self
-            .resolver
-            .qualified(self.package, self.module, n, span.clone())
-        {
+        self.audit_package_reference(n, span);
+        let (package, module) = self
+            .definition(span)
+            .map_or((self.package, self.module), |(p, m)| (*p, m.as_slice()));
+        match self.resolver.qualified(package, module, n, span.clone()) {
             Ok(t) => *n = t,
             Err(d) => self.diagnostics.push(d),
         }
@@ -1732,9 +1913,14 @@ impl Renamer<'_> {
     fn type_name(&mut self, n: &mut String, span: &Span) {
         // A value enum member `E::M` (own `const$E::M` or imported).
         if n.contains("::")
+            && self.definition(span).is_none()
             && let Some((t, _)) = self.names.get(n.as_str())
         {
-            *n = t.clone();
+            let target = t.clone();
+            if !self.own.contains_key(n.as_str()) {
+                self.audit_package_reference(n, span);
+            }
+            *n = target;
             return;
         }
         if is_qualified(n) {
@@ -1745,7 +1931,7 @@ impl Renamer<'_> {
             Some((h, r)) => (h.to_owned(), Some(r.to_owned())),
             None => (n.clone(), None),
         };
-        if self.types.contains(&head) {
+        if self.definition(span).is_none() && self.types.contains(&head) {
             return;
         }
         if let Some(t) = self.resolve(&head, span, Kind::Type) {
@@ -1758,7 +1944,7 @@ impl Renamer<'_> {
     fn value_name(&mut self, n: &mut String, span: &Span) {
         if n.contains("::") {
             self.type_name(n, span);
-        } else if !self.values.contains(n)
+        } else if (self.definition(span).is_some() || !self.values.contains(n))
             && let Some(t) = self.resolve(n, span, Kind::Value)
         {
             *n = t;
@@ -1767,7 +1953,7 @@ impl Renamer<'_> {
     fn ty(&mut self, t: &mut Type, span: &Span) {
         match t {
             Type::Named(n, args) => {
-                if args.is_empty() && self.types.contains(n) {
+                if self.definition(span).is_none() && args.is_empty() && self.types.contains(n) {
                     return;
                 }
                 self.type_name(n, span);
@@ -1802,7 +1988,7 @@ impl Renamer<'_> {
         }
     }
     fn effect(&mut self, e: &mut Effect, span: &Span) {
-        if !self.types.contains(&e.name) {
+        if self.definition(span).is_some() || !self.types.contains(&e.name) {
             self.type_name(&mut e.name, span);
         }
         for a in &mut e.args {
@@ -1971,8 +2157,15 @@ impl Renamer<'_> {
                 fields,
                 named,
             } => {
-                let local = self.names.get(name.as_str()).map(|(t, _)| t.clone());
+                let foreign = self.definition(&span);
+                let local = match foreign {
+                    Some(scope) => self.resolver.sugar_name(scope, name, Kind::Value),
+                    None => self.names.get(name.as_str()).map(|(t, _)| t.clone()),
+                };
                 if let Some(t) = local.filter(|t| crate::arrays::is_const_function(t)) {
+                    if foreign.is_some() || !self.own.contains_key(name.as_str()) {
+                        self.audit_package_reference(name, &span);
+                    }
                     *name = t;
                 } else {
                     self.type_name(name, &span);

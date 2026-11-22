@@ -96,11 +96,11 @@ pub fn ir_opt_words(in b: Slice[u8]) -> ChunkSeq[u64] {
     for k in 0..reuse.payloads.len() {
         out
             .push(
-            match reuse.payloads.try_get(k) {
-                Option::Some(x) => x,
-                Option::None => 0,
-            }
-        );
+                match reuse.payloads.try_get(k) {
+                    Option::Some(x) => x,
+                    Option::None => 0,
+                }
+            );
     }
     put_program(in p, in c.types, in c.names, inout out);
     out

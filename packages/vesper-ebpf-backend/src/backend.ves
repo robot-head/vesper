@@ -1176,12 +1176,11 @@ fn packet_effect(inout g: G, inout c: Ctx, in x: Extra, function: u32, decl: XEf
         } else {
             0
         };
-        let result_ok = inner
-            != NONE32
+        let result_ok = inner != NONE32
             && (
-            (want_u8 && is(in c.names, inner_name, "u8"))
-                || (!want_u8 && is(in c.names, inner_name, "u32"))
-        );
+                (want_u8 && is(in c.names, inner_name, "u8"))
+                    || (!want_u8 && is(in c.names, inner_name, "u32"))
+            );
         if !one_u32 || !result_ok {
             bad_signature(inout g, in c, function, decl, o.name);
             if pk == PK_U8 {
@@ -1509,15 +1508,15 @@ fn map_effect(inout g: G, inout c: Ctx, in p: Program, in x: Extra, function: u3
     g
         .map_defs
         .push(
-        MapRow {
-            name: msym,
-            kind: mkind,
-            key: key_bytes,
-            value: value_bytes,
-            max: max,
-            flags: 0
-        }
-    );
+            MapRow {
+                name: msym,
+                kind: mkind,
+                key: key_bytes,
+                value: value_bytes,
+                max: max,
+                flags: 0
+            }
+        );
     g.map_effects.push(name);
     for k in 0..decl.on {
         let o = x.op(add(decl.oa, k));
@@ -1736,15 +1735,15 @@ fn read_params(inout g: G, in p: Program, f: FnRow) {
         g
             .params
             .push(
-            PInfo {
-                name: name,
-                pass: pass,
-                nproj: k,
-                ty: pos32(in p, t),
-                s0: p.op(inc(t)),
-                s1: p.op(add(t, 2))
-            }
-        );
+                PInfo {
+                    name: name,
+                    pass: pass,
+                    nproj: k,
+                    ty: pos32(in p, t),
+                    s0: p.op(inc(t)),
+                    s1: p.op(add(t, 2))
+                }
+            );
         at = add(t, 3);
     }
 }
@@ -2503,16 +2502,11 @@ fn allocate(inout g: G, inout c: Ctx, in p: Program, f: FnRow, locals_at: u64) -
             sort_dedup(inout uses);
             for u in 0..uses.len() {
                 let v = u32_at(in uses, u);
-                if u64_at(in g.last_b, w(v))
-                    == stamp
-                    && u64_at(in g.last_k, w(v))
-                    == k
-                    && u64_at(in g.def_block, w(v))
-                    == bi
-                    && loc_kind(in g, v)
-                    == L_SLOT
-                    && loc_val(in g, v)
-                    >= w(base) {
+                if u64_at(in g.last_b, w(v)) == stamp
+                    && u64_at(in g.last_k, w(v)) == k
+                    && u64_at(in g.def_block, w(v)) == bi
+                    && loc_kind(in g, v) == L_SLOT
+                    && loc_val(in g, v) >= w(base) {
                     g.free_slot.push(n32(wrapping_sub(loc_val(in g, v), w(base))));
                     g.free_size.push(rep_slots(vrep(in g, v)));
                 }

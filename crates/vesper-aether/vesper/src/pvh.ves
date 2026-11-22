@@ -164,16 +164,11 @@ fn scan_notes(in elf: Slice[u8], base: u64, len: u64, inout found: Option[u32])
         if add_overflows(desc_at, descsz) || wrapping_add(desc_at, descsz) > len {
             return Option::Some(PvhFault::MalformedNote);
         }
-        let is_xen = namesz
-            == 4
-            && byte(in elf, wrapping_add(base, name_at))
-            == 88
-            && byte(in elf, wrapping_add(base, wrapping_add(name_at, 1)))
-            == 101
-            && byte(in elf, wrapping_add(base, wrapping_add(name_at, 2)))
-            == 110
-            && byte(in elf, wrapping_add(base, wrapping_add(name_at, 3)))
-            == 0;
+        let is_xen = namesz == 4
+            && byte(in elf, wrapping_add(base, name_at)) == 88
+            && byte(in elf, wrapping_add(base, wrapping_add(name_at, 1))) == 101
+            && byte(in elf, wrapping_add(base, wrapping_add(name_at, 2))) == 110
+            && byte(in elf, wrapping_add(base, wrapping_add(name_at, 3))) == 0;
         if is_xen && kind == XEN_ELFNOTE_PHYS32_ENTRY {
             match found {
                 Option::Some(_) => return Option::Some(PvhFault::DuplicatePvhNote),
@@ -221,14 +216,10 @@ pub fn pvh_parse(in elf: Slice[u8], in ram: Slice[u64], inout out: Slice[u64])
     if n < ELF_HEADER_BYTES {
         return Result::Err(PvhFault::Truncated);
     }
-    if byte(in elf, 0)
-        != 127
-        || byte(in elf, 1)
-        != 69
-        || byte(in elf, 2)
-        != 76
-        || byte(in elf, 3)
-        != 70 {
+    if byte(in elf, 0) != 127
+        || byte(in elf, 1) != 69
+        || byte(in elf, 2) != 76
+        || byte(in elf, 3) != 70 {
         return Result::Err(PvhFault::BadMagic);
     }
     if byte(in elf, 4) != 2 || byte(in elf, 5) != 1 || byte(in elf, 6) != 1 {
