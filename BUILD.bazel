@@ -1450,7 +1450,7 @@ vesper_package(
     srcs = glob(["packages/vesper-std/env/src/**/*.ves"]),
     manifest = "packages/vesper-std/env/Loom.toml",
     visibility = ["//visibility:public"],
-    vsys = ["packages/vesper-std/env/env.vsys"],
+    vsys = glob(["packages/vesper-std/env/env-*.vsys"]),
     deps = [":std_fs_package"],
 )
 

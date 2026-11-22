@@ -1,0 +1,33 @@
+// @vesper-std/env's import on macOS (SH6 lane 13, #1408): the C library
+// itself. Every target's file declares the same functions with the same
+// signatures (src/lib.ves is one source), so the C names differ only
+// through `#[link_name]`; the constants are this target's.
+//
+// The arguments and the environment have no libc function, so they come
+// from the process's own tables: `dlsym` finds glibc's `__libc_stack_end`
+// (argc, then argv, at the stack's top) and `environ`, or Apple's
+// `_NSGetArgc`, `_NSGetArgv` and `_NSGetEnviron`; `read_word` reads a
+// word through such an address and `cstr_at` copies the C string at one
+// (`strstr(s, "")` is `s`).
+sys library StdEnv (
+    target = "@TARGET@", abi = "@ABI@",
+    link = "dynamic", name = "c",
+    artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+) {
+    const OS: u32 = 2;
+    const RTLD_DEFAULT: u64 = 18446744073709551614;
+    const ERANGE: u32 = 34;
+    // A C function of no arguments returning an address (`_NSGetArgv`).
+    callback AddressFn() -> ForeignVal[u64];
+    fn getenv(nocapture in name: CStr) -> ForeignVal[Option[CStr]];
+    fn getcwd(nocapture inout buf: CSlice[u8]) -> ForeignVal[u64] errno;
+    fn dlsym(handle: u64, nocapture in name: CStr) -> ForeignVal[u64];
+    #[link_name = "dlsym"]
+    fn dlsym_function(handle: u64, nocapture in name: CStr) -> ForeignVal[Option[AddressFn]];
+    #[link_name = "memcpy"]
+    fn read_word(nocapture inout word: u64, address: u64, size: u64) -> ForeignVal[u64];
+    #[link_name = "strchr"]
+    fn find_byte(address: u64, byte: i32) -> ForeignVal[u64];
+    #[link_name = "strstr"]
+    fn cstr_at(address: u64, nocapture in empty: CStr) -> ForeignVal[Option[CStr]];
+}
