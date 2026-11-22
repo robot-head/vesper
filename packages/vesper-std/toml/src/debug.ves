@@ -4,7 +4,7 @@
 // in escape.ves.
 
 use self::escape::{
-    escape_ranges
+    ESCAPE_RANGES
 };
 
 // The char at `s[i..]` (valid UTF-8) and its length in bytes.
@@ -51,8 +51,27 @@ fn put_utf8(inout out: ChunkSeq[u8], c: u64) {
 }
 
 // Whether `c` is in one of the (first, last) pairs of `t`.
-fn in_ranges(in t: ChunkSeq[u32], c: u64) -> bool {
-    let n = wrapping_shr_u64(t.len(), 1);
+// Six hex digits of ESCAPE_RANGES from byte `at`.
+fn hex6(in t: Slice[u8], at: u64) -> u64 {
+    let mut v: u64 = 0;
+    for i in 0..6 {
+        let d = match t.try_get(wrapping_add(at, i)) {
+            Option::Some(b) => widen_u64(b),
+            Option::None => 48,
+        };
+        let x = if d >= 97 {
+            wrapping_sub(d, 87)
+        } else {
+            wrapping_sub(d, 48)
+        };
+        v = (v << 4) | x;
+    }
+    v
+}
+
+// Binary search of ESCAPE_RANGES: 12 hex digits per (first, last) range.
+fn in_ranges(in t: Slice[u8], c: u64) -> bool {
+    let n = t.len() / 12;
     let mut lo: u64 = 0;
     let mut hi = n;
     loop {
@@ -60,14 +79,8 @@ fn in_ranges(in t: ChunkSeq[u32], c: u64) -> bool {
             break false;
         }
         let mid = wrapping_shr_u64(wrapping_add(lo, hi), 1);
-        let first = match t.try_get(wrapping_mul(mid, 2)) {
-            Option::Some(v) => widen_u64(v),
-            Option::None => 0,
-        };
-        let last = match t.try_get(wrapping_add(wrapping_mul(mid, 2), 1)) {
-            Option::Some(v) => widen_u64(v),
-            Option::None => 0,
-        };
+        let first = hex6(in t, wrapping_mul(mid, 12));
+        let last = hex6(in t, wrapping_add(wrapping_mul(mid, 12), 6));
         if c < first {
             hi = mid;
         } else if c > last {
@@ -88,7 +101,7 @@ fn hex(v: u64) -> u8 {
 
 // One char of a Debug text; `in_str` picks the `str` quoting (escape `"`,
 // keep `'`) over the `char` one.
-fn put_escaped(inout out: ChunkSeq[u8], in t: ChunkSeq[u32], c: u64, in_str: bool) {
+fn put_escaped(inout out: ChunkSeq[u8], in t: Slice[u8], c: u64, in_str: bool) {
     if c == 0 {
         out.push(92);
         out.push(48);
@@ -137,7 +150,6 @@ fn put_escaped(inout out: ChunkSeq[u8], in t: ChunkSeq[u32], c: u64, in_str: boo
 
 // `format!("{:?}", &s[a..b])`, quotes included.
 pub fn put_debug_str(inout out: ChunkSeq[u8], in s: Slice[u8], a: u64, b: u64) {
-    let t = escape_ranges();
     out.push(34);
     let mut i = a;
     loop {
@@ -145,7 +157,7 @@ pub fn put_debug_str(inout out: ChunkSeq[u8], in s: Slice[u8], a: u64, b: u64) {
             break;
         }
         let (c, n) = utf8_at(in s, i);
-        put_escaped(inout out, in t, c, true);
+        put_escaped(inout out, in ESCAPE_RANGES.as_bytes(), c, true);
         i = wrapping_add(i, n);
     }
     out.push(34);
@@ -153,8 +165,7 @@ pub fn put_debug_str(inout out: ChunkSeq[u8], in s: Slice[u8], a: u64, b: u64) {
 
 // `format!("{:?}", c)`, quotes included.
 pub fn put_debug_char(inout out: ChunkSeq[u8], c: u64) {
-    let t = escape_ranges();
     out.push(39);
-    put_escaped(inout out, in t, c, false);
+    put_escaped(inout out, in ESCAPE_RANGES.as_bytes(), c, false);
     out.push(39);
 }

@@ -402,26 +402,21 @@ fn debug_escape_table_matches_the_rust_toolchain() {
         out.push_str(
             "// @vesper-std/toml: the chars Rust's `Debug` for `str` and `char` writes\n\
              // as `\\u{...}` (not printable, or Grapheme_Extend), as inclusive\n\
-             // (first, last) ranges in code point order. Generated from the Rust\n\
-             // toolchain by `VESPER_TOML_BLESS=1 cargo test -p vesper-loom-calculus\n\
-             // --test toml_reader debug_escape` and checked by that test.\n\n",
+             // (first, last) ranges in code point order, six hex digits each.\n\
+             // Generated from the Rust toolchain by `VESPER_TOML_BLESS=1 cargo test\n\
+             // -p vesper-loom-calculus --test toml_reader debug_escape` and checked\n\
+             // by that test.\n\n",
         );
         writeln!(
             out,
             "pub const UNICODE_VERSION: Str = \"{major}.{minor}.{update}\";\n"
         )
         .unwrap();
-        writeln!(out, "pub fn escape_ranges() -> ChunkSeq[u32] {{").unwrap();
-        writeln!(
-            out,
-            "    let mut t: ChunkSeq[u32] = ChunkSeq::with_capacity({});",
-            ranges.len() * 2
-        )
-        .unwrap();
+        out.push_str("pub const ESCAPE_RANGES: Str = \"");
         for (a, b) in &ranges {
-            writeln!(out, "    t.push(0x{a:x});\n    t.push(0x{b:x});").unwrap();
+            write!(out, "{a:06x}{b:06x}").unwrap();
         }
-        out.push_str("    t\n}\n");
+        out.push_str("\";\n");
         std::fs::write(path, out).unwrap();
     }
     let text = std::fs::read_to_string(path).unwrap();
@@ -430,11 +425,19 @@ fn debug_escape_table_matches_the_rust_toolchain() {
         eprintln!("escape.ves is for another Unicode version than {version}; not compared");
         return;
     }
-    let words: Vec<u32> = text
-        .lines()
-        .filter_map(|l| l.trim().strip_prefix("t.push(0x")?.strip_suffix(");"))
-        .map(|h| u32::from_str_radix(h, 16).unwrap())
+    let table = text
+        .split_once("ESCAPE_RANGES: Str = \"")
+        .and_then(|(_, rest)| rest.split_once('"'))
+        .expect("escape.ves defines ESCAPE_RANGES")
+        .0;
+    let hex = |h: &str| u32::from_str_radix(h, 16).unwrap();
+    let committed: Vec<(u32, u32)> = table
+        .as_bytes()
+        .chunks(12)
+        .map(|r| {
+            let r = std::str::from_utf8(r).unwrap();
+            (hex(&r[..6]), hex(&r[6..]))
+        })
         .collect();
-    let committed: Vec<(u32, u32)> = words.chunks(2).map(|p| (p[0], p[1])).collect();
     assert_eq!(committed, ranges);
 }
