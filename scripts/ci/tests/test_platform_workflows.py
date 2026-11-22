@@ -155,6 +155,17 @@ class PlatformWorkflowTests(unittest.TestCase):
                            capture_output=True)
             self.assertEqual(output.read_text(), "crates=none\n")
 
+    def test_main_runs_of_pr_skipped_jobs_are_never_cancelled(self):
+        # Ports and hybrid run only on main, so a later merge must not cancel
+        # the run that would catch a regression (#1479).
+        cancel = self.platforms["concurrency"]["cancel-in-progress"]
+        self.assertNotIn("'push'", cancel)
+        self.assertIn("inputs.pull_request != ''", cancel)
+        self.assertIn("'main'", self.platforms["concurrency"]["group"])
+        hybrid = workflow("hybrid.yml")["concurrency"]
+        self.assertEqual(hybrid["cancel-in-progress"], "false")
+        self.assertIn("'main'", hybrid["group"])
+
     def test_merge_gate_is_the_first_step_of_every_pull_request_job(self):
         # The gate runs inside the jobs it guards, not as a job of its own
         # that queued for a runner ahead of them (#1479).
