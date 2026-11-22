@@ -21,8 +21,11 @@ use self::util::{
     Order,
     SortKind,
     add,
-    bytes_ord,
+    gb,
     inc,
+    mul,
+    occ_ord,
+    pool_ord,
     sort,
     sw
 };
@@ -30,6 +33,8 @@ use self::util::{
 pub fn new_l(in words: Slice[u64], in text: Slice[u8]) -> L {
     let mut l = L {
         inw: ChunkSeq::new[u64](),
+        skat: ChunkSeq::new[u64](),
+        sk: ChunkSeq::new[u64](),
         pos: 0,
         pool: ChunkSeq::new[u8](),
         out: ChunkSeq::new[u64](),
@@ -100,18 +105,8 @@ pub fn new_l(in words: Slice[u64], in text: Slice[u8]) -> L {
         ea: ChunkSeq::new[u64](),
         eb: ChunkSeq::new[u64]()
     };
-    for i in 0..words.len() {
-        match words.try_get(i) {
-            Option::Some(w) => l.inw.push(w),
-            Option::None => (),
-        }
-    }
-    for i in 0..text.len() {
-        match text.try_get(i) {
-            Option::Some(b) => l.pool.push(b),
-            Option::None => (),
-        }
-    }
+    l.inw.extend(in words);
+    l.pool.extend(in text);
     l
 }
 
@@ -143,20 +138,103 @@ pub fn rd_set(inout l: L) -> (u64, u64) {
     (at, n)
 }
 
+// Reads the given order into idx: true when it is a permutation of the
+// occurrences in ascending byte order. Then tmp[j] holds the order of
+// occurrence idx[j - 1] to idx[j], and rank marks the occurrences seen.
+fn given_order(inout l: L, nocc: u64) -> bool {
+    let at = add(1, add(nocc, nocc));
+    for j in 0..nocc {
+        let occ = sw(in l.inw, add(at, j));
+        if occ >= nocc || sw(in l.rank, occ) != 0 {
+            return false;
+        }
+        l.rank.try_set(occ, 1);
+        l.idx.push(occ);
+        let o = if j == 0 {
+            Order::Equal
+        } else {
+            pool_ord(in l, sw(in l.idx, wrapping_sub(j, 1)), occ)
+        };
+        if o == Order::Greater {
+            return false;
+        }
+        l.tmp.push(o);
+    }
+    true
+}
+
+// Sorts the occurrences into idx by their bytes, over big-endian words.
+fn sort_occurrences(inout l: L, nocc: u64) {
+    l.idx.clear();
+    l.tmp.clear();
+    l.skat.clear();
+    l.sk.clear();
+    l.skat.reserve(nocc);
+    l.sk.reserve(add(nocc, l.pool.len() >> 3));
+    for i in 0..nocc {
+        l.idx.push(i);
+        l.rank.try_set(i, 0);
+        let base = add(1, add(i, i));
+        let off = sw(in l.inw, base);
+        let len = sw(in l.inw, inc(base));
+        l.skat.push(l.sk.len());
+        let mut p: u64 = 0;
+        loop {
+            if p >= len {
+                break;
+            }
+            let mut w: u64 = 0;
+            if add(p, 8) <= len {
+                w = match l.pool.try_read_u64_be(add(off, p)) {
+                    Option::Some(v) => v,
+                    Option::None => 0,
+                };
+            } else {
+                // The last, partial word: zero padded on the right.
+                for b in 0..8 {
+                    let q = add(p, b);
+                    let x: u64 = if q < len {
+                        widen_u64(gb(in l, add(off, q)))
+                    } else {
+                        0
+                    };
+                    w = (w << 8) | x;
+                }
+            }
+            l.sk.push(w);
+            p = add(p, 8);
+        }
+    }
+    sort(inout l, SortKind::Strings);
+}
+
 // The string table, the versions and the requirements:
 //   nocc, (off, len)*; nver, (major, minor, patch, pre, build, text)*;
 //   nreq, (text, ncmp, (op, major, minor, has_minor, patch, has_patch,
 //   pre)*)*.
 // Sorting the occurrences by their bytes gives each distinct string its
-// rank, which is its id.
+// rank, which is its id. When the top bit of nocc is set, nocc words of
+// occurrence indices in byte order follow the pairs (the wrappers sort the
+// strings they intern); the port checks that they form a permutation in
+// order and sorts the occurrences itself when they do not.
 pub fn decode_tables(inout l: L) {
-    let nocc = rd(inout l);
+    let head = rd(inout l);
+    let given = (head >> 63) != 0;
+    let nocc = head & 0x7fff_ffff_ffff_ffff;
     l.idx.clear();
+    l.idx.reserve(nocc);
+    l.rank.reserve(nocc);
+    l.rocc.reserve(nocc);
+    l.roff.reserve(nocc);
+    l.rlen.reserve(nocc);
+    l.tmp.clear();
     for i in 0..nocc {
-        l.idx.push(i);
         l.rank.push(0);
     }
-    sort(inout l, SortKind::Strings);
+    let sorted = given && given_order(inout l, nocc);
+    if !sorted {
+        sort_occurrences(inout l, nocc);
+    }
     let mut k: u64 = 0;
     for j in 0..nocc {
         let occ = sw(in l.idx, j);
@@ -165,10 +243,11 @@ pub fn decode_tables(inout l: L) {
         let len = sw(in l.inw, inc(base));
         let same = if j == 0 {
             false
+        } else if sorted {
+            sw(in l.tmp, j) == Order::Equal
         } else {
             let prev = sw(in l.rocc, wrapping_sub(k, 1));
-            let pb = add(1, add(prev, prev));
-            bytes_ord(in l, sw(in l.inw, pb), sw(in l.inw, inc(pb)), off, len) == Order::Equal
+            occ_ord(in l, prev, occ) == Order::Equal
         };
         if !same {
             l.rocc.push(occ);
@@ -179,8 +258,20 @@ pub fn decode_tables(inout l: L) {
         l.rank.try_set(occ, wrapping_sub(k, 1));
     }
     l.k = k;
-    l.pos = add(1, add(nocc, nocc));
+    l
+        .pos = add(
+        1,
+        mul(
+            nocc,
+            if given {
+                3
+            } else {
+                2
+            }
+        )
+    );
     let nver = rd(inout l);
+    l.vers.reserve(nver);
     for i in 0..nver {
         let major = rd(inout l);
         let minor = rd(inout l);
@@ -202,6 +293,7 @@ pub fn decode_tables(inout l: L) {
         );
     }
     let nreq = rd(inout l);
+    l.reqs.reserve(nreq);
     for i in 0..nreq {
         let text = rd_str(inout l);
         let n = rd(inout l);

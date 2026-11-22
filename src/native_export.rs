@@ -1303,7 +1303,7 @@ fn compile_exports<M: Module>(
             .filter(|e| needs_wide_entry(e));
         let (symbol, linkage) = match exports.get(key) {
             Some(symbol) if wide.is_none() => (symbol.clone(), Linkage::Export),
-            _ => (format!("vesper_function_{i}"), Linkage::Local),
+            _ => (local_symbol(i, key), Linkage::Local),
         };
         let sig = signature_with_abi(m, world, &f, false, abi.of(key))?;
         let id = m

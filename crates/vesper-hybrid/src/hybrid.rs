@@ -48,6 +48,11 @@ mod codegen_binding;
 
 #[rustfmt::skip]
 #[allow(clippy::all)]
+#[path = "../port/codegen_numeric.rs"]
+mod codegen_numeric_binding;
+
+#[rustfmt::skip]
+#[allow(clippy::all)]
 #[path = "../port/codegen_export.rs"]
 mod codegen_export_binding;
 
@@ -137,6 +142,10 @@ static STACK_BOUND_CALLS: AtomicU64 = AtomicU64::new(0);
 /// `aggregate` requests the Vesper codegen module emitted, and declined.
 static CODEGEN_CALLS: AtomicU64 = AtomicU64::new(0);
 static CODEGEN_DECLINED: AtomicU64 = AtomicU64::new(0);
+/// `numeric` requests (vectors, `TiledSeq`) the Vesper module emitted, and
+/// declined.
+static NUMERIC_CALLS: AtomicU64 = AtomicU64::new(0);
+static NUMERIC_DECLINED: AtomicU64 = AtomicU64::new(0);
 /// Libraries whose v2 glue the Vesper export module emitted, and declined.
 static EXPORT_CALLS: AtomicU64 = AtomicU64::new(0);
 static EXPORT_DECLINED: AtomicU64 = AtomicU64::new(0);
@@ -605,6 +614,47 @@ fn vesper_aggregate(lent: &mut vesper::codegen_swap::Lent<'_, '_>) -> Result<boo
     }
 }
 
+/// The `numeric` hook of `vesper::codegen_swap` from
+/// `modules/codegen_numeric` (#1285): vector and `TiledSeq` operations
+/// emitted in Vesper. The graph walk's `INSTRUCTION` requests are declined
+/// here, without crossing: the Rust family code then sends the typed
+/// requests of `codegen_swap::numeric`, which the Vesper hook answers.
+fn vesper_numeric(lent: &mut vesper::codegen_swap::Lent<'_, '_>) -> Result<bool, String> {
+    if lent.op == vesper::codegen_swap::INSTRUCTION {
+        return Ok(false);
+    }
+    let kind = if lent.jit {
+        vesper_cranelift_sys::ModuleKind::Jit
+    } else {
+        vesper_cranelift_sys::ModuleKind::Object
+    };
+    let (answer, crossing) = vesper_cranelift_sys::lend_as(
+        kind,
+        lent.builder,
+        &mut *lent.module,
+        lent.op,
+        lent.args,
+        codegen_numeric_binding::numeric,
+    );
+    if let Some(e) = crossing.error {
+        return Err(format!("codegen (numeric op {}): {e}", lent.op));
+    }
+    if crossing.unreturned {
+        return Err(format!(
+            "codegen (numeric op {}) kept a lent handle",
+            lent.op
+        ));
+    }
+    if answer == 1 {
+        NUMERIC_CALLS.fetch_add(1, Relaxed);
+        lent.results.extend(crossing.results);
+        Ok(true)
+    } else {
+        NUMERIC_DECLINED.fetch_add(1, Relaxed);
+        Ok(false)
+    }
+}
+
 /// The `plan` hook of `vesper::codegen_swap` from `modules/codegen_export`
 /// (#1286): `plan_with` in Vesper. The checker's answers about each type
 /// travel with the request (plan_words.rs `plan_input`).
@@ -827,6 +877,7 @@ extern "C" fn install() {
     }
     let hooks = vesper::codegen_swap::CodegenHooks {
         aggregate: Some(vesper_aggregate),
+        numeric: Some(vesper_numeric),
         export: Some(vesper_export),
         plan: Some(vesper_plan),
         interface_json: Some(vesper_interface_json),
@@ -879,6 +930,11 @@ extern "C" fn report() {
         "vesper-hybrid: codegen emitted {} aggregate requests from Vesper ({} declined)",
         CODEGEN_CALLS.load(Relaxed),
         CODEGEN_DECLINED.load(Relaxed)
+    );
+    eprintln!(
+        "vesper-hybrid: codegen emitted {} numeric requests from Vesper ({} declined)",
+        NUMERIC_CALLS.load(Relaxed),
+        NUMERIC_DECLINED.load(Relaxed)
     );
     eprintln!(
         "vesper-hybrid: codegen emitted the export glue of {} libraries from Vesper ({} declined)",

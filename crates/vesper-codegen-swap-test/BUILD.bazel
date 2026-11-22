@@ -14,6 +14,7 @@ vesper_crate(
         "//packages/vesper-cranelift:files",
     ],
     test_timeouts = {
+        "test/self_host_codegen_aggregates_drops": "long",
         "test/self_host_codegen_swap": "long",
         "test/self_host_walk_state": "long",
         # SH4 lane 11 (#1285): the vector and TiledSeq differentials.

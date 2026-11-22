@@ -288,6 +288,13 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # SH4 lane 8 (#1282): the aggregate decisions of native lowering in
+        # Vesper against src/native_aggregates.rs over the same corpus.
+        "test/self_host_codegen_aggregates": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
         # SH4 lane 6 (#1280): @vesper/codegen-scalar's decisions against the
         # native Codegen core over the same corpus.
         "test/self_host_codegen_scalar": glob([
@@ -881,6 +888,7 @@ vesper_crate(
         "test/self_host_check_data": "long",
         "test/hybrid_layout": "long",
         "test/hybrid_ir_check": "long",
+        "test/self_host_codegen_aggregates": "long",
         # The inliner differential passed 900 s on a cold CI run.
         "test/self_host_ir_inline": "eternal",
         # Four round-trip tests and the pass harness share one stage build;

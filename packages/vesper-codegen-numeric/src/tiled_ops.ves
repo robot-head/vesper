@@ -7,6 +7,43 @@
 // and with the tiled runtime already defined. Every emission makes the
 // Cranelift calls of the Rust function in the same order.
 
+use @vesper/cranelift::{
+    Ty,
+    Value,
+    Var,
+    call_arg,
+    call_arg_count,
+    call_conv_default,
+    create_block,
+    create_stack_slot,
+    declare_function,
+    import_function,
+    ins_brif0,
+    ins_call,
+    ins_convert,
+    ins_icmp_imm,
+    ins_iconst,
+    ins_jump0,
+    ins_load,
+    ins_stack_addr,
+    ins_store,
+    inst_result,
+    linkage_import,
+    linkage_local,
+    module_pointer_type,
+    sig_new,
+    sig_param,
+    sig_return,
+    switch_to_block,
+    use_var,
+    value_of_word,
+    value_type,
+};
+use self::shapes::{
+    E_U8,
+    chunk_ty,
+};
+
 pub const NUM_TILED: u32 = 1;
 
 // `numeric::TILED_*`.
@@ -406,7 +443,7 @@ fn t_load_tile_vec(inout b: Builder, inout m: Module, jit: bool, inout w: Words)
 }
 
 // One `TILED` request; answers its value.
-fn tiled_request(call: u64, inout b: Builder, inout m: Module) -> Value eff [Ffi[Cranelift]] {
+pub fn tiled_request(call: u64, inout b: Builder, inout m: Module) -> Value eff [Ffi[Cranelift]] {
     let kind = call_arg(call, TW_KIND);
     let jit = call_arg(call, TW_JIT) != 0;
     let mut w = Words {
@@ -457,7 +494,7 @@ fn tiled_request(call: u64, inout b: Builder, inout m: Module) -> Value eff [Ffi
     t_load_tile_vec(inout b, inout m, jit, inout w)
 }
 
-fn tiled_known(call: u64) -> bool eff [Ffi[Cranelift]] {
+pub fn tiled_known(call: u64) -> bool eff [Ffi[Cranelift]] {
     let kind = call_arg(call, TW_KIND);
     call_arg_count(call) > TW_FIRST && kind >= TK_NEW && kind <= TK_LOAD_TILE_VEC
 }
