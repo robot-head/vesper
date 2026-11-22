@@ -756,7 +756,7 @@ pub fn check(module: &Module) -> Checked {
     for u in &module.uses {
         checked.diagnostics.push(
             Diagnostic::new(
-                crate::packages::USE_OUTSIDE_PACKAGE,
+                USE_OUTSIDE_PACKAGE,
                 "`use` imports need a package; check the package directory instead of one file",
                 u.span.clone(),
             )
@@ -1120,7 +1120,7 @@ impl Checker<'_> {
                     }
                     if c.world
                         .functions
-                        .contains_key(&format!("{}{n}", crate::ffi_lowering::drops::DROP_PREFIX))
+                        .contains_key(&format!("{}{n}", FOREIGN_DROP_PREFIX))
                     {
                         return true;
                     }
@@ -1185,8 +1185,7 @@ impl Checker<'_> {
                 self.world.adts.get(n).is_some_and(|a| {
                     a.variants.iter().any(|v| {
                         v.fields.iter().any(|f| {
-                            f.name == crate::ffi_lowering::HANDLE_FIELD
-                                || self.holds_extern_handle(&f.ty, seen)
+                            f.name == FOREIGN_HANDLE_FIELD || self.holds_extern_handle(&f.ty, seen)
                         })
                     })
                 })
@@ -1843,7 +1842,7 @@ impl Checker<'_> {
                     // Qualified paths resolve only through the package
                     // loader (`crate::packages`), like `use` imports.
                     self.error(
-                        crate::packages::USE_OUTSIDE_PACKAGE,
+                        USE_OUTSIDE_PACKAGE,
                         format!("the qualified path '{n}' needs a package; check the package directory instead of one file"),
                         e.span.clone(),
                     );
@@ -6136,6 +6135,10 @@ pub mod core_typing_probe {
         (t, diagnostics.len())
     }
 }
+pub const USE_OUTSIDE_PACKAGE: &str = "E0110";
+pub(crate) const FOREIGN_DROP_PREFIX: &str = "$drop$";
+pub(crate) const FOREIGN_HANDLE_FIELD: &str = "$handle";
+
 #[cfg(test)]
 mod isolated_item_tests {
     use super::*;

@@ -7,9 +7,39 @@
 // the same order, so values, blocks, function references and global values
 // are numbered as in the Rust lowering.
 
+use @vesper/cranelift::{
+    Block,
+    DataId,
+    FuncId,
+    SigId,
+    Value,
+    append_block_params_for_function_params,
+    call_conv_default,
+    create_block,
+    data_define,
+    data_new,
+    declare_data,
+    declare_function,
+    define_data,
+    define_function,
+    import_function,
+    ins_call,
+    ins_iconst,
+    inst_result,
+    linkage_import,
+    linkage_local,
+    seal_all_blocks,
+    seal_block,
+    sig_new,
+    sig_param,
+    sig_return,
+    switch_to_block,
+    ty_i64,
+};
+
 // A signature of `params` `i64` parameters and, with `ret`, one `i64`
 // result, in the target's default calling convention (`m.make_signature()`).
-fn rt_sig(inout m: Module, params: u32, ret: bool) -> SigId eff [Ffi[Cranelift]] {
+pub fn rt_sig(inout m: Module, params: u32, ret: bool) -> SigId eff [Ffi[Cranelift]] {
     let s = sig_new(inout m, call_conv_default());
     for _ in 0..params {
         sig_param(inout m, s, ty_i64());
@@ -27,19 +57,19 @@ fn rt_declare(inout m: Module, in name: Slice[u8], linkage: u32, params: u32, re
 }
 
 // `declare_function(name, Linkage::Import, sig)`.
-fn rt_import(inout m: Module, in name: Slice[u8], params: u32, ret: bool)
+pub fn rt_import(inout m: Module, in name: Slice[u8], params: u32, ret: bool)
     -> FuncId eff [Ffi[Cranelift]] {
     rt_declare(inout m, in name, linkage_import(), params, ret)
 }
 
 // `declare_function(name, Linkage::Local, sig)`.
-fn rt_local(inout m: Module, in name: Slice[u8], params: u32, ret: bool)
+pub fn rt_local(inout m: Module, in name: Slice[u8], params: u32, ret: bool)
     -> FuncId eff [Ffi[Cranelift]] {
     rt_declare(inout m, in name, linkage_local(), params, ret)
 }
 
 // A local, read-only data object holding `bytes`.
-fn rt_message(inout m: Module, in name: Slice[u8], in bytes: Slice[u8])
+pub fn rt_message(inout m: Module, in name: Slice[u8], in bytes: Slice[u8])
     -> Option[DataId] eff [Ffi[Cranelift]] {
     let id = declare_data(inout m, in name, linkage_local(), false);
     let mut d = match data_new() {
@@ -55,7 +85,7 @@ fn rt_message(inout m: Module, in name: Slice[u8], in bytes: Slice[u8])
 }
 
 // `prefix ++ text ++ "\n"`.
-fn rt_text(in prefix: Str, in text: Str) -> ChunkSeq[u8] {
+pub fn rt_text(in prefix: Str, in text: Str) -> ChunkSeq[u8] {
     let mut s: ChunkSeq[u8] = ChunkSeq::new[u8]();
     s.extend(in prefix.as_bytes());
     s.extend(in text.as_bytes());
@@ -64,21 +94,21 @@ fn rt_text(in prefix: Str, in text: Str) -> ChunkSeq[u8] {
 }
 
 // `name ++ decimal(i)` for a one-digit `i`.
-fn rt_numbered(in name: Str, i: u32) -> ChunkSeq[u8] {
+pub fn rt_numbered(in name: Str, i: u32) -> ChunkSeq[u8] {
     let mut s: ChunkSeq[u8] = ChunkSeq::new[u8]();
     s.extend(in name.as_bytes());
     s.push(wrapping_add(48, wrapping_u8(i)));
     s
 }
 
-fn rt_k(inout b: Builder, v: i64) -> Value eff [Ffi[Cranelift]] {
+pub fn rt_k(inout b: Builder, v: i64) -> Value eff [Ffi[Cranelift]] {
     ins_iconst(inout b, ty_i64(), v)
 }
 
 // The entry block with the function's parameters, as both Rust generators
 // open a body; returns the block. `seal` seals it at once (the tiled
 // runtime's `compile`).
-fn rt_entry(inout b: Builder, seal: bool) -> Block eff [Ffi[Cranelift]] {
+pub fn rt_entry(inout b: Builder, seal: bool) -> Block eff [Ffi[Cranelift]] {
     let entry = create_block(inout b);
     append_block_params_for_function_params(inout b, entry);
     switch_to_block(inout b, entry);
@@ -90,12 +120,14 @@ fn rt_entry(inout b: Builder, seal: bool) -> Block eff [Ffi[Cranelift]] {
 
 // `declare_func_in_func` then `call`; the call's instruction is the
 // builder's last, so `inst_result(inout b, 0)` reads its result.
-fn rt_call(inout b: Builder, inout m: Module, f: FuncId, in args: Slice[u32]) eff [Ffi[Cranelift]] {
+pub fn rt_call(inout b: Builder, inout m: Module, f: FuncId, in args: Slice[u32]) eff [
+    Ffi[Cranelift]
+] {
     let r = import_function(inout b, inout m, f);
     ins_call(inout b, r, in args);
 }
 
-fn rt_call1(inout b: Builder, inout m: Module, f: FuncId, in args: Slice[u32])
+pub fn rt_call1(inout b: Builder, inout m: Module, f: FuncId, in args: Slice[u32])
     -> Value eff [Ffi[Cranelift]] {
     let r = import_function(inout b, inout m, f);
     ins_call(inout b, r, in args);
@@ -112,12 +144,12 @@ fn vals4(a: Value, c: Value, d: Value, e: Value) -> ChunkSeq[u32] {
     s
 }
 
-fn no_vals() -> ChunkSeq[u32] {
+pub fn no_vals() -> ChunkSeq[u32] {
     ChunkSeq::new[u32]()
 }
 
 // Seal every block and compile the function into `func`.
-fn rt_finish(inout m: Module, func: FuncId, sink b: Builder) -> bool eff [Ffi[Cranelift]] {
+pub fn rt_finish(inout m: Module, func: FuncId, sink b: Builder) -> bool eff [Ffi[Cranelift]] {
     let mut b = b;
     seal_all_blocks(inout b);
     define_function(inout m, func, b)

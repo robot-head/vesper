@@ -1,0 +1,35 @@
+# The flip gate for vesper-aegis (scripts/ci/flip_gate.py, SH6 lane 1,
+# #1396; this crate's lane: SH6 lane 8, #1403). The ported modules are the
+# quote, report and claims parsers, the timestamp parser and the policy
+# check, whose Rust SH6 lane 8 deleted (the report counts the lines).
+name = "vesper-aegis"
+lane = "SH6-8"
+env = { CARGO_PROFILE_DEV_DEBUG = "0", CARGO_PROFILE_TEST_DEBUG = "0" }
+build = ["cargo build --locked --release -p vesper-aegis --example abba"]
+
+[[tests]]
+run = "cargo test --locked --release -p vesper-aegis"
+
+# Every ported parser on the vendor samples and 4,000 mutations of each,
+# and 200,000 random claims/policy pairs, against the Rust build.
+[differential]
+run = "cargo test --locked --release -p vesper-aegis --test port_differential"
+
+# The harness times both arms (A B B A per epoch; the Rust arm is the
+# example built at the last Rust commit, see bench-abba.sh) and prints the
+# gate's pairs line.
+[[abba]]
+workload = "snp"
+run = "crates/vesper-aegis/bench-abba.sh flip-gate snp"
+
+[[abba]]
+workload = "tdx"
+run = "crates/vesper-aegis/bench-abba.sh flip-gate tdx"
+
+[[abba]]
+workload = "sgx"
+run = "crates/vesper-aegis/bench-abba.sh flip-gate sgx"
+
+[[abba]]
+workload = "policy"
+run = "crates/vesper-aegis/bench-abba.sh flip-gate policy"

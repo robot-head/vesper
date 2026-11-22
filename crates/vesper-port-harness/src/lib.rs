@@ -189,6 +189,18 @@ impl Port {
                 if let Some(types) = &self.types_path {
                     command.args(["--rust-types", types]);
                 }
+                // The CPU features the Rust half is compiled for (baseline
+                // by default, every host feature under
+                // `-C target-cpu=native`): the port's object uses the same.
+                // x86-64's baseline list adds nothing, so a default build
+                // runs the same command as before.
+                if let Ok(features) = std::env::var("CARGO_CFG_TARGET_FEATURE")
+                    && features
+                        .split(',')
+                        .any(|f| !matches!(f, "" | "fxsr" | "sse" | "sse2" | "x87"))
+                {
+                    command.arg("--target-features").arg(features);
+                }
                 run(&mut command, &compiler)?;
                 Some(binding)
             }
@@ -333,6 +345,17 @@ pub fn prepare_source(
         let rel = package.strip_prefix(&base).unwrap_or(package);
         let copy = scratch.join(rel);
         copy_file(&package.join("Loom.toml"), &copy.join("Loom.toml"))?;
+        // The `.vsys` files a manifest names (`[package] vsys`) sit beside it.
+        for entry in
+            std::fs::read_dir(package).map_err(|e| format!("{}: {e}", package.display()))?
+        {
+            let path = entry
+                .map_err(|e| format!("{}: {e}", package.display()))?
+                .path();
+            if path.is_file() && path.extension().is_some_and(|e| e == "vsys") {
+                copy_file(&path, &copy.join(path.file_name().unwrap_or_default()))?;
+            }
+        }
         let mut files = Vec::new();
         if package.join("src").is_dir() {
             walk(&package.join("src"), &mut files)?;

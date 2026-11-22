@@ -1,5 +1,9 @@
-//! ABBA benchmark of the Vesper port against the frozen Rust seed copy
-//! (port wave P3a lane 8, #1043), both linked into this one binary.
+//! ABBA benchmark of the Vesper port against the last Rust build (SH6
+//! lane 8, #1403). The Rust parsers and policy check were deleted, so the
+//! Rust arm is this example built at the last commit that had them
+//! (bench-abba.sh builds it in a temporary worktree) and run as a child
+//! process: `<rust-abba> window rust <workload> N` prints the nanoseconds
+//! its N passes took, timed inside that process.
 //!
 //! Workloads, each over the vendor samples in tests/data/vendor:
 //!
@@ -12,22 +16,34 @@
 //!   gives, against a policy with four architectures and 16 measurements.
 //!
 //! ```sh
-//! cargo run --release -p vesper-aegis --example abba            # ABBA, wall clock
+//! crates/vesper-aegis/bench-abba.sh                    # ABBA, wall clock
+//! crates/vesper-aegis/bench-abba.sh flip-gate snp      # the flip gate's pairs line
 //! cargo run --release -p vesper-aegis --example abba -- window port snp 2000
 //! ```
 //!
-//! `window <port|rust> <workload> N` runs N passes once (for callgrind
-//! instruction counts of one arm). The driver runs epochs of windows in
+//! `window port <workload> N` runs N passes once (for callgrind instruction
+//! counts). `compare <rust-abba>` runs 9 epochs of windows per workload in
 //! the order A B B A (A = Rust, B = port), pairs each epoch's totals and
 //! reports the median regression of B over A with
-//! `vesper_bench::analyze_pairs`.
+//! `vesper_bench::analyze_pairs`. `flip-gate <workload> <rust-abba>` runs
+//! 30 such epochs and prints them in the flip gate's pairs protocol
+//! (scripts/ci/flip_gate.py, crates/vesper-aegis/flip-gate.toml).
 use std::hint::black_box;
 use std::path::PathBuf;
+use std::process::Command;
 use std::time::Instant;
 use vesper_aegis as port;
-use vesper_aegis_rust as rust;
 
 const EPOCHS: usize = 9;
+/// Epochs of one `flip-gate` run (the gate's default).
+const FLIP_GATE_EPOCHS: usize = 30;
+/// Each workload and the passes in one window.
+const WORKLOADS: [(&str, usize); 4] = [
+    ("snp", 20_000),
+    ("tdx", 10_000),
+    ("sgx", 10_000),
+    ("policy", 50_000),
+];
 
 fn data(path: &str) -> Vec<u8> {
     std::fs::read(
@@ -62,7 +78,7 @@ fn samples() -> Samples {
     .iter()
     .map(|p| {
         let q = data(p);
-        let used = rust::tdx::TdxQuote::parse_prefix(&q).unwrap().1;
+        let used = port::tdx::TdxQuote::parse_prefix(&q).unwrap().1;
         exact(q, used)
     })
     .collect();
@@ -70,7 +86,7 @@ fn samples() -> Samples {
         .iter()
         .map(|p| {
             let q = data(p);
-            let used = rust::sgx::SgxQuote::parse_prefix(&q).unwrap().1;
+            let used = port::sgx::SgxQuote::parse_prefix(&q).unwrap().1;
             exact(q, used)
         })
         .collect();
@@ -126,7 +142,8 @@ macro_rules! policy_case {
     }};
 }
 
-fn window(arm: &str, workload: &str, passes: usize, s: &Samples) -> u64 {
+/// One window of the port, in this process.
+fn window(workload: &str, passes: usize, s: &Samples) -> u64 {
     macro_rules! go {
         ($k:ident) => {{
             let (claims, policy, channel) = policy_case!($k, &s.snp[1]);
@@ -166,51 +183,84 @@ fn window(arm: &str, workload: &str, passes: usize, s: &Samples) -> u64 {
             start.elapsed().as_nanos() as u64
         }};
     }
-    match arm {
-        "port" => go!(port),
-        "rust" => go!(rust),
-        _ => panic!("unknown arm {arm}"),
-    }
+    go!(port)
+}
+
+/// One window of the Rust build: `rust_abba window rust <workload> N`.
+fn rust_window(rust_abba: &str, workload: &str, passes: usize) -> u64 {
+    let out = Command::new(rust_abba)
+        .args(["window", "rust", workload, &passes.to_string()])
+        .output()
+        .unwrap_or_else(|e| panic!("{rust_abba}: {e}"));
+    assert!(
+        out.status.success(),
+        "{rust_abba} window rust {workload} failed"
+    );
+    String::from_utf8(out.stdout)
+        .unwrap()
+        .trim()
+        .parse()
+        .expect("the Rust window's nanoseconds")
+}
+
+/// One A B B A epoch: (Rust total, port total).
+fn epoch(rust_abba: &str, workload: &str, passes: usize, s: &Samples) -> (u64, u64) {
+    let a1 = rust_window(rust_abba, workload, passes);
+    let b1 = window(workload, passes, s);
+    let b2 = window(workload, passes, s);
+    let a2 = rust_window(rust_abba, workload, passes);
+    (a1 + a2, b1 + b2)
 }
 
 fn main() {
     assert_eq!(port::IMPLEMENTATION, "vesper");
-    assert_eq!(rust::IMPLEMENTATION, "rust");
     let s = samples();
     let args: Vec<String> = std::env::args().collect();
-    if args.get(1).map(String::as_str) == Some("window") {
-        println!(
-            "{}",
-            window(&args[2], &args[3], args[4].parse().unwrap(), &s)
-        );
-        return;
-    }
-    for (workload, passes) in [
-        ("snp", 20_000),
-        ("tdx", 10_000),
-        ("sgx", 10_000),
-        ("policy", 50_000),
-    ] {
-        let mut pairs = Vec::new();
-        let mut ratios = Vec::new();
-        for _ in 0..EPOCHS {
-            let a1 = window("rust", workload, passes, &s);
-            let b1 = window("port", workload, passes, &s);
-            let b2 = window("port", workload, passes, &s);
-            let a2 = window("rust", workload, passes, &s);
-            ratios.push((b1 + b2) as f64 / (a1 + a2) as f64);
-            pairs.push(
-                vesper_bench::PairedSample::new(a1 + a2, b1 + b2, 2 * passes as u64).unwrap(),
+    match args.get(1).map(String::as_str) {
+        Some("window") => {
+            assert_eq!(
+                args[2], "port",
+                "the Rust build was deleted (#1403): run `window rust` on a baseline built by bench-abba.sh"
             );
+            println!("{}", window(&args[3], args[4].parse().unwrap(), &s));
         }
-        ratios.sort_by(f64::total_cmp);
-        let analysis = vesper_bench::analyze_pairs(&pairs, 10_000).unwrap();
-        println!(
-            "{workload}: port/Rust median {:.2}x (min {:.2}x, max {:.2}x); 2x gate {:?}",
-            ratios[EPOCHS / 2],
-            ratios[0],
-            ratios[EPOCHS - 1],
-            analysis.decision
-        );
+        Some("flip-gate") => {
+            let workload = args[2].as_str();
+            let passes = WORKLOADS
+                .iter()
+                .find(|(w, _)| *w == workload)
+                .unwrap_or_else(|| panic!("unknown workload {workload}"))
+                .1;
+            let pairs: Vec<String> = (0..FLIP_GATE_EPOCHS)
+                .map(|_| {
+                    let (a, b) = epoch(&args[3], workload, passes, &s);
+                    format!("{a}:{b}")
+                })
+                .collect();
+            println!("flip-gate pairs {workload} {}", pairs.join(" "));
+        }
+        Some("compare") => {
+            for (workload, passes) in WORKLOADS {
+                let mut pairs = Vec::new();
+                let mut ratios = Vec::new();
+                for _ in 0..EPOCHS {
+                    let (a, b) = epoch(&args[2], workload, passes, &s);
+                    ratios.push(b as f64 / a as f64);
+                    pairs.push(vesper_bench::PairedSample::new(a, b, 2 * passes as u64).unwrap());
+                }
+                ratios.sort_by(f64::total_cmp);
+                let analysis = vesper_bench::analyze_pairs(&pairs, 10_000).unwrap();
+                println!(
+                    "{workload}: port/Rust median {:.2}x (min {:.2}x, max {:.2}x); 2x gate {:?}",
+                    ratios[EPOCHS / 2],
+                    ratios[0],
+                    ratios[EPOCHS - 1],
+                    analysis.decision
+                );
+            }
+        }
+        _ => panic!(
+            "usage: abba window port <workload> N | compare <rust-abba> | flip-gate <workload> <rust-abba>"
+        ),
     }
 }

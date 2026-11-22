@@ -20,6 +20,10 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 use std::collections::{BTreeMap, BTreeSet};
 use std::{cell::RefCell, rc::Rc};
 
+/// The aggregate decisions as text, for the SH4 lane 8 differential.
+#[doc(hidden)]
+#[path = "native_aggregate_decisions.rs"]
+pub mod aggregate_decisions;
 /// `vesper build --lib`: C-ABI library objects (port P0 lane 6, #878).
 #[path = "native_aggregates.rs"]
 mod aggregates;
@@ -305,120 +309,8 @@ fn call_vars(world: &World, e: &Expr, vars: &BTreeMap<String, Type>) -> BTreeMap
         })
         .unwrap_or_default()
 }
-fn visit(e: &Expr, callback: &mut impl FnMut(&Expr)) {
-    callback(e);
-    match &e.kind {
-        ExprKind::Tuple(es) => {
-            for e in es {
-                visit(e, callback)
-            }
-        }
-        ExprKind::Struct { fields, .. } => {
-            for (_, e) in fields {
-                visit(e, callback)
-            }
-        }
-        ExprKind::Block { statements, tail } => {
-            for s in statements {
-                visit(
-                    match s {
-                        Statement::Let { value, .. } => value,
-                        Statement::Expr(e) => e,
-                    },
-                    callback,
-                )
-            }
-            if let Some(e) = tail {
-                visit(e, callback)
-            }
-        }
-        ExprKind::Call { callee, args, .. } => {
-            visit(callee, callback);
-            for a in args {
-                visit(&a.expr, callback)
-            }
-        }
-        ExprKind::Unary(_, e) | ExprKind::Field(e, _) | ExprKind::Try(e) => visit(e, callback),
-        ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) | ExprKind::Assign(_, a, b) => {
-            visit(a, callback);
-            visit(b, callback)
-        }
-        ExprKind::If {
-            condition,
-            then,
-            otherwise,
-        } => {
-            visit(condition, callback);
-            visit(then, callback);
-            if let Some(e) = otherwise {
-                visit(e, callback)
-            }
-        }
-        ExprKind::Match { value, arms } => {
-            visit(value, callback);
-            for (_, e) in arms {
-                visit(e, callback)
-            }
-        }
-        ExprKind::Closure { body, .. } => visit(body, callback),
-        ExprKind::Handle {
-            state,
-            body,
-            ret,
-            ops,
-            ..
-        } => {
-            if let Some((_, e)) = state {
-                visit(e, callback)
-            }
-            visit(body, callback);
-            visit(&ret.body, callback);
-            for c in ops {
-                visit(&c.body, callback)
-            }
-        }
-        k @ (ExprKind::Loop(_)
-        | ExprKind::For { .. }
-        | ExprKind::Range { .. }
-        | ExprKind::Break(_)
-        | ExprKind::Continue
-        | ExprKind::Return(_)) => {
-            for c in k.control_children().into_iter().flatten() {
-                visit(c, callback)
-            }
-        }
-        _ => {}
-    }
-}
-pub(crate) fn contains_function(world: &World, t: &Type) -> bool {
-    fn visit(world: &World, t: &Type, seen: &mut BTreeSet<String>) -> bool {
-        match t {
-            Type::Function { .. } => true,
-            Type::Tuple(ts) => ts.iter().any(|t| visit(world, t, seen)),
-            Type::Named(n, args) => {
-                if !seen.insert(n.clone()) {
-                    return args.iter().any(|t| matches!(t, Type::Function { .. }));
-                }
-                let result = world.adts.get(n).is_some_and(|a| {
-                    let vars = a
-                        .generics
-                        .iter()
-                        .zip(args)
-                        .map(|(g, t)| (g.name.clone(), t.clone()))
-                        .collect();
-                    a.variants
-                        .iter()
-                        .flat_map(|v| &v.fields)
-                        .any(|f| visit(world, &substitute(&f.ty, &vars), seen))
-                });
-                seen.remove(n);
-                result
-            }
-            _ => false,
-        }
-    }
-    visit(world, t, &mut BTreeSet::new())
-}
+pub use crate::source_analysis::{closure_capabilities, needs_nan_canonicalization};
+use crate::source_analysis::{contains_function, visit};
 fn specialized_function(world: &World, f: &Function) -> bool {
     (!capability_only(f)
         || f.effects.tail.is_some()
@@ -439,30 +331,6 @@ fn capability_only(f: &Function) -> bool {
         crate::capability_effects::is_capability_effect(&e.name)
             || crate::ffi_lowering::is_foreign_effect(&e.name)
     })
-}
-/// Whether the program needs Cranelift's NaN canonicalisation: any
-/// `eff [DetFloat]` function promises bit-identical floats on x86-64 and
-/// AArch64, whose default NaN bits differ (§36.2).
-pub fn needs_nan_canonicalization(world: &World) -> bool {
-    world.functions.values().any(|f| {
-        crate::capability_effects::capabilities(&f.effects)
-            .contains(&crate::capability_effects::Capability::DetFloat)
-            || closure_capabilities(f).contains(&crate::capability_effects::Capability::DetFloat)
-    })
-}
-/// Capability effects declared on closure literals anywhere in `f`'s body.
-/// Closures are specialized into the function that contains them, so their
-/// code is part of that function's Cranelift function.
-pub fn closure_capabilities(f: &Function) -> BTreeSet<crate::capability_effects::Capability> {
-    let mut out = BTreeSet::new();
-    if let Some(body) = &f.body {
-        visit(body, &mut |e| {
-            if let ExprKind::Closure { effects, .. } = &e.kind {
-                out.extend(crate::capability_effects::capabilities(effects));
-            }
-        });
-    }
-    out
 }
 /// A function whose only effects are unlabeled `Fail` instances, such as a
 /// recursive function using checked arithmetic. `raise` never resumes (its
@@ -1396,7 +1264,7 @@ fn declare_instances_with_trace<M: Module>(
             let symbol = if key == entry {
                 entry.to_owned()
             } else {
-                format!("vesper_function_{i}")
+                local_symbol(i, key)
             };
             let id = m
                 .declare_function(
@@ -1473,7 +1341,7 @@ fn define_instances_observed_with_trace<M: Module>(
         let own_abi = abi.of(key);
         ctx.func.signature = signature_with_abi(m, world, &f, pass_trace, own_abi)?;
         let mut fbctx = FunctionBuilderContext::new();
-        {
+        let wide_divisions = {
             let mut b = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
             let entry = b.create_block();
             b.append_block_params_for_function_params(entry);
@@ -1583,6 +1451,7 @@ fn define_instances_observed_with_trace<M: Module>(
                 forced_call_vars: None,
                 discard_slot: None,
                 element_writebacks: vec![],
+                wide_divisions: vec![],
             };
             c.set_location(f.span.start);
             // Function-value parameters bound to top-level functions by
@@ -1642,7 +1511,9 @@ fn define_instances_observed_with_trace<M: Module>(
             )?;
             c.b.seal_all_blocks();
             c.b.finalize();
-        }
+            c.wide_divisions
+        };
+        wide_native::fuse_wide_divisions(&mut ctx.func, &wide_divisions);
         // A hook error at an infallible layout helper (#1275).
         crate::codegen_swap::take_error()?;
         if let Some(rewrite) = instrument.as_mut() {
@@ -1916,6 +1787,25 @@ impl WordFunction {
         }
     }
 }
+/// The symbol of the local (not exported) function instance `i`, whose
+/// instance key is `key`: `vesper_function_{i}_` and the key with every
+/// character outside `[A-Za-z0-9_]` as `_` (at most 96 of them), so
+/// profilers and disassemblers name the Vesper function. The index keeps
+/// symbols unique.
+pub(crate) fn local_symbol(i: usize, key: &str) -> String {
+    let name: String = key
+        .chars()
+        .take(96)
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("vesper_function_{i}_{name}")
+}
 pub(crate) fn register_jit_runtime_symbols(builder: &mut JITBuilder, trace_host: bool) {
     builder.symbol("fmod", native_float_remainder as *const u8);
     builder.symbol("fmodf", float_math::native_float_remainder_f32 as *const u8);
@@ -2093,6 +1983,55 @@ pub fn object_isa_optimized(
 ) -> Result<std::sync::Arc<dyn cranelift_codegen::isa::TargetIsa>, String> {
     isa_with_flags(target, needs_nan_canonicalization(world), optimize)
 }
+/// CPU features an explicit `--target` uses beyond the target's baseline
+/// ([`set_target_features`]).
+static TARGET_FEATURES: std::sync::RwLock<Vec<String>> = std::sync::RwLock::new(Vec::new());
+
+/// Use the CPU features `list` (comma-separated, Rust's names, as in
+/// cargo's `CARGO_CFG_TARGET_FEATURE`) for every later explicit-target
+/// build in this process. A build without `--target` uses the host's own
+/// features. The port harness passes the outer cargo build's features, so
+/// a port's object is built for the same CPU as the Rust it is measured
+/// against (`-C target-cpu=native` for both, or the baseline for both).
+pub fn set_target_features(list: &str) {
+    let features = list
+        .split(',')
+        .map(str::trim)
+        .filter(|f| !f.is_empty())
+        .map(str::to_owned)
+        .collect();
+    if let Ok(mut current) = TARGET_FEATURES.write() {
+        *current = features;
+    }
+}
+
+/// The Cranelift ISA setting for the Rust target feature `feature`.
+fn cranelift_feature(feature: &str) -> Option<&'static str> {
+    Some(match feature {
+        "sse3" => "has_sse3",
+        "ssse3" => "has_ssse3",
+        "sse4.1" => "has_sse41",
+        "sse4.2" => "has_sse42",
+        "popcnt" => "has_popcnt",
+        "avx" => "has_avx",
+        "avx2" => "has_avx2",
+        "fma" => "has_fma",
+        "bmi1" => "has_bmi1",
+        "bmi2" => "has_bmi2",
+        "lzcnt" => "has_lzcnt",
+        "cmpxchg16b" => "has_cmpxchg16b",
+        "avx512f" => "has_avx512f",
+        "avx512vl" => "has_avx512vl",
+        "avx512dq" => "has_avx512dq",
+        "avx512bitalg" => "has_avx512bitalg",
+        "avx512vbmi" => "has_avx512vbmi",
+        "lse" => "has_lse",
+        "paca" => "has_pauth",
+        "fp16" => "has_fp16",
+        _ => return None,
+    })
+}
+
 fn isa_with_flags(
     target: Option<&str>,
     canonicalize_nans: bool,
@@ -2123,7 +2062,15 @@ fn isa_with_flags(
         ) {
             return Err("native targets must be x86_64 or AArch64".into());
         }
-        cranelift_codegen::isa::lookup(triple).map_err(|e| e.to_string())?
+        let mut builder = cranelift_codegen::isa::lookup(triple).map_err(|e| e.to_string())?;
+        for feature in TARGET_FEATURES.read().map_err(|e| e.to_string())?.iter() {
+            // A feature this target's ISA has no setting for (or Cranelift
+            // does not use) changes nothing, as for rustc.
+            if let Some(setting) = cranelift_feature(feature) {
+                let _ = builder.enable(setting);
+            }
+        }
+        builder
     } else {
         cranelift_native::builder().map_err(str::to_string)?
     };
@@ -2611,6 +2558,9 @@ struct Codegen<'a, 'b, M: Module> {
     /// through a word of scratch: (scratch, element address, element type),
     /// written back when the call or place primitive that borrows them ends.
     element_writebacks: Vec<(ir::Value, ir::Value, Type)>,
+    /// The 128-bit divisions emitted so far, for
+    /// [`wide_native::fuse_wide_divisions`] once the function is built.
+    wide_divisions: Vec<wide_native::WideDivision>,
 }
 /// The most place re-entries one hook request may make
 /// ([`Codegen::walk_instruction`]).
@@ -2705,6 +2655,13 @@ impl<M: Module> Codegen<'_, '_, M> {
         let ty = self.b.func.dfg.value_type(v);
         if !flush || !is_float_type(ty) {
             return v;
+        }
+        // SH4 swap point (#1285): the `numeric` hook may emit the flush.
+        if let Some(r) = self.swap_numeric(
+            crate::codegen_swap::numeric::FLOAT_FLUSH,
+            &[crate::codegen_swap::word(v)],
+        ) {
+            return r;
         }
         let magnitude = self.b.ins().fabs(v);
         let smallest = if ty == types::F32 {
@@ -7142,6 +7099,16 @@ impl<M: Module> Codegen<'_, '_, M> {
             return Err("native parallel_for data is not one word".into());
         }
         let n = self.expr(&args[1].expr)?;
+        // SH4 swap point (#1285): the `numeric` hook may emit the runtime
+        // call (`codegen_swap::numeric::PARALLEL_FOR`).
+        let words = [
+            u64::from(fun.as_u32()),
+            crate::codegen_swap::word(data),
+            crate::codegen_swap::word(n),
+        ];
+        if let Some(v) = self.swap_numeric(crate::codegen_swap::numeric::PARALLEL_FOR, &words) {
+            return Ok(Some(v));
+        }
         let pointer = self.b.ins().func_addr(types::I64, fun);
         let mut runtime = self.m.make_signature();
         runtime.params.extend([word, word, word]);
@@ -7191,8 +7158,16 @@ impl<M: Module> Codegen<'_, '_, M> {
         let flags = ir::MemFlags::trusted();
         // `Atomic { cell }` -> sequence header `{len, cap, data}` -> element.
         let receiver = self.expr(&args[0].expr)?;
-        let handle = self.b.ins().load(types::I64, flags, receiver, 0);
-        let data = self.b.ins().load(types::I64, flags, handle, 16);
+        // SH4 swap point (#1285): the `numeric` hook may emit the element
+        // address and the operation (`codegen_swap::numeric::ATOMIC_*`).
+        use crate::codegen_swap::{numeric as n, word};
+        let data = match self.swap_numeric(n::ATOMIC_CELL, &[word(receiver)]) {
+            Some(data) => data,
+            None => {
+                let handle = self.b.ins().load(types::I64, flags, receiver, 0);
+                self.b.ins().load(types::I64, flags, handle, 16)
+            }
+        };
         let mut operands = vec![];
         for a in &args[1..1 + op.values()] {
             let v = self.expr(&a.expr)?;
@@ -7211,6 +7186,30 @@ impl<M: Module> Codegen<'_, '_, M> {
                 c.b.ins().uextend(types::I64, v)
             }
         };
+        let swap_op = match op {
+            A::Load => Some(n::ATOMIC_LOAD),
+            A::Store => Some(n::ATOMIC_STORE),
+            A::Swap => Some(n::ATOMIC_SWAP),
+            A::FetchAdd => Some(n::ATOMIC_ADD),
+            A::FetchSub => Some(n::ATOMIC_SUB),
+            A::FetchAnd => Some(n::ATOMIC_AND),
+            A::FetchOr => Some(n::ATOMIC_OR),
+            A::FetchXor => Some(n::ATOMIC_XOR),
+            // The Cranelift shim has no `atomic_cas` yet.
+            A::CompareExchange => None,
+        };
+        if let Some(code) = swap_op {
+            let mut words = vec![
+                code,
+                crate::codegen_swap::ty_code(narrow),
+                u64::from(signed),
+                word(data),
+            ];
+            words.extend(operands.iter().map(|v| word(*v)));
+            if let Some(v) = self.swap_numeric(n::ATOMIC, &words) {
+                return Ok(v);
+            }
+        }
         let rmw = match op {
             A::Load => {
                 let v = self.b.ins().atomic_load(narrow, flags, data);

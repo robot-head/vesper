@@ -4,6 +4,7 @@
 resolver = "2"
 members = [
     ".",
+    "website/wasm",
     "crates/vesper-core",
     "crates/vesper-syntax",
     "crates/vesper-span",
@@ -77,7 +78,6 @@ members = [
     "crates/vesper-warp-tcp",
     "crates/vesper-chorus",
     "crates/vesper-aegis",
-    "crates/vesper-aegis/seed",
     "crates/vesper-resonance",
     "crates/vesper-resonance/seed",
     "crates/vesper-warp-tls",
@@ -194,7 +194,6 @@ default-members = [
     "crates/vesper-warp-tcp",
     "crates/vesper-chorus",
     "crates/vesper-aegis",
-    "crates/vesper-aegis/seed",
     "crates/vesper-resonance",
     "crates/vesper-resonance/seed",
     "crates/vesper-warp-tls",
@@ -359,7 +358,11 @@ wit-parser = "=0.261.0"
 # as `vesper-<tool>` binaries (crates/vesper-tools, SH0 lane 2), so these
 # seed copies left the compiler's closure. The CLI tests still check results
 # against them.
-vesper-aegis = { path = "crates/vesper-aegis/seed", package = "vesper-aegis-seed" }
+# tests/native_verifiers_cli.rs recomputes the `build --tee` register
+# extend with sha2. It cannot use vesper-aegis: Aegis has no seed since its
+# parsers became Vesper only (SH6 lane 8, #1403), and Bazel builds that port
+# with this crate's binary, so a dev-dependency on it would be a cycle.
+sha2 = { workspace = true }
 vesper-bench = { path = "crates/vesper-bench/seed", package = "vesper-bench-seed" }
 # The one crypto shim, bound to @vesper/crypto in tests/crypto_shim.rs (SH6 lane 17).
 vesper-crypto-sys = { path = "crates/vesper-crypto-sys" }
