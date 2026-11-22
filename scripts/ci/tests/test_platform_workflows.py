@@ -43,7 +43,7 @@ class PlatformWorkflowTests(unittest.TestCase):
             self.assertEqual(checkout["with"]["ref"], "${{ needs.plan.outputs.sha }}")
             self.assertTrue(any(s.get("name") == "Verify exact checkout" for s in job["steps"]))
         self.assertEqual(mac["timeout-minutes"], "60")
-        self.assertEqual(windows["timeout-minutes"], "60")
+        self.assertEqual(windows["timeout-minutes"], "120")
         for job in (mac, windows):
             commands = "\n".join(s.get("run", "") for s in job["steps"])
             self.assertNotIn("--workspace", commands)
