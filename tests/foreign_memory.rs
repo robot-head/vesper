@@ -323,6 +323,9 @@ fn foreign_memory_never_moves_while_c_may_hold_it() {
         "linear struct Pair { r: Ring, n: u64 }\nfn f(inout p: Pair) { p.r.data.push(1); }",
         "fn f(sink o: Option[Ring]) -> u64 eff [Ffi[Xsk]] { match o { Some(r) => { let mut r2 = r; r2.data.push(1); Xsk::xsk_ring_unmap(r2); 1 }, None => 0 } }",
         "fn g[T](inout p: Pinned[T], inout s: ChunkSeq[T]) { swap(inout p.data, inout s); }",
+        // Through a handler's return clause and an operation clause.
+        "effect Ask { fn ask() -> u64; }\nfn f(sink r: Ring) -> u64 eff [Ffi[Xsk]] { handle Ask in { r } with { return m => { let mut m2 = m; m2.data.push(1); Xsk::xsk_ring_unmap(m2); 1 }, ask(resume) => resume(0), } }",
+        "effect Give { fn give(sink r: Ring) -> u64; }\nfn f(sink r: Ring) -> u64 eff [Ffi[Xsk]] { handle Give in { Give::give(r) } with { return v => v, give(m, resume) => { let mut m2 = m; m2.data.push(1); Xsk::xsk_ring_unmap(m2); resume(1) }, } }",
     ] {
         let e = refused(body);
         assert_eq!(e.kind, FfiErrorKind::BufferMisuse, "{body}: {e}");

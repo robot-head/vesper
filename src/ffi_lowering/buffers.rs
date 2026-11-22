@@ -55,6 +55,9 @@ struct Walk<'a> {
     types: &'a TypeMap,
     /// Struct declarations by name, for the types of field paths.
     adts: std::collections::BTreeMap<&'a str, &'a Adt>,
+    /// Effect declarations by name, for the types of handler-clause
+    /// patterns.
+    effects: std::collections::BTreeMap<&'a str, &'a EffectDecl>,
     /// Local bindings in scope, innermost last. The checker records the
     /// types of expressions it evaluates but not of place roots (`b` in
     /// `b.data.push(x)`), so the walk types places itself.
@@ -294,23 +297,63 @@ impl<'a> Walk<'a> {
                 self.scopes.pop();
             }
             ExprKind::Handle {
+                effect,
                 state,
                 body,
                 ret,
                 ops,
-                ..
             } => {
-                if let Some((_, s)) = state {
+                // The clause patterns are typed as the checker types them:
+                // the return clause binds the body's value (with the state
+                // after it), and an operation clause binds the operation's
+                // arguments, then the state, then the continuation.
+                let state_ty = state.as_ref().map(|(_, s)| {
                     self.expr(s, false);
-                }
+                    self.type_of(s)
+                });
                 self.expr(body, false);
+                let body_ty = self.type_of(body);
+                let ret_ty = match &state_ty {
+                    Some(st) => match (body_ty, st) {
+                        (Some(b), Some(st)) => Some(Type::Tuple(vec![b, st.clone()])),
+                        _ => None,
+                    },
+                    None => body_ty,
+                };
                 self.scoped(|w| {
-                    ret.pats.iter().for_each(|p| w.bind(p, None));
+                    if let Some(p) = ret.pats.first() {
+                        w.bind(p, ret_ty);
+                    }
+                    ret.pats.iter().skip(1).for_each(|p| w.bind(p, None));
                     w.expr(&ret.body, false);
                 });
+                let decl = self.effects.get(effect.name.as_str()).copied();
+                let vars: std::collections::BTreeMap<String, Type> = decl
+                    .map(|d| {
+                        d.generics
+                            .iter()
+                            .map(|g| g.name.clone())
+                            .zip(effect.args.iter().cloned())
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 for c in ops {
+                    let sig = decl.and_then(|d| d.ops.iter().find(|f| f.name == c.name));
+                    let mut tys: Vec<Option<Type>> = sig
+                        .map(|f| {
+                            f.params
+                                .iter()
+                                .map(|p| Some(substitute(&p.ty, &vars)))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if let Some(st) = &state_ty {
+                        tys.push(st.clone());
+                    }
                     self.scoped(|w| {
-                        c.pats.iter().for_each(|p| w.bind(p, None));
+                        for (i, p) in c.pats.iter().enumerate() {
+                            w.bind(p, tys.get(i).cloned().flatten());
+                        }
                         w.expr(&c.body, false);
                     });
                 }
@@ -349,6 +392,14 @@ pub(super) fn check(
             .iter()
             .filter_map(|i| match i {
                 Item::Adt(a) => Some((a.name.as_str(), a)),
+                _ => None,
+            })
+            .collect(),
+        effects: module
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Effect(e) => Some((e.name.as_str(), e)),
                 _ => None,
             })
             .collect(),

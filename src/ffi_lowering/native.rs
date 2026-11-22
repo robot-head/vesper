@@ -250,6 +250,9 @@ impl<M: Module> Codegen<'_, '_, M> {
                 }
             }
         }
+        // The length word is taken before any variadic padding shifts the
+        // argument positions.
+        let length = mapping_length.map(|i| c_args[i]);
         let abi = plan.function.abi();
         // Apple arm64 passes variadic arguments on the stack: zero words
         // fill the remaining argument registers first (`sys::Variadic`).
@@ -327,7 +330,6 @@ impl<M: Module> Codegen<'_, '_, M> {
         } else {
             None
         };
-        let length = mapping_length.map(|i| c_args[i]);
         let call = self.b.ins().call(callee, &c_args);
         let mut raw = self.b.inst_results(call).first().copied();
         if let (Some(len), Some(address)) = (length, raw) {
