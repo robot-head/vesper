@@ -132,7 +132,7 @@ fn lex(source: &str, limits: Limits) -> Result<Vec<Token>, Error> {
                 at += 3;
                 TokenKind::Ellipsis
             }
-            c @ (b'{' | b'}' | b'(' | b')' | b'[' | b']' | b',' | b';' | b':' | b'=') => {
+            c @ (b'{' | b'}' | b'(' | b')' | b'[' | b']' | b',' | b';' | b':' | b'=' | b'#') => {
                 at += 1;
                 TokenKind::Punct(c)
             }
@@ -493,8 +493,30 @@ impl Parser {
         }
         Ok(WireType::Struct(name))
     }
-    fn function(&mut self) -> Result<RawFunction, Error> {
-        self.keyword("fn")?;
+    /// `#[link_name = "symbol"]` before a `fn`: the C symbol it imports.
+    fn link_attribute(&mut self) -> Result<String, Error> {
+        self.expect(b'#')?;
+        self.expect(b'[')?;
+        self.keyword("link_name")?;
+        self.expect(b'=')?;
+        let symbol = self.text()?;
+        self.expect(b']')?;
+        if !c_identifier(&symbol) {
+            return Err(self.error(ErrorKind::Syntax, "link_name must be a C identifier"));
+        }
+        if !self.is_word("fn") {
+            return Err(self.error(
+                ErrorKind::Syntax,
+                "#[link_name] applies to the `fn` that follows it",
+            ));
+        }
+        Ok(symbol)
+    }
+    /// `fn symbol(..) -> ForeignVal[T];`, or with `keyword` "callback",
+    /// `callback Name(..) -> ForeignVal[T];`: the signature of a C
+    /// function pointer type.
+    fn function(&mut self, keyword: &str) -> Result<RawFunction, Error> {
+        self.keyword(keyword)?;
         let symbol = self.word()?;
         self.expect(b'(')?;
         let mut parameters = vec![];
@@ -708,6 +730,8 @@ impl Parser {
             errno,
             variadic,
             length,
+            link_name: None,
+            indirect: keyword == "callback",
         })
     }
     /// The type after `nocapture <access> name:`: a slice, a single pointee,
@@ -873,6 +897,10 @@ struct RawFunction {
     variadic: Option<usize>,
     /// The parameter named in a mapping result `Option[M[len]]`.
     length: Option<String>,
+    /// `#[link_name = "sym"]`.
+    link_name: Option<String>,
+    /// A `callback` declaration rather than a `fn`.
+    indirect: bool,
 }
 /// Whether a buffer of `s` may be viewed in place: its packed sequence
 /// stride is its C size.
@@ -882,6 +910,15 @@ fn in_place_scalar(s: Scalar) -> bool {
         Scalar::U8 | Scalar::U32 | Scalar::U64 | Scalar::I64 | Scalar::Usize
     )
 }
+/// A C identifier: what `#[link_name]` may name.
+fn c_identifier(n: &str) -> bool {
+    n.as_bytes()
+        .first()
+        .is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_')
+        && n.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+/// The first parameter of a callback type's call: the pointer.
+pub const CALLEE: &str = "callee";
 fn scalar(name: &str) -> Option<Scalar> {
     Some(match name {
         "u8" => Scalar::U8,
@@ -1040,12 +1077,15 @@ fn option<'a>(options: &'a BTreeMap<String, String>, key: &str) -> Result<&'a st
         )
     })
 }
+/// A bare library name: `-l<name>` and `lib<name>.so` (versioned ones such
+/// as `glib-2.0` included), never a flag or a path.
 fn link_name(n: &str) -> bool {
     n.as_bytes()
         .first()
         .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_')
         && n.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+            .all(|b| b.is_ascii_alphanumeric() || b"_-.".contains(&b))
+        && !n.contains("..")
 }
 pub(super) fn header(n: &str) -> bool {
     !n.is_empty()
@@ -1185,15 +1225,30 @@ pub(super) fn parse(source: &str, limits: Limits) -> Result<LibraryDescriptor, E
                 return Err(p.error(ErrorKind::Limit, "extern type declaration budget exceeded"));
             }
             extern_types.push(p.extern_type()?);
-        } else if p.is_word("fn") {
+        } else if p.is_word("fn") || p.is_word("callback") || p.peek_punct(0) == Some(b'#') {
             if raw_functions.len() >= limits.functions {
                 return Err(p.error(ErrorKind::Limit, "function declaration budget exceeded"));
             }
-            raw_functions.push(p.function()?);
+            let link_name = if p.peek_punct(0) == Some(b'#') {
+                Some(p.link_attribute()?)
+            } else {
+                None
+            };
+            let keyword = if p.is_word("callback") {
+                "callback"
+            } else {
+                "fn"
+            };
+            let mut f = p.function(keyword)?;
+            f.link_name = link_name;
+            if f.indirect && f.variadic.is_some() {
+                return Err(p.error(ErrorKind::Unsupported, "a callback type cannot be variadic"));
+            }
+            raw_functions.push(f);
         } else {
             return Err(p.error(
                 ErrorKind::Unsupported,
-                "expected fn/enum/wire struct/linear extern type/affine extern type; C structs, code and variadics are unsupported",
+                "expected fn/callback/enum/wire struct/linear extern type/affine extern type; C structs and code are unsupported",
             ));
         }
     }
@@ -1219,6 +1274,20 @@ pub(super) fn parse(source: &str, limits: Limits) -> Result<LibraryDescriptor, E
         extern_types.iter().map(ExternTypeDescriptor::name),
         "duplicate extern type declaration",
     )?;
+    // Each `callback` declares a copyable handle type of its name: the C
+    // function pointer.
+    for f in raw_functions.iter().filter(|f| f.indirect) {
+        extern_types.push(ExternTypeDescriptor {
+            name: f.symbol.clone(),
+            linearity: Linearity::Callback,
+            drop: None,
+            mapping: None,
+        });
+    }
+    unique(
+        extern_types.iter().map(ExternTypeDescriptor::name),
+        "duplicate extern or callback type declaration",
+    )?;
     extern_types.sort_by(|a, b| a.name.cmp(&b.name));
     for t in &extern_types {
         if enums.iter().any(|e| e.name() == t.name())
@@ -1238,7 +1307,29 @@ pub(super) fn parse(source: &str, limits: Limits) -> Result<LibraryDescriptor, E
     let mut functions = vec![];
     for f in raw_functions {
         let mut parameters = vec![];
+        if f.indirect {
+            reject_reserved_type(&f.symbol)?;
+            // The call of a callback type takes the pointer first.
+            let callee = extern_types
+                .iter()
+                .find(|t| t.name() == f.symbol)
+                .expect("declared above");
+            parameters.push(ParameterDescriptor {
+                name: CALLEE.into(),
+                ty: ParameterType::Handle {
+                    handle: callee.clone(),
+                    access: HandleAccess::In,
+                },
+            });
+        }
         for (index, (name, ty)) in f.parameters.into_iter().enumerate() {
+            if f.indirect && name == CALLEE {
+                return Err(Error::new(
+                    ErrorKind::Duplicate,
+                    0..0,
+                    format!("`{CALLEE}` names the pointer of callback `{}`", f.symbol),
+                ));
+            }
             let ty = match ty {
                 RawParameterType::Value(t) => {
                     let t = resolve(t, &enums, &extern_types)?;
@@ -1333,6 +1424,34 @@ pub(super) fn parse(source: &str, limits: Limits) -> Result<LibraryDescriptor, E
                     ));
                 }
             }
+            // A callback's arguments are each one machine word, as C hands
+            // them to (or takes them from) a function pointer.
+            if f.indirect && matches!(ty, ParameterType::Slice { .. }) {
+                return Err(Error::new(
+                    ErrorKind::Unsupported,
+                    0..0,
+                    format!(
+                        "parameter `{name}` of callback `{}` is a slice, which is two words; a callback takes word-sized carriers (integers, bool, enums, handles, pointers, CStr)",
+                        f.symbol
+                    ),
+                ));
+            }
+            // A function pointer is a copyable word: lent `in`, never
+            // replaced or consumed.
+            if let ParameterType::Handle { handle, access } = &ty
+                && handle.linearity() == Linearity::Callback
+                && *access != HandleAccess::In
+            {
+                return Err(Error::new(
+                    ErrorKind::Unsupported,
+                    0..0,
+                    format!(
+                        "callback parameter `{name}: {}` is passed `in`; `{}` has no meaning for a function pointer",
+                        handle.name(),
+                        access.keyword()
+                    ),
+                ));
+            }
             parameters.push(ParameterDescriptor { name, ty });
         }
         // A refused C string skips the call, so it must not take a handle
@@ -1369,6 +1488,8 @@ pub(super) fn parse(source: &str, limits: Limits) -> Result<LibraryDescriptor, E
             errno: f.errno,
             variadic: f.variadic,
             mapping_length,
+            link_name: f.link_name,
+            indirect: f.indirect,
         });
     }
     functions.sort_by(|a, b| a.symbol.cmp(&b.symbol));

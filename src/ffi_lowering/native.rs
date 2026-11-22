@@ -93,6 +93,13 @@ fn identical(p: &Pointee, little: bool) -> bool {
     }
 }
 
+/// What a foreign call calls: an imported symbol, or (a callback type's
+/// call) the C function pointer it was handed.
+enum Callee {
+    Direct(ir::FuncRef),
+    Indirect(ir::SigRef, ir::Value),
+}
+
 impl<M: Module> Codegen<'_, '_, M> {
     pub(super) fn foreign_perform(
         &mut self,
@@ -117,10 +124,12 @@ impl<M: Module> Codegen<'_, '_, M> {
             ));
         }
         // SH4 swap point (#1287): the `ffi` hook may emit this call
-        // (`codegen_swap::ffi`); none is installed by default.
-        // Foreign memory viewed in place (pinned buffers and mappings) is
-        // lowered here only; the hook is not offered such calls.
-        if !plan.function.uses_foreign_memory()
+        // (`codegen_swap::ffi`); none is installed by default. A callback
+        // type's call is not offered: the steps name a symbol. Foreign
+        // memory viewed in place (pinned buffers and mappings) is lowered
+        // here only, so the hook is not offered such calls either.
+        if !plan.function.is_indirect()
+            && !plan.function.uses_foreign_memory()
             && let Some(v) = self.foreign_perform_swapped(&plan, &signature, args)?
         {
             return Ok(v);
@@ -269,24 +278,28 @@ impl<M: Module> Codegen<'_, '_, M> {
         if let Some(t) = abi.result {
             sig.returns.push(abi_param(t, pointer));
         }
-        // A `@vesper-std/cpu` instruction: a local leaf function of machine
-        // code for this target (`ffi::cpu`), not an import.
+        // A callback type's call goes through the pointer in its first
+        // argument (the handle word); a `@vesper-std/cpu` instruction is a
+        // local leaf function of machine code for this target (`ffi::cpu`);
+        // every other call imports its symbol.
         let architecture = self.m.isa().triple().architecture;
-        let callee = match ffi::cpu::code_for(plan.function.symbol(), architecture)? {
-            Some((arch, code)) => {
-                if arch == ffi::cpu::Arch::X86_64 {
-                    sig.call_conv = cranelift_codegen::isa::CallConv::SystemV;
-                }
-                self.foreign_code(plan.function.symbol(), &sig, &code)?
+        let cpu = ffi::cpu::code_for(plan.function.symbol(), architecture)?;
+        let callee = if plan.function.is_indirect() {
+            let pointer = c_args.remove(0);
+            Callee::Indirect(self.b.import_signature(sig), pointer)
+        } else if let Some((arch, code)) = cpu {
+            if arch == ffi::cpu::Arch::X86_64 {
+                sig.call_conv = cranelift_codegen::isa::CallConv::SystemV;
             }
-            None => {
-                self.foreign_symbol_free(plan.function.symbol(), Linkage::Import)?;
-                let callee = self
-                    .m
-                    .declare_function(plan.function.symbol(), Linkage::Import, &sig)
-                    .map_err(|e| format!("foreign symbol '{}': {e}", plan.function.symbol()))?;
-                self.m.declare_func_in_func(callee, self.b.func)
-            }
+            Callee::Direct(self.foreign_code(plan.function.symbol(), &sig, &code)?)
+        } else {
+            let symbol = plan.function.link_symbol();
+            self.foreign_symbol_free(symbol, Linkage::Import)?;
+            let callee = self
+                .m
+                .declare_function(symbol, Linkage::Import, &sig)
+                .map_err(|e| format!("foreign symbol '{symbol}': {e}"))?;
+            Callee::Direct(self.m.declare_func_in_func(callee, self.b.func))
         };
         // A `CStr` argument holding a NUL byte refuses the whole call:
         // `Err(ForeignInvalid { raw: offset })` of the first such argument.
@@ -330,7 +343,10 @@ impl<M: Module> Codegen<'_, '_, M> {
         } else {
             None
         };
-        let call = self.b.ins().call(callee, &c_args);
+        let call = match callee {
+            Callee::Direct(f) => self.b.ins().call(f, &c_args),
+            Callee::Indirect(sig, pointer) => self.b.ins().call_indirect(sig, pointer, &c_args),
+        };
         let mut raw = self.b.inst_results(call).first().copied();
         if let (Some(len), Some(address)) = (length, raw) {
             raw = Some(self.foreign_mapping(address, len)?);
@@ -1349,6 +1365,11 @@ impl<M: Module> Codegen<'_, '_, M> {
         if crate::codegen_swap::hook(crate::codegen_swap::Family::Ffi).is_none() {
             return Ok(None);
         }
+        // Apple arm64 pads a variadic call's argument registers with zero
+        // words (`sys::Variadic`), which the steps do not carry.
+        if plan.function.abi().variadic.is_some_and(|v| v.padding > 0) {
+            return Ok(None);
+        }
         let descriptors = plan.function.parameters();
         let handler = match plan.handler {
             Handler::Direct => 0,
@@ -1544,11 +1565,12 @@ impl<M: Module> Codegen<'_, '_, M> {
         if let Some(t) = abi.result {
             sig.returns.push(abi_param(t, pointer));
         }
-        self.foreign_symbol_free(plan.function.symbol(), Linkage::Import)?;
+        let symbol = plan.function.link_symbol();
+        self.foreign_symbol_free(symbol, Linkage::Import)?;
         let callee = self
             .m
-            .declare_function(plan.function.symbol(), Linkage::Import, &sig)
-            .map_err(|e| format!("foreign symbol '{}': {e}", plan.function.symbol()))?;
+            .declare_function(symbol, Linkage::Import, &sig)
+            .map_err(|e| format!("foreign symbol '{symbol}': {e}"))?;
         let callee = self.m.declare_func_in_func(callee, self.b.func);
         let refusal = if strings.is_empty() {
             None

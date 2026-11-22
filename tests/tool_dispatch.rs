@@ -44,6 +44,39 @@ fn run(program: &Path, args: &[&str]) -> Output {
         .unwrap()
 }
 
+/// `command`'s output, retried while a script a test just wrote is busy
+/// (`ETXTBSY`): another test thread's fork can still hold the script's write
+/// descriptor until that child execs, and the kernel refuses to exec a file
+/// open for writing. The dispatcher reports that as a spawn failure (exit 1,
+/// "Text file busy"), and spawning `vesper` itself fails with the raw error.
+#[cfg(unix)]
+fn output_once_not_busy(command: &mut Command) -> Output {
+    retry_busy(|| command.output())
+}
+
+/// `run`'s output, retried as [`output_once_not_busy`] does.
+#[cfg(unix)]
+fn retry_busy(mut run: impl FnMut() -> std::io::Result<Output>) -> Output {
+    const BUSY: i32 = 26; // ETXTBSY on Linux and macOS
+    for attempt in 1.. {
+        let busy = match run() {
+            Ok(out) => {
+                let busy = out.status.code() == Some(1)
+                    && String::from_utf8_lossy(&out.stderr).contains("os error 26");
+                if !busy || attempt == 50 {
+                    return out;
+                }
+                busy
+            }
+            Err(e) if e.raw_os_error() == Some(BUSY) && attempt < 50 => true,
+            Err(e) => panic!("spawn: {e}"),
+        };
+        assert!(busy);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    unreachable!()
+}
+
 /// A private directory holding only a link to (or copy of) the compiler, so
 /// no tool is beside it.
 fn lone_vesper(tag: &str) -> (PathBuf, PathBuf) {
@@ -204,21 +237,18 @@ fn external_subcommands_pass_streams_and_status_through() {
     fs::create_dir_all(&later).unwrap();
     fs::rename(dir.join("later-echo"), later.join("vesper-echo-dispatch")).unwrap();
     let path = env::join_paths([shadow, later, "/usr/bin".into(), "/bin".into()]).unwrap();
-    let mut child = Command::new(&exe)
-        .args(["echo-dispatch", "a b", "--json", ""])
-        .env("PATH", path)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"from stdin\n")
-        .unwrap();
-    let out = child.wait_with_output().unwrap();
+    let out = retry_busy(|| {
+        let mut child = Command::new(&exe)
+            .args(["echo-dispatch", "a b", "--json", ""])
+            .env("PATH", &path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        // A busy script never reads stdin; the pipe may already be closed.
+        let _ = child.stdin.take().unwrap().write_all(b"from stdin\n");
+        child.wait_with_output()
+    });
     let _ = fs::remove_dir_all(&dir);
     assert_eq!(out.status.code(), Some(7));
     assert_eq!(
@@ -236,12 +266,12 @@ fn a_tool_killed_by_a_signal_exits_with_128_plus_the_signal() {
     let script = dir.join("vesper-signal-dispatch");
     fs::write(&script, "#!/bin/sh\nkill -TERM $$\n").unwrap();
     fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
-    let out = Command::new(&exe)
-        .arg("signal-dispatch")
-        .env("PATH", "/usr/bin:/bin")
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
+    let out = output_once_not_busy(
+        Command::new(&exe)
+            .arg("signal-dispatch")
+            .env("PATH", "/usr/bin:/bin")
+            .stdin(Stdio::null()),
+    );
     let _ = fs::remove_dir_all(&dir);
     assert_eq!(out.status.code(), Some(128 + 15));
 }

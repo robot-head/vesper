@@ -7,6 +7,7 @@ mod assume;
 mod clayout;
 mod foreign;
 mod parser;
+pub use parser::CALLEE;
 
 pub use assume::{
     Assumption, AssumptionCheck, BoundaryReport, Checkability, DeclaredAssumption,
@@ -346,12 +347,16 @@ pub enum Linearity {
     Affine,
     /// `linear extern type`: every handle reaches exactly one `sink` import.
     Linear,
+    /// `callback Name(..)`: a C function pointer of that signature, which
+    /// Vesper holds as a copyable word and calls with `Lib::Name(h, ..)`.
+    Callback,
 }
 impl Linearity {
     pub fn keyword(self) -> &'static str {
         match self {
             Self::Affine => "affine",
             Self::Linear => "linear",
+            Self::Callback => "callback",
         }
     }
 }
@@ -633,11 +638,30 @@ pub struct FunctionDescriptor {
     convention: CallingConvention,
     errno: bool,
     variadic: Option<usize>,
+    /// `#[link_name = "sym"]`: the C symbol, when it is not `symbol`.
+    link_name: Option<String>,
+    /// A `callback` type's call: the C function pointer is the first
+    /// parameter (a handle of the callback type), not a symbol.
+    indirect: bool,
     /// `-> ForeignVal[Option[M[len]]]`: the index of the parameter that
     /// gives a mapping result's length in elements.
     mapping_length: Option<usize>,
 }
 impl FunctionDescriptor {
+    /// The C symbol a direct call imports: `#[link_name]`, or the
+    /// declared name.
+    pub fn link_symbol(&self) -> &str {
+        self.link_name.as_deref().unwrap_or(&self.symbol)
+    }
+    /// `#[link_name = "sym"]`, when declared.
+    pub fn link_name(&self) -> Option<&str> {
+        self.link_name.as_deref()
+    }
+    /// Whether this is the call of a `callback` type: the callee is the
+    /// pointer in the first parameter, and [`Self::abi`] leaves it out.
+    pub fn is_indirect(&self) -> bool {
+        self.indirect
+    }
     /// The parameter giving the length of a mapping result
     /// (`ForeignVal[Option[M[len]]]`), if the result is a mapping.
     pub fn mapping_length(&self) -> Option<usize> {
@@ -682,6 +706,9 @@ impl FunctionDescriptor {
         let mut parameters = vec![];
         let mut variadic = None;
         for (index, p) in self.parameters.iter().enumerate() {
+            if self.indirect && index == 0 {
+                continue;
+            }
             if self.variadic == Some(index) {
                 // Every parameter is an integer or pointer word, so the
                 // fixed words so far are exactly the registers they use.
@@ -850,6 +877,107 @@ fn canonicalize(library: &LibraryDescriptor, limit: usize) -> Result<Vec<u8>, Er
             }
             Ok(())
         }
+        /// One function's declaration: name, parameters, result and the
+        /// suffixes appended only when declared.
+        fn function(&mut self, f: &FunctionDescriptor) -> Result<(), Error> {
+            let e = self;
+            e.text(&f.symbol)?;
+            e.count(f.parameters.len())?;
+            for p in &f.parameters {
+                e.text(&p.name)?;
+                match &p.ty {
+                    ParameterType::Value(t) => {
+                        e.text("value")?;
+                        e.value(t)?;
+                    }
+                    ParameterType::Slice {
+                        element,
+                        access,
+                        nullable,
+                    } => {
+                        let access = match access {
+                            Access::In => "in",
+                            Access::Inout => "inout",
+                        };
+                        match (element, nullable) {
+                            // The original form keeps its exact canonical bytes.
+                            (Pointee::Scalar(s), false) => {
+                                e.text("nocapture-slice")?;
+                                e.text(access)?;
+                                e.text(s.name())?;
+                            }
+                            _ => {
+                                e.text("nocapture-slice/2")?;
+                                e.text(access)?;
+                                e.text(if *nullable { "option" } else { "nonnull" })?;
+                                match element {
+                                    Pointee::Scalar(s) => {
+                                        e.text("scalar")?;
+                                        e.text(s.name())?;
+                                    }
+                                    Pointee::Struct(w) => {
+                                        e.text("wire-struct")?;
+                                        e.text(w.name())?;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    ParameterType::Pointer {
+                        pointee,
+                        access,
+                        nullable,
+                    } => {
+                        e.text("nocapture-pointer")?;
+                        e.text(access.keyword())?;
+                        e.text(if *nullable { "option" } else { "nonnull" })?;
+                        match pointee {
+                            Pointee::Scalar(s) => {
+                                e.text("scalar")?;
+                                e.text(s.name())?;
+                            }
+                            Pointee::Struct(w) => {
+                                e.text("wire-struct")?;
+                                e.text(w.name())?;
+                            }
+                        }
+                    }
+                    ParameterType::Handle { handle, access } => {
+                        e.text("extern-handle")?;
+                        e.text(access.keyword())?;
+                        e.text(handle.name())?;
+                    }
+                    ParameterType::CStr => e.text("nocapture-cstr")?,
+                    ParameterType::Pinned { element, access } => {
+                        e.text("pinned-buffer")?;
+                        e.text(match access {
+                            Access::In => "in",
+                            Access::Inout => "inout",
+                        })?;
+                        e.text(element.name())?;
+                    }
+                }
+            }
+            e.value(&f.result)?;
+            // Appended only when declared, like `errno`.
+            if let Some(length) = f.mapping_length {
+                e.text("mapping/length-from")?;
+                e.count(length)?;
+            }
+            // Appended only when declared, so other functions keep their bytes.
+            if f.errno {
+                e.text("errno/after-call")?;
+            }
+            if let Some(first) = f.variadic {
+                e.text("variadic/from")?;
+                e.count(first)?;
+            }
+            if let Some(link) = &f.link_name {
+                e.text("link-name")?;
+                e.text(link)?;
+            }
+            Ok(())
+        }
         fn value(&mut self, t: &ValueType) -> Result<(), Error> {
             match t {
                 ValueType::Unit => self.text("unit"),
@@ -912,98 +1040,21 @@ fn canonicalize(library: &LibraryDescriptor, limit: usize) -> Result<Vec<u8>, Er
             e.bytes(&value.to_le_bytes())?;
         }
     }
-    e.count(library.functions.len())?;
-    for f in &library.functions {
-        e.text(&f.symbol)?;
-        e.count(f.parameters.len())?;
-        for p in &f.parameters {
-            e.text(&p.name)?;
-            match &p.ty {
-                ParameterType::Value(t) => {
-                    e.text("value")?;
-                    e.value(t)?;
-                }
-                ParameterType::Slice {
-                    element,
-                    access,
-                    nullable,
-                } => {
-                    let access = match access {
-                        Access::In => "in",
-                        Access::Inout => "inout",
-                    };
-                    match (element, nullable) {
-                        // The original form keeps its exact canonical bytes.
-                        (Pointee::Scalar(s), false) => {
-                            e.text("nocapture-slice")?;
-                            e.text(access)?;
-                            e.text(s.name())?;
-                        }
-                        _ => {
-                            e.text("nocapture-slice/2")?;
-                            e.text(access)?;
-                            e.text(if *nullable { "option" } else { "nonnull" })?;
-                            match element {
-                                Pointee::Scalar(s) => {
-                                    e.text("scalar")?;
-                                    e.text(s.name())?;
-                                }
-                                Pointee::Struct(w) => {
-                                    e.text("wire-struct")?;
-                                    e.text(w.name())?;
-                                }
-                            }
-                        }
-                    }
-                }
-                ParameterType::Pointer {
-                    pointee,
-                    access,
-                    nullable,
-                } => {
-                    e.text("nocapture-pointer")?;
-                    e.text(access.keyword())?;
-                    e.text(if *nullable { "option" } else { "nonnull" })?;
-                    match pointee {
-                        Pointee::Scalar(s) => {
-                            e.text("scalar")?;
-                            e.text(s.name())?;
-                        }
-                        Pointee::Struct(w) => {
-                            e.text("wire-struct")?;
-                            e.text(w.name())?;
-                        }
-                    }
-                }
-                ParameterType::Handle { handle, access } => {
-                    e.text("extern-handle")?;
-                    e.text(access.keyword())?;
-                    e.text(handle.name())?;
-                }
-                ParameterType::CStr => e.text("nocapture-cstr")?,
-                ParameterType::Pinned { element, access } => {
-                    e.text("pinned-buffer")?;
-                    e.text(match access {
-                        Access::In => "in",
-                        Access::Inout => "inout",
-                    })?;
-                    e.text(element.name())?;
-                }
-            }
-        }
-        e.value(&f.result)?;
-        // Appended only when declared, like `errno`.
-        if let Some(length) = f.mapping_length {
-            e.text("mapping/length-from")?;
-            e.count(length)?;
-        }
-        // Appended only when declared, so other functions keep their bytes.
-        if f.errno {
-            e.text("errno/after-call")?;
-        }
-        if let Some(first) = f.variadic {
-            e.text("variadic/from")?;
-            e.count(first)?;
+    let direct: Vec<&FunctionDescriptor> =
+        library.functions.iter().filter(|f| !f.indirect).collect();
+    let callbacks: Vec<&FunctionDescriptor> =
+        library.functions.iter().filter(|f| f.indirect).collect();
+    e.count(direct.len())?;
+    for f in direct {
+        e.function(f)?;
+    }
+    // Appended only when present, so other libraries keep their bytes: each
+    // callback's call, whose first parameter is the pointer itself.
+    if !callbacks.is_empty() {
+        e.text("callbacks")?;
+        e.count(callbacks.len())?;
+        for f in callbacks {
+            e.function(f)?;
         }
     }
     // Appended only when present, so descriptors without wire structs keep
@@ -1054,18 +1105,24 @@ fn canonicalize(library: &LibraryDescriptor, limit: usize) -> Result<Vec<u8>, Er
         }
     }
     // Appended only when present, like wire structs.
-    if !library.extern_types.is_empty() {
+    // A callback type is spelled by its call in "callbacks" above.
+    let externs: Vec<&ExternTypeDescriptor> = library
+        .extern_types
+        .iter()
+        .filter(|t| t.linearity != Linearity::Callback)
+        .collect();
+    if !externs.is_empty() {
         e.text("extern-types")?;
-        e.count(library.extern_types.len())?;
-        for t in &library.extern_types {
+        e.count(externs.len())?;
+        for t in &externs {
             e.text(t.name())?;
             e.text(t.linearity().keyword())?;
         }
         // Appended only when declared, so libraries without drop imports
         // keep their canonical bytes.
-        if library.extern_types.iter().any(|t| t.drop.is_some()) {
+        if externs.iter().any(|t| t.drop.is_some()) {
             e.text("drop-imports")?;
-            for t in &library.extern_types {
+            for t in &externs {
                 e.text(t.drop.as_deref().unwrap_or(""))?;
             }
         }
