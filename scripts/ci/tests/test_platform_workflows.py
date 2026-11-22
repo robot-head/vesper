@@ -264,7 +264,8 @@ class PlatformWorkflowTests(unittest.TestCase):
         sha = "a" * 40 if sha is None else sha
         if statuses is None:
             statuses = [{"id": 1, "context": "Test all targets", "state": "success"},
-                        {"id": 2, "context": "Native and acceptance scripts", "state": "success"}]
+                        {"id": 2, "context": "Native and acceptance scripts", "state": "success"},
+                        {"id": 4, "context": "Self-host differentials", "state": "success"}]
         job = self.release["jobs"][which]
         step = next(s for s in job["steps"] if s.get("uses") == "actions/github-script@v7")
         code = step["with"]["script"]
@@ -324,11 +325,15 @@ const fn = new Function("github", "context", "core", "process", "require",
 
     def test_release_gate_uses_latest_linux_states_and_fails_closed(self):
         good = [{"id": 1, "context": "Test all targets", "state": "success"},
-                {"id": 2, "context": "Native and acceptance scripts", "state": "success"}]
+                {"id": 2, "context": "Native and acceptance scripts", "state": "success"},
+                {"id": 4, "context": "Self-host differentials", "state": "success"}]
         for which in ("linux", "ready"):
             for state in ("failure", "error", "pending"):
-                statuses = good + [{"id": 3, "context": "Test all targets", "state": state}]
-                self.assertFalse(self.gate(which, statuses=statuses)["ok"])
+                for context in ("Test all targets", "Self-host differentials"):
+                    statuses = good + [{"id": 5, "context": context, "state": state}]
+                    self.assertFalse(self.gate(which, statuses=statuses)["ok"])
+            # A candidate without the self-host check (#1519) is not ready.
+            self.assertFalse(self.gate(which, statuses=good[:2])["ok"])
             self.assertFalse(self.gate(which, statuses=good[:1])["ok"])
             self.assertFalse(self.gate(which, statuses=[])["ok"])
             # Input order cannot let an old failure replace a newer success.
