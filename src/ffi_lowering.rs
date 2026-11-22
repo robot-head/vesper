@@ -1849,6 +1849,7 @@ fn describe_value(v: &ValueType) -> String {
         ValueType::Handle { handle, .. } | ValueType::NonNullHandle { handle } => {
             handle.name().into()
         }
+        ValueType::CStr => "Option[ChunkSeq[u8]] (a copy of the C string)".into(),
     }
 }
 

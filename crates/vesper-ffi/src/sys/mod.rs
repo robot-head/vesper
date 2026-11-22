@@ -362,6 +362,12 @@ pub enum ValueType {
     NonNullHandle {
         handle: ExternTypeDescriptor,
     },
+    /// `ForeignVal[Option[CStr]]`: a `const char *` result the library
+    /// keeps (as `getenv`, `readdir`'s names or `strerror` return one). The
+    /// call copies the bytes before the NUL into a fresh `ChunkSeq[u8]`
+    /// right after C returns, so source code receives
+    /// `Option[ChunkSeq[u8]]`; `NULL` is `None`. C keeps its string.
+    CStr,
 }
 /// Whether an `extern type`'s handles must be finalized.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -804,9 +810,10 @@ fn carrier(t: &ValueType) -> Option<AbiType> {
         ValueType::Float(f) => AbiType::Float(*f),
         ValueType::Bool => AbiType::Integer(Scalar::U8),
         ValueType::Enum(e) => AbiType::Integer(e.scalar()),
-        ValueType::Address { .. } | ValueType::Handle { .. } | ValueType::NonNullHandle { .. } => {
-            AbiType::Pointer
-        }
+        ValueType::Address { .. }
+        | ValueType::Handle { .. }
+        | ValueType::NonNullHandle { .. }
+        | ValueType::CStr => AbiType::Pointer,
     })
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1067,6 +1074,7 @@ fn canonicalize(library: &LibraryDescriptor, limit: usize) -> Result<Vec<u8>, Er
                     self.text("nonnull-handle")?;
                     self.text(handle.name())
                 }
+                ValueType::CStr => self.text("nullable-cstr-copy"),
             }
         }
     }

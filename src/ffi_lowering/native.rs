@@ -303,8 +303,8 @@ impl<M: Module> Codegen<'_, '_, M> {
         // (`codegen_swap::ffi`); none is installed by default. A callback
         // type's call is not offered: the steps name a symbol. Nor is a
         // call passing or returning a float: the steps carry integer words.
-        // Nor, yet, is one taking a `CStrList` (SH6 lane 13; the Vesper
-        // emitter mirrors it later).
+        // Nor, yet, is one taking a `CStrList` or returning a C string (SH6
+        // lane 13; the Vesper emitter mirrors them later).
         // Foreign memory viewed in place (pinned buffers and mappings) is
         // lowered here only, so the hook is not offered such calls either.
         let abi = plan.function.abi();
@@ -322,6 +322,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                 )
             })
             && !plan.function.uses_foreign_memory()
+            && *plan.function.result() != ValueType::CStr
             && let Some(v) = self.foreign_perform_swapped(&plan, &signature, args)?
         {
             return Ok(v);
@@ -692,6 +693,34 @@ impl<M: Module> Codegen<'_, '_, M> {
         self.b.seal_block(join);
         Ok(self.b.block_params(join)[0])
     }
+    /// The `ChunkSeq[u8]` copy of the C string at `address` (its bytes
+    /// before the NUL), or 0 when `address` is `NULL`. The copy has room
+    /// for one byte more, so it is never the shared empty header.
+    fn foreign_cstr_copy(&mut self, address: ir::Value) -> Result<ir::Value, String> {
+        let copy = self.b.create_block();
+        let join = self.b.create_block();
+        self.b.append_block_param(join, types::I64);
+        let zero = self.b.ins().iconst(types::I64, 0);
+        let null = self.b.ins().icmp_imm(IntCC::Equal, address, 0);
+        self.branch(null, join, &[ir::BlockArg::Value(zero)], copy, &[]);
+        self.b.switch_to_block(copy);
+        self.b.seal_block(copy);
+        let strlen = self.foreign_libc("strlen", 1, true)?;
+        let memcpy = self.foreign_libc("memcpy", 3, true)?;
+        let call = self.b.ins().call(strlen, &[address]);
+        let len = self.b.inst_results(call)[0];
+        let cap = self.b.ins().iadd_imm(len, 1);
+        let stride = self.b.ins().iconst(types::I64, 1);
+        let header = self.seq_make(cap, stride)?;
+        let flags = ir::MemFlags::new();
+        let data = self.b.ins().load(types::I64, flags, header, 16);
+        self.b.ins().call(memcpy, &[data, address, len]);
+        self.b.ins().store(flags, len, header, 0);
+        self.jump(join, &[ir::BlockArg::Value(header)]);
+        self.b.switch_to_block(join);
+        self.b.seal_block(join);
+        Ok(self.b.block_params(join)[0])
+    }
     /// A `CStrList` argument: a NUL-terminated `malloc` copy of the `len`
     /// bytes at `data`, and a `malloc`'d NULL-terminated array pointing at
     /// each string in it (every string ends at a NUL; a last one without
@@ -927,9 +956,8 @@ impl<M: Module> Codegen<'_, '_, M> {
             ValueType::Unit
             | ValueType::Address { .. }
             | ValueType::Handle { .. }
-            | ValueType::NonNullHandle { .. } => {
-                Err("foreign parameter type has no native lowering".into())
-            }
+            | ValueType::NonNullHandle { .. }
+            | ValueType::CStr => Err("foreign parameter type has no native lowering".into()),
         }
     }
     /// For a nullable parameter, the `Some` payload and its presence flag.
@@ -1295,6 +1323,22 @@ impl<M: Module> Codegen<'_, '_, M> {
                 self.foreign_validated(ty, valid, index, word)
             }
             ValueType::Address { .. } => Err("foreign address results have no lowering".into()),
+            ValueType::CStr => {
+                let word = raw()?;
+                let copy = self.foreign_cstr_copy(word)?;
+                let layout = Layout::of(self.world, ty)?;
+                let (some, fields) = layout.variant("Some").ok_or("Option lacks Some")?;
+                let offset = fields.first().ok_or("Some lacks a payload")?.offset;
+                let (none, _) = layout.variant("None").ok_or("Option lacks None")?;
+                let present = self.b.ins().icmp_imm(IntCC::NotEqual, word, 0);
+                let ptr = self.alloc(layout.size);
+                let some = self.b.ins().iconst(types::I64, some as i64);
+                let none = self.b.ins().iconst(types::I64, none as i64);
+                let tag = self.b.ins().select(present, some, none);
+                self.b.ins().store(ir::MemFlags::new(), tag, ptr, 0);
+                self.b.ins().store(ir::MemFlags::new(), copy, ptr, offset);
+                Ok(ptr)
+            }
             // The library promised a handle: `NULL` breaks the promise.
             ValueType::NonNullHandle { .. } => {
                 let word = raw()?;
@@ -1570,6 +1614,7 @@ fn value_words(v: &ValueType, out: &mut Vec<u64>) {
         ValueType::Handle { nullable, .. } => out.extend([5, u64::from(*nullable)]),
         ValueType::NonNullHandle { .. } => out.push(6),
         ValueType::Float(_) => unreachable!("calls with floats are not offered to the hook"),
+        ValueType::CStr => unreachable!("calls returning C strings are not offered to the hook"),
     }
 }
 fn integer_word(int: &vesper_ffi::Integer) -> u64 {
@@ -1821,7 +1866,8 @@ impl<M: Module> Codegen<'_, '_, M> {
                                 ValueType::Unit
                                 | ValueType::Address { .. }
                                 | ValueType::Handle { .. }
-                                | ValueType::NonNullHandle { .. } => {
+                                | ValueType::NonNullHandle { .. }
+                                | ValueType::CStr => {
                                     return Err(
                                         "foreign parameter type has no native lowering".into()
                                     );
@@ -2097,6 +2143,9 @@ impl<M: Module> Codegen<'_, '_, M> {
         match v {
             ValueType::Unit | ValueType::Scalar(_) => Ok(()),
             ValueType::Float(_) => unreachable!("calls with floats are not offered to the hook"),
+            ValueType::CStr => {
+                unreachable!("calls returning C strings are not offered to the hook")
+            }
             ValueType::Bool | ValueType::Enum(_) => validated(self.world, out),
             ValueType::Address { .. } => Err("foreign address results have no lowering".into()),
             ValueType::NonNullHandle { .. } => {

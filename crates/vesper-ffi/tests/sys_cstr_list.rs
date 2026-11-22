@@ -61,3 +61,24 @@ fn the_cstr_list_name_is_reserved() {
         assert!(e.to_string().contains("reserved"), "{body}: {e}");
     }
 }
+
+// `-> ForeignVal[Option[CStr]]` (gap G1): a C string result.
+#[test]
+fn a_c_string_result_is_one_pointer() {
+    let lib =
+        parse_body("fn getenv(nocapture in name: CStr) -> ForeignVal[Option[CStr]];").unwrap();
+    let f = lib.function("getenv").unwrap();
+    assert_eq!(f.result(), &ValueType::CStr);
+    assert_eq!(f.abi().result, Some(AbiType::Pointer));
+    let address = parse_body("fn getenv(nocapture in name: CStr) -> ForeignVal[u64];").unwrap();
+    assert_ne!(lib.identity(), address.identity());
+}
+
+#[test]
+fn a_callback_cannot_return_a_c_string() {
+    let e = parse_body(
+        "callback Name(x: u64) -> ForeignVal[Option[CStr]]; fn f() -> ForeignVal[Unit];",
+    )
+    .unwrap_err();
+    assert!(e.to_string().contains("C string"), "{e}");
+}
