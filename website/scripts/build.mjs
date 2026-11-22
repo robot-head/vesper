@@ -26,7 +26,10 @@ await writeFile(resolve(out, 'index.html'), insertFigures(html));
 const guide = await readFile(resolve(root, 'language.html'), 'utf8');
 await writeFile(resolve(out, 'language.html'), insertFigures(guide));
 const chapters = await buildDocs(root, out);
-const tour = await buildTour(root, out);
+const wasm = await readFile(resolve(root, '../target/wasm32-unknown-unknown/port-compiler/vesper_tour_wasm.wasm'));
+const { instance } = await WebAssembly.instantiate(wasm);
+await writeFile(resolve(out, 'vesper-tour.wasm'), wasm);
+const tour = await buildTour(root, out, instance.exports);
 for (const file of ['search.js', 'docs.css']) {
   await cp(resolve(root, 'docs', file), resolve(out, 'docs', file));
 }
@@ -36,8 +39,6 @@ await writeFile(resolve(out, 'sitemap.xml'), sitemap.replace('</urlset>', `${cha
 for (const path of ['assets', 'brand', 'diagrams', 'site.css', 'site.js', 'tour-editor.js', 'tour-worker.js', 'tour-wasm.js', 'favicon.svg', 'vesper-specification.pdf', 'CNAME', 'robots.txt']) {
   await cp(resolve(root, path), resolve(out, path), { recursive: true });
 }
-const wasm = resolve(root, '../target/wasm32-unknown-unknown/port-compiler/vesper_tour_wasm.wasm');
-await cp(wasm, resolve(out, 'vesper-tour.wasm'));
 const css = await highlightSite(out, ['index.html', 'language.html', 'docs/index.html', ...chapters, ...tour]);
 await appendFile(resolve(out, 'site.css'), '\n' + css);
 try { await cp(resolve(root, 'share.jpg'), resolve(out, 'share.jpg')); } catch (e) { if (e.code !== 'ENOENT') throw e; }
