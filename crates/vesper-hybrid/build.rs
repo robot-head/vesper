@@ -33,6 +33,13 @@ const MODULES: &[(&str, &str, &str)] = &[
     // SH4 lane 1 (#1275): the census lowering family, emitted through
     // lent Cranelift handles.
     ("hybrid_codegen", "modules/codegen", "port/codegen.rs"),
+    // SH4 lane 11 (#1285): vector and TiledSeq operations, through the
+    // `numeric` hook.
+    (
+        "hybrid_codegen_numeric",
+        "modules/codegen_numeric",
+        "port/codegen_numeric.rs",
+    ),
     // SH4 lane 12 (#1286): the export ABI v2 glue over the lent module.
     (
         "hybrid_codegen_export",

@@ -277,3 +277,56 @@ footer { border-top: 1px solid var(--line); }
   .contents { position: static; max-height: none; margin-bottom: 26px; }
   .reader-body pre { padding: 14px; }
 }
+
+.tour .tour-editor { border: 1px solid var(--line); padding: 1rem; border-radius: 6px; background: var(--surface); }
+.tour-editor h2 { margin-bottom: .75rem; }
+.tour-editor label { display: block; margin-bottom: .45rem; }
+.editor-source { position: relative; }
+.tour-editor textarea, .tour-editor .editor-highlight {
+  display: block;
+  margin: 0;
+  padding: .75rem;
+  font: .9rem/1.55 var(--mono);
+  font-variant-ligatures: none;
+  tab-size: 4;
+  white-space: pre;
+  overflow-wrap: normal;
+  letter-spacing: normal;
+}
+.tour-editor textarea {
+  position: relative;
+  width: 100%;
+  min-height: 10rem;
+  resize: vertical;
+  color: var(--vc-fg-primary);
+  caret-color: var(--vc-fg-primary);
+  background: var(--vc-bg-card);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+.tour-editor .editor-highlight {
+  position: absolute;
+  inset: 1px;
+  overflow: hidden;
+  pointer-events: none;
+  border-radius: 3px;
+}
+.editor-highlight span { font-style: normal; }
+.tour-editor textarea.has-highlight { color: transparent; background: transparent; }
+.tour-editor textarea.has-highlight::selection { color: transparent; background: color-mix(in srgb, var(--accent) 32%, transparent); }
+@media (forced-colors: active) {
+  .tour-editor .editor-highlight { display: none; }
+  .tour-editor textarea.has-highlight { color: CanvasText; caret-color: CanvasText; background: Canvas; }
+  .tour-editor textarea.has-highlight::selection { color: HighlightText; background: Highlight; }
+}
+.tour-editor .actions { margin-top: .8rem; }
+.tour-editor p { margin-block: .7rem; font-size: .9rem; }
+.tour-editor .editor-output { white-space: pre-wrap; overflow-wrap: anywhere; padding: .75rem; background: var(--bg); }
+
+.mode-figure table { width: 100%; border-collapse: collapse; text-align: left; }
+.mode-figure th, .mode-figure td { padding: .5rem .2rem; border-bottom: 1px solid var(--line); }
+.mode-figure table + p { margin-top: .7rem; font-size: .92rem; }
+
+.terminal-command { color: var(--ink); }
+.terminal-failure { color: #ffa3ac; }
+[data-vesper-theme="dawn"] .terminal-failure { color: #9e2438; }

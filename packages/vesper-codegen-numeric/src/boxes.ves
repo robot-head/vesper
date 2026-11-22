@@ -3,6 +3,53 @@
 // `vesper_box_free`, both counting live boxes in the local word
 // `vesper_box_live` with an atomic add.
 
+use @vesper/cranelift::{
+    DataId,
+    append_block_params_for_function_params,
+    block_param,
+    builder_new,
+    cc_eq,
+    cc_ult,
+    create_block,
+    data_align,
+    data_new,
+    data_zeroinit,
+    declare_data,
+    declare_function,
+    define_data,
+    import_data,
+    import_function,
+    ins_atomic_rmw,
+    ins_brif0,
+    ins_call,
+    ins_icmp,
+    ins_icmp_imm,
+    ins_jump0,
+    ins_return1,
+    ins_select,
+    ins_symbol_value,
+    ins_trap,
+    linkage_import,
+    linkage_local,
+    mem_trusted,
+    switch_to_block,
+    trap_user,
+    ty_i64,
+    vals1,
+    vals2,
+};
+use self::rt::{
+    rt_call,
+    rt_call1,
+    rt_finish,
+    rt_import,
+    rt_k,
+    rt_sig,
+};
+use self::tiled::{
+    tl_return0,
+};
+
 const BOX_OOM_STATUS: i64 = 72;
 // `AtomicRmwOp::Add` in the shim's codes.
 const ATOMIC_ADD: u32 = 1;

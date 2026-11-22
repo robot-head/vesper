@@ -7,15 +7,13 @@ description = "Vesper Aegis confidential-computing guest libraries: TDX/SEV-SNP/
 publish = false
 build = "build.rs"
 
-# This is the port-backed build: build.rs links the Vesper package in vesper/
-# and sets cfg(vesper_port), and the quote, report and claims parsers, the
-# timestamp parser and the relying-party policy check forward to it. The
-# compiler and every crate inside `cargo tree -p vesper -e normal,build` use
-# the frozen Rust seed copy, crates/vesper-aegis/seed (package
-# vesper-aegis-seed, same library name), instead; see "Crates the compiler
-# links" in docs/maintenance/porting-a-crate.md. No crate outside the
-# compiler's closure depends on Aegis, so every dependent links the Rust
-# build until the port reaches parity (port wave P3a lane 8, #1043).
+# build.rs links the Vesper package in vesper/ (@vesper/aegis), which is the
+# only implementation of the quote, report and claims parsers, the
+# timestamp parser and the relying-party policy check: SH6 lane 8 (#1403)
+# deleted their Rust once the port passed the flip gate (flip-gate.toml).
+# The compiler does not link Aegis, so there is no seed copy. The rest of
+# the crate (certificate chains, collateral, CCA/CoRIM, the gate, GPA and
+# host values) is still Rust; see docs/parallel-results/rust-exit-aegis.md.
 
 [features]
 # A deliberately wrong Vesper build, one edit per ported module (build.rs
@@ -41,14 +39,10 @@ vesper-port-abi = { path = "../vesper-port-abi" }
 [dev-dependencies]
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 vesper-bench = { path = "../vesper-bench" }
-# The frozen Rust build, for the ABBA benchmark against the port
-# (examples/abba.rs).
-vesper-aegis-rust = { path = "seed", package = "vesper-aegis-seed" }
 
 [build-dependencies]
 vesper-port-harness = { path = "../vesper-port-harness" }
 
 [lints.rust]
-# cfg(vesper_port) is set by build.rs (the harness); the seed package has no
-# build script.
+# cfg(vesper_port) is set by build.rs (the harness).
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(vesper_port)"] }
