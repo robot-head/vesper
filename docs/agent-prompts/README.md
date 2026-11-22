@@ -46,7 +46,8 @@ no Rust except the irreducible minimum: Stage 2 and a committed wasm seed,
 every ported library flipped at the 1.5x bar, the OS and C-API crates on
 `.vsys`, one crypto shim, and the Rust tests moved to Vesper. The program and
 the census are in [rust-exit-plan.md](../maintenance/rust-exit-plan.md) and
-[rust-census.md](../maintenance/rust-census.md).
+[rust-census.md](../maintenance/rust-census.md). [Gap wave 1](rust-exit-gaps-1/README.md)
+closes the compiler gaps those lanes report.
 
 Earlier assignments retained as dependencies:
 
