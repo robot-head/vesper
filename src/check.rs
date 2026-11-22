@@ -6135,6 +6135,10 @@ pub mod core_typing_probe {
         (t, diagnostics.len())
     }
 }
+pub const USE_OUTSIDE_PACKAGE: &str = "E0110";
+pub(crate) const FOREIGN_DROP_PREFIX: &str = "$drop$";
+pub(crate) const FOREIGN_HANDLE_FIELD: &str = "$handle";
+
 #[cfg(test)]
 mod isolated_item_tests {
     use super::*;
@@ -6281,7 +6285,3 @@ fn ok_tx() -> i64 {
         );
     }
 }
-
-pub const USE_OUTSIDE_PACKAGE: &str = "E0110";
-pub(crate) const FOREIGN_DROP_PREFIX: &str = "$drop$";
-pub(crate) const FOREIGN_HANDLE_FIELD: &str = "$handle";
