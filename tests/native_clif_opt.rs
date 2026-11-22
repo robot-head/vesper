@@ -249,3 +249,84 @@ fn view_header_words_are_read_once() {
     assert!(seen > 0, "put was not emitted");
     assert_eq!(agree(HEADERS), "5146723582377");
 }
+
+/// A sequence local that only an early-return branch uses (kinetic's
+/// `fastmath_sin` cache, #1404 gap 8): its slot used to be zeroed at
+/// function entry, and its drop flag tested on the fast path as a
+/// constant-false branch.
+const COLD_LOCAL: &str = r#"
+fn helper(inout c: Slice[u32], b: u64) -> u64 {
+    let mut n = b;
+    for i in 0..c.len() {
+        match c.try_get(i) {
+            Option::Some(w) => {
+                n = wrapping_add(n, widen_u64(w));
+            },
+            Option::None => (),
+        }
+    }
+    if c.len() == 0 { wrapping_mul(n, 3) } else { n }
+}
+
+fn cold(x: u64) -> u64 {
+    if x > 1000 {
+        let mut cache: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        cache.push(5);
+        return helper(inout cache.as_slice_mut(), x);
+    }
+    wrapping_add(x, 7)
+}
+
+fn main() -> u64 {
+    let mut total: u64 = 0;
+    let n: u64 = 3000;
+    for i in 0..n {
+        total = wrapping_add(total, cold(i));
+    }
+    total
+}
+"#;
+
+#[test]
+fn a_cold_local_costs_the_entry_nothing() {
+    let c = accepted(COLD_LOCAL);
+    let mut seen = 0;
+    native::object_with_observer(
+        &c.world,
+        "main",
+        None,
+        true,
+        Some(&mut |f: native::EmittedFunction| {
+            if f.source != "cold" {
+                return;
+            }
+            seen += 1;
+            let func = &f.function;
+            let entry = func.layout.entry_block().unwrap();
+            for inst in func.layout.block_insts(entry) {
+                assert_ne!(
+                    func.dfg.insts[inst].opcode(),
+                    Opcode::Store,
+                    "a store in the entry block\n{}",
+                    func.display()
+                );
+            }
+            for block in func.layout.blocks() {
+                for inst in func.layout.block_insts(block) {
+                    if let InstructionData::Brif { arg, .. } = func.dfg.insts[inst] {
+                        let arg = func.dfg.resolve_aliases(arg);
+                        let def = func.dfg.value_def(arg).inst();
+                        assert!(
+                            !def.is_some_and(|d| func.dfg.insts[d].opcode() == Opcode::Iconst),
+                            "a branch on a constant\n{}",
+                            func.display()
+                        );
+                    }
+                }
+            }
+        }),
+    )
+    .unwrap();
+    assert!(seen > 0, "cold was not emitted");
+    assert_eq!(agree(COLD_LOCAL), "4515502");
+}
