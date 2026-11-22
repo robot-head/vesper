@@ -339,6 +339,21 @@ fn callbacks_are_named_functions_with_foreign_rows() {
         ),
         FfiErrorKind::CallbackArgument
     );
+    // A local binding that shares a top-level function's name is a value,
+    // not that function: it could hold anything (here a thread-affine
+    // function), so it is refused.
+    assert_eq!(
+        kind(
+            "fn h(sig: i32) { } fn bad(sig: i32) { let b = Box::new(sig); } pub fn main() -> i32 eff [Ffi[Host]] { let h = bad; Host::on_signal(h) }"
+        ),
+        FfiErrorKind::CallbackArgument
+    );
+    assert_eq!(
+        kind(
+            "fn h(sig: i32) { } fn run(h: fn(i32)) -> i32 eff [Ffi[Host]] { Host::on_signal(h) } pub fn main() -> i32 eff [Ffi[Host]] { run(h) }"
+        ),
+        FfiErrorKind::CallbackArgument
+    );
     // The signature must match the callback type.
     assert_eq!(
         kind("fn f(a: u64) -> u64 { a } pub fn main() -> u64 eff [Ffi[Host]] { Host::fold(f, 3) }"),

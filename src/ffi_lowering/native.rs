@@ -222,6 +222,17 @@ impl<M: Module> Codegen<'_, '_, M> {
                 .collect();
             let call = b.ins().call(callee, &args);
             let results = b.inst_results(call).to_vec();
+            // In the JIT a sequence fault is recorded per thread and C may
+            // call from any thread: hand it to the entry's `finish`.
+            if std::any::type_name::<M>().contains("JITModule") {
+                let sig = self.m.make_signature();
+                let id = self
+                    .m
+                    .declare_function("vesper_callback_return", Linkage::Import, &sig)
+                    .map_err(|e| format!("trampoline of '{function}': {e}"))?;
+                let f = self.m.declare_func_in_func(id, b.func);
+                b.ins().call(f, &[]);
+            }
             match (abi.result, results.first(), c_sig.returns.first()) {
                 (Some(t), Some(r), Some(ret)) => {
                     let signed = matches!(t, AbiType::Integer(s) if s.signed());

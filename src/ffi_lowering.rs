@@ -1177,6 +1177,111 @@ struct Rewriter<'a> {
     /// Functions handed to C as `retain` callbacks, which C may call from
     /// any thread, with the span of the argument.
     retained: Vec<(String, Span)>,
+    /// Names bound anywhere in the function being rewritten (parameters,
+    /// patterns, closure and handler parameters). A callback argument
+    /// that names one of these is a local value, not the top-level
+    /// function, so it is refused even when a function shares the name.
+    locals: BTreeSet<String>,
+}
+/// Every name a pattern binds.
+fn pattern_binders(p: &Pattern, out: &mut BTreeSet<String>) {
+    match &p.kind {
+        PatternKind::Bind(n) => {
+            out.insert(n.clone());
+        }
+        PatternKind::Tuple(ps) => ps.iter().for_each(|p| pattern_binders(p, out)),
+        PatternKind::Constructor { fields, .. } => {
+            fields.iter().for_each(|(_, p)| pattern_binders(p, out))
+        }
+        PatternKind::Wild | PatternKind::Literal(_) => {}
+    }
+}
+/// Every name bound anywhere inside `e`: `let`, `match`, `for`, closure
+/// and handler binders. Scope is ignored, which errs towards refusing.
+fn expr_binders(e: &Expr, out: &mut BTreeSet<String>) {
+    match &e.kind {
+        ExprKind::Literal(_) | ExprKind::Name(_) | ExprKind::Continue => {}
+        ExprKind::Tuple(es) => es.iter().for_each(|e| expr_binders(e, out)),
+        ExprKind::Struct { fields, .. } => fields.iter().for_each(|(_, e)| expr_binders(e, out)),
+        ExprKind::Block { statements, tail } => {
+            for s in statements {
+                match s {
+                    Statement::Let { pat, value, .. } => {
+                        pattern_binders(pat, out);
+                        expr_binders(value, out);
+                    }
+                    Statement::Expr(e) => expr_binders(e, out),
+                }
+            }
+            if let Some(t) = tail {
+                expr_binders(t, out);
+            }
+        }
+        ExprKind::Call { callee, args, .. } => {
+            expr_binders(callee, out);
+            args.iter().for_each(|a| expr_binders(&a.expr, out));
+        }
+        ExprKind::Field(e, _) | ExprKind::Try(e) | ExprKind::Unary(_, e) | ExprKind::Loop(e) => {
+            expr_binders(e, out)
+        }
+        ExprKind::Index(a, b) | ExprKind::Binary(_, a, b) | ExprKind::Assign(_, a, b) => {
+            expr_binders(a, out);
+            expr_binders(b, out);
+        }
+        ExprKind::Range { start, end, .. } => {
+            expr_binders(start, out);
+            expr_binders(end, out);
+        }
+        ExprKind::If {
+            condition,
+            then,
+            otherwise,
+        } => {
+            expr_binders(condition, out);
+            expr_binders(then, out);
+            if let Some(o) = otherwise {
+                expr_binders(o, out);
+            }
+        }
+        ExprKind::Match { value, arms } => {
+            expr_binders(value, out);
+            for (p, e) in arms {
+                pattern_binders(p, out);
+                expr_binders(e, out);
+            }
+        }
+        ExprKind::Closure { params, body, .. } => {
+            out.extend(params.iter().map(|p| p.name.clone()));
+            expr_binders(body, out);
+        }
+        ExprKind::Handle {
+            state,
+            body,
+            ret,
+            ops,
+            ..
+        } => {
+            if let Some((p, init)) = state {
+                pattern_binders(p, out);
+                expr_binders(init, out);
+            }
+            expr_binders(body, out);
+            for c in std::iter::once(&**ret).chain(ops) {
+                c.pats.iter().for_each(|p| pattern_binders(p, out));
+                expr_binders(&c.body, out);
+            }
+        }
+        ExprKind::For { pat, iter, body } => {
+            pattern_binders(pat, out);
+            expr_binders(iter, out);
+            expr_binders(body, out);
+        }
+        ExprKind::Break(v) | ExprKind::Return(v) => {
+            if let Some(v) = v {
+                expr_binders(v, out);
+            }
+        }
+    }
 }
 impl<'a> Rewriter<'a> {
     fn new(
@@ -1194,6 +1299,7 @@ impl<'a> Rewriter<'a> {
             calls: vec![],
             plain_functions: BTreeSet::new(),
             retained: vec![],
+            locals: BTreeSet::new(),
         }
     }
     fn finish(&mut self) -> Result<(), FfiError> {
@@ -1260,9 +1366,15 @@ impl<'a> Rewriter<'a> {
         }
         self.ty(&mut f.result, &span);
         self.effects(&mut f.effects, &span);
+        let mut locals: BTreeSet<String> = f.params.iter().map(|p| p.name.clone()).collect();
+        if let Some(body) = &f.body {
+            expr_binders(body, &mut locals);
+        }
+        let outer = std::mem::replace(&mut self.locals, locals);
         if let Some(body) = &mut f.body {
             self.expr(body);
         }
+        self.locals = outer;
     }
     fn effects(&mut self, es: &mut Effects, span: &Span) {
         let realtime = es
@@ -1547,8 +1659,7 @@ impl<'a> Rewriter<'a> {
         // trampoline: a top-level function that is not generic (§16.3).
         for (p, a) in function.parameters().iter().zip(args) {
             if let ParameterType::Function { callback, retain } = p.ty() {
-                let named =
-                    matches!(&a.expr.kind, ExprKind::Name(n) if self.plain_functions.contains(n));
+                let named = matches!(&a.expr.kind, ExprKind::Name(n) if self.plain_functions.contains(n) && !self.locals.contains(n));
                 if *retain
                     && let ExprKind::Name(n) = &a.expr.kind
                     && named
