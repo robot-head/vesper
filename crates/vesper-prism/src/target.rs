@@ -30,10 +30,6 @@
 
 use std::fmt;
 
-#[cfg(not(feature = "vesper-port"))]
-use crate::reference::target as imp;
-
-#[cfg(feature = "vesper-port")]
 use crate::forward::target as imp;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

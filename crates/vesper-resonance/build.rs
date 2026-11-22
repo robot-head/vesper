@@ -44,7 +44,7 @@ const EDITS: &[(&str, &str)] = &[
     ),
     // graph.ves: the Vesper graph's gain nodes ignore their gain.
     (
-        "sum_inputs(in r.slab, in r.ins, block, inout r.out, 0, true, gain);",
-        "sum_inputs(in r.slab, in r.ins, block, inout r.out, 0, false, gain);",
+        "sum_inputs(in r.slab, in r.plan[ins..p], block, inout r.out, 0, true, gain);",
+        "sum_inputs(in r.slab, in r.plan[ins..p], block, inout r.out, 0, false, gain);",
     ),
 ];

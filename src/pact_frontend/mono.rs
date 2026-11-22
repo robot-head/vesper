@@ -838,10 +838,10 @@ impl Elaborator {
         for v in self.dyn_vtables.borrow().iter() {
             let carries_function = v.methods.iter().any(|(slot, _)| {
                 world.functions.get(slot).is_some_and(|f| {
-                    crate::native::contains_function(world, &f.result)
+                    crate::source_analysis::contains_function(world, &f.result)
                         || f.params
                             .iter()
-                            .any(|p| crate::native::contains_function(world, &p.ty))
+                            .any(|p| crate::source_analysis::contains_function(world, &p.ty))
                 })
             });
             if carries_function {

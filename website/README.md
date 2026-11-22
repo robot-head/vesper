@@ -8,7 +8,9 @@ Use Node.js 22 or newer and the repository’s Rust toolchain. From the reposito
 
 ```sh
 cargo build --locked --bin vesper
+rustup target add wasm32-unknown-unknown
 cd website
+npm run build:wasm
 npm run build
 npm run check
 ```
@@ -24,6 +26,12 @@ Edit the [guided tour](tour.md) to update the lessons at `/tour/`. Use a level-o
 The documentation homepage is published at `/docs/`. Edit the lessons in [the eight documentation parts](docs/). Use a level-one heading for a chapter or appendix and a level-two heading for each numbered section. Keep the manuscript number before each plain-language heading. Blank lines separate paragraphs, backticks mark inline code, four spaces indent a trace, and `~~~vesper` fences enclose Vesper source.
 
 The build produces static chapter pages, an in-page search index, and sitemap entries. It reads the printed numbers and PDF destination labels from `docs/manuscript/content.typ` and checks for missing lessons. The contents, chapters, and PDF links work without JavaScript.
+
+## Browser compiler
+
+Install the browser target with `rustup target add wasm32-unknown-unknown`, then run `npm run build:wasm` from `website` before `npm run build`. The site copies the Wasm module into `dist`. Serve the directory with a static HTTP server and open `/tour/`.
+
+The worker uses Vesper's parser, checker, reference evaluator, Forge, and formatter. Chroma highlights incomplete source as you type. The Format button applies the formatter to the editable source. Unit tests and table rows use Vesper's test discovery and run through the reference evaluator. The examples run with a source size limit and evaluation fuel. The page stops a worker that exceeds the time limit. The compiler module has no imports for a host clock, filesystem, or native JIT.
 
 ## Publish
 

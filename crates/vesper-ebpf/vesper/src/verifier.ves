@@ -33,6 +33,7 @@ use self::common::{
     bits,
     checked_add_i64,
     max_u64,
+    min_u64,
     shl,
     shr,
     signed,
@@ -172,7 +173,13 @@ pub copy struct VErr {
 
 pub struct St {
     rs: ChunkSeq[R],
-    ws: ChunkSeq[u64]
+    ws: ChunkSeq[u64],
+    // Per frame, a slot below which every stack slot is empty
+    // (`r_bytes(0)`): slots grow down from fp-8 (slot 63), so the scans of
+    // a frame's slots start here. It may be lower than the first
+    // non-empty slot (writing an empty slot does not raise it); it is not
+    // part of the state the verifier compares.
+    low: ChunkSeq[u64]
 }
 
 pub struct Ids {
@@ -230,7 +237,10 @@ pub struct V {
     rec_rs: ChunkSeq[u64],
     rec_ws: ChunkSeq[u64],
     rec_nws: ChunkSeq[u64],
+    // explored states' registers, packed (`pack_regs`)
     prs: ChunkSeq[R],
+    // the current state packed, for comparisons with explored ones
+    cpk: ChunkSeq[R],
     pws: ChunkSeq[u64],
     depth: ChunkSeq[u64],
     processed: u64,
@@ -683,6 +693,23 @@ fn ww(in st: St, i: u64) -> u64 {
 
 fn setr(inout st: St, i: u64, r: R) {
     st.rs.try_set(i, r);
+    if r.tag != S_BYTES || r.x != 0 {
+        let f = i / FRAME_RS;
+        let k = wrapping_sub(i, wrapping_mul(f, FRAME_RS));
+        if k >= MAX_BPF_REG && k < CBARG {
+            let slot = wrapping_sub(k, MAX_BPF_REG);
+            if slot < low_of(in st, f) {
+                st.low.try_set(f, slot);
+            }
+        }
+    }
+}
+
+fn low_of(in st: St, f: u64) -> u64 {
+    match st.low.try_get(f) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
 }
 
 fn setw(inout st: St, i: u64, x: u64) {
@@ -869,6 +896,7 @@ fn push_frame(inout st: St, subprog: u64, return_pc: u64) {
         st.rs.push(r_bytes(0));
     }
     st.rs.push(r_none());
+    st.low.push(STACK_SLOTS);
     let at = s_tail(in st.ws.as_slice());
     insert_words(inout st, at, FRAME_WS);
     setw(inout st, at, subprog);
@@ -880,12 +908,14 @@ fn pop_frame(inout st: St) {
     let f = curf(in st);
     remove_words(inout st, s_meta(f), FRAME_WS);
     st.rs.truncate(wrapping_mul(f, FRAME_RS));
+    st.low.truncate(f);
     setw(inout st, 0, f);
 }
 
 fn initial_state(inout st: St) {
     st.rs.clear();
     st.ws.clear();
+    st.low.clear();
     let eight: u64 = 8;
     for i in 0..eight {
         st.ws.push(0);
@@ -899,12 +929,15 @@ fn copy_state(inout dst: St, in src: St) {
     dst.rs.extend(in src.rs.as_slice());
     dst.ws.clear();
     dst.ws.extend(in src.ws.as_slice());
+    dst.low.clear();
+    dst.low.extend(in src.low.as_slice());
 }
 
 fn new_st() -> St {
     St {
         rs: ChunkSeq::new[R](),
-        ws: ChunkSeq::new[u64]()
+        ws: ChunkSeq::new[u64](),
+        low: ChunkSeq::new[u64]()
     }
 }
 
@@ -917,7 +950,15 @@ fn for_each_value(inout st: St, mode: u64, a: u64, b: u64) {
     for f in 0..nf {
         let base = wrapping_mul(f, FRAME_RS);
         let n: u64 = CBARG;
-        for i in 0..n {
+        // the registers, then the slots from the frame's low mark (the
+        // slots below it are empty, which this leaves alone)
+        let skip = low_of(in st, f);
+        for j in 0..wrapping_sub(n, skip) {
+            let i = if j < MAX_BPF_REG {
+                j
+            } else {
+                wrapping_add(j, skip)
+            };
             let at = wrapping_add(base, i);
             let r = rr(in st, at);
             if i < MAX_BPF_REG || r.tag < S_BYTES {
@@ -1080,6 +1121,37 @@ fn slot_includes(so: R, sc: R, in ows: Slice[u64], in cws: Slice[u64], inout ids
 
 // `cur` is included in `old`: every behaviour of `cur` was covered by
 // exploring `old`.
+// Packed registers (`pack_regs`): frame `f` starts at `off`, its header's
+// tag is the number of empty slots skipped.
+fn pk_empty(in rs: Slice[R], off: u64) -> u64 {
+    gr(in rs, off).tag
+}
+
+fn pk_reg(in rs: Slice[R], off: u64, i: u64) -> R {
+    gr(in rs, wrapping_add(wrapping_add(off, 1), i))
+}
+
+fn pk_cbarg(in rs: Slice[R], off: u64) -> R {
+    gr(in rs, wrapping_add(wrapping_add(off, 1), MAX_BPF_REG))
+}
+
+fn pk_slot(in rs: Slice[R], off: u64, e: u64, k: u64) -> R {
+    if k < e {
+        r_bytes(0)
+    } else {
+        gr(in rs, wrapping_add(wrapping_add(off, wrapping_add(MAX_BPF_REG, 2)), wrapping_sub(k, e)))
+    }
+}
+
+// The start of the frame after the one at `off`.
+fn pk_next(in rs: Slice[R], off: u64) -> u64 {
+    wrapping_add(
+        off,
+        wrapping_add(wrapping_add(MAX_BPF_REG, 2), wrapping_sub(STACK_SLOTS, pk_empty(in rs, off)))
+    )
+}
+
+// Both states' registers packed.
 fn state_includes(
     inout ids: Ids,
     in ors: Slice[R],
@@ -1106,6 +1178,8 @@ fn state_includes(
     ids_reset(inout ids);
     let eleven: u64 = 11;
     let slots: u64 = STACK_SLOTS;
+    let mut oo: u64 = 0;
+    let mut co: u64 = 0;
     for f in 0..nf {
         let m = s_meta(f);
         if gw(in ows, m)
@@ -1124,8 +1198,8 @@ fn state_includes(
                 return false;
             }
             if !reg_includes(
-                gr(in ors, s_cbarg(f)),
-                gr(in crs, s_cbarg(f)),
+                pk_cbarg(in ors, oo),
+                pk_cbarg(in crs, co),
                 in ows,
                 in cws,
                 inout ids
@@ -1135,19 +1209,21 @@ fn state_includes(
         }
         for i in 0..eleven {
             let li = gw(in ows, link_at(f, i));
-            let ci = gw(in cws, link_at(f, i));
-            for j in wrapping_add(i, 1)..eleven {
-                let lo = li != 0 && li == gw(in ows, link_at(f, j));
-                let lc = ci != 0 && ci == gw(in cws, link_at(f, j));
-                if lo && !lc {
-                    return false;
+            if li != 0 {
+                let ci = gw(in cws, link_at(f, i));
+                for j in wrapping_add(i, 1)..eleven {
+                    if li
+                        == gw(in ows, link_at(f, j))
+                        && (ci == 0 || ci != gw(in cws, link_at(f, j))) {
+                        return false;
+                    }
                 }
             }
         }
         for i in 0..eleven {
             if !reg_includes(
-                gr(in ors, s_reg(f, i)),
-                gr(in crs, s_reg(f, i)),
+                pk_reg(in ors, oo, i),
+                pk_reg(in crs, co, i),
                 in ows,
                 in cws,
                 inout ids
@@ -1155,10 +1231,13 @@ fn state_includes(
                 return false;
             }
         }
-        for k in 0..slots {
+        // slots that are empty on both sides are included
+        let eo = pk_empty(in ors, oo);
+        let ec = pk_empty(in crs, co);
+        for k in min_u64(eo, ec)..slots {
             if !slot_includes(
-                gr(in ors, s_slot(f, k)),
-                gr(in crs, s_slot(f, k)),
+                pk_slot(in ors, oo, eo, k),
+                pk_slot(in crs, co, ec, k),
                 in ows,
                 in cws,
                 inout ids
@@ -1166,6 +1245,8 @@ fn state_includes(
                 return false;
             }
         }
+        oo = pk_next(in ors, oo);
+        co = pk_next(in crs, co);
     }
     // irq flags are restored in order: the same order on both sides
     let oi = s_irqs(in ows);
@@ -1225,14 +1306,20 @@ fn iter_depths_differ(in ors: Slice[R], in ows: Slice[u64], in crs: Slice[R], in
         b
     };
     let slots: u64 = STACK_SLOTS;
+    let mut oo: u64 = 0;
+    let mut co: u64 = 0;
     for f in 0..nf {
-        for k in 0..slots {
-            let x = gr(in ors, s_slot(f, k));
-            let y = gr(in crs, s_slot(f, k));
+        let eo = pk_empty(in ors, oo);
+        let ec = pk_empty(in crs, co);
+        for k in max_u64(eo, ec)..slots {
+            let x = pk_slot(in ors, oo, eo, k);
+            let y = pk_slot(in crs, co, ec, k);
             if x.tag == S_ITER && y.tag == S_ITER && x.z != y.z {
                 return true;
             }
         }
+        oo = pk_next(in ors, oo);
+        co = pk_next(in crs, co);
     }
     false
 }
@@ -1246,12 +1333,13 @@ fn widen_scalars(in prs: Slice[R], in pws: Slice[u64], inout cur: St) -> bool {
     let mut changed = false;
     let eleven: u64 = 11;
     let slots: u64 = STACK_SLOTS;
+    let mut po: u64 = 0;
     for f in 0..nf {
         if gw(in pws, subprog_at(f)) != ww(in cur, subprog_at(f)) {
             return changed;
         }
         for i in 0..eleven {
-            let a = gr(in prs, s_reg(f, i));
+            let a = pk_reg(in prs, po, i);
             let b = rr(in cur, s_reg(f, i));
             if a
                 .tag
@@ -1268,8 +1356,10 @@ fn widen_scalars(in prs: Slice[R], in pws: Slice[u64], inout cur: St) -> bool {
                 changed = true;
             }
         }
-        for k in 0..slots {
-            let a = gr(in prs, s_slot(f, k));
+        // a widened slot is a scalar on both sides, so neither is empty
+        let e = pk_empty(in prs, po);
+        for k in max_u64(e, low_of(in cur, f))..slots {
+            let a = pk_slot(in prs, po, e, k);
             let b = rr(in cur, s_slot(f, k));
             if a
                 .tag
@@ -1285,6 +1375,7 @@ fn widen_scalars(in prs: Slice[R], in pws: Slice[u64], inout cur: St) -> bool {
                 changed = true;
             }
         }
+        po = pk_next(in prs, po);
     }
     changed
 }
@@ -2721,7 +2812,7 @@ fn kfunc_region(in st: St, from: u64) -> u64 {
     let mut iter = false;
     let slots: u64 = STACK_SLOTS;
     for f in from..nf {
-        for k in 0..slots {
+        for k in low_of(in st, f)..slots {
             let t = rr(in st, s_slot(f, k)).tag;
             if t == 18 {
                 irq = true;
@@ -3921,14 +4012,18 @@ fn finish_path(inout v: V, start: u64) {
 
 fn rec_rs_end(in v: V, rid: u64) -> u64 {
     let nf = sq(in v.pws, sq(in v.rec_ws, rid));
-    wrapping_add(sq(in v.rec_rs, rid), wrapping_mul(nf, FRAME_RS))
+    let mut at = sq(in v.rec_rs, rid);
+    for f in 0..nf {
+        at = pk_next(in v.prs.as_slice(), at);
+    }
+    at
 }
 
 fn rec_ws_end(in v: V, rid: u64) -> u64 {
     wrapping_add(sq(in v.rec_ws, rid), sq(in v.rec_nws, rid))
 }
 
-// `cur` included in record `rid`.
+// `cur` included in record `rid`. `v.cpk` holds `cur` packed.
 fn rec_includes(inout v: V, rid: u64, in cur: St) -> bool {
     let a = sq(in v.rec_rs, rid);
     let b = rec_rs_end(in v, rid);
@@ -3938,12 +4033,12 @@ fn rec_includes(inout v: V, rid: u64, in cur: St) -> bool {
         inout v.ids,
         in v.prs[a..b],
         in v.pws[c..d],
-        in cur.rs.as_slice(),
+        in v.cpk.as_slice(),
         in cur.ws.as_slice()
     )
 }
 
-// Record `rid` included in `cur`.
+// Record `rid` included in `cur`. `v.cpk` holds `cur` packed.
 fn includes_rec(inout v: V, rid: u64, in cur: St) -> bool {
     let a = sq(in v.rec_rs, rid);
     let b = rec_rs_end(in v, rid);
@@ -3951,19 +4046,20 @@ fn includes_rec(inout v: V, rid: u64, in cur: St) -> bool {
     let d = rec_ws_end(in v, rid);
     state_includes(
         inout v.ids,
-        in cur.rs.as_slice(),
+        in v.cpk.as_slice(),
         in cur.ws.as_slice(),
         in v.prs[a..b],
         in v.pws[c..d]
     )
 }
 
+// `v.cpk` holds `cur` packed.
 fn rec_iter_depths_differ(in v: V, rid: u64, in cur: St) -> bool {
     let a = sq(in v.rec_rs, rid);
     let b = rec_rs_end(in v, rid);
     let c = sq(in v.rec_ws, rid);
     let d = rec_ws_end(in v, rid);
-    iter_depths_differ(in v.prs[a..b], in v.pws[c..d], in cur.rs.as_slice(), in cur.ws.as_slice())
+    iter_depths_differ(in v.prs[a..b], in v.pws[c..d], in v.cpk.as_slice(), in cur.ws.as_slice())
 }
 
 // Whether `st`, at a loop head (callback entry or `bpf_iter_num_next`
@@ -4001,13 +4097,16 @@ fn bounded_iteration(in v: V, pc: u64, rid: u64, in st: St) -> bool {
     if !(s.tag == S_ITER && s.y == 0) {
         return false;
     }
-    let base = sq(in v.rec_rs, rid);
     let onf = sq(in v.pws, sq(in v.rec_ws, rid));
-    let of = wrapping_sub(onf, 1);
-    match v.prs.try_get(wrapping_add(base, s_slot(of, at))) {
-        Option::Some(o) => o.tag == S_ITER && o.x == s.x,
-        Option::None => false,
+    if onf == 0 {
+        return false;
     }
+    let mut off = sq(in v.rec_rs, rid);
+    for g in 0..wrapping_sub(onf, 1) {
+        off = pk_next(in v.prs.as_slice(), off);
+    }
+    let o = pk_slot(in v.prs.as_slice(), off, pk_empty(in v.prs.as_slice(), off), at);
+    o.tag == S_ITER && o.x == s.x
 }
 
 fn rec_widen(inout v: V, rid: u64, inout cur: St) -> bool {
@@ -4019,9 +4118,19 @@ fn rec_widen(inout v: V, rid: u64, inout cur: St) -> bool {
 }
 
 // (pruned, new parent)
+// Packs `st` into `v.cpk` for the record comparisons.
+fn pack_cur(inout v: V, in st: St) {
+    v.cpk.clear();
+    pack_regs(inout v.cpk, in st);
+}
+
 fn checkpoint(inout v: V, inout st: St, pc: u64, parent: u64) -> (bool, u64) eff [Fail[VErr]] {
     let mut widen_from = none();
     let mut rid = sq(in v.ex_head, pc);
+    let packed = rid != none();
+    if packed {
+        pack_cur(inout v, in st);
+    }
     loop {
         if rid == none() {
             break;
@@ -4058,7 +4167,11 @@ fn checkpoint(inout v: V, inout st: St, pc: u64, parent: u64) -> (bool, u64) eff
         }
         rid = sq(in v.rec_next, rid);
     }
-    if widen_from != none() && rec_widen(inout v, widen_from, inout st) {
+    let widened = widen_from != none() && rec_widen(inout v, widen_from, inout st);
+    if widen_from != none() {
+        pack_cur(inout v, in st);
+    }
+    if widened {
         v.widenings = wrapping_add(v.widenings, 1);
         let mut r = sq(in v.ex_head, pc);
         loop {
@@ -4083,7 +4196,11 @@ fn checkpoint(inout v: V, inout st: St, pc: u64, parent: u64) -> (bool, u64) eff
         v.rec_rs.push(v.prs.len());
         v.rec_ws.push(v.pws.len());
         v.rec_nws.push(st.ws.len());
-        v.prs.extend(in st.rs.as_slice());
+        if packed {
+            v.prs.extend(in v.cpk.as_slice());
+        } else {
+            pack_regs(inout v.prs, in st);
+        }
         v.pws.extend(in st.ws.as_slice());
         if count == 0 {
             v.ex_head.try_set(pc, id);
@@ -4132,7 +4249,7 @@ fn pack_regs(inout out: ChunkSeq[R], in st: St) {
     for f in 0..nf {
         let base = wrapping_mul(f, FRAME_RS);
         let lo = wrapping_add(base, MAX_BPF_REG);
-        let mut e: u64 = 0;
+        let mut e: u64 = low_of(in st, f);
         loop {
             if e == STACK_SLOTS {
                 break;
@@ -4152,18 +4269,19 @@ fn pack_regs(inout out: ChunkSeq[R], in st: St) {
 
 // The inverse of `pack_regs` for the packed entries from `at` on; the
 // frame count comes from `st.ws`, restored first.
-fn unpack_regs(inout st: St, in src: ChunkSeq[R], at: u64) {
+// `empty` holds STACK_SLOTS empty slots.
+fn unpack_regs(inout st: St, in src: ChunkSeq[R], at: u64, in empty: ChunkSeq[R]) {
     st.rs.clear();
+    st.low.clear();
     let nf = nframes(in st);
     let mut i = at;
     for f in 0..nf {
         let e = gr(in src.as_slice(), i).tag;
+        st.low.push(e);
         let regs = wrapping_add(i, 1);
         st.rs.extend(in src[regs..wrapping_add(regs, MAX_BPF_REG)]);
         let cb = gr(in src.as_slice(), wrapping_add(regs, MAX_BPF_REG));
-        for j in 0..e {
-            st.rs.push(r_bytes(0));
-        }
+        st.rs.extend(in empty[0..e]);
         let lo = wrapping_add(regs, wrapping_add(MAX_BPF_REG, 1));
         let kept = wrapping_sub(STACK_SLOTS, e);
         st.rs.extend(in src[lo..wrapping_add(lo, kept)]);
@@ -4173,6 +4291,11 @@ fn unpack_regs(inout st: St, in src: ChunkSeq[R], at: u64) {
 }
 
 fn run(inout v: V) -> u64 eff [Fail[VErr]] {
+    let mut empty: ChunkSeq[R] = ChunkSeq::with_capacity[R](STACK_SLOTS);
+    let slots: u64 = STACK_SLOTS;
+    for k in 0..slots {
+        empty.push(r_bytes(0));
+    }
     let mut st = new_st();
     initial_state(inout st);
     let mut alt = new_st();
@@ -4192,7 +4315,7 @@ fn run(inout v: V) -> u64 eff [Fail[VErr]] {
             let wso = sq(in v.work, wrapping_add(at, 3));
             st.ws.clear();
             st.ws.extend(in v.wws[wso..v.wws.len()]);
-            unpack_regs(inout st, in v.wrs, rso);
+            unpack_regs(inout st, in v.wrs, rso, in empty);
             v.wrs.truncate(rso);
             v.wws.truncate(wso);
             v.work.truncate(at);
@@ -4395,6 +4518,79 @@ fn simple_outcome(rule: Str, msg: Str) -> Outcome {
     }
 }
 
+// The verifier's record and worklist pools, kept by the caller between
+// runs so that their buffers are reused instead of regrown.
+pub struct Pools {
+    prs: ChunkSeq[R],
+    cpk: ChunkSeq[R],
+    wrs: ChunkSeq[R],
+    pws: ChunkSeq[u64],
+    wws: ChunkSeq[u64],
+    rec_next: ChunkSeq[u64],
+    rec_branches: ChunkSeq[u64],
+    rec_parent: ChunkSeq[u64],
+    rec_rs: ChunkSeq[u64],
+    rec_ws: ChunkSeq[u64],
+    rec_nws: ChunkSeq[u64]
+}
+
+pub fn new_pools() -> Pools {
+    Pools {
+        prs: ChunkSeq::new[R](),
+        cpk: ChunkSeq::new[R](),
+        wrs: ChunkSeq::new[R](),
+        pws: ChunkSeq::new[u64](),
+        wws: ChunkSeq::new[u64](),
+        rec_next: ChunkSeq::new[u64](),
+        rec_branches: ChunkSeq::new[u64](),
+        rec_parent: ChunkSeq::new[u64](),
+        rec_rs: ChunkSeq::new[u64](),
+        rec_ws: ChunkSeq::new[u64](),
+        rec_nws: ChunkSeq::new[u64]()
+    }
+}
+
+// Moves the pools into `v`, emptied.
+fn take_pools(inout v: V, inout p: Pools) {
+    swap(inout v.prs, inout p.prs);
+    v.prs.clear();
+    swap(inout v.cpk, inout p.cpk);
+    v.cpk.clear();
+    swap(inout v.wrs, inout p.wrs);
+    v.wrs.clear();
+    swap(inout v.pws, inout p.pws);
+    v.pws.clear();
+    swap(inout v.wws, inout p.wws);
+    v.wws.clear();
+    swap(inout v.rec_next, inout p.rec_next);
+    v.rec_next.clear();
+    swap(inout v.rec_branches, inout p.rec_branches);
+    v.rec_branches.clear();
+    swap(inout v.rec_parent, inout p.rec_parent);
+    v.rec_parent.clear();
+    swap(inout v.rec_rs, inout p.rec_rs);
+    v.rec_rs.clear();
+    swap(inout v.rec_ws, inout p.rec_ws);
+    v.rec_ws.clear();
+    swap(inout v.rec_nws, inout p.rec_nws);
+    v.rec_nws.clear();
+}
+
+// Hands the pools back to the caller.
+fn give_pools(inout v: V, inout p: Pools) {
+    swap(inout v.prs, inout p.prs);
+    swap(inout v.cpk, inout p.cpk);
+    swap(inout v.wrs, inout p.wrs);
+    swap(inout v.pws, inout p.pws);
+    swap(inout v.wws, inout p.wws);
+    swap(inout v.rec_next, inout p.rec_next);
+    swap(inout v.rec_branches, inout p.rec_branches);
+    swap(inout v.rec_parent, inout p.rec_parent);
+    swap(inout v.rec_rs, inout p.rec_rs);
+    swap(inout v.rec_ws, inout p.rec_ws);
+    swap(inout v.rec_nws, inout p.rec_nws);
+}
+
 fn verify_one(
     in slots: Slice[RawInsn],
     ptype: ProgramType,
@@ -4405,7 +4601,8 @@ fn verify_one(
     in text: Slice[u8],
     max_insns: u64,
     max_states: u64,
-    widen: bool
+    widen: bool,
+    inout pools: Pools
 ) -> Outcome {
     let mut decoded: ChunkSeq[Insn] = ChunkSeq::new[Insn]();
     let derr: u64 = handle Fail[DecodeError] in {
@@ -4476,6 +4673,7 @@ fn verify_one(
         rec_ws: ChunkSeq::new[u64](),
         rec_nws: ChunkSeq::new[u64](),
         prs: ChunkSeq::new[R](),
+        cpk: ChunkSeq::new[R](),
         pws: ChunkSeq::new[u64](),
         depth: ChunkSeq::new[u64](),
         processed: 0,
@@ -4491,6 +4689,7 @@ fn verify_one(
         msg: ChunkSeq::new[u8](),
         rule: ChunkSeq::new[u8]()
     };
+    take_pools(inout v, inout pools);
     let res: u64 = handle Fail[VErr] in {
         check_cfg(inout v);
         let nk = shr(v.kf.len(), 2);
@@ -4507,6 +4706,8 @@ fn verify_one(
         return x => x,
         raise(e, k) => e.insn,
     };
+    let nrec = v.rec_next.len();
+    give_pools(inout v, inout pools);
     let mut w: ChunkSeq[u64] = ChunkSeq::new[u64]();
     if res != wrapping_sub(none(), 1) {
         w.push(1);
@@ -4520,7 +4721,7 @@ fn verify_one(
     }
     w.push(0);
     w.push(v.processed);
-    w.push(v.rec_next.len());
+    w.push(nrec);
     w.push(v.paths);
     w.push(v.pruned);
     w.push(v.widenings);
@@ -4553,7 +4754,8 @@ pub fn verify_program(
     in text: Slice[u8],
     max_insns: u64,
     max_states: u64,
-    widen_loops: bool
+    widen_loops: bool,
+    inout pools: Pools
 ) -> Outcome {
     if !widen_loops {
         return verify_one(
@@ -4566,7 +4768,8 @@ pub fn verify_program(
             in text,
             max_insns,
             max_states,
-            false
+            false,
+            inout pools
         );
     }
     let first = verify_one(
@@ -4579,7 +4782,8 @@ pub fn verify_program(
         in text,
         max_insns,
         max_states,
-        true
+        true,
+        inout pools
     );
     if sq(in first.words, 0) == 0 || first.widenings == 0 {
         return first;
@@ -4594,7 +4798,8 @@ pub fn verify_program(
         in text,
         max_insns,
         max_states,
-        false
+        false,
+        inout pools
     );
     if sq(in second.words, 0) == 0 {
         return second;

@@ -3,6 +3,67 @@
 // and three helpers as local functions of the module, over libc and the
 // region runtime's `vesper_region_alloc` (regions.ves, defined first).
 
+use @vesper/cranelift::{
+    DataId,
+    FuncId,
+    Value,
+    append_block_param,
+    block_param,
+    builder_new,
+    cc_eq,
+    cc_ne,
+    cc_uge,
+    cc_ugt,
+    cc_ule,
+    cc_ult,
+    create_block,
+    import_data,
+    ins_band,
+    ins_brif0,
+    ins_global_value,
+    ins_iadd,
+    ins_iadd_imm,
+    ins_icmp,
+    ins_icmp_imm,
+    ins_imul,
+    ins_ishl_imm,
+    ins_istore32,
+    ins_istore8,
+    ins_isub,
+    ins_jump,
+    ins_jump0,
+    ins_load,
+    ins_return,
+    ins_return1,
+    ins_select,
+    ins_store,
+    ins_trap,
+    ins_udiv,
+    ins_uload32,
+    ins_uload8,
+    ins_urem,
+    switch_to_block,
+    trap_user,
+    ty_i64,
+    vals1,
+    vals2,
+    vals3,
+};
+use self::rt::{
+    no_vals,
+    rt_call,
+    rt_call1,
+    rt_entry,
+    rt_finish,
+    rt_import,
+    rt_k,
+    rt_local,
+    rt_message,
+    rt_numbered,
+    rt_sig,
+    rt_text,
+};
+
 // The sequence record: field offsets and size in bytes.
 const T_W: i32 = 0;
 const T_STRIDE: i32 = 8;
@@ -211,7 +272,7 @@ fn tl_ld(inout b: Builder, p: Value, off: i32) -> Value eff [Ffi[Cranelift]] {
 fn tl_st(inout b: Builder, v: Value, p: Value, off: i32) eff [Ffi[Cranelift]] {
     ins_store(inout b, 0, v, p, off);
 }
-fn tl_return0(inout b: Builder) eff [Ffi[Cranelift]] {
+pub fn tl_return0(inout b: Builder) eff [Ffi[Cranelift]] {
     let nothing = no_vals();
     ins_return(inout b, in nothing.as_slice());
 }

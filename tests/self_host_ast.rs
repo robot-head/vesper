@@ -1029,6 +1029,14 @@ fn desugarings_and_limits_match_the_rust_ast() {
         "const A: i128 = -170141183460469231731687303715884105728; const B: u128 = 340282366920938463463374607431768211455; const C: i128 = 18446744073709551616; const D: i128 = -C; fn f() -> i128 { match A { A => 1, C => 2, _ => 3 } }",
         "enum W: i128 { A = 18446744073709551616, B, C = -18446744073709551616, D, E = -1, F, G = 170141183460469231731687303715884105727 } enum U: u128 { A = 340282366920938463463374607431768211455 }",
         "fn f() { region r(18446744073709551616) { 1 } }",
+        // SH5 lane 4 (#1327): `if`/`match` operands, `handle` statements,
+        // `copy`/`affine` names, reserved keywords.
+        "fn f(a: bool, b: bool) -> bool { a && if b { true } else { false } } fn g(a: bool) -> bool { a || match x { 0 => true, _ => false } }",
+        "fn f() { 1 + if a { 2 } else { 3 } * 4; x == match y { _ => 1 }.len(); if a && if b { c } else { d } { 1 } else { 2 }; !if a { b } else { c }; if a { } -1 }",
+        "fn f() { handle E in { 0 } with { return x => x } let y = 1; region r { 1 } y }",
+        "fn copy(copy: u64) -> u64 { copy } fn affine() {} struct S { copy: u64, affine: u8 } fn f() { let copy = copy(1); let s = S { copy, affine: 2 }; s.copy(); copy[0]; match copy { copy => copy } g(sink copy, inout affine, sink with); for copy in 0..2 {} }",
+        "copy struct P { x: u64 } pub affine enum E { A } struct H { p: P @@ copy } fn id[T: mod copy + Ord](x: fn @copy (u64) -> u64) {} fn c() { |x| @affine x; }",
+        "fn f() { let in = 1; let fn = 2; let (a, mod) = (1, 2); } fn g(match: u64, struct: u8) {} fn h() { let x = s.impl; }",
     ]
     .iter()
     .map(|s| s.to_string())

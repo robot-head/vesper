@@ -1,15 +1,18 @@
 name: Platforms
 # Linux CI runs the general workspace and acceptance suites on BuildBuddy.
 # macOS and Windows run only host-specific tests and native executables.
-# Run on pushes to main, on pull requests, and on merge queue groups. A push
-# trigger on every branch would start a second, duplicate run for each commit
-# pushed to a PR branch. The merge queue only advances once the required
+# Run on pushes to main, nightly, on merge queue groups and by dispatch.
+# Pull requests do not trigger it directly (#1479): once a pull request can
+# merge and both BuildBuddy checks are green, `Native platform checks`
+# (native-checks.yml) dispatches it on the PR branch with `pull_request` set,
+# and its macOS and Windows jobs report the required checks on the PR head.
+# That run skips the Linux port shards, which run on main and nightly. The
+# merge queue only advances once the required
 # checks report on its temporary gh-readonly-queue/main/* branch, so
 # `merge_group` must stay here for as long as the queue is enabled on main.
 on:
   push:
     branches: [main]
-  pull_request:
   merge_group:
   schedule:
     - cron: '23 6 * * *'
@@ -22,6 +25,10 @@ on:
         default: full
       checkout_ref:
         description: Optional commit or ref to validate (resolved to an immutable SHA)
+        type: string
+        default: ''
+      pull_request:
+        description: Pull request number (set by native-checks.yml); runs macOS and Windows only
         type: string
         default: ''
   workflow_call:
@@ -46,8 +53,8 @@ permissions:
 # Newer PR/main runs replace obsolete validation; nightly and release calls
 # have independent run-id groups so they cannot cancel an exact-SHA candidate.
 concurrency:
-  group: platforms-${{ github.event_name == 'pull_request' && github.ref || github.event_name == 'push' && 'main' || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
+  group: platforms-${{ github.event_name == 'workflow_dispatch' && inputs.pull_request != '' && github.ref || github.event_name == 'push' && 'main' || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.pull_request != '') }}
 
 jobs:
   plan:
@@ -67,6 +74,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
+      - name: Verify the dispatched pull request commit
+        # The checks report on the commit the run was dispatched on, so it
+        # must be the PR head that went green: the checkout is that head or
+        # GitHub's test merge of it into main.
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.pull_request != '' }}
+        env:
+          PR_HEAD: ${{ github.sha }}
+        run: |
+          checked=$(git rev-parse HEAD)
+          test "$checked" = "$PR_HEAD" || test "$(git rev-parse HEAD^2 2>/dev/null)" = "$PR_HEAD"
       - name: Install workflow test dependency
         run: python -m pip install PyYAML==6.0.2
       - name: Check CI policy and workflow regressions
@@ -85,7 +102,13 @@ jobs:
           REQUESTED_PROFILE: ${{ inputs.profile || (github.event_name == 'schedule' && 'full') || 'pr' }}
           EVENT: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PULL_REQUEST: ${{ inputs.pull_request }}
         run: |
+          if [ -n "$PULL_REQUEST" ]; then
+            # Pull requests leave the port shards to main and nightly (#1479).
+            echo "crates=none" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           crates=$(python scripts/ci/port_harness_selection.py --profile "$REQUESTED_PROFILE" \
             --event "$EVENT" --base "$BASE_SHA" --head "$(git rev-parse HEAD)")
           echo "ports to test: $crates"

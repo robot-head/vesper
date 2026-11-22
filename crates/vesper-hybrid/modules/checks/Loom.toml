@@ -1,0 +1,12 @@
+[package]
+name = "@vesper/hybrid-checks"
+version = "0.1.0"
+edition = "2026"
+# The layout and the IR check only compute: no I/O, clock or network
+# (design §42.3).
+capability_ceiling = ["Fail", "Alloc"]
+
+[dependencies]
+"@vesper/check-data" = { version = "^0.1", path = "../../../../packages/vesper-check-data" }
+"@vesper/check-layout" = { version = "^0.1", path = "../../../../packages/vesper-check-layout" }
+"@vesper/ir-check" = { version = "^0.1", path = "../../../../packages/vesper-ir-check" }
