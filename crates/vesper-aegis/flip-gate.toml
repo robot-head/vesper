@@ -47,3 +47,11 @@ run = "crates/vesper-aegis/bench-abba.sh flip-gate cca_token"
 [[abba]]
 workload = "corim"
 run = "crates/vesper-aegis/bench-abba.sh flip-gate corim"
+
+[[abba]]
+workload = "corim_store"
+run = "crates/vesper-aegis/bench-abba.sh flip-gate corim_store"
+
+[[abba]]
+workload = "appraise_cca"
+run = "crates/vesper-aegis/bench-abba.sh flip-gate appraise_cca"

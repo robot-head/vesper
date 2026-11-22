@@ -1824,6 +1824,7 @@ pub fn describe_parameter(p: &ParameterType) -> String {
             )
         }
         ParameterType::CStr => "in Slice[u8]".into(),
+        ParameterType::CStrList => "in Slice[u8] (NUL-ended strings)".into(),
         ParameterType::Function { callback, retain } => describe_function(callback.name(), *retain),
     }
 }

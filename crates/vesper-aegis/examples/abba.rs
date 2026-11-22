@@ -49,7 +49,7 @@ const EPOCHS: usize = 9;
 /// Epochs of one `flip-gate` run (the gate's default).
 const FLIP_GATE_EPOCHS: usize = 30;
 /// Each workload and the passes in one window.
-const WORKLOADS: [(&str, usize); 7] = [
+const WORKLOADS: [(&str, usize); 9] = [
     ("snp", 20_000),
     ("tdx", 10_000),
     ("sgx", 10_000),
@@ -57,6 +57,8 @@ const WORKLOADS: [(&str, usize); 7] = [
     ("cca_claims", 5_000),
     ("cca_token", 2_000),
     ("corim", 2_000),
+    ("corim_store", 2_000),
+    ("appraise_cca", 5_000),
 ];
 
 fn data(path: &str) -> Vec<u8> {
@@ -83,6 +85,9 @@ struct Samples {
     cca: Vec<Vec<u8>>,
     cca_payloads: Vec<(Vec<u8>, Vec<u8>)>,
     corim: Vec<Vec<u8>>,
+    cca_good: Vec<u8>,
+    cca_plat_corim: Vec<u8>,
+    cca_realm_corim: Vec<u8>,
 }
 
 fn samples() -> Samples {
@@ -149,6 +154,9 @@ fn samples() -> Samples {
         cca,
         cca_payloads,
         corim,
+        cca_good: data("cca-veraison-services/cca-good.cbor"),
+        cca_plat_corim: data("cca-veraison-services/corim-cca-platform-valid.cbor"),
+        cca_realm_corim: data("cca-veraison-services/corim-cca-realm-valid.cbor"),
     }
 }
 
@@ -200,6 +208,17 @@ fn window(workload: &str, passes: usize, s: &Samples) -> u64 {
     macro_rules! go {
         ($k:ident) => {{
             let (claims, policy, channel) = policy_case!($k, &s.snp[1]);
+            let now = 1_748_736_000 * 1_000_000_000u64;
+            let plat_corim = $k::corim::Corim::parse_unsigned(&s.cca_plat_corim).unwrap();
+            let realm_corim = $k::corim::Corim::parse_unsigned(&s.cca_realm_corim).unwrap();
+            let mut cca_store = $k::corim::CcaCorimStore::new();
+            cca_store.add(&plat_corim, now).unwrap();
+            cca_store.add(&realm_corim, now).unwrap();
+            let cca_verified =
+                $k::cca::verify_cca_endorsed(&s.cca_good, &cca_store.endorsements).unwrap();
+            let cca_opts = $k::corim::CcaAppraisalOptions {
+                compare_signer_id: false,
+            };
             let pass = || match workload {
                 "snp" => {
                     for b in &s.snp {
@@ -241,6 +260,22 @@ fn window(workload: &str, passes: usize, s: &Samples) -> u64 {
                     for b in &s.corim {
                         black_box($k::corim::Corim::parse_unsigned(black_box(b)).unwrap());
                     }
+                }
+                "corim_store" => {
+                    let mut st = $k::corim::CcaCorimStore::new();
+                    st.add(black_box(&plat_corim), now).unwrap();
+                    st.add(black_box(&realm_corim), now).unwrap();
+                    black_box(st);
+                }
+                "appraise_cca" => {
+                    black_box(
+                        $k::corim::appraise_cca_with_options(
+                            black_box(&cca_verified),
+                            black_box(&cca_store),
+                            black_box(&cca_opts),
+                        )
+                        .unwrap(),
+                    );
                 }
                 _ => panic!("unknown workload {workload}"),
             };

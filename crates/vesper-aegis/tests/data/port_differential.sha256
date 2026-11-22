@@ -12,5 +12,13 @@ timestamps_agree 87519 b090b07b32317822e1abfeac53dfb25747b458cef518e341597e3b037
 # the last commit with the Rust CBOR decoding (ciborium) and CCA claim
 # parsers (SH6 lane 8 part 2, #1403).
 cca_claims_agree 224016 5c7a57f1e9744acca28ebefb2236d12875703711406aeb5b80153d0739cd57d1
-cca_tokens_agree 70035 9d7bb020d22c8e953a74ac59d282ca9786a3419319041b6cbc343f2d248c08d9
 corims_agree 70035 b0d6424602faad71f0410826d379a704391c5993eb4b759b2f444e235bb99bf2
+# Recorded from the Rust build at 0f5a9eba809fd81ad7050d7d083a0e729ce009d4,
+# the last commit with the Rust COSE/CoRIM/CCA collection, profile and
+# appraisal implementations (SH6 lane 8 part 2b, #1403).
+cca_tokens_agree 70035 5c64d252069e46fd7259eb396f2695da8ee32738012481685674f411a0d80e52
+cose_sign1_agrees 75050 00fff211efdb166bd8af3857671970ee0e23e0a6a0e5aa9e1af2a3b7aa4f63f9
+cose_keys_agree 22515 3acdfa7003b22f7f0b7c9b0851d723df350a60d91a9ae07265dcc35e6df85bd2
+signed_corims_agree 9012 18cba9ee9010c070b07894522b453fc2264e719ecdd35ea5e1ab911a7c3c991d
+corim_store_agrees 86 285d87f9b56d4641666363bcc7cd8cd09daa6767f56d7117fc7208fa2c535a21
+cca_appraisal_agrees 44 4c83bfe75bdc491a79b9da516ae0a94e584e5ccf5d7586ac50ce9e7fd08a77d7
