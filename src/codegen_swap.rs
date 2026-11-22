@@ -606,6 +606,54 @@ pub mod drops {
     pub const DROP_BOX: u32 = 1;
 }
 
+/// The `numeric` family's requests (lane 11, #1285). `Op::Vector` and
+/// `Op::Tiled` instructions arrive as [`INSTRUCTION`] first; a hook that
+/// declines those gets the typed requests below from `Codegen::vector_op`
+/// (src/native_vector.rs) and `Codegen::tiled_op` (src/tiled/native.rs).
+pub mod numeric {
+    /// One `TiledSeq` operation, with the tiled runtime already defined in
+    /// an object module. Args `[kind, jit, ...]`, where `kind` is one of the
+    /// `TILED_*` codes below and `jit` is 1 in a JIT module (the runtime
+    /// is then imported, not local). The rest, by kind (`v` is a value):
+    ///
+    /// - `NEW`: `[tile width, tile stride bytes, cold words per row]`;
+    /// - `WITH_CAPACITY`: those, then `[v capacity]`;
+    /// - `WITH_REGION`: those, then `[region variable, v capacity]`;
+    /// - `LEN`, `TILE_COUNT`: `[v seq]`;
+    /// - `PUSH`: `[v seq, v record]`, `GET`: `[v seq, v row]`, `SET`:
+    ///   `[v seq, v row, v record]`; each followed by the row layout:
+    ///   `[record size, hot count, (record offset, tile offset, element
+    ///   bytes)..., cold count, (aggregate, words, record offset, word
+    ///   offset)...]`;
+    /// - `COL_GET`: `[v seq, v row]`, `COL_SET`: `[v seq, v row, v value]`;
+    ///   then `[0, tile offset, element bytes, type]` for a hot column or
+    ///   `[1, aggregate, size, words, word offset, type]` for a cold field
+    ///   (type is a [`super::ty_code`], 0 for an aggregate);
+    /// - `LOAD_TILE_VEC`: `[v seq, v tile, tile offset, vector bytes,
+    ///   chunks]`.
+    ///
+    /// Result `[value]`.
+    pub const TILED: u32 = 1;
+    /// One vector operation (`Codegen::vector_op`, src/native_vector.rs):
+    /// `[intrinsic, element, lanes, constant count, constants...,
+    /// v operands...]`, with the codes of `request_intrinsic` and
+    /// `request_elem` there. Result `[value]`.
+    pub const VECTOR: u32 = 2;
+    /// `Isa::supported`: `[enabled]`. Result `[value]` (`iconst.i64`).
+    pub const ISA_SUPPORTED: u32 = 3;
+    pub const TILED_NEW: u32 = 1;
+    pub const TILED_WITH_CAPACITY: u32 = 2;
+    pub const TILED_WITH_REGION: u32 = 3;
+    pub const TILED_LEN: u32 = 4;
+    pub const TILED_TILE_COUNT: u32 = 5;
+    pub const TILED_PUSH: u32 = 6;
+    pub const TILED_GET: u32 = 7;
+    pub const TILED_SET: u32 = 8;
+    pub const TILED_COL_GET: u32 = 9;
+    pub const TILED_COL_SET: u32 = 10;
+    pub const TILED_LOAD_TILE_VEC: u32 = 11;
+}
+
 /// The `scalar` family's requests besides [`INSTRUCTION`] (SH4 lane 6,
 /// #1280): the run-time tests of `expr_at`'s raising arms. The hook
 /// answers the test's flag; the Rust code raises and emits the rest as it

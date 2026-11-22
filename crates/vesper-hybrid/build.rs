@@ -21,6 +21,12 @@ const MODULES: &[(&str, &str, &str)] = &[
         "port/check_layout.rs",
     ),
     ("hybrid_ir_check", "modules/ir_check", "port/ir_check.rs"),
+    // SH2 lane 10 (#1182): the stack-bound report.
+    (
+        "hybrid_stack_bound",
+        "modules/stack_bound",
+        "port/stack_bound.rs",
+    ),
     // SH4 lane 1 (#1275): the census lowering family, emitted through
     // lent Cranelift handles.
     ("hybrid_codegen", "modules/codegen", "port/codegen.rs"),
@@ -91,6 +97,14 @@ const DIVERGENT_IR_CHECK_EDIT: (&str, &str) = (
 const DIVERGENT_DOC_EDIT: (&str, &str) = (
     "(sink page: ChunkSeq[u8]) -> ChunkSeq[u8] {\n    page\n",
     "(sink page: ChunkSeq[u8]) -> ChunkSeq[u8] {\n    let mut p = page;\n    p.push(32);\n    p\n",
+);
+
+/// The stack-bound divergence check: every graph is rejected as malformed
+/// (`divergent_words` in modules/stack_bound), so every report differs.
+#[cfg(feature = "divergent-stack-bound")]
+const DIVERGENT_STACK_BOUND_EDIT: (&str, &str) = (
+    "    stack_bound_words(in input)\n",
+    "    divergent_words(in input)\n",
 );
 
 /// The same on the encode-once path (#1276).
@@ -170,6 +184,12 @@ fn main() {
                     DIVERGENT_SCOPED_IR_CHECK_EDIT.0,
                     DIVERGENT_SCOPED_IR_CHECK_EDIT.1,
                 )
+        } else {
+            port
+        };
+        #[cfg(feature = "divergent-stack-bound")]
+        let port = if *library == "hybrid_stack_bound" {
+            port.edit(DIVERGENT_STACK_BOUND_EDIT.0, DIVERGENT_STACK_BOUND_EDIT.1)
         } else {
             port
         };

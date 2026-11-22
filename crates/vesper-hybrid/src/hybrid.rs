@@ -33,6 +33,11 @@ mod ir_check_binding;
 
 #[rustfmt::skip]
 #[allow(clippy::all)]
+#[path = "../port/stack_bound.rs"]
+mod stack_bound_binding;
+
+#[rustfmt::skip]
+#[allow(clippy::all)]
 #[path = "../port/codegen.rs"]
 mod codegen_binding;
 
@@ -91,6 +96,11 @@ mod plan_words;
 #[path = "../../../tests/common/check_words.rs"]
 mod check_words;
 
+// The stack-bound swap's encoder and decoder (#1182), shared with the root
+// package's tests/self_host_check_loops_atomics.rs.
+#[path = "../../../tests/common/stack_words.rs"]
+mod stack_words;
+
 // The test-discovery swap's input encoders and result decoders (#1337),
 // shared with the root package's tests/self_host_test_runner.rs.
 #[path = "../../../tests/common/test_runner_words.rs"]
@@ -118,6 +128,8 @@ static PARSE_CALLS: AtomicU64 = AtomicU64::new(0);
 static CHECK_LAYOUT_CALLS: AtomicU64 = AtomicU64::new(0);
 /// Programs checked by the Vesper IR-check module.
 static IR_CHECK_CALLS: AtomicU64 = AtomicU64::new(0);
+/// Reports made by the Vesper stack-bound module.
+static STACK_BOUND_CALLS: AtomicU64 = AtomicU64::new(0);
 /// `aggregate` requests the Vesper codegen module emitted, and declined.
 static CODEGEN_CALLS: AtomicU64 = AtomicU64::new(0);
 static CODEGEN_DECLINED: AtomicU64 = AtomicU64::new(0);
@@ -359,6 +371,21 @@ const VESPER_DOC: vesper_doc::swap::RenderTable = vesper_doc::swap::RenderTable 
         doc_binding::doc_linked_page(request)
     },
 };
+
+/// `vesper::stack_bound::StackBoundTable` from `modules/stack_bound`: the
+/// stack-bound report of `@vesper/check-loops-atomics` (`vesper ebpf check`
+/// and `--verify-stack`).
+const VESPER_STACK_BOUND: vesper::stack_bound::StackBoundTable =
+    vesper::stack_bound::StackBoundTable {
+        report: |graph, policy| {
+            STACK_BOUND_CALLS.fetch_add(1, Relaxed);
+            let input = stack_words::stack_input(graph, policy);
+            stack_words::decode_stack_report(
+                graph.origin,
+                &stack_bound_binding::report_words(&input),
+            )
+        },
+    };
 
 /// The swaps' input and output costs (SH4 lane 2, #1276), reported at exit
 /// with `VESPER_HYBRID_STATS=1`. `VESPER_HYBRID_STATS=time` also runs the
@@ -721,6 +748,9 @@ extern "C" fn install() {
     if vesper::ir_check::install_ir_check(VESPER_IR_CHECK).is_err() {
         std::process::abort();
     }
+    if vesper::stack_bound::install_stack_bound(VESPER_STACK_BOUND).is_err() {
+        std::process::abort();
+    }
     // Swaps keep one input per compilation (SH4 lane 2, #1276).
     // `VESPER_HYBRID_SCOPES=0` encodes per call instead (the before side of
     // the report's measurement).
@@ -779,6 +809,10 @@ extern "C" fn report() {
     stats::PARSE.report();
     stats::LAYOUT.report();
     stats::IR_CHECK.report();
+    eprintln!(
+        "vesper-hybrid: stack-bound answered {} calls from Vesper",
+        STACK_BOUND_CALLS.load(Relaxed)
+    );
     eprintln!(
         "vesper-hybrid: codegen emitted {} aggregate requests from Vesper ({} declined)",
         CODEGEN_CALLS.load(Relaxed),

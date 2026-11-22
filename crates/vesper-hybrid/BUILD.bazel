@@ -28,6 +28,10 @@ vesper_hybrid(
             "edit_src": "modules/doc/src/lib.ves",
             "edits": {"(sink page: ChunkSeq[u8]) -> ChunkSeq[u8] {\n    page\n": "(sink page: ChunkSeq[u8]) -> ChunkSeq[u8] {\n    let mut p = page;\n    p.push(32);\n    p\n"},
         },
+        "hybrid_stack_bound": {
+            "edit_src": "modules/stack_bound/src/lib.ves",
+            "edits": {"    stack_bound_words(in input)\n": "    divergent_words(in input)\n"},
+        },
         "hybrid_ir_inline": {
             "edit_src": "modules/ir_inline/src/lib.ves",
             "edits": {"    inline_program_words(in input)\n": "    divergent_words(in input)\n"},
@@ -80,6 +84,11 @@ vesper_hybrid(
             "//:check_data_package",
             "//:ir_check_package",
         ],
+        # The stack-bound swap (#1182) builds on @vesper/check-loops-atomics.
+        "hybrid_stack_bound": [
+            "//:check_data_package",
+            "//:check_loops_atomics_package",
+        ],
         "hybrid_ir_inline": [
             "//:check_data_package",
             "//:ir_inline_package",
@@ -124,6 +133,7 @@ vesper_hybrid(
         "hybrid_parse": "modules/parse",
         "hybrid_test_runner": "modules/test_runner",
         "hybrid_place_ir": "modules/place_ir",
+        "hybrid_stack_bound": "modules/stack_bound",
         "hybrid_bounds_hoist": "modules/bounds_hoist",
     },
     # The export glue swap (#1286) builds every library a port crate links
@@ -193,6 +203,11 @@ vesper_hybrid(
             "//:bin/vesper",
         ],
         "test/doc": [
+            ":bin/vesper-hybrid",
+            "//:bin/vesper",
+        ],
+        # The stack-bound swap (#1182) through the CLI.
+        "test/stack_bound": [
             ":bin/vesper-hybrid",
             "//:bin/vesper",
         ],

@@ -35,6 +35,9 @@ divergent-ir-check = []
 # The same check for the doc module (#1338): every linked page gains a
 # trailing space.
 divergent-doc = []
+# The same check for the stack-bound module (#1182): every graph is
+# rejected as malformed.
+divergent-stack-bound = []
 # The same check for the inliner (#1250): nothing is inlined.
 divergent-ir-inline = []
 # The same check for the IR optimizer (#1248): every optimizing compile fails.
