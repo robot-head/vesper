@@ -49,6 +49,10 @@ vesper_hybrid(
             "edit_src": "modules/ir_opt/src/lib.ves",
             "edits": {"    ir_opt_words(in input)\n": "    divergent_words(in input)\n"},
         },
+        "hybrid_pact": {
+            "edit_src": "modules/pact/src/lib.ves",
+            "edits": {"    declarations_words(in input)\n": "    divergent_words(in input)\n"},
+        },
         "hybrid_parse": {
             "edit_src": "modules/parse/src/lib.ves",
             "edits": {"    if b {\n        1\n    } else {\n        0\n    }": "    if b {\n        0\n    } else {\n        1\n    }"},
@@ -133,6 +137,11 @@ vesper_hybrid(
             "//:check_data_package",
             "//:place_ir_package",
         ],
+        # The trait declaration pass (#1185) builds on @vesper/check-pact.
+        "hybrid_pact": [
+            "//:check_data_package",
+            "//:check_pact_package",
+        ],
         "hybrid_parse": [
             "//:ast_package",
             "//:front_package",
@@ -161,6 +170,7 @@ vesper_hybrid(
         "hybrid_ir_opt": "modules/ir_opt",
         "hybrid_layout": "modules/layout",
         "hybrid_optimize": "modules/optimize",
+        "hybrid_pact": "modules/pact",
         "hybrid_parse": "modules/parse",
         "hybrid_wasm_backend": "modules/wasm_backend",
         "hybrid_test_runner": "modules/test_runner",
