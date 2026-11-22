@@ -94,6 +94,12 @@ vesper_hybrid(
             "//:codegen_base_package",
             "//packages/vesper-cranelift:cranelift_package",
         ],
+        # The call swap (#1281) emits through the same shim.
+        "hybrid_codegen_calls": [
+            "//:codegen_base_package",
+            "//:codegen_calls_emit_package",
+            "//packages/vesper-cranelift:cranelift_package",
+        ],
         # Vector and TiledSeq operations (#1285), through the shim too.
         "hybrid_codegen_numeric": [
             "//packages/vesper-codegen-numeric:codegen_numeric_package",
@@ -185,6 +191,7 @@ vesper_hybrid(
         "hybrid_driver": "modules/driver",
         "hybrid_checks": "modules/checks",
         "hybrid_codegen": "modules/codegen",
+        "hybrid_codegen_calls": "modules/codegen_calls",
         "hybrid_codegen_export": "modules/codegen_export",
         "hybrid_codegen_numeric": "modules/codegen_numeric",
         "hybrid_codegen_scalar": "modules/codegen_scalar",
