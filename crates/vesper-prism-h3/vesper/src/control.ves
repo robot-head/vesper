@@ -131,11 +131,11 @@ pub fn uni_accept(inout c: UniCore, id: u64) -> bool {
         c
             .cmds
             .push(
-            UniCmd::StopSending {
-                stream_id: id,
-                code: EXCESSIVE_LOAD
-            }
-        );
+                UniCmd::StopSending {
+                    stream_id: id,
+                    code: EXCESSIVE_LOAD
+                }
+            );
         c.cmds.push(UniCmd::UnknownStream);
         return false;
     }
@@ -222,21 +222,21 @@ fn typed_bytes(inout c: UniCore, id: u64, kind: u64, in bytes: Slice[u8])
         c
             .cmds
             .push(
-            UniCmd::ToDecoder {
-                at: at,
-                len: bytes.len()
-            }
-        );
+                UniCmd::ToDecoder {
+                    at: at,
+                    len: bytes.len()
+                }
+            );
     } else if kind == KIND_DECODER {
         let at = put_out(inout c, in bytes);
         c
             .cmds
             .push(
-            UniCmd::ToEncoder {
-                at: at,
-                len: bytes.len()
-            }
-        );
+                UniCmd::ToEncoder {
+                    at: at,
+                    len: bytes.len()
+                }
+            );
     }
     Result::Ok(true)
 }
@@ -266,13 +266,13 @@ fn pending_bytes(inout c: UniCore, i: u64, id: u64, in bytes: Slice[u8])
         c
             .cmds
             .push(
-            UniCmd::WebTransportStream {
-                stream_id: id,
-                session: s.value,
-                at: at,
-                len: wrapping_sub(len, start)
-            }
-        );
+                UniCmd::WebTransportStream {
+                    stream_id: id,
+                    session: s.value,
+                    at: at,
+                    len: wrapping_sub(len, start)
+                }
+            );
         return Result::Ok(true);
     }
     let kind = if ty == STREAM_CONTROL {
@@ -292,11 +292,11 @@ fn pending_bytes(inout c: UniCore, i: u64, id: u64, in bytes: Slice[u8])
         c
             .cmds
             .push(
-            UniCmd::StopSending {
-                stream_id: id,
-                code: STREAM_CREATION_ERROR
-            }
-        );
+                UniCmd::StopSending {
+                    stream_id: id,
+                    code: STREAM_CREATION_ERROR
+                }
+            );
         c.cmds.push(UniCmd::UnknownStream);
         set_kind(inout c, i, KIND_IGNORED);
         let _cleared = c.held_len.try_set(i, 0);
