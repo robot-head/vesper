@@ -1947,6 +1947,10 @@ impl L {
         if ins.op != IR_CALL {
             return false;
         }
+        // An intercepted `Atomic` operation is no call (`atomic_call`).
+        if self.seqs && self.has_prefix(n32(self.cx.ir.word(ins.a)), "Atomic::") {
+            return false;
+        }
         let key = self.callee_key(widen_u64(ins.dest));
         if key == NONE32 || !self.has_func(key) || self.role_of(key) != R_ORDINARY {
             return false;
@@ -2731,9 +2735,9 @@ impl L {
         if !is_int(to) {
             return false;
         }
-        if kind == 1 {
-            // Out of range: negative into an unsigned kind, or above the
-            // largest value of `to`.
+        if kind == 1 && from != to {
+            // Out of range: above the largest value of `to` (unsigned, so a
+            // negative `i64` counts as large), or negative into `u64`.
             let max: u64 = if to == SC_I64 {
                 9223372036854775807
             } else {
@@ -2741,21 +2745,12 @@ impl L {
             };
             self.e.code.get(x);
             self.e.code.u64_const(max);
-            self
-                .e
-                .code
-                .op(
-                    if from == SC_I64 {
-                        OP_I64_GT_S
-                    } else {
-                        OP_I64_GT_U
-                    }
-                );
-            if from == SC_I64 && to != SC_I64 {
+            self.e.code.op(OP_I64_GT_U);
+            if from == SC_I64 && to == SC_U64 {
+                self.e.code.op(OP_DROP);
                 self.e.code.get(x);
                 self.e.code.i64_const(0);
                 self.e.code.op(OP_I64_LT_S);
-                self.e.code.op(OP_I32_OR);
             }
             self.e.code.open(OP_IF);
             self.raise_overflow();
@@ -3052,7 +3047,18 @@ impl L {
                 continue;
             }
             if root == 0 {
-                Fail::raise(werr(K_INVALID, 0, 211));
+                // A temporary view (`inout s.as_slice_mut()`, `inout
+                // s[a..b]`): its elements are written in place, so the cell
+                // needs no writeback.
+                let at = self.vty(vid);
+                if self.seq_kind(at) != SK_VIEW {
+                    Fail::raise(werr(K_INVALID, 0, 211));
+                }
+                let v = self.value(vid);
+                let cell = self.alloc_block(8);
+                self.store(cell, 0, v);
+                out.push(cell);
+                continue;
             }
             let rs = n32(wrapping_sub(root, 1));
             if path == 0 {
@@ -4372,7 +4378,8 @@ impl L {
         let t0 = self.seq_ty(a, 0);
         let x = self.seq_val(a, 0);
         let d0 = self.cx.default_ty(t0);
-        if c == SQ_SUB_SLICE && self.cx.types.node(d0).name == self.cx.s.string {
+        let n0 = self.cx.types.node(d0).name;
+        if c == SQ_SUB_SLICE && (n0 == self.cx.s.string || n0 == self.cx.s.str_) {
             self.sub_str(a, x, t0, dv);
             return;
         }

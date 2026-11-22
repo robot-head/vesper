@@ -1,0 +1,1607 @@
+// The on-disk store (src/store.rs, layout schema v1) over the `.vsys`
+// library `CasFs` (src/port_fs.rs). Layout below the store root:
+//
+//   LAYOUT                                  "vesper-loom-cas layout 1\n"
+//   objects/v1/<domain>/<kind>/<aa>/<hex>   immutable, read-only objects
+//   derivations/v1/<aa>/<hex>               derivation key -> output records
+//   tmp/                                    private staging files
+//   quarantine/                             entries that failed verification
+//   locks/                                  per-key repair locks
+//
+// Writers stage into tmp/, hash while writing, flush, and publish with a
+// no-replace rename; readers always rehash.
+//
+// Every exported store call answers with a reply: the payload and then a
+// 0, or an error's fields (`rep_*`) and then its code (the last byte);
+// src/port.rs rebuilds the `CasError` from them. An object id is its 34
+// bytes (domain tag, kind tag, digest).
+use self::id::{
+    context,
+    hex_into
+};
+use self::tree::tree_scan;
+use self::drv::drv_scan;
+use self::name::is_utf8;
+use self::DrvErr;
+use self::derivation_hash;
+use @vesper-std/hash-sys::{
+    hasher_new_derive_key,
+    update,
+    finalize,
+    hasher_free
+};
+
+pub copy enum StoreErr {
+    Raised
+}
+
+// Reply codes (the `CasError` variants).
+const E_IO: u8 = 1;
+const E_CORRUPT: u8 = 2;
+const E_DIGEST_MISMATCH: u8 = 3;
+const E_SIZE_MISMATCH: u8 = 4;
+const E_NOT_FOUND: u8 = 5;
+const E_WRONG_KIND: u8 = 6;
+const E_DOMAIN_MISMATCH: u8 = 7;
+const E_DERIVATION_CONFLICT: u8 = 12;
+const E_CORRUPT_RECORD: u8 = 13;
+const E_UNSAFE_LAYOUT: u8 = 16;
+const E_CONTENTION: u8 = 18;
+
+// `UnsafeStoreLayout` reasons.
+const R_NOT_PLAIN_DIR: u8 = 1;
+const R_MARKER_NOT_FILE: u8 = 2;
+const R_UNKNOWN_MARKER: u8 = 3;
+const R_OBJECT_NOT_FILE: u8 = 4;
+
+// `CasError::Io` operations (OPS in src/port.rs).
+const OP_CREATE_ROOT: u8 = 0;
+const OP_RESOLVE_ROOT: u8 = 1;
+const OP_CREATE_STORE_DIR: u8 = 2;
+const OP_INSPECT_STORE_DIR: u8 = 3;
+const OP_PUBLISH_MARKER: u8 = 4;
+const OP_INSPECT_MARKER: u8 = 5;
+const OP_READ_MARKER: u8 = 6;
+const OP_WRITE_STAGING: u8 = 7;
+const OP_CREATE_STAGING: u8 = 8;
+const OP_READ_INPUT: u8 = 9;
+const OP_FLUSH_STAGING: u8 = 10;
+const OP_CREATE_SHARD: u8 = 11;
+const OP_PUBLISH_OBJECT: u8 = 12;
+const OP_SYNC_SHARD: u8 = 13;
+const OP_INSPECT_OCCUPIED: u8 = 14;
+const OP_READ_OCCUPIED: u8 = 15;
+const OP_OPEN_LOCK: u8 = 16;
+const OP_ACQUIRE_LOCK: u8 = 17;
+const OP_QUARANTINE: u8 = 18;
+const OP_READ: u8 = 19;
+const OP_INSPECT_OBJECT: u8 = 20;
+const OP_OPEN_OBJECT: u8 = 21;
+const OP_READ_OBJECT: u8 = 22;
+const OP_INSPECT_CHILD: u8 = 23;
+const OP_PUBLISH_DERIVATION: u8 = 24;
+const OP_INSPECT_DERIVATION: u8 = 25;
+const OP_READ_DERIVATION: u8 = 26;
+const OP_READ_DIR: u8 = 27;
+const OP_REMOVE_STAGING: u8 = 28;
+
+// `CasMeta.kind`.
+const K_FILE: u32 = 1;
+const K_DIR: u32 = 2;
+
+// Error-word kinds (src/port_fs.rs).
+const IO_NOT_FOUND: u64 = 1;
+const IO_EXISTS: u64 = 2;
+
+const BUF: u64 = 65536;
+const PUBLISH_ATTEMPTS: u64 = 4;
+const ID_BYTES: u64 = 34;
+
+fn byte(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(b) => b,
+        Option::None => 0,
+    }
+}
+
+fn word(in s: Slice[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(b) => b,
+        Option::None => 0,
+    }
+}
+
+fn same(in a: Slice[u8], in b: Slice[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i: u64 = 0;
+    // Eight bytes at a time, then the tail.
+    loop {
+        if wrapping_add(i, 8) > a.len() {
+            break;
+        }
+        if read_word(in a, i) != read_word(in b, i) {
+            return false;
+        }
+        i = wrapping_add(i, 8);
+    }
+    loop {
+        if i >= a.len() {
+            return true;
+        }
+        if byte(in a, i) != byte(in b, i) {
+            return false;
+        }
+        i = wrapping_add(i, 1);
+    }
+}
+
+fn zeros(n: u64) -> ChunkSeq[u8] {
+    let mut s: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](n);
+    s.resize(n, 0);
+    s
+}
+
+fn copy_of(in s: Slice[u8]) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](s.len());
+    out.extend(in s);
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Replies.
+
+pub fn rep_u64(inout r: ChunkSeq[u8], v: u64) {
+    let at = r.len();
+    r.resize(wrapping_add(at, 8), 0);
+    r.try_write_u64_le(at, v);
+}
+
+pub fn rep_bytes(inout r: ChunkSeq[u8], in b: Slice[u8]) {
+    rep_u64(inout r, b.len());
+    r.extend(in b);
+}
+
+// A reply is built from empty: the payload or the error's fields, then
+// the code as its last byte (so a large payload is never moved).
+fn begin(inout r: ChunkSeq[u8]) {
+    r.truncate(0);
+}
+
+// End an error reply with its code and raise.
+fn raise_code(inout r: ChunkSeq[u8], code: u8) eff [Fail[StoreErr]] {
+    r.push(code);
+    raise();
+}
+
+fn raise() eff [Fail[StoreErr]] {
+    Fail::raise(StoreErr::Raised);
+}
+
+// `raise` where a value is expected (after a `fail_*` call has raised).
+fn raised[T]() -> T eff [Fail[StoreErr]] {
+    Fail::raise(StoreErr::Raised)
+}
+
+fn fail_io(inout r: ChunkSeq[u8], op: u8, in path: Slice[u8], err: u64) eff [Fail[StoreErr]] {
+    begin(inout r);
+    r.push(op);
+    rep_bytes(inout r, in path);
+    rep_u64(inout r, err);
+    raise_code(inout r, E_IO);
+}
+
+fn fail_layout(inout r: ChunkSeq[u8], in path: Slice[u8], reason: u8, in text: Slice[u8]) eff [
+    Fail[StoreErr]
+] {
+    begin(inout r);
+    rep_bytes(inout r, in path);
+    r.push(reason);
+    rep_bytes(inout r, in text);
+    raise_code(inout r, E_UNSAFE_LAYOUT);
+}
+
+fn fail_id(inout r: ChunkSeq[u8], code: u8, in id: Slice[u8]) eff [Fail[StoreErr]] {
+    begin(inout r);
+    r.extend(in id);
+    raise_code(inout r, code);
+}
+
+fn fail_corrupt(
+    inout r: ChunkSeq[u8],
+    in id: Slice[u8],
+    in actual: Slice[u8],
+    in path: Slice[u8]
+) eff [Fail[StoreErr]] {
+    begin(inout r);
+    r.extend(in id);
+    r.extend(in actual);
+    rep_bytes(inout r, in path);
+    raise_code(inout r, E_CORRUPT);
+}
+
+fn fail_size(inout r: ChunkSeq[u8], in id: Slice[u8], expected: u64, actual: u64) eff [
+    Fail[StoreErr]
+] {
+    begin(inout r);
+    r.extend(in id);
+    rep_u64(inout r, expected);
+    rep_u64(inout r, actual);
+    raise_code(inout r, E_SIZE_MISMATCH);
+}
+
+fn fail_record(inout r: ChunkSeq[u8], in key: Slice[u8], in path: Slice[u8]) eff [Fail[StoreErr]] {
+    begin(inout r);
+    r.extend(in key);
+    rep_bytes(inout r, in path);
+    raise_code(inout r, E_CORRUPT_RECORD);
+}
+
+// ---------------------------------------------------------------------------
+// Paths.
+
+fn join(inout p: ChunkSeq[u8], in name: Slice[u8]) eff [Ffi[CasFs]] {
+    p.push(CasFs::cfs_sep());
+    p.extend(in name);
+}
+
+fn under(in root: Slice[u8], in a: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[CasFs]] {
+    // Room for the longest store path below the root.
+    let mut p: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](wrapping_add(root.len(), 128));
+    p.extend(in root);
+    join(inout p, in a);
+    p
+}
+
+fn under2(in root: Slice[u8], in a: Slice[u8], in b: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[CasFs]] {
+    let mut p = under(in root, in a);
+    join(inout p, in b);
+    p
+}
+
+fn domain_name(tag: u8) -> Str {
+    if tag == 1 {
+        "source"
+    } else if tag == 2 {
+        "interface"
+    } else {
+        "artifact"
+    }
+}
+
+fn kind_name(tag: u8) -> Str {
+    if tag == 1 {
+        "blob"
+    } else {
+        "tree"
+    }
+}
+
+fn hex_of(in digest: Slice[u8]) -> ChunkSeq[u8] {
+    let mut h = ChunkSeq::with_capacity[u8](64);
+    hex_into(in digest, inout h);
+    h
+}
+
+// `<base>/<aa>/<hex>`.
+fn shard_path(inout p: ChunkSeq[u8], in digest: Slice[u8]) eff [Ffi[CasFs]] {
+    let hex = hex_of(in digest);
+    join(inout p, in hex[0..2]);
+    join(inout p, in hex.as_slice());
+}
+
+// `Store::object_path`.
+pub fn object_path(in root: Slice[u8], in id: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[CasFs]] {
+    let mut p = under2(in root, in "objects".as_bytes(), in "v1".as_bytes());
+    join(inout p, in domain_name(byte(in id, 0)).as_bytes());
+    join(inout p, in kind_name(byte(in id, 1)).as_bytes());
+    shard_path(inout p, in id[2..ID_BYTES]);
+    p
+}
+
+fn record_path(in root: Slice[u8], in key: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[CasFs]] {
+    let mut p = under2(in root, in "derivations".as_bytes(), in "v1".as_bytes());
+    shard_path(inout p, in key);
+    p
+}
+
+// The length of `p` up to its last separator (the parent directory).
+fn parent_len(in p: Slice[u8]) -> u64 eff [Ffi[CasFs]] {
+    let s = CasFs::cfs_sep();
+    let mut i = p.len();
+    loop {
+        if i == 0 {
+            return 0;
+        }
+        i = wrapping_sub(i, 1);
+        if byte(in p, i) == s {
+            return i;
+        }
+    }
+}
+
+fn push_hex(inout out: ChunkSeq[u8], n: u64) {
+    // Lowercase hex without leading zeros (`{:x}`).
+    let mut shift: u64 = 60;
+    let mut started = false;
+    loop {
+        let d = wrapping_u8(wrapping_shr_u64(n, wrapping_u32(shift)) & 15);
+        if d != 0 || started || shift == 0 {
+            started = true;
+            if d < 10 {
+                out.push(wrapping_add(d, 48));
+            } else {
+                out.push(wrapping_add(d, 87));
+            }
+        }
+        if shift == 0 {
+            break;
+        }
+        shift = wrapping_sub(shift, 4);
+    }
+}
+
+fn read_word(in s: Slice[u8], at: u64) -> u64 {
+    match s.try_read_u64_le(at) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+// `fsutil::unique_name`: "<prefix><pid:x>-<seq:x>-<nanos:x>".
+fn unique_name(in prefix: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[CasFs]] {
+    let mut parts = zeros(24);
+    CasFs::cfs_unique(inout parts.as_slice_mut());
+    let mut out = copy_of(in prefix);
+    push_hex(inout out, read_word(in parts.as_slice(), 0));
+    out.push(45);
+    push_hex(inout out, read_word(in parts.as_slice(), 8));
+    out.push(45);
+    push_hex(inout out, read_word(in parts.as_slice(), 16));
+    out
+}
+
+// ---------------------------------------------------------------------------
+// File system steps.
+
+fn new_meta() -> CasMeta {
+    CasMeta {
+        size: 0,
+        mtime_s: 0,
+        mtime_ns: 0,
+        kind: 0,
+    }
+}
+
+// The `symlink_metadata` of `path`: 0 when it is there (in `m`), else the
+// error word.
+fn meta_of(in path: Slice[u8], inout m: CasMeta) -> u64 eff [Ffi[CasFs]] {
+    let mut err: u64 = 0;
+    let s = CasFs::cfs_meta(in path, inout m, inout err);
+    err
+}
+
+fn not_found(err: u64) -> bool {
+    (err & 255) == IO_NOT_FOUND
+}
+
+fn exists_err(err: u64) -> bool {
+    (err & 255) == IO_EXISTS
+}
+
+fn create_dir_all(inout r: ChunkSeq[u8], in path: Slice[u8], op: u8) eff [
+    Ffi[CasFs],
+    Fail[StoreErr]
+] {
+    let mut err: u64 = 0;
+    let s = CasFs::cfs_create_dir_all(in path, inout err);
+    if err != 0 {
+        fail_io(inout r, op, in path, err);
+    }
+}
+
+// Remove a staging file, ignoring errors (the `StagedFile` guard).
+fn discard(in path: Slice[u8]) eff [Ffi[CasFs]] {
+    let mut err: u64 = 0;
+    let s = CasFs::cfs_remove_staged(in path, inout err);
+}
+
+fn sync_dir(inout r: ChunkSeq[u8], durable: bool, in dir: Slice[u8], op: u8) eff [
+    Ffi[CasFs],
+    Fail[StoreErr]
+] {
+    if !durable {
+        return;
+    }
+    let mut err: u64 = 0;
+    let s = CasFs::cfs_sync_dir(in dir, inout err);
+    if err != 0 {
+        fail_io(inout r, op, in dir, err);
+    }
+}
+
+// `ensure_plain_dir`.
+fn ensure_plain_dir(inout r: ChunkSeq[u8], in dir: Slice[u8]) eff [Ffi[CasFs], Fail[StoreErr]] {
+    let mut m = new_meta();
+    let err = meta_of(in dir, inout m);
+    if err == 0 {
+        if m.kind != K_DIR {
+            fail_layout(inout r, in dir, R_NOT_PLAIN_DIR, in "".as_bytes());
+        }
+        return;
+    }
+    if !not_found(err) {
+        fail_io(inout r, OP_INSPECT_STORE_DIR, in dir, err);
+    }
+    let mut cerr: u64 = 0;
+    let s = CasFs::cfs_create_dir(in dir, inout cerr);
+    if cerr == 0 {
+        return;
+    }
+    if exists_err(cerr) {
+        ensure_plain_dir(inout r, in dir);
+        return;
+    }
+    fail_io(inout r, OP_CREATE_STORE_DIR, in dir, cerr);
+}
+
+// Create a fresh staging file under `tmp/`; its path goes to `path`.
+fn new_staging(inout r: ChunkSeq[u8], in root: Slice[u8], inout path: ChunkSeq[u8])
+    -> CasFile eff [Ffi[CasFs], Fail[StoreErr]] {
+    loop {
+        let name = unique_name(in "stage-".as_bytes());
+        let p = under2(in root, in "tmp".as_bytes(), in name.as_slice());
+        let mut err: u64 = 0;
+        match CasFs::cfs_create_new(in p.as_slice(), inout err) {
+            Option::Some(f) => {
+                path = p;
+                return f;
+            },
+            Option::None => {
+                if !exists_err(err) {
+                    fail_io(inout r, OP_CREATE_STAGING, in p.as_slice(), err);
+                }
+            },
+        }
+    }
+}
+
+// `stage_bytes`: a flushed staging file holding `bytes`; its path.
+fn stage_bytes(inout r: ChunkSeq[u8], in root: Slice[u8], durable: bool, in bytes: Slice[u8])
+    -> ChunkSeq[u8] eff [Ffi[CasFs], Fail[StoreErr]] {
+    let mut path: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut f = new_staging(inout r, in root, inout path);
+    let mut err: u64 = 0;
+    let w = CasFs::cfs_write(inout f, in bytes, inout err);
+    if err == 0 && durable {
+        let s = CasFs::cfs_sync(inout f, inout err);
+    }
+    CasFs::cfs_close(f);
+    if err != 0 {
+        discard(in path.as_slice());
+        fail_io(inout r, OP_WRITE_STAGING, in path.as_slice(), err);
+    }
+    path
+}
+
+// A hasher for objects of `domain` and `kind`.
+fn object_hasher(domain: u8, kind: u8) -> Hasher eff [Ffi[Blake3]] {
+    loop {
+        match hasher_new_derive_key(in context(domain, kind).as_bytes()) {
+            Option::Some(h) => return h,
+            Option::None => {},
+        }
+    }
+}
+
+// The id of what `h` hashed (and release it).
+fn finish_id(domain: u8, kind: u8, sink h: Hasher) -> ChunkSeq[u8] eff [Ffi[Blake3]] {
+    let mut id = ChunkSeq::with_capacity[u8](ID_BYTES);
+    id.push(domain);
+    id.push(kind);
+    let d = finalize(in h);
+    hasher_free(h);
+    id.resize(ID_BYTES, 0);
+    id.try_write_u64_le(2, d.w0);
+    id.try_write_u64_le(10, d.w1);
+    id.try_write_u64_le(18, d.w2);
+    id.try_write_u64_le(26, d.w3);
+    id
+}
+
+// `open_object_at`: the opened object, or None with `why` set to 1 for
+// NotFound, 2 for UnsafeStoreLayout ("object is not a regular file"), 3
+// for an `inspect object` error and 4 for an `open object` error (in
+// `err`).
+fn open_object(in path: Slice[u8], inout why: u8, inout err: u64)
+    -> Option[CasFile] eff [Ffi[CasFs]] {
+    let mut m = new_meta();
+    err = meta_of(in path, inout m);
+    if err != 0 {
+        if not_found(err) {
+            why = 1;
+        } else {
+            why = 3;
+        }
+        return Option::None;
+    }
+    if m.kind != K_FILE {
+        why = 2;
+        return Option::None;
+    }
+    match CasFs::cfs_open_regular(in path, inout err) {
+        Option::Some(f) => {
+            why = 0;
+            Option::Some(f)
+        },
+        Option::None => {
+            if not_found(err) {
+                why = 1;
+            } else {
+                why = 4;
+            }
+            Option::None
+        },
+    }
+}
+
+// Raise the error of a failed `open_object`.
+fn fail_open(inout r: ChunkSeq[u8], in id: Slice[u8], in path: Slice[u8], why: u8, err: u64) eff [
+    Fail[StoreErr]
+] {
+    if why == 1 {
+        fail_id(inout r, E_NOT_FOUND, in id);
+    }
+    if why == 2 {
+        fail_layout(inout r, in path, R_OBJECT_NOT_FILE, in "".as_bytes());
+    }
+    if why == 3 {
+        fail_io(inout r, OP_INSPECT_OBJECT, in path, err);
+    }
+    fail_io(inout r, OP_OPEN_OBJECT, in path, err);
+}
+
+fn open_object_or_fail(inout r: ChunkSeq[u8], in id: Slice[u8], in path: Slice[u8])
+    -> CasFile eff [Ffi[CasFs], Fail[StoreErr]] {
+    let mut why: u8 = 0;
+    let mut err: u64 = 0;
+    match open_object(in path, inout why, inout err) {
+        Option::Some(f) => f,
+        Option::None => {
+            fail_open(inout r, in id, in path, why, err);
+            raised[CasFile]()
+        },
+    }
+}
+
+// `check_existing_object`: 0 Valid, 1 Invalid, 2 Gone.
+fn check_existing(inout r: ChunkSeq[u8], in id: Slice[u8], in path: Slice[u8], size: u64)
+    -> u8 eff [Ffi[CasFs], Ffi[Blake3], Fail[StoreErr]] {
+    let mut why: u8 = 0;
+    let mut err: u64 = 0;
+    let mut f = match open_object(in path, inout why, inout err) {
+        Option::Some(f) => f,
+        Option::None => {
+            if why == 1 {
+                return 2;
+            }
+            if why == 2 {
+                return 1;
+            }
+            fail_open(inout r, in id, in path, why, err);
+            return 1;
+        },
+    };
+    let len = CasFs::cfs_file_len(in f, inout err);
+    if err != 0 {
+        CasFs::cfs_close(f);
+        fail_io(inout r, OP_INSPECT_OCCUPIED, in path, err);
+        return 1;
+    }
+    if len != size {
+        CasFs::cfs_close(f);
+        return 1;
+    }
+    let mut h = object_hasher(byte(in id, 0), byte(in id, 1));
+    let mut buf = zeros(BUF);
+    let mut seen: u64 = 0;
+    let mut verdict: u8 = 0;
+    loop {
+        // One probe byte past the expected length, without letting a growing
+        // file force an unbounded read.
+        let remaining = wrapping_sub(size, seen);
+        let mut request = BUF;
+        if remaining < BUF {
+            request = wrapping_add(remaining, 1);
+        }
+        if request != buf.len() {
+            buf.resize(request, 0);
+        }
+        let n = CasFs::cfs_read(inout f, inout buf.as_slice_mut(), inout err);
+        if err != 0 {
+            verdict = 3;
+            break;
+        }
+        if n == 0 {
+            break;
+        }
+        if n > remaining {
+            verdict = 1;
+            break;
+        }
+        update(inout h, in buf[0..n]);
+        seen = wrapping_add(seen, n);
+    }
+    CasFs::cfs_close(f);
+    let actual = finish_id(byte(in id, 0), byte(in id, 1), h);
+    if verdict == 3 {
+        fail_io(inout r, OP_READ_OCCUPIED, in path, err);
+    }
+    if verdict == 1 {
+        return 1;
+    }
+    if seen == size && same(in actual.as_slice(), in id) {
+        0
+    } else {
+        1
+    }
+}
+
+// `object_lock_name`: "obj-<domain>-<kind>-<hex>".
+fn object_lock_name(in id: Slice[u8]) -> ChunkSeq[u8] {
+    let mut n = copy_of(in "obj-".as_bytes());
+    n.extend(in domain_name(byte(in id, 0)).as_bytes());
+    n.push(45);
+    n.extend(in kind_name(byte(in id, 1)).as_bytes());
+    n.push(45);
+    hex_into(in id[2..ID_BYTES], inout n);
+    n
+}
+
+fn record_lock_name(in key: Slice[u8]) -> ChunkSeq[u8] {
+    let mut n = copy_of(in "drv-".as_bytes());
+    hex_into(in key, inout n);
+    n
+}
+
+// Whether the entry at `path` is still invalid, under the repair lock:
+// an object (`record` false: `id` and `size`) that does not verify, or a
+// derivation record (`key`) that is corrupt.
+fn still_invalid(
+    inout r: ChunkSeq[u8],
+    in root: Slice[u8],
+    record: bool,
+    in id: Slice[u8],
+    size: u64,
+    in path: Slice[u8]
+) -> bool eff [Ffi[CasFs], Ffi[Blake3], Fail[StoreErr]] {
+    if !record {
+        return check_existing(inout r, in id, in path, size) == 1;
+    }
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut enc: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    read_record(inout r, in root, in id, in path, inout out, inout enc) == 2
+}
+
+// `Store::repair`: move a failed entry into quarantine/, serialized per
+// key by an exclusive lock and re-checked while it is held.
+fn repair(
+    inout r: ChunkSeq[u8],
+    in root: Slice[u8],
+    in path: Slice[u8],
+    in lock_name: Slice[u8],
+    record: bool,
+    in id: Slice[u8],
+    size: u64
+) eff [Ffi[CasFs], Ffi[Blake3], Fail[StoreErr]] {
+    let lock_path = under2(in root, in "locks".as_bytes(), in lock_name);
+    let mut stage: u64 = 0;
+    let mut err: u64 = 0;
+    let lock = match CasFs::cfs_open_lock(in lock_path.as_slice(), inout stage, inout err) {
+        Option::Some(l) => l,
+        Option::None => {
+            if stage == 0 {
+                fail_io(inout r, OP_OPEN_LOCK, in lock_path.as_slice(), err);
+            }
+            fail_io(inout r, OP_ACQUIRE_LOCK, in lock_path.as_slice(), err);
+            raised[CasFile]()
+        },
+    };
+    // 0 valid, 1 still invalid, 2 the check raised. (A handler's raise arm
+    // answers a value: assignments made in it do not reach this frame.)
+    let verdict: u8 = handle Fail[StoreErr] in {
+        if still_invalid(inout r, in root, record, in id, size, in path) {
+            1
+        } else {
+            0
+        }
+    } with {
+        return v => v,
+        raise(_e, _k) => 2,
+    };
+    let failed = verdict == 2;
+    let invalid = verdict == 1;
+    if failed || !invalid {
+        CasFs::cfs_close(lock);
+        if failed {
+            raise();
+        }
+        return;
+    }
+    let cut = parent_len(in path);
+    let mut name = ChunkSeq::with_capacity[u8](128);
+    if cut < path.len() {
+        name.extend(in path[wrapping_add(cut, 1)..path.len()]);
+    }
+    name.push(46);
+    let q = unique_name(in "q-".as_bytes());
+    name.extend(in q.as_slice());
+    let target = under2(in root, in "quarantine".as_bytes(), in name.as_slice());
+    let s = CasFs::cfs_rename(in path, in target.as_slice(), inout err);
+    CasFs::cfs_close(lock);
+    if err != 0 && !not_found(err) {
+        fail_io(inout r, OP_QUARANTINE, in path, err);
+    }
+}
+
+// `publish_object`: true when newly stored. Consumes the staging file.
+fn publish_object(
+    inout r: ChunkSeq[u8],
+    in root: Slice[u8],
+    durable: bool,
+    in staged: Slice[u8],
+    in id: Slice[u8],
+    size: u64
+) -> bool eff [Ffi[CasFs], Ffi[Blake3], Fail[StoreErr]] {
+    let dest = object_path(in root, in id);
+    let cut = parent_len(in dest.as_slice());
+    let outcome: u8 = handle Fail[StoreErr] in {
+        if publish_object_at(
+            inout r,
+            in root,
+            durable,
+            in staged,
+            in id,
+            size,
+            in dest.as_slice(),
+            cut
+        ) {
+            1
+        } else {
+            0
+        }
+    } with {
+        return v => v,
+        raise(_e, _k) => 2,
+    };
+    if outcome == 2 {
+        discard(in staged);
+        raise();
+    }
+    outcome == 1
+}
+
+fn publish_object_at(
+    inout r: ChunkSeq[u8],
+    in root: Slice[u8],
+    durable: bool,
+    in staged: Slice[u8],
+    in id: Slice[u8],
+    size: u64,
+    in dest: Slice[u8],
+    cut: u64
+) -> bool eff [Ffi[CasFs], Ffi[Blake3], Fail[StoreErr]] {
+    create_dir_all(inout r, in dest[0..cut], OP_CREATE_SHARD);
+    let mut attempt: u64 = 0;
+    loop {
+        if attempt >= PUBLISH_ATTEMPTS {
+            break;
+        }
+        attempt = wrapping_add(attempt, 1);
+        let mut err: u64 = 0;
+        let p = CasFs::cfs_publish(in staged, in dest, false, inout err);
+        if p == 2 {
+            fail_io(inout r, OP_PUBLISH_OBJECT, in dest, err);
+        }
+        if p == 0 {
+            // Published. If the shard sync fails, `publish_object` still
+            // removes the staging name, which is already gone.
+            sync_dir(inout r, durable, in dest[0..cut], OP_SYNC_SHARD);
+            return true;
+        }
+        let existing = check_existing(inout r, in id, in dest, size);
+        if existing == 0 {
+            discard(in staged);
+            return false;
+        }
+        if existing == 1 {
+            let lock = object_lock_name(in id);
+            repair(inout r, in root, in dest, in lock.as_slice(), false, in id, size);
+        }
+    }
+    begin(inout r);
+    r.extend(in id);
+    raise_code(inout r, E_CONTENTION);
+    false
+}
+
+// ---------------------------------------------------------------------------
+// Ingestion.
+
+// `put_reader`: stream `rd` into a staging file, hashing as it goes, and
+// publish it. Writes the `Ingested` payload (id, size, newly stored) to the
+// reply.
+fn put_core(
+    inout r: ChunkSeq[u8],
+    in root: Slice[u8],
+    durable: bool,
+    domain: u8,
+    kind: u8,
+    in rd: Reader,
+    has_expected: bool,
+    in expected: Slice[u8]
+) eff [Ffi[CasFs], Ffi[Blake3], Fail[StoreErr]] {
+    let mut path: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut f = new_staging(inout r, in root, inout path);
+    let mut h = object_hasher(domain, kind);
+    let mut buf = zeros(BUF);
+    let mut size: u64 = 0;
+    let mut err: u64 = 0;
+    let mut op: u8 = 255;
+    loop {
+        let n = CasFs::cfs_reader_read(in rd, inout buf.as_slice_mut(), inout err);
+        if err != 0 {
+            op = OP_READ_INPUT;
+            break;
+        }
+        if n == 0 {
+            break;
+        }
+        update(inout h, in buf[0..n]);
+        let w = CasFs::cfs_write(inout f, in buf[0..n], inout err);
+        if err != 0 {
+            op = OP_WRITE_STAGING;
+            break;
+        }
+        size = wrapping_add(size, n);
+    }
+    let id = finish_id(domain, kind, h);
+    let mismatch = op == 255 && has_expected && !same(in expected, in id.as_slice());
+    if op == 255 && !mismatch {
+        op = OP_FLUSH_STAGING;
+        if durable {
+            let s = CasFs::cfs_sync(inout f, inout err);
+        }
+        if err == 0 {
+            let s = CasFs::cfs_make_readonly(inout f, inout err);
+        }
+    }
+    CasFs::cfs_close(f);
+    if mismatch {
+        discard(in path.as_slice());
+        begin(inout r);
+        r.extend(in expected);
+        r.extend(in id.as_slice());
+        raise_code(inout r, E_DIGEST_MISMATCH);
+    }
+    if err != 0 {
+        discard(in path.as_slice());
+        fail_io(inout r, op, in path.as_slice(), err);
+    }
+    let newly = publish_object(
+        inout r,
+        in root,
+        durable,
+        in path.as_slice(),
+        in id.as_slice(),
+        size
+    );
+    ingested(inout r, in id.as_slice(), size, newly);
+}
+
+fn ingested(inout r: ChunkSeq[u8], in id: Slice[u8], size: u64, newly: bool) {
+    begin(inout r);
+    r.extend(in id);
+    rep_u64(inout r, size);
+    if newly {
+        r.push(1);
+    } else {
+        r.push(0);
+    }
+    r.push(0);
+}
+
+// The id of `bytes` as a blob of `domain`.
+fn blob_id_of(domain: u8, in bytes: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[Blake3]] {
+    let mut h = object_hasher(domain, 1);
+    update(inout h, in bytes);
+    finish_id(domain, 1, h)
+}
+
+// `Store::put_blob`: `rd` reads `bytes`. An identical object that is
+// already stored and verifies needs no staging.
+pub fn put_blob(
+    inout r: ChunkSeq[u8],
+    in root: Slice[u8],
+    durable: bool,
+    domain: u8,
+    in bytes: Slice[u8],
+    in rd: Reader
+) eff [Ffi[CasFs], Ffi[Blake3], Fail[StoreErr]] {
+    let id = blob_id_of(domain, in bytes);
+    let dest = object_path(in root, in id.as_slice());
+    if check_existing(inout r, in id.as_slice(), in dest.as_slice(), bytes.len()) == 0 {
+        ingested(inout r, in id.as_slice(), bytes.len(), false);
+        return;
+    }
+    put_core(inout r, in root, durable, domain, 1, in rd, false, in "".as_bytes());
+}
+
+// `put_blob_reader` (`has_expected` false) and `put_blob_expected`.
+pub fn put_stream(
+    inout r: ChunkSeq[u8],
+    in root: Slice[u8],
+    durable: bool,
+    domain: u8,
+    in rd: Reader,
+    has_expected: bool,
+    in expected: Slice[u8]
+) eff [Ffi[CasFs], Ffi[Blake3], Fail[StoreErr]] {
+    if has_expected && byte(in expected, 1) != 1 {
+        begin(inout r);
+        r.extend(in expected);
+        r.push(1);
+        raise_code(inout r, E_WRONG_KIND);
+    }
+    put_core(inout r, in root, durable, domain, 1, in rd, has_expected, in expected);
+}
+
+// `Store::put_tree`: `enc` is the tree's canonical encoding, which `rd`
+// reads. Every child must be stored, files with the recorded size.
+pub fn put_tree(
+    inout r: ChunkSeq[u8],
+    in root: Slice[u8],
+    durable: bool,
+    domain: u8,
+    in enc: Slice[u8],
+    in rd: Reader
+) eff [Ffi[CasFs], Ffi[Blake3], Fail[StoreErr]] {
+    let scan = tree_scan(in enc);
+    let entries = wrapping_sub(scan.len(), 3) / 5;
+    let mut i: u64 = 0;
+    loop {
+        if i >= entries {
+            break;
+        }
+        let w = wrapping_mul(i, 5);
+        let at = word(in scan.as_slice(), w);
+        let nlen = word(in scan.as_slice(), wrapping_add(w, 1));
+        let tag = word(in scan.as_slice(), wrapping_add(w, 2));
+        let size = word(in scan.as_slice(), wrapping_add(w, 3));
+        let d = wrapping_add(wrapping_add(at, nlen), 1);
+        let mut child = ChunkSeq::with_capacity[u8](ID_BYTES);
+        child.push(domain);
+        if tag == 3 {
+            child.push(2);
+        } else {
+            child.push(1);
+        }
+        child.extend(in enc[d..wrapping_add(d, 32)]);
+        let path = object_path(in root, in child.as_slice());
+        let mut m = new_meta();
+        let err = meta_of(in path.as_slice(), inout m);
+        if err != 0 {
+            if not_found(err) {
+                fail_id(inout r, E_NOT_FOUND, in child.as_slice());
+            }
+            fail_io(inout r, OP_INSPECT_CHILD, in path.as_slice(), err);
+        }
+        if m.kind != K_FILE {
+            fail_layout(inout r, in path.as_slice(), R_OBJECT_NOT_FILE, in "".as_bytes());
+        }
+        if tag != 3 && m.size != size {
+            fail_size(inout r, in child.as_slice(), size, m.size);
+        }
+        i = wrapping_add(i, 1);
+    }
+    put_core(inout r, in root, durable, domain, 2, in rd, false, in "".as_bytes());
+}
+
+// ---------------------------------------------------------------------------
+// Readback.
+
+// `Store::contains`.
+fn contains(inout r: ChunkSeq[u8], in root: Slice[u8], in id: Slice[u8])
+    -> bool eff [Ffi[CasFs], Fail[StoreErr]] {
+    let path = object_path(in root, in id);
+    let mut m = new_meta();
+    let err = meta_of(in path.as_slice(), inout m);
+    if err == 0 {
+        return m.kind == K_FILE;
+    }
+    if not_found(err) {
+        return false;
+    }
+    fail_io(inout r, OP_INSPECT_OBJECT, in path.as_slice(), err);
+    false
+}
+
+pub fn contains_reply(inout r: ChunkSeq[u8], in root: Slice[u8], in id: Slice[u8]) eff [
+    Ffi[CasFs],
+    Fail[StoreErr]
+] {
+    let c = contains(inout r, in root, in id);
+    begin(inout r);
+    if c {
+        r.push(1);
+    } else {
+        r.push(0);
+    }
+    r.push(0);
+}
+
+// `verify_object`: rehash the object and answer its size.
+pub fn verify_object(inout r: ChunkSeq[u8], in root: Slice[u8], in id: Slice[u8]) eff [
+    Ffi[CasFs],
+    Ffi[Blake3],
+    Fail[StoreErr]
+] {
+    let path = object_path(in root, in id);
+    let mut f = open_object_or_fail(inout r, in id, in path.as_slice());
+    let mut h = object_hasher(byte(in id, 0), byte(in id, 1));
+    let mut buf = zeros(BUF);
+    let mut size: u64 = 0;
+    let mut err: u64 = 0;
+    loop {
+        let n = CasFs::cfs_read(inout f, inout buf.as_slice_mut(), inout err);
+        if err != 0 || n == 0 {
+            break;
+        }
+        update(inout h, in buf[0..n]);
+        size = wrapping_add(size, n);
+    }
+    CasFs::cfs_close(f);
+    let actual = finish_id(byte(in id, 0), byte(in id, 1), h);
+    if err != 0 {
+        fail_io(inout r, OP_READ, in path.as_slice(), err);
+    }
+    if !same(in actual.as_slice(), in id) {
+        fail_corrupt(inout r, in id, in actual.as_slice(), in path.as_slice());
+    }
+    begin(inout r);
+    rep_u64(inout r, size);
+    r.push(0);
+}
+
+// All of an open file; `err` is set on a failed read.
+fn read_all(inout f: CasFile, inout err: u64) -> ChunkSeq[u8] eff [Ffi[CasFs]] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut buf = zeros(BUF);
+    loop {
+        let n = CasFs::cfs_read(inout f, inout buf.as_slice_mut(), inout err);
+        if err != 0 || n == 0 {
+            return out;
+        }
+        out.extend(in buf[0..n]);
+    }
+}
+
+// `read_blob` (`kind` 1) and `read_tree` (`kind` 2): the verified bytes.
+pub fn read_verified(inout r: ChunkSeq[u8], in root: Slice[u8], in id: Slice[u8], kind: u8) eff [
+    Ffi[CasFs],
+    Ffi[Blake3],
+    Fail[StoreErr]
+] {
+    if byte(in id, 1) != kind {
+        begin(inout r);
+        r.extend(in id);
+        r.push(kind);
+        raise_code(inout r, E_WRONG_KIND);
+    }
+    let path = object_path(in root, in id);
+    let mut f = open_object_or_fail(inout r, in id, in path.as_slice());
+    // Read straight into the reply, sized by the file's length now, then
+    // whatever it grew by since (`read_to_end`).
+    let mut err: u64 = 0;
+    let mut len = CasFs::cfs_file_len(in f, inout err);
+    if err != 0 {
+        len = 0;
+        err = 0;
+    }
+    begin(inout r);
+    let end = len;
+    r.resize(end, 0);
+    let mut filled: u64 = 0;
+    loop {
+        if filled >= end {
+            break;
+        }
+        let n = CasFs::cfs_read(inout f, inout r[filled..end], inout err);
+        if err != 0 || n == 0 {
+            break;
+        }
+        filled = wrapping_add(filled, n);
+    }
+    r.truncate(filled);
+    if err == 0 && filled == end {
+        // A small probe first, as `read_to_end` does: the file rarely grew.
+        let mut buf = zeros(32);
+        loop {
+            let n = CasFs::cfs_read(inout f, inout buf.as_slice_mut(), inout err);
+            if err != 0 || n == 0 {
+                break;
+            }
+            r.extend(in buf[0..n]);
+            if buf.len() < BUF {
+                buf.resize(BUF, 0);
+            }
+        }
+    }
+    CasFs::cfs_close(f);
+    if err != 0 {
+        fail_io(inout r, OP_READ_OBJECT, in path.as_slice(), err);
+    }
+    let mut h = object_hasher(byte(in id, 0), byte(in id, 1));
+    update(inout h, in r[0..r.len()]);
+    let actual = finish_id(byte(in id, 0), byte(in id, 1), h);
+    if !same(in actual.as_slice(), in id) {
+        fail_corrupt(inout r, in id, in actual.as_slice(), in path.as_slice());
+    }
+    r.push(0);
+}
+
+// ---------------------------------------------------------------------------
+// Derivations.
+
+// `read_record`: 0 no record, 1 a valid one (its output id to `out` and
+// its inputs encoding to `enc`), 2 corrupt.
+fn read_record(
+    inout r: ChunkSeq[u8],
+    in root: Slice[u8],
+    in key: Slice[u8],
+    in path: Slice[u8],
+    inout out: ChunkSeq[u8],
+    inout enc: ChunkSeq[u8]
+) -> u8 eff [Ffi[CasFs], Ffi[Blake3], Fail[StoreErr]] {
+    let mut m = new_meta();
+    let err = meta_of(in path, inout m);
+    if err != 0 {
+        if not_found(err) {
+            return 0;
+        }
+        fail_io(inout r, OP_INSPECT_DERIVATION, in path, err);
+    }
+    if m.kind != K_FILE {
+        return 2;
+    }
+    let mut oerr: u64 = 0;
+    let mut f = match CasFs::cfs_open_regular(in path, inout oerr) {
+        Option::Some(f) => f,
+        Option::None => {
+            if not_found(oerr) {
+                return 0;
+            }
+            return 2;
+        },
+    };
+    let mut rerr: u64 = 0;
+    let bytes = read_all(inout f, inout rerr);
+    CasFs::cfs_close(f);
+    if rerr != 0 {
+        fail_io(inout r, OP_READ_DERIVATION, in path, rerr);
+    }
+    let header = wrapping_add(8, ID_BYTES);
+    if bytes.len() < header
+        || byte(in bytes.as_slice(), 0) != 86
+        || byte(in bytes.as_slice(), 1) != 76
+        || byte(in bytes.as_slice(), 2) != 68
+        || byte(in bytes.as_slice(), 3) != 82
+        || byte(in bytes.as_slice(), 4) != 1
+        || byte(in bytes.as_slice(), 5) != 0
+        || byte(in bytes.as_slice(), 6) != 0
+        || byte(in bytes.as_slice(), 7) != 0 {
+        return 2;
+    }
+    let dom = byte(in bytes.as_slice(), 8);
+    let knd = byte(in bytes.as_slice(), 9);
+    if dom < 1 || dom > 3 || knd < 1 || knd > 2 {
+        return 2;
+    }
+    let e = copy_of(in bytes[header..bytes.len()]);
+    let mut info: u64 = 0;
+    let mut info2: u64 = 0;
+    let mut scanned_domain: u64 = 0;
+    let ok = handle Fail[DrvErr] in {
+        let words = drv_scan(in e.as_slice(), inout info, inout info2);
+        scanned_domain = word(in words.as_slice(), 0);
+        true
+    } with {
+        return v => v,
+        raise(_e, _k) => false,
+    };
+    if !ok {
+        return 2;
+    }
+    let k = derivation_hash(in e.as_slice());
+    if !same(in k.as_slice(), in key) || scanned_domain != widen_u64(dom) {
+        return 2;
+    }
+    out = copy_of(in bytes[8..header]);
+    enc = e;
+    1
+}
+
+// The ids of a valid derivation encoding's inputs, 34 bytes each.
+fn input_ids(in e: Slice[u8]) -> ChunkSeq[u8] eff [Fail[DrvErr]] {
+    let mut info: u64 = 0;
+    let mut info2: u64 = 0;
+    let words = drv_scan(in e, inout info, inout info2);
+    let w = words.as_slice();
+    let n_inp = word(in w, 3);
+    let mut out = ChunkSeq::with_capacity[u8](wrapping_mul(n_inp, ID_BYTES));
+    let first = wrapping_sub(w.len(), n_inp);
+    let mut i: u64 = 0;
+    loop {
+        if i >= n_inp {
+            return out;
+        }
+        let at = word(in w, wrapping_add(first, i));
+        out.extend(in e[at..wrapping_add(at, ID_BYTES)]);
+        i = wrapping_add(i, 1);
+    }
+}
+
+// `publish_derivation`: `enc` is the inputs' (valid) encoding. Answers the
+// key and whether the record is new.
+pub fn publish_derivation(
+    inout r: ChunkSeq[u8],
+    in root: Slice[u8],
+    durable: bool,
+    in enc: Slice[u8],
+    in output: Slice[u8]
+) eff [Ffi[CasFs], Ffi[Blake3], Fail[StoreErr]] {
+    let key = derivation_hash(in enc);
+    let mut ids: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut domain: u8 = 0;
+    let ok = handle Fail[DrvErr] in {
+        ids = input_ids(in enc);
+        domain = byte(in enc, 8);
+        true
+    } with {
+        return v => v,
+        raise(_e, _k) => false,
+    };
+    if byte(in output, 0) != domain {
+        begin(inout r);
+        r.push(domain);
+        r.push(byte(in output, 0));
+        raise_code(inout r, E_DOMAIN_MISMATCH);
+    }
+    let n = ids.len() / ID_BYTES;
+    let mut i: u64 = 0;
+    loop {
+        if i > n {
+            break;
+        }
+        let mut id: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        if i < n {
+            let at = wrapping_mul(i, ID_BYTES);
+            id.extend(in ids[at..wrapping_add(at, ID_BYTES)]);
+        } else {
+            id.extend(in output);
+        }
+        if !contains(inout r, in root, in id.as_slice()) {
+            fail_id(inout r, E_NOT_FOUND, in id.as_slice());
+        }
+        i = wrapping_add(i, 1);
+    }
+    let mut record = ChunkSeq::with_capacity[u8](
+        wrapping_add(wrapping_add(8, ID_BYTES), enc.len())
+    );
+    record.extend(in "VLDR".as_bytes());
+    record.push(1);
+    record.push(0);
+    record.push(0);
+    record.push(0);
+    record.extend(in output);
+    record.extend(in enc);
+    let dest = record_path(in root, in key.as_slice());
+    let cut = parent_len(in dest.as_slice());
+    create_dir_all(inout r, in dest[0..cut], OP_CREATE_SHARD);
+    let mut attempt: u64 = 0;
+    loop {
+        if attempt >= PUBLISH_ATTEMPTS {
+            break;
+        }
+        attempt = wrapping_add(attempt, 1);
+        let staged = stage_bytes(inout r, in root, durable, in record.as_slice());
+        let mut err: u64 = 0;
+        let p = CasFs::cfs_publish(in staged.as_slice(), in dest.as_slice(), false, inout err);
+        if p == 2 {
+            discard(in staged.as_slice());
+            fail_io(inout r, OP_PUBLISH_DERIVATION, in dest.as_slice(), err);
+        }
+        if p == 0 {
+            sync_dir(inout r, durable, in dest[0..cut], OP_SYNC_SHARD);
+            begin(inout r);
+            r.extend(in key.as_slice());
+            r.push(1);
+            r.push(0);
+            return;
+        }
+        discard(in staged.as_slice());
+        let mut existing: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        let mut stored: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        let got = read_record(
+            inout r,
+            in root,
+            in key.as_slice(),
+            in dest.as_slice(),
+            inout existing,
+            inout stored
+        );
+        if got == 1 {
+            if same(in existing.as_slice(), in output) {
+                begin(inout r);
+                r.extend(in key.as_slice());
+                r.push(0);
+                r.push(0);
+                return;
+            }
+            begin(inout r);
+            r.extend(in key.as_slice());
+            r.extend(in existing.as_slice());
+            r.extend(in output);
+            raise_code(inout r, E_DERIVATION_CONFLICT);
+        }
+        if got == 2 {
+            let lock = record_lock_name(in key.as_slice());
+            repair(
+                inout r,
+                in root,
+                in dest.as_slice(),
+                in lock.as_slice(),
+                true,
+                in key.as_slice(),
+                0
+            );
+        }
+    }
+    fail_id(inout r, E_CONTENTION, in output);
+}
+
+// `lookup_derivation`: answers 0, or 1 and the output id.
+pub fn lookup_derivation(inout r: ChunkSeq[u8], in root: Slice[u8], in enc: Slice[u8]) eff [
+    Ffi[CasFs],
+    Ffi[Blake3],
+    Fail[StoreErr]
+] {
+    let key = derivation_hash(in enc);
+    let path = record_path(in root, in key.as_slice());
+    let mut output: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut stored: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let got = read_record(
+        inout r,
+        in root,
+        in key.as_slice(),
+        in path.as_slice(),
+        inout output,
+        inout stored
+    );
+    if got == 0 {
+        begin(inout r);
+        r.push(0);
+        r.push(0);
+        return;
+    }
+    if got == 2 || !same(in stored.as_slice(), in enc) {
+        fail_record(inout r, in key.as_slice(), in path.as_slice());
+    }
+    if !contains(inout r, in root, in output.as_slice()) {
+        fail_id(inout r, E_NOT_FOUND, in output.as_slice());
+    }
+    begin(inout r);
+    r.push(1);
+    r.extend(in output.as_slice());
+    r.push(0);
+}
+
+// ---------------------------------------------------------------------------
+// Opening and maintenance.
+
+const LAYOUT_MARKER: Str = "vesper-loom-cas layout 1\n";
+
+fn ensure_marker(inout r: ChunkSeq[u8], in root: Slice[u8], durable: bool) eff [
+    Ffi[CasFs],
+    Fail[StoreErr]
+] {
+    let marker = under(in root, in "LAYOUT".as_bytes());
+    let mut m = new_meta();
+    let err = meta_of(in marker.as_slice(), inout m);
+    if err != 0 {
+        if !not_found(err) {
+            fail_io(inout r, OP_INSPECT_MARKER, in marker.as_slice(), err);
+        }
+        let staged = stage_bytes(inout r, in root, durable, in LAYOUT_MARKER.as_bytes());
+        let mut perr: u64 = 0;
+        let p = CasFs::cfs_publish(in staged.as_slice(), in marker.as_slice(), false, inout perr);
+        discard(in staged.as_slice());
+        if p == 2 {
+            fail_io(inout r, OP_PUBLISH_MARKER, in marker.as_slice(), perr);
+        }
+    }
+    let mut oerr: u64 = 0;
+    let mut f = match CasFs::cfs_open_regular(in marker.as_slice(), inout oerr) {
+        Option::Some(f) => f,
+        Option::None => {
+            fail_layout(inout r, in marker.as_slice(), R_MARKER_NOT_FILE, in "".as_bytes());
+            raised[CasFile]()
+        },
+    };
+    // At most 1024 bytes (`take(1024)`).
+    let mut text: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut buf = zeros(1024);
+    let mut rerr: u64 = 0;
+    loop {
+        let want = wrapping_sub(1024, text.len());
+        if want == 0 {
+            break;
+        }
+        if want != buf.len() {
+            buf.resize(want, 0);
+        }
+        let n = CasFs::cfs_read(inout f, inout buf.as_slice_mut(), inout rerr);
+        if rerr != 0 || n == 0 {
+            break;
+        }
+        text.extend(in buf[0..n]);
+    }
+    CasFs::cfs_close(f);
+    if rerr != 0 {
+        fail_io(inout r, OP_READ_MARKER, in marker.as_slice(), rerr);
+    }
+    if !is_utf8(in text.as_slice()) {
+        // `read_to_string`'s InvalidData error (error word 0).
+        fail_io(inout r, OP_READ_MARKER, in marker.as_slice(), 0);
+    }
+    if !same(in text.as_slice(), in LAYOUT_MARKER.as_bytes()) {
+        fail_layout(inout r, in marker.as_slice(), R_UNKNOWN_MARKER, in text.as_slice());
+    }
+}
+
+// `Store::open_with`: answers the canonical root.
+pub fn open(inout r: ChunkSeq[u8], in root: Slice[u8], durable: bool) eff [
+    Ffi[CasFs],
+    Fail[StoreErr]
+] {
+    create_dir_all(inout r, in root, OP_CREATE_ROOT);
+    let mut canon = zeros(4096);
+    let mut err: u64 = 0;
+    let n = CasFs::cfs_canonicalize(in root, inout canon.as_slice_mut(), inout err);
+    if err == 0 && n > canon.len() {
+        canon.resize(n, 0);
+        let m = CasFs::cfs_canonicalize(in root, inout canon.as_slice_mut(), inout err);
+    }
+    if err != 0 {
+        fail_io(inout r, OP_RESOLVE_ROOT, in root, err);
+    }
+    canon.truncate(n);
+    let d_objects = under(in canon.as_slice(), in "objects".as_bytes());
+    ensure_plain_dir(inout r, in d_objects.as_slice());
+    let d_objects_v1 = under2(in canon.as_slice(), in "objects".as_bytes(), in "v1".as_bytes());
+    ensure_plain_dir(inout r, in d_objects_v1.as_slice());
+    let d_drvs = under(in canon.as_slice(), in "derivations".as_bytes());
+    ensure_plain_dir(inout r, in d_drvs.as_slice());
+    let d_drvs_v1 = under2(in canon.as_slice(), in "derivations".as_bytes(), in "v1".as_bytes());
+    ensure_plain_dir(inout r, in d_drvs_v1.as_slice());
+    let d_tmp = under(in canon.as_slice(), in "tmp".as_bytes());
+    ensure_plain_dir(inout r, in d_tmp.as_slice());
+    let d_quarantine = under(in canon.as_slice(), in "quarantine".as_bytes());
+    ensure_plain_dir(inout r, in d_quarantine.as_slice());
+    let d_locks = under(in canon.as_slice(), in "locks".as_bytes());
+    ensure_plain_dir(inout r, in d_locks.as_slice());
+    ensure_marker(inout r, in canon.as_slice(), durable);
+    begin(inout r);
+    r.extend(in canon.as_slice());
+    r.push(0);
+}
+
+// The next name of a listing into `name`: false at the end; `err` is set
+// on a listing error.
+fn dir_next(inout d: CasDir, inout name: ChunkSeq[u8], inout err: u64) -> bool eff [Ffi[CasFs]] {
+    loop {
+        let n = CasFs::cfs_dir_next(inout d, inout name.as_slice_mut(), inout err);
+        if n < 0 {
+            return false;
+        }
+        let len = wrapping_u64(n);
+        if len <= name.len() {
+            name.truncate(len);
+            return true;
+        }
+        name.resize(len, 0);
+    }
+}
+
+// `sweep_temporaries`: answers the number removed. `min_s`/`min_ns` is the
+// minimum age.
+pub fn sweep(inout r: ChunkSeq[u8], in root: Slice[u8], min_s: u64, min_ns: u64) eff [
+    Ffi[CasFs],
+    Fail[StoreErr]
+] {
+    let mut now = zeros(16);
+    CasFs::cfs_now(inout now.as_slice_mut());
+    let now_s = read_word(in now.as_slice(), 0);
+    let now_ns = read_word(in now.as_slice(), 8);
+    let tmp = under(in root, in "tmp".as_bytes());
+    let mut err: u64 = 0;
+    let mut d = match CasFs::cfs_read_dir(in tmp.as_slice(), inout err) {
+        Option::Some(d) => d,
+        Option::None => {
+            fail_io(inout r, OP_READ_DIR, in tmp.as_slice(), err);
+            raised[CasDir]()
+        },
+    };
+    let mut removed: u64 = 0;
+    let mut name = zeros(256);
+    let mut failed_op: u8 = 255;
+    let mut failed_path: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    loop {
+        name.resize(256, 0);
+        if !dir_next(inout d, inout name, inout err) {
+            if err != 0 {
+                failed_op = OP_READ_DIR;
+                failed_path = copy_of(in tmp.as_slice());
+            }
+            break;
+        }
+        let path = under(in tmp.as_slice(), in name.as_slice());
+        let mut m = new_meta();
+        if meta_of(in path.as_slice(), inout m) != 0 || m.kind == K_DIR {
+            // Gone, or not a staging file.
+        } else {
+            let mut old = false;
+            if m.mtime_ns <= 999999999 {
+                let ms = wrapping_u64(m.mtime_s);
+                let mns = widen_u64(m.mtime_ns);
+                // age = now - mtime (zero when mtime is later), against min.
+                if m.mtime_s < 0 {
+                    old = true;
+                } else if ms < now_s || (ms == now_s && mns <= now_ns) {
+                    let mut age_s = wrapping_sub(now_s, ms);
+                    let mut age_ns = now_ns;
+                    if now_ns < mns {
+                        age_s = wrapping_sub(age_s, 1);
+                        age_ns = wrapping_add(now_ns, 1000000000);
+                    }
+                    age_ns = wrapping_sub(age_ns, mns);
+                    old = age_s > min_s || (age_s == min_s && age_ns >= min_ns);
+                } else {
+                    old = min_s == 0 && min_ns == 0;
+                }
+            } else {
+                old = min_s == 0 && min_ns == 0;
+            }
+            if old {
+                let mut rerr: u64 = 0;
+                let s = CasFs::cfs_remove_staged(in path.as_slice(), inout rerr);
+                if rerr == 0 {
+                    removed = wrapping_add(removed, 1);
+                } else if !not_found(rerr) {
+                    failed_op = OP_REMOVE_STAGING;
+                    failed_path = path;
+                    err = rerr;
+                    break;
+                }
+            }
+        }
+    }
+    CasFs::cfs_dir_close(d);
+    if failed_op != 255 {
+        fail_io(inout r, failed_op, in failed_path.as_slice(), err);
+    }
+    begin(inout r);
+    rep_u64(inout r, removed);
+    r.push(0);
+}
