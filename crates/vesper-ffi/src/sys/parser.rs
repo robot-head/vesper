@@ -328,6 +328,37 @@ impl Parser {
         };
         self.bump();
         self.keyword("extern")?;
+        // `linear extern mapping M[T];`: foreign memory Vesper views in
+        // place, `len` elements of `T` at an address the library owns.
+        if self.is_word("mapping") {
+            if linearity != Linearity::Linear {
+                return Err(self.error(
+                    ErrorKind::Type,
+                    "a mapping is `linear extern mapping M[T];`: its memory is released only by a `sink` import",
+                ));
+            }
+            self.bump();
+            let name = self.word()?;
+            reject_reserved_type(&name)?;
+            self.expect(b'[')?;
+            let element = self.word()?;
+            let element = scalar(&element)
+                .filter(|s| in_place_scalar(*s))
+                .ok_or_else(|| {
+                    self.error(
+                        ErrorKind::Unsupported,
+                        "a mapping's elements are u8, u32, u64, i64 or usize (their packed stride is their C size)",
+                    )
+                })?;
+            self.expect(b']')?;
+            self.expect(b';')?;
+            return Ok(ExternTypeDescriptor {
+                name,
+                linearity,
+                drop: None,
+                mapping: Some(element),
+            });
+        }
         self.keyword("type")?;
         let name = self.word()?;
         reject_reserved_type(&name)?;
@@ -348,6 +379,7 @@ impl Parser {
             name,
             linearity,
             drop,
+            mapping: None,
         })
     }
     fn peek_word(&self, offset: usize) -> Option<&str> {
@@ -596,6 +628,32 @@ impl Parser {
                     self.expect(b':')?;
                     let span = self.token().span.clone();
                     let ty = match a {
+                        Some(a) if self.is_word("Pinned") && self.peek_punct(1) == Some(b'[') => {
+                            // `in b: Pinned[T]` / `inout b: Pinned[T]`: a
+                            // buffer C may keep until the program releases it.
+                            let access = match a {
+                                PointerAccess::In => Access::In,
+                                PointerAccess::Inout => Access::Inout,
+                                PointerAccess::Out => {
+                                    return Err(self.error(
+                                        ErrorKind::Unsupported,
+                                        "a pinned buffer is lent `in` or `inout`",
+                                    ));
+                                }
+                            };
+                            self.bump();
+                            self.expect(b'[')?;
+                            let element = scalar(&self.word()?)
+                                .filter(|s| in_place_scalar(*s))
+                                .ok_or_else(|| {
+                                    self.error(
+                                        ErrorKind::Unsupported,
+                                        "a pinned buffer's elements are u8, u32, u64, i64 or usize",
+                                    )
+                                })?;
+                            self.expect(b']')?;
+                            RawParameterType::Pinned { element, access }
+                        }
                         Some(a) => {
                             let handle = self.word()?;
                             let pointer = Error::new(
@@ -660,10 +718,16 @@ impl Parser {
         self.expect(b'[')?;
         // `ForeignVal[Option[H]]`: a nullable extern-type handle;
         // `ForeignVal[NonNull[H]]`: one the library promises is not NULL.
+        let mut length = None;
         let result = if self.is_word("Option") && self.peek_punct(1) == Some(b'[') {
             self.bump();
             self.expect(b'[')?;
             let name = self.word()?;
+            // `ForeignVal[Option[M[len]]]`: a mapping of `len` elements.
+            if self.eat(b'[') {
+                length = Some(self.word()?);
+                self.expect(b']')?;
+            }
             self.expect(b']')?;
             RawType::OptionHandle(name)
         } else if self.is_word("NonNull") && self.peek_punct(1) == Some(b'[') {
@@ -690,6 +754,7 @@ impl Parser {
             result,
             errno,
             variadic,
+            length,
             link_name: None,
             indirect: keyword == "callback",
         })
@@ -849,6 +914,11 @@ enum RawParameterType {
         span: Range<usize>,
         retain: bool,
     },
+    /// `in`/`inout b: Pinned[T]`.
+    Pinned {
+        element: Scalar,
+        access: Access,
+    },
 }
 struct RawFunction {
     symbol: String,
@@ -857,10 +927,20 @@ struct RawFunction {
     errno: bool,
     /// Index of the first variadic parameter (after `...`).
     variadic: Option<usize>,
+    /// The parameter named in a mapping result `Option[M[len]]`.
+    length: Option<String>,
     /// `#[link_name = "sym"]`.
     link_name: Option<String>,
     /// A `callback` declaration rather than a `fn`.
     indirect: bool,
+}
+/// Whether a buffer of `s` may be viewed in place: its packed sequence
+/// stride is its C size.
+fn in_place_scalar(s: Scalar) -> bool {
+    matches!(
+        s,
+        Scalar::U8 | Scalar::U32 | Scalar::U64 | Scalar::I64 | Scalar::Usize
+    )
 }
 /// A C identifier: what `#[link_name]` may name.
 fn c_identifier(n: &str) -> bool {
@@ -900,6 +980,7 @@ fn reject_reserved_type(n: &str) -> Result<(), Error> {
                 | "Option"
                 | "ByteArray"
                 | "ZeroPad"
+                | "Pinned"
         )
     {
         return Err(Error::new(ErrorKind::Type, 0..0, "reserved type name"));
@@ -959,6 +1040,63 @@ fn resolve(
                     format!("unknown foreign type '{n}'; aggregates/handles are unsupported"),
                 ))
             }
+        }
+    }
+}
+/// The length parameter of a mapping result `ForeignVal[Option[M[len]]]`:
+/// a by-value unsigned 32- or 64-bit parameter of the same function. A
+/// mapping is only ever returned in that form, and only a mapping names a
+/// length.
+fn mapping_length(
+    symbol: &str,
+    result: &ValueType,
+    length: Option<String>,
+    parameters: &[ParameterDescriptor],
+) -> Result<Option<usize>, Error> {
+    let mapping = match result {
+        ValueType::Handle { handle, nullable } if handle.mapping.is_some() => {
+            Some((handle.name(), *nullable))
+        }
+        ValueType::NonNullHandle { handle } if handle.mapping.is_some() => {
+            Some((handle.name(), false))
+        }
+        _ => None,
+    };
+    match (mapping, length) {
+        (None, None) => Ok(None),
+        (None, Some(_)) => Err(Error::new(
+            ErrorKind::Type,
+            0..0,
+            format!("`{symbol}`: only a mapping result names a length (`Option[M[len]]`)"),
+        )),
+        (Some((name, nullable)), length) => {
+            let Some(length) = length.filter(|_| nullable) else {
+                return Err(Error::new(
+                    ErrorKind::Type,
+                    0..0,
+                    format!(
+                        "`{symbol}` returns the mapping `{name}`: declare it `ForeignVal[Option[{name}[len]]]`, where `len` is the parameter giving its length"
+                    ),
+                ));
+            };
+            let index = parameters.iter().position(|p| {
+                p.name == length
+                    && matches!(
+                        p.ty,
+                        ParameterType::Value(ValueType::Scalar(
+                            Scalar::U32 | Scalar::U64 | Scalar::Usize
+                        ))
+                    )
+            });
+            index.map(Some).ok_or_else(|| {
+                Error::new(
+                    ErrorKind::Type,
+                    0..0,
+                    format!(
+                        "`{symbol}`: the length of `{name}[{length}]` must be a by-value u32, u64 or usize parameter of `{symbol}`"
+                    ),
+                )
+            })
         }
     }
 }
@@ -1175,6 +1313,7 @@ pub(super) fn parse(source: &str, limits: Limits) -> Result<LibraryDescriptor, E
             name: f.symbol.clone(),
             linearity: Linearity::Callback,
             drop: None,
+            mapping: None,
         });
     }
     unique(
@@ -1328,6 +1467,9 @@ pub(super) fn parse(source: &str, limits: Limits) -> Result<LibraryDescriptor, E
                         ));
                     }
                 },
+                RawParameterType::Pinned { element, access } => {
+                    ParameterType::Pinned { element, access }
+                }
             };
             // A variadic argument occupies one 8-byte slot on every target
             // (Apple arm64 passes them all on the stack), so it is declared
@@ -1403,13 +1545,16 @@ pub(super) fn parse(source: &str, limits: Limits) -> Result<LibraryDescriptor, E
                 ),
             ));
         }
+        let result = resolve(f.result, &enums, &extern_types)?;
+        let mapping_length = mapping_length(&f.symbol, &result, f.length, &parameters)?;
         functions.push(FunctionDescriptor {
             symbol: f.symbol,
             parameters,
-            result: resolve(f.result, &enums, &extern_types)?,
+            result,
             convention: target.convention(),
             errno: f.errno,
             variadic: f.variadic,
+            mapping_length,
             link_name: f.link_name,
             indirect: f.indirect,
         });

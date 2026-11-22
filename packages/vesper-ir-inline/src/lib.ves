@@ -150,7 +150,8 @@ const R_SITE_INOUT: u32 = 31;
 const R_SITE_SEQUENCE: u32 = 32;
 const R_SITE_FIELD: u32 = 33;
 const R_SITE_REBIND: u32 = 34;
-const REASONS: u64 = 35;
+const R_SITE_COLD: u32 = 35;
+const REASONS: u64 = 36;
 
 // site.rs: smallest cold side worth a call, and what the call adds.
 const MIN_COLD: u64 = 16;
@@ -3617,6 +3618,96 @@ fn find_instance(in p: Prog, callee: u32, s0: u64, s1: u64) -> u32 {
 }
 
 // `inline_into`: inline the eligible calls of caller `c`.
+// `owns_sequence`: a local of the target, a by-value parameter included,
+// whose type holds a sequence and is no slice view. Its copy would put the sequence's slot,
+// frame and drop flags on every path of the caller (#1499).
+fn owns_sequence(in p: Prog, g: Tgt) -> bool {
+    let f = p.fun(g.f);
+    for k in 0..w(f.ln) {
+        let at = add(w(f.la), k);
+        let t = p.map(g.inst, u32_at(in p.loc_ty, at));
+        if !p.has(t, F_SEQUENCE) || p.has(t, F_SLICE) {
+            continue;
+        }
+        let name = u32_at(in p.loc_name, at);
+        let mut owned = true;
+        for j in 0..w(f.pn) {
+            let q = p.param(f, j);
+            if q.name == name {
+                owned = q.pass == P_SINK;
+                break;
+            }
+        }
+        if owned {
+            return true;
+        }
+    }
+    false
+}
+
+// `cold_block`: block `b` of function `c` is on no cycle, and some path
+// from the entry leaves the function without passing it.
+fn cold_block(in p: Prog, c: u32, b: u64) -> bool {
+    if b == 0 {
+        return false;
+    }
+    let f = p.fun(c);
+    let nb = w(f.fc);
+    let mut succ: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    // On a cycle: `b` is reachable from its own successors.
+    let mut seen = zeros8(nb);
+    let mut work: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    successors(in p, p.block(f, b), inout succ);
+    for k in 0..succ.len() {
+        work.push(u32_at(in succ, k));
+    }
+    loop {
+        let k = match work.pop() {
+            Option::Some(x) => w(x),
+            Option::None => break,
+        };
+        if k >= nb || u8_at(in seen, k) != 0 {
+            continue;
+        }
+        if k == b {
+            return false;
+        }
+        set_u8(inout seen, k, 1);
+        successors(in p, p.block(f, k), inout succ);
+        for j in 0..succ.len() {
+            work.push(u32_at(in succ, j));
+        }
+    }
+    // A path from the entry that avoids `b` and leaves the function.
+    let mut seen2 = zeros8(nb);
+    work.push(0);
+    loop {
+        let k = match work.pop() {
+            Option::Some(x) => w(x),
+            Option::None => break,
+        };
+        if k == b || k >= nb || u8_at(in seen2, k) != 0 {
+            continue;
+        }
+        set_u8(inout seen2, k, 1);
+        let bk = p.block(f, k);
+        if bk.term == T_RETURN {
+            return true;
+        }
+        for i in 0..w(bk.ic) {
+            let x = p.inst_of(bk, i);
+            if x.op == O_EXIT && n32(p.op(w(x.a))) == f.name {
+                return true;
+            }
+        }
+        successors(in p, bk, inout succ);
+        for j in 0..succ.len() {
+            work.push(u32_at(in succ, j));
+        }
+    }
+    false
+}
+
 fn inline_into(
     inout p: Prog,
     c: u32,
@@ -3675,6 +3766,9 @@ fn inline_into(
             }
             if why == R_OK {
                 why = site_bindings(in p, c, g, inst.dest, add(a, 2), inout bs);
+            }
+            if why == R_OK && owns_sequence(in p, g) && cold_block(in p, c, b) {
+                why = R_SITE_COLD;
             }
             if why == R_OK {
                 let handlers = handler_sum(in p, fi, false);

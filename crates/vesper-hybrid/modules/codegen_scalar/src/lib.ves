@@ -1,0 +1,26 @@
+// @export vsys Cranelift direct rust=vesper_cranelift_sys
+//
+// The `scalar` codegen swap of the hybrid Stage 2 build (self-hosting SH4
+// lane 6, #1280): scalars, locals and control flow emitted in Vesper
+// through the lent Cranelift builder. `plan` reads one program (the words
+// of `program_input` in tests/common/ir_words.rs) and returns six words per
+// instruction Vesper emits, `[function, block, instruction, request, a,
+// b]`. crates/vesper-hybrid installs `scalar` as the `scalar` hook of
+// `vesper::codegen_swap`; it emits one planned instruction or one typed
+// request of `codegen_swap::scalar`, and returns 0 to leave it to Rust.
+use @vesper/codegen-scalar::{
+    codegen_scalar_plan_bytes
+};
+use @vesper/codegen-scalar-emit::{
+    scalar_hook
+};
+
+pub fn plan(in input: Slice[u8]) -> ChunkSeq[u64] {
+    codegen_scalar_plan_bytes(in input)
+}
+
+// One request: `call` is the address of the lent call. Returns 1 when it
+// emitted the request, 0 to leave it to Rust.
+pub fn scalar(call: u64) -> u64 eff [Ffi[Cranelift]] {
+    scalar_hook(call)
+}

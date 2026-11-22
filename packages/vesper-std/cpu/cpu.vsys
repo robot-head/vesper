@@ -19,6 +19,14 @@ sys library StdCpu (
     fn vstd_cpu_rdpmc(index: u32) -> ForeignVal[u64];
     // x86_64: `rdrand`; 1 when `out` holds a random word, else 0.
     fn vstd_cpu_rdrand64(nocapture inout out: u64) -> ForeignVal[u32];
+    // x86_64: `rdpkru` (ecx = 0): the protection-key rights register.
+    fn vstd_cpu_rdpkru() -> ForeignVal[u32];
+    // x86_64: `wrpkru` of `value` (ecx = edx = 0).
+    fn vstd_cpu_wrpkru(value: u32) -> ForeignVal[Unit];
+    // x86_64: `lfence`, `mfence` and `sfence`.
+    fn vstd_cpu_lfence() -> ForeignVal[Unit];
+    fn vstd_cpu_mfence() -> ForeignVal[Unit];
+    fn vstd_cpu_sfence() -> ForeignVal[Unit];
     // AArch64: `isb; mrs cntvct_el0`.
     fn vstd_cpu_cntvct() -> ForeignVal[u64];
     // AArch64: `isb; mrs pmccntr_el0; isb`.
@@ -27,4 +35,12 @@ sys library StdCpu (
     fn vstd_cpu_pmevcntr(index: u32) -> ForeignVal[u64];
     // AArch64: `mrs rndr`; 1 when `out` holds a random word, else 0.
     fn vstd_cpu_rndr(nocapture inout out: u64) -> ForeignVal[u32];
+    // AArch64: `isb`, `dmb ish` and `dsb sy`.
+    fn vstd_cpu_isb() -> ForeignVal[Unit];
+    fn vstd_cpu_dmb_ish() -> ForeignVal[Unit];
+    fn vstd_cpu_dsb_sy() -> ForeignVal[Unit];
+    // AArch64 (FEAT_S1POE): `mrs por_el0`, the permission-overlay register.
+    fn vstd_cpu_rdpor() -> ForeignVal[u64];
+    // AArch64 (FEAT_S1POE): `msr por_el0, value; isb`.
+    fn vstd_cpu_wrpor(value: u64) -> ForeignVal[Unit];
 }

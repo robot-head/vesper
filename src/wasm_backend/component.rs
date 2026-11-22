@@ -910,6 +910,12 @@ fn err<E: std::fmt::Display>(stage: &str, e: E) -> WasmError {
 
 /// Embed the WIT world and encode the component.
 pub(crate) fn encode(mut core: Vec<u8>, wit: &str, world: WasmWorld) -> Result<Vec<u8>, WasmError> {
+    // SH5 swap point (#1334): the `component` hook may write the component.
+    if let Some(hook) = crate::codegen_swap::installed().component
+        && let Some(component) = hook(&core, wit, world)
+    {
+        return Ok(component);
+    }
     let mut resolve = wit_parser::Resolve::default();
     for (name, source) in [
         ("wasi-io.wit", super::host::IO_WIT),

@@ -1,57 +1,162 @@
-// The Vulkan 1.2 core entry points the compute runtime calls, all exported
-// by the system loader (libvulkan). Dispatchable and non-dispatchable
+// The Vulkan 1.2 core entry points the compute runtime calls. The loader
+// (libvulkan) is optional: nothing of it is resolved at link time. `open`
+// loads it with `dlopen` and looks up each entry point with a typed
+// `dlsym` declaration (`load_*`) at each call, so a machine without a
+// loader, or with one that lacks an entry point, gets `Unavailable` (manuscript, "Callback
+// Types and C Function Pointers"). Dispatchable and non-dispatchable
 // handles are u64 words; every pointer argument is an address of memory the
 // package allocated with libc (see libc.vsys). Results are VkResult codes.
 sys library Vk (
     target = "@TARGET@", abi = "@ABI@",
-    link = "dynamic", name = "vulkan",
+    link = "dynamic", name = "c",
     artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
 ) {
-    fn vkEnumerateInstanceVersion(nocapture inout version: u32) -> ForeignVal[i32];
-    fn vkCreateInstance(info: u64, alloc: u64, nocapture inout instance: u64) -> ForeignVal[i32];
-    fn vkDestroyInstance(instance: u64, alloc: u64) -> ForeignVal[Unit];
-    fn vkEnumeratePhysicalDevices(instance: u64, nocapture inout count: u32, devices: u64) -> ForeignVal[i32];
-    fn vkGetPhysicalDeviceProperties2(physical: u64, props: u64) -> ForeignVal[Unit];
-    fn vkGetPhysicalDeviceFeatures2(physical: u64, features: u64) -> ForeignVal[Unit];
-    fn vkGetPhysicalDeviceQueueFamilyProperties(physical: u64, nocapture inout count: u32, props: u64) -> ForeignVal[Unit];
-    fn vkGetPhysicalDeviceMemoryProperties(physical: u64, props: u64) -> ForeignVal[Unit];
-    fn vkCreateDevice(physical: u64, info: u64, alloc: u64, nocapture inout device: u64) -> ForeignVal[i32];
-    fn vkDestroyDevice(device: u64, alloc: u64) -> ForeignVal[Unit];
-    fn vkDeviceWaitIdle(device: u64) -> ForeignVal[i32];
-    fn vkGetDeviceQueue(device: u64, family: u32, index: u32, nocapture inout queue: u64) -> ForeignVal[Unit];
-    fn vkCreateSemaphore(device: u64, info: u64, alloc: u64, nocapture inout semaphore: u64) -> ForeignVal[i32];
-    fn vkDestroySemaphore(device: u64, semaphore: u64, alloc: u64) -> ForeignVal[Unit];
-    fn vkGetSemaphoreCounterValue(device: u64, semaphore: u64, nocapture inout value: u64) -> ForeignVal[i32];
-    fn vkWaitSemaphores(device: u64, info: u64, timeout: u64) -> ForeignVal[i32];
-    fn vkCreateBuffer(device: u64, info: u64, alloc: u64, nocapture inout buffer: u64) -> ForeignVal[i32];
-    fn vkDestroyBuffer(device: u64, buffer: u64, alloc: u64) -> ForeignVal[Unit];
-    fn vkGetBufferMemoryRequirements(device: u64, buffer: u64, req: u64) -> ForeignVal[Unit];
-    fn vkAllocateMemory(device: u64, info: u64, alloc: u64, nocapture inout memory: u64) -> ForeignVal[i32];
-    fn vkFreeMemory(device: u64, memory: u64, alloc: u64) -> ForeignVal[Unit];
-    fn vkBindBufferMemory(device: u64, buffer: u64, memory: u64, offset: u64) -> ForeignVal[i32];
-    fn vkMapMemory(device: u64, memory: u64, offset: u64, size: u64, flags: u32, nocapture inout data: u64) -> ForeignVal[i32];
-    fn vkUnmapMemory(device: u64, memory: u64) -> ForeignVal[Unit];
-    fn vkCreateDescriptorSetLayout(device: u64, info: u64, alloc: u64, nocapture inout layout: u64) -> ForeignVal[i32];
-    fn vkDestroyDescriptorSetLayout(device: u64, layout: u64, alloc: u64) -> ForeignVal[Unit];
-    fn vkCreatePipelineLayout(device: u64, info: u64, alloc: u64, nocapture inout layout: u64) -> ForeignVal[i32];
-    fn vkDestroyPipelineLayout(device: u64, layout: u64, alloc: u64) -> ForeignVal[Unit];
-    fn vkCreateShaderModule(device: u64, info: u64, alloc: u64, nocapture inout module: u64) -> ForeignVal[i32];
-    fn vkDestroyShaderModule(device: u64, module: u64, alloc: u64) -> ForeignVal[Unit];
-    fn vkCreateComputePipelines(device: u64, cache: u64, count: u32, infos: u64, alloc: u64, nocapture inout pipeline: u64) -> ForeignVal[i32];
-    fn vkDestroyPipeline(device: u64, pipeline: u64, alloc: u64) -> ForeignVal[Unit];
-    fn vkCreateCommandPool(device: u64, info: u64, alloc: u64, nocapture inout pool: u64) -> ForeignVal[i32];
-    fn vkDestroyCommandPool(device: u64, pool: u64, alloc: u64) -> ForeignVal[Unit];
-    fn vkAllocateCommandBuffers(device: u64, info: u64, nocapture inout cmd: u64) -> ForeignVal[i32];
-    fn vkBeginCommandBuffer(cmd: u64, info: u64) -> ForeignVal[i32];
-    fn vkEndCommandBuffer(cmd: u64) -> ForeignVal[i32];
-    fn vkCreateDescriptorPool(device: u64, info: u64, alloc: u64, nocapture inout pool: u64) -> ForeignVal[i32];
-    fn vkDestroyDescriptorPool(device: u64, pool: u64, alloc: u64) -> ForeignVal[Unit];
-    fn vkAllocateDescriptorSets(device: u64, info: u64, nocapture inout set: u64) -> ForeignVal[i32];
-    fn vkUpdateDescriptorSets(device: u64, write_count: u32, writes: u64, copy_count: u32, copies: u64) -> ForeignVal[Unit];
-    fn vkCmdBindPipeline(cmd: u64, bind_point: u32, pipeline: u64) -> ForeignVal[Unit];
-    fn vkCmdBindDescriptorSets(cmd: u64, bind_point: u32, layout: u64, first: u32, count: u32, sets: u64, dynamic_count: u32, dynamic: u64) -> ForeignVal[Unit];
-    fn vkCmdPushConstants(cmd: u64, layout: u64, stages: u32, offset: u32, size: u32, values: u64) -> ForeignVal[Unit];
-    fn vkCmdDispatch(cmd: u64, x: u32, y: u32, z: u32) -> ForeignVal[Unit];
-    fn vkCmdPipelineBarrier(cmd: u64, src: u32, dst: u32, deps: u32, memory_count: u32, memory: u64, buffer_count: u32, buffers: u64, image_count: u32, images: u64) -> ForeignVal[Unit];
-    fn vkQueueSubmit(queue: u64, count: u32, submits: u64, fence: u64) -> ForeignVal[i32];
+    // The platform loader (libc on Linux, libSystem on macOS). RTLD_NOW.
+    fn dlopen(nocapture in path: CStr, flags: i32) -> ForeignVal[u64];
+    fn dlclose(library: u64) -> ForeignVal[i32];
+    // An entry point's address, or 0 (`open` checks that each exists).
+    #[link_name = "dlsym"]
+    fn lookup(library: u64, nocapture in name: CStr) -> ForeignVal[u64];
+
+    callback PfnEnumerateInstanceVersion(nocapture inout version: u32) -> ForeignVal[i32];
+    #[link_name = "dlsym"]
+    fn load_enumerate_instance_version(library: u64, nocapture in name: CStr) -> ForeignVal[NonNull[PfnEnumerateInstanceVersion]];
+    callback PfnCreateInstance(info: u64, alloc: u64, nocapture inout instance: u64) -> ForeignVal[i32];
+    #[link_name = "dlsym"]
+    fn load_create_instance(library: u64, nocapture in name: CStr) -> ForeignVal[NonNull[PfnCreateInstance]];
+    callback PfnDestroyInstance(instance: u64, alloc: u64) -> ForeignVal[Unit];
+    #[link_name = "dlsym"]
+    fn load_destroy_instance(library: u64, nocapture in name: CStr) -> ForeignVal[NonNull[PfnDestroyInstance]];
+    callback PfnEnumeratePhysicalDevices(instance: u64, nocapture inout count: u32, devices: u64) -> ForeignVal[i32];
+    #[link_name = "dlsym"]
+    fn load_enumerate_physical_devices(library: u64, nocapture in name: CStr) -> ForeignVal[NonNull[PfnEnumeratePhysicalDevices]];
+    callback PfnGetPhysicalDeviceProperties2(physical: u64, props: u64) -> ForeignVal[Unit];
+    #[link_name = "dlsym"]
+    fn load_get_physical_device_properties2(library: u64, nocapture in name: CStr) -> ForeignVal[NonNull[PfnGetPhysicalDeviceProperties2]];
+    callback PfnGetPhysicalDeviceFeatures2(physical: u64, features: u64) -> ForeignVal[Unit];
+    #[link_name = "dlsym"]
+    fn load_get_physical_device_features2(library: u64, nocapture in name: CStr) -> ForeignVal[NonNull[PfnGetPhysicalDeviceFeatures2]];
+    callback PfnGetPhysicalDeviceQueueFamilyProperties(physical: u64, nocapture inout count: u32, props: u64) -> ForeignVal[Unit];
+    #[link_name = "dlsym"]
+    fn load_get_physical_device_queue_family_properties(library: u64, nocapture in name: CStr) -> ForeignVal[NonNull[PfnGetPhysicalDeviceQueueFamilyProperties]];
+    callback PfnGetPhysicalDeviceMemoryProperties(physical: u64, props: u64) -> ForeignVal[Unit];
+    #[link_name = "dlsym"]
+    fn load_get_physical_device_memory_properties(library: u64, nocapture in name: CStr) -> ForeignVal[NonNull[PfnGetPhysicalDeviceMemoryProperties]];
+    callback PfnCreateDevice(physical: u64, info: u64, alloc: u64, nocapture inout device: u64) -> ForeignVal[i32];
+    #[link_name = "dlsym"]
+    fn load_create_device(library: u64, nocapture in name: CStr) -> ForeignVal[NonNull[PfnCreateDevice]];
+    callback PfnDestroyDevice(device: u64, alloc: u64) -> ForeignVal[Unit];
+    #[link_name = "dlsym"]
+    fn load_destroy_device(library: u64, nocapture in name: CStr) -> ForeignVal[NonNull[PfnDestroyDevice]];
+    callback PfnDeviceWaitIdle(device: u64) -> ForeignVal[i32];
+    #[link_name = "dlsym"]
+    fn load_device_wait_idle(library: u64, nocapture in name: CStr) -> ForeignVal[NonNull[PfnDeviceWaitIdle]];
+    callback PfnGetDeviceQueue(device: u64, family: u32, index: u32, nocapture inout queue: u64) -> ForeignVal[Unit];
+    #[link_name = "dlsym"]
+    fn load_get_device_queue(library: u64, nocapture in name: CStr) -> ForeignVal[NonNull[PfnGetDeviceQueue]];
+    callback PfnCreateSemaphore(device: u64, info: u64, alloc: u64, nocapture inout semaphore: u64) -> ForeignVal[i32];
+    #[link_name = "dlsym"]
+    fn load_create_semaphore(library: u64, nocapture in name: CStr) -> ForeignVal[NonNull[PfnCreateSemaphore]];
+    callback PfnDestroySemaphore(device: u64, semaphore: u64, alloc: u64) -> ForeignVal[Unit];
+    #[link_name = "dlsym"]
+    fn load_destroy_semaphore(library: u64, nocapture in name: CStr) -> ForeignVal[NonNull[PfnDestroySemaphore]];
+    callback PfnGetSemaphoreCounterValue(device: u64, semaphore: u64, nocapture inout value: u64) -> ForeignVal[i32];
+    #[link_name = "dlsym"]
+    fn load_get_semaphore_counter_value(library: u64, nocapture in name: CStr) -> ForeignVal[NonNull[PfnGetSemaphoreCounterValue]];
+    callback PfnWaitSemaphores(device: u64, info: u64, timeout: u64) -> ForeignVal[i32];
+    #[link_name = "dlsym"]
+    fn load_wait_semaphores(library: u64, nocapture in name: CStr) -> ForeignVal[NonNull[PfnWaitSemaphores]];
+    callback PfnCreateBuffer(device: u64, info: u64, alloc: u64, nocapture inout buffer: u64) -> ForeignVal[i32];
+    #[link_name = "dlsym"]
+    fn load_create_buffer(library: u64, nocapture in name: CStr) -> ForeignVal[NonNull[PfnCreateBuffer]];
+    callback PfnDestroyBuffer(device: u64, buffer: u64, alloc: u64) -> ForeignVal[Unit];
+    #[link_name = "dlsym"]
+    fn load_destroy_buffer(library: u64, nocapture in name: CStr) -> ForeignVal[NonNull[PfnDestroyBuffer]];
+    callback PfnGetBufferMemoryRequirements(device: u64, buffer: u64, req: u64) -> ForeignVal[Unit];
+    #[link_name = "dlsym"]
+    fn load_get_buffer_memory_requirements(library: u64, nocapture in name: CStr) -> ForeignVal[NonNull[PfnGetBufferMemoryRequirements]];
+    callback PfnAllocateMemory(device: u64, info: u64, alloc: u64, nocapture inout memory: u64) -> ForeignVal[i32];
+    #[link_name = "dlsym"]
+    fn load_allocate_memory(library: u64, nocapture in name: CStr) -> ForeignVal[NonNull[PfnAllocateMemory]];
+    callback PfnFreeMemory(device: u64, memory: u64, alloc: u64) -> ForeignVal[Unit];
+    #[link_name = "dlsym"]
+    fn load_free_memory(library: u64, nocapture in name: CStr) -> ForeignVal[NonNull[PfnFreeMemory]];
+    callback PfnBindBufferMemory(device: u64, buffer: u64, memory: u64, offset: u64) -> ForeignVal[i32];
+    #[link_name = "dlsym"]
+    fn load_bind_buffer_memory(library: u64, nocapture in name: CStr) -> ForeignVal[NonNull[PfnBindBufferMemory]];
+    callback PfnMapMemory(device: u64, memory: u64, offset: u64, size: u64, flags: u32, nocapture inout data: u64) -> ForeignVal[i32];
+    #[link_name = "dlsym"]
+    fn load_map_memory(library: u64, nocapture in name: CStr) -> ForeignVal[NonNull[PfnMapMemory]];
+    callback PfnUnmapMemory(device: u64, memory: u64) -> ForeignVal[Unit];
+    #[link_name = "dlsym"]
+    fn load_unmap_memory(library: u64, nocapture in name: CStr) -> ForeignVal[NonNull[PfnUnmapMemory]];
+    callback PfnCreateDescriptorSetLayout(device: u64, info: u64, alloc: u64, nocapture inout layout: u64) -> ForeignVal[i32];
+    #[link_name = "dlsym"]
+    fn load_create_descriptor_set_layout(library: u64, nocapture in name: CStr) -> ForeignVal[NonNull[PfnCreateDescriptorSetLayout]];
+    callback PfnDestroyDescriptorSetLayout(device: u64, layout: u64, alloc: u64) -> ForeignVal[Unit];
+    #[link_name = "dlsym"]
+    fn load_destroy_descriptor_set_layout(library: u64, nocapture in name: CStr) -> ForeignVal[NonNull[PfnDestroyDescriptorSetLayout]];
+    callback PfnCreatePipelineLayout(device: u64, info: u64, alloc: u64, nocapture inout layout: u64) -> ForeignVal[i32];
+    #[link_name = "dlsym"]
+    fn load_create_pipeline_layout(library: u64, nocapture in name: CStr) -> ForeignVal[NonNull[PfnCreatePipelineLayout]];
+    callback PfnDestroyPipelineLayout(device: u64, layout: u64, alloc: u64) -> ForeignVal[Unit];
+    #[link_name = "dlsym"]
+    fn load_destroy_pipeline_layout(library: u64, nocapture in name: CStr) -> ForeignVal[NonNull[PfnDestroyPipelineLayout]];
+    callback PfnCreateShaderModule(device: u64, info: u64, alloc: u64, nocapture inout module: u64) -> ForeignVal[i32];
+    #[link_name = "dlsym"]
+    fn load_create_shader_module(library: u64, nocapture in name: CStr) -> ForeignVal[NonNull[PfnCreateShaderModule]];
+    callback PfnDestroyShaderModule(device: u64, module: u64, alloc: u64) -> ForeignVal[Unit];
+    #[link_name = "dlsym"]
+    fn load_destroy_shader_module(library: u64, nocapture in name: CStr) -> ForeignVal[NonNull[PfnDestroyShaderModule]];
+    callback PfnCreateComputePipelines(device: u64, cache: u64, count: u32, infos: u64, alloc: u64, nocapture inout pipeline: u64) -> ForeignVal[i32];
+    #[link_name = "dlsym"]
+    fn load_create_compute_pipelines(library: u64, nocapture in name: CStr) -> ForeignVal[NonNull[PfnCreateComputePipelines]];
+    callback PfnDestroyPipeline(device: u64, pipeline: u64, alloc: u64) -> ForeignVal[Unit];
+    #[link_name = "dlsym"]
+    fn load_destroy_pipeline(library: u64, nocapture in name: CStr) -> ForeignVal[NonNull[PfnDestroyPipeline]];
+    callback PfnCreateCommandPool(device: u64, info: u64, alloc: u64, nocapture inout pool: u64) -> ForeignVal[i32];
+    #[link_name = "dlsym"]
+    fn load_create_command_pool(library: u64, nocapture in name: CStr) -> ForeignVal[NonNull[PfnCreateCommandPool]];
+    callback PfnDestroyCommandPool(device: u64, pool: u64, alloc: u64) -> ForeignVal[Unit];
+    #[link_name = "dlsym"]
+    fn load_destroy_command_pool(library: u64, nocapture in name: CStr) -> ForeignVal[NonNull[PfnDestroyCommandPool]];
+    callback PfnAllocateCommandBuffers(device: u64, info: u64, nocapture inout cmd: u64) -> ForeignVal[i32];
+    #[link_name = "dlsym"]
+    fn load_allocate_command_buffers(library: u64, nocapture in name: CStr) -> ForeignVal[NonNull[PfnAllocateCommandBuffers]];
+    callback PfnBeginCommandBuffer(cmd: u64, info: u64) -> ForeignVal[i32];
+    #[link_name = "dlsym"]
+    fn load_begin_command_buffer(library: u64, nocapture in name: CStr) -> ForeignVal[NonNull[PfnBeginCommandBuffer]];
+    callback PfnEndCommandBuffer(cmd: u64) -> ForeignVal[i32];
+    #[link_name = "dlsym"]
+    fn load_end_command_buffer(library: u64, nocapture in name: CStr) -> ForeignVal[NonNull[PfnEndCommandBuffer]];
+    callback PfnCreateDescriptorPool(device: u64, info: u64, alloc: u64, nocapture inout pool: u64) -> ForeignVal[i32];
+    #[link_name = "dlsym"]
+    fn load_create_descriptor_pool(library: u64, nocapture in name: CStr) -> ForeignVal[NonNull[PfnCreateDescriptorPool]];
+    callback PfnDestroyDescriptorPool(device: u64, pool: u64, alloc: u64) -> ForeignVal[Unit];
+    #[link_name = "dlsym"]
+    fn load_destroy_descriptor_pool(library: u64, nocapture in name: CStr) -> ForeignVal[NonNull[PfnDestroyDescriptorPool]];
+    callback PfnAllocateDescriptorSets(device: u64, info: u64, nocapture inout set: u64) -> ForeignVal[i32];
+    #[link_name = "dlsym"]
+    fn load_allocate_descriptor_sets(library: u64, nocapture in name: CStr) -> ForeignVal[NonNull[PfnAllocateDescriptorSets]];
+    callback PfnUpdateDescriptorSets(device: u64, write_count: u32, writes: u64, copy_count: u32, copies: u64) -> ForeignVal[Unit];
+    #[link_name = "dlsym"]
+    fn load_update_descriptor_sets(library: u64, nocapture in name: CStr) -> ForeignVal[NonNull[PfnUpdateDescriptorSets]];
+    callback PfnCmdBindPipeline(cmd: u64, bind_point: u32, pipeline: u64) -> ForeignVal[Unit];
+    #[link_name = "dlsym"]
+    fn load_cmd_bind_pipeline(library: u64, nocapture in name: CStr) -> ForeignVal[NonNull[PfnCmdBindPipeline]];
+    callback PfnCmdBindDescriptorSets(cmd: u64, bind_point: u32, layout: u64, first: u32, count: u32, sets: u64, dynamic_count: u32, dynamic: u64) -> ForeignVal[Unit];
+    #[link_name = "dlsym"]
+    fn load_cmd_bind_descriptor_sets(library: u64, nocapture in name: CStr) -> ForeignVal[NonNull[PfnCmdBindDescriptorSets]];
+    callback PfnCmdPushConstants(cmd: u64, layout: u64, stages: u32, offset: u32, size: u32, values: u64) -> ForeignVal[Unit];
+    #[link_name = "dlsym"]
+    fn load_cmd_push_constants(library: u64, nocapture in name: CStr) -> ForeignVal[NonNull[PfnCmdPushConstants]];
+    callback PfnCmdDispatch(cmd: u64, x: u32, y: u32, z: u32) -> ForeignVal[Unit];
+    #[link_name = "dlsym"]
+    fn load_cmd_dispatch(library: u64, nocapture in name: CStr) -> ForeignVal[NonNull[PfnCmdDispatch]];
+    callback PfnCmdPipelineBarrier(cmd: u64, src: u32, dst: u32, deps: u32, memory_count: u32, memory: u64, buffer_count: u32, buffers: u64, image_count: u32, images: u64) -> ForeignVal[Unit];
+    #[link_name = "dlsym"]
+    fn load_cmd_pipeline_barrier(library: u64, nocapture in name: CStr) -> ForeignVal[NonNull[PfnCmdPipelineBarrier]];
+    callback PfnQueueSubmit(queue: u64, count: u32, submits: u64, fence: u64) -> ForeignVal[i32];
+    #[link_name = "dlsym"]
+    fn load_queue_submit(library: u64, nocapture in name: CStr) -> ForeignVal[NonNull[PfnQueueSubmit]];
 }

@@ -2,9 +2,9 @@
 # The Vesper port of vesper-resonance (port wave P3b lane 9, #1071) under
 # Cargo, for the port harness; Bazel runs the same tests as its own targets
 # (crates/vesper-resonance/BUILD.bazel). Three checks:
-#   1. the crate's tests pass against the Rust build, the Rust seed copy and
-#      the port-backed build (tests/port_differential.rs compares the port's
-#      samples, schedules, findings and leases with the Rust build bit for bit);
+#   1. the crate's tests pass against the Rust seed copy and the port-backed
+#      package (tests/port_differential.rs compares the port's samples,
+#      schedules, findings and leases with the Rust build bit for bit);
 #   2. the divergent port (one edit in each ported module, see build.rs) fails
 #      one test per module while a test in the same file still passes;
 #   3. the native realtime verifier proves the port's audio path (the
@@ -14,7 +14,6 @@
 set -eu
 cd "$(dirname "$0")/../../.."
 cargo test --locked -p vesper-resonance -p vesper-resonance-seed
-cargo test --locked -p vesper-resonance --features vesper-port
 log=$(mktemp)
 obj=$(mktemp)
 trap 'rm -f "$log" "$obj"' EXIT HUP INT TERM

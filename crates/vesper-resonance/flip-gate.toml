@@ -1,0 +1,33 @@
+# The flip gate for vesper-resonance (scripts/ci/flip_gate.py, SH6 lane 1,
+# #1396; this crate's lane: SH6 lane 9, #1404). The flipped modules are the
+# SVF kernel render (kernels.rs) and the built-in graph runner (pdc.rs). The
+# package has only their port; their frozen Rust is the seed's engine, which
+# the compiler links until Stage 2. The schedule compiler is not flipped
+# (1.50x [1.45x, 1.53x] on 2026-11-22); add it here when it passes.
+name = "vesper-resonance"
+lane = "SH6-9"
+rust = [
+    "crates/vesper-resonance/seed/src/engine/kernels.rs",
+    "crates/vesper-resonance/seed/src/engine/pdc.rs",
+]
+env = { CARGO_PROFILE_DEV_DEBUG = "0", CARGO_PROFILE_TEST_DEBUG = "0" }
+build = ["cargo build --locked --release -p vesper-resonance --example abba"]
+
+[[tests]]
+run = "cargo test --locked --release -p vesper-resonance -p vesper-resonance-seed"
+
+# Every ported module against the seed, bit for bit (samples, schedules,
+# graph outputs, findings, leases).
+[differential]
+run = "cargo test --locked --release -p vesper-resonance --test port_differential"
+
+# Both builds are in one binary (the seed is a dev-dependency), so the
+# harness times both arms itself (A B B A per epoch) and prints the pairs.
+[[abba]]
+workload = "kernel"
+run = "${CARGO_TARGET_DIR:-target}/release/examples/abba flip-gate kernel"
+
+[[abba]]
+workload = "graph"
+run = "${CARGO_TARGET_DIR:-target}/release/examples/abba flip-gate graph"
+
