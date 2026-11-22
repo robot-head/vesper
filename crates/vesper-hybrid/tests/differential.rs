@@ -173,6 +173,22 @@ fn run_with(
     }
 }
 
+/// A wasm build the default compiler refuses for loops (Rust's wasm backend
+/// does not lower them) and the hybrid's Vesper backend compiles: the port
+/// goes beyond Rust here, so the runs cannot agree (the port's loop
+/// lowering is checked against the evaluator in
+/// tests/self_host_wasm_backend.rs).
+fn loop_extension(command: &[&str], default: &Run, hybrid: &Run) -> bool {
+    let refusal = vesper::loops::WASM_REFUSAL
+        .split(';')
+        .next()
+        .unwrap_or_default();
+    command.contains(&"wasm32-wasip2")
+        && !default.output.status.success()
+        && String::from_utf8_lossy(&default.output.stderr).contains(refusal)
+        && hybrid.output.status.success()
+}
+
 fn differences(default: &Run, hybrid: &Run) -> Vec<&'static str> {
     let mut out = Vec::new();
     if default.output.status.code() != hybrid.output.status.code() {
@@ -204,6 +220,7 @@ fn hybrid_matches_the_default_compiler() {
     let mismatches = Mutex::new(Vec::new());
     let ties = Mutex::new(Vec::new());
     let totals = Mutex::new((Duration::ZERO, Duration::ZERO, 0usize));
+    let extended = Mutex::new(0usize);
     let workers = std::thread::available_parallelism().map_or(2, |n| n.get().min(8));
     std::thread::scope(|s| {
         for _ in 0..workers {
@@ -219,17 +236,28 @@ fn hybrid_matches_the_default_compiler() {
                         let b = a.clone();
                         let d = run(&default, &root, command, file, &a);
                         let h = run(&hybrid, &root, command, file, &b);
+                        if loop_extension(command, &d, &h) {
+                            *extended.lock().unwrap() += 1;
+                            continue;
+                        }
                         let mut diff = differences(&d, &h);
                         let tie_file = OPTIMIZE_EQUAL_COST_TIES
                             .iter()
                             .any(|t| Path::new(t) == file.as_path());
-                        // A tie only changes the emitted IR or object: both
-                        // runs succeed with the same diagnostics.
-                        let artifact_only =
-                            diff.iter().all(|d| *d == "stdout" || *d == "object bytes")
-                                && d.output.status.success()
-                                && (command.get(2) == Some(&"object") || diff == ["stdout"]);
-                        if !diff.is_empty() && tie_file && command[0] == "emit" && artifact_only {
+                        // A tie only changes the emitted IR, object or wasm
+                        // component: both runs succeed with the same
+                        // diagnostics.
+                        let wasm = command.contains(&"wasm32-wasip2");
+                        let artifact_only = diff
+                            .iter()
+                            .all(|d| *d == "stdout" || *d == "object bytes")
+                            && d.output.status.success()
+                            && (command.get(2) == Some(&"object") || wasm || diff == ["stdout"]);
+                        if !diff.is_empty()
+                            && tie_file
+                            && (command[0] == "emit" || wasm)
+                            && artifact_only
+                        {
                             let r = run_with(
                                 &hybrid,
                                 &root,
@@ -276,12 +304,14 @@ fn hybrid_matches_the_default_compiler() {
         ties.len()
     );
     eprintln!(
-        "differential: {} files, {runs} runs per compiler; default {:.2} s, hybrid {:.2} s ({:.3}x); {} differ",
+        "differential: {} files, {runs} runs per compiler; default {:.2} s, hybrid {:.2} s ({:.3}x); \
+         {} differ; {} wasm builds with loops only the hybrid compiles",
         files.len(),
         d.as_secs_f64(),
         h.as_secs_f64(),
         h.as_secs_f64() / d.as_secs_f64(),
-        mismatches.len()
+        mismatches.len(),
+        extended.into_inner().unwrap()
     );
     if cfg!(any(
         feature = "divergent",
