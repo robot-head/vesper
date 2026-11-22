@@ -1,0 +1,75 @@
+[package]
+name = "vesper-loom-cas-port"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "vesper-loom-cas built on its Vesper port (Rust-exit SH6 lane 16, #1411)"
+publish = false
+build = "build.rs"
+autotests = false
+autoexamples = false
+autobenches = false
+
+# The port build of vesper-loom-cas: ../src with cfg(vesper_port), which
+# build.rs sets after linking the Loom package in ../vesper. A separate
+# package because vesper-loom-cas is in the compiler's closure: a port
+# harness there would make a Bazel cycle through the compiler binary (and
+# Cargo features unify, so a feature could not keep the compiler on Rust).
+# No crate depends on this package; port/test-port.sh runs the crate's
+# tests against it. At the flip, the compiler moves to a seed copy instead
+# (seed-copy rule, docs/maintenance/porting-a-crate.md).
+[lib]
+name = "vesper_loom_cas"
+path = "../src/lib.rs"
+doctest = false
+
+[[test]]
+name = "codec_differential"
+path = "../tests/codec_differential.rs"
+
+[[test]]
+name = "store"
+path = "../tests/store.rs"
+
+[[test]]
+name = "transfer_acceptance"
+path = "../tests/transfer_acceptance.rs"
+
+[[test]]
+name = "transfer_export"
+path = "../tests/transfer_export.rs"
+
+[[test]]
+name = "transfer_import"
+path = "../tests/transfer_import.rs"
+
+[[example]]
+name = "codec_timing_port"
+path = "../examples/codec_timing.rs"
+
+[features]
+# A deliberately wrong port, one edit per module picked by
+# VESPER_CAS_DIVERGE (port/test-port.sh asserts that the tests catch each).
+divergent = []
+
+[dependencies]
+blake3 = "1.8"
+reflink-copy = "0.1"
+vesper-port-abi = { path = "../../vesper-port-abi" }
+# The `.vsys` library `Blake3` in C, which the port links.
+vesper-blake3-sys = { path = "../../vesper-blake3-sys" }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[build-dependencies]
+vesper-port-harness = { path = "../../vesper-port-harness" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(vesper_port)"] }
