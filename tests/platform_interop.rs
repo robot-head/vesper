@@ -707,6 +707,28 @@ fn executables_link_package_assembly() {
     assert!(left.is_empty(), "{left:?}");
 }
 
+/// A C source compiles for the target and links in place of the static
+/// library (BLAKE3 in @vesper-std/hash-sys is built this way).
+#[test]
+fn executables_link_a_package_c_source() {
+    if !host_jit() || (!cfg!(windows) && Command::new("cc").arg("--version").output().is_err()) {
+        return;
+    }
+    let t = Temp::new("c-object");
+    t.write(
+        "app/c/twice.c",
+        "#include <stdint.h>\nuint64_t twice_plus(uint64_t x, uint32_t y) { return 2 * x + y; }\n",
+    );
+    let dir = objects_app(&t, "[\"c/twice.c\"]");
+    let exe = t.0.join(if cfg!(windows) {
+        "twice.exe"
+    } else {
+        "twice.bin"
+    });
+    run(vesper().arg("build").arg(&dir).arg("-o").arg(&exe));
+    assert_eq!(Command::new(&exe).status().unwrap().code(), Some(43));
+}
+
 /// A prebuilt object links as it is.
 #[test]
 fn executables_link_a_prebuilt_object() {
@@ -733,7 +755,7 @@ fn executables_link_a_prebuilt_object() {
     assert_eq!(Command::new(&exe).status().unwrap().code(), Some(43));
 }
 
-/// The JIT and the evaluator do not load assembly objects; they say so
+/// The JIT and the evaluator do not load package objects; they say so
 /// rather than looking for a `twice_asm` library.
 #[test]
 fn jit_and_run_refuse_assembly_objects() {
@@ -745,7 +767,7 @@ fn jit_and_run_refuse_assembly_objects() {
     for command in ["jit", "run"] {
         let err = fails(vesper().arg(command).arg(&dir));
         assert!(
-            err.contains("assembly objects of @t/app") && err.contains("only `vesper build` links"),
+            err.contains("objects of @t/app") && err.contains("only `vesper build` links"),
             "{command}: {err}"
         );
     }
@@ -766,7 +788,7 @@ fn masm_source_is_refused_for_other_targets() {
 #[test]
 fn bad_object_paths_are_manifest_errors() {
     for (objects, want) in [
-        ("[\"asm/twice.c\"]", "expected an assembly source"),
+        ("[\"asm/twice.cpp\"]", "expected a C source"),
         ("[\"asm/none.s\"]", "no such file"),
         ("[\"asm/none-@OS@.s\"]", "no such file for any target"),
         ("[\"../x.s\"]", "no `..`"),

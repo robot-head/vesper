@@ -141,7 +141,7 @@ fn host_symbols(
             && let Some(package) = imports.objects_provider(library.link().name())
         {
             return Err(format!(
-                "{command}: library {} is provided by the assembly objects of {package} (`[package] objects`), which only `vesper build` links; build an executable instead",
+                "{command}: library {} is provided by the objects of {package} (`[package] objects`), which only `vesper build` links; build an executable instead",
                 library.name()
             ));
         }
@@ -401,7 +401,7 @@ fn build(
         })
         .map_err(|e| e.to_string())?;
     fs::write(&object, bytes).map_err(|e| e.to_string())?;
-    // A package's assembly objects provide its static libraries
+    // A package's objects provide its static libraries
     // (manuscript §16.3): they link in place of `lib<name>.a`.
     // A package's objects link only when the executable calls one of the
     // static libraries they provide.
@@ -427,7 +427,7 @@ fn build(
 }
 
 /// The `[package] objects` of each package in `used` for the build target:
-/// a prebuilt object as it is, and an assembly source assembled beside
+/// a prebuilt object as it is, and a C or assembly source compiled beside
 /// `output` (each such file is added to `temporary`).
 fn package_objects(
     c: &Command<'_>,
@@ -463,9 +463,13 @@ fn package_objects(
                 o.display
             ));
         } else {
-            // The C compiler driver that links also assembles (and runs the
-            // C preprocessor over `.S`).
-            let result = process::Command::new(c.linker)
+            // The C compiler driver that links also compiles `.c` and
+            // assembles (running the C preprocessor over `.S`).
+            let mut command = process::Command::new(c.linker);
+            if extension == "c" {
+                command.arg("-O2");
+            }
+            let result = command
                 .arg("-c")
                 .arg(file)
                 .arg("-o")

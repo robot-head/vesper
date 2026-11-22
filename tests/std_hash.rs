@@ -1,5 +1,5 @@
 //! `@vesper-std/hash` and `@vesper-std/hash-sys` (self-hosting SH0 lane 5,
-//! #1127): BLAKE3 in portable Vesper and through the `blake3` crate behind
+//! #1127): BLAKE3 in portable Vesper and through the BLAKE3 C library behind
 //! `.vsys`, and the table hashes FNV-1a, XXH64, `mix64` and `hash_pair`.
 //!
 //! A driver package folds the outputs of the official BLAKE3 test-vector
@@ -10,9 +10,9 @@
 //! `blake3` crate's output (itself checked against official vectors) and of
 //! Rust references; the portable driver runs in the JIT with and without
 //! `optimize`, as an executable and (on short inputs) in the evaluator. The
-//! `.vsys` driver runs in the JIT bound to the C library in `hash/sys/c`
-//! (the official BLAKE3 C implementation) and in the
-//! evaluator with the same crate standing in.
+//! `.vsys` driver runs as an executable that links hash-sys's
+//! `[package] objects` (the official BLAKE3 C implementation in
+//! `hash/sys/c`) and in the evaluator with the `blake3` crate standing in.
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -21,10 +21,6 @@ use std::{
 };
 use vesper::ffi_lowering::{self, Handler, Imports};
 use vesper::{check, native, packages, runtime::Runtime, runtime::Value};
-
-// The `.vsys` library `Blake3` in C (packages/vesper-std/hash/sys/c), built
-// by vesper-blake3-sys.
-use vesper_blake3_sys as blake3_shim;
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
@@ -731,13 +727,10 @@ fn host_target() -> Option<(&'static str, &'static str)> {
     }
 }
 
-/// The `.vsys` library on the `// | ` lines of hash-sys's lib.ves.
+/// The `.vsys` library hash-sys's manifest names.
 fn sys_vsys(target: (&str, &str)) -> String {
-    let src = fs::read_to_string("packages/vesper-std/hash/sys/src/lib.ves").unwrap();
-    src.lines()
-        .filter_map(|l| l.strip_prefix("// | "))
-        .collect::<Vec<_>>()
-        .join("\n")
+    fs::read_to_string("packages/vesper-std/hash/sys/blake3.vsys")
+        .unwrap()
         .replace("@TARGET@", target.0)
         .replace("@ABI@", target.1)
 }
@@ -767,24 +760,67 @@ fn sys_checked(
     (dir, checked)
 }
 
-/// `.vsys` BLAKE3 in the JIT, bound to the `blake3` crate.
+/// `.vsys` BLAKE3 in an executable: `vesper build` compiles hash-sys's
+/// `[package] objects` (the official C implementation) and links them.
 #[test]
-fn sys_hashes_match_rust_in_the_jit() {
-    let Some(target) = host_target() else {
-        eprintln!("no .vsys target for this host; JIT evidence unavailable");
+fn sys_hashes_match_rust_natively() {
+    if host_target().is_none() || !links_executables() {
+        eprintln!("no .vsys target or C linker on this host; native evidence unavailable");
         return;
-    };
-    let (_dir, checked) = sys_checked(&OFFICIAL, 9000, target);
-    let symbols = blake3_shim::symbols();
-    for (entry, want) in [
-        ("vectors", model_vectors(&OFFICIAL)),
-        ("incremental", model_incremental(9000)),
-    ] {
-        let got = checked
-            .jit(entry, &symbols)
-            .unwrap_or_else(|e| panic!("{entry}: {e}"));
-        assert_eq!(word(&got), want, "{entry}");
     }
+    let main = "fn main() -> u64 eff [Ffi[Blake3]] {\n    vectors() ^ incremental()\n}\n";
+    let check = format!(
+        "fn main() -> u64 eff [Ffi[Blake3]] {{\n    if vectors() == {} && incremental() == {} {{\n        0\n    }} else {{\n        1\n    }}\n}}\n",
+        model_vectors(&OFFICIAL),
+        model_incremental(9000)
+    );
+    assert_eq!(SYS.matches(main).count(), 1);
+    let source = SYS
+        .replace(main, &check)
+        .replace("LENS", &lens_literal(&OFFICIAL))
+        .replace("SPLITS", &lens_literal(&SPLITS))
+        .replace("TOTAL", "9000");
+    let dir = driver(
+        &source,
+        &[
+            ("@vesper-std/hash", "hash"),
+            ("@vesper-std/hash-sys", "hash/sys"),
+        ],
+        "\"Fail\", \"Alloc\", \"Ffi\"",
+    );
+    assert_eq!(executable_exit(&dir.0), Some(0), "C BLAKE3 digests differ");
+}
+
+/// The JIT does not load hash-sys's C objects; it says to build instead.
+#[test]
+fn sys_jit_points_to_vesper_build() {
+    if host_target().is_none() {
+        return;
+    }
+    let source = SYS
+        .replace("LENS", &lens_literal(&SMALL))
+        .replace("SPLITS", &lens_literal(&SPLITS))
+        .replace("TOTAL", "2100");
+    let dir = driver(
+        &source,
+        &[
+            ("@vesper-std/hash", "hash"),
+            ("@vesper-std/hash-sys", "hash/sys"),
+        ],
+        "\"Fail\", \"Alloc\", \"Ffi\"",
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_vesper"))
+        .arg("run")
+        .arg(&dir.0)
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{err}");
+    assert!(
+        err.contains("objects of @vesper-std/hash-sys")
+            && err.contains("only `vesper build` links"),
+        "{err}"
+    );
 }
 
 /// The evaluator's stand-in host for `Blake3`: handles index `hashers`.

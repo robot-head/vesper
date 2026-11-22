@@ -76,24 +76,42 @@ Part 1 leaves all of these untouched: `src/ir_opt.rs`, `src/ir_opt_policy.rs`,
 hook, which the default compiler never installs, so `bootstrap/stage1.lock`
 cannot move.
 
-## Part 2: `vesper-blake3-sys` (waits on lane 7)
+## Part 2: `vesper-blake3-sys` deleted
 
-The crate holds no logic. Its `build.rs` compiles the vendored BLAKE3 C
-sources into `vesper_std_blake3`, the link name that `@vesper-std/hash-sys`'s
-`.vsys` library already imports. The `.vsys` import exists. What is missing
-is a toolchain step that builds a package's C.
+The crate held no logic: its `build.rs` compiled the vendored BLAKE3 C
+sources into `vesper_std_blake3`, the link name of `@vesper-std/hash-sys`'s
+`.vsys` library. That build is now part of the package:
 
-Lane 7 (#1504) adds the `objects` field for assembly in its part 2. I asked
-there (issue comment) for that field to cover what BLAKE3 needs:
+- `[package] objects` (lane 7, #1548) also takes C sources (`.c`). Unix
+  compiles them with the linking C driver at `-O2`; Windows with `cl.exe`,
+  else `clang`. The owner's rules stay: objects need a `link = "static"`
+  `.vsys` library of the same package, link only when an executable calls
+  it, and `jit`/`run`/`test` refuse them.
+- An entry takes no flags, as agreed with lane 7. Each wrapper in
+  `hash/sys/c/b3-*.c` includes one upstream file after
+  `vesper_b3_rename.h` (the 31 `blake3_*` to `vesper_b3_*` renames the
+  crate passed with `-D`). The x86-64 kernels set their ISA with a
+  `target` pragma, so code the CPU may lack is still reached only through
+  the run-time dispatch. Per-target names (`b3-sse2-@ARCH@.c`,
+  `b3-neon-@ARCH@.c`) pick the kernels a target builds.
+- The library moved from inline `// @export vsys` blocks (one in hash-sys
+  and a copy in each port) to `hash/sys/blake3.vsys`, named by the
+  manifest's `[package] vsys`, so every library build that loads hash-sys
+  imports it.
+- `vesper-port-harness` compiles the `[package] objects` of a port's
+  package closure with `cc` into the port's own archive. `vesper-fmt`,
+  `vesper-flux` and `vesper-loom-cas-port` link BLAKE3 that way, and their
+  bindings no longer name a Rust `blake3_shim`. Bazel passes
+  `//:std_hash_sys_package` (which now carries the `.vsys` file and the C
+  sources) to the build scripts.
+- `tests/std_hash.rs` builds the `.vsys` driver as an executable (the
+  official vectors and every split, checked against the `blake3` crate)
+  in place of the JIT run over the crate's symbols, and checks that
+  `vesper run` points to `vesper build`. The evaluator test is unchanged.
 
-- C sources.
-- Per-file ISA flags.
-- Per-target file sets and defines.
-- Symbol renames.
-- The same objects from `vesper-port-harness` for Rust hosts.
-
-Once that lands, `vesper-fmt`, `vesper-flux` and `tests/std_hash.rs` drop the
-crate and the crate is deleted.
+Checked: gcc and clang give BLAKE3("abc") =
+`6437b3ac…5bd9d85` and the same 100 KB digest, with no unrenamed global
+symbols.
 
 ## Part 3: what is left of `src/database` (blocked on the Vesper LSP server)
 

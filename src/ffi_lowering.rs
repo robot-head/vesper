@@ -259,7 +259,7 @@ struct Import {
 #[derive(Debug, Clone, Default)]
 pub struct Imports {
     libraries: BTreeMap<String, Import>,
-    /// Static link names a package's assembly objects provide (`[package]
+    /// Static link names a package's objects provide (`[package]
     /// objects`, manuscript §16.3), each with that package.
     objects: BTreeMap<String, String>,
 }
@@ -267,13 +267,13 @@ impl Imports {
     pub fn new() -> Self {
         Self::default()
     }
-    /// Record that `package`'s assembly objects provide the static library
+    /// Record that `package`'s objects provide the static library
     /// linked as `link_name`.
     pub fn provide_by_objects(&mut self, link_name: &str, package: &str) {
         self.objects
             .insert(link_name.to_owned(), package.to_owned());
     }
-    /// The package whose assembly objects provide the library linked as
+    /// The package whose objects provide the library linked as
     /// `link_name`, if one does.
     pub fn objects_provider(&self, link_name: &str) -> Option<&str> {
         self.objects.get(link_name).map(String::as_str)

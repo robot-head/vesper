@@ -24,11 +24,6 @@ mod surface;
 mod port_binding;
 #[cfg(vesper_port)]
 mod port;
-// @vesper-std/hash-sys's `.vsys` library `Blake3` (the official BLAKE3 C
-// implementation, built by vesper-blake3-sys), which the port imports for
-// the BLAKE3 digests of `format_for_verification`.
-#[cfg(vesper_port)]
-use vesper_blake3_sys as blake3_shim;
 
 /// Which build this is: `"vesper"` for `vesper-fmt` with the `vesper-port`
 /// feature, `"rust"` otherwise (and for the seed copy `vesper-fmt-seed` that

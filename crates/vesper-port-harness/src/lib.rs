@@ -7,7 +7,11 @@
 //! tells Cargo to link it, sets `cfg(vesper_port)` on the crate, and checks
 //! that the committed Rust binding is exactly what the compiler generates
 //! for the current source. The crate's public functions then forward to
-//! the binding and its unchanged tests run against the Vesper build.
+//! the binding and its unchanged tests run against the Vesper build. The
+//! archive also holds the C, assembly and object files that the package
+//! closure names in `[package] objects` (manuscript §16.3), compiled with
+//! `cc` for the target, so a port that calls a static `.vsys` library a
+//! package provides links without a Rust crate for it.
 //!
 //! The port is a Loom package directory (`Loom.toml` plus `src/**/*.ves`,
 //! with path dependencies) or a single `.ves` file. This crate does not
@@ -220,13 +224,97 @@ impl Port {
                 ),
             }
         }
-        cc::Build::new()
+        // The port object and the C, assembly and object files the
+        // closure's packages name in `[package] objects` (manuscript
+        // §16.3), which provide the static `.vsys` libraries it calls: one
+        // archive, so the linker finds them after the port's references.
+        let mut build = cc::Build::new();
+        build
             .object(&object)
             .cargo_metadata(true)
+            .opt_level(2)
+            .warnings(false);
+        for file in package_objects(&source, &target)? {
+            println!("cargo:rerun-if-changed={}", file.display());
+            if file.extension().is_some_and(|e| e == "o" || e == "obj") {
+                build.object(&file);
+            } else {
+                build.file(&file);
+            }
+        }
+        build
             .try_compile(&format!("vesper_{}", self.library))
             .map_err(|e| e.to_string())?;
         Ok(())
     }
+}
+
+/// The `.vsys` targets (`@TARGET@`, `@OS@`, `@ARCH@` in a per-target
+/// manifest path, as in `vesper::packages::VSYS_TARGETS`).
+const TARGETS: [(&str, &str, &str); 4] = [
+    ("x86_64-unknown-linux-gnu", "linux", "x86_64"),
+    ("aarch64-unknown-linux-gnu", "linux", "aarch64"),
+    ("aarch64-apple-darwin", "macos", "aarch64"),
+    ("x86_64-pc-windows-msvc", "windows", "x86_64"),
+];
+
+/// The `[package] objects` entries of the package at `dir`, as written.
+fn manifest_objects(dir: &Path) -> Result<Vec<String>, String> {
+    let manifest = dir.join("Loom.toml");
+    let text =
+        std::fs::read_to_string(&manifest).map_err(|e| format!("{}: {e}", manifest.display()))?;
+    let value: toml::Table =
+        toml::from_str(&text).map_err(|e| format!("{}: {e}", manifest.display()))?;
+    Ok(value
+        .get("package")
+        .and_then(|p| p.get("objects"))
+        .and_then(|o| o.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+fn expand(entry: &str, (triple, os, arch): (&str, &str, &str)) -> String {
+    entry
+        .replace("@TARGET@", triple)
+        .replace("@OS@", os)
+        .replace("@ARCH@", arch)
+}
+
+/// The files the `[package] objects` of the port's package closure name
+/// for the Rust `target`, in closure order: a per-target entry
+/// (`@TARGET@`, `@OS@`, `@ARCH@`) gives the target's file when it has one.
+/// A `.ves` file source has none. The compiler checks the entries
+/// themselves when it loads the packages.
+pub fn package_objects(source: &Path, target: &str) -> Result<Vec<PathBuf>, String> {
+    if !is_package(source) {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for package in package_closure(source)? {
+        let entries = manifest_objects(&package)?;
+        if entries.is_empty() {
+            continue;
+        }
+        let Some(t) = TARGETS.iter().find(|t| t.0 == target) else {
+            return Err(format!(
+                "{}: `[package] objects` have no target for {target}",
+                package.display()
+            ));
+        };
+        for entry in entries {
+            let file = package.join(expand(&entry, *t));
+            if file.is_file() {
+                out.push(file);
+            } else if expand(&entry, ("", "", "")) == entry {
+                return Err(format!("{}: no such object file", file.display()));
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Compare a committed binding with the generated text (line endings
@@ -354,6 +442,15 @@ pub fn prepare_source(
                 .path();
             if path.is_file() && path.extension().is_some_and(|e| e == "vsys") {
                 copy_file(&path, &copy.join(path.file_name().unwrap_or_default()))?;
+            }
+        }
+        // So are the files its `[package] objects` name, for every target.
+        for entry in manifest_objects(package)? {
+            for t in TARGETS {
+                let file = package.join(expand(&entry, t));
+                if file.is_file() {
+                    copy_file(&file, &copy.join(expand(&entry, t)))?;
+                }
             }
         }
         let mut files = Vec::new();
