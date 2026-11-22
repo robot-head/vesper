@@ -74,13 +74,54 @@ Rust keywords). The binding is generated once per library build, so this is
 not on a hot path; the parity bar is the whole `build --lib` once emission
 is swapped.
 
+## Part 2: the v2 glue, emitted in Vesper
+
+Stacked on lane 1's #1309 (lent Cranelift handles and the `export` hook).
+
+### What changed
+
+- **`packages/vesper-codegen-export/glue`** (`@vesper/codegen-export-glue`):
+  `glue.rs` in Vesper over `@vesper/cranelift`. After the runtime prelude it
+  emits v4's `box_new`, `vesper_box_free` when the module lacks it, the
+  `seq_new`, `seq_free` and `live_allocations` entry points, and the drop
+  glue of every handle type (sequences of owning elements, boxes, boxed
+  objects through their vtable, tuples, `Option`/`Result`, nested handles,
+  owned strings). `export_glue` is the hook: its words are a flags word
+  (what the module already holds) and the interface in part 1's words.
+- **The swap point moves into `glue::define`** (owner approved,
+  2026-11-21). Lane 1's dispatch replaced the whole glue, but the glue
+  starts by defining the sequence runtime and `vesper_box_alloc`, which
+  belong to the seq and drops families. The hook is now called right
+  after them; the Rust fallback and the default build are unchanged. This
+  touches only src/native_export.rs and src/native_export/glue.rs (8 lines
+  each way); src/codegen_swap.rs is unchanged.
+- **`crates/vesper-hybrid`**: module `hybrid_codegen_export`
+  (modules/codegen_export) installed as the `export` hook, the interface
+  encoded with part 1's words.rs.
+- **`crates/vesper-hybrid/tests/codegen_export.rs`**: the default `vesper`
+  and `vesper-hybrid` build every library of `PORTS` (now
+  tests/self_host_codegen_export/ports.rs, shared with part 1's test) with
+  `build --lib`, `--no-opt` for all and with the optimizer for three.
+
+### The differential
+
+| Check | Objects | Differences |
+|---|--:|--:|
+| `vesper` vs `vesper-hybrid` objects, 51 libraries (`--no-opt`, plus 3 optimized) | 54 | 0 |
+
+The hybrid's stats show the hook emitted the glue of all 51 builds of v2
+libraries (48 unoptimized, 3 optimized); v1 libraries have no glue.
+
 ## Stage 1 guard
 
-Part 1 adds a package, a test and BUILD.bazel entries. It edits no Rust in
-`src/`, nothing under src/verified_codegen/**, src/ir.rs, `ir_opt`,
-lean/**, bootstrap/** or packages/vesper-compiler/**, and installs no hook,
-so the default compiler and its objects are unchanged. The
-bootstrap-stage1 workflow run on the branch is linked from the PR.
+Part 1 adds a package, a test and BUILD.bazel entries. Part 2's only Rust
+edit outside the hybrid is the swap point's move from
+`native_export::compile_exports` into `glue::define`: with no hook
+installed (the default compiler) the glue runs exactly as before, so the
+default compiler and its objects are unchanged. Nothing touches
+src/verified_codegen/**, src/ir.rs, `ir_opt`, lean/**, bootstrap/** or
+packages/vesper-compiler/**. The bootstrap-stage1 workflow run on the
+branch is linked from the PR.
 
 ## Compiler gaps
 
@@ -115,9 +156,7 @@ bootstrap-stage1 workflow run on the branch is linked from the PR.
 - Part 2: `plan_with` on @vesper/check-data's `World` and
   @vesper/check-layout's layouts, compared as interface JSON over the same
   corpus.
-- After lane 1 (#1275): the runtime entry points and drop glue
-  (`glue::define`) and the export signatures through @vesper/cranelift,
-  compared as CLIF text and object bytes; 128-bit cells after lane 3.
-- The swap: a hybrid `codegen_export` module and its `export` hook install,
-  the full `--lib` suite and the port harness's export tier, and the SH4
-  scoreboard row.
+- The export signatures (the wrappers `object` compiles per exported
+  function); 128-bit cells after lane 3.
+- The full `--lib` suite and the port harness's export tier on the hybrid,
+  and the SH4 scoreboard row.

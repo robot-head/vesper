@@ -21,9 +21,13 @@ LIBRARIES = [
         name = "%s_package" % library,
         srcs = glob(["vesper/%s/src/**/*.ves" % library]),
         manifest = "vesper/%s/Loom.toml" % library,
-        # tests/self_host_codegen_export.rs builds these sources; `target`
+        # tests/self_host_codegen_export.rs and the hybrid's codegen_export
+        # test build these sources; `target`
         # is outside :files (which never globs **/target/**).
-        visibility = ["//:__pkg__"],
+        visibility = [
+            "//:__pkg__",
+            "//crates/vesper-hybrid:__pkg__",
+        ],
     )
     for library in LIBRARIES
 ]

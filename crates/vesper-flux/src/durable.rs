@@ -243,16 +243,16 @@ fn signed_sum(
     limits: Limits,
     budget: &mut Budget,
 ) -> Result<ZSet, Error> {
-    let mut acc = Accumulator::new(width, limits)?;
+    let mut acc = Accumulator::new(&[width], limits)?;
     for (set, sign) in parts {
         if set.width != width {
             return Err(Error::Schema);
         }
         for (row, w) in set.entries() {
-            acc.add(row, i128::from(w) * sign, budget)?;
+            acc.add(0, row, i128::from(w) * sign, budget)?;
         }
     }
-    acc.finish()
+    Ok(acc.finish()?.remove(0))
 }
 
 /// Upper bound of the charged reads of [`DurableCheckpointer::restore`]'s
@@ -659,14 +659,14 @@ impl DurableCheckpointer {
         };
         let mut prior = Vec::with_capacity(parsed.nodes.len());
         for (node, (width, rows, spine)) in parsed.nodes.iter().enumerate() {
-            let mut acc = Accumulator::new(*width, eval)?;
+            let mut acc = Accumulator::new(&[*width], eval)?;
             for b in spine {
                 let batch = read_batch(store, b, &fingerprint, node, *width, limits, &mut budget)?;
                 for (row, w) in batch.entries() {
-                    acc.add(row, i128::from(w), &mut budget)?;
+                    acc.add(0, row, i128::from(w), &mut budget)?;
                 }
             }
-            let set = acc.finish()?;
+            let set = acc.finish()?.remove(0);
             if set.len() != *rows {
                 return Err(Error::Checkpoint("spine row count"));
             }

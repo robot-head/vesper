@@ -47,4 +47,17 @@ const DIVERGENT_EDITS: &[(&str, &str, &str)] = &[
         "    if wrapping_add(reserved, at(in n.queued, e)) >= n.max_inbox {",
         "    if wrapping_add(reserved, at(in n.queued, e)) > n.max_inbox {",
     ),
+    // log: a torn tail may cover the whole next frame (caught by the
+    // `wal_ops` transcript; no unit test tears a whole frame).
+    (
+        "log",
+        "        torn_bytes = min(torn, wrapping_sub(frame_len, 1));",
+        "        torn_bytes = min(torn, frame_len);",
+    ),
+    // quic: a short header without the fixed bit is accepted.
+    (
+        "quic",
+        "    if first & FIXED_BIT == 0 {",
+        "    if first & FIXED_BIT == 1 {",
+    ),
 ];

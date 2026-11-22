@@ -248,7 +248,8 @@ fn literal_of(in s: St, inout a: Ast, name: u32) -> u32 {
             let v = Lit {
                 kind: at8(in s.cl_kind, i),
                 neg: at8(in s.cl_neg, i) != 0,
-                bits: at64(in s.cl_bits, i)
+                bits: at64(in s.cl_bits, i),
+                hi: at64(in s.cl_hi, i)
             };
             a.lits.alloc(v).raw()
         },

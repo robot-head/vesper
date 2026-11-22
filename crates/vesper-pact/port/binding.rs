@@ -531,8 +531,11 @@ unsafe extern "C" {
     fn vesper_pact_S_drop(value: *mut u64) -> i64;
     fn vesper_pact_canonicalize(result: *mut u64, query: *mut u64) -> i64;
     fn vesper_pact_coherence(result: *mut u64, words: *mut u64) -> i64;
+    fn vesper_pact_conformance_env_of(result: *mut u64, words: *mut u64) -> i64;
     fn vesper_pact_derivation(result: *mut u64, words: *mut u64) -> i64;
+    fn vesper_pact_orphan_check(result: *mut u64, words: *mut u64) -> i64;
     fn vesper_pact_program_check(result: *mut u64, words: *mut u64) -> i64;
+    fn vesper_pact_query_check(result: *mut u64, words: *mut u64) -> i64;
     fn vesper_pact_s_solve(s: *mut u64, query: *mut u64) -> i64;
     fn vesper_pact_solver_new(result: *mut u64, words: *mut u64, max_depth: i64, max_steps: i64, max_fix: i64) -> i64;
 }
@@ -569,6 +572,16 @@ pub fn coherence(words: &[u64]) -> S {
     unsafe { S::from_words(&result[0..]) }
 }
 
+/// Calls `conformance_env_of` of the Vesper library `pact` (`vesper_pact_conformance_env_of`).
+pub fn conformance_env_of(words: &[u64]) -> S {
+    let mut result = [0u64; 117];
+    // SAFETY: `vesper_pact_conformance_env_of` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(words, |view_words| unsafe { vesper_pact_conformance_env_of(result.as_mut_ptr(), view_words) });
+    unsafe { S::from_words(&result[0..]) }
+}
+
 /// Calls `derivation` of the Vesper library `pact` (`vesper_pact_derivation`).
 pub fn derivation(words: &[u64]) -> S {
     let mut result = [0u64; 117];
@@ -579,6 +592,16 @@ pub fn derivation(words: &[u64]) -> S {
     unsafe { S::from_words(&result[0..]) }
 }
 
+/// Calls `orphan_check` of the Vesper library `pact` (`vesper_pact_orphan_check`).
+pub fn orphan_check(words: &[u64]) -> S {
+    let mut result = [0u64; 117];
+    // SAFETY: `vesper_pact_orphan_check` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(words, |view_words| unsafe { vesper_pact_orphan_check(result.as_mut_ptr(), view_words) });
+    unsafe { S::from_words(&result[0..]) }
+}
+
 /// Calls `program_check` of the Vesper library `pact` (`vesper_pact_program_check`).
 pub fn program_check(words: &[u64]) -> S {
     let mut result = [0u64; 117];
@@ -586,6 +609,16 @@ pub fn program_check(words: &[u64]) -> S {
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_slice(words, |view_words| unsafe { vesper_pact_program_check(result.as_mut_ptr(), view_words) });
+    unsafe { S::from_words(&result[0..]) }
+}
+
+/// Calls `query_check` of the Vesper library `pact` (`vesper_pact_query_check`).
+pub fn query_check(words: &[u64]) -> S {
+    let mut result = [0u64; 117];
+    // SAFETY: `vesper_pact_query_check` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(words, |view_words| unsafe { vesper_pact_query_check(result.as_mut_ptr(), view_words) });
     unsafe { S::from_words(&result[0..]) }
 }
 

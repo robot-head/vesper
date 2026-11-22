@@ -2,7 +2,10 @@
 
 Part 1 (#1357, merged as `b647460`) ported the datagram link model. Part 2
 (#1380, merged as `97de64f`) ported SHA-256 and the WAL frame codec and
-recovery scan. Part 3 ports the virtual message network `net-v1`.
+recovery scan. Part 3 (#1384, merged as `ce75623`) ported the virtual
+message network `net-v1`. Part 4 (#1390, merged as `af7dd90`) ported the
+write-ahead log state machine. Part 5 (#1416) made the Vesper SHA-256
+faster. Part 6 ports the Warp QUIC wire codec.
 
 ## Part 1: the datagram link model
 
@@ -217,12 +220,146 @@ those parts.
    on `ChunkSeq[u64]` is E1525 ("'eq' reads and writes bytes"). Comparing
    word sequences is a loop.
 
+## Part 4: the write-ahead log state machine
+
+Base: `main` at `ce75623`.
+
+### What changed
+
+- `WalState` at the end of `port/src/lib.ves` is the `Wal` of
+  `src/model/wal.rs`. It owns:
+  - the medium's bytes and LSN assignment,
+  - the volatile and in-flight regions, kept as one queue of
+    `(lsn, frame_len)` pairs whose front `in_flight` entries are the batch,
+    with their frames built at append,
+  - the record and byte bounds,
+  - flush begin, completion and failure (a failed batch is already at the
+    front of the volatile region),
+  - recovery through the part 2 scan,
+  - the crash rules: the persisted prefix is clamped to the batch, and a
+    torn tail stays below a whole frame.
+- The Rust `Wal` wrapper keeps each live record's payload, keyed by LSN,
+  so it can return `WalRecord`s.
+- `Wal`'s reference accessors became owned ones on both builds:
+  - `durable_bytes` returns a `Cow`.
+  - `volatile`, `in_flight` and `begin_flush` return owned values.
+  - `view` is now `record(index)`, its only use.
+- The differential adds a `wal_ops` case: 3,000 pseudo-random operations,
+  each followed by the log's state (the medium's digest and length, the
+  durable LSN, the recovered flag, the batch and the volatile records). The
+  operations are appends (some too large or past the bounds), flush begins,
+  completions and failures, reads, crashes with persisted prefixes and torn
+  tails, and recoveries.
+- The `log` divergent edit lets a torn tail cover the whole next frame. No
+  unit test tears a whole frame, but the `wal_ops` transcript changes.
+
+### Results
+
+| Check | Rust | Vesper |
+|---|---|---|
+| Crate tests | all pass | all pass |
+| Transcript differential (11 cases) | blessed | **0 differences** |
+
+| Measure (release, best of 5) | Rust | Vesper | Ratio |
+|---|---|---|---|
+| `wal_ops_throughput`: 10^5 operations of the `wal_ops` mix | 742 ns/op | 4,152 ns/op | 5.6x |
+| `net_throughput` (rerun) | 396 ns/op | 439 ns/op | 1.11x |
+| Link (rerun) | 47.2 ns | 51.4 ns | 1.09x |
+| SHA-256 (rerun) | 0.77 ns/byte | 11.91 ns/byte | 15.5x |
+| WAL scan (rerun) | 327 ns/frame | 2,892 ns/frame | 8.8x |
+
+The log is bound by SHA-256. Every frame carries a check, the port builds
+each frame at append (Rust builds it at flush or crash, so records that
+vanish before either are never hashed), and every recovery rescans the
+medium. A faster SHA-256 is the first step toward parity. Rust stays the
+default.
+
+## Part 5: a faster SHA-256
+
+Base: `main` at `af7dd90`.
+
+`port/src/sha256.ves` now keeps its words as `u32`, using `wrapping_add`
+and the total `rotate_right`, where it used to mask them in `u64`. The state
+is a `[u32; 8]` value, and the message schedule is a local `[u32; 64]` array
+in place of a `ChunkSeq[u64]` behind checked `try_get`/`try_set`. Each block
+reads its 16 message words straight from the input slice.
+
+| Measure (release, best of 5) | Rust | Vesper before | Vesper now |
+|---|---|---|---|
+| SHA-256, 1 MiB | 0.77 ns/byte (SHA-NI) | 11.91 ns/byte | **7.54 ns/byte** |
+| SHA-256, 1 MiB, `sha2` with `force-soft` (scalar) | 7.28 ns/byte | | 1.04x of it |
+| WAL scan, 10,000 frames | 327 ns/frame | 2,892 ns/frame | 1,944 ns/frame |
+| `wal_ops` | 742 ns/op | 4,152 ns/op | 3,001 ns/op |
+
+The port now matches scalar Rust within 4%. This machine's CPU has the SHA
+extensions (`sha_ni`), and the Rust build's `sha2` uses them, which is the
+whole remaining 10x gap. Closing it needs a SHA-256 intrinsic in Vesper (a
+compiler feature, gap 8 below) or a hashing call the port can reach. The
+transcript differential still shows 0 differences in all 11 cases.
+
+### More compiler gaps
+
+8. **No access to hardware SHA instructions.** There is no intrinsic for
+   x86 `sha256rnds2`/`sha256msg1`/`sha256msg2` or the AArch64 SHA2
+   instructions, so a Vesper SHA-256 tops out at scalar speed. This is
+   where the WAL and the identity digests miss parity.
+
+## Part 6: the Warp QUIC wire codec
+
+Base: part 5 (#1416).
+
+### What changed
+
+- The end of `port/src/lib.ves` holds the wire layer that `src/model/umem.rs`
+  and `src/model/warp.rs` share:
+  - `parse_short_header`: the flags byte, the long-header and fixed bits,
+    the DCID and the truncated packet number.
+  - `parse_ack`: the fixed-width ACK frame. It follows RFC 9000 §19.3, with
+    big-endian integers in place of varints, and checks every range for
+    underflow.
+  - `ack_frame_bytes`, `short_header` and `ack_datagram_len`.
+  - The peer's `record_pn`: inclusive ranges kept largest first, merged
+    with their neighbours, and capped at `max_ranges`.
+
+  Under `vesper-port` the Rust functions forward to the port. Results cross
+  the boundary as flat words: `[code, dcid, largest, delay, lo0, hi0, ...]`
+  and range pairs.
+- `vesper-warp-umem` (the AF_XDP driver, the software NIC and the UMEM
+  auditor) belongs to SH6 lane 14 (#1409). The coordinator and the
+  recommended option on the user's card both leave it there. The umem/warp
+  models keep calling the Rust crate until that port lands.
+- The differential adds a `quic_wire` case: short headers of all 256 first
+  bytes, `ack_datagram_len`, and 20,000 encoded ACK datagrams with random
+  mutations through `parse_ack`. The mutations are bit flips, cuts,
+  extensions, forged range counts and overwritten bytes. The Warp
+  transcripts cover `record_pn` through the datagram ACK path.
+- The `quic` divergent edit accepts a short header without the fixed bit.
+
+### Results
+
+| Check | Rust | Vesper |
+|---|---|---|
+| Crate tests | all pass | all pass |
+| Transcript differential (12 cases) | blessed | **0 differences** |
+
+| Measure (release, best of 5) | Rust | Vesper | Ratio |
+|---|---|---|---|
+| `quic_throughput`: encode and parse 10^5 ACK datagrams of 1 to 8 ranges | 390 ns | 529 ns | 1.36x |
+
+Part of the gap is the boundary itself: the ranges go in and out as `Vec`s
+of words and are rebuilt as tuples on each side. The codec is a small share
+of a Warp session's time, since the evaluator dominates.
+
 ## What is left (later parts of #1342)
 
-- The `Wal` state machine itself (part 2 ported only its codec), and a
-  faster SHA-256.
-- `model/umem.rs` and `model/warp.rs` (3,100 lines, over the
-  `vesper-warp-umem` crate).
+- Hardware SHA-256 (gap 8), and building WAL frames at flush rather than
+  at append.
+- The rest of `model/umem.rs` and `model/warp.rs`: the frame adapter and
+  journal over the `vesper-warp-umem` driver (its linear owners, location
+  table and auditor), the EDT launch queue, the lease timers and the
+  flows' event plumbing. The randomness (SplitMix64), the links and the
+  wire codec are already in Vesper. The rest is orchestration around the
+  driver, so it waits for SH6 lane 14 (#1409) to port `vesper-warp-umem`.
 - `model/mod.rs` process epochs, scenario validation, the canonical-JSON
   identity digests and `value.rs`. These need a JSON value model on the
   Vesper side, or the Rust side has to pass canonical strings in.
