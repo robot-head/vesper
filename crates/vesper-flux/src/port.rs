@@ -14,7 +14,7 @@ use crate::{Budget, Error, Limits};
 #[path = "../port/binding.rs"]
 pub(crate) mod binding;
 
-use binding::{CdcErr, FrErr, ZErr};
+use binding::{CdcErr, CpErr, FrErr, LogErr, ZErr};
 
 fn zset_error(e: ZErr) -> Error {
     match e {
@@ -274,4 +274,341 @@ pub(crate) fn cdc_ingest(
         CdcErr::TruncatedRow => Error::Cdc("truncated row"),
     })?;
     Ok((stats[0] as usize, stats[1]))
+}
+
+fn log_error(e: LogErr) -> Error {
+    match e {
+        LogErr::Overflow => Error::Overflow,
+        LogErr::Schema => Error::Schema,
+        LogErr::Rows => Error::Limit("log rows"),
+        LogErr::FrameBytes => Error::Limit("log frame bytes"),
+        LogErr::Frame => Error::Storage("log frame"),
+        LogErr::Epoch => Error::Storage("log epoch"),
+        LogErr::Noncanonical => Error::Storage("noncanonical log rows"),
+    }
+}
+
+/// The input log's header for inputs of these widths (each fits a u32).
+pub(crate) fn log_header(widths: &[usize]) -> Vec<u8> {
+    let widths: Vec<u64> = widths.iter().map(|x| w(*x)).collect();
+    binding::log_header(&widths)
+}
+
+/// One whole frame (length, payload, checksum) of `epoch`.
+pub(crate) fn log_frame(
+    epoch: u64,
+    deltas: &[ZSet],
+    widths: &[usize],
+    limits: crate::LogLimits,
+) -> Result<Vec<u8>, Error> {
+    let schema_at = deltas
+        .iter()
+        .zip(widths)
+        .position(|(d, w)| d.width != *w)
+        .unwrap_or(deltas.len());
+    let mut cells = Vec::new();
+    let mut counts = Vec::with_capacity(deltas.len());
+    let ws: Vec<u64> = widths.iter().map(|x| w(*x)).collect();
+    // Copy only what the codec reaches: it fails at the first input whose
+    // rows overflow or exceed the limit (before its cells), or after the
+    // first input that takes the payload over the byte limit. Inputs past
+    // that point, and the input of another width, are only counted as 0.
+    let (mut rows, mut bytes) = (0usize, 8usize);
+    for d in &deltas[..schema_at] {
+        counts.push(w(d.len()));
+        match rows.checked_add(d.len()) {
+            Some(total) if total <= limits.max_rows_per_frame => rows = total,
+            _ => break,
+        }
+        cells.extend_from_slice(&d.cells);
+        bytes = bytes.saturating_add(4 + d.cells.len().saturating_mul(8));
+        if bytes > limits.max_frame_bytes {
+            break;
+        }
+    }
+    counts.resize(deltas.len(), 0);
+    binding::log_frame(
+        epoch,
+        w(schema_at),
+        &cells,
+        &counts,
+        &ws,
+        w(limits.max_rows_per_frame),
+        w(limits.max_frame_bytes),
+    )
+    .map_err(log_error)
+}
+
+/// Whether `body` (a payload of `len` bytes and its checksum) checks.
+pub(crate) fn log_frame_ok(body: &[u8], len: u32) -> bool {
+    binding::log_frame_ok(body, u64::from(len))
+}
+
+/// The sets of a checked payload of `epoch`.
+pub(crate) fn log_decode(
+    payload: &[u8],
+    epoch: u64,
+    widths: &[usize],
+    limits: crate::LogLimits,
+) -> Result<Vec<ZSet>, Error> {
+    let ws: Vec<u64> = widths.iter().map(|x| w(*x)).collect();
+    let out = binding::log_decode(payload, epoch, &ws, w(limits.max_rows_per_frame))
+        .map_err(log_error)?;
+    let mut at = 0;
+    Ok(widths
+        .iter()
+        .map(|width| {
+            let n = out[at] as usize * (width + 1);
+            let set = ZSet::from_cells(*width, out[at + 1..at + 1 + n].to_vec());
+            at += 1 + n;
+            set
+        })
+        .collect())
+}
+
+fn cp_error(e: CpErr) -> Error {
+    match e {
+        CpErr::Work => Error::Limit("work"),
+        CpErr::Overflow => Error::Overflow,
+        CpErr::Bytes => Error::Limit("checkpoint bytes"),
+        CpErr::Truncated => Error::Checkpoint("truncated"),
+        CpErr::Checksum => Error::Checkpoint("checksum"),
+        CpErr::Version => Error::Checkpoint("version"),
+        CpErr::Identity => Error::Checkpoint("identity"),
+        CpErr::SourceTag => Error::Checkpoint("source tag"),
+        CpErr::Sources => Error::Limit("checkpoint sources"),
+        CpErr::WeightPolicy => Error::Checkpoint("weight policy"),
+        CpErr::NodeCount => Error::Checkpoint("node count"),
+        CpErr::RowSchema => Error::Checkpoint("row schema"),
+        CpErr::State => Error::Limit("checkpoint state"),
+        CpErr::Noncanonical => Error::Checkpoint("noncanonical rows"),
+        CpErr::Trailing => Error::Checkpoint("trailing bytes"),
+        CpErr::ManifestVersion => Error::Checkpoint("manifest version"),
+        CpErr::BatchVersion => Error::Checkpoint("batch version"),
+        CpErr::BatchIdentity => Error::Checkpoint("batch identity"),
+        CpErr::BatchHeader => Error::Checkpoint("batch header"),
+        CpErr::SpineLevels => Error::Checkpoint("spine levels"),
+        CpErr::SpineRanges => Error::Checkpoint("spine ranges"),
+        CpErr::BatchRows => Error::Checkpoint("batch rows"),
+        CpErr::NamedTwice => Error::Checkpoint("batch named twice"),
+        CpErr::ParentTag => Error::Checkpoint("parent tag"),
+    }
+}
+
+/// Runs `f` on the budget's remaining work as a word, and stores it back.
+fn with_budget<T>(
+    budget: &mut Budget,
+    f: impl FnOnce(&mut u64) -> Result<T, CpErr>,
+) -> Result<T, Error> {
+    let mut left = w(budget.remaining);
+    let out = f(&mut left).map_err(cp_error);
+    budget.remaining = left as usize;
+    out
+}
+
+/// The execution identity digest of a circuit's flattened words, charging
+/// one unit of work per word.
+pub(crate) fn cp_identity(words: &[u64], budget: &mut Budget) -> Result<[u8; 32], Error> {
+    let d = with_budget(budget, |left| binding::cp_identity(words, left))?;
+    d.try_into().map_err(|_| Error::Checkpoint("identity"))
+}
+
+/// A whole checkpoint image of `sets` (see `vesper/src/image.ves`).
+/// `source` is empty for no source, else the batch byte limit, the record
+/// limit, the binding count and six words per binding.
+pub(crate) fn cp_image(
+    id: &[u8; 32],
+    ticks: u64,
+    source: &[u64],
+    sets: &[ZSet],
+    limit: usize,
+    budget: &mut Budget,
+) -> Result<Vec<u8>, Error> {
+    let widths: Vec<u64> = sets.iter().map(|s| w(s.width)).collect();
+    let counts: Vec<u64> = sets.iter().map(|s| w(s.len())).collect();
+    let mut cells = Vec::with_capacity(sets.iter().map(|s| s.cells.len()).sum());
+    for s in sets {
+        cells.extend_from_slice(&s.cells);
+    }
+    with_budget(budget, |left| {
+        binding::cp_image(id, ticks, source, &widths, &counts, &cells, w(limit), left)
+    })
+}
+
+/// Checks an image's trailing digest.
+pub(crate) fn cp_check(image: &[u8]) -> Result<(), Error> {
+    binding::cp_check(image).map_err(cp_error)
+}
+
+/// A checked body's head through its source: the cursor after it, the
+/// ticks, the source tag, and for tag 1 the two policy limits, the binding
+/// count and six words per binding.
+pub(crate) fn cp_head(
+    body: &[u8],
+    expected: &[u8; 32],
+    max_sources: usize,
+    budget: &mut Budget,
+) -> Result<Vec<u64>, Error> {
+    with_budget(budget, |left| {
+        binding::cp_head(body, expected, w(max_sources), left)
+    })
+}
+
+/// A checked body's node sets from `cursor`, for nodes of `widths`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn cp_sets(
+    body: &[u8],
+    cursor: u64,
+    widths: &[usize],
+    max_rows: usize,
+    max_nodes: usize,
+    max_total_rows: usize,
+    max_total_cells: usize,
+    budget: &mut Budget,
+) -> Result<Vec<ZSet>, Error> {
+    let ws: Vec<u64> = widths.iter().map(|x| w(*x)).collect();
+    let out = with_budget(budget, |left| {
+        binding::cp_sets(
+            body,
+            cursor,
+            &ws,
+            w(max_rows),
+            w(max_nodes),
+            w(max_total_rows),
+            w(max_total_cells),
+            left,
+        )
+    })?;
+    let mut at = 0;
+    Ok(widths
+        .iter()
+        .map(|width| {
+            let n = out[at] as usize * (width + 1);
+            let set = ZSet::from_cells(*width, out[at + 1..at + 1 + n].to_vec());
+            at += 1 + n;
+            set
+        })
+        .collect())
+}
+
+/// One durable spine batch blob of `set` (see `vesper/src/spine.ves`).
+pub(crate) fn dur_batch(
+    fingerprint: &[u8; 32],
+    node: usize,
+    lo: u64,
+    hi: u64,
+    set: &ZSet,
+    limit: usize,
+) -> Result<Vec<u8>, Error> {
+    binding::dur_batch(
+        fingerprint,
+        w(node),
+        w(set.width),
+        lo,
+        hi,
+        w(set.len()),
+        &set.cells,
+        w(limit),
+    )
+    .map_err(cp_error)
+}
+
+/// The set a batch blob holds, checked against its manifest reference.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn dur_batch_read(
+    blob: &[u8],
+    fingerprint: &[u8; 32],
+    node: usize,
+    width: usize,
+    lo: u64,
+    hi: u64,
+    rows: usize,
+    budget: &mut Budget,
+) -> Result<ZSet, Error> {
+    let cells = with_budget(budget, |left| {
+        binding::dur_batch_read(blob, fingerprint, w(node), w(width), lo, hi, w(rows), left)
+    })?;
+    Ok(ZSet::from_cells(width, cells))
+}
+
+/// A whole manifest blob: `spines` holds per node its batch count, then
+/// per batch its digest (four little-endian words), lo, hi and row count;
+/// `parent` is empty or the parent manifest's digest words.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn dur_manifest(
+    fingerprint: &[u8; 32],
+    ticks: u64,
+    source: &[u64],
+    sets: &[ZSet],
+    spines: &[u64],
+    parent: &[u64],
+    limit: usize,
+    budget: &mut Budget,
+) -> Result<Vec<u8>, Error> {
+    let widths: Vec<u64> = sets.iter().map(|s| w(s.width)).collect();
+    let counts: Vec<u64> = sets.iter().map(|s| w(s.len())).collect();
+    with_budget(budget, |left| {
+        binding::dur_manifest(
+            fingerprint,
+            ticks,
+            source,
+            &widths,
+            &counts,
+            spines,
+            parent,
+            w(limit),
+            left,
+        )
+    })
+}
+
+/// A manifest's head through its source (as [`cp_head`]).
+pub(crate) fn dur_head(
+    body: &[u8],
+    expected: &[u8; 32],
+    max_sources: usize,
+    budget: &mut Budget,
+) -> Result<Vec<u64>, Error> {
+    with_budget(budget, |left| {
+        binding::dur_head(body, expected, w(max_sources), left)
+    })
+}
+
+/// A manifest's nodes and parent from `cursor`, as words (see
+/// `manifest_nodes` in `vesper/src/spine.ves`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn dur_nodes(
+    body: &[u8],
+    cursor: u64,
+    widths: &[usize],
+    ticks: u64,
+    max_rows: usize,
+    max_nodes: usize,
+    max_total_rows: usize,
+    max_total_cells: usize,
+    budget: &mut Budget,
+) -> Result<Vec<u64>, Error> {
+    use std::hash::BuildHasher;
+    let keys = std::hash::RandomState::new();
+    let ws: Vec<u64> = widths.iter().map(|x| w(*x)).collect();
+    with_budget(budget, |left| {
+        binding::dur_nodes(
+            body,
+            cursor,
+            &ws,
+            ticks,
+            w(max_rows),
+            w(max_nodes),
+            w(max_total_rows),
+            w(max_total_cells),
+            keys.hash_one(0u64),
+            keys.hash_one(1u64),
+            left,
+        )
+    })
+}
+
+/// Live allocations of the port's runtime (leak checks).
+pub(crate) fn live_allocations() -> i64 {
+    binding::live_allocations()
 }
