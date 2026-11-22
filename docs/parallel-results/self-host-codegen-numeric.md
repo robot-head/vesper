@@ -28,6 +28,58 @@ Part 1 ports everything in this lane that needs no lent builder from lane 1
 Rust stays the default build. No Rust lowering changed, no hook is
 installed, and no Rust code was deleted.
 
+## Part 2: vectors and `TiledSeq` through the `numeric` hook
+
+Part 2 stacks on lane 1's first PR (#1309), which lends the live builder
+and module to a family hook (`vesper::codegen_swap`), and emits two of the
+lane's in-function families in Vesper:
+
+- **Vector operations** (`Op::Vector`, `Codegen::vector_op` of
+  `src/native_vector.rs`): `src/vector.ves`, every lanes intrinsic except
+  the `widen_f64`/`nearest_f32` conversions (see the gaps below), plus
+  `Isa::supported`.
+- **`TiledSeq` operations** (`Op::Tiled`, `Codegen::tiled_op` of
+  `src/tiled/native.rs`): `src/tiled_ops.ves`, all eleven operations
+  (`new`, `with_capacity`, `with_region`, `len`, `tile_count`, `push`,
+  `get`, `set`, `col_get`, `col_set`, `load_tile_vec`).
+
+| Differential | Programs | Builds | Functions compared | JIT runs | Differences |
+|---|--:|--:|--:|--:|--:|
+| vectors: every intrinsic x element x shape (generated) | 670 | 1,340 | 2,670 | 1,340 | 0 |
+| `TiledSeq`: tests/tiled.rs and every column type, hot and cold | 23 | 46 | 62 | 46 | 0 |
+
+Each build compares every function's CLIF text, the object bytes and the
+JIT result, with optimize off and on (lane 1's harness,
+`crates/vesper-codegen-swap-test`). The vector corpus checks that each of
+the 54 operation templates compiled for at least one shape (235 of the
+generated programs are rejected by the checker, for example `div` on
+integer lanes, and are skipped). As checks that the comparison can fail,
+swapping the operands of the integer `min` compare gave 24 CLIF, object and
+run differences, and swapping two constants of `TiledSeq::new` gave 46 CLIF
+and 23 object differences.
+
+### The dispatch hunks
+
+The graph walk's `INSTRUCTION` request names the IR instruction, but the
+Vesper hook cannot read the IR. So the hook declines `INSTRUCTION`, and
+the Rust family code sends a typed request with what it resolved
+(lane 1's rule for family hunks: op constants in a `pub mod numeric` at the
+end of `src/codegen_swap.rs`, requests through `codegen_swap::request`, and
+the Rust code unchanged when no hook is installed or the hook declines):
+
+- `vector_op` sends `numeric::VECTOR` (intrinsic, element, lanes, literal
+  constants, operand values) or `numeric::ISA_SUPPORTED` (whether the
+  module's ISA has the profile).
+- `tiled_op` sends `numeric::TILED` with the tiled layout (tile width and
+  stride, the row's hot and cold columns with their record offsets, a
+  column's scalar type), the region variable of `with_region`, and whether
+  the module is a JIT module. It first defines the tiled runtime in an
+  object module, as `tiled_runtime_call` does before its first call.
+
+Neither hunk emits anything, so a declined request leaves the Rust
+emission exactly as it was; with no hook installed each is one relaxed
+atomic load.
+
 ## Why the runtimes come first
 
 The plan's port lanes wait on lane 1 for emission because the Rust `Codegen`
@@ -104,6 +156,13 @@ Bazel (`//:vesper` and `//crates/vesper-cranelift-sys`), which failed the
 first CI run. The bootstrap-stage1 workflow run on this branch is
 linked from the PR.
 
+Part 2 touches three Rust files of the native backend, all outside the
+guarded paths: the `numeric` op constants at the end of
+`src/codegen_swap.rs`, and the dispatch hunks at the top of `vector_op`
+(`src/native_vector.rs`) and `tiled_op` (`src/tiled/native.rs`). Both
+hunks return at once when no `numeric` hook is installed, which the
+default compiler never does, so its objects stay byte-identical.
+
 ## Compiler gaps
 
 Each was worked around in this lane.
@@ -129,22 +188,32 @@ Each was worked around in this lane.
    one entry per configuration, and the object leaves through
    `object_publish`.
 
+6. **The shim has no `fvpromote_low` or `fvdemote`** (part 2), so the
+   vector `Widen` and `Narrow` conversions stay in Rust.
+7. **Division and remainder raise `Fail`, and so does `ChunkSeq::set`**
+   (part 2): emission code that is total by construction (`k / per` for a
+   power-of-two `per`, a write at an index it just read) must use shifts,
+   masks and `try_set`, or declare `Fail`.
+
 No Rust bug was found.
 
 ## What is left
 
-- **After lane 1's first PR:** emission of the in-function families through
-  lent builders: `vector_op` and the slice loads and stores
-  (`src/native_vector.rs`), `tiled_op` (`src/tiled/native.rs`), the float
-  intrinsics and conversions (`src/float_math/native.rs`), region blocks
-  (`src/regions/native.rs`), `atomic_call` and `parallel_for_call`
-  (`src/native.rs`); then the `numeric` hook install in the hybrid build, a
-  whole-object and CLIF comparison over the corpus, and the measurements.
+- **Part 3:** the hybrid install of the `numeric` hook (module
+  `codegen_numeric`), which needs the package to import
+  `@vesper/cranelift` with `use` lines instead of being assembled into one
+  source; then float intrinsics and conversions
+  (`src/float_math/native.rs`), region blocks (`src/regions/native.rs`),
+  `atomic_call` and `parallel_for_call` (`src/native.rs`), and the slice
+  vector loads and stores (`SeqOp::Vector`, which arrive through the `seq`
+  family), each through a dispatch hunk like the two above.
+- **`widen_f64` and `nearest_f32`:** the shim has no `fvpromote_low` or
+  `fvdemote`; the hook declines them and the Rust code emits them.
 - **After lane 3 (#1277):** the 128-bit helpers (`src/integer_widths/native.rs`).
-- **Runtime swap:** the runtimes are ready to define into lane 1's lent
-  module once it can answer `get_name` (gap 3).
+- **Runtime swap:** the part 1 runtimes can now be defined into the lent
+  module (lane 1 added `declarations()`), replacing `aot_runtime::define`.
 - **Mach-O and COFF:** the root crate's `object` reader is built for ELF
-  only, so the runtime comparison covers the two ELF targets; the emission
-  is the same code for every target.
+  only, so the part 1 runtime comparison covers the two ELF targets.
+- **Measurements** of the swapped emission, with the hybrid install.
 - **Scoreboard row:** added to the SH4 scoreboard in
   `docs/maintenance/self-hosting-plan.md` once the plan (#1293) has merged.

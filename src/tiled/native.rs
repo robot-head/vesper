@@ -163,6 +163,219 @@ impl<M: Module> Codegen<'_, '_, M> {
         Ok(out_ptr)
     }
 
+    /// The `numeric` hook's `TILED` request for `op`
+    /// (`codegen_swap::numeric::TILED` documents the words), or `None`
+    /// when no hook is in effect, the hook declines, or the Rust code
+    /// would report an error (it then emits or reports it unchanged). It
+    /// emits nothing itself: the tiled runtime is defined first, as
+    /// `tiled_runtime_call` does before the first call.
+    fn swap_tiled(
+        &mut self,
+        op: &TiledOp,
+        args: &[ir::Value],
+        capability: Option<&str>,
+    ) -> Result<Option<ir::Value>, String> {
+        use crate::codegen_swap::{self, Family, numeric as n};
+        if codegen_swap::hook(Family::Numeric).is_none() {
+            return Ok(None);
+        }
+        let jit = std::any::type_name::<M>().contains("JITModule");
+        let w = |x: usize| x as u64;
+        let v = |x: ir::Value| codegen_swap::word(x);
+        let arg = |i: usize| args.get(i).copied().map(v);
+        let layout_of = |this: &Self, adt: &str| this.tiled_layout_of(adt).ok();
+        // The hot and cold columns of a whole-row store or load: counts,
+        // then `[record offset, tile offset, element bytes]` per hot column
+        // and `[aggregate, words, record offset, word offset]` per cold one.
+        let row = |this: &Self, adt: &str, words: &mut Vec<u64>| -> Option<u32> {
+            let tlayout = this.tiled_layout_of(adt).ok()?;
+            let aos = Layout::of(this.world, &Type::named(adt)).ok()?;
+            words.push(w(tlayout.hot_columns.len()));
+            for h in &tlayout.hot_columns {
+                let lf = aos.field(&h.name)?;
+                words.extend([lf.offset as i64 as u64, w(h.tile_offset), w(h.elem_bytes)]);
+            }
+            words.push(w(tlayout.cold_fields.len()));
+            for c in &tlayout.cold_fields {
+                let lf = aos.field(&c.name)?;
+                words.extend([
+                    u64::from(lf.layout.aggregate()),
+                    w(c.words),
+                    lf.offset as i64 as u64,
+                    w(c.word_offset),
+                ]);
+            }
+            Some(aos.size)
+        };
+        let mut words = vec![0, u64::from(jit)];
+        let kind = match op {
+            TiledOp::New { adt }
+            | TiledOp::WithCapacity { adt }
+            | TiledOp::WithRegion { adt, .. } => {
+                let Some(layout) = layout_of(self, adt) else {
+                    return Ok(None);
+                };
+                words.extend([
+                    u64::from(layout.tile_width),
+                    w(layout.tile_stride_bytes),
+                    w(layout.cold_words_per_row),
+                ]);
+                match op {
+                    TiledOp::New { .. } => n::TILED_NEW,
+                    TiledOp::WithCapacity { .. } => {
+                        let Some(cap) = arg(0) else { return Ok(None) };
+                        words.push(cap);
+                        n::TILED_WITH_CAPACITY
+                    }
+                    TiledOp::WithRegion { region_label, .. } => {
+                        let label = capability.unwrap_or(region_label);
+                        let Some(var) = self.region_variable(label) else {
+                            return Ok(None);
+                        };
+                        let Some(cap) = arg(0) else { return Ok(None) };
+                        words.extend([u64::from(var.as_u32()), cap]);
+                        n::TILED_WITH_REGION
+                    }
+                    _ => unreachable!("matched above"),
+                }
+            }
+            TiledOp::Len | TiledOp::TileCount { .. } => {
+                let Some(seq) = arg(0) else { return Ok(None) };
+                words.push(seq);
+                if matches!(op, TiledOp::Len) {
+                    n::TILED_LEN
+                } else {
+                    n::TILED_TILE_COUNT
+                }
+            }
+            TiledOp::Push { adt } | TiledOp::Get { adt } | TiledOp::Set { adt } => {
+                let operands = if matches!(op, TiledOp::Set { .. }) {
+                    3
+                } else {
+                    2
+                };
+                if args.len() < operands {
+                    return Ok(None);
+                }
+                words.extend(args[..operands].iter().map(|x| v(*x)));
+                let mut columns = Vec::new();
+                let Some(size) = row(self, adt, &mut columns) else {
+                    return Ok(None);
+                };
+                words.push(u64::from(size));
+                words.extend(columns);
+                match op {
+                    TiledOp::Push { .. } => n::TILED_PUSH,
+                    TiledOp::Get { .. } => n::TILED_GET,
+                    _ => n::TILED_SET,
+                }
+            }
+            TiledOp::ColGet { adt, field } | TiledOp::ColSet { adt, field } => {
+                let set = matches!(op, TiledOp::ColSet { .. });
+                let operands = if set { 3 } else { 2 };
+                if args.len() < operands {
+                    return Ok(None);
+                }
+                words.extend(args[..operands].iter().map(|x| v(*x)));
+                let Some(layout) = layout_of(self, adt) else {
+                    return Ok(None);
+                };
+                // `[0, tile offset, element bytes, type]` for a hot column,
+                // `[1, aggregate, size, words, word offset, type]` for a
+                // cold field (type 0 for an aggregate).
+                if let Some(h) = layout.hot_columns.iter().find(|h| &h.name == field) {
+                    let Ok(t) = scalar(&h.ty, &[]) else {
+                        return Ok(None);
+                    };
+                    words.extend([
+                        0,
+                        w(h.tile_offset),
+                        w(h.elem_bytes),
+                        codegen_swap::ty_code(t),
+                    ]);
+                } else {
+                    let Some(c) = layout.cold_fields.iter().find(|c| &c.name == field) else {
+                        return Ok(None);
+                    };
+                    let Ok(fl) = Layout::of(self.world, &c.ty) else {
+                        return Ok(None);
+                    };
+                    let t = if fl.aggregate() {
+                        0
+                    } else {
+                        let Ok(t) = scalar(&c.ty, &[]) else {
+                            return Ok(None);
+                        };
+                        codegen_swap::ty_code(t)
+                    };
+                    words.extend([
+                        1,
+                        u64::from(fl.aggregate()),
+                        u64::from(fl.size),
+                        w(c.words),
+                        w(c.word_offset),
+                        t,
+                    ]);
+                }
+                if set {
+                    n::TILED_COL_SET
+                } else {
+                    n::TILED_COL_GET
+                }
+            }
+            TiledOp::LoadTileVec { adt, field, shape } => {
+                if args.len() < 2 {
+                    return Ok(None);
+                }
+                words.extend(args[..2].iter().map(|x| v(*x)));
+                let Some(layout) = layout_of(self, adt) else {
+                    return Ok(None);
+                };
+                let Some(h) = layout.hot_columns.iter().find(|h| &h.name == field) else {
+                    return Ok(None);
+                };
+                words.extend([
+                    w(h.tile_offset),
+                    u64::from(shape.bytes()),
+                    w(shape.chunks()),
+                ]);
+                n::TILED_LOAD_TILE_VEC
+            }
+        };
+        words[0] = u64::from(kind);
+        if !jit {
+            if self.m.isa().triple().operating_system == target_lexicon::OperatingSystem::None_ {
+                return Ok(None);
+            }
+            aot_runtime::define(self.m)?;
+        }
+        let site = crate::codegen_swap::Site::NONE;
+        match codegen_swap::request(
+            Family::Numeric,
+            &mut self.b,
+            &mut *self.m,
+            self.world,
+            self.program,
+            site,
+            n::TILED,
+            &words,
+            None,
+        )? {
+            Some(results) => codegen_swap::value_of(&results).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// The region variable `resolve_region_var` reads, without reading it.
+    fn region_variable(&self, label: &str) -> Option<Variable> {
+        let identity = self.capabilities.get(&format!("$label:{label}"))?;
+        self.handlers
+            .iter()
+            .rev()
+            .find(|h| &h.identity == identity && h.effect.name == crate::regions::REGION_EFFECT)
+            .and_then(|h| h.region)
+    }
+
     fn resolve_region_var(&mut self, label: &str) -> Result<ir::Value, String> {
         let identity = self
             .capabilities
@@ -187,6 +400,12 @@ impl<M: Module> Codegen<'_, '_, M> {
         args: &[ir::Value],
         capability: Option<&str>,
     ) -> Result<ir::Value, String> {
+        // SH4 swap point (#1285): the `numeric` hook may emit the
+        // operation (`codegen_swap::numeric::TILED`); none is installed by
+        // default.
+        if let Some(v) = self.swap_tiled(op, args, capability)? {
+            return Ok(v);
+        }
         match op {
             TiledOp::New { adt } => {
                 let layout = self.tiled_layout_of(adt)?;
