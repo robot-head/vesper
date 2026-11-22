@@ -16,6 +16,8 @@
 mod check_harness;
 #[path = "common/check_words.rs"]
 mod check_words;
+#[path = "common/corpus_shard.rs"]
+mod corpus_shard;
 #[path = "common/ir_opt_words.rs"]
 mod ir_opt_words;
 #[path = "common/ir_words.rs"]
@@ -101,7 +103,8 @@ fn inputs() -> Vec<&'static Input> {
 fn screen_matches_rust() {
     screen();
     let (mut done, mut bad, mut blocks, mut kept) = (0, 0, 0, 0);
-    for c in all_inputs() {
+    // Bazel shards the inputs (BUILD.bazel `test_shards`).
+    for c in corpus_shard::Shard::from_environment().keep(all_inputs()) {
         let Some(prep) = prepare(c.world, &c.program, MODE_OPTIMIZE) else {
             continue;
         };
@@ -135,7 +138,8 @@ fn screen_matches_rust() {
         }
     }
     eprintln!("screen: {bad} of {done} inputs differ; {kept} of {blocks} blocks kept");
-    assert!(done > 50, "only {done} inputs");
+    let least = corpus_shard::Shard::from_environment().share(50);
+    assert!(done > least, "only {done} inputs");
     assert_eq!(bad, 0);
 }
 
@@ -157,7 +161,7 @@ fn policy_matches_rust() {
     let quiet = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
     let (mut done, mut bad, mut skipped) = (0, 0, 0);
-    for c in inputs() {
+    for c in corpus_shard::Shard::from_environment().keep(inputs()) {
         let rust = std::panic::catch_unwind(|| {
             let mut p = c.program.clone();
             let r = vesper::ir_opt_policy::optimize(c.world, &mut p);
@@ -192,7 +196,8 @@ fn policy_matches_rust() {
     }
     std::panic::set_hook(quiet);
     eprintln!("policy: {bad} of {done} inputs differ ({skipped} skipped)");
-    assert!(done > 20, "only {done} inputs");
+    let least = corpus_shard::Shard::from_environment().share(20);
+    assert!(done > least, "only {done} inputs");
     assert_eq!(bad, 0);
 }
 

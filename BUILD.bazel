@@ -688,6 +688,7 @@ vesper_crate(
         "test/self_host_codegen_scalar": 4,
         "test/self_host_front_end": 4,
         "test/self_host_ir_opt": 4,
+        "test/self_host_ir_opt_policy": 4,
         "test/self_host_place_ir_jit": 4,
         "test/self_host_swap_inputs": 4,
     },
