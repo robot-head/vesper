@@ -160,6 +160,12 @@ compiler's objects do not change. The runtime is small next to a whole
 compile, so a callgrind number waits for part 3, where the hybrid build
 installs the hook.
 
+Under Bazel, where "Test all targets" shares one hour with the whole
+suite, both seq tests sample: the decisions test compares every twelfth
+program, and the runtime test compares the first four runtime worlds,
+every fourth corpus world. Cargo runs compare the whole corpus.
+`CODEGEN_SEQ_STEP=n` overrides the stride in either test.
+
 Compiler gaps found here:
 
 4. **`copy` is a keyword.** `let copy = ...` fails with E0002 ("expected
