@@ -233,3 +233,67 @@ fn probe() {
         }
     }
 }
+
+/// A compiler package built to wasm (lane 9 acceptance): a program over
+/// `@vesper/place-ir` (the place-IR reader and writer, and `@vesper/check-data`
+/// under it) compiles through the port, handlers and bit operators included,
+/// and runs like the evaluator. Rust refuses it (bit operators).
+#[test]
+fn place_ir_package_builds_and_runs() {
+    // One package: shard 0 runs it.
+    if !corpus_shard::Shard::from_environment().contains(0) {
+        return;
+    }
+    let dep = std::fs::canonicalize("packages/vesper-place-ir").expect("place-ir package");
+    let dir = std::env::temp_dir().join(format!("wasm-seed-place-ir-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("src")).expect("package dir");
+    std::fs::write(
+        dir.join("Loom.toml"),
+        format!(
+            "[package]\nname = \"@wasm-seed/place-ir-main\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n\
+             [dependencies]\n\"@vesper/place-ir\" = {{ version = \"^0.1\", path = {:?} }}\n",
+            dep.display().to_string()
+        ),
+    )
+    .expect("Loom.toml");
+    std::fs::write(
+        dir.join("src/main.ves"),
+        "use @vesper/place-ir::{ place_ir_round_trip };\n\
+         fn main() -> u64 {\n\
+         \x20   let s = \"\";\n\
+         \x20   let words = place_ir_round_trip(in s.as_bytes());\n\
+         \x20   words.len()\n\
+         }\n",
+    )
+    .expect("main.ves");
+    let assembled = vesper::packages::load(&dir).expect("load");
+    assert!(
+        assembled.ok(),
+        "{:?} {:?}",
+        assembled.diagnostics,
+        assembled.manifest_errors
+    );
+    let c = vesper::check::check(&assembled.module);
+    assert!(c.diagnostics.is_empty(), "{:?}", c.diagnostics);
+    for (k, o) in configs().iter().enumerate() {
+        assert!(
+            vesper::wasm_backend::compile(&c.world, "main", o).is_err(),
+            "[{k}] Rust now lowers place-ir; compare byte for byte instead"
+        );
+        let program = backend_program(&c.world, o).expect("optimize");
+        let input = wasm_input(&c.world, &program, "main", o).expect("encodable");
+        let f = package().entry("wasm_backend_compile", true);
+        match outcome(&f.words(&input)) {
+            Outcome::Module { core, wit, .. } => {
+                let component = wrap(core, &wit, o.world);
+                assert_eq!(
+                    run_main(&component),
+                    evaluate(&c.world),
+                    "[{k}] wasm vs evaluator"
+                );
+            }
+            other => panic!("[{k}] port {other:?}"),
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
