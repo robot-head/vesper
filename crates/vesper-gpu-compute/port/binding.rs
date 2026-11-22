@@ -6,6 +6,54 @@
 use vesper_port_abi::Abi;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BpBuffers { pub boxes: Buf, pub keys: Buf, pub ids: Buf, pub counts: Buf, pub offsets: Buf, pub pairs: Buf }
+
+impl Abi for BpBuffers {
+    const WORDS: usize = 24;
+    fn put(&self, out: &mut [u64]) {
+        Abi::put(&self.boxes, &mut out[0..]);
+        Abi::put(&self.keys, &mut out[4..]);
+        Abi::put(&self.ids, &mut out[8..]);
+        Abi::put(&self.counts, &mut out[12..]);
+        Abi::put(&self.offsets, &mut out[16..]);
+        Abi::put(&self.pairs, &mut out[20..]);
+    }
+    fn get(words: &[u64]) -> Self {
+        BpBuffers { boxes: Abi::get(&words[0..]), keys: Abi::get(&words[4..]), ids: Abi::get(&words[8..]), counts: Abi::get(&words[12..]), offsets: Abi::get(&words[16..]), pairs: Abi::get(&words[20..]) }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BpKernels { pub keys: Kern, pub sort: Kern, pub sweep: Kern, pub scan: Kern }
+
+impl Abi for BpKernels {
+    const WORDS: usize = 20;
+    fn put(&self, out: &mut [u64]) {
+        Abi::put(&self.keys, &mut out[0..]);
+        Abi::put(&self.sort, &mut out[5..]);
+        Abi::put(&self.sweep, &mut out[10..]);
+        Abi::put(&self.scan, &mut out[15..]);
+    }
+    fn get(words: &[u64]) -> Self {
+        BpKernels { keys: Abi::get(&words[0..]), sort: Abi::get(&words[5..]), sweep: Abi::get(&words[10..]), scan: Abi::get(&words[15..]) }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BpRun { pub value: u64, pub total: u64 }
+
+impl Abi for BpRun {
+    const WORDS: usize = 2;
+    fn put(&self, out: &mut [u64]) {
+        Abi::put(&self.value, &mut out[0..]);
+        Abi::put(&self.total, &mut out[1..]);
+    }
+    fn get(words: &[u64]) -> Self {
+        BpRun { value: Abi::get(&words[0..]), total: Abi::get(&words[1..]) }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Buf { pub buffer: u64, pub memory: u64, pub ptr: u64, pub len: u64 }
 
 impl Abi for Buf {
@@ -142,6 +190,9 @@ impl<'a> RecRef<'a> {
 }
 
 const _: () = assert!(<() as Abi>::WORDS == 1);
+const _: () = assert!(<BpBuffers as Abi>::WORDS == 24);
+const _: () = assert!(<BpKernels as Abi>::WORDS == 20);
+const _: () = assert!(<BpRun as Abi>::WORDS == 2);
 const _: () = assert!(<Buf as Abi>::WORDS == 4);
 const _: () = assert!(<Dev as Abi>::WORDS == 11);
 const _: () = assert!(<GpuErr as Abi>::WORDS == 3);
@@ -154,6 +205,8 @@ unsafe extern "C" {
     fn vesper_gpu_seq_free(seq: i64) -> i64;
     fn vesper_gpu_live_allocations() -> i64;
     fn vesper_gpu_Rec_drop(value: *mut u64) -> i64;
+    fn vesper_gpu_bp_check(words: *mut u64, n: i64, fail: *mut u64) -> i64;
+    fn vesper_gpu_bp_run(result: *mut u64, d: *mut u64, k: *mut u64, b: *mut u64, words: *mut u64, n: i64, max_pairs: i64, previous: i64, fail: *mut u64) -> i64;
     fn vesper_gpu_buffer_free(d: *mut u64, b: *mut u64) -> i64;
     fn vesper_gpu_buffer_new(result: *mut u64, d: *mut u64, bytes: i64, fail: *mut u64) -> i64;
     fn vesper_gpu_buffer_read(b: *mut u64, offset: i64, out: *mut u64, fail: *mut u64) -> i64;
@@ -168,6 +221,7 @@ unsafe extern "C" {
     fn vesper_gpu_max_buffer_bytes() -> i64;
     fn vesper_gpu_max_immediate_bytes() -> i64;
     fn vesper_gpu_open(result: *mut u64, wanted: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_gpu_order_key(bits: i64) -> i64;
     fn vesper_gpu_rec_dispatch(d: *mut u64, r: *mut u64, k: *mut u64, buffers: *mut u64, immediates: *mut u64, gx: i64, gy: i64, gz: i64, fail: *mut u64) -> i64;
     fn vesper_gpu_rec_free(d: *mut u64, r: *mut u64, fail: *mut u64) -> i64;
     fn vesper_gpu_rec_new(result: *mut u64, d: *mut u64, fail: *mut u64) -> i64;
@@ -190,6 +244,59 @@ pub const RUNTIME: vesper_port_abi::SeqRuntime = vesper_port_abi::SeqRuntime {
 pub fn live_allocations() -> i64 {
     // SAFETY: the function only reads two counters.
     unsafe { vesper_gpu_live_allocations() }
+}
+
+/// The errors `bp_check` can raise, in status order.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BpCheckError {
+    RuntimeError(vesper_port_abi::RuntimeError),
+    ArithOverflow(vesper_port_abi::ArithOverflow),
+}
+
+/// Calls `bp_check` of the Vesper library `gpu` (`vesper_gpu_bp_check`).
+pub fn bp_check(words: &[u8], n: u64) -> Result<u64, BpCheckError> {
+    let mut fail = [0u64; 2];
+    // SAFETY: `vesper_gpu_bp_check` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(words, |view_words| unsafe { vesper_gpu_bp_check(view_words, n as i64, fail.as_mut_ptr()) });
+    match fail[0] {
+        0 => Ok(raw as u64),
+        1 => Err(BpCheckError::RuntimeError(<vesper_port_abi::RuntimeError as Abi>::get(&fail[1..]))),
+        2 => Err(BpCheckError::ArithOverflow(<vesper_port_abi::ArithOverflow as Abi>::get(&fail[1..]))),
+        status => panic!("invalid failure status {status} from vesper_gpu_bp_check"),
+    }
+}
+
+/// The errors `bp_run` can raise, in status order.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BpRunError {
+    GpuErr(GpuErr),
+    RuntimeError(vesper_port_abi::RuntimeError),
+    ArithOverflow(vesper_port_abi::ArithOverflow),
+}
+
+/// Calls `bp_run` of the Vesper library `gpu` (`vesper_gpu_bp_run`).
+pub fn bp_run(d: Dev, k: BpKernels, b: BpBuffers, words: &[u8], n: u64, max_pairs: u64, previous: u64) -> Result<BpRun, BpRunError> {
+    let mut result = [0u64; 2];
+    let mut arg_d = [0u64; <Dev as Abi>::WORDS];
+    Abi::put(&d, &mut arg_d);
+    let mut arg_k = [0u64; <BpKernels as Abi>::WORDS];
+    Abi::put(&k, &mut arg_k);
+    let mut arg_b = [0u64; <BpBuffers as Abi>::WORDS];
+    Abi::put(&b, &mut arg_b);
+    let mut fail = [0u64; 4];
+    // SAFETY: `vesper_gpu_bp_run` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(words, |view_words| unsafe { vesper_gpu_bp_run(result.as_mut_ptr(), arg_d.as_mut_ptr(), arg_k.as_mut_ptr(), arg_b.as_mut_ptr(), view_words, n as i64, max_pairs as i64, previous as i64, fail.as_mut_ptr()) });
+    match fail[0] {
+        0 => Ok(<BpRun as Abi>::get(&result[0..])),
+        1 => Err(BpRunError::GpuErr(<GpuErr as Abi>::get(&fail[1..]))),
+        2 => Err(BpRunError::RuntimeError(<vesper_port_abi::RuntimeError as Abi>::get(&fail[1..]))),
+        3 => Err(BpRunError::ArithOverflow(<vesper_port_abi::ArithOverflow as Abi>::get(&fail[1..]))),
+        status => panic!("invalid failure status {status} from vesper_gpu_bp_run"),
+    }
 }
 
 /// Calls `buffer_free` of the Vesper library `gpu` (`vesper_gpu_buffer_free`).
@@ -414,6 +521,15 @@ pub fn open(wanted: &str) -> Result<Dev, OpenError> {
         3 => Err(OpenError::ArithOverflow(<vesper_port_abi::ArithOverflow as Abi>::get(&fail[1..]))),
         status => panic!("invalid failure status {status} from vesper_gpu_open"),
     }
+}
+
+/// Calls `order_key` of the Vesper library `gpu` (`vesper_gpu_order_key`).
+pub fn order_key(bits: u32) -> u32 {
+    // SAFETY: `vesper_gpu_order_key` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_gpu_order_key(bits as i64) };
+    raw as u32
 }
 
 /// The errors `rec_dispatch` can raise, in status order.

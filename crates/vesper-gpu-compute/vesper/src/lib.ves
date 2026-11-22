@@ -2226,3 +2226,299 @@ pub fn rec_free(in d: Dev, in r: Rec) eff [Ffi[Vk], Fail[RuntimeError]] {
     }
     Vk::PfnDestroyCommandPool(pfn_destroy_command_pool(d.library), d.device, r.pool, 0);
 }
+
+// ---------------------------------------------------------------------------
+// The Kinetic broadphase (src/broadphase.rs): sort and sweep on the device.
+// The crate keeps the buffers and kernels; this part checks the boxes,
+// records the whole schedule in one submission, waits for it and reads the
+// pair count back.
+
+// The broadphase's four kernels (keys, bitonic sort step, sweep, scan).
+pub copy struct BpKernels {
+    pub keys: Kern,
+    pub sort: Kern,
+    pub sweep: Kern,
+    pub scan: Kern,
+}
+
+// The broadphase's device buffers: 6 words per box, the padded keys and
+// ids, per-box counts, their exclusive prefix sums (plus the total) and the
+// pair words.
+pub copy struct BpBuffers {
+    pub boxes: Buf,
+    pub keys: Buf,
+    pub ids: Buf,
+    pub counts: Buf,
+    pub offsets: Buf,
+    pub pairs: Buf,
+}
+
+// A call that may have failed (handlers return it, so the recording is
+// freed outside them).
+copy struct Outcome {
+    failed: bool,
+    value: u64,
+    err: GpuErr,
+}
+
+fn no_error() -> GpuErr {
+    GpuErr {
+        kind: 0,
+        detail: 0,
+        code: 0
+    }
+}
+
+// One run: the timeline value it signalled (0 when nothing was submitted)
+// and the pair count the device wrote.
+pub copy struct BpRun {
+    pub value: u64,
+    pub total: u64,
+}
+
+const F32_EXPONENT: u32 = 2139095040;
+const F32_SIGN: u32 = 2147483648;
+
+fn word_at(in words: Slice[u8], i: u64) -> u32 eff [Fail[RuntimeError], Fail[ArithOverflow]] {
+    let at = i * 4;
+    widen_u32(words[at]) | (widen_u32(words[at + 1]) << 8) | (widen_u32(words[at + 2]) << 16) | (
+        widen_u32(words[at + 3]) << 24
+    )
+}
+
+// The order-preserving encoding of a finite f32's bits (-0 as +0), the one
+// the kernels compare (`order_key` in src/broadphase.rs).
+pub fn order_key(bits: u32) -> u32 {
+    let b = if bits == F32_SIGN {
+        0
+    } else {
+        bits
+    };
+    if b & F32_SIGN != 0 {
+        b ^ 4294967295
+    } else {
+        b | F32_SIGN
+    }
+}
+
+fn finite(bits: u32) -> bool {
+    bits & F32_EXPONENT != F32_EXPONENT
+}
+
+// 1 + the index of the first box that is not finite or has min > max on an
+// axis (the CPU broadphase's `InvalidBox`), or 0 when every one of the `n`
+// boxes (6 f32 bit patterns each: min xyz, max xyz) is valid.
+pub fn bp_check(in words: Slice[u8], n: u64) -> u64 eff [Fail[RuntimeError], Fail[ArithOverflow]] {
+    let mut bad: u64 = 0;
+    for i in 0..n {
+        let mut ok = true;
+        for a in 0..3 {
+            let lo = word_at(in words, i * 6 + a);
+            let hi = word_at(in words, i * 6 + 3 + a);
+            if !(finite(lo) && finite(hi) && order_key(lo) <= order_key(hi)) {
+                ok = false;
+            }
+        }
+        if !ok {
+            bad = i + 1;
+            break;
+        }
+    }
+    bad
+}
+
+fn imm4(a: u32, b: u32, c: u32, e: u32)
+    -> ChunkSeq[u8] eff [Fail[RuntimeError], Fail[ArithOverflow]] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    out.resize(16, 0);
+    let mut s = Scratch {
+        base: 0,
+        image: out
+    };
+    put32(inout s, 0, a);
+    put32(inout s, 4, b);
+    put32(inout s, 8, c);
+    put32(inout s, 12, e);
+    s.image
+}
+
+fn groups64(items: u64) -> u32 eff [Fail[ArithOverflow]] {
+    narrow_u32((items + 63) / 64)
+}
+
+fn next_power_of_two(n: u64) -> u64 eff [Fail[ArithOverflow]] {
+    let mut p: u64 = 1;
+    loop {
+        if p >= n {
+            break;
+        }
+        p = p * 2;
+    }
+    p
+}
+
+// Records the broadphase over `n` (2 or more) checked boxes whose words are
+// `words`: keys, the bitonic sort over the padded length, the counting
+// sweep, the scan and the writing sweep. Leaves the recording to the caller.
+fn bp_record(
+    in d: Dev,
+    inout r: Rec,
+    in k: BpKernels,
+    in b: BpBuffers,
+    n: u64,
+    max_pairs: u64
+) eff [Ffi[Vk], Ffi[LibC], Fail[GpuErr], Fail[RuntimeError], Fail[ArithOverflow]] {
+    let padded = next_power_of_two(n);
+    let n32 = narrow_u32(n);
+    let padded32 = narrow_u32(padded);
+    let cap = narrow_u32(max_pairs);
+    let mut keys_bufs: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    keys_bufs.push(b.boxes.buffer);
+    keys_bufs.push(b.keys.buffer);
+    keys_bufs.push(b.ids.buffer);
+    let imm = imm4(n32, padded32, 0, 0);
+    rec_dispatch(
+        in d,
+        inout r,
+        in k.keys,
+        in keys_bufs.as_slice(),
+        in imm.as_slice(),
+        groups64(padded),
+        1,
+        1
+    );
+    let mut sort_bufs: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    sort_bufs.push(b.keys.buffer);
+    sort_bufs.push(b.ids.buffer);
+    let mut kk: u32 = 2;
+    loop {
+        if kk > padded32 {
+            break;
+        }
+        let mut j = kk / 2;
+        loop {
+            if j == 0 {
+                break;
+            }
+            let imm = imm4(n32, padded32, j, kk);
+            rec_dispatch(
+                in d,
+                inout r,
+                in k.sort,
+                in sort_bufs.as_slice(),
+                in imm.as_slice(),
+                groups64(padded),
+                1,
+                1
+            );
+            j = j / 2;
+        }
+        kk = kk * 2;
+    }
+    let mut sweep_bufs: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    sweep_bufs.push(b.boxes.buffer);
+    sweep_bufs.push(b.keys.buffer);
+    sweep_bufs.push(b.ids.buffer);
+    sweep_bufs.push(b.counts.buffer);
+    sweep_bufs.push(b.offsets.buffer);
+    sweep_bufs.push(b.pairs.buffer);
+    let count = imm4(n32, 0, cap, 0);
+    rec_dispatch(
+        in d,
+        inout r,
+        in k.sweep,
+        in sweep_bufs.as_slice(),
+        in count.as_slice(),
+        groups64(n),
+        1,
+        1
+    );
+    let mut scan_bufs: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    scan_bufs.push(b.counts.buffer);
+    scan_bufs.push(b.offsets.buffer);
+    let scan = imm4(n32, 0, 0, 0);
+    rec_dispatch(in d, inout r, in k.scan, in scan_bufs.as_slice(), in scan.as_slice(), 1, 1, 1);
+    let write = imm4(n32, 1, cap, 0);
+    rec_dispatch(
+        in d,
+        inout r,
+        in k.sweep,
+        in sweep_bufs.as_slice(),
+        in write.as_slice(),
+        groups64(n),
+        1,
+        1
+    );
+}
+
+// Writes the `n` boxes' words, runs the whole broadphase in one submission
+// after timeline value `previous`, waits for it and returns its value and
+// the pair count (which may exceed `max_pairs`: the caller reports that).
+// The caller holds the queue lock and owns every buffer and kernel, none of
+// which a pending submission uses. Fewer than 2 boxes submit nothing.
+pub fn bp_run(
+    in d: Dev,
+    in k: BpKernels,
+    in b: BpBuffers,
+    in words: Slice[u8],
+    n: u64,
+    max_pairs: u64,
+    previous: u64,
+) -> BpRun eff [Ffi[Vk], Ffi[LibC], Fail[GpuErr], Fail[RuntimeError], Fail[ArithOverflow]] {
+    if n < 2 {
+        return BpRun {
+            value: 0,
+            total: 0
+        };
+    }
+    buffer_write(in b.boxes, 0, in words);
+    let mut r = rec_new(in d);
+    let submitted = handle Fail[GpuErr] in {
+        bp_record(in d, inout r, in k, in b, n, max_pairs);
+        Outcome {
+            failed: false,
+            value: rec_submit(in d, in r, previous),
+            err: no_error()
+        }
+    } with {
+        return v => v,
+        raise(e, k2) => Outcome {
+            failed: true,
+            value: 0,
+            err: e
+        },
+    };
+    if submitted.failed {
+        rec_free(in d, in r);
+        fail(submitted.err.kind, submitted.err.detail, submitted.err.code);
+    }
+    let value = submitted.value;
+    let waited = handle Fail[GpuErr] in {
+        wait_value(in d, value);
+        Outcome {
+            failed: false,
+            value: value,
+            err: no_error()
+        }
+    } with {
+        return v => v,
+        raise(e, k3) => Outcome {
+            failed: true,
+            value: 0,
+            err: e
+        },
+    };
+    if waited.failed {
+        wait_idle(in d);
+        rec_free(in d, in r);
+        fail(waited.err.kind, waited.err.detail, waited.err.code);
+    }
+    rec_free(in d, in r);
+    let mut total: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    total.resize(4, 0);
+    buffer_read(in b.offsets, n * 4, inout total.as_slice_mut());
+    BpRun {
+        value: value,
+        total: widen_u64(word_at(in total.as_slice(), 0))
+    }
+}

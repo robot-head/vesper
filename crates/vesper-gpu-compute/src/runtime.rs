@@ -25,7 +25,7 @@ use crate::shader::{self, ShaderError};
 #[allow(unsafe_code)]
 #[rustfmt::skip]
 #[path = "../port/binding.rs"]
-mod binding;
+pub(crate) mod binding;
 use binding::{Buf, Dev, GpuErr, Kern, Rec};
 
 /// Number of [`Submission`]s dropped without [`Submission::wait`] in this
@@ -211,6 +211,11 @@ fn gpu_error(e: GpuErr, wanted: Option<&str>) -> GpuError {
     }
 }
 
+/// A Vesper `GpuErr` from another module of the crate as the crate's error.
+pub(crate) fn port_error(e: GpuErr) -> GpuError {
+    gpu_error(e, None)
+}
+
 /// Converts a Vesper failure. Arithmetic or indexing failures inside the
 /// library are bugs of the port, not input errors.
 macro_rules! vesper {
@@ -390,6 +395,46 @@ impl Context {
         })
     }
 
+    /// Runs a whole submission made by another Vesper-driven module of the
+    /// crate (`run` records, submits and waits inside the Vesper library).
+    /// Under the queue lock, once every submission that bound `buffers` has
+    /// completed, `run` gets the device and the last issued timeline value,
+    /// and returns the value it signalled (0 if it submitted nothing). That
+    /// value becomes the issued value and every buffer's busy value, so the
+    /// runtime's ordering holds as for [`Recording::submit`]. Every buffer
+    /// and kernel `run` uses must be one of `buffers` or owned by the caller
+    /// for the whole call, and `run` must not return before its submission
+    /// completed.
+    pub(crate) fn submit_with<R>(
+        &self,
+        buffers: &[&Buffer],
+        run: impl FnOnce(Dev, u64) -> Result<(u64, R), GpuError>,
+    ) -> Result<R, GpuError> {
+        let inner = &self.inner;
+        if buffers.iter().any(|b| !b.same_device(self)) {
+            return Err(GpuError::ForeignObject);
+        }
+        let _queue = inner
+            .queue
+            .lock()
+            .map_err(|_| GpuError::Shape("queue mutex poisoned"))?;
+        for b in buffers {
+            let value = b.inner.busy_until.load(Ordering::Acquire);
+            if value != 0 {
+                binding::wait_value(inner.dev, value).map_err(wait_error)?;
+            }
+        }
+        let previous = inner.issued.load(Ordering::Acquire);
+        let (value, result) = run(inner.dev, previous)?;
+        if value != 0 {
+            for b in buffers {
+                b.inner.busy_until.fetch_max(value, Ordering::AcqRel);
+            }
+            inner.issued.store(value, Ordering::Release);
+        }
+        Ok(result)
+    }
+
     /// Starts recording a command buffer.
     pub fn record(&self) -> Result<Recording<'_>, GpuError> {
         let rec = vesper!(binding::rec_new(self.inner.dev), RecNewError)?;
@@ -494,6 +539,12 @@ impl Buffer {
         Ok(out)
     }
 
+    /// The Vesper library's handle, for the crate's other Vesper-driven
+    /// modules (the buffer stays owned by this `Buffer`).
+    pub(crate) fn raw(&self) -> Buf {
+        self.inner.buf
+    }
+
     fn same_device(&self, ctx: &Context) -> bool {
         Arc::ptr_eq(&self.inner.ctx, &ctx.inner)
     }
@@ -533,6 +584,12 @@ impl std::fmt::Debug for Kernel {
 impl Kernel {
     pub fn name(&self) -> &str {
         &self.inner.name
+    }
+
+    /// The Vesper library's handle, for the crate's other Vesper-driven
+    /// modules (the handle stays owned by this kernel).
+    pub(crate) fn raw(&self) -> Kern {
+        self.inner.kern
     }
 }
 

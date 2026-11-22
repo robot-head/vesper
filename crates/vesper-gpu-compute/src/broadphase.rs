@@ -11,10 +11,15 @@
 //! of the f32 bounds, so there is no floating-point arithmetic on the device
 //! at all. [`GpuBroadphase::overlapping_pairs`] then returns the pairs sorted
 //! ascending, exactly the CPU contract.
+//!
+//! The checks, the schedule and the submission are the Vesper library's
+//! (`bp_check`, `bp_run` in `vesper/src/lib.ves`, SH6 lane 15, #1410); this
+//! module owns the buffers and kernels and keeps the crate's API.
 use vesper_kinetic::lbvh::{Aabb, LbvhError};
 
 use crate::error::GpuError;
-use crate::runtime::{Buffer, Context, Kernel};
+use crate::runtime::binding::{self, BpBuffers, BpKernels};
+use crate::runtime::{Buffer, Context, Kernel, port_error};
 
 /// Largest number of boxes one broadphase accepts. With 65,536 boxes the
 /// pair count stays below 2^31, so `u32` counts and offsets cannot overflow.
@@ -72,8 +77,10 @@ impl From<GpuError> for BroadphaseError {
     }
 }
 
-fn valid(b: &Aabb) -> bool {
-    (0..3).all(|a| b.min[a].is_finite() && b.max[a].is_finite() && b.min[a] <= b.max[a])
+/// A failure inside the Vesper library that is not a device error is a bug
+/// of the port, not an input error.
+fn internal(e: impl std::fmt::Debug) -> ! {
+    panic!("the Vesper GPU broadphase failed internally: {e:?}")
 }
 
 /// Device buffers and kernels for up to `capacity` boxes and `max_pairs`
@@ -147,43 +154,29 @@ impl GpuBroadphase {
                 capacity: self.capacity,
             }));
         }
-        if let Some(index) = boxes.iter().position(|b| !valid(b)) {
-            return Err(BroadphaseError::Kinetic(LbvhError::InvalidBox { index }));
-        }
         let n = boxes.len();
+        let mut words = Vec::with_capacity(n * 24);
+        for b in boxes {
+            for v in b.min.iter().chain(&b.max) {
+                words.extend_from_slice(&v.to_bits().to_le_bytes());
+            }
+        }
+        let bad = binding::bp_check(&words, n as u64).unwrap_or_else(|e| internal(e));
+        if bad != 0 {
+            return Err(BroadphaseError::Kinetic(LbvhError::InvalidBox {
+                index: (bad - 1) as usize,
+            }));
+        }
         if n < 2 {
             return Ok(());
         }
-        let mut words = Vec::with_capacity(n * 6);
-        for b in boxes {
-            words.extend(b.min.iter().chain(&b.max).map(|v| v.to_bits()));
-        }
-        self.boxes.write(0, &words)?;
-        let padded = n.next_power_of_two();
-        let (n32, padded32) = (n as u32, padded as u32);
-        let groups = |items: usize| [items.div_ceil(64) as u32, 1, 1];
-        let mut rec = self.ctx.record()?;
-        rec.dispatch(
-            &self.keys_kernel,
-            &[&self.boxes, &self.keys, &self.ids],
-            &[n32, padded32, 0, 0],
-            groups(padded),
-        )?;
-        let mut k = 2u32;
-        while k <= padded32 {
-            let mut j = k / 2;
-            while j > 0 {
-                rec.dispatch(
-                    &self.sort_kernel,
-                    &[&self.keys, &self.ids],
-                    &[n32, padded32, j, k],
-                    groups(padded),
-                )?;
-                j /= 2;
-            }
-            k *= 2;
-        }
-        let sweep = [
+        let kernels = BpKernels {
+            keys: self.keys_kernel.raw(),
+            sort: self.sort_kernel.raw(),
+            sweep: self.sweep_kernel.raw(),
+            scan: self.scan_kernel.raw(),
+        };
+        let buffers = [
             &self.boxes,
             &self.keys,
             &self.ids,
@@ -191,19 +184,23 @@ impl GpuBroadphase {
             &self.offsets,
             &self.pairs,
         ];
-        let cap = self.max_pairs as u32;
-        rec.dispatch(&self.sweep_kernel, &sweep, &[n32, 0, cap, 0], groups(n))?;
-        rec.dispatch(
-            &self.scan_kernel,
-            &[&self.counts, &self.offsets],
-            &[n32, 0, 0, 0],
-            [1, 1, 1],
-        )?;
-        rec.dispatch(&self.sweep_kernel, &sweep, &[n32, 1, cap, 0], groups(n))?;
-        rec.submit()?.wait()?;
-        let mut total = [0u32];
-        self.offsets.read((n * 4) as u64, &mut total)?;
-        let total = total[0] as usize;
+        let raw = BpBuffers {
+            boxes: self.boxes.raw(),
+            keys: self.keys.raw(),
+            ids: self.ids.raw(),
+            counts: self.counts.raw(),
+            offsets: self.offsets.raw(),
+            pairs: self.pairs.raw(),
+        };
+        let max_pairs = self.max_pairs as u64;
+        let total = self.ctx.submit_with(&buffers, |dev, previous| {
+            match binding::bp_run(dev, kernels, raw, &words, n as u64, max_pairs, previous) {
+                Ok(run) => Ok((run.value, run.total)),
+                Err(binding::BpRunError::GpuErr(g)) => Err(port_error(g)),
+                Err(e) => internal(e),
+            }
+        })?;
+        let total = total as usize;
         if total > self.max_pairs {
             return Err(BroadphaseError::Kinetic(LbvhError::PairOverflow {
                 capacity: self.max_pairs,
@@ -242,13 +239,5 @@ impl GpuBroadphase {
 /// The order-preserving `u32` encoding of a finite `f32` that the kernels
 /// compare (with `-0` encoded as `+0`).
 pub fn order_key(v: f32) -> u32 {
-    let mut bits = v.to_bits();
-    if bits == 0x8000_0000 {
-        bits = 0;
-    }
-    if bits & 0x8000_0000 != 0 {
-        !bits
-    } else {
-        bits | 0x8000_0000
-    }
+    binding::order_key(v.to_bits())
 }
