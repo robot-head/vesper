@@ -120,6 +120,65 @@ pub(crate) mod abi {
         pub value: u64,
         pub used: u64,
     }
+
+    pub use crate::client::ClientError;
+    pub use crate::connection::{ConnectionStats, SendError};
+    pub use crate::session::{SessionError, SessionStats};
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct H3ConfigAbi {
+        pub settings: Settings,
+        pub encoder: EncoderConfig,
+        pub max_frame_payload: u64,
+        pub max_body_bytes: u64,
+        pub max_concurrent_requests: u64,
+        pub max_peer_uni_streams: u64,
+        pub max_blocked_bytes: u64,
+        pub max_stream_buffer: u64,
+        pub streaming_request_bodies: bool,
+        pub stream_body_window: u64,
+        pub max_connection_buffer: u64,
+        pub incremental_quantum: u64,
+        pub work_conserving: bool,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct UnpackedFields {
+        pub count: u64,
+        pub meta_off: u64,
+        pub byte_off: u64,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct ServerReadPlan {
+        pub skip: bool,
+        pub allowance: u64,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct BodyReadStep {
+        pub len: u64,
+        pub end: bool,
+        pub need_read: bool,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum WtReadPre {
+        TryTransport,
+        Done { len: u64, fin: bool },
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum DgramSendPlan {
+        SendQuic,
+        SentCapsule,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum FlushStep {
+        Done,
+        Write { stream_id: u64, off: u64, len: u64 },
+    }
 }
 
 // Generated and committed, but kept outside src/ so formatters, which
@@ -144,7 +203,7 @@ pub fn live_allocations() -> i64 {
 /// The QPACK encoder (RFC 9204 §2.1). See the Rust build for the policy;
 /// this is the same encoder in Vesper.
 pub struct Encoder {
-    core: binding::EncoderCore,
+    pub(crate) core: binding::EncoderCore,
     bytes: Vec<u8>,
     meta: Vec<u64>,
 }
@@ -219,7 +278,7 @@ impl Encoder {
 /// The QPACK decoder (RFC 9204 §2.2), in Vesper. Sections that unblock wait
 /// here, in the same queue the Rust build keeps.
 pub struct Decoder {
-    core: binding::DecoderCore,
+    pub(crate) core: binding::DecoderCore,
     ready: VecDeque<Result<FieldSection, QpackError>>,
 }
 

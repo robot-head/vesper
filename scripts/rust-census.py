@@ -53,7 +53,7 @@ CRATES = {
     "vesper-warp-bbr": ("partial", "in crate", "2.2-2.9x", "on_event dispatch Rust", "4"),
     "vesper-warp-wheel": ("partial", "in crate", "1.73-1.77x", "speed only", "4"),
     "vesper-prism": ("gone", "in crate", "0.96-1.34x", "", "5"),
-    "vesper-prism-h3": ("partial", "in crate", "0.99-1.36x", "protocol core Vesper-only; connection, client, session drivers and Warp adapter still Rust", "5"),
+    "vesper-prism-h3": ("partial", "in crate", "connection 0.97x, session 0.94x, core 0.99-1.36x", "protocol core and connection/client/session state machines flipped (part 3b); RoleCore Transport I/O glue and Warp adapter stay Rust", "5"),
     "vesper-quarry": ("partial", "in crate", "1.80x", "buffer pool, executor, online DDL", "6"),
     "vesper-flux": ("partial", "in crate", "unmeasured", "CDC, Kafka wire, durable state, cluster driver", "6"),
     "vesper-ignis": ("partial", "in crate", "0.68-3.1x", "build 2.5x, lower 2.7-3.1x", "7"),

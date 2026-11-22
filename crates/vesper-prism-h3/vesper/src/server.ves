@@ -1,0 +1,2079 @@
+// HTTP/3 server-side connection state machine (`ServerConnection` in
+// `src/connection.rs`): request stream lifecycle, framing, QPACK section
+// blocking/unblocking, connection/stream buffer budgets, and responder
+// validation & encoding.
+
+use self::{
+    ConnectionError,
+    FrameError,
+    QpackError,
+    MessageError,
+    SendError,
+    H3ConfigAbi,
+    RequestParts,
+    SessionKind,
+    EncoderCore,
+    DecoderCore,
+    Huff,
+    ConnCore,
+    ServerCore,
+    ServerReadPlan,
+    BodyReadStep,
+    UnpackedFields
+};
+use self::int::{
+    inc,
+    min64,
+    max64,
+    sat_sub,
+    word,
+    byte,
+    remove_word
+};
+use self::varint::{
+    put_record
+};
+use self::frame::{
+    data_type,
+    headers_type
+};
+use self::capsule::{
+    valid_utf8,
+    max_close_reason
+};
+use self::encoder::{
+    enc_encode
+};
+use self::decoder::{
+    dec_decode_section
+};
+use self::message::{
+    message_parse_request,
+    message_check_trailers
+};
+use self::pool::{
+    PoolRange,
+    MODE_HEADER,
+    FRAME_NONE,
+    FRAME_DATA,
+    FRAME_HEADERS,
+    FRAME_WT_STREAM,
+    FRAME_UNKNOWN,
+    CMD_STOP_SENDING,
+    CMD_RESET,
+    HEV_REQUEST,
+    HEV_STREAMING_REQUEST,
+    HEV_BODY_READABLE,
+    HEV_CONNECT,
+    HEV_REQUEST_FAILED,
+    HEV_RESPONSE_ABANDONED,
+    HEV_GOAWAY,
+    q_len,
+    q_push,
+    q_consume,
+    q_clear,
+    q_transfer,
+    q_drain_to,
+    q_drain_all_to,
+    put_u64_le,
+    get_u64_le,
+    pooled_frame_at_boundary,
+    pooled_frame_next,
+    bsearch_u64,
+    insert_word,
+    set_u64_insert,
+    set_u64_remove,
+    out_queued,
+    out_queue,
+    out_queue_fin,
+    out_discard,
+    push_cmd
+};
+use self::session::{
+    CODE_NO_ERROR,
+    CODE_EXCESSIVE_LOAD,
+    CODE_REQUEST_REJECTED,
+    CODE_REQUEST_CANCELLED,
+    CODE_REQUEST_INCOMPLETE,
+    CODE_MESSAGE_ERROR,
+    session_known_gone,
+    live_webtransport_sessions,
+    add_session,
+    establish_session,
+    incoming_wt_stream_fin,
+    drop_held_for,
+    end_session,
+    forget_session,
+    session_data,
+    session_fin_ok,
+    queue_session_close,
+    wt_peer_fin
+};
+use self::core::{
+    conn_core_new,
+    core_send_goaway,
+    core_forget_priority,
+    core_header_priority,
+    core_cancel_stream,
+    build_msg_meta,
+    sec_total_bytes,
+    push_status_ascii,
+    push_u64_ascii,
+    headers_frame_bound_meta,
+    pack_trailers_to_pool,
+    unpack_fields_to_hev
+};
+
+const CODE_INTERNAL_ERROR: u64 = 0x102;
+
+const PHASE_HEADERS: u64 = 0;
+const PHASE_BLOCKED_HDR: u64 = 1;
+const PHASE_BLOCKED_TRL: u64 = 2;
+const PHASE_BODY: u64 = 3;
+const PHASE_TRAILERS: u64 = 4;
+const PHASE_DELIVERED: u64 = 5;
+const PHASE_STREAMING: u64 = 6;
+const PHASE_TUNNEL: u64 = 7;
+
+const REPLY_NONE: u64 = 0;
+const REPLY_HEADERS: u64 = 1;
+const REPLY_FINISHED: u64 = 2;
+const REPLY_GONE: u64 = 3;
+
+const RF_FIN: u64 = 1;
+const RF_HAS_CL: u64 = 2;
+const RF_REPLY_HAS_CL: u64 = 4;
+const RF_HEAD_REQ: u64 = 8;
+const RF_FRAMED: u64 = 16;
+const RF_STREAMING: u64 = 32;
+const RF_TRAILERS_SEEN: u64 = 64;
+const RF_BODY_END: u64 = 128;
+const RF_NOTIFIED: u64 = 256;
+
+const UNB_CANCELLED: u64 = 99;
+const ASCII_COLON: u8 = 58;
+
+pub fn server_core_new(cfg: H3ConfigAbi) -> ServerCore {
+    ServerCore {
+        conn: conn_core_new(cfg, true),
+        r_id: ChunkSeq::new[u64](),
+        r_phase: ChunkSeq::new[u64](),
+        r_reply: ChunkSeq::new[u64](),
+        r_flags: ChunkSeq::new[u64](),
+        r_rx_q: ChunkSeq::new[u64](),
+        r_fr_mode: ChunkSeq::new[u64](),
+        r_fr_rem: ChunkSeq::new[u64](),
+        r_fr_ty: ChunkSeq::new[u64](),
+        r_fr_len: ChunkSeq::new[u64](),
+        r_body_q: ChunkSeq::new[u64](),
+        r_body_total: ChunkSeq::new[u64](),
+        r_head_q: ChunkSeq::new[u64](),
+        r_trl_q: ChunkSeq::new[u64](),
+        r_cl: ChunkSeq::new[u64](),
+        r_reply_cl: ChunkSeq::new[u64](),
+        r_reply_sent: ChunkSeq::new[u64](),
+        goaway_sent: Option::None,
+        next_request_id: 0,
+        goaway_reported: Option::None,
+        budget_blocked: false,
+    }
+}
+
+fn phase_handed_out(phase: u64) -> bool {
+    phase == PHASE_DELIVERED || phase == PHASE_STREAMING || phase == PHASE_TUNNEL
+}
+
+fn phase_is_blocked(phase: u64) -> bool {
+    phase == PHASE_BLOCKED_HDR || phase == PHASE_BLOCKED_TRL
+}
+
+fn stream_held_bytes(in s: ServerCore, idx: u64) -> u64 {
+    let rx = q_len(in s.conn.pool, word(in s.r_rx_q.as_slice(), idx));
+    let phase = word(in s.r_phase.as_slice(), idx);
+    if phase == PHASE_DELIVERED || phase == PHASE_TUNNEL {
+        rx
+    } else {
+        wrapping_add(rx, q_len(in s.conn.pool, word(in s.r_body_q.as_slice(), idx)))
+    }
+}
+
+pub fn server_buffered_request_bytes(in s: ServerCore) -> u64 {
+    let mut sum: u64 = 0;
+    for i in 0..s.r_id.len() {
+        sum = wrapping_add(sum, stream_held_bytes(in s, i));
+    }
+    sum
+}
+
+fn remove_request_at(inout s: ServerCore, idx: u64) {
+    let rxq = word(in s.r_rx_q.as_slice(), idx);
+    let bq = word(in s.r_body_q.as_slice(), idx);
+    let hq = word(in s.r_head_q.as_slice(), idx);
+    let tq = word(in s.r_trl_q.as_slice(), idx);
+    let _c1 = q_clear(inout s.conn.pool, rxq);
+    let _c2 = q_clear(inout s.conn.pool, bq);
+    let _c3 = q_clear(inout s.conn.pool, hq);
+    let _c4 = q_clear(inout s.conn.pool, tq);
+    remove_word(inout s.r_id, idx);
+    remove_word(inout s.r_phase, idx);
+    remove_word(inout s.r_reply, idx);
+    remove_word(inout s.r_flags, idx);
+    remove_word(inout s.r_rx_q, idx);
+    remove_word(inout s.r_fr_mode, idx);
+    remove_word(inout s.r_fr_rem, idx);
+    remove_word(inout s.r_fr_ty, idx);
+    remove_word(inout s.r_fr_len, idx);
+    remove_word(inout s.r_body_q, idx);
+    remove_word(inout s.r_body_total, idx);
+    remove_word(inout s.r_head_q, idx);
+    remove_word(inout s.r_trl_q, idx);
+    remove_word(inout s.r_cl, idx);
+    remove_word(inout s.r_reply_cl, idx);
+    remove_word(inout s.r_reply_sent, idx);
+}
+
+fn goaway_allows(goaway: Option[u64], id: u64) -> bool {
+    match goaway {
+        Option::Some(g) => id < g,
+        Option::None => true,
+    }
+}
+
+fn is_server_initiated(id: u64) -> bool {
+    (id & 1) != 0
+}
+
+fn push_hev_record(inout s: ServerCore, kind: u64, words: Slice[u64]) {
+    s.conn.hev.kinds.push(kind);
+    s.conn.hev.wpos.push(s.conn.hev.words.len());
+    for i in 0..words.len() {
+        s.conn.hev.words.push(word(in words, i));
+    }
+}
+
+fn push_hev_2(inout s: ServerCore, kind: u64, w0: u64, w1: u64) {
+    s.conn.hev.kinds.push(kind);
+    s.conn.hev.wpos.push(s.conn.hev.words.len());
+    s.conn.hev.words.push(w0);
+    s.conn.hev.words.push(w1);
+}
+
+fn push_hev_1(inout s: ServerCore, kind: u64, w0: u64) {
+    s.conn.hev.kinds.push(kind);
+    s.conn.hev.wpos.push(s.conn.hev.words.len());
+    s.conn.hev.words.push(w0);
+}
+
+pub fn server_accept(inout s: ServerCore, id: u64) -> Result[Unit, ConnectionError] {
+    if is_server_initiated(id) {
+        return Result::Err(ConnectionError::BadStreamId(id));
+    }
+    s.next_request_id = max64(s.next_request_id, wrapping_add(id, 4));
+    s.conn.next_peer_bidi = s.next_request_id;
+    if !goaway_allows(s.goaway_sent, id) || s.r_id.len() >= s.conn.cfg.max_concurrent_requests {
+        push_cmd(inout s.conn.cmd, CMD_RESET, id, CODE_REQUEST_REJECTED);
+        push_cmd(inout s.conn.cmd, CMD_STOP_SENDING, id, CODE_REQUEST_REJECTED);
+        s.conn.stats.rejected = inc(s.conn.stats.rejected);
+        drop_held_for(
+            inout s.conn.sess,
+            inout s.conn.pool,
+            inout s.conn.cmd,
+            inout s.conn.unparsed,
+            id,
+        );
+        push_hev_2(inout s, HEV_REQUEST_FAILED, id, CODE_REQUEST_REJECTED);
+        return Result::Ok(());
+    }
+    set_u64_insert(inout s.conn.unparsed, id);
+    let f = bsearch_u64(in s.r_id.as_slice(), id);
+    if !f.found {
+        insert_word(inout s.r_id, f.idx, id);
+        insert_word(inout s.r_phase, f.idx, PHASE_HEADERS);
+        insert_word(inout s.r_reply, f.idx, REPLY_NONE);
+        insert_word(inout s.r_flags, f.idx, 0);
+        insert_word(inout s.r_rx_q, f.idx, 0);
+        insert_word(inout s.r_fr_mode, f.idx, MODE_HEADER);
+        insert_word(inout s.r_fr_rem, f.idx, 0);
+        insert_word(inout s.r_fr_ty, f.idx, 0);
+        insert_word(inout s.r_fr_len, f.idx, 0);
+        insert_word(inout s.r_body_q, f.idx, 0);
+        insert_word(inout s.r_body_total, f.idx, 0);
+        insert_word(inout s.r_head_q, f.idx, 0);
+        insert_word(inout s.r_trl_q, f.idx, 0);
+        insert_word(inout s.r_cl, f.idx, 0);
+        insert_word(inout s.r_reply_cl, f.idx, 0);
+        insert_word(inout s.r_reply_sent, f.idx, 0);
+    }
+    Result::Ok(())
+}
+
+pub fn server_report_goaway(inout s: ServerCore) {
+    match s.conn.goaway_received {
+        Option::Some(g) => {
+            let need = match s.goaway_reported {
+                Option::Some(prev) => prev != g,
+                Option::None => true,
+            };
+            if need {
+                s.goaway_reported = Option::Some(g);
+                push_hev_1(inout s, HEV_GOAWAY, g);
+            }
+        }
+        Option::None => {}
+    }
+}
+
+fn malformed(inout s: ServerCore, inout dec: DecoderCore, id: u64, code: u64) {
+    s.conn.stats.malformed = inc(s.conn.stats.malformed);
+    core_cancel_stream(inout s.conn, inout dec, id);
+    push_cmd(inout s.conn.cmd, CMD_STOP_SENDING, id, code);
+    push_cmd(inout s.conn.cmd, CMD_RESET, id, code);
+    s.conn.stats.resets_sent = inc(s.conn.stats.resets_sent);
+    out_discard(inout s.conn.out, inout s.conn.pool, id);
+    drop_held_for(
+        inout s.conn.sess,
+        inout s.conn.pool,
+        inout s.conn.cmd,
+        inout s.conn.unparsed,
+        id,
+    );
+    let f = bsearch_u64(in s.r_id.as_slice(), id);
+    if f.found {
+        let phase = word(in s.r_phase.as_slice(), f.idx);
+        remove_request_at(inout s, f.idx);
+        if phase == PHASE_TUNNEL {
+            let empty = ChunkSeq::new[u8]();
+            end_session(
+                inout s.conn.sess,
+                inout s.conn.pool,
+                inout s.conn.out,
+                inout s.conn.cmd,
+                inout s.conn.sev,
+                inout s.conn.unparsed,
+                id,
+                0,
+                in empty.as_slice(),
+                true,
+                code,
+                true,
+            );
+            forget_session(inout s.conn.sess, inout s.conn.pool, id);
+        }
+    }
+    core_forget_priority(inout s.conn, id);
+    push_hev_2(inout s, HEV_REQUEST_FAILED, id, code);
+}
+
+fn pack_req_head_to_pool(
+    inout s: ServerCore,
+    parts: RequestParts,
+    in bytes: Slice[u8],
+    byte_off: u64,
+    in meta: Slice[u64],
+    meta_start: u64,
+    count: u64,
+) -> u64 {
+    let mut b = ChunkSeq::new[u8]();
+    put_u64_le(inout b, parts.method.lo);
+    put_u64_le(inout b, parts.method.hi);
+    put_u64_le(inout b, parts.scheme.lo);
+    put_u64_le(inout b, parts.scheme.hi);
+    match parts.authority {
+        Option::Some(sp) => {
+            put_u64_le(inout b, 1);
+            put_u64_le(inout b, sp.lo);
+            put_u64_le(inout b, sp.hi);
+        }
+        Option::None => {
+            put_u64_le(inout b, 0);
+            put_u64_le(inout b, 0);
+            put_u64_le(inout b, 0);
+        }
+    }
+    put_u64_le(inout b, parts.path.lo);
+    put_u64_le(inout b, parts.path.hi);
+    match parts.protocol {
+        Option::Some(sp) => {
+            put_u64_le(inout b, 1);
+            put_u64_le(inout b, sp.lo);
+            put_u64_le(inout b, sp.hi);
+        }
+        Option::None => {
+            put_u64_le(inout b, 0);
+            put_u64_le(inout b, 0);
+            put_u64_le(inout b, 0);
+        }
+    }
+    put_u64_le(inout b, parts.pseudo);
+    match parts.content_length {
+        Option::Some(cl) => {
+            put_u64_le(inout b, 1);
+            put_u64_le(inout b, cl);
+        }
+        Option::None => {
+            put_u64_le(inout b, 0);
+            put_u64_le(inout b, 0);
+        }
+    }
+    put_u64_le(inout b, count);
+    let total_bytes = sec_total_bytes(in meta, meta_start, count);
+    put_u64_le(inout b, total_bytes);
+    for k in 0..count {
+        let m = wrapping_mul(wrapping_add(meta_start, k), 3);
+        put_u64_le(inout b, word(in meta, m));
+        put_u64_le(inout b, word(in meta, inc(m)));
+        put_u64_le(inout b, word(in meta, wrapping_add(m, 2)));
+    }
+    b.extend(in bytes[byte_off..wrapping_add(byte_off, total_bytes)]);
+    q_push(inout s.conn.pool, 0, in b.as_slice())
+}
+
+fn push_direct_req_event(
+    inout s: ServerCore,
+    event_kind: u64,
+    stream_id: u64,
+    extra: u64,
+    parts: RequestParts,
+    in bytes: Slice[u8],
+    byte_off: u64,
+    in meta: Slice[u64],
+    meta_start: u64,
+    count: u64,
+) {
+    let base = s.conn.hev.bytes.len();
+    let total_bytes = sec_total_bytes(in meta, meta_start, count);
+    s.conn.hev.bytes.extend(in bytes[byte_off..wrapping_add(byte_off, total_bytes)]);
+    let pseudo_bytes = sec_total_bytes(in meta, meta_start, parts.pseudo);
+    let reg_boff = wrapping_add(base, pseudo_bytes);
+    let moff = s.conn.hev.meta.len() / 3;
+    let reg_count = wrapping_sub(count, parts.pseudo);
+    for k in parts.pseudo..count {
+        let m = wrapping_mul(wrapping_add(meta_start, k), 3);
+        s.conn.hev.meta.push(word(in meta, m));
+        s.conn.hev.meta.push(word(in meta, inc(m)));
+        s.conn.hev.meta.push(word(in meta, wrapping_add(m, 2)));
+    }
+    let mut has_auth: u64 = 0;
+    let mut auth_lo: u64 = 0;
+    let mut auth_hi: u64 = 0;
+    match parts.authority {
+        Option::Some(sp) => {
+            has_auth = 1;
+            auth_lo = wrapping_add(base, sp.lo);
+            auth_hi = wrapping_add(base, sp.hi);
+        }
+        Option::None => {}
+    }
+    let mut has_proto: u64 = 0;
+    let mut proto_lo: u64 = 0;
+    let mut proto_hi: u64 = 0;
+    match parts.protocol {
+        Option::Some(sp) => {
+            has_proto = 1;
+            proto_lo = wrapping_add(base, sp.lo);
+            proto_hi = wrapping_add(base, sp.hi);
+        }
+        Option::None => {}
+    }
+    let mut has_cl: u64 = 0;
+    let mut cl: u64 = 0;
+    match parts.content_length {
+        Option::Some(v) => {
+            has_cl = 1;
+            cl = v;
+        }
+        Option::None => {}
+    }
+    let mut w = ChunkSeq::with_capacity[u64](18);
+    w.push(stream_id);
+    w.push(extra);
+    w.push(wrapping_add(base, parts.method.lo));
+    w.push(wrapping_add(base, parts.method.hi));
+    w.push(wrapping_add(base, parts.scheme.lo));
+    w.push(wrapping_add(base, parts.scheme.hi));
+    w.push(has_auth);
+    w.push(auth_lo);
+    w.push(auth_hi);
+    w.push(wrapping_add(base, parts.path.lo));
+    w.push(wrapping_add(base, parts.path.hi));
+    w.push(has_proto);
+    w.push(proto_lo);
+    w.push(proto_hi);
+    w.push(has_cl);
+    w.push(cl);
+    w.push(moff);
+    w.push(reg_count);
+    w.push(reg_boff);
+    push_hev_record(inout s, event_kind, w.as_slice());
+}
+
+fn deliver_whole(inout s: ServerCore, inout dec: DecoderCore, id: u64) {
+    let f = bsearch_u64(in s.r_id.as_slice(), id);
+    if !f.found {
+        return;
+    }
+    let flags = word(in s.r_flags.as_slice(), f.idx);
+    let body_total = word(in s.r_body_total.as_slice(), f.idx);
+    if (flags & RF_HAS_CL) != 0 && word(in s.r_cl.as_slice(), f.idx) != body_total {
+        malformed(inout s, inout dec, id, CODE_MESSAGE_ERROR);
+        return;
+    }
+    let _p = s.r_phase.try_set(f.idx, PHASE_DELIVERED);
+    let hq = word(in s.r_head_q.as_slice(), f.idx);
+    let bq = word(in s.r_body_q.as_slice(), f.idx);
+    let tq = word(in s.r_trl_q.as_slice(), f.idx);
+    let _h = s.r_head_q.try_set(f.idx, 0);
+    let _b = s.r_body_q.try_set(f.idx, 0);
+    let _t = s.r_trl_q.try_set(f.idx, 0);
+    s.conn.stats.requests = inc(s.conn.stats.requests);
+
+    let mut hb = ChunkSeq::new[u8]();
+    let _dh = q_drain_all_to(inout s.conn.pool, hq, inout hb);
+    let hs = hb.as_slice();
+    let m_lo = get_u64_le(in hs, 0);
+    let m_hi = get_u64_le(in hs, 8);
+    let sc_lo = get_u64_le(in hs, 16);
+    let sc_hi = get_u64_le(in hs, 24);
+    let has_auth = get_u64_le(in hs, 32);
+    let au_lo = get_u64_le(in hs, 40);
+    let au_hi = get_u64_le(in hs, 48);
+    let pa_lo = get_u64_le(in hs, 56);
+    let pa_hi = get_u64_le(in hs, 64);
+    let has_proto = get_u64_le(in hs, 72);
+    let pr_lo = get_u64_le(in hs, 80);
+    let pr_hi = get_u64_le(in hs, 88);
+    let pseudo = get_u64_le(in hs, 96);
+    let has_cl = get_u64_le(in hs, 104);
+    let cl = get_u64_le(in hs, 112);
+    let count = get_u64_le(in hs, 120);
+    let total_bytes = get_u64_le(in hs, 128);
+
+    let meta_at: u64 = 136;
+    let bytes_at = wrapping_add(meta_at, wrapping_mul(count, 24));
+    let mut pseudo_bytes: u64 = 0;
+    let moff = s.conn.hev.meta.len() / 3;
+    for k in 0..count {
+        let p = wrapping_add(meta_at, wrapping_mul(k, 24));
+        let nl = get_u64_le(in hs, p);
+        let vl = get_u64_le(in hs, wrapping_add(p, 8));
+        let sens = get_u64_le(in hs, wrapping_add(p, 16));
+        if k < pseudo {
+            pseudo_bytes = wrapping_add(pseudo_bytes, wrapping_add(nl, vl));
+        } else {
+            s.conn.hev.meta.push(nl);
+            s.conn.hev.meta.push(vl);
+            s.conn.hev.meta.push(sens);
+        }
+    }
+    let reg_count = wrapping_sub(count, pseudo);
+    let base = s.conn.hev.bytes.len();
+    s.conn.hev.bytes.extend(in hb[bytes_at..wrapping_add(bytes_at, total_bytes)]);
+    let reg_boff = wrapping_add(base, pseudo_bytes);
+
+    let body_res = q_drain_all_to(inout s.conn.pool, bq, inout s.conn.hev.bytes);
+    let trl = unpack_fields_to_hev(inout s.conn, tq);
+
+    let mut w = ChunkSeq::with_capacity[u64](23);
+    w.push(id);
+    w.push(0);
+    w.push(wrapping_add(base, m_lo));
+    w.push(wrapping_add(base, m_hi));
+    w.push(wrapping_add(base, sc_lo));
+    w.push(wrapping_add(base, sc_hi));
+    w.push(has_auth);
+    w
+        .push(
+            if has_auth != 0 {
+                wrapping_add(base, au_lo)
+            } else {
+                0
+            }
+        );
+    w
+        .push(
+            if has_auth != 0 {
+                wrapping_add(base, au_hi)
+            } else {
+                0
+            }
+        );
+    w.push(wrapping_add(base, pa_lo));
+    w.push(wrapping_add(base, pa_hi));
+    w.push(has_proto);
+    w
+        .push(
+            if has_proto != 0 {
+                wrapping_add(base, pr_lo)
+            } else {
+                0
+            }
+        );
+    w
+        .push(
+            if has_proto != 0 {
+                wrapping_add(base, pr_hi)
+            } else {
+                0
+            }
+        );
+    w.push(has_cl);
+    w.push(cl);
+    w.push(moff);
+    w.push(reg_count);
+    w.push(reg_boff);
+    w.push(body_res.off);
+    w.push(body_res.len);
+    w.push(trl.meta_off);
+    w.push(trl.count);
+    w.push(trl.byte_off);
+    push_hev_record(inout s, HEV_REQUEST, w.as_slice());
+}
+
+fn fields(
+    inout s: ServerCore,
+    inout dec: DecoderCore,
+    id: u64,
+    trailers: bool,
+    in bytes: Slice[u8],
+    byte_off: u64,
+    in meta: Slice[u64],
+    meta_start: u64,
+    count: u64,
+) {
+    let f = bsearch_u64(in s.r_id.as_slice(), id);
+    if !f.found {
+        return;
+    }
+    build_msg_meta(in meta, meta_start, count, inout s.conn.msg_meta);
+    let total_bytes = sec_total_bytes(in meta, meta_start, count);
+    let bslice = bytes[byte_off..wrapping_add(byte_off, total_bytes)];
+
+    if trailers {
+        match message_check_trailers(in bslice, in s.conn.msg_meta.as_slice()) {
+            Option::Some(_) => {
+                malformed(inout s, inout dec, id, CODE_MESSAGE_ERROR);
+                return;
+            }
+            Option::None => {}
+        }
+        let old_tq = word(in s.r_trl_q.as_slice(), f.idx);
+        let _c = q_clear(inout s.conn.pool, old_tq);
+        let tq = pack_trailers_to_pool(
+            inout s.conn.pool,
+            inout s.conn.scratch,
+            in bytes,
+            byte_off,
+            in meta,
+            meta_start,
+            count,
+        );
+        let _st = s.r_trl_q.try_set(f.idx, tq);
+        if word(in s.r_phase.as_slice(), f.idx) == PHASE_STREAMING {
+            let flags = word(in s.r_flags.as_slice(), f.idx);
+            let _sf = s.r_flags.try_set(f.idx, flags | RF_TRAILERS_SEEN);
+        } else {
+            let _sp = s.r_phase.try_set(f.idx, PHASE_TRAILERS);
+        }
+        return;
+    }
+
+    let parts = match message_parse_request(in bslice, in s.conn.msg_meta.as_slice()) {
+        Result::Ok(p) => p,
+        Result::Err(MessageError::UnsupportedConnect) => {
+            malformed(inout s, inout dec, id, CODE_REQUEST_REJECTED);
+            return;
+        }
+        Result::Err(_) => {
+            malformed(inout s, inout dec, id, CODE_MESSAGE_ERROR);
+            return;
+        }
+    };
+    core_header_priority(inout s.conn, id, in bytes, in meta, meta_start, count, byte_off);
+
+    match parts.protocol {
+        Option::Some(proto_sp) => {
+            if !s.conn.sent_settings.enable_connect_protocol {
+                malformed(inout s, inout dec, id, CODE_MESSAGE_ERROR);
+                return;
+            }
+            let pbytes = bslice[proto_sp.lo..proto_sp.hi];
+            let is_wt_proto = is_webtransport_bytes(in pbytes);
+            let (wt_enabled, wt_max) = match s.conn.sent_settings.webtransport_max_sessions {
+                Option::Some(m) => (true, m),
+                Option::None => (false, 0),
+            };
+            let wt = is_wt_proto && wt_enabled;
+            if wt && live_webtransport_sessions(in s.conn.sess) >= wt_max {
+                malformed(inout s, inout dec, id, CODE_REQUEST_REJECTED);
+                return;
+            }
+            let kind = if wt {
+                SessionKind::WebTransport
+            } else {
+                SessionKind::Tunnel
+            };
+            let kind_u64 = if wt {
+                0
+            } else {
+                1
+            };
+            add_session(inout s.conn.sess, id, kind);
+            set_u64_remove(inout s.conn.unparsed, id);
+            let idx = bsearch_u64(in s.r_id.as_slice(), id).idx;
+            let _sp = s.r_phase.try_set(idx, PHASE_TUNNEL);
+            s.conn.stats.requests = inc(s.conn.stats.requests);
+            push_direct_req_event(
+                inout s,
+                HEV_CONNECT,
+                id,
+                kind_u64,
+                parts,
+                in bytes,
+                byte_off,
+                in meta,
+                meta_start,
+                count,
+            );
+            return;
+        }
+        Option::None => {}
+    }
+
+    drop_held_for(
+        inout s.conn.sess,
+        inout s.conn.pool,
+        inout s.conn.cmd,
+        inout s.conn.unparsed,
+        id,
+    );
+    match parts.content_length {
+        Option::Some(cl) => {
+            if cl > s.conn.cfg.max_body_bytes && !s.conn.cfg.streaming_request_bodies {
+                malformed(inout s, inout dec, id, CODE_EXCESSIVE_LOAD);
+                return;
+            }
+        }
+        Option::None => {}
+    }
+
+    let idx = bsearch_u64(in s.r_id.as_slice(), id).idx;
+    let is_head = is_head_bytes(in bslice[parts.method.lo..parts.method.hi]);
+    let mut flags = word(in s.r_flags.as_slice(), idx);
+    if is_head {
+        flags = flags | RF_HEAD_REQ;
+    }
+    match parts.content_length {
+        Option::Some(cl) => {
+            flags = flags | RF_HAS_CL;
+            let _scl = s.r_cl.try_set(idx, cl);
+        }
+        Option::None => {}
+    }
+
+    if s.conn.cfg.streaming_request_bodies {
+        flags = flags | RF_STREAMING;
+        let _sf = s.r_flags.try_set(idx, flags);
+        let _sp = s.r_phase.try_set(idx, PHASE_STREAMING);
+        s.conn.stats.requests = inc(s.conn.stats.requests);
+        push_direct_req_event(
+            inout s,
+            HEV_STREAMING_REQUEST,
+            id,
+            0,
+            parts,
+            in bytes,
+            byte_off,
+            in meta,
+            meta_start,
+            count,
+        );
+    } else {
+        let _sf = s.r_flags.try_set(idx, flags);
+        let hq = pack_req_head_to_pool(
+            inout s,
+            parts,
+            in bytes,
+            byte_off,
+            in meta,
+            meta_start,
+            count,
+        );
+        let idx2 = bsearch_u64(in s.r_id.as_slice(), id).idx;
+        let _shq = s.r_head_q.try_set(idx2, hq);
+        let _sp = s.r_phase.try_set(idx2, PHASE_BODY);
+    }
+}
+
+fn is_webtransport_bytes(in b: Slice[u8]) -> bool {
+    if b.len() != 12 {
+        return false;
+    }
+    let target = "webtransport".as_bytes();
+    for i in 0..12 {
+        if byte(in b, i) != byte(in target, i) {
+            return false;
+        }
+    }
+    true
+}
+
+fn is_head_bytes(in b: Slice[u8]) -> bool {
+    if b.len() != 4 {
+        return false;
+    }
+    let target = "HEAD".as_bytes();
+    for i in 0..4 {
+        if byte(in b, i) != byte(in target, i) {
+            return false;
+        }
+    }
+    true
+}
+
+fn section(
+    inout s: ServerCore,
+    inout dec: DecoderCore,
+    in h: Huff,
+    id: u64,
+    in block: Slice[u8],
+    trailers: bool,
+) -> Result[Unit, ConnectionError] {
+    let res = dec_decode_section(inout dec, in h, id, in block);
+    match res {
+        Result::Ok(true) => {
+            let count = if dec.sec.heads.len() >= 4 {
+                word(in dec.sec.heads.as_slice(), 3)
+            } else {
+                0
+            };
+            let mut sb = ChunkSeq::new[u8]();
+            let mut sm = ChunkSeq::new[u64]();
+            swap(inout sb, inout dec.sec.bytes);
+            swap(inout sm, inout dec.sec.fields);
+            dec.sec.heads.clear();
+            fields(
+                inout s,
+                inout dec,
+                id,
+                trailers,
+                in sb.as_slice(),
+                0,
+                in sm.as_slice(),
+                0,
+                count,
+            );
+            Result::Ok(())
+        }
+        Result::Ok(false) => {
+            dec.sec.heads.clear();
+            dec.sec.fields.clear();
+            dec.sec.bytes.clear();
+            s.conn.stats.blocked_sections = inc(s.conn.stats.blocked_sections);
+            let f = bsearch_u64(in s.r_id.as_slice(), id);
+            if f.found {
+                let np = if trailers {
+                    PHASE_BLOCKED_TRL
+                } else {
+                    PHASE_BLOCKED_HDR
+                };
+                let _sp = s.r_phase.try_set(f.idx, np);
+            }
+            Result::Ok(())
+        }
+        Result::Err(crate_err) => {
+            dec.sec.heads.clear();
+            dec.sec.fields.clear();
+            dec.sec.bytes.clear();
+            match crate_err {
+                QpackError::FieldSectionTooLarge {
+                    stream_id: _sid
+                } => {
+                    malformed(inout s, inout dec, id, CODE_EXCESSIVE_LOAD);
+                    Result::Ok(())
+                }
+                e => Result::Err(ConnectionError::Qpack(e)),
+            }
+        }
+    }
+}
+
+fn request_fin(inout s: ServerCore, inout dec: DecoderCore, id: u64)
+    -> Result[Unit, ConnectionError] {
+    let f = bsearch_u64(in s.r_id.as_slice(), id);
+    if !f.found {
+        return Result::Ok(());
+    }
+    let flags = word(in s.r_flags.as_slice(), f.idx);
+    let _sf = s.r_flags.try_set(f.idx, flags | RF_FIN);
+    let phase = word(in s.r_phase.as_slice(), f.idx);
+    if phase_is_blocked(phase) {
+        return Result::Ok(());
+    }
+    let rxq = word(in s.r_rx_q.as_slice(), f.idx);
+    let mode = word(in s.r_fr_mode.as_slice(), f.idx);
+    if !pooled_frame_at_boundary(in s.conn.pool, rxq, mode) {
+        return Result::Err(
+            ConnectionError::Frame {
+                stream_id: id,
+                error: FrameError::Malformed,
+            }
+        );
+    }
+    if phase == PHASE_HEADERS {
+        malformed(inout s, inout dec, id, CODE_REQUEST_INCOMPLETE);
+    } else if phase == PHASE_BODY || phase == PHASE_TRAILERS {
+        deliver_whole(inout s, inout dec, id);
+    } else if phase == PHASE_STREAMING {
+        let bt = word(in s.r_body_total.as_slice(), f.idx);
+        if (flags & RF_HAS_CL) != 0 && word(in s.r_cl.as_slice(), f.idx) != bt {
+            malformed(inout s, inout dec, id, CODE_MESSAGE_ERROR);
+            return Result::Ok(());
+        }
+        let cur_flags = word(in s.r_flags.as_slice(), f.idx);
+        let mut nf = cur_flags | RF_BODY_END;
+        if (nf & RF_NOTIFIED) == 0 {
+            nf = nf | RF_NOTIFIED;
+            push_hev_1(inout s, HEV_BODY_READABLE, id);
+        }
+        let _sf2 = s.r_flags.try_set(f.idx, nf);
+    } else if phase == PHASE_TUNNEL {
+        if !session_fin_ok(in s.conn.sess, in s.conn.pool, id) {
+            malformed(inout s, inout dec, id, CODE_MESSAGE_ERROR);
+            return Result::Ok(());
+        }
+        let empty = ChunkSeq::new[u8]();
+        end_session(
+            inout s.conn.sess,
+            inout s.conn.pool,
+            inout s.conn.out,
+            inout s.conn.cmd,
+            inout s.conn.sev,
+            inout s.conn.unparsed,
+            id,
+            0,
+            in empty.as_slice(),
+            false,
+            0,
+            true,
+        );
+    }
+    Result::Ok(())
+}
+
+fn request_frames(inout s: ServerCore, inout dec: DecoderCore, in h: Huff, id: u64)
+    -> Result[Unit, ConnectionError] {
+    loop {
+        let f = bsearch_u64(in s.r_id.as_slice(), id);
+        if !f.found {
+            return Result::Ok(());
+        }
+        let phase = word(in s.r_phase.as_slice(), f.idx);
+        if phase_is_blocked(phase) {
+            return Result::Ok(());
+        }
+        let rxq = word(in s.r_rx_q.as_slice(), f.idx);
+        let mode = word(in s.r_fr_mode.as_slice(), f.idx);
+        let rem = word(in s.r_fr_rem.as_slice(), f.idx);
+        let ty = word(in s.r_fr_ty.as_slice(), f.idx);
+        let flen = word(in s.r_fr_len.as_slice(), f.idx);
+        let has_wt = match s.conn.sent_settings.webtransport_max_sessions {
+            Option::Some(_) => true,
+            Option::None => false,
+        };
+        let step = match pooled_frame_next(
+            inout s.conn.pool,
+            inout s.conn.scratch,
+            rxq,
+            mode,
+            rem,
+            ty,
+            flen,
+            s.conn.cfg.max_frame_payload,
+            has_wt,
+        ) {
+            Result::Ok(st) => st,
+            Result::Err(
+                FrameError::TooLarge {
+                    frame_type: _ft,
+                    len: _len
+                }
+            ) => {
+                malformed(inout s, inout dec, id, CODE_EXCESSIVE_LOAD);
+                return Result::Ok(());
+            }
+            Result::Err(err) => {
+                return Result::Err(
+                    ConnectionError::Frame {
+                        stream_id: id,
+                        error: err,
+                    }
+                );
+            }
+        };
+
+        let _rq = s.r_rx_q.try_set(f.idx, step.rx_q);
+        let _rm = s.r_fr_mode.try_set(f.idx, step.mode);
+        let _rr = s.r_fr_rem.try_set(f.idx, step.rem);
+        let _rt = s.r_fr_ty.try_set(f.idx, step.ty);
+        let _rl = s.r_fr_len.try_set(f.idx, step.flen);
+
+        if step.kind == FRAME_NONE {
+            return Result::Ok(());
+        }
+        let flags = word(in s.r_flags.as_slice(), f.idx);
+        let first = (flags & RF_FRAMED) == 0;
+        let _sf = s.r_flags.try_set(f.idx, flags | RF_FRAMED);
+
+        if step.kind == FRAME_WT_STREAM && phase == PHASE_HEADERS && first && has_wt {
+            let session = step.val;
+            let rest_q = word(in s.r_rx_q.as_slice(), f.idx);
+            let _zr = s.r_rx_q.try_set(f.idx, 0);
+            remove_request_at(inout s, f.idx);
+            drop_held_for(
+                inout s.conn.sess,
+                inout s.conn.pool,
+                inout s.conn.cmd,
+                inout s.conn.unparsed,
+                id,
+            );
+            let gone = session_known_gone(
+                in s.conn.sess,
+                in s.conn.unparsed,
+                s.conn.server,
+                s.conn.next_peer_bidi,
+                session,
+            );
+            return incoming_wt_stream_fin(
+                inout s.conn.sess,
+                inout s.conn.pool,
+                inout s.conn.cmd,
+                inout s.conn.sev,
+                id,
+                session,
+                true,
+                rest_q,
+                gone,
+                false,
+            );
+        }
+
+        if step.kind == FRAME_UNKNOWN {
+            s.conn.stats.unknown_frames = inc(s.conn.stats.unknown_frames);
+        } else if step.kind == FRAME_HEADERS {
+            if phase == PHASE_STREAMING && (flags & RF_TRAILERS_SEEN) != 0 {
+                if !step.in_scratch {
+                    let next_q = q_consume(inout s.conn.pool, step.rx_q, step.len);
+                    let _uq = s.r_rx_q.try_set(f.idx, next_q);
+                }
+                return Result::Err(
+                    ConnectionError::FrameUnexpected {
+                        stream_id: id,
+                        frame_type: headers_type(),
+                    }
+                );
+            }
+            if phase == PHASE_TUNNEL {
+                if !step.in_scratch {
+                    let next_q = q_consume(inout s.conn.pool, step.rx_q, step.len);
+                    let _uq = s.r_rx_q.try_set(f.idx, next_q);
+                }
+                s.conn.stats.unknown_frames = inc(s.conn.stats.unknown_frames);
+            } else if phase == PHASE_HEADERS || phase == PHASE_BODY || phase == PHASE_STREAMING {
+                let mut hdr_buf = ChunkSeq::new[u8]();
+                if step.in_scratch {
+                    swap(inout hdr_buf, inout s.conn.scratch);
+                } else {
+                    let hi = wrapping_add(step.off, step.len);
+                    hdr_buf.extend(in s.conn.pool.data[step.off..hi]);
+                    let next_q = q_consume(inout s.conn.pool, step.rx_q, step.len);
+                    let _uq = s.r_rx_q.try_set(f.idx, next_q);
+                }
+                let is_tr = phase != PHASE_HEADERS;
+                match section(inout s, inout dec, in h, id, in hdr_buf[0..step.len], is_tr) {
+                    Result::Ok(_) => {}
+                    Result::Err(e) => return Result::Err(e),
+                }
+            } else {
+                if !step.in_scratch {
+                    let next_q = q_consume(inout s.conn.pool, step.rx_q, step.len);
+                    let _uq = s.r_rx_q.try_set(f.idx, next_q);
+                }
+                return Result::Err(
+                    ConnectionError::FrameUnexpected {
+                        stream_id: id,
+                        frame_type: headers_type(),
+                    }
+                );
+            }
+        } else if step.kind == FRAME_DATA {
+            let dlen = step.len;
+            if phase == PHASE_STREAMING && (flags & RF_TRAILERS_SEEN) != 0 {
+                let next_q = q_consume(inout s.conn.pool, step.rx_q, dlen);
+                let _uq = s.r_rx_q.try_set(f.idx, next_q);
+                return Result::Err(
+                    ConnectionError::FrameUnexpected {
+                        stream_id: id,
+                        frame_type: data_type(),
+                    }
+                );
+            }
+            if phase == PHASE_BODY || phase == PHASE_STREAMING {
+                let bq = word(in s.r_body_q.as_slice(), f.idx);
+                if phase == PHASE_BODY
+                    && dlen > sat_sub(s.conn.cfg.max_body_bytes, q_len(in s.conn.pool, bq)) {
+                    let next_q = q_consume(inout s.conn.pool, step.rx_q, dlen);
+                    let _uq = s.r_rx_q.try_set(f.idx, next_q);
+                    malformed(inout s, inout dec, id, CODE_EXCESSIVE_LOAD);
+                    return Result::Ok(());
+                }
+                let tr = q_transfer(inout s.conn.pool, step.rx_q, bq, dlen);
+                let _uq = s.r_rx_q.try_set(f.idx, tr.from_q);
+                let _ub = s.r_body_q.try_set(f.idx, tr.to_q);
+                let bt = wrapping_add(word(in s.r_body_total.as_slice(), f.idx), dlen);
+                let _bt = s.r_body_total.try_set(f.idx, bt);
+                if (flags & RF_HAS_CL) != 0 && bt > word(in s.r_cl.as_slice(), f.idx) {
+                    malformed(inout s, inout dec, id, CODE_MESSAGE_ERROR);
+                    return Result::Ok(());
+                }
+                if phase == PHASE_STREAMING && dlen > 0 && (flags & RF_NOTIFIED) == 0 {
+                    let _nf = s.r_flags.try_set(f.idx, flags | RF_FRAMED | RF_NOTIFIED);
+                    push_hev_1(inout s, HEV_BODY_READABLE, id);
+                }
+            } else if phase == PHASE_TUNNEL {
+                let sd = session_data(
+                    inout s.conn.sess,
+                    inout s.conn.pool,
+                    inout s.conn.out,
+                    inout s.conn.cmd,
+                    inout s.conn.sev,
+                    inout s.conn.unparsed,
+                    inout s.conn.scratch,
+                    inout s.conn.cap_out,
+                    id,
+                    step.rx_q,
+                    dlen,
+                    s.conn.cfg.max_frame_payload,
+                );
+                let idx2 = bsearch_u64(in s.r_id.as_slice(), id);
+                if idx2.found {
+                    let _uq = s.r_rx_q.try_set(idx2.idx, sd.rx_q);
+                }
+                if sd.err_code != 0 {
+                    malformed(inout s, inout dec, id, sd.err_code);
+                    return Result::Ok(());
+                }
+            } else {
+                let next_q = q_consume(inout s.conn.pool, step.rx_q, dlen);
+                let _uq = s.r_rx_q.try_set(f.idx, next_q);
+                return Result::Err(
+                    ConnectionError::FrameUnexpected {
+                        stream_id: id,
+                        frame_type: data_type(),
+                    }
+                );
+            }
+        } else {
+            return Result::Err(
+                ConnectionError::FrameUnexpected {
+                    stream_id: id,
+                    frame_type: step.val,
+                }
+            );
+        }
+    }
+}
+
+pub fn server_drain_unblocked(inout s: ServerCore, inout dec: DecoderCore, in h: Huff)
+    -> Result[Unit, ConnectionError] {
+    let mut i: u64 = 0;
+    loop {
+        if i >= s.conn.unb_kind.len() {
+            break;
+        }
+        let kind = word(in s.conn.unb_kind.as_slice(), i);
+        let id = word(in s.conn.unb_stream.as_slice(), i);
+        let count = word(in s.conn.unb_count.as_slice(), i);
+        let boff = word(in s.conn.unb_boff.as_slice(), i);
+        let moff = word(in s.conn.unb_moff.as_slice(), i);
+        i = inc(i);
+
+        if kind == 1 {
+            malformed(inout s, inout dec, id, CODE_EXCESSIVE_LOAD);
+        } else if kind == 0 {
+            let f = bsearch_u64(in s.r_id.as_slice(), id);
+            if f.found {
+                let phase = word(in s.r_phase.as_slice(), f.idx);
+                if phase_is_blocked(phase) {
+                    let trailers = phase == PHASE_BLOCKED_TRL;
+                    let flags = word(in s.r_flags.as_slice(), f.idx);
+                    let np = if !trailers {
+                        PHASE_HEADERS
+                    } else if (flags & RF_STREAMING) != 0 {
+                        PHASE_STREAMING
+                    } else {
+                        PHASE_BODY
+                    };
+                    let _sp = s.r_phase.try_set(f.idx, np);
+                    let total_bytes = sec_total_bytes(in s.conn.unb_meta.as_slice(), moff, count);
+                    let mut ubytes = ChunkSeq::new[u8]();
+                    ubytes.extend(in s.conn.unb_bytes[boff..wrapping_add(boff, total_bytes)]);
+                    let mut umeta = ChunkSeq::with_capacity[u64](wrapping_mul(count, 3));
+                    for k in 0..wrapping_mul(count, 3) {
+                        umeta
+                            .push(
+                                word(
+                                    in s.conn.unb_meta.as_slice(),
+                                    wrapping_add(wrapping_mul(moff, 3), k),
+                                ),
+                            );
+                    }
+                    fields(
+                        inout s,
+                        inout dec,
+                        id,
+                        trailers,
+                        in ubytes.as_slice(),
+                        0,
+                        in umeta.as_slice(),
+                        0,
+                        count
+                    );
+                    match request_frames(inout s, inout dec, in h, id) {
+                        Result::Ok(_) => {}
+                        Result::Err(e) => {
+                            s.conn.unb_kind.clear();
+                            s.conn.unb_stream.clear();
+                            s.conn.unb_count.clear();
+                            s.conn.unb_boff.clear();
+                            s.conn.unb_moff.clear();
+                            s.conn.unb_meta.clear();
+                            s.conn.unb_bytes.clear();
+                            return Result::Err(e);
+                        }
+                    }
+                    let f2 = bsearch_u64(in s.r_id.as_slice(), id);
+                    if f2.found {
+                        let fin = (word(in s.r_flags.as_slice(), f2.idx) & RF_FIN) != 0;
+                        let p2 = word(in s.r_phase.as_slice(), f2.idx);
+                        if fin && !phase_is_blocked(p2) {
+                            match request_fin(inout s, inout dec, id) {
+                                Result::Ok(_) => {}
+                                Result::Err(e) => {
+                                    s.conn.unb_kind.clear();
+                                    s.conn.unb_stream.clear();
+                                    s.conn.unb_count.clear();
+                                    s.conn.unb_boff.clear();
+                                    s.conn.unb_moff.clear();
+                                    s.conn.unb_meta.clear();
+                                    s.conn.unb_bytes.clear();
+                                    return Result::Err(e);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    s.conn.unb_kind.clear();
+    s.conn.unb_stream.clear();
+    s.conn.unb_count.clear();
+    s.conn.unb_boff.clear();
+    s.conn.unb_moff.clear();
+    s.conn.unb_meta.clear();
+    s.conn.unb_bytes.clear();
+    Result::Ok(())
+}
+
+pub fn server_read_plan(in s: ServerCore, id: u64, scratch_len: u64) -> ServerReadPlan {
+    let f = bsearch_u64(in s.r_id.as_slice(), id);
+    if !f.found {
+        return ServerReadPlan {
+            skip: true,
+            allowance: 0
+        };
+    }
+    let phase = word(in s.r_phase.as_slice(), f.idx);
+    let flags = word(in s.r_flags.as_slice(), f.idx);
+    if phase_is_blocked(phase) || (flags & RF_FIN) != 0 {
+        return ServerReadPlan {
+            skip: true,
+            allowance: 0
+        };
+    }
+    if phase == PHASE_DELIVERED || phase == PHASE_TUNNEL {
+        return ServerReadPlan {
+            skip: false,
+            allowance: scratch_len
+        };
+    }
+    let conn_room = sat_sub(s.conn.cfg.max_connection_buffer, server_buffered_request_bytes(in s));
+    let mut n = min64(scratch_len, conn_room);
+    if phase == PHASE_STREAMING {
+        let blen = q_len(in s.conn.pool, word(in s.r_body_q.as_slice(), f.idx));
+        n = min64(n, sat_sub(s.conn.cfg.stream_body_window, blen));
+    }
+    ServerReadPlan {
+        skip: false,
+        allowance: n
+    }
+}
+
+pub fn server_on_read_data(
+    inout s: ServerCore,
+    inout dec: DecoderCore,
+    in h: Huff,
+    id: u64,
+    in bytes: Slice[u8],
+    fin: bool,
+) -> Result[Unit, ConnectionError] {
+    if bytes.len() > 0 {
+        let f = bsearch_u64(in s.r_id.as_slice(), id);
+        if f.found {
+            let rxq = word(in s.r_rx_q.as_slice(), f.idx);
+            let nq = q_push(inout s.conn.pool, rxq, in bytes);
+            let _uq = s.r_rx_q.try_set(f.idx, nq);
+            match request_frames(inout s, inout dec, in h, id) {
+                Result::Ok(_) => {}
+                Result::Err(e) => return Result::Err(e),
+            }
+            if !bsearch_u64(in s.r_id.as_slice(), id).found {
+                if fin {
+                    wt_peer_fin(inout s.conn.sess, in s.conn.pool, id);
+                }
+                return Result::Ok(());
+            }
+        }
+    }
+    if fin {
+        return request_fin(inout s, inout dec, id);
+    }
+    Result::Ok(())
+}
+
+pub fn server_on_zero_allowance(inout s: ServerCore, id: u64) {
+    let f = bsearch_u64(in s.r_id.as_slice(), id);
+    if f.found && word(in s.r_phase.as_slice(), f.idx) != PHASE_STREAMING {
+        s.budget_blocked = true;
+    }
+}
+
+pub fn server_on_peer_reset(inout s: ServerCore, inout dec: DecoderCore, id: u64, code: u64) {
+    s.conn.stats.resets_received = inc(s.conn.stats.resets_received);
+    core_cancel_stream(inout s.conn, inout dec, id);
+    let f = bsearch_u64(in s.r_id.as_slice(), id);
+    if !f.found {
+        return;
+    }
+    let phase = word(in s.r_phase.as_slice(), f.idx);
+    if phase == PHASE_TUNNEL {
+        let empty = ChunkSeq::new[u8]();
+        end_session(
+            inout s.conn.sess,
+            inout s.conn.pool,
+            inout s.conn.out,
+            inout s.conn.cmd,
+            inout s.conn.sev,
+            inout s.conn.unparsed,
+            id,
+            0,
+            in empty.as_slice(),
+            true,
+            code,
+            true,
+        );
+    }
+    if phase_handed_out(phase) {
+        let flags = word(in s.r_flags.as_slice(), f.idx);
+        let _sf = s.r_flags.try_set(f.idx, flags | RF_FIN);
+        let bq = word(in s.r_body_q.as_slice(), f.idx);
+        let _cb = q_clear(inout s.conn.pool, bq);
+        let _ub = s.r_body_q.try_set(f.idx, 0);
+        let reply = word(in s.r_reply.as_slice(), f.idx);
+        if reply != REPLY_FINISHED {
+            let _sr = s.r_reply.try_set(f.idx, REPLY_GONE);
+            out_discard(inout s.conn.out, inout s.conn.pool, id);
+            push_cmd(inout s.conn.cmd, CMD_RESET, id, CODE_REQUEST_CANCELLED);
+            push_hev_2(inout s, HEV_RESPONSE_ABANDONED, id, code);
+        }
+    } else {
+        remove_request_at(inout s, f.idx);
+        core_forget_priority(inout s.conn, id);
+        drop_held_for(
+            inout s.conn.sess,
+            inout s.conn.pool,
+            inout s.conn.cmd,
+            inout s.conn.unparsed,
+            id,
+        );
+        push_cmd(inout s.conn.cmd, CMD_RESET, id, CODE_REQUEST_CANCELLED);
+        push_hev_2(inout s, HEV_REQUEST_FAILED, id, code);
+    }
+}
+
+pub fn server_relieve_budget(inout s: ServerCore, inout dec: DecoderCore) {
+    if server_buffered_request_bytes(in s) < s.conn.cfg.max_connection_buffer {
+        return;
+    }
+    let mut streaming: u64 = 0;
+    for i in 0..s.r_id.len() {
+        if word(in s.r_phase.as_slice(), i) == PHASE_STREAMING {
+            streaming = wrapping_add(streaming, stream_held_bytes(in s, i));
+        }
+    }
+    if streaming > 0 {
+        return;
+    }
+    let mut i = s.r_id.len();
+    loop {
+        if i == 0 {
+            return;
+        }
+        i = wrapping_sub(i, 1);
+        let phase = word(in s.r_phase.as_slice(), i);
+        if !phase_handed_out(phase) && stream_held_bytes(in s, i) > 0 {
+            let id = word(in s.r_id.as_slice(), i);
+            s.conn.stats.budget_resets = inc(s.conn.stats.budget_resets);
+            malformed(inout s, inout dec, id, CODE_EXCESSIVE_LOAD);
+            return;
+        }
+    }
+}
+
+pub fn server_on_write_failures(inout s: ServerCore) {
+    let n = s.conn.write_fail_ids.len();
+    let empty = ChunkSeq::new[u8]();
+    for i in 0..n {
+        let id = word(in s.conn.write_fail_ids.as_slice(), i);
+        let code = word(in s.conn.write_fail_codes.as_slice(), i);
+        let f = bsearch_u64(in s.r_id.as_slice(), id);
+        if f.found {
+            let reply = word(in s.r_reply.as_slice(), f.idx);
+            if reply != REPLY_GONE {
+                let _sr = s.r_reply.try_set(f.idx, REPLY_GONE);
+                let flags = word(in s.r_flags.as_slice(), f.idx);
+                let _sf = s.r_flags.try_set(f.idx, flags | RF_FIN);
+                if word(in s.r_phase.as_slice(), f.idx) == PHASE_TUNNEL {
+                    end_session(
+                        inout s.conn.sess,
+                        inout s.conn.pool,
+                        inout s.conn.out,
+                        inout s.conn.cmd,
+                        inout s.conn.sev,
+                        inout s.conn.unparsed,
+                        id,
+                        0,
+                        in empty.as_slice(),
+                        true,
+                        code,
+                        true,
+                    );
+                }
+                push_hev_2(inout s, HEV_RESPONSE_ABANDONED, id, code);
+            }
+        }
+    }
+    s.conn.write_fail_ids.clear();
+    s.conn.write_fail_codes.clear();
+}
+
+pub fn server_on_leaked(inout s: ServerCore, inout dec: DecoderCore, id: u64) {
+    s.conn.stats.leaked_responders = inc(s.conn.stats.leaked_responders);
+    server_reset_request(inout s, inout dec, id, CODE_INTERNAL_ERROR);
+}
+
+pub fn server_retire(inout s: ServerCore) {
+    let mut i: u64 = 0;
+    loop {
+        if i >= s.r_id.len() {
+            break;
+        }
+        let id = word(in s.r_id.as_slice(), i);
+        let flags = word(in s.r_flags.as_slice(), i);
+        let reply = word(in s.r_reply.as_slice(), i);
+        let fin = (flags & RF_FIN) != 0;
+        let rdone = reply == REPLY_FINISHED || reply == REPLY_GONE;
+        if fin && rdone && out_queued(in s.conn.out, in s.conn.pool, id) == 0 {
+            remove_request_at(inout s, i);
+            forget_session(inout s.conn.sess, inout s.conn.pool, id);
+            core_forget_priority(inout s.conn, id);
+        } else {
+            i = inc(i);
+        }
+    }
+}
+
+pub fn server_shutdown(inout s: ServerCore) {
+    let id = s.next_request_id;
+    let send = match s.goaway_sent {
+        Option::Some(g) => id < g,
+        Option::None => true,
+    };
+    if send {
+        s.goaway_sent = Option::Some(id);
+        core_send_goaway(inout s.conn, id);
+    }
+}
+
+pub fn server_read_body_pre(inout s: ServerCore, id: u64, max_n: u64)
+    -> Result[BodyReadStep, SendError] {
+    let f = bsearch_u64(in s.r_id.as_slice(), id);
+    if !f.found {
+        return Result::Err(SendError::StreamGone);
+    }
+    let phase = word(in s.r_phase.as_slice(), f.idx);
+    let reply = word(in s.r_reply.as_slice(), f.idx);
+    if phase != PHASE_STREAMING || reply == REPLY_GONE {
+        return Result::Err(SendError::StreamGone);
+    }
+    let bq = word(in s.r_body_q.as_slice(), f.idx);
+    s.conn.scratch.clear();
+    let d = q_drain_to(inout s.conn.pool, bq, max_n, inout s.conn.scratch);
+    let _ub = s.r_body_q.try_set(f.idx, d.q);
+    let mut flags = word(in s.r_flags.as_slice(), f.idx);
+    if d.q == 0 {
+        flags = flags & (~RF_NOTIFIED);
+        let _sf = s.r_flags.try_set(f.idx, flags);
+    }
+    let body_end = (flags & RF_BODY_END) != 0;
+    let fin = (flags & RF_FIN) != 0;
+    let end = body_end && d.q == 0;
+    let need_read = d.len > 0 && !fin;
+    Result::Ok(
+        BodyReadStep {
+            len: d.len,
+            end: end,
+            need_read: need_read,
+        }
+    )
+}
+
+pub fn server_read_body_post(inout s: ServerCore, id: u64) {
+    let f = bsearch_u64(in s.r_id.as_slice(), id);
+    if !f.found {
+        return;
+    }
+    let bq = word(in s.r_body_q.as_slice(), f.idx);
+    let flags = word(in s.r_flags.as_slice(), f.idx);
+    let body_end = (flags & RF_BODY_END) != 0;
+    if q_len(in s.conn.pool, bq) == 0 && !body_end {
+        let _sf = s.r_flags.try_set(f.idx, flags & (~RF_NOTIFIED));
+    }
+}
+
+pub fn server_take_trailers(inout s: ServerCore, id: u64) -> UnpackedFields {
+    let f = bsearch_u64(in s.r_id.as_slice(), id);
+    if !f.found {
+        return UnpackedFields {
+            count: 0,
+            meta_off: s.conn.hev.meta.len() / 3,
+            byte_off: s.conn.hev.bytes.len(),
+        };
+    }
+    let tq = word(in s.r_trl_q.as_slice(), f.idx);
+    let _ut = s.r_trl_q.try_set(f.idx, 0);
+    unpack_fields_to_hev(inout s.conn, tq)
+}
+
+pub fn server_check_responder(in s: ServerCore, id: u64) -> Result[Unit, SendError] {
+    match s.conn.error {
+        Option::Some(_) => return Result::Err(SendError::StreamGone),
+        Option::None => {}
+    }
+    let f = bsearch_u64(in s.r_id.as_slice(), id);
+    if !f.found {
+        return Result::Err(SendError::StreamGone);
+    }
+    if word(in s.r_reply.as_slice(), f.idx) == REPLY_GONE {
+        return Result::Err(SendError::StreamGone);
+    }
+    Result::Ok(())
+}
+
+fn is_cl_name(in b: Slice[u8], lo: u64, nl: u64) -> bool {
+    if nl != 14 {
+        return false;
+    }
+    let target = "content-length".as_bytes();
+    for i in 0..14 {
+        if byte(in b, wrapping_add(lo, i)) != byte(in target, i) {
+            return false;
+        }
+    }
+    true
+}
+
+fn check_response_fields(inout s: ServerCore, in bytes: Slice[u8], in meta: Slice[u64])
+    -> Option[SendError] {
+    let count = meta.len() / 3;
+    let mut at: u64 = 0;
+    s.conn.msg_meta.clear();
+    for i in 0..count {
+        let m = wrapping_mul(i, 3);
+        let nl = word(in meta, m);
+        let vl = word(in meta, inc(m));
+        if nl > 0 && byte(in bytes, at) == ASCII_COLON {
+            return Option::Some(SendError::InvalidResponse(MessageError::UnknownPseudoHeader));
+        }
+        if is_cl_name(in bytes, at, nl) {
+            return Option::Some(SendError::InvalidResponse(MessageError::InvalidContentLength));
+        }
+        s.conn.msg_meta.push(nl);
+        s.conn.msg_meta.push(vl);
+        s.conn.msg_meta.push(at);
+        at = wrapping_add(at, wrapping_add(nl, vl));
+    }
+    match message_check_trailers(in bytes, in s.conn.msg_meta.as_slice()) {
+        Option::Some(e) => Option::Some(SendError::InvalidResponse(e)),
+        Option::None => Option::None,
+    }
+}
+
+fn build_and_encode_response(
+    inout s: ServerCore,
+    inout enc: EncoderCore,
+    in h: Huff,
+    id: u64,
+    status: u16,
+    in bytes: Slice[u8],
+    in meta: Slice[u64],
+    has_cl: bool,
+    cl: u64,
+    reserve: u64,
+) -> Result[Unit, SendError] {
+    let mut fbytes = ChunkSeq::with_capacity[u8](wrapping_add(bytes.len(), 64));
+    let mut fmeta = ChunkSeq::with_capacity[u64](wrapping_add(meta.len(), 6));
+    let status_name = ":status".as_bytes();
+    fbytes.extend(in status_name);
+    push_status_ascii(inout fbytes, status);
+    fmeta.push(7);
+    fmeta.push(3);
+    fmeta.push(0);
+
+    fbytes.extend(in bytes);
+    fmeta.extend(in meta);
+
+    if has_cl && !(status == 204 || (status == 304 && cl == 0)) {
+        let cl_name = "content-length".as_bytes();
+        fbytes.extend(in cl_name);
+        let dlen = push_u64_ascii(inout fbytes, cl);
+        fmeta.push(14);
+        fmeta.push(dlen);
+        fmeta.push(0);
+    }
+
+    let bound = headers_frame_bound_meta(in fmeta.as_slice(), fmeta.len() / 3);
+    let budget = sat_sub(
+        s.conn.cfg.max_stream_buffer,
+        out_queued(in s.conn.out, in s.conn.pool, id),
+    );
+    if wrapping_add(bound, reserve) > budget {
+        return Result::Err(SendError::BufferFull);
+    }
+    let block = enc_encode(inout enc, in h, id, in fbytes.as_slice(), in fmeta.as_slice());
+    s.conn.scratch.clear();
+    let _ok = put_record(inout s.conn.scratch, headers_type(), in block.as_slice());
+    out_queue(inout s.conn.out, inout s.conn.pool, id, in s.conn.scratch.as_slice());
+    Result::Ok(())
+}
+
+pub fn server_send_interim(
+    inout s: ServerCore,
+    inout enc: EncoderCore,
+    in h: Huff,
+    id: u64,
+    status: u16,
+    in bytes: Slice[u8],
+    in meta: Slice[u64],
+) -> Result[Unit, SendError] {
+    match server_check_responder(in s, id) {
+        Result::Ok(_) => {}
+        Result::Err(e) => return Result::Err(e),
+    }
+    if status < 100 || status > 199 || status == 101 {
+        return Result::Err(SendError::InvalidResponse(MessageError::InvalidStatus));
+    }
+    match check_response_fields(inout s, in bytes, in meta) {
+        Option::Some(e) => return Result::Err(e),
+        Option::None => {}
+    }
+    match build_and_encode_response(
+        inout s,
+        inout enc,
+        in h,
+        id,
+        status,
+        in bytes,
+        in meta,
+        false,
+        0,
+        0,
+    ) {
+        Result::Ok(_) => {
+            s.conn.stats.interim_responses = inc(s.conn.stats.interim_responses);
+            Result::Ok(())
+        }
+        Result::Err(e) => Result::Err(e),
+    }
+}
+
+pub fn server_send_headers(
+    inout s: ServerCore,
+    inout enc: EncoderCore,
+    in h: Huff,
+    id: u64,
+    status: u16,
+    in bytes: Slice[u8],
+    in meta: Slice[u64],
+    has_cl: bool,
+    cl: u64,
+    reserve: u64,
+) -> Result[Unit, SendError] {
+    match server_check_responder(in s, id) {
+        Result::Ok(_) => {}
+        Result::Err(e) => return Result::Err(e),
+    }
+    if status < 200 || status > 599 {
+        return Result::Err(SendError::InvalidResponse(MessageError::InvalidStatus));
+    }
+    match check_response_fields(inout s, in bytes, in meta) {
+        Option::Some(e) => return Result::Err(e),
+        Option::None => {}
+    }
+    let bodyless = status == 204 || status == 304;
+    if bodyless && has_cl && cl > 0 {
+        return Result::Err(SendError::InvalidResponse(MessageError::ContentLengthMismatch));
+    }
+    match build_and_encode_response(
+        inout s,
+        inout enc,
+        in h,
+        id,
+        status,
+        in bytes,
+        in meta,
+        has_cl,
+        cl,
+        reserve,
+    ) {
+        Result::Ok(_) => {}
+        Result::Err(e) => return Result::Err(e),
+    }
+    let idx = bsearch_u64(in s.r_id.as_slice(), id).idx;
+    let _sr = s.r_reply.try_set(idx, REPLY_HEADERS);
+    let mut flags = word(in s.r_flags.as_slice(), idx);
+    if bodyless {
+        flags = flags | RF_REPLY_HAS_CL;
+        let _scl = s.r_reply_cl.try_set(idx, 0);
+    } else if has_cl {
+        flags = flags | RF_REPLY_HAS_CL;
+        let _scl = s.r_reply_cl.try_set(idx, cl);
+    } else {
+        flags = flags & (~RF_REPLY_HAS_CL);
+    }
+    let _sf = s.r_flags.try_set(idx, flags);
+    let _ss = s.r_reply_sent.try_set(idx, 0);
+    Result::Ok(())
+}
+
+pub fn server_send_data(inout s: ServerCore, id: u64, in data: Slice[u8])
+    -> Result[Unit, SendError] {
+    match server_check_responder(in s, id) {
+        Result::Ok(_) => {}
+        Result::Err(e) => return Result::Err(e),
+    }
+    let idx = bsearch_u64(in s.r_id.as_slice(), id).idx;
+    let flags = word(in s.r_flags.as_slice(), idx);
+    if (flags & RF_HEAD_REQ) != 0 && data.len() > 0 {
+        return Result::Err(SendError::InvalidResponse(MessageError::ContentLengthMismatch));
+    }
+    if word(in s.r_reply.as_slice(), idx) != REPLY_HEADERS {
+        return Result::Err(SendError::StreamGone);
+    }
+    if data.len() == 0 {
+        return Result::Ok(());
+    }
+    let total = wrapping_add(word(in s.r_reply_sent.as_slice(), idx), data.len());
+    if (flags & RF_REPLY_HAS_CL) != 0 && total > word(in s.r_reply_cl.as_slice(), idx) {
+        return Result::Err(SendError::InvalidResponse(MessageError::ContentLengthMismatch));
+    }
+    let budget = sat_sub(
+        s.conn.cfg.max_stream_buffer,
+        out_queued(in s.conn.out, in s.conn.pool, id),
+    );
+    if wrapping_add(data.len(), 9) > budget {
+        return Result::Err(SendError::BufferFull);
+    }
+    let _ss = s.r_reply_sent.try_set(idx, total);
+    s.conn.scratch.clear();
+    let _ok = put_record(inout s.conn.scratch, data_type(), in data);
+    out_queue(inout s.conn.out, inout s.conn.pool, id, in s.conn.scratch.as_slice());
+    Result::Ok(())
+}
+
+pub fn server_finish_response(
+    inout s: ServerCore,
+    inout enc: EncoderCore,
+    inout dec: DecoderCore,
+    in h: Huff,
+    id: u64,
+    in trl_bytes: Slice[u8],
+    in trl_meta: Slice[u64],
+) -> Result[Unit, SendError] {
+    match server_check_responder(in s, id) {
+        Result::Ok(_) => {}
+        Result::Err(e) => return Result::Err(e),
+    }
+    let idx = bsearch_u64(in s.r_id.as_slice(), id).idx;
+    if word(in s.r_reply.as_slice(), idx) != REPLY_HEADERS {
+        return Result::Err(SendError::StreamGone);
+    }
+    let flags = word(in s.r_flags.as_slice(), idx);
+    let sent = word(in s.r_reply_sent.as_slice(), idx);
+    if (flags & RF_HEAD_REQ) == 0
+        && (flags & RF_REPLY_HAS_CL) != 0
+        && word(in s.r_reply_cl.as_slice(), idx) != sent {
+        return Result::Err(SendError::InvalidResponse(MessageError::ContentLengthMismatch));
+    }
+    let trl_count = trl_meta.len() / 3;
+    if trl_count > 0 {
+        build_msg_meta(in trl_meta, 0, trl_count, inout s.conn.msg_meta);
+        match message_check_trailers(in trl_bytes, in s.conn.msg_meta.as_slice()) {
+            Option::Some(e) => return Result::Err(SendError::InvalidResponse(e)),
+            Option::None => {}
+        }
+        let block = enc_encode(inout enc, in h, id, in trl_bytes, in trl_meta);
+        s.conn.scratch.clear();
+        let _ok = put_record(inout s.conn.scratch, headers_type(), in block.as_slice());
+        out_queue(inout s.conn.out, inout s.conn.pool, id, in s.conn.scratch.as_slice());
+    }
+    let _sr = s.r_reply.try_set(idx, REPLY_FINISHED);
+    let phase = word(in s.r_phase.as_slice(), idx);
+    let fin = (flags & RF_FIN) != 0;
+    if !fin && phase != PHASE_TUNNEL {
+        let _sf = s.r_flags.try_set(idx, flags | RF_FIN);
+        let bq = word(in s.r_body_q.as_slice(), idx);
+        let _cb = q_clear(inout s.conn.pool, bq);
+        let _ub = s.r_body_q.try_set(idx, 0);
+        push_cmd(inout s.conn.cmd, CMD_STOP_SENDING, id, CODE_NO_ERROR);
+        core_cancel_stream(inout s.conn, inout dec, id);
+    }
+    if phase == PHASE_TUNNEL {
+        let empty = ChunkSeq::new[u8]();
+        end_session(
+            inout s.conn.sess,
+            inout s.conn.pool,
+            inout s.conn.out,
+            inout s.conn.cmd,
+            inout s.conn.sev,
+            inout s.conn.unparsed,
+            id,
+            0,
+            in empty.as_slice(),
+            false,
+            0,
+            false,
+        );
+        let idx2 = bsearch_u64(in s.r_id.as_slice(), id);
+        if idx2.found && (word(in s.r_flags.as_slice(), idx2.idx) & RF_FIN) == 0 {
+            push_cmd(inout s.conn.cmd, CMD_STOP_SENDING, id, CODE_NO_ERROR);
+            let f2 = word(in s.r_flags.as_slice(), idx2.idx);
+            let _sf2 = s.r_flags.try_set(idx2.idx, f2 | RF_FIN);
+        }
+    }
+    out_queue_fin(inout s.conn.out, id);
+    s.conn.stats.responses = inc(s.conn.stats.responses);
+    Result::Ok(())
+}
+
+pub fn server_send_whole(
+    inout s: ServerCore,
+    inout enc: EncoderCore,
+    inout dec: DecoderCore,
+    in h: Huff,
+    id: u64,
+    status: u16,
+    in bytes: Slice[u8],
+    in meta: Slice[u64],
+    in body: Slice[u8],
+) -> Result[Unit, SendError] {
+    match server_check_responder(in s, id) {
+        Result::Ok(_) => {}
+        Result::Err(e) => return Result::Err(e),
+    }
+    let idx = bsearch_u64(in s.r_id.as_slice(), id).idx;
+    let head = (word(in s.r_flags.as_slice(), idx) & RF_HEAD_REQ) != 0;
+    let bodyless = status == 204 || status == 304;
+    let wire_body = if head || bodyless {
+        0
+    } else {
+        body.len()
+    };
+    if bodyless && body.len() > 0 {
+        return Result::Err(SendError::InvalidResponse(MessageError::ContentLengthMismatch));
+    }
+    let reserve = if wire_body > 0 {
+        wrapping_add(wire_body, 9)
+    } else {
+        0
+    };
+    match server_send_headers(
+        inout s,
+        inout enc,
+        in h,
+        id,
+        status,
+        in bytes,
+        in meta,
+        true,
+        body.len(),
+        reserve,
+    ) {
+        Result::Ok(_) => {}
+        Result::Err(e) => return Result::Err(e),
+    }
+    if wire_body > 0 {
+        match server_send_data(inout s, id, in body) {
+            Result::Ok(_) => {}
+            Result::Err(e) => return Result::Err(e),
+        }
+    }
+    let eb = ChunkSeq::new[u8]();
+    let em = ChunkSeq::new[u64]();
+    server_finish_response(
+        inout s,
+        inout enc,
+        inout dec,
+        in h,
+        id,
+        in eb.as_slice(),
+        in em.as_slice()
+    )
+}
+
+pub fn server_accept_session_send(
+    inout s: ServerCore,
+    inout enc: EncoderCore,
+    in h: Huff,
+    id: u64,
+    in bytes: Slice[u8],
+    in meta: Slice[u64],
+) -> Result[Unit, SendError] {
+    match server_check_responder(in s, id) {
+        Result::Ok(_) => {}
+        Result::Err(e) => return Result::Err(e),
+    }
+    let idx = bsearch_u64(in s.r_id.as_slice(), id).idx;
+    if word(in s.r_phase.as_slice(), idx) != PHASE_TUNNEL {
+        return Result::Err(SendError::NotExtendedConnect);
+    }
+    server_send_headers(inout s, inout enc, in h, id, 200, in bytes, in meta, false, 0, 0)
+}
+
+pub fn server_accept_session_establish(inout s: ServerCore, id: u64) {
+    establish_session(inout s.conn.sess, inout s.conn.pool, inout s.conn.sev, id);
+}
+
+pub fn server_close_session(inout s: ServerCore, id: u64, code: u32, in reason: Slice[u8])
+    -> Result[Option[u64], SendError] {
+    if reason.len() > max_close_reason() || !valid_utf8(in reason) {
+        return Result::Err(SendError::BadCloseReason);
+    }
+    let f = bsearch_u64(in s.r_id.as_slice(), id);
+    let err_absent = match s.conn.error {
+        Option::Some(_) => false,
+        Option::None => true,
+    };
+    let live = if f.found && err_absent {
+        let rep = word(in s.r_reply.as_slice(), f.idx);
+        rep != REPLY_GONE && rep != REPLY_FINISHED
+    } else {
+        false
+    };
+    let empty = ChunkSeq::new[u8]();
+    if !live {
+        end_session(
+            inout s.conn.sess,
+            inout s.conn.pool,
+            inout s.conn.out,
+            inout s.conn.cmd,
+            inout s.conn.sev,
+            inout s.conn.unparsed,
+            id,
+            0,
+            in empty.as_slice(),
+            false,
+            0,
+            false,
+        );
+        return Result::Ok(Option::Some(CODE_REQUEST_CANCELLED));
+    }
+    match queue_session_close(
+        in s.conn.sess,
+        inout s.conn.pool,
+        inout s.conn.out,
+        id,
+        code,
+        in reason
+    ) {
+        Result::Ok(_) => {}
+        Result::Err(_) => return Result::Err(SendError::BadCloseReason),
+    }
+    end_session(
+        inout s.conn.sess,
+        inout s.conn.pool,
+        inout s.conn.out,
+        inout s.conn.cmd,
+        inout s.conn.sev,
+        inout s.conn.unparsed,
+        id,
+        code,
+        in empty.as_slice(),
+        false,
+        0,
+        false,
+    );
+    let idx = bsearch_u64(in s.r_id.as_slice(), id).idx;
+    let _sr = s.r_reply.try_set(idx, REPLY_FINISHED);
+    s.conn.stats.responses = inc(s.conn.stats.responses);
+    Result::Ok(Option::None)
+}
+
+pub fn server_reset_request(inout s: ServerCore, inout dec: DecoderCore, id: u64, code: u64) {
+    out_discard(inout s.conn.out, inout s.conn.pool, id);
+    let f = bsearch_u64(in s.r_id.as_slice(), id);
+    if f.found {
+        let reply = word(in s.r_reply.as_slice(), f.idx);
+        let flags = word(in s.r_flags.as_slice(), f.idx);
+        if reply != REPLY_GONE {
+            push_cmd(inout s.conn.cmd, CMD_RESET, id, code);
+            if (flags & RF_FIN) == 0 {
+                push_cmd(inout s.conn.cmd, CMD_STOP_SENDING, id, code);
+                core_cancel_stream(inout s.conn, inout dec, id);
+            }
+            s.conn.stats.resets_sent = inc(s.conn.stats.resets_sent);
+        }
+        let _sr = s.r_reply.try_set(f.idx, REPLY_GONE);
+        let _sf = s.r_flags.try_set(f.idx, flags | RF_FIN);
+        let bq = word(in s.r_body_q.as_slice(), f.idx);
+        let _cb = q_clear(inout s.conn.pool, bq);
+        let _ub = s.r_body_q.try_set(f.idx, 0);
+        if word(in s.r_phase.as_slice(), f.idx) == PHASE_TUNNEL {
+            let empty = ChunkSeq::new[u8]();
+            end_session(
+                inout s.conn.sess,
+                inout s.conn.pool,
+                inout s.conn.out,
+                inout s.conn.cmd,
+                inout s.conn.sev,
+                inout s.conn.unparsed,
+                id,
+                0,
+                in empty.as_slice(),
+                true,
+                code,
+                false,
+            );
+        }
+    }
+}

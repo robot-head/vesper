@@ -1,10 +1,10 @@
 //! The divergence check: a Vesper build with one deliberate error per ported
 //! module (huffman, prefix, table, encoder, decoder, varint, frame,
-//! priority, capsule, message, control; `DIVERGENT_EDITS` in
-//! build.rs) must fail the test that guards that module, and must still pass
-//! a test that the change does not reach. Bazel passes the divergent test
-//! binaries; under Cargo the check is port/check.sh. Without the variables
-//! these tests have nothing to run and pass.
+//! priority, capsule, message, control, session, core, server, client;
+//! `DIVERGENT_EDITS` in build.rs) must fail the test that guards that module,
+//! and must still pass a test that the change does not reach. Bazel passes the
+//! divergent test binaries; under Cargo the check is port/check.sh. Without the
+//! variables these tests have nothing to run and pass.
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -131,5 +131,41 @@ fn divergent_control_fails() {
         "control",
         "bad_priority_updates_are_connection_errors",
         "priority_update_overrides_the_header",
+    );
+}
+
+#[test]
+fn divergent_session_fails() {
+    check(
+        "session",
+        "held_stream_bound_and_gone_sessions_are_refused",
+        "without_quic_datagrams_http_datagrams_use_capsules",
+    );
+}
+
+#[test]
+fn divergent_core_fails() {
+    check(
+        "core",
+        "incremental_responses_of_one_urgency_share_capacity",
+        "streaming_bodies_are_pulled_under_a_window",
+    );
+}
+
+#[test]
+fn divergent_server_fails() {
+    check(
+        "server",
+        "goaway_refuses_later_requests",
+        "request_and_response_round_trip",
+    );
+}
+
+#[test]
+fn divergent_client_fails() {
+    check(
+        "client",
+        "each_lower_goaway_rejects_newly_excluded_requests",
+        "request_and_response_round_trip",
     );
 }
