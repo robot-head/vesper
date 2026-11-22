@@ -1,6 +1,9 @@
-const broker = `<figure class="worked-figure broker-figure">
+const broker = prefix => `<figure class="worked-figure broker-figure">
   <figcaption>What can one call change?</figcaption>
-  <pre tabindex="0"><code data-lang="vesper">append(inout broker, in broker.config);</code></pre>
+  <pre tabindex="0"><code data-lang="vesper">// Callee
+fn append(inout broker.{index, metrics}: Broker, in config: u64)</code></pre>
+  <pre tabindex="0"><code data-lang="vesper">// Caller
+append(inout broker, in broker.config);</code></pre>
   <table aria-label="Broker fields before and after append">
     <thead><tr><th scope="col">Field</th><th scope="col">Loan</th><th scope="col">Before</th><th scope="col">After</th></tr></thead>
     <tbody>
@@ -14,6 +17,14 @@ const broker = `<figure class="worked-figure broker-figure">
     <select><option>0</option><option>8</option><option selected>41</option></select>
   </label>
   <span class="sr-only" role="status"></span>
+  <label data-overlap-toggle hidden><input type="checkbox"> Show an overlapping loan</label>
+  <div data-overlap>
+    <pre tabindex="0"><code data-lang="vesper">// Two exclusive parameters
+fn transfer(inout broker.{index}: Broker, inout other: u64)
+transfer(inout broker, inout broker.index);</code></pre>
+    <p><strong>E0301</strong> · Both arguments ask for exclusive access to <code>index</code>.
+    <a href="${prefix}tour/find-a-conflicting-loan.html">Try a repair in the tour</a>.</p>
+  </div>
   <details class="loan-map"><summary>Trace the two field loans</summary><!-- diagram:field-loans --></details>
 </figure>`;
 
@@ -69,7 +80,8 @@ const diagrams = {
 export function insertFigures(html, prefix = '') {
   return html.replace(/<!-- figure:([\w-]+) -->/g, (_, name) => {
     if (!Object.hasOwn(figures, name)) throw new Error(`Unknown figure: ${name}`);
-    return figures[name];
+    const figure = figures[name];
+    return typeof figure === 'function' ? figure(prefix) : figure;
   }).replace(/<!-- diagram:([\w-]+) -->/g, (_, name) => {
     const [title, description, height] = diagrams[name];
     const url = `${prefix}diagrams/${name}.svg`;
