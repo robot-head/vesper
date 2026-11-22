@@ -354,7 +354,11 @@ compiler (`check`, `emit --emit ir`, object). 0 runs differ.
 `examples/traits/shapes.ves`, `tests/fixtures/bounded_generics/nested.ves`
 and `tests/fixtures/native_handlers/shared_locals.ves`. These are the
 equal-cost extraction ties of part 2 (spans 1049:1135, 532:611,
-1201:1320), which the owner accepted. The harness lists the three files in
+1201:1320), which the owner accepted. Main later added
+`tests/fixtures/wide_literals.ves` (#1264), whose
+`wrapping_add(score, wrapping_add(wrapping_mul(c, 10), ...))` is the same
+kind of tie (span 1522:1598), so the list has four files. On that main the harness runs 553 files,
+1,659 runs per compiler: 0 differ, 8 are accepted ties. The harness lists these files in
 `OPTIMIZE_EQUAL_COST_TIES`. For a mismatch on one of them, it reruns the
 hybrid with `VESPER_HYBRID_RUST_PRODUCER=1` (Rust search, Vesper checker).
 If that run equals the default, it counts the run as a tie. A mismatch on
@@ -388,6 +392,7 @@ Whole corpus, wall clock of the differential's 1,614 runs per compiler
 | 1 | 30.11 s | 29.32 s | 0.97x |
 | 2 | 28.29 s | 28.22 s | 1.00x |
 | 3 | 27.73 s | 26.89 s | 0.97x |
+| 4, on main with #1371 (553 files) | 29.31 s | 25.40 s | 0.87x |
 
 The optimizer is a small part of a whole compile, so this mostly says the
 swap costs nothing measurable end to end. The pass alone is part 2's

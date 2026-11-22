@@ -115,6 +115,7 @@ const OPTIMIZE_EQUAL_COST_TIES: &[&str] = &[
     "examples/traits/shapes.ves",
     "tests/fixtures/bounded_generics/nested.ves",
     "tests/fixtures/native_handlers/shared_locals.ves",
+    "tests/fixtures/wide_literals.ves",
 ];
 
 /// The commands run on each file. `{out}` is an output file.
