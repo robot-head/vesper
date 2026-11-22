@@ -94,7 +94,7 @@ pub fn run(c: Command<'_>) -> Result<(), String> {
             Ok(())
         }
         "build" if wasm => build_wasm(&c, &checked),
-        "build" => build(&c, &checked),
+        "build" => build(&c, &checked, &imports),
         "run" => {
             // The evaluator reaches the same host functions as `jit`.
             let host = eval_host_in(&imports, "run", c.link_search)?;
