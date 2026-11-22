@@ -18,6 +18,8 @@
 //!   graphs of both origins.
 #[path = "common/check_harness.rs"]
 mod check_harness;
+#[path = "common/stack_words.rs"]
+mod stack_words;
 
 use check_harness::*;
 use std::collections::BTreeMap;
@@ -1454,6 +1456,34 @@ fn stack_entry() -> &'static Entry {
 fn stack_cases() -> Vec<(StackGraph, StackBoundPolicy)> {
     let mut rng = Rng(0x9e3779b97f4a7c15);
     (0..4000).map(|_| random_graph(&mut rng)).collect()
+}
+
+fn stack_words_entry() -> &'static Entry {
+    static E: OnceLock<Entry> = OnceLock::new();
+    E.get_or_init(|| package().entry("check_stack_words", true))
+}
+
+/// The hybrid build's path (crates/vesper-hybrid/modules/stack_bound): the
+/// input of tests/common/stack_words.rs and the decoded `report_words`
+/// stream must give exactly `rust_stack_bound_report`'s report, error or
+/// not, on every generated graph.
+#[test]
+fn stack_bound_words_match_rust() {
+    let mut bad = 0;
+    let cases = stack_cases();
+    for (i, (g, p)) in cases.iter().enumerate() {
+        let rust = vesper::stack_bound::rust_stack_bound_report(g, p);
+        let words = stack_words_entry().words(&stack_words::stack_input(g, p));
+        let vesper = stack_words::decode_stack_report(g.origin, &words);
+        if vesper != rust {
+            bad += 1;
+            if bad <= 4 {
+                eprintln!("stack words: graph {i}\n  rust:   {rust:?}\n  vesper: {vesper:?}");
+            }
+        }
+    }
+    eprintln!("stack words: {bad} of {} graphs differ", cases.len());
+    assert_eq!(bad, 0);
 }
 
 #[test]

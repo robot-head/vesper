@@ -72,6 +72,7 @@ members = [
     "crates/vesper-warp-umem",
     "crates/vesper-warp-wheel",
     "crates/vesper-warp-crypto",
+    "crates/vesper-crypto-sys",
     "crates/vesper-warp-tcp",
     "crates/vesper-chorus",
     "crates/vesper-aegis",
@@ -187,6 +188,7 @@ default-members = [
     "crates/vesper-warp-umem",
     "crates/vesper-warp-wheel",
     "crates/vesper-warp-crypto",
+    "crates/vesper-crypto-sys",
     "crates/vesper-warp-tcp",
     "crates/vesper-chorus",
     "crates/vesper-aegis",
@@ -358,6 +360,8 @@ wit-parser = "=0.261.0"
 # against them.
 vesper-aegis = { path = "crates/vesper-aegis/seed", package = "vesper-aegis-seed" }
 vesper-bench = { path = "crates/vesper-bench/seed", package = "vesper-bench-seed" }
+# The one crypto shim, bound to @vesper/crypto in tests/crypto_shim.rs (SH6 lane 17).
+vesper-crypto-sys = { path = "crates/vesper-crypto-sys" }
 vesper-nexus = { path = "crates/vesper-nexus" }
 # The tools moved out of the compiler by SH6 lane 3 (#1398) link these; the
 # CLI tests still call them to check results.
