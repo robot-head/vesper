@@ -303,6 +303,8 @@ impl<M: Module> Codegen<'_, '_, M> {
         // (`codegen_swap::ffi`); none is installed by default. A callback
         // type's call is not offered: the steps name a symbol. Nor is a
         // call passing or returning a float: the steps carry integer words.
+        // Nor, yet, is one taking a `CStrList` (SH6 lane 13; the Vesper
+        // emitter mirrors it later).
         // Foreign memory viewed in place (pinned buffers and mappings) is
         // lowered here only, so the hook is not offered such calls either.
         let abi = plan.function.abi();
@@ -313,9 +315,12 @@ impl<M: Module> Codegen<'_, '_, M> {
             .any(|t| matches!(t, AbiType::Float(_)));
         if !plan.function.is_indirect()
             && !floats
-            && !descriptors
-                .iter()
-                .any(|d| matches!(d.ty(), ParameterType::Function { .. }))
+            && !descriptors.iter().any(|d| {
+                matches!(
+                    d.ty(),
+                    ParameterType::Function { .. } | ParameterType::CStrList
+                )
+            })
             && !plan.function.uses_foreign_memory()
             && let Some(v) = self.foreign_perform_swapped(&plan, &signature, args)?
         {
@@ -328,6 +333,8 @@ impl<M: Module> Codegen<'_, '_, M> {
         // Per `CStr` argument: its malloc'd buffer, and the offset of its
         // first NUL byte (or -1).
         let mut strings: Vec<(ir::Value, ir::Value)> = vec![];
+        // The malloc'd bytes and pointer array of each `CStrList` argument.
+        let mut lists: Vec<ir::Value> = vec![];
         // The sequence headers of mappings consumed by this call, freed
         // after it, and the length argument of a mapping result.
         let mut released = vec![];
@@ -351,6 +358,14 @@ impl<M: Module> Codegen<'_, '_, M> {
                 let (data, len) = self.foreign_view(&arg.expr, 1)?;
                 strings.push(self.foreign_cstr(data, len)?);
                 c_args.push(strings.last().expect("just pushed").0);
+                continue;
+            }
+            if let ParameterType::CStrList = descriptor.ty() {
+                let (data, len) = self.foreign_view(&arg.expr, 1)?;
+                let (buffer, array) = self.foreign_cstr_list(data, len)?;
+                lists.push(buffer);
+                lists.push(array);
+                c_args.push(array);
                 continue;
             }
             if let ParameterType::Slice { element, .. } = descriptor.ty()
@@ -400,7 +415,9 @@ impl<M: Module> Codegen<'_, '_, M> {
                     c_args.push(len);
                 }
                 ParameterType::Handle { .. } => c_args.push(self.foreign_word(source)),
-                ParameterType::CStr => unreachable!("C strings are lowered above"),
+                ParameterType::CStr | ParameterType::CStrList => {
+                    unreachable!("C strings are lowered above")
+                }
                 ParameterType::Function { .. } => unreachable!("functions are lowered above"),
                 ParameterType::Pointer {
                     pointee,
@@ -602,7 +619,7 @@ impl<M: Module> Codegen<'_, '_, M> {
             self.b.seal_block(join);
             value = slot;
         }
-        for (buffer, _) in strings {
+        for buffer in strings.into_iter().map(|(b, _)| b).chain(lists) {
             let free = self.foreign_libc("free", 1, false)?;
             self.b.ins().call(free, &[buffer]);
         }
@@ -674,6 +691,99 @@ impl<M: Module> Codegen<'_, '_, M> {
         self.b.switch_to_block(join);
         self.b.seal_block(join);
         Ok(self.b.block_params(join)[0])
+    }
+    /// A `CStrList` argument: a NUL-terminated `malloc` copy of the `len`
+    /// bytes at `data`, and a `malloc`'d NULL-terminated array pointing at
+    /// each string in it (every string ends at a NUL; a last one without
+    /// its NUL is ended by the copy's terminator).
+    fn foreign_cstr_list(
+        &mut self,
+        data: ir::Value,
+        len: ir::Value,
+    ) -> Result<(ir::Value, ir::Value), String> {
+        let malloc = self.foreign_libc("malloc", 1, true)?;
+        let memcpy = self.foreign_libc("memcpy", 3, true)?;
+        let flags = ir::MemFlags::new();
+        let size = self.b.ins().iadd_imm(len, 1);
+        let call = self.b.ins().call(malloc, &[size]);
+        let buffer = self.b.inst_results(call)[0];
+        self.b
+            .ins()
+            .trapz(buffer, ir::TrapCode::unwrap_user(ffi::CSTR_ALLOC_TRAP));
+        self.b.ins().call(memcpy, &[buffer, data, len]);
+        let end = self.b.ins().iadd(buffer, len);
+        let nul = self.b.ins().iconst(types::I8, 0);
+        self.b.ins().store(flags, nul, end, 0);
+        // At most `len + 1` strings and the NULL: no counting pass.
+        let slots = self.b.ins().iadd_imm(len, 2);
+        let bytes = self.b.ins().imul_imm(slots, 8);
+        let call = self.b.ins().call(malloc, &[bytes]);
+        let array = self.b.inst_results(call)[0];
+        self.b
+            .ins()
+            .trapz(array, ir::TrapCode::unwrap_user(ffi::CSTR_ALLOC_TRAP));
+        // scan(i, start, k): array[k] = buffer + start for the string being
+        // read; a NUL at i ends it.
+        let scan = self.b.create_block();
+        let body = self.b.create_block();
+        let tail = self.b.create_block();
+        for block in [scan, body] {
+            for _ in 0..3 {
+                self.b.append_block_param(block, types::I64);
+            }
+        }
+        for _ in 0..2 {
+            self.b.append_block_param(tail, types::I64);
+        }
+        let zero = self.b.ins().iconst(types::I64, 0);
+        let start_args = [ir::BlockArg::Value(zero); 3];
+        self.jump(scan, &start_args);
+        self.b.switch_to_block(scan);
+        let (i, start, k) = {
+            let p = self.b.block_params(scan);
+            (p[0], p[1], p[2])
+        };
+        let more = self.b.ins().icmp(IntCC::UnsignedLessThan, i, len);
+        let args = [i, start, k].map(ir::BlockArg::Value);
+        let tail_args = [start, k].map(ir::BlockArg::Value);
+        self.branch(more, body, &args, tail, &tail_args);
+        self.b.switch_to_block(body);
+        self.b.seal_block(body);
+        let (i, start, k) = {
+            let p = self.b.block_params(body);
+            (p[0], p[1], p[2])
+        };
+        let here = self.b.ins().iadd(buffer, start);
+        let slot = self.b.ins().imul_imm(k, 8);
+        let slot = self.b.ins().iadd(array, slot);
+        self.b.ins().store(flags, here, slot, 0);
+        let at = self.b.ins().iadd(buffer, i);
+        let byte = self.b.ins().uload8(types::I64, flags, at, 0);
+        let ends = self.b.ins().icmp_imm(IntCC::Equal, byte, 0);
+        let next = self.b.ins().iadd_imm(i, 1);
+        let k_next = self.b.ins().iadd_imm(k, 1);
+        let k = self.b.ins().select(ends, k_next, k);
+        let start = self.b.ins().select(ends, next, start);
+        let args = [next, start, k].map(ir::BlockArg::Value);
+        self.jump(scan, &args);
+        self.b.seal_block(scan);
+        self.b.switch_to_block(tail);
+        self.b.seal_block(tail);
+        let (start, k) = {
+            let p = self.b.block_params(tail);
+            (p[0], p[1])
+        };
+        let here = self.b.ins().iadd(buffer, start);
+        let slot = self.b.ins().imul_imm(k, 8);
+        let slot = self.b.ins().iadd(array, slot);
+        self.b.ins().store(flags, here, slot, 0);
+        let open = self.b.ins().icmp(IntCC::UnsignedLessThan, start, len);
+        let k_next = self.b.ins().iadd_imm(k, 1);
+        let k = self.b.ins().select(open, k_next, k);
+        let slot = self.b.ins().imul_imm(k, 8);
+        let slot = self.b.ins().iadd(array, slot);
+        self.b.ins().store(flags, zero, slot, 0);
+        Ok((buffer, array))
     }
     /// A NUL-terminated `malloc` copy of `len` bytes at `data`, and the
     /// offset of the first NUL byte among them (-1 when there is none).
@@ -1727,6 +1837,9 @@ impl<M: Module> Codegen<'_, '_, M> {
                             return Err("pinned buffers are not offered to the ffi hook".into());
                         }
                         ParameterType::CStr => unreachable!("C strings are lowered above"),
+                        ParameterType::CStrList => {
+                            unreachable!("calls taking C string lists are not offered to the hook")
+                        }
                         ParameterType::Function { .. } => {
                             unreachable!("calls taking functions are not offered to the hook")
                         }
