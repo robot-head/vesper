@@ -102,6 +102,9 @@ fn scratch(name: &str) -> PathBuf {
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("TEST_TMPDIR").map(PathBuf::from))
         .unwrap_or_else(std::env::temp_dir);
+    // Bazel's TEST_TMPDIR can be relative, and every run changes its
+    // working directory.
+    let base = std::env::current_dir().unwrap().join(base);
     let dir = base.join(format!("{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
