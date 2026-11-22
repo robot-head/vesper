@@ -15,6 +15,7 @@
 // `AErr`: `kind` is the ParseError variant index, `format` the Format
 // index, `field` an index into the field-name table of src/port.rs
 // (FIELDS), and `a`, `b` the variant's numbers.
+use self::cbor::decode as cbor_decode_impl;
 use self::claims::{
     check_policy,
     decode_wire
@@ -72,6 +73,13 @@ pub fn tdx_parse(in b: Slice[u8], mode: u64, inout w: Slice[u64]) -> u64 eff [Fa
 // SgxQuote::parse (mode 0), parse_padded (1) and parse_prefix (2).
 pub fn sgx_parse(in b: Slice[u8], mode: u64, inout w: Slice[u64]) -> u64 eff [Fail[AErr]] {
     sgx_parse_impl(in b, mode, inout w)
+}
+
+// cca::decode_value: one CBOR item at the start of `b` as preorder nodes
+// in `w` (module cbor), with `st` the decoder's stack; the bytes it used.
+pub fn cbor_decode(in b: Slice[u8], inout w: Slice[u64], inout st: Slice[u64])
+    -> u64 eff [Fail[AErr]] {
+    cbor_decode_impl(in b, inout w, inout st)
 }
 
 // AegisAttestationClaimsWire::decode.

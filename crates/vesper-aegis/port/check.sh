@@ -13,11 +13,14 @@ cd "$(dirname "$0")/../../.."
 cargo test --locked -p vesper-aegis
 log=$(mktemp)
 trap 'rm -f "$log"' EXIT HUP INT TERM
-# check <module> <test file> <expected failing test> <expected passing test>
+# check <module> <test file, or lib for the unit tests> <expected failing
+# test> <expected passing test>
 check() {
-    if VESPER_AEGIS_DIVERGE=$1 cargo test --locked -p vesper-aegis --features vesper-port-divergent --test "$2" -- --test-threads=1 >"$log" 2>&1; then
+    if [ "$2" = lib ]; then target=--lib; else target="--test $2"; fi
+    # shellcheck disable=SC2086 # $target is one or two words
+    if VESPER_AEGIS_DIVERGE=$1 cargo test --locked -p vesper-aegis --features vesper-port-divergent $target -- --test-threads=1 >"$log" 2>&1; then
         cat "$log"
-        echo "the divergent aegis port ($1) passed tests/$2.rs" >&2
+        echo "the divergent aegis port ($1) passed $2" >&2
         exit 1
     fi
     if ! grep -q "test $3 ... FAILED" "$log" || ! grep -q "test $4 ... ok" "$log"; then
@@ -35,3 +38,5 @@ check sgx sgx_quote_v3 real_sgx_quote_v3_verifies_end_to_end sgx_quote_mutations
 check wire port_differential claims_wire_agrees snp_reports_agree
 check policy port_differential policy_decisions_agree snp_reports_agree
 check time port_differential timestamps_agree snp_reports_agree
+# One container fewer than ciborium's recursion limit.
+check cbor lib port::cbor_differential::edge_cases_match_ciborium port::cbor_differential::random_items_match_ciborium

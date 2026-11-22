@@ -417,10 +417,9 @@ impl<'v> ClaimMap<'v> {
 }
 
 pub(crate) fn decode_value(bytes: &[u8], what: &'static str) -> Result<Value, ParseError> {
-    let mut rest = bytes;
-    let v: Value =
-        coset::cbor::de::from_reader(&mut rest).map_err(|_| cbor_err(what, "malformed CBOR"))?;
-    if !rest.is_empty() {
+    let (v, used) =
+        crate::port::cbor_value(bytes).ok_or_else(|| cbor_err(what, "malformed CBOR"))?;
+    if used != bytes.len() {
         return Err(cbor_err(what, "trailing bytes"));
     }
     Ok(v)

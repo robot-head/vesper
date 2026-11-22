@@ -48,6 +48,7 @@ unsafe extern "C" {
     fn vesper_aegis_seq_new(capacity: i64, stride: i64) -> i64;
     fn vesper_aegis_seq_free(seq: i64) -> i64;
     fn vesper_aegis_live_allocations() -> i64;
+    fn vesper_aegis_cbor_decode(b: *mut u64, w: *mut u64, st: *mut u64, fail: *mut u64) -> i64;
     fn vesper_aegis_claims_wire_decode(b: *mut u64, w: *mut u64, fail: *mut u64) -> i64;
     fn vesper_aegis_iso8601_utc_to_unix(result: *mut u64, s: *mut u64) -> i64;
     fn vesper_aegis_sgx_parse(b: *mut u64, mode: i64, w: *mut u64, fail: *mut u64) -> i64;
@@ -67,6 +68,20 @@ pub const RUNTIME: vesper_port_abi::SeqRuntime = vesper_port_abi::SeqRuntime {
 pub fn live_allocations() -> i64 {
     // SAFETY: the function only reads two counters.
     unsafe { vesper_aegis_live_allocations() }
+}
+
+/// Calls `cbor_decode` of the Vesper library `aegis` (`vesper_aegis_cbor_decode`).
+pub fn cbor_decode(b: &[u8], w: &mut [u64], st: &mut [u64]) -> Result<u64, AErr> {
+    let mut fail = [0u64; 6];
+    // SAFETY: `vesper_aegis_cbor_decode` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(b, |view_b| vesper_port_abi::with_slice_mut(w, |view_w| vesper_port_abi::with_slice_mut(st, |view_st| unsafe { vesper_aegis_cbor_decode(view_b, view_w, view_st, fail.as_mut_ptr()) })));
+    match fail[0] {
+        0 => Ok(raw as u64),
+        1 => Err(<AErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_aegis_cbor_decode"),
+    }
 }
 
 /// Calls `claims_wire_decode` of the Vesper library `aegis` (`vesper_aegis_claims_wire_decode`).
