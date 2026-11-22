@@ -501,6 +501,13 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # Self-hosting SH4 lane 10 (#1284): @vesper/codegen-control's session
+        # plans and handler keys against the Rust compiler on the same corpus.
+        "test/self_host_codegen_control": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
         # Self-hosting SH3 lane 9 (#1248): @vesper/ir-opt against ir_opt on
         # the same corpus. Anchored globs.
         "test/self_host_ir_opt": glob([
@@ -668,8 +675,17 @@ vesper_crate(
         },
     },
     test_path_binaries = {"test/self_host_front_end": []},
-    # The corpus implements TEST_TOTAL_SHARDS/TEST_SHARD_INDEX itself.
-    test_shards = {"test/self_host_front_end": 4},
+    # The corpus implements TEST_TOTAL_SHARDS/TEST_SHARD_INDEX itself
+    # (tests/common/corpus_shard.rs). The others were the slow tail of
+    # "Test all targets" (8-9 min each), which hit BuildBuddy's 1-hour limit.
+    test_shards = {
+        "test/self_host_bounds_hoist_jit": 4,
+        "test/self_host_codegen_scalar": 4,
+        "test/self_host_front_end": 4,
+        "test/self_host_ir_opt": 4,
+        "test/self_host_place_ir_jit": 4,
+        "test/self_host_swap_inputs": 4,
+    },
     # Reservations include subprocess overhead; they do not enforce RSS limits.
     # `lean_replay` marks the Lean/Logos suite run by "Native and acceptance
     # scripts" when Lean-facing paths change and on pushes to main
@@ -1003,6 +1019,8 @@ vesper_crate(
         "test/self_host_lsp_features": "long",
         # The e-graph differential (#1247) runs egg and egglog on the corpus.
         "test/self_host_egraph": "long",
+        # Loads every corpus world and runs about 1,900 session plans.
+        "test/self_host_codegen_control": "long",
         # The ir_opt differential (#1248) runs Rust's egglog on a corpus slice;
         # it ran past 900 s on loaded CI (unoptimized).
         "test/self_host_ir_opt": "eternal",

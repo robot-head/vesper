@@ -14,6 +14,7 @@ vesper_crate(
         "//packages/vesper-cranelift:files",
     ],
     test_timeouts = {
+        "test/self_host_codegen_control": "long",
         "test/self_host_codegen_aggregates_drops": "long",
         "test/self_host_codegen_seq": "long",
         "test/self_host_codegen_swap": "long",

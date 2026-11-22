@@ -103,7 +103,7 @@ CRATES = {
     "vesper-aura-gtk": ("c-api", "", "", "gtk4-rs: call the GTK 4 C API", "15"),
     "vesper-ignis-vulkan": ("c-api", "", "", "ash: call the Vulkan C API; naga via shim", "15"),
     "vesper-gpu-compute": ("c-api", "", "", "ash: Vulkan C API; naga via shim", "15"),
-    "vesper-loom-cas": ("c-api", "", "", "BLAKE3 C, reflink ioctls", "16"),
+    "vesper-loom-cas": ("c-api", "codecs + store (non-default)", "1.0-3.5x", "ingest/materialize/verify_all, codec speed, fs calls in shim", "16"),
     "vesper-loom-admission": ("c-api", "", "", "out of the compiler's closure (#1398); glue over CAS + trust", "16"),
     "vesper-loom-build": ("unported", "", "", "sandbox driver", "16"),
     "vesper-loom-sandbox": ("c-api", "", "", "wasmtime: use the wasmtime C API", "16"),
