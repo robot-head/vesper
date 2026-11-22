@@ -78,6 +78,11 @@ vesper_hybrid(
             "//:codegen_base_package",
             "//packages/vesper-cranelift:cranelift_package",
         ],
+        # Vector and TiledSeq operations (#1285), through the shim too.
+        "hybrid_codegen_numeric": [
+            "//packages/vesper-codegen-numeric:codegen_numeric_package",
+            "//packages/vesper-cranelift:cranelift_package",
+        ],
         # The export planner and glue (#1286); the glue emits through the
         # Cranelift shim too.
         "hybrid_codegen_export": [
@@ -131,6 +136,7 @@ vesper_hybrid(
         "hybrid_checks": "modules/checks",
         "hybrid_codegen": "modules/codegen",
         "hybrid_codegen_export": "modules/codegen_export",
+        "hybrid_codegen_numeric": "modules/codegen_numeric",
         "hybrid_ir_check": "modules/ir_check",
         "hybrid_ir_inline": "modules/ir_inline",
         "hybrid_ir_opt": "modules/ir_opt",
@@ -204,6 +210,11 @@ vesper_hybrid(
         ],
         # The stack-bound swap (#1182) through the CLI.
         "test/stack_bound": [
+            ":bin/vesper-hybrid",
+            "//:bin/vesper",
+        ],
+        # SH4 lane 11 (#1285): numeric programs through both compilers.
+        "test/numeric": [
             ":bin/vesper-hybrid",
             "//:bin/vesper",
         ],

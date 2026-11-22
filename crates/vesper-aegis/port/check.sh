@@ -1,14 +1,16 @@
 #!/bin/sh
-# vesper-aegis port checks under Cargo (port wave P3a lane 8, #1043), run
-# by scripts/test-port-harness.sh in the Linux "Vesper ports" shard; Bazel
-# builds the same divergent objects (crates/vesper-aegis/BUILD.bazel).
-# Every test must pass against the Rust seed (vesper-aegis-seed) and the
-# port-backed package (vesper-aegis), and each divergent build (one edit
-# per ported module, DIVERGENT in build.rs, picked by VESPER_AEGIS_DIVERGE)
-# must fail the test that guards its module while an unrelated one passes.
+# vesper-aegis port checks under Cargo (port wave P3a lane 8, #1043; SH6
+# lane 8, #1403), run by scripts/test-port-harness.sh in the Linux "Vesper
+# ports" shard; Bazel builds the same divergent objects
+# (crates/vesper-aegis/BUILD.bazel). Every test must pass against the port
+# (the only build since #1403; tests/port_differential.rs compares it with
+# the last Rust build's recorded results), and each divergent build (one
+# edit per ported module, DIVERGENT in build.rs, picked by
+# VESPER_AEGIS_DIVERGE) must fail the test that guards its module while an
+# unrelated one passes.
 set -eu
 cd "$(dirname "$0")/../../.."
-cargo test --locked -p vesper-aegis-seed -p vesper-aegis
+cargo test --locked -p vesper-aegis
 log=$(mktemp)
 trap 'rm -f "$log"' EXIT HUP INT TERM
 # check <module> <test file> <expected failing test> <expected passing test>

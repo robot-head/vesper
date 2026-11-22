@@ -1,11 +1,10 @@
 load("//tools/bazel:defs.bzl", "vesper_crate")
 load("//tools/bazel:vesper_port.bzl", "VESPER_TARGET", "vesper_package", "vesper_port_object")
 
-# The port-backed package (seed-copy rule, docs/maintenance/porting-a-crate.md;
-# port wave P3a lane 8, #1043): build.rs links the object built here from the
-# Loom package in vesper/ and checks port/binding.rs against the generated
-# binding. The compiler links the Rust seed copy, //crates/vesper-aegis/seed,
-# instead, and so does every other dependent until the port reaches parity.
+# The port-backed package (port wave P3a lane 8, #1043): build.rs links the
+# object built here from the Loom package in vesper/ and checks
+# port/binding.rs against the generated binding. The port is the only build
+# of the parsers and the policy check (SH6 lane 8, #1403); there is no seed.
 vesper_package(
     name = "port_package",
     srcs = glob(["vesper/src/**/*.ves"]),
@@ -30,8 +29,8 @@ filegroup(
 # the Cargo run in port/check.sh (scripts/test-port-harness.sh) asserts that
 # the tests catch each edit.
 DIVERGENT = {
-    "reader": ("reader", {"acc = acc | x;": "acc = acc | (x & 18446744073709551614);"}),
-    "snp": ("snp", {"if version < SNP_REPORT_MIN_VERSION || version > SNP_REPORT_MAX_VERSION {": "if version < SNP_REPORT_MIN_VERSION || version > 7 {"}),
+    "reader": ("reader", {"all_zero(in b[start..end])": "all_zero(in b[start..start])"}),
+    "snp": ("snp", {"const SNP_REPORT_MAX_VERSION: u64 = 6;": "const SNP_REPORT_MAX_VERSION: u64 = 7;"}),
     "tdx": ("tdx", {"const TDX_BODY_TD15_EX_LEN: u64 = 885;": "const TDX_BODY_TD15_EX_LEN: u64 = 884;"}),
     "sgx": ("sgx", {"if cert_type != CERT_DATA_PCK_CHAIN_PEM {": "if cert_type != 6 {"}),
     "wire": ("claims", {"if tag < ARCH_TDX || tag > ARCH_CCA {": "if tag < ARCH_TDX || tag > ARCH_SNP {"}),
@@ -65,28 +64,4 @@ vesper_crate(
     # them as outside --root, so the model test runs in a copy of regular files.
     copy_test_cwd = ["test/lean_model"],
     extra_test_data = ["//:lean"],
-)
-
-# The seed package (seed/) builds these same Rust sources without the port.
-exports_files(glob([
-    "src/**/*.rs",
-    "tests/**/*.rs",
-]))
-
-filegroup(
-    name = "rust_srcs",
-    srcs = glob(["src/**/*.rs"]),
-    visibility = ["//crates/vesper-aegis/seed:__pkg__"],
-)
-
-filegroup(
-    name = "roots",
-    srcs = glob(["roots/**"]),
-    visibility = ["//crates/vesper-aegis/seed:__pkg__"],
-)
-
-filegroup(
-    name = "test_data",
-    srcs = glob(["tests/data/**"]),
-    visibility = ["//crates/vesper-aegis/seed:__pkg__"],
 )

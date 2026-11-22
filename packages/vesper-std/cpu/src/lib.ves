@@ -1,0 +1,63 @@
+// @vesper-std/cpu: CPU instructions with no Cranelift instruction (audit
+// gap G4) over the `.vsys` library `StdCpu` (cpu.vsys). Every operation
+// performs `Ffi[StdCpu]`, so a package reaches the CPU only when its
+// `capability_ceiling` lists "Ffi[StdCpu]". The native backend emits each
+// instruction as a small leaf function. A function of the other
+// architecture fails to compile on this target, so `x86_*` builds only for
+// x86_64 and `aarch64_*` only for AArch64. The evaluator has no CPU
+// instructions.
+//
+// The counter reads trap when the operating system has not enabled
+// user-space access: RDPMC needs CR4.PCE (Linux: a perf event mapped with
+// `cap_user_rdpmc`), and PMCCNTR_EL0 / PMXEVCNTR_EL0 need PMUSERENR_EL0.
+// The time-stamp and generic-timer reads are enabled on common systems.
+
+// The time-stamp counter after earlier instructions complete (`lfence;
+// rdtsc`).
+pub fn x86_rdtsc() -> u64 eff [Ffi[StdCpu]] {
+    StdCpu::vstd_cpu_rdtsc()
+}
+
+// Performance counter `index` (`lfence; rdpmc; lfence`): the general
+// counters from 0, the fixed counters at `(1 << 30) + n`.
+pub fn x86_rdpmc(index: u32) -> u64 eff [Ffi[StdCpu]] {
+    StdCpu::vstd_cpu_rdpmc(index)
+}
+
+// One hardware random word (`rdrand`), or `None` when the generator had
+// none ready. Callers retry a few times, as Intel recommends. RDRAND is an
+// invalid opcode on a CPU without it (CPUID.01H:ECX bit 30), so callers
+// check that first.
+pub fn x86_rdrand64() -> Option[u64] eff [Ffi[StdCpu]] {
+    let mut out: u64 = 0;
+    if StdCpu::vstd_cpu_rdrand64(inout out) == 0 {
+        return Option::None;
+    }
+    Option::Some(out)
+}
+
+// The virtual count of the generic timer (`isb; mrs cntvct_el0`).
+pub fn aarch64_cntvct() -> u64 eff [Ffi[StdCpu]] {
+    StdCpu::vstd_cpu_cntvct()
+}
+
+// The cycle counter (`isb; mrs pmccntr_el0; isb`).
+pub fn aarch64_pmccntr() -> u64 eff [Ffi[StdCpu]] {
+    StdCpu::vstd_cpu_pmccntr()
+}
+
+// Event counter `index` (0 to 30), selected through PMSELR_EL0.
+pub fn aarch64_pmevcntr(index: u32) -> u64 eff [Ffi[StdCpu]] {
+    StdCpu::vstd_cpu_pmevcntr(index)
+}
+
+// One hardware random word (`mrs rndr`, FEAT_RNG), or `None` when the
+// generator had none ready. It is undefined without FEAT_RNG
+// (ID_AA64ISAR0_EL1.RNDR), so callers check that first.
+pub fn aarch64_rndr() -> Option[u64] eff [Ffi[StdCpu]] {
+    let mut out: u64 = 0;
+    if StdCpu::vstd_cpu_rndr(inout out) == 0 {
+        return Option::None;
+    }
+    Option::Some(out)
+}

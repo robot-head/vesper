@@ -1,0 +1,248 @@
+// ---------------------------------------------------------------------------
+// Batched event application (src/reference/batch.rs). The wrapper passes
+// the batch as four words per descriptor: slot index, generation, event
+// kind (0 PacketReceived, 1 PacketSent, 2 BytesAcked, 3 BytesLost,
+// 4 CwndUpdate) and the event's value. Each touched tile gets a stage of
+// 16 lanes; the stages are checked and then committed with the lane
+// kernels, so a rejected batch leaves the table unchanged.
+
+const EV_RECEIVED: u64 = 0;
+const EV_SENT: u64 = 1;
+const EV_CWND: u64 = 4;
+// Touched lanes from which a stage is checked with the lane kernels.
+const VECTOR_LANES_MIN: u64 = 4;
+
+impl TableCore {
+    fn stage_at(in self, s: u64, l: u64) -> u64 {
+        wrapping_add(wrapping_mul(s, LANES), l)
+    }
+
+    // Open a stage for `tile`. Its lanes are cleared on first touch
+    // (`scatter`), and only touched lanes are read back.
+    fn stage_open(inout self, s: u64, tile: u64) {
+        self.st_tile.try_set(s, tile);
+        self.st_touched.try_set(s, 0);
+        self.st_cwnd_set.try_set(s, 0);
+        self.tile_stage.try_set(tile, wrapping_u8(s));
+    }
+
+    // Scatter the descriptors into stages; the number of stages opened.
+    fn scatter(inout self, in batch: Slice[u64], n: u64, inout opened: u64)
+        -> Option[CoreBatchFault] {
+        for i in 0..n {
+            let base = wrapping_mul(i, 4);
+            let index = match batch.try_get(base) {
+                Option::Some(v) => v,
+                Option::None => 0,
+            };
+            let generation = match batch.try_get(wrapping_add(base, 1)) {
+                Option::Some(v) => v,
+                Option::None => 0,
+            };
+            let kind = match batch.try_get(wrapping_add(base, 2)) {
+                Option::Some(v) => v,
+                Option::None => 0,
+            };
+            let value = match batch.try_get(wrapping_add(base, 3)) {
+                Option::Some(v) => v,
+                Option::None => 0,
+            };
+            if !self.live(index, generation) {
+                return Option::Some(CoreBatchFault::StaleHandle(i));
+            }
+            if kind == EV_RECEIVED && value >= PN_LIMIT {
+                return Option::Some(
+                    CoreBatchFault::PacketNumberRange {
+                        index: i,
+                        pn: value
+                    }
+                );
+            }
+            let t = index / LANES;
+            let l = index % LANES;
+            let mut s = get8(in self.tile_stage, t);
+            if s == NO_STAGE {
+                s = opened;
+                self.stage_open(s, t);
+                opened = wrapping_add(opened, 1);
+            }
+            let at = self.stage_at(s, l);
+            let b = bit(l);
+            let touched = get64(in self.st_touched, s);
+            if touched & b == 0 {
+                self.st_touched.try_set(s, touched | b);
+                self.st_first.try_set(at, wrapping_u8(i));
+                self.st_sent.try_set(at, 0);
+                self.st_released.try_set(at, 0);
+                self.st_max_pn_p1.try_set(at, 0);
+            }
+            // Sums of at most 64 u32 values stay below 2^38.
+            if kind == EV_RECEIVED {
+                let m = get64(in self.st_max_pn_p1, at);
+                self.st_max_pn_p1.try_set(at, max64(m, wrapping_add(value, 1)));
+            } else if kind == EV_SENT {
+                let v = get64(in self.st_sent, at);
+                self.st_sent.try_set(at, wrapping_add(v, value));
+            } else if kind == EV_CWND {
+                self.st_cwnd.try_set(at, wrapping_u32(value));
+                let set = get64(in self.st_cwnd_set, s);
+                self.st_cwnd_set.try_set(s, set | b);
+            } else {
+                let v = get64(in self.st_released, at);
+                self.st_released.try_set(at, wrapping_add(v, value));
+            }
+        }
+        Option::None
+    }
+
+    // New bytes in flight per stage lane, or the fault of the lowest first
+    // descriptor index among the lanes out of range.
+    fn stage_compute(inout self, opened: u64, vector: bool) -> Option[CoreBatchFault] {
+        let mut worst: Option[CoreBatchFault] = Option::None;
+        let mut worst_first = U64_MAX;
+        for s in 0..opened {
+            let tile = get64(in self.st_tile, s);
+            let base = self.stage_at(s, 0);
+            let end = wrapping_add(base, LANES);
+            let touched = get64(in self.st_touched, s);
+            let mut under: u64 = 0;
+            let mut over: u64 = 0;
+            if vector && lane_count(touched) >= VECTOR_LANES_MIN {
+                // Untouched lanes hold stale sums; the masks drop them.
+                for l in 0..LANES {
+                    let slot = wrapping_add(wrapping_mul(tile, LANES), l);
+                    self.st_result.try_set(wrapping_add(base, l), get32(in self.bif, slot));
+                }
+                // bif < 2^32 and sent < 2^38: the add cannot wrap.
+                lanes_op(inout self.st_result[base..end], in self.st_sent[base..end], 1, vector);
+                under = gt_mask_u64(
+                    in self.st_released[base..end],
+                    in self.st_result[base..end],
+                    vector
+                )
+                    & touched;
+                lanes_op(
+                    inout self.st_result[base..end],
+                    in self.st_released[base..end],
+                    2,
+                    vector
+                );
+                over = gt_mask_u64_splat(in self.st_result[base..end], U32_MAX, vector)
+                    & touched
+                    & ~under;
+            } else {
+                // A few touched lanes: the same sums, lane by lane.
+                let mut m = touched;
+                loop {
+                    if m == 0 {
+                        break;
+                    }
+                    let l = low_bit(m);
+                    let at = wrapping_add(base, l);
+                    let slot = wrapping_add(wrapping_mul(tile, LANES), l);
+                    let total = wrapping_add(get32(in self.bif, slot), get64(in self.st_sent, at));
+                    let released = get64(in self.st_released, at);
+                    let r = wrapping_sub(total, released);
+                    self.st_result.try_set(at, r);
+                    if released > total {
+                        under = under | bit(l);
+                    } else if r > U32_MAX {
+                        over = over | bit(l);
+                    }
+                    m = m & wrapping_sub(m, 1);
+                }
+            }
+            let mut bad = under | over;
+            loop {
+                if bad == 0 {
+                    break;
+                }
+                let l = low_bit(bad);
+                let first = get8(in self.st_first, wrapping_add(base, l));
+                if first < worst_first {
+                    worst_first = first;
+                    worst = if under & bit(l) != 0 {
+                        Option::Some(CoreBatchFault::BytesInFlightUnderflow(first))
+                    } else {
+                        Option::Some(CoreBatchFault::BytesInFlightOverflow(first))
+                    };
+                }
+                bad = bad & wrapping_sub(bad, 1);
+            }
+        }
+        worst
+    }
+
+    fn stage_commit(inout self, opened: u64, vector: bool) {
+        for s in 0..opened {
+            let tile = get64(in self.st_tile, s);
+            let base = self.stage_at(s, 0);
+            let touched = get64(in self.st_touched, s);
+            let cwnd_set = get64(in self.st_cwnd_set, s);
+            let slot0 = wrapping_mul(tile, LANES);
+            let mut m = touched;
+            loop {
+                if m == 0 {
+                    break;
+                }
+                let l = low_bit(m);
+                let slot = wrapping_add(slot0, l);
+                let at = wrapping_add(base, l);
+                // Range-checked in stage_compute.
+                self.bif.try_set(slot, wrapping_u32(get64(in self.st_result, at)));
+                if cwnd_set & bit(l) != 0 {
+                    self.cwnd.try_set(slot, wrapping_u32(get32(in self.st_cwnd, at)));
+                }
+                self
+                    .rx_p1
+                    .try_set(
+                    slot,
+                    max64(get64(in self.rx_p1, slot), get64(in self.st_max_pn_p1, at))
+                );
+                m = m & wrapping_sub(m, 1);
+            }
+        }
+    }
+}
+
+// Lanes set in a 16-lane mask.
+fn lane_count(mask: u64) -> u64 {
+    let mut m = mask;
+    let mut n: u64 = 0;
+    loop {
+        if m == 0 {
+            break;
+        }
+        n = wrapping_add(n, 1);
+        m = m & wrapping_sub(m, 1);
+    }
+    n
+}
+
+pub fn table_core_apply_batch(inout c: TableCore, in batch: Slice[u64], vector: bool)
+    -> Option[CoreBatchFault] {
+    let n = batch.len() / 4;
+    if n > MAX_BATCH {
+        return Option::Some(CoreBatchFault::TooLong(n));
+    }
+    let mut opened: u64 = 0;
+    let mut outcome = c.scatter(in batch, n, inout opened);
+    if !is_some_fault(outcome) {
+        outcome = c.stage_compute(opened, vector);
+        if !is_some_fault(outcome) {
+            c.stage_commit(opened, vector);
+        }
+    }
+    for s in 0..opened {
+        let tile = get64(in c.st_tile, s);
+        c.tile_stage.try_set(tile, wrapping_u8(NO_STAGE));
+    }
+    outcome
+}
+
+fn is_some_fault(o: Option[CoreBatchFault]) -> bool {
+    match o {
+        Option::Some(e) => true,
+        Option::None => false,
+    }
+}

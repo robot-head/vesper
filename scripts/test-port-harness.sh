@@ -195,6 +195,8 @@ fi
 skip_port vesper-warp-tcp || crates/vesper-warp-tcp/scripts/test-port.sh
 # Port wave P1 lane 3 (#900): vesper-warp-wheel.
 skip_port vesper-warp-wheel || sh crates/vesper-warp-wheel/port/test-port.sh
+# Rust exit SH6 lane 4 (#1399): vesper-warp-shard.
+skip_port vesper-warp-shard || sh crates/vesper-warp-shard/port/test-port.sh
 skip_port vesper-ignis || sh crates/vesper-ignis/port/check.sh  # port P1 lane 12 (#909): vesper-ignis, both builds and the divergence check
 fi
 # Shard 2: Quarry through pact.
@@ -276,7 +278,7 @@ skip_port vesper-serde || sh crates/vesper-serde/port/check.sh  # port P1 lane 1
 fi
 # Shard 5: aegis through bench.
 if part 5; then
-skip_port vesper-aegis || sh crates/vesper-aegis/port/check.sh  # port P3a lane 8 (#1043): vesper-aegis, both builds and one divergence check per ported module
+skip_port vesper-aegis || sh crates/vesper-aegis/port/check.sh  # port P3a lane 8 (#1043): vesper-aegis, the port (the only build, SH6 lane 8 #1403) and one divergence check per ported module
 skip_port vesper-loom-audit || sh crates/vesper-loom-audit/port/test-port.sh  # port wave P3a lane 4 (#1039): vesper-loom-audit, both builds and the divergence check
 skip_port vesper-bench || sh crates/vesper-bench/port/check.sh  # port P3a lane 5 (#1040): vesper-bench, both builds and one divergence check per ported module
 fi
@@ -302,3 +304,4 @@ skip_port vesper-forge || sh crates/vesper-forge/port/test-port.sh  # self-hosti
 skip_port vesper-lint || sh crates/vesper-lint/port/test-port.sh  # self-hosting SH1 lane 13 (#1156): vesper-lint, all three builds, the differential test and one divergence check per ported area
 skip_port vesper-sim-session || sh crates/vesper-sim-session/port/test-port.sh  # self-hosting SH5 lane 19 (#1342): vesper-sim-session, both builds, the transcript differential and the divergence check
 skip_port vesper-fusion || sh crates/vesper-fusion/port/test-port.sh  # Rust-exit SH6 lane 18 (#1413): vesper-fusion on its Vesper engine (the only build) and one divergence check
+skip_port vesper-warp-crypto || . crates/vesper-warp-crypto/port/check.sh  # Rust-exit SH6 lane 17 (#1412): vesper-warp-crypto on its Vesper port (the only build), the differential against the Rust reference and one divergence check per ported area
