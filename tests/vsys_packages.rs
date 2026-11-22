@@ -260,13 +260,13 @@ fn cli_reports_a_dependency_error_at_its_file() {
 }
 
 #[test]
-fn jit_refuses_a_library_it_does_not_host() {
+fn jit_refuses_a_library_it_cannot_load() {
     let t = Temp::new("nohost");
     let app = probe_graph(&t, "vsys = [\"sys/probe.vsys\"]");
     let out = vesper().arg("jit").arg(&app).output().unwrap();
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("does not host"), "{err}");
+    assert!(err.contains("could not be loaded"), "{err}");
 }
 
 #[test]

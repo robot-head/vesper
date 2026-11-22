@@ -47,6 +47,7 @@ pub mod freestanding;
 /// Cranelift SIMD lowering of `Op::Vector` (lane 28).
 #[path = "native_vector.rs"]
 mod native_vector;
+pub(crate) use native_vector::registers as vector_registers;
 /// Source Strata region blocks lowered to `vesper_region_*` runtime calls.
 #[path = "regions/native.rs"]
 mod regions;
