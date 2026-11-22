@@ -415,6 +415,8 @@ pub(super) fn fixtures() -> Vec<PathBuf> {
                     // SH4 lane 15 (#1289): the wasm backend port uses `use`
                     // (#880) and `pub const`.
                     || path.ends_with("packages/vesper-wasm-backend")
+                    // SH5 lane 11 (#1334): the wit-component port too.
+                    || path.ends_with("packages/vesper-wit-component")
                     // SH5 lane 17 (#1340): the LSP features package exports
                     // with `pub fn` and imports with `use` (#880).
                     || path.ends_with("packages/vesper-lsp-features")
@@ -433,9 +435,6 @@ pub(super) fn fixtures() -> Vec<PathBuf> {
                     // SH5 lane 1 (#1324): `use` (#880) and `pub const`.
                     || path.ends_with("packages/vesper-codegen-base/walk")
                     || path.ends_with("crates/vesper-codegen-swap-test/walk-demo")
-                    // Claim #1159: value enums (`pub enum Word: _ { .. }`), which
-                    // the Stage 1 parser reads with a different tree.
-                    || path.ends_with("packages/vesper-bounds-hoist")
                 {
                     continue;
                 }
@@ -459,13 +458,23 @@ pub(super) fn fixtures() -> Vec<PathBuf> {
     // Loops, early exits and `let mut` (lane F6, #876) are not in the
     // self-hosted parser yet; such sources join the corpus once
     // packages/vesper-compiler parses them.
+    // Nor are value enums (`enum Word: _ { Int = 0, .. }`, claim #1159):
+    // the Stage 1 parser reads them with a different tree.
     out.retain(|path| {
         std::fs::read_to_string(path).map_or(true, |source| {
-            !vesper::loops::uses_loop_syntax(&vesper::parser::parse(&source).module)
+            let module = vesper::parser::parse(&source).module;
+            !vesper::loops::uses_loop_syntax(&module)
+                && !module.items.iter().any(is_value_enum_member)
         })
     });
     out.sort();
     out
+}
+
+/// The seed desugars a value enum's members to const items named
+/// `Enum::Member`.
+fn is_value_enum_member(item: &vesper::ast::Item) -> bool {
+    matches!(item, vesper::ast::Item::Function(f) if f.name.contains("::"))
 }
 
 pub(super) fn read_front_end() -> String {
