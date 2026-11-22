@@ -172,11 +172,15 @@ one target must have one (else a manifest error, as for a bad extension, a
 - No Stage 1 guarded path is touched, and only packages with `objects` see
   any change.
 
+## Part 3: per-target constants (G4)
+
+- **`.vsys` parser and descriptor (`crates/vesper-ffi`):** `const NAME: <int> = [-]value;` inside `sys library { ... }`, accepting decimal, `0x`, `0o`, `0b`, `_` separators, and unary `-` on signed scalars (`u8`..`u64`, `i8`..`i64`, `usize`) with exact width/sign range checks and collision checks against enums, wire structs, extern types, and functions. A constants-only library is valid. Canonical descriptor bytes append a `"consts"` section only when constants are present, keeping existing digests unchanged.
+- **Bridge AST lowering (`src/ffi_lowering`):** generates pure `const$FfiConst$<Lib>$<NAME>() -> <int>` constant functions (distinct synthetic body spans past source spans so `world.types` never overwrites widths across constants), rewrites `Lib::NAME` expressions to `const$FfiConst$...()` calls, and rewrites fieldless `Lib::NAME` match patterns to integer literals (`Literal::Int`).
+- **SH4 lowering port (`packages/vesper-ffi-lowering`):** decoded `"consts"` in `src/lib.ves` and constant expression/pattern rewrites in `rewrite/src/lib.ves`.
+- **Manuscript (`§16.3`):** split into a separate doc-only PR held for owner review per House Rule 7 so code merges cleanly.
+- **Tests:** `cargo +1.100.0 test -p vesper-ffi --test sys` (17 passed), `cargo +1.100.0 test -p vesper-ffi --test sys_variadic` (6 passed), `cargo +1.100.0 test -p vesper --test platform_interop` (20 passed, including cross-target objects, Windows JIT `optimize=true`/`false`, evaluator, `vesper run`, `vesper jit`, patterns, and negative type/call checks), `cargo +1.100.0 test -p vesper --test vsys_packages` (16 passed), `cargo +1.100.0 test -p vesper --test self_host_ffi_lowering` (1 passed, 1 ignored, 32.49s, full corpus including `ConstProbe`), and `cargo +1.100.0 test -p vesper --test self_host_ffi_lowering_rewrite` (2 passed, 1 ignored, including `ConstProbe`).
+
 ## Left
 
-- **Part 3, per-target constants:** `const NAME: <int> = <value>;` items in a
-  `.vsys` library, read as `Lib::NAME`, so one call site sees each target's
-  `O_CREAT`. Touches the `.vsys` parser (lane 8, #1505) and the Bridge
-  checker (SH4 lane 13, #1287); to agree with both first.
-- The census rows do not move: parts 1 and 2 add about 550 lines of Rust to
-  the CLI and delete none. The Rust it unblocks is deleted by the lanes above.
+- None for #1504 (`vesper-ffi` / Bridge / CLI). Downstream crates (`@vesper-std/fs`, `vesper-std-host`, etc.) can adopt `.vsys` `const` declarations on top of this landing.
+- The census rows do not move: parts 1–3 add no new crates and delete no Rust modules; the Rust deleted on top of this lives in downstream lanes (#1408, #1409, #1505).
