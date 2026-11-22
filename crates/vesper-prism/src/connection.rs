@@ -50,10 +50,6 @@ use crate::{
     response::{EncodedResponse, ResponseError, ResponseLimits},
 };
 
-#[cfg(not(feature = "vesper-port"))]
-pub use crate::reference::connection::Connection;
-
-#[cfg(feature = "vesper-port")]
 pub use crate::forward::connection::Connection;
 
 static NEXT_CONNECTION: AtomicU64 = AtomicU64::new(1);
@@ -241,8 +237,7 @@ pub struct Shutdown {
     pub failure: Option<Error>,
 }
 
-// Runs against both builds: it needs an id that was never issued, which the
-// public API cannot make.
+// It needs an id that was never issued, which the public API cannot make.
 #[cfg(test)]
 mod tests {
     use super::*;

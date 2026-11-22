@@ -61,6 +61,20 @@ pub copy enum RouteFault {
     AllocationFailed
 }
 
+// The words of a node and of an edge in `RouterCore::nodes` and `edges`.
+const NODE_WORDS: u64 = 6;
+const FIRST_STATIC: u64 = 0;
+const PARAM_CHILD: u64 = 1;
+const PARAM_LO: u64 = 2;
+const PARAM_HI: u64 = 3;
+const TERMS: u64 = 4;
+const TERMS_SLASH: u64 = 5;
+const EDGE_WORDS: u64 = 4;
+const EDGE_NEXT: u64 = 0;
+const EDGE_CHILD: u64 = 1;
+const KEY_LO: u64 = 2;
+const KEY_HI: u64 = 3;
+
 copy struct Node {
     first_static: u64,
     param_child: u64,
@@ -97,8 +111,11 @@ pub struct Pattern {
 
 pub struct RouterCore {
     limits: RouterLimits,
-    nodes: ChunkSeq[Node],
-    edges: ChunkSeq[Edge],
+    // `NODE_WORDS` words per node and `EDGE_WORDS` per edge, in the field
+    // order of `Node` and `Edge`: matching reads single fields, never a
+    // whole record.
+    nodes: ChunkSeq[u64],
+    edges: ChunkSeq[u64],
     terms: ChunkSeq[Term],
     keys: ChunkSeq[u8],
     names: ChunkSeq[u8],
@@ -171,30 +188,69 @@ fn token(b: u8) -> bool {
     }
 }
 
-pub fn node_at(in r: RouterCore, i: u64) -> Node {
-    match r.nodes.try_get(i) {
-        Option::Some(n) => n,
-        Option::None => Node {
-            first_static: none(),
-            param_child: none(),
-            param_lo: 0,
-            param_hi: 0,
-            terms: none(),
-            terms_slash: none()
-        },
+// Word `k` of node `i` (`none()` past the end).
+fn node_word(in r: RouterCore, i: u64, k: u64) -> u64 {
+    match r.nodes.try_get(wrapping_add(wrapping_mul(i, NODE_WORDS), k)) {
+        Option::Some(w) => w,
+        Option::None => none(),
     }
 }
 
-fn edge_at(in r: RouterCore, i: u64) -> Edge {
-    match r.edges.try_get(i) {
-        Option::Some(e) => e,
-        Option::None => Edge {
-            next: none(),
-            child: none(),
-            key_lo: 0,
-            key_hi: 0
-        },
+// Word `k` of edge `i` (`none()` past the end).
+fn edge_word(in r: RouterCore, i: u64, k: u64) -> u64 {
+    match r.edges.try_get(wrapping_add(wrapping_mul(i, EDGE_WORDS), k)) {
+        Option::Some(w) => w,
+        Option::None => none(),
     }
+}
+
+fn node_at(in r: RouterCore, i: u64) -> Node {
+    Node {
+        first_static: node_word(in r, i, FIRST_STATIC),
+        param_child: node_word(in r, i, PARAM_CHILD),
+        param_lo: node_word(in r, i, PARAM_LO),
+        param_hi: node_word(in r, i, PARAM_HI),
+        terms: node_word(in r, i, TERMS),
+        terms_slash: node_word(in r, i, TERMS_SLASH)
+    }
+}
+
+// Node `i`'s parameter child, or `none()`.
+pub fn param_child_of(in r: RouterCore, i: u64) -> u64 {
+    node_word(in r, i, PARAM_CHILD)
+}
+
+// Node `i`'s first terminal for a path with or without the trailing slash.
+pub fn terms_at(in r: RouterCore, i: u64, trailing: bool) -> u64 {
+    node_word(
+        in r,
+        i,
+        if trailing {
+            TERMS_SLASH
+        } else {
+            TERMS
+        }
+    )
+}
+
+fn node_count(in r: RouterCore) -> u64 {
+    r.nodes.len() / NODE_WORDS
+}
+
+fn push_node(inout r: RouterCore, n: Node) {
+    r.nodes.push(n.first_static);
+    r.nodes.push(n.param_child);
+    r.nodes.push(n.param_lo);
+    r.nodes.push(n.param_hi);
+    r.nodes.push(n.terms);
+    r.nodes.push(n.terms_slash);
+}
+
+fn push_edge(inout r: RouterCore, e: Edge) {
+    r.edges.push(e.next);
+    r.edges.push(e.child);
+    r.edges.push(e.key_lo);
+    r.edges.push(e.key_hi);
 }
 
 pub fn term_at(in r: RouterCore, i: u64) -> Term {
@@ -220,7 +276,7 @@ fn fresh_node() -> Node {
     }
 }
 
-pub fn terms_of(n: Node, trailing: bool) -> u64 {
+fn terms_of(n: Node, trailing: bool) -> u64 {
     if trailing {
         n.terms_slash
     } else {
@@ -232,18 +288,18 @@ pub fn router_core_new(limits: RouterLimits) -> RouterCore eff [Fail[RouteFault]
     if limits.max_routes == 0 || limits.max_match_work == 0 {
         Fail::raise(RouteFault::InvalidLimits);
     }
-    let mut nodes: ChunkSeq[Node] = ChunkSeq::new[Node]();
-    nodes.push(fresh_node());
-    RouterCore {
+    let mut r = RouterCore {
         limits: limits,
-        nodes: nodes,
-        edges: ChunkSeq::new[Edge](),
+        nodes: ChunkSeq::new[u64](),
+        edges: ChunkSeq::new[u64](),
         terms: ChunkSeq::new[Term](),
         keys: ChunkSeq::new[u8](),
         names: ChunkSeq::new[u8](),
         methods: ChunkSeq::new[u8](),
         routes: 0
-    }
+    };
+    push_node(inout r, fresh_node());
+    r
 }
 
 pub fn router_core_len(in r: RouterCore) -> u64 {
@@ -270,16 +326,34 @@ pub fn pattern_params(in pattern: Slice[u8]) -> ChunkSeq[u64] {
 }
 
 pub fn static_child(in r: RouterCore, node: u64, in key: Slice[u8], lo: u64, hi: u64) -> u64 {
-    let mut e = node_at(in r, node).first_static;
+    let mut e = node_word(in r, node, FIRST_STATIC);
     loop {
         if e == none() {
             return none();
         }
-        let edge = edge_at(in r, e);
-        if same(in r.keys.as_slice(), edge.key_lo, edge.key_hi, in key, lo, hi) {
-            return edge.child;
+        let key_lo = edge_word(in r, e, KEY_LO);
+        let key_hi = edge_word(in r, e, KEY_HI);
+        // Inline rather than `same` (a call per edge): the length test,
+        // then one bytes comparison of the two in-range views.
+        if wrapping_sub(key_hi, key_lo)
+            == wrapping_sub(hi, lo)
+            && key_lo
+            <= key_hi
+            && key_hi
+            <= r
+            .keys
+            .len()
+            && lo
+            <= hi
+            && hi
+            <= key
+            .len()
+            && r
+            .keys[key_lo..key_hi]
+            .eq(in key[lo..hi]) {
+            return edge_word(in r, e, EDGE_CHILD);
         }
-        e = edge.next;
+        e = edge_word(in r, e, EDGE_NEXT);
     }
 }
 
@@ -290,7 +364,25 @@ fn find_term(in r: RouterCore, first: u64, in method: Slice[u8], lo: u64, hi: u6
             return none();
         }
         let term = term_at(in r, t);
-        if same(in r.methods.as_slice(), term.method_lo, term.method_hi, in method, lo, hi) {
+        if wrapping_sub(term.method_hi, term.method_lo)
+            == wrapping_sub(hi, lo)
+            && term
+            .method_lo
+            <= term
+            .method_hi
+            && term
+            .method_hi
+            <= r
+            .methods
+            .len()
+            && lo
+            <= hi
+            && hi
+            <= method
+            .len()
+            && r
+            .methods[term.method_lo..term.method_hi]
+            .eq(in method[lo..hi]) {
             return t;
         }
         t = term.next;
@@ -298,7 +390,13 @@ fn find_term(in r: RouterCore, first: u64, in method: Slice[u8], lo: u64, hi: u6
 }
 
 fn set_node(inout r: RouterCore, i: u64, n: Node) {
-    r.nodes.try_set(i, n);
+    let at = wrapping_mul(i, NODE_WORDS);
+    r.nodes.try_set(wrapping_add(at, FIRST_STATIC), n.first_static);
+    r.nodes.try_set(wrapping_add(at, PARAM_CHILD), n.param_child);
+    r.nodes.try_set(wrapping_add(at, PARAM_LO), n.param_lo);
+    r.nodes.try_set(wrapping_add(at, PARAM_HI), n.param_hi);
+    r.nodes.try_set(wrapping_add(at, TERMS), n.terms);
+    r.nodes.try_set(wrapping_add(at, TERMS_SLASH), n.terms_slash);
 }
 
 // `Router::insert`: the route id, or why it was refused. The router is
@@ -394,8 +492,8 @@ pub fn router_core_insert(inout r: RouterCore, in method: Slice[u8], in pattern:
         let mut current = node_at(in r, node);
         if piece.param {
             if current.param_child == none() {
-                let child = r.nodes.len();
-                r.nodes.push(fresh_node());
+                let child = node_count(in r);
+                push_node(inout r, fresh_node());
                 current.param_child = child;
                 current.param_lo = r.names.len();
                 for i in piece.lo..piece.hi {
@@ -408,21 +506,21 @@ pub fn router_core_insert(inout r: RouterCore, in method: Slice[u8], in pattern:
         } else {
             let found = static_child(in r, node, in pattern, piece.lo, piece.hi);
             if found == none() {
-                let child = r.nodes.len();
-                r.nodes.push(fresh_node());
+                let child = node_count(in r);
+                push_node(inout r, fresh_node());
                 let key_lo = r.keys.len();
                 for i in piece.lo..piece.hi {
                     r.keys.push(byte(in pattern, i));
                 }
-                let e = r.edges.len();
-                r
-                    .edges
-                    .push(
+                let e = r.edges.len() / EDGE_WORDS;
+                let key_hi = r.keys.len();
+                push_edge(
+                    inout r,
                     Edge {
                         next: current.first_static,
                         child: child,
                         key_lo: key_lo,
-                        key_hi: r.keys.len()
+                        key_hi: key_hi
                     }
                 );
                 current.first_static = e;
@@ -474,7 +572,8 @@ pub fn router_core_resolve(
         return not_found();
     }
     let mut work: u64 = 0;
-    let mut captured: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](ends.len());
+    // Allocated by the first capture only: a static route needs none.
+    let mut captured: ChunkSeq[u64] = ChunkSeq::new[u64]();
     let node = find_path(in r, 0, in segments, in ends, trailing, 0, inout captured, inout work);
     if node == work_exhausted() {
         Fail::raise(RouteFault::WorkLimit);
@@ -482,7 +581,7 @@ pub fn router_core_resolve(
     if node == none() {
         return not_found();
     }
-    let first = terms_of(node_at(in r, node), trailing);
+    let first = terms_at(in r, node, trailing);
     let exact = find_term(in r, first, in method, 0, method.len());
     let mut head_fallback = false;
     let mut t = exact;

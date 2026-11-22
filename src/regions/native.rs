@@ -52,6 +52,45 @@ impl<M: Module> Codegen<'_, '_, M> {
         Ok(self.b.inst_results(call)[0])
     }
 
+    /// The `numeric` hook's `REGION` request of `kind` with `words` after
+    /// `[kind, jit]` (`codegen_swap::numeric::REGION` documents them), or
+    /// `None` when no hook is in effect, the hook declines, or the Rust
+    /// code would report an error. The runtime is defined first, as
+    /// `region_call` does.
+    fn swap_region(&mut self, kind: u64, words: &[u64]) -> Result<Option<ir::Value>, String> {
+        use crate::codegen_swap::{self, Family, numeric as n};
+        if codegen_swap::hook(Family::Numeric).is_none() {
+            return Ok(None);
+        }
+        let jit = std::any::type_name::<M>().contains("JITModule");
+        if !jit {
+            if self.m.isa().triple().operating_system == target_lexicon::OperatingSystem::None_ {
+                return Ok(None);
+            }
+            aot_runtime::define(self.m)?;
+        }
+        let mut all = vec![kind, u64::from(jit)];
+        all.extend_from_slice(words);
+        Ok(self.swap_numeric(n::REGION, &all))
+    }
+
+    /// The payload words of a `REGION` request for `ty`: `[size,
+    /// aggregate, type]`, or `None` for a 128-bit scalar (two words, which
+    /// the Rust code splits) or a type without a layout.
+    fn region_payload_words(&self, ty: &Type) -> Option<[u64; 3]> {
+        let layout = Layout::of(self.world, ty).ok()?;
+        let t = if layout.aggregate() {
+            0
+        } else {
+            let t = scalar(ty, &[]).ok()?;
+            if t == types::I128 {
+                return None;
+            }
+            crate::codegen_swap::ty_code(t)
+        };
+        Some([u64::from(layout.size), u64::from(layout.aggregate()), t])
+    }
+
     /// Entry of a region block (`None` for other handlers).
     pub(super) fn region_enter(
         &mut self,
@@ -61,11 +100,17 @@ impl<M: Module> Codegen<'_, '_, M> {
         let Some(capacity) = regions::block_capacity(effect, ret) else {
             return Ok(None);
         };
-        let c = self.b.ins().iconst(
-            types::I64,
-            i64::try_from(capacity).map_err(|e| e.to_string())?,
-        );
-        let id = self.region_call("vesper_region_open", &[c])?;
+        let capacity = i64::try_from(capacity).map_err(|e| e.to_string())?;
+        // SH4 swap point (#1285): the `numeric` hook may emit each step
+        // of the block (`codegen_swap::numeric::REGION`).
+        let open = crate::codegen_swap::numeric::REGION_OPEN;
+        let id = match self.swap_region(open, &[capacity as u64])? {
+            Some(id) => id,
+            None => {
+                let c = self.b.ins().iconst(types::I64, capacity);
+                self.region_call("vesper_region_open", &[c])?
+            }
+        };
         let var = self.b.declare_var(types::I64);
         self.b.def_var(var, id);
         Ok(Some(var))
@@ -77,7 +122,13 @@ impl<M: Module> Codegen<'_, '_, M> {
             && self.b.current_block().is_some()
         {
             let id = self.b.use_var(var);
-            self.region_call("vesper_region_close", &[id])?;
+            let w = crate::codegen_swap::word(id);
+            if self
+                .swap_region(crate::codegen_swap::numeric::REGION_CLOSE, &[w])?
+                .is_none()
+            {
+                self.region_call("vesper_region_close", &[id])?;
+            }
         }
         Ok(())
     }
@@ -109,11 +160,18 @@ impl<M: Module> Codegen<'_, '_, M> {
                 .ok_or_else(|| format!("native region operation '{op}' expects a RegionBox"))
         };
         let id = self.b.use_var(region);
+        use crate::codegen_swap::{numeric as n, word};
         match op {
             "box" => {
                 let ty = self.ty(&args[0].expr);
                 let layout = Layout::of(self.world, &ty)?;
                 let value = self.expr(&args[0].expr)?;
+                if let Some(p) = self.region_payload_words(&ty) {
+                    let words = [word(id), word(value), p[0], p[1], p[2]];
+                    if let Some(handle) = self.swap_region(n::REGION_BOX, &words)? {
+                        return Ok(handle);
+                    }
+                }
                 let size = self.b.ins().iconst(types::I64, i64::from(layout.size));
                 let handle = self.region_call("vesper_region_alloc", &[id, size])?;
                 self.region_store_payload(id, handle, &layout, value)?;
@@ -122,6 +180,17 @@ impl<M: Module> Codegen<'_, '_, M> {
             "get" | "take" => {
                 let ty = payload_of(self, &args[0].expr)?;
                 let handle = self.expr(&args[0].expr)?;
+                if let Some(p) = self.region_payload_words(&ty) {
+                    let kind = if op == "take" {
+                        n::REGION_TAKE
+                    } else {
+                        n::REGION_GET
+                    };
+                    let words = [word(id), word(handle), p[0], p[1], p[2]];
+                    if let Some(value) = self.swap_region(kind, &words)? {
+                        return Ok(value);
+                    }
+                }
                 let value = self.region_load_payload(id, handle, &ty)?;
                 if op == "take" {
                     self.region_call("vesper_region_release", &[id, handle])?;
@@ -133,12 +202,29 @@ impl<M: Module> Codegen<'_, '_, M> {
                 let layout = Layout::of(self.world, &ty)?;
                 let handle = self.expr(&args[0].expr)?;
                 let value = self.expr(&args[1].expr)?;
+                if let Some(p) = self.region_payload_words(&ty) {
+                    let words = [word(id), word(handle), word(value), p[0], p[1], p[2]];
+                    if let Some(zero) = self.swap_region(n::REGION_SET, &words)? {
+                        return Ok(zero);
+                    }
+                }
                 self.region_store_payload(id, handle, &layout, value)?;
                 Ok(self.zero())
             }
-            "checkpoint" => self.region_call("vesper_region_checkpoint", &[id]),
+            "checkpoint" => match self.swap_region(n::REGION_CHECKPOINT, &[word(id)])? {
+                Some(v) => Ok(v),
+                None => self.region_call("vesper_region_checkpoint", &[id]),
+            },
             "rewind" | "commit" => {
                 let mark = self.expr(&args[0].expr)?;
+                let kind = if op == "rewind" {
+                    n::REGION_REWIND
+                } else {
+                    n::REGION_COMMIT
+                };
+                if let Some(v) = self.swap_region(kind, &[word(id), word(mark)])? {
+                    return Ok(v);
+                }
                 let name = if op == "rewind" {
                     "vesper_region_rewind"
                 } else {
@@ -146,7 +232,10 @@ impl<M: Module> Codegen<'_, '_, M> {
                 };
                 self.region_call(name, &[id, mark])
             }
-            "used" => self.region_call("vesper_region_used", &[id]),
+            "used" => match self.swap_region(n::REGION_USED, &[word(id)])? {
+                Some(v) => Ok(v),
+                None => self.region_call("vesper_region_used", &[id]),
+            },
             _ => Err(format!("unknown region operation '{op}'")),
         }
     }

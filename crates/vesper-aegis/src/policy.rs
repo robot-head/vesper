@@ -6,8 +6,6 @@ use crate::chain::TrustRoot;
 use crate::claims::{
     AttestationClaims, GuestRuntimeClaims, SnpTcbVersion, SupplyChainEvidence, TeeArch,
 };
-#[cfg(not(vesper_port))]
-use crate::claims::{ENCLAVE_FLAG_DEBUG_DISABLED, ct_eq};
 use crate::error::{AegisVerifyError, AttestError};
 use crate::snp::verify_snp_report;
 use crate::tdx::verify_tdx_quote;
@@ -60,15 +58,11 @@ pub struct RelyingPartyPolicy {
 /// The policy words before the allowed architectures, the policy bytes
 /// before the allowed measurements, and a measurement's size
 /// (vesper/src/claims.ves `PW_ARCHS`, `PB_MEASUREMENTS`).
-#[cfg(vesper_port)]
 const PW_HEADER_WORDS: usize = 8;
-#[cfg(vesper_port)]
 const PB_HEADER_BYTES: usize = 64;
-#[cfg(vesper_port)]
 const MEASUREMENT_LEN: usize = 48;
 
 /// this function (`checkPolicy`).
-#[cfg(vesper_port)]
 pub fn verify_attestation_claims(
     claims: &AttestationClaims,
     policy: &RelyingPartyPolicy,
@@ -117,82 +111,6 @@ pub fn verify_attestation_claims(
     }
     crate::port::vesper::verify_attestation_claims(&cw, &cb, &pw, &pb, expected_channel_binding)
         .map_err(crate::port::verify_error)
-}
-
-/// Check normalized claims against `policy`. `expected_channel_binding` is
-/// the SHA-384 binding of the TLS key or transcript the relying party
-/// observed; it is compared in full and in constant time.
-#[cfg(not(vesper_port))]
-pub fn verify_attestation_claims(
-    claims: &AttestationClaims,
-    policy: &RelyingPartyPolicy,
-    expected_channel_binding: &[u8; 48],
-) -> Result<(), AegisVerifyError> {
-    if !policy.allowed_archs.contains(&claims.arch) {
-        return Err(AegisVerifyError::DisallowedTeeArchitecture(claims.arch));
-    }
-    if claims.enclave_flags & ENCLAVE_FLAG_DEBUG_DISABLED == 0 {
-        return Err(AegisVerifyError::EnclaveDebugModeEnabled);
-    }
-    let floor = policy.tcb_floors.for_arch(claims.arch);
-    if claims.tcb_svn < floor {
-        return Err(AegisVerifyError::StaleTcbSvn {
-            actual: claims.tcb_svn,
-            min_required: floor,
-        });
-    }
-    if !policy
-        .allowed_measurements
-        .iter()
-        .any(|(arch, m)| *arch == claims.arch && ct_eq(m, &claims.mr_enclave_sha384))
-    {
-        return Err(AegisVerifyError::BootMeasurementMismatch);
-    }
-    if !ct_eq(&claims.loom_lock_blake3, &policy.expected_loom_blake3) {
-        return Err(AegisVerifyError::SupplyChainLoomLockMismatch);
-    }
-    if !ct_eq(&claims.olean_spec_mif, &policy.expected_olean_mif) {
-        return Err(AegisVerifyError::FormalOleanProofDigestMismatch);
-    }
-    if !ct_eq(&claims.channel_binding, expected_channel_binding)
-        || claims.chan_binding_prefix[..] != expected_channel_binding[..8]
-    {
-        return Err(AegisVerifyError::ChannelTranscriptBindingMismatch);
-    }
-    if claims.arch == TeeArch::AmdSevSnp {
-        let vmpl = claims.snp_vmpl.unwrap_or(u32::MAX);
-        if vmpl > policy.snp_max_vmpl {
-            return Err(AegisVerifyError::DisallowedVmpl {
-                actual: vmpl,
-                max_allowed: policy.snp_max_vmpl,
-            });
-        }
-        if let Some(min) = policy.snp_component_floors {
-            let actual = claims.snp_reported_tcb.unwrap_or_default();
-            for (component, a, m) in [
-                ("bootloader", actual.bootloader, min.bootloader),
-                ("tee", actual.tee, min.tee),
-                ("snp", actual.snp, min.snp),
-                ("microcode", actual.microcode, min.microcode),
-            ] {
-                if a < m {
-                    return Err(AegisVerifyError::StaleSnpTcbComponent {
-                        component,
-                        actual: a,
-                        min_required: m,
-                    });
-                }
-            }
-        }
-    }
-    if policy.require_register_replay
-        && claims.supply_chain_evidence != SupplyChainEvidence::RegisterReplay
-    {
-        return Err(AegisVerifyError::SupplyChainNotRegisterMeasured(
-            claims.arch,
-        ));
-    }
-    Ok(())
 }
 
 /// Channel binding for an RA-TLS server key:

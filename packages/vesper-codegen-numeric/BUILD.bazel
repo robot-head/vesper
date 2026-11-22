@@ -1,7 +1,19 @@
-# @vesper/codegen-numeric (#1285): read by the differential test in
-# crates/vesper-codegen-numeric-test.
+load("//tools/bazel:vesper_port.bzl", "vesper_package")
+
+# @vesper/codegen-numeric (#1285): read by the differential tests in
+# crates/vesper-codegen-numeric-test and crates/vesper-codegen-swap-test.
 filegroup(
     name = "files",
     srcs = glob(["**"], exclude = ["BUILD.bazel"]),
     visibility = ["//visibility:public"],
+)
+
+# The package as a path dependency of the hybrid compiler's
+# codegen_numeric module (#1285).
+vesper_package(
+    name = "codegen_numeric_package",
+    srcs = glob(["src/**/*.ves"]),
+    manifest = "Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = ["//packages/vesper-cranelift:cranelift_package"],
 )

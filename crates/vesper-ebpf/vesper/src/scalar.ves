@@ -248,7 +248,10 @@ fn is_const(s: Scalar) -> bool {
 pub fn scalar_normalize(input: Scalar) -> Option[Scalar] {
     let mut s = input;
     let sign: u64 = 9223372036854775808;
+    // Each round is a function of `s` alone, so a round that changes
+    // nothing has reached the fixpoint the remaining rounds would keep.
     for round in 0..3 {
+        let before = s;
         // tnum -> intervals
         s.umin = max_u64(s.umin, s.var.value);
         s.umax = min_u64(s.umax, s.var.value | s.var.mask);
@@ -282,14 +285,26 @@ pub fn scalar_normalize(input: Scalar) -> Option[Scalar] {
         if s.umin > s.umax || s.smin > s.smax {
             return Option::None;
         }
-        // intervals -> tnum
-        match tnum_intersect(s.var, tnum_range(s.umin, s.umax)) {
-            Option::Some(t) => {
-                s.var = t;
-            },
-            Option::None => {
-                return Option::None;
-            },
+        // intervals -> tnum: `tnum_intersect(s.var, tnum_range(..))`, inline
+        let chi = s.umin ^ s.umax;
+        let width = wrapping_sub(64, widen_u64(leading_zeros_u64(chi)));
+        let mut rv: u64 = 0;
+        let mut rm: u64 = umax();
+        if width <= 63 {
+            rm = wrapping_sub(shl(1, width), 1);
+            rv = s.umin & ~rm;
+        }
+        if (s.var.value ^ rv) & (~s.var.mask & ~rm) != 0 {
+            return Option::None;
+        }
+        let mu = s.var.mask & rm;
+        let value = (s.var.value | rv) & ~mu;
+        let moved_u = (s.umin ^ before.umin) | (s.umax ^ before.umax);
+        let moved_s = (bits(s.smin) ^ bits(before.smin)) | (bits(s.smax) ^ bits(before.smax));
+        let moved = moved_u | moved_s | (value ^ before.var.value) | (mu ^ before.var.mask);
+        s.var = tn(value, mu);
+        if moved == 0 {
+            break;
         }
     }
     if s.umin > s.umax || s.smin > s.smax {
@@ -581,13 +596,6 @@ fn pair(a: Scalar, b: Scalar) -> Option[(Scalar, Scalar)] {
     Option::Some((a, b))
 }
 
-fn swapped(r: Option[(Scalar, Scalar)]) -> Option[(Scalar, Scalar)] {
-    match r {
-        Option::Some((x, y)) => Option::Some((y, x)),
-        Option::None => Option::None,
-    }
-}
-
 fn known_zero_bits(c: u64) -> Scalar {
     let u = scalar_unknown();
     parts(u.umin, u.umax, u.smin, u.smax, tn(0, ~c))
@@ -632,11 +640,27 @@ pub fn refine_jmp(op: JmpOp, wide: bool, a: Scalar, b: Scalar, holds: bool)
             }
             return pair(a, b);
         }
-        return refine_jmp(negate(op), true, a, b, true);
     }
+    // `a op b` failing is `a negate(op) b` holding, and `a < b` is `b > a`:
+    // one comparison of the four directions, its operands maybe swapped.
+    let mut o = op;
+    if !holds {
+        o = negate(op);
+    }
+    let flip = o == JmpOp::Lt || o == JmpOp::Le || o == JmpOp::SLt || o == JmpOp::SLe;
     let mut x = a;
     let mut y = b;
-    match op {
+    if flip {
+        x = b;
+        y = a;
+        o = match o {
+            JmpOp::Lt => JmpOp::Gt,
+            JmpOp::Le => JmpOp::Ge,
+            JmpOp::SLt => JmpOp::SGt,
+            _ => JmpOp::SGe,
+        };
+    }
+    match o {
         JmpOp::Eq => {
             return match scalar_meet(x, y) {
                 Option::Some(m) => pair(m, m),
@@ -689,12 +713,6 @@ pub fn refine_jmp(op: JmpOp, wide: bool, a: Scalar, b: Scalar, holds: bool)
             x.umin = max_u64(x.umin, y.umin);
             y.umax = min_u64(y.umax, x.umax);
         },
-        JmpOp::Lt => {
-            return swapped(refine_jmp(JmpOp::Gt, true, y, x, true));
-        },
-        JmpOp::Le => {
-            return swapped(refine_jmp(JmpOp::Ge, true, y, x, true));
-        },
         JmpOp::SGt => {
             if y.smin == smax_i64() || x.smax == smin_i64() {
                 return Option::None;
@@ -706,16 +724,15 @@ pub fn refine_jmp(op: JmpOp, wide: bool, a: Scalar, b: Scalar, holds: bool)
             x.smin = max_i64(x.smin, y.smin);
             y.smax = min_i64(y.smax, x.smax);
         },
-        JmpOp::SLt => {
-            return swapped(refine_jmp(JmpOp::SGt, true, y, x, true));
-        },
-        JmpOp::SLe => {
-            return swapped(refine_jmp(JmpOp::SGe, true, y, x, true));
-        },
+        _ => {},
     }
     match scalar_normalize(x) {
         Option::Some(nx) => match scalar_normalize(y) {
-            Option::Some(ny) => pair(nx, ny),
+            Option::Some(ny) => if flip {
+                pair(ny, nx)
+            } else {
+                pair(nx, ny)
+            },
             Option::None => Option::None,
         },
         Option::None => Option::None,

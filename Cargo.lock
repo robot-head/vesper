@@ -5592,12 +5592,13 @@ dependencies = [
  "salsa",
  "serde",
  "serde_json",
+ "sha2",
  "stacker",
  "target-lexicon",
- "vesper-aegis-seed",
  "vesper-alloc-seed",
  "vesper-beacon-seed",
  "vesper-bench-seed",
+ "vesper-blake3-sys",
  "vesper-chrono",
  "vesper-core",
  "vesper-crucible-seed",
@@ -5653,31 +5654,10 @@ dependencies = [
  "serde_json",
  "spki",
  "subtle",
- "vesper-aegis-seed",
  "vesper-bench",
  "vesper-loom-cas",
  "vesper-port-abi",
  "vesper-port-harness",
- "vesper-vault",
- "x509-parser",
- "zeroize",
-]
-
-[[package]]
-name = "vesper-aegis-seed"
-version = "0.1.0"
-dependencies = [
- "chacha20poly1305",
- "coset",
- "rcgen",
- "ring",
- "rustls-pki-types",
- "rustls-webpki",
- "serde",
- "serde_json",
- "spki",
- "subtle",
- "vesper-loom-cas",
  "vesper-vault",
  "x509-parser",
  "zeroize",
@@ -5794,6 +5774,14 @@ dependencies = [
 [[package]]
 name = "vesper-bench-seed"
 version = "0.1.0"
+
+[[package]]
+name = "vesper-blake3-sys"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "cc",
+]
 
 [[package]]
 name = "vesper-chorus"
@@ -6032,6 +6020,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "vesper-bench",
+ "vesper-blake3-sys",
  "vesper-fmt-seed",
  "vesper-lean-syntax-seed",
  "vesper-port-abi",
@@ -6189,7 +6178,6 @@ dependencies = [
  "stacker",
  "target-lexicon",
  "vesper",
- "vesper-aegis-seed",
  "vesper-alloc-seed",
  "vesper-beacon-seed",
  "vesper-bench-pmu",
@@ -6862,8 +6850,8 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
+ "sha2",
  "vesper",
- "vesper-aegis-seed",
  "vesper-beacon-seed",
  "vesper-bench-pmu",
  "vesper-bench-seed",
@@ -6872,6 +6860,7 @@ dependencies = [
  "vesper-ffi",
  "vesper-fmt-seed",
  "vesper-grammar-seed",
+ "vesper-highlight-seed",
  "vesper-loom-admission",
  "vesper-loom-audit-seed",
  "vesper-loom-calculus-seed",
@@ -6882,6 +6871,7 @@ dependencies = [
  "vesper-semver-seed",
  "vesper-serde-seed",
  "vesper-simd",
+ "vesper-span-seed",
 ]
 
 [[package]]
@@ -6949,16 +6939,21 @@ dependencies = [
  "chacha20 0.9.1",
  "chacha20poly1305",
  "hkdf",
- "poly1305",
- "polyval",
  "sha2",
- "subtle",
+ "vesper-bench",
+ "vesper-crypto-sys",
+ "vesper-port-abi",
+ "vesper-port-harness",
  "zeroize",
 ]
 
 [[package]]
 name = "vesper-warp-shard"
 version = "0.1.0"
+dependencies = [
+ "vesper-port-abi",
+ "vesper-port-harness",
+]
 
 [[package]]
 name = "vesper-warp-tcp"

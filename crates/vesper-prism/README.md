@@ -1,12 +1,15 @@
 # Prism HTTP/1.1 framing milestones
 
-> **Port freeze (2026-11-17):** this crate is being ported to Vesper (port
-> wave P1 lane 14, [#911](https://github.com/robot-head/vesper/issues/911)).
-> Its Rust code takes bug fixes only. `bench-abba.sh` compares the Rust build
-> with the Vesper build (`--features vesper-port`) on a pipelined batch; see
-> [the port parity report](../../docs/parallel-results/port-parity-prism.md).
+> **Implemented in Vesper (2026-11-21):** the decoder, response encoder,
+> target parser, router and connection state machine are the Loom packages in
+> `vesper/` (port wave P1 lane 14, [#911](https://github.com/robot-head/vesper/issues/911)),
+> and their Rust implementation is deleted (SH6 lane 5,
+> [#1400](https://github.com/robot-head/vesper/issues/1400)). The Rust code left
+> is the public API, thin adapters and the middleware chain (`service.rs`).
+> `bench-abba.sh` compares the port with the last Rust build on a pipelined
+> batch; see [the report](../../docs/parallel-results/rust-exit-prism.md).
 
-This is a safe, dependency-free Rust host library for a bounded part of expanded
+This is a host library for a bounded part of expanded
 [manuscript §33](../../docs/manuscript/README.md). It is not the Prism server or its source-language APIs.
 
 ```rust
