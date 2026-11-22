@@ -30,10 +30,11 @@
 //!   single call site in the program and is at most
 //!   [`Budget::single_site_callee`] instructions;
 //! * its effect row is empty, or it is exactly the caller's row and holds only
-//!   unlabeled `Fail[E]` instances. A raise in the inlined body then performs
-//!   the caller's `Fail[E]` capability, which is what the caller's re-raise
-//!   after the call did. Rows with labels, tails or capability effects are
-//!   not inlined, and callers whose row names a capability effect
+//!   unlabeled `Fail[E]` instances, or the callee has no loop and its
+//!   unlabeled `Fail[E]` instances are all in the caller's row (#1502).
+//!   A raise in the inlined body then performs the caller's `Fail[E]`
+//!   capability, which is what the caller's re-raise after the call did.
+//!   Rows with labels, tails or capability effects are not inlined, and callers whose row names a capability effect
 //!   (`ConstTime`, `Realtime`, `DetFloat`) are left alone so the per-function
 //!   capability verifiers see the code they saw before, and so are callers
 //!   holding `Box` values, whose drops are placed per block;
@@ -494,6 +495,27 @@ fn fail_row_only(effects: &Effects) -> bool {
             .all(|e| e.name == "Fail" && e.label.is_none() && e.args.len() == 1)
 }
 
+/// Whether `callee` may be inlined into a caller whose row is `caller`:
+/// the callee's row is empty or equal to the caller's, or the callee has no
+/// loop and every instance of its row (unlabeled `Fail[E]` only, see
+/// [`fail_row_only`]) is also in the caller's row (#1502). A raise in the
+/// inlined body then performs the caller's `Fail[E]`, the instance that the
+/// caller's re-raise after the call selected by its error type. A narrower
+/// callee with a loop stays a call: such kernels are kept apart on purpose,
+/// since a merged loop nest spills in the native backend (Resonance's
+/// `accumulate2` into `sum_inputs`, 1.0G to 1.8G instructions).
+fn row_within(callee: &FunctionIr, caller: &Effects) -> bool {
+    let row = &callee.effects;
+    if row.instances.is_empty() || row == caller {
+        return true;
+    }
+    let looped = callee
+        .blocks
+        .iter()
+        .any(|b| b.instructions.iter().any(|i| matches!(i.op, Op::Loop)));
+    !looped && fail_row_only(row) && row.instances.iter().all(|e| caller.instances.contains(e))
+}
+
 fn mentions_function(world: &World, t: &Type) -> bool {
     crate::source_analysis::contains_function(world, t)
 }
@@ -720,7 +742,7 @@ fn site_bindings(
     if args.len() != callee.params.len() || caller.values.get(&dest) != Some(&callee.result) {
         return Err("signature");
     }
-    if !callee.effects.instances.is_empty() && callee.effects != caller.effects {
+    if !row_within(callee, &caller.effects) {
         return Err("effect row differs from the caller's");
     }
     if !caller.bounds.is_empty() {

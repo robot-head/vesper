@@ -54,7 +54,7 @@ CRATES = {
     "vesper-bench": ("partial", "in crate", "2.2-3.2x", "timers via bench-pmu", "7"),
     "vesper-aegis": ("partial", "in crate", "unmeasured", "X.509, webpki, ECDSA stay behind the crypto shim; rest ports", "8"),
     "vesper-kinetic": ("partial", "in crate", "1.83x+", "detfloat, simd, threaded world", "9"),
-    "vesper-resonance": ("partial", "in crate", "5.0-5.3x", "realtime rings, f32 kernels", "9"),
+    "vesper-resonance": ("partial", "in crate", "pid 1.05x; events 4.8x, slab 2.1x", "realtime rings, f32 kernels; per-sample export calls (events)", "9"),
     "vesper-silicon": ("partial", "in crate", "unmeasured", "SVD model, stack/prologue/hazard analysis (Cranelift IR), mmio", "10"),
     "vesper-ebpf": ("partial", "in crate", "1.2-4.7x", "BTF writers, ELF, bpf() syscalls", "10"),
     "vesper-serde": ("partial", "in crate", "4.8-5.7x", "SIMD stage 1 needs source vectors", "11"),
@@ -69,7 +69,7 @@ CRATES = {
     # The compiler's own crates.
     "vesper-syntax": ("compiler", "packages/vesper-front", "parse swap 1.03x corpus", "editor mode, lossless CST users", "SH1/2"),
     "vesper-core": ("compiler", "packages/vesper-ast", "in parse swap", "", "SH1/2"),
-    "vesper-span": ("compiler", "in crate", "pilot", "", "2"),
+    "vesper-span": ("compiler", "in crate", "edits 1.68x, lookup 1.35x, index 0.32x", "edits codegen (check_edits)", "2"),
     "vesper-diagnostics": ("compiler", "in crate", "pilot", "", "2"),
     "vesper-lean-syntax": ("compiler", "in crate", "pilot", "", "2"),
     "vesper-fmt": ("compiler", "in crate", "unmeasured", "", "2"),
