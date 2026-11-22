@@ -256,7 +256,20 @@ pub fn answer(words: &[u64]) -> Result<Vec<u8>, u64> {
 /// other function as a command entry (parameters, strings among them) and
 /// `run` as a Nexus plugin.
 fn rust_artifacts() -> &'static [(String, usize, WasmArtifact)] {
-    static A: OnceLock<Vec<(String, usize, WasmArtifact)>> = OnceLock::new();
+    &compiled().0
+}
+
+/// The compilations behind `rust_artifacts`, in its order: the case's
+/// world, the entry and the options (the flip gate's `build` workload).
+type Job = (&'static World, String, WasmOptions);
+
+fn jobs() -> &'static [Job] {
+    &compiled().1
+}
+
+#[allow(clippy::type_complexity)]
+fn compiled() -> &'static (Vec<(String, usize, WasmArtifact)>, Vec<Job>) {
+    static A: OnceLock<(Vec<(String, usize, WasmArtifact)>, Vec<Job>)> = OnceLock::new();
     A.get_or_init(|| {
         let quiet = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
@@ -266,10 +279,12 @@ fn rust_artifacts() -> &'static [(String, usize, WasmArtifact)] {
                 .and_then(Result::ok)
         };
         let mut out = vec![];
+        let mut jobs: Vec<Job> = vec![];
         for c in cases().iter().step_by(step()) {
             for (k, o) in configs().iter().enumerate() {
                 if let Some(a) = compile(&c.world, "main", o) {
                     out.push((c.name.clone(), k, a));
+                    jobs.push((&c.world, "main".into(), o.clone()));
                 }
             }
             let mut entries: Vec<&String> = c.world.functions.keys().collect();
@@ -281,6 +296,7 @@ fn rust_artifacts() -> &'static [(String, usize, WasmArtifact)] {
                 let o = &configs()[0];
                 if let Some(a) = compile(&c.world, entry, o) {
                     out.push((format!("{}::{entry}", c.name), 0, a));
+                    jobs.push((&c.world, entry.clone(), o.clone()));
                 }
                 let plugin = WasmOptions {
                     world: WasmWorld::NexusPlugin,
@@ -288,11 +304,12 @@ fn rust_artifacts() -> &'static [(String, usize, WasmArtifact)] {
                 };
                 if let Some(a) = compile(&c.world, entry, &plugin) {
                     out.push((format!("{}::{entry} (plugin)", c.name), 0, a));
+                    jobs.push((&c.world, entry.clone(), plugin));
                 }
             }
         }
         std::panic::set_hook(quiet);
-        out
+        (out, jobs)
     })
 }
 
@@ -367,6 +384,12 @@ fn port_matches_wit_component() {
     for d in t.diffs.iter().take(40) {
         eprintln!("DIFF {d}");
     }
+    // scripts/ci/flip-gate/wit-component.toml reads this line.
+    println!(
+        "flip-gate differential differences={} cases={}",
+        t.diffs.len(),
+        t.compared
+    );
     assert!(t.diffs.is_empty(), "{} differences", t.diffs.len());
     assert!(
         t.identical * step() >= 1000,
@@ -445,6 +468,113 @@ fn timing() {
     };
     eprintln!("{} components, {} reps", work.len(), reps);
     abba("wit-component wrap", &mut rust, &mut port);
+}
+
+/// The port as the `component` hook of `vesper::codegen_swap`.
+fn port_component(core: &[u8], wit: &str, world: WasmWorld) -> Option<Vec<u8>> {
+    static F: OnceLock<Entry> = OnceLock::new();
+    let f = F.get_or_init(|| package().entry("wit_component_wrap", true));
+    answer(&f.words(&wrap_input(core, wit, world))).ok()
+}
+
+/// The flip gate's ABBA workloads (scripts/ci/flip-gate/wit-component.toml;
+/// `CHECK_HARNESS_SPEED=1`, release build). Each epoch runs Rust, Vesper,
+/// Vesper, Rust and prints one pair per epoch in the gate's
+/// `flip-gate pairs` format (`WIT_COMPONENT_GATE_EPOCHS`, default 12;
+/// `WIT_COMPONENT_GATE_WORKLOAD` runs only one):
+/// - `wrap`: every component from its core module and WIT, Rust's
+///   `component::encode` against the port.
+/// - `build`: `wasm_backend::compile` of every input (the whole wasm
+///   build, backend and wrap) without and with the port as the
+///   `component` hook.
+#[test]
+#[ignore]
+fn flip_gate() {
+    if !speed() {
+        return;
+    }
+    let epochs: usize = std::env::var("WIT_COMPONENT_GATE_EPOCHS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(12);
+    let only = std::env::var("WIT_COMPONENT_GATE_WORKLOAD").ok();
+    let wants = |w: &str| only.as_deref().is_none_or(|o| o == w);
+    let f = package().entry("wit_component_wrap", true);
+    let work: Vec<_> = rust_artifacts()
+        .iter()
+        .map(|(_, _, a)| (a, wrap_input(&a.core, &a.wit, a.world)))
+        .collect();
+    let rust = || {
+        time(|| {
+            for (a, _) in &work {
+                std::hint::black_box(rust_encode(a.core.clone(), &a.wit, a.world));
+            }
+        })
+        .as_nanos()
+    };
+    let port = || {
+        time(|| {
+            for (_, input) in &work {
+                std::hint::black_box(f.words(input));
+            }
+        })
+        .as_nanos()
+    };
+    let hooks = vesper::codegen_swap::CodegenHooks {
+        component: Some(port_component),
+        ..Default::default()
+    };
+    let build = |vesper: bool| {
+        let run = || {
+            time(|| {
+                for (w, entry, o) in jobs() {
+                    std::hint::black_box(wasm_backend::compile(w, entry, o).ok());
+                }
+            })
+            .as_nanos()
+        };
+        if vesper {
+            vesper::codegen_swap::with_hooks(hooks, run)
+        } else {
+            run()
+        }
+    };
+    let (mut wrap_pairs, mut build_pairs) = (String::new(), String::new());
+    // Warm-up, untimed; the hooked build must give Rust's components.
+    if wants("wrap") {
+        rust();
+        port();
+    }
+    if wants("build") {
+        build(false);
+        build(true);
+        let same = vesper::codegen_swap::with_hooks(hooks, || {
+            jobs()
+                .iter()
+                .zip(rust_artifacts())
+                .all(|((w, e, o), (_, _, a))| {
+                    wasm_backend::compile(w, e, o).is_ok_and(|b| b.component == a.component)
+                })
+        });
+        assert!(same, "the hooked build's components differ from Rust's");
+    }
+    for _ in 0..epochs {
+        if wants("wrap") {
+            let (r1, v1, v2, r2) = (rust(), port(), port(), rust());
+            wrap_pairs += &format!(" {}:{}", r1 + r2, v1 + v2);
+        }
+        if wants("build") {
+            let (r1, v1, v2, r2) = (build(false), build(true), build(true), build(false));
+            build_pairs += &format!(" {}:{}", r1 + r2, v1 + v2);
+        }
+    }
+    eprintln!("{} components", work.len());
+    if wants("wrap") {
+        println!("flip-gate pairs wrap{wrap_pairs}");
+    }
+    if wants("build") {
+        println!("flip-gate pairs build{build_pairs}");
+    }
 }
 
 /// src/wasm_backend/component.rs `encode` (the module is crate-private).
