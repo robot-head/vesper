@@ -306,14 +306,14 @@ impl Facts {
         self
             .terms
             .push(
-            TermNode {
-                kind: kind,
-                a: a,
-                b: b,
-                c: c,
-                exact: exact
-            }
-        );
+                TermNode {
+                    kind: kind,
+                    a: a,
+                    b: b,
+                    c: c,
+                    exact: exact
+                }
+            );
         id
     }
 
@@ -332,15 +332,9 @@ impl Facts {
                 return (0, 0, 0);
             }
             let i = f.inst(d);
-            if i
-                .op
-                == OP_BINARY
-                && i
-                .sub
-                >= B_LT
-                && i
-                .sub
-                <= B_GE
+            if i.op == OP_BINARY
+                && i.sub >= B_LT
+                && i.sub <= B_GE
                 && unsigned_word(in f, i.a)
                 && unsigned_word(in f, i.b) {
                 return (i.sub, i.a, i.b);
@@ -394,27 +388,27 @@ impl Facts {
                 self
                     .edges
                     .push(
-                    Edge {
-                        from: d,
-                        to: k.yes,
-                        lhs: yl,
-                        rhs: yr,
-                        strict: ys
-                    }
-                );
+                        Edge {
+                            from: d,
+                            to: k.yes,
+                            lhs: yl,
+                            rhs: yr,
+                            strict: ys
+                        }
+                    );
             }
             if k.no != d && self.g.only_pred(w(k.no), d) {
                 self
                     .edges
                     .push(
-                    Edge {
-                        from: d,
-                        to: k.no,
-                        lhs: nl,
-                        rhs: nr,
-                        strict: ns
-                    }
-                );
+                        Edge {
+                            from: d,
+                            to: k.no,
+                            lhs: nl,
+                            rhs: nr,
+                            strict: ns
+                        }
+                    );
             }
         }
     }
@@ -432,9 +426,7 @@ impl Facts {
         let mut borrowed = false;
         for p in 0..f.params.len() {
             let q = f.param(p);
-            if q
-                .name
-                == root
+            if q.name == root
                 && (q.pass == P_IN || (q.pass == P_INOUT && whole && (q.flags & TY_SLICE) != 0)) {
                 borrowed = true;
             }
@@ -580,20 +572,10 @@ impl Facts {
             return false;
         }
         if x.kind == K_ADD {
-            return x
-                .b
-                == y
-                .b
-                && x
-                .c
-                == y
-                .c
-                && x
-                .exact
-                == y
-                .exact
-                && self
-                .term_eq(n32(x.a), n32(y.a));
+            return x.b == y.b
+                && x.c == y.c
+                && x.exact == y.exact
+                && self.term_eq(n32(x.a), n32(y.a));
         }
         x.a == y.a && x.b == y.b && x.c == y.c
     }
@@ -671,10 +653,8 @@ impl Facts {
             } else {
                 qk
             };
-            return !self
-                .block_changes(in f, pb, mode, arg)
-                && !self
-                .any_changes(in f, pb, from, qk, mode, arg);
+            return !self.block_changes(in f, pb, mode, arg)
+                && !self.any_changes(in f, pb, from, qk, mode, arg);
         }
         let n = f.nblocks();
         // Forward from p's successors, never through p's block again.
@@ -733,10 +713,8 @@ impl Facts {
         }
         for b in 0..n {
             if u8_at(in forward, b) != 0 && u8_at(in back, b) != 0 && n32(b) != qb {
-                if self
-                    .block_changes(in f, n32(b), mode, arg)
-                    || self
-                    .any_changes(in f, n32(b), 0, NONE64, mode, arg) {
+                if self.block_changes(in f, n32(b), mode, arg)
+                    || self.any_changes(in f, n32(b), 0, NONE64, mode, arg) {
                     return false;
                 }
             }
@@ -763,20 +741,10 @@ impl Facts {
             return x.a == y.a && self.unchanged(in f, n32(x.a), n32(x.b), x.c, n32(y.b), y.c);
         }
         if x.kind == K_ADD && y.kind == K_ADD {
-            return x
-                .b
-                == y
-                .b
-                && x
-                .c
-                == y
-                .c
-                && x
-                .exact
-                == y
-                .exact
-                && self
-                .same(in f, n32(x.a), n32(y.a));
+            return x.b == y.b
+                && x.c == y.c
+                && x.exact == y.exact
+                && self.same(in f, n32(x.a), n32(y.a));
         }
         if x.kind == K_LEN && y.kind == K_LEN {
             return x.a == y.a && self.length_kept(in f, n32(x.a), n32(x.b), x.c, n32(y.b), y.c);
@@ -822,10 +790,8 @@ impl Facts {
             let l = self.term(in f, e.lhs);
             let r = self.term(in f, e.rhs);
             let ok = if e.strict {
-                self
-                    .index_is(in f, l, t)
-                    && self
-                    .at_most_len(in f, r, place, tb, tk, e.from, inc(depth))
+                self.index_is(in f, l, t)
+                    && self.at_most_len(in f, r, place, tb, tk, e.from, inc(depth))
             } else {
                 self.same(in f, l, t) && self.below_len(in f, r, place, tb, tk, e.from, inc(depth))
             };
@@ -852,13 +818,9 @@ impl Facts {
             return false;
         }
         let x = self.node(t);
-        if x
-            .kind
-            == K_LEN
-            && n32(x.a)
-            == place
-            && self
-            .length_kept(in f, place, n32(x.b), x.c, tb, tk) {
+        if x.kind == K_LEN
+            && n32(x.a) == place
+            && self.length_kept(in f, place, n32(x.b), x.c, tb, tk) {
             return true;
         }
         // A join of values that are each at most the length (`min`).
@@ -895,10 +857,8 @@ impl Facts {
             }
             let l = self.term(in f, e.lhs);
             let r = self.term(in f, e.rhs);
-            if self
-                .same(in f, l, t)
-                && self
-                .at_most_len(in f, r, place, tb, tk, e.from, inc(depth)) {
+            if self.same(in f, l, t)
+                && self.at_most_len(in f, r, place, tb, tk, e.from, inc(depth)) {
                 return true;
             }
         }

@@ -1136,19 +1136,11 @@ pub fn exports(inout l: L) -> ChunkSeq[u8] eff [Fail[WErr]] {
         core_result.push(VT_I32);
     }
     if plugin {
-        let ok = scalars
-            .len()
-            == 2
-            && k_at(in scalars, 0)
-            == SC_U32
-            && k_at(in scalars, 1)
-            == SC_U64
-            && shape
-            .kind
-            == SH_SCALAR
-            && shape
-            .scalar
-            == SC_I64;
+        let ok = scalars.len() == 2
+            && k_at(in scalars, 0) == SC_U32
+            && k_at(in scalars, 1) == SC_U64
+            && shape.kind == SH_SCALAR
+            && shape.scalar == SC_I64;
         if !ok {
             Fail::raise(werr(K_ENTRY, 0, 25));
         }
@@ -1177,8 +1169,8 @@ pub fn exports(inout l: L) -> ChunkSeq[u8] eff [Fail[WErr]] {
         let p = l.cx.f.param(add(sig.p0, i));
         args
             .push(
-            lift(inout l, inout c, inout locals, nparams, p.ty, in flat_params, inout cursor)
-        );
+                lift(inout l, inout c, inout locals, nparams, p.ty, in flat_params, inout cursor)
+            );
     }
     for i in 0..args.len() {
         match args.try_get(i) {

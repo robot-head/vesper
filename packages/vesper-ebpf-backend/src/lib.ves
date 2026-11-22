@@ -169,12 +169,12 @@ fn put_err(inout o: ChunkSeq[u64], in g: G, in names: Names) {
         put_sym(inout o, in names, g.err_fn);
         o
             .push(
-            if g.err_has_span {
-                1
-            } else {
-                0
-            }
-        );
+                if g.err_has_span {
+                    1
+                } else {
+                    0
+                }
+            );
         o.push(g.err_s0);
         o.push(g.err_s1);
     }

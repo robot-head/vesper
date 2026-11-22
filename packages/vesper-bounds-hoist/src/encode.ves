@@ -289,14 +289,10 @@ pub fn seq_class(in p: Program, in names: Names, pool: u64) -> u64 {
         return 18;
     }
     let s = row.label;
-    if names
-        .spells(s, in "New".as_bytes())
-        || names
-        .spells(s, in "WithCapacity".as_bytes())
-        || names
-        .spells(s, in "Swap".as_bytes())
-        || names
-        .spells(s, in "Replace".as_bytes()) {
+    if names.spells(s, in "New".as_bytes())
+        || names.spells(s, in "WithCapacity".as_bytes())
+        || names.spells(s, in "Swap".as_bytes())
+        || names.spells(s, in "Replace".as_bytes()) {
         return 1;
     }
     if names.spells(s, in "Get".as_bytes()) {

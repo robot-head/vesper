@@ -617,25 +617,25 @@ pub fn load_catalog(inout q: Q, in meta: Slice[u64], at: u64) -> u64 {
         q
             .tabs
             .push(
-            CTab {
-                noff: noff,
-                nlen: nlen,
-                start: q.cols.len(),
-                n: nc
-            }
-        );
+                CTab {
+                    noff: noff,
+                    nlen: nlen,
+                    start: q.cols.len(),
+                    n: nc
+                }
+            );
         for c in 0..nc {
             q
                 .cols
                 .push(
-                CCol {
-                    noff: sw(in meta, p),
-                    nlen: sw(in meta, wrapping_add(p, 1)),
-                    ty: sw(in meta, wrapping_add(p, 2)),
-                    nullable: sw(in meta, wrapping_add(p, 3)) != 0,
-                    used: false
-                }
-            );
+                    CCol {
+                        noff: sw(in meta, p),
+                        nlen: sw(in meta, wrapping_add(p, 1)),
+                        ty: sw(in meta, wrapping_add(p, 2)),
+                        nullable: sw(in meta, wrapping_add(p, 3)) != 0,
+                        used: false
+                    }
+                );
             p = wrapping_add(p, 4);
         }
     }

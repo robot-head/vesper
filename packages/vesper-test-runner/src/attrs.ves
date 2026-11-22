@@ -585,15 +585,15 @@ impl Stream {
                 .out
                 .args
                 .push(
-                Arg {
-                    has_name: named,
-                    na: na,
-                    nb: nb,
-                    val: v,
-                    start: arg_start,
-                    end: ve
-                }
-            );
+                    Arg {
+                        has_name: named,
+                        na: na,
+                        nb: nb,
+                        val: v,
+                        start: arg_start,
+                        end: ve
+                    }
+                );
             if self.kind() == k_comma() {
                 self.bump();
             } else if self.kind() != k_r_paren() {
@@ -682,15 +682,15 @@ impl Stream {
                             .out
                             .fns
                             .push(
-                            FnAttrs {
-                                na: ns,
-                                nb: ne,
-                                has_test: has_test,
-                                test: test,
-                                ca: ca,
-                                cn: cn
-                            }
-                        );
+                                FnAttrs {
+                                    na: ns,
+                                    nb: ne,
+                                    has_test: has_test,
+                                    test: test,
+                                    ca: ca,
+                                    cn: cn
+                                }
+                            );
                     }
                 }
                 has_test = false;

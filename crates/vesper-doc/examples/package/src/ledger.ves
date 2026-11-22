@@ -53,8 +53,7 @@ fn commit(sink tx: Tx) -> u64 {
     let Tx {
         id,
         total
-    }
-    = tx;
+    } = tx;
     total
 }
 

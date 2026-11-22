@@ -363,14 +363,10 @@ fn is_space(b: u8) -> bool {
 
 fn is_delim(b: u8) -> bool {
     is_space(b)
-        || b
-        == Ascii::OpenParen
-        || b
-        == Ascii::CloseParen
-        || b
-        == Ascii::Quote
-        || b
-        == Ascii::Semicolon
+        || b == Ascii::OpenParen
+        || b == Ascii::CloseParen
+        || b == Ascii::Quote
+        || b == Ascii::Semicolon
 }
 
 impl Eng {
@@ -691,12 +687,8 @@ impl Eng {
         let args = self.kid(cmd, Cmd::Args);
         let out = self.kid(cmd, Cmd::Out);
         if (n != Cmd::CtorItems && n != Cmd::CostedCtorItems)
-            || self
-            .kind(name)
-            != SX_ATOM
-            || self
-            .kind(args)
-            != SX_LIST {
+            || self.kind(name) != SX_ATOM
+            || self.kind(args) != SX_LIST {
             self.fail(Code::Command, self.sx_at(cmd));
             return;
         }
@@ -704,16 +696,9 @@ impl Eng {
         if n == Cmd::CostedCtorItems {
             let kw = self.kid(cmd, Cmd::CostKey);
             let val = self.kid(cmd, Cmd::CostValue);
-            if self
-                .kind(kw)
-                != SX_ATOM
-                || self
-                .sym_of(kw)
-                != self
-                .kw_cost
-                || self
-                .kind(val)
-                != SX_ATOM {
+            if self.kind(kw) != SX_ATOM
+                || self.sym_of(kw) != self.kw_cost
+                || self.kind(val) != SX_ATOM {
                 self.fail(Code::Command, self.sx_at(kw));
                 return;
             }
@@ -1713,12 +1698,9 @@ impl Eng {
                 continue;
             }
             let (cost, r) = self.node_cost(m);
-            if cost
-                != MAX_COST
-                && cost
-                == at64(in self.best_cost, c)
-                && at64(in self.best_rank, c)
-                > r {
+            if cost != MAX_COST
+                && cost == at64(in self.best_cost, c)
+                && at64(in self.best_rank, c) > r {
                 self.best_node.try_set(c, m);
             }
         }
@@ -1878,11 +1860,11 @@ impl Eng {
             }
             self
                 .write_node(
-                false,
-                at32(in self.n_op, w(top)),
-                ati(in self.n_data, w(top)),
-                in kids
-            );
+                    false,
+                    at32(in self.n_op, w(top)),
+                    ati(in self.n_data, w(top)),
+                    in kids
+                );
             let slot = n32(self.t_count);
             self.t_count = inc(self.t_count);
             self.t_slot.try_set(w(top), slot);
@@ -1911,12 +1893,12 @@ impl Eng {
         self
             .st_words
             .push(
-            if forward {
-                0
-            } else {
-                1
-            }
-        );
+                if forward {
+                    0
+                } else {
+                    1
+                }
+            );
         self.st_words.push(self.path.len());
         for i in 0..self.path.len() {
             self.st_words.push(w(at32(in self.path, i)));
@@ -2027,12 +2009,12 @@ impl Eng {
             self
                 .settled
                 .push(
-                if ok {
-                    1
-                } else {
-                    0
-                }
-            );
+                    if ok {
+                        1
+                    } else {
+                        0
+                    }
+                );
         }
     }
 

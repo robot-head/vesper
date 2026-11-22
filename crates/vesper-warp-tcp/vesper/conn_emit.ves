@@ -79,15 +79,15 @@ fn base_options(in t: Tcb, now: u64, syn: bool) -> Opts {
     if (syn && active_syn && t.cfg.timestamps) || t.ts_ok {
         o
             .timestamps = Option::Some(
-            Timestamps {
-                val: ts_now(now),
-                ecr: if t.ts_ok {
-                    t.ts_recent
-                } else {
-                    0
+                Timestamps {
+                    val: ts_now(now),
+                    ecr: if t.ts_ok {
+                        t.ts_recent
+                    } else {
+                        0
+                    }
                 }
-            }
-        );
+            );
     }
     o
 }

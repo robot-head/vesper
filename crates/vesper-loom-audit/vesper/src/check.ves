@@ -46,15 +46,9 @@ const MAX_LICENSE_DEPTH: u64 = 64;
 const MAX_LICENSE_TOKENS: u64 = 1024;
 
 pub fn check_limits(inout s: A) {
-    if s
-        .m_jdepth
-        > MAX_JSON_DEPTH
-        || s
-        .m_ldepth
-        > MAX_LICENSE_DEPTH
-        || s
-        .m_ltokens
-        > MAX_LICENSE_TOKENS {
+    if s.m_jdepth > MAX_JSON_DEPTH
+        || s.m_ldepth > MAX_LICENSE_DEPTH
+        || s.m_ltokens > MAX_LICENSE_TOKENS {
         fail(inout s, ErrorKind::Limit, "unsafe parser depth/token limit (maximum 64/64/1024)");
     }
 }
@@ -66,14 +60,10 @@ fn id_bytes(in s: A, id: u64) -> bool {
         let c = byte(in s, wrapping_add(off, i));
         if !(
             ascii_alnum(c)
-                || c
-                == Ascii::Minus
-                || c
-                == Ascii::Underscore
-                || c
-                == Ascii::Dot
-                || c
-                == Ascii::Colon
+                || c == Ascii::Minus
+                || c == Ascii::Underscore
+                || c == Ascii::Dot
+                || c == Ascii::Colon
         ) {
             return false;
         }
