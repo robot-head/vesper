@@ -321,6 +321,17 @@ pub fn prepare_source(
         let rel = package.strip_prefix(&base).unwrap_or(package);
         let copy = scratch.join(rel);
         copy_file(&package.join("Loom.toml"), &copy.join("Loom.toml"))?;
+        // The `.vsys` files a manifest names (`[package] vsys`) sit beside it.
+        for entry in
+            std::fs::read_dir(package).map_err(|e| format!("{}: {e}", package.display()))?
+        {
+            let path = entry
+                .map_err(|e| format!("{}: {e}", package.display()))?
+                .path();
+            if path.is_file() && path.extension().is_some_and(|e| e == "vsys") {
+                copy_file(&path, &copy.join(path.file_name().unwrap_or_default()))?;
+            }
+        }
         let mut files = Vec::new();
         if package.join("src").is_dir() {
             walk(&package.join("src"), &mut files)?;

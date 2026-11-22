@@ -471,19 +471,27 @@ pub enum Aead {
     ChaCha(ChaCha20Poly1305),
 }
 
+impl Aead {
+    /// The key `vcr_aead_new` boxes, for a Rust caller that keeps it inline
+    /// and lends it to Vesper (export ABI 4): `None` for an unknown code or
+    /// a key of the wrong length. Not counted by [`live_handles`].
+    pub fn new(alg: u32, key: &[u8]) -> Option<Self> {
+        match alg {
+            aead::AES_128_GCM => Aes128Gcm::new_from_slice(key).ok().map(Aead::Aes128),
+            aead::AES_256_GCM => Aes256Gcm::new_from_slice(key).ok().map(Aead::Aes256),
+            aead::CHACHA20_POLY1305 => ChaCha20Poly1305::new_from_slice(key).ok().map(Aead::ChaCha),
+            _ => None,
+        }
+    }
+}
+
 /// A new AEAD key for `alg`, or null if the code is unknown or `key` has
 /// the wrong length (16 bytes for AES-128-GCM, 32 otherwise).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vcr_aead_new(alg: u32, key: *const u8, key_len: usize) -> *mut Aead {
     // SAFETY: the `.vsys` contract.
     let key = unsafe { slice(key, key_len) };
-    let a = match alg {
-        aead::AES_128_GCM => Aes128Gcm::new_from_slice(key).ok().map(Aead::Aes128),
-        aead::AES_256_GCM => Aes256Gcm::new_from_slice(key).ok().map(Aead::Aes256),
-        aead::CHACHA20_POLY1305 => ChaCha20Poly1305::new_from_slice(key).ok().map(Aead::ChaCha),
-        _ => None,
-    };
-    a.map_or(std::ptr::null_mut(), |a| born(0, a))
+    Aead::new(alg, key).map_or(std::ptr::null_mut(), |a| born(0, a))
 }
 
 /// Releases an AEAD key.
@@ -594,17 +602,25 @@ pub enum Block {
     Aes256(aes::Aes256),
 }
 
+impl Block {
+    /// The key `vcr_aes_new` boxes, for a Rust caller that keeps it inline
+    /// and lends it to Vesper: `None` unless `key` is 16 or 32 bytes. Not
+    /// counted by [`live_handles`].
+    pub fn new(key: &[u8]) -> Option<Self> {
+        match key.len() {
+            16 => aes::Aes128::new_from_slice(key).ok().map(Block::Aes128),
+            32 => aes::Aes256::new_from_slice(key).ok().map(Block::Aes256),
+            _ => None,
+        }
+    }
+}
+
 /// A new AES key (16 or 32 bytes), or null for any other length.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vcr_aes_new(key: *const u8, key_len: usize) -> *mut Block {
     // SAFETY: the `.vsys` contract.
     let key = unsafe { slice(key, key_len) };
-    let b = match key.len() {
-        16 => aes::Aes128::new_from_slice(key).ok().map(Block::Aes128),
-        32 => aes::Aes256::new_from_slice(key).ok().map(Block::Aes256),
-        _ => None,
-    };
-    b.map_or(std::ptr::null_mut(), |b| born(1, b))
+    Block::new(key).map_or(std::ptr::null_mut(), |b| born(1, b))
 }
 
 /// Releases an AES key.
