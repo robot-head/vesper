@@ -29,6 +29,8 @@
 mod check_harness;
 #[path = "common/check_words.rs"]
 mod check_words;
+#[path = "common/corpus_shard.rs"]
+mod corpus_shard;
 #[path = "common/ir_words.rs"]
 mod ir_words;
 
@@ -74,7 +76,8 @@ pub fn stages() -> &'static [Stage] {
         let mut out = vec![];
         let quiet = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
-        for c in corpus().iter().step_by(step()) {
+        // Bazel shards the stepped worlds (BUILD.bazel `test_shards`).
+        for c in corpus_shard::Shard::from_environment().keep(corpus().iter().step_by(step())) {
             let w = &c.world;
             let r = std::panic::catch_unwind(|| {
                 let mut v = vec![];
@@ -553,7 +556,8 @@ fn vesper_decisions_match_rust() {
     for (k, n) in &seen {
         eprintln!("  {n:>8}  {k}");
     }
-    assert!(stages().len() > 10, "only {} programs", stages().len());
+    let least = corpus_shard::Shard::from_environment().share(10);
+    assert!(stages().len() > least, "only {} programs", stages().len());
     assert_eq!(bad, 0);
 }
 

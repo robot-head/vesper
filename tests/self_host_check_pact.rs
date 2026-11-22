@@ -8,13 +8,19 @@
 //! mutants that make each diagnostic of the pass fire.
 #[path = "common/check_harness.rs"]
 mod check_harness;
+// The encoder of the hybrid build's swap (`modules/pact`), shared with
+// crates/vesper-hybrid/src/hybrid.rs.
+#[path = "common/check_words.rs"]
+mod check_words;
+#[path = "common/pact_words.rs"]
+mod pact_words;
 
 use check_harness::*;
 use std::collections::BTreeSet;
 use std::sync::OnceLock;
 use vesper::ast::{
-    AssocTypeBinding, ConformanceKind, Diagnostic, Effect, Function, Generic, Item, Mode, ModelUse,
-    Module, Pass, TraitBoundSyntax, TraitRef, Type, projection_type,
+    AssocTypeBinding, ConformanceKind, Diagnostic, Effect, Generic, Item, Mode, ModelUse, Module,
+    Pass, TraitBoundSyntax, TraitRef, Type, projection_type,
 };
 use vesper::check::World;
 use vesper::pact_frontend;
@@ -35,164 +41,6 @@ fn base_world(m: &Module) -> World {
         ..Module::default()
     };
     World::collect(&base).0
-}
-
-fn span(t: &mut Vec<u64>, s: &std::ops::Range<usize>) {
-    t.extend([s.start as u64, s.end as u64]);
-}
-
-fn generics(e: &mut Enc, t: &mut Vec<u64>, gs: &[Generic]) {
-    t.push(gs.len() as u64);
-    for g in gs {
-        t.push(e.name(&g.name));
-        t.push(mode_word(g.bound));
-        t.push(g.row as u64);
-    }
-}
-
-fn trait_ref(e: &mut Enc, t: &mut Vec<u64>, r: &TraitRef) {
-    t.push(e.opt_name(&r.package));
-    t.push(e.name(&r.name));
-    t.push(r.args.len() as u64);
-    for a in &r.args {
-        t.push(e.ty(a));
-    }
-    span(t, &r.span);
-}
-
-/// A signature; effect operations and trait methods have no body, and a
-/// conformance method's body is not read by the pass.
-fn signature(e: &mut Enc, t: &mut Vec<u64>, f: &Function) {
-    t.push(e.name(&f.name));
-    span(t, &f.span);
-    generics(e, t, &f.generics);
-    t.push(f.params.len() as u64);
-    for p in &f.params {
-        t.push(e.name(&p.name));
-        t.push(pass_word(p.pass));
-        t.push(p.projections.len() as u64);
-        for list in &p.projections {
-            t.push(list.len() as u64);
-            for n in list {
-                t.push(e.name(n));
-            }
-        }
-        t.push(e.ty(&p.ty));
-        span(t, &p.span);
-    }
-    t.push(e.ty(&f.result));
-    t.push(e.ty(&Type::Row(f.effects.clone())));
-}
-
-/// The declaration section (`read_decls` in decl.ves).
-fn encode_declarations(e: &mut Enc, t: &mut Vec<u64>, m: &Module, base: &World) {
-    t.push(e.name(IDENTITY));
-    t.push(base.functions.len() as u64);
-    for (name, f) in &base.functions {
-        t.push(e.name(name));
-        generics(e, t, &f.generics);
-    }
-    let traits: Vec<_> = m
-        .items
-        .iter()
-        .filter_map(|i| match i {
-            Item::Trait(t) => Some(t),
-            _ => None,
-        })
-        .collect();
-    t.push(traits.len() as u64);
-    for tr in traits {
-        t.push(e.name(&tr.name));
-        span(t, &tr.span);
-        generics(e, t, &tr.generics);
-        t.push(tr.assoc.len() as u64);
-        for a in &tr.assoc {
-            t.push(e.name(&a.name));
-            t.push(mode_word(a.bound));
-            span(t, &a.span);
-        }
-        t.push(tr.methods.len() as u64);
-        for f in &tr.methods {
-            signature(e, t, f);
-        }
-    }
-    let confs: Vec<_> = m
-        .items
-        .iter()
-        .filter_map(|i| match i {
-            Item::Conformance(c) => Some(c),
-            _ => None,
-        })
-        .collect();
-    t.push(confs.len() as u64);
-    for c in confs {
-        match &c.kind {
-            ConformanceKind::Canonical => t.extend([0, e.name("")]),
-            ConformanceKind::Model { name, .. } => t.extend([1, e.name(name)]),
-        }
-        generics(e, t, &c.generics);
-        trait_ref(e, t, &c.trait_ref);
-        t.push(e.ty(&c.self_ty));
-        t.push(c.where_clauses.len() as u64);
-        for w in &c.where_clauses {
-            t.push(e.ty(&w.ty));
-            trait_ref(e, t, &w.trait_ref);
-        }
-        t.push(c.assoc.len() as u64);
-        for a in &c.assoc {
-            t.push(e.name(&a.name));
-            t.push(e.ty(&a.ty));
-            span(t, &a.span);
-        }
-        t.push(c.methods.len() as u64);
-        for f in &c.methods {
-            signature(e, t, f);
-        }
-        span(t, &c.span);
-    }
-    t.push(m.model_uses.len() as u64);
-    for u in &m.model_uses {
-        t.push(e.name(&u.model));
-        span(t, &u.span);
-    }
-    t.push(m.trait_bounds.len() as u64);
-    for b in &m.trait_bounds {
-        t.push(e.name(&b.param));
-        trait_ref(e, t, &b.trait_ref);
-        span(t, &b.span);
-        t.push(e.name(&b.owner));
-    }
-    let items: Vec<_> = m
-        .items
-        .iter()
-        .filter(|i| matches!(i, Item::Adt(_) | Item::Effect(_)))
-        .collect();
-    t.push(items.len() as u64);
-    for i in items {
-        match i {
-            Item::Adt(a) => {
-                t.push(1);
-                t.push(e.name(&a.name));
-                span(t, &a.span);
-                let fields: Vec<_> = a.variants.iter().flat_map(|v| &v.fields).collect();
-                t.push(fields.len() as u64);
-                for f in fields {
-                    t.push(e.ty(&f.ty));
-                }
-            }
-            Item::Effect(d) => {
-                t.push(0);
-                t.push(e.name(&d.name));
-                span(t, &d.span);
-                t.push(d.ops.len() as u64);
-                for f in &d.ops {
-                    assert!(f.body.is_none(), "effect operation with a body");
-                    signature(e, t, f);
-                }
-            }
-            _ => unreachable!(),
-        }
-    }
 }
 
 /// One line per diagnostic: code, span, message (then help and labels,
@@ -217,7 +65,7 @@ fn diagnostic_text(ds: &[Diagnostic]) -> String {
 fn task(m: &Module) -> Option<(Vec<u8>, String)> {
     let (prepared, ds) = pact_frontend::declaration_pass(m)?;
     let base = base_world(&prepared);
-    let input = encode(&base, |e, t| encode_declarations(e, t, &prepared, &base));
+    let input = pact_words::declaration_input(&prepared, &base, IDENTITY)?;
     Some((input, diagnostic_text(&ds)))
 }
 
@@ -994,6 +842,74 @@ fn every_message_of_the_pass_fires() {
     }
 }
 
+/// The declaration pass of `@vesper/check-pact` as the hybrid build
+/// installs it: the shared encoder, the JIT entry and the text decoder.
+fn vesper_declarations(
+    m: &Module,
+    base: &World,
+    identity: &vesper_pact_binding::PackageIdentity,
+) -> Option<Vec<Diagnostic>> {
+    static ENTRY: OnceLock<Entry> = OnceLock::new();
+    let f = ENTRY.get_or_init(|| package().entry("check_pact_declarations", true));
+    let input = pact_words::declaration_input(m, base, &identity.to_string())?;
+    Some(pact_words::decode_declaration_text(&f.text(&input)))
+}
+
+#[test]
+fn check_package_agrees_through_the_swap_point() {
+    // `check_package` with the Vesper pass installed answers every checker
+    // test and its mutants as the Rust pass does (diagnostics compared as
+    // values, so the decoder is checked too). The corpus goes through the
+    // hybrid build's suite.
+    assert_eq!(pact_frontend::default_identity().to_string(), IDENTITY);
+    let mut modules = vec![];
+    for (k, (name, src)) in checker_tests().into_iter().enumerate() {
+        let m = parse(&src);
+        for (label, x) in mutants(&m, k) {
+            modules.push((format!("{name}#{label}"), x));
+        }
+        modules.push((name, m));
+    }
+    let check = |m: &Module| {
+        pact_frontend::check_package(m, &pact_frontend::default_identity())
+            .checked
+            .diagnostics
+    };
+    let rust: Vec<_> = modules.iter().map(|(_, m)| check(m)).collect();
+    assert!(
+        pact_frontend::install_declaration_pass(pact_frontend::DeclarationPassTable {
+            diagnostics: vesper_declarations,
+        })
+        .is_ok()
+    );
+    let mut bad = 0;
+    let mut rejected = 0;
+    for ((name, m), rust) in modules.iter().zip(&rust) {
+        let (prepared, _) = match pact_frontend::declaration_pass(m) {
+            Some(p) => p,
+            None => (m.clone(), vec![]),
+        };
+        let base = base_world(&prepared);
+        let identity = pact_frontend::default_identity();
+        if vesper_declarations(&prepared, &base, &identity).is_some_and(|d| !d.is_empty()) {
+            rejected += 1;
+        }
+        let swapped = check(m);
+        if swapped != *rust {
+            bad += 1;
+            if bad <= 8 {
+                eprintln!("{name}: rust {rust:?}\nswapped {swapped:?}");
+            }
+        }
+    }
+    eprintln!(
+        "check_package: {bad} of {} modules differ through the swap point ({rejected} rejected by the Vesper pass)",
+        modules.len()
+    );
+    assert_eq!(bad, 0);
+    assert!(rejected > 0);
+}
+
 #[test]
 fn answers_depend_on_the_input() {
     // A module without declarations does not run the pass; one with a bad
@@ -1015,44 +931,61 @@ fn declaration_pass_speed() {
         return;
     }
     let f = package().entry("check_pact_declarations", true);
-    // The corpus worlds the pass runs on and their inputs.
-    let worlds: Vec<(Module, Vec<u8>)> = corpus()
+    let identity = pact_frontend::default_identity();
+    // The swap point's inputs on the corpus worlds the pass runs on: the
+    // prepared module and its base world, as `check_package` holds them.
+    let worlds: Vec<(Module, World, Vec<u8>)> = corpus()
         .iter()
-        .filter_map(|c| task(&c.module).map(|(input, _)| (c.module.clone(), input)))
+        .filter_map(|c| {
+            let (prepared, _) = pact_frontend::declaration_pass(&c.module)?;
+            let base = base_world(&prepared);
+            let input = pact_words::declaration_input(&prepared, &base, IDENTITY)?;
+            Some((prepared, base, input))
+        })
         .collect();
-    let mut mutated = 0;
-    for (k, (m, _)) in worlds.iter().enumerate() {
-        mutated += mutants(m, k).len();
-    }
-    eprintln!(
-        "{} corpus worlds run the pass ({mutated} mutants)",
-        worlds.len()
-    );
-    // Rust: `declaration_pass` (the lowerings before the pass, collecting,
-    // validating and building the Pact binding DTOs). Vesper: decoding the
-    // input and the pass (validation and the lowering checks, no DTOs).
-    // Encoding is not timed.
+    eprintln!("{} corpus worlds run the pass", worlds.len());
+    // Like for like, behind the swap point: Rust's
+    // `rust_declaration_diagnostics` (`Frontend::new` given the base world:
+    // collecting, validating and building the binding DTOs) against the
+    // hybrid's answer (encoding, the Vesper pass, decoding).
     abba(
-        "declarations",
+        "declarations (swap point, with encode and decode)",
         &mut || {
             time(|| {
-                for (m, _) in &worlds {
-                    std::hint::black_box(pact_frontend::declaration_pass(m));
+                for (m, base, _) in &worlds {
+                    std::hint::black_box(pact_frontend::rust_declaration_diagnostics(
+                        m, base, &identity,
+                    ));
                 }
             })
         },
         &mut || {
             time(|| {
-                for (_, input) in &worlds {
+                for (m, base, _) in &worlds {
+                    let input = pact_words::declaration_input(m, base, IDENTITY).unwrap();
+                    std::hint::black_box(pact_words::decode_declarations(&f.words(&input)));
+                }
+            })
+        },
+    );
+    // The Vesper pass alone on prebuilt inputs.
+    abba(
+        "declarations (pass alone)",
+        &mut || {
+            time(|| {
+                for (m, base, _) in &worlds {
+                    std::hint::black_box(pact_frontend::rust_declaration_diagnostics(
+                        m, base, &identity,
+                    ));
+                }
+            })
+        },
+        &mut || {
+            time(|| {
+                for (_, _, input) in &worlds {
                     std::hint::black_box(f.words(input));
                 }
             })
         },
     );
-    let t = time(|| {
-        for (m, _) in &worlds {
-            std::hint::black_box(task(m));
-        }
-    });
-    eprintln!("encoding (with the Rust pass it runs): {t:?}");
 }

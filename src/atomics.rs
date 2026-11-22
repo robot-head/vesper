@@ -496,7 +496,10 @@ pub fn worker_row(world: &World, effects: &Effects) -> bool {
         && effects.instances.iter().all(|e| {
             e.label.is_none()
                 && (crate::capability_effects::is_capability_effect(&e.name)
-                    || crate::ffi_lowering::is_foreign_effect(&e.name)
+                    // `ffi_lowering::is_foreign_effect`, spelled out: this
+                    // module also builds for wasm, where `ffi_lowering`
+                    // does not.
+                    || e.name.starts_with("Ffi$")
                     || (e.name == crate::fip::ALLOC_EFFECT
                         && world.effects.get(&e.name).is_some_and(|d| d.ops.is_empty())))
         })

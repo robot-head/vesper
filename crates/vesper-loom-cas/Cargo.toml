@@ -6,6 +6,12 @@ license = "MIT OR Apache-2.0"
 description = "Vesper Loom immutable BLAKE3 content-addressed store (design section 8.2.6)"
 publish = false
 
+# The Rust build. The compiler links this package, so it resolves no port
+# harness; the Vesper port (vesper/, Rust-exit SH6 lane 16, #1411) is built
+# from the same sources by the package in port/ (`vesper-loom-cas-port`,
+# library `vesper_loom_cas`, cfg(vesper_port)), which no crate depends on
+# until the port reaches the parity bar.
+
 [dependencies]
 blake3 = "1.8"
 reflink-copy = "0.1"
@@ -18,3 +24,7 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage
 
 [dev-dependencies]
 tempfile = "3"
+
+[lints.rust]
+# cfg(vesper_port) is set only by the port package's build script.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(vesper_port)"] }

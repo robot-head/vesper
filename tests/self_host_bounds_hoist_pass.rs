@@ -120,6 +120,8 @@ fn pass_matches_bounds_hoist_run() {
 /// 12, at least the gate's 6; `BOUNDS_HOIST_GATE_WORKLOAD` runs only one):
 /// - `hook`: what the hybrid's `hoist` hook runs (Rust program -> input bytes
 ///   -> pass -> words -> Rust program) against `bounds_hoist::run`.
+/// - `build`: the native optimize pipeline's object of every corpus `main`
+///   with the Vesper pass as the `hoist` hook, against Rust's pass.
 /// - `pass`: the pass on the input bytes with the place-ir identity read and
 ///   write of the same input, timed in the same epoch, subtracted. That is
 ///   the port's own cost once its neighbours are Vesper too.
@@ -168,10 +170,47 @@ fn flip_gate() {
     hook();
     on_bytes(entry());
     on_bytes(&identity);
+    // `build`: the whole native optimize pipeline (`object_with_options`)
+    // of every corpus `main`, with the Vesper pass installed as the `hoist`
+    // hook against Rust's `bounds_hoist::run`, in the same process.
+    vesper::ir_swap::install(SWITCHED).ok();
+    let mains: Vec<&vesper::check::World> = corpus::programs(1)
+        .into_iter()
+        .map(|(c, _)| c)
+        .filter(|c| !c.name.ends_with('/'))
+        .filter(|c| {
+            c.world
+                .functions
+                .get("main")
+                .is_some_and(|f| f.params.is_empty())
+        })
+        .map(|c| &c.world)
+        .filter(|w| build_once(w))
+        .collect();
+    let build = |vesper: bool| {
+        HOOK_VESPER.store(vesper, std::sync::atomic::Ordering::Relaxed);
+        let t = time(|| {
+            for w in &mains {
+                std::hint::black_box(build_once(w));
+            }
+        })
+        .as_nanos();
+        HOOK_VESPER.store(false, std::sync::atomic::Ordering::Relaxed);
+        t
+    };
     let only = std::env::var("BOUNDS_HOIST_GATE_WORKLOAD").ok();
     let wants = |w: &str| only.as_deref().is_none_or(|o| o == w);
     let (mut hook_pairs, mut pass_pairs) = (String::new(), String::new());
+    let mut build_pairs = String::new();
+    if wants("build") {
+        build(false);
+        build(true);
+    }
     for _ in 0..epochs {
+        if wants("build") {
+            let (r1, v1, v2, r2) = (build(false), build(true), build(true), build(false));
+            build_pairs += &format!(" {}:{}", r1 + r2, v1 + v2);
+        }
         if wants("hook") {
             let (r1, v1, v2, r2) = (rust(), hook(), hook(), rust());
             hook_pairs += &format!(" {}:{}", r1 + r2, v1 + v2);
@@ -189,6 +228,40 @@ fn flip_gate() {
     if wants("pass") {
         println!("flip-gate pairs pass{pass_pairs}");
     }
+    if wants("build") {
+        eprintln!("build workload: {} corpus mains", mains.len());
+        println!("flip-gate pairs build{build_pairs}");
+    }
+}
+
+/// Whether the `hoist` hook runs the Vesper pass (`build` workload).
+static HOOK_VESPER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The `hoist` hook of the `build` workload: the Vesper pass while
+/// [`HOOK_VESPER`] is set (Rust for a program the words cannot carry, as in
+/// the hybrid), else `bounds_hoist::run`.
+const SWITCHED: vesper::ir_swap::IrPasses = vesper::ir_swap::IrPasses {
+    lower: None,
+    opt: None,
+    inline: None,
+    hoist: Some(|p| {
+        if HOOK_VESPER.load(std::sync::atomic::Ordering::Relaxed)
+            && let Some(q) = ir_words::through_vesper(None, p, |i| entry().words(i))
+        {
+            *p = q;
+        } else {
+            bounds_hoist::run(p);
+        }
+        0
+    }),
+};
+
+/// One optimized native object of `world`'s `main`; whether it built.
+fn build_once(world: &vesper::check::World) -> bool {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        vesper::native::object_with_options(world, "main", None, true).is_ok()
+    }))
+    .unwrap_or(false)
 }
 
 /// Wall clock of the pass over every corpus program (`CHECK_HARNESS_SPEED`
