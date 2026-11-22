@@ -309,12 +309,12 @@ fn intern(inout w: Wit, kind: u8, a: u64, n: u64) -> u32 {
     w
         .tys
         .push(
-        Ty {
-            kind: kind,
-            a: a,
-            n: n
-        }
-    );
+            Ty {
+                kind: kind,
+                a: a,
+                n: n
+            }
+        );
     at
 }
 
@@ -348,12 +348,12 @@ fn intern_tuple(inout w: Wit, a: u64, n: u64) -> u32 {
     w
         .tys
         .push(
-        Ty {
-            kind: T_TUPLE,
-            a: a,
-            n: n
-        }
-    );
+            Ty {
+                kind: T_TUPLE,
+                a: a,
+                n: n
+            }
+        );
     at
 }
 
@@ -485,12 +485,12 @@ fn def(inout c: Cur, in b: Slice[u8], inout w: Wit, kind: u8) {
         let n0 = name(inout w, in b, fs, fe);
         items
             .push(
-            Field {
-                n0: n0,
-                nn: wrapping_sub(fe, fs),
-                ty: t
-            }
-        );
+                Field {
+                    n0: n0,
+                    nn: wrapping_sub(fe, fs),
+                    ty: t
+                }
+            );
         if peek(inout c, in b) == C_COMMA {
             c.pos = inc(c.pos);
         }
@@ -507,15 +507,15 @@ fn def(inout c: Cur, in b: Slice[u8], inout w: Wit, kind: u8) {
     w
         .defs
         .push(
-        Def {
-            kind: kind,
-            n0: n0,
-            nn: wrapping_sub(e, s),
-            f0: f0,
-            fnum: items.len(),
-            ty: t
-        }
-    );
+            Def {
+                kind: kind,
+                n0: n0,
+                nn: wrapping_sub(e, s),
+                f0: f0,
+                fnum: items.len(),
+                ty: t
+            }
+        );
 }
 
 // `name: func(%p: ty, ...) [-> ty];` after its name `b[s..e]`.
@@ -534,12 +534,12 @@ fn func(inout c: Cur, in b: Slice[u8], inout w: Wit, s: u64, e: u64) {
         let n0 = name(inout w, in b, ps, pe);
         params
             .push(
-            Field {
-                n0: n0,
-                nn: wrapping_sub(pe, ps),
-                ty: t
-            }
-        );
+                Field {
+                    n0: n0,
+                    nn: wrapping_sub(pe, ps),
+                    ty: t
+                }
+            );
         if peek(inout c, in b) == C_COMMA {
             c.pos = inc(c.pos);
         }
@@ -561,14 +561,14 @@ fn func(inout c: Cur, in b: Slice[u8], inout w: Wit, s: u64, e: u64) {
     w
         .funcs
         .push(
-        Func {
-            n0: n0,
-            nn: wrapping_sub(e, s),
-            p0: p0,
-            pn: params.len(),
-            res: res
-        }
-    );
+            Func {
+                n0: n0,
+                nn: wrapping_sub(e, s),
+                p0: p0,
+                pn: params.len(),
+                res: res
+            }
+        );
 }
 
 // The text of a world item up to its `;`, blanks removed.
@@ -638,14 +638,14 @@ pub fn parse(in b: Slice[u8]) -> Wit {
     w
         .funcs
         .push(
-        Func {
-            n0: run_name,
-            nn: 3,
-            p0: 0,
-            pn: 0,
-            res: result_ty
-        }
-    );
+            Func {
+                n0: run_name,
+                nn: 3,
+                p0: 0,
+                pn: 0,
+                res: result_ty
+            }
+        );
     w.e0 = w.funcs.len();
     keyword(inout c, in b, inout w, in "interface".as_bytes());
     keyword(inout c, in b, inout w, in "entry".as_bytes());

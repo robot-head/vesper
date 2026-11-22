@@ -245,13 +245,13 @@ impl B {
         self
             .names
             .push(
-            NameRow {
-                ns: ns,
-                idx: r,
-                n0: n0,
-                nn: name.len()
-            }
-        );
+                NameRow {
+                    ns: ns,
+                    idx: r,
+                    n0: n0,
+                    nn: name.len()
+                }
+            );
         r
     }
 
