@@ -97,7 +97,12 @@ finished (#1321). To keep pull requests within the limit:
   fails with the reason. Push again once the parent has merged. It is the
   first step of every job that runs on pull requests, so it takes no runner
   of its own; as a separate `Merge gate` job it waited over an hour for a
-  Linux runner ahead of everything else (#1479).
+  Linux runner ahead of everything else (#1479). The gate also stops a pull
+  request that changes the generated `docs/maintenance/rust-census.md` along
+  with anything else: lanes edit the STATUS tables in
+  `scripts/rust-census.py`, and `.github/workflows/rust-census.yml`
+  regenerates the census after each push to main into one "Refresh the Rust
+  census" pull request, which changes only that file.
 - `macOS (AArch64)` and `Windows (x86_64 MSVC)` start only when a pull
   request is ready to merge. Platforms no longer runs on pull request pushes;
   `Native platform checks` (`.github/workflows/native-checks.yml`) runs on
