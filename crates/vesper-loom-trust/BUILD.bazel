@@ -59,7 +59,7 @@ vesper_crate(
         ("object", "if source != 6 {", "if source / 4 != 1 {"),
         ("message", "\"vesper.loom.builder-attestation.v1\"", "\"vesper.loom.builder-attestation.v2\""),
         ("quorum", "if distinct.len() < policy.minimum_operators {", "if keys.len() < policy.minimum_operators {"),
-        ("interval", "|| now >= b.valid_until ||", "|| now > b.valid_until ||"),
+        ("interval", "let outside = now < from || now >= until;", "let outside = now < from || now > until;"),
         ("conflation", "} else if l == 55 {", "} else if l == 56 {"),
         ("distance", "wrapping_sub(j, 2))), 1));", "wrapping_sub(j, 2))), 2));"),
         ("screen", "if cost > widen_u64(policy.max_trust_cost) {", "if cost >= widen_u64(policy.max_trust_cost) {"),

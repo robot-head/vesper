@@ -46,8 +46,8 @@ const DIVERGENT: &[(&str, &str, &str)] = &[
     // interval: a key is valid at its end.
     (
         "interval",
-        "|| now >= b.valid_until ||",
-        "|| now > b.valid_until ||",
+        "let outside = now < from || now >= until;",
+        "let outside = now < from || now > until;",
     ),
     // conflation: `8` instead of `7` is a lookalike of `t`.
     ("conflation", "} else if l == 55 {", "} else if l == 56 {"),

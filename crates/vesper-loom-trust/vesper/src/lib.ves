@@ -15,7 +15,10 @@
 // values to the trees below (export ABI 4) and back.
 //
 // @export abi 4 options
-use @vesper/crypto::{ed25519_check_public, ed25519_verify};
+use @vesper/crypto::{
+    ed25519_check_public,
+    ed25519_verify
+};
 
 const SCHEMA_VERSION: u32 = 1;
 const MAX_POLICY_KEYS: u64 = 64;
@@ -306,8 +309,20 @@ fn label(in t: Slice[u8]) -> bool {
         return false;
     }
     for x in t {
-        let ok = is_alpha(x) || is_digit(x) || x == 95 || x == 45 || x == 46 || x == 58 || x == 47
-            || x == 64;
+        let ok = is_alpha(x)
+            || is_digit(x)
+            || x
+            == 95
+            || x
+            == 45
+            || x
+            == 46
+            || x
+            == 58
+            || x
+            == 47
+            || x
+            == 64;
         if !ok {
             return false;
         }
@@ -561,8 +576,22 @@ fn identity_error(in id: Identity) -> u64 {
     if id.package.len() > 256 {
         return Msg::PackageTooLong;
     }
-    if id.version.len() > 256 || id.source_tree.len() > 128 || id.derivation.len() > 128
-        || id.output.len() > 128 {
+    if id
+        .version
+        .len()
+        > 256
+        || id
+        .source_tree
+        .len()
+        > 128
+        || id
+        .derivation
+        .len()
+        > 128
+        || id
+        .output
+        .len()
+        > 128 {
         return Msg::FieldTooLong;
     }
     if !semver_exact(in id.version.as_bytes()) {
@@ -576,7 +605,11 @@ fn identity_error(in id: Identity) -> u64 {
         return Msg::SourceNotTree;
     }
     let drv = id.derivation.as_bytes();
-    if !starts_at(in drv, 0, in "drv:b3v1:".as_bytes()) || drv.len() != 73 || !is_hex(in drv, 9, 32) {
+    if !starts_at(in drv, 0, in "drv:b3v1:".as_bytes())
+        || drv
+        .len()
+        != 73
+        || !is_hex(in drv, 9, 32) {
         return Msg::InvalidDerivation;
     }
     let output = object_id(in id.output.as_bytes());
@@ -597,9 +630,38 @@ fn identity_error(in id: Identity) -> u64 {
 }
 
 fn identity_eq(in a: Identity, in b: Identity) -> bool {
-    a.package == b.package && a.version == b.version && a.source_tree == b.source_tree
-        && a.derivation == b.derivation && a.target == b.target && a.builder_blake3 == b.builder_blake3
-        && a.sandbox_contract == b.sandbox_contract && a.output == b.output
+    a
+        .package
+        == b
+        .package
+        && a
+        .version
+        == b
+        .version
+        && a
+        .source_tree
+        == b
+        .source_tree
+        && a
+        .derivation
+        == b
+        .derivation
+        && a
+        .target
+        == b
+        .target
+        && a
+        .builder_blake3
+        == b
+        .builder_blake3
+        && a
+        .sandbox_contract
+        == b
+        .sandbox_contract
+        && a
+        .output
+        == b
+        .output
 }
 
 // ---------------------------------------------------------------------------
@@ -634,11 +696,14 @@ fn put_json_string(inout out: ChunkSeq[u8], in b: Slice[u8]) {
                 let hi = wrapping_shr_u64(widen_u64(x), 4);
                 let lo = widen_u64(x) & 15;
                 out.push(wrapping_u8(wrapping_add(hi, 48)));
-                out.push(if lo < 10 {
-                    wrapping_u8(wrapping_add(lo, 48))
-                } else {
-                    wrapping_u8(wrapping_add(lo, 87))
-                });
+                out
+                    .push(
+                    if lo < 10 {
+                        wrapping_u8(wrapping_add(lo, 48))
+                    } else {
+                        wrapping_u8(wrapping_add(lo, 87))
+                    }
+                );
             }
         }
     }
@@ -717,7 +782,8 @@ fn signing_message(in s: Statement) -> ChunkSeq[u8] {
     p.push(125);
     let n = wrapping_sub(p.len(), start);
     for i in 0..8 {
-        let _ok = p.try_set(
+        let _ok = p
+            .try_set(
             wrapping_add(wrapping_add(domain.len(), 1), i),
             wrapping_u8(wrapping_shr_u64(n, wrapping_u32(wrapping_mul(i, 8))))
         );
@@ -829,7 +895,8 @@ fn copy_diagnostic(in d: Diagnostic) -> Diagnostic {
 }
 
 // The text of each diagnostic, sorted and without repeats.
-fn diagnostics(in policy: Policy, in bundle: Bundle, in ds: ChunkSeq[Diag]) -> ChunkSeq[Diagnostic] {
+fn diagnostics(in policy: Policy, in bundle: Bundle, in ds: ChunkSeq[Diag])
+    -> ChunkSeq[Diagnostic] {
     let mut made: ChunkSeq[Diagnostic] = ChunkSeq::new[Diagnostic]();
     for d in ds {
         let key: Option[String] = if d.key == NONE {
@@ -845,7 +912,8 @@ fn diagnostics(in policy: Policy, in bundle: Bundle, in ds: ChunkSeq[Diag]) -> C
                 Option::None => Option::None,
             }
         };
-        made.push(
+        made
+            .push(
             Diagnostic {
                 code: copy_text(in code_text(d.code)),
                 key_id: key,
@@ -928,7 +996,12 @@ fn name_set(in ns: ChunkSeq[Name]) -> ChunkSeq[Name] {
         }
         last = p;
         match ns.try_get(p) {
-            Option::Some(n) => out.push(Name { text: copy_text(in n.text) }),
+            Option::Some(n) => out
+                .push(
+                Name {
+                    text: copy_text(in n.text)
+                }
+            ),
             Option::None => {},
         }
     }
@@ -955,8 +1028,14 @@ fn finish(
 
 // Whether the 32 bytes at `pks[a * 32..]` and `pks[b * 32..]` are equal.
 fn same_key(in pks: Slice[u8], a: u64, b: u64) -> bool {
-    range_eq(in pks, wrapping_mul(a, 32), wrapping_add(wrapping_mul(a, 32), 32), in pks,
-        wrapping_mul(b, 32), wrapping_add(wrapping_mul(b, 32), 32))
+    range_eq(
+        in pks,
+        wrapping_mul(a, 32),
+        wrapping_add(wrapping_mul(a, 32), 32),
+        in pks,
+        wrapping_mul(b, 32),
+        wrapping_add(wrapping_mul(b, 32), 32)
+    )
 }
 
 // The index of the builder whose key ID is `id`, or NONE.
@@ -975,9 +1054,8 @@ fn builder_index(in policy: Policy, in id: Str) -> u64 {
 // invalid extra rejects the whole bundle. Key and statement intervals are
 // half-open; a statement's interval must lie inside its key's, and `now`
 // inside both.
-pub fn verify(in expected: Identity, in bundle: Bundle, in policy: Policy, now: u64) -> Report eff [
-    Ffi[Crypto]
-] {
+pub fn verify(in expected: Identity, in bundle: Bundle, in policy: Policy, now: u64)
+    -> Report eff [Ffi[Crypto]] {
     let mut ds: ChunkSeq[Diag] = ChunkSeq::new[Diag]();
     let no_names: ChunkSeq[Name] = ChunkSeq::new[Name]();
     let e = identity_error(in expected);
@@ -987,8 +1065,15 @@ pub fn verify(in expected: Identity, in bundle: Bundle, in policy: Policy, now: 
     if policy.schema_version != SCHEMA_VERSION || bundle.schema_version != SCHEMA_VERSION {
         ds.push(diag(Code::UnsupportedSchema, Field::SchemaVersion, Msg::UnsupportedSchema));
     }
-    if policy.minimum_operators < 2 || policy.minimum_operators > MAX_POLICY_KEYS
-        || policy.max_statement_ttl == 0 {
+    if policy
+        .minimum_operators
+        < 2
+        || policy
+        .minimum_operators
+        > MAX_POLICY_KEYS
+        || policy
+        .max_statement_ttl
+        == 0 {
         ds.push(diag(Code::InvalidPolicy, Field::Quorum, Msg::InvalidQuorum));
     }
     let nb = policy.builders.len();
@@ -1021,7 +1106,10 @@ pub fn verify(in expected: Identity, in bundle: Bundle, in policy: Policy, now: 
             2
         };
         if status != 0 && status != 5 {
-            ds.push(keyed(Code::InvalidPublicKey, bi, false, Field::PublicKey, Msg::InvalidPublicKey));
+            ds
+                .push(
+                keyed(Code::InvalidPublicKey, bi, false, Field::PublicKey, Msg::InvalidPublicKey)
+            );
             continue;
         }
         for k in 0..32 {
@@ -1044,7 +1132,16 @@ pub fn verify(in expected: Identity, in bundle: Bundle, in policy: Policy, now: 
             }
         }
         if dup_key {
-            ds.push(keyed(Code::DuplicatePublicKey, bi, false, Field::PublicKey, Msg::DuplicatePublicKey));
+            ds
+                .push(
+                keyed(
+                    Code::DuplicatePublicKey,
+                    bi,
+                    false,
+                    Field::PublicKey,
+                    Msg::DuplicatePublicKey
+                )
+            );
         }
         if dup_id {
             ds.push(keyed(Code::DuplicateKeyId, bi, false, Field::KeyId, Msg::DuplicateKeyId));
@@ -1077,7 +1174,10 @@ pub fn verify(in expected: Identity, in bundle: Bundle, in policy: Policy, now: 
             }
         }
         if repeated {
-            ds.push(keyed(Code::DuplicateAttestation, si, true, Field::KeyId, Msg::DuplicateAttestation));
+            ds
+                .push(
+                keyed(Code::DuplicateAttestation, si, true, Field::KeyId, Msg::DuplicateAttestation)
+            );
             continue;
         }
         seen.push(si);
@@ -1094,34 +1194,84 @@ pub fn verify(in expected: Identity, in bundle: Bundle, in policy: Policy, now: 
         let message = signing_message(in env.statement);
         let before = ds.len();
         if !identity_eq(in env.statement.identity, in expected) {
-            ds.push(keyed(Code::IdentityMismatch, si, true, Field::Identity, Msg::IdentityMismatch));
+            ds
+                .push(
+                keyed(Code::IdentityMismatch, si, true, Field::Identity, Msg::IdentityMismatch)
+            );
         }
         match policy.builders.try_get(bi) {
             Option::Some(b) => {
                 if b.revoked {
                     ds.push(keyed(Code::RevokedKey, si, true, Field::KeyId, Msg::RevokedKey));
                 }
-                if now < b.valid_from || now >= b.valid_until || env.statement.issued_at < b.valid_from
-                    || env.statement.expires_at > b.valid_until {
+                let from = b.valid_from;
+                let until = b.valid_until;
+                let outside = now < from || now >= until;
+                let issued = env.statement.issued_at;
+                let expires = env.statement.expires_at;
+                let overhang = issued < from || expires > until;
+                if outside || overhang {
                     ds.push(keyed(Code::KeyExpired, si, true, Field::Validity, Msg::KeyValidity));
                 }
                 if env.statement.issued_at > now || now >= env.statement.expires_at {
-                    ds.push(keyed(Code::StatementExpired, si, true, Field::Validity, Msg::StatementValidity));
+                    ds
+                        .push(
+                        keyed(
+                            Code::StatementExpired,
+                            si,
+                            true,
+                            Field::Validity,
+                            Msg::StatementValidity
+                        )
+                    );
                 }
-                if env.statement.expires_at < env.statement.issued_at
-                    || wrapping_sub(env.statement.expires_at, env.statement.issued_at) > policy.max_statement_ttl {
-                    ds.push(keyed(Code::StatementTtl, si, true, Field::Validity, Msg::StatementTtl));
+                if env
+                    .statement
+                    .expires_at
+                    < env
+                    .statement
+                    .issued_at
+                    || wrapping_sub(env.statement.expires_at, env.statement.issued_at)
+                    > policy
+                    .max_statement_ttl {
+                    ds
+                        .push(
+                        keyed(Code::StatementTtl, si, true, Field::Validity, Msg::StatementTtl)
+                    );
                 }
                 let mut sig: ChunkSeq[u8] = ChunkSeq::new[u8]();
                 let o = wrapping_mul(bi, 32);
                 let good = hex_into(in env.signature.as_bytes(), 64, inout sig)
-                    && ed25519_verify(in pks[o..wrapping_add(o, 32)], in message.as_slice(), in sig.as_slice());
+                    && ed25519_verify(
+                    in pks[o..wrapping_add(o, 32)],
+                    in message.as_slice(),
+                    in sig.as_slice()
+                );
                 if !good {
-                    ds.push(keyed(Code::InvalidSignature, si, true, Field::Signature, Msg::InvalidSignature));
+                    ds
+                        .push(
+                        keyed(
+                            Code::InvalidSignature,
+                            si,
+                            true,
+                            Field::Signature,
+                            Msg::InvalidSignature
+                        )
+                    );
                 }
                 if ds.len() == before {
-                    keys.push(Name { text: copy_text(in env.statement.key_id) });
-                    operators.push(Name { text: copy_text(in b.operator_id) });
+                    keys
+                        .push(
+                        Name {
+                            text: copy_text(in env.statement.key_id)
+                        }
+                    );
+                    operators
+                        .push(
+                        Name {
+                            text: copy_text(in b.operator_id)
+                        }
+                    );
                 }
             },
             Option::None => {},
@@ -1183,7 +1333,11 @@ pub struct Screening {
 // `[org_start, org_end, name_start, name_end]` (the name is empty without
 // a `/`).
 fn split(in t: Slice[u8], inout out: Slice[u64]) {
-    let s: u64 = if byte(in t, 0) == 64 && t.len() > 0 { 1 } else { 0 };
+    let s: u64 = if byte(in t, 0) == 64 && t.len() > 0 {
+        1
+    } else {
+        0
+    };
     let mut slash = NONE;
     for i in s..t.len() {
         if byte(in t, i) == 47 {
@@ -1215,7 +1369,11 @@ pub fn split_package(in name: Str) -> ChunkSeq[u64] {
 // the lookalikes `0 1 3 4 5 7` as `o l e a s t`. A byte past ASCII is
 // appended as the char of the same value, as the Rust code does.
 fn key_byte(x: u8) -> u64 {
-    let l = if x >= 65 && x <= 90 { wrapping_add(x, 32) } else { x };
+    let l = if x >= 65 && x <= 90 {
+        wrapping_add(x, 32)
+    } else {
+        x
+    };
     if l == 45 || l == 95 {
         return 256;
     }
@@ -1289,7 +1447,11 @@ fn cell(in w: ChunkSeq[u64], i: u64) -> u64 {
 }
 
 fn min(a: u64, b: u64) -> u64 {
-    if a < b { a } else { b }
+    if a < b {
+        a
+    } else {
+        b
+    }
 }
 
 // Optimal string alignment distance of `a` (the longer) and `b`, over
@@ -1302,7 +1464,11 @@ fn osa(in a: Slice[u8], in b: Slice[u8], limit: u64, inout w: ChunkSeq[u64]) -> 
     let n = a.len();
     let m = b.len();
     if m == 0 {
-        return if limit == NONE || n <= limit { n } else { NONE };
+        return if limit == NONE || n <= limit {
+            n
+        } else {
+            NONE
+        };
     }
     let width = wrapping_add(m, 1);
     let banded = limit != NONE && limit < wrapping_add(n, m);
@@ -1318,8 +1484,16 @@ fn osa(in a: Slice[u8], in b: Slice[u8], limit: u64, inout w: ChunkSeq[u64]) -> 
     }
     let mut prev_row_min: u64 = 0;
     for i in 1..wrapping_add(n, 1) {
-        let lo = if banded && i > wrapping_add(limit, 1) { wrapping_sub(i, limit) } else { 1 };
-        let hi = if banded && wrapping_add(i, limit) < m { wrapping_add(i, limit) } else { m };
+        let lo = if banded && i > wrapping_add(limit, 1) {
+            wrapping_sub(i, limit)
+        } else {
+            1
+        };
+        let hi = if banded && wrapping_add(i, limit) < m {
+            wrapping_add(i, limit)
+        } else {
+            m
+        };
         let _c0 = w.try_set(c, i);
         if lo > 1 {
             let _l = w.try_set(wrapping_add(c, wrapping_sub(lo, 1)), far);
@@ -1333,8 +1507,15 @@ fn osa(in a: Slice[u8], in b: Slice[u8], limit: u64, inout w: ChunkSeq[u64]) -> 
         for j in lo..wrapping_add(hi, 1) {
             let bj = byte(in b, wrapping_sub(j, 1));
             let up = cell(in w, wrapping_add(p1, j));
-            let cost: u64 = if ai != bj { 1 } else { 0 };
-            let mut best = min(min(wrapping_add(up, 1), wrapping_add(left, 1)), wrapping_add(diag, cost));
+            let cost: u64 = if ai != bj {
+                1
+            } else {
+                0
+            };
+            let mut best = min(
+                min(wrapping_add(up, 1), wrapping_add(left, 1)),
+                wrapping_add(diag, cost)
+            );
             if i > 1 && j > 1 && ai == bprev && ai2 == bj {
                 best = min(best, wrapping_add(cell(in w, wrapping_add(p2, wrapping_sub(j, 2))), 1));
             }
@@ -1357,7 +1538,11 @@ fn osa(in a: Slice[u8], in b: Slice[u8], limit: u64, inout w: ChunkSeq[u64]) -> 
         c = t;
     }
     let dist = cell(in w, wrapping_add(p1, m));
-    if limit == NONE || dist <= limit { dist } else { NONE }
+    if limit == NONE || dist <= limit {
+        dist
+    } else {
+        NONE
+    }
 }
 
 fn distance(in a: Slice[u8], in b: Slice[u8], limit: u64, inout w: ChunkSeq[u64]) -> u64 {
@@ -1371,7 +1556,11 @@ fn distance(in a: Slice[u8], in b: Slice[u8], limit: u64, inout w: ChunkSeq[u64]
 // The bounded distance (NONE past `limit`, or when the lengths alone
 // differ by more).
 fn bounded(in a: Slice[u8], in b: Slice[u8], limit: u64, inout w: ChunkSeq[u64]) -> u64 {
-    let d = if a.len() > b.len() { wrapping_sub(a.len(), b.len()) } else { wrapping_sub(b.len(), a.len()) };
+    let d = if a.len() > b.len() {
+        wrapping_sub(a.len(), b.len())
+    } else {
+        wrapping_sub(b.len(), a.len())
+    };
     if d > limit {
         return NONE;
     }
@@ -1495,7 +1684,9 @@ pub fn screen(
             let e = sp(in ends, i);
             let os = s;
             s = e;
-            if range_eq(in nb, os, e, in c, 0, c.len()) || wrapping_sub(e, os) > MAX_PACKAGE_NAME_LEN {
+            if range_eq(in nb, os, e, in c, 0, c.len())
+                || wrapping_sub(e, os)
+                > MAX_PACKAGE_NAME_LEN {
                 continue;
             }
             let other = names[os..e];
@@ -1526,10 +1717,24 @@ pub fn screen(
                 continue;
             }
             let limit = policy.max_edit_distance;
-            let pkg_dist = if same_org { bounded(in c[c2..c3], in ob[o2..o3], limit, inout w) } else { NONE };
-            let org_dist = if same_pkg { bounded(in c[c0..c1], in ob[o0..o1], limit, inout w) } else { NONE };
-            let full_dist = bounded(in cand_full.as_slice(), in other_full.as_slice(), limit, inout w);
-            let near = (pkg_dist != NONE && pkg_dist > 0) || (org_dist != NONE && org_dist > 0)
+            let pkg_dist = if same_org {
+                bounded(in c[c2..c3], in ob[o2..o3], limit, inout w)
+            } else {
+                NONE
+            };
+            let org_dist = if same_pkg {
+                bounded(in c[c0..c1], in ob[o0..o1], limit, inout w)
+            } else {
+                NONE
+            };
+            let full_dist = bounded(
+                in cand_full.as_slice(),
+                in other_full.as_slice(),
+                limit,
+                inout w
+            );
+            let near = (pkg_dist != NONE && pkg_dist > 0)
+                || (org_dist != NONE && org_dist > 0)
                 || (full_dist != NONE && full_dist > 0);
             if near {
                 let reported = if same_org {
@@ -1587,8 +1792,15 @@ pub fn screen(
     }
     let mut hard = false;
     for f in findings {
-        if f.reason == Reason::MissingFromCatalog || f.reason == Reason::OversizedPackageName
-            || f.reason == Reason::MissingOidcProvenance {
+        if f
+            .reason
+            == Reason::MissingFromCatalog
+            || f
+            .reason
+            == Reason::OversizedPackageName
+            || f
+            .reason
+            == Reason::MissingOidcProvenance {
             hard = true;
         }
     }
