@@ -14,7 +14,59 @@ use vesper::{
     runtime::Runtime,
 };
 
-const SOURCE: &str = include_str!("fixtures/cold_inline.ves");
+/// Kept out of `tests/fixtures` so the corpus that the sampled self-host
+/// differentials walk stays as it was.
+const SOURCE: &str = r#"
+// Gap 8 (#1499): a callee that owns a sequence stays a call on a cold
+// branch, and is inlined where every call or every loop iteration runs it.
+fn slow(x: u64) -> u64 {
+    let mut s: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    s.push(x);
+    s.push(wrapping_add(x, 1));
+    s.len()
+}
+
+fn total(in s: ChunkSeq[u64]) -> u64 {
+    wrapping_mul(s.len(), 3)
+}
+
+pub fn hot(x: u64) -> u64 {
+    if x > 1000000 {
+        return slow(x);
+    }
+    wrapping_add(x, 1)
+}
+
+pub fn every(x: u64) -> u64 {
+    wrapping_add(slow(x), x)
+}
+
+pub fn looped(n: u64) -> u64 {
+    let mut t: u64 = 0;
+    for i in 0..n {
+        if i == 3 {
+            t = wrapping_add(t, slow(i));
+        }
+    }
+    t
+}
+
+pub fn borrowed(x: u64) -> u64 {
+    let mut s: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    s.push(x);
+    if x > 7 {
+        return total(in s);
+    }
+    x
+}
+
+fn main() -> u64 {
+    wrapping_add(
+        wrapping_add(hot(5), hot(2000000)),
+        wrapping_add(wrapping_add(every(4), looped(6)), wrapping_add(borrowed(3), borrowed(9)))
+    )
+}
+"#;
 const COLD: Refusal = Refusal::Site("sequence owner on a cold path");
 
 fn world(source: &str) -> check::World {

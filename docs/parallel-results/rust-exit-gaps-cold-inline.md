@@ -113,7 +113,7 @@ so they belong to the code-size lane (#1426): header reloads and spills.
 
 ## Checks
 
-- `tests/native_cold_inline.rs` (new, fixture `tests/fixtures/cold_inline.ves`):
+- `tests/native_cold_inline.rs` (new; its program is inline, outside the sampled corpus):
   the evaluator, the JIT and x86-64/AArch64 objects agree with `optimize`
   on and off; `hot` keeps its call with the new refusal; `every`
   (unconditional) and `looped` (rare branch inside a loop) inline `slow`;
