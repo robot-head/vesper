@@ -49,6 +49,8 @@
 //! | `drops` (fip) | the same | [`INSTRUCTION`] for `Op::Fip` |
 //! | `ffi` | the same | [`INSTRUCTION`] for a call of a foreign (`.vsys`) effect operation |
 //! | `export` | `native_export::glue::define`, after the sequence runtime and `vesper_box_alloc` | the rest of the v2 glue over a lent module ([`ExportHook`]) |
+//! | `plan` | `native_export::plan_with` | the whole library interface ([`PlanHook`]) |
+//! | `interface_json` | `native_export::interface_json` | the whole interface file ([`InterfaceJsonHook`]) |
 //! | `freestanding` | `native_freestanding::build_image` | whole image ([`FreestandingHook`]) |
 //! | `wasm` | `wasm_backend::compile` | whole component ([`WasmHook`]) |
 //! | `ebpf` | `ebpf_backend::compile_world` | whole program ([`EbpfHook`]) |
@@ -138,6 +140,20 @@ pub type ExportHook = fn(
     &World,
     &crate::native::export::LibraryInterface,
 ) -> Option<Result<(), String>>;
+/// The export interface planner hook: `native_export::plan_with`'s
+/// signature (`native_export::plan_native` is the Rust planner); `None`
+/// declines.
+pub type PlanHook = fn(
+    &World,
+    &std::collections::BTreeSet<String>,
+    &str,
+    &crate::native::export::Directives,
+) -> Option<
+    Result<crate::native::export::LibraryInterface, Vec<crate::native::export::ExportError>>,
+>;
+/// The interface file hook: `native_export::interface_json`'s text (the
+/// pretty JSON and its trailing newline); `None` declines.
+pub type InterfaceJsonHook = fn(&crate::native::export::LibraryInterface) -> Option<String>;
 /// The whole-image hook: `native::freestanding::build_image`'s signature;
 /// `None` declines.
 pub type FreestandingHook = fn(
@@ -250,6 +266,8 @@ pub struct CodegenHooks {
     pub numeric: Option<Hook>,
     pub ffi: Option<Hook>,
     pub export: Option<ExportHook>,
+    pub plan: Option<PlanHook>,
+    pub interface_json: Option<InterfaceJsonHook>,
     pub freestanding: Option<FreestandingHook>,
     pub wasm: Option<WasmHook>,
     pub ebpf: Option<EbpfHook>,
@@ -273,6 +291,8 @@ impl CodegenHooks {
     fn any(&self) -> bool {
         Family::ALL.iter().any(|f| self.family(*f).is_some())
             || self.export.is_some()
+            || self.plan.is_some()
+            || self.interface_json.is_some()
             || self.freestanding.is_some()
             || self.wasm.is_some()
             || self.ebpf.is_some()
