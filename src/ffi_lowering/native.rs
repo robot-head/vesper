@@ -6,7 +6,9 @@
 use super::*;
 use crate::ffi_lowering::{self as ffi, Handler};
 use cranelift_module::DataDescription;
-use vesper_ffi::sys::{AbiType, Access, ParameterType, Pointee, PointerAccess, Scalar, ValueType};
+use vesper_ffi::sys::{
+    AbiType, Access, Float, ParameterType, Pointee, PointerAccess, Scalar, ValueType,
+};
 use vesper_ffi::{Endian, FieldKind, WireLayout};
 
 /// `xor ecx, ecx; rdpkru; ret` — returns PKRU in eax (System V).
@@ -55,9 +57,27 @@ fn c_type(bits: u8) -> ir::Type {
         _ => types::I64,
     }
 }
+/// C functions the runtimes import, with their word signatures (`n`
+/// 64-bit integer parameters, and a 64-bit result or none).
+fn runtime_import(symbol: &str) -> Option<(usize, bool)> {
+    Some(match symbol {
+        "write" | "memcpy" | "memmove" | "memset" => (3, true),
+        "malloc" => (1, true),
+        "calloc" | "realloc" => (2, true),
+        "free" | "exit" => (1, false),
+        _ => return None,
+    })
+}
+fn float_type(f: Float) -> ir::Type {
+    match f {
+        Float::F32 => types::F32,
+        Float::F64 => types::F64,
+    }
+}
 fn abi_param(t: AbiType, pointer: ir::Type) -> AbiParam {
     match t {
         AbiType::Pointer => AbiParam::new(pointer),
+        AbiType::Float(f) => AbiParam::new(float_type(f)),
         AbiType::Integer(s) => {
             let p = AbiParam::new(c_type(s.bits()));
             if s.bits() == 64 {
@@ -93,6 +113,26 @@ fn identical(p: &Pointee, little: bool) -> bool {
     }
 }
 
+/// Converts a word of type `from` to `to` (both integers): sign or zero
+/// extension, or truncation.
+fn convert_word(
+    b: &mut FunctionBuilder<'_>,
+    v: ir::Value,
+    to: ir::Type,
+    signed: bool,
+) -> ir::Value {
+    let from = b.func.dfg.value_type(v);
+    if from == to {
+        v
+    } else if from.bits() > to.bits() {
+        b.ins().ireduce(to, v)
+    } else if signed {
+        b.ins().sextend(to, v)
+    } else {
+        b.ins().uextend(to, v)
+    }
+}
+
 /// What a foreign call calls: an imported symbol, or (a callback type's
 /// call) the C function pointer it was handed.
 enum Callee {
@@ -101,6 +141,142 @@ enum Callee {
 }
 
 impl<M: Module> Codegen<'_, '_, M> {
+    /// The address of the C-ABI trampoline that calls the Vesper function
+    /// `arg` names as a pointer of `library`'s callback type `callback`
+    /// (§16.3): it widens or narrows each C word to the function's own
+    /// parameter, calls it, and hands its result back as the C result. One
+    /// trampoline per (function, callback type) in a module.
+    fn foreign_trampoline(
+        &mut self,
+        arg: &Expr,
+        library: &str,
+        callback: &str,
+    ) -> Result<ir::Value, String> {
+        // The function value, as `parallel_for` resolves its body: the
+        // optimize path may hand it over as a renamed operand.
+        let value = self.expr(arg)?;
+        let info = self.info(value);
+        let refuse =
+            || format!("{library}::{callback}: the callback argument is not a named function");
+        let [target] = info.targets.iter().copied().collect::<Vec<_>>()[..] else {
+            return Err(refuse());
+        };
+        let closure = target
+            .checked_sub(1)
+            .and_then(|i| self.closures.get(i))
+            .ok_or_else(refuse)?;
+        let ClosureTarget::Function(function) = &closure.target else {
+            return Err(refuse());
+        };
+        if !closure.captures.is_empty() {
+            return Err(refuse());
+        }
+        let function = function.clone();
+        let id = *self
+            .ids
+            .get(&instance_key(&function, &BTreeMap::new()))
+            .ok_or_else(|| format!("callback function '{function}' was not compiled"))?;
+        let key = (function.clone(), library.to_owned(), callback.to_owned());
+        let existing = ffi::TRAMPOLINES.with(|t| t.borrow().get(&key).copied());
+        let trampoline = match existing {
+            Some(t) => FuncId::from_u32(t),
+            None => {
+                let t = self.define_trampoline(&function, id, library, callback)?;
+                ffi::TRAMPOLINES.with(|m| m.borrow_mut().insert(key, t.as_u32()));
+                t
+            }
+        };
+        let pointer = self.m.target_config().pointer_type();
+        let f = self.m.declare_func_in_func(trampoline, self.b.func);
+        Ok(self.b.ins().func_addr(pointer, f))
+    }
+    fn define_trampoline(
+        &mut self,
+        function: &str,
+        id: FuncId,
+        library: &str,
+        callback: &str,
+    ) -> Result<FuncId, String> {
+        let descriptor = ffi::callback_plan(library, callback)?;
+        let abi = descriptor.abi();
+        let pointer = self.m.target_config().pointer_type();
+        let mut c_sig = self.m.make_signature();
+        for t in &abi.parameters {
+            c_sig.params.push(abi_param(*t, pointer));
+        }
+        if let Some(t) = abi.result {
+            c_sig.returns.push(abi_param(t, pointer));
+        }
+        let trampoline = self
+            .m
+            .declare_anonymous_function(&c_sig)
+            .map_err(|e| format!("trampoline of '{function}': {e}"))?;
+        let mut ctx = self.m.make_context();
+        ctx.func.signature = c_sig.clone();
+        let mut fbctx = FunctionBuilderContext::new();
+        {
+            let mut b = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
+            let block = b.create_block();
+            b.append_block_params_for_function_params(block);
+            b.switch_to_block(block);
+            let c_args = b.block_params(block).to_vec();
+            let callee = self.m.declare_func_in_func(id, b.func);
+            let v_sig = b.func.dfg.signatures[b.func.dfg.ext_funcs[callee].signature].clone();
+            if v_sig.params.len() != c_args.len() || v_sig.returns.len() > 1 {
+                return Err(format!(
+                    "'{function}' cannot be called by C as {library}::{callback}: its compiled signature takes {} words, C passes {}",
+                    v_sig.params.len(),
+                    c_args.len()
+                ));
+            }
+            let signed: Vec<bool> = abi
+                .parameters
+                .iter()
+                .map(|t| matches!(t, AbiType::Integer(s) if s.signed()))
+                .collect();
+            let args: Vec<ir::Value> = c_args
+                .iter()
+                .zip(&v_sig.params)
+                .zip(&signed)
+                .map(|((v, p), s)| convert_word(&mut b, *v, p.value_type, *s))
+                .collect();
+            let call = b.ins().call(callee, &args);
+            let results = b.inst_results(call).to_vec();
+            // In the JIT a sequence fault is recorded per thread and C may
+            // call from any thread: hand it to the entry's `finish`.
+            if std::any::type_name::<M>().contains("JITModule") {
+                let sig = self.m.make_signature();
+                let id = self
+                    .m
+                    .declare_function("vesper_callback_return", Linkage::Import, &sig)
+                    .map_err(|e| format!("trampoline of '{function}': {e}"))?;
+                let f = self.m.declare_func_in_func(id, b.func);
+                b.ins().call(f, &[]);
+            }
+            match (abi.result, results.first(), c_sig.returns.first()) {
+                (Some(t), Some(r), Some(ret)) => {
+                    let signed = matches!(t, AbiType::Integer(s) if s.signed());
+                    let r = convert_word(&mut b, *r, ret.value_type, signed);
+                    b.ins().return_(&[r]);
+                }
+                (None, _, _) => {
+                    b.ins().return_(&[]);
+                }
+                _ => {
+                    return Err(format!(
+                        "'{function}' returns nothing, but {library}::{callback} returns a value"
+                    ));
+                }
+            }
+            b.seal_all_blocks();
+            b.finalize();
+        }
+        self.m
+            .define_function(trampoline, &mut ctx)
+            .map_err(|e| format!("trampoline of '{function}': {e}"))?;
+        self.m.clear_context(&mut ctx);
+        Ok(trampoline)
+    }
     pub(super) fn foreign_perform(
         &mut self,
         effect: &str,
@@ -125,10 +301,21 @@ impl<M: Module> Codegen<'_, '_, M> {
         }
         // SH4 swap point (#1287): the `ffi` hook may emit this call
         // (`codegen_swap::ffi`); none is installed by default. A callback
-        // type's call is not offered: the steps name a symbol. Foreign
-        // memory viewed in place (pinned buffers and mappings) is lowered
-        // here only, so the hook is not offered such calls either.
+        // type's call is not offered: the steps name a symbol. Nor is a
+        // call passing or returning a float: the steps carry integer words.
+        // Foreign memory viewed in place (pinned buffers and mappings) is
+        // lowered here only, so the hook is not offered such calls either.
+        let abi = plan.function.abi();
+        let floats = abi
+            .parameters
+            .iter()
+            .chain(abi.result.as_ref())
+            .any(|t| matches!(t, AbiType::Float(_)));
         if !plan.function.is_indirect()
+            && !floats
+            && !descriptors
+                .iter()
+                .any(|d| matches!(d.ty(), ParameterType::Function { .. }))
             && !plan.function.uses_foreign_memory()
             && let Some(v) = self.foreign_perform_swapped(&plan, &signature, args)?
         {
@@ -153,6 +340,12 @@ impl<M: Module> Codegen<'_, '_, M> {
         {
             if plan.function.mapping_length() == Some(index) {
                 mapping_length = Some(c_args.len());
+            }
+            if let ParameterType::Function { callback, .. } = descriptor.ty() {
+                let trampoline =
+                    self.foreign_trampoline(&arg.expr, &plan.library, callback.name())?;
+                c_args.push(trampoline);
+                continue;
             }
             if let ParameterType::CStr = descriptor.ty() {
                 let (data, len) = self.foreign_view(&arg.expr, 1)?;
@@ -208,6 +401,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                 }
                 ParameterType::Handle { .. } => c_args.push(self.foreign_word(source)),
                 ParameterType::CStr => unreachable!("C strings are lowered above"),
+                ParameterType::Function { .. } => unreachable!("functions are lowered above"),
                 ParameterType::Pointer {
                     pointee,
                     access,
@@ -262,7 +456,6 @@ impl<M: Module> Codegen<'_, '_, M> {
         // The length word is taken before any variadic padding shifts the
         // argument positions.
         let length = mapping_length.map(|i| c_args[i]);
-        let abi = plan.function.abi();
         // Apple arm64 passes variadic arguments on the stack: zero words
         // fill the remaining argument registers first (`sys::Variadic`).
         if let Some(v) = abi.variadic {
@@ -293,13 +486,7 @@ impl<M: Module> Codegen<'_, '_, M> {
             }
             Callee::Direct(self.foreign_code(plan.function.symbol(), &sig, &code)?)
         } else {
-            let symbol = plan.function.link_symbol();
-            self.foreign_symbol_free(symbol, Linkage::Import)?;
-            let callee = self
-                .m
-                .declare_function(symbol, Linkage::Import, &sig)
-                .map_err(|e| format!("foreign symbol '{symbol}': {e}"))?;
-            Callee::Direct(self.m.declare_func_in_func(callee, self.b.func))
+            self.foreign_import(plan.function.link_symbol(), sig)?
         };
         // A `CStr` argument holding a NUL byte refuses the whole call:
         // `Err(ForeignInvalid { raw: offset })` of the first such argument.
@@ -605,6 +792,10 @@ impl<M: Module> Codegen<'_, '_, M> {
                 let word = self.foreign_word(source);
                 Ok(self.foreign_narrow(word, s.bits()))
             }
+            ValueType::Float(f) => Ok(match source {
+                Source::Scalar(v) => v,
+                Source::Memory(p) => self.b.ins().load(float_type(*f), ir::MemFlags::new(), p, 0),
+            }),
             ValueType::Bool => {
                 let word = self.foreign_word(source);
                 Ok(self.b.ins().ireduce(types::I8, word))
@@ -971,6 +1162,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                 let v = raw()?;
                 Ok(self.foreign_widen(v, s.bits(), s.signed()))
             }
+            ValueType::Float(_) => raw().map_err(Into::into),
             ValueType::Bool => {
                 let v = raw()?;
                 let word = self.b.ins().uextend(types::I64, v);
@@ -1110,6 +1302,73 @@ impl<M: Module> Codegen<'_, '_, M> {
     /// A foreign import must not bind to a Vesper function (for example an
     /// entry exported under the same name), and a generated helper must not
     /// bind to a foreign import: both are errors, never a silent rebinding.
+    /// The callee of a direct foreign call of `symbol` with C signature
+    /// `sig`. A symbol the runtime also imports (`write`, `malloc`, ...)
+    /// is declared with the runtime's word signature, whichever declares
+    /// it first, and called through its address with `sig`, so the two
+    /// declarations never clash.
+    fn foreign_import(&mut self, symbol: &str, sig: ir::Signature) -> Result<Callee, String> {
+        let shared = match self.m.declarations().get_name(symbol) {
+            Some(cranelift_module::FuncOrDataId::Func(id)) => {
+                let decl = self.m.declarations().get_function_decl(id);
+                if decl.linkage != Linkage::Import {
+                    return Err(format!(
+                        "foreign symbol '{symbol}' collides with another symbol of this object; rename the Vesper function or the .vsys import"
+                    ));
+                }
+                (decl.signature != sig).then_some(id)
+            }
+            Some(_) => {
+                return Err(format!(
+                    "foreign symbol '{symbol}' collides with another symbol of this object; rename the Vesper function or the .vsys import"
+                ));
+            }
+            None => match runtime_import(symbol) {
+                Some((params, result)) => {
+                    let mut word = self.m.make_signature();
+                    word.params
+                        .extend((0..params).map(|_| AbiParam::new(types::I64)));
+                    if result {
+                        word.returns.push(AbiParam::new(types::I64));
+                    }
+                    if word == sig {
+                        None
+                    } else {
+                        Some(
+                            self.m
+                                .declare_function(symbol, Linkage::Import, &word)
+                                .map_err(|e| format!("foreign symbol '{symbol}': {e}"))?,
+                        )
+                    }
+                }
+                None => None,
+            },
+        };
+        if let Some(id) = shared {
+            let f = self.m.declare_func_in_func(id, self.b.func);
+            let pointer = self.m.target_config().pointer_type();
+            let address = self.b.ins().func_addr(pointer, f);
+            return Ok(Callee::Indirect(self.b.import_signature(sig), address));
+        }
+        let callee = self
+            .m
+            .declare_function(symbol, Linkage::Import, &sig)
+            .map_err(|e| format!("foreign symbol '{symbol}': {e}"))?;
+        Ok(Callee::Direct(
+            self.m.declare_func_in_func(callee, self.b.func),
+        ))
+    }
+    /// Whether `symbol` may be declared with `sig` itself (the `ffi` hook
+    /// is offered only such calls).
+    fn foreign_import_direct(&self, symbol: &str, sig: &ir::Signature) -> bool {
+        match self.m.declarations().get_name(symbol) {
+            Some(cranelift_module::FuncOrDataId::Func(id)) => {
+                self.m.declarations().get_function_decl(id).signature == *sig
+            }
+            Some(_) => true,
+            None => runtime_import(symbol).is_none(),
+        }
+    }
     fn foreign_symbol_free(&self, name: &str, linkage: Linkage) -> Result<bool, String> {
         let declarations = self.m.declarations();
         match declarations.get_name(name) {
@@ -1201,6 +1460,7 @@ fn value_words(v: &ValueType, out: &mut Vec<u64>) {
         ValueType::Address { .. } => out.push(4),
         ValueType::Handle { nullable, .. } => out.extend([5, u64::from(*nullable)]),
         ValueType::NonNullHandle { .. } => out.push(6),
+        ValueType::Float(_) => unreachable!("calls with floats are not offered to the hook"),
     }
 }
 fn integer_word(int: &vesper_ffi::Integer) -> u64 {
@@ -1365,9 +1625,23 @@ impl<M: Module> Codegen<'_, '_, M> {
         if crate::codegen_swap::hook(crate::codegen_swap::Family::Ffi).is_none() {
             return Ok(None);
         }
+        // A symbol shared with the runtime's imports is called through its
+        // address (`foreign_import`), which the steps do not express, and
         // Apple arm64 pads a variadic call's argument registers with zero
-        // words (`sys::Variadic`), which the steps do not carry.
-        if plan.function.abi().variadic.is_some_and(|v| v.padding > 0) {
+        // words (`sys::Variadic`), which they do not carry either.
+        let abi = plan.function.abi();
+        if abi.variadic.is_some_and(|v| v.padding > 0) {
+            return Ok(None);
+        }
+        let pointer = self.m.target_config().pointer_type();
+        let mut sig = self.m.make_signature();
+        for t in &abi.parameters {
+            sig.params.push(abi_param(*t, pointer));
+        }
+        if let Some(t) = abi.result {
+            sig.returns.push(abi_param(t, pointer));
+        }
+        if !self.foreign_import_direct(plan.function.link_symbol(), &sig) {
             return Ok(None);
         }
         let descriptors = plan.function.parameters();
@@ -1453,6 +1727,9 @@ impl<M: Module> Codegen<'_, '_, M> {
                             return Err("pinned buffers are not offered to the ffi hook".into());
                         }
                         ParameterType::CStr => unreachable!("C strings are lowered above"),
+                        ParameterType::Function { .. } => {
+                            unreachable!("calls taking functions are not offered to the hook")
+                        }
                         ParameterType::Pointer {
                             pointee,
                             access,
@@ -1555,15 +1832,6 @@ impl<M: Module> Codegen<'_, '_, M> {
             if s == 2 {
                 strings.push((r[3 + k + m], r[4 + k + m]));
             }
-        }
-        let abi = plan.function.abi();
-        let pointer = self.m.target_config().pointer_type();
-        let mut sig = self.m.make_signature();
-        for t in &abi.parameters {
-            sig.params.push(abi_param(*t, pointer));
-        }
-        if let Some(t) = abi.result {
-            sig.returns.push(abi_param(t, pointer));
         }
         let symbol = plan.function.link_symbol();
         self.foreign_symbol_free(symbol, Linkage::Import)?;
@@ -1716,6 +1984,7 @@ impl<M: Module> Codegen<'_, '_, M> {
         };
         match v {
             ValueType::Unit | ValueType::Scalar(_) => Ok(()),
+            ValueType::Float(_) => unreachable!("calls with floats are not offered to the hook"),
             ValueType::Bool | ValueType::Enum(_) => validated(self.world, out),
             ValueType::Address { .. } => Err("foreign address results have no lowering".into()),
             ValueType::NonNullHandle { .. } => {

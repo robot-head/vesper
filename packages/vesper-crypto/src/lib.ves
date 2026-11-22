@@ -33,6 +33,7 @@
 // |     fn vcr_ed25519_public(nocapture in seed: CSlice[u8], nocapture inout out: CSlice[u8]) -> ForeignVal[u32];
 // |     fn vcr_ed25519_sign(nocapture in seed: CSlice[u8], nocapture in msg: CSlice[u8], nocapture inout out: CSlice[u8]) -> ForeignVal[u32];
 // |     fn vcr_ed25519_verify(nocapture in public: CSlice[u8], nocapture in msg: CSlice[u8], nocapture in sig: CSlice[u8]) -> ForeignVal[u32];
+// |     fn vcr_ed25519_check_public(nocapture in public: CSlice[u8]) -> ForeignVal[u32];
 // |     fn vcr_mlkem768_isa_available(isa: u32) -> ForeignVal[u32];
 // |     fn vcr_mlkem768_keygen(isa: u32, nocapture in seed: CSlice[u8], nocapture inout ek: CSlice[u8], nocapture inout dk: CSlice[u8]) -> ForeignVal[u32];
 // |     fn vcr_mlkem768_validate(isa: u32, nocapture in ek: CSlice[u8]) -> ForeignVal[u32];
@@ -67,7 +68,8 @@ pub enum Status: _ {
     Length = 1,
     Auth = 2,
     Failed = 3,
-    Unsupported = 4
+    Unsupported = 4,
+    Weak = 5
 }
 
 // AEAD algorithm codes.
@@ -371,6 +373,12 @@ pub fn ed25519_sign(in seed: Slice[u8], in msg: Slice[u8], inout out: Slice[u8])
 pub fn ed25519_verify(in public: Slice[u8], in msg: Slice[u8], in sig: Slice[u8])
     -> bool eff [Ffi[Crypto]] {
     Crypto::vcr_ed25519_verify(in public, in msg, in sig) == 0
+}
+
+// The shim status of a 32-byte Ed25519 public key: `Ok`, `Auth` when it
+// does not encode a curve point, `Weak` for a small-order point, `Length`.
+pub fn ed25519_check_public(in public: Slice[u8]) -> u32 eff [Ffi[Crypto]] {
+    Crypto::vcr_ed25519_check_public(in public)
 }
 
 // ---------------------------------------------------------------------------

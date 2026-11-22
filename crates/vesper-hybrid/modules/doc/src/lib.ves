@@ -1,0 +1,42 @@
+// @vesper/hybrid-doc: `vesper_doc`'s renderers served from Vesper in the
+// hybrid Stage 2 build (self-hosting SH5 lane 15, #1338).
+//
+// Each entry takes one request written by `vesper_doc::swap` (the byte
+// budget, the compact JSON of the value and, for a linked page, the
+// validated link data) and returns a status byte and the output bytes or
+// the error text, which `vesper_doc::swap::decode` reads back.
+
+// @export abi 4
+
+use @vesper/doc::{
+    format,
+    linked_page,
+    pretty_json,
+    static_page
+};
+
+// The request and result layout version; `vesper_doc::swap::FORMAT`.
+pub fn doc_format() -> u64 {
+    format()
+}
+
+// `vesper_doc::to_json`.
+pub fn doc_pretty_json(in request: Slice[u8]) -> ChunkSeq[u8] {
+    pretty_json(in request)
+}
+
+// `vesper_doc::render_html`.
+pub fn doc_static_page(in request: Slice[u8]) -> ChunkSeq[u8] {
+    static_page(in request)
+}
+
+// `vesper_doc::render_document_html`.
+pub fn doc_linked_page(in request: Slice[u8]) -> ChunkSeq[u8] {
+    divergent(linked_page(in request))
+}
+
+// The divergent build (build.rs `divergent-doc`) swaps this body for one
+// that drops the last byte of every linked page.
+fn divergent(sink page: ChunkSeq[u8]) -> ChunkSeq[u8] {
+    page
+}

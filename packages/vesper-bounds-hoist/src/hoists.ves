@@ -150,8 +150,9 @@ fn users_of(in f: Fun) -> Users {
 }
 
 // `only_access_receivers`: whether every use of `read` is the receiver,
-// lent as `pass`, of a length-keeping access of `place` (or the sequence of
-// a bounds guard), in `blocks` when `within`.
+// lent as `pass`, of a length-keeping access of `place` (of any operation
+// when `any_receiver`: a slice view never changes), or the sequence of a
+// bounds guard, in `blocks` when `within`.
 fn only_access_receivers(
     in f: Fun,
     in us: Users,
@@ -159,7 +160,8 @@ fn only_access_receivers(
     pass: u8,
     place: u32,
     within: bool,
-    in blocks: ChunkSeq[u32]
+    in blocks: ChunkSeq[u32],
+    any_receiver: bool
 ) -> bool {
     let n = w(u32_at(in us.un, w(read)));
     if n == 0 {
@@ -189,7 +191,9 @@ fn only_access_receivers(
             }
             continue;
         }
-        if !has_receiver(u.sub) || !(keeps_length(u.sub) || is_hoisted(u.sub)) || u.gn == 0 {
+        if !has_receiver(u.sub)
+            || !(any_receiver || keeps_length(u.sub) || is_hoisted(u.sub))
+            || u.gn == 0 {
             return false;
         }
         let first = f.arg(w(u.g0));
@@ -294,7 +298,16 @@ fn stable_views(in f: Fun, in us: Users, inout out: Hoists) {
             }
             let pass = wrapping_u8(i.sub);
             if (pass == P_IN || pass == P_INOUT)
-                && only_access_receivers(in f, in us, i.dest, pass, place, false, in none) {
+                && only_access_receivers(
+                    in f,
+                    in us,
+                    i.dest,
+                    pass,
+                    place,
+                    false,
+                    in none,
+                    (q.flags & TY_SLICE) != 0
+                ) {
                 out.reads.push(wrapping_shl_u64(k, 32) | w(i.dest));
                 any = true;
             }
@@ -345,7 +358,7 @@ fn stable_views(in f: Fun, in us: Users, inout out: Hoists) {
             if (i.flags & TY_SEQ) == 0 || (i.flags & TY_TEXT) != 0 {
                 continue;
             }
-            if !only_access_receivers(in f, in us, i.dest, P_IN, i.place, false, in none) {
+            if !only_access_receivers(in f, in us, i.dest, P_IN, i.place, false, in none, false) {
                 continue;
             }
             buf.clear();
@@ -544,7 +557,7 @@ fn header_hoists(in f: Fun, in us: Users, inout out: Hoists) {
                 if viewed {
                     continue;
                 }
-                if !only_access_receivers(in f, in us, i.dest, pass, i.place, true, in both)
+                if !only_access_receivers(in f, in us, i.dest, pass, i.place, true, in both, false)
                     || !stable_place(in f, in both, i.place) {
                     continue;
                 }

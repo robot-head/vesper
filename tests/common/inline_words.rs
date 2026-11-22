@@ -136,6 +136,10 @@ pub struct Tables {
     type_words: Vec<Vec<u64>>,
     pub rows: HashMap<String, u64>,
     row_words: Vec<Vec<u64>>,
+    /// Debug text of every effect instance of a row -> index, so the
+    /// package compares instances (the callee-row-within-caller-row test of
+    /// `site_bindings`, #1502) without reading their argument types.
+    instances: HashMap<String, u64>,
     /// Debug text of every copied-but-unread part -> index.
     pub opaque: HashMap<String, u64>,
     pub opaque_list: Vec<String>,
@@ -202,6 +206,9 @@ impl Tables {
             words.push(self.opt_name(&i.label));
             words.push(self.name(&i.name));
             words.push(i.args.len() as u64);
+            let key = format!("{i:?}");
+            let next = self.instances.len() as u64;
+            words.push(*self.instances.entry(key).or_insert(next));
         }
         words.push(self.opt_name(&e.tail));
         let i = self.row_words.len() as u64;

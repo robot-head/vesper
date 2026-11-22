@@ -22,6 +22,7 @@ fn package(s: &str, version: &str) -> Manifest {
             capability_ceiling: BTreeSet::new(),
             forbid_unsafe_ffi: true,
             vsys: vec![],
+            objects: vec![],
         },
         features: Default::default(),
         dependencies: Default::default(),

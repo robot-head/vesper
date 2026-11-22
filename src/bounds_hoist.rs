@@ -1977,7 +1977,10 @@ pub fn stable_views(f: &FunctionIr) -> Vec<HeaderHoist> {
             // Only a growing operation writes a handle back to its place,
             // and a stable place is never grown.
             let pass_ok = matches!(pass, Pass::In | Pass::Inout);
-            if pass_ok && only_access_receivers(&users, i.dest, *pass, &place, None) {
+            // A slice keeps its view through every operation on it, so any
+            // receiver use qualifies (#1426): byte reads and writes too.
+            let slice = crate::seq::is_slice_type(&ty);
+            if pass_ok && only_access_receivers(&users, i.dest, *pass, &place, None, slice) {
                 reads.insert(i.dest);
             }
         }
@@ -2022,7 +2025,7 @@ pub fn stable_views(f: &FunctionIr) -> Vec<HeaderHoist> {
                 root: root.clone(),
                 path: path.clone(),
             };
-            if only_access_receivers(&users, i.dest, *pass, &place, None) {
+            if only_access_receivers(&users, i.dest, *pass, &place, None, false) {
                 let mut key = vec![root.clone()];
                 key.extend(path.iter().cloned());
                 fields
@@ -2060,7 +2063,8 @@ fn value_users(f: &FunctionIr) -> BTreeMap<ValueId, Vec<(usize, Option<&Instruct
 }
 
 /// Whether every use of `read` is the receiver, lent as `pass`, of a
-/// length-keeping access of `place` (or the sequence of a bounds guard), in
+/// length-keeping access of `place` (of any operation when `any_receiver`:
+/// a slice view never changes), or the sequence of a bounds guard, in
 /// `blocks` when given.
 fn only_access_receivers(
     users: &BTreeMap<ValueId, Vec<(usize, Option<&Instruction>)>>,
@@ -2068,6 +2072,7 @@ fn only_access_receivers(
     pass: Pass,
     place: &Place,
     blocks: Option<&BTreeSet<usize>>,
+    any_receiver: bool,
 ) -> bool {
     users.get(&read).is_some_and(|us| {
         us.iter().all(|(b, user)| {
@@ -2081,7 +2086,9 @@ fn only_access_receivers(
                     }),
                     Op::Seq { op, args } => {
                         op.has_receiver()
-                            && (keeps_length(*op) || matches!(op, SeqOp::Hoisted(_)))
+                            && (any_receiver
+                                || keeps_length(*op)
+                                || matches!(op, SeqOp::Hoisted(_)))
                             && args.first().is_some_and(|a| {
                                 a.value == read && a.pass == pass && a.place.as_ref() == Some(place)
                             })
@@ -2189,7 +2196,8 @@ pub fn header_hoists(f: &FunctionIr) -> Vec<HeaderHoist> {
                 continue;
             }
             // Every use is the receiver of an access in the loop.
-            let only_receivers = only_access_receivers(&users, i.dest, *pass, &place, Some(&both));
+            let only_receivers =
+                only_access_receivers(&users, i.dest, *pass, &place, Some(&both), false);
             if !only_receivers || !stable_place(f, &both, &place) {
                 continue;
             }
