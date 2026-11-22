@@ -7,7 +7,12 @@ cannot merge yet when
 - its base branch is not main,
 - its branch carries another open pull request's own commits (it merged in
   a parent that has not landed), or
-- it conflicts with current main.
+- it conflicts with current main, or
+- it changes the generated docs/maintenance/rust-census.md along with other
+  files. Only the census refresh pull request (.github/workflows/
+  rust-census.yml), which changes nothing else, updates it: lanes edit the
+  STATUS tables in scripts/rust-census.py instead, so the generated file
+  stops conflicting between lane pull requests.
 
 A commit belongs to an open pull request when it is on that branch's
 first-parent chain past main. A child that merges its parent in carries those
@@ -35,6 +40,9 @@ def commits(*args):
     return set(git("rev-list", *args).stdout.split())
 
 
+CENSUS = "docs/maintenance/rust-census.md"
+
+
 def blockers(number, base_ref, head, main, open_prs):
     reasons = []
     if base_ref != "main":
@@ -50,6 +58,11 @@ def blockers(number, base_ref, head, main, open_prs):
             reasons.append(f"it carries {len(shared)} commit(s) of open PR #{pr['number']}")
     if git("merge-tree", "--write-tree", main, head, check=False).returncode != 0:
         reasons.append("it conflicts with main")
+    changed = set(git("diff", "--name-only", f"{main}...{head}").stdout.split())
+    if CENSUS in changed and changed != {CENSUS}:
+        reasons.append(f"it changes {CENSUS}, which only the census refresh PR updates: "
+                       f"run `git checkout {main} -- {CENSUS}` and keep the STATUS edits "
+                       "in scripts/rust-census.py")
     return reasons
 
 
