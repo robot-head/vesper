@@ -12,7 +12,9 @@ vesper_crate(
 
 # The Vesper build (SH6 lane 14, #1409): the same API forwarding to the port
 # in vesper/src/ through the committed binding, and the crate's tests run
-# unchanged against it. The port's files joined in order, as build.rs does
+# unchanged against it. tests/wire.rs is left out: the wire codec is Rust in
+# both builds, and its libc layout check is a dev-dependency the Rust build
+# (vesper_crate above) already runs it with. The port's files joined in order, as build.rs does
 # (PARTS).
 UMEM_PARTS = [
     "vesper/src/types.ves",
@@ -70,7 +72,6 @@ rust_library(
     for name, src, crate, obj, common, extra, tags in [
         ("port_rings_test", "tests/rings.rs", "rings", ":umem_vesper", False, [], []),
         ("port_soft_nic_test", "tests/soft_nic.rs", "soft_nic", ":umem_vesper", True, [], []),
-        ("port_wire_test", "tests/wire.rs", "wire", ":umem_vesper", False, [], []),
         ("port_zero_alloc_test", "tests/zero_alloc.rs", "zero_alloc", ":umem_vesper", False, [], []),
         ("port_abba_test", "tests/abba.rs", "abba", ":umem_vesper", False, ["//crates/vesper-bench"], []),
     ]
