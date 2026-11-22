@@ -208,9 +208,12 @@ fn fail_id(inout r: ChunkSeq[u8], code: u8, in id: Slice[u8]) eff [Fail[StoreErr
     raise_code(inout r, code);
 }
 
-fn fail_corrupt(inout r: ChunkSeq[u8], in id: Slice[u8], in actual: Slice[u8], in path: Slice[u8]) eff [
-    Fail[StoreErr]
-] {
+fn fail_corrupt(
+    inout r: ChunkSeq[u8],
+    in id: Slice[u8],
+    in actual: Slice[u8],
+    in path: Slice[u8]
+) eff [Fail[StoreErr]] {
     begin(inout r);
     r.extend(in id);
     r.extend(in actual);
@@ -444,10 +447,8 @@ fn ensure_plain_dir(inout r: ChunkSeq[u8], in dir: Slice[u8]) eff [Ffi[CasFs], F
 }
 
 // Create a fresh staging file under `tmp/`; its path goes to `path`.
-fn new_staging(inout r: ChunkSeq[u8], in root: Slice[u8], inout path: ChunkSeq[u8]) -> CasFile eff [
-    Ffi[CasFs],
-    Fail[StoreErr]
-] {
+fn new_staging(inout r: ChunkSeq[u8], in root: Slice[u8], inout path: ChunkSeq[u8])
+    -> CasFile eff [Ffi[CasFs], Fail[StoreErr]] {
     loop {
         let name = unique_name(in "stage-".as_bytes());
         let p = under2(in root, in "tmp".as_bytes(), in name.as_slice());
@@ -513,9 +514,8 @@ fn finish_id(domain: u8, kind: u8, sink h: Hasher) -> ChunkSeq[u8] eff [Ffi[Blak
 // NotFound, 2 for UnsafeStoreLayout ("object is not a regular file"), 3
 // for an `inspect object` error and 4 for an `open object` error (in
 // `err`).
-fn open_object(in path: Slice[u8], inout why: u8, inout err: u64) -> Option[CasFile] eff [
-    Ffi[CasFs]
-] {
+fn open_object(in path: Slice[u8], inout why: u8, inout err: u64)
+    -> Option[CasFile] eff [Ffi[CasFs]] {
     let mut m = new_meta();
     err = meta_of(in path, inout m);
     if err != 0 {
@@ -562,10 +562,8 @@ fn fail_open(inout r: ChunkSeq[u8], in id: Slice[u8], in path: Slice[u8], why: u
     fail_io(inout r, OP_OPEN_OBJECT, in path, err);
 }
 
-fn open_object_or_fail(inout r: ChunkSeq[u8], in id: Slice[u8], in path: Slice[u8]) -> CasFile eff [
-    Ffi[CasFs],
-    Fail[StoreErr]
-] {
+fn open_object_or_fail(inout r: ChunkSeq[u8], in id: Slice[u8], in path: Slice[u8])
+    -> CasFile eff [Ffi[CasFs], Fail[StoreErr]] {
     let mut why: u8 = 0;
     let mut err: u64 = 0;
     match open_object(in path, inout why, inout err) {
@@ -578,11 +576,8 @@ fn open_object_or_fail(inout r: ChunkSeq[u8], in id: Slice[u8], in path: Slice[u
 }
 
 // `check_existing_object`: 0 Valid, 1 Invalid, 2 Gone.
-fn check_existing(inout r: ChunkSeq[u8], in id: Slice[u8], in path: Slice[u8], size: u64) -> u8 eff [
-    Ffi[CasFs],
-    Ffi[Blake3],
-    Fail[StoreErr]
-] {
+fn check_existing(inout r: ChunkSeq[u8], in id: Slice[u8], in path: Slice[u8], size: u64)
+    -> u8 eff [Ffi[CasFs], Ffi[Blake3], Fail[StoreErr]] {
     let mut why: u8 = 0;
     let mut err: u64 = 0;
     let mut f = match open_object(in path, inout why, inout err) {
@@ -762,7 +757,16 @@ fn publish_object(
     let dest = object_path(in root, in id);
     let cut = parent_len(in dest.as_slice());
     let outcome: u8 = handle Fail[StoreErr] in {
-        if publish_object_at(inout r, in root, durable, in staged, in id, size, in dest.as_slice(), cut) {
+        if publish_object_at(
+            inout r,
+            in root,
+            durable,
+            in staged,
+            in id,
+            size,
+            in dest.as_slice(),
+            cut
+        ) {
             1
         } else {
             0
@@ -885,7 +889,14 @@ fn put_core(
         discard(in path.as_slice());
         fail_io(inout r, op, in path.as_slice(), err);
     }
-    let newly = publish_object(inout r, in root, durable, in path.as_slice(), in id.as_slice(), size);
+    let newly = publish_object(
+        inout r,
+        in root,
+        durable,
+        in path.as_slice(),
+        in id.as_slice(),
+        size
+    );
     ingested(inout r, in id.as_slice(), size, newly);
 }
 
@@ -910,11 +921,14 @@ fn blob_id_of(domain: u8, in bytes: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[Blake3]]
 
 // `Store::put_blob`: `rd` reads `bytes`. An identical object that is
 // already stored and verifies needs no staging.
-pub fn put_blob(inout r: ChunkSeq[u8], in root: Slice[u8], durable: bool, domain: u8, in bytes: Slice[u8], in rd: Reader) eff [
-    Ffi[CasFs],
-    Ffi[Blake3],
-    Fail[StoreErr]
-] {
+pub fn put_blob(
+    inout r: ChunkSeq[u8],
+    in root: Slice[u8],
+    durable: bool,
+    domain: u8,
+    in bytes: Slice[u8],
+    in rd: Reader
+) eff [Ffi[CasFs], Ffi[Blake3], Fail[StoreErr]] {
     let id = blob_id_of(domain, in bytes);
     let dest = object_path(in root, in id.as_slice());
     if check_existing(inout r, in id.as_slice(), in dest.as_slice(), bytes.len()) == 0 {
@@ -945,11 +959,14 @@ pub fn put_stream(
 
 // `Store::put_tree`: `enc` is the tree's canonical encoding, which `rd`
 // reads. Every child must be stored, files with the recorded size.
-pub fn put_tree(inout r: ChunkSeq[u8], in root: Slice[u8], durable: bool, domain: u8, in enc: Slice[u8], in rd: Reader) eff [
-    Ffi[CasFs],
-    Ffi[Blake3],
-    Fail[StoreErr]
-] {
+pub fn put_tree(
+    inout r: ChunkSeq[u8],
+    in root: Slice[u8],
+    durable: bool,
+    domain: u8,
+    in enc: Slice[u8],
+    in rd: Reader
+) eff [Ffi[CasFs], Ffi[Blake3], Fail[StoreErr]] {
     let scan = tree_scan(in enc);
     let entries = wrapping_sub(scan.len(), 3) / 5;
     let mut i: u64 = 0;
@@ -995,10 +1012,8 @@ pub fn put_tree(inout r: ChunkSeq[u8], in root: Slice[u8], durable: bool, domain
 // Readback.
 
 // `Store::contains`.
-fn contains(inout r: ChunkSeq[u8], in root: Slice[u8], in id: Slice[u8]) -> bool eff [
-    Ffi[CasFs],
-    Fail[StoreErr]
-] {
+fn contains(inout r: ChunkSeq[u8], in root: Slice[u8], in id: Slice[u8])
+    -> bool eff [Ffi[CasFs], Fail[StoreErr]] {
     let path = object_path(in root, in id);
     let mut m = new_meta();
     let err = meta_of(in path.as_slice(), inout m);
@@ -1178,10 +1193,14 @@ fn read_record(
     }
     let header = wrapping_add(8, ID_BYTES);
     if bytes.len() < header
-        || byte(in bytes.as_slice(), 0) != 86 || byte(in bytes.as_slice(), 1) != 76
-        || byte(in bytes.as_slice(), 2) != 68 || byte(in bytes.as_slice(), 3) != 82
-        || byte(in bytes.as_slice(), 4) != 1 || byte(in bytes.as_slice(), 5) != 0
-        || byte(in bytes.as_slice(), 6) != 0 || byte(in bytes.as_slice(), 7) != 0 {
+        || byte(in bytes.as_slice(), 0) != 86
+        || byte(in bytes.as_slice(), 1) != 76
+        || byte(in bytes.as_slice(), 2) != 68
+        || byte(in bytes.as_slice(), 3) != 82
+        || byte(in bytes.as_slice(), 4) != 1
+        || byte(in bytes.as_slice(), 5) != 0
+        || byte(in bytes.as_slice(), 6) != 0
+        || byte(in bytes.as_slice(), 7) != 0 {
         return 2;
     }
     let dom = byte(in bytes.as_slice(), 8);
@@ -1235,11 +1254,13 @@ fn input_ids(in e: Slice[u8]) -> ChunkSeq[u8] eff [Fail[DrvErr]] {
 
 // `publish_derivation`: `enc` is the inputs' (valid) encoding. Answers the
 // key and whether the record is new.
-pub fn publish_derivation(inout r: ChunkSeq[u8], in root: Slice[u8], durable: bool, in enc: Slice[u8], in output: Slice[u8]) eff [
-    Ffi[CasFs],
-    Ffi[Blake3],
-    Fail[StoreErr]
-] {
+pub fn publish_derivation(
+    inout r: ChunkSeq[u8],
+    in root: Slice[u8],
+    durable: bool,
+    in enc: Slice[u8],
+    in output: Slice[u8]
+) eff [Ffi[CasFs], Ffi[Blake3], Fail[StoreErr]] {
     let key = derivation_hash(in enc);
     let mut ids: ChunkSeq[u8] = ChunkSeq::new[u8]();
     let mut domain: u8 = 0;
@@ -1275,7 +1296,9 @@ pub fn publish_derivation(inout r: ChunkSeq[u8], in root: Slice[u8], durable: bo
         }
         i = wrapping_add(i, 1);
     }
-    let mut record = ChunkSeq::with_capacity[u8](wrapping_add(wrapping_add(8, ID_BYTES), enc.len()));
+    let mut record = ChunkSeq::with_capacity[u8](
+        wrapping_add(wrapping_add(8, ID_BYTES), enc.len())
+    );
     record.extend(in "VLDR".as_bytes());
     record.push(1);
     record.push(0);
@@ -1310,7 +1333,14 @@ pub fn publish_derivation(inout r: ChunkSeq[u8], in root: Slice[u8], durable: bo
         discard(in staged.as_slice());
         let mut existing: ChunkSeq[u8] = ChunkSeq::new[u8]();
         let mut stored: ChunkSeq[u8] = ChunkSeq::new[u8]();
-        let got = read_record(inout r, in root, in key.as_slice(), in dest.as_slice(), inout existing, inout stored);
+        let got = read_record(
+            inout r,
+            in root,
+            in key.as_slice(),
+            in dest.as_slice(),
+            inout existing,
+            inout stored
+        );
         if got == 1 {
             if same(in existing.as_slice(), in output) {
                 begin(inout r);
@@ -1327,7 +1357,15 @@ pub fn publish_derivation(inout r: ChunkSeq[u8], in root: Slice[u8], durable: bo
         }
         if got == 2 {
             let lock = record_lock_name(in key.as_slice());
-            repair(inout r, in root, in dest.as_slice(), in lock.as_slice(), true, in key.as_slice(), 0);
+            repair(
+                inout r,
+                in root,
+                in dest.as_slice(),
+                in lock.as_slice(),
+                true,
+                in key.as_slice(),
+                0
+            );
         }
     }
     fail_id(inout r, E_CONTENTION, in output);
@@ -1343,7 +1381,14 @@ pub fn lookup_derivation(inout r: ChunkSeq[u8], in root: Slice[u8], in enc: Slic
     let path = record_path(in root, in key.as_slice());
     let mut output: ChunkSeq[u8] = ChunkSeq::new[u8]();
     let mut stored: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    let got = read_record(inout r, in root, in key.as_slice(), in path.as_slice(), inout output, inout stored);
+    let got = read_record(
+        inout r,
+        in root,
+        in key.as_slice(),
+        in path.as_slice(),
+        inout output,
+        inout stored
+    );
     if got == 0 {
         begin(inout r);
         r.push(0);

@@ -311,8 +311,13 @@ pub fn store_contains(in root: Slice[u8], in id: Slice[u8]) -> ChunkSeq[u8] eff 
 
 // `put_blob`: `rd` reads `bytes`. Answers the id, size and newly-stored
 // byte (also for the calls below).
-pub fn store_put_blob(in root: Slice[u8], durable: bool, domain: u8, in bytes: Slice[u8], in rd: Reader)
-    -> ChunkSeq[u8] eff [Ffi[CasFs], Ffi[Blake3]] {
+pub fn store_put_blob(
+    in root: Slice[u8],
+    durable: bool,
+    domain: u8,
+    in bytes: Slice[u8],
+    in rd: Reader
+) -> ChunkSeq[u8] eff [Ffi[CasFs], Ffi[Blake3]] {
     let mut r = reply_of(0);
     handle Fail[StoreErr] in {
         self::store::put_blob(inout r, in root, durable, domain, in bytes, in rd);
@@ -334,7 +339,15 @@ pub fn store_put_stream(
 ) -> ChunkSeq[u8] eff [Ffi[CasFs], Ffi[Blake3]] {
     let mut r = reply_of(0);
     handle Fail[StoreErr] in {
-        self::store::put_stream(inout r, in root, durable, domain, in rd, has_expected, in expected);
+        self::store::put_stream(
+            inout r,
+            in root,
+            durable,
+            domain,
+            in rd,
+            has_expected,
+            in expected
+        );
     } with {
         return v => v,
         raise(_e, _k) => {},
@@ -343,8 +356,13 @@ pub fn store_put_stream(
 }
 
 // `put_tree`: `enc` is the tree's encoding and `rd` reads it.
-pub fn store_put_tree(in root: Slice[u8], durable: bool, domain: u8, in enc: Slice[u8], in rd: Reader)
-    -> ChunkSeq[u8] eff [Ffi[CasFs], Ffi[Blake3]] {
+pub fn store_put_tree(
+    in root: Slice[u8],
+    durable: bool,
+    domain: u8,
+    in enc: Slice[u8],
+    in rd: Reader
+) -> ChunkSeq[u8] eff [Ffi[CasFs], Ffi[Blake3]] {
     let mut r = reply_of(0);
     handle Fail[StoreErr] in {
         self::store::put_tree(inout r, in root, durable, domain, in enc, in rd);
@@ -356,7 +374,8 @@ pub fn store_put_tree(in root: Slice[u8], durable: bool, domain: u8, in enc: Sli
 }
 
 // `verify_object`: answers the size.
-pub fn store_verify(in root: Slice[u8], in id: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[CasFs], Ffi[Blake3]] {
+pub fn store_verify(in root: Slice[u8], in id: Slice[u8])
+    -> ChunkSeq[u8] eff [Ffi[CasFs], Ffi[Blake3]] {
     let mut r = reply_of(0);
     handle Fail[StoreErr] in {
         self::store::verify_object(inout r, in root, in id);
@@ -369,7 +388,8 @@ pub fn store_verify(in root: Slice[u8], in id: Slice[u8]) -> ChunkSeq[u8] eff [F
 
 // `read_blob` (`kind` 1) and `read_tree`'s read (`kind` 2): answers the
 // verified bytes.
-pub fn store_read(in root: Slice[u8], in id: Slice[u8], kind: u8) -> ChunkSeq[u8] eff [Ffi[CasFs], Ffi[Blake3]] {
+pub fn store_read(in root: Slice[u8], in id: Slice[u8], kind: u8)
+    -> ChunkSeq[u8] eff [Ffi[CasFs], Ffi[Blake3]] {
     let mut r = reply_of(0);
     handle Fail[StoreErr] in {
         self::store::read_verified(inout r, in root, in id, kind);
@@ -382,8 +402,12 @@ pub fn store_read(in root: Slice[u8], in id: Slice[u8], kind: u8) -> ChunkSeq[u8
 
 // `publish_derivation`: `enc` is the inputs' encoding. Answers the key and
 // the newly-recorded byte.
-pub fn store_publish_derivation(in root: Slice[u8], durable: bool, in enc: Slice[u8], in output: Slice[u8])
-    -> ChunkSeq[u8] eff [Ffi[CasFs], Ffi[Blake3]] {
+pub fn store_publish_derivation(
+    in root: Slice[u8],
+    durable: bool,
+    in enc: Slice[u8],
+    in output: Slice[u8]
+) -> ChunkSeq[u8] eff [Ffi[CasFs], Ffi[Blake3]] {
     let mut r = reply_of(0);
     handle Fail[StoreErr] in {
         self::store::publish_derivation(inout r, in root, durable, in enc, in output);
@@ -395,7 +419,8 @@ pub fn store_publish_derivation(in root: Slice[u8], durable: bool, in enc: Slice
 }
 
 // `lookup_derivation`: answers 0, or 1 and the output id.
-pub fn store_lookup_derivation(in root: Slice[u8], in enc: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[CasFs], Ffi[Blake3]] {
+pub fn store_lookup_derivation(in root: Slice[u8], in enc: Slice[u8])
+    -> ChunkSeq[u8] eff [Ffi[CasFs], Ffi[Blake3]] {
     let mut r = reply_of(0);
     handle Fail[StoreErr] in {
         self::store::lookup_derivation(inout r, in root, in enc);
