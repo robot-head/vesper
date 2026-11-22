@@ -195,6 +195,22 @@ class PlatformWorkflowTests(unittest.TestCase):
         self.assertIn("website.yml:build", guarded)
         self.assertGreaterEqual(len(guarded), 10)
 
+    def test_self_host_differentials_run_as_their_own_buildbuddy_check(self):
+        # #1519: on one runner the corpus differentials pushed "Test all
+        # targets" past BuildBuddy's one-hour limit.
+        config = yaml.load((ROOT / "buildbuddy.yaml").read_text(), Loader=yaml.BaseLoader)
+        actions = {a["name"]: a for a in config["actions"]}
+        command = lambda name: actions[name]["steps"][-1]["run"]
+        everything = command("Test all targets")
+        self.assertIn("--test_tag_filters=-lean_replay,-self_host", everything)
+        self.assertIn("--build_tag_filters=-lean_replay,-self_host", everything)
+        self_host = command("Self-host differentials")
+        self.assertIn("--build_tests_only", self_host)
+        self.assertIn("--test_tag_filters=self_host,-lean_replay", self_host)
+        self.assertEqual(actions["Self-host differentials"]["timeout"], "60m")
+        defs = (ROOT / "tools/bazel/defs.bzl").read_text()
+        self.assertIn('startswith("self_host_")', defs)
+
     def test_native_checks_start_only_after_the_gate_and_buildbuddy(self):
         native = workflow("native-checks.yml")
         self.assertEqual(set(native["on"]), {"status"})
@@ -203,10 +219,10 @@ class PlatformWorkflowTests(unittest.TestCase):
         self.assertEqual(job["runs-on"], "ubuntu-latest")
         steps = job["steps"]
         find = steps[0]["run"]
-        for context in ("Test all targets", "Native and acceptance scripts"):
+        for context in ("Test all targets", "Self-host differentials", "Native and acceptance scripts"):
             self.assertIn(context, job["if"])
             self.assertIn(f'"{context}"', find)
-        self.assertIn('"$states" != 2', find)
+        self.assertIn('"$states" != 3', find)
         names = [s.get("uses") or s.get("name") for s in steps]
         gate = names.index("./.gate/.github/actions/merge-gate")
         dispatch = next(i for i, s in enumerate(steps) if "gh workflow run" in s.get("run", ""))
