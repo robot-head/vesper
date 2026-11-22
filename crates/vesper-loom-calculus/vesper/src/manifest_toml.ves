@@ -817,14 +817,10 @@ fn put_datetime(inout m: ChunkSeq[u8], in src: Slice[u8], n: Node) {
         if c == 90 || c == 122 {
             m.push(90);
         } else if c == 43 || c == 45 {
-            let zero = sbyte(in src, wrapping_add(i, 1))
-                == 48
-                && sbyte(in src, wrapping_add(i, 2))
-                == 48
-                && sbyte(in src, wrapping_add(i, 4))
-                == 48
-                && sbyte(in src, wrapping_add(i, 5))
-                == 48;
+            let zero = sbyte(in src, wrapping_add(i, 1)) == 48
+                && sbyte(in src, wrapping_add(i, 2)) == 48
+                && sbyte(in src, wrapping_add(i, 4)) == 48
+                && sbyte(in src, wrapping_add(i, 5)) == 48;
             if zero {
                 m.push(43);
             } else {
@@ -996,14 +992,10 @@ fn name_ok(in d: D, a: u64, b: u64) -> bool {
     if at {
         return true;
     }
-    wrapping_sub(slash, a)
-        == 3
-        && tbyte(in d, a)
-        == 115
-        && tbyte(in d, wrapping_add(a, 1))
-        == 116
-        && tbyte(in d, wrapping_add(a, 2))
-        == 100
+    wrapping_sub(slash, a) == 3
+        && tbyte(in d, a) == 115
+        && tbyte(in d, wrapping_add(a, 1)) == 116
+        && tbyte(in d, wrapping_add(a, 2)) == 100
 }
 
 fn component(in d: D, from: u64, to: u64) -> bool {
@@ -1229,10 +1221,8 @@ fn seq_value(inout d: D, in src: Slice[u8], id: u32, t: u64) -> bool {
     for i in 0..count {
         let a = qw(in q, wrapping_mul(i, 4));
         let len = qw(in q, wrapping_add(wrapping_mul(i, 4), 1));
-        if t
-            != T_STRING_VEC
-            && written
-            > 0
+        if t != T_STRING_VEC
+            && written > 0
             && same_text(in d.doc.text.as_slice(), a, len, last_a, last_n) {
             continue;
         }
@@ -1381,14 +1371,13 @@ fn struct_value(inout d: D, in src: Slice[u8], id: u32, k: u64) -> bool {
         }
         let x = ent(in d.doc.ents, e);
         let mut f = field_of(k, x.hash);
-        if f
-            < count
+        if f < count
             && !same_name(
-            in d.doc.text.as_slice(),
-            x.koff,
-            x.klen,
-            in field_name(k, f).as_bytes()
-        ) {
+                in d.doc.text.as_slice(),
+                x.koff,
+                x.klen,
+                in field_name(k, f).as_bytes()
+            ) {
             f = count;
         }
         if f == count {
@@ -1452,14 +1441,10 @@ fn struct_value(inout d: D, in src: Slice[u8], id: u32, k: u64) -> bool {
 
 fn has_default_json(t: u64) -> bool {
     !(
-        t
-            == T_NAME
-            || t
-            == T_VERSION
-            || t
-            == T_REQ
-            || t
-            == T_STRING
+        t == T_NAME
+            || t == T_VERSION
+            || t == T_REQ
+            || t == T_STRING
             || (t >= T_STRUCT && t < T_OPT_STRUCT)
     )
 }

@@ -915,14 +915,14 @@ fn simple_key(in s: Slice[u8], inout p: P) -> bool {
     p
         .path
         .push(
-        Part {
-            koff: koff,
-            klen: klen,
-            hash: hash,
-            ks: ks,
-            ke: p.pos
-        }
-    );
+            Part {
+                koff: koff,
+                klen: klen,
+                hash: hash,
+                ks: ks,
+                ke: p.pos
+            }
+        );
     true
 }
 
@@ -1597,17 +1597,17 @@ fn add_entry(inout p: P, c: u32, keyed: bool, k: Part, child: u32) -> u32 {
     p
         .ents
         .push(
-        Ent {
-            has_key: keyed,
-            koff: k.koff,
-            klen: k.klen,
-            hash: k.hash,
-            ks: k.ks,
-            ke: k.ke,
-            child: child,
-            next: NONE
-        }
-    );
+            Ent {
+                has_key: keyed,
+                koff: k.koff,
+                klen: k.klen,
+                hash: k.hash,
+                ks: k.ks,
+                ke: k.ke,
+                child: child,
+                next: NONE
+            }
+        );
     link(inout p.nodes, inout p.ents, c, e);
     e
 }
@@ -1727,15 +1727,15 @@ fn value(in s: Slice[u8], inout p: P) -> u32 {
         }
         p
             .pos = wrapping_add(
-            p.pos,
-            if c == 102 {
-                5
-            } else if c == 116 {
-                4
-            } else {
-                3
-            }
-        );
+                p.pos,
+                if c == 102 {
+                    5
+                } else if c == 116 {
+                    4
+                } else {
+                    3
+                }
+            );
         if c == 116 || c == 102 {
             let mut n = empty_node(K_BOOL);
             n.a = if c == 116 {
