@@ -1097,6 +1097,15 @@ vesper_package(
     visibility = ["//visibility:public"],
 )
 
+# @vesper-std/toml, the TOML reader of @vesper/loom-calculus (Rust exit SH6
+# lane 12, #1407; #965).
+vesper_package(
+    name = "std_toml_package",
+    srcs = glob(["packages/vesper-std/toml/src/**/*.ves"]),
+    manifest = "packages/vesper-std/toml/Loom.toml",
+    visibility = ["//visibility:public"],
+)
+
 # The AST and @vesper-std/arena and intern as dependencies of the lint port
 # (self-hosting SH1 lane 13, #1156) and of the hybrid compiler's parse module
 # (lane 12, #1155).

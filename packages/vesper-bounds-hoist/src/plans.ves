@@ -32,7 +32,8 @@ use self::graph::{
     is_loop_header,
     natural_loop,
     no_cut,
-    outside_preds
+    outside_preds,
+    successors
 };
 use self::rules::{
     all_blocks,
@@ -83,6 +84,7 @@ const B_ADD: u64 = 5;
 const B_WADD: u64 = 6;
 const B_SUB: u64 = 7;
 const B_WSUB: u64 = 8;
+const B_EQ: u64 = 9;
 const S_GET: u64 = 2;
 const S_SLICE_SET: u64 = 5;
 const S_GUARD: u64 = 18;
@@ -163,13 +165,16 @@ pub fn compared_text(in f: Fun, inout o: ChunkSeq[u8]) {
 
 // ----- counted loops -------------------------------------------------------------
 
-// The counted-loop header shape `crate::loops` lowers `for` to (`header`).
+// The counted-loop header shape `crate::loops` lowers `for` to, or a
+// count-down loop's (`down`: `loop { if s == 0 { break; } s = s - 1; ... }`,
+// `s` both the index and the bound) (`header`).
 pub copy struct Head {
     ok: bool,
     index: u32,
     bound: u32,
     inclusive: bool,
     body: u32,
+    down: bool,
 }
 
 pub fn header(in f: Fun, h: u64) -> Head {
@@ -178,7 +183,8 @@ pub fn header(in f: Fun, h: u64) -> Head {
         index: 0,
         bound: 0,
         inclusive: false,
-        body: 0
+        body: 0,
+        down: false
     };
     let k = f.block(h);
     if k.ic != 4 {
@@ -189,6 +195,31 @@ pub fn header(in f: Fun, h: u64) -> Head {
     let n = f.inst(add(w(k.i0), 2));
     let test = f.inst(add(w(k.i0), 3));
     if first.op != OP_LOOP {
+        return no;
+    }
+    // `countdown_header`: `read s; 0; s == 0`, leaving the loop when it holds.
+    if i.op == OP_READ
+        && f.depth(i.place) == 1
+        && f.is_u64(i.dest)
+        && n.op == OP_INT
+        && !n.neg
+        && n.lo == 0
+        && n.hi == 0 {
+        if test.op == OP_BINARY
+            && test.sub == B_EQ
+            && test.a == i.dest
+            && test.b == n.dest
+            && k.term == T_BRANCH
+            && k.tv == test.dest {
+            return Head {
+                ok: true,
+                index: f.root_of(i.place),
+                bound: f.root_of(i.place),
+                inclusive: false,
+                body: k.no,
+                down: true
+            };
+        }
         return no;
     }
     if i.op != OP_READ || f.depth(i.place) != 1 || f.class(f.root_of(i.place)) != N_INDEX {
@@ -211,7 +242,8 @@ pub fn header(in f: Fun, h: u64) -> Head {
         index: f.root_of(i.place),
         bound: f.root_of(n.place),
         inclusive: test.sub == B_LE,
-        body: k.yes
+        body: k.yes,
+        down: false
     }
 }
 
@@ -681,7 +713,17 @@ fn slot_constant(in f: Fun, slot: u32) -> SlotConst {
 
 // `trip_count`: whether both range ends are constants, and the count.
 fn trip_count(in f: Fun, head: Head) -> (bool, u64) {
-    let lo = slot_constant(in f, head.index);
+    // A count-down loop's index runs over `0..s`.
+    let lo = if head.down {
+        SlotConst {
+            ok: true,
+            neg: false,
+            lo: 0,
+            hi: 0
+        }
+    } else {
+        slot_constant(in f, head.index)
+    };
     if !lo.ok {
         return (false, 0);
     }
@@ -854,6 +896,9 @@ pub fn counted_text(in f: Fun, inout o: ChunkSeq[u8]) {
     put_u64(inout o, w(plan.pre));
     put(inout o, " inclusive=");
     put_bool(inout o, plan.head.inclusive);
+    if plan.head.down {
+        put(inout o, " down=true");
+    }
     put(inout o, " blocks=");
     put_blocks(inout o, in plan.c.blocks);
     put(inout o, " receivers=[");
@@ -876,6 +921,163 @@ pub fn counted_text(in f: Fun, inout o: ChunkSeq[u8]) {
         put_access(inout o, x & 255);
     }
     o.push(93);
+}
+
+// The definition of `v` in the loop: 1 + its global instruction index, 0
+// for none.
+fn loop_def(in c: Counted, v: u32) -> u64 {
+    if has(in c.defined, v) {
+        u64_at(in c.defs, w(v))
+    } else {
+        0
+    }
+}
+
+// `countdown_step`: when the count-down loop `h`'s one write to its index
+// slot `slot` (instruction `wx` in block `wb`, of `value`) stores a read of
+// the slot minus one, read earlier in the same iteration, adds the
+// decremented value and every read of the slot after the decrement to the
+// induction values.
+fn countdown_step(
+    in f: Fun,
+    in g: Graph,
+    inout c: Counted,
+    h: u32,
+    slot: u32,
+    wb: u32,
+    wx: u64,
+    value: u32
+) -> bool {
+    let hk = f.block(w(h));
+    if hk.term != T_BRANCH || has(in c.blocks, hk.yes) || wb == h {
+        return false;
+    }
+    // The decremented value, through the parameters that carry it.
+    let mut after: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    after.push(value);
+    let mut v = value;
+    loop {
+        let pa = u64_at(in c.passed, w(v));
+        if pa == 0 {
+            break;
+        }
+        v = n32(wrapping_sub(pa, 1));
+        after.push(v);
+        if after.len() > MAX_DEPTH {
+            return false;
+        }
+    }
+    let d = loop_def(in c, v);
+    if d == 0 {
+        return false;
+    }
+    let bin = f.inst(wrapping_sub(d, 1));
+    if bin.op != OP_BINARY || !(bin.sub == B_SUB || bin.sub == B_WSUB) {
+        return false;
+    }
+    let od = loop_def(in c, bin.b);
+    if od == 0 {
+        return false;
+    }
+    let one = f.inst(wrapping_sub(od, 1));
+    if one.op != OP_INT || one.neg || one.lo != 1 || one.hi != 0 {
+        return false;
+    }
+    // The read of the slot it decrements, through parameters and locals
+    // bound once.
+    let mut x = bin.a;
+    let mut rx = NONE64;
+    for step in 0..inc(MAX_DEPTH) {
+        let pa = u64_at(in c.passed, w(x));
+        if pa != 0 {
+            x = n32(wrapping_sub(pa, 1));
+            continue;
+        }
+        let dx = loop_def(in c, x);
+        if dx == 0 {
+            return false;
+        }
+        let ri = f.inst(wrapping_sub(dx, 1));
+        if ri.op != OP_READ || f.depth(ri.place) != 1 {
+            return false;
+        }
+        let root = f.root_of(ri.place);
+        if root == slot {
+            rx = wrapping_sub(dx, 1);
+            break;
+        }
+        if !single_binding(in f, root) {
+            return false;
+        }
+        let mut found = false;
+        for bi in 0..c.blocks.len() {
+            let k = f.block(w(u32_at(in c.blocks, bi)));
+            for j in 0..w(k.ic) {
+                let bd = f.inst(add(w(k.i0), j));
+                if !found && bd.op == OP_BIND && f.binds(bd, root) {
+                    x = bd.a;
+                    found = true;
+                }
+            }
+        }
+        if !found {
+            return false;
+        }
+    }
+    if rx == NONE64 {
+        return false;
+    }
+    // The read's block.
+    let mut rb = NONE32;
+    for bi in 0..c.blocks.len() {
+        let b = u32_at(in c.blocks, bi);
+        let k = f.block(w(b));
+        if rx >= w(k.i0) && rx < add(w(k.i0), w(k.ic)) {
+            rb = b;
+        }
+    }
+    if rb == NONE32 || !g.dominates(rb, wb) || (rb == wb && rx > wx) {
+        return false;
+    }
+    // Nothing after the decrement reaches it or the read again before the
+    // header does.
+    let mut seen: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut stack: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    successors(in f, in no_cut(), w(wb), inout stack);
+    loop {
+        let n = stack.len();
+        if n == 0 {
+            break;
+        }
+        let b = u32_at(in stack, wrapping_sub(n, 1));
+        stack.resize(wrapping_sub(n, 1), 0);
+        if b == h || !has(in c.blocks, b) || !insert(inout seen, b) {
+            continue;
+        }
+        if b == wb || b == rb {
+            return false;
+        }
+        successors(in f, in no_cut(), w(b), inout stack);
+    }
+    after.push(bin.dest);
+    for bi in 0..c.blocks.len() {
+        let b = u32_at(in c.blocks, bi);
+        if b == h || !g.dominates(wb, b) {
+            continue;
+        }
+        let k = f.block(w(b));
+        for j in 0..w(k.ic) {
+            let gx = add(w(k.i0), j);
+            let i = f.inst(gx);
+            if i.op == OP_READ && f.is_root(i.place, slot) && (b != wb || gx > wx) {
+                after.push(i.dest);
+            }
+        }
+    }
+    for q in 0..after.len() {
+        let new = insert(inout c.induction, u32_at(in after, q));
+    }
+    true
 }
 
 // `counted_plan` for the step's header.
@@ -916,12 +1118,25 @@ pub fn counted_plan(in f: Fun) -> CountedPlan {
     // The bound never changes; the index changes only in latch blocks that
     // jump straight back to the header.
     let mut latches: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    // a count-down loop's decrements: (block, instruction, value)
+    let mut nwrites: u64 = 0;
+    let mut wb: u32 = 0;
+    let mut wx: u64 = 0;
+    let mut wv: u32 = 0;
     for bi in 0..blocks.len() {
         let b = u32_at(in blocks, bi);
         let k = f.block(w(b));
         for j in 0..w(k.ic) {
             let i = f.inst(add(w(k.i0), j));
-            if i.op == OP_WRITE {
+            if i.op == OP_WRITE && head.down && f.write_root(i) == head.index {
+                if f.depth(i.place) != 1 || i.sub != 0 {
+                    return no_plan(head);
+                }
+                nwrites = inc(nwrites);
+                wb = b;
+                wx = add(w(k.i0), j);
+                wv = i.a;
+            } else if i.op == OP_WRITE {
                 let r = f.write_root(i);
                 if r == head.bound {
                     return no_plan(head);
@@ -959,13 +1174,37 @@ pub fn counted_plan(in f: Fun) -> CountedPlan {
             set_grow(inout c.defs, w(i.dest), inc(x));
             if i.op == OP_READ {
                 set_grow(inout c.reads, w(i.dest), inc(x));
-                if b != h && f.is_root(i.place, head.index) {
+                if !head.down && b != h && f.is_root(i.place, head.index) {
                     let n2 = insert(inout c.induction, i.dest);
                 }
             }
         }
         for j in 0..w(k.pn) {
             let new = insert(inout c.defined, f.at(add(w(k.p0), j)));
+        }
+    }
+    // Parameters of loop blocks entered by one jump hold its arguments.
+    for bi in 0..c.blocks.len() {
+        let b = u32_at(in c.blocks, bi);
+        let k = f.block(w(b));
+        if k.pn != 0 && g.npreds(w(b)) == 1 {
+            let pk = f.block(w(g.pred(w(b), 0)));
+            if pk.term == T_JUMP && pk.yes == b && pk.tn == k.pn {
+                for j in 0..w(k.pn) {
+                    set_grow(
+                        inout c.passed,
+                        w(f.at(add(w(k.p0), j))),
+                        inc(w(f.at(add(w(pk.t0), j))))
+                    );
+                }
+            }
+        }
+    }
+    // A count-down loop's index values: the decremented value and the reads
+    // of the slot after the decrement.
+    if head.down {
+        if nwrites != 1 || !countdown_step(in f, in g, inout c, h, head.index, wb, wx, wv) {
+            return no_plan(head);
         }
     }
     let mut locals: ChunkSeq[u32] = ChunkSeq::new[u32]();
@@ -1003,23 +1242,6 @@ pub fn counted_plan(in f: Fun) -> CountedPlan {
                 let name = wrapping_sub(i.bind, 1);
                 if !has(in locals, name) && f.is_u64(i.a) && single_binding(in f, name) {
                     set_grow(inout c.bound_locals, w(name), inc(w(i.a)));
-                }
-            }
-        }
-    }
-    // Parameters of loop blocks entered by one jump hold its arguments.
-    for bi in 0..c.blocks.len() {
-        let b = u32_at(in c.blocks, bi);
-        let k = f.block(w(b));
-        if k.pn != 0 && g.npreds(w(b)) == 1 {
-            let pk = f.block(w(g.pred(w(b), 0)));
-            if pk.term == T_JUMP && pk.yes == b && pk.tn == k.pn {
-                for j in 0..w(k.pn) {
-                    set_grow(
-                        inout c.passed,
-                        w(f.at(add(w(k.p0), j))),
-                        inc(w(f.at(add(w(pk.t0), j))))
-                    );
                 }
             }
         }

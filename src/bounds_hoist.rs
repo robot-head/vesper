@@ -360,12 +360,16 @@ fn dominated_checks(f: &FunctionIr) -> Vec<(usize, usize)> {
     dropped
 }
 
-/// The counted-loop header shape [`crate::loops`] lowers `for` to.
+/// The counted-loop header shape [`crate::loops`] lowers `for` to, or a
+/// count-down loop's (`down`): `loop { if s == 0 { break; } s = s - 1; ... }`
+/// over a `u64` local `s` (both `index` and `bound`), whose index runs over
+/// `0..s` as `s` stood on entry.
 struct Header {
     index: String,
     bound: String,
     inclusive: bool,
     body: usize,
+    down: bool,
 }
 
 fn header(f: &FunctionIr, h: usize) -> Option<Header> {
@@ -386,6 +390,9 @@ fn header(f: &FunctionIr, h: usize) -> Option<Header> {
         }
         _ => None,
     };
+    if let Some(down) = countdown_header(f, b, i, n, test) {
+        return Some(down);
+    }
     let index = slot(i, "_index")?;
     let bound = slot(n, "_bound")?;
     let Op::Binary(op, a, c) = &test.op else {
@@ -412,6 +419,48 @@ fn header(f: &FunctionIr, h: usize) -> Option<Header> {
         bound,
         inclusive,
         body: yes,
+        down: false,
+    })
+}
+
+/// A count-down loop's header: `read s; 0; s == 0`, leaving the loop when
+/// it holds.
+fn countdown_header(
+    f: &FunctionIr,
+    b: &crate::ir::Block,
+    i: &Instruction,
+    n: &Instruction,
+    test: &Instruction,
+) -> Option<Header> {
+    let Op::Read { root, path, .. } = &i.op else {
+        return None;
+    };
+    let u64_value = |v: ValueId| {
+        f.values
+            .get(&v)
+            .is_some_and(|t| crate::numeric::default_type(t) == Type::named("u64"))
+    };
+    if !path.is_empty()
+        || !u64_value(i.dest)
+        || !matches!(n.op, Op::Constant(crate::ast::Literal::Int(0)))
+    {
+        return None;
+    }
+    let Op::Binary(op, a, c) = &test.op else {
+        return None;
+    };
+    if op != "==" || *a != i.dest || *c != n.dest {
+        return None;
+    }
+    let Terminator::Branch { condition, no, .. } = b.terminator else {
+        return None;
+    };
+    (condition == test.dest).then(|| Header {
+        index: root.clone(),
+        bound: root.clone(),
+        inclusive: false,
+        body: no,
+        down: true,
     })
 }
 
@@ -675,9 +724,10 @@ impl CountedPlan {
             .collect::<Vec<_>>()
             .join(" ");
         format!(
-            "pre={} inclusive={} blocks={} receivers=[{receivers}] accesses=[{accesses}]",
+            "pre={} inclusive={}{} blocks={} receivers=[{receivers}] accesses=[{accesses}]",
             self.pre,
             self.head.inclusive,
+            if self.head.down { " down=true" } else { "" },
             blocks_text(&self.blocks)
         )
     }
@@ -755,10 +805,18 @@ fn counted_plan(
         }
     }
     // The bound never changes; the index changes only in latch blocks that
-    // jump straight back to the header.
+    // jump straight back to the header (a count-down loop's only in its one
+    // decrement).
     let mut latches = BTreeSet::new();
+    let mut writes = vec![];
     for (b, i) in insts() {
         match &i.op {
+            Op::Write { place, op, value } if head.down && place_root(place) == head.index => {
+                if place != &head.index || op != "=" {
+                    return None;
+                }
+                writes.push((b, i.dest, *value));
+            }
             Op::Write { place, .. } if place_root(place) == head.bound => return None,
             Op::Write { place, .. } if place_root(place) == head.index => {
                 if !matches!(f.blocks[b].terminator, Terminator::Jump { block, .. } if block == h) {
@@ -774,16 +832,38 @@ fn counted_plan(
             _ => {}
         }
     }
-    // Values that hold an index of the range: reads of the index slot after
-    // the header test, and reads of a local bound once from one.
-    let mut induction: BTreeSet<ValueId> = BTreeSet::new();
-    for (b, i) in insts() {
-        if let Op::Read { root, path, .. } = &i.op
-            && b != h
-            && path.is_empty()
-            && *root == head.index
+    // Parameters of loop blocks entered by one jump hold that jump's
+    // arguments: the result of an inlined call (`let s = sub(max, j)`) joins
+    // its return through one.
+    let mut passed: BTreeMap<ValueId, ValueId> = BTreeMap::new();
+    for &b in &blocks {
+        if let ([p], false) = (preds[b].as_slice(), f.blocks[b].params.is_empty())
+            && let Terminator::Jump { block, args } = &f.blocks[*p].terminator
+            && *block == b
+            && args.len() == f.blocks[b].params.len()
         {
-            induction.insert(i.dest);
+            passed.extend(f.blocks[b].params.iter().copied().zip(args.iter().copied()));
+        }
+    }
+    // Values that hold an index of the range: reads of the index slot after
+    // the header test (after the decrement in a count-down loop), and reads
+    // of a local bound once from one.
+    let mut induction: BTreeSet<ValueId> = BTreeSet::new();
+    if head.down {
+        let [(wb, write, value)] = writes.as_slice() else {
+            return None;
+        };
+        let after = countdown_step(f, &blocks, &idom, &passed, h, *wb, *write, *value)?;
+        induction.extend(after);
+    } else {
+        for (b, i) in insts() {
+            if let Op::Read { root, path, .. } = &i.op
+                && b != h
+                && path.is_empty()
+                && *root == head.index
+            {
+                induction.insert(i.dest);
+            }
         }
     }
     let mut locals = BTreeSet::new();
@@ -827,19 +907,6 @@ fn counted_plan(
             && single_binding(f, name)
         {
             bound_locals.insert(name.clone(), *value);
-        }
-    }
-    // Parameters of loop blocks entered by one jump hold that jump's
-    // arguments: the result of an inlined call (`let s = sub(max, j)`) joins
-    // its return through one.
-    let mut passed: BTreeMap<ValueId, ValueId> = BTreeMap::new();
-    for &b in &blocks {
-        if let ([p], false) = (preds[b].as_slice(), f.blocks[b].params.is_empty())
-            && let Terminator::Jump { block, args } = &f.blocks[*p].terminator
-            && *block == b
-            && args.len() == f.blocks[b].params.len()
-        {
-            passed.extend(f.blocks[b].params.iter().copied().zip(args.iter().copied()));
         }
     }
     let analysis = Affine {
@@ -928,6 +995,134 @@ fn counted_plan(
     })
 }
 
+/// The index values of the count-down loop headed by `h` whose index slot
+/// `wb`'s instruction `write` sets to `value`: when `value` is a read of
+/// the slot minus one, read earlier in the same iteration (the read's block
+/// dominates `wb`, and `wb` reaches neither block again before the header),
+/// the slot only ever goes down by one from a value the header proved
+/// nonzero, so the decremented value and every read of the slot after the
+/// decrement hold an index of `0..s` for `s` as it stood on entry.
+#[allow(clippy::too_many_arguments)]
+fn countdown_step(
+    f: &FunctionIr,
+    blocks: &BTreeSet<usize>,
+    idom: &[Option<usize>],
+    passed: &BTreeMap<ValueId, ValueId>,
+    h: usize,
+    wb: usize,
+    write: ValueId,
+    value: ValueId,
+) -> Option<Vec<ValueId>> {
+    let Terminator::Branch { yes, .. } = f.blocks[h].terminator else {
+        return None;
+    };
+    let slot = header(f, h)?.index;
+    if blocks.contains(&yes) || wb == h {
+        return None;
+    }
+    let def = |v: ValueId| -> Option<(usize, usize)> {
+        blocks.iter().find_map(|&b| {
+            f.blocks[b]
+                .instructions
+                .iter()
+                .position(|i| i.dest == v)
+                .map(|k| (b, k))
+        })
+    };
+    // The decremented value, through the parameters that carry it.
+    let mut after = vec![value];
+    let mut v = value;
+    while let Some(&arg) = passed.get(&v) {
+        after.push(arg);
+        v = arg;
+        if after.len() > MAX_DEPTH {
+            return None;
+        }
+    }
+    let (db, dk) = def(v)?;
+    let Op::Binary(op, a, one) = &f.blocks[db].instructions[dk].op else {
+        return None;
+    };
+    if !matches!(op.as_str(), "-" | "wrapping_sub")
+        || def(*one).is_none_or(|(b, k)| {
+            !matches!(
+                f.blocks[b].instructions[k].op,
+                Op::Constant(crate::ast::Literal::Int(1))
+            )
+        })
+    {
+        return None;
+    }
+    // The read of the slot it decrements, through parameters and locals
+    // bound once.
+    let mut x = *a;
+    let mut read = None;
+    for _ in 0..=MAX_DEPTH {
+        if let Some(&arg) = passed.get(&x) {
+            x = arg;
+            continue;
+        }
+        let (b, k) = def(x)?;
+        let Op::Read { root, path, .. } = &f.blocks[b].instructions[k].op else {
+            return None;
+        };
+        if !path.is_empty() {
+            return None;
+        }
+        if *root == slot {
+            read = Some((b, k));
+            break;
+        }
+        if !single_binding(f, root) {
+            return None;
+        }
+        x = blocks
+            .iter()
+            .flat_map(|&b| &f.blocks[b].instructions)
+            .find_map(|i| match &i.op {
+                Op::Bind { pattern, value } if binds(pattern, root) => Some(*value),
+                _ => None,
+            })?;
+    }
+    let (rb, rk) = read?;
+    let wk = f.blocks[wb]
+        .instructions
+        .iter()
+        .position(|i| i.dest == write)?;
+    if !dominates(idom, rb, wb) || (rb == wb && rk > wk) {
+        return None;
+    }
+    // Nothing after the decrement reaches it or the read again before the
+    // header does.
+    let mut seen = BTreeSet::new();
+    let mut stack = successors(&f.blocks[wb].terminator);
+    while let Some(b) = stack.pop() {
+        if b == h || !blocks.contains(&b) || !seen.insert(b) {
+            continue;
+        }
+        if b == wb || b == rb {
+            return None;
+        }
+        stack.extend(successors(&f.blocks[b].terminator));
+    }
+    after.push(f.blocks[db].instructions[dk].dest);
+    for &b in blocks {
+        if b == h || !dominates(idom, wb, b) {
+            continue;
+        }
+        for (k, i) in f.blocks[b].instructions.iter().enumerate() {
+            if let Op::Read { root, path, .. } = &i.op
+                && path.is_empty()
+                && *root == slot
+                && (b != wb || k > wk)
+            {
+                after.push(i.dest);
+            }
+        }
+    }
+    Some(after)
+}
+
 /// Whether every binding of `head`'s range slots (its start and its bound)
 /// takes a value `outer` (the loop around it) does not change: one defined
 /// outside it, a constant, or a read of a local `outer` neither binds nor
@@ -963,7 +1158,12 @@ const GUARD_COST: u64 = 7;
 /// The trip count of the counted loop `head` when both its range ends are
 /// constants.
 fn trip_count(f: &FunctionIr, head: &Header) -> Option<u64> {
-    let lo = slot_constant(f, &head.index)?;
+    // A count-down loop's index runs over `0..s`.
+    let lo = if head.down {
+        0
+    } else {
+        slot_constant(f, &head.index)?
+    };
     let hi = slot_constant(f, &head.bound)?;
     let hi = if head.inclusive {
         hi.checked_add(1)?
@@ -1348,7 +1548,20 @@ fn clone_loop(
     };
     let lo = fresh.value(f, u64_ty.clone());
     let hi = fresh.value(f, u64_ty.clone());
-    let mut guard_insts = vec![read_slot(lo, &head.index), read_slot(hi, &head.bound)];
+    // A count-down loop's index runs over `0..s`, `s` as it stands here.
+    let start = if head.down {
+        Instruction {
+            dest: lo,
+            op: Op::Constant(crate::ast::Literal::Int(0)),
+            ty: u64_ty.clone(),
+            span: span.clone(),
+            token: None,
+            fallible: false,
+        }
+    } else {
+        read_slot(lo, &head.index)
+    };
+    let mut guard_insts = vec![start, read_slot(hi, &head.bound)];
     let sink = |value| Argument {
         pass: Pass::Sink,
         value,
