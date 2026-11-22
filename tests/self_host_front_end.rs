@@ -297,13 +297,15 @@ fn edge_cases_and_typed_errors() {
                 Expect::Seed,
             ),
             ("fn f() -> i64 { region r(1073741824) { 1 } }", Expect::Seed),
-            // Literal checks the seed performs after lexing.
+            // Literal checks the seed performs after lexing. The seed takes
+            // literals up to `u128::MAX` since #1244; this (Stage 1, guarded)
+            // front end stops at `u64::MAX`, so the cases are past both.
             (
-                "fn f() -> u64 { 18446744073709551616 }",
+                "fn f() -> u128 { 340282366920938463463374607431768211456 }",
                 Expect::ParseError(CODE_INVALID),
             ),
             (
-                "fn f() -> u64 { 0x10000000000000000 }",
+                "fn f() -> u128 { 0x100000000000000000000000000000000 }",
                 Expect::ParseError(CODE_INVALID),
             ),
             ("fn f() -> u64 { 0x_ }", Expect::ParseError(CODE_INVALID)),

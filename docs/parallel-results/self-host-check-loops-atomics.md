@@ -129,12 +129,33 @@ bootstrap-stage1 workflow on the branch confirms the digests against
    `fn main() -> u64 { let s = "ab"; let v = s.as_bytes(); v.len() }`
    (E1531 on `s.as_bytes()` outside an argument).
 
+## Hybrid swap (stack bound)
+
+`stack_bound::stack_bound_report` is the cleanest boundary of the three:
+one call from `vesper ebpf check` and from `--verify-stack` on Cranelift
+objects. It now dispatches through a `StackBoundTable` (`RUST_STACK_BOUND`
+by default, `install_stack_bound` for the hybrid), and the Rust body is
+`rust_stack_bound_report`, unchanged.
+
+- `report_words` in `stack.ves` writes the report as a word stream
+  (validation error text, or the roots then the findings), and
+  `stack_bound_words` in `lib.ves` reads a graph and policy and returns it.
+  `tests/common/stack_words.rs` writes the input and decodes the result;
+  `stack_bound_words_match_rust` compares it with Rust on the 4,000 graphs
+  (0 differ).
+- `crates/vesper-hybrid/modules/stack_bound` wraps it, and `src/hybrid.rs`
+  installs it. `crates/vesper-hybrid/tests/stack_bound.rs` runs the default
+  `vesper` and the hybrid on 24 `emit --verify-stack` commands (two entries,
+  two targets, three policies, with and without `--no-opt`) and two
+  `ebpf check` commands: 0 of 26 differ in status, stdout, stderr or object
+  bytes, and `VESPER_HYBRID_STATS` shows the report came from Vesper.
+- Under `--features divergent-stack-bound` every graph is rejected, and the
+  same test must find differences (the Hybrid compiler workflow asserts
+  it).
+
 ## What is left
 
-- The hybrid swap: a swap-in table in `src/stack_bound.rs` (the cleanest
-  boundary: one call from `vesper ebpf check` and `--verify-stack`) and a
-  `modules/loops_atomics` hybrid module, with corpus commands that reach
-  it; then `check_world` behind the checker's atomics call once the AST
-  crosses ABI v4.
+- `check_world` behind the checker's atomics call, and the control rules,
+  once the AST crosses ABI v4.
 - Callgrind instruction counts of each task, and the ABI v4 input.
 - The environment rules above, with lane 7.

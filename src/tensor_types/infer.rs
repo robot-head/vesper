@@ -1012,7 +1012,7 @@ impl Body<'_> {
         match &e.kind {
             ExprKind::Literal(l) => Ty::Base(
                 match l {
-                    Literal::Int(_) => "int",
+                    Literal::Int(_) | Literal::WideInt(_) => "int",
                     Literal::Float(_) => "f64",
                     Literal::Bool(_) => "bool",
                     Literal::String(_) => "String",

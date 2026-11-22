@@ -54,4 +54,10 @@ const DIVERGENT_EDITS: &[(&str, &str, &str)] = &[
         "        torn_bytes = min(torn, wrapping_sub(frame_len, 1));",
         "        torn_bytes = min(torn, frame_len);",
     ),
+    // quic: a short header without the fixed bit is accepted.
+    (
+        "quic",
+        "    if first & FIXED_BIT == 0 {",
+        "    if first & FIXED_BIT == 1 {",
+    ),
 ];

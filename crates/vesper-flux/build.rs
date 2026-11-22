@@ -22,7 +22,7 @@ fn main() {
 }
 
 /// The divergence edits (mirrored in BUILD.bazel): each kernel's name, the
-/// text it replaces and the wrong text.
+/// text it replaces and the wrong text (in whichever package file holds it).
 #[cfg(feature = "vesper-port-divergent")]
 const DIVERGENT: &[(&str, &str, &str)] = &[
     // union: the second set's weights are dropped.
@@ -54,5 +54,17 @@ const DIVERGENT: &[(&str, &str, &str)] = &[
         "frontier",
         "    let mut min = watermark;\n",
         "    let mut min: i64 = 0;\n",
+    ),
+    // accumulator (vesper/src/acc.ves): one row more than `max_rows` fits.
+    (
+        "accumulator",
+        "    if count >= a.max_rows {\n",
+        "    if count > a.max_rows {\n",
+    ),
+    // cdc (vesper/src/cdc.ves): flags 1 is accepted.
+    (
+        "cdc",
+        "        if flags != 0 {\n",
+        "        if flags > 1 {\n",
     ),
 ];
