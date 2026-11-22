@@ -19,7 +19,11 @@
 //! Run `cargo run -p vesper-loom-cas --example lower_table >
 //! crates/vesper-loom-cas/vesper/src/lower.ves`; the test
 //! `lower_table_is_generated` (tests/lower_table.rs) fails when the committed
-//! file differs from this output, such as after a toolchain's Unicode update.
+//! file differs from this output. The header records the generating
+//! toolchain's `char::UNICODE_VERSION`; a toolchain with another Unicode
+//! version (`cargo` on a newer stable than Bazel's pinned Rust) skips the
+//! comparisons, since its `to_lowercase` differs on the new chars. Regenerate
+//! with the toolchain Bazel pins.
 
 /// `(first, last, delta, step)`: `c` in `first..=last` with
 /// `(c - first) % step == 0` lowers to `c + delta` (wrapping).
@@ -177,6 +181,24 @@ pub fn case_class(c: u64) -> u64 {
 }
 "#;
 
+const UNICODE_LINE: &str = "// Unicode version: ";
+
+fn version_text((a, b, c): (u8, u8, u8)) -> String {
+    format!("{a}.{b}.{c}")
+}
+
+/// Whether this toolchain's `char::UNICODE_VERSION` is the one the committed
+/// table `src` was generated with, so that its `to_lowercase` must agree.
+#[allow(dead_code)]
+pub fn same_unicode(src: &str) -> bool {
+    let want = format!("{UNICODE_LINE}{}", version_text(char::UNICODE_VERSION));
+    let same = src.lines().any(|l| l == want);
+    if !same {
+        eprintln!("skipped: lower.ves is for another Unicode version than this toolchain's");
+    }
+    same
+}
+
 pub fn generate() -> String {
     let runs = runs();
     let mut s = String::from(
@@ -184,8 +206,9 @@ pub fn generate() -> String {
          // Rust's `char::to_lowercase` as runs of code points that lower to `c + delta`\n\
          // (wrapping), every `step`-th code point of a run; U+0130 lowers to two chars\n\
          // and is handled by the caller. Then the case classes of the final-sigma rule\n\
-         // (1 case-ignorable, 2 cased), probed from `str::to_lowercase`.\n\n",
+         // (1 case-ignorable, 2 cased), probed from `str::to_lowercase`.\n",
     );
+    s += &format!("{UNICODE_LINE}{}\n\n", version_text(char::UNICODE_VERSION));
     let col = |f: &dyn Fn(&Run) -> u64| runs.iter().map(f).collect::<Vec<u64>>();
     s += &array("LOWER_LO", &col(&|r| r.0 as u64));
     s += &array("LOWER_HI", &col(&|r| r.1 as u64));

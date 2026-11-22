@@ -343,12 +343,15 @@ package.
 
 * The tree's case-collision check needs `str::to_lowercase`, and Vesper
   had no Unicode tables. `vesper/src/lower.ves` is generated from the
-  Rust toolchain by `examples/lower_table.rs`. It holds 185 runs of
-  `char::to_lowercase` deltas, plus 615 runs of the case classes that
+  Rust toolchain Bazel pins (1.100, Unicode 18) by
+  `examples/lower_table.rs`. It holds 194 runs of
+  `char::to_lowercase` deltas, plus 621 runs of the case classes that
   the final-sigma rule needs (Case_Ignorable and Cased). std does not
   expose those properties, so the generator probes them from
   `str::to_lowercase` itself. `tests/lower_table.rs` fails when the
-  committed table is stale, for example after a toolchain Unicode update.
+  committed table is stale. The table records its Unicode version, and a
+  toolchain with another one (a newer cargo stable) skips the comparisons,
+  since its `to_lowercase` differs on the new chars.
   `vesper/src/fold.ves` folds names with the table, U+0130 and the final
   sigma. A port unit test compares it with `str::to_lowercase` on every
   char in three sigma contexts, plus 50,000 seeded strings.

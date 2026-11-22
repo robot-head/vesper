@@ -135,8 +135,7 @@ pub(crate) fn tree_decode(domain: Domain, bytes: &[u8]) -> Result<Tree, TreeErro
     let (entries, end) = words.split_at(words.len() - 3);
     let mut tree = Tree::new(domain);
     let mut previous: Option<(u64, u64)> = None;
-    for e in entries.chunks_exact(5) {
-        let (at, len, tag, size, local) = (e[0], e[1], e[2], e[3], e[4]);
+    for &[at, len, tag, size, local] in entries.as_chunks::<5>().0 {
         let entry_name = name(bytes, at, len);
         match local {
             0 => {}
@@ -366,15 +365,25 @@ pub(crate) fn drv_decode(bytes: &[u8]) -> Result<DerivationInputs, DerivationErr
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
+#[path = "../examples/lower_table.rs"]
+mod lower_table;
+
+#[cfg(test)]
 mod tests {
     use super::binding;
+    use super::lower_table;
 
     /// The port's case folding (`fold.ves`, from the generated `lower.ves`)
     /// against `str::to_lowercase`, on seeded strings that mix ASCII, the
     /// sigmas and the chars around them (case-ignorable marks and
-    /// punctuation, cased letters), U+0130 and arbitrary chars.
+    /// punctuation, cased letters), U+0130 and arbitrary chars. Only on a
+    /// toolchain with the table's Unicode version.
     #[test]
     fn name_fold_is_to_lowercase() {
+        if !lower_table::same_unicode(include_str!("../vesper/src/lower.ves")) {
+            return;
+        }
         const POOL: &[char] = &[
             'A',
             'z',
