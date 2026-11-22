@@ -26,6 +26,10 @@
 //!    from the entry block to the block that dominates every other use, so
 //!    a cold branch's locals cost the hot path nothing.
 //!
+//! 6. [`float_constants`]: `from_bits_f64(K)` and `from_bits_f32(K)`
+//!    become float constants, which Cranelift reads from its constant pool
+//!    as a memory operand instead of building them in a general register.
+//!
 //! Each step keeps the function valid CLIF on its own.
 use cranelift_codegen::cursor::Cursor as _;
 use cranelift_codegen::dominator_tree::DominatorTree;
@@ -44,6 +48,7 @@ pub fn run(func: &mut ir::Function) {
     remove_unreachable(func);
     merge_blocks(func);
     remove_constant_params(func);
+    float_constants(func);
     split_join_slots(func);
     promote_slots(func);
     remove_constant_params(func);
@@ -1612,13 +1617,19 @@ pub fn share_invariant_loads(func: &mut ir::Function) {
             else {
                 continue;
             };
-            if !(flags.readonly() && flags.can_move() && flags.notrap()) || !rank.contains_key(&block)
+            if !(flags.readonly() && flags.can_move() && flags.notrap())
+                || !rank.contains_key(&block)
             {
                 continue;
             }
             let ty = func.dfg.value_type(func.dfg.first_result(inst));
             let region = flags.alias_region().map_or(0, |r| r as u32 + 1);
-            let key = (func.dfg.resolve_aliases(arg), i32::from(offset), ty.index(), region);
+            let key = (
+                func.dfg.resolve_aliases(arg),
+                i32::from(offset),
+                ty.index(),
+                region,
+            );
             groups.entry(key).or_default().push((block, inst));
         }
         let mut changed = false;
@@ -1856,4 +1867,40 @@ fn in_cycle(func: &ir::Function, block: Block) -> bool {
         }
     }
     false
+}
+
+/// A `bitcast` of an integer constant to `f64` or `f32` (Vesper's
+/// `from_bits_f64(K)`, how ported math code spells its coefficients)
+/// becomes `f64const` / `f32const`. Cranelift 0.125 does not fold it: it
+/// builds each coefficient with `movabs` and `movq` through a general
+/// register, where a float constant is one memory operand of the
+/// instruction that uses it.
+pub fn float_constants(func: &mut ir::Function) {
+    use cranelift_codegen::ir::immediates::{Ieee32, Ieee64};
+    for (_, inst) in insts(func) {
+        let InstructionData::LoadNoOffset {
+            opcode: Opcode::Bitcast,
+            arg,
+            ..
+        } = func.dfg.insts[inst]
+        else {
+            continue;
+        };
+        let ty = func.dfg.value_type(func.dfg.first_result(inst));
+        if ty != types::F64 && ty != types::F32 {
+            continue;
+        }
+        let Some(bits) = constant(func, arg, 0) else {
+            continue;
+        };
+        if ty == types::F64 {
+            func.dfg
+                .replace(inst)
+                .f64const(Ieee64::with_bits(bits as u64));
+        } else {
+            func.dfg
+                .replace(inst)
+                .f32const(Ieee32::with_bits(bits as u32));
+        }
+    }
 }

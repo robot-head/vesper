@@ -1977,7 +1977,8 @@ pub fn header_hoists(f: &FunctionIr) -> Vec<HeaderHoist> {
                 continue;
             }
             // Every use is the receiver of an access in the loop.
-            let only_receivers = only_access_receivers(&users, i.dest, *pass, &place, Some(&both), false);
+            let only_receivers =
+                only_access_receivers(&users, i.dest, *pass, &place, Some(&both), false);
             if !only_receivers || !stable_place(f, &both, &place) {
                 continue;
             }

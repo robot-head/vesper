@@ -330,3 +330,57 @@ fn a_cold_local_costs_the_entry_nothing() {
     assert!(seen > 0, "cold was not emitted");
     assert_eq!(agree(COLD_LOCAL), "4515502");
 }
+
+/// Float coefficients spelled `from_bits_f64(K)`, as ported math code
+/// writes them (kinetic `fastmath`): they used to be built through a
+/// general register at every use.
+const COEFFICIENTS: &str = r#"
+fn poly(x: f64) -> f64 {
+    let z = x * x;
+    from_bits_f64(4607182418800017408) + z * (from_bits_f64(4602678819172646912) + z * from_bits_f64(4598175219545276416))
+}
+
+fn main() -> u64 {
+    let mut acc: u64 = 0;
+    let n: u64 = 8;
+    for i in 0..n {
+        acc = wrapping_add(acc, to_bits_f64(poly(from_bits_f64(wrapping_mul(i, 4503599627370496)))) >> 40);
+    }
+    acc
+}
+"#;
+
+#[test]
+fn float_coefficients_are_constants() {
+    let c = accepted(COEFFICIENTS);
+    let mut seen = 0;
+    native::object_with_observer(
+        &c.world,
+        "main",
+        None,
+        true,
+        Some(&mut |f: native::EmittedFunction| {
+            if f.source != "poly" {
+                return;
+            }
+            seen += 1;
+            let func = &f.function;
+            for block in func.layout.blocks() {
+                for inst in func.layout.block_insts(block) {
+                    if func.dfg.insts[inst].opcode() == Opcode::Bitcast {
+                        let arg = func.dfg.resolve_aliases(func.dfg.inst_args(inst)[0]);
+                        let def = func.dfg.value_def(arg).inst();
+                        assert!(
+                            !def.is_some_and(|d| func.dfg.insts[d].opcode() == Opcode::Iconst),
+                            "a float built from an integer constant\n{}",
+                            func.display()
+                        );
+                    }
+                }
+            }
+        }),
+    )
+    .unwrap();
+    assert!(seen > 0, "poly was not emitted");
+    assert_eq!(agree(COEFFICIENTS), "33521664");
+}
