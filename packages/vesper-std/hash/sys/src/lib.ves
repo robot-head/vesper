@@ -12,6 +12,7 @@
 // |     fn vesper_blake3_finalize(in h: Hasher, nocapture inout out: CSlice[u8]) -> ForeignVal[Unit];
 // |     fn vesper_blake3_free(sink h: Hasher) -> ForeignVal[Unit];
 // |     fn vesper_blake3_hash(nocapture in data: CSlice[u8], nocapture inout out: CSlice[u8]) -> ForeignVal[Unit];
+// |     fn vesper_blake3_derive_key_hash(nocapture in context: CSlice[u8], nocapture in data: CSlice[u8], nocapture inout out: CSlice[u8]) -> ForeignVal[u32];
 // | }
 //
 // @vesper-std/hash-sys: BLAKE3 through the vetted `blake3` crate
@@ -58,6 +59,21 @@ pub fn hash(in data: Slice[u8]) -> Digest eff [Ffi[Blake3]] {
     let mut out = zeros(32);
     Blake3::vesper_blake3_hash(in data, inout out.as_slice_mut());
     digest_of(in out.as_slice())
+}
+
+// Append `n` bytes of the key-derivation hash of `data` under `context` to
+// `out`, in one call with no hasher handle; false (appending nothing) unless
+// `context` is UTF-8.
+pub fn derive_key_hash(in context: Slice[u8], in data: Slice[u8], n: u64, inout out: ChunkSeq[u8])
+    -> bool eff [Ffi[Blake3]] {
+    let at = out.len();
+    out.resize(wrapping_add(at, n), 0);
+    let end = out.len();
+    if Blake3::vesper_blake3_derive_key_hash(in context, in data, inout out[at..end]) == 0 {
+        out.resize(at, 0);
+        return false;
+    }
+    true
 }
 
 // A new unkeyed hasher (`None` only if the host cannot allocate one).

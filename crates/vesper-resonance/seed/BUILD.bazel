@@ -1,6 +1,8 @@
 # The frozen Rust seed copy of vesper-resonance (package
 # vesper-resonance-seed, library vesper_resonance) that the compiler links:
-# ../src built without the port, so cfg(vesper_port) is off. Written by hand
+# ../src built without the port, so cfg(vesper_port) is off, over the frozen
+# Rust engine in src/engine for the modules the port replaced (SH6 lane 9,
+# #1404). Written by hand
 # because its sources live in the parent package; see "Crates the compiler
 # links" in docs/maintenance/porting-a-crate.md.
 load("@rules_rs//rs:rust_library.bzl", "rust_library")
@@ -20,9 +22,9 @@ _DEV = all_crate_deps(_DATA, platforms = _DATA["platforms"], normal_dev = True)
 
 rust_library(
     name = "seed",
-    srcs = ["//crates/vesper-resonance:rust_srcs"],
+    srcs = glob(["src/**/*.rs"]) + ["//crates/vesper-resonance:rust_srcs"],
     crate_name = "vesper_resonance",
-    crate_root = "//crates/vesper-resonance:src/lib.rs",
+    crate_root = "src/lib.rs",
     edition = "2024",
     rustc_env = {
         "CARGO_PKG_NAME": "vesper-resonance-seed",

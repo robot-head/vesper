@@ -38,7 +38,7 @@ const NAME_ERRORS: [NameError; 9] = [
     NameError::NotUtf8,
 ];
 
-fn name_error(code: u64) -> NameError {
+pub(crate) fn name_error(code: u64) -> NameError {
     NAME_ERRORS[(code - 1) as usize]
 }
 
@@ -135,8 +135,7 @@ pub(crate) fn tree_decode(domain: Domain, bytes: &[u8]) -> Result<Tree, TreeErro
     let (entries, end) = words.split_at(words.len() - 3);
     let mut tree = Tree::new(domain);
     let mut previous: Option<(u64, u64)> = None;
-    for e in entries.chunks_exact(5) {
-        let (at, len, tag, size, local) = (e[0], e[1], e[2], e[3], e[4]);
+    for &[at, len, tag, size, local] in entries.as_chunks::<5>().0 {
         let entry_name = name(bytes, at, len);
         match local {
             0 => {}
@@ -200,7 +199,15 @@ struct Flat {
     strs: Vec<u8>,
     ends: Vec<u64>,
     ids: Vec<u8>,
-    texts: Vec<String>,
+}
+
+impl Flat {
+    /// String `i`, for an error's value: built only when a call fails.
+    fn text(&self, i: u64) -> String {
+        let i = i as usize;
+        let start = if i == 0 { 0 } else { self.ends[i - 1] as usize };
+        String::from_utf8_lossy(&self.strs[start..self.ends[i] as usize]).into_owned()
+    }
 }
 
 fn flat(inputs: &DerivationInputs) -> Flat {
@@ -208,12 +215,10 @@ fn flat(inputs: &DerivationInputs) -> Flat {
         strs: Vec::new(),
         ends: Vec::new(),
         ids: Vec::with_capacity(inputs.inputs.len() * OBJECT_ID_BYTES),
-        texts: Vec::new(),
     };
     let mut push = |s: &str| {
         f.strs.extend_from_slice(s.as_bytes());
         f.ends.push(word(f.strs.len()));
-        f.texts.push(s.to_owned());
     };
     push(&inputs.builder);
     push(&inputs.builder_version);
@@ -289,7 +294,7 @@ pub(crate) fn drv_encode(inputs: &DerivationInputs) -> Result<Vec<u8>, Derivatio
         &f.ids,
         &mut info,
     )
-    .map_err(|e| drv_error(e, info, || f.texts[(info & 0xffff_ffff) as usize].clone()))
+    .map_err(|e| drv_error(e, info, || f.text(info & 0xffff_ffff)))
 }
 
 /// `DerivationInputs::key`'s digest.
@@ -307,7 +312,7 @@ pub(crate) fn drv_key(inputs: &DerivationInputs) -> Result<Digest, DerivationErr
         &mut info,
     )
     .map(|d| digest(&d))
-    .map_err(|e| drv_error(e, info, || f.texts[(info & 0xffff_ffff) as usize].clone()))
+    .map_err(|e| drv_error(e, info, || f.text(info & 0xffff_ffff)))
 }
 
 /// `DerivationKey::of_encoding`'s digest.
@@ -363,4 +368,113 @@ pub(crate) fn drv_decode(bytes: &[u8]) -> Result<DerivationInputs, DerivationErr
         options,
         inputs,
     })
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../examples/lower_table.rs"]
+mod lower_table;
+
+#[cfg(test)]
+mod tests {
+    use super::binding;
+    use super::lower_table;
+
+    /// Fixed cases of the port's folding that hold under every Unicode
+    /// version, so a toolchain that skips `name_fold_is_to_lowercase` still
+    /// checks the final-sigma rule and U+0130.
+    #[test]
+    fn name_fold_fixed_cases() {
+        for (name, folded) in [
+            ("ABC.ves", "abc.ves"),
+            (
+                "\u{39f}\u{394}\u{39f}\u{3a3}",
+                "\u{3bf}\u{3b4}\u{3bf}\u{3c2}",
+            ),
+            ("\u{3a3}", "\u{3c3}"),
+            ("A\u{3a3}B", "a\u{3c3}b"),
+            ("A\u{3a3}.ves", "a\u{3c3}.ves"),
+            ("A\u{3a3} b", "a\u{3c2} b"),
+            ("A'\u{3a3}", "a'\u{3c2}"),
+            ("A\u{3a3}'B", "a\u{3c3}'b"),
+            ("\u{130}X", "i\u{307}x"),
+            ("\u{10400}", "\u{10428}"),
+        ] {
+            assert_eq!(
+                String::from_utf8(binding::name_fold(name.as_bytes())).unwrap(),
+                folded,
+                "{name:?}"
+            );
+        }
+    }
+
+    /// The port's case folding (`fold.ves`, from the generated `lower.ves`)
+    /// against `str::to_lowercase`, on seeded strings that mix ASCII, the
+    /// sigmas and the chars around them (case-ignorable marks and
+    /// punctuation, cased letters), U+0130 and arbitrary chars. Only on a
+    /// toolchain with the table's Unicode version.
+    #[test]
+    fn name_fold_is_to_lowercase() {
+        if !lower_table::same_unicode(include_str!("../vesper/src/lower.ves")) {
+            return;
+        }
+        const POOL: &[char] = &[
+            'A',
+            'z',
+            '.',
+            '\'',
+            ':',
+            ' ',
+            '\u{3a3}',
+            '\u{3c3}',
+            '\u{3c2}',
+            '\u{391}',
+            '\u{3b1}',
+            '\u{301}',
+            '\u{345}',
+            '\u{2b0}',
+            '\u{2019}',
+            '\u{130}',
+            '\u{1e9e}',
+            '\u{2126}',
+            '\u{10400}',
+            '\u{1f600}',
+            '\u{fb03}',
+        ];
+        let mut state: u64 = 0x5eed;
+        let mut next = move || {
+            state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            z ^ (z >> 31)
+        };
+        for _ in 0..50_000 {
+            let len = next() % 8;
+            let s: String = (0..len)
+                .map(|_| {
+                    let r = next();
+                    if r % 4 == 0 {
+                        char::from_u32((r >> 8) as u32 % 0x11_0000).unwrap_or('x')
+                    } else {
+                        POOL[(r >> 8) as usize % POOL.len()]
+                    }
+                })
+                .collect();
+            let folded = binding::name_fold(s.as_bytes());
+            assert_eq!(String::from_utf8_lossy(&folded), s.to_lowercase(), "{s:?}");
+        }
+        // Every char on its own and before a final sigma position.
+        for c in (0..=0x10_ffffu32).filter_map(char::from_u32) {
+            for s in [
+                c.to_string(),
+                format!("{c}\u{3a3}"),
+                format!("A{c}\u{3a3}"),
+                format!("A\u{3a3}{c}"),
+            ] {
+                let folded = binding::name_fold(s.as_bytes());
+                assert_eq!(String::from_utf8_lossy(&folded), s.to_lowercase(), "{s:?}");
+            }
+        }
+    }
 }

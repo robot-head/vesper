@@ -57,51 +57,68 @@ pub fn limit(value: u64, max: u64) -> u8 {
     }
 }
 
-// `WitnessBudget::work`.
+// `WitnessBudget::work`: `checked_add(work, amount)` over `max_work` is
+// `Limit`. Written as a comparison against the room left, which neither
+// overflows nor builds an `Option`: when `work <= max_work`, the sum fits
+// exactly when `amount <= max_work - work`, and when `work > max_work` every
+// charge fails.
 pub fn work(inout b: Budget, amount: u64) -> u8 {
-    match checked_add_u64(b.work, amount) {
-        Option::Some(next) => {
-            if next > b.max_work {
-                return E_LIMIT;
-            }
-            b.work = next;
-            0
-        }
-        Option::None => E_LIMIT,
+    let w = b.work;
+    let m = b.max_work;
+    if w > m || amount > wrapping_sub(m, w) {
+        return E_LIMIT;
     }
+    b.work = wrapping_add(w, amount);
+    0
+}
+
+// `count` calls of `work(b, 1)` that stop at the first refusal: the counter
+// ends where those calls leave it (at `max_work` when one refuses after
+// others passed, unchanged when the first refuses).
+pub fn work_units(inout b: Budget, count: u64) -> u8 {
+    if count == 0 {
+        return 0;
+    }
+    let w = b.work;
+    let m = b.max_work;
+    if w >= m {
+        return E_LIMIT;
+    }
+    if count > wrapping_sub(m, w) {
+        b.work = m;
+        return E_LIMIT;
+    }
+    b.work = wrapping_add(w, count);
+    0
 }
 
 // `WitnessBudget::metadata`: the bytes count as work too.
 pub fn metadata(inout b: Budget, amount: u64) -> u8 {
-    let next = match checked_add_u64(b.metadata, amount) {
-        Option::Some(v) => v,
-        Option::None => return E_LIMIT,
-    };
-    if next > b.max_metadata_bytes {
+    let x = b.metadata;
+    let m = b.max_metadata_bytes;
+    if x > m || amount > wrapping_sub(m, x) {
         return E_LIMIT;
     }
     let e = work(inout b, amount);
     if e != 0 {
         return e;
     }
-    b.metadata = next;
+    b.metadata = wrapping_add(x, amount);
     0
 }
 
 // `WitnessBudget::names`: the bytes count as work too.
 pub fn names(inout b: Budget, amount: u64) -> u8 {
-    let next = match checked_add_u64(b.names, amount) {
-        Option::Some(v) => v,
-        Option::None => return E_LIMIT,
-    };
-    if next > b.max_name_bytes {
+    let x = b.names;
+    let m = b.max_name_bytes;
+    if x > m || amount > wrapping_sub(m, x) {
         return E_LIMIT;
     }
     let e = work(inout b, amount);
     if e != 0 {
         return e;
     }
-    b.names = next;
+    b.names = wrapping_add(x, amount);
     0
 }
 
@@ -110,6 +127,46 @@ pub fn names(inout b: Budget, amount: u64) -> u8 {
 // of the requirement, twice the capacity and one element, and charges its
 // bytes before it happens. `cap` becomes the new capacity.
 pub fn reserve(inout b: Budget, len: u64, inout cap: u64, additional: u64, size: u64) -> u8 {
+    // The common case, room left, is small enough to inline.
+    if additional <= cap && len <= wrapping_sub(cap, additional) {
+        0
+    } else {
+        grow(inout b, len, inout cap, additional, size)
+    }
+}
+
+// `reserve` when the vector grows.
+fn grow(inout b: Budget, len: u64, inout cap: u64, additional: u64, size: u64) -> u8 {
+    // Below these bounds no step overflows (the bytes stay under 2^50), so
+    // the plain operations give the checked ones' values.
+    if len >= SMALL || additional >= SMALL || cap >= SMALL || size >= SMALL_SIZE {
+        return grow_checked(inout b, len, inout cap, additional, size);
+    }
+    let required = wrapping_add(len, additional);
+    if required <= cap {
+        return 0;
+    }
+    let doubled = wrapping_add(cap, cap);
+    let mut capacity = required;
+    if doubled > capacity {
+        capacity = doubled;
+    }
+    if capacity < 1 {
+        capacity = 1;
+    }
+    let e = metadata(inout b, wrapping_mul(capacity, size));
+    if e != 0 {
+        return e;
+    }
+    cap = capacity;
+    0
+}
+
+const SMALL: u64 = 4294967296;
+const SMALL_SIZE: u64 = 65536;
+
+// `grow` with every step checked.
+fn grow_checked(inout b: Budget, len: u64, inout cap: u64, additional: u64, size: u64) -> u8 {
     let required = match checked_add_u64(len, additional) {
         Option::Some(v) => v,
         Option::None => return E_LIMIT,

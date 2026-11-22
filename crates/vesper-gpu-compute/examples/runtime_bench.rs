@@ -47,10 +47,5 @@ fn main() {
             .iter()
             .fold(digest, |h, v| h.rotate_left(5) ^ u64::from(*v));
     }
-    let build = if cfg!(feature = "vesper-port") {
-        "vesper"
-    } else {
-        "rust"
-    };
-    println!("{build} {} {digest:016x}", start.elapsed().as_nanos());
+    println!("vesper {} {digest:016x}", start.elapsed().as_nanos());
 }

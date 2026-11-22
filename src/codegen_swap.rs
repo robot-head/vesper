@@ -53,6 +53,7 @@
 //! | `interface_json` | `native_export::interface_json` | the whole interface file ([`InterfaceJsonHook`]) |
 //! | `freestanding` | `native_freestanding::build_image` | whole image ([`FreestandingHook`]) |
 //! | `wasm` | `wasm_backend::compile` | whole component ([`WasmHook`]) |
+//! | `component` | `wasm_backend::component::encode` | the component around a core module and its WIT ([`ComponentHook`]) |
 //! | `ebpf` | `ebpf_backend::compile_world` | whole program ([`EbpfHook`]) |
 //! | `verifiers` | `native_verifiers::verify_emitted` | whole report ([`VerifierHook`]) |
 //!
@@ -94,7 +95,9 @@ pub const INSTRUCTION: u32 = 0;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Site<'a> {
     /// The lowered function (its `Program` key) being emitted; empty when
-    /// the request is not inside a Place IR graph.
+    /// the request is not inside a Place IR graph, or the walk emits a
+    /// rewritten copy of the graph (small enums as words, #1330) whose
+    /// indices are not the program's.
     pub function: &'a str,
     /// The block and instruction index in that function's graph
     /// (`u32::MAX` when the request is not one instruction).
@@ -186,6 +189,10 @@ pub type WasmHook =
         &str,
         &crate::wasm_backend::WasmOptions,
     ) -> Option<Result<crate::wasm_backend::WasmArtifact, crate::wasm_backend::WasmError>>;
+/// The component wrapping hook (SH5 lane 11, #1334): the component
+/// wit-component would write for a core module, its WIT world and the world
+/// kind, or `None` to leave it to wit-component.
+pub type ComponentHook = fn(&[u8], &str, crate::wasm_backend::WasmWorld) -> Option<Vec<u8>>;
 /// The eBPF backend hook: `ebpf_backend::compile_world`'s signature.
 pub type EbpfHook =
     fn(
@@ -283,6 +290,7 @@ pub struct CodegenHooks {
     pub interface_json: Option<InterfaceJsonHook>,
     pub freestanding: Option<FreestandingHook>,
     pub wasm: Option<WasmHook>,
+    pub component: Option<ComponentHook>,
     pub ebpf: Option<EbpfHook>,
     pub verifiers: Option<VerifierHook>,
 }
@@ -308,6 +316,7 @@ impl CodegenHooks {
             || self.interface_json.is_some()
             || self.freestanding.is_some()
             || self.wasm.is_some()
+            || self.component.is_some()
             || self.ebpf.is_some()
             || self.verifiers.is_some()
     }
@@ -349,6 +358,8 @@ pub fn module_kind_scope(jit: bool, optimize: bool) -> ModuleKindScope {
 /// Installs `hooks` for the rest of the process (the hybrid build, from its
 /// static constructor). Only the first call takes effect; a later one
 /// returns its table back.
+// Called once per process, so returning the whole table by value is fine.
+#[allow(clippy::result_large_err)]
 pub fn install(hooks: CodegenHooks) -> Result<(), CodegenHooks> {
     INSTALLED.set(hooks)?;
     if hooks.any() {

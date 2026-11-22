@@ -304,6 +304,16 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]) + ["tests/wasm_backend.rs"],
+        # Rust exit gap wave 1 lane 9 (#1506): the port's sequences and
+        # strings under Wasmtime against the evaluator.
+        "test/wasm_seed_breadth": glob(["packages/**"]),
+        # SH5 lane 11 (#1334): @vesper/wit-component against wit-component
+        # over the same programs.
+        "test/self_host_wit_component": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]) + ["tests/wasm_backend.rs"],
         # SH4 lane 8 (#1282): the aggregate decisions of native lowering in
         # Vesper against src/native_aggregates.rs over the same corpus.
         "test/self_host_codegen_aggregates": glob([
@@ -622,6 +632,8 @@ vesper_crate(
         # @vesper-std/cpu (audit gap G4): a driver over the package and its
         # .vsys import.
         "test/std_cpu": [":files"],
+        # Platform interop (#1504): drivers over @vesper-std/cpu.
+        "test/platform_interop": [":files"],
         "test/std_env": [":files"],
         "test/std_fs": [":files"],
         "test/std_process": [":files"],
@@ -698,6 +710,7 @@ vesper_crate(
         "test/self_host_ir_opt_policy": 4,
         "test/self_host_place_ir_jit": 4,
         "test/self_host_swap_inputs": 4,
+        "test/wasm_seed_breadth": 4,
     },
     # Reservations include subprocess overhead; they do not enforce RSS limits.
     # `lean_replay` marks the Lean/Logos suite run by "Native and acceptance
@@ -994,6 +1007,10 @@ vesper_crate(
         "test/self_host_codegen_seq": "long",
         # The wasm backend differential: about 10 min in a debug build.
         "test/self_host_wasm_backend": "long",
+        # Loads the port package, then 17 compilations and Wasmtime runs.
+        "test/wasm_seed_breadth": "long",
+        # The component wrapping differential (#1334): ~2 min release.
+        "test/self_host_wit_component": "long",
         "test/self_host_codegen_scalar": "long",
         "test/self_host_native_walk": "long",
         "test/self_host_check_harness": "long",
@@ -1099,6 +1116,15 @@ vesper_package(
     visibility = ["//visibility:public"],
 )
 
+# @vesper-std/toml, the TOML reader of @vesper/loom-calculus (Rust exit SH6
+# lane 12, #1407; #965).
+vesper_package(
+    name = "std_toml_package",
+    srcs = glob(["packages/vesper-std/toml/src/**/*.ves"]),
+    manifest = "packages/vesper-std/toml/Loom.toml",
+    visibility = ["//visibility:public"],
+)
+
 # The AST and @vesper-std/arena and intern as dependencies of the lint port
 # (self-hosting SH1 lane 13, #1156) and of the hybrid compiler's parse module
 # (lane 12, #1155).
@@ -1192,6 +1218,28 @@ vesper_package(
     deps = [":check_data_package"],
 )
 
+# The scalar lowering's plan and emission for the hybrid compiler's
+# codegen_scalar module (SH4 lane 6, #1280).
+vesper_package(
+    name = "codegen_scalar_package",
+    srcs = glob(["packages/vesper-codegen-scalar/src/**/*.ves"]),
+    manifest = "packages/vesper-codegen-scalar/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":check_data_package",
+        ":check_layout_package",
+        ":place_ir_package",
+    ],
+)
+
+vesper_package(
+    name = "codegen_scalar_emit_package",
+    srcs = glob(["packages/vesper-codegen-scalar/emit/src/**/*.ves"]),
+    manifest = "packages/vesper-codegen-scalar/emit/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = ["//packages/vesper-cranelift:cranelift_package"],
+)
+
 # Bounds hoisting for the hybrid compiler's bounds_hoist module (SH3 lane
 # 12, #1251).
 vesper_package(
@@ -1214,6 +1262,14 @@ vesper_package(
         ":check_data_package",
         ":place_ir_package",
     ],
+)
+
+vesper_package(
+    name = "wit_component_package",
+    srcs = glob(["packages/vesper-wit-component/src/**/*.ves"]),
+    manifest = "packages/vesper-wit-component/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [":check_data_package"],
 )
 
 vesper_package(

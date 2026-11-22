@@ -28,6 +28,18 @@ use self::solve::{
 use self::upgrade::{
     upgrade
 };
+use @vesper-std/toml::{
+    parse,
+    dump
+};
+use self::manifest_toml::{
+    manifest_from_toml
+};
+use self::semver_text::{
+    SCmp,
+    parse_version,
+    parse_req
+};
 use self::encode::{
     encode_manifest_diags,
     encode_upgrade,
@@ -314,4 +326,100 @@ pub fn check_upgrade(in words: Slice[u64], in text: Slice[u8]) -> L {
     upgrade(inout l);
     encode_upgrade(inout l);
     l
+}
+
+// The TOML reader's result on `text` (see `@vesper-std/toml::dump`), for
+// the differential tests against the `toml` crate.
+pub struct TomlRead {
+    pool: ChunkSeq[u8]
+}
+
+pub fn read_toml(in text: Slice[u8]) -> TomlRead {
+    let d = parse(in text);
+    TomlRead {
+        pool: dump(in d, in text)
+    }
+}
+
+// Whether the TOML reader accepts `text`, for the reader's benchmark.
+pub fn toml_accepts(in text: Slice[u8]) -> bool {
+    parse(in text).ok
+}
+
+// SemVer text checks for the differential tests: `kind` 0 parses `text`
+// as a version, 1 as a requirement. The pool is `!` and the error text,
+// or the parts (`major.minor.patch-pre+build`, or one `op major
+// [minor] [patch] pre;` per comparator).
+pub fn semver_text(in text: Slice[u8], kind: u64) -> TomlRead {
+    let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    if kind == 0 {
+        let (ok, v) = parse_version(inout m, in text, 0, text.len());
+        if !ok {
+            out.push(33);
+            out.extend(in m.as_slice());
+        } else {
+            put_dec(inout out, v.major);
+            out.push(46);
+            put_dec(inout out, v.minor);
+            out.push(46);
+            put_dec(inout out, v.patch);
+            out.push(45);
+            out.extend(in text[v.pre_a..v.pre_b]);
+            out.push(43);
+            out.extend(in text[v.build_a..v.build_b]);
+        }
+    } else {
+        let mut cs: ChunkSeq[SCmp] = ChunkSeq::new[SCmp]();
+        if !parse_req(inout m, in text, 0, text.len(), inout cs) {
+            out.push(33);
+            out.extend(in m.as_slice());
+        } else {
+            for i in 0..cs.len() {
+                match cs.try_get(i) {
+                    Option::Some(c) => {
+                        put_dec(inout out, c.op);
+                        out.push(32);
+                        put_dec(inout out, c.major);
+                        out.push(32);
+                        if c.has_minor {
+                            put_dec(inout out, c.minor);
+                        }
+                        out.push(32);
+                        if c.has_patch {
+                            put_dec(inout out, c.patch);
+                        }
+                        out.push(32);
+                        out.extend(in text[c.pre_a..c.pre_b]);
+                        out.push(59);
+                    }
+                    Option::None => (),
+                }
+            }
+        }
+    }
+    TomlRead {
+        pool: out
+    }
+}
+
+fn put_dec(inout out: ChunkSeq[u8], v: u64) {
+    if v >= 10 {
+        put_dec(inout out, v / 10);
+    }
+    out.push(wrapping_u8(wrapping_add(v % 10, 48)));
+}
+
+// `toml::from_str::<Manifest>` for the differential tests: the pool is the
+// manifest's JSON (`serde_json::to_string`), or `!` and the error text.
+pub fn manifest_toml(in text: Slice[u8]) -> TomlRead {
+    let (ok, body) = manifest_from_toml(in text);
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    if !ok {
+        out.push(33);
+    }
+    out.extend(in body.as_slice());
+    TomlRead {
+        pool: out
+    }
 }

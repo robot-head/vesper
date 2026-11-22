@@ -46,6 +46,13 @@ const MODULES: &[(&str, &str, &str)] = &[
         "modules/codegen_numeric",
         "port/codegen_numeric.rs",
     ),
+    // SH4 lane 6 (#1280): scalars, locals and control flow, through the
+    // `scalar` hook.
+    (
+        "hybrid_codegen_scalar",
+        "modules/codegen_scalar",
+        "port/codegen_scalar.rs",
+    ),
     // SH4 lane 12 (#1286): the export ABI v2 glue over the lent module.
     (
         "hybrid_codegen_export",

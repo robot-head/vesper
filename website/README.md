@@ -4,10 +4,10 @@ The public language website at **https://vesper-lang.org/**. It compares Vesper 
 
 ## Build
 
-Use Node.js 22 or newer and the repository’s Rust toolchain. From the repository root, build the Vesper CLI before the site. Set `VESPER_BIN` to use a compiler in a different location.
+Use Node.js 22 or newer, Typst 0.15.1, and the repository’s Rust toolchain. Build the Vesper CLI and Chroma before building the site. Set `VESPER_BIN` or `TYPST_BIN` if either executable is in a different location.
 
 ```sh
-cargo build --locked --bin vesper
+cargo build --locked -p vesper -p vesper-tools --bin vesper --bin vesper-highlight
 rustup target add wasm32-unknown-unknown
 cd website
 npm run build:wasm
@@ -15,7 +15,7 @@ npm run build
 npm run check
 ```
 
-Serve `website/dist` using any static HTTP server. The build includes the three compiler examples from the repository and checks that the displayed/downloaded source preserves their tokens. The build runs Chroma (`vesper highlight`) on Vesper listings and embeds its HTML and theme colors. To annotate an intentional failure, add the expected checker code to its Vesper fence (for example, `~~~vesper E0302`) or its HTML listing (`data-error="E0302"`). The build checks the example and uses the reported source span for the underline and message. The source explorer and comparison tabs use the shared keyboard navigation in `assets/system.js`. The full examples and comparisons are readable with scripts disabled.
+Serve `website/dist` using any static HTTP server. The build keeps repository downloads byte-for-byte and runs Chroma on Vesper listings. To annotate an intentional failure, add the expected code to its fence (`~~~vesper E0302`) or listing (`data-error="E0302"`). The build checks the example and uses the reported span. The tabs and theme switch use `site.js`. Readers can see both tab panels with scripts disabled.
 
 `index.html` holds the comparison, compiler overview and build guide. `site.css` defines the responsive layout and themes. `site.js` handles the theme switch and clipboard. The field table uses the starting values and updates in `examples/projections.ves`. The Vesper mark and favicon use Appendix B’s original geometry.
 
@@ -25,13 +25,13 @@ Edit the [guided tour](tour.md) to update the lessons at `/tour/`. Use a level-o
 
 The documentation homepage is published at `/docs/`. Edit the lessons in [the eight documentation parts](docs/). Use a level-one heading for a chapter or appendix and a level-two heading for each numbered section. Keep the manuscript number before each plain-language heading. Blank lines separate paragraphs, backticks mark inline code, four spaces indent a trace, and `~~~vesper` fences enclose Vesper source.
 
-The build produces static chapter pages, an in-page search index, and sitemap entries. It reads the printed numbers and PDF destination labels from `docs/manuscript/content.typ` and checks for missing lessons. The contents, chapters, and PDF links work without JavaScript.
+The build produces static chapter guides, a search index for the guides and tour, and a sitemap without retired tour URLs. It uses printed numbers and Typst labels to link each chapter or section to both the HTML and PDF editions. Docs search requires JavaScript. Contents, listings, and reference links work without it.
 
 ## Browser compiler
 
 Install the browser target with `rustup target add wasm32-unknown-unknown`, then run `npm run build:wasm` from `website` before `npm run build`. The site copies the Wasm module into `dist`. Serve the directory with a static HTTP server and open `/tour/`.
 
-The worker uses Vesper's parser, checker, reference evaluator, Forge, and formatter. Chroma highlights incomplete source as you type. The Format button applies the formatter to the editable source. Unit tests and table rows use Vesper's test discovery and run through the reference evaluator. The examples run with a source size limit and evaluation fuel. The page stops a worker that exceeds the time limit. The compiler module has no imports for a host clock, filesystem, or native JIT.
+The worker uses Vesper’s parser, bounded checker, evaluator, Forge, Lean extractor, and formatter. Chroma adds semantic highlighting when the original source checks and falls back to syntax highlighting for incomplete source. Repair lessons show one starting program and disclose the solution separately. Unit tests and selected table rows run through Vesper’s test discovery and evaluator. The worker has a source size limit, evaluation fuel, and a time limit. It has no host clock, filesystem, or native JIT imports.
 
 ## Publish
 
@@ -59,4 +59,4 @@ GitHub Pages provisions the TLS certificate; HTTPS is enforced for the configure
 
 The Specification and Read the design links open `/vesper-specification.pdf`. This is the complete, searchable Typst manuscript spanning Parts I–VIII (Chapters 1–42 and Appendices A and B), with linked contents, PDF bookmarks, and internal cross-references. Editable sources and provenance are in `docs/manuscript/`.
 
-GitHub Pages CI rebuilds the PDF using pinned Typst 0.15.1 and its bundled fonts before building the site. Local website builds use the checked-in PDF. See `docs/manuscript/README.md` for the typesetting command and verification details.
+GitHub Pages CI rebuilds the PDF with Typst 0.15.1 and the bundled fonts. Local builds use the checked-in PDF. The site build generates `/docs/reference.html` from the same source using `docs/manuscript/web.typ`. It validates the manuscript links, listings, and inference rules. See `docs/manuscript/README.md` for PDF verification.

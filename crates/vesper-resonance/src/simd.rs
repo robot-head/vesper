@@ -26,7 +26,7 @@
 //! * AArch64: Advanced SIMD (NEON, baseline, 4 lanes x 4).
 //! * Elsewhere: only the scalar loop.
 //!
-//! In the port build (`vesper-port`), every path runs in the Vesper port
+//! In the port-backed package (not the seed), every path runs in the Vesper port
 //! (vesper/src/simd.ves): the SSE2 and NEON paths on 4-lane source vectors
 //! (`Isa[Baseline128]`), the AVX path on 8-lane vectors where the port's
 //! object is built for AVX2 and on 4-lane vectors otherwise, and the scalar

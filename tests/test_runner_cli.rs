@@ -395,7 +395,10 @@ test {
     let report = parse_json(&out);
     assert!(!out.status.success(), "{report}");
     assert!(
-        report["error"].as_str().unwrap().contains("does not host"),
+        report["error"]
+            .as_str()
+            .unwrap()
+            .contains("could not be loaded"),
         "{report}"
     );
 }
