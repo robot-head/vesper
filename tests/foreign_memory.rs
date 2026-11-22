@@ -599,7 +599,11 @@ fn measure_in_place_against_copies() {
     let mut copies = vec![];
     for round in 0..3 {
         // A B B A, then B A A B, then A B B A.
-        let order = if round % 2 == 0 { [0, 1, 1, 0] } else { [1, 0, 0, 1] };
+        let order = if round % 2 == 0 {
+            [0, 1, 1, 0]
+        } else {
+            [1, 0, 0, 1]
+        };
         for which in order {
             if which == 0 {
                 in_place.push(time("rx_200000"));
