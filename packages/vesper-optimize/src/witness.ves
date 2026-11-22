@@ -269,7 +269,8 @@ pub fn wrap(kind: u8, n: i128) -> i128 {
 
 fn int_value(in t: Tree, e: ExprNode) -> i128 {
     let l = lit_at(in t.ast, e.a);
-    let m = widen_i128(l.bits);
+    // The 128-bit magnitude `hi`:`bits` (2^127 wraps to `i128::MIN`).
+    let m = wrapping_shl_i128(widen_i128(wrapping_i64(l.hi)), 64) | widen_i128(l.bits);
     if l.neg {
         wrapping_neg_i128(m)
     } else {

@@ -121,6 +121,7 @@ fn b(v: bool) -> u8 {
 fn lit(l: &Literal) -> String {
     match l {
         Literal::Int(n) => format!("int {n}"),
+        Literal::WideInt(n) => format!("int {n}"),
         Literal::Float(f) => format!("float {:#018x}", f.to_bits()),
         Literal::Bool(v) => format!("bool {v}"),
         Literal::String(s) => format!("str {}", q(s)),

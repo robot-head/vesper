@@ -4,7 +4,8 @@ Part 1 (#1357, merged as `b647460`) ported the datagram link model. Part 2
 (#1380, merged as `97de64f`) ported SHA-256 and the WAL frame codec and
 recovery scan. Part 3 (#1384, merged as `ce75623`) ported the virtual
 message network `net-v1`. Part 4 (#1390, merged as `af7dd90`) ported the
-write-ahead log state machine. Part 5 makes the Vesper SHA-256 faster.
+write-ahead log state machine. Part 5 (#1416) made the Vesper SHA-256
+faster. Part 6 ports the Warp QUIC wire codec.
 
 ## Part 1: the datagram link model
 
@@ -303,12 +304,62 @@ transcript differential still shows 0 differences in all 11 cases.
    instructions, so a Vesper SHA-256 tops out at scalar speed. This is
    where the WAL and the identity digests miss parity.
 
+## Part 6: the Warp QUIC wire codec
+
+Base: part 5 (#1416).
+
+### What changed
+
+- The end of `port/src/lib.ves` holds the wire layer that `src/model/umem.rs`
+  and `src/model/warp.rs` share:
+  - `parse_short_header`: the flags byte, the long-header and fixed bits,
+    the DCID and the truncated packet number.
+  - `parse_ack`: the fixed-width ACK frame. It follows RFC 9000 §19.3, with
+    big-endian integers in place of varints, and checks every range for
+    underflow.
+  - `ack_frame_bytes`, `short_header` and `ack_datagram_len`.
+  - The peer's `record_pn`: inclusive ranges kept largest first, merged
+    with their neighbours, and capped at `max_ranges`.
+
+  Under `vesper-port` the Rust functions forward to the port. Results cross
+  the boundary as flat words: `[code, dcid, largest, delay, lo0, hi0, ...]`
+  and range pairs.
+- `vesper-warp-umem` (the AF_XDP driver, the software NIC and the UMEM
+  auditor) belongs to SH6 lane 14 (#1409). The coordinator and the
+  recommended option on the user's card both leave it there. The umem/warp
+  models keep calling the Rust crate until that port lands.
+- The differential adds a `quic_wire` case: short headers of all 256 first
+  bytes, `ack_datagram_len`, and 20,000 encoded ACK datagrams with random
+  mutations through `parse_ack`. The mutations are bit flips, cuts,
+  extensions, forged range counts and overwritten bytes. The Warp
+  transcripts cover `record_pn` through the datagram ACK path.
+- The `quic` divergent edit accepts a short header without the fixed bit.
+
+### Results
+
+| Check | Rust | Vesper |
+|---|---|---|
+| Crate tests | all pass | all pass |
+| Transcript differential (12 cases) | blessed | **0 differences** |
+
+| Measure (release, best of 5) | Rust | Vesper | Ratio |
+|---|---|---|---|
+| `quic_throughput`: encode and parse 10^5 ACK datagrams of 1 to 8 ranges | 390 ns | 529 ns | 1.36x |
+
+Part of the gap is the boundary itself: the ranges go in and out as `Vec`s
+of words and are rebuilt as tuples on each side. The codec is a small share
+of a Warp session's time, since the evaluator dominates.
+
 ## What is left (later parts of #1342)
 
 - Hardware SHA-256 (gap 8), and building WAL frames at flush rather than
   at append.
-- `model/umem.rs` and `model/warp.rs` (3,100 lines, over the
-  `vesper-warp-umem` crate).
+- The rest of `model/umem.rs` and `model/warp.rs`: the frame adapter and
+  journal over the `vesper-warp-umem` driver (its linear owners, location
+  table and auditor), the EDT launch queue, the lease timers and the
+  flows' event plumbing. The randomness (SplitMix64), the links and the
+  wire codec are already in Vesper. The rest is orchestration around the
+  driver, so it waits for SH6 lane 14 (#1409) to port `vesper-warp-umem`.
 - `model/mod.rs` process epochs, scenario validation, the canonical-JSON
   identity digests and `value.rs`. These need a JSON value model on the
   Vesper side, or the Rust side has to pass canonical strings in.

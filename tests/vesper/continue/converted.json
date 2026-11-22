@@ -1,0 +1,16 @@
+{
+  "from": "tests/continue.rs",
+  "cases": 13,
+  "covered_tests": [
+    "continue_in_loop_and_for",
+    "continue_at_the_last_value_of_a_closed_range_does_not_step_past_it",
+    "continue_targets_the_innermost_loop",
+    "continue_drops_loop_locals",
+    "continue_is_a_contextual_word",
+    "continue_follows_the_mode_rules"
+  ],
+  "kept_in_rust": [
+    "continue_drops_loop_local_boxes",
+    "continue_formats_and_highlights"
+  ]
+}

@@ -82,6 +82,7 @@ pub copy struct TestAttr {
     expect_error: OptText,
     primary: OptText,
     related: OptText,
+    message: OptText,
     expected_span: OptText,
     cases: OptNum,
     sim_schedules: OptNum,
@@ -159,6 +160,7 @@ pub fn test_attr_new(start: u64, end: u64) -> TestAttr {
         expect_error: no_text(),
         primary: no_text(),
         related: no_text(),
+        message: no_text(),
         expected_span: no_text(),
         cases: no_num(),
         sim_schedules: no_num(),
@@ -463,6 +465,11 @@ impl Stream {
             let t = self.opt_str(v);
             if t.has {
                 attr.related = t;
+            }
+        } else if is_text(in b, ks, ke, in "message") {
+            let t = self.opt_str(v);
+            if t.has {
+                attr.message = t;
             }
         } else if is_text(in b, ks, ke, in "span") {
             let t = self.opt_str(v);

@@ -6,5 +6,6 @@ edition = "2026"
 capability_ceiling = ["Fail", "Alloc", "Ffi"]
 
 [dependencies]
+"@vesper/codegen-export" = { version = "^0.1", path = "../../../../packages/vesper-codegen-export" }
 "@vesper/codegen-export-glue" = { version = "^0.1", path = "../../../../packages/vesper-codegen-export/glue" }
 "@vesper/cranelift" = { version = "^0.1", path = "../../../../packages/vesper-cranelift" }
