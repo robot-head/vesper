@@ -926,7 +926,13 @@ impl<M: Module> Codegen<'_, '_, M> {
 
     /// The three-way comparison of `p[..len]` with `q[..len2]` as an `i32`
     /// word (`-1`, `0` or `1`): 16-byte steps while the lanes agree, then
-    /// bytes up to the first difference, then the lengths.
+    /// the first differing lane, found from the step's lane mask, decides;
+    /// with no difference in the common prefix, the lengths decide. Under 16
+    /// common bytes, hosted code compares one over-reading step on the lanes
+    /// below the common length ([`Self::short_load_safe`]); otherwise, and
+    /// without vectors, a byte loop runs to the first difference (gap wave
+    /// 1 lane 6: a differing step used to be rescanned byte by byte, about
+    /// 120 instructions of a 47-byte compare).
     fn bytes_cmp(
         &mut self,
         p: ir::Value,
@@ -939,16 +945,46 @@ impl<M: Module> Codegen<'_, '_, M> {
         let scalar = self.b.create_block();
         let scalar_body = self.b.create_block();
         let differ = self.b.create_block();
+        let lane = self.b.create_block();
         let tail = self.b.create_block();
         let done = self.b.create_block();
         self.b.append_block_param(scalar, types::I64);
         self.b.append_block_param(done, types::I64);
+        // `lane(at, bits)`: the step at `at` differs in the lanes set in the
+        // 16-bit mask `bits` (nonzero); the lowest one is the first byte that
+        // differs.
+        self.b.append_block_param(lane, types::I64);
+        self.b.append_block_param(lane, types::I32);
         let n = self.b.ins().umin(len, len2);
         if simd {
             let head = self.b.create_block();
             let body = self.b.create_block();
             self.b.append_block_param(head, types::I64);
             self.b.append_block_param(body, types::I64);
+            if self.short_scans() {
+                let short = self.b.create_block();
+                let long = self.b.create_block();
+                let under = self.b.ins().icmp_imm(IntCC::UnsignedLessThan, n, LANES);
+                self.branch(under, short, &[], long, &[]);
+
+                self.b.switch_to_block(short);
+                // An empty prefix is never read: its pointer may be null.
+                let safe = self.short_load_safe(&[p, q], n);
+                let vector = self.b.create_block();
+                self.branch(safe, vector, &[], scalar, &[zero.into()]);
+
+                self.b.switch_to_block(vector);
+                let a = self.b.ins().load(types::I8X16, little(), p, 0);
+                let b = self.b.ins().load(types::I8X16, little(), q, 0);
+                let same = self.b.ins().icmp(IntCC::Equal, a, b);
+                let bits = self.b.ins().vhigh_bits(types::I32, same);
+                let mask = self.short_mask(n);
+                let ones = self.b.ins().bnot(bits);
+                let diff = self.b.ins().band(ones, mask);
+                let none = self.b.ins().icmp_imm(IntCC::Equal, diff, 0);
+                self.branch(none, tail, &[], lane, &[zero.into(), diff.into()]);
+                self.b.switch_to_block(long);
+            }
             let end = self.vector_end(n);
             let carried = self.loop_invariants(head, &[end]);
             self.jump(head, &[zero.into(), end.into()]);
@@ -970,11 +1006,27 @@ impl<M: Module> Codegen<'_, '_, M> {
             let k2 = self.b.ins().iadd_imm(k, LANES);
             let mut back: Vec<ir::BlockArg> = vec![k2.into()];
             back.extend(self.carried(&carried));
-            // A differing step is rescanned byte by byte from its start.
-            self.branch(all, head, &back, scalar, &[k.into()]);
+            // The final step may overlap bytes the loop already found
+            // equal, so its lowest differing lane is still the first.
+            let ones = self.b.ins().bnot(bits);
+            let diff = self.b.ins().band_imm(ones, 0xffff);
+            self.branch(all, head, &back, lane, &[k.into(), diff.into()]);
         } else {
             self.jump(scalar, &[zero.into()]);
         }
+
+        self.b.switch_to_block(lane);
+        let at = self.b.block_params(lane)[0];
+        let bits = self.b.block_params(lane)[1];
+        let first = self.b.ins().ctz(bits);
+        let first = self.b.ins().uextend(types::I64, first);
+        let i = self.b.ins().iadd(at, first);
+        let a = self.b.ins().iadd(p, i);
+        let a = self.b.ins().uload8(types::I64, MemFlags::new(), a, 0);
+        let b = self.b.ins().iadd(q, i);
+        let b = self.b.ins().uload8(types::I64, MemFlags::new(), b, 0);
+        let r = self.three_way(a, b);
+        self.jump(done, &[r.into()]);
 
         self.b.switch_to_block(scalar);
         let k = self.b.block_params(scalar)[0];

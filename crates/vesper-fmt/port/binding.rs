@@ -55,7 +55,7 @@ pub fn live_allocations() -> i64 {
 /// Calls `blake3` of the Vesper library `fmt` (`vesper_fmt_blake3`).
 pub fn blake3(data: &str) -> crate::port::Hash32 {
     // Keep the crate's `Blake3` symbols linked: the Vesper object calls them.
-    let _ = core::hint::black_box([crate::blake3_shim::vesper_blake3_finalize as *const (), crate::blake3_shim::vesper_blake3_free as *const (), crate::blake3_shim::vesper_blake3_hash as *const (), crate::blake3_shim::vesper_blake3_new as *const (), crate::blake3_shim::vesper_blake3_new_derive_key as *const (), crate::blake3_shim::vesper_blake3_new_keyed as *const (), crate::blake3_shim::vesper_blake3_update as *const ()]);
+    let _ = core::hint::black_box([crate::blake3_shim::vesper_blake3_derive_key_hash as *const (), crate::blake3_shim::vesper_blake3_finalize as *const (), crate::blake3_shim::vesper_blake3_free as *const (), crate::blake3_shim::vesper_blake3_hash as *const (), crate::blake3_shim::vesper_blake3_new as *const (), crate::blake3_shim::vesper_blake3_new_derive_key as *const (), crate::blake3_shim::vesper_blake3_new_keyed as *const (), crate::blake3_shim::vesper_blake3_update as *const ()]);
     let mut result = [0u64; 4];
     // SAFETY: `vesper_fmt_blake3` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and

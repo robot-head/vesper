@@ -393,12 +393,12 @@ fn read_gens(inout r: Reader, in b: Slice[u8], inout d: Decls, in nmap: ChunkSeq
         d
             .gens
             .push(
-            Gen {
-                name: name,
-                bound: bound,
-                row: row
-            }
-        );
+                Gen {
+                    name: name,
+                    bound: bound,
+                    row: row
+                }
+            );
     }
     n32(n)
 }
@@ -429,15 +429,15 @@ fn read_tref(
     d
         .trefs
         .push(
-        TRef {
-            pkg: pkg,
-            name: name,
-            xa: xa,
-            xn: n32(xn),
-            s: s,
-            e: e
-        }
-    );
+            TRef {
+                pkg: pkg,
+                name: name,
+                xa: xa,
+                xn: n32(xn),
+                s: s,
+                e: e
+            }
+        );
     id
 }
 
@@ -475,34 +475,34 @@ fn read_sig(
         d
             .pars
             .push(
-            Par {
-                name: pname,
-                pass: pass,
-                ja: ja,
-                jn: jn,
-                ty: ty,
-                s: ps,
-                e: pe
-            }
-        );
+                Par {
+                    name: pname,
+                    pass: pass,
+                    ja: ja,
+                    jn: jn,
+                    ty: ty,
+                    s: ps,
+                    e: pe
+                }
+            );
     }
     let result = tid(in tmap, r.word(in b));
     let row = tid(in tmap, r.word(in b));
     d
         .sigs
         .push(
-        Sig {
-            name: name,
-            s: s,
-            e: e,
-            ga: ga,
-            gn: gn,
-            pa: pa,
-            pn: n32(pn),
-            result: result,
-            row: row
-        }
-    );
+            Sig {
+                name: name,
+                s: s,
+                e: e,
+                ga: ga,
+                gn: gn,
+                pa: pa,
+                pn: n32(pn),
+                result: result,
+                row: row
+            }
+        );
 }
 
 // Reads `n` signatures written one after another; they land in
@@ -545,31 +545,31 @@ fn read_traits(
             d
                 .assocs
                 .push(
-                AssocDecl {
-                    name: aname,
-                    bound: bound,
-                    s: as_,
-                    e: ae
-                }
-            );
+                    AssocDecl {
+                        name: aname,
+                        bound: bound,
+                        s: as_,
+                        e: ae
+                    }
+                );
         }
         let ma = n32(d.sigs.len());
         let mn = read_sigs(inout r, in b, inout d, in nmap, in tmap);
         d
             .traits
             .push(
-            TraitRow {
-                name: name,
-                s: s,
-                e: e,
-                ga: ga,
-                gn: gn,
-                aa: aa,
-                an: n32(an),
-                ma: ma,
-                mn: mn
-            }
-        );
+                TraitRow {
+                    name: name,
+                    s: s,
+                    e: e,
+                    ga: ga,
+                    gn: gn,
+                    aa: aa,
+                    an: n32(an),
+                    ma: ma,
+                    mn: mn
+                }
+            );
     }
 }
 
@@ -596,11 +596,11 @@ fn read_confs(
             d
                 .wheres
                 .push(
-                Where {
-                    ty: ty,
-                    tref: wt
-                }
-            );
+                    Where {
+                        ty: ty,
+                        tref: wt
+                    }
+                );
         }
         let bn = r.word(in b);
         let ba = n32(d.binds.len());
@@ -612,13 +612,13 @@ fn read_confs(
             d
                 .binds
                 .push(
-                Bind {
-                    name: bname,
-                    ty: bty,
-                    s: bs,
-                    e: be
-                }
-            );
+                    Bind {
+                        name: bname,
+                        ty: bty,
+                        s: bs,
+                        e: be
+                    }
+                );
         }
         let ma = n32(d.sigs.len());
         let mn = read_sigs(inout r, in b, inout d, in nmap, in tmap);
@@ -627,23 +627,23 @@ fn read_confs(
         d
             .confs
             .push(
-            Conf {
-                model: model,
-                mname: mname,
-                ga: ga,
-                gn: gn,
-                tref: tref,
-                self_ty: self_ty,
-                wa: wa,
-                wn: n32(wn),
-                ba: ba,
-                bn: n32(bn),
-                ma: ma,
-                mn: mn,
-                s: s,
-                e: e
-            }
-        );
+                Conf {
+                    model: model,
+                    mname: mname,
+                    ga: ga,
+                    gn: gn,
+                    tref: tref,
+                    self_ty: self_ty,
+                    wa: wa,
+                    wn: n32(wn),
+                    ba: ba,
+                    bn: n32(bn),
+                    ma: ma,
+                    mn: mn,
+                    s: s,
+                    e: e
+                }
+            );
     }
 }
 
@@ -670,30 +670,30 @@ fn read_items(
             d
                 .items
                 .push(
-                ItemRow {
-                    adt: true,
-                    name: name,
-                    s: s,
-                    e: e,
-                    a: a,
-                    n: n32(fc)
-                }
-            );
+                    ItemRow {
+                        adt: true,
+                        name: name,
+                        s: s,
+                        e: e,
+                        a: a,
+                        n: n32(fc)
+                    }
+                );
         } else {
             let a = n32(d.sigs.len());
             let on = read_sigs(inout r, in b, inout d, in nmap, in tmap);
             d
                 .items
                 .push(
-                ItemRow {
-                    adt: false,
-                    name: name,
-                    s: s,
-                    e: e,
-                    a: a,
-                    n: on
-                }
-            );
+                    ItemRow {
+                        adt: false,
+                        name: name,
+                        s: s,
+                        e: e,
+                        a: a,
+                        n: on
+                    }
+                );
         }
     }
 }
@@ -711,12 +711,12 @@ pub fn read_decls(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], in t
         d
             .fns
             .push(
-            FnRow {
-                name: name,
-                ga: ga,
-                gn: gn
-            }
-        );
+                FnRow {
+                    name: name,
+                    ga: ga,
+                    gn: gn
+                }
+            );
     }
     read_traits(inout r, in b, inout d, in nmap, in tmap);
     read_confs(inout r, in b, inout d, in nmap, in tmap);
@@ -728,12 +728,12 @@ pub fn read_decls(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], in t
         d
             .uses
             .push(
-            UseRow {
-                model: model,
-                s: s,
-                e: e
-            }
-        );
+                UseRow {
+                    model: model,
+                    s: s,
+                    e: e
+                }
+            );
     }
     let bn = r.word(in b);
     for i in 0..bn {
@@ -745,14 +745,14 @@ pub fn read_decls(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], in t
         d
             .bounds
             .push(
-            BoundSyn {
-                param: param,
-                tref: tref,
-                s: s,
-                e: e,
-                owner: owner
-            }
-        );
+                BoundSyn {
+                    param: param,
+                    tref: tref,
+                    s: s,
+                    e: e,
+                    owner: owner
+                }
+            );
     }
     read_items(inout r, in b, inout d, in nmap, in tmap);
     d

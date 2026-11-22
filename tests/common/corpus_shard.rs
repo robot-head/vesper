@@ -34,6 +34,24 @@ impl Shard {
         shard
     }
 
+    /// The items of `items` this shard owns, by position (four-item blocks,
+    /// as `contains`).
+    #[allow(dead_code)]
+    pub fn keep<T>(self, items: impl IntoIterator<Item = T>) -> impl Iterator<Item = T> {
+        items
+            .into_iter()
+            .enumerate()
+            .filter(move |(i, _)| self.contains(*i))
+            .map(|(_, item)| item)
+    }
+
+    /// A lower bound `n` on a count over the whole corpus, as this shard's
+    /// share of it.
+    #[allow(dead_code)]
+    pub fn share(self, n: usize) -> usize {
+        n / self.total
+    }
+
     pub fn contains(self, corpus_index: usize) -> bool {
         // The corpus JIT-samples every fourth index. Assign four-case blocks
         // so each shard receives those samples, rather than concentrating all
@@ -79,6 +97,18 @@ mod tests {
                 .collect();
             assert!(counts.iter().max().unwrap() - counts.iter().min().unwrap() <= 1);
         }
+    }
+
+    #[test]
+    fn keep_partitions_items_exactly_once() {
+        let mut seen = vec![];
+        for index in 0..3 {
+            seen.extend(Shard { index, total: 3 }.keep(0..50));
+        }
+        seen.sort();
+        assert_eq!(seen, (0..50).collect::<Vec<_>>());
+        assert_eq!(Shard { index: 0, total: 1 }.keep(0..7).count(), 7);
+        assert_eq!(Shard { index: 1, total: 4 }.share(21), 5);
     }
 
     #[test]

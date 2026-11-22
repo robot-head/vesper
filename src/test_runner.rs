@@ -120,6 +120,9 @@ struct Options {
     /// `--engines all`: every passing unit test must pass on every engine
     /// ([`test_engines::agree`]).
     engines_all: bool,
+    /// `--link-search` directories the foreign-library loader looks in
+    /// first (`vsys_commands::eval_host_in`).
+    link_search: Vec<PathBuf>,
 }
 
 impl Options {
@@ -152,6 +155,7 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
     let mut no_cache = false;
     let mut json = false;
     let mut engines = None;
+    let mut link_search = vec![];
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -162,6 +166,9 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
                 mutate_dependency = Some(PathBuf::from(path));
             }
             "--no-cache" if !no_cache => no_cache = true,
+            "--link-search" => link_search.push(PathBuf::from(
+                it.next().ok_or("--link-search requires a directory")?,
+            )),
             "--json" if !json => json = true,
             "--engines" if engines.is_none() => {
                 let value = it.next().ok_or("--engines requires `all` or `unit`")?;
@@ -240,6 +247,7 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
         no_cache,
         json,
         engines_all,
+        link_search,
     })
 }
 
@@ -290,8 +298,10 @@ impl TestCase {
     }
 }
 
-fn prepare_tests(source: &mut String) -> Result<(parser::Parse, Vec<TestCase>), String> {
-    let parsed = parser::parse_for_tests(source);
+fn prepare_tests(
+    source: &mut String,
+    parsed: parser::Parse,
+) -> Result<(parser::Parse, Vec<TestCase>), String> {
     if let Some(d) = parsed.diagnostics.first() {
         return Err(test_diagnostic(
             source,
@@ -326,6 +336,7 @@ fn prepare_tests(source: &mut String) -> Result<(parser::Parse, Vec<TestCase>), 
             lowered.diagnostics.len(),
         ));
     }
+    lowered.module.sugar_origins = parsed.module.sugar_origins.clone();
     test_discovery::finish_case_wrappers(
         source,
         &parsed.module,
@@ -705,7 +716,9 @@ fn checked_for_mutation(
     source: &str,
     negative: &BTreeSet<String>,
 ) -> Result<check::Checked, String> {
-    let (parsed, cases) = prepare_tests(&mut source.to_owned())?;
+    let (expanded, parsed) = vesper::forge_frontend::parse_compiler_source(source, true)
+        .map_err(|d| format!("{}: {}", d.code, d.message))?;
+    let (parsed, cases) = prepare_tests(&mut expanded.into_owned(), parsed)?;
     let world = check::check(&without_negative_tests(parsed.module, negative));
     if let Some(diagnostic) = world.diagnostics.first() {
         return Err(test_diagnostic(
@@ -877,8 +890,17 @@ struct TestSource {
 
 impl TestSource {
     fn prepare(display: String, source: &mut String) -> Result<(parser::Parse, Self), String> {
+        let parsed = parser::parse_for_tests(source);
+        Self::prepare_parsed(display, source, parsed)
+    }
+
+    fn prepare_parsed(
+        display: String,
+        source: &mut String,
+        parsed: parser::Parse,
+    ) -> Result<(parser::Parse, Self), String> {
         let original = source.clone();
-        let (parsed, cases) = prepare_tests(source)?;
+        let (parsed, cases) = prepare_tests(source, parsed)?;
         let tests = discover_tests(&original, &parsed.module.items, &cases)?;
         Ok((
             parsed,
@@ -936,14 +958,18 @@ fn bridge_diagnostics(mut error: FfiError) -> Vec<Diagnostic> {
     error.diagnostics
 }
 
-fn test_host(imports: &Imports) -> Result<EvalHost, String> {
-    crate::vsys_commands::eval_host(imports, "test")
+fn test_host(imports: &Imports, opts: &Options) -> Result<EvalHost, String> {
+    crate::vsys_commands::eval_host_in(imports, "test", &opts.link_search)
 }
 
 impl TestProgram {
     fn standalone(display: String, source: String) -> Result<Self, Box<FileUnitTests>> {
-        let mut expanded = source.clone();
-        match TestSource::prepare(display.clone(), &mut expanded) {
+        let prepared = vesper::forge_frontend::parse_compiler_source(&source, true)
+            .map_err(|d| format!("{}: {}", d.code, d.message))
+            .and_then(|(text, parsed)| {
+                TestSource::prepare_parsed(display.clone(), &mut text.into_owned(), parsed)
+            });
+        match prepared {
             Ok((parsed, file)) => Ok(Self {
                 module: parsed.module,
                 files: vec![file],
@@ -996,15 +1022,10 @@ impl TestProgram {
     fn package(target: &PackageTarget, replacement: Option<(&Path, &str)>) -> Result<Self, String> {
         let mut files = Vec::new();
         let mut found = target.file.is_none();
-        let mut parse_root = |path: &Path| {
-            let mut source = match replacement {
-                Some((replaced, text)) if path == replaced => text.to_owned(),
-                _ => read_source(path)?,
-            };
+        let mut parse_root = |path: &Path, source: &mut String| {
             if target.file.as_deref().is_some_and(|file| file != path) {
                 files.push(None);
-                let parsed = parser::parse(&source);
-                return Ok((source, parsed));
+                return Ok(parser::parse(source));
             }
             found = true;
             let display = path
@@ -1014,19 +1035,12 @@ impl TestProgram {
                 .map(|part| part.as_os_str().to_string_lossy())
                 .collect::<Vec<_>>()
                 .join("/");
-            let (parsed, tested) = TestSource::prepare(display, &mut source)
+            let (parsed, tested) = TestSource::prepare(display, source)
                 .map_err(|error| format!("{}: {error}", path.display()))?;
             files.push(Some(tested));
-            Ok((source, parsed))
+            Ok(parsed)
         };
-        let assembled = match replacement {
-            Some(replacement) => packages::load_with_dependency_replacement(
-                &target.root,
-                &mut parse_root,
-                replacement,
-            )?,
-            None => packages::load_with_root_parser(&target.root, &mut parse_root)?,
-        };
+        let assembled = packages::load_test_sources(&target.root, replacement, &mut parse_root)?;
         if let Some((path, d)) = assembled.manifest_errors.first() {
             return Err(format!("{path}: {} {}", d.code, d.message));
         }
@@ -1047,7 +1061,7 @@ impl TestProgram {
                 let tests = root_package_files
                     .iter()
                     .position(|&id| id == index)
-                    .and_then(|i| files[i].as_ref());
+                    .and_then(|i| files.get(i)?.as_ref());
                 return Err(format!(
                     "{}: {}",
                     file.display,
@@ -1191,7 +1205,11 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
                 continue;
             }
         };
-        let host = program.imports.as_ref().map(test_host).transpose()?;
+        let host = program
+            .imports
+            .as_ref()
+            .map(|i| test_host(i, opts))
+            .transpose()?;
         let fn_graph = FunctionGraph::from_module(&program.module);
         let combined = program.sources.as_ref().map(SourceMap::combined);
         let package_hash = combined.as_ref().map(|text| blake3::hash(text.as_bytes()));
@@ -1959,7 +1977,7 @@ fn run_mutation_gate(opts: &Options) -> Result<(), String> {
     let host = package_program
         .as_ref()
         .and_then(|program| program.imports.as_ref())
-        .map(test_host)
+        .map(|i| test_host(i, opts))
         .transpose()?;
     let mut all_candidates = Vec::new();
     let dependency_source = if let Some(path) = &opts.mutate_dependency {

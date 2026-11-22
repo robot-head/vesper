@@ -24,7 +24,6 @@ linear struct Tx {
 fn close(sink x: Tx) -> u64 {
     let Tx {
         id
-    }
-    = x;
+    } = x;
     id
 }

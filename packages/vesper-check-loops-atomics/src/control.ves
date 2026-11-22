@@ -324,8 +324,7 @@ pub fn visit(
         let t = world.expr_type(vr.start, vr.end);
         if is_option(in types, c.option, t) {
             let expected = c.function_result();
-            let fine = expected
-                != NONE32
+            let fine = expected != NONE32
                 && (is_option(in types, c.option, expected) || types.kind(expected) == K_INFER);
             if !fine {
                 line(

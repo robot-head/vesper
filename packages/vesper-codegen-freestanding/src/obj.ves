@@ -10,6 +10,21 @@
 // `RelocationSections`). Malformed input is an `Object` error; its message
 // is ours, not the `object` crate's.
 
+use self::codes::{
+    Absent,
+    Ehdr,
+    Et,
+    Ident,
+    RelEnt,
+    Shdr,
+    Shf,
+    Shn,
+    Sht,
+    Stb,
+    Stt,
+    Stv,
+    SymEnt
+};
 use self::util::{
     Span,
     add,
@@ -23,46 +38,16 @@ use self::util::{
     grow
 };
 
-// "no such row" (util.ves).
-const NONE64: u64 = 18446744073709551615;
-
-const SHT_PROGBITS: u32 = 1;
-const SHT_SYMTAB: u32 = 2;
-const SHT_STRTAB: u32 = 3;
-const SHT_RELA: u32 = 4;
-const SHT_NOBITS: u32 = 8;
-const SHT_REL: u32 = 9;
-const SHT_CREL: u32 = 1073741844;
-
-const SHF_WRITE: u64 = 1;
-const SHF_ALLOC: u64 = 2;
-const SHF_EXECINSTR: u64 = 4;
-const SHF_STRINGS: u64 = 32;
-const SHF_INFO_LINK: u64 = 64;
-const SHF_TLS: u64 = 1024;
-
-const SHN_UNDEF: u16 = 0;
-const SHN_LORESERVE: u16 = 65280;
-const SHN_ABS: u16 = 65521;
-const SHN_XINDEX: u16 = 65535;
-
-const STT_SECTION: u8 = 3;
-const STT_FILE: u8 = 4;
-
-const ET_REL: u16 = 1;
-const EHDR_BYTES: u64 = 64;
-const SHDR_BYTES: u64 = 64;
-const SYM_BYTES: u64 = 24;
-const RELA_BYTES: u64 = 24;
-const REL_BYTES: u64 = 16;
 const ELF_ALIGN: u64 = 8;
 
 // `object::SectionKind`, as far as the linker tells them apart.
-const KIND_TEXT: u8 = 0;
-const KIND_DATA: u8 = 1;
-const KIND_RODATA: u8 = 2;
-const KIND_BSS: u8 = 3;
-const KIND_OTHER: u8 = 4;
+enum Kind: _ {
+    Text = 0,
+    Data = 1,
+    Rodata = 2,
+    Bss = 3,
+    Other = 4,
+}
 
 // One section header. Offsets are absolute in the request.
 pub copy struct Sec {
@@ -137,21 +122,21 @@ fn o64(in b: Slice[u8], o: Obj, at: u64) -> Option[u64] {
 fn w16(x: Option[u16]) -> u64 {
     match x {
         Option::Some(v) => widen_u64(v),
-        Option::None => NONE64,
+        Option::None => Absent::Row,
     }
 }
 
 fn w32(x: Option[u32]) -> u64 {
     match x {
         Option::Some(v) => widen_u64(v),
-        Option::None => NONE64,
+        Option::None => Absent::Row,
     }
 }
 
 fn w64(x: Option[u64]) -> u64 {
     match x {
         Option::Some(v) => v,
-        Option::None => NONE64,
+        Option::None => Absent::Row,
     }
 }
 
@@ -184,28 +169,28 @@ fn c_string(in b: Slice[u8], t_at: u64, t_len: u64, at: u64) -> Option[Span] {
 }
 
 fn sec_kind(s: Sec) -> u8 {
-    if s.sh_type == SHT_PROGBITS {
-        if s.flags & SHF_ALLOC != 0 {
-            if s.flags & SHF_EXECINSTR != 0 {
-                return KIND_TEXT;
+    if s.sh_type == Sht::Progbits {
+        if s.flags & Shf::Alloc != 0 {
+            if s.flags & Shf::Execinstr != 0 {
+                return Kind::Text;
             }
-            if s.flags & SHF_TLS != 0 {
-                return KIND_OTHER;
+            if s.flags & Shf::Tls != 0 {
+                return Kind::Other;
             }
-            if s.flags & SHF_WRITE != 0 {
-                return KIND_DATA;
+            if s.flags & Shf::Write != 0 {
+                return Kind::Data;
             }
-            return KIND_RODATA;
+            return Kind::Rodata;
         }
-        return KIND_OTHER;
+        return Kind::Other;
     }
-    if s.sh_type == SHT_NOBITS {
-        if s.flags & SHF_TLS != 0 {
-            return KIND_OTHER;
+    if s.sh_type == Sht::Nobits {
+        if s.flags & Shf::Tls != 0 {
+            return Kind::Other;
         }
-        return KIND_BSS;
+        return Kind::Bss;
     }
-    KIND_OTHER
+    Kind::Other
 }
 
 // Parses the object at `b[base..base + len]`, appending its rows. Returns
@@ -233,85 +218,72 @@ pub fn parse_object(
         nsym: 0,
         symtab: 0
     };
-    if len
-        < EHDR_BYTES
-        || rd8(in b, base)
-        != 127
-        || rd8(in b, add(base, 1))
-        != 69
-        || rd8(in b, add(base, 2))
-        != 76
-        || rd8(in b, add(base, 3))
-        != 70 {
+    if len < Ehdr::Bytes
+        || rd8(in b, base) != Ident::Mag0
+        || rd8(in b, add(base, 1)) != Ident::Mag1
+        || rd8(in b, add(base, 2)) != Ident::Mag2
+        || rd8(in b, add(base, 3)) != Ident::Mag3 {
         why.extend(in "not an ELF file".as_bytes());
         return o;
     }
-    if rd8(in b, add(base, 4))
-        != 2
-        || rd8(in b, add(base, 5))
-        != 1
-        || rd8(in b, add(base, 6))
-        != 1 {
+    if rd8(in b, add(base, Ehdr::Class)) != Ident::Class64
+        || rd8(in b, add(base, Ehdr::Data)) != Ident::Data2Lsb
+        || rd8(in b, add(base, Ehdr::Version)) != Ident::Current {
         why.extend(in "not a little-endian ELF64 file".as_bytes());
         return o;
     }
-    o.e_type = wrapping_u16(w16(o16(in b, o, 16)));
-    o.machine = wrapping_u16(w16(o16(in b, o, 18)));
-    o.e_flags = wrapping_u32(w32(o32(in b, o, 48)));
-    let shoff = w64(o64(in b, o, 40));
-    let shentsize = w16(o16(in b, o, 58));
-    let mut shnum = w16(o16(in b, o, 60));
-    let mut shstrndx = w16(o16(in b, o, 62));
+    o.e_type = wrapping_u16(w16(o16(in b, o, Ehdr::Kind)));
+    o.machine = wrapping_u16(w16(o16(in b, o, Ehdr::Machine)));
+    o.e_flags = wrapping_u32(w32(o32(in b, o, Ehdr::Flags)));
+    let shoff = w64(o64(in b, o, Ehdr::Shoff));
+    let shentsize = w16(o16(in b, o, Ehdr::Shentsize));
+    let mut shnum = w16(o16(in b, o, Ehdr::Shnum));
+    let mut shstrndx = w16(o16(in b, o, Ehdr::Shstrndx));
     if shoff == 0 {
         // No section headers: no sections and no symbols.
         return o;
     }
-    if shentsize != SHDR_BYTES {
+    if shentsize != Shdr::Bytes {
         why.extend(in "invalid section header size".as_bytes());
         return o;
     }
     if shnum == 0 {
-        shnum = w64(o64(in b, o, add(shoff, 32)));
+        shnum = w64(o64(in b, o, add(shoff, Shdr::Size)));
     }
-    if shstrndx == widen_u64(SHN_XINDEX) {
-        shstrndx = w32(o32(in b, o, add(shoff, 40)));
+    if shstrndx == Shn::Xindex {
+        shstrndx = w32(o32(in b, o, add(shoff, Shdr::Link)));
     }
-    if shnum
-        == NONE64
-        || shstrndx
-        == NONE64
-        || shnum
-        > o
-        .len
-        / SHDR_BYTES
-        || !inside(o, shoff, wrapping_mul(shnum, SHDR_BYTES)) {
+    if shnum == Absent::Row
+        || shstrndx == Absent::Row
+        || shnum > o.len / Shdr::Bytes
+        || !inside(o, shoff, wrapping_mul(shnum, Shdr::Bytes)) {
         why.extend(in "invalid section header table".as_bytes());
         return o;
     }
     for i in 0..shnum {
-        let h = add(shoff, wrapping_mul(i, SHDR_BYTES));
-        let sh_type = wrapping_u32(w32(o32(in b, o, add(h, 4))));
-        let offset = w64(o64(in b, o, add(h, 24)));
-        let size = w64(o64(in b, o, add(h, 32)));
-        let data_ok = sh_type == SHT_NOBITS || inside(o, offset, size);
+        let h = add(shoff, wrapping_mul(i, Shdr::Bytes));
+        let sh_type = wrapping_u32(w32(o32(in b, o, add(h, Shdr::Kind))));
+        let offset = w64(o64(in b, o, add(h, Shdr::Offset)));
+        let size = w64(o64(in b, o, add(h, Shdr::Size)));
+        let data_ok = sh_type == Sht::Nobits || inside(o, offset, size);
         secs
             .push(
-            Sec {
-                name_at: widen_u64(wrapping_u32(w32(o32(in b, o, h)))),
-                name_len: 0,
-                sh_type: sh_type,
-                flags: w64(o64(in b, o, add(h, 8))),
-                data_at: add(base, offset),
-                size: size,
-                link: wrapping_u32(w32(o32(in b, o, add(h, 40)))),
-                info: wrapping_u32(w32(o32(in b, o, add(h, 44)))),
-                align: w64(o64(in b, o, add(h, 48))),
-                entsize: w64(o64(in b, o, add(h, 56))),
-                rel: 0,
-                data_ok: data_ok,
-                name_ok: false
-            }
-        );
+                Sec {
+                    name_at: widen_u64(wrapping_u32(w32(o32(in b, o, h)))),
+                    name_len: 0,
+                    sh_type: sh_type,
+                    flags: w64(o64(in b, o, add(h, Shdr::Flags))),
+                    data_at: add(base, offset),
+                    size: size,
+                    link: wrapping_u32(w32(o32(in b, o, add(h, Shdr::Link)))),
+                    info: wrapping_u32(w32(o32(in b, o, add(h, Shdr::Info)))),
+                    align: w64(o64(in b, o, add(h, Shdr::Addralign))),
+                    entsize: w64(o64(in b, o, add(h, Shdr::Entsize))),
+                    rel: 0,
+                    data_ok: data_ok,
+                    name_ok: false
+                }
+            );
     }
     o.nsec = shnum;
     // Section names.
@@ -319,7 +291,7 @@ pub fn parse_object(
     let mut str_len: u64 = 0;
     if shstrndx != 0 && shstrndx < shnum {
         let st = sec(in secs, o, shstrndx);
-        if st.sh_type != SHT_NOBITS && st.data_ok {
+        if st.sh_type != Sht::Nobits && st.data_ok {
             str_at = st.data_at;
             str_len = st.size;
         }
@@ -340,13 +312,13 @@ pub fn parse_object(
     }
     // The symbol table: the first SHT_SYMTAB section.
     for i in 1..shnum {
-        if o.symtab == 0 && sec(in secs, o, i).sh_type == SHT_SYMTAB {
+        if o.symtab == 0 && sec(in secs, o, i).sh_type == Sht::Symtab {
             o.symtab = i;
         }
     }
     if o.symtab != 0 {
         let st = sec(in secs, o, o.symtab);
-        if !st.data_ok || st.size % SYM_BYTES != 0 {
+        if !st.data_ok || st.size % SymEnt::Bytes != 0 {
             why.extend(in "invalid ELF symbol table data".as_bytes());
             return o;
         }
@@ -360,9 +332,9 @@ pub fn parse_object(
             why.extend(in "invalid ELF string table data".as_bytes());
             return o;
         }
-        let count = st.size / SYM_BYTES;
+        let count = st.size / SymEnt::Bytes;
         for k in 0..count {
-            let at = add(st.data_at, wrapping_mul(k, SYM_BYTES));
+            let at = add(st.data_at, wrapping_mul(k, SymEnt::Bytes));
             let name_off = match rd32(in b, at) {
                 Option::Some(v) => widen_u64(v),
                 Option::None => 0,
@@ -371,16 +343,16 @@ pub fn parse_object(
                 name_at: 0,
                 name_len: 0,
                 name_ok: true,
-                info: rd8(in b, add(at, 4)),
-                shndx: match rd16(in b, add(at, 6)) {
+                info: rd8(in b, add(at, SymEnt::Info)),
+                shndx: match rd16(in b, add(at, SymEnt::Shndx)) {
                     Option::Some(v) => v,
                     Option::None => 0,
                 },
-                value: match rd64(in b, add(at, 8)) {
+                value: match rd64(in b, add(at, SymEnt::Value)) {
                     Option::Some(v) => v,
                     Option::None => 0,
                 },
-                size: match rd64(in b, add(at, 16)) {
+                size: match rd64(in b, add(at, SymEnt::Size)) {
                     Option::Some(v) => v,
                     Option::None => 0,
                 }
@@ -407,7 +379,7 @@ pub fn parse_object(
         }
         i = wrapping_sub(i, 1);
         let s = sec(in secs, o, i);
-        if s.sh_type == SHT_REL || s.sh_type == SHT_RELA || s.sh_type == SHT_CREL {
+        if s.sh_type == Sht::Rel || s.sh_type == Sht::Rela || s.sh_type == Sht::Crel {
             let info = widen_u64(s.info);
             if widen_u64(s.link) == o.symtab && info != 0 {
                 if info >= shnum {
@@ -415,7 +387,7 @@ pub fn parse_object(
                     return o;
                 }
                 let mut t = sec(in secs, o, info);
-                if t.sh_type == SHT_REL || t.sh_type == SHT_RELA || t.sh_type == SHT_CREL {
+                if t.sh_type == Sht::Rel || t.sh_type == Sht::Rela || t.sh_type == Sht::Crel {
                     why.extend(in "unsupported ELF sh_info for relocation section".as_bytes());
                     return o;
                 }
@@ -470,7 +442,7 @@ pub fn sym(in syms: ChunkSeq[Sym], o: Obj, i: u64) -> Sym {
 }
 
 pub fn is_relocatable(o: Obj) -> bool {
-    o.e_type == ET_REL
+    o.e_type == Et::Rel
 }
 
 // One relocation: `r_offset`, the symbol index, the type and the addend.
@@ -487,28 +459,28 @@ pub fn rel_count(r: Sec) -> u64 {
     if !r.data_ok {
         return 0;
     }
-    if r.sh_type == SHT_RELA {
-        return r.size / RELA_BYTES;
+    if r.sh_type == Sht::Rela {
+        return r.size / RelEnt::RelaBytes;
     }
-    if r.sh_type == SHT_REL {
-        return r.size / REL_BYTES;
+    if r.sh_type == Sht::Rel {
+        return r.size / RelEnt::RelBytes;
     }
     0
 }
 
 pub fn rel_at(in b: Slice[u8], r: Sec, k: u64) -> Rel {
-    let size = if r.sh_type == SHT_RELA {
-        RELA_BYTES
+    let size = if r.sh_type == Sht::Rela {
+        RelEnt::RelaBytes
     } else {
-        REL_BYTES
+        RelEnt::RelBytes
     };
     let at = add(r.data_at, wrapping_mul(k, size));
-    let info = match rd64(in b, add(at, 8)) {
+    let info = match rd64(in b, add(at, RelEnt::Info)) {
         Option::Some(v) => v,
         Option::None => 0,
     };
-    let addend = if r.sh_type == SHT_RELA {
-        match rd64(in b, add(at, 16)) {
+    let addend = if r.sh_type == Sht::Rela {
+        match rd64(in b, add(at, RelEnt::Addend)) {
             Option::Some(v) => v,
             Option::None => 0,
         }
@@ -574,7 +546,7 @@ pub fn string_table(
     offsets.clear();
     offsets.resize(n, 0);
     let mut offset = base;
-    let mut prev: u64 = NONE64;
+    let mut prev: u64 = Absent::Row;
     for k in 0..order.len() {
         let id = match order.try_get(k) {
             Option::Some(v) => v,
@@ -582,18 +554,19 @@ pub fn string_table(
         };
         let s = at64(in starts, id);
         let l = at64(in lens, id);
-        if prev != NONE64 && ends_with(in strs, at64(in starts, prev), at64(in lens, prev), s, l) {
+        if prev != Absent::Row
+            && ends_with(in strs, at64(in starts, prev), at64(in lens, prev), s, l) {
             let ok = offsets.try_set(id, wrapping_sub(wrapping_sub(offset, l), 1));
         } else {
             let ok = offsets.try_set(id, offset);
             for c in 0..l {
                 data
                     .push(
-                    match strs.try_get(add(s, c)) {
-                        Option::Some(v) => v,
-                        Option::None => 0,
-                    }
-                );
+                        match strs.try_get(add(s, c)) {
+                            Option::Some(v) => v,
+                            Option::None => 0,
+                        }
+                    );
             }
             data.push(0);
             offset = add(offset, add(l, 1));
@@ -697,16 +670,16 @@ pub fn write_stub_object(
     let nsym = starts.len();
     let nrel = rel_offsets.len();
     // Offsets, as the writer reserves them.
-    let text_off = align_to(EHDR_BYTES, align);
+    let text_off = align_to(Ehdr::Bytes, align);
     let symtab_off = align_to(add(text_off, code.len()), ELF_ALIGN);
-    let symtab_size = wrapping_mul(add(nsym, 1), SYM_BYTES);
+    let symtab_size = wrapping_mul(add(nsym, 1), SymEnt::Bytes);
     let mut strtab: ChunkSeq[u8] = ChunkSeq::new[u8]();
     strtab.push(0);
     let mut str_offsets: ChunkSeq[u64] = ChunkSeq::new[u64]();
     string_table(in names, in starts, in lens, 1, inout strtab, inout str_offsets);
     let strtab_off = add(symtab_off, symtab_size);
     let rela_off = align_to(add(strtab_off, strtab.len()), ELF_ALIGN);
-    let rela_size = wrapping_mul(nrel, RELA_BYTES);
+    let rela_size = wrapping_mul(nrel, RelEnt::RelaBytes);
     // Section names, in the order the writer adds them.
     let mut sh_names: ChunkSeq[u8] = ChunkSeq::new[u8]();
     let mut sh_starts: ChunkSeq[u64] = ChunkSeq::new[u64]();
@@ -726,45 +699,46 @@ pub fn write_stub_object(
 
     let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
     // File header.
-    out.push(127);
-    out.push(69);
-    out.push(76);
-    out.push(70);
-    out.push(2);
-    out.push(1);
-    out.push(1);
+    out.push(Ident::Mag0);
+    out.push(Ident::Mag1);
+    out.push(Ident::Mag2);
+    out.push(Ident::Mag3);
+    out.push(Ident::Class64);
+    out.push(Ident::Data2Lsb);
+    out.push(Ident::Current);
     let at = grow(inout out, 9);
-    push16(inout out, ET_REL);
+    push16(inout out, Et::Rel);
     push16(inout out, machine);
-    push32(inout out, 1);
+    push32(inout out, Ident::Current);
     push64(inout out, 0);
     push64(inout out, 0);
     push64(inout out, shoff);
     push32(inout out, e_flags);
-    push16(inout out, 64);
+    push16(inout out, Ehdr::Bytes);
     push16(inout out, 0);
     push16(inout out, 0);
-    push16(inout out, 64);
+    push16(inout out, Shdr::Bytes);
     push16(inout out, wrapping_u16(shnum));
-    push16(inout out, 5);
+    // `.shstrtab` is the last header.
+    push16(inout out, wrapping_u16(wrapping_sub(shnum, 1)));
     // Section data.
     pad_to(inout out, align);
     out.extend(in code.as_slice());
     // Symbols: the null symbol, then every symbol (all global).
     pad_to(inout out, ELF_ALIGN);
-    let z = grow(inout out, SYM_BYTES);
+    let z = grow(inout out, SymEnt::Bytes);
     for i in 0..nsym {
         push32(inout out, wrapping_u32(at64(in str_offsets, i)));
         if i < defined {
             // STB_GLOBAL, STT_FUNC; STV_HIDDEN; in `.text.boot`.
-            out.push(18);
-            out.push(2);
+            out.push((Stb::Global << Stb::Shift) | Stt::Func);
+            out.push(Stv::Hidden);
             push16(inout out, 1);
             push64(inout out, at64(in values, i));
         } else {
             // STB_GLOBAL, STT_NOTYPE; STV_HIDDEN; undefined.
-            out.push(16);
-            out.push(2);
+            out.push((Stb::Global << Stb::Shift) | Stt::Notype);
+            out.push(Stv::Hidden);
             push16(inout out, 0);
             push64(inout out, 0);
         }
@@ -785,12 +759,12 @@ pub fn write_stub_object(
     out.extend(in shstrtab.as_slice());
     pad_to(inout out, ELF_ALIGN);
     // Section headers.
-    let n = grow(inout out, SHDR_BYTES);
+    let n = grow(inout out, Shdr::Bytes);
     section_header(
         inout out,
         at64(in sh_offsets, 0),
-        widen_u64(SHT_PROGBITS),
-        SHF_ALLOC | SHF_EXECINSTR,
+        Sht::Progbits,
+        Shf::Alloc | Shf::Execinstr,
         text_off,
         code.len(),
         0,
@@ -801,31 +775,31 @@ pub fn write_stub_object(
     section_header(
         inout out,
         at64(in sh_offsets, 1),
-        widen_u64(SHT_RELA),
-        SHF_INFO_LINK,
+        Sht::Rela,
+        Shf::InfoLink,
         rela_off,
         rela_size,
         3,
         1,
         ELF_ALIGN,
-        RELA_BYTES
+        RelEnt::RelaBytes
     );
     section_header(
         inout out,
         at64(in sh_offsets, 2),
-        widen_u64(SHT_SYMTAB),
+        Sht::Symtab,
         0,
         symtab_off,
         symtab_size,
         4,
         1,
         ELF_ALIGN,
-        SYM_BYTES
+        SymEnt::Bytes
     );
     section_header(
         inout out,
         at64(in sh_offsets, 3),
-        widen_u64(SHT_STRTAB),
+        Sht::Strtab,
         0,
         strtab_off,
         strtab.len(),
@@ -837,7 +811,7 @@ pub fn write_stub_object(
     section_header(
         inout out,
         at64(in sh_offsets, 4),
-        widen_u64(SHT_STRTAB),
+        Sht::Strtab,
         0,
         shstrtab_off,
         shstrtab.len(),
@@ -901,17 +875,17 @@ pub fn section_header(
 // OUT_TEXT..OUT_BSS (link.ves order), 4 to skip it, 5 for an allocated
 // section the linker cannot place.
 pub fn classify(s: Sec) -> u8 {
-    if s.flags & SHF_ALLOC == 0 {
+    if s.flags & Shf::Alloc == 0 {
         return 4;
     }
     let k = sec_kind(s);
-    if k == KIND_TEXT {
+    if k == Kind::Text {
         0
-    } else if k == KIND_RODATA {
+    } else if k == Kind::Rodata {
         1
-    } else if k == KIND_DATA {
+    } else if k == Kind::Data {
         2
-    } else if k == KIND_BSS {
+    } else if k == Kind::Bss {
         3
     } else if s.size == 0 {
         4
@@ -921,27 +895,27 @@ pub fn classify(s: Sec) -> u8 {
 }
 
 pub fn is_nobits(s: Sec) -> bool {
-    s.sh_type == SHT_NOBITS
+    s.sh_type == Sht::Nobits
 }
 
 // `SymbolSection::Section(_)`.
 pub fn sym_in_section(s: Sym) -> bool {
-    s.shndx != SHN_UNDEF && s.shndx < SHN_LORESERVE
+    s.shndx != Shn::Undef && s.shndx < Shn::Loreserve
 }
 
 pub fn sym_undefined(s: Sym) -> bool {
-    s.shndx == SHN_UNDEF
+    s.shndx == Shn::Undef
 }
 
 // `SymbolSection::Absolute` (a file symbol is `None`).
 pub fn sym_absolute(s: Sym) -> bool {
-    s.shndx == SHN_ABS && (s.info & 15) != STT_FILE
+    s.shndx == Shn::Abs && (s.info & Stt::Mask) != Stt::File
 }
 
 pub fn sym_is_section(s: Sym) -> bool {
-    (s.info & 15) == STT_SECTION
+    (s.info & Stt::Mask) == Stt::Section
 }
 
 pub fn sym_global(s: Sym) -> bool {
-    (s.info >> 4) != 0
+    (s.info >> Stb::Shift) != Stb::Local
 }

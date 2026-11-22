@@ -53,18 +53,10 @@ fn le32(in s: Slice[u8], at: u64) -> u64 {
 }
 
 fn same_digest(d: Digest, in s: Slice[u8], at: u64) -> bool {
-    d
-        .w0
-        == le64(in s, at)
-        && d
-        .w1
-        == le64(in s, wrapping_add(at, 8))
-        && d
-        .w2
-        == le64(in s, wrapping_add(at, 16))
-        && d
-        .w3
-        == le64(in s, wrapping_add(at, 24))
+    d.w0 == le64(in s, at)
+        && d.w1 == le64(in s, wrapping_add(at, 8))
+        && d.w2 == le64(in s, wrapping_add(at, 16))
+        && d.w3 == le64(in s, wrapping_add(at, 24))
 }
 
 // The header of a log of inputs of these widths (each checked to fit a

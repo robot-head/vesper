@@ -11,11 +11,11 @@ async function loadRuntime() {
 self.addEventListener('message', async ({ data }) => {
   try {
     const wasm = await (runtime ??= loadRuntime());
-    self.postMessage({ ...evaluate(wasm, data), mode: data.mode, id: data.id });
+    self.postMessage({ ...evaluate(wasm, data), mode: data.mode, id: data.id, live: data.live });
   } catch (error) {
     const message = error instanceof WebAssembly.RuntimeError
       ? 'The example stopped while checking or running. Try a smaller input.'
       : 'Could not start the Vesper compiler. Try again.';
-    self.postMessage({ ok: false, output: message, restart: true, mode: data.mode, id: data.id });
+    self.postMessage({ ok: false, output: message, restart: true, mode: data.mode, id: data.id, live: data.live });
   }
 });

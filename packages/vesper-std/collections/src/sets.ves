@@ -182,26 +182,16 @@ test {
                 Option::Some(digit) => digit,
                 Option::None => return false,
             };
-            if !ordered
-                .insert(entry)
-                || !flat
-                .insert(entry)
-                || ordered
-                .insert(entry)
-                || flat
-                .insert(entry) {
+            if !ordered.insert(entry)
+                || !flat.insert(entry)
+                || ordered.insert(entry)
+                || flat.insert(entry) {
                 return false;
             }
         }
         for i in 0..ordered_before.len() {
-            if ordered
-                .nth(i)
-                != ordered_before
-                .try_byte_at(i)
-                || flat
-                .element_at(i)
-                != flat_before
-                .try_byte_at(i) {
+            if ordered.nth(i) != ordered_before.try_byte_at(i)
+                || flat.element_at(i) != flat_before.try_byte_at(i) {
                 return false;
             }
         }
@@ -223,14 +213,8 @@ test {
             return false;
         }
         for i in 0..ordered.len() {
-            if ordered_out
-                .try_get(i)
-                != ordered_after
-                .try_byte_at(i)
-                || flat_out
-                .try_get(i)
-                != flat_after
-                .try_byte_at(i) {
+            if ordered_out.try_get(i) != ordered_after.try_byte_at(i)
+                || flat_out.try_get(i) != flat_after.try_byte_at(i) {
                 return false;
             }
         }
@@ -251,17 +235,9 @@ test {
         }
         set.insert(5);
         set.insert(2);
-        set
-            .first()
-            == Option::Some(2)
-            && set
-            .last()
-            == Option::Some(5)
-            && set
-            .nth(2)
-            == Option::None
-            && set
-            .ceiling(key)
-            == expected
+        set.first() == Option::Some(2)
+            && set.last() == Option::Some(5)
+            && set.nth(2) == Option::None
+            && set.ceiling(key) == expected
     }
 }

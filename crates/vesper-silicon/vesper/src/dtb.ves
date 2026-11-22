@@ -139,40 +139,26 @@ fn word(in s: ChunkSeq[u64], i: u64) -> u64 {
 // Which phandle property a name is: 1 `phandle`, 2 `linux,phandle`, else 0.
 fn phandle_kind(in b: Slice[u8], at: u64, n: u64) -> u64 {
     if n == 7 {
-        if byte(in b, at)
-            == 112
-            && byte(in b, wrapping_add(at, 1))
-            == 104
-            && byte(in b, wrapping_add(at, 2))
-            == 97
-            && byte(in b, wrapping_add(at, 3))
-            == 110
-            && byte(in b, wrapping_add(at, 4))
-            == 100
-            && byte(in b, wrapping_add(at, 5))
-            == 108
-            && byte(in b, wrapping_add(at, 6))
-            == 101 {
+        if byte(in b, at) == 112
+            && byte(in b, wrapping_add(at, 1)) == 104
+            && byte(in b, wrapping_add(at, 2)) == 97
+            && byte(in b, wrapping_add(at, 3)) == 110
+            && byte(in b, wrapping_add(at, 4)) == 100
+            && byte(in b, wrapping_add(at, 5)) == 108
+            && byte(in b, wrapping_add(at, 6)) == 101 {
             return 1;
         }
         return 0;
     }
     if n == 13 {
         // "linux," then "phandle".
-        if byte(in b, at)
-            == 108
-            && byte(in b, wrapping_add(at, 1))
-            == 105
-            && byte(in b, wrapping_add(at, 2))
-            == 110
-            && byte(in b, wrapping_add(at, 3))
-            == 117
-            && byte(in b, wrapping_add(at, 4))
-            == 120
-            && byte(in b, wrapping_add(at, 5))
-            == 44
-            && phandle_kind(in b, wrapping_add(at, 6), 7)
-            == 1 {
+        if byte(in b, at) == 108
+            && byte(in b, wrapping_add(at, 1)) == 105
+            && byte(in b, wrapping_add(at, 2)) == 110
+            && byte(in b, wrapping_add(at, 3)) == 117
+            && byte(in b, wrapping_add(at, 4)) == 120
+            && byte(in b, wrapping_add(at, 5)) == 44
+            && phandle_kind(in b, wrapping_add(at, 6), 7) == 1 {
             return 2;
         }
     }

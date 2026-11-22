@@ -267,19 +267,185 @@ non-default.
    an export cannot carry `Isa[P]` ("only Fail[E] and imported .vsys
    libraries are"), so the dispatch has to sit inside the export.
 
+## Part 4: the speed of every other ported module
+
+Base `main` at `d1b96cd2` (part 3 merged). P3b measured only the kernel
+and the graph. `examples/abba.rs` now has one workload for each other
+ported module (`ABBA_WORKLOADS=a,b` picks workloads), and the schedule
+compiler got one port rewrite.
+
+| Module | Workload | port/rust median (range) | Bar |
+|---|---|--:|---|
+| kernels (`SvfBank::render`) | `kernel` | 1.10x (0.87-1.28) | passes |
+| graph (`render_builtin_graph`) | `graph` | 1.08x (0.90-1.36) | passes |
+| pdc (`compile_schedule`) | `schedule`: the 32-node graph | **1.32x (1.22-1.50)**, was 1.50x (1.47-1.56) | passes |
+| confine (`verify_realtime`) | `confine`: 64 functions, one root, three findings | 1.66x (1.58-1.80) | fails |
+| kernels (`PidController::step`) | `pid`: 200,000 steps | 2.06x (2.04-2.13) | fails |
+| slab (`DelaySlab`) | `slab`: 8 lines, 20,000 blocks | 2.13x (2.12-2.30) | fails |
+| events (wire codec, `ParamRamp`) | `events`: 32 events round trip, 16 ramps x 64 samples | 5.64x (5.31-5.95) | fails |
+| simd | `simd` (part 3) | 8-48x | fails |
+
+**Schedule rewrite.** `p_compile` looked up each input's source with a
+binary search over the sorted ids, five times per input. It now resolves
+every input's source once (`srcs`, by input) and reads it from there.
+
+**What keeps the rest above the bar.** `pid`, `slab` and `events` make one
+export call per step, per line or per sample; `ParamRamp::next_value` is
+one call per sample. The work in each call is a few nanoseconds in Rust,
+so the cost of a call across the export ABI (the status words, the
+binding's conversions and the lost inlining) is most of the port's time:
+about 15 ns per call more than Rust. Closing it needs either coarser
+calls (a block of PID steps, all of a slab's lines per block, a block of
+ramp values), which changes the crate's Rust API, or cheaper calls from
+the compiler (gap 7). `confine` spends its time in `verify_root`'s total
+`get`/`set` accessors and in the Rust side's interning of effects and
+building of the call-graph words.
+
+### Compiler gap found in this part
+
+7. **A call across the export ABI costs about 15 ns more than a Rust
+   call.** The binding passes a status buffer and converts every argument
+   to words and back, and a Rust caller can't inline the Vesper callee.
+   That cost is the gap for a module whose API is one small operation
+   (`ParamRamp::next_value`, `PidController::step`, `DelaySlab::read`).
+   An inlinable fast path for leaf exports with no `Fail` row, or
+   coarse-grained entry points in the crates, would close it.
+
+## Part 5: flip the kernel and the graph
+
+The package `vesper-resonance` is now port-backed, like `vesper-tensor`:
+its build script always links the Vesper port, and the `vesper-port`
+feature is gone (`vesper-port-divergent` stays). The compiler, vesper-fusion
+and vesper-hybrid already link the seed, `vesper-resonance-seed`, so no
+dependent changes build. The seed now has its own crate root
+(`seed/src/lib.rs`, the #1102 pattern) that includes `../../src/lib.rs` as a
+module and adds the frozen Rust engine beside it:
+
+| Module | Moved to the seed | Package `vesper-resonance` |
+|---|---|---|
+| kernels (`SvfBank::render`, `render_reference`) | `seed/src/engine/kernels.rs` | port only (`vesper/src/kernels.ves`) |
+| graph (`render_builtin_graph`, the built-in source) | `seed/src/engine/pdc.rs` | port only (`vesper/src/graph.ves`) |
+
+The shared source calls `crate::engine::…` under `cfg(not(vesper_port))`,
+so `src/` has no Rust implementation of either module (124 lines moved).
+Bazel builds the package with the port object (`vesper_crate` with the
+port's build script data, as vesper-tensor does), so the separate `:port`
+targets are gone.
+
+### Flip gate
+
+`python3 scripts/ci/flip_gate.py vesper-resonance`
+(`crates/vesper-resonance/flip-gate.toml`; `examples/abba.rs flip-gate
+<workload>` prints the pairs line), cloud Linux x86_64 VM, compiler at
+`main` 2026-11-22:
+
+```
+flip-gate vesper-resonance: PASS (bar: 0 differences, every test, 95% upper <= 1.50x) | tests 1/1 pass | differential 0 differences | ABBA vesper/rust kernel 1.07x [1.02x, 1.13x] n=30; graph 1.07x [1.05x, 1.12x] n=30 | RUSTFLAGS=-C target-cpu=native
+```
+
+**The schedule compiler is not flipped.** With the current compiler and
+the host CPU, the gate measured it at 1.50x [1.45x, 1.53x] (n=30). The upper
+end is over the bar, so its Rust stays in `src/pdc.rs`. In callgrind the
+port runs 1.19x Rust's instructions (118k against 99k per compile of the
+32-node graph); 79k of them are in the one inlined `p_compile` body, so the
+wall-clock gap is mostly that function's spills (gap 3).
+
+### Checks
+
+- `cargo test -p vesper-resonance -p vesper-resonance-seed` (the package
+  now runs every test against the port).
+- `crates/vesper-resonance/port/test-port.sh`: the divergent port fails one
+  test per ported module, and the realtime verifier proves the audio path
+  allocation-free on x86_64 and aarch64.
+- `vesper build --lib` of the port for `aarch64-apple-darwin`,
+  `x86_64-pc-windows-msvc` and `aarch64-unknown-linux-gnu` gives the
+  committed binding, so the macOS and Windows jobs can build the package.
+
+### Kinetic: the colouring, flipped
+
+`abba compare 12 1` (`crates/vesper-kinetic/examples/abba.rs`, host CPU) on
+the same compiler, median port/rust before this part: fastmath 1.42x,
+scene 1.20x, colorer 1.60x, gjk 1.70x, sap 1.84x, morton 2.03x, lbvh
+2.07x, multi-colorer 2.21x, pile-lbvh 2.21x, crmath 2.65x.
+
+**Colouring.** The port ran only 1.11x Rust's instructions on `colorer`,
+but 2.6x its mispredicted branches (cachegrind: 356k against 138k for five
+runs). Nearly all of them were in the comparison sort of the visiting
+order (`@vesper-std/sort` keyed quicksort). `coloring.ves` now packs each
+constraint's `(min, max, index)` into one word when it fits
+(`(min << (bb + nb)) | (max << nb) | index`, which orders as the pair does
+and is unique), and sorts those words with an LSD radix sort that
+ping-pongs between the two halves of a 2n-word key buffer and counts
+digits in the (not yet used) `sorted` buffer. Short inputs (under 256
+constraints) and body counts too wide to pack keep the comparison sort.
+The Rust adapter now lends a key buffer of two words per constraint.
+Mispredicts fell to 100k, under Rust's.
+
+The frozen Rust colourers (`Colorer::color`, `MultiColorer::color`) moved
+to `seed/src/engine/coloring.rs` under a new seed crate root, as in
+Resonance. `tests/port_differential.rs` compares both colourers with the
+seed (visiting order, colours and layers) over 600 cases, from small
+graphs to large ones and from 2 bodies to 4 million.
+
+```
+flip-gate vesper-kinetic: PASS (bar: 0 differences, every test, 95% upper <= 1.50x) | tests 1/1 pass | differential 0 differences on 600 cases | ABBA vesper/rust colorer 0.78x [0.78x, 0.79x] n=30; multi-colorer 1.35x [1.29x, 1.36x] n=30 | RUSTFLAGS=-C target-cpu=native
+```
+
+**Sweep and prune.** `pair_total` and `write_pairs` now read each row's
+bounds once instead of once per candidate: 16% fewer instructions, `sap`
+1.84x to 1.67x (range 1.50-1.92). What is left is the slice header that
+every `try_get` reloads (base and offset, three loads per element read),
+which the code-size lane (#1426) owns.
+
+### Compiler gap found in this part
+
+8. **The inliner moves a cold path's sequence onto the hot path.** If a
+   small callee that holds a sequence is spliced into a caller where only
+   a rare branch reaches it, the caller's every call pays for the
+   sequence: a frame, saves of callee-saved registers, zeroing of the
+   sequence slot, and drop branches on constant `false`. Repro: a package
+   with
+
+   ```vesper
+   fn slow(x: u64) -> u64 {
+       let mut s: ChunkSeq[u64] = ChunkSeq::new[u64]();
+       s.push(x);
+       s.len()
+   }
+
+   pub fn hot(x: u64) -> u64 {
+       if x > 1000000 {
+           return slow(x);
+       }
+       wrapping_add(x, 1)
+   }
+
+   pub fn plain(x: u64) -> u64 {
+       wrapping_add(x, 1)
+   }
+   ```
+
+   `vesper build --lib --lib-name repro` gives `vesper_repro_hot` 74
+   instructions, about 20 of them on the fast path, against 6 for
+   `vesper_repro_plain`. Kinetic's `fastmath_sin` and `fastmath_cos`
+   exports have this shape (a rare correctly rounded branch with an empty
+   `ChunkSeq` cache). On every call they set up a 288-byte frame, save 5
+   registers and zero 7 words, which accounts for much of fastmath's 1.42x.
+   Moving the branch into its own function does not help, because that
+   function is inlined back.
+
 ## What is left
 
-- **Resonance flip** (seed pattern, the compiler links it through
-  `native_verifiers`): the port becomes the default build of
-  `vesper-resonance` and the Rust engine stays in `seed/`. The Rust
+- **Resonance:** flip the schedule compiler once it passes the gate
+  (1.50x), then confine, pid, slab and events (gap 7). The Rust
   `CompiledGraph` over Rust `Box<dyn DspProcessor>` trait objects, the
   Cranelift JIT (`clif.rs`, which goes through `@vesper/cranelift` per the
   plan), the `rtrb` rings (`spsc.rs`) and the denormal registers are not
   ported yet. The SIMD paths are ported (part 3), but they run at 8-48x and
   are bound by gaps 2 and 6.
-- **Kinetic:** `world`/`tile`, `rigid` and `rigid/**`, `soft`,
+- **Kinetic:** speed up fastmath (gap 8), gjk, sap, morton, lbvh and
+  crmath to the bar and flip them, then port `world`/`tile`, `rigid` and `rigid/**`, `soft`,
   `articulation`, `couple`, `diff`, `rigid_diff`, `rollback`, `snapshot`,
   `detfloat`, `simd` (see `port-p3b-kinetic.md`, "Not ported yet"), then the
   speed of the ported modules (1.3-2.8x in P3b).
-- The census row (`scripts/rust-census.py` is in the plan PR #1415, not yet
-  on `main`).
+- The census row in `scripts/rust-census.py` is updated with each part.

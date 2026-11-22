@@ -5,13 +5,18 @@
 // `compile_words` takes one compilation's input (the world, the Place IR and
 // the wasm section; written by `wasm_input` in tests/common/wasm_words.rs)
 // and returns `@vesper/wasm-backend`'s answer, which `outcome` reads back.
-// The hook wraps a module with wit-component in Rust and leaves errors and
-// constructs not ported yet to the Rust backend.
+// `wrap_words` wraps the module into the component with
+// `@vesper/wit-component` (SH5 lane 11, #1334); the hook falls back to
+// Rust's wit-component where it declines. Errors and constructs not
+// ported yet go to the Rust backend.
 
 // @export abi 4
 
 use @vesper/wasm-backend::{
     wasm_backend_compile_bytes
+};
+use @vesper/wit-component::{
+    wit_component_wrap_bytes
 };
 
 // The layout version of `compile_words`; tests/common/wasm_words.rs checks it.
@@ -21,4 +26,11 @@ pub fn format() -> u64 {
 
 pub fn compile_words(in input: Slice[u8]) -> ChunkSeq[u64] {
     wasm_backend_compile_bytes(in input)
+}
+
+// The component for one module: `[world kind, WIT length (u32 LE), WIT,
+// core module]` in, `[0, packed component]` or `[1, reason]` (declined)
+// out (packages/vesper-wit-component/src/lib.ves).
+pub fn wrap_words(in input: Slice[u8]) -> ChunkSeq[u64] {
+    wit_component_wrap_bytes(in input)
 }

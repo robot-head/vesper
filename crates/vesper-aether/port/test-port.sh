@@ -37,3 +37,5 @@ expect pvh_port truncations_and_bit_flips_match
 # hotset: equal indices count as increasing.
 expect hotset_port decode_matches_on_valid_and_mutated_encodings -- runs_match
 expect hotset encoded_form_is_validated -- runs_coalesce_and_split_at_the_batch_size
+# packed: a used descriptor counts as available.
+expect packed_port capture_matches_the_rust_capture
