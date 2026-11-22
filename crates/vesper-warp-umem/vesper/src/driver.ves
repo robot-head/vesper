@@ -1,0 +1,748 @@
+// ---------------------------------------------------------------------------
+// The device handle: the software NIC and, once attached, the
+// application-side driver (src/driver.rs). Locations are codes:
+
+const L_FREE: u64 = 0;
+const L_FILL_POSTED: u64 = 1;
+const L_APP_RX: u64 = 2;
+const L_APP_TX: u64 = 3;
+const L_TX_LIVE: u64 = 4;
+const L_TX_RETIRED: u64 = 5;
+const L_TX_LEAKED: u64 = 6;
+const L_IN_FLIGHT: u64 = 7;
+const L_LEAKED: u64 = 8;
+
+fn loc_of(code: u64) -> DriverLoc {
+    if code == L_FREE {
+        return DriverLoc::Free;
+    }
+    if code == L_FILL_POSTED {
+        return DriverLoc::FillPosted;
+    }
+    if code == L_APP_RX {
+        return DriverLoc::AppRx;
+    }
+    if code == L_APP_TX {
+        return DriverLoc::AppTx;
+    }
+    if code == L_TX_LIVE {
+        return DriverLoc::TxPosted(LeaseMark::Live);
+    }
+    if code == L_TX_RETIRED {
+        return DriverLoc::TxPosted(LeaseMark::Retired);
+    }
+    if code == L_TX_LEAKED {
+        return DriverLoc::TxPosted(LeaseMark::Leaked);
+    }
+    if code == L_IN_FLIGHT {
+        return DriverLoc::InFlight;
+    }
+    DriverLoc::Leaked
+}
+
+fn no_census() -> DriverCensus {
+    DriverCensus {
+        free: 0,
+        fill_posted: 0,
+        app_rx: 0,
+        app_tx: 0,
+        tx_posted: 0,
+        tx_posted_leased: 0,
+        in_flight: 0,
+        leaked: 0
+    }
+}
+
+fn no_driver_stats() -> DriverStats {
+    DriverStats {
+        rx_harvested: 0,
+        rx_rejected: 0,
+        rx_rejected_recycled: 0,
+        tx_submitted: 0,
+        tx_ring_full: 0,
+        completions: 0,
+        completions_invalid: 0,
+        retired: 0,
+        wake_errors: 0,
+        leaks_detected: 0
+    }
+}
+
+struct Device {
+    nic: Nic,
+    attached: bool,
+    table: ChunkSeq[u64],
+    census: DriverCensus,
+    // The free list as a stack: the last element is popped first.
+    free: ChunkSeq[u32],
+    stats: DriverStats,
+    // The auditor's scratch: how often each chunk was seen.
+    seen: ChunkSeq[u8],
+    // The fast audit's scratch: the audit epoch that last claimed each
+    // chunk, so a new audit needs no clearing.
+    stamp: ChunkSeq[u32],
+    epoch: u32
+}
+
+fn bump(c: u32, up: bool) -> u32 {
+    if up {
+        wrapping_add(c, 1)
+    } else {
+        wrapping_sub(c, 1)
+    }
+}
+
+impl Device {
+    fn loc(in self, chunk: u32) -> u64 {
+        at(in self.table, widen_u64(chunk))
+    }
+
+    fn count(inout self, code: u64, up: bool) {
+        if code == L_FREE {
+            self.census.free = bump(self.census.free, up);
+        } else if code == L_FILL_POSTED {
+            self.census.fill_posted = bump(self.census.fill_posted, up);
+        } else if code == L_APP_RX {
+            self.census.app_rx = bump(self.census.app_rx, up);
+        } else if code == L_APP_TX {
+            self.census.app_tx = bump(self.census.app_tx, up);
+        } else if code == L_IN_FLIGHT {
+            self.census.in_flight = bump(self.census.in_flight, up);
+        } else if code == L_LEAKED {
+            self.census.leaked = bump(self.census.leaked, up);
+        } else {
+            self.census.tx_posted = bump(self.census.tx_posted, up);
+            if code == L_TX_LIVE {
+                self.census.tx_posted_leased = bump(self.census.tx_posted_leased, up);
+            }
+        }
+    }
+
+    // Counts are bounded by frame_count <= 2^20, so they never wrap.
+    fn set_loc(inout self, chunk: u32, to: u64) {
+        let from = self.loc(chunk);
+        self.table.try_set(widen_u64(chunk), to);
+        self.count(from, false);
+        self.count(to, true);
+    }
+
+    fn base(in self, chunk: u32) -> u64 {
+        chunk_base(self.nic.config, chunk)
+    }
+
+    fn check_loc(in self, chunk: u32, expected: u64) -> Option[PortError] {
+        if chunk >= self.nic.config.frame_count || self.loc(chunk) != expected {
+            return Option::Some(
+                PortError::WrongLocation {
+                    chunk: chunk
+                }
+            );
+        }
+        Option::None
+    }
+
+    // A window `[offset, offset + len)` inside one chunk.
+    fn check_window(in self, offset: u32, len: u32) -> Option[PortError] {
+        let headroom = self.nic.config.headroom;
+        let frame_size = self.nic.config.frame_size;
+        if offset < headroom {
+            return Option::Some(
+                PortError::HeadroomOverlap {
+                    offset: offset,
+                    headroom: headroom
+                }
+            );
+        }
+        let end = wrapping_add(widen_u64(offset), widen_u64(len));
+        if len > 0 && end <= widen_u64(frame_size) {
+            return Option::None;
+        }
+        Option::Some(
+            PortError::LengthOutOfFrame {
+                offset: offset,
+                len: len,
+                frame_size: frame_size
+            }
+        )
+    }
+
+    // Posts a kernel-bound chunk to the fill ring; falls back to the free
+    // list (unreachable while fill_size >= frame_count).
+    fn post_fill(inout self, chunk: u32, ok: u64, fallback: u64) {
+        let base = self.base(chunk);
+        if self.nic.fill.push_a(base) {
+            self.set_loc(chunk, L_FILL_POSTED);
+            self.nic.note(ok, chunk);
+        } else {
+            self.set_loc(chunk, L_FREE);
+            self.free.push(chunk);
+            self.nic.note(fallback, chunk);
+        }
+    }
+
+    fn release_to_free(inout self, chunk: u32, kind: u64) {
+        self.set_loc(chunk, L_FREE);
+        self.free.push(chunk);
+        self.nic.note(kind, chunk);
+    }
+
+    // Classifies an rx descriptor: `(chunk, offset, len)`, or the reason
+    // and, when the chunk is kernel-owned, the chunk to return.
+    fn classify_rx(in self, d: XdpDesc) -> Result[(u32, u32, u32), (DescError, Option[u32])] {
+        let c = self.nic.config;
+        if d.addr >= self.nic.umem_len {
+            return Result::Err(
+                (
+                    DescError::OutOfUmem {
+                        addr: d.addr
+                    },
+                    Option::None
+                )
+            );
+        }
+        let chunk = wrapping_u32(shr(d.addr, self.nic.shift));
+        if self.loc(chunk) != L_FILL_POSTED {
+            return Result::Err(
+                (
+                    DescError::NotKernelOwned {
+                        chunk: chunk
+                    },
+                    Option::None
+                )
+            );
+        }
+        let offset = wrapping_u32(d.addr & self.nic.frame_mask());
+        if d.options != 0 {
+            return Result::Err(
+                (
+                    DescError::UnsupportedOptions {
+                        options: d.options
+                    },
+                    Option::Some(chunk)
+                )
+            );
+        }
+        if d.len == 0 {
+            return Result::Err((DescError::ZeroLength, Option::Some(chunk)));
+        }
+        if offset < c.headroom {
+            return Result::Err(
+                (
+                    DescError::HeadroomOverlap {
+                        offset: offset,
+                        headroom: c.headroom
+                    },
+                    Option::Some(chunk)
+                )
+            );
+        }
+        let end = wrapping_add(widen_u64(offset), widen_u64(d.len));
+        if end <= widen_u64(c.frame_size) {
+            return Result::Ok((chunk, offset, d.len));
+        }
+        Result::Err(
+            (
+                DescError::OverLength {
+                    offset: offset,
+                    len: d.len,
+                    frame_size: c.frame_size
+                },
+                Option::Some(chunk)
+            )
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The software NIC's API (`SoftNic`).
+
+pub fn soft_nic_new(config: UmemConfig, mode: SoftNicMode) -> Device eff [Fail[PortError]] {
+    match nic_make(config, mode) {
+        Result::Ok(nic) => Device {
+            nic: nic,
+            attached: false,
+            table: ChunkSeq::new[u64](),
+            census: no_census(),
+            free: ChunkSeq::new[u32](),
+            stats: no_driver_stats(),
+            seen: ChunkSeq::new[u8](),
+            stamp: ChunkSeq::new[u32](),
+            epoch: 0
+        },
+        Result::Err(e) => Fail::raise(e),
+    }
+}
+
+pub fn device_enable_trace(inout d: Device) {
+    d.nic.tracing = true;
+}
+
+pub fn device_trace(in d: Device) -> ChunkSeq[u64] {
+    let n = d.nic.trace.len();
+    let mut out: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+    out.extend(in d.nic.trace.as_slice());
+    out
+}
+
+pub fn device_take_trace(inout d: Device) -> ChunkSeq[u64] {
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    swap(inout out, inout d.nic.trace);
+    out
+}
+
+pub fn device_soft_stats(in d: Device) -> SoftNicStats {
+    d.nic.stats
+}
+
+pub fn device_mode(in d: Device) -> SoftNicMode {
+    d.nic.mode
+}
+
+pub fn device_queue_ingress(inout d: Device, in packet: Slice[u8]) {
+    d.nic.ingress_start.push(d.nic.ingress.len());
+    d.nic.ingress_len.push(packet.len());
+    d.nic.ingress.extend(in packet);
+}
+
+pub fn device_inject(inout d: Device, f: Fault) {
+    d.nic.faults.push(fault_word(f));
+}
+
+pub fn device_pending_faults(in d: Device) -> u64 {
+    d.nic.pending_faults()
+}
+
+pub fn device_deliver(inout d: Device, inout mem: Slice[u8], in packet: Slice[u8])
+    -> DeliverOutcome {
+    nic_deliver(inout d.nic, inout mem, in packet)
+}
+
+pub fn device_step(
+    inout d: Device,
+    inout mem: Slice[u8],
+    fill_batch: u32,
+    tx_batch: u32,
+    rx_batch: u32
+) -> SoftStepReport {
+    nic_step(inout d.nic, inout mem, fill_batch, tx_batch, rx_batch)
+}
+
+pub fn device_kernel_census(in d: Device) -> KernelCensus {
+    d.nic.kernel_census()
+}
+
+// Every chunk the device side holds, as `location_index << 32 | chunk`, in
+// the order of `SoftNic::for_each_kernel_chunk`.
+pub fn device_kernel_chunks(in d: Device) -> ChunkSeq[u64] {
+    kernel_chunks(in d.nic)
+}
+
+fn kernel_chunks(in n: Nic) -> ChunkSeq[u64] {
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for i in 0..widen_u64(n.fill.len()) {
+        match n.chunk_of(n.base_of(n.fill.committed_a(wrapping_u32(i)))) {
+            Option::Some(c) => out.push(shl(1, 32) | widen_u64(c)),
+            Option::None => (),
+        }
+    }
+    for i in 0..n.rx_pool.len() {
+        match n.chunk_of(at(in n.rx_pool, i)) {
+            Option::Some(c) => out.push(shl(2, 32) | widen_u64(c)),
+            Option::None => (),
+        }
+    }
+    for i in 0..widen_u64(n.rx.len()) {
+        match n.chunk_of(n.rx.committed_a(wrapping_u32(i))) {
+            Option::Some(c) => out.push(shl(3, 32) | widen_u64(c)),
+            Option::None => (),
+        }
+    }
+    for i in 0..widen_u64(n.tx.len()) {
+        match n.chunk_of(n.tx.committed_a(wrapping_u32(i))) {
+            Option::Some(c) => out.push(shl(6, 32) | widen_u64(c)),
+            Option::None => (),
+        }
+    }
+    let mut j = n.nic_tx_head;
+    loop {
+        if j >= n.nic_tx.len() {
+            break;
+        }
+        match n.chunk_of(at(in n.nic_tx, j)) {
+            Option::Some(c) => out.push(shl(7, 32) | widen_u64(c)),
+            Option::None => (),
+        }
+        j = wrapping_add(j, 1);
+    }
+    for i in 0..widen_u64(n.completion.len()) {
+        match n.chunk_of(n.completion.committed_a(wrapping_u32(i))) {
+            Option::Some(c) => out.push(shl(8, 32) | widen_u64(c)),
+            Option::None => (),
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// The driver (`Xsk`, `XdpNic`).
+
+// `Xsk::new`: the config must be valid and match the device.
+pub fn xsk_attach(inout d: Device, config: UmemConfig) -> Option[PortError] {
+    match config_error(config) {
+        Option::Some(code) => return Option::Some(PortError::InvalidConfig(code)),
+        Option::None => (),
+    }
+    let n = d.nic.config;
+    let same = config
+        .frame_count
+        == n
+        .frame_count
+        && config
+        .frame_size
+        == n
+        .frame_size
+        && config
+        .headroom
+        == n
+        .headroom
+        && config
+        .fill_size
+        == n
+        .fill_size
+        && config
+        .rx_size
+        == n
+        .rx_size
+        && config
+        .tx_size
+        == n
+        .tx_size
+        && config
+        .completion_size
+        == n
+        .completion_size;
+    if !same {
+        return Option::Some(PortError::InvalidConfig(6));
+    }
+    let frames = widen_u64(config.frame_count);
+    d.table = filled(frames, L_FREE);
+    d.census = no_census();
+    d.census.free = config.frame_count;
+    let mut free: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](frames);
+    // Chunk 0 is popped first.
+    let mut i = frames;
+    loop {
+        if i == 0 {
+            break;
+        }
+        i = wrapping_sub(i, 1);
+        free.push(wrapping_u32(i));
+    }
+    d.free = free;
+    d.stats = no_driver_stats();
+    d.attached = true;
+    Option::None
+}
+
+pub fn xsk_census(in d: Device) -> DriverCensus {
+    d.census
+}
+
+pub fn xsk_stats(in d: Device) -> DriverStats {
+    d.stats
+}
+
+pub fn xsk_location(in d: Device, chunk: u32) -> Option[DriverLoc] {
+    if chunk < d.nic.config.frame_count {
+        Option::Some(loc_of(d.loc(chunk)))
+    } else {
+        Option::None
+    }
+}
+
+// Quarantines chunks whose owner was dropped (`reconcile_leaks`); `leaked`
+// lists every chunk the Rust ledger has ever seen dropped, in order.
+pub fn xsk_reconcile(inout d: Device, in leaked: Slice[u32]) {
+    for i in 0..leaked.len() {
+        let chunk = match leaked.try_get(i) {
+            Option::Some(c) => c,
+            Option::None => break,
+        };
+        if chunk >= d.nic.config.frame_count {
+            continue;
+        }
+        let here = d.loc(chunk);
+        let mut kind: u64 = 0;
+        let mut leak = false;
+        if here == L_APP_RX {
+            kind = T_LEAK_RX;
+            leak = true;
+        } else if here == L_APP_TX {
+            kind = T_LEAK_TX;
+            leak = true;
+        } else if here == L_IN_FLIGHT {
+            kind = T_LEAK_IN_FLIGHT;
+            leak = true;
+        } else if here == L_TX_LIVE {
+            // Still on the kernel side; quarantined when it completes.
+            d.set_loc(chunk, L_TX_LEAKED);
+            d.stats.leaks_detected = wrapping_add(d.stats.leaks_detected, 1);
+        }
+        if leak {
+            d.set_loc(chunk, L_LEAKED);
+            d.stats.leaks_detected = wrapping_add(d.stats.leaks_detected, 1);
+            d.nic.note(kind, chunk);
+        }
+    }
+}
+
+// Moves up to `max` free chunks into the fill ring; returns how many.
+pub fn xsk_replenish_fill(inout d: Device, max: u32) -> u32 {
+    let available = wrapping_u32(d.free.len());
+    let wanted = min32(max, available);
+    if wanted == 0 {
+        return 0;
+    }
+    let n = min32(wanted, d.nic.fill.free_entries(wanted));
+    if n == 0 {
+        return 0;
+    }
+    let first = match d.nic.fill.reserve(n) {
+        Option::Some(i) => i,
+        Option::None => return 0,
+    };
+    for i in 0..widen_u64(n) {
+        let chunk = match d.free.pop() {
+            Option::Some(c) => c,
+            Option::None => break,
+        };
+        let base = d.base(chunk);
+        d.nic.fill.write_a(wrapping_add(first, wrapping_u32(i)), base);
+        d.set_loc(chunk, L_FILL_POSTED);
+        d.nic.note(T_REPLENISH, chunk);
+    }
+    d.nic.fill.submit(n);
+    n
+}
+
+// A fresh transmit frame of `len` bytes at the headroom, zeroed:
+// `(chunk, data_offset)`.
+pub fn xsk_alloc_tx(inout d: Device, inout mem: Slice[u8], len: u32)
+    -> Result[(u32, u32), PortError] {
+    let headroom = d.nic.config.headroom;
+    match d.check_window(headroom, len) {
+        Option::Some(e) => return Result::Err(e),
+        Option::None => (),
+    }
+    let chunk = match d.free.pop() {
+        Option::Some(c) => c,
+        Option::None => return Result::Err(PortError::NoFreeFrame),
+    };
+    let addr = wrapping_add(d.base(chunk), widen_u64(headroom));
+    mem.try_fill(addr, wrapping_add(addr, widen_u64(len)), 0);
+    d.set_loc(chunk, L_APP_TX);
+    d.nic.note(T_ALLOC_TX, chunk);
+    Result::Ok((chunk, headroom))
+}
+
+pub fn xsk_abandon_tx(inout d: Device, chunk: u32) -> Option[PortError] {
+    match d.check_loc(chunk, L_APP_TX) {
+        Option::Some(e) => return Option::Some(e),
+        Option::None => (),
+    }
+    d.release_to_free(chunk, T_ABANDON_TX);
+    Option::None
+}
+
+// The UMEM offset of an application-held frame's data, after checking that
+// the driver places `chunk` at `expected` (2 AppRx, 3 AppTx).
+pub fn xsk_frame_addr(in d: Device, chunk: u32, offset: u32, expected: u64)
+    -> Result[u64, PortError] {
+    match d.check_loc(chunk, expected) {
+        Option::Some(e) => Result::Err(e),
+        Option::None => Result::Ok(wrapping_add(d.base(chunk), widen_u64(offset))),
+    }
+}
+
+// Turn-around with a new data offset; bytes of the new window the received
+// packet did not cover are zeroed.
+pub fn xsk_turn_around(
+    inout d: Device,
+    inout mem: Slice[u8],
+    chunk: u32,
+    old_off: u32,
+    old_len: u32,
+    data_offset: u32,
+    tx_len: u32
+) -> Option[PortError] {
+    match d.check_loc(chunk, L_APP_RX) {
+        Option::Some(e) => return Option::Some(e),
+        Option::None => (),
+    }
+    match d.check_window(data_offset, tx_len) {
+        Option::Some(e) => return Option::Some(e),
+        Option::None => (),
+    }
+    let base = d.base(chunk);
+    let new_start = widen_u64(data_offset);
+    let new_end = wrapping_add(new_start, widen_u64(tx_len));
+    let old_start = widen_u64(old_off);
+    let old_end = wrapping_add(old_start, widen_u64(old_len));
+    let lo_end = if new_end < old_start {
+        new_end
+    } else {
+        old_start
+    };
+    if new_start < lo_end {
+        mem.try_fill(wrapping_add(base, new_start), wrapping_add(base, lo_end), 0);
+    }
+    let hi_start = if new_start > old_end {
+        new_start
+    } else {
+        old_end
+    };
+    if hi_start < new_end {
+        mem.try_fill(wrapping_add(base, hi_start), wrapping_add(base, new_end), 0);
+    }
+    d.set_loc(chunk, L_APP_TX);
+    d.nic.note(T_TURN_AROUND, chunk);
+    Option::None
+}
+
+// `harvest_rx`: the next received frame as `(chunk, offset, len)`.
+pub fn xsk_harvest_rx(inout d: Device) -> Result[Option[(u32, u32, u32)], RxRejected] {
+    let desc = match d.nic.rx.pop_desc() {
+        Option::Some(x) => x,
+        Option::None => return Result::Ok(Option::None),
+    };
+    match d.classify_rx(desc) {
+        Result::Ok((chunk, offset, len)) => {
+            d.set_loc(chunk, L_APP_RX);
+            d.nic.note(T_HARVEST, chunk);
+            d.stats.rx_harvested = wrapping_add(d.stats.rx_harvested, 1);
+            Result::Ok(Option::Some((chunk, offset, len)))
+        },
+        Result::Err((reason, chunk)) => {
+            d.stats.rx_rejected = wrapping_add(d.stats.rx_rejected, 1);
+            let mut recycled = false;
+            match chunk {
+                Option::Some(c) => {
+                    d.stats.rx_rejected_recycled = wrapping_add(d.stats.rx_rejected_recycled, 1);
+                    d.post_fill(c, T_HARVEST_REJECT, T_REJECT_TO_FREE);
+                    recycled = true;
+                },
+                Option::None => (),
+            }
+            Result::Err(
+                RxRejected {
+                    reason: reason,
+                    chunk: chunk,
+                    recycled: recycled
+                }
+            )
+        },
+    }
+}
+
+pub fn xsk_recycle(inout d: Device, chunk: u32) -> Option[PortError] {
+    match d.check_loc(chunk, L_APP_RX) {
+        Option::Some(e) => return Option::Some(e),
+        Option::None => (),
+    }
+    d.post_fill(chunk, T_RECYCLE, T_RECYCLE_TO_FREE);
+    Option::None
+}
+
+// `submit_paced_tx`: publishes the frame's descriptor.
+pub fn xsk_submit(inout d: Device, chunk: u32, offset: u32, len: u32, pkt_num_full: u64)
+    -> Option[PortError] {
+    match d.check_loc(chunk, L_APP_TX) {
+        Option::Some(e) => return Option::Some(e),
+        Option::None => (),
+    }
+    if pkt_num_full >= max_packet_number_exclusive() {
+        return Option::Some(
+            PortError::PacketNumberOutOfRange {
+                pn: pkt_num_full
+            }
+        );
+    }
+    let desc = XdpDesc {
+        addr: wrapping_add(d.base(chunk), widen_u64(offset)),
+        len: len,
+        options: 0
+    };
+    if !d.nic.tx.push_desc(desc) {
+        d.stats.tx_ring_full = wrapping_add(d.stats.tx_ring_full, 1);
+        return Option::Some(PortError::TxRingFull);
+    }
+    d.set_loc(chunk, L_TX_LIVE);
+    d.nic.note(T_SUBMIT, chunk);
+    d.stats.tx_submitted = wrapping_add(d.stats.tx_submitted, 1);
+    // The software NIC needs no wake.
+    Option::None
+}
+
+pub fn xsk_harvest_completions(inout d: Device, max: u32) -> CompletionReport {
+    let mut report = CompletionReport {
+        completed_leased: 0,
+        freed: 0,
+        leaked: 0,
+        invalid: 0
+    };
+    let (count, first) = d.nic.completion.peek(max);
+    for i in 0..widen_u64(count) {
+        let addr = d.nic.completion.slot_a(wrapping_add(first, wrapping_u32(i)));
+        let mut valid = false;
+        if addr < d.nic.umem_len {
+            let chunk = wrapping_u32(shr(addr, d.nic.shift));
+            let here = d.loc(chunk);
+            if here == L_TX_LIVE {
+                d.set_loc(chunk, L_IN_FLIGHT);
+                d.nic.note(T_COMPLETE_LEASED, chunk);
+                report.completed_leased = wrapping_add(report.completed_leased, 1);
+                valid = true;
+            } else if here == L_TX_RETIRED {
+                d.release_to_free(chunk, T_COMPLETE_RETIRED);
+                report.freed = wrapping_add(report.freed, 1);
+                valid = true;
+            } else if here == L_TX_LEAKED {
+                d.set_loc(chunk, L_LEAKED);
+                d.nic.note(T_COMPLETE_LEAKED, chunk);
+                report.leaked = wrapping_add(report.leaked, 1);
+                valid = true;
+            }
+        }
+        if valid {
+            d.stats.completions = wrapping_add(d.stats.completions, 1);
+        } else {
+            d.stats.completions_invalid = wrapping_add(d.stats.completions_invalid, 1);
+            report.invalid = wrapping_add(report.invalid, 1);
+        }
+    }
+    if count > 0 {
+        d.nic.completion.release(count);
+    }
+    report
+}
+
+pub fn xsk_retire(inout d: Device, chunk: u32) -> Result[RetireOutcome, PortError] {
+    if chunk < d.nic.config.frame_count {
+        let here = d.loc(chunk);
+        if here == L_IN_FLIGHT {
+            d.release_to_free(chunk, T_RETIRE);
+            d.stats.retired = wrapping_add(d.stats.retired, 1);
+            return Result::Ok(RetireOutcome::Freed);
+        }
+        if here == L_TX_LIVE {
+            d.set_loc(chunk, L_TX_RETIRED);
+            d.stats.retired = wrapping_add(d.stats.retired, 1);
+            return Result::Ok(RetireOutcome::AwaitingCompletion);
+        }
+    }
+    Result::Err(
+        PortError::WrongLocation {
+            chunk: chunk
+        }
+    )
+}

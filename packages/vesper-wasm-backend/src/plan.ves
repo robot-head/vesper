@@ -1,0 +1,1200 @@
+// The uniform value layout (src/wasm_backend/layout.rs) and the static
+// plan (src/wasm_backend/analysis.rs): which function instances the entry
+// reaches, under which type arguments, and what each call targets.
+//
+// Strings the Rust code keys maps by (instance keys such as `f<T=i64>`,
+// evidence keys such as `$effect:Fail`) are interned symbols here; a
+// table indexed by symbol stands for each `BTreeMap<String, _>`, and the
+// few maps the Rust code iterates in key order are sorted by the names'
+// bytes (`cmp_syms`), as `String`'s `Ord` is.
+
+use @vesper/check-data::util::{
+    add,
+    inc,
+    n32,
+    u32_at,
+    u64_at,
+    w
+};
+use @vesper/check-data::names::{
+    Names
+};
+use @vesper/check-data::types::{
+    Types,
+    Vars,
+    default_type,
+    display,
+    substitute,
+    vars_new
+};
+use @vesper/check-data::world::{
+    Adt,
+    Known,
+    Variant,
+    World,
+    set_by_symbol
+};
+use @vesper/check-data::input::{
+    Ctx
+};
+use self::err::{
+    WErr,
+    werr
+};
+use self::ir::{
+    EffInst,
+    Facts,
+    FnInfo,
+    Ir,
+    Sig
+};
+
+const NONE32: u32 = 4294967295;
+const NO_ADT: u32 = 4294967295;
+// err.ves kinds and constructs (constants cannot be imported yet).
+const K_UNSUPPORTED: u8 = 0;
+const K_ENTRY: u8 = 1;
+const K_LIMIT: u8 = 2;
+const K_INVALID: u8 = 3;
+const K_NOT_PORTED: u8 = 5;
+const U_PROJECTION: u8 = 4;
+const U_EXTERNAL_FUNCTION: u8 = 11;
+const U_INTEGER_WIDTH: u8 = 14;
+const U_FLOAT32: u8 = 15;
+
+// check-data's type kinds.
+const K_LIT: u8 = 0;
+const K_NAMED: u8 = 1;
+const K_TUPLE: u8 = 2;
+const K_FN: u8 = 3;
+const K_ROW: u8 = 4;
+const K_INFER: u8 = 5;
+
+// IR opcodes (ir_words.rs `OP_NAMES`).
+const OP_READ: u8 = 2;
+const OP_CALL: u8 = 11;
+const OP_CLOSURE: u8 = 14;
+const OP_HANDLE: u8 = 15;
+
+// Shapes (`layout::Shape`) and scalars (`layout::Scalar`).
+pub const SH_SCALAR: u8 = 0;
+pub const SH_TUPLE: u8 = 1;
+pub const SH_STRUCT: u8 = 2;
+pub const SH_ENUM: u8 = 3;
+pub const SH_STR: u8 = 4;
+pub const SH_OPAQUE: u8 = 5;
+pub const SH_FUNCTION: u8 = 6;
+pub const SC_I64: u8 = 0;
+pub const SC_U64: u8 = 1;
+pub const SC_U32: u8 = 2;
+pub const SC_U8: u8 = 3;
+pub const SC_BOOL: u8 = 4;
+pub const SC_F64: u8 = 5;
+pub const SC_UNIT: u8 = 6;
+pub const SC_NEVER: u8 = 7;
+
+// Roles (`analysis::Role`).
+pub const R_ORDINARY: u8 = 0;
+pub const R_HANDLER_BODY: u8 = 1;
+pub const R_RETURN_CLAUSE: u8 = 2;
+pub const R_OP_CLAUSE: u8 = 3;
+
+// Symbols the backend compares against, interned once.
+pub copy struct Syms {
+    i64_: u32,
+    u64_: u32,
+    u32_: u32,
+    u8_: u32,
+    bool_: u32,
+    f64_: u32,
+    f32_: u32,
+    unit: u32,
+    never: u32,
+    string: u32,
+    i128_: u32,
+    u128_: u32,
+    fail: u32,
+    raise: u32,
+    result: u32,
+    overflow: u32,
+    runtime_error: u32,
+    index_oob: u32,
+    div_zero: u32,
+    stdout: u32,
+    clock: u32,
+    trace: u32,
+    eq: u32,
+    empty: u32,
+}
+
+pub fn syms_new(inout n: Names) -> Syms {
+    Syms {
+        i64_: n.intern(in "i64".as_bytes()),
+        u64_: n.intern(in "u64".as_bytes()),
+        u32_: n.intern(in "u32".as_bytes()),
+        u8_: n.intern(in "u8".as_bytes()),
+        bool_: n.intern(in "bool".as_bytes()),
+        f64_: n.intern(in "f64".as_bytes()),
+        f32_: n.intern(in "f32".as_bytes()),
+        unit: n.intern(in "Unit".as_bytes()),
+        never: n.intern(in "Never".as_bytes()),
+        string: n.intern(in "String".as_bytes()),
+        i128_: n.intern(in "i128".as_bytes()),
+        u128_: n.intern(in "u128".as_bytes()),
+        fail: n.intern(in "Fail".as_bytes()),
+        raise: n.intern(in "raise".as_bytes()),
+        result: n.intern(in "Result".as_bytes()),
+        overflow: n.intern(in "ArithOverflow".as_bytes()),
+        runtime_error: n.intern(in "RuntimeError".as_bytes()),
+        index_oob: n.intern(in "IndexOutOfBounds".as_bytes()),
+        div_zero: n.intern(in "DivisionByZero".as_bytes()),
+        stdout: n.intern(in "Stdout".as_bytes()),
+        clock: n.intern(in "Clock".as_bytes()),
+        trace: n.intern(in "Trace".as_bytes()),
+        eq: n.intern(in "=".as_bytes()),
+        empty: n.intern(in "".as_bytes()),
+    }
+}
+
+// The checker data and the backend's inputs.
+pub struct Cx {
+    names: Names,
+    types: Types,
+    world: World,
+    k: Known,
+    f: Facts,
+    ir: Ir,
+    s: Syms,
+}
+
+pub fn cx_new(sink c: Ctx, sink f: Facts, sink ir: Ir) -> Cx {
+    let Ctx {
+        names,
+        types,
+        world,
+        tmap,
+        nmap
+    }
+    = c;
+    let mut names = names;
+    let s = syms_new(inout names);
+    let k = world.k;
+    Cx {
+        names: names,
+        types: types,
+        world: world,
+        k: k,
+        f: f,
+        ir: ir,
+        s: s,
+    }
+}
+
+// Byte order of two names (`String`'s `Ord`): -1, 0 or 1.
+pub fn cmp_syms(in names: Names, a: u32, b: u32) -> i64 {
+    if a == b {
+        return 0;
+    }
+    let (a0, a1) = (names.start(a), names.end(a));
+    let (b0, b1) = (names.start(b), names.end(b));
+    let la = wrapping_sub(a1, a0);
+    let lb = wrapping_sub(b1, b0);
+    let n = if la < lb {
+        la
+    } else {
+        lb
+    };
+    for i in 0..n {
+        let x = names.byte(a, i);
+        let y = names.byte(b, i);
+        if x < y {
+            return -1;
+        }
+        if x > y {
+            return 1;
+        }
+    }
+    if la < lb {
+        -1
+    } else if la > lb {
+        1
+    } else {
+        0
+    }
+}
+
+// Inserts symbol `x` into the byte-sorted set `set` (no duplicates).
+pub fn sorted_insert(in names: Names, inout set: ChunkSeq[u32], x: u32) {
+    let mut at = set.len();
+    for i in 0..set.len() {
+        let c = cmp_syms(in names, u32_at(in set, i), x);
+        if c == 0 {
+            return;
+        }
+        if c > 0 {
+            at = i;
+            break;
+        }
+    }
+    set.push(x);
+    let mut i = wrapping_sub(set.len(), 1);
+    loop {
+        if i <= at {
+            break;
+        }
+        let prev = u32_at(in set, wrapping_sub(i, 1));
+        let ok = set.try_set(i, prev);
+        i = wrapping_sub(i, 1);
+    }
+    let ok = set.try_set(at, x);
+}
+
+pub fn contains32(in set: ChunkSeq[u32], x: u32) -> bool {
+    for i in 0..set.len() {
+        if u32_at(in set, i) == x {
+            return true;
+        }
+    }
+    false
+}
+
+// ----- layout ------------------------------------------------------------------
+
+// `layout::shape` of a type: the kind, the scalar, and for an ADT its
+// index (fields are read through `variant_field`).
+pub copy struct Shape {
+    kind: u8,
+    scalar: u8,
+    adt: u32,
+    // the defaulted type the shape is of
+    ty: u32,
+}
+
+fn shape_of(kind: u8, scalar: u8, adt: u32, ty: u32) -> Shape {
+    Shape {
+        kind: kind,
+        scalar: scalar,
+        adt: adt,
+        ty: ty
+    }
+}
+
+impl Cx {
+    pub fn default_ty(inout self, t: u32) -> u32 {
+        default_type(inout self.types, t)
+    }
+
+    pub fn subst(inout self, t: u32, in vars: Vars) -> u32 {
+        substitute(inout self.types, t, in vars)
+    }
+
+    // `numeric::is_integer_name`.
+    pub fn is_integer_name(in self, n: u32) -> bool {
+        self.k.is_integer(n) || n == self.s.i128_ || n == self.s.u128_
+    }
+
+    pub fn is_scalar_name(in self, n: u32) -> bool {
+        self.k.is_scalar(n) || n == self.s.i128_ || n == self.s.u128_
+    }
+
+    pub fn shape(inout self, t: u32) -> Shape eff [Fail[WErr]] {
+        let ty = default_type(inout self.types, t);
+        let node = self.types.node(ty);
+        if node.kind == K_NAMED {
+            let n = node.name;
+            let s = self.s;
+            if n == s.i64_ {
+                return shape_of(SH_SCALAR, SC_I64, NO_ADT, ty);
+            }
+            if n == s.u64_ {
+                return shape_of(SH_SCALAR, SC_U64, NO_ADT, ty);
+            }
+            if n == s.u32_ {
+                return shape_of(SH_SCALAR, SC_U32, NO_ADT, ty);
+            }
+            if n == s.u8_ {
+                return shape_of(SH_SCALAR, SC_U8, NO_ADT, ty);
+            }
+            if n == s.bool_ {
+                return shape_of(SH_SCALAR, SC_BOOL, NO_ADT, ty);
+            }
+            if n == s.f64_ {
+                return shape_of(SH_SCALAR, SC_F64, NO_ADT, ty);
+            }
+            if n == s.unit {
+                return shape_of(SH_SCALAR, SC_UNIT, NO_ADT, ty);
+            }
+            if n == s.never {
+                return shape_of(SH_SCALAR, SC_NEVER, NO_ADT, ty);
+            }
+            if n == s.string {
+                return shape_of(SH_STR, 0, NO_ADT, ty);
+            }
+            if n == s.f32_ {
+                Fail::raise(werr(K_UNSUPPORTED, U_FLOAT32, 10));
+            }
+            if self.is_integer_name(n) {
+                Fail::raise(werr(K_UNSUPPORTED, U_INTEGER_WIDTH, 11));
+            }
+            let a = self.world.lookup(n);
+            if a == NO_ADT {
+                return shape_of(SH_OPAQUE, 0, NO_ADT, ty);
+            }
+            let adt = self.world.adt(a);
+            if adt.is_enum {
+                return shape_of(SH_ENUM, 0, a, ty);
+            }
+            return shape_of(SH_STRUCT, 0, a, ty);
+        }
+        if node.kind == K_TUPLE {
+            if node.n == 0 {
+                return shape_of(SH_SCALAR, SC_UNIT, NO_ADT, ty);
+            }
+            return shape_of(SH_TUPLE, 0, NO_ADT, ty);
+        }
+        if node.kind == K_FN {
+            return shape_of(SH_FUNCTION, 0, NO_ADT, ty);
+        }
+        if node.kind == K_LIT {
+            return shape_of(SH_SCALAR, SC_I64, NO_ADT, ty);
+        }
+        shape_of(SH_OPAQUE, 0, NO_ADT, ty)
+    }
+
+    // The number of variants of an ADT shape (a struct has its one, or
+    // none).
+    pub fn variant_count(in self, sh: Shape) -> u64 {
+        w(self.world.adt(sh.adt).vn)
+    }
+
+    pub fn variant(in self, sh: Shape, v: u64) -> Variant {
+        let a = self.world.adt(sh.adt);
+        self.world.variant(add(w(a.va), v))
+    }
+
+    // Field `i` of variant `v` of ADT shape `sh`: its name and its type
+    // under the shape's arguments (substituted, not defaulted).
+    pub fn variant_field(inout self, sh: Shape, v: u64, i: u64) -> (u32, u32) {
+        let a = self.world.adt(sh.adt);
+        let var = self.world.variant(add(w(a.va), v));
+        let f = self.world.field(add(w(var.fa), i));
+        let vars = self.world.vars_of(in self.types, a, sh.ty);
+        let t = substitute(inout self.types, f.ty, in vars);
+        (f.name, t)
+    }
+
+    // The number of fields of variant `v` (a struct's only variant is 0;
+    // a struct without variants has none).
+    pub fn field_count(in self, sh: Shape, v: u64) -> u64 {
+        let a = self.world.adt(sh.adt);
+        if v >= w(a.vn) {
+            return 0;
+        }
+        w(self.world.variant(add(w(a.va), v)).fc)
+    }
+
+    // Element `i` of a tuple type.
+    pub fn tuple_elem(in self, ty: u32, i: u64) -> u32 {
+        self.types.arg(ty, i)
+    }
+
+    pub fn arity(in self, ty: u32) -> u64 {
+        self.types.arity(ty)
+    }
+
+    // `layout::field`: the byte offset and type of field `name` of a tuple
+    // or struct value.
+    pub fn field(inout self, ty: u32, name: u32) -> (u64, u32) eff [Fail[WErr]] {
+        let sh = self.shape(ty);
+        if sh.kind == SH_TUPLE {
+            let i = self.decimal(name);
+            if i == 18446744073709551615 {
+                Fail::raise(werr(K_INVALID, 0, 20));
+            }
+            if i >= self.types.arity(sh.ty) {
+                Fail::raise(werr(K_INVALID, 0, 21));
+            }
+            return (wrapping_mul(8, i), self.types.arg(sh.ty, i));
+        }
+        if sh.kind == SH_STRUCT {
+            let n = self.field_count(sh, 0);
+            for i in 0..n {
+                let (fname, fty) = self.variant_field(sh, 0, i);
+                if fname == name {
+                    return (wrapping_mul(8, i), fty);
+                }
+            }
+            Fail::raise(werr(K_INVALID, 0, 22));
+        }
+        Fail::raise(werr(K_UNSUPPORTED, U_PROJECTION, 23));
+        (0, 0)
+    }
+
+    // The value of decimal name `s` (`str::parse::<usize>`), or u64::MAX.
+    pub fn decimal(in self, s: u32) -> u64 {
+        let n = self.names.size(s);
+        if n == 0 {
+            return 18446744073709551615;
+        }
+        let mut v: u64 = 0;
+        for i in 0..n {
+            let c = self.names.byte(s, i);
+            if c < 48 || c > 57 {
+                return 18446744073709551615;
+            }
+            v = wrapping_add(wrapping_mul(v, 10), widen_u64(wrapping_sub(c, 48)));
+        }
+        v
+    }
+
+    // `layout::slots`: the slot count of a struct or tuple block.
+    pub fn slots(inout self, ty: u32) -> u64 eff [Fail[WErr]] {
+        let sh = self.shape(ty);
+        if sh.kind == SH_TUPLE {
+            return self.types.arity(sh.ty);
+        }
+        if sh.kind == SH_STRUCT {
+            return self.field_count(sh, 0);
+        }
+        Fail::raise(werr(K_INVALID, 0, 24));
+        0
+    }
+
+    // `layout::variant`: (index, is_enum) of `constructor` in the enum
+    // or struct `ty`, and the shape whose variant `index` it is.
+    pub fn variant_of(inout self, ty: u32, constructor: u32)
+        -> (u64, bool, Shape) eff [Fail[WErr]] {
+        let short = self.short_name(constructor);
+        let sh = self.shape(ty);
+        if sh.kind == SH_ENUM {
+            let n = self.variant_count(sh);
+            for i in 0..n {
+                let v = self.variant(sh, i);
+                if self.names_equal(v.name, short) {
+                    return (i, true, sh);
+                }
+            }
+            Fail::raise(werr(K_INVALID, 0, 25));
+        }
+        if sh.kind == SH_STRUCT {
+            return (0, false, sh);
+        }
+        Fail::raise(werr(K_INVALID, 0, 26));
+        (0, false, sh)
+    }
+
+    pub fn names_equal(in self, a: u32, b: u32) -> bool {
+        cmp_syms(in self.names, a, b) == 0
+    }
+
+    // The part of `name` after its last `::` (`rsplit("::").next()`).
+    pub fn short_name(inout self, name: u32) -> u32 {
+        let n = self.names.size(name);
+        let mut cut: u64 = 0;
+        let mut i: u64 = 0;
+        loop {
+            if inc(i) >= n {
+                break;
+            }
+            if self.names.byte(name, i) == 58 && self.names.byte(name, inc(i)) == 58 {
+                cut = add(i, 2);
+            }
+            i = inc(i);
+        }
+        if cut == 0 {
+            return name;
+        }
+        let mut text = ChunkSeq::new[u8]();
+        for k in cut..n {
+            text.push(self.names.byte(name, k));
+        }
+        self.names.intern(in text.as_slice())
+    }
+
+    // The index of field `name` in variant `v` of shape `sh`, or NONE.
+    pub fn field_index(inout self, sh: Shape, v: u64, name: u32) -> u64 {
+        let n = self.field_count(sh, v);
+        let a = self.world.adt(sh.adt);
+        let var = self.world.variant(add(w(a.va), v));
+        for i in 0..n {
+            let f = self.world.field(add(w(var.fa), i));
+            if f.name == name {
+                return i;
+            }
+        }
+        18446744073709551615
+    }
+
+    // The function's signature in the world: a sig index + 1, or 0.
+    pub fn fn_sig(in self, name: u32) -> u64 {
+        self.f.fn_sig_of(name)
+    }
+
+    pub fn sig(in self, name: u32) -> Sig {
+        let s = self.f.fn_sig_of(name);
+        if s == 0 {
+            return self.f.sig(18446744073709551615);
+        }
+        self.f.sig(wrapping_sub(s, 1))
+    }
+
+    // Appends the `Display` of type `t` to `out`.
+    pub fn show(in self, t: u32, inout out: ChunkSeq[u8]) {
+        display(in self.types, in self.names, t, inout out);
+    }
+
+    pub fn write_name(in self, s: u32, inout out: ChunkSeq[u8]) {
+        self.names.write(s, inout out);
+    }
+
+    pub fn intern(inout self, in text: ChunkSeq[u8]) -> u32 {
+        self.names.intern(in text.as_slice())
+    }
+
+    // `mentions_generic` of analysis.rs.
+    pub fn mentions_generic(in self, t: u32) -> bool {
+        let n = self.types.node(t);
+        if n.kind == K_NAMED {
+            if n
+                .n
+                == 0
+                && self
+                .world
+                .lookup(n.name)
+                == NO_ADT
+                && !self
+                .is_scalar_name(n.name)
+                && n
+                .name
+                != self
+                .s
+                .string {
+                return true;
+            }
+            for i in 0..w(n.n) {
+                if self.mentions_generic(self.types.arg(t, i)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        if n.kind == K_TUPLE {
+            for i in 0..w(n.n) {
+                if self.mentions_generic(self.types.arg(t, i)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        n.kind != K_LIT
+    }
+}
+
+// ----- vars ------------------------------------------------------------------
+
+// Type arguments of an instance in name order (`analysis::Vars`, a
+// `BTreeMap<String, Type>`): `keys[i] -> vals[i]`.
+pub struct TVars {
+    keys: ChunkSeq[u32],
+    vals: ChunkSeq[u32],
+}
+
+pub fn tvars_new() -> TVars {
+    TVars {
+        keys: ChunkSeq::new[u32](),
+        vals: ChunkSeq::new[u32]()
+    }
+}
+
+impl TVars {
+    pub fn len(in self) -> u64 {
+        self.keys.len()
+    }
+
+    pub fn key(in self, i: u64) -> u32 {
+        u32_at(in self.keys, i)
+    }
+
+    pub fn val(in self, i: u64) -> u32 {
+        u32_at(in self.vals, i)
+    }
+
+    pub fn get(in self, k: u32) -> u32 {
+        for i in 0..self.keys.len() {
+            if u32_at(in self.keys, i) == k {
+                return u32_at(in self.vals, i);
+            }
+        }
+        NONE32
+    }
+
+    // `insert`, keeping name order.
+    pub fn set(inout self, in names: Names, k: u32, v: u32) {
+        for i in 0..self.keys.len() {
+            if u32_at(in self.keys, i) == k {
+                let ok = self.vals.try_set(i, v);
+                return;
+            }
+        }
+        let mut at = self.keys.len();
+        for i in 0..self.keys.len() {
+            if cmp_syms(in names, u32_at(in self.keys, i), k) > 0 {
+                at = i;
+                break;
+            }
+        }
+        self.keys.push(k);
+        self.vals.push(v);
+        let mut i = wrapping_sub(self.keys.len(), 1);
+        loop {
+            if i <= at {
+                break;
+            }
+            let pk = u32_at(in self.keys, wrapping_sub(i, 1));
+            let pv = u32_at(in self.vals, wrapping_sub(i, 1));
+            let ok = self.keys.try_set(i, pk);
+            let ok2 = self.vals.try_set(i, pv);
+            i = wrapping_sub(i, 1);
+        }
+        let ok = self.keys.try_set(at, k);
+        let ok2 = self.vals.try_set(at, v);
+    }
+
+    // check-data's `Vars` for `substitute`.
+    pub fn vars(in self) -> Vars {
+        let mut v = vars_new();
+        for i in 0..self.keys.len() {
+            v.set(u32_at(in self.keys, i), u32_at(in self.vals, i));
+        }
+        v
+    }
+
+    pub fn dup(in self) -> TVars {
+        let mut out = tvars_new();
+        for i in 0..self.keys.len() {
+            out.keys.push(u32_at(in self.keys, i));
+            out.vals.push(u32_at(in self.vals, i));
+        }
+        out
+    }
+}
+
+// ----- plan ------------------------------------------------------------------
+
+// One reachable function instance (`analysis::Instance` and its role).
+pub copy struct Inst {
+    key: u32,
+    base: u32,
+    // the IR function: index into `Ir`'s functions
+    fi: u64,
+    // type arguments: vkeys/vvals[v0..v0+vn]
+    v0: u64,
+    vn: u64,
+    role: u8,
+    handler: u64,
+    op: u64,
+    // calls[c0..c0+cn]: this instance's direct calls
+    c0: u64,
+    cn: u64,
+    // labels[l0..l0+ln]
+    l0: u64,
+    ln: u64,
+}
+
+pub copy struct CallTarget {
+    dest: u64,
+    callee: u32,
+}
+
+pub struct Plan {
+    insts: ChunkSeq[Inst],
+    vkeys: ChunkSeq[u32],
+    vvals: ChunkSeq[u32],
+    // key symbol -> inst index + 1
+    by_key: ChunkSeq[u32],
+    calls: ChunkSeq[CallTarget],
+    labels: ChunkSeq[u32],
+    // every dynamic evidence key, in byte order
+    keys: ChunkSeq[u32],
+    max_arity: u64,
+    // host capabilities, sorted: 0 Stdout, 1 Clock, 2 Trace
+    host: ChunkSeq[u8],
+}
+
+// A queued instance (BFS of `analysis::plan`).
+copy struct Queued {
+    key: u32,
+    base: u32,
+    v0: u64,
+    vn: u64,
+    role: u8,
+    l0: u64,
+    ln: u64,
+}
+
+impl Plan {
+    pub fn inst(in self, i: u64) -> Inst {
+        match self.insts.try_get(i) {
+            Option::Some(x) => x,
+            Option::None => Inst {
+                key: 0,
+                base: 0,
+                fi: 0,
+                v0: 0,
+                vn: 0,
+                role: 0,
+                handler: 0,
+                op: 0,
+                c0: 0,
+                cn: 0,
+                l0: 0,
+                ln: 0
+            },
+        }
+    }
+
+    // The instance of key `k`: an index + 1, or 0.
+    pub fn find(in self, k: u32) -> u64 {
+        w(u32_at(in self.by_key, w(k)))
+    }
+
+    pub fn vars(in self, i: Inst) -> TVars {
+        let mut out = tvars_new();
+        for k in 0..i.vn {
+            out.keys.push(u32_at(in self.vkeys, add(i.v0, k)));
+            out.vals.push(u32_at(in self.vvals, add(i.v0, k)));
+        }
+        out
+    }
+
+    // The callee key of call `dest` in instance `i`, or NONE32.
+    pub fn callee(in self, i: Inst, dest: u64) -> u32 {
+        for k in 0..i.cn {
+            match self.calls.try_get(add(i.c0, k)) {
+                Option::Some(c) => {
+                    if c.dest == dest {
+                        return c.callee;
+                    }
+                },
+                Option::None => {},
+            }
+        }
+        NONE32
+    }
+
+    pub fn has_label(in self, i: Inst, l: u32) -> bool {
+        for k in 0..i.ln {
+            if u32_at(in self.labels, add(i.l0, k)) == l {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+// `instance_name(base, vars)`: `base`, or `base<k=T,...>`.
+pub fn instance_name(inout cx: Cx, base: u32, in vars: TVars) -> u32 {
+    if vars.len() == 0 {
+        return base;
+    }
+    let mut text = ChunkSeq::new[u8]();
+    cx.write_name(base, inout text);
+    text.push(60);
+    for i in 0..vars.len() {
+        if i > 0 {
+            text.push(44);
+        }
+        cx.write_name(vars.key(i), inout text);
+        text.push(61);
+        cx.show(vars.val(i), inout text);
+    }
+    text.push(62);
+    cx.intern(in text)
+}
+
+// `call_vars`: the type arguments of the call at span (s0, s1) to
+// `callee` with explicit types `explicit` inside an instance with `outer`
+// arguments, when all are concrete (else none).
+fn call_vars(
+    inout cx: Cx,
+    callee: u32,
+    s0: u64,
+    s1: u64,
+    in explicit: ChunkSeq[u32],
+    in outer: TVars
+) -> TVars {
+    let mut out = tvars_new();
+    let fs = cx.fn_sig(callee);
+    if fs == 0 {
+        return out;
+    }
+    let sig = cx.f.sig(wrapping_sub(fs, 1));
+    let mut all_rows = true;
+    for g in 0..sig.gn {
+        if !cx.f.gen(add(sig.g0, g)).row {
+            all_rows = false;
+        }
+    }
+    if all_rows {
+        return out;
+    }
+    let ov = outer.vars();
+    let mut vars = tvars_new();
+    let ci = cx.f.call_at(s0, s1);
+    if ci < cx.f.calls.len() {
+        let c = cx.f.call(ci);
+        for k in 0..c.vn {
+            let p = cx.f.pair(add(c.v0, k));
+            let t = cx.subst(p.ty, in ov);
+            vars.set(in cx.names, p.name, t);
+        }
+    }
+    let n = if sig.gn < explicit.len() {
+        sig.gn
+    } else {
+        explicit.len()
+    };
+    for g in 0..n {
+        let gr = cx.f.gen(add(sig.g0, g));
+        if !gr.row && vars.get(gr.name) == NONE32 {
+            let t = cx.subst(u32_at(in explicit, g), in ov);
+            vars.set(in cx.names, gr.name, t);
+        }
+    }
+    for g in 0..sig.gn {
+        let gr = cx.f.gen(add(sig.g0, g));
+        if gr.row {
+            continue;
+        }
+        let t = vars.get(gr.name);
+        if t == NONE32 || cx.mentions_generic(t) {
+            return tvars_new();
+        }
+        let d = cx.default_ty(t);
+        out.set(in cx.names, gr.name, d);
+    }
+    out
+}
+
+// The labels a function's own effect row binds (`eff [l: E]`).
+fn row_labels(inout cx: Cx, inout out: ChunkSeq[u32], base: u32) {
+    let fs = cx.fn_sig(base);
+    if fs == 0 {
+        return;
+    }
+    let sig = cx.f.sig(wrapping_sub(fs, 1));
+    for i in 0..sig.en {
+        let e = cx.f.eff(add(sig.e0, i));
+        if e.label != NONE32 && cx.names.byte(e.label, 0) != 36 {
+            sorted_insert(in cx.names, inout out, e.label);
+        }
+    }
+}
+
+// `host::capabilities`: the host capabilities the entry declares.
+fn capabilities(inout cx: Cx, inout out: ChunkSeq[u8], entry: u32) eff [Fail[WErr]] {
+    let fs = cx.fn_sig(entry);
+    if fs == 0 {
+        Fail::raise(werr(K_ENTRY, 0, 30));
+    }
+    let sig = cx.f.sig(wrapping_sub(fs, 1));
+    if sig.tail != NONE32 {
+        Fail::raise(werr(K_ENTRY, 0, 31));
+    }
+    for i in 0..sig.en {
+        let e = cx.f.eff(add(sig.e0, i));
+        if cx.f.is_capability(e.name) {
+            continue;
+        }
+        if e.name == cx.s.stdout || e.name == cx.s.clock || e.name == cx.s.trace {
+            // The WASI host frames are lowered in part 2 of the port.
+            Fail::raise(werr(K_NOT_PORTED, 0, 32));
+        }
+        Fail::raise(werr(K_ENTRY, 0, 33));
+    }
+}
+
+// The names of `ir` function `fi`'s first `n` parameters equal
+// `caps[c0..c0+n]` (`check_prefix`).
+fn check_prefix(in cx: Cx, fi: u64, in caps: ChunkSeq[u32]) eff [Fail[WErr]] {
+    let f = cx.ir.info(fi);
+    if f.pn < caps.len() {
+        Fail::raise(werr(K_INVALID, 0, 34));
+    }
+    for i in 0..caps.len() {
+        if cx.ir.param(add(f.p0, i)).name != u32_at(in caps, i) {
+            Fail::raise(werr(K_INVALID, 0, 35));
+        }
+    }
+}
+
+// The alias of `name` in an instruction's alias pairs `ops[a..a+2n]`
+// (closure and handler `aliases`), or NONE32.
+pub fn alias_of(in cx: Cx, a: u64, n: u64, name: u32) -> u32 {
+    for i in 0..n {
+        let at = add(a, wrapping_mul(i, 2));
+        if n32(cx.ir.word(at)) == name {
+            return n32(cx.ir.word(inc(at)));
+        }
+    }
+    NONE32
+}
+
+// `analysis::captures`: the free names (`free[f0..f0+fc]`, sorted) that
+// alias a visible local of the enclosing function.
+pub fn captures(in cx: Cx, f0: u64, fc: u64, a: u64, n: u64, outer: FnInfo) -> ChunkSeq[u32] {
+    let mut out = ChunkSeq::new[u32]();
+    for i in 0..fc {
+        let name = cx.f.free_at(add(f0, i));
+        let s = alias_of(in cx, a, n, name);
+        if s != NONE32 && cx.ir.has_local(outer, s) {
+            out.push(name);
+        }
+    }
+    out
+}
+
+// The closure facts of a `closure` instruction at `ops[at]`: its nested
+// function name, and the aliases' range (ops index, pair count).
+pub fn closure_operands(in cx: Cx, at: u64) -> (u64, u64, u64) {
+    // pool index, aliases n, n pairs, moves n, n pairs
+    let pool = cx.ir.word(at);
+    let n = cx.ir.word(inc(at));
+    (pool, add(at, 2), n)
+}
+
+pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
+    let entry = cx.f.entry;
+    let mut p = Plan {
+        insts: ChunkSeq::new[Inst](),
+        vkeys: ChunkSeq::new[u32](),
+        vvals: ChunkSeq::new[u32](),
+        by_key: ChunkSeq::new[u32](),
+        calls: ChunkSeq::new[CallTarget](),
+        labels: ChunkSeq::new[u32](),
+        keys: ChunkSeq::new[u32](),
+        max_arity: 0,
+        host: ChunkSeq::new[u8](),
+    };
+    capabilities(inout cx, inout p.host, entry);
+    let mut arity: u64 = 0;
+    for d in 0..cx.f.decls.len() {
+        let decl = cx.f.decl(d);
+        for o in 0..decl.on {
+            let sig = cx.f.sig(cx.f.op(add(decl.o0, o)).sig);
+            if sig.pn > arity {
+                arity = sig.pn;
+            }
+        }
+    }
+    if arity < 1 {
+        arity = 1;
+    }
+    p.max_arity = arity;
+    // the queue: rows, their vars and labels in side tables
+    let mut queue = ChunkSeq::new[Queued]();
+    let mut qkeys = ChunkSeq::new[u32]();
+    let mut qvals = ChunkSeq::new[u32]();
+    let mut qlabels = ChunkSeq::new[u32]();
+    let mut l = ChunkSeq::new[u32]();
+    row_labels(inout cx, inout l, entry);
+    let l0 = qlabels.len();
+    for i in 0..l.len() {
+        qlabels.push(u32_at(in l, i));
+    }
+    queue
+        .push(
+        Queued {
+            key: entry,
+            base: entry,
+            v0: 0,
+            vn: 0,
+            role: R_ORDINARY,
+            l0: l0,
+            ln: l.len()
+        }
+    );
+    let mut seen = ChunkSeq::new[u32]();
+    let mut head: u64 = 0;
+    loop {
+        if head >= queue.len() {
+            break;
+        }
+        let q = match queue.try_get(head) {
+            Option::Some(x) => x,
+            Option::None => Queued {
+                key: 0,
+                base: 0,
+                v0: 0,
+                vn: 0,
+                role: 0,
+                l0: 0,
+                ln: 0
+            },
+        };
+        head = inc(head);
+        if u32_at(in seen, w(q.key)) != 0 {
+            continue;
+        }
+        set_by_symbol(inout seen, q.key, 1);
+        if p.insts.len() >= cx.f.max_functions {
+            Fail::raise(werr(K_LIMIT, 0, 40));
+        }
+        let found = cx.ir.find(q.base);
+        if found == 0 {
+            Fail::raise(werr(K_UNSUPPORTED, U_EXTERNAL_FUNCTION, 41));
+        }
+        let fi = wrapping_sub(found, 1);
+        let info = cx.ir.info(fi);
+        let mut vars = tvars_new();
+        for k in 0..q.vn {
+            vars.keys.push(u32_at(in qkeys, add(q.v0, k)));
+            vars.vals.push(u32_at(in qvals, add(q.v0, k)));
+        }
+        let v0 = p.vkeys.len();
+        for k in 0..vars.len() {
+            p.vkeys.push(vars.key(k));
+            p.vvals.push(vars.val(k));
+        }
+        let pl0 = p.labels.len();
+        for k in 0..q.ln {
+            p.labels.push(u32_at(in qlabels, add(q.l0, k)));
+        }
+        let c0 = p.calls.len();
+        let row = cx.ir.p.function(fi);
+        for bi in 0..row.bc {
+            let blk = cx.ir.p.block(add(row.b0, bi));
+            for ii in 0..blk.ic {
+                let ins = cx.ir.p.inst(add(blk.i0, ii));
+                if ins.op == OP_CALL {
+                    let callee = n32(cx.ir.word(ins.a));
+                    if cx.ir.find(callee) == 0 {
+                        continue;
+                    }
+                    // callee, args (n, n x 4), types (n, ...), capability
+                    let na = cx.ir.word(inc(ins.a));
+                    let tat = add(add(ins.a, 2), wrapping_mul(na, 4));
+                    let nt = cx.ir.word(tat);
+                    let mut explicit = ChunkSeq::new[u32]();
+                    for k in 0..nt {
+                        explicit.push(n32(cx.ir.word(add(inc(tat), k))));
+                    }
+                    let cv = call_vars(inout cx, callee, ins.s0, ins.s1, in explicit, in vars);
+                    let key = instance_name(inout cx, callee, in cv);
+                    p
+                        .calls
+                        .push(
+                        CallTarget {
+                            dest: widen_u64(ins.dest),
+                            callee: key
+                        }
+                    );
+                    let mut ls = ChunkSeq::new[u32]();
+                    row_labels(inout cx, inout ls, callee);
+                    let qv0 = qkeys.len();
+                    for k in 0..cv.len() {
+                        qkeys.push(cv.key(k));
+                        qvals.push(cv.val(k));
+                    }
+                    let ql0 = qlabels.len();
+                    for k in 0..ls.len() {
+                        qlabels.push(u32_at(in ls, k));
+                    }
+                    queue
+                        .push(
+                        Queued {
+                            key: key,
+                            base: callee,
+                            v0: qv0,
+                            vn: cv.len(),
+                            role: R_ORDINARY,
+                            l0: ql0,
+                            ln: ls.len()
+                        }
+                    );
+                } else if ins.op == OP_CLOSURE {
+                    let (pool, aa, an) = closure_operands(in cx, ins.a);
+                    let fact = cx.f.expr(pool);
+                    if fact.kind != 1 {
+                        Fail::raise(werr(K_INVALID, 0, 42));
+                    }
+                    let caps = captures(in cx, fact.f0, fact.fc, aa, an, info);
+                    let nf = cx.ir.find(fact.fn_);
+                    if nf == 0 {
+                        Fail::raise(werr(K_INVALID, 0, 43));
+                    }
+                    check_prefix(in cx, wrapping_sub(nf, 1), in caps);
+                    let key = instance_name(inout cx, fact.fn_, in vars);
+                    let qv0 = qkeys.len();
+                    for k in 0..vars.len() {
+                        qkeys.push(vars.key(k));
+                        qvals.push(vars.val(k));
+                    }
+                    let ql0 = qlabels.len();
+                    for k in 0..q.ln {
+                        qlabels.push(u32_at(in qlabels, add(q.l0, k)));
+                    }
+                    queue
+                        .push(
+                        Queued {
+                            key: key,
+                            base: fact.fn_,
+                            v0: qv0,
+                            vn: vars.len(),
+                            role: R_ORDINARY,
+                            l0: ql0,
+                            ln: q.ln
+                        }
+                    );
+                } else if ins.op == OP_READ {
+                    let root = n32(cx.ir.word(ins.a));
+                    let path = cx.ir.word(inc(ins.a));
+                    if path == 0 && !cx.ir.has_local(info, root) && cx.ir.find(root) != 0 {
+                        let mut ls = ChunkSeq::new[u32]();
+                        row_labels(inout cx, inout ls, root);
+                        let ql0 = qlabels.len();
+                        for k in 0..ls.len() {
+                            qlabels.push(u32_at(in ls, k));
+                        }
+                        queue
+                            .push(
+                            Queued {
+                                key: root,
+                                base: root,
+                                v0: 0,
+                                vn: 0,
+                                role: R_ORDINARY,
+                                l0: ql0,
+                                ln: ls.len()
+                            }
+                        );
+                    }
+                } else if ins.op == OP_HANDLE {
+                    // Handlers are lowered in part 2 of the port.
+                    Fail::raise(werr(K_NOT_PORTED, 0, 44));
+                }
+            }
+        }
+        let i = p.insts.len();
+        p
+            .insts
+            .push(
+            Inst {
+                key: q.key,
+                base: q.base,
+                fi: fi,
+                v0: v0,
+                vn: vars.len(),
+                role: q.role,
+                handler: 0,
+                op: 0,
+                c0: c0,
+                cn: wrapping_sub(p.calls.len(), c0),
+                l0: pl0,
+                ln: q.ln
+            }
+        );
+        set_by_symbol(inout p.by_key, q.key, n32(inc(i)));
+    }
+    p
+}

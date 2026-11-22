@@ -1,0 +1,687 @@
+// Module cbor of @vesper/aegis (see lib.ves): the CBOR decoder behind
+// src/cca.rs and src/corim.rs (`decode_value`). It accepts exactly what
+// ciborium 0.2's `Value` deserializer accepts and gives the same value:
+//
+// - integers of any width in the header, minimal or not;
+// - byte and text strings of definite length, or indefinite strings whose
+//   chunks are strings of the same major type, indefinite chunks nested
+//   in them included; each text chunk is valid UTF-8 on its own;
+// - arrays, maps and tags nested at most 256 deep;
+// - tags 2 and 3 over a definite byte string of at most 16 bytes are
+//   bignums: an integer when it fits in 64 bits, otherwise the tag over
+//   its minimal big-endian bytes; a negative bignum of 2^127 or more
+//   fails;
+// - simple values 20 to 23 (false, true, null, undefined; undefined reads
+//   as null) in the short or the one-byte form, every other one failing;
+// - floats of 16, 32 or 64 bits, widened to 64 bits as `half` and the
+//   hardware widen them.
+//
+// The value is written to `w` in preorder after the word count `w[0]`
+// (see reader::put), one node per item:
+//
+//   K_UINT n | K_NINT n (the integer -1 - n) | K_FLOAT bits | K_BOOL b |
+//   K_NULL 0 | K_BYTES k (off len)*k | K_TEXT k (off len)*k (a string's
+//   chunks, as offsets into the input) | K_ARRAY n, then n items |
+//   K_MAP n, then n key-value pairs | K_TAG t, then one item |
+//   K_BIGNUM t hi lo (tag t over the minimal bytes of hi:lo).
+//
+// `st` is the decoder's stack, STACK_WORDS words per open array, map or
+// tag. `decode` returns the bytes the item used; the caller decides what
+// trailing bytes mean.
+use self::AErr;
+use self::reader::put;
+
+pub const K_UINT: u64 = 0;
+pub const K_NINT: u64 = 1;
+pub const K_BYTES: u64 = 2;
+pub const K_TEXT: u64 = 3;
+pub const K_ARRAY: u64 = 4;
+pub const K_MAP: u64 = 5;
+pub const K_TAG: u64 = 6;
+pub const K_FLOAT: u64 = 7;
+pub const K_BOOL: u64 = 8;
+pub const K_NULL: u64 = 9;
+pub const K_BIGNUM: u64 = 10;
+
+// Major types.
+const M_BYTES: u64 = 2;
+const M_TEXT: u64 = 3;
+const M_ARRAY: u64 = 4;
+const M_MAP: u64 = 5;
+const M_TAG: u64 = 6;
+const M_OTHER: u64 = 7;
+// Additional information: the value follows in 1, 2, 4 or 8 bytes; 28 to
+// 30 are reserved; 31 is an indefinite length (or a break in major 7).
+const AI_ONE: u64 = 24;
+const AI_TWO: u64 = 25;
+const AI_FOUR: u64 = 26;
+const AI_EIGHT: u64 = 27;
+const AI_INDEFINITE: u64 = 31;
+const SIMPLE_FALSE: u64 = 20;
+const SIMPLE_TRUE: u64 = 21;
+const SIMPLE_NULL: u64 = 22;
+const SIMPLE_UNDEFINED: u64 = 23;
+const TAG_BIGPOS: u64 = 2;
+const TAG_BIGNEG: u64 = 3;
+const BIGNUM_MAX_BYTES: u64 = 16;
+const HIGH_BIT: u64 = 9223372036854775808;
+// ciborium's recursion limit.
+const MAX_DEPTH: u64 = 256;
+// A stack entry: items still expected (INDEFINITE until a break), the
+// word index of the node's count, items seen, and the node's kind.
+pub const STACK_WORDS: u64 = 4;
+const S_LEFT: u64 = 0;
+const S_SLOT: u64 = 1;
+const S_SEEN: u64 = 2;
+const S_KIND: u64 = 3;
+const INDEFINITE: u64 = 18446744073709551615;
+
+// Float widening.
+const F16_SIGN: u64 = 32768;
+const F16_EXP: u64 = 31744;
+const F16_MAN: u64 = 1023;
+const F32_SIGN: u64 = 2147483648;
+const F32_EXP: u64 = 2139095040;
+const F32_MAN: u64 = 8388607;
+const F64_EXP: u64 = 9218868437227405312;
+const F64_QUIET: u64 = 2251799813685248;
+const F64_MAN: u64 = 4503599627370495;
+// The f64 exponent bias less the f16 and f32 ones.
+const F16_REBIAS: u64 = 1008;
+const F32_REBIAS: u64 = 896;
+
+// ParseError::Cbor (kind 5): `field` indexes CBOR_FIELDS and `a`
+// CBOR_REASONS of src/port.rs. A malformed item is reported with the
+// field WHAT, the item the caller is decoding.
+pub const K_CBOR_ERROR: u64 = 5;
+pub const WHAT: u64 = 1000;
+pub const R_MALFORMED: u64 = 0;
+pub const R_TRAILING: u64 = 1;
+
+pub fn cbor_err(field: u64, reason: u64) -> Never eff [Fail[AErr]] {
+    Fail::raise(
+        AErr {
+            kind: K_CBOR_ERROR,
+            format: 0,
+            field: field,
+            a: reason,
+            b: 0
+        }
+    )
+}
+
+// A failed decode: every CBOR error is one error to the caller.
+fn bad() -> Never eff [Fail[AErr]] {
+    cbor_err(WHAT, R_MALFORMED)
+}
+
+fn byte(in b: Slice[u8], i: u64) -> u64 eff [Fail[AErr]] {
+    match b.try_get(i) {
+        Option::Some(x) => widen_u64(x),
+        Option::None => bad(),
+    }
+}
+
+// An item's header: its major type, additional information and argument.
+copy struct Head {
+    major: u64,
+    ai: u64,
+    arg: u64,
+    end: u64
+}
+
+// The header at `p`; reserved additional information fails.
+fn head(in b: Slice[u8], p: u64) -> Head eff [Fail[AErr]] {
+    let first = byte(in b, p);
+    let ai = first & 31;
+    let at = wrapping_add(p, 1);
+    let mut arg = ai;
+    let mut end = at;
+    if ai == AI_ONE {
+        arg = byte(in b, at);
+        end = wrapping_add(at, 1);
+    } else if ai == AI_TWO {
+        arg = match b.try_read_u16_be(at) {
+            Option::Some(v) => widen_u64(v),
+            Option::None => bad(),
+        };
+        end = wrapping_add(at, 2);
+    } else if ai == AI_FOUR {
+        arg = match b.try_read_u32_be(at) {
+            Option::Some(v) => widen_u64(v),
+            Option::None => bad(),
+        };
+        end = wrapping_add(at, 4);
+    } else if ai == AI_EIGHT {
+        arg = match b.try_read_u64_be(at) {
+            Option::Some(v) => v,
+            Option::None => bad(),
+        };
+        end = wrapping_add(at, 8);
+    } else if ai > AI_EIGHT && ai < AI_INDEFINITE {
+        bad();
+    }
+    Head {
+        major: first >> 5,
+        ai: ai,
+        arg: arg,
+        end: end
+    }
+}
+
+// The end of `n` bytes at `p`, failing past the input.
+fn span(in b: Slice[u8], p: u64, n: u64) -> u64 eff [Fail[AErr]] {
+    if n > wrapping_sub(b.len(), p) {
+        bad();
+    }
+    wrapping_add(p, n)
+}
+
+fn cont(in t: Slice[u8], p: u64, to: u64) -> bool {
+    if p >= to {
+        return false;
+    }
+    match t.try_get(p) {
+        Option::Some(x) => {
+            let c = widen_u64(x);
+            c >= 128 && c <= 191
+        },
+        Option::None => false,
+    }
+}
+
+fn in_range(in t: Slice[u8], p: u64, to: u64, lo: u64, hi: u64) -> bool {
+    if p >= to {
+        return false;
+    }
+    match t.try_get(p) {
+        Option::Some(x) => {
+            let c = widen_u64(x);
+            c >= lo && c <= hi
+        },
+        Option::None => false,
+    }
+}
+
+// Whether `t[from..to]` is UTF-8 (RFC 3629, as `core::str::from_utf8`).
+fn utf8(in t: Slice[u8], from: u64, to: u64) -> bool {
+    let mut p = from;
+    loop {
+        if p >= to {
+            return true;
+        }
+        let c = match t.try_get(p) {
+            Option::Some(x) => widen_u64(x),
+            Option::None => return false,
+        };
+        if c < 128 {
+            p = wrapping_add(p, 1);
+        } else if c >= 194 && c <= 223 {
+            if !cont(in t, wrapping_add(p, 1), to) {
+                return false;
+            }
+            p = wrapping_add(p, 2);
+        } else if c >= 224 && c <= 239 {
+            let ok1 = if c == 224 {
+                in_range(in t, wrapping_add(p, 1), to, 160, 191)
+            } else if c == 237 {
+                in_range(in t, wrapping_add(p, 1), to, 128, 159)
+            } else {
+                cont(in t, wrapping_add(p, 1), to)
+            };
+            if !ok1 || !cont(in t, wrapping_add(p, 2), to) {
+                return false;
+            }
+            p = wrapping_add(p, 3);
+        } else if c >= 240 && c <= 244 {
+            let ok1 = if c == 240 {
+                in_range(in t, wrapping_add(p, 1), to, 144, 191)
+            } else if c == 244 {
+                in_range(in t, wrapping_add(p, 1), to, 128, 143)
+            } else {
+                cont(in t, wrapping_add(p, 1), to)
+            };
+            if !ok1 || !cont(in t, wrapping_add(p, 2), to) || !cont(in t, wrapping_add(p, 3), to) {
+                return false;
+            }
+            p = wrapping_add(p, 4);
+        } else {
+            return false;
+        }
+    }
+}
+
+// The bits of a 16-bit float widened to 64 (half's f16_to_f64).
+fn widen_f16(h: u64) -> u64 {
+    let sign = (h & F16_SIGN) << 48;
+    let exp = h & F16_EXP;
+    let man = h & F16_MAN;
+    if h & 32767 == 0 {
+        return sign;
+    }
+    if exp == F16_EXP {
+        if man == 0 {
+            return sign | F64_EXP;
+        }
+        return sign | F64_EXP | F64_QUIET | (man << 42);
+    }
+    if exp == 0 {
+        // Subnormal: normalize. `e` is how far the top mantissa bit sits
+        // below bit 9.
+        let mut e: u64 = 0;
+        let mut m = man;
+        loop {
+            if m & 512 != 0 {
+                break;
+            }
+            m = m << 1;
+            e = wrapping_add(e, 1);
+        }
+        let exp64 = wrapping_sub(F16_REBIAS, e) << 52;
+        return sign | exp64 | (wrapping_shl_u64(man, wrapping_u32(wrapping_add(43, e))) & F64_MAN);
+    }
+    sign | (wrapping_add(exp >> 10, F16_REBIAS) << 52) | (man << 42)
+}
+
+// The bits of a 32-bit float widened to 64 (`f32 as f64` on x86-64 and
+// AArch64: exact, with a signaling NaN quieted).
+fn widen_f32(f: u64) -> u64 {
+    let sign = (f & F32_SIGN) << 32;
+    let exp = f & F32_EXP;
+    let man = f & F32_MAN;
+    if exp == F32_EXP {
+        if man == 0 {
+            return sign | F64_EXP;
+        }
+        return sign | F64_EXP | F64_QUIET | (man << 29);
+    }
+    if exp == 0 {
+        if man == 0 {
+            return sign;
+        }
+        let mut e: u64 = 0;
+        let mut m = man;
+        loop {
+            if m & 4194304 != 0 {
+                break;
+            }
+            m = m << 1;
+            e = wrapping_add(e, 1);
+        }
+        let exp64 = wrapping_sub(F32_REBIAS, e) << 52;
+        return sign | exp64 | (wrapping_shl_u64(man, wrapping_u32(wrapping_add(30, e))) & F64_MAN);
+    }
+    sign | (wrapping_add(exp >> 23, F32_REBIAS) << 52) | (man << 29)
+}
+
+fn st_get(in st: Slice[u64], depth: u64, field: u64) -> u64 {
+    match st.try_get(wrapping_add(wrapping_mul(wrapping_sub(depth, 1), STACK_WORDS), field)) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn st_set(inout st: Slice[u64], depth: u64, field: u64, v: u64) {
+    st.try_set(wrapping_add(wrapping_mul(wrapping_sub(depth, 1), STACK_WORDS), field), v);
+}
+
+// The index the next `put` writes.
+fn next_slot(in w: Slice[u64]) -> u64 {
+    match w.try_get(0) {
+        Option::Some(n) => wrapping_add(n, 1),
+        Option::None => 1,
+    }
+}
+
+// A string of major type `major` whose header is `h`: its chunks.
+fn string(in b: Slice[u8], h: Head, inout w: Slice[u64]) -> u64 eff [Fail[AErr]] {
+    let kind = if h.major == M_TEXT {
+        K_TEXT
+    } else {
+        K_BYTES
+    };
+    put(inout w, kind);
+    if h.ai != AI_INDEFINITE {
+        let end = span(in b, h.end, h.arg);
+        if kind == K_TEXT && !utf8(in b, h.end, end) {
+            bad();
+        }
+        put(inout w, 1);
+        put(inout w, h.end);
+        put(inout w, h.arg);
+        return end;
+    }
+    let slot = next_slot(in w);
+    put(inout w, 0);
+    let mut chunks = 0;
+    let mut nested = 1;
+    let mut p = h.end;
+    loop {
+        let c = head(in b, p);
+        if c.major == M_OTHER && c.ai == AI_INDEFINITE {
+            p = c.end;
+            if nested == 1 {
+                break;
+            }
+            nested = wrapping_sub(nested, 1);
+        } else if c.major != h.major {
+            bad();
+        } else if c.ai == AI_INDEFINITE {
+            nested = wrapping_add(nested, 1);
+            p = c.end;
+        } else {
+            let end = span(in b, c.end, c.arg);
+            if kind == K_TEXT && !utf8(in b, c.end, end) {
+                bad();
+            }
+            put(inout w, c.end);
+            put(inout w, c.arg);
+            chunks = wrapping_add(chunks, 1);
+            p = end;
+        }
+    }
+    w.try_set(slot, chunks);
+    p
+}
+
+// A bignum: tag 2 or 3 over the definite byte string `h` of at most 16
+// bytes.
+fn bignum(in b: Slice[u8], tag: u64, h: Head, inout w: Slice[u64]) -> u64 eff [Fail[AErr]] {
+    let end = span(in b, h.end, h.arg);
+    let mut hi = 0;
+    let mut lo = 0;
+    let mut i = h.end;
+    loop {
+        if i >= end {
+            break;
+        }
+        hi = (hi << 8) | (lo >> 56);
+        lo = (lo << 8) | byte(in b, i);
+        i = wrapping_add(i, 1);
+    }
+    if tag == TAG_BIGNEG && hi & HIGH_BIT != 0 {
+        bad();
+    }
+    if hi == 0 {
+        put(
+            inout w,
+            if tag == TAG_BIGNEG {
+                K_NINT
+            } else {
+                K_UINT
+            }
+        );
+        put(inout w, lo);
+    } else {
+        put(inout w, K_BIGNUM);
+        put(inout w, tag);
+        put(inout w, hi);
+        put(inout w, lo);
+    }
+    end
+}
+
+// Decode one item at the start of `b` into `w`; the bytes it used.
+pub fn decode(in b: Slice[u8], inout w: Slice[u64], inout st: Slice[u64]) -> u64 eff [Fail[AErr]] {
+    let n = b.len();
+    let mut p = 0;
+    let mut depth = 0;
+    let mut started = false;
+    loop {
+        // Close every finished array, map and tag.
+        loop {
+            if depth == 0 || st_get(in st, depth, S_LEFT) != 0 {
+                break;
+            }
+            let kind = st_get(in st, depth, S_KIND);
+            let seen = st_get(in st, depth, S_SEEN);
+            if kind != K_TAG {
+                w
+                    .try_set(
+                    st_get(in st, depth, S_SLOT),
+                    if kind == K_MAP {
+                        seen >> 1
+                    } else {
+                        seen
+                    }
+                );
+            }
+            depth = wrapping_sub(depth, 1);
+        }
+        if depth == 0 && started {
+            return p;
+        }
+        started = true;
+        let h = head(in b, p);
+        if h.major == M_OTHER && h.ai == AI_INDEFINITE {
+            // A break ends an indefinite array, or a map between entries.
+            if depth == 0 || st_get(in st, depth, S_LEFT) != INDEFINITE {
+                bad();
+            }
+            let kind = st_get(in st, depth, S_KIND);
+            if kind == K_MAP && st_get(in st, depth, S_SEEN) & 1 != 0 {
+                bad();
+            }
+            st_set(inout st, depth, S_LEFT, 0);
+            p = h.end;
+            continue;
+        }
+        if depth != 0 {
+            st_set(inout st, depth, S_SEEN, wrapping_add(st_get(in st, depth, S_SEEN), 1));
+            let left = st_get(in st, depth, S_LEFT);
+            if left != INDEFINITE {
+                st_set(inout st, depth, S_LEFT, wrapping_sub(left, 1));
+            }
+        }
+        if h.major <= 1 {
+            if h.ai == AI_INDEFINITE {
+                bad();
+            }
+            put(inout w, h.major);
+            put(inout w, h.arg);
+            p = h.end;
+        } else if h.major == M_BYTES || h.major == M_TEXT {
+            p = string(in b, h, inout w);
+        } else if h.major == M_ARRAY || h.major == M_MAP || h.major == M_TAG {
+            if h.major == M_TAG {
+                if h.ai == AI_INDEFINITE {
+                    bad();
+                }
+                if h.arg == TAG_BIGPOS || h.arg == TAG_BIGNEG {
+                    let inner = head(in b, h.end);
+                    if inner
+                        .major
+                        == M_BYTES
+                        && inner
+                        .ai
+                        != AI_INDEFINITE
+                        && inner
+                        .arg
+                        <= BIGNUM_MAX_BYTES {
+                        p = bignum(in b, h.arg, inner, inout w);
+                        continue;
+                    }
+                }
+            }
+            if depth == MAX_DEPTH {
+                bad();
+            }
+            let kind = if h.major == M_ARRAY {
+                K_ARRAY
+            } else if h.major == M_MAP {
+                K_MAP
+            } else {
+                K_TAG
+            };
+            put(inout w, kind);
+            let slot = next_slot(in w);
+            let left = if kind == K_TAG {
+                put(inout w, h.arg);
+                1
+            } else {
+                put(inout w, 0);
+                if h.ai == AI_INDEFINITE {
+                    INDEFINITE
+                } else {
+                    // Every item takes at least a byte, so a count past
+                    // the input fails here instead of overflowing.
+                    if h.arg > n {
+                        bad();
+                    }
+                    if kind == K_MAP {
+                        wrapping_mul(h.arg, 2)
+                    } else {
+                        h.arg
+                    }
+                }
+            };
+            depth = wrapping_add(depth, 1);
+            st_set(inout st, depth, S_LEFT, left);
+            st_set(inout st, depth, S_SLOT, slot);
+            st_set(inout st, depth, S_SEEN, 0);
+            st_set(inout st, depth, S_KIND, kind);
+            p = h.end;
+        } else {
+            // Major 7: simple values and floats.
+            if h.ai == AI_TWO {
+                put(inout w, K_FLOAT);
+                put(inout w, widen_f16(h.arg));
+            } else if h.ai == AI_FOUR {
+                put(inout w, K_FLOAT);
+                put(inout w, widen_f32(h.arg));
+            } else if h.ai == AI_EIGHT {
+                put(inout w, K_FLOAT);
+                put(inout w, h.arg);
+            } else if h.arg == SIMPLE_FALSE || h.arg == SIMPLE_TRUE {
+                put(inout w, K_BOOL);
+                put(inout w, wrapping_sub(h.arg, SIMPLE_FALSE));
+            } else if h.arg == SIMPLE_NULL || h.arg == SIMPLE_UNDEFINED {
+                put(inout w, K_NULL);
+                put(inout w, 0);
+            } else {
+                bad();
+            }
+            p = h.end;
+        }
+    }
+}
+
+// Node accessors over a decoded buffer `n` (nodes from index 1).
+
+// The node kind at `i`.
+pub fn kind(in n: Slice[u64], i: u64) -> u64 {
+    match n.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => INDEFINITE,
+    }
+}
+
+// The node's first argument: an integer, a count, a tag or float bits.
+pub fn arg(in n: Slice[u64], i: u64) -> u64 {
+    match n.try_get(wrapping_add(i, 1)) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+// The index of the node after the item at `i`, children included.
+pub fn skip(in n: Slice[u64], i: u64) -> u64 {
+    let mut at = i;
+    let mut pending = 1;
+    loop {
+        if pending == 0 {
+            return at;
+        }
+        pending = wrapping_sub(pending, 1);
+        let k = kind(in n, at);
+        let a = arg(in n, at);
+        if k == K_BYTES || k == K_TEXT {
+            at = wrapping_add(at, wrapping_add(2, wrapping_mul(a, 2)));
+        } else if k == K_ARRAY {
+            pending = wrapping_add(pending, a);
+            at = wrapping_add(at, 2);
+        } else if k == K_MAP {
+            pending = wrapping_add(pending, wrapping_mul(a, 2));
+            at = wrapping_add(at, 2);
+        } else if k == K_TAG {
+            pending = wrapping_add(pending, 1);
+            at = wrapping_add(at, 2);
+        } else if k == K_BIGNUM {
+            at = wrapping_add(at, 4);
+        } else {
+            at = wrapping_add(at, 2);
+        }
+    }
+}
+
+// The total length of a string node's chunks.
+pub fn str_len(in n: Slice[u64], i: u64) -> u64 {
+    let k = arg(in n, i);
+    let mut total = 0;
+    let mut c = 0;
+    loop {
+        if c == k {
+            return total;
+        }
+        total = wrapping_add(
+            total,
+            arg(in n, wrapping_add(i, wrapping_add(2, wrapping_mul(c, 2))))
+        );
+        c = wrapping_add(c, 1);
+    }
+}
+
+// Whether the text node at `i` reads `lit`.
+pub fn text_eq(in b: Slice[u8], in n: Slice[u64], i: u64, in lit: Slice[u8]) -> bool {
+    if kind(in n, i) != K_TEXT || str_len(in n, i) != lit.len() {
+        return false;
+    }
+    let k = arg(in n, i);
+    let mut c = 0;
+    let mut at = 0;
+    loop {
+        if c == k {
+            return true;
+        }
+        let slot = wrapping_add(i, wrapping_add(2, wrapping_mul(c, 2)));
+        let off = kind(in n, slot);
+        let len = arg(in n, slot);
+        let mut j = 0;
+        loop {
+            if j == len {
+                break;
+            }
+            let x = match b.try_get(wrapping_add(off, j)) {
+                Option::Some(v) => v,
+                Option::None => return false,
+            };
+            let y = match lit.try_get(wrapping_add(at, j)) {
+                Option::Some(v) => v,
+                Option::None => return false,
+            };
+            if x != y {
+                return false;
+            }
+            j = wrapping_add(j, 1);
+        }
+        at = wrapping_add(at, len);
+        c = wrapping_add(c, 1);
+    }
+}
+
+// Copy the string node at `i` to the output words: its chunk count, then
+// each chunk's offset and length.
+pub fn put_str(in n: Slice[u64], i: u64, inout w: Slice[u64]) {
+    let k = arg(in n, i);
+    put(inout w, k);
+    let mut c = 0;
+    loop {
+        if c == k {
+            return;
+        }
+        let slot = wrapping_add(i, wrapping_add(2, wrapping_mul(c, 2)));
+        put(inout w, kind(in n, slot));
+        put(inout w, arg(in n, slot));
+        c = wrapping_add(c, 1);
+    }
+}

@@ -1,0 +1,1316 @@
+// @vesper/ffi-rewrite: the source rewrite of src/ffi_lowering.rs's
+// `Rewriter` in Vesper (self-hosting SH4 lane 13, #1287, part 2), over the
+// @vesper/ast tree. Rust stays the default; nothing here replaces Rust code
+// yet.
+//
+// The rewriter turns `Ffi[Lib]` rows into the library's effect `Ffi$Lib`
+// and `Lib::f(..)` calls into its operations, and reports the first typed
+// error (by span) of the module. Pass 1 leaves slice parameters open and
+// records each call's slice arguments; pass 2 gets each call's slice
+// lengths (which the checker computes from pass 1) and names one operation
+// per slice-length vector, recording the vectors used and the calls.
+//
+// The input is each imported library's canonical descriptor bytes (as in
+// @vesper/ffi-lowering), then the pass 2 lengths; the source is a second
+// argument. The word format is documented in
+// tests/self_host_ffi_lowering_rewrite.rs, which writes the same text from
+// the Rust code.
+//
+// The tree is the @vesper/ast index graph. A rewrite overwrites an
+// expression row (a call's callee) or an effect row (`Ffi[Lib]`) in place;
+// both rewrites depend only on the row and the imports, so a row the
+// parser shares between owners gets the rewrite every Rust copy gets.
+
+use @vesper/ast::{
+    Ast,
+    ExprNode,
+    PatNode,
+    TypeNode,
+    StmtNode,
+    ArgNode,
+    ClauseNode,
+    ParamNode,
+    EffectsNode,
+    EffectNode,
+    FieldNode,
+    VariantNode,
+    AdtNode,
+    FnNode,
+    EffectDeclNode,
+    ImplNode,
+    TraitNode,
+    ConfNode,
+    ItemNode,
+    list_len,
+    list_at,
+    expr_at,
+    pat_at,
+    type_at
+};
+use @vesper/ast::lower::{
+    lower_source
+};
+use @vesper/ast::dump::{
+    dump_ast
+};
+use @vesper-std/arena::{
+    idx_from_raw
+};
+use @vesper-std/intern::{
+    symbol_from_id
+};
+use @vesper/ffi-lowering::{
+    S,
+    Err,
+    Sh,
+    Sp,
+    Reader,
+    s_new,
+    read_library,
+    generate,
+    slice_count,
+    put_op_name
+};
+
+const NONE: u32 = 4294967295;
+const NONE64: u64 = 18446744073709551615;
+
+// Handler tiers.
+const H_MPK: u64 = 1;
+
+// `FfiErrorKind`s: the five of @vesper/ffi-lowering, then the rewriter's.
+const K_DUPLICATE: u8 = 0;
+const K_COLLISION: u8 = 1;
+const K_SLICE: u8 = 2;
+const K_TARGET: u8 = 3;
+const K_ISOLATION: u8 = 4;
+const K_MALFORMED: u8 = 10;
+const K_UNKNOWN_LIBRARY: u8 = 11;
+const K_REALTIME: u8 = 12;
+const K_FOREIGN_VALUE: u8 = 13;
+const K_HANDLE_MISUSE: u8 = 14;
+const K_FOREIGN_HANDLER: u8 = 15;
+const K_UNKNOWN_FUNCTION: u8 = 16;
+const K_UNSUPPORTED: u8 = 17;
+
+// Expression kinds (`@vesper/ast` `ExprNode`).
+const E_NAME: u8 = 2;
+const E_TUPLE: u8 = 3;
+const E_STRUCT: u8 = 4;
+const E_BLOCK: u8 = 5;
+const E_CALL: u8 = 6;
+const E_FIELD: u8 = 7;
+const E_INDEX: u8 = 8;
+const E_TRY: u8 = 9;
+const E_UNARY: u8 = 10;
+const E_BINARY: u8 = 11;
+const E_ASSIGN: u8 = 12;
+const E_IF: u8 = 13;
+const E_MATCH: u8 = 14;
+const E_CLOSURE: u8 = 15;
+const E_HANDLE: u8 = 16;
+const E_LOOP: u8 = 17;
+const E_FOR: u8 = 18;
+const E_RANGE: u8 = 19;
+const E_BREAK: u8 = 20;
+const E_RETURN: u8 = 21;
+
+// Pattern kinds.
+const P_TUPLE: u8 = 4;
+const P_CONSTRUCTOR: u8 = 5;
+
+// Type kinds.
+const T_NAMED: u8 = 1;
+const T_TUPLE: u8 = 2;
+const T_FUNCTION: u8 = 3;
+const T_ROW: u8 = 4;
+
+// Item kinds.
+const I_ADT: u8 = 1;
+const I_FN: u8 = 2;
+const I_EFFECT: u8 = 3;
+const I_IMPL: u8 = 4;
+const I_TRAIT: u8 = 5;
+const I_CONF: u8 = 6;
+
+// Statement kinds.
+const ST_LET: u8 = 1;
+
+// The state of one pass over one module.
+pub struct R {
+    s: S,
+    ast: Ast,
+    pass2: bool,
+    // Pass 2 slice lengths by call span: rows (start, end, first, count)
+    // into `lens`.
+    ar: ChunkSeq[u64],
+    lens: ChunkSeq[u64],
+    // The first error by span (`Rewriter::finish`).
+    has_err: bool,
+    err: Err,
+    // Pass 1 slice sites: (call start, end, n), then n x (arg start, end,
+    // element type, nullable, in place).
+    sites: ChunkSeq[u64],
+    // Pass 2: used vectors as (library row, function row, first, count)
+    // into `ilens`; calls as (start, end, library row, function row,
+    // first, count) into `clens`.
+    insts: ChunkSeq[u64],
+    ilens: ChunkSeq[u64],
+    calls: ChunkSeq[u64],
+    clens: ChunkSeq[u64],
+    // Symbol caches by AST symbol: 0 unknown, 1 no, 2 yes (handles);
+    // 0 unknown, 1 not foreign, else library row + 2 and the split at bits
+    // 32.. (foreign paths).
+    handle_of: ChunkSeq[u8],
+    path_of: ChunkSeq[u64],
+    bytes: ChunkSeq[u8],
+    buf: String
+}
+
+fn u64_at(in s: ChunkSeq[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+fn u8_at(in s: ChunkSeq[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+fn w(x: u32) -> u64 {
+    widen_u64(x)
+}
+
+fn n32(x: u64) -> u32 {
+    wrapping_u32(x)
+}
+
+fn no_err() -> Err {
+    Err {
+        kind: 0,
+        msg: NONE,
+        has_span: false,
+        start: 0,
+        end: 0
+    }
+}
+
+fn r_new(sink s: S, sink ast: Ast, pass2: bool, in ar: ChunkSeq[u64], in lens: ChunkSeq[u64]) -> R {
+    let mut a = ChunkSeq::with_capacity[u64](ar.len());
+    for i in 0..ar.len() {
+        a.push(u64_at(in ar, i));
+    }
+    let mut l = ChunkSeq::with_capacity[u64](lens.len());
+    for i in 0..lens.len() {
+        l.push(u64_at(in lens, i));
+    }
+    R {
+        s: s,
+        ast: ast,
+        pass2: pass2,
+        ar: a,
+        lens: l,
+        has_err: false,
+        err: no_err(),
+        sites: ChunkSeq::new[u64](),
+        insts: ChunkSeq::new[u64](),
+        ilens: ChunkSeq::new[u64](),
+        calls: ChunkSeq::new[u64](),
+        clens: ChunkSeq::new[u64](),
+        handle_of: ChunkSeq::new[u8](),
+        path_of: ChunkSeq::new[u64](),
+        bytes: ChunkSeq::new[u8](),
+        buf: String::new()
+    }
+}
+
+// ---------------------------------------------------------------- symbols
+
+// The bytes of AST symbol `x`, into `r.bytes`.
+fn load_bytes(inout r: R, x: u32) {
+    r.bytes.truncate(0);
+    if x == NONE {
+        return;
+    }
+    let (a, e) = r.ast.names.span(symbol_from_id(x));
+    for i in a..e {
+        match r.ast.names.text_byte(i) {
+            Option::Some(c) => r.bytes.push(c),
+            Option::None => {}
+        }
+    }
+}
+
+// Whether AST symbol `x` spells `t`.
+fn sym_is(in r: R, x: u32, in t: Str) -> bool {
+    if x == NONE {
+        return false;
+    }
+    r.ast.names.symbol_eq(symbol_from_id(x), in t)
+}
+
+// Appends AST symbol `x` to the output text of `r.s`.
+fn put_sym(inout r: R, x: u32) {
+    load_bytes(inout r, x);
+    for i in 0..r.bytes.len() {
+        r.s.out.push(u8_at(in r.bytes, i));
+    }
+}
+
+// Appends S symbol `x` to `r.buf`.
+fn buf_name(inout r: R, x: u32) {
+    let a = r.s.start(x);
+    let e = r.s.end(x);
+    for i in a..e {
+        r.buf.push_char(wrapping_u32(widen_u64(u8_at(in r.s.text, i))));
+    }
+}
+
+// The AST symbol of `r.buf`, which it then clears.
+fn intern_buf(inout r: R) -> u32 {
+    let x = r.ast.names.intern(in r.buf).id();
+    r.buf = String::new();
+    x
+}
+
+// Whether AST symbol `x` names a generated extern-type handle
+// (`Generated::is_handle`).
+fn is_handle(inout r: R, x: u32) -> bool {
+    if x == NONE {
+        return false;
+    }
+    let k = w(x);
+    if k < r.handle_of.len() {
+        let c = u8_at(in r.handle_of, k);
+        if c != 0 {
+            return c == 2;
+        }
+    } else {
+        r.handle_of.resize(wrapping_add(k, 1), 0);
+    }
+    load_bytes(inout r, x);
+    let mut yes = false;
+    for i in 0..r.s.ghs.len() {
+        if r.s.spells(r.s.gh(i).name, in r.bytes[0..r.bytes.len()]) {
+            yes = true;
+        }
+    }
+    let ok = r
+        .handle_of
+        .try_set(
+        k,
+        if yes {
+            2
+        } else {
+            1
+        }
+    );
+    yes
+}
+
+// `Rewriter::foreign_path`: the library row and the byte offset of the
+// symbol after the first `::` of name `x`, or NONE64 when the part before
+// it is not an imported library.
+fn foreign_path(inout r: R, x: u32) -> (u64, u64) {
+    if x == NONE {
+        return (NONE64, 0);
+    }
+    let k = w(x);
+    if k < r.path_of.len() {
+        let c = u64_at(in r.path_of, k);
+        if c == 1 {
+            return (NONE64, 0);
+        }
+        if c != 0 {
+            return (wrapping_sub(c & 4294967295, 2), c >> 32);
+        }
+    } else {
+        r.path_of.resize(wrapping_add(k, 1), 0);
+    }
+    load_bytes(inout r, x);
+    let n = r.bytes.len();
+    let mut at = NONE64;
+    for i in 1..n {
+        if at
+            == NONE64
+            && u8_at(in r.bytes, wrapping_sub(i, 1))
+            == 58
+            && u8_at(in r.bytes, i)
+            == 58 {
+            at = wrapping_sub(i, 1);
+        }
+    }
+    let mut lib = NONE64;
+    if at != NONE64 {
+        for li in 0..r.s.libs.len() {
+            if lib == NONE64 && r.s.spells(r.s.lib(li).name, in r.bytes[0..at]) {
+                lib = li;
+            }
+        }
+    }
+    if lib == NONE64 {
+        let ok = r.path_of.try_set(k, 1);
+        return (NONE64, 0);
+    }
+    let sym = wrapping_add(at, 2);
+    let ok = r.path_of.try_set(k, wrapping_add(lib, 2) | (sym << 32));
+    (lib, sym)
+}
+
+// Whether AST symbol `x` names an imported library.
+fn is_library(inout r: R, x: u32) -> bool {
+    load_bytes(inout r, x);
+    for li in 0..r.s.libs.len() {
+        if r.s.spells(r.s.lib(li).name, in r.bytes[0..r.bytes.len()]) {
+            return true;
+        }
+    }
+    false
+}
+
+// ---------------------------------------------------------------- errors
+
+// Records an error at `start..end`. The first error by span wins, and of
+// equal spans the first one raised (`finish`'s stable sort).
+fn raise(inout r: R, kind: u8, msg: u32, start: u32, end: u32) {
+    let s = w(start);
+    let e = w(end);
+    if r.has_err && (r.err.start < s || (r.err.start == s && r.err.end <= e)) {
+        return;
+    }
+    r.has_err = true;
+    r.err = Err {
+        kind: kind,
+        msg: msg,
+        has_span: true,
+        start: s,
+        end: e
+    };
+}
+
+// The S symbol of the output text from `mark`, which it then drops.
+fn message(inout r: R, mark: u64) -> u32 {
+    r.s.intern_tail(mark)
+}
+
+fn handle_misuse(inout r: R, name: u32, in what: Str, start: u32, end: u32) {
+    let mark = r.s.out.len();
+    r.s.put(in "extern type ");
+    put_sym(inout r, name);
+    r.s.put(in " is an opaque foreign handle: it cannot be ");
+    r.s.put(in what);
+    r.s.put(in " in source; only its library's imports create, use and finalize it");
+    let m = message(inout r, mark);
+    raise(inout r, K_HANDLE_MISUSE, m, start, end);
+}
+
+// ---------------------------------------------------------------- walk
+
+fn module(inout r: R) {
+    for i in 0..r.ast.m_items.len() {
+        let it = match r.ast.m_items.try_get(i) {
+            Option::Some(x) => x,
+            Option::None => NONE,
+        };
+        let item = match r.ast.items.get(idx_from_raw[ItemNode](it)) {
+            Option::Some(x) => x,
+            Option::None => ItemNode {
+                kind: 0,
+                node: NONE
+            },
+        };
+        if item.kind == I_ADT {
+            let a = match r.ast.adts.get(idx_from_raw[AdtNode](item.node)) {
+                Option::Some(x) => x,
+                Option::None => continue,
+            };
+            for v in 0..list_len(in r.ast, a.variants) {
+                let vn = match r
+                    .ast
+                    .variants
+                    .get(idx_from_raw[VariantNode](list_at(in r.ast, a.variants, v))) {
+                    Option::Some(x) => x,
+                    Option::None => continue,
+                };
+                for f in 0..list_len(in r.ast, vn.fields) {
+                    match r
+                        .ast
+                        .fields
+                        .get(idx_from_raw[FieldNode](list_at(in r.ast, vn.fields, f))) {
+                        Option::Some(fd) => ty(inout r, fd.ty, a.start, a.end),
+                        Option::None => {}
+                    }
+                }
+            }
+        } else if item.kind == I_FN {
+            function(inout r, item.node);
+        } else if item.kind == I_EFFECT {
+            let e = match r.ast.effect_decls.get(idx_from_raw[EffectDeclNode](item.node)) {
+                Option::Some(x) => x,
+                Option::None => continue,
+            };
+            for j in 0..list_len(in r.ast, e.ops) {
+                function(inout r, list_at(in r.ast, e.ops, j));
+            }
+        } else if item.kind == I_IMPL {
+            let m = match r.ast.impls.get(idx_from_raw[ImplNode](item.node)) {
+                Option::Some(x) => x,
+                Option::None => continue,
+            };
+            ty(inout r, m.ty, 0, 0);
+            for j in 0..list_len(in r.ast, m.methods) {
+                function(inout r, list_at(in r.ast, m.methods, j));
+            }
+        } else if item.kind == I_TRAIT {
+            let t = match r.ast.traits.get(idx_from_raw[TraitNode](item.node)) {
+                Option::Some(x) => x,
+                Option::None => continue,
+            };
+            for j in 0..list_len(in r.ast, t.methods) {
+                function(inout r, list_at(in r.ast, t.methods, j));
+            }
+        } else if item.kind == I_CONF {
+            let c = match r.ast.confs.get(idx_from_raw[ConfNode](item.node)) {
+                Option::Some(x) => x,
+                Option::None => continue,
+            };
+            for j in 0..list_len(in r.ast, c.methods) {
+                function(inout r, list_at(in r.ast, c.methods, j));
+            }
+        }
+    }
+}
+
+fn function(inout r: R, fi: u32) {
+    let f = match r.ast.fns.get(idx_from_raw[FnNode](fi)) {
+        Option::Some(x) => x,
+        Option::None => return,
+    };
+    for j in 0..list_len(in r.ast, f.params) {
+        match r.ast.params.get(idx_from_raw[ParamNode](list_at(in r.ast, f.params, j))) {
+            Option::Some(p) => ty(inout r, p.ty, f.start, f.end),
+            Option::None => {}
+        }
+    }
+    ty(inout r, f.result, f.start, f.end);
+    effects(inout r, f.effects, f.start, f.end);
+    if f.body != NONE {
+        expr(inout r, f.body);
+    }
+}
+
+// `Rewriter::effects`: rewrites each `Ffi[Lib]` instance of row `es` to
+// `Ffi$Lib`, or raises its error at `start..end`.
+fn effects(inout r: R, es: u32, start: u32, end: u32) {
+    let row = match r.ast.effects.get(idx_from_raw[EffectsNode](es)) {
+        Option::Some(x) => x,
+        Option::None => return,
+    };
+    let n = list_len(in r.ast, row.instances);
+    let mut realtime = false;
+    for i in 0..n {
+        let e = effect_at(in r, list_at(in r.ast, row.instances, i));
+        if sym_is(in r, e.name, in "Realtime") {
+            realtime = true;
+        }
+    }
+    for i in 0..n {
+        let ei = list_at(in r.ast, row.instances, i);
+        let e0 = effect_at(in r, ei);
+        for j in 0..list_len(in r.ast, e0.args) {
+            ty(inout r, list_at(in r.ast, e0.args, j), start, end);
+        }
+        let e = effect_at(in r, ei);
+        if !sym_is(in r, e.name, in "Ffi") {
+            continue;
+        }
+        let mut library = NONE;
+        if list_len(in r.ast, e.args) == 1 {
+            let t = type_at(in r.ast, list_at(in r.ast, e.args, 0));
+            if t.kind == T_NAMED && list_len(in r.ast, t.b) == 0 {
+                library = t.a;
+            }
+        }
+        if library == NONE {
+            let mark = r.s.out.len();
+            r.s.put(in "a foreign capability is written Ffi[Lib] with one library name");
+            let m = message(inout r, mark);
+            raise(inout r, K_MALFORMED, m, start, end);
+            continue;
+        }
+        if !is_library(inout r, library) {
+            let mark = r.s.out.len();
+            r.s.put(in "Ffi[");
+            put_sym(inout r, library);
+            r.s.put(in "] names a library this package does not import");
+            let m = message(inout r, mark);
+            raise(inout r, K_UNKNOWN_LIBRARY, m, start, end);
+            continue;
+        }
+        if e.label != NONE {
+            let mark = r.s.out.len();
+            r.s.put(in "Ffi[");
+            put_sym(inout r, library);
+            r.s.put(in "] cannot be labelled; call Lib::f directly");
+            let m = message(inout r, mark);
+            raise(inout r, K_MALFORMED, m, start, end);
+            continue;
+        }
+        if realtime {
+            let mark = r.s.out.len();
+            r.s.put(in "realtime code cannot carry Ffi[");
+            put_sym(inout r, library);
+            r.s.put(in "] (§32.2)");
+            let m = message(inout r, mark);
+            raise(inout r, K_REALTIME, m, start, end);
+            continue;
+        }
+        r.buf.push_str(in "Ffi$");
+        let ok = r.ast.names.resolve_into(symbol_from_id(library), inout r.buf);
+        let name = intern_buf(inout r);
+        let ok2 = r
+            .ast
+            .effect_nodes
+            .set(
+            idx_from_raw[EffectNode](ei),
+            EffectNode {
+                label: e.label,
+                name: name,
+                args: 0
+            }
+        );
+    }
+}
+
+fn effect_at(in r: R, i: u32) -> EffectNode {
+    r
+        .ast
+        .effect_nodes
+        .get_or(
+        idx_from_raw[EffectNode](i),
+        EffectNode {
+            label: NONE,
+            name: NONE,
+            args: 0
+        }
+    )
+}
+
+// `Rewriter::ty`.
+fn ty(inout r: R, t: u32, start: u32, end: u32) {
+    if t == NONE {
+        return;
+    }
+    let n = type_at(in r.ast, t);
+    if n.kind == T_NAMED {
+        for i in 0..list_len(in r.ast, n.b) {
+            ty(inout r, list_at(in r.ast, n.b, i), start, end);
+        }
+    } else if n.kind == T_TUPLE {
+        for i in 0..list_len(in r.ast, n.a) {
+            ty(inout r, list_at(in r.ast, n.a, i), start, end);
+        }
+    } else if n.kind == T_FUNCTION {
+        let k = list_len(in r.ast, n.a) >> 1;
+        for i in 0..k {
+            ty(inout r, list_at(in r.ast, n.a, wrapping_add(i << 1, 1)), start, end);
+        }
+        ty(inout r, n.b, start, end);
+        effects(inout r, n.c, start, end);
+    } else if n.kind == T_ROW {
+        effects(inout r, n.a, start, end);
+    }
+}
+
+// `Rewriter::expr`.
+fn expr(inout r: R, x: u32) {
+    if x == NONE {
+        return;
+    }
+    let e = expr_at(in r.ast, x);
+    let k = e.kind;
+    if k == E_NAME {
+        let (lib, at) = foreign_path(inout r, e.a);
+        if lib != NONE64 {
+            let mark = r.s.out.len();
+            r.s.put(in "foreign function ");
+            put_sym(inout r, e.a);
+            r.s.put(in " can only be called");
+            let m = message(inout r, mark);
+            raise(inout r, K_FOREIGN_VALUE, m, e.start, e.end);
+        } else if is_handle(inout r, e.a) {
+            handle_misuse(inout r, e.a, in "constructed", e.start, e.end);
+        }
+    } else if k == E_CALL {
+        for i in 0..list_len(in r.ast, e.b) {
+            ty(inout r, list_at(in r.ast, e.b, i), e.start, e.end);
+        }
+        for i in 0..list_len(in r.ast, e.c) {
+            match r.ast.args.get(idx_from_raw[ArgNode](list_at(in r.ast, e.c, i))) {
+                Option::Some(a) => expr(inout r, a.expr),
+                Option::None => {}
+            }
+        }
+        let callee = expr_at(in r.ast, e.a);
+        let mut lib = NONE64;
+        let mut at: u64 = 0;
+        if callee.kind == E_NAME {
+            let (l, s) = foreign_path(inout r, callee.a);
+            lib = l;
+            at = s;
+        }
+        if lib != NONE64 {
+            let name = call(inout r, lib, callee.a, at, e.c, e.start, e.end);
+            if name != NONE {
+                let ok = r
+                    .ast
+                    .exprs
+                    .set(
+                    idx_from_raw[ExprNode](e.a),
+                    ExprNode {
+                        kind: E_NAME,
+                        start: callee.start,
+                        end: callee.end,
+                        a: name,
+                        b: callee.b,
+                        c: callee.c,
+                        d: callee.d,
+                        e: callee.e
+                    }
+                );
+            }
+        } else {
+            expr(inout r, e.a);
+        }
+    } else if k == E_TUPLE {
+        for i in 0..list_len(in r.ast, e.a) {
+            expr(inout r, list_at(in r.ast, e.a, i));
+        }
+    } else if k == E_STRUCT {
+        if is_handle(inout r, e.a) {
+            handle_misuse(inout r, e.a, in "constructed", e.start, e.end);
+        }
+        let n = list_len(in r.ast, e.b) >> 1;
+        for i in 0..n {
+            expr(inout r, list_at(in r.ast, e.b, wrapping_add(i << 1, 1)));
+        }
+    } else if k == E_BLOCK {
+        for i in 0..list_len(in r.ast, e.a) {
+            let st = match r.ast.stmts.get(idx_from_raw[StmtNode](list_at(in r.ast, e.a, i))) {
+                Option::Some(v) => v,
+                Option::None => continue,
+            };
+            if st.kind == ST_LET {
+                pattern(inout r, st.pat);
+                ty(inout r, st.ty, e.start, e.end);
+                expr(inout r, st.value);
+            } else {
+                expr(inout r, st.value);
+            }
+        }
+        expr(inout r, e.b);
+    } else if k == E_FIELD || k == E_TRY || k == E_LOOP {
+        expr(inout r, e.a);
+    } else if k == E_UNARY {
+        expr(inout r, e.b);
+    } else if k == E_INDEX || k == E_RANGE {
+        expr(inout r, e.a);
+        expr(inout r, e.b);
+    } else if k == E_BINARY || k == E_ASSIGN {
+        expr(inout r, e.b);
+        expr(inout r, e.c);
+    } else if k == E_IF {
+        expr(inout r, e.a);
+        expr(inout r, e.b);
+        expr(inout r, e.c);
+    } else if k == E_MATCH {
+        expr(inout r, e.a);
+        let n = list_len(in r.ast, e.b) >> 1;
+        for i in 0..n {
+            pattern(inout r, list_at(in r.ast, e.b, i << 1));
+            expr(inout r, list_at(in r.ast, e.b, wrapping_add(i << 1, 1)));
+        }
+    } else if k == E_FOR {
+        expr(inout r, e.b);
+        expr(inout r, e.c);
+    } else if k == E_BREAK || k == E_RETURN {
+        expr(inout r, e.a);
+    } else if k == E_CLOSURE {
+        for i in 0..list_len(in r.ast, e.a) {
+            match r.ast.params.get(idx_from_raw[ParamNode](list_at(in r.ast, e.a, i))) {
+                Option::Some(p) => ty(inout r, p.ty, e.start, e.end),
+                Option::None => {}
+            }
+        }
+        ty(inout r, e.c, e.start, e.end);
+        effects(inout r, e.d, e.start, e.end);
+        expr(inout r, e.e);
+    } else if k == E_HANDLE {
+        let eff = effect_at(in r, e.a);
+        if sym_is(in r, eff.name, in "Ffi") || is_library(inout r, eff.name) {
+            let mark = r.s.out.len();
+            r
+                .s
+                .put(
+                in "foreign capabilities are granted by the package's import, not handled in source"
+            );
+            let m = message(inout r, mark);
+            raise(inout r, K_FOREIGN_HANDLER, m, e.start, e.end);
+        }
+        for i in 0..list_len(in r.ast, eff.args) {
+            ty(inout r, list_at(in r.ast, eff.args, i), e.start, e.end);
+        }
+        if e.b != NONE {
+            expr(inout r, e.c);
+        }
+        expr(inout r, e.d);
+        for i in 0..list_len(in r.ast, e.e) {
+            let c = match r.ast.clauses.get(idx_from_raw[ClauseNode](list_at(in r.ast, e.e, i))) {
+                Option::Some(v) => v,
+                Option::None => continue,
+            };
+            for j in 0..list_len(in r.ast, c.pats) {
+                pattern(inout r, list_at(in r.ast, c.pats, j));
+            }
+            expr(inout r, c.body);
+        }
+    }
+}
+
+// `Rewriter::pattern`.
+fn pattern(inout r: R, p: u32) {
+    if p == NONE {
+        return;
+    }
+    let n = pat_at(in r.ast, p);
+    if n.kind == P_CONSTRUCTOR {
+        if is_handle(inout r, n.a) {
+            handle_misuse(inout r, n.a, in "destructured", n.start, n.end);
+        }
+        let k = list_len(in r.ast, n.b) >> 1;
+        for i in 0..k {
+            pattern(inout r, list_at(in r.ast, n.b, wrapping_add(i << 1, 1)));
+        }
+    } else if n.kind == P_TUPLE {
+        for i in 0..list_len(in r.ast, n.a) {
+            pattern(inout r, list_at(in r.ast, n.a, i));
+        }
+    }
+}
+
+// ---------------------------------------------------------------- calls
+
+// The function row of library `lib` whose symbol is `r.bytes[at..]`, or
+// NONE64 (`LibraryDescriptor::function`).
+fn function_row(inout r: R, lib: u64, at: u64) -> u64 {
+    let l = r.s.lib(lib);
+    let n = r.bytes.len();
+    for i in 0..l.fc {
+        let fi = wrapping_add(l.f0, i);
+        if r.s.spells(r.s.fun(fi).sym, in r.bytes[at..n]) {
+            return fi;
+        }
+    }
+    NONE64
+}
+
+// The pass 2 lengths row of the call at `start..end`, or NONE64.
+fn arity_row(in r: R, start: u32, end: u32) -> u64 {
+    let n = r.ar.len() >> 2;
+    for i in 0..n {
+        let b = i << 2;
+        if u64_at(in r.ar, b) == w(start) && u64_at(in r.ar, wrapping_add(b, 1)) == w(end) {
+            return b;
+        }
+    }
+    NONE64
+}
+
+// Whether lens[a..a+n] equals ilens[b..b+m].
+fn same_vector(in r: R, a: u64, n: u64, b: u64, m: u64) -> bool {
+    if n != m {
+        return false;
+    }
+    for i in 0..n {
+        if u64_at(in r.lens, wrapping_add(a, i)) != u64_at(in r.ilens, wrapping_add(b, i)) {
+            return false;
+        }
+    }
+    true
+}
+
+// Records that (lib, fi) uses lens[a..a+n] (`instances[..].insert`).
+fn use_vector(inout r: R, lib: u64, fi: u64, a: u64, n: u64) {
+    let k = r.insts.len() >> 2;
+    for i in 0..k {
+        let b = i << 2;
+        if u64_at(in r.insts, b) == lib && u64_at(in r.insts, wrapping_add(b, 1)) == fi {
+            if same_vector(
+                in r,
+                a,
+                n,
+                u64_at(in r.insts, wrapping_add(b, 2)),
+                u64_at(in r.insts, wrapping_add(b, 3))
+            ) {
+                return;
+            }
+        }
+    }
+    r.insts.push(lib);
+    r.insts.push(fi);
+    r.insts.push(r.ilens.len());
+    r.insts.push(n);
+    for i in 0..n {
+        r.ilens.push(u64_at(in r.lens, wrapping_add(a, i)));
+    }
+}
+
+// `Rewriter::call`: the AST symbol of the operation `Lib::f` (name `x`,
+// symbol at byte `at`) resolves to, or NONE after raising its error.
+fn call(inout r: R, lib: u64, x: u32, at: u64, args: u32, start: u32, end: u32) -> u32 {
+    load_bytes(inout r, x);
+    let fi = function_row(inout r, lib, at);
+    let l = r.s.lib(lib);
+    if fi == NONE64 {
+        let mark = r.s.out.len();
+        r.s.put(in "library '");
+        r.s.put_name(l.name);
+        r.s.put(in "' declares no function '");
+        for i in at..r.bytes.len() {
+            r.s.out.push(u8_at(in r.bytes, i));
+        }
+        r.s.put(in "'");
+        let m = message(inout r, mark);
+        raise(inout r, K_UNKNOWN_FUNCTION, m, start, end);
+        return NONE;
+    }
+    let f = r.s.fun(fi);
+    let sh = r.s.sh(fi);
+    if !sh.ok {
+        let mark = r.s.out.len();
+        r.s.put_name(l.name);
+        r.s.put(in "::");
+        r.s.put_name(f.sym);
+        r.s.put(in ": ");
+        r.s.put_name(sh.err);
+        let m = message(inout r, mark);
+        raise(inout r, K_UNSUPPORTED, m, start, end);
+        return NONE;
+    }
+    r.buf.push_str(in "Ffi$");
+    buf_name(inout r, l.name);
+    r.buf.push_str(in "::");
+    if !r.pass2 {
+        if list_len(in r.ast, args) == sh.pn {
+            let head = r.sites.len();
+            let mut count: u64 = 0;
+            for j in 0..sh.pn {
+                let p = r.s.sp(wrapping_add(sh.p0, j));
+                if !p.slice {
+                    continue;
+                }
+                if count == 0 {
+                    r.sites.push(w(start));
+                    r.sites.push(w(end));
+                    r.sites.push(0);
+                }
+                count = wrapping_add(count, 1);
+                let arg = match r.ast.args.get(idx_from_raw[ArgNode](list_at(in r.ast, args, j))) {
+                    Option::Some(v) => v,
+                    Option::None => ArgNode {
+                        pass: 0,
+                        explicit: false,
+                        expr: NONE
+                    },
+                };
+                let ae = expr_at(in r.ast, arg.expr);
+                r.sites.push(w(ae.start));
+                r.sites.push(w(ae.end));
+                r.sites.push(w(p.ty));
+                r
+                    .sites
+                    .push(
+                    if p.nullable {
+                        1
+                    } else {
+                        0
+                    }
+                );
+                r
+                    .sites
+                    .push(
+                    if p.in_place {
+                        1
+                    } else {
+                        0
+                    }
+                );
+            }
+            if count > 0 {
+                let ok = r.sites.try_set(wrapping_add(head, 2), count);
+            }
+        }
+        buf_name(inout r, f.sym);
+        return intern_buf(inout r);
+    }
+    let row = arity_row(in r, start, end);
+    let mut a: u64 = 0;
+    let mut n: u64 = 0;
+    if row != NONE64 {
+        a = u64_at(in r.ar, wrapping_add(row, 2));
+        n = u64_at(in r.ar, wrapping_add(row, 3));
+    }
+    if n != slice_count(in r.s, sh) {
+        // Arity mismatch: the checker reports it against the base op.
+        use_vector(inout r, lib, fi, 0, 0);
+        buf_name(inout r, f.sym);
+        return intern_buf(inout r);
+    }
+    r.calls.push(w(start));
+    r.calls.push(w(end));
+    r.calls.push(lib);
+    r.calls.push(fi);
+    r.calls.push(r.clens.len());
+    r.calls.push(n);
+    for i in 0..n {
+        r.clens.push(u64_at(in r.lens, wrapping_add(a, i)));
+    }
+    use_vector(inout r, lib, fi, a, n);
+    let mark = r.s.out.len();
+    put_op_name(inout r.s, f.sym, in r.lens, a, n);
+    let op = r.s.intern_tail(mark);
+    buf_name(inout r, op);
+    intern_buf(inout r)
+}
+
+// ---------------------------------------------------------------- output
+
+fn put_kind(inout s: S, kind: u8) {
+    if kind == K_DUPLICATE {
+        s.put(in "DuplicateLibrary");
+    } else if kind == K_COLLISION {
+        s.put(in "NameCollision");
+    } else if kind == K_SLICE {
+        s.put(in "SliceArgument");
+    } else if kind == K_TARGET {
+        s.put(in "TargetMismatch");
+    } else if kind == K_ISOLATION {
+        s.put(in "IsolationUnavailable");
+    } else if kind == K_MALFORMED {
+        s.put(in "MalformedCapability");
+    } else if kind == K_UNKNOWN_LIBRARY {
+        s.put(in "UnknownLibrary");
+    } else if kind == K_REALTIME {
+        s.put(in "Realtime");
+    } else if kind == K_FOREIGN_VALUE {
+        s.put(in "ForeignValue");
+    } else if kind == K_HANDLE_MISUSE {
+        s.put(in "HandleMisuse");
+    } else if kind == K_FOREIGN_HANDLER {
+        s.put(in "ForeignHandler");
+    } else if kind == K_UNKNOWN_FUNCTION {
+        s.put(in "UnknownForeignFunction");
+    } else {
+        s.put(in "UnsupportedType");
+    }
+}
+
+fn put_err(inout s: S, e: Err) {
+    put_kind(inout s, e.kind);
+    if e.has_span {
+        s.put(in " @");
+        s.put_u64(e.start);
+        s.put(in "..");
+        s.put_u64(e.end);
+    } else {
+        s.put(in " -");
+    }
+    s.put(in " ");
+    s.put_q(e.msg);
+}
+
+fn put_span(inout s: S, a: u64, b: u64) {
+    s.put(in " @");
+    s.put_u64(a);
+    s.put(in "..");
+    s.put_u64(b);
+}
+
+fn put_lengths(inout s: S, in v: ChunkSeq[u64], a: u64, n: u64) {
+    s.put(in "[");
+    for i in 0..n {
+        if i > 0 {
+            s.put(in ",");
+        }
+        let x = u64_at(in v, wrapping_add(a, i));
+        if x == NONE64 {
+            s.put(in "s");
+        } else {
+            s.put_u64(x);
+        }
+    }
+    s.put(in "]");
+}
+
+fn put_flag(inout s: S, b: bool) {
+    if b {
+        s.put(in "1");
+    } else {
+        s.put(in "0");
+    }
+}
+
+// Byte order of two S names (`str::cmp`), then of two length vectors
+// (`Vec<usize>`'s `Ord`): -1, 0 or 1.
+fn vector_cmp(in r: R, a: u64, n: u64, b: u64, m: u64) -> i32 {
+    let k = if n < m {
+        n
+    } else {
+        m
+    };
+    for i in 0..k {
+        let x = u64_at(in r.ilens, wrapping_add(a, i));
+        let y = u64_at(in r.ilens, wrapping_add(b, i));
+        if x < y {
+            return -1;
+        }
+        if x > y {
+            return 1;
+        }
+    }
+    if n < m {
+        -1
+    } else if n > m {
+        1
+    } else {
+        0
+    }
+}
+
+// Whether instance row `i` sorts before row `j`: by (library name, symbol)
+// then vector, as the `BTreeMap<(String, String), BTreeSet<Vec<usize>>>`
+// iterates.
+fn inst_less(in r: R, i: u64, j: u64) -> bool {
+    let a = i << 2;
+    let b = j << 2;
+    let la = r.s.lib(u64_at(in r.insts, a)).name;
+    let lb = r.s.lib(u64_at(in r.insts, b)).name;
+    let c = r.s.name_cmp(la, lb);
+    if c != 0 {
+        return c < 0;
+    }
+    let fa = r.s.fun(u64_at(in r.insts, wrapping_add(a, 1))).sym;
+    let fb = r.s.fun(u64_at(in r.insts, wrapping_add(b, 1))).sym;
+    let d = r.s.name_cmp(fa, fb);
+    if d != 0 {
+        return d < 0;
+    }
+    vector_cmp(
+        in r,
+        u64_at(in r.insts, wrapping_add(a, 2)),
+        u64_at(in r.insts, wrapping_add(a, 3)),
+        u64_at(in r.insts, wrapping_add(b, 2)),
+        u64_at(in r.insts, wrapping_add(b, 3))
+    )
+        < 0
+}
+
+// Writes pass `pass`'s outcome: its first error, its tables, then the
+// canonical dump of the rewritten module.
+fn report(inout r: R) {
+    if r.has_err {
+        r.s.put(in " err ");
+        let e = r.err;
+        put_err(inout r.s, e);
+    } else {
+        r.s.put(in " ok");
+    }
+    r.s.nl();
+    if !r.pass2 {
+        let mut i: u64 = 0;
+        let total = r.sites.len();
+        for step in 0..total {
+            if i >= total {
+                break;
+            }
+            r.s.put(in "site");
+            put_span(inout r.s, u64_at(in r.sites, i), u64_at(in r.sites, wrapping_add(i, 1)));
+            r.s.nl();
+            let n = u64_at(in r.sites, wrapping_add(i, 2));
+            i = wrapping_add(i, 3);
+            for j in 0..n {
+                r.s.put(in " slice");
+                put_span(inout r.s, u64_at(in r.sites, i), u64_at(in r.sites, wrapping_add(i, 1)));
+                r.s.put(in " ");
+                r.s.put_display(n32(u64_at(in r.sites, wrapping_add(i, 2))));
+                r.s.put(in " nullable=");
+                put_flag(inout r.s, u64_at(in r.sites, wrapping_add(i, 3)) == 1);
+                r.s.put(in " in_place=");
+                put_flag(inout r.s, u64_at(in r.sites, wrapping_add(i, 4)) == 1);
+                r.s.nl();
+                i = wrapping_add(i, 5);
+            }
+        }
+    } else {
+        let k = r.insts.len() >> 2;
+        let mut order = ChunkSeq::with_capacity[u64](k);
+        for i in 0..k {
+            order.push(i);
+        }
+        // Insertion sort: the rows are few.
+        for i in 1..k {
+            let mut j = i;
+            for step in 0..i {
+                if j == 0 {
+                    break;
+                }
+                let x = u64_at(in order, j);
+                let y = u64_at(in order, wrapping_sub(j, 1));
+                if !inst_less(in r, x, y) {
+                    break;
+                }
+                let ok = order.try_set(j, y);
+                let ok2 = order.try_set(wrapping_sub(j, 1), x);
+                j = wrapping_sub(j, 1);
+            }
+        }
+        for i in 0..k {
+            let b = u64_at(in order, i) << 2;
+            r.s.put(in "instance ");
+            let l = r.s.lib(u64_at(in r.insts, b)).name;
+            r.s.put_q(l);
+            r.s.put(in " ");
+            let f = r.s.fun(u64_at(in r.insts, wrapping_add(b, 1))).sym;
+            r.s.put_q(f);
+            r.s.put(in " ");
+            put_lengths(
+                inout r.s,
+                in r.ilens,
+                u64_at(in r.insts, wrapping_add(b, 2)),
+                u64_at(in r.insts, wrapping_add(b, 3))
+            );
+            r.s.nl();
+        }
+        let c = r.calls.len() / 6;
+        for i in 0..c {
+            let b = wrapping_mul(i, 6);
+            r.s.put(in "call");
+            put_span(inout r.s, u64_at(in r.calls, b), u64_at(in r.calls, wrapping_add(b, 1)));
+            r.s.put(in " ");
+            let lib = r.s.lib(u64_at(in r.calls, wrapping_add(b, 2)));
+            r.s.put_q(lib.name);
+            r.s.put(in " ");
+            let f = r.s.fun(u64_at(in r.calls, wrapping_add(b, 3))).sym;
+            r.s.put_q(f);
+            if lib.handler == H_MPK {
+                r.s.put(in " isolated(mpk) ");
+            } else {
+                r.s.put(in " direct ");
+            }
+            put_lengths(
+                inout r.s,
+                in r.clens,
+                u64_at(in r.calls, wrapping_add(b, 4)),
+                u64_at(in r.calls, wrapping_add(b, 5))
+            );
+            r.s.nl();
+        }
+    }
+    dump_ast(in r.ast, inout r.s.out);
+}
+
+// ---------------------------------------------------------------- entries
+
+// One case: reads the libraries and the pass 2 lengths from `b`, then runs
+// pass 1 and (when asked) pass 2 over `source`; returns the state with its
+// text.
+fn run(in b: Slice[u8], in source: Str) -> S {
+    let mut s = s_new();
+    let mut rd = Reader {
+        pos: 0,
+        stop: b.len()
+    };
+    let nl = rd.word(in b);
+    for i in 0..nl {
+        let handler = rd.word(in b);
+        let (a, e) = rd.text(in b);
+        read_library(in b, a, e, handler, inout s);
+    }
+    let has2 = rd.word(in b) == 1;
+    let mut ar = ChunkSeq::new[u64]();
+    let mut lens = ChunkSeq::new[u64]();
+    if has2 {
+        let n = rd.word(in b);
+        for i in 0..n {
+            ar.push(rd.word(in b));
+            ar.push(rd.word(in b));
+            ar.push(lens.len());
+            let k = rd.word(in b);
+            ar.push(k);
+            for j in 0..k {
+                lens.push(rd.word(in b));
+            }
+        }
+    }
+    let g = generate(inout s);
+    if g.msg != NONE {
+        s.put(in "G err ");
+        put_err(inout s, g);
+        s.nl();
+        return s;
+    }
+    let l1 = lower_source(in source);
+    let mut r = r_new(s, l1.ast, false, in ar, in lens);
+    r.s.put(in "pass1");
+    module(inout r);
+    report(inout r);
+    if !has2 {
+        return r.s;
+    }
+    let l2 = lower_source(in source);
+    let mut r2 = r_new(r.s, l2.ast, true, in ar, in lens);
+    r2.s.put(in "pass2");
+    module(inout r2);
+    report(inout r2);
+    r2.s
+}
+
+// The harness entry: the case `input` and `source`
+// (tests/self_host_ffi_lowering_rewrite.rs) to its text, packed as a byte
+// length and eight bytes per word.
+pub fn ffi_rewrite_text(in input: Str, in source: Str) -> ChunkSeq[u64] {
+    let s = run(in input.as_bytes(), in source);
+    pack(in s.out)
+}
+
+// The same work without the text: its length, for timing.
+pub fn ffi_rewrite_count(in input: Str, in source: Str) -> u64 {
+    let s = run(in input.as_bytes(), in source);
+    s.out.len()
+}
+
+fn pack(in text: ChunkSeq[u8]) -> ChunkSeq[u64] {
+    let n = text.len();
+    let mut out = ChunkSeq::with_capacity[u64](wrapping_add(n >> 3, 2));
+    out.push(n);
+    let mut x: u64 = 0;
+    let mut k: u32 = 0;
+    for i in 0..n {
+        let c = widen_u64(u8_at(in text, i));
+        x = x | wrapping_shl_u64(c, wrapping_mul(k, 8));
+        k = wrapping_add(k, 1);
+        if k == 8 {
+            out.push(x);
+            x = 0;
+            k = 0;
+        }
+    }
+    if k != 0 {
+        out.push(x);
+    }
+    out
+}

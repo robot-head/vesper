@@ -26,6 +26,7 @@ for check in \
     "pdc pdc parallel_branches_get_compensation_delays buffer_liveness_reuses_buffers" \
     "graph port_differential graph_outputs_match_the_rust_build events_and_ramps_match_the_rust_build" \
     "slab slab delay_slab_read_write_wraps_and_clones_cleanly clones_are_realigned_and_hold_the_same_samples" \
+    "simd simd tick_is_bit_identical_over_filter_range host_reports_its_paths" \
     "confine confinement allocation_two_calls_deep_is_rejected_with_its_path loops_follow_the_policy"; do
     set -- $check
     if cargo test --locked -p vesper-resonance --features vesper-port-divergent --test "$2" -- --test-threads=1 >"$log" 2>&1; then

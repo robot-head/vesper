@@ -3,8 +3,10 @@
 // `find_not_in` is a scalar loop of about 14 instructions per byte on the
 // SSE2-only x86-64 target, and Prism's hot paths run it over every field
 // name and value. These scans read eight bytes at a time and test them with
-// word arithmetic (SWAR). A word with a byte outside the fast class, and the
-// last bytes after the final whole word, go to `find_not_in` with the exact
+// word arithmetic (SWAR). The last bytes are read as one more word too: the
+// final eight bytes of `s` (overlapping bytes already found clean), or for a
+// shorter `s` its bytes padded with `a`, which every class here allows. A
+// word with a byte outside a fast class goes to `find_not_in` with the exact
 // class.
 // Each returns what `find_not_in` would: the index of the first byte outside
 // the class.
@@ -20,6 +22,67 @@ const ONES: u64 = 72340172838076673;
 const WORD: u64 = 8;
 // The ASCII case bit: setting it maps A-Z onto a-z.
 const CASE_BITS: u64 = 2314885530818453536;
+
+// `a` in every lane: the padding of a short slice's word.
+const PAD_WORD: u64 = 7016996765293437281;
+// Bits per byte.
+const BYTE_BITS: u64 = 8;
+
+// The bytes of `s` (fewer than eight) as a word, padded with `a`: two
+// overlapping reads of four, two or one byte.
+fn short_word(in s: Slice[u8]) -> u64 {
+    let n = s.len();
+    let x = if n >= 4 {
+        let a = match s.try_read_u32_le(0) {
+            Option::Some(v) => widen_u64(v),
+            Option::None => 0,
+        };
+        let b = match s.try_read_u32_le(wrapping_sub(n, 4)) {
+            Option::Some(v) => widen_u64(v),
+            Option::None => 0,
+        };
+        a | shl(b, wrapping_mul(wrapping_sub(n, 4), BYTE_BITS))
+    } else if n >= 2 {
+        let a = match s.try_read_u16_le(0) {
+            Option::Some(v) => widen_u64(v),
+            Option::None => 0,
+        };
+        let b = match s.try_read_u16_le(wrapping_sub(n, 2)) {
+            Option::Some(v) => widen_u64(v),
+            Option::None => 0,
+        };
+        a | shl(b, wrapping_mul(wrapping_sub(n, 2), BYTE_BITS))
+    } else if n == 1 {
+        match s.try_get(0) {
+            Option::Some(v) => widen_u64(v),
+            Option::None => 0,
+        }
+    } else {
+        0
+    };
+    x | shl(PAD_WORD, wrapping_mul(n, BYTE_BITS))
+}
+
+fn shl(x: u64, s: u64) -> u64 {
+    if s < 64 {
+        x << s
+    } else {
+        0
+    }
+}
+
+// The word at `at` (callers keep `at + 8 <= s.len()`).
+fn word_at(in s: Slice[u8], at: u64) -> u64 {
+    match s.try_read_u64_le(at) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+// The index of the first flagged lane of `bad` in the word at `at`.
+fn lane_of(at: u64, bad: u64) -> Option[u64] {
+    Option::Some(wrapping_add(at, widen_u64(trailing_zeros_u64(bad)) / WORD))
+}
 
 // Lanes of `x` (7-bit) with a value of at least `lo`, as their high bits.
 fn ge(x: u64, lo: u64) -> u64 {
@@ -37,11 +100,29 @@ fn eq(x: u64, b: u64) -> u64 {
     (~(wrapping_add(y, LOW7) | y)) & HIGHS
 }
 
-// The scalar scan of the word `s[at..at + 8]`, as an index of `s`. Callers
-// keep `at + 8 <= s.len()`.
+// Lanes of `x` below `b` (`b` at most 128), as high bits: exact for the
+// lowest flagged lane, and no lane is flagged when none is below `b`. A
+// lane above a flagged one may be flagged too (the borrow), so only the
+// first flagged lane is meaningful. A byte of 128 or more is never flagged.
+fn below(x: u64, b: u64) -> u64 {
+    wrapping_sub(x, wrapping_mul(ONES, b)) & (~x) & HIGHS
+}
+
+// Lanes of `x` equal to `b`, with the same exactness as `below`.
+fn equal(x: u64, b: u64) -> u64 {
+    below(x ^ wrapping_mul(ONES, b), 1)
+}
+
+// The scalar scan of the word at `at` (`s[at..at + 8]`, or all of a
+// shorter `s`), as an index of `s`.
 fn within(in s: Slice[u8], at: u64, lo_mask: u64, hi_mask: u64, high: bool) -> Option[u64] {
-    let end = wrapping_add(at, WORD);
-    if end > s.len() || at > end {
+    let n = s.len();
+    let end = if wrapping_add(at, WORD) <= n {
+        wrapping_add(at, WORD)
+    } else {
+        n
+    };
+    if at > end {
         return Option::None;
     }
     match s[at..end].find_not_in(lo_mask, hi_mask, high) {
@@ -50,44 +131,83 @@ fn within(in s: Slice[u8], at: u64, lo_mask: u64, hi_mask: u64, high: bool) -> O
     }
 }
 
-// The scalar scan of `s[at..]`, as an index of `s`.
-fn rest(in s: Slice[u8], at: u64, lo_mask: u64, hi_mask: u64, high: bool) -> Option[u64] {
-    let n = s.len();
-    if at >= n {
-        return Option::None;
-    }
-    match s[at..n].find_not_in(lo_mask, hi_mask, high) {
-        Option::Some(i) => Option::Some(wrapping_add(at, i)),
-        Option::None => Option::None,
+// The lanes of the word `x` that are controls (but tab when `tab_ok`) or
+// DEL. Without tab the first flagged lane is exact (see `below`); clearing
+// tab lanes needs the exact 7-bit lane tests.
+fn control_bits(x: u64, tab_ok: bool) -> u64 {
+    if tab_ok {
+        let x7 = x & LOW7;
+        ((~ge(x7, 32)) | eq(x7, 127)) & (~eq(x7, 9)) & (~x) & HIGHS
+    } else {
+        below(x, 32) | equal(x, 127)
     }
 }
 
+// The lanes of `x` that are NUL, LF or CR (the first flagged lane is exact,
+// see `below`).
+fn line_break_bits(x: u64) -> u64 {
+    below(x, 1) | equal(x, 10) | equal(x, 13)
+}
+
+// The lanes of `x` at or below SP, or DEL (the first flagged lane is exact).
+fn invisible_bits(x: u64) -> u64 {
+    below(x, 33) | equal(x, 127)
+}
+
+// Every lane of `x` is ALPHA, DIGIT or `-` (only lowercase letters unless
+// `upper`).
+fn token_word(x: u64, upper: bool) -> bool {
+    let x7 = x & LOW7;
+    let letters = if upper {
+        x7 | CASE_BITS
+    } else {
+        x7
+    };
+    let alpha = ge(letters, 97) & le(letters, 122);
+    let digit = ge(x7, 48) & le(x7, 57);
+    ((alpha | digit | eq(x7, 45)) & (~x)) == HIGHS
+}
+
+// Every lane of `x` is ALPHA, DIGIT or one of `-./_&=`.
+fn path_word(x: u64) -> bool {
+    let x7 = x & LOW7;
+    let folded = x7 | CASE_BITS;
+    let alpha = ge(folded, 97) & le(folded, 122);
+    // `-` `.` `/` `0`-`9` are 45-57; `_` is 95; the query's `&` and `=`
+    // are 38 and 61.
+    let path = ge(x7, 45) & le(x7, 57);
+    let marks = eq(x7, 95) | eq(x7, 38) | eq(x7, 61);
+    ((alpha | path | marks) & (~x)) == HIGHS
+}
+
 // The first control byte of `s` other than tab (when `tab_ok`), or DEL:
-// RFC 9110 §5.5 field values allow VCHAR, SP, HTAB and obs-text. `lo_mask`
-// and `hi_mask` are the same class for `find_not_in` (bytes 128-255 in it).
-pub fn first_control(in s: Slice[u8], tab_ok: bool, lo_mask: u64, hi_mask: u64) -> Option[u64] {
+// RFC 9110 §5.5 field values allow VCHAR, SP, HTAB and obs-text.
+pub fn first_control(in s: Slice[u8], tab_ok: bool) -> Option[u64] {
     let n = s.len();
+    if n < WORD {
+        let bad = control_bits(short_word(in s), tab_ok);
+        if bad != 0 {
+            return lane_of(0, bad);
+        }
+        return Option::None;
+    }
+    // The last word: the final eight bytes, overlapping bytes already found
+    // clean.
+    let last = wrapping_sub(n, WORD);
     let mut at: u64 = 0;
     loop {
-        if wrapping_add(at, WORD) > n || at > n {
-            break;
-        }
-        let x = match s.try_read_u64_le(at) {
-            Option::Some(x) => x,
-            Option::None => 0,
-        };
-        let x7 = x & LOW7;
-        let mut bad = ((~ge(x7, 32)) | eq(x7, 127)) & (~x) & HIGHS;
-        if tab_ok {
-            bad = bad & (~eq(x7, 9));
-        }
+        let bad = control_bits(word_at(in s, at), tab_ok);
         if bad != 0 {
-            let lane = widen_u64(trailing_zeros_u64(bad)) / WORD;
-            return Option::Some(wrapping_add(at, lane));
+            return lane_of(at, bad);
+        }
+        if at >= last {
+            return Option::None;
         }
         at = wrapping_add(at, WORD);
+        if at > last {
+            at = last;
+        }
     }
-    rest(in s, at, lo_mask, hi_mask, true)
 }
 
 // The first byte of `s` outside the RFC 9110 §5.6.2 `tchar` class (ALPHA,
@@ -95,21 +215,16 @@ pub fn first_control(in s: Slice[u8], tab_ok: bool, lo_mask: u64, hi_mask: u64) 
 // test covers ALPHA, DIGIT and `-`, the bytes of nearly every field name.
 pub fn first_not_token(in s: Slice[u8], lo_mask: u64, hi_mask: u64) -> Option[u64] {
     let n = s.len();
+    if n < WORD {
+        if token_word(short_word(in s), true) {
+            return Option::None;
+        }
+        return within(in s, 0, lo_mask, hi_mask, false);
+    }
+    let last = wrapping_sub(n, WORD);
     let mut at: u64 = 0;
     loop {
-        if wrapping_add(at, WORD) > n || at > n {
-            break;
-        }
-        let x = match s.try_read_u64_le(at) {
-            Option::Some(x) => x,
-            Option::None => 0,
-        };
-        let x7 = x & LOW7;
-        let folded = x7 | CASE_BITS;
-        let alpha = ge(folded, 97) & le(folded, 122);
-        let digit = ge(x7, 48) & le(x7, 57);
-        let good = (alpha | digit | eq(x7, 45)) & (~x);
-        if good != HIGHS {
+        if !token_word(word_at(in s, at), true) {
             match within(in s, at, lo_mask, hi_mask, false) {
                 Option::Some(i) => {
                     return Option::Some(i);
@@ -117,9 +232,14 @@ pub fn first_not_token(in s: Slice[u8], lo_mask: u64, hi_mask: u64) -> Option[u6
                 Option::None => (),
             }
         }
+        if at >= last {
+            return Option::None;
+        }
         at = wrapping_add(at, WORD);
+        if at > last {
+            at = last;
+        }
     }
-    rest(in s, at, lo_mask, hi_mask, false)
 }
 
 // The first byte of `s` outside an origin-form target class given as
@@ -127,24 +247,16 @@ pub fn first_not_token(in s: Slice[u8], lo_mask: u64, hi_mask: u64) -> Option[u6
 // test covers ALPHA, DIGIT and `-./_&=`, the bytes of most paths and queries.
 pub fn first_not_path(in s: Slice[u8], lo_mask: u64, hi_mask: u64) -> Option[u64] {
     let n = s.len();
+    if n < WORD {
+        if path_word(short_word(in s)) {
+            return Option::None;
+        }
+        return within(in s, 0, lo_mask, hi_mask, false);
+    }
+    let last = wrapping_sub(n, WORD);
     let mut at: u64 = 0;
     loop {
-        if wrapping_add(at, WORD) > n || at > n {
-            break;
-        }
-        let x = match s.try_read_u64_le(at) {
-            Option::Some(x) => x,
-            Option::None => 0,
-        };
-        let x7 = x & LOW7;
-        let folded = x7 | CASE_BITS;
-        let alpha = ge(folded, 97) & le(folded, 122);
-        // `-` `.` `/` `0`-`9` are 45-57; `_` is 95; the query's `&` and `=`
-        // are 38 and 61.
-        let path = ge(x7, 45) & le(x7, 57);
-        let marks = eq(x7, 95) | eq(x7, 38) | eq(x7, 61);
-        let good = (alpha | path | marks) & (~x);
-        if good != HIGHS {
+        if !path_word(word_at(in s, at)) {
             match within(in s, at, lo_mask, hi_mask, false) {
                 Option::Some(i) => {
                     return Option::Some(i);
@@ -152,7 +264,106 @@ pub fn first_not_path(in s: Slice[u8], lo_mask: u64, hi_mask: u64) -> Option[u64
                 Option::None => (),
             }
         }
+        if at >= last {
+            return Option::None;
+        }
         at = wrapping_add(at, WORD);
+        if at > last {
+            at = last;
+        }
     }
-    rest(in s, at, lo_mask, hi_mask, false)
+}
+
+// The first NUL, LF or CR of `s`: RFC 9114 §4.2 field values allow every
+// other byte.
+pub fn first_nul_or_line_break(in s: Slice[u8]) -> Option[u64] {
+    let n = s.len();
+    if n < WORD {
+        let bad = line_break_bits(short_word(in s));
+        if bad != 0 {
+            return lane_of(0, bad);
+        }
+        return Option::None;
+    }
+    // The last word: the final eight bytes, overlapping bytes already found
+    // clean.
+    let last = wrapping_sub(n, WORD);
+    let mut at: u64 = 0;
+    loop {
+        let bad = line_break_bits(word_at(in s, at));
+        if bad != 0 {
+            return lane_of(at, bad);
+        }
+        if at >= last {
+            return Option::None;
+        }
+        at = wrapping_add(at, WORD);
+        if at > last {
+            at = last;
+        }
+    }
+}
+
+// The first byte of `s` at or below SP, or DEL: HTTP/3 pseudo-header values
+// allow neither.
+pub fn first_not_visible(in s: Slice[u8]) -> Option[u64] {
+    let n = s.len();
+    if n < WORD {
+        let bad = invisible_bits(short_word(in s));
+        if bad != 0 {
+            return lane_of(0, bad);
+        }
+        return Option::None;
+    }
+    // The last word: the final eight bytes, overlapping bytes already found
+    // clean.
+    let last = wrapping_sub(n, WORD);
+    let mut at: u64 = 0;
+    loop {
+        let bad = invisible_bits(word_at(in s, at));
+        if bad != 0 {
+            return lane_of(at, bad);
+        }
+        if at >= last {
+            return Option::None;
+        }
+        at = wrapping_add(at, WORD);
+        if at > last {
+            at = last;
+        }
+    }
+}
+
+// The first byte of `s` outside an HTTP/3 field-name class (RFC 9114 §4.2:
+// `tchar` without uppercase), given as `lo_mask` and `hi_mask`. The word
+// test covers lowercase letters, DIGIT and `-`. With `upper`, the class is a
+// method token, which also allows uppercase.
+pub fn first_not_lower_token(in s: Slice[u8], upper: bool, lo_mask: u64, hi_mask: u64)
+    -> Option[u64] {
+    let n = s.len();
+    if n < WORD {
+        if token_word(short_word(in s), upper) {
+            return Option::None;
+        }
+        return within(in s, 0, lo_mask, hi_mask, false);
+    }
+    let last = wrapping_sub(n, WORD);
+    let mut at: u64 = 0;
+    loop {
+        if !token_word(word_at(in s, at), upper) {
+            match within(in s, at, lo_mask, hi_mask, false) {
+                Option::Some(i) => {
+                    return Option::Some(i);
+                },
+                Option::None => (),
+            }
+        }
+        if at >= last {
+            return Option::None;
+        }
+        at = wrapping_add(at, WORD);
+        if at > last {
+            at = last;
+        }
+    }
 }

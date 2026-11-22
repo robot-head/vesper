@@ -4,6 +4,10 @@
 // part 3). The words are documented at `codegen_swap::numeric::ATOMIC`.
 // `compare_exchange` stays in Rust until the shim has `atomic_cas`.
 
+use @vesper/cranelift::codes::{
+    Cv,
+    TyCode,
+};
 use @vesper/cranelift::{
     FuncRef,
     Ty,
@@ -52,10 +56,6 @@ const AR_XOR: u32 = 6;
 const AR_XCHG: u32 = 7;
 
 // Type codes, and the `sextend`/`uextend` convert ops.
-const AT_I8: u64 = 1;
-const AT_I64: u32 = 4;
-const AV_UEXTEND: u32 = 1;
-const AV_SEXTEND: u32 = 2;
 
 fn aty(code: u32) -> Ty {
     Ty {
@@ -77,7 +77,7 @@ pub fn atomic_known(call: u64, op: u32) -> bool eff [Ffi[Cranelift]] {
     }
     let code = call_arg(call, 0);
     let t = call_arg(call, 1);
-    if t < AT_I8 || t > widen_u64(AT_I64) {
+    if t < TyCode::I8 || t > widen_u64(TyCode::I64) {
         return false;
     }
     if code == AO_LOAD {
@@ -89,12 +89,12 @@ pub fn atomic_known(call: u64, op: u32) -> bool eff [Ffi[Cranelift]] {
 
 // The canonical 64-bit lane of the narrow `v` (`widen` in `atomic_call`).
 fn a_widen(inout b: Builder, v: Value, t: u32, signed: bool) -> Value eff [Ffi[Cranelift]] {
-    if t == AT_I64 {
+    if t == TyCode::I64 {
         v
     } else if signed {
-        ins_convert(inout b, AV_SEXTEND, aty(AT_I64), v)
+        ins_convert(inout b, Cv::Sextend, aty(TyCode::I64), v)
     } else {
-        ins_convert(inout b, AV_UEXTEND, aty(AT_I64), v)
+        ins_convert(inout b, Cv::Uextend, aty(TyCode::I64), v)
     }
 }
 
@@ -104,19 +104,19 @@ pub fn atomic_request(call: u64, op: u32, inout b: Builder, inout m: Module)
     if op == NUM_ATOMIC_CELL {
         // `Atomic { cell }` -> sequence header `{len, cap, data}` -> element.
         let receiver = value_of_word(call_arg(call, 0));
-        let handle = ins_load(inout b, aty(AT_I64), flags, receiver, 0);
-        return ins_load(inout b, aty(AT_I64), flags, handle, 16);
+        let handle = ins_load(inout b, aty(TyCode::I64), flags, receiver, 0);
+        return ins_load(inout b, aty(TyCode::I64), flags, handle, 16);
     }
     if op == NUM_PARALLEL_FOR {
         let fun = FuncRef {
             id: wrapping_u32(call_arg(call, 0))
         };
-        let pointer = ins_func_addr(inout b, aty(AT_I64), fun);
+        let pointer = ins_func_addr(inout b, aty(TyCode::I64), fun);
         let s = sig_new(inout m, call_conv_default());
         for _ in 0..3 {
-            sig_param(inout m, s, aty(AT_I64));
+            sig_param(inout m, s, aty(TyCode::I64));
         }
-        sig_return(inout m, s, aty(AT_I64));
+        sig_return(inout m, s, aty(TyCode::I64));
         let f = declare_function(inout m, in "vesper_parallel_for".as_bytes(), linkage_import(), s);
         let r = import_function(inout b, inout m, f);
         let mut args = ChunkSeq::with_capacity[u32](3);
@@ -124,7 +124,7 @@ pub fn atomic_request(call: u64, op: u32, inout b: Builder, inout m: Module)
         args.push(wrapping_u32(call_arg(call, 1)));
         args.push(wrapping_u32(call_arg(call, 2)));
         let _r = ins_call(inout b, r, in args.as_slice());
-        return ins_iconst(inout b, aty(AT_I64), 0);
+        return ins_iconst(inout b, aty(TyCode::I64), 0);
     }
     let code = call_arg(call, 0);
     let t = wrapping_u32(call_arg(call, 1));
@@ -137,7 +137,7 @@ pub fn atomic_request(call: u64, op: u32, inout b: Builder, inout m: Module)
     let x = value_of_word(call_arg(call, 4));
     if code == AO_STORE {
         ins_atomic_store(inout b, flags, x, data);
-        return ins_iconst(inout b, aty(AT_I64), 0);
+        return ins_iconst(inout b, aty(TyCode::I64), 0);
     }
     let rmw = if code == AO_SWAP {
         AR_XCHG

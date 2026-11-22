@@ -1,0 +1,200 @@
+// The `vesper.beacon.spans/1` stream: one schema message, one record batch of
+// twelve nonnullable unsigned columns, and the end-of-stream marker, laid
+// out byte for byte as `arrow-ipc` 56's `StreamWriter` writes it with
+// 64-byte alignment and metadata V5 (an all-valid bitmap per column, every
+// buffer padded to 64 bytes).
+use self::fb::{
+    Fb,
+    fb_new,
+    padding
+};
+use self::ipc::{
+    batch_message,
+    framed_len,
+    int_field,
+    key_value,
+    schema_message,
+    write_eos,
+    write_framed
+};
+
+const ALIGN: u64 = 64;
+const COLUMNS: u64 = 12;
+// The u64 columns among the twelve (the rest are u8).
+const WIDE: u64 = 7;
+const NARROW: u64 = 5;
+
+// Column `c`'s byte width: trace and span ids, times and the attribute value
+// are u64; flags and codes are u8.
+fn width(c: u64) -> u64 {
+    if c < 6 || c == 11 {
+        8
+    } else {
+        1
+    }
+}
+
+fn field(inout fb: Fb, c: u64) -> u64 {
+    let bits = wrapping_mul(width(c), 8);
+    match c {
+        0 => int_field(inout fb, in "trace_id_hi".as_bytes(), bits, false, false),
+        1 => int_field(inout fb, in "trace_id_lo".as_bytes(), bits, false, false),
+        2 => int_field(inout fb, in "span_id".as_bytes(), bits, false, false),
+        3 => int_field(inout fb, in "parent_span_id".as_bytes(), bits, false, false),
+        4 => int_field(inout fb, in "start_unix_ns".as_bytes(), bits, false, false),
+        5 => int_field(inout fb, in "duration_ns".as_bytes(), bits, false, false),
+        6 => int_field(inout fb, in "trace_flags".as_bytes(), bits, false, false),
+        7 => int_field(inout fb, in "schema".as_bytes(), bits, false, false),
+        8 => int_field(inout fb, in "status".as_bytes(), bits, false, false),
+        9 => int_field(inout fb, in "error_code".as_bytes(), bits, false, false),
+        10 => int_field(inout fb, in "attribute_kind".as_bytes(), bits, false, false),
+        _ => int_field(inout fb, in "attribute_value".as_bytes(), bits, false, false),
+    }
+}
+
+// The schema metadata, in key order (`arrow-ipc` sorts the keys).
+fn metadata(inout fb: Fb, k: u64) -> u64 {
+    match k {
+        0 => key_value(
+            inout fb,
+            in "vesper.attribute_codes".as_bytes(),
+            in "0=none,1=item_count,2=byte_count,3=redacted;inactive_value=0".as_bytes()
+        ),
+        1 => key_value(
+            inout fb,
+            in "vesper.error_codes".as_bytes(),
+            in "0=none,1=invalid_input,2=storage,3=timeout,4=cancelled".as_bytes()
+        ),
+        2 => key_value(
+            inout fb,
+            in "vesper.redacted_marker".as_bytes(),
+            in "[REDACTED]".as_bytes()
+        ),
+        3 => key_value(
+            inout fb,
+            in "vesper.schema".as_bytes(),
+            in "vesper.beacon.spans/1".as_bytes()
+        ),
+        4 => key_value(
+            inout fb,
+            in "vesper.schema_codes".as_bytes(),
+            in "0=request,1=storage_append,2=background".as_bytes()
+        ),
+        _ => key_value(inout fb, in "vesper.status_codes".as_bytes(), in "0=ok,1=error".as_bytes()),
+    }
+}
+
+fn schema(inout fb: Fb) {
+    let mut fields: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](COLUMNS);
+    for c in 0..COLUMNS {
+        fields.push(field(inout fb, c));
+    }
+    let field_vector = fb.create_offsets(in fields);
+    let mut kv: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](6);
+    for k in 0..6 {
+        kv.push(metadata(inout fb, k));
+    }
+    let kv_vector = fb.create_offsets(in kv);
+    schema_message(inout fb, field_vector, kv_vector);
+}
+
+fn padded(n: u64) -> u64 {
+    wrapping_add(n, padding(n, ALIGN))
+}
+
+fn bitmap_bytes(rows: u64) -> u64 {
+    wrapping_add(rows, 7) / 8
+}
+
+// The record batch message for `rows` rows; returns the body length.
+fn batch(inout fb: Fb, rows: u64) -> u64 {
+    let mut nodes: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](wrapping_mul(COLUMNS, 2));
+    let mut buffers: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](wrapping_mul(COLUMNS, 4));
+    let bitmap = bitmap_bytes(rows);
+    let mut off: u64 = 0;
+    for c in 0..COLUMNS {
+        nodes.push(rows);
+        nodes.push(0);
+        buffers.push(off);
+        buffers.push(bitmap);
+        off = wrapping_add(off, padded(bitmap));
+        let values = wrapping_mul(rows, width(c));
+        buffers.push(off);
+        buffers.push(values);
+        off = wrapping_add(off, padded(values));
+    }
+    batch_message(inout fb, rows, in nodes, in buffers, off);
+    off
+}
+
+fn meta_len(in fb: Fb) -> u64 {
+    wrapping_sub(fb.end(), fb.start())
+}
+
+// The exact byte length of the stream of `rows` rows.
+pub fn stream_len(rows: u64) -> u64 {
+    let mut s = fb_new(2048);
+    schema(inout s);
+    let mut b = fb_new(1024);
+    let body = batch(inout b, rows);
+    let head = wrapping_add(framed_len(meta_len(in s), ALIGN), framed_len(meta_len(in b), ALIGN));
+    wrapping_add(wrapping_add(head, body), 8)
+}
+
+fn word(in s: Slice[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+// Writes the stream into `out`: `wide` holds the seven u64 columns (the six
+// ids and times, then the attribute value) one after another, `narrow` the
+// five u8 columns. Returns the bytes written, or 0 when the column lengths do
+// not match `rows` or `out` is shorter than `stream_len(rows)`.
+pub fn stream_into(in wide: Slice[u64], in narrow: Slice[u8], rows: u64, inout out: Slice[u8])
+    -> u64 {
+    if wide.len() != wrapping_mul(rows, WIDE) || narrow.len() != wrapping_mul(rows, NARROW) {
+        return 0;
+    }
+    let mut s = fb_new(2048);
+    schema(inout s);
+    let mut b = fb_new(1024);
+    let body = batch(inout b, rows);
+    let head = wrapping_add(framed_len(meta_len(in s), ALIGN), framed_len(meta_len(in b), ALIGN));
+    let total = wrapping_add(wrapping_add(head, body), 8);
+    if out.len() < total {
+        return 0;
+    }
+    let mut at = write_framed(in s, ALIGN, inout out, 0);
+    at = write_framed(in b, ALIGN, inout out, at);
+    let bitmap = bitmap_bytes(rows);
+    let mut w: u64 = 0;
+    let mut nw: u64 = 0;
+    for c in 0..COLUMNS {
+        out.try_fill(at, wrapping_add(at, bitmap), 255);
+        let pad_end = wrapping_add(at, padded(bitmap));
+        out.try_fill(wrapping_add(at, bitmap), pad_end, 0);
+        at = pad_end;
+        let values = wrapping_mul(rows, width(c));
+        if width(c) == 8 {
+            let base = wrapping_mul(w, rows);
+            for i in 0..rows {
+                out
+                    .try_write_u64_le(
+                    wrapping_add(at, wrapping_mul(i, 8)),
+                    word(in wide, wrapping_add(base, i))
+                );
+            }
+            w = wrapping_add(w, 1);
+        } else {
+            let base = wrapping_mul(nw, rows);
+            out.try_copy_from(at, in narrow[base..wrapping_add(base, rows)]);
+            nw = wrapping_add(nw, 1);
+        }
+        let end = wrapping_add(at, padded(values));
+        out.try_fill(wrapping_add(at, values), end, 0);
+        at = end;
+    }
+    write_eos(inout out, at)
+}

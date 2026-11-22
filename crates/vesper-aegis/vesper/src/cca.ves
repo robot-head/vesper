@@ -1,0 +1,577 @@
+// Module cca of @vesper/aegis (see lib.ves): the claim structure of an Arm
+// CCA token (src/cca.rs): the realm and platform claims maps, their
+// software components and TBB RoTPK entries, and the two profiles. Each
+// export decodes its payload with module cbor into `n` (a node buffer the
+// caller lends, `st` the decoder's stack) and writes the claims to `w`
+// (see reader::put): integers as words, strings as their chunks (see
+// cbor::put_str), optional claims behind a presence word. Every failure
+// is a ParseError::Cbor (cbor::cbor_err) whose field and reason index
+// CBOR_FIELDS and CBOR_REASONS of src/port.rs.
+use self::AErr;
+use self::cbor::{
+    K_ARRAY,
+    K_BYTES,
+    K_MAP,
+    K_NINT,
+    K_TEXT,
+    K_UINT,
+    R_TRAILING,
+    WHAT,
+    arg,
+    cbor_err,
+    decode,
+    kind,
+    put_str,
+    skip,
+    str_len,
+    text_eq
+};
+use self::reader::put;
+
+// CBOR_FIELDS of src/port.rs.
+const F_REALM_CLAIMS: u64 = 0;
+const F_PLATFORM_CLAIMS: u64 = 1;
+const F_REALM_HASH_ALGO: u64 = 2;
+const F_RIM: u64 = 3;
+const F_REMS: u64 = 4;
+const F_REM: u64 = 5;
+const F_REALM_CHALLENGE: u64 = 6;
+const F_REALM_PERSONALIZATION: u64 = 7;
+const F_RAK: u64 = 8;
+const F_RAK_HASH_ALGO: u64 = 9;
+const F_LIFECYCLE: u64 = 10;
+const F_SW_COMPONENTS: u64 = 11;
+const F_PLATFORM_CONFIG: u64 = 12;
+const F_PLATFORM_MFG_CONFIG: u64 = 13;
+const F_TBB_ROTPK: u64 = 14;
+const F_PLATFORM_CHALLENGE: u64 = 15;
+const F_INSTANCE_ID: u64 = 16;
+const F_IMPLEMENTATION_ID: u64 = 17;
+const F_PLATFORM_HASH_ALGO: u64 = 18;
+const F_ROTPK_NAME: u64 = 19;
+const F_ROTPK_INDEX: u64 = 20;
+const F_ROTPK_HASH: u64 = 21;
+const F_SW_COMPONENT: u64 = 22;
+const F_SW_VALUE: u64 = 23;
+const F_SW_SIGNER: u64 = 24;
+const F_SW_TYPE: u64 = 25;
+const F_SW_VERSION: u64 = 26;
+const F_SW_DESCRIPTION: u64 = 27;
+const F_PLATFORM_PROFILE: u64 = 28;
+const F_REALM_PROFILE: u64 = 29;
+
+// CBOR_REASONS of src/port.rs (0 and 1 are cbor's).
+const R_EXPECTED_MAP: u64 = 2;
+const R_NON_INTEGER_KEY: u64 = 3;
+const R_DUPLICATE_KEY: u64 = 4;
+const R_MISSING: u64 = 5;
+const R_EXPECTED_TEXT: u64 = 6;
+const R_UNSUPPORTED_HASH: u64 = 7;
+const R_EXPECTED_BYTES: u64 = 8;
+const R_WRONG_LENGTH: u64 = 9;
+const R_MEASUREMENT_LENGTH: u64 = 10;
+const R_EXPECTED_ARRAY: u64 = 11;
+const R_FOUR_REGISTERS: u64 = 12;
+const R_EXPECTED_UNSIGNED: u64 = 13;
+const R_TOO_MANY_COMPONENTS: u64 = 14;
+const R_TOO_MANY_ENTRIES: u64 = 15;
+const R_ROTPK_SHAPE: u64 = 16;
+const R_CM_OR_DM: u64 = 17;
+const R_ROTPK_INDEX: u64 = 18;
+const R_DIGEST_LENGTH: u64 = 19;
+const R_UNKNOWN_KEY: u64 = 20;
+const R_UNKNOWN_PROFILE: u64 = 21;
+
+// Claim keys (src/cca.rs, mod keys).
+const CHALLENGE: u64 = 10;
+const PROFILE: u64 = 265;
+const REALM_PERSONALIZATION: u64 = 44235;
+const REALM_HASH_ALGO: u64 = 44236;
+const REALM_PUBLIC_KEY: u64 = 44237;
+const REALM_INITIAL_MEASUREMENT: u64 = 44238;
+const REALM_EXTENSIBLE_MEASUREMENTS: u64 = 44239;
+const REALM_PUBLIC_KEY_HASH_ALGO: u64 = 44240;
+const PLATFORM_INSTANCE_ID: u64 = 256;
+const PLATFORM_LIFECYCLE: u64 = 2395;
+const PLATFORM_IMPLEMENTATION_ID: u64 = 2396;
+const PLATFORM_HASH_ALGO: u64 = 2402;
+const PLATFORM_SW_COMPONENTS: u64 = 2399;
+const PLATFORM_CONFIG: u64 = 2401;
+const PLATFORM_MANUFACTURING_CONFIG: u64 = 2403;
+const PLATFORM_TBB_ROTPK: u64 = 2405;
+const ROTPK_NAME: u64 = 1;
+const ROTPK_INDEX: u64 = 2;
+const ROTPK_HASH: u64 = 3;
+const SW_MEASUREMENT_TYPE: u64 = 1;
+const SW_MEASUREMENT_VALUE: u64 = 2;
+const SW_VERSION: u64 = 4;
+const SW_SIGNER_ID: u64 = 5;
+const SW_MEASUREMENT_DESCRIPTION: u64 = 6;
+
+// Limits and lengths.
+const CCA_REMS: u64 = 4;
+const CCA_MAX_MEASUREMENT_LEN: u64 = 64;
+const CHALLENGE_LEN: u64 = 64;
+const MAX_SW_COMPONENTS: u64 = 64;
+const MAX_TBB_ROTPKS: u64 = 12;
+const ROTPK_ENTRIES: u64 = 3;
+const ROTPK_MAX_INDEX: u64 = 5;
+const I64_MAX: u64 = 9223372036854775807;
+const NONE: u64 = 18446744073709551615;
+// RegisterHash, as the words report it.
+const SHA256: u64 = 0;
+const SHA384: u64 = 1;
+const SHA512: u64 = 2;
+
+// Decode `b` whole into `n`; the root node is at 1.
+fn decode_whole(in b: Slice[u8], field: u64, inout n: Slice[u64], inout st: Slice[u64])
+    -> Unit eff [Fail[AErr]] {
+    let used = decode(in b, inout n, inout st);
+    if used != b.len() {
+        cbor_err(field, R_TRAILING);
+    }
+}
+
+// An integer node as an i64 (two's complement bits), or NONE when it is
+// not an integer or does not fit. Keys are compared as these bits.
+fn int_key(in n: Slice[u64], i: u64) -> u64 {
+    let k = kind(in n, i);
+    let a = arg(in n, i);
+    if a > I64_MAX {
+        return NONE;
+    }
+    if k == K_UINT {
+        a
+    } else if k == K_NINT {
+        // -1 - a.
+        a ^ NONE
+    } else {
+        NONE
+    }
+}
+
+// The integer node at `i` as a u64, or NONE (u64::try_from of an
+// Integer: negative integers and non-integers fail).
+fn uint(in n: Slice[u64], i: u64) -> u64 {
+    if kind(in n, i) == K_UINT {
+        arg(in n, i)
+    } else {
+        NONE
+    }
+}
+
+// ClaimMap::new: the map node at `i` with integer keys, none repeated.
+fn claim_map(in n: Slice[u64], i: u64, field: u64) -> Unit eff [Fail[AErr]] {
+    if kind(in n, i) != K_MAP {
+        cbor_err(field, R_EXPECTED_MAP);
+    }
+    let count = arg(in n, i);
+    let mut e = 0;
+    let mut at = wrapping_add(i, 2);
+    loop {
+        if e == count {
+            return;
+        }
+        let key = int_key(in n, at);
+        // NONE is also the bits of -1, which is a valid key.
+        if key == NONE && !(kind(in n, at) == K_NINT && arg(in n, at) == 0) {
+            cbor_err(field, R_NON_INTEGER_KEY);
+        }
+        // Compare with every earlier key.
+        let mut j = 0;
+        let mut prev = wrapping_add(i, 2);
+        loop {
+            if j == e {
+                break;
+            }
+            if int_key(in n, prev) == key && same_kind(in n, prev, at) {
+                cbor_err(field, R_DUPLICATE_KEY);
+            }
+            prev = skip(in n, skip(in n, prev));
+            j = wrapping_add(j, 1);
+        }
+        at = skip(in n, skip(in n, at));
+        e = wrapping_add(e, 1);
+    }
+}
+
+// Two integer keys with equal bits are equal only with the same sign
+// (int_key maps every out-of-range value to NONE, but claim_map rejects
+// those first).
+fn same_kind(in n: Slice[u64], a: u64, b: u64) -> bool {
+    kind(in n, a) == kind(in n, b)
+}
+
+// The value node of `key` in the claim map at `i`, or NONE.
+fn find(in n: Slice[u64], i: u64, key: u64) -> u64 {
+    let count = arg(in n, i);
+    let mut e = 0;
+    let mut at = wrapping_add(i, 2);
+    loop {
+        if e == count {
+            return NONE;
+        }
+        let v = skip(in n, at);
+        if kind(in n, at) == K_UINT && arg(in n, at) == key {
+            return v;
+        }
+        at = skip(in n, v);
+        e = wrapping_add(e, 1);
+    }
+}
+
+// ClaimMap::get: the value of `key`, or "missing claim".
+fn get(in n: Slice[u64], i: u64, key: u64, field: u64) -> u64 eff [Fail[AErr]] {
+    let v = find(in n, i, key);
+    if v == NONE {
+        cbor_err(field, R_MISSING);
+    }
+    v
+}
+
+// A byte string node, or "expected byte string".
+fn bytes(in n: Slice[u64], i: u64, field: u64) -> u64 eff [Fail[AErr]] {
+    if kind(in n, i) != K_BYTES {
+        cbor_err(field, R_EXPECTED_BYTES);
+    }
+    str_len(in n, i)
+}
+
+// parse_algo: a hash algorithm name.
+fn algo(in b: Slice[u8], in n: Slice[u64], i: u64, field: u64) -> u64 eff [Fail[AErr]] {
+    if kind(in n, i) != K_TEXT {
+        cbor_err(field, R_EXPECTED_TEXT);
+    }
+    if text_eq(in b, in n, i, "sha-256".as_bytes()) {
+        SHA256
+    } else if text_eq(in b, in n, i, "sha-384".as_bytes()) {
+        SHA384
+    } else if text_eq(in b, in n, i, "sha-512".as_bytes()) {
+        SHA512
+    } else {
+        cbor_err(field, R_UNSUPPORTED_HASH)
+    }
+}
+
+fn algo_len(a: u64) -> u64 {
+    if a == SHA256 {
+        32
+    } else if a == SHA384 {
+        48
+    } else {
+        64
+    }
+}
+
+fn measurement_len_ok(len: u64, a: u64) -> bool {
+    len == algo_len(a) || len == CCA_MAX_MEASUREMENT_LEN
+}
+
+fn digest_len_ok(len: u64) -> bool {
+    len == 32 || len == 48 || len == 64
+}
+
+// CcaRealmClaims::from_cbor: hash algorithm, RIM, the four REMs,
+// challenge, personalization value, RAK and its hash algorithm.
+pub fn realm_claims(in b: Slice[u8], inout n: Slice[u64], inout st: Slice[u64], inout w: Slice[u64])
+    -> Unit eff [Fail[AErr]] {
+    decode_whole(in b, F_REALM_CLAIMS, inout n, inout st);
+    let m = 1;
+    claim_map(in n, m, F_REALM_CLAIMS);
+    let hash_algo = algo(
+        in b,
+        in n,
+        get(in n, m, REALM_HASH_ALGO, F_REALM_HASH_ALGO),
+        F_REALM_HASH_ALGO
+    );
+    put(inout w, hash_algo);
+    let rim = get(in n, m, REALM_INITIAL_MEASUREMENT, F_RIM);
+    if !measurement_len_ok(bytes(in n, rim, F_RIM), hash_algo) {
+        cbor_err(F_RIM, R_MEASUREMENT_LENGTH);
+    }
+    put_str(in n, rim, inout w);
+    let rems = get(in n, m, REALM_EXTENSIBLE_MEASUREMENTS, F_REMS);
+    if kind(in n, rems) != K_ARRAY {
+        cbor_err(F_REMS, R_EXPECTED_ARRAY);
+    }
+    if arg(in n, rems) != CCA_REMS {
+        cbor_err(F_REMS, R_FOUR_REGISTERS);
+    }
+    let mut r = 0;
+    let mut at = wrapping_add(rems, 2);
+    loop {
+        if r == CCA_REMS {
+            break;
+        }
+        if !measurement_len_ok(bytes(in n, at, F_REM), hash_algo) {
+            cbor_err(F_REM, R_MEASUREMENT_LENGTH);
+        }
+        put_str(in n, at, inout w);
+        at = skip(in n, at);
+        r = wrapping_add(r, 1);
+    }
+    let challenge = get(in n, m, CHALLENGE, F_REALM_CHALLENGE);
+    if bytes(in n, challenge, F_REALM_CHALLENGE) != CHALLENGE_LEN {
+        cbor_err(F_REALM_CHALLENGE, R_WRONG_LENGTH);
+    }
+    put_str(in n, challenge, inout w);
+    let personalization = get(in n, m, REALM_PERSONALIZATION, F_REALM_PERSONALIZATION);
+    if bytes(in n, personalization, F_REALM_PERSONALIZATION) != CHALLENGE_LEN {
+        cbor_err(F_REALM_PERSONALIZATION, R_WRONG_LENGTH);
+    }
+    put_str(in n, personalization, inout w);
+    let rak = get(in n, m, REALM_PUBLIC_KEY, F_RAK);
+    bytes(in n, rak, F_RAK);
+    put_str(in n, rak, inout w);
+    put(
+        inout w,
+        algo(in b, in n, get(in n, m, REALM_PUBLIC_KEY_HASH_ALGO, F_RAK_HASH_ALGO), F_RAK_HASH_ALGO)
+    );
+}
+
+// An optional text claim of a software component: presence, then chunks.
+fn opt_text(in n: Slice[u64], m: u64, key: u64, field: u64, inout w: Slice[u64])
+    -> Unit eff [Fail[AErr]] {
+    let v = find(in n, m, key);
+    if v == NONE {
+        put(inout w, 0);
+        return;
+    }
+    if kind(in n, v) != K_TEXT {
+        cbor_err(field, R_EXPECTED_TEXT);
+    }
+    put(inout w, 1);
+    put_str(in n, v, inout w);
+}
+
+// CcaSwComponent::from_value.
+fn sw_component(in n: Slice[u64], c: u64, inout w: Slice[u64]) -> Unit eff [Fail[AErr]] {
+    claim_map(in n, c, F_SW_COMPONENT);
+    let count = arg(in n, c);
+    let mut e = 0;
+    let mut at = wrapping_add(c, 2);
+    loop {
+        if e == count {
+            break;
+        }
+        let key = int_key(in n, at);
+        if kind(in n, at)
+            != K_UINT
+            || (
+            key
+                != SW_MEASUREMENT_TYPE
+                && key
+                != SW_MEASUREMENT_VALUE
+                && key
+                != SW_VERSION
+                && key
+                != SW_SIGNER_ID
+                && key
+                != SW_MEASUREMENT_DESCRIPTION
+        ) {
+            cbor_err(F_SW_COMPONENT, R_UNKNOWN_KEY);
+        }
+        at = skip(in n, skip(in n, at));
+        e = wrapping_add(e, 1);
+    }
+    let value = get(in n, c, SW_MEASUREMENT_VALUE, F_SW_VALUE);
+    let value_len = bytes(in n, value, F_SW_VALUE);
+    let signer = get(in n, c, SW_SIGNER_ID, F_SW_SIGNER);
+    let signer_len = bytes(in n, signer, F_SW_SIGNER);
+    if !digest_len_ok(value_len) {
+        cbor_err(F_SW_VALUE, R_DIGEST_LENGTH);
+    }
+    if !digest_len_ok(signer_len) {
+        cbor_err(F_SW_SIGNER, R_DIGEST_LENGTH);
+    }
+    opt_text(in n, c, SW_MEASUREMENT_TYPE, F_SW_TYPE, inout w);
+    put_str(in n, value, inout w);
+    opt_text(in n, c, SW_VERSION, F_SW_VERSION, inout w);
+    put_str(in n, signer, inout w);
+    opt_text(in n, c, SW_MEASUREMENT_DESCRIPTION, F_SW_DESCRIPTION, inout w);
+}
+
+// CcaTbbRotpk::from_value: name, index and hash.
+fn tbb_rotpk(in b: Slice[u8], in n: Slice[u64], r: u64, inout w: Slice[u64])
+    -> Unit eff [Fail[AErr]] {
+    claim_map(in n, r, F_TBB_ROTPK);
+    if arg(in n, r) != ROTPK_ENTRIES {
+        cbor_err(F_TBB_ROTPK, R_ROTPK_SHAPE);
+    }
+    let name = get(in n, r, ROTPK_NAME, F_ROTPK_NAME);
+    if kind(in n, name) != K_TEXT {
+        cbor_err(F_ROTPK_NAME, R_EXPECTED_TEXT);
+    }
+    if !text_eq(in b, in n, name, "CM".as_bytes()) && !text_eq(in b, in n, name, "DM".as_bytes()) {
+        cbor_err(F_ROTPK_NAME, R_CM_OR_DM);
+    }
+    put_str(in n, name, inout w);
+    let index = uint(in n, get(in n, r, ROTPK_INDEX, F_ROTPK_INDEX));
+    if index > ROTPK_MAX_INDEX {
+        cbor_err(F_ROTPK_INDEX, R_ROTPK_INDEX);
+    }
+    put(inout w, index);
+    let hash = get(in n, r, ROTPK_HASH, F_ROTPK_HASH);
+    if !digest_len_ok(bytes(in n, hash, F_ROTPK_HASH)) {
+        cbor_err(F_ROTPK_HASH, R_DIGEST_LENGTH);
+    }
+    put_str(in n, hash, inout w);
+}
+
+// An optional array claim of the platform map: its count (0 when absent)
+// and its entries.
+fn opt_array(in n: Slice[u64], m: u64, key: u64, field: u64, max: u64, too_many: u64)
+    -> u64 eff [Fail[AErr]] {
+    let v = find(in n, m, key);
+    if v == NONE {
+        return NONE;
+    }
+    if kind(in n, v) != K_ARRAY {
+        cbor_err(field, R_EXPECTED_ARRAY);
+    }
+    if arg(in n, v) > max {
+        cbor_err(field, too_many);
+    }
+    v
+}
+
+// An optional byte-string claim: presence, then chunks.
+fn opt_bytes(in n: Slice[u64], m: u64, key: u64, field: u64, inout w: Slice[u64])
+    -> Unit eff [Fail[AErr]] {
+    let v = find(in n, m, key);
+    if v == NONE {
+        put(inout w, 0);
+        return;
+    }
+    bytes(in n, v, field);
+    put(inout w, 1);
+    put_str(in n, v, inout w);
+}
+
+// CcaPlatformClaims::from_cbor: lifecycle, software components, the two
+// configurations, TBB RoTPKs, challenge, instance ID, implementation ID
+// and hash algorithm.
+pub fn platform_claims(
+    in b: Slice[u8],
+    inout n: Slice[u64],
+    inout st: Slice[u64],
+    inout w: Slice[u64]
+) -> Unit eff [Fail[AErr]] {
+    decode_whole(in b, F_PLATFORM_CLAIMS, inout n, inout st);
+    let m = 1;
+    claim_map(in n, m, F_PLATFORM_CLAIMS);
+    let lifecycle = uint(in n, get(in n, m, PLATFORM_LIFECYCLE, F_LIFECYCLE));
+    if lifecycle == NONE && kind(in n, find(in n, m, PLATFORM_LIFECYCLE)) != K_UINT {
+        cbor_err(F_LIFECYCLE, R_EXPECTED_UNSIGNED);
+    }
+    put(inout w, lifecycle);
+    let components = opt_array(
+        in n,
+        m,
+        PLATFORM_SW_COMPONENTS,
+        F_SW_COMPONENTS,
+        MAX_SW_COMPONENTS,
+        R_TOO_MANY_COMPONENTS
+    );
+    if components == NONE {
+        put(inout w, 0);
+    } else {
+        let count = arg(in n, components);
+        put(inout w, count);
+        let mut c = 0;
+        let mut at = wrapping_add(components, 2);
+        loop {
+            if c == count {
+                break;
+            }
+            sw_component(in n, at, inout w);
+            at = skip(in n, at);
+            c = wrapping_add(c, 1);
+        }
+    }
+    opt_bytes(in n, m, PLATFORM_CONFIG, F_PLATFORM_CONFIG, inout w);
+    opt_bytes(in n, m, PLATFORM_MANUFACTURING_CONFIG, F_PLATFORM_MFG_CONFIG, inout w);
+    let rotpks = opt_array(
+        in n,
+        m,
+        PLATFORM_TBB_ROTPK,
+        F_TBB_ROTPK,
+        MAX_TBB_ROTPKS,
+        R_TOO_MANY_ENTRIES
+    );
+    if rotpks == NONE {
+        put(inout w, 0);
+    } else {
+        let count = arg(in n, rotpks);
+        put(inout w, count);
+        let mut c = 0;
+        let mut at = wrapping_add(rotpks, 2);
+        loop {
+            if c == count {
+                break;
+            }
+            tbb_rotpk(in b, in n, at, inout w);
+            at = skip(in n, at);
+            c = wrapping_add(c, 1);
+        }
+    }
+    let challenge = get(in n, m, CHALLENGE, F_PLATFORM_CHALLENGE);
+    bytes(in n, challenge, F_PLATFORM_CHALLENGE);
+    put_str(in n, challenge, inout w);
+    let instance = get(in n, m, PLATFORM_INSTANCE_ID, F_INSTANCE_ID);
+    bytes(in n, instance, F_INSTANCE_ID);
+    put_str(in n, instance, inout w);
+    let implementation = get(in n, m, PLATFORM_IMPLEMENTATION_ID, F_IMPLEMENTATION_ID);
+    bytes(in n, implementation, F_IMPLEMENTATION_ID);
+    put_str(in n, implementation, inout w);
+    put(
+        inout w,
+        algo(
+            in b,
+            in n,
+            get(in n, m, PLATFORM_HASH_ALGO, F_PLATFORM_HASH_ALGO),
+            F_PLATFORM_HASH_ALGO
+        )
+    );
+}
+
+// platform_profile: CcaPlatformProfile index (CCA-SSD 1.0.0, 2023, 2024).
+pub fn platform_profile(in b: Slice[u8], inout n: Slice[u64], inout st: Slice[u64])
+    -> u64 eff [Fail[AErr]] {
+    decode_whole(in b, F_PLATFORM_CLAIMS, inout n, inout st);
+    claim_map(in n, 1, F_PLATFORM_CLAIMS);
+    let p = get(in n, 1, PROFILE, F_PLATFORM_PROFILE);
+    if kind(in n, p) != K_TEXT {
+        cbor_err(F_PLATFORM_PROFILE, R_EXPECTED_TEXT);
+    }
+    if text_eq(in b, in n, p, "http://arm.com/CCA-SSD/1.0.0".as_bytes()) {
+        0
+    } else if text_eq(in b, in n, p, "tag:arm.com,2023:cca_platform#1.0.0".as_bytes()) {
+        1
+    } else if text_eq(in b, in n, p, "tag:arm.com,2024:cca_platform#2.0.0".as_bytes()) {
+        2
+    } else {
+        cbor_err(F_PLATFORM_PROFILE, R_UNKNOWN_PROFILE)
+    }
+}
+
+// realm_profile: CcaRealmProfile index (unspecified, 2023, 2024).
+pub fn realm_profile(in b: Slice[u8], inout n: Slice[u64], inout st: Slice[u64])
+    -> u64 eff [Fail[AErr]] {
+    decode_whole(in b, F_REALM_CLAIMS, inout n, inout st);
+    claim_map(in n, 1, F_REALM_CLAIMS);
+    let p = find(in n, 1, PROFILE);
+    if p == NONE {
+        return 0;
+    }
+    if kind(in n, p) != K_TEXT {
+        cbor_err(F_REALM_PROFILE, R_EXPECTED_TEXT);
+    }
+    if text_eq(in b, in n, p, "tag:arm.com,2023:realm#1.0.0".as_bytes()) {
+        1
+    } else if text_eq(in b, in n, p, "tag:arm.com,2024:realm#2.0.0".as_bytes()) {
+        2
+    } else {
+        cbor_err(F_REALM_PROFILE, R_UNKNOWN_PROFILE)
+    }
+}

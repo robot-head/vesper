@@ -94,6 +94,8 @@ const M_CURSOR: i32 = 16;
 const M_MARK: i64 = 24;
 
 const INDEX_BITS: i64 = 21;
+// (1 << INDEX_BITS) - 1
+const INDEX_MASK: i64 = 2097151;
 // 1 << (63 - INDEX_BITS)
 const MAX_SERIAL: i64 = 4398046511104;
 // crate::regions::store::{MAX_ALLOCATIONS, MAX_CHECKPOINTS}
@@ -128,6 +130,15 @@ fn region_fault_text(i: u32) -> Str {
     } else {
         "out of memory"
     }
+}
+
+// The `which` of the four helpers `region_emit` defines before the
+// entry points (whose `which` is their index, below 100).
+enum RegionHelper: _ {
+    Fault = 100,
+    Reclaim = 101,
+    Resolve = 102,
+    FindMark = 103,
 }
 
 // The runtime entry points: name and `i64` parameter count (`FUNCTIONS`).
@@ -214,16 +225,16 @@ pub fn define_region_runtime(inout m: Module) -> bool eff [Ffi[Cranelift]] {
         messages,
         lengths,
     };
-    if !region_emit(inout m, in im, im.fault, 1, false, 100) {
+    if !region_emit(inout m, in im, im.fault, 1, false, RegionHelper::Fault) {
         return false;
     }
-    if !region_emit(inout m, in im, im.reclaim, 1, false, 101) {
+    if !region_emit(inout m, in im, im.reclaim, 1, false, RegionHelper::Reclaim) {
         return false;
     }
-    if !region_emit(inout m, in im, im.resolve, 2, true, 102) {
+    if !region_emit(inout m, in im, im.resolve, 2, true, RegionHelper::Resolve) {
         return false;
     }
-    if !region_emit(inout m, in im, im.find_mark, 2, true, 103) {
+    if !region_emit(inout m, in im, im.find_mark, 2, true, RegionHelper::FindMark) {
         return false;
     }
     for i in 0..REGION_FUNCTIONS {
@@ -268,13 +279,13 @@ fn region_emit(
     } else {
         a0
     };
-    if which == 100 {
+    if which == RegionHelper::Fault {
         rg_fault_body(inout b, inout m, in im, a0);
-    } else if which == 101 {
+    } else if which == RegionHelper::Reclaim {
         rg_reclaim_body(inout b, a0);
-    } else if which == 102 {
+    } else if which == RegionHelper::Resolve {
         rg_resolve_body(inout b, inout m, in im, a0, a1);
-    } else if which == 103 {
+    } else if which == RegionHelper::FindMark {
         rg_find_mark_body(inout b, inout m, in im, a0, a1);
     } else if which == 0 {
         rg_open(inout b, inout m, in im, a0);
@@ -533,8 +544,7 @@ fn rg_resolve_body(
     rec: Value,
     hnd: Value
 ) eff [Ffi[Cranelift]] {
-    // (1 << INDEX_BITS) - 1
-    let index = ins_band_imm(inout b, hnd, 2097151);
+    let index = ins_band_imm(inout b, hnd, INDEX_MASK);
     let serial = ins_ushr_imm(inout b, hnd, INDEX_BITS);
     let n = rg_ld(inout b, rec, R_NSLOTS);
     let c = ins_icmp(inout b, cc_uge(), index, n);

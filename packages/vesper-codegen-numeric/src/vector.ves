@@ -10,6 +10,17 @@
 // `Codegen::vector_op` sends one request per operation (see
 // `codegen_swap::numeric`); this file reads it and never consults the IR.
 
+use @vesper/cranelift::codes::{
+    Bin,
+    BinImm,
+    Cv,
+    FloatCc,
+    IntCc,
+    MemFlag,
+    Ternary,
+    TyCode,
+    Un,
+};
 use @vesper/cranelift::{
     Ty,
     Value,
@@ -104,9 +115,6 @@ use self::shapes::{
     RD_AND,
     RD_OR,
     RD_XOR,
-    TY_I32,
-    TY_I64,
-    TY_I8,
     chunk_ty,
     conv_accepts,
     conv_target,
@@ -148,64 +156,11 @@ pub const HOOK_DECLINED: u64 = 0;
 
 // Memory flags: `MemFlags::new()` and `little()`.
 const MF_PLAIN: u32 = 0;
-const MF_LITTLE: u32 = 16;
 // Stack slots are aligned to 1 << 3.
 const SLOT_ALIGN_SHIFT: u32 = 3;
 const CHUNK_BYTES: u32 = 16;
 
 // Shim op codes (crates/vesper-cranelift-sys/src/codes.rs).
-const OP_IADD: u32 = 1;
-const OP_ISUB: u32 = 2;
-const OP_IMUL: u32 = 3;
-const OP_BAND: u32 = 10;
-const OP_BOR: u32 = 11;
-const OP_BXOR: u32 = 12;
-const OP_ISHL: u32 = 16;
-const OP_USHR: u32 = 17;
-const OP_SSHR: u32 = 18;
-const OP_FADD: u32 = 25;
-const OP_FSUB: u32 = 26;
-const OP_FMUL: u32 = 27;
-const OP_FDIV: u32 = 28;
-const OP_FMIN: u32 = 29;
-const OP_FMAX: u32 = 30;
-const OP_UADD_SAT: u32 = 35;
-const OP_USUB_SAT: u32 = 37;
-const UN_BNOT: u32 = 2;
-const UN_POPCNT: u32 = 5;
-const UN_FNEG: u32 = 10;
-const UN_FABS: u32 = 11;
-const UN_SQRT: u32 = 12;
-const UN_FVPROMOTE_LOW: u32 = 20;
-const UN_FVDEMOTE: u32 = 21;
-const CV_UEXTEND: u32 = 1;
-const CV_IREDUCE: u32 = 3;
-const CV_SPLAT: u32 = 13;
-const CV_VHIGH_BITS: u32 = 14;
-const CV_BITCAST_LE: u32 = 15;
-const TE_SELECT: u32 = 1;
-const TE_BITSELECT: u32 = 2;
-const TE_FMA: u32 = 3;
-const IM_IADD: u32 = 1;
-const IM_IMUL: u32 = 2;
-const IM_BAND: u32 = 10;
-const IM_ISHL: u32 = 16;
-const CC_EQ: u32 = 0;
-const CC_NE: u32 = 1;
-const CC_SLT: u32 = 2;
-const CC_SGE: u32 = 3;
-const CC_SGT: u32 = 4;
-const CC_SLE: u32 = 5;
-const CC_ULT: u32 = 6;
-const CC_UGE: u32 = 7;
-const CC_UGT: u32 = 8;
-const CC_ULE: u32 = 9;
-const FC_EQ: u32 = 2;
-const FC_NE: u32 = 3;
-const FC_LT: u32 = 6;
-const FC_LE: u32 = 7;
-const FC_GT: u32 = 8;
-const FC_GE: u32 = 9;
 
 // `ShiftOp`, `UnaryOp`, `MaskOp` and the remaining `CmpOp`/`ReduceOp` codes
 // (the others are in shapes.ves).
@@ -228,7 +183,7 @@ fn vty(code: u32) -> Ty {
     }
 }
 fn vx_i64() -> Ty {
-    vty(TY_I64)
+    vty(TyCode::I64)
 }
 
 // ---------------------------------------------------------------------------
@@ -295,7 +250,7 @@ fn vx_chunk_offset(c: u64) -> i32 {
 }
 
 fn vx_bitcast(inout b: Builder, ty: u32, x: Value) -> Value eff [Ffi[Cranelift]] {
-    ins_convert(inout b, CV_BITCAST_LE, vty(ty), x)
+    ins_convert(inout b, Cv::BitcastLe, vty(ty), x)
 }
 
 fn vx_zero_chunk(inout b: Builder, ty: u32) -> Value eff [Ffi[Cranelift]] {
@@ -316,7 +271,7 @@ fn vx_load_chunks(inout b: Builder, ptr: Value, e: u32, lanes: u32, mask: bool)
     let n = widen_u64(shape_chunks(e, lanes));
     let mut out = ChunkSeq::with_capacity[u32](n);
     for c in 0..n {
-        let v = ins_load(inout b, vty(ty), MF_LITTLE, ptr, vx_chunk_offset(c));
+        let v = ins_load(inout b, vty(ty), MemFlag::LittleEndian, ptr, vx_chunk_offset(c));
         out.push(v.id);
     }
     out
@@ -331,7 +286,13 @@ fn vx_store_chunks(inout b: Builder, in m: Module, e: u32, lanes: u32, in chunks
             Some(x) => x,
             None => 0,
         };
-        ins_store(inout b, MF_LITTLE, value_of_word(widen_u64(chunk)), ptr, vx_chunk_offset(c));
+        ins_store(
+            inout b,
+            MemFlag::LittleEndian,
+            value_of_word(widen_u64(chunk)),
+            ptr,
+            vx_chunk_offset(c)
+        );
     }
     ptr
 }
@@ -350,16 +311,16 @@ fn vx_chunk(in chunks: Slice[u32], c: u64) -> Value {
 // A backend scalar (`i64` or a float) as one lane, and back.
 fn vx_lane_of(inout b: Builder, v: Value, e: u32) -> Value eff [Ffi[Cranelift]] {
     let t = lane_ty(e);
-    if t == TY_I8 || t == TY_I32 {
-        ins_convert(inout b, CV_IREDUCE, vty(t), v)
+    if t == TyCode::I8 || t == TyCode::I32 {
+        ins_convert(inout b, Cv::Ireduce, vty(t), v)
     } else {
         v
     }
 }
 fn vx_scalar_of(inout b: Builder, v: Value, e: u32) -> Value eff [Ffi[Cranelift]] {
     let t = lane_ty(e);
-    if t == TY_I8 || t == TY_I32 {
-        ins_convert(inout b, CV_UEXTEND, vx_i64(), v)
+    if t == TyCode::I8 || t == TyCode::I32 {
+        ins_convert(inout b, Cv::Uextend, vx_i64(), v)
     } else {
         v
     }
@@ -367,9 +328,9 @@ fn vx_scalar_of(inout b: Builder, v: Value, e: u32) -> Value eff [Ffi[Cranelift]
 
 fn vx_less(e: u32) -> u32 {
     if elem_is_signed(e) {
-        CC_SLT
+        IntCc::Slt
     } else {
-        CC_ULT
+        IntCc::Ult
     }
 }
 
@@ -377,28 +338,28 @@ fn vx_binary_chunk(inout b: Builder, op: u32, e: u32, x: Value, y: Value)
     -> Value eff [Ffi[Cranelift]] {
     if elem_is_float(e) {
         return if op == B_ADD {
-            ins_binary(inout b, OP_FADD, x, y)
+            ins_binary(inout b, Bin::Fadd, x, y)
         } else if op == B_SUB {
-            ins_binary(inout b, OP_FSUB, x, y)
+            ins_binary(inout b, Bin::Fsub, x, y)
         } else if op == B_MUL {
-            ins_binary(inout b, OP_FMUL, x, y)
+            ins_binary(inout b, Bin::Fmul, x, y)
         } else if op == B_DIV {
-            ins_binary(inout b, OP_FDIV, x, y)
+            ins_binary(inout b, Bin::Fdiv, x, y)
         } else if op == B_MIN {
-            ins_binary(inout b, OP_FMIN, x, y)
+            ins_binary(inout b, Bin::Fmin, x, y)
         } else if op == B_MAX {
-            ins_binary(inout b, OP_FMAX, x, y)
+            ins_binary(inout b, Bin::Fmax, x, y)
         } else {
             // Rejected by the checker.
             x
         };
     }
     if op == B_ADD {
-        ins_binary(inout b, OP_IADD, x, y)
+        ins_binary(inout b, Bin::Iadd, x, y)
     } else if op == B_SUB {
-        ins_binary(inout b, OP_ISUB, x, y)
+        ins_binary(inout b, Bin::Isub, x, y)
     } else if op == B_MUL {
-        ins_binary(inout b, OP_IMUL, x, y)
+        ins_binary(inout b, Bin::Imul, x, y)
     } else if op == B_MIN {
         let m = ins_icmp(inout b, vx_less(e), y, x);
         ins_bitselect(inout b, m, y, x)
@@ -406,15 +367,15 @@ fn vx_binary_chunk(inout b: Builder, op: u32, e: u32, x: Value, y: Value)
         let m = ins_icmp(inout b, vx_less(e), x, y);
         ins_bitselect(inout b, m, y, x)
     } else if op == B_AND {
-        ins_binary(inout b, OP_BAND, x, y)
+        ins_binary(inout b, Bin::Band, x, y)
     } else if op == B_OR {
-        ins_binary(inout b, OP_BOR, x, y)
+        ins_binary(inout b, Bin::Bor, x, y)
     } else if op == B_XOR {
-        ins_binary(inout b, OP_BXOR, x, y)
+        ins_binary(inout b, Bin::Bxor, x, y)
     } else if op == B_SATURATING_ADD {
-        ins_binary(inout b, OP_UADD_SAT, x, y)
+        ins_binary(inout b, Bin::UaddSat, x, y)
     } else if op == B_SATURATING_SUB {
-        ins_binary(inout b, OP_USUB_SAT, x, y)
+        ins_binary(inout b, Bin::UsubSat, x, y)
     } else {
         // `Div`: rejected by the checker.
         x
@@ -423,42 +384,42 @@ fn vx_binary_chunk(inout b: Builder, op: u32, e: u32, x: Value, y: Value)
 
 fn vx_int_cc(op: u32, signed: bool) -> u32 {
     if op == CM_EQ {
-        CC_EQ
+        IntCc::Eq
     } else if op == CM_NE {
-        CC_NE
+        IntCc::Ne
     } else if signed {
         if op == CM_LT {
-            CC_SLT
+            IntCc::Slt
         } else if op == CM_LE {
-            CC_SLE
+            IntCc::Sle
         } else if op == CM_GT {
-            CC_SGT
+            IntCc::Sgt
         } else {
-            CC_SGE
+            IntCc::Sge
         }
     } else if op == CM_LT {
-        CC_ULT
+        IntCc::Ult
     } else if op == CM_LE {
-        CC_ULE
+        IntCc::Ule
     } else if op == CM_GT {
-        CC_UGT
+        IntCc::Ugt
     } else {
-        CC_UGE
+        IntCc::Uge
     }
 }
 fn vx_float_cc(op: u32) -> u32 {
     if op == CM_EQ {
-        FC_EQ
+        FloatCc::Eq
     } else if op == CM_NE {
-        FC_NE
+        FloatCc::Ne
     } else if op == CM_LT {
-        FC_LT
+        FloatCc::Lt
     } else if op == CM_LE {
-        FC_LE
+        FloatCc::Le
     } else if op == CM_GT {
-        FC_GT
+        FloatCc::Gt
     } else {
-        FC_GE
+        FloatCc::Ge
     }
 }
 
@@ -466,21 +427,21 @@ fn vx_reduce_step(inout b: Builder, op: u32, e: u32, a: Value, x: Value)
     -> Value eff [Ffi[Cranelift]] {
     if elem_is_float(e) {
         return if op == RD_MIN {
-            ins_binary(inout b, OP_FMIN, a, x)
+            ins_binary(inout b, Bin::Fmin, a, x)
         } else if op == wrapping_add(RD_MIN, 1) {
-            ins_binary(inout b, OP_FMAX, a, x)
+            ins_binary(inout b, Bin::Fmax, a, x)
         } else {
-            ins_binary(inout b, OP_FADD, a, x)
+            ins_binary(inout b, Bin::Fadd, a, x)
         };
     }
     let v = if op == RD_ADD {
-        ins_binary(inout b, OP_IADD, a, x)
+        ins_binary(inout b, Bin::Iadd, a, x)
     } else if op == RD_XOR {
-        ins_binary(inout b, OP_BXOR, a, x)
+        ins_binary(inout b, Bin::Bxor, a, x)
     } else if op == RD_OR {
-        ins_binary(inout b, OP_BOR, a, x)
+        ins_binary(inout b, Bin::Bor, a, x)
     } else if op == RD_AND {
-        ins_binary(inout b, OP_BAND, a, x)
+        ins_binary(inout b, Bin::Band, a, x)
     } else {
         let take_x = if op == RD_MIN {
             ins_icmp(inout b, vx_less(e), x, a)
@@ -490,7 +451,7 @@ fn vx_reduce_step(inout b: Builder, op: u32, e: u32, a: Value, x: Value)
         ins_select(inout b, take_x, x, a)
     };
     if elem_bits(e) < 64 {
-        ins_binary_imm(inout b, IM_BAND, v, wrapping_i64(elem_mask(e)))
+        ins_binary_imm(inout b, BinImm::BandImm, v, wrapping_i64(elem_mask(e)))
     } else {
         v
     }
@@ -502,21 +463,21 @@ fn vx_bitmask(inout b: Builder, ptr: Value, e: u32, lanes: u32) -> Value eff [Ff
     let per = widen_u64(lanes_per_chunk(e));
     let mut acc = ins_iconst(inout b, vx_i64(), 0);
     for c in 0..chunks.len() {
-        let bits = ins_convert(inout b, CV_VHIGH_BITS, vx_i64(), vx_chunk(in chunks.as_slice(), c));
+        let bits = ins_convert(inout b, Cv::VhighBits, vx_i64(), vx_chunk(in chunks.as_slice(), c));
         let shifted = if c == 0 {
             bits
         } else {
-            ins_binary_imm(inout b, IM_ISHL, bits, wrapping_i64(wrapping_mul(per, c)))
+            ins_binary_imm(inout b, BinImm::IshlImm, bits, wrapping_i64(wrapping_mul(per, c)))
         };
-        acc = ins_binary(inout b, OP_BOR, acc, shifted);
+        acc = ins_binary(inout b, Bin::Bor, acc, shifted);
     }
     acc
 }
 
 // Lanes available from `offset` below `len`: `len - offset`, or 0.
 fn vx_available(inout b: Builder, offset: Value, len: Value) -> Value eff [Ffi[Cranelift]] {
-    let inside = ins_icmp(inout b, CC_ULT, offset, len);
-    let rest = ins_binary(inout b, OP_ISUB, len, offset);
+    let inside = ins_icmp(inout b, IntCc::Ult, offset, len);
+    let rest = ins_binary(inout b, Bin::Isub, len, offset);
     let zero = ins_iconst(inout b, vx_i64(), 0);
     ins_select(inout b, inside, rest, zero)
 }
@@ -527,16 +488,16 @@ fn vx_active(inout b: Builder, in m: Module, offset: Value, len: Value, e: u32, 
     let available = vx_available(inout b, offset, len);
     // Clamp to the lane count so the bound fits every lane type.
     let n = ins_iconst(inout b, vx_i64(), widen_i64(lanes));
-    let small = ins_icmp(inout b, CC_ULT, available, n);
+    let small = ins_icmp(inout b, IntCc::Ult, available, n);
     let bound = ins_select(inout b, small, available, n);
     let ty = mask_chunk_ty(e);
     let lane_code = ty & 255;
-    let lane = if lane_code == TY_I8 || lane_code == TY_I32 {
-        ins_convert(inout b, CV_IREDUCE, vty(lane_code), bound)
+    let lane = if lane_code == TyCode::I8 || lane_code == TyCode::I32 {
+        ins_convert(inout b, Cv::Ireduce, vty(lane_code), bound)
     } else {
         bound
     };
-    let bounds = ins_convert(inout b, CV_SPLAT, vty(ty), lane);
+    let bounds = ins_convert(inout b, Cv::Splat, vty(ty), lane);
     let width = widen_u64(elem_bits(elem_bits_elem(e)) >> 3);
     let per = widen_u64(lanes_per_chunk(e));
     let n_chunks = widen_u64(shape_chunks(e, lanes));
@@ -550,7 +511,7 @@ fn vx_active(inout b: Builder, in m: Module, offset: Value, len: Value, e: u32, 
             }
         }
         let iota = ins_vconst(inout b, vty(ty), in bytes.as_slice());
-        let cmp = ins_icmp(inout b, CC_UGT, bounds, iota);
+        let cmp = ins_icmp(inout b, IntCc::Ugt, bounds, iota);
         chunks.push(cmp.id);
     }
     vx_store_chunks(inout b, in m, e, lanes, in chunks.as_slice())
@@ -562,31 +523,37 @@ fn vx_load_masked(inout b: Builder, in m: Module, string: Value, offset: Value, 
     let result = vx_alloc(inout b, in m, shape_bytes(e, lanes), true);
     let len = ins_load(inout b, vx_i64(), MF_PLAIN, string, 0);
     let available = vx_available(inout b, offset, len);
-    let full = ins_icmp_imm(inout b, CC_UGE, available, widen_i64(lanes));
+    let full = ins_icmp_imm(inout b, IntCc::Uge, available, widen_i64(lanes));
     let base = ins_load(inout b, vx_i64(), MF_PLAIN, string, 16);
     let fast = create_block(inout b);
     let slow = create_block(inout b);
     let join = create_block(inout b);
     ins_brif0(inout b, full, fast, slow);
     switch_to_block(inout b, fast);
-    let start = ins_binary(inout b, OP_IADD, base, offset);
+    let start = ins_binary(inout b, Bin::Iadd, base, offset);
     for c in 0..widen_u64(shape_chunks(e, lanes)) {
-        let chunk = ins_load(inout b, vty(chunk_ty(E_U8)), MF_LITTLE, start, vx_chunk_offset(c));
-        ins_store(inout b, MF_LITTLE, chunk, result, vx_chunk_offset(c));
+        let chunk = ins_load(
+            inout b,
+            vty(chunk_ty(E_U8)),
+            MemFlag::LittleEndian,
+            start,
+            vx_chunk_offset(c)
+        );
+        ins_store(inout b, MemFlag::LittleEndian, chunk, result, vx_chunk_offset(c));
     }
     ins_jump0(inout b, join);
     switch_to_block(inout b, slow);
     let zero = ins_iconst(inout b, vx_i64(), 0);
     for i in 0..widen_u64(lanes) {
-        let valid = ins_icmp_imm(inout b, CC_UGT, available, wrapping_i64(i));
-        let at = ins_binary_imm(inout b, IM_IADD, offset, wrapping_i64(i));
+        let valid = ins_icmp_imm(inout b, IntCc::Ugt, available, wrapping_i64(i));
+        let at = ins_binary_imm(inout b, BinImm::IaddImm, offset, wrapping_i64(i));
         // A lane past the end reads the (zeroed) result buffer instead: the
         // data of an empty string is null.
-        let address = ins_binary(inout b, OP_IADD, base, at);
+        let address = ins_binary(inout b, Bin::Iadd, base, at);
         let address = ins_select(inout b, valid, address, result);
         let byte = ins_uload8(inout b, vx_i64(), MF_PLAIN, address, 0);
         let byte = ins_select(inout b, valid, byte, zero);
-        let byte = ins_convert(inout b, CV_IREDUCE, vty(TY_I8), byte);
+        let byte = ins_convert(inout b, Cv::Ireduce, vty(TyCode::I8), byte);
         ins_store(inout b, MF_PLAIN, byte, result, wrapping_i32(i));
     }
     ins_jump0(inout b, join);
@@ -690,7 +657,7 @@ fn vx_emit(call: u64, inout b: Builder, in m: Module, i: u32, e: u32, lanes: u32
     let n_chunks = widen_u64(shape_chunks(e, lanes));
     if family == I_SPLAT {
         let lane = vx_lane_of(inout b, vx_operand(call, 0), e);
-        let chunk = ins_convert(inout b, CV_SPLAT, vty(chunk_ty(e)), lane);
+        let chunk = ins_convert(inout b, Cv::Splat, vty(chunk_ty(e)), lane);
         let mut chunks = ChunkSeq::with_capacity[u32](n_chunks);
         for _ in 0..n_chunks {
             chunks.push(chunk.id);
@@ -730,11 +697,11 @@ fn vx_emit(call: u64, inout b: Builder, in m: Module, i: u32, e: u32, lanes: u32
                     ins_icmp(inout b, vx_int_cc(sub, elem_is_signed(e)), x, y)
                 }
             } else if sub == MO_AND {
-                ins_binary(inout b, OP_BAND, x, y)
+                ins_binary(inout b, Bin::Band, x, y)
             } else if sub == MO_OR {
-                ins_binary(inout b, OP_BOR, x, y)
+                ins_binary(inout b, Bin::Bor, x, y)
             } else {
-                ins_binary(inout b, OP_BXOR, x, y)
+                ins_binary(inout b, Bin::Bxor, x, y)
             };
             out.push(v.id);
         }
@@ -746,13 +713,13 @@ fn vx_emit(call: u64, inout b: Builder, in m: Module, i: u32, e: u32, lanes: u32
         for c in 0..n_chunks {
             let x = vx_chunk(in a.as_slice(), c);
             let op = if family != I_UNARY {
-                UN_BNOT
+                Un::Bnot
             } else if sub == UO_SQRT {
-                UN_SQRT
+                Un::Sqrt
             } else if sub == UO_ABS {
-                UN_FABS
+                Un::Fabs
             } else {
-                UN_FNEG
+                Un::Fneg
             };
             let v = ins_unary(inout b, op, x);
             out.push(v.id);
@@ -769,7 +736,7 @@ fn vx_emit(call: u64, inout b: Builder, in m: Module, i: u32, e: u32, lanes: u32
             let y = vx_chunk(in c2.as_slice(), c);
             let z = vx_chunk(in c3.as_slice(), c);
             let v = Value {
-                id: Cranelift::vcl_ternary(inout b, TE_FMA, x.id, y.id, z.id)
+                id: Cranelift::vcl_ternary(inout b, Ternary::Fma, x.id, y.id, z.id)
             };
             out.push(v.id);
         }
@@ -790,12 +757,12 @@ fn vx_emit(call: u64, inout b: Builder, in m: Module, i: u32, e: u32, lanes: u32
             }
             for c in 0..n_chunks {
                 let x = vx_chunk(in a.as_slice(), c);
-                let low = ins_unary(inout b, UN_FVPROMOTE_LOW, x);
+                let low = ins_unary(inout b, Un::FvpromoteLow, x);
                 out.push(low.id);
                 let bytes = vx_bitcast(inout b, chunk_ty(E_U8), x);
                 let moved = ins_shuffle(inout b, bytes, bytes, in upper.as_slice());
                 let moved = vx_bitcast(inout b, chunk_ty(E_F32), moved);
-                let high = ins_unary(inout b, UN_FVPROMOTE_LOW, moved);
+                let high = ins_unary(inout b, Un::FvpromoteLow, moved);
                 out.push(high.id);
             }
         } else if sub == C_NARROW {
@@ -810,12 +777,12 @@ fn vx_emit(call: u64, inout b: Builder, in m: Module, i: u32, e: u32, lanes: u32
             for c in 0..(n_chunks >> 1) {
                 let lo = ins_unary(
                     inout b,
-                    UN_FVDEMOTE,
+                    Un::Fvdemote,
                     vx_chunk(in a.as_slice(), wrapping_mul(c, 2))
                 );
                 let hi = ins_unary(
                     inout b,
-                    UN_FVDEMOTE,
+                    Un::Fvdemote,
                     vx_chunk(in a.as_slice(), wrapping_add(wrapping_mul(c, 2), 1))
                 );
                 let lo = vx_bitcast(inout b, chunk_ty(E_U8), lo);
@@ -841,11 +808,11 @@ fn vx_emit(call: u64, inout b: Builder, in m: Module, i: u32, e: u32, lanes: u32
         for c in 0..n_chunks {
             let x = vx_chunk(in a.as_slice(), c);
             let op = if sub == SH_SHL {
-                OP_ISHL
+                Bin::Ishl
             } else if elem_is_signed(e) {
-                OP_SSHR
+                Bin::Sshr
             } else {
-                OP_USHR
+                Bin::Ushr
             };
             let v = ins_binary(inout b, op, x, k);
             out.push(v.id);
@@ -878,21 +845,21 @@ fn vx_emit(call: u64, inout b: Builder, in m: Module, i: u32, e: u32, lanes: u32
     }
     if family == I_MASK_COUNT {
         let bits = vx_bitmask(inout b, vx_operand(call, 0), e, lanes);
-        return ins_unary(inout b, UN_POPCNT, bits);
+        return ins_unary(inout b, Un::Popcnt, bits);
     }
     if family == I_MASK_ANY || family == I_MASK_ALL {
         let bits = vx_bitmask(inout b, vx_operand(call, 0), e, lanes);
         let flag = if family == I_MASK_ANY {
-            ins_icmp_imm(inout b, CC_NE, bits, 0)
+            ins_icmp_imm(inout b, IntCc::Ne, bits, 0)
         } else {
             let full = if lanes == ALL_LANES_64 {
                 -1
             } else {
                 wrapping_i64(wrapping_sub(wrapping_shl_u64(1, lanes), 1))
             };
-            ins_icmp_imm(inout b, CC_EQ, bits, full)
+            ins_icmp_imm(inout b, IntCc::Eq, bits, full)
         };
-        return ins_convert(inout b, CV_UEXTEND, vx_i64(), flag);
+        return ins_convert(inout b, Cv::Uextend, vx_i64(), flag);
     }
     if family == I_REDUCE {
         let chunks = vx_load_chunks(inout b, vx_operand(call, 0), e, lanes, false);

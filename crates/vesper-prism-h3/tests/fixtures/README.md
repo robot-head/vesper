@@ -20,7 +20,7 @@
   | `qifs/fb-req.qif` (not committed) | `75b501df8290c6615b0e626527c64ccf19c53c813c52e841004e558db947642b` |
   | `qifs/fb-resp.qif` (not committed) | `698d06cdfa85fc34d9044ff5c2ef800ac2c1993c3ea7bae589992ed4f209f612` |
 
-* `gen_tables.py`: regenerates `src/qpack/static_table.rs` from RFC 9204's
+* `gen_tables.py`: regenerates `vesper/src/static_table.ves` from RFC 9204's
   Markdown source (`rfc9204.md` in github.com/quicwg/base-drafts, `main`) and
-  `src/qpack/huffman_table.rs` from the `h2` 0.4.12 crate's
+  `vesper/src/huffman_codes.ves` from the `h2` 0.4.12 crate's
   `src/hpack/huffman/table.rs` (RFC 7541 Appendix B).

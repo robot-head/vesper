@@ -50,11 +50,15 @@ on:
 permissions:
   contents: read
 
-# Newer PR/main runs replace obsolete validation; nightly and release calls
-# have independent run-id groups so they cannot cancel an exact-SHA candidate.
+# A newer PR dispatch replaces the older one for that branch. Main runs are
+# never cancelled (#1479): pull requests no longer run the port shards, so a
+# main run is the first to catch a port regression and must finish. One main
+# run goes at a time; GitHub keeps only the newest waiting push, so a burst of
+# merges collapses into one more run. Nightly and release calls have
+# independent run-id groups so they cannot cancel an exact-SHA candidate.
 concurrency:
   group: platforms-${{ github.event_name == 'workflow_dispatch' && inputs.pull_request != '' && github.ref || github.event_name == 'push' && 'main' || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.pull_request != '') }}
+  cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' && inputs.pull_request != '' }}
 
 jobs:
   plan:
