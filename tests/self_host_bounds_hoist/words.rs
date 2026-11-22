@@ -252,9 +252,10 @@ impl Enc {
                 self.put(*value as u64);
                 self.pattern(pattern);
             }
-            Op::Write { place, value, .. } => {
+            Op::Write { place, op, value } => {
                 self.put(5);
                 self.put(*value as u64);
+                self.put(u64::from(op != "="));
                 let mut parts = place.split('.');
                 self.put_name(parts.next().unwrap_or_default());
                 let rest: Vec<String> = parts.map(str::to_owned).collect();

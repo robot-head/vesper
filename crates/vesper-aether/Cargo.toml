@@ -16,18 +16,21 @@ kvm = ["dep:kvm-ioctls", "dep:kvm-bindings"]
 # Installing the VMM seccomp-bpf profile (the same gated module, Linux).
 seccomp = []
 # Run the Vesper port (vesper/src/*.ves) instead of the Rust code for the
-# ported modules (see docs/maintenance/porting-a-crate.md).
-vesper-port = ["dep:vesper-port-abi", "dep:vesper-port-harness"]
+# ported modules that have not flipped yet (see
+# docs/maintenance/porting-a-crate.md). The virtqueue walks
+# (vesper/src/vq.ves) flipped (#1409): every build links the port and runs
+# them.
+vesper-port = []
 # The port with one deliberate bug per module, for the divergence check.
 vesper-port-divergent = ["vesper-port"]
 
 [dependencies]
 blake3 = "1.8"
 vesper-loom-cas = { path = "../vesper-loom-cas" }
-vesper-port-abi = { path = "../vesper-port-abi", optional = true }
+vesper-port-abi = { path = "../vesper-port-abi" }
 
 [build-dependencies]
-vesper-port-harness = { path = "../vesper-port-harness", optional = true }
+vesper-port-harness = { path = "../vesper-port-harness" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

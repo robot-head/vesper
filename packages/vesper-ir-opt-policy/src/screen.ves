@@ -1,0 +1,390 @@
+// The native optimizer policy's screen (src/ir_opt_policy.rs
+// `block_may_improve` and `block_can_improve`): which blocks memory
+// forwarding can change. A block that fails the screen is one where
+// saturation removes no read, so the policy skips it.
+//
+// `block_may_improve`: some sink read of a local has an earlier
+// instruction on the same place, or has no state evidence.
+//
+// `block_can_improve` (SH5 lane 9, #1332): some scalar sink read's walk back
+// from its state across writes to disjoint places reaches a write of its
+// place, or a state an earlier scalar sink read of the same place reached.
+// A read without state evidence, a walk through a state the block does not
+// define, a cycle of states, or two steps from one state keep the block, so
+// the pass reports what it reports.
+
+use @vesper/check-data::util::{
+    add,
+    inc,
+    n32,
+    w
+};
+use @vesper/check-data::names::{
+    Names,
+    names_new
+};
+use @vesper/place-ir::{
+    BlockRow,
+    FnRow,
+    InstRow,
+    Program
+};
+use @vesper/ir-opt::view::{
+    at32,
+    block_entry,
+    class_of,
+    fn_view,
+    overlaps,
+    place_text
+};
+
+// Constants are copied, not imported: the Vesper package assembler
+// (@vesper/check-names-packages) does not resolve an imported constant
+// yet (E0111).
+const C_SCALAR: u8 = 1;
+const NONE: u32 = 4294967295;
+const OP_BIND: u8 = 3;
+const OP_READ: u8 = 2;
+const OP_WRITE: u8 = 4;
+const PAT_BIND: u64 = 1;
+const P_SINK: u64 = 2;
+
+// A state made by an instruction that is not a forwarding write.
+const BARRIER: u32 = 4294967294;
+
+// What the screen keeps between blocks: place texts and per-symbol marks.
+pub struct Screen {
+    pn: Names,
+    buf: ChunkSeq[u8],
+    // name symbol -> 1 for the function's locals
+    lmark: ChunkSeq[u8],
+    // place symbol -> the block's place index (NONE when absent)
+    pidx: ChunkSeq[u32],
+    // per state token: the state it was made from, what made it (a place
+    // index, `BARRIER`, or `NONE` for no step), whether a step consumed
+    // it, and the head of its reached-place list
+    from: ChunkSeq[u64],
+    kind: ChunkSeq[u32],
+    used: ChunkSeq[u8],
+    head: ChunkSeq[u32],
+    // reached lists: (place, next)
+    rp: ChunkSeq[u32],
+    rn: ChunkSeq[u32],
+    // tokens touched by this block, to reset
+    touched: ChunkSeq[u64]
+}
+
+pub fn screen_new(names_len: u64) -> Screen {
+    let mut lmark: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](names_len);
+    lmark.resize(names_len, 0);
+    Screen {
+        pn: names_new(),
+        buf: ChunkSeq::new[u8](),
+        lmark: lmark,
+        pidx: ChunkSeq::new[u32](),
+        from: ChunkSeq::new[u64](),
+        kind: ChunkSeq::new[u32](),
+        used: ChunkSeq::new[u8](),
+        head: ChunkSeq::new[u32](),
+        rp: ChunkSeq::new[u32](),
+        rn: ChunkSeq::new[u32](),
+        touched: ChunkSeq::new[u64]()
+    }
+}
+
+fn is_local(in sc: Screen, s: u32) -> bool {
+    match sc.lmark.try_get(w(s)) {
+        Option::Some(x) => x != 0,
+        Option::None => false,
+    }
+}
+
+fn is_scalar(in cls: ChunkSeq[u8], ty: u32) -> bool {
+    class_of(in cls, ty) == C_SCALAR
+}
+
+fn is_sink_read(in p: Program, i: InstRow) -> bool {
+    i.op == OP_READ && p.op(add(i.a, 2)) == P_SINK
+}
+
+// The place symbol `ir_opt_policy::place_of` gives an instruction: a read
+// of a local, a write, or a plain bind. `NONE` for none.
+fn place_of(in p: Program, in names: Names, inout sc: Screen, i: InstRow) -> u32 {
+    if i.op == OP_READ {
+        if !is_local(in sc, n32(p.op(i.a))) {
+            return NONE;
+        }
+    } else if i.op != OP_WRITE && !(i.op == OP_BIND && p.op(inc(i.a)) == PAT_BIND) {
+        return NONE;
+    }
+    place_text(in p, in names, inout sc.pn, inout sc.buf, i)
+}
+
+fn grow32(inout s: ChunkSeq[u32], n: u64) {
+    if s.len() < n {
+        s.resize(n, NONE);
+    }
+}
+
+// `block_may_improve`. Uses `pidx` as the seen set and clears it.
+fn may_improve(in p: Program, in names: Names, inout sc: Screen, bk: BlockRow) -> bool {
+    let mut seen: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut found = false;
+    for k in 0..bk.ic {
+        let i = p.inst(add(bk.i0, k));
+        let s = place_of(in p, in names, inout sc, i);
+        if s == NONE {
+            continue;
+        }
+        grow32(inout sc.pidx, sc.pn.len());
+        let was = at32(in sc.pidx, w(s)) != NONE;
+        if is_sink_read(in p, i) && (i.has_token == 0 || was) {
+            found = true;
+            break;
+        }
+        if !was {
+            sc.pidx.try_set(w(s), 0);
+            seen.push(s);
+        }
+    }
+    for k in 0..seen.len() {
+        sc.pidx.try_set(w(at32(in seen, k)), NONE);
+    }
+    found
+}
+
+fn touch(inout sc: Screen, t: u64) {
+    if sc.kind.len() <= t {
+        let n = inc(t);
+        sc.from.resize(n, 0);
+        sc.kind.resize(n, NONE);
+        sc.used.resize(n, 0);
+        sc.head.resize(n, NONE);
+    }
+    sc.touched.push(t);
+}
+
+fn reached(in sc: Screen, t: u64, place: u32) -> bool {
+    let mut at = at32(in sc.head, t);
+    loop {
+        if at == NONE {
+            return false;
+        }
+        if at32(in sc.rp, w(at)) == place {
+            return true;
+        }
+        at = at32(in sc.rn, w(at));
+    }
+    false
+}
+
+fn reach(inout sc: Screen, t: u64, place: u32) {
+    if reached(in sc, t, place) {
+        return;
+    }
+    touch(inout sc, t);
+    let at = n32(sc.rp.len());
+    sc.rp.push(place);
+    sc.rn.push(at32(in sc.head, t));
+    sc.head.try_set(t, at);
+}
+
+fn step_kind(in sc: Screen, t: u64) -> u32 {
+    at32(in sc.kind, t)
+}
+
+fn step_from(in sc: Screen, t: u64) -> u64 {
+    match sc.from.try_get(t) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+// The walk of one scalar sink read of place `pi` from state `input`:
+// 1 when the block can improve, 0 to go on (the walk's states reached).
+fn walk(
+    in sc: Screen,
+    input: u64,
+    pi: u32,
+    entry: u64,
+    in places: ChunkSeq[u32],
+    limit: u64,
+    inout states: ChunkSeq[u64]
+) -> bool {
+    let mut s = input;
+    loop {
+        if reached(in sc, s, pi) {
+            return true;
+        }
+        states.push(s);
+        let k = step_kind(in sc, s);
+        if k == NONE {
+            if s == entry {
+                return false;
+            }
+            return true;
+        }
+        if k == BARRIER {
+            return false;
+        }
+        if k == pi {
+            return true;
+        }
+        if overlaps(in sc.pn, at32(in places, w(k)), at32(in places, w(pi))) {
+            return false;
+        }
+        s = step_from(in sc, s);
+        if states.len() > limit {
+            // A cycle of states; let the pass decide.
+            return true;
+        }
+    }
+    false
+}
+
+fn reset(inout sc: Screen, in places: ChunkSeq[u32]) {
+    for k in 0..sc.touched.len() {
+        let t = match sc.touched.try_get(k) {
+            Option::Some(x) => x,
+            Option::None => 0,
+        };
+        sc.kind.try_set(t, NONE);
+        sc.used.try_set(t, 0);
+        sc.head.try_set(t, NONE);
+    }
+    sc.touched.clear();
+    sc.rp.clear();
+    sc.rn.clear();
+    for k in 0..places.len() {
+        sc.pidx.try_set(w(at32(in places, k)), NONE);
+    }
+}
+
+// `block_can_improve` past `block_may_improve`.
+fn can_improve(
+    in p: Program,
+    in names: Names,
+    in cls: ChunkSeq[u8],
+    in vty: ChunkSeq[u32],
+    inout sc: Screen,
+    bk: BlockRow
+) -> bool {
+    // The block's place table: place symbol -> index by first appearance.
+    let mut places: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut isym: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](bk.ic);
+    for k in 0..bk.ic {
+        let i = p.inst(add(bk.i0, k));
+        let mut s = place_of(in p, in names, inout sc, i);
+        if s != NONE {
+            grow32(inout sc.pidx, sc.pn.len());
+            if at32(in sc.pidx, w(s)) == NONE {
+                sc.pidx.try_set(w(s), n32(places.len()));
+                places.push(s);
+            }
+        } else if is_sink_read(in p, i) && is_scalar(in cls, i.ty) {
+            // A sink read of a non-local looks its place up.
+            s = place_text(in p, in names, inout sc.pn, inout sc.buf, i);
+            grow32(inout sc.pidx, sc.pn.len());
+        }
+        isym.push(s);
+    }
+    let entry = block_entry(in p, bk);
+    let limit = inc(bk.ic);
+    let mut states: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut keep = false;
+    for k in 0..bk.ic {
+        let i = p.inst(add(bk.i0, k));
+        let s = at32(in isym, k);
+        if is_sink_read(in p, i) && is_scalar(in cls, i.ty) && s != NONE {
+            let pi = at32(in sc.pidx, w(s));
+            if pi != NONE {
+                if i.has_token == 0 {
+                    keep = true;
+                    break;
+                }
+                states.clear();
+                if walk(in sc, i.tin, pi, entry, in places, limit, inout states) {
+                    keep = true;
+                    break;
+                }
+                for j in 0..states.len() {
+                    let t = match states.try_get(j) {
+                        Option::Some(x) => x,
+                        Option::None => 0,
+                    };
+                    reach(inout sc, t, pi);
+                }
+            }
+        }
+        if i.has_token != 0 && i.tin != i.tout {
+            let mut step = BARRIER;
+            if i.op == OP_WRITE {
+                let value = p.op(add(i.a, 2));
+                let is_eq = names.spells(n32(p.op(inc(i.a))), in "=".as_bytes());
+                if is_eq && is_scalar(in cls, at32(in vty, value)) && s != NONE {
+                    step = at32(in sc.pidx, w(s));
+                }
+            } else if i.op == OP_BIND && p.op(inc(i.a)) == PAT_BIND {
+                let value = p.op(i.a);
+                if is_scalar(in cls, at32(in vty, value)) && s != NONE {
+                    step = at32(in sc.pidx, w(s));
+                }
+            }
+            if step == NONE {
+                step = BARRIER;
+            }
+            touch(inout sc, i.tin);
+            match sc.used.try_get(i.tin) {
+                Option::Some(u) => {
+                    if u != 0 {
+                        // Two steps from one state; let the pass decide.
+                        keep = true;
+                        break;
+                    }
+                },
+                Option::None => {},
+            }
+            sc.used.try_set(i.tin, 1);
+            touch(inout sc, i.tout);
+            sc.from.try_set(i.tout, i.tin);
+            sc.kind.try_set(i.tout, step);
+        }
+    }
+    reset(inout sc, in places);
+    keep
+}
+
+// Per block row of the program: 1 when the screen keeps the block (memory
+// forwarding may change it), 0 when the policy skips it. Also returns the
+// number of kept blocks.
+pub fn screen_program(in p: Program, in names: Names, in cls: ChunkSeq[u8]) -> (ChunkSeq[u8], u64) {
+    let mut sc = screen_new(names.len());
+    let mut keep: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut kept: u64 = 0;
+    for fi in 0..p.fn_count() {
+        let f = p.function(fi);
+        let v = fn_view(in p, f);
+        for k in 0..v.locals.len() {
+            sc.lmark.try_set(w(at32(in v.locals, k)), 1);
+        }
+        for bi in 0..f.bc {
+            let b = add(f.b0, bi);
+            let bk = p.block(b);
+            if keep.len() <= b {
+                keep.resize(inc(b), 0);
+            }
+            let mut k: u8 = 0;
+            if may_improve(in p, in names, inout sc, bk) {
+                if can_improve(in p, in names, in cls, in v.vty, inout sc, bk) {
+                    k = 1;
+                    kept = inc(kept);
+                }
+            }
+            keep.try_set(b, k);
+        }
+        for k in 0..v.locals.len() {
+            sc.lmark.try_set(w(at32(in v.locals, k)), 0);
+        }
+    }
+    (keep, kept)
+}

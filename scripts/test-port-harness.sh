@@ -219,7 +219,7 @@ if cargo test --locked -p vesper-loom-calculus --features vesper-port-divergent 
     echo "the divergent loom-calculus port passed its tests" >&2
     exit 1
 fi
-for t in manifest_corpus_matches_the_rust_build semver_matrix_matches_the_rust_build authority_reaches_ancestors_that_sort_before_their_dependencies unsafe_ffi_policy_relaxation_is_rejected_for_existing_and_new_packages; do
+for t in manifest_corpus_matches_the_rust_build semver_matrix_matches_the_rust_build authority_reaches_ancestors_that_sort_before_their_dependencies unsafe_ffi_policy_relaxation_is_rejected_for_existing_and_new_packages manifest_cases_match_the_toml_crate semver_cases_match_the_semver_crate; do
     grep -q "test $t ... FAILED" "$log" || { cat "$log"; echo "the divergent loom-calculus port did not fail $t" >&2; exit 1; }
 done
 grep -q 'test documented_manifest_is_declarative_and_secure_by_default ... ok' "$log" || { cat "$log"; echo "the divergent loom-calculus port failed an unchanged test" >&2; exit 1; }
@@ -307,4 +307,6 @@ skip_port vesper-lint || sh crates/vesper-lint/port/test-port.sh  # self-hosting
 skip_port vesper-sim-session || sh crates/vesper-sim-session/port/test-port.sh  # self-hosting SH5 lane 19 (#1342): vesper-sim-session, both builds, the transcript differential and the divergence check
 skip_port vesper-fusion || sh crates/vesper-fusion/port/test-port.sh  # Rust-exit SH6 lane 18 (#1413): vesper-fusion on its Vesper engine (the only build) and one divergence check
 skip_port vesper-warp-crypto || . crates/vesper-warp-crypto/port/check.sh  # Rust-exit SH6 lane 17 (#1412): vesper-warp-crypto on its Vesper port (the only build), the differential against the Rust reference and one divergence check per ported area
+skip_port vesper-loom-trust || . crates/vesper-loom-trust/port/check.sh  # Rust-exit SH6 lane 17 (#1412): vesper-loom-trust on its Vesper port (its users outside the compiler's build; the tools link the Rust seed), the differential against the Rust reference and one divergence check per ported area
 skip_port vesper-beacon-arrow || sh crates/vesper-beacon-arrow/port/test-port.sh  # Rust-exit SH6 lane 18 (#1413): vesper-beacon-arrow span stream on its Vesper writer (the only build) and one divergence check
+skip_port vesper-loom-cas || sh crates/vesper-loom-cas/port/test-port.sh  # Rust-exit SH6 lane 16 (#1411): vesper-loom-cas codecs (names, ids, trees, derivations) on both builds, the seeded differential and one divergence check per module

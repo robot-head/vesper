@@ -619,3 +619,111 @@ fn speed_producer() {
         alone.as_secs_f64() / r.as_secs_f64()
     );
 }
+
+/// The flip gate's producer workloads (scripts/ci/flip-gate/optimize.toml;
+/// `CHECK_HARNESS_SPEED` set, release build), over every recorded visit.
+/// Each epoch runs Rust, Vesper, Vesper, Rust (`OPTIMIZE_GATE_EPOCHS`,
+/// default 12; `OPTIMIZE_GATE_WORKLOAD` runs only one) and prints one pair
+/// per epoch in the gate's `flip-gate pairs` format:
+/// - `producer`: the Vesper producer alone (its input decode, the
+///   `optimize_propose_decode` entry timed in the same epoch, subtracted)
+///   against `propose_rust`.
+/// - `pass`: the producer and the checker together, as the optimizer runs
+///   them: Rust's `propose_rust` on every visit and `verify_spent` on every
+///   candidate it proposed, against the Vesper producer and the Vesper
+///   checker on the same cases, both with their input decode.
+#[test]
+#[ignore]
+fn flip_gate() {
+    if !speed() {
+        return;
+    }
+    let epochs: usize = std::env::var("OPTIMIZE_GATE_EPOCHS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(12);
+    let (all, _) = all_visits();
+    let cases: Vec<&Visit> = all.iter().collect();
+    let input = encode_cases(&cases);
+    let quiet = package().entry("optimize_propose_quiet", true);
+    let decode = package().entry("optimize_propose_decode", true);
+    let verify = package().entry("optimize_verify", true);
+    let produced: Vec<(&Visit, &Produced)> = all
+        .iter()
+        .filter_map(|v| match &v.result {
+            Ok(Proposal::Candidate(p)) => Some((v, &**p)),
+            _ => None,
+        })
+        .collect();
+    let mut batch = Batch::new(produced.len(), false);
+    for (v, p) in &produced {
+        let c = &p.certificate;
+        batch.verify(
+            &v.source,
+            &p.candidate,
+            &v.types,
+            c,
+            (c.terms.capacity(), c.proofs.capacity()),
+            p.limits,
+            p.spent,
+            false,
+        );
+    }
+    let checks = batch.bytes;
+    let propose = || {
+        time(|| {
+            for v in &cases {
+                let _ = std::hint::black_box(optimize::propose_rust(&v.source, &v.types, v.limits));
+            }
+        })
+        .as_nanos()
+    };
+    let gate = || {
+        time(|| {
+            for (v, p) in &produced {
+                let mut spent = p.spent;
+                let r = witness::verify_spent(
+                    &v.source,
+                    &p.candidate,
+                    &v.types,
+                    &p.certificate,
+                    p.limits,
+                    &mut spent,
+                );
+                let _ = std::hint::black_box((r, spent));
+            }
+        })
+        .as_nanos()
+    };
+    let on = |e: &Entry, i: &[u8]| time(|| drop(std::hint::black_box(e.words(i)))).as_nanos();
+    // Warm-up, untimed.
+    propose();
+    gate();
+    on(&quiet, &input);
+    on(&decode, &input);
+    on(&verify, &checks);
+    let only = std::env::var("OPTIMIZE_GATE_WORKLOAD").ok();
+    let wants = |w: &str| only.as_deref().is_none_or(|o| o == w);
+    let (mut alone, mut pass) = (String::new(), String::new());
+    for _ in 0..epochs {
+        if wants("producer") {
+            let (r1, v1, d1) = (propose(), on(&quiet, &input), on(&decode, &input));
+            let (d2, v2, r2) = (on(&decode, &input), on(&quiet, &input), propose());
+            let v = (v1 + v2).saturating_sub(d1 + d2);
+            alone += &format!(" {}:{}", r1 + r2, v);
+        }
+        if wants("pass") {
+            let r1 = propose() + gate();
+            let v1 = on(&quiet, &input) + on(&verify, &checks);
+            let v2 = on(&quiet, &input) + on(&verify, &checks);
+            let r2 = propose() + gate();
+            pass += &format!(" {}:{}", r1 + r2, v1 + v2);
+        }
+    }
+    if wants("producer") {
+        println!("flip-gate pairs producer{alone}");
+    }
+    if wants("pass") {
+        println!("flip-gate pairs pass{pass}");
+    }
+}

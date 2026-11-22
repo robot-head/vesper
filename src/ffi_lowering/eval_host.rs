@@ -58,13 +58,19 @@ impl EvalHost {
                 if super::cpu::function(f.symbol()).is_some() {
                     continue;
                 }
-                let address = symbols
-                    .iter()
-                    .find(|(n, _)| *n == f.symbol())
-                    .ok_or_else(|| {
-                        format!("{}::{} has no host function", library.name(), f.symbol())
-                    })?
-                    .1 as usize;
+                // A callback type's call goes through the pointer it is
+                // handed, so it binds no host function.
+                let address = if f.is_indirect() {
+                    0
+                } else {
+                    symbols
+                        .iter()
+                        .find(|(n, _)| *n == f.link_symbol())
+                        .ok_or_else(|| {
+                            format!("{}::{} has no host function", library.name(), f.symbol())
+                        })?
+                        .1 as usize
+                };
                 let words = f.abi().parameters.len();
                 if words > MAX_WORDS {
                     return Err(format!(
@@ -101,6 +107,12 @@ impl EvalHost {
                 }
             })?;
         let d = &f.descriptor;
+        if d.uses_foreign_memory() {
+            return Err(format!(
+                "{}::{} takes or returns foreign memory viewed in place (a pinned buffer or a mapping), which only native code lends; the evaluator has no stable addresses",
+                call.library, call.symbol
+            ));
+        }
         let args = call.arguments().to_vec();
         let params = d.parameters();
         if args.len() != params.len() {
@@ -111,7 +123,16 @@ impl EvalHost {
         let mut slots = vec![];
         for (p, v) in params.iter().zip(&args) {
             let slot = match p.ty() {
-                ParameterType::Value(_) | ParameterType::Handle { .. } => Slot::None,
+                ParameterType::Value(_)
+                | ParameterType::Handle { .. }
+                | ParameterType::Pinned { .. } => Slot::None,
+                // C would need a pointer that re-enters this evaluator.
+                ParameterType::Function { .. } => {
+                    return Err(format!(
+                        "{}: a Vesper function handed to C runs in compiled code (the JIT or an object), not the evaluator",
+                        call.symbol
+                    ));
+                }
                 ParameterType::CStr => {
                     let bytes = elements(v)?
                         .iter()
@@ -188,6 +209,16 @@ impl EvalHost {
                 (_, _) => words.push(0),
             }
         }
+        // A callback type's call: its first word is the C function pointer.
+        let address = if d.is_indirect() {
+            let callee = words.remove(0);
+            if callee == 0 {
+                return Err(format!("{}: call of a NULL function pointer", call.symbol));
+            }
+            callee as usize
+        } else {
+            f.address
+        };
         if let Some(v) = d.abi().variadic {
             words.splice(
                 v.first - v.padding..v.first - v.padding,
@@ -197,7 +228,7 @@ impl EvalHost {
         // SAFETY: `address` is the host function bound to this `.vsys`
         // signature; each parameter is one integer-class word in the C ABI
         // (see the module comment), and every buffer outlives the call.
-        let raw = unsafe { call_words(f.address, &words)? };
+        let raw = unsafe { call_words(address, &words)? };
         let os_error = d.reads_errno().then(|| {
             std::io::Error::last_os_error()
                 .raw_os_error()

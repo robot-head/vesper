@@ -93,7 +93,7 @@ impl Checker<'_> {
         // binding or static text) is bound to the hidden binding; a slice
         // view of a place that may change is read as a method receiver
         // each iteration, and the loop lends the place.
-        let bound = !place && view_base(iter).is_some() && self.bind_view(iter, env);
+        let bound = !place && view_base(iter).is_some() && self.bind_view(iter, env, false);
         let view = view_base(iter).filter(|(base, _)| {
             !bound
                 && crate::strings::whole_view(iter).is_none()

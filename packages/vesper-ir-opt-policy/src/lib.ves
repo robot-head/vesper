@@ -1,0 +1,138 @@
+// @vesper/ir-opt-policy: the native optimizer policy (src/ir_opt_policy.rs,
+// self-hosting SH4 lane 5 #1279 and SH5 lane 9 #1332) in Vesper (Rust-exit
+// gap wave 1, lane 12, #1510), around @vesper/ir-opt's pass.
+//
+// - screen.ves: `block_may_improve` and `block_can_improve`, the necessary
+//   conditions for memory forwarding to remove a read in a block.
+//
+// `policy_words` takes @vesper/ir-opt's input and returns its output
+// (`ir_opt_words`), with memory forwarding run only on the blocks the
+// screen keeps: what `ir_opt_policy::optimize_with_stats` gives, which is
+// `ir_opt::optimize` on the whole program. The Rust policy's surrogates,
+// threads and opt-in cache are how the Rust pass is driven per block;
+// @vesper/ir-opt already works per block, so a mask over the block rows
+// replaces them.
+
+use @vesper/check-data::input::{
+    Reader,
+    read_ctx
+};
+use @vesper/place-ir::{
+    put_program,
+    read_program
+};
+use @vesper/ir-opt::view::{
+    type_classes
+};
+use @vesper/ir-opt::forward::{
+    forward_program_kept
+};
+use @vesper/ir-opt::reuse::{
+    read_facts,
+    reuse_new,
+    reuse_program
+};
+use self::screen::{
+    screen_program
+};
+
+// Constants are copied, not imported: the Vesper package assembler
+// (@vesper/check-names-packages) does not resolve an imported constant
+// yet (E0111).
+const S_OK: u8 = 0;
+
+const MODE_OPTIMIZE: u64 = 0;
+
+// The harness's entry (tests/self_host_ir_opt_policy.rs passes a `Str`).
+pub fn ir_opt_policy_entry(in input: Str) -> ChunkSeq[u64] {
+    policy_words(in input.as_bytes())
+}
+
+// The harness's screen: per block row, 1 when the screen keeps it.
+pub fn ir_opt_policy_screen_entry(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut r = Reader {
+        pos: 0
+    };
+    let c = read_ctx(inout r, in b);
+    let p = read_program(inout r, in b, in c);
+    let cls = type_classes(in c.types, in c.names);
+    let (keep, kept) = screen_program(in p, in c.names, in cls);
+    let mut out: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](inc(keep.len()));
+    out.push(kept);
+    for k in 0..keep.len() {
+        out
+            .push(
+                match keep.try_get(k) {
+                    Option::Some(x) => widen_u64(x),
+                    Option::None => 0,
+                }
+            );
+    }
+    out
+}
+
+fn inc(x: u64) -> u64 {
+    wrapping_add(x, 1)
+}
+
+// @vesper/ir-opt's `ir_opt_words` with the screen, for the hybrid build's
+// `opt` hook (crates/vesper-hybrid/modules/ir_opt).
+pub fn policy_words(in b: Slice[u8]) -> ChunkSeq[u64] {
+    let mut r = Reader {
+        pos: 0
+    };
+    let c = read_ctx(inout r, in b);
+    let mut p = read_program(inout r, in b, in c);
+    let mode = r.word(in b);
+    let facts = read_facts(inout r, in b, in p);
+    let cls = type_classes(in c.types, in c.names);
+    let n = p.insts.len();
+    let mut orig: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+    for k in 0..n {
+        orig.push(k);
+    }
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut count: u64 = 0;
+    if mode == MODE_OPTIMIZE {
+        let (keep, kept) = screen_program(in p, in c.names, in cls);
+        if kept != 0 {
+            let (st, forwarded) = forward_program_kept(
+                inout p,
+                in c.names,
+                in cls,
+                inout orig,
+                in keep
+            );
+            if st != S_OK {
+                out.push(widen_u64(st));
+                out.push(0);
+                out.push(0);
+                out.push(0);
+                return out;
+            }
+            count = forwarded;
+        }
+    }
+    let mut reuse = reuse_new();
+    reuse_program(inout p, in c.names, in cls, in facts, in orig, inout reuse);
+    out.push(widen_u64(reuse.status));
+    out.push(reuse.error);
+    out.push(wrapping_add(count, reuse.matched));
+    let np = reuse.payloads.len() / 3;
+    out.push(np);
+    if reuse.status != 0 {
+        return out;
+    }
+    for k in 0..reuse.payloads.len() {
+        out
+            .push(
+                match reuse.payloads.try_get(k) {
+                    Option::Some(x) => x,
+                    Option::None => 0,
+                }
+            );
+    }
+    put_program(in p, in c.types, in c.names, inout out);
+    out
+}

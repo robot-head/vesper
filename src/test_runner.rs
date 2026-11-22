@@ -120,6 +120,9 @@ struct Options {
     /// `--engines all`: every passing unit test must pass on every engine
     /// ([`test_engines::agree`]).
     engines_all: bool,
+    /// `--link-search` directories the foreign-library loader looks in
+    /// first (`vsys_commands::eval_host_in`).
+    link_search: Vec<PathBuf>,
 }
 
 impl Options {
@@ -152,6 +155,7 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
     let mut no_cache = false;
     let mut json = false;
     let mut engines = None;
+    let mut link_search = vec![];
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -162,6 +166,9 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
                 mutate_dependency = Some(PathBuf::from(path));
             }
             "--no-cache" if !no_cache => no_cache = true,
+            "--link-search" => link_search.push(PathBuf::from(
+                it.next().ok_or("--link-search requires a directory")?,
+            )),
             "--json" if !json => json = true,
             "--engines" if engines.is_none() => {
                 let value = it.next().ok_or("--engines requires `all` or `unit`")?;
@@ -240,6 +247,7 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
         no_cache,
         json,
         engines_all,
+        link_search,
     })
 }
 
@@ -950,8 +958,8 @@ fn bridge_diagnostics(mut error: FfiError) -> Vec<Diagnostic> {
     error.diagnostics
 }
 
-fn test_host(imports: &Imports) -> Result<EvalHost, String> {
-    crate::vsys_commands::eval_host(imports, "test")
+fn test_host(imports: &Imports, opts: &Options) -> Result<EvalHost, String> {
+    crate::vsys_commands::eval_host_in(imports, "test", &opts.link_search)
 }
 
 impl TestProgram {
@@ -1197,7 +1205,11 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
                 continue;
             }
         };
-        let host = program.imports.as_ref().map(test_host).transpose()?;
+        let host = program
+            .imports
+            .as_ref()
+            .map(|i| test_host(i, opts))
+            .transpose()?;
         let fn_graph = FunctionGraph::from_module(&program.module);
         let combined = program.sources.as_ref().map(SourceMap::combined);
         let package_hash = combined.as_ref().map(|text| blake3::hash(text.as_bytes()));
@@ -1965,7 +1977,7 @@ fn run_mutation_gate(opts: &Options) -> Result<(), String> {
     let host = package_program
         .as_ref()
         .and_then(|program| program.imports.as_ref())
-        .map(test_host)
+        .map(|i| test_host(i, opts))
         .transpose()?;
     let mut all_candidates = Vec::new();
     let dependency_source = if let Some(path) = &opts.mutate_dependency {

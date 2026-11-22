@@ -195,6 +195,9 @@ impl FunctionDescriptor {
                 ParameterType::Value(_) | ParameterType::Handle { .. } => {
                     &[(ValidBits, BeforeCall)]
                 }
+                // Memory C may keep: its address and length are Vesper's own
+                // sequence, valid until the program releases it.
+                ParameterType::Pinned { .. } => &[(ValidBits, BeforeCall)],
                 ParameterType::Slice { .. } => &[
                     (NonNull, BeforeCall),
                     (Aligned, BeforeCall),
@@ -216,6 +219,12 @@ impl FunctionDescriptor {
                 // The callee reads a fresh NUL-terminated copy, never the
                 // caller's memory.
                 ParameterType::CStr => &[(NonNull, BeforeCall), (NoRetention, Unverifiable)],
+                // A compiler-generated trampoline: never NULL. A `retain`
+                // pointer may be kept, so only `nocapture` promises more.
+                ParameterType::Function { retain: true, .. } => &[(NonNull, BeforeCall)],
+                ParameterType::Function { retain: false, .. } => {
+                    &[(NonNull, BeforeCall), (NoRetention, Unverifiable)]
+                }
             };
             for (assumption, checkability) in list {
                 if *assumption == NoCaptureViaReturn && !returns_pointer {
@@ -303,7 +312,11 @@ impl FunctionDescriptor {
             let assumption = match p.ty {
                 ParameterType::Slice { .. } => Assumption::WithinLength,
                 ParameterType::Pointer { .. } => Assumption::SingleElement,
-                ParameterType::Value(_) | ParameterType::Handle { .. } | ParameterType::CStr => {
+                ParameterType::Value(_)
+                | ParameterType::Handle { .. }
+                | ParameterType::CStr
+                | ParameterType::Function { .. }
+                | ParameterType::Pinned { .. } => {
                     continue;
                 }
             };
@@ -352,7 +365,10 @@ impl FunctionDescriptor {
         for (i, p) in self.parameters.iter().enumerate() {
             if matches!(
                 p.ty,
-                ParameterType::Value(_) | ParameterType::Handle { .. } | ParameterType::CStr
+                ParameterType::Value(_)
+                    | ParameterType::Handle { .. }
+                    | ParameterType::CStr
+                    | ParameterType::Function { .. }
             ) {
                 continue;
             }
@@ -422,7 +438,10 @@ impl FunctionDescriptor {
                         },
                     );
                 }
-                (ParameterType::CStr, RawArgument::Pointer { address }) => {
+                (
+                    ParameterType::CStr | ParameterType::Function { .. },
+                    RawArgument::Pointer { address },
+                ) => {
                     report.push(
                         at,
                         name,
@@ -434,7 +453,28 @@ impl FunctionDescriptor {
                         },
                     );
                 }
-                (ParameterType::Handle { handle, .. }, RawArgument::Bits(bits)) => {
+                // A pinned buffer or a mapping: `(data, len)` of memory that
+                // stays where it is until the program releases it.
+                (ParameterType::Pinned { .. }, RawArgument::Slice { .. }) => {
+                    report.push(at, name, ValidBits, Outcome::Held);
+                }
+                (ParameterType::Handle { handle, .. }, RawArgument::Slice { address, .. })
+                    if handle.mapping().is_some() =>
+                {
+                    report.push(
+                        at,
+                        name,
+                        ValidBits,
+                        if *address == 0 {
+                            Outcome::Violated(ValidationError::NullAddress)
+                        } else {
+                            Outcome::Held
+                        },
+                    );
+                }
+                (ParameterType::Handle { handle, .. }, RawArgument::Bits(bits))
+                    if handle.mapping().is_none() =>
+                {
                     let contract = ValueType::Handle {
                         handle: handle.clone(),
                         nullable: false,

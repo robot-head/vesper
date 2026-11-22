@@ -320,12 +320,23 @@ impl FunctionDescriptor {
                 (ParameterType::Value(t), RawArgument::Bits(bits)) => {
                     raw.push((carrier(t).expect("non-unit parameters"), bits))
                 }
-                (ParameterType::Slice { .. }, RawArgument::Slice { address, length }) => {
+                (
+                    ParameterType::Slice { .. } | ParameterType::Pinned { .. },
+                    RawArgument::Slice { address, length },
+                ) => {
+                    raw.push((AbiType::Pointer, address));
+                    raw.push((AbiType::Integer(Scalar::Usize), length));
+                }
+                (ParameterType::Handle { handle, .. }, RawArgument::Slice { address, length })
+                    if handle.mapping().is_some() =>
+                {
                     raw.push((AbiType::Pointer, address));
                     raw.push((AbiType::Integer(Scalar::Usize), length));
                 }
                 (
-                    ParameterType::Pointer { .. } | ParameterType::CStr,
+                    ParameterType::Pointer { .. }
+                    | ParameterType::CStr
+                    | ParameterType::Function { .. },
                     RawArgument::Pointer { address },
                 )
                 | (ParameterType::Handle { .. }, RawArgument::Bits(address)) => {

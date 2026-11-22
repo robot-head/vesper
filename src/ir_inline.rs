@@ -30,10 +30,13 @@
 //!   single call site in the program and is at most
 //!   [`Budget::single_site_callee`] instructions;
 //! * its effect row is empty, or it is exactly the caller's row and holds only
-//!   unlabeled `Fail[E]` instances. A raise in the inlined body then performs
-//!   the caller's `Fail[E]` capability, which is what the caller's re-raise
-//!   after the call did. Rows with labels, tails or capability effects are
-//!   not inlined, and callers whose row names a capability effect
+//!   unlabeled `Fail[E]` instances, or its unlabeled `Fail[E]` instances are
+//!   all in the caller's row and it has no loop, handler or effect operation
+//!   (`Fail::raise` performs the innermost `Fail` in scope, see `row_within`;
+//!   #1502).
+//!   A raise in the inlined body then performs the caller's `Fail[E]`
+//!   capability, which is what the caller's re-raise after the call did.
+//!   Rows with labels, tails or capability effects are not inlined, and callers whose row names a capability effect
 //!   (`ConstTime`, `Realtime`, `DetFloat`) are left alone so the per-function
 //!   capability verifiers see the code they saw before, and so are callers
 //!   holding `Box` values, whose drops are placed per block;
@@ -494,6 +497,37 @@ fn fail_row_only(effects: &Effects) -> bool {
             .all(|e| e.name == "Fail" && e.label.is_none() && e.args.len() == 1)
 }
 
+/// Whether `callee` may be inlined into a caller whose row is `caller`:
+/// the callee's row is empty or equal to the caller's, or every instance of
+/// its row (unlabeled `Fail[E]` only, see [`fail_row_only`]) is also in the
+/// caller's row and its body raises only through typed paths (#1502). Its
+/// fallible primitives raise by error type and its calls re-raise by error
+/// type, so in the caller they perform the caller's instance of the same
+/// `Fail[E]`. An effect operation (`Fail::raise(e)`) records no type: the
+/// native backend performs the innermost `Fail` in scope, which is the
+/// callee's own instance only while the rows are equal, so a callee with an
+/// effect operation (a call of anything that is not a program function) or
+/// a handler stays a call. So does a callee with a loop: such kernels are
+/// kept apart on purpose, since a merged loop nest spills in the native
+/// backend (Resonance's `accumulate2` into `sum_inputs`, 1.0G to 1.8G
+/// instructions).
+fn row_within(program: &Program, callee: &FunctionIr, caller: &Effects) -> bool {
+    let row = &callee.effects;
+    if row.instances.is_empty() || row == caller {
+        return true;
+    }
+    let untyped = callee
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| match &i.op {
+            Op::Loop | Op::Handle { .. } => true,
+            Op::Call { callee, .. } => !program.functions.contains_key(callee),
+            _ => false,
+        });
+    !untyped && fail_row_only(row) && row.instances.iter().all(|e| caller.instances.contains(e))
+}
+
 fn mentions_function(world: &World, t: &Type) -> bool {
     crate::source_analysis::contains_function(world, t)
 }
@@ -712,6 +746,7 @@ fn mentions_names(t: &Type, names: &BTreeSet<&String>) -> bool {
 /// The bindings for a call, or `None` when the site must stay a call.
 fn site_bindings(
     world: &World,
+    program: &Program,
     caller: &FunctionIr,
     callee: &FunctionIr,
     dest: ValueId,
@@ -720,7 +755,7 @@ fn site_bindings(
     if args.len() != callee.params.len() || caller.values.get(&dest) != Some(&callee.result) {
         return Err("signature");
     }
-    if !callee.effects.instances.is_empty() && callee.effects != caller.effects {
+    if !row_within(program, callee, &caller.effects) {
         return Err("effect row differs from the caller's");
     }
     if !caller.bounds.is_empty() {
@@ -869,8 +904,11 @@ fn inline_into(
                     None
                 };
                 let target = copy.as_ref().unwrap_or(original);
-                let bindings =
-                    site_bindings(world, caller, target, inst.dest, args).map_err(Refusal::Site)?;
+                let bindings = site_bindings(world, program, caller, target, inst.dest, args)
+                    .map_err(Refusal::Site)?;
+                if owns_sequence(world, target) && cold_block(caller, b) {
+                    return Err(Refusal::Site("sequence owner on a cold path"));
+                }
                 let whole = cost_with_handlers(world, program, target);
                 let handlers = whole - cost(world, target);
                 let folded = site::fold(world, caller, target, &bindings)
@@ -981,6 +1019,66 @@ fn inline_into(
         }
         b += 1;
     }
+}
+
+/// Whether `f` owns a sequence: a local, a by-value parameter included,
+/// whose type holds one. A slice local is a view (pointer and length) and
+/// owns nothing. Its copy would give the caller the sequence's
+/// stack slot, which the native backend zeroes in the prologue, the frame
+/// and callee-saved registers its calls need, and drop flags tested on
+/// every path (gap 8 of the Kinetic/Resonance report, #1499).
+fn owns_sequence(world: &World, f: &FunctionIr) -> bool {
+    f.locals.iter().any(|(name, t)| {
+        crate::seq::holds_sequence(world, t)
+            && !crate::seq::is_slice_type(t)
+            && f.params
+                .iter()
+                .find(|p| &p.name == name)
+                .is_none_or(|p| p.pass == Pass::Sink)
+    })
+}
+
+/// Whether block `b` of `f` runs on only some calls of `f`: it is on no
+/// cycle, and some path from the entry leaves `f` (a `return` terminator or
+/// an [`Op::Exit`] of `f`) without passing it. A sequence-owning callee
+/// spliced there would put its setup on the paths that skip it (#1499); a
+/// call keeps that setup in the callee's own frame.
+fn cold_block(f: &FunctionIr, b: usize) -> bool {
+    let exits = |k: usize| {
+        let block = &f.blocks[k];
+        matches!(block.terminator, Terminator::Return(_))
+            || block
+                .instructions
+                .iter()
+                .any(|i| matches!(&i.op, Op::Exit { owner, .. } if *owner == f.name))
+    };
+    let on_cycle = reaches(f, site::successors(&f.blocks[b].terminator), None, |k| {
+        k == b
+    });
+    b != 0 && !on_cycle && reaches(f, vec![0], Some(b), exits)
+}
+
+/// Whether a walk of `f`'s blocks from `from` that never enters `avoid`
+/// meets a block `stop` accepts.
+fn reaches(
+    f: &FunctionIr,
+    from: Vec<usize>,
+    avoid: Option<usize>,
+    stop: impl Fn(usize) -> bool,
+) -> bool {
+    let mut seen = vec![false; f.blocks.len()];
+    let mut work = from;
+    while let Some(k) = work.pop() {
+        if Some(k) == avoid || k >= f.blocks.len() || seen[k] {
+            continue;
+        }
+        seen[k] = true;
+        if stop(k) {
+            return true;
+        }
+        work.extend(site::successors(&f.blocks[k].terminator));
+    }
+    false
 }
 
 /// Partial inlining calls the callee again with the site's arguments, so

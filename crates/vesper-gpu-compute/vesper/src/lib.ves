@@ -92,6 +92,524 @@ pub copy struct Dev {
     pub device_type: u64,
     pub max_invocations: u64,
     pub max_range: u64,
+    // The loader (a `dlopen` handle).
+    library: u64,
+}
+
+// Each Vulkan entry point, looked up in the loader at the call (a `dlsym`,
+// about 40 ns). A callback handle cannot cross the export ABI, so `Dev`
+// keeps only the loader handle. `open` checked that every entry point
+// exists, so the lookup never finds NULL (`NonNull` would trap; the `Err`
+// arm is unreachable).
+
+fn pfn_enumerate_instance_version(library: u64) -> PfnEnumerateInstanceVersion eff [Ffi[Vk]] {
+    match Vk::load_enumerate_instance_version(library, in "vkEnumerateInstanceVersion".as_bytes()) {
+        Result::Ok(f) => f,
+        Result::Err(_) => loop {},
+    }
+}
+
+fn pfn_create_instance(library: u64) -> PfnCreateInstance eff [Ffi[Vk]] {
+    match Vk::load_create_instance(library, in "vkCreateInstance".as_bytes()) {
+        Result::Ok(f) => f,
+        Result::Err(_) => loop {},
+    }
+}
+
+fn pfn_destroy_instance(library: u64) -> PfnDestroyInstance eff [Ffi[Vk]] {
+    match Vk::load_destroy_instance(library, in "vkDestroyInstance".as_bytes()) {
+        Result::Ok(f) => f,
+        Result::Err(_) => loop {},
+    }
+}
+
+fn pfn_enumerate_physical_devices(library: u64) -> PfnEnumeratePhysicalDevices eff [Ffi[Vk]] {
+    match Vk::load_enumerate_physical_devices(library, in "vkEnumeratePhysicalDevices".as_bytes()) {
+        Result::Ok(f) => f,
+        Result::Err(_) => loop {},
+    }
+}
+
+fn pfn_get_physical_device_properties2(library: u64)
+    -> PfnGetPhysicalDeviceProperties2 eff [Ffi[Vk]] {
+    match Vk::load_get_physical_device_properties2(
+        library,
+        in "vkGetPhysicalDeviceProperties2".as_bytes()
+    ) {
+        Result::Ok(f) => f,
+        Result::Err(_) => loop {},
+    }
+}
+
+fn pfn_get_physical_device_features2(library: u64) -> PfnGetPhysicalDeviceFeatures2 eff [Ffi[Vk]] {
+    match Vk::load_get_physical_device_features2(
+        library,
+        in "vkGetPhysicalDeviceFeatures2".as_bytes()
+    ) {
+        Result::Ok(f) => f,
+        Result::Err(_) => loop {},
+    }
+}
+
+fn pfn_get_physical_device_queue_family_properties(library: u64)
+    -> PfnGetPhysicalDeviceQueueFamilyProperties eff [Ffi[Vk]] {
+    match Vk::load_get_physical_device_queue_family_properties(
+        library,
+        in "vkGetPhysicalDeviceQueueFamilyProperties".as_bytes()
+    ) {
+        Result::Ok(f) => f,
+        Result::Err(_) => loop {},
+    }
+}
+
+fn pfn_get_physical_device_memory_properties(library: u64)
+    -> PfnGetPhysicalDeviceMemoryProperties eff [Ffi[Vk]] {
+    match Vk::load_get_physical_device_memory_properties(
+        library,
+        in "vkGetPhysicalDeviceMemoryProperties".as_bytes()
+    ) {
+        Result::Ok(f) => f,
+        Result::Err(_) => loop {},
+    }
+}
+
+fn pfn_create_device(library: u64) -> PfnCreateDevice eff [Ffi[Vk]] {
+    match Vk::load_create_device(library, in "vkCreateDevice".as_bytes()) {
+        Result::Ok(f) => f,
+        Result::Err(_) => loop {},
+    }
+}
+
+fn pfn_destroy_device(library: u64) -> PfnDestroyDevice eff [Ffi[Vk]] {
+    match Vk::load_destroy_device(library, in "vkDestroyDevice".as_bytes()) {
+        Result::Ok(f) => f,
+        Result::Err(_) => loop {},
+    }
+}
+
+fn pfn_device_wait_idle(library: u64) -> PfnDeviceWaitIdle eff [Ffi[Vk]] {
+    match Vk::load_device_wait_idle(library, in "vkDeviceWaitIdle".as_bytes()) {
+        Result::Ok(f) => f,
+        Result::Err(_) => loop {},
+    }
+}
+
+fn pfn_get_device_queue(library: u64) -> PfnGetDeviceQueue eff [Ffi[Vk]] {
+    match Vk::load_get_device_queue(library, in "vkGetDeviceQueue".as_bytes()) {
+        Result::Ok(f) => f,
+        Result::Err(_) => loop {},
+    }
+}
+
+fn pfn_create_semaphore(library: u64) -> PfnCreateSemaphore eff [Ffi[Vk]] {
+    match Vk::load_create_semaphore(library, in "vkCreateSemaphore".as_bytes()) {
+        Result::Ok(f) => f,
+        Result::Err(_) => loop {},
+    }
+}
+
+fn pfn_destroy_semaphore(library: u64) -> PfnDestroySemaphore eff [Ffi[Vk]] {
+    match Vk::load_destroy_semaphore(library, in "vkDestroySemaphore".as_bytes()) {
+        Result::Ok(f) => f,
+        Result::Err(_) => loop {},
+    }
+}
+
+fn pfn_get_semaphore_counter_value(library: u64) -> PfnGetSemaphoreCounterValue eff [Ffi[Vk]] {
+    match Vk::load_get_semaphore_counter_value(
+        library,
+        in "vkGetSemaphoreCounterValue".as_bytes()
+    ) {
+        Result::Ok(f) => f,
+        Result::Err(_) => loop {},
+    }
+}
+
+fn pfn_wait_semaphores(library: u64) -> PfnWaitSemaphores eff [Ffi[Vk]] {
+    match Vk::load_wait_semaphores(library, in "vkWaitSemaphores".as_bytes()) {
+        Result::Ok(f) => f,
+        Result::Err(_) => loop {},
+    }
+}
+
+fn pfn_create_buffer(library: u64) -> PfnCreateBuffer eff [Ffi[Vk]] {
+    match Vk::load_create_buffer(library, in "vkCreateBuffer".as_bytes()) {
+        Result::Ok(f) => f,
+        Result::Err(_) => loop {},
+    }
+}
+
+fn pfn_destroy_buffer(library: u64) -> PfnDestroyBuffer eff [Ffi[Vk]] {
+    match Vk::load_destroy_buffer(library, in "vkDestroyBuffer".as_bytes()) {
+        Result::Ok(f) => f,
+        Result::Err(_) => loop {},
+    }
+}
+
+fn pfn_get_buffer_memory_requirements(library: u64)
+    -> PfnGetBufferMemoryRequirements eff [Ffi[Vk]] {
+    match Vk::load_get_buffer_memory_requirements(
+        library,
+        in "vkGetBufferMemoryRequirements".as_bytes()
+    ) {
+        Result::Ok(f) => f,
+        Result::Err(_) => loop {},
+    }
+}
+
+fn pfn_allocate_memory(library: u64) -> PfnAllocateMemory eff [Ffi[Vk]] {
+    match Vk::load_allocate_memory(library, in "vkAllocateMemory".as_bytes()) {
+        Result::Ok(f) => f,
+        Result::Err(_) => loop {},
+    }
+}
+
+fn pfn_free_memory(library: u64) -> PfnFreeMemory eff [Ffi[Vk]] {
+    match Vk::load_free_memory(library, in "vkFreeMemory".as_bytes()) {
+        Result::Ok(f) => f,
+        Result::Err(_) => loop {},
+    }
+}
+
+fn pfn_bind_buffer_memory(library: u64) -> PfnBindBufferMemory eff [Ffi[Vk]] {
+    match Vk::load_bind_buffer_memory(library, in "vkBindBufferMemory".as_bytes()) {
+        Result::Ok(f) => f,
+        Result::Err(_) => loop {},
+    }
+}
+
+fn pfn_map_memory(library: u64) -> PfnMapMemory eff [Ffi[Vk]] {
+    match Vk::load_map_memory(library, in "vkMapMemory".as_bytes()) {
+        Result::Ok(f) => f,
+        Result::Err(_) => loop {},
+    }
+}
+
+fn pfn_unmap_memory(library: u64) -> PfnUnmapMemory eff [Ffi[Vk]] {
+    match Vk::load_unmap_memory(library, in "vkUnmapMemory".as_bytes()) {
+        Result::Ok(f) => f,
+        Result::Err(_) => loop {},
+    }
+}
+
+fn pfn_create_descriptor_set_layout(library: u64) -> PfnCreateDescriptorSetLayout eff [Ffi[Vk]] {
+    match Vk::load_create_descriptor_set_layout(
+        library,
+        in "vkCreateDescriptorSetLayout".as_bytes()
+    ) {
+        Result::Ok(f) => f,
+        Result::Err(_) => loop {},
+    }
+}
+
+fn pfn_destroy_descriptor_set_layout(library: u64) -> PfnDestroyDescriptorSetLayout eff [Ffi[Vk]] {
+    match Vk::load_destroy_descriptor_set_layout(
+        library,
+        in "vkDestroyDescriptorSetLayout".as_bytes()
+    ) {
+        Result::Ok(f) => f,
+        Result::Err(_) => loop {},
+    }
+}
+
+fn pfn_create_pipeline_layout(library: u64) -> PfnCreatePipelineLayout eff [Ffi[Vk]] {
+    match Vk::load_create_pipeline_layout(library, in "vkCreatePipelineLayout".as_bytes()) {
+        Result::Ok(f) => f,
+        Result::Err(_) => loop {},
+    }
+}
+
+fn pfn_destroy_pipeline_layout(library: u64) -> PfnDestroyPipelineLayout eff [Ffi[Vk]] {
+    match Vk::load_destroy_pipeline_layout(library, in "vkDestroyPipelineLayout".as_bytes()) {
+        Result::Ok(f) => f,
+        Result::Err(_) => loop {},
+    }
+}
+
+fn pfn_create_shader_module(library: u64) -> PfnCreateShaderModule eff [Ffi[Vk]] {
+    match Vk::load_create_shader_module(library, in "vkCreateShaderModule".as_bytes()) {
+        Result::Ok(f) => f,
+        Result::Err(_) => loop {},
+    }
+}
+
+fn pfn_destroy_shader_module(library: u64) -> PfnDestroyShaderModule eff [Ffi[Vk]] {
+    match Vk::load_destroy_shader_module(library, in "vkDestroyShaderModule".as_bytes()) {
+        Result::Ok(f) => f,
+        Result::Err(_) => loop {},
+    }
+}
+
+fn pfn_create_compute_pipelines(library: u64) -> PfnCreateComputePipelines eff [Ffi[Vk]] {
+    match Vk::load_create_compute_pipelines(library, in "vkCreateComputePipelines".as_bytes()) {
+        Result::Ok(f) => f,
+        Result::Err(_) => loop {},
+    }
+}
+
+fn pfn_destroy_pipeline(library: u64) -> PfnDestroyPipeline eff [Ffi[Vk]] {
+    match Vk::load_destroy_pipeline(library, in "vkDestroyPipeline".as_bytes()) {
+        Result::Ok(f) => f,
+        Result::Err(_) => loop {},
+    }
+}
+
+fn pfn_create_command_pool(library: u64) -> PfnCreateCommandPool eff [Ffi[Vk]] {
+    match Vk::load_create_command_pool(library, in "vkCreateCommandPool".as_bytes()) {
+        Result::Ok(f) => f,
+        Result::Err(_) => loop {},
+    }
+}
+
+fn pfn_destroy_command_pool(library: u64) -> PfnDestroyCommandPool eff [Ffi[Vk]] {
+    match Vk::load_destroy_command_pool(library, in "vkDestroyCommandPool".as_bytes()) {
+        Result::Ok(f) => f,
+        Result::Err(_) => loop {},
+    }
+}
+
+fn pfn_allocate_command_buffers(library: u64) -> PfnAllocateCommandBuffers eff [Ffi[Vk]] {
+    match Vk::load_allocate_command_buffers(library, in "vkAllocateCommandBuffers".as_bytes()) {
+        Result::Ok(f) => f,
+        Result::Err(_) => loop {},
+    }
+}
+
+fn pfn_begin_command_buffer(library: u64) -> PfnBeginCommandBuffer eff [Ffi[Vk]] {
+    match Vk::load_begin_command_buffer(library, in "vkBeginCommandBuffer".as_bytes()) {
+        Result::Ok(f) => f,
+        Result::Err(_) => loop {},
+    }
+}
+
+fn pfn_end_command_buffer(library: u64) -> PfnEndCommandBuffer eff [Ffi[Vk]] {
+    match Vk::load_end_command_buffer(library, in "vkEndCommandBuffer".as_bytes()) {
+        Result::Ok(f) => f,
+        Result::Err(_) => loop {},
+    }
+}
+
+fn pfn_create_descriptor_pool(library: u64) -> PfnCreateDescriptorPool eff [Ffi[Vk]] {
+    match Vk::load_create_descriptor_pool(library, in "vkCreateDescriptorPool".as_bytes()) {
+        Result::Ok(f) => f,
+        Result::Err(_) => loop {},
+    }
+}
+
+fn pfn_destroy_descriptor_pool(library: u64) -> PfnDestroyDescriptorPool eff [Ffi[Vk]] {
+    match Vk::load_destroy_descriptor_pool(library, in "vkDestroyDescriptorPool".as_bytes()) {
+        Result::Ok(f) => f,
+        Result::Err(_) => loop {},
+    }
+}
+
+fn pfn_allocate_descriptor_sets(library: u64) -> PfnAllocateDescriptorSets eff [Ffi[Vk]] {
+    match Vk::load_allocate_descriptor_sets(library, in "vkAllocateDescriptorSets".as_bytes()) {
+        Result::Ok(f) => f,
+        Result::Err(_) => loop {},
+    }
+}
+
+fn pfn_update_descriptor_sets(library: u64) -> PfnUpdateDescriptorSets eff [Ffi[Vk]] {
+    match Vk::load_update_descriptor_sets(library, in "vkUpdateDescriptorSets".as_bytes()) {
+        Result::Ok(f) => f,
+        Result::Err(_) => loop {},
+    }
+}
+
+fn pfn_cmd_bind_pipeline(library: u64) -> PfnCmdBindPipeline eff [Ffi[Vk]] {
+    match Vk::load_cmd_bind_pipeline(library, in "vkCmdBindPipeline".as_bytes()) {
+        Result::Ok(f) => f,
+        Result::Err(_) => loop {},
+    }
+}
+
+fn pfn_cmd_bind_descriptor_sets(library: u64) -> PfnCmdBindDescriptorSets eff [Ffi[Vk]] {
+    match Vk::load_cmd_bind_descriptor_sets(library, in "vkCmdBindDescriptorSets".as_bytes()) {
+        Result::Ok(f) => f,
+        Result::Err(_) => loop {},
+    }
+}
+
+fn pfn_cmd_push_constants(library: u64) -> PfnCmdPushConstants eff [Ffi[Vk]] {
+    match Vk::load_cmd_push_constants(library, in "vkCmdPushConstants".as_bytes()) {
+        Result::Ok(f) => f,
+        Result::Err(_) => loop {},
+    }
+}
+
+fn pfn_cmd_dispatch(library: u64) -> PfnCmdDispatch eff [Ffi[Vk]] {
+    match Vk::load_cmd_dispatch(library, in "vkCmdDispatch".as_bytes()) {
+        Result::Ok(f) => f,
+        Result::Err(_) => loop {},
+    }
+}
+
+fn pfn_cmd_pipeline_barrier(library: u64) -> PfnCmdPipelineBarrier eff [Ffi[Vk]] {
+    match Vk::load_cmd_pipeline_barrier(library, in "vkCmdPipelineBarrier".as_bytes()) {
+        Result::Ok(f) => f,
+        Result::Err(_) => loop {},
+    }
+}
+
+fn pfn_queue_submit(library: u64) -> PfnQueueSubmit eff [Ffi[Vk]] {
+    match Vk::load_queue_submit(library, in "vkQueueSubmit".as_bytes()) {
+        Result::Ok(f) => f,
+        Result::Err(_) => loop {},
+    }
+}
+
+// Raises `Unavailable::MissingEntryPoint` with the index (in the crate's
+// ENTRY_POINTS table) of the first entry point the loader lacks.
+fn check_entry_points(library: u64) eff [Ffi[Vk], Fail[GpuErr]] {
+    if lookup_or_zero(library, in "vkEnumerateInstanceVersion") == 0 {
+        fail(Kind::Unavailable, Unavailable::MissingEntryPoint, 0);
+    }
+    if lookup_or_zero(library, in "vkCreateInstance") == 0 {
+        fail(Kind::Unavailable, Unavailable::MissingEntryPoint, 1);
+    }
+    if lookup_or_zero(library, in "vkDestroyInstance") == 0 {
+        fail(Kind::Unavailable, Unavailable::MissingEntryPoint, 2);
+    }
+    if lookup_or_zero(library, in "vkEnumeratePhysicalDevices") == 0 {
+        fail(Kind::Unavailable, Unavailable::MissingEntryPoint, 3);
+    }
+    if lookup_or_zero(library, in "vkGetPhysicalDeviceProperties2") == 0 {
+        fail(Kind::Unavailable, Unavailable::MissingEntryPoint, 4);
+    }
+    if lookup_or_zero(library, in "vkGetPhysicalDeviceFeatures2") == 0 {
+        fail(Kind::Unavailable, Unavailable::MissingEntryPoint, 5);
+    }
+    if lookup_or_zero(library, in "vkGetPhysicalDeviceQueueFamilyProperties") == 0 {
+        fail(Kind::Unavailable, Unavailable::MissingEntryPoint, 6);
+    }
+    if lookup_or_zero(library, in "vkGetPhysicalDeviceMemoryProperties") == 0 {
+        fail(Kind::Unavailable, Unavailable::MissingEntryPoint, 7);
+    }
+    if lookup_or_zero(library, in "vkCreateDevice") == 0 {
+        fail(Kind::Unavailable, Unavailable::MissingEntryPoint, 8);
+    }
+    if lookup_or_zero(library, in "vkDestroyDevice") == 0 {
+        fail(Kind::Unavailable, Unavailable::MissingEntryPoint, 9);
+    }
+    if lookup_or_zero(library, in "vkDeviceWaitIdle") == 0 {
+        fail(Kind::Unavailable, Unavailable::MissingEntryPoint, 10);
+    }
+    if lookup_or_zero(library, in "vkGetDeviceQueue") == 0 {
+        fail(Kind::Unavailable, Unavailable::MissingEntryPoint, 11);
+    }
+    if lookup_or_zero(library, in "vkCreateSemaphore") == 0 {
+        fail(Kind::Unavailable, Unavailable::MissingEntryPoint, 12);
+    }
+    if lookup_or_zero(library, in "vkDestroySemaphore") == 0 {
+        fail(Kind::Unavailable, Unavailable::MissingEntryPoint, 13);
+    }
+    if lookup_or_zero(library, in "vkGetSemaphoreCounterValue") == 0 {
+        fail(Kind::Unavailable, Unavailable::MissingEntryPoint, 14);
+    }
+    if lookup_or_zero(library, in "vkWaitSemaphores") == 0 {
+        fail(Kind::Unavailable, Unavailable::MissingEntryPoint, 15);
+    }
+    if lookup_or_zero(library, in "vkCreateBuffer") == 0 {
+        fail(Kind::Unavailable, Unavailable::MissingEntryPoint, 16);
+    }
+    if lookup_or_zero(library, in "vkDestroyBuffer") == 0 {
+        fail(Kind::Unavailable, Unavailable::MissingEntryPoint, 17);
+    }
+    if lookup_or_zero(library, in "vkGetBufferMemoryRequirements") == 0 {
+        fail(Kind::Unavailable, Unavailable::MissingEntryPoint, 18);
+    }
+    if lookup_or_zero(library, in "vkAllocateMemory") == 0 {
+        fail(Kind::Unavailable, Unavailable::MissingEntryPoint, 19);
+    }
+    if lookup_or_zero(library, in "vkFreeMemory") == 0 {
+        fail(Kind::Unavailable, Unavailable::MissingEntryPoint, 20);
+    }
+    if lookup_or_zero(library, in "vkBindBufferMemory") == 0 {
+        fail(Kind::Unavailable, Unavailable::MissingEntryPoint, 21);
+    }
+    if lookup_or_zero(library, in "vkMapMemory") == 0 {
+        fail(Kind::Unavailable, Unavailable::MissingEntryPoint, 22);
+    }
+    if lookup_or_zero(library, in "vkUnmapMemory") == 0 {
+        fail(Kind::Unavailable, Unavailable::MissingEntryPoint, 23);
+    }
+    if lookup_or_zero(library, in "vkCreateDescriptorSetLayout") == 0 {
+        fail(Kind::Unavailable, Unavailable::MissingEntryPoint, 24);
+    }
+    if lookup_or_zero(library, in "vkDestroyDescriptorSetLayout") == 0 {
+        fail(Kind::Unavailable, Unavailable::MissingEntryPoint, 25);
+    }
+    if lookup_or_zero(library, in "vkCreatePipelineLayout") == 0 {
+        fail(Kind::Unavailable, Unavailable::MissingEntryPoint, 26);
+    }
+    if lookup_or_zero(library, in "vkDestroyPipelineLayout") == 0 {
+        fail(Kind::Unavailable, Unavailable::MissingEntryPoint, 27);
+    }
+    if lookup_or_zero(library, in "vkCreateShaderModule") == 0 {
+        fail(Kind::Unavailable, Unavailable::MissingEntryPoint, 28);
+    }
+    if lookup_or_zero(library, in "vkDestroyShaderModule") == 0 {
+        fail(Kind::Unavailable, Unavailable::MissingEntryPoint, 29);
+    }
+    if lookup_or_zero(library, in "vkCreateComputePipelines") == 0 {
+        fail(Kind::Unavailable, Unavailable::MissingEntryPoint, 30);
+    }
+    if lookup_or_zero(library, in "vkDestroyPipeline") == 0 {
+        fail(Kind::Unavailable, Unavailable::MissingEntryPoint, 31);
+    }
+    if lookup_or_zero(library, in "vkCreateCommandPool") == 0 {
+        fail(Kind::Unavailable, Unavailable::MissingEntryPoint, 32);
+    }
+    if lookup_or_zero(library, in "vkDestroyCommandPool") == 0 {
+        fail(Kind::Unavailable, Unavailable::MissingEntryPoint, 33);
+    }
+    if lookup_or_zero(library, in "vkAllocateCommandBuffers") == 0 {
+        fail(Kind::Unavailable, Unavailable::MissingEntryPoint, 34);
+    }
+    if lookup_or_zero(library, in "vkBeginCommandBuffer") == 0 {
+        fail(Kind::Unavailable, Unavailable::MissingEntryPoint, 35);
+    }
+    if lookup_or_zero(library, in "vkEndCommandBuffer") == 0 {
+        fail(Kind::Unavailable, Unavailable::MissingEntryPoint, 36);
+    }
+    if lookup_or_zero(library, in "vkCreateDescriptorPool") == 0 {
+        fail(Kind::Unavailable, Unavailable::MissingEntryPoint, 37);
+    }
+    if lookup_or_zero(library, in "vkDestroyDescriptorPool") == 0 {
+        fail(Kind::Unavailable, Unavailable::MissingEntryPoint, 38);
+    }
+    if lookup_or_zero(library, in "vkAllocateDescriptorSets") == 0 {
+        fail(Kind::Unavailable, Unavailable::MissingEntryPoint, 39);
+    }
+    if lookup_or_zero(library, in "vkUpdateDescriptorSets") == 0 {
+        fail(Kind::Unavailable, Unavailable::MissingEntryPoint, 40);
+    }
+    if lookup_or_zero(library, in "vkCmdBindPipeline") == 0 {
+        fail(Kind::Unavailable, Unavailable::MissingEntryPoint, 41);
+    }
+    if lookup_or_zero(library, in "vkCmdBindDescriptorSets") == 0 {
+        fail(Kind::Unavailable, Unavailable::MissingEntryPoint, 42);
+    }
+    if lookup_or_zero(library, in "vkCmdPushConstants") == 0 {
+        fail(Kind::Unavailable, Unavailable::MissingEntryPoint, 43);
+    }
+    if lookup_or_zero(library, in "vkCmdDispatch") == 0 {
+        fail(Kind::Unavailable, Unavailable::MissingEntryPoint, 44);
+    }
+    if lookup_or_zero(library, in "vkCmdPipelineBarrier") == 0 {
+        fail(Kind::Unavailable, Unavailable::MissingEntryPoint, 45);
+    }
+    if lookup_or_zero(library, in "vkQueueSubmit") == 0 {
+        fail(Kind::Unavailable, Unavailable::MissingEntryPoint, 46);
+    }
+}
+
+fn lookup_or_zero(library: u64, in name: Str) -> u64 eff [Ffi[Vk]] {
+    match Vk::lookup(library, in name.as_bytes()) {
+        Result::Ok(p) => p,
+        Result::Err(_) => 0,
+    }
 }
 
 // A host-visible, host-coherent storage buffer, mapped at `ptr` for its
@@ -270,9 +788,11 @@ enum Call: _ {
 
 // `Kind::Unavailable` details.
 enum Unavailable: _ {
+    NoLoader = 1,
     OldInstance = 2,
     CreateInstance = 3,
     NoDevice = 4,
+    MissingEntryPoint = 5,
 }
 
 // `Kind::Shape` details.
@@ -725,26 +1245,30 @@ fn contains(in hay: Slice[u8], in needle: Slice[u8])
 
 // VkPhysicalDeviceProperties2 at 0 chained to VkPhysicalDeviceDriverProperties
 // at 840, filled for `physical`.
-fn properties(physical: u64)
+fn properties(library: u64, physical: u64)
     -> Scratch eff [Ffi[Vk], Ffi[LibC], Fail[RuntimeError], Fail[ArithOverflow]] {
     let mut s = scratch(PropertiesBlock::Bytes);
     header(inout s, 0, St::Properties2);
     put64(inout s, Header::PNext, addr(in s, PropertiesBlock::Driver));
     header(inout s, PropertiesBlock::Driver, St::DriverProperties);
     flush(in s);
-    Vk::vkGetPhysicalDeviceProperties2(physical, s.base);
+    Vk::PfnGetPhysicalDeviceProperties2(
+        pfn_get_physical_device_properties2(library),
+        physical,
+        s.base
+    );
     pull(inout s);
     s
 }
 
-fn timeline_supported(physical: u64)
+fn timeline_supported(library: u64, physical: u64)
     -> bool eff [Ffi[Vk], Ffi[LibC], Fail[RuntimeError], Fail[ArithOverflow]] {
     let mut s = scratch(Features2::Bytes + TimelineFeatures::Bytes);
     header(inout s, 0, St::Features2);
     put64(inout s, Header::PNext, addr(in s, Features2::Bytes));
     header(inout s, Features2::Bytes, St::TimelineFeatures);
     flush(in s);
-    Vk::vkGetPhysicalDeviceFeatures2(physical, s.base);
+    Vk::PfnGetPhysicalDeviceFeatures2(pfn_get_physical_device_features2(library), physical, s.base);
     pull(inout s);
     let on = get32(in s, Features2::Bytes + TimelineFeatures::TimelineSemaphore) != 0;
     release(in s);
@@ -752,16 +1276,26 @@ fn timeline_supported(physical: u64)
 }
 
 // The first queue family with compute, or None.
-fn compute_family(physical: u64)
+fn compute_family(library: u64, physical: u64)
     -> Option[u64] eff [Ffi[Vk], Ffi[LibC], Fail[RuntimeError], Fail[ArithOverflow]] {
     let mut count: u32 = 0;
-    Vk::vkGetPhysicalDeviceQueueFamilyProperties(physical, inout count, 0);
+    Vk::PfnGetPhysicalDeviceQueueFamilyProperties(
+        pfn_get_physical_device_queue_family_properties(library),
+        physical,
+        inout count,
+        0
+    );
     let n = widen_u64(count);
     if n == 0 {
         return Option::None;
     }
     let mut s = scratch(n * QueueFamilyProperties::Bytes);
-    Vk::vkGetPhysicalDeviceQueueFamilyProperties(physical, inout count, s.base);
+    Vk::PfnGetPhysicalDeviceQueueFamilyProperties(
+        pfn_get_physical_device_queue_family_properties(library),
+        physical,
+        inout count,
+        s.base
+    );
     pull(inout s);
     let mut found: Option[u64] = Option::None;
     for i in 0..widen_u64(count) {
@@ -776,10 +1310,13 @@ fn compute_family(physical: u64)
     found
 }
 
-fn create_instance()
+fn create_instance(library: u64)
     -> u64 eff [Ffi[Vk], Ffi[LibC], Fail[GpuErr], Fail[RuntimeError], Fail[ArithOverflow]] {
     let mut version: u32 = 0;
-    check(Vk::vkEnumerateInstanceVersion(inout version), Call::EnumerateInstanceVersion);
+    check(
+        Vk::PfnEnumerateInstanceVersion(pfn_enumerate_instance_version(library), inout version),
+        Call::EnumerateInstanceVersion
+    );
     if version < Api::Version1_2 {
         fail(Kind::Unavailable, Unavailable::OldInstance, widen_i64(version));
     }
@@ -797,7 +1334,12 @@ fn create_instance()
     put_bytes(inout s, InstanceBlock::EngineName, in engine_name.as_bytes());
     flush(in s);
     let mut instance: u64 = 0;
-    let rc = Vk::vkCreateInstance(addr(in s, InstanceBlock::Instance), 0, inout instance);
+    let rc = Vk::PfnCreateInstance(
+        pfn_create_instance(library),
+        addr(in s, InstanceBlock::Instance),
+        0,
+        inout instance
+    );
     release(in s);
     if rc != 0 {
         fail(Kind::Unavailable, Unavailable::CreateInstance, widen_i64(rc));
@@ -805,44 +1347,103 @@ fn create_instance()
     instance
 }
 
-// Loads nothing (the loader is linked), creates an instance and opens the
-// first physical device with a compute queue and Vulkan 1.2 timeline
-// semaphores whose name contains `wanted` (any device when it is empty).
+// `dlopen(name, RTLD_NOW)`, or 0 when the library is missing.
+fn try_loader(in name: Str) -> u64 eff [Ffi[Vk]] {
+    match Vk::dlopen(in name.as_bytes(), 2) {
+        Result::Ok(h) => h,
+        _ => 0,
+    }
+}
+
+// The first Vulkan loader `dlopen` finds, or 0: Linux's, then macOS's (the
+// SDK's loader, then MoltenVK on its own).
+fn open_loader() -> u64 eff [Ffi[Vk]] {
+    let mut library = try_loader(in "libvulkan.so.1");
+    if library == 0 {
+        library = try_loader(in "libvulkan.so");
+    }
+    if library == 0 {
+        library = try_loader(in "libvulkan.1.dylib");
+    }
+    if library == 0 {
+        library = try_loader(in "libvulkan.dylib");
+    }
+    if library == 0 {
+        library = try_loader(in "libMoltenVK.dylib");
+    }
+    library
+}
+
+// Loads the Vulkan loader and its entry points, creates an instance and
+// opens the first physical device with a compute queue and Vulkan 1.2
+// timeline semaphores whose name contains `wanted` (any device when it is
+// empty).
 pub fn open(in wanted: Str)
     -> Dev eff [Ffi[Vk], Ffi[LibC], Fail[GpuErr], Fail[RuntimeError], Fail[ArithOverflow]] {
-    let instance = create_instance();
+    let library = open_loader();
+    if library == 0 {
+        fail(Kind::Unavailable, Unavailable::NoLoader, 0);
+    }
     handle Fail[GpuErr] in {
-        open_on(instance, in wanted)
+        check_entry_points(library);
+        open_with(library, in wanted)
     } with {
         return d => d,
         raise(e, k) => {
-            Vk::vkDestroyInstance(instance, 0);
+            Vk::dlclose(library);
             raise(e.kind, e.detail, e.code)
         },
     }
 }
 
-fn open_on(instance: u64, in wanted: Str)
+fn open_with(library: u64, in wanted: Str)
+    -> Dev eff [Ffi[Vk], Ffi[LibC], Fail[GpuErr], Fail[RuntimeError], Fail[ArithOverflow]] {
+    let instance = create_instance(library);
+    handle Fail[GpuErr] in {
+        open_on(library, instance, in wanted)
+    } with {
+        return d => d,
+        raise(e, k) => {
+            Vk::PfnDestroyInstance(pfn_destroy_instance(library), instance, 0);
+            raise(e.kind, e.detail, e.code)
+        },
+    }
+}
+
+fn open_on(library: u64, instance: u64, in wanted: Str)
     -> Dev eff [Ffi[Vk], Ffi[LibC], Fail[GpuErr], Fail[RuntimeError], Fail[ArithOverflow]] {
     let mut count: u32 = 0;
-    check(Vk::vkEnumeratePhysicalDevices(instance, inout count, 0), Call::EnumeratePhysicalDevices);
+    check(
+        Vk::PfnEnumeratePhysicalDevices(
+            pfn_enumerate_physical_devices(library),
+            instance,
+            inout count,
+            0
+        ),
+        Call::EnumeratePhysicalDevices
+    );
     let mut list = scratch(wrapping_add(widen_u64(count) * Handle::Bytes, Handle::Bytes));
     check(
-        Vk::vkEnumeratePhysicalDevices(instance, inout count, list.base),
+        Vk::PfnEnumeratePhysicalDevices(
+            pfn_enumerate_physical_devices(library),
+            instance,
+            inout count,
+            list.base
+        ),
         Call::EnumeratePhysicalDevices
     );
     pull(inout list);
     let mut chosen: Option[Dev] = Option::None;
     for i in 0..widen_u64(count) {
         let physical = get64(in list, i * Handle::Bytes);
-        let p = properties(physical);
+        let p = properties(library, physical);
         let api = get32(in p, Properties2::ApiVersion);
         let name = c_string(in p, Properties2::DeviceName);
         let fits = api >= Api::Version1_2
             && contains(in name.as_slice(), in wanted.as_bytes())
-            && timeline_supported(physical);
+            && timeline_supported(library, physical);
         if fits {
-            match compute_family(physical) {
+            match compute_family(library, physical) {
                 Option::Some(family) => {
                     chosen = Option::Some(
                         Dev {
@@ -858,6 +1459,7 @@ fn open_on(instance: u64, in wanted: Str)
                                 get32(in p, Properties2::MaxComputeWorkGroupInvocations)
                             ),
                             max_range: widen_u64(get32(in p, Properties2::MaxStorageBufferRange)),
+                            library: library,
                         }
                     );
                 }
@@ -894,12 +1496,24 @@ fn open_on(instance: u64, in wanted: Str)
     put64(inout s, DeviceBlock::Device + DeviceCreateInfo::QueueCreateInfos, s.base);
     flush(in s);
     let mut device: u64 = 0;
-    let rc = Vk::vkCreateDevice(d.physical, addr(in s, DeviceBlock::Device), 0, inout device);
+    let rc = Vk::PfnCreateDevice(
+        pfn_create_device(library),
+        d.physical,
+        addr(in s, DeviceBlock::Device),
+        0,
+        inout device
+    );
     release(in s);
     check(rc, Call::CreateDevice);
     d.device = device;
     let mut queue: u64 = 0;
-    Vk::vkGetDeviceQueue(device, narrow_u32(d.family), 0, inout queue);
+    Vk::PfnGetDeviceQueue(
+        pfn_get_device_queue(library),
+        device,
+        narrow_u32(d.family),
+        0,
+        inout queue
+    );
     d.queue = queue;
     // VkSemaphoreTypeCreateInfo (timeline, initial 0) at 0 chained from
     // VkSemaphoreCreateInfo at 32.
@@ -910,7 +1524,8 @@ fn open_on(instance: u64, in wanted: Str)
     put64(inout t, SemaphoreTypeCreateInfo::Bytes + Header::PNext, t.base);
     flush(in t);
     let mut timeline: u64 = 0;
-    let rc = Vk::vkCreateSemaphore(
+    let rc = Vk::PfnCreateSemaphore(
+        pfn_create_semaphore(library),
         device,
         addr(in t, SemaphoreTypeCreateInfo::Bytes),
         0,
@@ -918,7 +1533,7 @@ fn open_on(instance: u64, in wanted: Str)
     );
     release(in t);
     if rc < 0 {
-        Vk::vkDestroyDevice(device, 0);
+        Vk::PfnDestroyDevice(pfn_destroy_device(library), device, 0);
         fail(Kind::Vulkan, Call::CreateSemaphore, widen_i64(rc));
     }
     d.timeline = timeline;
@@ -928,22 +1543,23 @@ fn open_on(instance: u64, in wanted: Str)
 // Waits for the device, then destroys the timeline, the device and the
 // instance. Every buffer, kernel and recording must be freed first.
 pub fn close(in d: Dev) eff [Ffi[Vk]] {
-    Vk::vkDeviceWaitIdle(d.device);
-    Vk::vkDestroySemaphore(d.device, d.timeline, 0);
-    Vk::vkDestroyDevice(d.device, 0);
-    Vk::vkDestroyInstance(d.instance, 0);
+    Vk::PfnDeviceWaitIdle(pfn_device_wait_idle(d.library), d.device);
+    Vk::PfnDestroySemaphore(pfn_destroy_semaphore(d.library), d.device, d.timeline, 0);
+    Vk::PfnDestroyDevice(pfn_destroy_device(d.library), d.device, 0);
+    Vk::PfnDestroyInstance(pfn_destroy_instance(d.library), d.instance, 0);
+    Vk::dlclose(d.library);
 }
 
 // Waits for the device to go idle (after a failed wait, before freeing).
 pub fn wait_idle(in d: Dev) eff [Ffi[Vk]] {
-    Vk::vkDeviceWaitIdle(d.device);
+    Vk::PfnDeviceWaitIdle(pfn_device_wait_idle(d.library), d.device);
 }
 
 // The device name, the driver name and the driver info, each followed by a
 // NUL byte.
 pub fn device_strings(in d: Dev)
     -> ChunkSeq[u8] eff [Ffi[Vk], Ffi[LibC], Fail[RuntimeError], Fail[ArithOverflow]] {
-    let p = properties(d.physical);
+    let p = properties(d.library, d.physical);
     let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
     let name = c_string(in p, Properties2::DeviceName);
     let driver = c_string(in p, PropertiesBlock::Driver + DriverProperties::DriverName);
@@ -962,7 +1578,12 @@ pub fn device_strings(in d: Dev)
 pub fn completed(in d: Dev) -> u64 eff [Ffi[Vk], Fail[GpuErr]] {
     let mut value: u64 = 0;
     check(
-        Vk::vkGetSemaphoreCounterValue(d.device, d.timeline, inout value),
+        Vk::PfnGetSemaphoreCounterValue(
+            pfn_get_semaphore_counter_value(d.library),
+            d.device,
+            d.timeline,
+            inout value
+        ),
         Call::GetSemaphoreCounterValue
     );
     value
@@ -991,7 +1612,12 @@ pub fn wait_value(in d: Dev, value: u64) eff [
     );
     put64(inout s, WaitBlock::Info + SemaphoreWaitInfo::Values, addr(in s, WaitBlock::Value));
     flush(in s);
-    let rc = Vk::vkWaitSemaphores(d.device, addr(in s, WaitBlock::Info), WHOLE_SIZE);
+    let rc = Vk::PfnWaitSemaphores(
+        pfn_wait_semaphores(d.library),
+        d.device,
+        addr(in s, WaitBlock::Info),
+        WHOLE_SIZE
+    );
     release(in s);
     check(rc, Call::WaitSemaphores);
 }
@@ -1015,13 +1641,22 @@ pub fn buffer_new(in d: Dev, bytes: u64)
     put32(inout s, BufferCreateInfo::Usage, BufferUsage::StorageTransfer);
     flush(in s);
     let mut buffer: u64 = 0;
-    let rc = Vk::vkCreateBuffer(d.device, s.base, 0, inout buffer);
+    let rc = Vk::PfnCreateBuffer(pfn_create_buffer(d.library), d.device, s.base, 0, inout buffer);
     if rc < 0 {
         release(in s);
         return raise(Kind::Vulkan, Call::CreateBuffer, widen_i64(rc));
     }
-    Vk::vkGetBufferMemoryRequirements(d.device, buffer, addr(in s, BufferBlock::Requirements));
-    Vk::vkGetPhysicalDeviceMemoryProperties(d.physical, addr(in s, BufferBlock::Properties));
+    Vk::PfnGetBufferMemoryRequirements(
+        pfn_get_buffer_memory_requirements(d.library),
+        d.device,
+        buffer,
+        addr(in s, BufferBlock::Requirements)
+    );
+    Vk::PfnGetPhysicalDeviceMemoryProperties(
+        pfn_get_physical_device_memory_properties(d.library),
+        d.physical,
+        addr(in s, BufferBlock::Properties)
+    );
     pull(inout s);
     let size = get64(in s, BufferBlock::Requirements + MemoryRequirements::Size);
     let bits = get32(in s, BufferBlock::Requirements + MemoryRequirements::MemoryTypeBits);
@@ -1046,7 +1681,7 @@ pub fn buffer_new(in d: Dev, bytes: u64)
         Option::Some(i) => i,
         Option::None => {
             release(in s);
-            Vk::vkDestroyBuffer(d.device, buffer, 0);
+            Vk::PfnDestroyBuffer(pfn_destroy_buffer(d.library), d.device, buffer, 0);
             return raise(Kind::Unsupported, Unsupported::MemoryType, 0);
         }
     };
@@ -1055,23 +1690,43 @@ pub fn buffer_new(in d: Dev, bytes: u64)
     put32(inout s, BufferBlock::Allocate + MemoryAllocateInfo::MemoryTypeIndex, index);
     flush(in s);
     let mut memory: u64 = 0;
-    let rc = Vk::vkAllocateMemory(d.device, addr(in s, BufferBlock::Allocate), 0, inout memory);
+    let rc = Vk::PfnAllocateMemory(
+        pfn_allocate_memory(d.library),
+        d.device,
+        addr(in s, BufferBlock::Allocate),
+        0,
+        inout memory
+    );
     release(in s);
     if rc < 0 {
-        Vk::vkDestroyBuffer(d.device, buffer, 0);
+        Vk::PfnDestroyBuffer(pfn_destroy_buffer(d.library), d.device, buffer, 0);
         return raise(Kind::Vulkan, Call::AllocateMemory, widen_i64(rc));
     }
-    let rc = Vk::vkBindBufferMemory(d.device, buffer, memory, 0);
+    let rc = Vk::PfnBindBufferMemory(
+        pfn_bind_buffer_memory(d.library),
+        d.device,
+        buffer,
+        memory,
+        0
+    );
     if rc < 0 {
-        Vk::vkDestroyBuffer(d.device, buffer, 0);
-        Vk::vkFreeMemory(d.device, memory, 0);
+        Vk::PfnDestroyBuffer(pfn_destroy_buffer(d.library), d.device, buffer, 0);
+        Vk::PfnFreeMemory(pfn_free_memory(d.library), d.device, memory, 0);
         return raise(Kind::Vulkan, Call::BindBufferMemory, widen_i64(rc));
     }
     let mut ptr: u64 = 0;
-    let rc = Vk::vkMapMemory(d.device, memory, 0, WHOLE_SIZE, 0, inout ptr);
+    let rc = Vk::PfnMapMemory(
+        pfn_map_memory(d.library),
+        d.device,
+        memory,
+        0,
+        WHOLE_SIZE,
+        0,
+        inout ptr
+    );
     if rc < 0 {
-        Vk::vkDestroyBuffer(d.device, buffer, 0);
-        Vk::vkFreeMemory(d.device, memory, 0);
+        Vk::PfnDestroyBuffer(pfn_destroy_buffer(d.library), d.device, buffer, 0);
+        Vk::PfnFreeMemory(pfn_free_memory(d.library), d.device, memory, 0);
         return raise(Kind::Vulkan, Call::MapMemory, widen_i64(rc));
     }
     LibC::memset(ptr, 0, len);
@@ -1104,9 +1759,9 @@ pub fn buffer_read(in b: Buf, offset: u64, inout out: Slice[u8]) eff [Ffi[LibC],
 
 // Unmaps and frees a buffer no pending submission uses.
 pub fn buffer_free(in d: Dev, in b: Buf) eff [Ffi[Vk]] {
-    Vk::vkUnmapMemory(d.device, b.memory);
-    Vk::vkDestroyBuffer(d.device, b.buffer, 0);
-    Vk::vkFreeMemory(d.device, b.memory, 0);
+    Vk::PfnUnmapMemory(pfn_unmap_memory(d.library), d.device, b.memory);
+    Vk::PfnDestroyBuffer(pfn_destroy_buffer(d.library), d.device, b.buffer, 0);
+    Vk::PfnFreeMemory(pfn_free_memory(d.library), d.device, b.memory, 0);
 }
 
 // A compute pipeline for entry point `entry` of the SPIR-V module `spirv`
@@ -1153,7 +1808,8 @@ pub fn kernel_new(in d: Dev, in spirv: Slice[u8], in entry: Str, bindings: u64, 
     put64(inout s, LayoutBlock::SetLayoutInfo + SetLayoutCreateInfo::Bindings, s.base);
     flush(in s);
     let mut set_layout: u64 = 0;
-    let rc = Vk::vkCreateDescriptorSetLayout(
+    let rc = Vk::PfnCreateDescriptorSetLayout(
+        pfn_create_descriptor_set_layout(d.library),
         d.device,
         addr(in s, LayoutBlock::SetLayoutInfo),
         0,
@@ -1187,7 +1843,8 @@ pub fn kernel_new(in d: Dev, in spirv: Slice[u8], in entry: Str, bindings: u64, 
     }
     flush(in s);
     let mut layout: u64 = 0;
-    let rc = Vk::vkCreatePipelineLayout(
+    let rc = Vk::PfnCreatePipelineLayout(
+        pfn_create_pipeline_layout(d.library),
         d.device,
         addr(in s, LayoutBlock::PipelineLayoutInfo),
         0,
@@ -1195,7 +1852,12 @@ pub fn kernel_new(in d: Dev, in spirv: Slice[u8], in entry: Str, bindings: u64, 
     );
     release(in s);
     if rc < 0 {
-        Vk::vkDestroyDescriptorSetLayout(d.device, set_layout, 0);
+        Vk::PfnDestroyDescriptorSetLayout(
+            pfn_destroy_descriptor_set_layout(d.library),
+            d.device,
+            set_layout,
+            0
+        );
         return raise(Kind::Vulkan, Call::CreatePipelineLayout, widen_i64(rc));
     }
     // The code, then VkShaderModuleCreateInfo after it (8-aligned).
@@ -1208,11 +1870,22 @@ pub fn kernel_new(in d: Dev, in spirv: Slice[u8], in entry: Str, bindings: u64, 
     put64(inout m, info_at + ShaderModuleCreateInfo::Code, m.base);
     flush(in m);
     let mut module: u64 = 0;
-    let rc = Vk::vkCreateShaderModule(d.device, addr(in m, info_at), 0, inout module);
+    let rc = Vk::PfnCreateShaderModule(
+        pfn_create_shader_module(d.library),
+        d.device,
+        addr(in m, info_at),
+        0,
+        inout module
+    );
     release(in m);
     if rc < 0 {
-        Vk::vkDestroyPipelineLayout(d.device, layout, 0);
-        Vk::vkDestroyDescriptorSetLayout(d.device, set_layout, 0);
+        Vk::PfnDestroyPipelineLayout(pfn_destroy_pipeline_layout(d.library), d.device, layout, 0);
+        Vk::PfnDestroyDescriptorSetLayout(
+            pfn_destroy_descriptor_set_layout(d.library),
+            d.device,
+            set_layout,
+            0
+        );
         return raise(Kind::Vulkan, Call::CreateShaderModule, widen_i64(rc));
     }
     // VkComputePipelineCreateInfo at 0 with its stage at 24, the entry
@@ -1235,12 +1908,25 @@ pub fn kernel_new(in d: Dev, in spirv: Slice[u8], in entry: Str, bindings: u64, 
     put_bytes(inout p, ComputePipelineCreateInfo::Bytes, in name);
     flush(in p);
     let mut pipeline: u64 = 0;
-    let rc = Vk::vkCreateComputePipelines(d.device, 0, 1, p.base, 0, inout pipeline);
+    let rc = Vk::PfnCreateComputePipelines(
+        pfn_create_compute_pipelines(d.library),
+        d.device,
+        0,
+        1,
+        p.base,
+        0,
+        inout pipeline
+    );
     release(in p);
-    Vk::vkDestroyShaderModule(d.device, module, 0);
+    Vk::PfnDestroyShaderModule(pfn_destroy_shader_module(d.library), d.device, module, 0);
     if rc < 0 {
-        Vk::vkDestroyPipelineLayout(d.device, layout, 0);
-        Vk::vkDestroyDescriptorSetLayout(d.device, set_layout, 0);
+        Vk::PfnDestroyPipelineLayout(pfn_destroy_pipeline_layout(d.library), d.device, layout, 0);
+        Vk::PfnDestroyDescriptorSetLayout(
+            pfn_destroy_descriptor_set_layout(d.library),
+            d.device,
+            set_layout,
+            0
+        );
         return raise(Kind::Vulkan, Call::CreateComputePipelines, widen_i64(rc));
     }
     Kern {
@@ -1254,9 +1940,14 @@ pub fn kernel_new(in d: Dev, in spirv: Slice[u8], in entry: Str, bindings: u64, 
 
 // Destroys a kernel no pending submission uses.
 pub fn kernel_free(in d: Dev, in k: Kern) eff [Ffi[Vk]] {
-    Vk::vkDestroyPipeline(d.device, k.pipeline, 0);
-    Vk::vkDestroyPipelineLayout(d.device, k.layout, 0);
-    Vk::vkDestroyDescriptorSetLayout(d.device, k.set_layout, 0);
+    Vk::PfnDestroyPipeline(pfn_destroy_pipeline(d.library), d.device, k.pipeline, 0);
+    Vk::PfnDestroyPipelineLayout(pfn_destroy_pipeline_layout(d.library), d.device, k.layout, 0);
+    Vk::PfnDestroyDescriptorSetLayout(
+        pfn_destroy_descriptor_set_layout(d.library),
+        d.device,
+        k.set_layout,
+        0
+    );
 }
 
 // Starts recording a one-time-submit command buffer from a transient pool.
@@ -1270,7 +1961,13 @@ pub fn rec_new(in d: Dev)
     put32(inout s, CommandPoolCreateInfo::QueueFamilyIndex, narrow_u32(d.family));
     flush(in s);
     let mut pool: u64 = 0;
-    let rc = Vk::vkCreateCommandPool(d.device, s.base, 0, inout pool);
+    let rc = Vk::PfnCreateCommandPool(
+        pfn_create_command_pool(d.library),
+        d.device,
+        s.base,
+        0,
+        inout pool
+    );
     if rc < 0 {
         release(in s);
         return raise(Kind::Vulkan, Call::CreateCommandPool, widen_i64(rc));
@@ -1286,16 +1983,25 @@ pub fn rec_new(in d: Dev)
     );
     flush(in s);
     let mut cmd: u64 = 0;
-    let rc = Vk::vkAllocateCommandBuffers(d.device, addr(in s, CommandBlock::Allocate), inout cmd);
+    let rc = Vk::PfnAllocateCommandBuffers(
+        pfn_allocate_command_buffers(d.library),
+        d.device,
+        addr(in s, CommandBlock::Allocate),
+        inout cmd
+    );
     if rc < 0 {
         release(in s);
-        Vk::vkDestroyCommandPool(d.device, pool, 0);
+        Vk::PfnDestroyCommandPool(pfn_destroy_command_pool(d.library), d.device, pool, 0);
         return raise(Kind::Vulkan, Call::AllocateCommandBuffers, widen_i64(rc));
     }
-    let rc = Vk::vkBeginCommandBuffer(cmd, addr(in s, CommandBlock::Begin));
+    let rc = Vk::PfnBeginCommandBuffer(
+        pfn_begin_command_buffer(d.library),
+        cmd,
+        addr(in s, CommandBlock::Begin)
+    );
     release(in s);
     if rc < 0 {
-        Vk::vkDestroyCommandPool(d.device, pool, 0);
+        Vk::PfnDestroyCommandPool(pfn_destroy_command_pool(d.library), d.device, pool, 0);
         return raise(Kind::Vulkan, Call::BeginCommandBuffer, widen_i64(rc));
     }
     Rec {
@@ -1327,7 +2033,8 @@ fn descriptor_set(in d: Dev, inout r: Rec, in k: Kern)
         put64(inout s, DescriptorPoolSize::Bytes + DescriptorPoolCreateInfo::PoolSizes, s.base);
         flush(in s);
         let mut pool: u64 = 0;
-        let rc = Vk::vkCreateDescriptorPool(
+        let rc = Vk::PfnCreateDescriptorPool(
+            pfn_create_descriptor_pool(d.library),
             d.device,
             addr(in s, DescriptorPoolSize::Bytes),
             0,
@@ -1348,7 +2055,12 @@ fn descriptor_set(in d: Dev, inout r: Rec, in k: Kern)
     put64(inout s, Handle::Bytes + DescriptorSetAllocateInfo::SetLayouts, s.base);
     flush(in s);
     let mut set: u64 = 0;
-    let rc = Vk::vkAllocateDescriptorSets(d.device, addr(in s, Handle::Bytes), inout set);
+    let rc = Vk::PfnAllocateDescriptorSets(
+        pfn_allocate_descriptor_sets(d.library),
+        d.device,
+        addr(in s, Handle::Bytes),
+        inout set
+    );
     release(in s);
     check(rc, Call::AllocateDescriptorSets);
     r.sets_left = r.sets_left - 1;
@@ -1411,9 +2123,17 @@ pub fn rec_dispatch(
     put64(inout s, DispatchBlock::Set, set);
     put_bytes(inout s, DispatchBlock::Immediates, in immediates);
     flush(in s);
-    Vk::vkUpdateDescriptorSets(d.device, narrow_u32(n), addr(in s, DispatchBlock::Writes), 0, 0);
-    Vk::vkCmdBindPipeline(r.cmd, BindPoint::Compute, k.pipeline);
-    Vk::vkCmdBindDescriptorSets(
+    Vk::PfnUpdateDescriptorSets(
+        pfn_update_descriptor_sets(d.library),
+        d.device,
+        narrow_u32(n),
+        addr(in s, DispatchBlock::Writes),
+        0,
+        0
+    );
+    Vk::PfnCmdBindPipeline(pfn_cmd_bind_pipeline(d.library), r.cmd, BindPoint::Compute, k.pipeline);
+    Vk::PfnCmdBindDescriptorSets(
+        pfn_cmd_bind_descriptor_sets(d.library),
         r.cmd,
         BindPoint::Compute,
         k.layout,
@@ -1424,7 +2144,8 @@ pub fn rec_dispatch(
         0
     );
     if immediates.len() > 0 {
-        Vk::vkCmdPushConstants(
+        Vk::PfnCmdPushConstants(
+            pfn_cmd_push_constants(d.library),
             r.cmd,
             k.layout,
             ShaderStage::Compute,
@@ -1433,8 +2154,9 @@ pub fn rec_dispatch(
             addr(in s, DispatchBlock::Immediates)
         );
     }
-    Vk::vkCmdDispatch(r.cmd, gx, gy, gz);
-    Vk::vkCmdPipelineBarrier(
+    Vk::PfnCmdDispatch(pfn_cmd_dispatch(d.library), r.cmd, gx, gy, gz);
+    Vk::PfnCmdPipelineBarrier(
+        pfn_cmd_pipeline_barrier(d.library),
         r.cmd,
         PipelineStage::Compute,
         PipelineStage::Compute | PipelineStage::Host,
@@ -1454,7 +2176,10 @@ pub fn rec_dispatch(
 // serializes submissions on the queue.
 pub fn rec_submit(in d: Dev, in r: Rec, previous: u64)
     -> u64 eff [Ffi[Vk], Ffi[LibC], Fail[GpuErr], Fail[RuntimeError], Fail[ArithOverflow]] {
-    check(Vk::vkEndCommandBuffer(r.cmd), Call::EndCommandBuffer);
+    check(
+        Vk::PfnEndCommandBuffer(pfn_end_command_buffer(d.library), r.cmd),
+        Call::EndCommandBuffer
+    );
     let value = previous + 1;
     // Wait value at 0, signal value at 8, VkTimelineSemaphoreSubmitInfo at
     // 16, the semaphore at 64, the wait stage at 72, the command buffer at
@@ -1482,7 +2207,7 @@ pub fn rec_submit(in d: Dev, in r: Rec, previous: u64)
     put32(inout s, sub + SubmitInfo::SignalSemaphoreCount, 1);
     put64(inout s, sub + SubmitInfo::SignalSemaphores, addr(in s, SubmitBlock::Semaphore));
     flush(in s);
-    let rc = Vk::vkQueueSubmit(d.queue, 1, addr(in s, sub), 0);
+    let rc = Vk::PfnQueueSubmit(pfn_queue_submit(d.library), d.queue, 1, addr(in s, sub), 0);
     release(in s);
     check(rc, Call::QueueSubmit);
     value
@@ -1492,7 +2217,12 @@ pub fn rec_submit(in d: Dev, in r: Rec, previous: u64)
 // buffer must not be pending: never submitted, or its value waited for.
 pub fn rec_free(in d: Dev, in r: Rec) eff [Ffi[Vk], Fail[RuntimeError]] {
     for i in 0..r.pools.len() {
-        Vk::vkDestroyDescriptorPool(d.device, r.pools[i], 0);
+        Vk::PfnDestroyDescriptorPool(
+            pfn_destroy_descriptor_pool(d.library),
+            d.device,
+            r.pools[i],
+            0
+        );
     }
-    Vk::vkDestroyCommandPool(d.device, r.pool, 0);
+    Vk::PfnDestroyCommandPool(pfn_destroy_command_pool(d.library), d.device, r.pool, 0);
 }

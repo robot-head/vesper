@@ -367,6 +367,62 @@ Under callgrind the Vesper walk costs 720 instructions per chain against
 390 for Rust. The listing shows G10: each `try_read` result goes to a
 stack slot and is tested twice.
 
+## Part 2d: the virtqueue engine walks flip to Vesper
+
+The engine behind the MMIO devices (`devices::queue::VirtQueue`, split and
+packed rings with indirect tables, event index and in-order completion)
+captures every chain through Vesper (`vesper/src/vq.ves`) in every build.
+Vesper reads the avail ring or the packed descriptors, follows the chain
+and any indirect table, and applies every check: flags, the
+read-after-write rule, the region authorization, the descriptor, byte and
+work budgets, loops, busy ids and descriptors, and the hint bound. Rust
+copies the readable bytes out once and commits the chain. Completion,
+flushing and notification suppression stay Rust; they are not walks.
+
+`GuestMemory` now keeps guest RAM in one buffer with a region table, so the
+walk sees it as one slice.
+
+The Rust walks left the build. They live on as the unit tests' reference
+(`src/devices/queue/reference.rs`, `#[cfg(test)]`), as vesper-flux keeps
+its differential.
+
+- `reference::differential` runs 8,000 random queues (both formats,
+  random limits, features, hints and driver writes) through both walks
+  and compares every chain, error, stat and ring byte.
+- The divergence check (a chain may hold one buffer more than the limit)
+  fails it.
+- `reference::abba` captures, completes and flushes 64 three-descriptor
+  chains per lap on a 256-entry split ring and a 256-entry packed ring.
+
+Flip gate (`crates/vesper-aether/flip-gate.toml`):
+
+```text
+flip-gate vesper-aether: PASS (bar: 0 differences, every test, 95% upper <= 1.50x) | tests 2/2 pass | differential 0 differences | ABBA vesper/rust virtqueue 1.44x [1.36x, 1.47x] n=30 | RUSTFLAGS=-C target-cpu=native
+| `vesper-aether` (PASS) | SH6-14 | 0 differences; tests 2/2 pass | virtqueue 1.44x [1.36x, 1.47x] n=30 |  | |
+```
+
+The margin is small. Two things made it: the walk keeps its running
+totals in caller locals with pure helpers instead of `inout` scalars, and
+the queue owns the output buffer. The rest is G10.
+
+## Part 2e: the hardware RNG in Vesper (G4 closed)
+
+`hw_rng` (RDRAND on x86_64, RNDR on AArch64, used by the clone entropy)
+was the crate's only unsafe code outside `linux_host`. It is now Vesper
+over `@vesper-std/cpu` (#1443, #1473), detection included, and its Rust
+is gone. There is one package per target in `vesper-rng/`, and all three
+export the same two functions, so one binding (`port/rng_binding.rs`)
+serves them:
+
+- `x86_64`: CPUID leaf 1 for RDRAND (Linux, macOS and Windows).
+- `aarch64-linux`: `getauxval(AT_HWCAP2) & HWCAP2_RNG`.
+- `aarch64-macos`: the `hw.optional.arm.FEAT_RNG` sysctl.
+
+Other targets keep the stub that reports no instruction. The unit tests
+check that the detection agrees with the standard library's and that a
+present generator delivers distinct words. Speed does not matter here
+(four words per clone).
+
 ## Compiler gaps (for the coordinator)
 
 | Gap | Blocks | Owner of the fix |
@@ -374,7 +430,7 @@ stack slot and is tested twice.
 | G1 variadics in `.vsys` | macOS `fcntl`/`ioctl`/`open` | lane 13 (`vesper-ffi`) |
 | G2 address of a Vesper buffer | nothing (workaround: mapped staging buffers) | none needed |
 | G3 in-place views of mappings | AF_XDP zero copy, perf AUX in place | manuscript §16.3 + `vesper-ffi` |
-| G4 CPU instruction intrinsics | RDPMC, RDRAND/RNDR | compiler codegen (SH4) |
+| G4 CPU instruction intrinsics | closed (#1443, #1473): aether's RNG uses them (part 2e); RDPMC for bench-pmu next | done |
 | G5 C function pointers / callbacks | threads, signal handlers, `dlsym` | manuscript §16.3 + compiler |
 | G6 atomics on foreign memory | macOS rings (none here) | compiler builtins |
 | G8 effectful workers | aether's vCPU and uffd threads (lazy guest memory needs a concurrent fault resolver) | manuscript §15 + compiler |
@@ -382,5 +438,6 @@ stack slot and is tested twice.
 
 ## Census rows
 
-No crate has flipped yet; the census rows stay "unported" until the first
-flip PR.
+`vesper-aether` stays "c-api" (KVM ioctls and userfaultfd are its Rust
+wrappers over the OS). Its virtqueue walks are Vesper-only since part 2d;
+slot plans, PVH parsing, hot sets and the packed model wait on G10.

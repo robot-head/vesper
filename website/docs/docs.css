@@ -41,3 +41,23 @@
   .docs-bar .docs-home { padding-left: .6rem; }
   .docs-intro h1, .docs-reader h1 { font-size: clamp(38px, 9vw, 58px); }
 }
+.reference-table, .manuscript-reference figure { overflow-x: auto; }
+.reader-body table { border-collapse: collapse; margin-block: 1rem; }
+.reader-body :is(th, td) { padding: .45rem .65rem; border: 1px solid var(--line); text-align: start; }
+.infer-rule { display: flex; flex-direction: column; align-items: center; padding: .75rem; margin-block: 1rem; background: var(--surface); border: 1px solid var(--line); overflow-x: auto; }
+.infer-rule div { white-space: pre-line; text-align: center; min-width: max-content; padding: .3rem 1rem; }
+.infer-rule div + div { border-top: 1px solid currentColor; }
+.manuscript-reference { max-width: 74rem; padding-block: 2rem; }
+.manuscript-reference svg { max-width: 100%; height: auto; }
+.manuscript-reference h2 { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--line); }
+.manuscript-reference :is(h3, h4, h5) { margin-block: 1.5rem .5rem; }
+.manuscript-reference > :is(p, ul, ol, figure, pre, blockquote) { margin-block: 1rem; }
+.manuscript-reference :is(p, th, td, li), .model-index li { overflow-wrap: anywhere; }
+.manuscript-reference math[display="block"] { display: block; max-width: 100%; overflow-x: auto; }
+.model-index { margin-block: 1rem; }
+.model-index ul { padding-inline-start: 1.5rem; }
+.model-index li + li { margin-top: .5rem; }
+.technical-detail { margin-block: 1rem; padding: .85rem 1rem; border: 1px solid var(--line); border-radius: 5px; }
+.technical-detail summary { cursor: pointer; }
+.technical-detail > * + * { margin-top: .8rem; }
+.technical-detail p, .technical-detail td { overflow-wrap: anywhere; }

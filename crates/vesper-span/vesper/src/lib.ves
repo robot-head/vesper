@@ -537,11 +537,12 @@ pub fn edits_check(
 
 // `SourceEdits::apply`: `replace` is three words per edit in span order
 // (span start, span end, replacement length); the replacements follow each
-// other in `pool`. The result is UTF-8 bytes: `extend` copies a slice in one
-// block, while `String::push_str` copies a byte at a time (see the report).
-pub fn edits_apply(in text: Slice[u8], in replace: Slice[u64], in pool: Slice[u8], output: usize)
-    -> ChunkSeq[u8] {
-    let mut out: ChunkSeq[u8] = ChunkSeq::with_capacity(u(output));
+// other in `pool`. Every span and replacement starts and ends on a char
+// boundary (`edits_check`), so the pieces are `Str` views and the result is
+// a `String`, which the binding hands to Rust without validating it again
+// (#1502). `push_str` copies each run of 16 bytes or more with `memmove`.
+pub fn edits_apply(in text: Str, in replace: Slice[u64], in pool: Str, output: usize) -> String {
+    let mut out = String::with_capacity(u(output));
     let mut cursor: u64 = 0;
     let mut at: u64 = 0;
     let count = replace.len() / Repl::Words;
@@ -550,12 +551,12 @@ pub fn edits_apply(in text: Slice[u8], in replace: Slice[u64], in pool: Slice[u8
         let start = word(in replace, w);
         let end = word(in replace, wrapping_add(w, Repl::End));
         let len = word(in replace, wrapping_add(w, Repl::Len));
-        out.extend(text[cursor..start]);
-        out.extend(pool[at..wrapping_add(at, len)]);
+        out.push_str(text[cursor..start]);
+        out.push_str(pool[at..wrapping_add(at, len)]);
         at = wrapping_add(at, len);
         cursor = end;
     }
-    out.extend(text[cursor..text.len()]);
+    out.push_str(text[cursor..text.len()]);
     out
 }
 

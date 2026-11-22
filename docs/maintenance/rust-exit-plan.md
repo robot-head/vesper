@@ -153,7 +153,8 @@ Vesper can do itself.
 | **SH6** | Flip gate and census; Stage 2, the wasm seed and the retirement; the compiler's closure; finish and flip every ported library; the OS and C-API crates on `.vsys`; one crypto shim; Rust-only libraries replaced; Rust tests to Vesper | #1396-#1414 ([plan](../agent-prompts/self-host-sh6/README.md)) |
 | SH6b | The verified backend widened to the compiler (DDC check of §10.2) | after SH6 lane 2 |
 | SH7 (optional) | Vesper-native backend; replaces Cranelift only at its level | after SH6 |
-| Gap waves | Compiler gaps the SH6 lanes report, planned by lane 1 from the reports | as they come |
+| Gap wave 1 | The code-generation and interop gaps the SH6 reports name (Option results, cold inlining, vectors, export calls, slices, platform interop, foreign memory), the wasm seed's breadth, the native walk, and the unowned rows | #1498-#1506, #1508-#1510 ([plan](../agent-prompts/rust-exit-gaps-1/README.md)) |
+| Later gap waves | Planned from each wave's reports | as they come |
 
 ## Scoreboard
 
@@ -162,4 +163,7 @@ the Rust lines deleted.
 
 | Flip | Lane | Differential | Speed (ABBA) | Rust deleted | PR |
 |---|---|---|---|--:|---|
-| | | | | | |
+| `bounds-hoist` (PASS; compiler module, its 2,017 lines go at the retirement) | SH3-12 | 0 differences on 325 cases; tests 2/2 pass | pass 1.15x [1.06x, 1.22x] n=12; build 1.07x [1.01x, 1.09x] n=30 | 0 | #1251 part 4 |
+| `optimize` (PASS, compiler module) | G1-4 | 0 differences; tests 2/2 pass | checker 1.12x [1.00x, 1.19x] n=12; producer 0.70x [0.64x, 0.74x] n=12; pass 0.79x [0.70x, 0.83x] n=12 | 0 (2,867 at the retirement) | #1501 |
+| `wit-component` (PASS; compiler module, `src/wasm_backend/component.rs` and the wit-component dependency go at the retirement) | SH5-11 | 0 differences on 1,383 cases; tests 1/1 pass | wrap 0.05x [0.05x, 0.05x] n=12; build 0.67x [0.65x, 0.68x] n=12 | 0 (933 at the retirement) | #1334 flip |
+| `vesper-aether` virtqueue walks (PASS) | SH6-14 | 0 differences; tests 2/2 pass | virtqueue 1.44x [1.36x, 1.47x] n=30 | 331 (now the tests' reference) | #1494 |

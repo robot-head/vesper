@@ -6,11 +6,34 @@ use super::{
 use crate::ast::*;
 use std::collections::{BTreeMap, BTreeSet};
 use vesper_ffi::sys::{
-    Access, ExternTypeDescriptor, FunctionDescriptor, HandleAccess, Linearity, ParameterType,
-    Pointee, PointerAccess, Scalar, ValueType,
+    Access, ExternTypeDescriptor, FunctionDescriptor, HandleAccess, LibraryDescriptor, Linearity,
+    ParameterType, Pointee, PointerAccess, Scalar, ValueType,
 };
 use vesper_ffi::{FieldKind, WireLayout};
 
+/// The one field of a pinned buffer or a mapping: the sequence over its
+/// memory (`p.data`).
+pub(super) const BUFFER_FIELD: &str = "data";
+/// The generated pinned-buffer type (`linear struct Pinned[T] { data:
+/// ChunkSeq[T] }`), declared when an import takes one.
+pub(super) const PINNED_TYPE: &str = "Pinned";
+/// `Pinned[T]` as a source declaration.
+fn pinned_adt() -> Adt {
+    let parsed = crate::parser::parse("linear struct Pinned[T] { data: ChunkSeq[T] }");
+    debug_assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    parsed
+        .module
+        .items
+        .into_iter()
+        .find_map(|i| match i {
+            Item::Adt(mut a) => {
+                a.span = 0..0;
+                Some(a)
+            }
+            _ => None,
+        })
+        .expect("Pinned declaration")
+}
 /// Pass-1 placeholder of a slice parameter (not a source identifier).
 const OPEN: &str = "$open";
 /// Built-in source type names a generated declaration may not take.
@@ -147,8 +170,13 @@ pub(super) struct Generated {
     enums: BTreeMap<String, Adt>,
     /// Opaque extern-type handles by name.
     handles: BTreeMap<String, Adt>,
+    /// `Pinned[T]`, when an import takes a pinned buffer.
+    pinned: Option<Adt>,
     /// Library names, for demangling.
     libraries: Vec<String>,
+    /// The effects of the directly called libraries: what a Vesper function
+    /// handed to C as a callback may perform.
+    callback_row: Effects,
     /// Per library: symbol -> shape.
     shapes: BTreeMap<String, BTreeMap<String, Result<OpShape, String>>>,
     invalid: bool,
@@ -190,11 +218,39 @@ fn struct_adt(layout: &WireLayout) -> Result<Adt, String> {
 /// whose one field (the C handle word) no source identifier can spell, so
 /// source code can neither build, read nor destructure it.
 fn handle_adt(t: &ExternTypeDescriptor) -> Adt {
+    if let Some(element) = t.mapping() {
+        // A mapping is viewed in place: its one field is a sequence over
+        // the foreign memory, which source code may read, write and view
+        // but never grow, shrink, move or free (`buffers::check`).
+        return Adt {
+            name: t.name().to_owned(),
+            mode: Mode::Linear,
+            generics: vec![],
+            variants: vec![Variant {
+                name: t.name().to_owned(),
+                fields: vec![Field {
+                    name: BUFFER_FIELD.into(),
+                    ty: Type::Named(
+                        crate::seq::CHUNK_SEQ_TYPE.into(),
+                        vec![Type::named(element.name())],
+                    ),
+                    modality: None,
+                    temperature: None,
+                }],
+                named: true,
+            }],
+            is_enum: false,
+            tile_width: None,
+            span: 0..0,
+        };
+    }
     Adt {
         name: t.name().to_owned(),
         mode: match t.linearity() {
             Linearity::Linear => Mode::Linear,
             Linearity::Affine => Mode::Affine,
+            // A C function pointer is a plain word.
+            Linearity::Callback => Mode::Copy,
         },
         generics: vec![],
         variants: vec![Variant {
@@ -212,6 +268,28 @@ fn handle_adt(t: &ExternTypeDescriptor) -> Adt {
         span: 0..0,
     }
 }
+/// The row of a Vesper function handed to C: every directly called
+/// library's `Ffi[Lib]` and `Realtime`, so a signal handler may be one. An
+/// isolated library's gate is the calling thread's, so a callback cannot
+/// call one.
+fn callback_row(imports: &Imports) -> Effects {
+    let mut row = Effects::default();
+    for (name, import) in &imports.libraries {
+        if import.handler == super::Handler::Direct {
+            row.instances.push(Effect {
+                label: None,
+                name: effect_name(name),
+                args: vec![],
+            });
+        }
+    }
+    row.instances.push(Effect {
+        label: None,
+        name: crate::capability_effects::REALTIME.into(),
+        args: vec![],
+    });
+    row
+}
 fn collect_structs(layout: &WireLayout, out: &mut Vec<WireLayout>) {
     for f in layout.fields() {
         if let FieldKind::Struct(inner) = f.kind() {
@@ -227,7 +305,9 @@ impl Generated {
             structs: BTreeMap::new(),
             enums: BTreeMap::new(),
             handles: BTreeMap::new(),
+            pinned: None,
             libraries: imports.libraries.keys().cloned().collect(),
+            callback_row: callback_row(imports),
             shapes: BTreeMap::new(),
             invalid: false,
         };
@@ -294,10 +374,19 @@ impl Generated {
                 g.handles.insert(t.name().to_owned(), adt);
             }
         }
+        if imports.libraries.values().any(|i| {
+            i.descriptor.functions().iter().any(|f| {
+                f.parameters()
+                    .iter()
+                    .any(|p| matches!(p.ty(), ParameterType::Pinned { .. }))
+            })
+        }) {
+            g.pinned = Some(pinned_adt());
+        }
         for (name, import) in &imports.libraries {
             let mut shapes = BTreeMap::new();
             for f in import.descriptor.functions() {
-                let shape = g.compute_shape(f);
+                let shape = g.compute_shape(&import.descriptor, f);
                 if let Ok(s) = &shape
                     && mentions_result(&s.result)
                 {
@@ -319,7 +408,48 @@ impl Generated {
             },
         }
     }
-    fn compute_shape(&self, f: &FunctionDescriptor) -> Result<OpShape, String> {
+    /// The source type of a Vesper function C calls as `callback`: its
+    /// parameters and result are integers (each crosses as one C word), and
+    /// its row may hold the direct libraries' effects and `Realtime`.
+    fn callback_type(&self, library: &LibraryDescriptor, callback: &str) -> Result<Type, String> {
+        let f = library
+            .function(callback)
+            .filter(|f| f.is_indirect())
+            .ok_or_else(|| format!("{callback} is not a callback type"))?;
+        let unsupported = || {
+            format!(
+                "C calls a Vesper function of callback type {callback} only with integer parameters and an integer or Unit result, without errno, for now"
+            )
+        };
+        let mut params = vec![];
+        for p in &f.parameters()[1..] {
+            match p.ty() {
+                ParameterType::Value(ValueType::Scalar(s)) => {
+                    params.push((Pass::In, Type::named(parameter_scalar(*s)?)));
+                }
+                _ => return Err(unsupported()),
+            }
+        }
+        let result = match f.result() {
+            ValueType::Unit => Type::unit(),
+            ValueType::Scalar(s) => Type::named(result_scalar(*s)),
+            _ => return Err(unsupported()),
+        };
+        if f.reads_errno() {
+            return Err(unsupported());
+        }
+        Ok(Type::Function {
+            params,
+            result: Box::new(result),
+            effects: self.callback_row.clone(),
+            mode: Mode::Copy,
+        })
+    }
+    fn compute_shape(
+        &self,
+        library: &LibraryDescriptor,
+        f: &FunctionDescriptor,
+    ) -> Result<OpShape, String> {
         let mut params = vec![];
         for p in f.parameters() {
             let (pass, kind) = match p.ty() {
@@ -383,6 +513,21 @@ impl Generated {
                     },
                     ParamKind::Value(Type::named(handle.name())),
                 ),
+                // A named Vesper function, handed to C as a trampoline.
+                ParameterType::Function { callback, .. } => (
+                    Pass::In,
+                    ParamKind::Value(self.callback_type(library, callback.name())?),
+                ),
+                ParameterType::Pinned { element, access } => (
+                    match access {
+                        Access::In => Pass::In,
+                        Access::Inout => Pass::Inout,
+                    },
+                    ParamKind::Value(Type::Named(
+                        PINNED_TYPE.into(),
+                        vec![Type::named(parameter_scalar(*element)?)],
+                    )),
+                ),
                 // A C string is the caller's bytes, copied and terminated.
                 ParameterType::CStr => (
                     Pass::In,
@@ -427,9 +572,24 @@ impl Generated {
             result: wrap_result(f, result),
         })
     }
-    /// Whether `name` is a generated extern-type handle.
+    /// Whether `name` is a generated extern-type handle (or mapping).
     pub fn is_handle(&self, name: &str) -> bool {
         self.handles.contains_key(name)
+    }
+    /// Whether any generated type holds foreign memory viewed in place.
+    pub fn has_buffers(&self) -> bool {
+        self.pinned.is_some() || self.handles.keys().any(|n| self.is_buffer(n))
+    }
+    /// Whether values of the source type `name` hold foreign memory viewed
+    /// in place: a mapping or `Pinned`.
+    pub fn is_buffer(&self, name: &str) -> bool {
+        (self.pinned.is_some() && name == PINNED_TYPE)
+            || self.handles.get(name).is_some_and(|a| {
+                a.variants
+                    .first()
+                    .and_then(|v| v.fields.first())
+                    .is_some_and(|f| f.name == BUFFER_FIELD)
+            })
     }
     pub fn shape(&self, library: &str, f: &FunctionDescriptor) -> Result<&OpShape, String> {
         match self.shapes.get(library).and_then(|s| s.get(f.symbol())) {
@@ -447,6 +607,9 @@ impl Generated {
             .collect();
         names.extend(self.enums.keys().cloned());
         names.extend(self.handles.keys().cloned());
+        if self.pinned.is_some() {
+            names.insert(PINNED_TYPE.into());
+        }
         if self.invalid {
             names.insert(INVALID_TYPE.into());
         }
@@ -503,7 +666,12 @@ impl Generated {
         for adt in self.structs.values().flatten() {
             module.items.push(Item::Adt(adt.clone()));
         }
-        for adt in self.enums.values().chain(self.handles.values()) {
+        for adt in self
+            .enums
+            .values()
+            .chain(self.handles.values())
+            .chain(&self.pinned)
+        {
             module.items.push(Item::Adt(adt.clone()));
         }
         if self.invalid {

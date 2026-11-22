@@ -150,7 +150,8 @@ const R_SITE_INOUT: u32 = 31;
 const R_SITE_SEQUENCE: u32 = 32;
 const R_SITE_FIELD: u32 = 33;
 const R_SITE_REBIND: u32 = 34;
-const REASONS: u64 = 35;
+const R_SITE_COLD: u32 = 35;
+const REASONS: u64 = 36;
 
 // site.rs: smallest cold side worth a call, and what the call adds.
 const MIN_COLD: u64 = 16;
@@ -382,8 +383,8 @@ pub struct Prog {
     targa: ChunkSeq[u32],
     targn: ChunkSeq[u32],
     targs: ChunkSeq[u32],
-    // effect rows: row_words[row_a[r]..]: count, (label + 1, name, args)*,
-    // tail + 1
+    // effect rows: row_words[row_a[r]..]: count, (label + 1, name, args,
+    // instance)*, tail + 1 (`instance` is the same index for equal instances)
     row_a: ChunkSeq[u32],
     row_words: ChunkSeq[u64],
     unit_ty: u32,
@@ -1079,6 +1080,7 @@ pub fn read_input(in b: Slice[u8]) -> Prog {
             p.row_words.push(opt_sym(in nmap, r.word(in b)));
             p.row_words.push(w(sym(in nmap, r.word(in b))));
             p.row_words.push(r.word(in b));
+            p.row_words.push(r.word(in b));
         }
         p.row_words.push(opt_sym(in nmap, r.word(in b)));
     }
@@ -1294,19 +1296,22 @@ fn renamed(inout p: Prog, s: u32, serial: u64) -> u32 {
 
 // ----- rows ---------------------------------------------------------------------
 
+// The words of one effect instance in `row_words`.
+const ROW_STRIDE: u64 = 4;
+
 // `fail_row_only`: no tail, and only unlabeled one-argument `Fail`s.
 fn fail_row_only(in p: Prog, r: u32) -> bool {
     let at = w(u32_at(in p.row_a, w(r)));
     let n = u64_at(in p.row_words, at);
     for i in 0..n {
-        let e = add(inc(at), wrapping_mul(i, 3));
+        let e = add(inc(at), wrapping_mul(i, ROW_STRIDE));
         if u64_at(in p.row_words, e) != 0
             || u64_at(in p.row_words, inc(e)) != w(p.s_fail)
             || u64_at(in p.row_words, add(e, 2)) != 1 {
             return false;
         }
     }
-    u64_at(in p.row_words, add(inc(at), wrapping_mul(n, 3))) == 0
+    u64_at(in p.row_words, add(inc(at), wrapping_mul(n, ROW_STRIDE))) == 0
 }
 
 // A capability effect (`capability_effects::is_capability_effect`) in row `r`.
@@ -1314,7 +1319,7 @@ fn row_has_capability(in p: Prog, r: u32) -> bool {
     let at = w(u32_at(in p.row_a, w(r)));
     let n = u64_at(in p.row_words, at);
     for i in 0..n {
-        let name = n32(u64_at(in p.row_words, add(add(inc(at), wrapping_mul(i, 3)), 1)));
+        let name = n32(u64_at(in p.row_words, add(add(inc(at), wrapping_mul(i, ROW_STRIDE)), 1)));
         for k in 0..p.s_caps.len() {
             if u32_at(in p.s_caps, k) == name {
                 return true;
@@ -1974,6 +1979,56 @@ impl Bindings {
     }
 }
 
+// `row_within`: callee `fi` with row `row` may be inlined into a caller
+// with row `caller`. Its row is empty or the caller's, or every instance of
+// its row (unlabeled `Fail` only) is in the caller's row and the callee
+// raises only by error type: no loop, no handler and no effect operation
+// (a call of anything that is not a program function), since `Fail::raise`
+// performs the innermost `Fail` in scope (#1502).
+fn row_within(in p: Prog, fi: u32, row: u32, caller: u32) -> bool {
+    if p.row_count(row) == 0 || row == caller {
+        return true;
+    }
+    if !fail_row_only(in p, row) || raises_untyped(in p, fi) {
+        return false;
+    }
+    let at = w(u32_at(in p.row_a, w(row)));
+    let ca = w(u32_at(in p.row_a, w(caller)));
+    let cn = u64_at(in p.row_words, ca);
+    for i in 0..p.row_count(row) {
+        let key = u64_at(in p.row_words, add(inc(at), add(wrapping_mul(i, ROW_STRIDE), 3)));
+        let mut found = false;
+        for j in 0..cn {
+            if u64_at(in p.row_words, add(inc(ca), add(wrapping_mul(j, ROW_STRIDE), 3))) == key {
+                found = true;
+            }
+        }
+        if !found {
+            return false;
+        }
+    }
+    true
+}
+
+// Whether function `fi`'s body has a loop header, a handler or an effect
+// operation.
+fn raises_untyped(in p: Prog, fi: u32) -> bool {
+    let f = p.fun(fi);
+    for b in 0..w(f.fc) {
+        let bk = p.block(f, b);
+        for k in 0..w(bk.ic) {
+            let i = p.inst_of(bk, k);
+            if i.op == O_LOOP || i.op == O_HANDLE {
+                return true;
+            }
+            if i.op == O_CALL && p.fun_index(n32(p.op(w(i.a)))) == NONE32 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 // `site_bindings`: the bindings for a call, or why it stays a call.
 fn site_bindings(in p: Prog, c: u32, g: Tgt, dest: u32, args: u64, inout out: Bindings) -> u32 {
     let caller = p.fun(c);
@@ -1983,7 +2038,7 @@ fn site_bindings(in p: Prog, c: u32, g: Tgt, dest: u32, args: u64, inout out: Bi
         return R_SITE_SIGNATURE;
     }
     let row = p.row_of(g);
-    if p.row_count(row) != 0 && row != caller.row {
+    if !row_within(in p, g.f, row, caller.row) {
         return R_SITE_ROW;
     }
     if caller.bn != 0 {
@@ -3617,6 +3672,96 @@ fn find_instance(in p: Prog, callee: u32, s0: u64, s1: u64) -> u32 {
 }
 
 // `inline_into`: inline the eligible calls of caller `c`.
+// `owns_sequence`: a local of the target, a by-value parameter included,
+// whose type holds a sequence and is no slice view. Its copy would put the sequence's slot,
+// frame and drop flags on every path of the caller (#1499).
+fn owns_sequence(in p: Prog, g: Tgt) -> bool {
+    let f = p.fun(g.f);
+    for k in 0..w(f.ln) {
+        let at = add(w(f.la), k);
+        let t = p.map(g.inst, u32_at(in p.loc_ty, at));
+        if !p.has(t, F_SEQUENCE) || p.has(t, F_SLICE) {
+            continue;
+        }
+        let name = u32_at(in p.loc_name, at);
+        let mut owned = true;
+        for j in 0..w(f.pn) {
+            let q = p.param(f, j);
+            if q.name == name {
+                owned = q.pass == P_SINK;
+                break;
+            }
+        }
+        if owned {
+            return true;
+        }
+    }
+    false
+}
+
+// `cold_block`: block `b` of function `c` is on no cycle, and some path
+// from the entry leaves the function without passing it.
+fn cold_block(in p: Prog, c: u32, b: u64) -> bool {
+    if b == 0 {
+        return false;
+    }
+    let f = p.fun(c);
+    let nb = w(f.fc);
+    let mut succ: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    // On a cycle: `b` is reachable from its own successors.
+    let mut seen = zeros8(nb);
+    let mut work: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    successors(in p, p.block(f, b), inout succ);
+    for k in 0..succ.len() {
+        work.push(u32_at(in succ, k));
+    }
+    loop {
+        let k = match work.pop() {
+            Option::Some(x) => w(x),
+            Option::None => break,
+        };
+        if k >= nb || u8_at(in seen, k) != 0 {
+            continue;
+        }
+        if k == b {
+            return false;
+        }
+        set_u8(inout seen, k, 1);
+        successors(in p, p.block(f, k), inout succ);
+        for j in 0..succ.len() {
+            work.push(u32_at(in succ, j));
+        }
+    }
+    // A path from the entry that avoids `b` and leaves the function.
+    let mut seen2 = zeros8(nb);
+    work.push(0);
+    loop {
+        let k = match work.pop() {
+            Option::Some(x) => w(x),
+            Option::None => break,
+        };
+        if k == b || k >= nb || u8_at(in seen2, k) != 0 {
+            continue;
+        }
+        set_u8(inout seen2, k, 1);
+        let bk = p.block(f, k);
+        if bk.term == T_RETURN {
+            return true;
+        }
+        for i in 0..w(bk.ic) {
+            let x = p.inst_of(bk, i);
+            if x.op == O_EXIT && n32(p.op(w(x.a))) == f.name {
+                return true;
+            }
+        }
+        successors(in p, bk, inout succ);
+        for j in 0..succ.len() {
+            work.push(u32_at(in succ, j));
+        }
+    }
+    false
+}
+
 fn inline_into(
     inout p: Prog,
     c: u32,
@@ -3675,6 +3820,9 @@ fn inline_into(
             }
             if why == R_OK {
                 why = site_bindings(in p, c, g, inst.dest, add(a, 2), inout bs);
+            }
+            if why == R_OK && owns_sequence(in p, g) && cold_block(in p, c, b) {
+                why = R_SITE_COLD;
             }
             if why == R_OK {
                 let handlers = handler_sum(in p, fi, false);
