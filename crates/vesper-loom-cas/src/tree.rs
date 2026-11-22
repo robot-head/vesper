@@ -34,6 +34,14 @@ const MAGIC: &[u8; 4] = b"VLTR";
 /// no separators, no `.`/`..`, no NUL/control characters, no Windows-reserved
 /// characters or device names, and no trailing dot or space.
 pub fn validate_name(name: &str) -> Result<(), NameError> {
+    #[cfg(vesper_port)]
+    return crate::port::validate_name(name);
+    #[cfg(not(vesper_port))]
+    validate_name_rust(name)
+}
+
+#[cfg(not(vesper_port))]
+fn validate_name_rust(name: &str) -> Result<(), NameError> {
     if name.is_empty() {
         return Err(NameError::Empty);
     }
@@ -73,7 +81,7 @@ pub enum EntryKind {
 }
 
 impl EntryKind {
-    fn tag(self) -> u8 {
+    pub(crate) fn tag(self) -> u8 {
         match self {
             EntryKind::File { executable: false } => 1,
             EntryKind::File { executable: true } => 2,
@@ -81,7 +89,7 @@ impl EntryKind {
         }
     }
 
-    fn from_tag(tag: u8) -> Option<Self> {
+    pub(crate) fn from_tag(tag: u8) -> Option<Self> {
         match tag {
             1 => Some(EntryKind::File { executable: false }),
             2 => Some(EntryKind::File { executable: true }),
@@ -165,7 +173,7 @@ impl Tree {
         self.insert(name, tree, EntryKind::Directory, 0)
     }
 
-    fn insert(
+    pub(crate) fn insert(
         &mut self,
         name: &str,
         child: ObjectId,
@@ -203,6 +211,14 @@ impl Tree {
 
     /// Canonical encoding.
     pub fn encode(&self) -> Vec<u8> {
+        #[cfg(vesper_port)]
+        return crate::port::tree_encode(self);
+        #[cfg(not(vesper_port))]
+        self.encode_rust()
+    }
+
+    #[cfg(not(vesper_port))]
+    fn encode_rust(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(16 + self.entries.len() * 64);
         out.extend_from_slice(MAGIC);
         out.extend_from_slice(&TREE_SCHEMA_VERSION.to_le_bytes());
@@ -219,6 +235,18 @@ impl Tree {
 
     /// Identity of this tree.
     pub fn id(&self) -> ObjectId {
+        #[cfg(vesper_port)]
+        return ObjectId::new(
+            self.domain,
+            ObjectKind::Tree,
+            crate::port::tree_digest(self),
+        );
+        #[cfg(not(vesper_port))]
+        self.id_rust()
+    }
+
+    #[cfg(not(vesper_port))]
+    fn id_rust(&self) -> ObjectId {
         let mut hasher = ObjectHasher::new(self.domain, ObjectKind::Tree);
         hasher.update(&self.encode());
         hasher.finish()
@@ -226,6 +254,14 @@ impl Tree {
 
     /// Strict decoder: only canonical encodings are accepted.
     pub fn decode(domain: Domain, bytes: &[u8]) -> Result<Tree, TreeError> {
+        #[cfg(vesper_port)]
+        return crate::port::tree_decode(domain, bytes);
+        #[cfg(not(vesper_port))]
+        Self::decode_rust(domain, bytes)
+    }
+
+    #[cfg(not(vesper_port))]
+    fn decode_rust(domain: Domain, bytes: &[u8]) -> Result<Tree, TreeError> {
         let mut r = Reader { bytes, pos: 0 };
         if r.take(4)? != MAGIC {
             return Err(TreeError::BadMagic);

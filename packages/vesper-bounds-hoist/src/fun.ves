@@ -9,25 +9,17 @@
 // node of a trie whose first level is the root: equal places have equal
 // ids, and two places overlap when one is an ancestor of the other.
 
+use self::words::{
+    Ascii,
+    SeqWord,
+    Word,
+};
+
 const NONE32: u32 = 4294967295;
 
-// Instruction kinds (the input's op codes).
-const OP_INT: u8 = 0;
-const OP_OTHER: u8 = 1;
-const OP_LOOP: u8 = 2;
-const OP_READ: u8 = 3;
-const OP_BIND: u8 = 4;
-const OP_WRITE: u8 = 5;
-const OP_ONE: u8 = 6;
-const OP_BINARY: u8 = 7;
-const OP_LIST: u8 = 8;
-const OP_CALL: u8 = 9;
-const OP_SEQ: u8 = 10;
-const OP_TILED: u8 = 11;
-const OP_FIP: u8 = 12;
-const OP_INDIRECT: u8 = 13;
-const OP_CLOSURE: u8 = 14;
-const OP_HANDLE: u8 = 15;
+// The place table's starting slots (a power of two; it doubles at half
+// full).
+const PLACE_SLOTS: u64 = 1024;
 
 // Terminators.
 const T_RETURN: u8 = 0;
@@ -40,24 +32,6 @@ const T_UNREACHABLE: u8 = 4;
 const P_IN: u8 = 0;
 const P_INOUT: u8 = 1;
 const P_SINK: u8 = 2;
-
-// Sequence operation classes (`seq_word` of words.rs).
-const S_ANY: u64 = 0;
-const S_NO_RECEIVER: u64 = 1;
-const S_GET: u64 = 2;
-const S_SLICE_GET: u64 = 3;
-const S_SET: u64 = 4;
-const S_SLICE_SET: u64 = 5;
-const S_TRY_GET: u64 = 6;
-const S_TRY_SET: u64 = 7;
-const S_LEN: u64 = 8;
-const S_SLICE_LEN: u64 = 9;
-const S_AS_SLICE: u64 = 10;
-const S_SUB_SLICE: u64 = 11;
-const S_AS_BYTES: u64 = 12;
-const S_STR_LEN: u64 = 13;
-const S_HOISTED: u64 = 14;
-const S_GUARD: u64 = 18;
 
 // Binary operator classes.
 const B_OTHER: u32 = 0;
@@ -212,13 +186,13 @@ pub copy struct Ins {
     flags: u64,
     tyname: u32,
     op: u8,
-    // the sequence class (OP_SEQ), operator class (OP_BINARY), callee class
-    // (OP_CALL), or the read pass (OP_READ)
+    // the sequence class (Word::Seq), operator class (Word::Binary), callee class
+    // (Word::Call), or the read pass (Word::Read)
     sub: u64,
     // the first and second value operand (bind, write, binary, unary)
     a: u32,
     b: u32,
-    // the read or written place; the callee name (OP_CALL)
+    // the read or written place; the callee name (Word::Call)
     place: u32,
     // arguments: args[g0..g0+gn]
     g0: u32,
@@ -330,7 +304,7 @@ impl Fun {
                 dest: NONE32,
                 flags: 0,
                 tyname: 0,
-                op: OP_OTHER,
+                op: Word::Other,
                 sub: 0,
                 a: 0,
                 b: 0,
@@ -507,7 +481,7 @@ impl Fun {
         }
         if d > 1 {
             self.put_place(u32_at(in self.pparent, w(p)), inout out);
-            out.push(46);
+            out.push(Ascii::Dot);
         }
         self.put_name(u32_at(in self.plast, w(p)), inout out);
     }
@@ -536,7 +510,7 @@ impl Fun {
 
     // Whether instruction `i`'s pattern binds `name` (`binds`).
     pub fn binds(in self, i: Ins, name: u32) -> bool {
-        if i.op != OP_BIND {
+        if i.op != Word::Bind {
             return false;
         }
         for j in 0..w(i.nn) {
@@ -556,11 +530,11 @@ impl Fun {
     // `in` or by value (`lent` of `single_binding` and `invariant_local`).
     pub fn lends_root(in self, i: Ins, root: u32) -> bool {
         if !(
-            i.op == OP_CALL
-                || i.op == OP_INDIRECT
-                || i.op == OP_SEQ
-                || i.op == OP_TILED
-                || i.op == OP_FIP
+            i.op == Word::Call
+                || i.op == Word::Indirect
+                || i.op == Word::Seq
+                || i.op == Word::Tiled
+                || i.op == Word::Fip
         ) {
             return false;
         }
@@ -575,66 +549,74 @@ impl Fun {
 
     // `facts::touches`: whether `i` may change the local `root`.
     pub fn touches(in self, i: Ins, root: u32) -> bool {
-        if i.op == OP_WRITE {
+        if i.op == Word::Write {
             return self.write_root(i) == root;
         }
-        if i.op == OP_BIND {
+        if i.op == Word::Bind {
             return self.binds(i, root);
         }
-        if i.op == OP_CLOSURE || i.op == OP_HANDLE {
+        if i.op == Word::Closure || i.op == Word::Handle {
             return true;
         }
         self.lends_root(i, root)
     }
 }
 
+// FNV-1a's 64-bit offset basis and prime.
+const FNV_OFFSET: u64 = 14695981039346656037;
+const FNV_PRIME: u64 = 1099511628211;
+
 fn place_hash(parent: u32, last: u32) -> u64 {
-    let h = wrapping_mul(14695981039346656037 ^ w(parent), 1099511628211);
-    wrapping_mul(h ^ w(last), 1099511628211)
+    let h = wrapping_mul(FNV_OFFSET ^ w(parent), FNV_PRIME);
+    wrapping_mul(h ^ w(last), FNV_PRIME)
 }
 
 // The access a checked element operation becomes (`hoistable`): 0 get, 1
 // set, 2 try_get, 3 try_set; 4 for none.
 pub fn hoistable(s: u64) -> u64 {
-    if s == S_GET || s == S_SLICE_GET {
+    if s == SeqWord::Get || s == SeqWord::SliceGet {
         return 0;
     }
-    if s == S_SET || s == S_SLICE_SET {
+    if s == SeqWord::Set || s == SeqWord::SliceSet {
         return 1;
     }
-    if s == S_TRY_GET {
+    if s == SeqWord::TryGet {
         return 2;
     }
-    if s == S_TRY_SET {
+    if s == SeqWord::TrySet {
         return 3;
     }
     4
 }
 
 pub fn keeps_length(s: u64) -> bool {
-    hoistable(s) < 4 || s == S_LEN || s == S_SLICE_LEN || s == S_AS_SLICE || s == S_SUB_SLICE
+    hoistable(s) < 4
+        || s == SeqWord::Len
+        || s == SeqWord::SliceLen
+        || s == SeqWord::AsSlice
+        || s == SeqWord::SubSlice
 }
 
 pub fn has_receiver(s: u64) -> bool {
-    s != S_NO_RECEIVER && s != S_GUARD
+    s != SeqWord::NoReceiver && s != SeqWord::Guard
 }
 
 pub fn is_hoisted(s: u64) -> bool {
-    s >= S_HOISTED && s < S_GUARD
+    s >= SeqWord::Hoisted && s < SeqWord::Guard
 }
 
 // `calls_out`: whether the operation may call out of the function.
 pub fn calls_out(i: Ins) -> bool {
-    if i.op == OP_CALL
-        || i.op == OP_TILED
-        || i.op == OP_FIP
-        || i.op == OP_INDIRECT
-        || i.op == OP_CLOSURE
-        || i.op == OP_HANDLE {
+    if i.op == Word::Call
+        || i.op == Word::Tiled
+        || i.op == Word::Fip
+        || i.op == Word::Indirect
+        || i.op == Word::Closure
+        || i.op == Word::Handle {
         return true;
     }
-    if i.op == OP_SEQ {
-        return !(keeps_length(i.sub) || is_hoisted(i.sub) || i.sub == S_GUARD);
+    if i.op == Word::Seq {
+        return !(keeps_length(i.sub) || is_hoisted(i.sub) || i.sub == SeqWord::Guard);
     }
     false
 }
@@ -725,7 +707,7 @@ fn name_class(in t: ChunkSeq[u8], a: u64, n: u64) -> u8 {
         let mut digits = true;
         for k in tail..len {
             let c = u8_at(in t, add(a, k));
-            if c < 48 || c > 57 {
+            if c < Ascii::Zero || c > Ascii::Nine {
                 digits = false;
             }
         }
@@ -815,7 +797,8 @@ fn callee_class(in f: Fun, s: u32) -> u64 {
     let n = u64_at(in f.nlen, w(s));
     if n >= 2 {
         for i in 0..wrapping_sub(n, 1) {
-            if u8_at(in f.text, add(a, i)) == 58 && u8_at(in f.text, add(a, inc(i))) == 58 {
+            if u8_at(in f.text, add(a, i)) == Ascii::Colon
+                && u8_at(in f.text, add(a, inc(i))) == Ascii::Colon {
                 return w(C_PATH);
             }
         }
@@ -850,11 +833,11 @@ fn read_inst(inout f: Fun, inout r: Reader, in b: Slice[u8]) {
         lo: 0,
         hi: 0
     };
-    if op == OP_INT {
+    if op == Word::Int {
         i.neg = r.word(in b) != 0;
         i.lo = r.word(in b);
         i.hi = r.word(in b);
-    } else if op == OP_READ {
+    } else if op == Word::Read {
         let root = n32(r.word(in b));
         i.sub = r.word(in b);
         let mut p = f.child(0, root);
@@ -864,7 +847,7 @@ fn read_inst(inout f: Fun, inout r: Reader, in b: Slice[u8]) {
             p = f.child(p, s);
         }
         i.place = p;
-    } else if op == OP_BIND {
+    } else if op == Word::Bind {
         i.a = n32(r.word(in b));
         uses.push(i.a);
         i.bind = n32(r.word(in b));
@@ -874,39 +857,39 @@ fn read_inst(inout f: Fun, inout r: Reader, in b: Slice[u8]) {
         for k in 0..n {
             f.pool.push(n32(r.word(in b)));
         }
-    } else if op == OP_WRITE {
+    } else if op == Word::Write {
         i.a = n32(r.word(in b));
         uses.push(i.a);
         i.place = read_place(inout f, inout r, in b);
-    } else if op == OP_ONE {
+    } else if op == Word::One {
         i.a = n32(r.word(in b));
         uses.push(i.a);
-    } else if op == OP_BINARY {
+    } else if op == Word::Binary {
         let s = n32(r.word(in b));
         i.sub = binary_class(in f, s);
         i.a = n32(r.word(in b));
         i.b = n32(r.word(in b));
         uses.push(i.a);
         uses.push(i.b);
-    } else if op == OP_LIST {
+    } else if op == Word::List {
         let n = r.word(in b);
         for k in 0..n {
             uses.push(n32(r.word(in b)));
         }
-    } else if op == OP_CALL {
+    } else if op == Word::Call {
         let s = n32(r.word(in b));
         i.sub = callee_class(in f, s);
         i.place = s;
         i.gn = read_args(inout f, inout r, in b, inout uses);
-    } else if op == OP_SEQ {
+    } else if op == Word::Seq {
         i.sub = r.word(in b);
         i.gn = read_args(inout f, inout r, in b, inout uses);
-    } else if op == OP_TILED || op == OP_FIP {
+    } else if op == Word::Tiled || op == Word::Fip {
         i.gn = read_args(inout f, inout r, in b, inout uses);
-    } else if op == OP_INDIRECT {
+    } else if op == Word::Indirect {
         uses.push(n32(r.word(in b)));
         i.gn = read_args(inout f, inout r, in b, inout uses);
-    } else if op == OP_HANDLE {
+    } else if op == Word::Handle {
         let has_state = r.word(in b);
         let v = n32(r.word(in b));
         if has_state != 0 {
@@ -942,7 +925,7 @@ pub fn read_fun(in b: Slice[u8]) -> Fun {
         plast: ChunkSeq::new[u32](),
         pdepth: ChunkSeq::new[u32](),
         pslots: ChunkSeq::new[u32](),
-        pmask: 1023,
+        pmask: wrapping_sub(PLACE_SLOTS, 1),
         params: ChunkSeq::new[Prm](),
         vflags: ChunkSeq::new[u64](),
         joins: ChunkSeq::new[u8](),
@@ -959,7 +942,7 @@ pub fn read_fun(in b: Slice[u8]) -> Fun {
         enclosing: ChunkSeq::new[u32](),
         tried: ChunkSeq::new[u32]()
     };
-    f.pslots.resize(1024, 0);
+    f.pslots.resize(PLACE_SLOTS, 0);
     f.pparent.push(0);
     f.plast.push(0);
     f.pdepth.push(0);

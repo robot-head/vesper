@@ -262,25 +262,102 @@ Each step runs the crate's Rust tests against the Vesper build as a
 differential, then flips at the bar (0 differences, ABBA upper bound at or
 below 1.5x).
 
-## Flip verdicts
+## Part 2a: loom-cas codecs
 
-None yet: nothing is ported in part 1.
+`crates/vesper-loom-cas/vesper/` (`@vesper/loom-cas`) ports the pure half of
+the crate: the entry-name policy, object ids (BLAKE3 derive-key contexts,
+hex and the `b3v1:<domain>:<kind>:<hex>` text form), the canonical tree
+encoding and decoder, and the derivation encoding, decoder and key. It
+hashes through the shared BLAKE3 C package (`@vesper-std/hash-sys`).
+
+* The port build is its own package, `crates/vesper-loom-cas/port`
+  (`vesper-loom-cas-port`, library `vesper_loom_cas`): the same `src/`
+  with cfg(vesper_port), and the crate's tests. `vesper-loom-cas` itself
+  stays the Rust build with no port harness, because the compiler links it:
+  a harness build dependency there made a Bazel cycle through the compiler
+  binary (the first CI run of #1493), and a Cargo feature cannot keep the
+  compiler on Rust. No crate depends on the port package until the flip,
+  when the compiler moves to a seed copy.
+* `tests/codec_differential.rs` runs a seeded corpus through every codec
+  (valid and broken inputs, every error kind) and pins the transcript's
+  hash. Rust and the port give the same transcript: 0 differences.
+* `port/test-port.sh` runs the port package's tests, then one deliberate bug per module
+  (name, id, tree, derivation). Each is caught. It runs in shard 7 of
+  `scripts/test-port-harness.sh`.
+
+Rough timings (`examples/codec_timing.rs`, median of 15, port / Rust):
+
+| Codec | Port vs Rust |
+|---|---|
+| `validate_name` | ~2.0x |
+| `blob_id`, small blob | ~2.7x |
+| `blob_id`, 1 MiB | ~1.2x |
+| tree encode | ~3.5x |
+| tree decode | ~1.6x |
+| derivation key | ~3.3x |
+| derivation decode | ~2.3x |
+
+The small-input costs are mostly the ABI-3 crossing and `ChunkSeq` growth,
+so these codecs flip together with the store (part 2b), when the whole
+crate runs in Vesper and no crossing is left per call.
+
+## Part 2b: the loom-cas store
+
+`vesper/src/store.ves` ports the store's rules: the layout and its
+marker, staging, hashing while writing, flushing, no-replace publication
+with re-checks and per-key repair locks, verified reads, derivation
+records (publication, conflicts, corrupt-record repair, lookup) and the
+staging sweep. `Store::open`, `contains`, `put_blob`, `put_blob_reader`,
+`put_blob_expected`, `put_tree`, `verify_object`, `read_blob`,
+`read_tree`, `publish_derivation`, `lookup_derivation` and
+`sweep_temporaries` call it in the port package.
+
+* The operating-system calls are one `.vsys` library, `CasFs`, that the
+  crate provides in `src/port_fs.rs`: one system operation per call over
+  the existing `fsutil` helpers (no-follow opens, no-replace renames,
+  directory syncs, modes, locks, reflinks, listings). Errors keep their
+  exact `io::Error`: the shim records it and hands Vesper an index, and
+  the wrapper takes it back. These calls are the part that stays Rust
+  until `@vesper-std/fs` (lane 13, #1408) has them.
+* A reader is lent to Vesper as a handle (export ABI 4). A panicking
+  reader is caught in the shim, reported as a read error so the port
+  removes its staging file, and resumed after the call, as the Rust
+  store's guard does.
+* Every store call answers a byte reply: the payload, or the error's
+  fields, with the code as the last byte, so a large blob is never moved.
+* The crate's store and transfer suites (36 + 39 tests) pass against the
+  port. A deliberately wrong store (an occupied path trusted without
+  rehashing) fails three store tests; `port/test-port.sh` checks one.
+
+Timings over 50,000 and 40,000 calls (`time`, unsynced store, release):
+reading a 256-byte blob is ~1.05-1.1x Rust, and storing new and
+deduplicated 256-byte blobs is at or below Rust's time (the file system
+dominates). A 1 MiB read is ~1.8x (median of 15): the reply is copied
+once into the Rust `Vec`.
+
+Left for part 2c: `put_file`, `ingest_dir`, `materialize`, `verify_all`
+and the transfer exporter's bounded read. They need the tree decoder's
+case-insensitive collision check (Unicode `to_lowercase`) in Vesper.
+
+## Flip verdicts
 
 | Crate | Differential | ABBA (95% interval) | Rust deleted | PR |
 |---|---|---|---|---|
-| (none) | | | 0 | |
+| `vesper-loom-cas` (codecs) | 0 diffs | not run (1.2-3.5x rough) | 0 | part 2a |
+| `vesper-loom-cas` (store, 12 calls) | crate suites pass | not run (~1.0-1.1x small, 1.8x 1 MiB read) | 0 | part 2b |
 
 ## Coordination asks
 
 * Gap 1 (C callbacks) needs an owner and a manuscript decision. It blocks
   three of these crates and part of lane 13.
-* Gap 9: one shared BLAKE3 C package with lane 12.
-* Gap 11: RSA-PSS verify in lane 17's shim, or an owner decision that
-  loom-tuf drops RSA keys.
+* Gap 11: RSA-PSS verify is done in lane 17's shim.
 * Gap 12: lane 3 moving the CAS/admission commands out of the compiler, and
   a decision on where the DDC auditor's copy of the object-id scheme lives.
 
 ## What is left
 
-All of part 2 (the ports) and part 3 (the flips). The census row update in
-`scripts/rust-census.py` waits for plan PR #1415, which adds that file.
+* Part 2c: the rest of the store (above), then a speed pass on the codecs
+  to the 1.5x bar and the loom-cas flip.
+* Moving `CasFs` onto `@vesper-std/fs` once lane 13 has no-follow opens,
+  no-replace renames, modes, locks and reflinks.
+* Then admission, tuf, and the Wasmtime crates once gap 1 is closed.

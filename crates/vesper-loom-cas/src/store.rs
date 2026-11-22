@@ -189,10 +189,14 @@ impl Store {
     }
 
     fn open_with(root: &Path, durable: bool) -> Result<Store> {
-        fs::create_dir_all(root).map_err(|e| CasError::io("create store root", root, e))?;
-        let root = root
-            .canonicalize()
-            .map_err(|e| CasError::io("resolve store root", root, e))?;
+        #[cfg(vesper_port)]
+        let root = crate::port_store::open(root, durable)?;
+        #[cfg(not(vesper_port))]
+        let root = {
+            fs::create_dir_all(root).map_err(|e| CasError::io("create store root", root, e))?;
+            root.canonicalize()
+                .map_err(|e| CasError::io("resolve store root", root, e))?
+        };
         let store = Store {
             objects: root.join("objects").join("v1"),
             derivations: root.join("derivations").join("v1"),
@@ -211,8 +215,12 @@ impl Store {
             store.quarantine.clone(),
             store.locks.clone(),
         ] {
+            #[cfg(not(vesper_port))]
             ensure_plain_dir(&dir)?;
+            #[cfg(vesper_port)]
+            let _ = dir;
         }
+        #[cfg(not(vesper_port))]
         store.ensure_marker()?;
         Ok(store)
     }
@@ -269,6 +277,13 @@ impl Store {
 
     /// Whether an object file is present (contents are not rehashed).
     pub fn contains(&self, id: &ObjectId) -> Result<bool> {
+        #[cfg(vesper_port)]
+        return crate::port_store::contains(&self.root, id);
+        #[cfg(not(vesper_port))]
+        self.contains_rust(id)
+    }
+
+    fn contains_rust(&self, id: &ObjectId) -> Result<bool> {
         let path = self.object_path(id);
         match fs::symlink_metadata(&path) {
             Ok(meta) => Ok(meta.is_file()),
@@ -283,6 +298,13 @@ impl Store {
 
     /// Store `bytes` as a blob.
     pub fn put_blob(&self, domain: Domain, bytes: &[u8]) -> Result<Ingested> {
+        #[cfg(vesper_port)]
+        return crate::port_store::put_blob(&self.root, self.durable, domain, bytes);
+        #[cfg(not(vesper_port))]
+        self.put_blob_rust(domain, bytes)
+    }
+
+    fn put_blob_rust(&self, domain: Domain, bytes: &[u8]) -> Result<Ingested> {
         // The whole input is in memory, so hash it first: an identical object
         // that is already stored (and verifies) needs no staging file, flush
         // or rename. Anything else takes the ordinary path, which re-checks
@@ -305,12 +327,28 @@ impl Store {
     /// Stream a blob into the store. If the reader fails, nothing is
     /// published and the staging file is removed.
     pub fn put_blob_reader(&self, domain: Domain, reader: impl Read) -> Result<Ingested> {
+        #[cfg(vesper_port)]
+        return crate::port_store::put_stream(&self.root, self.durable, domain, reader, None);
+        #[cfg(not(vesper_port))]
         self.put_reader(domain, ObjectKind::Blob, reader, None)
     }
 
     /// Stream a blob and require it to hash to `expected` (e.g. a digest from
     /// a lockfile). On mismatch nothing is published.
     pub fn put_blob_expected(&self, expected: ObjectId, reader: impl Read) -> Result<Ingested> {
+        #[cfg(vesper_port)]
+        return crate::port_store::put_stream(
+            &self.root,
+            self.durable,
+            expected.domain,
+            reader,
+            Some(expected),
+        );
+        #[cfg(not(vesper_port))]
+        self.put_blob_expected_rust(expected, reader)
+    }
+
+    fn put_blob_expected_rust(&self, expected: ObjectId, reader: impl Read) -> Result<Ingested> {
         if expected.kind != ObjectKind::Blob {
             return Err(CasError::WrongKind {
                 id: expected,
@@ -330,6 +368,13 @@ impl Store {
     /// Store a tree after checking that every child is present with the
     /// recorded size and kind.
     pub fn put_tree(&self, tree: &Tree) -> Result<Ingested> {
+        #[cfg(vesper_port)]
+        return crate::port_store::put_tree(&self.root, self.durable, tree);
+        #[cfg(not(vesper_port))]
+        self.put_tree_rust(tree)
+    }
+
+    fn put_tree_rust(&self, tree: &Tree) -> Result<Ingested> {
         for (_, entry) in tree.entries() {
             let child = tree.child_id(entry);
             let path = self.object_path(&child);
@@ -625,6 +670,9 @@ impl Store {
 
     /// Rehash an object and return its size.
     pub fn verify_object(&self, id: &ObjectId) -> Result<u64> {
+        #[cfg(vesper_port)]
+        return crate::port_store::verify(&self.root, id);
+        #[cfg(not(vesper_port))]
         self.verify_at(id, &self.object_path(id))
     }
 
@@ -670,6 +718,13 @@ impl Store {
 
     /// Read a blob and verify it hashes to `id`.
     pub fn read_blob(&self, id: &ObjectId) -> Result<Vec<u8>> {
+        #[cfg(vesper_port)]
+        return crate::port_store::read(&self.root, id, ObjectKind::Blob);
+        #[cfg(not(vesper_port))]
+        self.read_blob_rust(id)
+    }
+
+    fn read_blob_rust(&self, id: &ObjectId) -> Result<Vec<u8>> {
         if id.kind != ObjectKind::Blob {
             return Err(CasError::WrongKind {
                 id: *id,
@@ -769,6 +824,16 @@ impl Store {
 
     /// Read, verify and strictly decode a tree.
     pub fn read_tree(&self, id: &ObjectId) -> Result<Tree> {
+        #[cfg(vesper_port)]
+        return Ok(Tree::decode(
+            id.domain,
+            &crate::port_store::read(&self.root, id, ObjectKind::Tree)?,
+        )?);
+        #[cfg(not(vesper_port))]
+        self.read_tree_rust(id)
+    }
+
+    fn read_tree_rust(&self, id: &ObjectId) -> Result<Tree> {
         if id.kind != ObjectKind::Tree {
             return Err(CasError::WrongKind {
                 id: *id,
@@ -791,6 +856,17 @@ impl Store {
     /// A record states only what a local builder produced. It is not a
     /// provenance, signature or reproducibility attestation.
     pub fn publish_derivation(
+        &self,
+        inputs: &DerivationInputs,
+        output: ObjectId,
+    ) -> Result<DerivationOutcome> {
+        #[cfg(vesper_port)]
+        return crate::port_store::publish_derivation(&self.root, self.durable, inputs, output);
+        #[cfg(not(vesper_port))]
+        self.publish_derivation_rust(inputs, output)
+    }
+
+    fn publish_derivation_rust(
         &self,
         inputs: &DerivationInputs,
         output: ObjectId,
@@ -867,6 +943,13 @@ impl Store {
     /// miss. A record whose output object has been removed is an error, not a
     /// silent miss. The output's contents are verified when it is read.
     pub fn lookup_derivation(&self, inputs: &DerivationInputs) -> Result<Option<ObjectId>> {
+        #[cfg(vesper_port)]
+        return crate::port_store::lookup_derivation(&self.root, inputs);
+        #[cfg(not(vesper_port))]
+        self.lookup_derivation_rust(inputs)
+    }
+
+    fn lookup_derivation_rust(&self, inputs: &DerivationInputs) -> Result<Option<ObjectId>> {
         let encoding = inputs.encode()?;
         let key = DerivationKey::of_encoding(&encoding);
         let path = self.record_path(&key);
@@ -1127,6 +1210,13 @@ impl Store {
     /// cannot affect readers. Use an age comfortably longer than the slowest
     /// expected ingestion, since a live writer's file is also in `tmp/`.
     pub fn sweep_temporaries(&self, min_age: Duration) -> Result<usize> {
+        #[cfg(vesper_port)]
+        return crate::port_store::sweep(&self.root, min_age);
+        #[cfg(not(vesper_port))]
+        self.sweep_temporaries_rust(min_age)
+    }
+
+    fn sweep_temporaries_rust(&self, min_age: Duration) -> Result<usize> {
         let now = SystemTime::now();
         let mut removed = 0;
         let entries =

@@ -1,0 +1,444 @@
+// @export abi 4
+// @export vsys direct rust=crate::blake3_shim
+// | sys library Blake3 (
+// |     target = "@TARGET@", abi = "@ABI@",
+// |     link = "static", name = "vesper_std_blake3",
+// |     artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+// | ) {
+// |     linear extern type Hasher;
+// |     fn vesper_blake3_new() -> ForeignVal[Option[Hasher]];
+// |     fn vesper_blake3_new_keyed(nocapture in key: CSlice[u8]) -> ForeignVal[Option[Hasher]];
+// |     fn vesper_blake3_new_derive_key(nocapture in context: CSlice[u8]) -> ForeignVal[Option[Hasher]];
+// |     fn vesper_blake3_update(inout h: Hasher, nocapture in data: CSlice[u8]) -> ForeignVal[Unit];
+// |     fn vesper_blake3_finalize(in h: Hasher, nocapture inout out: CSlice[u8]) -> ForeignVal[Unit];
+// |     fn vesper_blake3_free(sink h: Hasher) -> ForeignVal[Unit];
+// |     fn vesper_blake3_hash(nocapture in data: CSlice[u8], nocapture inout out: CSlice[u8]) -> ForeignVal[Unit];
+// | }
+//
+// @export vsys direct rust=crate::port_fs
+// | sys library CasFs (
+// |     target = "@TARGET@", abi = "@ABI@",
+// |     link = "static", name = "vesper_loom_cas_fs",
+// |     artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+// | ) {
+// |     linear extern type CasFile;
+// |     linear extern type CasDir;
+// |     affine extern type Reader;
+// |     wire struct CasMeta { size: u64, mtime_s: i64, mtime_ns: u32, kind: u32 }
+// |     fn cfs_sep() -> ForeignVal[u8];
+// |     fn cfs_unique(nocapture inout out: CSlice[u8]) -> ForeignVal[Unit];
+// |     fn cfs_now(nocapture inout out: CSlice[u8]) -> ForeignVal[Unit];
+// |     fn cfs_create_dir_all(nocapture in path: CSlice[u8], nocapture inout err: u64) -> ForeignVal[u32];
+// |     fn cfs_create_dir(nocapture in path: CSlice[u8], nocapture inout err: u64) -> ForeignVal[u32];
+// |     fn cfs_canonicalize(nocapture in path: CSlice[u8], nocapture inout out: CSlice[u8], nocapture inout err: u64) -> ForeignVal[u64];
+// |     fn cfs_meta(nocapture in path: CSlice[u8], nocapture inout m: CasMeta, nocapture inout err: u64) -> ForeignVal[u32];
+// |     fn cfs_open_regular(nocapture in path: CSlice[u8], nocapture inout err: u64) -> ForeignVal[Option[CasFile]];
+// |     fn cfs_create_new(nocapture in path: CSlice[u8], nocapture inout err: u64) -> ForeignVal[Option[CasFile]];
+// |     fn cfs_open_lock(nocapture in path: CSlice[u8], nocapture inout stage: u64, nocapture inout err: u64) -> ForeignVal[Option[CasFile]];
+// |     fn cfs_file_len(in f: CasFile, nocapture inout err: u64) -> ForeignVal[u64];
+// |     fn cfs_file_exec(in f: CasFile, nocapture inout err: u64) -> ForeignVal[u32];
+// |     fn cfs_read(inout f: CasFile, nocapture inout buf: CSlice[u8], nocapture inout err: u64) -> ForeignVal[u64];
+// |     fn cfs_write(inout f: CasFile, nocapture in buf: CSlice[u8], nocapture inout err: u64) -> ForeignVal[u32];
+// |     fn cfs_sync(inout f: CasFile, nocapture inout err: u64) -> ForeignVal[u32];
+// |     fn cfs_make_readonly(inout f: CasFile, nocapture inout err: u64) -> ForeignVal[u32];
+// |     fn cfs_close(sink f: CasFile) -> ForeignVal[Unit];
+// |     fn cfs_publish(nocapture in staged: CSlice[u8], nocapture in dest: CSlice[u8], dir: bool, nocapture inout err: u64) -> ForeignVal[u32];
+// |     fn cfs_remove_staged(nocapture in path: CSlice[u8], nocapture inout err: u64) -> ForeignVal[u32];
+// |     fn cfs_remove_file(nocapture in path: CSlice[u8], nocapture inout err: u64) -> ForeignVal[u32];
+// |     fn cfs_remove_dir_all(nocapture in path: CSlice[u8], nocapture inout err: u64) -> ForeignVal[u32];
+// |     fn cfs_rename(nocapture in from: CSlice[u8], nocapture in to: CSlice[u8], nocapture inout err: u64) -> ForeignVal[u32];
+// |     fn cfs_sync_dir(nocapture in path: CSlice[u8], nocapture inout err: u64) -> ForeignVal[u32];
+// |     fn cfs_set_workspace_mode(nocapture in path: CSlice[u8], exec: bool, nocapture inout err: u64) -> ForeignVal[u32];
+// |     fn cfs_reflink(nocapture in src: CSlice[u8], nocapture in dst: CSlice[u8], nocapture inout err: u64) -> ForeignVal[u32];
+// |     fn cfs_read_dir(nocapture in path: CSlice[u8], nocapture inout err: u64) -> ForeignVal[Option[CasDir]];
+// |     fn cfs_dir_next(inout d: CasDir, nocapture inout name: CSlice[u8], nocapture inout err: u64) -> ForeignVal[i64];
+// |     fn cfs_dir_close(sink d: CasDir) -> ForeignVal[Unit];
+// |     fn cfs_reader_read(in r: Reader, nocapture inout buf: CSlice[u8], nocapture inout err: u64) -> ForeignVal[u64];
+// | }
+//
+// The `.vsys` library `CasFs` above is the store's file system calls, one
+// system operation each, provided by the Rust crate (src/port_fs.rs over
+// src/fsutil.rs). `Reader` is a Rust reader lent to one call.
+//
+// The `.vsys` library `Blake3` is @vesper-std/hash-sys's (`.vsys` imports are
+// read from the root module of a library build only), provided in C by
+// packages/vesper-std/hash/sys/c, which the Rust crate links through
+// vesper-blake3-sys as `crate::blake3_shim`.
+//
+// @vesper/loom-cas: Vesper port of vesper-loom-cas's codecs (Rust-exit wave
+// SH6 lane 16, #1411, part 2a): the portable naming policy, object ids and
+// their text form, the canonical tree encoding, and the derivation inputs
+// encoding and key (part 2a); the store (`store`, part 2b) over the
+// `CasFs` calls.
+//
+// Errors are value enums (`NameErr`, `TreeErr`, `DrvErr`, `IdErr`). Where
+// the Rust error carries a detail (a version, a tag, an entry), the
+// function writes it to its `inout info` word before it raises; the Rust
+// wrapper (src/port.rs) rebuilds the crate's error values from it and from
+// the input bytes.
+use self::name::{
+    name_code
+};
+use self::id::{
+    object_hash,
+    parse_id,
+    hex_into
+};
+use self::tree::{
+    tree_encode_into,
+    tree_scan
+};
+use self::drv::{
+    drv_encode_into,
+    drv_scan
+};
+use self::store::StoreErr;
+use @vesper-std/hash-sys::{
+    hasher_new_derive_key,
+    update,
+    finalize,
+    hasher_free
+};
+use @vesper-std/hash::blake3::{
+    Digest,
+    digest_bytes
+};
+
+// The naming policy's verdict for one tree entry name (`validate_name`):
+// 0 for a valid name, else the `NameError` variant's position plus one
+// (1 Empty .. 8 TrailingDotOrSpace, 9 NotUtf8).
+pub fn name_error(in name: Slice[u8]) -> u64 {
+    name_code(in name)
+}
+
+// The 32-byte digest of `bytes` under the object context of `domain` and
+// `kind` (their tags: domain 1 source, 2 interface, 3 artifact; kind 1
+// blob, 2 tree).
+pub fn object_digest(domain: u8, kind: u8, in bytes: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[Blake3]] {
+    object_hash(domain, kind, in bytes)
+}
+
+// The 64 lowercase hex digits of `bytes`.
+pub fn to_hex(in bytes: Slice[u8]) -> ChunkSeq[u8] {
+    let mut out = ChunkSeq::with_capacity[u8](wrapping_mul(bytes.len(), 2));
+    hex_into(in bytes, inout out);
+    out
+}
+
+pub copy enum IdErr {
+    Invalid
+}
+
+// `ObjectId::from_str`: `b3v1:<domain>:<kind>:<64 hex>` as the 34-byte
+// binary id (domain tag, kind tag, digest).
+pub fn parse_object_id(in text: Slice[u8]) -> ChunkSeq[u8] eff [Fail[IdErr]] {
+    parse_id(in text)
+}
+
+// Digest of the 64 hex digits, or `Invalid` (`Digest::from_hex`).
+pub fn digest_from_hex(in text: Slice[u8]) -> ChunkSeq[u8] eff [Fail[IdErr]] {
+    self::id::from_hex(in text)
+}
+
+// The canonical encoding of a tree whose entries are already in ascending
+// name order: entry i is named `names[ends[i - 1] .. ends[i]]` (from 0 for
+// i = 0), has kind tag `kinds[i]`, digest `digests[32 i .. 32 i + 32]` and
+// size `sizes[i]`.
+pub fn tree_encode(
+    in names: Slice[u8],
+    in ends: Slice[u64],
+    in kinds: Slice[u8],
+    in digests: Slice[u8],
+    in sizes: Slice[u64]
+) -> ChunkSeq[u8] {
+    tree_encode_into(in names, in ends, in kinds, in digests, in sizes)
+}
+
+// `Tree::id`'s digest: the tree object hash of the canonical encoding.
+pub fn tree_digest(
+    domain: u8,
+    in names: Slice[u8],
+    in ends: Slice[u64],
+    in kinds: Slice[u8],
+    in digests: Slice[u8],
+    in sizes: Slice[u64]
+) -> ChunkSeq[u8] eff [Ffi[Blake3]] {
+    let enc = tree_encode_into(in names, in ends, in kinds, in digests, in sizes);
+    object_hash(domain, 2, in enc.as_slice())
+}
+
+// The strict tree decoder's checks (`Tree::decode`), in its order. The
+// case-collision check is the Rust tree's, applied as it inserts, so the
+// decoder reports per entry instead of stopping: five words per entry (the
+// name's offset in `bytes`, its length, the kind tag, the size, and the
+// entry's own error: 0 none, 1 NotSorted against the entry before it, 2
+// DirectorySize, 16 + the NameError code for an invalid name), the digest
+// following the kind byte, then three words that end the scan: the
+// TreeErr position plus one (0 when the whole encoding is canonical) and
+// two details (the version for UnsupportedVersion; the count for
+// TooManyEntries; the tag for UnknownEntryKind; the name's offset and
+// length for InvalidName, which here is always NotUtf8). The Rust decoder
+// replays the entries in order and stops at the first error.
+pub fn tree_decode(in bytes: Slice[u8]) -> ChunkSeq[u64] {
+    tree_scan(in bytes)
+}
+
+pub copy enum DrvErr {
+    BadMagic,
+    UnsupportedSchema,
+    Truncated,
+    TrailingBytes,
+    SourceOutputDomain,
+    UnknownDomain,
+    InvalidLabel,
+    NoInputs,
+    TooManyEntries,
+    NotSorted,
+    InvalidObjectId,
+    StringTooLong,
+    StringNotUtf8
+}
+
+// `DerivationInputs::encode`: the strings are `strs[ends[i - 1] ..
+// ends[i]]` in the order builder, builder version, target (when
+// `has_target`), then the option keys and values interleaved, then the
+// input names; `ids` holds the inputs' 34-byte binary ids in order. Maps
+// are in ascending key order. On failure `info` is the field (InvalidLabel
+// and TooManyEntries: 0 builder, 1 builder_version, 2 target, 3 option
+// key, 4 option value, 5 input name, 6 options, 7 inputs) * 2^32 + the
+// string's index in `ends`.
+pub fn drv_encode(
+    domain: u8,
+    has_target: bool,
+    n_options: u64,
+    n_inputs: u64,
+    in strs: Slice[u8],
+    in ends: Slice[u64],
+    in ids: Slice[u8],
+    inout info: u64
+) -> ChunkSeq[u8] eff [Fail[DrvErr]] {
+    drv_encode_into(domain, has_target, n_options, n_inputs, in strs, in ends, in ids, inout info)
+}
+
+// `DerivationInputs::key`: the derivation-key digest of the encoding.
+pub fn drv_key(
+    domain: u8,
+    has_target: bool,
+    n_options: u64,
+    n_inputs: u64,
+    in strs: Slice[u8],
+    in ends: Slice[u64],
+    in ids: Slice[u8],
+    inout info: u64
+) -> ChunkSeq[u8] eff [Ffi[Blake3], Fail[DrvErr]] {
+    let enc = drv_encode_into(
+        domain,
+        has_target,
+        n_options,
+        n_inputs,
+        in strs,
+        in ends,
+        in ids,
+        inout info
+    );
+    derivation_hash(in enc.as_slice())
+}
+
+// The derivation key of an encoding (`DerivationKey::of_encoding`).
+pub fn derivation_hash(in enc: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[Blake3]] {
+    let mut out = ChunkSeq::with_capacity[u8](32);
+    match hasher_new_derive_key(in "vesper-loom-cas 2026-11 v1 derivation key".as_bytes()) {
+        Option::Some(h) => {
+            let mut h = h;
+            update(inout h, in enc);
+            let d = finalize(in h);
+            hasher_free(h);
+            digest_bytes(d, inout out);
+        },
+        Option::None => {},
+    }
+    out
+}
+
+// `DerivationInputs::decode`: on success, words: domain tag, has_target,
+// option count, input count, then (offset, length) of every string in the
+// encoding order of `drv_encode`, then the offset of every input's
+// 34-byte id. `info` on failure: the schema (UnsupportedSchema), the tag
+// (UnknownDomain), the field * 2^32 + string index as in `drv_encode`
+// (InvalidLabel, TooManyEntries: 6 options or 7 inputs), 6 or 7
+// (NotSorted), the string's length (StringTooLong), the string's offset
+// and, in `info2`, its length (StringNotUtf8).
+pub fn drv_decode(in bytes: Slice[u8], inout info: u64, inout info2: u64)
+    -> ChunkSeq[u64] eff [Fail[DrvErr]] {
+    drv_scan(in bytes, inout info, inout info2)
+}
+
+// ---------------------------------------------------------------------------
+// The store (module `store`). Each call answers a reply (see store.ves):
+// the payload and a 0, or a `CasError`'s fields and its code (last byte). `root`
+// is the store's canonical root (from `store_open`), `durable` whether it
+// flushes writes.
+
+fn reply_of(code: u8) -> ChunkSeq[u8] {
+    let mut r: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    r.push(code);
+    r
+}
+
+// `Store::open_with`: answers the canonical root.
+pub fn store_open(in root: Slice[u8], durable: bool) -> ChunkSeq[u8] eff [Ffi[CasFs], Ffi[Blake3]] {
+    let mut r = reply_of(0);
+    handle Fail[StoreErr] in {
+        self::store::open(inout r, in root, durable);
+    } with {
+        return v => v,
+        raise(_e, _k) => {},
+    };
+    r
+}
+
+// `contains`: answers 1 or 0.
+pub fn store_contains(in root: Slice[u8], in id: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[CasFs]] {
+    let mut r = reply_of(0);
+    handle Fail[StoreErr] in {
+        self::store::contains_reply(inout r, in root, in id);
+    } with {
+        return v => v,
+        raise(_e, _k) => {},
+    };
+    r
+}
+
+// `put_blob`: `rd` reads `bytes`. Answers the id, size and newly-stored
+// byte (also for the calls below).
+pub fn store_put_blob(
+    in root: Slice[u8],
+    durable: bool,
+    domain: u8,
+    in bytes: Slice[u8],
+    in rd: Reader
+) -> ChunkSeq[u8] eff [Ffi[CasFs], Ffi[Blake3]] {
+    let mut r = reply_of(0);
+    handle Fail[StoreErr] in {
+        self::store::put_blob(inout r, in root, durable, domain, in bytes, in rd);
+    } with {
+        return v => v,
+        raise(_e, _k) => {},
+    };
+    r
+}
+
+// `put_blob_reader` and (`has_expected`) `put_blob_expected`.
+pub fn store_put_stream(
+    in root: Slice[u8],
+    durable: bool,
+    domain: u8,
+    in rd: Reader,
+    has_expected: bool,
+    in expected: Slice[u8]
+) -> ChunkSeq[u8] eff [Ffi[CasFs], Ffi[Blake3]] {
+    let mut r = reply_of(0);
+    handle Fail[StoreErr] in {
+        self::store::put_stream(
+            inout r,
+            in root,
+            durable,
+            domain,
+            in rd,
+            has_expected,
+            in expected
+        );
+    } with {
+        return v => v,
+        raise(_e, _k) => {},
+    };
+    r
+}
+
+// `put_tree`: `enc` is the tree's encoding and `rd` reads it.
+pub fn store_put_tree(
+    in root: Slice[u8],
+    durable: bool,
+    domain: u8,
+    in enc: Slice[u8],
+    in rd: Reader
+) -> ChunkSeq[u8] eff [Ffi[CasFs], Ffi[Blake3]] {
+    let mut r = reply_of(0);
+    handle Fail[StoreErr] in {
+        self::store::put_tree(inout r, in root, durable, domain, in enc, in rd);
+    } with {
+        return v => v,
+        raise(_e, _k) => {},
+    };
+    r
+}
+
+// `verify_object`: answers the size.
+pub fn store_verify(in root: Slice[u8], in id: Slice[u8])
+    -> ChunkSeq[u8] eff [Ffi[CasFs], Ffi[Blake3]] {
+    let mut r = reply_of(0);
+    handle Fail[StoreErr] in {
+        self::store::verify_object(inout r, in root, in id);
+    } with {
+        return v => v,
+        raise(_e, _k) => {},
+    };
+    r
+}
+
+// `read_blob` (`kind` 1) and `read_tree`'s read (`kind` 2): answers the
+// verified bytes.
+pub fn store_read(in root: Slice[u8], in id: Slice[u8], kind: u8)
+    -> ChunkSeq[u8] eff [Ffi[CasFs], Ffi[Blake3]] {
+    let mut r = reply_of(0);
+    handle Fail[StoreErr] in {
+        self::store::read_verified(inout r, in root, in id, kind);
+    } with {
+        return v => v,
+        raise(_e, _k) => {},
+    };
+    r
+}
+
+// `publish_derivation`: `enc` is the inputs' encoding. Answers the key and
+// the newly-recorded byte.
+pub fn store_publish_derivation(
+    in root: Slice[u8],
+    durable: bool,
+    in enc: Slice[u8],
+    in output: Slice[u8]
+) -> ChunkSeq[u8] eff [Ffi[CasFs], Ffi[Blake3]] {
+    let mut r = reply_of(0);
+    handle Fail[StoreErr] in {
+        self::store::publish_derivation(inout r, in root, durable, in enc, in output);
+    } with {
+        return v => v,
+        raise(_e, _k) => {},
+    };
+    r
+}
+
+// `lookup_derivation`: answers 0, or 1 and the output id.
+pub fn store_lookup_derivation(in root: Slice[u8], in enc: Slice[u8])
+    -> ChunkSeq[u8] eff [Ffi[CasFs], Ffi[Blake3]] {
+    let mut r = reply_of(0);
+    handle Fail[StoreErr] in {
+        self::store::lookup_derivation(inout r, in root, in enc);
+    } with {
+        return v => v,
+        raise(_e, _k) => {},
+    };
+    r
+}
+
+// `sweep_temporaries`: answers the number removed.
+pub fn store_sweep(in root: Slice[u8], min_s: u64, min_ns: u64) -> ChunkSeq[u8] eff [Ffi[CasFs]] {
+    let mut r = reply_of(0);
+    handle Fail[StoreErr] in {
+        self::store::sweep(inout r, in root, min_s, min_ns);
+    } with {
+        return v => v,
+        raise(_e, _k) => {},
+    };
+    r
+}

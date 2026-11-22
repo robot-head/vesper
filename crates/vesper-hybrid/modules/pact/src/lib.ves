@@ -1,0 +1,36 @@
+// @vesper/hybrid-pact: the declaration pass of `pact_frontend::check_package`
+// served from Vesper in the hybrid Stage 2 build (self-hosting SH2 lane 13,
+// #1185).
+//
+// `pass_words` takes one package's input as little-endian words
+// (names, types, the world of the module without trait declarations, then
+// the declarations; written by `declaration_input` in
+// tests/common/pact_words.rs) and returns the diagnostics as packed text,
+// one `CODE START END MESSAGE` line each, which `decode_declaration_text`
+// reads back into Rust diagnostics.
+
+// @export abi 4
+
+use @vesper/check-pact::{
+    declarations_words
+};
+
+// The layout version of `pass_words`; the hybrid's tests check it.
+pub fn format() -> u64 {
+    1
+}
+
+pub fn pass_words(in input: Slice[u8]) -> ChunkSeq[u64] {
+    declarations_words(in input)
+}
+
+// The divergent build's answer (build.rs `divergent-pact`): every package
+// with trait declarations is rejected with one made-up E0600 ("divergent") at 0..0.
+fn divergent_words(in input: Slice[u8]) -> ChunkSeq[u64] {
+    let mut o: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    o.push(19);
+    o.push(2319389199435182149);
+    o.push(7454131892500308016);
+    o.push(7630437);
+    o
+}
