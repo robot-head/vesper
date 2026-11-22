@@ -258,6 +258,28 @@ const TARGETS: [(&str, &str, &str); 4] = [
     ("x86_64-pc-windows-msvc", "windows", "x86_64"),
 ];
 
+/// The `.vsys` target of a Rust target triple, by architecture and
+/// operating system as `vesper::packages::vsys_target` picks it, so
+/// `x86_64-unknown-linux-musl` builds the `x86_64-unknown-linux-gnu` files.
+fn vsys_target(target: &str) -> Option<(&'static str, &'static str, &'static str)> {
+    let arch = target.split('-').next()?;
+    let os = if target.contains("-linux") {
+        "linux"
+    } else if target.contains("-apple-darwin") || target.contains("-apple-macos") {
+        "macos"
+    } else if target.contains("-windows") {
+        "windows"
+    } else {
+        return None;
+    };
+    let arch = match arch {
+        "x86_64" => "x86_64",
+        "aarch64" | "arm64" => "aarch64",
+        _ => return None,
+    };
+    TARGETS.iter().copied().find(|t| t.1 == os && t.2 == arch)
+}
+
 /// The `[package] objects` entries of the package at `dir`, as written.
 fn manifest_objects(dir: &Path) -> Result<Vec<String>, String> {
     let manifest = dir.join("Loom.toml");
@@ -299,14 +321,14 @@ pub fn package_objects(source: &Path, target: &str) -> Result<Vec<PathBuf>, Stri
         if entries.is_empty() {
             continue;
         }
-        let Some(t) = TARGETS.iter().find(|t| t.0 == target) else {
+        let Some(t) = vsys_target(target) else {
             return Err(format!(
                 "{}: `[package] objects` have no target for {target}",
                 package.display()
             ));
         };
         for entry in entries {
-            let file = package.join(expand(&entry, *t));
+            let file = package.join(expand(&entry, t));
             if file.is_file() {
                 out.push(file);
             } else if expand(&entry, ("", "", "")) == entry {
@@ -613,4 +635,30 @@ fn run(command: &mut Command, program: &Path) -> Result<(), String> {
 
 fn env(name: &str) -> Result<String, String> {
     std::env::var(name).map_err(|_| format!("{name} is not set; call Port::build from build.rs"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::vsys_target;
+
+    #[test]
+    fn rust_targets_map_to_vsys_targets_by_arch_and_os() {
+        for (rust, vsys) in [
+            ("x86_64-unknown-linux-gnu", Some("x86_64-unknown-linux-gnu")),
+            (
+                "x86_64-unknown-linux-musl",
+                Some("x86_64-unknown-linux-gnu"),
+            ),
+            (
+                "aarch64-unknown-linux-musl",
+                Some("aarch64-unknown-linux-gnu"),
+            ),
+            ("aarch64-apple-darwin", Some("aarch64-apple-darwin")),
+            ("x86_64-pc-windows-msvc", Some("x86_64-pc-windows-msvc")),
+            ("x86_64-apple-darwin", None),
+            ("riscv64gc-unknown-linux-gnu", None),
+        ] {
+            assert_eq!(vsys_target(rust).map(|t| t.0), vsys, "{rust}");
+        }
+    }
 }
