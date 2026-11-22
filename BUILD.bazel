@@ -297,6 +297,35 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # Self-hosting SH4 lane 7 (#1281): @vesper/codegen-calls against the
+        # native backend's declarations over the corpus and the source strings
+        # of the feature test files it reads. Anchored globs.
+        "test/self_host_codegen_calls": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]) + [
+            "tests/arrays.rs",
+            "tests/capability_effects.rs",
+            "tests/capability_verifiers.rs",
+            "tests/checked_arithmetic.rs",
+            "tests/dyn_box.rs",
+            "tests/dyn_effects.rs",
+            "tests/dyn_fn.rs",
+            "tests/dyn_trait.rs",
+            "tests/ffi_handles.rs",
+            "tests/fip.rs",
+            "tests/floats.rs",
+            "tests/integer_widths.rs",
+            "tests/native_block_param_homes.rs",
+            "tests/native_export_f32.rs",
+            "tests/native_fail_status.rs",
+            "tests/native_handlers.rs",
+            "tests/native_hoist_calls.rs",
+            "tests/native_spans.rs",
+            "tests/vector_f32.rs",
+            "tests/wide_integers.rs",
+        ],
         # SH4 lane 15 (#1289): @vesper/wasm-backend against src/wasm_backend
         # over the tests/wasm_backend.rs programs and the corpus.
         "test/self_host_wasm_backend": glob([
@@ -1006,6 +1035,7 @@ vesper_crate(
         "test/self_host_ir_lower": "long",
         # The eBPF backend differential (#1290) loads every corpus world.
         "test/self_host_ebpf_backend": "long",
+        "test/self_host_codegen_calls": "long",
         "test/self_host_codegen_seq": "long",
         # The wasm backend differential: about 10 min in a debug build.
         "test/self_host_wasm_backend": "long",
@@ -1437,6 +1467,19 @@ vesper_package(
     manifest = "packages/vesper-codegen-base/Loom.toml",
     visibility = ["//visibility:public"],
     deps = ["//packages/vesper-cranelift:cranelift_package"],
+)
+
+# The `call` family's emission (self-hosting SH4 lane 7, #1281), for the
+# hybrid compiler's codegen_calls module.
+vesper_package(
+    name = "codegen_calls_emit_package",
+    srcs = glob(["packages/vesper-codegen-calls/emit/src/**/*.ves"]),
+    manifest = "packages/vesper-codegen-calls/emit/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":codegen_base_package",
+        "//packages/vesper-cranelift:cranelift_package",
+    ],
 )
 
 # The font `vesper shot` embeds (crates/vesper-tools, SH6 lane 3).
