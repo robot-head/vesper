@@ -5658,12 +5658,19 @@ impl<M: Module> Codegen<'_, '_, M> {
                 .map(|id| registers.get(id).map(|v| v.as_u32()))
                 .collect(),
         };
+        // A site names an instruction of the program's own graph. A graph
+        // the walk rewrote first (small enums as words, #1330) has other
+        // instructions at those indices, so its requests carry no site.
+        let function = match self.program.functions.get(&f.name) {
+            Some(g) if std::ptr::eq(g, f) => f.name.as_str(),
+            _ => "",
+        };
         let (answer, effects) = crate::codegen_swap::walk::instruction(
             &mut self.b,
             &mut *self.m,
             self.world,
             self.program,
-            (&f.name, block, index, inst),
+            (function, block, index, inst),
             values,
             ty,
             facts,
