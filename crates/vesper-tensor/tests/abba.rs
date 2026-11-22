@@ -1424,6 +1424,33 @@ fn abba_llama2c_load() {
     );
 }
 
+#[test]
+#[ignore = "benchmark; run in release with --ignored --nocapture"]
+fn abba_llama2c_decode() {
+    let rust = seed::llama::Tokenizer::from_llama2c(TOK512, 512).unwrap();
+    let port = vesper_tensor::llama::Tokenizer::from_llama2c(TOK512, 512).unwrap();
+    // Every (previous, token) pair class: BOS before a piece, plain pieces
+    // and the byte-fallback pieces.
+    let pairs: Vec<(u32, u32)> = (0..4096u32)
+        .map(|i| ((i * 7) % 512, (i * 13) % 512))
+        .collect();
+    abba(
+        "llama2.c decode, 4,096 tokens of tok512",
+        || {
+            pairs
+                .iter()
+                .map(|&(p, t)| rust.decode(p, t).unwrap().len() as u64)
+                .sum()
+        },
+        || {
+            pairs
+                .iter()
+                .map(|&(p, t)| port.decode(p, t).unwrap().len() as u64)
+                .sum()
+        },
+    );
+}
+
 macro_rules! open_weights {
     ($krate:ident, $path:expr) => {
         match $krate::mmap::Mapping::open($path) {

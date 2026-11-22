@@ -210,6 +210,13 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # SH4 lane 2 (#1276): the encode-once checker inputs over the same
+        # corpus.
+        "test/self_host_swap_inputs": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
         # Self-hosting SH4 lane 12 (#1286): the export ABI's binding generator
         # and directives in Vesper, over every library a port crate links
         # (built with the vesper binary from each crate's own files).
@@ -449,6 +456,13 @@ vesper_crate(
             "examples/**",
             "packages/**",
             "tests/fixtures/**",
+        ]),
+        # Rust-exit SH6 lane 19 (#1414): the Vesper suite, run with
+        # `vesper test --engines all`, and the Rust test files the families
+        # came from (converted.json names them). Anchored globs.
+        "test/vesper_suite": glob([
+            "tests/vesper/**",
+            "tests/*.rs",
         ]),
         # Self-hosting SH5 lane 14 (#1337): @vesper/test-runner against
         # test_discovery on the repository's .ves files, the runner's test
@@ -867,6 +881,7 @@ vesper_crate(
         # Four round-trip tests and the pass harness share one stage build;
         # past 900 s on a busy runner.
         "test/self_host_place_ir": "eternal",
+        "test/self_host_swap_inputs": "long",
         # SH4 lane 14 (#1288): 22 Cranelift image builds and the package's
         # JIT compile before the comparisons; 5-8 minutes unoptimized.
         "test/self_host_freestanding": "eternal",
@@ -1023,6 +1038,14 @@ vesper_package(
     name = "check_layout_package",
     srcs = glob(["packages/vesper-check-layout/src/**/*.ves"]),
     manifest = "packages/vesper-check-layout/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [":check_data_package"],
+)
+
+vesper_package(
+    name = "check_loops_atomics_package",
+    srcs = glob(["packages/vesper-check-loops-atomics/src/**/*.ves"]),
+    manifest = "packages/vesper-check-loops-atomics/Loom.toml",
     visibility = ["//visibility:public"],
     deps = [":check_data_package"],
 )
