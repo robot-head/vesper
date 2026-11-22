@@ -535,34 +535,12 @@ fn is_kfunc_object(s: R) -> bool {
 }
 
 fn scalar_eq(a: Scalar, b: Scalar) -> bool {
-    a
-        .umin
-        == b
-        .umin
-        && a
-        .umax
-        == b
-        .umax
-        && a
-        .smin
-        == b
-        .smin
-        && a
-        .smax
-        == b
-        .smax
-        && a
-        .var
-        .value
-        == b
-        .var
-        .value
-        && a
-        .var
-        .mask
-        == b
-        .var
-        .mask
+    a.umin == b.umin
+        && a.umax == b.umax
+        && a.smin == b.smin
+        && a.smax == b.smax
+        && a.var.value == b.var.value
+        && a.var.mask == b.var.mask
 }
 
 fn is_unknown(s: Scalar) -> bool {
@@ -609,8 +587,7 @@ fn slots_of(i: Insn) -> u64 {
         Insn::LdImm64 {
             dst,
             imm
-        }
-        => 2,
+        } => 2,
         _ => 1,
     }
 }
@@ -1046,48 +1023,27 @@ fn reg_includes(o: R, c: R, in ows: Slice[u64], in cws: Slice[u64], inout ids: I
         2 => c.tag == T_CTX,
         5 => c.tag == T_PACKET_END,
         3 => c.tag == T_FUNC && o.x == c.x,
-        4 => c
-            .tag
-            == 4
-            && o
-            .off
-            == c
-            .off
+        4 => c.tag == 4
+            && o.off == c.off
             && scalar_includes(o.var, c.var)
             && scalar_includes(c.var, o.var)
             && ids_check(inout ids, o.x, c.x)
-            && s_range(in ows, o.x)
-            <= s_range(in cws, c.x),
+            && s_range(in ows, o.x) <= s_range(in cws, c.x),
         6 => c.tag == T_STACK && o.x == c.x && o.off == c.off,
         7 => c.tag == T_MAP_PTR && o.x == c.x,
         8 => c.tag == T_MAP_VALUE && o.x == c.x && o.off == c.off && scalar_includes(o.var, c.var),
         9 => c.tag == T_MAP_VALUE_OR_NULL && o.x == c.x && ids_check(inout ids, o.y, c.y),
         10 => c.tag == T_MEM && o.x == c.x && o.off == c.off && ids_check(inout ids, o.z, c.z),
-        11 => c
-            .tag
-            == 11
-            && o
-            .x
-            == c
-            .x
+        11 => c.tag == 11
+            && o.x == c.x
             && ids_check(inout ids, o.y, c.y)
             && ids_check(inout ids, o.z, c.z),
         13 => c.tag == T_SOCKET && ids_check(inout ids, o.z, c.z),
-        12 => c
-            .tag
-            == T_RDONLY_MEM
-            && o
-            .x
-            == c
-            .x
-            && o
-            .off
-            == c
-            .off
+        12 => c.tag == T_RDONLY_MEM
+            && o.x == c.x
+            && o.off == c.off
             && ids_check(inout ids, o.y, c.y),
-        14 => c
-            .tag
-            == T_SOCKET_OR_NULL
+        14 => c.tag == T_SOCKET_OR_NULL
             && ids_check(inout ids, o.y, c.y)
             && ids_check(inout ids, o.z, c.z),
         _ => false,
@@ -1160,16 +1116,11 @@ fn state_includes(
     in cws: Slice[u64]
 ) -> bool {
     let nf = gw(in ows, 0);
-    if nf
-        != gw(in cws, 0)
-        || gw(in ows, 5)
-        != gw(in cws, 5)
-        || gw(in ows, 2)
-        != gw(in cws, 2)
-        || gw(in ows, 3)
-        != gw(in cws, 3)
-        || gw(in ows, 7)
-        != gw(in cws, 7) {
+    if nf != gw(in cws, 0)
+        || gw(in ows, 5) != gw(in cws, 5)
+        || gw(in ows, 2) != gw(in cws, 2)
+        || gw(in ows, 3) != gw(in cws, 3)
+        || gw(in ows, 7) != gw(in cws, 7) {
         return false;
     }
     if s_range(in ows, 0) > s_range(in cws, 0) {
@@ -1182,10 +1133,8 @@ fn state_includes(
     let mut co: u64 = 0;
     for f in 0..nf {
         let m = s_meta(f);
-        if gw(in ows, m)
-            != gw(in cws, m)
-            || gw(in ows, wrapping_add(m, 1))
-            != gw(in cws, wrapping_add(m, 1)) {
+        if gw(in ows, m) != gw(in cws, m)
+            || gw(in ows, wrapping_add(m, 1)) != gw(in cws, wrapping_add(m, 1)) {
             return false;
         }
         let ho = gw(in ows, wrapping_add(m, 2));
@@ -1212,8 +1161,7 @@ fn state_includes(
             if li != 0 {
                 let ci = gw(in cws, link_at(f, i));
                 for j in wrapping_add(i, 1)..eleven {
-                    if li
-                        == gw(in ows, link_at(f, j))
+                    if li == gw(in ows, link_at(f, j))
                         && (ci == 0 || ci != gw(in cws, link_at(f, j))) {
                         return false;
                     }
@@ -1341,12 +1289,8 @@ fn widen_scalars(in prs: Slice[R], in pws: Slice[u64], inout cur: St) -> bool {
         for i in 0..eleven {
             let a = pk_reg(in prs, po, i);
             let b = rr(in cur, s_reg(f, i));
-            if a
-                .tag
-                == T_SCALAR
-                && b
-                .tag
-                == T_SCALAR
+            if a.tag == T_SCALAR
+                && b.tag == T_SCALAR
                 && !scalar_eq(a.var, b.var)
                 && !is_unknown(b.var) {
                 setr(inout cur, s_reg(f, i), r_unknown());
@@ -1361,12 +1305,8 @@ fn widen_scalars(in prs: Slice[R], in pws: Slice[u64], inout cur: St) -> bool {
         for k in max_u64(e, low_of(in cur, f))..slots {
             let a = pk_slot(in prs, po, e, k);
             let b = rr(in cur, s_slot(f, k));
-            if a
-                .tag
-                == T_SCALAR
-                && b
-                .tag
-                == T_SCALAR
+            if a.tag == T_SCALAR
+                && b.tag == T_SCALAR
                 && !scalar_eq(a.var, b.var)
                 && !is_unknown(b.var) {
                 setr(inout cur, s_slot(f, k), r_unknown());
@@ -1492,14 +1432,12 @@ fn check_cfg(inout v: V) eff [Fail[VErr]] {
                 Insn::LdImm64 {
                     dst,
                     imm
-                }
-                => match imm {
+                } => match imm {
                     Imm64::Pseudo {
                         src,
                         imm_lo,
                         imm_hi
-                    }
-                    => {
+                    } => {
                         if src == 4 {
                             if imm_hi != 0 {
                                 fail(
@@ -1586,8 +1524,7 @@ fn check_cfg(inout v: V) eff [Fail[VErr]] {
             Insn::Exit => true,
             Insn::Ja {
                 off
-            }
-            => true,
+            } => true,
             _ => false,
         };
         if !ends {
@@ -1603,16 +1540,14 @@ fn check_cfg(inout v: V) eff [Fail[VErr]] {
                 let (has, off, cond) = match i {
                     Insn::Ja {
                         off
-                    }
-                    => (true, widen_i64(off), false),
+                    } => (true, widen_i64(off), false),
                     Insn::Jcond {
                         wide,
                         op,
                         dst,
                         src,
                         off
-                    }
-                    => (true, widen_i64(off), true),
+                    } => (true, widen_i64(off), true),
                     _ => (false, 0, false),
                 };
                 if has {
@@ -1665,8 +1600,7 @@ fn check_cfg(inout v: V) eff [Fail[VErr]] {
                 Insn::Exit => {},
                 Insn::Ja {
                     off
-                }
-                => {
+                } => {
                     let t = target(inout v, pc, widen_i64(off));
                     stack.push(t);
                 },
@@ -1676,8 +1610,7 @@ fn check_cfg(inout v: V) eff [Fail[VErr]] {
                     dst,
                     src,
                     off
-                }
-                => {
+                } => {
                     let t = target(inout v, pc, widen_i64(off));
                     stack.push(t);
                     if next < n {
@@ -2292,8 +2225,7 @@ fn load(inout v: V, in st: St, pc: u64, p: R, off: i16, size: Size) -> R eff [Fa
         Target::Stack {
             frame,
             at
-        }
-        => {
+        } => {
             let slot = rr(in st, s_slot(frame, shr(at, 3)));
             let n = size_bytes(size);
             let first = (at & 7);
@@ -2334,8 +2266,7 @@ fn store(inout v: V, inout st: St, pc: u64, p: R, off: i16, size: Size, val: R) 
         Target::Stack {
             frame,
             at
-        }
-        => {
+        } => {
             let n = size_bytes(size);
             let k = s_slot(frame, shr(at, 3));
             let slot = rr(in st, k);
@@ -2382,20 +2313,16 @@ fn fetches(op: AtomicOp) -> bool {
     match op {
         AtomicOp::Add {
             fetch
-        }
-        => fetch,
+        } => fetch,
         AtomicOp::Or {
             fetch
-        }
-        => fetch,
+        } => fetch,
         AtomicOp::And {
             fetch
-        }
-        => fetch,
+        } => fetch,
         AtomicOp::Xor {
             fetch
-        }
-        => fetch,
+        } => fetch,
         AtomicOp::Xchg => true,
         AtomicOp::CmpXchg => true,
     }
@@ -2462,8 +2389,7 @@ fn atomic(
         Target::Stack {
             frame,
             at
-        }
-        => {
+        } => {
             // the spill (if any) is now an unknown value
             let k = s_slot(frame, shr(at, 3));
             if rr(in st, k).tag < S_BYTES {
@@ -2691,17 +2617,17 @@ fn skb_read(o: i64) -> bool {
         SKB_INGRESS_IFINDEX
     )
         || in_list(
-        o,
-        SKB_IFINDEX,
-        SKB_TC_INDEX,
-        SKB_CB,
-        wrapping_add(SKB_CB, 4),
-        wrapping_add(SKB_CB, 8),
-        wrapping_add(SKB_CB, 12),
-        wrapping_add(SKB_CB, 16),
-        SKB_HASH,
-        SKB_TC_CLASSID
-    )
+            o,
+            SKB_IFINDEX,
+            SKB_TC_INDEX,
+            SKB_CB,
+            wrapping_add(SKB_CB, 4),
+            wrapping_add(SKB_CB, 8),
+            wrapping_add(SKB_CB, 12),
+            wrapping_add(SKB_CB, 16),
+            SKB_HASH,
+            SKB_TC_CLASSID
+        )
 }
 
 fn skb_write(o: i64) -> bool {
@@ -2923,15 +2849,10 @@ fn kfunc_slot(inout v: V, in st: St, pc: u64, what: Str, creates: bool)
         raise_at(pc);
     }
     let off = a.off;
-    if wrapping_add(a.x, 1)
-        != nframes(in st)
-        || bits(off)
-        & 7
-        != 0
-        || off
-        < NEG_STACK_BYTES
-        || off
-        > -8 {
+    if wrapping_add(a.x, 1) != nframes(in st)
+        || bits(off) & 7 != 0
+        || off < NEG_STACK_BYTES
+        || off > -8 {
         begin(inout v, "kfunc.arg_type");
         lit(inout v.msg, what);
         lit(inout v.msg, ": arg #0 must be an aligned 8-byte slot of the current frame, got fp");
@@ -3684,18 +3605,10 @@ fn cond(
         // `op` now reads `pkt op pkt_end`
         // `find_good_pkt_pointers`: no range unless the whole variable plus
         // constant offset stays within MAX_PACKET_OFF
-        let good = p
-            .off
-            >= 0
-            && p
-            .off
-            <= MAX_PACKET_OFF_I
-            && p
-            .var
-            .umax
-            <= MAX_PACKET_OFF
-            && wrapping_add(p.var.umax, bits(p.off))
-            <= MAX_PACKET_OFF;
+        let good = p.off >= 0
+            && p.off <= MAX_PACKET_OFF_I
+            && p.var.umax <= MAX_PACKET_OFF
+            && wrapping_add(p.var.umax, bits(p.off)) <= MAX_PACKET_OFF;
         let kind = match o {
             JmpOp::Gt => 1,
             JmpOp::Ge => 1,
@@ -3743,8 +3656,7 @@ fn step(inout v: V, inout st: St, inout alt: St, pc: u64) -> Step eff [Fail[VErr
             op,
             dst,
             src
-        }
-        => {
+        } => {
             alu(inout v, inout st, pc, wide, op, widen_u64(dst), src);
             Step::Next(next)
         },
@@ -3752,8 +3664,7 @@ fn step(inout v: V, inout st: St, inout alt: St, pc: u64) -> Step eff [Fail[VErr
             kind,
             bits,
             dst
-        }
-        => {
+        } => {
             let d = widen_u64(dst);
             write_check(inout v, pc, d);
             let s = read(inout v, in st, pc, d);
@@ -3777,16 +3688,14 @@ fn step(inout v: V, inout st: St, inout alt: St, pc: u64) -> Step eff [Fail[VErr
         },
         Insn::Ja {
             off
-        }
-        => Step::Jump(target(inout v, pc, widen_i64(off))),
+        } => Step::Jump(target(inout v, pc, widen_i64(off))),
         Insn::Jcond {
             wide,
             op,
             dst,
             src,
             off
-        }
-        => {
+        } => {
             let t = target(inout v, pc, widen_i64(off));
             cond(inout v, inout st, inout alt, pc, wide, op, widen_u64(dst), src, t, next)
         },
@@ -3842,8 +3751,7 @@ fn step(inout v: V, inout st: St, inout alt: St, pc: u64) -> Step eff [Fail[VErr
         Insn::LdImm64 {
             dst,
             imm
-        }
-        => {
+        } => {
             let d = widen_u64(dst);
             write_check(inout v, pc, d);
             let val = match imm {
@@ -3861,8 +3769,7 @@ fn step(inout v: V, inout st: St, inout alt: St, pc: u64) -> Step eff [Fail[VErr
                     src,
                     imm_lo,
                     imm_hi
-                }
-                => {
+                } => {
                     if src != 4 {
                         begin(inout v, "insn.unsupported");
                         lit(inout v.msg, "ld_imm64 pseudo source ");
@@ -3883,8 +3790,7 @@ fn step(inout v: V, inout st: St, inout alt: St, pc: u64) -> Step eff [Fail[VErr
             src,
             off,
             sign_extend
-        }
-        => {
+        } => {
             let d = widen_u64(dst);
             write_check(inout v, pc, d);
             let p = read(inout v, in st, pc, widen_u64(src));
@@ -3923,8 +3829,7 @@ fn step(inout v: V, inout st: St, inout alt: St, pc: u64) -> Step eff [Fail[VErr
             dst,
             off,
             imm
-        }
-        => {
+        } => {
             let p = read(inout v, in st, pc, widen_u64(dst));
             let skb = match v.ptype {
                 ProgramType::SchedCls => true,
@@ -3948,8 +3853,7 @@ fn step(inout v: V, inout st: St, inout alt: St, pc: u64) -> Step eff [Fail[VErr
             dst,
             src,
             off
-        }
-        => {
+        } => {
             let p = read(inout v, in st, pc, widen_u64(dst));
             let val = read(inout v, in st, pc, widen_u64(src));
             store(inout v, inout st, pc, p, off, size, val);
@@ -3963,8 +3867,7 @@ fn step(inout v: V, inout st: St, inout alt: St, pc: u64) -> Step eff [Fail[VErr
             dst,
             src,
             off
-        }
-        => {
+        } => {
             atomic(inout v, inout st, pc, size, op, widen_u64(dst), widen_u64(src), off);
             Step::Next(next)
         },
@@ -3973,8 +3876,7 @@ fn step(inout v: V, inout st: St, inout alt: St, pc: u64) -> Step eff [Fail[VErr
             indirect,
             src,
             imm
-        }
-        => fail(inout v, pc, "insn.unsupported", "BPF_LD_ABS/BPF_LD_IND are not supported"),
+        } => fail(inout v, pc, "insn.unsupported", "BPF_LD_ABS/BPF_LD_IND are not supported"),
     }
 }
 
@@ -4075,20 +3977,11 @@ fn bounded_iteration(in v: V, pc: u64, rid: u64, in st: St) -> bool {
     // only an active iterator, the same instance the earlier visit used
     let r1 = reg(in st, 1);
     if !(
-        r1
-            .tag
-            == 6
-            && wrapping_add(r1.x, 1)
-            == nframes(in st)
-            && bits(r1.off)
-            & 7
-            == 0
-            && r1
-            .off
-            >= NEG_STACK_BYTES
-            && r1
-            .off
-            < 0
+        r1.tag == 6
+            && wrapping_add(r1.x, 1) == nframes(in st)
+            && bits(r1.off) & 7 == 0
+            && r1.off >= NEG_STACK_BYTES
+            && r1.off < 0
     ) {
         return false;
     }
@@ -4157,10 +4050,8 @@ fn checkpoint(inout v: V, inout st: St, pc: u64, parent: u64) -> (bool, u64) eff
                     "infinite loop detected: back-edge reaches an identical state"
                 );
             }
-        } else if v
-            .widen
-            && br
-            > 0
+        } else if v.widen
+            && br > 0
             && is_ancestor(in v, rid, parent)
             && bounded_iteration(in v, pc, rid, in st) {
             widen_from = rid;
@@ -4178,8 +4069,7 @@ fn checkpoint(inout v: V, inout st: St, pc: u64, parent: u64) -> (bool, u64) eff
             if r == none() {
                 break;
             }
-            if sq(in v.rec_branches, r)
-                > 0
+            if sq(in v.rec_branches, r) > 0
                 && is_ancestor(in v, r, parent)
                 && rec_includes(inout v, r, in st) {
                 return (true, parent);
@@ -4464,27 +4354,22 @@ fn decode_code(e: DecodeError) -> u64 {
     match e {
         DecodeError::TruncatedProgram {
             len
-        }
-        => shl(widen_u64(len), 12),
+        } => shl(widen_u64(len), 12),
         DecodeError::BadRegister {
             pc,
             reg
-        }
-        => 1 | shl(widen_u64(reg), 4) | shl(widen_u64(pc), 12),
+        } => 1 | shl(widen_u64(reg), 4) | shl(widen_u64(pc), 12),
         DecodeError::InvalidOpcode {
             pc,
             code
-        }
-        => 2 | shl(widen_u64(code), 4) | shl(widen_u64(pc), 12),
+        } => 2 | shl(widen_u64(code), 4) | shl(widen_u64(pc), 12),
         DecodeError::ReservedFieldSet {
             pc,
             field
-        }
-        => 3 | shl(widen_u64(field), 4) | shl(widen_u64(pc), 12),
+        } => 3 | shl(widen_u64(field), 4) | shl(widen_u64(pc), 12),
         DecodeError::BrokenLdImm64 {
             pc
-        }
-        => 4 | shl(widen_u64(pc), 12),
+        } => 4 | shl(widen_u64(pc), 12),
     }
 }
 
@@ -4804,14 +4689,9 @@ pub fn verify_program(
     if sq(in second.words, 0) == 0 {
         return second;
     }
-    if second
-        .rule
-        .eq(in "complexity.limit".as_bytes())
-        && sq(in first.words, 0)
-        == 1
-        && !first
-        .rule
-        .eq(in "loop.widened_precise".as_bytes()) {
+    if second.rule.eq(in "complexity.limit".as_bytes())
+        && sq(in first.words, 0) == 1
+        && !first.rule.eq(in "loop.widened_precise".as_bytes()) {
         return first;
     }
     second

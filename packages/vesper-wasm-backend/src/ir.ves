@@ -179,11 +179,11 @@ fn read_sig(inout r: Reader, in b: Slice[u8], in c: Ctx, inout f: Facts) -> u64 
         f
             .gens
             .push(
-            GenRow {
-                name: name,
-                row: row
-            }
-        );
+                GenRow {
+                    name: name,
+                    row: row
+                }
+            );
     }
     let pn = r.word(in b);
     let p0 = f.params.len();
@@ -194,12 +194,12 @@ fn read_sig(inout r: Reader, in b: Slice[u8], in c: Ctx, inout f: Facts) -> u64 
         f
             .params
             .push(
-            ParamRow {
-                name: name,
-                pass: pass,
-                ty: ty
-            }
-        );
+                ParamRow {
+                    name: name,
+                    pass: pass,
+                    ty: ty
+                }
+            );
     }
     let result = tid(in c, r.word(in b));
     let en = r.word(in b);
@@ -220,17 +220,17 @@ fn read_sig(inout r: Reader, in b: Slice[u8], in c: Ctx, inout f: Facts) -> u64 
     f
         .sigs
         .push(
-        Sig {
-            g0: g0,
-            gn: gn,
-            p0: p0,
-            pn: pn,
-            result: result,
-            e0: e0,
-            en: en,
-            tail: tail
-        }
-    );
+            Sig {
+                g0: g0,
+                gn: gn,
+                p0: p0,
+                pn: pn,
+                result: result,
+                e0: e0,
+                en: en,
+                tail: tail
+            }
+        );
     i
 }
 
@@ -289,12 +289,12 @@ fn read_handler(inout r: Reader, in b: Slice[u8], in c: Ctx, inout f: Facts) {
     f
         .hops
         .push(
-        if label == 0 {
-            0
-        } else {
-            inc(w(sym(in c, wrapping_sub(label, 1))))
-        }
-    );
+            if label == 0 {
+                0
+            } else {
+                inc(w(sym(in c, wrapping_sub(label, 1))))
+            }
+        );
     f.hops.push(w(sym(in c, r.word(in b))));
     let na = r.word(in b);
     f.hops.push(na);
@@ -399,25 +399,25 @@ pub fn read_facts(inout r: Reader, in b: Slice[u8], in c: Ctx, pool: u64) -> Fac
             f
                 .ops
                 .push(
-                OpDecl {
-                    name: u32_at(in names, k),
-                    sig: u64_at(in sigs, k)
-                }
-            );
+                    OpDecl {
+                        name: u32_at(in names, k),
+                        sig: u64_at(in sigs, k)
+                    }
+                );
         }
         let d = f.decls.len();
         f
             .decls
             .push(
-            EffDecl {
-                name: name,
-                linear: linear,
-                g0: g0,
-                gn: gn,
-                o0: o0,
-                on: on
-            }
-        );
+                EffDecl {
+                    name: name,
+                    linear: linear,
+                    g0: g0,
+                    gn: gn,
+                    o0: o0,
+                    on: on
+                }
+            );
         set_by_symbol(inout f.eff_by_sym, name, n32(inc(d)));
     }
     let ncalls = r.word(in b);
@@ -432,22 +432,22 @@ pub fn read_facts(inout r: Reader, in b: Slice[u8], in c: Ctx, pool: u64) -> Fac
             f
                 .pairs
                 .push(
-                Pair {
-                    name: name,
-                    ty: ty
-                }
-            );
+                    Pair {
+                        name: name,
+                        ty: ty
+                    }
+                );
         }
         f
             .calls
             .push(
-            CallRow {
-                s0: s0,
-                s1: s1,
-                v0: v0,
-                vn: k
-            }
-        );
+                CallRow {
+                    s0: s0,
+                    s1: s1,
+                    v0: v0,
+                    vn: k
+                }
+            );
     }
     for i in 0..pool {
         let kind = r.word(in b);
@@ -702,12 +702,12 @@ pub fn ir_new(sink p: Program) -> Ir {
             ir
                 .fparams
                 .push(
-                IrParam {
-                    name: name,
-                    pass: pass,
-                    ty: ty
-                }
-            );
+                    IrParam {
+                        name: name,
+                        pass: pass,
+                        ty: ty
+                    }
+                );
         }
         let result = n32(op_at(in ir.p, at));
         let effects = n32(op_at(in ir.p, inc(at)));
@@ -743,27 +743,27 @@ pub fn ir_new(sink p: Program) -> Ir {
             ir
                 .flocals
                 .push(
-                IrLocal {
-                    name: n32(op_at(in ir.p, add(at, wrapping_mul(i, 2)))),
-                    ty: n32(op_at(in ir.p, add(at, inc(wrapping_mul(i, 2)))))
-                }
-            );
+                    IrLocal {
+                        name: n32(op_at(in ir.p, add(at, wrapping_mul(i, 2)))),
+                        ty: n32(op_at(in ir.p, add(at, inc(wrapping_mul(i, 2)))))
+                    }
+                );
         }
         ir
             .fns
             .push(
-            FnInfo {
-                name: row.name,
-                p0: p0,
-                pn: np,
-                result: result,
-                effects: effects,
-                l0: l0,
-                ln: nl,
-                v0: v0,
-                vn: top
-            }
-        );
+                FnInfo {
+                    name: row.name,
+                    p0: p0,
+                    pn: np,
+                    result: result,
+                    effects: effects,
+                    l0: l0,
+                    ln: nl,
+                    v0: v0,
+                    vn: top
+                }
+            );
         set_by_symbol(inout ir.by_name, row.name, n32(inc(fi)));
     }
     ir

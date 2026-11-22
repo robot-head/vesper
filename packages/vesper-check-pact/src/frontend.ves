@@ -924,8 +924,7 @@ fn dto_err(in c: Ctx, in d: Decls, in fe: Fe, ga: u32, gn: u32, ty: u32, inout e
             let mut count: u64 = 0;
             for i in 0..d.traits.len() {
                 let t = d.trait_row(i);
-                if at_symbol(in fe.trait_of, t.name)
-                    == n32(inc(i))
+                if at_symbol(in fe.trait_of, t.name) == n32(inc(i))
                     && trait_has_assoc(in d, t, assoc) {
                     count = inc(count);
                     tn = t.name;

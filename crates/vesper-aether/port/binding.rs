@@ -59,6 +59,55 @@ impl Abi for crate::port_types::KvmHostLimits {
     }
 }
 
+impl Abi for crate::port_types::PackedFault {
+    const WORDS: usize = 1;
+    fn put(&self, out: &mut [u64]) {
+        match self {
+            crate::port_types::PackedFault::Limit => {
+                out[0] = 0;
+            }
+            crate::port_types::PackedFault::Overflow => {
+                out[0] = 1;
+            }
+            crate::port_types::PackedFault::Full => {
+                out[0] = 2;
+            }
+            crate::port_types::PackedFault::NotAvailable => {
+                out[0] = 3;
+            }
+            crate::port_types::PackedFault::IncompleteChain => {
+                out[0] = 4;
+            }
+            crate::port_types::PackedFault::UnsupportedFlags => {
+                out[0] = 5;
+            }
+            crate::port_types::PackedFault::EmptyBuffer => {
+                out[0] = 6;
+            }
+            crate::port_types::PackedFault::ReadAfterWrite => {
+                out[0] = 7;
+            }
+            crate::port_types::PackedFault::UnauthorizedRange => {
+                out[0] = 8;
+            }
+        }
+    }
+    fn get(words: &[u64]) -> Self {
+        match words[0] {
+            0 => crate::port_types::PackedFault::Limit,
+            1 => crate::port_types::PackedFault::Overflow,
+            2 => crate::port_types::PackedFault::Full,
+            3 => crate::port_types::PackedFault::NotAvailable,
+            4 => crate::port_types::PackedFault::IncompleteChain,
+            5 => crate::port_types::PackedFault::UnsupportedFlags,
+            6 => crate::port_types::PackedFault::EmptyBuffer,
+            7 => crate::port_types::PackedFault::ReadAfterWrite,
+            8 => crate::port_types::PackedFault::UnauthorizedRange,
+            tag => panic!("invalid PackedFault tag {tag} from Vesper"),
+        }
+    }
+}
+
 impl Abi for crate::port_types::PlannedRegion {
     const WORDS: usize = 5;
     fn put(&self, out: &mut [u64]) {
@@ -261,8 +310,10 @@ impl Abi for crate::port_types::SlotError {
 const _: () = assert!(<Option<crate::port_types::SlotError> as Abi>::WORDS == 6);
 const _: () = assert!(<Result<(u32, u64), crate::port_types::PvhFault> as Abi>::WORDS == 4);
 const _: () = assert!(<Result<u64, crate::port_types::HotFault> as Abi>::WORDS == 3);
+const _: () = assert!(<Result<u64, crate::port_types::PackedFault> as Abi>::WORDS == 2);
 const _: () = assert!(<crate::port_types::HotFault as Abi>::WORDS == 2);
 const _: () = assert!(<crate::port_types::KvmHostLimits as Abi>::WORDS == 3);
+const _: () = assert!(<crate::port_types::PackedFault as Abi>::WORDS == 1);
 const _: () = assert!(<crate::port_types::PlannedRegion as Abi>::WORDS == 5);
 const _: () = assert!(<crate::port_types::PvhFault as Abi>::WORDS == 3);
 const _: () = assert!(<crate::port_types::SlotError as Abi>::WORDS == 5);
@@ -273,6 +324,7 @@ unsafe extern "C" {
     fn vesper_aether_live_allocations() -> i64;
     fn vesper_aether_hotset_decode(result: *mut u64, bytes: *mut u64, expected: i64, pages: *mut u64) -> i64;
     fn vesper_aether_hotset_runs(result: *mut u64, pages: *mut u64, batch: i64, out: *mut u64) -> i64;
+    fn vesper_aether_packed_capture(result: *mut u64, ring: *mut u64, regions: *mut u64, size: i64, free: i64, index: i64, wrap: i64, max_desc: i64, max_bytes: i64, max_work: i64, out: *mut u64) -> i64;
     fn vesper_aether_pvh_parse(result: *mut u64, elf: *mut u64, ram: *mut u64, out: *mut u64) -> i64;
     fn vesper_aether_slot_plan_verify(result: *mut u64, regions: *mut u64, limits: *mut u64) -> i64;
     fn vesper_aether_slot_plan_verify_cross_vm(result: *mut u64, vm_ids: *mut u64, regions: *mut u64, region_vm: *mut u64) -> i64;
@@ -308,6 +360,16 @@ pub fn hotset_runs(pages: &[u64], batch: u64, out: &mut [u64]) -> Result<u64, cr
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_slice(pages, |view_pages| vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_aether_hotset_runs(result.as_mut_ptr(), view_pages, batch as i64, view_out) }));
     <Result<u64, crate::port_types::HotFault> as Abi>::get(&result[0..])
+}
+
+/// Calls `packed_capture` of the Vesper library `aether` (`vesper_aether_packed_capture`).
+pub fn packed_capture(ring: &[u8], regions: &[u64], size: u64, free: u64, index: u64, wrap: u64, max_desc: u64, max_bytes: u64, max_work: u64, out: &mut [u64]) -> Result<u64, crate::port_types::PackedFault> {
+    let mut result = [0u64; 2];
+    // SAFETY: `vesper_aether_packed_capture` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(ring, |view_ring| vesper_port_abi::with_slice(regions, |view_regions| vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_aether_packed_capture(result.as_mut_ptr(), view_ring, view_regions, size as i64, free as i64, index as i64, wrap as i64, max_desc as i64, max_bytes as i64, max_work as i64, view_out) })));
+    <Result<u64, crate::port_types::PackedFault> as Abi>::get(&result[0..])
 }
 
 /// Calls `pvh_parse` of the Vesper library `aether` (`vesper_aether_pvh_parse`).

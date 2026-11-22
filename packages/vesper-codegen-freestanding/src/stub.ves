@@ -192,38 +192,38 @@ impl Asm {
         self
             .fixups
             .push(
-            Fixup {
-                at: at,
-                label: l,
-                kind: kind,
-                base: 0
-            }
-        );
+                Fixup {
+                    at: at,
+                    label: l,
+                    kind: kind,
+                    base: 0
+                }
+            );
     }
 
     fn fix_pcrel(inout self, at: u64, l: u64, base: u64) {
         self
             .fixups
             .push(
-            Fixup {
-                at: at,
-                label: l,
-                kind: FIX_RV_PCREL_I,
-                base: base
-            }
-        );
+                Fixup {
+                    at: at,
+                    label: l,
+                    kind: FIX_RV_PCREL_I,
+                    base: base
+                }
+            );
     }
 
     fn reloc(inout self, at: u64, symbol: u64, r_type: u32) {
         self
             .relocs
             .push(
-            Reloc {
-                at: at,
-                symbol: symbol,
-                r_type: r_type
-            }
-        );
+                Reloc {
+                    at: at,
+                    symbol: symbol,
+                    r_type: r_type
+                }
+            );
     }
 
     fn literal(inout self, l: u64, symbol: u64, r_type: u32) {

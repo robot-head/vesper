@@ -378,54 +378,27 @@ test {
         for k in 0..count {
             let previous = wrapping_add(k, 100);
             let replacement = wrapping_add(k, 200);
-            if keys
-                .try_get(wrapping_add(k, 1))
-                != Option::Some(k)
-                || !table
-                .contains_key(k)
-                || table
-                .entry_at(k)
-                != Option::Some((k, previous))
-                || table
-                .insert(k, replacement)
-                != Option::Some(previous)
-                || table
-                .get(k)
-                != Option::Some(replacement)
-                || table
-                .entry_at(k)
-                != Option::Some((k, replacement)) {
+            if keys.try_get(wrapping_add(k, 1)) != Option::Some(k)
+                || !table.contains_key(k)
+                || table.entry_at(k) != Option::Some((k, previous))
+                || table.insert(k, replacement) != Option::Some(previous)
+                || table.get(k) != Option::Some(replacement)
+                || table.entry_at(k) != Option::Some((k, replacement)) {
                 return false;
             }
         }
-        if table
-            .len()
-            != count
-            || table
-            .contains_key(count)
-            || table
-            .get(count)
-            != Option::None
-            || table
-            .entry_at(count)
-            != Option::None {
+        if table.len() != count
+            || table.contains_key(count)
+            || table.get(count) != Option::None
+            || table.entry_at(count) != Option::None {
             return false;
         }
         table.clear();
-        table
-            .len()
-            == 0
-            && table
-            .is_empty()
-            && table
-            .get(0)
-            == Option::None
-            && table
-            .insert(0, 11)
-            == Option::None
-            && table
-            .get(0)
-            == Option::Some(11)
+        table.len() == 0
+            && table.is_empty()
+            && table.get(0) == Option::None
+            && table.insert(0, 11) == Option::None
+            && table.get(0) == Option::Some(11)
     }
 
     // @case first(0, 2, 1)
@@ -436,44 +409,21 @@ test {
         for k in 0..3 {
             table.insert(k, wrapping_add(k, 10));
         }
-        if table
-            .remove(removed_key)
-            != Option::Some(wrapping_add(removed_key, 10))
-            || table
-            .remove(removed_key)
-            != Option::None
-            || table
-            .len()
-            != 2
-            || table
-            .contains_key(removed_key)
-            || table
-            .entry_at(0)
-            != Option::Some((first, wrapping_add(first, 10)))
-            || table
-            .entry_at(1)
-            != Option::Some((second, wrapping_add(second, 10)))
-            || table
-            .get(first)
-            != Option::Some(wrapping_add(first, 10))
-            || table
-            .get(second)
-            != Option::Some(wrapping_add(second, 10)) {
+        if table.remove(removed_key) != Option::Some(wrapping_add(removed_key, 10))
+            || table.remove(removed_key) != Option::None
+            || table.len() != 2
+            || table.contains_key(removed_key)
+            || table.entry_at(0) != Option::Some((first, wrapping_add(first, 10)))
+            || table.entry_at(1) != Option::Some((second, wrapping_add(second, 10)))
+            || table.get(first) != Option::Some(wrapping_add(first, 10))
+            || table.get(second) != Option::Some(wrapping_add(second, 10)) {
             return false;
         }
         let replacement: u64 = 99;
-        table
-            .insert(removed_key, replacement)
-            == Option::None
-            && table
-            .len()
-            == 3
-            && table
-            .get(removed_key)
-            == Option::Some(replacement)
-            && table
-            .entry_at(2)
-            == Option::Some((removed_key, replacement))
+        table.insert(removed_key, replacement) == Option::None
+            && table.len() == 3
+            && table.get(removed_key) == Option::Some(replacement)
+            && table.entry_at(2) == Option::Some((removed_key, replacement))
     }
 
     // @case first_key(0)
@@ -490,26 +440,12 @@ test {
         }
         table.insert(first, 10);
         table.insert(later, 20);
-        table
-            .remove(first)
-            == Option::Some(10)
-            && table
-            .get(later)
-            == Option::Some(20)
-            && table
-            .insert(later, 21)
-            == Option::Some(20)
-            && table
-            .insert(first, 11)
-            == Option::None
-            && table
-            .get(first)
-            == Option::Some(11)
-            && table
-            .get(later)
-            == Option::Some(21)
-            && table
-            .len()
-            == 2
+        table.remove(first) == Option::Some(10)
+            && table.get(later) == Option::Some(20)
+            && table.insert(later, 21) == Option::Some(20)
+            && table.insert(first, 11) == Option::None
+            && table.get(first) == Option::Some(11)
+            && table.get(later) == Option::Some(21)
+            && table.len() == 2
     }
 }

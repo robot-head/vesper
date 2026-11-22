@@ -47,15 +47,13 @@ fn pick(p: Port) -> u64 {
             handle,
             sink: _,
             inout: _
-        }
-        => handle,
+        } => handle,
         Port {
             effect,
             handle: _,
             sink: _,
             inout: _
-        }
-        => effect,
+        } => effect,
     }
 }
 

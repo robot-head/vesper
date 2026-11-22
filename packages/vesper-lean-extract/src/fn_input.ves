@@ -126,11 +126,11 @@ pub fn read_fns(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], in tma
             out
                 .gens
                 .push(
-                Generic {
-                    name: g,
-                    row: row
-                }
-            );
+                    Generic {
+                        name: g,
+                        row: row
+                    }
+                );
         }
         let pa = out.params.len();
         let pn = r.word(in b);
@@ -148,39 +148,39 @@ pub fn read_fns(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], in tma
                 out
                     .paths
                     .push(
-                    Path {
-                        a: a,
-                        n: n
-                    }
-                );
+                        Path {
+                            a: a,
+                            n: n
+                        }
+                    );
             }
             let t = ty(inout r, in b, in tmap);
             out
                 .params
                 .push(
-                SigParam {
-                    pass: pass,
-                    qa: qa,
-                    qn: qn,
-                    ty: t
-                }
-            );
+                    SigParam {
+                        pass: pass,
+                        qa: qa,
+                        qn: qn,
+                        ty: t
+                    }
+                );
         }
         let effectful = r.word(in b) != 0;
         set_by_symbol(inout out.by_name, name, n32(add(out.sigs.len(), 1)));
         out
             .sigs
             .push(
-            Sig {
-                name: name,
-                source: source,
-                ga: ga,
-                gn: gn,
-                pa: pa,
-                pn: pn,
-                effectful: effectful
-            }
-        );
+                Sig {
+                    name: name,
+                    source: source,
+                    ga: ga,
+                    gn: gn,
+                    pa: pa,
+                    pn: pn,
+                    effectful: effectful
+                }
+            );
     }
     let nc = r.word(in b);
     for i in 0..nc {
@@ -194,22 +194,22 @@ pub fn read_fns(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], in tma
             out
                 .vars
                 .push(
-                Var {
-                    name: name,
-                    ty: t
-                }
-            );
+                    Var {
+                        name: name,
+                        ty: t
+                    }
+                );
         }
         out
             .calls
             .push(
-            Call {
-                s0: s0,
-                s1: s1,
-                a: a,
-                n: n
-            }
-        );
+                Call {
+                    s0: s0,
+                    s1: s1,
+                    a: a,
+                    n: n
+                }
+            );
     }
     let nl = r.word(in b);
     for i in 0..nl {
@@ -225,14 +225,14 @@ pub fn read_fns(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], in tma
         out
             .closures
             .push(
-            Closure {
-                owner: owner,
-                dest: dest,
-                lifted: lifted,
-                a: a,
-                n: n
-            }
-        );
+                Closure {
+                    owner: owner,
+                    dest: dest,
+                    lifted: lifted,
+                    a: a,
+                    n: n
+                }
+            );
     }
     out
 }
