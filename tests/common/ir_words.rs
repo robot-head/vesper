@@ -841,7 +841,7 @@ pub fn literal_fits(t: &Type) -> bool {
     }
 }
 
-fn function_fits(f: &FunctionIr) -> bool {
+pub fn function_fits(f: &FunctionIr) -> bool {
     let drop_fits = |d: &FipDrop| match d {
         FipDrop::Value(_, t) | FipDrop::Place(_, t) | FipDrop::OtherFields { ty: t, .. } => {
             literal_fits(t)
