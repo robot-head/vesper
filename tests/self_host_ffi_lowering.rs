@@ -542,6 +542,7 @@ fn abi_type(t: AbiType) -> String {
     match t {
         AbiType::Pointer => "ptr".into(),
         AbiType::Integer(s) => s.name().into(),
+        AbiType::Float(f) => f.name().into(),
     }
 }
 
@@ -892,7 +893,7 @@ fn embedded_sources(text: &str) -> Vec<String> {
 /// address, unit and handle parameters, pointer results, nested and
 /// byte-array structs, every slice and pointer form, `errno`, `CStr`,
 /// reserved and duplicate names.
-const HANDWRITTEN: [&str; 6] = [
+const HANDWRITTEN: [&str; 7] = [
     r#"sys library Shapes (
     target = "x86_64-unknown-linux-gnu", abi = "sysv64",
     link = "dynamic", name = "shapes", artifact = "blake3:@DIGEST@",
@@ -964,6 +965,29 @@ const HANDWRITTEN: [&str; 6] = [
 ) {
     wire struct ForeignInvalid { raw: u64 }
     fn f(nocapture in x: ForeignInvalid) -> ForeignVal[bool];
+}"#,
+    // Callback types (copyable handles whose calls come after the direct
+    // functions in the canonical bytes, but in symbol order everywhere
+    // else) and `#[link_name]` lookups sharing one C symbol.
+    r#"sys library Loader (
+    target = "aarch64-apple-darwin", abi = "darwin64",
+    link = "dynamic", name = "loader", artifact = "blake3:@DIGEST@"
+) {
+    enum Mode: u8 { Off = 0, On = 3 }
+    wire struct Flat { a: u64, b: i64, c: u64 }
+    linear extern type Ctx;
+    fn open(nocapture in path: CStr, flags: i32) -> ForeignVal[u64];
+    callback Bump(nocapture inout n: u32, by: u64) -> ForeignVal[i32];
+    #[link_name = "dlsym"]
+    fn load_bump(library: u64, nocapture in name: CStr) -> ForeignVal[NonNull[Bump]];
+    callback Apply(in c: Ctx, nocapture in f: Flat, m: Mode) -> ForeignVal[Mode];
+    #[link_name = "dlsym"]
+    fn load_apply(library: u64, nocapture in name: CStr) -> ForeignVal[Option[Apply]];
+    callback Zap(x: u64) -> ForeignVal[Unit];
+    #[link_name = "dlsym"]
+    fn load_zap(library: u64, nocapture in name: CStr) -> ForeignVal[Zap];
+    fn register(h: u64) -> ForeignVal[bool] errno;
+    fn ctx_free(sink c: Ctx) -> ForeignVal[Unit];
 }"#,
 ];
 

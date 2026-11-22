@@ -1,0 +1,123 @@
+// @vesper/doc: the renderers of crates/vesper-doc in Vesper (self-hosting
+// SH5 lane 15, #1338).
+//
+// Part 1 ports the byte-producing core every `vesper doc` output goes
+// through:
+//
+// - `pretty_json`: `vesper_doc::to_json`, serde_json's pretty writer with
+//   its output budget, over the compact serialization of the same value.
+// - `static_page`: `vesper_doc::render_html`, the static page: the header,
+//   the item overview read through the @vesper/serde tape, and the escaped
+//   typed metadata.
+// - `linked_page`: the tail of `vesper_doc::render_document_html`, the
+//   local declarations and the linked source documentation, after Rust has
+//   validated the intra-doc links.
+//
+// Every entry takes one `in Slice[u8]` request (`Reader` below: little-endian
+// words and length-prefixed byte strings, written by
+// `vesper_doc::swap` in Rust) and returns one byte sequence: a status byte
+// (`OK` or `ERR`), then the output bytes or the error text.
+
+// @export abi 4
+
+use self::json::{
+    pretty
+};
+use self::page::{
+    linked,
+    page
+};
+
+// The layout version of the requests and results; the Rust encoder
+// (crates/vesper-doc/src/swap.rs `FORMAT`) checks it.
+pub fn format() -> u64 {
+    1
+}
+
+// The result's first byte.
+const OK: u8 = 0;
+const ERR: u8 = 1;
+
+// A request: u64 words (little endian) and byte strings (a length word,
+// then the bytes).
+pub struct Reader {
+    pos: u64
+}
+
+pub fn read_word(inout r: Reader, in b: Slice[u8]) -> u64 {
+    let v = match b.try_read_u64_le(r.pos) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    };
+    r.pos = wrapping_add(r.pos, 8);
+    v
+}
+
+// The byte range (start, end) of the next byte string.
+pub fn read_bytes(inout r: Reader, in b: Slice[u8]) -> (u64, u64) {
+    let n = read_word(inout r, in b);
+    let start = r.pos;
+    let end = wrapping_add(start, n);
+    r.pos = end;
+    (start, end)
+}
+
+// A result: `ERR` and the text, or `OK` and the bytes of `out`.
+pub fn result_ok(in out: ChunkSeq[u8]) -> ChunkSeq[u8] {
+    let mut o: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](wrapping_add(out.len(), 1));
+    o.push(OK);
+    o.extend(in out[0..out.len()]);
+    o
+}
+
+pub fn result_err(in text: Str) -> ChunkSeq[u8] {
+    let mut o: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    o.push(ERR);
+    o.extend(in text.as_bytes());
+    o
+}
+
+// `to_json(value, max_bytes)`: request = max_bytes, then the compact JSON
+// (the rest of the request).
+pub fn pretty_json(in b: Slice[u8]) -> ChunkSeq[u8] {
+    let mut r = Reader {
+        pos: 0
+    };
+    let max = read_word(inout r, in b);
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let status = pretty(in b, r.pos, b.len(), max, inout out);
+    match status {
+        0 => result_ok(in out),
+        1 => result_err(in "bounded JSON output: output byte budget exceeded"),
+        _ => result_err(in "output byte budget exceeded"),
+    }
+}
+
+// `render_html(value, limits)` after `limits.validate()`: request =
+// max_output_bytes, then the compact JSON.
+pub fn static_page(in b: Slice[u8]) -> ChunkSeq[u8] {
+    let mut r = Reader {
+        pos: 0
+    };
+    let max = read_word(inout r, in b);
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let status = page(in b, r.pos, b.len(), max, inout out);
+    match status {
+        0 => result_ok(in out),
+        1 => result_err(in "bounded JSON output: output byte budget exceeded"),
+        _ => result_err(in "output byte budget exceeded"),
+    }
+}
+
+// `render_document_html` after its link validation: request =
+// max_output_bytes, the compact JSON of the report, the targets, the
+// retained comments and the references (`page::linked`).
+pub fn linked_page(in b: Slice[u8]) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let status = linked(in b, inout out);
+    match status {
+        0 => result_ok(in out),
+        1 => result_err(in "bounded JSON output: output byte budget exceeded"),
+        _ => result_err(in "output byte budget exceeded"),
+    }
+}

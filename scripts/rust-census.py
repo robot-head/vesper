@@ -7,6 +7,13 @@ prints docs/maintenance/rust-census.md to stdout.
 
     python3 scripts/rust-census.py > docs/maintenance/rust-census.md
 
+Lane pull requests edit only the STATUS tables here, never the generated
+file: .github/workflows/rust-census.yml regenerates it after each push to
+main and keeps one "Refresh the Rust census" pull request open with the
+result, and the merge gate stops CI for any other pull request that changes
+it (scripts/ci/merge_gate.py). The output names no commit, so merging the
+refresh leaves nothing new to refresh.
+
 Non-test lines: non-blank, non-comment lines outside `#[cfg(test)]` items,
 skipping `tests.rs`, `tests/`, `benches/` and `examples/`. Update STATUS when a
 lane reports (the scoreboard lane, SH6 lane 1, owns this file).
@@ -54,13 +61,13 @@ CRATES = {
     "vesper-bench": ("partial", "in crate", "2.2-3.2x", "timers via bench-pmu", "7"),
     "vesper-aegis": ("partial", "in crate", "unmeasured", "X.509, webpki, ECDSA stay behind the crypto shim; rest ports", "8"),
     "vesper-kinetic": ("partial", "in crate (+ seed)", "colorer 0.78x, multi-colorer 1.35x; fastmath 1.42x, gjk 1.70x, sap 1.84x, morton 2.03x, lbvh 2.07x, crmath 2.65x", "coloring flipped (Rust in seed/src/engine); fastmath, gjk, sap, morton, lbvh, crmath above the bar; world/tile, rigid, soft, articulation, couple, diff, rollback, snapshot, detfloat, simd unported", "9"),
-    "vesper-resonance": ("partial", "in crate (+ seed)", "kernel 1.07x, graph 1.07x; schedule 1.50x, confine 1.66x, pid/slab 2.1x, events 5.6x, simd 8-48x", "kernel render and built-in graph flipped (Rust in seed/src/engine); schedule, confine, pid, slab, events, simd above the bar; clif, spsc rings, denorm, dyn CompiledGraph unported", "9"),
+    "vesper-resonance": ("partial", "in crate (+ seed)", "kernel 1.07x, graph 1.07x, schedule 1.02x, pid 1.27x, confine 1.35x; slab 1.89x, events 8.00x, simd 8-48x", "kernel render, PID controller, built-in graph, schedule compiler and confinement verifier flipped (Rust in seed/src/engine); slab, events, simd above the bar; clif, spsc rings, denorm, dyn CompiledGraph unported", "9"),
     "vesper-silicon": ("partial", "in crate", "unmeasured", "SVD model, stack/prologue/hazard analysis (Cranelift IR), mmio", "10"),
     "vesper-ebpf": ("partial", "in crate", "1.2-4.7x", "BTF writers, ELF, bpf() syscalls", "10"),
     "vesper-serde": ("partial", "in crate", "4.8-5.7x", "SIMD stage 1 needs source vectors", "11"),
     "vesper-tensor": ("partial", "in crate", "unmeasured", "safetensors, memmap, simd kernels", "11"),
     "vesper-alloc": ("partial", "in crate", "unmeasured", "cache B-tree, arena keys, OS pages", "11"),
-    "vesper-gpu-compute": ("partial", "in crate (runtime)", "runtime 1.03x", "Vulkan runtime Vesper-only (dlopen'd loader); WGSL compile (naga), tensor and broadphase kernel drivers still Rust", "15"),
+    "vesper-gpu-compute": ("partial", "in crate (runtime, broadphase, tensor)", "1.00-1.02x", "runtime, broadphase and tensor drivers Vesper-only; WGSL compile (naga, src/shader.rs) and the Rust API glue left", "15"),
     "vesper-crucible": ("partial", "in crate", "0.79-1.57x", "fuzzer, schedule explorers, DPOR, arena", "12"),
     "vesper-semver": ("partial", "in crate", "1.6-2.3x", "speed: Rust encoder hash-conses every node; checker reads through try_get", "12"),
     "vesper-loom-calculus": ("gone", "in crate (+ seed)", "1.12x @8 / 0.80x @64 pkgs", "seed until Stage 2; TOML decoding in Vesper (#965), serde_json read of its output", "12"),
@@ -70,7 +77,7 @@ CRATES = {
     # The compiler's own crates.
     "vesper-syntax": ("compiler", "packages/vesper-front", "parse swap 1.03x corpus", "editor mode, lossless CST users", "SH1/2"),
     "vesper-core": ("compiler", "packages/vesper-ast", "in parse swap", "", "SH1/2"),
-    "vesper-span": ("compiler", "in crate", "pilot", "", "2"),
+    "vesper-span": ("compiler", "in crate", "edits 1.68x, lookup 1.35x, index 0.32x", "edits codegen (check_edits)", "2"),
     "vesper-diagnostics": ("compiler", "in crate", "pilot", "", "2"),
     "vesper-lean-syntax": ("compiler", "in crate", "pilot", "", "2"),
     "vesper-fmt": ("compiler", "in crate", "unmeasured", "", "2"),
@@ -113,13 +120,12 @@ CRATES = {
     "vesper-fusion": ("rust-lib", "", "", "egglog: move rule sets onto @vesper/egraph", "18"),
     "vesper-beacon-arrow": ("rust-lib", "", "", "arrow-rs, tonic, prost: Arrow IPC and gRPC on Prism", "18"),
     "vesper-migrate": ("rust-lib", "", "", "out of the compiler's closure (#1398); lang-c, syn: C and Rust readers in Vesper", "18"),
-    "vesper-loom-trust": ("shim", "", "", "out of the compiler's closure (#1398); Ed25519 quorum: logic ports, ed25519 behind the crypto shim", "17"),
-    "vesper-warp-crypto": ("shim", "", "", "RustCrypto AEADs: one crypto C-ABI shim", "17"),
+    "vesper-loom-trust": ("gone", "in crate (+ seed)", "0.70-1.23x", "NOT deleted: frozen Rust engine (src/reference, 639) stays as the seed vesper-tools links (Bazel run-time data of //:bin/vesper) until the Stage 2 wasm seed (lane 2); API, serde, JSON and conversion 470 and generated binding 1,253 go when callers are Vesper; Ed25519 via the crypto shim", "17"),
+    "vesper-warp-crypto": ("gone", "in crate", "1.04-1.89x", "header micro 1.89x (codegen, #1426); Rust holds the keys and NonceTicket; primitives via the crypto shim", "17"),
     "vesper-vault": ("shim", "", "", "libcrux ML-KEM, x25519, AEADs: crypto shim; Cranelift via its shim", "17"),
     "vesper-warp-tls": ("shim", "", "", "rustls: TLS shim (or the TLS 1.3 state machine ports over the crypto shim)", "17"),
     "vesper-simd": ("c-api", "", "", "out of the compiler's closure (#1398); Cranelift JIT host: through vesper-cranelift-sys", "13"),
     "vesper-crypto-sys": ("shim", "", "", "vetted crypto C-ABI shim (SH6 lane 17)", "17"),
-    "vesper-blake3-sys": ("c-api", "", "", "BLAKE3 C library: import it straight from .vsys", "G1-12"),
     "vesper-cranelift-sys": ("shim", "", "", "Cranelift C-ABI shim (owner 2026-11-19)", "-"),
     "vesper-codegen-verified": ("diverse", "", "", "DDC auditor, diverse on purpose", "owner"),
 }
@@ -135,7 +141,7 @@ MODULES = {
     "proof_commands": ("SH5-18", "", ""),
     "native": ("G1-11", "vesper-codegen-base", "family hooks swapped by SH4; the walk itself ports in gap wave 1 lane 11"),
     "seq": ("SH4-9", "", ""),
-    "wasm_backend": ("SH4-15, SH5-11, G1-9", "vesper-wasm-backend, vesper-wit-component", "0 diffs (#1311); component wrap: flip gate PASS, wrap 0.05x, build 0.67x; swapped in the hybrid (`component`); the port alone lowers loops (#1492), sequences, strings and conversions (#1506); handlers next"),
+    "wasm_backend": ("SH4-15, SH5-11, G1-9, G1-10", "vesper-wasm-backend, vesper-wit-component", "0 diffs (#1311); component wrap: flip gate PASS, wrap 0.05x, build 0.67x; swapped in the hybrid (`component`); the port alone lowers loops (#1492), sequences, strings and conversions (#1506), StdEnv/StdFs over WASI and Box (#1508); handlers next"),
     "check": ("SH2-7", "vesper-check-core-typing", ""),
     "tooling": ("SH5-15, SH5-17", "", ""),
     "lsp": ("SH5-16, SH5-17", "", ""),
@@ -179,11 +185,11 @@ MODULES = {
     "anvil_sim": ("SH5-14", "", ""),
     "native_freestanding": ("SH4-14", "", ""),
     "native_vector": ("SH4-11, G1-3", "", "vectors in registers (#1500): simd 40x -> 5.0x"),
-    "ir_opt_policy": ("G1-12", "", ""),
+    "ir_opt_policy": ("G1-12", "vesper-ir-opt-policy", "1.15x, swapped into the hybrid"),
     "ir_opt": ("SH3-9", "vesper-ir-opt", "0.0036x"),
     "native_windows": ("SH4-14", "", ""),
     "native_batch": ("SH4-17", "", ""),
-    "database": ("G1-12", "", "salsa: memo tables"),
+    "database": ("G1-12", "vesper-memo", "memo tables ported (SH5-16); query bodies wait on the Vesper LSP server"),
     "float_math": ("SH2-7", "", ""),
     "package_graph": ("SH2-6", "", ""),
     "layout": ("SH2-5", "vesper-check-layout", "swapped"),
@@ -200,8 +206,8 @@ MODULES = {
     "compiler_modules": ("2", "", "goes with the hybrid"),
     "swap_input": ("2", "", "goes with the hybrid"),
     "test_engines": ("SH6-19", "", ""),
-    "source_analysis": ("G1-12", "", "tour playground"),
-    "browser_tour": ("G1-12", "", "tour playground"),
+    "source_analysis": ("2", "", "compiler helpers (native, ir_inline, runtime); not tour code: goes with the compiler"),
+    "browser_tour": ("G1-12", "", "tour glue over the wasm-built compiler: needs website/wasm and the wasm seed"),
     "native_clif_opt": ("G1-11", "", "new in #1466 (#1426); ported with the walk"),
 }
 
@@ -259,7 +265,6 @@ def tracked_lines(pattern):
 
 def main():
     os.chdir(ROOT)
-    head = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
     crates = {c: tree_lines(f"crates/{c}") for c in sorted(os.listdir("crates")) if os.path.isdir(f"crates/{c}")}
     modules = {}
     for root, _, files in os.walk("src"):
@@ -273,8 +278,9 @@ def main():
 
     w = sys.stdout.write
     w("# Rust census\n\n")
-    w(f"> Generated by `scripts/rust-census.py` at `{head}`. Do not edit by hand: update the\n")
-    w("> STATUS tables in the script and re-run it. Plan: [rust-exit-plan.md](rust-exit-plan.md).\n\n")
+    w("> Generated by `scripts/rust-census.py` on `main` (`.github/workflows/rust-census.yml`).\n")
+    w("> Do not edit it in a lane pull request: update the STATUS tables in the script.\n")
+    w("> Plan: [rust-exit-plan.md](rust-exit-plan.md).\n\n")
     w("Lines are non-test Rust (see the script). Speeds are Vesper time / Rust time from the\n")
     w("latest lane report; \"unmeasured\" means no ABBA number on file. The bar to flip a module\n")
     w("and delete its Rust (owner, 2026-11-21): full function and within 1.5x of Rust's speed.\n\n")

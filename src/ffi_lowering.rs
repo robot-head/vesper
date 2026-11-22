@@ -204,6 +204,9 @@ pub enum FfiErrorKind {
     BufferMisuse,
     /// `Realtime` code may not call foreign code (§32.2).
     Realtime,
+    /// A Vesper function handed to C is not a named top-level function, or
+    /// C cannot call it this way yet (§16.3, `E0831`).
+    CallbackArgument,
     /// The ordinary checker rejected the elaborated module.
     Check,
     /// The library's `.vsys` target differs from the object target.
@@ -256,10 +259,24 @@ struct Import {
 #[derive(Debug, Clone, Default)]
 pub struct Imports {
     libraries: BTreeMap<String, Import>,
+    /// Static link names a package's objects provide (`[package]
+    /// objects`, manuscript §16.3), each with that package.
+    objects: BTreeMap<String, String>,
 }
 impl Imports {
     pub fn new() -> Self {
         Self::default()
+    }
+    /// Record that `package`'s objects provide the static library
+    /// linked as `link_name`.
+    pub fn provide_by_objects(&mut self, link_name: &str, package: &str) {
+        self.objects
+            .insert(link_name.to_owned(), package.to_owned());
+    }
+    /// The package whose objects provide the library linked as
+    /// `link_name`, if one does.
+    pub fn objects_provider(&self, link_name: &str) -> Option<&str> {
+        self.objects.get(link_name).map(String::as_str)
     }
     /// Parse one bounded `.vsys` library and import it.
     pub fn add(&mut self, vsys: &str, handler: Handler) -> Result<&LibraryDescriptor, FfiError> {
@@ -365,6 +382,28 @@ thread_local! {
     static USED: RefCell<BTreeSet<String>> = const { RefCell::new(BTreeSet::new()) };
     /// The typed error behind a backend failure in [`op_plan`].
     static FAULT: RefCell<Option<FfiError>> = const { RefCell::new(None) };
+    /// The C-ABI trampolines the module being built has, by (Vesper
+    /// function instance, library, callback type): one each (§16.3).
+    pub(crate) static TRAMPOLINES: RefCell<BTreeMap<(String, String, String), u32>> =
+        const { RefCell::new(BTreeMap::new()) };
+}
+/// The call of callback type `callback` of `library` (its signature, with
+/// the pointer first), for the trampoline that lets C call a Vesper
+/// function of that type.
+pub(crate) fn callback_plan(library: &str, callback: &str) -> Result<FunctionDescriptor, String> {
+    PLAN.with(|p| {
+        let plan = p.borrow();
+        let plan = plan
+            .as_ref()
+            .ok_or("foreign calls compile only through vesper::ffi_lowering")?;
+        plan.libraries
+            .values()
+            .find(|l| l.name == library)
+            .and_then(|l| l.descriptor.function(callback))
+            .filter(|f| f.is_indirect())
+            .cloned()
+            .ok_or_else(|| format!("library '{library}' has no callback type '{callback}'"))
+    })
 }
 struct PlanGuard;
 impl Drop for PlanGuard {
@@ -372,6 +411,7 @@ impl Drop for PlanGuard {
         PLAN.with(|p| *p.borrow_mut() = None);
         USED.with(|u| u.borrow_mut().clear());
         FAULT.with(|f| *f.borrow_mut() = None);
+        TRAMPOLINES.with(|t| t.borrow_mut().clear());
     }
 }
 /// The foreign symbols [`ForeignChecked::jit`] binds for the JIT module
@@ -977,6 +1017,7 @@ pub fn check_module(module: &Module, imports: &Imports) -> Result<ForeignChecked
     rewriter.finish()?;
     let instances = rewriter.instances;
     let calls = rewriter.calls;
+    let retained = rewriter.retained;
     // An isolated call is a generated trampoline around a named symbol;
     // the trampoline for a function pointer does not exist yet (§16.3).
     for call in &calls {
@@ -1017,6 +1058,19 @@ pub fn check_module(module: &Module, imports: &Imports) -> Result<ForeignChecked
     }
     drops::check_rows(&checked.world)?;
     check_isolated_workers(&checked.world, imports, &generated)?;
+    // A retained function runs on whatever thread C calls it from, where
+    // the runtime state of thread-affine values does not exist (§16.3).
+    for (function, span) in &retained {
+        if crate::atomics::thread_affine(&checked.world, function, &Type::unit()) {
+            return Err(FfiError::new(
+                FfiErrorKind::CallbackArgument,
+                format!(
+                    "'{function}' is retained by C, which may call it from any thread, but it uses a value whose runtime state is per thread (TiledSeq, Box or a region) (E0832)"
+                ),
+                Some(span.clone()),
+            ));
+        }
+    }
     buffers::check(&second, &checked.expression_types, &generated)?;
     let mut plan = Plan::default();
     for (name, import) in &imports.libraries {
@@ -1161,6 +1215,117 @@ struct Rewriter<'a> {
     /// Pass 2: (library, symbol) -> slice-length vectors used.
     instances: Instances,
     calls: Vec<ForeignCall>,
+    /// Top-level functions that are not generic: what a callback argument
+    /// may name.
+    plain_functions: BTreeSet<String>,
+    /// Functions handed to C as `retain` callbacks, which C may call from
+    /// any thread, with the span of the argument.
+    retained: Vec<(String, Span)>,
+    /// Names bound anywhere in the function being rewritten (parameters,
+    /// patterns, closure and handler parameters). A callback argument
+    /// that names one of these is a local value, not the top-level
+    /// function, so it is refused even when a function shares the name.
+    locals: BTreeSet<String>,
+}
+/// Every name a pattern binds.
+fn pattern_binders(p: &Pattern, out: &mut BTreeSet<String>) {
+    match &p.kind {
+        PatternKind::Bind(n) => {
+            out.insert(n.clone());
+        }
+        PatternKind::Tuple(ps) => ps.iter().for_each(|p| pattern_binders(p, out)),
+        PatternKind::Constructor { fields, .. } => {
+            fields.iter().for_each(|(_, p)| pattern_binders(p, out))
+        }
+        PatternKind::Wild | PatternKind::Literal(_) => {}
+    }
+}
+/// Every name bound anywhere inside `e`: `let`, `match`, `for`, closure
+/// and handler binders. Scope is ignored, which errs towards refusing.
+fn expr_binders(e: &Expr, out: &mut BTreeSet<String>) {
+    match &e.kind {
+        ExprKind::Literal(_) | ExprKind::Name(_) | ExprKind::Continue => {}
+        ExprKind::Tuple(es) => es.iter().for_each(|e| expr_binders(e, out)),
+        ExprKind::Struct { fields, .. } => fields.iter().for_each(|(_, e)| expr_binders(e, out)),
+        ExprKind::Block { statements, tail } => {
+            for s in statements {
+                match s {
+                    Statement::Let { pat, value, .. } => {
+                        pattern_binders(pat, out);
+                        expr_binders(value, out);
+                    }
+                    Statement::Expr(e) => expr_binders(e, out),
+                }
+            }
+            if let Some(t) = tail {
+                expr_binders(t, out);
+            }
+        }
+        ExprKind::Call { callee, args, .. } => {
+            expr_binders(callee, out);
+            args.iter().for_each(|a| expr_binders(&a.expr, out));
+        }
+        ExprKind::Field(e, _) | ExprKind::Try(e) | ExprKind::Unary(_, e) | ExprKind::Loop(e) => {
+            expr_binders(e, out)
+        }
+        ExprKind::Index(a, b) | ExprKind::Binary(_, a, b) | ExprKind::Assign(_, a, b) => {
+            expr_binders(a, out);
+            expr_binders(b, out);
+        }
+        ExprKind::Range { start, end, .. } => {
+            expr_binders(start, out);
+            expr_binders(end, out);
+        }
+        ExprKind::If {
+            condition,
+            then,
+            otherwise,
+        } => {
+            expr_binders(condition, out);
+            expr_binders(then, out);
+            if let Some(o) = otherwise {
+                expr_binders(o, out);
+            }
+        }
+        ExprKind::Match { value, arms } => {
+            expr_binders(value, out);
+            for (p, e) in arms {
+                pattern_binders(p, out);
+                expr_binders(e, out);
+            }
+        }
+        ExprKind::Closure { params, body, .. } => {
+            out.extend(params.iter().map(|p| p.name.clone()));
+            expr_binders(body, out);
+        }
+        ExprKind::Handle {
+            state,
+            body,
+            ret,
+            ops,
+            ..
+        } => {
+            if let Some((p, init)) = state {
+                pattern_binders(p, out);
+                expr_binders(init, out);
+            }
+            expr_binders(body, out);
+            for c in std::iter::once(&**ret).chain(ops) {
+                c.pats.iter().for_each(|p| pattern_binders(p, out));
+                expr_binders(&c.body, out);
+            }
+        }
+        ExprKind::For { pat, iter, body } => {
+            pattern_binders(pat, out);
+            expr_binders(iter, out);
+            expr_binders(body, out);
+        }
+        ExprKind::Break(v) | ExprKind::Return(v) => {
+            if let Some(v) = v {
+                expr_binders(v, out);
+            }
+        }
+    }
 }
 impl<'a> Rewriter<'a> {
     fn new(
@@ -1176,6 +1341,9 @@ impl<'a> Rewriter<'a> {
             slice_sites: vec![],
             instances: BTreeMap::new(),
             calls: vec![],
+            plain_functions: BTreeSet::new(),
+            retained: vec![],
+            locals: BTreeSet::new(),
         }
     }
     fn finish(&mut self) -> Result<(), FfiError> {
@@ -1191,6 +1359,16 @@ impl<'a> Rewriter<'a> {
             .push(FfiError::new(kind, message, Some(span.clone())));
     }
     fn module(&mut self, m: &mut Module) {
+        self.plain_functions = m
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Function(f) if f.generics.is_empty() && f.body.is_some() => {
+                    Some(f.name.clone())
+                }
+                _ => None,
+            })
+            .collect();
         for item in &mut m.items {
             match item {
                 Item::Adt(a) => {
@@ -1232,9 +1410,15 @@ impl<'a> Rewriter<'a> {
         }
         self.ty(&mut f.result, &span);
         self.effects(&mut f.effects, &span);
+        let mut locals: BTreeSet<String> = f.params.iter().map(|p| p.name.clone()).collect();
+        if let Some(body) = &f.body {
+            expr_binders(body, &mut locals);
+        }
+        let outer = std::mem::replace(&mut self.locals, locals);
         if let Some(body) = &mut f.body {
             self.expr(body);
         }
+        self.locals = outer;
     }
     fn effects(&mut self, es: &mut Effects, span: &Span) {
         let realtime = es
@@ -1515,6 +1699,31 @@ impl<'a> Rewriter<'a> {
                 return None;
             }
         };
+        // A function handed to C is named, so the compiler can emit its
+        // trampoline: a top-level function that is not generic (§16.3).
+        for (p, a) in function.parameters().iter().zip(args) {
+            if let ParameterType::Function { callback, retain } = p.ty() {
+                let named = matches!(&a.expr.kind, ExprKind::Name(n) if self.plain_functions.contains(n) && !self.locals.contains(n));
+                if *retain
+                    && let ExprKind::Name(n) = &a.expr.kind
+                    && named
+                    && self.arities.is_some()
+                {
+                    self.retained.push((n.clone(), a.expr.span.clone()));
+                }
+                if !named {
+                    self.error(
+                        FfiErrorKind::CallbackArgument,
+                        format!(
+                            "{library}::{symbol}: the `{}` argument (a {}) must name a top-level function that is not generic (E0831)",
+                            p.name(),
+                            callback.name()
+                        ),
+                        &a.expr.span,
+                    );
+                }
+            }
+        }
         let effect = effect_name(library);
         let handler = import.handler;
         let Some(arities) = self.arities else {
@@ -1615,12 +1824,20 @@ pub fn describe_parameter(p: &ParameterType) -> String {
             )
         }
         ParameterType::CStr => "in Slice[u8]".into(),
+        ParameterType::Function { callback, retain } => describe_function(callback.name(), *retain),
     }
+}
+fn describe_function(callback: &str, retain: bool) -> String {
+    format!(
+        "{} fn {callback}",
+        if retain { "retain" } else { "nocapture" }
+    )
 }
 fn describe_value(v: &ValueType) -> String {
     match v {
         ValueType::Unit => "Unit".into(),
         ValueType::Scalar(s) => s.name().into(),
+        ValueType::Float(f) => f.name().into(),
         ValueType::Bool => "bool".into(),
         ValueType::Enum(e) => e.name().into(),
         ValueType::Address { pointee, .. } => format!("Ptr[{}]", pointee.name()),

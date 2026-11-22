@@ -21,19 +21,20 @@ pub struct SeqRuntime {
 /// to Vesper in place. Only the built-in scalars qualify: their sizes match
 /// their strides, and every bit pattern Vesper writes is a valid value.
 /// (Implementors of the safe [`Abi`] trait cannot opt in.)
+#[inline(always)]
 fn native<T: Abi + 'static>() -> bool {
     use core::any::TypeId;
+    // One comparison per type (not a search of an array), so the test folds
+    // to a constant in every instance and the copy path drops out (#1502).
     let id = TypeId::of::<T>();
-    let builtin = [
-        TypeId::of::<u8>(),
-        TypeId::of::<u32>(),
-        TypeId::of::<u64>(),
-        TypeId::of::<i64>(),
-        TypeId::of::<usize>(),
-        TypeId::of::<isize>(),
-        TypeId::of::<f64>(),
-    ];
-    builtin.contains(&id) && core::mem::size_of::<T>() == T::STRIDE
+    let builtin = id == TypeId::of::<u8>()
+        || id == TypeId::of::<u32>()
+        || id == TypeId::of::<u64>()
+        || id == TypeId::of::<i64>()
+        || id == TypeId::of::<usize>()
+        || id == TypeId::of::<isize>()
+        || id == TypeId::of::<f64>();
+    builtin && core::mem::size_of::<T>() == T::STRIDE
 }
 
 /// Panic unless `T::STRIDE` and `T::WORDS` describe one layout, which every
@@ -100,6 +101,7 @@ pub unsafe fn write_elem<T: Abi>(data: *mut u8, i: usize, value: &T) {
 ///
 /// # Safety
 /// `handle` must be a live sequence handle from the same library.
+#[inline]
 unsafe fn header(handle: u64) -> (usize, *mut u8) {
     let h = handle as usize as *const u64;
     // SAFETY: a live handle points at its three header words.
@@ -120,6 +122,7 @@ fn packed<T: Abi>(items: &[T]) -> Vec<u64> {
 /// Lend `items` to Vesper as an `in Slice[T]` view and run `call` with the
 /// pointer to the view's words. Elements whose Rust layout is the packed
 /// Vesper layout (the built-in scalars, see `native`) are lent in place, others are copied.
+#[inline]
 pub fn with_slice<T: Abi + 'static, R>(items: &[T], call: impl FnOnce(*mut u64) -> R) -> R {
     let copy;
     let data = if native::<T>() {
@@ -136,6 +139,7 @@ pub fn with_slice<T: Abi + 'static, R>(items: &[T], call: impl FnOnce(*mut u64) 
 
 /// Lend `items` to Vesper as an `inout Slice[T]` view. Non-native elements
 /// are copied in and back after the call.
+#[inline]
 pub fn with_slice_mut<T: Abi + 'static, R>(items: &mut [T], call: impl FnOnce(*mut u64) -> R) -> R {
     let len = items.len() as u64;
     if native::<T>() {
@@ -157,6 +161,7 @@ pub fn with_slice_mut<T: Abi + 'static, R>(items: &mut [T], call: impl FnOnce(*m
 
 /// Lend `items` to Vesper as an `in ChunkSeq[T]` and run `call` with the
 /// handle (a header the caller owns; Vesper only reads it).
+#[inline]
 pub fn with_seq<T: Abi + 'static, R>(items: &[T], call: impl FnOnce(u64) -> R) -> R {
     let copy;
     let data = if native::<T>() {
@@ -174,14 +179,25 @@ pub fn with_seq<T: Abi + 'static, R>(items: &[T], call: impl FnOnce(u64) -> R) -
 ///
 /// # Safety
 /// `rt` must be the runtime of a linked v2 library.
-pub unsafe fn seq_from<T: Abi>(rt: SeqRuntime, items: &[T]) -> u64 {
+pub unsafe fn seq_from<T: Abi + 'static>(rt: SeqRuntime, items: &[T]) -> u64 {
     // SAFETY: `seq_new` returns a header whose buffer holds `cap` elements.
     unsafe {
         let handle = (rt.new)(items.len() as i64, T::STRIDE as i64) as u64;
         let h = handle as usize as *mut u64;
         let data = *h.add(2) as usize as *mut u8;
-        for (i, item) in items.iter().enumerate() {
-            write_elem(data, i, item);
+        if native::<T>() {
+            // The Rust layout is the packed one: one block copy (#1502).
+            if !items.is_empty() {
+                core::ptr::copy_nonoverlapping(
+                    items.as_ptr().cast::<u8>(),
+                    data,
+                    items.len() * T::STRIDE,
+                );
+            }
+        } else {
+            for (i, item) in items.iter().enumerate() {
+                write_elem(data, i, item);
+            }
         }
         *h = items.len() as u64;
         handle
@@ -193,7 +209,7 @@ pub unsafe fn seq_from<T: Abi>(rt: SeqRuntime, items: &[T]) -> u64 {
 /// # Safety
 /// `handle` must be a live sequence of `rt`'s library holding `T` elements,
 /// owned by the caller; it is freed.
-pub unsafe fn seq_take<T: Abi>(rt: SeqRuntime, handle: u64) -> Vec<T> {
+pub unsafe fn seq_take<T: Abi + 'static>(rt: SeqRuntime, handle: u64) -> Vec<T> {
     // SAFETY: forwarded from the caller.
     unsafe {
         let items = seq_copy(handle);
@@ -206,10 +222,19 @@ pub unsafe fn seq_take<T: Abi>(rt: SeqRuntime, handle: u64) -> Vec<T> {
 ///
 /// # Safety
 /// `handle` must be a live sequence holding `T` elements.
-pub unsafe fn seq_copy<T: Abi>(handle: u64) -> Vec<T> {
+pub unsafe fn seq_copy<T: Abi + 'static>(handle: u64) -> Vec<T> {
     // SAFETY: forwarded from the caller.
     unsafe {
         let (len, data) = header(handle);
+        if native::<T>() {
+            // The packed layout is the Rust one: one block copy (#1502).
+            let mut items = Vec::<T>::with_capacity(len);
+            if len != 0 {
+                core::ptr::copy_nonoverlapping(data.cast::<T>(), items.as_mut_ptr(), len);
+            }
+            items.set_len(len);
+            return items;
+        }
         (0..len).map(|i| read_elem(data, i)).collect()
     }
 }
@@ -218,7 +243,7 @@ pub unsafe fn seq_copy<T: Abi>(handle: u64) -> Vec<T> {
 /// copied into a Vesper sequence, `call` runs with a pointer to its handle
 /// word, and the (possibly grown or replaced) sequence is copied back into
 /// `items` and freed.
-pub fn with_seq_mut<T: Abi, R>(
+pub fn with_seq_mut<T: Abi + 'static, R>(
     rt: SeqRuntime,
     items: &mut Vec<T>,
     call: impl FnOnce(*mut u64) -> R,
@@ -423,6 +448,7 @@ pub unsafe fn box_words<'a>(pointer: u64, words: usize) -> &'a [u64] {
 /// Lend `s` to Vesper as an `in Str` (or `in String`): `call` runs with a
 /// pointer to the three-word value `{len, 0, data}`, which borrows the bytes
 /// in place (capacity 0 marks borrowed bytes; Vesper never writes them).
+#[inline]
 pub fn with_str<R>(s: &str, call: impl FnOnce(*mut u64) -> R) -> R {
     let mut words = [s.len() as u64, 0, s.as_ptr() as usize as u64];
     call(words.as_mut_ptr())
@@ -510,6 +536,7 @@ pub unsafe fn string_take(rt: SeqRuntime, words: &[u64]) -> String {
 /// # Safety
 /// `words` must be a live Vesper string (so its bytes are UTF-8) that stays
 /// alive and unchanged while the result is borrowed.
+#[inline]
 pub unsafe fn str_view(words: &[u64]) -> &str {
     // SAFETY: forwarded from the caller.
     let bytes = unsafe { string_bytes(words) };
@@ -525,6 +552,7 @@ pub unsafe fn str_view(words: &[u64]) -> &str {
 ///
 /// # Safety
 /// `words` must be a live Vesper string.
+#[inline]
 unsafe fn string_bytes(words: &[u64]) -> &[u8] {
     let len = words[0] as usize;
     if len == 0 {

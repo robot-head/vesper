@@ -27,6 +27,10 @@ use self::lower::{
     body_n,
     get32
 };
+use self::host::{
+    active,
+    wit_imports
+};
 use self::plan::{
     Shape
 };
@@ -1239,7 +1243,8 @@ pub fn exports(inout l: L) -> ChunkSeq[u8] eff [Fail[WErr]] {
             has_str = true;
         }
     }
-    if has_str {
+    // The WASI imports return lists through `cabi_realloc` too.
+    if has_str || active(in l.host) {
         export_realloc(inout l);
     }
     let mut run = ChunkSeq::new[u8]();
@@ -1274,6 +1279,7 @@ pub fn exports(inout l: L) -> ChunkSeq[u8] eff [Fail[WErr]] {
         text(inout src, in wit_result.as_slice());
     }
     text(inout src, in ";\n}\n\nworld program {\n".as_bytes());
+    text(inout src, in wit_imports(in l.host).as_bytes());
     text(inout src, in run.as_slice());
     text(inout src, in "  export entry;\n}\n".as_bytes());
     src

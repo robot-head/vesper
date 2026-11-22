@@ -462,14 +462,14 @@ impl SourceEdits {
     }
     #[cfg(vesper_port)]
     pub fn apply(&self) -> Result<String, Error> {
-        // Whole edits of valid UTF-8 at char boundaries: the bytes are UTF-8.
-        String::from_utf8(port::edits_apply(
-            self.source.as_bytes(),
+        // Whole edits of valid UTF-8 at char boundaries: the port builds a
+        // `String`, which the binding does not validate again (#1502).
+        Ok(port::edits_apply(
+            &self.source,
             &self.replace.0,
-            self.replace.1.as_bytes(),
+            &self.replace.1,
             self.output_bytes,
         ))
-        .map_err(|_| Error::Utf8Boundary)
     }
     #[cfg(not(vesper_port))]
     pub fn apply(&self) -> Result<String, Error> {

@@ -170,3 +170,217 @@ fn chosen_aggregates_and_options_leave_no_slot() {
     }
     assert_eq!(agree(AGGREGATES), "198");
 }
+
+/// A helper that writes through an `inout` slice with a fallback, inlined
+/// three times: every write used to read the view's handle, offset and
+/// data pointer again in each arm (SH6 lane 11 item 1, warp-shard #1448).
+const HEADERS: &str = r#"
+fn wr16(inout b: Slice[u8], i: u64, v: u16) {
+    if !b.try_write_u16_be(i, v) {
+        b.try_set(i, wrapping_u8(v >> 8));
+        b.try_set(wrapping_add(i, 1), wrapping_u8(v));
+    }
+}
+
+fn put(inout out: Slice[u8], a: u16, b: u16, c: u16) -> u64 {
+    if out.len() < 6 {
+        return 0;
+    }
+    wr16(inout out, 0, a);
+    wr16(inout out, 2, b);
+    wr16(inout out, 4, c);
+    6
+}
+
+fn main() -> u64 {
+    let mut v = ChunkSeq::new[u8]();
+    let n: u64 = 8;
+    for i in 0..n {
+        v.push(0);
+    }
+    let w = put(inout v.as_slice_mut(), 258, 772, 1286);
+    let mut sum: u64 = w;
+    for i in 0..n {
+        sum = match v.try_get(i) {
+            Option::Some(x) => wrapping_add(wrapping_mul(sum, 31), widen_u64(x)),
+            Option::None => sum,
+        };
+    }
+    sum
+}
+"#;
+
+#[test]
+fn view_header_words_are_read_once() {
+    let c = accepted(HEADERS);
+    let mut seen = 0;
+    native::object_with_observer(
+        &c.world,
+        "main",
+        None,
+        true,
+        Some(&mut |f: native::EmittedFunction| {
+            if f.source != "put" {
+                return;
+            }
+            seen += 1;
+            let func = &f.function;
+            let entry = func.layout.entry_block().unwrap();
+            let view = func.dfg.block_params(entry)[0];
+            // Loads of the view, then of the handle it holds.
+            let mut header = std::collections::HashSet::new();
+            header.insert(view);
+            let mut words = vec![];
+            for block in func.layout.blocks() {
+                for inst in func.layout.block_insts(block) {
+                    if let InstructionData::Load { arg, offset, .. } = func.dfg.insts[inst]
+                        && header.contains(&func.dfg.resolve_aliases(arg))
+                    {
+                        words.push((func.dfg.resolve_aliases(arg), i32::from(offset)));
+                        header.insert(func.dfg.first_result(inst));
+                    }
+                }
+            }
+            let distinct: std::collections::HashSet<_> = words.iter().collect();
+            assert_eq!(words.len(), distinct.len(), "{words:?}\n{}", func.display());
+        }),
+    )
+    .unwrap();
+    assert!(seen > 0, "put was not emitted");
+    assert_eq!(agree(HEADERS), "5146723582377");
+}
+
+/// A sequence local that only an early-return branch uses (kinetic's
+/// `fastmath_sin` cache, #1404 gap 8): its slot used to be zeroed at
+/// function entry, and its drop flag tested on the fast path as a
+/// constant-false branch.
+const COLD_LOCAL: &str = r#"
+fn helper(inout c: Slice[u32], b: u64) -> u64 {
+    let mut n = b;
+    for i in 0..c.len() {
+        match c.try_get(i) {
+            Option::Some(w) => {
+                n = wrapping_add(n, widen_u64(w));
+            },
+            Option::None => (),
+        }
+    }
+    if c.len() == 0 { wrapping_mul(n, 3) } else { n }
+}
+
+fn cold(x: u64) -> u64 {
+    if x > 1000 {
+        let mut cache: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        cache.push(5);
+        return helper(inout cache.as_slice_mut(), x);
+    }
+    wrapping_add(x, 7)
+}
+
+fn main() -> u64 {
+    let mut total: u64 = 0;
+    let n: u64 = 3000;
+    for i in 0..n {
+        total = wrapping_add(total, cold(i));
+    }
+    total
+}
+"#;
+
+#[test]
+fn a_cold_local_costs_the_entry_nothing() {
+    let c = accepted(COLD_LOCAL);
+    let mut seen = 0;
+    native::object_with_observer(
+        &c.world,
+        "main",
+        None,
+        true,
+        Some(&mut |f: native::EmittedFunction| {
+            if f.source != "cold" {
+                return;
+            }
+            seen += 1;
+            let func = &f.function;
+            let entry = func.layout.entry_block().unwrap();
+            for inst in func.layout.block_insts(entry) {
+                assert_ne!(
+                    func.dfg.insts[inst].opcode(),
+                    Opcode::Store,
+                    "a store in the entry block\n{}",
+                    func.display()
+                );
+            }
+            for block in func.layout.blocks() {
+                for inst in func.layout.block_insts(block) {
+                    if let InstructionData::Brif { arg, .. } = func.dfg.insts[inst] {
+                        let arg = func.dfg.resolve_aliases(arg);
+                        let def = func.dfg.value_def(arg).inst();
+                        assert!(
+                            !def.is_some_and(|d| func.dfg.insts[d].opcode() == Opcode::Iconst),
+                            "a branch on a constant\n{}",
+                            func.display()
+                        );
+                    }
+                }
+            }
+        }),
+    )
+    .unwrap();
+    assert!(seen > 0, "cold was not emitted");
+    assert_eq!(agree(COLD_LOCAL), "4515502");
+}
+
+/// Float coefficients spelled `from_bits_f64(K)`, as ported math code
+/// writes them (kinetic `fastmath`): they used to be built through a
+/// general register at every use.
+const COEFFICIENTS: &str = r#"
+fn poly(x: f64) -> f64 {
+    let z = x * x;
+    from_bits_f64(4607182418800017408) + z * (from_bits_f64(4602678819172646912) + z * from_bits_f64(4598175219545276416))
+}
+
+fn main() -> u64 {
+    let mut acc: u64 = 0;
+    let n: u64 = 8;
+    for i in 0..n {
+        acc = wrapping_add(acc, to_bits_f64(poly(from_bits_f64(wrapping_mul(i, 4503599627370496)))) >> 40);
+    }
+    acc
+}
+"#;
+
+#[test]
+fn float_coefficients_are_constants() {
+    let c = accepted(COEFFICIENTS);
+    let mut seen = 0;
+    native::object_with_observer(
+        &c.world,
+        "main",
+        None,
+        true,
+        Some(&mut |f: native::EmittedFunction| {
+            if f.source != "poly" {
+                return;
+            }
+            seen += 1;
+            let func = &f.function;
+            for block in func.layout.blocks() {
+                for inst in func.layout.block_insts(block) {
+                    if func.dfg.insts[inst].opcode() == Opcode::Bitcast {
+                        let arg = func.dfg.resolve_aliases(func.dfg.inst_args(inst)[0]);
+                        let def = func.dfg.value_def(arg).inst();
+                        assert!(
+                            !def.is_some_and(|d| func.dfg.insts[d].opcode() == Opcode::Iconst),
+                            "a float built from an integer constant\n{}",
+                            func.display()
+                        );
+                    }
+                }
+            }
+        }),
+    )
+    .unwrap();
+    assert!(seen > 0, "poly was not emitted");
+    assert_eq!(agree(COEFFICIENTS), "33521664");
+}

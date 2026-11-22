@@ -147,6 +147,8 @@ pub copy struct Fun {
     errno: bool,
     // the library row
     lib: u64,
+    // the call of a callback type: params[p0] is the pointer itself
+    indirect: bool,
 }
 
 // A `ParameterType`. Pointees and slice elements are a scalar (`psc`) or
@@ -186,6 +188,8 @@ pub copy struct Wf {
 pub copy struct Xt {
     name: u32,
     linear: bool,
+    // a callback type: a C function pointer, a plain copyable word
+    copy: bool,
     drop: u32,
 }
 
@@ -219,6 +223,7 @@ pub copy struct Ge {
 pub copy struct Gh {
     name: u32,
     linear: bool,
+    copy: bool,
 }
 
 // A function's shape: Ok with params sp[p0..p0+pn] and `result`, or Err.
@@ -533,7 +538,8 @@ impl S {
                 pn: 0,
                 result: vt_unit(),
                 errno: false,
-                lib: 0
+                lib: 0,
+                indirect: false
             },
         }
     }
@@ -589,6 +595,7 @@ impl S {
             Option::None => Xt {
                 name: NONE,
                 linear: false,
+                copy: false,
                 drop: NONE
             },
         }
@@ -644,7 +651,8 @@ impl S {
             Option::Some(x) => x,
             Option::None => Gh {
                 name: NONE,
-                linear: false
+                linear: false,
+                copy: false
             },
         }
     }
@@ -1016,6 +1024,70 @@ fn read_param(inout r: Reader, in b: Slice[u8], inout s: S) -> Par {
     p
 }
 
+// One function of library row `lib`: symbol, parameters, result and the
+// trailers appended only when declared.
+fn read_function(inout r: Reader, in b: Slice[u8], inout s: S, lib: u64, indirect: bool) {
+    let sym = field_sym(inout r, in b, inout s);
+    let p0 = s.pars.len();
+    let np = r.count(in b);
+    for j in 0..np {
+        let p = read_param(inout r, in b, inout s);
+        s.pars.push(p);
+    }
+    let result = read_value(inout r, in b, inout s);
+    if peek_is(in r, in b, in "mapping/length-from") {
+        let marker = r.field(in b);
+        let length = r.count(in b);
+    }
+    let errno = peek_is(in r, in b, in "errno/after-call");
+    if errno {
+        let marker = r.field(in b);
+    }
+    if peek_is(in r, in b, in "variadic/from") {
+        let marker = r.field(in b);
+        let first = r.count(in b);
+    }
+    // The C symbol several declarations may share (`#[link_name]`): the
+    // plans and shapes name the declaration's own symbol.
+    if peek_is(in r, in b, in "link-name") {
+        let marker = r.field(in b);
+        let link = r.field(in b);
+    }
+    s
+        .funs
+        .push(
+            Fun {
+                sym: sym,
+                p0: p0,
+                pn: np,
+                result: result,
+                errno: errno,
+                lib: lib,
+                indirect: indirect
+            }
+        );
+}
+
+// Function rows funs[f0..f0+n] in symbol order (insertion sort, stable).
+fn sort_fun_rows(inout s: S, f0: u64, n: u64) {
+    for i in 1..n {
+        let x = s.fun(add(f0, i));
+        let mut j = i;
+        loop {
+            if j == 0 {
+                break;
+            }
+            let y = s.fun(add(f0, wrapping_sub(j, 1)));
+            if s.name_cmp(y.sym, x.sym) <= 0 {
+                break;
+            }
+            s.funs.try_set(add(f0, j), y);
+            j = wrapping_sub(j, 1);
+        }
+        s.funs.try_set(add(f0, j), x);
+    }
+}
+
 // One canonical descriptor `b[a..e]` with its handler tier, as a library row.
 pub fn read_library(in b: Slice[u8], a: u64, e: u64, handler: u64, inout s: S) {
     let mut r = Reader {
@@ -1063,33 +1135,21 @@ pub fn read_library(in b: Slice[u8], a: u64, e: u64, handler: u64, inout s: S) {
             );
     }
     let f0 = s.funs.len();
-    let nf = r.count(in b);
-    for i in 0..nf {
-        let sym = field_sym(inout r, in b, inout s);
-        let p0 = s.pars.len();
-        let np = r.count(in b);
-        for j in 0..np {
-            let p = read_param(inout r, in b, inout s);
-            s.pars.push(p);
-        }
-        let result = read_value(inout r, in b, inout s);
-        let errno = peek_is(in r, in b, in "errno/after-call");
-        if errno {
-            let marker = r.field(in b);
-        }
-        s
-            .funs
-            .push(
-                Fun {
-                    sym: sym,
-                    p0: p0,
-                    pn: np,
-                    result: result,
-                    errno: errno,
-                    lib: lib
-                }
-            );
+    let nd = r.count(in b);
+    for i in 0..nd {
+        read_function(inout r, in b, inout s, lib, false);
     }
+    // Each callback type's call, appended only when present; the rows are
+    // then put in symbol order, as the descriptor keeps its functions.
+    if peek_is(in r, in b, in "callbacks") {
+        let marker = r.field(in b);
+        let nc = r.count(in b);
+        for i in 0..nc {
+            read_function(inout r, in b, inout s, lib, true);
+        }
+    }
+    let nf = wrapping_sub(s.funs.len(), f0);
+    sort_fun_rows(inout s, f0, nf);
     let w0 = s.wss.len();
     if peek_is(in r, in b, in "wire-structs") {
         let marker = r.field(in b);
@@ -1188,6 +1248,7 @@ pub fn read_library(in b: Slice[u8], a: u64, e: u64, handler: u64, inout s: S) {
                     Xt {
                         name: xn,
                         linear: field_is(in b, c, d, in "linear"),
+                        copy: false,
                         drop: NONE
                     }
                 );
@@ -1202,6 +1263,22 @@ pub fn read_library(in b: Slice[u8], a: u64, e: u64, handler: u64, inout s: S) {
                     s.xts.try_set(add(x0, i), x);
                 }
             }
+        }
+    }
+    // Each callback declares a copyable handle type of its name.
+    for i in 0..nf {
+        let f = s.fun(add(f0, i));
+        if f.indirect {
+            s
+                .xts
+                .push(
+                    Xt {
+                        name: f.sym,
+                        linear: false,
+                        copy: true,
+                        drop: NONE
+                    }
+                );
         }
     }
     s
@@ -1468,7 +1545,8 @@ pub fn generate(inout s: S) -> Err {
                 .push(
                     Gh {
                         name: x.name,
-                        linear: x.linear
+                        linear: x.linear,
+                        copy: x.copy
                     }
                 );
         }
@@ -1838,7 +1916,7 @@ pub fn append(inout s: S, pass2: bool, in insts: ChunkSeq[Inst], in lens: ChunkS
     let handles = sorted_handle_names(in s);
     for i in 0..handles.len() {
         let h = s.gh(find_gh(in s, u32_at(in handles, i)));
-        adt_head(inout s, h.name, h.linear, !h.linear, false);
+        adt_head(inout s, h.name, h.linear, !h.linear && !h.copy, false);
         variant_line(inout s, h.name, true);
         let u64t = s.ty_name(sym8(SC_U64));
         field_line(inout s, S_HANDLE, u64t);
@@ -2611,9 +2689,15 @@ pub fn dump_abi(inout s: S) {
         s.put(in " conv=");
         put_convention(inout s, l.triple);
         s.put(in " params=");
-        for j in 0..f.pn {
+        // A callback's call leaves the pointer out of its C signature.
+        let first: u64 = if f.indirect {
+            1
+        } else {
+            0
+        };
+        for j in first..f.pn {
             let p = s.par(add(f.p0, j));
-            if j > 0 {
+            if j > first {
                 s.put(in ",");
             }
             if p.tag == P_VALUE {

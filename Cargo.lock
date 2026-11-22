@@ -5598,7 +5598,6 @@ dependencies = [
  "vesper-alloc-seed",
  "vesper-beacon-seed",
  "vesper-bench-seed",
- "vesper-blake3-sys",
  "vesper-chrono",
  "vesper-core",
  "vesper-crucible-seed",
@@ -5779,14 +5778,6 @@ name = "vesper-bench-seed"
 version = "0.1.0"
 
 [[package]]
-name = "vesper-blake3-sys"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "cc",
-]
-
-[[package]]
 name = "vesper-chorus"
 version = "0.1.0"
 dependencies = [
@@ -5841,7 +5832,7 @@ dependencies = [
  "toml 0.8.23",
  "vesper-loom-calculus-seed",
  "vesper-loom-cas",
- "vesper-loom-trust",
+ "vesper-loom-trust-seed",
 ]
 
 [[package]]
@@ -6009,7 +6000,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "vesper-bench",
- "vesper-blake3-sys",
  "vesper-loom-cas",
  "vesper-port-abi",
  "vesper-port-harness",
@@ -6024,7 +6014,6 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "vesper-bench",
- "vesper-blake3-sys",
  "vesper-fmt-seed",
  "vesper-lean-syntax-seed",
  "vesper-port-abi",
@@ -6344,7 +6333,7 @@ dependencies = [
  "tempfile",
  "vesper-loom-calculus-seed",
  "vesper-loom-cas",
- "vesper-loom-trust",
+ "vesper-loom-trust-seed",
 ]
 
 [[package]]
@@ -6431,7 +6420,6 @@ dependencies = [
  "libc",
  "reflink-copy",
  "tempfile",
- "vesper-blake3-sys",
  "vesper-port-abi",
  "vesper-port-harness",
  "windows-sys 0.61.2",
@@ -6482,6 +6470,22 @@ name = "vesper-loom-trust"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "ed25519-dalek",
+ "semver",
+ "serde",
+ "serde_json",
+ "vesper-bench",
+ "vesper-crypto-sys",
+ "vesper-loom-calculus-seed",
+ "vesper-loom-cas",
+ "vesper-port-abi",
+ "vesper-port-harness",
+]
+
+[[package]]
+name = "vesper-loom-trust-seed"
+version = "0.1.0"
+dependencies = [
  "ed25519-dalek",
  "semver",
  "serde",
@@ -6884,7 +6888,7 @@ dependencies = [
  "vesper-loom-calculus-seed",
  "vesper-loom-cas",
  "vesper-loom-solver-seed",
- "vesper-loom-trust",
+ "vesper-loom-trust-seed",
  "vesper-migrate",
  "vesper-semver-seed",
  "vesper-serde-seed",

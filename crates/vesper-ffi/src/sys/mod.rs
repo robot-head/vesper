@@ -243,6 +243,26 @@ impl fmt::Display for ArtifactMismatch {
     }
 }
 impl std::error::Error for ArtifactMismatch {}
+/// A floating-point carrier: C `float` or `double`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Float {
+    F32,
+    F64,
+}
+impl Float {
+    pub fn name(self) -> &'static str {
+        match self {
+            Float::F32 => "f32",
+            Float::F64 => "f64",
+        }
+    }
+    pub fn bits(self) -> u32 {
+        match self {
+            Float::F32 => 32,
+            Float::F64 => 64,
+        }
+    }
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scalar {
     U8,
@@ -319,6 +339,9 @@ impl EnumDescriptor {
 pub enum ValueType {
     Unit,
     Scalar(Scalar),
+    /// An IEEE 754 `f32`/`f64`, passed and returned in a floating-point
+    /// register exactly as C passes `float`/`double`.
+    Float(Float),
     Bool,
     Enum(EnumDescriptor),
     Address {
@@ -541,6 +564,14 @@ pub enum ParameterType {
     /// bytes are copied into a fresh buffer with the terminator appended; an
     /// argument holding a NUL byte is refused before the call.
     CStr,
+    /// `nocapture f: Cb` or `retain f: Cb`: a Vesper function handed to C as
+    /// a pointer of the callback type `Cb` (a compiler-generated C-ABI
+    /// trampoline). `nocapture` C calls it only during the call; `retain`
+    /// C may keep it and call it later, from any thread.
+    Function {
+        callback: ExternTypeDescriptor,
+        retain: bool,
+    },
     /// `in b: Pinned[T]` or `inout b: Pinned[T]`: a Vesper buffer whose
     /// address C may keep after the call, until the program releases the
     /// buffer. Passed as `(T *data, size_t len)`.
@@ -601,6 +632,8 @@ impl ParameterDescriptor {
 pub enum AbiType {
     Integer(Scalar),
     Pointer,
+    /// A floating-point register value.
+    Float(Float),
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AbiSignature {
@@ -710,11 +743,15 @@ impl FunctionDescriptor {
                 continue;
             }
             if self.variadic == Some(index) {
-                // Every parameter is an integer or pointer word, so the
-                // fixed words so far are exactly the registers they use.
+                // The fixed integer and pointer words so far are exactly
+                // the integer registers they use; floats take `v0`-`v7`.
+                let integers = parameters
+                    .iter()
+                    .filter(|t| !matches!(t, AbiType::Float(_)))
+                    .count();
                 let padding = match self.convention {
                     CallingConvention::Darwin64 => {
-                        ARM64_INTEGER_ARGUMENT_REGISTERS.saturating_sub(parameters.len())
+                        ARM64_INTEGER_ARGUMENT_REGISTERS.saturating_sub(integers)
                     }
                     CallingConvention::SysV64
                     | CallingConvention::Aapcs64
@@ -740,7 +777,8 @@ impl FunctionDescriptor {
                 }
                 ParameterType::Pointer { .. }
                 | ParameterType::Handle { .. }
-                | ParameterType::CStr => parameters.push(AbiType::Pointer),
+                | ParameterType::CStr
+                | ParameterType::Function { .. } => parameters.push(AbiType::Pointer),
             }
         }
         AbiSignature {
@@ -755,6 +793,7 @@ fn carrier(t: &ValueType) -> Option<AbiType> {
     Some(match t {
         ValueType::Unit => return None,
         ValueType::Scalar(s) => AbiType::Integer(*s),
+        ValueType::Float(f) => AbiType::Float(*f),
         ValueType::Bool => AbiType::Integer(Scalar::U8),
         ValueType::Enum(e) => AbiType::Integer(e.scalar()),
         ValueType::Address { .. } | ValueType::Handle { .. } | ValueType::NonNullHandle { .. } => {
@@ -948,6 +987,11 @@ fn canonicalize(library: &LibraryDescriptor, limit: usize) -> Result<Vec<u8>, Er
                         e.text(handle.name())?;
                     }
                     ParameterType::CStr => e.text("nocapture-cstr")?,
+                    ParameterType::Function { callback, retain } => {
+                        e.text("callback-function")?;
+                        e.text(if *retain { "retain" } else { "nocapture" })?;
+                        e.text(callback.name())?;
+                    }
                     ParameterType::Pinned { element, access } => {
                         e.text("pinned-buffer")?;
                         e.text(match access {
@@ -984,6 +1028,10 @@ fn canonicalize(library: &LibraryDescriptor, limit: usize) -> Result<Vec<u8>, Er
                 ValueType::Scalar(s) => {
                     self.text("scalar")?;
                     self.text(s.name())
+                }
+                ValueType::Float(f) => {
+                    self.text("float")?;
+                    self.text(f.name())
                 }
                 ValueType::Bool => self.text("bool-u8"),
                 ValueType::Enum(e) => {

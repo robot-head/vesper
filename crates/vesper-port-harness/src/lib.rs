@@ -7,7 +7,11 @@
 //! tells Cargo to link it, sets `cfg(vesper_port)` on the crate, and checks
 //! that the committed Rust binding is exactly what the compiler generates
 //! for the current source. The crate's public functions then forward to
-//! the binding and its unchanged tests run against the Vesper build.
+//! the binding and its unchanged tests run against the Vesper build. The
+//! archive also holds the C, assembly and object files that the package
+//! closure names in `[package] objects` (manuscript §16.3), compiled with
+//! `cc` for the target, so a port that calls a static `.vsys` library a
+//! package provides links without a Rust crate for it.
 //!
 //! The port is a Loom package directory (`Loom.toml` plus `src/**/*.ves`,
 //! with path dependencies) or a single `.ves` file. This crate does not
@@ -47,6 +51,11 @@ pub const COMPILER_ENV: &str = "VESPER_PORT_COMPILER";
 pub const OBJECT_ENV: &str = "VESPER_PORT_OBJECT";
 /// With [`OBJECT_ENV`]: the binding generated for that object, to check.
 pub const GENERATED_BINDING_ENV: &str = "VESPER_PORT_GENERATED_BINDING";
+/// The `Loom.toml` files (absolute, joined like `PATH`) of packages whose
+/// `[package] objects` the port links, for builds where its path
+/// dependencies are not beside the crate (Bazel passes execpaths). They add
+/// to the package closure found from the source.
+pub const OBJECT_PACKAGES_ENV: &str = "VESPER_PORT_OBJECT_PACKAGES";
 /// Set on the nested compiler build. A port build script that sees it is
 /// inside the compiler's own dependency closure, which the seed-copy rule
 /// forbids, and fails instead of recursing.
@@ -124,6 +133,7 @@ impl Port {
             OBJECT_ENV,
             GENERATED_BINDING_ENV,
             IN_COMPILER_BUILD_ENV,
+            OBJECT_PACKAGES_ENV,
             &object_env,
             &binding_env,
         ] {
@@ -220,13 +230,140 @@ impl Port {
                 ),
             }
         }
-        cc::Build::new()
+        // The port object and the C, assembly and object files the
+        // closure's packages name in `[package] objects` (manuscript
+        // §16.3), which provide the static `.vsys` libraries it calls: one
+        // archive, so the linker finds them after the port's references.
+        let mut build = cc::Build::new();
+        build
             .object(&object)
             .cargo_metadata(true)
+            .opt_level(2)
+            .warnings(false);
+        for file in package_objects(&source, &target)? {
+            println!("cargo:rerun-if-changed={}", file.display());
+            if file.extension().is_some_and(|e| e == "o" || e == "obj") {
+                build.object(&file);
+            } else {
+                build.file(&file);
+            }
+        }
+        build
             .try_compile(&format!("vesper_{}", self.library))
             .map_err(|e| e.to_string())?;
         Ok(())
     }
+}
+
+/// The `.vsys` targets (`@TARGET@`, `@OS@`, `@ARCH@` in a per-target
+/// manifest path, as in `vesper::packages::VSYS_TARGETS`).
+const TARGETS: [(&str, &str, &str); 4] = [
+    ("x86_64-unknown-linux-gnu", "linux", "x86_64"),
+    ("aarch64-unknown-linux-gnu", "linux", "aarch64"),
+    ("aarch64-apple-darwin", "macos", "aarch64"),
+    ("x86_64-pc-windows-msvc", "windows", "x86_64"),
+];
+
+/// The `.vsys` target of a Rust target triple, by architecture and
+/// operating system as `vesper::packages::vsys_target` picks it, so
+/// `x86_64-unknown-linux-musl` builds the `x86_64-unknown-linux-gnu` files.
+fn vsys_target(target: &str) -> Option<(&'static str, &'static str, &'static str)> {
+    let arch = target.split('-').next()?;
+    let os = if target.contains("-linux") {
+        "linux"
+    } else if target.contains("-apple-darwin") || target.contains("-apple-macos") {
+        "macos"
+    } else if target.contains("-windows") {
+        "windows"
+    } else {
+        return None;
+    };
+    let arch = match arch {
+        "x86_64" => "x86_64",
+        "aarch64" | "arm64" => "aarch64",
+        _ => return None,
+    };
+    TARGETS.iter().copied().find(|t| t.1 == os && t.2 == arch)
+}
+
+/// The `[package] objects` entries of the package at `dir`, as written.
+fn manifest_objects(dir: &Path) -> Result<Vec<String>, String> {
+    let manifest = dir.join("Loom.toml");
+    let text =
+        std::fs::read_to_string(&manifest).map_err(|e| format!("{}: {e}", manifest.display()))?;
+    let value: toml::Table =
+        toml::from_str(&text).map_err(|e| format!("{}: {e}", manifest.display()))?;
+    Ok(value
+        .get("package")
+        .and_then(|p| p.get("objects"))
+        .and_then(|o| o.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+fn expand(entry: &str, (triple, os, arch): (&str, &str, &str)) -> String {
+    entry
+        .replace("@TARGET@", triple)
+        .replace("@OS@", os)
+        .replace("@ARCH@", arch)
+}
+
+/// The files the `[package] objects` of the port's package closure name
+/// for the Rust `target`, in closure order: a per-target entry
+/// (`@TARGET@`, `@OS@`, `@ARCH@`) gives the target's file when it has one.
+/// A `.ves` file source has none. The packages whose manifests
+/// [`OBJECT_PACKAGES_ENV`] names come after the closure. The compiler
+/// checks the entries themselves when it loads the packages.
+pub fn package_objects(source: &Path, target: &str) -> Result<Vec<PathBuf>, String> {
+    if !is_package(source) {
+        return Ok(Vec::new());
+    }
+    let mut packages = package_closure(source)?;
+    for manifest in
+        std::env::split_paths(&std::env::var_os(OBJECT_PACKAGES_ENV).unwrap_or_default())
+    {
+        // An empty value (or entry) names nothing.
+        if manifest.as_os_str().is_empty() {
+            continue;
+        }
+        let dir = manifest.parent().ok_or_else(|| {
+            format!(
+                "{OBJECT_PACKAGES_ENV}: {} is not a Loom.toml",
+                manifest.display()
+            )
+        })?;
+        let dir = std::fs::canonicalize(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        println!("cargo:rerun-if-changed={}", dir.display());
+        if !packages.contains(&dir) {
+            packages.push(dir);
+        }
+    }
+    let mut out = Vec::new();
+    for package in packages {
+        let entries = manifest_objects(&package)?;
+        if entries.is_empty() {
+            continue;
+        }
+        let Some(t) = vsys_target(target) else {
+            return Err(format!(
+                "{}: `[package] objects` have no target for {target}",
+                package.display()
+            ));
+        };
+        for entry in entries {
+            let file = package.join(expand(&entry, t));
+            if file.is_file() {
+                out.push(file);
+            } else if expand(&entry, ("", "", "")) == entry {
+                return Err(format!("{}: no such object file", file.display()));
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Compare a committed binding with the generated text (line endings
@@ -354,6 +491,15 @@ pub fn prepare_source(
                 .path();
             if path.is_file() && path.extension().is_some_and(|e| e == "vsys") {
                 copy_file(&path, &copy.join(path.file_name().unwrap_or_default()))?;
+            }
+        }
+        // So are the files its `[package] objects` name, for every target.
+        for entry in manifest_objects(package)? {
+            for t in TARGETS {
+                let file = package.join(expand(&entry, t));
+                if file.is_file() {
+                    copy_file(&file, &copy.join(expand(&entry, t)))?;
+                }
             }
         }
         let mut files = Vec::new();
@@ -516,4 +662,30 @@ fn run(command: &mut Command, program: &Path) -> Result<(), String> {
 
 fn env(name: &str) -> Result<String, String> {
     std::env::var(name).map_err(|_| format!("{name} is not set; call Port::build from build.rs"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::vsys_target;
+
+    #[test]
+    fn rust_targets_map_to_vsys_targets_by_arch_and_os() {
+        for (rust, vsys) in [
+            ("x86_64-unknown-linux-gnu", Some("x86_64-unknown-linux-gnu")),
+            (
+                "x86_64-unknown-linux-musl",
+                Some("x86_64-unknown-linux-gnu"),
+            ),
+            (
+                "aarch64-unknown-linux-musl",
+                Some("aarch64-unknown-linux-gnu"),
+            ),
+            ("aarch64-apple-darwin", Some("aarch64-apple-darwin")),
+            ("x86_64-pc-windows-msvc", Some("x86_64-pc-windows-msvc")),
+            ("x86_64-apple-darwin", None),
+            ("riscv64gc-unknown-linux-gnu", None),
+        ] {
+            assert_eq!(vsys_target(rust).map(|t| t.0), vsys, "{rust}");
+        }
+    }
 }
