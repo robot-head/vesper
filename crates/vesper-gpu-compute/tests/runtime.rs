@@ -112,6 +112,26 @@ fn out_of_bounds_kernel_accesses_are_clamped() {
     assert_eq!(b.to_u32().unwrap(), vec![0, 0, 0, 7]);
 }
 
+/// A module with no bounds checks of its own, as a caller may supply: the
+/// device's `robustBufferAccess` discards the out-of-bounds write, so a
+/// buffer next to the target keeps its contents.
+#[test]
+fn unchecked_out_of_bounds_writes_are_discarded() {
+    let Some(ctx) = test_context() else { return };
+    let wild = "@group(0) @binding(0) var<storage, read_write> b: array<u32>;
+        @compute @workgroup_size(1) fn m() { b[1000000u] = 7u; b[4u] = 9u; }";
+    let kernel = ctx
+        .kernel(&wgsl::spirv_unbounded(wild, "m"), "m", 1, 0)
+        .unwrap();
+    let b = ctx.buffer(16).unwrap();
+    let next = ctx.buffer_from(&[1u32, 2, 3, 4]).unwrap();
+    let mut rec = ctx.record().unwrap();
+    rec.dispatch(&kernel, &[&b], &[], [1, 1, 1]).unwrap();
+    rec.submit().unwrap().wait().unwrap();
+    assert_eq!(b.to_u32().unwrap(), vec![0, 0, 0, 0]);
+    assert_eq!(next.to_u32().unwrap(), vec![1, 2, 3, 4]);
+}
+
 #[test]
 fn runtime_arguments_are_validated() {
     let Some(ctx) = test_context() else { return };

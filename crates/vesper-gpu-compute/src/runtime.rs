@@ -401,7 +401,12 @@ impl Context {
     /// file gives them). The module must bind exactly `bindings` storage
     /// buffers at set 0, bindings `0..bindings`, and may declare one
     /// immediate block of at most `immediate_bytes` bytes
-    /// ([`shader::interface`] reads what it declares).
+    /// ([`shader::interface`] reads what it declares). The device is created
+    /// with `robustBufferAccess`, so a module without bounds checks of its
+    /// own still cannot reach memory outside the buffers it binds: an
+    /// out-of-bounds write is discarded and a read returns a value from the
+    /// buffer or zero. The crate's kernels also clamp every index themselves
+    /// (naga's `Restrict` policy).
     pub fn kernel(
         &self,
         spirv: &[u8],

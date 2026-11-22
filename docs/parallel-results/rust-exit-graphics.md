@@ -501,6 +501,14 @@ Rust and naga's dependency tree). It is replaced by:
   `Backend` (those are naga errors, now caught by `tests/spirv.rs`).
   `shader::interface` exposes the reader. The only callers outside the crate
   (`vesper-kinetic-gpu`) use the broadphase module and are unchanged.
+- **Bounds safety.** The WGSL path gave every kernel naga's `Restrict`
+  bounds checks; a caller's own SPIR-V may have none. The device is now
+  created with `robustBufferAccess` (required of every Vulkan 1.0 device),
+  so an out-of-bounds write is discarded and a read stays inside the
+  buffer. A test runs a kernel compiled without bounds checks that writes
+  past its buffer and checks that a neighbouring buffer is untouched. With
+  it on, generation measured 0.99x [0.98x, 1.01x] and broadphase 1.04x
+  [1.01x, 1.08x].
 
 Kernel code on the device is byte-for-byte what it was, so the dispatch
 workloads cannot change. All 27 tests pass on lavapipe, also under

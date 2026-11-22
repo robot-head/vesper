@@ -888,7 +888,14 @@ enum Vulkan12Features: _ {
 enum DeviceCreateInfo: _ {
     QueueCreateInfoCount = 20,
     QueueCreateInfos = 24,
+    EnabledFeatures = 64,
     Bytes = 72,
+}
+
+// VkPhysicalDeviceFeatures: 55 VkBool32s, `robustBufferAccess` first.
+enum DeviceFeatures: _ {
+    RobustBufferAccess = 0,
+    Bytes = 220,
 }
 
 enum SemaphoreTypeCreateInfo: _ {
@@ -1078,12 +1085,13 @@ enum PropertiesBlock: _ {
 }
 
 // `open_on`: the queue info at 0, then its priority, the Vulkan 1.2
-// features and the device info.
+// features, the device info and the Vulkan 1.0 features.
 enum DeviceBlock: _ {
     Priority = 40,
     Features = 48,
     Device = 256,
-    Bytes = 328,
+    CoreFeatures = 328,
+    Bytes = 548,
 }
 
 // `wait_value`: the semaphore, the value, then the wait info.
@@ -1482,7 +1490,10 @@ fn open_on(library: u64, instance: u64, in wanted: Str)
         Option::None => return raise(Kind::Unavailable, Unavailable::NoDevice, 0),
     };
     // VkDeviceQueueCreateInfo at 0, its priority (1.0f) at 40,
-    // VkPhysicalDeviceVulkan12Features at 48, VkDeviceCreateInfo at 256.
+    // VkPhysicalDeviceVulkan12Features at 48, VkDeviceCreateInfo at 256,
+    // VkPhysicalDeviceFeatures at 328. `robustBufferAccess` (a feature every
+    // Vulkan 1.0 device has) keeps a kernel that indexes past a buffer from
+    // touching other memory, whatever SPIR-V the caller supplies.
     let mut s = scratch(DeviceBlock::Bytes);
     header(inout s, 0, St::DeviceQueueCreateInfo);
     put32(inout s, DeviceQueueCreateInfo::QueueFamilyIndex, narrow_u32(d.family));
@@ -1495,6 +1506,12 @@ fn open_on(library: u64, instance: u64, in wanted: Str)
     put64(inout s, DeviceBlock::Device + Header::PNext, addr(in s, DeviceBlock::Features));
     put32(inout s, DeviceBlock::Device + DeviceCreateInfo::QueueCreateInfoCount, 1);
     put64(inout s, DeviceBlock::Device + DeviceCreateInfo::QueueCreateInfos, s.base);
+    put64(
+        inout s,
+        DeviceBlock::Device + DeviceCreateInfo::EnabledFeatures,
+        addr(in s, DeviceBlock::CoreFeatures)
+    );
+    put32(inout s, DeviceBlock::CoreFeatures + DeviceFeatures::RobustBufferAccess, 1);
     flush(in s);
     let mut device: u64 = 0;
     let rc = Vk::PfnCreateDevice(

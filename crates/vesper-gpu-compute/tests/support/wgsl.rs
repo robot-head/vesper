@@ -141,13 +141,14 @@ pub fn strip_workgroup_layout(words: &mut Vec<u32>) -> Result<(), ShaderError> {
 /// Compiles the compute entry point `entry` of `source`, refusing a binding
 /// interface the runtime does not bind.
 pub fn compile_wgsl(source: &str, entry: &str) -> Result<Compiled, ShaderError> {
-    compile(source, entry, true)
+    compile(source, entry, true, BoundsCheckPolicy::Restrict)
 }
 
 /// The SPIR-V bytes of `entry`, without the interface checks: modules the
 /// Vesper interface reader must refuse.
 pub fn spirv_unchecked(source: &str, entry: &str) -> Vec<u8> {
-    let compiled = compile(source, entry, false).unwrap_or_else(|e| panic!("{entry}: {e}"));
+    let compiled = compile(source, entry, false, BoundsCheckPolicy::Restrict)
+        .unwrap_or_else(|e| panic!("{entry}: {e}"));
     bytes(&compiled.spirv)
 }
 
@@ -162,7 +163,20 @@ pub fn bytes(words: &[u32]) -> Vec<u8> {
     words.iter().flat_map(|w| w.to_le_bytes()).collect()
 }
 
-fn compile(source: &str, entry: &str, check: bool) -> Result<Compiled, ShaderError> {
+/// The SPIR-V bytes of `entry` with no bounds checks at all: a module the
+/// caller of `Context::kernel` might supply, for the robustness test.
+pub fn spirv_unbounded(source: &str, entry: &str) -> Vec<u8> {
+    let compiled = compile(source, entry, true, BoundsCheckPolicy::Unchecked)
+        .unwrap_or_else(|e| panic!("{entry}: {e}"));
+    bytes(&compiled.spirv)
+}
+
+fn compile(
+    source: &str,
+    entry: &str,
+    check: bool,
+    bounds: BoundsCheckPolicy,
+) -> Result<Compiled, ShaderError> {
     if source.len() > MAX_SOURCE_BYTES {
         return Err(ShaderError::Parse("source larger than 1 MiB".into()));
     }
@@ -215,10 +229,10 @@ fn compile(source: &str, entry: &str, check: bool) -> Result<Compiled, ShaderErr
         )));
     }
     let policies = BoundsCheckPolicies {
-        index: BoundsCheckPolicy::Restrict,
-        buffer: BoundsCheckPolicy::Restrict,
-        image_load: BoundsCheckPolicy::Restrict,
-        binding_array: BoundsCheckPolicy::Restrict,
+        index: bounds,
+        buffer: bounds,
+        image_load: bounds,
+        binding_array: bounds,
     };
     let options = spv::Options {
         lang_version: (1, 3),
