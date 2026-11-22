@@ -14,7 +14,10 @@ use crate::{Abi, Mirror};
 /// generated bindings use ([`Abi::get`], [`crate::mirror_from_words`]) can
 /// still make one from any word, so every binding wrapper that takes a
 /// value holding a `FnPtr` is an `unsafe fn`: its caller promises that each
-/// pointer is one the library returned, unchanged.
+/// pointer is one the library returned, unchanged, and that the code it
+/// points to stays valid (its library stays loaded) for every call Vesper
+/// makes through it, including after the wrapper returns if the library
+/// keeps the pointer.
 #[repr(transparent)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FnPtr<const ID: u64>(u64);

@@ -453,7 +453,7 @@ pub(super) fn wrapper_head(
     types: &BTreeMap<String, TypeDecl>,
 ) -> &'static str {
     if f.params.iter().any(|p| holds_callback(&p.ty, types)) {
-        "///\n/// # Safety\n///\n/// Every `vesper_port_abi::FnPtr` in the arguments is one this library\n/// returned, unchanged: Vesper calls through it.\npub unsafe fn"
+        "///\n/// # Safety\n///\n/// Every `vesper_port_abi::FnPtr` in the arguments is one this library\n/// returned, unchanged, and the code it points to stays valid for every\n/// call Vesper makes through it: the library that supplied it stays loaded\n/// while this call runs and for as long as the library keeps the pointer.\npub unsafe fn"
     } else {
         "pub fn"
     }

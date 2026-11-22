@@ -103,7 +103,9 @@ pub fn live_allocations() -> i64 {
 /// # Safety
 ///
 /// Every `vesper_port_abi::FnPtr` in the arguments is one this library
-/// returned, unchanged: Vesper calls through it.
+/// returned, unchanged, and the code it points to stays valid for every
+/// call Vesper makes through it: the library that supplied it stays loaded
+/// while this call runs and for as long as the library keeps the pointer.
 pub unsafe fn call(f: vesper_port_abi::FnPtr<0xd6f13188220f3d1c>, a: u64, b: u64) -> u64 {
     // Keep the crate's `Ops` symbols linked: the Vesper object calls them.
     let _ = core::hint::black_box([crate::fnptrs::shim::pilot_ops_lookup as *const ()]);
@@ -121,7 +123,9 @@ pub unsafe fn call(f: vesper_port_abi::FnPtr<0xd6f13188220f3d1c>, a: u64, b: u64
 /// # Safety
 ///
 /// Every `vesper_port_abi::FnPtr` in the arguments is one this library
-/// returned, unchanged: Vesper calls through it.
+/// returned, unchanged, and the code it points to stays valid for every
+/// call Vesper makes through it: the library that supplied it stays loaded
+/// while this call runs and for as long as the library keeps the pointer.
 pub unsafe fn call_unary(f: vesper_port_abi::FnPtr<0x4fa372b53368d170>, x: u64) -> u64 {
     // Keep the crate's `Ops` symbols linked: the Vesper object calls them.
     let _ = core::hint::black_box([crate::fnptrs::shim::pilot_ops_lookup as *const ()]);
@@ -139,7 +143,9 @@ pub unsafe fn call_unary(f: vesper_port_abi::FnPtr<0x4fa372b53368d170>, x: u64) 
 /// # Safety
 ///
 /// Every `vesper_port_abi::FnPtr` in the arguments is one this library
-/// returned, unchanged: Vesper calls through it.
+/// returned, unchanged, and the code it points to stays valid for every
+/// call Vesper makes through it: the library that supplied it stays loaded
+/// while this call runs and for as long as the library keeps the pointer.
 pub unsafe fn combine(t: &repr::Table, a: u64, b: u64) -> u64 {
     // Keep the crate's `Ops` symbols linked: the Vesper object calls them.
     let _ = core::hint::black_box([crate::fnptrs::shim::pilot_ops_lookup as *const ()]);
@@ -191,7 +197,9 @@ pub fn open(scale: u64) -> Option<Table> {
 /// # Safety
 ///
 /// Every `vesper_port_abi::FnPtr` in the arguments is one this library
-/// returned, unchanged: Vesper calls through it.
+/// returned, unchanged, and the code it points to stays valid for every
+/// call Vesper makes through it: the library that supplied it stays loaded
+/// while this call runs and for as long as the library keeps the pointer.
 pub unsafe fn pick(t: &repr::Table, mul: bool) -> vesper_port_abi::FnPtr<0xd6f13188220f3d1c> {
     let mut result = [0u64; 1];
     // SAFETY: `vesper_fnptrs_pick` has exactly this signature in the export ABI; every
@@ -206,7 +214,9 @@ pub unsafe fn pick(t: &repr::Table, mul: bool) -> vesper_port_abi::FnPtr<0xd6f13
 /// # Safety
 ///
 /// Every `vesper_port_abi::FnPtr` in the arguments is one this library
-/// returned, unchanged: Vesper calls through it.
+/// returned, unchanged, and the code it points to stays valid for every
+/// call Vesper makes through it: the library that supplied it stays loaded
+/// while this call runs and for as long as the library keeps the pointer.
 pub unsafe fn swap(t: &mut repr::Table) -> () {
     // SAFETY: `vesper_fnptrs_swap` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and

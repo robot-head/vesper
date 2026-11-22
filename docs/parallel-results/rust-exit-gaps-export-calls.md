@@ -182,9 +182,12 @@ handle. So the planner now gives it its own ABI form, `AbiType::Callback`
 word, allowed wherever a scalar is: a parameter in any mode, a result, a
 field of a copy struct or mirror, and inside `Option`, tuples and sequences.
 Rust sees `vesper_port_abi::FnPtr`, a `repr(transparent)` word with a
-private field. Rust can hold, compare and hand one back. It has no safe way
-to build one or to call it. Only the word conversions that bindings use
-(`Abi::get`, `mirror_from_words`) can make one. Extern-type handles keep the
+private field, one type per callback type. Rust can hold, compare and hand
+one back, but cannot call it. The word conversions that bindings use
+(`Abi::get`, `mirror_from_words`) can make one from any word, so a binding
+wrapper that takes one is an `unsafe fn`: its caller vouches that each
+pointer is one the library returned and that its target stays loaded for
+every call Vesper makes through it. Extern-type handles keep the
 v4 rule: Rust lends one only directly, as an `in` parameter.
 
 - `@vesper/codegen-export` makes the same decision (`K_CALLBACK`, input
