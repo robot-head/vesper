@@ -43,7 +43,7 @@
 //! | `call` | the same, and `Codegen::call_function_into` | [`INSTRUCTION`] for `Op::Call` and `Op::Indirect`; the [`call`] ops |
 //! | `aggregate` | the same, and the layout helpers | [`INSTRUCTION`] for tuples, data, projections and indexing; the [`aggregate`] ops |
 //! | `drops` | `Codegen::drop_box_value` | [`drops::DROP_BOX`] |
-//! | `seq` | `Codegen::ir_graph_at` | [`INSTRUCTION`] for `Op::Seq` |
+//! | `seq` | `Codegen::ir_graph_at`, and the sequence helpers | [`INSTRUCTION`] for `Op::Seq`; the [`seq`] ops |
 //! | `control` | the same | [`INSTRUCTION`] for closures, handlers and calls of effect operations |
 //! | `numeric` | the same | [`INSTRUCTION`] for `Op::Vector` and `Op::Tiled` |
 //! | `drops` (fip) | the same | [`INSTRUCTION`] for `Op::Fip` |
@@ -53,6 +53,7 @@
 //! | `interface_json` | `native_export::interface_json` | the whole interface file ([`InterfaceJsonHook`]) |
 //! | `freestanding` | `native_freestanding::build_image` | whole image ([`FreestandingHook`]) |
 //! | `wasm` | `wasm_backend::compile` | whole component ([`WasmHook`]) |
+//! | `component` | `wasm_backend::component::encode` | the component around a core module and its WIT ([`ComponentHook`]) |
 //! | `ebpf` | `ebpf_backend::compile_world` | whole program ([`EbpfHook`]) |
 //! | `verifiers` | `native_verifiers::verify_emitted` | whole report ([`VerifierHook`]) |
 //!
@@ -94,7 +95,9 @@ pub const INSTRUCTION: u32 = 0;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Site<'a> {
     /// The lowered function (its `Program` key) being emitted; empty when
-    /// the request is not inside a Place IR graph.
+    /// the request is not inside a Place IR graph, or the walk emits a
+    /// rewritten copy of the graph (small enums as words, #1330) whose
+    /// indices are not the program's.
     pub function: &'a str,
     /// The block and instruction index in that function's graph
     /// (`u32::MAX` when the request is not one instruction).
@@ -186,6 +189,10 @@ pub type WasmHook =
         &str,
         &crate::wasm_backend::WasmOptions,
     ) -> Option<Result<crate::wasm_backend::WasmArtifact, crate::wasm_backend::WasmError>>;
+/// The component wrapping hook (SH5 lane 11, #1334): the component
+/// wit-component would write for a core module, its WIT world and the world
+/// kind, or `None` to leave it to wit-component.
+pub type ComponentHook = fn(&[u8], &str, crate::wasm_backend::WasmWorld) -> Option<Vec<u8>>;
 /// The eBPF backend hook: `ebpf_backend::compile_world`'s signature.
 pub type EbpfHook =
     fn(
@@ -283,6 +290,7 @@ pub struct CodegenHooks {
     pub interface_json: Option<InterfaceJsonHook>,
     pub freestanding: Option<FreestandingHook>,
     pub wasm: Option<WasmHook>,
+    pub component: Option<ComponentHook>,
     pub ebpf: Option<EbpfHook>,
     pub verifiers: Option<VerifierHook>,
 }
@@ -308,6 +316,7 @@ impl CodegenHooks {
             || self.interface_json.is_some()
             || self.freestanding.is_some()
             || self.wasm.is_some()
+            || self.component.is_some()
             || self.ebpf.is_some()
             || self.verifiers.is_some()
     }
@@ -349,6 +358,8 @@ pub fn module_kind_scope(jit: bool, optimize: bool) -> ModuleKindScope {
 /// Installs `hooks` for the rest of the process (the hybrid build, from its
 /// static constructor). Only the first call takes effect; a later one
 /// returns its table back.
+// Called once per process, so returning the whole table by value is fine.
+#[allow(clippy::result_large_err)]
 pub fn install(hooks: CodegenHooks) -> Result<(), CodegenHooks> {
     INSTALLED.set(hooks)?;
     if hooks.any() {
@@ -632,6 +643,46 @@ pub mod call {
     pub const CALL_INDIRECT: u32 = 2;
 }
 
+/// The `control` family's leaf requests (SH4 lane 10, #1284): the
+/// builder sequences of closure tags, `invoke_tag`'s dispatch chain and
+/// the inlined handlers' resumption points. The `Codegen` keeps the state
+/// they read and write (the closure table, target sets, variables and the
+/// `HandlerControl`), so a hook only emits. Blocks and stack slots pass as
+/// their entity numbers.
+pub mod control {
+    /// A closure or function tag: `iconst.i64 id`. Args `[id]`; result
+    /// `[value]`.
+    pub const TAG: u32 = 1;
+    /// A captured variable's explicit stack slot of `size` bytes, aligned
+    /// to 8, and its address. Args `[size]`; result `[slot, address]`.
+    pub const CAPTURE_SLOT: u32 = 2;
+    /// `qualify_tag`'s re-numbering of one descriptor:
+    /// `select(icmp_imm eq tag old, iconst new, acc)`. Args
+    /// `[tag, old, new, acc]`; result `[value]`.
+    pub const QUALIFY: u32 = 3;
+    /// One candidate of `invoke_tag`: the `yes` and `no` blocks, then a
+    /// jump to `yes` when `single` is 1, else `brif (icmp_imm eq tag
+    /// index), yes, no`; emission continues in `yes`. Args
+    /// `[tag, index, single]`; result `[yes, no]`.
+    pub const DISPATCH: u32 = 4;
+    /// The end of a dispatch chain: `trap user(code)` (3 for a closure
+    /// call, 4 for a handler's return selector). Args `[code]`; no result.
+    pub const TRAP: u32 = 5;
+    /// A non-tail resumption's save: an 8-byte slot holding `selector`,
+    /// the `returned` block with one parameter of `ty_code`, and
+    /// `iconst.i64 index`. Args `[selector, ty_code, index]`; result
+    /// `[slot, returned, selected]`.
+    pub const RESUME_SAVE: u32 = 6;
+    /// The resumption's restore in `returned`: `stack_load.i64 slot`.
+    /// Args `[slot]`; result `[value]`.
+    pub const RESUME_RESTORE: u32 = 7;
+    /// One test of a handler's dispatch chain: a `next` block, then
+    /// `brif (icmp_imm eq selector index), target(output), next`;
+    /// emission continues in `next`. Args
+    /// `[selector, index, target, output]`; no result.
+    pub const RETURN_TO: u32 = 8;
+}
+
 /// The `ffi` family's requests (SH4 lane 13, #1287): one foreign (`.vsys`)
 /// call, emitted in steps by `Codegen::foreign_perform`
 /// (src/ffi_lowering/native.rs). The Rust code keeps what needs its own
@@ -876,5 +927,32 @@ pub mod scalar {
             .iter()
             .position(|k| *k == kind)
             .map(|i| i as u64 + 1)
+    }
+}
+
+/// The `seq` family's helper requests (self-hosting SH4 lane 9, #1283).
+pub mod seq {
+    /// Define the AOT sequence runtime (`seq::aot_runtime::define`: the
+    /// live counter, the shared empty header, the fault messages and
+    /// `vesper_seq_fault`, `_new`, `_make`, `_grow`, `_free` and
+    /// `vesper_str_release`) in the lent module, which has none of it yet
+    /// and a 64-bit pointer type. Args [`runtime_args`]; no result. The
+    /// lent builder is not used.
+    pub const RUNTIME: u32 = 1;
+
+    /// [`RUNTIME`]'s argument words: whether the target is Windows (no
+    /// fault message is written there), then the runtime's constants
+    /// `INLINE_BYTES`, `NEW_INLINE_BYTES`, `BUFFER_PREFIX`, `FAULT_STATUS`
+    /// and `HEADER_BYTES`, so the two emitters cannot drift apart.
+    pub fn runtime_args(windows: bool) -> [u64; 6] {
+        use crate::seq::native_runtime::{BUFFER_PREFIX, INLINE_BYTES, NEW_INLINE_BYTES};
+        [
+            u64::from(windows),
+            INLINE_BYTES as u64,
+            NEW_INLINE_BYTES as u64,
+            BUFFER_PREFIX as u64,
+            crate::seq::FAULT_STATUS as u64,
+            crate::seq::HEADER_BYTES as u64,
+        ]
     }
 }

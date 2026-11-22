@@ -138,6 +138,18 @@ fn loop_refusal(e: &WasmError) -> bool {
     matches!(e, WasmError::Unsupported { detail, .. } if detail == vesper::loops::WASM_REFUSAL)
 }
 
+/// Rust's refusal of an operation: loops, and the sequence, string and
+/// integer conversion operations the port lowers (#1506).
+fn operation_refusal(e: &WasmError) -> bool {
+    matches!(
+        e,
+        WasmError::Unsupported {
+            construct: wasm_backend::Unsupported::Operation,
+            ..
+        }
+    )
+}
+
 /// `main` on the evaluator: its value's display, or "trap".
 fn evaluate(world: &World) -> String {
     let mut r = vesper::runtime::Runtime::new(world);
@@ -264,7 +276,8 @@ pub struct Tally {
     pub not_ported: usize,
     pub not_encodable: usize,
     pub ran: usize,
-    /// Programs with loops, which Rust refuses: the port compiles them
+    /// Programs with an operation Rust refuses (loops, sequences, strings,
+    /// integer conversions): the port compiles them
     /// (`loops`, and `loops_ran` of them ran like the evaluator) or refuses
     /// a later construct (`loops_refused`).
     pub loops: usize,
@@ -292,7 +305,7 @@ pub fn differential_run(step: usize, execute: bool) -> Tally {
             let tag = format!("{} [{k}]", c.name);
             match (&rust, &port) {
                 (_, Outcome::NotPorted(_)) => t.not_ported += 1,
-                (Err(e), Outcome::Module { core, wit, .. }) if loop_refusal(e) => {
+                (Err(e), Outcome::Module { core, wit, .. }) if operation_refusal(e) => {
                     t.loops += 1;
                     if execute && k == 0 && c.world.functions["main"].params.is_empty() {
                         let component = wrap(core.clone(), wit, o.world);
@@ -305,7 +318,7 @@ pub fn differential_run(step: usize, execute: bool) -> Tally {
                         t.loops_ran += 1;
                     }
                 }
-                (Err(e), Outcome::Error(..)) if loop_refusal(e) => t.loops_refused += 1,
+                (Err(e), Outcome::Error(..)) if operation_refusal(e) => t.loops_refused += 1,
                 (
                     Ok(a),
                     Outcome::Module {
@@ -379,7 +392,7 @@ fn port_matches_rust() {
     let t = differential_run(step(), true);
     eprintln!(
         "compared {} identical {} errors agree {} not ported {} not encodable {} ran {}; \
-         loops {} (ran {}, refused later {})",
+         Rust-refused operations {} (ran {}, refused later {})",
         t.compared,
         t.identical,
         t.errors_agree,
@@ -494,7 +507,7 @@ fn hook_artifact_matches_rust() {
                 (_, None) => declined += 1,
                 // Loops: Rust refuses them, the port lowers them
                 // (`loops_run_like_the_evaluator`).
-                (Err(e), Some(_)) if loop_refusal(e) => answered += 1,
+                (Err(e), Some(_)) if operation_refusal(e) => answered += 1,
                 (Err(e), Some(_)) => panic!("{}: the hook answered where Rust fails: {e}", c.name),
             }
         }

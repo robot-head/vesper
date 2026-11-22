@@ -3,9 +3,9 @@ name: Website
 on:
   push:
     branches: [main]
-    paths: ['website/**', 'crates/vesper-highlight/**', 'src/highlight_commands.rs', 'docs/manuscript/**', '.github/workflows/website.yml', 'examples/transaction.ves', 'examples/projections.ves', 'examples/checked_math.ves']
+    paths: ['website/**', 'crates/vesper-highlight/**', 'src/browser_tour.rs', 'crates/vesper-tools/src/highlight.rs', 'crates/vesper-tools/src/highlight/**', 'lean/**', 'docs/manuscript/**', '.github/workflows/website.yml', 'examples/transaction.ves', 'examples/projections.ves', 'examples/checked_math.ves', 'examples/rejected/error_unwind.ves']
   pull_request:
-    paths: ['website/**', 'crates/vesper-highlight/**', 'src/highlight_commands.rs', 'docs/manuscript/**', '.github/workflows/website.yml', 'examples/transaction.ves', 'examples/projections.ves', 'examples/checked_math.ves']
+    paths: ['website/**', 'crates/vesper-highlight/**', 'src/browser_tour.rs', 'crates/vesper-tools/src/highlight.rs', 'crates/vesper-tools/src/highlight/**', 'lean/**', 'docs/manuscript/**', '.github/workflows/website.yml', 'examples/transaction.ves', 'examples/projections.ves', 'examples/checked_math.ves', 'examples/rejected/error_unwind.ves']
   workflow_dispatch:
 
 permissions:

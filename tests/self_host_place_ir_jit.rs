@@ -12,6 +12,8 @@
 mod check_harness;
 #[path = "common/check_words.rs"]
 mod check_words;
+#[path = "common/corpus_shard.rs"]
+mod corpus_shard;
 #[path = "common/ir_words.rs"]
 mod ir_words;
 
@@ -81,6 +83,11 @@ fn mains() -> Vec<&'static Case> {
                 .is_some_and(|f| f.params.is_empty())
         })
         .step_by(step)
+        // Bazel shards the mains (BUILD.bazel `test_shards`); the children
+        // inherit the shard variables.
+        .enumerate()
+        .filter(|(i, _)| corpus_shard::Shard::from_environment().contains(*i))
+        .map(|(_, c)| c)
         .collect()
 }
 
@@ -172,7 +179,8 @@ fn jit_results_match_through_the_identity_hooks() {
     eprintln!(
         "jit: {runs} runs ({ok} returned a value) with the Rust passes and through the identity hooks"
     );
-    assert!(ok > 20, "only {ok} corpus mains ran");
+    let least = corpus_shard::Shard::from_environment().share(20);
+    assert!(ok > least, "only {ok} corpus mains ran");
     if let Some(d) = first_difference(&rust, &vesper) {
         panic!("jit results differ at {d}");
     }

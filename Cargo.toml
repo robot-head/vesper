@@ -63,6 +63,7 @@ members = [
     "crates/vesper-pact-bridge",
     "crates/vesper-pact-binding",
     "crates/vesper-loom-cas",
+    "crates/vesper-loom-cas/port",
     "crates/vesper-loom-sandbox",
     "crates/vesper-loom-build",
     "crates/vesper-forge-runner",

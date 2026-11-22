@@ -15,6 +15,8 @@
 mod check_harness;
 #[path = "common/check_words.rs"]
 mod check_words;
+#[path = "common/corpus_shard.rs"]
+mod corpus_shard;
 
 use check_harness::*;
 use check_words::{Cursor, WorldLog};
@@ -193,7 +195,8 @@ fn layout_parts(w: &World, types: &[Type]) -> (Vec<Vec<u8>>, usize) {
 fn layout_parts_match_rust() {
     let f = layout_package().entry("check_layout_parts", true);
     let (mut bad, mut checked, mut errors) = (0, 0, 0);
-    for c in corpus().iter().step_by(step(1)) {
+    let shard = corpus_shard::Shard::from_environment();
+    for c in shard.keep(corpus().iter().step_by(step(1))) {
         let types = world_types(&c.world);
         let (parts, repeat_bytes) = layout_parts(&c.world, &types);
         // A repeated type sends its name-free part: 9 words of empty
@@ -216,7 +219,7 @@ fn layout_parts_match_rust() {
         }
     }
     eprintln!("layout parts: {bad} of {checked} layouts differ ({errors} errors)");
-    assert!(checked > 1000, "only {checked} layouts");
+    assert!(checked > shard.share(1000), "only {checked} layouts");
     assert_eq!(bad, 0);
 }
 
@@ -228,6 +231,8 @@ fn layout_parts_match_rust() {
 fn ir_check_parts_match_rust() {
     let f = ir_package().entry("check_ir_parts", true);
     let cases = ir_cases(IR_MUTANTS);
+    let shard = corpus_shard::Shard::from_environment();
+    let mut stepped = 0;
     let (mut bad, mut checked, mut diags) = (0, 0, 0);
     let mut worlds = 0;
     let mut i = 0;
@@ -241,6 +246,10 @@ fn ir_check_parts_match_rust() {
         i = j;
         worlds += 1;
         if (worlds - 1) % step(5) != 0 {
+            continue;
+        }
+        stepped += 1;
+        if !shard.contains(stepped - 1) {
             continue;
         }
         let mut log = WorldLog::new(w);
@@ -271,7 +280,10 @@ fn ir_check_parts_match_rust() {
         }
     }
     eprintln!("ir check parts: {bad} of {checked} programs differ ({diags} Rust diagnostics)");
-    assert!(diags > 100, "the mutants produced only {diags} diagnostics");
+    assert!(
+        diags > shard.share(100),
+        "the mutants produced only {diags} diagnostics"
+    );
     assert_eq!(bad, 0);
 }
 

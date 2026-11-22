@@ -4,6 +4,8 @@
 //! vesper-bench analyzes the paired totals. Port wave P3b lane 8 (#1070).
 //!
 //! `abba compare <epochs> <ops>` prints one line per workload.
+//! `abba flip-gate <workload> <ops>` prints the flip gate's pairs line for
+//! one workload (`ABBA_EPOCHS` epochs, default 30).
 //! `abba one <rust|port> <workload> <ops>` runs one workload `ops` times
 //! (for `valgrind --tool=callgrind`).
 //!
@@ -380,7 +382,7 @@ fn measure(work: Work, ops: u64) -> u64 {
     elapsed
 }
 
-fn compare(epochs: usize, ops: u64, only: Option<&str>) {
+fn compare(epochs: usize, ops: u64, only: Option<&str>, gate: bool) {
     assert_eq!(vesper_kinetic::IMPLEMENTATION, "vesper");
     assert_eq!(vesper_kinetic_rust::IMPLEMENTATION, "rust");
     for (name, rust, port) in WORKLOADS {
@@ -398,6 +400,14 @@ fn compare(epochs: usize, ops: u64, only: Option<&str>) {
             let b2 = measure(port, ops);
             let a2 = measure(rust, ops);
             pairs.push(PairedSample::new(a1 + a2, b1 + b2, 2 * ops).unwrap());
+        }
+        if gate {
+            let line: Vec<String> = pairs
+                .iter()
+                .map(|p| format!("{}:{}", p.baseline_total(), p.candidate_total()))
+                .collect();
+            println!("flip-gate pairs {name} {}", line.join(" "));
+            continue;
         }
         let per_op = |t: u64| t as f64 / (2 * ops) as f64;
         let median = |mut v: Vec<f64>| {
@@ -432,9 +442,23 @@ fn main() {
         .collect::<Vec<_>>()
         .as_slice()
     {
-        ["compare", epochs, ops] => compare(epochs.parse().unwrap(), ops.parse().unwrap(), None),
-        ["compare", epochs, ops, only] => {
-            compare(epochs.parse().unwrap(), ops.parse().unwrap(), Some(only))
+        ["compare", epochs, ops] => {
+            compare(epochs.parse().unwrap(), ops.parse().unwrap(), None, false)
+        }
+        ["compare", epochs, ops, only] => compare(
+            epochs.parse().unwrap(),
+            ops.parse().unwrap(),
+            Some(only),
+            false,
+        ),
+        // The flip gate's harness protocol (scripts/ci/flip_gate.py):
+        // `ABBA_EPOCHS` (default 30) epochs of one workload, one pairs line.
+        ["flip-gate", workload, ops] => {
+            let epochs = std::env::var("ABBA_EPOCHS")
+                .ok()
+                .and_then(|e| e.parse().ok())
+                .unwrap_or(30);
+            compare(epochs, ops.parse().unwrap(), Some(workload), true)
         }
         ["one", build, workload, ops] => {
             let (_, rust, port) = WORKLOADS
@@ -450,7 +474,7 @@ fn main() {
         }
         _ => {
             eprintln!(
-                "usage: abba compare <epochs> <ops> [workload] | abba one <rust|port> <workload> <ops>"
+                "usage: abba compare <epochs> <ops> [workload] | abba flip-gate <workload> <ops> | abba one <rust|port> <workload> <ops>"
             );
             std::process::exit(2);
         }

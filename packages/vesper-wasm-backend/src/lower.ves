@@ -215,6 +215,50 @@ const IR_CLOSURE: u8 = 14;
 const IR_HANDLE: u8 = 15;
 const IR_LOOP: u8 = 20;
 const IR_EXIT: u8 = 21;
+// `Op::Seq` operations `seq_code` knows (#1506): the index of the
+// operation's `Debug` text in `L::seq_code`, from 1; Wide variants from
+// SQ_WIDE (see `wide_bytes`).
+const SQ_NEW: u64 = 1;
+const SQ_WITH_CAPACITY: u64 = 2;
+const SQ_LEN: u64 = 3;
+const SQ_PUSH: u64 = 4;
+const SQ_POP: u64 = 5;
+const SQ_GET: u64 = 6;
+const SQ_SET: u64 = 7;
+const SQ_TRY_GET: u64 = 8;
+const SQ_LAST: u64 = 9;
+const SQ_TRY_SET: u64 = 10;
+const SQ_CLEAR: u64 = 11;
+const SQ_TRUNCATE: u64 = 12;
+const SQ_RESERVE: u64 = 13;
+const SQ_EXTEND: u64 = 14;
+const SQ_FINISH: u64 = 15;
+const SQ_AS_SLICE: u64 = 16;
+const SQ_SUB_SLICE: u64 = 17;
+const SQ_SLICE_LEN: u64 = 18;
+const SQ_SLICE_GET: u64 = 19;
+const SQ_SLICE_SET: u64 = 20;
+const SQ_SWAP: u64 = 21;
+const SQ_REPLACE: u64 = 22;
+const SQ_BYTES_EQ: u64 = 23;
+const SQ_FILL: u64 = 24;
+const SQ_STR_LEN: u64 = 25;
+const SQ_STR_BYTE_AT: u64 = 26;
+const SQ_STR_TRY_BYTE_AT: u64 = 27;
+const SQ_STR_AS_STR: u64 = 28;
+const SQ_STR_AS_BYTES: u64 = 29;
+const SQ_STR_SUB_STR: u64 = 30;
+const SQ_STR_PUSH_STR: u64 = 31;
+const SQ_STR_PUSH_CHAR: u64 = 32;
+const SQ_STR_CLEAR: u64 = 33;
+const SQ_STR_RESERVE: u64 = 34;
+const SQ_WIDE: u64 = 64;
+const SK_OTHER: u8 = 0;
+const SK_BUF: u8 = 1;
+const SK_VIEW: u8 = 2;
+const LOW32: u64 = 4294967295;
+const HIGH32: u64 = 18446744069414584320;
+const IR_SEQ: u8 = 18;
 const TERM_RETURN: u8 = 0;
 const TERM_JUMP: u8 = 1;
 const TERM_BRANCH: u8 = 2;
@@ -263,6 +307,9 @@ pub struct Em {
     // when the body is structured (a cyclic block graph, `structured_body`).
     frames: ChunkSeq[u64],
     structured: bool,
+    // value id -> (address local | stride << 32) + 1 of an element view
+    // (`s[i]` read for `swap(inout s[i], ..)`)
+    elems: ChunkSeq[u64],
 }
 
 fn em_new(inst: Inst, info: FnInfo) -> Em {
@@ -279,6 +326,7 @@ fn em_new(inst: Inst, info: FnInfo) -> Em {
         mark: NONE32,
         frames: ChunkSeq::new[u64](),
         structured: false,
+        elems: ChunkSeq::new[u64](),
     }
 }
 
@@ -315,6 +363,13 @@ pub struct L {
     trampolines: ChunkSeq[u32],
     h_str_eq: u32,
     h_fmod: u32,
+    h_seq_reserve: u32,
+    h_bytes_eq: u32,
+    h_utf8: u32,
+    // The program has `Op::Seq` operations, so a string may be a buffer
+    // with a capacity (`seq`); Rust lowers none, and without them every
+    // helper stays byte-equal to its.
+    seqs: bool,
     // literal text -> address + 1
     strings: ChunkSeq[u64],
     // type display -> `$copy` function + 1
@@ -401,6 +456,12 @@ pub fn lowerer_new(sink cx: Cx, sink plan: Plan, max_instructions: u64) -> L eff
     if cx.f.stack_switching && plan.keys.len() != 0 {
         Fail::raise(werr(K_NOT_PORTED, 0, 100));
     }
+    let mut seqs = false;
+    for i in 0..cx.ir.p.pool.len() {
+        if cx.ir.p.pool_row(i).kind == 0 {
+            seqs = true;
+        }
+    }
     L {
         cx: cx,
         plan: plan,
@@ -419,6 +480,10 @@ pub fn lowerer_new(sink cx: Cx, sink plan: Plan, max_instructions: u64) -> L eff
         trampolines: ChunkSeq::new[u32](),
         h_str_eq: NONE32,
         h_fmod: NONE32,
+        h_seq_reserve: NONE32,
+        h_bytes_eq: NONE32,
+        h_utf8: NONE32,
+        seqs: seqs,
         strings: ChunkSeq::new[u64](),
         copies: ChunkSeq::new[u32](),
         arity: arity,
@@ -971,6 +1036,10 @@ impl L {
             c.get(v);
             c.op(OP_I32_WRAP_I64);
             c.load(0);
+            if self.seqs {
+                c.u64_const(LOW32);
+                c.op(OP_I64_AND);
+            }
             c.i64_const(8);
             c.op(OP_I64_ADD);
             c.tee(x);
@@ -982,6 +1051,15 @@ impl L {
             c.get(x);
             c.op(OP_I32_WRAP_I64);
             c.memory_copy();
+            if self.seqs {
+                // The copy holds the bytes only: capacity 0.
+                c.get(n);
+                c.op(OP_I32_WRAP_I64);
+                c.get(x);
+                c.i64_const(8);
+                c.op(OP_I64_SUB);
+                c.store(0);
+            }
             c.get(n);
             c.get(delta);
             c.op(OP_I64_SUB);
@@ -1252,10 +1330,18 @@ impl L {
         c.get(a);
         c.op(OP_I32_WRAP_I64);
         c.load(0);
+        if self.seqs {
+            c.u64_const(LOW32);
+            c.op(OP_I64_AND);
+        }
         c.tee(n);
         c.get(b);
         c.op(OP_I32_WRAP_I64);
         c.load(0);
+        if self.seqs {
+            c.u64_const(LOW32);
+            c.op(OP_I64_AND);
+        }
         c.op(OP_I64_NE);
         c.open(OP_IF);
         c.i64_const(0);
@@ -1846,6 +1932,10 @@ impl L {
         if ins.op != IR_CALL {
             return false;
         }
+        // An intercepted `Atomic` operation is no call (`atomic_call`).
+        if self.seqs && self.has_prefix(n32(self.cx.ir.word(ins.a)), "Atomic::") {
+            return false;
+        }
         let key = self.callee_key(widen_u64(ins.dest));
         if key == NONE32 || !self.has_func(key) || self.role_of(key) != R_ORDINARY {
             return false;
@@ -2040,6 +2130,18 @@ impl L {
                 self.e.code.op(OP_F64_REINTERPRET_I64);
                 self.e.code.f64_const(lo);
                 self.e.code.op(OP_F64_EQ);
+            } else if lk == LIT_STRING && self.seq_kind(ty) == SK_VIEW {
+                // A `Str` view against the literal's bytes.
+                self.e.code.op(OP_DROP);
+                let (base, n) = self.parts(v, ty);
+                let a = self.string_literal(n32(lo));
+                let f = self.bytes_eq();
+                self.e.code.get(base);
+                self.e.code.get(n);
+                self.e.code.u64_const(add(a, 8));
+                self.e.code.u64_const(self.cx.names.size(n32(lo)));
+                self.e.code.call(f);
+                self.e.code.op(OP_I32_WRAP_I64);
             } else if lk == LIT_STRING {
                 let a = self.string_literal(n32(lo));
                 let eq = self.str_eq();
@@ -2383,6 +2485,9 @@ impl L {
                 self.raise_overflow();
                 self.e.code.op(OP_END);
                 self.e.code.i64_const(0);
+            } else if self.conversion(opn, x, s, ty) {
+                // `widen_k`, `narrow_k` or `wrapping_k`: the value on the
+                // stack.
             } else {
                 Fail::raise(werr(K_UNSUPPORTED, U_OPERATION, 194));
             }
@@ -2401,7 +2506,10 @@ impl L {
                 || sh.kind == SH_ENUM
                 || sh.kind == SH_STR;
             let ne = self.is_op(opn, "!=");
-            let r = if (self.is_op(opn, "==") || ne) && agg {
+            let views = self.seq_kind(sa) == SK_VIEW || self.seq_kind(sb) == SK_VIEW;
+            let r = if (self.is_op(opn, "==") || ne) && views {
+                self.view_eq(x, sa, y, sb, ne)
+            } else if (self.is_op(opn, "==") || ne) && agg {
                 let eq = self.eq_fn(sa);
                 let d = self.local();
                 self.e.code.get(x);
@@ -2553,6 +2661,8 @@ impl L {
             let r = self.perform(fail, raise, in inst, NONE32, in args);
             self.e.code.op(OP_UNREACHABLE);
             self.e.code.op(OP_END);
+        } else if op == IR_SEQ {
+            self.seq(at, ty, dv);
         } else if op == IR_HANDLE {
             Fail::raise(werr(K_NOT_PORTED, 0, 198));
         } else if op == IR_CLOSURE {
@@ -2575,6 +2685,175 @@ impl L {
         } else {
             Fail::raise(werr(K_UNSUPPORTED, U_OPERATION, 200));
         }
+    }
+
+    // `widen_k(x)`, `narrow_k(x)` (checked: `ArithOverflow` past `k`) and
+    // `wrapping_k(x)` between the lowered integer kinds (#1506): push the
+    // result, or false for another operator. Rust lowers none of them.
+    fn conversion(inout self, opn: u32, x: u32, from: u8, ty: u32) -> bool eff [Fail[WErr]] {
+        let kind = if self.has_prefix(opn, "widen_") {
+            0
+        } else if self.has_prefix(opn, "narrow_") {
+            1
+        } else if self.has_prefix(opn, "wrapping_") {
+            2
+        } else {
+            return false;
+        };
+        if !is_int(from) {
+            return false;
+        }
+        let to = self.scalar_of(ty);
+        if !is_int(to) {
+            return false;
+        }
+        if kind == 1 && from != to {
+            // Out of range: above the largest value of `to` (unsigned, so a
+            // negative `i64` counts as large), or negative into `u64`.
+            let max: u64 = if to == SC_I64 {
+                9223372036854775807
+            } else {
+                ik_mask(to)
+            };
+            self.e.code.get(x);
+            self.e.code.u64_const(max);
+            self.e.code.op(OP_I64_GT_U);
+            if from == SC_I64 && to == SC_U64 {
+                self.e.code.op(OP_DROP);
+                self.e.code.get(x);
+                self.e.code.i64_const(0);
+                self.e.code.op(OP_I64_LT_S);
+            }
+            self.e.code.open(OP_IF);
+            self.raise_overflow();
+            self.e.code.op(OP_END);
+        }
+        self.e.code.get(x);
+        if kind == 2 && (to == SC_U8 || to == SC_U32) {
+            self.e.code.u64_const(ik_mask(to));
+            self.e.code.op(OP_I64_AND);
+        }
+        true
+    }
+
+    // An `Atomic[T]` operation (src/atomics.rs): the prelude bodies only
+    // type the call and recurse, so every backend intercepts them. Wasm runs
+    // one thread here: a plain access of `self.cell[0]`. `compare_exchange`
+    // is refused. Rust lowers no atomic (its cell is a `ChunkSeq`).
+    fn atomic_call(inout self, dv: u64, callee: u32, a: u64) -> bool eff [Fail[WErr]] {
+        if !self.has_prefix(callee, "Atomic::") {
+            return false;
+        }
+        let mut k: u64 = 0;
+        let mut found = false;
+        loop {
+            if k >= 9 {
+                break;
+            }
+            let mut t = ChunkSeq::new[u8]();
+            append_text(inout t, "Atomic::");
+            append_text(inout t, atomic_op(k));
+            if self.cx.names.spells(callee, in t.as_slice()) {
+                found = true;
+                break;
+            }
+            k = inc(k);
+        }
+        if !found {
+            if self.cx.names.spells(callee, in "Atomic::compare_exchange".as_bytes()) {
+                Fail::raise(werr(K_UNSUPPORTED, U_OPERATION, 237));
+            }
+            return false;
+        }
+        let x = self.seq_val(a, 0);
+        let xt = self.seq_ty(a, 0);
+        let dxt = self.cx.default_ty(xt);
+        let cell_ty = self.cx.types.arg(dxt, 0);
+        let cell = self.local();
+        self.load(x, 0);
+        self.e.code.set(cell);
+        // The cell's element type `T`.
+        let st = if cell_ty == NONE32 {
+            8
+        } else {
+            let sh = self.cx.shape(cell_ty);
+            if sh.kind == SH_SCALAR && sh.scalar == SC_U8 {
+                1
+            } else {
+                8
+            }
+        };
+        let s = if cell_ty == NONE32 {
+            SC_U64
+        } else {
+            self.scalar_of(cell_ty)
+        };
+        let base = self.local();
+        self.e.code.get(cell);
+        self.e.code.i64_const(8);
+        self.e.code.op(OP_I64_ADD);
+        self.e.code.set(base);
+        let zero = self.const_local(0);
+        let old = self.elem_load(base, zero, st);
+        if k == 0 || k == 8 {
+            self.set_value(dv, old);
+            return true;
+        }
+        let v = self.seq_val(a, 1);
+        let new = if k == 1 || k == 2 {
+            v
+        } else {
+            let d = self.local();
+            self.e.code.get(old);
+            self.e.code.get(v);
+            self
+                .e
+                .code
+                .op(
+                    if k == 3 {
+                        OP_I64_ADD
+                    } else if k == 4 {
+                        OP_I64_SUB
+                    } else if k == 5 {
+                        OP_I64_AND
+                    } else if k == 6 {
+                        OP_I64_OR
+                    } else {
+                        OP_I64_XOR
+                    }
+                );
+            if (k == 3 || k == 4) && (s == SC_U8 || s == SC_U32) {
+                self.e.code.u64_const(ik_mask(s));
+                self.e.code.op(OP_I64_AND);
+            }
+            self.e.code.set(d);
+            d
+        };
+        self.elem_store(base, zero, st, new);
+        if k == 1 {
+            self.unit_into(dv);
+        } else {
+            self.set_value(dv, old);
+        }
+        true
+    }
+
+    fn has_prefix(in self, s: u32, in text: Str) -> bool {
+        let b = text.as_bytes();
+        let n = b.len();
+        if self.cx.names.size(s) < n {
+            return false;
+        }
+        for i in 0..n {
+            let c = match b.try_get(i) {
+                Option::Some(c) => c,
+                Option::None => 0,
+            };
+            if self.cx.names.byte(s, i) != c {
+                return false;
+            }
+        }
+        true
     }
 
     fn is_op(in self, s: u32, in text: Str) -> bool {
@@ -2718,16 +2997,40 @@ impl L {
                 Option::None => false,
             };
             if !(pass == 1 || pinout) {
-                let v = self.value(vid);
+                let v0 = self.value(vid);
                 if i < tys.len() {
-                    out.push(self.bind_evidence(v, u32_at(in tys, i)));
+                    // A `String` passed as a `Str` is its whole view.
+                    let pt = u32_at(in tys, i);
+                    let v = if self.seq_kind(pt) == SK_VIEW {
+                        let at = self.vty(vid);
+                        if self.seq_kind(at) == SK_BUF {
+                            let (base, n) = self.parts(v0, at);
+                            self.pack(base, n)
+                        } else {
+                            v0
+                        }
+                    } else {
+                        v0
+                    };
+                    out.push(self.bind_evidence(v, pt));
                 } else {
-                    out.push(v);
+                    out.push(v0);
                 }
                 continue;
             }
             if root == 0 {
-                Fail::raise(werr(K_INVALID, 0, 211));
+                // A temporary view (`inout s.as_slice_mut()`, `inout
+                // s[a..b]`): its elements are written in place, so the cell
+                // needs no writeback.
+                let at = self.vty(vid);
+                if self.seq_kind(at) != SK_VIEW {
+                    Fail::raise(werr(K_INVALID, 0, 211));
+                }
+                let v = self.value(vid);
+                let cell = self.alloc_block(8);
+                self.store(cell, 0, v);
+                out.push(cell);
+                continue;
             }
             let rs = n32(wrapping_sub(root, 1));
             if path == 0 {
@@ -2777,6 +3080,9 @@ impl L {
         let a = ins.a;
         let dv = widen_u64(ins.dest);
         let callee = n32(self.cx.ir.word(a));
+        if self.seqs && self.atomic_call(dv, callee, a) {
+            return;
+        }
         if self.cx.ir.find(callee) != 0 {
             let key = self.callee_key(dv);
             if key == NONE32 {
@@ -3349,6 +3655,1071 @@ impl L {
         self.raise_overflow();
         self.e.code.op(OP_END);
     }
+
+    // ----- sequences, slices and strings (#1506) ---------------------------
+    //
+    // A `ChunkSeq[T]` or a `String` is a pointer to a buffer: one word
+    // `len | cap << 32`, then the elements, one byte each for `u8` and for a
+    // string and eight bytes otherwise. A string literal is a static buffer
+    // with cap 0 (Rust's layout), so the first write copies it. A `Slice[T]`
+    // or `Str` view is `addr | len << 32`. A buffer has one owner (a
+    // `ChunkSeq` moves), so writes happen in place; a buffer that grows
+    // moves, and its new address is written back to the receiver's place.
+    // Rust (src/wasm_backend) lowers no `Op::Seq`.
+
+    fn seq_code(in self, pool: u64) -> u8 {
+        let l = self.cx.ir.p.pool_row(pool).label;
+        if self.cx.names.spells(l, in "New".as_bytes()) {
+            return 1;
+        }
+        if self.cx.names.spells(l, in "WithCapacity".as_bytes()) {
+            return 2;
+        }
+        if self.cx.names.spells(l, in "Len".as_bytes()) {
+            return 3;
+        }
+        if self.cx.names.spells(l, in "Push".as_bytes()) {
+            return 4;
+        }
+        if self.cx.names.spells(l, in "Pop".as_bytes()) {
+            return 5;
+        }
+        if self.cx.names.spells(l, in "Get".as_bytes()) {
+            return 6;
+        }
+        if self.cx.names.spells(l, in "Set".as_bytes()) {
+            return 7;
+        }
+        if self.cx.names.spells(l, in "TryGet".as_bytes()) {
+            return 8;
+        }
+        if self.cx.names.spells(l, in "Last".as_bytes()) {
+            return 9;
+        }
+        if self.cx.names.spells(l, in "TrySet".as_bytes()) {
+            return 10;
+        }
+        if self.cx.names.spells(l, in "Clear".as_bytes()) {
+            return 11;
+        }
+        if self.cx.names.spells(l, in "Truncate".as_bytes()) {
+            return 12;
+        }
+        if self.cx.names.spells(l, in "Reserve".as_bytes()) {
+            return 13;
+        }
+        if self.cx.names.spells(l, in "Extend".as_bytes()) {
+            return 14;
+        }
+        if self.cx.names.spells(l, in "Finish".as_bytes()) {
+            return 15;
+        }
+        if self.cx.names.spells(l, in "AsSlice".as_bytes()) {
+            return 16;
+        }
+        if self.cx.names.spells(l, in "SubSlice".as_bytes()) {
+            return 17;
+        }
+        if self.cx.names.spells(l, in "SliceLen".as_bytes()) {
+            return 18;
+        }
+        if self.cx.names.spells(l, in "SliceGet".as_bytes()) {
+            return 19;
+        }
+        if self.cx.names.spells(l, in "SliceSet".as_bytes()) {
+            return 20;
+        }
+        if self.cx.names.spells(l, in "Swap".as_bytes()) {
+            return 21;
+        }
+        if self.cx.names.spells(l, in "Replace".as_bytes()) {
+            return 22;
+        }
+        if self.cx.names.spells(l, in "BytesEq".as_bytes()) {
+            return 23;
+        }
+        if self.cx.names.spells(l, in "Fill".as_bytes()) {
+            return 24;
+        }
+        if self.cx.names.spells(l, in "Str(Len)".as_bytes()) {
+            return 25;
+        }
+        if self.cx.names.spells(l, in "Str(ByteAt)".as_bytes()) {
+            return 26;
+        }
+        if self.cx.names.spells(l, in "Str(TryByteAt)".as_bytes()) {
+            return 27;
+        }
+        if self.cx.names.spells(l, in "Str(AsStr)".as_bytes()) {
+            return 28;
+        }
+        if self.cx.names.spells(l, in "Str(AsBytes)".as_bytes()) {
+            return 29;
+        }
+        if self.cx.names.spells(l, in "Str(SubStr)".as_bytes()) {
+            return 30;
+        }
+        if self.cx.names.spells(l, in "Str(PushStr)".as_bytes()) {
+            return 31;
+        }
+        if self.cx.names.spells(l, in "Str(PushChar)".as_bytes()) {
+            return 32;
+        }
+        if self.cx.names.spells(l, in "Str(Clear)".as_bytes()) {
+            return 33;
+        }
+        if self.cx.names.spells(l, in "Str(Reserve)".as_bytes()) {
+            return 34;
+        }
+        for k in 0..24 {
+            let mut t = ChunkSeq::new[u8]();
+            append_text(inout t, "Wide(Wide { bytes: ");
+            let bytes = wide_bytes(k);
+            t.push(wrapping_add(48, wrapping_u8(bytes)));
+            append_text(inout t, ", big: ");
+            append_bool(inout t, (k & 4) != 0);
+            append_text(inout t, ", write: ");
+            append_bool(inout t, (k & 2) != 0);
+            append_text(inout t, ", total: ");
+            append_bool(inout t, (k & 1) != 0);
+            append_text(inout t, " })");
+            if self.cx.names.spells(l, in t.as_slice()) {
+                return wrapping_u8(add(SQ_WIDE, k));
+            }
+        }
+        0
+    }
+
+    // SK_BUF for `ChunkSeq` and `String`, SK_VIEW for `Slice` and `Str`.
+    fn seq_kind(inout self, t: u32) -> u8 {
+        let d = self.cx.default_ty(t);
+        let node = self.cx.types.node(d);
+        if node.kind != K_NAMED {
+            return SK_OTHER;
+        }
+        let s = self.cx.s;
+        if node.name == s.string || node.name == s.chunkseq {
+            return SK_BUF;
+        }
+        if node.name == s.str_ || node.name == s.slice {
+            return SK_VIEW;
+        }
+        SK_OTHER
+    }
+
+    // The element width in bytes of a sequence, slice or string type.
+    fn stride(inout self, t: u32) -> u64 eff [Fail[WErr]] {
+        let d = self.cx.default_ty(t);
+        let node = self.cx.types.node(d);
+        let s = self.cx.s;
+        if node.name == s.string || node.name == s.str_ {
+            return 1;
+        }
+        if node.n == 0 {
+            Fail::raise(werr(K_INVALID, 0, 230));
+        }
+        let et = self.cx.types.arg(d, 0);
+        let sh = self.cx.shape(et);
+        if sh.kind == SH_SCALAR && sh.scalar == SC_U8 {
+            1
+        } else {
+            8
+        }
+    }
+
+    // The words of Seq argument `k` at `ops[q0]`: its ops index.
+    fn seq_arg(in self, a: u64, k: u64) -> u64 {
+        add(add(a, 2), wrapping_mul(k, 4))
+    }
+
+    fn seq_val(in self, a: u64, k: u64) -> u32 eff [Fail[WErr]] {
+        self.value(self.cx.ir.word(inc(self.seq_arg(a, k))))
+    }
+
+    fn seq_ty(inout self, a: u64, k: u64) -> u32 {
+        self.vty(self.cx.ir.word(inc(self.seq_arg(a, k))))
+    }
+
+    // (address, length) of buffer or view `x` of type `t`.
+    fn parts(inout self, x: u32, t: u32) -> (u32, u32) eff [Fail[WErr]] {
+        let k = self.seq_kind(t);
+        let a = self.local();
+        let n = self.local();
+        if k == SK_BUF {
+            self.e.code.get(x);
+            self.e.code.i64_const(8);
+            self.e.code.op(OP_I64_ADD);
+            self.e.code.set(a);
+            self.load(x, 0);
+            self.e.code.u64_const(LOW32);
+            self.e.code.op(OP_I64_AND);
+            self.e.code.set(n);
+        } else if k == SK_VIEW {
+            self.e.code.get(x);
+            self.e.code.u64_const(LOW32);
+            self.e.code.op(OP_I64_AND);
+            self.e.code.set(a);
+            self.e.code.get(x);
+            self.e.code.i64_const(32);
+            self.e.code.op(OP_I64_SHR_U);
+            self.e.code.set(n);
+        } else {
+            Fail::raise(werr(K_UNSUPPORTED, U_OPERATION, 231));
+        }
+        (a, n)
+    }
+
+    // The view `a | n << 32`.
+    fn pack(inout self, a: u32, n: u32) -> u32 {
+        let d = self.local();
+        self.e.code.get(a);
+        self.e.code.get(n);
+        self.e.code.i64_const(32);
+        self.e.code.op(OP_I64_SHL);
+        self.e.code.op(OP_I64_OR);
+        self.e.code.set(d);
+        d
+    }
+
+    // Push the i32 address `a + i * stride`.
+    fn elem_addr(inout self, a: u32, i: u32, stride: u64) {
+        self.e.code.get(a);
+        self.e.code.get(i);
+        if stride == 8 {
+            self.e.code.i64_const(3);
+            self.e.code.op(OP_I64_SHL);
+        }
+        self.e.code.op(OP_I64_ADD);
+        self.e.code.op(OP_I32_WRAP_I64);
+    }
+
+    fn elem_load(inout self, a: u32, i: u32, stride: u64) -> u32 {
+        let d = self.local();
+        self.elem_addr(a, i, stride);
+        if stride == 1 {
+            self.e.code.mem(OP_I64_LOAD8_U, 0, 0);
+        } else {
+            self.e.code.load(0);
+        }
+        self.e.code.set(d);
+        d
+    }
+
+    fn elem_store(inout self, a: u32, i: u32, stride: u64, v: u32) {
+        self.elem_addr(a, i, stride);
+        self.e.code.get(v);
+        if stride == 1 {
+            self.e.code.mem(OP_I64_STORE8, 0, 0);
+        } else {
+            self.e.code.store(0);
+        }
+    }
+
+    // Raise `IndexOutOfBounds` unless `i < n`.
+    fn check_index(inout self, i: u32, n: u32) eff [Fail[WErr]] {
+        self.e.code.get(i);
+        self.e.code.get(n);
+        self.e.code.op(OP_I64_GE_U);
+        self.e.code.open(OP_IF);
+        let oob = self.cx.s.index_oob;
+        self.raise_runtime_error(oob);
+        self.e.code.op(OP_END);
+    }
+
+    // Trap (a view fault) unless `lo <= hi <= n`.
+    fn check_interval(inout self, lo: u32, hi: u32, n: u32) {
+        self.e.code.get(lo);
+        self.e.code.get(hi);
+        self.e.code.op(OP_I64_GT_U);
+        self.e.code.get(hi);
+        self.e.code.get(n);
+        self.e.code.op(OP_I64_GT_U);
+        self.e.code.op(OP_I32_OR);
+        self.e.code.open(OP_IF);
+        self.e.code.op(OP_UNREACHABLE);
+        self.e.code.op(OP_END);
+    }
+
+    // An `Option[T]` (type `ty`) into `d`: `Some(v)`, or `None` when `v`
+    // is NONE32.
+    fn option_into(inout self, d: u32, ty: u32, v: u32) eff [Fail[WErr]] {
+        let s = self.cx.s;
+        let name = if v == NONE32 {
+            s.none
+        } else {
+            s.some
+        };
+        let (index, is_enum, sh) = self.cx.variant_of(ty, name);
+        let block = self
+            .alloc_block(
+                if v == NONE32 {
+                    8
+                } else {
+                    16
+                }
+            );
+        let t = self.local();
+        self.e.code.u64_const(index);
+        self.e.code.set(t);
+        self.store(block, 0, t);
+        if v != NONE32 {
+            self.store(block, 8, v);
+        }
+        self.e.code.get(block);
+        self.e.code.set(d);
+    }
+
+    // Write `v` to the place of Seq argument `k` (an element view, or the
+    // receiver's root and path).
+    fn write_arg(inout self, a: u64, k: u64, v: u32) eff [Fail[WErr]] {
+        let q = self.seq_arg(a, k);
+        let vid = self.cx.ir.word(inc(q));
+        let el = u64_at(in self.e.elems, vid);
+        if el != 0 {
+            let addr = wrapping_u32(wrapping_sub(el, 1) & LOW32);
+            let stride = wrapping_shr_u64(wrapping_sub(el, 1), 32);
+            let zero = self.local();
+            self.e.code.i64_const(0);
+            self.e.code.set(zero);
+            self.elem_store(addr, zero, stride, v);
+            return;
+        }
+        let root = self.cx.ir.word(add(q, 2));
+        if root == 0 {
+            Fail::raise(werr(K_INVALID, 0, 232));
+        }
+        let segs = self.path_names(self.cx.ir.word(add(q, 3)));
+        self.write_place(n32(wrapping_sub(root, 1)), in segs, v);
+    }
+
+    // The receiver buffer `p` (Seq argument 0) with room for `need`
+    // elements, a copy of it when it is static or too small; a copy is
+    // written back to the receiver's place.
+    fn room(inout self, a: u64, p: u32, need: u32, stride: u64) -> u32 eff [Fail[WErr]] {
+        let f = self.seq_reserve();
+        let d = self.local();
+        self.e.code.get(p);
+        self.e.code.get(need);
+        self.e.code.u64_const(stride);
+        self.e.code.call(f);
+        self.e.code.set(d);
+        self.e.code.get(d);
+        self.e.code.get(p);
+        self.e.code.op(OP_I64_NE);
+        self.e.code.open(OP_IF);
+        self.write_arg(a, 0, d);
+        self.e.code.op(OP_END);
+        d
+    }
+
+    // Add `k` to the length of buffer `p` (its capacity has room).
+    fn bump_len(inout self, p: u32, k: u32) {
+        self.e.code.get(p);
+        self.e.code.op(OP_I32_WRAP_I64);
+        self.load(p, 0);
+        self.e.code.get(k);
+        self.e.code.op(OP_I64_ADD);
+        self.e.code.store(0);
+    }
+
+    // Set the length of buffer `p` to `n`, keeping its capacity.
+    fn set_len(inout self, p: u32, n: u32) {
+        self.e.code.get(p);
+        self.e.code.op(OP_I32_WRAP_I64);
+        self.load(p, 0);
+        self.e.code.u64_const(HIGH32);
+        self.e.code.op(OP_I64_AND);
+        self.e.code.get(n);
+        self.e.code.op(OP_I64_OR);
+        self.e.code.store(0);
+    }
+
+    fn add_locals(inout self, x: u32, y: u32) -> u32 {
+        let d = self.local();
+        self.e.code.get(x);
+        self.e.code.get(y);
+        self.e.code.op(OP_I64_ADD);
+        self.e.code.set(d);
+        d
+    }
+
+    fn const_local(inout self, v: u64) -> u32 {
+        let d = self.local();
+        self.e.code.u64_const(v);
+        self.e.code.set(d);
+        d
+    }
+
+    // Append the `n` elements at `src` to the receiver buffer `p`.
+    fn append_elems(inout self, a: u64, p: u32, src: u32, n: u32, stride: u64) eff [Fail[WErr]] {
+        let t0 = self.seq_ty(a, 0);
+        let (pa, len) = self.parts(p, t0);
+        let need = self.add_locals(len, n);
+        let q = self.room(a, p, need, stride);
+        let qa = self.local();
+        self.e.code.get(q);
+        self.e.code.i64_const(8);
+        self.e.code.op(OP_I64_ADD);
+        self.e.code.set(qa);
+        self.elem_addr(qa, len, stride);
+        self.e.code.get(src);
+        self.e.code.op(OP_I32_WRAP_I64);
+        self.e.code.get(n);
+        if stride == 8 {
+            self.e.code.i64_const(3);
+            self.e.code.op(OP_I64_SHL);
+        }
+        self.e.code.op(OP_I32_WRAP_I64);
+        self.e.code.memory_copy();
+        self.bump_len(q, n);
+    }
+
+    fn unit_into(inout self, dv: u64) {
+        let d = self.dest(dv);
+        self.e.code.i64_const(0);
+        self.e.code.set(d);
+    }
+
+    // `==` (`!=` when `ne`) of byte views or strings, one a view.
+    fn view_eq(inout self, x: u32, tx: u32, y: u32, ty: u32, ne: bool) -> u32 eff [Fail[WErr]] {
+        if self.stride(tx) != 1 || self.stride(ty) != 1 {
+            Fail::raise(werr(K_UNSUPPORTED, U_GENERIC_OPERATION, 235));
+        }
+        let (xa, xn) = self.parts(x, tx);
+        let (ya, yn) = self.parts(y, ty);
+        let f = self.bytes_eq();
+        let d = self.local();
+        self.e.code.get(xa);
+        self.e.code.get(xn);
+        self.e.code.get(ya);
+        self.e.code.get(yn);
+        self.e.code.call(f);
+        if ne {
+            self.e.code.op(OP_I64_EQZ);
+            self.e.code.op(OP_I64_EXTEND_I32_U);
+        }
+        self.e.code.set(d);
+        d
+    }
+
+    fn seq(inout self, at: u64, ty: u32, dv: u64) eff [Fail[WErr]] {
+        let ins = self.cx.ir.p.inst(at);
+        let a = ins.a;
+        let code = self.seq_code(self.cx.ir.word(a));
+        if code == 0 {
+            Fail::raise(werr(K_UNSUPPORTED, U_OPERATION, 233));
+        }
+        let c = widen_u64(code);
+        if c == SQ_NEW || c == SQ_WITH_CAPACITY {
+            let stride = self.stride(ty);
+            let cap = if c == SQ_NEW {
+                self.const_local(0)
+            } else {
+                self.seq_val(a, 0)
+            };
+            let d = self.dest(dv);
+            self.e.code.get(cap);
+            self.e.code.u64_const(stride);
+            self.e.code.op(OP_I64_MUL);
+            self.e.code.i64_const(8);
+            self.e.code.op(OP_I64_ADD);
+            self.e.code.call(self.alloc);
+            self.e.code.set(d);
+            self.e.code.get(d);
+            self.e.code.op(OP_I32_WRAP_I64);
+            self.e.code.get(cap);
+            self.e.code.i64_const(32);
+            self.e.code.op(OP_I64_SHL);
+            self.e.code.store(0);
+            return;
+        }
+        if c == SQ_SWAP || c == SQ_REPLACE {
+            let x = self.seq_val(a, 0);
+            let y = self.seq_val(a, 1);
+            self.write_arg(a, 0, y);
+            if c == SQ_SWAP {
+                self.write_arg(a, 1, x);
+                self.unit_into(dv);
+            } else {
+                self.set_value(dv, x);
+            }
+            return;
+        }
+        let t0 = self.seq_ty(a, 0);
+        let x = self.seq_val(a, 0);
+        let d0 = self.cx.default_ty(t0);
+        let n0 = self.cx.types.node(d0).name;
+        if c == SQ_SUB_SLICE && (n0 == self.cx.s.string || n0 == self.cx.s.str_) {
+            self.sub_str(a, x, t0, dv);
+            return;
+        }
+        let stride = self.stride(t0);
+        if c >= SQ_WIDE {
+            self.wide(a, wrapping_sub(c, SQ_WIDE), x, t0, ty, dv);
+            return;
+        }
+        let (base, n) = self.parts(x, t0);
+        if c == SQ_LEN || c == SQ_SLICE_LEN || c == SQ_STR_LEN {
+            self.set_value(dv, n);
+        } else if c == SQ_PUSH {
+            let v = self.seq_val(a, 1);
+            let one = self.const_local(1);
+            let need = self.add_locals(n, one);
+            let q = self.room(a, x, need, stride);
+            let qa = self.local();
+            self.e.code.get(q);
+            self.e.code.i64_const(8);
+            self.e.code.op(OP_I64_ADD);
+            self.e.code.set(qa);
+            self.elem_store(qa, n, stride, v);
+            self.bump_len(q, one);
+            self.unit_into(dv);
+        } else if c == SQ_POP || c == SQ_LAST {
+            let d = self.dest(dv);
+            self.e.code.get(n);
+            self.e.code.op(OP_I64_EQZ);
+            self.e.code.open(OP_IF);
+            self.option_into(d, ty, NONE32);
+            self.e.code.op(OP_ELSE);
+            let last = self.local();
+            self.e.code.get(n);
+            self.e.code.i64_const(1);
+            self.e.code.op(OP_I64_SUB);
+            self.e.code.set(last);
+            let v = self.elem_load(base, last, stride);
+            if c == SQ_POP {
+                self.set_len(x, last);
+            }
+            self.option_into(d, ty, v);
+            self.e.code.op(OP_END);
+        } else if c == SQ_GET || c == SQ_SLICE_GET || c == SQ_STR_BYTE_AT {
+            let i = self.seq_val(a, 1);
+            self.check_index(i, n);
+            let v = self.elem_load(base, i, stride);
+            // An element view (`swap(inout s[i], ..)`) writes here.
+            let addr = self.local();
+            self.elem_addr(base, i, stride);
+            self.e.code.op(OP_I64_EXTEND_I32_U);
+            self.e.code.set(addr);
+            set64(
+                inout self.e.elems,
+                wrapping_u32(dv),
+                inc(widen_u64(addr) | wrapping_shl_u64(stride, 32))
+            );
+            self.set_value(dv, v);
+        } else if c == SQ_SET || c == SQ_SLICE_SET {
+            let i = self.seq_val(a, 1);
+            let v = self.seq_val(a, 2);
+            self.check_index(i, n);
+            self.elem_store(base, i, stride, v);
+            self.unit_into(dv);
+        } else if c == SQ_TRY_GET || c == SQ_STR_TRY_BYTE_AT {
+            let i = self.seq_val(a, 1);
+            let d = self.dest(dv);
+            self.e.code.get(i);
+            self.e.code.get(n);
+            self.e.code.op(OP_I64_LT_U);
+            self.e.code.open(OP_IF);
+            let v = self.elem_load(base, i, stride);
+            self.option_into(d, ty, v);
+            self.e.code.op(OP_ELSE);
+            self.option_into(d, ty, NONE32);
+            self.e.code.op(OP_END);
+        } else if c == SQ_TRY_SET {
+            let i = self.seq_val(a, 1);
+            let v = self.seq_val(a, 2);
+            let d = self.dest(dv);
+            self.e.code.get(i);
+            self.e.code.get(n);
+            self.e.code.op(OP_I64_LT_U);
+            self.e.code.open(OP_IF);
+            self.elem_store(base, i, stride, v);
+            self.e.code.op(OP_END);
+            self.e.code.get(i);
+            self.e.code.get(n);
+            self.e.code.op(OP_I64_LT_U);
+            self.e.code.op(OP_I64_EXTEND_I32_U);
+            self.e.code.set(d);
+        } else if c == SQ_CLEAR || c == SQ_STR_CLEAR {
+            // A static string is copied first, so the literal stays.
+            let q = self.room(a, x, n, stride);
+            let zero = self.const_local(0);
+            self.set_len(q, zero);
+            self.unit_into(dv);
+        } else if c == SQ_TRUNCATE {
+            let k = self.seq_val(a, 1);
+            self.e.code.get(k);
+            self.e.code.get(n);
+            self.e.code.op(OP_I64_LT_U);
+            self.e.code.open(OP_IF);
+            self.set_len(x, k);
+            self.e.code.op(OP_END);
+            self.unit_into(dv);
+        } else if c == SQ_RESERVE || c == SQ_STR_RESERVE {
+            let k = self.seq_val(a, 1);
+            let need = self.add_locals(n, k);
+            let q = self.room(a, x, need, stride);
+            self.unit_into(dv);
+        } else if c == SQ_EXTEND || c == SQ_STR_PUSH_STR {
+            let y = self.seq_val(a, 1);
+            let t1 = self.seq_ty(a, 1);
+            let (sa, sn) = self.parts(y, t1);
+            self.append_elems(a, x, sa, sn, stride);
+            self.unit_into(dv);
+        } else if c == SQ_FINISH {
+            self.e.code.get(n);
+            self.e.code.op(OP_I64_EQZ);
+            self.e.code.op(OP_I32_EQZ);
+            self.e.code.open(OP_IF);
+            let oob = self.cx.s.index_oob;
+            self.raise_runtime_error(oob);
+            self.e.code.op(OP_END);
+            self.unit_into(dv);
+        } else if c == SQ_AS_SLICE || c == SQ_STR_AS_STR || c == SQ_STR_AS_BYTES {
+            let v = self.pack(base, n);
+            self.set_value(dv, v);
+        } else if c == SQ_SUB_SLICE {
+            let lo = self.seq_val(a, 1);
+            let hi = self.seq_val(a, 2);
+            self.check_interval(lo, hi, n);
+            let start = self.local();
+            self.elem_addr(base, lo, stride);
+            self.e.code.op(OP_I64_EXTEND_I32_U);
+            self.e.code.set(start);
+            let len = self.local();
+            self.e.code.get(hi);
+            self.e.code.get(lo);
+            self.e.code.op(OP_I64_SUB);
+            self.e.code.set(len);
+            let v = self.pack(start, len);
+            self.set_value(dv, v);
+        } else if c == SQ_STR_SUB_STR {
+            self.sub_str(a, x, t0, dv);
+        } else if c == SQ_BYTES_EQ {
+            let y = self.seq_val(a, 1);
+            let t1 = self.seq_ty(a, 1);
+            let (ya, yn) = self.parts(y, t1);
+            let f = self.bytes_eq();
+            let d = self.dest(dv);
+            self.e.code.get(base);
+            self.e.code.get(n);
+            self.e.code.get(ya);
+            self.e.code.get(yn);
+            self.e.code.call(f);
+            self.e.code.set(d);
+        } else if c == SQ_FILL {
+            let v = self.seq_val(a, 1);
+            let i = self.const_local(0);
+            self.e.code.open(OP_BLOCK);
+            self.e.code.open(OP_LOOP);
+            self.e.code.get(i);
+            self.e.code.get(n);
+            self.e.code.op(OP_I64_GE_U);
+            self.e.code.br_if(1);
+            self.elem_store(base, i, stride, v);
+            self.e.code.get(i);
+            self.e.code.i64_const(1);
+            self.e.code.op(OP_I64_ADD);
+            self.e.code.set(i);
+            self.e.code.br(0);
+            self.e.code.op(OP_END);
+            self.e.code.op(OP_END);
+            self.unit_into(dv);
+        } else if c == SQ_STR_PUSH_CHAR {
+            let ch = self.seq_val(a, 1);
+            let d = self.dest(dv);
+            // A scalar value: below 0x110000 and not a surrogate.
+            self.e.code.get(ch);
+            self.e.code.u64_const(1114112);
+            self.e.code.op(OP_I64_LT_U);
+            self.e.code.get(ch);
+            self.e.code.u64_const(4294965248);
+            self.e.code.op(OP_I64_AND);
+            self.e.code.u64_const(55296);
+            self.e.code.op(OP_I64_NE);
+            self.e.code.op(OP_I32_AND);
+            self.e.code.op(OP_I64_EXTEND_I32_U);
+            self.e.code.tee(d);
+            self.e.code.op(OP_I32_WRAP_I64);
+            self.e.code.open(OP_IF);
+            let four = self.const_local(4);
+            let need = self.add_locals(n, four);
+            let q = self.room(a, x, need, 1);
+            let f = self.utf8();
+            let width = self.local();
+            self.e.code.get(ch);
+            self.e.code.get(q);
+            self.e.code.i64_const(8);
+            self.e.code.op(OP_I64_ADD);
+            self.e.code.get(n);
+            self.e.code.op(OP_I64_ADD);
+            self.e.code.call(f);
+            self.e.code.set(width);
+            self.bump_len(q, width);
+            self.e.code.op(OP_END);
+        } else {
+            Fail::raise(werr(K_UNSUPPORTED, U_OPERATION, 234));
+        }
+    }
+
+    // `s[lo..hi]` of a string: a view on char boundaries, or a fault.
+    fn sub_str(inout self, a: u64, x: u32, t0: u32, dv: u64) eff [Fail[WErr]] {
+        let (base, n) = self.parts(x, t0);
+        let lo = self.seq_val(a, 1);
+        let hi = self.seq_val(a, 2);
+        self.check_interval(lo, hi, n);
+        for k in 0..2 {
+            let e = if k == 0 {
+                lo
+            } else {
+                hi
+            };
+            // A boundary unless a continuation byte `0b10xx_xxxx` is there.
+            self.e.code.get(e);
+            self.e.code.get(n);
+            self.e.code.op(OP_I64_LT_U);
+            self.e.code.open(OP_IF);
+            let b = self.elem_load(base, e, 1);
+            self.e.code.get(b);
+            self.e.code.i64_const(192);
+            self.e.code.op(OP_I64_AND);
+            self.e.code.i64_const(128);
+            self.e.code.op(OP_I64_EQ);
+            self.e.code.open(OP_IF);
+            self.e.code.op(OP_UNREACHABLE);
+            self.e.code.op(OP_END);
+            self.e.code.op(OP_END);
+        }
+        let start = self.add_locals(base, lo);
+        let len = self.local();
+        self.e.code.get(hi);
+        self.e.code.get(lo);
+        self.e.code.op(OP_I64_SUB);
+        self.e.code.set(len);
+        let v = self.pack(start, len);
+        self.set_value(dv, v);
+    }
+
+    // `read_u32_le`, `try_write_u64_be` and the other fixed-width accesses
+    // of a byte sequence or slice (`Wide`, variant `k` of `seq_code`).
+    fn wide(inout self, a: u64, k: u64, x: u32, t0: u32, ty: u32, dv: u64) eff [Fail[WErr]] {
+        let bytes = wide_bytes(k);
+        let big = (k & 4) != 0;
+        let write = (k & 2) != 0;
+        let total = (k & 1) != 0;
+        let (base, n) = self.parts(x, t0);
+        let at = self.seq_val(a, 1);
+        // In bounds when `at <= n && n - at >= bytes`.
+        let ok = self.local();
+        self.e.code.get(at);
+        self.e.code.get(n);
+        self.e.code.op(OP_I64_LE_U);
+        self.e.code.get(n);
+        self.e.code.get(at);
+        self.e.code.op(OP_I64_SUB);
+        self.e.code.u64_const(bytes);
+        self.e.code.op(OP_I64_GE_U);
+        self.e.code.op(OP_I32_AND);
+        self.e.code.op(OP_I64_EXTEND_I32_U);
+        self.e.code.set(ok);
+        let d = self.dest(dv);
+        if !total {
+            self.e.code.get(ok);
+            self.e.code.op(OP_I64_EQZ);
+            self.e.code.open(OP_IF);
+            let oob = self.cx.s.index_oob;
+            self.raise_runtime_error(oob);
+            self.e.code.op(OP_END);
+        }
+        let addr = self.add_locals(base, at);
+        if write {
+            let v = self.seq_val(a, 2);
+            self.e.code.get(ok);
+            self.e.code.op(OP_I32_WRAP_I64);
+            self.e.code.open(OP_IF);
+            for i in 0..bytes {
+                // Byte `i` of the value, low first; `big` stores it at the
+                // mirrored offset.
+                self.e.code.get(addr);
+                self.e.code.op(OP_I32_WRAP_I64);
+                self.e.code.get(v);
+                self.e.code.u64_const(wrapping_mul(i, 8));
+                self.e.code.op(OP_I64_SHR_U);
+                self
+                    .e
+                    .code
+                    .mem(
+                        OP_I64_STORE8,
+                        0,
+                        if big {
+                            wrapping_sub(wrapping_sub(bytes, 1), i)
+                        } else {
+                            i
+                        }
+                    );
+            }
+            self.e.code.op(OP_END);
+            if total {
+                self.e.code.get(ok);
+                self.e.code.set(d);
+            } else {
+                self.e.code.i64_const(0);
+                self.e.code.set(d);
+            }
+            return;
+        }
+        let v = self.local();
+        self.e.code.i64_const(0);
+        self.e.code.set(v);
+        self.e.code.get(ok);
+        self.e.code.op(OP_I32_WRAP_I64);
+        self.e.code.open(OP_IF);
+        for i in 0..bytes {
+            self.e.code.get(v);
+            self.e.code.get(addr);
+            self.e.code.op(OP_I32_WRAP_I64);
+            self
+                .e
+                .code
+                .mem(
+                    OP_I64_LOAD8_U,
+                    0,
+                    if big {
+                        wrapping_sub(wrapping_sub(bytes, 1), i)
+                    } else {
+                        i
+                    }
+                );
+            self.e.code.u64_const(wrapping_mul(i, 8));
+            self.e.code.op(OP_I64_SHL);
+            self.e.code.op(OP_I64_OR);
+            self.e.code.set(v);
+        }
+        self.e.code.op(OP_END);
+        if total {
+            self.e.code.get(ok);
+            self.e.code.op(OP_I32_WRAP_I64);
+            self.e.code.open(OP_IF);
+            self.option_into(d, ty, v);
+            self.e.code.op(OP_ELSE);
+            self.option_into(d, ty, NONE32);
+            self.e.code.op(OP_END);
+        } else {
+            self.e.code.get(v);
+            self.e.code.set(d);
+        }
+    }
+
+    // `$seq_reserve(p, need, stride) -> p`: buffer `p` when its capacity
+    // holds `need` elements, else a copy with capacity
+    // `max(need, 2 * cap, 4)`.
+    fn seq_reserve(inout self) -> u32 {
+        if self.h_seq_reserve != NONE32 {
+            return self.h_seq_reserve;
+        }
+        let idx = self.b.declare(in i64s(3), in i64s(1));
+        self.h_seq_reserve = idx;
+        let p: u32 = 0;
+        let need: u32 = 1;
+        let stride: u32 = 2;
+        let cap: u32 = 3;
+        let len: u32 = 4;
+        let nc: u32 = 5;
+        let q: u32 = 6;
+        let mut c = code_new();
+        c.get(p);
+        c.op(OP_I32_WRAP_I64);
+        c.load(0);
+        c.tee(len);
+        c.i64_const(32);
+        c.op(OP_I64_SHR_U);
+        c.set(cap);
+        c.get(len);
+        c.u64_const(LOW32);
+        c.op(OP_I64_AND);
+        c.set(len);
+        c.get(need);
+        c.get(cap);
+        c.op(OP_I64_LE_U);
+        c.open(OP_IF);
+        c.get(p);
+        c.op(OP_RETURN);
+        c.op(OP_END);
+        c.get(cap);
+        c.i64_const(1);
+        c.op(OP_I64_SHL);
+        c.set(nc);
+        c.get(nc);
+        c.get(need);
+        c.op(OP_I64_LT_U);
+        c.open(OP_IF);
+        c.get(need);
+        c.set(nc);
+        c.op(OP_END);
+        c.get(nc);
+        c.i64_const(4);
+        c.op(OP_I64_LT_U);
+        c.open(OP_IF);
+        c.i64_const(4);
+        c.set(nc);
+        c.op(OP_END);
+        c.get(nc);
+        c.get(stride);
+        c.op(OP_I64_MUL);
+        c.i64_const(8);
+        c.op(OP_I64_ADD);
+        c.call(self.alloc);
+        c.tee(q);
+        c.i64_const(8);
+        c.op(OP_I64_ADD);
+        c.op(OP_I32_WRAP_I64);
+        c.get(p);
+        c.i64_const(8);
+        c.op(OP_I64_ADD);
+        c.op(OP_I32_WRAP_I64);
+        c.get(len);
+        c.get(stride);
+        c.op(OP_I64_MUL);
+        c.op(OP_I32_WRAP_I64);
+        c.memory_copy();
+        c.get(q);
+        c.op(OP_I32_WRAP_I64);
+        c.get(len);
+        c.get(nc);
+        c.i64_const(32);
+        c.op(OP_I64_SHL);
+        c.op(OP_I64_OR);
+        c.store(0);
+        c.get(q);
+        c.op(OP_END);
+        self.b.define(idx, in body_n(4, in c));
+        idx
+    }
+
+    // `$bytes_eq(a, n, b, m)`: the byte ranges are equal.
+    fn bytes_eq(inout self) -> u32 {
+        if self.h_bytes_eq != NONE32 {
+            return self.h_bytes_eq;
+        }
+        let idx = self.b.declare(in i64s(4), in i64s(1));
+        self.h_bytes_eq = idx;
+        let i: u32 = 4;
+        let mut c = code_new();
+        c.get(1);
+        c.get(3);
+        c.op(OP_I64_NE);
+        c.open(OP_IF);
+        c.i64_const(0);
+        c.op(OP_RETURN);
+        c.op(OP_END);
+        c.open(OP_LOOP);
+        c.get(i);
+        c.get(1);
+        c.op(OP_I64_GE_U);
+        c.open(OP_IF);
+        c.i64_const(1);
+        c.op(OP_RETURN);
+        c.op(OP_END);
+        c.get(0);
+        c.get(i);
+        c.op(OP_I64_ADD);
+        c.op(OP_I32_WRAP_I64);
+        c.mem(OP_I64_LOAD8_U, 0, 0);
+        c.get(2);
+        c.get(i);
+        c.op(OP_I64_ADD);
+        c.op(OP_I32_WRAP_I64);
+        c.mem(OP_I64_LOAD8_U, 0, 0);
+        c.op(OP_I64_NE);
+        c.open(OP_IF);
+        c.i64_const(0);
+        c.op(OP_RETURN);
+        c.op(OP_END);
+        c.get(i);
+        c.i64_const(1);
+        c.op(OP_I64_ADD);
+        c.set(i);
+        c.br(0);
+        c.op(OP_END);
+        c.op(OP_UNREACHABLE);
+        c.op(OP_END);
+        self.b.define(idx, in body_n(1, in c));
+        idx
+    }
+
+    // `$utf8(c, at) -> width`: the UTF-8 encoding of scalar value `c` at
+    // address `at`.
+    fn utf8(inout self) -> u32 {
+        if self.h_utf8 != NONE32 {
+            return self.h_utf8;
+        }
+        let idx = self.b.declare(in i64s(2), in i64s(1));
+        self.h_utf8 = idx;
+        let ch: u32 = 0;
+        let at: u32 = 1;
+        let mut c = code_new();
+        // One byte below 0x80.
+        c.get(ch);
+        c.i64_const(128);
+        c.op(OP_I64_LT_U);
+        c.open(OP_IF);
+        c.get(at);
+        c.op(OP_I32_WRAP_I64);
+        c.get(ch);
+        c.mem(OP_I64_STORE8, 0, 0);
+        c.i64_const(1);
+        c.op(OP_RETURN);
+        c.op(OP_END);
+        // Width w: 2 below 0x800, 3 below 0x10000, else 4. The lead byte
+        // is `prefix | c >> 6(w-1)`, then `0x80 | (c >> 6k) & 63`.
+        for wd in 2..5 {
+            let limit: u64 = if wd == 2 {
+                2048
+            } else if wd == 3 {
+                65536
+            } else {
+                1114112
+            };
+            let prefix: i64 = if wd == 2 {
+                192
+            } else if wd == 3 {
+                224
+            } else {
+                240
+            };
+            c.get(ch);
+            c.u64_const(limit);
+            c.op(OP_I64_LT_U);
+            c.open(OP_IF);
+            c.get(at);
+            c.op(OP_I32_WRAP_I64);
+            c.get(ch);
+            c.u64_const(wrapping_mul(6, wrapping_sub(wd, 1)));
+            c.op(OP_I64_SHR_U);
+            c.i64_const(prefix);
+            c.op(OP_I64_OR);
+            c.mem(OP_I64_STORE8, 0, 0);
+            for k in 1..wd {
+                c.get(at);
+                c.op(OP_I32_WRAP_I64);
+                c.get(ch);
+                c.u64_const(wrapping_mul(6, wrapping_sub(wd, inc(k))));
+                c.op(OP_I64_SHR_U);
+                c.i64_const(63);
+                c.op(OP_I64_AND);
+                c.i64_const(128);
+                c.op(OP_I64_OR);
+                c.mem(OP_I64_STORE8, 0, k);
+            }
+            c.u64_const(wd);
+            c.op(OP_RETURN);
+            c.op(OP_END);
+        }
+        c.op(OP_UNREACHABLE);
+        c.op(OP_END);
+        self.b.define(idx, in body_n(0, in c));
+        idx
+    }
 }
 
 fn inc32(x: u32) -> u32 {
@@ -3552,4 +4923,58 @@ fn fmod_code(inout c: Code) {
     c.op(OP_I64_SHL);
     c.op(OP_I64_OR);
     c.op(OP_END);
+}
+
+// The width of `Wide` variant `k` (bit 0 total, 1 write, 2 big, then the
+// width index): 2, 4 or 8 bytes.
+fn wide_bytes(k: u64) -> u64 {
+    let i = wrapping_shr_u64(k, 3);
+    if i == 0 {
+        2
+    } else if i == 1 {
+        4
+    } else {
+        8
+    }
+}
+
+fn append_text(inout t: ChunkSeq[u8], in s: Str) {
+    let b = s.as_bytes();
+    for i in 0..b.len() {
+        match b.try_get(i) {
+            Option::Some(x) => t.push(x),
+            Option::None => {},
+        }
+    }
+}
+
+fn append_bool(inout t: ChunkSeq[u8], b: bool) {
+    if b {
+        append_text(inout t, "true");
+    } else {
+        append_text(inout t, "false");
+    }
+}
+
+// The `Atomic` operation `k` of `L::atomic_call`.
+fn atomic_op(k: u64) -> String {
+    if k == 0 {
+        "load"
+    } else if k == 1 {
+        "store"
+    } else if k == 2 {
+        "swap"
+    } else if k == 3 {
+        "fetch_add"
+    } else if k == 4 {
+        "fetch_sub"
+    } else if k == 5 {
+        "fetch_and"
+    } else if k == 6 {
+        "fetch_or"
+    } else if k == 7 {
+        "fetch_xor"
+    } else {
+        "into_inner"
+    }
 }

@@ -1,0 +1,303 @@
+// The portable naming policy of tree entry names (`validate_name` in
+// src/tree.rs), and the UTF-8 and control-character scans the derivation
+// labels share.
+
+fn byte(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(b) => b,
+        Option::None => 0,
+    }
+}
+
+fn cont(in s: Slice[u8], i: u64) -> bool {
+    i < s.len() && byte(in s, i) >= 128 && byte(in s, i) < 192
+}
+
+// The length of the UTF-8 sequence that starts at `i`, or 0 when it is
+// not valid UTF-8 (overlong forms, surrogates and code points above
+// U+10FFFF are invalid, as in `std::str::from_utf8`).
+pub fn seq_len(in s: Slice[u8], i: u64) -> u64 {
+    let b0 = byte(in s, i);
+    if b0 < 128 {
+        return 1;
+    }
+    if b0 < 194 {
+        return 0;
+    }
+    if b0 < 224 {
+        if cont(in s, wrapping_add(i, 1)) {
+            return 2;
+        }
+        return 0;
+    }
+    if b0 < 240 {
+        let b1 = byte(in s, wrapping_add(i, 1));
+        if !cont(in s, wrapping_add(i, 1)) || !cont(in s, wrapping_add(i, 2)) {
+            return 0;
+        }
+        if b0 == 224 && b1 < 160 {
+            return 0;
+        }
+        if b0 == 237 && b1 >= 160 {
+            return 0;
+        }
+        return 3;
+    }
+    if b0 < 245 {
+        let b1 = byte(in s, wrapping_add(i, 1));
+        if !cont(in s, wrapping_add(i, 1))
+            || !cont(in s, wrapping_add(i, 2))
+            || !cont(in s, wrapping_add(i, 3)) {
+            return 0;
+        }
+        if b0 == 240 && b1 < 144 {
+            return 0;
+        }
+        if b0 == 244 && b1 >= 144 {
+            return 0;
+        }
+        return 4;
+    }
+    0
+}
+
+// SWAR masks over the 8 bytes of a little-endian word.
+const HIGH: u64 = 9259542123273814144;
+const ONES: u64 = 72340172838076673;
+const ALL: u64 = 18446744073709551615;
+
+// Whether the 8 bytes at `i` are all ASCII and none is a control character
+// (below 32 or 127), or false when fewer than 8 bytes are left.
+fn plain8(in s: Slice[u8], i: u64) -> bool {
+    match s.try_read_u64_le(i) {
+        Option::Some(w) => {
+            let below = wrapping_sub(w, wrapping_mul(ONES, 32)) & (w ^ ALL);
+            let x = w ^ wrapping_mul(ONES, 127);
+            let del = wrapping_sub(x, ONES) & (x ^ ALL);
+            ((w | below | del) & HIGH) == 0
+        },
+        Option::None => false,
+    }
+}
+
+// Whether the 8 bytes at `i` are all ASCII, or false when fewer are left.
+fn ascii8(in s: Slice[u8], i: u64) -> bool {
+    match s.try_read_u64_le(i) {
+        Option::Some(w) => (w & HIGH) == 0,
+        Option::None => false,
+    }
+}
+
+// Whether `s` is valid UTF-8.
+pub fn is_utf8(in s: Slice[u8]) -> bool {
+    let len = s.len();
+    let mut i = ascii_prefix(in s, false);
+    if i >= len {
+        return true;
+    }
+    loop {
+        if i >= len {
+            return true;
+        }
+        if byte(in s, i) < 128 {
+            i = wrapping_add(i, 1);
+        } else {
+            let n = seq_len(in s, i);
+            if n == 0 {
+                return false;
+            }
+            i = wrapping_add(i, n);
+        }
+    }
+}
+
+// The length of the leading run of whole 8-byte words of `s` that are ASCII
+// (and, with `plain`, hold no control character), or `s.len()` when the
+// rest of `s` after that run passes the same test, read as the overlapping
+// last word.
+fn ascii_prefix(in s: Slice[u8], plain: bool) -> u64 {
+    let len = s.len();
+    let mut i: u64 = 0;
+    loop {
+        if wrapping_add(i, 8) > len {
+            break;
+        }
+        let ok = if plain {
+            plain8(in s, i)
+        } else {
+            ascii8(in s, i)
+        };
+        if !ok {
+            return i;
+        }
+        i = wrapping_add(i, 8);
+    }
+    if i >= len {
+        return len;
+    }
+    if len >= 8 {
+        let last = wrapping_sub(len, 8);
+        let ok = if plain {
+            plain8(in s, last)
+        } else {
+            ascii8(in s, last)
+        };
+        if ok {
+            return len;
+        }
+    }
+    i
+}
+
+// Whether the character at `i` (of UTF-8 length `n`) is a control
+// character (`char::is_control`: U+0000..U+001F, U+007F..U+009F).
+pub fn is_control_at(in s: Slice[u8], i: u64, n: u64) -> bool {
+    let b0 = byte(in s, i);
+    if n == 1 {
+        return b0 < 32 || b0 == 127;
+    }
+    if n == 2 && b0 == 194 {
+        return byte(in s, wrapping_add(i, 1)) < 160;
+    }
+    false
+}
+
+// Whether valid UTF-8 `s` holds a control character.
+pub fn has_control(in s: Slice[u8]) -> bool {
+    let len = s.len();
+    let mut i = ascii_prefix(in s, true);
+    loop {
+        if i >= len {
+            return false;
+        }
+        let b = byte(in s, i);
+        if b < 128 {
+            if b < 32 || b == 127 {
+                return true;
+            }
+            i = wrapping_add(i, 1);
+            continue;
+        }
+        let n = seq_len(in s, i);
+        if n == 0 {
+            return false;
+        }
+        if is_control_at(in s, i, n) {
+            return true;
+        }
+        i = wrapping_add(i, n);
+    }
+}
+
+fn upper(b: u8) -> u8 {
+    if b >= 97 && b <= 122 {
+        wrapping_sub(b, 32)
+    } else {
+        b
+    }
+}
+
+// Whether the stem (the name up to its first '.') is a Windows device
+// name: CON, PRN, AUX, NUL, or COM/LPT followed by one ASCII digit.
+fn reserved(in s: Slice[u8]) -> bool {
+    let mut stem: u64 = 0;
+    loop {
+        if stem >= s.len() || byte(in s, stem) == 46 {
+            break;
+        }
+        stem = wrapping_add(stem, 1);
+    }
+    let a = upper(byte(in s, 0));
+    let b = upper(byte(in s, 1));
+    let c = upper(byte(in s, 2));
+    if stem == 3 {
+        return (a == 67 && b == 79 && c == 78)
+            || (a == 80 && b == 82 && c == 78)
+            || (a == 65 && b == 85 && c == 88)
+            || (a == 78 && b == 85 && c == 76);
+    }
+    if stem == 4 {
+        let d = byte(in s, 3);
+        let com = a == 67 && b == 79 && c == 77;
+        let lpt = a == 76 && b == 80 && c == 84;
+        return (com || lpt) && d >= 48 && d <= 57;
+    }
+    false
+}
+
+// The ASCII bytes a name may not hold, as bits of two masks (bytes 0..63
+// and 64..127): the separators, the Windows-reserved punctuation and the
+// control characters.
+const ASCII_BAD_LO: u64 = 15276355093050425343;
+const ASCII_BAD_HI: u64 = 10376293541730058240;
+
+fn ascii_bad(b: u8) -> bool {
+    let w = widen_u32(b);
+    if w < 64 {
+        (wrapping_shr_u64(ASCII_BAD_LO, w) & 1) != 0
+    } else {
+        (wrapping_shr_u64(ASCII_BAD_HI, wrapping_sub(w, 64)) & 1) != 0
+    }
+}
+
+// The NameError code of a bad ASCII byte: 4 a separator, 5 reserved
+// punctuation, 6 a control character.
+fn ascii_code(b: u8) -> u64 {
+    if b == 47 || b == 92 {
+        4
+    } else if b < 32 || b == 127 {
+        6
+    } else {
+        5
+    }
+}
+
+// 0 for a valid name, else the NameError code (see `name_error`). One pass
+// checks UTF-8 and finds the first bad character; UTF-8 (9) and the length
+// and dot checks (1, 2, 3) come before it, as in `validate_name`.
+pub fn name_code(in s: Slice[u8]) -> u64 {
+    let n = s.len();
+    let mut code: u64 = 0;
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let b = byte(in s, i);
+        if b < 128 {
+            if code == 0 && ascii_bad(b) {
+                code = ascii_code(b);
+            }
+            i = wrapping_add(i, 1);
+        } else {
+            let len = seq_len(in s, i);
+            if len == 0 {
+                return 9;
+            }
+            if code == 0 && is_control_at(in s, i, len) {
+                code = 6;
+            }
+            i = wrapping_add(i, len);
+        }
+    }
+    if n == 0 {
+        return 1;
+    }
+    if n > 255 {
+        return 2;
+    }
+    if (n == 1 && byte(in s, 0) == 46) || (n == 2 && byte(in s, 0) == 46 && byte(in s, 1) == 46) {
+        return 3;
+    }
+    if code != 0 {
+        return code;
+    }
+    let last = byte(in s, wrapping_sub(n, 1));
+    if last == 46 || last == 32 {
+        return 8;
+    }
+    if reserved(in s) {
+        return 7;
+    }
+    0
+}

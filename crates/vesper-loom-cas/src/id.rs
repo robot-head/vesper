@@ -122,6 +122,14 @@ impl Digest {
 
     /// Lowercase hexadecimal rendering (64 characters).
     pub fn to_hex(&self) -> String {
+        #[cfg(vesper_port)]
+        return crate::port::to_hex(self);
+        #[cfg(not(vesper_port))]
+        self.to_hex_rust()
+    }
+
+    #[cfg(not(vesper_port))]
+    fn to_hex_rust(self) -> String {
         const HEX: &[u8; 16] = b"0123456789abcdef";
         let mut out = String::with_capacity(64);
         for byte in self.0 {
@@ -134,6 +142,14 @@ impl Digest {
     /// Strict parser: exactly 64 lowercase hexadecimal characters. Store paths
     /// are derived from this form, so no other spelling is accepted.
     pub fn from_hex(text: &str) -> Option<Self> {
+        #[cfg(vesper_port)]
+        return crate::port::from_hex(text);
+        #[cfg(not(vesper_port))]
+        Self::from_hex_rust(text)
+    }
+
+    #[cfg(not(vesper_port))]
+    fn from_hex_rust(text: &str) -> Option<Self> {
         let bytes = text.as_bytes();
         if bytes.len() != 64 {
             return None;
@@ -219,6 +235,16 @@ impl FromStr for ObjectId {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let invalid = || CasError::InvalidId(s.to_owned());
+        #[cfg(vesper_port)]
+        return crate::port::parse_object_id(s).ok_or_else(invalid);
+        #[cfg(not(vesper_port))]
+        Self::from_str_rust(s, invalid)
+    }
+}
+
+impl ObjectId {
+    #[cfg(not(vesper_port))]
+    fn from_str_rust(s: &str, invalid: impl Fn() -> CasError + Copy) -> Result<Self, CasError> {
         let mut parts = s.split(':');
         let (Some(scheme), Some(domain), Some(kind), Some(hex), None) = (
             parts.next(),
@@ -297,6 +323,18 @@ impl ObjectHasher {
 
 /// Identity of `bytes` stored as a blob in `domain`.
 pub fn blob_id(domain: Domain, bytes: &[u8]) -> ObjectId {
+    #[cfg(vesper_port)]
+    return ObjectId::new(
+        domain,
+        ObjectKind::Blob,
+        crate::port::object_digest(domain, ObjectKind::Blob, bytes),
+    );
+    #[cfg(not(vesper_port))]
+    blob_id_rust(domain, bytes)
+}
+
+#[cfg(not(vesper_port))]
+fn blob_id_rust(domain: Domain, bytes: &[u8]) -> ObjectId {
     let mut hasher = ObjectHasher::new(domain, ObjectKind::Blob);
     hasher.update(bytes);
     hasher.finish()
