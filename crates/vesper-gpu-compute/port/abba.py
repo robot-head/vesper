@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """ABBA timing of the runtime workload (examples/runtime_bench.rs): the Rust
-build (A) against the Vesper build (B, feature `vesper-port`), alternating
-A B B A in fresh processes. Prints the per-pair ratio B/A, its mean and a
-95% interval (Student t over pairs), and checks both builds print the same
-digest. Usage: abba.py <rust-binary> <vesper-binary> [pairs]."""
+build (A, the ash runtime at the last commit that had it, see bench-abba.sh)
+against the Vesper build (B), alternating A B B A in fresh processes. Prints
+the per-pair ratio B/A, its mean and a 95% interval (Student t over pairs),
+the flip gate's pairs line (scripts/ci/flip_gate.py), and checks both builds
+print the same digest. Usage: abba.py <rust-binary> <vesper-binary> [pairs]."""
 import math
 import subprocess
 import sys
@@ -17,7 +18,7 @@ def run(binary):
 def main():
     a_bin, b_bin = sys.argv[1], sys.argv[2]
     pairs = int(sys.argv[3]) if len(sys.argv) > 3 else 10
-    ratios, digests = [], set()
+    ratios, digests, sums = [], set(), []
     for _ in range(pairs):
         a1, da = run(a_bin)
         b1, db = run(b_bin)
@@ -25,6 +26,7 @@ def main():
         a2, _ = run(a_bin)
         digests.update([da, db])
         ratios.append((b1 + b2) / (a1 + a2))
+        sums.append(f"{a1 + a2}:{b1 + b2}")
     n = len(ratios)
     mean = sum(ratios) / n
     sd = math.sqrt(sum((r - mean) ** 2 for r in ratios) / (n - 1))
@@ -35,6 +37,7 @@ def main():
     t = table.get(df) or table[max(k for k in table if k <= df)] if df >= 4 else 3.182
     half = t * sd / math.sqrt(n)
     print(f"pairs {n}  Vesper/Rust mean {mean:.3f}  95% [{mean - half:.3f}, {mean + half:.3f}]")
+    print("flip-gate pairs runtime " + " ".join(sums))
     print(f"digests {'equal' if len(digests) == 1 else 'DIFFER: ' + ' '.join(sorted(digests))}")
     sys.exit(0 if len(digests) == 1 else 1)
 

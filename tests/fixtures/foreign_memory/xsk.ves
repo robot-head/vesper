@@ -1,0 +1,258 @@
+// The worked example of foreign memory viewed in place (§16.3): an
+// AF_XDP-shaped receive ring. The UMEM is a `Pinned[u8]` whose address the
+// socket keeps; the ring is a mapping the socket owns. Vesper consumes
+// descriptors from the ring and checksums each frame where the kernel put
+// it, with no copy of either.
+
+// 16 frames of 2,048 bytes; the ring has 8 descriptors after its 64-byte
+// header. Arithmetic is wrapping, so no path can fail while a linear
+// socket, ring or UMEM is live.
+fn ring_bytes() -> u64 {
+    192
+}
+
+fn umem() -> Pinned[u8] {
+    let mut bytes = ChunkSeq::with_capacity[u8](32768);
+    bytes.resize(32768, 0);
+    Pinned {
+        data: bytes
+    }
+}
+
+// Consume every descriptor the kernel produced: checksum its frame in the
+// UMEM, then publish the new consumer index in the ring.
+fn consume(inout ring: Ring, in umem: Pinned[u8]) -> u64 {
+    let frames = umem.data.as_slice();
+    let producer = match ring.data.try_read_u32_le(0) {
+        Some(p) => p,
+        None => return 0,
+    };
+    let mut consumer = match ring.data.try_read_u32_le(4) {
+        Some(c) => c,
+        None => return 0,
+    };
+    let mut sum: u64 = 0;
+    loop {
+        if consumer == producer {
+            break;
+        }
+        let at = wrapping_add(64, wrapping_mul(16, widen_u64(consumer) & 7));
+        let addr = match ring.data.try_read_u64_le(at) {
+            Some(a) => a,
+            None => return 0,
+        };
+        let len = match ring.data.try_read_u32_le(wrapping_add(at, 8)) {
+            Some(l) => widen_u64(l),
+            None => return 0,
+        };
+        let end = wrapping_add(addr, len);
+        if addr <= end && end <= frames.len() {
+            sum = wrapping_add(sum, frames[addr..end].sum_be16());
+        }
+        consumer = wrapping_add(consumer, 1);
+    }
+    ring.data.try_write_u32_le(4, consumer);
+    sum
+}
+
+// Receive `packets` packets in batches of up to 5: the ring holds 8, so
+// the kernel stops when Vesper has not caught up.
+pub fn rx(packets: u32) -> u64 eff [Ffi[Xsk]] {
+    let mut umem = umem();
+    let mut socket = match Xsk::xsk_socket_new(inout umem, 2048) {
+        Some(s) => s,
+        None => {
+            let Pinned {
+                data
+            } = umem;
+            return 1;
+        }
+    };
+    let mut ring = match Xsk::xsk_ring_map(in socket, ring_bytes()) {
+        Some(r) => r,
+        None => {
+            Xsk::xsk_socket_free(socket);
+            let Pinned {
+                data
+            } = umem;
+            return 2;
+        }
+    };
+    let mut left = packets;
+    let mut sum: u64 = 0;
+    loop {
+        if left == 0 {
+            break;
+        }
+        let batch = if left < 5 {
+            left
+        } else {
+            5
+        };
+        let got = Xsk::xsk_kernel_rx(inout socket, batch);
+        sum = wrapping_add(sum, consume(inout ring, in umem));
+        left = if got < left {
+            wrapping_sub(left, got)
+        } else {
+            0
+        };
+    }
+    Xsk::xsk_ring_unmap(ring);
+    Xsk::xsk_socket_free(socket);
+    // Released: the UMEM's bytes are Vesper's again.
+    let Pinned {
+        data
+    } = umem;
+    sum
+}
+
+// A ring the socket refuses to map (too small) is `None`: `MAP_FAILED`.
+pub fn refused() -> u64 eff [Ffi[Xsk]] {
+    let mut umem = umem();
+    let socket = match Xsk::xsk_socket_new(inout umem, 2048) {
+        Some(s) => s,
+        None => {
+            let Pinned {
+                data
+            } = umem;
+            return 1;
+        }
+    };
+    let code = match Xsk::xsk_ring_map(in socket, 8) {
+        Some(r) => {
+            Xsk::xsk_ring_unmap(r);
+            2
+        }
+        None => 70,
+    };
+    Xsk::xsk_socket_free(socket);
+    let Pinned {
+        data
+    } = umem;
+    wrapping_add(code, Xsk::xsk_live())
+}
+
+// A bound view of a mapping reads it in place; the mapping is released
+// once the view's block ends.
+pub fn view() -> u64 eff [Ffi[Xsk]] {
+    let mut umem = umem();
+    let socket = match Xsk::xsk_socket_new(inout umem, 2048) {
+        Some(s) => s,
+        None => {
+            let Pinned {
+                data
+            } = umem;
+            return 1;
+        }
+    };
+    let ring = match Xsk::xsk_ring_map(in socket, ring_bytes()) {
+        Some(r) => r,
+        None => {
+            Xsk::xsk_socket_free(socket);
+            let Pinned {
+                data
+            } = umem;
+            return 2;
+        }
+    };
+    let n = {
+        let bytes = ring.data.as_slice();
+        wrapping_add(bytes.len(), bytes.sum_be16())
+    };
+    Xsk::xsk_ring_unmap(ring);
+    Xsk::xsk_socket_free(socket);
+    let Pinned {
+        data
+    } = umem;
+    n
+}
+
+pub fn rx_37() -> u64 eff [Ffi[Xsk]] {
+    rx(37)
+}
+pub fn rx_3() -> u64 eff [Ffi[Xsk]] {
+    rx(3)
+}
+
+// The same receive path without foreign memory in place: every ring index
+// and descriptor field is an import call, and every frame is copied into a
+// Vesper buffer before it is read.
+fn consume_copy(inout s: Socket, inout buf: ChunkSeq[u8]) -> u64 eff [Ffi[Xsk]] {
+    let producer = Xsk::xsk_rx_producer(in s);
+    let mut consumer = Xsk::xsk_rx_consumer(in s);
+    let mut sum: u64 = 0;
+    loop {
+        if consumer == producer {
+            break;
+        }
+        let addr = Xsk::xsk_rx_desc_addr(in s, consumer);
+        let len = widen_u64(Xsk::xsk_rx_desc_len(in s, consumer));
+        if len <= buf.len() {
+            Xsk::xsk_copy_out(in s, addr, inout buf[0..len]);
+            sum = wrapping_add(sum, buf[0..len].sum_be16());
+        }
+        consumer = wrapping_add(consumer, 1);
+    }
+    Xsk::xsk_rx_release(inout s, consumer);
+    sum
+}
+
+pub fn rx_copy(packets: u32) -> u64 eff [Ffi[Xsk]] {
+    let mut umem = umem();
+    let mut socket = match Xsk::xsk_socket_new(inout umem, 2048) {
+        Some(s) => s,
+        None => {
+            let Pinned {
+                data
+            } = umem;
+            return 1;
+        }
+    };
+    let ring = match Xsk::xsk_ring_map(in socket, ring_bytes()) {
+        Some(r) => r,
+        None => {
+            Xsk::xsk_socket_free(socket);
+            let Pinned {
+                data
+            } = umem;
+            return 2;
+        }
+    };
+    let mut buf = ChunkSeq::with_capacity[u8](2048);
+    buf.resize(2048, 0);
+    let mut left = packets;
+    let mut sum: u64 = 0;
+    loop {
+        if left == 0 {
+            break;
+        }
+        let batch = if left < 5 {
+            left
+        } else {
+            5
+        };
+        let got = Xsk::xsk_kernel_rx(inout socket, batch);
+        sum = wrapping_add(sum, consume_copy(inout socket, inout buf));
+        left = if got < left {
+            wrapping_sub(left, got)
+        } else {
+            0
+        };
+    }
+    Xsk::xsk_ring_unmap(ring);
+    Xsk::xsk_socket_free(socket);
+    let Pinned {
+        data
+    } = umem;
+    sum
+}
+
+pub fn rx_copy_37() -> u64 eff [Ffi[Xsk]] {
+    rx_copy(37)
+}
+pub fn rx_200000() -> u64 eff [Ffi[Xsk]] {
+    rx(200000)
+}
+pub fn rx_copy_200000() -> u64 eff [Ffi[Xsk]] {
+    rx_copy(200000)
+}

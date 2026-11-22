@@ -63,6 +63,7 @@ use self::witness::{
     build_candidate,
     ops_new,
     rust_sizes,
+    scratch_new,
     verify
 };
 
@@ -264,6 +265,7 @@ fn run_cases(in b: Slice[u8], in text: Str, split: bool, check: bool) -> ChunkSe
     let mut map = ChunkSeq::new[u32]();
     let mut types = ChunkSeq::new[TypeRow]();
     let mut cert = cert_new();
+    let mut scratch = scratch_new();
     let cases = r.word(in b);
     let mut at: u64 = 0;
     for k in 0..cases {
@@ -284,7 +286,16 @@ fn run_cases(in b: Slice[u8], in text: Str, split: bool, check: bool) -> ChunkSe
             budget.metadata = 0;
             budget.names = 0;
         } else if code == 0 {
-            code = verify(inout t, in ops, in types, source, candidate, in cert, inout budget);
+            code = verify(
+                inout t,
+                in ops,
+                in types,
+                source,
+                candidate,
+                in cert,
+                inout budget,
+                inout scratch
+            );
         }
         put(inout o, "R ");
         put_u64(inout o, widen_u64(code));

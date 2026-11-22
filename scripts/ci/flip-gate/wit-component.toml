@@ -1,0 +1,32 @@
+# Flip gate for the wasm backend's component wrapping
+# (src/wasm_backend/component.rs `encode`: wit-parser, wit-component and
+# wasmparser validation), ported as @vesper/wit-component (SH5 lane 11,
+# #1334) and installed as the hybrid's `component` hook. A compiler module:
+# its Rust, and the wit-component and wit-parser dependencies of the
+# compiler, are deleted by the Rust compiler's retirement (SH6 lane 2), not
+# by this flip.
+name = "wit-component"
+lane = "SH5-11"
+rust = ["src/wasm_backend/component.rs"]
+env = { CARGO_PROFILE_DEV_DEBUG = "0", CARGO_PROFILE_TEST_DEBUG = "0", CARGO_PROFILE_RELEASE_DEBUG = "0", WIT_COMPONENT_STEP = "1" }
+build = ["cargo test --locked --release --test self_host_wit_component --no-run"]
+
+[[tests]]
+run = "cargo test --locked --release --test self_host_wit_component"
+
+# Every component the Rust backend wraps over the cases (1,383), byte for
+# byte; 0 declined.
+[differential]
+run = "cargo test --locked --release --test self_host_wit_component port_matches_wit_component -- --nocapture"
+
+# The module's own speed: every component from its core module and WIT.
+[[abba]]
+workload = "wrap"
+run = "WIT_COMPONENT_GATE_WORKLOAD=wrap CHECK_HARNESS_SPEED=1 cargo test --locked --release --test self_host_wit_component flip_gate -- --ignored --nocapture"
+
+# The compiler-module bar: the whole wasm build of every input
+# (`wasm_backend::compile`) with the port as the `component` hook against
+# without it.
+[[abba]]
+workload = "build"
+run = "WIT_COMPONENT_GATE_WORKLOAD=build CHECK_HARNESS_SPEED=1 cargo test --locked --release --test self_host_wit_component flip_gate -- --ignored --nocapture"
