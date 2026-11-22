@@ -45,9 +45,11 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 
+mod fnptr;
 mod host;
 mod mirror;
 mod seq;
+pub use fnptr::FnPtr;
 pub use host::HostCall;
 pub use mirror::*;
 pub use seq::*;

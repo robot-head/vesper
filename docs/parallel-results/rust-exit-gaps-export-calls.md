@@ -165,3 +165,37 @@ this PR.
   programs match Rust over the corpus (5 tests).
 - `tests/native_inline*.rs`, `cargo test -p vesper-port-abi`,
   `cargo test -p vesper-span`, `crates/vesper-span/port/test-port.sh`.
+
+## Part 2: callback handles in exported values (graphics gap 10)
+
+`docs/parallel-results/rust-exit-graphics.md` (#1534) found that a `copy`
+struct holding a `.vsys` `callback` handle could not be a parameter or a
+result of an exported function: the planner refused every type with a
+`.vsys` handle field. So `vesper-gpu-compute`'s `Dev` could not keep its
+table of Vulkan entry points, and each call looked its entry point up again
+(one `dlsym`, about 44 ns on glibc).
+
+A callback type is a `copy` handle whose word is a C function pointer.
+Holding one releases nothing, unlike a `linear` or `affine` extern-type
+handle. So the planner now gives it its own ABI form, `AbiType::Callback`
+(`{"kind":"callback","name":...}` in the interface file). The form is one
+word, allowed wherever a scalar is: a parameter in any mode, a result, a
+field of a copy struct or mirror, and inside `Option`, tuples and sequences.
+Rust sees `vesper_port_abi::FnPtr`, a `repr(transparent)` word with a
+private field, one type per callback type. Rust can hold, compare and hand
+one back, but cannot call it. The word conversions that bindings use
+(`Abi::get`, `mirror_from_words`) can make one from any word, so a binding
+wrapper that takes one is an `unsafe fn`: its caller vouches that each
+pointer is one the library returned and that its target stays loaded for
+every call Vesper makes through it. Extern-type handles keep the
+v4 rule: Rust lends one only directly, as an `in` parameter.
+
+- `@vesper/codegen-export` makes the same decision (`K_CALLBACK`, input
+  class `C_CALLBACK`). Plans, interface JSON and bindings match Rust over
+  the corpus.
+- `crates/vesper-port-pilot` gains `fnptrs.ves`, which is also in the
+  parity corpus. It looks up two pointers through a Rust shim (as `dlsym`
+  would), returns them in a `Table`, takes the table lent and `inout`,
+  hands single pointers out and back, and calls through each.
+  `tests/fnptrs.rs` checks every result. `tests/callback_export.rs` pins the
+  interface and the committed binding on four targets.
