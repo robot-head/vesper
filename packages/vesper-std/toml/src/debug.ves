@@ -1,0 +1,171 @@
+// Rust's `Debug` text of a `str` and of a `char` (`escape_debug_ext`), as
+// serde's error messages and the semver crate print them. Chars that are
+// not printable, or are Grapheme_Extend, become `\u{hex}`; the ranges are
+// in escape.ves.
+
+use self::escape::{
+    ESCAPE_RANGES
+};
+
+// The char at `s[i..]` (valid UTF-8) and its length in bytes.
+pub fn utf8_at(in s: Slice[u8], i: u64) -> (u64, u64) {
+    let b0 = byte(in s, i);
+    if b0 < 0x80 {
+        return (b0, 1);
+    }
+    let b1 = byte(in s, wrapping_add(i, 1)) & 0x3f;
+    if b0 < 0xe0 {
+        return (((b0 & 0x1f) << 6) | b1, 2);
+    }
+    let b2 = byte(in s, wrapping_add(i, 2)) & 0x3f;
+    if b0 < 0xf0 {
+        return (((b0 & 0x0f) << 12) | (b1 << 6) | b2, 3);
+    }
+    let b3 = byte(in s, wrapping_add(i, 3)) & 0x3f;
+    (((b0 & 0x07) << 18) | (b1 << 12) | (b2 << 6) | b3, 4)
+}
+
+fn byte(in s: Slice[u8], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => widen_u64(v),
+        Option::None => 0,
+    }
+}
+
+fn put_utf8(inout out: ChunkSeq[u8], c: u64) {
+    if c < 0x80 {
+        out.push(wrapping_u8(c));
+    } else if c < 0x800 {
+        out.push(wrapping_u8(0xc0 | wrapping_shr_u64(c, 6)));
+        out.push(wrapping_u8(0x80 | (c & 0x3f)));
+    } else if c < 0x10000 {
+        out.push(wrapping_u8(0xe0 | wrapping_shr_u64(c, 12)));
+        out.push(wrapping_u8(0x80 | (wrapping_shr_u64(c, 6) & 0x3f)));
+        out.push(wrapping_u8(0x80 | (c & 0x3f)));
+    } else {
+        out.push(wrapping_u8(0xf0 | wrapping_shr_u64(c, 18)));
+        out.push(wrapping_u8(0x80 | (wrapping_shr_u64(c, 12) & 0x3f)));
+        out.push(wrapping_u8(0x80 | (wrapping_shr_u64(c, 6) & 0x3f)));
+        out.push(wrapping_u8(0x80 | (c & 0x3f)));
+    }
+}
+
+// Whether `c` is in one of the (first, last) pairs of `t`.
+// Six hex digits of ESCAPE_RANGES from byte `at`.
+fn hex6(in t: Slice[u8], at: u64) -> u64 {
+    let mut v: u64 = 0;
+    for i in 0..6 {
+        let d = match t.try_get(wrapping_add(at, i)) {
+            Option::Some(b) => widen_u64(b),
+            Option::None => 48,
+        };
+        let x = if d >= 97 {
+            wrapping_sub(d, 87)
+        } else {
+            wrapping_sub(d, 48)
+        };
+        v = (v << 4) | x;
+    }
+    v
+}
+
+// Binary search of ESCAPE_RANGES: 12 hex digits per (first, last) range.
+fn in_ranges(in t: Slice[u8], c: u64) -> bool {
+    let n = t.len() / 12;
+    let mut lo: u64 = 0;
+    let mut hi = n;
+    loop {
+        if lo >= hi {
+            break false;
+        }
+        let mid = wrapping_shr_u64(wrapping_add(lo, hi), 1);
+        let first = hex6(in t, wrapping_mul(mid, 12));
+        let last = hex6(in t, wrapping_add(wrapping_mul(mid, 12), 6));
+        if c < first {
+            hi = mid;
+        } else if c > last {
+            lo = wrapping_add(mid, 1);
+        } else {
+            break true;
+        }
+    }
+}
+
+fn hex(v: u64) -> u8 {
+    if v < 10 {
+        wrapping_u8(wrapping_add(v, 48))
+    } else {
+        wrapping_u8(wrapping_add(v, 87))
+    }
+}
+
+// One char of a Debug text; `in_str` picks the `str` quoting (escape `"`,
+// keep `'`) over the `char` one.
+fn put_escaped(inout out: ChunkSeq[u8], in t: Slice[u8], c: u64, in_str: bool) {
+    if c == 0 {
+        out.push(92);
+        out.push(48);
+    } else if c == 9 {
+        out.push(92);
+        out.push(116);
+    } else if c == 13 {
+        out.push(92);
+        out.push(114);
+    } else if c == 10 {
+        out.push(92);
+        out.push(110);
+    } else if c == 92 {
+        out.push(92);
+        out.push(92);
+    } else if c == 34 && in_str {
+        out.push(92);
+        out.push(34);
+    } else if c == 39 && !in_str {
+        out.push(92);
+        out.push(39);
+    } else if c >= 32 && c < 127 {
+        out.push(wrapping_u8(c));
+    } else if in_ranges(in t, c) {
+        out.push(92);
+        out.push(117);
+        out.push(123);
+        let mut shift: u64 = 20;
+        let mut started = false;
+        loop {
+            let d = wrapping_shr_u64(c, wrapping_u32(shift)) & 15;
+            if d != 0 || started || shift == 0 {
+                out.push(hex(d));
+                started = true;
+            }
+            if shift == 0 {
+                break;
+            }
+            shift = wrapping_sub(shift, 4);
+        }
+        out.push(125);
+    } else {
+        put_utf8(inout out, c);
+    }
+}
+
+// `format!("{:?}", &s[a..b])`, quotes included.
+pub fn put_debug_str(inout out: ChunkSeq[u8], in s: Slice[u8], a: u64, b: u64) {
+    out.push(34);
+    let mut i = a;
+    loop {
+        if i >= b {
+            break;
+        }
+        let (c, n) = utf8_at(in s, i);
+        put_escaped(inout out, in ESCAPE_RANGES.as_bytes(), c, true);
+        i = wrapping_add(i, n);
+    }
+    out.push(34);
+}
+
+// `format!("{:?}", c)`, quotes included.
+pub fn put_debug_char(inout out: ChunkSeq[u8], c: u64) {
+    out.push(39);
+    put_escaped(inout out, in ESCAPE_RANGES.as_bytes(), c, false);
+    out.push(39);
+}

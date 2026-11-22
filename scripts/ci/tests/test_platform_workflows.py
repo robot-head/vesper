@@ -43,7 +43,7 @@ class PlatformWorkflowTests(unittest.TestCase):
             self.assertEqual(checkout["with"]["ref"], "${{ needs.plan.outputs.sha }}")
             self.assertTrue(any(s.get("name") == "Verify exact checkout" for s in job["steps"]))
         self.assertEqual(mac["timeout-minutes"], "60")
-        self.assertEqual(windows["timeout-minutes"], "60")
+        self.assertEqual(windows["timeout-minutes"], "120")
         for job in (mac, windows):
             commands = "\n".join(s.get("run", "") for s in job["steps"])
             self.assertNotIn("--workspace", commands)
@@ -195,6 +195,27 @@ class PlatformWorkflowTests(unittest.TestCase):
         self.assertIn("website.yml:build", guarded)
         self.assertGreaterEqual(len(guarded), 10)
 
+    def test_self_host_differentials_run_as_their_own_buildbuddy_check(self):
+        # #1519: on one runner the corpus differentials pushed "Test all
+        # targets" past BuildBuddy's one-hour limit.
+        config = yaml.load((ROOT / "buildbuddy.yaml").read_text(), Loader=yaml.BaseLoader)
+        actions = {a["name"]: a for a in config["actions"]}
+        command = lambda name: actions[name]["steps"][-1]["run"]
+        everything = command("Test all targets")
+        self.assertIn("--test_tag_filters=-lean_replay,-self_host", everything)
+        self.assertIn("--build_tag_filters=-lean_replay,-self_host", everything)
+        self_host = command("Self-host differentials")
+        self.assertIn("--build_tests_only", self_host)
+        self.assertIn("--test_tag_filters=self_host,-self_host_codegen,-lean_replay", self_host)
+        codegen = command("Self-host codegen differentials")
+        self.assertIn("--build_tests_only", codegen)
+        self.assertIn("--test_tag_filters=self_host_codegen,-lean_replay", codegen)
+        for name in ("Self-host differentials", "Self-host codegen differentials"):
+            self.assertEqual(actions[name]["timeout"], "60m")
+        defs = (ROOT / "tools/bazel/defs.bzl").read_text()
+        self.assertIn('startswith("self_host_")', defs)
+        self.assertIn('"self_host_codegen"', defs)
+
     def test_native_checks_start_only_after_the_gate_and_buildbuddy(self):
         native = workflow("native-checks.yml")
         self.assertEqual(set(native["on"]), {"status"})
@@ -203,10 +224,12 @@ class PlatformWorkflowTests(unittest.TestCase):
         self.assertEqual(job["runs-on"], "ubuntu-latest")
         steps = job["steps"]
         find = steps[0]["run"]
-        for context in ("Test all targets", "Native and acceptance scripts"):
+        for context in ("Test all targets", "Self-host differentials", "Self-host codegen differentials",
+                        "Native and acceptance scripts"):
             self.assertIn(context, job["if"])
             self.assertIn(f'"{context}"', find)
-        self.assertIn('"$states" != 2', find)
+        self.assertIn('"$states" != 3', find)
+        self.assertIn('"$codegen" != success', find)
         names = [s.get("uses") or s.get("name") for s in steps]
         gate = names.index("./.gate/.github/actions/merge-gate")
         dispatch = next(i for i, s in enumerate(steps) if "gh workflow run" in s.get("run", ""))
@@ -248,7 +271,9 @@ class PlatformWorkflowTests(unittest.TestCase):
         sha = "a" * 40 if sha is None else sha
         if statuses is None:
             statuses = [{"id": 1, "context": "Test all targets", "state": "success"},
-                        {"id": 2, "context": "Native and acceptance scripts", "state": "success"}]
+                        {"id": 2, "context": "Native and acceptance scripts", "state": "success"},
+                        {"id": 4, "context": "Self-host differentials", "state": "success"},
+                        {"id": 6, "context": "Self-host codegen differentials", "state": "success"}]
         job = self.release["jobs"][which]
         step = next(s for s in job["steps"] if s.get("uses") == "actions/github-script@v7")
         code = step["with"]["script"]
@@ -308,11 +333,17 @@ const fn = new Function("github", "context", "core", "process", "require",
 
     def test_release_gate_uses_latest_linux_states_and_fails_closed(self):
         good = [{"id": 1, "context": "Test all targets", "state": "success"},
-                {"id": 2, "context": "Native and acceptance scripts", "state": "success"}]
+                {"id": 2, "context": "Native and acceptance scripts", "state": "success"},
+                {"id": 4, "context": "Self-host differentials", "state": "success"},
+                {"id": 6, "context": "Self-host codegen differentials", "state": "success"}]
         for which in ("linux", "ready"):
             for state in ("failure", "error", "pending"):
-                statuses = good + [{"id": 3, "context": "Test all targets", "state": state}]
-                self.assertFalse(self.gate(which, statuses=statuses)["ok"])
+                for context in ("Test all targets", "Self-host differentials", "Self-host codegen differentials"):
+                    statuses = good + [{"id": 7, "context": context, "state": state}]
+                    self.assertFalse(self.gate(which, statuses=statuses)["ok"])
+            # A candidate without the self-host check (#1519) is not ready.
+            self.assertFalse(self.gate(which, statuses=good[:3])["ok"])
+            self.assertFalse(self.gate(which, statuses=good[:2])["ok"])
             self.assertFalse(self.gate(which, statuses=good[:1])["ok"])
             self.assertFalse(self.gate(which, statuses=[])["ok"])
             # Input order cannot let an old failure replace a newer success.

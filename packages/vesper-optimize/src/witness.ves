@@ -32,7 +32,8 @@ use self::budget::{
     metadata,
     names,
     reserve,
-    work
+    work,
+    work_units
 };
 use self::input::{
     Cert,
@@ -141,10 +142,16 @@ pub copy struct Origin {
     callee: u32
 }
 
-// `BoundSource`.
+// `BoundSource`. `keys` and `consts` mirror `terms` for the interning
+// search (`term_key`), and `stack` and `values` are `bind_source`'s work
+// stacks, kept here so that a reused `Bound` reuses their buffers.
 pub struct Bound {
     kind: u8,
     terms: ChunkSeq[TermRow],
+    keys: ChunkSeq[u64],
+    consts: ChunkSeq[i128],
+    stack: ChunkSeq[Frame],
+    values: ChunkSeq[u32],
     terms_cap: u64,
     root: u32,
     names: ChunkSeq[u32],
@@ -159,6 +166,10 @@ pub fn bound_new() -> Bound {
     Bound {
         kind: 0,
         terms: ChunkSeq::new[TermRow](),
+        keys: ChunkSeq::new[u64](),
+        consts: ChunkSeq::new[i128](),
+        stack: ChunkSeq::new[Frame](),
+        values: ChunkSeq::new[u32](),
         terms_cap: 0,
         root: 0,
         names: ChunkSeq::new[u32](),
@@ -171,13 +182,13 @@ pub fn bound_new() -> Bound {
 }
 
 // A `compare_input` stack entry: a source term and a certificate term.
-copy struct Pair {
+pub copy struct Pair {
     left: u32,
     right: u32
 }
 
 // A `compare_output` stack entry: an expression, a term and its depth.
-copy struct OutFrame {
+pub copy struct OutFrame {
     e: u32,
     id: u32,
     depth: u64
@@ -374,39 +385,64 @@ fn source_type(in t: Tree, in types: ChunkSeq[TypeRow], e: ExprNode, kind: u8) -
     }
 }
 
-// `intern`: a linear search, one unit of work per compared term.
-fn intern_term(
-    inout terms: ChunkSeq[TermRow],
-    inout cap: u64,
-    term: TermRow,
-    inout b: Budget,
-    inout id: u32
-) -> u8 {
-    for i in 0..terms.len() {
-        let e = work(inout b, 1);
-        if e != 0 {
-            return e;
-        }
-        match terms.try_get(i) {
-            Option::Some(existing) => {
-                if same_term(existing, term) {
-                    id = wrapping_u32(i);
-                    return 0;
-                }
-            }
-            Option::None => {}
-        }
+// A bound term's identity apart from its kind (every bound term has the
+// source's kind) and a constant's value: the tag, the operation and the
+// children (term ids and variable indices stay below 2^30).
+fn term_key(term: TermRow) -> u64 {
+    (widen_u64(term.tag) << 62) | (widen_u64(term.op) << 60) | (
+        widen_u64(term.a) << 30
+    ) | widen_u64(term.b)
+}
+
+fn const_at(in consts: ChunkSeq[i128], i: u64) -> i128 {
+    match consts.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
     }
-    let e = limit(wrapping_add(terms.len(), 1), b.max_terms);
+}
+
+// `intern`: a linear search, one unit of work per compared term. The
+// search runs over the `keys` column, and the units are charged at once
+// (`work_units`), which spends and refuses exactly as one charge per
+// compared term does.
+fn intern_term(inout bound: Bound, term: TermRow, inout b: Budget, inout id: u32) -> u8 {
+    let key = term_key(term);
+    let constant = term.tag == T_CONST;
+    let n = bound.keys.len();
+    let mut found = n;
+    let mut i: u64 = 0;
+    for k in bound.keys {
+        if k == key && (!constant || const_at(in bound.consts, i) == term.value) {
+            found = i;
+            break;
+        }
+        i = wrapping_add(i, 1);
+    }
+    let compared = if found < n {
+        wrapping_add(found, 1)
+    } else {
+        n
+    };
+    let e = work_units(inout b, compared);
     if e != 0 {
         return e;
     }
-    let e = reserve(inout b, terms.len(), inout cap, 1, S_TERM);
+    if found < n {
+        id = wrapping_u32(found);
+        return 0;
+    }
+    let e = limit(wrapping_add(n, 1), b.max_terms);
     if e != 0 {
         return e;
     }
-    id = wrapping_u32(terms.len());
-    terms.push(term);
+    let e = reserve(inout b, n, inout bound.terms_cap, 1, S_TERM);
+    if e != 0 {
+        return e;
+    }
+    id = wrapping_u32(n);
+    bound.terms.push(term);
+    bound.keys.push(key);
+    bound.consts.push(term.value);
     0
 }
 
@@ -427,7 +463,7 @@ fn binary_term(kind: u8, wrapping: bool, op: u8, left: u32, right: u32) -> TermR
 
 // A `bind_source` frame: `Enter(expression, depth)` or
 // `Finish(op, wrapping)`.
-copy struct Frame {
+pub copy struct Frame {
     finish: bool,
     e: u32,
     depth: u64,
@@ -477,6 +513,10 @@ pub fn bind_source(
     }
     bound.kind = kind;
     bound.terms.clear();
+    bound.keys.clear();
+    bound.consts.clear();
+    bound.stack.clear();
+    bound.values.clear();
     bound.terms_cap = 0;
     bound.root = 0;
     bound.names.clear();
@@ -485,18 +525,16 @@ pub fn bind_source(
     bound.origins_cap = 0;
     bound.start = source.start;
     bound.end = source.end;
-    let mut stack = ChunkSeq::new[Frame]();
     let mut stack_cap: u64 = 0;
-    let mut values = ChunkSeq::new[u32]();
     let mut values_cap: u64 = 0;
     let e = reserve(inout b, 0, inout stack_cap, 1, S_SOURCE_FRAME);
     if e != 0 {
         return e;
     }
-    stack.push(enter(root, 1));
+    bound.stack.push(enter(root, 1));
     let mut nodes: u64 = 0;
     loop {
-        let frame = match stack.pop() {
+        let frame = match bound.stack.pop() {
             Option::Some(f) => f,
             Option::None => break,
         };
@@ -513,11 +551,11 @@ pub fn bind_source(
             b: 0
         };
         if frame.finish {
-            let right = match values.pop() {
+            let right = match bound.values.pop() {
                 Option::Some(v) => v,
                 Option::None => return E_UNSUPPORTED_AST,
             };
-            let left = match values.pop() {
+            let left = match bound.values.pop() {
                 Option::Some(v) => v,
                 Option::None => return E_UNSUPPORTED_AST,
             };
@@ -590,13 +628,13 @@ pub fn bind_source(
                 if op == 255 {
                     return E_UNSUPPORTED_AST;
                 }
-                let e = reserve(inout b, stack.len(), inout stack_cap, 3, S_SOURCE_FRAME);
+                let e = reserve(inout b, bound.stack.len(), inout stack_cap, 3, S_SOURCE_FRAME);
                 if e != 0 {
                     return e;
                 }
-                stack.push(finish(op, false));
-                stack.push(enter(x.c, deeper));
-                stack.push(enter(x.b, deeper));
+                bound.stack.push(finish(op, false));
+                bound.stack.push(enter(x.c, deeper));
+                bound.stack.push(enter(x.b, deeper));
                 continue;
             } else if x.kind == X_CALL {
                 let mut op: u8 = 0;
@@ -634,34 +672,34 @@ pub fn bind_source(
                             callee: x.a
                         }
                     );
-                let e = reserve(inout b, stack.len(), inout stack_cap, 3, S_SOURCE_FRAME);
+                let e = reserve(inout b, bound.stack.len(), inout stack_cap, 3, S_SOURCE_FRAME);
                 if e != 0 {
                     return e;
                 }
                 let (left, right) = args;
-                stack.push(finish(op, true));
-                stack.push(enter(right, deeper));
-                stack.push(enter(left, deeper));
+                bound.stack.push(finish(op, true));
+                bound.stack.push(enter(right, deeper));
+                bound.stack.push(enter(left, deeper));
                 continue;
             } else {
                 return E_UNSUPPORTED_AST;
             }
         }
         let mut id: u32 = 0;
-        let e = intern_term(inout bound.terms, inout bound.terms_cap, term, inout b, inout id);
+        let e = intern_term(inout bound, term, inout b, inout id);
         if e != 0 {
             return e;
         }
-        let e = reserve(inout b, values.len(), inout values_cap, 1, S_TERM_ID);
+        let e = reserve(inout b, bound.values.len(), inout values_cap, 1, S_TERM_ID);
         if e != 0 {
             return e;
         }
-        values.push(id);
+        bound.values.push(id);
     }
-    if values.len() != 1 {
+    if bound.values.len() != 1 {
         return E_UNSUPPORTED_AST;
     }
-    bound.root = match values.try_get(0) {
+    bound.root = match bound.values.try_get(0) {
         Option::Some(v) => v,
         Option::None => 0,
     };
@@ -692,9 +730,25 @@ fn bound_origin(in bound: Bound, op: u8) -> u32 {
 // ---------------------------------------------------------------- terms
 
 fn saturating_add(a: u64, b: u64) -> u64 {
-    match checked_add_u64(a, b) {
-        Option::Some(v) => v,
-        Option::None => 18446744073709551615,
+    if a > wrapping_sub(18446744073709551615, b) {
+        18446744073709551615
+    } else {
+        wrapping_add(a, b)
+    }
+}
+
+// `n * size` for one of the `S_*` sizes (even, below 2^16), or `OVERFLOW`,
+// which no such product equals (it is odd).
+const OVERFLOW: u64 = 18446744073709551615;
+
+fn bytes_of(n: u64, size: u64) -> u64 {
+    if n < 281474976710656 {
+        wrapping_mul(n, size)
+    } else {
+        match checked_mul_u64(n, size) {
+            Option::Some(v) => v,
+            Option::None => OVERFLOW,
+        }
     }
 }
 
@@ -726,10 +780,10 @@ pub fn validate_terms(
     if e != 0 {
         return e;
     }
-    let bytes = match checked_mul_u64(n, S_TERM) {
-        Option::Some(v) => v,
-        Option::None => return E_LIMIT,
-    };
+    let bytes = bytes_of(n, S_TERM);
+    if bytes == OVERFLOW {
+        return E_LIMIT;
+    }
     let e = metadata(inout b, bytes);
     if e != 0 {
         return e;
@@ -739,12 +793,12 @@ pub fn validate_terms(
     if e != 0 {
         return e;
     }
-    for id in 0..n {
+    let mut id: u64 = 0;
+    for current in terms {
         let e = work(inout b, 8);
         if e != 0 {
             return e;
         }
-        let current = term_at(in terms, wrapping_u32(id));
         if current.kind != bound.kind {
             return E_TYPE_MISMATCH;
         }
@@ -829,6 +883,7 @@ pub fn validate_terms(
             return E_UNSUPPORTED_AST;
         };
         shapes.push(shape);
+        id = wrapping_add(id, 1);
     }
     0
 }
@@ -846,9 +901,14 @@ fn shape_at(in shapes: ChunkSeq[Shape], id: u32) -> Shape {
 }
 
 // `compare_input`: the certificate's input expands to the bound source.
-pub fn compare_input(in bound: Bound, in terms: ChunkSeq[TermRow], input: u32, inout b: Budget)
-    -> u8 {
-    let mut stack = ChunkSeq::new[Pair]();
+pub fn compare_input(
+    in bound: Bound,
+    in terms: ChunkSeq[TermRow],
+    input: u32,
+    inout b: Budget,
+    inout stack: ChunkSeq[Pair]
+) -> u8 {
+    stack.clear();
     let mut cap: u64 = 0;
     let e = reserve(inout b, 0, inout cap, 1, S_INPUT_PAIR);
     if e != 0 {
@@ -941,13 +1001,14 @@ pub fn compare_output(
     candidate: u32,
     in terms: ChunkSeq[TermRow],
     output: u32,
-    inout b: Budget
+    inout b: Budget,
+    inout stack: ChunkSeq[OutFrame]
 ) -> u8 {
     let root = expr_at(in t.ast, candidate);
     if root.start != bound.start || root.end != bound.end {
         return E_OUTPUT_MISMATCH;
     }
-    let mut stack = ChunkSeq::new[OutFrame]();
+    stack.clear();
     let mut cap: u64 = 0;
     let e = reserve(inout b, 0, inout cap, 1, S_OUTPUT_FRAME);
     if e != 0 {
@@ -1024,18 +1085,18 @@ pub fn compare_output(
             if e != 0 {
                 return e;
             }
-            let tbytes = match checked_mul_u64(cap_at(in t.cap1, ei), S_TYPE) {
-                Option::Some(v) => v,
-                Option::None => return E_LIMIT,
-            };
+            let tbytes = bytes_of(cap_at(in t.cap1, ei), S_TYPE);
+            if tbytes == OVERFLOW {
+                return E_LIMIT;
+            }
             let e = metadata(inout b, tbytes);
             if e != 0 {
                 return e;
             }
-            let abytes = match checked_mul_u64(cap_at(in t.cap2, ei), S_ARG) {
-                Option::Some(v) => v,
-                Option::None => return E_LIMIT,
-            };
+            let abytes = bytes_of(cap_at(in t.cap2, ei), S_ARG);
+            if abytes == OVERFLOW {
+                return E_LIMIT;
+            }
             let e = metadata(inout b, abytes);
             if e != 0 {
                 return e;
@@ -1505,6 +1566,25 @@ fn check_rule(
 
 // ---------------------------------------------------------------- verify
 
+// The work buffers of `verify`, which a caller checking many certificates
+// keeps across them (cleared by each use), so their sequences are
+// allocated once.
+pub struct Scratch {
+    bound: Bound,
+    shapes: ChunkSeq[Shape],
+    pairs: ChunkSeq[Pair],
+    frames: ChunkSeq[OutFrame]
+}
+
+pub fn scratch_new() -> Scratch {
+    Scratch {
+        bound: bound_new(),
+        shapes: ChunkSeq::new[Shape](),
+        pairs: ChunkSeq::new[Pair](),
+        frames: ChunkSeq::new[OutFrame]()
+    }
+}
+
 // `verify_with_budget`: the certificate proves the source equal to the
 // candidate, under the budget `b` (continued from the producer).
 pub fn verify(
@@ -1514,7 +1594,8 @@ pub fn verify(
     source: u32,
     candidate: u32,
     in c: Cert,
-    inout b: Budget
+    inout b: Budget,
+    inout s: Scratch
 ) -> u8 {
     if c.schema_version != 1 || c.arithmetic_version != 1 {
         return E_UNSUPPORTED_VERSION;
@@ -1527,36 +1608,34 @@ pub fn verify(
     if e != 0 {
         return e;
     }
-    let pbytes = match checked_mul_u64(c.proofs_cap, S_EQUALITY) {
-        Option::Some(v) => v,
-        Option::None => return E_LIMIT,
-    };
+    let pbytes = bytes_of(c.proofs_cap, S_EQUALITY);
+    if pbytes == OVERFLOW {
+        return E_LIMIT;
+    }
     let e = metadata(inout b, pbytes);
     if e != 0 {
         return e;
     }
-    let tbytes = match checked_mul_u64(c.terms_cap, S_TERM) {
-        Option::Some(v) => v,
-        Option::None => return E_LIMIT,
-    };
+    let tbytes = bytes_of(c.terms_cap, S_TERM);
+    if tbytes == OVERFLOW {
+        return E_LIMIT;
+    }
     let e = metadata(inout b, tbytes);
     if e != 0 {
         return e;
     }
-    let mut bound = bound_new();
-    let e = bind_source(in t, in o, in types, source, inout b, inout bound);
+    let e = bind_source(in t, in o, in types, source, inout b, inout s.bound);
     if e != 0 {
         return e;
     }
-    let mut shapes = ChunkSeq::new[Shape]();
-    let e = validate_terms(in t, in bound, in c.terms, inout b, inout shapes);
+    let e = validate_terms(in t, in s.bound, in c.terms, inout b, inout s.shapes);
     if e != 0 {
         return e;
     }
     if !in_range(in c.terms, c.input) || !in_range(in c.terms, c.output) {
         return E_INVALID_TERM_INDEX;
     }
-    let e = compare_input(in bound, in c.terms, c.input, inout b);
+    let e = compare_input(in s.bound, in c.terms, c.input, inout b, inout s.pairs);
     if e != 0 {
         return e;
     }
@@ -1635,7 +1714,7 @@ pub fn verify(
     if conclusion.from != c.input || conclusion.to != c.output {
         return E_INVALID_EQUALITY;
     }
-    let shape = shape_at(in shapes, c.output);
+    let shape = shape_at(in s.shapes, c.output);
     let e = limit(shape.nodes, b.max_output_nodes);
     if e != 0 {
         return e;
@@ -1648,7 +1727,7 @@ pub fn verify(
     if e != 0 {
         return e;
     }
-    compare_output(in t, in o, in bound, candidate, in c.terms, c.output, inout b)
+    compare_output(in t, in o, in s.bound, candidate, in c.terms, c.output, inout b, inout s.frames)
 }
 
 // The `size_of` constants the differential compares with Rust's: `Term`,
