@@ -126,7 +126,8 @@ vesper-simd = { path = "../vesper-simd" }
 vesper-highlight = { path = "../vesper-highlight/seed", package = "vesper-highlight-seed", features = ["shot"] }
 vesper-span = { path = "../vesper-span/seed", package = "vesper-span-seed" }
 vesper-migrate = { path = "../vesper-migrate" }
-vesper-loom-trust = { path = "../vesper-loom-trust" }
+# The compiler's build links the frozen Rust seed copy of vesper-loom-trust (#1412).
+vesper-loom-trust = { path = "../vesper-loom-trust/seed", package = "vesper-loom-trust-seed" }
 vesper-loom-admission = { path = "../vesper-loom-admission" }
 
 [target.'cfg(unix)'.dependencies]
