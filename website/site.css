@@ -312,6 +312,7 @@ footer { border-top: 1px solid var(--line); }
   border-radius: 3px;
 }
 .editor-highlight span { font-style: normal; }
+.editor-highlight.ends-with-newline::after { content: "\200b"; }
 .tour-editor textarea.has-highlight { color: transparent; background: transparent; }
 .tour-editor textarea.has-highlight::selection { color: transparent; background: color-mix(in srgb, var(--accent) 32%, transparent); }
 @media (forced-colors: active) {

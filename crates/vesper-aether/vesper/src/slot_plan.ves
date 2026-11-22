@@ -1,0 +1,366 @@
+// ---------------------------------------------------------------------------
+// KVM memory-slot plan verification (src/slot_plan.rs).
+
+const KVM_MEM_LOG_DIRTY_PAGES: u32 = 1;
+const KVM_MEM_READONLY: u32 = 2;
+const KNOWN_FLAGS: u32 = 3;
+
+copy struct PlannedRegion {
+    slot: u32,
+    flags: u32,
+    guest_phys_addr: u64,
+    memory_size: u64,
+    userspace_addr: u64
+}
+
+copy struct KvmHostLimits {
+    max_slots: u32,
+    readonly_mem: bool,
+    guest_phys_bits: u8
+}
+
+// `PlanError` from `verify` and `verify_cross_vm` (counts as u64).
+copy enum SlotError {
+    InvalidLimits,
+    TooManyRegions {
+        count: u64,
+        max: u64
+    },
+    ZeroSized {
+        slot: u32
+    },
+    Unaligned {
+        slot: u32
+    },
+    Overflow {
+        slot: u32
+    },
+    NullHost {
+        slot: u32
+    },
+    UnknownFlags {
+        slot: u32,
+        flags: u32
+    },
+    ReadOnlyUnsupported {
+        slot: u32
+    },
+    DirtyLogReadOnly {
+        slot: u32
+    },
+    SlotIdOutOfRange {
+        slot: u32,
+        max: u32
+    },
+    GuestAddressTooWide {
+        slot: u32,
+        bits: u8
+    },
+    DuplicateSlot {
+        slot: u32
+    },
+    GuestOverlap {
+        a: u32,
+        b: u32
+    },
+    HostOverlap {
+        a: u32,
+        b: u32
+    },
+    DuplicateVm {
+        vm_id: u64
+    },
+    CrossVmHostOverlap {
+        vm_a: u64,
+        slot_a: u32,
+        vm_b: u64,
+        slot_b: u32
+    }
+}
+
+fn read_only(r: PlannedRegion) -> bool {
+    r.flags & KVM_MEM_READONLY != 0
+}
+
+fn region_at(in regions: Slice[PlannedRegion], i: u64) -> PlannedRegion {
+    match regions.try_get(i) {
+        Option::Some(r) => r,
+        Option::None => PlannedRegion {
+            slot: 0,
+            flags: 0,
+            guest_phys_addr: 0,
+            memory_size: 0,
+            userspace_addr: 0
+        },
+    }
+}
+
+// The per-region rules, in the Rust order.
+fn region_error(r: PlannedRegion, limits: KvmHostLimits) -> Option[SlotError] {
+    let slot = r.slot;
+    if r.memory_size == 0 {
+        return Option::Some(
+            SlotError::ZeroSized {
+                slot: slot
+            }
+        );
+    }
+    if !aligned_4k(r.guest_phys_addr)
+        || !aligned_4k(r.userspace_addr)
+        || !aligned_4k(r.memory_size) {
+        return Option::Some(
+            SlotError::Unaligned {
+                slot: slot
+            }
+        );
+    }
+    if add_overflows(r.guest_phys_addr, r.memory_size)
+        || add_overflows(r.userspace_addr, r.memory_size) {
+        return Option::Some(
+            SlotError::Overflow {
+                slot: slot
+            }
+        );
+    }
+    if r.userspace_addr == 0 {
+        return Option::Some(
+            SlotError::NullHost {
+                slot: slot
+            }
+        );
+    }
+    if r.flags & (KNOWN_FLAGS ^ 4294967295) != 0 {
+        return Option::Some(
+            SlotError::UnknownFlags {
+                slot: slot,
+                flags: r.flags
+            }
+        );
+    }
+    if read_only(r) && !limits.readonly_mem {
+        return Option::Some(
+            SlotError::ReadOnlyUnsupported {
+                slot: slot
+            }
+        );
+    }
+    if read_only(r) && r.flags & KVM_MEM_LOG_DIRTY_PAGES != 0 {
+        return Option::Some(
+            SlotError::DirtyLogReadOnly {
+                slot: slot
+            }
+        );
+    }
+    if slot >= limits.max_slots {
+        return Option::Some(
+            SlotError::SlotIdOutOfRange {
+                slot: slot,
+                max: limits.max_slots
+            }
+        );
+    }
+    let bits = widen_u64(limits.guest_phys_bits);
+    if bits < 64 {
+        let end = wrapping_add(r.guest_phys_addr, r.memory_size);
+        if end > wrapping_shl_u64(1, wrapping_u32(bits)) {
+            return Option::Some(
+                SlotError::GuestAddressTooWide {
+                    slot: slot,
+                    bits: limits.guest_phys_bits
+                }
+            );
+        }
+    }
+    Option::None
+}
+
+// `first_overlap`: sort by (start, end, id) and keep the running reach.
+fn first_overlap(inout starts: ChunkSeq[u64], inout ends: ChunkSeq[u64], inout ids: ChunkSeq[u64])
+    -> Option[(u32, u32)] {
+    sort3(inout starts, inout ends, inout ids);
+    let n = starts.len();
+    let mut have = false;
+    let mut reach_end: u64 = 0;
+    let mut reach_id: u64 = 0;
+    for i in 0..n {
+        let start = at(in starts, i);
+        let end = at(in ends, i);
+        let id = at(in ids, i);
+        if have {
+            if start < reach_end {
+                return Option::Some((wrapping_u32(reach_id), wrapping_u32(id)));
+            }
+            if end > reach_end {
+                reach_end = end;
+                reach_id = id;
+            }
+        } else {
+            have = true;
+            reach_end = end;
+            reach_id = id;
+        }
+    }
+    Option::None
+}
+
+// The smallest value that occurs twice, if any (sorts `values`).
+fn first_duplicate(inout values: ChunkSeq[u64]) -> Option[u64] {
+    let n = values.len();
+    let mut z1: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+    z1.resize(n, 0);
+    let mut z2: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+    z2.resize(n, 0);
+    sort3(inout values, inout z1, inout z2);
+    for k in 1..n {
+        let a = at(in values, wrapping_sub(k, 1));
+        let b = at(in values, k);
+        if a == b {
+            return Option::Some(a);
+        }
+    }
+    Option::None
+}
+
+// `KvmSlotPlan::verify` over a plan's regions (already non-empty and at
+// most MAX_PLAN_REGIONS, which `from_regions` checks).
+pub fn slot_plan_verify(in regions: Slice[PlannedRegion], limits: KvmHostLimits)
+    -> Option[SlotError] {
+    let bits = widen_u64(limits.guest_phys_bits);
+    if limits.max_slots == 0 || bits == 0 || bits > 64 {
+        return Option::Some(SlotError::InvalidLimits);
+    }
+    let n = regions.len();
+    if n > widen_u64(limits.max_slots) {
+        return Option::Some(
+            SlotError::TooManyRegions {
+                count: n,
+                max: widen_u64(limits.max_slots)
+            }
+        );
+    }
+    for i in 0..n {
+        match region_error(region_at(in regions, i), limits) {
+            Option::Some(e) => return Option::Some(e),
+            Option::None => (),
+        }
+    }
+    let mut ids: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+    let mut gs: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+    let mut ge: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+    let mut hs: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+    let mut he: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+    for i in 0..n {
+        let r = region_at(in regions, i);
+        ids.push(widen_u64(r.slot));
+        gs.push(r.guest_phys_addr);
+        ge.push(wrapping_add(r.guest_phys_addr, r.memory_size));
+        hs.push(r.userspace_addr);
+        he.push(wrapping_add(r.userspace_addr, r.memory_size));
+    }
+    let mut sorted_ids = ChunkSeq::with_capacity[u64](n);
+    sorted_ids.extend(ids.as_slice());
+    match first_duplicate(inout sorted_ids) {
+        Option::Some(s) => return Option::Some(
+            SlotError::DuplicateSlot {
+                slot: wrapping_u32(s)
+            }
+        ),
+        Option::None => (),
+    }
+    let mut ids2 = ChunkSeq::with_capacity[u64](n);
+    ids2.extend(ids.as_slice());
+    match first_overlap(inout gs, inout ge, inout ids) {
+        Option::Some((a, b)) => return Option::Some(
+            SlotError::GuestOverlap {
+                a: a,
+                b: b
+            }
+        ),
+        Option::None => (),
+    }
+    match first_overlap(inout hs, inout he, inout ids2) {
+        Option::Some((a, b)) => return Option::Some(
+            SlotError::HostOverlap {
+                a: a,
+                b: b
+            }
+        ),
+        Option::None => (),
+    }
+    Option::None
+}
+
+// `verify_cross_vm`: `vm_ids` lists each plan's VM id, `regions` all their
+// regions and `region_vm[i]` the VM of region `i`. Entries with the same
+// host range keep their input order (the Rust sort leaves that order
+// unspecified).
+pub fn slot_plan_verify_cross_vm(
+    in vm_ids: Slice[u64],
+    in regions: Slice[PlannedRegion],
+    in region_vm: Slice[u64]
+) -> Option[SlotError] {
+    let mut vms: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](vm_ids.len());
+    for i in 0..vm_ids.len() {
+        match vm_ids.try_get(i) {
+            Option::Some(v) => vms.push(v),
+            Option::None => (),
+        }
+    }
+    match first_duplicate(inout vms) {
+        Option::Some(v) => return Option::Some(
+            SlotError::DuplicateVm {
+                vm_id: v
+            }
+        ),
+        Option::None => (),
+    }
+    let n = regions.len();
+    let mut starts: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+    let mut ends: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+    let mut pos: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+    for i in 0..n {
+        let r = region_at(in regions, i);
+        starts.push(r.userspace_addr);
+        ends.push(wrapping_add(r.userspace_addr, r.memory_size));
+        pos.push(i);
+    }
+    sort3(inout starts, inout ends, inout pos);
+    let mut have = false;
+    let mut reach: u64 = 0;
+    let mut rs: u64 = 0;
+    let mut re: u64 = 0;
+    for k in 0..n {
+        let s = at(in starts, k);
+        let e = at(in ends, k);
+        let i = at(in pos, k);
+        if have && s < re {
+            let a = region_at(in regions, reach);
+            let b = region_at(in regions, i);
+            let identical_shared = s == rs && e == re && read_only(b) && read_only(a);
+            if !identical_shared {
+                let vm_a = match region_vm.try_get(reach) {
+                    Option::Some(v) => v,
+                    Option::None => 0,
+                };
+                let vm_b = match region_vm.try_get(i) {
+                    Option::Some(v) => v,
+                    Option::None => 0,
+                };
+                return Option::Some(
+                    SlotError::CrossVmHostOverlap {
+                        vm_a: vm_a,
+                        slot_a: a.slot,
+                        vm_b: vm_b,
+                        slot_b: b.slot
+                    }
+                );
+            }
+            continue;
+        }
+        have = true;
+        reach = i;
+        rs = s;
+        re = e;
+    }
+    Option::None
+}

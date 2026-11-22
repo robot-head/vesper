@@ -51,6 +51,8 @@ use self::tiled::{
 };
 
 const BOX_OOM_STATUS: i64 = 72;
+// The trap code after the exit call (`TrapCode::unwrap_user(72)`).
+const BOX_OOM_TRAP: u32 = 72;
 // `AtomicRmwOp::Add` in the shim's codes.
 const ATOMIC_ADD: u32 = 1;
 
@@ -131,7 +133,7 @@ fn box_define_alloc(inout m: Module, live: DataId) -> bool eff [Ffi[Cranelift]] 
     let status = rt_k(inout b, BOX_OOM_STATUS);
     let sargs = vals1(status);
     ins_call(inout b, exit_ref, in sargs.as_slice());
-    ins_trap(inout b, trap_user(72));
+    ins_trap(inout b, trap_user(BOX_OOM_TRAP));
 
     switch_to_block(inout b, ok);
     box_count(inout b, in m, live, 1);

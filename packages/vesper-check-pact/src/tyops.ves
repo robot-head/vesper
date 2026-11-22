@@ -1,0 +1,561 @@
+// The type operations of the trait frontend over `@vesper/check-data`'s
+// hash-consed arena: projection encodings (`ast::as_projection`),
+// `contains_projection`, `mentions`, `Frontend::conform_type` (a trait
+// signature instantiated at one conformance), `check::compatible`, the
+// impl-key encoding (`key_segment`) and `row_arg`.
+
+use @vesper/check-data::types::{
+    EffNode,
+    Types,
+    Vars,
+    substitute_row
+};
+use @vesper/check-data::names::{
+    Names
+};
+use @vesper/check-data::util::{
+    add,
+    n32,
+    u32_at,
+    w
+};
+use self::decl::{
+    Conf,
+    Decls,
+    TraitRow
+};
+
+const NONE32: u32 = 4294967295;
+const K_LIT: u8 = 0;
+const K_NAMED: u8 = 1;
+const K_TUPLE: u8 = 2;
+const K_FN: u8 = 3;
+const K_ROW: u8 = 4;
+const K_INFER: u8 = 5;
+
+// Names the frontend compares against, interned once.
+pub copy struct Sy {
+    self_ty: u32,
+    self_param: u32,
+    projection: u32,
+    any_trait: u32,
+    never: u32,
+    unit: u32,
+    empty: u32,
+}
+
+pub fn sy_new(inout names: Names) -> Sy {
+    Sy {
+        self_ty: names.intern(in "Self".as_bytes()),
+        self_param: names.intern(in "self".as_bytes()),
+        projection: names.intern(in "$projection".as_bytes()),
+        any_trait: names.intern(in "$any".as_bytes()),
+        never: names.intern(in "Never".as_bytes()),
+        unit: names.intern(in "Unit".as_bytes()),
+        empty: names.intern(in "".as_bytes()),
+    }
+}
+
+pub fn contains32(in s: ChunkSeq[u32], x: u32) -> bool {
+    for i in 0..s.len() {
+        if u32_at(in s, i) == x {
+            return true;
+        }
+    }
+    false
+}
+
+// `BTreeSet::insert`: false when `x` was already present.
+pub fn insert32(inout s: ChunkSeq[u32], x: u32) -> bool {
+    if contains32(in s, x) {
+        return false;
+    }
+    s.push(x);
+    true
+}
+
+// ------------------------------------------------------------ projections
+
+// `ast::as_projection(t).is_some()`: `$projection[self, Trait[args], A]`.
+pub fn is_projection(in t: Types, sy: Sy, ty: u32) -> bool {
+    let n = t.node(ty);
+    if n.kind != K_NAMED || n.name != sy.projection || n.n != 3 {
+        return false;
+    }
+    let tr = t.node(t.arg(ty, 1));
+    let a = t.node(t.arg(ty, 2));
+    tr.kind == K_NAMED && a.kind == K_NAMED && a.n == 0
+}
+
+pub fn proj_self(in t: Types, ty: u32) -> u32 {
+    t.arg(ty, 0)
+}
+
+// The projection's trait name, or NONE32 for the shorthand `T::A`.
+pub fn proj_trait(in t: Types, sy: Sy, ty: u32) -> u32 {
+    let n = t.node(t.arg(ty, 1)).name;
+    if n == sy.any_trait {
+        NONE32
+    } else {
+        n
+    }
+}
+
+// The `Trait[args]` part (its arguments are the projection's trait args).
+pub fn proj_trait_ty(in t: Types, ty: u32) -> u32 {
+    t.arg(ty, 1)
+}
+
+pub fn proj_assoc(in t: Types, ty: u32) -> u32 {
+    t.node(t.arg(ty, 2)).name
+}
+
+// `*t == Type::named("Self")`.
+pub fn is_self(in t: Types, sy: Sy, ty: u32) -> bool {
+    let n = t.node(ty);
+    n.kind == K_NAMED && n.name == sy.self_ty && n.n == 0
+}
+
+fn row_contains_projection(in t: Types, sy: Sy, r: u32) -> bool {
+    let row = t.row(r);
+    for i in 0..w(row.n) {
+        let e = t.effect_at(add(w(row.a), i));
+        for j in 0..w(e.n) {
+            if contains_projection(in t, sy, u32_at(in t.items, add(w(e.a), j))) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+// `contains_projection`.
+pub fn contains_projection(in t: Types, sy: Sy, ty: u32) -> bool {
+    let n = t.node(ty);
+    if n.kind == K_NAMED {
+        if n.name == sy.projection {
+            return true;
+        }
+        for i in 0..w(n.n) {
+            if contains_projection(in t, sy, t.arg(ty, i)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if n.kind == K_TUPLE {
+        for i in 0..w(n.n) {
+            if contains_projection(in t, sy, t.arg(ty, i)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if n.kind == K_FN {
+        for i in 0..w(n.n) {
+            if contains_projection(in t, sy, t.arg(ty, i)) {
+                return true;
+            }
+        }
+        return contains_projection(in t, sy, n.r) || row_contains_projection(in t, sy, n.r2);
+    }
+    if n.kind == K_ROW {
+        return row_contains_projection(in t, sy, n.r2);
+    }
+    false
+}
+
+fn row_mentions(in t: Types, r: u32, name: u32) -> bool {
+    let row = t.row(r);
+    for i in 0..w(row.n) {
+        let e = t.effect_at(add(w(row.a), i));
+        for j in 0..w(e.n) {
+            if mentions(in t, u32_at(in t.items, add(w(e.a), j)), name) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+// `mentions(t, name)`: the type names `name` anywhere.
+pub fn mentions(in t: Types, ty: u32, name: u32) -> bool {
+    let n = t.node(ty);
+    if n.kind == K_NAMED {
+        if n.name == name {
+            return true;
+        }
+        for i in 0..w(n.n) {
+            if mentions(in t, t.arg(ty, i), name) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if n.kind == K_TUPLE {
+        for i in 0..w(n.n) {
+            if mentions(in t, t.arg(ty, i), name) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if n.kind == K_FN {
+        for i in 0..w(n.n) {
+            if mentions(in t, t.arg(ty, i), name) {
+                return true;
+            }
+        }
+        return mentions(in t, n.r, name) || row_mentions(in t, n.r2, name);
+    }
+    if n.kind == K_ROW {
+        return row_mentions(in t, n.r2, name);
+    }
+    false
+}
+
+// -------------------------------------------------------- conform_type
+
+// Whether trait `tr` declares associated type `name`.
+pub fn trait_has_assoc(in d: Decls, tr: TraitRow, name: u32) -> bool {
+    for i in 0..w(tr.an) {
+        if d.assoc(add(w(tr.aa), i)).name == name {
+            return true;
+        }
+    }
+    false
+}
+
+// The type conformance `c` binds associated type `name` to (the first
+// binding of that name), or NONE32.
+pub fn binding_of(in d: Decls, c: Conf, name: u32) -> u32 {
+    for i in 0..w(c.bn) {
+        let b = d.bind(add(w(c.ba), i));
+        if b.name == name {
+            return b.ty;
+        }
+    }
+    NONE32
+}
+
+// `Frontend::conform_type`: replaces `Self`, the trait parameters (in
+// `vars`) and `Self::A` / `<Self as Trait>::A` by conformance `c`'s values.
+// `stack` holds the associated types being expanded on this path: a cyclic
+// binding (E0601) is left unexpanded instead of recursing forever.
+pub fn conform_type(
+    inout t: Types,
+    in d: Decls,
+    sy: Sy,
+    tr: TraitRow,
+    c: Conf,
+    ty: u32,
+    in vars: Vars,
+    inout stack: ChunkSeq[u32]
+) -> u32 {
+    if is_projection(in t, sy, ty) {
+        let pt = proj_trait(in t, sy, ty);
+        let assoc = proj_assoc(in t, ty);
+        if is_self(in t, sy, proj_self(in t, ty))
+            && (pt == NONE32 || pt == tr.name)
+            && trait_has_assoc(in d, tr, assoc)
+            && !contains32(in stack, assoc) {
+            let v = binding_of(in d, c, assoc);
+            if v != NONE32 {
+                let depth = stack.len();
+                stack.push(assoc);
+                let out = conform_type(inout t, in d, sy, tr, c, v, in vars, inout stack);
+                stack.truncate(depth);
+                return out;
+            }
+        }
+    }
+    let n = t.node(ty);
+    if n.kind == K_NAMED {
+        if n.n == 0 {
+            let v = vars.get(n.name);
+            if v != NONE32 {
+                return v;
+            }
+            return ty;
+        }
+        let mut args: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](w(n.n));
+        for i in 0..w(n.n) {
+            let a = t.arg(ty, i);
+            let x = conform_type(inout t, in d, sy, tr, c, a, in vars, inout stack);
+            args.push(x);
+        }
+        return t.named(n.name, in args);
+    }
+    if n.kind == K_TUPLE {
+        if n.n == 0 {
+            return ty;
+        }
+        let mut args: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](w(n.n));
+        for i in 0..w(n.n) {
+            let a = t.arg(ty, i);
+            let x = conform_type(inout t, in d, sy, tr, c, a, in vars, inout stack);
+            args.push(x);
+        }
+        return t.tuple(in args);
+    }
+    if n.kind == K_FN {
+        let mut args: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](w(n.n));
+        let mut passes: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](w(n.n));
+        for i in 0..w(n.n) {
+            let a = t.arg(ty, i);
+            passes.push(t.param_pass(ty, i));
+            let x = conform_type(inout t, in d, sy, tr, c, a, in vars, inout stack);
+            args.push(x);
+        }
+        let result = conform_type(inout t, in d, sy, tr, c, n.r, in vars, inout stack);
+        let row = conform_row(inout t, in d, sy, tr, c, n.r2, in vars, inout stack);
+        return t.mk_with(K_FN, n.mode, 0, in args, in passes, result, row, 0);
+    }
+    if n.kind == K_ROW {
+        let row = conform_row(inout t, in d, sy, tr, c, n.r2, in vars, inout stack);
+        return t.row_type(row);
+    }
+    ty
+}
+
+// `go_effects`: arguments conformed, then `substitute_effects` by `vars`.
+pub fn conform_row(
+    inout t: Types,
+    in d: Decls,
+    sy: Sy,
+    tr: TraitRow,
+    c: Conf,
+    r: u32,
+    in vars: Vars,
+    inout stack: ChunkSeq[u32]
+) -> u32 {
+    let row = t.row(r);
+    let mut es: ChunkSeq[EffNode] = ChunkSeq::new[EffNode]();
+    let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..w(row.n) {
+        let e = t.effect_at(add(w(row.a), i));
+        let a = n32(args.len());
+        for j in 0..w(e.n) {
+            let x = u32_at(in t.items, add(w(e.a), j));
+            let y = conform_type(inout t, in d, sy, tr, c, x, in vars, inout stack);
+            args.push(y);
+        }
+        es
+            .push(
+            EffNode {
+                label: e.label,
+                name: e.name,
+                a: a,
+                n: e.n
+            }
+        );
+    }
+    let mapped = t.mk_row(in es, in args, row.tail);
+    substitute_row(inout t, mapped, in vars)
+}
+
+// --------------------------------------------------------- compatibility
+
+// `check::compatible(a, b)`. Integer literal types never occur in the
+// signatures this pass compares (the parser cannot write one), so a
+// literal is only compatible with another literal here.
+pub fn compatible(in t: Types, sy: Sy, a: u32, b: u32) -> bool {
+    let x = t.node(a);
+    let y = t.node(b);
+    if x.kind == K_INFER || y.kind == K_INFER || (y.kind == K_NAMED && y.name == sy.never) {
+        return true;
+    }
+    if x.kind == K_LIT || y.kind == K_LIT {
+        return x.kind == K_LIT && y.kind == K_LIT;
+    }
+    if x.kind == K_NAMED && y.kind == K_NAMED {
+        if x.name != y.name || x.n != y.n {
+            return false;
+        }
+        for i in 0..w(x.n) {
+            if !compatible(in t, sy, t.arg(a, i), t.arg(b, i)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    if x.kind == K_TUPLE && y.kind == K_TUPLE {
+        if x.n != y.n {
+            return false;
+        }
+        for i in 0..w(x.n) {
+            if !compatible(in t, sy, t.arg(a, i), t.arg(b, i)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    if x.kind == K_NAMED && y.kind == K_TUPLE {
+        return x.name == sy.unit && y.n == 0;
+    }
+    if x.kind == K_TUPLE && y.kind == K_NAMED {
+        return y.name == sy.unit && x.n == 0;
+    }
+    if x.kind == K_ROW && y.kind == K_ROW {
+        return a == b;
+    }
+    if x.kind == K_FN && y.kind == K_FN {
+        if !effects_include(in t, sy, x.r2, y.r2) || y.mode > x.mode || x.n != y.n {
+            return false;
+        }
+        for i in 0..w(x.n) {
+            if t.param_pass(a, i) != t.param_pass(b, i) {
+                return false;
+            }
+            if !compatible(in t, sy, t.arg(b, i), t.arg(a, i)) {
+                return false;
+            }
+        }
+        return compatible(in t, sy, x.r, y.r);
+    }
+    false
+}
+
+// `check::effects_include(expected, actual)` over two row ids.
+pub fn effects_include(in t: Types, sy: Sy, expected: u32, actual: u32) -> bool {
+    let ex = t.row(expected);
+    let ac = t.row(actual);
+    if ac.tail != 0 && ex.tail == 0 {
+        return false;
+    }
+    if ex.tail != 0 {
+        return true;
+    }
+    for i in 0..w(ac.n) {
+        let e = t.effect_at(add(w(ac.a), i));
+        let mut found = false;
+        for j in 0..w(ex.n) {
+            let x = t.effect_at(add(w(ex.a), j));
+            if !found && x.name == e.name && (x.label == 0 || x.label == e.label) && x.n == e.n {
+                let mut all = true;
+                for k in 0..w(x.n) {
+                    let xa = u32_at(in t.items, add(w(x.a), k));
+                    let ea = u32_at(in t.items, add(w(e.a), k));
+                    if !compatible(in t, sy, xa, ea) {
+                        all = false;
+                    }
+                }
+                if all {
+                    found = true;
+                }
+            }
+        }
+        if !found {
+            return false;
+        }
+    }
+    true
+}
+
+// `same_type`: compatible both ways.
+pub fn same_type(in t: Types, sy: Sy, a: u32, b: u32) -> bool {
+    compatible(in t, sy, a, b) && compatible(in t, sy, b, a)
+}
+
+// ------------------------------------------------------------ impl keys
+
+fn push_bytes(inout o: ChunkSeq[u8], in s: Str) {
+    o.extend(in s.as_bytes());
+}
+
+fn segment_list(in t: Types, in names: Names, ty: u32, inout o: ChunkSeq[u8]) {
+    let n = t.node(ty);
+    for i in 0..w(n.n) {
+        if i > 0 {
+            push_bytes(inout o, "-1-");
+        }
+        key_segment(in t, in names, t.arg(ty, i), inout o);
+    }
+}
+
+// `key_segment`: the injective impl-key encoding of a type.
+pub fn key_segment(in t: Types, in names: Names, ty: u32, inout o: ChunkSeq[u8]) {
+    let n = t.node(ty);
+    if n.kind == K_NAMED {
+        names.write(n.name, inout o);
+        if n.n > 0 {
+            push_bytes(inout o, "-0-");
+            segment_list(in t, in names, ty, inout o);
+            push_bytes(inout o, "-2");
+        }
+        return;
+    }
+    if n.kind == K_TUPLE {
+        if n.n == 0 {
+            push_bytes(inout o, "Unit");
+            return;
+        }
+        push_bytes(inout o, "3-0-");
+        segment_list(in t, in names, ty, inout o);
+        push_bytes(inout o, "-2");
+        return;
+    }
+    if n.kind == K_ROW {
+        push_bytes(inout o, "4-0-");
+        let row = t.row(n.r2);
+        let mut first = true;
+        for i in 0..w(row.n) {
+            let e = t.effect_at(add(w(row.a), i));
+            if !first {
+                push_bytes(inout o, "-1-");
+            }
+            first = false;
+            names.write(e.name, inout o);
+            if e.n > 0 {
+                push_bytes(inout o, "-0-");
+                for j in 0..w(e.n) {
+                    if j > 0 {
+                        push_bytes(inout o, "-1-");
+                    }
+                    key_segment(in t, in names, u32_at(in t.items, add(w(e.a), j)), inout o);
+                }
+                push_bytes(inout o, "-2");
+            }
+        }
+        if row.tail != 0 {
+            if !first {
+                push_bytes(inout o, "-1-");
+            }
+            names.write(wrapping_sub(row.tail, 1), inout o);
+        }
+        push_bytes(inout o, "-2");
+        return;
+    }
+    push_bytes(inout o, "5");
+}
+
+// `row_arg`: a trait argument for an effect-row parameter, as a row.
+pub fn row_arg(inout t: Types, a: u32) -> u32 {
+    let n = t.node(a);
+    if n.kind == K_ROW {
+        return a;
+    }
+    if n.kind == K_NAMED {
+        let mut es: ChunkSeq[EffNode] = ChunkSeq::new[EffNode]();
+        let mut args: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](w(n.n));
+        for i in 0..w(n.n) {
+            args.push(t.arg(a, i));
+        }
+        es
+            .push(
+            EffNode {
+                label: 0,
+                name: n.name,
+                a: 0,
+                n: n.n
+            }
+        );
+        let r = t.mk_row(in es, in args, 0);
+        return t.row_type(r);
+    }
+    if n.kind == K_TUPLE && n.n == 0 {
+        let r = t.empty_row;
+        return t.row_type(r);
+    }
+    a
+}

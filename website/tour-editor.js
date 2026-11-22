@@ -12,21 +12,51 @@ if ('Worker' in globalThis && 'WebAssembly' in globalThis) {
   let worker, timer, highlightTimer, pending;
   let revision = 0;
   const template = document.createElement('template');
+  const painted = document.createElement('span');
+  mirror.append(painted);
+  let paintedSource = '';
+
+  function boundary(offset) {
+    const walker = document.createTreeWalker(painted, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      if (offset <= node.length) return [node, offset];
+      offset -= node.length;
+    }
+    return [painted, painted.childNodes.length];
+  }
+
+  // Keep the unchanged tokens painted while the worker reclassifies the edit.
+  function updatePaint(sourceText) {
+    if (mirror.hidden || sourceText === paintedSource) return;
+    let start = 0;
+    while (start < paintedSource.length && start < sourceText.length
+      && paintedSource[start] === sourceText[start]) start++;
+    let oldEnd = paintedSource.length;
+    let newEnd = sourceText.length;
+    while (oldEnd > start && newEnd > start && paintedSource[oldEnd - 1] === sourceText[newEnd - 1]) {
+      oldEnd--;
+      newEnd--;
+    }
+    const range = document.createRange();
+    range.setStart(...boundary(start));
+    range.setEnd(...boundary(oldEnd));
+    range.deleteContents();
+    if (start < newEnd) range.insertNode(document.createTextNode(sourceText.slice(start, newEnd)));
+    // Merge text nodes from successive keystrokes before the worker replies.
+    painted.normalize();
+    paintedSource = sourceText;
+    mirror.classList.toggle('ends-with-newline', sourceText.endsWith('\n'));
+    syncScroll();
+  }
 
   function syncScroll() {
     mirror.scrollTop = source.scrollTop;
     mirror.scrollLeft = source.scrollLeft;
   }
 
-  function clearHighlight() {
-    mirror.hidden = true;
-    source.classList.remove('has-highlight');
-  }
-
   function stop() {
     worker?.terminate();
     worker = undefined;
-    clearHighlight();
   }
 
   function finish(result) {
@@ -65,8 +95,9 @@ if ('Worker' in globalThis && 'WebAssembly' in globalThis) {
     template.innerHTML = result.output;
     const code = template.content.querySelector('pre > code');
     if (!code || code.textContent !== source.value) return;
-    mirror.replaceChildren(...code.childNodes);
-    if (source.value.endsWith('\n')) mirror.append('\u200b');
+    painted.replaceChildren(...code.childNodes);
+    paintedSource = source.value;
+    mirror.classList.toggle('ends-with-newline', paintedSource.endsWith('\n'));
     mirror.hidden = false;
     source.classList.add('has-highlight');
     syncScroll();
@@ -89,14 +120,14 @@ if ('Worker' in globalThis && 'WebAssembly' in globalThis) {
 
   function refreshHighlight() {
     revision++;
-    clearHighlight();
+    updatePaint(source.value);
     clearTimeout(highlightTimer);
     highlightTimer = setTimeout(() => {
       try {
         worker ??= startWorker();
         worker.postMessage({ source: source.value, mode: 'highlight', id: revision });
       } catch {
-        clearHighlight();
+        // The textarea remains readable if a worker could not start.
       }
     }, 50);
   }
@@ -133,7 +164,7 @@ if ('Worker' in globalThis && 'WebAssembly' in globalThis) {
     if (format) format.disabled = false;
     output.hidden = true;
     status.textContent = 'Example restored.';
-    refreshHighlight();
+    queueMicrotask(refreshHighlight);
   });
   source.addEventListener('input', refreshHighlight);
   source.addEventListener('scroll', syncScroll);

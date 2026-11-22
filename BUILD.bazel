@@ -194,6 +194,13 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # Self-hosting SH2 lane 13 (#1185): the trait frontend's declaration
+        # pass in Vesper over the same corpus. Anchored globs.
+        "test/self_host_check_pact": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
         # Loops, atomics and the stack bound (SH2 lane 10, #1182).
         "test/self_host_check_loops_atomics": glob([
             "examples/**",
@@ -317,6 +324,13 @@ vesper_crate(
             "tests/vector_f32.rs",
             "tests/wide_integers.rs",
         ],
+        # SH4 lane 15 (#1289): @vesper/wasm-backend against src/wasm_backend
+        # over the tests/wasm_backend.rs programs and the corpus.
+        "test/self_host_wasm_backend": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]) + ["tests/wasm_backend.rs"],
         # SH4 lane 8 (#1282): the aggregate decisions of native lowering in
         # Vesper against src/native_aggregates.rs over the same corpus.
         "test/self_host_codegen_aggregates": glob([
@@ -934,8 +948,12 @@ vesper_crate(
         # The eBPF backend differential (#1290) loads every corpus world.
         "test/self_host_ebpf_backend": "long",
         "test/self_host_codegen_calls": "long",
+        # The wasm backend differential: about 10 min in a debug build.
+        "test/self_host_wasm_backend": "long",
         "test/self_host_codegen_scalar": "long",
         "test/self_host_check_harness": "long",
+        # The trait declaration differential (#1185) checks every corpus world.
+        "test/self_host_check_pact": "long",
         # The loops and atomics differential (#1182) passed 900 s on loaded CI.
         "test/self_host_check_loops_atomics": "eternal",
         # The tensor types differential (#1186) JIT-compiles the port and
@@ -1117,6 +1135,17 @@ vesper_package(
     name = "bounds_hoist_package",
     srcs = glob(["packages/vesper-bounds-hoist/src/**/*.ves"]),
     manifest = "packages/vesper-bounds-hoist/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":check_data_package",
+        ":place_ir_package",
+    ],
+)
+
+vesper_package(
+    name = "wasm_backend_package",
+    srcs = glob(["packages/vesper-wasm-backend/src/**/*.ves"]),
+    manifest = "packages/vesper-wasm-backend/Loom.toml",
     visibility = ["//visibility:public"],
     deps = [
         ":check_data_package",

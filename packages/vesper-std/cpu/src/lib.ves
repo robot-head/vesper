@@ -12,6 +12,26 @@
 // `cap_user_rdpmc`), and PMCCNTR_EL0 / PMXEVCNTR_EL0 need PMUSERENR_EL0.
 // The time-stamp and generic-timer reads are enabled on common systems.
 
+// `cpuid` of `leaf` and `subleaf`: `(eax, ebx, ecx, edx)`. CPUID runs in
+// user space on every x86_64 system.
+pub fn x86_cpuid(leaf: u32, subleaf: u32) -> (u32, u32, u32, u32) eff [Ffi[StdCpu]] {
+    let mut r = CpuidRegs {
+        eax: 0,
+        ebx: 0,
+        ecx: 0,
+        edx: 0,
+    };
+    StdCpu::vstd_cpu_cpuid(leaf, subleaf, inout r);
+    (r.eax, r.ebx, r.ecx, r.edx)
+}
+
+// Whether the CPU has RDRAND (CPUID.01H:ECX bit 30), which
+// `x86_rdrand64` needs.
+pub fn x86_has_rdrand() -> bool eff [Ffi[StdCpu]] {
+    let (_, _, ecx, _) = x86_cpuid(1, 0);
+    ((ecx >> 30) & 1) == 1
+}
+
 // The time-stamp counter after earlier instructions complete (`lfence;
 // rdtsc`).
 pub fn x86_rdtsc() -> u64 eff [Ffi[StdCpu]] {
@@ -26,8 +46,8 @@ pub fn x86_rdpmc(index: u32) -> u64 eff [Ffi[StdCpu]] {
 
 // One hardware random word (`rdrand`), or `None` when the generator had
 // none ready. Callers retry a few times, as Intel recommends. RDRAND is an
-// invalid opcode on a CPU without it (CPUID.01H:ECX bit 30), so callers
-// check that first.
+// invalid opcode on a CPU without it, so callers check `x86_has_rdrand`
+// first.
 pub fn x86_rdrand64() -> Option[u64] eff [Ffi[StdCpu]] {
     let mut out: u64 = 0;
     if StdCpu::vstd_cpu_rdrand64(inout out) == 0 {

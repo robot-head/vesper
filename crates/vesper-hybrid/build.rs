@@ -39,6 +39,12 @@ const MODULES: &[(&str, &str, &str)] = &[
         "modules/codegen_calls",
         "port/codegen_calls.rs",
     ),
+    // SH4 lane 15 (#1289): the wasm backend's core module and WIT.
+    (
+        "hybrid_wasm_backend",
+        "modules/wasm_backend",
+        "port/wasm_backend.rs",
+    ),
     // SH4 lane 11 (#1285): vector and TiledSeq operations, through the
     // `numeric` hook.
     (

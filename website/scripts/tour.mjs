@@ -1,3 +1,4 @@
+import { evaluate } from '../tour-wasm.js';
 import { tourPrograms } from './tour-programs.mjs';
 import { mkdir, readdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
@@ -57,7 +58,7 @@ function editor(program) {
   </section>`;
 }
 
-export async function buildTour(root, out) {
+export async function buildTour(root, out, wasm) {
   const source = (await readFile(resolve(root, 'tour.md'), 'utf8')).replaceAll('\r\n', '\n');
   const lessons = [];
   for (const group of source.split(/^# /m).slice(1)) {
@@ -75,7 +76,12 @@ export async function buildTour(root, out) {
   for (const name of await readdir(dir)) {
     if (name.endsWith('.html') && !filenames.has(name)) await unlink(resolve(dir, name));
   }
-  const programs = tourPrograms(lessons);
+  const programs = tourPrograms(lessons).map((program, i) => {
+    if (!program) return null;
+    const formatted = evaluate(wasm, { source: program.source, mode: 'format' });
+    if (!formatted.ok) throw new Error(lessons[i].file + ' · starter formatting failed: ' + formatted.output);
+    return { ...program, source: formatted.output };
+  });
   for (const [i, step] of lessons.entries()) {
     const subjects = [...new Set(lessons.map(s => s.subject))];
     const menu = subjects.map(subject => `<li>${escape(subject)}<ol start="${1 + lessons.findIndex(s => s.subject === subject)}">${lessons.filter(s => s.subject === subject).map(s =>

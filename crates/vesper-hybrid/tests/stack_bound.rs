@@ -161,9 +161,13 @@ fn stack_bound_commands_match_the_default_compiler() {
     let default = default_compiler();
     let hybrid = hybrid();
     let mut differ = vec![];
+    let mut first_success = None;
     let commands = commands(&scratch);
-    for (args, out) in &commands {
+    for (i, (args, out)) in commands.iter().enumerate() {
         let d = run(&default, args, out.as_deref(), false);
+        if first_success.is_none() && d.output.status.success() {
+            first_success = Some(i);
+        }
         let h = run(&hybrid, args, out.as_deref(), false);
         let mut what = vec![];
         if d.output.status.code() != h.output.status.code() {
@@ -188,8 +192,12 @@ fn stack_bound_commands_match_the_default_compiler() {
             ));
         }
     }
-    // The hybrid really answered from Vesper.
-    let (args, out) = &commands[0];
+    // The hybrid really answered from Vesper. The count is printed by an
+    // `atexit` handler, which a failing command skips on Windows: the CLI
+    // exits through `std::process::exit`, which there is `ExitProcess` and
+    // does not run the C runtime's exit handlers. So ask a command that
+    // succeeds (#1486).
+    let (args, out) = &commands[first_success.expect("a stack-bound command that succeeds")];
     let stats = run(&hybrid, args, out.as_deref(), true);
     let stderr = String::from_utf8_lossy(&stats.output.stderr);
     let calls: u64 = stderr

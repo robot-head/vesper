@@ -19,6 +19,7 @@ export async function checkTourWasm(dist, tour, pages) {
     if (!example) continue;
     const [, mode, encoded] = example;
     const source = encoded.replace(/&(lt|gt|quot|amp);/g, (_, key) => entities[key]);
+    assert.deepEqual(invoke(source, 'format'), { ok: true, output: source }, file + ' · starter formatting');
     const result = invoke(source, mode);
     const expected = expectedErrors.get(file);
     assert.equal(result.ok, !expected, file + ' · ' + result.output);
