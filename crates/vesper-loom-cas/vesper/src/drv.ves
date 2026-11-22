@@ -1,0 +1,420 @@
+// Derivation inputs (src/derivation.rs, schema v1, little-endian):
+//
+//   "VLDI" | u32 schema=1 | u8 output_domain |
+//   str builder | str builder_version | u8 has_target [str target] |
+//   u32 n_options | n x (str key | str value) |
+//   u32 n_inputs  | n x (str name | 34-byte object id)
+//   str := u32 len | UTF-8 bytes
+//
+// Strings are handled as spans: (offset, length) word pairs into one byte
+// buffer, in the order builder, builder version, target (when present),
+// option keys and values interleaved, then input names.
+use self::DrvErr;
+use self::name::{
+    is_utf8,
+    has_control
+};
+
+const MAX_LABEL_BYTES: u64 = 4096;
+const MAX_MAP_ENTRIES: u64 = 4096;
+
+// `info` fields (see `drv_encode`).
+const F_BUILDER: u64 = 0;
+const F_VERSION: u64 = 1;
+const F_TARGET: u64 = 2;
+const F_KEY: u64 = 3;
+const F_VALUE: u64 = 4;
+const F_NAME: u64 = 5;
+const F_OPTIONS: u64 = 6;
+const F_INPUTS: u64 = 7;
+
+fn byte(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(b) => b,
+        Option::None => 0,
+    }
+}
+
+fn word(in s: Slice[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(b) => b,
+        Option::None => 0,
+    }
+}
+
+fn tagged(field: u64, index: u64) -> u64 {
+    wrapping_shl_u64(field, 32) | index
+}
+
+// `check_value`: at most 4096 bytes and no control character; `label`
+// also refuses the empty string (`check_label`).
+// On failure `info2` is the string's offset * 8192 + its length (at most
+// 8191 here), for the error's value.
+fn check(
+    in buf: Slice[u8],
+    in spans: Slice[u64],
+    i: u64,
+    label: bool,
+    field: u64,
+    inout info: u64,
+    inout info2: u64
+) eff [Fail[DrvErr]] {
+    let at = word(in spans, wrapping_mul(i, 2));
+    let n = word(in spans, wrapping_add(wrapping_mul(i, 2), 1));
+    let end = wrapping_add(at, n);
+    if (label && n == 0) || n > MAX_LABEL_BYTES || has_control(in buf[at..end]) {
+        info = tagged(field, i);
+        let mut shown = n;
+        if shown > 8191 {
+            shown = 8191;
+        }
+        info2 = wrapping_add(wrapping_mul(at, 8192), shown);
+        Fail::raise(DrvErr::InvalidLabel);
+    }
+}
+
+// `DerivationInputs::validate` over spans.
+fn validate(
+    domain: u8,
+    has_target: bool,
+    n_options: u64,
+    n_inputs: u64,
+    in buf: Slice[u8],
+    in spans: Slice[u64],
+    inout info: u64,
+    inout info2: u64
+) eff [Fail[DrvErr]] {
+    if domain == 1 {
+        Fail::raise(DrvErr::SourceOutputDomain);
+    }
+    check(in buf, in spans, 0, true, F_BUILDER, inout info, inout info2);
+    check(in buf, in spans, 1, true, F_VERSION, inout info, inout info2);
+    let mut base: u64 = 2;
+    if has_target {
+        check(in buf, in spans, 2, true, F_TARGET, inout info, inout info2);
+        base = 3;
+    }
+    if n_options > MAX_MAP_ENTRIES {
+        info = tagged(F_OPTIONS, 0);
+        Fail::raise(DrvErr::TooManyEntries);
+    }
+    let mut j: u64 = 0;
+    loop {
+        if j >= n_options {
+            break;
+        }
+        check(
+            in buf,
+            in spans,
+            wrapping_add(base, wrapping_mul(j, 2)),
+            true,
+            F_KEY,
+            inout info,
+            inout info2
+        );
+        j = wrapping_add(j, 1);
+    }
+    j = 0;
+    loop {
+        if j >= n_options {
+            break;
+        }
+        check(
+            in buf,
+            in spans,
+            wrapping_add(base, wrapping_add(wrapping_mul(j, 2), 1)),
+            false,
+            F_VALUE,
+            inout info,
+            inout info2
+        );
+        j = wrapping_add(j, 1);
+    }
+    if n_inputs == 0 {
+        Fail::raise(DrvErr::NoInputs);
+    }
+    if n_inputs > MAX_MAP_ENTRIES {
+        info = tagged(F_INPUTS, 0);
+        Fail::raise(DrvErr::TooManyEntries);
+    }
+    let names = wrapping_add(base, wrapping_mul(n_options, 2));
+    j = 0;
+    loop {
+        if j >= n_inputs {
+            break;
+        }
+        check(in buf, in spans, wrapping_add(names, j), true, F_NAME, inout info, inout info2);
+        j = wrapping_add(j, 1);
+    }
+}
+
+fn push_le(inout out: ChunkSeq[u8], v: u64, n: u64) {
+    let at = out.len();
+    out.resize(wrapping_add(at, n), 0);
+    if n == 4 {
+        out.try_write_u32_le(at, wrapping_u32(v));
+    } else {
+        out.try_write_u64_le(at, v);
+    }
+}
+
+fn push_span(inout out: ChunkSeq[u8], in buf: Slice[u8], in spans: Slice[u64], i: u64) {
+    let at = word(in spans, wrapping_mul(i, 2));
+    let n = word(in spans, wrapping_add(wrapping_mul(i, 2), 1));
+    push_le(inout out, n, 4);
+    out.extend(in buf[at..wrapping_add(at, n)]);
+}
+
+pub fn drv_encode_into(
+    domain: u8,
+    has_target: bool,
+    n_options: u64,
+    n_inputs: u64,
+    in strs: Slice[u8],
+    in ends: Slice[u64],
+    in ids: Slice[u8],
+    inout info: u64
+) -> ChunkSeq[u8] eff [Fail[DrvErr]] {
+    let mut spans: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](wrapping_mul(ends.len(), 2));
+    let mut start: u64 = 0;
+    let mut i: u64 = 0;
+    loop {
+        if i >= ends.len() {
+            break;
+        }
+        let end = word(in ends, i);
+        spans.push(start);
+        spans.push(wrapping_sub(end, start));
+        start = end;
+        i = wrapping_add(i, 1);
+    }
+    let mut info2: u64 = 0;
+    validate(
+        domain,
+        has_target,
+        n_options,
+        n_inputs,
+        in strs,
+        in spans.as_slice(),
+        inout info,
+        inout info2
+    );
+    let mut out: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](wrapping_add(64, strs.len()));
+    out.extend(in "VLDI".as_bytes());
+    push_le(inout out, 1, 4);
+    out.push(domain);
+    push_span(inout out, in strs, in spans.as_slice(), 0);
+    push_span(inout out, in strs, in spans.as_slice(), 1);
+    let mut base: u64 = 2;
+    if has_target {
+        out.push(1);
+        push_span(inout out, in strs, in spans.as_slice(), 2);
+        base = 3;
+    } else {
+        out.push(0);
+    }
+    push_le(inout out, n_options, 4);
+    let mut j: u64 = 0;
+    loop {
+        if j >= wrapping_mul(n_options, 2) {
+            break;
+        }
+        push_span(inout out, in strs, in spans.as_slice(), wrapping_add(base, j));
+        j = wrapping_add(j, 1);
+    }
+    let names = wrapping_add(base, wrapping_mul(n_options, 2));
+    push_le(inout out, n_inputs, 4);
+    j = 0;
+    loop {
+        if j >= n_inputs {
+            break;
+        }
+        push_span(inout out, in strs, in spans.as_slice(), wrapping_add(names, j));
+        let id = wrapping_mul(j, 34);
+        out.extend(in ids[id..wrapping_add(id, 34)]);
+        j = wrapping_add(j, 1);
+    }
+    out
+}
+
+fn read_le(in s: Slice[u8], at: u64, n: u64) -> u64 {
+    if n == 8 {
+        return match s.try_read_u64_le(at) {
+            Option::Some(v) => v,
+            Option::None => 0
+        };
+    }
+    if n == 4 {
+        return match s.try_read_u32_le(at) {
+            Option::Some(v) => widen_u64(v),
+            Option::None => 0
+        };
+    }
+    match s.try_read_u16_le(at) {
+        Option::Some(v) => widen_u64(v),
+        Option::None => 0
+    }
+}
+
+// Read `n` bytes at `pos`, or raise Truncated.
+fn need(in s: Slice[u8], pos: u64, n: u64) eff [Fail[DrvErr]] {
+    if wrapping_sub(s.len(), pos) < n || pos > s.len() {
+        Fail::raise(DrvErr::Truncated);
+    }
+}
+
+// One `str` at `pos`: appends its span and returns the next position.
+fn read_str(
+    in s: Slice[u8],
+    pos: u64,
+    inout spans: ChunkSeq[u64],
+    inout info: u64,
+    inout info2: u64
+) -> u64 eff [Fail[DrvErr]] {
+    need(in s, pos, 4);
+    let n = read_le(in s, pos, 4);
+    if n > MAX_LABEL_BYTES {
+        info = n;
+        Fail::raise(DrvErr::StringTooLong);
+    }
+    let at = wrapping_add(pos, 4);
+    need(in s, at, n);
+    if !is_utf8(in s[at..wrapping_add(at, n)]) {
+        info = at;
+        info2 = n;
+        Fail::raise(DrvErr::StringNotUtf8);
+    }
+    spans.push(at);
+    spans.push(n);
+    wrapping_add(at, n)
+}
+
+// Whether span a is at or after span b in byte order.
+fn not_before(in s: Slice[u8], in spans: Slice[u64], a: u64, b: u64) -> bool {
+    let pa = word(in spans, wrapping_mul(a, 2));
+    let na = word(in spans, wrapping_add(wrapping_mul(a, 2), 1));
+    let pb = word(in spans, wrapping_mul(b, 2));
+    let nb = word(in spans, wrapping_add(wrapping_mul(b, 2), 1));
+    let mut i: u64 = 0;
+    loop {
+        if i >= na || i >= nb {
+            return na >= nb;
+        }
+        let x = byte(in s, wrapping_add(pa, i));
+        let y = byte(in s, wrapping_add(pb, i));
+        if x != y {
+            return x > y;
+        }
+        i = wrapping_add(i, 1);
+    }
+}
+
+pub fn drv_scan(in s: Slice[u8], inout info: u64, inout info2: u64)
+    -> ChunkSeq[u64] eff [Fail[DrvErr]] {
+    need(in s, 0, 4);
+    if byte(in s, 0) != 86 || byte(in s, 1) != 76 || byte(in s, 2) != 68 || byte(in s, 3) != 73 {
+        Fail::raise(DrvErr::BadMagic);
+    }
+    need(in s, 4, 4);
+    let schema = read_le(in s, 4, 4);
+    if schema != 1 {
+        info = schema;
+        Fail::raise(DrvErr::UnsupportedSchema);
+    }
+    need(in s, 8, 1);
+    let domain = byte(in s, 8);
+    if domain < 1 || domain > 3 {
+        info = widen_u64(domain);
+        Fail::raise(DrvErr::UnknownDomain);
+    }
+    let mut spans: ChunkSeq[u64] = ChunkSeq::new();
+    let mut pos = read_str(in s, 9, inout spans, inout info, inout info2);
+    pos = read_str(in s, pos, inout spans, inout info, inout info2);
+    need(in s, pos, 1);
+    let t = byte(in s, pos);
+    pos = wrapping_add(pos, 1);
+    let mut has_target = false;
+    if t == 1 {
+        pos = read_str(in s, pos, inout spans, inout info, inout info2);
+        has_target = true;
+    } else if t != 0 {
+        Fail::raise(DrvErr::BadMagic);
+    }
+    need(in s, pos, 4);
+    let n_options = read_le(in s, pos, 4);
+    pos = wrapping_add(pos, 4);
+    if n_options > MAX_MAP_ENTRIES {
+        info = tagged(F_OPTIONS, 0);
+        Fail::raise(DrvErr::TooManyEntries);
+    }
+    let mut j: u64 = 0;
+    loop {
+        if j >= n_options {
+            break;
+        }
+        pos = read_str(in s, pos, inout spans, inout info, inout info2);
+        pos = read_str(in s, pos, inout spans, inout info, inout info2);
+        let key = wrapping_sub(wrapping_shr_u64(spans.len(), 1), 2);
+        if j > 0 && not_before(in s, in spans.as_slice(), wrapping_sub(key, 2), key) {
+            info = F_OPTIONS;
+            Fail::raise(DrvErr::NotSorted);
+        }
+        j = wrapping_add(j, 1);
+    }
+    need(in s, pos, 4);
+    let n_inputs = read_le(in s, pos, 4);
+    pos = wrapping_add(pos, 4);
+    if n_inputs > MAX_MAP_ENTRIES {
+        info = tagged(F_INPUTS, 0);
+        Fail::raise(DrvErr::TooManyEntries);
+    }
+    let mut ids: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n_inputs);
+    j = 0;
+    loop {
+        if j >= n_inputs {
+            break;
+        }
+        pos = read_str(in s, pos, inout spans, inout info, inout info2);
+        need(in s, pos, 34);
+        let dt = byte(in s, pos);
+        let kt = byte(in s, wrapping_add(pos, 1));
+        if dt < 1 || dt > 3 || kt < 1 || kt > 2 {
+            Fail::raise(DrvErr::InvalidObjectId);
+        }
+        ids.push(pos);
+        pos = wrapping_add(pos, 34);
+        let name = wrapping_sub(wrapping_shr_u64(spans.len(), 1), 1);
+        if j > 0 && not_before(in s, in spans.as_slice(), wrapping_sub(name, 1), name) {
+            info = F_INPUTS;
+            Fail::raise(DrvErr::NotSorted);
+        }
+        j = wrapping_add(j, 1);
+    }
+    if pos != s.len() {
+        Fail::raise(DrvErr::TrailingBytes);
+    }
+    validate(
+        domain,
+        has_target,
+        n_options,
+        n_inputs,
+        in s,
+        in spans.as_slice(),
+        inout info,
+        inout info2
+    );
+    let mut out: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](
+        wrapping_add(4, wrapping_add(spans.len(), ids.len()))
+    );
+    out.push(widen_u64(domain));
+    if has_target {
+        out.push(1);
+    } else {
+        out.push(0);
+    }
+    out.push(n_options);
+    out.push(n_inputs);
+    out.extend(in spans.as_slice());
+    out.extend(in ids.as_slice());
+    out
+}
