@@ -106,6 +106,11 @@ mod bounds_hoist_binding;
 #[path = "../port/pact.rs"]
 mod pact_binding;
 
+#[rustfmt::skip]
+#[allow(clippy::all)]
+#[path = "../port/doc.rs"]
+mod doc_binding;
+
 #[path = "parse_words.rs"]
 mod parse_words;
 
@@ -220,6 +225,8 @@ static PACT_CALLS: AtomicU64 = AtomicU64::new(0);
 static PLACE_IR_CALLS: AtomicU64 = AtomicU64::new(0);
 /// Programs `modules/bounds_hoist` hoisted.
 static BOUNDS_HOIST_CALLS: AtomicU64 = AtomicU64::new(0);
+/// JSON texts and pages rendered by the Vesper doc module.
+static DOC_CALLS: AtomicU64 = AtomicU64::new(0);
 
 fn count() {
     LAYOUT_CALLS.fetch_add(1, Relaxed);
@@ -498,6 +505,23 @@ const VESPER_IR_CHECK: vesper::ir_check::IrCheckTable = vesper::ir_check::IrChec
             |rust| *rust == diagnostics,
         );
         diagnostics
+    },
+};
+
+/// `vesper_doc::swap::RenderTable` from `modules/doc`: the JSON writer and
+/// the static and linked pages of `@vesper/doc`.
+const VESPER_DOC: vesper_doc::swap::RenderTable = vesper_doc::swap::RenderTable {
+    pretty_json: |request| {
+        DOC_CALLS.fetch_add(1, Relaxed);
+        doc_binding::doc_pretty_json(request)
+    },
+    static_page: |request| {
+        DOC_CALLS.fetch_add(1, Relaxed);
+        doc_binding::doc_static_page(request)
+    },
+    linked_page: |request| {
+        DOC_CALLS.fetch_add(1, Relaxed);
+        doc_binding::doc_linked_page(request)
     },
 };
 
@@ -1387,6 +1411,12 @@ extern "C" fn install() {
     if vesper::ir_swap::install(VESPER_IR_PASSES).is_err() {
         std::process::abort();
     }
+    // The request layout the Rust encoder writes must be the module's.
+    if doc_binding::doc_format() != vesper_doc::swap::FORMAT
+        || vesper_doc::swap::install_render(VESPER_DOC).is_err()
+    {
+        std::process::abort();
+    }
     // `VESPER_HYBRID_RUST_PRODUCER=1` keeps the Rust producer behind the
     // Vesper gate: the differential's check of the optimizer's accepted
     // equal-cost ties (tests/differential.rs).
@@ -1518,6 +1548,10 @@ extern "C" fn report() {
     eprintln!(
         "vesper-hybrid: the command layers printed {} times from Vesper",
         crate::commands::PRINTS.load(Relaxed)
+    );
+    eprintln!(
+        "vesper-hybrid: doc answered {} calls from Vesper",
+        DOC_CALLS.load(Relaxed)
     );
 }
 
