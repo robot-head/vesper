@@ -174,6 +174,9 @@ static CODEGEN_DECLINED: AtomicU64 = AtomicU64::new(0);
 /// Programs the Vesper wasm backend compiled, and left to Rust.
 static WASM_CALLS: AtomicU64 = AtomicU64::new(0);
 static WASM_DECLINED: AtomicU64 = AtomicU64::new(0);
+/// Components `@vesper/wit-component` wrapped, and left to wit-component.
+static WRAP_CALLS: AtomicU64 = AtomicU64::new(0);
+static WRAP_DECLINED: AtomicU64 = AtomicU64::new(0);
 /// `numeric` requests (vectors, `TiledSeq`) the Vesper module emitted, and
 /// declined.
 static NUMERIC_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -683,15 +686,16 @@ fn vesper_aggregate(lent: &mut vesper::codegen_swap::Lent<'_, '_>) -> Result<boo
 
 /// The `wasm` hook of `vesper::codegen_swap` from `modules/wasm_backend`:
 /// `@vesper/wasm-backend` writes the core module and the WIT, and
-/// wit-component wraps them here. Errors (so the messages stay Rust's) and
-/// programs with handlers or host capabilities (not ported yet) decline to
-/// the Rust backend.
+/// `@vesper/wit-component` wraps them into the component (#1334), with
+/// Rust's wit-component where it declines (host imports). Errors (so the
+/// messages stay Rust's) and programs with handlers or host capabilities
+/// (not ported yet) decline to the Rust backend.
 fn vesper_wasm(
     world: &vesper::check::World,
     entry: &str,
     options: &vesper::wasm_backend::WasmOptions,
 ) -> Option<Result<vesper::wasm_backend::WasmArtifact, vesper::wasm_backend::WasmError>> {
-    match wasm_words::compile_with(world, entry, options, wasm_backend_binding::compile_words) {
+    match compile_wasm(world, entry, options) {
         Some(artifact) => {
             WASM_CALLS.fetch_add(1, Relaxed);
             Some(Ok(artifact))
@@ -701,6 +705,100 @@ fn vesper_wasm(
             None
         }
     }
+}
+
+/// `wasm_words::compile_with` over the binding, with the component from
+/// Vesper.
+fn compile_wasm(
+    w: &vesper::check::World,
+    entry: &str,
+    o: &vesper::wasm_backend::WasmOptions,
+) -> Option<vesper::wasm_backend::WasmArtifact> {
+    if !w.functions.contains_key(entry) {
+        return None;
+    }
+    let program = wasm_words::backend_program(w, o)?;
+    let input = wasm_words::wasm_input(w, &program, entry, o)?;
+    let wasm_words::Outcome::Module {
+        core,
+        wit,
+        functions,
+    } = wasm_words::outcome(&wasm_backend_binding::compile_words(&input))
+    else {
+        return None;
+    };
+    match wrap_component(&core, &wit, o.world) {
+        Some(component) => {
+            WRAP_CALLS.fetch_add(1, Relaxed);
+            Some(artifact(w, entry, o, core, component, wit, functions))
+        }
+        None => {
+            WRAP_DECLINED.fetch_add(1, Relaxed);
+            Some(wasm_words::artifact(w, entry, o, core, wit, functions))
+        }
+    }
+}
+
+/// `wasm_words::artifact` with the component given: the artifact of a
+/// module without handlers or host capabilities.
+fn artifact(
+    w: &vesper::check::World,
+    entry: &str,
+    o: &vesper::wasm_backend::WasmOptions,
+    core: Vec<u8>,
+    component: Vec<u8>,
+    wit: String,
+    functions: usize,
+) -> vesper::wasm_backend::WasmArtifact {
+    use vesper::wasm_backend::{ENTRY_INTERFACE, WasmWorld};
+    let f = &w.functions[entry];
+    vesper::wasm_backend::WasmArtifact {
+        core,
+        component,
+        wit,
+        world: o.world,
+        export: match o.world {
+            WasmWorld::Command => format!("{ENTRY_INTERFACE}#main"),
+            WasmWorld::NexusPlugin => "run".to_owned(),
+        },
+        params: f.params.iter().map(|p| p.ty.clone()).collect(),
+        result: vesper::numeric::default_type(&f.result),
+        stack_switching: false,
+        imports: vec![],
+        handlers: vec![],
+        functions,
+    }
+}
+
+/// `@vesper/wit-component`'s component for a core module and its WIT, or
+/// `None` where it declines (modules/wasm_backend `wrap_words`).
+fn wrap_component(
+    core: &[u8],
+    wit: &str,
+    world: vesper::wasm_backend::WasmWorld,
+) -> Option<Vec<u8>> {
+    let mut input = Vec::with_capacity(5 + wit.len() + core.len());
+    input.push(match world {
+        vesper::wasm_backend::WasmWorld::Command => 0,
+        vesper::wasm_backend::WasmWorld::NexusPlugin => 1,
+    });
+    input.extend_from_slice(&u32::try_from(wit.len()).ok()?.to_le_bytes());
+    input.extend_from_slice(wit.as_bytes());
+    input.extend_from_slice(core);
+    let words = wasm_backend_binding::wrap_words(&input);
+    if words.first() != Some(&0) {
+        return None;
+    }
+    let len = usize::try_from(*words.get(1)?).ok()?;
+    let mut bytes = Vec::with_capacity(len + 8);
+    for x in &words[2..] {
+        bytes.extend_from_slice(&x.to_le_bytes());
+    }
+    if bytes.len() < len {
+        return None;
+    }
+    bytes.truncate(len);
+    Some(bytes)
 }
 
 /// The `numeric` hook of `vesper::codegen_swap` from
@@ -1129,6 +1227,11 @@ extern "C" fn report() {
         "vesper-hybrid: wasm backend compiled {} programs from Vesper ({} declined)",
         WASM_CALLS.load(Relaxed),
         WASM_DECLINED.load(Relaxed)
+    );
+    eprintln!(
+        "vesper-hybrid: wit-component wrapped {} components from Vesper ({} declined)",
+        WRAP_CALLS.load(Relaxed),
+        WRAP_DECLINED.load(Relaxed)
     );
     eprintln!(
         "vesper-hybrid: codegen emitted {} numeric requests from Vesper ({} declined)",

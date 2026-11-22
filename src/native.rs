@@ -1522,6 +1522,11 @@ fn define_instances_observed_with_trace<M: Module>(
         linkage.normalize_references(&mut ctx.func);
         if operands_only {
             crate::native_clif_opt::run(&mut ctx.func);
+            let simd = matches!(
+                m.isa().triple().architecture,
+                target_lexicon::Architecture::X86_64 | target_lexicon::Architecture::Aarch64(_)
+            );
+            crate::native_vectorize::run(&mut ctx.func, simd);
         }
         // No JIT caller reads the CLIF text, and printing it costs as much
         // as half of Cranelift's own work on a large function (#1151).
@@ -7207,7 +7212,9 @@ impl<M: Module> Codegen<'_, '_, M> {
         let Some(f) = self.world.functions.get(function) else {
             return Ok(None);
         };
-        if !f.generics.is_empty() || !f.effects.instances.is_empty() || f.effects.tail.is_some() {
+        // Capability and foreign effects need no evidence, so the body keeps
+        // the word ABI; any other worker row (`Alloc`) runs sequentially.
+        if !f.generics.is_empty() || f.effects.tail.is_some() || !capability_only(f) {
             return Ok(None);
         }
         let Some(&id) = self.ids.get(&instance_key(function, &BTreeMap::new())) else {

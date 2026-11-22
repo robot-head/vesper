@@ -9,3 +9,4 @@ capability_ceiling = ["Fail", "Alloc"]
 "@vesper/check-data" = { version = "^0.1", path = "../../../../packages/vesper-check-data" }
 "@vesper/place-ir" = { version = "^0.1", path = "../../../../packages/vesper-place-ir" }
 "@vesper/wasm-backend" = { version = "^0.1", path = "../../../../packages/vesper-wasm-backend" }
+"@vesper/wit-component" = { version = "^0.1", path = "../../../../packages/vesper-wit-component" }
