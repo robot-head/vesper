@@ -16,9 +16,15 @@ use self::memo::{
     oracle_read
 };
 
-const OP_NEW_INPUT: u64 = 1;
-const OP_SET_INPUT: u64 = 2;
-const OP_FETCH: u64 = 3;
+// A script op's tag.
+enum Op: _ {
+    NewInput = 1,
+    SetInput = 2,
+    Fetch = 3
+}
+
+// The harness's little-endian words.
+const WORD_BYTES: u64 = 8;
 
 copy struct Reader {
     pos: u64
@@ -29,7 +35,7 @@ fn word(in b: Slice[u8], inout r: Reader) -> u64 {
         Option::Some(x) => x,
         Option::None => 0,
     };
-    r.pos = wrapping_add(r.pos, 8);
+    r.pos = wrapping_add(r.pos, WORD_BYTES);
     x
 }
 
@@ -71,11 +77,11 @@ pub fn memo_replay(in input: Str) -> ChunkSeq[u64] {
     let mut fetched: ChunkSeq[u64] = ChunkSeq::new();
     for i in 0..ops {
         let op = word(in b, inout r);
-        if op == OP_NEW_INPUT {
+        if op == Op::NewInput {
             let _ = input_new(inout db);
-        } else if op == OP_SET_INPUT {
+        } else if op == Op::SetInput {
             input_set(inout db, word(in b, inout r));
-        } else if op == OP_FETCH {
+        } else if op == Op::Fetch {
             let q = word(in b, inout r);
             let f = word(in b, inout r);
             fetched.push(fetch(inout db, q, f));

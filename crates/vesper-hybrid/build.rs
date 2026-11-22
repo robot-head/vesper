@@ -69,6 +69,14 @@ const DIVERGENT_CHECK_LAYOUT_EDIT: (&str, &str) = (
     "    layout_words(in input[0..0])\n",
 );
 
+/// The same divergence on the encode-once path (#1276): every part reads as
+/// empty, so each scoped layout is of the wrong type, with no ADTs.
+#[cfg(feature = "divergent")]
+const DIVERGENT_SCOPED_LAYOUT_EDIT: (&str, &str) = (
+    "    layout_part(inout s.c, in part)\n",
+    "    layout_part(inout s.c, in part[0..0])\n",
+);
+
 /// The IR check's divergence check: every program gets one made-up E0410
 /// (`divergent_words` in modules/ir_check), so every checked file fails.
 #[cfg(feature = "divergent-ir-check")]
@@ -83,6 +91,13 @@ const DIVERGENT_IR_CHECK_EDIT: (&str, &str) = (
 const DIVERGENT_DOC_EDIT: (&str, &str) = (
     "(sink page: ChunkSeq[u8]) -> ChunkSeq[u8] {\n    page\n",
     "(sink page: ChunkSeq[u8]) -> ChunkSeq[u8] {\n    let mut p = page;\n    p.push(32);\n    p\n",
+);
+
+/// The same on the encode-once path (#1276).
+#[cfg(feature = "divergent-ir-check")]
+const DIVERGENT_SCOPED_IR_CHECK_EDIT: (&str, &str) = (
+    "    ir_check_part(inout s.c, in part)\n",
+    "    divergent_words(in part)\n",
 );
 
 /// The inliner's divergence check: an empty report reads back as "nothing
@@ -141,12 +156,20 @@ fn main() {
         #[cfg(feature = "divergent")]
         let port = if *library == "hybrid_check_layout" {
             port.edit(DIVERGENT_CHECK_LAYOUT_EDIT.0, DIVERGENT_CHECK_LAYOUT_EDIT.1)
+                .edit(
+                    DIVERGENT_SCOPED_LAYOUT_EDIT.0,
+                    DIVERGENT_SCOPED_LAYOUT_EDIT.1,
+                )
         } else {
             port
         };
         #[cfg(feature = "divergent-ir-check")]
         let port = if *library == "hybrid_ir_check" {
             port.edit(DIVERGENT_IR_CHECK_EDIT.0, DIVERGENT_IR_CHECK_EDIT.1)
+                .edit(
+                    DIVERGENT_SCOPED_IR_CHECK_EDIT.0,
+                    DIVERGENT_SCOPED_IR_CHECK_EDIT.1,
+                )
         } else {
             port
         };
