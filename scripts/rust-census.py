@@ -178,7 +178,7 @@ MODULES = {
     "atomics": ("SH2-10", "vesper-check-loops-atomics", "2.31x"),
     "anvil_sim": ("SH5-14", "", ""),
     "native_freestanding": ("SH4-14", "", ""),
-    "native_vector": ("SH4-11", "", ""),
+    "native_vector": ("SH4-11, G1-3", "", "vectors in registers (#1500): simd 40x -> 5.0x"),
     "ir_opt_policy": ("G1-12", "", ""),
     "ir_opt": ("SH3-9", "vesper-ir-opt", "0.0036x"),
     "native_windows": ("SH4-14", "", ""),

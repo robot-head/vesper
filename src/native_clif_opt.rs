@@ -35,6 +35,8 @@ pub fn run(func: &mut ir::Function) {
     remove_unreachable(func);
     merge_blocks(func);
     remove_constant_params(func);
+    // Vector slots at one type per offset (#1500, src/native_vector.rs).
+    crate::native::vector_registers(func);
     split_join_slots(func);
     promote_slots(func);
     remove_constant_params(func);
