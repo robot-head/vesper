@@ -8,7 +8,7 @@
 //! every object and every sampled JIT run must equal the Rust build's, and
 //! the objects for the other native targets (Windows, where no fault
 //! message is written, and AArch64) must be byte-identical too.
-//! `CODEGEN_SEQ_STEP=n` compares every n-th world (default 1 under Cargo, 4 under Bazel).
+//! `CODEGEN_SEQ_STEP=n` compares every n-th world (default 1 under Cargo; under Bazel every fourth, up to four runtime worlds).
 #[path = "../../../tests/common/check_harness.rs"]
 mod check_harness;
 
@@ -82,6 +82,12 @@ fn worlds() -> &'static [&'static check_harness::Case] {
             .iter()
             .filter(|c| c.world.functions.contains_key("main"))
             .step_by(step())
+            // Cheap first: a world whose signatures and bodies never name
+            // a sequence or string type cannot need the runtime.
+            .filter(|c| {
+                let text = format!("{:?}", c.world.functions);
+                text.contains("ChunkSeq") || text.contains("String")
+            })
             .filter(|c| {
                 build(&c.world, "main", true).is_ok_and(|b| {
                     b.object
@@ -89,9 +95,22 @@ fn worlds() -> &'static [&'static check_harness::Case] {
                         .any(|w| w == b"vesper_seq_live")
                 })
             })
+            .take(if under_bazel() {
+                BAZEL_WORLDS
+            } else {
+                usize::MAX
+            })
             .collect()
     })
 }
+
+fn under_bazel() -> bool {
+    std::env::var_os("TEST_SRCDIR").is_some()
+}
+
+/// Under Bazel, the first few runtime worlds only: the CI run shares one
+/// time limit with the whole suite, and a Cargo run covers the corpus.
+const BAZEL_WORLDS: usize = 4;
 
 fn runs(index: usize, case: &check_harness::Case) -> bool {
     let f = &case.world.functions["main"];
