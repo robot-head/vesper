@@ -17,6 +17,19 @@
 //! 3. [`remove_dead`]: loads (and pure instructions) whose results are
 //!    unused are deleted. Vesper code never relies on a load trapping.
 //!
+//! 4. [`share_invariant_loads`]: a read-only word that may move (a header
+//!    word of a borrowed view, `invariant_word` in the native lowering) is
+//!    read once where every read of it is dominated.
+//!
+//! 5. [`fold_constant_branches`] and [`sink_slot_inits`]: a `brif` on a
+//!    constant becomes a `jump`, and a slot's constant initial stores move
+//!    from the entry block to the block that dominates every other use, so
+//!    a cold branch's locals cost the hot path nothing.
+//!
+//! 6. [`float_constants`]: `from_bits_f64(K)` and `from_bits_f32(K)`
+//!    become float constants, which Cranelift reads from its constant pool
+//!    as a memory operand instead of building them in a general register.
+//!
 //! Each step keeps the function valid CLIF on its own.
 use cranelift_codegen::cursor::Cursor as _;
 use cranelift_codegen::dominator_tree::DominatorTree;
@@ -35,6 +48,7 @@ pub fn run(func: &mut ir::Function) {
     remove_unreachable(func);
     merge_blocks(func);
     remove_constant_params(func);
+    float_constants(func);
     // Vector slots at one type per offset (#1500, src/native_vector.rs).
     crate::native::vector_registers(func);
     split_join_slots(func);
@@ -42,8 +56,12 @@ pub fn run(func: &mut ir::Function) {
     remove_constant_params(func);
     sink_compares(func);
     thread_branches(func);
+    thread_decided_branches(func);
+    fold_constant_branches(func);
     remove_unreachable(func);
     remove_dead(func);
+    share_invariant_loads(func);
+    sink_slot_inits(func);
     merge_tails(func);
     shrink_unused_slots(func);
 }
@@ -1103,10 +1121,23 @@ pub fn sink_compares(func: &mut ir::Function) {
 /// A constant integer value of `v`, folding the few operations the
 /// lowering builds its 0/1 tests from.
 fn constant(func: &ir::Function, v: Value, depth: u32) -> Option<i64> {
+    constant_with(func, &HashMap::new(), v, depth)
+}
+
+/// [`constant`], where the values in `known` hold the given constants.
+fn constant_with(
+    func: &ir::Function,
+    known: &HashMap<Value, i64>,
+    v: Value,
+    depth: u32,
+) -> Option<i64> {
     if depth > 8 {
         return None;
     }
     let v = func.dfg.resolve_aliases(v);
+    if let Some(&k) = known.get(&v) {
+        return Some(k);
+    }
     let inst = func.dfg.value_def(v).inst()?;
     let ty = func.dfg.value_type(v);
     let mask = |x: i64| -> i64 {
@@ -1124,14 +1155,14 @@ fn constant(func: &ir::Function, v: Value, depth: u32) -> Option<i64> {
         InstructionData::Unary {
             opcode: Opcode::Uextend | Opcode::Ireduce,
             arg,
-        } => constant(func, arg, depth + 1).map(mask),
+        } => constant_with(func, known, arg, depth + 1).map(mask),
         InstructionData::IntCompareImm {
             opcode: Opcode::IcmpImm,
             cond,
             arg,
             imm,
         } => {
-            let a = constant(func, arg, depth + 1)?;
+            let a = constant_with(func, known, arg, depth + 1)?;
             let arg_ty = func.dfg.value_type(func.dfg.resolve_aliases(arg));
             let b = match arg_ty.bits() {
                 64 => imm.bits(),
@@ -1144,8 +1175,8 @@ fn constant(func: &ir::Function, v: Value, depth: u32) -> Option<i64> {
             }
         }
         InstructionData::Binary { opcode, args } => {
-            let a = constant(func, args[0], depth + 1)?;
-            let b = constant(func, args[1], depth + 1)?;
+            let a = constant_with(func, known, args[0], depth + 1)?;
+            let b = constant_with(func, known, args[1], depth + 1)?;
             match opcode {
                 Opcode::Band => Some(a & b),
                 Opcode::Bor => Some(a | b),
@@ -1297,6 +1328,184 @@ pub fn thread_branches(func: &mut ir::Function) {
     }
 }
 
+/// A 0/1 value: a comparison, or bit operations and extensions of them.
+fn is_flag(func: &ir::Function, v: Value, depth: u32) -> bool {
+    if depth > 8 {
+        return false;
+    }
+    let v = func.dfg.resolve_aliases(v);
+    let Some(inst) = func.dfg.value_def(v).inst() else {
+        return false;
+    };
+    match func.dfg.insts[inst] {
+        InstructionData::IntCompare { .. } | InstructionData::IntCompareImm { .. } => true,
+        InstructionData::UnaryImm {
+            opcode: Opcode::Iconst,
+            imm,
+        } => matches!(imm.bits(), 0 | 1),
+        InstructionData::Unary {
+            opcode: Opcode::Uextend,
+            arg,
+        } => is_flag(func, arg, depth + 1),
+        InstructionData::Binary {
+            opcode: Opcode::Band | Opcode::Bor | Opcode::Bxor,
+            args,
+        } => is_flag(func, args[0], depth + 1) && is_flag(func, args[1], depth + 1),
+        _ => false,
+    }
+}
+
+/// What the branch ending `pred` says about its condition on edge `k`
+/// (0 taken when nonzero, 1 when zero).
+fn edge_fact(func: &ir::Function, pred: Inst, k: usize) -> Option<(Value, i64)> {
+    let InstructionData::Brif { arg, blocks, .. } = func.dfg.insts[pred] else {
+        return None;
+    };
+    let pool = &func.dfg.value_lists;
+    if blocks[0].block(pool) == blocks[1].block(pool) {
+        return None;
+    }
+    let arg = func.dfg.resolve_aliases(arg);
+    match k {
+        0 if is_flag(func, arg, 0) => Some((arg, 1)),
+        1 => Some((arg, 0)),
+        _ => None,
+    }
+}
+
+/// Jump threading on a condition a dominating branch already decided.
+///
+/// A block with no parameters that computes a test from values defined
+/// elsewhere and branches on it (`try_write`'s ok flag tested again after
+/// the write, a `match` arm re-testing its tag) is skipped on each incoming
+/// edge where the test folds to a constant: the edge leaves a `brif` on a
+/// value the test reads, or a jump from a block whose only way in is such
+/// an edge.
+pub fn thread_decided_branches(func: &mut ir::Function) {
+    let mut cfg = ControlFlowGraph::with_function(func);
+    let mut uses_outside: HashSet<Value> = HashSet::new();
+    for (block, inst) in insts(func) {
+        for v in values_of(func, inst) {
+            if let Some(def) = func.dfg.value_def(v).inst()
+                && func.layout.inst_block(def) != Some(block)
+            {
+                uses_outside.insert(v);
+            }
+        }
+    }
+    let blocks: Vec<Block> = func.layout.blocks().collect();
+    for block in blocks {
+        if !func.dfg.block_params(block).is_empty() {
+            continue;
+        }
+        let body: Vec<Inst> = func.layout.block_insts(block).collect();
+        let Some((&brif, rest)) = body.split_last() else {
+            continue;
+        };
+        let InstructionData::Brif {
+            arg: cond,
+            blocks: succ,
+            ..
+        } = func.dfg.insts[brif]
+        else {
+            continue;
+        };
+        let pure = rest.iter().all(|&i| {
+            matches!(
+                func.dfg.insts[i].opcode(),
+                Opcode::Iconst
+                    | Opcode::Uextend
+                    | Opcode::Ireduce
+                    | Opcode::IcmpImm
+                    | Opcode::Icmp
+                    | Opcode::Band
+                    | Opcode::Bor
+                    | Opcode::Bxor
+            ) && func
+                .dfg
+                .inst_results(i)
+                .iter()
+                .all(|r| !uses_outside.contains(r))
+        });
+        let local = |v: Value| {
+            func.dfg
+                .value_def(func.dfg.resolve_aliases(v))
+                .inst()
+                .is_some_and(|d| func.layout.inst_block(d) == Some(block))
+        };
+        let pool = &func.dfg.value_lists;
+        let outside_args = succ.iter().all(|c| {
+            c.block(pool) != block
+                && c.args(pool).all(|a| match a {
+                    BlockArg::Value(v) => !local(v),
+                    _ => false,
+                })
+        });
+        if !pure || !outside_args {
+            continue;
+        }
+        let succ: Vec<(Block, Vec<BlockArg>)> = succ
+            .iter()
+            .map(|c| (c.block(pool), c.args(pool).collect()))
+            .collect();
+        let preds: Vec<Inst> = cfg.pred_iter(block).map(|p| p.inst).collect();
+        let mut changed = false;
+        for pred in preds {
+            let calls: Vec<ir::BlockCall> = func.dfg.insts[pred]
+                .branch_destination(&func.dfg.jump_tables, &func.dfg.exception_tables)
+                .to_vec();
+            if !matches!(func.dfg.insts[pred].opcode(), Opcode::Jump | Opcode::Brif) {
+                continue;
+            }
+            for (k, call) in calls.iter().enumerate() {
+                if call.block(&func.dfg.value_lists) != block {
+                    continue;
+                }
+                let mut fact = edge_fact(func, pred, k);
+                if fact.is_none()
+                    && func.dfg.insts[pred].opcode() == Opcode::Jump
+                    && let Some(pred_block) = func.layout.inst_block(pred)
+                    && let mut outer = cfg.pred_iter(pred_block)
+                    && let Some(only) = outer.next()
+                    && outer.next().is_none()
+                {
+                    let into: Vec<ir::BlockCall> = func.dfg.insts[only.inst]
+                        .branch_destination(&func.dfg.jump_tables, &func.dfg.exception_tables)
+                        .to_vec();
+                    let edges: Vec<usize> = (0..into.len())
+                        .filter(|&e| into[e].block(&func.dfg.value_lists) == pred_block)
+                        .collect();
+                    if let [e] = edges[..] {
+                        fact = edge_fact(func, only.inst, e);
+                    }
+                }
+                let Some((value, known)) = fact else {
+                    continue;
+                };
+                let known = HashMap::from([(value, known)]);
+                let Some(taken) = constant_with(func, &known, cond, 0) else {
+                    continue;
+                };
+                let (target, args) = &succ[usize::from(taken == 0)];
+                let new = func.dfg.block_call(*target, args);
+                let ir::DataFlowGraph {
+                    insts,
+                    jump_tables,
+                    exception_tables,
+                    ..
+                } = &mut func.dfg;
+                insts[pred].branch_destination_mut(jump_tables, exception_tables)[k] = new;
+                changed = true;
+            }
+        }
+        // A redirected edge gives its target a new way in, which the
+        // single-predecessor test above must see.
+        if changed {
+            cfg.compute(func);
+        }
+    }
+}
+
 fn removable(func: &ir::Function, inst: Inst) -> bool {
     let op = func.dfg.insts[inst].opcode();
     if func.dfg.inst_results(inst).is_empty() {
@@ -1362,6 +1571,338 @@ pub fn remove_dead(func: &mut ir::Function) {
                     work.push(def);
                 }
             }
+        }
+    }
+}
+
+/// Read each `readonly can_move notrap` word that is loaded more than once
+/// a single time, in the nearest block that dominates every load of it,
+/// and reuse that value at every load.
+///
+/// Cranelift's egraph merges such loads but elaborates a value only where a
+/// side-effecting instruction uses it: a header word first used by a store
+/// in one arm of a branch is loaded again in every sibling arm. `can_move`
+/// says the word is valid and unchanged wherever its address is, and the
+/// address definition dominates every load, so it dominates their common
+/// dominator too. The kept load loses `readonly`, so the egraph leaves it
+/// where it is. A word loaded once is left to Cranelift.
+pub fn share_invariant_loads(func: &mut ir::Function) {
+    // Address, offset, type index and alias region.
+    type WordKey = (Value, i32, usize, u32);
+    let cfg = ControlFlowGraph::with_function(func);
+    let domtree = DominatorTree::with_function(func, &cfg);
+    let mut rank: HashMap<Block, usize> = HashMap::new();
+    for (n, &block) in domtree.cfg_postorder().iter().rev().enumerate() {
+        rank.insert(block, n);
+    }
+    let common = |mut a: Block, mut b: Block| {
+        while a != b {
+            if rank[&a] > rank[&b] {
+                a = domtree.idom(a).expect("reachable block");
+            } else {
+                b = domtree.idom(b).expect("reachable block");
+            }
+        }
+        a
+    };
+    // A merged word can be the address of another (a slice's handle, then
+    // its data pointer): repeat until no word is loaded twice.
+    loop {
+        let mut groups: BTreeMap<WordKey, Vec<(Block, Inst)>> = BTreeMap::new();
+        for (block, inst) in insts(func) {
+            let InstructionData::Load {
+                opcode: Opcode::Load,
+                arg,
+                flags,
+                offset,
+            } = func.dfg.insts[inst]
+            else {
+                continue;
+            };
+            if !(flags.readonly() && flags.can_move() && flags.notrap())
+                || !rank.contains_key(&block)
+            {
+                continue;
+            }
+            let ty = func.dfg.value_type(func.dfg.first_result(inst));
+            let region = flags.alias_region().map_or(0, |r| r as u32 + 1);
+            let key = (
+                func.dfg.resolve_aliases(arg),
+                i32::from(offset),
+                ty.index(),
+                region,
+            );
+            groups.entry(key).or_default().push((block, inst));
+        }
+        let mut changed = false;
+        for (_, loads) in groups {
+            if loads.len() < 2 {
+                continue;
+            }
+            let target = loads.iter().map(|&(b, _)| b).reduce(&common).unwrap();
+            let (_, kept) = loads[0];
+            let before = func
+                .layout
+                .block_insts(target)
+                .find(|i| loads.iter().any(|&(_, l)| l == *i))
+                .or_else(|| func.layout.last_inst(target))
+                .unwrap();
+            if before != kept {
+                func.layout.remove_inst(kept);
+                func.layout.insert_inst(kept, before);
+            }
+            if let InstructionData::Load { flags, .. } = &mut func.dfg.insts[kept] {
+                *flags = ir::MemFlags::trusted().with_alias_region(flags.alias_region());
+            }
+            let shared = func.dfg.first_result(kept);
+            for &(_, inst) in &loads[1..] {
+                let result = func.dfg.first_result(inst);
+                func.layout.remove_inst(inst);
+                func.dfg.clear_results(inst);
+                func.dfg.change_to_alias(result, shared);
+            }
+            changed = true;
+        }
+        if !changed {
+            break;
+        }
+    }
+}
+
+/// A `brif` whose condition folds to a constant (a drop flag of a local
+/// that only a cold branch sets, so it is 0 on every other path) becomes a
+/// `jump`: Cranelift 0.125 lowers it as a compare of a materialized zero.
+pub fn fold_constant_branches(func: &mut ir::Function) {
+    for (_, inst) in insts(func) {
+        let InstructionData::Brif { arg, blocks, .. } = func.dfg.insts[inst] else {
+            continue;
+        };
+        let Some(value) = constant(func, arg, 0) else {
+            continue;
+        };
+        let pool = &func.dfg.value_lists;
+        let call = blocks[usize::from(value == 0)];
+        let target = call.block(pool);
+        let args: Vec<BlockArg> = call.args(pool).collect();
+        func.dfg.replace(inst).jump(target, &args);
+    }
+}
+
+/// Move a slot's initial stores of constants out of the entry block into
+/// the nearest block that dominates every other use of the slot, when that
+/// block is in no cycle (so it runs at most once, like the entry).
+///
+/// The lowering zeroes every local's slot at function entry. A sequence
+/// local or an inlined callee's aggregate that only a cold branch uses
+/// (kinetic's `fastmath_sin` cache, #1404 gap 8) then costs every call the
+/// stores, and the address it keeps live costs a register.
+pub fn sink_slot_inits(func: &mut ir::Function) {
+    let Some(entry) = func.layout.entry_block() else {
+        return;
+    };
+    let cfg = ControlFlowGraph::with_function(func);
+    let domtree = DominatorTree::with_function(func, &cfg);
+    let mut rank: HashMap<Block, usize> = HashMap::new();
+    for (n, &block) in domtree.cfg_postorder().iter().rev().enumerate() {
+        rank.insert(block, n);
+    }
+    let common = |mut a: Block, mut b: Block| {
+        while a != b {
+            if rank[&a] > rank[&b] {
+                a = domtree.idom(a).expect("reachable block");
+            } else {
+                b = domtree.idom(b).expect("reachable block");
+            }
+        }
+        a
+    };
+    let all = insts(func);
+    // Stack addresses of each slot.
+    let mut addresses: HashMap<Value, StackSlot> = HashMap::new();
+    let mut mixed: HashSet<StackSlot> = HashSet::new();
+    for &(_, inst) in &all {
+        if let InstructionData::StackLoad {
+            opcode: Opcode::StackAddr,
+            stack_slot,
+            ..
+        } = func.dfg.insts[inst]
+        {
+            addresses.insert(func.dfg.first_result(inst), stack_slot);
+        }
+    }
+    // A block parameter that receives a slot's address on some edge is
+    // that slot's address too: its uses count as the slot's.
+    loop {
+        let mut grew = false;
+        for &(_, inst) in &all {
+            let data = &func.dfg.insts[inst];
+            if !data.opcode().is_branch() {
+                continue;
+            }
+            let pool = &func.dfg.value_lists;
+            for call in data.branch_destination(&func.dfg.jump_tables, &func.dfg.exception_tables) {
+                let params = func.dfg.block_params(call.block(pool));
+                for (a, &p) in call.args(pool).zip(params) {
+                    if let BlockArg::Value(v) = a
+                        && let Some(&slot) = addresses.get(&func.dfg.resolve_aliases(v))
+                    {
+                        match addresses.get(&p) {
+                            Some(&other) if other != slot => {
+                                // Two slots meet in one parameter: keep
+                                // both out of the analysis.
+                                mixed.insert(slot);
+                                mixed.insert(other);
+                            }
+                            Some(_) => {}
+                            None => {
+                                addresses.insert(p, slot);
+                                grew = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    struct Uses {
+        inits: Vec<Inst>,
+        blocks: Vec<Block>,
+        unsafe_use: bool,
+    }
+    let mut slots: BTreeMap<StackSlot, Uses> = BTreeMap::new();
+    for &(block, inst) in &all {
+        let data = &func.dfg.insts[inst];
+        if let InstructionData::StackLoad { stack_slot, .. }
+        | InstructionData::StackStore { stack_slot, .. } = *data
+            && data.opcode() != Opcode::StackAddr
+        {
+            slots
+                .entry(stack_slot)
+                .or_insert(Uses {
+                    inits: vec![],
+                    blocks: vec![],
+                    unsafe_use: false,
+                })
+                .unsafe_use = true;
+            continue;
+        }
+        let mut seen: Vec<StackSlot> = vec![];
+        for v in func.dfg.inst_values(inst) {
+            if let Some(&slot) = addresses.get(&func.dfg.resolve_aliases(v)) {
+                seen.push(slot);
+            }
+        }
+        if seen.is_empty() {
+            continue;
+        }
+        let init = block == entry
+            && match *data {
+                InstructionData::Store { args, .. } => {
+                    addresses.contains_key(&func.dfg.resolve_aliases(args[1]))
+                        && !addresses.contains_key(&func.dfg.resolve_aliases(args[0]))
+                        && constant(func, args[0], 0).is_some()
+                }
+                _ => false,
+            };
+        for slot in seen {
+            let uses = slots.entry(slot).or_insert(Uses {
+                inits: vec![],
+                blocks: vec![],
+                unsafe_use: false,
+            });
+            if init {
+                uses.inits.push(inst);
+            } else {
+                uses.blocks.push(block);
+            }
+        }
+    }
+    for (slot, uses) in slots {
+        if uses.unsafe_use
+            || mixed.contains(&slot)
+            || uses.inits.is_empty()
+            || uses.blocks.is_empty()
+        {
+            continue;
+        }
+        if uses.blocks.iter().any(|b| !rank.contains_key(b)) {
+            continue;
+        }
+        let target = uses.blocks.iter().copied().reduce(&common).unwrap();
+        if target == entry || in_cycle(func, target) {
+            continue;
+        }
+        let Some(first) = func.layout.first_inst(target) else {
+            continue;
+        };
+        for inst in uses.inits {
+            func.layout.remove_inst(inst);
+            func.layout.insert_inst(inst, first);
+        }
+    }
+}
+
+/// Whether `block` can reach itself.
+fn in_cycle(func: &ir::Function, block: Block) -> bool {
+    let successors = |b: Block| -> Vec<Block> {
+        let Some(last) = func.layout.last_inst(b) else {
+            return vec![];
+        };
+        let pool = &func.dfg.value_lists;
+        func.dfg.insts[last]
+            .branch_destination(&func.dfg.jump_tables, &func.dfg.exception_tables)
+            .iter()
+            .map(|c| c.block(pool))
+            .collect()
+    };
+    let mut seen: HashSet<Block> = HashSet::new();
+    let mut work = successors(block);
+    while let Some(b) = work.pop() {
+        if b == block {
+            return true;
+        }
+        if seen.insert(b) {
+            work.extend(successors(b));
+        }
+    }
+    false
+}
+
+/// A `bitcast` of an integer constant to `f64` or `f32` (Vesper's
+/// `from_bits_f64(K)`, how ported math code spells its coefficients)
+/// becomes `f64const` / `f32const`. Cranelift 0.125 does not fold it: it
+/// builds each coefficient with `movabs` and `movq` through a general
+/// register, where a float constant is one memory operand of the
+/// instruction that uses it.
+pub fn float_constants(func: &mut ir::Function) {
+    use cranelift_codegen::ir::immediates::{Ieee32, Ieee64};
+    for (_, inst) in insts(func) {
+        let InstructionData::LoadNoOffset {
+            opcode: Opcode::Bitcast,
+            arg,
+            ..
+        } = func.dfg.insts[inst]
+        else {
+            continue;
+        };
+        let ty = func.dfg.value_type(func.dfg.first_result(inst));
+        if ty != types::F64 && ty != types::F32 {
+            continue;
+        }
+        let Some(bits) = constant(func, arg, 0) else {
+            continue;
+        };
+        if ty == types::F64 {
+            func.dfg
+                .replace(inst)
+                .f64const(Ieee64::with_bits(bits as u64));
+        } else {
+            func.dfg
+                .replace(inst)
+                .f32const(Ieee32::with_bits(bits as u32));
         }
     }
 }
