@@ -119,7 +119,7 @@ CRATES = {
     "vesper-warp-tls": ("shim", "", "", "rustls: TLS shim (or the TLS 1.3 state machine ports over the crypto shim)", "17"),
     "vesper-simd": ("c-api", "", "", "out of the compiler's closure (#1398); Cranelift JIT host: through vesper-cranelift-sys", "13"),
     "vesper-crypto-sys": ("shim", "", "", "vetted crypto C-ABI shim (SH6 lane 17)", "17"),
-    "vesper-blake3-sys": ("c-api", "", "", "BLAKE3 C library: import it straight from .vsys", "G1-12"),
+    "vesper-blake3-sys": ("c-api", "", "", "BLAKE3 C build only (.vsys import exists); deleted once #1504 part 2 builds package C objects", "G1-12"),
     "vesper-cranelift-sys": ("shim", "", "", "Cranelift C-ABI shim (owner 2026-11-19)", "-"),
     "vesper-codegen-verified": ("diverse", "", "", "DDC auditor, diverse on purpose", "owner"),
 }
@@ -179,11 +179,11 @@ MODULES = {
     "anvil_sim": ("SH5-14", "", ""),
     "native_freestanding": ("SH4-14", "", ""),
     "native_vector": ("SH4-11, G1-3", "", "vectors in registers (#1500): simd 40x -> 5.0x"),
-    "ir_opt_policy": ("G1-12", "", ""),
+    "ir_opt_policy": ("G1-12", "vesper-ir-opt-policy", "1.15x, swapped into the hybrid"),
     "ir_opt": ("SH3-9", "vesper-ir-opt", "0.0036x"),
     "native_windows": ("SH4-14", "", ""),
     "native_batch": ("SH4-17", "", ""),
-    "database": ("G1-12", "", "salsa: memo tables"),
+    "database": ("G1-12", "vesper-memo", "memo tables ported (SH5-16); query bodies wait on the Vesper LSP server"),
     "float_math": ("SH2-7", "", ""),
     "package_graph": ("SH2-6", "", ""),
     "layout": ("SH2-5", "vesper-check-layout", "swapped"),
@@ -200,8 +200,8 @@ MODULES = {
     "compiler_modules": ("2", "", "goes with the hybrid"),
     "swap_input": ("2", "", "goes with the hybrid"),
     "test_engines": ("SH6-19", "", ""),
-    "source_analysis": ("G1-12", "", "tour playground"),
-    "browser_tour": ("G1-12", "", "tour playground"),
+    "source_analysis": ("2", "", "compiler helpers (native, ir_inline, runtime); not tour code: goes with the compiler"),
+    "browser_tour": ("G1-12", "", "tour glue over the wasm-built compiler: needs website/wasm and the wasm seed"),
     "native_clif_opt": ("G1-11", "", "new in #1466 (#1426); ported with the walk"),
 }
 
