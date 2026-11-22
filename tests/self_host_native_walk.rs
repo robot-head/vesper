@@ -76,7 +76,10 @@ pub fn stages() -> &'static [Stage] {
         let only: Option<Vec<String>> = std::env::var("NATIVE_WALK_WORLD")
             .ok()
             .map(|s| s.split(',').map(str::to_owned).collect());
-        for c in corpus().iter().step_by(if only.is_some() { 1 } else { step() }) {
+        for c in corpus()
+            .iter()
+            .step_by(if only.is_some() { 1 } else { step() })
+        {
             if only
                 .as_ref()
                 .is_some_and(|o| !o.iter().any(|n| c.name.contains(n.as_str())))
@@ -411,11 +414,7 @@ fn in_param_registers(world: &World, f: &FunctionIr, nested: bool) -> Vec<String
     };
     let callback = |name: &str| {
         f.params.iter().any(|p| {
-            p.name == name
-                && matches!(
-                    vesper::numeric::default_type(&p.ty),
-                    Type::Function { .. }
-                )
+            p.name == name && matches!(vesper::numeric::default_type(&p.ty), Type::Function { .. })
         })
     };
     for inst in f.blocks.iter().flat_map(|b| &b.instructions) {
