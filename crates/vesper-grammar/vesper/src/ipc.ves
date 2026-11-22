@@ -230,13 +230,11 @@ fn claim(
         let re = cw(in regs, wrapping_add(wrapping_mul(i, REGION_WORDS), 1));
         let rr = cw(in regs, wrapping_add(wrapping_mul(i, REGION_WORDS), 2));
         if start < re && rs < end {
-            if start
-                == rs
-                && end
-                == re
+            if start == rs
+                && end == re
                 && (
-                role == rr || (len == UOFFSET_BYTES && role >= ROLE_VECTOR && rr >= ROLE_VECTOR)
-            ) {
+                    role == rr || (len == UOFFSET_BYTES && role >= ROLE_VECTOR && rr >= ROLE_VECTOR)
+                ) {
                 return;
             }
             ffail(f, 14, start);
@@ -349,15 +347,10 @@ fn table(
     }
     let length = fu16(in input, f, inout b, vtable);
     let object = fu16(in input, f, inout b, add_or(vtable, VOFFSET_BYTES, 9, vtable));
-    if length
-        < VTABLE_HEADER_BYTES
-        || length
-        & VOFFSET_MASK
-        != 0
-        || length
-        > MAX_VTABLE_BYTES
-        || object
-        < UOFFSET_BYTES {
+    if length < VTABLE_HEADER_BYTES
+        || length & VOFFSET_MASK != 0
+        || length > MAX_VTABLE_BYTES
+        || object < UOFFSET_BYTES {
         ffail(f, 12, vtable);
     }
     claim(f, inout b, inout regs, in lim, vtable, length, ROLE_VTABLE);
@@ -375,13 +368,9 @@ fn table(
                 ffail(f, 24, slot);
             }
             let align = min(width, STRUCT_ALIGN);
-            if off
-                < UOFFSET_BYTES
-                || add_or(off, width, 9, off)
-                > object
-                || add_or(pos, off, 9, pos)
-                & wrapping_sub(align, 1)
-                != 0 {
+            if off < UOFFSET_BYTES
+                || add_or(off, width, 9, off) > object
+                || add_or(pos, off, 9, pos) & wrapping_sub(align, 1) != 0 {
                 ffail(f, 12, wrapping_add(pos, off));
             }
             for prior in 0..index {
@@ -795,12 +784,8 @@ fn batch(
         max_buffers
     );
     let nf = fields.len() / FIELD_WORDS;
-    if nodes
-        .b
-        != nf
-        || buffers
-        .b
-        != mul_or(nf, BUFFERS_PER_FIELD, 9, nf)
+    if nodes.b != nf
+        || buffers.b != mul_or(nf, BUFFERS_PER_FIELD, 9, nf)
         || (nf == 0 && body_len != 0) {
         ffail(f, 28, t.pos);
     }
@@ -826,11 +811,8 @@ fn batch(
             if range.a & ALIGN_64_MASK != 0 {
                 fail(13, wrapping_add(body_at, range.a));
             }
-            if profile
-                == P_HOST_ADDRESS64
-                && add_or(body_address, range.a, 9, body_address)
-                & ALIGN_64_MASK
-                != 0 {
+            if profile == P_HOST_ADDRESS64
+                && add_or(body_address, range.a, 9, body_address) & ALIGN_64_MASK != 0 {
                 fail(13, wrapping_add(body_at, range.a));
             }
         }
@@ -875,12 +857,12 @@ fn batch(
         out.push(c.values_end);
         out
             .push(
-            if c.has_validity {
-                1
-            } else {
-                0
-            }
-        );
+                if c.has_validity {
+                    1
+                } else {
+                    0
+                }
+            );
         out.push(c.validity_start);
         out.push(c.validity_end);
         out.push(c.rows);
@@ -890,28 +872,17 @@ fn batch(
 }
 
 fn validate_limits(in lim: Slice[u64]) -> Unit eff [Fail[GErr]] {
-    if sw(in lim, 0)
-        > HARD_INPUT_BYTES
-        || sw(in lim, 1)
-        > HARD_METADATA_BYTES
-        || sw(in lim, 2)
-        > HARD_TOTAL_METADATA_BYTES
-        || sw(in lim, 3)
-        > HARD_FIELDS
-        || sw(in lim, 4)
-        > HARD_BATCHES
-        || sw(in lim, 5)
-        > HARD_ROWS_PER_BATCH
-        || sw(in lim, 6)
-        > HARD_TOTAL_ROWS
-        || sw(in lim, 7)
-        > HARD_NAME_BYTES
-        || sw(in lim, 8)
-        > HARD_METADATA_OBJECTS
-        || sw(in lim, 10)
-        > HARD_WORK
-        || sw(in lim, 11)
-        > HARD_ALLOCATION_BYTES {
+    if sw(in lim, 0) > HARD_INPUT_BYTES
+        || sw(in lim, 1) > HARD_METADATA_BYTES
+        || sw(in lim, 2) > HARD_TOTAL_METADATA_BYTES
+        || sw(in lim, 3) > HARD_FIELDS
+        || sw(in lim, 4) > HARD_BATCHES
+        || sw(in lim, 5) > HARD_ROWS_PER_BATCH
+        || sw(in lim, 6) > HARD_TOTAL_ROWS
+        || sw(in lim, 7) > HARD_NAME_BYTES
+        || sw(in lim, 8) > HARD_METADATA_OBJECTS
+        || sw(in lim, 10) > HARD_WORK
+        || sw(in lim, 11) > HARD_ALLOCATION_BYTES {
         fail(0, 0);
     }
     if sw(in lim, 9) == 0 || sw(in lim, 9) > HARD_DEPTH {

@@ -40,11 +40,11 @@ fn push_read(inout pl: Planner, st: SubState, r: Rec) -> SubState {
     pl
         .reads
         .push(
-        RecNode {
-            rec: r,
-            next: none32()
-        }
-    );
+            RecNode {
+                rec: r,
+                next: none32()
+            }
+        );
     let mut out = st;
     if st.reads_tail == none32() {
         out.reads_head = at;
@@ -113,12 +113,12 @@ fn set_covered(inout pl: Planner, st: SubState, queue: u32, c: Covered) -> SubSt
     pl
         .covs
         .push(
-        CovNode {
-            queue: queue,
-            cov: c,
-            next: st.cov_head
-        }
-    );
+            CovNode {
+                queue: queue,
+                cov: c,
+                next: st.cov_head
+            }
+        );
     let mut out = st;
     out.cov_head = fresh;
     out
@@ -168,12 +168,12 @@ fn clone_state(inout pl: Planner, st: SubState) -> SubState {
                 pl
                     .covs
                     .push(
-                    CovNode {
-                        queue: n.queue,
-                        cov: n.cov,
-                        next: out.cov_head
-                    }
-                );
+                        CovNode {
+                            queue: n.queue,
+                            cov: n.cov,
+                            next: out.cov_head
+                        }
+                    );
                 out.cov_head = fresh;
             },
             Option::None => (),
@@ -236,23 +236,23 @@ fn push_pending(
         pl
             .tex
             .push(
-            TexEntry {
-                pk0: at.pk0,
-                pk1: at.pk1,
-                pk2: at.pk2,
-                resource: resource,
-                sync_before: sync_before,
-                sync_after: sync_after,
-                access_before: access_before,
-                access_after: access_after,
-                layout_before: layout_ord(before),
-                layout_after: layout_ord(after),
-                sub: sub.flat,
-                mip: sub.mip,
-                slice: sub.slice,
-                plane: sub.plane
-            }
-        );
+                TexEntry {
+                    pk0: at.pk0,
+                    pk1: at.pk1,
+                    pk2: at.pk2,
+                    resource: resource,
+                    sync_before: sync_before,
+                    sync_after: sync_after,
+                    access_before: access_before,
+                    access_after: access_after,
+                    layout_before: layout_ord(before),
+                    layout_after: layout_ord(after),
+                    sub: sub.flat,
+                    mip: sub.mip,
+                    slice: sub.slice,
+                    plane: sub.plane
+                }
+            );
         return;
     }
     for i in 0..pl.buf.len() {
@@ -274,17 +274,17 @@ fn push_pending(
     pl
         .buf
         .push(
-        BufEntry {
-            pk0: at.pk0,
-            pk1: at.pk1,
-            pk2: at.pk2,
-            resource: resource,
-            sync_before: sync_before,
-            sync_after: sync_after,
-            access_before: access_before,
-            access_after: access_after
-        }
-    );
+            BufEntry {
+                pk0: at.pk0,
+                pk1: at.pk1,
+                pk2: at.pk2,
+                resource: resource,
+                sync_before: sync_before,
+                sync_after: sync_after,
+                access_before: access_before,
+                access_after: access_after
+            }
+        );
 }
 
 // Split or single placement for a barrier ordering earlier work on the same
@@ -431,8 +431,7 @@ fn process(
         let cur = st.layout;
         target = if req.has_layout {
             req.layout
-        } else if cur
-            != Layout::Undefined
+        } else if cur != Layout::Undefined
             && layout_allows(cur, req.access)
             && queue_supports_layout(kind, cur) {
             cur
@@ -562,11 +561,11 @@ fn process(
         pl
             .cross
             .push(
-            Pair {
-                key: p,
-                value: get32(in cross, i)
-            }
-        );
+                Pair {
+                    key: p,
+                    value: get32(in cross, i)
+                }
+            );
     }
     let rec = Rec {
         pass: p,
@@ -643,13 +642,13 @@ fn split_segments(inout pl: Planner, resource: u32, at: u64) {
             pl
                 .segs
                 .push(
-                Seg {
-                    start: at,
-                    end: seg.end,
-                    sid: state_index,
-                    next: seg.next
-                }
-            );
+                    Seg {
+                        start: at,
+                        end: seg.end,
+                        sid: state_index,
+                        next: seg.next
+                    }
+                );
             let mut m = seg;
             m.end = at;
             m.next = fresh;

@@ -81,18 +81,11 @@ fn sort_order(
     let bb = width(wrapping_sub(bodies, 1));
     let nb = width(wrapping_sub(n, 1));
     let bits = wrapping_add(wrapping_mul(bb, 2), nb);
-    if bodies
-        == 0
-        || n
-        < ORDER_RADIX_MIN
-        || bits
-        > 64
-        || keys
-        .len()
-        < wrapping_mul(n, 2)
-        || hist
-        .len()
-        < ORDER_RADIX_BUCKETS {
+    if bodies == 0
+        || n < ORDER_RADIX_MIN
+        || bits > 64
+        || keys.len() < wrapping_mul(n, 2)
+        || hist.len() < ORDER_RADIX_BUCKETS {
         sort_by_key(in keys[0..n], inout order[0..n]);
         return;
     }

@@ -34,7 +34,7 @@ vesper_port_object(
     edits = {
         "            let s = fit(chunk_at(in b, i), size, align);": "            let s = MAX_U64;",
         "b.marks.truncate(pos);": "b.marks.truncate(inc(pos));",
-        "        && sget(in b, index, SlotWord::Elen)\n        > 0;": "        && sget(in b, index, SlotWord::Elen)\n        > 1;",
+        "&& sget(in b, index, SlotWord::Elen) > 0;": "&& sget(in b, index, SlotWord::Elen) > 1;",
     },
     library = "alloc",
     package = ":port_package",

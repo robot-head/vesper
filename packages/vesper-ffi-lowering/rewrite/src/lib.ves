@@ -302,13 +302,13 @@ fn is_handle(inout r: R, x: u32) -> bool {
     let ok = r
         .handle_of
         .try_set(
-        k,
-        if yes {
-            2
-        } else {
-            1
-        }
-    );
+            k,
+            if yes {
+                2
+            } else {
+                1
+            }
+        );
     yes
 }
 
@@ -335,12 +335,9 @@ fn foreign_path(inout r: R, x: u32) -> (u64, u64) {
     let n = r.bytes.len();
     let mut at = NONE64;
     for i in 1..n {
-        if at
-            == NONE64
-            && u8_at(in r.bytes, wrapping_sub(i, 1))
-            == 58
-            && u8_at(in r.bytes, i)
-            == 58 {
+        if at == NONE64
+            && u8_at(in r.bytes, wrapping_sub(i, 1)) == 58
+            && u8_at(in r.bytes, i) == 58 {
             at = wrapping_sub(i, 1);
         }
     }
@@ -576,13 +573,13 @@ fn effects(inout r: R, es: u32, start: u32, end: u32) {
             .ast
             .effect_nodes
             .set(
-            idx_from_raw[EffectNode](ei),
-            EffectNode {
-                label: e.label,
-                name: name,
-                args: 0
-            }
-        );
+                idx_from_raw[EffectNode](ei),
+                EffectNode {
+                    label: e.label,
+                    name: name,
+                    args: 0
+                }
+            );
     }
 }
 
@@ -591,13 +588,13 @@ fn effect_at(in r: R, i: u32) -> EffectNode {
         .ast
         .effect_nodes
         .get_or(
-        idx_from_raw[EffectNode](i),
-        EffectNode {
-            label: NONE,
-            name: NONE,
-            args: 0
-        }
-    )
+            idx_from_raw[EffectNode](i),
+            EffectNode {
+                label: NONE,
+                name: NONE,
+                args: 0
+            }
+        )
 }
 
 // `Rewriter::ty`.
@@ -670,18 +667,18 @@ fn expr(inout r: R, x: u32) {
                     .ast
                     .exprs
                     .set(
-                    idx_from_raw[ExprNode](e.a),
-                    ExprNode {
-                        kind: E_NAME,
-                        start: callee.start,
-                        end: callee.end,
-                        a: name,
-                        b: callee.b,
-                        c: callee.c,
-                        d: callee.d,
-                        e: callee.e
-                    }
-                );
+                        idx_from_raw[ExprNode](e.a),
+                        ExprNode {
+                            kind: E_NAME,
+                            start: callee.start,
+                            end: callee.end,
+                            a: name,
+                            b: callee.b,
+                            c: callee.c,
+                            d: callee.d,
+                            e: callee.e
+                        }
+                    );
             }
         } else {
             expr(inout r, e.a);
@@ -756,8 +753,8 @@ fn expr(inout r: R, x: u32) {
             r
                 .s
                 .put(
-                in "foreign capabilities are granted by the package's import, not handled in source"
-            );
+                    in "foreign capabilities are granted by the package's import, not handled in source"
+                );
             let m = message(inout r, mark);
             raise(inout r, K_FOREIGN_HANDLER, m, e.start, e.end);
         }
@@ -934,21 +931,21 @@ fn call(inout r: R, lib: u64, x: u32, at: u64, args: u32, start: u32, end: u32) 
                 r
                     .sites
                     .push(
-                    if p.nullable {
-                        1
-                    } else {
-                        0
-                    }
-                );
+                        if p.nullable {
+                            1
+                        } else {
+                            0
+                        }
+                    );
                 r
                     .sites
                     .push(
-                    if p.in_place {
-                        1
-                    } else {
-                        0
-                    }
-                );
+                        if p.in_place {
+                            1
+                        } else {
+                            0
+                        }
+                    );
             }
             if count > 0 {
                 let ok = r.sites.try_set(wrapping_add(head, 2), count);

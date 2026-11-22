@@ -303,13 +303,13 @@ fn stable_views(in f: Fun, in us: Users, inout out: Hoists) {
             out
                 .rows
                 .push(
-                Hoist {
-                    pre: 0,
-                    place: place,
-                    ty: q.tyname,
-                    entry: true
-                }
-            );
+                    Hoist {
+                        pre: 0,
+                        place: place,
+                        ty: q.tyname,
+                        entry: true
+                    }
+                );
         }
     }
     // Sequence fields of `in` parameters, by [root, path..] key.
@@ -336,19 +336,10 @@ fn stable_views(in f: Fun, in us: Users, inout out: Hoists) {
         }
         for x in 0..f.insts.len() {
             let i = f.inst(x);
-            if i
-                .op
-                != OP_READ
-                || f
-                .depth(i.place)
-                <= 1
-                || f
-                .root_of(i.place)
-                != q
-                .name
-                || i
-                .sub
-                != 0 {
+            if i.op != OP_READ
+                || f.depth(i.place) <= 1
+                || f.root_of(i.place) != q.name
+                || i.sub != 0 {
                 continue;
             }
             if (i.flags & TY_SEQ) == 0 || (i.flags & TY_TEXT) != 0 {
@@ -380,13 +371,13 @@ fn stable_views(in f: Fun, in us: Users, inout out: Hoists) {
         out
             .rows
             .push(
-            Hoist {
-                pre: 0,
-                place: u32_at(in kplace, key),
-                ty: u32_at(in kty, key),
-                entry: true
-            }
-        );
+                Hoist {
+                    pre: 0,
+                    place: u32_at(in kplace, key),
+                    ty: u32_at(in kty, key),
+                    entry: true
+                }
+            );
         for q in 0..kreads.len() {
             let r = u64_at(in kreads, q);
             if (r >> 32) == key {
@@ -583,13 +574,13 @@ fn header_hoists(in f: Fun, in us: Users, inout out: Hoists) {
             found
                 .rows
                 .push(
-                Hoist {
-                    pre: pre,
-                    place: u32_at(in kplace, key),
-                    ty: u32_at(in kty, key),
-                    entry: false
-                }
-            );
+                    Hoist {
+                        pre: pre,
+                        place: u32_at(in kplace, key),
+                        ty: u32_at(in kty, key),
+                        entry: false
+                    }
+                );
             flen.push(blocks.len());
             for q in 0..kreads.len() {
                 let x = u64_at(in kreads, q);

@@ -437,12 +437,9 @@ pub fn parameters(in w: Slice[u64], inout r: R) -> u64 {
             }
         }
         // Only source tokens (rank 0) without a claim.
-        if tok(in w, index, Token::Kind)
-            != Tk::Ident
-            || origin_rank(in w, tok(in w, index, Token::Origin))
-            != 0
-            || tok(in w, index, Token::HasClaim)
-            != 0
+        if tok(in w, index, Token::Kind) != Tk::Ident
+            || origin_rank(in w, tok(in w, index, Token::Origin)) != 0
+            || tok(in w, index, Token::HasClaim) != 0
             || !distinct {
             raise(inout r, Code::Parameter, index, 1, 0, 0);
             return ctx_len;
@@ -578,12 +575,9 @@ fn path_spells(
     let mut k: u64 = 0;
     for i in 0..n {
         if i > 0 {
-            if wrapping_add(k, SEPARATOR_LEN)
-                > len
-                || byte(in names, wrapping_add(start, k))
-                != COLON
-                || byte(in names, wrapping_add(start, wrapping_add(k, 1)))
-                != COLON {
+            if wrapping_add(k, SEPARATOR_LEN) > len
+                || byte(in names, wrapping_add(start, k)) != COLON
+                || byte(in names, wrapping_add(start, wrapping_add(k, 1))) != COLON {
                 return false;
             }
             k = wrapping_add(k, SEPARATOR_LEN);
@@ -796,8 +790,7 @@ fn path(
             ff,
             fl
         )
-            || tok(in w, t, Token::Origin)
-            != fo {
+            || tok(in w, t, Token::Origin) != fo {
             raise(inout r, Code::MixedPath, t, 0, 0, 0);
             return none;
         }

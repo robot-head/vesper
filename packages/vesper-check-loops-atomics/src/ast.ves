@@ -267,15 +267,15 @@ pub fn read_pat(
     x
         .pats
         .push(
-        PatRow {
-            kind: kind,
-            start: start,
-            end: end,
-            name: NONE32,
-            a: 0,
-            n: 0
-        }
-    );
+            PatRow {
+                kind: kind,
+                start: start,
+                end: end,
+                name: NONE32,
+                a: 0,
+                n: 0
+            }
+        );
     let mut name = NONE32;
     let mut kids = ChunkSeq::new[u32]();
     if kind == P_BIND {
@@ -298,16 +298,16 @@ pub fn read_pat(
     let ok = x
         .pats
         .try_set(
-        widen_u64(id),
-        PatRow {
-            kind: kind,
-            start: start,
-            end: end,
-            name: name,
-            a: a,
-            n: wrapping_u32(kids.len())
-        }
-    );
+            widen_u64(id),
+            PatRow {
+                kind: kind,
+                start: start,
+                end: end,
+                name: name,
+                a: a,
+                n: wrapping_u32(kids.len())
+            }
+        );
     id
 }
 

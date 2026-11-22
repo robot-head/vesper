@@ -232,8 +232,11 @@ fn lookup_scan_vec(in kw: Slice[u32], in occupied: Slice[u64], tiles: u64, words
             );
             m = m
                 & (
-                m0 | wrapping_shl_u64(m1, 4) | wrapping_shl_u64(m2, 8) | wrapping_shl_u64(m3, 12)
-            );
+                    m0 | wrapping_shl_u64(m1, 4) | wrapping_shl_u64(m2, 8) | wrapping_shl_u64(
+                        m3,
+                        12
+                    )
+                );
         }
         if m != 0 {
             return wrapping_add(wrapping_mul(t, 16), low_bit(m));

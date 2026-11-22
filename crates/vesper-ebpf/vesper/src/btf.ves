@@ -277,26 +277,19 @@ fn decode_types(inout out: ChunkSeq[u64], inout bad: u64, in types: Slice[u8]) -
         let vlen = info & INFO_VLEN_MASK;
         let kflag = (info >> INFO_KFLAG_SHIFT) != 0;
         // words the kind reads after the common 12 bytes
-        let fixed: u64 = if kind
-            == BtfKind::Int
-            || kind
-            == BtfKind::Var
-            || kind
-            == BtfKind::DeclTag {
+        let fixed: u64 = if kind == BtfKind::Int
+            || kind == BtfKind::Var
+            || kind == BtfKind::DeclTag {
             1
         } else if kind == BtfKind::Array {
             3
         } else {
             0
         };
-        let per: u64 = if kind
-            == BtfKind::Struct
-            || kind
-            == BtfKind::Union
-            || kind
-            == BtfKind::Datasec
-            || kind
-            == BtfKind::Enum64 {
+        let per: u64 = if kind == BtfKind::Struct
+            || kind == BtfKind::Union
+            || kind == BtfKind::Datasec
+            || kind == BtfKind::Enum64 {
             3
         } else if kind == BtfKind::Enum || kind == BtfKind::FuncProto {
             2
@@ -358,28 +351,22 @@ fn decode_types(inout out: ChunkSeq[u64], inout bad: u64, in types: Slice[u8]) -
         }
         // `BtfType::name_off`: these kinds carry no name
         let named = !(
-            kind
-                == BtfKind::Ptr
-                || kind
-                == BtfKind::Array
-                || kind
-                == BtfKind::Volatile
-                || kind
-                == BtfKind::Const
-                || kind
-                == BtfKind::Restrict
-                || kind
-                == BtfKind::FuncProto
+            kind == BtfKind::Ptr
+                || kind == BtfKind::Array
+                || kind == BtfKind::Volatile
+                || kind == BtfKind::Const
+                || kind == BtfKind::Restrict
+                || kind == BtfKind::FuncProto
         );
         out.push(kind);
         out
             .push(
-            if named {
-                name
-            } else {
-                0
-            }
-        );
+                if named {
+                    name
+                } else {
+                    0
+                }
+            );
         out.push(a);
         out.push(b);
         out.push(c);
@@ -403,20 +390,20 @@ fn decode_types(inout out: ChunkSeq[u64], inout bad: u64, in types: Slice[u8]) -
                 let v = le32(in types, wrapping_add(at, 4));
                 out
                     .push(
-                    if kflag {
-                        sext32(v)
-                    } else {
-                        v
-                    }
-                );
+                        if kflag {
+                            sext32(v)
+                        } else {
+                            v
+                        }
+                    );
             } else if kind == BtfKind::Enum64 {
                 out.push(le32(in types, at));
                 out
                     .push(
-                    le32(in types, wrapping_add(at, 4)) | (
-                        le32(in types, wrapping_add(at, 8)) << 32
-                    )
-                );
+                        le32(in types, wrapping_add(at, 4)) | (
+                            le32(in types, wrapping_add(at, 8)) << 32
+                        )
+                    );
             } else if kind == BtfKind::FuncProto {
                 out.push(le32(in types, at));
                 out.push(le32(in types, wrapping_add(at, 4)));
@@ -454,38 +441,25 @@ fn validate(
         let e = wrapping_add(r, 7);
         let k = entry_words(kind);
         let mut past = false;
-        if kind
-            == BtfKind::Ptr
-            || kind
-            == BtfKind::Typedef
-            || kind
-            == BtfKind::Volatile
-            || kind
-            == BtfKind::Const
-            || kind
-            == BtfKind::Restrict
-            || kind
-            == BtfKind::Var
-            || kind
-            == BtfKind::DeclTag
-            || kind
-            == BtfKind::TypeTag
-            || kind
-            == BtfKind::Func {
+        if kind == BtfKind::Ptr
+            || kind == BtfKind::Typedef
+            || kind == BtfKind::Volatile
+            || kind == BtfKind::Const
+            || kind == BtfKind::Restrict
+            || kind == BtfKind::Var
+            || kind == BtfKind::DeclTag
+            || kind == BtfKind::TypeTag
+            || kind == BtfKind::Func {
             past = a >= ntypes;
         } else if kind == BtfKind::Array {
             past = a >= ntypes || b >= ntypes;
         } else if kind == BtfKind::FuncProto {
             past = a >= ntypes;
         }
-        if kind
-            == BtfKind::Struct
-            || kind
-            == BtfKind::Union
-            || kind
-            == BtfKind::FuncProto
-            || kind
-            == BtfKind::Datasec {
+        if kind == BtfKind::Struct
+            || kind == BtfKind::Union
+            || kind == BtfKind::FuncProto
+            || kind == BtfKind::Datasec {
             // the type is entry word 1 of a member or param, word 0 of a var
             let at: u64 = if kind == BtfKind::Datasec {
                 0
@@ -508,16 +482,11 @@ fn validate(
         if c0 != 0 {
             return c0;
         }
-        if kind
-            == BtfKind::Struct
-            || kind
-            == BtfKind::Union
-            || kind
-            == BtfKind::Enum
-            || kind
-            == BtfKind::Enum64
-            || kind
-            == BtfKind::FuncProto {
+        if kind == BtfKind::Struct
+            || kind == BtfKind::Union
+            || kind == BtfKind::Enum
+            || kind == BtfKind::Enum64
+            || kind == BtfKind::FuncProto {
             for i in 0..n {
                 let o = word_at(in out, wrapping_add(e, wrapping_mul(i, k)));
                 let ci = check_name(in base, in own, o);

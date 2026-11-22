@@ -217,20 +217,13 @@ pub fn pair_total(in smin: Slice[u32], in smax: Slice[u32], axis: u64, inout cou
             if !(t < n && gf(in smin, wrapping_add(bt, axis)) <= up) {
                 break;
             }
-            if min0
-                <= gf(in smax, bt)
-                && gf(in smin, bt)
-                <= max0
-                && min1
-                <= gf(in smax, wrapping_add(bt, 1))
-                && gf(in smin, wrapping_add(bt, 1))
-                <= max1
-                && min2
-                <= gf(in smax, wrapping_add(bt, 2))
-                && gf(in smin, wrapping_add(bt, 2))
-                <= max2
-                && c
-                != U32_MAX {
+            if min0 <= gf(in smax, bt)
+                && gf(in smin, bt) <= max0
+                && min1 <= gf(in smax, wrapping_add(bt, 1))
+                && gf(in smin, wrapping_add(bt, 1)) <= max1
+                && min2 <= gf(in smax, wrapping_add(bt, 2))
+                && gf(in smin, wrapping_add(bt, 2)) <= max2
+                && c != U32_MAX {
                 c = wrapping_add(c, 1);
             }
             t = inc(t);
@@ -276,18 +269,12 @@ pub fn write_pairs(
             if !(t < n && gf(in smin, wrapping_add(bt, axis)) <= up) {
                 break;
             }
-            if min0
-                <= gf(in smax, bt)
-                && gf(in smin, bt)
-                <= max0
-                && min1
-                <= gf(in smax, wrapping_add(bt, 1))
-                && gf(in smin, wrapping_add(bt, 1))
-                <= max1
-                && min2
-                <= gf(in smax, wrapping_add(bt, 2))
-                && gf(in smin, wrapping_add(bt, 2))
-                <= max2 {
+            if min0 <= gf(in smax, bt)
+                && gf(in smin, bt) <= max0
+                && min1 <= gf(in smax, wrapping_add(bt, 1))
+                && gf(in smin, wrapping_add(bt, 1)) <= max1
+                && min2 <= gf(in smax, wrapping_add(bt, 2))
+                && gf(in smin, wrapping_add(bt, 2)) <= max2 {
                 let b = widen_u64(g32(in order, t));
                 if a < b {
                     out.try_set(at, (a << 32) | b);

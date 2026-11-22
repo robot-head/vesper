@@ -247,11 +247,11 @@ fn list_new(inout p: Prog, in items: ChunkSeq[u32]) -> u32 {
     p
         .lists
         .push(
-        ListRef {
-            first: wrapping_u32(p.pool.len()),
-            len: wrapping_u32(items.len())
-        }
-    );
+            ListRef {
+                first: wrapping_u32(p.pool.len()),
+                len: wrapping_u32(items.len())
+            }
+        );
     p.pool.extend(in items.as_slice());
     id
 }
@@ -396,12 +396,12 @@ fn rd_effect(in w: Slice[u64], inout r: Rd, inout p: Prog, in blob: Str) -> u32 
     p
         .effs
         .push(
-        EffectNode {
-            label: label,
-            name: name,
-            args: args
-        }
-    );
+            EffectNode {
+                label: label,
+                name: name,
+                args: args
+            }
+        );
     id
 }
 
@@ -417,11 +417,11 @@ fn rd_effects(in w: Slice[u64], inout r: Rd, inout p: Prog, in blob: Str) -> u32
     p
         .rows
         .push(
-        EffectsNode {
-            instances: instances,
-            tail: tail
-        }
-    );
+            EffectsNode {
+                instances: instances,
+                tail: tail
+            }
+        );
     id
 }
 
@@ -534,16 +534,16 @@ fn rd_param(in w: Slice[u64], inout r: Rd, inout p: Prog, in blob: Str) -> u32 {
     p
         .params
         .push(
-        ParamRow {
-            name: name,
-            pass: pass,
-            projections: projections,
-            ty: ty,
-            start: start,
-            end: end,
-            fields: 0
-        }
-    );
+            ParamRow {
+                name: name,
+                pass: pass,
+                projections: projections,
+                ty: ty,
+                start: start,
+                end: end,
+                fields: 0
+            }
+        );
     id
 }
 
@@ -563,12 +563,12 @@ fn rd_function(in w: Slice[u64], inout r: Rd, inout p: Prog, in blob: Str) {
         p
             .generics
             .push(
-            GenericNode {
-                name: gname,
-                bound: bound,
-                row: row
-            }
-        );
+                GenericNode {
+                    name: gname,
+                    bound: bound,
+                    row: row
+                }
+            );
     }
     let generics = list_new(inout p, in gs);
     let np = rd(in w, inout r);
@@ -588,14 +588,14 @@ fn rd_function(in w: Slice[u64], inout r: Rd, inout p: Prog, in blob: Str) {
             p
                 .acts
                 .push(
-                ActRow {
-                    kind: kind,
-                    a: e,
-                    b: 0,
-                    pass: 0,
-                    moves: false
-                }
-            );
+                    ActRow {
+                        kind: kind,
+                        a: e,
+                        b: 0,
+                        pass: 0,
+                        moves: false
+                    }
+                );
         } else if kind == A_CALL {
             let callee = rd_name(in w, inout r, inout p, in blob);
             let n = rd(in w, inout r);
@@ -608,14 +608,14 @@ fn rd_function(in w: Slice[u64], inout r: Rd, inout p: Prog, in blob: Str) {
             p
                 .acts
                 .push(
-                ActRow {
-                    kind: kind,
-                    a: callee,
-                    b: b,
-                    pass: 0,
-                    moves: false
-                }
-            );
+                    ActRow {
+                        kind: kind,
+                        a: callee,
+                        b: b,
+                        pass: 0,
+                        moves: false
+                    }
+                );
         } else if kind == A_ACCESS {
             let root = rd_name(in w, inout r, inout p, in blob);
             let n = rd(in w, inout r);
@@ -629,26 +629,26 @@ fn rd_function(in w: Slice[u64], inout r: Rd, inout p: Prog, in blob: Str) {
             p
                 .acts
                 .push(
-                ActRow {
-                    kind: kind,
-                    a: root,
-                    b: b,
-                    pass: pass,
-                    moves: moves
-                }
-            );
+                    ActRow {
+                        kind: kind,
+                        a: root,
+                        b: b,
+                        pass: pass,
+                        moves: moves
+                    }
+                );
         } else {
             p
                 .acts
                 .push(
-                ActRow {
-                    kind: A_OPAQUE,
-                    a: NONE,
-                    b: 0,
-                    pass: 0,
-                    moves: false
-                }
-            );
+                    ActRow {
+                        kind: A_OPAQUE,
+                        a: NONE,
+                        b: 0,
+                        pass: 0,
+                        moves: false
+                    }
+                );
         }
     }
     let nf = rd(in w, inout r);
@@ -669,21 +669,21 @@ fn rd_function(in w: Slice[u64], inout r: Rd, inout p: Prog, in blob: Str) {
     p
         .fns
         .push(
-        FnFacts {
-            name: name,
-            owned: owned,
-            body: body,
-            start: start,
-            end: end,
-            generics: generics,
-            params: params,
-            result: result,
-            effects: effects,
-            act_first: act_first,
-            act_len: wrapping_u32(na),
-            facts: facts
-        }
-    );
+            FnFacts {
+                name: name,
+                owned: owned,
+                body: body,
+                start: start,
+                end: end,
+                generics: generics,
+                params: params,
+                result: result,
+                effects: effects,
+                act_first: act_first,
+                act_len: wrapping_u32(na),
+                facts: facts
+            }
+        );
 }
 
 fn decode(in w: Slice[u64], in blob: Str) -> Prog {
@@ -809,22 +809,14 @@ fn validate_effect(in p: Prog, e: u32) eff [Fail[LintFail]] {
 fn check_limits(in p: Prog, functions: u64, actions: u64, work: u64, depth: u64) eff [
     Fail[LintFail]
 ] {
-    if functions
-        == 0
-        || functions
-        > MAX_FUNCTIONS
-        || actions
-        == 0
-        || actions
-        > MAX_ACTIONS
-        || work
-        == 0
-        || work
-        > MAX_WORK
-        || depth
-        == 0
-        || depth
-        > MAX_CALL_DEPTH {
+    if functions == 0
+        || functions > MAX_FUNCTIONS
+        || actions == 0
+        || actions > MAX_ACTIONS
+        || work == 0
+        || work > MAX_WORK
+        || depth == 0
+        || depth > MAX_CALL_DEPTH {
         fail(L_INVALID_LIMITS);
     }
     if p.fns.len() > functions {
@@ -835,12 +827,9 @@ fn check_limits(in p: Prog, functions: u64, actions: u64, work: u64, depth: u64)
         let f = fn_at(in p, i);
         count = wrapping_add(count, widen_u64(f.act_len));
         let row = row_at(in p, f.effects);
-        if count
-            > actions
-            || list_len(in p, row.instances)
-            > MAX_EFFECTS
-            || list_len(in p, f.facts)
-            > MAX_PARAMS {
+        if count > actions
+            || list_len(in p, row.instances) > MAX_EFFECTS
+            || list_len(in p, f.facts) > MAX_PARAMS {
             fail(L_FACT_LIMIT);
         }
         if list_len(in p, f.params) > MAX_PARAMS || list_len(in p, f.generics) > MAX_GENERICS {
@@ -976,10 +965,9 @@ fn type_eq(in p: Prog, a: u32, b: u32) -> bool {
     } else if x.kind == TY_ROW {
         row_eq(in p, x.a, y.a)
     } else if x.kind == TY_INT_LITERAL {
-        word(in p.ilits.as_slice(), widen_u64(x.a))
-            == word(in p.ilits.as_slice(), widen_u64(y.a))
+        word(in p.ilits.as_slice(), widen_u64(x.a)) == word(in p.ilits.as_slice(), widen_u64(y.a))
             && word(in p.ilits.as_slice(), inc(widen_u64(x.a)))
-            == word(in p.ilits.as_slice(), inc(widen_u64(y.a)))
+                == word(in p.ilits.as_slice(), inc(widen_u64(y.a)))
     } else {
         true
     }
@@ -1082,10 +1070,7 @@ fn resolve(in p: Prog, row: u32, request: u32) -> u32 {
         i = wrapping_sub(i, 1);
         let id = list_at(in p, inst, i);
         let e = eff_at(in p, id);
-        if e
-            .name
-            == q
-            .name
+        if e.name == q.name
             && types_eq(in p, e.args, q.args)
             && (q.label == NONE || e.label == q.label) {
             return id;
@@ -1225,12 +1210,12 @@ fn required_body(
                 p
                     .effs
                     .push(
-                    EffectNode {
-                        label: e.label,
-                        name: e.name,
-                        args: args
-                    }
-                );
+                        EffectNode {
+                            label: e.label,
+                            name: e.name,
+                            args: args
+                        }
+                    );
                 requested.push(id);
             }
         } else if a.kind == A_OPAQUE {
@@ -1569,13 +1554,9 @@ fn projection_findings(
     let mut reads = ChunkSeq::new[u32]();
     for pi in 0..list_len(in p, f.facts) {
         let q = param_at(in p, list_at(in p, f.facts, pi));
-        if q
-            .pass
-            != PASS_INOUT
-            || list_len(in p, q.projections)
-            != 0
-            || list_len(in p, q.fields)
-            == 0 {
+        if q.pass != PASS_INOUT
+            || list_len(in p, q.projections) != 0
+            || list_len(in p, q.fields) == 0 {
             continue;
         }
         writes.clear();
@@ -1587,10 +1568,8 @@ fn projection_findings(
             if a.kind != A_ACCESS || a.a != q.name {
                 continue;
             }
-            if list_len(in p, a.b)
-                == 0
-                || a
-                .moves
+            if list_len(in p, a.b) == 0
+                || a.moves
                 || !list_has(in p, q.fields, list_at(in p, a.b, 0)) {
                 blocked = true;
                 break;
@@ -1778,12 +1757,12 @@ pub fn apply_edits(in source: Str, in edits: Slice[u64], in texts: Str, max_byte
         let b = inc(wrapping_mul(i, Edit::Words));
         keys
             .push(
-            EditKey {
-                start: word(in edits, b),
-                end: word(in edits, wrapping_add(b, Edit::End)),
-                index: i
-            }
-        );
+                EditKey {
+                    start: word(in edits, b),
+                    end: word(in edits, wrapping_add(b, Edit::End)),
+                    index: i
+                }
+            );
     }
     sort(inout keys.as_slice_mut());
     let mut end: u64 = 0;
@@ -1801,21 +1780,12 @@ pub fn apply_edits(in source: Str, in edits: Slice[u64], in texts: Str, max_byte
         let es = word(in edits, wrapping_add(b, Edit::ExpStart));
         let el = word(in edits, wrapping_add(b, Edit::ExpLen));
         let rl = word(in edits, wrapping_add(b, Edit::RepLen));
-        if e
-            .start
-            < end
-            || e
-            .start
-            >= e
-            .end
-            || e
-            .end
-            > s
-            .len()
+        if e.start < end
+            || e.start >= e.end
+            || e.end > s.len()
             || !char_boundary(in s, e.start)
             || !char_boundary(in s, e.end)
-            || wrapping_sub(e.end, e.start)
-            != el {
+            || wrapping_sub(e.end, e.start) != el {
             fail(E_STALE);
         }
         for i in 0..el {

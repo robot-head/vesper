@@ -565,38 +565,22 @@ fn check_reductions(inout c: Cx, f: u64, sequential_order: bool, fname: u64) {
 // ----- NaN escapes ------------------------------------------------------------
 
 fn generates_nan(op: u64) -> bool {
-    op
-        == OP_FADD
-        || op
-        == OP_FSUB
-        || op
-        == OP_FMUL
-        || op
-        == OP_FDIV
-        || op
-        == OP_SQRT
-        || op
-        == OP_FMA
-        || op
-        == OP_FMIN
-        || op
-        == OP_FMAX
-        || op
-        == OP_CEIL
-        || op
-        == OP_FLOOR
-        || op
-        == OP_TRUNC
-        || op
-        == OP_NEAREST
-        || op
-        == OP_FPROMOTE
-        || op
-        == OP_FDEMOTE
-        || op
-        == OP_FVDEMOTE
-        || op
-        == OP_FVPROMOTE_LOW
+    op == OP_FADD
+        || op == OP_FSUB
+        || op == OP_FMUL
+        || op == OP_FDIV
+        || op == OP_SQRT
+        || op == OP_FMA
+        || op == OP_FMIN
+        || op == OP_FMAX
+        || op == OP_CEIL
+        || op == OP_FLOOR
+        || op == OP_TRUNC
+        || op == OP_NEAREST
+        || op == OP_FPROMOTE
+        || op == OP_FDEMOTE
+        || op == OP_FVDEMOTE
+        || op == OP_FVPROMOTE_LOW
 }
 
 fn canonical_nan_bits(in c: Cx, row: u64, ty: u64) -> bool {
@@ -711,8 +695,7 @@ fn check_nan_escape(inout c: Cx, f: u64, fname: u64) {
                 }
             }
             let lib = libcall(in c, row);
-            let nan_lib = lib
-                != NONE
+            let nan_lib = lib != NONE
                 && (is_fma_libcall(in c.nm, lib) || is_rounding_libcall(in c.nm, lib));
             let mut taint = false;
             if generates_nan(op) || nan_lib {
