@@ -35,6 +35,9 @@ use @vesper-std/fs::{
     IoError,
     not_found
 };
+use self::ebpf::{
+    run_ebpf
+};
 
 enum Ascii: _ {
     LineFeed = 10,
@@ -64,7 +67,7 @@ pub fn delegate() -> i64 {
     -1
 }
 
-fn stdout_stream() -> u32 {
+pub fn stdout_stream() -> u32 {
     1
 }
 
@@ -124,6 +127,9 @@ pub fn run(in args: Args)
             return version();
         }
         return unknown_command(in c);
+    }
+    if eq(in c, in "ebpf") {
+        return run_ebpf(in args);
     }
     if eq(in c, in "verify") && has_arg(in args, in "--refute") {
         let found = locate(in "refute".as_bytes());
@@ -227,7 +233,7 @@ fn tool_name(in c: Slice[u8]) -> bool {
 // ---------------------------------------------------------------------------
 // Shared helpers.
 
-fn arg(in a: Args, i: u64) -> ChunkSeq[u8] {
+pub fn arg(in a: Args, i: u64) -> ChunkSeq[u8] {
     let mut v: ChunkSeq[u8] = ChunkSeq::new[u8]();
     let s = arg_start(in a, i);
     let e = arg_end(in a, i);
@@ -235,19 +241,19 @@ fn arg(in a: Args, i: u64) -> ChunkSeq[u8] {
     v
 }
 
-fn byte_at(in s: Slice[u8], i: u64) -> u8 {
+pub fn byte_at(in s: Slice[u8], i: u64) -> u8 {
     match s.try_get(i) {
         Option::Some(b) => b,
         Option::None => 0,
     }
 }
 
-fn print(stream: u32, in text: Slice[u8]) eff [Ffi[HybridCommands]] {
+pub fn print(stream: u32, in text: Slice[u8]) eff [Ffi[HybridCommands]] {
     HybridCommands::hc_print(stream, in text);
 }
 
 // `vesper: <message>` on stderr (`main`'s `Err` arm); exit code 1.
-fn fail(in message: Slice[u8]) -> i64 eff [Ffi[HybridCommands]] {
+pub fn fail(in message: Slice[u8]) -> i64 eff [Ffi[HybridCommands]] {
     let mut line: ChunkSeq[u8] = ChunkSeq::new[u8]();
     line.extend(in "vesper: ".as_bytes());
     line.extend(in message);

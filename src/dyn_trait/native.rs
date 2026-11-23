@@ -660,16 +660,47 @@ fn dyn_drop_helper<M: Module>(m: &mut M, world: &World, ty: &Type) -> Result<Fun
     let mut fb_ctx = FunctionBuilderContext::new();
     {
         let mut h = FunctionBuilder::new(&mut ctx.func, &mut fb_ctx);
-        let entry = h.create_block();
-        h.append_block_params_for_function_params(entry);
-        h.switch_to_block(entry);
-        let data = h.block_params(entry)[0];
-        let value = helper_load(&mut h, world, data, ty)?;
+        let scalar_ty_code = if Layout::of(world, ty)?.aggregate() {
+            0
+        } else {
+            crate::codegen_swap::ty_code(scalar(ty, &[])?)
+        };
+        let head = if crate::codegen_swap::hook(crate::codegen_swap::Family::Control).is_some() {
+            crate::codegen_swap::request_or_record(
+                crate::codegen_swap::Family::Control,
+                &mut h,
+                m,
+                world,
+                &crate::ir::Program::default(),
+                crate::codegen_swap::control::DYN_DROP_HELPER_HEAD,
+                &[scalar_ty_code],
+            )
+            .and_then(|r| crate::codegen_swap::value_or_record(&r))
+        } else {
+            None
+        };
+        crate::codegen_swap::take_error()?;
+        let value = if let Some(v) = head {
+            v
+        } else {
+            let entry = h.create_block();
+            h.append_block_params_for_function_params(entry);
+            h.switch_to_block(entry);
+            let data = h.block_params(entry)[0];
+            helper_load(&mut h, world, data, ty)?
+        };
         // `elements`: the Box drop elaboration cannot see through the erased
         // parameter, so the vtable drop frees the boxes too.
         seq_native::emit_drop_glue(&mut h, m, world, value, ty, true)?;
-        h.ins().return_(&[]);
-        h.seal_all_blocks();
+        if !crate::codegen_swap::request_control_builder(
+            &mut h,
+            m,
+            crate::codegen_swap::control::DYN_DROP_HELPER_TAIL,
+            &[],
+        )? {
+            h.ins().return_(&[]);
+            h.seal_all_blocks();
+        }
         h.finalize();
     }
     if jit {
