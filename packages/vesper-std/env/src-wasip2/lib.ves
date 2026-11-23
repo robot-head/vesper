@@ -127,8 +127,8 @@ pub fn current_dir() -> String eff [Ffi[StdEnv], Fail[IoError]] {
 }
 
 // The platform: `os_linux()`, `os_macos()`, `os_windows()`, or 0.
-pub fn os() -> u32 eff [Ffi[StdEnv]] {
-    StdEnv::vstd_env_os()
+pub fn os() -> u32 {
+    0
 }
 
 pub fn os_linux() -> u32 {
