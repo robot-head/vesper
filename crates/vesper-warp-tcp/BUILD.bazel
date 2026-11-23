@@ -2,9 +2,6 @@ load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
 load("//tools/bazel:defs.bzl", "vesper_crate")
 load("//tools/bazel:vesper_port.bzl", "VESPER_TARGET", "vesper_port_object")
 
-# The Rust build (default features), with its tests.
-vesper_crate()
-
 # The Vesper library `tcp`: the files of vesper/ concatenated in this order
 # (`PARTS` in build.rs), each followed by a newline.
 TCP_PARTS = [
@@ -44,7 +41,27 @@ vesper_port_object(
     name = "tcp_vesper",
     src = ":tcp_source",
     library = "tcp",
+    rust_types = "crate::ported::types",
     target = VESPER_TARGET,
+)
+
+filegroup(
+    name = "tcp_vesper_binding",
+    srcs = [":tcp_vesper"],
+    output_group = "rust_binding",
+)
+
+# wire (codec + checksum) is unconditionally Vesper; seq/rtt/cc/conn stay
+# behind `vesper-port` until `transfer` clears 1.50x.
+vesper_crate(
+    build_script_data = [
+        ":tcp_vesper",
+        ":tcp_vesper_binding",
+    ],
+    build_script_env = {
+        "VESPER_PORT_OBJECT": "$(execpath :tcp_vesper)",
+        "VESPER_PORT_GENERATED_BINDING": "$(execpath :tcp_vesper_binding)",
+    },
 )
 
 # The divergence check: the edits of DIVERGENT_EDITS in build.rs, one wrong
