@@ -51,7 +51,7 @@ vesper_hybrid(
         },
         "hybrid_pact": {
             "edit_src": "modules/pact/src/lib.ves",
-            "edits": {"    declarations_words(in input)\n": "    divergent_words(in input)\n"},
+            "edits": {"    session_open(in input)\n": "    divergent_session(in input)\n"},
         },
         "hybrid_parse": {
             "edit_src": "modules/parse/src/lib.ves",
@@ -156,10 +156,11 @@ vesper_hybrid(
             "//:check_data_package",
             "//:place_ir_package",
         ],
-        # The trait declaration pass (#1185) builds on @vesper/check-pact.
+        # The trait declaration pass and Pact session (#1185) build on @vesper/check-pact and @vesper/pact.
         "hybrid_pact": [
             "//:check_data_package",
             "//:check_pact_package",
+            "//crates/vesper-pact:port_package",
         ],
         "hybrid_parse": [
             "//:ast_package",

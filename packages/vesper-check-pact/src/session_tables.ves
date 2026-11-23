@@ -1,0 +1,1175 @@
+// Sorted Pact identity tables, constructor mode-scheme collection, diagnostic
+// formatting (`CODE START END MESSAGE`) and `IdTables::rename_ids` for
+// `@vesper/check-pact`'s session.
+
+use @vesper/check-data::input::{
+    Ctx
+};
+use @vesper/check-data::names::{
+    Names
+};
+use @vesper/check-data::types::{
+    M_AFFINE,
+    M_COPY,
+    M_LINEAR
+};
+use @vesper/check-data::util::{
+    add,
+    inc,
+    n32,
+    u32_at,
+    u64_at,
+    u8_at,
+    w
+};
+use @vesper/pact::term::{
+    kd_row,
+    kd_type
+};
+use self::decl::{
+    Decls
+};
+use self::frontend::{
+    Fe
+};
+use self::modes::{
+    MAX_MODE_COMBINATIONS,
+    SCHEME_OK,
+    SCHEME_TOO_MANY_COMBOS,
+    derive_adt_scheme
+};
+use self::session_input::{
+    SessionMeta,
+    cmp_sym_ascii,
+    put_num,
+    put_str,
+    put_sym,
+    valid_ident,
+    valid_key
+};
+
+const NONE32: u32 = 4294967295;
+pub const NONE64: u64 = 18446744073709551615;
+
+pub const ORIGIN_PRIMITIVE: u8 = 0;
+pub const ORIGIN_UNIT: u8 = 1;
+pub const ORIGIN_TUPLE: u8 = 2;
+pub const ORIGIN_ADT: u8 = 3;
+
+pub struct Tables {
+    pub builtin_pkg: u64,
+    pub local_pkg: u64,
+    pub pkg0_str: u32,
+    pub pkg1_str: u32,
+    pub unit_ctor_id: u64,
+    pub tuple_ctor_ids: ChunkSeq[u64],
+
+    // Sorted `types` table.
+    pub ty_origin: ChunkSeq[u8],
+    pub ty_tuple_k: ChunkSeq[u8],
+    pub ty_pkg: ChunkSeq[u64],
+    pub ty_name: ChunkSeq[u32],
+    pub ty_span_s: ChunkSeq[u64],
+    pub ty_span_e: ChunkSeq[u64],
+    pub ty_pa: ChunkSeq[u32],
+    pub ty_pn: ChunkSeq[u32],
+    pub ty_pnames: ChunkSeq[u32],
+    pub ty_pkinds: ChunkSeq[u8],
+    pub ty_pbounds: ChunkSeq[u8],
+    pub ty_base: ChunkSeq[u8],
+    pub ty_ja: ChunkSeq[u32],
+    pub ty_jn: ChunkSeq[u32],
+    pub ty_joins: ChunkSeq[u32],
+
+    // Sorted `effects` table.
+    pub ef_pkg: ChunkSeq[u64],
+    pub ef_name: ChunkSeq[u32],
+    pub ef_span_s: ChunkSeq[u64],
+    pub ef_span_e: ChunkSeq[u64],
+    pub ef_pa: ChunkSeq[u32],
+    pub ef_pn: ChunkSeq[u32],
+    pub ef_pnames: ChunkSeq[u32],
+    pub ef_pkinds: ChunkSeq[u8],
+    pub ef_pbounds: ChunkSeq[u8],
+
+    // Sorted `traits` table.
+    pub tr_decl_idx: ChunkSeq[u32],
+    pub tr_name: ChunkSeq[u32],
+    pub tr_span_s: ChunkSeq[u64],
+    pub tr_span_e: ChunkSeq[u64],
+    pub tr_pa: ChunkSeq[u32],
+    pub tr_pn: ChunkSeq[u32],
+    pub tr_pkinds: ChunkSeq[u8],
+    pub tr_aa: ChunkSeq[u32],
+    pub tr_an: ChunkSeq[u32],
+    pub tr_assoc_names: ChunkSeq[u32],
+
+    // Sorted `impls` and `models` tables (`acc_idx` indexes into `Fe::acc_*`).
+    pub im_acc_idx: ChunkSeq[u32],
+    pub im_name: ChunkSeq[u32],
+    pub im_span_s: ChunkSeq[u64],
+    pub im_span_e: ChunkSeq[u64],
+
+    pub mo_acc_idx: ChunkSeq[u32],
+    pub mo_name: ChunkSeq[u32],
+    pub mo_span_s: ChunkSeq[u64],
+    pub mo_span_e: ChunkSeq[u64],
+}
+
+impl Tables {
+    pub fn pkg_str(in self, id: u64) -> u32 {
+        if id == 0 {
+            self.pkg0_str
+        } else {
+            self.pkg1_str
+        }
+    }
+}
+
+pub fn empty_tables() -> Tables {
+    Tables {
+        builtin_pkg: 0,
+        local_pkg: 1,
+        pkg0_str: 0,
+        pkg1_str: 0,
+        unit_ctor_id: 0,
+        tuple_ctor_ids: ChunkSeq::new[u64](),
+        ty_origin: ChunkSeq::new[u8](),
+        ty_tuple_k: ChunkSeq::new[u8](),
+        ty_pkg: ChunkSeq::new[u64](),
+        ty_name: ChunkSeq::new[u32](),
+        ty_span_s: ChunkSeq::new[u64](),
+        ty_span_e: ChunkSeq::new[u64](),
+        ty_pa: ChunkSeq::new[u32](),
+        ty_pn: ChunkSeq::new[u32](),
+        ty_pnames: ChunkSeq::new[u32](),
+        ty_pkinds: ChunkSeq::new[u8](),
+        ty_pbounds: ChunkSeq::new[u8](),
+        ty_base: ChunkSeq::new[u8](),
+        ty_ja: ChunkSeq::new[u32](),
+        ty_jn: ChunkSeq::new[u32](),
+        ty_joins: ChunkSeq::new[u32](),
+        ef_pkg: ChunkSeq::new[u64](),
+        ef_name: ChunkSeq::new[u32](),
+        ef_span_s: ChunkSeq::new[u64](),
+        ef_span_e: ChunkSeq::new[u64](),
+        ef_pa: ChunkSeq::new[u32](),
+        ef_pn: ChunkSeq::new[u32](),
+        ef_pnames: ChunkSeq::new[u32](),
+        ef_pkinds: ChunkSeq::new[u8](),
+        ef_pbounds: ChunkSeq::new[u8](),
+        tr_decl_idx: ChunkSeq::new[u32](),
+        tr_name: ChunkSeq::new[u32](),
+        tr_span_s: ChunkSeq::new[u64](),
+        tr_span_e: ChunkSeq::new[u64](),
+        tr_pa: ChunkSeq::new[u32](),
+        tr_pn: ChunkSeq::new[u32](),
+        tr_pkinds: ChunkSeq::new[u8](),
+        tr_aa: ChunkSeq::new[u32](),
+        tr_an: ChunkSeq::new[u32](),
+        tr_assoc_names: ChunkSeq::new[u32](),
+        im_acc_idx: ChunkSeq::new[u32](),
+        im_name: ChunkSeq::new[u32](),
+        im_span_s: ChunkSeq::new[u64](),
+        im_span_e: ChunkSeq::new[u64](),
+        mo_acc_idx: ChunkSeq::new[u32](),
+        mo_name: ChunkSeq::new[u32](),
+        mo_span_s: ChunkSeq::new[u64](),
+        mo_span_e: ChunkSeq::new[u64](),
+    }
+}
+
+pub struct DiagSink {
+    pub inv: ChunkSeq[u8],
+    pub unsup: ChunkSeq[u8],
+}
+
+pub fn diag_sink_new() -> DiagSink {
+    DiagSink {
+        inv: ChunkSeq::new[u8](),
+        unsup: ChunkSeq::new[u8](),
+    }
+}
+
+pub fn emit_line(
+    inout out: ChunkSeq[u8],
+    in code: Str,
+    s: u64,
+    e: u64,
+    in sub_code: Str,
+    in msg: Slice[u8],
+    in tb: Tables,
+    in names: Names,
+    has_subj: bool,
+    subj_kind: u8,
+    subj_pkg: u64,
+    subj_name: u32
+) {
+    put_str(inout out, in code);
+    out.push(32);
+    put_num(inout out, s);
+    out.push(32);
+    put_num(inout out, e);
+    out.push(32);
+    put_str(inout out, in sub_code);
+    put_str(inout out, ": ");
+    for i in 0..msg.len() {
+        let ch = u8_at_slice(in msg, i);
+        out
+            .push(
+                if ch == 10 {
+                    1
+                } else {
+                    ch
+                }
+            );
+    }
+    if has_subj {
+        put_str(inout out, " (");
+        put_def_path(inout out, in tb, in names, subj_kind, subj_pkg, subj_name);
+        out.push(41);
+    }
+    out.push(10);
+}
+
+// `DefPath::Display`: prefix (`"" | "effect " | "trait " | "impl " | "model "`) + `pkg@ver::name`.
+pub fn put_def_path(
+    inout o: ChunkSeq[u8],
+    in tb: Tables,
+    in names: Names,
+    kind: u8,
+    pkg_id: u64,
+    name_sym: u32
+) {
+    if kind == 1 {
+        put_str(inout o, "effect ");
+    } else if kind == 2 {
+        put_str(inout o, "trait ");
+    } else if kind == 3 {
+        put_str(inout o, "impl ");
+    } else if kind == 4 {
+        put_str(inout o, "model ");
+    }
+    put_sym(inout o, in names, tb.pkg_str(pkg_id));
+    put_str(inout o, "::");
+    put_sym(inout o, in names, name_sym);
+}
+
+fn intern_tuple_name(inout names: Names, k: u64) -> u32 {
+    let mut b: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put_str(inout b, "(tuple/");
+    put_num(inout b, k);
+    b.push(41);
+    names.intern(in b.as_slice())
+}
+
+fn intern_pkg_str(inout names: Names, pkg: u32, ver: u32) -> u32 {
+    let mut b: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    names.write(pkg, inout b);
+    b.push(64);
+    names.write(ver, inout b);
+    names.intern(in b.as_slice())
+}
+
+fn is_primitive_name(in names: Names, s: u32) -> bool {
+    names.spells(s, in "u8".as_bytes())
+        || names.spells(s, in "u32".as_bytes())
+        || names.spells(s, in "u64".as_bytes())
+        || names.spells(s, in "i64".as_bytes())
+        || names.spells(s, in "f64".as_bytes())
+        || names.spells(s, in "bool".as_bytes())
+        || names.spells(s, in "Never".as_bytes())
+        || names.spells(s, in "String".as_bytes())
+        || names.spells(s, in "Unit".as_bytes())
+}
+
+fn intern_primitive_at(inout names: Names, i: u64) -> u32 {
+    if i == 0 {
+        names.intern(in "u8".as_bytes())
+    } else if i == 1 {
+        names.intern(in "u32".as_bytes())
+    } else if i == 2 {
+        names.intern(in "u64".as_bytes())
+    } else if i == 3 {
+        names.intern(in "i64".as_bytes())
+    } else if i == 4 {
+        names.intern(in "f64".as_bytes())
+    } else if i == 5 {
+        names.intern(in "bool".as_bytes())
+    } else if i == 6 {
+        names.intern(in "Never".as_bytes())
+    } else {
+        names.intern(in "String".as_bytes())
+    }
+}
+
+fn cmp_entry(in names: Names, pkg_a: u64, sym_a: u32, pkg_b: u64, sym_b: u32) -> u8 {
+    if pkg_a < pkg_b {
+        return 0;
+    }
+    if pkg_a > pkg_b {
+        return 2;
+    }
+    cmp_sym_ascii(in names, sym_a, sym_b)
+}
+
+fn local_item_span(in d: Decls, is_adt: bool, name: u32) -> (u64, u64) {
+    for i in 0..d.items.len() {
+        let it = d.item(i);
+        if it.adt == is_adt && it.name == name {
+            return (it.s, it.e);
+        }
+    }
+    (0, 0)
+}
+
+// Builds `Tables`, deriving constructor mode schemes and checking Phase 1 names.
+pub fn build_tables(
+    inout c: Ctx,
+    in d: Decls,
+    in fe: Fe,
+    in meta: SessionMeta,
+    inout sink: DiagSink
+) -> Tables {
+    let mut tb = empty_tables();
+    let b_name = c.names.intern(in "@vesper/builtin".as_bytes());
+    let b_ver = c.names.intern(in "0.0.0".as_bytes());
+    let b_str = c.names.intern(in "@vesper/builtin@0.0.0".as_bytes());
+    let l_str = intern_pkg_str(inout c.names, meta.pkg_name, meta.pkg_ver);
+
+    let cmp_name = cmp_sym_ascii(in c.names, meta.pkg_name, b_name);
+    let cmp_pkg = if cmp_name != 1 {
+        cmp_name
+    } else {
+        cmp_sym_ascii(in c.names, meta.pkg_ver, b_ver)
+    };
+    if cmp_pkg == 0 {
+        tb.local_pkg = 0;
+        tb.builtin_pkg = 1;
+        tb.pkg0_str = l_str;
+        tb.pkg1_str = b_str;
+    } else {
+        tb.builtin_pkg = 0;
+        tb.local_pkg = 1;
+        tb.pkg0_str = b_str;
+        tb.pkg1_str = l_str;
+    }
+
+    // 1. Collect and sort `traits`, `impls`, `models`.
+    let mut tr_idxs: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut tr_syms: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..d.traits.len() {
+        let tr = d.trait_row(i);
+        tr_idxs.push(n32(i));
+        tr_syms.push(tr.name);
+        if !valid_ident(in c.names, tr.name) {
+            emit_line(
+                inout sink.inv,
+                "E0601",
+                tr.s,
+                tr.e,
+                "BRIDGE0001",
+                in "invalid trait name".as_bytes(),
+                in tb,
+                in c.names,
+                true,
+                2,
+                tb.local_pkg,
+                tr.name
+            );
+        }
+    }
+    sort_u32_pairs(in c.names, inout tr_syms, inout tr_idxs);
+    for i in 1..tr_syms.len() {
+        if u32_at(in tr_syms, wrapping_sub(i, 1)) == u32_at(in tr_syms, i) {
+            emit_line(
+                inout sink.inv,
+                "E0601",
+                0,
+                0,
+                "BRIDGE0001",
+                in "duplicate trait".as_bytes(),
+                in tb,
+                in c.names,
+                true,
+                2,
+                tb.local_pkg,
+                u32_at(in tr_syms, i)
+            );
+        }
+    }
+
+    let mut im_acc: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut im_sym: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut mo_acc: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut mo_sym: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for j in 0..fe.acc_conf.len() {
+        let is_m = match fe.acc_model.try_get(j) {
+            Option::Some(v) => v,
+            Option::None => false,
+        };
+        let psym = u32_at(in fe.acc_path, j);
+        let cf_j = d.conf(w(u32_at(in fe.acc_conf, j)));
+        if is_m {
+            mo_acc.push(n32(j));
+            mo_sym.push(psym);
+            if !valid_ident(in c.names, psym) {
+                emit_line(
+                    inout sink.inv,
+                    "E0601",
+                    cf_j.s,
+                    cf_j.e,
+                    "BRIDGE0001",
+                    in "invalid model name".as_bytes(),
+                    in tb,
+                    in c.names,
+                    true,
+                    4,
+                    tb.local_pkg,
+                    psym
+                );
+            }
+        } else {
+            im_acc.push(n32(j));
+            im_sym.push(psym);
+            if !valid_key(in c.names, psym) {
+                emit_line(
+                    inout sink.inv,
+                    "E0601",
+                    cf_j.s,
+                    cf_j.e,
+                    "BRIDGE0001",
+                    in "invalid impl key".as_bytes(),
+                    in tb,
+                    in c.names,
+                    true,
+                    3,
+                    tb.local_pkg,
+                    psym
+                );
+            }
+        }
+    }
+    sort_u32_pairs(in c.names, inout im_sym, inout im_acc);
+    sort_u32_pairs(in c.names, inout mo_sym, inout mo_acc);
+    for i in 1..im_sym.len() {
+        if u32_at(in im_sym, wrapping_sub(i, 1)) == u32_at(in im_sym, i) {
+            emit_line(
+                inout sink.inv,
+                "E0601",
+                0,
+                0,
+                "BRIDGE0001",
+                in "duplicate impl key".as_bytes(),
+                in tb,
+                in c.names,
+                true,
+                3,
+                tb.local_pkg,
+                u32_at(in im_sym, i)
+            );
+        }
+    }
+    for i in 1..mo_sym.len() {
+        if u32_at(in mo_sym, wrapping_sub(i, 1)) == u32_at(in mo_sym, i) {
+            emit_line(
+                inout sink.inv,
+                "E0601",
+                0,
+                0,
+                "BRIDGE0001",
+                in "duplicate model".as_bytes(),
+                in tb,
+                in c.names,
+                true,
+                4,
+                tb.local_pkg,
+                u32_at(in mo_sym, i)
+            );
+        }
+    }
+    if sink.inv.len() > 0 {
+        return tb;
+    }
+
+    for i in 0..tr_idxs.len() {
+        let di = u32_at(in tr_idxs, i);
+        let tr = d.trait_row(w(di));
+        tb.tr_decl_idx.push(di);
+        tb.tr_name.push(tr.name);
+        tb.tr_span_s.push(tr.s);
+        tb.tr_span_e.push(tr.e);
+        tb.tr_pa.push(n32(tb.tr_pkinds.len()));
+        tb.tr_pn.push(tr.gn);
+        for g_i in 0..w(tr.gn) {
+            let g = d.gen(add(w(tr.ga), g_i));
+            tb
+                .tr_pkinds
+                .push(
+                    if g.row {
+                        wrapping_u8(kd_row())
+                    } else {
+                        wrapping_u8(kd_type())
+                    }
+                );
+        }
+        tb.tr_aa.push(n32(tb.tr_assoc_names.len()));
+        tb.tr_an.push(tr.an);
+        for a_i in 0..w(tr.an) {
+            let as_d = d.assoc(add(w(tr.aa), a_i));
+            tb.tr_assoc_names.push(as_d.name);
+        }
+    }
+
+    for i in 0..im_acc.len() {
+        let ai = u32_at(in im_acc, i);
+        let cf = d.conf(w(u32_at(in fe.acc_conf, w(ai))));
+        tb.im_acc_idx.push(ai);
+        tb.im_name.push(u32_at(in im_sym, i));
+        tb.im_span_s.push(cf.s);
+        tb.im_span_e.push(cf.e);
+    }
+    for i in 0..mo_acc.len() {
+        let ai = u32_at(in mo_acc, i);
+        let cf = d.conf(w(u32_at(in fe.acc_conf, w(ai))));
+        tb.mo_acc_idx.push(ai);
+        tb.mo_name.push(u32_at(in mo_sym, i));
+        tb.mo_span_s.push(cf.s);
+        tb.mo_span_e.push(cf.e);
+    }
+
+    // 2. Collect and sort `effects`.
+    let mut ef_order: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](meta.eff_name.len());
+    for i in 0..meta.eff_name.len() {
+        ef_order.push(n32(i));
+    }
+    for i in 1..ef_order.len() {
+        let mut j = i;
+        loop {
+            if j == 0 {
+                break;
+            }
+            let pj = wrapping_sub(j, 1);
+            let ia = w(u32_at(in ef_order, pj));
+            let ib = w(u32_at(in ef_order, j));
+            let pa = if is_eff_local(in meta, ia) {
+                tb.local_pkg
+            } else {
+                tb.builtin_pkg
+            };
+            let pb = if is_eff_local(in meta, ib) {
+                tb.local_pkg
+            } else {
+                tb.builtin_pkg
+            };
+            if cmp_entry(
+                in c.names,
+                pa,
+                u32_at(in meta.eff_name, ia),
+                pb,
+                u32_at(in meta.eff_name, ib)
+            )
+                != 2 {
+                break;
+            }
+            let oa = u32_at(in ef_order, pj);
+            let ob = u32_at(in ef_order, j);
+            let _ = ef_order.try_set(pj, ob);
+            let _ = ef_order.try_set(j, oa);
+            j = pj;
+        }
+    }
+    for i in 0..ef_order.len() {
+        let k = w(u32_at(in ef_order, i));
+        let loc = is_eff_local(in meta, k);
+        let ename = u32_at(in meta.eff_name, k);
+        tb
+            .ef_pkg
+            .push(
+                if loc {
+                    tb.local_pkg
+                } else {
+                    tb.builtin_pkg
+                }
+            );
+        tb.ef_name.push(ename);
+        if loc {
+            let (ss, se) = local_item_span(in d, false, ename);
+            tb.ef_span_s.push(ss);
+            tb.ef_span_e.push(se);
+        } else {
+            tb.ef_span_s.push(0);
+            tb.ef_span_e.push(0);
+        }
+        tb.ef_pa.push(n32(tb.ef_pnames.len()));
+        let gn = u32_at(in meta.eff_gn, k);
+        let ga = u32_at(in meta.eff_ga, k);
+        tb.ef_pn.push(gn);
+        for g_i in 0..w(gn) {
+            let g = meta.eff_gen(add(w(ga), g_i));
+            tb.ef_pnames.push(g.name);
+            tb
+                .ef_pkinds
+                .push(
+                    if g.row {
+                        wrapping_u8(kd_row())
+                    } else {
+                        wrapping_u8(kd_type())
+                    }
+                );
+            tb
+                .ef_pbounds
+                .push(
+                    if g.row {
+                        M_LINEAR
+                    } else {
+                        g.bound
+                    }
+                );
+        }
+    }
+
+    // 3. Collect and sort pending `types`.
+    let mut p_orig: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut p_k: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut p_pkg: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut p_sym: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut p_adt: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut p_ss: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut p_se: ChunkSeq[u64] = ChunkSeq::new[u64]();
+
+    for i in 0..8 {
+        let s = intern_primitive_at(inout c.names, i);
+        let pm = if i == 7 {
+            M_AFFINE
+        } else {
+            M_COPY
+        };
+        p_orig.push(ORIGIN_PRIMITIVE);
+        p_k.push(pm);
+        p_pkg.push(tb.builtin_pkg);
+        p_sym.push(s);
+        p_adt.push(NONE32);
+        p_ss.push(0);
+        p_se.push(0);
+    }
+    let unit_sym = c.names.intern(in "Unit".as_bytes());
+    p_orig.push(ORIGIN_UNIT);
+    p_k.push(M_COPY);
+    p_pkg.push(tb.builtin_pkg);
+    p_sym.push(unit_sym);
+    p_adt.push(NONE32);
+    p_ss.push(0);
+    p_se.push(0);
+
+    for k in 1..13 {
+        let tsym = intern_tuple_name(inout c.names, k);
+        p_orig.push(ORIGIN_TUPLE);
+        p_k.push(wrapping_u8(k));
+        p_pkg.push(tb.builtin_pkg);
+        p_sym.push(tsym);
+        p_adt.push(NONE32);
+        p_ss.push(0);
+        p_se.push(0);
+    }
+
+    for i in 0..meta.prelude_adts.len() {
+        let name = u32_at(in meta.prelude_adts, i);
+        if !is_primitive_name(in c.names, name) {
+            let adt_id = c.world.lookup(name);
+            if adt_id != NONE32 {
+                p_orig.push(ORIGIN_ADT);
+                p_k.push(0);
+                p_pkg.push(tb.builtin_pkg);
+                p_sym.push(name);
+                p_adt.push(adt_id);
+                p_ss.push(0);
+                p_se.push(0);
+            }
+        }
+    }
+
+    for i in 0..d.items.len() {
+        let it = d.item(i);
+        if it.adt {
+            let adt_id = c.world.lookup(it.name);
+            if adt_id != NONE32 {
+                p_orig.push(ORIGIN_ADT);
+                p_k.push(0);
+                p_pkg.push(tb.local_pkg);
+                p_sym.push(it.name);
+                p_adt.push(adt_id);
+                p_ss.push(it.s);
+                p_se.push(it.e);
+            }
+        }
+    }
+
+    let nt = p_sym.len();
+    let mut ty_ord: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](nt);
+    for i in 0..nt {
+        ty_ord.push(n32(i));
+    }
+    for i in 1..nt {
+        let mut j = i;
+        loop {
+            if j == 0 {
+                break;
+            }
+            let pj = wrapping_sub(j, 1);
+            let ia = w(u32_at(in ty_ord, pj));
+            let ib = w(u32_at(in ty_ord, j));
+            if cmp_entry(
+                in c.names,
+                u64_at(in p_pkg, ia),
+                u32_at(in p_sym, ia),
+                u64_at(in p_pkg, ib),
+                u32_at(in p_sym, ib)
+            )
+                != 2 {
+                break;
+            }
+            let oa = u32_at(in ty_ord, pj);
+            let ob = u32_at(in ty_ord, j);
+            let _ = ty_ord.try_set(pj, ob);
+            let _ = ty_ord.try_set(j, oa);
+            j = pj;
+        }
+    }
+
+    for _ in 0..13 {
+        tb.tuple_ctor_ids.push(0);
+    }
+
+    for cid in 0..nt {
+        let k = w(u32_at(in ty_ord, cid));
+        let orig = u8_at(in p_orig, k);
+        let pk = u8_at(in p_k, k);
+        let pkg = u64_at(in p_pkg, k);
+        let name = u32_at(in p_sym, k);
+        let adt_idx = u32_at(in p_adt, k);
+        let ss = u64_at(in p_ss, k);
+        let se = u64_at(in p_se, k);
+
+        tb.ty_origin.push(orig);
+        tb.ty_tuple_k.push(pk);
+        tb.ty_pkg.push(pkg);
+        tb.ty_name.push(name);
+        tb.ty_span_s.push(ss);
+        tb.ty_span_e.push(se);
+        tb.ty_pa.push(n32(tb.ty_pnames.len()));
+        tb.ty_ja.push(n32(tb.ty_joins.len()));
+
+        if orig == ORIGIN_PRIMITIVE {
+            tb.ty_pn.push(0);
+            tb.ty_base.push(pk);
+            tb.ty_jn.push(0);
+        } else if orig == ORIGIN_UNIT {
+            tb.unit_ctor_id = cid;
+            tb.ty_pn.push(0);
+            tb.ty_base.push(M_COPY);
+            tb.ty_jn.push(0);
+        } else if orig == ORIGIN_TUPLE {
+            let arity = widen_u64(pk);
+            let _ = tb.tuple_ctor_ids.try_set(arity, cid);
+            tb.ty_pn.push(n32(arity));
+            for p_i in 0..arity {
+                let mut pn_b: ChunkSeq[u8] = ChunkSeq::new[u8]();
+                put_num(inout pn_b, p_i);
+                tb.ty_pnames.push(c.names.intern(in pn_b.as_slice()));
+                tb.ty_pkinds.push(wrapping_u8(kd_type()));
+                tb.ty_pbounds.push(M_LINEAR);
+                tb.ty_joins.push(n32(p_i));
+            }
+            tb.ty_base.push(M_COPY);
+            tb.ty_jn.push(n32(arity));
+        } else {
+            let a = c.world.adt(adt_idx);
+            tb.ty_pn.push(a.gn);
+            for g_i in 0..w(a.gn) {
+                let g = c.world.generic(add(w(a.ga), g_i));
+                tb.ty_pnames.push(g.name);
+                tb
+                    .ty_pkinds
+                    .push(
+                        if g.row {
+                            wrapping_u8(kd_row())
+                        } else {
+                            wrapping_u8(kd_type())
+                        }
+                    );
+                tb.ty_pbounds.push(g.bound);
+            }
+            let ds = derive_adt_scheme(inout c.types, inout c.names, in c.world, adt_idx);
+            if ds.status == SCHEME_OK {
+                tb.ty_base.push(ds.base);
+                tb.ty_jn.push(n32(ds.joins.len()));
+                for j_i in 0..ds.joins.len() {
+                    tb.ty_joins.push(u32_at(in ds.joins, j_i));
+                }
+            } else {
+                let mut msg: ChunkSeq[u8] = ChunkSeq::new[u8]();
+                if ds.status == SCHEME_TOO_MANY_COMBOS {
+                    msg.push(96);
+                    put_sym(inout msg, in c.names, a.name);
+                    put_str(inout msg, "` has ");
+                    put_num(inout msg, ds.non_row_count);
+                    put_str(
+                        inout msg,
+                        " type parameters; verifying its mode scheme against the checker needs more than "
+                    );
+                    put_num(inout msg, MAX_MODE_COMBINATIONS);
+                    put_str(inout msg, " argument-mode combinations");
+                } else {
+                    put_str(inout msg, "the checker's mode of `");
+                    put_sym(inout msg, in c.names, a.name);
+                    put_str(
+                        inout msg,
+                        "` cannot be represented as `base ⊔ joined arguments`; Pact's ModeScheme cannot represent it"
+                    );
+                }
+                emit_line(
+                    inout sink.unsup,
+                    "E0607",
+                    0,
+                    0,
+                    "BRIDGE0002",
+                    in msg.as_slice(),
+                    in tb,
+                    in c.names,
+                    true,
+                    0,
+                    pkg,
+                    name
+                );
+                tb.ty_base.push(M_LINEAR);
+                tb.ty_jn.push(0);
+            }
+        }
+    }
+
+    tb
+}
+
+fn is_eff_local(in meta: SessionMeta, i: u64) -> bool {
+    match meta.eff_local.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => false,
+    }
+}
+
+fn sort_u32_pairs(in names: Names, inout syms: ChunkSeq[u32], inout vals: ChunkSeq[u32]) {
+    for i in 1..syms.len() {
+        let mut j = i;
+        loop {
+            if j == 0 {
+                break;
+            }
+            let pj = wrapping_sub(j, 1);
+            if cmp_sym_ascii(in names, u32_at(in syms, pj), u32_at(in syms, j)) != 2 {
+                break;
+            }
+            let s1 = u32_at(in syms, pj);
+            let s2 = u32_at(in syms, j);
+            let _ = syms.try_set(pj, s2);
+            let _ = syms.try_set(j, s1);
+            let v1 = u32_at(in vals, pj);
+            let v2 = u32_at(in vals, j);
+            let _ = vals.try_set(pj, v2);
+            let _ = vals.try_set(j, v1);
+            j = pj;
+        }
+    }
+}
+
+// Lookup helpers.
+pub fn find_type_in_pkg(in tb: Tables, pkg: u64, name: u32) -> u64 {
+    for i in 0..tb.ty_name.len() {
+        if u64_at(in tb.ty_pkg, i) == pkg && u32_at(in tb.ty_name, i) == name {
+            return i;
+        }
+    }
+    NONE64
+}
+
+pub fn resolve_type_id(in tb: Tables, in names: Names, site_pkg: u64, name: u32) -> u64 {
+    if !valid_ident(in names, name) {
+        return NONE64;
+    }
+    if names.spells(name, in "Unit".as_bytes()) {
+        return tb.unit_ctor_id;
+    }
+    let hit = find_type_in_pkg(in tb, site_pkg, name);
+    if hit != NONE64 {
+        return hit;
+    }
+    find_type_in_pkg(in tb, tb.builtin_pkg, name)
+}
+
+pub fn resolve_effect_id(in tb: Tables, site_pkg: u64, name: u32) -> u64 {
+    for i in 0..tb.ef_name.len() {
+        if u64_at(in tb.ef_pkg, i) == site_pkg && u32_at(in tb.ef_name, i) == name {
+            return i;
+        }
+    }
+    for i in 0..tb.ef_name.len() {
+        if u64_at(in tb.ef_pkg, i) == tb.builtin_pkg && u32_at(in tb.ef_name, i) == name {
+            return i;
+        }
+    }
+    NONE64
+}
+
+pub fn resolve_trait_id(in tb: Tables, name: u32) -> u64 {
+    for i in 0..tb.tr_name.len() {
+        if u32_at(in tb.tr_name, i) == name {
+            return i;
+        }
+    }
+    NONE64
+}
+
+pub fn resolve_model_id(in tb: Tables, name: u32) -> u64 {
+    for i in 0..tb.mo_name.len() {
+        if u32_at(in tb.mo_name, i) == name {
+            return i;
+        }
+    }
+    NONE64
+}
+
+pub fn find_assoc_idx(in tb: Tables, trait_id: u64, name: u32) -> u64 {
+    let aa = w(u32_at(in tb.tr_aa, trait_id));
+    let an = w(u32_at(in tb.tr_an, trait_id));
+    for i in 0..an {
+        if u32_at(in tb.tr_assoc_names, add(aa, i)) == name {
+            return i;
+        }
+    }
+    NONE64
+}
+
+// ---------------------------------------------------------------------------
+// `IdTables::rename_ids` and `!n` placeholder substitution.
+
+fn starts_at(in b: Slice[u8], at: u64, in pat: Slice[u8]) -> bool {
+    if add(at, pat.len()) > b.len() {
+        return false;
+    }
+    for i in 0..pat.len() {
+        if u8_at_slice(in b, add(at, i)) != u8_at_slice(in pat, i) {
+            return false;
+        }
+    }
+    true
+}
+
+fn u8_at_slice(in b: Slice[u8], i: u64) -> u8 {
+    match b.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn is_ascii_alnum(c: u8) -> bool {
+    (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122)
+}
+
+fn matches_prefix(in b: Slice[u8], at: u64, kind: u64) -> u64 {
+    if kind == 0 {
+        if starts_at(in b, at, in "pkg#".as_bytes()) {
+            4
+        } else {
+            0
+        }
+    } else if kind == 1 {
+        if starts_at(in b, at, in "type#".as_bytes()) {
+            5
+        } else {
+            0
+        }
+    } else if kind == 2 {
+        if starts_at(in b, at, in "trait#".as_bytes()) {
+            6
+        } else {
+            0
+        }
+    } else if kind == 3 {
+        if starts_at(in b, at, in "effect#".as_bytes()) {
+            7
+        } else {
+            0
+        }
+    } else if kind == 4 {
+        if starts_at(in b, at, in "impl#".as_bytes()) {
+            5
+        } else {
+            0
+        }
+    } else {
+        if starts_at(in b, at, in "model#".as_bytes()) {
+            6
+        } else {
+            0
+        }
+    }
+}
+
+fn try_rename_token(
+    in b: Slice[u8],
+    at: u64,
+    in tb: Tables,
+    in names: Names,
+    inout out: ChunkSeq[u8]
+) -> u64 {
+    if at > 0 && is_ascii_alnum(u8_at_slice(in b, wrapping_sub(at, 1))) {
+        return 0;
+    }
+    for kind in 0..6 {
+        let plen = matches_prefix(in b, at, kind);
+        if plen > 0 {
+            let start = add(at, plen);
+            let mut end = start;
+            let mut val: u64 = 0;
+            loop {
+                if end >= b.len() {
+                    break;
+                }
+                let ch = u8_at_slice(in b, end);
+                if ch < 48 || ch > 57 {
+                    break;
+                }
+                val = wrapping_add(wrapping_mul(val, 10), widen_u64(wrapping_sub(ch, 48)));
+                end = inc(end);
+            }
+            if end > start && write_id_name(in tb, in names, kind, val, inout out) {
+                return end;
+            }
+            return 0;
+        }
+    }
+    0
+}
+
+fn write_id_name(in tb: Tables, in names: Names, kind: u64, id: u64, inout out: ChunkSeq[u8])
+    -> bool {
+    if kind == 0 {
+        if id < 2 {
+            put_sym(inout out, in names, tb.pkg_str(id));
+            return true;
+        }
+        return false;
+    }
+    if kind == 1 {
+        if id >= tb.ty_name.len() {
+            return false;
+        }
+        let orig = u8_at(in tb.ty_origin, id);
+        if orig == ORIGIN_TUPLE {
+            put_str(inout out, "tuple/");
+            put_num(inout out, widen_u64(u8_at(in tb.ty_tuple_k, id)));
+            return true;
+        }
+        let pkg = u64_at(in tb.ty_pkg, id);
+        if pkg == tb.builtin_pkg {
+            put_sym(inout out, in names, u32_at(in tb.ty_name, id));
+            return true;
+        }
+        put_def_path(inout out, in tb, in names, 0, pkg, u32_at(in tb.ty_name, id));
+        return true;
+    }
+    if kind == 2 {
+        if id >= tb.tr_name.len() {
+            return false;
+        }
+        put_def_path(inout out, in tb, in names, 2, tb.local_pkg, u32_at(in tb.tr_name, id));
+        return true;
+    }
+    if kind == 3 {
+        if id >= tb.ef_name.len() {
+            return false;
+        }
+        put_def_path(
+            inout out,
+            in tb,
+            in names,
+            1,
+            u64_at(in tb.ef_pkg, id),
+            u32_at(in tb.ef_name, id)
+        );
+        return true;
+    }
+    if kind == 4 {
+        if id >= tb.im_name.len() {
+            return false;
+        }
+        put_def_path(inout out, in tb, in names, 3, tb.local_pkg, u32_at(in tb.im_name, id));
+        return true;
+    }
+    if kind == 5 {
+        if id >= tb.mo_name.len() {
+            return false;
+        }
+        put_def_path(inout out, in tb, in names, 4, tb.local_pkg, u32_at(in tb.mo_name, id));
+        return true;
+    }
+    false
+}
+
+pub fn rename_ids(in raw: Slice[u8], in tb: Tables, in names: Names, inout out: ChunkSeq[u8]) {
+    let mut i: u64 = 0;
+    loop {
+        if i >= raw.len() {
+            break;
+        }
+        let next = try_rename_token(in raw, i, in tb, in names, inout out);
+        if next > 0 {
+            i = next;
+        } else {
+            out.push(u8_at_slice(in raw, i));
+            i = inc(i);
+        }
+    }
+}
+
+pub fn render_query_text(
+    in raw: Slice[u8],
+    in tb: Tables,
+    in names: Names,
+    in ph_names: ChunkSeq[u32],
+    inout out: ChunkSeq[u8]
+) {
+    let mut renamed: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](raw.len());
+    rename_ids(in raw, in tb, in names, inout renamed);
+    let rb = renamed.as_slice();
+    let mut i: u64 = 0;
+    loop {
+        if i >= rb.len() {
+            break;
+        }
+        let ch = u8_at_slice(in rb, i);
+        if ch == 33 {
+            let start = inc(i);
+            let mut end = start;
+            let mut val: u64 = 0;
+            loop {
+                if end >= rb.len() {
+                    break;
+                }
+                let d = u8_at_slice(in rb, end);
+                if d < 48 || d > 57 {
+                    break;
+                }
+                val = wrapping_add(wrapping_mul(val, 10), widen_u64(wrapping_sub(d, 48)));
+                end = inc(end);
+            }
+            if end > start && val < ph_names.len() {
+                put_sym(inout out, in names, u32_at(in ph_names, val));
+                i = end;
+                continue;
+            }
+        }
+        out.push(ch);
+        i = inc(i);
+    }
+}

@@ -202,7 +202,7 @@ vesper_crate(
             "examples/**",
             "packages/**",
             "tests/fixtures/**",
-        ]),
+        ]) + ["//crates/vesper-pact:files"],
         # Loops, atomics and the stack bound (SH2 lane 10, #1182).
         "test/self_host_check_loops_atomics": glob([
             "examples/**",
@@ -1201,7 +1201,10 @@ vesper_package(
     srcs = glob(["packages/vesper-check-pact/src/**/*.ves"]),
     manifest = "packages/vesper-check-pact/Loom.toml",
     visibility = ["//visibility:public"],
-    deps = [":check_data_package"],
+    deps = [
+        ":check_data_package",
+        "//crates/vesper-pact:port_package",
+    ],
 )
 
 vesper_package(
