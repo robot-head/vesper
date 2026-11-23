@@ -3,8 +3,8 @@
 // 16-byte block, so storage, moves, `==`, copies and evacuation are the
 // tuple's. The operations @vesper/front and the prelude's
 // `checked_add_u128`/`checked_mul_u128` use are lowered here: literals,
-// `widen_u128`, `wrapping_u64`, `+`, `wrapping_add`, `wrapping_mul`,
-// `/`, `%`, `<<` and the orderings. Anything else on a `u128` (and every
+// `widen_u128`, `wrapping_u64`, `wrapping_u8`, `+`, `wrapping_add`, `wrapping_mul`,
+// `/`, `%`, `<<`, `>>`, `|` and the orderings. Anything else on a `u128` (and every
 // `i128`) is refused (sites 248 and 249).
 
 use @vesper/check-data::types::{
@@ -182,6 +182,13 @@ impl L {
         } else if self.is_op(opn, "wrapping_u64") && wf && !wt {
             let lo = self.word_of(x, 0);
             self.set_value(dv, lo);
+        } else if self.is_op(opn, "wrapping_u8") && wf && !wt {
+            let lo = self.word_of(x, 0);
+            let d = self.dest(dv);
+            self.e.code.get(lo);
+            self.e.code.i64_const(255);
+            self.e.code.op(OP_I64_AND);
+            self.e.code.set(d);
         } else {
             Fail::raise(werr(K_UNSUPPORTED, U_OPERATION, 249));
         }
@@ -196,7 +203,8 @@ impl L {
             return false;
         }
         let checked = self.is_op(opn, "+");
-        if self.is_op(opn, "<<") {
+        let right = self.is_op(opn, ">>");
+        if right || self.is_op(opn, "<<") {
             if self.is_u128(sb) {
                 // a `u128` amount: its low word, or 128 (out of range) when
                 // the high word is set
@@ -207,10 +215,23 @@ impl L {
                 self.e.code.op(OP_I64_EQZ);
                 self.e.code.op(OP_SELECT);
                 self.e.code.set(k);
-                self.wide_shl(dv, x, k);
+                self.wide_shift(dv, x, k, right);
             } else {
-                self.wide_shl(dv, x, y);
+                self.wide_shift(dv, x, y, right);
             }
+        } else if self.is_op(opn, "|") {
+            let lo = self.local();
+            let hi = self.local();
+            word(inout self.e.code, x, 0);
+            word(inout self.e.code, y, 0);
+            self.e.code.op(OP_I64_OR);
+            self.e.code.set(lo);
+            word(inout self.e.code, x, 1);
+            word(inout self.e.code, y, 1);
+            self.e.code.op(OP_I64_OR);
+            self.e.code.set(hi);
+            let b = self.wide_block(lo, hi);
+            self.set_value(dv, b);
         } else if self.is_op(opn, "wrapping_add") || self.is_op(opn, "+") {
             self.wide_add(dv, x, y, checked);
         } else if self.is_op(opn, "wrapping_mul") {
@@ -330,53 +351,59 @@ impl L {
         self.set_value(dv, b);
     }
 
-    // `x << k`: Fail[ArithOverflow] unless k < 128.
-    fn wide_shl(inout self, dv: u64, x: u32, k: u32) eff [Fail[WErr]] {
+    // Shifts raise Fail[ArithOverflow] unless k < 128.
+    fn wide_shift(inout self, dv: u64, x: u32, k: u32, right: bool) eff [Fail[WErr]] {
         self.e.code.get(k);
         self.e.code.u64_const(128);
         self.e.code.op(OP_I64_GE_U);
         self.e.code.open(OP_IF);
         self.raise_overflow();
         self.e.code.op(OP_END);
-        let x0 = self.word_of(x, 0);
-        let x1 = self.word_of(x, 1);
-        let lo = self.local();
-        let hi = self.local();
+        let (first, second, shift, cross) = if right {
+            (self.word_of(x, 1), self.word_of(x, 0), OP_I64_SHR_U, OP_I64_SHL)
+        } else {
+            (self.word_of(x, 0), self.word_of(x, 1), OP_I64_SHL, OP_I64_SHR_U)
+        };
+        let a = self.local();
+        let b = self.local();
         self.e.code.get(k);
         self.e.code.u64_const(64);
         self.e.code.op(OP_I64_GE_U);
         self.e.code.open(OP_IF);
         self.e.code.i64_const(0);
-        self.e.code.set(lo);
-        self.e.code.get(x0);
+        self.e.code.set(a);
+        self.e.code.get(first);
         self.e.code.get(k);
-        self.e.code.op(OP_I64_SHL);
-        self.e.code.set(hi);
+        self.e.code.op(shift);
+        self.e.code.set(b);
         self.e.code.op(OP_ELSE);
-        self.e.code.get(x0);
+        self.e.code.get(first);
         self.e.code.get(k);
-        self.e.code.op(OP_I64_SHL);
-        self.e.code.set(lo);
-        // x1 when k is 0, else (x1 << k) | (x0 >> (64 - k)) (a wasm shift
-        // takes its amount modulo 64); `select` gives its first operand
-        // when the condition is nonzero
-        self.e.code.get(x1);
-        self.e.code.get(x1);
+        self.e.code.op(shift);
+        self.e.code.set(a);
+        // A Wasm shift takes its amount modulo 64. At zero, select the
+        // unmodified second word so there is no cross-word contribution.
+        self.e.code.get(second);
+        self.e.code.get(second);
         self.e.code.get(k);
-        self.e.code.op(OP_I64_SHL);
-        self.e.code.get(x0);
+        self.e.code.op(shift);
+        self.e.code.get(first);
         self.e.code.i64_const(64);
         self.e.code.get(k);
         self.e.code.op(OP_I64_SUB);
-        self.e.code.op(OP_I64_SHR_U);
+        self.e.code.op(cross);
         self.e.code.op(OP_I64_OR);
         self.e.code.get(k);
         self.e.code.op(OP_I64_EQZ);
         self.e.code.op(OP_SELECT);
-        self.e.code.set(hi);
+        self.e.code.set(b);
         self.e.code.op(OP_END);
-        let b = self.wide_block(lo, hi);
-        self.set_value(dv, b);
+        let result = if right {
+            self.wide_block(b, a)
+        } else {
+            self.wide_block(a, b)
+        };
+        self.set_value(dv, result);
     }
 
     // Helper `k`: 0 `$u128_mul(dst, a, b)`, 1

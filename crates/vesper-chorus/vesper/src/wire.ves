@@ -1,0 +1,652 @@
+// Module wire of @vesper/chorus (see lib.ves): Raft wire codecs, quorum rules,
+// configuration lookup, log matching, and the Raft invariant Checker (src/raft.rs).
+
+const MAX_U64: u64 = 18446744073709551615;
+pub const APPEND_HEADER_LEN: u64 = 40;
+pub const MAX_BATCH: u64 = 256;
+pub const ACK_LEN: u64 = 21;
+pub const VOTE_REQ_LEN: u64 = 28;
+pub const CONFIG_FLAG: u64 = 9223372036854775808;
+const FNV_OFFSET: u64 = 14695981039346656037;
+const FNV_PRIME: u64 = 1099511628211;
+const MIN_LEADER_HT: u64 = 32;
+
+pub copy struct RaftEntry {
+    term: u64,
+    cmd: u64
+}
+
+pub copy struct WireHeader {
+    term: u64,
+    leader_id: u32,
+    follower_slot: u32,
+    prev_log_index: u64,
+    prev_log_term: u64,
+    leader_commit: u64
+}
+
+pub copy struct WireAck {
+    follower_id: u32,
+    term: u64,
+    match_index: u64,
+    accepted: bool
+}
+
+pub copy struct WireVoteReq {
+    term: u64,
+    candidate: u32,
+    last_log_index: u64,
+    last_log_term: u64
+}
+
+pub copy enum WireErr {
+    Length {
+        expected: u64,
+        found: u64
+    },
+    TooManyEntries(u32),
+    BadFlag(u8)
+}
+
+pub enum QuorumKind: _ {
+    Majority = 0,
+    HalfFloor = 1
+}
+
+pub enum ViolKind: _ {
+    ElectionSafety = 0,
+    LogMatching = 1,
+    CommittedDivergence = 2,
+    CompactedEntryChanged = 3,
+    RecoveryLostState = 4,
+    RecoveryInconsistent = 5
+}
+
+fn be64(in b: Slice[u8], at: u64) -> u64 {
+    match b.try_read_u64_be(at) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn be32(in b: Slice[u8], at: u64) -> u32 {
+    match b.try_read_u32_be(at) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn bu8(in b: Slice[u8], at: u64) -> u8 {
+    match b.try_get(at) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn sw(in q: ChunkSeq[u64], i: u64) -> u64 {
+    match q.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn setw(inout q: ChunkSeq[u64], i: u64, v: u64) {
+    let _ = q.try_set(i, v);
+}
+
+fn ge(in s: Slice[RaftEntry], i: u64) -> RaftEntry {
+    match s.try_get(i) {
+        Option::Some(e) => e,
+        Option::None => RaftEntry {
+            term: 0,
+            cmd: 0
+        },
+    }
+}
+
+fn gce(in q: ChunkSeq[RaftEntry], i: u64) -> RaftEntry {
+    match q.try_get(i) {
+        Option::Some(e) => e,
+        Option::None => RaftEntry {
+            term: 0,
+            cmd: 0
+        },
+    }
+}
+
+fn gu(in s: Slice[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Wire codecs
+
+pub fn header_encode_into(in h: WireHeader, inout out: Slice[u8], at: u64) {
+    let _ = out.try_write_u64_be(at, h.term);
+    let _ = out.try_write_u32_be(wrapping_add(at, 8), h.leader_id);
+    let _ = out.try_write_u32_be(wrapping_add(at, 12), h.follower_slot);
+    let _ = out.try_write_u64_be(wrapping_add(at, 16), h.prev_log_index);
+    let _ = out.try_write_u64_be(wrapping_add(at, 24), h.prev_log_term);
+    let _ = out.try_write_u64_be(wrapping_add(at, 32), h.leader_commit);
+}
+
+pub fn header_encode(in h: WireHeader, inout out: Slice[u8]) {
+    header_encode_into(in h, inout out, 0);
+}
+
+pub fn header_decode_at(in b: Slice[u8], at: u64) -> WireHeader {
+    WireHeader {
+        term: be64(in b, at),
+        leader_id: be32(in b, wrapping_add(at, 8)),
+        follower_slot: be32(in b, wrapping_add(at, 12)),
+        prev_log_index: be64(in b, wrapping_add(at, 16)),
+        prev_log_term: be64(in b, wrapping_add(at, 24)),
+        leader_commit: be64(in b, wrapping_add(at, 32))
+    }
+}
+
+pub fn header_decode(in b: Slice[u8]) -> WireHeader eff [Fail[WireErr]] {
+    if b.len() != APPEND_HEADER_LEN {
+        Fail::raise(
+            WireErr::Length {
+                expected: APPEND_HEADER_LEN,
+                found: b.len()
+            }
+        );
+    }
+    header_decode_at(in b, 0)
+}
+
+pub fn batch_encode(in h: WireHeader, in entries: Slice[RaftEntry], inout out: Slice[u8]) {
+    header_encode_into(in h, inout out, 0);
+    let n = entries.len();
+    let _ = out.try_write_u32_be(APPEND_HEADER_LEN, wrapping_u32(n));
+    let mut at = wrapping_add(APPEND_HEADER_LEN, 4);
+    for i in 0..n {
+        let e = ge(in entries, i);
+        let _ = out.try_write_u64_be(at, e.term);
+        let _ = out.try_write_u64_be(wrapping_add(at, 8), e.cmd);
+        at = wrapping_add(at, 16);
+    }
+}
+
+pub fn batch_encode_arena_seq(
+    in h: WireHeader,
+    in arena: Slice[RaftEntry],
+    off: u64,
+    count: u64,
+    inout out: ChunkSeq[u8]
+) {
+    let total = wrapping_add(44, wrapping_mul(16, count));
+    let base = out.len();
+    out.resize(wrapping_add(base, total), 0);
+    let _ = out.try_write_u64_be(base, h.term);
+    let _ = out.try_write_u32_be(wrapping_add(base, 8), h.leader_id);
+    let _ = out.try_write_u32_be(wrapping_add(base, 12), h.follower_slot);
+    let _ = out.try_write_u64_be(wrapping_add(base, 16), h.prev_log_index);
+    let _ = out.try_write_u64_be(wrapping_add(base, 24), h.prev_log_term);
+    let _ = out.try_write_u64_be(wrapping_add(base, 32), h.leader_commit);
+    let _ = out.try_write_u32_be(wrapping_add(base, APPEND_HEADER_LEN), wrapping_u32(count));
+    let mut at = wrapping_add(base, 44);
+    for i in 0..count {
+        let e = ge(in arena, wrapping_add(off, i));
+        let _ = out.try_write_u64_be(at, e.term);
+        let _ = out.try_write_u64_be(wrapping_add(at, 8), e.cmd);
+        at = wrapping_add(at, 16);
+    }
+}
+
+pub fn batch_encode_seq(in h: WireHeader, in entries: Slice[RaftEntry], inout out: ChunkSeq[u8]) {
+    batch_encode_arena_seq(in h, in entries, 0, entries.len(), inout out);
+}
+
+pub fn batch_decode_range(
+    in b: Slice[u8],
+    off: u64,
+    len: u64,
+    inout out_entries: ChunkSeq[RaftEntry]
+) -> WireHeader eff [Fail[WireErr]] {
+    let min_len = wrapping_add(APPEND_HEADER_LEN, 4);
+    if len < min_len {
+        Fail::raise(
+            WireErr::Length {
+                expected: min_len,
+                found: len
+            }
+        );
+    }
+    let h = header_decode_at(in b, off);
+    let count_u32 = be32(in b, wrapping_add(off, APPEND_HEADER_LEN));
+    let count = widen_u64(count_u32);
+    if count > MAX_BATCH {
+        Fail::raise(WireErr::TooManyEntries(count_u32));
+    }
+    let want = wrapping_add(min_len, wrapping_mul(16, count));
+    if len != want {
+        Fail::raise(
+            WireErr::Length {
+                expected: want,
+                found: len
+            }
+        );
+    }
+    out_entries.clear();
+    let mut at = wrapping_add(off, min_len);
+    for _ in 0..count {
+        out_entries
+            .push(
+                RaftEntry {
+                    term: be64(in b, at),
+                    cmd: be64(in b, wrapping_add(at, 8))
+                }
+            );
+        at = wrapping_add(at, 16);
+    }
+    h
+}
+
+pub fn batch_decode(in b: Slice[u8], inout out_entries: ChunkSeq[RaftEntry])
+    -> WireHeader eff [Fail[WireErr]] {
+    batch_decode_range(in b, 0, b.len(), inout out_entries)
+}
+
+pub fn ack_encode(in a: WireAck, inout out: Slice[u8]) {
+    let _ = out.try_write_u32_be(0, a.follower_id);
+    let _ = out.try_write_u64_be(4, a.term);
+    let _ = out.try_write_u64_be(12, a.match_index);
+    let flag: u8 = if a.accepted {
+        1
+    } else {
+        0
+    };
+    let _ = out.try_set(20, flag);
+}
+
+pub fn ack_encode_seq(in a: WireAck, inout out: ChunkSeq[u8]) {
+    let base = out.len();
+    out.resize(wrapping_add(base, ACK_LEN), 0);
+    let _ = out.try_write_u32_be(base, a.follower_id);
+    let _ = out.try_write_u64_be(wrapping_add(base, 4), a.term);
+    let _ = out.try_write_u64_be(wrapping_add(base, 12), a.match_index);
+    let flag: u8 = if a.accepted {
+        1
+    } else {
+        0
+    };
+    let _ = out.try_set(wrapping_add(base, 20), flag);
+}
+
+pub fn ack_decode_range(in b: Slice[u8], off: u64, len: u64) -> WireAck eff [Fail[WireErr]] {
+    if len != ACK_LEN {
+        Fail::raise(
+            WireErr::Length {
+                expected: ACK_LEN,
+                found: len
+            }
+        );
+    }
+    let fb = bu8(in b, wrapping_add(off, 20));
+    let accepted = if fb == 0 {
+        false
+    } else if fb == 1 {
+        true
+    } else {
+        Fail::raise(WireErr::BadFlag(fb));
+        false
+    };
+    WireAck {
+        follower_id: be32(in b, off),
+        term: be64(in b, wrapping_add(off, 4)),
+        match_index: be64(in b, wrapping_add(off, 12)),
+        accepted: accepted
+    }
+}
+
+pub fn ack_decode(in b: Slice[u8]) -> WireAck eff [Fail[WireErr]] {
+    ack_decode_range(in b, 0, b.len())
+}
+
+pub fn votereq_encode(in v: WireVoteReq, inout out: Slice[u8]) {
+    let _ = out.try_write_u64_be(0, v.term);
+    let _ = out.try_write_u32_be(8, v.candidate);
+    let _ = out.try_write_u64_be(12, v.last_log_index);
+    let _ = out.try_write_u64_be(20, v.last_log_term);
+}
+
+pub fn votereq_encode_seq(in v: WireVoteReq, inout out: ChunkSeq[u8]) {
+    let base = out.len();
+    out.resize(wrapping_add(base, VOTE_REQ_LEN), 0);
+    let _ = out.try_write_u64_be(base, v.term);
+    let _ = out.try_write_u32_be(wrapping_add(base, 8), v.candidate);
+    let _ = out.try_write_u64_be(wrapping_add(base, 12), v.last_log_index);
+    let _ = out.try_write_u64_be(wrapping_add(base, 20), v.last_log_term);
+}
+
+pub fn votereq_decode_range(in b: Slice[u8], off: u64, len: u64)
+    -> WireVoteReq eff [Fail[WireErr]] {
+    if len != VOTE_REQ_LEN {
+        Fail::raise(
+            WireErr::Length {
+                expected: VOTE_REQ_LEN,
+                found: len
+            }
+        );
+    }
+    WireVoteReq {
+        term: be64(in b, off),
+        candidate: be32(in b, wrapping_add(off, 8)),
+        last_log_index: be64(in b, wrapping_add(off, 12)),
+        last_log_term: be64(in b, wrapping_add(off, 20))
+    }
+}
+
+pub fn votereq_decode(in b: Slice[u8]) -> WireVoteReq eff [Fail[WireErr]] {
+    votereq_decode_range(in b, 0, b.len())
+}
+
+pub fn term_encode_seq(t: u64, inout out: ChunkSeq[u8]) {
+    let base = out.len();
+    out.resize(wrapping_add(base, 8), 0);
+    let _ = out.try_write_u64_be(base, t);
+}
+
+pub fn term_decode_range(in b: Slice[u8], off: u64, len: u64) -> u64 eff [Fail[WireErr]] {
+    if len != 8 {
+        Fail::raise(
+            WireErr::Length {
+                expected: 8,
+                found: len
+            }
+        );
+    }
+    be64(in b, off)
+}
+
+pub fn term_decode(in b: Slice[u8]) -> u64 eff [Fail[WireErr]] {
+    term_decode_range(in b, 0, b.len())
+}
+
+// ---------------------------------------------------------------------------
+// Quorum, config_of, log_matching_violation
+
+pub fn quorum_size(rule: u64, n: u64) -> u64 {
+    if rule == QuorumKind::Majority {
+        wrapping_add(n / 2, 1)
+    } else {
+        let half = n / 2;
+        if half > 1 {
+            half
+        } else {
+            1
+        }
+    }
+}
+
+pub fn raft_config_of_arena(in arena: Slice[RaftEntry], off: u64, len: u64, initial: u64) -> u64 {
+    let mut i = len;
+    loop {
+        if i == 0 {
+            return initial;
+        }
+        i = wrapping_sub(i, 1);
+        let e = ge(in arena, wrapping_add(off, i));
+        if (e.cmd & CONFIG_FLAG) != 0 {
+            return e.cmd & (~CONFIG_FLAG);
+        }
+    }
+}
+
+pub fn raft_config_of(in log: Slice[RaftEntry], initial: u64) -> u64 {
+    raft_config_of_arena(in log, 0, log.len(), initial)
+}
+
+pub fn config_index_arena(in arena: Slice[RaftEntry], off: u64, len: u64) -> u64 {
+    let mut i = len;
+    loop {
+        if i == 0 {
+            return 0;
+        }
+        i = wrapping_sub(i, 1);
+        let e = ge(in arena, wrapping_add(off, i));
+        if (e.cmd & CONFIG_FLAG) != 0 {
+            return wrapping_add(i, 1);
+        }
+    }
+}
+
+pub fn config_index_slice(in log: Slice[RaftEntry]) -> u64 {
+    config_index_arena(in log, 0, log.len())
+}
+
+pub fn log_matching_slice(in x: Slice[RaftEntry], in y: Slice[RaftEntry]) -> u64 {
+    let nx = x.len();
+    let ny = y.len();
+    let n = if nx < ny {
+        nx
+    } else {
+        ny
+    };
+    let mut prefix_equal = true;
+    for i in 0..n {
+        let a = ge(in x, i);
+        let b = ge(in y, i);
+        if a.term == b.term && (!prefix_equal || a.cmd != b.cmd) {
+            return i;
+        }
+        prefix_equal = prefix_equal && a.term == b.term && a.cmd == b.cmd;
+    }
+    MAX_U64
+}
+
+pub fn log_matching_arena(
+    in arena: Slice[RaftEntry],
+    off_a: u64,
+    len_a: u64,
+    off_b: u64,
+    len_b: u64
+) -> u64 {
+    let n = if len_a < len_b {
+        len_a
+    } else {
+        len_b
+    };
+    let mut prefix_equal = true;
+    for i in 0..n {
+        let a = ge(in arena, wrapping_add(off_a, i));
+        let b = ge(in arena, wrapping_add(off_b, i));
+        if a.term == b.term && (!prefix_equal || a.cmd != b.cmd) {
+            return i;
+        }
+        prefix_equal = prefix_equal && a.term == b.term && a.cmd == b.cmd;
+    }
+    MAX_U64
+}
+
+// ---------------------------------------------------------------------------
+// CheckerCore
+
+pub struct CheckerCore {
+    leader_terms: ChunkSeq[u64],
+    leader_nodes: ChunkSeq[u64],
+    leader_ht: ChunkSeq[u64],
+    leader_mask: u64,
+    committed: ChunkSeq[RaftEntry],
+    has_violation: bool,
+    v_time: u64,
+    v_kind: u64,
+    v_a: u64,
+    v_b: u64,
+    v_c: u64,
+    checks: u64
+}
+
+pub fn checker_core_new() -> CheckerCore {
+    CheckerCore {
+        leader_terms: ChunkSeq::new[u64](),
+        leader_nodes: ChunkSeq::new[u64](),
+        leader_ht: ChunkSeq::new[u64](),
+        leader_mask: 0,
+        committed: ChunkSeq::new[RaftEntry](),
+        has_violation: false,
+        v_time: 0,
+        v_kind: 0,
+        v_a: 0,
+        v_b: 0,
+        v_c: 0,
+        checks: 0
+    }
+}
+
+fn term_hash(t: u64) -> u64 {
+    let h = wrapping_mul(FNV_OFFSET ^ t, FNV_PRIME);
+    h ^ (h >> 29)
+}
+
+fn leader_grow(inout chk: CheckerCore) {
+    let cap = if chk.leader_mask == 0 {
+        MIN_LEADER_HT
+    } else {
+        wrapping_mul(wrapping_add(chk.leader_mask, 1), 2)
+    };
+    chk.leader_ht.resize(cap, 0);
+    chk.leader_ht.fill(0);
+    chk.leader_mask = wrapping_sub(cap, 1);
+    let n = chk.leader_terms.len();
+    for j in 0..n {
+        let mut at = term_hash(sw(in chk.leader_terms, j)) & chk.leader_mask;
+        loop {
+            if sw(in chk.leader_ht, at) == 0 {
+                setw(inout chk.leader_ht, at, wrapping_add(j, 1));
+                break;
+            }
+            at = wrapping_add(at, 1) & chk.leader_mask;
+        }
+    }
+}
+
+pub fn checker_core_record(inout chk: CheckerCore, now: u64, kind: u64, a: u64, b: u64, cc: u64) {
+    if !chk.has_violation {
+        chk.has_violation = true;
+        chk.v_time = now;
+        chk.v_kind = kind;
+        chk.v_a = a;
+        chk.v_b = b;
+        chk.v_c = cc;
+    }
+}
+
+pub fn checker_core_leader_elected(inout chk: CheckerCore, now: u64, term: u64, node: u64) -> bool {
+    chk.checks = wrapping_add(chk.checks, 1);
+    if wrapping_mul(wrapping_add(chk.leader_terms.len(), 1), 2) > chk.leader_mask {
+        leader_grow(inout chk);
+    }
+    let mut at = term_hash(term) & chk.leader_mask;
+    loop {
+        let e = sw(in chk.leader_ht, at);
+        if e == 0 {
+            break;
+        }
+        let j = wrapping_sub(e, 1);
+        if sw(in chk.leader_terms, j) == term {
+            let other = sw(in chk.leader_nodes, j);
+            if other != node {
+                checker_core_record(inout chk, now, ViolKind::ElectionSafety, term, other, node);
+            }
+            return false;
+        }
+        at = wrapping_add(at, 1) & chk.leader_mask;
+    }
+    let j = chk.leader_terms.len();
+    chk.leader_terms.push(term);
+    chk.leader_nodes.push(node);
+    setw(inout chk.leader_ht, at, wrapping_add(j, 1));
+    true
+}
+
+pub fn checker_core_logs_changed_arena(
+    inout chk: CheckerCore,
+    now: u64,
+    a: u64,
+    in arena: Slice[RaftEntry],
+    in offs: Slice[u64],
+    in lens: Slice[u64]
+) {
+    let n = lens.len();
+    let off_a = gu(in offs, a);
+    let len_a = gu(in lens, a);
+    for b in 0..n {
+        if b == a {
+            continue;
+        }
+        chk.checks = wrapping_add(chk.checks, 1);
+        let idx = log_matching_arena(in arena, off_a, len_a, gu(in offs, b), gu(in lens, b));
+        if idx != MAX_U64 {
+            checker_core_record(inout chk, now, ViolKind::LogMatching, a, b, idx);
+            return;
+        }
+    }
+}
+
+pub fn checker_core_committed(
+    inout chk: CheckerCore,
+    now: u64,
+    node: u64,
+    in log: Slice[RaftEntry],
+    commit: u64
+) {
+    chk.checks = wrapping_add(chk.checks, 1);
+    let n = if commit < log.len() {
+        commit
+    } else {
+        log.len()
+    };
+    for i in 0..n {
+        let e = ge(in log, i);
+        if i < chk.committed.len() {
+            let c = gce(in chk.committed, i);
+            if c.term != e.term || c.cmd != e.cmd {
+                checker_core_record(inout chk, now, ViolKind::CommittedDivergence, node, i, 0);
+                return;
+            }
+        } else {
+            chk.committed.push(e);
+        }
+    }
+}
+
+pub fn checker_core_committed_arena(
+    inout chk: CheckerCore,
+    now: u64,
+    node: u64,
+    in arena: Slice[RaftEntry],
+    off: u64,
+    len: u64,
+    commit: u64
+) {
+    chk.checks = wrapping_add(chk.checks, 1);
+    let n = if commit < len {
+        commit
+    } else {
+        len
+    };
+    for i in 0..n {
+        let e = ge(in arena, wrapping_add(off, i));
+        if i < chk.committed.len() {
+            let c = gce(in chk.committed, i);
+            if c.term != e.term || c.cmd != e.cmd {
+                checker_core_record(inout chk, now, ViolKind::CommittedDivergence, node, i, 0);
+                return;
+            }
+        } else {
+            chk.committed.push(e);
+        }
+    }
+}
+
+pub fn checker_core_compacted_changed(inout chk: CheckerCore, now: u64, node: u64, index: u64) {
+    chk.checks = wrapping_add(chk.checks, 1);
+    checker_core_record(inout chk, now, ViolKind::CompactedEntryChanged, node, index, 0);
+}

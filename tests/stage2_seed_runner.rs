@@ -13,6 +13,10 @@
 //! `cc`; MSVC's `cl.exe` on Windows), as a seed user would build it.
 #[path = "common/check_harness.rs"]
 mod check_harness;
+#[path = "common/seed_runner.rs"]
+mod seed_runner;
+
+use seed_runner::build_runner;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -26,49 +30,6 @@ fn scratch() -> PathBuf {
     let dir = std::env::temp_dir().join(format!("vesper-stage2-seed-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     dir
-}
-
-/// Build the runner with the host C compiler.
-fn build_runner(dir: &Path) -> PathBuf {
-    let src = check_harness::repo().join("bootstrap/seed/runner/vwasm.c");
-    let exe = dir.join(if cfg!(windows) { "vwasm.exe" } else { "vwasm" });
-    let status = if cfg!(windows) && std::env::var_os("CC").is_none() {
-        let target = if cfg!(target_arch = "aarch64") {
-            "aarch64-pc-windows-msvc"
-        } else {
-            "x86_64-pc-windows-msvc"
-        };
-        let mut cmd = find_cl(target);
-        cmd.arg("/nologo")
-            .arg("/O2")
-            .arg("/std:c11")
-            .arg(format!("/Fo{}\\", dir.display()))
-            .arg(format!("/Fe{}", exe.display()))
-            .arg(&src)
-            .status()
-    } else {
-        let cc = std::env::var("CC").unwrap_or_else(|_| "cc".into());
-        Command::new(cc)
-            .args(["-std=c11", "-O2", "-o"])
-            .arg(&exe)
-            .arg(&src)
-            .arg("-lm")
-            .status()
-    };
-    let status = status.expect("run the C compiler for bootstrap/seed/runner/vwasm.c");
-    assert!(status.success(), "building vwasm failed: {status}");
-    exe
-}
-
-#[cfg(windows)]
-fn find_cl(target: &str) -> Command {
-    find_msvc_tools::find_tool(target, "cl.exe")
-        .expect("cl.exe (Visual Studio C compiler)")
-        .to_command()
-}
-#[cfg(not(windows))]
-fn find_cl(_: &str) -> Command {
-    unreachable!()
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -432,4 +393,118 @@ fn stage1_front_end_runs_under_vwasm() {
         }
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Exercise canonical ABI reentry with an allocator that grows memory on
+/// every call. A live local and operand must survive each host callback.
+#[test]
+fn wasi_arguments_survive_guest_memory_growth() {
+    use wasm_encoder::{
+        CodeSection, EntityType, ExportKind, ExportSection, Function, FunctionSection,
+        ImportSection, Instruction as I, MemArg, MemorySection, MemoryType, Module, TypeSection,
+        ValType::I32,
+    };
+
+    let dir = scratch().join("arguments");
+    std::fs::create_dir_all(&dir).unwrap();
+    let runner = build_runner(&dir);
+    let mut types = TypeSection::new();
+    types.ty().function([I32], []);
+    types.ty().function([I32; 4], [I32]);
+    types.ty().function([], [I32]);
+
+    let mut imports = ImportSection::new();
+    imports.import(
+        "wasi:cli/environment@0.2.0",
+        "get-arguments",
+        EntityType::Function(0),
+    );
+    let mut funcs = FunctionSection::new();
+    funcs.function(1).function(2);
+    let mut memory = MemorySection::new();
+    memory.memory(MemoryType {
+        minimum: 1,
+        maximum: Some(4),
+        memory64: false,
+        shared: false,
+        page_size_log2: None,
+    });
+    let mut exports = ExportSection::new();
+    exports.export("cabi_realloc", ExportKind::Func, 1);
+    exports.export("main", ExportKind::Func, 2);
+    let mut alloc = Function::new([]);
+    for op in [
+        I::I32Const(1),
+        I::MemoryGrow(0),
+        I::I32Const(16),
+        I::I32Shl,
+        I::End,
+    ] {
+        alloc.instruction(&op);
+    }
+    let mut main = Function::new([(1, I32)]);
+    let addr = MemArg {
+        offset: 0,
+        align: 0,
+        memory_index: 0,
+    };
+    for op in [
+        I::I32Const(7),
+        I::LocalSet(0),
+        I::I32Const(13),
+        I::I32Const(0),
+        I::Call(0),
+        // Load the first byte of the first argument and add its list count.
+        I::I32Const(0),
+        I::I32Load(addr),
+        I::I32Load(addr),
+        I::I32Load8U(addr),
+        I::I32Add,
+        I::I32Const(4),
+        I::I32Load(addr),
+        I::I32Add,
+        I::LocalGet(0),
+        I::I32Add,
+        I::End,
+    ] {
+        main.instruction(&op);
+    }
+    let mut code = CodeSection::new();
+    code.function(&alloc).function(&main);
+    let mut module = Module::new();
+    module
+        .section(&types)
+        .section(&imports)
+        .section(&funcs)
+        .section(&memory)
+        .section(&exports)
+        .section(&code);
+    let path = dir.join("arguments.wasm");
+    std::fs::write(&path, module.finish()).unwrap();
+    let result = Command::new(&runner)
+        .args(["--arg", "a", "--arg", "", "--print"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout).trim(), "119"); // 7 + 13 + 97 + 2
+
+    // An import with the right name and the wrong type must fail at load.
+    let mut invalid = Module::new();
+    let mut types = TypeSection::new();
+    types.ty().function([], []);
+    invalid.section(&types).section(&imports);
+    std::fs::write(&path, invalid.finish()).unwrap();
+    let result = Command::new(runner)
+        .arg("--dump")
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert_eq!(result.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("incorrect signature"));
+    std::fs::remove_dir_all(dir).unwrap();
 }

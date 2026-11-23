@@ -18,9 +18,11 @@ use vesper::check::World;
 use vesper::wasm_backend::{EffectLowering, WasmOptions};
 use wasm_words::*;
 
-fn package() -> &'static Package {
-    static P: OnceLock<Package> = OnceLock::new();
-    P.get_or_init(|| Package::load("packages/vesper-wasm-backend"))
+fn backend() -> &'static Entry {
+    static BACKEND: OnceLock<Entry> = OnceLock::new();
+    BACKEND.get_or_init(|| {
+        Package::load("packages/vesper-wasm-backend").entry("wasm_backend_compile", true)
+    })
 }
 
 fn configs() -> [WasmOptions; 2] {
@@ -91,8 +93,7 @@ fn port(src: &str, o: &WasmOptions) -> Result<(Vec<u8>, World), String> {
     assert!(c.diagnostics.is_empty(), "{:?}", c.diagnostics);
     let program = backend_program(&c.world, o).ok_or("optimize failed")?;
     let input = wasm_input(&c.world, &program, "main", o).ok_or("not encodable")?;
-    let f = package().entry("wasm_backend_compile", true);
-    match outcome(&f.words(&input)) {
+    match outcome(&backend().words(&input)) {
         Outcome::Module { core, wit, .. } => Ok((wrap(core, &wit, o.world), c.world)),
         o => Err(format!("{o:?}")),
     }
@@ -174,6 +175,23 @@ fn main() -> u64 { cut("aéb") }"#,
     r#"fn bump(inout v: Slice[u64]) { for i in 0..v.len() { let ok = v.try_set(i, wrapping_add(i, 7)); } }
 fn main() -> u64 { let mut s = ChunkSeq::new[u64](); s.push(1); s.push(2); s.push(3); bump(inout s.as_slice_mut());
   let mut t: u64 = 0; for i in 0..s.len() { match s.try_get(i) { Option::Some(x) => { t = wrapping_add(wrapping_mul(t, 10), x); }, Option::None => {} } } t }"#,
+    // Ranged fill on bytes and a subslice of words, including both invalid
+    // interval shapes, an empty interval and the checked form's handler.
+    r#"fn words(inout s: Slice[u64]) -> bool {
+  let a = s.try_fill(1, 3, 42); let b = s.try_fill(2, 1, 99);
+  let c = s.try_fill(1, 4, 99); let d = s.try_fill(3, 3, 99);
+  a && !b && !c && d
+}
+fn main() -> u64 {
+  let mut s = ChunkSeq::new[u64](); s.resize(5, 1);
+  let mut b = ChunkSeq::new[u8](); b.resize(5, 2);
+  let ok = words(inout s[1..4]);
+  let fault = handle Fail[RuntimeError] in { b.fill(1, 4, 3); b.fill(4, 6, 9); 0 } with { return v => v, raise(e, k) => 1, };
+  let mut d: u64 = fault;
+  for i in 0..5 { match s.try_get(i) { Option::Some(x) => { d = wrapping_add(wrapping_mul(d, 31), x); }, Option::None => {} }
+                  match b.try_get(i) { Option::Some(x) => { d = wrapping_add(wrapping_mul(d, 31), widen_u64(x)); }, Option::None => {} } }
+  if ok { d } else { 0 }
+}"#,
 ];
 
 #[test]
@@ -200,6 +218,64 @@ fn sequences_and_strings_run_like_the_evaluator() {
     }
 }
 
+#[test]
+fn str_literals_return_packed_views() {
+    let source = r#"
+fn word(flag: bool) -> Str {
+    if flag { "open" } else { "é" }
+}
+fn main() -> u64 {
+    let ascii = word(true);
+    let unicode = word(false);
+    let byte = match unicode.try_byte_at(1) {
+        Option::Some(b) => widen_u64(b),
+        Option::None => 0,
+    };
+    wrapping_add(wrapping_mul(ascii.as_bytes().len(), 1000),
+                 wrapping_add(wrapping_mul(unicode.len(), 100), byte))
+}
+"#;
+    for options in configs() {
+        let (component, world) = port(source, &options).expect("compile Str literals");
+        assert_eq!(evaluate(&world), "4369");
+        assert_eq!(run_main(&component), "4369");
+    }
+}
+
+#[test]
+fn mutable_element_views_are_refused_only_when_reached() {
+    if !corpus_shard::Shard::from_environment().contains(8) {
+        return;
+    }
+    let prefix = r#"fn set(inout x: u64) { x = 3; }
+fn by_match(inout s: ChunkSeq[u64]) {
+    match s.try_get_mut(0) { Option::Some(x) => set(inout x), Option::None => {} }
+}
+fn by_index(inout s: ChunkSeq[u64]) eff [Fail[RuntimeError]] { set(inout s[0]); }
+"#;
+    for o in configs() {
+        let unused = format!("{prefix}fn main() -> u64 {{ 7 }}");
+        let (component, _) = port(&unused, &o).expect("unused mutable views are encodable");
+        assert_eq!(run_main(&component), "7");
+
+        for (write, error_class) in [
+            ("by_match(inout s);", "Unsupported(Operation)"),
+            (
+                "handle Fail[RuntimeError] in { by_index(inout s); } with { return v => v, raise(e, k) => (), };",
+                "Invalid",
+            ),
+        ] {
+            let source = format!(
+                "{prefix}fn main() -> u64 {{ let mut s = ChunkSeq::new[u64](); s.push(1); {write} s.len() }}"
+            );
+            let Err(error) = port(&source, &o) else {
+                panic!("port accepted a reachable mutable element view: {write}");
+            };
+            assert!(error.contains(error_class), "{error}: {write}");
+        }
+    }
+}
+
 /// `u128` as the port lowers it (a 16-byte block, #1508), against the
 /// evaluator. Rust refuses every one (`IntegerWidth`).
 const WIDE_PROGRAMS: &[&str] = &[
@@ -210,6 +286,26 @@ fn sh(x: u128, k: u128) -> u128 eff [Fail[ArithOverflow]] { x << k }
 fn go() -> u64 eff [Fail[ArithOverflow]] { let one = widen_u128(1); let x = widen_u128(12345678901234567); let mut a: u64 = 0;
   a = mix(a, sh(x, widen_u128(0))); a = mix(a, sh(x, widen_u128(1))); a = mix(a, sh(sh(one, widen_u128(63)), widen_u128(1)));
   a = mix(a, sh(x, widen_u128(63))); a = mix(a, sh(x, widen_u128(64))); a = mix(a, sh(x, widen_u128(100))); a }
+fn main() -> u64 { handle Fail[ArithOverflow] in { go() } with { return v => v, raise(e, k) => 999, } }"#,
+    // OR in both words, logical right shifts across their boundary, and
+    // checked shift counts at and above the width.
+    r#"fn mix(a: u64, v: u128) -> u64 eff [Fail[ArithOverflow]] {
+  let hi = wrapping_u64(v / 18446744073709551616);
+  wrapping_add(wrapping_mul(a, 31), wrapping_add(wrapping_mul(hi, 17), wrapping_u64(v)))
+}
+fn shr(v: u128, k: u128) -> u128 eff [Fail[ArithOverflow]] { v >> k }
+fn handled(v: u128, k: u128) -> u128 {
+  handle Fail[ArithOverflow] in { shr(v, k) } with { return v => v, raise(e, k) => 7, }
+}
+fn go() -> u64 eff [Fail[ArithOverflow]] {
+  let a = widen_u128(9223372036854775809);
+  let b = widen_u128(4611686018427388418);
+  let u = ((a << 64) | b) | ((b << 64) | a);
+  let mut d = mix(1, shr(u, 0)); d = mix(d, shr(u, 1)); d = mix(d, shr(u, 63));
+  d = mix(d, shr(u, 64)); d = mix(d, shr(u, 65)); d = mix(d, shr(u, 127));
+  d = mix(d, handled(u, 128)); d = mix(d, handled(u, 18446744073709551616));
+  wrapping_add(d, widen_u64(wrapping_u8(shr(u, 8))))
+}
 fn main() -> u64 { handle Fail[ArithOverflow] in { go() } with { return v => v, raise(e, k) => 999, } }"#,
     // A literal pattern on a runtime `u128`, add with carry, mul, div, rem, compare.
     r#"fn class(x: u128) -> u64 { match x { 0 => 1, 1 => 7, 18446744073709551616 => 11, _ => 9 } }
@@ -284,28 +380,56 @@ fn place_ir_package_builds_and_runs() {
     if !corpus_shard::Shard::from_environment().contains(0) {
         return;
     }
-    let dep = std::fs::canonicalize("packages/vesper-place-ir").expect("place-ir package");
-    let dir = std::env::temp_dir().join(format!("wasm-seed-place-ir-{}", std::process::id()));
-    std::fs::create_dir_all(dir.join("src")).expect("package dir");
-    std::fs::write(
-        dir.join("Loom.toml"),
-        format!(
-            "[package]\nname = \"@wasm-seed/place-ir-main\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n\
-             [dependencies]\n\"@vesper/place-ir\" = {{ version = \"^0.1\", path = {:?} }}\n",
-            dep.display().to_string()
-        ),
-    )
-    .expect("Loom.toml");
-    std::fs::write(
-        dir.join("src/main.ves"),
+    compare_package(
+        "place-ir",
         "use @vesper/place-ir::{ place_ir_round_trip };\n\
          fn main() -> u64 {\n\
          \x20   let s = \"\";\n\
          \x20   let words = place_ir_round_trip(in s.as_bytes());\n\
          \x20   words.len()\n\
          }\n",
+    );
+}
+
+/// Compile the compiler's dynamic-dispatch checker and run its trait and
+/// function-object lowering on real source. Hash every output word so the
+/// comparison covers its diagnostics and the complete lowered AST.
+#[test]
+fn dyn_checker_package_builds_and_runs() {
+    if !corpus_shard::Shard::from_environment().contains(4) {
+        return;
+    }
+    compare_package(
+        "check-dyn",
+        r#"use @vesper/check-dyn::{ check_dyn };
+fn main() -> u64 {
+    let words = check_dyn(in "trait T { fn f(in self) -> i64; } fn g(in x: dyn T) -> i64 { x.f() }", 1000000, 1);
+    let mut digest: u64 = 1;
+    for i in 0..words.len() {
+        match words.try_get(i) {
+            Option::Some(v) => { digest = wrapping_add(wrapping_mul(digest, 31), v); },
+            Option::None => {}
+        }
+    }
+    digest
+}"#,
+    );
+}
+
+fn compare_package(name: &str, source: &str) {
+    let dep = std::fs::canonicalize(format!("packages/vesper-{name}")).expect("package");
+    let dir = std::env::temp_dir().join(format!("wasm-seed-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("src")).expect("source dir");
+    std::fs::write(
+        dir.join("Loom.toml"),
+        format!(
+            "[package]\nname = \"@wasm-seed/{name}-main\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n\
+             [dependencies]\n\"@vesper/{name}\" = {{ version = \"^0.1\", path = {:?} }}\n",
+            dep.display().to_string()
+        ),
     )
-    .expect("main.ves");
+    .expect("Loom.toml");
+    std::fs::write(dir.join("src/main.ves"), source).expect("main.ves");
     let assembled = vesper::packages::load(&dir).expect("load");
     assert!(
         assembled.ok(),
@@ -315,25 +439,22 @@ fn place_ir_package_builds_and_runs() {
     );
     let c = vesper::check::check(&assembled.module);
     assert!(c.diagnostics.is_empty(), "{:?}", c.diagnostics);
+    let expected = evaluate(&c.world);
+    assert_ne!(expected, "trap", "{name} evaluator");
     for (k, o) in configs().iter().enumerate() {
         assert!(
             vesper::wasm_backend::compile(&c.world, "main", o).is_err(),
-            "[{k}] Rust now lowers place-ir; compare byte for byte instead"
+            "[{k}] Rust now lowers {name}; compare byte for byte instead"
         );
         let program = backend_program(&c.world, o).expect("optimize");
         let input = wasm_input(&c.world, &program, "main", o).expect("encodable");
-        let f = package().entry("wasm_backend_compile", true);
-        match outcome(&f.words(&input)) {
+        match outcome(&backend().words(&input)) {
             Outcome::Module { core, wit, .. } => {
                 let component = wrap(core, &wit, o.world);
-                assert_eq!(
-                    run_main(&component),
-                    evaluate(&c.world),
-                    "[{k}] wasm vs evaluator"
-                );
+                assert_eq!(run_main(&component), expected, "[{k}] wasm vs evaluator");
             }
             other => panic!("[{k}] port {other:?}"),
         }
     }
-    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::remove_dir_all(&dir).expect("remove package dir");
 }

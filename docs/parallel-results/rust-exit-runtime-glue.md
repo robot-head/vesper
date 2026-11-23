@@ -121,8 +121,7 @@ Smaller notes found on the way (no fix needed by this lane):
 | list a directory | `opendir`/`readdir`/`closedir` | needs G1 (`readdir` returns a pointer). Linux-only fallback: `getdents64` into a `CSlice[u8]` |
 | remove a tree, create parents | built from the above in Vesper | yes, once listing works |
 | unique temp names, parent split | pure Vesper (`getpid` for the pid) | yes |
-| arguments, variables | `argc`/`argv` from `main`, `environ` | needs G1 (or Linux-only `/proc/self/cmdline` and `/proc/self/environ`) |
-| current directory | `getcwd(buf, n)` | yes |
+| arguments, variables, current directory, OS | `getenv`, `getcwd`; `argv` and `environ` through `dlsym` (glibc `__libc_stack_end` and `environ`, macOS `_NSGetArgv`, `_NSGetArgc`, `_NSGetEnviron`), read with `memcpy`, `strchr` and `strstr` | **done**: `@vesper-std/env` imports libc on Linux and macOS (`env-@OS@.vsys`); Windows keeps six libc-shaped functions in `vesper-std-host/src/env.rs` until G7 |
 | spawn, pipes, wait, kill | `pipe`, `posix_spawn` with file actions, `poll`, `read`, `waitpid`, `kill` | needs G2 (argv/envp) |
 | exit, pid | `exit`, `getpid` | needs G6 (`exit(i32)` collides) |
 | Windows: every call above | `CreateFileW`, `ReadFile`, `FindFirstFileW`, `CreateProcessW`, `GetEnvironmentStringsW`, `MoveFileExW` | needs G7, G1 and G11 |

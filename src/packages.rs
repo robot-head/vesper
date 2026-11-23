@@ -267,7 +267,7 @@ impl PackageVsys {
     /// fills the placeholders. A library that does not parse declares no
     /// names here; [`Assembled::imports`] reports its error.
     /// A per-target import declares the names of every target's file.
-    fn type_names(&self) -> Vec<(String, String)> {
+    pub fn type_names(&self) -> Vec<(String, String)> {
         let texts: Vec<(&str, &str)> = if self.targets.is_empty() {
             let Ok((triple, _)) = vsys_target(None) else {
                 return vec![];
@@ -478,13 +478,30 @@ pub fn is_package(path: &Path) -> bool {
 /// them into one module. `Err` is an I/O failure; language and manifest
 /// errors are reported in [`Assembled`].
 pub fn load(dir: &Path) -> Result<Assembled, String> {
-    load_with_parser(dir, None, None, false, None)
+    load_for_target(dir, None, false)
 }
 
 /// Include test-only declarations in the root package. Dependencies are
 /// loaded in ordinary mode.
 pub fn load_for_tests(dir: &Path) -> Result<Assembled, String> {
-    load_with_parser(dir, None, None, true, None)
+    load_for_target(dir, None, true)
+}
+
+/// Assemble a package for the requested build. A WASI component may carry
+/// a src-wasip2 implementation alongside its native src implementation.
+pub fn load_for_target(
+    dir: &Path,
+    target: Option<&str>,
+    include_tests: bool,
+) -> Result<Assembled, String> {
+    load_with_parser(
+        dir,
+        None,
+        None,
+        include_tests,
+        None,
+        target == Some(crate::wasm_backend::TARGET),
+    )
 }
 
 type RootParser<'a> = dyn FnMut(&Path) -> Result<(String, crate::parser::Parse), String> + 'a;
@@ -493,7 +510,7 @@ type RootParser<'a> = dyn FnMut(&Path) -> Result<(String, crate::parser::Parse),
 /// The callback may append synthetic source, but its AST must use offsets
 /// into the resulting text. Dependencies always use the ordinary parser.
 pub fn load_with_root_parser(dir: &Path, parse: &mut RootParser<'_>) -> Result<Assembled, String> {
-    load_with_parser(dir, Some(parse), None, false, None)
+    load_with_parser(dir, Some(parse), None, false, None, false)
 }
 
 /// Assemble tests against one changed dependency source held in memory.
@@ -502,7 +519,7 @@ pub fn load_with_dependency_replacement(
     parse: &mut RootParser<'_>,
     replacement: (&Path, &str),
 ) -> Result<Assembled, String> {
-    load_with_parser(dir, Some(parse), Some(replacement), false, None)
+    load_with_parser(dir, Some(parse), Some(replacement), false, None, false)
 }
 
 type PreparedParser<'a> =
@@ -514,7 +531,7 @@ pub fn load_test_sources(
     replacement: Option<(&Path, &str)>,
     prepare: &mut PreparedParser<'_>,
 ) -> Result<Assembled, String> {
-    load_with_parser(dir, None, replacement, true, Some(prepare))
+    load_with_parser(dir, None, replacement, true, Some(prepare), false)
 }
 
 fn read_source(path: &Path) -> Result<String, String> {
@@ -527,8 +544,10 @@ fn load_with_parser(
     replacement: Option<(&Path, &str)>,
     root_tests: bool,
     prepare: Option<&mut PreparedParser<'_>>,
+    wasi: bool,
 ) -> Result<Assembled, String> {
     let mut loader = Loader {
+        wasi,
         replacement,
         ..Loader::default()
     };
@@ -573,6 +592,7 @@ fn load_with_parser(
 
 #[derive(Default)]
 struct Loader<'a> {
+    wasi: bool,
     packages: Vec<Package>,
     /// Canonical directory -> package index.
     by_path: BTreeMap<PathBuf, usize>,
@@ -755,7 +775,12 @@ impl Loader<'_> {
         // dependencies' (its root module is not file 0 when another source
         // sorts first; see `Assembled::root_module`).
         let mut files = vec![];
-        let src = dir.join("src");
+        let source_dir = if self.wasi && dir.join("src-wasip2").is_dir() {
+            "src-wasip2"
+        } else {
+            "src"
+        };
+        let src = dir.join(source_dir);
         if src.is_dir() {
             walk(&src, 0, &mut files)?;
         }
@@ -769,7 +794,7 @@ impl Loader<'_> {
                 .collect();
             let file_shown = display(&normalize(
                 &shown
-                    .join("src")
+                    .join(source_dir)
                     .join(path.strip_prefix(&src).unwrap_or(&path)),
             ));
             if segments.len() == 1 && matches!(segments[0].as_str(), "lib" | "main") {
@@ -927,6 +952,18 @@ impl Loader<'_> {
         for path in &manifest.package.vsys {
             let bad = |why: &str| {
                 manifest_error(INVALID_PACKAGE, format!("package.vsys '{path}': {why}"))
+            };
+            // The Bridge checks the selected WASI surface using its host ABI.
+            // The component backend maps those operations to WASI imports.
+            let wasi_path;
+            let path = if self.wasi && is_per_target_path(path) {
+                wasi_path = path
+                    .replace("@TARGET@", crate::wasm_backend::TARGET)
+                    .replace("@OS@", "wasip2")
+                    .replace("@ARCH@", "wasm32");
+                &wasi_path
+            } else {
+                path
             };
             let relative = Path::new(path);
             if !path.ends_with(".vsys") {

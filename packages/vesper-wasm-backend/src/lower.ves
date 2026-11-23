@@ -260,6 +260,8 @@ const SQ_STR_PUSH_CHAR: u64 = 32;
 const SQ_STR_CLEAR: u64 = 33;
 const SQ_STR_RESERVE: u64 = 34;
 const SQ_RESIZE: u64 = 35;
+const SQ_FILL_RANGE: u64 = 39;
+const SQ_TRY_FILL: u64 = 40;
 const SQ_WIDE: u64 = 64;
 const SK_OTHER: u8 = 0;
 const SK_BUF: u8 = 1;
@@ -449,7 +451,7 @@ pub fn get32(in t: ChunkSeq[u32], k: u32) -> u32 {
     u32_at(in t, w(k))
 }
 
-fn i64s(n: u64) -> ChunkSeq[ValTy] {
+pub fn i64s(n: u64) -> ChunkSeq[ValTy] {
     let mut v = ChunkSeq::new[ValTy]();
     for i in 0..n {
         v.push(vt(VT_I64));
@@ -2586,9 +2588,16 @@ impl L {
             let lo = self.cx.ir.word(inc(a));
             let hi = self.cx.ir.word(add(a, 2));
             if lk == Lit::String {
-                let addr = self.string_literal(n32(lo));
+                let text = n32(lo);
+                let addr = self.string_literal(text);
+                let value = if self.seq_kind(ty) == SK_VIEW {
+                    // A Str literal points past the static String header.
+                    add(addr, 8) | wrapping_shl_u64(self.cx.names.size(text), 32)
+                } else {
+                    addr
+                };
                 let d = self.dest(dv);
-                self.e.code.u64_const(addr);
+                self.e.code.u64_const(value);
                 self.e.code.set(d);
             } else if self.is_u128(ty) {
                 self.wide_const(dv, lo, hi);
@@ -5062,6 +5071,12 @@ impl L {
         if self.cx.names.spells(l, in "Str(Reserve)".as_bytes()) {
             return 34;
         }
+        if self.cx.names.spells(l, in "FillRange { total: false }".as_bytes()) {
+            return wrapping_u8(SQ_FILL_RANGE);
+        }
+        if self.cx.names.spells(l, in "FillRange { total: true }".as_bytes()) {
+            return wrapping_u8(SQ_TRY_FILL);
+        }
         for k in 0..24 {
             let mut t = ChunkSeq::new[u8]();
             append_text(inout t, "Wide(Wide { bytes: ");
@@ -5204,6 +5219,27 @@ impl L {
         } else {
             self.e.code.store(0);
         }
+    }
+
+    // Store v into each element of [lo, hi). The caller checks the bounds.
+    fn fill_elems(inout self, base: u32, lo: u32, hi: u32, stride: u64, v: u32) {
+        let i = self.local();
+        self.e.code.get(lo);
+        self.e.code.set(i);
+        self.e.code.open(OP_BLOCK);
+        self.e.code.open(OP_LOOP);
+        self.e.code.get(i);
+        self.e.code.get(hi);
+        self.e.code.op(OP_I64_GE_U);
+        self.e.code.br_if(1);
+        self.elem_store(base, i, stride, v);
+        self.e.code.get(i);
+        self.e.code.i64_const(1);
+        self.e.code.op(OP_I64_ADD);
+        self.e.code.set(i);
+        self.e.code.br(0);
+        self.e.code.op(OP_END);
+        self.e.code.op(OP_END);
     }
 
     // Raise `IndexOutOfBounds` unless `i < n`.
@@ -5397,10 +5433,13 @@ impl L {
         let ins = self.cx.ir.p.inst(at);
         let a = ins.a;
         let code = self.seq_code(self.cx.ir.word(a));
-        if code == 0 {
+        let c = widen_u64(code);
+        if c == 0
+            || (
+                c == SQ_TRY_GET && self.cx.ir.word(self.seq_arg(a, 0)) == widen_u64(TyPass::Inout)
+            ) {
             Fail::raise(werr(K_UNSUPPORTED, U_OPERATION, 233));
         }
-        let c = widen_u64(code);
         if c == SQ_NEW || c == SQ_WITH_CAPACITY {
             let stride = self.stride(ty);
             let cap = if c == SQ_NEW {
@@ -5610,43 +5649,42 @@ impl L {
             self.e.code.i64_const(8);
             self.e.code.op(OP_I64_ADD);
             self.e.code.set(qa);
-            let i = self.local();
-            self.e.code.get(n);
-            self.e.code.set(i);
-            self.e.code.open(OP_BLOCK);
-            self.e.code.open(OP_LOOP);
-            self.e.code.get(i);
-            self.e.code.get(k);
-            self.e.code.op(OP_I64_GE_U);
-            self.e.code.br_if(1);
-            self.elem_store(qa, i, stride, v);
-            self.e.code.get(i);
-            self.e.code.i64_const(1);
-            self.e.code.op(OP_I64_ADD);
-            self.e.code.set(i);
-            self.e.code.br(0);
-            self.e.code.op(OP_END);
-            self.e.code.op(OP_END);
+            self.fill_elems(qa, n, k, stride, v);
             self.set_len(q, k);
             self.unit_into(dv);
         } else if c == SQ_FILL {
             let v = self.seq_val(a, 1);
-            let i = self.const_local(0);
-            self.e.code.open(OP_BLOCK);
-            self.e.code.open(OP_LOOP);
-            self.e.code.get(i);
-            self.e.code.get(n);
-            self.e.code.op(OP_I64_GE_U);
-            self.e.code.br_if(1);
-            self.elem_store(base, i, stride, v);
-            self.e.code.get(i);
-            self.e.code.i64_const(1);
-            self.e.code.op(OP_I64_ADD);
-            self.e.code.set(i);
-            self.e.code.br(0);
-            self.e.code.op(OP_END);
-            self.e.code.op(OP_END);
+            let zero = self.const_local(0);
+            self.fill_elems(base, zero, n, stride, v);
             self.unit_into(dv);
+        } else if c == SQ_FILL_RANGE || c == SQ_TRY_FILL {
+            let lo = self.seq_val(a, 1);
+            let hi = self.seq_val(a, 2);
+            let v = self.seq_val(a, 3);
+            self.e.code.get(lo);
+            self.e.code.get(hi);
+            self.e.code.op(OP_I64_LE_U);
+            self.e.code.get(hi);
+            self.e.code.get(n);
+            self.e.code.op(OP_I64_LE_U);
+            self.e.code.op(OP_I32_AND);
+            if c == SQ_TRY_FILL {
+                let d = self.dest(dv);
+                self.e.code.op(OP_I64_EXTEND_I32_U);
+                self.e.code.tee(d);
+                self.e.code.op(OP_I32_WRAP_I64);
+            }
+            self.e.code.open(OP_IF);
+            self.fill_elems(base, lo, hi, stride, v);
+            if c == SQ_FILL_RANGE {
+                self.e.code.op(OP_ELSE);
+                let oob = self.cx.s.index_oob;
+                self.raise_runtime_error(oob);
+            }
+            self.e.code.op(OP_END);
+            if c == SQ_FILL_RANGE {
+                self.unit_into(dv);
+            }
         } else if c == SQ_STR_PUSH_CHAR {
             let ch = self.seq_val(a, 1);
             let d = self.dest(dv);
@@ -5830,217 +5868,6 @@ impl L {
             self.e.code.get(v);
             self.e.code.set(d);
         }
-    }
-
-    // `$seq_reserve(p, need, stride) -> p`: buffer `p` when its capacity
-    // holds `need` elements, else a copy with capacity
-    // `max(need, 2 * cap, 4)`.
-    fn seq_reserve(inout self) -> u32 {
-        if self.h_seq_reserve != NONE32 {
-            return self.h_seq_reserve;
-        }
-        let idx = self.b.declare(in i64s(3), in i64s(1));
-        self.h_seq_reserve = idx;
-        let p: u32 = 0;
-        let need: u32 = 1;
-        let stride: u32 = 2;
-        let cap: u32 = 3;
-        let len: u32 = 4;
-        let nc: u32 = 5;
-        let q: u32 = 6;
-        let mut c = code_new();
-        c.get(p);
-        c.op(OP_I32_WRAP_I64);
-        c.load(0);
-        c.tee(len);
-        c.i64_const(32);
-        c.op(OP_I64_SHR_U);
-        c.set(cap);
-        c.get(len);
-        c.u64_const(LOW32);
-        c.op(OP_I64_AND);
-        c.set(len);
-        c.get(need);
-        c.get(cap);
-        c.op(OP_I64_LE_U);
-        c.open(OP_IF);
-        c.get(p);
-        c.op(OP_RETURN);
-        c.op(OP_END);
-        c.get(cap);
-        c.i64_const(1);
-        c.op(OP_I64_SHL);
-        c.set(nc);
-        c.get(nc);
-        c.get(need);
-        c.op(OP_I64_LT_U);
-        c.open(OP_IF);
-        c.get(need);
-        c.set(nc);
-        c.op(OP_END);
-        c.get(nc);
-        c.i64_const(4);
-        c.op(OP_I64_LT_U);
-        c.open(OP_IF);
-        c.i64_const(4);
-        c.set(nc);
-        c.op(OP_END);
-        c.get(nc);
-        c.get(stride);
-        c.op(OP_I64_MUL);
-        c.i64_const(8);
-        c.op(OP_I64_ADD);
-        c.call(self.alloc);
-        c.tee(q);
-        c.i64_const(8);
-        c.op(OP_I64_ADD);
-        c.op(OP_I32_WRAP_I64);
-        c.get(p);
-        c.i64_const(8);
-        c.op(OP_I64_ADD);
-        c.op(OP_I32_WRAP_I64);
-        c.get(len);
-        c.get(stride);
-        c.op(OP_I64_MUL);
-        c.op(OP_I32_WRAP_I64);
-        c.memory_copy();
-        c.get(q);
-        c.op(OP_I32_WRAP_I64);
-        c.get(len);
-        c.get(nc);
-        c.i64_const(32);
-        c.op(OP_I64_SHL);
-        c.op(OP_I64_OR);
-        c.store(0);
-        c.get(q);
-        c.op(OP_END);
-        self.b.define(idx, in body_n(4, in c));
-        idx
-    }
-
-    // `$bytes_eq(a, n, b, m)`: the byte ranges are equal.
-    fn bytes_eq(inout self) -> u32 {
-        if self.h_bytes_eq != NONE32 {
-            return self.h_bytes_eq;
-        }
-        let idx = self.b.declare(in i64s(4), in i64s(1));
-        self.h_bytes_eq = idx;
-        let i: u32 = 4;
-        let mut c = code_new();
-        c.get(1);
-        c.get(3);
-        c.op(OP_I64_NE);
-        c.open(OP_IF);
-        c.i64_const(0);
-        c.op(OP_RETURN);
-        c.op(OP_END);
-        c.open(OP_LOOP);
-        c.get(i);
-        c.get(1);
-        c.op(OP_I64_GE_U);
-        c.open(OP_IF);
-        c.i64_const(1);
-        c.op(OP_RETURN);
-        c.op(OP_END);
-        c.get(0);
-        c.get(i);
-        c.op(OP_I64_ADD);
-        c.op(OP_I32_WRAP_I64);
-        c.mem(OP_I64_LOAD8_U, 0, 0);
-        c.get(2);
-        c.get(i);
-        c.op(OP_I64_ADD);
-        c.op(OP_I32_WRAP_I64);
-        c.mem(OP_I64_LOAD8_U, 0, 0);
-        c.op(OP_I64_NE);
-        c.open(OP_IF);
-        c.i64_const(0);
-        c.op(OP_RETURN);
-        c.op(OP_END);
-        c.get(i);
-        c.i64_const(1);
-        c.op(OP_I64_ADD);
-        c.set(i);
-        c.br(0);
-        c.op(OP_END);
-        c.op(OP_UNREACHABLE);
-        c.op(OP_END);
-        self.b.define(idx, in body_n(1, in c));
-        idx
-    }
-
-    // `$utf8(c, at) -> width`: the UTF-8 encoding of scalar value `c` at
-    // address `at`.
-    fn utf8(inout self) -> u32 {
-        if self.h_utf8 != NONE32 {
-            return self.h_utf8;
-        }
-        let idx = self.b.declare(in i64s(2), in i64s(1));
-        self.h_utf8 = idx;
-        let ch: u32 = 0;
-        let at: u32 = 1;
-        let mut c = code_new();
-        // One byte below 0x80.
-        c.get(ch);
-        c.i64_const(128);
-        c.op(OP_I64_LT_U);
-        c.open(OP_IF);
-        c.get(at);
-        c.op(OP_I32_WRAP_I64);
-        c.get(ch);
-        c.mem(OP_I64_STORE8, 0, 0);
-        c.i64_const(1);
-        c.op(OP_RETURN);
-        c.op(OP_END);
-        // Width w: 2 below 0x800, 3 below 0x10000, else 4. The lead byte
-        // is `prefix | c >> 6(w-1)`, then `0x80 | (c >> 6k) & 63`.
-        for wd in 2..5 {
-            let limit: u64 = if wd == 2 {
-                2048
-            } else if wd == 3 {
-                65536
-            } else {
-                1114112
-            };
-            let prefix: i64 = if wd == 2 {
-                192
-            } else if wd == 3 {
-                224
-            } else {
-                240
-            };
-            c.get(ch);
-            c.u64_const(limit);
-            c.op(OP_I64_LT_U);
-            c.open(OP_IF);
-            c.get(at);
-            c.op(OP_I32_WRAP_I64);
-            c.get(ch);
-            c.u64_const(wrapping_mul(6, wrapping_sub(wd, 1)));
-            c.op(OP_I64_SHR_U);
-            c.i64_const(prefix);
-            c.op(OP_I64_OR);
-            c.mem(OP_I64_STORE8, 0, 0);
-            for k in 1..wd {
-                c.get(at);
-                c.op(OP_I32_WRAP_I64);
-                c.get(ch);
-                c.u64_const(wrapping_mul(6, wrapping_sub(wd, inc(k))));
-                c.op(OP_I64_SHR_U);
-                c.i64_const(63);
-                c.op(OP_I64_AND);
-                c.i64_const(128);
-                c.op(OP_I64_OR);
-                c.mem(OP_I64_STORE8, 0, k);
-            }
-            c.u64_const(wd);
-            c.op(OP_RETURN);
-            c.op(OP_END);
-        }
-        c.op(OP_UNREACHABLE);
-        c.op(OP_END);
-        self.b.define(idx, in body_n(0, in c));
-        idx
     }
 }
 
