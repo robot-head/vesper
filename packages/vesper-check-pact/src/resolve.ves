@@ -13,12 +13,8 @@ use @vesper/check-data::{
 };
 use @vesper/check-data::types::{
     EffNode,
-    K_FN,
-    K_INFER,
-    K_NAMED,
-    K_ROW,
-    K_TUPLE,
     RowNode,
+    TyKind,
     TypeNode,
     Types,
     default_type,
@@ -26,6 +22,12 @@ use @vesper/check-data::types::{
     substitute,
     vars_new
 };
+
+const K_FN: u8 = TyKind::Fn;
+const K_INFER: u8 = TyKind::Infer;
+const K_NAMED: u8 = TyKind::Named;
+const K_ROW: u8 = TyKind::Row;
+const K_TUPLE: u8 = TyKind::Tuple;
 use @vesper/check-data::util::{
     add,
     n32,
