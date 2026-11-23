@@ -232,6 +232,17 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         fn unlinkat(dirfd: i32, path: *const c_char, flags: i32) -> i32;
         fn fdopendir(fd: i32) -> *mut c_void;
         fn memset(dst: *mut c_void, byte: i32, n: usize) -> *mut c_void;
+        fn syscall(nr: i64, ...) -> i64;
+        fn ioctl(fd: i32, req: u64, ...) -> i32;
+        fn mmap(
+            addr: *mut c_void,
+            len: usize,
+            prot: i32,
+            flags: i32,
+            fd: i32,
+            off: i64,
+        ) -> *mut c_void;
+        fn munmap(addr: *mut c_void, len: usize) -> i32;
         fn malloc(n: usize) -> *mut c_void;
         fn free(p: *mut c_void);
         fn posix_spawn_file_actions_init(fa: *mut c_void) -> i32;
@@ -366,6 +377,10 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         ("memcpy", memcpy as *const u8),
         ("strchr", strchr as *const u8),
         ("strstr", strstr as *const u8),
+        ("syscall", syscall as *const u8),
+        ("ioctl", ioctl as *const u8),
+        ("mmap", mmap as *const u8),
+        ("munmap", munmap as *const u8),
     ]
 }
 #[cfg(windows)]
