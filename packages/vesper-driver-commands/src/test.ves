@@ -1,0 +1,339 @@
+// `vesper test`: CLI option parsing, validation, and `--help` in Vesper,
+// delegating doctest (`src/doctest_commands.rs`) and unit/mutation test
+// execution (`src/test_runner.rs`) to `HybridCommands::hc_test_run`.
+use @vesper/driver::{
+    Args,
+    args_count,
+    eq
+};
+use super::{
+    arg,
+    byte_at,
+    print,
+    fail,
+    stdout_stream
+};
+
+fn print_test_help() eff [Ffi[HybridCommands]] {
+    print(
+        stdout_stream(),
+        in "Usage: vesper test --doc [FILE|DIR] [--json]\n       vesper test <FILE|DIR> [--mutate] [--mutate-dependency <FILE>] [--filter <PAT>] [--mutant-offset <N>] [--max-mutants <N>] [--no-opt] [--fuel <N>] [--link-search <DIR>] [--json]\n\nUnit & Mutation Tests (`vesper test <FILE|DIR>`):\n  Run `test_*` functions, `@test` functions, and named `// @case` rows. For a package directory\n  or a file under its `src/`, resolve imports using `Loom.toml`. A file runs its own tests; a\n  package directory runs tests in every source module. Dependencies provide ordinary declarations.\n  Tests use JIT where supported and fall back to the evaluator. With `--mutate`, mutations\n  in the selected source scope are replayed against the suite. `--link-search` adds a directory\n  the `.vsys` library loader looks in first.\n\nDoctests (`vesper test --doc [FILE|DIR]`):\nExtract actual Vesper doc-comment fences, fully check examples, and run supported finite scalar entries in one shared JIT module per file;\nexamples outside the native subset run on the reference evaluator instead, and each result names its engine.\nWith no path (or a directory), run every .ves source of the package that has doc examples: the nearest\nLoom.toml at or above the directory (else the directory itself); hidden, target/, bazel-* and nested-package\ndirectories are skipped and symlinks are not followed. Files without examples are listed, not run; a package\nwith no examples at all fails. Each file's examples are checked against that file; the runnable examples of all\nfiles then share ONE package module and ONE JIT module when the files' top-level names are disjoint, otherwise\neach file runs in its own module and the report says why.\ncompile_fail(E...) must match exact example diagnostics; base errors and unsupported execution never count as success.\n`vesper,sim(seed=N,clock,net,disk)` fences run on the reference evaluator under a seeded SimPulse kernel with\nsimulated clock, network and disk effects, twice: the second run replays the first run's journal.\nSource/check/module budgets apply; this is not an OS sandbox or a hard deadline.\n"
+            .as_bytes()
+    );
+}
+
+fn any_flag(in args: Args, n: u64, in flag: Str) -> bool {
+    let mut i: u64 = 1;
+    loop {
+        if i >= n {
+            return false;
+        }
+        let a_buf = arg(in args, i);
+        if eq(in a_buf.as_slice(), in flag) {
+            return true;
+        }
+        i = wrapping_add(i, 1);
+    }
+    false
+}
+
+fn any_help(in args: Args, n: u64) -> bool {
+    let mut i: u64 = 1;
+    loop {
+        if i >= n {
+            return false;
+        }
+        let a_buf = arg(in args, i);
+        let a = a_buf.as_slice();
+        if eq(in a, in "--help") || eq(in a, in "-h") {
+            return true;
+        }
+        i = wrapping_add(i, 1);
+    }
+    false
+}
+
+fn fail_test(has_json: bool, in message: Slice[u8]) -> i64 eff [Ffi[HybridCommands]] {
+    if has_json {
+        HybridCommands::hc_test_json_err(in message);
+    }
+    fail(in message)
+}
+
+fn fail_usage(has_json: bool) -> i64 eff [Ffi[HybridCommands]] {
+    fail_test(
+        has_json,
+        in "usage: vesper test --doc [FILE|DIR] [--json]\n       vesper test <FILE|DIR> [--mutate] [--mutate-dependency <FILE>] [--filter <PAT>] [--mutant-offset <N>] [--max-mutants <N>] [--no-opt] [--fuel <N>] [--engines all|unit] [--no-cache] [--json]"
+            .as_bytes()
+    )
+}
+
+fn pack_args(in args: Args, n: u64) -> ChunkSeq[u8] {
+    let mut packed: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut i: u64 = 1;
+    loop {
+        if i >= n {
+            break;
+        }
+        let a_buf = arg(in args, i);
+        packed.extend(in a_buf.as_slice());
+        packed.push(0);
+        i = wrapping_add(i, 1);
+    }
+    packed
+}
+
+fn run_packed(in args: Args, n: u64) -> i64 eff [Ffi[HybridCommands]] {
+    let packed = pack_args(in args, n);
+    let err_len = HybridCommands::hc_test_run(in packed.as_slice());
+    if err_len == 0 {
+        return 0;
+    }
+    let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    err.resize(err_len, 0);
+    let actual = HybridCommands::hc_test_err(inout err.as_slice_mut());
+    if actual > err.len() {
+        err.resize(actual, 0);
+        let _got = HybridCommands::hc_test_err(inout err.as_slice_mut());
+    } else {
+        err.truncate(actual);
+    }
+    fail(in err.as_slice())
+}
+
+// Parse an unsigned 64-bit integer like `src/test_runner.rs::parse_u64`
+// (ignoring `_`, supporting optional `0x` hex prefix). Returns `false` on
+// empty input, invalid characters, or u64 overflow.
+fn parse_u64(in text: Slice[u8], inout out: u64) -> bool {
+    let mut digits: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for i in 0..text.len() {
+        let b = byte_at(in text, i);
+        if b != 95 {
+            digits.push(b);
+        }
+    }
+    let d = digits.as_slice();
+    if d.len() == 0 {
+        return false;
+    }
+    let mut start: u64 = 0;
+    let mut radix: u64 = 10;
+    if d.len() >= 2 && byte_at(in d, 0) == 48 && byte_at(in d, 1) == 120 {
+        start = 2;
+        radix = 16;
+        if d.len() == 2 {
+            return false;
+        }
+    }
+    let max_div: u64 = 18446744073709551615 / radix;
+    let max_rem: u64 = 18446744073709551615 % radix;
+    let mut val: u64 = 0;
+    let mut idx = start;
+    loop {
+        if idx >= d.len() {
+            break;
+        }
+        let c = byte_at(in d, idx);
+        let mut digit: u64 = 99;
+        if c >= 48 && c <= 57 {
+            digit = widen_u64(wrapping_sub(c, 48));
+        } else if radix == 16 && c >= 97 && c <= 102 {
+            digit = widen_u64(wrapping_add(wrapping_sub(c, 97), 10));
+        } else if radix == 16 && c >= 65 && c <= 70 {
+            digit = widen_u64(wrapping_add(wrapping_sub(c, 65), 10));
+        }
+        if digit >= radix {
+            return false;
+        }
+        if val > max_div || (val == max_div && digit > max_rem) {
+            return false;
+        }
+        val = wrapping_add(wrapping_mul(val, radix), digit);
+        idx = wrapping_add(idx, 1);
+    }
+    out = val;
+    true
+}
+
+fn run_doctest_cli(in args: Args, n: u64, has_json: bool) -> i64 eff [Ffi[HybridCommands]] {
+    let mut doc = false;
+    let mut json = false;
+    let mut has_file = false;
+    let mut i: u64 = 1;
+    loop {
+        if i >= n {
+            break;
+        }
+        let a_buf = arg(in args, i);
+        let a = a_buf.as_slice();
+        if eq(in a, in "--doc") && !doc {
+            doc = true;
+        } else if eq(in a, in "--json") && !json {
+            json = true;
+        } else if (a.len() == 0 || byte_at(in a, 0) != 45) && !has_file {
+            has_file = true;
+        } else {
+            return fail_usage(has_json);
+        }
+        i = wrapping_add(i, 1);
+    }
+    if !doc {
+        return fail_usage(has_json);
+    }
+    run_packed(in args, n)
+}
+
+pub fn run_test(in args: Args) -> i64 eff [Ffi[HybridCommands]] {
+    let n = args_count(in args);
+    if any_help(in args, n) {
+        print_test_help();
+        return 0;
+    }
+    let has_json = any_flag(in args, n, in "--json");
+    if any_flag(in args, n, in "--doc") {
+        return run_doctest_cli(in args, n, has_json);
+    }
+    let mut has_path = false;
+    let mut mutate = false;
+    let mut has_mutate_dep = false;
+    let mut optimize = true;
+    let mut has_filter = false;
+    let mut has_max_mutants = false;
+    let mut has_mutant_offset = false;
+    let mut no_cache = false;
+    let mut json = false;
+    let mut has_engines = false;
+    let mut engines_all = false;
+    let mut i: u64 = 1;
+    loop {
+        if i >= n {
+            break;
+        }
+        let a_buf = arg(in args, i);
+        let a = a_buf.as_slice();
+        if eq(in a, in "--mutate") && !mutate {
+            mutate = true;
+        } else if eq(in a, in "--no-opt") && optimize {
+            optimize = false;
+        } else if eq(in a, in "--mutate-dependency") && !has_mutate_dep {
+            i = wrapping_add(i, 1);
+            if i >= n {
+                return fail_test(has_json, in "--mutate-dependency requires a file".as_bytes());
+            }
+            has_mutate_dep = true;
+        } else if eq(in a, in "--no-cache") && !no_cache {
+            no_cache = true;
+        } else if eq(in a, in "--link-search") {
+            i = wrapping_add(i, 1);
+            if i >= n {
+                return fail_test(has_json, in "--link-search requires a directory".as_bytes());
+            }
+        } else if eq(in a, in "--json") && !json {
+            json = true;
+        } else if eq(in a, in "--engines") && !has_engines {
+            i = wrapping_add(i, 1);
+            if i >= n {
+                return fail_test(has_json, in "--engines requires `all` or `unit`".as_bytes());
+            }
+            let v_buf = arg(in args, i);
+            let v = v_buf.as_slice();
+            if eq(in v, in "all") {
+                engines_all = true;
+            } else if eq(in v, in "unit") {
+                engines_all = false;
+            } else {
+                return fail_test(has_json, in "--engines takes `all` or `unit`".as_bytes());
+            }
+            has_engines = true;
+        } else if eq(in a, in "--filter") {
+            if has_filter {
+                return fail_test(has_json, in "duplicate --filter option".as_bytes());
+            }
+            i = wrapping_add(i, 1);
+            if i >= n {
+                return fail_test(has_json, in "--filter requires a pattern".as_bytes());
+            }
+            has_filter = true;
+        } else if eq(in a, in "--max-mutants") {
+            if has_max_mutants {
+                return fail_test(has_json, in "duplicate --max-mutants option".as_bytes());
+            }
+            i = wrapping_add(i, 1);
+            if i >= n {
+                return fail_test(
+                    has_json,
+                    in "--max-mutants requires a positive integer".as_bytes()
+                );
+            }
+            let v_buf = arg(in args, i);
+            let mut val: u64 = 0;
+            if !parse_u64(in v_buf.as_slice(), inout val) {
+                return fail_test(
+                    has_json,
+                    in "--max-mutants requires a positive integer".as_bytes()
+                );
+            }
+            if val == 0 || val > 2048 {
+                return fail_test(
+                    has_json,
+                    in "--max-mutants must be between 1 and 2048".as_bytes()
+                );
+            }
+            has_max_mutants = true;
+        } else if eq(in a, in "--mutant-offset") {
+            if has_mutant_offset {
+                return fail_test(has_json, in "duplicate --mutant-offset option".as_bytes());
+            }
+            i = wrapping_add(i, 1);
+            if i >= n {
+                return fail_test(has_json, in "--mutant-offset requires an integer".as_bytes());
+            }
+            let v_buf = arg(in args, i);
+            let mut val: u64 = 0;
+            if !parse_u64(in v_buf.as_slice(), inout val) {
+                return fail_test(
+                    has_json,
+                    in "--mutant-offset requires a positive integer".as_bytes()
+                );
+            }
+            has_mutant_offset = true;
+        } else if eq(in a, in "--fuel") {
+            i = wrapping_add(i, 1);
+            if i >= n {
+                return fail_test(has_json, in "--fuel requires a positive integer".as_bytes());
+            }
+            let v_buf = arg(in args, i);
+            let mut val: u64 = 0;
+            if !parse_u64(in v_buf.as_slice(), inout val) {
+                return fail_test(has_json, in "--fuel requires a positive integer".as_bytes());
+            }
+            if val == 0 {
+                return fail_test(has_json, in "--fuel must be positive".as_bytes());
+            }
+        } else if (a.len() == 0 || byte_at(in a, 0) != 45) && !has_path {
+            has_path = true;
+        } else {
+            return fail_usage(has_json);
+        }
+        i = wrapping_add(i, 1);
+    }
+    if has_max_mutants && !mutate {
+        return fail_test(has_json, in "--max-mutants requires --mutate".as_bytes());
+    }
+    if has_mutant_offset && !mutate {
+        return fail_test(has_json, in "--mutant-offset requires --mutate".as_bytes());
+    }
+    if has_mutate_dep && !mutate {
+        return fail_test(has_json, in "--mutate-dependency requires --mutate".as_bytes());
+    }
+    if !optimize && !mutate {
+        return fail_test(has_json, in "--no-opt requires --mutate".as_bytes());
+    }
+    if engines_all && mutate {
+        return fail_test(has_json, in "--engines all cannot be combined with --mutate".as_bytes());
+    }
+    if !has_path {
+        return fail_usage(has_json);
+    }
+    run_packed(in args, n)
+}

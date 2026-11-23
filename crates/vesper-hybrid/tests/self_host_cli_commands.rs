@@ -976,3 +976,103 @@ fn graph_runs_in_vesper() {
     assert_eq!(prints, 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+fn seed_test_tree(dir: &Path) {
+    std::fs::write(
+        dir.join("unit.ves"),
+        "/// ```vesper\n/// assert_eq(add(2, 3), 5);\n/// ```\npub fn add(a: u64, b: u64) -> u64 {\n    a + b\n}\n\nfn test_add() -> bool {\n    add(2, 3) == 5\n}\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn test_matches_the_default_compiler() {
+    let hybrid = hybrid();
+    let default = default_compiler();
+    let root = scratch("vesper-cli-test-diff");
+    let cases: &[&[&str]] = &[
+        &["test", "--help"],
+        &["test", "-h"],
+        &["test"],
+        &["test", "--json"],
+        &["test", "--unknown"],
+        &["test", "--unknown", "--json"],
+        &["test", "--doc", "--unknown"],
+        &["test", "--doc", "--unknown", "--json"],
+        &["test", "unit.ves", "--max-mutants", "5"],
+        &["test", "unit.ves", "--mutant-offset", "1"],
+        &["test", "unit.ves", "--mutate-dependency", "dep.ves"],
+        &["test", "unit.ves", "--no-opt"],
+        &["test", "unit.ves", "--engines", "all", "--mutate"],
+        &["test", "unit.ves", "--engines", "bogus"],
+        &["test", "unit.ves", "--filter", "a", "--filter", "b"],
+        &["test", "unit.ves", "--mutate", "--max-mutants", "0"],
+        &["test", "unit.ves", "--mutate", "--max-mutants", "2049"],
+        &["test", "unit.ves", "--fuel", "0"],
+        &["test", "unit.ves", "--fuel", "0x1_000"],
+        &["test", "unit.ves", "--json"],
+        &["test", "--doc", "unit.ves", "--json"],
+    ];
+    let mut diffs = vec![];
+    for argv in cases {
+        let mut results = vec![];
+        for compiler in [&default, &hybrid] {
+            let work = root.join(if compiler == &default { "d" } else { "h" });
+            let _ = std::fs::remove_dir_all(&work);
+            std::fs::create_dir_all(&work).unwrap();
+            seed_test_tree(&work);
+            let out = Command::new(compiler)
+                .current_dir(&work)
+                .env_remove("VESPER_HYBRID_STATS")
+                .args(*argv)
+                .output()
+                .unwrap();
+            results.push(out);
+        }
+        let d = &results[0];
+        let h = &results[1];
+        if d.status.code() != h.status.code() || d.stdout != h.stdout || d.stderr != h.stderr {
+            diffs.push(format!(
+                "{argv:?}: status {:?} vs {:?}, stdout {:?} vs {:?}, stderr {:?} vs {:?}",
+                d.status.code(),
+                h.status.code(),
+                String::from_utf8_lossy(&d.stdout),
+                String::from_utf8_lossy(&h.stdout),
+                String::from_utf8_lossy(&d.stderr),
+                String::from_utf8_lossy(&h.stderr),
+            ));
+        }
+    }
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(
+        diffs.is_empty(),
+        "Vesper `test` differs from default CLI on {} cases:\n{}",
+        diffs.len(),
+        diffs.join("\n")
+    );
+}
+
+#[test]
+fn test_runs_in_vesper() {
+    let hybrid = hybrid();
+    let dir = scratch("vesper-cli-test-runs");
+    seed_test_tree(&dir);
+    let out = Command::new(&hybrid)
+        .current_dir(&dir)
+        .env("VESPER_HYBRID_STATS", "1")
+        .args(["test", "--help"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let prints: u64 = stderr
+        .lines()
+        .find_map(|l| {
+            l.strip_prefix("vesper-hybrid: the command layers printed ")
+                .and_then(|s| s.strip_suffix(" times from Vesper"))
+                .and_then(|n| n.parse().ok())
+        })
+        .unwrap_or_else(|| panic!("no command-layer report in {stderr:?}"));
+    assert_eq!(prints, 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
