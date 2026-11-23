@@ -5466,7 +5466,8 @@ impl L {
         let a = ins.a;
         let code = self.seq_code(self.cx.ir.word(a));
         let c = widen_u64(code);
-        if c == 0 || (c == SQ_TRY_GET && self.cx.ir.word(self.seq_arg(a, 0)) == widen_u64(P_INOUT)) {
+        if c == 0
+            || (c == SQ_TRY_GET && self.cx.ir.word(self.seq_arg(a, 0)) == widen_u64(P_INOUT)) {
             Fail::raise(werr(K_UNSUPPORTED, U_OPERATION, 233));
         }
         if c == SQ_NEW || c == SQ_WITH_CAPACITY {
