@@ -11,7 +11,7 @@ sys library StdEnv (
 ) {
     const OS: u32 = 3;
     const RTLD_DEFAULT: u64 = 0;
-    const ERANGE: u32 = 34;
+    const ERANGE: u32 = 122;
     // A C function of no arguments returning an address (`_NSGetArgv`).
     callback AddressFn() -> ForeignVal[u64];
     #[link_name = "vstd_getenv"]

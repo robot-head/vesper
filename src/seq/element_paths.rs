@@ -536,6 +536,7 @@ impl Rewriter<'_> {
     fn let_statement(&mut self, name: &str, ty: Type, value: Expr) -> Statement {
         Statement::Let {
             pat: Pattern {
+                integer_kind: None,
                 kind: PatternKind::Bind(name.into()),
                 span: self.fresh_span(),
             },
@@ -589,11 +590,13 @@ impl Rewriter<'_> {
             },
         };
         let some = Pattern {
+            integer_kind: None,
             kind: PatternKind::Constructor {
                 name: "Option::Some".into(),
                 fields: vec![(
                     "0".into(),
                     Pattern {
+                        integer_kind: None,
                         kind: PatternKind::Bind(site.name),
                         span: self.fresh_span(),
                     },
@@ -603,6 +606,7 @@ impl Rewriter<'_> {
             span: self.fresh_span(),
         };
         let none = Pattern {
+            integer_kind: None,
             kind: PatternKind::Constructor {
                 name: "Option::None".into(),
                 fields: vec![],

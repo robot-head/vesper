@@ -23,22 +23,31 @@ use self::names::{
 
 const NONE32: u32 = 4294967295;
 
-pub const K_LIT: u8 = 0;
-pub const K_NAMED: u8 = 1;
-pub const K_TUPLE: u8 = 2;
-pub const K_FN: u8 = 3;
-pub const K_ROW: u8 = 4;
-pub const K_INFER: u8 = 5;
+// A type node's kind. Every checker, lowering and backend package that
+// reads check-data's type table compares against these, so they live here
+// as value enums and fold to the same literals everywhere.
+pub enum TyKind: _ {
+    Lit = 0,
+    Named = 1,
+    Tuple = 2,
+    Fn = 3,
+    Row = 4,
+    Infer = 5,
+}
 
 // `Mode`: Copy < Affine < Linear.
-pub const M_COPY: u8 = 0;
-pub const M_AFFINE: u8 = 1;
-pub const M_LINEAR: u8 = 2;
+pub enum TyMode: _ {
+    Copy = 0,
+    Affine = 1,
+    Linear = 2,
+}
 
-// `Pass`.
-pub const P_IN: u8 = 0;
-pub const P_INOUT: u8 = 1;
-pub const P_SINK: u8 = 2;
+// `Pass`: how a parameter is passed.
+pub enum TyPass: _ {
+    In = 0,
+    Inout = 1,
+    Sink = 2,
+}
 
 pub copy struct TypeNode {
     kind: u8,
@@ -124,9 +133,9 @@ pub fn types_new(inout names: Names) -> Types {
     let no_effs: ChunkSeq[EffNode] = ChunkSeq::new[EffNode]();
     let er = t.mk_row(in no_effs, in no_items, 0);
     t.empty_row = er;
-    let u = t.mk(K_TUPLE, 0, 0, in no_items, 0, 0, 0);
+    let u = t.mk(TyKind::Tuple, 0, 0, in no_items, 0, 0, 0);
     t.unit = u;
-    let i = t.mk(K_INFER, 0, 0, in no_items, 0, 0, 0);
+    let i = t.mk(TyKind::Infer, 0, 0, in no_items, 0, 0, 0);
     t.infer = i;
     t
 }
@@ -150,7 +159,7 @@ impl Types {
         match self.nodes.try_get(w(t)) {
             Option::Some(n) => n,
             Option::None => TypeNode {
-                kind: K_INFER,
+                kind: TyKind::Infer,
                 mode: 0,
                 name: 0,
                 a: 0,
@@ -169,7 +178,7 @@ impl Types {
     // `Type::name`: the name of a `Named` type, else "" (symbol 0).
     pub fn name(in self, t: u32) -> u32 {
         let n = self.node(t);
-        if n.kind == K_NAMED {
+        if n.kind == TyKind::Named {
             n.name
         } else {
             0
@@ -178,7 +187,7 @@ impl Types {
 
     pub fn arity(in self, t: u32) -> u64 {
         let n = self.node(t);
-        if n.kind == K_NAMED || n.kind == K_TUPLE || n.kind == K_FN {
+        if n.kind == TyKind::Named || n.kind == TyKind::Tuple || n.kind == TyKind::Fn {
             w(n.n)
         } else {
             0
@@ -267,7 +276,7 @@ impl Types {
             if u32_at(in self.items, at) != u32_at(in items, i) {
                 return false;
             }
-            if kind == K_FN && u8_at(in self.passes, at) != u8_at(in passes, i) {
+            if kind == TyKind::Fn && u8_at(in self.passes, at) != u8_at(in passes, i) {
                 return false;
             }
         }
@@ -287,7 +296,7 @@ impl Types {
         lit: i64
     ) -> u32 {
         let mut h = node_hash(kind, mode, name, in items, r, r2, lit);
-        if kind == K_FN {
+        if kind == TyKind::Fn {
             for i in 0..passes.len() {
                 h = fold(h, widen_u64(u8_at(in passes, i)));
             }
@@ -309,7 +318,7 @@ impl Types {
         let a = n32(self.items.len());
         for i in 0..items.len() {
             self.items.push(u32_at(in items, i));
-            if kind == K_FN {
+            if kind == TyKind::Fn {
                 self.passes.push(u8_at(in passes, i));
             } else {
                 self.passes.push(0);
@@ -352,16 +361,16 @@ impl Types {
     }
 
     pub fn named(inout self, name: u32, in args: ChunkSeq[u32]) -> u32 {
-        self.mk(K_NAMED, 0, name, in args, 0, 0, 0)
+        self.mk(TyKind::Named, 0, name, in args, 0, 0, 0)
     }
 
     pub fn named0(inout self, name: u32) -> u32 {
         let no: ChunkSeq[u32] = ChunkSeq::new[u32]();
-        self.mk(K_NAMED, 0, name, in no, 0, 0, 0)
+        self.mk(TyKind::Named, 0, name, in no, 0, 0, 0)
     }
 
     pub fn tuple(inout self, in args: ChunkSeq[u32]) -> u32 {
-        self.mk(K_TUPLE, 0, 0, in args, 0, 0, 0)
+        self.mk(TyKind::Tuple, 0, 0, in args, 0, 0, 0)
     }
 
     // An integer literal type: Rust holds an `i128`; Vesper has no 128-bit
@@ -370,7 +379,7 @@ impl Types {
         let no: ChunkSeq[u32] = ChunkSeq::new[u32]();
         self
             .mk(
-                K_LIT,
+                TyKind::Lit,
                 if neg {
                     1
                 } else {
@@ -386,7 +395,7 @@ impl Types {
 
     pub fn row_type(inout self, row: u32) -> u32 {
         let no: ChunkSeq[u32] = ChunkSeq::new[u32]();
-        self.mk(K_ROW, 0, 0, in no, 0, row, 0)
+        self.mk(TyKind::Row, 0, 0, in no, 0, row, 0)
     }
 
     // A row of effects `es` whose arguments are `args` (each effect's
@@ -739,7 +748,7 @@ impl Vars {
 // repeated instances.
 pub fn substitute(inout t: Types, ty: u32, in vars: Vars) -> u32 {
     let n = t.node(ty);
-    if n.kind == K_NAMED {
+    if n.kind == TyKind::Named {
         if n.n == 0 {
             let v = vars.get(n.name);
             if v != NONE32 {
@@ -753,9 +762,9 @@ pub fn substitute(inout t: Types, ty: u32, in vars: Vars) -> u32 {
             let s = substitute(inout t, a, in vars);
             args.push(s);
         }
-        return t.mk(K_NAMED, 0, n.name, in args, 0, 0, 0);
+        return t.mk(TyKind::Named, 0, n.name, in args, 0, 0, 0);
     }
-    if n.kind == K_TUPLE {
+    if n.kind == TyKind::Tuple {
         if n.n == 0 {
             return ty;
         }
@@ -767,7 +776,7 @@ pub fn substitute(inout t: Types, ty: u32, in vars: Vars) -> u32 {
         }
         return t.tuple(in args);
     }
-    if n.kind == K_FN {
+    if n.kind == TyKind::Fn {
         let mut args: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](w(n.n));
         let mut passes: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](w(n.n));
         for i in 0..w(n.n) {
@@ -779,7 +788,7 @@ pub fn substitute(inout t: Types, ty: u32, in vars: Vars) -> u32 {
         }
         let result = substitute(inout t, n.r, in vars);
         let row = substitute_row(inout t, n.r2, in vars);
-        return t.mk_with(K_FN, n.mode, 0, in args, in passes, result, row, 0);
+        return t.mk_with(TyKind::Fn, n.mode, 0, in args, in passes, result, row, 0);
     }
     ty
 }
@@ -813,7 +822,7 @@ pub fn substitute_row(inout t: Types, r: u32, in vars: Vars) -> u32 {
     let mut tail = row.tail;
     if row.tail != 0 {
         let bound = vars.get(wrapping_sub(row.tail, 1));
-        if bound != NONE32 && t.kind(bound) == K_ROW {
+        if bound != NONE32 && t.kind(bound) == TyKind::Row {
             let inner = t.row(t.node(bound).r2);
             for i in 0..w(inner.n) {
                 let e = t.effect_at(add(w(inner.a), i));
@@ -871,13 +880,13 @@ fn push_unique(in t: Types, inout es: ChunkSeq[EffNode], in args: ChunkSeq[u32],
 // `numeric::default_type`: integer literals take i64, or u64 above i64::MAX.
 pub fn default_type(inout t: Types, ty: u32) -> u32 {
     let n = t.node(ty);
-    if n.kind == K_LIT {
+    if n.kind == TyKind::Lit {
         if n.mode == 0 && wrapping_u64(n.lit) > 9223372036854775807 {
             return t.named0(t.s_u64);
         }
         return t.named0(t.s_i64);
     }
-    if n.kind == K_NAMED || n.kind == K_TUPLE {
+    if n.kind == TyKind::Named || n.kind == TyKind::Tuple {
         if n.n == 0 {
             return ty;
         }
@@ -889,7 +898,7 @@ pub fn default_type(inout t: Types, ty: u32) -> u32 {
         }
         return t.mk(n.kind, 0, n.name, in args, 0, 0, 0);
     }
-    if n.kind == K_FN {
+    if n.kind == TyKind::Fn {
         let mut args: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](w(n.n));
         let mut passes: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](w(n.n));
         for i in 0..w(n.n) {
@@ -900,7 +909,7 @@ pub fn default_type(inout t: Types, ty: u32) -> u32 {
         }
         let result = default_type(inout t, n.r);
         let row = default_row(inout t, n.r2);
-        return t.mk_with(K_FN, n.mode, 0, in args, in passes, result, row, 0);
+        return t.mk_with(TyKind::Fn, n.mode, 0, in args, in passes, result, row, 0);
     }
     ty
 }

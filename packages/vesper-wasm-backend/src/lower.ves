@@ -441,6 +441,9 @@ pub struct L {
     seqs: bool,
     // literal text -> address + 1
     strings: ChunkSeq[u64],
+    // the static data of each constant table (`$table$NAME`) by callee, + 1
+    tables: ChunkSeq[u64],
+    wide_fns: ChunkSeq[u32],
     // type display -> `$copy` function + 1
     copies: ChunkSeq[u32],
     hfns: ChunkSeq[HFns],
@@ -463,7 +466,7 @@ fn set32(inout t: ChunkSeq[u32], k: u32, v: u32) {
     let ok = t.try_set(i, v);
 }
 
-fn set64(inout t: ChunkSeq[u64], k: u32, v: u64) {
+pub fn set64(inout t: ChunkSeq[u64], k: u32, v: u64) {
     let i = w(k);
     loop {
         if t.len() > i {
@@ -560,6 +563,8 @@ pub fn lowerer_new(sink cx: Cx, sink plan: Plan, max_instructions: u64) -> L eff
         host: host,
         seqs: seqs,
         strings: ChunkSeq::new[u64](),
+        tables: ChunkSeq::new[u64](),
+        wide_fns: ChunkSeq::new[u32](),
         copies: ChunkSeq::new[u32](),
         hfns: ChunkSeq::new[HFns](),
         hcap_name: ChunkSeq::new[u32](),
@@ -1393,7 +1398,9 @@ impl L {
         }
         for k in 0..sig.en {
             let e = self.cx.f.eff(add(sig.e0, k));
-            if e.name != self.cx.s.fail && !self.cx.f.is_capability(e.name) {
+            if e.name != self.cx.s.fail
+                && !self.cx.f.is_capability(e.name)
+                && !self.host_effect(e.name) {
                 return false;
             }
         }
@@ -2382,6 +2389,8 @@ impl L {
                 self.e.code.u64_const(a);
                 self.e.code.call(eq);
                 self.e.code.op(OP_I32_WRAP_I64);
+            } else if self.is_u128(ty) {
+                self.wide_lit_eq(v, lo, hi);
             } else {
                 let c = self.constant_bits(lk, lo, hi, ty);
                 self.e.code.i64_const(c);
@@ -2613,6 +2622,8 @@ impl L {
                 let d = self.dest(dv);
                 self.e.code.u64_const(addr);
                 self.e.code.set(d);
+            } else if self.is_u128(ty) {
+                self.wide_const(dv, lo, hi);
             } else {
                 let c = self.constant_bits(lk, lo, hi, ty);
                 let d = self.dest(dv);
@@ -2694,6 +2705,9 @@ impl L {
             let vid = self.cx.ir.word(inc(a));
             let x = self.value(vid);
             let vt0 = self.vty(vid);
+            if self.wide_unary(dv, opn, x, vt0, ty) {
+                return;
+            }
             let s = self.scalar_of(vt0);
             let d = self.dest(dv);
             if self.is_op(opn, "!") && s == SC_BOOL {
@@ -2738,6 +2752,9 @@ impl L {
             let y = self.value(bi);
             let sa = self.vty(ai);
             let sb = self.vty(bi);
+            if self.wide_binary(dv, opn, x, y, sa, sb) {
+                return;
+            }
             let sh = self.cx.shape(sa);
             let agg = sh.kind == SH_TUPLE
                 || sh.kind == SH_STRUCT
@@ -3489,6 +3506,9 @@ impl L {
         let dv = widen_u64(ins.dest);
         let callee = n32(self.cx.ir.word(a));
         if self.seqs && self.atomic_call(dv, callee, a) {
+            return;
+        }
+        if self.table_call(dv, callee) {
             return;
         }
         if self.cx.ir.find(callee) != 0 {
@@ -4969,6 +4989,15 @@ impl L {
         if self.cx.names.spells(l, in "Resize".as_bytes()) {
             return 35;
         }
+        if self.cx.names.spells(l, in "FindByte".as_bytes()) {
+            return 36;
+        }
+        if self.cx.names.spells(l, in "FindEither".as_bytes()) {
+            return 37;
+        }
+        if self.cx.names.spells(l, in "FindNotIn".as_bytes()) {
+            return 38;
+        }
         if self.cx.names.spells(l, in "Len".as_bytes()) {
             return 3;
         }
@@ -5453,7 +5482,9 @@ impl L {
             return;
         }
         let (base, n) = self.parts(x, t0);
-        if c == SQ_LEN || c == SQ_SLICE_LEN || c == SQ_STR_LEN {
+        if c >= 36 && c <= 38 {
+            self.find_scan(a, c, base, n, t0, ty, dv);
+        } else if c == SQ_LEN || c == SQ_SLICE_LEN || c == SQ_STR_LEN {
             self.set_value(dv, n);
         } else if c == SQ_PUSH {
             let v = self.seq_val(a, 1);

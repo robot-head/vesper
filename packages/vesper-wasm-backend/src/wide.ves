@@ -1,0 +1,615 @@
+// `u128` in the port (manuscript §3.2). The plan gives a `u128` the shape
+// of the tuple `(u64, u64)` (low word, high word): a pointer to a
+// 16-byte block, so storage, moves, `==`, copies and evacuation are the
+// tuple's. The operations @vesper/front and the prelude's
+// `checked_add_u128`/`checked_mul_u128` use are lowered here: literals,
+// `widen_u128`, `wrapping_u64`, `+`, `wrapping_add`, `wrapping_mul`,
+// `/`, `%`, `<<` and the orderings. Anything else on a `u128` (and every
+// `i128`) is refused (sites 248 and 249).
+
+use @vesper/check-data::util::{
+    u32_at
+};
+use self::enc::{
+    Code,
+    ValTy,
+    code_new,
+    vt
+};
+use self::err::{
+    WErr,
+    werr
+};
+use self::lower::{
+    L,
+    body_n
+};
+
+// Consts do not cross modules: src/err.ves, src/lower.ves, src/enc.ves.
+const K_UNSUPPORTED: u8 = 0;
+const U_OPERATION: u8 = 13;
+const U_INTEGER_WIDTH: u8 = 14;
+const VT_I64: u8 = 126;
+const NONE32: u32 = 4294967295;
+const OP_UNREACHABLE: u8 = 0;
+const OP_BLOCK: u8 = 2;
+const OP_LOOP: u8 = 3;
+const OP_IF: u8 = 4;
+const OP_ELSE: u8 = 5;
+const OP_END: u8 = 11;
+const OP_RETURN: u8 = 15;
+const OP_SELECT: u8 = 27;
+const OP_I32_EQZ: u8 = 69;
+const OP_I64_EQZ: u8 = 80;
+const OP_I64_EQ: u8 = 81;
+const OP_I64_NE: u8 = 82;
+const OP_I64_LT_U: u8 = 84;
+const OP_I64_GT_U: u8 = 86;
+const OP_I64_GE_U: u8 = 90;
+const OP_I32_AND: u8 = 113;
+const OP_DROP: u8 = 26;
+const OP_I32_OR: u8 = 114;
+const OP_I64_ADD: u8 = 124;
+const OP_I64_SUB: u8 = 125;
+const OP_I64_MUL: u8 = 126;
+const OP_I64_AND: u8 = 131;
+const OP_I64_OR: u8 = 132;
+const OP_I64_SHL: u8 = 134;
+const OP_I64_SHR_U: u8 = 136;
+const OP_I32_WRAP_I64: u8 = 167;
+const OP_I64_EXTEND_I32_U: u8 = 173;
+const LOW32: u64 = 4294967295;
+const OP_I64_XOR: u8 = 133;
+const SC_I64: u8 = 0;
+const SC_U64: u8 = 1;
+const SC_U32: u8 = 2;
+const SC_U8: u8 = 3;
+const K_NAMED: u8 = 1;
+
+fn i64s(n: u64) -> ChunkSeq[ValTy] {
+    let mut v = ChunkSeq::new[ValTy]();
+    for _i in 0..n {
+        v.push(vt(VT_I64));
+    }
+    v
+}
+
+// `c` loads word `k` (0 low, 1 high) of the block in local `p`.
+fn word(inout c: Code, p: u32, k: u64) {
+    c.get(p);
+    c.op(OP_I32_WRAP_I64);
+    c
+        .load(
+            if k == 0 {
+                0
+            } else {
+                8
+            }
+        );
+}
+
+impl L {
+    // Is `t` a `u128` (an `i128` is refused)?
+    pub fn is_u128(inout self, t: u32) -> bool eff [Fail[WErr]] {
+        let ty = self.cx.default_ty(t);
+        let node = self.cx.types.node(ty);
+        if node.kind != K_NAMED {
+            return false;
+        }
+        if node.name == self.cx.s.i128_ {
+            Fail::raise(werr(K_UNSUPPORTED, U_INTEGER_WIDTH, 248));
+        }
+        node.name == self.cx.s.u128_
+    }
+
+    // A fresh block holding locals `lo`, `hi`.
+    fn wide_block(inout self, lo: u32, hi: u32) -> u32 {
+        let b = self.alloc_block(16);
+        self.store(b, 0, lo);
+        self.store(b, 8, hi);
+        b
+    }
+
+    fn word_of(inout self, p: u32, k: u64) -> u32 {
+        let d = self.local();
+        word(inout self.e.code, p, k);
+        self.e.code.set(d);
+        d
+    }
+
+    // A literal pattern `hi:lo` against the `u128` block `v`, which the
+    // caller pushed: an `i32` condition.
+    pub fn wide_lit_eq(inout self, v: u32, lo: u64, hi: u64) {
+        self.e.code.op(OP_DROP);
+        word(inout self.e.code, v, 0);
+        self.e.code.u64_const(lo);
+        self.e.code.op(OP_I64_EQ);
+        word(inout self.e.code, v, 1);
+        self.e.code.u64_const(hi);
+        self.e.code.op(OP_I64_EQ);
+        self.e.code.op(OP_I32_AND);
+    }
+
+    // A `u128` literal `hi:lo` into `dv`.
+    pub fn wide_const(inout self, dv: u64, lo: u64, hi: u64) {
+        let l = self.local();
+        let h = self.local();
+        self.e.code.u64_const(lo);
+        self.e.code.set(l);
+        self.e.code.u64_const(hi);
+        self.e.code.set(h);
+        let b = self.wide_block(l, h);
+        self.set_value(dv, b);
+    }
+
+    // A unary operation with a `u128` operand or result; false when
+    // neither is one.
+    pub fn wide_unary(inout self, dv: u64, opn: u32, x: u32, from: u32, to: u32)
+        -> bool eff [Fail[WErr]] {
+        let wf = self.is_u128(from);
+        let wt = self.is_u128(to);
+        if self.is_op(opn, "~") && !wf {
+            // bitwise not of an integer word, within its width
+            let sc = self.scalar_of(from);
+            let d = self.local();
+            self.e.code.get(x);
+            if sc == SC_U8 {
+                self.e.code.i64_const(255);
+            } else if sc == SC_U32 {
+                self.e.code.u64_const(LOW32);
+            } else if sc == SC_I64 || sc == SC_U64 {
+                self.e.code.i64_const(-1);
+            } else {
+                Fail::raise(werr(K_UNSUPPORTED, U_OPERATION, 249));
+            }
+            self.e.code.op(OP_I64_XOR);
+            self.e.code.set(d);
+            self.set_value(dv, d);
+            return true;
+        }
+        if !wf && !wt {
+            return false;
+        }
+        if self.is_op(opn, "widen_u128") && wf {
+            self.set_value(dv, x);
+        } else if self.is_op(opn, "widen_u128") {
+            // an unsigned operand is zero-extended in its word
+            let z = self.const_local(0);
+            let b = self.wide_block(x, z);
+            self.set_value(dv, b);
+        } else if self.is_op(opn, "wrapping_u64") && wf && !wt {
+            let lo = self.word_of(x, 0);
+            self.set_value(dv, lo);
+        } else {
+            Fail::raise(werr(K_UNSUPPORTED, U_OPERATION, 249));
+        }
+        true
+    }
+
+    // A binary operation with a `u128` left operand; false otherwise.
+    // `==` and `!=` stay the tuple's.
+    pub fn wide_binary(inout self, dv: u64, opn: u32, x: u32, y: u32, sa: u32, sb: u32)
+        -> bool eff [Fail[WErr]] {
+        if !self.is_u128(sa) || self.is_op(opn, "==") || self.is_op(opn, "!=") {
+            return false;
+        }
+        let checked = self.is_op(opn, "+");
+        if self.is_op(opn, "<<") {
+            if self.is_u128(sb) {
+                // a `u128` amount: its low word, or 128 (out of range) when
+                // the high word is set
+                let k = self.local();
+                word(inout self.e.code, y, 0);
+                self.e.code.i64_const(128);
+                word(inout self.e.code, y, 1);
+                self.e.code.op(OP_I64_EQZ);
+                self.e.code.op(OP_SELECT);
+                self.e.code.set(k);
+                self.wide_shl(dv, x, k);
+            } else {
+                self.wide_shl(dv, x, y);
+            }
+        } else if self.is_op(opn, "wrapping_add") || self.is_op(opn, "+") {
+            self.wide_add(dv, x, y, checked);
+        } else if self.is_op(opn, "wrapping_mul") {
+            let f = self.wide_helper(0);
+            let b = self.alloc_block(16);
+            self.e.code.get(b);
+            self.e.code.get(x);
+            self.e.code.get(y);
+            self.e.code.call(f);
+            self.set_value(dv, b);
+        } else if self.is_op(opn, "/") || self.is_op(opn, "%") {
+            let y0 = self.word_of(y, 0);
+            let y1 = self.word_of(y, 1);
+            self.e.code.get(y0);
+            self.e.code.get(y1);
+            self.e.code.op(OP_I64_OR);
+            self.e.code.op(OP_I64_EQZ);
+            self.e.code.open(OP_IF);
+            let dz = self.cx.s.div_zero;
+            self.raise_runtime_error(dz);
+            self.e.code.op(OP_END);
+            let f = self.wide_helper(1);
+            let b = self.alloc_block(16);
+            self.e.code.get(b);
+            self.e.code.get(x);
+            self.e.code.get(y);
+            self
+                .e
+                .code
+                .i64_const(
+                    if self.is_op(opn, "%") {
+                        1
+                    } else {
+                        0
+                    }
+                );
+            self.e.code.call(f);
+            self.set_value(dv, b);
+        } else if self.is_op(opn, "<")
+            || self.is_op(opn, ">")
+            || self.is_op(opn, "<=")
+            || self.is_op(opn, ">=") {
+            // a < b, with the operands swapped for > and <=, negated for
+            // <= and >=
+            let swap = self.is_op(opn, ">") || self.is_op(opn, "<=");
+            let neg = self.is_op(opn, "<=") || self.is_op(opn, ">=");
+            let (p, q) = if swap {
+                (y, x)
+            } else {
+                (x, y)
+            };
+            let p0 = self.word_of(p, 0);
+            let p1 = self.word_of(p, 1);
+            let q0 = self.word_of(q, 0);
+            let q1 = self.word_of(q, 1);
+            let d = self.local();
+            self.e.code.get(p1);
+            self.e.code.get(q1);
+            self.e.code.op(OP_I64_LT_U);
+            self.e.code.get(p1);
+            self.e.code.get(q1);
+            self.e.code.op(OP_I64_EQ);
+            self.e.code.get(p0);
+            self.e.code.get(q0);
+            self.e.code.op(OP_I64_LT_U);
+            self.e.code.op(OP_I32_AND);
+            self.e.code.op(OP_I32_OR);
+            if neg {
+                self.e.code.op(OP_I32_EQZ);
+            }
+            self.e.code.op(OP_I64_EXTEND_I32_U);
+            self.e.code.set(d);
+            self.set_value(dv, d);
+        } else {
+            Fail::raise(werr(K_UNSUPPORTED, U_OPERATION, 249));
+        }
+        true
+    }
+
+    fn wide_add(inout self, dv: u64, x: u32, y: u32, checked: bool) eff [Fail[WErr]] {
+        let x0 = self.word_of(x, 0);
+        let x1 = self.word_of(x, 1);
+        let y0 = self.word_of(y, 0);
+        let y1 = self.word_of(y, 1);
+        let lo = self.local();
+        let t = self.local();
+        let hi = self.local();
+        self.e.code.get(x0);
+        self.e.code.get(y0);
+        self.e.code.op(OP_I64_ADD);
+        self.e.code.set(lo);
+        self.e.code.get(x1);
+        self.e.code.get(y1);
+        self.e.code.op(OP_I64_ADD);
+        self.e.code.set(t);
+        // hi = t + carry
+        self.e.code.get(t);
+        self.e.code.get(lo);
+        self.e.code.get(x0);
+        self.e.code.op(OP_I64_LT_U);
+        self.e.code.op(OP_I64_EXTEND_I32_U);
+        self.e.code.op(OP_I64_ADD);
+        self.e.code.set(hi);
+        if checked {
+            self.e.code.get(t);
+            self.e.code.get(x1);
+            self.e.code.op(OP_I64_LT_U);
+            self.e.code.get(hi);
+            self.e.code.get(t);
+            self.e.code.op(OP_I64_LT_U);
+            self.e.code.op(OP_I32_OR);
+            self.e.code.open(OP_IF);
+            self.raise_overflow();
+            self.e.code.op(OP_END);
+        }
+        let b = self.wide_block(lo, hi);
+        self.set_value(dv, b);
+    }
+
+    // `x << k`: Fail[ArithOverflow] unless k < 128.
+    fn wide_shl(inout self, dv: u64, x: u32, k: u32) eff [Fail[WErr]] {
+        self.e.code.get(k);
+        self.e.code.u64_const(128);
+        self.e.code.op(OP_I64_GE_U);
+        self.e.code.open(OP_IF);
+        self.raise_overflow();
+        self.e.code.op(OP_END);
+        let x0 = self.word_of(x, 0);
+        let x1 = self.word_of(x, 1);
+        let lo = self.local();
+        let hi = self.local();
+        self.e.code.get(k);
+        self.e.code.u64_const(64);
+        self.e.code.op(OP_I64_GE_U);
+        self.e.code.open(OP_IF);
+        self.e.code.i64_const(0);
+        self.e.code.set(lo);
+        self.e.code.get(x0);
+        self.e.code.get(k);
+        self.e.code.op(OP_I64_SHL);
+        self.e.code.set(hi);
+        self.e.code.op(OP_ELSE);
+        self.e.code.get(x0);
+        self.e.code.get(k);
+        self.e.code.op(OP_I64_SHL);
+        self.e.code.set(lo);
+        // x1 when k is 0, else (x1 << k) | (x0 >> (64 - k)) (a wasm shift
+        // takes its amount modulo 64); `select` gives its first operand
+        // when the condition is nonzero
+        self.e.code.get(x1);
+        self.e.code.get(x1);
+        self.e.code.get(k);
+        self.e.code.op(OP_I64_SHL);
+        self.e.code.get(x0);
+        self.e.code.i64_const(64);
+        self.e.code.get(k);
+        self.e.code.op(OP_I64_SUB);
+        self.e.code.op(OP_I64_SHR_U);
+        self.e.code.op(OP_I64_OR);
+        self.e.code.get(k);
+        self.e.code.op(OP_I64_EQZ);
+        self.e.code.op(OP_SELECT);
+        self.e.code.set(hi);
+        self.e.code.op(OP_END);
+        let b = self.wide_block(lo, hi);
+        self.set_value(dv, b);
+    }
+
+    // Helper `k`: 0 `$u128_mul(dst, a, b)`, 1
+    // `$u128_divrem(dst, a, b, rem)`. Declared once.
+    fn wide_helper(inout self, k: u64) -> u32 {
+        loop {
+            if self.wide_fns.len() >= 2 {
+                break;
+            }
+            self.wide_fns.push(NONE32);
+        }
+        let have = u32_at(in self.wide_fns, k);
+        if have != NONE32 {
+            return have;
+        }
+        let idx = if k == 0 {
+            self.b.declare(in i64s(3), in ChunkSeq::new[ValTy]())
+        } else {
+            self.b.declare(in i64s(4), in ChunkSeq::new[ValTy]())
+        };
+        let ok = self.wide_fns.try_set(k, idx);
+        let mut c = code_new();
+        if k == 0 {
+            mul_code(inout c);
+            self.b.define(idx, in body_n(9, in c));
+        } else {
+            divrem_code(inout c);
+            self.b.define(idx, in body_n(8, in c));
+        }
+        idx
+    }
+}
+
+// `$u128_mul(dst 0, a 1, b 2)`, wrapping; locals a0 3, a1 4, b0 5,
+// b1 6, ll 7, lh 8, hl 9, mid 10, hi 11, (lo in ll).
+fn mul_code(inout c: Code) {
+    word(inout c, 1, 0);
+    c.set(3);
+    word(inout c, 1, 1);
+    c.set(4);
+    word(inout c, 2, 0);
+    c.set(5);
+    word(inout c, 2, 1);
+    c.set(6);
+    // the 128-bit product of a0 and b0 from 32-bit halves
+    half(inout c, 3, false);
+    half(inout c, 5, false);
+    c.op(OP_I64_MUL);
+    c.set(7);
+    half(inout c, 3, false);
+    half(inout c, 5, true);
+    c.op(OP_I64_MUL);
+    c.set(8);
+    half(inout c, 3, true);
+    half(inout c, 5, false);
+    c.op(OP_I64_MUL);
+    c.set(9);
+    c.get(7);
+    c.i64_const(32);
+    c.op(OP_I64_SHR_U);
+    c.get(8);
+    c.u64_const(LOW32);
+    c.op(OP_I64_AND);
+    c.op(OP_I64_ADD);
+    c.get(9);
+    c.u64_const(LOW32);
+    c.op(OP_I64_AND);
+    c.op(OP_I64_ADD);
+    c.set(10);
+    half(inout c, 3, true);
+    half(inout c, 5, true);
+    c.op(OP_I64_MUL);
+    c.get(8);
+    c.i64_const(32);
+    c.op(OP_I64_SHR_U);
+    c.op(OP_I64_ADD);
+    c.get(9);
+    c.i64_const(32);
+    c.op(OP_I64_SHR_U);
+    c.op(OP_I64_ADD);
+    c.get(10);
+    c.i64_const(32);
+    c.op(OP_I64_SHR_U);
+    c.op(OP_I64_ADD);
+    // + a0 * b1 + a1 * b0 (wrapping)
+    c.get(3);
+    c.get(6);
+    c.op(OP_I64_MUL);
+    c.op(OP_I64_ADD);
+    c.get(4);
+    c.get(5);
+    c.op(OP_I64_MUL);
+    c.op(OP_I64_ADD);
+    c.set(11);
+    // dst = lo, hi
+    c.get(0);
+    c.op(OP_I32_WRAP_I64);
+    c.get(7);
+    c.u64_const(LOW32);
+    c.op(OP_I64_AND);
+    c.get(10);
+    c.i64_const(32);
+    c.op(OP_I64_SHL);
+    c.op(OP_I64_OR);
+    c.store(0);
+    c.get(0);
+    c.op(OP_I32_WRAP_I64);
+    c.get(11);
+    c.store(8);
+    c.op(OP_END);
+}
+
+// `c` pushes the low (`high` false) or high 32 bits of local `l`.
+fn half(inout c: Code, l: u32, high: bool) {
+    c.get(l);
+    if high {
+        c.i64_const(32);
+        c.op(OP_I64_SHR_U);
+    } else {
+        c.u64_const(LOW32);
+        c.op(OP_I64_AND);
+    }
+}
+
+// `$u128_divrem(dst 0, a 1, b 2, rem 3)`: restoring division, one bit per
+// step from bit 127 down; dst gets the quotient, or the remainder when
+// `rem` is 1. Locals: i 4, r0 5, r1 6, q0 7, q1 8, bit 9, b0 10, b1 11.
+fn divrem_code(inout c: Code) {
+    word(inout c, 2, 0);
+    c.set(10);
+    word(inout c, 2, 1);
+    c.set(11);
+    c.i64_const(128);
+    c.set(4);
+    c.open(OP_BLOCK);
+    c.open(OP_LOOP);
+    c.get(4);
+    c.op(OP_I64_EQZ);
+    c.br_if(1);
+    c.get(4);
+    c.i64_const(1);
+    c.op(OP_I64_SUB);
+    c.set(4);
+    // bit = (i >= 64 ? a1 >> (i - 64) : a0 >> i) & 1
+    word(inout c, 1, 1);
+    c.get(4);
+    c.op(OP_I64_SHR_U);
+    word(inout c, 1, 0);
+    c.get(4);
+    c.op(OP_I64_SHR_U);
+    c.get(4);
+    c.i64_const(64);
+    c.op(OP_I64_GE_U);
+    c.op(OP_SELECT);
+    c.i64_const(1);
+    c.op(OP_I64_AND);
+    c.set(9);
+    // r = r << 1 | bit
+    c.get(6);
+    c.i64_const(1);
+    c.op(OP_I64_SHL);
+    c.get(5);
+    c.i64_const(63);
+    c.op(OP_I64_SHR_U);
+    c.op(OP_I64_OR);
+    c.set(6);
+    c.get(5);
+    c.i64_const(1);
+    c.op(OP_I64_SHL);
+    c.get(9);
+    c.op(OP_I64_OR);
+    c.set(5);
+    // if r >= b: r -= b, q |= 1 << i
+    c.get(6);
+    c.get(11);
+    c.op(OP_I64_GT_U);
+    c.get(6);
+    c.get(11);
+    c.op(OP_I64_EQ);
+    c.get(5);
+    c.get(10);
+    c.op(OP_I64_GE_U);
+    c.op(OP_I32_AND);
+    c.op(OP_I32_OR);
+    c.open(OP_IF);
+    c.get(6);
+    c.get(11);
+    c.op(OP_I64_SUB);
+    c.get(5);
+    c.get(10);
+    c.op(OP_I64_LT_U);
+    c.op(OP_I64_EXTEND_I32_U);
+    c.op(OP_I64_SUB);
+    c.set(6);
+    c.get(5);
+    c.get(10);
+    c.op(OP_I64_SUB);
+    c.set(5);
+    c.get(4);
+    c.i64_const(64);
+    c.op(OP_I64_GE_U);
+    c.open(OP_IF);
+    c.get(8);
+    c.i64_const(1);
+    c.get(4);
+    c.op(OP_I64_SHL);
+    c.op(OP_I64_OR);
+    c.set(8);
+    c.op(OP_ELSE);
+    c.get(7);
+    c.i64_const(1);
+    c.get(4);
+    c.op(OP_I64_SHL);
+    c.op(OP_I64_OR);
+    c.set(7);
+    c.op(OP_END);
+    c.op(OP_END);
+    c.br(0);
+    c.op(OP_END);
+    c.op(OP_END);
+    c.get(0);
+    c.op(OP_I32_WRAP_I64);
+    c.get(5);
+    c.get(7);
+    c.get(3);
+    c.op(OP_I32_WRAP_I64);
+    c.op(OP_SELECT);
+    c.store(0);
+    c.get(0);
+    c.op(OP_I32_WRAP_I64);
+    c.get(6);
+    c.get(8);
+    c.get(3);
+    c.op(OP_I32_WRAP_I64);
+    c.op(OP_SELECT);
+    c.store(8);
+    c.op(OP_END);
+}

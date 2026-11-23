@@ -20,6 +20,10 @@ mod vesper_hybrid;
 #[path = "driver.rs"]
 mod driver;
 
+// The host of the command layers the driver hands on (SH5 lane 13, #1336).
+#[path = "commands.rs"]
+mod commands;
+
 /// The C entry point: the Vesper driver.
 #[unsafe(export_name = "main")]
 extern "C" fn hybrid_main(

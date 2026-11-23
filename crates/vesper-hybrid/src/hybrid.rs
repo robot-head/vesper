@@ -1556,6 +1556,10 @@ extern "C" fn report() {
         "vesper-hybrid: doc answered {} calls from Vesper",
         DOC_CALLS.load(Relaxed)
     );
+    eprintln!(
+        "vesper-hybrid: the command layers printed {} times from Vesper",
+        crate::commands::PRINTS.load(Relaxed)
+    );
 }
 
 // Run `install` before `main` (the platform's static-constructor section).

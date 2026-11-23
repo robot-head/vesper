@@ -139,12 +139,14 @@ fn loop_refusal(e: &WasmError) -> bool {
 }
 
 /// Rust's refusal of an operation: loops, and the sequence, string and
-/// integer conversion operations the port lowers (#1506).
+/// integer conversion operations the port lowers (#1506), and of `u128`,
+/// which the port lowers as a 16-byte block (#1508).
 fn operation_refusal(e: &WasmError) -> bool {
     matches!(
         e,
         WasmError::Unsupported {
-            construct: wasm_backend::Unsupported::Operation,
+            construct: wasm_backend::Unsupported::Operation
+                | wasm_backend::Unsupported::IntegerWidth,
             ..
         }
     )

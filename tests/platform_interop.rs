@@ -894,6 +894,35 @@ fn test_runner_refuses_a_called_assembly_backed_library() {
 
 // ---- Per-target .vsys constants (#1504 part 3) ----------------------------
 
+#[test]
+fn reading_constants_does_not_load_or_link_the_library() {
+    let t = Temp::new("consts-only");
+    let dir = app(
+        &t,
+        "vsys = [\"sys/flags.vsys\"]",
+        "const COMBINED: i32 = Flags::O_CREAT | 4;\n\
+         pub fn main() -> i32 { match COMBINED { Flags::O_CREAT => 0, _ => COMBINED } }\n\
+         pub fn test_flags() -> bool { main() == 68 }\n",
+        "",
+    );
+    for decl in ["", "fn unused() -> ForeignVal[i32];"] {
+        t.write("app/sys/flags.vsys", &format!(
+            "sys library Flags ({HEADER}, link = \"dynamic\", name = \"vesper_absent_flags_1581\", {ARTIFACT}) {{ const O_CREAT: i32 = 0o100; {decl} }}"
+        ));
+        run(vesper().arg("check").arg(&dir));
+        assert_eq!(run(vesper().arg("run").arg(&dir)).trim(), "68");
+        run(vesper().arg("test").arg(&dir));
+        if host_jit() {
+            assert_eq!(run(vesper().arg("jit").arg(&dir)).trim(), "68");
+            run(vesper()
+                .arg("build")
+                .arg(&dir)
+                .arg("-o")
+                .arg(t.0.join("flags.bin")));
+        }
+    }
+}
+
 fn flags_app(t: &Temp, source: &str) -> PathBuf {
     for (os, o_creat, neg, big) in [
         ("linux", "0o100", "-7", "0x10_00"),
@@ -1042,6 +1071,27 @@ fn vsys_constant_types_and_misuses_are_checked() {
     let loaded = vesper::packages::load(&dir).unwrap();
     let imports = loaded.imports(None).unwrap();
     assert!(ffi_lowering::check_module(&loaded.module, &imports).is_err());
+
+    // Each value fits the scrutinee, but its declared integer kind must match.
+    for (ty, pattern, diagnostic) in [
+        ("u8", "Flags::O_CREAT", "expected u8, found i32"),
+        (
+            "(u32, u8)",
+            "(Flags::O_CREAT, _)",
+            "expected u32, found i32",
+        ),
+        ("u64", "Flags::PAGE", "expected u64, found usize"),
+    ] {
+        let source = format!("fn probe(x: {ty}) -> i32 {{ match x {{ {pattern} => 1, _ => 0 }} }}");
+        let error =
+            ffi_lowering::check_source(&source, &imports).expect_err("pattern type mismatch");
+        assert!(
+            error.diagnostics.iter().any(|d| d.code == "E0200"
+                && d.message == diagnostic
+                && source[d.span.clone()].starts_with("Flags::")),
+            "{error:?}"
+        );
+    }
 
     // Calling a constant as a function is rejected.
     let dir2 = flags_app(&t, "pub fn main() -> i32 {\n    Flags::O_CREAT(1)\n}\n");

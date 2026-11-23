@@ -3102,16 +3102,15 @@ impl<M: Module> Codegen<'_, '_, M> {
                 },
             });
         }
-        let join = self.b.create_block();
-        let layout = Layout::of(self.world, result)?;
-        self.b.append_block_param(
-            join,
+        let join_ty = {
+            let layout = Layout::of(self.world, result)?;
             if layout.aggregate() {
                 self.m.target_config().pointer_type()
             } else {
                 scalar(result, &[])?
-            },
-        );
+            }
+        };
+        let join = self.control_join_block(join_ty);
         let descriptors = self.closures.clone();
         let targets = self.info(tag).targets;
         let scope = self.vars.clone();
@@ -3155,20 +3154,19 @@ impl<M: Module> Codegen<'_, '_, M> {
             };
             self.inline_depth -= 1;
             let value = value?;
-            self.jump(join, &[value.into()]);
+            self.control_jump(join, &[value.into()]);
             branches += 1;
             self.vars = scope.clone();
             self.local_types = types_scope.clone();
             self.generic_vars = generic_scope.clone();
             self.capabilities = caps_scope.clone();
-            self.b.switch_to_block(no);
+            self.control_switch_block(no);
         }
         self.dispatch_trap(3);
         if branches == 0 {
             return Err("native call has no statically known closure target".into());
         }
-        self.b.switch_to_block(join);
-        Ok(self.b.block_params(join)[0])
+        Ok(self.control_switch_param(join, 0))
     }
     fn invoke_continuation(
         &mut self,
@@ -3194,13 +3192,22 @@ impl<M: Module> Codegen<'_, '_, M> {
             // so the rest returns straight to whoever the clause returns to.
             // Nothing is saved, so the operation may run again (from a loop
             // of the handled body) before this resumption returns.
-            self.jump(
-                entry,
-                &values
-                    .into_iter()
-                    .map(ir::BlockArg::from)
-                    .collect::<Vec<_>>(),
-            );
+            let block_args = values
+                .iter()
+                .copied()
+                .map(ir::BlockArg::from)
+                .collect::<Vec<_>>();
+            self.edge_info(entry, &block_args);
+            let mut req = vec![
+                u64::from(entry.as_u32()),
+                crate::codegen_swap::ty_code(result_type),
+            ];
+            req.extend(values.iter().map(|v| crate::codegen_swap::word(*v)));
+            if let Some([res]) = self.control_words(crate::codegen_swap::control::TAIL_RESUME, &req)
+            {
+                return Ok(ir::Value::from_u32(res as u32));
+            }
+            self.b.ins().jump(entry, &block_args);
             let unreachable = self.b.create_block();
             self.b.append_block_param(unreachable, result_type);
             self.b.switch_to_block(unreachable);
@@ -3218,14 +3225,12 @@ impl<M: Module> Codegen<'_, '_, M> {
         let (saved, returned, selected) = self.resume_save(selector, result_type, index);
         control.returns.borrow_mut().push(returned);
         self.def_var(control.selector, selected);
-        self.jump(
-            entry,
-            &values
-                .into_iter()
-                .map(ir::BlockArg::from)
-                .collect::<Vec<_>>(),
-        );
-        self.b.switch_to_block(returned);
+        let block_args = values
+            .into_iter()
+            .map(ir::BlockArg::from)
+            .collect::<Vec<_>>();
+        self.control_jump(entry, &block_args);
+        self.control_switch_block(returned);
         let selector = self.resume_restore(saved);
         self.def_var(control.selector, selector);
         Ok(self.b.block_params(returned)[0])
@@ -3240,18 +3245,14 @@ impl<M: Module> Codegen<'_, '_, M> {
             .clone();
         let result = crate::numeric::default_type(&substitute(&graph.result, &self.generic_vars));
         let layout = Layout::of(self.world, &result)?;
-        let join = self.b.create_block();
-        self.b.append_block_param(
-            join,
-            if layout.aggregate() {
-                self.m.target_config().pointer_type()
-            } else {
-                scalar(&result, &[])?
-            },
-        );
+        let join_ty = if layout.aggregate() {
+            self.m.target_config().pointer_type()
+        } else {
+            scalar(&result, &[])?
+        };
+        let join = self.control_join_block(join_ty);
         self.ir_graph(&graph, None, Some(join))?;
-        self.b.switch_to_block(join);
-        Ok(self.b.block_params(join)[0])
+        Ok(self.control_switch_param(join, 0))
     }
     fn invoke_closure_body(
         &mut self,
@@ -3299,8 +3300,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                     value
                 }
                 CaptureHome::Slot(slot) => {
-                    let pointer_type = self.m.target_config().pointer_type();
-                    let ptr = self.b.ins().stack_addr(pointer_type, slot, 0);
+                    let ptr = self.control_stack_addr(slot, 0);
                     self.write_info(ptr, info.clone());
                     let layout = Layout::of(self.world, ty)?;
                     let value = self.load(ptr, ty)?;
@@ -3334,16 +3334,15 @@ impl<M: Module> Codegen<'_, '_, M> {
         let ClosureTarget::Body { result, .. } = &closure.target else {
             unreachable!()
         };
-        let join = self.b.create_block();
-        let layout = Layout::of(self.world, result)?;
-        self.b.append_block_param(
-            join,
+        let join_ty = {
+            let layout = Layout::of(self.world, result)?;
             if layout.aggregate() {
                 self.m.target_config().pointer_type()
             } else {
                 scalar(result, &[])?
-            },
-        );
+            }
+        };
+        let join = self.control_join_block(join_ty);
         let graph = self
             .program
             .functions
@@ -3354,8 +3353,7 @@ impl<M: Module> Codegen<'_, '_, M> {
         let graph_res = self.ir_graph(&graph, None, Some(join));
         self.in_fip_fn = fip_scope;
         graph_res?;
-        self.b.switch_to_block(join);
-        let result = self.b.block_params(join)[0];
+        let result = self.control_switch_param(join, 0);
         for (variable, ptr, ty) in restores {
             let value = self.load(ptr, &ty)?;
             self.def_var(variable, value);
@@ -5904,7 +5902,11 @@ impl<M: Module> Codegen<'_, '_, M> {
         )
     }
     /// The words of a `control` answer that must have `n` of them.
-    fn control_words<const N: usize>(&mut self, op: u32, args: &[u64]) -> Option<[u64; N]> {
+    pub(super) fn control_words<const N: usize>(
+        &mut self,
+        op: u32,
+        args: &[u64],
+    ) -> Option<[u64; N]> {
         let r = self.swap_control(op, args)?;
         match <[u64; N]>::try_from(r.as_slice()) {
             Ok(words) => Some(words),
@@ -5916,6 +5918,78 @@ impl<M: Module> Codegen<'_, '_, M> {
                 None
             }
         }
+    }
+    /// `JOIN_BLOCK`: create a block with one parameter of `param_ty`.
+    pub(super) fn control_join_block(&mut self, param_ty: ir::Type) -> ir::Block {
+        if let Some([blk]) = self.control_words(
+            crate::codegen_swap::control::JOIN_BLOCK,
+            &[crate::codegen_swap::ty_code(param_ty)],
+        ) {
+            return ir::Block::from_u32(blk as u32);
+        }
+        let join = self.b.create_block();
+        self.b.append_block_param(join, param_ty);
+        join
+    }
+    /// `SWITCH_PARAM`: switch to `block` and read parameter `index`.
+    pub(super) fn control_switch_param(&mut self, block: ir::Block, index: usize) -> ir::Value {
+        if let Some([v]) = self.control_words(
+            crate::codegen_swap::control::SWITCH_PARAM,
+            &[u64::from(block.as_u32()), index as u64],
+        ) {
+            return ir::Value::from_u32(v as u32);
+        }
+        self.b.switch_to_block(block);
+        self.b.block_params(block)[index]
+    }
+    /// `SWITCH_BLOCK`: switch emission to `block`.
+    pub(super) fn control_switch_block(&mut self, block: ir::Block) {
+        if self
+            .control_words::<0>(
+                crate::codegen_swap::control::SWITCH_BLOCK,
+                &[u64::from(block.as_u32())],
+            )
+            .is_some()
+        {
+            return;
+        }
+        self.b.switch_to_block(block);
+    }
+    /// `JUMP_ARGS`: propagate `edge_info` and emit `jump block(args)`.
+    pub(super) fn control_jump(&mut self, block: ir::Block, args: &[ir::BlockArg]) {
+        self.edge_info(block, args);
+        if crate::codegen_swap::hook(crate::codegen_swap::Family::Control).is_some()
+            && let Some(values) = args
+                .iter()
+                .map(|a| a.as_value().map(crate::codegen_swap::word))
+                .collect::<Option<Vec<_>>>()
+        {
+            let mut req = Vec::with_capacity(1 + values.len());
+            req.push(u64::from(block.as_u32()));
+            req.extend(values);
+            if self
+                .control_words::<0>(crate::codegen_swap::control::JUMP_ARGS, &req)
+                .is_some()
+            {
+                return;
+            }
+        }
+        self.b.ins().jump(block, args);
+    }
+    /// `STACK_ADDR`: address of `slot + offset`.
+    pub(super) fn control_stack_addr(&mut self, slot: ir::StackSlot, offset: i32) -> ir::Value {
+        if let Some([ptr]) = self.control_words(
+            crate::codegen_swap::control::STACK_ADDR,
+            &[u64::from(slot.as_u32()), offset as i64 as u64],
+        ) {
+            return ir::Value::from_u32(ptr as u32);
+        }
+        let pointer_type = self.m.target_config().pointer_type();
+        self.b.ins().stack_addr(pointer_type, slot, offset)
+    }
+    /// Make `dispatch_trap` visible to `dyn_trait::native`.
+    pub(super) fn control_trap(&mut self, code: u8) {
+        self.dispatch_trap(code);
     }
     /// A closure, function or continuation tag constant.
     fn control_tag(&mut self, id: usize) -> ir::Value {
@@ -6966,16 +7040,26 @@ impl<M: Module> Codegen<'_, '_, M> {
             } => {
                 let output_type = self.ty(e);
                 let output_layout = Layout::of(self.world, &output_type)?;
-                let exit = self.b.create_block();
-                self.b.append_block_param(
-                    exit,
-                    if output_layout.aggregate() {
-                        self.m.target_config().pointer_type()
-                    } else {
-                        scalar(&output_type, &[])?
-                    },
-                );
-                let control = {
+                let param_ty = if output_layout.aggregate() {
+                    self.m.target_config().pointer_type()
+                } else {
+                    scalar(&output_type, &[])?
+                };
+                let (exit, dispatch, selector) = if let Some([exit, dispatch, selector, zero]) =
+                    self.control_words(
+                        crate::codegen_swap::control::HANDLE_SETUP,
+                        &[crate::codegen_swap::ty_code(param_ty)],
+                    ) {
+                    let exit = ir::Block::from_u32(exit as u32);
+                    let dispatch = ir::Block::from_u32(dispatch as u32);
+                    let selector = Variable::from_u32(selector as u32);
+                    let zero = ir::Value::from_u32(zero as u32);
+                    self.note_def(selector, zero);
+                    self.def_homes(selector, zero);
+                    (exit, dispatch, selector)
+                } else {
+                    let exit = self.b.create_block();
+                    self.b.append_block_param(exit, param_ty);
                     let dispatch = self.b.create_block();
                     self.b.append_block_param(
                         dispatch,
@@ -6984,13 +7068,14 @@ impl<M: Module> Codegen<'_, '_, M> {
                     let selector = self.b.declare_var(types::I64);
                     let zero = self.zero();
                     self.def_var(selector, zero);
-                    HandlerControl {
-                        selector,
-                        dispatch,
-                        returns: Rc::new(RefCell::new(vec![exit])),
-                        cycle_depth: self.cycle_depth,
-                        exits_depth: self.exits.len(),
-                    }
+                    (exit, dispatch, selector)
+                };
+                let control = HandlerControl {
+                    selector,
+                    dispatch,
+                    returns: Rc::new(RefCell::new(vec![exit])),
+                    cycle_depth: self.cycle_depth,
+                    exits_depth: self.exits.len(),
                 };
                 let captured = self.vars.clone();
                 let captured_types = self.local_types.clone();
@@ -7084,19 +7169,17 @@ impl<M: Module> Codegen<'_, '_, M> {
                     result
                 };
                 {
-                    self.jump(control.dispatch, &[result.into()]);
-                    self.b.switch_to_block(control.dispatch);
-                    let output = self.b.block_params(control.dispatch)[0];
+                    self.control_jump(control.dispatch, &[result.into()]);
+                    let output = self.control_switch_param(control.dispatch, 0);
                     let selector = self.use_var(control.selector);
                     for (index, target) in control.returns.borrow().iter().enumerate() {
                         self.return_to(selector, index, *target, output);
                     }
                     self.dispatch_trap(4);
                 }
-                self.b.switch_to_block(exit);
                 self.vars = captured;
                 self.local_types = captured_types;
-                self.b.block_params(exit)[0]
+                self.control_switch_param(exit, 0)
             }
         };
         let ty = self.ty(e);
@@ -7689,14 +7772,22 @@ impl<M: Module> Codegen<'_, '_, M> {
         if fail_instances(f).count() > 1 {
             // Several instances: one test of the status first, so the
             // success path takes a single branch whatever the row's size.
-            let failed = self.b.ins().icmp_imm(IntCC::NotEqual, tag, 0);
-            let bad = self.b.create_block();
-            let good = self.b.create_block();
-            self.branch(failed, bad, &[], good, &[]);
-            self.b.switch_to_block(bad);
+            let good = if let Some([_bad, good]) = self.control_words(
+                crate::codegen_swap::control::RERAISE_GUARD,
+                &[crate::codegen_swap::word(tag)],
+            ) {
+                ir::Block::from_u32(good as u32)
+            } else {
+                let failed = self.b.ins().icmp_imm(IntCC::NotEqual, tag, 0);
+                let bad = self.b.create_block();
+                let good = self.b.create_block();
+                self.branch(failed, bad, &[], good, &[]);
+                self.b.switch_to_block(bad);
+                good
+            };
             self.reraise_each(f, record, tag)?;
-            self.jump(good, &[]);
-            self.b.switch_to_block(good);
+            self.control_jump(good, &[]);
+            self.control_switch_block(good);
             return Ok(());
         }
         self.reraise_each(f, record, tag)
@@ -7708,16 +7799,35 @@ impl<M: Module> Codegen<'_, '_, M> {
         tag: ir::Value,
     ) -> Result<(), String> {
         for (index, effect) in fail_instances(f).enumerate() {
-            let failed = self.b.ins().icmp_imm(IntCC::Equal, tag, index as i64 + 1);
-            let bad = self.b.create_block();
-            let good = self.b.create_block();
-            self.branch(failed, bad, &[], good, &[]);
-            self.b.switch_to_block(bad);
-            let payload = self.offset(record, 8);
+            let (good, payload) = if let Some([_bad, good, payload]) = self.control_words(
+                crate::codegen_swap::control::RERAISE_EACH,
+                &[
+                    crate::codegen_swap::word(tag),
+                    (index as i64 + 1) as u64,
+                    crate::codegen_swap::word(record),
+                ],
+            ) {
+                let payload = ir::Value::from_u32(payload as u32);
+                let info = self
+                    .info(record)
+                    .fields
+                    .get(&8)
+                    .cloned()
+                    .unwrap_or_default();
+                self.infos.insert(payload, info);
+                (ir::Block::from_u32(good as u32), payload)
+            } else {
+                let failed = self.b.ins().icmp_imm(IntCC::Equal, tag, index as i64 + 1);
+                let bad = self.b.create_block();
+                let good = self.b.create_block();
+                self.branch(failed, bad, &[], good, &[]);
+                self.b.switch_to_block(bad);
+                (good, self.offset(record, 8))
+            };
             let error = self.load(payload, &effect.args[0])?;
             self.perform_values("Fail", None, &effect.args, "raise", vec![error], vec![])?;
-            self.jump(good, &[]);
-            self.b.switch_to_block(good);
+            self.control_jump(good, &[]);
+            self.control_switch_block(good);
         }
         Ok(())
     }
@@ -8426,17 +8536,25 @@ impl<M: Module> Codegen<'_, '_, M> {
     /// was done already (the block variable holds 0), then empties it.
     fn free_sink_block(&mut self, lent: LentSinkBlock) -> Result<(), String> {
         let block = self.use_var(lent.block);
-        let live = self.b.ins().icmp_imm(IntCC::NotEqual, block, 0);
-        let free = self.b.create_block();
-        let done = self.b.create_block();
-        self.branch(live, free, &[], done, &[]);
-        self.b.switch_to_block(free);
+        let done = if let Some([_free, done]) = self.control_words(
+            crate::codegen_swap::control::FREE_SINK_BRANCH,
+            &[crate::codegen_swap::word(block)],
+        ) {
+            ir::Block::from_u32(done as u32)
+        } else {
+            let live = self.b.ins().icmp_imm(IntCC::NotEqual, block, 0);
+            let free = self.b.create_block();
+            let done = self.b.create_block();
+            self.branch(live, free, &[], done, &[]);
+            self.b.switch_to_block(free);
+            done
+        };
         let pair = self.use_var(lent.pair);
         dyn_native::emit_drop_object(&mut self.b, self.m, pair)?;
         self.fip_box_free(block)?;
-        self.jump(done, &[]);
-        self.b.switch_to_block(done);
-        let zero = self.zero();
+        self.control_jump(done, &[]);
+        self.control_switch_block(done);
+        let zero = self.control_tag(0);
         self.def_var(lent.block, zero);
         Ok(())
     }
@@ -8679,17 +8797,48 @@ impl<M: Module> Codegen<'_, '_, M> {
             .get(index as usize)
             .cloned()
             .ok_or("native failure exit names an unknown instance")?;
-        let tag = self.b.ins().iconst(types::I64, index + 1);
-        if !self.own_abi.status {
-            self.b.ins().store(ir::MemFlags::new(), tag, record, 0);
-        }
-        let payload = self.offset(record, 8);
+        let (tag, payload) = if let Some([tag, payload]) = self.control_words(
+            crate::codegen_swap::control::FAIL_EXIT_PREP,
+            &[
+                u64::from(self.own_abi.status),
+                crate::codegen_swap::word(record),
+                (index + 1) as u64,
+            ],
+        ) {
+            let tag = ir::Value::from_u32(tag as u32);
+            let payload = ir::Value::from_u32(payload as u32);
+            let info = self
+                .info(record)
+                .fields
+                .get(&8)
+                .cloned()
+                .unwrap_or_default();
+            self.infos.insert(payload, info);
+            (tag, payload)
+        } else {
+            let tag = self.b.ins().iconst(types::I64, index + 1);
+            if !self.own_abi.status {
+                self.b.ins().store(ir::MemFlags::new(), tag, record, 0);
+            }
+            let payload = self.offset(record, 8);
+            (tag, payload)
+        };
         self.store(payload, values[0], &ty)?;
         self.box_drop_abort(0)?;
         self.seq_drop_exit(0)?;
         self.free_sink_blocks_within(None)?;
         let returns = self.b.func.signature.returns[0].value_type;
         let placeholder = self.scalar_zero(returns);
+        if let Some([z]) = self.control_words(
+            crate::codegen_swap::control::FAIL_EXIT_RETURN,
+            &[
+                u64::from(self.own_abi.status),
+                crate::codegen_swap::word(tag),
+                crate::codegen_swap::word(placeholder),
+            ],
+        ) {
+            return Ok(ir::Value::from_u32(z as u32));
+        }
         if self.own_abi.status {
             // The register-status ABI: the status is the second return value.
             self.b.ins().return_(&[placeholder, tag]);
@@ -8875,22 +9024,34 @@ impl<M: Module> Codegen<'_, '_, M> {
                 h.state_type.as_ref().unwrap(),
             )?;
         }
-        let entry = self.b.create_block();
         let mut params = vec![(Pass::Sink, substitute(&sig.result, &substitutions))];
         if let Some(ty) = &h.state_type {
             params.push((Pass::Sink, ty.clone()));
         }
+        let mut param_tys = Vec::with_capacity(params.len());
         for (_, ty) in &params {
             let layout = Layout::of(self.world, ty)?;
-            self.b.append_block_param(
-                entry,
-                if layout.aggregate() {
-                    self.m.target_config().pointer_type()
-                } else {
-                    scalar(ty, &[])?
-                },
-            );
+            param_tys.push(if layout.aggregate() {
+                self.m.target_config().pointer_type()
+            } else {
+                scalar(ty, &[])?
+            });
         }
+        let req = param_tys
+            .iter()
+            .map(|t| crate::codegen_swap::ty_code(*t))
+            .collect::<Vec<_>>();
+        let entry = if let Some([entry]) =
+            self.control_words(crate::codegen_swap::control::HANDLER_ENTRY, &req)
+        {
+            ir::Block::from_u32(entry as u32)
+        } else {
+            let entry = self.b.create_block();
+            for ty in param_tys {
+                self.b.append_block_param(entry, ty);
+            }
+            entry
+        };
         if let PatternKind::Bind(k) = &continuation_pattern.kind {
             let graph = &self.program.functions
                 [&crate::ir::nested_name("handler_clause", &clause.body.span)];
@@ -8930,7 +9091,7 @@ impl<M: Module> Codegen<'_, '_, M> {
         // Leaving the handled body frees the blocks lent inside it (a
         // resumed body has freed them already).
         self.free_sink_blocks_within(Some(index))?;
-        self.jump(h.control.dispatch, &[output.into()]);
+        self.control_jump(h.control.dispatch, &[output.into()]);
         for (exit, drops) in self
             .exits
             .iter_mut()
@@ -8939,11 +9100,10 @@ impl<M: Module> Codegen<'_, '_, M> {
         {
             exit.drops = drops;
         }
-        self.b.switch_to_block(entry);
+        let result = self.control_switch_param(entry, 0);
         if let Some(state) = h.state {
             self.def_var(state, self.b.block_params(entry)[1]);
         }
-        let result = self.b.block_params(entry)[0];
         self.handlers.extend(saved);
         self.vars = old_vars;
         self.local_types = old_types;
@@ -8962,6 +9122,25 @@ impl<M: Module> Codegen<'_, '_, M> {
     /// Return `value` from the function being compiled, with a zero
     /// (success) status when it uses the register-status Fail ABI.
     fn return_value(&mut self, value: ir::Value) {
+        let (has_buffer, buffer, words) = match (self.own_abi.result_words, self.result_buffer) {
+            (Some(words), Some(buffer)) => (1u64, crate::codegen_swap::word(buffer), words as u64),
+            _ => (0u64, 0u64, 0u64),
+        };
+        if self
+            .control_words::<0>(
+                crate::codegen_swap::control::RETURN_VALUES,
+                &[
+                    has_buffer,
+                    buffer,
+                    words,
+                    u64::from(self.own_abi.status),
+                    crate::codegen_swap::word(value),
+                ],
+            )
+            .is_some()
+        {
+            return;
+        }
         if let (Some(words), Some(buffer)) = (self.own_abi.result_words, self.result_buffer) {
             let mut out = vec![];
             for word in 0..words {
@@ -8983,6 +9162,19 @@ impl<M: Module> Codegen<'_, '_, M> {
         }
     }
     fn abort_on_nonzero_status(&mut self, status: ir::Value) {
+        if let Some([_bad, good]) = self.control_words(
+            crate::codegen_swap::control::TRACE_ABORT,
+            &[
+                crate::codegen_swap::word(status),
+                u64::from(self.trace_fail.is_some()),
+                self.trace_fail.map_or(0, crate::codegen_swap::word),
+            ],
+        ) {
+            let good = ir::Block::from_u32(good as u32);
+            self.return_trace_placeholder();
+            self.control_switch_block(good);
+            return;
+        }
         let failed = self.b.ins().icmp_imm(IntCC::NotEqual, status, 0);
         let bad = self.b.create_block();
         let good = self.b.create_block();
@@ -8997,6 +9189,15 @@ impl<M: Module> Codegen<'_, '_, M> {
     }
     fn check_trace_failed(&mut self) {
         if let Some(flag) = self.trace_fail {
+            if let Some([_bad, good]) = self.control_words(
+                crate::codegen_swap::control::TRACE_CHECK,
+                &[crate::codegen_swap::word(flag)],
+            ) {
+                let good = ir::Block::from_u32(good as u32);
+                self.return_trace_placeholder();
+                self.control_switch_block(good);
+                return;
+            }
             let flagged = self.b.ins().load(types::I64, ir::MemFlags::new(), flag, 0);
             let cond = self.b.ins().icmp_imm(IntCC::NotEqual, flagged, 0);
             let bad = self.b.create_block();
@@ -9008,20 +9209,30 @@ impl<M: Module> Codegen<'_, '_, M> {
         }
     }
     fn trace_call(&mut self, symbol: &str, args: &[ir::Value]) -> Result<ir::Value, String> {
-        let mut signature = self.m.make_signature();
-        for arg in args {
-            signature
-                .params
-                .push(AbiParam::new(self.b.func.dfg.value_type(*arg)));
-        }
-        signature.returns.push(AbiParam::new(types::I64));
-        let id = self
-            .m
-            .declare_function(symbol, Linkage::Import, &signature)
-            .map_err(|e| e.to_string())?;
-        let reference = self.m.declare_func_in_func(id, self.b.func);
-        let call = self.b.ins().call(reference, args);
-        let status = self.b.inst_results(call)[0];
+        let mut req = Vec::with_capacity(2 + args.len() + symbol.len().div_ceil(8));
+        req.push(args.len() as u64);
+        req.extend(args.iter().map(|a| crate::codegen_swap::word(*a)));
+        crate::codegen_swap::pack_bytes_words(symbol.as_bytes(), &mut req);
+        let status = if let Some([status]) =
+            self.control_words(crate::codegen_swap::control::TRACE_CALL, &req)
+        {
+            ir::Value::from_u32(status as u32)
+        } else {
+            let mut signature = self.m.make_signature();
+            for arg in args {
+                signature
+                    .params
+                    .push(AbiParam::new(self.b.func.dfg.value_type(*arg)));
+            }
+            signature.returns.push(AbiParam::new(types::I64));
+            let id = self
+                .m
+                .declare_function(symbol, Linkage::Import, &signature)
+                .map_err(|e| e.to_string())?;
+            let reference = self.m.declare_func_in_func(id, self.b.func);
+            let call = self.b.ins().call(reference, args);
+            self.b.inst_results(call)[0]
+        };
         self.abort_on_nonzero_status(status);
         Ok(status)
     }
@@ -9313,17 +9524,13 @@ fn declare_or_define_eq_helper<M: Module>(
     Ok(id)
 }
 
-fn emit_fip_box_free<M: Module>(
-    b: &mut FunctionBuilder<'_>,
-    m: &mut M,
-    ptr: ir::Value,
-) -> Result<(), String> {
+pub(super) fn fip_box_free_id<M: Module>(m: &mut M) -> Result<FuncId, String> {
     let jit = std::any::type_name::<M>().contains("JITModule");
-    let id = if jit {
+    if jit {
         let mut sig = m.make_signature();
         sig.params.push(AbiParam::new(types::I64));
         m.declare_function("vesper_box_free", Linkage::Import, &sig)
-            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())
     } else {
         if m.isa().triple().operating_system == target_lexicon::OperatingSystem::None_ {
             return Err(
@@ -9331,8 +9538,16 @@ fn emit_fip_box_free<M: Module>(
                     .into(),
             );
         }
-        crate::fip::aot_runtime::declare_or_define_free(m)?
-    };
+        crate::fip::aot_runtime::declare_or_define_free(m)
+    }
+}
+
+fn emit_fip_box_free<M: Module>(
+    b: &mut FunctionBuilder<'_>,
+    m: &mut M,
+    ptr: ir::Value,
+) -> Result<(), String> {
+    let id = fip_box_free_id(m)?;
     let reference = m.declare_func_in_func(id, b.func);
     b.ins().call(reference, &[ptr]);
     Ok(())

@@ -844,6 +844,8 @@ fn pattern(inout r: R, p: u32) {
                                 hi: 0
                             }
                         );
+                    buf_name(inout r, wrapping_u32(widen_u64(c.scalar)));
+                    let scalar = intern_buf(inout r);
                     let ok = r
                         .ast
                         .pats
@@ -854,8 +856,8 @@ fn pattern(inout r: R, p: u32) {
                                 start: n.start,
                                 end: n.end,
                                 a: lit.raw(),
-                                b: 0,
-                                c: 0
+                                b: scalar,
+                                c: NONE
                             }
                         );
                     return;

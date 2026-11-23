@@ -4831,7 +4831,9 @@ impl Checker<'_> {
                 if let Literal::String(s) = l {
                     self.string_capacity = self.string_capacity.max(s.len());
                 }
-                let lt = if matches!(l, Literal::Float(_))
+                let lt = if let Some(kind) = p.integer_kind {
+                    kind.ty()
+                } else if matches!(l, Literal::Float(_))
                     && crate::numeric::FloatKind::from_type(ty)
                         == Some(crate::numeric::FloatKind::F32)
                 {
@@ -5793,6 +5795,7 @@ fn matrix_covered(world: &World, rows: &[Vec<Pattern>], types: &[Type], depth: u
                 fields
                     .iter()
                     .map(|_| Pattern {
+                        integer_kind: None,
                         kind: PatternKind::Wild,
                         span: p.span.clone(),
                     })

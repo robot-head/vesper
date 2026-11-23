@@ -198,6 +198,22 @@ pub fn var_at_bytes(i: u64) -> Option[ChunkSeq[u8]] eff [Ffi[StdEnv]] {
 
 // The `IoError` kind of the C library's `errno` value `e`.
 fn errno_kind(e: u32) -> u32 {
+    if StdEnv::OS == 3 {
+        return match e {
+            2 => 1,
+            3 => 1,
+            5 => 2,
+            8 => 12,
+            14 => 12,
+            50 => 11,
+            80 => 3,
+            87 => 7,
+            145 => 6,
+            183 => 3,
+            267 => 4,
+            _ => 13,
+        };
+    }
     let mac = StdEnv::OS == 2;
     match e {
         1 => 2,

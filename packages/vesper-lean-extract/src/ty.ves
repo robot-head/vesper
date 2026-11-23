@@ -4,7 +4,9 @@
 // caller checked (`emit_ty`).
 
 use @vesper/check-data::types::{
-    Types
+    Types,
+    TyKind,
+    TyPass
 };
 use @vesper/check-data::util::{
     add,
@@ -19,13 +21,6 @@ use self::build::{
     T_INFER,
     T_PRODUCT
 };
-
-const K_LIT: u8 = 0;
-const K_NAMED: u8 = 1;
-const K_TUPLE: u8 = 2;
-const K_FN: u8 = 3;
-const K_ROW: u8 = 4;
-const P_INOUT: u8 = 1;
 
 // Error codes of `ty_error`.
 pub const E_NONE: u64 = 0;
@@ -107,7 +102,7 @@ pub fn spells(in b: B, s: u32, in text: Str) -> bool {
 // Whether `Box[T]` erases to `T` (fip active, one argument).
 fn erased(in b: B, in t: Types, ty: u32, erase_box: bool) -> bool {
     let n = t.node(ty);
-    erase_box && n.kind == K_NAMED && w(n.n) == 1 && spells(in b, n.name, in "Box")
+    erase_box && n.kind == TyKind::Named && w(n.n) == 1 && spells(in b, n.name, in "Box")
 }
 
 // The argument order of a named type: `Result[T, E]` is `Except E T`, and a
@@ -139,10 +134,10 @@ fn has_effects(in t: Types, r: u32) -> bool {
 // offending name.
 pub fn ty_error(in b: B, in t: Types, ty: u32, erase_box: bool, inout name: u32) -> u64 {
     let n = t.node(ty);
-    if n.kind == K_LIT || n.kind == T_INFER_KIND {
+    if n.kind == TyKind::Lit || n.kind == T_INFER_KIND {
         return E_NONE;
     }
-    if n.kind == K_NAMED {
+    if n.kind == TyKind::Named {
         if erased(in b, in t, ty, erase_box) {
             return ty_error(in b, in t, t.arg(ty, 0), erase_box, inout name);
         }
@@ -164,7 +159,7 @@ pub fn ty_error(in b: B, in t: Types, ty: u32, erase_box: bool, inout name: u32)
         }
         return E_NONE;
     }
-    if n.kind == K_TUPLE {
+    if n.kind == TyKind::Tuple {
         for i in 0..w(n.n) {
             let e = ty_error(in b, in t, t.arg(ty, i), erase_box, inout name);
             if e != E_NONE {
@@ -173,13 +168,13 @@ pub fn ty_error(in b: B, in t: Types, ty: u32, erase_box: bool, inout name: u32)
         }
         return E_NONE;
     }
-    if n.kind == K_FN {
+    if n.kind == TyKind::Fn {
         let e = ty_error(in b, in t, n.r, erase_box, inout name);
         if e != E_NONE {
             return e;
         }
         for i in 0..w(n.n) {
-            if t.param_pass(ty, i) == P_INOUT {
+            if t.param_pass(ty, i) == TyPass::Inout {
                 let e = ty_error(in b, in t, t.arg(ty, i), erase_box, inout name);
                 if e != E_NONE {
                     return e;
@@ -202,7 +197,7 @@ pub fn ty_error(in b: B, in t: Types, ty: u32, erase_box: bool, inout name: u32)
         }
         return E_NONE;
     }
-    if n.kind == K_ROW {
+    if n.kind == TyKind::Row {
         return E_ROW;
     }
     E_NONE
@@ -222,7 +217,7 @@ pub fn ty_check(inout b: B, in t: Types, ty: u32, erase_box: bool) {
 // Writes `typed(ty, None, erase_box)`.
 pub fn emit_ty(inout b: B, in t: Types, ty: u32, erase_box: bool) {
     let n = t.node(ty);
-    if n.kind == K_LIT {
+    if n.kind == TyKind::Lit {
         if n.mode == 0 && wrapping_u64(n.lit) > 9223372036854775807 {
             b.global(in "UInt64");
         } else {
@@ -230,7 +225,7 @@ pub fn emit_ty(inout b: B, in t: Types, ty: u32, erase_box: bool) {
         }
         return;
     }
-    if n.kind == K_NAMED {
+    if n.kind == TyKind::Named {
         if erased(in b, in t, ty, erase_box) {
             emit_ty(inout b, in t, t.arg(ty, 0), erase_box);
             return;
@@ -256,7 +251,7 @@ pub fn emit_ty(inout b: B, in t: Types, ty: u32, erase_box: bool) {
         }
         return;
     }
-    if n.kind == K_TUPLE {
+    if n.kind == TyKind::Tuple {
         if n.n == 0 {
             b.global(in "Unit");
         } else if n.n == 1 {
@@ -270,7 +265,7 @@ pub fn emit_ty(inout b: B, in t: Types, ty: u32, erase_box: bool) {
         }
         return;
     }
-    if n.kind == K_FN {
+    if n.kind == TyKind::Fn {
         let params = w(n.n);
         for i in 0..params {
             b.w(T_ARROW);
@@ -283,7 +278,7 @@ pub fn emit_ty(inout b: B, in t: Types, ty: u32, erase_box: bool) {
         // product([result, inout parameters...])
         let mut results: u64 = 1;
         for i in 0..params {
-            if t.param_pass(ty, i) == P_INOUT {
+            if t.param_pass(ty, i) == TyPass::Inout {
                 results = wrapping_add(results, 1);
             }
         }
@@ -293,7 +288,7 @@ pub fn emit_ty(inout b: B, in t: Types, ty: u32, erase_box: bool) {
         }
         emit_ty(inout b, in t, n.r, erase_box);
         for i in 0..params {
-            if t.param_pass(ty, i) == P_INOUT {
+            if t.param_pass(ty, i) == TyPass::Inout {
                 emit_ty(inout b, in t, t.arg(ty, i), erase_box);
             }
         }

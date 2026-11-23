@@ -9,7 +9,7 @@
 //! - `vstd_getenv` is `getenv`: the value stays valid until the next call
 //!   on the same thread, which the lowering copies before.
 //! - `vstd_getcwd` is `getcwd`: on a short buffer it returns NULL with
-//!   `ERANGE` (34) as the thread's last error.
+//!   `ERROR_INSUFFICIENT_BUFFER` (122) as the thread's last error.
 //! - `vstd_dlsym` answers the two names src/lib.ves looks up, laid out as
 //!   glibc does: `__libc_stack_end` (a word pointing at `argc`, then
 //!   `argv`) and `environ` (a word pointing at the `NULL`-terminated
@@ -19,10 +19,10 @@
 use crate::*;
 use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_char, c_void};
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
-/// `ERANGE`: the buffer is too short for the directory.
-const ERANGE: u32 = 34;
+/// Win32 reports a short directory buffer through GetLastError.
+const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 
 #[cfg(windows)]
 fn set_last_error(code: u32) {
@@ -68,7 +68,7 @@ pub unsafe extern "C" fn vstd_getcwd(buf: *mut u8, size: usize) -> *mut u8 {
         Ok(d) => {
             let text = os_bytes(d.as_os_str());
             if text.len() >= size {
-                set_last_error(ERANGE);
+                set_last_error(ERROR_INSUFFICIENT_BUFFER);
                 return std::ptr::null_mut();
             }
             // SAFETY: the caller lends `size` bytes for the call.
@@ -105,9 +105,20 @@ fn stack_top() -> &'static [usize] {
     })
 }
 
-/// The words `__libc_stack_end` and `environ` point through.
-static STACK_END: Mutex<usize> = Mutex::new(0);
-static ENVIRON: Mutex<(usize, Vec<usize>)> = Mutex::new((0, vec![]));
+/// The process argument table is immutable. Environment lookups return a
+/// thread-local snapshot, valid until that thread's next environment lookup.
+static STACK_END: OnceLock<usize> = OnceLock::new();
+
+#[derive(Default)]
+struct Environment {
+    strings: Vec<CString>,
+    pointers: Vec<usize>,
+    address: usize,
+}
+
+thread_local! {
+    static ENVIRON: RefCell<Environment> = RefCell::default();
+}
 
 /// `dlsym(handle, name)` for the two variables src/lib.ves reads.
 #[unsafe(no_mangle)]
@@ -115,27 +126,28 @@ pub unsafe extern "C" fn vstd_dlsym(_handle: u64, name: *const c_char) -> *const
     // SAFETY: the lowering passes a NUL-terminated copy for the call.
     match unsafe { CStr::from_ptr(name) }.to_bytes() {
         b"__libc_stack_end" => {
-            let mut end = STACK_END.lock().unwrap_or_else(|e| e.into_inner());
-            *end = stack_top().as_ptr() as usize;
-            &*end as *const usize as *const c_void
+            let end = STACK_END.get_or_init(|| stack_top().as_ptr() as usize);
+            end as *const usize as *const c_void
         }
-        b"environ" => {
-            let mut env = ENVIRON.lock().unwrap_or_else(|e| e.into_inner());
-            for &p in &env.1 {
-                if p != 0 {
-                    // SAFETY: made by `CString::into_raw` in `table`.
-                    drop(unsafe { CString::from_raw(p as *mut c_char) });
-                }
-            }
-            env.1 = table(std::env::vars_os().map(|(k, v)| {
-                let mut text = os_bytes(&k);
-                text.push(b'=');
-                text.extend(os_bytes(&v));
-                text
-            }));
-            env.0 = env.1.as_ptr() as usize;
-            &env.0 as *const usize as *const c_void
-        }
+        b"environ" => ENVIRON.with(|cell| {
+            let mut env = cell.borrow_mut();
+            env.strings = std::env::vars_os()
+                .filter_map(|(k, v)| {
+                    let mut text = os_bytes(&k);
+                    text.push(b'=');
+                    text.extend(os_bytes(&v));
+                    CString::new(text).ok()
+                })
+                .collect();
+            env.pointers = env
+                .strings
+                .iter()
+                .map(|s| s.as_ptr() as usize)
+                .chain(std::iter::once(0))
+                .collect();
+            env.address = env.pointers.as_ptr() as usize;
+            &env.address as *const usize as *const c_void
+        }),
         _ => std::ptr::null(),
     }
 }

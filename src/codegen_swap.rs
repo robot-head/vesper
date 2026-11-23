@@ -519,6 +519,46 @@ pub fn value_or_record(results: &[u64]) -> Option<ir::Value> {
     value_of(results).map_err(record).ok()
 }
 
+/// Packs `bytes` as its byte length followed by little-endian 8-byte words
+/// (zero-padded in the tail word) into `out`.
+pub fn pack_bytes_words(bytes: &[u8], out: &mut Vec<u64>) {
+    out.push(bytes.len() as u64);
+    for chunk in bytes.chunks(8) {
+        let mut word = [0u8; 8];
+        word[..chunk.len()].copy_from_slice(chunk);
+        out.push(u64::from_le_bytes(word));
+    }
+}
+
+/// Dispatches a `control` request from a helper that holds a builder and
+/// module without a [`crate::native::Codegen`] context (object/boxed drops).
+pub(crate) fn request_control_builder(
+    builder: &mut FunctionBuilder<'_>,
+    module: &mut dyn Module,
+    op: u32,
+    args: &[u64],
+) -> Result<bool, String> {
+    if hook(Family::Control).is_none() {
+        return Ok(false);
+    }
+    static EMPTY_WORLD: OnceLock<World> = OnceLock::new();
+    static EMPTY_PROGRAM: OnceLock<Program> = OnceLock::new();
+    let world = EMPTY_WORLD.get_or_init(World::default);
+    let program = EMPTY_PROGRAM.get_or_init(Program::default);
+    Ok(request(
+        Family::Control,
+        builder,
+        module,
+        world,
+        program,
+        Site::NONE,
+        op,
+        args,
+        None,
+    )?
+    .is_some())
+}
+
 /// The graph walk's request for one Place IR instruction: `inst` (block
 /// `block`, index `index` of lowered function `function`), whose operands
 /// have the Cranelift values in `values`, and whose type is `ty`. `None`
@@ -692,6 +732,105 @@ pub mod control {
     /// emission continues in `next`. Args
     /// `[selector, index, target, output]`; no result.
     pub const RETURN_TO: u32 = 8;
+    /// A join block with one parameter of `ty_code`. Args `[ty_code]`;
+    /// result `[block]`.
+    pub const JOIN_BLOCK: u32 = 9;
+    /// Switch to `block` and read its parameter `index`. Args
+    /// `[block, index]`; result `[value]`.
+    pub const SWITCH_PARAM: u32 = 10;
+    /// `jump block(arg0, ...)`. Args `[block, arg0...]`; no result.
+    pub const JUMP_ARGS: u32 = 11;
+    /// A tail resumption: `jump entry(arg0, ...)`, then a new `unreachable`
+    /// block with one parameter of `ty_code`, switched to it. Args
+    /// `[entry, ty_code, arg0...]`; result `[value]`.
+    pub const TAIL_RESUME: u32 = 12;
+    /// `stack_addr pointer_type, slot, offset`. Args `[slot, offset]`;
+    /// result `[ptr]`.
+    pub const STACK_ADDR: u32 = 13;
+    /// Initial `Handle` blocks and selector variable: `exit` and `dispatch`
+    /// blocks each with one parameter of `ty_code`, plus `selector` variable
+    /// initialized to `zero = iconst.i64 0`. Args `[ty_code]`; result
+    /// `[exit, dispatch, selector, zero]`.
+    pub const HANDLE_SETUP: u32 = 14;
+    /// A handler clause resumption `entry` block with one parameter per
+    /// `ty_code`. Args `[ty_code0, ...]`; result `[entry]`.
+    pub const HANDLER_ENTRY: u32 = 15;
+    /// `reraise_status` guard: branch `icmp_imm ne tag, 0` to `bad` else
+    /// `good`, and switch to `bad`. Args `[tag]`; result `[bad, good]`.
+    pub const RERAISE_GUARD: u32 = 16;
+    /// One `reraise_each` instance branch: `icmp_imm eq tag, index_plus_1`
+    /// to `bad` else `good`, switch to `bad`, `iadd_imm record, 8`. Args
+    /// `[tag, index_plus_1, record]`; result `[bad, good, payload]`.
+    pub const RERAISE_EACH: u32 = 17;
+    /// `free_sink_block` branch: `icmp_imm ne block, 0` to `free` else
+    /// `done`, switch to `free`. Args `[block]`; result `[free, done]`.
+    pub const FREE_SINK_BRANCH: u32 = 18;
+    /// `fail_exit` tag and payload preparation: `tag = iconst.i64 index_plus_1`,
+    /// optional `store tag, record+0` when `status_abi == 0`, `iadd_imm
+    /// record, 8`. Args `[status_abi, record, index_plus_1]`; result
+    /// `[tag, payload]`.
+    pub const FAIL_EXIT_PREP: u32 = 19;
+    /// `fail_exit` return and dead block: `return [placeholder, tag]` if
+    /// `status_abi != 0` else `return [placeholder]`, create/switch `dead`,
+    /// `iconst.i64 0`. Args `[status_abi, tag, placeholder]`; result `[zero]`.
+    pub const FAIL_EXIT_RETURN: u32 = 20;
+    /// `return_value`: return `words` loads from `buffer` when `has_buffer != 0`,
+    /// `[value, 0]` when `status_abi != 0`, else `[value]`. Args
+    /// `[has_buffer, buffer, words, status_abi, value]`; no result.
+    pub const RETURN_VALUES: u32 = 21;
+    /// `check_trace_failed`: load `flag`, branch `!= 0` to `bad` else `good`,
+    /// switch to `bad`. Args `[flag]`; result `[bad, good]`.
+    pub const TRACE_CHECK: u32 = 22;
+    /// `trace_call`: declare/import `symbol` with param types of `args` and
+    /// `i64` return, call and return `status`. Args
+    /// `[arg_count, args..., sym_len, sym_words...]`; result `[status]`.
+    pub const TRACE_CALL: u32 = 23;
+    /// `abort_on_nonzero_status`: branch `status != 0` to `bad` else `good`,
+    /// switch to `bad`, store `1` to `flag` if `has_flag != 0`. Args
+    /// `[status, has_flag, flag]`; result `[bad, good]`.
+    pub const TRACE_ABORT: u32 = 24;
+    /// Switch to `block`. Args `[block]`; no result.
+    pub const SWITCH_BLOCK: u32 = 25;
+    /// Write `{data, table}` into a 16-byte `dyn` pair slot. Args
+    /// `[pair, data, table]`; no result.
+    pub const DYN_PAIR_INIT: u32 = 26;
+    /// Store one word `value` at `ptr + 0`. Args `[ptr, value]`; no result.
+    pub const DYN_STORE_WORD: u32 = 27;
+    /// `dyn_dispatch`: load `data` (`pair+0`), `table` (`pair+8`), and slot
+    /// target (`table+offset`). Args `[pair, offset]`; result `[data, target]`.
+    pub const DYN_DISPATCH: u32 = 28;
+    /// `dyn_dispatch_boxed`: load `table` (`block+0`), `data = block+header`,
+    /// and slot target (`table+offset`). Args `[block, header, offset]`;
+    /// result `[data, target]`.
+    pub const DYN_DISPATCH_BOXED: u32 = 29;
+    /// `dyn_lend_boxed` emits via [`DYN_BOXED_PARTS`] + `DYN_PAIR_INIT`.
+    /// `dyn_box_new` header setup: store `table` at `block+0`, `data =
+    /// block+header`. Args `[block, table, header]`; result `[data]`.
+    pub const DYN_BOX_INIT: u32 = 30;
+    /// Extract boxed `dyn` `{data, table}`. Args `[block, header]`; result
+    /// `[data, table]`.
+    pub const DYN_BOXED_PARTS: u32 = 31;
+    /// Extract `{data, table}` from a `dyn` pair. Args `[pair]`; result
+    /// `[data, table]`.
+    pub const DYN_PAIR_PARTS: u32 = 32;
+    /// One vtable candidate in `dyn_call_effectful`: branch `table == address`
+    /// to `yes` else `no`, switch to `yes`. Args `[table, address]`; result
+    /// `[yes, no]`.
+    pub const DYN_CANDIDATE: u32 = 33;
+    /// Define or look up a `dyn` vtable data object and return its
+    /// `symbol_value`. Args `[words, self_size, has_drop, drop_id, slot_count,
+    /// (slot, func_id)..., sym_len, sym_words...]`; result `[addr]`.
+    pub const DYN_VTABLE: u32 = 34;
+    /// Declare and define a by-value scalar `dyn` slot adapter function. Args
+    /// `[target_id, recv_idx, loaded_ty, ptr_ty, param_count, param_tys...,
+    /// ret_count, ret_tys..., sym_len, sym_words...]`; result `[func_id]`.
+    pub const DYN_SLOT_ADAPTER: u32 = 35;
+    /// `emit_drop_object`: drop `{data, table}` pair via vtable word 0. Args
+    /// `[pair]`; no result.
+    pub const DYN_DROP_OBJECT: u32 = 36;
+    /// `emit_drop_boxed`: drop boxed object via vtable word 0 and free block.
+    /// Args `[block, header, box_free_id]`; no result.
+    pub const DYN_DROP_BOXED: u32 = 37;
 }
 
 /// The `ffi` family's requests (SH4 lane 13, #1287): one foreign (`.vsys`)

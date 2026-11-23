@@ -98,7 +98,8 @@ pub copy struct ExprNode {
     e: u32
 }
 
-// A pattern (`Pattern`): 1 Wild, 2 Bind (a = name), 3 Literal (a = Lit),
+// A pattern (`Pattern`): 1 Wild, 2 Bind (a = name), 3 Literal (a = Lit,
+// b = declared integer type name or NONE for a contextual literal),
 // 4 Tuple (a = list of Pattern), 5 Constructor (a = name, b = list of
 // (name, Pattern), c = named).
 pub copy struct PatNode {
