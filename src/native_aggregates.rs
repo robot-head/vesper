@@ -1552,6 +1552,20 @@ fn word_fields(shape: &EnumShape, name: &str, fields: &[(String, Pattern)]) -> b
 /// (a field path, a write, a place argument, a closure or handler that
 /// names it) keeps the old lowering for the whole connected set.
 ///
+/// Whether a `Seq` operation returns a two-word scalar `Option[T]` built
+/// through [`crate::seq::native::Codegen::seq_option`].
+fn seq_option_op(op: crate::seq::SeqOp, shape: &EnumShape) -> bool {
+    shape.words.len() == 2
+        && (matches!(
+            op,
+            crate::seq::SeqOp::Pop
+                | crate::seq::SeqOp::Last
+                | crate::seq::SeqOp::TryGet
+                | crate::seq::SeqOp::Hoisted(crate::seq::Access::TryGet)
+        ) || matches!(op, crate::seq::SeqOp::Wide(w) if !w.write && w.total)
+            || op.byte_scan())
+}
+
 /// Graphs with `Box` values or FIP slots keep the old lowering: their drop
 /// plans index instructions and slots.
 pub(super) fn scalar_enums(
@@ -1559,7 +1573,7 @@ pub(super) fn scalar_enums(
     f: &FunctionIr,
     generics: &BTreeMap<String, Type>,
     returns: Option<&EnumShape>,
-    specialized: &dyn Fn(&str) -> bool,
+    call_words: &dyn Fn(&str, &[Type], &EnumShape) -> bool,
     shared: &BTreeSet<String>,
 ) -> Option<ScalarEnums> {
     if !f.fip_call_slots.is_empty()
@@ -1691,7 +1705,34 @@ pub(super) fn scalar_enums(
                                 .all(|(n, _, _)| fields.iter().any(|(m, _)| m == n))
                     }),
                     Op::Read { root, .. } => cl.get(root) == Some(shape),
-                    Op::Call { callee, .. } => specialized(callee),
+                    Op::Call {
+                        callee,
+                        types,
+                        capability,
+                        ..
+                    } => capability.is_none() && call_words(callee, types, shape),
+                    Op::Seq { op, .. } if seq_option_op(*op, shape) => {
+                        // Keep directly matched `try_get` on `seq_fused` so
+                        // element views and slice checks stay fused.
+                        let try_get = matches!(
+                            op,
+                            crate::seq::SeqOp::TryGet
+                                | crate::seq::SeqOp::Hoisted(crate::seq::Access::TryGet)
+                        );
+                        let fused_match = try_get
+                            && uses.get(v).is_some_and(|us| {
+                                us.len() == 1
+                                    && matches!(
+                                        us[0],
+                                        Use::Term(tb) if tb == *b
+                                            && matches!(
+                                                f.blocks[tb].terminator,
+                                                Terminator::Match { .. }
+                                            )
+                                    )
+                            });
+                        !fused_match
+                    }
                     _ => false,
                 },
                 Some(Def::Param(b, k)) => preds.get(b).is_some_and(|ps| {
@@ -1901,7 +1942,7 @@ pub(super) fn scalar_enums(
                         out.push(read);
                     }
                 }
-                Op::Call { .. } if cv.contains_key(&i.dest) => {
+                Op::Call { .. } | Op::Seq { .. } if cv.contains_key(&i.dest) => {
                     calls.insert(i.dest, (cv[&i.dest].clone(), words[&i.dest].clone()));
                     out.push(i.clone());
                 }

@@ -351,3 +351,51 @@ fn main() -> u64 {{
     assert_eq!(versioned(&source("in"), "bumped"), 1);
     assert_eq!(versioned(&source("inout"), "bumped"), 0);
 }
+
+/// An inlined helper's hoisted ChunkSeq bounds-check header reads reuse
+/// the caller's pre-hoisted header words even across cyclic local definitions,
+/// enabling i64x2 SLP/loop vectorization and agreeing with the evaluator.
+#[test]
+fn inlined_add_rank_hoists_header_and_vectorizes() {
+    let source = "fn add_rank(inout d: ChunkSeq[u64], n: u64) {
+    for i in 0..n {
+        let cur = match d.try_get(i) { Option::Some(v) => v, Option::None => 0 };
+        d.try_set(i, wrapping_add(cur, 1));
+    }
+}
+fn main() -> u64 {
+    let mut d: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for i in 0..500 { d.push(i); }
+    add_rank(inout d, 200);
+    let mut sum: u64 = 0;
+    for i in 0..500 {
+        let v = match d.try_get(i) { Option::Some(x) => x, Option::None => 0 };
+        sum = wrapping_add(sum, v);
+    }
+    sum
+}";
+    let p = parser::parse(source);
+    assert!(p.diagnostics.is_empty(), "{:?}", p.diagnostics);
+    let c = check::check(&p.module);
+    assert!(c.diagnostics.is_empty(), "{:#?}", c.diagnostics);
+    for target in [
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+    ] {
+        let (_, clif) =
+            vesper::native::object_with_options(&c.world, "main", Some(target), true).unwrap();
+        let main_start = clif.find("; main\n").expect("missing main in CLIF");
+        let main_clif = &clif[main_start..];
+        let header_loads = main_clif.matches("+16").count();
+        assert!(
+            header_loads <= 4,
+            "{target}: expected inlined add_rank to reuse hoisted +16 header words (saw {header_loads}):\n{main_clif}"
+        );
+    }
+    let eval = vesper::runtime::Runtime::new(&c.world)
+        .run("main", vec![])
+        .unwrap();
+    let jit = vesper::native::jit_with_options(&c.world, "main", true).unwrap();
+    assert_eq!(eval.to_string(), jit.to_string());
+}
+
