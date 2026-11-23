@@ -3453,6 +3453,28 @@ impl<M: Module> Codegen<'_, '_, M> {
                 Ok(())
             }
             PatternKind::Constructor { name, fields, .. } => {
+                if !self.borrowed_bind
+                    && name == crate::ffi_lowering::types::PINNED_TYPE
+                    && crate::ffi_lowering::types::is_generated_pinned(self.world)
+                    && let Type::Named(_, args) = ty
+                    && let Some(elem_ty) = args.first()
+                {
+                    let elem_layout = Layout::of(self.world, elem_ty)?;
+                    let stride = u64::from(elem_layout.size.max(1));
+                    let handle = self
+                        .b
+                        .ins()
+                        .load(types::I64, ir::MemFlags::trusted(), value, 0);
+                    let len = self
+                        .b
+                        .ins()
+                        .load(types::I64, ir::MemFlags::trusted(), handle, 0);
+                    let addr = self
+                        .b
+                        .ins()
+                        .load(types::I64, ir::MemFlags::trusted(), handle, 16);
+                    self.foreign_range_unregister(addr, len, stride)?;
+                }
                 let layout = Layout::of(self.world, ty)?;
                 let (_, fs) = layout.variant(name).ok_or("unknown IR variant")?;
                 for (n, p) in fields {
@@ -4381,7 +4403,9 @@ impl<M: Module> Codegen<'_, '_, M> {
                             })
                             .collect::<Result<Vec<_>, String>>()?;
                         let site = make(ExprKind::Tuple(vec![]));
-                        if let Some(table) = self.constant_table(callee, f, inst.dest)? {
+                        if callee != crate::ffi_lowering::types::PINNED_ADDRESS
+                            && let Some(table) = self.constant_table(callee, f, inst.dest)?
+                        {
                             table
                         } else if self.world.functions.contains_key(callee) {
                             self.current_call_slot = f.fip_call_slots.get(&inst.dest).cloned();
@@ -6311,6 +6335,28 @@ impl<M: Module> Codegen<'_, '_, M> {
             let dest = self.offset(ptr, f.offset);
             self.store(dest, value, &f.ty)?;
         }
+        if name == Some(crate::ffi_lowering::types::PINNED_TYPE)
+            && crate::ffi_lowering::types::is_generated_pinned(self.world)
+            && let Type::Named(_, args) = ty
+            && let Some(elem_ty) = args.first()
+        {
+            let elem_layout = Layout::of(self.world, elem_ty)?;
+            let stride = u64::from(elem_layout.size.max(1));
+            let align = u64::from(elem_layout.size.clamp(1, 8));
+            let handle = self
+                .b
+                .ins()
+                .load(types::I64, ir::MemFlags::trusted(), ptr, 0);
+            let len = self
+                .b
+                .ins()
+                .load(types::I64, ir::MemFlags::trusted(), handle, 0);
+            let addr = self
+                .b
+                .ins()
+                .load(types::I64, ir::MemFlags::trusted(), handle, 16);
+            self.foreign_range_register(addr, len, stride, align)?;
+        }
         Ok(ptr)
     }
     fn equal(&mut self, a: ir::Value, b: ir::Value, ty: &Type) -> Result<ir::Value, String> {
@@ -8023,6 +8069,16 @@ impl<M: Module> Codegen<'_, '_, M> {
     ) -> Result<ir::Value, String> {
         // A caller that keeps this call's enum result as words (#1330).
         let scalar_request = self.scalar_enums.request.take();
+        if name == crate::ffi_lowering::types::PINNED_ADDRESS
+            && args.len() == 1
+            && args[0].pass == Pass::In
+            && crate::ffi_lowering::types::is_generated_pinned(self.world)
+        {
+            let receiver = self.expr(&args[0].expr)?;
+            let flags = ir::MemFlags::trusted();
+            let handle = self.b.ins().load(types::I64, flags, receiver, 0);
+            return Ok(self.b.ins().load(types::I64, flags, handle, 16));
+        }
         if name == crate::integer_widths::MUL_WIDE && args.len() == 2 {
             // The reserved prelude product (`integer_widths`): `(low, high)`.
             let a = self.expr(&args[0].expr)?;

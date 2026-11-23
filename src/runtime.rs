@@ -2306,6 +2306,12 @@ impl<'a> Runtime<'a> {
         caller: &Env,
     ) -> Result<Control, String> {
         match callee {
+            Value::Function(ref name)
+                if name == crate::ffi_lowering::types::PINNED_ADDRESS
+                    && crate::ffi_lowering::types::is_generated_pinned(self.world) =>
+            {
+                Err("foreign memory is unsupported in the evaluator".into())
+            }
             Value::Function(name) if crate::atomics::intercepted(self.world, &name).is_some() => {
                 // An atomic operation (`atomics`): one update of the shared cell.
                 self.call_site = None;

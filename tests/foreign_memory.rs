@@ -697,3 +697,313 @@ fn a_derived_pinned_view_ends_at_its_outer_block() {
     );
     assert_eq!(refused(&body).kind, FfiErrorKind::BufferMisuse);
 }
+
+#[test]
+fn pinned_address_returns_pinned_buffer_pointer_and_evaluator_refuses_it() {
+    let Some(target) = host_target() else {
+        eprintln!("no .vsys target for this host; JIT evidence unavailable");
+        return;
+    };
+    let vsys_src = format!(
+        "sys library PinAddr (\n    target = \"{}\", abi = \"{}\",\n    link = \"static\", name = \"pinaddr\", artifact = \"blake3:{ZERO}\"\n) {{\n    fn check_addr(inout p: Pinned[u8], raw: u64) -> ForeignVal[u64];\n}}\n",
+        target.0, target.1
+    );
+    let mut imp = Imports::new();
+    imp.add(&vsys_src, Handler::Direct).unwrap();
+    let src = "
+pub fn run() -> u64 eff [Ffi[PinAddr]] {
+    let mut buf = ChunkSeq::with_capacity[u8](64);
+    buf.resize(64, 7);
+    let mut p = Pinned { data: buf };
+    let addr = p.address();
+    let ok = PinAddr::check_addr(inout p, addr);
+    let Pinned { data } = p;
+    if ok == addr && addr != 0 { data.len() } else { 0 }
+}
+";
+    let checked = ffi_lowering::check_source(src, &imp).unwrap_or_else(|e| panic!("{e}"));
+    extern "C" fn check_addr(ptr: *mut u8, len: usize, raw: u64) -> u64 {
+        assert_eq!(len, 64);
+        assert_eq!(raw, ptr as u64);
+        raw
+    }
+    {
+        let _lock = JIT.lock().unwrap();
+        let got = checked
+            .jit("run", &[("check_addr", check_addr as *const u8)])
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(word(&got), 64);
+    }
+    let eval_err = checked
+        .evaluate("run", |_| Err("no host".into()))
+        .unwrap_err();
+    assert!(
+        eval_err.to_string().contains("foreign memory"),
+        "{eval_err}"
+    );
+}
+
+#[test]
+fn atomic_views_support_concurrent_acquire_release_and_reject_invalid_orders() {
+    let Some(target) = host_target() else {
+        eprintln!("no .vsys target for this host; JIT evidence unavailable");
+        return;
+    };
+    let vsys_src = format!(
+        "sys library RingAtom (\n    target = \"{}\", abi = \"{}\",\n    link = \"static\", name = \"ringatom\", artifact = \"blake3:{ZERO}\"\n) {{\n    linear extern mapping AtomRing[u8];\n    fn ring_new(bytes: usize) -> ForeignVal[Option[AtomRing[bytes]]];\n    fn ring_free(sink r: AtomRing) -> ForeignVal[i32];\n}}\n",
+        target.0, target.1
+    );
+    let mut imp = Imports::new();
+    imp.add(&vsys_src, Handler::Direct).unwrap();
+
+    // 1. Concurrent spin-loop on a foreign mapping with Acquire/Release,
+    // plus bounds/alignment checks and typed ChunkSeq[u32] atomics.
+    let src = "
+pub fn spin_and_ack() -> u64 eff [Ffi[RingAtom]] {
+    let mut r = match RingAtom::ring_new(64) {
+        Some(m) => m,
+        None => return 0,
+    };
+    // Out-of-bounds and misaligned accesses return None / false.
+    let mis = match r.data.try_atomic_load_u32(2, MemoryOrder::Acquire) {
+        Some(_) => 1,
+        None => 0,
+    };
+    let oob = match r.data.try_atomic_load_u64(60, MemoryOrder::Acquire) {
+        Some(_) => 1,
+        None => 0,
+    };
+    let bad_store = r.data.try_atomic_store_u32(2, 99, MemoryOrder::Release);
+    if mis != 0 || oob != 0 || bad_store {
+        RingAtom::ring_free(r);
+        return 0;
+    }
+    // Spin on offset 0 (no foreign call in loop) until host thread releases payload.
+    loop {
+        match r.data.try_atomic_load_u32(0, MemoryOrder::Acquire) {
+            Some(v) => {
+                if v == 1 {
+                    break;
+                }
+            }
+            None => {
+                RingAtom::ring_free(r);
+                return 0;
+            }
+        }
+    }
+    let payload = match r.data.try_atomic_load_u64(8, MemoryOrder::Acquire) {
+        Some(v) => v,
+        None => 0,
+    };
+    r.data.try_atomic_store_u32(4, 2, MemoryOrder::Release);
+    RingAtom::ring_free(r);
+    payload
+}
+
+pub fn typed_seq_atomics() -> u64 {
+    let mut s = ChunkSeq::with_capacity[u32](4);
+    s.resize(4, 10);
+    let ok = s.try_atomic_store(2, 42, MemoryOrder::SeqCst);
+    let v = match s.as_slice().try_atomic_load(2, MemoryOrder::SeqCst) {
+        Some(x) => widen_u64(x),
+        None => 0,
+    };
+    let oob = match s.try_atomic_load(4, MemoryOrder::Acquire) {
+        Some(_) => 1,
+        None => 0,
+    };
+    if ok && oob == 0 { v } else { 0 }
+}
+";
+    let checked = ffi_lowering::check_source(src, &imp).unwrap_or_else(|e| panic!("{e}"));
+
+    static SHARED_RING: AtomicU64 = AtomicU64::new(0);
+    #[repr(align(64))]
+    struct AlignedRing([u8; 64]);
+    let mut ring_buf = Box::new(AlignedRing([0u8; 64]));
+    SHARED_RING.store(ring_buf.0.as_mut_ptr() as u64, Ordering::SeqCst);
+
+    extern "C" fn ring_new(_bytes: usize) -> *mut u8 {
+        SHARED_RING.load(Ordering::SeqCst) as *mut u8
+    }
+    extern "C" fn ring_free(_ptr: *mut u8, _len: usize) -> i32 {
+        0
+    }
+    let syms = [
+        ("ring_new", ring_new as *const u8),
+        ("ring_free", ring_free as *const u8),
+    ];
+
+    {
+        let _lock = JIT.lock().unwrap();
+        // Differential check on typed_seq_atomics (JIT vs evaluator).
+        let jit_seq = checked.jit("typed_seq_atomics", &syms).unwrap();
+        let eval_seq = checked
+            .evaluate("typed_seq_atomics", |_| Err("no host".into()))
+            .unwrap();
+        assert_eq!(word(&jit_seq), 42);
+        assert_eq!(word(&eval_seq), 42);
+
+        // Concurrent spin-loop test.
+        let func = checked.word_function("spin_and_ack", &syms, true).unwrap();
+        let ring_addr = SHARED_RING.load(Ordering::SeqCst);
+        let producer = std::thread::spawn(move || {
+            use std::sync::atomic::{AtomicU32, AtomicU64};
+            std::thread::sleep(std::time::Duration::from_millis(15));
+            // SAFETY: `ring_addr` points to `AlignedRing` for the duration of this scope.
+            unsafe {
+                let flag = &*(ring_addr as *const AtomicU32);
+                let ack = &*((ring_addr + 4) as *const AtomicU32);
+                let data = &*((ring_addr + 8) as *const AtomicU64);
+                data.store(0x1234_5678_9abc_def0, Ordering::Relaxed);
+                flag.store(1, Ordering::Release);
+                while ack.load(Ordering::Acquire) != 2 {
+                    std::hint::spin_loop();
+                }
+            }
+        });
+        // SAFETY: `spin_and_ack` takes 0 arguments and returns `u64`.
+        let got = unsafe { func.call(&[]) }.unwrap();
+        producer.join().unwrap();
+        assert_eq!(got, 0x1234_5678_9abc_def0);
+    }
+
+    // Invalid MemoryOrder checks (E0820).
+    for bad_body in [
+        "pub fn f() -> u64 { let s = ChunkSeq::with_capacity[u32](4); match s.try_atomic_load(0, MemoryOrder::Release) { Some(x) => widen_u64(x), None => 0 } }",
+        "pub fn f() -> bool { let mut s = ChunkSeq::with_capacity[u32](4); s.try_atomic_store(0, 1, MemoryOrder::Acquire) }",
+        "pub fn f(o: MemoryOrder) -> u64 { let s = ChunkSeq::with_capacity[u32](4); match s.try_atomic_load(0, o) { Some(x) => widen_u64(x), None => 0 } }",
+    ] {
+        let err = ffi_lowering::check_source(bad_body, &imp).unwrap_err();
+        assert!(
+            err.diagnostics.iter().any(|d| d.code == "E0820"),
+            "expected E0820 for `{bad_body}`, got {err}"
+        );
+    }
+}
+
+#[test]
+fn checked_aliasing_rule_runtime_traps_and_reuse_after_release() {
+    let Some(target) = host_target() else {
+        eprintln!("no .vsys target for this host; JIT evidence unavailable");
+        return;
+    };
+    let vsys_src = format!(
+        "sys library Alias (\n    target = \"{}\", abi = \"{}\",\n    link = \"static\", name = \"alias\", artifact = \"blake3:{ZERO}\"\n) {{\n    linear extern mapping MapU32[u32];\n    fn map_fixed(addr: u64, len: usize) -> ForeignVal[Option[MapU32[len]]];\n    fn unmap_fixed(sink m: MapU32) -> ForeignVal[i32];\n    fn touch_pin(in p: Pinned[u32]) -> ForeignVal[u32];\n}}\n",
+        target.0, target.1
+    );
+    let mut imp = Imports::new();
+    imp.add(&vsys_src, Handler::Direct).unwrap();
+
+    if let Ok(case) = std::env::var("VESPER_FOREIGN_TRAP_CASE") {
+        #[repr(align(16))]
+        struct Buf([u32; 16]);
+        let mut buf = Box::new(Buf([0u32; 16]));
+        let base = buf.0.as_mut_ptr() as u64;
+
+        extern "C" fn map_fixed(addr: u64, _len: usize) -> *mut u8 {
+            addr as *mut u8
+        }
+        extern "C" fn unmap_fixed(_ptr: *mut u8, _len: usize) -> i32 {
+            0
+        }
+        extern "C" fn touch_pin(_ptr: *mut u8, _len: usize) -> u32 {
+            0
+        }
+        let syms = [
+            ("map_fixed", map_fixed as *const u8),
+            ("unmap_fixed", unmap_fixed as *const u8),
+            ("touch_pin", touch_pin as *const u8),
+        ];
+
+        let src = match case.as_str() {
+            "overlap_mappings" => format!(
+                "pub fn run() -> u64 eff [Ffi[Alias]] {{
+                    let m1 = match Alias::map_fixed({base}, 8) {{ Some(m) => m, None => return 1 }};
+                    let m2 = match Alias::map_fixed({}, 4) {{ Some(m) => m, None => {{ Alias::unmap_fixed(m1); return 2 }} }};
+                    Alias::unmap_fixed(m2);
+                    Alias::unmap_fixed(m1);
+                    0
+                }}",
+                base + 8
+            ),
+            "overlap_mapping_and_pinned" => "pub fn run() -> u64 eff [Ffi[Alias]] {
+                let mut b = ChunkSeq::with_capacity[u32](8);
+                b.resize(8, 1);
+                let p = Pinned { data: b };
+                let addr = p.address();
+                let m = match Alias::map_fixed(addr, 4) {
+                    Some(m) => m,
+                    None => { let Pinned { data } = p; return 1 }
+                };
+                Alias::unmap_fixed(m);
+                let Pinned { data } = p;
+                0
+            }"
+            .to_string(),
+            "misaligned_mapping" => format!(
+                "pub fn run() -> u64 eff [Ffi[Alias]] {{
+                    let m = match Alias::map_fixed({}, 4) {{ Some(m) => m, None => return 1 }};
+                    Alias::unmap_fixed(m);
+                    0
+                }}",
+                base + 2
+            ),
+            "reuse_after_release" => format!(
+                "pub fn run() -> u64 eff [Ffi[Alias]] {{
+                    let m1 = match Alias::map_fixed({base}, 8) {{ Some(m) => m, None => return 1 }};
+                    Alias::unmap_fixed(m1);
+                    let m2 = match Alias::map_fixed({base}, 8) {{ Some(m) => m, None => return 2 }};
+                    Alias::unmap_fixed(m2);
+                    let mut b = ChunkSeq::with_capacity[u32](8);
+                    b.resize(8, 5);
+                    let p = Pinned {{ data: b }};
+                    let addr = p.address();
+                    let Pinned {{ data }} = p;
+                    let m3 = match Alias::map_fixed(addr, 4) {{ Some(m) => m, None => return 3 }};
+                    Alias::unmap_fixed(m3);
+                    42
+                }}"
+            ),
+            other => panic!("unknown trap case {other}"),
+        };
+        let checked = ffi_lowering::check_source(&src, &imp).unwrap_or_else(|e| panic!("{e}"));
+        let got = checked.jit("run", &syms).unwrap();
+        assert_eq!(word(&got), 42);
+        return;
+    }
+
+    let exe = std::env::current_exe().unwrap();
+    for (case, expect_ok) in [
+        ("overlap_mappings", false),
+        ("overlap_mapping_and_pinned", false),
+        ("misaligned_mapping", false),
+        ("reuse_after_release", true),
+    ] {
+        let out = std::process::Command::new(&exe)
+            .args([
+                "--exact",
+                "checked_aliasing_rule_runtime_traps_and_reuse_after_release",
+                "--nocapture",
+            ])
+            .env("VESPER_FOREIGN_TRAP_CASE", case)
+            .output()
+            .unwrap();
+        assert_eq!(
+            out.status.success(),
+            expect_ok,
+            "case={case} status={:?} stderr={}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        if !expect_ok {
+            assert_ne!(
+                out.status.code(),
+                Some(101),
+                "case={case} panicked instead of trapping: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+}

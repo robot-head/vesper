@@ -1,21 +1,15 @@
 //! Bounded host SQL execution (row and vectorized), checked slotted pages,
 //! recoverable page pins, and a durable WAL-recovered record store.
 //! See the crate README for grammar, resource accounting, and integration boundaries.
-// The Rust build has no unsafe code. The `vesper-port` build allows it
-// only in the generated binding (src/port.rs), which calls the port.
-#![cfg_attr(not(feature = "vesper-port"), forbid(unsafe_code))]
-#![cfg_attr(feature = "vesper-port", deny(unsafe_code))]
+// Only the generated binding (src/port.rs), which calls the port, uses unsafe.
+#![deny(unsafe_code)]
 
 mod execute;
-#[cfg(not(feature = "vesper-port"))]
-mod parse;
-#[cfg(feature = "vesper-port")]
 mod parse {
     //! The parser is the Vesper port's; the operator type stays shared.
     pub(crate) use crate::plan::Cmp;
 }
 mod plan;
-#[cfg(feature = "vesper-port")]
 mod port;
 
 pub mod device;
@@ -32,13 +26,10 @@ use std::fmt;
 pub use execute::{DataSet, QueryResult};
 
 /// Live allocations of the Vesper port (sequences and boxes), for leak
-/// tests; always 0 in the Rust build.
+/// tests.
 #[doc(hidden)]
 pub fn port_live_allocations() -> i64 {
-    #[cfg(feature = "vesper-port")]
-    return port::live_allocations();
-    #[cfg(not(feature = "vesper-port"))]
-    0
+    port::live_allocations()
 }
 pub use plan::{
     AccessPath, AccessPlan, BindingPath, BoundColumn, IndexBound, JoinKind, PreparedQuery, RelPlan,
@@ -262,69 +253,14 @@ impl HermeticCatalog {
         sql: &str,
         limits: Limits,
     ) -> Result<Vec<DdlChange>> {
-        #[cfg(feature = "vesper-port")]
-        return port::apply_ddl(self, sql, limits);
-        #[cfg(not(feature = "vesper-port"))]
-        self.apply_ddl_changes_rust(sql, limits)
-    }
-    #[cfg(not(feature = "vesper-port"))]
-    fn apply_ddl_changes_rust(&mut self, sql: &str, limits: Limits) -> Result<Vec<DdlChange>> {
-        limits.validate()?;
-        let statements = parse::ddl(sql, limits)?;
-        let mut next = self.clone();
-        let mut changes = Vec::with_capacity(statements.len());
-        for statement in statements {
-            match statement {
-                parse::Ddl::Create(name, cols) => {
-                    if next.tables.contains_key(&name) {
-                        return Err(Error::new(ErrorKind::Duplicate, format!("table {name}")));
-                    }
-                    bound(
-                        add(next.tables.len(), 1)?,
-                        limits.tables,
-                        "catalog table limit",
-                    )?;
-                    next.tables.insert(name.clone(), cols.clone());
-                    changes.push(DdlChange::Create(name, cols));
-                }
-                parse::Ddl::Drop(name) => {
-                    if next.tables.remove(&name).is_none() {
-                        return Err(Error::new(ErrorKind::Unknown, format!("table {name}")));
-                    }
-                    changes.push(DdlChange::Drop(name));
-                }
-            }
-            next.revision = next
-                .revision
-                .checked_add(1)
-                .ok_or_else(|| Error::new(ErrorKind::Overflow, "catalog revision overflow"))?;
-        }
-        *self = next;
-        Ok(changes)
+        port::apply_ddl(self, sql, limits)
     }
     /// Rebuilds a catalog persisted by the durable table store.
     pub(crate) fn from_parts(tables: BTreeMap<String, Vec<ColumnDef>>, revision: u64) -> Self {
         Self { tables, revision }
     }
     pub fn prepare(&self, sql: &str, params: &[ParamDef], limits: Limits) -> Result<PreparedQuery> {
-        #[cfg(feature = "vesper-port")]
-        return port::prepare(self, sql, params, limits);
-        #[cfg(not(feature = "vesper-port"))]
-        self.prepare_rust(sql, params, limits)
-    }
-    #[cfg(not(feature = "vesper-port"))]
-    fn prepare_rust(
-        &self,
-        sql: &str,
-        params: &[ParamDef],
-        limits: Limits,
-    ) -> Result<PreparedQuery> {
-        limits.validate()?;
-        bound(self.tables.len(), limits.tables, "catalog table limit")?;
-        for cols in self.tables.values() {
-            bound(cols.len(), limits.columns_per_table, "catalog column limit")?;
-        }
-        plan::prepare(self, parse::select(sql, limits)?, params, limits)
+        port::prepare(self, sql, params, limits)
     }
 }
 
