@@ -23,9 +23,26 @@ exactly as Rust does.
 
 The loader's I/O and manifest checks (`Loader::package`) stay in Rust: the
 test mirrors them and passes the graph in (`src/load.ves` documents the
-input).
+input). The loader supplies the type names declared in its `.vsys`
+libraries, including per-target files, as an optional graph suffix. The
+assembler resolves those names through the owning package's root module
+and preserves their global spellings. Graphs that omit the suffix have
+no foreign type entries.
 
-## Entries
+## Assembly API
+
+- `assembly_begin(in Str) -> Assembly` builds the resolver tables from the
+  encoded package graph.
+- `assemble_next(inout Assembly, in Str) -> Option[AssembledModule]` takes
+  the same encoded graph and yields the next owned, renamed AST and its file
+  index. It yields `None` when the cursor reaches the end. Spans are relative
+  to the virtual concatenation and symbols belong to each AST's interner.
+- `assembly_metadata(sink Assembly) -> AssemblyMetadata` releases the
+  resolver tables and returns the public names, qualified-name map, file
+  display names and offsets, and diagnostics gathered by the cursor. Pull
+  every module before taking the metadata for the whole package graph.
+
+## Differential and timing entries
 
 - `assemble_text(in Str) -> ChunkSeq[u64]`: the assembled program as one
   text packed by `pack_text` (`@vesper/check-data`): the diagnostics, the
@@ -39,10 +56,10 @@ input).
 
 ## Design notes
 
-- A module's `Ast` owns sequences, so it cannot be kept in a `ChunkSeq`
-  (E1522, SH2 lane 1). Each module is parsed twice: once for its tables and
-  once to rename it. Vesper still beats Rust's time, since its parse is about
-  half of Rust's.
+- A module's `Ast` owns sequences and the assembly cursor returns it by
+  value. Callers can process modules as they arrive or keep individual
+  ones for later passes. Each module is parsed twice, once for the resolver
+  tables and once to rename it.
 - The lowering shares some nodes where Rust's parser clones them: an array
   repetition's element (`[x; 2]`), an or-pattern arm's body, and one
   `TraitRef` between the bounds of every method of a generic `impl`. The
@@ -57,6 +74,8 @@ input).
 
 `tests/self_host_check_names_packages.rs`: every Loom package of the corpus
 (the loader's accept and reject fixtures included) and mutant graphs that
-fire every assembler diagnostic, against `packages::load`, at 0
-differences. `CHECK_HARNESS_SPEED=1` runs the ABBA timing; the ignored
-`callgrind_one_side` test measures one side under callgrind.
+fire every assembler diagnostic, compared against `packages::load`. A
+separate consumer keeps two owned ASTs live across calls and checks the
+file and package metadata against the Rust loader. `CHECK_HARNESS_SPEED=1`
+runs the ABBA timing. The ignored `callgrind_one_side` test measures one
+side under callgrind.

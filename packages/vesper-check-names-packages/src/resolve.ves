@@ -16,6 +16,7 @@ use self::state::{
     const_of,
     const_prefix,
     join_path,
+    kind_both,
     kind_value,
     emit,
     err,
@@ -140,9 +141,17 @@ fn mangle(inout s: St, m: u32, item: u32) -> u32 {
     s.g.intern(in s.buf).id()
 }
 
+// Source items shadow foreign types of the same name.
+pub fn is_foreign(in s: St, key: u64) -> bool {
+    s.foreign_types.contains_key(key) && !s.item_kind.contains_key(key)
+}
+
 // `Resolver::name_of`: its root re-export name, its plain name in the root
 // package's root module, else the mangled name.
 pub fn name_of(inout s: St, key: u64) -> u32 {
+    if is_foreign(in s, key) {
+        return lo(key);
+    }
     match s.renamed.get(key) {
         Option::Some(n) => {
             return n;
@@ -347,6 +356,9 @@ pub fn lookup(inout s: St, tm: u32, name: u32, same: bool, in shown: String, sta
             return (target, kind);
         },
         Option::None => {},
+    }
+    if s.foreign_types.contains_key(rk) {
+        return (rk, kind_both());
     }
     err(inout s, unknown_import(), start, end);
     let mut msg = String::new();

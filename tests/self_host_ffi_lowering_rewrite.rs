@@ -868,10 +868,13 @@ fn compare(case: &Case) -> (String, Option<String>) {
 
 /// The Rust test files whose string literals hold `.vsys` libraries and
 /// the Vesper sources that call them.
-const FFI_TESTS: [&str; 9] = [
+const FFI_TESTS: [&str; 12] = [
     "tests/ffi_lowering.rs",
     "tests/ffi_handles.rs",
     "tests/ffi_affine_drops.rs",
+    "tests/ffi_callbacks.rs",
+    "tests/ffi_floats.rs",
+    "tests/foreign_memory.rs",
     "tests/borrowed_box_match.rs",
     "tests/package_submodule_exports.rs",
     "tests/tree_abi.rs",
@@ -902,10 +905,6 @@ fn library_pool() -> Vec<LibraryDescriptor> {
     for s in &sources {
         if let Ok(d) = sys::parse(&fill(s, TARGETS[0]), sys::Limits::default())
             && !pool.iter().any(|p| p.name() == d.name())
-            // Foreign memory viewed in place (pinned buffers and mappings,
-            // #1505) is not in the port yet: handed to SH4 lane 13 (#1287).
-            && !d.functions().iter().any(|f| f.uses_foreign_memory())
-            && !d.extern_types().iter().any(|t| t.mapping().is_some())
         {
             pool.push(d);
         }

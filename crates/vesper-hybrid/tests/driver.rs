@@ -208,6 +208,9 @@ fn driver_matches_the_default_compiler() {
     inputs.push(root.join("examples/loom"));
     inputs.push(root.join("tests/fixtures/packages/workspace/app"));
     inputs.push(root.join("tests/fixtures/packages/reject/unknown_item"));
+    let invalid_utf8 = scratch.join("invalid-utf8.ves");
+    std::fs::write(&invalid_utf8, [0xff]).unwrap();
+    inputs.push(invalid_utf8);
     inputs.push(scratch.join("missing.ves"));
 
     let mut sets: Vec<&[&str]> = OPTION_SETS.to_vec();
