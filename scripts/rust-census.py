@@ -122,7 +122,7 @@ CRATES = {
     "vesper-migrate": ("rust-lib", "", "", "out of the compiler's closure (#1398); lang-c, syn: C and Rust readers in Vesper", "18"),
     "vesper-loom-trust": ("gone", "in crate (+ seed)", "0.70-1.23x", "NOT deleted: frozen Rust engine (src/reference, 639) stays as the seed vesper-tools links (Bazel run-time data of //:bin/vesper) until the Stage 2 wasm seed (lane 2); API, serde, JSON and conversion 470 and generated binding 1,253 go when callers are Vesper; Ed25519 via the crypto shim", "17"),
     "vesper-warp-crypto": ("gone", "in crate", "1.04-1.89x", "header micro 1.89x (codegen, #1426); Rust holds the keys and NonceTicket; primitives via the crypto shim", "17"),
-    "vesper-vault": ("shim", "", "", "libcrux ML-KEM, x25519, AEADs: crypto shim; Cranelift via its shim", "17"),
+    "vesper-vault": ("partial", "in crate (+ seed)", "aead-aes 1.20x, aead-chacha 1.09x, kem-hybrid 1.05x", "AEAD framing/limits/Doom opener, X25519MLKEM768 KEM, and verify_tag_16_ct flipped to Vesper over crypto shim (frozen seed engine in src/reference until Stage 2); Cranelift constant-time verifier, sys/LockedPages, slot, obligation, consttime, Sec* stay Rust (lane 3)", "17"),
     "vesper-warp-tls": ("shim", "", "", "rustls: TLS shim (or the TLS 1.3 state machine ports over the crypto shim)", "17"),
     "vesper-simd": ("c-api", "", "", "out of the compiler's closure (#1398); Cranelift JIT host: through vesper-cranelift-sys", "13"),
     "vesper-crypto-sys": ("shim", "", "", "vetted crypto C-ABI shim (SH6 lane 17)", "17"),

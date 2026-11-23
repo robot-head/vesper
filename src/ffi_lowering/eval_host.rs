@@ -169,6 +169,29 @@ impl EvalHost {
                     as_bytes(&mut buf)[..bytes.len()].copy_from_slice(&bytes);
                     Slot::Buffer(Some((buf, bytes.len())))
                 }
+                ParameterType::CWStr => {
+                    let units = elements(v)?
+                        .iter()
+                        .map(|u| int(u).map(|u| u as u16))
+                        .collect::<Result<Vec<u16>, _>>()?;
+                    if let Some(at) = units.iter().position(|u| *u == 0) {
+                        // Refused: `Err(ForeignInvalid { raw: offset })`.
+                        return Ok(result(
+                            "Err",
+                            data(
+                                INVALID_TYPE,
+                                INVALID_TYPE,
+                                vec![("raw", Value::UInt(at as u64, 64))],
+                            ),
+                        ));
+                    }
+                    let mut buf = vec![0u64; (units.len() + 1).div_ceil(4)];
+                    let dst = as_bytes(&mut buf);
+                    for (i, u) in units.iter().enumerate() {
+                        dst[i * 2..i * 2 + 2].copy_from_slice(&u.to_ne_bytes());
+                    }
+                    Slot::Buffer(Some((buf, units.len())))
+                }
                 ParameterType::CStrList => {
                     let bytes = elements(v)?
                         .iter()
@@ -378,6 +401,24 @@ fn foreign_value(t: &ValueType, raw: u64) -> Result<Value, String> {
                 .map(|b| Value::UInt(u64::from(*b), 8))
                 .collect(),
         )))),
+        ValueType::CWStr if raw == 0 => data("Option", "None", vec![]),
+        // SAFETY: the library returned a NUL-terminated UTF-16 string it keeps
+        // (the `.vsys` contract), read before any other foreign call.
+        ValueType::CWStr => {
+            let mut units = vec![];
+            let mut p = raw as usize as *const u16;
+            loop {
+                // SAFETY: `p` walks up to the terminating `0u16`.
+                let u = unsafe { *p };
+                if u == 0 {
+                    break;
+                }
+                units.push(Value::UInt(u64::from(u), 16));
+                // SAFETY: `p` stays within the NUL-terminated wide string.
+                p = unsafe { p.add(1) };
+            }
+            some(Value::Seq(std::rc::Rc::new(std::cell::RefCell::new(units))))
+        }
         ValueType::Float(_) => return Err("float results run in compiled code".into()),
     })
 }
