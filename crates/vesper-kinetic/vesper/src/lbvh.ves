@@ -3,6 +3,9 @@
 // z, max x, y, z). A child is a word: an internal node `k` is `k`, a leaf
 // at sorted position `i` is `2^32 + i`. The Rust wrapper owns every buffer
 // and lends it here sized for the call.
+use @vesper-std/sort::unstable::{
+    sort
+};
 use self::{
     LbvhError
 };
@@ -476,7 +479,10 @@ pub fn pairs(
             }
         }
     }
-    if len > 1 {
+    if len > INDEX_MASK {
+        // Radix histogram offsets are u32.
+        sort(inout out[0..len]);
+    } else if len > 1 {
         radix_sort_pairs(inout out, len, n, inout tk, inout novals, inout tv, inout hist);
     }
     len
