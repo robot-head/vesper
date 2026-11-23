@@ -202,7 +202,7 @@ vesper_crate(
             "examples/**",
             "packages/**",
             "tests/fixtures/**",
-        ]),
+        ]) + ["//crates/vesper-pact:files"],
         # Loops, atomics and the stack bound (SH2 lane 10, #1182).
         "test/self_host_check_loops_atomics": glob([
             "examples/**",
@@ -686,6 +686,10 @@ vesper_crate(
         "test/std_env": [":files"],
         "test/std_fs": [":files"],
         "test/std_process": [":files"],
+        "test/bench_pmu_port": [
+            ":files",
+            "//crates/vesper-bench-pmu:vesper_pkg",
+        ],
         # .vsys imports carried by packages (#1150): drivers over @vesper-std/fs.
         "test/vsys_packages": [":files"],
         # .vsys types in `use` (#1326): the real @vesper/cranelift as a dependency.
@@ -1063,8 +1067,8 @@ vesper_crate(
         "test/self_host_wasm_backend": "long",
         # Loads the port package, then 17 compilations and Wasmtime runs.
         "test/wasm_seed_breadth": "long",
-        # Loads the port package, then native and Wasmtime runs (~4 min debug).
-        "test/wasm_seed_package_io": "long",
+        # Loads the port package, then native, Wasmtime, and vwasm fixed-point runs.
+        "test/wasm_seed_package_io": "eternal",
         # The component wrapping differential (#1334): ~2 min release.
         "test/self_host_wit_component": "long",
         "test/self_host_codegen_scalar": "long",
@@ -1257,7 +1261,10 @@ vesper_package(
     srcs = glob(["packages/vesper-check-pact/src/**/*.ves"]),
     manifest = "packages/vesper-check-pact/Loom.toml",
     visibility = ["//visibility:public"],
-    deps = [":check_data_package"],
+    deps = [
+        ":check_data_package",
+        "//crates/vesper-pact:port_package",
+    ],
 )
 
 vesper_package(
@@ -1435,24 +1442,31 @@ vesper_package(
 
 vesper_package(
     name = "std_fs_package",
-    srcs = glob(["packages/vesper-std/fs/src/**/*.ves"]),
+    srcs = glob(["packages/vesper-std/fs/src/**/*.ves", "packages/vesper-std/fs/src-wasip2/**/*.ves"]),
     manifest = "packages/vesper-std/fs/Loom.toml",
     visibility = ["//visibility:public"],
-    vsys = ["packages/vesper-std/fs/fs.vsys"],
+    vsys = glob(["packages/vesper-std/fs/fs-*.vsys"]),
 )
 
 vesper_package(
     name = "std_process_package",
-    srcs = glob(["packages/vesper-std/process/src/**/*.ves"]),
+    srcs = glob([
+        "packages/vesper-std/process/src/**/*.ves",
+        "packages/vesper-std/process/src-windows/**/*.ves",
+    ]),
     manifest = "packages/vesper-std/process/Loom.toml",
     visibility = ["//visibility:public"],
-    vsys = ["packages/vesper-std/process/process.vsys"],
+    vsys = glob(["packages/vesper-std/process/process-*.vsys"]),
     deps = [":std_fs_package"],
 )
 
 vesper_package(
     name = "std_env_package",
-    srcs = glob(["packages/vesper-std/env/src/**/*.ves", "packages/vesper-std/env/src-wasip2/**/*.ves"]),
+    srcs = glob([
+        "packages/vesper-std/env/src/**/*.ves",
+        "packages/vesper-std/env/src-wasip2/**/*.ves",
+        "packages/vesper-std/env/src-windows/**/*.ves",
+    ]),
     manifest = "packages/vesper-std/env/Loom.toml",
     visibility = ["//visibility:public"],
     vsys = glob(["packages/vesper-std/env/env-*.vsys"]),

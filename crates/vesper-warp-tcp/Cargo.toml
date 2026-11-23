@@ -8,17 +8,18 @@ publish = false
 build = "build.rs"
 
 [features]
-# Forward every ported function to the Vesper library in vesper/.
-vesper-port = ["dep:vesper-port-abi", "dep:vesper-port-harness"]
+# wire (codec + checksum) is unconditionally Vesper (part of #1399).
+# Enabling vesper-port also switches seq, rtt, cc, and conn to Vesper.
+vesper-port = []
 # A deliberately wrong Vesper build, one change per ported module: the port
 # test runs must fail (scripts/test-port-harness.sh and Bazel assert it).
-vesper-port-divergent = ["vesper-port"]
+vesper-port-divergent = []
 
 [dependencies]
-vesper-port-abi = { path = "../vesper-port-abi", optional = true }
+vesper-port-abi = { path = "../vesper-port-abi" }
 
 [build-dependencies]
-vesper-port-harness = { path = "../vesper-port-harness", optional = true }
+vesper-port-harness = { path = "../vesper-port-harness" }
 
 [dev-dependencies]
 vesper-bench = { path = "../vesper-bench" }

@@ -384,3 +384,207 @@ fn float_coefficients_are_constants() {
     assert!(seen > 0, "poly was not emitted");
     assert_eq!(agree(COEFFICIENTS), "33521664");
 }
+
+#[test]
+fn narrow_extend_constant_chains_fold() {
+    let source = "fn clz_like(v: u64, k: u32) -> u64 {
+    if v == 0 {
+        return wrapping_add(64, widen_u64(k));
+    }
+    let mut x = v;
+    let mut n: u64 = 0;
+    if x >> 32 == 0 {
+        n = wrapping_add(n, 32);
+        x = x << 32;
+    }
+    if x >> 48 == 0 {
+        n = wrapping_add(n, 16);
+        x = x << 16;
+    }
+    let y: u32 = wrapping_u32(widen_u64(k));
+    wrapping_add(n, widen_u64(y))
+}
+fn main() -> u64 {
+    wrapping_add(clz_like(0, 10), clz_like(12345, 20))
+}";
+    let c = accepted(source);
+    let (_, clif) = native::object(&c.world, "main").unwrap();
+    assert!(
+        !clif.contains("clz_like::cold#"),
+        "early-return guard should not outline the hot body:\n{clif}"
+    );
+    assert!(
+        clif.matches("ireduce").count() <= 2,
+        "expected constant/round-trip narrow-extend chains to fold:\n{clif}"
+    );
+    assert_eq!(agree(source), "142");
+}
+
+#[test]
+fn sign_extend_round_trips_fold() {
+    let source = "fn sum_signed(x: u8) -> i64 {
+    let a = wrapping_i8(x);
+    let b = wrapping_i8(widen_i64(a));
+    widen_i64(b)
+}
+fn main() -> i64 {
+    wrapping_add(sum_signed(250), sum_signed(7))
+}";
+    let c = accepted(source);
+    let (_, clif) = native::object(&c.world, "main").unwrap();
+    assert!(
+        clif.matches("sextend").count() <= 2,
+        "expected sextend(ireduce(sextend(x))) round-trips to fold:\n{clif}"
+    );
+    assert_eq!(agree(source), "1");
+}
+
+#[test]
+fn trivial_arith_and_bool_extends_fold() {
+    let source = "fn pick(in s: Slice[u8], i: u64) -> u64 {
+    if i < s.len() {
+        match s.try_get(i) {
+            Option::Some(b) => widen_u64(b),
+            Option::None => 0,
+        }
+    } else {
+        99
+    }
+}
+fn main() -> u64 {
+    let mut seq = ChunkSeq::new[u8]();
+    seq.push(7);
+    seq.push(11);
+    let s = seq.as_slice();
+    wrapping_add(pick(in s, 1), pick(in s, 5))
+}";
+    let c = accepted(source);
+    let (_, clif) = native::object(&c.world, "main").unwrap();
+    assert!(
+        !clif.contains("imul_imm"),
+        "expected unit-stride imul_imm x, 1 to fold:\n{clif}"
+    );
+    assert_eq!(agree(source), "110");
+}
+
+#[test]
+fn loop_invariants_hoist_to_preheader() {
+    let source = "fn main() -> u64 {
+    let mut acc: u64 = 0;
+    let end_k: u64 = 3;
+    for k in 0..end_k {
+        let a = wrapping_add(k, 2);
+        let b = wrapping_add(k, 5);
+        for i in 0..10 {
+            let scale = wrapping_mul(a, b);
+            acc = wrapping_add(acc, wrapping_add(i, scale));
+        }
+    }
+    acc
+}";
+    let c = accepted(source);
+    let (_, clif) = native::object(&c.world, "main").unwrap();
+    // `imul` is loop-invariant in the inner `0..10` loop, so it must be
+    // hoisted into the preheader rather than appearing in the same block as
+    // the inner loop body's `iadd`s.
+    let inner_body = clif
+        .split("\n\n")
+        .find(|blk| blk.trim_start().starts_with("block5:"))
+        .unwrap_or("");
+    assert!(
+        !inner_body.is_empty() && !inner_body.contains("imul"),
+        "expected loop-invariant imul to hoist out of inner loop:\n{clif}"
+    );
+    assert_eq!(agree(source), "695");
+}
+
+#[test]
+fn guarded_loop_add_overflow_is_eliminated() {
+    let source = "fn copy_offset(in src: Slice[u8], inout dst: Slice[u8], at: u64) eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+    for i in 0..16 {
+        let b = src[2 + i];
+        dst.set(at + i, b);
+    }
+}
+fn main() -> u64 {
+    let mut a = ChunkSeq::new[u8]();
+    let mut b = ChunkSeq::new[u8]();
+    for i in 0..32 {
+        a.push(wrapping_u8(i));
+        b.push(0);
+    }
+    handle Fail[ArithOverflow] in {
+        handle Fail[RuntimeError] in {
+            copy_offset(in a.as_slice(), inout b.as_slice_mut(), 4);
+            match b.try_get(7) {
+                Option::Some(v) => widen_u64(v),
+                Option::None => 999,
+            }
+        } with {
+            return x => x,
+            raise(_, _) => 998,
+        }
+    } with {
+        return x => x,
+        raise(_, _) => 997,
+    }
+}";
+    let c = accepted(source);
+    let (_, clif) = native::object(&c.world, "main").unwrap();
+    assert_eq!(agree(source), "5");
+    let fast_body = clif
+        .split("\n\n")
+        .find(|blk| blk.contains("uload8") && blk.contains("istore8"))
+        .unwrap_or("");
+    assert!(
+        !fast_body.is_empty() && !fast_body.contains("icmp ult"),
+        "expected guarded fast-loop iadd overflow check to be eliminated and body merged:\n{clif}"
+    );
+}
+
+#[test]
+fn guarded_loop_add_const_offset_overflow_is_eliminated() {
+    let source = "fn copy_two_halves(in src: Slice[u8], inout dst: Slice[u8], at: u64) eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+    for i in 0..16 {
+        let b = src[i];
+        dst.set(at + i, b);
+        dst.set(at + 16 + i, b);
+    }
+}
+fn main() -> u64 {
+    let mut a = ChunkSeq::new[u8]();
+    let mut b = ChunkSeq::new[u8]();
+    for i in 0..16 {
+        a.push(wrapping_u8(i));
+    }
+    for _ in 0..40 {
+        b.push(0);
+    }
+    handle Fail[ArithOverflow] in {
+        handle Fail[RuntimeError] in {
+            copy_two_halves(in a.as_slice(), inout b.as_slice_mut(), 4);
+            match b.try_get(23) {
+                Option::Some(v) => widen_u64(v),
+                Option::None => 999,
+            }
+        } with {
+            return x => x,
+            raise(_, _) => 998,
+        }
+    } with {
+        return x => x,
+        raise(_, _) => 997,
+    }
+}";
+    let c = accepted(source);
+    let (_, clif) = native::object(&c.world, "main").unwrap();
+    assert_eq!(agree(source), "3");
+    let fast_body = clif
+        .split("\n\n")
+        .find(|blk| blk.contains("uload8") && blk.contains("istore8"))
+        .unwrap_or("");
+    assert!(
+        !fast_body.is_empty() && !fast_body.contains("icmp ult"),
+        "expected guarded fast-loop iadd+const overflow checks to be eliminated and body merged:\n{clif}"
+    );
+}

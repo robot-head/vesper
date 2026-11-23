@@ -1,0 +1,2210 @@
+// Coherence-gated Pact session for `@vesper/check-pact` (SH2 lane 13 part 2b).
+//
+// Lowers checked declarations + metadata directly to `@vesper/pact` (`program_check`,
+// `coherence`, `solver_new`, `solve_query`), verifies modal well-formedness and
+// returns revision-bound query answers without intermediate DTOs.
+
+use @vesper/check-data::input::{
+    Ctx,
+    Reader,
+    read_ctx
+};
+use @vesper/check-data::names::{
+    Names
+};
+use @vesper/check-data::{
+    pack_text
+};
+use @vesper/check-data::types::{
+    EffNode,
+    TyKind,
+    TyMode,
+    vars_new
+};
+
+const K_NAMED: u8 = TyKind::Named;
+const K_ROW: u8 = TyKind::Row;
+const K_TUPLE: u8 = TyKind::Tuple;
+const M_COPY: u8 = TyMode::Copy;
+const M_LINEAR: u8 = TyMode::Linear;
+use @vesper/check-data::util::{
+    add,
+    inc,
+    n32,
+    u32_at,
+    u64_at,
+    u8_at,
+    w
+};
+use @vesper/pact::{
+    S,
+    coherence,
+    program_check,
+    solver_new
+};
+use @vesper/pact::diag::{
+    sort_diags
+};
+use @vesper/pact::program::{
+    rd_env,
+    rd_slist,
+    rd_term
+};
+use @vesper/pact::query::{
+    solve_query
+};
+use @vesper/pact::render::{
+    lit,
+    num,
+    r_arg,
+    r_failure,
+    r_goal,
+    r_id,
+    r_source,
+    r_var
+};
+use @vesper/pact::term::{
+    am_mode,
+    am_multi,
+    am_noninj,
+    am_scoped,
+    am_self,
+    b_canon,
+    b_named,
+    b_var,
+    d_node,
+    fa,
+    fb,
+    fc,
+    g_impl,
+    g_mode,
+    g_peq,
+    g_row,
+    kd_brand,
+    kd_row,
+    kd_type,
+    kid,
+    l_eff,
+    m_const,
+    m_var,
+    nlen,
+    none,
+    q_ambig,
+    q_nosol,
+    q_over,
+    q_proven,
+    q_unsup,
+    st_alias,
+    st_assume,
+    st_cohyp,
+    st_conf,
+    st_mode,
+    st_norm,
+    st_passume,
+    st_pconf,
+    st_rigid,
+    sw,
+    t_ctor,
+    t_proj,
+    t_var,
+    tg,
+    un_dup,
+    un_mixed,
+    vbound,
+    vidx,
+    vinf,
+    vkind,
+    vph
+};
+use self::decl::{
+    Conf,
+    Decls,
+    Gen,
+    TRef,
+    TraitRow,
+    read_decls
+};
+use self::frontend::{
+    Fe,
+    declaration_pass,
+    fe_new
+};
+use self::sha256::{
+    sha256_hex
+};
+use self::session_input::{
+    QArg,
+    QGoal,
+    QuerySpec,
+    SessionMeta,
+    mode_debug_name,
+    put_num,
+    put_quoted_sym,
+    put_str,
+    put_sym,
+    read_query,
+    read_session_meta,
+    valid_pkg_name,
+    valid_pkg_ver
+};
+use self::session_tables::{
+    DiagSink,
+    NONE64,
+    ORIGIN_TUPLE,
+    Tables,
+    build_tables,
+    diag_sink_new,
+    emit_line,
+    empty_tables,
+    find_assoc_idx,
+    put_def_path,
+    rename_ids,
+    render_query_text,
+    resolve_effect_id,
+    resolve_model_id,
+    resolve_trait_id,
+    resolve_type_id
+};
+use self::tyops::{
+    Sy,
+    contains_projection,
+    conform_type,
+    is_projection,
+    proj_assoc,
+    proj_self,
+    proj_trait,
+    proj_trait_ty,
+    row_arg,
+    sy_new,
+    trait_has_assoc
+};
+
+const NONE32: u32 = 4294967295;
+const MAX_TUPLE: u64 = 12;
+const UNKNOWN_MODE: u8 = 255;
+
+const POS_TEMPLATE: u8 = 0;
+const POS_ENV: u8 = 1;
+const POS_GOAL: u8 = 2;
+
+const FAIL_OK: u8 = 0;
+const FAIL_INVALID: u8 = 1;
+const FAIL_UNSUP: u8 = 2;
+
+pub struct PactSession {
+    pub ok: bool,
+    pub c: Ctx,
+    pub d: Decls,
+    pub sy: Sy,
+    pub tb: Tables,
+    pub im_conf_idx: ChunkSeq[u32],
+    pub mo_conf_idx: ChunkSeq[u32],
+    pub out: ChunkSeq[u8],
+    pub revision: ChunkSeq[u8],
+    pub s: S,
+}
+
+struct Scope {
+    pub names: ChunkSeq[u32],
+    pub kinds: ChunkSeq[u8],
+    pub vars: ChunkSeq[u64],
+    pub bounds: ChunkSeq[u8],
+    pub infer_kinds: ChunkSeq[u8],
+    pub infer_names: ChunkSeq[u32],
+    pub infer_used: ChunkSeq[bool],
+    pub next_brand: u64,
+    pub pos: u8,
+    pub status: u8,
+    pub err: ChunkSeq[u8],
+}
+
+fn scope_new(pos: u8) -> Scope {
+    Scope {
+        names: ChunkSeq::new[u32](),
+        kinds: ChunkSeq::new[u8](),
+        vars: ChunkSeq::new[u64](),
+        bounds: ChunkSeq::new[u8](),
+        infer_kinds: ChunkSeq::new[u8](),
+        infer_names: ChunkSeq::new[u32](),
+        infer_used: ChunkSeq::new[bool](),
+        next_brand: 0,
+        pos: pos,
+        status: FAIL_OK,
+        err: ChunkSeq::new[u8](),
+    }
+}
+
+fn fail_invalid(inout sc: Scope, in msg: Str) {
+    if sc.status == FAIL_OK {
+        sc.status = FAIL_INVALID;
+        put_str(inout sc.err, in msg);
+    }
+}
+
+fn scope_push(inout sc: Scope, name: u32, kind: u8, var: u64, bound: u8) {
+    sc.names.push(name);
+    sc.kinds.push(kind);
+    sc.vars.push(var);
+    sc.bounds.push(bound);
+}
+
+fn scope_find(in sc: Scope, name: u32) -> u64 {
+    for i in 0..sc.names.len() {
+        if u32_at(in sc.names, i) == name {
+            return i;
+        }
+    }
+    NONE64
+}
+
+fn mark_var_used(inout sc: Scope, v: u64) {
+    if vkind(v) == 2 {
+        let idx = vidx(v);
+        if idx < sc.infer_used.len() {
+            let _ = sc.infer_used.try_set(idx, true);
+        }
+    }
+}
+
+fn var_bound_mode(in sc: Scope, v: u64) -> u8 {
+    if vkind(v) == 2 {
+        return UNKNOWN_MODE;
+    }
+    for i in 0..sc.vars.len() {
+        if u64_at(in sc.vars, i) == v && widen_u64(u8_at(in sc.kinds, i)) == kd_type() {
+            return u8_at(in sc.bounds, i);
+        }
+    }
+    2
+}
+
+fn join_mode_opt(a: u8, b: u8) -> u8 {
+    if a == UNKNOWN_MODE || b == UNKNOWN_MODE {
+        return UNKNOWN_MODE;
+    }
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+fn alloc_implicit_brand(inout sc: Scope, inout names: Names) -> u64 {
+    let idx = sc.infer_kinds.len();
+    let bi = sc.next_brand;
+    sc.next_brand = inc(bi);
+    let mut nb: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put_str(inout nb, "$brand");
+    put_num(inout nb, bi);
+    let bsym = names.intern(in nb.as_slice());
+    sc.infer_kinds.push(wrapping_u8(kd_brand()));
+    sc.infer_names.push(bsym);
+    sc.infer_used.push(true);
+    vinf(idx)
+}
+
+fn find_unique_assoc_trait(in c: Ctx, in d: Decls, in tb: Tables, assoc: u32, inout sc: Scope)
+    -> u64 {
+    let mut found = NONE64;
+    let mut cnt: u64 = 0;
+    for i in 0..tb.tr_decl_idx.len() {
+        let tr = d.trait_row(w(u32_at(in tb.tr_decl_idx, i)));
+        if trait_has_assoc(in d, tr, assoc) {
+            found = i;
+            cnt = inc(cnt);
+        }
+    }
+    if cnt == 1 {
+        return found;
+    }
+    if cnt == 0 {
+        sc.status = FAIL_INVALID;
+        put_str(inout sc.err, "no trait declares an associated type '");
+        put_sym(inout sc.err, in c.names, assoc);
+        sc.err.push(39);
+    } else {
+        sc.status = FAIL_INVALID;
+        put_str(inout sc.err, "associated type '");
+        put_sym(inout sc.err, in c.names, assoc);
+        put_str(inout sc.err, "' is declared by several traits; write <T as Trait>::");
+        put_sym(inout sc.err, in c.names, assoc);
+    }
+    NONE64
+}
+
+fn kind_name(k: u64) -> Str {
+    if k == 0 {
+        "Type"
+    } else if k == 1 {
+        "Mode"
+    } else if k == 2 {
+        "Row"
+    } else if k == 3 {
+        "Brand"
+    } else {
+        "Capability"
+    }
+}
+
+fn emit_bounds_err(
+    inout sc: Scope,
+    in c: Ctx,
+    in tb: Tables,
+    pname: u32,
+    bound: u8,
+    got_m: u8,
+    what_kind: u8,
+    what_pkg: u64,
+    what_name: u32
+) {
+    if got_m == UNKNOWN_MODE {
+        if sc.pos == POS_GOAL {
+            return;
+        }
+        sc.status = FAIL_UNSUP;
+        put_str(inout sc.err, "cannot establish the bound `");
+        put_sym(inout sc.err, in c.names, pname);
+        put_str(inout sc.err, ": mod ");
+        put_str(inout sc.err, in mode_debug_name(bound));
+        put_str(inout sc.err, "` of `");
+        put_def_path(inout sc.err, in tb, in c.names, what_kind, what_pkg, what_name);
+        put_str(inout sc.err, "` for a projection argument");
+        return;
+    }
+    if got_m > bound {
+        sc.status = FAIL_INVALID;
+        put_str(inout sc.err, "argument of mode ");
+        put_str(inout sc.err, in mode_debug_name(got_m));
+        put_str(inout sc.err, " for parameter `");
+        put_sym(inout sc.err, in c.names, pname);
+        put_str(inout sc.err, ": mod ");
+        put_str(inout sc.err, in mode_debug_name(bound));
+        put_str(inout sc.err, "` of `");
+        put_def_path(inout sc.err, in tb, in c.names, what_kind, what_pkg, what_name);
+        sc.err.push(96);
+    }
+}
+
+// Shared recursive lowerer from AST type `ty` into `@vesper/pact` words (`out`).
+// Returns upper modal bound (`0..=2` or `UNKNOWN_MODE`).
+fn lower_ty(
+    inout c: Ctx,
+    in d: Decls,
+    sy: Sy,
+    in tb: Tables,
+    inout sc: Scope,
+    ty: u32,
+    inout out: ChunkSeq[u64]
+) -> u8 {
+    if sc.status != FAIL_OK {
+        return UNKNOWN_MODE;
+    }
+    if is_projection(in c.types, sy, ty) {
+        let tname = proj_trait(in c.types, sy, ty);
+        let assoc = proj_assoc(in c.types, ty);
+        let tid = if tname == NONE32 {
+            find_unique_assoc_trait(in c, in d, in tb, assoc, inout sc)
+        } else {
+            let x = resolve_trait_id(in tb, tname);
+            if x == NONE64 {
+                sc.status = FAIL_INVALID;
+                put_str(inout sc.err, "unknown trait '");
+                put_sym(inout sc.err, in c.names, tname);
+                put_str(inout sc.err, "' in a projection");
+            }
+            x
+        };
+        if sc.status != FAIL_OK {
+            return UNKNOWN_MODE;
+        }
+        let aid = find_assoc_idx(in tb, tid, assoc);
+        if aid == NONE64 {
+            sc.status = FAIL_INVALID;
+            put_def_path(
+                inout sc.err,
+                in tb,
+                in c.names,
+                2,
+                tb.local_pkg,
+                u32_at(in tb.tr_name, tid)
+            );
+            put_str(inout sc.err, " has no associated type `");
+            put_sym(inout sc.err, in c.names, assoc);
+            sc.err.push(96);
+            return UNKNOWN_MODE;
+        }
+        out.push(t_proj());
+        out.push(tid);
+        let _ = lower_ty(inout c, in d, sy, in tb, inout sc, proj_self(in c.types, ty), inout out);
+        if sc.status != FAIL_OK {
+            return UNKNOWN_MODE;
+        }
+        let tt = proj_trait_ty(in c.types, ty);
+        let arity = c.types.arity(tt);
+        let tr_pn = w(u32_at(in tb.tr_pn, tid));
+        if arity != tr_pn {
+            sc.status = FAIL_INVALID;
+            put_def_path(
+                inout sc.err,
+                in tb,
+                in c.names,
+                2,
+                tb.local_pkg,
+                u32_at(in tb.tr_name, tid)
+            );
+            put_str(inout sc.err, " expects ");
+            put_num(inout sc.err, tr_pn);
+            put_str(inout sc.err, " argument(s), got ");
+            put_num(inout sc.err, arity);
+            return UNKNOWN_MODE;
+        }
+        out.push(arity);
+        let tr_pa = w(u32_at(in tb.tr_pa, tid));
+        for j in 0..arity {
+            let pk = widen_u64(u8_at(in tb.tr_pkinds, add(tr_pa, j)));
+            let a = c.types.arg(tt, j);
+            if pk == kd_row() {
+                lower_row_arg_bare(inout c, in d, sy, in tb, inout sc, a, inout out);
+            } else {
+                let _ = lower_ty(inout c, in d, sy, in tb, inout sc, a, inout out);
+            }
+            if sc.status != FAIL_OK {
+                return UNKNOWN_MODE;
+            }
+        }
+        if sc.pos == POS_GOAL {
+            let bv = alloc_implicit_brand(inout sc, inout c.names);
+            out.push(b_var());
+            out.push(bv);
+        } else {
+            out.push(b_canon());
+        }
+        out.push(aid);
+        return UNKNOWN_MODE;
+    }
+
+    let n = c.types.node(ty);
+    if n.kind == K_NAMED {
+        if n.n == 0 {
+            let pi = scope_find(in sc, n.name);
+            if pi != NONE64 {
+                let pk = widen_u64(u8_at(in sc.kinds, pi));
+                if pk != kd_type() {
+                    sc.status = FAIL_INVALID;
+                    put_str(inout sc.err, "parameter `");
+                    put_sym(inout sc.err, in c.names, n.name);
+                    put_str(inout sc.err, "` has kind ");
+                    put_str(inout sc.err, in kind_name(pk));
+                    put_str(inout sc.err, ", used as Type");
+                    return UNKNOWN_MODE;
+                }
+                let v = u64_at(in sc.vars, pi);
+                mark_var_used(inout sc, v);
+                out.push(t_var());
+                out.push(v);
+                return var_bound_mode(in sc, v);
+            }
+        }
+        let cid = resolve_type_id(in tb, in c.names, tb.local_pkg, n.name);
+        if cid == NONE64 {
+            sc.status = FAIL_INVALID;
+            put_str(inout sc.err, "unknown type `");
+            put_sym(inout sc.err, in c.names, n.name);
+            put_str(inout sc.err, "` in ");
+            put_sym(inout sc.err, in c.names, tb.pkg_str(tb.local_pkg));
+            return UNKNOWN_MODE;
+        }
+        let n_src = w(u32_at(in tb.ty_pn, cid));
+        if w(n.n) != n_src {
+            sc.status = FAIL_INVALID;
+            sc.err.push(96);
+            put_def_path(
+                inout sc.err,
+                in tb,
+                in c.names,
+                0,
+                u64_at(in tb.ty_pkg, cid),
+                u32_at(in tb.ty_name, cid)
+            );
+            put_str(inout sc.err, "` expects ");
+            put_num(inout sc.err, n_src);
+            put_str(inout sc.err, " argument(s), got ");
+            put_num(inout sc.err, w(n.n));
+            return UNKNOWN_MODE;
+        }
+        let pa = w(u32_at(in tb.ty_pa, cid));
+        let mut arg_modes: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](n_src);
+        out.push(t_ctor());
+        out.push(cid);
+        out.push(n_src);
+        for j in 0..n_src {
+            let pk = widen_u64(u8_at(in tb.ty_pkinds, add(pa, j)));
+            let arg_ty = c.types.arg(ty, j);
+            if pk == kd_row() {
+                lower_row_arg_bare(inout c, in d, sy, in tb, inout sc, arg_ty, inout out);
+                arg_modes.push(UNKNOWN_MODE);
+            } else {
+                let am = lower_ty(inout c, in d, sy, in tb, inout sc, arg_ty, inout out);
+                arg_modes.push(am);
+            }
+            if sc.status != FAIL_OK {
+                return UNKNOWN_MODE;
+            }
+        }
+        let cpkg = u64_at(in tb.ty_pkg, cid);
+        let cname = u32_at(in tb.ty_name, cid);
+        for j in 0..n_src {
+            if widen_u64(u8_at(in tb.ty_pkinds, add(pa, j))) == kd_type() {
+                let bound = u8_at(in tb.ty_pbounds, add(pa, j));
+                if bound < 2 {
+                    emit_bounds_err(
+                        inout sc,
+                        in c,
+                        in tb,
+                        u32_at(in tb.ty_pnames, add(pa, j)),
+                        bound,
+                        u8_at(in arg_modes, j),
+                        0,
+                        cpkg,
+                        cname
+                    );
+                    if sc.status != FAIL_OK {
+                        return UNKNOWN_MODE;
+                    }
+                }
+            }
+        }
+        let mut res_mode = u8_at(in tb.ty_base, cid);
+        let ja = w(u32_at(in tb.ty_ja, cid));
+        let jn = w(u32_at(in tb.ty_jn, cid));
+        for ji in 0..jn {
+            let pidx = w(u32_at(in tb.ty_joins, add(ja, ji)));
+            res_mode = join_mode_opt(res_mode, u8_at(in arg_modes, pidx));
+        }
+        return res_mode;
+    }
+
+    if n.kind == K_TUPLE {
+        if n.n == 0 {
+            out.push(t_ctor());
+            out.push(tb.unit_ctor_id);
+            out.push(0);
+            return M_COPY;
+        }
+        let k = w(n.n);
+        if k > MAX_TUPLE {
+            sc.status = FAIL_UNSUP;
+            put_str(inout sc.err, "tuple arity ");
+            put_num(inout sc.err, k);
+            put_str(inout sc.err, " exceeds the bridge's ");
+            put_num(inout sc.err, MAX_TUPLE);
+            return UNKNOWN_MODE;
+        }
+        let cid = u64_at(in tb.tuple_ctor_ids, k);
+        out.push(t_ctor());
+        out.push(cid);
+        out.push(k);
+        let mut res_mode = M_COPY;
+        for i in 0..k {
+            let am = lower_ty(inout c, in d, sy, in tb, inout sc, c.types.arg(ty, i), inout out);
+            if sc.status != FAIL_OK {
+                return UNKNOWN_MODE;
+            }
+            res_mode = join_mode_opt(res_mode, am);
+        }
+        return res_mode;
+    }
+
+    if n.kind == K_ROW {
+        fail_invalid(inout sc, "an effect row is not a type");
+        return UNKNOWN_MODE;
+    }
+    fail_invalid(inout sc, "unresolved or unsupported source type");
+    UNKNOWN_MODE
+}
+
+// Lowers a generic argument whose expected kind is `Row`: if written as a bare
+// `K_NAMED` matching a `Row` parameter in scope (from `dto` on `Type::Named`),
+// emits an open empty row `[var]`, else lowers `row` directly.
+fn lower_row_arg_bare(
+    inout c: Ctx,
+    in d: Decls,
+    sy: Sy,
+    in tb: Tables,
+    inout sc: Scope,
+    a: u32,
+    inout out: ChunkSeq[u64]
+) {
+    let n = c.types.node(a);
+    if n.kind == K_NAMED && n.n == 0 {
+        let pi = scope_find(in sc, n.name);
+        if pi != NONE64 && widen_u64(u8_at(in sc.kinds, pi)) == kd_row() {
+            let v = u64_at(in sc.vars, pi);
+            mark_var_used(inout sc, v);
+            out.push(g_row());
+            out.push(0);
+            out.push(v);
+            return;
+        }
+    }
+    if n.kind == K_ROW {
+        lower_row(inout c, in d, sy, in tb, inout sc, a, inout out);
+        return;
+    }
+    sc.status = FAIL_INVALID;
+    put_str(inout sc.err, "expected a Row argument");
+}
+
+// Lowers an explicit effect-row argument (applying `row_arg` when needed).
+fn lower_row_source(
+    inout c: Ctx,
+    in d: Decls,
+    sy: Sy,
+    in tb: Tables,
+    inout sc: Scope,
+    a: u32,
+    inout out: ChunkSeq[u64]
+) {
+    let rty = row_arg(inout c.types, a);
+    lower_row(inout c, in d, sy, in tb, inout sc, rty, inout out);
+}
+
+fn lower_row(
+    inout c: Ctx,
+    in d: Decls,
+    sy: Sy,
+    in tb: Tables,
+    inout sc: Scope,
+    row_ty: u32,
+    inout out: ChunkSeq[u64]
+) {
+    if sc.status != FAIL_OK {
+        return;
+    }
+    let n = c.types.node(row_ty);
+    if n.kind != K_ROW {
+        sc.status = FAIL_INVALID;
+        put_str(inout sc.err, "expected a Row argument");
+        return;
+    }
+    let row = c.types.row(n.r2);
+    let rn = w(row.n);
+
+    // Resolve each label's EffectId and verify capability labels & arities before sorting.
+    let mut lbl_eff: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](rn);
+    let mut lbl_idx: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](rn);
+    for i in 0..rn {
+        let e = c.types.effect_at(add(w(row.a), i));
+        if e.label != 0 {
+            let lsym = wrapping_sub(e.label, 1);
+            if c.names.size(lsym) > 0 && c.names.byte(lsym, 0) == 36 {
+                sc.status = FAIL_INVALID;
+                put_str(inout sc.err, "checker-internal capability label ");
+                put_quoted_sym(inout sc.err, in c.names, lsym);
+                put_str(inout sc.err, " is not a stable source name");
+                return;
+            }
+            sc.status = FAIL_INVALID;
+            put_str(inout sc.err, "unknown Capability parameter `");
+            put_sym(inout sc.err, in c.names, lsym);
+            sc.err.push(96);
+            return;
+        }
+        let eid = resolve_effect_id(in tb, tb.local_pkg, e.name);
+        if eid == NONE64 {
+            sc.status = FAIL_INVALID;
+            put_str(inout sc.err, "unknown effect `");
+            put_sym(inout sc.err, in c.names, e.name);
+            put_str(inout sc.err, "` in ");
+            put_sym(inout sc.err, in c.names, tb.pkg_str(tb.local_pkg));
+            return;
+        }
+        lbl_eff.push(eid);
+        lbl_idx.push(i);
+    }
+
+    // Sort labels by `EffectId` ascending (matching Pact `LabelKey`).
+    for i in 1..rn {
+        let mut j = i;
+        loop {
+            if j == 0 {
+                break;
+            }
+            let pj = wrapping_sub(j, 1);
+            if u64_at(in lbl_eff, pj) <= u64_at(in lbl_eff, j) {
+                break;
+            }
+            let e1 = u64_at(in lbl_eff, pj);
+            let e2 = u64_at(in lbl_eff, j);
+            let _ = lbl_eff.try_set(pj, e2);
+            let _ = lbl_eff.try_set(j, e1);
+            let x1 = u64_at(in lbl_idx, pj);
+            let x2 = u64_at(in lbl_idx, j);
+            let _ = lbl_idx.try_set(pj, x2);
+            let _ = lbl_idx.try_set(j, x1);
+            j = pj;
+        }
+    }
+    for i in 1..rn {
+        let eid = u64_at(in lbl_eff, i);
+        if u64_at(in lbl_eff, wrapping_sub(i, 1)) == eid {
+            sc.status = FAIL_UNSUP;
+            put_str(inout sc.err, "effect row repeats ");
+            put_def_path(
+                inout sc.err,
+                in tb,
+                in c.names,
+                1,
+                u64_at(in tb.ef_pkg, eid),
+                u32_at(in tb.ef_name, eid)
+            );
+            put_str(inout sc.err, "; duplicate labels are outside Pact's fragment");
+            return;
+        }
+    }
+
+    let mut tail_word = none();
+    if row.tail != 0 {
+        let tsym = wrapping_sub(row.tail, 1);
+        let pi = scope_find(in sc, tsym);
+        if pi == NONE64 {
+            sc.status = FAIL_INVALID;
+            put_str(inout sc.err, "unknown Row parameter `");
+            put_sym(inout sc.err, in c.names, tsym);
+            sc.err.push(96);
+            return;
+        }
+        let pk = widen_u64(u8_at(in sc.kinds, pi));
+        if pk != kd_row() {
+            sc.status = FAIL_INVALID;
+            put_str(inout sc.err, "parameter `");
+            put_sym(inout sc.err, in c.names, tsym);
+            put_str(inout sc.err, "` has kind ");
+            put_str(inout sc.err, in kind_name(pk));
+            put_str(inout sc.err, ", used as Row");
+            return;
+        }
+        tail_word = u64_at(in sc.vars, pi);
+        mark_var_used(inout sc, tail_word);
+    }
+
+    out.push(g_row());
+    out.push(rn);
+    for i in 0..rn {
+        let eid = u64_at(in lbl_eff, i);
+        let e = c.types.effect_at(add(w(row.a), u64_at(in lbl_idx, i)));
+        let e_pn = w(u32_at(in tb.ef_pn, eid));
+        if w(e.n) != e_pn {
+            sc.status = FAIL_INVALID;
+            put_str(inout sc.err, "effect `");
+            put_def_path(
+                inout sc.err,
+                in tb,
+                in c.names,
+                1,
+                u64_at(in tb.ef_pkg, eid),
+                u32_at(in tb.ef_name, eid)
+            );
+            put_str(inout sc.err, "` expects ");
+            put_num(inout sc.err, e_pn);
+            put_str(inout sc.err, " argument(s), got ");
+            put_num(inout sc.err, w(e.n));
+            return;
+        }
+        let e_pa = w(u32_at(in tb.ef_pa, eid));
+        let mut arg_modes: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](e_pn);
+        out.push(l_eff());
+        out.push(eid);
+        out.push(e_pn);
+        for j in 0..e_pn {
+            let pk = widen_u64(u8_at(in tb.ef_pkinds, add(e_pa, j)));
+            let arg_ty = u32_at(in c.types.items, add(w(e.a), j));
+            if pk == kd_row() {
+                lower_row_arg_bare(inout c, in d, sy, in tb, inout sc, arg_ty, inout out);
+                arg_modes.push(UNKNOWN_MODE);
+            } else {
+                let am = lower_ty(inout c, in d, sy, in tb, inout sc, arg_ty, inout out);
+                arg_modes.push(am);
+            }
+            if sc.status != FAIL_OK {
+                return;
+            }
+        }
+        let epkg = u64_at(in tb.ef_pkg, eid);
+        let ename = u32_at(in tb.ef_name, eid);
+        for j in 0..e_pn {
+            if widen_u64(u8_at(in tb.ef_pkinds, add(e_pa, j))) == kd_type() {
+                let bound = u8_at(in tb.ef_pbounds, add(e_pa, j));
+                if bound < 2 {
+                    emit_bounds_err(
+                        inout sc,
+                        in c,
+                        in tb,
+                        u32_at(in tb.ef_pnames, add(e_pa, j)),
+                        bound,
+                        u8_at(in arg_modes, j),
+                        1,
+                        epkg,
+                        ename
+                    );
+                    if sc.status != FAIL_OK {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+    out.push(tail_word);
+}
+
+fn lower_tref_from_ast(
+    inout c: Ctx,
+    in d: Decls,
+    sy: Sy,
+    in tb: Tables,
+    inout sc: Scope,
+    self_ty: u32,
+    r: TRef,
+    inout out: ChunkSeq[u64]
+) {
+    let tid = resolve_trait_id(in tb, r.name);
+    if tid == NONE64 {
+        sc.status = FAIL_INVALID;
+        put_str(inout sc.err, "unknown trait '");
+        put_sym(inout sc.err, in c.names, r.name);
+        sc.err.push(39);
+        return;
+    }
+    let tr_pn = w(u32_at(in tb.tr_pn, tid));
+    if w(r.xn) != tr_pn {
+        sc.status = FAIL_INVALID;
+        put_def_path(inout sc.err, in tb, in c.names, 2, tb.local_pkg, u32_at(in tb.tr_name, tid));
+        put_str(inout sc.err, " expects ");
+        put_num(inout sc.err, tr_pn);
+        put_str(inout sc.err, " argument(s), got ");
+        put_num(inout sc.err, w(r.xn));
+        return;
+    }
+    out.push(tid);
+    let _ = lower_ty(inout c, in d, sy, in tb, inout sc, self_ty, inout out);
+    if sc.status != FAIL_OK {
+        return;
+    }
+    out.push(tr_pn);
+    let tr_pa = w(u32_at(in tb.tr_pa, tid));
+    for i in 0..tr_pn {
+        let a = d.word(add(w(r.xa), i));
+        let pk = widen_u64(u8_at(in tb.tr_pkinds, add(tr_pa, i)));
+        if pk == kd_row() {
+            lower_row_source(inout c, in d, sy, in tb, inout sc, a, inout out);
+        } else {
+            let _ = lower_ty(inout c, in d, sy, in tb, inout sc, a, inout out);
+        }
+        if sc.status != FAIL_OK {
+            return;
+        }
+    }
+}
+
+fn lower_conformance(
+    inout c: Ctx,
+    in d: Decls,
+    sy: Sy,
+    in tb: Tables,
+    cf: Conf,
+    inout sc: Scope,
+    inout out: ChunkSeq[u64]
+) {
+    out.push(tb.local_pkg);
+    let gn = w(cf.gn);
+    out.push(gn);
+    let mut mode_bounds: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..gn {
+        let g = d.gen(add(w(cf.ga), i));
+        let pk = if g.row {
+            kd_row()
+        } else {
+            kd_type()
+        };
+        out.push(pk);
+        scope_push(inout sc, g.name, wrapping_u8(pk), vbound(i), g.bound);
+        if !g.row && g.bound < 2 {
+            mode_bounds.push(n32(i));
+        }
+    }
+    let cf_r = d.tref(w(cf.tref));
+    lower_tref_from_ast(inout c, in d, sy, in tb, inout sc, cf.self_ty, cf_r, inout out);
+    if sc.status != FAIL_OK {
+        return;
+    }
+
+    let nwhere = add(mode_bounds.len(), w(cf.wn));
+    out.push(nwhere);
+    for i in 0..mode_bounds.len() {
+        let pidx = w(u32_at(in mode_bounds, i));
+        let g = d.gen(add(w(cf.ga), pidx));
+        out.push(g_mode());
+        out.push(t_var());
+        out.push(vbound(pidx));
+        out.push(m_const());
+        out.push(widen_u64(g.bound));
+    }
+    for i in 0..w(cf.wn) {
+        let wh = d.where_row(add(w(cf.wa), i));
+        let wr = d.tref(w(wh.tref));
+        out.push(g_impl());
+        lower_tref_from_ast(inout c, in d, sy, in tb, inout sc, wh.ty, wr, inout out);
+        if sc.status != FAIL_OK {
+            return;
+        }
+        out.push(b_canon());
+    }
+
+    let tid = resolve_trait_id(in tb, cf_r.name);
+    let tr = d.trait_row(w(u32_at(in tb.tr_decl_idx, tid)));
+    let an = w(tr.an);
+    out.push(an);
+    let mut own = vars_new();
+    own.set(sy.self_ty, cf.self_ty);
+    for a_i in 0..an {
+        let as_decl = d.assoc(add(w(tr.aa), a_i));
+        let mut found_ty = NONE32;
+        for b_i in 0..w(cf.bn) {
+            let b = d.bind(add(w(cf.ba), b_i));
+            if b.name == as_decl.name {
+                found_ty = b.ty;
+                break;
+            }
+        }
+        if found_ty == NONE32 {
+            sc.status = FAIL_INVALID;
+            put_str(inout sc.err, "missing associated type `");
+            put_sym(inout sc.err, in c.names, as_decl.name);
+            sc.err.push(96);
+            return;
+        }
+        let mut stack: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        let cty = conform_type(inout c.types, in d, sy, tr, cf, found_ty, in own, inout stack);
+        let _ = lower_ty(inout c, in d, sy, in tb, inout sc, cty, inout out);
+        if sc.status != FAIL_OK {
+            return;
+        }
+    }
+}
+
+fn push_scope_fail(
+    in sc: Scope,
+    in tb: Tables,
+    in names: Names,
+    ss: u64,
+    se: u64,
+    kind: u8,
+    name: u32,
+    inout sink: DiagSink
+) {
+    if sc.status == FAIL_INVALID {
+        emit_line(
+            inout sink.inv,
+            "E0601",
+            ss,
+            se,
+            "BRIDGE0001",
+            in sc.err.as_slice(),
+            in tb,
+            in names,
+            true,
+            kind,
+            tb.local_pkg,
+            name
+        );
+    } else if sc.status == FAIL_UNSUP {
+        emit_line(
+            inout sink.unsup,
+            "E0607",
+            ss,
+            se,
+            "BRIDGE0002",
+            in sc.err.as_slice(),
+            in tb,
+            in names,
+            true,
+            kind,
+            tb.local_pkg,
+            name
+        );
+    }
+}
+
+fn diag_code_str(c: u64) -> Str {
+    if c == 0 {
+        "PACT0001"
+    } else if c == 1 {
+        "PACT0002"
+    } else if c == 2 {
+        "PACT0003"
+    } else if c == 3 {
+        "PACT0004"
+    } else if c == 4 {
+        "PACT0005"
+    } else if c == 5 {
+        "PACT0006"
+    } else if c == 6 {
+        "PACT0007"
+    } else if c == 7 {
+        "PACT0008"
+    } else if c == 8 {
+        "PACT0009"
+    } else if c == 9 {
+        "PACT0101"
+    } else if c == 10 {
+        "PACT0102"
+    } else {
+        "PACT0103"
+    }
+}
+
+fn subject_span_and_info(in tb: Tables, sv: u64, sa: u64) -> (u64, u64, bool, u8, u64, u32) {
+    if sv == 1 && sa < tb.ty_name.len() {
+        return (0, 0, true, 0, u64_at(in tb.ty_pkg, sa), u32_at(in tb.ty_name, sa));
+    }
+    if sv == 2 && sa < tb.ef_name.len() {
+        return (0, 0, true, 1, u64_at(in tb.ef_pkg, sa), u32_at(in tb.ef_name, sa));
+    }
+    if sv == 3 && sa < tb.tr_name.len() {
+        return (
+            u64_at(in tb.tr_span_s, sa),
+            u64_at(in tb.tr_span_e, sa),
+            true,
+            2,
+            tb.local_pkg,
+            u32_at(in tb.tr_name, sa)
+        );
+    }
+    if (sv == 4 || sv == 5) && sa < tb.im_name.len() {
+        return (
+            u64_at(in tb.im_span_s, sa),
+            u64_at(in tb.im_span_e, sa),
+            true,
+            3,
+            tb.local_pkg,
+            u32_at(in tb.im_name, sa)
+        );
+    }
+    if sv == 6 && sa < tb.mo_name.len() {
+        return (
+            u64_at(in tb.mo_span_s, sa),
+            u64_at(in tb.mo_span_e, sa),
+            true,
+            4,
+            tb.local_pkg,
+            u32_at(in tb.mo_name, sa)
+        );
+    }
+    (0, 0, false, 0, 0, 0)
+}
+
+fn format_pact_diags(in s: S, base: u64, in tb: Tables, in names: Names, inout out: ChunkSeq[u8]) {
+    let n = s.dg_code.len();
+    for i in base..n {
+        let off = sw(in s.dg_off, i);
+        let len = sw(in s.dg_len, i);
+        let raw_slice = s.txt[off..add(off, len)];
+        let mut msg: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](len);
+        rename_ids(in raw_slice, in tb, in names, inout msg);
+        let sv = sw(in s.dg_sv, i);
+        let sa = sw(in s.dg_sa, i);
+        let (sp_s, sp_e, has_s, sk, spkg, sname) = subject_span_and_info(in tb, sv, sa);
+        let pcode = diag_code_str(sw(in s.dg_code, i));
+        emit_line(
+            inout out,
+            "E0605",
+            sp_s,
+            sp_e,
+            in pcode,
+            in msg.as_slice(),
+            in tb,
+            in names,
+            has_s,
+            sk,
+            spkg,
+            sname
+        );
+    }
+}
+
+fn push_rev_u64(inout b: ChunkSeq[u8], v: u64) {
+    let mut x = v;
+    for _ in 0..8 {
+        b.push(wrapping_u8(x & 255));
+        x = x >> 8;
+    }
+}
+
+fn push_rev_sym(inout b: ChunkSeq[u8], in names: Names, s: u32) {
+    push_rev_u64(inout b, names.size(s));
+    names.write(s, inout b);
+}
+
+fn compute_revision(in tb: Tables, in names: Names, in words: ChunkSeq[u64], fingerprint: u32)
+    -> ChunkSeq[u8] {
+    let mut b: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put_str(inout b, "vesper-check-pact/revision/v1");
+    b.push(0);
+    push_rev_sym(inout b, in names, tb.pkg0_str);
+    push_rev_sym(inout b, in names, tb.pkg1_str);
+    push_rev_u64(inout b, tb.ty_name.len());
+    for i in 0..tb.ty_name.len() {
+        b.push(1);
+        push_rev_sym(inout b, in names, tb.pkg_str(u64_at(in tb.ty_pkg, i)));
+        push_rev_sym(inout b, in names, u32_at(in tb.ty_name, i));
+        let pa = w(u32_at(in tb.ty_pa, i));
+        let pn = w(u32_at(in tb.ty_pn, i));
+        push_rev_u64(inout b, pn);
+        for j in 0..pn {
+            push_rev_sym(inout b, in names, u32_at(in tb.ty_pnames, add(pa, j)));
+            b.push(u8_at(in tb.ty_pkinds, add(pa, j)));
+            b.push(u8_at(in tb.ty_pbounds, add(pa, j)));
+        }
+    }
+    push_rev_u64(inout b, tb.ef_name.len());
+    for i in 0..tb.ef_name.len() {
+        b.push(2);
+        push_rev_sym(inout b, in names, tb.pkg_str(u64_at(in tb.ef_pkg, i)));
+        push_rev_sym(inout b, in names, u32_at(in tb.ef_name, i));
+        let pa = w(u32_at(in tb.ef_pa, i));
+        let pn = w(u32_at(in tb.ef_pn, i));
+        push_rev_u64(inout b, pn);
+        for j in 0..pn {
+            b.push(u8_at(in tb.ef_pkinds, add(pa, j)));
+            b.push(u8_at(in tb.ef_pbounds, add(pa, j)));
+        }
+    }
+    push_rev_u64(inout b, tb.tr_name.len());
+    for i in 0..tb.tr_name.len() {
+        push_rev_sym(inout b, in names, u32_at(in tb.tr_name, i));
+    }
+    push_rev_u64(inout b, tb.im_name.len());
+    for i in 0..tb.im_name.len() {
+        push_rev_sym(inout b, in names, u32_at(in tb.im_name, i));
+    }
+    push_rev_u64(inout b, tb.mo_name.len());
+    for i in 0..tb.mo_name.len() {
+        push_rev_sym(inout b, in names, u32_at(in tb.mo_name, i));
+    }
+    push_rev_u64(inout b, words.len());
+    for i in 0..words.len() {
+        push_rev_u64(inout b, u64_at(in words, i));
+    }
+    if names.size(fingerprint) > 0 {
+        b.push(0);
+        put_str(inout b, "fingerprints");
+        b.push(0);
+        push_rev_sym(inout b, in names, fingerprint);
+    }
+    sha256_hex(in b.as_slice())
+}
+
+fn empty_s() -> S {
+    let mut w: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](9);
+    w.push(0);
+    w.push(1);
+    for _ in 0..7 {
+        w.push(0);
+    }
+    solver_new(in w.as_slice(), 0, 0, 0)
+}
+
+fn failed_session(sink c: Ctx, sink d: Decls, sy: Sy, sink out: ChunkSeq[u8]) -> PactSession {
+    PactSession {
+        ok: false,
+        c: c,
+        d: d,
+        sy: sy,
+        tb: empty_tables(),
+        im_conf_idx: ChunkSeq::new[u32](),
+        mo_conf_idx: ChunkSeq::new[u32](),
+        out: out,
+        revision: ChunkSeq::new[u8](),
+        s: empty_s(),
+    }
+}
+
+fn validate_identity_or_err(in c: Ctx, in meta: SessionMeta, inout out: ChunkSeq[u8]) -> bool {
+    if !valid_pkg_name(in c.names, meta.pkg_name) {
+        put_str(inout out, "E0600 0 0 package name ");
+        put_quoted_sym(inout out, in c.names, meta.pkg_name);
+        put_str(inout out, " must be non-empty lowercase ASCII [a-z0-9@/-_.]\n");
+        return false;
+    }
+    if !valid_pkg_ver(in c.names, meta.pkg_ver) {
+        put_str(inout out, "E0600 0 0 package version ");
+        put_quoted_sym(inout out, in c.names, meta.pkg_ver);
+        put_str(inout out, " must be non-empty ASCII [A-Za-z0-9+-.]\n");
+        return false;
+    }
+    true
+}
+
+// Opens a full Pact session from packed `session_input` bytes at `r`.
+pub fn session_open_reader(inout r: Reader, in b: Slice[u8]) -> PactSession {
+    let mut c = read_ctx(inout r, in b);
+    let d = read_decls(inout r, in b, in c.nmap, in c.tmap);
+    let meta = read_session_meta(inout r, in b, in c.nmap);
+    let sy = sy_new(inout c.names);
+    let mut out = ChunkSeq::new[u8]();
+
+    if !validate_identity_or_err(in c, in meta, inout out) {
+        return failed_session(c, d, sy, out);
+    }
+
+    let mut fe = fe_new(sy);
+    declaration_pass(inout c, in d, inout fe, inout out);
+    if out.len() > 0 {
+        return failed_session(c, d, sy, out);
+    }
+
+    if c.names.spells(meta.pkg_name, in "@vesper/builtin".as_bytes()) {
+        put_str(inout out, "E0601 0 0 BRIDGE0001: package name @vesper/builtin is reserved\n");
+        return failed_session(c, d, sy, out);
+    }
+
+    let mut sink = diag_sink_new();
+    let tb = build_tables(inout c, in d, in fe, in meta, inout sink);
+    if sink.inv.len() > 0 {
+        return failed_session(c, d, sy, sink.inv);
+    }
+    if sink.unsup.len() > 0 {
+        return failed_session(c, d, sy, sink.unsup);
+    }
+
+    let mut im_conf_idx: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](tb.im_acc_idx.len());
+    for i in 0..tb.im_acc_idx.len() {
+        let ai = w(u32_at(in tb.im_acc_idx, i));
+        im_conf_idx.push(u32_at(in fe.acc_conf, ai));
+    }
+    let mut mo_conf_idx: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](tb.mo_acc_idx.len());
+    for i in 0..tb.mo_acc_idx.len() {
+        let ai = w(u32_at(in tb.mo_acc_idx, i));
+        mo_conf_idx.push(u32_at(in fe.acc_conf, ai));
+    }
+
+    // Lower whole program into `rd_program` words.
+    let mut words: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    words.push(0);
+    words.push(1);
+    words.push(2);
+    words.push(0);
+    words.push(1);
+
+    let nt = tb.ty_name.len();
+    words.push(nt);
+    for i in 0..nt {
+        words.push(i);
+        words.push(u64_at(in tb.ty_pkg, i));
+        let pa = w(u32_at(in tb.ty_pa, i));
+        let pn = w(u32_at(in tb.ty_pn, i));
+        words.push(pn);
+        for j in 0..pn {
+            words.push(widen_u64(u8_at(in tb.ty_pkinds, add(pa, j))));
+        }
+        words.push(widen_u64(u8_at(in tb.ty_base, i)));
+        let ja = w(u32_at(in tb.ty_ja, i));
+        let jn = w(u32_at(in tb.ty_jn, i));
+        words.push(jn);
+        for j in 0..jn {
+            words.push(w(u32_at(in tb.ty_joins, add(ja, j))));
+        }
+    }
+
+    let ne = tb.ef_name.len();
+    words.push(ne);
+    for i in 0..ne {
+        words.push(i);
+        words.push(u64_at(in tb.ef_pkg, i));
+        let pa = w(u32_at(in tb.ef_pa, i));
+        let pn = w(u32_at(in tb.ef_pn, i));
+        words.push(pn);
+        for j in 0..pn {
+            words.push(widen_u64(u8_at(in tb.ef_pkinds, add(pa, j))));
+        }
+    }
+
+    let ntr = tb.tr_name.len();
+    words.push(ntr);
+    for i in 0..ntr {
+        let tr = d.trait_row(w(u32_at(in tb.tr_decl_idx, i)));
+        words.push(i);
+        words.push(tb.local_pkg);
+        let pn = w(u32_at(in tb.tr_pn, i));
+        let pa = w(u32_at(in tb.tr_pa, i));
+        words.push(pn);
+        for j in 0..pn {
+            words.push(widen_u64(u8_at(in tb.tr_pkinds, add(pa, j))));
+        }
+        words.push(w(tr.an));
+        for j in 0..w(tr.an) {
+            let as_d = d.assoc(add(w(tr.aa), j));
+            words.push(m_const());
+            words.push(widen_u64(as_d.bound));
+            words.push(0);
+        }
+        words.push(0);
+    }
+
+    let ni = tb.im_name.len();
+    words.push(ni);
+    for i in 0..ni {
+        let cf = d.conf(w(u32_at(in im_conf_idx, i)));
+        let mut sc = scope_new(POS_TEMPLATE);
+        words.push(i);
+        lower_conformance(inout c, in d, sy, in tb, cf, inout sc, inout words);
+        if sc.status != FAIL_OK {
+            push_scope_fail(
+                in sc,
+                in tb,
+                in c.names,
+                cf.s,
+                cf.e,
+                3,
+                u32_at(in tb.im_name, i),
+                inout sink
+            );
+        }
+    }
+
+    let nm = tb.mo_name.len();
+    words.push(nm);
+    for i in 0..nm {
+        let cf = d.conf(w(u32_at(in mo_conf_idx, i)));
+        let mut sc = scope_new(POS_TEMPLATE);
+        words.push(i);
+        lower_conformance(inout c, in d, sy, in tb, cf, inout sc, inout words);
+        if sc.status != FAIL_OK {
+            push_scope_fail(
+                in sc,
+                in tb,
+                in c.names,
+                cf.s,
+                cf.e,
+                4,
+                u32_at(in tb.mo_name, i),
+                inout sink
+            );
+        }
+    }
+
+    if sink.inv.len() > 0 {
+        return failed_session(c, d, sy, sink.inv);
+    }
+    if sink.unsup.len() > 0 {
+        return failed_session(c, d, sy, sink.unsup);
+    }
+
+    let ws = words.as_slice();
+    let mut sp = program_check(in ws);
+    if sp.dg_code.len() > 0 {
+        format_pact_diags(in sp, 0, in tb, in c.names, inout out);
+        return failed_session(c, d, sy, out);
+    }
+    let mut sco = coherence(in ws);
+    if sco.dg_code.len() > 0 {
+        sort_diags(inout sco, 0);
+        format_pact_diags(in sco, 0, in tb, in c.names, inout out);
+        return failed_session(c, d, sy, out);
+    }
+
+    let revision = compute_revision(in tb, in c.names, in words, meta.fingerprint);
+    let s = solver_new(in ws, meta.max_depth, meta.max_steps, meta.max_fix);
+    PactSession {
+        ok: true,
+        c: c,
+        d: d,
+        sy: sy,
+        tb: tb,
+        im_conf_idx: im_conf_idx,
+        mo_conf_idx: mo_conf_idx,
+        out: out,
+        revision: revision,
+        s: s,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Query solving and `well_formed_goal` re-verification
+
+fn lower_q_goal(
+    inout sess: PactSession,
+    inout sc: Scope,
+    g: QGoal,
+    in spec: QuerySpec,
+    inout out: ChunkSeq[u64]
+) {
+    let tid = resolve_trait_id(in sess.tb, g.trait_name);
+    if tid == NONE64 {
+        sc.status = FAIL_INVALID;
+        put_str(inout sc.err, "unknown trait `");
+        put_sym(inout sc.err, in sess.c.names, g.trait_name);
+        put_str(inout sc.err, "` in ");
+        put_sym(inout sc.err, in sess.c.names, sess.tb.pkg_str(sess.tb.local_pkg));
+        return;
+    }
+    let tr_pn = w(u32_at(in sess.tb.tr_pn, tid));
+    if w(g.arg_n) != tr_pn {
+        sc.status = FAIL_INVALID;
+        put_def_path(
+            inout sc.err,
+            in sess.tb,
+            in sess.c.names,
+            2,
+            sess.tb.local_pkg,
+            u32_at(in sess.tb.tr_name, tid)
+        );
+        put_str(inout sc.err, " expects ");
+        put_num(inout sc.err, tr_pn);
+        put_str(inout sc.err, " argument(s), got ");
+        put_num(inout sc.err, w(g.arg_n));
+        return;
+    }
+
+    out.push(g_impl());
+    out.push(tid);
+    let _ = lower_ty(inout sess.c, in sess.d, sess.sy, in sess.tb, inout sc, g.self_ty, inout out);
+    if sc.status != FAIL_OK {
+        return;
+    }
+    out.push(tr_pn);
+    let tr_pa = w(u32_at(in sess.tb.tr_pa, tid));
+    for i in 0..tr_pn {
+        let qa = match spec.args.try_get(add(w(g.arg_a), i)) {
+            Option::Some(v) => v,
+            Option::None => QArg {
+                is_row: false,
+                ty: 0
+            },
+        };
+        let pk = widen_u64(u8_at(in sess.tb.tr_pkinds, add(tr_pa, i)));
+        let actual_pk = if qa.is_row {
+            kd_row()
+        } else {
+            kd_type()
+        };
+        if pk != actual_pk {
+            // Check bare parameter name rule (`lower.rs:874`).
+            let n = sess.c.types.node(qa.ty);
+            if n.kind == K_NAMED && n.n == 0 {
+                let pi = scope_find(in sc, n.name);
+                if pi != NONE64 && widen_u64(u8_at(in sc.kinds, pi)) == pk {
+                    let v = u64_at(in sc.vars, pi);
+                    mark_var_used(inout sc, v);
+                    if pk == kd_row() {
+                        out.push(g_row());
+                        out.push(0);
+                        out.push(v);
+                        continue;
+                    }
+                }
+            }
+            sc.status = FAIL_INVALID;
+            put_str(inout sc.err, "expected a ");
+            put_str(inout sc.err, in kind_name(pk));
+            put_str(inout sc.err, " argument, got ");
+            put_str(inout sc.err, in kind_name(actual_pk));
+            return;
+        }
+        if pk == kd_row() {
+            lower_row(inout sess.c, in sess.d, sess.sy, in sess.tb, inout sc, qa.ty, inout out);
+        } else {
+            let _ = lower_ty(
+                inout sess.c,
+                in sess.d,
+                sess.sy,
+                in sess.tb,
+                inout sc,
+                qa.ty,
+                inout out
+            );
+        }
+        if sc.status != FAIL_OK {
+            return;
+        }
+    }
+
+    if g.brand_opt != 0 {
+        let msym = wrapping_sub(g.brand_opt, 1);
+        let mid = resolve_model_id(in sess.tb, msym);
+        if mid == NONE64 {
+            sc.status = FAIL_INVALID;
+            put_str(inout sc.err, "unknown model `");
+            put_sym(inout sc.err, in sess.c.names, msym);
+            put_str(inout sc.err, "` in ");
+            put_sym(inout sc.err, in sess.c.names, sess.tb.pkg_str(sess.tb.local_pkg));
+            return;
+        }
+        out.push(b_named());
+        out.push(mid);
+    } else if sc.pos == POS_GOAL {
+        let bv = alloc_implicit_brand(inout sc, inout sess.c.names);
+        out.push(b_var());
+        out.push(bv);
+    } else {
+        out.push(b_canon());
+    }
+}
+
+fn subst_node(in s: S, val_list: u64, in_val: bool, node: u64) -> u64 {
+    if !in_val && tg(in s, node) == t_var() {
+        let v = fa(in s, node);
+        if vkind(v) == 2 {
+            let idx = vidx(v);
+            if idx < nlen(in s, val_list) {
+                return kid(in s, val_list, idx);
+            }
+        }
+    }
+    node
+}
+
+fn subst_upper_mode(
+    in s: S,
+    in tb: Tables,
+    in ph_bounds: ChunkSeq[u8],
+    val_list: u64,
+    in_val: bool,
+    ty: u64
+) -> u8 {
+    let eff_node = subst_node(in s, val_list, in_val, ty);
+    let next_in_val = in_val || (eff_node != ty);
+    let t = tg(in s, eff_node);
+    if t == t_ctor() {
+        let ctor = fa(in s, eff_node);
+        if ctor >= tb.ty_name.len() {
+            return UNKNOWN_MODE;
+        }
+        let mut m = u8_at(in tb.ty_base, ctor);
+        let ja = w(u32_at(in tb.ty_ja, ctor));
+        let jn = w(u32_at(in tb.ty_jn, ctor));
+        let nk = nlen(in s, eff_node);
+        for ji in 0..jn {
+            let pidx = w(u32_at(in tb.ty_joins, add(ja, ji)));
+            if pidx >= nk {
+                return UNKNOWN_MODE;
+            }
+            let km = subst_upper_mode(
+                in s,
+                in tb,
+                in ph_bounds,
+                val_list,
+                next_in_val,
+                kid(in s, eff_node, pidx)
+            );
+            if km == UNKNOWN_MODE {
+                return UNKNOWN_MODE;
+            }
+            if km > m {
+                m = km;
+            }
+        }
+        return m;
+    }
+    if t == t_var() {
+        let v = fa(in s, eff_node);
+        if vkind(v) == 1 {
+            let i = vidx(v);
+            if i < ph_bounds.len() {
+                return u8_at(in ph_bounds, i);
+            }
+        }
+        return UNKNOWN_MODE;
+    }
+    UNKNOWN_MODE
+}
+
+fn wf_subst_node(
+    in s: S,
+    in tb: Tables,
+    in ph_bounds: ChunkSeq[u8],
+    val_list: u64,
+    in_val: bool,
+    node: u64
+) -> bool {
+    let eff = subst_node(in s, val_list, in_val, node);
+    let next_val = in_val || (eff != node);
+    let t = tg(in s, eff);
+    if t == t_ctor() {
+        let ctor = fa(in s, eff);
+        if ctor >= tb.ty_name.len() {
+            return false;
+        }
+        let nk = nlen(in s, eff);
+        let pa = w(u32_at(in tb.ty_pa, ctor));
+        let n_src = w(u32_at(in tb.ty_pn, ctor));
+        for i in 0..nk {
+            if !wf_subst_node(in s, in tb, in ph_bounds, val_list, next_val, kid(in s, eff, i)) {
+                return false;
+            }
+        }
+        for i in 0..n_src {
+            if widen_u64(u8_at(in tb.ty_pkinds, add(pa, i))) == kd_type() {
+                let b = u8_at(in tb.ty_pbounds, add(pa, i));
+                if b < 2 && i < nk {
+                    let um = subst_upper_mode(
+                        in s,
+                        in tb,
+                        in ph_bounds,
+                        val_list,
+                        next_val,
+                        kid(in s, eff, i)
+                    );
+                    if um == UNKNOWN_MODE || um > b {
+                        return false;
+                    }
+                }
+            }
+        }
+        return true;
+    }
+    if t == t_proj() {
+        let tr = fa(in s, eff);
+        if !wf_subst_node(in s, in tb, in ph_bounds, val_list, next_val, fb(in s, tr)) {
+            return false;
+        }
+        for i in 0..nlen(in s, tr) {
+            if !wf_subst_node(in s, in tb, in ph_bounds, val_list, next_val, kid(in s, tr, i)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    if t == g_row() {
+        for i in 0..nlen(in s, eff) {
+            let l = kid(in s, eff, i);
+            if tg(in s, l) == l_eff() {
+                let eid = fa(in s, l);
+                if eid >= tb.ef_name.len() {
+                    return false;
+                }
+                let nk = nlen(in s, l);
+                for j in 0..nk {
+                    if !wf_subst_node(
+                        in s,
+                        in tb,
+                        in ph_bounds,
+                        val_list,
+                        next_val,
+                        kid(in s, l, j)
+                    ) {
+                        return false;
+                    }
+                }
+                let pa = w(u32_at(in tb.ef_pa, eid));
+                let pn = w(u32_at(in tb.ef_pn, eid));
+                for j in 0..pn {
+                    if widen_u64(u8_at(in tb.ef_pkinds, add(pa, j))) == kd_type() {
+                        let b = u8_at(in tb.ef_pbounds, add(pa, j));
+                        if b < 2 && j < nk {
+                            let um = subst_upper_mode(
+                                in s,
+                                in tb,
+                                in ph_bounds,
+                                val_list,
+                                next_val,
+                                kid(in s, l, j)
+                            );
+                            if um == UNKNOWN_MODE || um > b {
+                                return false;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return true;
+    }
+    if t == g_impl() {
+        let tr = fa(in s, eff);
+        if !wf_subst_node(in s, in tb, in ph_bounds, val_list, next_val, fb(in s, tr)) {
+            return false;
+        }
+        for i in 0..nlen(in s, tr) {
+            if !wf_subst_node(in s, in tb, in ph_bounds, val_list, next_val, kid(in s, tr, i)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    true
+}
+
+fn render_from_s_txt(inout sess: PactSession, from_txt: u64, in ph_names: ChunkSeq[u32])
+    -> ChunkSeq[u8] {
+    let mut rendered: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let end = sess.s.txt.len();
+    let mut copied: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](wrapping_sub(end, from_txt));
+    copied.extend(in sess.s.txt[from_txt..end]);
+    sess.s.txt.truncate(from_txt);
+    render_query_text(
+        in copied.as_slice(),
+        in sess.tb,
+        in sess.c.names,
+        in ph_names,
+        inout rendered
+    );
+    rendered
+}
+
+fn push_packed_bytes(inout out: ChunkSeq[u64], status: u64, val: u64, in msg: ChunkSeq[u8]) {
+    out.push(status);
+    out.push(val);
+    let pk = pack_text(in msg);
+    out.extend(in pk.as_slice());
+}
+
+fn push_packed_str(inout out: ChunkSeq[u64], status: u64, val: u64, in msg: Str) {
+    let mut b: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    b.extend(in msg.as_bytes());
+    push_packed_bytes(inout out, status, val, in b);
+}
+
+// Solves one binary-encoded `QuerySpec` on an open `PactSession`.
+// Returns `[status (0=Ok, 1=Err), conf_idx_or_err_tag, packed_text...]`.
+pub struct SolveOutcome {
+    pub status: u8,
+    pub val: u64,
+    pub msg: ChunkSeq[u8],
+}
+
+fn outcome_str(status: u8, val: u64, in s: Str) -> SolveOutcome {
+    let mut msg = ChunkSeq::new[u8]();
+    put_str(inout msg, in s);
+    SolveOutcome {
+        status: status,
+        val: val,
+        msg: msg
+    }
+}
+
+pub fn solve_spec(inout sess: PactSession, in spec: QuerySpec) -> SolveOutcome {
+    if !sess.ok {
+        return outcome_str(1, 0, "pact session is not open");
+    }
+
+    let mut ph_names: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](spec.env_params.len());
+    let mut ph_bounds: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](spec.env_params.len());
+    let mut sc = scope_new(POS_ENV);
+
+    // Encode `env` into `q_words`.
+    let mut env_words: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let np = spec.env_params.len();
+    env_words.push(np);
+    for i in 0..np {
+        let g = match spec.env_params.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => Gen {
+                name: 0,
+                bound: 2,
+                row: false
+            },
+        };
+        let pk = if g.row {
+            kd_row()
+        } else {
+            kd_type()
+        };
+        scope_push(inout sc, g.name, wrapping_u8(pk), vph(i), g.bound);
+        ph_names.push(g.name);
+        ph_bounds.push(g.bound);
+        env_words.push(pk);
+        env_words
+            .push(
+                if g.row {
+                    none()
+                } else {
+                    widen_u64(g.bound)
+                }
+            );
+    }
+
+    let na = spec.assumptions.len();
+    env_words.push(na);
+    for i in 0..na {
+        let a = match spec.assumptions.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => QGoal {
+                self_ty: 0,
+                trait_name: 0,
+                brand_opt: 0,
+                arg_a: 0,
+                arg_n: 0
+            },
+        };
+        lower_q_goal(inout sess, inout sc, a, in spec, inout env_words);
+        if sc.status != FAIL_OK {
+            let mut rendered: ChunkSeq[u8] = ChunkSeq::new[u8]();
+            render_query_text(
+                in sc.err.as_slice(),
+                in sess.tb,
+                in sess.c.names,
+                in ph_names,
+                inout rendered
+            );
+            return SolveOutcome {
+                status: 1,
+                val: 0,
+                msg: rendered
+            };
+        }
+    }
+
+    let ns = spec.scope_at.len();
+    env_words.push(ns);
+    for i in 0..ns {
+        let sa = w(u32_at(in spec.scope_at, i));
+        let sl = w(u32_at(in spec.scope_len, i));
+        env_words.push(sl);
+        for j in 0..sl {
+            let msym = u32_at(in spec.scope_models, add(sa, j));
+            let mid = resolve_model_id(in sess.tb, msym);
+            if mid == NONE64 {
+                let mut msg: ChunkSeq[u8] = ChunkSeq::new[u8]();
+                put_str(inout msg, "unknown model `");
+                put_sym(inout msg, in sess.c.names, msym);
+                put_str(inout msg, "` in ");
+                put_sym(inout msg, in sess.c.names, sess.tb.pkg_str(sess.tb.local_pkg));
+                return SolveOutcome {
+                    status: 1,
+                    val: 0,
+                    msg: msg
+                };
+            }
+            env_words.push(mid);
+        }
+    }
+
+    // Add named inference variables before switching to `POS_GOAL`.
+    let ni = spec.infer_names.len();
+    for i in 0..ni {
+        let iname = u32_at(in spec.infer_names, i);
+        let ikind = u8_at(in spec.infer_kinds, i);
+        scope_push(inout sc, iname, ikind, vinf(i), 2);
+        sc.infer_kinds.push(ikind);
+        sc.infer_names.push(iname);
+        sc.infer_used.push(false);
+    }
+
+    sc.pos = POS_GOAL;
+    let mut goal_words: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    lower_q_goal(inout sess, inout sc, spec.goal, in spec, inout goal_words);
+    if sc.status != FAIL_OK {
+        let mut rendered: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        render_query_text(
+            in sc.err.as_slice(),
+            in sess.tb,
+            in sess.c.names,
+            in ph_names,
+            inout rendered
+        );
+        return SolveOutcome {
+            status: 1,
+            val: 0,
+            msg: rendered
+        };
+    }
+
+    for i in 0..sc.infer_used.len() {
+        let used = match sc.infer_used.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => true,
+        };
+        if !used {
+            let mut msg: ChunkSeq[u8] = ChunkSeq::new[u8]();
+            put_str(inout msg, "inference variable `");
+            put_sym(inout msg, in sess.c.names, u32_at(in sc.infer_names, i));
+            put_str(inout msg, "` does not occur in the goal");
+            return SolveOutcome {
+                status: 1,
+                val: 0,
+                msg: msg
+            };
+        }
+    }
+
+    let mut q_words: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](
+        add(env_words.len(), add(inc(sc.infer_kinds.len()), goal_words.len()))
+    );
+    q_words.extend(in env_words.as_slice());
+    q_words.push(sc.infer_kinds.len());
+    for i in 0..sc.infer_kinds.len() {
+        q_words.push(widen_u64(u8_at(in sc.infer_kinds, i)));
+    }
+    q_words.extend(in goal_words.as_slice());
+
+    let qslice = q_words.as_slice();
+    sess.s.pos = 0;
+    let env_node = rd_env(inout sess.s, in qslice);
+    let binders_node = rd_slist(inout sess.s, in qslice);
+    let goal_node = rd_term(inout sess.s, in qslice);
+
+    let dbase = sess.s.dg_code.len();
+    let txt_base = sess.s.txt.len();
+    sess.s.oob = false;
+    let o = solve_query(inout sess.s, 0, 1, env_node, binders_node, goal_node);
+    if sess.s.oob || o == 0 {
+        let mut msg: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        for i in dbase..sess.s.dg_code.len() {
+            if i > dbase {
+                put_str(inout msg, "\n  ");
+            }
+            let doff = sw(in sess.s.dg_off, i);
+            let dlen = sw(in sess.s.dg_len, i);
+            put_str(inout msg, in diag_code_str(sw(in sess.s.dg_code, i)));
+            put_str(inout msg, ": ");
+            render_query_text(
+                in sess.s.txt[doff..add(doff, dlen)],
+                in sess.tb,
+                in sess.c.names,
+                in ph_names,
+                inout msg
+            );
+        }
+        sess.s.txt.truncate(txt_base);
+        return SolveOutcome {
+            status: 1,
+            val: 0,
+            msg: msg
+        };
+    }
+
+    let tag = tg(in sess.s, o);
+    if tag == q_proven() {
+        let val_list = fb(in sess.s, o);
+        if !wf_subst_node(in sess.s, in sess.tb, in ph_bounds, val_list, false, goal_node) {
+            return outcome_str(1, 0, "solution is not a well-formed instantiation");
+        }
+        let mut drv = fc(in sess.s, o);
+        loop {
+            let step = fb(in sess.s, drv);
+            if tg(in sess.s, step) != st_norm() {
+                break;
+            }
+            let nk = nlen(in sess.s, drv);
+            if nk == 0 {
+                break;
+            }
+            drv = kid(in sess.s, drv, wrapping_sub(nk, 1));
+        }
+        let step = fb(in sess.s, drv);
+        let st = tg(in sess.s, step);
+        if st == st_conf() || st == st_pconf() {
+            let source = fa(in sess.s, step);
+            let is_model = (source & 1) != 0;
+            let raw_id = source >> 1;
+            let conf_idx = if is_model {
+                w(u32_at(in sess.mo_conf_idx, raw_id))
+            } else {
+                w(u32_at(in sess.im_conf_idx, raw_id))
+            };
+            let t0 = sess.s.txt.len();
+            if is_model {
+                r_id(inout sess.s, "model", raw_id);
+            } else {
+                r_id(inout sess.s, "impl", raw_id);
+            }
+            let nk = nlen(in sess.s, step);
+            if nk > 0 {
+                sess.s.txt.push(91);
+                for ai in 0..nk {
+                    if ai > 0 {
+                        sess.s.txt.push(44);
+                        sess.s.txt.push(32);
+                    }
+                    r_arg(inout sess.s, kid(in sess.s, step, ai));
+                }
+                sess.s.txt.push(93);
+            }
+            let sel = render_from_s_txt(inout sess, t0, in ph_names);
+            return SolveOutcome {
+                status: 0,
+                val: conf_idx,
+                msg: sel
+            };
+        }
+        if st == st_assume() || st == st_passume() {
+            return outcome_str(
+                1,
+                5,
+                "the obligation is discharged by a trait bound of the enclosing generic"
+            );
+        }
+        let t0 = sess.s.txt.len();
+        if st == st_alias() {
+            lit(inout sess.s, "the obligation is discharged by alias bound ");
+            num(inout sess.s, fa(in sess.s, step));
+            lit(inout sess.s, ", which needs generic dictionary dispatch");
+        } else if st == st_rigid() || st == st_norm() {
+            lit(
+                inout sess.s,
+                "the obligation is discharged by rigid projection, which needs generic dictionary dispatch"
+            );
+        } else if st == st_mode() {
+            lit(
+                inout sess.s,
+                "the obligation is discharged by modal kinding, which needs generic dictionary dispatch"
+            );
+        } else {
+            lit(
+                inout sess.s,
+                "the obligation is discharged by coinductive hypothesis, which needs generic dictionary dispatch"
+            );
+        }
+        let msg = render_from_s_txt(inout sess, t0, in ph_names);
+        return SolveOutcome {
+            status: 1,
+            val: 4,
+            msg: msg
+        };
+    }
+
+    if tag == q_nosol() {
+        let t0 = sess.s.txt.len();
+        r_failure(inout sess.s, fa(in sess.s, o), 0);
+        let msg = render_from_s_txt(inout sess, t0, in ph_names);
+        return SolveOutcome {
+            status: 1,
+            val: 1,
+            msg: msg
+        };
+    }
+
+    if tag == q_ambig() {
+        let a = fa(in sess.s, o);
+        let at = tg(in sess.s, a);
+        let t0 = sess.s.txt.len();
+        if at == am_self() {
+            lit(inout sess.s, "the self type is not yet known");
+        } else if at == am_multi() {
+            lit(inout sess.s, "several candidates apply: ");
+            let list = fa(in sess.s, a);
+            let nl = nlen(in sess.s, list);
+            for i in 0..nl {
+                if i > 0 {
+                    lit(inout sess.s, ", ");
+                }
+                r_source(inout sess.s, kid(in sess.s, list, i));
+            }
+        } else if at == am_scoped() {
+            lit(inout sess.s, "conflicting `use model` scope: ");
+            let list = fa(in sess.s, a);
+            let nl = nlen(in sess.s, list);
+            for i in 0..nl {
+                if i > 0 {
+                    lit(inout sess.s, ", ");
+                }
+                r_id(inout sess.s, "model", kid(in sess.s, list, i));
+            }
+        } else if at == am_mode() {
+            lit(inout sess.s, "a mode is not yet known");
+        } else if at == am_noninj() {
+            lit(inout sess.s, "two rigid projections cannot be equated");
+        } else {
+            lit(inout sess.s, "no progress on ");
+            r_goal(inout sess.s, fa(in sess.s, a));
+        }
+        let msg = render_from_s_txt(inout sess, t0, in ph_names);
+        return SolveOutcome {
+            status: 1,
+            val: 2,
+            msg: msg
+        };
+    }
+
+    if tag == q_over() {
+        let k = fa(in sess.s, o);
+        let msg = if k == 0 {
+            "Depth"
+        } else if k == 1 {
+            "Steps"
+        } else {
+            "FixpointIterations"
+        };
+        return outcome_str(1, 3, in msg);
+    }
+
+    // `q_unsup`
+    let u = fa(in sess.s, o);
+    let ut = tg(in sess.s, u);
+    let t0 = sess.s.txt.len();
+    if ut == un_dup() {
+        lit(inout sess.s, "merging effect rows repeats ");
+        let dk = fa(in sess.s, u);
+        if dk < 17179869184 {
+            r_id(inout sess.s, "effect", dk);
+        } else {
+            lit(inout sess.s, "capability ");
+            r_var(inout sess.s, wrapping_sub(dk, 17179869184));
+        }
+        lit(inout sess.s, "; duplicate labels are outside Pact's fragment");
+    } else if ut == un_mixed() {
+        r_goal(inout sess.s, fa(in sess.s, u));
+        lit(inout sess.s, " is reached through mixed coinductive/inductive cycles");
+    } else {
+        lit(inout sess.s, "internal solver limitation");
+    }
+    let msg = render_from_s_txt(inout sess, t0, in ph_names);
+    SolveOutcome {
+        status: 1,
+        val: 0,
+        msg: msg
+    }
+}
+
+pub fn session_solve(inout sess: PactSession, in qbytes: Slice[u8]) -> ChunkSeq[u64] {
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let spec = read_query(in qbytes, inout sess.c);
+    let res = solve_spec(inout sess, in spec);
+    push_packed_bytes(inout out, widen_u64(res.status), res.val, in res.msg);
+    out
+}
+
+pub fn session_open(in b: Slice[u8]) -> PactSession {
+    let mut r = Reader {
+        pos: 0
+    };
+    session_open_reader(inout r, in b)
+}
+
+// Stateless JIT/harness entrypoint returning packed diagnostic text lines (`session_open` only).
+pub fn session_words(in b: Slice[u8]) -> ChunkSeq[u64] {
+    let sess = session_open(in b);
+    pack_text(in sess.out)
+}
+
+// Stateless JIT/harness entrypoint taking `[session_input][n_queries][(qbyte_len, padded qbytes)...]`
+// and returning `[packed diag_text][ok_flag (0|1)][packed revision][n_queries, results...]`.
+pub fn queries_words(in b: Slice[u8]) -> ChunkSeq[u64] {
+    let mut r = Reader {
+        pos: 0
+    };
+    let mut sess = session_open_reader(inout r, in b);
+    let mut out = ChunkSeq::new[u64]();
+    let p_out = pack_text(in sess.out);
+    out.extend(in p_out.as_slice());
+    if !sess.ok {
+        out.push(0);
+        return out;
+    }
+    out.push(1);
+    let p_rev = pack_text(in sess.revision);
+    out.extend(in p_rev.as_slice());
+
+    let nq = r.word(in b);
+    out.push(nq);
+    for _ in 0..nq {
+        let qlen = r.word(in b);
+        let qstart = r.pos;
+        let padded = wrapping_mul(wrapping_add(qlen, 7) / 8, 8);
+        r.pos = wrapping_add(qstart, padded);
+        let ans = session_solve(inout sess, in b[qstart..add(qstart, qlen)]);
+        out.extend(in ans.as_slice());
+    }
+    out
+}

@@ -39,6 +39,9 @@ use @vesper/check-data::names::{
 use @vesper/check-data::input::{
     Reader
 };
+use @vesper/check-data::types::{
+    TyPass
+};
 
 const NONE32: u32 = 4294967295;
 const MAX64: u64 = 18446744073709551615;
@@ -107,11 +110,6 @@ const PK_LIT: u64 = 4;
 // Literal kinds.
 const L_INT: u64 = 0;
 const L_BOOL: u64 = 1;
-
-// Pass modes.
-const P_IN: u64 = 0;
-const P_INOUT: u64 = 1;
-const P_SINK: u64 = 2;
 
 // Refusal reasons (`REASONS` in tests/common/inline_words.rs).
 const R_OK: u32 = 4294967295;
@@ -1672,7 +1670,7 @@ fn inlinable(in p: Prog, fi: u32) -> u32 {
     }
     for k in 0..w(f.pn) {
         let q = p.param(f, k);
-        if q.pass == P_SINK && p.has(q.ty, F_SLICE) {
+        if q.pass == TyPass::Sink && p.has(q.ty, F_SLICE) {
             return R_SINK_SLICE;
         }
     }
@@ -2072,12 +2070,12 @@ fn site_bindings(in p: Prog, c: u32, g: Tgt, dest: u32, args: u64, inout out: Bi
         if p.has(ty, F_SLICE) {
             let same = local && p.op(inc(place)) == 0 && p.local_ty(caller, n32(p.op(place))) == ty;
             out.push(same, value, place);
-        } else if q.pass == P_INOUT {
+        } else if q.pass == TyPass::Inout {
             if !local {
                 return R_SITE_INOUT;
             }
             out.push(true, value, place);
-        } else if q.pass == P_IN && (aggregate || sequence) {
+        } else if q.pass == TyPass::In && (aggregate || sequence) {
             if local {
                 out.push(true, value, place);
             } else if !sequence {
@@ -2372,7 +2370,7 @@ fn stable_locals(in p: Prog, f: Fun, inout out: ChunkSeq[u32]) {
                 let n = p.op(start);
                 let mut at = inc(start);
                 for j in 0..n {
-                    if p.op(inc(at)) == P_INOUT && p.op(add(at, 2)) != 0 {
+                    if p.op(inc(at)) == TyPass::Inout && p.op(add(at, 2)) != 0 {
                         unstable.set(p.op(add(at, 3)), 1);
                     }
                     at = arg_end(in p, at);
@@ -3688,7 +3686,7 @@ fn owns_sequence(in p: Prog, g: Tgt) -> bool {
         for j in 0..w(f.pn) {
             let q = p.param(f, j);
             if q.name == name {
-                owned = q.pass == P_SINK;
+                owned = q.pass == TyPass::Sink;
                 break;
             }
         }

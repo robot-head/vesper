@@ -12,6 +12,7 @@ use @vesper/cranelift::{
     Data,
     DataId,
     FuncId,
+    FuncRef,
     Slot,
     Ty,
     Value,
@@ -52,6 +53,7 @@ use @vesper/cranelift::{
     import_data,
     import_function,
     import_signature,
+    ins_bitcast,
     ins_brif,
     ins_brif0,
     ins_call,
@@ -72,6 +74,7 @@ use @vesper/cranelift::{
     ins_store,
     ins_symbol_value,
     ins_trap,
+    ins_uextend,
     inst_result,
     linkage_import,
     linkage_local,
@@ -84,6 +87,7 @@ use @vesper/cranelift::{
     module_kind,
     module_pointer_type,
     seal_all_blocks,
+    seal_block,
     sig_new,
     sig_param,
     sig_return,
@@ -91,6 +95,7 @@ use @vesper/cranelift::{
     slot_word,
     switch_to_block,
     trap_user,
+    ty_i32,
     ty_i64,
     ty_of_word,
     vals1,
@@ -142,6 +147,15 @@ pub const DYN_VTABLE: u32 = 34;
 pub const DYN_SLOT_ADAPTER: u32 = 35;
 pub const DYN_DROP_OBJECT: u32 = 36;
 pub const DYN_DROP_BOXED: u32 = 37;
+pub const SESSION_PARK_PREP: u32 = 38;
+pub const SESSION_PARK_EMIT: u32 = 39;
+pub const SESSION_DATA_OFFSET: u32 = 40;
+pub const SESSION_EXIT: u32 = 41;
+pub const SESSION_VIOLATION: u32 = 42;
+pub const DYN_DROP_HELPER_HEAD: u32 = 43;
+pub const DYN_DROP_HELPER_TAIL: u32 = 44;
+
+const NO_VALUE: u64 = 18446744073709551615;
 
 // Stack slots are aligned to 1 << 3; a saved selector is one word.
 const WORD_ALIGN_SHIFT: u32 = 3;
@@ -739,10 +753,203 @@ fn control(call: u64, inout b: Builder, inout m: Module) -> u64 eff [Ffi[Craneli
         dyn_drop_object(call, inout b, inout m);
     } else if op == DYN_DROP_BOXED {
         dyn_drop_boxed(call, inout b, inout m);
+    } else if op == SESSION_PARK_PREP {
+        session_park_prep(call, inout b);
+    } else if op == SESSION_PARK_EMIT {
+        session_park_emit(call, inout b);
+    } else if op == SESSION_DATA_OFFSET {
+        let ptr = ty_of_word(call_arg(call, 0));
+        let ctx = arg_value(call, 1);
+        let base = ins_load(inout b, ptr, mem_trusted(), ctx, wrapping_i32(call_arg(call, 2)));
+        let dest = ins_iadd_imm(inout b, base, arg_i64(call, 3));
+        call_result_value(call, dest);
+    } else if op == SESSION_EXIT {
+        let ctx = arg_value(call, 0);
+        let res_off = wrapping_i32(call_arg(call, 1));
+        let status_imm = arg_i64(call, 2);
+        let kind = call_arg(call, 3);
+        let val = arg_value(call, 4);
+        let create_dead = call_arg(call, 5) == 1;
+        let word = if kind == 1 {
+            ins_bitcast(inout b, ty_i64(), val)
+        } else if kind == 2 {
+            let bits = ins_bitcast(inout b, ty_i32(), val);
+            ins_uextend(inout b, ty_i64(), bits)
+        } else {
+            val
+        };
+        ins_store(inout b, mem_trusted(), word, ctx, res_off);
+        let status = ins_iconst(inout b, ty_i64(), status_imm);
+        ins_return1(inout b, status);
+        if create_dead {
+            let dead = create_block(inout b);
+            switch_to_block(inout b, dead);
+            call_result_block(call, dead);
+        }
+    } else if op == SESSION_VIOLATION {
+        let violation = arg_block(call, 0);
+        switch_to_block(inout b, violation);
+        let status = ins_iconst(inout b, ty_i64(), arg_i64(call, 1));
+        ins_return1(inout b, status);
+    } else if op == DYN_DROP_HELPER_HEAD {
+        let entry = create_block(inout b);
+        append_block_params_for_function_params(inout b, entry);
+        switch_to_block(inout b, entry);
+        let data = block_param(inout b, entry, 0);
+        let scalar_ty = call_arg(call, 0);
+        let value = if scalar_ty == 0 {
+            data
+        } else {
+            ins_load(inout b, ty_of_word(scalar_ty), 0, data, 0)
+        };
+        call_result_value(call, value);
+    } else if op == DYN_DROP_HELPER_TAIL {
+        let empty = ChunkSeq::new[u32]();
+        ins_return(inout b, in empty.as_slice());
+        seal_all_blocks(inout b);
     } else {
         return DECLINED;
     }
     HANDLED
+}
+
+fn session_park_prep(call: u64, inout b: Builder) eff [Ffi[Cranelift]] {
+    let ptr = ty_of_word(call_arg(call, 0));
+    let ctx = arg_value(call, 1);
+    let depth = call_arg(call, 2);
+    let has_buffer = call_arg(call, 3) == 1;
+    let staging = arg_i64(call, 4);
+    let ctx_ev_off = wrapping_i32(call_arg(call, 5));
+    let ev_slots_off = wrapping_i32(call_arg(call, 6));
+    let slot_size = call_arg(call, 7);
+    let slot_id_off = wrapping_i32(call_arg(call, 8));
+    let slot_fn_off = wrapping_i32(call_arg(call, 9));
+    let slot_state_off = wrapping_i32(call_arg(call, 10));
+    let ctx_db_off = wrapping_i32(call_arg(call, 11));
+    let vector = ins_load(inout b, ptr, mem_trusted(), ctx, ctx_ev_off);
+    let slots = ins_load(inout b, ptr, mem_trusted(), vector, ev_slots_off);
+    let slot = ins_iadd_imm(inout b, slots, wrapping_i64(wrapping_mul(depth, slot_size)));
+    let identity = ins_load(inout b, ty_i64(), mem_trusted(), slot, slot_id_off);
+    let _handler_fn = ins_load(inout b, ptr, mem_trusted(), slot, slot_fn_off);
+    let _state_ptr = ins_load(inout b, ptr, mem_trusted(), slot, slot_state_off);
+    call_result_value(call, identity);
+    if has_buffer {
+        let base = ins_load(inout b, ptr, mem_trusted(), ctx, ctx_db_off);
+        let staged = ins_iadd_imm(inout b, base, staging);
+        call_result_value(call, staged);
+    } else {
+        call_result(call, NO_VALUE);
+    }
+}
+
+fn session_park_emit(call: u64, inout b: Builder) eff [Ffi[Cranelift]] {
+    let ptr = ty_of_word(call_arg(call, 0));
+    let park_fn = FuncRef {
+        id: wrapping_u32(call_arg(call, 1))
+    };
+    let ctx = arg_value(call, 2);
+    let evidence = arg_value(call, 3);
+    let op_tag = arg_i64(call, 4);
+    let arg0_imm = arg_i64(call, 5);
+    let arg1_imm = arg_i64(call, 6);
+    let violation = arg_block(call, 7);
+    let has_buffer = call_arg(call, 8) == 1;
+    let staging = arg_i64(call, 9);
+    let park_at = call_arg(call, 10);
+    let park_ev_off = call_arg(call, 11);
+    let park_op_off = call_arg(call, 12);
+    let park_flags_off = call_arg(call, 13);
+    let park_arg0_off = call_arg(call, 14);
+    let park_arg1_off = call_arg(call, 15);
+    let res_ev_off = wrapping_i32(call_arg(call, 16));
+    let res_kind_off = wrapping_i32(call_arg(call, 17));
+    let res_val_off = wrapping_i32(call_arg(call, 18));
+    let res_db_off = wrapping_i32(call_arg(call, 19));
+    let kind_value = arg_i64(call, 20);
+    let kind_error = arg_i64(call, 21);
+    let kind_cancelled = arg_i64(call, 22);
+
+    let arg0 = ins_iconst(inout b, ty_i64(), arg0_imm);
+    let arg1 = ins_iconst(inout b, ty_i64(), arg1_imm);
+    ins_store(
+        inout b,
+        mem_trusted(),
+        evidence,
+        ctx,
+        wrapping_i32(wrapping_add(park_at, park_ev_off))
+    );
+    let op = ins_iconst(inout b, ty_i32(), op_tag);
+    ins_store(inout b, mem_trusted(), op, ctx, wrapping_i32(wrapping_add(park_at, park_op_off)));
+    let zero = ins_iconst(inout b, ty_i32(), 0);
+    ins_store(
+        inout b,
+        mem_trusted(),
+        zero,
+        ctx,
+        wrapping_i32(wrapping_add(park_at, park_flags_off))
+    );
+    ins_store(
+        inout b,
+        mem_trusted(),
+        arg0,
+        ctx,
+        wrapping_i32(wrapping_add(park_at, park_arg0_off))
+    );
+    ins_store(
+        inout b,
+        mem_trusted(),
+        arg1,
+        ctx,
+        wrapping_i32(wrapping_add(park_at, park_arg1_off))
+    );
+    let call_args_v = vals1(ctx);
+    ins_call(inout b, park_fn, in call_args_v.as_slice());
+    let signal = inst_result(inout b, 0);
+
+    let check_identity = create_block(inout b);
+    ins_brif0(inout b, signal, check_identity, violation);
+    switch_to_block(inout b, check_identity);
+    seal_block(inout b, check_identity);
+    let echoed = ins_load(inout b, ty_i64(), mem_trusted(), signal, res_ev_off);
+    let same = ins_icmp(inout b, cc_eq(), echoed, evidence);
+    let resumed = create_block(inout b);
+    ins_brif0(inout b, same, resumed, violation);
+    switch_to_block(inout b, resumed);
+    seal_block(inout b, resumed);
+    let kind = ins_load(inout b, ty_i32(), mem_trusted(), signal, res_kind_off);
+    let park_val = ins_load(inout b, ty_i64(), mem_trusted(), signal, res_val_off);
+    let park_db = ins_load(inout b, ptr, mem_trusted(), signal, res_db_off);
+
+    let on_value = create_block(inout b);
+    let on_error = create_block(inout b);
+    let on_cancel = create_block(inout b);
+    let join = create_block(inout b);
+
+    let not_value = create_block(inout b);
+    let not_error = create_block(inout b);
+    let is_value = ins_icmp_imm(inout b, cc_eq(), kind, kind_value);
+    ins_brif0(inout b, is_value, on_value, not_value);
+    switch_to_block(inout b, not_value);
+    seal_block(inout b, not_value);
+    let is_error = ins_icmp_imm(inout b, cc_eq(), kind, kind_error);
+    ins_brif0(inout b, is_error, on_error, not_error);
+    switch_to_block(inout b, not_error);
+    seal_block(inout b, not_error);
+    let is_cancel = ins_icmp_imm(inout b, cc_eq(), kind, kind_cancelled);
+    ins_brif0(inout b, is_cancel, on_cancel, violation);
+
+    switch_to_block(inout b, on_value);
+    call_result_value(call, park_val);
+    call_result_value(call, park_db);
+    call_result_block(call, on_error);
+    call_result_block(call, on_cancel);
+    call_result_block(call, join);
+    if has_buffer {
+        let staged = ins_iadd_imm(inout b, park_db, staging);
+        call_result_value(call, staged);
+    } else {
+        call_result(call, NO_VALUE);
+    }
 }
 
 fn arg_slot_word(call: u64, i: u64) -> Slot eff [Ffi[Cranelift]] {

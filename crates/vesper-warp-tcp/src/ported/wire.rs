@@ -28,6 +28,7 @@ pub(crate) fn ips_to(ips: IpPair) -> Ips {
     }
 }
 
+#[cfg_attr(not(feature = "vesper-port"), allow(dead_code))]
 pub(crate) fn ips_from(ips: Ips) -> IpPair {
     let a16 = |hi: u64, lo: u64| {
         let mut a = [0u8; 16];

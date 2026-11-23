@@ -65,6 +65,8 @@ const VT_NONNULL: u8 = 6;
 const VT_FLOAT: u8 = 7;
 // A nullable C string copied into a Vesper byte sequence.
 const VT_CSTR: u8 = 8;
+// A nullable wide C string copied into a Vesper UTF-16 sequence.
+const VT_CWSTR: u8 = 9;
 
 // `ParameterType` tags.
 const P_VALUE: u8 = 0;
@@ -78,6 +80,8 @@ const P_FUNCTION: u8 = 5;
 const P_PINNED: u8 = 6;
 // `nocapture in argv: CStrList`: NUL-ended strings in one `Slice[u8]`.
 const P_CSTR_LIST: u8 = 7;
+// `nocapture in s: CWStr`: NUL-terminated UTF-16 string in `Slice[u16]`.
+const P_CWSTR: u8 = 8;
 
 // Accesses: `Access` (in, inout), `PointerAccess` (in, out, inout) and
 // `HandleAccess` (in, inout, sink) share these codes.
@@ -205,6 +209,8 @@ pub copy struct Fun {
     pn: u64,
     result: Vt,
     errno: bool,
+    has_variadic: bool,
+    variadic_first: u64,
     // the library row
     lib: u64,
     // the call of a callback type: params[p0] is the pointer itself
@@ -615,6 +621,8 @@ impl S {
                 pn: 0,
                 result: vt_unit(),
                 errno: false,
+                has_variadic: false,
+                variadic_first: 0,
                 lib: 0,
                 indirect: false
             },
@@ -1076,6 +1084,10 @@ fn read_value(inout r: Reader, in b: Slice[u8], inout s: S) -> Vt {
         v.tag = VT_CSTR;
         return v;
     }
+    if field_is(in b, a, e, in "nullable-cwstr-copy") {
+        v.tag = VT_CWSTR;
+        return v;
+    }
     let name = field_sym(inout r, in b, inout s);
     if field_is(in b, a, e, in "scalar") {
         v.tag = VT_SCALAR;
@@ -1167,6 +1179,8 @@ fn read_param(inout r: Reader, in b: Slice[u8], inout s: S) -> Par {
     } else if field_is(in b, a, e, in "nocapture-cstr-list") {
         // Only a `CStr` can refuse a call, so a list keeps its own tag.
         p.tag = P_CSTR_LIST;
+    } else if field_is(in b, a, e, in "nocapture-cwstr") {
+        p.tag = P_CWSTR;
     } else if field_is(in b, a, e, in "pinned-buffer") {
         p.tag = P_PINNED;
         let (c, d) = r.field(in b);
@@ -1195,9 +1209,12 @@ fn read_function(inout r: Reader, in b: Slice[u8], inout s: S, lib: u64, indirec
     if errno {
         let marker = r.field(in b);
     }
+    let mut has_variadic = false;
+    let mut variadic_first: u64 = 0;
     if peek_is(in r, in b, in "variadic/from") {
         let marker = r.field(in b);
-        let first = r.count(in b);
+        variadic_first = r.count(in b);
+        has_variadic = true;
     }
     // The C symbol several declarations may share (`#[link_name]`): the
     // plans and shapes name the declaration's own symbol.
@@ -1214,6 +1231,8 @@ fn read_function(inout r: Reader, in b: Slice[u8], inout s: S, lib: u64, indirec
                 pn: np,
                 result: result,
                 errno: errno,
+                has_variadic: has_variadic,
+                variadic_first: variadic_first,
                 lib: lib,
                 indirect: indirect
             }
@@ -1945,7 +1964,7 @@ pub fn compute_shape(inout s: S, fi: u64) -> Sh {
             } else if v.tag == VT_UNIT {
                 s.put(in "Unit parameter");
                 return shape_err(inout s, mark);
-            } else if v.tag == VT_CSTR {
+            } else if v.tag == VT_CSTR || v.tag == VT_CWSTR {
                 s.put(in "a C string result is not a parameter");
                 return shape_err(inout s, mark);
             } else if v.tag == VT_HANDLE || v.tag == VT_NONNULL {
@@ -2004,6 +2023,9 @@ pub fn compute_shape(inout s: S, fi: u64) -> Sh {
             };
             let t = s.ty_name(sym8(p.psc));
             sp.ty = s.ty_app1(S_PINNED, t);
+        } else if p.tag == P_CWSTR {
+            let u16t = s.ty_name(sym8(SC_U16));
+            sp.ty = s.ty_app1(S_SLICE, u16t);
         } else {
             let u8t = s.ty_name(sym8(SC_U8));
             sp.ty = s.ty_app1(S_SLICE, u8t);
@@ -2036,6 +2058,10 @@ pub fn compute_shape(inout s: S, fi: u64) -> Sh {
     } else if v.tag == VT_CSTR {
         let byte = s.ty_name(sym8(SC_U8));
         let text = s.ty_app1(S_CHUNK_SEQ, byte);
+        result = s.ty_app1(S_OPTION, text);
+    } else if v.tag == VT_CWSTR {
+        let unit = s.ty_name(sym8(SC_U16));
+        let text = s.ty_app1(S_CHUNK_SEQ, unit);
         result = s.ty_app1(S_OPTION, text);
     } else if v.tag == VT_HANDLE && v.nullable {
         let t = s.ty_name(v.name);
@@ -2078,7 +2104,8 @@ pub fn compute_shape(inout s: S, fi: u64) -> Sh {
 fn takes_cstr(in s: S, fi: u64) -> bool {
     let f = s.fun(fi);
     for j in 0..f.pn {
-        if s.par(add(f.p0, j)).tag == P_CSTR {
+        let tag = s.par(add(f.p0, j)).tag;
+        if tag == P_CSTR || tag == P_CWSTR {
             return true;
         }
     }
@@ -3117,19 +3144,39 @@ pub fn dump_abi(inout s: S) {
         } else {
             0
         };
+        let darwin = triple_os(in s, l.triple) == TargetOs::Darwin;
+        let mut integers: u64 = 0;
+        let mut emitted = false;
         for j in first..f.pn {
+            if darwin && f.has_variadic && j == f.variadic_first && integers < 8 {
+                let pad = wrapping_sub(8, integers);
+                for k in 0..pad {
+                    if emitted {
+                        s.put(in ",");
+                    }
+                    s.put(in "u64");
+                    emitted = true;
+                }
+            }
             let p = s.par(add(f.p0, j));
-            if j > first {
+            if emitted {
                 s.put(in ",");
             }
+            emitted = true;
             if p.tag == P_VALUE {
                 let any = put_carrier(inout s, f.lib, p.vt);
+                if p.vt.tag != VT_FLOAT {
+                    integers = add(integers, 1);
+                }
             } else if p.tag == P_SLICE || p.tag == P_PINNED {
                 s.put(in "ptr,usize");
+                integers = add(integers, 2);
             } else if p.tag == P_HANDLE && is_mapping(in s, f.lib, p.pname) {
                 s.put(in "ptr,usize");
+                integers = add(integers, 2);
             } else {
                 s.put(in "ptr");
+                integers = add(integers, 1);
             }
         }
         s.put(in " result=");

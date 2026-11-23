@@ -1,0 +1,518 @@
+// Input/output codecs and ASCII validation helpers for `@vesper/check-pact`'s
+// trait session (`session.ves`).
+
+use @vesper/check-data::input::{
+    Ctx,
+    Reader
+};
+use @vesper/check-data::names::{
+    Names
+};
+use @vesper/check-data::types::{
+    EffNode,
+    TyKind
+};
+
+const K_FN: u8 = TyKind::Fn;
+use @vesper/check-data::util::{
+    add,
+    inc,
+    inc32,
+    n32,
+    push_decimal,
+    u32_at,
+    w
+};
+use self::decl::{
+    Gen
+};
+
+const NONE32: u32 = 4294967295;
+
+pub struct SessionMeta {
+    pub pkg_name: u32,
+    pub pkg_ver: u32,
+    pub max_depth: u64,
+    pub max_steps: u64,
+    pub max_fix: u64,
+    pub fingerprint: u32,
+    pub prelude_adts: ChunkSeq[u32],
+    pub eff_local: ChunkSeq[bool],
+    pub eff_name: ChunkSeq[u32],
+    pub eff_ga: ChunkSeq[u32],
+    pub eff_gn: ChunkSeq[u32],
+    pub eff_gens: ChunkSeq[Gen],
+}
+
+impl SessionMeta {
+    pub fn eff_gen(in self, i: u64) -> Gen {
+        match self.eff_gens.try_get(i) {
+            Option::Some(g) => g,
+            Option::None => Gen {
+                name: 0,
+                bound: 0,
+                row: false
+            },
+        }
+    }
+}
+
+pub fn sym(in nmap: ChunkSeq[u32], x: u64) -> u32 {
+    u32_at(in nmap, x)
+}
+
+pub fn opt_sym(in nmap: ChunkSeq[u32], x: u64) -> u32 {
+    if x == 0 {
+        0
+    } else {
+        inc32(u32_at(in nmap, wrapping_sub(x, 1)))
+    }
+}
+
+// Reads the trailing session metadata after `read_decls`.
+pub fn read_session_meta(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32]) -> SessionMeta {
+    let pkg_name = sym(in nmap, r.word(in b));
+    let pkg_ver = sym(in nmap, r.word(in b));
+    let max_depth = r.word(in b);
+    let max_steps = r.word(in b);
+    let max_fix = r.word(in b);
+    let fingerprint = sym(in nmap, r.word(in b));
+
+    let padt_n = r.word(in b);
+    let mut prelude_adts: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](padt_n);
+    for _ in 0..padt_n {
+        prelude_adts.push(sym(in nmap, r.word(in b)));
+    }
+
+    let en = r.word(in b);
+    let mut eff_local: ChunkSeq[bool] = ChunkSeq::with_capacity[bool](en);
+    let mut eff_name: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](en);
+    let mut eff_ga: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](en);
+    let mut eff_gn: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](en);
+    let mut eff_gens: ChunkSeq[Gen] = ChunkSeq::new[Gen]();
+    for _ in 0..en {
+        eff_local.push(r.word(in b) != 0);
+        eff_name.push(sym(in nmap, r.word(in b)));
+        let ga = n32(eff_gens.len());
+        let gn = r.word(in b);
+        for _ in 0..gn {
+            let gname = sym(in nmap, r.word(in b));
+            let gbound = wrapping_u8(r.word(in b));
+            let grow = r.word(in b) != 0;
+            eff_gens
+                .push(
+                    Gen {
+                        name: gname,
+                        bound: gbound,
+                        row: grow
+                    }
+                );
+        }
+        eff_ga.push(ga);
+        eff_gn.push(n32(gn));
+    }
+
+    SessionMeta {
+        pkg_name: pkg_name,
+        pkg_ver: pkg_ver,
+        max_depth: max_depth,
+        max_steps: max_steps,
+        max_fix: max_fix,
+        fingerprint: fingerprint,
+        prelude_adts: prelude_adts,
+        eff_local: eff_local,
+        eff_name: eff_name,
+        eff_ga: eff_ga,
+        eff_gn: eff_gn,
+        eff_gens: eff_gens
+    }
+}
+
+pub copy struct QArg {
+    pub is_row: bool,
+    pub ty: u32,
+}
+
+pub copy struct QGoal {
+    pub self_ty: u32,
+    pub trait_name: u32,
+    pub brand_opt: u32,
+    pub arg_a: u32,
+    pub arg_n: u32,
+}
+
+pub struct QuerySpec {
+    pub env_params: ChunkSeq[Gen],
+    pub assumptions: ChunkSeq[QGoal],
+    pub args: ChunkSeq[QArg],
+    pub scope_at: ChunkSeq[u32],
+    pub scope_len: ChunkSeq[u32],
+    pub scope_models: ChunkSeq[u32],
+    pub infer_names: ChunkSeq[u32],
+    pub infer_kinds: ChunkSeq[u8],
+    pub goal: QGoal,
+}
+
+pub fn read_q_names(
+    inout r: Reader,
+    in b: Slice[u8],
+    inout names: Names,
+    inout nmap: ChunkSeq[u32]
+) {
+    let count = r.word(in b);
+    for _ in 0..count {
+        let len = r.word(in b);
+        let start = r.pos;
+        let s = names.intern(in b[start..wrapping_add(start, len)]);
+        nmap.push(s);
+        let padded = wrapping_mul(wrapping_add(len, 7) / 8, 8);
+        r.pos = wrapping_add(start, padded);
+    }
+}
+
+fn read_q_row(
+    inout r: Reader,
+    in b: Slice[u8],
+    inout c: Ctx,
+    in nmap: ChunkSeq[u32],
+    in tmap: ChunkSeq[u32]
+) -> u32 {
+    let count = r.word(in b);
+    let mut es: ChunkSeq[EffNode] = ChunkSeq::new[EffNode]();
+    let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for _ in 0..count {
+        let label = opt_sym(in nmap, r.word(in b));
+        let name = sym(in nmap, r.word(in b));
+        let n = r.word(in b);
+        let a = n32(args.len());
+        for _ in 0..n {
+            args.push(u32_at(in tmap, r.word(in b)));
+        }
+        es
+            .push(
+                EffNode {
+                    label: label,
+                    name: name,
+                    a: a,
+                    n: n32(n)
+                }
+            );
+    }
+    let tail = opt_sym(in nmap, r.word(in b));
+    c.types.mk_row(in es, in args, tail)
+}
+
+pub fn read_q_types(
+    inout r: Reader,
+    in b: Slice[u8],
+    inout c: Ctx,
+    in nmap: ChunkSeq[u32],
+    inout tmap: ChunkSeq[u32]
+) {
+    let count = r.word(in b);
+    for _ in 0..count {
+        let kind = r.word(in b);
+        let mut id: u32 = 0;
+        if kind == 0 {
+            let neg = r.word(in b) != 0;
+            id = c.types.literal(neg, r.word(in b));
+        } else if kind == 1 {
+            let name = sym(in nmap, r.word(in b));
+            let n = r.word(in b);
+            let mut args: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](n);
+            for _ in 0..n {
+                args.push(u32_at(in tmap, r.word(in b)));
+            }
+            id = c.types.named(name, in args);
+        } else if kind == 2 {
+            let n = r.word(in b);
+            let mut args: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](n);
+            for _ in 0..n {
+                args.push(u32_at(in tmap, r.word(in b)));
+            }
+            id = c.types.tuple(in args);
+        } else if kind == 3 {
+            let n = r.word(in b);
+            let mut args: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](n);
+            let mut passes: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](n);
+            for _ in 0..n {
+                passes.push(wrapping_u8(r.word(in b)));
+                args.push(u32_at(in tmap, r.word(in b)));
+            }
+            let result = u32_at(in tmap, r.word(in b));
+            let row = read_q_row(inout r, in b, inout c, in nmap, in tmap);
+            let mode = wrapping_u8(r.word(in b));
+            id = c.types.mk_with(K_FN, mode, 0, in args, in passes, result, row, 0);
+        } else if kind == 4 {
+            let row = read_q_row(inout r, in b, inout c, in nmap, in tmap);
+            id = c.types.row_type(row);
+        } else {
+            id = c.types.infer;
+        }
+        tmap.push(id);
+    }
+}
+
+fn read_q_goal(
+    inout r: Reader,
+    in b: Slice[u8],
+    in nmap: ChunkSeq[u32],
+    in tmap: ChunkSeq[u32],
+    inout args: ChunkSeq[QArg]
+) -> QGoal {
+    let self_ty = u32_at(in tmap, r.word(in b));
+    let trait_name = sym(in nmap, r.word(in b));
+    let arg_a = n32(args.len());
+    let arg_n = r.word(in b);
+    for _ in 0..arg_n {
+        let is_row = r.word(in b) != 0;
+        let ty = u32_at(in tmap, r.word(in b));
+        args
+            .push(
+                QArg {
+                    is_row: is_row,
+                    ty: ty
+                }
+            );
+    }
+    let brand_opt = opt_sym(in nmap, r.word(in b));
+    QGoal {
+        self_ty: self_ty,
+        trait_name: trait_name,
+        brand_opt: brand_opt,
+        arg_a: arg_a,
+        arg_n: n32(arg_n)
+    }
+}
+
+pub fn read_query(in b: Slice[u8], inout c: Ctx) -> QuerySpec {
+    let mut r = Reader {
+        pos: 0
+    };
+    let mut nmap: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    read_q_names(inout r, in b, inout c.names, inout nmap);
+    let mut tmap: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    read_q_types(inout r, in b, inout c, in nmap, inout tmap);
+
+    let np = r.word(in b);
+    let mut env_params: ChunkSeq[Gen] = ChunkSeq::with_capacity[Gen](np);
+    for _ in 0..np {
+        let name = sym(in nmap, r.word(in b));
+        let bound = wrapping_u8(r.word(in b));
+        let row = r.word(in b) != 0;
+        env_params
+            .push(
+                Gen {
+                    name: name,
+                    bound: bound,
+                    row: row
+                }
+            );
+    }
+
+    let na = r.word(in b);
+    let mut assumptions: ChunkSeq[QGoal] = ChunkSeq::with_capacity[QGoal](na);
+    let mut args: ChunkSeq[QArg] = ChunkSeq::new[QArg]();
+    for _ in 0..na {
+        assumptions.push(read_q_goal(inout r, in b, in nmap, in tmap, inout args));
+    }
+
+    let ns = r.word(in b);
+    let mut scope_at: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](ns);
+    let mut scope_len: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](ns);
+    let mut scope_models: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for _ in 0..ns {
+        scope_at.push(n32(scope_models.len()));
+        let ml = r.word(in b);
+        for _ in 0..ml {
+            scope_models.push(sym(in nmap, r.word(in b)));
+        }
+        scope_len.push(n32(ml));
+    }
+
+    let ni = r.word(in b);
+    let mut infer_names: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](ni);
+    let mut infer_kinds: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](ni);
+    for _ in 0..ni {
+        infer_names.push(sym(in nmap, r.word(in b)));
+        infer_kinds.push(wrapping_u8(r.word(in b)));
+    }
+
+    let goal = read_q_goal(inout r, in b, in nmap, in tmap, inout args);
+
+    QuerySpec {
+        env_params: env_params,
+        assumptions: assumptions,
+        args: args,
+        scope_at: scope_at,
+        scope_len: scope_len,
+        scope_models: scope_models,
+        infer_names: infer_names,
+        infer_kinds: infer_kinds,
+        goal: goal
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Text / identifier / ordering utilities
+
+pub fn put_str(inout o: ChunkSeq[u8], in s: Str) {
+    o.extend(in s.as_bytes());
+}
+
+pub fn put_sym(inout o: ChunkSeq[u8], in names: Names, s: u32) {
+    names.write(s, inout o);
+}
+
+pub fn put_num(inout o: ChunkSeq[u8], n: u64) {
+    push_decimal(inout o, n);
+}
+
+// Formats symbol `s` with Rust `{:?}` style quotes (ASCII).
+pub fn put_quoted_sym(inout o: ChunkSeq[u8], in names: Names, s: u32) {
+    o.push(34);
+    let n = names.size(s);
+    for i in 0..n {
+        let ch = names.byte(s, i);
+        if ch == 34 {
+            put_str(inout o, "\\\"");
+        } else if ch == 92 {
+            put_str(inout o, "\\\\");
+        } else if ch == 10 {
+            put_str(inout o, "\\n");
+        } else if ch == 13 {
+            put_str(inout o, "\\r");
+        } else if ch == 9 {
+            put_str(inout o, "\\t");
+        } else {
+            o.push(ch);
+        }
+    }
+    o.push(34);
+}
+
+pub fn cmp_sym_ascii(in names: Names, a: u32, b: u32) -> u8 {
+    if a == b {
+        return 1;
+    }
+    let na = names.size(a);
+    let nb = names.size(b);
+    let min_n = if na < nb {
+        na
+    } else {
+        nb
+    };
+    for i in 0..min_n {
+        let ba = names.byte(a, i);
+        let bb = names.byte(b, i);
+        if ba < bb {
+            return 0;
+        }
+        if ba > bb {
+            return 2;
+        }
+    }
+    if na < nb {
+        0
+    } else if na > nb {
+        2
+    } else {
+        1
+    }
+}
+
+pub fn valid_pkg_name(in names: Names, s: u32) -> bool {
+    let n = names.size(s);
+    if n == 0 {
+        return false;
+    }
+    for i in 0..n {
+        let c = names.byte(s, i);
+        let ok = (c >= 97 && c <= 122)
+            || (c >= 48 && c <= 57)
+            || c == 64
+            || c == 47
+            || c == 45
+            || c == 95
+            || c == 46;
+        if !ok {
+            return false;
+        }
+    }
+    true
+}
+
+pub fn valid_pkg_ver(in names: Names, s: u32) -> bool {
+    let n = names.size(s);
+    if n == 0 {
+        return false;
+    }
+    for i in 0..n {
+        let c = names.byte(s, i);
+        let ok = (c >= 65 && c <= 90)
+            || (c >= 97 && c <= 122)
+            || (c >= 48 && c <= 57)
+            || c == 43
+            || c == 45
+            || c == 46;
+        if !ok {
+            return false;
+        }
+    }
+    true
+}
+
+fn is_ident_tail(c: u8) -> bool {
+    (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c == 95
+}
+
+pub fn valid_ident(in names: Names, s: u32) -> bool {
+    let n = names.size(s);
+    if n == 0 {
+        return false;
+    }
+    let first = names.byte(s, 0);
+    let first_ok = (first >= 65 && first <= 90) || (first >= 97 && first <= 122) || first == 95;
+    if !first_ok {
+        return false;
+    }
+    for i in 1..n {
+        if !is_ident_tail(names.byte(s, i)) {
+            return false;
+        }
+    }
+    true
+}
+
+pub fn valid_key(in names: Names, s: u32) -> bool {
+    let n = names.size(s);
+    if n == 0 || names.byte(s, 0) == 36 {
+        return false;
+    }
+    let mut seg_len: u64 = 0;
+    for i in 0..n {
+        let c = names.byte(s, i);
+        if c == 46 || c == 45 || c == 47 {
+            if seg_len == 0 {
+                return false;
+            }
+            seg_len = 0;
+        } else {
+            if !is_ident_tail(c) {
+                return false;
+            }
+            seg_len = inc(seg_len);
+        }
+    }
+    seg_len > 0
+}
+
+pub fn mode_debug_name(m: u8) -> Str {
+    if m == 0 {
+        "Copy"
+    } else if m == 1 {
+        "Affine"
+    } else {
+        "Linear"
+    }
+}

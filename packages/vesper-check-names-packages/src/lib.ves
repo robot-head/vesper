@@ -74,7 +74,9 @@ use self::load::{
     back,
     begin_module,
     collect_all,
+    collect_all_bytes,
     decode,
+    decode_bytes,
     effect_decl_at,
     fn_at,
     item_at,
@@ -572,6 +574,10 @@ fn check_globals(inout s: St, in found: ChunkSeq[u32]) {
 
 // Binds and renames module `m`.
 fn assemble_module(inout s: St, in input: Str, m: u32) -> AssembledModule {
+    assemble_module_bytes(inout s, in input.as_bytes(), m)
+}
+
+fn assemble_module_bytes(inout s: St, in input: Slice[u8], m: u32) -> AssembledModule {
     let mut exported: ChunkSeq[u32] = ChunkSeq::new[u32]();
     bind(inout s, m, inout exported);
     s.cur = m;
@@ -588,7 +594,10 @@ fn assemble_module(inout s: St, in input: Str, m: u32) -> AssembledModule {
     s.values.clear();
     s.types.clear();
     let (x, y) = text_range(in s, w(m));
-    let mut l = lower_source(in input[x..y]);
+    let mut l = match String::from_utf8(in input[x..y]) {
+        Option::Some(src) => lower_source(in src.as_str()),
+        Option::None => lower_source(in ""),
+    };
     begin_module(inout s);
     s.made_from = l.ast.exprs.len();
     generic_scopes(inout s, inout l.ast);
@@ -705,9 +714,13 @@ pub struct AssemblyMetadata {
 }
 
 pub fn assembly_begin(in input: Str) -> Assembly {
+    assembly_begin_bytes(in input.as_bytes())
+}
+
+pub fn assembly_begin_bytes(in input: Slice[u8]) -> Assembly {
     let mut s = st_new();
-    decode(inout s, in input);
-    collect_all(inout s, in input);
+    decode_bytes(inout s, in input);
+    collect_all_bytes(inout s, in input);
     reexports(inout s);
     overrides(inout s);
     hidden_and_variants(inout s);
@@ -722,12 +735,16 @@ pub fn assembly_begin(in input: Str) -> Assembly {
 /// returned AST owns its arenas and can outlive the next call. Its name
 /// symbols belong to its own interner.
 pub fn assemble_next(inout a: Assembly, in input: Str) -> Option[AssembledModule] {
+    assemble_next_bytes(inout a, in input.as_bytes())
+}
+
+pub fn assemble_next_bytes(inout a: Assembly, in input: Slice[u8]) -> Option[AssembledModule] {
     if a.next >= a.state.mod_pkg.len() {
         return Option::None;
     }
     let m = n32(a.next);
     a.next = inc(a.next);
-    Option::Some(assemble_module(inout a.state, in input, m))
+    Option::Some(assemble_module_bytes(inout a.state, in input, m))
 }
 
 /// Takes the metadata accumulated so far and releases the resolver tables.

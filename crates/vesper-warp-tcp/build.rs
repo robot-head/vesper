@@ -3,40 +3,36 @@
 //! and check the committed binding (see docs/maintenance/porting-a-crate.md).
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    #[cfg(feature = "vesper-port")]
-    {
-        let mut source = String::new();
-        for part in PARTS {
-            let path = format!("vesper/{part}.ves");
-            println!("cargo:rerun-if-changed={path}");
-            let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
-            source.push_str(&text);
-            source.push('\n');
-        }
-        let out = std::path::PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
-        let tcp = out.join("tcp.ves");
-        std::fs::write(&tcp, source).expect("write tcp.ves");
-        let port = vesper_port_harness::Port::new("tcp", &tcp)
-            .binding("port/binding.rs")
-            .rust_types("crate::ported::types");
-        #[cfg(feature = "vesper-port-divergent")]
-        let port = {
-            // One module at a time (`VESPER_TCP_DIVERGE=seq`), or all.
-            println!("cargo:rerun-if-env-changed=VESPER_TCP_DIVERGE");
-            let only = std::env::var("VESPER_TCP_DIVERGE").ok();
-            DIVERGENT_EDITS
-                .iter()
-                .filter(|(module, _, _)| only.as_deref().is_none_or(|m| m == *module))
-                .fold(port, |port, (_, from, to)| port.edit(from, to))
-        };
-        port.build();
+    let mut source = String::new();
+    for part in PARTS {
+        let path = format!("vesper/{part}.ves");
+        println!("cargo:rerun-if-changed={path}");
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+        source.push_str(&text);
+        source.push('\n');
     }
+    let out = std::path::PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
+    let tcp = out.join("tcp.ves");
+    std::fs::write(&tcp, source).expect("write tcp.ves");
+    let port = vesper_port_harness::Port::new("tcp", &tcp)
+        .binding("port/binding.rs")
+        .rust_types("crate::ported::types");
+    #[cfg(feature = "vesper-port-divergent")]
+    let port = {
+        // One module at a time (`VESPER_TCP_DIVERGE=seq`), or all.
+        println!("cargo:rerun-if-env-changed=VESPER_TCP_DIVERGE");
+        let only = std::env::var("VESPER_TCP_DIVERGE").ok();
+        DIVERGENT_EDITS
+            .iter()
+            .filter(|(module, _, _)| only.as_deref().is_none_or(|m| m == *module))
+            .fold(port, |port, (_, from, to)| port.edit(from, to))
+    };
+    port.build();
 }
 
 /// The library's files in order (mirrored as `TCP_PARTS` in BUILD.bazel):
 /// one per Rust module, the larger ones split by topic so that each stays
 /// under the formatter's 8192-token cap.
-#[cfg(feature = "vesper-port")]
 const PARTS: &[&str] = &[
     "int",
     "seq",

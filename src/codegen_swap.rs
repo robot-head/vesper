@@ -559,6 +559,36 @@ pub(crate) fn request_control_builder(
     .is_some())
 }
 
+/// Dispatches a `numeric` request from a module-level runtime helper that
+/// holds only a module without a [`crate::native::Codegen`] context.
+pub(crate) fn request_numeric_module(
+    module: &mut dyn Module,
+    op: u32,
+    args: &[u64],
+) -> Result<Option<Vec<u64>>, String> {
+    if hook(Family::Numeric).is_none() {
+        return Ok(None);
+    }
+    static EMPTY_WORLD: OnceLock<World> = OnceLock::new();
+    static EMPTY_PROGRAM: OnceLock<Program> = OnceLock::new();
+    let world = EMPTY_WORLD.get_or_init(World::default);
+    let program = EMPTY_PROGRAM.get_or_init(Program::default);
+    let mut func = cranelift_codegen::ir::Function::new();
+    let mut fb_ctx = cranelift_frontend::FunctionBuilderContext::new();
+    let mut builder = cranelift_frontend::FunctionBuilder::new(&mut func, &mut fb_ctx);
+    request(
+        Family::Numeric,
+        &mut builder,
+        module,
+        world,
+        program,
+        Site::NONE,
+        op,
+        args,
+        None,
+    )
+}
+
 /// The graph walk's request for one Place IR instruction: `inst` (block
 /// `block`, index `index` of lowered function `function`), whose operands
 /// have the Cranelift values in `values`, and whose type is `ty`. `None`
@@ -831,6 +861,39 @@ pub mod control {
     /// `emit_drop_boxed`: drop boxed object via vtable word 0 and free block.
     /// Args `[block, header, box_free_id]`; no result.
     pub const DYN_DROP_BOXED: u32 = 37;
+    /// `native_session::session_park` prep: load evidence identity and optional
+    /// staging address. Args `[ptr_code, ctx, depth, has_buffer, staging,
+    /// ctx_evidence_off, ev_slots_off, slot_size, slot_identity_off,
+    /// ctx_data_base_off]`; answers `[identity, staged]`.
+    pub const SESSION_PARK_PREP: u32 = 38;
+    /// `native_session::session_park` emit: fill `ctx.park`, call `park`,
+    /// check signal/identity, branch on resume kind, switch to `on_value`.
+    /// Args `[ptr_code, park_ref, ctx, identity, op_tag, arg0, arg1,
+    /// violation_blk, has_buffer, staging, park_at, park_evidence_off,
+    /// park_op_off, park_flags_off, park_arg0_off, park_arg1_off,
+    /// resume_evidence_off, resume_kind_off, resume_value_off,
+    /// resume_data_base_off, kind_value, kind_error, kind_cancelled]`;
+    /// answers `[park_value, park_data_base, on_error, on_cancel, join,
+    /// staged_after]`.
+    pub const SESSION_PARK_EMIT: u32 = 39;
+    /// `native_session`: load `ctx.data_base` and add `offset`.
+    /// Args `[ptr_code, ctx, ctx_data_base_off, offset]`; answers `[dest]`.
+    pub const SESSION_DATA_OFFSET: u32 = 40;
+    /// `native_session`: store `ctx.result` (with optional f64/f32 bitcast)
+    /// and return `status`, optionally creating & switching to a dead block.
+    /// Args `[ctx, ctx_result_off, status, result_kind, value, create_dead]`;
+    /// answers `[dead]` if `create_dead == 1`.
+    pub const SESSION_EXIT: u32 = 41;
+    /// `native_session`: switch to `violation` block and return `status`.
+    /// Args `[violation_blk, status]`; no result.
+    pub const SESSION_VIOLATION: u32 = 42;
+    /// `dyn_drop_helper` head: create entry block, append params, switch to
+    /// entry, load scalar if `scalar_ty != 0` else keep `data`. Args
+    /// `[scalar_ty]`; answers `[value]`.
+    pub const DYN_DROP_HELPER_HEAD: u32 = 43;
+    /// `dyn_drop_helper` tail: emit `return_(&[])` and `seal_all_blocks`.
+    /// Args `[]`; no result.
+    pub const DYN_DROP_HELPER_TAIL: u32 = 44;
 }
 
 /// The `ffi` family's requests (SH4 lane 13, #1287): one foreign (`.vsys`)
@@ -890,6 +953,11 @@ pub mod ffi {
     pub const RESULT: u32 = 5;
     /// Frees the C string buffers. Args `[buffer...]`; no result.
     pub const FINISH: u32 = 6;
+    /// Indirect call through a function pointer (`is_indirect()`):
+    /// `[sig_ref, pointer, errno, returns, little, len_word, len_i64, reg_id,
+    /// released_n, released..., args_n, args..., copies_n, (len, copy...)...]`;
+    /// answers `[raw, os_error]`.
+    pub const CALL_INDIRECT: u32 = 7;
 }
 
 /// The `numeric` family's requests (lane 11, #1285). `Op::Vector` and
@@ -1007,6 +1075,15 @@ pub mod numeric {
     /// The `vesper_parallel_for(body, data, n)` call of `parallel_for_call`:
     /// `[body FuncRef, v data, v n]`. Result `[value]` (`0`).
     pub const PARALLEL_FOR: u32 = 13;
+    /// Define an AOT runtime on the lent module (`regions::aot_runtime::define`,
+    /// `tiled::aot_runtime::define`, `fip::aot_runtime::declare_or_define[_free]`):
+    /// `[kind]` one of `RUNTIME_*`. No result; callers look up any needed
+    /// `FuncId` by symbol name on `m`.
+    pub const RUNTIME: u32 = 14;
+    pub const RUNTIME_REGIONS: u64 = 1;
+    pub const RUNTIME_TILED: u64 = 2;
+    pub const RUNTIME_BOX_ALLOC: u64 = 3;
+    pub const RUNTIME_BOX_FREE: u64 = 4;
     /// The classes of a [`FLOAT_CONVERT`] operand (`FROM_F32` and
     /// `FROM_F64` are also the float words of the other requests).
     pub const FROM_F32: u64 = 1;
