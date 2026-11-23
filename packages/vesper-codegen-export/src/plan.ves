@@ -23,6 +23,10 @@ use @vesper/check-data::names::{
     Names,
     names_new
 };
+use @vesper/check-data::types::{
+    TyMode,
+    TyPass
+};
 
 // Type classes (plan_words.rs `C_*`).
 const C_OTHER: u8 = 0;
@@ -49,15 +53,6 @@ const K_STR: u8 = 6;
 const K_OBJECT: u8 = 7;
 const K_EXTERN: u8 = 8;
 const K_CALLBACK: u8 = 9;
-
-const M_COPY: u8 = 0;
-const M_LINEAR: u8 = 2;
-
-// Passing modes: the input's (0 in, 1 inout, 2 sink); the output's raw
-// `pass` field is 0 for none, else one more.
-const PASS_IN: u8 = 0;
-const PASS_INOUT: u8 = 1;
-const PASS_SINK: u8 = 2;
 
 // Positions (`Position`): a parameter's pass, then these.
 const POS_RESULT: u8 = 3;
@@ -917,7 +912,7 @@ impl Planner {
                 );
         }
         if n.kind == K_EXTERN {
-            if pos == PASS_IN {
+            if pos == TyPass::In {
                 return 0;
             }
             return self
@@ -954,7 +949,7 @@ impl Planner {
             return 0;
         }
         if n.kind == K_STR {
-            if pos == PASS_IN || n.owned {
+            if pos == TyPass::In || n.owned {
                 return 0;
             }
             return self
@@ -1062,7 +1057,7 @@ impl Planner {
             if abi == FAIL {
                 return FAIL;
             }
-            if self.node(elem).mode != M_COPY || self.owning(abi) {
+            if self.node(elem).mode != TyMode::Copy || self.owning(abi) {
                 let an = self.anode(abi);
                 let mut field = c == C_SEQ
                     && an.kind != K_SLICE
@@ -1151,11 +1146,11 @@ impl Planner {
             if !nd.lok {
                 return self.no_layout(function, t);
             }
-            let is_handle = nd.mode != M_COPY;
+            let is_handle = nd.mode != TyMode::Copy;
             if is_handle {
                 self.v2 = true;
             }
-            let linear = nd.mode == M_LINEAR;
+            let linear = nd.mode == TyMode::Linear;
             let mut drop: u32 = 0;
             if is_handle && !linear {
                 let mut o = ChunkSeq::new[u8]();
@@ -1427,14 +1422,14 @@ impl Planner {
             if self.position(function, p.ty, t, p.pass) == FAIL {
                 return FAIL;
             }
-            if p.pass == PASS_INOUT {
+            if p.pass == TyPass::Inout {
                 self.v2 = true;
             }
             let nd = self.node(p.ty);
             if !nd.lok {
                 return self.no_layout(function, p.ty);
             }
-            let pointer = nd.aggregate || p.pass == PASS_INOUT || self.wide_by_pointer(t);
+            let pointer = nd.aggregate || p.pass == TyPass::Inout || self.wide_by_pointer(t);
             pnames.push(p.name);
             ptys.push(t);
             pptr
@@ -1447,7 +1442,7 @@ impl Planner {
                 );
             ppass
                 .push(
-                    if p.pass == PASS_IN {
+                    if p.pass == TyPass::In {
                         0
                     } else {
                         wrapping_add(p.pass, 1)
@@ -1831,7 +1826,7 @@ pub fn plan(inout p: Planner) {
         let f = p.out(k);
         for i in 0..f.pn {
             let q = p.pout(wrapping_add(f.pa, i));
-            if q.raw == wrapping_add(PASS_SINK, 1) {
+            if q.raw == wrapping_add(TyPass::Sink, 1) {
                 let a = p.anode(q.ty);
                 if a.kind == K_NAMED {
                     let d = p.decl_of(a.name);
@@ -1862,8 +1857,8 @@ pub fn plan(inout p: Planner) {
                 let at = wrapping_add(f.pa, i);
                 let mut q = p.pout(at);
                 let a = p.anode(q.ty);
-                let is_in = q.raw == 0 || q.raw == wrapping_add(PASS_IN, 1);
-                let is_inout = q.raw == wrapping_add(PASS_INOUT, 1);
+                let is_in = q.raw == 0 || q.raw == wrapping_add(TyPass::In, 1);
+                let is_inout = q.raw == wrapping_add(TyPass::Inout, 1);
                 if a.kind == K_SLICE {
                     q.in_place = p.mirrored(p.akid(a, 0));
                 } else if a.kind == K_NAMED && is_in && p.handle_type(a.name) {
@@ -1884,7 +1879,7 @@ pub fn plan(inout p: Planner) {
         for i in 0..p.pouts.len() {
             let mut q = p.pout(i);
             if q.raw == 0 {
-                q.raw = wrapping_add(PASS_IN, 1);
+                q.raw = wrapping_add(TyPass::In, 1);
                 let ok = p.pouts.try_set(i, q);
             }
         }
@@ -2137,9 +2132,9 @@ pub fn write_plan(in p: Planner) -> ChunkSeq[u64] {
                 out.push(0);
             } else {
                 out.push(1);
-                if q.raw == wrapping_add(PASS_IN, 1) {
+                if q.raw == wrapping_add(TyPass::In, 1) {
                     put_abi(inout out, "in");
-                } else if q.raw == wrapping_add(PASS_INOUT, 1) {
+                } else if q.raw == wrapping_add(TyPass::Inout, 1) {
                     put_abi(inout out, "inout");
                 } else {
                     put_abi(inout out, "sink");
