@@ -15,6 +15,17 @@ mod check_words;
 #[path = "common/pact_words.rs"]
 mod pact_words;
 
+// Bazel runs one test per shard ("test/self_host_check_pact" has eight shards):
+// the file took over 50 minutes in one process.
+#[path = "common/corpus_shard.rs"]
+mod corpus_shard;
+
+/// Whether this Bazel shard runs test number `slot` (every test without Bazel).
+fn owned_by_shard(slot: usize) -> bool {
+    let shard = corpus_shard::Shard::from_environment();
+    slot % shard.total == shard.index
+}
+
 use check_harness::*;
 use std::collections::BTreeSet;
 use std::sync::OnceLock;
@@ -770,6 +781,9 @@ fn run(optimize: bool) -> (usize, usize, BTreeSet<String>) {
 
 #[test]
 fn declaration_pass_matches_rust() {
+    if !owned_by_shard(0) {
+        return;
+    }
     let (bad, lines, codes) = run(true);
     assert_eq!(bad, 0);
     assert!(lines > 0);
@@ -783,12 +797,18 @@ fn declaration_pass_matches_rust() {
 
 #[test]
 fn unoptimized_jit_agrees() {
+    if !owned_by_shard(1) {
+        return;
+    }
     let (bad, _, _) = run(false);
     assert_eq!(bad, 0);
 }
 
 #[test]
 fn every_message_of_the_pass_fires() {
+    if !owned_by_shard(2) {
+        return;
+    }
     // One fixed message stem per diagnostic the pass can report (the
     // `Frontend::new` part of src/pact_frontend.rs without dependencies).
     let stems = [
@@ -857,6 +877,9 @@ fn vesper_declarations(
 
 #[test]
 fn check_package_agrees_through_the_swap_point() {
+    if !owned_by_shard(3) {
+        return;
+    }
     // `check_package` with the Vesper pass installed answers every checker
     // test and its mutants as the Rust pass does (diagnostics compared as
     // values, so the decoder is checked too). The corpus goes through the
@@ -1082,6 +1105,9 @@ fn with_large_stack<F: FnOnce() + Send + 'static>(f: F) {
 
 #[test]
 fn session_diagnostics_agree_across_corpus_and_mutants() {
+    if !owned_by_shard(4) {
+        return;
+    }
     with_large_stack(|| {
         let f = session_entry();
         let mut cases: Vec<(String, Module, String, String)> = vec![];
@@ -1258,6 +1284,9 @@ fn session_diagnostics_agree_across_corpus_and_mutants() {
 
 #[test]
 fn session_queries_and_revision_agree_with_rust() {
+    if !owned_by_shard(5) {
+        return;
+    }
     with_large_stack(|| {
         let fq = queries_entry();
         let src = r#"
@@ -1499,6 +1528,9 @@ fn main() -> i64 { 0 }
 
 #[test]
 fn resolve_call_and_normalize_agree_with_rust() {
+    if !owned_by_shard(6) {
+        return;
+    }
     std::thread::Builder::new()
         .stack_size(32 * 1024 * 1024)
         .spawn(|| {
@@ -1889,6 +1921,9 @@ fn resolve_call_and_normalize_agree_with_rust() {
 
 #[test]
 fn builtin_derive_agrees_with_rust() {
+    if !owned_by_shard(7) {
+        return;
+    }
     std::thread::Builder::new()
         .stack_size(32 * 1024 * 1024)
         .spawn(|| {
