@@ -57,6 +57,10 @@ pub fn port_live_allocations() -> i64 {
     binding::live_allocations()
 }
 
+#[cfg(not(vesper_port))]
+#[path = "../seed/src/engine/mod.rs"]
+mod engine;
+
 mod arena;
 mod dpor;
 mod exec;

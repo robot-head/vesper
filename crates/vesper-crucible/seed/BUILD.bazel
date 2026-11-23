@@ -14,7 +14,7 @@ _DEPS = [
 
 rust_library(
     name = "seed",
-    srcs = ["//crates/vesper-crucible:rust_srcs"],
+    srcs = glob(["src/engine/**/*.rs"]) + ["//crates/vesper-crucible:rust_srcs"],
     crate_name = "vesper_crucible",
     crate_root = "//crates/vesper-crucible:src/lib.rs",
     edition = "2024",

@@ -5864,6 +5864,7 @@ version = "0.1.0"
 dependencies = [
  "vesper-alloc-seed",
  "vesper-bench",
+ "vesper-crucible-seed",
  "vesper-port-abi",
  "vesper-port-harness",
  "vesper-simpulse-seed",
