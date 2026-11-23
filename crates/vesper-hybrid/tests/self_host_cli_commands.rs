@@ -167,6 +167,7 @@ fn staged() -> Stage {
         tool(&full, t);
     }
     tool(&full, "extra");
+    tool(&full, "refute");
     layouts.push(Layout {
         name: "tools beside",
         default: d,
@@ -185,6 +186,7 @@ fn staged() -> Stage {
     let tools = root.join("bazel/crates/vesper-tools/bin");
     tool(&tools, "semver");
     tool(&tools, "extra");
+    tool(&tools, "refute");
     layouts.push(Layout {
         name: "Bazel tree",
         default: d,
@@ -350,6 +352,9 @@ fn vectors() -> Vec<Vec<OsString>> {
         s(&["dir"]),
         s(&["hybrid", "--version"]),
         s(&["cwdtool", "--version"]),
+        s(&["verify", "--refute", "--version"]),
+        s(&["verify", "--version", "--refute"]),
+        s(&["verify", "--refute", "nope"]),
     ];
     for t in TOOLS {
         // The tools are the default compiler, so give them a command that
@@ -552,7 +557,9 @@ fn routing_runs_in_vesper() {
     assert_eq!(prints(&bare, &["semver", "--help"]), 1);
     assert_eq!(prints(&bare, &["highlight", "--help"]), 1);
     assert_eq!(prints(&bare, &["shot", "--help"]), 1);
+    assert_eq!(prints(&bare, &["verify", "--refute"]), 1);
     // Handed back: the Rust CLI prints.
+    assert_eq!(prints(&bare, &["verify", "--help"]), 0);
     assert_eq!(prints(&bare, &["fmt", "--help"]), 0);
     assert_eq!(prints(&bare, &["check", "--fuel"]), 0);
     assert_eq!(prints(&bare, &["é"]), 0);

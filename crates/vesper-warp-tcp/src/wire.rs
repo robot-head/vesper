@@ -278,13 +278,7 @@ impl IpPair {
     }
 }
 
-#[cfg(feature = "vesper-port")]
 pub use crate::ported::wire::{
-    compute_checksum, fill_checksum, fold, pseudo_header_sum, sum_bytes, verify_checksum,
-    write_header,
-};
-#[cfg(not(feature = "vesper-port"))]
-pub use crate::reference::wire::{
     compute_checksum, fill_checksum, fold, pseudo_header_sum, sum_bytes, verify_checksum,
     write_header,
 };

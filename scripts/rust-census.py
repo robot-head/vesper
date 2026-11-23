@@ -49,7 +49,7 @@ CRATES = {
     "vesper-loom-solver": ("gone", "in crate (+ seed)", "0.21-1.27x", "seed until Stage 2", "-"),
     "vesper-chorus": ("gone", "in crate", "raft 0.31x, project 0.70x, explore 0.004x; wire micro 3.79x", "front end, Raft/replog, Session/Monitor and SimNet flipped (part 2); wire per-call FFI micro 3.79x (103ns Rust vs 389ns FFI); DurableLog/Transport trait glue stays Rust", "12"),
     "vesper-warp": ("partial", "in crate", "1.11-2.46x", "ack and stream buffers flipped; recovery 2.46x, frames 1.62x; crypto via warp-crypto shim", "4"),
-    "vesper-warp-tcp": ("partial", "in crate", "codec 0.72x Ir, transfer 1.47x Ir", "harness/simulator still Rust", "4"),
+    "vesper-warp-tcp": ("partial", "in crate", "codec 1.28x, transfer 2.04x", "wire codec flipped; harness/state machine still Rust", "4"),
     "vesper-warp-bbr": ("partial", "in crate", "2.2-2.9x", "on_event dispatch Rust", "4"),
     "vesper-warp-wheel": ("partial", "in crate", "1.73-1.77x", "speed only", "4"),
     "vesper-prism": ("gone", "in crate", "0.96-1.34x", "", "5"),
