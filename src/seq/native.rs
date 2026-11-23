@@ -119,7 +119,7 @@ impl<M: Module> Codegen<'_, '_, M> {
         let call = self.b.ins().call(reference, &[cap, stride]);
         Ok(self.b.inst_results(call)[0])
     }
-    fn seq_define_runtime(&mut self) -> Result<(), String> {
+    pub(crate) fn seq_define_runtime(&mut self) -> Result<(), String> {
         define_runtime(&mut self.b, self.m, self.world, Some(self.program))
     }
 
@@ -1039,6 +1039,8 @@ impl<M: Module> Codegen<'_, '_, M> {
             | SeqOp::Fill
             | SeqOp::FillRange { .. }
             | SeqOp::Wide(_)
+            | SeqOp::AtomicLoad { .. }
+            | SeqOp::AtomicStore { .. }
             | SeqOp::SumBe16
             | SeqOp::BytesEq
             | SeqOp::BytesCmp

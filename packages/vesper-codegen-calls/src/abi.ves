@@ -18,6 +18,8 @@ use @vesper/check-data::names::{
     Names
 };
 use @vesper/check-data::types::{
+    TyKind,
+    TyPass,
     Types,
     display
 };
@@ -47,12 +49,6 @@ use self::instances::{
 };
 
 const NONE32: u32 = 4294967295;
-const K_LIT: u8 = 0;
-const K_NAMED: u8 = 1;
-const K_TUPLE: u8 = 2;
-const K_FN: u8 = 3;
-const K_INFER: u8 = 5;
-const P_INOUT: u8 = 1;
 
 pub const V_I64: u8 = 0;
 pub const V_I128: u8 = 1;
@@ -132,10 +128,10 @@ pub fn layout_facts(
 fn scalar(in t: Types, in names: Names, in d: Calls, k: Syms, f: FnInfo, ty: u32, inout err: Errs)
     -> u8 {
     let n = t.node(ty);
-    if n.kind == K_LIT {
+    if n.kind == TyKind::Lit {
         return V_I64;
     }
-    if n.kind == K_NAMED {
+    if n.kind == TyKind::Named {
         if k.is_wide(n.name) {
             return V_I128;
         }
@@ -168,10 +164,10 @@ fn scalar(in t: Types, in names: Names, in d: Calls, k: Syms, f: FnInfo, ty: u32
             return V_I64;
         }
     }
-    if n.kind == K_TUPLE && n.n == 0 {
+    if n.kind == TyKind::Tuple && n.n == 0 {
         return V_I64;
     }
-    if n.kind == K_INFER || n.kind == K_FN {
+    if n.kind == TyKind::Infer || n.kind == TyKind::Fn {
         return V_I64;
     }
     err.text.clear();
@@ -214,7 +210,7 @@ pub fn signature(
         if !l.ok {
             return false;
         }
-        if l.aggregate || p.pass == P_INOUT {
+        if l.aggregate || p.pass == TyPass::Inout {
             sig.params.push(V_I64);
         } else {
             let v = scalar(in t, in names, in d, k, info, p.ty, inout err);

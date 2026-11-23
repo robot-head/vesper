@@ -234,3 +234,12 @@ and added `tests/foreign_memory.rs`, `tests/ffi_callbacks.rs`, and
   (`Pinned[T]`, `linear extern mapping M[T]`), callbacks, and floats.
 - `CHECK_HARNESS_SPEED=1 cargo +1.100.0 test --locked --release -p vesper --test self_host_ffi_lowering_rewrite rewriter_speed -- --ignored --nocapture`:
   ABBA `rust 116.1368ms vesper 42.1751ms (0.36x)`.
+
+## Part 3 extension: foreign-memory, float, `CStrList`, and `Option[CStr]` emission
+
+Extended `Codegen::foreign_perform_swapped` (`src/ffi_lowering/native.rs`) and `@vesper/ffi-emit` (`packages/vesper-ffi-lowering/emit/src/lib.ves`) to cover `f32`/`f64` by value (`V_FLOAT`), `Pinned[T]` and `linear extern mapping M[T]` buffers (`KIND_BUFFER`, `foreign_mapping`, `sink` header release), `CStrList` (`KIND_CSTRLIST`, `cstr_list_walk`, `cstr_list`), and `Option[CStr]` return values (`V_CSTR`, `foreign_cstr_copy` via `vesper_seq_make`).
+
+| Check | Result |
+| --- | --- |
+| `FFI_EMIT_STEP=1 cargo +1.100.0 test --locked --release -p vesper-codegen-swap-test --test self_host_ffi_emission -- --nocapture` | **0** CLIF differences, **0** object differences (`29` programs, `1,272` builds, `2,486` functions across all 4 targets with `optimize` `true` and `false`; `16,744` requests answered from Vesper, `3,944` declined; `xsk`, `forms` floats/`CStrList`/`Option[CStr]`, `vesper-std/fs`, `vesper-std/process`, `vesper-std/env`, `vesper-cranelift`, `vesper-codegen-base`) |
+| Rust lines deleted | `0` (hooked path only; default path unchanged) |

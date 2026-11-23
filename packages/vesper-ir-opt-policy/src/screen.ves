@@ -13,6 +13,13 @@
 // define, a cycle of states, or two steps from one state keep the block, so
 // the pass reports what it reports.
 
+use @vesper/place-ir::codes::{
+    Op,
+    Pat
+};
+use @vesper/check-data::types::{
+    TyPass
+};
 use @vesper/check-data::util::{
     add,
     inc,
@@ -43,11 +50,6 @@ use @vesper/ir-opt::view::{
 // yet (E0111).
 const C_SCALAR: u8 = 1;
 const NONE: u32 = 4294967295;
-const OP_BIND: u8 = 3;
-const OP_READ: u8 = 2;
-const OP_WRITE: u8 = 4;
-const PAT_BIND: u64 = 1;
-const P_SINK: u64 = 2;
 
 // A state made by an instruction that is not a forwarding write.
 const BARRIER: u32 = 4294967294;
@@ -104,17 +106,17 @@ fn is_scalar(in cls: ChunkSeq[u8], ty: u32) -> bool {
 }
 
 fn is_sink_read(in p: Program, i: InstRow) -> bool {
-    i.op == OP_READ && p.op(add(i.a, 2)) == P_SINK
+    i.op == Op::Read && p.op(add(i.a, 2)) == TyPass::Sink
 }
 
 // The place symbol `ir_opt_policy::place_of` gives an instruction: a read
 // of a local, a write, or a plain bind. `NONE` for none.
 fn place_of(in p: Program, in names: Names, inout sc: Screen, i: InstRow) -> u32 {
-    if i.op == OP_READ {
+    if i.op == Op::Read {
         if !is_local(in sc, n32(p.op(i.a))) {
             return NONE;
         }
-    } else if i.op != OP_WRITE && !(i.op == OP_BIND && p.op(inc(i.a)) == PAT_BIND) {
+    } else if i.op != Op::Write && !(i.op == Op::Bind && p.op(inc(i.a)) == Pat::Bind) {
         return NONE;
     }
     place_text(in p, in names, inout sc.pn, inout sc.buf, i)
@@ -318,13 +320,13 @@ fn can_improve(
         }
         if i.has_token != 0 && i.tin != i.tout {
             let mut step = BARRIER;
-            if i.op == OP_WRITE {
+            if i.op == Op::Write {
                 let value = p.op(add(i.a, 2));
                 let is_eq = names.spells(n32(p.op(inc(i.a))), in "=".as_bytes());
                 if is_eq && is_scalar(in cls, at32(in vty, value)) && s != NONE {
                     step = at32(in sc.pidx, w(s));
                 }
-            } else if i.op == OP_BIND && p.op(inc(i.a)) == PAT_BIND {
+            } else if i.op == Op::Bind && p.op(inc(i.a)) == Pat::Bind {
                 let value = p.op(i.a);
                 if is_scalar(in cls, at32(in vty, value)) && s != NONE {
                     step = at32(in sc.pidx, w(s));

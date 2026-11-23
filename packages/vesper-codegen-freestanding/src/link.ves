@@ -9,6 +9,7 @@
 
 use self::codes::{
     Absent,
+    Out,
     Page,
     RelType,
     RvOpcode
@@ -76,14 +77,8 @@ use self::elf::{
     write_executable
 };
 
-// Output sections (link.rs `Out`).
-enum Out: _ {
-    Text = 0,
-    Rodata = 1,
-    Data = 2,
-    Bss = 3,
-}
-const OUTS: u64 = 4;
+// The four sections contributed by input objects precede the stack.
+const OUTS: u64 = Out::Stack;
 
 // The object index of linker-defined symbols.
 const LINKER_OBJECT: u64 = Absent::Row;
@@ -742,7 +737,7 @@ impl Linker {
         secs
             .push(
                 OutSec {
-                    name: 4,
+                    name: Out::Stack,
                     address: self.stack_bottom,
                     data_at: data.len(),
                     data_len: 0,
@@ -756,16 +751,16 @@ impl Linker {
         segs
             .push(
                 OutSeg {
-                    first: 0,
-                    end: 2,
+                    first: Out::Text,
+                    end: Out::Data,
                     flags: pf_rx()
                 }
             );
         segs
             .push(
                 OutSeg {
-                    first: 2,
-                    end: 5,
+                    first: Out::Data,
+                    end: secs.len(),
                     flags: pf_rw()
                 }
             );
@@ -781,7 +776,7 @@ impl Linker {
                         value: l.address,
                         size: l.size,
                         global: l.global,
-                        function: section == 0,
+                        function: section == Out::Text,
                         section: section
                     }
                 );

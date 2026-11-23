@@ -181,3 +181,12 @@ pub enum RvOpcode: _ {
     System = 115,
     Mask = 127,
 }
+
+// Output sections in link order (link.rs `Out`, followed by the stack).
+pub enum Out: _ {
+    Text = 0,
+    Rodata = 1,
+    Data = 2,
+    Bss = 3,
+    Stack = 4,
+}

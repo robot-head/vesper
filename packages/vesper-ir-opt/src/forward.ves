@@ -16,6 +16,14 @@
 // a block egglog would refuse (a state read before it is defined, or a token
 // defined twice; the e-graph lane's `egraph_memory` check).
 
+use @vesper/place-ir::codes::{
+    Op,
+    Pat,
+    Tag
+};
+use @vesper/check-data::types::{
+    TyPass
+};
 use @vesper/check-data::util::{
     add,
     inc,
@@ -61,13 +69,6 @@ use self::view::{
 // package too.
 const C_SCALAR: u8 = 1;
 const NONE: u32 = 4294967295;
-const OP_BIND: u8 = 3;
-const OP_HANDLE: u8 = 15;
-const OP_READ: u8 = 2;
-const OP_WRITE: u8 = 4;
-const PAT_BIND: u64 = 1;
-const P_SINK: u64 = 2;
-const T_VALUE: u8 = 6;
 
 // @vesper/egraph's memory terms (its `V_*` constants). They are copied, not
 // imported: the Vesper package assembler (@vesper/check-names-packages)
@@ -160,15 +161,15 @@ fn forward_block(
         let i = p.inst(add(bk.i0, k));
         let mut s: u32 = NONE;
         let mut creates = true;
-        if i.op == OP_READ {
+        if i.op == Op::Read {
             let local = is_local(in sc, n32(p.op(i.a)));
             // A read of a non-local only looks a place up, and only a
             // scalar sink read does that.
-            if local || (p.op(add(i.a, 2)) == P_SINK && is_scalar(in cls, i.ty)) {
+            if local || (p.op(add(i.a, 2)) == TyPass::Sink && is_scalar(in cls, i.ty)) {
                 s = place_text(in p, in names, inout sc.pn, inout sc.buf, i);
             }
             creates = local;
-        } else if i.op == OP_WRITE || i.op == OP_BIND {
+        } else if i.op == Op::Write || i.op == Op::Bind {
             s = place_text(in p, in names, inout sc.pn, inout sc.buf, i);
         }
         isym.push(s);
@@ -251,7 +252,7 @@ fn forward_places(
     for k in 0..bk.ic {
         let i = p.inst(add(bk.i0, k));
         let s = at32(in isym, k);
-        if i.op == OP_READ && p.op(add(i.a, 2)) == P_SINK && is_scalar(in cls, i.ty) {
+        if i.op == Op::Read && p.op(add(i.a, 2)) == TyPass::Sink && is_scalar(in cls, i.ty) {
             let pi = place_index(in sc, s);
             if pi != NONE {
                 if i.has_token == 0 {
@@ -279,14 +280,14 @@ fn forward_places(
             // (place index, value) of a forwarding write, or NONE
             let mut wp: u32 = NONE;
             let mut wv: u64 = 0;
-            if i.op == OP_WRITE {
+            if i.op == Op::Write {
                 let value = p.op(add(i.a, 2));
                 let is_eq = names.spells(n32(p.op(inc(i.a))), in "=".as_bytes());
                 if is_eq && is_scalar(in cls, v.vtype(value)) {
                     wp = place_index(in sc, s);
                     wv = value;
                 }
-            } else if i.op == OP_BIND && p.op(inc(i.a)) == PAT_BIND {
+            } else if i.op == Op::Bind && p.op(inc(i.a)) == Pat::Bind {
                 let value = p.op(i.a);
                 if is_scalar(in cls, v.vtype(value)) {
                     wp = place_index(in sc, s);
@@ -369,7 +370,7 @@ fn rewrite(inout p: Program, f: FnRow, in aliases: ChunkSeq[u32], inout orig: Ch
             }
             for j in 0..i.n {
                 let x = add(i.a, j);
-                if p.tag(x) == T_VALUE && !(i.op == OP_HANDLE && j == 1 && p.op(i.a) == 0) {
+                if p.tag(x) == Tag::Value && !(i.op == Op::Handle && j == 1 && p.op(i.a) == 0) {
                     p.ops.try_set(x, w(resolve(in aliases, n32(p.op(x)))));
                 }
             }
@@ -386,7 +387,7 @@ fn rewrite(inout p: Program, f: FnRow, in aliases: ChunkSeq[u32], inout orig: Ch
         }
         for j in 0..bk.tn {
             let x = add(bk.ta, j);
-            if p.tag(x) == T_VALUE {
+            if p.tag(x) == Tag::Value {
                 p.ops.try_set(x, w(resolve(in aliases, n32(p.op(x)))));
             }
         }

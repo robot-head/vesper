@@ -3,6 +3,10 @@
 // not printable, or are Grapheme_Extend, become `\u{hex}`; the ranges are
 // in escape.ves.
 
+use self::{
+    Utf8,
+    Scalar
+};
 use self::escape::{
     ESCAPE_RANGES
 };
@@ -10,19 +14,19 @@ use self::escape::{
 // The char at `s[i..]` (valid UTF-8) and its length in bytes.
 pub fn utf8_at(in s: Slice[u8], i: u64) -> (u64, u64) {
     let b0 = byte(in s, i);
-    if b0 < 0x80 {
+    if b0 < Utf8::ContinuationPrefix {
         return (b0, 1);
     }
-    let b1 = byte(in s, wrapping_add(i, 1)) & 0x3f;
-    if b0 < 0xe0 {
-        return (((b0 & 0x1f) << 6) | b1, 2);
+    let b1 = byte(in s, wrapping_add(i, 1)) & Utf8::ContinuationMask;
+    if b0 < Utf8::ThreeByteLead {
+        return (((b0 & Utf8::TwoByteLeadMask) << 6) | b1, 2);
     }
-    let b2 = byte(in s, wrapping_add(i, 2)) & 0x3f;
-    if b0 < 0xf0 {
-        return (((b0 & 0x0f) << 12) | (b1 << 6) | b2, 3);
+    let b2 = byte(in s, wrapping_add(i, 2)) & Utf8::ContinuationMask;
+    if b0 < Utf8::FourByteLead {
+        return (((b0 & Utf8::ThreeByteLeadMask) << 12) | (b1 << 6) | b2, 3);
     }
-    let b3 = byte(in s, wrapping_add(i, 3)) & 0x3f;
-    (((b0 & 0x07) << 18) | (b1 << 12) | (b2 << 6) | b3, 4)
+    let b3 = byte(in s, wrapping_add(i, 3)) & Utf8::ContinuationMask;
+    (((b0 & Utf8::FourByteLeadMask) << 18) | (b1 << 12) | (b2 << 6) | b3, 4)
 }
 
 fn byte(in s: Slice[u8], i: u64) -> u64 {
@@ -33,20 +37,35 @@ fn byte(in s: Slice[u8], i: u64) -> u64 {
 }
 
 fn put_utf8(inout out: ChunkSeq[u8], c: u64) {
-    if c < 0x80 {
+    if c < Scalar::TwoByteMin {
         out.push(wrapping_u8(c));
-    } else if c < 0x800 {
-        out.push(wrapping_u8(0xc0 | wrapping_shr_u64(c, 6)));
-        out.push(wrapping_u8(0x80 | (c & 0x3f)));
-    } else if c < 0x10000 {
-        out.push(wrapping_u8(0xe0 | wrapping_shr_u64(c, 12)));
-        out.push(wrapping_u8(0x80 | (wrapping_shr_u64(c, 6) & 0x3f)));
-        out.push(wrapping_u8(0x80 | (c & 0x3f)));
+    } else if c < Scalar::ThreeByteMin {
+        out.push(wrapping_u8(Utf8::TwoByteLead | wrapping_shr_u64(c, 6)));
+        out.push(wrapping_u8(Utf8::ContinuationPrefix | (c & Utf8::ContinuationMask)));
+    } else if c < Scalar::FourByteMin {
+        out.push(wrapping_u8(Utf8::ThreeByteLead | wrapping_shr_u64(c, 12)));
+        out
+            .push(
+                wrapping_u8(
+                    Utf8::ContinuationPrefix | (wrapping_shr_u64(c, 6) & Utf8::ContinuationMask)
+                )
+            );
+        out.push(wrapping_u8(Utf8::ContinuationPrefix | (c & Utf8::ContinuationMask)));
     } else {
-        out.push(wrapping_u8(0xf0 | wrapping_shr_u64(c, 18)));
-        out.push(wrapping_u8(0x80 | (wrapping_shr_u64(c, 12) & 0x3f)));
-        out.push(wrapping_u8(0x80 | (wrapping_shr_u64(c, 6) & 0x3f)));
-        out.push(wrapping_u8(0x80 | (c & 0x3f)));
+        out.push(wrapping_u8(Utf8::FourByteLead | wrapping_shr_u64(c, 18)));
+        out
+            .push(
+                wrapping_u8(
+                    Utf8::ContinuationPrefix | (wrapping_shr_u64(c, 12) & Utf8::ContinuationMask)
+                )
+            );
+        out
+            .push(
+                wrapping_u8(
+                    Utf8::ContinuationPrefix | (wrapping_shr_u64(c, 6) & Utf8::ContinuationMask)
+                )
+            );
+        out.push(wrapping_u8(Utf8::ContinuationPrefix | (c & Utf8::ContinuationMask)));
     }
 }
 

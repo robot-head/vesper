@@ -122,6 +122,40 @@ const H_MPK: u64 = 1;
 
 // `MAX_SLICE_ELEMENTS`.
 const MAX_SLICE: u64 = 4096;
+const MAX_WIRE_STRUCT_DEPTH: u64 = 512;
+const MAX_DESCRIPTOR_TYPE_DEPTH: u64 = 64;
+// ASCII 'a' minus the value of hexadecimal digit A.
+const LOWER_HEX_DIGIT_OFFSET: u8 = 87;
+
+enum Ascii: u8 {
+    LineFeed = 10,
+    Space = 32,
+    Quote = 34,
+    Dollar = 36,
+    OpenParen = 40,
+    CloseParen = 41,
+    Hyphen = 45,
+    Digit0 = 48,
+    Digit1 = 49,
+    Digit9 = 57,
+    UpperA = 65,
+    UpperZ = 90,
+    OpenBracket = 91,
+    Backslash = 92,
+    CloseBracket = 93,
+    Underscore = 95,
+    LowerA = 97,
+    LowerX = 120,
+    LowerZ = 122,
+    Tilde = 126,
+}
+
+enum TargetOs: u64 {
+    Other = 0,
+    Linux = 1,
+    Darwin = 2,
+    Windows = 3,
+}
 
 // ----- tables -----------------------------------------------------------------
 
@@ -503,37 +537,37 @@ impl S {
 
     // A name quoted as the AST dump quotes strings.
     pub fn put_q(inout self, x: u32) {
-        self.out.push(34);
+        self.out.push(Ascii::Quote);
         let a = self.start(x);
         let e = self.end(x);
         for i in a..e {
             let c = u8_at(in self.text, i);
-            if c < 32 || c > 126 || c == 34 || c == 92 {
-                self.out.push(92);
-                self.out.push(120);
+            if c < Ascii::Space || c > Ascii::Tilde || c == Ascii::Quote || c == Ascii::Backslash {
+                self.out.push(Ascii::Backslash);
+                self.out.push(Ascii::LowerX);
                 self.out.push(hex(c >> 4));
                 self.out.push(hex(c & 15));
             } else {
                 self.out.push(c);
             }
         }
-        self.out.push(34);
+        self.out.push(Ascii::Quote);
     }
 
     pub fn put_u64(inout self, v: u64) {
         if v >= 10 {
             self.put_u64(v / 10);
         }
-        self.out.push(wrapping_u8(wrapping_add(v % 10, 48)));
+        self.out.push(wrapping_u8(wrapping_add(v % 10, widen_u64(Ascii::Digit0))));
     }
 
     pub fn nl(inout self) {
-        self.out.push(10);
+        self.out.push(Ascii::LineFeed);
     }
 
     pub fn indent(inout self, d: u64) {
         for i in 0..d {
-            self.out.push(32);
+            self.out.push(Ascii::Space);
         }
     }
 
@@ -826,9 +860,9 @@ impl S {
             if node.n == 0 {
                 return;
             }
-            self.out.push(91);
+            self.out.push(Ascii::OpenBracket);
         } else {
-            self.out.push(40);
+            self.out.push(Ascii::OpenParen);
         }
         for i in 0..node.n {
             if i > 0 {
@@ -837,9 +871,9 @@ impl S {
             self.put_display(self.targ(add(node.a, i)));
         }
         if node.kind == TK_NAMED {
-            self.out.push(93);
+            self.out.push(Ascii::CloseBracket);
         } else {
-            self.out.push(41);
+            self.out.push(Ascii::CloseParen);
         }
     }
 
@@ -916,9 +950,9 @@ impl S {
 
 fn hex(x: u8) -> u8 {
     if x < 10 {
-        wrapping_add(x, 48)
+        wrapping_add(x, Ascii::Digit0)
     } else {
-        wrapping_add(x, 87)
+        wrapping_add(x, LOWER_HEX_DIGIT_OFFSET)
     }
 }
 
@@ -1211,7 +1245,7 @@ fn parse_const_int(in b: Slice[u8], a: u64, e: u64) -> (bool, u64) {
         Option::Some(x) => x,
         Option::None => 0,
     };
-    let neg = a < e && first == 45;
+    let neg = a < e && first == Ascii::Hyphen;
     let mut i = if neg {
         inc(a)
     } else {
@@ -1224,9 +1258,9 @@ fn parse_const_int(in b: Slice[u8], a: u64, e: u64) -> (bool, u64) {
         }
         let d = match b.try_get(i) {
             Option::Some(x) => x,
-            Option::None => 48,
+            Option::None => Ascii::Digit0,
         };
-        mag = wrapping_add(wrapping_mul(mag, 10), widen_u64(wrapping_sub(d, 48)));
+        mag = wrapping_add(wrapping_mul(mag, 10), widen_u64(wrapping_sub(d, Ascii::Digit0)));
         i = inc(i);
     }
     (neg, mag)
@@ -1597,7 +1631,7 @@ fn struct_adt(inout s: S, lib: u64, row: u64, depth: u64) -> Gs {
             ty = s.ty_repeat(u8t, f.size);
         } else if f.kind == F_STRUCT {
             let inner = lib_ws(in s, lib, f.sname);
-            if depth < 512 {
+            if depth < MAX_WIRE_STRUCT_DEPTH {
                 let ig = struct_adt(inout s, lib, inner, inc(depth));
                 if !ig.ok {
                     g.ok = false;
@@ -1664,7 +1698,7 @@ fn enum_eq(in s: S, x: u64, y: u64) -> bool {
 
 // `collect_structs`: wire struct `row` after the structs it nests.
 fn collect_structs(in s: S, lib: u64, row: u64, inout out: ChunkSeq[u64], depth: u64) {
-    if depth > 512 {
+    if depth > MAX_WIRE_STRUCT_DEPTH {
         return;
     }
     let st = s.ws(row);
@@ -2233,6 +2267,26 @@ pub fn append(inout s: S, pass2: bool, in insts: ChunkSeq[Inst], in lens: ChunkS
         let t = s.ty_name(S_T);
         let seq = s.ty_app1(S_CHUNK_SEQ, t);
         field_line(inout s, S_DATA, seq);
+        s.indent(1);
+        s.put(in "impl");
+        s.nl();
+        s.indent(2);
+        s.put(in "generic \"T\" bound=linear row=0");
+        s.nl();
+        let pt = s.ty_app1(S_PINNED, t);
+        s.dump_ty(pt, 2);
+        s.indent(2);
+        s.put(in "fn \"address\" fip=0 @0..0");
+        s.nl();
+        s.indent(3);
+        s.put(in "param \"self\" pass=in @0..0");
+        s.nl();
+        s.dump_ty(pt, 4);
+        s.indent(3);
+        s.put(in "result");
+        s.nl();
+        let u64t = s.ty_name(sym8(SC_U64));
+        s.dump_ty(u64t, 4);
     }
     if s.invalid {
         adt_head(inout s, S_INVALID, false, false, false);
@@ -2413,9 +2467,9 @@ fn op_decl(inout s: S, sym: u32, sh: Sh, fixed: bool, in lens: ChunkSeq[u64], a:
 
 fn put_bit(inout s: S, b: bool) {
     if b {
-        s.out.push(49);
+        s.out.push(Ascii::Digit1);
     } else {
-        s.out.push(48);
+        s.out.push(Ascii::Digit0);
     }
 }
 
@@ -2641,11 +2695,14 @@ fn find_at(in hay: ChunkSeq[u8], in needle: ChunkSeq[u8], from: u64) -> u64 {
 }
 
 fn is_word_byte(c: u8) -> bool {
-    (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 95
+    (c >= Ascii::Digit0 && c <= Ascii::Digit9)
+        || (c >= Ascii::UpperA && c <= Ascii::UpperZ)
+        || (c >= Ascii::LowerA && c <= Ascii::LowerZ)
+        || c == Ascii::Underscore
 }
 
 fn is_digit_byte(c: u8) -> bool {
-    (c >= 48 && c <= 57) || c == 95
+    (c >= Ascii::Digit0 && c <= Ascii::Digit9) || c == Ascii::Underscore
 }
 
 // `Generated::demangle`: `Ffi$Lib::f$3` as `Lib::f`, `Ffi$Lib` as
@@ -2680,7 +2737,7 @@ pub fn demangle(inout s: S, msg: u32) -> u32 {
                 symbol_end = inc(symbol_end);
             }
             let mut end = symbol_end;
-            if symbol_end < len && u8_at(in out, symbol_end) == 36 {
+            if symbol_end < len && u8_at(in out, symbol_end) == Ascii::Dollar {
                 end = inc(symbol_end);
                 loop {
                     if end >= len || !is_digit_byte(u8_at(in out, end)) {
@@ -2720,7 +2777,7 @@ pub fn demangle(inout s: S, msg: u32) -> u32 {
             for k in s.start(lib)..s.end(lib) {
                 next.push(u8_at(in s.text, k));
             }
-            next.push(93);
+            next.push(Ascii::CloseBracket);
             i = add(at, eff_name.len());
         }
         for k in i..out.len() {
@@ -2836,14 +2893,12 @@ fn slice_error(
 
 // ----- targets, plans and ABI signatures --------------------------------------
 
-// A target triple's architecture is its first component; its operating
-// system is a code (1 linux, 2 darwin, 3 windows, 0 other), as
-// `target_lexicon` compares them.
+// A target triple's architecture is its first component.
 fn triple_arch(in s: S, x: u32) -> u64 {
     let a = s.start(x);
     let e = s.end(x);
     for i in a..e {
-        if u8_at(in s.text, i) == 45 {
+        if u8_at(in s.text, i) == Ascii::Hyphen {
             return wrapping_sub(i, a);
         }
     }
@@ -2868,13 +2923,13 @@ fn sym_contains(in s: S, x: u32, in t: Str) -> bool {
 
 fn triple_os(in s: S, x: u32) -> u64 {
     if sym_contains(in s, x, in "-linux") {
-        1
+        TargetOs::Linux
     } else if sym_contains(in s, x, in "-darwin") {
-        2
+        TargetOs::Darwin
     } else if sym_contains(in s, x, in "-windows") {
-        3
+        TargetOs::Windows
     } else {
-        0
+        TargetOs::Other
     }
 }
 
@@ -2901,7 +2956,7 @@ pub fn target_support(inout s: S, li: u64, t: u32) -> Err {
         s.put_name(t);
         return err_at(K_TARGET, s.intern_tail(mark), false, 0, 0);
     }
-    if l.handler == H_MPK && !(is_x86(in s, t) && triple_os(in s, t) == 1) {
+    if l.handler == H_MPK && !(is_x86(in s, t) && triple_os(in s, t) == TargetOs::Linux) {
         let mark = s.out.len();
         s.put(in "isolated(mpk) trampolines are generated for Linux x86-64 (WRPKRU) only; ");
         s.put_name(t);
@@ -2954,7 +3009,7 @@ pub fn op_plan(inout s: S, t: u32, eff_name: u32, op: u32) {
     let oa = s.start(op);
     let mut cut = s.end(op);
     for i in oa..s.end(op) {
-        if u8_at(in s.text, i) == 36 && cut == s.end(op) {
+        if u8_at(in s.text, i) == Ascii::Dollar && cut == s.end(op) {
             cut = i;
         }
     }
@@ -3088,9 +3143,9 @@ pub fn dump_abi(inout s: S) {
 // `Target::convention` of a library's triple.
 fn put_convention(inout s: S, triple: u32) {
     let os = triple_os(in s, triple);
-    if os == 3 {
+    if os == TargetOs::Windows {
         s.put(in "win64");
-    } else if os == 2 {
+    } else if os == TargetOs::Darwin {
         s.put(in "darwin64");
     } else if is_x86(in s, triple) {
         s.put(in "sysv64");
@@ -3109,7 +3164,7 @@ fn read_type(inout r: Reader, in b: Slice[u8], inout s: S, depth: u64) -> u32 {
     }
     let n = r.word(in b);
     let mut args = ChunkSeq::new[u32]();
-    if depth < 64 {
+    if depth < MAX_DESCRIPTOR_TYPE_DEPTH {
         for i in 0..n {
             args.push(read_type(inout r, in b, inout s, inc(depth)));
         }

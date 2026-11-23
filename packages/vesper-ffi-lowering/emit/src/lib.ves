@@ -13,9 +13,12 @@
 
 use @vesper/cranelift::{
     Block,
+    FuncId,
     FuncRef,
     Ty,
     Value,
+    append_block_param,
+    block_param,
     call_args,
     call_builder,
     call_module,
@@ -29,20 +32,24 @@ use @vesper/cranelift::{
     cc_ne,
     cc_sge,
     cc_ule,
+    cc_ult,
     create_block,
     declare_function,
     import_function,
     ins_bor,
+    ins_brif,
     ins_brif0,
     ins_bswap,
     ins_call,
     ins_iadd,
     ins_iadd_imm,
     ins_iconst,
+    ins_icmp,
     ins_icmp_imm,
     ins_imul_imm,
     ins_ireduce,
     ins_isub,
+    ins_jump,
     ins_jump0,
     ins_load,
     ins_select,
@@ -52,6 +59,7 @@ use @vesper/cranelift::{
     ins_uextend,
     inst_result,
     linkage_import,
+    linkage_local,
     module_pointer_type,
     seal_block,
     sig_new,
@@ -59,6 +67,8 @@ use @vesper/cranelift::{
     sig_return,
     switch_to_block,
     trap_user,
+    ty_f32,
+    ty_f64,
     ty_i16,
     ty_i32,
     ty_i64,
@@ -99,6 +109,8 @@ const KIND_CSTR: u64 = 2;
 const KIND_POINTER: u64 = 3;
 const KIND_SLICE: u64 = 4;
 const KIND_LENT: u64 = 5;
+const KIND_BUFFER: u64 = 6;
+const KIND_CSTRLIST: u64 = 7;
 
 // Value types `V`.
 const V_UNIT: u64 = 0;
@@ -107,6 +119,8 @@ const V_BOOL: u64 = 2;
 const V_ENUM: u64 = 3;
 const V_HANDLE: u64 = 5;
 const V_NONNULL: u64 = 6;
+const V_FLOAT: u64 = 7;
+const V_CSTR: u64 = 8;
 
 // Wire field kinds of `W`.
 const F_INTEGER: u64 = 0;
@@ -130,9 +144,10 @@ const ENDIAN_LITTLE: u64 = 1;
 const ERRNO_LOCATION: u64 = 1;
 const ERRNO_ERROR: u64 = 2;
 
-// `ffi::NULL_HANDLE_TRAP` and `ffi::CSTR_ALLOC_TRAP`.
+// `ffi::NULL_HANDLE_TRAP`, `ffi::CSTR_ALLOC_TRAP` and `ffi::MAPPING_ALLOC_TRAP`.
 const NULL_HANDLE_TRAP: u32 = 6;
 const CSTR_ALLOC_TRAP: u32 = 7;
+const MAPPING_ALLOC_TRAP: u32 = 8;
 
 // `MemFlags::new()`.
 const PLAIN: u32 = 0;
@@ -269,8 +284,10 @@ fn libc(inout b: Builder, inout m: Module, which: u32, params: u64, returns: boo
         declare_function(inout m, in "memcpy".as_bytes(), linkage_import(), sig)
     } else if which == 2 {
         declare_function(inout m, in "memchr".as_bytes(), linkage_import(), sig)
-    } else {
+    } else if which == 3 {
         declare_function(inout m, in "free".as_bytes(), linkage_import(), sig)
+    } else {
+        declare_function(inout m, in "strlen".as_bytes(), linkage_import(), sig)
     };
     import_function(inout b, inout m, id)
 }
@@ -279,10 +296,18 @@ const MALLOC: u32 = 0;
 const MEMCPY: u32 = 1;
 const MEMCHR: u32 = 2;
 const FREE: u32 = 3;
+const STRLEN: u32 = 4;
 
 fn call1(inout b: Builder, f: FuncRef, a: Value) -> u32 eff [Ffi[Cranelift]] {
     let mut args: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](1);
     args.push(wrapping_u32(value_word(a)));
+    ins_call(inout b, f, in args.as_slice())
+}
+
+fn call2(inout b: Builder, f: FuncRef, a: Value, c: Value) -> u32 eff [Ffi[Cranelift]] {
+    let mut args: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](2);
+    args.push(wrapping_u32(value_word(a)));
+    args.push(wrapping_u32(value_word(c)));
     ins_call(inout b, f, in args.as_slice())
 }
 
@@ -335,6 +360,188 @@ fn cstr(inout b: Builder, inout m: Module, data: Value, len: Value, inout out: C
     let nul_at = ins_select(inout b, missing, none, pos);
     out.push(value_word(buffer));
     out.push(value_word(nul_at));
+}
+
+fn cstr_list_walk(
+    inout b: Builder,
+    inout m: Module,
+    buffer: Value,
+    len: Value,
+    has_array: bool,
+    array: Value
+) -> Value eff [Ffi[Cranelift]] {
+    let memchr = libc(inout b, inout m, MEMCHR, 3, true);
+    let walk = create_block(inout b);
+    let body = create_block(inout b);
+    let done = create_block(inout b);
+    for _ in 0..2 {
+        append_block_param(inout b, walk, ty_i64());
+        append_block_param(inout b, body, ty_i64());
+    }
+    append_block_param(inout b, done, ty_i64());
+    let zero = ins_iconst(inout b, ty_i64(), 0);
+    let mut init: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](2);
+    init.push(wrapping_u32(value_word(zero)));
+    init.push(wrapping_u32(value_word(zero)));
+    ins_jump(inout b, walk, in init.as_slice());
+    switch_to_block(inout b, walk);
+    let start_w = block_param(inout b, walk, 0);
+    let k_w = block_param(inout b, walk, 1);
+    let more = ins_icmp(inout b, cc_ult(), start_w, len);
+    let mut yes_args: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](2);
+    yes_args.push(wrapping_u32(value_word(start_w)));
+    yes_args.push(wrapping_u32(value_word(k_w)));
+    let mut no_args: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](1);
+    no_args.push(wrapping_u32(value_word(k_w)));
+    ins_brif(inout b, more, body, in yes_args.as_slice(), done, in no_args.as_slice());
+    switch_to_block(inout b, body);
+    seal_block(inout b, body);
+    let start_b = block_param(inout b, body, 0);
+    let k_b = block_param(inout b, body, 1);
+    let here = ins_iadd(inout b, buffer, start_b);
+    if has_array {
+        let slot = ins_imul_imm(inout b, k_b, 8);
+        let slot = ins_iadd(inout b, array, slot);
+        ins_store(inout b, PLAIN, here, slot, 0);
+    }
+    let rest = ins_isub(inout b, len, start_b);
+    let rest = ins_iadd_imm(inout b, rest, 1);
+    call3(inout b, memchr, here, zero, rest);
+    let found = inst_result(inout b, 0);
+    let end = ins_isub(inout b, found, buffer);
+    let next_start = ins_iadd_imm(inout b, end, 1);
+    let k_next = ins_iadd_imm(inout b, k_b, 1);
+    let mut back_args: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](2);
+    back_args.push(wrapping_u32(value_word(next_start)));
+    back_args.push(wrapping_u32(value_word(k_next)));
+    ins_jump(inout b, walk, in back_args.as_slice());
+    seal_block(inout b, walk);
+    switch_to_block(inout b, done);
+    seal_block(inout b, done);
+    block_param(inout b, done, 0)
+}
+
+fn cstr_list(inout b: Builder, inout m: Module, data: Value, len: Value, inout a: Answer) eff [
+    Ffi[Cranelift]
+] {
+    let malloc = libc(inout b, inout m, MALLOC, 1, true);
+    let memcpy = libc(inout b, inout m, MEMCPY, 3, true);
+    let size = ins_iadd_imm(inout b, len, 1);
+    call1(inout b, malloc, size);
+    let buffer = inst_result(inout b, 0);
+    ins_trapz(inout b, buffer, trap_user(CSTR_ALLOC_TRAP));
+    call3(inout b, memcpy, buffer, data, len);
+    let end = ins_iadd(inout b, buffer, len);
+    let nul = ins_iconst(inout b, ty_i8(), 0);
+    ins_store(inout b, PLAIN, nul, end, 0);
+    let count = cstr_list_walk(inout b, inout m, buffer, len, false, buffer);
+    let slots = ins_iadd_imm(inout b, count, 1);
+    let bytes = ins_imul_imm(inout b, slots, 8);
+    call1(inout b, malloc, bytes);
+    let array = inst_result(inout b, 0);
+    ins_trapz(inout b, array, trap_user(CSTR_ALLOC_TRAP));
+    let count = cstr_list_walk(inout b, inout m, buffer, len, true, array);
+    let slot = ins_imul_imm(inout b, count, 8);
+    let slot = ins_iadd(inout b, array, slot);
+    let zero = ins_iconst(inout b, ty_i64(), 0);
+    ins_store(inout b, PLAIN, zero, slot, 0);
+    a.c.push(value_word(array));
+    a.text.push(value_word(buffer));
+    a.text.push(value_word(array));
+}
+
+fn foreign_mapping(
+    inout b: Builder,
+    inout m: Module,
+    address: Value,
+    raw_len: Value,
+    len_i64: bool,
+    reg_id: u64
+) -> Value eff [Ffi[Cranelift]] {
+    let len = if len_i64 {
+        raw_len
+    } else {
+        ins_uextend(inout b, ty_i64(), raw_len)
+    };
+    let null = ins_icmp_imm(inout b, cc_eq(), address, 0);
+    let failed = ins_icmp_imm(inout b, cc_eq(), address, -1);
+    let absent = ins_bor(inout b, null, failed);
+    let make = create_block(inout b);
+    let join = create_block(inout b);
+    append_block_param(inout b, join, ty_i64());
+    let zero = ins_iconst(inout b, ty_i64(), 0);
+    let mut yes_args: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](1);
+    yes_args.push(wrapping_u32(value_word(zero)));
+    let no_args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    ins_brif(inout b, absent, join, in yes_args.as_slice(), make, in no_args.as_slice());
+    switch_to_block(inout b, make);
+    seal_block(inout b, make);
+    let reg_fn = import_function(
+        inout b,
+        inout m,
+        FuncId {
+            id: wrapping_u32(reg_id)
+        }
+    );
+    let align = ins_iconst(inout b, ty_i64(), 1);
+    call3(inout b, reg_fn, address, len, align);
+    let malloc = libc(inout b, inout m, MALLOC, 1, true);
+    let size = ins_iconst(inout b, ty_i64(), 24);
+    call1(inout b, malloc, size);
+    let header = inst_result(inout b, 0);
+    ins_trapz(inout b, header, trap_user(MAPPING_ALLOC_TRAP));
+    ins_store(inout b, PLAIN, len, header, 0);
+    ins_store(inout b, PLAIN, len, header, 8);
+    ins_store(inout b, PLAIN, address, header, 16);
+    let mut jmp_args: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](1);
+    jmp_args.push(wrapping_u32(value_word(header)));
+    ins_jump(inout b, join, in jmp_args.as_slice());
+    switch_to_block(inout b, join);
+    seal_block(inout b, join);
+    block_param(inout b, join, 0)
+}
+
+fn foreign_cstr_copy(inout b: Builder, inout m: Module, address: Value, jit: bool)
+    -> Value eff [Ffi[Cranelift]] {
+    let copy = create_block(inout b);
+    let join = create_block(inout b);
+    append_block_param(inout b, join, ty_i64());
+    let zero = ins_iconst(inout b, ty_i64(), 0);
+    let null = ins_icmp_imm(inout b, cc_eq(), address, 0);
+    let mut yes_args: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](1);
+    yes_args.push(wrapping_u32(value_word(zero)));
+    let no_args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    ins_brif(inout b, null, join, in yes_args.as_slice(), copy, in no_args.as_slice());
+    switch_to_block(inout b, copy);
+    seal_block(inout b, copy);
+    let strlen = libc(inout b, inout m, STRLEN, 1, true);
+    let memcpy = libc(inout b, inout m, MEMCPY, 3, true);
+    call1(inout b, strlen, address);
+    let len = inst_result(inout b, 0);
+    let cap = ins_iadd_imm(inout b, len, 1);
+    let stride = ins_iconst(inout b, ty_i64(), 1);
+    let sig = sig_new(inout m, call_conv_default());
+    sig_param(inout m, sig, ty_i64());
+    sig_param(inout m, sig, ty_i64());
+    sig_return(inout m, sig, ty_i64());
+    let linkage = if jit {
+        linkage_import()
+    } else {
+        linkage_local()
+    };
+    let seq_id = declare_function(inout m, in "vesper_seq_make".as_bytes(), linkage, sig);
+    let seq_make = import_function(inout b, inout m, seq_id);
+    call2(inout b, seq_make, cap, stride);
+    let header = inst_result(inout b, 0);
+    let data = ins_load(inout b, ty_i64(), PLAIN, header, 16);
+    call3(inout b, memcpy, data, address, len);
+    ins_store(inout b, PLAIN, len, header, 0);
+    let mut jmp_args: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](1);
+    jmp_args.push(wrapping_u32(value_word(header)));
+    ins_jump(inout b, join, in jmp_args.as_slice());
+    switch_to_block(inout b, join);
+    seal_block(inout b, join);
+    block_param(inout b, join, 0)
 }
 
 // ---------------------------------------------------------------------------
@@ -609,6 +816,23 @@ fn value_arg(inout b: Builder, inout r: R, kind: u64, source: Value) -> Value ef
     } else if v == V_BOOL {
         let word = source_word(inout b, kind, source);
         ins_ireduce(inout b, ty_i8(), word)
+    } else if v == V_FLOAT {
+        let bits = next(inout r);
+        if kind == SOURCE_SCALAR {
+            source
+        } else {
+            ins_load(
+                inout b,
+                if bits == 32 {
+                    ty_f32()
+                } else {
+                    ty_f64()
+                },
+                PLAIN,
+                source,
+                0
+            )
+        }
     } else {
         // An enum (the Rust code checked that its source is in memory).
         let s = next(inout r);
@@ -675,6 +899,20 @@ fn arg(call: u64, inout b: Builder, inout m: Module) -> u64 eff [Ffi[Cranelift]]
     } else if kind == KIND_LENT {
         let stride = next(inout r);
         view(inout b, in m, source, stride, inout a.c);
+    } else if kind == KIND_BUFFER {
+        let release = next(inout r) == 1;
+        let header = source_word(inout b, source_kind, source);
+        let data = ins_load(inout b, ty_i64(), PLAIN, header, 16);
+        let len = ins_load(inout b, ty_i64(), PLAIN, header, 0);
+        a.c.push(value_word(data));
+        a.c.push(value_word(len));
+        if release {
+            a.text.push(value_word(header));
+        }
+    } else if kind == KIND_CSTRLIST {
+        let mut lent: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        view(inout b, in m, source, 1, inout lent);
+        cstr_list(inout b, inout m, val(word_at(in lent, 0)), val(word_at(in lent, 1)), inout a);
     } else if kind == KIND_VALUE {
         let v = value_arg(inout b, inout r, source_kind, source);
         a.c.push(value_word(v));
@@ -890,23 +1128,40 @@ fn the_call(call: u64, inout b: Builder, inout m: Module) eff [Ffi[Cranelift]] {
     let errno = at(in r, 1);
     let returns = at(in r, 2) == 1;
     let little = at(in r, 3) == 1;
-    let n = at(in r, 4);
+    let len_word = at(in r, 4);
+    let len_i64 = at(in r, 5) == 1;
+    let reg_id = at(in r, 6);
+    let rel_n = at(in r, 7);
+    let n_idx = wrapping_add(8, rel_n);
+    let n = at(in r, n_idx);
+    let args_start = wrapping_add(n_idx, 1);
     let mut args: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](n);
     for i in 0..n {
-        args.push(wrapping_u32(at(in r, wrapping_add(5, i))));
+        args.push(wrapping_u32(at(in r, wrapping_add(args_start, i))));
     }
     ins_call(inout b, callee, in args.as_slice());
-    let raw = if returns {
+    let mut raw = if returns {
         value_word(inst_result(inout b, 0))
     } else {
         NO_VALUE
     };
+    if len_word != NO_VALUE && raw != NO_VALUE {
+        raw = value_word(
+            foreign_mapping(inout b, inout m, val(raw), val(len_word), len_i64, reg_id)
+        );
+    }
+    if rel_n > 0 {
+        let free = libc(inout b, inout m, FREE, 1, false);
+        for j in 0..rel_n {
+            call1(inout b, free, val(at(in r, wrapping_add(8, j))));
+        }
+    }
     let os = if errno != 0 {
         value_word(os_error(inout b, inout m, errno))
     } else {
         NO_VALUE
     };
-    let mut i = wrapping_add(5, n);
+    let mut i = wrapping_add(args_start, n);
     let copies = at(in r, i);
     i = wrapping_add(i, 1);
     for _ in 0..copies {
@@ -932,18 +1187,32 @@ fn validated(inout b: Builder, in m: Module, in r: R, l: u64, valid: Value, ok: 
     ptr
 }
 
-fn result(call: u64, inout b: Builder, in m: Module) eff [Ffi[Cranelift]] {
+fn result(call: u64, inout b: Builder, inout m: Module) eff [Ffi[Cranelift]] {
     let mut r = R {
         w: call_args(call),
         i: 0,
     };
     let raw = val(next(inout r));
+    let jit = next(inout r) == 1;
     let v = next(inout r);
     let value = if v == V_UNIT {
         ins_iconst(inout b, ty_i64(), 0)
     } else if v == V_SCALAR {
         let s = next(inout r);
         widen(inout b, raw, bits_of(s), signed_of(s))
+    } else if v == V_FLOAT {
+        raw
+    } else if v == V_CSTR {
+        let copy = foreign_cstr_copy(inout b, inout m, raw, jit);
+        let l = r.i;
+        let present = ins_icmp_imm(inout b, cc_ne(), raw, 0);
+        let ptr = alloc(inout b, in m, wrapping_u32(at(in r, l)), true);
+        let some = ins_iconst(inout b, ty_i64(), imm(at(in r, wrapping_add(l, 1))));
+        let none = ins_iconst(inout b, ty_i64(), imm(at(in r, wrapping_add(l, 3))));
+        let tag = ins_select(inout b, present, some, none);
+        ins_store(inout b, PLAIN, tag, ptr, 0);
+        ins_store(inout b, PLAIN, copy, ptr, off(at(in r, wrapping_add(l, 2))));
+        ptr
     } else if v == V_BOOL {
         let word = ins_uextend(inout b, ty_i64(), raw);
         let valid = ins_icmp_imm(inout b, cc_ule(), word, 1);
@@ -1023,7 +1292,7 @@ fn request(call: u64, inout b: Builder, inout m: Module) -> u64 eff [Ffi[Craneli
     } else if op == CALL {
         the_call(call, inout b, inout m);
     } else if op == RESULT {
-        result(call, inout b, in m);
+        result(call, inout b, inout m);
     } else if op == FINISH {
         finish(call, inout b, inout m);
     } else {

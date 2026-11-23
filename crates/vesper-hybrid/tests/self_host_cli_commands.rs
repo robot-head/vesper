@@ -29,6 +29,7 @@ const TOOLS: &[&str] = &[
     "cas",
     "fuzz",
     "grammar",
+    "highlight",
     "json",
     "migrate",
     "publish",
@@ -36,6 +37,7 @@ const TOOLS: &[&str] = &[
     "resolve",
     "sbom",
     "semver",
+    "shot",
     "simd",
     "top",
     "traceparent",
@@ -271,7 +273,8 @@ fn staged() -> Stage {
         paths.push((";path1;;\"path2\"", Some(q)));
         // A bare drive (`C:`) names that drive's current directory, here the
         // run directory, where `run` stages `vesper-cwdtool`; it must not
-        // become the drive's root (`C:\vesper-cwdtool.exe`).
+        // become the drive's root (`C:\vesper-cwdtool.exe`). By contrast, a
+        // verbatim drive (`\\?\C:`) takes a separator (`\\?\C:\vesper-cwdtool.exe`).
         let drive: String = root.to_string_lossy().chars().take(2).collect();
         assert!(drive.ends_with(':'), "{} has no drive", root.display());
         let _ = CWD_TOOL.set(default.clone());
@@ -280,9 +283,9 @@ fn staged() -> Stage {
         q.push(";");
         q.push(&path1);
         paths.push(("C:;path1", Some(q)));
-        // A verbatim drive keeps its separator: `\\?\C:\vesper-x.exe`.
-        let mut q = OsString::from(r"\\?\");
-        q.push(&drive);
+        let verbatim_drive = format!(r"\\?\{drive}");
+        paths.push((r"\\?\C:", Some(OsString::from(&verbatim_drive))));
+        let mut q = OsString::from(&verbatim_drive);
         q.push(";");
         q.push(&path1);
         paths.push((r"\\?\C:;path1", Some(q)));
@@ -547,6 +550,8 @@ fn routing_runs_in_vesper() {
     assert_eq!(prints(&bare, &["-x"]), 1);
     assert_eq!(prints(&bare, &["nope"]), 1);
     assert_eq!(prints(&bare, &["semver", "--help"]), 1);
+    assert_eq!(prints(&bare, &["highlight", "--help"]), 1);
+    assert_eq!(prints(&bare, &["shot", "--help"]), 1);
     // Handed back: the Rust CLI prints.
     assert_eq!(prints(&bare, &["fmt", "--help"]), 0);
     assert_eq!(prints(&bare, &["check", "--fuel"]), 0);

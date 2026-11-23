@@ -573,6 +573,43 @@ fn dump_item(o: &mut String, item: &Item, d: usize) {
             line(o, d + 1, "body");
             line(o, d + 2, &format!("E lit int {value}{}", sp(&body.span)));
         }
+        Item::Impl {
+            ty,
+            generics,
+            methods,
+        } => {
+            line(o, d, "impl");
+            for g in generics {
+                line(
+                    o,
+                    d + 1,
+                    &format!(
+                        "generic {} bound={} row={}",
+                        q(&g.name),
+                        mode(g.bound),
+                        u8::from(g.row)
+                    ),
+                );
+            }
+            dump_ty(o, ty, d + 1);
+            for f in methods {
+                line(
+                    o,
+                    d + 1,
+                    &format!("fn {} fip={}{}", q(&f.name), u8::from(f.fip), sp(&f.span)),
+                );
+                for p in &f.params {
+                    line(
+                        o,
+                        d + 2,
+                        &format!("param {} pass={}{}", q(&p.name), pass(p.pass), sp(&p.span)),
+                    );
+                    dump_ty(o, &p.ty, d + 3);
+                }
+                line(o, d + 2, "result");
+                dump_ty(o, &f.result, d + 3);
+            }
+        }
         other => panic!("generated item {other:?}"),
     }
 }

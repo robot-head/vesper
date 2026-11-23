@@ -48,6 +48,7 @@ use self::decoder::{
     dec_decode_section
 };
 use self::message::{
+    HttpStatus,
     message_parse_request,
     message_check_trailers
 };
@@ -1653,7 +1654,8 @@ fn build_and_encode_response(
     fbytes.extend(in bytes);
     fmeta.extend(in meta);
 
-    if has_cl && !(status == 204 || (status == 304 && cl == 0)) {
+    if has_cl
+        && !(status == HttpStatus::NoContent || (status == HttpStatus::NotModified && cl == 0)) {
         let cl_name = "content-length".as_bytes();
         fbytes.extend(in cl_name);
         let dlen = push_u64_ascii(inout fbytes, cl);
@@ -1690,7 +1692,9 @@ pub fn server_send_interim(
         Result::Ok(_) => {}
         Result::Err(e) => return Result::Err(e),
     }
-    if status < 100 || status > 199 || status == 101 {
+    if status < HttpStatus::Continue
+        || status >= HttpStatus::Ok
+        || status == HttpStatus::SwitchingProtocols {
         return Result::Err(SendError::InvalidResponse(MessageError::InvalidStatus));
     }
     match check_response_fields(inout s, in bytes, in meta) {
@@ -1733,14 +1737,14 @@ pub fn server_send_headers(
         Result::Ok(_) => {}
         Result::Err(e) => return Result::Err(e),
     }
-    if status < 200 || status > 599 {
+    if status < HttpStatus::Ok || status > HttpStatus::Max {
         return Result::Err(SendError::InvalidResponse(MessageError::InvalidStatus));
     }
     match check_response_fields(inout s, in bytes, in meta) {
         Option::Some(e) => return Result::Err(e),
         Option::None => {}
     }
-    let bodyless = status == 204 || status == 304;
+    let bodyless = status == HttpStatus::NoContent || status == HttpStatus::NotModified;
     if bodyless && has_cl && cl > 0 {
         return Result::Err(SendError::InvalidResponse(MessageError::ContentLengthMismatch));
     }
@@ -1903,7 +1907,7 @@ pub fn server_send_whole(
     }
     let idx = bsearch_u64(in s.r_id.as_slice(), id).idx;
     let head = (word(in s.r_flags.as_slice(), idx) & RF_HEAD_REQ) != 0;
-    let bodyless = status == 204 || status == 304;
+    let bodyless = status == HttpStatus::NoContent || status == HttpStatus::NotModified;
     let wire_body = if head || bodyless {
         0
     } else {
@@ -1967,7 +1971,18 @@ pub fn server_accept_session_send(
     if word(in s.r_phase.as_slice(), idx) != PHASE_TUNNEL {
         return Result::Err(SendError::NotExtendedConnect);
     }
-    server_send_headers(inout s, inout enc, in h, id, 200, in bytes, in meta, false, 0, 0)
+    server_send_headers(
+        inout s,
+        inout enc,
+        in h,
+        id,
+        HttpStatus::Ok,
+        in bytes,
+        in meta,
+        false,
+        0,
+        0
+    )
 }
 
 pub fn server_accept_session_establish(inout s: ServerCore, id: u64) {

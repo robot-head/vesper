@@ -23,6 +23,12 @@
 // tests/self_host_ir_opt.rs from `fip::pattern_box_slots`, `box_inner`,
 // `caller_slot_functions` and `slot_key`).
 
+use @vesper/place-ir::codes::{
+    Op,
+    PoolKind,
+    Tag,
+    Term
+};
 use @vesper/check-data::util::{
     add,
     inc,
@@ -56,14 +62,6 @@ use self::view::{
 // package too.
 const C_NEVER: u8 = 2;
 const NONE: u32 = 4294967295;
-const OP_BIND: u8 = 3;
-const OP_CALL: u8 = 11;
-const OP_FIP: u8 = 19;
-const TERM_JUMP: u8 = 1;
-const TERM_RETURN: u8 = 0;
-const T_BLOCK: u8 = 7;
-const T_RAW: u8 = 0;
-const T_VALUE: u8 = 6;
 
 // Instruction facts.
 pub const F_NONE: u8 = 0;
@@ -71,9 +69,6 @@ pub const F_BIND: u8 = 1;
 pub const F_BIND_ERR: u8 = 2;
 pub const F_NEED: u8 = 3;
 pub const F_NEED_ERR: u8 = 4;
-
-// The `Fip` payload kind of the pool.
-const POOL_FIP: u64 = 3;
 
 // Call slot kinds (the trailer's words).
 const CS_CALLER: u64 = 0;
@@ -263,7 +258,7 @@ fn successors(in p: Program, bk: BlockRow, inout out: ChunkSeq[u64]) {
     out.clear();
     for j in 0..bk.tn {
         let x = add(bk.ta, j);
-        if p.tag(x) == T_BLOCK {
+        if p.tag(x) == Tag::Block {
             let t = p.op(x);
             let mut seen = false;
             for k in 0..out.len() {
@@ -280,7 +275,7 @@ fn successors(in p: Program, bk: BlockRow, inout out: ChunkSeq[u64]) {
 
 // Whether `pb` ends in a jump to `b` passing a `Never` value.
 fn never_edge(in p: Program, in cls: ChunkSeq[u8], in v: FnView, pb: BlockRow, b: u64) -> bool {
-    if pb.term != TERM_JUMP || p.op(pb.ta) != b {
+    if pb.term != Term::Jump || p.op(pb.ta) != b {
         return false;
     }
     let n = p.op(inc(pb.ta));
@@ -300,10 +295,10 @@ fn flows_to_return(in p: Program, f: FnRow, b0: u64, v0: u64) -> bool {
     let mut v = v0;
     for step in 0..inc(f.bc) {
         let bk = p.block(add(f.b0, b));
-        if bk.term == TERM_RETURN {
+        if bk.term == Term::Return {
             return p.op(bk.ta) == v;
         }
-        if bk.term != TERM_JUMP {
+        if bk.term != Term::Jump {
             return false;
         }
         let t = p.op(bk.ta);
@@ -583,7 +578,7 @@ fn reuse_function(
             };
             let kind = u8_of(in facts.kind, src);
             let fa = u64_of(in facts.a, src);
-            if i.op == OP_BIND {
+            if i.op == Op::Bind {
                 if kind == F_BIND_ERR {
                     out.status = S_FIP_ERROR;
                     out.error = fa;
@@ -608,7 +603,7 @@ fn reuse_function(
                         next_slot = wrapping_add(next_slot, 1);
                     }
                 }
-            } else if i.op == OP_FIP {
+            } else if i.op == Op::Fip {
                 let pool = p.op(i.a);
                 let label = p.pool_row(pool).label;
                 if names.spells(label, in "BoxNew".as_bytes()) {
@@ -628,7 +623,7 @@ fn reuse_function(
                                     .pool
                                     .push(
                                         PoolRow {
-                                            kind: POOL_FIP,
+                                            kind: PoolKind::Fip,
                                             label: 0
                                         }
                                     );
@@ -642,7 +637,7 @@ fn reuse_function(
                 } else if names.spells(label, in "BoxNewInCaller".as_bytes()) {
                     caller_used = true;
                 }
-            } else if i.op == OP_CALL {
+            } else if i.op == Op::Call {
                 if kind == F_NEED_ERR {
                     out.status = S_FIP_ERROR;
                     out.error = fa;
@@ -860,7 +855,7 @@ fn write_trailer(
     let end = add(f.ta, f.tn);
     let ta = p.ops.len();
     let n = calls.v.len();
-    p.put(n, T_RAW);
+    p.put(n, Tag::Raw);
     // call slots by value: selection of the next smallest
     let mut done: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](n);
     done.resize(n, 0);
@@ -873,11 +868,11 @@ fn write_trailer(
             }
         }
         done.try_set(best, 1);
-        p.put(w(at32(in calls.v, best)), T_VALUE);
-        p.put(u64_of(in calls.kind, best), T_RAW);
-        p.put(w(at32(in calls.bind, best)), T_VALUE);
-        p.put(u64_of(in calls.sidx, best), T_RAW);
-        p.put(u64_of(in calls.size, best), T_RAW);
+        p.put(w(at32(in calls.v, best)), Tag::Value);
+        p.put(u64_of(in calls.kind, best), Tag::Raw);
+        p.put(w(at32(in calls.bind, best)), Tag::Value);
+        p.put(u64_of(in calls.sidx, best), Tag::Raw);
+        p.put(u64_of(in calls.size, best), Tag::Raw);
     }
     // join slots: entries of a block are contiguous (one visit per block);
     // blocks in ascending order
@@ -896,7 +891,7 @@ fn write_trailer(
         }
     }
     let nbk = blocks.len();
-    p.put(nbk, T_RAW);
+    p.put(nbk, Tag::Raw);
     let mut bdone: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](nbk);
     bdone.resize(nbk, 0);
     for step in 0..nbk {
@@ -915,8 +910,8 @@ fn write_trailer(
                 count = inc(count);
             }
         }
-        p.put(b, T_BLOCK);
-        p.put(count, T_RAW);
+        p.put(b, Tag::Block);
+        p.put(count, Tag::Raw);
         for k in 0..ne {
             if u64_of(in jb, k) != b {
                 continue;
@@ -927,15 +922,15 @@ fn write_trailer(
             } else {
                 jin.len()
             };
-            p.put(u64_of(in jv, k), T_VALUE);
-            p.put(0, T_RAW);
+            p.put(u64_of(in jv, k), Tag::Value);
+            p.put(0, Tag::Raw);
             let m = wrapping_sub(e, s) / 3;
-            p.put(m, T_RAW);
+            p.put(m, Tag::Raw);
             for q in 0..m {
                 let at = add(s, wrapping_mul(q, 3));
-                p.put(u64_of(in jin, at), T_BLOCK);
-                p.put(u64_of(in jin, inc(at)), T_VALUE);
-                p.put(u64_of(in jin, add(at, 2)), T_RAW);
+                p.put(u64_of(in jin, at), Tag::Block);
+                p.put(u64_of(in jin, inc(at)), Tag::Value);
+                p.put(u64_of(in jin, add(at, 2)), Tag::Raw);
             }
         }
     }
