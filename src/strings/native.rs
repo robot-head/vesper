@@ -31,6 +31,19 @@ impl<M: Module> Codegen<'_, '_, M> {
 
     /// A string literal: `{n, 0, &static_bytes}` (`{0, 0, null}` when empty).
     pub(super) fn string_literal(&mut self, text: &str) -> Result<ir::Value, String> {
+        if self.seq_hook_active() {
+            let bytes = text.as_bytes();
+            let mut args = Vec::with_capacity(1 + bytes.len().div_ceil(8));
+            args.push(bytes.len() as u64);
+            for chunk in bytes.chunks(8) {
+                let mut buf = [0u8; 8];
+                buf[..chunk.len()].copy_from_slice(chunk);
+                args.push(u64::from_le_bytes(buf));
+            }
+            if let Some(res) = self.seq_swap_req(crate::codegen_swap::seq::STRING_LITERAL, &args)? {
+                return crate::codegen_swap::value_of(&res);
+            }
+        }
         let len = self.b.ins().iconst(types::I64, text.len() as i64);
         let zero = self.zero();
         if text.is_empty() {
@@ -92,6 +105,104 @@ impl<M: Module> Codegen<'_, '_, M> {
                 .ok_or_else(|| format!("native String::{} lacks an operand", op.name()))
         };
         let s = arg(0)?;
+        if self.seq_hook_active() {
+            use crate::codegen_swap::{seq as sops, value_of, word};
+            match op {
+                StrOp::AsStr => return Ok(s),
+                StrOp::Len => {
+                    if let Some(res) = self.seq_swap_req(sops::STR_OP, &[sops::STR_LEN, word(s)])? {
+                        return value_of(&res);
+                    }
+                }
+                StrOp::ByteAt => {
+                    let i = arg(1)?;
+                    if let Some(res) =
+                        self.seq_swap_req(sops::STR_OP, &[sops::STR_BYTE_VALID, word(s), word(i)])?
+                    {
+                        let valid = value_of(&res)?;
+                        self.seq_guard(valid)?;
+                        if let Some(b) =
+                            self.seq_swap_req(sops::STR_OP, &[sops::STR_BYTE, word(s), word(i)])?
+                        {
+                            return value_of(&b);
+                        }
+                    }
+                }
+                StrOp::TryByteAt => {
+                    let i = arg(1)?;
+                    let u8_ty = Type::named("u8");
+                    let option = Type::Named("Option".into(), vec![u8_ty.clone()]);
+                    let meta = self.seq_option_meta_for(&option, &u8_ty)?;
+                    if let Some(res) = self.seq_swap_req(
+                        sops::STR_OP,
+                        &[
+                            sops::STR_TRY_BYTE_AT,
+                            word(s),
+                            word(i),
+                            meta[0],
+                            meta[1],
+                            meta[2],
+                            meta[3],
+                            u64::from(self.operands_only),
+                        ],
+                    )? {
+                        return self.seq_option_finish_swap(&res, meta);
+                    }
+                }
+                StrOp::AsBytes => {
+                    if let Some(res) =
+                        self.seq_swap_req(sops::STR_OP, &[sops::STR_AS_BYTES, word(s)])?
+                    {
+                        return value_of(&res);
+                    }
+                }
+                StrOp::SubStr if !self.seq_is_freestanding() => {
+                    let (lo, hi) = (arg(1)?, arg(2)?);
+                    self.seq_ensure_runtime_if_hosted()?;
+                    if let Some(res) = self.seq_swap_req(
+                        sops::STR_OP,
+                        &[sops::STR_SUB_STR, word(s), word(lo), word(hi)],
+                    )? {
+                        return value_of(&res);
+                    }
+                }
+                StrOp::PushStr if !self.seq_is_freestanding() => {
+                    let src = arg(1)?;
+                    self.seq_ensure_runtime_if_hosted()?;
+                    if let Some(res) =
+                        self.seq_swap_req(sops::STR_OP, &[sops::STR_PUSH_STR, word(s), word(src)])?
+                    {
+                        return value_of(&res);
+                    }
+                }
+                StrOp::PushChar if !self.seq_is_freestanding() => {
+                    let c = arg(1)?;
+                    self.seq_ensure_runtime_if_hosted()?;
+                    if let Some(res) =
+                        self.seq_swap_req(sops::STR_OP, &[sops::STR_PUSH_CHAR, word(s), word(c)])?
+                    {
+                        return value_of(&res);
+                    }
+                }
+                StrOp::Clear => {
+                    if let Some(res) =
+                        self.seq_swap_req(sops::STR_OP, &[sops::STR_CLEAR, word(s)])?
+                    {
+                        return value_of(&res);
+                    }
+                }
+                StrOp::Reserve if !self.seq_is_freestanding() => {
+                    let n = arg(1)?;
+                    self.seq_ensure_runtime_if_hosted()?;
+                    if let Some(res) =
+                        self.seq_swap_req(sops::STR_OP, &[sops::STR_RESERVE, word(s), word(n)])?
+                    {
+                        return value_of(&res);
+                    }
+                }
+                _ => {}
+            }
+        }
         Ok(match op {
             StrOp::Len => self.str_word(s, LEN),
             StrOp::ByteAt => {
@@ -264,6 +375,29 @@ impl<M: Module> Codegen<'_, '_, M> {
         a: ir::Value,
         b: ir::Value,
     ) -> Result<ir::Value, String> {
+        if self.seq_hook_active() {
+            let cc = match op {
+                "==" => Some(0u64),
+                "!=" => Some(1),
+                "<" => Some(2),
+                ">=" => Some(3),
+                ">" => Some(4),
+                "<=" => Some(5),
+                _ => None,
+            };
+            if let Some(cc) = cc
+                && let Some(res) = self.seq_swap_req(
+                    crate::codegen_swap::seq::STR_COMPARE,
+                    &[
+                        cc,
+                        crate::codegen_swap::word(a),
+                        crate::codegen_swap::word(b),
+                    ],
+                )?
+            {
+                return crate::codegen_swap::value_of(&res);
+            }
+        }
         let order = emit_str_order(&mut self.b, a, b);
         let cc = match op {
             "==" => IntCC::Equal,

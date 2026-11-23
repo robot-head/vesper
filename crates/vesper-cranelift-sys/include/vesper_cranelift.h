@@ -190,6 +190,14 @@ uint64_t vcl_module_last_relocs(const vcl_module *m, uint64_t *out, size_t out_l
 uint64_t vcl_module_last_call_sites(const vcl_module *m, uint64_t *out, size_t out_len);
 uint64_t vcl_module_last_frame_size(const vcl_module *m);
 
+/* Sequence emission (SH4 lane 9, part 2b). Architectures: 0 other,
+   1 x86-64, 2 AArch64, 3 RISC-V 64. */
+uint32_t vcl_declare_anonymous_data(vcl_module *m, bool writable, bool tls);
+void vcl_call_memset(vcl_builder *b, const vcl_module *m, uint32_t dst, uint32_t val, uint32_t count);
+void vcl_call_memmove(vcl_builder *b, const vcl_module *m, uint32_t dst, uint32_t src, uint32_t count);
+uint32_t vcl_isa_triple_arch(const vcl_module *m);
+uint32_t vcl_has_x86_pshufb_lowering(const vcl_module *m);
+
 #ifdef __cplusplus
 }
 #endif

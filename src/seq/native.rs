@@ -60,6 +60,160 @@ fn seq_field_offsets(world: &World, layout: &Layout, base: i32, out: &mut Vec<i3
 }
 
 impl<M: Module> Codegen<'_, '_, M> {
+    pub(super) fn seq_hook_active(&self) -> bool {
+        crate::codegen_swap::hook(crate::codegen_swap::Family::Seq).is_some()
+    }
+
+    pub(super) fn seq_has_jit(&self) -> bool {
+        std::any::type_name::<M>().contains("JITModule")
+    }
+
+    pub(super) fn seq_is_freestanding(&self) -> bool {
+        !self.seq_has_jit()
+            && self.m.isa().triple().operating_system == target_lexicon::OperatingSystem::None_
+    }
+
+    pub(super) fn seq_ensure_runtime_if_hosted(&mut self) -> Result<(), String> {
+        if !self.seq_has_jit() && !self.seq_is_freestanding() {
+            self.seq_define_runtime()?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn seq_swap_req(
+        &mut self,
+        op: u32,
+        args: &[u64],
+    ) -> Result<Option<Vec<u64>>, String> {
+        crate::codegen_swap::request(
+            crate::codegen_swap::Family::Seq,
+            &mut self.b,
+            &mut *self.m,
+            self.world,
+            self.program,
+            crate::codegen_swap::Site::NONE,
+            op,
+            args,
+            None,
+        )
+    }
+
+    pub(super) fn seq_swap_req_or_record(&mut self, op: u32, args: &[u64]) -> Option<Vec<u64>> {
+        crate::codegen_swap::request_or_record(
+            crate::codegen_swap::Family::Seq,
+            &mut self.b,
+            &mut *self.m,
+            self.world,
+            self.program,
+            op,
+            args,
+        )
+    }
+
+    pub(super) fn seq_elem_desc(&self, elem: &Type) -> Result<[u64; 3], String> {
+        let layout = Layout::of(self.world, elem)?;
+        let is_agg = layout.aggregate();
+        let stride = self.seq_stride(elem)? as u64;
+        let kind = crate::numeric::IntegerKind::from_type(elem);
+        let is_signed = kind.is_some_and(|k| k.signed());
+        let is_wide = kind.is_some_and(|k| k.wide());
+        let is_f32 = elem.name() == "f32";
+        let is_f64 = elem.name() == "f64";
+        let bits = kind.map_or(0, |k| u64::from(k.bits()));
+        let flags = u64::from(is_agg)
+            | (u64::from(is_signed) << 1)
+            | (u64::from(is_wide) << 2)
+            | (u64::from(is_f32) << 3)
+            | (u64::from(is_f64) << 4)
+            | (bits << 8);
+        let size_or_ty = if is_agg {
+            u64::from(layout.size)
+        } else {
+            crate::codegen_swap::ty_code(scalar(elem, &[])?)
+        };
+        Ok([flags, size_or_ty, stride])
+    }
+
+    pub(super) fn seq_cached_word(&self, ptr: ir::Value, offset: i32) -> u64 {
+        self.exits
+            .last()
+            .and_then(|t| t.header_words.get(&(ptr, offset)).copied())
+            .map_or(crate::codegen_swap::NO_VALUE, crate::codegen_swap::word)
+    }
+
+    pub(super) fn seq_cached_view(
+        &self,
+        value: ir::Value,
+        ty: &Type,
+    ) -> (bool, bool, bool, u64, u64, u64, u64) {
+        let is_seq = seq::is_seq_type(ty);
+        let invariant = self.invariant_headers.contains(&value);
+        if is_seq {
+            let c2 = self.seq_cached_word(value, LEN);
+            let cdata = self.seq_cached_word(value, DATA);
+            (
+                true,
+                invariant,
+                invariant,
+                crate::codegen_swap::NO_VALUE,
+                crate::codegen_swap::NO_VALUE,
+                c2,
+                cdata,
+            )
+        } else {
+            let c0 = self.seq_cached_word(value, 0);
+            let c1 = self.seq_cached_word(value, 8);
+            let c2 = self.seq_cached_word(value, 16);
+            let h_val = self
+                .exits
+                .last()
+                .and_then(|t| t.header_words.get(&(value, 0)).copied());
+            let h_invariant = h_val.map_or(invariant, |hv| self.invariant_headers.contains(&hv));
+            let cdata = h_val.map_or(crate::codegen_swap::NO_VALUE, |hv| {
+                self.seq_cached_word(hv, DATA)
+            });
+            (false, invariant, h_invariant, c0, c1, c2, cdata)
+        }
+    }
+
+    pub(super) fn seq_option_meta_for(
+        &self,
+        option: &Type,
+        elem: &Type,
+    ) -> Result<[u64; 4], String> {
+        let layout = Layout::of(self.world, option)?;
+        let (some_tag, some_fields) = layout.variant("Some").ok_or("native Option lacks Some")?;
+        let payload = some_fields
+            .first()
+            .map(|f| f.offset)
+            .ok_or("native Option lacks a payload")?;
+        let (none_tag, _) = layout.variant("None").ok_or("native Option lacks None")?;
+        let scalar = self.scalar_enums.request.as_ref().is_some_and(|shape| {
+            shape.words.len() == 2 && !Layout::of(self.world, elem).is_ok_and(|l| l.aggregate())
+        });
+        Ok([
+            u64::from(layout.size) | (u64::from(scalar) << 32),
+            some_tag as u64,
+            none_tag as u64,
+            payload as u64,
+        ])
+    }
+
+    pub(super) fn seq_option_finish_swap(
+        &mut self,
+        res: &[u64],
+        meta: [u64; 4],
+    ) -> Result<ir::Value, String> {
+        if (meta[0] >> 32) != 0 && res.len() == 3 {
+            self.scalar_enums.request.take();
+            let p0 = crate::codegen_swap::value_of(&res[1..2])?;
+            let p1 = crate::codegen_swap::value_of(&res[2..3])?;
+            self.scalar_enums.result = Some(vec![p0, p1]);
+            return Ok(self.zero());
+        }
+        crate::codegen_swap::value_of(&res[..1])
+    }
+
     pub(super) fn seq_runtime_call(
         &mut self,
         name: &str,
@@ -123,11 +277,35 @@ impl<M: Module> Codegen<'_, '_, M> {
         define_runtime(&mut self.b, self.m, self.world, Some(self.program))
     }
 
+    /// `encode_drop_tree` using `self.world` and `self.generic_vars`.
+    fn encode_drop_tree(
+        &self,
+        ty: &Type,
+        elements: bool,
+        out: &mut Vec<u64>,
+    ) -> Result<bool, String> {
+        let ty = crate::numeric::default_type(&substitute(ty, &self.generic_vars));
+        encode_drop_tree_world(self.world, &ty, elements, out)
+    }
+
     /// The address of the shared empty header (#1021): what `new` and
     /// `with_capacity(0)` return. It is `{0, 0, null}`, freeing it is a
     /// no-op and growing it allocates a fresh header, which generated code
     /// writes back to the receiver's place ([`Self::seq_reserve`]).
     fn seq_empty_header(&mut self) -> Result<ir::Value, String> {
+        if self.seq_hook_active() && !self.seq_is_freestanding() {
+            self.seq_ensure_runtime_if_hosted()?;
+            let jit_addr = if self.seq_has_jit() {
+                crate::seq::native_runtime::empty_header()
+            } else {
+                0
+            };
+            if let Some(res) =
+                self.seq_swap_req(crate::codegen_swap::seq::EMPTY_HEADER, &[jit_addr])?
+            {
+                return crate::codegen_swap::value_of(&res);
+            }
+        }
         if std::any::type_name::<M>().contains("JITModule") {
             let address = crate::seq::native_runtime::empty_header();
             return Ok(self.b.ins().iconst(types::I64, address as i64));
@@ -181,11 +359,20 @@ impl<M: Module> Codegen<'_, '_, M> {
                 }
             }
             let storage = if kind == crate::fip::SeqDrop::Str && !param {
-                let storage = self.alloc(crate::seq::HEADER_BYTES as u32);
-                let zero = self.zero();
-                for offset in [LEN, CAP, DATA] {
-                    self.seq_set_word(storage, offset, zero);
-                }
+                let storage = if self.seq_hook_active()
+                    && let Some(res) = self.seq_swap_req(
+                        crate::codegen_swap::seq::DROP_OP,
+                        &[crate::codegen_swap::seq::DROP_SLOTS_STR],
+                    )? {
+                    crate::codegen_swap::value_of(&res)?
+                } else {
+                    let storage = self.alloc(crate::seq::HEADER_BYTES as u32);
+                    let zero = self.zero();
+                    for offset in [LEN, CAP, DATA] {
+                        self.seq_set_word(storage, offset, zero);
+                    }
+                    storage
+                };
                 Some(storage)
             } else if kind == crate::fip::SeqDrop::Fields {
                 // Its own storage, so that a binding in a loop (whose
@@ -193,7 +380,17 @@ impl<M: Module> Codegen<'_, '_, M> {
                 // replaces, not the one it binds.
                 let ty =
                     crate::numeric::default_type(&substitute(&f.locals[&name], &self.generic_vars));
-                Some(self.alloc(Layout::of(self.world, &ty)?.size))
+                let sz = Layout::of(self.world, &ty)?.size;
+                let storage = if self.seq_hook_active()
+                    && let Some(res) = self.seq_swap_req(
+                        crate::codegen_swap::seq::DROP_OP,
+                        &[crate::codegen_swap::seq::DROP_SLOTS_FIELDS, u64::from(sz)],
+                    )? {
+                    crate::codegen_swap::value_of(&res)?
+                } else {
+                    self.alloc(sz)
+                };
+                Some(storage)
             } else {
                 None
             };
@@ -231,16 +428,35 @@ impl<M: Module> Codegen<'_, '_, M> {
             (crate::fip::SeqDrop::Str, Some(storage)) => storage,
             _ => self.use_var(slot.var),
         };
+        let ty = match slot.kind {
+            crate::fip::SeqDrop::Str => Type::named(crate::strings::STRING_TYPE),
+            _ => slot.ty.clone(),
+        };
+        if self.seq_hook_active() {
+            let mut tree = vec![
+                crate::codegen_swap::seq::DROP_FREE_GUARD,
+                crate::codegen_swap::word(value),
+            ];
+            if self.encode_drop_tree(&ty, false, &mut tree)? {
+                self.seq_ensure_runtime_if_hosted()?;
+                if self
+                    .seq_swap_req(crate::codegen_swap::seq::DROP_OP, &tree)?
+                    .is_some()
+                {
+                    return Ok(());
+                }
+            }
+        }
+        let ty = match slot.kind {
+            crate::fip::SeqDrop::Str => Type::named(crate::strings::STRING_TYPE),
+            _ => slot.ty.clone(),
+        };
         // An empty slot (never bound, or moved from) holds 0.
         let present = self.b.ins().icmp_imm(IntCC::NotEqual, value, 0);
         let free = self.b.create_block();
         let done = self.b.create_block();
         self.branch(present, free, &[], done, &[]);
         self.b.switch_to_block(free);
-        let ty = match slot.kind {
-            crate::fip::SeqDrop::Str => Type::named(crate::strings::STRING_TYPE),
-            _ => slot.ty.clone(),
-        };
         self.drop_value(value, &ty)?;
         self.jump(done, &[]);
         self.b.switch_to_block(done);
@@ -278,6 +494,20 @@ impl<M: Module> Codegen<'_, '_, M> {
         }
         let ty = crate::numeric::default_type(&substitute(ty, &self.generic_vars));
         let size = Layout::of(self.world, &ty).map_or(0, |l| l.size);
+        if self.seq_hook_active()
+            && self
+                .seq_swap_req_or_record(
+                    crate::codegen_swap::seq::DROP_OP,
+                    &[
+                        crate::codegen_swap::seq::DROP_FIELD_MOVED,
+                        crate::codegen_swap::word(ptr),
+                        u64::from(size),
+                    ],
+                )
+                .is_some()
+        {
+            return;
+        }
         for offset in (0..size).step_by(8) {
             let zero = self.zero();
             self.seq_set_word(ptr, offset as i32, zero);
@@ -292,7 +522,17 @@ impl<M: Module> Codegen<'_, '_, M> {
         };
         match slot.kind {
             crate::fip::SeqDrop::Seq => {
-                let zero = self.zero();
+                let zero = if self.seq_hook_active()
+                    && let Some(res) = self.seq_swap_req_or_record(
+                        crate::codegen_swap::seq::DROP_OP,
+                        &[crate::codegen_swap::seq::DROP_MOVED_ZERO],
+                    )
+                    && let Some(v) = crate::codegen_swap::value_or_record(&res)
+                {
+                    v
+                } else {
+                    self.zero()
+                };
                 self.def_var(slot.var, zero);
             }
             crate::fip::SeqDrop::Owned | crate::fip::SeqDrop::Fields => {
@@ -301,6 +541,22 @@ impl<M: Module> Codegen<'_, '_, M> {
                 // a borrowed-nothing string, no handles). A local read
                 // before any binding has no storage.
                 let ptr = self.use_var(slot.var);
+                let ty = crate::numeric::default_type(&substitute(&slot.ty, &self.generic_vars));
+                let size = Layout::of(self.world, &ty).map_or(0, |l| l.size);
+                if self.seq_hook_active()
+                    && self
+                        .seq_swap_req_or_record(
+                            crate::codegen_swap::seq::DROP_OP,
+                            &[
+                                crate::codegen_swap::seq::DROP_MOVED_CLEAR,
+                                crate::codegen_swap::word(ptr),
+                                u64::from(size),
+                            ],
+                        )
+                        .is_some()
+                {
+                    return;
+                }
                 let bound = self.b.ins().icmp_imm(IntCC::NotEqual, ptr, 0);
                 let clear = self.b.create_block();
                 let done = self.b.create_block();
@@ -351,11 +607,40 @@ impl<M: Module> Codegen<'_, '_, M> {
                     .cloned()
                     .ok_or("drop slot lacks type")?;
                 let size = Layout::of(self.world, &ty)?.size;
-                self.copy_bytes(value, storage, size);
+                if !(self.seq_hook_active()
+                    && self
+                        .seq_swap_req(
+                            crate::codegen_swap::seq::DROP_OP,
+                            &[
+                                crate::codegen_swap::seq::DROP_REBIND_COPY,
+                                crate::codegen_swap::word(value),
+                                crate::codegen_swap::word(storage),
+                                u64::from(size),
+                            ],
+                        )?
+                        .is_some())
+                {
+                    self.copy_bytes(value, storage, size);
+                }
                 storage
             }
             Some(storage) => {
-                self.copy_bytes(value, storage, crate::seq::HEADER_BYTES as u32);
+                let size = crate::seq::HEADER_BYTES as u32;
+                if !(self.seq_hook_active()
+                    && self
+                        .seq_swap_req(
+                            crate::codegen_swap::seq::DROP_OP,
+                            &[
+                                crate::codegen_swap::seq::DROP_REBIND_COPY,
+                                crate::codegen_swap::word(value),
+                                crate::codegen_swap::word(storage),
+                                u64::from(size),
+                            ],
+                        )?
+                        .is_some())
+                {
+                    self.copy_bytes(value, storage, size);
+                }
                 storage
             }
             None => value,
@@ -384,7 +669,21 @@ impl<M: Module> Codegen<'_, '_, M> {
                     }
                 };
                 let value = self.use_var(slot.var);
-                self.copy_bytes(value, storage, size);
+                if !(self.seq_hook_active()
+                    && self
+                        .seq_swap_req(
+                            crate::codegen_swap::seq::DROP_OP,
+                            &[
+                                crate::codegen_swap::seq::DROP_REBIND_COPY,
+                                crate::codegen_swap::word(value),
+                                crate::codegen_swap::word(storage),
+                                u64::from(size),
+                            ],
+                        )?
+                        .is_some())
+                {
+                    self.copy_bytes(value, storage, size);
+                }
                 self.def_var(slot.var, storage);
             }
         }
@@ -449,17 +748,65 @@ impl<M: Module> Codegen<'_, '_, M> {
         ty: &Type,
     ) -> Result<ir::Value, String> {
         let e = ir_place_expr(place, 0..0);
+        let is_slice = seq::is_slice_type(ty);
+        let raw = if is_slice {
+            self.address(&e)?
+        } else {
+            self.expr(&e)?
+        };
+        if self.seq_hook_active() {
+            let inv = self.invariant_headers.contains(&raw);
+            if let Some(res) = self.seq_swap_req(
+                crate::codegen_swap::seq::SEQ_OP,
+                &[
+                    crate::codegen_swap::seq::SEQ_HOIST_HEADER,
+                    u64::from(is_slice),
+                    u64::from(inv),
+                    crate::codegen_swap::word(raw),
+                ],
+            )? {
+                let copy = crate::codegen_swap::value_of(&res[0..1])?;
+                let info = self.info(raw);
+                self.write_info(copy, info);
+                if inv {
+                    self.invariant_headers.insert(copy);
+                }
+                let mut words = vec![];
+                let handle = if is_slice {
+                    let w0 = crate::codegen_swap::value_of(&res[1..2])?;
+                    let w8 = crate::codegen_swap::value_of(&res[2..3])?;
+                    let w16 = crate::codegen_swap::value_of(&res[3..4])?;
+                    let hlen = crate::codegen_swap::value_of(&res[4..5])?;
+                    let hdata = crate::codegen_swap::value_of(&res[5..6])?;
+                    words.push(((copy, 0), w0));
+                    words.push(((copy, 8), w8));
+                    words.push(((copy, 16), w16));
+                    words.push(((w0, LEN), hlen));
+                    words.push(((w0, DATA), hdata));
+                    let _ = w0;
+                    copy
+                } else {
+                    let hlen = crate::codegen_swap::value_of(&res[1..2])?;
+                    let hdata = crate::codegen_swap::value_of(&res[2..3])?;
+                    words.push(((copy, LEN), hlen));
+                    words.push(((copy, DATA), hdata));
+                    copy
+                };
+                if let Some(t) = self.exits.last_mut() {
+                    t.header_words.extend(words);
+                }
+                return Ok(handle);
+            }
+        }
         let mut words = vec![];
-        let (receiver, handle) = if seq::is_slice_type(ty) {
-            let view = self.address(&e)?;
-            let view = self.hoisted_receiver(view);
+        let (receiver, handle) = if is_slice {
+            let view = self.hoisted_receiver(raw);
             for offset in [0, 8, 16] {
                 words.push(((view, offset), self.seq_word(view, offset)));
             }
             (view, words[0].1)
         } else {
-            let handle = self.expr(&e)?;
-            let handle = self.hoisted_receiver(handle);
+            let handle = self.hoisted_receiver(raw);
             (handle, handle)
         };
         for offset in [LEN, DATA] {
@@ -610,6 +957,32 @@ impl<M: Module> Codegen<'_, '_, M> {
         stride: i64,
         receiver: Option<&Expr>,
     ) -> Result<ir::Value, String> {
+        if self.seq_hook_active() && !self.seq_is_freestanding() {
+            self.seq_ensure_runtime_if_hosted()?;
+            let h_inv = self.invariant_headers.contains(&handle);
+            if let Some(res) = self.seq_swap_req(
+                crate::codegen_swap::seq::SEQ_OP,
+                &[
+                    crate::codegen_swap::seq::SEQ_RESERVE_ONE,
+                    crate::codegen_swap::word(handle),
+                    crate::codegen_swap::word(needed),
+                    stride as u64,
+                    u64::from(receiver.is_some()),
+                    u64::from(h_inv),
+                ],
+            )? {
+                if let Some(place) = receiver {
+                    let _grow = ir::Block::from_u32(res[0] as u32);
+                    let done = ir::Block::from_u32(res[1] as u32);
+                    let grown = crate::codegen_swap::value_of(&res[2..3])?;
+                    self.seq_write_back(place, grown)?;
+                    self.jump(done, &[grown.into()]);
+                    self.b.switch_to_block(done);
+                    return Ok(self.b.block_params(done)[0]);
+                }
+                return crate::codegen_swap::value_of(&res);
+            }
+        }
         let cap = self.seq_word(handle, CAP);
         let fits = self
             .b
@@ -649,6 +1022,49 @@ impl<M: Module> Codegen<'_, '_, M> {
         receiver: Option<&Expr>,
         mut tail: impl FnMut(&mut Self, ir::Value) -> Result<(), String>,
     ) -> Result<(), String> {
+        if self.seq_hook_active() && !self.seq_is_freestanding() {
+            self.seq_ensure_runtime_if_hosted()?;
+            let h_inv = self.invariant_headers.contains(&handle);
+            if let Some(res) = self.seq_swap_req(
+                crate::codegen_swap::seq::SEQ_OP,
+                &[
+                    crate::codegen_swap::seq::SEQ_RESERVE_BEGIN,
+                    crate::codegen_swap::word(handle),
+                    crate::codegen_swap::word(needed),
+                    u64::from(h_inv),
+                ],
+            )? {
+                let _fast = ir::Block::from_u32(res[0] as u32);
+                let grow = ir::Block::from_u32(res[1] as u32);
+                let done = ir::Block::from_u32(res[2] as u32);
+                tail(self, handle)?;
+                self.jump(done, &[]);
+                let gres = self
+                    .seq_swap_req(
+                        crate::codegen_swap::seq::SEQ_OP,
+                        &[
+                            crate::codegen_swap::seq::SEQ_RESERVE_GROW,
+                            u64::from(grow.as_u32()),
+                            crate::codegen_swap::word(handle),
+                            crate::codegen_swap::word(needed),
+                            stride as u64,
+                        ],
+                    )?
+                    .ok_or("SEQ_RESERVE_GROW declined after SEQ_RESERVE_BEGIN")?;
+                let grown = crate::codegen_swap::value_of(&gres)?;
+                let grown = match receiver {
+                    Some(place) => {
+                        self.seq_write_back(place, grown)?;
+                        grown
+                    }
+                    None => handle,
+                };
+                tail(self, grown)?;
+                self.jump(done, &[]);
+                self.b.switch_to_block(done);
+                return Ok(());
+            }
+        }
         let cap = self.seq_word(handle, CAP);
         let fits = self
             .b
@@ -782,6 +1198,671 @@ impl<M: Module> Codegen<'_, '_, M> {
             let base = self.seq_elem_addr(h, start, zero, stride);
             let value = if io.store { Some(arg(2)?) } else { None };
             return self.vector_slice_io(io, base, len, arg(1)?, value, stride);
+        }
+        if self.seq_hook_active() {
+            use crate::codegen_swap::{seq as sops, value_of, word};
+            match op {
+                SeqOp::New => return self.seq_empty_header(),
+                SeqOp::WithCapacity if !self.seq_is_freestanding() => {
+                    self.seq_ensure_runtime_if_hosted()?;
+                    if let Some(res) = self.seq_swap_req(
+                        sops::SEQ_OP,
+                        &[sops::SEQ_WITH_CAPACITY, word(arg(0)?), stride as u64],
+                    )? {
+                        return value_of(&res);
+                    }
+                }
+                SeqOp::Len => {
+                    let h = arg(0)?;
+                    let c = self.seq_cached_word(h, LEN);
+                    if c != crate::codegen_swap::NO_VALUE {
+                        return value_of(&[c]);
+                    }
+                    let inv = self.invariant_headers.contains(&h);
+                    if let Some(res) =
+                        self.seq_swap_req(sops::SEQ_OP, &[sops::SEQ_LEN, word(h), u64::from(inv)])?
+                    {
+                        return value_of(&res);
+                    }
+                }
+                SeqOp::SliceLen => {
+                    let s = arg(0)?;
+                    let c = self.seq_cached_word(s, 16);
+                    if c != crate::codegen_swap::NO_VALUE {
+                        return value_of(&[c]);
+                    }
+                    let inv = self.invariant_headers.contains(&s);
+                    if let Some(res) = self.seq_swap_req(
+                        sops::SEQ_OP,
+                        &[sops::SEQ_SLICE_LEN, word(s), u64::from(inv)],
+                    )? {
+                        return value_of(&res);
+                    }
+                }
+                SeqOp::Push if !self.seq_is_freestanding() => {
+                    let h = arg(0)?;
+                    let len = self.seq_word(h, LEN);
+                    let next = self.b.ins().iadd_imm(len, 1);
+                    let val = arg(1)?;
+                    let desc = self.seq_elem_desc(&elem)?;
+                    self.seq_reserve_then(h, next, stride, receiver, |this, h| {
+                        let h_inv = this.invariant_headers.contains(&h);
+                        let cdata = this.seq_cached_word(h, DATA);
+                        if this
+                            .seq_swap_req(
+                                sops::SEQ_OP,
+                                &[
+                                    sops::SEQ_PUSH_TAIL,
+                                    word(h),
+                                    word(len),
+                                    word(next),
+                                    word(val),
+                                    u64::from(h_inv),
+                                    cdata,
+                                    u64::from(this.operands_only),
+                                    desc[0],
+                                    desc[1],
+                                    desc[2],
+                                ],
+                            )?
+                            .is_some()
+                        {
+                            return Ok(());
+                        }
+                        let zero = this.zero();
+                        let addr = this.seq_elem_addr(h, zero, len, stride);
+                        this.seq_store_elem(addr, val, &elem)?;
+                        this.seq_set_word(h, LEN, next);
+                        Ok(())
+                    })?;
+                    return Ok(self.zero());
+                }
+                SeqOp::Pop => {
+                    let h = arg(0)?;
+                    let h_inv = self.invariant_headers.contains(&h);
+                    let clen = self.seq_cached_word(h, LEN);
+                    let cdata = self.seq_cached_word(h, DATA);
+                    let desc = self.seq_elem_desc(&elem)?;
+                    let option = Type::Named("Option".into(), vec![elem.clone()]);
+                    let meta = self.seq_option_meta_for(&option, &elem)?;
+                    if let Some(res) = self.seq_swap_req(
+                        sops::SEQ_OP,
+                        &[
+                            sops::SEQ_POP,
+                            u64::from(h_inv),
+                            u64::from(self.operands_only),
+                            word(h),
+                            clen,
+                            cdata,
+                            desc[0],
+                            desc[1],
+                            desc[2],
+                            meta[0],
+                            meta[1],
+                            meta[2],
+                            meta[3],
+                        ],
+                    )? {
+                        return self.seq_option_finish_swap(&res, meta);
+                    }
+                }
+                SeqOp::Get | SeqOp::SliceGet => {
+                    let (is_seq, inv, h_inv, c0, c1, c2, cdata) =
+                        self.seq_cached_view(arg(0)?, &arg_types[0]);
+                    let i = arg(1)?;
+                    if let Some(ck) = self.seq_swap_req(
+                        sops::SEQ_OP,
+                        &[
+                            sops::SEQ_CHECK_INDEX,
+                            u64::from(is_seq),
+                            u64::from(inv),
+                            word(arg(0)?),
+                            word(i),
+                            c0,
+                            c1,
+                            c2,
+                        ],
+                    )? {
+                        let valid = value_of(&ck[0..1])?;
+                        let h = value_of(&ck[1..2])?;
+                        let start = value_of(&ck[2..3])?;
+                        self.seq_guard(valid)?;
+                        let h_inv = self.invariant_headers.contains(&h) || h_inv;
+                        let cdata = if is_seq {
+                            cdata
+                        } else {
+                            self.seq_cached_word(h, DATA)
+                        };
+                        let desc = self.seq_elem_desc(&elem)?;
+                        if let Some(res) = self.seq_swap_req(
+                            sops::SEQ_OP,
+                            &[
+                                sops::SEQ_GET,
+                                u64::from(h_inv),
+                                u64::from(self.operands_only),
+                                word(h),
+                                word(start),
+                                word(i),
+                                cdata,
+                                desc[0],
+                                desc[1],
+                                desc[2],
+                            ],
+                        )? {
+                            return value_of(&res);
+                        }
+                    }
+                }
+                SeqOp::Set | SeqOp::SliceSet => {
+                    let has_drop =
+                        self.drops_enabled() && crate::fip::elem_needs_drop(self.world, &elem);
+                    let mut drop_tree = vec![];
+                    let can_drop =
+                        !has_drop || self.encode_drop_tree(&elem, true, &mut drop_tree)?;
+                    if can_drop {
+                        if has_drop {
+                            self.seq_ensure_runtime_if_hosted()?;
+                        }
+                        let (is_seq, inv, h_inv, c0, c1, c2, cdata) =
+                            self.seq_cached_view(arg(0)?, &arg_types[0]);
+                        let i = arg(1)?;
+                        if let Some(ck) = self.seq_swap_req(
+                            sops::SEQ_OP,
+                            &[
+                                sops::SEQ_CHECK_INDEX,
+                                u64::from(is_seq),
+                                u64::from(inv),
+                                word(arg(0)?),
+                                word(i),
+                                c0,
+                                c1,
+                                c2,
+                            ],
+                        )? {
+                            let valid = value_of(&ck[0..1])?;
+                            let h = value_of(&ck[1..2])?;
+                            let start = value_of(&ck[2..3])?;
+                            self.seq_guard(valid)?;
+                            let h_inv = self.invariant_headers.contains(&h) || h_inv;
+                            let cdata = if is_seq {
+                                cdata
+                            } else {
+                                self.seq_cached_word(h, DATA)
+                            };
+                            let desc = self.seq_elem_desc(&elem)?;
+                            let mut req = vec![
+                                sops::SEQ_SET,
+                                u64::from(h_inv),
+                                u64::from(self.operands_only),
+                                u64::from(has_drop),
+                                word(h),
+                                word(start),
+                                word(i),
+                                word(arg(2)?),
+                                cdata,
+                                desc[0],
+                                desc[1],
+                                desc[2],
+                            ];
+                            req.extend_from_slice(&drop_tree);
+                            if let Some(res) = self.seq_swap_req(sops::SEQ_OP, &req)? {
+                                return value_of(&res);
+                            }
+                        }
+                    }
+                }
+                SeqOp::TryGet => {
+                    let (is_seq, inv, h_inv, c0, c1, c2, cdata) =
+                        self.seq_cached_view(arg(0)?, &arg_types[0]);
+                    let desc = self.seq_elem_desc(&elem)?;
+                    let option = Type::Named("Option".into(), vec![elem.clone()]);
+                    let meta = self.seq_option_meta_for(&option, &elem)?;
+                    if let Some(res) = self.seq_swap_req(
+                        sops::SEQ_OP,
+                        &[
+                            sops::SEQ_TRY_GET,
+                            u64::from(is_seq),
+                            u64::from(inv),
+                            u64::from(h_inv),
+                            u64::from(self.operands_only),
+                            word(arg(0)?),
+                            word(arg(1)?),
+                            c0,
+                            c1,
+                            c2,
+                            cdata,
+                            desc[0],
+                            desc[1],
+                            desc[2],
+                            meta[0],
+                            meta[1],
+                            meta[2],
+                            meta[3],
+                        ],
+                    )? {
+                        return self.seq_option_finish_swap(&res, meta);
+                    }
+                }
+                SeqOp::TrySet => {
+                    let has_drop =
+                        self.drops_enabled() && crate::fip::elem_needs_drop(self.world, &elem);
+                    let mut drop_tree = vec![];
+                    let can_drop =
+                        !has_drop || self.encode_drop_tree(&elem, true, &mut drop_tree)?;
+                    if can_drop {
+                        if has_drop {
+                            self.seq_ensure_runtime_if_hosted()?;
+                        }
+                        let (is_seq, inv, h_inv, c0, c1, c2, cdata) =
+                            self.seq_cached_view(arg(0)?, &arg_types[0]);
+                        let desc = self.seq_elem_desc(&elem)?;
+                        let slot_word = self
+                            .discard_slot
+                            .map_or(u64::from(u32::MAX), |s| u64::from(s.as_u32()));
+                        let mut req = vec![
+                            sops::SEQ_TRY_SET,
+                            u64::from(is_seq),
+                            u64::from(inv),
+                            u64::from(h_inv),
+                            u64::from(self.operands_only),
+                            u64::from(has_drop),
+                            word(arg(0)?),
+                            word(arg(1)?),
+                            word(arg(2)?),
+                            slot_word,
+                            c0,
+                            c1,
+                            c2,
+                            cdata,
+                            desc[0],
+                            desc[1],
+                            desc[2],
+                        ];
+                        req.extend_from_slice(&drop_tree);
+                        if let Some(res) = self.seq_swap_req(sops::SEQ_OP, &req)? {
+                            if res.len() == 2 {
+                                self.discard_slot = Some(ir::StackSlot::from_u32(res[1] as u32));
+                            }
+                            return value_of(&res[..1]);
+                        }
+                    }
+                }
+                SeqOp::Last => {
+                    let (is_seq, inv, h_inv, c0, c1, c2, cdata) =
+                        self.seq_cached_view(arg(0)?, &arg_types[0]);
+                    let desc = self.seq_elem_desc(&elem)?;
+                    let option = Type::Named("Option".into(), vec![elem.clone()]);
+                    let meta = self.seq_option_meta_for(&option, &elem)?;
+                    if let Some(res) = self.seq_swap_req(
+                        sops::SEQ_OP,
+                        &[
+                            sops::SEQ_LAST,
+                            u64::from(is_seq),
+                            u64::from(inv),
+                            u64::from(h_inv),
+                            u64::from(self.operands_only),
+                            word(arg(0)?),
+                            c0,
+                            c1,
+                            c2,
+                            cdata,
+                            desc[0],
+                            desc[1],
+                            desc[2],
+                            meta[0],
+                            meta[1],
+                            meta[2],
+                            meta[3],
+                        ],
+                    )? {
+                        return self.seq_option_finish_swap(&res, meta);
+                    }
+                }
+                SeqOp::Clear => {
+                    let has_drop =
+                        self.drops_enabled() && crate::fip::elem_needs_drop(self.world, &elem);
+                    let mut drop_tree = vec![];
+                    let can_drop =
+                        !has_drop || self.encode_drop_tree(&elem, true, &mut drop_tree)?;
+                    if can_drop {
+                        if has_drop {
+                            self.seq_ensure_runtime_if_hosted()?;
+                        }
+                        let h = arg(0)?;
+                        let h_inv = self.invariant_headers.contains(&h);
+                        let clen = self.seq_cached_word(h, LEN);
+                        let cdata = self.seq_cached_word(h, DATA);
+                        let mut req = vec![
+                            sops::SEQ_CLEAR,
+                            u64::from(h_inv),
+                            u64::from(has_drop),
+                            word(h),
+                            clen,
+                            cdata,
+                            stride as u64,
+                        ];
+                        if has_drop {
+                            let ehash = fnv1a64(&elem.to_string());
+                            let layout = Layout::of(self.world, &elem)?;
+                            let is_agg = layout.aggregate();
+                            let scalar_ty = if is_agg {
+                                0
+                            } else {
+                                crate::codegen_swap::ty_code(scalar(&elem, &[])?)
+                            };
+                            req.extend_from_slice(&[ehash, u64::from(is_agg), scalar_ty]);
+                            req.extend_from_slice(&drop_tree);
+                        }
+                        if let Some(res) = self.seq_swap_req(sops::SEQ_OP, &req)? {
+                            return value_of(&res);
+                        }
+                    }
+                }
+                SeqOp::Truncate => {
+                    let has_drop =
+                        self.drops_enabled() && crate::fip::elem_needs_drop(self.world, &elem);
+                    let mut drop_tree = vec![];
+                    let can_drop =
+                        !has_drop || self.encode_drop_tree(&elem, true, &mut drop_tree)?;
+                    if can_drop {
+                        if has_drop {
+                            self.seq_ensure_runtime_if_hosted()?;
+                        }
+                        let h = arg(0)?;
+                        let n = arg(1)?;
+                        let h_inv = self.invariant_headers.contains(&h);
+                        let clen = self.seq_cached_word(h, LEN);
+                        let cdata = self.seq_cached_word(h, DATA);
+                        let mut req = vec![
+                            sops::SEQ_TRUNCATE,
+                            u64::from(h_inv),
+                            u64::from(has_drop),
+                            word(h),
+                            word(n),
+                            clen,
+                            cdata,
+                            stride as u64,
+                        ];
+                        if has_drop {
+                            let ehash = fnv1a64(&elem.to_string());
+                            let layout = Layout::of(self.world, &elem)?;
+                            let is_agg = layout.aggregate();
+                            let scalar_ty = if is_agg {
+                                0
+                            } else {
+                                crate::codegen_swap::ty_code(scalar(&elem, &[])?)
+                            };
+                            req.extend_from_slice(&[ehash, u64::from(is_agg), scalar_ty]);
+                            req.extend_from_slice(&drop_tree);
+                        }
+                        if let Some(res) = self.seq_swap_req(sops::SEQ_OP, &req)? {
+                            return value_of(&res);
+                        }
+                    }
+                }
+                SeqOp::Reserve if !self.seq_is_freestanding() => {
+                    let h = arg(0)?;
+                    let len = self.seq_word(h, LEN);
+                    let (needed, over) = self.b.ins().uadd_overflow(len, arg(1)?);
+                    let max = self.b.ins().iconst(types::I64, -1);
+                    let needed = self.b.ins().select(over, max, needed);
+                    self.seq_reserve_then(h, needed, stride, receiver, |_, _| Ok(()))?;
+                    return Ok(self.zero());
+                }
+                SeqOp::Extend if !self.seq_is_freestanding() => {
+                    let h = arg(0)?;
+                    let (sh, sstart, slen) = self.seq_view(arg(1)?, &arg_types[1]);
+                    let len = self.seq_word(h, LEN);
+                    let needed = self.b.ins().iadd(len, slen);
+                    self.seq_reserve_then(h, needed, stride, receiver, |this, h| {
+                        let h_inv = this.invariant_headers.contains(&h);
+                        let sh_inv = this.invariant_headers.contains(&sh);
+                        let cdata = this.seq_cached_word(h, DATA);
+                        let scdata = this.seq_cached_word(sh, DATA);
+                        if this
+                            .seq_swap_req(
+                                sops::SEQ_OP,
+                                &[
+                                    sops::SEQ_EXTEND_TAIL,
+                                    word(h),
+                                    word(len),
+                                    word(needed),
+                                    word(sh),
+                                    word(sstart),
+                                    word(slen),
+                                    u64::from(h_inv),
+                                    u64::from(sh_inv),
+                                    cdata,
+                                    scdata,
+                                    stride as u64,
+                                ],
+                            )?
+                            .is_some()
+                        {
+                            return Ok(());
+                        }
+                        let zero = this.zero();
+                        let dst = this.seq_elem_addr(h, zero, len, stride);
+                        let src = this.seq_elem_addr(sh, sstart, zero, stride);
+                        let bytes = this.b.ins().imul_imm(slen, stride);
+                        this.seq_move(dst, src, bytes);
+                        let some = this.b.ins().icmp_imm(IntCC::NotEqual, slen, 0);
+                        this.seq_set_len_if(h, some, needed);
+                        Ok(())
+                    })?;
+                    return Ok(self.zero());
+                }
+                SeqOp::Resize if !self.seq_is_freestanding() => {
+                    let h = arg(0)?;
+                    let (n, val) = (arg(1)?, arg(2)?);
+                    let len = self.seq_word(h, LEN);
+                    if let Some(res) = self
+                        .seq_swap_req(sops::SEQ_OP, &[sops::SEQ_RESIZE_CMP, word(n), word(len)])?
+                    {
+                        let grow = ir::Block::from_u32(res[0] as u32);
+                        let shrink = ir::Block::from_u32(res[1] as u32);
+                        let done = ir::Block::from_u32(res[2] as u32);
+                        self.b.switch_to_block(shrink);
+                        let _ = self.seq_swap_req(
+                            sops::SEQ_OP,
+                            &[sops::SEQ_RESIZE_SHRINK, word(h), word(n), word(len)],
+                        )?;
+                        self.jump(done, &[]);
+                        self.b.switch_to_block(grow);
+                        let desc = self.seq_elem_desc(&elem)?;
+                        self.seq_reserve_then(h, n, stride, receiver, |this, h| {
+                            let h_inv = this.invariant_headers.contains(&h);
+                            let cdata = this.seq_cached_word(h, DATA);
+                            if this
+                                .seq_swap_req(
+                                    sops::SEQ_OP,
+                                    &[
+                                        sops::SEQ_RESIZE_GROW_TAIL,
+                                        word(h),
+                                        word(n),
+                                        word(len),
+                                        word(val),
+                                        u64::from(h_inv),
+                                        cdata,
+                                        u64::from(this.operands_only),
+                                        desc[0],
+                                        desc[1],
+                                        desc[2],
+                                    ],
+                                )?
+                                .is_some()
+                            {
+                                return Ok(());
+                            }
+                            let added = this.b.ins().isub(n, len);
+                            this.seq_fill_elems(h, len, added, val, &elem, stride)?;
+                            this.seq_set_word(h, LEN, n);
+                            Ok(())
+                        })?;
+                        self.jump(done, &[]);
+                        self.b.switch_to_block(done);
+                        return Ok(self.zero());
+                    }
+                }
+                SeqOp::ExtendFromWithin { total } if !self.seq_is_freestanding() => {
+                    let h = arg(0)?;
+                    let (lo, hi) = (arg(1)?, arg(2)?);
+                    let h_inv = self.invariant_headers.contains(&h);
+                    let clen = self.seq_cached_word(h, LEN);
+                    if let Some(ck) = self.seq_swap_req(
+                        sops::SEQ_OP,
+                        &[
+                            sops::SEQ_CHECK_EXTEND_WITHIN,
+                            word(h),
+                            word(lo),
+                            word(hi),
+                            u64::from(h_inv),
+                            clen,
+                        ],
+                    )? {
+                        let valid = value_of(&ck[0..1])?;
+                        let len = value_of(&ck[1..2])?;
+                        return self.seq_when(valid, total, |this| {
+                            let n = this.b.ins().isub(hi, lo);
+                            let needed = this.b.ins().iadd(len, n);
+                            this.seq_reserve_then(h, needed, stride, receiver, |this, h| {
+                                let h_inv = this.invariant_headers.contains(&h);
+                                let cdata = this.seq_cached_word(h, DATA);
+                                if this
+                                    .seq_swap_req(
+                                        sops::SEQ_OP,
+                                        &[
+                                            sops::SEQ_EXTEND_WITHIN_TAIL,
+                                            word(h),
+                                            word(lo),
+                                            word(n),
+                                            word(len),
+                                            word(needed),
+                                            u64::from(h_inv),
+                                            cdata,
+                                            stride as u64,
+                                        ],
+                                    )?
+                                    .is_some()
+                                {
+                                    return Ok(());
+                                }
+                                let zero = this.zero();
+                                let dst = this.seq_elem_addr(h, zero, len, stride);
+                                let src = this.seq_elem_addr(h, zero, lo, stride);
+                                let bytes = this.b.ins().imul_imm(n, stride);
+                                this.seq_move(dst, src, bytes);
+                                let some = this.b.ins().icmp_imm(IntCC::NotEqual, n, 0);
+                                this.seq_set_len_if(h, some, needed);
+                                Ok(())
+                            })
+                        });
+                    }
+                }
+                SeqOp::ExtendReversed if !self.seq_is_freestanding() => {
+                    let h = arg(0)?;
+                    let (sh, sstart, slen) = self.seq_view(arg(1)?, &arg_types[1]);
+                    let len = self.seq_word(h, LEN);
+                    let needed = self.b.ins().iadd(len, slen);
+                    let desc = self.seq_elem_desc(&elem)?;
+                    self.seq_reserve_then(h, needed, stride, receiver, |this, h| {
+                        let h_inv = this.invariant_headers.contains(&h);
+                        let sh_inv = this.invariant_headers.contains(&sh);
+                        let cdata = this.seq_cached_word(h, DATA);
+                        let scdata = this.seq_cached_word(sh, DATA);
+                        if this
+                            .seq_swap_req(
+                                sops::SEQ_OP,
+                                &[
+                                    sops::SEQ_EXTEND_REVERSED_TAIL,
+                                    word(h),
+                                    word(len),
+                                    word(needed),
+                                    word(sh),
+                                    word(sstart),
+                                    word(slen),
+                                    u64::from(h_inv),
+                                    u64::from(sh_inv),
+                                    cdata,
+                                    scdata,
+                                    u64::from(this.operands_only),
+                                    desc[0],
+                                    desc[1],
+                                    desc[2],
+                                ],
+                            )?
+                            .is_some()
+                        {
+                            return Ok(());
+                        }
+                        let zero = this.zero();
+                        let dst = this.seq_elem_addr(h, zero, len, stride);
+                        let src = this.seq_elem_addr(sh, sstart, zero, stride);
+                        this.seq_copy_reversed(dst, src, slen, stride, &elem)?;
+                        let some = this.b.ins().icmp_imm(IntCC::NotEqual, slen, 0);
+                        this.seq_set_len_if(h, some, needed);
+                        Ok(())
+                    })?;
+                    return Ok(self.zero());
+                }
+                SeqOp::Finish if !self.seq_is_freestanding() => {
+                    let h = arg(0)?;
+                    let h_inv = self.invariant_headers.contains(&h);
+                    let clen = self.seq_cached_word(h, LEN);
+                    if let Some(ck) = self.seq_swap_req(
+                        sops::SEQ_OP,
+                        &[sops::SEQ_CHECK_FINISH, word(h), u64::from(h_inv), clen],
+                    )? {
+                        self.seq_guard(value_of(&ck)?)?;
+                        self.seq_ensure_runtime_if_hosted()?;
+                        if let Some(res) =
+                            self.seq_swap_req(sops::SEQ_OP, &[sops::SEQ_FINISH, word(h)])?
+                        {
+                            return value_of(&res);
+                        }
+                    }
+                }
+                SeqOp::AsSlice => {
+                    let (is_seq, inv, _, c0, c1, c2, _) =
+                        self.seq_cached_view(arg(0)?, &arg_types[0]);
+                    if let Some(res) = self.seq_swap_req(
+                        sops::SEQ_OP,
+                        &[
+                            sops::SEQ_AS_SLICE,
+                            u64::from(is_seq),
+                            u64::from(inv),
+                            word(arg(0)?),
+                            c0,
+                            c1,
+                            c2,
+                        ],
+                    )? {
+                        return value_of(&res);
+                    }
+                }
+                SeqOp::SubSlice if !self.seq_is_freestanding() => {
+                    let (is_seq, inv, _, c0, c1, c2, _) =
+                        self.seq_cached_view(arg(0)?, &arg_types[0]);
+                    self.seq_ensure_runtime_if_hosted()?;
+                    if let Some(res) = self.seq_swap_req(
+                        sops::SEQ_OP,
+                        &[
+                            sops::SEQ_SUB_SLICE,
+                            u64::from(is_seq),
+                            u64::from(inv),
+                            word(arg(0)?),
+                            word(arg(1)?),
+                            word(arg(2)?),
+                            c0,
+                            c1,
+                            c2,
+                        ],
+                    )? {
+                        return value_of(&res);
+                    }
+                }
+                _ => {}
+            }
         }
         Ok(match op {
             SeqOp::New => {
@@ -1353,8 +2434,74 @@ impl<M: Module> Codegen<'_, '_, M> {
         let elem = crate::numeric::default_type(&elem);
         let stride = self.seq_stride(&elem)?;
         let value = self.expr(base)?;
-        let (h, start, len) = self.seq_view(value, &ty);
         let i = self.expr(index)?;
+        if self.seq_hook_active() {
+            use crate::codegen_swap::{seq as sops, value_of, word};
+            let (is_seq, inv, h_inv, c0, c1, c2, cdata) = self.seq_cached_view(value, &ty);
+            if let Some(ck) = self.seq_swap_req(
+                sops::SEQ_OP,
+                &[
+                    sops::SEQ_CHECK_INDEX,
+                    u64::from(is_seq),
+                    u64::from(inv),
+                    word(value),
+                    word(i),
+                    c0,
+                    c1,
+                    c2,
+                ],
+            )? {
+                let valid = value_of(&ck[0..1])?;
+                let h = value_of(&ck[1..2])?;
+                let start = value_of(&ck[2..3])?;
+                self.seq_guard(valid)?;
+                let h_inv = self.invariant_headers.contains(&h) || h_inv;
+                let cdata = if is_seq {
+                    cdata
+                } else {
+                    self.seq_cached_word(h, DATA)
+                };
+                let mut addr_res = self.seq_swap_req(
+                    sops::SEQ_OP,
+                    &[
+                        sops::SEQ_ELEM_ADDR,
+                        word(h),
+                        word(start),
+                        word(i),
+                        stride as u64,
+                        u64::from(h_inv),
+                        cdata,
+                    ],
+                )?;
+                if let Some(ares) = addr_res.take() {
+                    let addr = value_of(&ares)?;
+                    if stride == 8 || Layout::of(self.world, &elem)?.aggregate() {
+                        return Ok(addr);
+                    }
+                    let desc = self.seq_elem_desc(&elem)?;
+                    if let Some(lres) = self.seq_swap_req(
+                        sops::SEQ_OP,
+                        &[
+                            sops::SEQ_LOAD_ELEM,
+                            word(addr),
+                            u64::from(self.operands_only),
+                            desc[0],
+                            desc[1],
+                            desc[2],
+                        ],
+                    )? && let Some(sres) =
+                        self.seq_swap_req(sops::SEQ_OP, &[sops::SEQ_ALLOC, 1, 8])?
+                    {
+                        let loaded = value_of(&lres)?;
+                        let scratch = value_of(&sres)?;
+                        self.b.ins().store(MemFlags::new(), loaded, scratch, 0);
+                        self.element_writebacks.push((scratch, addr, elem));
+                        return Ok(scratch);
+                    }
+                }
+            }
+        }
+        let (h, start, len) = self.seq_view(value, &ty);
         let valid = self.b.ins().icmp(IntCC::UnsignedLessThan, i, len);
         self.seq_guard(valid)?;
         let addr = self.seq_elem_addr(h, start, i, stride);
@@ -1598,6 +2745,43 @@ impl<M: Module> Codegen<'_, '_, M> {
             .ok_or("native try_get lacks its element type")?;
         let elem = crate::numeric::default_type(&elem);
         let stride = self.seq_stride(&elem)?;
+        if self.seq_hook_active() {
+            use crate::codegen_swap::{seq as sops, word};
+            let (is_seq, inv, h_inv, c0, c1, c2, cdata) =
+                self.seq_cached_view(receiver, receiver_type);
+            if let Some(res) = self.seq_swap_req(
+                sops::FUSED_TRY_GET,
+                &[
+                    u64::from(checked),
+                    u64::from(is_seq),
+                    u64::from(inv),
+                    u64::from(h_inv),
+                    word(receiver),
+                    word(i),
+                    c0,
+                    c1,
+                    c2,
+                    cdata,
+                    stride as u64,
+                ],
+            )? {
+                let valid_var = Variable::from_u32(res[0] as u32);
+                let addr_var = Variable::from_u32(res[1] as u32);
+                if let Some(t) = self.exits.last_mut() {
+                    t.fused.insert(
+                        dest,
+                        Some(FusedRead {
+                            valid: valid_var,
+                            addr: addr_var,
+                            elem,
+                            always: !checked,
+                            view,
+                        }),
+                    );
+                }
+                return Ok(self.zero());
+            }
+        }
         let (h, start, len) = self.seq_view(receiver, receiver_type);
         let valid = if checked {
             let valid = self.b.ins().icmp(IntCC::UnsignedLessThan, i, len);
@@ -1652,6 +2836,20 @@ impl<M: Module> Codegen<'_, '_, M> {
         p: &Pattern,
     ) -> Option<ir::Value> {
         let read = self.seq_fused(value)?.clone()?;
+        if self.seq_hook_active() {
+            let kind = match &p.kind {
+                PatternKind::Constructor { name, .. } if name.ends_with("Some") => 0u64,
+                PatternKind::Constructor { .. } => 1,
+                _ => 2,
+            };
+            if let Some(res) = self.seq_swap_req_or_record(
+                crate::codegen_swap::seq::FUSED_CONDITION,
+                &[kind, u64::from(read.valid.as_u32())],
+            ) && let Some(v) = crate::codegen_swap::value_or_record(&res)
+            {
+                return Some(v);
+            }
+        }
         let valid = self.b.use_var(read.valid);
         Some(match &p.kind {
             PatternKind::Constructor { name, .. } if name.ends_with("Some") => {
@@ -1825,6 +3023,118 @@ fn glue_runtime_call<M: Module>(
 /// address of an aggregate. `elements` is set for an element of a dropped
 /// sequence, which also frees the boxes it holds (no Box drop tracks a
 /// sequence buffer); elsewhere boxes are left to the Box drop elaboration.
+fn encode_drop_tree_world(
+    world: &World,
+    ty: &Type,
+    elements: bool,
+    out: &mut Vec<u64>,
+) -> Result<bool, String> {
+    use crate::codegen_swap::seq as sops;
+    let ty = crate::numeric::default_type(ty);
+    let owns = |t: &Type| {
+        if elements {
+            crate::fip::elem_needs_drop(world, t)
+        } else {
+            crate::fip::needs_drop(world, t)
+        }
+    };
+    if crate::fip::is_box_type(world, &ty) || crate::dyn_trait::is_boxed(&ty) {
+        return Ok(false);
+    }
+    if crate::dyn_trait::is_object(&ty) {
+        out.push(sops::DROP_NODE_DYN);
+        return Ok(true);
+    }
+    if seq::is_seq_type(&ty) {
+        let elem = seq::elem(&ty)
+            .ok_or("ChunkSeq without an element type")?
+            .clone();
+        let elem = crate::numeric::default_type(&elem);
+        let elem_needs = crate::fip::elem_needs_drop(world, &elem);
+        let stride = seq::elem_bytes(world, &elem)? as u64;
+        let hash = fnv1a64(&elem.to_string());
+        let layout = Layout::of(world, &elem)?;
+        let is_agg = layout.aggregate();
+        let scalar_ty = if is_agg {
+            0
+        } else {
+            crate::codegen_swap::ty_code(scalar(&elem, &[])?)
+        };
+        out.extend_from_slice(&[
+            sops::DROP_NODE_SEQ,
+            u64::from(elem_needs),
+            stride,
+            hash,
+            u64::from(is_agg),
+            scalar_ty,
+        ]);
+        if elem_needs {
+            return encode_drop_tree_world(world, &elem, true, out);
+        }
+        return Ok(true);
+    }
+    if crate::strings::is_string_type(&ty) {
+        out.push(sops::DROP_NODE_STR);
+        return Ok(true);
+    }
+    let layout = Layout::of(world, &ty)?;
+    match layout.kind {
+        LayoutKind::Scalar => Ok(false),
+        LayoutKind::Product(fields) => {
+            let owning: Vec<_> = fields.into_iter().filter(|f| owns(&f.ty)).collect();
+            out.push(sops::DROP_NODE_PRODUCT);
+            out.push(owning.len() as u64);
+            for field in owning {
+                let is_agg = field.layout.aggregate();
+                let scalar_ty = if is_agg {
+                    0
+                } else {
+                    crate::codegen_swap::ty_code(scalar(&field.ty, &[])?)
+                };
+                out.extend_from_slice(&[field.offset as i64 as u64, u64::from(is_agg), scalar_ty]);
+                if !encode_drop_tree_world(world, &field.ty, elements, out)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        LayoutKind::Enum(variants) => {
+            let owning: Vec<(usize, Vec<LayoutField>)> = variants
+                .into_iter()
+                .enumerate()
+                .filter_map(|(i, v)| {
+                    let fields: Vec<LayoutField> =
+                        v.fields.into_iter().filter(|f| owns(&f.ty)).collect();
+                    (!fields.is_empty()).then_some((i, fields))
+                })
+                .collect();
+            out.push(sops::DROP_NODE_ENUM);
+            out.push(owning.len() as u64);
+            for (tag_index, fields) in owning {
+                out.push(tag_index as u64);
+                out.push(fields.len() as u64);
+                for field in fields {
+                    let is_agg = field.layout.aggregate();
+                    let scalar_ty = if is_agg {
+                        0
+                    } else {
+                        crate::codegen_swap::ty_code(scalar(&field.ty, &[])?)
+                    };
+                    out.extend_from_slice(&[
+                        field.offset as i64 as u64,
+                        u64::from(is_agg),
+                        scalar_ty,
+                    ]);
+                    if !encode_drop_tree_world(world, &field.ty, elements, out)? {
+                        return Ok(false);
+                    }
+                }
+            }
+            Ok(true)
+        }
+    }
+}
+
 pub(super) fn emit_drop_glue<M: Module>(
     b: &mut FunctionBuilder<'_>,
     m: &mut M,
@@ -1843,6 +3153,34 @@ pub(super) fn emit_drop_glue<M: Module>(
     };
     if !owns(&ty) {
         return Ok(());
+    }
+    if crate::codegen_swap::hook(crate::codegen_swap::Family::Seq).is_some() {
+        let mut tree = vec![
+            crate::codegen_swap::seq::DROP_GLUE,
+            crate::codegen_swap::word(value),
+        ];
+        if encode_drop_tree_world(world, &ty, elements, &mut tree)? {
+            let jit = std::any::type_name::<M>().contains("JITModule");
+            if !jit && m.isa().triple().operating_system != target_lexicon::OperatingSystem::None_ {
+                define_runtime(b, m, world, None)?;
+            }
+            let none = crate::ir::Program::default();
+            if crate::codegen_swap::request(
+                crate::codegen_swap::Family::Seq,
+                b,
+                m,
+                world,
+                &none,
+                crate::codegen_swap::Site::NONE,
+                crate::codegen_swap::seq::DROP_OP,
+                &tree,
+                None,
+            )?
+            .is_some()
+            {
+                return Ok(());
+            }
+        }
     }
     if crate::dyn_trait::is_object(&ty) {
         // An unconsumed `sink dyn` parameter: its vtable's drop.
