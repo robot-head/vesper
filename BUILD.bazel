@@ -686,6 +686,10 @@ vesper_crate(
         "test/std_env": [":files"],
         "test/std_fs": [":files"],
         "test/std_process": [":files"],
+        "test/bench_pmu_port": [
+            ":files",
+            "//crates/vesper-bench-pmu:vesper_pkg",
+        ],
         # .vsys imports carried by packages (#1150): drivers over @vesper-std/fs.
         "test/vsys_packages": [":files"],
         # .vsys types in `use` (#1326): the real @vesper/cranelift as a dependency.
@@ -758,7 +762,7 @@ vesper_crate(
     test_shards = {
         "test/self_host_bounds_hoist_jit": 4,
         # One test per shard: the file took 51 minutes in one process.
-        "test/self_host_check_pact": 8,
+        "test/self_host_check_pact": 9,
         "test/self_host_codegen_scalar": 4,
         "test/self_host_front_end": 4,
         "test/self_host_ir_opt": 4,

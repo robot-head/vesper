@@ -241,5 +241,9 @@ Extended `Codegen::foreign_perform_swapped` (`src/ffi_lowering/native.rs`) and `
 
 | Check | Result |
 | --- | --- |
-| `FFI_EMIT_STEP=1 cargo +1.100.0 test --locked --release -p vesper-codegen-swap-test --test self_host_ffi_emission -- --nocapture` | **0** CLIF differences, **0** object differences (`29` programs, `1,272` builds, `2,486` functions across all 4 targets with `optimize` `true` and `false`; `16,744` requests answered from Vesper, `3,944` declined; `xsk`, `forms` floats/`CStrList`/`Option[CStr]`, `vesper-std/fs`, `vesper-std/process`, `vesper-std/env`, `vesper-cranelift`, `vesper-codegen-base`) |
+| `FFI_EMIT_STEP=1 cargo +1.100.0 test --locked --release -p vesper-codegen-swap-test --test self_host_ffi_emission -- --nocapture` | **0** CLIF differences, **0** object differences (`29` programs, `1,392` builds, `4,296` functions, `112` built on neither side across all 4 targets with `optimize` `true` and `false`; `18,944` requests answered from Vesper, `4,328` declined; `xsk`, `forms` floats/`CStrList`/`Option[CStr]`/`callbacks` + indirect calls, `vesper-std/fs`, `vesper-std/process`, `vesper-std/env`, `vesper-cranelift`, `vesper-codegen-base`) |
 | Rust lines deleted | `0` (hooked path only; default path unchanged) |
+
+## Part 3 extension 2: callbacks and indirect foreign calls (`#1287` / `#1656`)
+
+Extended `Codegen::foreign_perform_swapped` (`src/ffi_lowering/native.rs`), `codegen_swap::ffi::CALL_INDIRECT` (`7`), and `@vesper/ffi-emit` (`packages/vesper-ffi-lowering/emit/src/lib.ves`) to emit callback arguments (`ParameterType::Function` via `foreign_trampoline`) and indirect foreign calls (`plan.function.is_indirect()` via `ins_call_indirect`) from Vesper with **0** CLIF/object differences.

@@ -2018,3 +2018,102 @@ fn builtin_derive_agrees_with_rust() {
         .join()
         .unwrap();
 }
+
+#[test]
+fn mono_check_agrees_with_rust() {
+    if !owned_by_shard(8) {
+        return;
+    }
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let mono_fn = package().entry("check_pact_mono_check", true);
+            let identity = pact_frontend::default_identity();
+            let mut cases: Vec<(String, Module)> = checker_tests()
+                .into_iter()
+                .map(|(n, s)| (n, parse(&s)))
+                .collect();
+            for c in corpus() {
+                cases.push((c.name.clone(), c.module.clone()));
+            }
+            // Targeted mono edge cases: function value, uninferred arg, generic suggestion,
+            // ADT type_bounds, ambiguity, and lexical `use model`.
+            let extra_sources = [
+                (
+                    "mono_fn_val",
+                    "trait Show { fn show(in self) -> i64; }
+                     fn f[T: Show](in x: T) -> i64 { x.show() }
+                     fn apply(in g: fn(i64) -> i64) -> i64 { g(1) }
+                     impl Show for i64 { fn show(in self) -> i64 { self } }
+                     fn main() -> i64 { let h = f; apply(h) }",
+                ),
+                (
+                    "mono_generic_add_bound",
+                    "trait Show { fn show(in self) -> i64; }
+                     fn f[T: Show](in x: T) -> i64 { x.show() }
+                     fn g[U](in x: U) -> i64 { f(x) }
+                     fn main() -> i64 { 0 }",
+                ),
+                (
+                    "mono_adt_type_bound",
+                    "trait Key { fn key(in self) -> i64; }
+                     struct Boxed[K: Key] { k: K }
+                     struct Plain { x: i64 }
+                     fn f(in b: Boxed[Plain]) -> i64 { b.k.x }
+                     fn main() -> i64 { 0 }",
+                ),
+                (
+                    "mono_ambiguous_model",
+                    "trait Show { fn show(in self) -> i64; }
+                     fn f[T: Show](in x: T) -> i64 { x.show() }
+                     model M1: Show for i64 { fn show(in self) -> i64 { self } }
+                     model M2: Show for i64 { fn show(in self) -> i64 { self + 1 } }
+                     fn main() -> i64 { f(1) }",
+                ),
+                (
+                    "mono_use_model_ok",
+                    "trait Show { fn show(in self) -> i64; }
+                     fn f[T: Show](in x: T) -> i64 { x.show() }
+                     model M1: Show for i64 { fn show(in self) -> i64 { self } }
+                     model M2: Show for i64 { fn show(in self) -> i64 { self + 1 } }
+                     fn main() -> i64 { use model M1; f(1) }",
+                ),
+            ];
+            for (name, src) in extra_sources {
+                cases.push((name.to_string(), parse(src)));
+            }
+
+            let mut checked = 0usize;
+            let mut with_errors = 0usize;
+            for (name, m) in &cases {
+                let Some(outcome) = pact_frontend::probe_mono_check(m, &identity) else {
+                    continue;
+                };
+                let Some(input) = pact_words::encode_mono_check_input(
+                    &outcome,
+                    pact_frontend::DEFAULT_PACKAGE,
+                    pact_frontend::DEFAULT_VERSION,
+                ) else {
+                    continue;
+                };
+                checked += 1;
+                if !outcome.errors.is_empty() {
+                    with_errors += 1;
+                }
+                let (s_diags, ok, v_bounded, v_errors) =
+                    pact_words::decode_mono_check(&mono_fn.words(&input));
+                assert!(s_diags.is_empty(), "{name}: session diags {s_diags:?}");
+                assert!(ok, "{name}: session failed");
+                assert_eq!(v_bounded, outcome.bounded, "{name}: bounded mismatch");
+                assert_eq!(v_errors, outcome.errors, "{name}: errors mismatch");
+            }
+            eprintln!(
+                "mono_check: {checked} modules checked ({with_errors} with errors), 0 differ"
+            );
+            assert!(checked > 0);
+            assert!(with_errors > 0);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}

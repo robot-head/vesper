@@ -953,6 +953,11 @@ pub mod ffi {
     pub const RESULT: u32 = 5;
     /// Frees the C string buffers. Args `[buffer...]`; no result.
     pub const FINISH: u32 = 6;
+    /// Indirect call through a function pointer (`is_indirect()`):
+    /// `[sig_ref, pointer, errno, returns, little, len_word, len_i64, reg_id,
+    /// released_n, released..., args_n, args..., copies_n, (len, copy...)...]`;
+    /// answers `[raw, os_error]`.
+    pub const CALL_INDIRECT: u32 = 7;
 }
 
 /// The `numeric` family's requests (lane 11, #1285). `Op::Vector` and

@@ -558,6 +558,7 @@ fn routing_runs_in_vesper() {
     assert_eq!(prints(&bare, &["highlight", "--help"]), 1);
     assert_eq!(prints(&bare, &["shot", "--help"]), 1);
     assert_eq!(prints(&bare, &["ebpf", "--help"]), 1);
+    assert_eq!(prints(&bare, &["forge", "--help"]), 1);
     assert_eq!(prints(&bare, &["verify", "--refute"]), 1);
     // Handed back: the Rust CLI prints.
     assert_eq!(prints(&bare, &["verify", "--help"]), 0);
@@ -705,6 +706,120 @@ fn ebpf_runs_in_vesper() {
         .current_dir(&dir)
         .env("VESPER_HYBRID_STATS", "1")
         .args(["ebpf", "check", "--help"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let prints: u64 = stderr
+        .lines()
+        .find_map(|l| {
+            l.strip_prefix("vesper-hybrid: the command layers printed ")
+                .and_then(|s| s.strip_suffix(" times from Vesper"))
+                .and_then(|n| n.parse().ok())
+        })
+        .unwrap_or_else(|| panic!("no command-layer report in {stderr:?}"));
+    assert_eq!(prints, 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn seed_forge_tree(dir: &Path) {
+    std::fs::write(
+        dir.join("ok.ves"),
+        "macro add1(x: Expr) -> Expr {\n    quote { $x + 1 }\n}\n\npub fn main() -> i64 {\n    add1!(41)\n}\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("bad.ves"), "pub fn main() -> i64 {\n    1 +\n}\n").unwrap();
+    std::fs::write(dir.join("bad_policy.json"), "{not-json").unwrap();
+}
+
+#[test]
+fn forge_matches_the_default_compiler() {
+    let default = default_compiler();
+    let hybrid = hybrid();
+    let root = scratch("vesper-cli-forge");
+    let cases: &[&[&str]] = &[
+        &["forge"],
+        &["forge", "--help"],
+        &["forge", "-h"],
+        &["forge", "check", "--help"],
+        &["forge", "nope"],
+        &["forge", "check"],
+        &["forge", "check", "--unknown"],
+        &["forge", "check", "--package"],
+        &["forge", "check", "--policy"],
+        &["forge", "check", "ok.ves", "bad.ves"],
+        &["forge", "check", "missing.ves"],
+        &["forge", "check", "ok.ves", "--policy", "bad_policy.json"],
+        &["forge", "check", "ok.ves"],
+        &[
+            "forge",
+            "check",
+            "ok.ves",
+            "--json",
+            "--package",
+            "@local/test",
+        ],
+        &["forge", "check", "bad.ves"],
+        &["forge", "expand", "ok.ves"],
+        &["forge", "lean", "ok.ves"],
+        &["forge", "lean", "ok.ves", "--provenance", "prov.json"],
+        &["forge", "lean", "--provenance"],
+    ];
+    let mut diffs = vec![];
+    for argv in cases {
+        let mut results = vec![];
+        for compiler in [&default, &hybrid] {
+            let work = root.join(if compiler == &default { "d" } else { "h" });
+            let _ = std::fs::remove_dir_all(&work);
+            std::fs::create_dir_all(&work).unwrap();
+            seed_forge_tree(&work);
+            let out = Command::new(compiler)
+                .current_dir(&work)
+                .env_remove("VESPER_HYBRID_STATS")
+                .args(*argv)
+                .output()
+                .unwrap();
+            results.push(out);
+        }
+        let d = &results[0];
+        let h = &results[1];
+        let d_prov = std::fs::read(root.join("d/prov.json")).ok();
+        let h_prov = std::fs::read(root.join("h/prov.json")).ok();
+        if d.status.code() != h.status.code()
+            || d.stdout != h.stdout
+            || d.stderr != h.stderr
+            || d_prov != h_prov
+        {
+            diffs.push(format!(
+                "{argv:?}: status {:?} vs {:?}, stdout {:?} vs {:?}, stderr {:?} vs {:?}, prov {}",
+                d.status.code(),
+                h.status.code(),
+                String::from_utf8_lossy(&d.stdout),
+                String::from_utf8_lossy(&h.stdout),
+                String::from_utf8_lossy(&d.stderr),
+                String::from_utf8_lossy(&h.stderr),
+                d_prov == h_prov,
+            ));
+        }
+    }
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(
+        diffs.is_empty(),
+        "Vesper `forge` differs from default CLI on {} cases:\n{}",
+        diffs.len(),
+        diffs.join("\n")
+    );
+}
+
+#[test]
+fn forge_runs_in_vesper() {
+    let hybrid = hybrid();
+    let dir = scratch("vesper-cli-forge-runs");
+    seed_forge_tree(&dir);
+    let out = Command::new(&hybrid)
+        .current_dir(&dir)
+        .env("VESPER_HYBRID_STATS", "1")
+        .args(["forge", "check", "--help"])
         .output()
         .unwrap();
     assert!(out.status.success());

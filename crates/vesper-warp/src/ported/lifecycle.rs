@@ -4,6 +4,8 @@
 //! HMAC-SHA-256 and the CSPRNG stay Rust behind the `.vsys` library
 //! `WarpKeys` ([`keys`]), which the Vesper code imports.
 
+#![cfg_attr(not(feature = "vesper-port"), allow(dead_code, unused_imports))]
+
 use std::sync::Arc;
 
 use aes_gcm::Aes256Gcm;
