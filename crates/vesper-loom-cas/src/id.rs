@@ -128,17 +128,6 @@ impl Digest {
         self.to_hex_rust()
     }
 
-    #[cfg(not(vesper_port))]
-    fn to_hex_rust(self) -> String {
-        const HEX: &[u8; 16] = b"0123456789abcdef";
-        let mut out = String::with_capacity(64);
-        for byte in self.0 {
-            out.push(HEX[(byte >> 4) as usize] as char);
-            out.push(HEX[(byte & 0x0f) as usize] as char);
-        }
-        out
-    }
-
     /// Strict parser: exactly 64 lowercase hexadecimal characters. Store paths
     /// are derived from this form, so no other spelling is accepted.
     pub fn from_hex(text: &str) -> Option<Self> {
@@ -146,26 +135,6 @@ impl Digest {
         return crate::port::from_hex(text);
         #[cfg(not(vesper_port))]
         Self::from_hex_rust(text)
-    }
-
-    #[cfg(not(vesper_port))]
-    fn from_hex_rust(text: &str) -> Option<Self> {
-        let bytes = text.as_bytes();
-        if bytes.len() != 64 {
-            return None;
-        }
-        fn nibble(c: u8) -> Option<u8> {
-            match c {
-                b'0'..=b'9' => Some(c - b'0'),
-                b'a'..=b'f' => Some(c - b'a' + 10),
-                _ => None,
-            }
-        }
-        let mut out = [0u8; 32];
-        for (i, pair) in bytes.as_chunks::<2>().0.iter().enumerate() {
-            out[i] = (nibble(pair[0])? << 4) | nibble(pair[1])?;
-        }
-        Some(Digest(out))
     }
 }
 
@@ -242,29 +211,6 @@ impl FromStr for ObjectId {
     }
 }
 
-impl ObjectId {
-    #[cfg(not(vesper_port))]
-    fn from_str_rust(s: &str, invalid: impl Fn() -> CasError + Copy) -> Result<Self, CasError> {
-        let mut parts = s.split(':');
-        let (Some(scheme), Some(domain), Some(kind), Some(hex), None) = (
-            parts.next(),
-            parts.next(),
-            parts.next(),
-            parts.next(),
-            parts.next(),
-        ) else {
-            return Err(invalid());
-        };
-        if scheme != "b3v1" {
-            return Err(invalid());
-        }
-        let domain = Domain::parse(domain).ok_or_else(invalid)?;
-        let kind = ObjectKind::parse(kind).ok_or_else(invalid)?;
-        let digest = Digest::from_hex(hex).ok_or_else(invalid)?;
-        Ok(ObjectId::new(domain, kind, digest))
-    }
-}
-
 /// BLAKE3 `derive_key` context for an object of `domain`/`kind`. These
 /// strings are frozen for schema version 1: changing one changes every id.
 pub(crate) fn object_context(domain: Domain, kind: ObjectKind) -> &'static str {
@@ -330,12 +276,5 @@ pub fn blob_id(domain: Domain, bytes: &[u8]) -> ObjectId {
         crate::port::object_digest(domain, ObjectKind::Blob, bytes),
     );
     #[cfg(not(vesper_port))]
-    blob_id_rust(domain, bytes)
-}
-
-#[cfg(not(vesper_port))]
-fn blob_id_rust(domain: Domain, bytes: &[u8]) -> ObjectId {
-    let mut hasher = ObjectHasher::new(domain, ObjectKind::Blob);
-    hasher.update(bytes);
-    hasher.finish()
+    crate::engine::id::blob_id_rust(domain, bytes)
 }

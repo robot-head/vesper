@@ -60,7 +60,7 @@ const ALLOWED: &[(&str, &str)] = &[
         "package manifests and authority",
     ),
     (
-        "vesper-loom-cas",
+        "vesper-loom-cas-seed",
         "test verdict cache, doc certificates, `vesper verify`",
     ),
     ("vesper-lsp", "`vesper lsp`"),

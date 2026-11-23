@@ -242,10 +242,12 @@ impl Port {
             .warnings(false);
         for file in package_objects(&source, &target)? {
             println!("cargo:rerun-if-changed={}", file.display());
-            if file.extension().is_some_and(|e| e == "o" || e == "obj") {
-                build.object(&file);
+            // MSVC `cl.exe` rejects `\\?\` verbatim prefixes from `canonicalize`.
+            let cc_file = strip_verbatim_prefix(&file);
+            if cc_file.extension().is_some_and(|e| e == "o" || e == "obj") {
+                build.object(&cc_file);
             } else {
-                build.file(&file);
+                build.file(&cc_file);
             }
         }
         build
@@ -253,6 +255,14 @@ impl Port {
             .map_err(|e| e.to_string())?;
         Ok(())
     }
+}
+
+fn strip_verbatim_prefix(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    if let Some(stripped) = path.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
+        return PathBuf::from(stripped);
+    }
+    path.to_path_buf()
 }
 
 /// The `.vsys` targets (`@TARGET@`, `@OS@`, `@ARCH@` in a per-target

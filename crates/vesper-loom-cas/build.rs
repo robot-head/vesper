@@ -1,16 +1,17 @@
-//! Link the Vesper port of vesper-loom-cas (the Loom package in ../vesper)
-//! and set cfg(vesper_port), so ../src forwards to it (see
-//! docs/maintenance/porting-a-crate.md and Cargo.toml).
+//! Link the Vesper port of `vesper-loom-cas` (the Loom package in `vesper`)
+//! and set `cfg(vesper_port)`, so `src/` forwards to it (see
+//! `docs/maintenance/porting-a-crate.md` and `Cargo.toml`). The seed package
+//! (`seed/`) has no build script, so it builds the frozen Rust CAS engine.
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    let port = vesper_port_harness::Port::new("loom_cas", "../vesper").binding("binding.rs");
+    let port = vesper_port_harness::Port::new("loom_cas", "vesper").binding("port/binding.rs");
     // The divergent build applies one module's edit, picked by
-    // VESPER_CAS_DIVERGE (test-port.sh runs each).
-    #[cfg(feature = "divergent")]
+    // VESPER_CAS_DIVERGE (port/test-port.sh runs each).
+    #[cfg(feature = "vesper-port-divergent")]
     let port = {
         println!("cargo:rerun-if-env-changed=VESPER_CAS_DIVERGE");
         let module = std::env::var("VESPER_CAS_DIVERGE")
-            .expect("the divergent feature needs VESPER_CAS_DIVERGE=<module>");
+            .expect("the vesper-port-divergent feature needs VESPER_CAS_DIVERGE=<module>");
         let (_, from, to) = DIVERGENT_EDITS
             .iter()
             .find(|(m, _, _)| *m == module)
@@ -20,13 +21,13 @@ fn main() {
     port.build();
 }
 
-/// One deliberate bug per ported module: (module, text, wrong text).
-#[cfg(feature = "divergent")]
+/// One deliberate bug per ported module: `(module, text, wrong text)`.
+#[cfg(feature = "vesper-port-divergent")]
 const DIVERGENT_EDITS: &[(&str, &str, &str)] = &[
     // name.ves: a backslash is no longer a separator.
     ("name", "if b == 47 || b == 92 {", "if b == 47 {"),
     // id.ves: the kind name "tree" is accepted as a blob.
-    ("id", "        kind = 2;\n", "        kind = 1;\n"),
+    ("id", "        kind = 2;", "        kind = 1;"),
     // tree.ves: directories may have a size.
     (
         "tree",
@@ -36,8 +37,8 @@ const DIVERGENT_EDITS: &[(&str, &str, &str)] = &[
     // drv.ves: an option value may hold control characters.
     (
         "drv",
-        "            false,\n            F_VALUE,",
-        "            true,\n            F_KEY,",
+        "            wrapping_add(base, wrapping_add(wrapping_mul(j, 2), 1)),",
+        "            wrapping_add(base, wrapping_mul(j, 2)),",
     ),
     // store.ves: an occupied object path is trusted without rehashing it.
     (
