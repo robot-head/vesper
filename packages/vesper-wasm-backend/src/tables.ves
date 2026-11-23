@@ -1,6 +1,10 @@
 // Constant tables in the port: a use of a constant aggregate
 // (`$table$NAME`, src/arrays.rs) as read-only static data.
 
+use @vesper/place-ir::codes::{
+    Lit,
+    Op
+};
 use @vesper/check-data::util::{
     add,
     inc,
@@ -21,9 +25,6 @@ use self::lower::{
 const K_UNSUPPORTED: u8 = 0;
 const U_EXTERNAL_FUNCTION: u8 = 11;
 const U_OPERATION: u8 = 13;
-const IR_CONST: u8 = 0;
-const IR_TUPLE: u8 = 7;
-const LIT_STRING: u64 = 3;
 
 impl L {
     // A use of a constant aggregate (`$table$NAME`, src/arrays.rs): the
@@ -91,16 +92,16 @@ impl L {
         for j in 0..blk.ic {
             let ins = self.cx.ir.p.inst(add(blk.i0, j));
             let a = ins.a;
-            if ins.op == IR_CONST {
+            if ins.op == Op::Const {
                 let lk = self.cx.ir.word(a);
-                if lk == LIT_STRING {
+                if lk == Lit::String {
                     Fail::raise(werr(K_UNSUPPORTED, U_OPERATION, 246));
                 }
                 let c = self
                     .constant_bits(lk, self.cx.ir.word(inc(a)), self.cx.ir.word(add(a, 2)), ins.ty);
                 dests.push(widen_u64(ins.dest));
                 vals.push(wrapping_u64(c));
-            } else if ins.op == IR_TUPLE {
+            } else if ins.op == Op::Tuple {
                 out.clear();
                 let k = self.cx.ir.word(a);
                 for i in 0..k {

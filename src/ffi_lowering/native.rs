@@ -302,27 +302,13 @@ impl<M: Module> Codegen<'_, '_, M> {
         // SH4 swap point (#1287): the `ffi` hook may emit this call
         // (`codegen_swap::ffi`); none is installed by default. A callback
         // type's call is not offered: the steps name a symbol. Nor is a
-        // call passing or returning a float: the steps carry integer words.
-        // Nor, yet, is one taking a `CStrList` or returning a C string (SH6
-        // lane 13; the Vesper emitter mirrors them later).
-        // Foreign memory viewed in place (pinned buffers and mappings) is
-        // lowered here only, so the hook is not offered such calls either.
+        // call taking a callback function: `foreign_trampoline` compiles a
+        // fresh function in `self.m`.
         let abi = plan.function.abi();
-        let floats = abi
-            .parameters
-            .iter()
-            .chain(abi.result.as_ref())
-            .any(|t| matches!(t, AbiType::Float(_)));
         if !plan.function.is_indirect()
-            && !floats
-            && !descriptors.iter().any(|d| {
-                matches!(
-                    d.ty(),
-                    ParameterType::Function { .. } | ParameterType::CStrList
-                )
-            })
-            && !plan.function.uses_foreign_memory()
-            && *plan.function.result() != ValueType::CStr
+            && !descriptors
+                .iter()
+                .any(|d| matches!(d.ty(), ParameterType::Function { .. }))
             && let Some(v) = self.foreign_perform_swapped(&plan, &signature, args)?
         {
             return Ok(v);
@@ -1613,8 +1599,14 @@ fn value_words(v: &ValueType, out: &mut Vec<u64>) {
         ValueType::Address { .. } => out.push(4),
         ValueType::Handle { nullable, .. } => out.extend([5, u64::from(*nullable)]),
         ValueType::NonNullHandle { .. } => out.push(6),
-        ValueType::Float(_) => unreachable!("calls with floats are not offered to the hook"),
-        ValueType::CStr => unreachable!("calls returning C strings are not offered to the hook"),
+        ValueType::Float(f) => out.extend([
+            7,
+            match f {
+                Float::F32 => 32,
+                Float::F64 => 64,
+            },
+        ]),
+        ValueType::CStr => out.push(8),
     }
 }
 fn integer_word(int: &vesper_ffi::Integer) -> u64 {
@@ -1823,17 +1815,27 @@ impl<M: Module> Codegen<'_, '_, M> {
         let mut copies: Vec<Vec<u64>> = vec![];
         let mut restores = vec![];
         let mut strings: Vec<(u64, u64)> = vec![];
+        let mut lists: Vec<u64> = vec![];
+        let mut released: Vec<u64> = vec![];
+        let mut mapping_length = None;
         for (i, ((arg, param), descriptor)) in args
             .iter()
             .zip(&signature.params)
             .zip(descriptors)
             .enumerate()
         {
+            if plan.function.mapping_length() == Some(i) {
+                mapping_length = Some(c_args.len());
+            }
             let mut words = vec![i as u64];
             match descriptor.ty() {
                 ParameterType::CStr => {
                     let view = self.expr(&arg.expr)?;
                     words.extend([2, word(view), little, 2]);
+                }
+                ParameterType::CStrList => {
+                    let view = self.expr(&arg.expr)?;
+                    words.extend([2, word(view), little, 7]);
                 }
                 ParameterType::Slice { element, .. } if crate::seq::is_slice_type(&param.ty) => {
                     let view = self.expr(&arg.expr)?;
@@ -1877,13 +1879,18 @@ impl<M: Module> Codegen<'_, '_, M> {
                             words.push(0);
                             value_words(v, &mut words);
                         }
+                        ParameterType::Handle { handle, access } if handle.mapping().is_some() => {
+                            words.extend([
+                                6,
+                                u64::from(*access == vesper_ffi::sys::HandleAccess::Sink),
+                            ]);
+                        }
                         ParameterType::Handle { .. } => words.push(1),
                         ParameterType::Pinned { .. } => {
-                            return Err("pinned buffers are not offered to the ffi hook".into());
+                            words.extend([6, 0]);
                         }
-                        ParameterType::CStr => unreachable!("C strings are lowered above"),
-                        ParameterType::CStrList => {
-                            unreachable!("calls taking C string lists are not offered to the hook")
+                        ParameterType::CStr | ParameterType::CStrList => {
+                            unreachable!("C strings are lowered above")
                         }
                         ParameterType::Function { .. } => {
                             unreachable!("calls taking functions are not offered to the hook")
@@ -1987,8 +1994,15 @@ impl<M: Module> Codegen<'_, '_, M> {
                 copies.push(copy.to_vec());
             }
             let s = *r.get(2 + k + m).ok_or_else(bad)? as usize;
-            if s == 2 {
-                strings.push((r[3 + k + m], r[4 + k + m]));
+            if s == 1 {
+                released.push(r[3 + k + m]);
+            } else if s == 2 {
+                if matches!(descriptor.ty(), ParameterType::CStrList) {
+                    lists.push(r[3 + k + m]);
+                    lists.push(r[4 + k + m]);
+                } else {
+                    strings.push((r[3 + k + m], r[4 + k + m]));
+                }
             }
         }
         let symbol = plan.function.link_symbol();
@@ -2024,13 +2038,27 @@ impl<M: Module> Codegen<'_, '_, M> {
         } else {
             0
         };
+        let (len_word, len_i64) = match mapping_length {
+            Some(idx) => {
+                let v = c_args[idx];
+                (
+                    word(v),
+                    u64::from(self.b.func.dfg.value_type(v) == types::I64),
+                )
+            }
+            None => (NO_VALUE, 0),
+        };
         let mut words = vec![
             u64::from(callee.as_u32()),
             errno,
             u64::from(abi.result.is_some()),
             little,
-            c_args.len() as u64,
+            len_word,
+            len_i64,
+            released.len() as u64,
         ];
+        words.extend(&released);
+        words.push(c_args.len() as u64);
         words.extend(c_args.iter().map(|v| word(*v)));
         words.push(copies.len() as u64);
         for c in &copies {
@@ -2069,8 +2097,28 @@ impl<M: Module> Codegen<'_, '_, M> {
             (_, Some(_)) => return Err("errno result is not a pair".into()),
             (t, None) => t.clone(),
         };
-        let mut words = vec![raw.map_or(NO_VALUE, word)];
         let result = plan.function.result();
+        let jit = std::any::type_name::<M>().contains("JITModule");
+        if *result == ValueType::CStr && !jit {
+            if self.m.isa().triple().operating_system == target_lexicon::OperatingSystem::None_ {
+                return Err(
+                    "ChunkSeq in a freestanding image needs an allocator; the generated one uses the C library"
+                        .into(),
+                );
+            }
+            for (name, params) in [("strlen", 1), ("memcpy", 3)] {
+                let mut sig = self.m.make_signature();
+                for _ in 0..params {
+                    sig.params.push(AbiParam::new(types::I64));
+                }
+                sig.returns.push(AbiParam::new(types::I64));
+                self.m
+                    .declare_function(name, Linkage::Import, &sig)
+                    .map_err(|e| format!("C library function '{name}': {e}"))?;
+            }
+            self.seq_define_runtime()?;
+        }
+        let mut words = vec![raw.map_or(NO_VALUE, word), u64::from(jit)];
         value_words(result, &mut words);
         self.foreign_result_layout(result, raw.is_some(), &value_ty, &mut words)?;
         let r = self.foreign_request(swap::RESULT, &words)?;
@@ -2100,8 +2148,8 @@ impl<M: Module> Codegen<'_, '_, M> {
             self.b.seal_block(join);
             value = slot;
         }
-        if !strings.is_empty() {
-            let buffers: Vec<u64> = strings.iter().map(|(b, _)| *b).collect();
+        if !strings.is_empty() || !lists.is_empty() {
+            let buffers: Vec<u64> = strings.iter().map(|(b, _)| *b).chain(lists).collect();
             self.foreign_request(swap::FINISH, &buffers)?;
         }
         Ok(Some(value))
@@ -2141,11 +2189,7 @@ impl<M: Module> Codegen<'_, '_, M> {
             Ok(())
         };
         match v {
-            ValueType::Unit | ValueType::Scalar(_) => Ok(()),
-            ValueType::Float(_) => unreachable!("calls with floats are not offered to the hook"),
-            ValueType::CStr => {
-                unreachable!("calls returning C strings are not offered to the hook")
-            }
+            ValueType::Unit | ValueType::Scalar(_) | ValueType::Float(_) => Ok(()),
             ValueType::Bool | ValueType::Enum(_) => validated(self.world, out),
             ValueType::Address { .. } => Err("foreign address results have no lowering".into()),
             ValueType::NonNullHandle { .. } => {
@@ -2153,10 +2197,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                 out.extend([u64::from(layout.aggregate()), u64::from(layout.size)]);
                 Ok(())
             }
-            ValueType::Handle { nullable, .. } => {
-                if !nullable {
-                    return validated(self.world, out);
-                }
+            ValueType::CStr | ValueType::Handle { nullable: true, .. } => {
                 let layout = Layout::of(self.world, ty)?;
                 let (some, fields) = layout.variant("Some").ok_or("Option lacks Some")?;
                 let offset = fields.first().ok_or("Some lacks a payload")?.offset;
@@ -2169,6 +2210,9 @@ impl<M: Module> Codegen<'_, '_, M> {
                 ]);
                 Ok(())
             }
+            ValueType::Handle {
+                nullable: false, ..
+            } => validated(self.world, out),
         }
     }
 }

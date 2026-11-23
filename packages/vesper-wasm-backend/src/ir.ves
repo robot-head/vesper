@@ -5,6 +5,10 @@
 // the facts the backend reads from closure and handler expressions (the
 // pool keeps those expressions on the Rust side).
 
+use @vesper/place-ir::codes::{
+    Lit,
+    Pat
+};
 use @vesper/check-data::util::{
     add,
     inc,
@@ -26,13 +30,12 @@ use @vesper/place-ir::{
 
 const NONE32: u32 = 4294967295;
 
-// Pattern kinds (ir_words.rs).
-pub const PAT_WILD: u64 = 0;
-pub const PAT_BIND: u64 = 1;
-pub const PAT_LITERAL: u64 = 2;
-pub const PAT_TUPLE: u64 = 3;
-pub const PAT_CONSTRUCTOR: u64 = 4;
-pub const LIT_STRING: u64 = 3;
+pub const PAT_WILD: u64 = Pat::Wild;
+pub const PAT_BIND: u64 = Pat::Bind;
+pub const PAT_LITERAL: u64 = Pat::Literal;
+pub const PAT_TUPLE: u64 = Pat::Tuple;
+pub const PAT_CONSTRUCTOR: u64 = Pat::Constructor;
+pub const LIT_STRING: u64 = Lit::String;
 
 pub copy struct GenRow {
     name: u32,
@@ -96,10 +99,15 @@ pub copy struct Pair {
     ty: u32,
 }
 
-// The facts of one pool row. `kind` 0: not an expression; 1: a closure
-// (`fn_` its nested function, `free` its free names less its params);
-// 2: a handler (`free` the handler expression's free names, the rest in
-// `hops[h0..]`, see `read_handler`).
+// Expression facts in the backend input's pool rows.
+pub enum ExprFactKind: _ {
+    None = 0,
+    Closure = 1,
+    Handler = 2,
+}
+
+// A closure records its nested function and free names. A handler records
+// its free names and the handler data at `hops[h0..]` (see `read_handler`).
 pub copy struct ExprFact {
     kind: u64,
     fn_: u32,
@@ -243,24 +251,24 @@ fn copy_pattern(inout r: Reader, in b: Slice[u8], in c: Ctx, inout f: Facts, dep
     if depth > 512 {
         return;
     }
-    if kind == PAT_BIND {
+    if kind == Pat::Bind {
         f.hops.push(w(sym(in c, r.word(in b))));
-    } else if kind == PAT_LITERAL {
+    } else if kind == Pat::Literal {
         let lk = r.word(in b);
         f.hops.push(lk);
-        if lk == LIT_STRING {
+        if lk == Lit::String {
             f.hops.push(w(sym(in c, r.word(in b))));
         } else {
             f.hops.push(r.word(in b));
         }
         f.hops.push(r.word(in b));
-    } else if kind == PAT_TUPLE {
+    } else if kind == Pat::Tuple {
         let n = r.word(in b);
         f.hops.push(n);
         for i in 0..n {
             copy_pattern(inout r, in b, in c, inout f, inc(depth));
         }
-    } else if kind == PAT_CONSTRUCTOR {
+    } else if kind == Pat::Constructor {
         f.hops.push(w(sym(in c, r.word(in b))));
         f.hops.push(r.word(in b));
         let n = r.word(in b);
@@ -458,11 +466,11 @@ pub fn read_facts(inout r: Reader, in b: Slice[u8], in c: Ctx, pool: u64) -> Fac
             fc: 0,
             h0: f.hops.len()
         };
-        if kind == 1 {
+        if kind == ExprFactKind::Closure {
             fact.fn_ = sym(in c, r.word(in b));
             fact.f0 = f.free.len();
             fact.fc = read_free(inout r, in b, in c, inout f);
-        } else if kind == 2 {
+        } else if kind == ExprFactKind::Handler {
             fact.f0 = f.free.len();
             fact.fc = read_free(inout r, in b, in c, inout f);
             fact.h0 = f.hops.len();
@@ -620,7 +628,7 @@ impl Facts {
         match self.exprs.try_get(i) {
             Option::Some(e) => e,
             Option::None => ExprFact {
-                kind: 0,
+                kind: ExprFactKind::None,
                 fn_: 0,
                 f0: 0,
                 fc: 0,
@@ -864,17 +872,17 @@ pub fn pattern_end(in ops: ChunkSeq[u64], at: u64, depth: u64) -> u64 {
     if depth > 512 {
         return i;
     }
-    if kind == PAT_BIND {
+    if kind == Pat::Bind {
         i = inc(i);
-    } else if kind == PAT_LITERAL {
+    } else if kind == Pat::Literal {
         i = add(i, 3);
-    } else if kind == PAT_TUPLE {
+    } else if kind == Pat::Tuple {
         let n = u64_at(in ops, i);
         i = inc(i);
         for k in 0..n {
             i = pattern_end(in ops, i, inc(depth));
         }
-    } else if kind == PAT_CONSTRUCTOR {
+    } else if kind == Pat::Constructor {
         let n = u64_at(in ops, add(i, 2));
         i = add(i, 3);
         for k in 0..n {

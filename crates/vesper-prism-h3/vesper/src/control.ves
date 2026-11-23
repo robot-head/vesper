@@ -25,9 +25,21 @@ use self::varint::{
     vdec
 };
 use self::frame::{
+    cancel_push_type,
+    data_type,
+    goaway_type,
+    headers_type,
+    max_push_id_type,
+    push_promise_type,
     reader_new,
     reader_push,
-    reader_next
+    reader_next,
+    settings_type,
+    webtransport_stream_type
+};
+use self::priority::{
+    priority_update_push,
+    priority_update_request
 };
 
 // Stream types (RFC 9114 §6.2, draft-ietf-webtrans-http3 §4.2).
@@ -378,19 +390,19 @@ fn is_server_initiated(id: u64) -> bool {
 
 fn frame_type(f: FrameOut) -> u64 {
     match f {
-        FrameOut::Data => 0x00,
-        FrameOut::Headers => 0x01,
-        FrameOut::CancelPush(_v) => 0x03,
-        FrameOut::SettingsFrame(_s) => 0x04,
-        FrameOut::PushPromise => 0x05,
-        FrameOut::GoAway(_v) => 0x07,
-        FrameOut::MaxPushId(_v) => 0x0d,
+        FrameOut::Data => data_type(),
+        FrameOut::Headers => headers_type(),
+        FrameOut::CancelPush(_v) => cancel_push_type(),
+        FrameOut::SettingsFrame(_s) => settings_type(),
+        FrameOut::PushPromise => push_promise_type(),
+        FrameOut::GoAway(_v) => goaway_type(),
+        FrameOut::MaxPushId(_v) => max_push_id_type(),
         FrameOut::PriorityUpdateFrame(u) => if u.push {
-            0xf0701
+            priority_update_push()
         } else {
-            0xf0700
+            priority_update_request()
         },
-        FrameOut::WebTransportStream(_v) => 0x41,
+        FrameOut::WebTransportStream(_v) => webtransport_stream_type(),
         FrameOut::Unknown(t) => t,
         FrameOut::None => 0,
     }

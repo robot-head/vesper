@@ -1816,6 +1816,16 @@ enum Spv: _ {
     StorageBuffer = 12,
 }
 
+// Module header word offsets and instruction header fields (SPIR-V §2.3).
+enum SpirvHeader: u64 {
+    Magic = 0,
+    IdBound = 3,
+    Words = 5,
+}
+
+const SPIRV_WORD_BYTES: u64 = 4;
+const SPIRV_WORD_COUNT_SHIFT: u32 = 16;
+const SPIRV_OPCODE_MASK: u32 = 0xffff;
 const UNSET: u32 = 4294967295;
 
 // A kernel module's binding interface: how many storage buffers it binds
@@ -1845,8 +1855,8 @@ fn id_at(in spirv: Slice[u8], at: u64, bound: u64)
 // is `name`.
 fn names(in spirv: Slice[u8], at: u64, end: u64, in name: Slice[u8])
     -> bool eff [Fail[RuntimeError], Fail[ArithOverflow]] {
-    let start = at * 4;
-    if start + name.len() >= end * 4 {
+    let start = at * SPIRV_WORD_BYTES;
+    if start + name.len() >= end * SPIRV_WORD_BYTES {
         return false;
     }
     for i in 0..name.len() {
@@ -1869,7 +1879,7 @@ fn struct_bytes(
     in sizes: ChunkSeq[u32],
     in offsets: ChunkSeq[u64]
 ) -> u64 eff [Fail[GpuErr], Fail[RuntimeError], Fail[ArithOverflow]] {
-    let members = widen_u64(word_at(in spirv, at) >> 16) - 2;
+    let members = widen_u64(word_at(in spirv, at) >> SPIRV_WORD_COUNT_SHIFT) - 2;
     let mut end: u64 = 0;
     for m in 0..members {
         let size = widen_u64(sizes[id_at(in spirv, at + 2 + m, bound)]);
@@ -1901,17 +1911,17 @@ fn struct_bytes(
 pub fn spirv_interface(in spirv: Slice[u8], in entry: Str)
     -> SpirvInterface eff [Fail[GpuErr], Fail[RuntimeError], Fail[ArithOverflow]] {
     let len = spirv.len();
-    if len < 20 || len % 4 != 0 {
+    if len < SpirvHeader::Words * SPIRV_WORD_BYTES || len % SPIRV_WORD_BYTES != 0 {
         return raise(Kind::Shader, BadSpirv::Malformed, 0);
     }
-    if word_at(in spirv, 0) != Spv::Magic {
+    if word_at(in spirv, SpirvHeader::Magic) != Spv::Magic {
         return raise(Kind::Shader, BadSpirv::Malformed, 0);
     }
-    let bound = widen_u64(word_at(in spirv, 3));
+    let bound = widen_u64(word_at(in spirv, SpirvHeader::IdBound));
     if bound > Spv::MaxBound {
         return raise(Kind::Shader, BadSpirv::Malformed, 0);
     }
-    let words = len / 4;
+    let words = len / SPIRV_WORD_BYTES;
     let name = entry.as_bytes();
     let mut pointee = id_table(bound, UNSET);
     let mut sizes = id_table(bound, 0);
@@ -1921,14 +1931,14 @@ pub fn spirv_interface(in spirv: Slice[u8], in entry: Str)
     let mut vars: ChunkSeq[u64] = ChunkSeq::new[u64]();
     let mut offsets: ChunkSeq[u64] = ChunkSeq::new[u64]();
     let mut found = false;
-    let mut at: u64 = 5;
+    let mut at = SpirvHeader::Words;
     loop {
         if at >= words {
             break;
         }
         let head = word_at(in spirv, at);
-        let count = widen_u64(head >> 16);
-        let op = head & 65535;
+        let count = widen_u64(head >> SPIRV_WORD_COUNT_SHIFT);
+        let op = head & SPIRV_OPCODE_MASK;
         if count == 0 || count > words - at {
             return raise(Kind::Shader, BadSpirv::Malformed, 0);
         }

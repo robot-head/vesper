@@ -9,6 +9,16 @@ pub copy enum ParseIntError {
     OutOfRange
 }
 
+const MIN_RADIX: u64 = 2;
+const MAX_RADIX: u64 = 36;
+
+const U64_MAX: u64 = 18446744073709551615;
+const I64_MIN_MAGNITUDE: u64 = 9223372036854775808;
+const I64_MAX_MAGNITUDE: u64 = 9223372036854775807;
+
+const FNV1A64_OFFSET: u64 = 14695981039346656037;
+const FNV1A64_PRIME: u64 = 1099511628211;
+
 // The ASCII digit for `d` (0..=35): `0`-`9`, then `a`-`z`.
 fn digit(d: u64) -> u8 {
     if d < 10 {
@@ -79,7 +89,7 @@ fn reverse_tail(inout out: ChunkSeq[u8], from: u64) {
 // Append `x` in `radix` (2..=36; other radixes write nothing), with at
 // least `min_digits` digits (zero-padded).
 pub fn write_u64_radix(inout out: ChunkSeq[u8], x: u64, radix: u64, min_digits: u64) {
-    if radix < 2 || radix > 36 {
+    if radix < MIN_RADIX || radix > MAX_RADIX {
         return;
     }
     let from = out.len();
@@ -142,14 +152,14 @@ pub fn write_bytes(inout out: ChunkSeq[u8], in s: Slice[u8]) {
 // Parse all of `s` as an unsigned integer in `radix` (2..=36). Letters may
 // be either case. There is no sign, prefix or separator.
 pub fn parse_u64_radix(in s: Slice[u8], radix: u64) -> Result[u64, ParseIntError] {
-    if radix < 2 || radix > 36 {
+    if radix < MIN_RADIX || radix > MAX_RADIX {
         return Result::Err(ParseIntError::InvalidDigit);
     }
     let n = s.len();
     if n == 0 {
         return Result::Err(ParseIntError::EmptyInput);
     }
-    let (limit, _) = div_rem(18446744073709551615, radix);
+    let (limit, _) = div_rem(U64_MAX, radix);
     let mut v: u64 = 0;
     let mut i: u64 = 0;
     loop {
@@ -205,9 +215,9 @@ pub fn parse_i64(in s: Slice[u8]) -> Result[i64, ParseIntError] {
     let mut v: u64 = 0;
     let mut i = start;
     let bound: u64 = if negative {
-        9223372036854775808
+        I64_MIN_MAGNITUDE
     } else {
-        9223372036854775807
+        I64_MAX_MAGNITUDE
     };
     loop {
         if i >= n {
@@ -237,7 +247,7 @@ pub fn parse_i64(in s: Slice[u8]) -> Result[i64, ParseIntError] {
 // FNV-1a 64 over `s`: the deterministic byte hash the conformance traces
 // and `Hash` documentation use.
 pub fn fnv1a64(in s: Slice[u8]) -> u64 {
-    let mut h: u64 = 14695981039346656037;
+    let mut h = FNV1A64_OFFSET;
     let n = s.len();
     let mut i: u64 = 0;
     loop {
@@ -248,7 +258,7 @@ pub fn fnv1a64(in s: Slice[u8]) -> u64 {
             Option::Some(x) => x,
             Option::None => 0,
         };
-        h = wrapping_mul(h ^ widen_u64(b), 1099511628211);
+        h = wrapping_mul(h ^ widen_u64(b), FNV1A64_PRIME);
         i = wrapping_add(i, 1);
     }
 }

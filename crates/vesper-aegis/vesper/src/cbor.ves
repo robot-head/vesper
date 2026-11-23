@@ -59,20 +59,30 @@ pub copy struct BytesSpan {
     base: u64
 }
 
-// Major types.
-const M_BYTES: u64 = 2;
-const M_TEXT: u64 = 3;
-const M_ARRAY: u64 = 4;
-const M_MAP: u64 = 5;
-const M_TAG: u64 = 6;
-const M_OTHER: u64 = 7;
-// Additional information: the value follows in 1, 2, 4 or 8 bytes; 28 to
-// 30 are reserved; 31 is an indefinite length (or a break in major 7).
-const AI_ONE: u64 = 24;
-const AI_TWO: u64 = 25;
-const AI_FOUR: u64 = 26;
-const AI_EIGHT: u64 = 27;
-const AI_INDEFINITE: u64 = 31;
+// Initial-byte fields (RFC 8949 §3.1).
+pub enum CborMajor: u64 {
+    UnsignedInteger = 0,
+    NegativeInteger = 1,
+    Bytes = 2,
+    Text = 3,
+    Array = 4,
+    Map = 5,
+    Tag = 6,
+    Other = 7,
+}
+
+// Values 24..27 indicate a following argument of 1, 2, 4 or 8 bytes.
+pub enum CborAdditional: u64 {
+    ImmediateMax = 23,
+    OneByte = 24,
+    TwoBytes = 25,
+    FourBytes = 26,
+    EightBytes = 27,
+    Indefinite = 31,
+}
+
+pub const CBOR_MAJOR_SHIFT: u64 = 5;
+const CBOR_ADDITIONAL_MASK: u64 = 31;
 const SIMPLE_FALSE: u64 = 20;
 const SIMPLE_TRUE: u64 = 21;
 const SIMPLE_NULL: u64 = 22;
@@ -149,36 +159,36 @@ copy struct Head {
 // The header at `p`; reserved additional information fails.
 fn head(in b: Slice[u8], p: u64, field: u64) -> Head eff [Fail[AErr]] {
     let first = byte_at(in b, p, field);
-    let ai = first & 31;
+    let ai = first & CBOR_ADDITIONAL_MASK;
     let at = wrapping_add(p, 1);
     let mut arg = ai;
     let mut end = at;
-    if ai == AI_ONE {
+    if ai == CborAdditional::OneByte {
         arg = byte_at(in b, at, field);
         end = wrapping_add(at, 1);
-    } else if ai == AI_TWO {
+    } else if ai == CborAdditional::TwoBytes {
         arg = match b.try_read_u16_be(at) {
             Option::Some(v) => widen_u64(v),
             Option::None => bad(field),
         };
         end = wrapping_add(at, 2);
-    } else if ai == AI_FOUR {
+    } else if ai == CborAdditional::FourBytes {
         arg = match b.try_read_u32_be(at) {
             Option::Some(v) => widen_u64(v),
             Option::None => bad(field),
         };
         end = wrapping_add(at, 4);
-    } else if ai == AI_EIGHT {
+    } else if ai == CborAdditional::EightBytes {
         arg = match b.try_read_u64_be(at) {
             Option::Some(v) => v,
             Option::None => bad(field),
         };
         end = wrapping_add(at, 8);
-    } else if ai > AI_EIGHT && ai < AI_INDEFINITE {
+    } else if ai > CborAdditional::EightBytes && ai < CborAdditional::Indefinite {
         bad(field);
     }
     Head {
-        major: first >> 5,
+        major: first >> CBOR_MAJOR_SHIFT,
         ai: ai,
         arg: arg,
         end: end
@@ -353,13 +363,13 @@ fn next_slot(in w: Slice[u64]) -> u64 {
 // shifted by `base`.
 fn string(in b: Slice[u8], h: Head, base: u64, field: u64, inout w: Slice[u64])
     -> u64 eff [Fail[AErr]] {
-    let kind = if h.major == M_TEXT {
+    let kind = if h.major == CborMajor::Text {
         K_TEXT
     } else {
         K_BYTES
     };
     put(inout w, kind);
-    if h.ai != AI_INDEFINITE {
+    if h.ai != CborAdditional::Indefinite {
         let end = span(in b, h.end, h.arg, field);
         if kind == K_TEXT && !utf8(in b, h.end, end) {
             bad(field);
@@ -376,7 +386,7 @@ fn string(in b: Slice[u8], h: Head, base: u64, field: u64, inout w: Slice[u64])
     let mut p = h.end;
     loop {
         let c = head(in b, p, field);
-        if c.major == M_OTHER && c.ai == AI_INDEFINITE {
+        if c.major == CborMajor::Other && c.ai == CborAdditional::Indefinite {
             p = c.end;
             if nested == 1 {
                 break;
@@ -384,7 +394,7 @@ fn string(in b: Slice[u8], h: Head, base: u64, field: u64, inout w: Slice[u64])
             nested = wrapping_sub(nested, 1);
         } else if c.major != h.major {
             bad(field);
-        } else if c.ai == AI_INDEFINITE {
+        } else if c.ai == CborAdditional::Indefinite {
             nested = wrapping_add(nested, 1);
             p = c.end;
         } else {
@@ -474,7 +484,7 @@ pub fn decode_at(in b: Slice[u8], base: u64, field: u64, inout w: Slice[u64], in
         }
         started = true;
         let h = head(in b, p, field);
-        if h.major == M_OTHER && h.ai == AI_INDEFINITE {
+        if h.major == CborMajor::Other && h.ai == CborAdditional::Indefinite {
             // A break ends an indefinite array, or a map between entries.
             if depth == 0 || st_get(in st, depth, S_LEFT) != INDEFINITE {
                 bad(field);
@@ -494,24 +504,26 @@ pub fn decode_at(in b: Slice[u8], base: u64, field: u64, inout w: Slice[u64], in
                 st_set(inout st, depth, S_LEFT, wrapping_sub(left, 1));
             }
         }
-        if h.major <= 1 {
-            if h.ai == AI_INDEFINITE {
+        if h.major <= CborMajor::NegativeInteger {
+            if h.ai == CborAdditional::Indefinite {
                 bad(field);
             }
             put(inout w, h.major);
             put(inout w, h.arg);
             p = h.end;
-        } else if h.major == M_BYTES || h.major == M_TEXT {
+        } else if h.major == CborMajor::Bytes || h.major == CborMajor::Text {
             p = string(in b, h, base, field, inout w);
-        } else if h.major == M_ARRAY || h.major == M_MAP || h.major == M_TAG {
-            if h.major == M_TAG {
-                if h.ai == AI_INDEFINITE {
+        } else if h.major == CborMajor::Array
+            || h.major == CborMajor::Map
+            || h.major == CborMajor::Tag {
+            if h.major == CborMajor::Tag {
+                if h.ai == CborAdditional::Indefinite {
                     bad(field);
                 }
                 if h.arg == TAG_BIGPOS || h.arg == TAG_BIGNEG {
                     let inner = head(in b, h.end, field);
-                    if inner.major == M_BYTES
-                        && inner.ai != AI_INDEFINITE
+                    if inner.major == CborMajor::Bytes
+                        && inner.ai != CborAdditional::Indefinite
                         && inner.arg <= BIGNUM_MAX_BYTES {
                         p = bignum(in b, h.arg, inner, field, inout w);
                         continue;
@@ -521,9 +533,9 @@ pub fn decode_at(in b: Slice[u8], base: u64, field: u64, inout w: Slice[u64], in
             if depth == MAX_DEPTH {
                 bad(field);
             }
-            let kind = if h.major == M_ARRAY {
+            let kind = if h.major == CborMajor::Array {
                 K_ARRAY
-            } else if h.major == M_MAP {
+            } else if h.major == CborMajor::Map {
                 K_MAP
             } else {
                 K_TAG
@@ -535,7 +547,7 @@ pub fn decode_at(in b: Slice[u8], base: u64, field: u64, inout w: Slice[u64], in
                 1
             } else {
                 put(inout w, 0);
-                if h.ai == AI_INDEFINITE {
+                if h.ai == CborAdditional::Indefinite {
                     INDEFINITE
                 } else {
                     // Every item takes at least a byte, so a count past
@@ -558,13 +570,13 @@ pub fn decode_at(in b: Slice[u8], base: u64, field: u64, inout w: Slice[u64], in
             p = h.end;
         } else {
             // Major 7: simple values and floats.
-            if h.ai == AI_TWO {
+            if h.ai == CborAdditional::TwoBytes {
                 put(inout w, K_FLOAT);
                 put(inout w, widen_f16(h.arg));
-            } else if h.ai == AI_FOUR {
+            } else if h.ai == CborAdditional::FourBytes {
                 put(inout w, K_FLOAT);
                 put(inout w, widen_f32(h.arg));
-            } else if h.ai == AI_EIGHT {
+            } else if h.ai == CborAdditional::EightBytes {
                 put(inout w, K_FLOAT);
                 put(inout w, h.arg);
             } else if h.arg == SIMPLE_FALSE || h.arg == SIMPLE_TRUE {

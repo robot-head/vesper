@@ -42,10 +42,17 @@ use @vesper/check-data::world::{
 const NONE32: u32 = 4294967295;
 
 // `ExprKind` tags (the encoder's `expr_kind`).
-pub const E_LITERAL: u8 = 0;
-pub const E_NAME: u8 = 1;
-pub const E_CALL: u8 = 5;
-pub const E_FIELD: u8 = 6;
+pub enum ExprKind: _ {
+    Literal = 0,
+    Name = 1,
+    Call = 5,
+    Field = 6,
+}
+
+pub const E_LITERAL: u8 = ExprKind::Literal;
+pub const E_NAME: u8 = ExprKind::Name;
+pub const E_CALL: u8 = ExprKind::Call;
+pub const E_FIELD: u8 = ExprKind::Field;
 
 pub copy struct FnInfo {
     name: u32,
@@ -177,7 +184,7 @@ impl Calls {
         match self.exprs.try_get(i) {
             Option::Some(e) => e,
             Option::None => ExprNode {
-                kind: E_LITERAL,
+                kind: ExprKind::Literal,
                 s0: 0,
                 s1: 0,
                 sym: 0,

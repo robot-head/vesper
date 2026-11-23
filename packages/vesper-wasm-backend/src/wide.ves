@@ -7,6 +7,9 @@
 // `/`, `%`, `<<`, `>>`, `|` and the orderings. Anything else on a `u128` (and every
 // `i128`) is refused (sites 248 and 249).
 
+use @vesper/check-data::types::{
+    TyKind
+};
 use @vesper/check-data::util::{
     u32_at
 };
@@ -70,7 +73,6 @@ const SC_U16: u8 = 8;
 const SC_I32: u8 = 9;
 const SC_I16: u8 = 10;
 const SC_I8: u8 = 11;
-const K_NAMED: u8 = 1;
 
 fn sc_signed(s: u8) -> bool {
     s == SC_I64 || s == SC_I32 || s == SC_I16 || s == SC_I8
@@ -115,14 +117,14 @@ impl L {
     pub fn is_u128(inout self, t: u32) -> bool {
         let ty = self.cx.default_ty(t);
         let node = self.cx.types.node(ty);
-        node.kind == K_NAMED && (node.name == self.cx.s.u128_ || node.name == self.cx.s.i128_)
+        node.kind == TyKind::Named && (node.name == self.cx.s.u128_ || node.name == self.cx.s.i128_)
     }
 
     // Is `t` an `i128`?
     pub fn is_i128(inout self, t: u32) -> bool {
         let ty = self.cx.default_ty(t);
         let node = self.cx.types.node(ty);
-        node.kind == K_NAMED && node.name == self.cx.s.i128_
+        node.kind == TyKind::Named && node.name == self.cx.s.i128_
     }
 
     // A fresh block holding locals `lo`, `hi`.

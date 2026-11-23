@@ -8,6 +8,11 @@
 // few maps the Rust code iterates in key order are sorted by the names'
 // bytes (`cmp_syms`), as `String`'s `Ord` is.
 
+use @vesper/place-ir::codes::{
+    Op,
+    Pat,
+    Term
+};
 use @vesper/check-data::util::{
     add,
     inc,
@@ -20,6 +25,8 @@ use @vesper/check-data::names::{
     Names
 };
 use @vesper/check-data::types::{
+    TyKind,
+    TyPass,
     Types,
     Vars,
     default_type,
@@ -43,6 +50,7 @@ use self::err::{
 };
 use self::ir::{
     EffInst,
+    ExprFactKind,
     Facts,
     FnInfo,
     Ir,
@@ -66,44 +74,6 @@ const U_FIRST_CLASS_CONTINUATION: u8 = 9;
 const U_EXTERNAL_FUNCTION: u8 = 11;
 const U_INTEGER_WIDTH: u8 = 14;
 const U_FLOAT32: u8 = 15;
-
-// check-data's type kinds.
-const K_LIT: u8 = 0;
-const K_NAMED: u8 = 1;
-const K_TUPLE: u8 = 2;
-const K_FN: u8 = 3;
-const K_ROW: u8 = 4;
-const K_INFER: u8 = 5;
-
-// IR opcodes (ir_words.rs `OP_NAMES`).
-const OP_CONST: u8 = 0;
-const OP_UNIT: u8 = 1;
-const OP_READ: u8 = 2;
-const OP_BIND: u8 = 3;
-const OP_WRITE: u8 = 4;
-const OP_UNARY: u8 = 5;
-const OP_BINARY: u8 = 6;
-const OP_TUPLE: u8 = 7;
-const OP_DATA: u8 = 8;
-const OP_PROJECT: u8 = 9;
-const OP_INDEX: u8 = 10;
-const OP_CALL: u8 = 11;
-const OP_INDIRECT: u8 = 12;
-const OP_TRY: u8 = 13;
-const OP_CLOSURE: u8 = 14;
-const OP_HANDLE: u8 = 15;
-const OP_VECTOR: u8 = 16;
-const OP_TILED: u8 = 17;
-const OP_SEQ: u8 = 18;
-const OP_FIP: u8 = 19;
-const OP_EXIT: u8 = 21;
-const TERM_RETURN: u8 = 0;
-const TERM_JUMP: u8 = 1;
-const TERM_BRANCH: u8 = 2;
-const TERM_MATCH: u8 = 3;
-const PAT_WILD: u64 = 0;
-const PAT_BIND: u64 = 1;
-const P_INOUT: u8 = 1;
 
 // Shapes (`layout::Shape`) and scalars (`layout::Scalar`).
 pub const SH_SCALAR: u8 = 0;
@@ -355,7 +325,7 @@ impl Cx {
     pub fn shape(inout self, t: u32) -> Shape eff [Fail[WErr]] {
         let ty = default_type(inout self.types, t);
         let node = self.types.node(ty);
-        if node.kind == K_NAMED {
+        if node.kind == TyKind::Named {
             let n = node.name;
             let s = self.s;
             if n == s.i64_ {
@@ -422,16 +392,16 @@ impl Cx {
             }
             return shape_of(SH_STRUCT, 0, a, ty);
         }
-        if node.kind == K_TUPLE {
+        if node.kind == TyKind::Tuple {
             if node.n == 0 {
                 return shape_of(SH_SCALAR, SC_UNIT, NO_ADT, ty);
             }
             return shape_of(SH_TUPLE, 0, NO_ADT, ty);
         }
-        if node.kind == K_FN {
+        if node.kind == TyKind::Fn {
             return shape_of(SH_FUNCTION, 0, NO_ADT, ty);
         }
-        if node.kind == K_LIT {
+        if node.kind == TyKind::Lit {
             return shape_of(SH_SCALAR, SC_I64, NO_ADT, ty);
         }
         shape_of(SH_OPAQUE, 0, NO_ADT, ty)
@@ -630,7 +600,7 @@ impl Cx {
     // `mentions_generic` of analysis.rs.
     pub fn mentions_generic(in self, t: u32) -> bool {
         let n = self.types.node(t);
-        if n.kind == K_NAMED {
+        if n.kind == TyKind::Named {
             if n.n == 0
                 && self.world.lookup(n.name) == NO_ADT
                 && !self.is_scalar_name(n.name)
@@ -644,7 +614,7 @@ impl Cx {
             }
             return false;
         }
-        if n.kind == K_TUPLE {
+        if n.kind == TyKind::Tuple {
             for i in 0..w(n.n) {
                 if self.mentions_generic(self.types.arg(t, i)) {
                     return true;
@@ -652,7 +622,7 @@ impl Cx {
             }
             return false;
         }
-        n.kind != K_LIT
+        n.kind != TyKind::Lit
     }
 }
 
@@ -1169,7 +1139,7 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
             let blk = cx.ir.p.block(add(row.b0, bi));
             for ii in 0..blk.ic {
                 let ins = cx.ir.p.inst(add(blk.i0, ii));
-                if ins.op == OP_CALL {
+                if ins.op == Op::Call {
                     let callee = n32(cx.ir.word(ins.a));
                     if cx.ir.find(callee) == 0 {
                         continue;
@@ -1217,10 +1187,10 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
                                 ln: ls.len()
                             }
                         );
-                } else if ins.op == OP_CLOSURE {
+                } else if ins.op == Op::Closure {
                     let (pool, aa, an) = closure_operands(in cx, ins.a);
                     let fact = cx.f.expr(pool);
-                    if fact.kind != 1 {
+                    if fact.kind != ExprFactKind::Closure {
                         Fail::raise(werr(K_INVALID, 0, 42));
                     }
                     let caps = captures(in cx, fact.f0, fact.fc, aa, an, info);
@@ -1253,7 +1223,7 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
                                 ln: q.ln
                             }
                         );
-                } else if ins.op == OP_READ {
+                } else if ins.op == Op::Read {
                     let root = n32(cx.ir.word(ins.a));
                     let path = cx.ir.word(inc(ins.a));
                     if path == 0 && !cx.ir.has_local(info, root) && cx.ir.find(root) != 0 {
@@ -1278,7 +1248,7 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
                                 }
                             );
                     }
-                } else if ins.op == OP_HANDLE {
+                } else if ins.op == Op::Handle {
                     let id = p.handlers.len();
                     let h = handler(
                         inout cx,
@@ -1523,10 +1493,10 @@ fn captures_h(in cx: Cx, at: u64, n: u64, aa: u64, an: u64, outer: FnInfo) -> Ch
 // function type.
 fn open_type(in cx: Cx, t: u32) -> bool {
     let n = cx.types.node(t);
-    if n.kind == K_INFER || n.kind == K_ROW || n.kind == K_FN {
+    if n.kind == TyKind::Infer || n.kind == TyKind::Row || n.kind == TyKind::Fn {
         return true;
     }
-    if n.kind == K_NAMED || n.kind == K_TUPLE {
+    if n.kind == TyKind::Named || n.kind == TyKind::Tuple {
         for i in 0..w(n.n) {
             if open_type(in cx, cx.types.arg(t, i)) {
                 return true;
@@ -1601,7 +1571,7 @@ fn handler(inout cx: Cx, inout p: Plan, site: u32, outer: FnInfo, in vars: TVars
     let an = cx.ir.word(add(a, 3));
     let aa = add(a, 4);
     let fact = cx.f.expr(pool);
-    if fact.kind != 2 {
+    if fact.kind != ExprFactKind::Handler {
         Fail::raise(werr(K_INVALID, 0, 45));
     }
     let ov = vars.vars();
@@ -1717,7 +1687,7 @@ fn handler(inout cx: Cx, inout p: Plan, site: u32, outer: FnInfo, in vars: TVars
         let mut resume = NONE32;
         if k_index < npats {
             let at = u64_at(in pat_at, k_index);
-            if hop(in cx, at) == PAT_BIND {
+            if hop(in cx, at) == Pat::Bind {
                 resume = n32(hop(in cx, add(at, 3)));
             }
         }
@@ -1728,12 +1698,12 @@ fn handler(inout cx: Cx, inout p: Plan, site: u32, outer: FnInfo, in vars: TVars
         // operation returns: only a clause that resumes in tail position
         // makes all its writes before that.
         for i in 0..n {
-            if cx.f.param(add(sig.p0, i)).pass != P_INOUT {
+            if cx.f.param(add(sig.p0, i)).pass != TyPass::Inout {
                 continue;
             }
             let bound = if i < npats {
                 let kind = hop(in cx, u64_at(in pat_at, i));
-                kind == PAT_BIND || kind == PAT_WILD
+                kind == Pat::Bind || kind == Pat::Wild
             } else {
                 false
             };
@@ -1818,20 +1788,20 @@ fn handler(inout cx: Cx, inout p: Plan, site: u32, outer: FnInfo, in vars: TVars
 // The values instruction `ins` reads (`analysis::operands`).
 pub fn inst_operands(in cx: Cx, op: u8, a: u64) -> ChunkSeq[u64] {
     let mut out = ChunkSeq::new[u64]();
-    if op == OP_BIND || op == OP_EXIT || op == OP_PROJECT || op == OP_TRY {
+    if op == Op::Bind || op == Op::Exit || op == Op::Project || op == Op::Try {
         out.push(cx.ir.word(a));
-    } else if op == OP_WRITE {
+    } else if op == Op::Write {
         out.push(cx.ir.word(add(a, 2)));
-    } else if op == OP_UNARY {
+    } else if op == Op::Unary {
         out.push(cx.ir.word(inc(a)));
-    } else if op == OP_BINARY {
+    } else if op == Op::Binary {
         out.push(cx.ir.word(inc(a)));
         out.push(cx.ir.word(add(a, 2)));
-    } else if op == OP_INDEX {
+    } else if op == Op::Index {
         out.push(cx.ir.word(a));
         out.push(cx.ir.word(inc(a)));
-    } else if op == OP_TUPLE || op == OP_VECTOR {
-        let at = if op == OP_VECTOR {
+    } else if op == Op::Tuple || op == Op::Vector {
+        let at = if op == Op::Vector {
             inc(a)
         } else {
             a
@@ -1840,13 +1810,17 @@ pub fn inst_operands(in cx: Cx, op: u8, a: u64) -> ChunkSeq[u64] {
         for k in 0..n {
             out.push(cx.ir.word(add(inc(at), k)));
         }
-    } else if op == OP_DATA {
+    } else if op == Op::Data {
         let n = cx.ir.word(inc(a));
         for k in 0..n {
             out.push(cx.ir.word(add(add(a, 3), wrapping_mul(2, k))));
         }
-    } else if op == OP_CALL || op == OP_TILED || op == OP_SEQ || op == OP_FIP || op == OP_INDIRECT {
-        if op == OP_INDIRECT {
+    } else if op == Op::Call
+        || op == Op::Tiled
+        || op == Op::Seq
+        || op == Op::Fip
+        || op == Op::Indirect {
+        if op == Op::Indirect {
             out.push(cx.ir.word(a));
         }
         // callee/pool, then args: n, n x (pass, value, root, path)
@@ -1854,7 +1828,7 @@ pub fn inst_operands(in cx: Cx, op: u8, a: u64) -> ChunkSeq[u64] {
         for k in 0..n {
             out.push(cx.ir.word(add(add(a, 3), wrapping_mul(4, k))));
         }
-    } else if op == OP_HANDLE {
+    } else if op == Op::Handle {
         if cx.ir.word(a) != 0 {
             out.push(cx.ir.word(inc(a)));
         }
@@ -1879,10 +1853,10 @@ pub fn flows_to_return(in cx: Cx, fi: u64, b: u64, value: u64, depth: u64) -> bo
     }
     let row = cx.ir.p.function(fi);
     let blk = cx.ir.p.block(add(row.b0, b));
-    if blk.term == TERM_RETURN {
+    if blk.term == Term::Return {
         return cx.ir.word(blk.ta) == value;
     }
-    if blk.term != TERM_JUMP {
+    if blk.term != Term::Jump {
         return false;
     }
     let t = cx.ir.word(blk.ta);
@@ -1914,10 +1888,10 @@ pub fn flows_to_return(in cx: Cx, fi: u64, b: u64, value: u64, depth: u64) -> bo
 // The blocks a terminator can branch to other than by a jump (a branch's
 // or a match's targets) include `b`.
 fn branches_to(in cx: Cx, blk_term: u8, ta: u64, b: u64) -> bool {
-    if blk_term == TERM_BRANCH {
+    if blk_term == Term::Branch {
         return cx.ir.word(inc(ta)) == b || cx.ir.word(add(ta, 2)) == b;
     }
-    if blk_term == TERM_MATCH {
+    if blk_term == Term::Match {
         let n = cx.ir.word(inc(ta));
         let mut at = add(ta, 2);
         for k in 0..n {
@@ -1956,7 +1930,7 @@ fn resumed_value(in cx: Cx, fi: u64, b: u64, value: u64, in tail: ChunkSeq[u64],
     let mut any = false;
     for pi in 0..row.bc {
         let pred = cx.ir.p.block(add(row.b0, pi));
-        if pred.term == TERM_JUMP && cx.ir.word(pred.ta) == b {
+        if pred.term == Term::Jump && cx.ir.word(pred.ta) == b {
             any = true;
             let arg = cx.ir.word(add(add(pred.ta, 2), pos));
             if !resumed_value(in cx, fi, pi, arg, in tail, inc(depth)) {
@@ -1982,7 +1956,7 @@ fn clause_mode(in cx: Cx, fi: u64, resume: u32) -> u8 eff [Fail[WErr]] {
         let blk = cx.ir.p.block(add(row.b0, bi));
         for ii in 0..blk.ic {
             let ins = cx.ir.p.inst(add(blk.i0, ii));
-            if ins.op == OP_READ && n32(cx.ir.word(ins.a)) == resume {
+            if ins.op == Op::Read && n32(cx.ir.word(ins.a)) == resume {
                 if cx.ir.word(inc(ins.a)) != 0 {
                     Fail::raise(werr(K_UNSUPPORTED, U_FIRST_CLASS_CONTINUATION, 56));
                 }
@@ -1997,7 +1971,7 @@ fn clause_mode(in cx: Cx, fi: u64, resume: u32) -> u8 eff [Fail[WErr]] {
         for ii in 0..blk.ic {
             let ins = cx.ir.p.inst(add(blk.i0, ii));
             let a = ins.a;
-            if ins.op == OP_INDIRECT && contains64(in reads, cx.ir.word(a)) {
+            if ins.op == Op::Indirect && contains64(in reads, cx.ir.word(a)) {
                 let n = cx.ir.word(inc(a));
                 for k in 0..n {
                     if contains64(in reads, cx.ir.word(add(add(a, 3), wrapping_mul(4, k)))) {
@@ -2005,10 +1979,10 @@ fn clause_mode(in cx: Cx, fi: u64, resume: u32) -> u8 eff [Fail[WErr]] {
                     }
                 }
                 calls.push(widen_u64(ins.dest));
-            } else if ins.op == OP_CLOSURE || ins.op == OP_HANDLE {
+            } else if ins.op == Op::Closure || ins.op == Op::Handle {
                 // A closure or nested handler that names the continuation
                 // captures it as a value.
-                let (pool, pa, pn) = if ins.op == OP_CLOSURE {
+                let (pool, pa, pn) = if ins.op == Op::Closure {
                     (cx.ir.word(a), add(a, 2), cx.ir.word(inc(a)))
                 } else {
                     (cx.ir.word(add(a, 2)), add(a, 4), cx.ir.word(add(a, 3)))
@@ -2068,7 +2042,7 @@ fn clause_mode(in cx: Cx, fi: u64, resume: u32) -> u8 eff [Fail[WErr]] {
                 }
             }
         }
-        if blk.term == TERM_RETURN {
+        if blk.term == Term::Return {
             if !resumed_value(in cx, fi, bi, cx.ir.word(blk.ta), in tail, 0) {
                 returns_resumed = false;
             }
@@ -2084,9 +2058,9 @@ fn clause_mode(in cx: Cx, fi: u64, resume: u32) -> u8 eff [Fail[WErr]] {
 // `terminator_operands`.
 fn term_operands(in cx: Cx, term: u8, ta: u64) -> ChunkSeq[u64] {
     let mut out = ChunkSeq::new[u64]();
-    if term == TERM_RETURN || term == TERM_BRANCH || term == TERM_MATCH {
+    if term == Term::Return || term == Term::Branch || term == Term::Match {
         out.push(cx.ir.word(ta));
-    } else if term == TERM_JUMP {
+    } else if term == Term::Jump {
         let n = cx.ir.word(inc(ta));
         for k in 0..n {
             out.push(cx.ir.word(add(add(ta, 2), k)));
