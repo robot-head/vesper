@@ -35,6 +35,9 @@ use @vesper-std/fs::{
     IoError,
     not_found
 };
+use self::forge::{
+    run_forge
+};
 use self::ebpf::{
     run_ebpf
 };
@@ -127,6 +130,9 @@ pub fn run(in args: Args)
             return version();
         }
         return unknown_command(in c);
+    }
+    if eq(in c, in "forge") {
+        return run_forge(in args);
     }
     if eq(in c, in "ebpf") {
         return run_ebpf(in args);
