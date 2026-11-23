@@ -1,0 +1,1806 @@
+// Byte sequence operations and SIMD/SWAR byte scans emission.
+
+use @vesper/cranelift::{
+    Block,
+    Ty,
+    Value,
+    append_block_param,
+    arch_aarch64,
+    arch_x86_64,
+    block_param,
+    call_arg,
+    call_memmove,
+    call_memset,
+    call_result_value,
+    cc_eq,
+    cc_ne,
+    cc_slt,
+    cc_uge,
+    cc_ugt,
+    cc_ule,
+    cc_ult,
+    create_block,
+    has_x86_pshufb_lowering,
+    ins_band,
+    ins_band_imm,
+    ins_band_not,
+    ins_bitcast,
+    ins_convert,
+    ins_bnot,
+    ins_bor,
+    ins_brif,
+    ins_brif0,
+    ins_bswap,
+    ins_bxor_imm,
+    ins_ctz,
+    ins_iadd,
+    ins_iadd_imm,
+    ins_icmp,
+    ins_icmp_imm,
+    ins_iconst,
+    ins_imul_imm,
+    ins_ineg,
+    ins_insertlane,
+    ins_ireduce,
+    ins_ishl,
+    ins_ishl_imm,
+    ins_istore8,
+    ins_isub,
+    ins_jump,
+    ins_jump0,
+    ins_load,
+    ins_select,
+    ins_splat,
+    ins_store,
+    ins_swizzle,
+    ins_uextend,
+    ins_uload8,
+    ins_umin,
+    ins_ushr,
+    ins_ushr_imm,
+    ins_vconst,
+    ins_vhigh_bits,
+    isa_triple_arch,
+    mem_little_endian,
+    switch_to_block,
+    ty_i16,
+    ty_i32,
+    ty_i64,
+    ty_i8,
+    ty_vector,
+    vals1,
+    vals2,
+    value_of_word,
+    value_type
+};
+use self::common::{
+    ElemDesc,
+    LEN,
+    PLAIN,
+    alloc,
+    coerce,
+    elem_from_call,
+    elem_is_agg,
+    elem_is_f32,
+    elem_is_f64,
+    seq_copy,
+    seq_elem_addr,
+    seq_has_libc,
+    seq_move,
+    seq_option_answer,
+    seq_option_begin,
+    seq_option_finish,
+    seq_set_len_if,
+    seq_store_elem,
+    seq_view_cached,
+    at_val,
+    zero
+};
+
+pub const BYTE_COPY_FROM: u64 = 1;
+pub const BYTE_COPY_WITHIN: u64 = 2;
+pub const BYTE_FILL: u64 = 3;
+pub const BYTE_FILL_RANGE: u64 = 4;
+pub const BYTE_WIDE: u64 = 5;
+pub const BYTE_SUM_BE16: u64 = 6;
+pub const BYTE_BYTES_EQ: u64 = 7;
+pub const BYTE_BYTES_CMP: u64 = 8;
+pub const BYTE_FIND_BYTE: u64 = 9;
+pub const BYTE_FIND_EITHER: u64 = 10;
+pub const BYTE_FIND_NOT_IN: u64 = 11;
+pub const BYTE_EXTEND_LOWER: u64 = 12;
+pub const BYTE_MAKE_LOWER: u64 = 13;
+pub const BYTE_CHECK_COPY_FROM: u64 = 14;
+pub const BYTE_CHECK_COPY_WITHIN: u64 = 15;
+pub const BYTE_CHECK_FILL_RANGE: u64 = 16;
+pub const BYTE_CHECK_WIDE: u64 = 17;
+pub const BYTE_CHECK_MAKE_LOWER: u64 = 18;
+
+const LANES: i64 = 16;
+const SUM_BLOCK_STEPS: i64 = 256;
+const PAGE: i64 = 4096;
+
+fn little() -> u32 {
+    mem_little_endian()
+}
+fn ty_i8x16() -> Ty {
+    ty_vector(ty_i8(), 4)
+}
+fn ty_i16x8() -> Ty {
+    ty_vector(ty_i16(), 3)
+}
+fn ty_i32x4() -> Ty {
+    ty_vector(ty_i32(), 2)
+}
+fn ty_i64x2() -> Ty {
+    ty_vector(ty_i64(), 1)
+}
+
+fn empty_args() -> ChunkSeq[u32] {
+    ChunkSeq::new[u32]()
+}
+
+fn bitcast_le(inout b: Builder, ty: Ty, x: Value) -> Value eff [Ffi[Cranelift]] {
+    ins_convert(inout b, 15, ty, x)
+}
+
+fn byte_scans_vectorized(in m: Module, optimize: bool) -> bool eff [Ffi[Cranelift]] {
+    if !optimize {
+        return false;
+    }
+    let arch = isa_triple_arch(in m);
+    arch == arch_x86_64() || arch == arch_aarch64()
+}
+
+fn short_scans(in m: Module, optimize: bool) -> bool eff [Ffi[Cranelift]] {
+    byte_scans_vectorized(in m, optimize) && seq_has_libc(in m)
+}
+
+fn seq_fits(inout b: Builder, len: Value, at: Value, n: Value) -> Value eff [Ffi[Cranelift]] {
+    let below = ins_icmp(inout b, cc_ule(), at, len);
+    let room = ins_isub(inout b, len, at);
+    let fits = ins_icmp(inout b, cc_ule(), n, room);
+    ins_band(inout b, below, fits)
+}
+
+fn seq_when_begin(inout b: Builder, valid: Value) -> (Block, Block) eff [Ffi[Cranelift]] {
+    let yes = create_block(inout b);
+    let done = create_block(inout b);
+    ins_brif0(inout b, valid, yes, done);
+    switch_to_block(inout b, yes);
+    (yes, done)
+}
+
+fn seq_when_end(inout b: Builder, done: Block, valid: Value) -> Value eff [Ffi[Cranelift]] {
+    ins_jump0(inout b, done);
+    switch_to_block(inout b, done);
+    ins_uextend(inout b, ty_i64(), valid)
+}
+
+pub fn seq_fill_elems(
+    inout b: Builder,
+    in m: Module,
+    h: Value,
+    from: Value,
+    n: Value,
+    value: Value,
+    elem: ElemDesc,
+    optimize: bool,
+    cdata: u64,
+    h_invariant: bool,
+) eff [Ffi[Cranelift]] {
+    let scalar = !elem_is_agg(elem);
+    if elem.stride == 1 && scalar && seq_has_libc(in m) {
+        let z = zero(inout b);
+        let dst = seq_elem_addr(inout b, h, from, z, 1, h_invariant, cdata);
+        let bv = coerce(inout b, value, elem, optimize);
+        let byte = ins_ireduce(inout b, ty_i8(), bv);
+        call_memset(inout b, in m, dst, byte, n);
+        return;
+    }
+    let done = create_block(inout b);
+    if scalar && seq_has_libc(in m) && optimize {
+        let bits = if elem_is_f32(elem) {
+            ins_bitcast(inout b, ty_i32(), value)
+        } else if elem_is_f64(elem) {
+            ins_bitcast(inout b, ty_i64(), value)
+        } else {
+            value
+        };
+        let is_z = ins_icmp_imm(inout b, cc_eq(), bits, 0);
+        let clear = create_block(inout b);
+        let store = create_block(inout b);
+        ins_brif0(inout b, is_z, clear, store);
+        switch_to_block(inout b, clear);
+        let start = zero(inout b);
+        let dst = seq_elem_addr(inout b, h, from, start, elem.stride, h_invariant, cdata);
+        let bytes = ins_imul_imm(inout b, n, elem.stride);
+        let byte = ins_iconst(inout b, ty_i8(), 0);
+        call_memset(inout b, in m, dst, byte, bytes);
+        ins_jump0(inout b, done);
+        switch_to_block(inout b, store);
+    }
+    let head = create_block(inout b);
+    let body = create_block(inout b);
+    append_block_param(inout b, head, ty_i64());
+    let z = zero(inout b);
+    let zargs = vals1(z);
+    ins_jump(inout b, head, in zargs.as_slice());
+    switch_to_block(inout b, head);
+    let k = block_param(inout b, head, 0);
+    let more = ins_icmp(inout b, cc_ult(), k, n);
+    ins_brif0(inout b, more, body, done);
+    switch_to_block(inout b, body);
+    let addr = seq_elem_addr(inout b, h, from, k, elem.stride, h_invariant, cdata);
+    seq_store_elem(inout b, addr, value, elem, optimize);
+    let next = ins_iadd_imm(inout b, k, 1);
+    let nargs = vals1(next);
+    ins_jump(inout b, head, in nargs.as_slice());
+    switch_to_block(inout b, done);
+}
+
+fn seq_move_overlapping(inout b: Builder, in m: Module, dst: Value, src: Value, bytes: Value) eff [
+    Ffi[Cranelift]
+] {
+    if seq_has_libc(in m) {
+        call_memmove(inout b, in m, dst, src, bytes);
+        return;
+    }
+    let forward = create_block(inout b);
+    let backward = create_block(inout b);
+    let done = create_block(inout b);
+    let above = ins_icmp(inout b, cc_ugt(), dst, src);
+    ins_brif0(inout b, above, backward, forward);
+    switch_to_block(inout b, forward);
+    seq_copy(inout b, dst, src, bytes);
+    ins_jump0(inout b, done);
+    switch_to_block(inout b, backward);
+    let head = create_block(inout b);
+    let body = create_block(inout b);
+    append_block_param(inout b, head, ty_i64());
+    let bargs = vals1(bytes);
+    ins_jump(inout b, head, in bargs.as_slice());
+    switch_to_block(inout b, head);
+    let k = block_param(inout b, head, 0);
+    let z = zero(inout b);
+    let more = ins_icmp(inout b, cc_ugt(), k, z);
+    ins_brif0(inout b, more, body, done);
+    switch_to_block(inout b, body);
+    let k = ins_iadd_imm(inout b, k, -1);
+    let from = ins_iadd(inout b, src, k);
+    let byte = ins_uload8(inout b, ty_i64(), PLAIN, from, 0);
+    let to = ins_iadd(inout b, dst, k);
+    ins_istore8(inout b, PLAIN, byte, to, 0);
+    let kargs = vals1(k);
+    ins_jump(inout b, head, in kargs.as_slice());
+    switch_to_block(inout b, done);
+}
+
+fn vector_head_exit(
+    inout b: Builder,
+    more: Value,
+    k: Value,
+    len: Value,
+    body: Block,
+    scalar: Block,
+) eff [Ffi[Cranelift]] {
+    let tail = create_block(inout b);
+    let kargs = vals1(k);
+    let eargs = empty_args();
+    ins_brif(inout b, more, body, in kargs.as_slice(), tail, in eargs.as_slice());
+    switch_to_block(inout b, tail);
+    let whole = ins_icmp_imm(inout b, cc_uge(), len, LANES);
+    let left = ins_icmp(inout b, cc_ult(), k, len);
+    let last = ins_band(inout b, whole, left);
+    let from = ins_iadd_imm(inout b, len, -LANES);
+    let fargs = vals1(from);
+    let sargs = vals1(k);
+    ins_brif(inout b, last, body, in fargs.as_slice(), scalar, in sargs.as_slice());
+}
+
+fn vector_end(inout b: Builder, len: Value) -> Value eff [Ffi[Cranelift]] {
+    ins_band_imm(inout b, len, -LANES)
+}
+
+fn short_load_safe1(inout b: Builder, p: Value, len: Value) -> Value eff [Ffi[Cranelift]] {
+    let safe = ins_icmp_imm(inout b, cc_ne(), len, 0);
+    let offset = ins_band_imm(inout b, p, PAGE - 1);
+    let inside = ins_icmp_imm(inout b, cc_ule(), offset, PAGE - LANES);
+    ins_band(inout b, safe, inside)
+}
+
+fn short_load_safe2(inout b: Builder, p: Value, q: Value, len: Value)
+    -> Value eff [Ffi[Cranelift]] {
+    let s1 = short_load_safe1(inout b, p, len);
+    let offset = ins_band_imm(inout b, q, PAGE - 1);
+    let inside = ins_icmp_imm(inout b, cc_ule(), offset, PAGE - LANES);
+    ins_band(inout b, s1, inside)
+}
+
+fn short_mask(inout b: Builder, len: Value) -> Value eff [Ffi[Cranelift]] {
+    let l32 = ins_ireduce(inout b, ty_i32(), len);
+    let one = ins_iconst(inout b, ty_i32(), 1);
+    let bit = ins_ishl(inout b, one, l32);
+    ins_iadd_imm(inout b, bit, -1)
+}
+
+fn loop_invariants(inout b: Builder, head: Block, in values: Slice[Value])
+    -> ChunkSeq[Value] eff [Ffi[Cranelift]] {
+    let mut out = ChunkSeq::with_capacity[Value](values.len());
+    let mut i: u64 = 0;
+    loop {
+        if i >= values.len() {
+            break;
+        }
+        let t = value_type(inout b, at_val(in values, i));
+        out.push(append_block_param(inout b, head, t));
+        i = wrapping_add(i, 1);
+    }
+    out
+}
+
+fn push_carried(inout b: Builder, inout args: ChunkSeq[u32], in params: Slice[Value]) eff [
+    Ffi[Cranelift]
+] {
+    let mut i: u64 = 0;
+    loop {
+        if i >= params.len() {
+            break;
+        }
+        let v = ins_bor(inout b, at_val(in params, i), at_val(in params, i));
+        args.push(v.id);
+        i = wrapping_add(i, 1);
+    }
+}
+
+fn lower_constants(inout b: Builder) -> (Value, Value, Value) eff [Ffi[Cranelift]] {
+    let ca = ins_iconst(inout b, ty_i8(), 65);
+    let a = ins_splat(inout b, ty_i8x16(), ca);
+    let cs = ins_iconst(inout b, ty_i8(), 26);
+    let span = ins_splat(inout b, ty_i8x16(), cs);
+    let cb = ins_iconst(inout b, ty_i8(), 32);
+    let case_bit = ins_splat(inout b, ty_i8x16(), cb);
+    (a, span, case_bit)
+}
+
+fn lower_scalar(inout b: Builder, bv: Value) -> Value eff [Ffi[Cranelift]] {
+    let from_a = ins_iadd_imm(inout b, bv, -65);
+    let upper = ins_icmp_imm(inout b, cc_ult(), from_a, 26);
+    let upper = ins_uextend(inout b, ty_i64(), upper);
+    let case_bit = ins_ishl_imm(inout b, upper, 5);
+    ins_bor(inout b, bv, case_bit)
+}
+
+fn lower_vector(inout b: Builder, a: Value, span: Value, case_bit: Value, v: Value)
+    -> Value eff [Ffi[Cranelift]] {
+    let from_a = ins_isub(inout b, v, a);
+    let upper = ins_icmp(inout b, cc_ult(), from_a, span);
+    let add = ins_band(inout b, upper, case_bit);
+    ins_bor(inout b, v, add)
+}
+
+fn sum_be16_scalar(inout b: Builder, p: Value, from: Value, len: Value, acc: Value)
+    -> Value eff [Ffi[Cranelift]] {
+    let head = create_block(inout b);
+    let body = create_block(inout b);
+    let pairs_done = create_block(inout b);
+    let odd = create_block(inout b);
+    let done = create_block(inout b);
+    append_block_param(inout b, head, ty_i64());
+    append_block_param(inout b, head, ty_i64());
+    append_block_param(inout b, pairs_done, ty_i64());
+    append_block_param(inout b, pairs_done, ty_i64());
+    append_block_param(inout b, done, ty_i64());
+    let init = vals2(from, acc);
+    ins_jump(inout b, head, in init.as_slice());
+
+    switch_to_block(inout b, head);
+    let k = block_param(inout b, head, 0);
+    let acc_h = block_param(inout b, head, 1);
+    let next = ins_iadd_imm(inout b, k, 1);
+    let more = ins_icmp(inout b, cc_ult(), next, len);
+    let p_args = vals2(k, acc_h);
+    let eargs = empty_args();
+    ins_brif(inout b, more, body, in eargs.as_slice(), pairs_done, in p_args.as_slice());
+
+    switch_to_block(inout b, body);
+    let at = ins_iadd(inout b, p, k);
+    let hi = ins_uload8(inout b, ty_i64(), PLAIN, at, 0);
+    let lo = ins_uload8(inout b, ty_i64(), PLAIN, at, 1);
+    let hi = ins_ishl_imm(inout b, hi, 8);
+    let word = ins_bor(inout b, hi, lo);
+    let sum = ins_iadd(inout b, acc_h, word);
+    let k2 = ins_iadd_imm(inout b, k, 2);
+    let hargs = vals2(k2, sum);
+    ins_jump(inout b, head, in hargs.as_slice());
+
+    switch_to_block(inout b, pairs_done);
+    let k = block_param(inout b, pairs_done, 0);
+    let acc_p = block_param(inout b, pairs_done, 1);
+    let left = ins_icmp(inout b, cc_ult(), k, len);
+    let dargs = vals1(acc_p);
+    ins_brif(inout b, left, odd, in eargs.as_slice(), done, in dargs.as_slice());
+
+    switch_to_block(inout b, odd);
+    let at = ins_iadd(inout b, p, k);
+    let hi = ins_uload8(inout b, ty_i64(), PLAIN, at, 0);
+    let hi = ins_ishl_imm(inout b, hi, 8);
+    let sum = ins_iadd(inout b, acc_p, hi);
+    let sargs = vals1(sum);
+    ins_jump(inout b, done, in sargs.as_slice());
+
+    switch_to_block(inout b, done);
+    block_param(inout b, done, 0)
+}
+
+fn sum_pairs(inout b: Builder, v: Value, low16: Value) -> Value eff [Ffi[Cranelift]] {
+    let v = bitcast_le(inout b, ty_i32x4(), v);
+    let lo = ins_band(inout b, v, low16);
+    let hi = ins_ushr_imm(inout b, v, 16);
+    ins_iadd(inout b, lo, hi)
+}
+
+fn sum_be16_vector(inout b: Builder, in m: Module, p: Value, len: Value)
+    -> (Value, Value) eff [Ffi[Cranelift]] {
+    let end = vector_end(inout b, len);
+    let z = zero(inout b);
+    let z16 = ins_iconst(inout b, ty_i16(), 0);
+    let zero16 = ins_splat(inout b, ty_i16x8(), z16);
+    let zero64 = ins_splat(inout b, ty_i64x2(), z);
+    let l8 = ins_iconst(inout b, ty_i16(), 255);
+    let low8 = ins_splat(inout b, ty_i16x8(), l8);
+    let l16 = ins_iconst(inout b, ty_i32(), 65535);
+    let low16 = ins_splat(inout b, ty_i32x4(), l16);
+    let l32 = ins_iconst(inout b, ty_i64(), 4294967295);
+    let low32 = ins_splat(inout b, ty_i64x2(), l32);
+
+    let outer = create_block(inout b);
+    let block_start = create_block(inout b);
+    let inner = create_block(inout b);
+    let step = create_block(inout b);
+    let widen = create_block(inout b);
+    let done = create_block(inout b);
+    append_block_param(inout b, outer, ty_i64());
+    append_block_param(inout b, outer, ty_i64x2());
+    append_block_param(inout b, inner, ty_i64());
+    append_block_param(inout b, inner, ty_i16x8());
+    append_block_param(inout b, inner, ty_i16x8());
+    append_block_param(inout b, done, ty_i64x2());
+    let oinit = vals2(z, zero64);
+    ins_jump(inout b, outer, in oinit.as_slice());
+
+    switch_to_block(inout b, outer);
+    let k = block_param(inout b, outer, 0);
+    let total = block_param(inout b, outer, 1);
+    let more = ins_icmp(inout b, cc_ult(), k, end);
+    let targs = vals1(total);
+    let eargs = empty_args();
+    ins_brif(inout b, more, block_start, in eargs.as_slice(), done, in targs.as_slice());
+
+    switch_to_block(inout b, block_start);
+    let room = ins_isub(inout b, end, k);
+    let cap = ins_iconst(inout b, ty_i64(), SUM_BLOCK_STEPS * LANES);
+    let short = ins_icmp(inout b, cc_ult(), room, cap);
+    let span = ins_select(inout b, short, room, cap);
+    let block_end = ins_iadd(inout b, k, span);
+    let mut iargs = ChunkSeq::new[u32]();
+    iargs.push(k.id);
+    iargs.push(zero16.id);
+    iargs.push(zero16.id);
+    ins_jump(inout b, inner, in iargs.as_slice());
+
+    switch_to_block(inout b, inner);
+    let i = block_param(inout b, inner, 0);
+    let evens = block_param(inout b, inner, 1);
+    let odds = block_param(inout b, inner, 2);
+    let more = ins_icmp(inout b, cc_ult(), i, block_end);
+    ins_brif0(inout b, more, step, widen);
+
+    switch_to_block(inout b, step);
+    let at = ins_iadd(inout b, p, i);
+    let v = ins_load(inout b, ty_i16x8(), little(), at, 0);
+    let even = ins_band(inout b, v, low8);
+    let odd = ins_ushr_imm(inout b, v, 8);
+    let evens2 = ins_iadd(inout b, evens, even);
+    let odds2 = ins_iadd(inout b, odds, odd);
+    let i2 = ins_iadd_imm(inout b, i, LANES);
+    let mut sargs = ChunkSeq::new[u32]();
+    sargs.push(i2.id);
+    sargs.push(evens2.id);
+    sargs.push(odds2.id);
+    ins_jump(inout b, inner, in sargs.as_slice());
+
+    switch_to_block(inout b, widen);
+    let evens = sum_pairs(inout b, evens, low16);
+    let odds = sum_pairs(inout b, odds, low16);
+    let weighted = ins_ishl_imm(inout b, evens, 8);
+    let words = ins_iadd(inout b, weighted, odds);
+    let words = bitcast_le(inout b, ty_i64x2(), words);
+    let lo = ins_band(inout b, words, low32);
+    let hi = ins_ushr_imm(inout b, words, 32);
+    let total = ins_iadd(inout b, total, lo);
+    let total = ins_iadd(inout b, total, hi);
+    let oargs = vals2(block_end, total);
+    ins_jump(inout b, outer, in oargs.as_slice());
+
+    switch_to_block(inout b, done);
+    let total = block_param(inout b, done, 0);
+    let slot = alloc(inout b, in m, 16);
+    ins_store(inout b, little(), total, slot, 0);
+    let a = ins_load(inout b, ty_i64(), PLAIN, slot, 0);
+    let bv = ins_load(inout b, ty_i64(), PLAIN, slot, 8);
+    (ins_iadd(inout b, a, bv), end)
+}
+
+fn bytes_eq(
+    inout b: Builder,
+    in m: Module,
+    p: Value,
+    q: Value,
+    len: Value,
+    len2: Value,
+    simd: bool,
+    fold: bool,
+    optimize: bool,
+) -> Value eff [Ffi[Cranelift]] {
+    let z = zero(inout b);
+    let scalar = create_block(inout b);
+    let scalar_body = create_block(inout b);
+    let done = create_block(inout b);
+    append_block_param(inout b, scalar, ty_i64());
+    append_block_param(inout b, done, ty_i64());
+    let no = ins_iconst(inout b, ty_i64(), 0);
+    let yes = ins_iconst(inout b, ty_i64(), 1);
+    let same_len = ins_icmp(inout b, cc_eq(), len, len2);
+    let start = create_block(inout b);
+    let no_args = vals1(no);
+    let eargs = empty_args();
+    ins_brif(inout b, same_len, start, in eargs.as_slice(), done, in no_args.as_slice());
+    switch_to_block(inout b, start);
+    if simd {
+        let head = create_block(inout b);
+        let body = create_block(inout b);
+        append_block_param(inout b, head, ty_i64());
+        append_block_param(inout b, body, ty_i64());
+        if short_scans(in m, optimize) {
+            let short = create_block(inout b);
+            let long = create_block(inout b);
+            let under = ins_icmp_imm(inout b, cc_ult(), len, LANES);
+            ins_brif0(inout b, under, short, long);
+
+            switch_to_block(inout b, short);
+            let safe = short_load_safe2(inout b, p, q, len);
+            let vector = create_block(inout b);
+            let zargs = vals1(z);
+            ins_brif(inout b, safe, vector, in eargs.as_slice(), scalar, in zargs.as_slice());
+
+            switch_to_block(inout b, vector);
+            let mut a = ins_load(inout b, ty_i8x16(), little(), p, 0);
+            let mut bv = ins_load(inout b, ty_i8x16(), little(), q, 0);
+            if fold {
+                let (ca, cs, cb) = lower_constants(inout b);
+                a = lower_vector(inout b, ca, cs, cb, a);
+                bv = lower_vector(inout b, ca, cs, cb, bv);
+            }
+            let same = ins_icmp(inout b, cc_eq(), a, bv);
+            let bits = ins_vhigh_bits(inout b, ty_i32(), same);
+            let mask = short_mask(inout b, len);
+            let bits = ins_band(inout b, bits, mask);
+            let all = ins_icmp(inout b, cc_eq(), bits, mask);
+            let all = ins_uextend(inout b, ty_i64(), all);
+            let aargs = vals1(all);
+            ins_jump(inout b, done, in aargs.as_slice());
+            switch_to_block(inout b, long);
+        }
+        let end = vector_end(inout b, len);
+        let mut inv = ChunkSeq::new[Value]();
+        inv.push(end);
+        if fold {
+            let (ca, cs, cb) = lower_constants(inout b);
+            inv.push(ca);
+            inv.push(cs);
+            inv.push(cb);
+        }
+        let mut entry = ChunkSeq::new[u32]();
+        entry.push(z.id);
+        let mut idx: u64 = 0;
+        loop {
+            if idx >= inv.len() {
+                break;
+            }
+            entry.push(at_val(in inv.as_slice(), idx).id);
+            idx = wrapping_add(idx, 1);
+        }
+        let carried = loop_invariants(inout b, head, in inv.as_slice());
+        ins_jump(inout b, head, in entry.as_slice());
+
+        switch_to_block(inout b, head);
+        let k = block_param(inout b, head, 0);
+        let more = ins_icmp(inout b, cc_ult(), k, at_val(in carried.as_slice(), 0));
+        vector_head_exit(inout b, more, k, len, body, scalar);
+
+        switch_to_block(inout b, body);
+        let k = block_param(inout b, body, 0);
+        let a_addr = ins_iadd(inout b, p, k);
+        let mut a = ins_load(inout b, ty_i8x16(), little(), a_addr, 0);
+        let b_addr = ins_iadd(inout b, q, k);
+        let mut bv = ins_load(inout b, ty_i8x16(), little(), b_addr, 0);
+        if fold {
+            a = lower_vector(
+                inout b,
+                at_val(in carried.as_slice(), 1),
+                at_val(in carried.as_slice(), 2),
+                at_val(in carried.as_slice(), 3),
+                a
+            );
+            bv = lower_vector(
+                inout b,
+                at_val(in carried.as_slice(), 1),
+                at_val(in carried.as_slice(), 2),
+                at_val(in carried.as_slice(), 3),
+                bv
+            );
+        }
+        let same = ins_icmp(inout b, cc_eq(), a, bv);
+        let bits = ins_vhigh_bits(inout b, ty_i32(), same);
+        let all = ins_icmp_imm(inout b, cc_eq(), bits, 65535);
+        let k2 = ins_iadd_imm(inout b, k, LANES);
+        let mut back = ChunkSeq::new[u32]();
+        back.push(k2.id);
+        push_carried(inout b, inout back, in carried.as_slice());
+        ins_brif(inout b, all, head, in back.as_slice(), done, in no_args.as_slice());
+    } else {
+        let zargs = vals1(z);
+        ins_jump(inout b, scalar, in zargs.as_slice());
+    }
+
+    switch_to_block(inout b, scalar);
+    let k = block_param(inout b, scalar, 0);
+    let more = ins_icmp(inout b, cc_ult(), k, len);
+    let yes_args = vals1(yes);
+    ins_brif(inout b, more, scalar_body, in eargs.as_slice(), done, in yes_args.as_slice());
+
+    switch_to_block(inout b, scalar_body);
+    let aa = ins_iadd(inout b, p, k);
+    let mut a = ins_uload8(inout b, ty_i64(), PLAIN, aa, 0);
+    let ba = ins_iadd(inout b, q, k);
+    let mut bv = ins_uload8(inout b, ty_i64(), PLAIN, ba, 0);
+    if fold {
+        a = lower_scalar(inout b, a);
+        bv = lower_scalar(inout b, bv);
+    }
+    let same = ins_icmp(inout b, cc_eq(), a, bv);
+    let k2 = ins_iadd_imm(inout b, k, 1);
+    let k2args = vals1(k2);
+    ins_brif(inout b, same, scalar, in k2args.as_slice(), done, in no_args.as_slice());
+
+    switch_to_block(inout b, done);
+    block_param(inout b, done, 0)
+}
+
+fn three_way(inout b: Builder, a: Value, bv: Value) -> Value eff [Ffi[Cranelift]] {
+    let gt = ins_icmp(inout b, cc_ugt(), a, bv);
+    let lt = ins_icmp(inout b, cc_ult(), a, bv);
+    let gt = ins_uextend(inout b, ty_i64(), gt);
+    let lt = ins_uextend(inout b, ty_i64(), lt);
+    ins_isub(inout b, gt, lt)
+}
+
+fn bytes_cmp(
+    inout b: Builder,
+    in m: Module,
+    p: Value,
+    q: Value,
+    len: Value,
+    len2: Value,
+    simd: bool,
+    optimize: bool,
+) -> Value eff [Ffi[Cranelift]] {
+    let z = zero(inout b);
+    let scalar = create_block(inout b);
+    let scalar_body = create_block(inout b);
+    let differ = create_block(inout b);
+    let lane = create_block(inout b);
+    let tail = create_block(inout b);
+    let done = create_block(inout b);
+    append_block_param(inout b, scalar, ty_i64());
+    append_block_param(inout b, done, ty_i64());
+    append_block_param(inout b, lane, ty_i64());
+    append_block_param(inout b, lane, ty_i32());
+    let n = ins_umin(inout b, len, len2);
+    if simd {
+        let head = create_block(inout b);
+        let body = create_block(inout b);
+        append_block_param(inout b, head, ty_i64());
+        append_block_param(inout b, body, ty_i64());
+        if short_scans(in m, optimize) {
+            let short = create_block(inout b);
+            let long = create_block(inout b);
+            let under = ins_icmp_imm(inout b, cc_ult(), n, LANES);
+            ins_brif0(inout b, under, short, long);
+
+            switch_to_block(inout b, short);
+            let safe = short_load_safe2(inout b, p, q, n);
+            let vector = create_block(inout b);
+            let zargs = vals1(z);
+            let eargs = empty_args();
+            ins_brif(inout b, safe, vector, in eargs.as_slice(), scalar, in zargs.as_slice());
+
+            switch_to_block(inout b, vector);
+            let a = ins_load(inout b, ty_i8x16(), little(), p, 0);
+            let bv = ins_load(inout b, ty_i8x16(), little(), q, 0);
+            let same = ins_icmp(inout b, cc_eq(), a, bv);
+            let bits = ins_vhigh_bits(inout b, ty_i32(), same);
+            let mask = short_mask(inout b, n);
+            let ones = ins_bnot(inout b, bits);
+            let diff = ins_band(inout b, ones, mask);
+            let none = ins_icmp_imm(inout b, cc_eq(), diff, 0);
+            let largs = vals2(z, diff);
+            ins_brif(inout b, none, tail, in eargs.as_slice(), lane, in largs.as_slice());
+            switch_to_block(inout b, long);
+        }
+        let end = vector_end(inout b, n);
+        let mut inv = ChunkSeq::new[Value]();
+        inv.push(end);
+        let carried = loop_invariants(inout b, head, in inv.as_slice());
+        let hinit = vals2(z, end);
+        ins_jump(inout b, head, in hinit.as_slice());
+
+        switch_to_block(inout b, head);
+        let k = block_param(inout b, head, 0);
+        let more = ins_icmp(inout b, cc_ult(), k, at_val(in carried.as_slice(), 0));
+        vector_head_exit(inout b, more, k, n, body, scalar);
+
+        switch_to_block(inout b, body);
+        let k = block_param(inout b, body, 0);
+        let aa = ins_iadd(inout b, p, k);
+        let a = ins_load(inout b, ty_i8x16(), little(), aa, 0);
+        let ba = ins_iadd(inout b, q, k);
+        let bv = ins_load(inout b, ty_i8x16(), little(), ba, 0);
+        let same = ins_icmp(inout b, cc_eq(), a, bv);
+        let bits = ins_vhigh_bits(inout b, ty_i32(), same);
+        let all = ins_icmp_imm(inout b, cc_eq(), bits, 65535);
+        let k2 = ins_iadd_imm(inout b, k, LANES);
+        let mut back = ChunkSeq::new[u32]();
+        back.push(k2.id);
+        push_carried(inout b, inout back, in carried.as_slice());
+        let ones = ins_bnot(inout b, bits);
+        let diff = ins_band_imm(inout b, ones, 65535);
+        let largs = vals2(k, diff);
+        ins_brif(inout b, all, head, in back.as_slice(), lane, in largs.as_slice());
+    } else {
+        let zargs = vals1(z);
+        ins_jump(inout b, scalar, in zargs.as_slice());
+    }
+
+    switch_to_block(inout b, lane);
+    let at = block_param(inout b, lane, 0);
+    let bits = block_param(inout b, lane, 1);
+    let first = ins_ctz(inout b, bits);
+    let first = ins_uextend(inout b, ty_i64(), first);
+    let i = ins_iadd(inout b, at, first);
+    let aa = ins_iadd(inout b, p, i);
+    let a = ins_uload8(inout b, ty_i64(), PLAIN, aa, 0);
+    let ba = ins_iadd(inout b, q, i);
+    let bv = ins_uload8(inout b, ty_i64(), PLAIN, ba, 0);
+    let r = three_way(inout b, a, bv);
+    let rargs = vals1(r);
+    ins_jump(inout b, done, in rargs.as_slice());
+
+    switch_to_block(inout b, scalar);
+    let k = block_param(inout b, scalar, 0);
+    let more = ins_icmp(inout b, cc_ult(), k, n);
+    ins_brif0(inout b, more, scalar_body, tail);
+
+    switch_to_block(inout b, scalar_body);
+    let aa = ins_iadd(inout b, p, k);
+    let a = ins_uload8(inout b, ty_i64(), PLAIN, aa, 0);
+    let ba = ins_iadd(inout b, q, k);
+    let bv = ins_uload8(inout b, ty_i64(), PLAIN, ba, 0);
+    let same = ins_icmp(inout b, cc_eq(), a, bv);
+    let k2 = ins_iadd_imm(inout b, k, 1);
+    append_block_param(inout b, differ, ty_i64());
+    append_block_param(inout b, differ, ty_i64());
+    let k2args = vals1(k2);
+    let dargs = vals2(a, bv);
+    ins_brif(inout b, same, scalar, in k2args.as_slice(), differ, in dargs.as_slice());
+
+    switch_to_block(inout b, differ);
+    let a = block_param(inout b, differ, 0);
+    let bv = block_param(inout b, differ, 1);
+    let r = three_way(inout b, a, bv);
+    let rargs = vals1(r);
+    ins_jump(inout b, done, in rargs.as_slice());
+
+    switch_to_block(inout b, tail);
+    let r = three_way(inout b, len, len2);
+    let rargs = vals1(r);
+    ins_jump(inout b, done, in rargs.as_slice());
+
+    switch_to_block(inout b, done);
+    block_param(inout b, done, 0)
+}
+
+copy struct Needle {
+    kind: u64,
+    a: Value,
+    b: Value,
+    c: Value,
+}
+
+fn needle_scalar(inout b: Builder, n: Needle, bv: Value) -> Value eff [Ffi[Cranelift]] {
+    if n.kind == 0 {
+        ins_icmp(inout b, cc_eq(), bv, n.a)
+    } else if n.kind == 1 {
+        let ax = ins_icmp(inout b, cc_eq(), bv, n.a);
+        let ay = ins_icmp(inout b, cc_eq(), bv, n.b);
+        ins_bor(inout b, ax, ay)
+    } else {
+        let low_half = ins_icmp_imm(inout b, cc_ult(), bv, 64);
+        let word = ins_select(inout b, low_half, n.a, n.b);
+        let shift = ins_band_imm(inout b, bv, 63);
+        let bit = ins_ushr(inout b, word, shift);
+        let bit = ins_band_imm(inout b, bit, 1);
+        let ascii = ins_icmp_imm(inout b, cc_ult(), bv, 128);
+        let member = ins_select(inout b, ascii, bit, n.c);
+        ins_icmp_imm(inout b, cc_eq(), member, 0)
+    }
+}
+
+fn splat8(inout b: Builder, v: Value) -> Value eff [Ffi[Cranelift]] {
+    let byte = ins_ireduce(inout b, ty_i8(), v);
+    ins_splat(inout b, ty_i8x16(), byte)
+}
+
+fn needle_splat(inout b: Builder, n: Needle) -> ChunkSeq[Value] eff [Ffi[Cranelift]] {
+    let mut out = ChunkSeq::new[Value]();
+    if n.kind == 0 {
+        out.push(splat8(inout b, n.a));
+    } else if n.kind == 1 {
+        out.push(splat8(inout b, n.a));
+        out.push(splat8(inout b, n.b));
+    } else {
+        let table = ins_splat(inout b, ty_i64x2(), n.a);
+        let table = ins_insertlane(inout b, table, n.b, 1);
+        let table = bitcast_le(inout b, ty_i8x16(), table);
+        let mut bits = ChunkSeq::with_capacity[u8](16);
+        for k in 0..16 {
+            bits.push(wrapping_u8(1 << (k & 7)));
+        }
+        let bits = ins_vconst(inout b, ty_i8x16(), in bits.as_slice());
+        let seven = ins_iconst(inout b, ty_i8(), 7);
+        let sevens = ins_splat(inout b, ty_i8x16(), seven);
+        let z8 = ins_iconst(inout b, ty_i8(), 0);
+        let zeros = ins_splat(inout b, ty_i8x16(), z8);
+        let nh = ins_ineg(inout b, n.c);
+        let high = splat8(inout b, nh);
+        out.push(table);
+        out.push(bits);
+        out.push(sevens);
+        out.push(zeros);
+        out.push(high);
+    }
+    out
+}
+
+fn needle_vector(inout b: Builder, kind: u64, in s: Slice[Value], off: u64, v: Value)
+    -> Value eff [Ffi[Cranelift]] {
+    if kind == 0 {
+        ins_icmp(inout b, cc_eq(), v, at_val(in s, off))
+    } else if kind == 1 {
+        let ax = ins_icmp(inout b, cc_eq(), v, at_val(in s, off));
+        let ay = ins_icmp(inout b, cc_eq(), v, at_val(in s, wrapping_add(off, 1)));
+        ins_bor(inout b, ax, ay)
+    } else {
+        let table = at_val(in s, off);
+        let bits = at_val(in s, wrapping_add(off, 1));
+        let sevens = at_val(in s, wrapping_add(off, 2));
+        let zeros = at_val(in s, wrapping_add(off, 3));
+        let high = at_val(in s, wrapping_add(off, 4));
+        let row = ins_ushr_imm(inout b, v, 3);
+        let row = ins_swizzle(inout b, table, row);
+        let col = ins_band(inout b, v, sevens);
+        let bit = ins_swizzle(inout b, bits, col);
+        let member = ins_band(inout b, row, bit);
+        let outside = ins_icmp(inout b, cc_eq(), member, zeros);
+        let upper = ins_icmp(inout b, cc_slt(), v, zeros);
+        let upper_in = ins_band(inout b, upper, high);
+        ins_band_not(inout b, outside, upper_in)
+    }
+}
+
+fn find_first(
+    inout b: Builder,
+    in m: Module,
+    p: Value,
+    len: Value,
+    n: Needle,
+    simd: bool,
+    optimize: bool,
+) -> (Value, Value) eff [Ffi[Cranelift]] {
+    let z = zero(inout b);
+    let scalar = create_block(inout b);
+    let scalar_body = create_block(inout b);
+    let done = create_block(inout b);
+    append_block_param(inout b, scalar, ty_i64());
+    append_block_param(inout b, done, ty_i64());
+    append_block_param(inout b, done, ty_i64());
+    let no = ins_iconst(inout b, ty_i64(), 0);
+    let yes = ins_iconst(inout b, ty_i64(), 1);
+    let eargs = empty_args();
+    if simd {
+        let head = create_block(inout b);
+        let body = create_block(inout b);
+        let next = create_block(inout b);
+        let hit = create_block(inout b);
+        append_block_param(inout b, head, ty_i64());
+        append_block_param(inout b, body, ty_i64());
+        if short_scans(in m, optimize) {
+            let short = create_block(inout b);
+            let short_hit = create_block(inout b);
+            let long = create_block(inout b);
+            let under = ins_icmp_imm(inout b, cc_ult(), len, LANES);
+            ins_brif0(inout b, under, short, long);
+
+            switch_to_block(inout b, short);
+            let safe = short_load_safe1(inout b, p, len);
+            let vector = create_block(inout b);
+            let zargs = vals1(z);
+            ins_brif(inout b, safe, vector, in eargs.as_slice(), scalar, in zargs.as_slice());
+
+            switch_to_block(inout b, vector);
+            let v = ins_load(inout b, ty_i8x16(), little(), p, 0);
+            let splat = needle_splat(inout b, n);
+            let found = needle_vector(inout b, n.kind, in splat.as_slice(), 0, v);
+            let bits = ins_vhigh_bits(inout b, ty_i32(), found);
+            let mask = short_mask(inout b, len);
+            let bits = ins_band(inout b, bits, mask);
+            let miss_args = vals2(no, z);
+            ins_brif(inout b, bits, short_hit, in eargs.as_slice(), done, in miss_args.as_slice());
+
+            switch_to_block(inout b, short_hit);
+            let first = ins_ctz(inout b, bits);
+            let first = ins_uextend(inout b, ty_i64(), first);
+            let hit_args = vals2(yes, first);
+            ins_jump(inout b, done, in hit_args.as_slice());
+            switch_to_block(inout b, long);
+        }
+        let end = vector_end(inout b, len);
+        let splat = needle_splat(inout b, n);
+        let mut inv = ChunkSeq::new[Value]();
+        inv.push(end);
+        let mut s_i: u64 = 0;
+        loop {
+            if s_i >= splat.len() {
+                break;
+            }
+            inv.push(at_val(in splat.as_slice(), s_i));
+            s_i = wrapping_add(s_i, 1);
+        }
+        let mut entry = ChunkSeq::new[u32]();
+        entry.push(z.id);
+        let mut i_i: u64 = 0;
+        loop {
+            if i_i >= inv.len() {
+                break;
+            }
+            entry.push(at_val(in inv.as_slice(), i_i).id);
+            i_i = wrapping_add(i_i, 1);
+        }
+        let carried = loop_invariants(inout b, head, in inv.as_slice());
+        ins_jump(inout b, head, in entry.as_slice());
+
+        switch_to_block(inout b, head);
+        let k = block_param(inout b, head, 0);
+        let more = ins_icmp(inout b, cc_ult(), k, at_val(in carried.as_slice(), 0));
+        vector_head_exit(inout b, more, k, len, body, scalar);
+
+        switch_to_block(inout b, body);
+        let k = block_param(inout b, body, 0);
+        let at = ins_iadd(inout b, p, k);
+        let v = ins_load(inout b, ty_i8x16(), little(), at, 0);
+        let found = needle_vector(inout b, n.kind, in carried.as_slice(), 1, v);
+        let bits = ins_vhigh_bits(inout b, ty_i32(), found);
+        ins_brif0(inout b, bits, hit, next);
+
+        switch_to_block(inout b, next);
+        let k2 = ins_iadd_imm(inout b, k, LANES);
+        let mut back = ChunkSeq::new[u32]();
+        back.push(k2.id);
+        push_carried(inout b, inout back, in carried.as_slice());
+        ins_jump(inout b, head, in back.as_slice());
+
+        switch_to_block(inout b, hit);
+        let first = ins_ctz(inout b, bits);
+        let first = ins_uextend(inout b, ty_i64(), first);
+        let index = ins_iadd(inout b, k, first);
+        let hargs = vals2(yes, index);
+        ins_jump(inout b, done, in hargs.as_slice());
+    } else {
+        let zargs = vals1(z);
+        ins_jump(inout b, scalar, in zargs.as_slice());
+    }
+
+    switch_to_block(inout b, scalar);
+    let k = block_param(inout b, scalar, 0);
+    let more = ins_icmp(inout b, cc_ult(), k, len);
+    let miss_args = vals2(no, z);
+    ins_brif(inout b, more, scalar_body, in eargs.as_slice(), done, in miss_args.as_slice());
+
+    switch_to_block(inout b, scalar_body);
+    let at = ins_iadd(inout b, p, k);
+    let bv = ins_uload8(inout b, ty_i64(), PLAIN, at, 0);
+    let found = needle_scalar(inout b, n, bv);
+    let k2 = ins_iadd_imm(inout b, k, 1);
+    let found_args = vals2(yes, k);
+    let next_args = vals1(k2);
+    ins_brif(inout b, found, done, in found_args.as_slice(), scalar, in next_args.as_slice());
+
+    switch_to_block(inout b, done);
+    (block_param(inout b, done, 0), block_param(inout b, done, 1))
+}
+
+fn find_not_in_runs(inout b: Builder, p: Value, len: Value, lo: Value, hi: Value, high: Value)
+    -> (Value, Value) eff [Ffi[Cranelift]] {
+    let n = Needle {
+        kind: 2,
+        a: lo,
+        b: hi,
+        c: high,
+    };
+    let z = zero(inout b);
+    let no = ins_iconst(inout b, ty_i64(), 0);
+    let yes = ins_iconst(inout b, ty_i64(), 1);
+    let outer = create_block(inout b);
+    let test = create_block(inout b);
+    let run = create_block(inout b);
+    let start = create_block(inout b);
+    let step = create_block(inout b);
+    let next = create_block(inout b);
+    let miss = create_block(inout b);
+    let tail = create_block(inout b);
+    let tail_body = create_block(inout b);
+    let done = create_block(inout b);
+    append_block_param(inout b, outer, ty_i64());
+    append_block_param(inout b, step, ty_i64());
+    append_block_param(inout b, tail, ty_i64());
+    append_block_param(inout b, done, ty_i64());
+    append_block_param(inout b, done, ty_i64());
+    let zargs = vals1(z);
+    ins_jump(inout b, outer, in zargs.as_slice());
+
+    switch_to_block(inout b, outer);
+    let k = block_param(inout b, outer, 0);
+    let more = ins_icmp(inout b, cc_ult(), k, len);
+    let miss_args = vals2(no, z);
+    let eargs = empty_args();
+    ins_brif(inout b, more, test, in eargs.as_slice(), done, in miss_args.as_slice());
+
+    switch_to_block(inout b, test);
+    let at = ins_iadd(inout b, p, k);
+    let bv = ins_uload8(inout b, ty_i64(), PLAIN, at, 0);
+    let found = needle_scalar(inout b, n, bv);
+    let found_args = vals2(yes, k);
+    ins_brif(inout b, found, done, in found_args.as_slice(), run, in eargs.as_slice());
+
+    switch_to_block(inout b, run);
+    let j = ins_iadd_imm(inout b, k, 1);
+    let left = ins_isub(inout b, len, j);
+    let room = ins_icmp_imm(inout b, cc_uge(), left, LANES);
+    let jargs = vals1(j);
+    ins_brif(inout b, room, start, in eargs.as_slice(), tail, in jargs.as_slice());
+
+    switch_to_block(inout b, start);
+    let byte = ins_ireduce(inout b, ty_i8(), bv);
+    let splat = ins_splat(inout b, ty_i8x16(), byte);
+    ins_jump(inout b, step, in jargs.as_slice());
+
+    switch_to_block(inout b, step);
+    let j = block_param(inout b, step, 0);
+    let at = ins_iadd(inout b, p, j);
+    let v = ins_load(inout b, ty_i8x16(), little(), at, 0);
+    let same = ins_icmp(inout b, cc_eq(), v, splat);
+    let bits = ins_vhigh_bits(inout b, ty_i32(), same);
+    let all = ins_icmp_imm(inout b, cc_eq(), bits, 65535);
+    ins_brif0(inout b, all, next, miss);
+
+    switch_to_block(inout b, next);
+    let j2 = ins_iadd_imm(inout b, j, LANES);
+    let left = ins_isub(inout b, len, j2);
+    let room = ins_icmp_imm(inout b, cc_uge(), left, LANES);
+    let j2args = vals1(j2);
+    ins_brif(inout b, room, step, in j2args.as_slice(), tail, in j2args.as_slice());
+
+    switch_to_block(inout b, miss);
+    let differ = ins_bxor_imm(inout b, bits, 65535);
+    let first = ins_ctz(inout b, differ);
+    let first = ins_uextend(inout b, ty_i64(), first);
+    let j3 = ins_iadd(inout b, j, first);
+    let j3args = vals1(j3);
+    ins_jump(inout b, outer, in j3args.as_slice());
+
+    switch_to_block(inout b, tail);
+    let k = block_param(inout b, tail, 0);
+    let more = ins_icmp(inout b, cc_ult(), k, len);
+    ins_brif(inout b, more, tail_body, in eargs.as_slice(), done, in miss_args.as_slice());
+
+    switch_to_block(inout b, tail_body);
+    let at = ins_iadd(inout b, p, k);
+    let bv = ins_uload8(inout b, ty_i64(), PLAIN, at, 0);
+    let found = needle_scalar(inout b, n, bv);
+    let k2 = ins_iadd_imm(inout b, k, 1);
+    let t_found = vals2(yes, k);
+    let t_next = vals1(k2);
+    ins_brif(inout b, found, done, in t_found.as_slice(), tail, in t_next.as_slice());
+
+    switch_to_block(inout b, done);
+    (block_param(inout b, done, 0), block_param(inout b, done, 1))
+}
+
+fn rep_byte(byte: u64, is_i64: bool) -> i64 {
+    let n = if is_i64 {
+        8
+    } else {
+        4
+    };
+    let mut acc: u64 = 0;
+    for _ in 0..n {
+        acc = (acc << 8) | (byte & 255);
+    }
+    wrapping_i64(acc)
+}
+
+fn lower_word(inout b: Builder, is_i64: bool, w: Value) -> Value eff [Ffi[Cranelift]] {
+    let low7 = ins_band_imm(inout b, w, rep_byte(127, is_i64));
+    let at_least_a = ins_iadd_imm(inout b, low7, rep_byte(63, is_i64));
+    let past_z = ins_iadd_imm(inout b, low7, rep_byte(37, is_i64));
+    let upper = ins_band_not(inout b, at_least_a, past_z);
+    let upper = ins_band_not(inout b, upper, w);
+    let upper = ins_band_imm(inout b, upper, rep_byte(128, is_i64));
+    let case_bit = ins_ushr_imm(inout b, upper, 2);
+    ins_bor(inout b, w, case_bit)
+}
+
+fn lowercase_words(
+    inout b: Builder,
+    dst: Value,
+    src: Value,
+    n: Value,
+    scalar: Block,
+    done: Block
+) eff [Ffi[Cranelift]] {
+    let eight = create_block(inout b);
+    let below_eight = create_block(inout b);
+    let four = create_block(inout b);
+    let wide = ins_icmp_imm(inout b, cc_uge(), n, 8);
+    ins_brif0(inout b, wide, eight, below_eight);
+    switch_to_block(inout b, below_eight);
+    let wide = ins_icmp_imm(inout b, cc_uge(), n, 4);
+    let z = zero(inout b);
+    let zargs = vals1(z);
+    let eargs = empty_args();
+    ins_brif(inout b, wide, four, in eargs.as_slice(), scalar, in zargs.as_slice());
+    for pass in 0..2 {
+        let blk = if pass == 0 {
+            eight
+        } else {
+            four
+        };
+        let is_i64 = pass == 0;
+        let ty = if is_i64 {
+            ty_i64()
+        } else {
+            ty_i32()
+        };
+        let neg_width: i64 = if is_i64 {
+            -8
+        } else {
+            -4
+        };
+        switch_to_block(inout b, blk);
+        let back = ins_iadd_imm(inout b, n, neg_width);
+        let src2 = ins_iadd(inout b, src, back);
+        let dst2 = ins_iadd(inout b, dst, back);
+        let first = ins_load(inout b, ty, PLAIN, src, 0);
+        let second = ins_load(inout b, ty, PLAIN, src2, 0);
+        let first = lower_word(inout b, is_i64, first);
+        let second = lower_word(inout b, is_i64, second);
+        ins_store(inout b, PLAIN, first, dst, 0);
+        ins_store(inout b, PLAIN, second, dst2, 0);
+        ins_jump0(inout b, done);
+    }
+}
+
+fn lowercase_copy(inout b: Builder, dst: Value, src: Value, n: Value, simd: bool) eff [
+    Ffi[Cranelift]
+] {
+    let z = zero(inout b);
+    let scalar = create_block(inout b);
+    let scalar_body = create_block(inout b);
+    let done = create_block(inout b);
+    append_block_param(inout b, scalar, ty_i64());
+    if simd {
+        let end = vector_end(inout b, n);
+        let head = create_block(inout b);
+        let body = create_block(inout b);
+        append_block_param(inout b, head, ty_i64());
+        append_block_param(inout b, body, ty_i64());
+        let short = create_block(inout b);
+        let long = create_block(inout b);
+        let under = ins_icmp_imm(inout b, cc_ult(), n, LANES);
+        ins_brif0(inout b, under, short, long);
+        switch_to_block(inout b, short);
+        lowercase_words(inout b, dst, src, n, scalar, done);
+
+        switch_to_block(inout b, long);
+        let (ca, cs, cb) = lower_constants(inout b);
+        let mut inv = ChunkSeq::new[Value]();
+        inv.push(end);
+        inv.push(ca);
+        inv.push(cs);
+        inv.push(cb);
+        let mut entry = ChunkSeq::new[u32]();
+        entry.push(z.id);
+        entry.push(end.id);
+        entry.push(ca.id);
+        entry.push(cs.id);
+        entry.push(cb.id);
+        let carried = loop_invariants(inout b, head, in inv.as_slice());
+        ins_jump(inout b, head, in entry.as_slice());
+
+        switch_to_block(inout b, head);
+        let k = block_param(inout b, head, 0);
+        let more = ins_icmp(inout b, cc_ult(), k, at_val(in carried.as_slice(), 0));
+        vector_head_exit(inout b, more, k, n, body, scalar);
+
+        switch_to_block(inout b, body);
+        let k = block_param(inout b, body, 0);
+        let from = ins_iadd(inout b, src, k);
+        let v = ins_load(inout b, ty_i8x16(), little(), from, 0);
+        let v = lower_vector(
+            inout b,
+            at_val(in carried.as_slice(), 1),
+            at_val(in carried.as_slice(), 2),
+            at_val(in carried.as_slice(), 3),
+            v
+        );
+        let to = ins_iadd(inout b, dst, k);
+        ins_store(inout b, little(), v, to, 0);
+        let k2 = ins_iadd_imm(inout b, k, LANES);
+        let mut back = ChunkSeq::new[u32]();
+        back.push(k2.id);
+        push_carried(inout b, inout back, in carried.as_slice());
+        ins_jump(inout b, head, in back.as_slice());
+    } else {
+        let zargs = vals1(z);
+        ins_jump(inout b, scalar, in zargs.as_slice());
+    }
+
+    switch_to_block(inout b, scalar);
+    let k = block_param(inout b, scalar, 0);
+    let more = ins_icmp(inout b, cc_ult(), k, n);
+    ins_brif0(inout b, more, scalar_body, done);
+
+    switch_to_block(inout b, scalar_body);
+    let from = ins_iadd(inout b, src, k);
+    let bv = ins_uload8(inout b, ty_i64(), PLAIN, from, 0);
+    let bv = lower_scalar(inout b, bv);
+    let to = ins_iadd(inout b, dst, k);
+    ins_istore8(inout b, PLAIN, bv, to, 0);
+    let k2 = ins_iadd_imm(inout b, k, 1);
+    let k2args = vals1(k2);
+    ins_jump(inout b, scalar, in k2args.as_slice());
+
+    switch_to_block(inout b, done);
+}
+
+pub fn emit_byte_op(call: u64, inout b: Builder, in m: Module) eff [Ffi[Cranelift]] {
+    let sub = call_arg(call, 0);
+    let is_seq = call_arg(call, 1) != 0;
+    let invariant = call_arg(call, 2) != 0;
+    let h_invariant = call_arg(call, 3) != 0;
+    let optimize = call_arg(call, 4) != 0;
+    let receiver = value_of_word(call_arg(call, 5));
+    let c0 = call_arg(call, 6);
+    let c1 = call_arg(call, 7);
+    let c2 = call_arg(call, 8);
+    let cdata = call_arg(call, 9);
+
+    if sub == BYTE_CHECK_COPY_FROM {
+        let (h, start, len) = seq_view_cached(inout b, receiver, is_seq, invariant, c0, c1, c2);
+        let at = value_of_word(call_arg(call, 10));
+        let src_is_seq = call_arg(call, 11) != 0;
+        let src_inv = call_arg(call, 12) != 0;
+        let src = value_of_word(call_arg(call, 13));
+        let sc0 = call_arg(call, 14);
+        let sc1 = call_arg(call, 15);
+        let sc2 = call_arg(call, 16);
+        let (sh, sstart, n) = seq_view_cached(inout b, src, src_is_seq, src_inv, sc0, sc1, sc2);
+        call_result_value(call, seq_fits(inout b, len, at, n));
+        call_result_value(call, h);
+        call_result_value(call, start);
+        call_result_value(call, len);
+        call_result_value(call, sh);
+        call_result_value(call, sstart);
+        call_result_value(call, n);
+    } else if sub == BYTE_COPY_FROM {
+        let total = call_arg(call, 10) != 0;
+        let at = value_of_word(call_arg(call, 11));
+        let src_is_seq = call_arg(call, 12) != 0;
+        let src_inv = call_arg(call, 13) != 0;
+        let src_h_inv = call_arg(call, 14) != 0;
+        let src = value_of_word(call_arg(call, 15));
+        let sc0 = call_arg(call, 16);
+        let sc1 = call_arg(call, 17);
+        let sc2 = call_arg(call, 18);
+        let scdata = call_arg(call, 19);
+        let stride = wrapping_i64(call_arg(call, 20));
+        let has_view = call_arg(call, 21) != 0;
+        let (h, start, len, sh, sstart, n) = if has_view {
+            (
+                value_of_word(call_arg(call, 22)),
+                value_of_word(call_arg(call, 23)),
+                value_of_word(call_arg(call, 24)),
+                value_of_word(call_arg(call, 25)),
+                value_of_word(call_arg(call, 26)),
+                value_of_word(call_arg(call, 27)),
+            )
+        } else {
+            let (h, start, len) = seq_view_cached(inout b, receiver, is_seq, invariant, c0, c1, c2);
+            let (sh, sstart, n) = seq_view_cached(inout b, src, src_is_seq, src_inv, sc0, sc1, sc2);
+            (h, start, len, sh, sstart, n)
+        };
+        if total {
+            let valid = seq_fits(inout b, len, at, n);
+            let (_yes, done) = seq_when_begin(inout b, valid);
+            let dst = seq_elem_addr(inout b, h, start, at, stride, h_invariant, cdata);
+            let z = zero(inout b);
+            let saddr = seq_elem_addr(inout b, sh, sstart, z, stride, src_h_inv, scdata);
+            let bytes = ins_imul_imm(inout b, n, stride);
+            seq_move(inout b, in m, dst, saddr, bytes);
+            call_result_value(call, seq_when_end(inout b, done, valid));
+        } else {
+            let dst = seq_elem_addr(inout b, h, start, at, stride, h_invariant, cdata);
+            let z = zero(inout b);
+            let saddr = seq_elem_addr(inout b, sh, sstart, z, stride, src_h_inv, scdata);
+            let bytes = ins_imul_imm(inout b, n, stride);
+            seq_move(inout b, in m, dst, saddr, bytes);
+            call_result_value(call, zero(inout b));
+        }
+    } else if sub == BYTE_CHECK_COPY_WITHIN {
+        let (h, start, len) = seq_view_cached(inout b, receiver, is_seq, invariant, c0, c1, c2);
+        let lo = value_of_word(call_arg(call, 10));
+        let hi = value_of_word(call_arg(call, 11));
+        let at = value_of_word(call_arg(call, 12));
+        let ordered = ins_icmp(inout b, cc_ule(), lo, hi);
+        let inside = ins_icmp(inout b, cc_ule(), hi, len);
+        let n = ins_isub(inout b, hi, lo);
+        let fits = seq_fits(inout b, len, at, n);
+        let source = ins_band(inout b, ordered, inside);
+        call_result_value(call, ins_band(inout b, source, fits));
+        call_result_value(call, h);
+        call_result_value(call, start);
+        call_result_value(call, len);
+        call_result_value(call, n);
+    } else if sub == BYTE_COPY_WITHIN {
+        let total = call_arg(call, 10) != 0;
+        let lo = value_of_word(call_arg(call, 11));
+        let hi = value_of_word(call_arg(call, 12));
+        let at = value_of_word(call_arg(call, 13));
+        let stride = wrapping_i64(call_arg(call, 14));
+        let has_view = call_arg(call, 15) != 0;
+        if total {
+            let (h, start, len) = if has_view {
+                (
+                    value_of_word(call_arg(call, 16)),
+                    value_of_word(call_arg(call, 17)),
+                    value_of_word(call_arg(call, 18)),
+                )
+            } else {
+                seq_view_cached(inout b, receiver, is_seq, invariant, c0, c1, c2)
+            };
+            let ordered = ins_icmp(inout b, cc_ule(), lo, hi);
+            let inside = ins_icmp(inout b, cc_ule(), hi, len);
+            let n = ins_isub(inout b, hi, lo);
+            let fits = seq_fits(inout b, len, at, n);
+            let source = ins_band(inout b, ordered, inside);
+            let valid = ins_band(inout b, source, fits);
+            let (_yes, done) = seq_when_begin(inout b, valid);
+            let dst = seq_elem_addr(inout b, h, start, at, stride, h_invariant, cdata);
+            let src = seq_elem_addr(inout b, h, start, lo, stride, h_invariant, cdata);
+            let bytes = ins_imul_imm(inout b, n, stride);
+            seq_move_overlapping(inout b, in m, dst, src, bytes);
+            call_result_value(call, seq_when_end(inout b, done, valid));
+        } else {
+            let (h, start, n) = if has_view {
+                (
+                    value_of_word(call_arg(call, 16)),
+                    value_of_word(call_arg(call, 17)),
+                    value_of_word(call_arg(call, 19)),
+                )
+            } else {
+                let (h, start, _len) = seq_view_cached(
+                    inout b,
+                    receiver,
+                    is_seq,
+                    invariant,
+                    c0,
+                    c1,
+                    c2
+                );
+                (h, start, ins_isub(inout b, hi, lo))
+            };
+            let dst = seq_elem_addr(inout b, h, start, at, stride, h_invariant, cdata);
+            let src = seq_elem_addr(inout b, h, start, lo, stride, h_invariant, cdata);
+            let bytes = ins_imul_imm(inout b, n, stride);
+            seq_move_overlapping(inout b, in m, dst, src, bytes);
+            call_result_value(call, zero(inout b));
+        }
+    } else if sub == BYTE_FILL {
+        let (h, start, len) = seq_view_cached(inout b, receiver, is_seq, invariant, c0, c1, c2);
+        let val = value_of_word(call_arg(call, 10));
+        let elem = elem_from_call(call, 11);
+        seq_fill_elems(inout b, in m, h, start, len, val, elem, optimize, cdata, h_invariant);
+        call_result_value(call, zero(inout b));
+    } else if sub == BYTE_CHECK_FILL_RANGE {
+        let (h, start, len) = seq_view_cached(inout b, receiver, is_seq, invariant, c0, c1, c2);
+        let lo = value_of_word(call_arg(call, 10));
+        let hi = value_of_word(call_arg(call, 11));
+        let ordered = ins_icmp(inout b, cc_ule(), lo, hi);
+        let inside = ins_icmp(inout b, cc_ule(), hi, len);
+        call_result_value(call, ins_band(inout b, ordered, inside));
+        call_result_value(call, h);
+        call_result_value(call, start);
+        call_result_value(call, len);
+    } else if sub == BYTE_FILL_RANGE {
+        let total = call_arg(call, 10) != 0;
+        let lo = value_of_word(call_arg(call, 11));
+        let hi = value_of_word(call_arg(call, 12));
+        let val = value_of_word(call_arg(call, 13));
+        let elem = elem_from_call(call, 14);
+        let has_view = call_arg(call, 17) != 0;
+        let (h, start, len) = if has_view {
+            (
+                value_of_word(call_arg(call, 18)),
+                value_of_word(call_arg(call, 19)),
+                value_of_word(call_arg(call, 20)),
+            )
+        } else {
+            seq_view_cached(inout b, receiver, is_seq, invariant, c0, c1, c2)
+        };
+        if total {
+            let ordered = ins_icmp(inout b, cc_ule(), lo, hi);
+            let inside = ins_icmp(inout b, cc_ule(), hi, len);
+            let valid = ins_band(inout b, ordered, inside);
+            let (_yes, done) = seq_when_begin(inout b, valid);
+            let from = ins_iadd(inout b, start, lo);
+            let n = ins_isub(inout b, hi, lo);
+            seq_fill_elems(inout b, in m, h, from, n, val, elem, optimize, cdata, h_invariant);
+            call_result_value(call, seq_when_end(inout b, done, valid));
+        } else {
+            let from = ins_iadd(inout b, start, lo);
+            let n = ins_isub(inout b, hi, lo);
+            seq_fill_elems(inout b, in m, h, from, n, val, elem, optimize, cdata, h_invariant);
+            call_result_value(call, zero(inout b));
+        }
+    } else if sub == BYTE_CHECK_WIDE {
+        let (h, start, len) = seq_view_cached(inout b, receiver, is_seq, invariant, c0, c1, c2);
+        let at = value_of_word(call_arg(call, 10));
+        let wbytes = wrapping_i64(call_arg(call, 11));
+        let width = ins_iconst(inout b, ty_i64(), wbytes);
+        let valid = seq_fits(inout b, len, at, width);
+        let addr = seq_elem_addr(inout b, h, start, at, 1, h_invariant, cdata);
+        call_result_value(call, valid);
+        call_result_value(call, h);
+        call_result_value(call, start);
+        call_result_value(call, len);
+        call_result_value(call, addr);
+    } else if sub == BYTE_WIDE {
+        let write = call_arg(call, 10) != 0;
+        let total = call_arg(call, 11) != 0;
+        let big = call_arg(call, 12) != 0;
+        let wbytes = call_arg(call, 13);
+        let at = value_of_word(call_arg(call, 14));
+        let val = value_of_word(call_arg(call, 15));
+        let opt_meta = call_arg(call, 16);
+        let some_tag = wrapping_i64(call_arg(call, 17));
+        let none_tag = wrapping_i64(call_arg(call, 18));
+        let payload_off = wrapping_u32(call_arg(call, 19));
+        let has_view = call_arg(call, 20) != 0;
+        let (h, start, len) = if has_view {
+            (
+                value_of_word(call_arg(call, 21)),
+                value_of_word(call_arg(call, 22)),
+                value_of_word(call_arg(call, 23)),
+            )
+        } else {
+            seq_view_cached(inout b, receiver, is_seq, invariant, c0, c1, c2)
+        };
+        let int_ty = if wbytes == 2 {
+            ty_i16()
+        } else if wbytes == 4 {
+            ty_i32()
+        } else {
+            ty_i64()
+        };
+        if write {
+            if total {
+                let width = ins_iconst(inout b, ty_i64(), wrapping_i64(wbytes));
+                let valid = seq_fits(inout b, len, at, width);
+                let addr = seq_elem_addr(inout b, h, start, at, 1, h_invariant, cdata);
+                let (_yes, done) = seq_when_begin(inout b, valid);
+                let mut v = val;
+                if wbytes != 8 {
+                    v = ins_ireduce(inout b, int_ty, v);
+                }
+                if big {
+                    v = ins_bswap(inout b, v);
+                }
+                ins_store(inout b, PLAIN, v, addr, 0);
+                call_result_value(call, seq_when_end(inout b, done, valid));
+            } else {
+                let addr = if has_view {
+                    value_of_word(call_arg(call, 24))
+                } else {
+                    seq_elem_addr(inout b, h, start, at, 1, h_invariant, cdata)
+                };
+                let mut v = val;
+                if wbytes != 8 {
+                    v = ins_ireduce(inout b, int_ty, v);
+                }
+                if big {
+                    v = ins_bswap(inout b, v);
+                }
+                ins_store(inout b, PLAIN, v, addr, 0);
+                call_result_value(call, zero(inout b));
+            }
+        } else if total {
+            let width = ins_iconst(inout b, ty_i64(), wrapping_i64(wbytes));
+            let valid = seq_fits(inout b, len, at, width);
+            let addr = seq_elem_addr(inout b, h, start, at, 1, h_invariant, cdata);
+            let (out, _some, done) = seq_option_begin(
+                inout b,
+                in m,
+                valid,
+                opt_meta,
+                some_tag,
+                none_tag,
+                optimize
+            );
+            let mut v = ins_load(inout b, int_ty, PLAIN, addr, 0);
+            if big {
+                v = ins_bswap(inout b, v);
+            }
+            if wbytes != 8 {
+                v = ins_uextend(inout b, ty_i64(), v);
+            }
+            let bits = wbytes << 3;
+            let e = ElemDesc {
+                flags: bits << 8,
+                size_or_ty: widen_u64(int_ty.code),
+                stride: wrapping_i64(wbytes),
+            };
+            let res = seq_option_finish(
+                inout b,
+                out,
+                done,
+                v,
+                e,
+                opt_meta,
+                some_tag,
+                payload_off,
+                optimize
+            );
+            seq_option_answer(call, inout b, res, done, opt_meta);
+        } else {
+            let addr = if has_view {
+                value_of_word(call_arg(call, 24))
+            } else {
+                seq_elem_addr(inout b, h, start, at, 1, h_invariant, cdata)
+            };
+            let mut v = ins_load(inout b, int_ty, PLAIN, addr, 0);
+            if big {
+                v = ins_bswap(inout b, v);
+            }
+            if wbytes != 8 {
+                v = ins_uextend(inout b, ty_i64(), v);
+            }
+            call_result_value(call, v);
+        }
+    } else if sub == BYTE_SUM_BE16 {
+        let (h, start, len) = seq_view_cached(inout b, receiver, is_seq, invariant, c0, c1, c2);
+        let z = zero(inout b);
+        let p = seq_elem_addr(inout b, h, start, z, 1, h_invariant, cdata);
+        let simd = byte_scans_vectorized(in m, optimize);
+        let (acc, from) = if simd {
+            sum_be16_vector(inout b, in m, p, len)
+        } else {
+            (z, z)
+        };
+        call_result_value(call, sum_be16_scalar(inout b, p, from, len, acc));
+    } else if sub == BYTE_BYTES_EQ {
+        let (h, start, len) = seq_view_cached(inout b, receiver, is_seq, invariant, c0, c1, c2);
+        let fold = call_arg(call, 10) != 0;
+        let src_is_seq = call_arg(call, 11) != 0;
+        let src_inv = call_arg(call, 12) != 0;
+        let src_h_inv = call_arg(call, 13) != 0;
+        let src = value_of_word(call_arg(call, 14));
+        let sc0 = call_arg(call, 15);
+        let sc1 = call_arg(call, 16);
+        let sc2 = call_arg(call, 17);
+        let scdata = call_arg(call, 18);
+        let z = zero(inout b);
+        let p = seq_elem_addr(inout b, h, start, z, 1, h_invariant, cdata);
+        let (h2, s2, len2) = seq_view_cached(inout b, src, src_is_seq, src_inv, sc0, sc1, sc2);
+        let q = seq_elem_addr(inout b, h2, s2, z, 1, src_h_inv, scdata);
+        let simd = byte_scans_vectorized(in m, optimize);
+        call_result_value(call, bytes_eq(inout b, in m, p, q, len, len2, simd, fold, optimize));
+    } else if sub == BYTE_BYTES_CMP {
+        let (h, start, len) = seq_view_cached(inout b, receiver, is_seq, invariant, c0, c1, c2);
+        let src_is_seq = call_arg(call, 10) != 0;
+        let src_inv = call_arg(call, 11) != 0;
+        let src_h_inv = call_arg(call, 12) != 0;
+        let src = value_of_word(call_arg(call, 13));
+        let sc0 = call_arg(call, 14);
+        let sc1 = call_arg(call, 15);
+        let sc2 = call_arg(call, 16);
+        let scdata = call_arg(call, 17);
+        let z = zero(inout b);
+        let p = seq_elem_addr(inout b, h, start, z, 1, h_invariant, cdata);
+        let (h2, s2, len2) = seq_view_cached(inout b, src, src_is_seq, src_inv, sc0, sc1, sc2);
+        let q = seq_elem_addr(inout b, h2, s2, z, 1, src_h_inv, scdata);
+        let simd = byte_scans_vectorized(in m, optimize);
+        call_result_value(call, bytes_cmp(inout b, in m, p, q, len, len2, simd, optimize));
+    } else if sub == BYTE_FIND_BYTE || sub == BYTE_FIND_EITHER || sub == BYTE_FIND_NOT_IN {
+        let (h, start, len) = seq_view_cached(inout b, receiver, is_seq, invariant, c0, c1, c2);
+        let opt_meta = call_arg(call, 10);
+        let some_tag = wrapping_i64(call_arg(call, 11));
+        let none_tag = wrapping_i64(call_arg(call, 12));
+        let payload_off = wrapping_u32(call_arg(call, 13));
+        let z = zero(inout b);
+        let p = seq_elem_addr(inout b, h, start, z, 1, h_invariant, cdata);
+        let simd_base = byte_scans_vectorized(in m, optimize);
+        let (present, index) = if sub == BYTE_FIND_BYTE {
+            let b0 = ins_band_imm(inout b, value_of_word(call_arg(call, 14)), 255);
+            let n = Needle {
+                kind: 0,
+                a: b0,
+                b: z,
+                c: z,
+            };
+            find_first(inout b, in m, p, len, n, simd_base, optimize)
+        } else if sub == BYTE_FIND_EITHER {
+            let b0 = ins_band_imm(inout b, value_of_word(call_arg(call, 14)), 255);
+            let b1 = ins_band_imm(inout b, value_of_word(call_arg(call, 15)), 255);
+            let n = Needle {
+                kind: 1,
+                a: b0,
+                b: b1,
+                c: z,
+            };
+            find_first(inout b, in m, p, len, n, simd_base, optimize)
+        } else {
+            let lo = value_of_word(call_arg(call, 14));
+            let hi = value_of_word(call_arg(call, 15));
+            let high = ins_band_imm(inout b, value_of_word(call_arg(call, 16)), 1);
+            let shuffles = has_x86_pshufb_lowering(in m) || isa_triple_arch(in m) == arch_aarch64();
+            let simd = simd_base && shuffles;
+            if simd_base && !simd {
+                find_not_in_runs(inout b, p, len, lo, hi, high)
+            } else {
+                let n = Needle {
+                    kind: 2,
+                    a: lo,
+                    b: hi,
+                    c: high,
+                };
+                find_first(inout b, in m, p, len, n, simd, optimize)
+            }
+        };
+        let u64_e = ElemDesc {
+            flags: 64 << 8,
+            size_or_ty: 4,
+            stride: 8,
+        };
+        let (out, _some, done) = seq_option_begin(
+            inout b,
+            in m,
+            present,
+            opt_meta,
+            some_tag,
+            none_tag,
+            optimize
+        );
+        let res = seq_option_finish(
+            inout b,
+            out,
+            done,
+            index,
+            u64_e,
+            opt_meta,
+            some_tag,
+            payload_off,
+            optimize
+        );
+        seq_option_answer(call, inout b, res, done, opt_meta);
+    } else if sub == BYTE_EXTEND_LOWER {
+        let h = receiver;
+        // Called after `seq_reserve` with grown/current `h`:
+        // args[10..] = [old_len, needed, src_h, src_start, src_len, src_h_inv, scdata, zero]
+        let old_len = value_of_word(call_arg(call, 10));
+        let needed = value_of_word(call_arg(call, 11));
+        let sh = value_of_word(call_arg(call, 12));
+        let sstart = value_of_word(call_arg(call, 13));
+        let slen = value_of_word(call_arg(call, 14));
+        let src_h_inv = call_arg(call, 15) != 0;
+        let scdata = call_arg(call, 16);
+        let z = value_of_word(call_arg(call, 17));
+        let dst = seq_elem_addr(inout b, h, z, old_len, 1, h_invariant, cdata);
+        let src = seq_elem_addr(inout b, sh, sstart, z, 1, src_h_inv, scdata);
+        let simd = byte_scans_vectorized(in m, optimize);
+        lowercase_copy(inout b, dst, src, slen, simd);
+        let some = ins_icmp_imm(inout b, cc_ne(), slen, 0);
+        seq_set_len_if(inout b, h, some, needed);
+        call_result_value(call, z);
+    } else if sub == BYTE_CHECK_MAKE_LOWER {
+        let (h, start, len) = seq_view_cached(inout b, receiver, is_seq, invariant, c0, c1, c2);
+        let z = zero(inout b);
+        let p = seq_elem_addr(inout b, h, start, z, 1, h_invariant, cdata);
+        let lo = value_of_word(call_arg(call, 10));
+        let hi = value_of_word(call_arg(call, 11));
+        let ordered = ins_icmp(inout b, cc_ule(), lo, hi);
+        let inside = ins_icmp(inout b, cc_ule(), hi, len);
+        call_result_value(call, ins_band(inout b, ordered, inside));
+        call_result_value(call, h);
+        call_result_value(call, start);
+        call_result_value(call, len);
+        call_result_value(call, p);
+    } else if sub == BYTE_MAKE_LOWER {
+        let total = call_arg(call, 10) != 0;
+        let lo = value_of_word(call_arg(call, 11));
+        let hi = value_of_word(call_arg(call, 12));
+        let has_view = call_arg(call, 13) != 0;
+        let simd = byte_scans_vectorized(in m, optimize);
+        if total {
+            let (h, start, len) = if has_view {
+                (
+                    value_of_word(call_arg(call, 14)),
+                    value_of_word(call_arg(call, 15)),
+                    value_of_word(call_arg(call, 16)),
+                )
+            } else {
+                seq_view_cached(inout b, receiver, is_seq, invariant, c0, c1, c2)
+            };
+            let z = zero(inout b);
+            let p = seq_elem_addr(inout b, h, start, z, 1, h_invariant, cdata);
+            let ordered = ins_icmp(inout b, cc_ule(), lo, hi);
+            let inside = ins_icmp(inout b, cc_ule(), hi, len);
+            let valid = ins_band(inout b, ordered, inside);
+            let (_yes, done) = seq_when_begin(inout b, valid);
+            let at = ins_iadd(inout b, p, lo);
+            let n = ins_isub(inout b, hi, lo);
+            lowercase_copy(inout b, at, at, n, simd);
+            call_result_value(call, seq_when_end(inout b, done, valid));
+        } else {
+            let p = if has_view {
+                value_of_word(call_arg(call, 17))
+            } else {
+                let (h, start, _len) = seq_view_cached(
+                    inout b,
+                    receiver,
+                    is_seq,
+                    invariant,
+                    c0,
+                    c1,
+                    c2
+                );
+                let z = zero(inout b);
+                seq_elem_addr(inout b, h, start, z, 1, h_invariant, cdata)
+            };
+            let at = ins_iadd(inout b, p, lo);
+            let n = ins_isub(inout b, hi, lo);
+            lowercase_copy(inout b, at, at, n, simd);
+            call_result_value(call, zero(inout b));
+        }
+    }
+}

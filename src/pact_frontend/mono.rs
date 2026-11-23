@@ -418,6 +418,88 @@ struct Mono<'a> {
     errors: Vec<Diagnostic>,
 }
 
+fn collect_mono_funcs(module: &Module) -> BTreeMap<String, Function> {
+    let mut funcs = BTreeMap::new();
+    for item in &module.items {
+        match item {
+            Item::Function(f) => {
+                funcs.insert(f.name.clone(), (**f).clone());
+            }
+            Item::Impl {
+                ty,
+                generics,
+                methods,
+            } => {
+                for m in methods {
+                    let mut f = m.clone();
+                    f.name = format!("{}::{}", ty.name(), m.name);
+                    f.generics.splice(0..0, generics.clone());
+                    for p in &mut f.params {
+                        if p.name == "self" && p.ty == Type::Infer {
+                            p.ty = ty.clone();
+                        }
+                    }
+                    funcs.insert(f.name.clone(), f);
+                }
+            }
+            _ => {}
+        }
+    }
+    funcs
+}
+
+#[doc(hidden)]
+pub struct MonoAdtInput {
+    pub name: String,
+    pub generics: Vec<String>,
+}
+
+#[doc(hidden)]
+pub struct MonoTypeBoundInput {
+    pub adt_name: String,
+    pub entries: Vec<(usize, String, Vec<Type>)>,
+}
+
+#[doc(hidden)]
+pub struct MonoCallInput {
+    pub span: Span,
+    pub callee_idx: usize,
+    pub vars: Vec<(String, Type)>,
+    pub scopes: Vec<Vec<String>>,
+}
+
+#[doc(hidden)]
+pub struct MonoBoundInput {
+    pub trait_name: String,
+    pub ty: Type,
+    pub args: Vec<Type>,
+}
+
+#[doc(hidden)]
+pub struct MonoFuncInput {
+    pub name: String,
+    pub span: Span,
+    pub generics: Vec<Generic>,
+    pub scopes: Vec<Vec<String>>,
+    pub is_conf_generated: bool,
+    pub all_bounds: Vec<MonoBoundInput>,
+    pub bounds: Vec<MonoBoundInput>,
+    pub calls: Vec<MonoCallInput>,
+    pub fn_val_uses: Vec<(Span, usize)>,
+    pub walked_types: Vec<Type>,
+}
+
+#[doc(hidden)]
+pub struct MonoCheckOutcome {
+    pub module: Module,
+    pub base_world: World,
+    pub adts: Vec<MonoAdtInput>,
+    pub type_bounds: Vec<MonoTypeBoundInput>,
+    pub funcs: Vec<MonoFuncInput>,
+    pub bounded: Vec<bool>,
+    pub errors: Vec<Diagnostic>,
+}
+
 impl Elaborator {
     /// The static (monomorphized) bounds of `function`: a `dyn`
     /// parameter's bound is discharged by a vtable instead.
@@ -551,38 +633,167 @@ impl Elaborator {
         out
     }
 
+    /// Differential probe for `Mono::close_bounded` and `Mono::check_obligations` (`#1659`).
+    pub(super) fn probe_mono_check_step(&self, module: &Module, world: &World) -> MonoCheckOutcome {
+        let funcs = collect_mono_funcs(module);
+        let fn_names: Vec<String> = funcs.keys().cloned().collect();
+        let fn_index: BTreeMap<String, usize> = fn_names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (n.clone(), i))
+            .collect();
+        let mut m = Mono {
+            el: self,
+            world,
+            bounded: funcs
+                .keys()
+                .filter(|n| !self.bounds_of(n).is_empty() || n.starts_with(STUB))
+                .cloned()
+                .collect(),
+            funcs: funcs.clone(),
+            instances: BTreeMap::new(),
+            names: BTreeSet::new(),
+            clones: vec![],
+            errors: vec![],
+        };
+        let mut func_inputs = Vec::with_capacity(fn_names.len());
+        for name in &fn_names {
+            let f = &m.funcs[name];
+            let scopes = scopes_at(&self.fe.module, f.span.start)
+                .into_iter()
+                .map(|layer| layer.into_iter().map(|r| r.name).collect::<Vec<_>>())
+                .collect();
+            let is_conf_generated = self
+                .fe
+                .confs
+                .iter()
+                .any(|c| c.local && c.generated.values().any(|g| g == name));
+            let all_bounds = self
+                .fe
+                .bounds
+                .get(name)
+                .map(|bs| {
+                    bs.iter()
+                        .map(|b| MonoBoundInput {
+                            trait_name: b.key.1.clone(),
+                            ty: b.ty.clone(),
+                            args: b.args.clone(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let bounds = self
+                .bounds_of(name)
+                .into_iter()
+                .map(|b| MonoBoundInput {
+                    trait_name: b.key.1,
+                    ty: b.ty,
+                    args: b.args,
+                })
+                .collect();
+            let calls = m
+                .calls_in(f)
+                .into_iter()
+                .filter_map(|(span, callee, vars)| {
+                    let callee_idx = *fn_index.get(&callee)?;
+                    let scopes = scopes_at(&self.fe.module, span.start)
+                        .into_iter()
+                        .map(|layer| layer.into_iter().map(|r| r.name).collect::<Vec<_>>())
+                        .collect();
+                    Some(MonoCallInput {
+                        span,
+                        callee_idx,
+                        vars: vars.into_iter().collect(),
+                        scopes,
+                    })
+                })
+                .collect();
+            let mut callees = BTreeSet::new();
+            let mut probe = f.clone();
+            each_body_expr(&mut probe, &mut |e| {
+                if let ExprKind::Call { callee, .. } = &e.kind {
+                    callees.insert((callee.span.start, callee.span.end));
+                }
+            });
+            let mut fn_val_uses = vec![];
+            each_body_expr(&mut probe, &mut |e| {
+                if let ExprKind::Name(n) = &e.kind
+                    && let Some(&target) = fn_index.get(n)
+                    && !callees.contains(&(e.span.start, e.span.end))
+                    && matches!(
+                        world.types.get(&(e.span.start, e.span.end)),
+                        Some(Type::Function { .. })
+                    )
+                {
+                    fn_val_uses.push((e.span.clone(), target));
+                }
+            });
+            let mut walked_types = vec![];
+            walk_function(&mut probe, &mut |t| walked_types.push(t.clone()));
+            if !self.spans.is_builtin(&f.span) {
+                walked_types.extend(
+                    world
+                        .types
+                        .range((f.span.start, 0)..=(f.span.end, usize::MAX))
+                        .map(|(_, t)| t.clone()),
+                );
+            }
+            func_inputs.push(MonoFuncInput {
+                name: name.clone(),
+                span: f.span.clone(),
+                generics: f.generics.clone(),
+                scopes,
+                is_conf_generated,
+                all_bounds,
+                bounds,
+                calls,
+                fn_val_uses,
+                walked_types,
+            });
+        }
+        m.close_bounded();
+        m.check_obligations();
+        let bounded = fn_names.iter().map(|n| m.bounded.contains(n)).collect();
+        let adts = self
+            .fe
+            .base_world
+            .adts
+            .iter()
+            .map(|(name, a)| MonoAdtInput {
+                name: name.clone(),
+                generics: a.generics.iter().map(|g| g.name.clone()).collect(),
+            })
+            .collect();
+        let type_bounds = self
+            .fe
+            .type_bounds
+            .iter()
+            .map(|(adt_name, entries)| MonoTypeBoundInput {
+                adt_name: adt_name.clone(),
+                entries: entries
+                    .iter()
+                    .map(|(idx, b)| (*idx, b.key.1.clone(), b.args.clone()))
+                    .collect(),
+            })
+            .collect();
+        MonoCheckOutcome {
+            module: self.fe.module.clone(),
+            base_world: self.fe.base_world.clone(),
+            adts,
+            type_bounds,
+            funcs: func_inputs,
+            bounded,
+            errors: m.errors,
+        }
+    }
+
     /// Replaces bounded generics by their instances (see the module docs).
     pub(super) fn monomorphize(
         &self,
         mut module: Module,
         world: &World,
     ) -> Result<Module, Vec<Diagnostic>> {
-        let mut funcs = BTreeMap::new();
-        for item in &module.items {
-            match item {
-                Item::Function(f) => {
-                    funcs.insert(f.name.clone(), (**f).clone());
-                }
-                Item::Impl {
-                    ty,
-                    generics,
-                    methods,
-                } => {
-                    for m in methods {
-                        let mut f = m.clone();
-                        f.name = format!("{}::{}", ty.name(), m.name);
-                        f.generics.splice(0..0, generics.clone());
-                        for p in &mut f.params {
-                            if p.name == "self" && p.ty == Type::Infer {
-                                p.ty = ty.clone();
-                            }
-                        }
-                        funcs.insert(f.name.clone(), f);
-                    }
-                }
-                _ => {}
-            }
-        }
+        let funcs = collect_mono_funcs(&module);
         if self.fe.bounds.is_empty() && self.fe.type_bounds.is_empty() && self.dyn_boxed.is_empty()
         {
             return Ok(self.prune(module));

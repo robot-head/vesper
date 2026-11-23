@@ -39,10 +39,32 @@ pub use self::session::{
     session_open,
     session_solve
 };
+use self::mono_check::{
+    mono_check_words
+};
+use self::resolve::{
+    normalize_words,
+    resolve_words
+};
 use self::session::{
     queries_words,
     session_words
 };
+
+// Task "mono_check" (part 5): `Mono::close_bounded` and `Mono::check_obligations`.
+pub fn check_pact_mono_check(in input: Str) -> ChunkSeq[u64] {
+    mono_check_words(in input.as_bytes())
+}
+
+// Task "resolve" (part 3): `TraitCalls::resolve` over a Pact session.
+pub fn check_pact_resolve(in input: Str) -> ChunkSeq[u64] {
+    resolve_words(in input.as_bytes())
+}
+
+// Task "normalize" (part 3): `Elaborator::normalize` over a Pact session.
+pub fn check_pact_normalize(in input: Str) -> ChunkSeq[u64] {
+    normalize_words(in input.as_bytes())
+}
 
 // Task "session" (part 2b): the coherence-gated Pact session over the
 // declaration section plus the session metadata (session_input.ves);

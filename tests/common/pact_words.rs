@@ -434,3 +434,289 @@ pub fn decode_session_queries(words: &[u64]) -> DecodedSessionRun {
         answers,
     }
 }
+
+/// Binary query payload for `check_pact_resolve`.
+pub struct ResolveCallPayload<'a> {
+    pub span: &'a vesper::ast::Span,
+    pub function: &'a str,
+    pub generics: &'a [vesper::ast::Generic],
+    pub gen_bounds: &'a [Vec<(String, Vec<Type>)>],
+    pub conf_bounds: &'a [(Type, String, Vec<Type>)],
+    pub scopes: &'a [Vec<String>],
+    pub callee: &'a str,
+    pub path: bool,
+    pub receiver: &'a Type,
+}
+
+/// Binary query payload for `check_pact_normalize`.
+pub struct NormalizePayload<'a> {
+    pub span: &'a vesper::ast::Span,
+    pub function: &'a str,
+    pub generics: &'a [vesper::ast::Generic],
+    pub gen_bounds: &'a [Vec<(String, Vec<Type>)>],
+    pub conf_bounds: &'a [(Type, String, Vec<Type>)],
+    pub scopes: &'a [Vec<String>],
+    pub ty: &'a Type,
+}
+
+fn push_cx_header(
+    e: &mut Enc,
+    t: &mut Vec<u64>,
+    generics: &[vesper::ast::Generic],
+    gen_bounds: &[Vec<(String, Vec<Type>)>],
+    conf_bounds: &[(Type, String, Vec<Type>)],
+    scopes: &[Vec<String>],
+) {
+    t.push(generics.len() as u64);
+    for (gi, g) in generics.iter().enumerate() {
+        t.push(e.name(&g.name));
+        t.push(mode_word(g.bound));
+        t.push(u64::from(g.row));
+        let bounds = gen_bounds.get(gi).map(Vec::as_slice).unwrap_or(&[]);
+        t.push(bounds.len() as u64);
+        for (bt, bargs) in bounds {
+            t.push(e.name(bt));
+            t.push(bargs.len() as u64);
+            for a in bargs {
+                t.push(e.ty(a));
+            }
+        }
+    }
+    t.push(conf_bounds.len() as u64);
+    for (gty, bt, bargs) in conf_bounds {
+        t.push(e.ty(gty));
+        t.push(e.name(bt));
+        t.push(bargs.len() as u64);
+        for a in bargs {
+            t.push(e.ty(a));
+        }
+    }
+    t.push(scopes.len() as u64);
+    for sc in scopes {
+        t.push(sc.len() as u64);
+        for m in sc {
+            t.push(e.name(m));
+        }
+    }
+}
+
+pub fn encode_resolve_call(q: &ResolveCallPayload<'_>) -> Option<Vec<u8>> {
+    let mut e = Enc::default();
+    let mut t = vec![];
+    t.push(q.span.start as u64);
+    t.push(q.span.end as u64);
+    t.push(e.name(q.function));
+    push_cx_header(
+        &mut e,
+        &mut t,
+        q.generics,
+        q.gen_bounds,
+        q.conf_bounds,
+        q.scopes,
+    );
+    t.push(e.name(q.callee));
+    t.push(u64::from(q.path));
+    t.push(e.ty(q.receiver));
+    Some(e.finish(&[], &t))
+}
+
+pub fn encode_normalize(q: &NormalizePayload<'_>) -> Option<Vec<u8>> {
+    let mut e = Enc::default();
+    let mut t = vec![];
+    t.push(q.span.start as u64);
+    t.push(q.span.end as u64);
+    t.push(e.name(q.function));
+    push_cx_header(
+        &mut e,
+        &mut t,
+        q.generics,
+        q.gen_bounds,
+        q.conf_bounds,
+        q.scopes,
+    );
+    t.push(e.ty(q.ty));
+    Some(e.finish(&[], &t))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum DecodedResolveOutcome {
+    None,
+    Ok(String),
+    Err(Vec<Diagnostic>),
+}
+
+pub fn decode_resolve_outcomes(
+    words: &[u64],
+) -> (Vec<Diagnostic>, bool, Vec<DecodedResolveOutcome>) {
+    let (diag_text, mut at) = decode_packed_text_at(words, 0);
+    let diagnostics = decode_session_text(&diag_text);
+    let ok = words.get(at).copied().unwrap_or(0) != 0;
+    at += 1;
+    if !ok {
+        return (diagnostics, false, vec![]);
+    }
+    let nq = words.get(at).copied().unwrap_or(0) as usize;
+    at += 1;
+    let mut outcomes = Vec::with_capacity(nq);
+    for _ in 0..nq {
+        let status = words.get(at).copied().unwrap_or(0);
+        at += 1;
+        let (text, next_at) = decode_packed_text_at(words, at);
+        at = next_at;
+        let item = match status {
+            0 => DecodedResolveOutcome::None,
+            1 => DecodedResolveOutcome::Ok(text),
+            _ => DecodedResolveOutcome::Err(decode_session_text(&text)),
+        };
+        outcomes.push(item);
+    }
+    (diagnostics, true, outcomes)
+}
+
+pub fn encode_mono_check_input(
+    outcome: &vesper::pact_frontend::MonoCheckOutcome,
+    pkg_name: &str,
+    pkg_ver: &str,
+) -> Option<Vec<u8>> {
+    let prelude = vesper::pact_frontend::prelude_world();
+    let fp = vesper::pact_frontend::declaration_fingerprint(&outcome.module);
+    let mut out = session_input(
+        &outcome.module,
+        &outcome.base_world,
+        &prelude,
+        pkg_name,
+        pkg_ver,
+        64,
+        4096,
+        64,
+        &fp,
+    )?;
+    let mut e = Enc::default();
+    let mut t = vec![];
+    t.push(outcome.adts.len() as u64);
+    for a in &outcome.adts {
+        t.push(e.name(&a.name));
+        t.push(a.generics.len() as u64);
+        for g in &a.generics {
+            t.push(e.name(g));
+        }
+    }
+    t.push(outcome.type_bounds.len() as u64);
+    for tb in &outcome.type_bounds {
+        t.push(e.name(&tb.adt_name));
+        t.push(tb.entries.len() as u64);
+        for (pidx, tr, args) in &tb.entries {
+            t.push(*pidx as u64);
+            t.push(e.name(tr));
+            t.push(args.len() as u64);
+            for a in args {
+                t.push(e.ty(a));
+            }
+        }
+    }
+    t.push(outcome.funcs.len() as u64);
+    for f in &outcome.funcs {
+        t.push(e.name(&f.name));
+        t.push(f.span.start as u64);
+        t.push(f.span.end as u64);
+        let mut gen_bounds = vec![vec![]; f.generics.len()];
+        let mut conf_bounds = vec![];
+        if !f.is_conf_generated {
+            for b in &f.all_bounds {
+                if let Type::Named(n, args) = &b.ty
+                    && args.is_empty()
+                    && let Some(gi) = f.generics.iter().position(|g| g.name == *n)
+                {
+                    gen_bounds[gi].push((b.trait_name.clone(), b.args.clone()));
+                } else {
+                    conf_bounds.push((b.ty.clone(), b.trait_name.clone(), b.args.clone()));
+                }
+            }
+        }
+        push_cx_header(
+            &mut e,
+            &mut t,
+            &f.generics,
+            &gen_bounds,
+            &conf_bounds,
+            &f.scopes,
+        );
+        t.push(f.bounds.len() as u64);
+        for b in &f.bounds {
+            t.push(e.name(&b.trait_name));
+            t.push(e.ty(&b.ty));
+            t.push(b.args.len() as u64);
+            for a in &b.args {
+                t.push(e.ty(a));
+            }
+        }
+        t.push(f.calls.len() as u64);
+        for c in &f.calls {
+            t.push(c.span.start as u64);
+            t.push(c.span.end as u64);
+            t.push(c.callee_idx as u64);
+            t.push(c.vars.len() as u64);
+            for (k, v) in &c.vars {
+                t.push(e.name(k));
+                t.push(e.ty(v));
+            }
+            t.push(c.scopes.len() as u64);
+            for sc in &c.scopes {
+                t.push(sc.len() as u64);
+                for m in sc {
+                    t.push(e.name(m));
+                }
+            }
+        }
+        t.push(f.fn_val_uses.len() as u64);
+        for (sp, target) in &f.fn_val_uses {
+            t.push(sp.start as u64);
+            t.push(sp.end as u64);
+            t.push(*target as u64);
+        }
+        t.push(f.walked_types.len() as u64);
+        for ty in &f.walked_types {
+            t.push(e.ty(ty));
+        }
+    }
+    out.extend_from_slice(&e.finish(&[], &t));
+    Some(out)
+}
+
+pub fn decode_mono_check(words: &[u64]) -> (Vec<Diagnostic>, bool, Vec<bool>, Vec<Diagnostic>) {
+    let (diag_text, mut at) = decode_packed_text_at(words, 0);
+    let session_diags = decode_session_text(&diag_text);
+    let ok = words.get(at).copied().unwrap_or(0) != 0;
+    at += 1;
+    if !ok {
+        return (session_diags, false, vec![], vec![]);
+    }
+    let nb = words.get(at).copied().unwrap_or(0) as usize;
+    at += 1;
+    let mut bounded = Vec::with_capacity(nb);
+    for _ in 0..nb {
+        bounded.push(words.get(at).copied().unwrap_or(0) != 0);
+        at += 1;
+    }
+    let ne = words.get(at).copied().unwrap_or(0) as usize;
+    at += 1;
+    let mut errors = Vec::with_capacity(ne);
+    for _ in 0..ne {
+        let code_tag = words.get(at).copied().unwrap_or(0);
+        at += 1;
+        let start = words.get(at).copied().unwrap_or(0) as usize;
+        at += 1;
+        let end = words.get(at).copied().unwrap_or(0) as usize;
+        at += 1;
+        let (msg, next_at) = decode_packed_text_at(words, at);
+        at = next_at;
+        let code = match code_tag {
+            1 => "E0608",
+            2 => "E0609",
+            3 => "E0611",
+            _ => "E0607",
+        };
+        errors.push(Diagnostic::new(code, msg, start..end));
+    }
+    (session_diags, true, bounded, errors)
+}

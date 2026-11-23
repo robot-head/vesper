@@ -1,5 +1,11 @@
-//! `sys library StdProcess` (packages/vesper-std/process/process.vsys): a
+//! `sys library StdProcess` on Windows
+//! (packages/vesper-std/process/process-windows.vsys, with src-windows/): a
 //! command builder and a child process, both linear handles.
+//!
+//! On Linux and macOS `@vesper-std/process` imports the C library itself
+//! (process-linux.vsys, process-macos.vsys; SH6 lane 13, #1408) and starts
+//! children with `posix_spawn`, so nothing here runs there. Windows keeps
+//! this shim until the package calls kernel32 itself.
 use crate::*;
 use std::process::{Command, Stdio};
 

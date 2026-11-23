@@ -1,6 +1,7 @@
-// @vesper-std/process's import (self-hosting SH0 lane 3, #1125). The
-// functions are the C-ABI host shim in crates/vesper-std-host
-// (src/process.rs).
+// @vesper-std/process's import on Windows (self-hosting SH0 lane 3,
+// #1125), with src-windows/: the C-ABI host shim in crates/vesper-std-host
+// (src/process.rs). Linux and macOS import the C library itself
+// (process-linux.vsys, process-macos.vsys).
 sys library StdProcess (
     target = "@TARGET@", abi = "@ABI@",
     link = "static", name = "vesper_std_host",

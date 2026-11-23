@@ -175,13 +175,27 @@ Compiler gaps found here:
    the package names `Builder` and `Module` without a `use`.
 
 
+## Part 2b: `seq`, `str`, `native_bytes`, hoisted, fused, and drop emission
+
+Extends `codegen_swap::seq` and `@vesper/codegen-seq-emit` to emit all sequence, string, byte/SIMD, bounds-hoisted, fused `try_get`/condition, and drop-glue operations through `@vesper/cranelift`, keeping every Rust fallback intact behind `seq_hook_active()`:
+
+- `crates/vesper-cranelift-sys` and `@vesper/cranelift`: added `vcl_declare_anonymous_data`, `vcl_call_memset`, `vcl_call_memmove`, `vcl_isa_triple_arch`, `vcl_has_x86_pshufb_lowering`, `CanMove` (`MemFlags::with_can_move`), `sload8`/`uload16`/`sload16`/`sload32`/`istore16`, and SIMD/overflow wrappers (`ins_umul_overflow`, `ins_swizzle`, `ins_vany_true`, `ins_vall_true`, `ins_vhigh_bits`).
+- `src/codegen_swap.rs` (`pub mod seq`): added ops `2..=13` (`STRING_LITERAL`, `STR_OP`, `STR_COMPARE`, `BOUNDS_GUARD`, `HOISTED_ACCESS`, `INVARIANT_WORD`, `EMPTY_HEADER`, `SEQ_OP`, `BYTE_OP`, `FUSED_TRY_GET`, `FUSED_CONDITION`, `DROP_OP`) and sub-op/node constants (`STR_*`, `HOIST_*`, `SEQ_*` including `SEQ_RESERVE_GROW`, `BYTE_*`, `DROP_*`, `DROP_NODE_*`).
+- `packages/vesper-codegen-seq/emit/src/{lib,common,strings,hoist,bytes,drops,seq_ops}.ves`: full Vesper emission for ops `1..=13`.
+- `src/strings/native.rs`, `src/bounds_hoist/native.rs`, `src/seq/native_bytes.rs`, `src/seq/native.rs`: hooked dispatch hunks with Rule 8 Rust fallbacks preserved.
+- `crates/vesper-codegen-swap-test/tests/self_host_codegen_seq.rs`: added `all_seq_ops_match_the_rust_emitter` (corpus + targeted `seq_core_ops`, `seq_strings`, `seq_bytes_simd`, `seq_hoist_and_drops` worlds across optimize on/off, asserting `op1..=op13 > 0`) and `a_wrong_seq_emit_is_caught`.
+
+Local verification (`self_host_codegen_seq`):
+
+| Check | Result |
+|---|---|
+| `all_seq_ops_match_the_rust_emitter` (24 worlds, 144 functions, 12 runs) | **0** CLIF, **0** object, **0** run, **0** one-sided diffs |
+| `codegen_swap::seq` ops exercised (`op1..=op13`) | `op1=24 op2=123 op3=242 op4=76 op5=2 op6=11 op7=2 op8=54 op9=802 op10=126 op11=71 op12=61 op13=618` |
+| `the_runtime_matches_on_other_targets` (Windows, AArch64 Linux/macOS) | 6 objects, **0 differ** |
+| `a_missing_runtime_is_caught` & `a_wrong_seq_emit_is_caught` | passed |
+
 ## Left
 
-- Part 2b: emission of `seq_op`, `str_op`, the byte operations
-  (src/seq/native_bytes.rs), hoisted accesses, fused reads and drop glue,
-  each as more `codegen_swap::seq` helper requests, all through
-  `@vesper/cranelift`. Done means 0 CLIF differences and byte-identical
-  objects.
 - The runtime is also defined from src/regions/native.rs (lane 11's file)
   and the export glue (src/native_export/glue.rs). Those calls still use the
   Rust emitter. They are left to those lanes, or to a follow-up once the

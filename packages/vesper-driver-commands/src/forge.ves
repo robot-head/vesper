@@ -1,0 +1,243 @@
+// `vesper forge`: CLI action/option parsing, argument-budget checks, and
+// `Stage::Config` JSON rejection in Vesper, delegating bounded file I/O,
+// policy loading, checked macro expansion, and Lean provenance extraction
+// (`src/forge_commands.rs`) to `HybridCommands::hc_forge_run`.
+use @vesper/driver::{
+    Args,
+    args_count,
+    arg_start,
+    arg_end,
+    eq
+};
+use super::{
+    arg,
+    byte_at,
+    print,
+    fail,
+    stdout_stream
+};
+
+const ACTION_CHECK: u32 = 0;
+const ACTION_EXPAND: u32 = 1;
+const ACTION_LEAN: u32 = 2;
+
+pub fn run_forge(in args: Args) -> i64 eff [Ffi[HybridCommands]] {
+    let n = args_count(in args);
+    let mut i: u64 = 1;
+    loop {
+        if i >= n {
+            break;
+        }
+        let a_buf = arg(in args, i);
+        let a = a_buf.as_slice();
+        if eq(in a, in "--help") || eq(in a, in "-h") {
+            print(
+                stdout_stream(),
+                in "Usage: vesper forge <check|expand|lean> SOURCE [--package @local/source] [--policy FILE] [--json] [--provenance FILE]\n\nCheck declarative Expr macros using whole-body hygiene, the ordinary checker and actual compiler-derived authority.\ncheck returns bounded JSON with the source map and per-function macro provenance; expand writes exactly the fully checked expanded source.\nlean writes the Lean extraction of the expanded program with `$macro_provenance` marker constants; --provenance FILE (lean only) writes the provenance manifest that `vesper proof-audit --macro-provenance` requires for theorems about expanded code.\nMacro-bearing functions must be top-level and nongeneric, with at most eight plain named parameters.\nProjected parameters, source Tier2, attributes, derives, recursive/nested macros and other categories are unsupported.\nNo native code or WASI component is executed. Existing check/LSP behavior is unchanged.\n"
+                    .as_bytes()
+            );
+            return 0;
+        }
+        i = wrapping_add(i, 1);
+    }
+    let mut check = false;
+    if n > 1 {
+        let first_buf = arg(in args, 1);
+        if eq(in first_buf.as_slice(), in "check") {
+            check = true;
+        }
+    }
+    let arg_count = if n > 1 {
+        wrapping_sub(n, 1)
+    } else {
+        0
+    };
+    if arg_count > 16 {
+        return reject_config(check, in "source macro argument budget exceeded".as_bytes());
+    }
+    let mut total_bytes: u64 = 0;
+    i = 1;
+    loop {
+        if i >= n {
+            break;
+        }
+        let a_buf = arg(in args, i);
+        let len = a_buf.len();
+        if total_bytes > wrapping_sub(16384, len) {
+            return reject_config(check, in "source macro argument budget exceeded".as_bytes());
+        }
+        total_bytes = wrapping_add(total_bytes, len);
+        i = wrapping_add(i, 1);
+    }
+    if n <= 1 {
+        return reject_config(check, in "missing forge action; see forge --help".as_bytes());
+    }
+    let act_buf = arg(in args, 1);
+    let act_s = act_buf.as_slice();
+    let mut action: u32 = ACTION_CHECK;
+    if eq(in act_s, in "check") {
+        action = ACTION_CHECK;
+    } else if eq(in act_s, in "expand") {
+        action = ACTION_EXPAND;
+    } else if eq(in act_s, in "lean") {
+        action = ACTION_LEAN;
+    } else {
+        return reject_config(check, in "expected forge check, expand or lean".as_bytes());
+    }
+    let mut has_provenance = false;
+    let mut provenance: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut has_input = false;
+    let mut input: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut has_package = false;
+    let mut package: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut has_policy = false;
+    let mut policy: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut json = false;
+    i = 2;
+    loop {
+        if i >= n {
+            break;
+        }
+        let a_buf = arg(in args, i);
+        let a = a_buf.as_slice();
+        if eq(in a, in "--package") {
+            i = wrapping_add(i, 1);
+            if i >= n {
+                return reject_config(check, in "--package requires a namespace".as_bytes());
+            }
+            let v_buf = arg(in args, i);
+            let v = v_buf.as_slice();
+            if v.len() > 256 || has_package {
+                return reject_config(
+                    check,
+                    in "duplicate or oversized package namespace".as_bytes()
+                );
+            }
+            has_package = true;
+            package.extend(in v);
+        } else if eq(in a, in "--policy") {
+            i = wrapping_add(i, 1);
+            if i >= n {
+                return reject_config(check, in "--policy requires a file".as_bytes());
+            }
+            if has_policy {
+                return reject_config(check, in "duplicate --policy".as_bytes());
+            }
+            let v_buf = arg(in args, i);
+            has_policy = true;
+            policy.extend(in v_buf.as_slice());
+        } else if eq(in a, in "--json") && check && !json {
+            json = true;
+        } else if eq(in a, in "--provenance") && action == ACTION_LEAN {
+            i = wrapping_add(i, 1);
+            if i >= n {
+                return reject_config(check, in "--provenance requires a file".as_bytes());
+            }
+            if has_provenance {
+                return reject_config(check, in "duplicate --provenance".as_bytes());
+            }
+            let v_buf = arg(in args, i);
+            has_provenance = true;
+            provenance.extend(in v_buf.as_slice());
+        } else if a.len() != 0 && byte_at(in a, 0) == 45 {
+            let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
+            err.extend(in "unsupported source macro option '".as_bytes());
+            err.extend(in a);
+            err.push(39);
+            return reject_config(check, in err.as_slice());
+        } else {
+            if has_input {
+                return reject_config(check, in "only one source file is supported".as_bytes());
+            }
+            has_input = true;
+            input.extend(in a);
+        }
+        i = wrapping_add(i, 1);
+    }
+    if !has_input {
+        return reject_config(check, in "missing source file".as_bytes());
+    }
+    if !has_package {
+        package.extend(in "@local/source".as_bytes());
+    }
+    let err_len = HybridCommands::hc_forge_run(
+        action,
+        in input.as_slice(),
+        in package.as_slice(),
+        has_policy,
+        in policy.as_slice(),
+        has_provenance,
+        in provenance.as_slice()
+    );
+    if err_len == 0 {
+        return 0;
+    }
+    let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    err.resize(err_len, 0);
+    let actual = HybridCommands::hc_forge_err(inout err.as_slice_mut());
+    if actual > err.len() {
+        err.resize(actual, 0);
+        let _got = HybridCommands::hc_forge_err(inout err.as_slice_mut());
+    } else {
+        err.truncate(actual);
+    }
+    fail(in err.as_slice())
+}
+
+fn reject_config(check: bool, in message: Slice[u8]) -> i64 eff [Ffi[HybridCommands]] {
+    if check {
+        let mut line: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        line
+            .extend(
+                in "{\"schema\":\"vesper.forge.source/1\",\"status\":\"rejected\",\"stage\":\"config\",\"message\":"
+                    .as_bytes()
+            );
+        push_json_str(inout line, in message);
+        line
+            .extend(
+                in ",\"source_blake3\":null,\"expanded_source\":null,\"diagnostics\":[],\"source_map\":[]}\n"
+                    .as_bytes()
+            );
+        print(stdout_stream(), in line.as_slice());
+    }
+    fail(in message)
+}
+
+fn push_json_str(inout out: ChunkSeq[u8], in s: Slice[u8]) {
+    out.push(34);
+    for i in 0..s.len() {
+        let b = byte_at(in s, i);
+        if b == 34 {
+            out.extend(in "\\\"".as_bytes());
+        } else if b == 92 {
+            out.extend(in "\\\\".as_bytes());
+        } else if b == 8 {
+            out.extend(in "\\b".as_bytes());
+        } else if b == 12 {
+            out.extend(in "\\f".as_bytes());
+        } else if b == 10 {
+            out.extend(in "\\n".as_bytes());
+        } else if b == 13 {
+            out.extend(in "\\r".as_bytes());
+        } else if b == 9 {
+            out.extend(in "\\t".as_bytes());
+        } else if b < 32 {
+            out.extend(in "\\u00".as_bytes());
+            let hi = b >> 4;
+            let lo = b & 15;
+            out.push(hex_digit(hi));
+            out.push(hex_digit(lo));
+        } else {
+            out.push(b);
+        }
+    }
+    out.push(34);
+}
+
+fn hex_digit(d: u8) -> u8 {
+    if d < 10 {
+        wrapping_add(48, d)
+    } else {
+        wrapping_add(97, wrapping_sub(d, 10))
+    }
+}

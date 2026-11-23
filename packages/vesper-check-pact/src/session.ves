@@ -1767,14 +1767,27 @@ fn push_packed_str(inout out: ChunkSeq[u64], status: u64, val: u64, in msg: Str)
 
 // Solves one binary-encoded `QuerySpec` on an open `PactSession`.
 // Returns `[status (0=Ok, 1=Err), conf_idx_or_err_tag, packed_text...]`.
-pub fn session_solve(inout sess: PactSession, in qbytes: Slice[u8]) -> ChunkSeq[u64] {
-    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+pub struct SolveOutcome {
+    pub status: u8,
+    pub val: u64,
+    pub msg: ChunkSeq[u8],
+}
+
+fn outcome_str(status: u8, val: u64, in s: Str) -> SolveOutcome {
+    let mut msg = ChunkSeq::new[u8]();
+    put_str(inout msg, in s);
+    SolveOutcome {
+        status: status,
+        val: val,
+        msg: msg
+    }
+}
+
+pub fn solve_spec(inout sess: PactSession, in spec: QuerySpec) -> SolveOutcome {
     if !sess.ok {
-        push_packed_str(inout out, 1, 0, "pact session is not open");
-        return out;
+        return outcome_str(1, 0, "pact session is not open");
     }
 
-    let spec = read_query(in qbytes, inout sess.c);
     let mut ph_names: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](spec.env_params.len());
     let mut ph_bounds: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](spec.env_params.len());
     let mut sc = scope_new(POS_ENV);
@@ -1834,8 +1847,11 @@ pub fn session_solve(inout sess: PactSession, in qbytes: Slice[u8]) -> ChunkSeq[
                 in ph_names,
                 inout rendered
             );
-            push_packed_bytes(inout out, 1, 0, in rendered);
-            return out;
+            return SolveOutcome {
+                status: 1,
+                val: 0,
+                msg: rendered
+            };
         }
     }
 
@@ -1854,8 +1870,11 @@ pub fn session_solve(inout sess: PactSession, in qbytes: Slice[u8]) -> ChunkSeq[
                 put_sym(inout msg, in sess.c.names, msym);
                 put_str(inout msg, "` in ");
                 put_sym(inout msg, in sess.c.names, sess.tb.pkg_str(sess.tb.local_pkg));
-                push_packed_bytes(inout out, 1, 0, in msg);
-                return out;
+                return SolveOutcome {
+                    status: 1,
+                    val: 0,
+                    msg: msg
+                };
             }
             env_words.push(mid);
         }
@@ -1884,8 +1903,11 @@ pub fn session_solve(inout sess: PactSession, in qbytes: Slice[u8]) -> ChunkSeq[
             in ph_names,
             inout rendered
         );
-        push_packed_bytes(inout out, 1, 0, in rendered);
-        return out;
+        return SolveOutcome {
+            status: 1,
+            val: 0,
+            msg: rendered
+        };
     }
 
     for i in 0..sc.infer_used.len() {
@@ -1898,8 +1920,11 @@ pub fn session_solve(inout sess: PactSession, in qbytes: Slice[u8]) -> ChunkSeq[
             put_str(inout msg, "inference variable `");
             put_sym(inout msg, in sess.c.names, u32_at(in sc.infer_names, i));
             put_str(inout msg, "` does not occur in the goal");
-            push_packed_bytes(inout out, 1, 0, in msg);
-            return out;
+            return SolveOutcome {
+                status: 1,
+                val: 0,
+                msg: msg
+            };
         }
     }
 
@@ -1942,16 +1967,18 @@ pub fn session_solve(inout sess: PactSession, in qbytes: Slice[u8]) -> ChunkSeq[
             );
         }
         sess.s.txt.truncate(txt_base);
-        push_packed_bytes(inout out, 1, 0, in msg);
-        return out;
+        return SolveOutcome {
+            status: 1,
+            val: 0,
+            msg: msg
+        };
     }
 
     let tag = tg(in sess.s, o);
     if tag == q_proven() {
         let val_list = fb(in sess.s, o);
         if !wf_subst_node(in sess.s, in sess.tb, in ph_bounds, val_list, false, goal_node) {
-            push_packed_str(inout out, 1, 0, "solution is not a well-formed instantiation");
-            return out;
+            return outcome_str(1, 0, "solution is not a well-formed instantiation");
         }
         let mut drv = fc(in sess.s, o);
         loop {
@@ -1995,17 +2022,18 @@ pub fn session_solve(inout sess: PactSession, in qbytes: Slice[u8]) -> ChunkSeq[
                 sess.s.txt.push(93);
             }
             let sel = render_from_s_txt(inout sess, t0, in ph_names);
-            push_packed_bytes(inout out, 0, conf_idx, in sel);
-            return out;
+            return SolveOutcome {
+                status: 0,
+                val: conf_idx,
+                msg: sel
+            };
         }
         if st == st_assume() || st == st_passume() {
-            push_packed_str(
-                inout out,
+            return outcome_str(
                 1,
                 5,
                 "the obligation is discharged by a trait bound of the enclosing generic"
             );
-            return out;
         }
         let t0 = sess.s.txt.len();
         if st == st_alias() {
@@ -2029,16 +2057,22 @@ pub fn session_solve(inout sess: PactSession, in qbytes: Slice[u8]) -> ChunkSeq[
             );
         }
         let msg = render_from_s_txt(inout sess, t0, in ph_names);
-        push_packed_bytes(inout out, 1, 4, in msg);
-        return out;
+        return SolveOutcome {
+            status: 1,
+            val: 4,
+            msg: msg
+        };
     }
 
     if tag == q_nosol() {
         let t0 = sess.s.txt.len();
         r_failure(inout sess.s, fa(in sess.s, o), 0);
         let msg = render_from_s_txt(inout sess, t0, in ph_names);
-        push_packed_bytes(inout out, 1, 1, in msg);
-        return out;
+        return SolveOutcome {
+            status: 1,
+            val: 1,
+            msg: msg
+        };
     }
 
     if tag == q_ambig() {
@@ -2076,8 +2110,11 @@ pub fn session_solve(inout sess: PactSession, in qbytes: Slice[u8]) -> ChunkSeq[
             r_goal(inout sess.s, fa(in sess.s, a));
         }
         let msg = render_from_s_txt(inout sess, t0, in ph_names);
-        push_packed_bytes(inout out, 1, 2, in msg);
-        return out;
+        return SolveOutcome {
+            status: 1,
+            val: 2,
+            msg: msg
+        };
     }
 
     if tag == q_over() {
@@ -2089,8 +2126,7 @@ pub fn session_solve(inout sess: PactSession, in qbytes: Slice[u8]) -> ChunkSeq[
         } else {
             "FixpointIterations"
         };
-        push_packed_str(inout out, 1, 3, in msg);
-        return out;
+        return outcome_str(1, 3, in msg);
     }
 
     // `q_unsup`
@@ -2114,7 +2150,18 @@ pub fn session_solve(inout sess: PactSession, in qbytes: Slice[u8]) -> ChunkSeq[
         lit(inout sess.s, "internal solver limitation");
     }
     let msg = render_from_s_txt(inout sess, t0, in ph_names);
-    push_packed_bytes(inout out, 1, 0, in msg);
+    SolveOutcome {
+        status: 1,
+        val: 0,
+        msg: msg
+    }
+}
+
+pub fn session_solve(inout sess: PactSession, in qbytes: Slice[u8]) -> ChunkSeq[u64] {
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let spec = read_query(in qbytes, inout sess.c);
+    let res = solve_spec(inout sess, in spec);
+    push_packed_bytes(inout out, widen_u64(res.status), res.val, in res.msg);
     out
 }
 

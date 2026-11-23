@@ -56,6 +56,19 @@ pub fn declare_or_define<M: Module>(m: &mut M) -> Result<FuncId, String> {
     if m.target_config().pointer_type() != types::I64 {
         return Err("Box[T] AOT runtime requires a 64-bit target".into());
     }
+    if crate::codegen_swap::request_numeric_module(
+        m,
+        crate::codegen_swap::numeric::RUNTIME,
+        &[crate::codegen_swap::numeric::RUNTIME_BOX_ALLOC],
+    )?
+    .is_some()
+    {
+        let Some(cranelift_module::FuncOrDataId::Func(func_id)) = m.get_name("vesper_box_alloc")
+        else {
+            return Err("numeric RUNTIME_BOX_ALLOC did not define vesper_box_alloc".into());
+        };
+        return Ok(func_id);
+    }
     let live = live_counter(m)?;
     let mut calloc_sig = m.make_signature();
     calloc_sig.params.push(AbiParam::new(types::I64));
@@ -130,6 +143,19 @@ pub fn declare_or_define_free<M: Module>(m: &mut M) -> Result<FuncId, String> {
     }
     if m.target_config().pointer_type() != types::I64 {
         return Err("Box[T] AOT runtime requires a 64-bit target".into());
+    }
+    if crate::codegen_swap::request_numeric_module(
+        m,
+        crate::codegen_swap::numeric::RUNTIME,
+        &[crate::codegen_swap::numeric::RUNTIME_BOX_FREE],
+    )?
+    .is_some()
+    {
+        let Some(cranelift_module::FuncOrDataId::Func(func_id)) = m.get_name("vesper_box_free")
+        else {
+            return Err("numeric RUNTIME_BOX_FREE did not define vesper_box_free".into());
+        };
+        return Ok(func_id);
     }
     let live = live_counter(m)?;
     let mut free_sig = m.make_signature();
