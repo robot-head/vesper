@@ -13,9 +13,11 @@ use @vesper/check-data::names::{
     Names
 };
 use @vesper/check-data::types::{
-    M_COPY,
+    TyMode,
     Types
 };
+
+const M_COPY: u8 = TyMode::Copy;
 use @vesper/check-data::world::{
     Adt,
     Bounds,

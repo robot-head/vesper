@@ -17,13 +17,16 @@ use @vesper/check-data::{
 };
 use @vesper/check-data::types::{
     EffNode,
-    K_NAMED,
-    K_ROW,
-    K_TUPLE,
-    M_COPY,
-    M_LINEAR,
+    TyKind,
+    TyMode,
     vars_new
 };
+
+const K_NAMED: u8 = TyKind::Named;
+const K_ROW: u8 = TyKind::Row;
+const K_TUPLE: u8 = TyKind::Tuple;
+const M_COPY: u8 = TyMode::Copy;
+const M_LINEAR: u8 = TyMode::Linear;
 use @vesper/check-data::util::{
     add,
     inc,

@@ -9,10 +9,12 @@ use @vesper/check-data::names::{
     Names
 };
 use @vesper/check-data::types::{
-    M_AFFINE,
-    M_COPY,
-    M_LINEAR
+    TyMode
 };
+
+const M_AFFINE: u8 = TyMode::Affine;
+const M_COPY: u8 = TyMode::Copy;
+const M_LINEAR: u8 = TyMode::Linear;
 use @vesper/check-data::util::{
     add,
     inc,

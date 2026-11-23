@@ -10,8 +10,10 @@ use @vesper/check-data::names::{
 };
 use @vesper/check-data::types::{
     EffNode,
-    K_FN
+    TyKind
 };
+
+const K_FN: u8 = TyKind::Fn;
 use @vesper/check-data::util::{
     add,
     inc,
