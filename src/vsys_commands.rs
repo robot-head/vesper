@@ -84,7 +84,11 @@ pub fn run(c: Command<'_>) -> Result<(), String> {
             Ok(())
         }
         "jit" => {
-            let symbols = host_symbols(&imports, "jit", c.link_search)?;
+            let symbols = host_symbols(
+                &imports.for_host_calls(checked.calls()),
+                "jit",
+                c.link_search,
+            )?;
             let symbols: Vec<(&str, *const u8)> =
                 symbols.iter().map(|(n, a)| (n.as_str(), *a)).collect();
             let value = checked
@@ -97,7 +101,11 @@ pub fn run(c: Command<'_>) -> Result<(), String> {
         "build" => build(&c, &checked, &imports),
         "run" => {
             // The evaluator reaches the same host functions as `jit`.
-            let host = eval_host_in(&imports, "run", c.link_search)?;
+            let host = eval_host_in(
+                &imports.for_host_calls(checked.calls()),
+                "run",
+                c.link_search,
+            )?;
             let value = checked
                 .evaluate(c.entry, |call| host.call(call))
                 .map_err(|e| e.to_string())?;

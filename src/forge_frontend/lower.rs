@@ -718,6 +718,7 @@ impl<'a> Builder<'a> {
                             self.budget.charge(name.len())?;
                             let name = name.clone();
                             let pat = Pattern {
+                                integer_kind: None,
                                 kind: PatternKind::Bind(name),
                                 span: self.anchor(*binder, depth + 1)?,
                             };

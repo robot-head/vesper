@@ -1,0 +1,219 @@
+// The `$fmod` helper body for @vesper/wasm-backend (split from lower.ves,
+// which reached the parser's token limit).
+
+use self::enc::{
+    Code
+};
+
+const OP_BLOCK: u8 = 2;
+const OP_LOOP: u8 = 3;
+const OP_IF: u8 = 4;
+const OP_ELSE: u8 = 5;
+const OP_END: u8 = 11;
+const OP_RETURN: u8 = 15;
+const OP_I64_EQZ: u8 = 80;
+const OP_I64_EQ: u8 = 81;
+const OP_I64_GT_S: u8 = 85;
+const OP_I64_GT_U: u8 = 86;
+const OP_I64_LE_S: u8 = 87;
+const OP_I64_LE_U: u8 = 88;
+const OP_I64_GE_S: u8 = 89;
+const OP_I32_OR: u8 = 114;
+const OP_I64_CLZ: u8 = 121;
+const OP_I64_ADD: u8 = 124;
+const OP_I64_SUB: u8 = 125;
+const OP_I64_AND: u8 = 131;
+const OP_I64_OR: u8 = 132;
+const OP_I64_SHL: u8 = 134;
+const OP_I64_SHR_U: u8 = 136;
+const OP_F64_MUL: u8 = 162;
+const OP_F64_DIV: u8 = 163;
+const OP_I64_REINTERPRET_F64: u8 = 189;
+const OP_F64_REINTERPRET_I64: u8 = 191;
+
+// The `$fmod` body: musl's integer `fmod`, instruction for instruction as
+// `Lowerer::fmod` in src/wasm_backend/lower.rs.
+const FM_ABS: i64 = 9223372036854775807;
+const FM_INF: i64 = 9218868437227405312;
+const FM_MANT: i64 = 4503599627370495;
+const FM_HIDDEN: i64 = 4503599627370496;
+
+fn fmod_zero_times_x(inout c: Code) {
+    c.f64_const(0);
+    c.get(7);
+    c.op(OP_F64_REINTERPRET_I64);
+    c.op(OP_F64_MUL);
+    c.op(OP_I64_REINTERPRET_F64);
+    c.op(OP_RETURN);
+}
+
+fn fmod_exp(inout c: Code, v: u32, e: u32) {
+    c.get(v);
+    c.i64_const(52);
+    c.op(OP_I64_SHR_U);
+    c.i64_const(2047);
+    c.op(OP_I64_AND);
+    c.set(e);
+}
+
+fn fmod_shl1(inout c: Code, v: u32) {
+    c.get(v);
+    c.i64_const(1);
+    c.op(OP_I64_SHL);
+}
+
+fn fmod_normalize(inout c: Code, v: u32, e: u32) {
+    c.get(e);
+    c.op(OP_I64_EQZ);
+    c.open(OP_IF);
+    c.get(v);
+    c.i64_const(12);
+    c.op(OP_I64_SHL);
+    c.op(OP_I64_CLZ);
+    c.set(6);
+    c.i64_const(0);
+    c.get(6);
+    c.op(OP_I64_SUB);
+    c.set(e);
+    c.get(v);
+    c.get(6);
+    c.i64_const(1);
+    c.op(OP_I64_ADD);
+    c.op(OP_I64_SHL);
+    c.set(v);
+    c.op(OP_ELSE);
+    c.get(v);
+    c.i64_const(FM_MANT);
+    c.op(OP_I64_AND);
+    c.i64_const(FM_HIDDEN);
+    c.op(OP_I64_OR);
+    c.set(v);
+    c.op(OP_END);
+}
+
+fn fmod_step(inout c: Code) {
+    c.get(0);
+    c.get(1);
+    c.op(OP_I64_SUB);
+    c.tee(5);
+    c.i64_const(0);
+    c.op(OP_I64_GE_S);
+    c.open(OP_IF);
+    c.get(5);
+    c.op(OP_I64_EQZ);
+    c.open(OP_IF);
+    fmod_zero_times_x(inout c);
+    c.op(OP_END);
+    c.get(5);
+    c.set(0);
+    c.op(OP_END);
+}
+
+pub fn fmod_code(inout c: Code) {
+    c.get(0);
+    c.set(7);
+    fmod_exp(inout c, 0, 2);
+    fmod_exp(inout c, 1, 3);
+    c.get(0);
+    c.i64_const(63);
+    c.op(OP_I64_SHR_U);
+    c.set(4);
+    // y == ±0, y is NaN or x is not finite: NaN.
+    fmod_shl1(inout c, 1);
+    c.op(OP_I64_EQZ);
+    c.get(1);
+    c.i64_const(FM_ABS);
+    c.op(OP_I64_AND);
+    c.i64_const(FM_INF);
+    c.op(OP_I64_GT_U);
+    c.op(OP_I32_OR);
+    c.get(2);
+    c.i64_const(2047);
+    c.op(OP_I64_EQ);
+    c.op(OP_I32_OR);
+    c.open(OP_IF);
+    for _k in 0..2 {
+        c.get(0);
+        c.op(OP_F64_REINTERPRET_I64);
+        c.get(1);
+        c.op(OP_F64_REINTERPRET_I64);
+        c.op(OP_F64_MUL);
+    }
+    c.op(OP_F64_DIV);
+    c.op(OP_I64_REINTERPRET_F64);
+    c.op(OP_RETURN);
+    c.op(OP_END);
+    // |x| <= |y|
+    fmod_shl1(inout c, 0);
+    fmod_shl1(inout c, 1);
+    c.op(OP_I64_LE_U);
+    c.open(OP_IF);
+    fmod_shl1(inout c, 0);
+    fmod_shl1(inout c, 1);
+    c.op(OP_I64_EQ);
+    c.open(OP_IF);
+    fmod_zero_times_x(inout c);
+    c.op(OP_END);
+    c.get(0);
+    c.op(OP_RETURN);
+    c.op(OP_END);
+    fmod_normalize(inout c, 0, 2);
+    fmod_normalize(inout c, 1, 3);
+    c.open(OP_BLOCK);
+    c.open(OP_LOOP);
+    c.get(2);
+    c.get(3);
+    c.op(OP_I64_LE_S);
+    c.br_if(1);
+    fmod_step(inout c);
+    fmod_shl1(inout c, 0);
+    c.set(0);
+    c.get(2);
+    c.i64_const(1);
+    c.op(OP_I64_SUB);
+    c.set(2);
+    c.br(0);
+    c.op(OP_END);
+    c.op(OP_END);
+    fmod_step(inout c);
+    // Renormalize: shift the leading bit back to bit 52.
+    c.get(0);
+    c.op(OP_I64_CLZ);
+    c.i64_const(11);
+    c.op(OP_I64_SUB);
+    c.set(6);
+    c.get(0);
+    c.get(6);
+    c.op(OP_I64_SHL);
+    c.set(0);
+    c.get(2);
+    c.get(6);
+    c.op(OP_I64_SUB);
+    c.set(2);
+    c.get(2);
+    c.i64_const(0);
+    c.op(OP_I64_GT_S);
+    c.open(OP_IF);
+    c.get(0);
+    c.i64_const(FM_HIDDEN);
+    c.op(OP_I64_SUB);
+    c.get(2);
+    c.i64_const(52);
+    c.op(OP_I64_SHL);
+    c.op(OP_I64_OR);
+    c.set(0);
+    c.op(OP_ELSE);
+    c.get(0);
+    c.i64_const(1);
+    c.get(2);
+    c.op(OP_I64_SUB);
+    c.op(OP_I64_SHR_U);
+    c.set(0);
+    c.op(OP_END);
+    c.get(0);
+    c.get(4);
+    c.i64_const(63);
+    c.op(OP_I64_SHL);
+    c.op(OP_I64_OR);
+    c.op(OP_END);
+}

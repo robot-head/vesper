@@ -1,10 +1,8 @@
 //! ABBA benchmark of the last Rust build of vesper-prism-h3 against the
 //! Vesper port (port wave P3b lane 5, #1067; SH6 lane 5, #1400): QPACK decoding of the committed QIFs corpus,
-//! QPACK encoding of its field lists, and frame parsing (`frames`): request
-//! streams of HEADERS and DATA frames, a control stream of SETTINGS and
-//! PRIORITY_UPDATE frames, and capsules, read in packet-sized pushes; and
-//! message validation (`messages`) of the netbsd QIF's field lists as requests
-//! or responses.
+//! QPACK encoding of its field lists, frame parsing (`frames`),
+//! message validation (`messages`), end-to-end HTTP/3 connections (`connection`),
+//! and WebTransport / HTTP Datagram sessions (`session`).
 //!
 //! The two builds are this crate and its Rust build from an older commit
 //! (`scripts/bench.sh` builds it in a git worktree), so they cannot share a
@@ -18,20 +16,29 @@
 //!
 //! ```text
 //! crates/vesper-prism-h3/scripts/bench.sh       # builds both, runs every workload
-//! abba worker <decode|encode|frames|messages>                # one arm
-//! abba drive <decode|encode|frames|messages> <rust-worker> <vesper-worker>
-//! abba once <decode|encode|frames|messages> <batches>
+//! abba worker <decode|encode|frames|messages|connection|session>                # one arm
+//! abba drive <workload> <rust-worker> <vesper-worker>
+//! abba flip-gate <workload> <rust-worker> <vesper-worker>
+//! abba once <workload> <batches>
 //! ```
+use std::cell::RefCell;
+use std::collections::{BTreeMap, VecDeque};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::rc::Rc;
 
 use vesper_bench::{BenchCase, Invocation, RunConfig, analyze_pairs, run_abba};
 use vesper_prism_h3::capsule::{self, Capsule, CapsuleReader};
+use vesper_prism_h3::client::{ClientConnection, ClientEvent, ClientRequest};
+use vesper_prism_h3::connection::{Event, H3Config, Response, ServerConnection, Session};
+use vesper_prism_h3::error::Code;
 use vesper_prism_h3::frame::{self, Frame, FrameReader, Settings};
 use vesper_prism_h3::message;
 use vesper_prism_h3::priority::{Priority, PriorityUpdate};
 use vesper_prism_h3::qpack::{Decoded, Decoder, DecoderConfig, Encoder, EncoderConfig, Field};
+use vesper_prism_h3::session::{DatagramPath, SessionEvent};
+use vesper_prism_h3::transport::{ReadOutcome, Transport, TransportError};
 
 fn fnv(mut h: u64, bytes: &[u8]) -> u64 {
     for &b in bytes {
@@ -335,6 +342,557 @@ fn frame_count(_s: &Streams) -> usize {
     64 * 6 + 258 + 512 + 512 / 16 + 1
 }
 
+#[derive(Default)]
+struct Half {
+    data: VecDeque<u8>,
+    fin: bool,
+    reset: Option<u64>,
+    stopped: Option<u64>,
+}
+
+#[derive(Default)]
+struct Shared {
+    halves: BTreeMap<(u64, usize), Half>,
+    accept: [VecDeque<u64>; 2],
+    next: [[u64; 2]; 2],
+    closed: [Option<Code>; 2],
+    datagrams: [VecDeque<Vec<u8>>; 2],
+}
+
+struct Mem {
+    shared: Rc<RefCell<Shared>>,
+    side: usize,
+    max_datagram: Option<usize>,
+}
+
+fn mem_pair(max_datagram: Option<usize>) -> (Mem, Mem) {
+    let shared = Rc::new(RefCell::new(Shared::default()));
+    (
+        Mem {
+            shared: shared.clone(),
+            side: 0,
+            max_datagram,
+        },
+        Mem {
+            shared,
+            side: 1,
+            max_datagram,
+        },
+    )
+}
+
+impl Mem {
+    fn open(&mut self, uni: bool) -> u64 {
+        let mut s = self.shared.borrow_mut();
+        let k = usize::from(uni);
+        let id = (s.next[self.side][k] << 2) | (u64::from(uni) << 1) | (self.side as u64);
+        s.next[self.side][k] += 1;
+        s.halves.entry((id, self.side)).or_default();
+        if !uni {
+            s.halves.entry((id, 1 - self.side)).or_default();
+        }
+        s.accept[1 - self.side].push_back(id);
+        id
+    }
+}
+
+impl Transport for Mem {
+    fn open_uni(&mut self) -> Result<u64, TransportError> {
+        Ok(self.open(true))
+    }
+    fn open_bidi(&mut self) -> Result<u64, TransportError> {
+        Ok(self.open(false))
+    }
+    fn write(&mut self, id: u64, data: &[u8]) -> Result<usize, TransportError> {
+        let mut s = self.shared.borrow_mut();
+        if s.closed.iter().any(Option::is_some) {
+            return Err(TransportError::Closed);
+        }
+        let h = s
+            .halves
+            .get_mut(&(id, self.side))
+            .ok_or(TransportError::UnknownStream)?;
+        if let Some(code) = h.reset {
+            return Err(TransportError::Reset(code));
+        }
+        if h.fin {
+            return Err(TransportError::UnknownStream);
+        }
+        h.data.extend(data);
+        Ok(data.len())
+    }
+    fn finish(&mut self, id: u64) -> Result<(), TransportError> {
+        let mut s = self.shared.borrow_mut();
+        let h = s
+            .halves
+            .get_mut(&(id, self.side))
+            .ok_or(TransportError::UnknownStream)?;
+        h.fin = true;
+        Ok(())
+    }
+    fn read(&mut self, id: u64, out: &mut [u8]) -> Result<ReadOutcome, TransportError> {
+        let mut s = self.shared.borrow_mut();
+        let h = s
+            .halves
+            .get_mut(&(id, 1 - self.side))
+            .ok_or(TransportError::UnknownStream)?;
+        if let Some(code) = h.reset {
+            return Err(TransportError::Reset(code));
+        }
+        let n = out.len().min(h.data.len());
+        for (o, b) in out.iter_mut().zip(h.data.drain(..n)) {
+            *o = b;
+        }
+        Ok(ReadOutcome {
+            len: n,
+            fin: h.fin && h.data.is_empty(),
+        })
+    }
+    fn reset(&mut self, id: u64, code: Code) {
+        let mut s = self.shared.borrow_mut();
+        if let Some(h) = s.halves.get_mut(&(id, self.side))
+            && !h.fin
+        {
+            h.reset = Some(code.0);
+            h.data.clear();
+        }
+    }
+    fn stop_sending(&mut self, id: u64, code: Code) {
+        let mut s = self.shared.borrow_mut();
+        if let Some(h) = s.halves.get_mut(&(id, 1 - self.side)) {
+            h.stopped = Some(code.0);
+            if !(h.fin && h.data.is_empty()) {
+                h.reset = Some(code.0);
+                h.data.clear();
+            }
+        }
+    }
+    fn accept(&mut self) -> Option<u64> {
+        self.shared.borrow_mut().accept[self.side].pop_front()
+    }
+    fn close(&mut self, code: Code) {
+        self.shared.borrow_mut().closed[self.side].get_or_insert(code);
+    }
+    fn max_datagram_size(&mut self) -> Option<usize> {
+        self.max_datagram
+    }
+    fn send_datagram(&mut self, data: &[u8]) -> Result<(), TransportError> {
+        match self.max_datagram {
+            None => Err(TransportError::Unsupported),
+            Some(m) if data.len() > m => Err(TransportError::TooLarge),
+            Some(_) => {
+                self.shared.borrow_mut().datagrams[1 - self.side].push_back(data.to_vec());
+                Ok(())
+            }
+        }
+    }
+    fn recv_datagram(&mut self) -> Option<Vec<u8>> {
+        self.shared.borrow_mut().datagrams[self.side].pop_front()
+    }
+}
+
+fn digest_u64(h: u64, v: u64) -> u64 {
+    fnv(h, &v.to_be_bytes())
+}
+
+/// Runs HTTP/3 client/server connections over an in-memory QUIC transport:
+/// whole requests, interims, chunked responses with trailers, priority updates,
+/// streaming request uploads, and GOAWAY.
+fn connection_batch() -> u64 {
+    let mut digest = 0xcbf2_9ce4_8422_2325;
+    let payload: Vec<u8> = (0..512usize).map(|i| (i.wrapping_mul(37)) as u8).collect();
+    for round in 0..8usize {
+        let (mut c, mut s) = mem_pair(None);
+        let cfg = H3Config {
+            incremental_quantum: 4096,
+            ..H3Config::default()
+        };
+        let mut client = ClientConnection::new(cfg);
+        let mut server = ServerConnection::new(cfg);
+        // Handshake settings exchange.
+        for _ in 0..2 {
+            client.poll(&mut c);
+            server.poll(&mut s);
+        }
+        for wave in 0..4usize {
+            let mut sent_ids = Vec::with_capacity(4);
+            for k in 0..4usize {
+                let mut req =
+                    ClientRequest::get("example.com", &format!("/item/{round}/{wave}/{k}"));
+                req.fields.push(Field::new(
+                    "priority",
+                    if k % 2 == 0 { "u=1, i" } else { "u=3" },
+                ));
+                req.fields
+                    .push(Field::new("x-tag", format!("w{wave}-k{k}")));
+                if k % 2 == 1 {
+                    req.method = "POST".into();
+                    req.body = payload[..64 + (k * 97 + wave * 31) % 384].to_vec();
+                }
+                let sid = client.send_request(&mut c, &req).unwrap();
+                if k == 1 {
+                    client
+                        .update_priority(&mut c, sid, Priority::new(0, true))
+                        .unwrap();
+                }
+                sent_ids.push(sid);
+            }
+            for _ in 0..3 {
+                client.poll(&mut c);
+                server.poll(&mut s);
+            }
+            while let Some(ev) = server.poll_event() {
+                match ev {
+                    Event::Request(r) => {
+                        digest = digest_u64(digest, r.stream_id);
+                        digest = fnv(digest, r.head.method.as_bytes());
+                        digest = fnv(digest, r.head.path.as_bytes());
+                        digest = digest_fields(digest, &r.head.fields);
+                        digest = fnv(digest, &r.body);
+                        let resp_len = 96 + (r.stream_id as usize % 5) * 64;
+                        if (r.stream_id / 4) % 2 == 0 {
+                            let mut resp = r.responder;
+                            resp.send_interim(
+                                &mut server,
+                                &mut s,
+                                103,
+                                vec![Field::new("link", "</style.css>; rel=preload")],
+                            )
+                            .unwrap();
+                            let _ = resp
+                                .respond(
+                                    &mut server,
+                                    &mut s,
+                                    Response {
+                                        status: 200,
+                                        fields: vec![Field::new("content-type", "text/plain")],
+                                        body: payload[..resp_len].to_vec(),
+                                    },
+                                )
+                                .unwrap();
+                        } else {
+                            let mut resp = r
+                                .responder
+                                .send_headers(
+                                    &mut server,
+                                    &mut s,
+                                    200,
+                                    vec![Field::new("x-streamed", "yes")],
+                                    Some(resp_len as u64),
+                                )
+                                .unwrap();
+                            resp.send_data(&mut server, &mut s, &payload[..resp_len / 2])
+                                .unwrap();
+                            resp.send_data(&mut server, &mut s, &payload[resp_len / 2..resp_len])
+                                .unwrap();
+                            let _ = resp
+                                .finish(&mut server, &mut s, vec![Field::new("x-end", "ok")])
+                                .unwrap();
+                        }
+                    }
+                    other => panic!("unexpected server event {other:?}"),
+                }
+            }
+            for _ in 0..3 {
+                server.poll(&mut s);
+                client.poll(&mut c);
+            }
+            while let Some(ev) = client.poll_event() {
+                match ev {
+                    ClientEvent::Interim { stream_id, head } => {
+                        digest = digest_u64(digest, stream_id);
+                        digest = digest_u64(digest, u64::from(head.status));
+                        digest = digest_fields(digest, &head.fields);
+                    }
+                    ClientEvent::Response(r) => {
+                        digest = digest_u64(digest, r.stream_id);
+                        digest = digest_u64(digest, u64::from(r.head.status));
+                        digest = digest_fields(digest, &r.head.fields);
+                        digest = fnv(digest, &r.body);
+                        digest = digest_fields(digest, &r.trailers);
+                    }
+                    other => panic!("unexpected client event {other:?}"),
+                }
+            }
+        }
+        server.shutdown(&mut s);
+        for _ in 0..2 {
+            server.poll(&mut s);
+            client.poll(&mut c);
+        }
+        while let Some(ev) = client.poll_event() {
+            match ev {
+                ClientEvent::GoAway(id) => digest = digest_u64(digest, id),
+                other => panic!("unexpected post-goaway client event {other:?}"),
+            }
+        }
+        let ss = server.stats();
+        let cs = client.stats();
+        digest = digest_u64(digest, ss.requests);
+        digest = digest_u64(digest, ss.responses);
+        digest = digest_u64(digest, ss.interim_responses);
+        digest = digest_u64(digest, ss.priority_updates);
+        digest = digest_u64(digest, cs.responses);
+        digest = digest_u64(digest, cs.interim_responses);
+
+        // Streaming request upload pair.
+        let (mut c, mut s) = mem_pair(None);
+        let scfg = H3Config {
+            streaming_request_bodies: true,
+            stream_body_window: 1024,
+            ..H3Config::default()
+        };
+        let mut client = ClientConnection::new(H3Config::default());
+        let mut server = ServerConnection::new(scfg);
+        for _ in 0..2 {
+            client.poll(&mut c);
+            server.poll(&mut s);
+        }
+        let mut responders = BTreeMap::new();
+        for u in 0..4usize {
+            let mut req = ClientRequest::get("example.com", &format!("/upload/{round}/{u}"));
+            req.method = "POST".into();
+            req.fields
+                .push(Field::new("content-length", (256 * 3).to_string()));
+            let sid = client.send_request_streaming(&mut c, &req).unwrap();
+            for chunk_idx in 0..3usize {
+                client
+                    .send_body(&mut c, sid, &payload[chunk_idx * 16..chunk_idx * 16 + 256])
+                    .unwrap();
+                client.poll(&mut c);
+                server.poll(&mut s);
+            }
+            client.finish_body(&mut c, sid).unwrap();
+            client.poll(&mut c);
+            server.poll(&mut s);
+            let mut body_buf = Vec::new();
+            let mut tmp = [0u8; 256];
+            loop {
+                server.poll(&mut s);
+                let mut drained = false;
+                while let Some(ev) = server.poll_event() {
+                    drained = true;
+                    match ev {
+                        Event::StreamingRequest(sr) => {
+                            digest = digest_u64(digest, sr.stream_id);
+                            digest = fnv(digest, sr.head.path.as_bytes());
+                            responders.insert(sr.stream_id, sr.responder);
+                        }
+                        Event::BodyReadable { stream_id } => loop {
+                            let r = server.read_body(&mut s, stream_id, &mut tmp).unwrap();
+                            body_buf.extend_from_slice(&tmp[..r.len]);
+                            if r.end {
+                                let trailers = server.take_trailers(stream_id);
+                                digest = digest_fields(digest, &trailers);
+                                digest = fnv(digest, &body_buf);
+                                let resp = responders.remove(&stream_id).unwrap();
+                                let _ = resp
+                                    .respond(
+                                        &mut server,
+                                        &mut s,
+                                        Response {
+                                            status: 204,
+                                            fields: Vec::new(),
+                                            body: Vec::new(),
+                                        },
+                                    )
+                                    .unwrap();
+                                break;
+                            }
+                            if r.len == 0 {
+                                break;
+                            }
+                        },
+                        other => panic!("unexpected streaming server event {other:?}"),
+                    }
+                }
+                if !drained {
+                    break;
+                }
+            }
+            client.poll(&mut c);
+            while let Some(ev) = client.poll_event() {
+                if let ClientEvent::Response(r) = ev {
+                    digest = digest_u64(digest, u64::from(r.head.status));
+                }
+            }
+        }
+    }
+    digest
+}
+
+/// Runs WebTransport and capsule HTTP Datagram sessions over an in-memory
+/// transport: extended CONNECT, uni/bidi WT streams, QUIC + capsule
+/// datagrams, and graceful CLOSE_WEBTRANSPORT_SESSION closure.
+fn session_batch() -> u64 {
+    let mut digest = 0xcbf2_9ce4_8422_2325;
+    let mut stream_buf = [0u8; 512];
+    for round in 0..16usize {
+        for max_dgram in [Some(1200usize), None] {
+            let (mut c, mut s) = mem_pair(max_dgram);
+            let cfg = H3Config::default().with_webtransport(4);
+            let mut client = ClientConnection::new(cfg);
+            let mut server = ServerConnection::new(cfg);
+            for _ in 0..2 {
+                client.poll(&mut c);
+                server.poll(&mut s);
+            }
+            let req =
+                ClientRequest::connect("example.com", &format!("/wt/{round}"), "webtransport");
+            let sid = client.open_session(&mut c, &req).unwrap();
+            client.poll(&mut c);
+            server.poll(&mut s);
+            let mut sess: Option<Session> = None;
+            while let Some(ev) = server.poll_event() {
+                match ev {
+                    Event::Connect(cr) => {
+                        digest = digest_u64(digest, cr.stream_id);
+                        digest = fnv(digest, cr.head.path.as_bytes());
+                        sess = Some(
+                            cr.responder
+                                .accept_session(&mut server, &mut s, Vec::new())
+                                .unwrap(),
+                        );
+                    }
+                    other => panic!("unexpected connect event {other:?}"),
+                }
+            }
+            let sess = sess.expect("accepted session");
+            client.poll(&mut c);
+            while let Some(ev) = client.poll_event() {
+                match ev {
+                    ClientEvent::SessionEstablished { session_id, head } => {
+                        digest = digest_u64(digest, session_id);
+                        digest = digest_u64(digest, u64::from(head.status));
+                    }
+                    other => panic!("unexpected session established event {other:?}"),
+                }
+            }
+            // Client opens bidi + uni WT streams and sends datagrams.
+            for k in 0..2usize {
+                let bidi = client.open_stream(&mut c, sid, true).unwrap();
+                let msg = format!("c-bidi-{round}-{k}");
+                let _ = client.write_stream(&mut c, bidi, msg.as_bytes()).unwrap();
+                client.finish_stream(&mut c, bidi).unwrap();
+
+                let uni = client.open_stream(&mut c, sid, false).unwrap();
+                let umsg = format!("c-uni-{round}-{k}");
+                let _ = client.write_stream(&mut c, uni, umsg.as_bytes()).unwrap();
+                client.finish_stream(&mut c, uni).unwrap();
+
+                let path = client
+                    .send_datagram(&mut c, sid, format!("c-dgram-{round}-{k}").as_bytes())
+                    .unwrap();
+                digest = digest_u64(digest, matches!(path, DatagramPath::Quic) as u64);
+            }
+            // Server opens bidi + uni WT streams and sends datagrams.
+            let sbidi = server.open_stream(&mut s, &sess, true).unwrap();
+            let _ = server.write_stream(&mut s, sbidi, b"s-bidi-hello").unwrap();
+            server.finish_stream(&mut s, sbidi).unwrap();
+            let suni = server.open_stream(&mut s, &sess, false).unwrap();
+            let _ = server.write_stream(&mut s, suni, b"s-uni-hello").unwrap();
+            server.finish_stream(&mut s, suni).unwrap();
+            let spath = server.send_datagram(&mut s, &sess, b"s-dgram").unwrap();
+            digest = digest_u64(digest, matches!(spath, DatagramPath::Quic) as u64);
+
+            for _ in 0..3 {
+                client.poll(&mut c);
+                server.poll(&mut s);
+            }
+            while let Some(ev) = server.poll_event() {
+                if let Event::Session(sev) = ev {
+                    match sev {
+                        SessionEvent::Stream {
+                            session,
+                            stream_id,
+                            bidi,
+                        } => {
+                            digest = digest_u64(digest, session);
+                            digest = digest_u64(digest, stream_id);
+                            digest = digest_u64(digest, u64::from(bidi));
+                            let r = server
+                                .read_stream(&mut s, stream_id, &mut stream_buf)
+                                .unwrap();
+                            digest = fnv(digest, &stream_buf[..r.len]);
+                            digest = digest_u64(digest, u64::from(r.fin));
+                            if bidi {
+                                let _ = server.write_stream(&mut s, stream_id, b"echo").unwrap();
+                                server.finish_stream(&mut s, stream_id).unwrap();
+                            }
+                        }
+                        SessionEvent::Datagram { session, payload } => {
+                            digest = digest_u64(digest, session);
+                            digest = fnv(digest, &payload);
+                        }
+                        other => panic!("unexpected server session event {other:?}"),
+                    }
+                }
+            }
+            for _ in 0..2 {
+                server.poll(&mut s);
+                client.poll(&mut c);
+            }
+            while let Some(ev) = client.poll_event() {
+                if let ClientEvent::Session(sev) = ev {
+                    match sev {
+                        SessionEvent::Stream {
+                            session,
+                            stream_id,
+                            bidi,
+                        } => {
+                            digest = digest_u64(digest, session);
+                            digest = digest_u64(digest, stream_id);
+                            digest = digest_u64(digest, u64::from(bidi));
+                            let r = client
+                                .read_stream(&mut c, stream_id, &mut stream_buf)
+                                .unwrap();
+                            digest = fnv(digest, &stream_buf[..r.len]);
+                            digest = digest_u64(digest, u64::from(r.fin));
+                        }
+                        SessionEvent::Datagram { session, payload } => {
+                            digest = digest_u64(digest, session);
+                            digest = fnv(digest, &payload);
+                        }
+                        other => panic!("unexpected client session event {other:?}"),
+                    }
+                }
+            }
+            let _ = sess.close(&mut server, &mut s, 0x1234, b"done").unwrap();
+            for _ in 0..2 {
+                server.poll(&mut s);
+                client.poll(&mut c);
+            }
+            while let Some(ev) = client.poll_event() {
+                if let ClientEvent::Session(SessionEvent::Closed {
+                    session,
+                    code,
+                    reason,
+                    reset,
+                }) = ev
+                {
+                    digest = digest_u64(digest, session);
+                    digest = digest_u64(digest, u64::from(code));
+                    digest = fnv(digest, &reason);
+                    digest = digest_u64(digest, reset.unwrap_or(u64::MAX));
+                }
+            }
+            let _ = client.close_session(&mut c, sid, 0, b"");
+            for _ in 0..2 {
+                client.poll(&mut c);
+                server.poll(&mut s);
+            }
+            let sstat = server.session_stats();
+            let cstat = client.session_stats();
+            digest = digest_u64(digest, sstat.sessions);
+            digest = digest_u64(digest, sstat.datagrams_received);
+            digest = digest_u64(digest, sstat.streams_accepted);
+            digest = digest_u64(digest, cstat.datagrams_received);
+            digest = digest_u64(digest, cstat.streams_accepted);
+        }
+    }
+    digest
+}
+
 struct Workload {
     corpus: Vec<Encoded>,
     blocks: Vec<Vec<Field>>,
@@ -343,7 +901,19 @@ struct Workload {
 }
 
 impl Workload {
-    fn load() -> Self {
+    fn load(workload: &str) -> Self {
+        if matches!(workload, "connection" | "session") {
+            return Self {
+                corpus: Vec::new(),
+                blocks: Vec::new(),
+                streams: Streams {
+                    requests: Vec::new(),
+                    control: Vec::new(),
+                    capsules: Vec::new(),
+                },
+                lists: Vec::new(),
+            };
+        }
         let corpus = corpus();
         let streams = streams(&corpus);
         Self {
@@ -360,6 +930,8 @@ impl Workload {
             "encode" => encode_batch(&self.blocks),
             "frames" => frames_batch(&self.streams),
             "messages" => messages_batch(&self.lists),
+            "connection" => connection_batch(),
+            "session" => session_batch(),
             other => panic!("unknown workload {other}"),
         }
     }
@@ -368,7 +940,7 @@ impl Workload {
 /// Serve batches: each stdin line `go <n>` runs one batch and answers with
 /// its digest.
 fn worker(workload: &str) {
-    let w = Workload::load();
+    let w = Workload::load(workload);
     let stdin = std::io::stdin();
     let mut out = std::io::stdout().lock();
     for line in stdin.lock().lines() {
@@ -428,8 +1000,8 @@ impl BenchCase for Arm {
     }
 }
 
-fn drive(workload: &str, rust: &str, vesper: &str) {
-    let w = Workload::load();
+fn drive(workload: &str, rust: &str, vesper: &str, epochs: usize, emit_pairs: bool) {
+    let w = Workload::load(workload);
     let (per_batch, unit) = match workload {
         "decode" => (
             w.corpus
@@ -441,12 +1013,14 @@ fn drive(workload: &str, rust: &str, vesper: &str) {
         "encode" => (16 * w.blocks.len(), "section"),
         "frames" => (frame_count(&w.streams), "frame"),
         "messages" => (64 * w.lists.len(), "message"),
+        "connection" => (8 * (16 + 4), "exchange"),
+        "session" => (16 * 2, "session"),
         other => panic!("unknown workload {other}"),
     };
     let operations = 16;
     let config = RunConfig {
-        epochs: 12,
-        warmup_epochs: 1,
+        epochs,
+        warmup_epochs: 2,
         operations_per_window: operations,
         max_elapsed_nanos: 600_000_000_000,
         ..RunConfig::default()
@@ -494,9 +1068,9 @@ fn drive(workload: &str, rust: &str, vesper: &str) {
         ratios[0],
         ratios[ratios.len() - 1],
     );
-    let analysis = analyze_pairs(report.pairs(), 10_000).expect("analysis");
+    let analysis = analyze_pairs(report.pairs(), 5_000).expect("analysis");
     println!(
-        "{workload}: 2x gate (candidate at most 10000 bp slower): {:?}; digests agree over {} batches",
+        "{workload}: 1.5x gate (candidate at most 5000 bp slower): {:?}; digests agree over {} batches",
         analysis.decision,
         baseline.digests.len() + candidate.digests.len()
     );
@@ -506,6 +1080,14 @@ fn drive(workload: &str, rust: &str, vesper: &str) {
             ratios[interval.lower_rank - 1],
             ratios[interval.upper_rank - 1]
         );
+    }
+    if emit_pairs {
+        let pairs_str: Vec<String> = report
+            .pairs()
+            .iter()
+            .map(|p| format!("{}:{}", p.baseline_total(), p.candidate_total()))
+            .collect();
+        println!("flip-gate pairs {workload} {}", pairs_str.join(" "));
     }
     for arm in [&mut baseline, &mut candidate] {
         let _ = arm.child.kill();
@@ -517,9 +1099,10 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     match args.iter().map(String::as_str).collect::<Vec<_>>()[1..] {
         ["worker", workload] => worker(workload),
-        ["drive", workload, rust, vesper] => drive(workload, rust, vesper),
+        ["drive", workload, rust, vesper] => drive(workload, rust, vesper, 30, false),
+        ["flip-gate", workload, rust, vesper] => drive(workload, rust, vesper, 30, true),
         ["once", workload, batches] => {
-            let w = Workload::load();
+            let w = Workload::load(workload);
             let mut digest = 0;
             for _ in 0..batches.parse::<u32>().expect("batches") {
                 digest ^= w.run(workload);
@@ -528,7 +1111,7 @@ fn main() {
         }
         _ => {
             eprintln!(
-                "usage: abba worker <decode|encode> | abba drive <decode|encode|frames|messages> <rust-worker> <vesper-worker> | abba once <decode|encode|frames|messages> <batches>"
+                "usage: abba worker <workload> | abba drive <workload> <rust-worker> <vesper-worker> | abba flip-gate <workload> <rust-worker> <vesper-worker> | abba once <workload> <batches>"
             );
             std::process::exit(2);
         }

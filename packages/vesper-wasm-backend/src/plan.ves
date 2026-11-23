@@ -46,10 +46,12 @@ use self::ir::{
     Facts,
     FnInfo,
     Ir,
-    Sig
+    Sig,
+    pattern_end
 };
 
 const NONE32: u32 = 4294967295;
+const NONE64: u64 = 18446744073709551615;
 const NO_ADT: u32 = 4294967295;
 // err.ves kinds and constructs (constants cannot be imported yet).
 const K_UNSUPPORTED: u8 = 0;
@@ -58,6 +60,9 @@ const K_LIMIT: u8 = 2;
 const K_INVALID: u8 = 3;
 const K_NOT_PORTED: u8 = 5;
 const U_PROJECTION: u8 = 4;
+const U_GENERIC_EFFECT_INSTANCE: u8 = 6;
+const U_INOUT_EFFECT_ARGUMENT: u8 = 8;
+const U_FIRST_CLASS_CONTINUATION: u8 = 9;
 const U_EXTERNAL_FUNCTION: u8 = 11;
 const U_INTEGER_WIDTH: u8 = 14;
 const U_FLOAT32: u8 = 15;
@@ -71,10 +76,34 @@ const K_ROW: u8 = 4;
 const K_INFER: u8 = 5;
 
 // IR opcodes (ir_words.rs `OP_NAMES`).
+const OP_CONST: u8 = 0;
+const OP_UNIT: u8 = 1;
 const OP_READ: u8 = 2;
+const OP_BIND: u8 = 3;
+const OP_WRITE: u8 = 4;
+const OP_UNARY: u8 = 5;
+const OP_BINARY: u8 = 6;
+const OP_TUPLE: u8 = 7;
+const OP_DATA: u8 = 8;
+const OP_PROJECT: u8 = 9;
+const OP_INDEX: u8 = 10;
 const OP_CALL: u8 = 11;
+const OP_INDIRECT: u8 = 12;
+const OP_TRY: u8 = 13;
 const OP_CLOSURE: u8 = 14;
 const OP_HANDLE: u8 = 15;
+const OP_VECTOR: u8 = 16;
+const OP_TILED: u8 = 17;
+const OP_SEQ: u8 = 18;
+const OP_FIP: u8 = 19;
+const OP_EXIT: u8 = 21;
+const TERM_RETURN: u8 = 0;
+const TERM_JUMP: u8 = 1;
+const TERM_BRANCH: u8 = 2;
+const TERM_MATCH: u8 = 3;
+const PAT_WILD: u64 = 0;
+const PAT_BIND: u64 = 1;
+const P_INOUT: u8 = 1;
 
 // Shapes (`layout::Shape`) and scalars (`layout::Scalar`).
 pub const SH_SCALAR: u8 = 0;
@@ -92,6 +121,13 @@ pub const SC_BOOL: u8 = 4;
 pub const SC_F64: u8 = 5;
 pub const SC_UNIT: u8 = 6;
 pub const SC_NEVER: u8 = 7;
+
+// Clause modes (`analysis::HandlerMode`). A clause that resumes other
+// than in tail position runs on a WasmFX continuation or in CPS, which
+// the port does not lower yet.
+pub const M_ABORT: u8 = 0;
+pub const M_TAIL: u8 = 1;
+pub const M_OTHER: u8 = 2;
 
 // Roles (`analysis::Role`).
 pub const R_ORDINARY: u8 = 0;
@@ -347,6 +383,15 @@ impl Cx {
             }
             if n == s.f32_ {
                 Fail::raise(werr(K_UNSUPPORTED, U_FLOAT32, 10));
+            }
+            if n == s.u128_ {
+                // the tuple (low word, high word): src/wide.ves
+                let u = self.types.named0(s.u64_);
+                let mut e = ChunkSeq::new[u32]();
+                e.push(u);
+                e.push(u);
+                let tt = self.types.tuple(in e);
+                return shape_of(SH_TUPLE, 0, NO_ADT, tt);
             }
             if self.is_integer_name(n) {
                 Fail::raise(werr(K_UNSUPPORTED, U_INTEGER_WIDTH, 11));
@@ -725,6 +770,10 @@ pub struct Plan {
     // host capabilities, sorted: 0 Stdout, 1 Clock, 2 Trace, 3 the
     // StdEnv library, 4 the StdFs library (`host::HOST_ENV`, `HOST_FS`)
     host: ChunkSeq[u8],
+    handlers: ChunkSeq[Handler],
+    clauses: ChunkSeq[HClause],
+    // the handlers' and clauses' side words (types, names, keys)
+    hw: ChunkSeq[u32],
 }
 
 // A queued instance (BFS of `analysis::plan`).
@@ -734,6 +783,8 @@ copy struct Queued {
     v0: u64,
     vn: u64,
     role: u8,
+    handler: u64,
+    op: u64,
     l0: u64,
     ln: u64,
 }
@@ -1004,6 +1055,9 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
         keys: ChunkSeq::new[u32](),
         max_arity: 0,
         host: ChunkSeq::new[u8](),
+        handlers: ChunkSeq::new[Handler](),
+        clauses: ChunkSeq::new[HClause](),
+        hw: ChunkSeq::new[u32](),
     };
     capabilities(inout cx, inout p.host, entry);
     let mut arity: u64 = 0;
@@ -1039,6 +1093,8 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
                 v0: 0,
                 vn: 0,
                 role: R_ORDINARY,
+                handler: 0,
+                op: 0,
                 l0: l0,
                 ln: l.len()
             }
@@ -1057,6 +1113,8 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
                 v0: 0,
                 vn: 0,
                 role: 0,
+                handler: 0,
+                op: 0,
                 l0: 0,
                 ln: 0
             },
@@ -1137,6 +1195,8 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
                                 v0: qv0,
                                 vn: cv.len(),
                                 role: R_ORDINARY,
+                                handler: 0,
+                                op: 0,
                                 l0: ql0,
                                 ln: ls.len()
                             }
@@ -1171,6 +1231,8 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
                                 v0: qv0,
                                 vn: vars.len(),
                                 role: R_ORDINARY,
+                                handler: 0,
+                                op: 0,
                                 l0: ql0,
                                 ln: q.ln
                             }
@@ -1193,14 +1255,72 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
                                     v0: 0,
                                     vn: 0,
                                     role: R_ORDINARY,
+                                    handler: 0,
+                                    op: 0,
                                     l0: ql0,
                                     ln: ls.len()
                                 }
                             );
                     }
                 } else if ins.op == OP_HANDLE {
-                    // Handlers are lowered in part 2 of the port.
-                    Fail::raise(werr(K_NOT_PORTED, 0, 44));
+                    let id = p.handlers.len();
+                    let h = handler(
+                        inout cx,
+                        inout p,
+                        q.key,
+                        info,
+                        in vars,
+                        widen_u64(ins.dest),
+                        ins.a
+                    );
+                    for r in 0..wrapping_add(2, h.cn) {
+                        let (key, base, role, op) = if r == 0 {
+                            (h.body, h.body_base, R_HANDLER_BODY, 0)
+                        } else if r == 1 {
+                            (h.ret, h.ret_base, R_RETURN_CLAUSE, 0)
+                        } else {
+                            let c = p.clause(add(h.c0, wrapping_sub(r, 2)));
+                            (c.function, c.base, R_OP_CLAUSE, c.op)
+                        };
+                        let qv0 = qkeys.len();
+                        for k in 0..vars.len() {
+                            qkeys.push(vars.key(k));
+                            qvals.push(vars.val(k));
+                        }
+                        let ql0 = qlabels.len();
+                        for k in 0..q.ln {
+                            qlabels.push(u32_at(in qlabels, add(q.l0, k)));
+                        }
+                        if r == 0 && h.label != NONE32 {
+                            let mut seen_label = false;
+                            for k in ql0..qlabels.len() {
+                                if u32_at(in qlabels, k) == h.label {
+                                    seen_label = true;
+                                }
+                            }
+                            if !seen_label {
+                                qlabels.push(h.label);
+                            }
+                        }
+                        queue
+                            .push(
+                                Queued {
+                                    key: key,
+                                    base: base,
+                                    v0: qv0,
+                                    vn: vars.len(),
+                                    role: role,
+                                    handler: id,
+                                    op: op,
+                                    l0: ql0,
+                                    ln: wrapping_sub(qlabels.len(), ql0)
+                                }
+                            );
+                    }
+                    for k in 0..h.en {
+                        sorted_insert(in cx.names, inout p.keys, u32_at(in p.hw, add(h.e0, k)));
+                    }
+                    p.handlers.push(h);
                 }
             }
         }
@@ -1215,8 +1335,8 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
                     v0: v0,
                     vn: vars.len(),
                     role: q.role,
-                    handler: 0,
-                    op: 0,
+                    handler: q.handler,
+                    op: q.op,
                     c0: c0,
                     cn: wrapping_sub(p.calls.len(), c0),
                     l0: pl0,
@@ -1226,4 +1346,735 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
         set_by_symbol(inout p.by_key, q.key, n32(inc(i)));
     }
     p
+}
+
+// ----- handlers --------------------------------------------------------------
+
+// One operation clause of a handler (`analysis::OpClause`).
+pub copy struct HClause {
+    // the operation's index in its effect, and its signature (facts)
+    op: u64,
+    sig: u64,
+    // the clause instance and its IR function
+    function: u32,
+    base: u32,
+    mode: u8,
+    // the clause's patterns: hops[pats..], npats of them
+    pats: u64,
+    npats: u64,
+    // the continuation's name, or NONE32
+    resume: u32,
+    // captures: hw[k0..k0+kn]
+    k0: u64,
+    kn: u64,
+    // the operation's parameter types under the effect's arguments:
+    // hw[t0..t0+n], n the signature's parameter count
+    t0: u64,
+}
+
+// One `handle` expression (`analysis::Handler`).
+pub copy struct Handler {
+    // the instance containing it and the instruction's value
+    site: u32,
+    dest: u64,
+    label: u32,
+    ename: u32,
+    // evidence keys, in install order: hw[e0..e0+en]
+    e0: u64,
+    en: u64,
+    // the state's type, or NONE32
+    state: u32,
+    body: u32,
+    body_base: u32,
+    body_type: u32,
+    ret: u32,
+    ret_base: u32,
+    // the return clause's first pattern: hops[ret_pat]
+    ret_pat: u64,
+    // the return clause's captures: hw[rk0..rk0+rkn]
+    rk0: u64,
+    rkn: u64,
+    // clauses[c0..c0+cn]
+    c0: u64,
+    cn: u64,
+    // alias pairs: ir words alias_at.., alias_n pairs
+    alias_at: u64,
+    alias_n: u64,
+}
+
+fn clause0() -> HClause {
+    HClause {
+        op: 0,
+        sig: 0,
+        function: 0,
+        base: 0,
+        mode: 0,
+        pats: 0,
+        npats: 0,
+        resume: NONE32,
+        k0: 0,
+        kn: 0,
+        t0: 0
+    }
+}
+
+fn handler0() -> Handler {
+    Handler {
+        site: 0,
+        dest: 0,
+        label: NONE32,
+        ename: 0,
+        e0: 0,
+        en: 0,
+        state: NONE32,
+        body: 0,
+        body_base: 0,
+        body_type: 0,
+        ret: 0,
+        ret_base: 0,
+        ret_pat: 0,
+        rk0: 0,
+        rkn: 0,
+        c0: 0,
+        cn: 0,
+        alias_at: 0,
+        alias_n: 0
+    }
+}
+
+impl Plan {
+    pub fn handler(in self, i: u64) -> Handler {
+        match self.handlers.try_get(i) {
+            Option::Some(h) => h,
+            Option::None => handler0(),
+        }
+    }
+
+    pub fn clause(in self, i: u64) -> HClause {
+        match self.clauses.try_get(i) {
+            Option::Some(c) => c,
+            Option::None => clause0(),
+        }
+    }
+
+    // The handler of the `handle` instruction `dest` in instance `site`
+    // (`handler_at`), or NONE64.
+    pub fn handler_at(in self, site: u32, dest: u64) -> u64 {
+        for i in 0..self.handlers.len() {
+            let h = self.handler(i);
+            if h.site == site && h.dest == dest {
+                return i;
+            }
+        }
+        NONE64
+    }
+
+    // The clause of operation `op` in handler `h`.
+    pub fn clause_of(in self, h: u64, op: u64) -> HClause {
+        let hd = self.handler(h);
+        for k in 0..hd.cn {
+            let c = self.clause(add(hd.c0, k));
+            if c.op == op {
+                return c;
+            }
+        }
+        clause0()
+    }
+
+    pub fn word(in self, i: u64) -> u32 {
+        u32_at(in self.hw, i)
+    }
+}
+
+fn hop(in cx: Cx, i: u64) -> u64 {
+    u64_at(in cx.f.hops, i)
+}
+
+// `analysis::captures` of the names `hops[at..at+n]`.
+fn captures_h(in cx: Cx, at: u64, n: u64, aa: u64, an: u64, outer: FnInfo) -> ChunkSeq[u32] {
+    let mut out = ChunkSeq::new[u32]();
+    for i in 0..n {
+        let name = n32(hop(in cx, add(at, i)));
+        let s = alias_of(in cx, aa, an, name);
+        if s != NONE32 && cx.ir.has_local(outer, s) {
+            out.push(name);
+        }
+    }
+    out
+}
+
+// Whether `t` is open (`numeric::open`): an inferred part, a row or a
+// function type.
+fn open_type(in cx: Cx, t: u32) -> bool {
+    let n = cx.types.node(t);
+    if n.kind == K_INFER || n.kind == K_ROW || n.kind == K_FN {
+        return true;
+    }
+    if n.kind == K_NAMED || n.kind == K_TUPLE {
+        for i in 0..w(n.n) {
+            if open_type(in cx, cx.types.arg(t, i)) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+// `numeric::instance_key(name, args)`: `$effect:E[T, ..]`, or NONE32
+// when there are no arguments or one is open.
+pub fn instance_key(inout cx: Cx, name: u32, in args: ChunkSeq[u32]) -> u32 {
+    if args.len() == 0 {
+        return NONE32;
+    }
+    for i in 0..args.len() {
+        if open_type(in cx, u32_at(in args, i)) {
+            return NONE32;
+        }
+    }
+    let mut text = ChunkSeq::new[u8]();
+    append_ascii(inout text, "$effect:");
+    cx.write_name(name, inout text);
+    text.push(91);
+    for i in 0..args.len() {
+        if i > 0 {
+            text.push(44);
+            text.push(32);
+        }
+        let d = cx.default_ty(u32_at(in args, i));
+        cx.show(d, inout text);
+    }
+    text.push(93);
+    cx.intern(in text)
+}
+
+// `$effect:E` or `$label:l`.
+pub fn prefixed_key(inout cx: Cx, label: bool, name: u32) -> u32 {
+    let mut text = ChunkSeq::new[u8]();
+    if label {
+        append_ascii(inout text, "$label:");
+    } else {
+        append_ascii(inout text, "$effect:");
+    }
+    cx.write_name(name, inout text);
+    cx.intern(in text)
+}
+
+fn append_ascii(inout out: ChunkSeq[u8], in s: Str) {
+    let b = s.as_bytes();
+    for i in 0..b.len() {
+        match b.try_get(i) {
+            Option::Some(x) => out.push(x),
+            Option::None => {},
+        }
+    }
+}
+
+// `analysis::handler`: the handler of the `handle` instruction with
+// operands at ir word `a` and value `dest`, in instance `site` (IR
+// function `outer` under `vars`). Pushes its clauses and side words.
+fn handler(inout cx: Cx, inout p: Plan, site: u32, outer: FnInfo, in vars: TVars, dest: u64, a: u64)
+    -> Handler eff [Fail[WErr]] {
+    if cx.f.stack_switching {
+        // WasmFX handlers are lowered in a later part of the port.
+        Fail::raise(werr(K_NOT_PORTED, 0, 44));
+    }
+    // has state, state value, pool, aliases (n, pairs), moves
+    let has_state = cx.ir.word(a);
+    let sv = cx.ir.word(inc(a));
+    let pool = cx.ir.word(add(a, 2));
+    let an = cx.ir.word(add(a, 3));
+    let aa = add(a, 4);
+    let fact = cx.f.expr(pool);
+    if fact.kind != 2 {
+        Fail::raise(werr(K_INVALID, 0, 45));
+    }
+    let ov = vars.vars();
+    let mut h = fact.h0;
+    let lw = hop(in cx, h);
+    let label = if lw == 0 {
+        NONE32
+    } else {
+        n32(wrapping_sub(lw, 1))
+    };
+    let ename = n32(hop(in cx, inc(h)));
+    let na = hop(in cx, add(h, 2));
+    let mut args = ChunkSeq::new[u32]();
+    let mut generic = false;
+    for i in 0..na {
+        let t = cx.subst(n32(hop(in cx, add(add(h, 3), i))), in ov);
+        if cx.mentions_generic(t) {
+            generic = true;
+        }
+        args.push(t);
+    }
+    h = add(add(h, 3), na);
+    if generic {
+        Fail::raise(werr(K_UNSUPPORTED, U_GENERIC_EFFECT_INSTANCE, 46));
+    }
+    let di = cx.f.decl_of(ename);
+    if di == 0 {
+        Fail::raise(werr(K_INVALID, 0, 47));
+    }
+    let decl = cx.f.decl(wrapping_sub(di, 1));
+    let mut dvars = tvars_new();
+    for i in 0..decl.gn {
+        if i < args.len() {
+            dvars.set(in cx.names, u32_at(in cx.f.gsyms, add(decl.g0, i)), u32_at(in args, i));
+        }
+    }
+    let dv = dvars.vars();
+    let stateful = hop(in cx, h) != 0;
+    let body_fn = n32(hop(in cx, inc(h)));
+    let ret_fn = n32(hop(in cx, add(h, 2)));
+    h = add(h, 3);
+    let bf = cx.ir.find(body_fn);
+    let rf = cx.ir.find(ret_fn);
+    if bf == 0 || rf == 0 {
+        Fail::raise(werr(K_INVALID, 0, 48));
+    }
+    let state = if stateful {
+        if has_state == 0 {
+            Fail::raise(werr(K_INVALID, 0, 49));
+        }
+        let t = cx.ir.value_type(outer, sv);
+        if t == NONE32 {
+            Fail::raise(werr(K_INVALID, 0, 50));
+        }
+        cx.subst(t, in ov)
+    } else {
+        NONE32
+    };
+    // the return clause: patterns, then free names
+    let np = hop(in cx, h);
+    let ret_pat = inc(h);
+    let mut q = inc(h);
+    for i in 0..np {
+        q = pattern_end(in cx.f.hops, q, 0);
+    }
+    let nfree = hop(in cx, q);
+    let rcaps = captures_h(in cx, inc(q), nfree, aa, an, outer);
+    q = add(inc(q), nfree);
+    check_prefix(in cx, wrapping_sub(rf, 1), in rcaps);
+    let rk0 = p.hw.len();
+    for i in 0..rcaps.len() {
+        p.hw.push(u32_at(in rcaps, i));
+    }
+    let nc = hop(in cx, q);
+    q = inc(q);
+    let c0 = p.clauses.len();
+    for k in 0..nc {
+        let cname = n32(hop(in cx, q));
+        let cfn = n32(hop(in cx, inc(q)));
+        let npats = hop(in cx, add(q, 2));
+        let pats = add(q, 3);
+        let mut e = pats;
+        let mut pat_at = ChunkSeq::new[u64]();
+        for i in 0..npats {
+            pat_at.push(e);
+            e = pattern_end(in cx.f.hops, e, 0);
+        }
+        let cfree = hop(in cx, e);
+        let free_at = inc(e);
+        q = add(inc(e), cfree);
+        let mut op = NONE64;
+        for o in 0..decl.on {
+            if cx.f.op(add(decl.o0, o)).name == cname {
+                op = o;
+                break;
+            }
+        }
+        if op == NONE64 {
+            Fail::raise(werr(K_INVALID, 0, 51));
+        }
+        let od = cx.f.op(add(decl.o0, op));
+        let sig = cx.f.sig(od.sig);
+        let cf = cx.ir.find(cfn);
+        if cf == 0 {
+            Fail::raise(werr(K_INVALID, 0, 52));
+        }
+        let n = sig.pn;
+        let k_index = if stateful {
+            inc(n)
+        } else {
+            n
+        };
+        let mut resume = NONE32;
+        if k_index < npats {
+            let at = u64_at(in pat_at, k_index);
+            if hop(in cx, at) == PAT_BIND {
+                resume = n32(hop(in cx, add(at, 3)));
+            }
+        }
+        let caps = captures_h(in cx, free_at, cfree, aa, an, outer);
+        check_prefix(in cx, wrapping_sub(cf, 1), in caps);
+        let mode = clause_mode(in cx, wrapping_sub(cf, 1), resume);
+        // An `inout` operation argument is a cell copied back when the
+        // operation returns: only a clause that resumes in tail position
+        // makes all its writes before that.
+        for i in 0..n {
+            if cx.f.param(add(sig.p0, i)).pass != P_INOUT {
+                continue;
+            }
+            let bound = if i < npats {
+                let kind = hop(in cx, u64_at(in pat_at, i));
+                kind == PAT_BIND || kind == PAT_WILD
+            } else {
+                false
+            };
+            if mode != M_TAIL || !bound {
+                Fail::raise(werr(K_UNSUPPORTED, U_INOUT_EFFECT_ARGUMENT, 53));
+            }
+        }
+        if mode == M_OTHER {
+            // A clause that resumes other than in tail position.
+            Fail::raise(werr(K_NOT_PORTED, 0, 54));
+        }
+        let k0 = p.hw.len();
+        for i in 0..caps.len() {
+            p.hw.push(u32_at(in caps, i));
+        }
+        let t0 = p.hw.len();
+        for i in 0..n {
+            let t = cx.subst(cx.f.param(add(sig.p0, i)).ty, in dv);
+            p.hw.push(t);
+        }
+        let function = instance_name(inout cx, cfn, in vars);
+        p
+            .clauses
+            .push(
+                HClause {
+                    op: op,
+                    sig: od.sig,
+                    function: function,
+                    base: cfn,
+                    mode: mode,
+                    pats: pats,
+                    npats: npats,
+                    resume: resume,
+                    k0: k0,
+                    kn: caps.len(),
+                    t0: t0
+                }
+            );
+    }
+    if np == 0 {
+        Fail::raise(werr(K_INVALID, 0, 55));
+    }
+    // `handler_keys`
+    let e0 = p.hw.len();
+    let by_name = prefixed_key(inout cx, false, ename);
+    p.hw.push(by_name);
+    let exact = instance_key(inout cx, ename, in args);
+    if exact != NONE32 {
+        p.hw.push(exact);
+    }
+    if label != NONE32 {
+        let lk = prefixed_key(inout cx, true, label);
+        p.hw.push(lk);
+    }
+    let en = wrapping_sub(p.hw.len(), e0);
+    let body_type = cx.subst(cx.ir.info(wrapping_sub(bf, 1)).result, in ov);
+    let body = instance_name(inout cx, body_fn, in vars);
+    let ret = instance_name(inout cx, ret_fn, in vars);
+    Handler {
+        site: site,
+        dest: dest,
+        label: label,
+        ename: ename,
+        e0: e0,
+        en: en,
+        state: state,
+        body: body,
+        body_base: body_fn,
+        body_type: body_type,
+        ret: ret,
+        ret_base: ret_fn,
+        ret_pat: ret_pat,
+        rk0: rk0,
+        rkn: rcaps.len(),
+        c0: c0,
+        cn: wrapping_sub(p.clauses.len(), c0),
+        alias_at: aa,
+        alias_n: an
+    }
+}
+
+// The values instruction `ins` reads (`analysis::operands`).
+pub fn inst_operands(in cx: Cx, op: u8, a: u64) -> ChunkSeq[u64] {
+    let mut out = ChunkSeq::new[u64]();
+    if op == OP_BIND || op == OP_EXIT || op == OP_PROJECT || op == OP_TRY {
+        out.push(cx.ir.word(a));
+    } else if op == OP_WRITE {
+        out.push(cx.ir.word(add(a, 2)));
+    } else if op == OP_UNARY {
+        out.push(cx.ir.word(inc(a)));
+    } else if op == OP_BINARY {
+        out.push(cx.ir.word(inc(a)));
+        out.push(cx.ir.word(add(a, 2)));
+    } else if op == OP_INDEX {
+        out.push(cx.ir.word(a));
+        out.push(cx.ir.word(inc(a)));
+    } else if op == OP_TUPLE || op == OP_VECTOR {
+        let at = if op == OP_VECTOR {
+            inc(a)
+        } else {
+            a
+        };
+        let n = cx.ir.word(at);
+        for k in 0..n {
+            out.push(cx.ir.word(add(inc(at), k)));
+        }
+    } else if op == OP_DATA {
+        let n = cx.ir.word(inc(a));
+        for k in 0..n {
+            out.push(cx.ir.word(add(add(a, 3), wrapping_mul(2, k))));
+        }
+    } else if op == OP_CALL || op == OP_TILED || op == OP_SEQ || op == OP_FIP || op == OP_INDIRECT {
+        if op == OP_INDIRECT {
+            out.push(cx.ir.word(a));
+        }
+        // callee/pool, then args: n, n x (pass, value, root, path)
+        let n = cx.ir.word(inc(a));
+        for k in 0..n {
+            out.push(cx.ir.word(add(add(a, 3), wrapping_mul(4, k))));
+        }
+    } else if op == OP_HANDLE {
+        if cx.ir.word(a) != 0 {
+            out.push(cx.ir.word(inc(a)));
+        }
+    }
+    out
+}
+
+fn contains64(in set: ChunkSeq[u64], x: u64) -> bool {
+    for i in 0..set.len() {
+        if u64_at(in set, i) == x {
+            return true;
+        }
+    }
+    false
+}
+
+// `flows_to_return`: whether `value`, defined last in block `b` of IR
+// function `fi`, reaches a `Return` unchanged.
+pub fn flows_to_return(in cx: Cx, fi: u64, b: u64, value: u64, depth: u64) -> bool {
+    if depth > 64 {
+        return false;
+    }
+    let row = cx.ir.p.function(fi);
+    let blk = cx.ir.p.block(add(row.b0, b));
+    if blk.term == TERM_RETURN {
+        return cx.ir.word(blk.ta) == value;
+    }
+    if blk.term != TERM_JUMP {
+        return false;
+    }
+    let t = cx.ir.word(blk.ta);
+    let n = cx.ir.word(inc(blk.ta));
+    let mut pos = NONE64;
+    let mut count: u64 = 0;
+    for k in 0..n {
+        if cx.ir.word(add(add(blk.ta, 2), k)) == value {
+            if pos == NONE64 {
+                pos = k;
+            }
+            count = inc(count);
+        }
+    }
+    if pos == NONE64 || count != 1 {
+        return false;
+    }
+    let target = cx.ir.p.block(add(row.b0, t));
+    if target.ic != 0 {
+        return false;
+    }
+    let (p0, pn) = cx.ir.block_params(fi, t);
+    if pos >= pn {
+        return false;
+    }
+    flows_to_return(in cx, fi, t, cx.ir.word(add(p0, pos)), inc(depth))
+}
+
+// The blocks a terminator can branch to other than by a jump (a branch's
+// or a match's targets) include `b`.
+fn branches_to(in cx: Cx, blk_term: u8, ta: u64, b: u64) -> bool {
+    if blk_term == TERM_BRANCH {
+        return cx.ir.word(inc(ta)) == b || cx.ir.word(add(ta, 2)) == b;
+    }
+    if blk_term == TERM_MATCH {
+        let n = cx.ir.word(inc(ta));
+        let mut at = add(ta, 2);
+        for k in 0..n {
+            at = pattern_end(in cx.ir.p.ops, at, 0);
+            if cx.ir.word(at) == b {
+                return true;
+            }
+            at = inc(at);
+        }
+    }
+    false
+}
+
+// `resumed_value`: whether `value` returned from block `b` is (through
+// join parameters fed only by jumps) a tail resumption result.
+fn resumed_value(in cx: Cx, fi: u64, b: u64, value: u64, in tail: ChunkSeq[u64], depth: u64)
+    -> bool {
+    if contains64(in tail, value) {
+        return true;
+    }
+    if depth > 64 {
+        return false;
+    }
+    let (p0, pn) = cx.ir.block_params(fi, b);
+    let mut pos = NONE64;
+    for k in 0..pn {
+        if cx.ir.word(add(p0, k)) == value {
+            pos = k;
+            break;
+        }
+    }
+    if pos == NONE64 {
+        return false;
+    }
+    let row = cx.ir.p.function(fi);
+    let mut any = false;
+    for pi in 0..row.bc {
+        let pred = cx.ir.p.block(add(row.b0, pi));
+        if pred.term == TERM_JUMP && cx.ir.word(pred.ta) == b {
+            any = true;
+            let arg = cx.ir.word(add(add(pred.ta, 2), pos));
+            if !resumed_value(in cx, fi, pi, arg, in tail, inc(depth)) {
+                return false;
+            }
+        }
+        if branches_to(in cx, pred.term, pred.ta, b) {
+            return false;
+        }
+    }
+    any
+}
+
+// `analysis::clause_mode` of the clause in IR function `fi` whose
+// continuation is `resume` (NONE32: none).
+fn clause_mode(in cx: Cx, fi: u64, resume: u32) -> u8 eff [Fail[WErr]] {
+    if resume == NONE32 {
+        return M_ABORT;
+    }
+    let row = cx.ir.p.function(fi);
+    let mut reads = ChunkSeq::new[u64]();
+    for bi in 0..row.bc {
+        let blk = cx.ir.p.block(add(row.b0, bi));
+        for ii in 0..blk.ic {
+            let ins = cx.ir.p.inst(add(blk.i0, ii));
+            if ins.op == OP_READ && n32(cx.ir.word(ins.a)) == resume {
+                if cx.ir.word(inc(ins.a)) != 0 {
+                    Fail::raise(werr(K_UNSUPPORTED, U_FIRST_CLASS_CONTINUATION, 56));
+                }
+                reads.push(widen_u64(ins.dest));
+            }
+        }
+    }
+    // Every read of the continuation must be the callee of an `Indirect`.
+    let mut calls = ChunkSeq::new[u64]();
+    for bi in 0..row.bc {
+        let blk = cx.ir.p.block(add(row.b0, bi));
+        for ii in 0..blk.ic {
+            let ins = cx.ir.p.inst(add(blk.i0, ii));
+            let a = ins.a;
+            if ins.op == OP_INDIRECT && contains64(in reads, cx.ir.word(a)) {
+                let n = cx.ir.word(inc(a));
+                for k in 0..n {
+                    if contains64(in reads, cx.ir.word(add(add(a, 3), wrapping_mul(4, k)))) {
+                        Fail::raise(werr(K_UNSUPPORTED, U_FIRST_CLASS_CONTINUATION, 57));
+                    }
+                }
+                calls.push(widen_u64(ins.dest));
+            } else if ins.op == OP_CLOSURE || ins.op == OP_HANDLE {
+                // A closure or nested handler that names the continuation
+                // captures it as a value.
+                let (pool, pa, pn) = if ins.op == OP_CLOSURE {
+                    (cx.ir.word(a), add(a, 2), cx.ir.word(inc(a)))
+                } else {
+                    (cx.ir.word(add(a, 2)), add(a, 4), cx.ir.word(add(a, 3)))
+                };
+                let fact = cx.f.expr(pool);
+                for i in 0..fact.fc {
+                    let name = cx.f.free_at(add(fact.f0, i));
+                    if name == resume || alias_of(in cx, pa, pn, name) == resume {
+                        Fail::raise(werr(K_UNSUPPORTED, U_FIRST_CLASS_CONTINUATION, 58));
+                    }
+                }
+            } else {
+                let used = inst_operands(in cx, ins.op, a);
+                for k in 0..used.len() {
+                    if contains64(in reads, u64_at(in used, k)) {
+                        Fail::raise(werr(K_UNSUPPORTED, U_FIRST_CLASS_CONTINUATION, 59));
+                    }
+                }
+            }
+        }
+        let tv = term_operands(in cx, blk.term, blk.ta);
+        for k in 0..tv.len() {
+            if contains64(in reads, u64_at(in tv, k)) {
+                Fail::raise(werr(K_UNSUPPORTED, U_FIRST_CLASS_CONTINUATION, 60));
+            }
+        }
+    }
+    if calls.len() == 0 {
+        return M_ABORT;
+    }
+    // Tail-resumptive: each resumption result flows unchanged to a return,
+    // and every return returns a resumption result.
+    let mut tail = ChunkSeq::new[u64]();
+    for bi in 0..row.bc {
+        let blk = cx.ir.p.block(add(row.b0, bi));
+        if blk.ic == 0 {
+            continue;
+        }
+        let last = cx.ir.p.inst(add(blk.i0, wrapping_sub(blk.ic, 1)));
+        let d = widen_u64(last.dest);
+        if contains64(in calls, d)
+            && flows_to_return(in cx, fi, bi, d, 0)
+            && !contains64(in tail, d) {
+            tail.push(d);
+        }
+    }
+    let mut used_elsewhere = false;
+    let mut returns_resumed = true;
+    for bi in 0..row.bc {
+        let blk = cx.ir.p.block(add(row.b0, bi));
+        for ii in 0..blk.ic {
+            let ins = cx.ir.p.inst(add(blk.i0, ii));
+            let used = inst_operands(in cx, ins.op, ins.a);
+            for k in 0..used.len() {
+                if contains64(in calls, u64_at(in used, k)) {
+                    used_elsewhere = true;
+                }
+            }
+        }
+        if blk.term == TERM_RETURN {
+            if !resumed_value(in cx, fi, bi, cx.ir.word(blk.ta), in tail, 0) {
+                returns_resumed = false;
+            }
+        }
+    }
+    if tail.len() == calls.len() && !used_elsewhere && returns_resumed {
+        M_TAIL
+    } else {
+        M_OTHER
+    }
+}
+
+// `terminator_operands`.
+fn term_operands(in cx: Cx, term: u8, ta: u64) -> ChunkSeq[u64] {
+    let mut out = ChunkSeq::new[u64]();
+    if term == TERM_RETURN || term == TERM_BRANCH || term == TERM_MATCH {
+        out.push(cx.ir.word(ta));
+    } else if term == TERM_JUMP {
+        let n = cx.ir.word(inc(ta));
+        for k in 0..n {
+            out.push(cx.ir.word(add(add(ta, 2), k)));
+        }
+    }
+    out
 }

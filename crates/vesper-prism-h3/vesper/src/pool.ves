@@ -1,0 +1,1136 @@
+// Pooled byte queues (`BytePool`), pooled frame reader, and pooled capsule
+// reader used by connection, client, and session state machines so that
+// active streams store scalar handles instead of per-stream ChunkSeqs.
+
+use self::{
+    FrameError,
+    FrameOut,
+    CapsuleError,
+    CapsuleOut
+};
+use self::int::{
+    inc,
+    min64,
+    word,
+    byte,
+    remove_word
+};
+use self::varint::{
+    vdec
+};
+use self::frame::{
+    data_type,
+    headers_type,
+    webtransport_stream_type,
+    is_http2_frame,
+    buffered_type,
+    parse_payload
+};
+use self::capsule::{
+    datagram_type,
+    close_type,
+    drain_type,
+    close_code_len,
+    max_close_reason,
+    parse_value
+};
+
+// Pooled reader modes (match frame.ves and capsule.ves).
+pub const MODE_HEADER: u64 = 0;
+pub const MODE_DATA: u64 = 1;
+pub const MODE_SKIP: u64 = 2;
+pub const MODE_PAYLOAD: u64 = 3;
+pub const MODE_OPAQUE: u64 = 4;
+
+// Pooled frame / capsule output kinds.
+pub const FRAME_NONE: u64 = 0;
+pub const FRAME_DATA: u64 = 1;
+pub const FRAME_HEADERS: u64 = 2;
+pub const FRAME_WT_STREAM: u64 = 3;
+pub const FRAME_UNKNOWN: u64 = 4;
+pub const FRAME_OTHER: u64 = 5;
+
+pub const CAPSULE_NONE: u64 = 0;
+pub const CAPSULE_DATAGRAM: u64 = 1;
+pub const CAPSULE_CLOSE: u64 = 2;
+pub const CAPSULE_DRAIN: u64 = 3;
+pub const CAPSULE_UNKNOWN: u64 = 4;
+
+const POOL_CLASSES: u64 = 5;
+const MAX_CLASS: u64 = 4;
+const VARINT_HDR_MAX: u64 = 16;
+
+pub struct BytePool {
+    data: ChunkSeq[u8],
+    chunk_off: ChunkSeq[u64],
+    chunk_cap: ChunkSeq[u64],
+    chunk_start: ChunkSeq[u64],
+    chunk_end: ChunkSeq[u64],
+    chunk_next: ChunkSeq[u64],
+    chunk_cls: ChunkSeq[u64],
+    free_heads: ChunkSeq[u64],
+    q_head: ChunkSeq[u64],
+    q_tail: ChunkSeq[u64],
+    q_len: ChunkSeq[u64],
+    q_free: u64,
+}
+
+pub copy struct PoolRange {
+    off: u64,
+    len: u64,
+}
+
+pub copy struct PoolDrain {
+    q: u64,
+    len: u64,
+}
+
+pub copy struct PooledFrameStep {
+    rx_q: u64,
+    mode: u64,
+    rem: u64,
+    ty: u64,
+    flen: u64,
+    kind: u64,
+    in_scratch: bool,
+    off: u64,
+    len: u64,
+    val: u64,
+}
+
+pub copy struct PooledCapsuleStep {
+    cap_q: u64,
+    mode: u64,
+    rem: u64,
+    ty: u64,
+    flen: u64,
+    kind: u64,
+    code: u32,
+    val: u64,
+}
+
+fn cls_cap(cls: u64) -> u64 {
+    if cls == 0 {
+        256
+    } else if cls == 1 {
+        1024
+    } else if cls == 2 {
+        4096
+    } else if cls == 3 {
+        16384
+    } else {
+        65536
+    }
+}
+
+fn choose_cls(need: u64) -> u64 {
+    if need <= 256 {
+        0
+    } else if need <= 1024 {
+        1
+    } else if need <= 4096 {
+        2
+    } else if need <= 16384 {
+        3
+    } else {
+        MAX_CLASS
+    }
+}
+
+pub fn pool_new() -> BytePool {
+    let mut free_heads = ChunkSeq::with_capacity[u64](POOL_CLASSES);
+    for _i in 0..POOL_CLASSES {
+        free_heads.push(0);
+    }
+    BytePool {
+        data: ChunkSeq::new[u8](),
+        chunk_off: ChunkSeq::new[u64](),
+        chunk_cap: ChunkSeq::new[u64](),
+        chunk_start: ChunkSeq::new[u64](),
+        chunk_end: ChunkSeq::new[u64](),
+        chunk_next: ChunkSeq::new[u64](),
+        chunk_cls: ChunkSeq::new[u64](),
+        free_heads: free_heads,
+        q_head: ChunkSeq::new[u64](),
+        q_tail: ChunkSeq::new[u64](),
+        q_len: ChunkSeq::new[u64](),
+        q_free: 0,
+    }
+}
+
+fn alloc_chunk(inout p: BytePool, cls: u64) -> u64 {
+    let head = word(in p.free_heads.as_slice(), cls);
+    if head != 0 {
+        let c = wrapping_sub(head, 1);
+        let next = word(in p.chunk_next.as_slice(), c);
+        let _a = p.free_heads.try_set(cls, next);
+        let _b = p.chunk_start.try_set(c, 0);
+        let _d = p.chunk_end.try_set(c, 0);
+        let _e = p.chunk_next.try_set(c, 0);
+        return c;
+    }
+    let c = p.chunk_off.len();
+    let cap = cls_cap(cls);
+    let off = p.data.len();
+    p.data.resize(wrapping_add(off, cap), 0);
+    p.chunk_off.push(off);
+    p.chunk_cap.push(cap);
+    p.chunk_start.push(0);
+    p.chunk_end.push(0);
+    p.chunk_next.push(0);
+    p.chunk_cls.push(cls);
+    c
+}
+
+fn free_chunk(inout p: BytePool, c: u64) {
+    let cls = word(in p.chunk_cls.as_slice(), c);
+    let head = word(in p.free_heads.as_slice(), cls);
+    let _a = p.chunk_next.try_set(c, head);
+    let _b = p.free_heads.try_set(cls, inc(c));
+    let _d = p.chunk_start.try_set(c, 0);
+    let _e = p.chunk_end.try_set(c, 0);
+}
+
+fn alloc_q(inout p: BytePool) -> u64 {
+    if p.q_free != 0 {
+        let q = p.q_free;
+        let qi = wrapping_sub(q, 1);
+        p.q_free = word(in p.q_head.as_slice(), qi);
+        let _a = p.q_head.try_set(qi, 0);
+        let _b = p.q_tail.try_set(qi, 0);
+        let _c = p.q_len.try_set(qi, 0);
+        return q;
+    }
+    let qi = p.q_head.len();
+    p.q_head.push(0);
+    p.q_tail.push(0);
+    p.q_len.push(0);
+    inc(qi)
+}
+
+pub fn q_len(in p: BytePool, q: u64) -> u64 {
+    if q == 0 {
+        0
+    } else {
+        word(in p.q_len.as_slice(), wrapping_sub(q, 1))
+    }
+}
+
+pub fn q_clear(inout p: BytePool, q: u64) -> u64 {
+    if q == 0 {
+        return 0;
+    }
+    let qi = wrapping_sub(q, 1);
+    let mut cur = word(in p.q_head.as_slice(), qi);
+    loop {
+        if cur == 0 {
+            break;
+        }
+        let c = wrapping_sub(cur, 1);
+        cur = word(in p.chunk_next.as_slice(), c);
+        free_chunk(inout p, c);
+    }
+    let _a = p.q_head.try_set(qi, p.q_free);
+    let _b = p.q_tail.try_set(qi, 0);
+    let _c = p.q_len.try_set(qi, 0);
+    p.q_free = q;
+    0
+}
+
+fn append_chunk(inout p: BytePool, qi: u64, c: u64) {
+    let tail = word(in p.q_tail.as_slice(), qi);
+    if tail == 0 {
+        let _a = p.q_head.try_set(qi, inc(c));
+        let _b = p.q_tail.try_set(qi, inc(c));
+    } else {
+        let tc = wrapping_sub(tail, 1);
+        let _a = p.chunk_next.try_set(tc, inc(c));
+        let _b = p.q_tail.try_set(qi, inc(c));
+    }
+}
+
+pub fn q_push(inout p: BytePool, q: u64, in src: Slice[u8]) -> u64 {
+    let total = src.len();
+    if total == 0 {
+        return q;
+    }
+    let cur_q = if q == 0 {
+        alloc_q(inout p)
+    } else {
+        q
+    };
+    let qi = wrapping_sub(cur_q, 1);
+    let mut at: u64 = 0;
+    let tail = word(in p.q_tail.as_slice(), qi);
+    if tail != 0 {
+        let tc = wrapping_sub(tail, 1);
+        let end = word(in p.chunk_end.as_slice(), tc);
+        let cap = word(in p.chunk_cap.as_slice(), tc);
+        let room = wrapping_sub(cap, end);
+        if room > 0 {
+            let n = min64(room, total);
+            let off = wrapping_add(word(in p.chunk_off.as_slice(), tc), end);
+            let _ok = p.data.try_copy_from(off, in src[0..n]);
+            let _e = p.chunk_end.try_set(tc, wrapping_add(end, n));
+            at = n;
+        }
+    }
+    loop {
+        if at >= total {
+            break;
+        }
+        let rem = wrapping_sub(total, at);
+        let c = alloc_chunk(inout p, choose_cls(rem));
+        append_chunk(inout p, qi, c);
+        let cap = word(in p.chunk_cap.as_slice(), c);
+        let n = min64(cap, rem);
+        let off = word(in p.chunk_off.as_slice(), c);
+        let _ok = p.data.try_copy_from(off, in src[at..wrapping_add(at, n)]);
+        let _e = p.chunk_end.try_set(c, n);
+        at = wrapping_add(at, n);
+    }
+    let prev = word(in p.q_len.as_slice(), qi);
+    let _l = p.q_len.try_set(qi, wrapping_add(prev, total));
+    cur_q
+}
+
+pub fn q_head_range(in p: BytePool, q: u64) -> PoolRange {
+    if q == 0 {
+        return PoolRange {
+            off: 0,
+            len: 0
+        };
+    }
+    let qi = wrapping_sub(q, 1);
+    let href = word(in p.q_head.as_slice(), qi);
+    if href == 0 {
+        return PoolRange {
+            off: 0,
+            len: 0
+        };
+    }
+    let hc = wrapping_sub(href, 1);
+    let start = word(in p.chunk_start.as_slice(), hc);
+    let end = word(in p.chunk_end.as_slice(), hc);
+    let off = wrapping_add(word(in p.chunk_off.as_slice(), hc), start);
+    PoolRange {
+        off: off,
+        len: wrapping_sub(end, start),
+    }
+}
+
+pub fn q_consume(inout p: BytePool, q: u64, n: u64) -> u64 {
+    if q == 0 || n == 0 {
+        return q;
+    }
+    let qi = wrapping_sub(q, 1);
+    let cur_len = word(in p.q_len.as_slice(), qi);
+    let take_total = min64(n, cur_len);
+    let mut rem = take_total;
+    loop {
+        if rem == 0 {
+            break;
+        }
+        let href = word(in p.q_head.as_slice(), qi);
+        if href == 0 {
+            break;
+        }
+        let hc = wrapping_sub(href, 1);
+        let start = word(in p.chunk_start.as_slice(), hc);
+        let end = word(in p.chunk_end.as_slice(), hc);
+        let avail = wrapping_sub(end, start);
+        if rem < avail {
+            let _s = p.chunk_start.try_set(hc, wrapping_add(start, rem));
+            rem = 0;
+        } else {
+            let next = word(in p.chunk_next.as_slice(), hc);
+            let _h = p.q_head.try_set(qi, next);
+            if next == 0 {
+                let _t = p.q_tail.try_set(qi, 0);
+            }
+            free_chunk(inout p, hc);
+            rem = wrapping_sub(rem, avail);
+        }
+    }
+    let new_len = wrapping_sub(cur_len, take_total);
+    if new_len == 0 {
+        q_clear(inout p, q)
+    } else {
+        let _l = p.q_len.try_set(qi, new_len);
+        q
+    }
+}
+
+fn ensure_tail_room(inout p: BytePool, qi: u64, hint: u64) -> PoolRange {
+    let tail = word(in p.q_tail.as_slice(), qi);
+    if tail != 0 {
+        let tc = wrapping_sub(tail, 1);
+        let end = word(in p.chunk_end.as_slice(), tc);
+        let cap = word(in p.chunk_cap.as_slice(), tc);
+        let room = wrapping_sub(cap, end);
+        if room > 0 {
+            return PoolRange {
+                off: tc,
+                len: room,
+            };
+        }
+    }
+    let c = alloc_chunk(inout p, choose_cls(hint));
+    append_chunk(inout p, qi, c);
+    PoolRange {
+        off: c,
+        len: word(in p.chunk_cap.as_slice(), c),
+    }
+}
+
+pub copy struct PoolTransfer {
+    from_q: u64,
+    to_q: u64,
+    moved: u64,
+}
+
+// Moves up to `n` bytes from the front of `from_q` to the back of `to_q`
+// without leaving `p.data`.
+pub fn q_transfer(inout p: BytePool, from_q: u64, to_q: u64, n: u64) -> PoolTransfer {
+    let src_len = q_len(in p, from_q);
+    let total = min64(n, src_len);
+    if total == 0 {
+        return PoolTransfer {
+            from_q: from_q,
+            to_q: to_q,
+            moved: 0,
+        };
+    }
+    let dst_q = if to_q == 0 {
+        alloc_q(inout p)
+    } else {
+        to_q
+    };
+    let dst_qi = wrapping_sub(dst_q, 1);
+    let mut cur_from = from_q;
+    let mut rem = total;
+    loop {
+        if rem == 0 {
+            break;
+        }
+        let hr = q_head_range(in p, cur_from);
+        if hr.len == 0 {
+            break;
+        }
+        let step = min64(rem, hr.len);
+        let dst = ensure_tail_room(inout p, dst_qi, rem);
+        let tc = dst.off;
+        let end = word(in p.chunk_end.as_slice(), tc);
+        let dst_off = wrapping_add(word(in p.chunk_off.as_slice(), tc), end);
+        let take = min64(step, dst.len);
+        let _ok = p.data.try_copy_within(hr.off, wrapping_add(hr.off, take), dst_off);
+        let _e = p.chunk_end.try_set(tc, wrapping_add(end, take));
+        let prev = word(in p.q_len.as_slice(), dst_qi);
+        let _l = p.q_len.try_set(dst_qi, wrapping_add(prev, take));
+        cur_from = q_consume(inout p, cur_from, take);
+        rem = wrapping_sub(rem, take);
+    }
+    PoolTransfer {
+        from_q: cur_from,
+        to_q: dst_q,
+        moved: wrapping_sub(total, rem),
+    }
+}
+
+pub fn q_gather(in p: BytePool, q: u64, want: u64, inout out: ChunkSeq[u8]) {
+    out.clear();
+    if q == 0 || want == 0 {
+        return;
+    }
+    let qi = wrapping_sub(q, 1);
+    let mut cur = word(in p.q_head.as_slice(), qi);
+    let mut rem = want;
+    loop {
+        if cur == 0 || rem == 0 {
+            break;
+        }
+        let c = wrapping_sub(cur, 1);
+        let start = word(in p.chunk_start.as_slice(), c);
+        let end = word(in p.chunk_end.as_slice(), c);
+        let avail = wrapping_sub(end, start);
+        let take = min64(rem, avail);
+        let lo = wrapping_add(word(in p.chunk_off.as_slice(), c), start);
+        out.extend(in p.data[lo..wrapping_add(lo, take)]);
+        rem = wrapping_sub(rem, take);
+        cur = word(in p.chunk_next.as_slice(), c);
+    }
+}
+
+pub fn q_drain_to(inout p: BytePool, q: u64, max_n: u64, inout out: ChunkSeq[u8]) -> PoolDrain {
+    let len = min64(max_n, q_len(in p, q));
+    if len == 0 {
+        return PoolDrain {
+            q: q,
+            len: 0
+        };
+    }
+    let qi = wrapping_sub(q, 1);
+    let mut cur = word(in p.q_head.as_slice(), qi);
+    let mut rem = len;
+    loop {
+        if cur == 0 || rem == 0 {
+            break;
+        }
+        let c = wrapping_sub(cur, 1);
+        let start = word(in p.chunk_start.as_slice(), c);
+        let end = word(in p.chunk_end.as_slice(), c);
+        let avail = wrapping_sub(end, start);
+        let take = min64(rem, avail);
+        let lo = wrapping_add(word(in p.chunk_off.as_slice(), c), start);
+        out.extend(in p.data[lo..wrapping_add(lo, take)]);
+        rem = wrapping_sub(rem, take);
+        cur = word(in p.chunk_next.as_slice(), c);
+    }
+    let next_q = q_consume(inout p, q, len);
+    PoolDrain {
+        q: next_q,
+        len: len
+    }
+}
+
+pub fn put_u64_le(inout out: ChunkSeq[u8], v: u64) {
+    out.push(wrapping_u8(v));
+    out.push(wrapping_u8(v >> 8));
+    out.push(wrapping_u8(v >> 16));
+    out.push(wrapping_u8(v >> 24));
+    out.push(wrapping_u8(v >> 32));
+    out.push(wrapping_u8(v >> 40));
+    out.push(wrapping_u8(v >> 48));
+    out.push(wrapping_u8(v >> 56));
+}
+
+pub fn get_u64_le(in s: Slice[u8], at: u64) -> u64 {
+    widen_u64(byte(in s, at)) | (widen_u64(byte(in s, wrapping_add(at, 1))) << 8) | (
+        widen_u64(byte(in s, wrapping_add(at, 2))) << 16
+    ) | (widen_u64(byte(in s, wrapping_add(at, 3))) << 24) | (
+        widen_u64(byte(in s, wrapping_add(at, 4))) << 32
+    ) | (widen_u64(byte(in s, wrapping_add(at, 5))) << 40) | (
+        widen_u64(byte(in s, wrapping_add(at, 6))) << 48
+    ) | (widen_u64(byte(in s, wrapping_add(at, 7))) << 56)
+}
+
+pub fn q_drain_all_to(inout p: BytePool, q: u64, inout out: ChunkSeq[u8]) -> PoolRange {
+    let off = out.len();
+    let total = q_len(in p, q);
+    let d = q_drain_to(inout p, q, total, inout out);
+    let _cleared = q_clear(inout p, d.q);
+    PoolRange {
+        off: off,
+        len: d.len,
+    }
+}
+
+pub fn pooled_frame_at_boundary(in p: BytePool, rx_q: u64, mode: u64) -> bool {
+    mode == MODE_HEADER && q_len(in p, rx_q) == 0
+}
+
+copy struct PooledHdr {
+    ok: bool,
+    ty: u64,
+    len: u64,
+    used: u64,
+}
+
+fn decode_two_hdr(in s: Slice[u8]) -> PooledHdr {
+    let t = match vdec(in s, 0) {
+        Option::Some(n) => n,
+        Option::None => return PooledHdr {
+            ok: false,
+            ty: 0,
+            len: 0,
+            used: 0
+        },
+    };
+    let l = match vdec(in s, t.used) {
+        Option::Some(n) => n,
+        Option::None => return PooledHdr {
+            ok: false,
+            ty: 0,
+            len: 0,
+            used: 0
+        },
+    };
+    PooledHdr {
+        ok: true,
+        ty: t.value,
+        len: l.value,
+        used: wrapping_add(t.used, l.used),
+    }
+}
+
+fn step_frame_res(
+    rx_q: u64,
+    mode: u64,
+    rem: u64,
+    ty: u64,
+    flen: u64,
+    kind: u64,
+    in_scratch: bool,
+    off: u64,
+    len: u64,
+    val: u64,
+) -> PooledFrameStep {
+    PooledFrameStep {
+        rx_q: rx_q,
+        mode: mode,
+        rem: rem,
+        ty: ty,
+        flen: flen,
+        kind: kind,
+        in_scratch: in_scratch,
+        off: off,
+        len: len,
+        val: val,
+    }
+}
+
+pub fn pooled_frame_next(
+    inout p: BytePool,
+    inout scratch: ChunkSeq[u8],
+    rx_q_in: u64,
+    mode_in: u64,
+    rem_in: u64,
+    ty_in: u64,
+    flen_in: u64,
+    max_payload: u64,
+    webtransport: bool,
+) -> Result[PooledFrameStep, FrameError] {
+    let mut rx_q = rx_q_in;
+    let mut mode = mode_in;
+    let mut rem = rem_in;
+    let mut ty = ty_in;
+    let mut flen = flen_in;
+    loop {
+        let avail = q_len(in p, rx_q);
+        if mode == MODE_HEADER {
+            if avail == 0 {
+                return Result::Ok(
+                    step_frame_res(rx_q, mode, rem, ty, flen, FRAME_NONE, false, 0, 0, 0)
+                );
+            }
+            let hr = q_head_range(in p, rx_q);
+            let hdr_slice_contig = hr.len >= VARINT_HDR_MAX || hr.len == avail;
+            let hdr = if hdr_slice_contig {
+                let take = min64(hr.len, VARINT_HDR_MAX);
+                let hi = wrapping_add(hr.off, take);
+                decode_two_hdr(in p.data[hr.off..hi])
+            } else {
+                q_gather(in p, rx_q, VARINT_HDR_MAX, inout scratch);
+                decode_two_hdr(in scratch.as_slice())
+            };
+            if !hdr.ok {
+                return Result::Ok(
+                    step_frame_res(rx_q, mode, rem, ty, flen, FRAME_NONE, false, 0, 0, 0)
+                );
+            }
+            rx_q = q_consume(inout p, rx_q, hdr.used);
+            let fty = hdr.ty;
+            let f_len = hdr.len;
+            if is_http2_frame(fty) {
+                return Result::Err(FrameError::Http2Frame(fty));
+            }
+            if fty == webtransport_stream_type() && webtransport {
+                mode = MODE_OPAQUE;
+                return Result::Ok(
+                    step_frame_res(rx_q, mode, rem, ty, flen, FRAME_WT_STREAM, false, 0, 0, f_len)
+                );
+            }
+            if fty == data_type() {
+                if f_len == 0 {
+                    return Result::Ok(
+                        step_frame_res(rx_q, mode, rem, ty, flen, FRAME_DATA, false, 0, 0, 0)
+                    );
+                }
+                mode = MODE_DATA;
+                rem = f_len;
+            } else if buffered_type(fty) {
+                if f_len > max_payload {
+                    return Result::Err(
+                        FrameError::TooLarge {
+                            frame_type: fty,
+                            len: f_len,
+                        }
+                    );
+                }
+                mode = MODE_PAYLOAD;
+                ty = fty;
+                flen = f_len;
+            } else {
+                mode = MODE_SKIP;
+                rem = f_len;
+                return Result::Ok(
+                    step_frame_res(rx_q, mode, rem, ty, flen, FRAME_UNKNOWN, false, 0, 0, fty)
+                );
+            }
+        } else if mode == MODE_DATA {
+            if avail == 0 {
+                return Result::Ok(
+                    step_frame_res(rx_q, mode, rem, ty, flen, FRAME_NONE, false, 0, 0, 0)
+                );
+            }
+            let n = min64(rem, avail);
+            rem = wrapping_sub(rem, n);
+            if rem == 0 {
+                mode = MODE_HEADER;
+            }
+            // Data bytes stay at the front of rx_q for direct transfer or consume.
+            return Result::Ok(
+                step_frame_res(rx_q, mode, rem, ty, flen, FRAME_DATA, false, 0, n, 0)
+            );
+        } else if mode == MODE_SKIP {
+            let n = min64(rem, avail);
+            rx_q = q_consume(inout p, rx_q, n);
+            rem = wrapping_sub(rem, n);
+            if rem > 0 {
+                return Result::Ok(
+                    step_frame_res(rx_q, mode, rem, ty, flen, FRAME_NONE, false, 0, 0, 0)
+                );
+            }
+            mode = MODE_HEADER;
+        } else if mode == MODE_PAYLOAD {
+            if avail < flen {
+                return Result::Ok(
+                    step_frame_res(rx_q, mode, rem, ty, flen, FRAME_NONE, false, 0, 0, 0)
+                );
+            }
+            mode = MODE_HEADER;
+            if ty == headers_type() {
+                let hr = q_head_range(in p, rx_q);
+                if hr.len >= flen {
+                    return Result::Ok(
+                        step_frame_res(
+                            rx_q,
+                            mode,
+                            rem,
+                            ty,
+                            flen,
+                            FRAME_HEADERS,
+                            false,
+                            hr.off,
+                            flen,
+                            0
+                        )
+                    );
+                }
+                q_gather(in p, rx_q, flen, inout scratch);
+                rx_q = q_consume(inout p, rx_q, flen);
+                return Result::Ok(
+                    step_frame_res(rx_q, mode, rem, ty, flen, FRAME_HEADERS, true, 0, flen, 0)
+                );
+            }
+            // Non-HEADERS buffered frame on request/response stream (e.g., SETTINGS/GOAWAY/etc.):
+            // validate syntax through `frame::parse_payload`, then treat as unexpected in callers.
+            let hr = q_head_range(in p, rx_q);
+            let mut unused = ChunkSeq::new[u8]();
+            let check = if hr.len >= flen {
+                let hi = wrapping_add(hr.off, flen);
+                parse_payload(ty, in p.data[hr.off..hi], inout unused)
+            } else {
+                q_gather(in p, rx_q, flen, inout scratch);
+                parse_payload(ty, in scratch.as_slice(), inout unused)
+            };
+            rx_q = q_consume(inout p, rx_q, flen);
+            match check {
+                Result::Ok(_fo) => {
+                    return Result::Ok(
+                        step_frame_res(rx_q, mode, rem, ty, flen, FRAME_OTHER, false, 0, 0, ty)
+                    );
+                }
+                Result::Err(e) => return Result::Err(e),
+            }
+        } else {
+            return Result::Err(FrameError::Malformed);
+        }
+    }
+}
+
+pub fn pooled_capsule_at_boundary(in p: BytePool, cap_q: u64, mode: u64) -> bool {
+    mode == MODE_HEADER && q_len(in p, cap_q) == 0
+}
+
+fn step_cap_res(
+    cap_q: u64,
+    mode: u64,
+    rem: u64,
+    ty: u64,
+    flen: u64,
+    kind: u64,
+    code: u32,
+    val: u64,
+) -> PooledCapsuleStep {
+    PooledCapsuleStep {
+        cap_q: cap_q,
+        mode: mode,
+        rem: rem,
+        ty: ty,
+        flen: flen,
+        kind: kind,
+        code: code,
+        val: val,
+    }
+}
+
+pub fn pooled_capsule_next(
+    inout p: BytePool,
+    inout scratch: ChunkSeq[u8],
+    inout out: ChunkSeq[u8],
+    cap_q_in: u64,
+    mode_in: u64,
+    rem_in: u64,
+    ty_in: u64,
+    flen_in: u64,
+    max_value: u64,
+) -> Result[PooledCapsuleStep, CapsuleError] {
+    out.clear();
+    let mut cap_q = cap_q_in;
+    let mut mode = mode_in;
+    let mut rem = rem_in;
+    let mut ty = ty_in;
+    let mut flen = flen_in;
+    loop {
+        let avail = q_len(in p, cap_q);
+        if mode == MODE_HEADER {
+            if avail == 0 {
+                return Result::Ok(step_cap_res(cap_q, mode, rem, ty, flen, CAPSULE_NONE, 0, 0));
+            }
+            let hr = q_head_range(in p, cap_q);
+            let contig = hr.len >= VARINT_HDR_MAX || hr.len == avail;
+            let hdr = if contig {
+                let take = min64(hr.len, VARINT_HDR_MAX);
+                let hi = wrapping_add(hr.off, take);
+                decode_two_hdr(in p.data[hr.off..hi])
+            } else {
+                q_gather(in p, cap_q, VARINT_HDR_MAX, inout scratch);
+                decode_two_hdr(in scratch.as_slice())
+            };
+            if !hdr.ok {
+                return Result::Ok(step_cap_res(cap_q, mode, rem, ty, flen, CAPSULE_NONE, 0, 0));
+            }
+            cap_q = q_consume(inout p, cap_q, hdr.used);
+            let cty = hdr.ty;
+            let c_len = hdr.len;
+            if cty == datagram_type() || cty == close_type() || cty == drain_type() {
+                let bound = if cty == close_type() {
+                    wrapping_add(close_code_len(), max_close_reason())
+                } else {
+                    max_value
+                };
+                if c_len > bound {
+                    return Result::Err(
+                        CapsuleError::TooLarge {
+                            capsule_type: cty,
+                            len: c_len,
+                        }
+                    );
+                }
+                mode = MODE_PAYLOAD;
+                ty = cty;
+                flen = c_len;
+            } else {
+                mode = MODE_SKIP;
+                rem = c_len;
+                return Result::Ok(
+                    step_cap_res(cap_q, mode, rem, ty, flen, CAPSULE_UNKNOWN, 0, cty)
+                );
+            }
+        } else if mode == MODE_SKIP {
+            let n = min64(rem, avail);
+            cap_q = q_consume(inout p, cap_q, n);
+            rem = wrapping_sub(rem, n);
+            if rem > 0 {
+                return Result::Ok(step_cap_res(cap_q, mode, rem, ty, flen, CAPSULE_NONE, 0, 0));
+            }
+            mode = MODE_HEADER;
+        } else {
+            if avail < flen {
+                return Result::Ok(step_cap_res(cap_q, mode, rem, ty, flen, CAPSULE_NONE, 0, 0));
+            }
+            mode = MODE_HEADER;
+            let hr = q_head_range(in p, cap_q);
+            let res = if hr.len >= flen {
+                let hi = wrapping_add(hr.off, flen);
+                parse_value(ty, in p.data[hr.off..hi], inout out)
+            } else {
+                q_gather(in p, cap_q, flen, inout scratch);
+                parse_value(ty, in scratch.as_slice(), inout out)
+            };
+            cap_q = q_consume(inout p, cap_q, flen);
+            match res {
+                Result::Ok(CapsuleOut::Datagram) => {
+                    return Result::Ok(
+                        step_cap_res(cap_q, mode, rem, ty, flen, CAPSULE_DATAGRAM, 0, 0)
+                    );
+                }
+                Result::Ok(CapsuleOut::CloseSession(code)) => {
+                    return Result::Ok(
+                        step_cap_res(cap_q, mode, rem, ty, flen, CAPSULE_CLOSE, code, 0)
+                    );
+                }
+                Result::Ok(CapsuleOut::DrainSession) => {
+                    return Result::Ok(
+                        step_cap_res(cap_q, mode, rem, ty, flen, CAPSULE_DRAIN, 0, 0)
+                    );
+                }
+                Result::Ok(CapsuleOut::Unknown(u)) => {
+                    return Result::Ok(
+                        step_cap_res(cap_q, mode, rem, ty, flen, CAPSULE_UNKNOWN, 0, u)
+                    );
+                }
+                Result::Ok(CapsuleOut::None) => {
+                    return Result::Ok(step_cap_res(cap_q, mode, rem, ty, flen, CAPSULE_NONE, 0, 0));
+                }
+                Result::Err(e) => return Result::Err(e),
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// Shared sorted containers, outgoing map, commands, and event queues
+// ---------------------------------------------------------------------
+
+pub const CMD_STOP_SENDING: u64 = 1;
+pub const CMD_RESET: u64 = 2;
+pub const CMD_FINISH: u64 = 3;
+pub const CMD_CLOSE: u64 = 4;
+pub const CMD_SET_PRIORITY: u64 = 5;
+
+pub const SEV_STREAM: u64 = 1;
+pub const SEV_DATAGRAM: u64 = 2;
+pub const SEV_DRAINING: u64 = 3;
+pub const SEV_CLOSED: u64 = 4;
+pub const SEV_STRIDE: u64 = 6;
+
+pub const HEV_REQUEST: u64 = 1;
+pub const HEV_STREAMING_REQUEST: u64 = 2;
+pub const HEV_BODY_READABLE: u64 = 3;
+pub const HEV_CONNECT: u64 = 4;
+pub const HEV_REQUEST_FAILED: u64 = 5;
+pub const HEV_RESPONSE_ABANDONED: u64 = 6;
+pub const HEV_GOAWAY: u64 = 7;
+
+pub const HEV_CLIENT_RESPONSE: u64 = 10;
+pub const HEV_CLIENT_INTERIM: u64 = 11;
+pub const HEV_CLIENT_SESSION_EST: u64 = 12;
+pub const HEV_CLIENT_FAILED: u64 = 13;
+pub const HEV_CLIENT_GOAWAY: u64 = 14;
+
+pub copy struct FindU64 {
+    idx: u64,
+    found: bool,
+}
+
+pub fn bsearch_u64(in s: Slice[u64], key: u64) -> FindU64 {
+    let mut lo: u64 = 0;
+    let mut hi: u64 = s.len();
+    loop {
+        if lo >= hi {
+            return FindU64 {
+                idx: lo,
+                found: false
+            };
+        }
+        let mid = wrapping_add(lo, wrapping_sub(hi, lo) >> 1);
+        let v = word(in s, mid);
+        if v < key {
+            lo = inc(mid);
+        } else if v > key {
+            hi = mid;
+        } else {
+            return FindU64 {
+                idx: mid,
+                found: true
+            };
+        }
+    }
+}
+
+pub fn insert_word(inout s: ChunkSeq[u64], i: u64, v: u64) {
+    let n = s.len();
+    s.push(v);
+    if i < n {
+        let _m = s.try_copy_within(i, n, inc(i));
+        let _x = s.try_set(i, v);
+    }
+}
+
+pub fn set_u64_contains(in s: ChunkSeq[u64], key: u64) -> bool {
+    bsearch_u64(in s.as_slice(), key).found
+}
+
+pub fn set_u64_insert(inout s: ChunkSeq[u64], key: u64) {
+    let f = bsearch_u64(in s.as_slice(), key);
+    if !f.found {
+        insert_word(inout s, f.idx, key);
+    }
+}
+
+pub fn set_u64_remove(inout s: ChunkSeq[u64], key: u64) {
+    let f = bsearch_u64(in s.as_slice(), key);
+    if f.found {
+        remove_word(inout s, f.idx);
+    }
+}
+
+pub struct OutMap {
+    ids: ChunkSeq[u64],
+    q: ChunkSeq[u64],
+    fin: ChunkSeq[u64],
+}
+
+pub fn out_map_new() -> OutMap {
+    OutMap {
+        ids: ChunkSeq::new[u64](),
+        q: ChunkSeq::new[u64](),
+        fin: ChunkSeq::new[u64](),
+    }
+}
+
+pub fn out_queued(in m: OutMap, in p: BytePool, id: u64) -> u64 {
+    let f = bsearch_u64(in m.ids.as_slice(), id);
+    if f.found {
+        q_len(in p, word(in m.q.as_slice(), f.idx))
+    } else {
+        0
+    }
+}
+
+pub fn out_queue(inout m: OutMap, inout p: BytePool, id: u64, in bytes: Slice[u8]) {
+    let f = bsearch_u64(in m.ids.as_slice(), id);
+    if f.found {
+        let cur = word(in m.q.as_slice(), f.idx);
+        let nq = q_push(inout p, cur, in bytes);
+        let _s = m.q.try_set(f.idx, nq);
+    } else {
+        let nq = q_push(inout p, 0, in bytes);
+        insert_word(inout m.ids, f.idx, id);
+        insert_word(inout m.q, f.idx, nq);
+        insert_word(inout m.fin, f.idx, 0);
+    }
+}
+
+pub fn out_queue_fin(inout m: OutMap, id: u64) {
+    let f = bsearch_u64(in m.ids.as_slice(), id);
+    if f.found {
+        let _s = m.fin.try_set(f.idx, 1);
+    } else {
+        insert_word(inout m.ids, f.idx, id);
+        insert_word(inout m.q, f.idx, 0);
+        insert_word(inout m.fin, f.idx, 1);
+    }
+}
+
+pub fn out_discard(inout m: OutMap, inout p: BytePool, id: u64) {
+    let f = bsearch_u64(in m.ids.as_slice(), id);
+    if f.found {
+        let cur = word(in m.q.as_slice(), f.idx);
+        let _c = q_clear(inout p, cur);
+        remove_word(inout m.ids, f.idx);
+        remove_word(inout m.q, f.idx);
+        remove_word(inout m.fin, f.idx);
+    }
+}
+
+pub fn out_remove_at(inout m: OutMap, inout p: BytePool, idx: u64) {
+    let cur = word(in m.q.as_slice(), idx);
+    let _c = q_clear(inout p, cur);
+    remove_word(inout m.ids, idx);
+    remove_word(inout m.q, idx);
+    remove_word(inout m.fin, idx);
+}
+
+pub struct CmdBuf {
+    kinds: ChunkSeq[u64],
+    a: ChunkSeq[u64],
+    b: ChunkSeq[u64],
+}
+
+pub fn cmd_buf_new() -> CmdBuf {
+    CmdBuf {
+        kinds: ChunkSeq::new[u64](),
+        a: ChunkSeq::new[u64](),
+        b: ChunkSeq::new[u64](),
+    }
+}
+
+pub fn cmd_clear(inout cb: CmdBuf) {
+    cb.kinds.clear();
+    cb.a.clear();
+    cb.b.clear();
+}
+
+pub fn push_cmd(inout cb: CmdBuf, kind: u64, a: u64, b: u64) {
+    cb.kinds.push(kind);
+    cb.a.push(a);
+    cb.b.push(b);
+}
+
+pub struct SevBuf {
+    kinds: ChunkSeq[u64],
+    words: ChunkSeq[u64],
+    bytes: ChunkSeq[u8],
+}
+
+pub fn sev_buf_new() -> SevBuf {
+    SevBuf {
+        kinds: ChunkSeq::new[u64](),
+        words: ChunkSeq::new[u64](),
+        bytes: ChunkSeq::new[u8](),
+    }
+}
+
+pub fn sev_clear(inout sb: SevBuf) {
+    sb.kinds.clear();
+    sb.words.clear();
+    sb.bytes.clear();
+}
+
+pub fn push_sev(
+    inout sb: SevBuf,
+    kind: u64,
+    w0: u64,
+    w1: u64,
+    w2: u64,
+    w3: u64,
+    w4: u64,
+    w5: u64,
+) {
+    sb.kinds.push(kind);
+    sb.words.push(w0);
+    sb.words.push(w1);
+    sb.words.push(w2);
+    sb.words.push(w3);
+    sb.words.push(w4);
+    sb.words.push(w5);
+}
+
+pub struct HevBuf {
+    kinds: ChunkSeq[u64],
+    wpos: ChunkSeq[u64],
+    words: ChunkSeq[u64],
+    meta: ChunkSeq[u64],
+    bytes: ChunkSeq[u8],
+}
+
+pub fn hev_buf_new() -> HevBuf {
+    HevBuf {
+        kinds: ChunkSeq::new[u64](),
+        wpos: ChunkSeq::new[u64](),
+        words: ChunkSeq::new[u64](),
+        meta: ChunkSeq::new[u64](),
+        bytes: ChunkSeq::new[u8](),
+    }
+}
+
+pub fn hev_clear(inout hb: HevBuf) {
+    hb.kinds.clear();
+    hb.wpos.clear();
+    hb.words.clear();
+    hb.meta.clear();
+    hb.bytes.clear();
+}

@@ -303,6 +303,10 @@ fn dump_pat(inout o: ChunkSeq[u8], in a: Ast, p: u32, depth: u64) {
     } else if n.kind == 3 {
         put(inout o, in "P lit ");
         put_lit(inout o, in a, n.a);
+        if n.b != none() {
+            put(inout o, in " type=");
+            put_q(inout o, in a, n.b);
+        }
         put_span(inout o, n.start, n.end);
         nl(inout o);
     } else if n.kind == 4 {

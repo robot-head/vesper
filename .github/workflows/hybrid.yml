@@ -34,6 +34,7 @@ on:
       - 'crates/vesper-doc/**'
       - 'crates/vesper-serde/vesper/**'
       - 'packages/vesper-driver/**'
+      - 'packages/vesper-driver-commands/**'
       - 'packages/vesper-check-loops-atomics/**'
       - 'tests/common/stack_words.rs'
       - 'tests/common/check_words.rs'

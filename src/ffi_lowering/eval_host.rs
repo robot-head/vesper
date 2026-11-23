@@ -368,6 +368,16 @@ fn foreign_value(t: &ValueType, raw: u64) -> Result<Value, String> {
             handle_value(handle.name(), raw)
         }
         ValueType::Address { .. } => return Err("address results have no source value".into()),
+        ValueType::CStr if raw == 0 => data("Option", "None", vec![]),
+        // SAFETY: the library returned a NUL-terminated string it keeps
+        // (the `.vsys` contract), read before any other foreign call.
+        ValueType::CStr => some(Value::Seq(std::rc::Rc::new(std::cell::RefCell::new(
+            unsafe { std::ffi::CStr::from_ptr(raw as usize as *const std::ffi::c_char) }
+                .to_bytes()
+                .iter()
+                .map(|b| Value::UInt(u64::from(*b), 8))
+                .collect(),
+        )))),
         ValueType::Float(_) => return Err("float results run in compiled code".into()),
     })
 }

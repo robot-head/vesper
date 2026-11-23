@@ -45,16 +45,20 @@ const UTF8_LEAD4_HI: u8 = 0xf4;
 const UTF8_F0_SECOND_LO: u8 = 0x90;
 const UTF8_F4_SECOND_HI: u8 = 0x8f;
 
-fn datagram_type() -> u64 {
+pub fn datagram_type() -> u64 {
     0
 }
 
-fn close_type() -> u64 {
+pub fn close_type() -> u64 {
     10307
 }
 
-fn drain_type() -> u64 {
+pub fn drain_type() -> u64 {
     30894
+}
+
+pub fn close_code_len() -> u64 {
+    CLOSE_CODE_LEN
 }
 
 pub fn max_close_reason() -> u64 {
@@ -154,7 +158,7 @@ pub fn valid_utf8(in s: Slice[u8]) -> bool {
     }
 }
 
-fn parse_value(ty: u64, in v: Slice[u8], inout out: ChunkSeq[u8])
+pub fn parse_value(ty: u64, in v: Slice[u8], inout out: ChunkSeq[u8])
     -> Result[CapsuleOut, CapsuleError] {
     if ty == datagram_type() {
         out.extend(in v);

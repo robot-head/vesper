@@ -13,7 +13,7 @@ The lane lands in parts. This report grows with each one.
 | --- | --- |
 | 1 (#1265) | `lower_world` and `thread_tokens` for every expression kind except closures, handlers and payload operations; the differential |
 | 2 (#1265) | closures and handlers (nested functions, captures, handler clauses) |
-| 3 | sequence, tiled, vector and `Box` operations (`seq::resolve` and the other resolvers, with a structured payload kind) |
+| 3 (#1252) | sequence, tiled, vector and `Box` operations (`ops.ves` resolvers, `PoolKind::Make*` structured payload kinds, zero skipped functions) |
 | 4 | the swap: the hybrid `ir_lower` module through lane 1's `lower` hook, the full suite on the hybrid build, the scoreboard row |
 
 ## Part 1
@@ -188,6 +188,86 @@ Same method as part 1, over the larger lowered set.
 | Decode | 140 ms | 0.43x |
 | Whole swap | 521 ms | 1.62x |
 
+## Part 3
+
+### What changed
+
+`@vesper/place-ir-lower` gains `src/ops.ves` and lowering support for
+sequence, tiled sequence, vector and `Box` operations, replacing the
+`X_FOREIGN` skipping of those constructs. No compiler-core Rust source
+(`src/**`, `lean/**`, `bootstrap/**`, `packages/vesper-compiler/**`,
+`crates/vesper-hybrid/**`) changed.
+
+- **Structured payload pool entries** (`@vesper/place-ir` `PoolKind`
+  variants `MakeSeq = 7`, `MakeVector = 8`, `MakeTiled = 9`,
+  `MakeFip = 10` in `packages/vesper-place-ir/src/codes.ves`, mapped by
+  `pool_kind` in `packages/vesper-place-ir/src/lib.ves`, and decoded back
+  into `SeqOp`/`VectorOp`/`TiledOp`/`FipOp` via `made_payload` in
+  `tests/common/ir_words.rs` using `Debug`-formatted pool label
+  symbols). `lower.ves`'s `pool_entry` deduplicates made entries by
+  `(kind, label)` after the input's `pool_count` `Expr` entries, matching
+  `Pool::add`.
+- **Sequences and strings** (`ops::resolve_seq_call`, `X_INDEX` in
+  `lower.ves`): handles `as_slice`/`as_slice_mut` whole views,
+  `ChunkSeq::new`/`with_capacity`/`finish`, `swap`, `replace`,
+  `Vec::load`/`load_masked`/`store`/`store_masked` (`SeqOp::Vector(SliceIo)`
+  over `ChunkSeq`/`Slice`), `String`/`Str` primitives (`SeqOp::Str`),
+  all `ChunkSeq`/`Slice` methods and shared methods (including `Wide`
+  reads/writes and `fill` 3-arg `FillRange`), and `SubSlice` (`[lo..hi]`)
+  / `Get` / `SliceGet` indexing with exact receiver and argument pass
+  modes.
+- **Tiled sequences** (`ops::resolve_tiled`, `lower_tiled_call` with
+  `argument_proj` in `lower.ves`): handles `TiledSeq::{new, with_capacity,
+  with_region, len, tile_count, push, get, set, col_get, col_set,
+  load_tile_vec}` across type-name and `Type::Row` tail field-name
+  encodings, `[field]` `Op::Read` projections on `ColGet`/`ColSet`/
+  `LoadTileVec`, and `WithRegion` capability label tracking.
+- **Vectors** (`ops::resolve_vector`, `lower_vector_call` in
+  `lower.ves`): handles `Isa::supported[Profile]`, `Vec::*` and `Mask::*`
+  intrinsics (checking `SliceIo` fallback for `load_masked` on
+  sequences/slices, deriving `Shape` from result/operand/type arguments,
+  extracting literal lane indices for `extract`/`replace`/`shuffle`,
+  and lowering `String` operands as `P_IN` reads).
+- **`Box` / FIP** (`call` in `lower.ves`): when `world.box_active`,
+  lowers `Box::new` and `Box::new_in_caller` into `Op::Fip` (`FipOp::BoxNew`
+  and `FipOp::BoxNewInCaller`) before constructor lookup.
+- **Test encoder** (`tests/common/ir_lower_words.rs` and
+  `tests/self_host_ir_lower.rs`): removed the `routed -> X_FOREIGN`
+  branch so every call and index expression is emitted in full, and
+  asserted `skipped_fns == 0` and `vesper_nested == rust_nested`.
+
+### The differential
+
+Corpus: full 342-world corpus (`IR_LOWER_STEP=1`, `--profile port-compiler`, Windows).
+
+| Worlds | Functions lowered | Functions skipped | Instructions compared | Functions differing | IR check differing |
+| --: | --: | --: | --: | --: | --: |
+| 342 (0 not encodable) | 43,131 | 0 | 1,620,736 | 0 | 0 |
+
+All 27,669 plain world functions, 182 closure/handler world functions,
+and 14,521 payload-operation world functions lower with 0 differences
+against Rust's `FunctionIr`, 0 skipped functions, and all 759 of Rust's
+759 nested closure and handler functions covered (`ir_check::validate`
+agrees on all 342 worlds). `@vesper/place-ir` round-trip and dump tests
+(`self_host_place_ir`) also pass with 0 of 516 stages differing
+(85,674,163 words, 7,124,665 lines, 0 of 33 pass-harness identity diffs).
+
+### Numbers
+
+Port-compiler test build (`--profile port-compiler`, `IR_LOWER_STEP=1`
+with `CHECK_HARNESS_SPEED=1`, ABBA best of six, Windows, over all 342
+worlds / 42,373 top-level world functions covered):
+
+| Step | Time | vs `ir::lower_world` |
+| --- | --: | --: |
+| `ir::lower_world` (Rust) | 1,534 ms | 1.00x |
+| Vesper entry (read input, lower, write words) | 781 ms | 0.51x |
+| Vesper read alone | 95 ms | 0.06x |
+| **Vesper lowering alone** (entry minus read) | **685 ms** | **0.45x** |
+| Encode (Rust, `lower_input`) | 988 ms | 0.64x |
+| Decode (Rust, `decode_program`) | 578 ms | 0.38x |
+| Whole swap (encode + entry + decode) | 2,347 ms | 1.53x |
+
 ## Compiler gaps
 
 1. **Re-initializing a moved owned local inside a loop is refused.**
@@ -221,10 +301,13 @@ Same method as part 1, over the larger lowered set.
 
 `src/ir.rs`, `src/loops/ir.rs`, `src/seq/ir.rs`, `ir_opt::optimize`,
 `src/verified_codegen/**`, `lean/**`, `bootstrap/**` and
-`packages/vesper-compiler/**` are unchanged (this part changes no Rust
-source at all), and nothing installs a `lower` hook. The bootstrap-stage1
-workflow runs on this branch; its digests are in the PR.
+`packages/vesper-compiler/**` (and `crates/vesper-hybrid/**`, root
+`Cargo.toml`, `packages/vesper-check-pact/**`, `docs/maintenance/rust-census.md`)
+are unchanged, and nothing installs a `lower` hook yet.
 
 ## What is left
 
-Parts 3 and 4 above. The skipped functions are the coverage still to come.
+Part 4 (the hybrid swap via `src/ir_swap.rs`'s `lower` hook). Part 3
+leaves 0 skipped functions on the lowering side; one per-call input word
+(`I_*` intrinsic class from `vesper-core::numeric` / `capability_effects`)
+remains in the test input until the compiler's own tables supply it.

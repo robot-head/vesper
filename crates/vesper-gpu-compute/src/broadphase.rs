@@ -44,12 +44,27 @@ const SCAN: &str = concat!(
     include_str!("shaders/bp_scan.wgsl")
 );
 
-/// Every WGSL source of this module with its entry point.
+/// Every WGSL source of this module with its entry point: the sources the
+/// committed SPIR-V is compiled from (`tests/spirv.rs`).
 pub const SOURCES: [(&str, &str); 4] = [
     ("keys_main", KEYS),
     ("sort_main", SORT),
     ("sweep_main", SWEEP),
     ("scan_main", SCAN),
+];
+
+const KEYS_SPV: &[u8] = include_bytes!("shaders/spirv/keys_main.spv");
+const SORT_SPV: &[u8] = include_bytes!("shaders/spirv/sort_main.spv");
+const SWEEP_SPV: &[u8] = include_bytes!("shaders/spirv/sweep_main.spv");
+const SCAN_SPV: &[u8] = include_bytes!("shaders/spirv/scan_main.spv");
+
+/// The committed SPIR-V of every kernel of this module with its entry point,
+/// in the order of [`SOURCES`].
+pub const SPIRV: [(&str, &[u8]); 4] = [
+    ("keys_main", KEYS_SPV),
+    ("sort_main", SORT_SPV),
+    ("sweep_main", SWEEP_SPV),
+    ("scan_main", SCAN_SPV),
 ];
 
 /// Broadphase failures: the CPU broadphase's own typed errors where the
@@ -115,10 +130,10 @@ impl GpuBroadphase {
         let words = |n: usize| ctx.buffer((n * 4) as u64);
         Ok(Self {
             ctx: ctx.clone(),
-            keys_kernel: ctx.kernel(KEYS, "keys_main", 3, 16)?,
-            sort_kernel: ctx.kernel(SORT, "sort_main", 2, 16)?,
-            sweep_kernel: ctx.kernel(SWEEP, "sweep_main", 6, 16)?,
-            scan_kernel: ctx.kernel(SCAN, "scan_main", 2, 16)?,
+            keys_kernel: ctx.kernel(KEYS_SPV, "keys_main", 3, 16)?,
+            sort_kernel: ctx.kernel(SORT_SPV, "sort_main", 2, 16)?,
+            sweep_kernel: ctx.kernel(SWEEP_SPV, "sweep_main", 6, 16)?,
+            scan_kernel: ctx.kernel(SCAN_SPV, "scan_main", 2, 16)?,
             capacity,
             max_pairs,
             boxes: words(capacity * 6)?,

@@ -174,11 +174,11 @@ pub copy struct Arm {
 pub copy struct PatX {
     start: u64,
     end: u64,
-    // bind: the name; constructor: the full name.
+    // Binding or constructor name, or a typed integer literal's scalar name.
     name: u32,
     // constructor qualifier (symbol + 1, 0 none, NONE32 refused)
     qual: u32,
-    // literal: 0 int, 1 float, 2 bool, 3 string
+    // Literal: 0 contextual int, 1 float, 2 bool, 3 string, 4 typed int.
     lit: u8,
     neg: bool,
     mag: u64,
@@ -484,6 +484,8 @@ fn read_xpat(inout r: Reader, in b: Slice[u8], inout ck: Ck) -> u32 {
         if x.lit == 0 {
             x.neg = r.word(in b) != 0;
             x.mag = r.word(in b);
+        } else if x.lit == 4 {
+            x.name = sym(in ck.c, r.word(in b));
         }
     } else if kind == P_TUPLE {
         let n = r.word(in b);
@@ -1347,7 +1349,9 @@ fn bind_mode(inout ck: Ck, p: u32, ty: u32, pass: u8) {
         return;
     }
     if pt.kind == P_TRUE || pt.kind == P_FALSE || pt.kind == P_LIT {
-        let lt = if pt.kind == P_LIT && px.lit == 0 {
+        let lt = if pt.kind == P_LIT && px.lit == 4 {
+            named(inout ck, px.name)
+        } else if pt.kind == P_LIT && px.lit == 0 {
             mk_lit(
                 inout ck.c.types,
                 Lit {

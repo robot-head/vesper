@@ -1,5 +1,7 @@
 # GitHub fallback until Vesper has an upstream Linguist language and grammar.
 *.ves linguist-language=Rust
+*.ves linguist-generated=false
+*.ves linguist-detectable=true
 
 # Keep the published manuscript byte-exact and its editable sources portable.
 website/*.pdf binary

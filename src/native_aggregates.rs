@@ -1940,6 +1940,7 @@ pub(super) fn scalar_enums(
                             dest,
                             Op::Bind {
                                 pattern: Pattern {
+                                    integer_kind: None,
                                     kind: PatternKind::Bind(n),
                                     span,
                                 },
@@ -1996,6 +1997,7 @@ pub(super) fn scalar_enums(
                             };
                             (
                                 Pattern {
+                                    integer_kind: None,
                                     kind,
                                     span: p.span.clone(),
                                 },

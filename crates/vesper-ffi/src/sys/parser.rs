@@ -17,6 +17,72 @@ struct Token {
     kind: TokenKind,
     span: Range<usize>,
 }
+fn lex_number(bytes: &[u8], start: usize) -> Result<(u64, usize), Error> {
+    let mut at = start;
+    let radix = if bytes[at] == b'0' {
+        match bytes.get(at + 1) {
+            Some(b'x' | b'X') => {
+                at += 2;
+                16
+            }
+            Some(b'o' | b'O') => {
+                at += 2;
+                8
+            }
+            Some(b'b' | b'B') => {
+                at += 2;
+                2
+            }
+            _ => 10,
+        }
+    } else {
+        10
+    };
+    let mut value: u64 = 0;
+    let mut digits = 0usize;
+    while at < bytes.len() {
+        let b = bytes[at];
+        if b == b'_' {
+            at += 1;
+            continue;
+        }
+        let digit = match (radix, b) {
+            (2, b'0'..=b'1') | (8, b'0'..=b'7') | (10, b'0'..=b'9') | (16, b'0'..=b'9') => {
+                (b - b'0') as u64
+            }
+            (16, b'a'..=b'f') => (b - b'a' + 10) as u64,
+            (16, b'A'..=b'F') => (b - b'A' + 10) as u64,
+            _ if b.is_ascii_alphanumeric() => {
+                return Err(Error::new(
+                    ErrorKind::Syntax,
+                    start..at + 1,
+                    format!("invalid digit '{}' in integer literal", b as char),
+                ));
+            }
+            _ => break,
+        };
+        digits += 1;
+        value = value
+            .checked_mul(radix)
+            .and_then(|v| v.checked_add(digit))
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorKind::Type,
+                    start..at + 1,
+                    "integer literal exceeds u64",
+                )
+            })?;
+        at += 1;
+    }
+    if digits == 0 {
+        return Err(Error::new(
+            ErrorKind::Syntax,
+            start..at,
+            "integer literal has no digits",
+        ));
+    }
+    Ok((value, at))
+}
 fn lex(source: &str, limits: Limits) -> Result<Vec<Token>, Error> {
     if source.len() > limits.source_bytes {
         return Err(Error::new(
@@ -63,13 +129,8 @@ fn lex(source: &str, limits: Limits) -> Result<Vec<Token>, Error> {
                 TokenKind::Word(source[start..at].into())
             }
             b'0'..=b'9' => {
-                at += 1;
-                while at < bytes.len() && bytes[at].is_ascii_digit() {
-                    at += 1;
-                }
-                let n = source[start..at].parse().map_err(|_| {
-                    Error::new(ErrorKind::Type, start..at, "integer literal exceeds u64")
-                })?;
+                let (n, next) = lex_number(bytes, start)?;
+                at = next;
                 TokenKind::Number(n)
             }
             b'"' => {
@@ -132,7 +193,8 @@ fn lex(source: &str, limits: Limits) -> Result<Vec<Token>, Error> {
                 at += 3;
                 TokenKind::Ellipsis
             }
-            c @ (b'{' | b'}' | b'(' | b')' | b'[' | b']' | b',' | b';' | b':' | b'=' | b'#') => {
+            c @ (b'{' | b'}' | b'(' | b')' | b'[' | b']' | b',' | b';' | b':' | b'=' | b'#'
+            | b'-') => {
                 at += 1;
                 TokenKind::Punct(c)
             }
@@ -220,12 +282,71 @@ impl Parser {
     }
     fn number(&mut self) -> Result<u64, Error> {
         if !matches!(self.token().kind, TokenKind::Number(_)) {
-            return Err(self.error(ErrorKind::Syntax, "expected unsigned decimal integer"));
+            return Err(self.error(ErrorKind::Syntax, "expected integer literal"));
         }
         match self.bump() {
             TokenKind::Number(w) => Ok(w),
             _ => unreachable!(),
         }
+    }
+    fn constant(&mut self) -> Result<ConstDescriptor, Error> {
+        self.keyword("const")?;
+        let name = self.word()?;
+        reject_reserved_type(&name)?;
+        if matches!(name.as_str(), "true" | "false") {
+            return Err(self.error(ErrorKind::Type, "reserved constant name"));
+        }
+        self.expect(b':')?;
+        let scalar_name = self.word()?;
+        let scalar = scalar(&scalar_name).ok_or_else(|| {
+            self.error(
+                ErrorKind::Unsupported,
+                "constant type must be an integer scalar (u8, i8, u16, i16, u32, i32, u64, i64, usize)",
+            )
+        })?;
+        self.expect(b'=')?;
+        let negative = self.eat(b'-');
+        let magnitude = self.number()?;
+        let value = if negative {
+            if !scalar.signed() {
+                return Err(self.error(
+                    ErrorKind::Type,
+                    &format!(
+                        "unsigned constant `{name}: {}` cannot be negative",
+                        scalar.name()
+                    ),
+                ));
+            }
+            let max_neg = 1u64 << (scalar.bits() - 1);
+            if magnitude > max_neg {
+                return Err(self.error(
+                    ErrorKind::Type,
+                    &format!("constant `{name}` is out of range for {}", scalar.name()),
+                ));
+            }
+            -(magnitude as i128)
+        } else {
+            let max_pos = if scalar.signed() {
+                (1u64 << (scalar.bits() - 1)) - 1
+            } else if scalar.bits() == 64 {
+                u64::MAX
+            } else {
+                (1u64 << scalar.bits()) - 1
+            };
+            if magnitude > max_pos {
+                return Err(self.error(
+                    ErrorKind::Type,
+                    &format!("constant `{name}` is out of range for {}", scalar.name()),
+                ));
+            }
+            magnitude as i128
+        };
+        self.expect(b';')?;
+        Ok(ConstDescriptor {
+            name,
+            scalar,
+            value,
+        })
     }
     fn enumeration(&mut self) -> Result<EnumDescriptor, Error> {
         self.keyword("enum")?;
@@ -720,7 +841,17 @@ impl Parser {
                 self.expect(b']')?;
             }
             self.expect(b']')?;
-            RawType::OptionHandle(name)
+            if name == "CStr" && length.is_none() {
+                if keyword == "callback" {
+                    return Err(self.error(
+                        ErrorKind::Unsupported,
+                        "a callback cannot return a C string: nothing would own or free it",
+                    ));
+                }
+                RawType::OptionCStr
+            } else {
+                RawType::OptionHandle(name)
+            }
         } else if self.is_word("NonNull") && self.peek_punct(1) == Some(b'[') {
             self.bump();
             self.expect(b'[')?;
@@ -884,6 +1015,8 @@ enum RawType {
     OptionHandle(String),
     /// `NonNull[H]` of an extern type, as a result.
     NonNullHandle(String),
+    /// `Option[CStr]`, as a result: a C string copied at the call.
+    OptionCStr,
 }
 enum RawParameterType {
     Value(RawType),
@@ -1007,6 +1140,7 @@ fn resolve(
 ) -> Result<ValueType, Error> {
     match t {
         RawType::Address { pointee, nullable } => Ok(ValueType::Address { pointee, nullable }),
+        RawType::OptionCStr => Ok(ValueType::CStr),
         RawType::OptionHandle(n) => match externs.iter().find(|e| e.name() == n) {
             Some(handle) => Ok(ValueType::Handle {
                 handle: handle.clone(),
@@ -1256,6 +1390,7 @@ pub(super) fn parse(source: &str, limits: Limits) -> Result<LibraryDescriptor, E
     let mut raw_structs = vec![];
     let mut raw_functions = vec![];
     let mut extern_types: Vec<ExternTypeDescriptor> = vec![];
+    let mut consts = vec![];
     while !p.eat(b'}') {
         if p.is_word("wire") {
             if raw_structs.len() >= limits.wire_structs {
@@ -1267,6 +1402,11 @@ pub(super) fn parse(source: &str, limits: Limits) -> Result<LibraryDescriptor, E
                 return Err(p.error(ErrorKind::Limit, "enum declaration budget exceeded"));
             }
             enums.push(p.enumeration()?);
+        } else if p.is_word("const") {
+            if consts.len() >= limits.variants {
+                return Err(p.error(ErrorKind::Limit, "constant declaration budget exceeded"));
+            }
+            consts.push(p.constant()?);
         } else if (p.is_word("linear") || p.is_word("affine")) && p.peek_word(1) == Some("extern") {
             if extern_types.len() >= limits.enums {
                 return Err(p.error(ErrorKind::Limit, "extern type declaration budget exceeded"));
@@ -1295,23 +1435,28 @@ pub(super) fn parse(source: &str, limits: Limits) -> Result<LibraryDescriptor, E
         } else {
             return Err(p.error(
                 ErrorKind::Unsupported,
-                "expected fn/callback/enum/wire struct/linear extern type/affine extern type; C structs and code are unsupported",
+                "expected fn/callback/const/enum/wire struct/linear extern type/affine extern type; C structs and code are unsupported",
             ));
         }
     }
     if p.token().kind != TokenKind::Eof {
         return Err(p.error(ErrorKind::Syntax, "trailing declarations after library"));
     }
-    if raw_functions.is_empty() {
+    if raw_functions.is_empty() && consts.is_empty() {
         return Err(p.error(
             ErrorKind::Type,
-            "library must declare at least one function",
+            "library must declare at least one function or constant",
         ));
     }
     unique(
         enums.iter().map(EnumDescriptor::name),
         "duplicate enum declaration",
     )?;
+    unique(
+        consts.iter().map(ConstDescriptor::name),
+        "duplicate constant declaration",
+    )?;
+    consts.sort_by(|a, b| a.name().cmp(b.name()));
     unique(
         raw_functions.iter().map(|f| f.symbol.as_str()),
         "duplicate foreign symbol",
@@ -1619,6 +1764,22 @@ pub(super) fn parse(source: &str, limits: Limits) -> Result<LibraryDescriptor, E
             ));
         }
     }
+    for c in &consts {
+        if enums.iter().any(|e| e.name() == c.name())
+            || wire_structs.iter().any(|w| w.name() == c.name())
+            || extern_types.iter().any(|t| t.name() == c.name())
+            || functions.iter().any(|f| f.symbol() == c.name())
+        {
+            return Err(Error::new(
+                ErrorKind::Duplicate,
+                0..0,
+                format!(
+                    "constant `{}` collides with another declaration in library",
+                    c.name()
+                ),
+            ));
+        }
+    }
     let mut library = LibraryDescriptor {
         name,
         target,
@@ -1627,6 +1788,7 @@ pub(super) fn parse(source: &str, limits: Limits) -> Result<LibraryDescriptor, E
         wire_structs,
         extern_types,
         functions,
+        consts,
         canonical: vec![],
         identity: DescriptorId([0; 32]),
     };
