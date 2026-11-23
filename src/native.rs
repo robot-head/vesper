@@ -1334,6 +1334,7 @@ fn define_instances_observed_with_trace<M: Module>(
     );
     let mut clif = String::new();
     let denorm = crate::capability_effects::const_denorm_spans(world);
+    let mut deferred_defs = Vec::new();
     for (key, (name, generic_vars)) in instances {
         let f = concrete(world, name, generic_vars)?;
         let entry_name = trace_entry.map(|(e, _)| e).unwrap_or("");
@@ -1368,18 +1369,28 @@ fn define_instances_observed_with_trace<M: Module>(
             };
             let result_layout = Layout::of(world, &f.result)?;
             let own_abi = abi.of(key);
+            let direct_enum = own_abi.result_words.is_some_and(|words| {
+                operands_only
+                    && !f.fip
+                    && aggregates::enum_shape(world, &f.result)
+                        .is_some_and(|shape| shape.words.len() as u32 == words)
+            });
             let sret = if let Some(words) = own_abi.result_words {
-                // Register result: build the value in a local buffer and
-                // return its words.
-                let slot = b.create_sized_stack_slot(ir::StackSlotData::new(
-                    ir::StackSlotKind::ExplicitSlot,
-                    words * 8,
-                    3,
-                ));
-                Some(
-                    b.ins()
-                        .stack_addr(m.target_config().pointer_type(), slot, 0),
-                )
+                if direct_enum {
+                    None
+                } else {
+                    // Register result: build the value in a local buffer and
+                    // return its words.
+                    let slot = b.create_sized_stack_slot(ir::StackSlotData::new(
+                        ir::StackSlotKind::ExplicitSlot,
+                        words * 8,
+                        3,
+                    ));
+                    Some(
+                        b.ins()
+                            .stack_addr(m.target_config().pointer_type(), slot, 0),
+                    )
+                }
             } else if result_layout.aggregate() {
                 Some(values.remove(0))
             } else {
@@ -1535,18 +1546,23 @@ fn define_instances_observed_with_trace<M: Module>(
                 target_lexicon::Architecture::X86_64 | target_lexicon::Architecture::Aarch64(_)
             );
             crate::native_vectorize::run(&mut ctx.func, simd);
+            let is_const_time = crate::capability_effects::capabilities(&f.effects)
+                .contains(&crate::capability_effects::Capability::ConstTime)
+                || closure_capabilities(&f)
+                    .contains(&crate::capability_effects::Capability::ConstTime);
+            deferred_defs.push((
+                define_id,
+                key.clone(),
+                name.clone(),
+                generic_vars.clone(),
+                is_const_time,
+                ctx,
+            ));
+            continue;
         }
-        // No JIT caller reads the CLIF text, and printing it costs as much
-        // as half of Cranelift's own work on a large function (#1151).
-        if matches!(linkage, DefinitionLinkage::Object) {
-            clif.push_str(&format!("; {key}\n{}\n", ctx.func.display()));
-        }
-        if let Some(observe) = observer.as_mut() {
-            let mut function = ctx.func.clone();
-            function.name = ir::UserFuncName::user(0, define_id.as_u32());
+        let user_callees = |func: &ir::Function| -> Vec<(u32, String)> {
             let declarations = m.declarations();
-            let callees = function
-                .params
+            func.params
                 .user_named_funcs()
                 .values()
                 .filter(|name| name.namespace == 0)
@@ -1560,7 +1576,17 @@ fn define_instances_observed_with_trace<M: Module>(
                             .into_owned(),
                     )
                 })
-                .collect();
+                .collect()
+        };
+        // No JIT caller reads the CLIF text, and printing it costs as much
+        // as half of Cranelift's own work on a large function (#1151).
+        if matches!(linkage, DefinitionLinkage::Object) {
+            clif.push_str(&format!("; {key}\n{}\n", ctx.func.display()));
+        }
+        if let Some(observe) = observer.as_mut() {
+            let mut function = ctx.func.clone();
+            function.name = ir::UserFuncName::user(0, define_id.as_u32());
+            let callees = user_callees(&function);
             observe(EmittedFunction {
                 key: key.clone(),
                 source: name.clone(),
@@ -1580,6 +1606,85 @@ fn define_instances_observed_with_trace<M: Module>(
         m.define_function(define_id, &mut ctx)
             .map_err(|e| format!("native codegen '{name}': {e}"))?;
         m.clear_context(&mut ctx);
+    }
+    for (define_id, key, name, generic_vars, is_const_time, mut ctx) in deferred_defs {
+        let cold_helpers = if !is_const_time {
+            crate::native_cold_outline::outline(m, &key, &mut ctx.func)?
+        } else {
+            Vec::new()
+        };
+        let user_callees = |func: &ir::Function| -> Vec<(u32, String)> {
+            let declarations = m.declarations();
+            func.params
+                .user_named_funcs()
+                .values()
+                .filter(|name| name.namespace == 0)
+                .map(|name| {
+                    let callee = FuncId::from_u32(name.index);
+                    (
+                        name.index,
+                        declarations
+                            .get_function_decl(callee)
+                            .linkage_name(callee)
+                            .into_owned(),
+                    )
+                })
+                .collect()
+        };
+        if matches!(linkage, DefinitionLinkage::Object) {
+            clif.push_str(&format!("; {key}\n{}\n", ctx.func.display()));
+            for (_, cold_key, cold_func) in &cold_helpers {
+                clif.push_str(&format!("; {cold_key}\n{}\n", cold_func.display()));
+            }
+        }
+        if let Some(observe) = observer.as_mut() {
+            let mut function = ctx.func.clone();
+            function.name = ir::UserFuncName::user(0, define_id.as_u32());
+            let callees = user_callees(&function);
+            observe(EmittedFunction {
+                key: key.clone(),
+                source: name.clone(),
+                symbol: m
+                    .declarations()
+                    .get_function_decl(define_id)
+                    .linkage_name(define_id)
+                    .into_owned(),
+                func_id: define_id.as_u32(),
+                function,
+                callees,
+                vars: generic_vars.clone(),
+                optimized: operands_only,
+                inlined: Default::default(),
+            });
+            for (cold_id, cold_key, cold_func) in &cold_helpers {
+                let callees = user_callees(cold_func);
+                observe(EmittedFunction {
+                    key: cold_key.clone(),
+                    source: String::new(),
+                    symbol: m
+                        .declarations()
+                        .get_function_decl(*cold_id)
+                        .linkage_name(*cold_id)
+                        .into_owned(),
+                    func_id: cold_id.as_u32(),
+                    function: cold_func.clone(),
+                    callees,
+                    vars: generic_vars.clone(),
+                    optimized: operands_only,
+                    inlined: Default::default(),
+                });
+            }
+        }
+        m.define_function(define_id, &mut ctx)
+            .map_err(|e| format!("native codegen '{name}': {e}"))?;
+        m.clear_context(&mut ctx);
+        for (cold_id, cold_key, cold_func) in cold_helpers {
+            let mut cold_ctx = m.make_context();
+            cold_ctx.func = cold_func;
+            m.define_function(cold_id, &mut cold_ctx)
+                .map_err(|e| format!("native codegen '{cold_key}': {e}"))?;
+            m.clear_context(&mut cold_ctx);
+        }
     }
     if let Some((entry_name, internal_id)) = trace_entry {
         let f = world.functions.get(entry_name).ok_or("unknown entry")?;
@@ -3548,7 +3653,18 @@ impl<M: Module> Codegen<'_, '_, M> {
         use crate::ir::{Op, Terminator};
         // Small enum values kept as words (#1330): the graph is rewritten
         // so that their tags and fields are scalar values and locals.
-        let scalar_join = self.scalar_enums.join.take();
+        let scalar_join = self.scalar_enums.join.take().or_else(|| {
+            if return_to.is_none() && self.operands_only && !self.in_fip_fn {
+                self.own_abi.result_words.and_then(|words| {
+                    let ty =
+                        crate::numeric::default_type(&substitute(&f.result, &self.generic_vars));
+                    let shape = aggregates::enum_shape(self.world, &ty)?;
+                    (shape.words.len() as u32 == words).then_some(shape)
+                })
+            } else {
+                None
+            }
+        });
         let scalar_graph = if self.operands_only && !self.in_fip_fn {
             let world = self.world;
             let shared: BTreeSet<String> = f
@@ -3562,11 +3678,25 @@ impl<M: Module> Codegen<'_, '_, M> {
                 f,
                 &self.generic_vars,
                 scalar_join.as_ref(),
-                &|callee| {
-                    world
-                        .functions
-                        .get(callee)
-                        .is_some_and(|g| specialized_function(world, g))
+                &|callee, types, shape| {
+                    let Some(g) = world.functions.get(callee) else {
+                        return false;
+                    };
+                    if specialized_function(world, g) {
+                        return true;
+                    }
+                    if world.dyn_objects.stubs.contains_key(callee) {
+                        return false;
+                    }
+                    let mut vars = BTreeMap::new();
+                    for (p, t) in g.generics.iter().zip(types) {
+                        vars.insert(
+                            p.name.clone(),
+                            crate::numeric::default_type(&substitute(t, &self.generic_vars)),
+                        );
+                    }
+                    let key = instance_key(callee, &vars);
+                    self.abi.of(&key).result_words == Some(shape.words.len() as u32)
                 },
                 &shared,
             )
@@ -4011,11 +4141,12 @@ impl<M: Module> Codegen<'_, '_, M> {
                         }
                     }
                 }
-                // A read of an invariant parameter is its entry value in
-                // every block, not a copy through a block parameter, so
-                // its header words are recognized as invariant everywhere.
+                // A read of a hoisted or invariant receiver is its hoisted
+                // value in every block, not a copy through a block parameter,
+                // so its header words are recognized as invariant everywhere.
                 for id in crate::ir_inline::operands(&inst.op) {
-                    if let Some(receiver) = entry_reads.get(&id) {
+                    if let Some(receiver) = entry_reads.get(&id).or_else(|| hoisted_reads.get(&id))
+                    {
                         values.insert(id, *receiver);
                     }
                 }
@@ -4586,7 +4717,25 @@ impl<M: Module> Codegen<'_, '_, M> {
                             .and_then(|a| a.place.as_ref())
                             .filter(|_| op.has_receiver() && op.mutates())
                             .map(|p| ir_place_expr(p, inst.span.clone()));
-                        self.seq_op(*op, &operands, &operand_types, &ty, receiver.as_ref())?
+                        let words = scalar_calls.get(&inst.dest);
+                        self.scalar_enums.request = words.map(|(shape, _)| shape.clone());
+                        self.scalar_enums.result = None;
+                        let seq_res =
+                            self.seq_op(*op, &operands, &operand_types, &ty, receiver.as_ref());
+                        self.scalar_enums.request = None;
+                        let seq_res = seq_res?;
+                        if let Some((shape, ids)) = words {
+                            let ws = match self.scalar_enums.result.take() {
+                                Some(ws) => ws,
+                                None => self.enum_words(seq_res, shape)?,
+                            };
+                            for ((id, w), t) in ids.iter().zip(ws).zip(&shape.words) {
+                                let w = self.coerce(w, Some(t));
+                                values.insert(*id, w);
+                                self.def_var(registers[id], w);
+                            }
+                        }
+                        seq_res
                     }
                     Op::Fip { op, args } => {
                         let operands = args
@@ -4749,9 +4898,14 @@ impl<M: Module> Codegen<'_, '_, M> {
                             self.enum_words(value, shape)?
                         }
                     };
-                    let join = return_to.ok_or("native enum words lack a join")?;
-                    let args: Vec<ir::BlockArg> = words.into_iter().map(Into::into).collect();
-                    self.jump(join, &args);
+                    match return_to {
+                        Some(join) => {
+                            let args: Vec<ir::BlockArg> =
+                                words.into_iter().map(Into::into).collect();
+                            self.jump(join, &args);
+                        }
+                        None => self.return_words(&words),
+                    }
                 }
                 Terminator::Return(id) => {
                     self.seq_drop_exit(self.exits.len() - 1)?;
@@ -4919,10 +5073,15 @@ impl<M: Module> Codegen<'_, '_, M> {
         } else {
             value
         };
-        if let (Some(shape), Some(join)) = (&target.scalar, target.join) {
+        if let Some(shape) = &target.scalar {
             let words = self.enum_words(value, shape)?;
-            let args: Vec<ir::BlockArg> = words.into_iter().map(Into::into).collect();
-            self.jump(join, &args);
+            match target.join {
+                Some(join) => {
+                    let args: Vec<ir::BlockArg> = words.into_iter().map(Into::into).collect();
+                    self.jump(join, &args);
+                }
+                None => self.return_words(&words),
+            }
             let dead = self.b.create_block();
             self.b.switch_to_block(dead);
             return Ok(());
@@ -8515,17 +8674,29 @@ impl<M: Module> Codegen<'_, '_, M> {
                 self.fip_box_free(block)?;
             }
             let result = if let Some(words) = callee_abi.result_words {
-                let buffer = match into {
-                    Some(out) => out,
-                    None => self.alloc_uninit(words * 8),
-                };
-                for word in 0..words {
-                    let value = self.b.inst_results(call)[word as usize];
-                    self.b
-                        .ins()
-                        .store(ir::MemFlags::new(), value, buffer, (word * 8) as i32);
+                if into.is_none()
+                    && scalar_request
+                        .as_ref()
+                        .is_some_and(|shape| shape.words.len() as u32 == words)
+                {
+                    let out = (0..words as usize)
+                        .map(|word| self.b.inst_results(call)[word])
+                        .collect();
+                    self.scalar_enums.result = Some(out);
+                    self.zero()
+                } else {
+                    let buffer = match into {
+                        Some(out) => out,
+                        None => self.alloc_uninit(words * 8),
+                    };
+                    for word in 0..words {
+                        let value = self.b.inst_results(call)[word as usize];
+                        self.b
+                            .ins()
+                            .store(ir::MemFlags::new(), value, buffer, (word * 8) as i32);
+                    }
+                    buffer
                 }
-                buffer
             } else {
                 output.unwrap_or_else(|| self.b.inst_results(call)[0])
             };
@@ -9171,16 +9342,49 @@ impl<M: Module> Codegen<'_, '_, M> {
         // A trace failure leaves the whole function; it cannot fail here.
         let _ = self.seq_drop_exit(0);
         let _ = self.free_sink_blocks_within(None);
+        if self.own_abi.result_words.is_some() && self.result_buffer.is_none() {
+            let tys: Vec<ir::Type> = self
+                .b
+                .func
+                .signature
+                .returns
+                .iter()
+                .map(|r| r.value_type)
+                .collect();
+            let words: Vec<ir::Value> = tys.into_iter().map(|t| self.scalar_zero(t)).collect();
+            self.b.ins().return_(&words);
+            return;
+        }
         let returns = self.b.func.signature.returns[0].value_type;
         let placeholder = self.scalar_zero(returns);
         self.return_value(placeholder);
     }
+    /// Return small-enum words directly in hardware return registers (#1498).
+    fn return_words(&mut self, words: &[ir::Value]) {
+        let out: Vec<ir::Value> = words
+            .iter()
+            .enumerate()
+            .map(|(k, &w)| {
+                let expected = self.b.func.signature.returns[k].value_type;
+                if self.b.func.dfg.value_type(w) == expected {
+                    w
+                } else if expected == types::I64 {
+                    self.b.ins().uextend(types::I64, w)
+                } else {
+                    w
+                }
+            })
+            .collect();
+        self.b.ins().return_(&out);
+    }
     /// Return `value` from the function being compiled, with a zero
     /// (success) status when it uses the register-status Fail ABI.
     fn return_value(&mut self, value: ir::Value) {
-        let (has_buffer, buffer, words) = match (self.own_abi.result_words, self.result_buffer) {
-            (Some(words), Some(buffer)) => (1u64, crate::codegen_swap::word(buffer), words as u64),
-            _ => (0u64, 0u64, 0u64),
+        let (has_buffer, buffer, words) = if let Some(words) = self.own_abi.result_words {
+            let buffer = self.result_buffer.unwrap_or(value);
+            (1u64, crate::codegen_swap::word(buffer), words as u64)
+        } else {
+            (0u64, 0u64, 0u64)
         };
         if self
             .control_words::<0>(
@@ -9197,7 +9401,8 @@ impl<M: Module> Codegen<'_, '_, M> {
         {
             return;
         }
-        if let (Some(words), Some(buffer)) = (self.own_abi.result_words, self.result_buffer) {
+        if let Some(words) = self.own_abi.result_words {
+            let buffer = self.result_buffer.unwrap_or(value);
             let mut out = vec![];
             for word in 0..words {
                 out.push(self.b.ins().load(
