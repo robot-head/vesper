@@ -1,49 +1,104 @@
 // @vesper-std/env: the process's arguments, environment variables and
 // current directory (self-hosting SH0 lane 3, #1125), over the `.vsys`
-// library `StdEnv` (env.vsys; the host side is crates/vesper-std-host).
-// Every operation performs `Ffi[StdEnv]`. Text comes back as `String` when
-// it is UTF-8 and as bytes from the `*_bytes` variants (Unix allows any
-// bytes; Windows text is UTF-16 converted to UTF-8).
+// library `StdEnv`: the C library itself (env-@OS@.vsys, SH6 lane 13,
+// #1408). Every operation performs `Ffi[StdEnv]`. Text comes back as
+// `String` when it is UTF-8 and as bytes from the `*_bytes` variants (Unix
+// allows any bytes; Windows text is UTF-16 converted to UTF-8).
 use @vesper-std/fs::{
     IoError,
-    raise_io
+    raise_kind
 };
 
-// The host's copy-out protocol: a call returns the length `n` (negative
-// for none) and copies only when `buf` is big enough. Whether `buf` had to
-// grow, so the call must be repeated; otherwise `buf` is cut to `n`.
-fn grown(n: i64, inout buf: ChunkSeq[u8]) -> bool {
-    if n < 0 {
-        return false;
+// The word of `size` bytes (at most 8, little-endian) at `address`, or 0
+// for a `NULL` address.
+fn word(address: u64, size: u64) -> u64 eff [Ffi[StdEnv]] {
+    if address == 0 {
+        return 0;
     }
-    let len = wrapping_u64(n);
-    if len > buf.len() {
-        buf.resize(len, 0);
-        return true;
+    let mut w: u64 = 0;
+    let _ = StdEnv::read_word(inout w, address, size);
+    w
+}
+
+// The address of the C function `name` of the process, `None` when there
+// is none.
+fn function(in name: Str) -> Option[AddressFn] eff [Ffi[StdEnv]] {
+    match StdEnv::dlsym_function(StdEnv::RTLD_DEFAULT, in name.as_bytes()) {
+        Result::Ok(f) => f,
+        Result::Err(_) => Option::None,
     }
-    buf.truncate(len);
-    false
+}
+
+// The address of the C variable `name` of the process, or 0.
+fn variable(in name: Str) -> u64 eff [Ffi[StdEnv]] {
+    match StdEnv::dlsym(StdEnv::RTLD_DEFAULT, in name.as_bytes()) {
+        Result::Ok(a) => a,
+        Result::Err(_) => 0,
+    }
+}
+
+// `(argc, argv)`: Apple's `_NSGetArgc` and `_NSGetArgv`, else glibc's
+// stack top `__libc_stack_end`, where argc is followed by argv.
+fn arguments() -> (u64, u64) eff [Ffi[StdEnv]] {
+    match function(in "_NSGetArgv") {
+        Option::Some(argv) => {
+            let argc = match function(in "_NSGetArgc") {
+                Option::Some(f) => word(StdEnv::AddressFn(f), 4),
+                Option::None => 0,
+            };
+            (argc, word(StdEnv::AddressFn(argv), 8))
+        }
+        Option::None => {
+            let top = word(variable(in "__libc_stack_end"), 8);
+            if top == 0 {
+                return (0, 0);
+            }
+            (word(top, 8), wrapping_add(top, 8))
+        }
+    }
+}
+
+// The NULL-terminated `environ` array now (`setenv` may move it).
+fn environment() -> u64 eff [Ffi[StdEnv]] {
+    match function(in "_NSGetEnviron") {
+        Option::Some(f) => word(StdEnv::AddressFn(f), 8),
+        Option::None => word(variable(in "environ"), 8),
+    }
+}
+
+// Whether byte `i` of `s` is `c`.
+fn byte_is(in s: Slice[u8], i: u64, c: u8) -> bool {
+    match s.try_get(i) {
+        Option::Some(b) => b == c,
+        Option::None => false,
+    }
+}
+
+// A copy of the C string at `address`.
+fn c_string(address: u64) -> ChunkSeq[u8] eff [Ffi[StdEnv]] {
+    match StdEnv::cstr_at(address, in "".as_bytes()) {
+        Result::Ok(Option::Some(s)) => s,
+        _ => ChunkSeq::new[u8](),
+    }
 }
 
 // The number of arguments, the program name (argument 0) included.
 pub fn arg_count() -> u64 eff [Ffi[StdEnv]] {
-    StdEnv::vstd_env_arg_count()
+    let (argc, _) = arguments();
+    argc
 }
 
 // Argument `i` as bytes, `None` past the last.
 pub fn arg_bytes(i: u64) -> Option[ChunkSeq[u8]] eff [Ffi[StdEnv]] {
-    let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    buf.resize(64, 0);
-    loop {
-        let n = StdEnv::vstd_env_arg(i, inout buf.as_slice_mut());
-        if n < 0 {
-            return Option::None;
-        }
-        if !grown(n, inout buf) {
-            break;
-        }
+    let (argc, argv) = arguments();
+    if i >= argc {
+        return Option::None;
     }
-    Option::Some(buf)
+    let p = word(wrapping_add(argv, wrapping_mul(i, 8)), 8);
+    if p == 0 {
+        return Option::None;
+    }
+    Option::Some(c_string(p))
 }
 
 // Argument `i` as text, `None` past the last or when it is not UTF-8.
@@ -54,20 +109,22 @@ pub fn arg(i: u64) -> Option[String] eff [Ffi[StdEnv]] {
     }
 }
 
-// Variable `key` as bytes, `None` when it is unset.
+// Variable `key` as bytes, `None` when it is unset (or `key` is empty or
+// holds `=` or NUL).
 pub fn var_bytes(in key: Str) -> Option[ChunkSeq[u8]] eff [Ffi[StdEnv]] {
-    let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    buf.resize(64, 0);
-    loop {
-        let n = StdEnv::vstd_env_var(in key.as_bytes(), inout buf.as_slice_mut());
-        if n < 0 {
+    let k = key.as_bytes();
+    if k.len() == 0 {
+        return Option::None;
+    }
+    for i in 0..k.len() {
+        if byte_is(in k, i, 61) {
             return Option::None;
         }
-        if !grown(n, inout buf) {
-            break;
-        }
     }
-    Option::Some(buf)
+    match StdEnv::getenv(in k) {
+        Result::Ok(v) => v,
+        Result::Err(_) => Option::None,
+    }
 }
 
 // Variable `key` as text, `None` when it is unset or not UTF-8.
@@ -78,25 +135,118 @@ pub fn var(in key: Str) -> Option[String] eff [Ffi[StdEnv]] {
     }
 }
 
+// Whether the `environ` entry at `p` is a variable: it has a `=` after
+// its first byte (as Rust's `std::env::vars_os` reads them).
+fn is_variable(p: u64) -> bool eff [Ffi[StdEnv]] {
+    if word(p, 1) == 0 {
+        return false;
+    }
+    StdEnv::find_byte(wrapping_add(p, 1), 61) != 0
+}
+
+// The address of variable `i`'s `KEY=VALUE` string, or 0 past the last.
+fn variable_at(i: u64) -> u64 eff [Ffi[StdEnv]] {
+    let table = environment();
+    if table == 0 {
+        return 0;
+    }
+    let mut seen: u64 = 0;
+    let mut k: u64 = 0;
+    loop {
+        let p = word(wrapping_add(table, wrapping_mul(k, 8)), 8);
+        if p == 0 {
+            return 0;
+        }
+        if is_variable(p) {
+            if seen == i {
+                return p;
+            }
+            seen = wrapping_add(seen, 1);
+        }
+        k = wrapping_add(k, 1);
+    }
+}
+
 // The number of environment variables.
 pub fn var_count() -> u64 eff [Ffi[StdEnv]] {
-    StdEnv::vstd_env_var_count()
+    let table = environment();
+    if table == 0 {
+        return 0;
+    }
+    let mut n: u64 = 0;
+    let mut k: u64 = 0;
+    loop {
+        let p = word(wrapping_add(table, wrapping_mul(k, 8)), 8);
+        if p == 0 {
+            return n;
+        }
+        if is_variable(p) {
+            n = wrapping_add(n, 1);
+        }
+        k = wrapping_add(k, 1);
+    }
 }
 
 // Variable `i` as `KEY=VALUE` bytes, `None` past the last.
 pub fn var_at_bytes(i: u64) -> Option[ChunkSeq[u8]] eff [Ffi[StdEnv]] {
-    let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    buf.resize(128, 0);
-    loop {
-        let n = StdEnv::vstd_env_var_at(i, inout buf.as_slice_mut());
-        if n < 0 {
-            return Option::None;
-        }
-        if !grown(n, inout buf) {
-            break;
-        }
+    let p = variable_at(i);
+    if p == 0 {
+        return Option::None;
     }
-    Option::Some(buf)
+    Option::Some(c_string(p))
+}
+
+// The `IoError` kind of the C library's `errno` value `e`.
+fn errno_kind(e: u32) -> u32 {
+    if StdEnv::OS == 3 {
+        return match e {
+            2 => 1,
+            3 => 1,
+            5 => 2,
+            8 => 12,
+            14 => 12,
+            50 => 11,
+            80 => 3,
+            87 => 7,
+            145 => 6,
+            183 => 3,
+            267 => 4,
+            _ => 13,
+        };
+    }
+    let mac = StdEnv::OS == 2;
+    match e {
+        1 => 2,
+        2 => 1,
+        4 => 8,
+        12 => 12,
+        13 => 2,
+        17 => 3,
+        20 => 4,
+        21 => 5,
+        22 => 7,
+        39 => if mac {
+            13
+        } else {
+            6
+        },
+        66 => if mac {
+            6
+        } else {
+            13
+        },
+        38 => if mac {
+            13
+        } else {
+            11
+        },
+        78 => if mac {
+            11
+        } else {
+            13
+        },
+        _ => 13,
+    }
 }
 
 // The current directory as path bytes.
@@ -104,15 +254,32 @@ pub fn current_dir_bytes() -> ChunkSeq[u8] eff [Ffi[StdEnv], Fail[IoError]] {
     let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
     buf.resize(256, 0);
     loop {
-        let mut err: u64 = 0;
-        let n = StdEnv::vstd_env_current_dir(inout buf.as_slice_mut(), inout err);
-        if n < 0 {
-            return raise_io(err);
-        }
-        if !grown(n, inout buf) {
+        let (at, e) = StdEnv::getcwd(inout buf.as_slice_mut());
+        if at != 0 {
             break;
         }
+        if e != StdEnv::ERANGE {
+            return Fail::raise(
+                IoError {
+                    kind: errno_kind(e),
+                    os: e,
+                }
+            );
+        }
+        let n = buf.len();
+        buf.resize(wrapping_mul(n, 2), 0);
     }
+    let mut n: u64 = 0;
+    loop {
+        if n >= buf.len() {
+            break;
+        }
+        if byte_is(in buf.as_slice(), n, 0) {
+            break;
+        }
+        n = wrapping_add(n, 1);
+    }
+    buf.truncate(n);
     buf
 }
 
@@ -122,18 +289,13 @@ pub fn current_dir() -> String eff [Ffi[StdEnv], Fail[IoError]] {
     let b = current_dir_bytes();
     match String::from_utf8(in b.as_slice()) {
         Option::Some(s) => s,
-        Option::None => Fail::raise(
-            IoError {
-                kind: 7,
-                os: 0,
-            }
-        ),
+        Option::None => raise_kind(7),
     }
 }
 
 // The platform: `os_linux()`, `os_macos()`, `os_windows()`, or 0.
-pub fn os() -> u32 eff [Ffi[StdEnv]] {
-    StdEnv::vstd_env_os()
+pub fn os() -> u32 {
+    StdEnv::OS
 }
 
 pub fn os_linux() -> u32 {

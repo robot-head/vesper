@@ -8,7 +8,7 @@ Claim: [#1400](https://github.com/robot-head/vesper/issues/1400). Base:
 |---|---|---|
 | 1 | `vesper-prism`: close the speed gap, then flip (the Vesper port is the only build, the Rust implementation deleted) | #1434 |
 | 2 | `vesper-prism-h3`: close the encode and message gaps, flip the ported modules | #1472 |
-| 3 | `vesper-prism-h3` drivers (`connection.rs`, `client.rs`, `transport.rs`, `warp.rs`, `prism.rs`, `session.rs`) on the ported Warp | 3a: this PR |
+| 3 | `vesper-prism-h3` drivers (`connection.rs`, `client.rs`, `transport.rs`, `warp.rs`, `prism.rs`, `session.rs`) on the ported Warp | 3a: #1491; 3b: ready |
 
 ## Part 1: vesper-prism
 
@@ -332,10 +332,73 @@ the linear `Responder`. It shrinks as each piece moves.
   read back. A connection-level workload in `examples/abba.rs` comes with
   part 3b, the request streams, where the per-request cost is.
 
+## Part 3b: HTTP/3 connection, client, and WebTransport session state machines
+
+### Flip-gate verdict
+
+- **Full function.** Every crate test binary (`lib` unit tests, `frame_codec`,
+  `message_rules`, `priority_bodies`, `h3_mem`, `webtransport_mem`, `robustness`,
+  `qpack_rfc`, `qpack_qifs`, `qpack_encode_golden`, `qpack_tables`, `quinn_datagrams`,
+  `warp_prism`, `warp_webtransport`, `wtransport_interop`, `port_differential`,
+  and `divergence`) passes, along with all 22 Vesper Loom unit tests.
+  `webtransport_mem` adds `stream_headers_wire_encoding`, moving the deleted
+  `session::tests::stream_headers` check onto the public API.
+- **Differential.** `tests/port_differential.rs` compares 7 scenario suites
+  (`req_resp_matrix` 1,944, `streaming_and_backpressure` 358,
+  `priority_scheduler` 324, `goaway_and_lifecycle` 87, `raw_wire_errors` 55,
+  `wt_sessions_and_streams` 142, `capsule_and_datagram_fuzz` 93; **3,003** cases
+  total) against frozen golden digests recorded at `0f5a9eba`: **0 differences**.
+- **Divergence.** `build.rs`, `BUILD.bazel`, `port/check.sh`, and
+  `tests/divergence.rs` gain divergent edits for `session`, `core`, `server`,
+  and `client` alongside the 11 existing modules (`huffman`, `prefix`, `table`,
+  `encoder`, `decoder`, `varint`, `frame`, `priority`, `capsule`, `message`,
+  `control`); each fails its guarding test while an unrelated test stays green.
+- **Speed (`RUSTFLAGS="-C target-cpu=native"`, `n = 30` ABBA epochs vs `0f5a9eba`):**
+
+  | Workload | Rust | Vesper | Ratio | 95% interval | Bar (upper <= 1.50x) |
+  |---|--:|--:|--:|---|---|
+  | `connection` | 26,416 ns/exchange | 25,758 ns/exchange | 0.97x | 0.966x..0.983x | pass |
+  | `session` | 62,074 ns/session | 59,182 ns/session | 0.94x | 0.927x..0.965x | pass |
+
+- **Rust deleted.** `git diff --shortstat 0f5a9eba` across
+  `src/{session,connection,client}.rs`: **2,798 deletions, 1,172 insertions**
+  (1,626 net lines removed; `src/session.rs` shrank from ~700 lines to 87 lines
+  of public types). Including `src/qpack/port.rs` ABI/table glue (`+65/-2`):
+  2,800 deletions, 1,237 insertions.
+
+### What moved to Vesper (`@vesper/prism-h3`)
+
+- **`vesper/src/pool.ves` (`BytePool`, `OutMap`, `CmdBuf`, `SevBuf`, `HevBuf`).**
+  Size-classed block arena (`256`, `1024`, `4096`, `16384`, `65536` byte blocks)
+  using `try_copy_from` / `try_copy_within` for zero-heap-churn stream send queues,
+  pooled `FrameReader`/`CapsuleReader` boundaries, sorted `u64` lookup helpers,
+  and flat FFI command/event staging buffers.
+- **`vesper/src/session.ves` (`SessionTable`).** Extended CONNECT sessions
+  (`WebTransport` / `Tunnel`), held streams for racing `accept_session` (16-stream
+  bound, `WT_BUFFERED_STREAM_REJECTED`), held datagrams, QUIC vs capsule HTTP
+  datagram dispatch, `DRAIN_WEBTRANSPORT_SESSION` / `CLOSE_WEBTRANSPORT_SESSION`
+  (UTF-8 and 1024-byte reason checks), and `WT_SESSION_GONE` stream resets.
+- **`vesper/src/core.ves` (`ConnCore`).** Shared connection state, control/QPACK
+  uni-stream handling (directly invoking `dec_on_encoder_stream` and
+  `enc_on_decoder_stream`), `flush_begin`/`flush_step` state machine driving
+  `priority::schedule_into` + RFC 9218 non-work-conserving turns, header bounds,
+  and field/trailer serialization into `BytePool`.
+- **`vesper/src/server.ves` (`ServerCore`) & `vesper/src/client.ves` (`ClientCore`).**
+  Server request lifecycle, streaming upload window + `max_connection_buffer`
+  eviction, interim/chunked/whole response framing, leaked-responder resets,
+  client request/response parsing, bidirectional `WEBTRANSPORT_STREAM` sniffing,
+  strictly decreasing `GOAWAY`, and `ClientError` checks.
+- **Rust boundary.** `RoleCore` in `src/connection.rs` shares `flush`,
+  `open_local`, `read_uni`, and WebTransport stream/datagram `Transport` loops
+  between `ServerConnection` and `ClientConnection`. All Rust remaining in
+  `src/{connection,client,session}.rs` is purely public API types, linear
+  `Responder`/`Session` drop obligations, and `Transport` trait I/O execution.
+
 ## What is left
 
-- Part 3b and later: server request streams, the client, the session
-  layer (WebTransport and HTTP Datagrams), and then the Warp and Prism
-  adapters (`warp.rs`, `prism.rs`) once Warp is ported.
-- The census row (`scripts/rust-census.py`, STATUS tables) is updated once
-  the plan PR (#1415) that adds the script has merged.
+- `src/warp.rs` (`Warp` transport adapter awaiting lane 4 `vesper-warp`),
+  `src/prism.rs` (`vesper_prism::service::Service` bridge), `src/transport.rs`,
+  `src/error.rs`, `src/qpack/port.rs`, and the thin `Transport` glue / linear API
+  wrappers in `src/{connection,client,session}.rs`.
+- The census row (`scripts/rust-census.py`, STATUS tables) is updated after
+  landing on `main`.

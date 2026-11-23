@@ -689,6 +689,7 @@ impl Lowering<'_> {
                 let pat_span = self.span();
                 hoisted.push(Statement::Let {
                     pat: Pattern {
+                        integer_kind: None,
                         kind: PatternKind::Bind(name),
                         span: pat_span,
                     },
@@ -711,6 +712,7 @@ impl Lowering<'_> {
                 let pat_span = self.span();
                 hoisted.push(Statement::Let {
                     pat: Pattern {
+                        integer_kind: None,
                         kind: PatternKind::Bind(name),
                         span: pat_span,
                     },
@@ -998,6 +1000,7 @@ impl Lowering<'_> {
                     (
                         field(n),
                         Pattern {
+                            integer_kind: None,
                             kind: PatternKind::Bind(renamed.get(n).cloned().unwrap_or(n.clone())),
                             span,
                         },
@@ -1011,6 +1014,7 @@ impl Lowering<'_> {
                 kind: ExprKind::Block {
                     statements: vec![Statement::Let {
                         pat: Pattern {
+                            integer_kind: None,
                             kind: PatternKind::Constructor {
                                 name: struct_name.clone(),
                                 fields,

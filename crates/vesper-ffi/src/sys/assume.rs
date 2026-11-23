@@ -218,7 +218,9 @@ impl FunctionDescriptor {
                 ],
                 // The callee reads a fresh NUL-terminated copy, never the
                 // caller's memory.
-                ParameterType::CStr => &[(NonNull, BeforeCall), (NoRetention, Unverifiable)],
+                ParameterType::CStr | ParameterType::CStrList => {
+                    &[(NonNull, BeforeCall), (NoRetention, Unverifiable)]
+                }
                 // A compiler-generated trampoline: never NULL. A `retain`
                 // pointer may be kept, so only `nocapture` promises more.
                 ParameterType::Function { retain: true, .. } => &[(NonNull, BeforeCall)],
@@ -241,6 +243,7 @@ impl FunctionDescriptor {
         match &self.result {
             ValueType::Unit
             | ValueType::Scalar(_)
+            | ValueType::Float(_)
             | ValueType::Bool
             | ValueType::Enum(_)
             | ValueType::Handle { .. }
@@ -250,6 +253,9 @@ impl FunctionDescriptor {
                 assumption: ValidBits,
                 checkability: AfterReturn,
             }),
+            // A C string result is read up to its NUL at the call: that it
+            // is one is trusted, like a pointer parameter's extent.
+            ValueType::CStr => {}
             ValueType::Address { nullable, .. } => {
                 if !nullable {
                     out.push(DeclaredAssumption {
@@ -315,6 +321,7 @@ impl FunctionDescriptor {
                 ParameterType::Value(_)
                 | ParameterType::Handle { .. }
                 | ParameterType::CStr
+                | ParameterType::CStrList
                 | ParameterType::Function { .. }
                 | ParameterType::Pinned { .. } => {
                     continue;
@@ -368,6 +375,7 @@ impl FunctionDescriptor {
                 ParameterType::Value(_)
                     | ParameterType::Handle { .. }
                     | ParameterType::CStr
+                    | ParameterType::CStrList
                     | ParameterType::Function { .. }
             ) {
                 continue;
@@ -439,7 +447,7 @@ impl FunctionDescriptor {
                     );
                 }
                 (
-                    ParameterType::CStr | ParameterType::Function { .. },
+                    ParameterType::CStr | ParameterType::CStrList | ParameterType::Function { .. },
                     RawArgument::Pointer { address },
                 ) => {
                     report.push(

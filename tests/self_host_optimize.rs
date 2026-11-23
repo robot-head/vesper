@@ -833,6 +833,31 @@ fn mutated_proposals_are_refused_for_the_same_reason() {
     assert_eq!(bad, 0);
 }
 
+/// A complete proof must fit when the total work limit equals its recorded
+/// final charge, including the producer's already-spent work.
+#[test]
+fn witness_work_limit_matches_at_the_last_charge() {
+    install();
+    take_records();
+    assert!(optimize_text("fn f(x: u64) -> u64 { wrapping_add(x, 0) }") > 0);
+    let records = take_records();
+    let record = records.iter().find(|r| r.result.is_ok()).unwrap();
+    let total = record.after.work;
+    assert!(total > record.check.spent.work);
+    let checks = [total - 1, total, total + 1].map(|limit| {
+        let mut check = record.check.clone();
+        check.limits.max_work = limit;
+        check
+    });
+    let cases: Vec<_> = checks.iter().map(|c| (c, false)).collect();
+    let expected = checks.each_ref().map(rust_line);
+    let limit_code = error_code(Err(WitnessError::Limit));
+    assert!(expected[0].starts_with(&format!("R {limit_code} ")));
+    assert_eq!(expected[1], expected_line(Ok(()), record.after));
+    assert_eq!(expected[2], expected[1]);
+    assert_eq!(vesper_lines(verify_entry(), &cases), expected);
+}
+
 /// The JIT with the optimizer off gives the same lines (every fifth
 /// proposal and its mutants).
 #[test]

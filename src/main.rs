@@ -250,11 +250,7 @@ fn cli() -> Result<(), String> {
             return Err("--target bpf takes one source file, not a package".into());
         }
         let path = std::path::Path::new(&input);
-        let assembled = if include_tests {
-            vesper::packages::load_for_tests(path)?
-        } else {
-            vesper::packages::load(path)?
-        };
+        let assembled = vesper::packages::load_for_target(path, target.as_deref(), include_tests)?;
         if !assembled.ok() {
             package_diagnostics(&assembled, &assembled.diagnostics, json);
             return Err(format!(

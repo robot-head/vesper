@@ -2,7 +2,8 @@
 //!
 //! * [`runtime`]: a small Vulkan compute runtime (buffers, descriptor sets,
 //!   dispatches with immediates, timeline-semaphore submissions).
-//! * [`shader`]: WGSL kernels compiled to SPIR-V by `naga`.
+//! * [`shader`]: SPIR-V kernels (WGSL compiled ahead of time by naga) and
+//!   their binding interface.
 //! * [`tensor`]: matmul, RMSNorm, RoPE and paged attention kernels and a
 //!   GPU decoder for `vesper-tensor`'s llama2.c models.
 //! * [`broadphase`]: the Kinetic sort-and-sweep broadphase as compute

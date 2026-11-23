@@ -36,7 +36,18 @@ impl<M: Module> Codegen<'_, '_, M> {
             {
                 let var = *self.vars.get(n).ok_or("unknown mutable scalar")?;
                 let value = self.use_var(var);
-                self.b.ins().store(MemFlags::new(), value, ptr, 0);
+                if self
+                    .control_words::<0>(
+                        crate::codegen_swap::control::DYN_STORE_WORD,
+                        &[
+                            crate::codegen_swap::word(ptr),
+                            crate::codegen_swap::word(value),
+                        ],
+                    )
+                    .is_none()
+                {
+                    self.b.ins().store(MemFlags::new(), value, ptr, 0);
+                }
                 restores.push((var, ptr, actual.clone()));
             }
             ptr
@@ -49,13 +60,36 @@ impl<M: Module> Codegen<'_, '_, M> {
         } else {
             let value = self.expr(&arg.expr)?;
             let slot = self.alloc_uninit(8);
-            self.b.ins().store(MemFlags::new(), value, slot, 0);
+            if self
+                .control_words::<0>(
+                    crate::codegen_swap::control::DYN_STORE_WORD,
+                    &[
+                        crate::codegen_swap::word(slot),
+                        crate::codegen_swap::word(value),
+                    ],
+                )
+                .is_none()
+            {
+                self.b.ins().store(MemFlags::new(), value, slot, 0);
+            }
             slot
         };
         let table = self.dyn_vtable(&vtable)?;
         let pair = self.alloc_uninit(16);
-        self.b.ins().store(MemFlags::new(), data, pair, 0);
-        self.b.ins().store(MemFlags::new(), table, pair, 8);
+        if self
+            .control_words::<0>(
+                crate::codegen_swap::control::DYN_PAIR_INIT,
+                &[
+                    crate::codegen_swap::word(pair),
+                    crate::codegen_swap::word(data),
+                    crate::codegen_swap::word(table),
+                ],
+            )
+            .is_none()
+        {
+            self.b.ins().store(MemFlags::new(), data, pair, 0);
+            self.b.ins().store(MemFlags::new(), table, pair, 8);
+        }
         Ok(pair)
     }
 
@@ -67,10 +101,17 @@ impl<M: Module> Codegen<'_, '_, M> {
         slot: usize,
     ) -> Result<ir::Value, String> {
         let pair = *values.first().ok_or("a vtable call lacks its receiver")?;
+        let offset = VTABLE_HEADER + 8 * i32::try_from(slot).map_err(|e| e.to_string())?;
+        if let Some([data, target]) = self.control_words(
+            crate::codegen_swap::control::DYN_DISPATCH,
+            &[crate::codegen_swap::word(pair), offset as i64 as u64],
+        ) {
+            values[0] = ir::Value::from_u32(data as u32);
+            return Ok(ir::Value::from_u32(target as u32));
+        }
         let data = self.b.ins().load(types::I64, MemFlags::trusted(), pair, 0);
         let table = self.b.ins().load(types::I64, MemFlags::trusted(), pair, 8);
         values[0] = data;
-        let offset = VTABLE_HEADER + 8 * i32::try_from(slot).map_err(|e| e.to_string())?;
         Ok(self.b.ins().load(
             types::I64,
             MemFlags::trusted().with_readonly(),
@@ -88,9 +129,20 @@ impl<M: Module> Codegen<'_, '_, M> {
         slot: usize,
     ) -> Result<(ir::Value, ir::Value), String> {
         let block = *values.first().ok_or("a vtable call lacks its receiver")?;
+        let offset = VTABLE_HEADER + 8 * i32::try_from(slot).map_err(|e| e.to_string())?;
+        if let Some([data, target]) = self.control_words(
+            crate::codegen_swap::control::DYN_DISPATCH_BOXED,
+            &[
+                crate::codegen_swap::word(block),
+                BOXED_HEADER as u64,
+                offset as i64 as u64,
+            ],
+        ) {
+            values[0] = ir::Value::from_u32(data as u32);
+            return Ok((ir::Value::from_u32(target as u32), block));
+        }
         let table = self.b.ins().load(types::I64, MemFlags::trusted(), block, 0);
         values[0] = self.b.ins().iadd_imm(block, BOXED_HEADER);
-        let offset = VTABLE_HEADER + 8 * i32::try_from(slot).map_err(|e| e.to_string())?;
         let target = self.b.ins().load(
             types::I64,
             MemFlags::trusted().with_readonly(),
@@ -109,11 +161,34 @@ impl<M: Module> Codegen<'_, '_, M> {
         _pass: Pass,
     ) -> Result<(ir::Value, ir::Value), String> {
         let block = self.expr(&arg.expr)?;
-        let table = self.b.ins().load(types::I64, MemFlags::trusted(), block, 0);
-        let data = self.b.ins().iadd_imm(block, BOXED_HEADER);
+        let (data, table) = if let Some([data, table]) = self.control_words(
+            crate::codegen_swap::control::DYN_BOXED_PARTS,
+            &[crate::codegen_swap::word(block), BOXED_HEADER as u64],
+        ) {
+            (
+                ir::Value::from_u32(data as u32),
+                ir::Value::from_u32(table as u32),
+            )
+        } else {
+            let table = self.b.ins().load(types::I64, MemFlags::trusted(), block, 0);
+            let data = self.b.ins().iadd_imm(block, BOXED_HEADER);
+            (data, table)
+        };
         let pair = self.alloc_uninit(16);
-        self.b.ins().store(MemFlags::new(), data, pair, 0);
-        self.b.ins().store(MemFlags::new(), table, pair, 8);
+        if self
+            .control_words::<0>(
+                crate::codegen_swap::control::DYN_PAIR_INIT,
+                &[
+                    crate::codegen_swap::word(pair),
+                    crate::codegen_swap::word(data),
+                    crate::codegen_swap::word(table),
+                ],
+            )
+            .is_none()
+        {
+            self.b.ins().store(MemFlags::new(), data, pair, 0);
+            self.b.ins().store(MemFlags::new(), table, pair, 8);
+        }
         Ok((pair, block))
     }
 
@@ -135,8 +210,19 @@ impl<M: Module> Codegen<'_, '_, M> {
         let layout = Layout::of(self.world, &actual)?;
         let block = self.fip_box_alloc(layout.size + BOXED_HEADER as u32)?;
         let table = self.dyn_vtable(&vtable)?;
-        self.b.ins().store(MemFlags::new(), table, block, 0);
-        let data = self.b.ins().iadd_imm(block, BOXED_HEADER);
+        let data = if let Some([data]) = self.control_words(
+            crate::codegen_swap::control::DYN_BOX_INIT,
+            &[
+                crate::codegen_swap::word(block),
+                crate::codegen_swap::word(table),
+                BOXED_HEADER as u64,
+            ],
+        ) {
+            ir::Value::from_u32(data as u32)
+        } else {
+            self.b.ins().store(MemFlags::new(), table, block, 0);
+            self.b.ins().iadd_imm(block, BOXED_HEADER)
+        };
         self.store(data, value, &actual)?;
         Ok(block)
     }
@@ -175,8 +261,19 @@ impl<M: Module> Codegen<'_, '_, M> {
         // pair (an `in`/`inout` place or a `sink` value).
         let (data, table, block) = if boxed {
             let block = self.expr(&receiver_arg.expr)?;
-            let table = self.b.ins().load(types::I64, MemFlags::trusted(), block, 0);
-            let data = self.b.ins().iadd_imm(block, BOXED_HEADER);
+            let (data, table) = if let Some([data, table]) = self.control_words(
+                crate::codegen_swap::control::DYN_BOXED_PARTS,
+                &[crate::codegen_swap::word(block), BOXED_HEADER as u64],
+            ) {
+                (
+                    ir::Value::from_u32(data as u32),
+                    ir::Value::from_u32(table as u32),
+                )
+            } else {
+                let table = self.b.ins().load(types::I64, MemFlags::trusted(), block, 0);
+                let data = self.b.ins().iadd_imm(block, BOXED_HEADER);
+                (data, table)
+            };
             (data, table, Some(block))
         } else {
             let pair = if receiver.pass != Pass::Sink
@@ -186,8 +283,19 @@ impl<M: Module> Codegen<'_, '_, M> {
             } else {
                 self.expr(&receiver_arg.expr)?
             };
-            let data = self.b.ins().load(types::I64, MemFlags::trusted(), pair, 0);
-            let table = self.b.ins().load(types::I64, MemFlags::trusted(), pair, 8);
+            let (data, table) = if let Some([data, table]) = self.control_words(
+                crate::codegen_swap::control::DYN_PAIR_PARTS,
+                &[crate::codegen_swap::word(pair)],
+            ) {
+                (
+                    ir::Value::from_u32(data as u32),
+                    ir::Value::from_u32(table as u32),
+                )
+            } else {
+                let data = self.b.ins().load(types::I64, MemFlags::trusted(), pair, 0);
+                let table = self.b.ins().load(types::I64, MemFlags::trusted(), pair, 8);
+                (data, table)
+            };
             (data, table, None)
         };
         // The other arguments are evaluated once, before the dispatch; an
@@ -221,15 +329,12 @@ impl<M: Module> Codegen<'_, '_, M> {
             });
         }
         let result_layout = Layout::of(self.world, &stub.result)?;
-        let join = self.b.create_block();
-        self.b.append_block_param(
-            join,
-            if result_layout.aggregate() {
-                self.m.target_config().pointer_type()
-            } else {
-                scalar(&stub.result, &[])?
-            },
-        );
+        let join_ty = if result_layout.aggregate() {
+            self.m.target_config().pointer_type()
+        } else {
+            scalar(&stub.result, &[])?
+        };
+        let join = self.control_join_block(join_ty);
         let vtables = self
             .world
             .dyn_objects
@@ -265,11 +370,22 @@ impl<M: Module> Codegen<'_, '_, M> {
                 .cloned()
                 .ok_or("a vtable lacks the called slot")?;
             let address = self.dyn_vtable(vtable)?;
-            let yes = self.b.create_block();
-            let no = self.b.create_block();
-            let matches = self.b.ins().icmp(IntCC::Equal, table, address);
-            self.branch(matches, yes, &[], no, &[]);
-            self.b.switch_to_block(yes);
+            let no = if let Some([_yes, no]) = self.control_words(
+                crate::codegen_swap::control::DYN_CANDIDATE,
+                &[
+                    crate::codegen_swap::word(table),
+                    crate::codegen_swap::word(address),
+                ],
+            ) {
+                ir::Block::from_u32(no as u32)
+            } else {
+                let yes = self.b.create_block();
+                let no = self.b.create_block();
+                let matches = self.b.ins().icmp(IntCC::Equal, table, address);
+                self.branch(matches, yes, &[], no, &[]);
+                self.b.switch_to_block(yes);
+                no
+            };
             let self_ty = crate::numeric::default_type(&vtable.self_ty);
             let name = format!("$dyn_self{}", data.as_u32());
             let mut value_at = data;
@@ -287,6 +403,7 @@ impl<M: Module> Codegen<'_, '_, M> {
             }
             self.bind_alias(
                 &Pattern {
+                    integer_kind: None,
                     kind: PatternKind::Bind(name.clone()),
                     span: 0..0,
                 },
@@ -307,14 +424,13 @@ impl<M: Module> Codegen<'_, '_, M> {
             let value = self.call_function_into(&method, &call_args, site, None);
             self.forced_call_vars = None;
             let value = value?;
-            self.jump(join, &[value.into()]);
+            self.control_jump(join, &[value.into()]);
             self.vars = scope.clone();
             self.local_types = types_scope.clone();
-            self.b.switch_to_block(no);
+            self.control_switch_block(no);
         }
-        self.b.ins().trap(ir::TrapCode::unwrap_user(3));
-        self.b.switch_to_block(join);
-        let result = self.b.block_params(join)[0];
+        self.control_trap(3);
+        let result = self.control_switch_param(join, 0);
         Ok(match into {
             Some(out) if result_layout.aggregate() => {
                 self.copy_bytes(result, out, result_layout.size);
@@ -331,13 +447,52 @@ impl<M: Module> Codegen<'_, '_, M> {
             "__vesper_vtable_{:016x}",
             fnv1a64(&format!("{:?}|{:?}", vtable.object, vtable.self_ty))
         );
-        let id = match self.m.get_name(&symbol) {
-            Some(FuncOrDataId::Data(id)) => id,
+        let words = 4 + vtable.methods.len();
+        let existing = match self.m.get_name(&symbol) {
+            Some(FuncOrDataId::Data(id)) => Some(id),
             Some(_) => return Err(format!("{symbol} collides with a function symbol")),
-            None => {
+            None => None,
+        };
+        if crate::codegen_swap::hook(crate::codegen_swap::Family::Control).is_some() {
+            let (self_size, drop, entries) = if existing.is_none() {
                 let layout = Layout::of(self.world, &vtable.self_ty)?;
-                let words = 4 + vtable.methods.len();
+                let drop = if crate::fip::elem_needs_drop(self.world, &vtable.self_ty) {
+                    Some(dyn_drop_helper(self.m, self.world, &vtable.self_ty)?)
+                } else {
+                    None
+                };
+                let mut entries = Vec::new();
+                for (slot, (name, vars)) in vtable.methods.iter().enumerate() {
+                    if specialized_function(self.world, &concrete(self.world, name, vars)?) {
+                        continue;
+                    }
+                    entries.push((slot as u64, self.dyn_slot_entry(vtable, name, vars)?));
+                }
+                (u64::from(layout.size), drop, entries)
+            } else {
+                (0, None, Vec::new())
+            };
+            let mut req = Vec::with_capacity(6 + entries.len() * 2 + symbol.len().div_ceil(8));
+            req.push(words as u64);
+            req.push(self_size);
+            req.push(u64::from(drop.is_some()));
+            req.push(drop.map_or(0, |d| u64::from(d.as_u32())));
+            req.push(entries.len() as u64);
+            for (slot, func) in entries {
+                req.push(slot);
+                req.push(u64::from(func.as_u32()));
+            }
+            crate::codegen_swap::pack_bytes_words(symbol.as_bytes(), &mut req);
+            if let Some([addr]) = self.control_words(crate::codegen_swap::control::DYN_VTABLE, &req)
+            {
+                return Ok(ir::Value::from_u32(addr as u32));
+            }
+        }
+        let id = match existing {
+            Some(id) => id,
+            None => {
                 let mut bytes = vec![0u8; words * 8];
+                let layout = Layout::of(self.world, &vtable.self_ty)?;
                 bytes[16..24].copy_from_slice(&u64::from(layout.size).to_le_bytes());
                 bytes[24..32].copy_from_slice(&8u64.to_le_bytes());
                 let mut description = DataDescription::new();
@@ -417,7 +572,31 @@ impl<M: Module> Codegen<'_, '_, M> {
             Layout::of(self.world, &f.result)?.aggregate() && abi.result_words.is_none(),
         );
         let loaded = sig.params[receiver_index].value_type;
-        sig.params[receiver_index] = AbiParam::new(self.m.target_config().pointer_type());
+        let ptr_ty = self.m.target_config().pointer_type();
+        sig.params[receiver_index] = AbiParam::new(ptr_ty);
+        if crate::codegen_swap::hook(crate::codegen_swap::Family::Control).is_some() {
+            let mut req = Vec::with_capacity(
+                7 + sig.params.len() + sig.returns.len() + symbol.len().div_ceil(8),
+            );
+            req.push(u64::from(id.as_u32()));
+            req.push(receiver_index as u64);
+            req.push(crate::codegen_swap::ty_code(loaded));
+            req.push(crate::codegen_swap::ty_code(ptr_ty));
+            req.push(sig.params.len() as u64);
+            for p in &sig.params {
+                req.push(crate::codegen_swap::ty_code(p.value_type));
+            }
+            req.push(sig.returns.len() as u64);
+            for r in &sig.returns {
+                req.push(crate::codegen_swap::ty_code(r.value_type));
+            }
+            crate::codegen_swap::pack_bytes_words(symbol.as_bytes(), &mut req);
+            if let Some([adapter]) =
+                self.control_words(crate::codegen_swap::control::DYN_SLOT_ADAPTER, &req)
+            {
+                return Ok(FuncId::from_u32(adapter as u32));
+            }
+        }
         let jit = std::any::type_name::<M>().contains("JITModule");
         let linkage = if jit {
             Linkage::Preemptible
@@ -509,6 +688,14 @@ pub(super) fn emit_drop_object<M: Module>(
     m: &mut M,
     pair: ir::Value,
 ) -> Result<(), String> {
+    if crate::codegen_swap::request_control_builder(
+        b,
+        m,
+        crate::codegen_swap::control::DYN_DROP_OBJECT,
+        &[crate::codegen_swap::word(pair)],
+    )? {
+        return Ok(());
+    }
     let table = b.ins().load(types::I64, MemFlags::trusted(), pair, 8);
     let has_table = b.ins().icmp_imm(IntCC::NotEqual, table, 0);
     let load_drop = b.create_block();
@@ -540,6 +727,21 @@ pub(super) fn emit_drop_boxed<M: Module>(
     m: &mut M,
     block: ir::Value,
 ) -> Result<(), String> {
+    if crate::codegen_swap::hook(crate::codegen_swap::Family::Control).is_some() {
+        let free_id = super::fip_box_free_id(m)?;
+        if crate::codegen_swap::request_control_builder(
+            b,
+            m,
+            crate::codegen_swap::control::DYN_DROP_BOXED,
+            &[
+                crate::codegen_swap::word(block),
+                BOXED_HEADER as u64,
+                u64::from(free_id.as_u32()),
+            ],
+        )? {
+            return Ok(());
+        }
+    }
     let live = b.ins().icmp_imm(IntCC::NotEqual, block, 0);
     let load_drop = b.create_block();
     let call = b.create_block();

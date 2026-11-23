@@ -314,7 +314,8 @@ fn drop_at<M: Module>(
         | AbiType::Slice { .. }
         | AbiType::Str { owned: false }
         | AbiType::Object { .. }
-        | AbiType::Extern { .. } => {}
+        | AbiType::Extern { .. }
+        | AbiType::Callback { .. } => {}
     }
 }
 

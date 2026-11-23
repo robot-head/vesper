@@ -5,7 +5,7 @@ edition = "2026"
 # The driver reads its arguments, runs the linker and removes the object
 # file; every compiler pass is the hybrid's Rust, reached through the
 # `HybridDriver` import (src/lib.ves).
-capability_ceiling = ["Fail", "Alloc", "Ffi[StdFs]", "Ffi[StdProcess]", "Ffi[StdEnv]", "Ffi[HybridDriver]"]
+capability_ceiling = ["Fail", "Alloc", "Ffi[StdFs]", "Ffi[StdProcess]", "Ffi[StdEnv]", "Ffi[HybridDriver]", "Ffi[HybridCommands]"]
 
 [dependencies]
 "@vesper/driver" = { version = "^0.1", path = "../../../../packages/vesper-driver" }
@@ -13,3 +13,5 @@ capability_ceiling = ["Fail", "Alloc", "Ffi[StdFs]", "Ffi[StdProcess]", "Ffi[Std
 "@vesper-std/process" = { version = "^0.1", path = "../../../../packages/vesper-std/process" }
 "@vesper-std/env" = { version = "^0.1", path = "../../../../packages/vesper-std/env" }
 "@vesper-std/fmt" = { version = "^0.1", path = "../../../../packages/vesper-std/fmt" }
+# The other commands' layers (SH5 lane 13, #1336).
+"@vesper/driver-commands" = { version = "^0.1", path = "../../../../packages/vesper-driver-commands" }

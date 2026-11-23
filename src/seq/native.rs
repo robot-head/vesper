@@ -90,6 +90,35 @@ impl<M: Module> Codegen<'_, '_, M> {
     }
 
     /// [`define_runtime`] from a `Codegen`.
+    /// A fresh sequence with room for `cap` elements of `stride` bytes
+    /// (`vesper_seq_make`; the shared empty header for `cap` 0).
+    pub(crate) fn seq_make(
+        &mut self,
+        cap: ir::Value,
+        stride: ir::Value,
+    ) -> Result<ir::Value, String> {
+        let mut signature = self.m.make_signature();
+        signature.params.push(AbiParam::new(types::I64));
+        signature.params.push(AbiParam::new(types::I64));
+        signature.returns.push(AbiParam::new(types::I64));
+        let jit = std::any::type_name::<M>().contains("JITModule");
+        if !jit {
+            if self.m.isa().triple().operating_system == target_lexicon::OperatingSystem::None_ {
+                return Err(
+                    "ChunkSeq in a freestanding image needs an allocator; the generated one uses the C library".into(),
+                );
+            }
+            self.seq_define_runtime()?;
+        }
+        let linkage = if jit { Linkage::Import } else { Linkage::Local };
+        let id = self
+            .m
+            .declare_function("vesper_seq_make", linkage, &signature)
+            .map_err(|e| e.to_string())?;
+        let reference = self.m.declare_func_in_func(id, self.b.func);
+        let call = self.b.ins().call(reference, &[cap, stride]);
+        Ok(self.b.inst_results(call)[0])
+    }
     fn seq_define_runtime(&mut self) -> Result<(), String> {
         define_runtime(&mut self.b, self.m, self.world, Some(self.program))
     }
@@ -759,29 +788,7 @@ impl<M: Module> Codegen<'_, '_, M> {
             SeqOp::WithCapacity => {
                 let cap = arg(0)?;
                 let stride = self.b.ins().iconst(types::I64, stride);
-                let mut signature = self.m.make_signature();
-                signature.params.push(AbiParam::new(types::I64));
-                signature.params.push(AbiParam::new(types::I64));
-                signature.returns.push(AbiParam::new(types::I64));
-                let jit = std::any::type_name::<M>().contains("JITModule");
-                if !jit {
-                    if self.m.isa().triple().operating_system
-                        == target_lexicon::OperatingSystem::None_
-                    {
-                        return Err(
-                            "ChunkSeq in a freestanding image needs an allocator; the generated one uses the C library".into(),
-                        );
-                    }
-                    self.seq_define_runtime()?;
-                }
-                let linkage = if jit { Linkage::Import } else { Linkage::Local };
-                let id = self
-                    .m
-                    .declare_function("vesper_seq_make", linkage, &signature)
-                    .map_err(|e| e.to_string())?;
-                let reference = self.m.declare_func_in_func(id, self.b.func);
-                let call = self.b.ins().call(reference, &[cap, stride]);
-                self.b.inst_results(call)[0]
+                self.seq_make(cap, stride)?
             }
             SeqOp::Len => self.seq_word(arg(0)?, LEN),
             SeqOp::SliceLen => self.seq_word(arg(0)?, 16),

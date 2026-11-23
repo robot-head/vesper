@@ -1,0 +1,686 @@
+// Module replog of @vesper/chorus (see lib.ves): replicated-log consensus
+// state machine, partition generation, invariant checking, convergence, and
+// report digest (src/replog.rs).
+use self::util::{
+    inc,
+    none,
+    setw,
+    sw
+};
+use self::simnet::{
+    sm_chance
+};
+use self::wire::{
+    checker_core_committed_arena,
+    checker_core_leader_elected,
+    checker_core_logs_changed_arena,
+    checker_core_new,
+    CheckerCore,
+    RaftEntry,
+    WireAck,
+    WireHeader,
+    WireVoteReq,
+    MAX_BATCH
+};
+
+const FNV_OFFSET: u64 = 14695981039346656037;
+const FNV_PRIME: u64 = 1099511628211;
+const SEED_REPLOG_XOR: u64 = 125780003417959;
+// 0x7265_706c_6f67
+const INIT_LOG_CAP: u64 = 64;
+
+pub enum ReplogCfgErr: _ {
+    Ok = 0,
+    BadNodes = 1,
+    BadMaxBatch = 2
+}
+
+pub copy struct ReplogStatsOut {
+    elections: u64,
+    elections_won: u64,
+    votes_granted: u64,
+    votes_denied: u64,
+    appends: u64,
+    accepted: u64,
+    rejected: u64,
+    rpc_faults: u64,
+    proposals: u64,
+    partitioned_links: u64
+}
+
+pub copy struct ReplogVotePrep {
+    channel: u64,
+    req: WireVoteReq
+}
+
+pub copy struct ReplogVoteDec {
+    grant: bool,
+    term: u64
+}
+
+pub copy struct ReplogAppPrep {
+    channel: u64,
+    header: WireHeader,
+    entry_off: u64,
+    entry_len: u64,
+    sent_last: u64
+}
+
+pub copy struct ReplogAppReqOut {
+    ack: WireAck,
+    changed: bool,
+    committed: bool
+}
+
+pub copy struct ReplogAppRespOut {
+    keep_leading: bool,
+    has_violation: bool
+}
+
+pub struct ReplogCore {
+    n: u64,
+    max_batch: u64,
+    proposals_per_round: u64,
+    partition_per_mille: u64,
+    rng: u64,
+    next_channel: u64,
+    next_cmd: u64,
+
+    nd_term: ChunkSeq[u64],
+    nd_voted_for: ChunkSeq[u64],
+    nd_commit: ChunkSeq[u64],
+    nd_log_off: ChunkSeq[u64],
+    nd_log_len: ChunkSeq[u64],
+    nd_log_cap: ChunkSeq[u64],
+    log_pool: ChunkSeq[RaftEntry],
+
+    next_idx: ChunkSeq[u64],
+    matched_idx: ChunkSeq[u64],
+    blocked: ChunkSeq[bool],
+
+    checker: CheckerCore,
+
+    elections: u64,
+    elections_won: u64,
+    votes_granted: u64,
+    votes_denied: u64,
+    appends: u64,
+    accepted: u64,
+    rejected: u64,
+    rpc_faults: u64,
+    proposals: u64,
+    partitioned_links: u64
+}
+
+fn ge_log(in pool: ChunkSeq[RaftEntry], i: u64) -> RaftEntry {
+    match pool.try_get(i) {
+        Option::Some(e) => e,
+        Option::None => RaftEntry {
+            term: 0,
+            cmd: 0
+        },
+    }
+}
+
+fn ge_slice(in s: Slice[RaftEntry], i: u64) -> RaftEntry {
+    match s.try_get(i) {
+        Option::Some(e) => e,
+        Option::None => RaftEntry {
+            term: 0,
+            cmd: 0
+        },
+    }
+}
+
+fn node_log_len(in rp: ReplogCore, i: u64) -> u64 {
+    sw(in rp.nd_log_len, i)
+}
+
+fn node_log_get(in rp: ReplogCore, i: u64, idx: u64) -> RaftEntry {
+    ge_log(in rp.log_pool, wrapping_add(sw(in rp.nd_log_off, i), idx))
+}
+
+fn node_last_index(in rp: ReplogCore, i: u64) -> u64 {
+    node_log_len(in rp, i)
+}
+
+fn node_last_term(in rp: ReplogCore, i: u64) -> u64 {
+    let n = node_log_len(in rp, i);
+    if n == 0 {
+        0
+    } else {
+        node_log_get(in rp, i, wrapping_sub(n, 1)).term
+    }
+}
+
+fn node_log_push(inout rp: ReplogCore, i: u64, e: RaftEntry) {
+    let off = sw(in rp.nd_log_off, i);
+    let len = sw(in rp.nd_log_len, i);
+    let cap = sw(in rp.nd_log_cap, i);
+    if len == cap {
+        let new_cap = if cap == 0 {
+            INIT_LOG_CAP
+        } else {
+            wrapping_mul(cap, 2)
+        };
+        let new_off = rp.log_pool.len();
+        rp
+            .log_pool
+            .resize(
+                wrapping_add(new_off, new_cap),
+                RaftEntry {
+                    term: 0,
+                    cmd: 0
+                }
+            );
+        for k in 0..len {
+            let cur_e = ge_log(in rp.log_pool, wrapping_add(off, k));
+            let _ = rp.log_pool.try_set(wrapping_add(new_off, k), cur_e);
+        }
+        setw(inout rp.nd_log_off, i, new_off);
+        setw(inout rp.nd_log_cap, i, new_cap);
+        let _ = rp.log_pool.try_set(wrapping_add(new_off, len), e);
+        setw(inout rp.nd_log_len, i, inc(len));
+    } else {
+        let _ = rp.log_pool.try_set(wrapping_add(off, len), e);
+        setw(inout rp.nd_log_len, i, inc(len));
+    }
+}
+
+fn node_log_truncate(inout rp: ReplogCore, i: u64, new_len: u64) {
+    if new_len < sw(in rp.nd_log_len, i) {
+        setw(inout rp.nd_log_len, i, new_len);
+    }
+}
+
+fn next_chan(inout rp: ReplogCore) -> u64 {
+    let c = inc(rp.next_channel);
+    rp.next_channel = c;
+    c
+}
+
+pub fn replog_validate_cfg(n: u64, max_batch: u64) -> u64 {
+    if n < 3 || n > 7 {
+        return ReplogCfgErr::BadNodes;
+    }
+    if max_batch == 0 || max_batch > MAX_BATCH {
+        return ReplogCfgErr::BadMaxBatch;
+    }
+    ReplogCfgErr::Ok
+}
+
+pub fn replog_new(
+    seed: u64,
+    n: u64,
+    max_batch: u64,
+    proposals_per_round: u64,
+    partition_per_mille: u64
+) -> ReplogCore {
+    let mut rp = ReplogCore {
+        n: n,
+        max_batch: max_batch,
+        proposals_per_round: proposals_per_round,
+        partition_per_mille: partition_per_mille,
+        rng: seed ^ SEED_REPLOG_XOR,
+        next_channel: 0,
+        next_cmd: 0,
+        nd_term: ChunkSeq::new[u64](),
+        nd_voted_for: ChunkSeq::new[u64](),
+        nd_commit: ChunkSeq::new[u64](),
+        nd_log_off: ChunkSeq::new[u64](),
+        nd_log_len: ChunkSeq::new[u64](),
+        nd_log_cap: ChunkSeq::new[u64](),
+        log_pool: ChunkSeq::new[RaftEntry](),
+        next_idx: ChunkSeq::new[u64](),
+        matched_idx: ChunkSeq::new[u64](),
+        blocked: ChunkSeq::new[bool](),
+        checker: checker_core_new(),
+        elections: 0,
+        elections_won: 0,
+        votes_granted: 0,
+        votes_denied: 0,
+        appends: 0,
+        accepted: 0,
+        rejected: 0,
+        rpc_faults: 0,
+        proposals: 0,
+        partitioned_links: 0
+    };
+    rp
+        .log_pool
+        .resize(
+            wrapping_mul(n, INIT_LOG_CAP),
+            RaftEntry {
+                term: 0,
+                cmd: 0
+            }
+        );
+    rp.next_idx.resize(n, 0);
+    rp.matched_idx.resize(n, 0);
+    rp.blocked.resize(wrapping_mul(n, n), false);
+    for i in 0..n {
+        rp.nd_term.push(0);
+        rp.nd_voted_for.push(none());
+        rp.nd_commit.push(0);
+        rp.nd_log_off.push(wrapping_mul(i, INIT_LOG_CAP));
+        rp.nd_log_len.push(0);
+        rp.nd_log_cap.push(INIT_LOG_CAP);
+    }
+    rp
+}
+
+pub fn replog_partition(inout rp: ReplogCore, on: bool) {
+    let n = rp.n;
+    let pp = rp.partition_per_mille;
+    for s in 0..n {
+        for d in 0..n {
+            if s == d {
+                continue;
+            }
+            let block = on && sm_chance(inout rp.rng, pp);
+            if block {
+                rp.partitioned_links = inc(rp.partitioned_links);
+            }
+            let _ = rp.blocked.try_set(wrapping_add(wrapping_mul(s, n), d), block);
+        }
+    }
+}
+
+pub fn replog_start_elect(inout rp: ReplogCore, c: u64, term: u64) -> bool {
+    rp.elections = inc(rp.elections);
+    if sw(in rp.nd_term, c) >= term {
+        return false;
+    }
+    setw(inout rp.nd_term, c, term);
+    setw(inout rp.nd_voted_for, c, c);
+    true
+}
+
+pub fn replog_prep_vote(inout rp: ReplogCore, c: u64) -> ReplogVotePrep {
+    let ch = next_chan(inout rp);
+    let li = node_last_index(in rp, c);
+    let lt = node_last_term(in rp, c);
+    ReplogVotePrep {
+        channel: ch,
+        req: WireVoteReq {
+            term: sw(in rp.nd_term, c),
+            candidate: wrapping_u32(c),
+            last_log_index: li,
+            last_log_term: lt
+        }
+    }
+}
+
+pub fn replog_on_vote_req(inout rp: ReplogCore, v: u64, in r: WireVoteReq) -> ReplogVoteDec {
+    let cur = sw(in rp.nd_term, v);
+    if r.term > cur {
+        setw(inout rp.nd_term, v, r.term);
+        setw(inout rp.nd_voted_for, v, none());
+    }
+    let li = node_last_index(in rp, v);
+    let lt = node_last_term(in rp, v);
+    let up_to_date = r.last_log_term > lt || (r.last_log_term == lt && r.last_log_index >= li);
+    let vterm = sw(in rp.nd_term, v);
+    let vf = sw(in rp.nd_voted_for, v);
+    let cand = widen_u64(r.candidate);
+    let grant = r.term == vterm && (vf == none() || vf == cand) && up_to_date;
+    if grant {
+        setw(inout rp.nd_voted_for, v, cand);
+    }
+    ReplogVoteDec {
+        grant: grant,
+        term: vterm
+    }
+}
+
+pub fn replog_on_vote_fault(inout rp: ReplogCore) {
+    rp.rpc_faults = inc(rp.rpc_faults);
+}
+
+// Returns `true` if `resp_term > term` (candidate stepped down).
+pub fn replog_on_vote_resp(inout rp: ReplogCore, c: u64, term: u64, granted: bool, resp_term: u64)
+    -> bool {
+    if granted {
+        rp.votes_granted = inc(rp.votes_granted);
+    } else {
+        rp.votes_denied = inc(rp.votes_denied);
+    }
+    if resp_term > term {
+        setw(inout rp.nd_term, c, resp_term);
+        setw(inout rp.nd_voted_for, c, none());
+        return true;
+    }
+    false
+}
+
+pub fn replog_finish_elect(inout rp: ReplogCore, now_ns: u64, c: u64, term: u64, votes: u64)
+    -> bool {
+    if votes > rp.n / 2 {
+        rp.elections_won = inc(rp.elections_won);
+        let _ = checker_core_leader_elected(inout rp.checker, now_ns, term, c);
+        return true;
+    }
+    false
+}
+
+pub fn replog_begin_lead(inout rp: ReplogCore, l: u64) {
+    let init_next = inc(node_log_len(in rp, l));
+    for i in 0..rp.n {
+        setw(inout rp.next_idx, i, init_next);
+        setw(inout rp.matched_idx, i, 0);
+    }
+}
+
+pub fn replog_propose_round(inout rp: ReplogCore, now_ns: u64, l: u64) {
+    let term = sw(in rp.nd_term, l);
+    for _ in 0..rp.proposals_per_round {
+        let cmd = inc(rp.next_cmd);
+        rp.next_cmd = cmd;
+        node_log_push(
+            inout rp,
+            l,
+            RaftEntry {
+                term: term,
+                cmd: cmd
+            }
+        );
+        rp.proposals = inc(rp.proposals);
+    }
+    checker_core_logs_changed_arena(
+        inout rp.checker,
+        now_ns,
+        l,
+        in rp.log_pool.as_slice(),
+        in rp.nd_log_off.as_slice(),
+        in rp.nd_log_len.as_slice()
+    );
+}
+
+pub fn replog_prep_append(inout rp: ReplogCore, l: u64, f: u64) -> ReplogAppPrep {
+    let ch = next_chan(inout rp);
+    let term = sw(in rp.nd_term, l);
+    let log_len = node_log_len(in rp, l);
+    let raw_ni = sw(in rp.next_idx, f);
+    let ni = if raw_ni < 1 {
+        1
+    } else if raw_ni > inc(log_len) {
+        inc(log_len)
+    } else {
+        raw_ni
+    };
+    let prev = wrapping_sub(ni, 1);
+    let prev_term = if prev == 0 {
+        0
+    } else {
+        node_log_get(in rp, l, wrapping_sub(prev, 1)).term
+    };
+    let avail = wrapping_sub(log_len, prev);
+    let count = if avail < rp.max_batch {
+        avail
+    } else {
+        rp.max_batch
+    };
+    let log_off = sw(in rp.nd_log_off, l);
+    rp.appends = inc(rp.appends);
+    ReplogAppPrep {
+        channel: ch,
+        header: WireHeader {
+            term: term,
+            leader_id: wrapping_u32(l),
+            follower_slot: wrapping_u32(f),
+            prev_log_index: prev,
+            prev_log_term: prev_term,
+            leader_commit: sw(in rp.nd_commit, l)
+        },
+        entry_off: wrapping_add(log_off, prev),
+        entry_len: count,
+        sent_last: wrapping_add(prev, count)
+    }
+}
+
+pub fn replog_on_append_req(
+    inout rp: ReplogCore,
+    f: u64,
+    in h: WireHeader,
+    in entries: Slice[RaftEntry]
+) -> ReplogAppReqOut {
+    let mut accepted = false;
+    let mut match_index: u64 = 0;
+    let mut changed = false;
+    let mut committed = false;
+    let cur = sw(in rp.nd_term, f);
+    if h.term >= cur {
+        if h.term > cur {
+            setw(inout rp.nd_term, f, h.term);
+            setw(inout rp.nd_voted_for, f, none());
+        }
+        let p = h.prev_log_index;
+        let cur_len = node_log_len(in rp, f);
+        let ok = p == 0
+            || (p <= cur_len && node_log_get(in rp, f, wrapping_sub(p, 1)).term == h.prev_log_term);
+        if ok {
+            let ec = entries.len();
+            for k in 0..ec {
+                let e = ge_slice(in entries, k);
+                let idx = wrapping_add(p, k);
+                let ll = node_log_len(in rp, f);
+                if idx < ll {
+                    if node_log_get(in rp, f, idx).term != e.term {
+                        node_log_truncate(inout rp, f, idx);
+                        node_log_push(inout rp, f, e);
+                        changed = true;
+                    }
+                } else {
+                    node_log_push(inout rp, f, e);
+                    changed = true;
+                }
+            }
+            match_index = wrapping_add(p, ec);
+            let c = if h.leader_commit < match_index {
+                h.leader_commit
+            } else {
+                match_index
+            };
+            if c > sw(in rp.nd_commit, f) {
+                setw(inout rp.nd_commit, f, c);
+                committed = true;
+            }
+            accepted = true;
+        }
+    }
+    ReplogAppReqOut {
+        ack: WireAck {
+            follower_id: wrapping_u32(f),
+            term: sw(in rp.nd_term, f),
+            match_index: match_index,
+            accepted: accepted
+        },
+        changed: changed,
+        committed: committed
+    }
+}
+
+pub fn replog_check_follower(
+    inout rp: ReplogCore,
+    now_ns: u64,
+    f: u64,
+    changed: bool,
+    committed: bool
+) {
+    if changed {
+        checker_core_logs_changed_arena(
+            inout rp.checker,
+            now_ns,
+            f,
+            in rp.log_pool.as_slice(),
+            in rp.nd_log_off.as_slice(),
+            in rp.nd_log_len.as_slice()
+        );
+    }
+    if committed {
+        checker_core_committed_arena(
+            inout rp.checker,
+            now_ns,
+            f,
+            in rp.log_pool.as_slice(),
+            sw(in rp.nd_log_off, f),
+            sw(in rp.nd_log_len, f),
+            sw(in rp.nd_commit, f)
+        );
+    }
+}
+
+pub fn replog_on_append_fault(inout rp: ReplogCore) {
+    rp.rpc_faults = inc(rp.rpc_faults);
+}
+
+fn replog_advance_commit(inout rp: ReplogCore, now_ns: u64, l: u64) {
+    let term = sw(in rp.nd_term, l);
+    let commit = sw(in rp.nd_commit, l);
+    let log_len = node_log_len(in rp, l);
+    let mut idx = log_len;
+    loop {
+        if idx <= commit {
+            break;
+        }
+        if node_log_get(in rp, l, wrapping_sub(idx, 1)).term == term {
+            let mut count: u64 = 1;
+            for p in 0..rp.n {
+                if p != l && sw(in rp.matched_idx, p) >= idx {
+                    count = inc(count);
+                }
+            }
+            if count > rp.n / 2 {
+                setw(inout rp.nd_commit, l, idx);
+                checker_core_committed_arena(
+                    inout rp.checker,
+                    now_ns,
+                    l,
+                    in rp.log_pool.as_slice(),
+                    sw(in rp.nd_log_off, l),
+                    sw(in rp.nd_log_len, l),
+                    idx
+                );
+                return;
+            }
+        }
+        idx = wrapping_sub(idx, 1);
+    }
+}
+
+pub fn replog_on_append_resp(
+    inout rp: ReplogCore,
+    now_ns: u64,
+    l: u64,
+    f: u64,
+    term: u64,
+    sent_last: u64,
+    in ack: WireAck,
+    ok: bool
+) -> ReplogAppRespOut {
+    if ack.term > term {
+        setw(inout rp.nd_term, l, ack.term);
+        setw(inout rp.nd_voted_for, l, none());
+        return ReplogAppRespOut {
+            keep_leading: false,
+            has_violation: rp.checker.has_violation
+        };
+    }
+    if ok {
+        rp.accepted = inc(rp.accepted);
+        if ack.match_index <= sent_last {
+            let cur_m = sw(in rp.matched_idx, f);
+            let m = if ack.match_index > cur_m {
+                ack.match_index
+            } else {
+                cur_m
+            };
+            setw(inout rp.matched_idx, f, m);
+            let want_ni = inc(m);
+            let cur_ni = sw(in rp.next_idx, f);
+            if want_ni > cur_ni {
+                setw(inout rp.next_idx, f, want_ni);
+            }
+        }
+    } else {
+        rp.rejected = inc(rp.rejected);
+        let cur_ni = sw(in rp.next_idx, f);
+        let next_ni = if cur_ni <= 1 {
+            1
+        } else {
+            wrapping_sub(cur_ni, 1)
+        };
+        setw(inout rp.next_idx, f, next_ni);
+    }
+    replog_advance_commit(inout rp, now_ns, l);
+    ReplogAppRespOut {
+        keep_leading: !rp.checker.has_violation,
+        has_violation: rp.checker.has_violation
+    }
+}
+
+pub fn replog_converged(in rp: ReplogCore, l: u64) -> bool {
+    let l_off = sw(in rp.nd_log_off, l);
+    let l_len = sw(in rp.nd_log_len, l);
+    for i in 0..rp.n {
+        if sw(in rp.nd_commit, i) != l_len || sw(in rp.nd_log_len, i) != l_len {
+            return false;
+        }
+        if i != l {
+            let i_off = sw(in rp.nd_log_off, i);
+            for k in 0..l_len {
+                let a = ge_log(in rp.log_pool, wrapping_add(i_off, k));
+                let b = ge_log(in rp.log_pool, wrapping_add(l_off, k));
+                if a.term != b.term || a.cmd != b.cmd {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+fn mix_fnv(h: u64, v: u64) -> u64 {
+    let mut x = h;
+    let mut val = v;
+    for _ in 0..8 {
+        x = wrapping_mul(x ^ (val & 255), FNV_PRIME);
+        val = val >> 8;
+    }
+    x
+}
+
+pub fn replog_digest(in rp: ReplogCore, datagrams: u64, dropped: u64) -> u64 {
+    let mut digest = FNV_OFFSET;
+    for i in 0..rp.n {
+        digest = mix_fnv(digest, sw(in rp.nd_term, i));
+        digest = mix_fnv(digest, sw(in rp.nd_commit, i));
+        let off = sw(in rp.nd_log_off, i);
+        let len = sw(in rp.nd_log_len, i);
+        for k in 0..len {
+            let e = ge_log(in rp.log_pool, wrapping_add(off, k));
+            digest = mix_fnv(digest, e.term);
+            digest = mix_fnv(digest, e.cmd);
+        }
+    }
+    digest = mix_fnv(digest, rp.rpc_faults);
+    digest = mix_fnv(digest, rp.rejected);
+    digest = mix_fnv(digest, datagrams);
+    digest = mix_fnv(digest, dropped);
+    digest
+}
+
+pub fn replog_stats(in rp: ReplogCore) -> ReplogStatsOut {
+    ReplogStatsOut {
+        elections: rp.elections,
+        elections_won: rp.elections_won,
+        votes_granted: rp.votes_granted,
+        votes_denied: rp.votes_denied,
+        appends: rp.appends,
+        accepted: rp.accepted,
+        rejected: rp.rejected,
+        rpc_faults: rp.rpc_faults,
+        proposals: rp.proposals,
+        partitioned_links: rp.partitioned_links
+    }
+}

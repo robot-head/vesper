@@ -1,7 +1,8 @@
 //! Tensor kernels (design §28) on the Vulkan runtime, and a GPU decoder for
 //! `vesper-tensor`'s llama2.c models.
 //!
-//! The kernels are WGSL compiled by naga: [`TensorKernels::matmul`]
+//! The kernels are WGSL, compiled ahead of time with naga into the committed
+//! SPIR-V that [`SPIRV`] embeds ([`crate::shader`]): [`TensorKernels::matmul`]
 //! (row-major `[m, k] x [n, k]^T`, the llama2.c weight layout),
 //! [`TensorKernels::rms_norm`], [`TensorKernels::rope`],
 //! [`TensorKernels::swiglu`], [`TensorKernels::kv_write`] and paged
@@ -22,7 +23,8 @@ use vesper_tensor::ops::argmax;
 use vesper_tensor::quant::Matrix;
 
 use crate::error::GpuError;
-use crate::runtime::{Buffer, Context, Kernel, Recording};
+use crate::runtime::binding::{self, StepModel, StepSession, StepShape, TensorKs};
+use crate::runtime::{Buffer, Context, Kernel, Recording, port_error};
 
 /// Longest sequence the attention kernel accepts (its workgroup score
 /// buffer holds 2048 floats, 8 KiB of the 16 KiB Vulkan guarantees).
@@ -37,8 +39,8 @@ const SWIGLU: &str = include_str!("shaders/swiglu.wgsl");
 const KV_WRITE: &str = include_str!("shaders/kv_write.wgsl");
 const ATTENTION: &str = include_str!("shaders/attention.wgsl");
 
-/// Every WGSL source of this module with its entry point, for compile-only
-/// checks on hosts without a device.
+/// Every WGSL source of this module with its entry point: the sources the
+/// committed SPIR-V is compiled from (`tests/spirv.rs`).
 pub const SOURCES: [(&str, &str); 6] = [
     ("matmul", MATMUL),
     ("rms_norm", RMS_NORM),
@@ -48,22 +50,37 @@ pub const SOURCES: [(&str, &str); 6] = [
     ("attention", ATTENTION),
 ];
 
+const MATMUL_SPV: &[u8] = include_bytes!("shaders/spirv/matmul.spv");
+const RMS_NORM_SPV: &[u8] = include_bytes!("shaders/spirv/rms_norm.spv");
+const ROPE_SPV: &[u8] = include_bytes!("shaders/spirv/rope.spv");
+const SWIGLU_SPV: &[u8] = include_bytes!("shaders/spirv/swiglu.spv");
+const KV_WRITE_SPV: &[u8] = include_bytes!("shaders/spirv/kv_write.spv");
+const ATTENTION_SPV: &[u8] = include_bytes!("shaders/spirv/attention.spv");
+
+/// The committed SPIR-V of every kernel of this module with its entry point,
+/// in the order of [`SOURCES`].
+pub const SPIRV: [(&str, &[u8]); 6] = [
+    ("matmul", MATMUL_SPV),
+    ("rms_norm", RMS_NORM_SPV),
+    ("rope", ROPE_SPV),
+    ("swiglu", SWIGLU_SPV),
+    ("kv_write", KV_WRITE_SPV),
+    ("attention", ATTENTION_SPV),
+];
+
 fn u32_of(v: usize, what: &'static str) -> Result<u32, GpuError> {
     u32::try_from(v).map_err(|_| GpuError::Limit(what))
 }
 
-fn need(buffer: &Buffer, floats: usize, what: &'static str) -> Result<(), GpuError> {
-    let bytes = floats
-        .checked_mul(4)
-        .ok_or(GpuError::Limit("operand size"))?;
-    if floats == 0 || (bytes as u64) > buffer.len() {
-        return Err(GpuError::Shape(what));
-    }
-    Ok(())
-}
-
-fn groups_for(n: usize, per: usize) -> Result<u32, GpuError> {
-    u32_of(n.div_ceil(per), "workgroup count")
+/// Converts a Vesper failure: a device or shape error is the crate's error,
+/// anything else is a bug of the port.
+macro_rules! vesper {
+    ($call:expr, $err:ident) => {
+        $call.map_err(|e| match e {
+            binding::$err::GpuErr(g) => port_error(g),
+            other => panic!("the Vesper GPU tensor kernels failed internally: {other:?}"),
+        })
+    };
 }
 
 /// The compiled tensor kernels of one context.
@@ -80,13 +97,35 @@ pub struct TensorKernels {
 impl TensorKernels {
     pub fn new(ctx: &Context) -> Result<Self, GpuError> {
         Ok(Self {
-            matmul: ctx.kernel(MATMUL, "matmul", 3, 16)?,
-            rms_norm: ctx.kernel(RMS_NORM, "rms_norm", 3, 8)?,
-            rope: ctx.kernel(ROPE, "rope", 2, 12)?,
-            swiglu: ctx.kernel(SWIGLU, "swiglu", 2, 4)?,
-            kv_write: ctx.kernel(KV_WRITE, "kv_write", 5, 8)?,
-            attention: ctx.kernel(ATTENTION, "attention", 5, 16)?,
+            matmul: ctx.kernel(MATMUL_SPV, "matmul", 3, 16)?,
+            rms_norm: ctx.kernel(RMS_NORM_SPV, "rms_norm", 3, 8)?,
+            rope: ctx.kernel(ROPE_SPV, "rope", 2, 12)?,
+            swiglu: ctx.kernel(SWIGLU_SPV, "swiglu", 2, 4)?,
+            kv_write: ctx.kernel(KV_WRITE_SPV, "kv_write", 5, 8)?,
+            attention: ctx.kernel(ATTENTION_SPV, "attention", 5, 16)?,
         })
+    }
+
+    fn raw(&self) -> TensorKs {
+        TensorKs {
+            matmul: self.matmul.raw(),
+            rms_norm: self.rms_norm.raw(),
+            rope: self.rope.raw(),
+            swiglu: self.swiglu.raw(),
+            kv_write: self.kv_write.raw(),
+            attention: self.attention.raw(),
+        }
+    }
+
+    fn all(&self) -> [&Kernel; 6] {
+        [
+            &self.matmul,
+            &self.rms_norm,
+            &self.rope,
+            &self.swiglu,
+            &self.kv_write,
+            &self.attention,
+        ]
     }
 
     /// `out[r, c] = sum_i w[c, i] * a[r, i]` for `a: [m, k]`, `w: [n, k]`;
@@ -103,33 +142,15 @@ impl TensorKernels {
         k: usize,
         accumulate: bool,
     ) -> Result<(), GpuError> {
-        need(
-            a,
-            m.checked_mul(k).ok_or(GpuError::Limit("m * k"))?,
-            "matmul a",
-        )?;
-        need(
-            w,
-            n.checked_mul(k).ok_or(GpuError::Limit("n * k"))?,
-            "matmul w",
-        )?;
-        need(
-            out,
-            m.checked_mul(n).ok_or(GpuError::Limit("m * n"))?,
-            "matmul out",
-        )?;
-        let imm = [
-            u32_of(m, "m")?,
-            u32_of(n, "n")?,
-            u32_of(k, "k")?,
-            u32::from(accumulate),
-        ];
-        rec.dispatch(
-            &self.matmul,
-            &[a, w, out],
-            &imm,
-            [groups_for(n, 64)?, u32_of(m, "matmul rows")?, 1],
-        )
+        let (kern, ra, rw, ro) = (self.matmul.raw(), a.raw(), w.raw(), out.raw());
+        rec.record_with(&[&self.matmul], &[a, w, out], 1, |dev, r, dry| {
+            vesper!(
+                binding::tk_matmul(
+                    dev, r, kern, ra, rw, ro, m as u64, n as u64, k as u64, accumulate, dry
+                ),
+                TkMatmulError
+            )
+        })
     }
 
     /// RMSNorm of each of `rows` rows of width `n`.
@@ -144,19 +165,14 @@ impl TensorKernels {
         n: usize,
         epsilon: f32,
     ) -> Result<(), GpuError> {
-        if !(epsilon.is_finite() && epsilon > 0.0) {
-            return Err(GpuError::Shape("rms_norm epsilon"));
-        }
-        let total = rows.checked_mul(n).ok_or(GpuError::Limit("rows * n"))?;
-        need(x, total, "rms_norm x")?;
-        need(out, total, "rms_norm out")?;
-        need(weight, n, "rms_norm weight")?;
-        rec.dispatch(
-            &self.rms_norm,
-            &[x, weight, out],
-            &[u32_of(n, "n")?, epsilon.to_bits()],
-            [u32_of(rows, "rms_norm rows")?, 1, 1],
-        )
+        let (kern, rx, rw, ro) = (self.rms_norm.raw(), x.raw(), weight.raw(), out.raw());
+        let eps = epsilon.to_bits();
+        rec.record_with(&[&self.rms_norm], &[x, weight, out], 1, |dev, r, dry| {
+            vesper!(
+                binding::tk_rms_norm(dev, r, kern, rx, rw, ro, rows as u64, n as u64, eps, dry),
+                TkRmsNormError
+            )
+        })
     }
 
     /// RoPE in place over `len` floats of whole heads of width `head_dim`,
@@ -171,21 +187,23 @@ impl TensorKernels {
         head_dim: usize,
         position: usize,
     ) -> Result<(), GpuError> {
-        if head_dim == 0 || !head_dim.is_multiple_of(2) || !len.is_multiple_of(head_dim) {
-            return Err(GpuError::Shape("rope needs whole heads of even width"));
-        }
-        need(x, len, "rope x")?;
-        need(freqs, head_dim / 2, "rope frequencies")?;
-        rec.dispatch(
-            &self.rope,
-            &[x, freqs],
-            &[
-                u32_of(len, "len")?,
-                u32_of(head_dim, "head_dim")?,
-                u32_of(position, "position")?,
-            ],
-            [groups_for(len / 2, 64)?, 1, 1],
-        )
+        let (kern, rx, rf) = (self.rope.raw(), x.raw(), freqs.raw());
+        rec.record_with(&[&self.rope], &[x, freqs], 1, |dev, r, dry| {
+            vesper!(
+                binding::tk_rope(
+                    dev,
+                    r,
+                    kern,
+                    rx,
+                    rf,
+                    len as u64,
+                    head_dim as u64,
+                    position as u64,
+                    dry
+                ),
+                TkRopeError
+            )
+        })
     }
 
     /// `gate[i] = silu(gate[i]) * up[i]` for `n` elements.
@@ -196,14 +214,13 @@ impl TensorKernels {
         up: &'a Buffer,
         n: usize,
     ) -> Result<(), GpuError> {
-        need(gate, n, "swiglu gate")?;
-        need(up, n, "swiglu up")?;
-        rec.dispatch(
-            &self.swiglu,
-            &[gate, up],
-            &[u32_of(n, "n")?],
-            [groups_for(n, 64)?, 1, 1],
-        )
+        let (kern, rg, ru) = (self.swiglu.raw(), gate.raw(), up.raw());
+        rec.record_with(&[&self.swiglu], &[gate, up], 1, |dev, r, dry| {
+            vesper!(
+                binding::tk_swiglu(dev, r, kern, rg, ru, n as u64, dry),
+                TkSwigluError
+            )
+        })
     }
 
     /// Stores `k` and `v` (`kv_dim` floats each) at `position` of the paged
@@ -220,26 +237,39 @@ impl TensorKernels {
         position: usize,
         kv_dim: usize,
     ) -> Result<(), GpuError> {
-        need(k, kv_dim, "kv_write k")?;
-        need(v, kv_dim, "kv_write v")?;
-        if (position / TOKENS_PER_PAGE + 1) * 4 > table.len() as usize {
-            return Err(GpuError::Shape("kv_write position beyond the page table"));
-        }
-        let page_floats = TOKENS_PER_PAGE * kv_dim;
-        need(keys, page_floats, "kv_write keys")?;
-        need(values, page_floats, "kv_write values")?;
-        rec.dispatch(
-            &self.kv_write,
+        let kern = self.kv_write.raw();
+        let (rk, rv, rt) = (k.raw(), v.raw(), table.raw());
+        let (rkeys, rvalues) = (keys.raw(), values.raw());
+        rec.record_with(
+            &[&self.kv_write],
             &[k, v, table, keys, values],
-            &[u32_of(position, "position")?, u32_of(kv_dim, "kv_dim")?],
-            [groups_for(kv_dim, 64)?, 1, 1],
+            1,
+            |dev, r, dry| {
+                vesper!(
+                    binding::tk_kv_write(
+                        dev,
+                        r,
+                        kern,
+                        rk,
+                        rv,
+                        rt,
+                        rkeys,
+                        rvalues,
+                        position as u64,
+                        kv_dim as u64,
+                        dry
+                    ),
+                    TkKvWriteError
+                )
+            },
         )
     }
 
     /// Paged grouped-query attention of `q` (`[query_heads, head_dim]`) over
     /// `tokens` tokens, writing `[query_heads, head_dim]` to `out`. Out-of-range
-    /// page-table entries cannot read outside `keys`/`values` (naga's
-    /// `Restrict` bounds checks clamp every access); they read wrong data,
+    /// page-table entries cannot read outside `keys`/`values` (the
+    /// kernels are compiled with naga's `Restrict` bounds checks, which clamp
+    /// every access); they read wrong data,
     /// which [`GpuModel`] rules out by construction.
     #[allow(clippy::too_many_arguments)]
     pub fn attention<'a>(
@@ -259,36 +289,33 @@ impl TensorKernels {
             head_dim,
         } = shape;
         vesper_tensor::shape::gqa_ratio(query_heads as u64, kv_heads as u64)?;
-        if head_dim == 0 || head_dim > MAX_HEAD_DIM {
-            return Err(GpuError::Limit("attention head_dim"));
-        }
-        if tokens == 0 {
-            return Err(GpuError::Shape("attention over an empty sequence"));
-        }
-        if tokens > MAX_ATTENTION_TOKENS {
-            return Err(GpuError::Limit("attention tokens"));
-        }
-        let width = query_heads
-            .checked_mul(head_dim)
-            .ok_or(GpuError::Limit("attention width"))?;
-        need(q, width, "attention q")?;
-        need(out, width, "attention out")?;
-        if tokens.div_ceil(TOKENS_PER_PAGE) * 4 > table.len() as usize {
-            return Err(GpuError::Shape("attention page table too short"));
-        }
-        let page_floats = TOKENS_PER_PAGE * kv_heads * head_dim;
-        need(keys, page_floats, "attention keys")?;
-        need(values, page_floats, "attention values")?;
-        rec.dispatch(
-            &self.attention,
+        let kern = self.attention.raw();
+        let (rq, rkeys, rvalues) = (q.raw(), keys.raw(), values.raw());
+        let (rt, ro) = (table.raw(), out.raw());
+        rec.record_with(
+            &[&self.attention],
             &[q, keys, values, table, out],
-            &[
-                u32_of(query_heads, "query_heads")?,
-                u32_of(kv_heads, "kv_heads")?,
-                u32_of(head_dim, "head_dim")?,
-                u32_of(tokens, "tokens")?,
-            ],
-            [u32_of(query_heads, "query_heads")?, 1, 1],
+            1,
+            |dev, r, dry| {
+                vesper!(
+                    binding::tk_attention(
+                        dev,
+                        r,
+                        kern,
+                        rq,
+                        rkeys,
+                        rvalues,
+                        rt,
+                        ro,
+                        query_heads as u64,
+                        kv_heads as u64,
+                        head_dim as u64,
+                        tokens as u64,
+                        dry
+                    ),
+                    TkAttentionError
+                )
+            },
         )
     }
 }
@@ -435,97 +462,91 @@ impl GpuModel {
         session
             .x
             .write(0, &self.embedding[token * c.dim..(token + 1) * c.dim])?;
-        let head_dim = c.head_dim();
-        let kv_dim = c.kv_dim();
         let shape = AttentionShape {
             query_heads: c.heads,
             kv_heads: c.kv_heads,
-            head_dim,
+            head_dim: c.head_dim(),
         };
-        let k = &self.kernels;
+        vesper_tensor::shape::gqa_ratio(shape.query_heads as u64, shape.kv_heads as u64)?;
+        let step = StepShape {
+            dim: c.dim as u64,
+            kv_dim: c.kv_dim() as u64,
+            head_dim: c.head_dim() as u64,
+            heads: c.heads as u64,
+            kv_heads: c.kv_heads as u64,
+            hidden_dim: c.hidden_dim as u64,
+            vocab: c.vocab as u64,
+            layers: self.layers.len() as u64,
+            position: position as u64,
+            epsilon: RMS_EPSILON.to_bits(),
+        };
         let s = &*session;
-        let mut rec = self.ctx.record()?;
-        for (l, layer) in self.layers.iter().enumerate() {
-            let (keys, values) = (&cache.keys[l], &cache.values[l]);
-            k.rms_norm(
-                &mut rec,
-                &s.x,
-                &layer.rms_attention,
-                &s.xb,
-                1,
-                c.dim,
-                RMS_EPSILON,
-            )?;
-            k.matmul(&mut rec, &s.xb, &layer.wq, &s.q, 1, c.dim, c.dim, false)?;
-            k.matmul(&mut rec, &s.xb, &layer.wk, &s.k, 1, kv_dim, c.dim, false)?;
-            k.matmul(&mut rec, &s.xb, &layer.wv, &s.v, 1, kv_dim, c.dim, false)?;
-            k.rope(&mut rec, &s.q, &self.freqs, c.dim, head_dim, position)?;
-            k.rope(&mut rec, &s.k, &self.freqs, kv_dim, head_dim, position)?;
-            k.kv_write(
-                &mut rec, &s.k, &s.v, &s.table, keys, values, position, kv_dim,
-            )?;
-            k.attention(
-                &mut rec,
-                &s.q,
-                keys,
-                values,
-                &s.table,
-                &s.att,
-                shape,
-                position + 1,
-            )?;
-            k.matmul(&mut rec, &s.att, &layer.wo, &s.x, 1, c.dim, c.dim, true)?;
-            k.rms_norm(&mut rec, &s.x, &layer.rms_ffn, &s.xb, 1, c.dim, RMS_EPSILON)?;
-            k.matmul(
-                &mut rec,
-                &s.xb,
-                &layer.w1,
-                &s.hb,
-                1,
-                c.hidden_dim,
-                c.dim,
-                false,
-            )?;
-            k.matmul(
-                &mut rec,
-                &s.xb,
-                &layer.w3,
-                &s.hb2,
-                1,
-                c.hidden_dim,
-                c.dim,
-                false,
-            )?;
-            k.swiglu(&mut rec, &s.hb, &s.hb2, c.hidden_dim)?;
-            k.matmul(
-                &mut rec,
-                &s.hb,
-                &layer.w2,
-                &s.x,
-                1,
-                c.dim,
-                c.hidden_dim,
-                true,
-            )?;
-        }
-        k.rms_norm(
-            &mut rec,
+        let raw_session = StepSession {
+            table: s.table.raw(),
+            x: s.x.raw(),
+            xb: s.xb.raw(),
+            q: s.q.raw(),
+            k: s.k.raw(),
+            v: s.v.raw(),
+            att: s.att.raw(),
+            hb: s.hb.raw(),
+            hb2: s.hb2.raw(),
+            logits: s.logits.raw(),
+        };
+        let model = StepModel {
+            rms_final: self.rms_final.raw(),
+            classifier: self.classifier.raw(),
+            freqs: self.freqs.raw(),
+        };
+        let mut buffers: Vec<&Buffer> = vec![
+            &s.table,
             &s.x,
-            &self.rms_final,
             &s.xb,
-            1,
-            c.dim,
-            RMS_EPSILON,
-        )?;
-        k.matmul(
-            &mut rec,
-            &s.xb,
-            &self.classifier,
+            &s.q,
+            &s.k,
+            &s.v,
+            &s.att,
+            &s.hb,
+            &s.hb2,
             &s.logits,
-            1,
-            c.vocab,
-            c.dim,
-            false,
+            &self.rms_final,
+            &self.classifier,
+            &self.freqs,
+        ];
+        let mut layers = Vec::with_capacity(self.layers.len() * 22);
+        for (l, layer) in self.layers.iter().enumerate() {
+            let own = [
+                &layer.rms_attention,
+                &layer.wq,
+                &layer.wk,
+                &layer.wv,
+                &layer.wo,
+                &layer.rms_ffn,
+                &layer.w1,
+                &layer.w2,
+                &layer.w3,
+                &cache.keys[l],
+                &cache.values[l],
+            ];
+            for b in own {
+                let raw = b.raw();
+                layers.extend([raw.buffer, raw.len]);
+                buffers.push(b);
+            }
+        }
+        let k = &self.kernels;
+        let kernels = k.raw();
+        let mut rec = self.ctx.record()?;
+        rec.record_with(
+            &k.all(),
+            &buffers,
+            14 * self.layers.len() + 2,
+            |dev, r, dry| {
+                vesper!(
+                    binding::tk_step(dev, r, kernels, step, raw_session, model, &layers, dry),
+                    TkStepError
+                )
+            },
         )?;
         rec.submit()?.wait()?;
         session.logits.read(0, &mut session.host_logits)?;

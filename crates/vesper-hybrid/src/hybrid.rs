@@ -48,6 +48,11 @@ mod codegen_binding;
 
 #[rustfmt::skip]
 #[allow(clippy::all)]
+#[path = "../port/codegen_calls.rs"]
+mod codegen_calls_binding;
+
+#[rustfmt::skip]
+#[allow(clippy::all)]
 #[path = "../port/wasm_backend.rs"]
 mod wasm_backend_binding;
 
@@ -100,6 +105,11 @@ mod bounds_hoist_binding;
 #[allow(clippy::all)]
 #[path = "../port/pact.rs"]
 mod pact_binding;
+
+#[rustfmt::skip]
+#[allow(clippy::all)]
+#[path = "../port/doc.rs"]
+mod doc_binding;
 
 #[path = "parse_words.rs"]
 mod parse_words;
@@ -176,6 +186,9 @@ static STACK_BOUND_CALLS: AtomicU64 = AtomicU64::new(0);
 /// `aggregate` requests the Vesper codegen module emitted, and declined.
 static CODEGEN_CALLS: AtomicU64 = AtomicU64::new(0);
 static CODEGEN_DECLINED: AtomicU64 = AtomicU64::new(0);
+/// `call` requests the Vesper codegen_calls module emitted, and declined.
+static CALLS_EMITTED: AtomicU64 = AtomicU64::new(0);
+static CALLS_DECLINED: AtomicU64 = AtomicU64::new(0);
 /// Programs the Vesper wasm backend compiled, and left to Rust.
 static WASM_CALLS: AtomicU64 = AtomicU64::new(0);
 static WASM_DECLINED: AtomicU64 = AtomicU64::new(0);
@@ -212,6 +225,8 @@ static PACT_CALLS: AtomicU64 = AtomicU64::new(0);
 static PLACE_IR_CALLS: AtomicU64 = AtomicU64::new(0);
 /// Programs `modules/bounds_hoist` hoisted.
 static BOUNDS_HOIST_CALLS: AtomicU64 = AtomicU64::new(0);
+/// JSON texts and pages rendered by the Vesper doc module.
+static DOC_CALLS: AtomicU64 = AtomicU64::new(0);
 
 fn count() {
     LAYOUT_CALLS.fetch_add(1, Relaxed);
@@ -493,6 +508,23 @@ const VESPER_IR_CHECK: vesper::ir_check::IrCheckTable = vesper::ir_check::IrChec
     },
 };
 
+/// `vesper_doc::swap::RenderTable` from `modules/doc`: the JSON writer and
+/// the static and linked pages of `@vesper/doc`.
+const VESPER_DOC: vesper_doc::swap::RenderTable = vesper_doc::swap::RenderTable {
+    pretty_json: |request| {
+        DOC_CALLS.fetch_add(1, Relaxed);
+        doc_binding::doc_pretty_json(request)
+    },
+    static_page: |request| {
+        DOC_CALLS.fetch_add(1, Relaxed);
+        doc_binding::doc_static_page(request)
+    },
+    linked_page: |request| {
+        DOC_CALLS.fetch_add(1, Relaxed);
+        doc_binding::doc_linked_page(request)
+    },
+};
+
 /// `vesper::stack_bound::StackBoundTable` from `modules/stack_bound`: the
 /// stack-bound report of `@vesper/check-loops-atomics` (`vesper ebpf check`
 /// and `--verify-stack`).
@@ -693,12 +725,42 @@ fn vesper_aggregate(lent: &mut vesper::codegen_swap::Lent<'_, '_>) -> Result<boo
     }
 }
 
+/// The `call` hook of `vesper::codegen_swap` from `modules/codegen_calls`:
+/// the call instructions of native lowering, emitted in Vesper through the
+/// lent builder (#1281).
+fn vesper_call(lent: &mut vesper::codegen_swap::Lent<'_, '_>) -> Result<bool, String> {
+    let (answer, crossing) = vesper_cranelift_sys::lend(
+        lent.builder,
+        &mut *lent.module,
+        lent.op,
+        lent.args,
+        codegen_calls_binding::call,
+    );
+    if let Some(e) = crossing.error {
+        return Err(format!("codegen_calls (call op {}): {e}", lent.op));
+    }
+    if crossing.unreturned {
+        return Err(format!(
+            "codegen_calls (call op {}) kept a lent handle",
+            lent.op
+        ));
+    }
+    if answer == 1 {
+        CALLS_EMITTED.fetch_add(1, Relaxed);
+        lent.results.extend(crossing.results);
+        Ok(true)
+    } else {
+        CALLS_DECLINED.fetch_add(1, Relaxed);
+        Ok(false)
+    }
+}
+
 /// The `wasm` hook of `vesper::codegen_swap` from `modules/wasm_backend`:
 /// `@vesper/wasm-backend` writes the core module and the WIT, and
 /// `@vesper/wit-component` wraps them into the component (#1334), with
 /// Rust's wit-component where it declines (host imports). Errors (so the
-/// messages stay Rust's) and programs with handlers or host capabilities
-/// (not ported yet) decline to the Rust backend.
+/// messages stay Rust's) and constructs not ported yet (host capabilities,
+/// CPS clauses, stack switching) decline to the Rust backend.
 fn vesper_wasm(
     world: &vesper::check::World,
     entry: &str,
@@ -732,6 +794,7 @@ fn compile_wasm(
         core,
         wit,
         functions,
+        handlers,
     } = wasm_words::outcome(&wasm_backend_binding::compile_words(&input))
     else {
         return None;
@@ -739,17 +802,22 @@ fn compile_wasm(
     match wrap_component(&core, &wit, o.world) {
         Some(component) => {
             WRAP_CALLS.fetch_add(1, Relaxed);
-            Some(artifact(w, entry, o, core, component, wit, functions))
+            Some(artifact(
+                w, entry, o, core, component, wit, functions, &handlers,
+            ))
         }
         None => {
             WRAP_DECLINED.fetch_add(1, Relaxed);
-            Some(wasm_words::artifact(w, entry, o, core, wit, functions))
+            Some(wasm_words::artifact(
+                w, entry, o, core, wit, functions, &handlers,
+            ))
         }
     }
 }
 
 /// `wasm_words::artifact` with the component given: the artifact of a
-/// module without handlers or host capabilities.
+/// module without host capabilities.
+#[allow(clippy::too_many_arguments)]
 fn artifact(
     w: &vesper::check::World,
     entry: &str,
@@ -758,6 +826,7 @@ fn artifact(
     component: Vec<u8>,
     wit: String,
     functions: usize,
+    handlers: &[wasm_words::PortHandler],
 ) -> vesper::wasm_backend::WasmArtifact {
     use vesper::wasm_backend::{ENTRY_INTERFACE, WasmWorld};
     let f = &w.functions[entry];
@@ -774,7 +843,7 @@ fn artifact(
         result: vesper::numeric::default_type(&f.result),
         stack_switching: false,
         imports: vec![],
-        handlers: vec![],
+        handlers: wasm_words::handler_lowerings(w, handlers),
         functions,
     }
 }
@@ -1327,6 +1396,7 @@ extern "C" fn install() {
     }
     let hooks = vesper::codegen_swap::CodegenHooks {
         aggregate: Some(vesper_aggregate),
+        call: Some(vesper_call),
         wasm: Some(vesper_wasm),
         component: Some(vesper_component),
         numeric: Some(vesper_numeric),
@@ -1346,6 +1416,12 @@ extern "C" fn install() {
         std::process::abort();
     }
     if vesper::ir_swap::install(VESPER_IR_PASSES).is_err() {
+        std::process::abort();
+    }
+    // The request layout the Rust encoder writes must be the module's.
+    if doc_binding::doc_format() != vesper_doc::swap::FORMAT
+        || vesper_doc::swap::install_render(VESPER_DOC).is_err()
+    {
         std::process::abort();
     }
     // `VESPER_HYBRID_RUST_PRODUCER=1` keeps the Rust producer behind the
@@ -1410,6 +1486,11 @@ extern "C" fn report() {
         CODEGEN_DECLINED.load(Relaxed)
     );
     eprintln!(
+        "vesper-hybrid: codegen_calls emitted {} calls from Vesper ({} declined)",
+        CALLS_EMITTED.load(Relaxed),
+        CALLS_DECLINED.load(Relaxed)
+    );
+    eprintln!(
         "vesper-hybrid: wasm backend compiled {} programs from Vesper ({} declined)",
         WASM_CALLS.load(Relaxed),
         WASM_DECLINED.load(Relaxed)
@@ -1470,6 +1551,14 @@ extern "C" fn report() {
     eprintln!(
         "vesper-hybrid: the driver ran {} passes from Vesper",
         crate::driver::PASSES.load(Relaxed)
+    );
+    eprintln!(
+        "vesper-hybrid: doc answered {} calls from Vesper",
+        DOC_CALLS.load(Relaxed)
+    );
+    eprintln!(
+        "vesper-hybrid: the command layers printed {} times from Vesper",
+        crate::commands::PRINTS.load(Relaxed)
     );
 }
 

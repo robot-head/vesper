@@ -874,3 +874,24 @@ fn a_bad_close_reason_leaves_the_client_session_closable() {
     );
     let _ = session.close(&mut p.server, &mut p.s, 0, b"").unwrap();
 }
+
+#[test]
+fn stream_headers_wire_encoding() {
+    let mut p = Pair::new(true);
+    let (sid0, sess0) = p.session();
+    assert_eq!(sid0, 0);
+    let (sid4, sess4) = p.session();
+    assert_eq!(sid4, 4);
+
+    let bidi = p.client.open_stream(&mut p.c, sid0, true).unwrap();
+    let mut buf = [0u8; 16];
+    let r = p.s.read(bidi, &mut buf).unwrap();
+    assert_eq!(&buf[..r.len], [0x40, 0x41, 0x00]);
+
+    let uni = p.client.open_stream(&mut p.c, sid4, false).unwrap();
+    let r = p.s.read(uni, &mut buf).unwrap();
+    assert_eq!(&buf[..r.len], [0x40, 0x54, 0x04]);
+
+    let _ = sess0.close(&mut p.server, &mut p.s, 0, b"").unwrap();
+    let _ = sess4.close(&mut p.server, &mut p.s, 0, b"").unwrap();
+}

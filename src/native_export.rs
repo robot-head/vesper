@@ -267,6 +267,14 @@ pub enum AbiType {
     Extern {
         name: String,
     },
+    /// A `.vsys` `callback` handle (a C function pointer, a copy value;
+    /// gap 10 of docs/parallel-results/rust-exit-graphics.md, #1502): one
+    /// opaque word, `vesper_port_abi::FnPtr` in Rust, which Rust can hold
+    /// and hand back but neither build nor call. It crosses wherever a
+    /// scalar does.
+    Callback {
+        name: String,
+    },
 }
 
 fn is_false(v: &bool) -> bool {
@@ -860,6 +868,22 @@ impl Planner<'_> {
             reason: reason.into(),
         };
         let world = self.world;
+        // A `.vsys` callback type is a copy handle: its word is a C
+        // function pointer the library resolved, and holding it releases
+        // nothing, so it crosses as an opaque word.
+        if let Type::Named(n, args) = ty
+            && args.is_empty()
+            && world.adts.get(n).is_some_and(|a| {
+                a.mode == Mode::Copy
+                    && a.variants.iter().any(|v| {
+                        v.fields
+                            .iter()
+                            .any(|f| f.name == crate::ffi_lowering::HANDLE_FIELD)
+                    })
+            })
+        {
+            return Ok(AbiType::Callback { name: n.clone() });
+        }
         // An opaque `.vsys` extern-type handle (#1065) stays inside Vesper:
         // its library, not the export binding, owns and finalizes it.
         if let Type::Named(n, args) = ty
@@ -1141,7 +1165,10 @@ fn contains_extern(ty: &AbiType) -> bool {
         AbiType::Named { args, .. } => args.iter().any(contains_extern),
         AbiType::Seq { elem } | AbiType::Slice { elem } => contains_extern(elem),
         AbiType::Box { inner } => contains_extern(inner),
-        AbiType::Scalar { .. } | AbiType::Str { .. } | AbiType::Object { .. } => false,
+        AbiType::Scalar { .. }
+        | AbiType::Str { .. }
+        | AbiType::Object { .. }
+        | AbiType::Callback { .. } => false,
     }
 }
 
@@ -1149,7 +1176,10 @@ fn holds_sequence(ty: &AbiType, types: &BTreeMap<String, TypeDecl>) -> bool {
     match ty {
         // Native code frees neither a dropped sequence nor a dropped string.
         AbiType::Seq { .. } | AbiType::Str { owned: true } => true,
-        AbiType::Scalar { .. } | AbiType::Slice { .. } | AbiType::Str { owned: false } => false,
+        AbiType::Scalar { .. }
+        | AbiType::Callback { .. }
+        | AbiType::Slice { .. }
+        | AbiType::Str { owned: false } => false,
         // A boxed object's value may own anything; its vtable drops it.
         AbiType::Object { .. } | AbiType::Extern { .. } => false,
         AbiType::Tuple { items } => items.iter().any(|t| holds_sequence(t, types)),
@@ -1170,7 +1200,7 @@ pub(crate) fn owning(ty: &AbiType, types: &BTreeMap<String, TypeDecl>) -> bool {
         | AbiType::Str { .. }
         | AbiType::Object { .. } => true,
         // Lent by Rust, never owned by the value that holds it.
-        AbiType::Scalar { .. } | AbiType::Extern { .. } => false,
+        AbiType::Scalar { .. } | AbiType::Extern { .. } | AbiType::Callback { .. } => false,
         AbiType::Tuple { items } => items.iter().any(|t| owning(t, types)),
         AbiType::Named { name, args } => {
             types.get(name).is_some_and(|d| d.handle) || args.iter().any(|t| owning(t, types))
@@ -1195,7 +1225,8 @@ pub(crate) fn abi_words(ty: &AbiType, types: &BTreeMap<String, TypeDecl>) -> u32
         | AbiType::Seq { .. }
         | AbiType::Box { .. }
         | AbiType::Object { .. }
-        | AbiType::Extern { .. } => 1,
+        | AbiType::Extern { .. }
+        | AbiType::Callback { .. } => 1,
         AbiType::Slice { .. } | AbiType::Str { .. } => 3,
         AbiType::Tuple { items } => items
             .iter()

@@ -23,6 +23,7 @@ fn package(s: &str, capabilities: &[&str]) -> Selection {
                 capability_ceiling: set(capabilities),
                 forbid_unsafe_ffi: true,
                 vsys: vec![],
+                objects: vec![],
             },
             features: Default::default(),
             dependencies: Default::default(),

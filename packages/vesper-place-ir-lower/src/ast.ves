@@ -19,6 +19,10 @@ use @vesper/check-data::input::{
     Ctx,
     Reader
 };
+use @vesper/place-ir::codes::{
+    Lit,
+    Pat
+};
 
 const NONE32: u32 = 4294967295;
 const NONE64: u64 = 18446744073709551615;
@@ -47,16 +51,6 @@ const X_CONTINUE: u8 = 19;
 const X_RETURN: u8 = 20;
 const X_CLOSURE: u8 = 21;
 const X_HANDLE: u8 = 22;
-
-// Pattern kinds (the Place IR's: 0 wild, 1 bind, 2 literal, 3 tuple,
-// 4 constructor).
-const PT_BIND: u8 = 1;
-const PT_LITERAL: u8 = 2;
-const PT_TUPLE: u8 = 3;
-const PT_CTOR: u8 = 4;
-
-// Literal kinds.
-const LIT_STRING: u64 = 3;
 
 // One expression. By kind (lists are ranges of `xs`):
 // - literal: a = literal kind, b = low word (a string's symbol), c = high;
@@ -516,7 +510,7 @@ fn read_params(inout r: Reader, in b: Slice[u8], in c: Ctx, inout a: Ast) -> u64
 fn read_literal(inout r: Reader, in b: Slice[u8], in c: Ctx, inout x: Ex) {
     x.a = r.word(in b);
     x.b = r.word(in b);
-    if x.a == LIT_STRING {
+    if x.a == Lit::String {
         x.b = w(sym(in c, x.b));
     }
     x.c = r.word(in b);
@@ -533,22 +527,22 @@ fn read_pattern(inout r: Reader, in b: Slice[u8], in c: Ctx, inout a: Ast) {
         c: 0,
         n: 0
     };
-    if kind == PT_BIND {
+    if kind == Pat::Bind {
         p.a = w(sym(in c, r.word(in b)));
-    } else if kind == PT_LITERAL {
+    } else if kind == Pat::Literal {
         p.a = r.word(in b);
         p.b = r.word(in b);
-        if p.a == LIT_STRING {
+        if p.a == Lit::String {
             p.b = w(sym(in c, p.b));
         }
         p.c = r.word(in b);
-    } else if kind == PT_TUPLE {
+    } else if kind == Pat::Tuple {
         p.n = r.word(in b);
         p.b = a.pxs.len();
         for i in 0..p.n {
             a.pxs.push(r.word(in b));
         }
-    } else if kind == PT_CTOR {
+    } else if kind == Pat::Constructor {
         p.a = w(sym(in c, r.word(in b)));
         p.c = r.word(in b);
         p.n = r.word(in b);

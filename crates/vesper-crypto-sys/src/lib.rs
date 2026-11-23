@@ -35,7 +35,8 @@
 //!   the wrong length), [`AUTH`] (authentication or verification failed),
 //!   [`FAILED`] (the library failed, or the OS had no randomness) or
 //!   [`UNSUPPORTED`] (an unknown algorithm code, or an ML-KEM backend this
-//!   CPU cannot run). On any status but [`OK`], no output byte is written.
+//!   CPU cannot run); [`WEAK`] only from the Ed25519 public-key check. On any
+//!   status but [`OK`], no output byte is written.
 //! - Every `vcr_*` function is `unsafe`: its `(ptr, len)` pairs must be valid
 //!   for the call and its handles live (or null), which the `.vsys`
 //!   declarations guarantee to Vesper. No panic crosses the boundary: every
@@ -66,6 +67,8 @@ pub const AUTH: u32 = 2;
 pub const FAILED: u32 = 3;
 /// An unknown algorithm code, or a backend this CPU cannot run.
 pub const UNSUPPORTED: u32 = 4;
+/// A valid Ed25519 public key of small order (`VerifyingKey::is_weak`).
+pub const WEAK: u32 = 5;
 
 /// AEAD algorithm codes.
 pub mod aead {
@@ -854,6 +857,24 @@ pub unsafe extern "C" fn vcr_ed25519_verify(
     })
 }
 
+/// Checks a 32-byte Ed25519 public key: [`OK`], [`AUTH`] when it is not
+/// the encoding of a curve point, [`WEAK`] for a small-order point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vcr_ed25519_check_public(public: *const u8, public_len: usize) -> u32 {
+    // SAFETY: the `.vsys` contract.
+    let pk = unsafe { slice(public, public_len) };
+    guard(|| {
+        let Some(pk) = array::<32>(pk) else {
+            return LENGTH;
+        };
+        match ed25519_dalek::VerifyingKey::from_bytes(&pk) {
+            Err(_) => AUTH,
+            Ok(key) if key.is_weak() => WEAK,
+            Ok(_) => OK,
+        }
+    })
+}
+
 // ---------------------------------------------------------------------------
 // ML-KEM-768 (FIPS 203), libcrux.
 
@@ -1139,6 +1160,10 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
         ("vcr_ed25519_public", vcr_ed25519_public as *const u8),
         ("vcr_ed25519_sign", vcr_ed25519_sign as *const u8),
         ("vcr_ed25519_verify", vcr_ed25519_verify as *const u8),
+        (
+            "vcr_ed25519_check_public",
+            vcr_ed25519_check_public as *const u8,
+        ),
         (
             "vcr_mlkem768_isa_available",
             vcr_mlkem768_isa_available as *const u8,

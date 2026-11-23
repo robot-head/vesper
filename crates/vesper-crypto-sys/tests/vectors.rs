@@ -494,6 +494,13 @@ fn ed25519_rfc8032_test_1() {
             vcr_ed25519_verify(id.as_ptr(), 32, [].as_ptr(), 0, sig.as_ptr(), 64),
             AUTH
         );
+        assert_eq!(vcr_ed25519_check_public(pk.as_ptr(), 32), OK);
+        assert_eq!(vcr_ed25519_check_public(id.as_ptr(), 32), WEAK);
+        assert_eq!(vcr_ed25519_check_public(pk.as_ptr(), 31), LENGTH);
+        // y = 2 is not on the curve.
+        let mut off = [0u8; 32];
+        off[0] = 2;
+        assert_eq!(vcr_ed25519_check_public(off.as_ptr(), 32), AUTH);
     }
 }
 

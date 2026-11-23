@@ -15,7 +15,8 @@ use self::names::{
 use self::types::{
     EffNode,
     Types,
-    types_new
+    types_new,
+    TyKind
 };
 use self::world::{
     Adt,
@@ -31,7 +32,6 @@ use self::world::{
 };
 
 const NONE32: u32 = 4294967295;
-const K_FN: u8 = 3;
 
 pub struct Reader {
     pos: u64,
@@ -125,12 +125,12 @@ fn read_types(
     let count = r.word(in b);
     for i in 0..count {
         let kind = r.word(in b);
-        let id = if kind == 0 {
+        let id = if kind == TyKind::Lit {
             {
                 let neg = r.word(in b) != 0;
                 t.literal(neg, r.word(in b))
             }
-        } else if kind == 1 {
+        } else if kind == TyKind::Named {
             let name = sym(in nmap, r.word(in b));
             let n = r.word(in b);
             let mut args: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](n);
@@ -138,14 +138,14 @@ fn read_types(
                 args.push(u32_at(in tmap, r.word(in b)));
             }
             t.named(name, in args)
-        } else if kind == 2 {
+        } else if kind == TyKind::Tuple {
             let n = r.word(in b);
             let mut args: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](n);
             for j in 0..n {
                 args.push(u32_at(in tmap, r.word(in b)));
             }
             t.tuple(in args)
-        } else if kind == 3 {
+        } else if kind == TyKind::Fn {
             let n = r.word(in b);
             let mut args: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](n);
             let mut passes: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](n);
@@ -156,8 +156,8 @@ fn read_types(
             let result = u32_at(in tmap, r.word(in b));
             let row = read_row(inout r, in b, inout t, in nmap, in tmap);
             let mode = wrapping_u8(r.word(in b));
-            t.mk_with(K_FN, mode, 0, in args, in passes, result, row, 0)
-        } else if kind == 4 {
+            t.mk_with(TyKind::Fn, mode, 0, in args, in passes, result, row, 0)
+        } else if kind == TyKind::Row {
             let row = read_row(inout r, in b, inout t, in nmap, in tmap);
             t.row_type(row)
         } else {

@@ -24,6 +24,10 @@ vesper_hybrid(
                 "    ir_check_part(inout s.c, in part)\n": "    divergent_words(in part)\n",
             },
         },
+        "hybrid_doc": {
+            "edit_src": "modules/doc/src/lib.ves",
+            "edits": {"(sink page: ChunkSeq[u8]) -> ChunkSeq[u8] {\n    page\n": "(sink page: ChunkSeq[u8]) -> ChunkSeq[u8] {\n    let mut p = page;\n    p.push(32);\n    p\n"},
+        },
         # SH5 lane 10 (#1333): the shared-world module gets both
         # divergences (the bzl applies every edit in the divergent build).
         "hybrid_checks": {
@@ -76,8 +80,15 @@ vesper_hybrid(
             "//:check_data_package",
             "//:check_layout_package",
         ],
+        # The doc renderers (#1338) build on @vesper/doc and @vesper/serde.
+        "hybrid_doc": [
+            "//:doc_package",
+            "//crates/vesper-serde:port_package",
+        ],
         # The driver (#1335) builds on @vesper/driver and @vesper-std I/O.
+        # The command layers (#1336) add @vesper/driver-commands.
         "hybrid_driver": [
+            "//:driver_commands_package",
             "//:driver_package",
             "//:std_env_package",
             "//:std_fmt_package",
@@ -92,6 +103,12 @@ vesper_hybrid(
         # The codegen swap (#1275) emits through the Cranelift shim.
         "hybrid_codegen": [
             "//:codegen_base_package",
+            "//packages/vesper-cranelift:cranelift_package",
+        ],
+        # The call swap (#1281) emits through the same shim.
+        "hybrid_codegen_calls": [
+            "//:codegen_base_package",
+            "//:codegen_calls_emit_package",
             "//packages/vesper-cranelift:cranelift_package",
         ],
         # Vector and TiledSeq operations (#1285), through the shim too.
@@ -182,9 +199,11 @@ vesper_hybrid(
     },
     modules = {
         "hybrid_check_layout": "modules/check_layout",
+        "hybrid_doc": "modules/doc",
         "hybrid_driver": "modules/driver",
         "hybrid_checks": "modules/checks",
         "hybrid_codegen": "modules/codegen",
+        "hybrid_codegen_calls": "modules/codegen_calls",
         "hybrid_codegen_export": "modules/codegen_export",
         "hybrid_codegen_numeric": "modules/codegen_numeric",
         "hybrid_codegen_scalar": "modules/codegen_scalar",
@@ -250,7 +269,12 @@ vesper_hybrid(
             "//crates/vesper-warp-wheel:files",
         ],
     },
-    test_env = {"VESPER_DEFAULT_COMPILER": "vesper"},
+    # The doc differential (#1338) runs every 8th file and package here;
+    # Cargo (the Hybrid compiler workflow) runs them all.
+    test_env = {
+        "VESPER_DEFAULT_COMPILER": "vesper",
+        "VESPER_DOC_STRIDE": "8",
+    },
     # 51 libraries, each built by both compilers.
     test_timeouts = {"test/codegen_export": "long"},
     test_path_binaries = {
@@ -262,7 +286,15 @@ vesper_hybrid(
             ":bin/vesper-hybrid",
             "//:bin/vesper",
         ],
+        "test/doc": [
+            ":bin/vesper-hybrid",
+            "//:bin/vesper",
+        ],
         "test/driver": [
+            ":bin/vesper-hybrid",
+            "//:bin/vesper",
+        ],
+        "test/self_host_cli_commands": [
             ":bin/vesper-hybrid",
             "//:bin/vesper",
         ],

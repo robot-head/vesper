@@ -40,7 +40,9 @@ use @vesper/check-data::types::{
     Types,
     debug_type,
     default_type,
-    substitute
+    substitute,
+    TyKind,
+    TyPass
 };
 use @vesper/check-data::world::{
     World,
@@ -62,33 +64,13 @@ use @vesper/place-ir::{
     Program,
     read_program
 };
+use @vesper/place-ir::codes::{
+    Op,
+    Pat,
+    Term
+};
 
 const NONE32: u32 = 4294967295;
-
-// check-data's type kinds.
-const K_NAMED: u8 = 1;
-const K_TUPLE: u8 = 2;
-const K_INFER: u8 = 5;
-
-// Passes (check_words.rs `pass_word`).
-const P_SINK: u64 = 2;
-
-// Opcodes (ir_words.rs `OP_NAMES`).
-const OP_READ: u8 = 2;
-const OP_BIND: u8 = 3;
-const OP_WRITE: u8 = 4;
-const OP_CLOSURE: u8 = 14;
-const OP_HANDLE: u8 = 15;
-const OP_SEQ: u8 = 18;
-
-// Terminators.
-const TERM_MATCH: u8 = 3;
-
-// Pattern kinds.
-const PAT_BIND: u64 = 1;
-const PAT_LITERAL: u64 = 2;
-const PAT_TUPLE: u64 = 3;
-const PAT_CONSTRUCTOR: u64 = 4;
 
 // Patterns nested deeper than this are corrupt input (place-ir reads no
 // further).
@@ -345,19 +327,19 @@ fn walk_pattern(
             has_box: false
         };
     }
-    if kind == PAT_BIND {
+    if kind == Pat::Bind {
         names.push(n32(p.op(k)));
         k = inc(k);
-    } else if kind == PAT_LITERAL {
+    } else if kind == Pat::Literal {
         k = add(k, 3);
-    } else if kind == PAT_TUPLE {
+    } else if kind == Pat::Tuple {
         let n = p.op(k);
         k = inc(k);
         for i in 0..n {
             let c = walk_pattern(in p, inout k, inc(depth), in s, box_active, inout names);
             has_box = has_box || c.has_box;
         }
-    } else if kind == PAT_CONSTRUCTOR {
+    } else if kind == Pat::Constructor {
         let name = n32(p.op(k));
         let n = p.op(add(k, 2));
         k = add(k, 3);
@@ -403,7 +385,7 @@ pub struct Dec {
 
 fn named_is(in t: Types, ty: u32, name: u32, arity: u64) -> bool {
     let n = t.node(ty);
-    n.kind == K_NAMED && n.name == name && w(n.n) == arity
+    n.kind == TyKind::Named && n.name == name && w(n.n) == arity
 }
 
 impl Dec {
@@ -436,15 +418,15 @@ impl Dec {
             return true;
         }
         let n = self.c.types.node(ty);
-        if n.kind == K_NAMED && n.name == self.s.dyn_ && n.n == 1 {
+        if n.kind == TyKind::Named && n.name == self.s.dyn_ && n.n == 1 {
             return true;
         }
-        if n.kind == K_NAMED
+        if n.kind == TyKind::Named
             && n.n == 0
             && self.c.names.has_prefix(n.name, in "__dyn__".as_bytes()) {
             return true;
         }
-        if n.kind == K_TUPLE {
+        if n.kind == TyKind::Tuple {
             for i in 0..w(n.n) {
                 let a = self.c.types.arg(ty, i);
                 if self.drop_visit(a, unknown) {
@@ -453,7 +435,7 @@ impl Dec {
             }
             return false;
         }
-        if n.kind == K_NAMED {
+        if n.kind == TyKind::Named {
             let box_ = self.c.world.box_active && n.name == self.s.box_ && n.n == 1;
             let tiled = n.name == self.s.tiled_seq && (n.n == 1 || n.n == 2);
             let is_handle = n.name == self.s.region_box || n.name == self.s.watermark;
@@ -497,7 +479,7 @@ impl Dec {
             let last = self.seen.pop();
             return found;
         }
-        n.kind == K_INFER && unknown
+        n.kind == TyKind::Infer && unknown
     }
 
     fn needs_drop(inout self, ty: u32) -> bool {
@@ -516,7 +498,7 @@ impl Dec {
             return true;
         }
         let n = self.c.types.node(ty);
-        if n.kind == K_TUPLE {
+        if n.kind == TyKind::Tuple {
             for i in 0..w(n.n) {
                 if self.holds_visit(self.c.types.arg(ty, i)) {
                     return true;
@@ -524,7 +506,7 @@ impl Dec {
             }
             return false;
         }
-        if n.kind != K_NAMED {
+        if n.kind != TyKind::Named {
             return false;
         }
         for i in 0..w(n.n) {
@@ -568,7 +550,7 @@ impl Dec {
 
     fn is_adt(in self, ty: u32) -> bool {
         let n = self.c.types.node(ty);
-        n.kind == K_NAMED && self.c.world.lookup(n.name) != NONE32
+        n.kind == TyKind::Named && self.c.world.lookup(n.name) != NONE32
     }
 
     // `seq::elem`: the element type of `ChunkSeq[T]` or `Slice[T]`, or
@@ -585,7 +567,7 @@ impl Dec {
     fn stride(inout self, ty0: u32) -> u64 {
         let ty = default_type(inout self.c.types, ty0);
         let n = self.c.types.node(ty);
-        if n.kind == K_NAMED && n.n == 0 {
+        if n.kind == TyKind::Named && n.n == 0 {
             if n.name == self.s.u8_ || n.name == self.s.bool_ {
                 return 1;
             }
@@ -681,14 +663,14 @@ impl Dec {
     fn borrowed_scrutinees(inout self, in p: Program, f: FnRow) {
         for bi in 0..f.bc {
             let b = p.block(add(f.b0, bi));
-            if b.term == TERM_MATCH {
+            if b.term == Term::Match {
                 let v = p.op(b.ta);
                 self.vtouch(v);
                 let ok = self.matched.try_set(v, true);
             }
         }
         for i in 0..self.fn_.param_names.len() {
-            if u64_at(in self.fn_.param_passes, i) != P_SINK {
+            if u64_at(in self.fn_.param_passes, i) != TyPass::Sink {
                 let n = u32_at(in self.fn_.param_names, i);
                 self.touch(n);
                 let ok = self.named.try_set(w(n), true);
@@ -702,7 +684,7 @@ impl Dec {
                 for ii in 0..b.ic {
                     let inst = p.inst(add(b.i0, ii));
                     let d = w(inst.dest);
-                    if inst.op == OP_READ {
+                    if inst.op == Op::Read {
                         let root = n32(p.op(inst.a));
                         if bool_at(in self.matched, d)
                             && bool_at(in self.named, w(root))
@@ -710,7 +692,7 @@ impl Dec {
                             let ok = self.borrowed.try_set(d, true);
                             changed = true;
                         }
-                    } else if inst.op == OP_SEQ {
+                    } else if inst.op == Op::Seq {
                         let l = seq_label(in p, inst);
                         if (l == self.s.try_get || l == self.s.hoisted_try_get)
                             && bool_at(in self.matched, d)
@@ -718,7 +700,7 @@ impl Dec {
                             let ok = self.borrowed.try_set(d, true);
                             changed = true;
                         }
-                    } else if inst.op == OP_BIND {
+                    } else if inst.op == Op::Bind {
                         let v = p.op(inst.a);
                         if bool_at(in self.borrowed, v) {
                             self.scratch.clear();
@@ -806,7 +788,7 @@ impl Dec {
             } else {
                 D_NONE
             };
-            if kind == D_NONE || self.fn_.captured(name) || (param && pass != P_SINK) {
+            if kind == D_NONE || self.fn_.captured(name) || (param && pass != TyPass::Sink) {
                 continue;
             }
             self.set_plan(name, kind);
@@ -821,11 +803,11 @@ impl Dec {
             for ii in 0..b.ic {
                 let inst = p.inst(add(b.i0, ii));
                 let a = inst.a;
-                if inst.op == OP_READ {
+                if inst.op == Op::Read {
                     let root = n32(p.op(a));
                     let path = p.op(inc(a));
                     let pass = p.op(add(a, 2));
-                    if pass == P_SINK {
+                    if pass == TyPass::Sink {
                         let partial = p.path(path).n != 0
                             && self.may_need_drop(inst.ty)
                             && !self.owned_or_fields(root);
@@ -833,7 +815,7 @@ impl Dec {
                             self.refuse(root);
                         }
                     }
-                } else if inst.op == OP_WRITE {
+                } else if inst.op == Op::Write {
                     let place = n32(p.op(a));
                     let op = n32(p.op(inc(a)));
                     let root = self.place_root(place);
@@ -844,7 +826,7 @@ impl Dec {
                             self.refuse(root);
                         }
                     }
-                } else if inst.op == OP_BIND {
+                } else if inst.op == Op::Bind {
                     let v = p.op(a);
                     self.scratch.clear();
                     let mut k = inc(a);
@@ -861,15 +843,15 @@ impl Dec {
                         false
                     } else {
                         let di = p.inst(w(d));
-                        di.op == OP_READ && p.op(add(di.a, 2)) != P_SINK
+                        di.op == Op::Read && p.op(add(di.a, 2)) != TyPass::Sink
                     };
                     if borrow_read
                         || bool_at(in self.borrowed, v)
-                        || (info.kind != PAT_BIND && info.has_box) {
+                        || (info.kind != Pat::Bind && info.has_box) {
                         self.refuse_scratch();
                     }
-                } else if inst.op == OP_CLOSURE || inst.op == OP_HANDLE {
-                    let is_handle = inst.op == OP_HANDLE;
+                } else if inst.op == Op::Closure || inst.op == Op::Handle {
+                    let is_handle = inst.op == Op::Handle;
                     // handle: has, state value; then the pool entry
                     let mut k = if is_handle {
                         add(a, 3)
@@ -897,7 +879,7 @@ impl Dec {
                     }
                 }
             }
-            if b.term == TERM_MATCH {
+            if b.term == Term::Match {
                 // value, n, n x (pattern, block)
                 let mut k = inc(b.ta);
                 let n = p.op(k);
@@ -1292,7 +1274,7 @@ impl Dec {
             let b = p.block(add(f.b0, bi));
             for ii in 0..b.ic {
                 let inst = p.inst(add(b.i0, ii));
-                if inst.op != OP_SEQ {
+                if inst.op != Op::Seq {
                     continue;
                 }
                 let l = seq_label(in p, inst);

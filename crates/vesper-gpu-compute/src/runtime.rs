@@ -13,19 +13,19 @@
 //!   [`Buffer::write`]), in Vesper, under the queue lock, after waiting for
 //!   the last submission that bound the buffer.
 //!
-//! WGSL is still compiled with naga here ([`crate::shader`]); the Vesper
-//! library takes the SPIR-V words.
+//! Kernels are SPIR-V modules ([`crate::shader`]); the Vesper library reads
+//! their binding interface and creates the pipelines.
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::error::GpuError;
-use crate::shader::{self, ShaderError};
+use crate::shader;
 
 #[allow(unsafe_code)]
 #[rustfmt::skip]
 #[path = "../port/binding.rs"]
-mod binding;
+pub(crate) mod binding;
 use binding::{Buf, Dev, GpuErr, Kern, Rec};
 
 /// Number of [`Submission`]s dropped without [`Submission::wait`] in this
@@ -106,7 +106,7 @@ const CALLS: [&str; 23] = [
     "vkDeviceWaitIdle",
 ];
 /// `s_*` details.
-const SHAPES: [&str; 8] = [
+const SHAPES: [&str; 31] = [
     "?",
     "zero-sized buffer",
     "buffer range",
@@ -115,14 +115,59 @@ const SHAPES: [&str; 8] = [
     "dispatch with zero workgroups",
     "descriptor pool",
     "kernel entry point contains NUL",
+    // The tensor kernels' checks (`TensorShape` in vesper/src/lib.ves).
+    "matmul a",
+    "matmul w",
+    "matmul out",
+    "rms_norm epsilon",
+    "rms_norm x",
+    "rms_norm out",
+    "rms_norm weight",
+    "rope needs whole heads of even width",
+    "rope x",
+    "rope frequencies",
+    "swiglu gate",
+    "swiglu up",
+    "kv_write k",
+    "kv_write v",
+    "kv_write position beyond the page table",
+    "kv_write keys",
+    "kv_write values",
+    "attention over an empty sequence",
+    "attention q",
+    "attention out",
+    "attention page table too short",
+    "attention keys",
+    "attention values",
 ];
 /// `l_*` details.
-const LIMITS: [&str; 5] = [
+const LIMITS: [&str; 25] = [
     "?",
     "buffer size",
     "kernel storage bindings",
     "kernel immediate bytes",
     "workgroup count",
+    // The tensor kernels' checks (`TensorLimit`).
+    "operand size",
+    "m * k",
+    "n * k",
+    "m * n",
+    "rows * n",
+    "attention head_dim",
+    "attention tokens",
+    "attention width",
+    "m",
+    "n",
+    "k",
+    "matmul rows",
+    "rms_norm rows",
+    "len",
+    "head_dim",
+    "position",
+    "kv_dim",
+    "query_heads",
+    "kv_heads",
+    "tokens",
 ];
 
 fn api_parts(v: u64) -> (u32, u32, u32) {
@@ -209,6 +254,11 @@ fn gpu_error(e: GpuErr, wanted: Option<&str>) -> GpuError {
         4 => GpuError::Limit(pick(&LIMITS, e.detail)),
         _ => GpuError::Unsupported("no host-visible coherent memory type for storage buffers"),
     }
+}
+
+/// A Vesper `GpuErr` from another module of the crate as the crate's error.
+pub(crate) fn port_error(e: GpuErr) -> GpuError {
+    gpu_error(e, None)
 }
 
 /// Converts a Vesper failure. Arithmetic or indexing failures inside the
@@ -346,41 +396,69 @@ impl Context {
         Ok(buffer)
     }
 
-    /// Compiles `wgsl` with naga and creates a compute pipeline for `entry`.
-    /// The module must bind exactly `bindings` storage buffers at
-    /// `@group(0) @binding(0..bindings)` and may declare one
-    /// `var<immediate>` block of at most `immediate_bytes` bytes.
-    pub fn kernel(
+    /// Creates a compute pipeline for one of the crate's own kernels: the
+    /// committed SPIR-V that `tests/spirv.rs` checks is naga's validated
+    /// output for the WGSL beside it.
+    pub(crate) fn kernel(
         &self,
-        wgsl: &str,
+        spirv: &[u8],
         entry: &str,
         bindings: u32,
         immediate_bytes: u32,
     ) -> Result<Kernel, GpuError> {
-        let compiled = shader::compile_wgsl(wgsl, entry)?;
-        if compiled.storage_bindings != bindings {
-            return Err(GpuError::Shader(ShaderError::Interface(format!(
-                "kernel {entry} binds {} storage buffers, expected {bindings}",
-                compiled.storage_bindings
-            ))));
-        }
-        if compiled.immediate_bytes > immediate_bytes {
-            return Err(GpuError::Shader(ShaderError::Interface(format!(
-                "kernel {entry} declares {} immediate bytes, expected at most {immediate_bytes}",
-                compiled.immediate_bytes
-            ))));
-        }
-        let spirv: &[u8] = bytemuck::cast_slice(&compiled.spirv);
-        let kern = vesper!(
-            binding::kernel_new(
-                self.inner.dev,
-                spirv,
-                entry,
-                u64::from(bindings),
-                u64::from(immediate_bytes)
-            ),
-            KernelNewError
-        )?;
+        self.create_kernel(spirv, entry, bindings, immediate_bytes)
+    }
+
+    /// Creates a compute pipeline for entry point `entry` of the SPIR-V 1.3
+    /// module `spirv` (little-endian words, as `include_bytes!` of a `.spv`
+    /// file gives them). The module must bind exactly `bindings` storage
+    /// buffers at set 0, bindings `0..bindings`, and may declare one
+    /// immediate block of at most `immediate_bytes` bytes
+    /// ([`shader::interface`] reads what it declares, and a module that
+    /// differs is a typed error). The device is created with
+    /// `robustBufferAccess`, so a valid module without bounds checks of its
+    /// own still cannot reach memory outside the buffers it binds.
+    ///
+    /// # Safety
+    ///
+    /// `spirv` must be a valid SPIR-V module for this device, as
+    /// `vkCreateShaderModule` requires: it passes `spirv-val
+    /// --target-env vulkan1.2`, and it declares only capabilities and
+    /// extensions the device supports. The interface check reads
+    /// declarations only, not function bodies. naga's SPIR-V output for
+    /// WGSL it has validated meets this (`tests/support/wgsl.rs`).
+    #[allow(unsafe_code)]
+    pub unsafe fn kernel_from_spirv(
+        &self,
+        spirv: &[u8],
+        entry: &str,
+        bindings: u32,
+        immediate_bytes: u32,
+    ) -> Result<Kernel, GpuError> {
+        self.create_kernel(spirv, entry, bindings, immediate_bytes)
+    }
+
+    fn create_kernel(
+        &self,
+        spirv: &[u8],
+        entry: &str,
+        bindings: u32,
+        immediate_bytes: u32,
+    ) -> Result<Kernel, GpuError> {
+        let kern = binding::kernel_new(
+            self.inner.dev,
+            spirv,
+            entry,
+            u64::from(bindings),
+            u64::from(immediate_bytes),
+        )
+        .map_err(|e| match e {
+            binding::KernelNewError::GpuErr(g) if g.kind == 6 => {
+                GpuError::Shader(shader::shader_error(g.detail, g.code, entry))
+            }
+            binding::KernelNewError::GpuErr(g) => gpu_error(g, None),
+            other => panic!("the Vesper GPU runtime failed internally: {other:?}"),
+        })?;
         Ok(Kernel {
             inner: Arc::new(KernelInner {
                 ctx: self.inner.clone(),
@@ -388,6 +466,48 @@ impl Context {
                 name: entry.to_owned(),
             }),
         })
+    }
+
+    /// Runs a whole submission made by another Vesper-driven module of the
+    /// crate (`run` records, submits and waits inside the Vesper library).
+    /// Under the queue lock, once every submission that bound `buffers` has
+    /// completed, `run` gets the device and the last issued timeline value,
+    /// and returns the value it signalled (0 if it submitted nothing). That
+    /// value becomes the issued value and every buffer's busy value, so the
+    /// runtime's ordering holds as for [`Recording::submit`], also when
+    /// `run` fails after submitting (it returns that value with its error).
+    /// Every buffer
+    /// and kernel `run` uses must be one of `buffers` or owned by the caller
+    /// for the whole call, and `run` must not return before its submission
+    /// completed.
+    pub(crate) fn submit_with<R>(
+        &self,
+        buffers: &[&Buffer],
+        run: impl FnOnce(Dev, u64) -> (u64, Result<R, GpuError>),
+    ) -> Result<R, GpuError> {
+        let inner = &self.inner;
+        if buffers.iter().any(|b| !b.same_device(self)) {
+            return Err(GpuError::ForeignObject);
+        }
+        let _queue = inner
+            .queue
+            .lock()
+            .map_err(|_| GpuError::Shape("queue mutex poisoned"))?;
+        for b in buffers {
+            let value = b.inner.busy_until.load(Ordering::Acquire);
+            if value != 0 {
+                binding::wait_value(inner.dev, value).map_err(wait_error)?;
+            }
+        }
+        let previous = inner.issued.load(Ordering::Acquire);
+        let (value, result) = run(inner.dev, previous);
+        if value != 0 {
+            for b in buffers {
+                b.inner.busy_until.fetch_max(value, Ordering::AcqRel);
+            }
+            inner.issued.store(value, Ordering::Release);
+        }
+        result
     }
 
     /// Starts recording a command buffer.
@@ -494,6 +614,12 @@ impl Buffer {
         Ok(out)
     }
 
+    /// The Vesper library's handle, for the crate's other Vesper-driven
+    /// modules (the buffer stays owned by this `Buffer`).
+    pub(crate) fn raw(&self) -> Buf {
+        self.inner.buf
+    }
+
     fn same_device(&self, ctx: &Context) -> bool {
         Arc::ptr_eq(&self.inner.ctx, &ctx.inner)
     }
@@ -533,6 +659,12 @@ impl std::fmt::Debug for Kernel {
 impl Kernel {
     pub fn name(&self) -> &str {
         &self.inner.name
+    }
+
+    /// The Vesper library's handle, for the crate's other Vesper-driven
+    /// modules (the handle stays owned by this kernel).
+    pub(crate) fn raw(&self) -> Kern {
+        self.inner.kern
     }
 }
 
@@ -624,6 +756,51 @@ impl<'a> Recording<'a> {
             .buffers
             .extend(buffers.iter().map(|b| b.inner.clone()));
         self.dispatches += 1;
+        Ok(())
+    }
+
+    /// Records `dispatches` dispatches made by another Vesper-driven module
+    /// of the crate: `record` gets the device, the command buffer and `dry`,
+    /// and may bind only `kernels` and `buffers`, which the recording then
+    /// keeps alive as [`Recording::dispatch`] does. It is called first with
+    /// `dry` set, to make every check of its own without recording, so its
+    /// shape errors come before an ownership error as they did in Rust; then
+    /// once to record.
+    pub(crate) fn record_with(
+        &mut self,
+        kernels: &[&'a Kernel],
+        buffers: &[&'a Buffer],
+        dispatches: usize,
+        record: impl Fn(Dev, &mut Rec, bool) -> Result<(), GpuError>,
+    ) -> Result<(), GpuError> {
+        let dev = self.ctx.inner.dev;
+        if let Some(rec) = self.commands.rec.as_mut() {
+            // A dry run records nothing, so nothing is retained on failure.
+            record(dev, rec, true)?;
+        }
+        if kernels
+            .iter()
+            .any(|k| !Arc::ptr_eq(&k.inner.ctx, &self.ctx.inner))
+            || buffers.iter().any(|b| !b.same_device(self.ctx))
+        {
+            return Err(GpuError::ForeignObject);
+        }
+        let rec = self
+            .commands
+            .rec
+            .as_mut()
+            .ok_or(GpuError::Shape("recording already submitted"))?;
+        let recorded = record(dev, rec, false);
+        // Kept even when `record` failed part way: the command buffer may
+        // already name them.
+        self.commands
+            .kernels
+            .extend(kernels.iter().map(|k| k.inner.clone()));
+        self.commands
+            .buffers
+            .extend(buffers.iter().map(|b| b.inner.clone()));
+        recorded?;
+        self.dispatches += dispatches;
         Ok(())
     }
 

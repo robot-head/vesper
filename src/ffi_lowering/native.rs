@@ -6,7 +6,9 @@
 use super::*;
 use crate::ffi_lowering::{self as ffi, Handler};
 use cranelift_module::DataDescription;
-use vesper_ffi::sys::{AbiType, Access, ParameterType, Pointee, PointerAccess, Scalar, ValueType};
+use vesper_ffi::sys::{
+    AbiType, Access, Float, ParameterType, Pointee, PointerAccess, Scalar, ValueType,
+};
 use vesper_ffi::{Endian, FieldKind, WireLayout};
 
 /// `xor ecx, ecx; rdpkru; ret` — returns PKRU in eax (System V).
@@ -55,9 +57,27 @@ fn c_type(bits: u8) -> ir::Type {
         _ => types::I64,
     }
 }
+/// C functions the runtimes import, with their word signatures (`n`
+/// 64-bit integer parameters, and a 64-bit result or none).
+fn runtime_import(symbol: &str) -> Option<(usize, bool)> {
+    Some(match symbol {
+        "write" | "memcpy" | "memmove" | "memset" => (3, true),
+        "malloc" => (1, true),
+        "calloc" | "realloc" => (2, true),
+        "free" | "exit" => (1, false),
+        _ => return None,
+    })
+}
+fn float_type(f: Float) -> ir::Type {
+    match f {
+        Float::F32 => types::F32,
+        Float::F64 => types::F64,
+    }
+}
 fn abi_param(t: AbiType, pointer: ir::Type) -> AbiParam {
     match t {
         AbiType::Pointer => AbiParam::new(pointer),
+        AbiType::Float(f) => AbiParam::new(float_type(f)),
         AbiType::Integer(s) => {
             let p = AbiParam::new(c_type(s.bits()));
             if s.bits() == 64 {
@@ -281,14 +301,28 @@ impl<M: Module> Codegen<'_, '_, M> {
         }
         // SH4 swap point (#1287): the `ffi` hook may emit this call
         // (`codegen_swap::ffi`); none is installed by default. A callback
-        // type's call is not offered: the steps name a symbol. Foreign
-        // memory viewed in place (pinned buffers and mappings) is lowered
-        // here only, so the hook is not offered such calls either.
+        // type's call is not offered: the steps name a symbol. Nor is a
+        // call passing or returning a float: the steps carry integer words.
+        // Nor, yet, is one taking a `CStrList` or returning a C string (SH6
+        // lane 13; the Vesper emitter mirrors them later).
+        // Foreign memory viewed in place (pinned buffers and mappings) is
+        // lowered here only, so the hook is not offered such calls either.
+        let abi = plan.function.abi();
+        let floats = abi
+            .parameters
+            .iter()
+            .chain(abi.result.as_ref())
+            .any(|t| matches!(t, AbiType::Float(_)));
         if !plan.function.is_indirect()
-            && !descriptors
-                .iter()
-                .any(|d| matches!(d.ty(), ParameterType::Function { .. }))
+            && !floats
+            && !descriptors.iter().any(|d| {
+                matches!(
+                    d.ty(),
+                    ParameterType::Function { .. } | ParameterType::CStrList
+                )
+            })
             && !plan.function.uses_foreign_memory()
+            && *plan.function.result() != ValueType::CStr
             && let Some(v) = self.foreign_perform_swapped(&plan, &signature, args)?
         {
             return Ok(v);
@@ -300,6 +334,8 @@ impl<M: Module> Codegen<'_, '_, M> {
         // Per `CStr` argument: its malloc'd buffer, and the offset of its
         // first NUL byte (or -1).
         let mut strings: Vec<(ir::Value, ir::Value)> = vec![];
+        // The malloc'd bytes and pointer array of each `CStrList` argument.
+        let mut lists: Vec<ir::Value> = vec![];
         // The sequence headers of mappings consumed by this call, freed
         // after it, and the length argument of a mapping result.
         let mut released = vec![];
@@ -323,6 +359,14 @@ impl<M: Module> Codegen<'_, '_, M> {
                 let (data, len) = self.foreign_view(&arg.expr, 1)?;
                 strings.push(self.foreign_cstr(data, len)?);
                 c_args.push(strings.last().expect("just pushed").0);
+                continue;
+            }
+            if let ParameterType::CStrList = descriptor.ty() {
+                let (data, len) = self.foreign_view(&arg.expr, 1)?;
+                let (buffer, array) = self.foreign_cstr_list(data, len)?;
+                lists.push(buffer);
+                lists.push(array);
+                c_args.push(array);
                 continue;
             }
             if let ParameterType::Slice { element, .. } = descriptor.ty()
@@ -372,7 +416,9 @@ impl<M: Module> Codegen<'_, '_, M> {
                     c_args.push(len);
                 }
                 ParameterType::Handle { .. } => c_args.push(self.foreign_word(source)),
-                ParameterType::CStr => unreachable!("C strings are lowered above"),
+                ParameterType::CStr | ParameterType::CStrList => {
+                    unreachable!("C strings are lowered above")
+                }
                 ParameterType::Function { .. } => unreachable!("functions are lowered above"),
                 ParameterType::Pointer {
                     pointee,
@@ -428,7 +474,6 @@ impl<M: Module> Codegen<'_, '_, M> {
         // The length word is taken before any variadic padding shifts the
         // argument positions.
         let length = mapping_length.map(|i| c_args[i]);
-        let abi = plan.function.abi();
         // Apple arm64 passes variadic arguments on the stack: zero words
         // fill the remaining argument registers first (`sys::Variadic`).
         if let Some(v) = abi.variadic {
@@ -459,13 +504,7 @@ impl<M: Module> Codegen<'_, '_, M> {
             }
             Callee::Direct(self.foreign_code(plan.function.symbol(), &sig, &code)?)
         } else {
-            let symbol = plan.function.link_symbol();
-            self.foreign_symbol_free(symbol, Linkage::Import)?;
-            let callee = self
-                .m
-                .declare_function(symbol, Linkage::Import, &sig)
-                .map_err(|e| format!("foreign symbol '{symbol}': {e}"))?;
-            Callee::Direct(self.m.declare_func_in_func(callee, self.b.func))
+            self.foreign_import(plan.function.link_symbol(), sig)?
         };
         // A `CStr` argument holding a NUL byte refuses the whole call:
         // `Err(ForeignInvalid { raw: offset })` of the first such argument.
@@ -581,7 +620,7 @@ impl<M: Module> Codegen<'_, '_, M> {
             self.b.seal_block(join);
             value = slot;
         }
-        for (buffer, _) in strings {
+        for buffer in strings.into_iter().map(|(b, _)| b).chain(lists) {
             let free = self.foreign_libc("free", 1, false)?;
             self.b.ins().call(free, &[buffer]);
         }
@@ -653,6 +692,126 @@ impl<M: Module> Codegen<'_, '_, M> {
         self.b.switch_to_block(join);
         self.b.seal_block(join);
         Ok(self.b.block_params(join)[0])
+    }
+    /// The `ChunkSeq[u8]` copy of the C string at `address` (its bytes
+    /// before the NUL), or 0 when `address` is `NULL`. The copy has room
+    /// for one byte more, so it is never the shared empty header.
+    fn foreign_cstr_copy(&mut self, address: ir::Value) -> Result<ir::Value, String> {
+        let copy = self.b.create_block();
+        let join = self.b.create_block();
+        self.b.append_block_param(join, types::I64);
+        let zero = self.b.ins().iconst(types::I64, 0);
+        let null = self.b.ins().icmp_imm(IntCC::Equal, address, 0);
+        self.branch(null, join, &[ir::BlockArg::Value(zero)], copy, &[]);
+        self.b.switch_to_block(copy);
+        self.b.seal_block(copy);
+        let strlen = self.foreign_libc("strlen", 1, true)?;
+        let memcpy = self.foreign_libc("memcpy", 3, true)?;
+        let call = self.b.ins().call(strlen, &[address]);
+        let len = self.b.inst_results(call)[0];
+        let cap = self.b.ins().iadd_imm(len, 1);
+        let stride = self.b.ins().iconst(types::I64, 1);
+        let header = self.seq_make(cap, stride)?;
+        let flags = ir::MemFlags::new();
+        let data = self.b.ins().load(types::I64, flags, header, 16);
+        self.b.ins().call(memcpy, &[data, address, len]);
+        self.b.ins().store(flags, len, header, 0);
+        self.jump(join, &[ir::BlockArg::Value(header)]);
+        self.b.switch_to_block(join);
+        self.b.seal_block(join);
+        Ok(self.b.block_params(join)[0])
+    }
+    /// A `CStrList` argument: a NUL-terminated `malloc` copy of the `len`
+    /// bytes at `data`, and a `malloc`'d NULL-terminated array pointing at
+    /// each string in it (every string ends at a NUL; a last one without
+    /// its NUL is ended by the copy's terminator).
+    fn foreign_cstr_list(
+        &mut self,
+        data: ir::Value,
+        len: ir::Value,
+    ) -> Result<(ir::Value, ir::Value), String> {
+        let malloc = self.foreign_libc("malloc", 1, true)?;
+        let memcpy = self.foreign_libc("memcpy", 3, true)?;
+        let flags = ir::MemFlags::new();
+        let size = self.b.ins().iadd_imm(len, 1);
+        let call = self.b.ins().call(malloc, &[size]);
+        let buffer = self.b.inst_results(call)[0];
+        self.b
+            .ins()
+            .trapz(buffer, ir::TrapCode::unwrap_user(ffi::CSTR_ALLOC_TRAP));
+        self.b.ins().call(memcpy, &[buffer, data, len]);
+        let end = self.b.ins().iadd(buffer, len);
+        let nul = self.b.ins().iconst(types::I8, 0);
+        self.b.ins().store(flags, nul, end, 0);
+        // Count the strings first, so the array holds just them and the NULL.
+        let count = self.cstr_list_walk(buffer, len, None)?;
+        let slots = self.b.ins().iadd_imm(count, 1);
+        let bytes = self.b.ins().imul_imm(slots, 8);
+        let call = self.b.ins().call(malloc, &[bytes]);
+        let array = self.b.inst_results(call)[0];
+        self.b
+            .ins()
+            .trapz(array, ir::TrapCode::unwrap_user(ffi::CSTR_ALLOC_TRAP));
+        let count = self.cstr_list_walk(buffer, len, Some(array))?;
+        let slot = self.b.ins().imul_imm(count, 8);
+        let slot = self.b.ins().iadd(array, slot);
+        let zero = self.b.ins().iconst(types::I64, 0);
+        self.b.ins().store(flags, zero, slot, 0);
+        Ok((buffer, array))
+    }
+    /// Walks the strings of a `CStrList` copy (`len` bytes at `buffer`,
+    /// NUL at `buffer + len`) with `memchr`, one step per string, storing
+    /// each start into `array` when given; returns the number of strings.
+    fn cstr_list_walk(
+        &mut self,
+        buffer: ir::Value,
+        len: ir::Value,
+        array: Option<ir::Value>,
+    ) -> Result<ir::Value, String> {
+        let memchr = self.foreign_libc("memchr", 3, true)?;
+        let walk = self.b.create_block();
+        let body = self.b.create_block();
+        let done = self.b.create_block();
+        for _ in 0..2 {
+            self.b.append_block_param(walk, types::I64);
+            self.b.append_block_param(body, types::I64);
+        }
+        self.b.append_block_param(done, types::I64);
+        let zero = self.b.ins().iconst(types::I64, 0);
+        self.jump(walk, &[ir::BlockArg::Value(zero); 2]);
+        self.b.switch_to_block(walk);
+        let (start, k) = {
+            let p = self.b.block_params(walk);
+            (p[0], p[1])
+        };
+        let more = self.b.ins().icmp(IntCC::UnsignedLessThan, start, len);
+        let args = [start, k].map(ir::BlockArg::Value);
+        self.branch(more, body, &args, done, &[ir::BlockArg::Value(k)]);
+        self.b.switch_to_block(body);
+        self.b.seal_block(body);
+        let (start, k) = {
+            let p = self.b.block_params(body);
+            (p[0], p[1])
+        };
+        let here = self.b.ins().iadd(buffer, start);
+        if let Some(array) = array {
+            let slot = self.b.ins().imul_imm(k, 8);
+            let slot = self.b.ins().iadd(array, slot);
+            self.b.ins().store(ir::MemFlags::new(), here, slot, 0);
+        }
+        // The copy's terminator at `len` bounds every search.
+        let rest = self.b.ins().isub(len, start);
+        let rest = self.b.ins().iadd_imm(rest, 1);
+        let call = self.b.ins().call(memchr, &[here, zero, rest]);
+        let found = self.b.inst_results(call)[0];
+        let end = self.b.ins().isub(found, buffer);
+        let next = self.b.ins().iadd_imm(end, 1);
+        let k = self.b.ins().iadd_imm(k, 1);
+        self.jump(walk, &[next, k].map(ir::BlockArg::Value));
+        self.b.seal_block(walk);
+        self.b.switch_to_block(done);
+        self.b.seal_block(done);
+        Ok(self.b.block_params(done)[0])
     }
     /// A NUL-terminated `malloc` copy of `len` bytes at `data`, and the
     /// offset of the first NUL byte among them (-1 when there is none).
@@ -771,6 +930,10 @@ impl<M: Module> Codegen<'_, '_, M> {
                 let word = self.foreign_word(source);
                 Ok(self.foreign_narrow(word, s.bits()))
             }
+            ValueType::Float(f) => Ok(match source {
+                Source::Scalar(v) => v,
+                Source::Memory(p) => self.b.ins().load(float_type(*f), ir::MemFlags::new(), p, 0),
+            }),
             ValueType::Bool => {
                 let word = self.foreign_word(source);
                 Ok(self.b.ins().ireduce(types::I8, word))
@@ -793,9 +956,8 @@ impl<M: Module> Codegen<'_, '_, M> {
             ValueType::Unit
             | ValueType::Address { .. }
             | ValueType::Handle { .. }
-            | ValueType::NonNullHandle { .. } => {
-                Err("foreign parameter type has no native lowering".into())
-            }
+            | ValueType::NonNullHandle { .. }
+            | ValueType::CStr => Err("foreign parameter type has no native lowering".into()),
         }
     }
     /// For a nullable parameter, the `Some` payload and its presence flag.
@@ -1137,6 +1299,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                 let v = raw()?;
                 Ok(self.foreign_widen(v, s.bits(), s.signed()))
             }
+            ValueType::Float(_) => raw().map_err(Into::into),
             ValueType::Bool => {
                 let v = raw()?;
                 let word = self.b.ins().uextend(types::I64, v);
@@ -1160,6 +1323,22 @@ impl<M: Module> Codegen<'_, '_, M> {
                 self.foreign_validated(ty, valid, index, word)
             }
             ValueType::Address { .. } => Err("foreign address results have no lowering".into()),
+            ValueType::CStr => {
+                let word = raw()?;
+                let copy = self.foreign_cstr_copy(word)?;
+                let layout = Layout::of(self.world, ty)?;
+                let (some, fields) = layout.variant("Some").ok_or("Option lacks Some")?;
+                let offset = fields.first().ok_or("Some lacks a payload")?.offset;
+                let (none, _) = layout.variant("None").ok_or("Option lacks None")?;
+                let present = self.b.ins().icmp_imm(IntCC::NotEqual, word, 0);
+                let ptr = self.alloc(layout.size);
+                let some = self.b.ins().iconst(types::I64, some as i64);
+                let none = self.b.ins().iconst(types::I64, none as i64);
+                let tag = self.b.ins().select(present, some, none);
+                self.b.ins().store(ir::MemFlags::new(), tag, ptr, 0);
+                self.b.ins().store(ir::MemFlags::new(), copy, ptr, offset);
+                Ok(ptr)
+            }
             // The library promised a handle: `NULL` breaks the promise.
             ValueType::NonNullHandle { .. } => {
                 let word = raw()?;
@@ -1276,6 +1455,73 @@ impl<M: Module> Codegen<'_, '_, M> {
     /// A foreign import must not bind to a Vesper function (for example an
     /// entry exported under the same name), and a generated helper must not
     /// bind to a foreign import: both are errors, never a silent rebinding.
+    /// The callee of a direct foreign call of `symbol` with C signature
+    /// `sig`. A symbol the runtime also imports (`write`, `malloc`, ...)
+    /// is declared with the runtime's word signature, whichever declares
+    /// it first, and called through its address with `sig`, so the two
+    /// declarations never clash.
+    fn foreign_import(&mut self, symbol: &str, sig: ir::Signature) -> Result<Callee, String> {
+        let shared = match self.m.declarations().get_name(symbol) {
+            Some(cranelift_module::FuncOrDataId::Func(id)) => {
+                let decl = self.m.declarations().get_function_decl(id);
+                if decl.linkage != Linkage::Import {
+                    return Err(format!(
+                        "foreign symbol '{symbol}' collides with another symbol of this object; rename the Vesper function or the .vsys import"
+                    ));
+                }
+                (decl.signature != sig).then_some(id)
+            }
+            Some(_) => {
+                return Err(format!(
+                    "foreign symbol '{symbol}' collides with another symbol of this object; rename the Vesper function or the .vsys import"
+                ));
+            }
+            None => match runtime_import(symbol) {
+                Some((params, result)) => {
+                    let mut word = self.m.make_signature();
+                    word.params
+                        .extend((0..params).map(|_| AbiParam::new(types::I64)));
+                    if result {
+                        word.returns.push(AbiParam::new(types::I64));
+                    }
+                    if word == sig {
+                        None
+                    } else {
+                        Some(
+                            self.m
+                                .declare_function(symbol, Linkage::Import, &word)
+                                .map_err(|e| format!("foreign symbol '{symbol}': {e}"))?,
+                        )
+                    }
+                }
+                None => None,
+            },
+        };
+        if let Some(id) = shared {
+            let f = self.m.declare_func_in_func(id, self.b.func);
+            let pointer = self.m.target_config().pointer_type();
+            let address = self.b.ins().func_addr(pointer, f);
+            return Ok(Callee::Indirect(self.b.import_signature(sig), address));
+        }
+        let callee = self
+            .m
+            .declare_function(symbol, Linkage::Import, &sig)
+            .map_err(|e| format!("foreign symbol '{symbol}': {e}"))?;
+        Ok(Callee::Direct(
+            self.m.declare_func_in_func(callee, self.b.func),
+        ))
+    }
+    /// Whether `symbol` may be declared with `sig` itself (the `ffi` hook
+    /// is offered only such calls).
+    fn foreign_import_direct(&self, symbol: &str, sig: &ir::Signature) -> bool {
+        match self.m.declarations().get_name(symbol) {
+            Some(cranelift_module::FuncOrDataId::Func(id)) => {
+                self.m.declarations().get_function_decl(id).signature == *sig
+            }
+            Some(_) => true,
+            None => runtime_import(symbol).is_none(),
+        }
+    }
     fn foreign_symbol_free(&self, name: &str, linkage: Linkage) -> Result<bool, String> {
         let declarations = self.m.declarations();
         match declarations.get_name(name) {
@@ -1367,6 +1613,8 @@ fn value_words(v: &ValueType, out: &mut Vec<u64>) {
         ValueType::Address { .. } => out.push(4),
         ValueType::Handle { nullable, .. } => out.extend([5, u64::from(*nullable)]),
         ValueType::NonNullHandle { .. } => out.push(6),
+        ValueType::Float(_) => unreachable!("calls with floats are not offered to the hook"),
+        ValueType::CStr => unreachable!("calls returning C strings are not offered to the hook"),
     }
 }
 fn integer_word(int: &vesper_ffi::Integer) -> u64 {
@@ -1531,9 +1779,23 @@ impl<M: Module> Codegen<'_, '_, M> {
         if crate::codegen_swap::hook(crate::codegen_swap::Family::Ffi).is_none() {
             return Ok(None);
         }
+        // A symbol shared with the runtime's imports is called through its
+        // address (`foreign_import`), which the steps do not express, and
         // Apple arm64 pads a variadic call's argument registers with zero
-        // words (`sys::Variadic`), which the steps do not carry.
-        if plan.function.abi().variadic.is_some_and(|v| v.padding > 0) {
+        // words (`sys::Variadic`), which they do not carry either.
+        let abi = plan.function.abi();
+        if abi.variadic.is_some_and(|v| v.padding > 0) {
+            return Ok(None);
+        }
+        let pointer = self.m.target_config().pointer_type();
+        let mut sig = self.m.make_signature();
+        for t in &abi.parameters {
+            sig.params.push(abi_param(*t, pointer));
+        }
+        if let Some(t) = abi.result {
+            sig.returns.push(abi_param(t, pointer));
+        }
+        if !self.foreign_import_direct(plan.function.link_symbol(), &sig) {
             return Ok(None);
         }
         let descriptors = plan.function.parameters();
@@ -1604,7 +1866,8 @@ impl<M: Module> Codegen<'_, '_, M> {
                                 ValueType::Unit
                                 | ValueType::Address { .. }
                                 | ValueType::Handle { .. }
-                                | ValueType::NonNullHandle { .. } => {
+                                | ValueType::NonNullHandle { .. }
+                                | ValueType::CStr => {
                                     return Err(
                                         "foreign parameter type has no native lowering".into()
                                     );
@@ -1619,6 +1882,9 @@ impl<M: Module> Codegen<'_, '_, M> {
                             return Err("pinned buffers are not offered to the ffi hook".into());
                         }
                         ParameterType::CStr => unreachable!("C strings are lowered above"),
+                        ParameterType::CStrList => {
+                            unreachable!("calls taking C string lists are not offered to the hook")
+                        }
                         ParameterType::Function { .. } => {
                             unreachable!("calls taking functions are not offered to the hook")
                         }
@@ -1724,15 +1990,6 @@ impl<M: Module> Codegen<'_, '_, M> {
             if s == 2 {
                 strings.push((r[3 + k + m], r[4 + k + m]));
             }
-        }
-        let abi = plan.function.abi();
-        let pointer = self.m.target_config().pointer_type();
-        let mut sig = self.m.make_signature();
-        for t in &abi.parameters {
-            sig.params.push(abi_param(*t, pointer));
-        }
-        if let Some(t) = abi.result {
-            sig.returns.push(abi_param(t, pointer));
         }
         let symbol = plan.function.link_symbol();
         self.foreign_symbol_free(symbol, Linkage::Import)?;
@@ -1885,6 +2142,10 @@ impl<M: Module> Codegen<'_, '_, M> {
         };
         match v {
             ValueType::Unit | ValueType::Scalar(_) => Ok(()),
+            ValueType::Float(_) => unreachable!("calls with floats are not offered to the hook"),
+            ValueType::CStr => {
+                unreachable!("calls returning C strings are not offered to the hook")
+            }
             ValueType::Bool | ValueType::Enum(_) => validated(self.world, out),
             ValueType::Address { .. } => Err("foreign address results have no lowering".into()),
             ValueType::NonNullHandle { .. } => {

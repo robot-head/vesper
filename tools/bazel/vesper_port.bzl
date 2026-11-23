@@ -43,14 +43,18 @@ VesperPackageInfo = provider(
 )
 
 def _vesper_package_impl(ctx):
-    own = [ctx.file.manifest] + ctx.files.srcs + ctx.files.vsys
+    own = [ctx.file.manifest] + ctx.files.srcs + ctx.files.vsys + ctx.files.objects
     prefix = ctx.file.manifest.dirname + "/src/"
+    wasi_prefix = ctx.file.manifest.dirname + "/src-wasip2/"
     for f in ctx.files.srcs:
-        if not f.path.startswith(prefix):
-            fail("%s is not under %s" % (f.path, prefix))
+        if not f.path.startswith(prefix) and not f.path.startswith(wasi_prefix):
+            fail("%s is outside the package source directories" % f.path)
     for f in ctx.files.vsys:
         if f.dirname != ctx.file.manifest.dirname:
             fail("%s is not next to %s" % (f.path, ctx.file.manifest.path))
+    for f in ctx.files.objects:
+        if not f.path.startswith(ctx.file.manifest.dirname + "/"):
+            fail("%s is not under %s" % (f.path, ctx.file.manifest.dirname))
     files = depset(own, transitive = [d[VesperPackageInfo].files for d in ctx.attr.deps])
     return [
         VesperPackageInfo(manifest = ctx.file.manifest, srcs = own, files = files),
@@ -70,6 +74,10 @@ vesper_package = rule(
         "vsys": attr.label_list(
             allow_files = [".vsys"],
             doc = "The `.vsys` libraries the manifest's `[package] vsys` field names (next to it).",
+        ),
+        "objects": attr.label_list(
+            allow_files = True,
+            doc = "The files the manifest's `[package] objects` field names, with the headers and sources they include (under the package).",
         ),
     },
 )

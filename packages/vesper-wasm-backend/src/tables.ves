@@ -1,0 +1,150 @@
+// Constant tables in the port: a use of a constant aggregate
+// (`$table$NAME`, src/arrays.rs) as read-only static data.
+
+use @vesper/check-data::util::{
+    add,
+    inc,
+    u64_at,
+    u8_at,
+    w
+};
+use self::err::{
+    WErr,
+    werr
+};
+use self::lower::{
+    L,
+    set64
+};
+
+// Consts do not cross modules: src/err.ves, src/lower.ves.
+const K_UNSUPPORTED: u8 = 0;
+const U_EXTERNAL_FUNCTION: u8 = 11;
+const U_OPERATION: u8 = 13;
+const IR_CONST: u8 = 0;
+const IR_TUPLE: u8 = 7;
+const LIT_STRING: u64 = 3;
+
+impl L {
+    // A use of a constant aggregate (`$table$NAME`, src/arrays.rs): the
+    // constant function `NAME` builds a tuple of literals, which becomes
+    // read-only static data of 8-byte words, the layout of a tuple value.
+    // Uses only read it (`TABLE[i]`), as natively.
+    pub fn table_call(inout self, dv: u64, callee: u32) -> bool eff [Fail[WErr]] {
+        let n = self.cx.names.size(callee);
+        let mut prefix = ChunkSeq::new[u8]();
+        prefix.extend(in "$table$".as_bytes());
+        if n <= prefix.len() {
+            return false;
+        }
+        for k in 0..prefix.len() {
+            if self.cx.names.byte(callee, k) != u8_at(in prefix, k) {
+                return false;
+            }
+        }
+        let cached = u64_at(in self.tables, w(callee));
+        let at = if cached != 0 {
+            wrapping_sub(cached, 1)
+        } else {
+            let mut rest = ChunkSeq::new[u8]();
+            for k in prefix.len()..n {
+                rest.push(self.cx.names.byte(callee, k));
+            }
+            let name = self.cx.intern(in rest);
+            let words = self.table_words(name);
+            let mut bytes = ChunkSeq::new[u8]();
+            for i in 0..words.len() {
+                let x = u64_at(in words, i);
+                for k in 0..8 {
+                    bytes
+                        .push(
+                            wrapping_u8(wrapping_shr_u64(x, wrapping_u32(wrapping_mul(k, 8))) & 255)
+                        );
+                }
+            }
+            let a = self.b.data(in bytes);
+            set64(inout self.tables, callee, inc(a));
+            a
+        };
+        let d = self.dest(dv);
+        self.e.code.u64_const(at);
+        self.e.code.set(d);
+        true
+    }
+
+    // The words of the tuple that constant function `name` returns: one
+    // block of literals and one tuple of them, else refused (site 246).
+    fn table_words(inout self, name: u32) -> ChunkSeq[u64] eff [Fail[WErr]] {
+        let fi = self.cx.ir.find(name);
+        if fi == 0 {
+            Fail::raise(werr(K_UNSUPPORTED, U_EXTERNAL_FUNCTION, 246));
+        }
+        let row = self.cx.ir.p.function(wrapping_sub(fi, 1));
+        if row.bc != 1 {
+            Fail::raise(werr(K_UNSUPPORTED, U_OPERATION, 246));
+        }
+        let blk = self.cx.ir.p.block(row.b0);
+        // (dest, value) of each literal, and the last tuple's words
+        let mut dests = ChunkSeq::new[u64]();
+        let mut vals = ChunkSeq::new[u64]();
+        let mut out = ChunkSeq::new[u64]();
+        for j in 0..blk.ic {
+            let ins = self.cx.ir.p.inst(add(blk.i0, j));
+            let a = ins.a;
+            if ins.op == IR_CONST {
+                let lk = self.cx.ir.word(a);
+                if lk == LIT_STRING {
+                    Fail::raise(werr(K_UNSUPPORTED, U_OPERATION, 246));
+                }
+                let c = self
+                    .constant_bits(lk, self.cx.ir.word(inc(a)), self.cx.ir.word(add(a, 2)), ins.ty);
+                dests.push(widen_u64(ins.dest));
+                vals.push(wrapping_u64(c));
+            } else if ins.op == IR_TUPLE {
+                out.clear();
+                let k = self.cx.ir.word(a);
+                for i in 0..k {
+                    let v = self.cx.ir.word(add(inc(a), i));
+                    let mut found = false;
+                    for q in 0..dests.len() {
+                        if u64_at(in dests, q) == v {
+                            out.push(u64_at(in vals, q));
+                            found = true;
+                        }
+                    }
+                    if !found {
+                        Fail::raise(werr(K_UNSUPPORTED, U_OPERATION, 246));
+                    }
+                }
+            } else {
+                Fail::raise(werr(K_UNSUPPORTED, U_OPERATION, 246));
+            }
+        }
+        if out.len() == 0 {
+            Fail::raise(werr(K_UNSUPPORTED, U_OPERATION, 246));
+        }
+        out
+    }
+
+    // A host capability of the plan (`plan.host`): the WASI libraries.
+    pub fn host_effect(in self, name: u32) -> bool {
+        let code: u8 = if name == self.cx.s.ffi_env {
+            3
+        } else if name == self.cx.s.ffi_fs {
+            4
+        } else {
+            return false;
+        };
+        for k in 0..self.plan.host.len() {
+            match self.plan.host.try_get(k) {
+                Option::Some(x) => {
+                    if x == code {
+                        return true;
+                    }
+                },
+                Option::None => {},
+            }
+        }
+        false
+    }
+}

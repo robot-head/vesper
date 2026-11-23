@@ -220,3 +220,17 @@ the PR).
   extensions.
 - Part 4: the hybrid `ffi_lowering` module and its `ffi` hook install, the
   full suite and the SH4 scoreboard row.
+
+## Rewrite foreign-memory, callback, and float coverage (`#1287`)
+
+Removed the `uses_foreign_memory()` / `mapping().is_some()` descriptor filter
+in `tests/self_host_ffi_lowering_rewrite.rs` (now unblocked by PR `#1578`)
+and added `tests/foreign_memory.rs`, `tests/ffi_callbacks.rs`, and
+`tests/ffi_floats.rs` to `FFI_TESTS`:
+
+- `cargo +1.100.0 test --locked --release -p vesper --test self_host_ffi_lowering_rewrite -- --nocapture`:
+  `2 passed, 0 failed` (`141 cases, 61583 lines; 0 differ`, `1237 files,
+  4019183 lines; 0 differ`), covering `tests/fixtures/foreign_memory/xsk.ves`
+  (`Pinned[T]`, `linear extern mapping M[T]`), callbacks, and floats.
+- `CHECK_HARNESS_SPEED=1 cargo +1.100.0 test --locked --release -p vesper --test self_host_ffi_lowering_rewrite rewriter_speed -- --ignored --nocapture`:
+  ABBA `rust 116.1368ms vesper 42.1751ms (0.36x)`.

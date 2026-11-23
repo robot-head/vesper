@@ -1,0 +1,915 @@
+// Module cose of @vesper/aegis (see lib.ves): COSE_Sign1 parsing and
+// header validation (matching coset 0.3.8 / RFC 8152), Sig_structure TBS
+// construction, and COSE_Key EC2 P-384 decoding for Arm CCA RAKs.
+use self::{
+    AErr,
+    AtErr
+};
+use self::cbor::{
+    I64_MAX,
+    K_ARRAY,
+    K_BYTES,
+    K_MAP,
+    K_NEED_SCRATCH,
+    K_NINT,
+    K_NULL,
+    K_TAG,
+    K_TEXT,
+    K_UINT,
+    R_MALFORMED,
+    SCRATCH_BIT,
+    Scratch,
+    arg,
+    cbor_err,
+    cur_len,
+    decode_span,
+    decode_whole_at,
+    i64_bits,
+    int_nodes_eq,
+    is_i64,
+    kind,
+    materialize_bytes,
+    put_str,
+    set_len,
+    skip,
+    str_byte,
+    str_len,
+    str_nodes_eq,
+    text_eq_s
+};
+use self::reader::put;
+
+const COSE_SIGN1_TAG: u64 = 18;
+const MAX_HEADER_DEPTH: u64 = 64;
+const P384_COORD_LEN: u64 = 48;
+const P384_SEC1_LEN: u64 = 97;
+const SEC1_UNCOMPRESSED: u64 = 4;
+
+// Common header parameter labels.
+const H_ALG: u64 = 1;
+const H_CRIT: u64 = 2;
+const H_CONTENT_TYPE: u64 = 3;
+const H_KID: u64 = 4;
+const H_IV: u64 = 5;
+const H_PARTIAL_IV: u64 = 6;
+const H_COUNTER_SIG: u64 = 7;
+const H_CORIM_META: u64 = 8;
+
+// Common COSE_Key parameter labels.
+const KP_KTY: u64 = 1;
+const KP_KID: u64 = 2;
+const KP_ALG: u64 = 3;
+const KP_KEY_OPS: u64 = 4;
+const KP_BASE_IV: u64 = 5;
+const KTY_EC2: u64 = 2;
+const CRV_P384: u64 = 2;
+
+// Negative integer node args (`-1 - arg` = `i64`):
+// -1 -> 0 (Crv), -2 -> 1 (X), -3 -> 2 (Y).
+const EC2_CRV_NARG: u64 = 0;
+const EC2_X_NARG: u64 = 1;
+const EC2_Y_NARG: u64 = 2;
+
+// Algorithm encodings in output words.
+pub const ALG_NONE: u64 = 0;
+pub const ALG_ASSIGNED: u64 = 1;
+pub const ALG_PRIVATE: u64 = 2;
+pub const ALG_TEXT: u64 = 3;
+
+// Field/reason codes for CoseSign1 errors (src/port.rs).
+pub const F_COSE_SIGN1: u64 = 33;
+pub const R_MALFORMED_COSE_SIGN1: u64 = 25;
+pub const R_MALFORMED_SIGNED_COSE_SIGN1: u64 = 31;
+
+// AttestError::UnexpectedKeyType (kind 5) what indices in src/port.rs.
+const KEY_WHAT_BAD_RAK: u64 = 0;
+const KEY_WHAT_NOT_EC2: u64 = 1;
+const KEY_WHAT_NOT_P384: u64 = 2;
+const KEY_WHAT_COORD: u64 = 3;
+
+fn key_err(what: u64) -> Never eff [Fail[AtErr]] {
+    Fail::raise(
+        AtErr {
+            kind: 5,
+            what: what,
+            reason: 0,
+            index: 0,
+            extra: 0,
+            off: 0,
+            len: 0
+        }
+    )
+}
+
+// Whether `node` is a CBOR label (`Int(i64)` or `Text`).
+fn is_label(in n: Slice[u64], node: u64) -> bool {
+    is_i64(in n, node) || kind(in n, node) == K_TEXT
+}
+
+// Whether two CBOR label nodes represent the same label.
+fn label_eq(in b: Slice[u8], in s: Slice[u8], in n: Slice[u64], a: u64, c: u64) -> bool {
+    let ka = kind(in n, a);
+    let kc = kind(in n, c);
+    if ka == K_TEXT || kc == K_TEXT {
+        return ka == K_TEXT && kc == K_TEXT && str_nodes_eq(in b, in s, in n, a, c);
+    }
+    int_nodes_eq(in n, a, c)
+}
+
+// IANA Algorithm check (coset::iana::Algorithm + private use < -65536).
+// Returns 0 = invalid, 1 = assigned, 2 = private.
+fn classify_alg_int(k: u64, a: u64) -> u64 {
+    if k == K_UINT {
+        if a <= 7 || (a >= 10 && a <= 15) || (a >= 24 && a <= 26) || (a >= 30 && a <= 34) {
+            1
+        } else {
+            0
+        }
+    } else if k == K_NINT && a <= I64_MAX {
+        // value = -1 - a
+        if a > 65535 {
+            2
+        } else if a == 65534
+            || (a >= 256 && a <= 259)
+            || (a >= 24 && a <= 46)
+            || (a >= 9 && a <= 17)
+            || (a >= 2 && a <= 7) {
+            1
+        } else {
+            0
+        }
+    } else {
+        0
+    }
+}
+
+// IANA HeaderParameter check (coset::iana::HeaderParameter).
+fn valid_header_param_int(k: u64, a: u64) -> bool {
+    if k != K_UINT {
+        return false;
+    }
+    a <= 7 || a == 9 || a == 10 || (a >= 32 && a <= 35) || a == 256 || a == 257
+}
+
+// IANA CoapContentFormat check (coset::iana::CoapContentFormat).
+fn valid_content_format_int(k: u64, a: u64) -> bool {
+    if k != K_UINT {
+        return false;
+    }
+    a == 0
+        || (a >= 16 && a <= 18)
+        || (a >= 40 && a <= 42)
+        || a == 47
+        || (a >= 50 && a <= 52)
+        || (a >= 60 && a <= 63)
+        || (a >= 96 && a <= 98)
+        || a == 101
+        || a == 102
+        || (a >= 110 && a <= 115)
+        || a == 256
+        || a == 271
+        || (a >= 280 && a <= 287)
+        || a == 310
+        || a == 311
+        || a == 320
+        || a == 322
+        || a == 432
+        || a == 10000
+        || a == 10001
+        || a == 11050
+        || a == 11060
+        || (a >= 11542 && a <= 11544)
+}
+
+// IANA KeyType check (0..=6).
+fn valid_kty_int(k: u64, a: u64) -> bool {
+    k == K_UINT && a <= 6
+}
+
+// IANA KeyOperation check (1..=10).
+fn valid_key_op_int(k: u64, a: u64) -> bool {
+    k == K_UINT && a >= 1 && a <= 10
+}
+
+// Whether bytes `(b0, b1, b2)` starting at UTF-8 codepoint `idx` in a
+// string are a Rust `char::is_whitespace` character, and its UTF-8 length.
+fn ws_prefix_len(in b: Slice[u8], in s: Slice[u8], in n: Slice[u64], node: u64) -> u64 {
+    let total = str_len(in n, node);
+    if total == 0 {
+        return 0;
+    }
+    let b0 = node_byte(in b, in s, in n, node, 0);
+    if b0 == 32 || (b0 >= 9 && b0 <= 13) {
+        return 1;
+    }
+    if b0 == 194 && total >= 2 {
+        let b1 = node_byte(in b, in s, in n, node, 1);
+        if b1 == 133 || b1 == 160 {
+            return 2;
+        }
+    }
+    if total >= 3 {
+        let b1 = node_byte(in b, in s, in n, node, 1);
+        let b2 = node_byte(in b, in s, in n, node, 2);
+        if b0 == 225 && b1 == 154 && b2 == 128 {
+            return 3;
+        }
+        if b0 == 226
+            && b1 == 128
+            && ((b2 >= 128 && b2 <= 138) || b2 == 168 || b2 == 169 || b2 == 175) {
+            return 3;
+        }
+        if b0 == 226 && b1 == 129 && b2 == 159 {
+            return 3;
+        }
+        if b0 == 227 && b1 == 128 && b2 == 128 {
+            return 3;
+        }
+    }
+    0
+}
+
+fn ws_suffix(in b: Slice[u8], in s: Slice[u8], in n: Slice[u64], node: u64) -> bool {
+    let total = str_len(in n, node);
+    if total == 0 {
+        return false;
+    }
+    let last = node_byte(in b, in s, in n, node, wrapping_sub(total, 1));
+    if last == 32 || (last >= 9 && last <= 13) {
+        return true;
+    }
+    if total >= 2 {
+        let prev1 = node_byte(in b, in s, in n, node, wrapping_sub(total, 2));
+        if prev1 == 194 && (last == 133 || last == 160) {
+            return true;
+        }
+    }
+    if total >= 3 {
+        let prev2 = node_byte(in b, in s, in n, node, wrapping_sub(total, 3));
+        let prev1 = node_byte(in b, in s, in n, node, wrapping_sub(total, 2));
+        if prev2 == 225 && prev1 == 154 && last == 128 {
+            return true;
+        }
+        if prev2 == 226
+            && prev1 == 128
+            && ((last >= 128 && last <= 138) || last == 168 || last == 169 || last == 175) {
+            return true;
+        }
+        if prev2 == 226 && prev1 == 129 && last == 159 {
+            return true;
+        }
+        if prev2 == 227 && prev1 == 128 && last == 128 {
+            return true;
+        }
+    }
+    false
+}
+
+// Read logical byte `pos` of string `node`.
+fn node_byte(in b: Slice[u8], in s: Slice[u8], in n: Slice[u64], node: u64, pos: u64) -> u64 {
+    let k = arg(in n, node);
+    let mut rem = pos;
+    let mut c = 0;
+    loop {
+        if c == k {
+            return 0;
+        }
+        let slot = wrapping_add(node, wrapping_add(2, wrapping_mul(c, 2)));
+        let off = kind(in n, slot);
+        let len = arg(in n, slot);
+        if rem < len {
+            return str_byte(in b, in s, off, rem);
+        }
+        rem = wrapping_sub(rem, len);
+        c = wrapping_add(c, 1);
+    }
+}
+
+// Validate a text content-type string (non-empty, trimmed, exactly one '/').
+fn valid_content_type_text(in b: Slice[u8], in s: Slice[u8], in n: Slice[u64], node: u64) -> bool {
+    let total = str_len(in n, node);
+    if total == 0 {
+        return false;
+    }
+    if ws_prefix_len(in b, in s, in n, node) != 0 || ws_suffix(in b, in s, in n, node) {
+        return false;
+    }
+    let k = arg(in n, node);
+    let mut slashes = 0;
+    let mut c = 0;
+    loop {
+        if c == k {
+            return slashes == 1;
+        }
+        let slot = wrapping_add(node, wrapping_add(2, wrapping_mul(c, 2)));
+        let off = kind(in n, slot);
+        let len = arg(in n, slot);
+        let mut j = 0;
+        loop {
+            if j == len {
+                break;
+            }
+            if str_byte(in b, in s, off, j) == 47 {
+                slashes = wrapping_add(slashes, 1);
+                if slashes > 1 {
+                    return false;
+                }
+            }
+            j = wrapping_add(j, 1);
+        }
+        c = wrapping_add(c, 1);
+    }
+}
+
+copy struct HeaderInfo {
+    alg_kind: u64,
+    alg_val: u64,
+    has_ct_text: u64,
+    ct_text_node: u64,
+    has_meta: u64,
+    meta_is_bytes: u64,
+    meta_node: u64
+}
+
+fn empty_header_info() -> HeaderInfo {
+    HeaderInfo {
+        alg_kind: ALG_NONE,
+        alg_val: 0,
+        has_ct_text: 0,
+        ct_text_node: 0,
+        has_meta: 0,
+        meta_is_bytes: 0,
+        meta_node: 0
+    }
+}
+
+fn validate_alg_node(in n: Slice[u64], val: u64, field: u64, reason: u64)
+    -> (u64, u64) eff [Fail[AErr]] {
+    let k = kind(in n, val);
+    if k == K_TEXT {
+        return (ALG_TEXT, 0);
+    }
+    let a = arg(in n, val);
+    let cls = classify_alg_int(k, a);
+    if cls == 0 {
+        cbor_err(field, reason);
+    }
+    (cls, i64_bits(in n, val))
+}
+
+// Validate a `COSE_Signature` node `[protected_bstr, unprotected_map, sig_bstr]`.
+fn validate_cose_signature(
+    in b: Slice[u8],
+    inout s: Slice[u8],
+    inout sc: Scratch,
+    inout n: Slice[u64],
+    inout st: Slice[u64],
+    node: u64,
+    depth: u64,
+    field: u64,
+    reason: u64
+) -> Unit eff [Fail[AErr]] {
+    if depth >= MAX_HEADER_DEPTH {
+        cbor_err(field, reason);
+    }
+    if kind(in n, node) != K_ARRAY || arg(in n, node) != 3 {
+        cbor_err(field, reason);
+    }
+    let e0 = wrapping_add(node, 2);
+    let e1 = skip(in n, e0);
+    let e2 = skip(in n, e1);
+    if kind(in n, e2) != K_BYTES {
+        cbor_err(field, reason);
+    }
+    validate_header(
+        in b,
+        inout s,
+        inout sc,
+        inout n,
+        inout st,
+        e1,
+        wrapping_add(depth, 1),
+        field,
+        reason
+    );
+    if kind(in n, e0) != K_BYTES {
+        cbor_err(field, reason);
+    }
+    if str_len(in n, e0) > 0 {
+        let sp = materialize_bytes(in b, inout s, inout sc, in n, e0);
+        let saved = cur_len(in n);
+        let root = decode_span(in b, in s, sp, field, inout n, inout st);
+        validate_header(
+            in b,
+            inout s,
+            inout sc,
+            inout n,
+            inout st,
+            root,
+            wrapping_add(depth, 1),
+            field,
+            reason
+        );
+        set_len(inout n, saved);
+    }
+}
+
+// Validate a COSE `Header` map at `map_node`.
+fn validate_header(
+    in b: Slice[u8],
+    inout s: Slice[u8],
+    inout sc: Scratch,
+    inout n: Slice[u64],
+    inout st: Slice[u64],
+    map_node: u64,
+    depth: u64,
+    field: u64,
+    reason: u64
+) -> HeaderInfo eff [Fail[AErr]] {
+    if depth >= MAX_HEADER_DEPTH {
+        cbor_err(field, reason);
+    }
+    if kind(in n, map_node) != K_MAP {
+        cbor_err(field, reason);
+    }
+    let count = arg(in n, map_node);
+    let mut info = empty_header_info();
+    let mut has_iv = false;
+    let mut has_piv = false;
+    let mut e = 0;
+    let mut at = wrapping_add(map_node, 2);
+    loop {
+        if e == count {
+            return info;
+        }
+        if !is_label(in n, at) {
+            cbor_err(field, reason);
+        }
+        // Check duplicate label against earlier entries.
+        let mut j = 0;
+        let mut prev = wrapping_add(map_node, 2);
+        loop {
+            if j == e {
+                break;
+            }
+            if label_eq(in b, in s, in n, prev, at) {
+                cbor_err(field, reason);
+            }
+            prev = skip(in n, skip(in n, prev));
+            j = wrapping_add(j, 1);
+        }
+        let val = skip(in n, at);
+        let next_at = skip(in n, val);
+        if kind(in n, at) == K_UINT {
+            let lbl = arg(in n, at);
+            if lbl == H_ALG {
+                let (ak, av) = validate_alg_node(in n, val, field, reason);
+                info.alg_kind = ak;
+                info.alg_val = av;
+            } else if lbl == H_CRIT {
+                if kind(in n, val) != K_ARRAY || arg(in n, val) == 0 {
+                    cbor_err(field, reason);
+                }
+                let cc = arg(in n, val);
+                let mut ci = 0;
+                let mut cat = wrapping_add(val, 2);
+                loop {
+                    if ci == cc {
+                        break;
+                    }
+                    let ck = kind(in n, cat);
+                    if ck != K_TEXT && !valid_header_param_int(ck, arg(in n, cat)) {
+                        cbor_err(field, reason);
+                    }
+                    cat = skip(in n, cat);
+                    ci = wrapping_add(ci, 1);
+                }
+            } else if lbl == H_CONTENT_TYPE {
+                let vk = kind(in n, val);
+                if vk == K_TEXT {
+                    if !valid_content_type_text(in b, in s, in n, val) {
+                        cbor_err(field, reason);
+                    }
+                    info.has_ct_text = 1;
+                    info.ct_text_node = val;
+                } else if valid_content_format_int(vk, arg(in n, val)) {
+                    info.has_ct_text = 0;
+                    info.ct_text_node = 0;
+                } else {
+                    cbor_err(field, reason);
+                }
+            } else if lbl == H_KID {
+                if kind(in n, val) != K_BYTES || str_len(in n, val) == 0 {
+                    cbor_err(field, reason);
+                }
+            } else if lbl == H_IV {
+                if kind(in n, val) != K_BYTES || str_len(in n, val) == 0 {
+                    cbor_err(field, reason);
+                }
+                has_iv = true;
+            } else if lbl == H_PARTIAL_IV {
+                if kind(in n, val) != K_BYTES || str_len(in n, val) == 0 {
+                    cbor_err(field, reason);
+                }
+                has_piv = true;
+            } else if lbl == H_COUNTER_SIG {
+                if kind(in n, val) != K_ARRAY || arg(in n, val) == 0 {
+                    cbor_err(field, reason);
+                }
+                let f0 = wrapping_add(val, 2);
+                let fk = kind(in n, f0);
+                if fk == K_BYTES {
+                    validate_cose_signature(
+                        in b,
+                        inout s,
+                        inout sc,
+                        inout n,
+                        inout st,
+                        val,
+                        wrapping_add(depth, 1),
+                        field,
+                        reason
+                    );
+                } else if fk == K_ARRAY {
+                    let scount = arg(in n, val);
+                    let mut si = 0;
+                    let mut sat = f0;
+                    loop {
+                        if si == scount {
+                            break;
+                        }
+                        validate_cose_signature(
+                            in b,
+                            inout s,
+                            inout sc,
+                            inout n,
+                            inout st,
+                            sat,
+                            wrapping_add(depth, 1),
+                            field,
+                            reason
+                        );
+                        sat = skip(in n, sat);
+                        si = wrapping_add(si, 1);
+                    }
+                } else {
+                    cbor_err(field, reason);
+                }
+            } else if lbl == H_CORIM_META {
+                info.has_meta = 1;
+                info.meta_is_bytes = if kind(in n, val) == K_BYTES {
+                    1
+                } else {
+                    0
+                };
+                info.meta_node = val;
+            }
+            if has_iv && has_piv {
+                cbor_err(field, reason);
+            }
+        }
+        at = next_at;
+        e = wrapping_add(e, 1);
+    }
+}
+
+// Parse a tagged `COSE_Sign1` node at `root` in `n` and emit to `w`:
+// `protected_raw` (str), `alg_kind`, `alg_val`, `has_ct_text`,
+// [`ct_text`], `has_meta`, `meta_is_bytes`, [`corim_meta`], `has_payload`,
+// [`payload`], `signature`.
+// Returns `(has_payload, payload_node)`.
+pub fn parse_sign1_node(
+    in b: Slice[u8],
+    inout s: Slice[u8],
+    inout sc: Scratch,
+    inout n: Slice[u64],
+    inout st: Slice[u64],
+    root: u64,
+    field: u64,
+    reason: u64,
+    inout w: Slice[u64]
+) -> (u64, u64) eff [Fail[AErr]] {
+    if kind(in n, root) != K_TAG || arg(in n, root) != COSE_SIGN1_TAG {
+        cbor_err(field, reason);
+    }
+    let arr = wrapping_add(root, 2);
+    if kind(in n, arr) != K_ARRAY || arg(in n, arr) != 4 {
+        cbor_err(field, reason);
+    }
+    let e0 = wrapping_add(arr, 2);
+    let e1 = skip(in n, e0);
+    let e2 = skip(in n, e1);
+    let e3 = skip(in n, e2);
+    if kind(in n, e3) != K_BYTES {
+        cbor_err(field, reason);
+    }
+    let pk = kind(in n, e2);
+    if pk != K_BYTES && pk != K_NULL {
+        cbor_err(field, reason);
+    }
+    let has_payload = if pk == K_BYTES {
+        1
+    } else {
+        0
+    };
+    handle Fail[AErr] in {
+        validate_header(in b, inout s, inout sc, inout n, inout st, e1, 0, field, reason);
+        if kind(in n, e0) != K_BYTES {
+            cbor_err(field, reason);
+        }
+        put_str(in n, e0, inout w);
+        if str_len(in n, e0) == 0 {
+            put(inout w, ALG_NONE);
+            put(inout w, 0);
+            put(inout w, 0);
+            put(inout w, 0);
+            put(inout w, 0);
+        } else {
+            let sp = materialize_bytes(in b, inout s, inout sc, in n, e0);
+            let saved = cur_len(in n);
+            let prot_root = decode_span(in b, in s, sp, field, inout n, inout st);
+            let info = validate_header(
+                in b,
+                inout s,
+                inout sc,
+                inout n,
+                inout st,
+                prot_root,
+                0,
+                field,
+                reason
+            );
+            put(inout w, info.alg_kind);
+            put(inout w, info.alg_val);
+            put(inout w, info.has_ct_text);
+            if info.has_ct_text == 1 {
+                put_str(in n, info.ct_text_node, inout w);
+            }
+            put(inout w, info.has_meta);
+            put(inout w, info.meta_is_bytes);
+            if info.has_meta == 1 && info.meta_is_bytes == 1 {
+                put_str(in n, info.meta_node, inout w);
+            }
+            set_len(inout n, saved);
+        }
+    } with {
+        return v => v,
+        raise(e, k) => if e.kind == K_NEED_SCRATCH {
+            Fail::raise(e)
+        } else {
+            cbor_err(field, reason)
+        }
+    };
+    put(inout w, has_payload);
+    if has_payload == 1 {
+        put_str(in n, e2, inout w);
+    }
+    put_str(in n, e3, inout w);
+    (has_payload, e2)
+}
+
+// Parse a whole tagged `COSE_Sign1` input `b`.
+pub fn sign1_parse(
+    in b: Slice[u8],
+    inout s: Slice[u8],
+    inout n: Slice[u64],
+    inout st: Slice[u64],
+    inout w: Slice[u64],
+    field: u64,
+    reason: u64
+) -> Unit eff [Fail[AErr]] {
+    let mut sc = Scratch {
+        pos: 0
+    };
+    handle Fail[AErr] in {
+        decode_whole_at(in b, 0, field, inout n, inout st);
+    } with {
+        return v => v,
+        raise(e, k) => cbor_err(field, reason)
+    };
+    parse_sign1_node(in b, inout s, inout sc, inout n, inout st, 1, field, reason, inout w);
+}
+
+// Write CBOR major-2 (bstr) or major-4 (array) header for `len` at `at`,
+// returning the new cursor.
+fn write_cbor_head(inout out: Slice[u8], at: u64, major: u64, len: u64) -> u64 {
+    let base = major << 5;
+    if len <= 23 {
+        out.try_set(at, wrapping_u8(base | len));
+        wrapping_add(at, 1)
+    } else if len <= 255 {
+        out.try_set(at, wrapping_u8(base | 24));
+        out.try_set(wrapping_add(at, 1), wrapping_u8(len));
+        wrapping_add(at, 2)
+    } else if len <= 65535 {
+        out.try_set(at, wrapping_u8(base | 25));
+        out.try_write_u16_be(wrapping_add(at, 1), wrapping_u16(len));
+        wrapping_add(at, 3)
+    } else if len <= 4294967295 {
+        out.try_set(at, wrapping_u8(base | 26));
+        out.try_write_u32_be(wrapping_add(at, 1), wrapping_u32(len));
+        wrapping_add(at, 5)
+    } else {
+        out.try_set(at, wrapping_u8(base | 27));
+        out.try_write_u64_be(wrapping_add(at, 1), len);
+        wrapping_add(at, 9)
+    }
+}
+
+fn write_cbor_bstr(inout out: Slice[u8], at: u64, in data: Slice[u8]) -> u64 {
+    let p = write_cbor_head(inout out, at, 2, data.len());
+    out.try_copy_from(p, in data);
+    wrapping_add(p, data.len())
+}
+
+// Construct RFC 8152 §4.4 Sig_structure for COSE_Sign1:
+// `["Signature1", body_protected, external_aad, payload]` into `out`,
+// returning the written byte count.
+pub fn sig_structure(in prot: Slice[u8], in aad: Slice[u8], in pay: Slice[u8], inout out: Slice[u8])
+    -> u64 {
+    // Array of 4 items: 0x84, then text "Signature1" (0x6a || bytes).
+    out.try_set(0, 132);
+    out.try_set(1, 106);
+    out.try_copy_from(2, in "Signature1".as_bytes());
+    let mut p = 12;
+    p = write_cbor_bstr(inout out, p, in prot);
+    p = write_cbor_bstr(inout out, p, in aad);
+    write_cbor_bstr(inout out, p, in pay)
+}
+
+fn copy_str_to_sec1(
+    in b: Slice[u8],
+    in s: Slice[u8],
+    in n: Slice[u64],
+    node: u64,
+    inout out: Slice[u8],
+    dst_base: u64
+) {
+    let k = arg(in n, node);
+    let mut dst = dst_base;
+    let mut c = 0;
+    loop {
+        if c == k {
+            return;
+        }
+        let slot = wrapping_add(node, wrapping_add(2, wrapping_mul(c, 2)));
+        let off = kind(in n, slot);
+        let len = arg(in n, slot);
+        if off >= SCRATCH_BIT {
+            let soff = wrapping_sub(off, SCRATCH_BIT);
+            out.try_copy_from(dst, in s[soff..wrapping_add(soff, len)]);
+        } else {
+            out.try_copy_from(dst, in b[off..wrapping_add(off, len)]);
+        }
+        dst = wrapping_add(dst, len);
+        c = wrapping_add(c, 1);
+    }
+}
+
+// Decode a CCA Realm Attestation Key (RAK): raw 97-byte SEC1 uncompressed
+// P-384 point or CBOR `COSE_Key` (EC2, P-384), writing `0x04 || X || Y`
+// into `out_sec1`.
+pub fn cose_key_p384(
+    in b: Slice[u8],
+    inout n: Slice[u64],
+    inout st: Slice[u64],
+    inout out_sec1: Slice[u8]
+) -> Unit eff [Fail[AtErr]] {
+    if b.len() == P384_SEC1_LEN {
+        let first = match b.try_get(0) {
+            Option::Some(v) => widen_u64(v),
+            Option::None => 0,
+        };
+        if first == SEC1_UNCOMPRESSED {
+            out_sec1.try_copy_from(0, in b);
+            return;
+        }
+    }
+    handle Fail[AErr] in {
+        decode_whole_at(in b, 0, F_COSE_SIGN1, inout n, inout st);
+    } with {
+        return v => v,
+        raise(e, k) => key_err(KEY_WHAT_BAD_RAK)
+    };
+    let m = 1;
+    if kind(in n, m) != K_MAP {
+        key_err(KEY_WHAT_BAD_RAK);
+    }
+    let count = arg(in n, m);
+    let mut kty_seen = false;
+    let mut kty_is_ec2 = false;
+    let mut crv_node = 0;
+    let mut x_node = 0;
+    let mut y_node = 0;
+    let mut e = 0;
+    let mut at = wrapping_add(m, 2);
+    loop {
+        if e == count {
+            break;
+        }
+        if !is_label(in n, at) {
+            key_err(KEY_WHAT_BAD_RAK);
+        }
+        let mut j = 0;
+        let mut prev = wrapping_add(m, 2);
+        loop {
+            if j == e {
+                break;
+            }
+            if label_eq(in b, in b, in n, prev, at) {
+                key_err(KEY_WHAT_BAD_RAK);
+            }
+            prev = skip(in n, skip(in n, prev));
+            j = wrapping_add(j, 1);
+        }
+        let val = skip(in n, at);
+        let next_at = skip(in n, val);
+        let ak = kind(in n, at);
+        let aa = arg(in n, at);
+        if ak == K_UINT {
+            if aa == KP_KTY {
+                let vk = kind(in n, val);
+                let va = arg(in n, val);
+                if vk != K_TEXT && !valid_kty_int(vk, va) {
+                    key_err(KEY_WHAT_BAD_RAK);
+                }
+                if vk == K_UINT && va == 0 {
+                    key_err(KEY_WHAT_BAD_RAK);
+                }
+                kty_seen = true;
+                kty_is_ec2 = vk == K_UINT && va == KTY_EC2;
+            } else if aa == KP_KID {
+                if kind(in n, val) != K_BYTES || str_len(in n, val) == 0 {
+                    key_err(KEY_WHAT_BAD_RAK);
+                }
+            } else if aa == KP_ALG {
+                let vk = kind(in n, val);
+                if vk != K_TEXT && classify_alg_int(vk, arg(in n, val)) == 0 {
+                    key_err(KEY_WHAT_BAD_RAK);
+                }
+            } else if aa == KP_KEY_OPS {
+                if kind(in n, val) != K_ARRAY || arg(in n, val) == 0 {
+                    key_err(KEY_WHAT_BAD_RAK);
+                }
+                let kc = arg(in n, val);
+                let mut ki = 0;
+                let mut kat = wrapping_add(val, 2);
+                loop {
+                    if ki == kc {
+                        break;
+                    }
+                    let opk = kind(in n, kat);
+                    if opk != K_TEXT && !valid_key_op_int(opk, arg(in n, kat)) {
+                        key_err(KEY_WHAT_BAD_RAK);
+                    }
+                    let mut kj = 0;
+                    let mut kprev = wrapping_add(val, 2);
+                    loop {
+                        if kj == ki {
+                            break;
+                        }
+                        if label_eq(in b, in b, in n, kprev, kat) {
+                            key_err(KEY_WHAT_BAD_RAK);
+                        }
+                        kprev = skip(in n, kprev);
+                        kj = wrapping_add(kj, 1);
+                    }
+                    kat = skip(in n, kat);
+                    ki = wrapping_add(ki, 1);
+                }
+            } else if aa == KP_BASE_IV {
+                if kind(in n, val) != K_BYTES || str_len(in n, val) == 0 {
+                    key_err(KEY_WHAT_BAD_RAK);
+                }
+            }
+        } else if ak == K_NINT {
+            if aa == EC2_CRV_NARG {
+                crv_node = val;
+            } else if aa == EC2_X_NARG {
+                x_node = val;
+            } else if aa == EC2_Y_NARG {
+                y_node = val;
+            }
+        }
+        at = next_at;
+        e = wrapping_add(e, 1);
+    }
+    if !kty_seen {
+        key_err(KEY_WHAT_BAD_RAK);
+    }
+    if !kty_is_ec2 {
+        key_err(KEY_WHAT_NOT_EC2);
+    }
+    if crv_node == 0 || kind(in n, crv_node) != K_UINT || arg(in n, crv_node) != CRV_P384 {
+        key_err(KEY_WHAT_NOT_P384);
+    }
+    if x_node == 0 || kind(in n, x_node) != K_BYTES || str_len(in n, x_node) != P384_COORD_LEN {
+        key_err(KEY_WHAT_COORD);
+    }
+    if y_node == 0 || kind(in n, y_node) != K_BYTES || str_len(in n, y_node) != P384_COORD_LEN {
+        key_err(KEY_WHAT_COORD);
+    }
+    out_sec1.try_set(0, wrapping_u8(SEC1_UNCOMPRESSED));
+    copy_str_to_sec1(in b, in b, in n, x_node, inout out_sec1, 1);
+    copy_str_to_sec1(in b, in b, in n, y_node, inout out_sec1, wrapping_add(1, P384_COORD_LEN));
+}

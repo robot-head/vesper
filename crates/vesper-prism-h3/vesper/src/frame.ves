@@ -66,39 +66,39 @@ enum Mode: u64 {
     Opaque = 4,
 }
 
-fn data_type() -> u64 {
+pub fn data_type() -> u64 {
     0
 }
 
-fn headers_type() -> u64 {
+pub fn headers_type() -> u64 {
     1
 }
 
-fn cancel_push_type() -> u64 {
+pub fn cancel_push_type() -> u64 {
     3
 }
 
-fn settings_type() -> u64 {
+pub fn settings_type() -> u64 {
     4
 }
 
-fn push_promise_type() -> u64 {
+pub fn push_promise_type() -> u64 {
     5
 }
 
-fn goaway_type() -> u64 {
+pub fn goaway_type() -> u64 {
     7
 }
 
-fn max_push_id_type() -> u64 {
+pub fn max_push_id_type() -> u64 {
     13
 }
 
-fn webtransport_stream_type() -> u64 {
+pub fn webtransport_stream_type() -> u64 {
     65
 }
 
-fn is_http2_frame(ty: u64) -> bool {
+pub fn is_http2_frame(ty: u64) -> bool {
     ty == H2Frame::Priority
         || ty == H2Frame::Ping
         || ty == H2Frame::WindowUpdate
@@ -312,7 +312,7 @@ fn single_varint(in p: Slice[u8]) -> Result[u64, FrameError] {
     }
 }
 
-fn buffered_type(ty: u64) -> bool {
+pub fn buffered_type(ty: u64) -> bool {
     ty == headers_type()
         || ty == settings_type()
         || ty == goaway_type()
@@ -323,7 +323,7 @@ fn buffered_type(ty: u64) -> bool {
         || ty == priority_update_push()
 }
 
-fn parse_payload(ty: u64, in p: Slice[u8], inout out: ChunkSeq[u8])
+pub fn parse_payload(ty: u64, in p: Slice[u8], inout out: ChunkSeq[u8])
     -> Result[FrameOut, FrameError] {
     if ty == headers_type() {
         out.extend(in p);

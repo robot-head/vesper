@@ -140,6 +140,13 @@ pub const PORTS: &[Port] = &[
         "port/arrays.rs",
     ),
     (
+        "vesper-port-pilot",
+        "fnptrs",
+        Source::Path("vesper/fnptrs.ves"),
+        None,
+        "port/fnptrs.rs",
+    ),
+    (
         "vesper-prism",
         "decoder",
         Source::Path("vesper/decoder"),

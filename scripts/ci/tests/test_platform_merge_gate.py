@@ -79,6 +79,35 @@ class MergeGateTest(unittest.TestCase):
         self.assertEqual(run.returncode, 1)
         self.assertIn("not main", run.stdout)
 
+    def test_census_with_other_changes_cannot_merge(self):
+        git(self.repo, "checkout", "-q", "-b", "lane", "main")
+        self.commit("src.txt", "lane\n")
+        (self.repo / "docs/maintenance").mkdir(parents=True)
+        self.commit("docs/maintenance/rust-census.md", "census\n")
+        run = self.gate(4, "lane")
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertIn("rust-census.md", run.stdout)
+
+    def test_census_taken_from_a_newer_main_can_merge(self):
+        (self.repo / "docs/maintenance").mkdir(parents=True)
+        self.commit("docs/maintenance/rust-census.md", "old\n")
+        git(self.repo, "checkout", "-q", "-b", "lane", "main")
+        self.commit("src.txt", "lane\n")
+        git(self.repo, "checkout", "-q", "main")
+        self.commit("docs/maintenance/rust-census.md", "refreshed\n")
+        git(self.repo, "checkout", "-q", "lane")
+        git(self.repo, "checkout", "main", "--", "docs/maintenance/rust-census.md")
+        git(self.repo, "commit", "-q", "-m", "take main's census")
+        run = self.gate(4, "lane")
+        self.assertEqual(run.returncode, 0, run.stdout)
+
+    def test_census_refresh_alone_can_merge(self):
+        git(self.repo, "checkout", "-q", "-b", "refresh", "main")
+        (self.repo / "docs/maintenance").mkdir(parents=True)
+        self.commit("docs/maintenance/rust-census.md", "census\n")
+        run = self.gate(5, "refresh")
+        self.assertEqual(run.returncode, 0, run.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
