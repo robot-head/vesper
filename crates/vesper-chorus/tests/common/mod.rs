@@ -17,16 +17,16 @@ pub const ROGUE_NODE1: (&[u8], &[u8]) = (
 );
 
 macro_rules! hosts {
-    ($($i:literal),*) => {
+    ($directory:literal; $($i:literal),*) => {
         [$((
-            include_bytes!(concat!("../fixtures/pki/node", $i, ".der")).as_slice(),
-            include_bytes!(concat!("../fixtures/pki/node", $i, ".key.der")).as_slice(),
+            include_bytes!(concat!("../fixtures/", $directory, "/node", $i, ".der")).as_slice(),
+            include_bytes!(concat!("../fixtures/", $directory, "/node", $i, ".key.der")).as_slice(),
         )),*]
     };
 }
 
 pub const HOSTS: [(&[u8], &[u8]); 16] =
-    hosts!(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+    hosts!("pki"; 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
 
 /// 2030-01-01, inside the fixtures' validity (2026-11-14 to 2126-10-21).
 pub const NOW_SECS: u64 = 1_893_456_000;
@@ -41,9 +41,21 @@ pub fn credential(name: &str, cert: &[u8], key: &[u8]) -> HostCredential {
 
 /// The honest PKI for 16 hosts at a fixed time.
 pub fn pki() -> WarpTls {
+    pki_with(CA, &HOSTS)
+}
+
+/// Fixed-size TLS signatures for the replicated-log differential oracle.
+pub fn replog_pki() -> WarpTls {
+    pki_with(
+        include_bytes!("../fixtures/replog-pki/ca.der"),
+        &hosts!("replog-pki"; 0, 1, 2, 3, 4, 5, 6),
+    )
+}
+
+fn pki_with(ca: &[u8], hosts: &[(&[u8], &[u8])]) -> WarpTls {
     WarpTls {
-        roots: vec![CertificateDer::from(CA.to_vec())],
-        hosts: HOSTS
+        roots: vec![CertificateDer::from(ca.to_vec())],
+        hosts: hosts
             .iter()
             .enumerate()
             .map(|(i, (c, k))| credential(&format!("node{i}.chorus.test"), c, k))

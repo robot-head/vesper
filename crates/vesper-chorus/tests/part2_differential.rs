@@ -882,7 +882,7 @@ fn digest_replog(h: &mut u64, rep: &vesper_chorus::replog::ReplogReport) {
 fn diff_replog() -> (u64, usize) {
     let mut h = 0xcbf2_9ce4_8422_2325u64;
     let mut cases = 0usize;
-    let tls = common::pki();
+    let tls = common::replog_pki();
 
     for (seed, nodes, loss, part) in [
         (1u64, 3u32, 0u32, 0u32),
