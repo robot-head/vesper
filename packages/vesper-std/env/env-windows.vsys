@@ -1,31 +1,28 @@
-// @vesper-std/env's import on Windows (SH6 lane 13, #1408): the same
-// functions as env-linux.vsys and env-macos.vsys, provided by the Windows
-// part of crates/vesper-std-host until Vesper calls Win32 itself (gap G7:
-// UTF-16 strings). Its `dlsym` answers the names src/lib.ves asks for
-// (`__libc_stack_end` and `environ`, laid out as glibc does) with UTF-8
-// copies of the process's arguments and environment.
+// @vesper-std/env's import on Windows: Win32 `kernel32` directly (no
+// `vesper_std_host`).
 sys library StdEnv (
     target = "@TARGET@", abi = "@ABI@",
-    link = "static", name = "vesper_std_host",
+    link = "dynamic", name = "kernel32",
     artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
 ) {
     const OS: u32 = 3;
-    const RTLD_DEFAULT: u64 = 0;
-    const ERANGE: u32 = 122;
-    // A C function of no arguments returning an address (`_NSGetArgv`).
-    callback AddressFn() -> ForeignVal[u64];
-    #[link_name = "vstd_getenv"]
-    fn getenv(nocapture in name: CStr) -> ForeignVal[Option[CStr]];
-    #[link_name = "vstd_getcwd"]
-    fn getcwd(nocapture inout buf: CSlice[u8]) -> ForeignVal[u64] errno;
-    #[link_name = "vstd_dlsym"]
-    fn dlsym(handle: u64, nocapture in name: CStr) -> ForeignVal[u64];
-    #[link_name = "vstd_dlsym"]
-    fn dlsym_function(handle: u64, nocapture in name: CStr) -> ForeignVal[Option[AddressFn]];
-    #[link_name = "vstd_memcpy"]
-    fn read_word(nocapture inout word: u64, address: u64, size: u64) -> ForeignVal[u64];
-    #[link_name = "vstd_strchr"]
-    fn find_byte(address: u64, byte: i32) -> ForeignVal[u64];
-    #[link_name = "vstd_strstr"]
-    fn cstr_at(address: u64, nocapture in empty: CStr) -> ForeignVal[Option[CStr]];
+    const CP_UTF8: u32 = 65001;
+    const ERROR_ENVVAR_NOT_FOUND: u32 = 203;
+
+    fn GetCommandLineW() -> ForeignVal[Option[CWStr]];
+    fn GetCurrentDirectoryW(nBufferLength: u32, nocapture inout lpBuffer: CSlice[u32]) -> ForeignVal[u32] errno;
+    fn GetEnvironmentVariableW(nocapture in lpName: CWStr, nocapture inout lpBuffer: CSlice[u32]) -> ForeignVal[u32] errno;
+    fn GetEnvironmentStringsW() -> ForeignVal[u64];
+    fn FreeEnvironmentStringsW(lpszEnvironmentBlock: u64) -> ForeignVal[i32];
+    fn lstrlenW(lpString: u64) -> ForeignVal[i32];
+    fn WideCharToMultiByte(
+        codePage: u32,
+        dwFlags: u32,
+        lpWideCharStr: u64,
+        cchWideChar: i32,
+        nocapture inout lpMultiByteStr: CSlice[u8],
+        cbMultiByte: i32,
+        lpDefaultChar: u64,
+        lpUsedDefaultChar: u64
+    ) -> ForeignVal[i32];
 }

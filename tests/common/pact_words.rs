@@ -218,3 +218,219 @@ pub fn decode_declaration_text(text: &str) -> Vec<Diagnostic> {
 pub fn decode_declarations(words: &[u64]) -> Vec<Diagnostic> {
     decode_declaration_text(&Words::new(words).text())
 }
+
+/// Trailing metadata after `encode_declarations` for `session_open` (SH2 lane 13 part 2b).
+#[allow(clippy::too_many_arguments)]
+pub fn encode_session_meta(
+    e: &mut Enc,
+    t: &mut Vec<u64>,
+    m: &Module,
+    base: &World,
+    prelude: &World,
+    pkg_name: &str,
+    pkg_ver: &str,
+    max_depth: u64,
+    max_steps: u64,
+    max_fix: u64,
+    fingerprint: &str,
+) {
+    t.push(e.name(pkg_name));
+    t.push(e.name(pkg_ver));
+    t.push(max_depth);
+    t.push(max_steps);
+    t.push(max_fix);
+    t.push(e.name(fingerprint));
+    t.push(prelude.adts.len() as u64);
+    for name in prelude.adts.keys() {
+        t.push(e.name(name));
+    }
+    let mut effs: Vec<(bool, &str, &[Generic])> = vec![];
+    for (name, decl) in &prelude.effects {
+        effs.push((false, name.as_str(), &decl.generics));
+    }
+    for item in &m.items {
+        if let Item::Effect(d) = item
+            && base.effects.contains_key(&d.name)
+        {
+            effs.push((true, d.name.as_str(), &d.generics));
+        }
+    }
+    t.push(effs.len() as u64);
+    for (is_local, name, gs) in effs {
+        t.push(is_local as u64);
+        t.push(e.name(name));
+        generics(e, t, gs);
+    }
+}
+
+/// Full byte input for `session_open` / `check_pact_session`.
+#[allow(clippy::too_many_arguments)]
+pub fn session_input(
+    m: &Module,
+    base: &World,
+    prelude: &World,
+    pkg_name: &str,
+    pkg_ver: &str,
+    max_depth: u64,
+    max_steps: u64,
+    max_fix: u64,
+    fingerprint: &str,
+) -> Option<Vec<u8>> {
+    let mut e = Enc::default();
+    let w = e.world(base);
+    let mut t = vec![];
+    let id = format!("{pkg_name}@{pkg_ver}");
+    encode_declarations(&mut e, &mut t, m, base, &id);
+    encode_session_meta(
+        &mut e,
+        &mut t,
+        m,
+        base,
+        prelude,
+        pkg_name,
+        pkg_ver,
+        max_depth,
+        max_steps,
+        max_fix,
+        fingerprint,
+    );
+    if !e.type_list.iter().all(|ty| encodable_with(ty, true)) {
+        return None;
+    }
+    Some(e.finish(&w, &t))
+}
+
+/// A `(self_ty, trait_name, args, brand)` goal or assumption tuple in [`SessionQuery`].
+pub type SessionGoal = (Type, String, Vec<(bool, Type)>, Option<String>);
+
+/// Binary query payload consumed by `session_solve` (`QuerySpec`).
+pub struct SessionQuery<'a> {
+    pub env_params: &'a [Generic],
+    pub assumptions: &'a [SessionGoal],
+    pub scopes: &'a [Vec<String>],
+    pub infer: &'a [(String, u8)],
+    pub goal: SessionGoal,
+}
+
+fn push_q_goal(e: &mut Enc, t: &mut Vec<u64>, g: &SessionGoal) {
+    t.push(e.ty(&g.0));
+    t.push(e.name(&g.1));
+    t.push(g.2.len() as u64);
+    for (is_row, ty) in &g.2 {
+        t.push(*is_row as u64);
+        t.push(e.ty(ty));
+    }
+    t.push(e.opt_name(&g.3));
+}
+
+pub fn encode_session_query(q: &SessionQuery<'_>) -> Vec<u8> {
+    let mut e = Enc::default();
+    let mut t = vec![];
+    t.push(q.env_params.len() as u64);
+    for g in q.env_params {
+        t.push(e.name(&g.name));
+        t.push(mode_word(g.bound));
+        t.push(g.row as u64);
+    }
+    t.push(q.assumptions.len() as u64);
+    for a in q.assumptions {
+        push_q_goal(&mut e, &mut t, a);
+    }
+    t.push(q.scopes.len() as u64);
+    for s in q.scopes {
+        t.push(s.len() as u64);
+        for m in s {
+            t.push(e.name(m));
+        }
+    }
+    t.push(q.infer.len() as u64);
+    for (n, k) in q.infer {
+        t.push(e.name(n));
+        t.push(*k as u64);
+    }
+    push_q_goal(&mut e, &mut t, &q.goal);
+    e.finish(&[], &t)
+}
+
+/// Decodes a single `session_solve` word vector (`Ok((conf_idx, selection))` or `Err((tag, msg))`).
+pub fn decode_solve_words(words: &[u64]) -> Result<(usize, String), (u8, String)> {
+    let (res, _) = decode_solve_at(words, 0);
+    res
+}
+
+fn decode_packed_text_at(words: &[u64], at: usize) -> (String, usize) {
+    let len = words.get(at).copied().unwrap_or(0) as usize;
+    let text = Words::new(&words[at..]).text();
+    let next = at + 1 + len.div_ceil(8);
+    (text, next)
+}
+
+type SolveOutcome = Result<(usize, String), (u8, String)>;
+
+fn decode_solve_at(words: &[u64], at: usize) -> (SolveOutcome, usize) {
+    let status = words[at];
+    let val = words[at + 1];
+    let (msg, next) = decode_packed_text_at(words, at + 2);
+    let res = if status == 0 {
+        Ok((val as usize, msg))
+    } else {
+        Err((val as u8, msg))
+    };
+    (res, next)
+}
+
+pub struct DecodedSessionRun {
+    pub diagnostics: Vec<Diagnostic>,
+    pub ok: bool,
+    pub revision: String,
+    pub answers: Vec<Result<(usize, String), (u8, String)>>,
+}
+
+/// Decodes session diagnostics (multiline messages use `\x01` inside each record line).
+pub fn decode_session_text(text: &str) -> Vec<Diagnostic> {
+    decode_declaration_text(text)
+        .into_iter()
+        .map(|mut d| {
+            if d.message.contains('\x01') {
+                d.message = d.message.replace('\x01', "\n");
+            }
+            d
+        })
+        .collect()
+}
+
+pub fn decode_session_words(words: &[u64]) -> Vec<Diagnostic> {
+    decode_session_text(&Words::new(words).text())
+}
+
+/// Decodes the output word slice of `check_pact_queries`.
+pub fn decode_session_queries(words: &[u64]) -> DecodedSessionRun {
+    let (diag_text, mut at) = decode_packed_text_at(words, 0);
+    let diagnostics = decode_session_text(&diag_text);
+    let ok = words.get(at).copied().unwrap_or(0) != 0;
+    at += 1;
+    if !ok {
+        return DecodedSessionRun {
+            diagnostics,
+            ok: false,
+            revision: String::new(),
+            answers: vec![],
+        };
+    }
+    let (revision, next) = decode_packed_text_at(words, at);
+    at = next;
+    let nq = words.get(at).copied().unwrap_or(0) as usize;
+    at += 1;
+    let mut answers = Vec::with_capacity(nq);
+    for _ in 0..nq {
+        let (ans, next_at) = decode_solve_at(words, at);
+        answers.push(ans);
+        at = next_at;
+    }
+    DecodedSessionRun {
+        diagnostics,
+        ok: true,
+        revision,
+        answers,
+    }
+}

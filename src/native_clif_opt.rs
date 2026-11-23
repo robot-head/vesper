@@ -2017,7 +2017,7 @@ fn fold_narrow_extends(func: &mut ir::Function) {
             let InstructionData::Unary { opcode, arg } = func.dfg.insts[inst] else {
                 continue;
             };
-            if !matches!(opcode, Opcode::Ireduce | Opcode::Uextend) {
+            if !matches!(opcode, Opcode::Ireduce | Opcode::Uextend | Opcode::Sextend) {
                 continue;
             }
             let dest = func.dfg.first_result(inst);
@@ -2073,6 +2073,62 @@ fn fold_narrow_extends(func: &mut ir::Function) {
                     } else if inner_ty.bits() < dst_ty.bits() {
                         func.dfg.insts[inst] = InstructionData::Unary {
                             opcode: Opcode::Uextend,
+                            arg: inner,
+                        };
+                        changed = true;
+                    }
+                }
+                (
+                    Opcode::Sextend,
+                    InstructionData::UnaryImm {
+                        opcode: Opcode::Iconst,
+                        imm,
+                    },
+                ) => {
+                    let shift = 64 - src_ty.bits();
+                    let v = (((imm.bits() << shift) >> shift) as u64) & dst_mask;
+                    func.dfg.replace(inst).iconst(dst_ty, v as i64);
+                    changed = true;
+                }
+                (
+                    Opcode::Ireduce,
+                    InstructionData::Unary {
+                        opcode: Opcode::Sextend,
+                        arg: inner,
+                    },
+                ) => {
+                    let inner = func.dfg.resolve_aliases(inner);
+                    let inner_ty = func.dfg.value_type(inner);
+                    if inner_ty == dst_ty {
+                        func.layout.remove_inst(inst);
+                        func.dfg.clear_results(inst);
+                        func.dfg.change_to_alias(dest, inner);
+                        changed = true;
+                    } else if inner_ty.bits() < dst_ty.bits() {
+                        func.dfg.insts[inst] = InstructionData::Unary {
+                            opcode: Opcode::Sextend,
+                            arg: inner,
+                        };
+                        changed = true;
+                    } else if mask_for(inner_ty).is_some() {
+                        func.dfg.insts[inst] = InstructionData::Unary {
+                            opcode: Opcode::Ireduce,
+                            arg: inner,
+                        };
+                        changed = true;
+                    }
+                }
+                (
+                    Opcode::Sextend,
+                    InstructionData::Unary {
+                        opcode: Opcode::Sextend,
+                        arg: inner,
+                    },
+                ) => {
+                    let inner = func.dfg.resolve_aliases(inner);
+                    if mask_for(func.dfg.value_type(inner)).is_some() {
+                        func.dfg.insts[inst] = InstructionData::Unary {
+                            opcode: Opcode::Sextend,
                             arg: inner,
                         };
                         changed = true;

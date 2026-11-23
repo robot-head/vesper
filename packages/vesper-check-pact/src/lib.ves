@@ -34,6 +34,27 @@ use self::frontend::{
     declaration_pass,
     fe_new
 };
+pub use self::session::{
+    PactSession,
+    session_open,
+    session_solve
+};
+use self::session::{
+    queries_words,
+    session_words
+};
+
+// Task "session" (part 2b): the coherence-gated Pact session over the
+// declaration section plus the session metadata (session_input.ves);
+// returns the session's diagnostics as text, empty when it opens.
+pub fn check_pact_session(in input: Str) -> ChunkSeq[u64] {
+    session_words(in input.as_bytes())
+}
+
+// Task "queries": a session followed by queries (`session_solve` each).
+pub fn check_pact_queries(in input: Str) -> ChunkSeq[u64] {
+    queries_words(in input.as_bytes())
+}
 
 // Task "declarations": the declaration section (decl.ves) after the common
 // sections; returns the diagnostics as text, one `CODE START END MESSAGE`
@@ -55,4 +76,16 @@ pub fn declarations_words(in b: Slice[u8]) -> ChunkSeq[u64] {
     let mut o = ChunkSeq::new[u8]();
     declaration_pass(inout c, in d, inout fe, inout o);
     pack_text(in o)
+}
+
+pub fn session_is_ok(in sess: PactSession) -> bool {
+    sess.ok
+}
+
+pub fn session_revision(in sess: PactSession) -> ChunkSeq[u64] {
+    pack_text(in sess.revision)
+}
+
+pub fn session_take_diagnostics(in sess: PactSession) -> ChunkSeq[u64] {
+    pack_text(in sess.out)
 }
