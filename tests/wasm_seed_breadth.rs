@@ -200,6 +200,46 @@ fn sequences_and_strings_run_like_the_evaluator() {
     }
 }
 
+/// `u128` as the port lowers it (a 16-byte block, #1508), against the
+/// evaluator. Rust refuses every one (`IntegerWidth`).
+const WIDE_PROGRAMS: &[&str] = &[
+    // `<<` below, at and past 64 bits, including 0.
+    r#"fn hi(x: u128) -> u64 eff [Fail[ArithOverflow]] { wrapping_u64(x / 18446744073709551616) }
+fn mix(a: u64, x: u128) -> u64 eff [Fail[ArithOverflow]] { wrapping_add(wrapping_mul(a, 1000003), wrapping_add(wrapping_u64(x), wrapping_mul(hi(x), 7919))) }
+fn sh(x: u128, k: u128) -> u128 eff [Fail[ArithOverflow]] { x << k }
+fn go() -> u64 eff [Fail[ArithOverflow]] { let one = widen_u128(1); let x = widen_u128(12345678901234567); let mut a: u64 = 0;
+  a = mix(a, sh(x, widen_u128(0))); a = mix(a, sh(x, widen_u128(1))); a = mix(a, sh(sh(one, widen_u128(63)), widen_u128(1)));
+  a = mix(a, sh(x, widen_u128(63))); a = mix(a, sh(x, widen_u128(64))); a = mix(a, sh(x, widen_u128(100))); a }
+fn main() -> u64 { handle Fail[ArithOverflow] in { go() } with { return v => v, raise(e, k) => 999, } }"#,
+    // A literal pattern on a runtime `u128`, add with carry, mul, div, rem, compare.
+    r#"fn class(x: u128) -> u64 { match x { 0 => 1, 1 => 7, 18446744073709551616 => 11, _ => 9 } }
+fn f(a: u128, b: u128) -> u64 eff [Fail[ArithOverflow]] { let s = wrapping_add(a, b); let m = wrapping_mul(a, b);
+  let q = m / 1000000007; let r = m % 1000000007;
+  let c: u64 = if a < b { 1 } else if a > b { 2 } else { 3 };
+  wrapping_add(wrapping_add(wrapping_u64(s), wrapping_u64(q)), wrapping_add(wrapping_mul(wrapping_u64(r), 3), c)) }
+fn go() -> u64 eff [Fail[ArithOverflow]] { let big = widen_u128(18446744073709551615);
+  wrapping_add(wrapping_add(class(widen_u128(1)), class(widen_u128(0))), wrapping_add(class(wrapping_add(big, widen_u128(1))),
+  wrapping_add(class(widen_u128(5)), wrapping_mul(f(big, big), 13)))) }
+fn main() -> u64 { handle Fail[ArithOverflow] in { go() } with { return v => v, raise(e, k) => 999, } }"#,
+];
+
+#[test]
+fn u128_runs_like_the_evaluator() {
+    let o = &configs()[0];
+    for (i, src) in WIDE_PROGRAMS.iter().enumerate() {
+        let p = vesper::parser::parse(src);
+        let c = vesper::check::check(&p.module);
+        assert!(c.diagnostics.is_empty(), "#{i}: {:?}", c.diagnostics);
+        assert!(
+            vesper::wasm_backend::compile(&c.world, "main", o).is_err(),
+            "#{i}: Rust now lowers this; compare byte for byte instead"
+        );
+        let (component, world) = port(src, o).unwrap_or_else(|e| panic!("#{i}: {e}\n{src}"));
+        let (got, expected) = (run_main(&component), evaluate(&world));
+        assert_eq!(got, expected, "#{i}: wasm vs evaluator\n{src}");
+    }
+}
+
 /// The programs of `WASM_SEED_PROBE` (a file, or a directory of `.ves`
 /// files): the port's answer and the run against the evaluator.
 #[test]

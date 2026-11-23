@@ -384,6 +384,15 @@ impl Cx {
             if n == s.f32_ {
                 Fail::raise(werr(K_UNSUPPORTED, U_FLOAT32, 10));
             }
+            if n == s.u128_ {
+                // the tuple (low word, high word): src/wide.ves
+                let u = self.types.named0(s.u64_);
+                let mut e = ChunkSeq::new[u32]();
+                e.push(u);
+                e.push(u);
+                let tt = self.types.tuple(in e);
+                return shape_of(SH_TUPLE, 0, NO_ADT, tt);
+            }
             if self.is_integer_name(n) {
                 Fail::raise(werr(K_UNSUPPORTED, U_INTEGER_WIDTH, 11));
             }

@@ -1,0 +1,129 @@
+// The byte scans `find_byte`, `find_either` and `find_not_in` (`SeqOp`
+// FindByte, FindEither, FindNotIn in src/seq.rs) on a byte sequence or
+// slice: the index of the first matching byte as an `Option[u64]`, total.
+// The lexer of @vesper/front uses all three.
+
+use self::err::{
+    WErr,
+    werr
+};
+use self::lower::{
+    L
+};
+
+// Consts do not cross modules: src/err.ves, src/lower.ves.
+const K_UNSUPPORTED: u8 = 0;
+const U_GENERIC_OPERATION: u8 = 5;
+const OP_BLOCK: u8 = 2;
+const OP_LOOP: u8 = 3;
+const OP_IF: u8 = 4;
+const OP_END: u8 = 11;
+const OP_SELECT: u8 = 27;
+const OP_I64_EQZ: u8 = 80;
+const OP_I64_EQ: u8 = 81;
+const OP_I64_LT_U: u8 = 84;
+const OP_I64_GE_U: u8 = 90;
+const OP_I32_OR: u8 = 114;
+const OP_I64_ADD: u8 = 124;
+const OP_I64_AND: u8 = 131;
+const OP_I64_SHR_U: u8 = 136;
+const NONE32: u32 = 4294967295;
+// `seq_code` of the three scans (src/lower.ves)
+pub fn sq_find_byte() -> u64 {
+    36
+}
+
+pub fn sq_find_not_in() -> u64 {
+    38
+}
+
+impl L {
+    // `code` over the bytes `base[0..n]` of the operand at `a`, into `dv`.
+    pub fn find_scan(
+        inout self,
+        a: u64,
+        code: u64,
+        base: u32,
+        n: u32,
+        t0: u32,
+        ty: u32,
+        dv: u64
+    ) eff [Fail[WErr]] {
+        if self.stride(t0) != 1 {
+            Fail::raise(werr(K_UNSUPPORTED, U_GENERIC_OPERATION, 247));
+        }
+        let x1 = self.seq_val(a, 1);
+        let x2 = if code == sq_find_byte() {
+            NONE32
+        } else {
+            self.seq_val(a, 2)
+        };
+        let x3 = if code == sq_find_not_in() {
+            self.seq_val(a, 3)
+        } else {
+            NONE32
+        };
+        let d = self.dest(dv);
+        let i = self.const_local(0);
+        self.e.code.open(OP_BLOCK);
+        self.e.code.open(OP_LOOP);
+        self.e.code.get(i);
+        self.e.code.get(n);
+        self.e.code.op(OP_I64_GE_U);
+        self.e.code.open(OP_IF);
+        self.option_into(d, ty, NONE32);
+        self.e.code.br(2);
+        self.e.code.op(OP_END);
+        let b = self.elem_load(base, i, 1);
+        if code == sq_find_byte() {
+            self.e.code.get(b);
+            self.e.code.get(x1);
+            self.e.code.op(OP_I64_EQ);
+        } else if code == sq_find_not_in() {
+            // in the class: bit b of lo (b < 64), bit b - 64 of hi
+            // (b < 128), else `high`; the scan stops outside it
+            self.class_bit(x1, b);
+            self.class_bit(x2, b);
+            self.e.code.get(x3);
+            self.e.code.get(b);
+            self.e.code.i64_const(128);
+            self.e.code.op(OP_I64_LT_U);
+            self.e.code.op(OP_SELECT);
+            self.e.code.get(b);
+            self.e.code.i64_const(64);
+            self.e.code.op(OP_I64_LT_U);
+            self.e.code.op(OP_SELECT);
+            self.e.code.op(OP_I64_EQZ);
+        } else {
+            self.e.code.get(b);
+            self.e.code.get(x1);
+            self.e.code.op(OP_I64_EQ);
+            self.e.code.get(b);
+            self.e.code.get(x2);
+            self.e.code.op(OP_I64_EQ);
+            self.e.code.op(OP_I32_OR);
+        }
+        self.e.code.open(OP_IF);
+        self.option_into(d, ty, i);
+        self.e.code.br(2);
+        self.e.code.op(OP_END);
+        self.e.code.get(i);
+        self.e.code.i64_const(1);
+        self.e.code.op(OP_I64_ADD);
+        self.e.code.set(i);
+        self.e.code.br(0);
+        self.e.code.op(OP_END);
+        self.e.code.op(OP_END);
+    }
+
+    // `(mask >> (b & 63)) & 1` on the stack.
+    fn class_bit(inout self, mask: u32, b: u32) {
+        self.e.code.get(mask);
+        self.e.code.get(b);
+        self.e.code.i64_const(63);
+        self.e.code.op(OP_I64_AND);
+        self.e.code.op(OP_I64_SHR_U);
+        self.e.code.i64_const(1);
+        self.e.code.op(OP_I64_AND);
+    }
+}
