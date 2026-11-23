@@ -1,13 +1,17 @@
 // @vesper-std/process: child processes (self-hosting SH0 lane 3, #1125),
-// over the `.vsys` library `StdProcess` (process.vsys; the host side is
-// crates/vesper-std-host). Every operation performs `Ffi[StdProcess]`.
+// over the `.vsys` library `StdProcess`: the C library itself on Linux and
+// macOS (process-@OS@.vsys, SH6 lane 13, #1408). Every operation performs
+// `Ffi[StdProcess]`. Children start the way Rust's `std::process` starts
+// them: `posix_spawn` with the signal mask cleared and `SIGPIPE` back to
+// its default, standard streams set up by file actions, captured output
+// read through close-on-exec pipes.
 //
 // A command (`ProcCommand`) and a running child (`ProcChild`) are linear
-// handles: a command is spawned or discarded, a child is released, exactly
-// once on every path. Functions that take a live handle return a
-// `Result` instead of raising, because a caller may not keep a linear
-// handle live across an unhandled `Fail` (E0402). `output` runs a command
-// to completion and owns its handles itself, so it raises.
+// values: a command is spawned or discarded, a child is released, exactly
+// once on every path. Functions that take a live one return a `Result`
+// instead of raising, because a caller may not keep a linear value live
+// across an unhandled `Fail` (E0402). `output` runs a command to
+// completion and owns its values itself, so it raises.
 //
 // ```vesper
 // let mut c = command(in "cc");
@@ -16,9 +20,9 @@
 // ```
 use @vesper-std/fs::{
     IoError,
-    error_of,
-    raise_io
+    invalid_input
 };
+use @vesper-std/fs::sys::os_error_word;
 
 // How a child ended: `exited` with `code`, or (Unix) killed by `signal`.
 pub copy struct ExitStatus {
@@ -64,6 +68,98 @@ pub fn null() -> u32 {
     2
 }
 
+// A command being built. `args` holds argv (the program first), each
+// argument ended by a NUL byte, as a `CStrList` takes it. The environment
+// edits are in order: edit `i` names the key `keys[key_ends[i - 1]..
+// key_ends[i]]`, sets it to the matching range of `values` when `ops[i]`
+// is 1 and removes it when 0; the last edit of a key wins, as in Rust's
+// `Command`. `nul` records a NUL byte in any text, which `spawn` refuses.
+pub linear struct ProcCommand {
+    program: ChunkSeq[u8],
+    args: ChunkSeq[u8],
+    keys: ChunkSeq[u8],
+    key_ends: ChunkSeq[u64],
+    values: ChunkSeq[u8],
+    value_ends: ChunkSeq[u64],
+    ops: ChunkSeq[u8],
+    clear: bool,
+    dir: ChunkSeq[u8],
+    has_dir: bool,
+    nul: bool,
+    stdin: u32,
+    stdout: u32,
+    stderr: u32,
+}
+
+// A spawned child: `pid` until it is waited for (then 0), the read ends
+// of its captured streams until they are drained (then -1), and what they
+// carried.
+pub linear struct ProcChild {
+    pid: i32,
+    out_fd: i32,
+    err_fd: i32,
+    out: ChunkSeq[u8],
+    err: ChunkSeq[u8],
+}
+
+// ---------------------------------------------------------------------------
+// Small helpers.
+
+fn byte_at(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(b) => b,
+        Option::None => 0,
+    }
+}
+
+fn word_at(in s: Slice[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(w) => w,
+        Option::None => 0,
+    }
+}
+
+fn has_byte(in s: Slice[u8], b: u8) -> bool {
+    for i in 0..s.len() {
+        if byte_at(in s, i) == b {
+            return true;
+        }
+    }
+    false
+}
+
+// Whether `a[a0..a1]` and `b[b0..b1]` hold the same bytes.
+fn same(in a: Slice[u8], a0: u64, a1: u64, in b: Slice[u8], b0: u64, b1: u64) -> bool {
+    let n = wrapping_sub(a1, a0);
+    if n != wrapping_sub(b1, b0) {
+        return false;
+    }
+    for i in 0..n {
+        if byte_at(in a, wrapping_add(a0, i)) != byte_at(in b, wrapping_add(b0, i)) {
+            return false;
+        }
+    }
+    true
+}
+
+fn io_kind(kind: u32) -> IoError {
+    IoError {
+        kind: kind,
+        os: 0,
+    }
+}
+
+fn io_errno(e: u32) -> IoError {
+    let word = os_error_word(e);
+    IoError {
+        kind: wrapping_u32(word & 255),
+        os: e,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Building a command.
+
 // A command that runs `program` (searched on `PATH` when it has no path
 // separator) with no arguments, the parent's environment and directory,
 // and inherited standard streams.
@@ -72,121 +168,727 @@ pub fn command(in program: Str) -> ProcCommand eff [Ffi[StdProcess]] {
 }
 
 pub fn command_path(in program: Slice[u8]) -> ProcCommand eff [Ffi[StdProcess]] {
-    match StdProcess::vstd_proc_command(in program) {
-        Result::Ok(c) => c,
-        // The host never returns NULL here.
-        Result::Err(_) => loop {},
+    let mut p: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    p.extend(in program);
+    let mut a: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    a.extend(in program);
+    a.push(0);
+    ProcCommand {
+        program: p,
+        args: a,
+        keys: ChunkSeq::new[u8](),
+        key_ends: ChunkSeq::new[u64](),
+        values: ChunkSeq::new[u8](),
+        value_ends: ChunkSeq::new[u64](),
+        ops: ChunkSeq::new[u8](),
+        clear: false,
+        dir: ChunkSeq::new[u8](),
+        has_dir: false,
+        nul: has_byte(in program, 0),
+        stdin: inherit(),
+        stdout: inherit(),
+        stderr: inherit(),
     }
 }
 
 pub fn arg(inout c: ProcCommand, in a: Str) eff [Ffi[StdProcess]] {
-    StdProcess::vstd_proc_arg(inout c, in a.as_bytes());
+    arg_bytes(inout c, in a.as_bytes());
 }
 
 pub fn arg_bytes(inout c: ProcCommand, in a: Slice[u8]) eff [Ffi[StdProcess]] {
-    StdProcess::vstd_proc_arg(inout c, in a);
+    if has_byte(in a, 0) {
+        c.nul = true;
+    }
+    c.args.extend(in a);
+    c.args.push(0);
+}
+
+fn edit(inout c: ProcCommand, in key: Slice[u8], in value: Slice[u8], op: u8) {
+    if has_byte(in key, 0) || has_byte(in value, 0) {
+        c.nul = true;
+    }
+    c.keys.extend(in key);
+    c.key_ends.push(c.keys.len());
+    c.values.extend(in value);
+    c.value_ends.push(c.values.len());
+    c.ops.push(op);
 }
 
 // Set `key` to `value` in the child's environment.
 pub fn env(inout c: ProcCommand, in key: Str, in value: Str) eff [Ffi[StdProcess]] {
-    StdProcess::vstd_proc_env(inout c, in key.as_bytes(), in value.as_bytes());
+    edit(inout c, in key.as_bytes(), in value.as_bytes(), 1);
 }
 
 // Leave `key` out of the child's environment.
 pub fn env_remove(inout c: ProcCommand, in key: Str) eff [Ffi[StdProcess]] {
-    StdProcess::vstd_proc_env_remove(inout c, in key.as_bytes());
+    edit(inout c, in key.as_bytes(), in "".as_bytes(), 0);
 }
 
 // Start the child from an empty environment; `env` calls after this one
 // still apply.
 pub fn env_clear(inout c: ProcCommand) eff [Ffi[StdProcess]] {
-    StdProcess::vstd_proc_env_clear(inout c);
+    c.clear = true;
+    c.keys.truncate(0);
+    c.key_ends.truncate(0);
+    c.values.truncate(0);
+    c.value_ends.truncate(0);
+    c.ops.truncate(0);
 }
 
 // Run the child in directory `dir`.
 pub fn cwd(inout c: ProcCommand, in dir: Str) eff [Ffi[StdProcess]] {
-    StdProcess::vstd_proc_cwd(inout c, in dir.as_bytes());
+    let d = dir.as_bytes();
+    if has_byte(in d, 0) {
+        c.nul = true;
+    }
+    c.dir.truncate(0);
+    c.dir.extend(in d);
+    c.has_dir = true;
 }
 
 // Set standard stream `stream` (`stdin_stream()` and friends) to `mode`
 // (`inherit()`, `capture()` or `null()`; stdin cannot be captured and is
 // then `null()`).
 pub fn stdio(inout c: ProcCommand, stream: u32, mode: u32) eff [Ffi[StdProcess]] {
-    StdProcess::vstd_proc_stdio(inout c, stream, mode);
+    if stream == 0 {
+        c.stdin = mode;
+    } else if stream == 1 {
+        c.stdout = mode;
+    } else if stream == 2 {
+        c.stderr = mode;
+    }
 }
 
 // Throw a command away without running it.
 pub fn discard(sink c: ProcCommand) eff [Ffi[StdProcess]] {
-    StdProcess::vstd_proc_command_free(c);
+    let ProcCommand {
+        program,
+        args,
+        keys,
+        key_ends,
+        values,
+        value_ends,
+        ops,
+        clear,
+        dir,
+        has_dir,
+        nul,
+        stdin,
+        stdout,
+        stderr,
+    } = c;
+}
+
+// ---------------------------------------------------------------------------
+// The child's environment.
+
+// The word of `size` bytes (at most 8, little-endian) at `address`, or 0
+// for a `NULL` address.
+fn word(address: u64, size: u64) -> u64 eff [Ffi[StdProcess]] {
+    if address == 0 {
+        return 0;
+    }
+    let mut w: u64 = 0;
+    let _ = StdProcess::read_word(inout w, address, size);
+    w
+}
+
+// The NULL-terminated `environ` array now: Apple's `_NSGetEnviron`, else
+// glibc's `environ`.
+fn environment() -> u64 eff [Ffi[StdProcess]] {
+    match StdProcess::dlsym_function(StdProcess::RTLD_DEFAULT, in "_NSGetEnviron".as_bytes()) {
+        Result::Ok(Option::Some(f)) => word(StdProcess::EnvironFn(f), 8),
+        _ => match StdProcess::dlsym(StdProcess::RTLD_DEFAULT, in "environ".as_bytes()) {
+            Result::Ok(a) => word(a, 8),
+            Result::Err(_) => 0,
+        },
+    }
+}
+
+// The last edit of the key `s[k0..k1]`, or `n` (the edit count) when no
+// edit names it.
+fn last_edit(in c: ProcCommand, in s: Slice[u8], k0: u64, k1: u64) -> u64 {
+    let n = c.ops.len();
+    let mut found = n;
+    let mut start: u64 = 0;
+    for i in 0..n {
+        let end = word_at(in c.key_ends.as_slice(), i);
+        if same(in c.keys.as_slice(), start, end, in s, k0, k1) {
+            found = i;
+        }
+        start = end;
+    }
+    found
+}
+
+// The child's environment as a `CStrList`: the parent's variables (unless
+// cleared) that no edit names, then each key's last edit when it sets it.
+// A parent entry's key ends at its first `=` after byte 0, as Rust's
+// `std::env::vars_os` reads them; entries without one are dropped.
+fn child_environment(in c: ProcCommand) -> ChunkSeq[u8] eff [Ffi[StdProcess]] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let n = c.ops.len();
+    if !c.clear {
+        let table = environment();
+        let mut k: u64 = 0;
+        loop {
+            let p = word(wrapping_add(table, wrapping_mul(k, 8)), 8);
+            if p == 0 {
+                break;
+            }
+            k = wrapping_add(k, 1);
+            let entry = match StdProcess::cstr_at(p, in "".as_bytes()) {
+                Result::Ok(Option::Some(s)) => s,
+                _ => ChunkSeq::new[u8](),
+            };
+            let e = entry.as_slice();
+            let mut eq: u64 = 0;
+            for i in 1..e.len() {
+                if eq == 0 && byte_at(in e, i) == 61 {
+                    eq = i;
+                }
+            }
+            if eq == 0 {
+                continue;
+            }
+            if n > 0 && last_edit(in c, in e, 0, eq) < n {
+                continue;
+            }
+            out.extend(in e);
+            out.push(0);
+        }
+    }
+    let mut start: u64 = 0;
+    let mut vstart: u64 = 0;
+    for i in 0..n {
+        let end = word_at(in c.key_ends.as_slice(), i);
+        let vend = word_at(in c.value_ends.as_slice(), i);
+        if byte_at(in c.ops.as_slice(), i) == 1
+            && last_edit(in c, in c.keys.as_slice(), start, end) == i {
+            out.extend(in c.keys[start..end]);
+            out.push(61);
+            out.extend(in c.values[vstart..vend]);
+            out.push(0);
+        }
+        start = end;
+        vstart = vend;
+    }
+    out
+}
+
+// Whether the child's `PATH` may differ from the parent's: the
+// environment is cleared or an edit names `PATH`.
+fn path_changed(in c: ProcCommand) -> bool {
+    if c.clear {
+        return true;
+    }
+    let path = "PATH".as_bytes();
+    last_edit(in c, in path, 0, path.len()) < c.ops.len()
+}
+
+// The value of `PATH` in a `CStrList` environment, or glibc's default
+// search path (`/bin:/usr/bin`) when it has none.
+fn search_path(in envp: Slice[u8]) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let prefix = "PATH=".as_bytes();
+    let mut start: u64 = 0;
+    for i in 0..envp.len() {
+        if byte_at(in envp, i) == 0 {
+            if wrapping_sub(i, start) >= 5
+                && same(in envp, start, wrapping_add(start, 5), in prefix, 0, 5) {
+                out.extend(in envp[wrapping_add(start, 5)..i]);
+                return out;
+            }
+            start = wrapping_add(i, 1);
+        }
+    }
+    out.extend(in "/bin:/usr/bin".as_bytes());
+    out
+}
+
+// The program a bare name runs under a changed `PATH`: the first
+// executable `dir/name` along it (an empty entry is the current
+// directory), as `execvp` searches. `Err` is the errno to report:
+// `EACCES` when a candidate exists but cannot run, else `ENOENT`.
+fn find_program(in name: Slice[u8], in path: Slice[u8])
+    -> Result[ChunkSeq[u8], u32] eff [Ffi[StdProcess]] {
+    let mut denied = false;
+    let mut start: u64 = 0;
+    let n = path.len();
+    for i in 0..wrapping_add(n, 1) {
+        if i == n || byte_at(in path, i) == 58 {
+            let mut cand: ChunkSeq[u8] = ChunkSeq::new[u8]();
+            if i == start {
+                cand.push(46);
+            } else {
+                cand.extend(in path[start..i]);
+            }
+            cand.push(47);
+            cand.extend(in name);
+            match StdProcess::access(in cand.as_slice(), StdProcess::X_OK) {
+                Result::Ok((0, _)) => return Result::Ok(cand),
+                Result::Ok((_, e)) => {
+                    if e == StdProcess::EACCES {
+                        denied = true;
+                    }
+                },
+                Result::Err(_) => {},
+            }
+            start = wrapping_add(i, 1);
+        }
+    }
+    if denied {
+        Result::Err(StdProcess::EACCES)
+    } else {
+        Result::Err(StdProcess::ENOENT)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Spawning.
+
+fn new_actions() -> SpawnActions {
+    SpawnActions {
+        w0: 0,
+        w1: 0,
+        w2: 0,
+        w3: 0,
+        w4: 0,
+        w5: 0,
+        w6: 0,
+        w7: 0,
+        w8: 0,
+        w9: 0,
+        w10: 0,
+        w11: 0,
+        w12: 0,
+        w13: 0,
+        w14: 0,
+        w15: 0,
+    }
+}
+
+fn new_sigset() -> SigSet {
+    SigSet {
+        w0: 0,
+        w1: 0,
+        w2: 0,
+        w3: 0,
+        w4: 0,
+        w5: 0,
+        w6: 0,
+        w7: 0,
+        w8: 0,
+        w9: 0,
+        w10: 0,
+        w11: 0,
+        w12: 0,
+        w13: 0,
+        w14: 0,
+        w15: 0,
+    }
+}
+
+fn new_attr() -> SpawnAttr {
+    SpawnAttr {
+        w0: 0,
+        w1: 0,
+        w2: 0,
+        w3: 0,
+        w4: 0,
+        w5: 0,
+        w6: 0,
+        w7: 0,
+        w8: 0,
+        w9: 0,
+        w10: 0,
+        w11: 0,
+        w12: 0,
+        w13: 0,
+        w14: 0,
+        w15: 0,
+        w16: 0,
+        w17: 0,
+        w18: 0,
+        w19: 0,
+        w20: 0,
+        w21: 0,
+        w22: 0,
+        w23: 0,
+        w24: 0,
+        w25: 0,
+        w26: 0,
+        w27: 0,
+        w28: 0,
+        w29: 0,
+        w30: 0,
+        w31: 0,
+        w32: 0,
+        w33: 0,
+        w34: 0,
+        w35: 0,
+        w36: 0,
+        w37: 0,
+        w38: 0,
+        w39: 0,
+        w40: 0,
+        w41: 0,
+        w42: 0,
+        w43: 0,
+        w44: 0,
+        w45: 0,
+        w46: 0,
+        w47: 0,
+    }
+}
+
+fn close_fd(fd: i32) eff [Ffi[StdProcess]] {
+    if fd >= 0 {
+        let _ = StdProcess::close(fd);
+    }
+}
+
+// A close-on-exec pipe: `(read end, write end)`, or `Err(errno)`.
+fn pipe() -> Result[(i32, i32), u32] eff [Ffi[StdProcess]] {
+    let mut fds: u64 = 0;
+    let (r, e) = StdProcess::make_pipe(inout fds, StdProcess::O_CLOEXEC);
+    if r < 0 {
+        return Result::Err(e);
+    }
+    let rd = wrapping_i32(fds & 4294967295);
+    let wr = wrapping_i32(fds >> 32);
+    if StdProcess::PIPE_CLOEXEC == 0 {
+        let _ = StdProcess::fcntl(rd, StdProcess::F_SETFD, StdProcess::FD_CLOEXEC);
+        let _ = StdProcess::fcntl(wr, StdProcess::F_SETFD, StdProcess::FD_CLOEXEC);
+    }
+    Result::Ok((rd, wr))
+}
+
+// Set up stream `fd` of the child for `mode` in `fa`: a null device, or
+// for a captured output stream a new pipe whose write end becomes `fd`.
+// `(read end, write end)` of that pipe (-1 when there is none), or
+// `Err(errno)`.
+fn stream(inout fa: SpawnActions, fd: i32, mode: u32)
+    -> Result[(i32, i32), u32] eff [Ffi[StdProcess]] {
+    if mode == capture() && fd != 0 {
+        let (rd, wr) = match pipe() {
+            Result::Ok(p) => p,
+            Result::Err(e) => return Result::Err(e),
+        };
+        let _ = StdProcess::posix_spawn_file_actions_adddup2(inout fa, wr, fd);
+        return Result::Ok((rd, wr));
+    }
+    if mode == null() || mode == capture() {
+        let flags = if fd == 0 {
+            StdProcess::O_RDONLY
+        } else {
+            StdProcess::O_WRONLY
+        };
+        let _ = StdProcess::posix_spawn_file_actions_addopen(
+            inout fa,
+            fd,
+            in "/dev/null".as_bytes(),
+            flags,
+            0
+        );
+    }
+    Result::Ok((-1, -1))
 }
 
 // Start the command. The command is consumed either way.
 pub fn spawn(sink c: ProcCommand) -> Result[ProcChild, IoError] eff [Ffi[StdProcess]] {
-    let mut err: u64 = 0;
-    match StdProcess::vstd_proc_spawn(c, inout err) {
-        Option::Some(ch) => Result::Ok(ch),
-        Option::None => Result::Err(error_of(err)),
+    if c.nul {
+        discard(c);
+        return Result::Err(io_kind(invalid_input()));
+    }
+    let envp = child_environment(in c);
+    let bare = !has_byte(in c.program.as_slice(), 47);
+    // A bare name under a changed `PATH` is searched here, along the
+    // child's `PATH` (Rust's `Command` searches the child's too).
+    let mut program: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut search = false;
+    if bare && path_changed(in c) {
+        let path = search_path(in envp.as_slice());
+        match find_program(in c.program.as_slice(), in path.as_slice()) {
+            Result::Ok(p) => program.extend(in p.as_slice()),
+            Result::Err(e) => {
+                discard(c);
+                return Result::Err(io_errno(e));
+            },
+        }
+    } else {
+        program.extend(in c.program.as_slice());
+        search = bare;
+    }
+    let mut fa = new_actions();
+    let _ = StdProcess::posix_spawn_file_actions_init(inout fa);
+    let mut attr = new_attr();
+    let _ = StdProcess::posix_spawnattr_init(inout attr);
+    let mut set = new_sigset();
+    let _ = StdProcess::sigemptyset(inout set);
+    let _ = StdProcess::posix_spawnattr_setsigmask(inout attr, in set);
+    let _ = StdProcess::sigaddset(inout set, StdProcess::SIGPIPE);
+    let _ = StdProcess::posix_spawnattr_setsigdefault(inout attr, in set);
+    let _ = StdProcess::posix_spawnattr_setflags(
+        inout attr,
+        StdProcess::POSIX_SPAWN_SETSIGDEF | StdProcess::POSIX_SPAWN_SETSIGMASK
+    );
+    let mut failed: u32 = 0;
+    let (_, _) = match stream(inout fa, 0, c.stdin) {
+        Result::Ok(p) => p,
+        Result::Err(e) => {
+            failed = e;
+            (-1, -1)
+        },
+    };
+    let (out_rd, out_wr) = if failed != 0 {
+        (-1, -1)
+    } else {
+        match stream(inout fa, 1, c.stdout) {
+            Result::Ok(p) => p,
+            Result::Err(e) => {
+                failed = e;
+                (-1, -1)
+            },
+        }
+    };
+    let (err_rd, err_wr) = if failed != 0 {
+        (-1, -1)
+    } else {
+        match stream(inout fa, 2, c.stderr) {
+            Result::Ok(p) => p,
+            Result::Err(e) => {
+                failed = e;
+                (-1, -1)
+            },
+        }
+    };
+    if failed == 0 && c.has_dir {
+        let _ = StdProcess::posix_spawn_file_actions_addchdir_np(inout fa, in c.dir.as_slice());
+    }
+    let mut pid: i32 = 0;
+    if failed == 0 {
+        let r = if search {
+            StdProcess::posix_spawnp(
+                inout pid,
+                in program.as_slice(),
+                in fa,
+                in attr,
+                in c.args.as_slice(),
+                in envp.as_slice()
+            )
+        } else {
+            StdProcess::posix_spawn(
+                inout pid,
+                in program.as_slice(),
+                in fa,
+                in attr,
+                in c.args.as_slice(),
+                in envp.as_slice()
+            )
+        };
+        failed = match r {
+            Result::Ok(e) => wrapping_u32(e),
+            Result::Err(_) => 22,
+        };
+    }
+    let _ = StdProcess::posix_spawn_file_actions_destroy(inout fa);
+    let _ = StdProcess::posix_spawnattr_destroy(inout attr);
+    close_fd(out_wr);
+    close_fd(err_wr);
+    discard(c);
+    if failed != 0 {
+        close_fd(out_rd);
+        close_fd(err_rd);
+        return Result::Err(io_errno(failed));
+    }
+    Result::Ok(
+        ProcChild {
+            pid: pid,
+            out_fd: out_rd,
+            err_fd: err_rd,
+            out: ChunkSeq::new[u8](),
+            err: ChunkSeq::new[u8](),
+        }
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Waiting.
+
+// One `read` of up to 8 KiB from `fd` onto the end of `buf`: the bytes
+// read (0 at end of file), or -1 with `err` set. `EINTR` is retried.
+fn read_some(fd: i32, inout buf: ChunkSeq[u8], inout err: u64) -> i64 eff [Ffi[StdProcess]] {
+    let at = buf.len();
+    let end = wrapping_add(at, 8192);
+    buf.resize(end, 0);
+    loop {
+        let (n, e) = StdProcess::read(fd, inout buf[at..end]);
+        if n >= 0 {
+            buf.truncate(wrapping_add(at, wrapping_u64(n)));
+            return n;
+        }
+        if e != StdProcess::EINTR {
+            buf.truncate(at);
+            err = os_error_word(e);
+            return -1;
+        }
+    }
+}
+
+// Read the captured streams to their ends, as Rust's `wait_with_output`
+// does: one stream is read straight through, two are read as `poll` finds
+// data. Each read end is closed once drained. 0, or 1 with `err` set.
+fn drain(inout ch: ProcChild, inout err: u64) -> u32 eff [Ffi[StdProcess]] {
+    loop {
+        let a = ch.out_fd;
+        let b = ch.err_fd;
+        if a < 0 && b < 0 {
+            return 0;
+        }
+        let mut read_out = a >= 0;
+        let mut read_err = b >= 0;
+        if a >= 0 && b >= 0 {
+            let mut fds: ChunkSeq[u64] = ChunkSeq::new[u64]();
+            let events = wrapping_mul(StdProcess::POLLIN, 4294967296);
+            fds.push(widen_u64(wrapping_u32(a)) | events);
+            fds.push(widen_u64(wrapping_u32(b)) | events);
+            let (r, e) = StdProcess::poll(inout fds[0..2], -1);
+            if r < 0 {
+                if e == StdProcess::EINTR {
+                    continue;
+                }
+                err = os_error_word(e);
+                return 1;
+            }
+            let fa = word_at(in fds.as_slice(), 0);
+            let fb = word_at(in fds.as_slice(), 1);
+            read_out = wrapping_shr_u64(fa, 48) != 0;
+            read_err = wrapping_shr_u64(fb, 48) != 0;
+        }
+        if read_out {
+            let n = read_some(a, inout ch.out, inout err);
+            if n < 0 {
+                return 1;
+            }
+            if n == 0 {
+                close_fd(a);
+                ch.out_fd = -1;
+            }
+        }
+        if read_err {
+            let n = read_some(b, inout ch.err, inout err);
+            if n < 0 {
+                return 1;
+            }
+            if n == 0 {
+                close_fd(b);
+                ch.err_fd = -1;
+            }
+        }
+    }
+}
+
+// `waitpid(pid)`, retrying `EINTR`: the raw status, or `Err(errno)`.
+fn reap(pid: i32) -> Result[u32, u32] eff [Ffi[StdProcess]] {
+    loop {
+        let mut status: i32 = 0;
+        let (r, e) = StdProcess::waitpid(pid, inout status, 0);
+        if r >= 0 {
+            return Result::Ok(wrapping_u32(status));
+        }
+        if e != StdProcess::EINTR {
+            return Result::Err(e);
+        }
     }
 }
 
 // Wait for the child to end, collecting captured output while it runs.
 // Waiting twice is an `invalid_input()` error.
 pub fn wait(inout ch: ProcChild) -> Result[ExitStatus, IoError] eff [Ffi[StdProcess]] {
+    if ch.pid <= 0 {
+        return Result::Err(io_kind(invalid_input()));
+    }
     let mut err: u64 = 0;
-    let mut s = ProcStatus {
-        code: 0,
-        signal: 0,
-        exited: 0,
+    if drain(inout ch, inout err) != 0 {
+        return Result::Err(
+            IoError {
+                kind: wrapping_u32(err & 255),
+                os: wrapping_u32(err >> 32),
+            }
+        );
+    }
+    let s = match reap(ch.pid) {
+        Result::Ok(s) => s,
+        Result::Err(e) => return Result::Err(io_errno(e)),
     };
-    if StdProcess::vstd_proc_wait(inout ch, inout s, inout err) != 0 {
-        return Result::Err(error_of(err));
+    ch.pid = 0;
+    let low = s & 127;
+    if low == 0 {
+        return Result::Ok(
+            ExitStatus {
+                code: wrapping_i64(wrapping_shr_u32(s, 8) & 255),
+                signal: 0,
+                exited: true,
+            }
+        );
     }
     Result::Ok(
         ExitStatus {
-            code: s.code,
-            signal: s.signal,
-            exited: s.exited != 0,
+            code: 0,
+            signal: low,
+            exited: false,
         }
     )
-}
-
-fn captured(in ch: ProcChild, stream: u32) -> ChunkSeq[u8] eff [Ffi[StdProcess]] {
-    let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    let n = StdProcess::vstd_proc_output(in ch, stream, inout buf.as_slice_mut());
-    if n > 0 {
-        buf.resize(n, 0);
-        let m = StdProcess::vstd_proc_output(in ch, stream, inout buf.as_slice_mut());
-    }
-    buf
 }
 
 // What a waited child wrote to a captured stdout (empty before `wait`, or
 // when stdout was not captured).
 pub fn stdout(in ch: ProcChild) -> ChunkSeq[u8] eff [Ffi[StdProcess]] {
-    captured(in ch, stdout_stream())
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    out.extend(in ch.out.as_slice());
+    out
 }
 
 pub fn stderr(in ch: ProcChild) -> ChunkSeq[u8] eff [Ffi[StdProcess]] {
-    captured(in ch, stderr_stream())
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    out.extend(in ch.err.as_slice());
+    out
 }
 
 // The child's process id (0 once it has been waited for).
 pub fn child_id(in ch: ProcChild) -> u64 eff [Ffi[StdProcess]] {
-    StdProcess::vstd_proc_child_id(in ch)
+    if ch.pid > 0 {
+        widen_u64(wrapping_u32(ch.pid))
+    } else {
+        0
+    }
 }
 
 // Release a child. One that was never waited for is killed and reaped.
 pub fn release(sink ch: ProcChild) eff [Ffi[StdProcess]] {
-    StdProcess::vstd_proc_free(ch);
+    let ProcChild {
+        pid,
+        out_fd,
+        err_fd,
+        out,
+        err,
+    } = ch;
+    close_fd(out_fd);
+    close_fd(err_fd);
+    if pid > 0 {
+        let _ = StdProcess::kill(pid, StdProcess::SIGKILL);
+        let _ = reap(pid);
+    }
 }
 
 // Run the command to completion with stdout and stderr captured and stdin
 // null: its status and output.
 pub fn output(sink c: ProcCommand) -> Output eff [Ffi[StdProcess], Fail[IoError]] {
     let mut c = c;
-    StdProcess::vstd_proc_stdio(inout c, stdin_stream(), null());
-    StdProcess::vstd_proc_stdio(inout c, stdout_stream(), capture());
-    StdProcess::vstd_proc_stdio(inout c, stderr_stream(), capture());
+    stdio(inout c, stdin_stream(), null());
+    stdio(inout c, stdout_stream(), capture());
+    stdio(inout c, stderr_stream(), capture());
     let mut ch = match spawn(c) {
         Result::Ok(ch) => ch,
         Result::Err(e) => return Fail::raise(e),
@@ -207,10 +909,10 @@ pub fn output(sink c: ProcCommand) -> Output eff [Ffi[StdProcess], Fail[IoError]
 
 // End this process now with exit status `code` (truncated to 32 bits).
 pub fn exit(code: i64) eff [Ffi[StdProcess]] {
-    StdProcess::vstd_proc_exit(code);
+    let _ = StdProcess::exit(wrapping_i32(code));
 }
 
 // This process's id.
 pub fn id() -> u64 eff [Ffi[StdProcess]] {
-    StdProcess::vstd_proc_id()
+    widen_u64(wrapping_u32(StdProcess::getpid()))
 }

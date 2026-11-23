@@ -138,6 +138,37 @@ pub fn lifecycle() -> u64 eff [Ffi[StdProcess]] {
     mix(mix(mix(mix(first, again), hash(in text.as_slice())), killed), me)
 }
 
+// The benchmark: `rounds` runs of a program with both streams captured,
+// and one with an edited environment.
+fn bench(rounds: u64) -> u64 eff [Ffi[StdProcess]] {
+    let mut total: u64 = 0;
+    for _ in 0..rounds {
+        let r = handle Fail[IoError] in {
+            let mut c = command(in "/bin/echo");
+            arg(inout c, in "benchmark output");
+            let a = output(c);
+            let mut d = command(in "echo");
+            arg(inout d, in "x");
+            env(inout d, in "VESPER_STD_BENCH", in "1");
+            let b = output(d);
+            wrapping_add(a.stdout.len(), b.stdout.len())
+        } with {
+            return v => v,
+            raise(e, _) => code(e),
+        };
+        total = wrapping_add(total, r);
+    }
+    total
+}
+
+pub fn bench_spawn() -> u64 eff [Ffi[StdProcess]] {
+    bench(200)
+}
+
+pub fn bench_none() -> u64 eff [Ffi[StdProcess]] {
+    bench(0)
+}
+
 pub fn quit() -> u64 eff [Ffi[StdProcess]] {
     exit(7);
     0
@@ -208,6 +239,69 @@ fn spawn_failures_are_typed_and_children_are_released() {
     assert_eq!(agree(&checked, "lifecycle", &MODES), want);
     // Three runs, each killing a 30-second sleep instead of waiting for it.
     assert!(start.elapsed().as_secs() < 25, "{:?}", start.elapsed());
+}
+
+/// Spawn throughput, Vesper (JIT, optimized) against `std::process`, in
+/// ABBA order. Run by hand:
+/// `cargo test --release --test std_process -- --ignored --nocapture bench`.
+#[cfg(unix)]
+#[test]
+#[ignore = "benchmark"]
+fn bench_spawning_children() {
+    let dir = Temp::new("std-process");
+    let checked = check_driver(&source(&dir));
+    let rust = || {
+        let mut t = 0u64;
+        for _ in 0..200 {
+            let a = std::process::Command::new("/bin/echo")
+                .arg("benchmark output")
+                .output()
+                .unwrap();
+            let b = std::process::Command::new("echo")
+                .arg("x")
+                .env("VESPER_STD_BENCH", "1")
+                .output()
+                .unwrap();
+            t += (a.stdout.len() + b.stdout.len()) as u64;
+        }
+        t
+    };
+    let symbols = std_io_support::symbols();
+    let jit = |entry: &str| {
+        let start = std::time::Instant::now();
+        let v = std_io_support::word(&checked.jit(entry, &symbols).unwrap());
+        (v, start.elapsed())
+    };
+    let want = rust();
+    let mut vesper = vec![];
+    let mut native = vec![];
+    for round in 0..4 {
+        let order: &[bool] = if round % 2 == 0 {
+            &[true, false]
+        } else {
+            &[false, true]
+        };
+        for &v in order {
+            if v {
+                let (got, t) = jit("bench_spawn");
+                let (_, base) = jit("bench_none");
+                assert_eq!(got, want);
+                vesper.push(t.saturating_sub(base));
+            } else {
+                let start = std::time::Instant::now();
+                assert_eq!(rust(), want);
+                native.push(start.elapsed());
+            }
+        }
+    }
+    vesper.sort();
+    native.sort();
+    eprintln!(
+        "median of 400 spawns: Vesper {:?}, std::process {:?}, ratio {:.2}",
+        vesper[2],
+        native[2],
+        vesper[2].as_secs_f64() / native[2].as_secs_f64()
+    );
 }
 
 /// Runs only as the child of `exit_ends_the_process`.

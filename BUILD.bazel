@@ -1446,10 +1446,13 @@ vesper_package(
 
 vesper_package(
     name = "std_process_package",
-    srcs = glob(["packages/vesper-std/process/src/**/*.ves"]),
+    srcs = glob([
+        "packages/vesper-std/process/src/**/*.ves",
+        "packages/vesper-std/process/src-windows/**/*.ves",
+    ]),
     manifest = "packages/vesper-std/process/Loom.toml",
     visibility = ["//visibility:public"],
-    vsys = ["packages/vesper-std/process/process.vsys"],
+    vsys = glob(["packages/vesper-std/process/process-*.vsys"]),
     deps = [":std_fs_package"],
 )
 
