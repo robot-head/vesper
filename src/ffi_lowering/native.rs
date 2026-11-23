@@ -2079,7 +2079,8 @@ fn value_words(v: &ValueType, out: &mut Vec<u64>) {
                 Float::F64 => 64,
             },
         ]),
-        ValueType::CStr | ValueType::CWStr => out.push(8),
+        ValueType::CStr => out.push(8),
+        ValueType::CWStr => out.push(9),
     }
 }
 fn integer_word(int: &vesper_ffi::Integer) -> u64 {
@@ -2249,14 +2250,7 @@ impl<M: Module> Codegen<'_, '_, M> {
         // Apple arm64 pads a variadic call's argument registers with zero
         // words (`sys::Variadic`), which they do not carry either.
         let abi = plan.function.abi();
-        if abi.variadic.is_some_and(|v| v.padding > 0)
-            || plan
-                .function
-                .parameters()
-                .iter()
-                .any(|p| matches!(p.ty(), ParameterType::CWStr))
-            || *plan.function.result() == ValueType::CWStr
-        {
+        if abi.variadic.is_some_and(|v| v.padding > 0) {
             return Ok(None);
         }
         let pointer = self.m.target_config().pointer_type();
@@ -2329,6 +2323,10 @@ impl<M: Module> Codegen<'_, '_, M> {
                 ParameterType::CStr => {
                     let view = self.expr(&arg.expr)?;
                     words.extend([2, word(view), little, 2]);
+                }
+                ParameterType::CWStr => {
+                    let view = self.expr(&arg.expr)?;
+                    words.extend([2, word(view), little, 8]);
                 }
                 ParameterType::CStrList => {
                     let view = self.expr(&arg.expr)?;
@@ -2622,24 +2620,30 @@ impl<M: Module> Codegen<'_, '_, M> {
         };
         let result = plan.function.result();
         let jit = std::any::type_name::<M>().contains("JITModule");
-        if *result == ValueType::CStr && !jit {
+        if (*result == ValueType::CStr || *result == ValueType::CWStr) && !jit {
             if self.m.isa().triple().operating_system == target_lexicon::OperatingSystem::None_ {
                 return Err(
                     "ChunkSeq in a freestanding image needs an allocator; the generated one uses the C library"
                         .into(),
                 );
             }
-            for (name, params) in [("strlen", 1), ("memcpy", 3)] {
+            if *result == ValueType::CStr {
                 let mut sig = self.m.make_signature();
-                for _ in 0..params {
-                    sig.params.push(AbiParam::new(types::I64));
-                }
+                sig.params.push(AbiParam::new(types::I64));
                 sig.returns.push(AbiParam::new(types::I64));
                 self.m
-                    .declare_function(name, Linkage::Import, &sig)
-                    .map_err(|e| format!("C library function '{name}': {e}"))?;
+                    .declare_function("strlen", Linkage::Import, &sig)
+                    .map_err(|e| format!("C library function 'strlen': {e}"))?;
             }
             self.seq_define_runtime()?;
+            let mut sig = self.m.make_signature();
+            for _ in 0..3 {
+                sig.params.push(AbiParam::new(types::I64));
+            }
+            sig.returns.push(AbiParam::new(types::I64));
+            self.m
+                .declare_function("memcpy", Linkage::Import, &sig)
+                .map_err(|e| format!("C library function 'memcpy': {e}"))?;
         }
         let mut words = vec![raw.map_or(NO_VALUE, word), u64::from(jit)];
         value_words(result, &mut words);
