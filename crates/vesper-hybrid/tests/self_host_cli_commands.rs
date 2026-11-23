@@ -836,3 +836,43 @@ fn fmt_matches_the_default_compiler() {
         mismatches.join("\n")
     );
 }
+
+/// The workspace walk's 200,000-entry bound holds while a directory is
+/// read (Linux, where creating the entries is quick): exactly the limit
+/// walks, one more is the bounded-walk error, on both compilers.
+#[cfg(target_os = "linux")]
+#[test]
+fn fmt_walk_limit_matches_the_default_compiler() {
+    let default = default_compiler();
+    let hybrid = hybrid();
+    let root = scratch("vesper-cli-fmt-limit");
+    let big = root.join("big");
+    std::fs::create_dir_all(&big).unwrap();
+    for i in 0..200_000 {
+        std::fs::File::create(big.join(format!("{i:06}.txt"))).unwrap();
+    }
+    let run = |compiler: &Path| {
+        Command::new(compiler)
+            .current_dir(&root)
+            .args(["fmt", "--json", "big"])
+            .env_remove("VESPER_HYBRID_STATS")
+            .output()
+            .unwrap()
+    };
+    for extra in [None, Some("zz.ves")] {
+        if let Some(name) = extra {
+            std::fs::write(big.join(name), b"fn main() -> i64 {   1 }\n").unwrap();
+        }
+        let (d, h) = (run(&default), run(&hybrid));
+        assert_eq!(d.status.code(), h.status.code(), "{extra:?}");
+        assert_eq!(d.stdout, h.stdout, "{extra:?}");
+        assert_eq!(d.stderr, h.stderr, "{extra:?}");
+        let stderr = String::from_utf8_lossy(&h.stderr);
+        assert_eq!(
+            stderr.contains("fmt visited more than 200000 directory entries"),
+            extra.is_some(),
+            "{extra:?}: {stderr}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}

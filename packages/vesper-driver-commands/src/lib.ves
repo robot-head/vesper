@@ -40,7 +40,6 @@ use @vesper-std/fs::{
 };
 use @vesper-std/fs::walk::{
     Entries,
-    list_dir_path,
     entry_count,
     entry_start,
     entry_end,
@@ -874,16 +873,149 @@ fn io_word(e: IoError) -> u64 {
     widen_u64(e.kind) | (widen_u64(e.os) << 32)
 }
 
-// `list_dir_path` into `out`; 0, or the error word of a failed listing
-// (never 0: a failure has a kind).
-fn try_list(in dir: Slice[u8], inout out: Entries) -> u64 eff [Ffi[StdFs]] {
-    handle Fail[IoError] in {
-        out = list_dir_path(in dir);
-        0
-    } with {
-        return v => v,
-        raise(e, _k) => io_word(e),
+// Directory `dir`'s names and kinds (not following symbolic links) into
+// `out`, in the OS's order, reading at most `budget` entries: one more sets
+// `over` and stops, so the walk's limit holds while the listing is read,
+// as in Rust. 0, or the error word of a directory that cannot be read.
+fn list_bounded(in dir: Slice[u8], budget: u64, inout out: Entries, inout over: bool)
+    -> u64 eff [Ffi[StdFs]] {
+    let mut err: u64 = 0;
+    let mut d = match StdFs::vstd_fs_read_dir(in dir, inout err) {
+        Option::Some(d) => d,
+        Option::None => {
+            if err == 0 {
+                return 13;
+            }
+            return err;
+        },
+    };
+    let mut name: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    name.resize(256, 0);
+    loop {
+        let mut kind: u32 = 0;
+        let n = StdFs::vstd_fs_dir_next(inout d, inout name.as_slice_mut(), inout kind);
+        if n < 0 {
+            break;
+        }
+        let len = wrapping_u64(n);
+        if len > name.len() {
+            // Longer than the buffer: it was not consumed; ask again.
+            name.resize(len, 0);
+        } else {
+            if out.ends.len() >= budget {
+                over = true;
+                break;
+            }
+            out.bytes.extend(in name[0..len]);
+            out.ends.push(out.bytes.len());
+            out.kinds.push(kind);
+        }
     }
+    StdFs::vstd_fs_dir_close(d);
+    0
+}
+
+// Whether name `x` sorts before name `y` (bytewise, as `OsString` does).
+fn name_before(in e: Entries, x: u64, y: u64) -> bool {
+    let xa = entry_start(in e, x);
+    let xb = entry_end(in e, x);
+    let ya = entry_start(in e, y);
+    let yb = entry_end(in e, y);
+    let xl = wrapping_sub(xb, xa);
+    let yl = wrapping_sub(yb, ya);
+    let n = if xl < yl {
+        xl
+    } else {
+        yl
+    };
+    for i in 0..n {
+        let p = byte_at(in e.bytes.as_slice(), wrapping_add(xa, i));
+        let q = byte_at(in e.bytes.as_slice(), wrapping_add(ya, i));
+        if p != q {
+            return p < q;
+        }
+    }
+    xl < yl
+}
+
+// The entry order of `e` sorted by name: a stable bottom-up merge sort of
+// indices.
+fn sorted_order(in e: Entries) -> ChunkSeq[u64] {
+    let n = e.ends.len();
+    let mut a: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut b: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for i in 0..n {
+        a.push(i);
+        b.push(i);
+    }
+    let mut width: u64 = 1;
+    loop {
+        if width >= n {
+            break;
+        }
+        let mut lo: u64 = 0;
+        loop {
+            if lo >= n {
+                break;
+            }
+            let mid = min_u64(wrapping_add(lo, width), n);
+            let hi = min_u64(wrapping_add(mid, width), n);
+            let mut i = lo;
+            let mut j = mid;
+            for k in lo..hi {
+                let ai = span_at(in a.as_slice(), i);
+                let aj = span_at(in a.as_slice(), j);
+                let take_left = if i >= mid {
+                    false
+                } else if j >= hi {
+                    true
+                } else {
+                    !name_before(in e, aj, ai)
+                };
+                if take_left {
+                    set64(inout b.as_slice_mut(), k, ai);
+                    i = wrapping_add(i, 1);
+                } else {
+                    set64(inout b.as_slice_mut(), k, aj);
+                    j = wrapping_add(j, 1);
+                }
+            }
+            lo = hi;
+        }
+        for k in 0..n {
+            set64(inout a.as_slice_mut(), k, span_at(in b.as_slice(), k));
+        }
+        width = wrapping_add(width, width);
+    }
+    a
+}
+
+fn set64(inout s: Slice[u64], i: u64, v: u64) {
+    s.try_set(i, v);
+}
+
+fn min_u64(x: u64, y: u64) -> u64 {
+    if x < y {
+        x
+    } else {
+        y
+    }
+}
+
+// Whether `name` holds U+FFFD: on Windows the host lists names lossily, so
+// such a name may not be the file's real (unpaired-surrogate) name.
+fn replacement_char(in name: Slice[u8]) -> bool {
+    if name.len() < 3 {
+        return false;
+    }
+    for i in 0..wrapping_sub(name.len(), 2) {
+        if byte_at(in name, i) == 239
+            && byte_at(in name, wrapping_add(i, 1)) == 191
+            && byte_at(in name, wrapping_add(i, 2)) == 189 {
+            return true;
+        }
+    }
+    false
 }
 
 // `Path::extension() == Some("ves")` of a file name.
@@ -918,10 +1050,12 @@ fn skipped_dir(in name: Slice[u8]) -> bool {
 }
 
 // `walk`: the `.ves` files below `root` in sorted order, appended to
-// `files`; symbolic links are never followed. False with `err` set when a
-// directory cannot be read or the walk visits too many entries.
+// `files`; symbolic links are never followed. `walk_ok()`; `walk_failed()`
+// with `err` set when a directory cannot be read or the walk visits too
+// many entries; or `walk_delegate()` when a Windows name may have been
+// listed lossily, so the Rust CLI, which keeps the `OsString`, must run.
 fn walk(in root: Slice[u8], inout files: Paths, inout visited: u64, inout err: ChunkSeq[u8])
-    -> bool eff [Ffi[StdFs], Ffi[StdEnv], Ffi[HybridCommands]] {
+    -> u32 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[HybridCommands]] {
     let windows = os() == os_windows();
     let mut pending = paths_new();
     paths_push(inout pending, in root);
@@ -935,30 +1069,37 @@ fn walk(in root: Slice[u8], inout files: Paths, inout visited: u64, inout err: C
             ends: ChunkSeq::new[u64](),
             kinds: ChunkSeq::new[u32](),
         };
-        let word = try_list(in dir.as_slice(), inout entries);
+        let mut over = false;
+        let budget = wrapping_sub(FMT_MAX_WALK_ENTRIES, visited);
+        let word = list_bounded(in dir.as_slice(), budget, inout entries, inout over);
         if word != 0 {
             err.extend(in dir.as_slice());
             err.extend(in ": ".as_bytes());
             let t = io_error_text(word);
             err.extend(in t.as_slice());
-            return false;
+            return walk_failed();
         }
-        let count = entry_count(in entries);
-        visited = wrapping_add(visited, count);
-        if visited > FMT_MAX_WALK_ENTRIES {
+        if over {
             err
                 .extend(
                     in "fmt visited more than 200000 directory entries; pass narrower paths"
                         .as_bytes()
                 );
-            return false;
+            return walk_failed();
         }
+        let count = entry_count(in entries);
+        visited = wrapping_add(visited, count);
+        let order = sorted_order(in entries);
         let mut subdirs = paths_new();
-        for i in 0..count {
+        for k in 0..count {
+            let i = span_at(in order.as_slice(), k);
             let a = entry_start(in entries, i);
             let b = entry_end(in entries, i);
             let mut name: ChunkSeq[u8] = ChunkSeq::new[u8]();
             name.extend(in entries.bytes[a..b]);
+            if windows && replacement_char(in name.as_slice()) {
+                return walk_delegate();
+            }
             let kind = entry_kind(in entries, i);
             if kind == kind_dir() {
                 if !skipped_dir(in name.as_slice()) {
@@ -976,7 +1117,19 @@ fn walk(in root: Slice[u8], inout files: Paths, inout visited: u64, inout err: C
             paths_push(inout pending, in p.as_slice());
         }
     }
-    true
+    walk_ok()
+}
+
+fn walk_ok() -> u32 {
+    0
+}
+
+fn walk_failed() -> u32 {
+    1
+}
+
+fn walk_delegate() -> u32 {
+    2
 }
 
 fn format_one(in path: Slice[u8], check: bool, recovery: bool, inout stats: ChunkSeq[u64])
@@ -1120,7 +1273,11 @@ fn fmt(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[HybridCommands]] 
         let p = paths_get(in paths, i);
         if is_dir(in p.as_slice()) {
             let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
-            if !walk(in p.as_slice(), inout files, inout visited, inout err) {
+            let walked = walk(in p.as_slice(), inout files, inout visited, inout err);
+            if walked == walk_delegate() {
+                return delegate();
+            }
+            if walked == walk_failed() {
                 return fmt_failed(in err.as_slice(), json);
             }
         } else {

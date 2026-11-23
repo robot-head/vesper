@@ -138,11 +138,16 @@ the Rust CLI. **Rust stays the default build**: the only `src/**` change is
 - **Options.** `--help`/`-h` and `--json` before `--`, `--check`,
   `--recovery`, `--`, and the `unknown fmt option` error.
 - **Paths.** The single-file case and the workspace case.
-- **The walk** (`walk`), over `@vesper-std/fs::walk::list_dir_path`:
+- **The walk** (`walk`), over @vesper-std/fs's directory reads (`StdFs`), with its own byte-order merge sort:
   - files and directories in byte order, without following symbolic links;
   - hidden, `target` and `bazel-*` directories skipped;
   - `Path::extension() == "ves"` decided the way Rust decides it;
-  - the 200,000-entry limit;
+  - the 200,000-entry limit, checked while each directory is read, so an
+    oversized directory is never fully loaded (Codex review);
+  - on Windows, a listed name holding U+FFFD goes back to the Rust CLI before
+    anything is formatted: the host lists Windows names lossily, so the name
+    may stand for an unpaired surrogate that Rust's `OsString` keeps (Codex
+    review);
   - the `{dir}: {io error}` message.
 - **Output.** Every status line and the summary.
 - **JSON.** Both JSON reports and the error report, written as serde_json
@@ -174,7 +179,7 @@ open issue or PR, and nothing under crates/vesper-fmt changed.
 | `crates/vesper-hybrid/src/commands.rs` | their host side |
 | `crates/vesper-hybrid/port/driver.rs` | regenerated binding (keeps the two symbols linked) |
 | `src/fmt_commands.rs` | `format_file` is `pub(crate)` |
-| `crates/vesper-hybrid/tests/self_host_cli_commands.rs` | `fmt_matches_the_default_compiler`; `routing_runs_in_vesper` now expects `fmt` to print from Vesper |
+| `crates/vesper-hybrid/tests/self_host_cli_commands.rs` | `fmt_matches_the_default_compiler`, `fmt_walk_limit_matches_the_default_compiler` (Linux: 200,000 entries walk, 200,001 give the bounded-walk error, on both compilers); `routing_runs_in_vesper` now expects `fmt` to print from Vesper |
 
 **The differential.** `fmt_matches_the_default_compiler` builds a fresh
 fixture for each compiler and each argument vector, then compares exit
