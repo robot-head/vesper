@@ -332,6 +332,9 @@ fn rust_task(w: &World, entry: &str, optimize: bool) -> RustTask {
     };
     let mut lines = vec![];
     let mut observe = |f: native::EmittedFunction| {
+        if f.key.contains("::cold#") {
+            return;
+        }
         let sig = &f.function.signature;
         let params: Vec<String> = sig
             .params
