@@ -221,6 +221,20 @@ the PR).
 - Part 4: the hybrid `ffi_lowering` module and its `ffi` hook install, the
   full suite and the SH4 scoreboard row.
 
+## Rewrite foreign-memory, callback, and float coverage (`#1287`)
+
+Removed the `uses_foreign_memory()` / `mapping().is_some()` descriptor filter
+in `tests/self_host_ffi_lowering_rewrite.rs` (now unblocked by PR `#1578`)
+and added `tests/foreign_memory.rs`, `tests/ffi_callbacks.rs`, and
+`tests/ffi_floats.rs` to `FFI_TESTS`:
+
+- `cargo +1.100.0 test --locked --release -p vesper --test self_host_ffi_lowering_rewrite -- --nocapture`:
+  `2 passed, 0 failed` (`141 cases, 61583 lines; 0 differ`, `1237 files,
+  4019183 lines; 0 differ`), covering `tests/fixtures/foreign_memory/xsk.ves`
+  (`Pinned[T]`, `linear extern mapping M[T]`), callbacks, and floats.
+- `CHECK_HARNESS_SPEED=1 cargo +1.100.0 test --locked --release -p vesper --test self_host_ffi_lowering_rewrite rewriter_speed -- --ignored --nocapture`:
+  ABBA `rust 116.1368ms vesper 42.1751ms (0.36x)`.
+
 ## Part 3 extension: foreign-memory, float, `CStrList`, and `Option[CStr]` emission
 
 Extended `Codegen::foreign_perform_swapped` (`src/ffi_lowering/native.rs`) and `@vesper/ffi-emit` (`packages/vesper-ffi-lowering/emit/src/lib.ves`) to cover `f32`/`f64` by value (`V_FLOAT`), `Pinned[T]` and `linear extern mapping M[T]` buffers (`KIND_BUFFER`, `foreign_mapping`, `sink` header release), `CStrList` (`KIND_CSTRLIST`, `cstr_list_walk`, `cstr_list`), and `Option[CStr]` return values (`V_CSTR`, `foreign_cstr_copy` via `vesper_seq_make`).
