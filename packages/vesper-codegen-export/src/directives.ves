@@ -27,7 +27,8 @@ use @vesper/check-data::names::{
 use @vesper/check-data::types::{
     Types,
     display,
-    types_new
+    types_new,
+    TyKind
 };
 use self::text::{
     copy_of,
@@ -38,9 +39,6 @@ use self::text::{
     same_str
 };
 
-const K_LIT: u8 = 0;
-const K_NAMED: u8 = 1;
-const K_TUPLE: u8 = 2;
 const NONE32: u32 = 4294967295;
 
 fn is_space(c: u8) -> bool {
@@ -340,7 +338,7 @@ impl TyParser {
 
 fn is_row(in rows: ChunkSeq[u32], in t: Types, ty: u32) -> bool {
     let n = t.node(ty);
-    if n.kind != K_NAMED || n.n != 0 {
+    if n.kind != TyKind::Named || n.n != 0 {
         return false;
     }
     for i in 0..rows.len() {
@@ -358,9 +356,9 @@ fn show(in t: Types, in names: Names, in rows: ChunkSeq[u32], ty: u32, inout o: 
         put(inout o, "eff Effects { instances: [], tail: Some(\"");
         names.write(n.name, inout o);
         put(inout o, "\") }");
-    } else if n.kind == K_LIT {
+    } else if n.kind == TyKind::Lit {
         put_u64(inout o, wrapping_u64(n.lit));
-    } else if n.kind == K_NAMED {
+    } else if n.kind == TyKind::Named {
         names.write(n.name, inout o);
         if n.n > 0 {
             put(inout o, "[");
@@ -387,7 +385,7 @@ fn show(in t: Types, in names: Names, in rows: ChunkSeq[u32], ty: u32, inout o: 
 // The Rust spelling `mangle(ty)`.
 fn mangle(in t: Types, in names: Names, in rows: ChunkSeq[u32], ty: u32, inout o: ChunkSeq[u8]) {
     let n = t.node(ty);
-    if n.kind == K_NAMED && !is_row(in rows, in t, ty) {
+    if n.kind == TyKind::Named && !is_row(in rows, in t, ty) {
         let mut b = ChunkSeq::new[u8]();
         names.write(n.name, inout b);
         for i in 0..b.len() {
@@ -402,9 +400,9 @@ fn mangle(in t: Types, in names: Names, in rows: ChunkSeq[u32], ty: u32, inout o
                 mangle(in t, in names, in rows, t.arg(ty, i), inout o);
             }
         }
-    } else if n.kind == K_TUPLE && n.n == 0 {
+    } else if n.kind == TyKind::Tuple && n.n == 0 {
         put(inout o, "unit");
-    } else if n.kind == K_TUPLE {
+    } else if n.kind == TyKind::Tuple {
         put(inout o, "tuple");
         for i in 0..w(n.n) {
             o.push(95);
