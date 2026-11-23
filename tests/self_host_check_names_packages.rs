@@ -788,6 +788,25 @@ fn encode(g: &Graph, a: &packages::Assembled) -> Vec<u8> {
         put(&mut out, m.file as u64);
         put_str(&mut out, &a.sources.files[m.file].text);
     }
+    let foreign: Vec<_> = a
+        .vsys
+        .iter()
+        .flat_map(|lib| {
+            let package = g
+                .packages
+                .iter()
+                .position(|p| p.name == lib.package)
+                .expect("foreign library belongs to a loaded package");
+            lib.type_names()
+                .into_iter()
+                .map(move |(name, _)| (package, name))
+        })
+        .collect();
+    put(&mut out, foreign.len() as u64);
+    for (package, name) in foreign {
+        put(&mut out, package as u64);
+        put_str(&mut out, &name);
+    }
     out
 }
 
@@ -1006,6 +1025,102 @@ fn manifest(name: &str, deps: &str) -> String {
     format!(
         "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n[dependencies]\n{deps}"
     )
+}
+
+/// An external consumer can keep two ASTs alive while taking the metadata.
+#[test]
+fn assembled_modules_outlive_the_cursor() {
+    let deps = format!(
+        "\"@vesper/check-names-packages\" = {{ version = \"^0.1\", path = \"{}\" }}\n",
+        repo().join(PACKAGE).display()
+    );
+    let consumer = manifest("@test/assembly-consumer", &deps);
+    let app = manifest("@demo/app", "");
+    let files = [
+        (
+            "lib.ves",
+            "use self::m::{helper};\npub fn entry() -> u64 { helper() }",
+        ),
+        (
+            "m.ves",
+            "pub fn helper() -> u64 { 1 }\nfn extra() -> u64 { 2 }",
+        ),
+    ];
+    let source = r#"
+use @vesper/check-names-packages::{assembly_begin, assemble_next, assembly_metadata};
+
+pub fn inspect(in input: Str) -> ChunkSeq[u64] {
+    let mut a = assembly_begin(in input);
+    let mut out = ChunkSeq::new[u64]();
+    let first = match assemble_next(inout a, in input) {
+        Option::Some(m) => m,
+        Option::None => return out,
+    };
+    let second = match assemble_next(inout a, in input) {
+        Option::Some(m) => m,
+        Option::None => return out,
+    };
+    match assemble_next(inout a, in input) {
+        Option::Some(m) => return out,
+        Option::None => {},
+    }
+    let meta = assembly_metadata(sink a);
+    let first_base = match meta.file_base.try_get(widen_u64(first.file)) {
+        Option::Some(base) => base,
+        Option::None => return out,
+    };
+    let second_base = match meta.file_base.try_get(widen_u64(second.file)) {
+        Option::Some(base) => base,
+        Option::None => return out,
+    };
+    out.push(widen_u64(first.file));
+    out.push(first_base);
+    out.push(first.ast.m_items.len());
+    out.push(widen_u64(second.file));
+    out.push(second_base);
+    out.push(second.ast.m_items.len());
+    out.push(meta.public_items.len());
+    out.push(meta.qualified.len());
+    out.push(meta.diagnostics.len());
+    out
+}
+"#;
+    let root = graph(
+        "retained",
+        &[
+            ("consumer", &consumer, &[("lib.ves", source)]),
+            ("app", &app, &files),
+        ],
+    );
+    let loaded = load(&root.0.join("app")).unwrap();
+    let a = &loaded.assembled;
+    assert!(a.diagnostics.is_empty());
+    let expected: Vec<_> = loaded
+        .graph
+        .modules
+        .iter()
+        .flat_map(|m| {
+            let f = &a.sources.files[m.file];
+            [
+                m.file as u64,
+                f.base as u64,
+                parser::parse(&f.text).module.items.len() as u64,
+            ]
+        })
+        .chain([
+            a.module.public_items.len() as u64,
+            a.sources.qualified.len() as u64,
+            0,
+        ])
+        .collect();
+    let consumer = Package::load(root.0.join("consumer").to_str().unwrap());
+    let entry = consumer.entry("inspect", true);
+    let mut input = encode(&loaded.graph, a);
+    assert_eq!(entry.words(&input), expected);
+    // The original wire format ends after the last module.
+    assert!(a.vsys.is_empty());
+    input.truncate(input.len() - 8);
+    assert_eq!(entry.words(&input), expected);
 }
 
 /// Mutants that make every assembler diagnostic fire, each compared.

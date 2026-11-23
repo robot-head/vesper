@@ -338,11 +338,12 @@ vesper_crate(
         "test/wasm_seed_breadth": glob(["packages/**"]),
         # Rust exit gap wave 1 lane 10 (#1508): StdEnv and StdFs over WASI
         # (the .vsys files of packages/vesper-std) and Box in the port, and
-        # @vesper/front parsing examples/ and its own sources under Wasmtime.
+        # @vesper/front parsing examples/ and its own sources under Wasmtime,
+        # plus the C seed runner reading its explicitly mapped files.
         "test/wasm_seed_package_io": glob([
             "examples/**",
             "packages/**",
-        ]),
+        ]) + ["//bootstrap:files"],
         # SH5 lane 11 (#1334): @vesper/wit-component against wit-component
         # over the same programs.
         "test/self_host_wit_component": glob([

@@ -17,6 +17,8 @@ mod check_harness;
 mod check_words;
 #[path = "common/ir_words.rs"]
 mod ir_words;
+#[path = "common/seed_runner.rs"]
+mod seed_runner;
 #[path = "common/wasm_words.rs"]
 mod wasm_words;
 
@@ -27,9 +29,11 @@ use vesper::ffi_lowering::{ForeignChecked, Handler, Imports};
 use vesper::wasm_backend::{EffectLowering, WasmOptions};
 use wasm_words::*;
 
-fn package() -> &'static Package {
-    static P: OnceLock<Package> = OnceLock::new();
-    P.get_or_init(|| Package::load("packages/vesper-wasm-backend"))
+fn backend() -> &'static Entry {
+    static BACKEND: OnceLock<Entry> = OnceLock::new();
+    BACKEND.get_or_init(|| {
+        Package::load("packages/vesper-wasm-backend").entry("wasm_backend_compile", true)
+    })
 }
 
 fn imports() -> Imports {
@@ -64,7 +68,7 @@ fn port(c: &ForeignChecked, o: &WasmOptions) -> Result<Vec<u8>, String> {
     let w = &c.checked.world;
     let program = backend_program(w, o).ok_or("optimize failed")?;
     let input = wasm_input(w, &program, "main", o).ok_or("not encodable")?;
-    match outcome(&package().entry("wasm_backend_compile", true).words(&input)) {
+    match outcome(&backend().words(&input)) {
         Outcome::Module { core, wit, .. } => Ok(wrap(core, &wit, o.world)),
         o => Err(format!("{o:?}")),
     }
@@ -651,11 +655,10 @@ fn heap_programs() {
             let o = options(optimize);
             let program = backend_program(&c.world, &o).expect("optimize");
             let input = wasm_input(&c.world, &program, "main", &o).expect("encodable");
-            let component =
-                match outcome(&package().entry("wasm_backend_compile", true).words(&input)) {
-                    Outcome::Module { core, wit, .. } => wrap(core, &wit, o.world),
-                    other => panic!("program {i} (optimize {optimize}): {other:?}"),
-                };
+            let component = match outcome(&backend().words(&input)) {
+                Outcome::Module { core, wit, .. } => wrap(core, &wit, o.world),
+                other => panic!("program {i} (optimize {optimize}): {other:?}"),
+            };
             let got = run(&component, &Ctx::default())
                 .unwrap_or_else(|e| panic!("program {i} (optimize {optimize}): {e}"));
             assert_eq!(
@@ -842,6 +845,248 @@ fn front_end_parses_like_native() {
             want.len()
         );
     }
+    // Give the C runner a single source and an explicit destination. All the
+    // other inputs still exist on the host, but must be invisible to the guest.
+    let runner = seed_runner::build_runner(&pkg);
+    let module = pkg.join("front.wasm");
+    std::fs::write(&module, &component).expect("write parser component");
+    let input = base.join("input0.ves");
+    let output = base.join("output0.bin");
+    std::fs::remove_file(&output).expect("clear Wasmtime output");
+    let run = std::process::Command::new(runner)
+        .arg("--input")
+        .arg(&input)
+        .arg(&input)
+        .arg("--output")
+        .arg(&output)
+        .arg(&output)
+        .args(["--invoke", "vesper:program/entry@0.1.0#main", "--print"])
+        .arg(module)
+        .output()
+        .expect("run parser in C seed runner");
+    assert!(
+        run.status.success(),
+        "C seed runner: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "1");
+    assert_eq!(
+        std::fs::read(output).expect("C runner parse tables"),
+        expected[0],
+        "C runner parse tables for {}",
+        corpus[0].display()
+    );
     let _ = std::fs::remove_dir_all(&base);
     let _ = std::fs::remove_dir_all(&pkg);
+}
+
+#[test]
+fn seed_runner_grants_only_the_named_files_and_modes() {
+    let src = r#"
+fn opens(in name: Str, mode: u32) -> u64 eff [Ffi[StdFs]] {
+    let mut err: u64 = 0;
+    match StdFs::vstd_fs_open(in name.as_bytes(), mode, inout err) {
+        Option::Some(f) => { StdFs::vstd_fs_close(f); 1 },
+        Option::None => 0,
+    }
+}
+fn main() -> u64 eff [Ffi[StdFs]] {
+    if opens("/src/in", 0) != 1 { return 1; }
+    if opens("/src/out", 1) != 1 { return 2; }
+    if opens("/src/in", 1) != 0 { return 3; }
+    if opens("/src/out", 0) != 0 { return 4; }
+    if opens("/src/../src/in", 0) != 0 { return 5; }
+    if opens("/src/unlisted", 0) != 0 { return 6; }
+    0
+}
+"#;
+    let dir = fresh("seed-grants");
+    let input = dir.join("input");
+    let output = dir.join("output");
+    std::fs::write(&input, b"immutable").unwrap();
+    std::fs::write(dir.join("unlisted"), b"hidden").unwrap();
+    let module = dir.join("grants.wasm");
+    std::fs::write(&module, port(&check(src), &options(true)).expect("port")).unwrap();
+    let run = std::process::Command::new(seed_runner::build_runner(&dir))
+        .args(["--input", "/src/in"])
+        .arg(&input)
+        .args(["--output", "/src/out"])
+        .arg(&output)
+        .args(["--invoke", "vesper:program/entry@0.1.0#main", "--print"])
+        .arg(module)
+        .output()
+        .expect("run C seed runner");
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "0");
+    assert_eq!(std::fs::read(input).unwrap(), b"immutable");
+    assert_eq!(std::fs::read(output).unwrap(), b"");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+const WASM_BACKEND_MAIN: &str = r#"use @vesper/wasm-backend::{ wasm_backend_compile_bytes };
+use @vesper-std/fs::{ IoError, read, write };
+
+fn compile_file() eff [Ffi[StdFs], Fail[IoError]] {
+    let input = read("/src/compiler-input.bin");
+    let words = wasm_backend_compile_bytes(in input.as_slice());
+    let mut output = ChunkSeq::new[u8]();
+    for i in 0..words.len() {
+        match words.try_get(i) {
+            Option::Some(w) => {
+                let mut remaining = w;
+                for byte in 0..8 {
+                    output.push(wrapping_u8(remaining));
+                    remaining = remaining >> 8;
+                }
+            },
+            Option::None => {},
+        }
+    }
+    write("/src/compiler-output.bin", output.as_slice());
+}
+
+fn main() -> u64 eff [Ffi[StdFs]] {
+    handle Fail[IoError] in { compile_file() } with {
+        return value => 0,
+        raise(e, k) => wrapping_add(1, widen_u64(e.kind)),
+    }
+}
+"#;
+
+/// Compile the production Vesper backend to wasm. Run its small output and
+/// compare the core it emits for its own Place IR with the native port's core.
+#[test]
+fn wasm_backend_emits_runnable_core_under_seed_runner() {
+    let dir = fresh("backend-self-build");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let backend_path = repo().join("packages/vesper-wasm-backend");
+    let fs = repo().join("packages/vesper-std/fs");
+    std::fs::write(
+        dir.join("Loom.toml"),
+        format!(
+            "[package]\nname = \"@wasm-seed/backend-main\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\
+             capability_ceiling = [\"Fail\", \"Alloc\", \"Ffi[StdFs]\"]\n\
+             [dependencies]\n\"@vesper/wasm-backend\" = {{ version = \"^0.1\", path = {backend_path:?} }}\n\
+             \"@vesper-std/fs\" = {{ version = \"^0.1\", path = {fs:?} }}\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(dir.join("src/main.ves"), WASM_BACKEND_MAIN).unwrap();
+    let assembled = vesper::packages::load(&dir).expect("load backend package");
+    assert!(
+        assembled.ok(),
+        "{:?} {:?}",
+        assembled.diagnostics,
+        assembled.manifest_errors
+    );
+    let c = vesper::ffi_lowering::check_module(&assembled.module, &imports())
+        .unwrap_or_else(|e| panic!("{e}: {:?}", e.diagnostics));
+    let o = WasmOptions {
+        // Self-compiling the backend needs several hundred MiB of guest heap.
+        max_memory_pages: 16_384,
+        ..options(false)
+    };
+    let backend_world = &c.checked.world;
+    let program = backend_program(backend_world, &o).expect("lower the wasm backend");
+    let own_request =
+        wasm_input(backend_world, &program, "main", &o).expect("encode the wasm backend");
+    let own_expected = backend().words(&own_request);
+    let Outcome::Module {
+        core: own_core,
+        wit,
+        ..
+    } = outcome(&own_expected)
+    else {
+        panic!("the native port did not compile the wasm backend");
+    };
+    let component = wrap(own_core.clone(), &wit, o.world);
+
+    let target = vesper::parser::parse("fn main() -> u64 { 42 }");
+    assert!(target.diagnostics.is_empty(), "{:?}", target.diagnostics);
+    let target = vesper::check::check(&target.module);
+    assert!(target.diagnostics.is_empty(), "{:?}", target.diagnostics);
+    let program = backend_program(&target.world, &o).expect("lower target");
+    let request = wasm_input(&target.world, &program, "main", &o).expect("encode target");
+    let expected = backend().words(&request);
+    assert!(matches!(outcome(&expected), Outcome::Module { .. }));
+
+    let module = dir.join("backend.wasm");
+    let input = dir.join("compiler-input.bin");
+    let output = dir.join("compiler-output.bin");
+    std::fs::write(&module, component).unwrap();
+    let runner = seed_runner::build_runner(&dir);
+    let invoke = |cmd: &mut std::process::Command, module: &Path, fuel: u64| {
+        let run = cmd
+            .args(["--invoke", "vesper:program/entry@0.1.0#main", "--print"])
+            .arg("--fuel")
+            .arg(fuel.to_string())
+            .arg(module)
+            .output()
+            .expect("run C seed runner");
+        assert!(
+            run.status.success(),
+            "{}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        String::from_utf8(run.stdout).unwrap().trim().to_owned()
+    };
+    let compile = |request: &[u8], fuel| {
+        std::fs::write(&input, request).unwrap();
+        assert_eq!(
+            invoke(
+                std::process::Command::new(&runner)
+                    .args(["--input", "/src/compiler-input.bin"])
+                    .arg(&input)
+                    .args(["--output", "/src/compiler-output.bin"])
+                    .arg(&output),
+                &module,
+                fuel
+            ),
+            "0"
+        );
+        let words = std::fs::read(&output)
+            .unwrap()
+            .chunks(8)
+            .map(|word| u64::from_le_bytes(word.try_into().expect("complete output word")))
+            .collect::<Vec<_>>();
+        std::fs::remove_file(&output).unwrap();
+        words
+    };
+    let words = compile(&request, 200_000_000);
+    assert_eq!(words, expected);
+    let Outcome::Module { core, .. } = outcome(&words) else {
+        panic!("the guest backend did not emit a module")
+    };
+    let target = dir.join("target.wasm");
+    std::fs::write(&target, core).unwrap();
+    assert_eq!(
+        invoke(
+            &mut std::process::Command::new(&runner),
+            &target,
+            200_000_000
+        ),
+        "42"
+    );
+
+    let from_guest = compile(&own_request, 10_000_000_000);
+    let Outcome::Module {
+        core: guest_core, ..
+    } = outcome(&from_guest)
+    else {
+        panic!(
+            "the guest backend did not compile itself: {:?}",
+            &from_guest[..from_guest.len().min(4)]
+        );
+    };
+    assert!(
+        guest_core == own_core,
+        "backend fixed point differs (guest {} bytes, native {} bytes)",
+        guest_core.len(),
+        own_core.len()
+    );
+    std::fs::remove_dir_all(dir).unwrap();
 }
