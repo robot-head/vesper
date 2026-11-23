@@ -3,7 +3,6 @@
 //! module BTF when present, and thousands of mutated and truncated copies.
 //! Both builds must give the same error message, or the same types, names,
 //! by-name index and base length. Port wave P3a lane 6 (#1041).
-#![cfg(feature = "vesper-port")]
 
 mod common;
 

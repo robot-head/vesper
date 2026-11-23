@@ -46,6 +46,7 @@ vesper_crate(
     # symlinked runfiles to the source tree and then rejects them as outside
     # --root, so it runs in a copy of regular files.
     copy_test_cwd = ["test/lean_model"],
+    extra_compile_data = ["//crates/vesper-ebpf/seed:src/engine/verifier.rs"],
     extra_test_data = ["//:lean"],
 )
 
@@ -105,7 +106,7 @@ rust_library(
     crate_root = "src/lib.rs",
     edition = "2024",
     rustc_flags = ["--cfg=vesper_port"],
-    deps = ["//crates/vesper-port-abi"] + all_crate_deps(
+    deps = all_crate_deps(
         _CRATE_DATA,
         normal = True,
         platforms = _CRATE_DATA["platforms"],
@@ -119,7 +120,7 @@ rust_library(
     rust_test(
         name = "port_%s_test" % test,
         srcs = ["tests/%s.rs" % test] + glob(["tests/common/**/*.rs"]),
-        compile_data = [":ebpf_vesper"] + (["src/verifier.rs"] if test == "verifier_rules" else []),
+        compile_data = [":ebpf_vesper"] + (["//crates/vesper-ebpf/seed:src/engine/verifier.rs"] if test == "verifier_rules" else []),
         crate_features = ["vesper-port"],
         crate_name = test,
         crate_root = "tests/%s.rs" % test,
