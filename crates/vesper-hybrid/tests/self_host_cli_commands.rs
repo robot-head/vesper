@@ -557,6 +557,7 @@ fn routing_runs_in_vesper() {
     assert_eq!(prints(&bare, &["semver", "--help"]), 1);
     assert_eq!(prints(&bare, &["highlight", "--help"]), 1);
     assert_eq!(prints(&bare, &["shot", "--help"]), 1);
+    assert_eq!(prints(&bare, &["ebpf", "--help"]), 1);
     assert_eq!(prints(&bare, &["verify", "--refute"]), 1);
     // Handed back: the Rust CLI prints.
     assert_eq!(prints(&bare, &["verify", "--help"]), 0);
@@ -602,5 +603,120 @@ fn full_stdout_fails_as_in_rust() {
         }
         assert_eq!(both[1].status.code(), Some(101), "{args:?}");
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn seed_ebpf_tree(dir: &Path) {
+    let prog = vesper_ebpf::mitigator::build(&Default::default()).unwrap();
+    std::fs::write(
+        dir.join("mitigator.o"),
+        vesper_ebpf::elf::write_object(&prog).unwrap(),
+    )
+    .unwrap();
+    // Valid XDP program: `r0 = 2; exit` (16-hex-digit slots).
+    std::fs::write(dir.join("ok.hex"), "b700000002000000\n9500000000000000\n").unwrap();
+    // Same instructions in raw 8-byte little-endian binary.
+    std::fs::write(
+        dir.join("ok.bin"),
+        [
+            0xb7, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x95, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00,
+        ],
+    )
+    .unwrap();
+    // Invalid program: reads uninitialized r1 (`r0 = r1; exit`).
+    std::fs::write(dir.join("bad.hex"), "bf01000000000000\n9500000000000000\n").unwrap();
+    // Malformed hex line.
+    std::fs::write(dir.join("malformed.hex"), "not-hex\n").unwrap();
+}
+
+#[test]
+fn ebpf_matches_the_default_compiler() {
+    let default = default_compiler();
+    let hybrid = hybrid();
+    let root = scratch("vesper-cli-ebpf");
+    let cases: &[&[&str]] = &[
+        &["ebpf"],
+        &["ebpf", "--help"],
+        &["ebpf", "-h"],
+        &["ebpf", "check", "--help"],
+        &["ebpf", "check", "-h"],
+        &["ebpf", "verify"],
+        &["ebpf", "check"],
+        &["ebpf", "check", "--unknown"],
+        &["ebpf", "check", "--stack-budget"],
+        &["ebpf", "check", "--stack-budget", "abc", "ok.hex"],
+        &["ebpf", "check", "ok.hex", "ok.bin"],
+        &["ebpf", "check", "missing.hex"],
+        &["ebpf", "check", "malformed.hex"],
+        &["ebpf", "check", "ok.hex"],
+        &["ebpf", "check", "ok.hex", "--disassemble"],
+        &["ebpf", "check", "ok.bin"],
+        &["ebpf", "check", "bad.hex"],
+        &["ebpf", "check", "mitigator.o"],
+        &["ebpf", "check", "mitigator.o", "--load"],
+        &["ebpf", "check", "mitigator.o", "--stack-budget", "8"],
+    ];
+    let mut diffs = vec![];
+    for argv in cases {
+        let mut results = vec![];
+        for compiler in [&default, &hybrid] {
+            let work = root.join(if compiler == &default { "d" } else { "h" });
+            let _ = std::fs::remove_dir_all(&work);
+            std::fs::create_dir_all(&work).unwrap();
+            seed_ebpf_tree(&work);
+            let out = Command::new(compiler)
+                .current_dir(&work)
+                .env_remove("VESPER_HYBRID_STATS")
+                .args(*argv)
+                .output()
+                .unwrap();
+            results.push(out);
+        }
+        let d = &results[0];
+        let h = &results[1];
+        if d.status.code() != h.status.code() || d.stdout != h.stdout || d.stderr != h.stderr {
+            diffs.push(format!(
+                "{argv:?}: status {:?} vs {:?}, stdout {:?} vs {:?}, stderr {:?} vs {:?}",
+                d.status.code(),
+                h.status.code(),
+                String::from_utf8_lossy(&d.stdout),
+                String::from_utf8_lossy(&h.stdout),
+                String::from_utf8_lossy(&d.stderr),
+                String::from_utf8_lossy(&h.stderr),
+            ));
+        }
+    }
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(
+        diffs.is_empty(),
+        "Vesper `ebpf` differs from default CLI on {} cases:\n{}",
+        diffs.len(),
+        diffs.join("\n")
+    );
+}
+
+#[test]
+fn ebpf_runs_in_vesper() {
+    let hybrid = hybrid();
+    let dir = scratch("vesper-cli-ebpf-runs");
+    seed_ebpf_tree(&dir);
+    let out = Command::new(&hybrid)
+        .current_dir(&dir)
+        .env("VESPER_HYBRID_STATS", "1")
+        .args(["ebpf", "check", "--help"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let prints: u64 = stderr
+        .lines()
+        .find_map(|l| {
+            l.strip_prefix("vesper-hybrid: the command layers printed ")
+                .and_then(|s| s.strip_suffix(" times from Vesper"))
+                .and_then(|n| n.parse().ok())
+        })
+        .unwrap_or_else(|| panic!("no command-layer report in {stderr:?}"));
+    assert_eq!(prints, 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
