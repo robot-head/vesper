@@ -54,11 +54,15 @@ pub fn run(func: &mut ir::Function) {
     split_join_slots(func);
     promote_slots(func);
     remove_constant_params(func);
+    fold_narrow_extends(func);
     sink_compares(func);
     thread_branches(func);
     thread_decided_branches(func);
-    fold_constant_branches(func);
-    remove_unreachable(func);
+    for _ in 0..3 {
+        merge_blocks(func);
+        fold_constant_branches(func);
+        remove_unreachable(func);
+    }
     remove_dead(func);
     share_invariant_loads(func);
     sink_slot_inits(func);
@@ -215,6 +219,15 @@ fn derive<K: Copy>(
 /// and the parameter becomes that slot's address. [`promote_slots`] then
 /// turns all of them into SSA values.
 pub fn split_join_slots(func: &mut ir::Function) {
+    let mut split_merged: HashSet<StackSlot> = HashSet::new();
+    for _ in 0..8 {
+        if !split_one_join_slot(func, &mut split_merged) {
+            break;
+        }
+    }
+}
+
+fn split_one_join_slot(func: &mut ir::Function, split_merged: &mut HashSet<StackSlot>) -> bool {
     let all = insts(func);
     let mut slot_addr: HashMap<Value, (StackSlot, i64)> = HashMap::new();
     for &(_, inst) in &all {
@@ -228,7 +241,7 @@ pub fn split_join_slots(func: &mut ir::Function) {
         }
     }
     if slot_addr.is_empty() {
-        return;
+        return false;
     }
     derive(func, &all, &mut slot_addr);
     // Blocks in which each slot's addresses are used, and how often each
@@ -272,6 +285,7 @@ pub fn split_join_slots(func: &mut ir::Function) {
             }
         }
     }
+    let mut did_split = false;
     let blocks: Vec<Block> = func.layout.blocks().collect();
     for join in blocks {
         if bad_target.contains(&join) {
@@ -286,7 +300,8 @@ pub fn split_join_slots(func: &mut ir::Function) {
         let params = func.dfg.block_params(join).to_vec();
         for i in (0..params.len()).rev() {
             let p = params[i];
-            // Every edge passes a distinct whole slot, used only in its block.
+            // Every edge passes a distinct whole slot, used only in its block
+            // (or a slot created by splitting a prior join).
             let mut sources: Vec<(Inst, StackSlot, Value)> = vec![];
             let mut ok = true;
             for &inst in &incoming {
@@ -302,9 +317,10 @@ pub fn split_join_slots(func: &mut ir::Function) {
                     break;
                 };
                 let block = func.layout.inst_block(inst).unwrap();
-                let only_here = used_in
-                    .get(&slot)
-                    .is_some_and(|b| b.len() == 1 && b.contains(&block));
+                let only_here = split_merged.contains(&slot)
+                    || used_in
+                        .get(&slot)
+                        .is_some_and(|b| b.len() == 1 && b.contains(&block));
                 if !only_here
                     || as_arg.get(&slot).copied().unwrap_or(0) != 1
                     || sources.iter().any(|s| s.1 == slot)
@@ -318,10 +334,38 @@ pub fn split_join_slots(func: &mut ir::Function) {
             if !ok {
                 continue;
             }
-            // The parameter: read and written at constant offsets only.
+            // The parameter (and any downstream unconditional join forwards):
+            // read and written at constant offsets only.
             let mut through: HashMap<Value, ((), i64)> = HashMap::new();
             through.insert(p, ((), 0));
-            derive(func, &all, &mut through);
+            loop {
+                let before = through.len();
+                derive(func, &all, &mut through);
+                for &(_, inst) in &all {
+                    let data = &func.dfg.insts[inst];
+                    if data.opcode() != Opcode::Jump {
+                        continue;
+                    }
+                    let call = data
+                        .branch_destination(&func.dfg.jump_tables, &func.dfg.exception_tables)[0];
+                    let target = call.block(&func.dfg.value_lists);
+                    if target == join {
+                        continue;
+                    }
+                    let t_params = func.dfg.block_params(target);
+                    for (k, a) in call.args(&func.dfg.value_lists).enumerate() {
+                        if let BlockArg::Value(v) = a
+                            && let Some(&((), 0)) = through.get(&func.dfg.resolve_aliases(v))
+                            && let Some(&tp) = t_params.get(k)
+                        {
+                            through.entry(tp).or_insert(((), 0));
+                        }
+                    }
+                }
+                if through.len() == before {
+                    break;
+                }
+            }
             let mut reads: BTreeMap<i64, Type> = BTreeMap::new();
             for &(_, inst) in &all {
                 let data = func.dfg.insts[inst];
@@ -334,6 +378,15 @@ pub fn split_join_slots(func: &mut ir::Function) {
                         opcode: Opcode::IaddImm,
                         ..
                     } => {}
+                    InstructionData::Jump { .. } => {
+                        let call = data
+                            .branch_destination(&func.dfg.jump_tables, &func.dfg.exception_tables)
+                            [0];
+                        let target = call.block(&func.dfg.value_lists);
+                        if target == join {
+                            ok = false;
+                        }
+                    }
                     InstructionData::Load {
                         opcode: Opcode::Load,
                         arg,
@@ -377,8 +430,12 @@ pub fn split_join_slots(func: &mut ir::Function) {
             if !ok || end > i64::from(size) {
                 continue;
             }
-            // Each source block stores before it reads its slot.
+            // Each source block stores before it reads its slot (prior split
+            // slots already have every `reads` offset stored at their edges).
             for &(inst, slot, _) in &sources {
+                if split_merged.contains(&slot) {
+                    continue;
+                }
                 let block = func.layout.inst_block(inst).unwrap();
                 let mut stored: HashSet<i64> = HashSet::new();
                 for b_inst in func.layout.block_insts(block) {
@@ -411,6 +468,7 @@ pub fn split_join_slots(func: &mut ir::Function) {
                 size,
                 3,
             ));
+            split_merged.insert(merged);
             let flags = ir::MemFlags::trusted();
             for &(inst, _, from) in &sources {
                 let mut pos = cranelift_codegen::cursor::FuncCursor::new(func).at_inst(inst);
@@ -437,11 +495,13 @@ pub fn split_join_slots(func: &mut ir::Function) {
             let mut pos = cranelift_codegen::cursor::FuncCursor::new(func).at_inst(first);
             let a = pos.ins().stack_addr(types::I64, merged, 0);
             func.dfg.change_to_alias(p, a);
+            did_split = true;
             // The analysis above is stale for this block now; one
             // parameter per join per run.
             break;
         }
     }
+    did_split
 }
 
 /// A block reached only by a `jump` from one other block joins that block.
@@ -1876,7 +1936,9 @@ fn in_cycle(func: &ir::Function, block: Block) -> bool {
 /// becomes `f64const` / `f32const`. Cranelift 0.125 does not fold it: it
 /// builds each coefficient with `movabs` and `movq` through a general
 /// register, where a float constant is one memory operand of the
-/// instruction that uses it.
+/// instruction that uses it. Commutes `fadd(C, x)` / `fmul(C, x)` into
+/// `(x, C)` for non-NaN constants so Cranelift's x86-64 backend folds `C`
+/// as the memory operand instead of loading it with `movabs + movq`.
 pub fn float_constants(func: &mut ir::Function) {
     use cranelift_codegen::ir::immediates::{Ieee32, Ieee64};
     for (_, inst) in insts(func) {
@@ -1903,6 +1965,156 @@ pub fn float_constants(func: &mut ir::Function) {
             func.dfg
                 .replace(inst)
                 .f32const(Ieee32::with_bits(bits as u32));
+        }
+    }
+    let non_nan_float_const = |func: &ir::Function, v: ir::Value| -> bool {
+        let ir::ValueDef::Result(def, 0) = func.dfg.value_def(func.dfg.resolve_aliases(v)) else {
+            return false;
+        };
+        match func.dfg.insts[def] {
+            InstructionData::UnaryIeee64 {
+                opcode: Opcode::F64const,
+                imm,
+            } => !f64::from_bits(imm.bits()).is_nan(),
+            InstructionData::UnaryIeee32 {
+                opcode: Opcode::F32const,
+                imm,
+            } => !f32::from_bits(imm.bits()).is_nan(),
+            _ => false,
+        }
+    };
+    for (_, inst) in insts(func) {
+        if let InstructionData::Binary {
+            opcode: opcode @ (Opcode::Fadd | Opcode::Fmul),
+            args: [lhs, rhs],
+        } = func.dfg.insts[inst]
+            && non_nan_float_const(func, lhs)
+            && !non_nan_float_const(func, rhs)
+        {
+            func.dfg.insts[inst] = InstructionData::Binary {
+                opcode,
+                args: [rhs, lhs],
+            };
+        }
+    }
+}
+
+/// Fold `ireduce`/`uextend` constant chains and `ireduce(uextend(x))`
+/// round-trips emitted by narrow-integer lowering.
+fn fold_narrow_extends(func: &mut ir::Function) {
+    let mask_for = |ty: ir::Type| -> Option<u64> {
+        match ty {
+            types::I8 => Some(0xff),
+            types::I16 => Some(0xffff),
+            types::I32 => Some(0xffff_ffff),
+            types::I64 => Some(u64::MAX),
+            _ => None,
+        }
+    };
+    for _ in 0..3 {
+        let mut changed = false;
+        for (_, inst) in insts(func) {
+            let InstructionData::Unary { opcode, arg } = func.dfg.insts[inst] else {
+                continue;
+            };
+            if !matches!(opcode, Opcode::Ireduce | Opcode::Uextend) {
+                continue;
+            }
+            let dest = func.dfg.first_result(inst);
+            let dst_ty = func.dfg.value_type(dest);
+            let Some(dst_mask) = mask_for(dst_ty) else {
+                continue;
+            };
+            let src = func.dfg.resolve_aliases(arg);
+            let src_ty = func.dfg.value_type(src);
+            let Some(src_mask) = mask_for(src_ty) else {
+                continue;
+            };
+            let ir::ValueDef::Result(def, 0) = func.dfg.value_def(src) else {
+                continue;
+            };
+            match (opcode, func.dfg.insts[def]) {
+                (
+                    Opcode::Ireduce,
+                    InstructionData::UnaryImm {
+                        opcode: Opcode::Iconst,
+                        imm,
+                    },
+                ) => {
+                    let v = (imm.bits() as u64) & dst_mask;
+                    func.dfg.replace(inst).iconst(dst_ty, v as i64);
+                    changed = true;
+                }
+                (
+                    Opcode::Uextend,
+                    InstructionData::UnaryImm {
+                        opcode: Opcode::Iconst,
+                        imm,
+                    },
+                ) => {
+                    let v = (imm.bits() as u64) & src_mask;
+                    func.dfg.replace(inst).iconst(dst_ty, v as i64);
+                    changed = true;
+                }
+                (
+                    Opcode::Ireduce,
+                    InstructionData::Unary {
+                        opcode: Opcode::Uextend,
+                        arg: inner,
+                    },
+                ) => {
+                    let inner = func.dfg.resolve_aliases(inner);
+                    let inner_ty = func.dfg.value_type(inner);
+                    if inner_ty == dst_ty {
+                        func.layout.remove_inst(inst);
+                        func.dfg.clear_results(inst);
+                        func.dfg.change_to_alias(dest, inner);
+                        changed = true;
+                    } else if inner_ty.bits() < dst_ty.bits() {
+                        func.dfg.insts[inst] = InstructionData::Unary {
+                            opcode: Opcode::Uextend,
+                            arg: inner,
+                        };
+                        changed = true;
+                    }
+                }
+                (
+                    Opcode::Uextend,
+                    InstructionData::Unary {
+                        opcode: Opcode::Uextend,
+                        arg: inner,
+                    },
+                ) => {
+                    let inner = func.dfg.resolve_aliases(inner);
+                    if mask_for(func.dfg.value_type(inner)).is_some() {
+                        func.dfg.insts[inst] = InstructionData::Unary {
+                            opcode: Opcode::Uextend,
+                            arg: inner,
+                        };
+                        changed = true;
+                    }
+                }
+                (
+                    Opcode::Ireduce,
+                    InstructionData::Unary {
+                        opcode: Opcode::Ireduce,
+                        arg: inner,
+                    },
+                ) => {
+                    let inner = func.dfg.resolve_aliases(inner);
+                    if mask_for(func.dfg.value_type(inner)).is_some() {
+                        func.dfg.insts[inst] = InstructionData::Unary {
+                            opcode: Opcode::Ireduce,
+                            arg: inner,
+                        };
+                        changed = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !changed {
+            break;
         }
     }
 }

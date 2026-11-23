@@ -25,15 +25,17 @@
 //! the `Debug` text as a name, so a pass can tell `Get` from `Push`. A
 //! Vesper pass can copy, move and drop pool references but not make new
 //! payloads, except the structured pool kinds of [`made_payload`]
-//! (bounds hoisting's `SeqOp::Hoisted` and `SeqOp::BoundsGuard`), which
-//! it appends after the input's entries.
+//! (bounds hoisting's `SeqOp::Hoisted` and `SeqOp::BoundsGuard`, and
+//! lowering's `SeqOp`, `VectorOp`, `TiledOp` and `FipOp`), which it
+//! appends after the input's entries.
 //!
 //! The program section (every name a name index, every type a type index
 //! of the stream's own tables; `opt` is 0 for none, else index + 1):
 //!
 //! ```text
 //! pool:   n, n x (kind, label name)          kind: 0 seq 1 vector 2 tiled 3 fip 4 expr
-//!                                            (5 hoisted, 6 guard: label a number)
+//!                                            (5 hoisted, 6 guard: label a number;
+//!                                             7..=10 made seq/vector/tiled/fip: label name)
 //! paths:  n, n x (k, k names)                path 0 is the empty path
 //! fns:    n, n x function
 //! function: name, header, blocks, trailer
@@ -841,7 +843,7 @@ pub fn literal_fits(t: &Type) -> bool {
     }
 }
 
-fn function_fits(f: &FunctionIr) -> bool {
+pub fn function_fits(f: &FunctionIr) -> bool {
     let drop_fits = |d: &FipDrop| match d {
         FipDrop::Value(_, t) | FipDrop::Place(_, t) | FipDrop::OtherFields { ty: t, .. } => {
             literal_fits(t)
@@ -952,20 +954,421 @@ pub fn program_words(program: &Program) -> Option<(Vec<u64>, Pool)> {
 
 // ------------------------------------------------------- made payloads
 //
-// SH3 lane 12 (#1251, bounds hoisting): the pool kinds a Vesper pass
-// creates rather than keeps. Their label is a number, not a name:
+// SH3 lane 12 (#1251, bounds hoisting) and lane 13 (#1252, Place IR
+// lowering): the pool kinds a Vesper pass creates rather than keeps:
 //
 // - 5, `SeqOp::Hoisted(access)`: label 0 `Get`, 1 `Set`, 2 `TryGet`,
-//   3 `TrySet`.
+//   3 `TrySet` (numeric label, not a name).
 // - 6, `SeqOp::BoundsGuard`: label bit 0 `inclusive`, bit 1
-//   `form.negated`, bits 8..16 `form.plus`, bits 16..24 `form.minus`.
+//   `form.negated`, bits 8..16 `form.plus`, bits 16..24 `form.minus`
+//   (numeric label, not a name).
+// - 7, `SeqOp` (`POOL_MAKE_SEQ`): label is a name symbol holding the
+//   `Debug` string of the `SeqOp`.
+// - 8, `VectorOp` (`POOL_MAKE_VECTOR`): label is a name symbol holding
+//   the `Debug` string of the `VectorOp`.
+// - 9, `TiledOp` (`POOL_MAKE_TILED`): label is a name symbol holding the
+//   `Debug` string of the `TiledOp`.
+// - 10, `FipOp` (`POOL_MAKE_FIP`): label is a name symbol holding the
+//   `Debug` string of the `FipOp`.
 //
 // packages/vesper-bounds-hoist/src/encode.ves (`POOL_HOISTED`,
-// `POOL_GUARD`) writes them. The input encoding never has them.
+// `POOL_GUARD`) and packages/vesper-place-ir-lower/src/lower.ves
+// (`PoolKind::Make*`) write them. The input encoding never has them.
+
+pub const POOL_MAKE_SEQ: u64 = 7;
+pub const POOL_MAKE_VECTOR: u64 = 8;
+pub const POOL_MAKE_TILED: u64 = 9;
+pub const POOL_MAKE_FIP: u64 = 10;
+
+fn parse_bool(s: &str) -> Option<bool> {
+    match s {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
+fn parse_quoted_str(s: &str) -> Option<(String, &str)> {
+    let rest = s.strip_prefix('"')?;
+    let mut out = String::new();
+    let mut chars = rest.char_indices();
+    while let Some((idx, c)) = chars.next() {
+        match c {
+            '"' => return Some((out, &rest[idx + 1..])),
+            '\\' => match chars.next()?.1 {
+                '\\' => out.push('\\'),
+                '"' => out.push('"'),
+                '\'' => out.push('\''),
+                'n' => out.push('\n'),
+                'r' => out.push('\r'),
+                't' => out.push('\t'),
+                'x' => {
+                    let (_, h1) = chars.next()?;
+                    let (_, h2) = chars.next()?;
+                    let mut hex = [0u8; 2];
+                    hex[0] = h1 as u8;
+                    hex[1] = h2 as u8;
+                    let byte = u8::from_str_radix(std::str::from_utf8(&hex).ok()?, 16).ok()?;
+                    out.push(byte as char);
+                }
+                'u' => {
+                    let (_, open) = chars.next()?;
+                    if open != '{' {
+                        return None;
+                    }
+                    let mut hex = String::new();
+                    loop {
+                        let (_, ch) = chars.next()?;
+                        if ch == '}' {
+                            break;
+                        }
+                        hex.push(ch);
+                    }
+                    let code = u32::from_str_radix(&hex, 16).ok()?;
+                    out.push(char::from_u32(code)?);
+                }
+                _ => return None,
+            },
+            ch => out.push(ch),
+        }
+    }
+    None
+}
+
+fn parse_elem(s: &str) -> Option<vesper::vector::Elem> {
+    use vesper::vector::Elem;
+    match s {
+        "U8" => Some(Elem::U8),
+        "U32" => Some(Elem::U32),
+        "U64" => Some(Elem::U64),
+        "I64" => Some(Elem::I64),
+        "F32" => Some(Elem::F32),
+        "F64" => Some(Elem::F64),
+        _ => None,
+    }
+}
+
+fn parse_shape(s: &str) -> Option<vesper::vector::Shape> {
+    let inner = s.strip_prefix("Shape { ")?.strip_suffix(" }")?;
+    let (elem_part, lanes_part) = inner.split_once(", ")?;
+    let elem = parse_elem(elem_part.strip_prefix("elem: ")?)?;
+    let lanes: u16 = lanes_part.strip_prefix("lanes: ")?.parse().ok()?;
+    vesper::vector::Shape::new(elem, lanes)
+}
+
+fn parse_str_op(s: &str) -> Option<vesper::strings::StrOp> {
+    use vesper::strings::StrOp;
+    Some(match s {
+        "Len" => StrOp::Len,
+        "ByteAt" => StrOp::ByteAt,
+        "TryByteAt" => StrOp::TryByteAt,
+        "AsStr" => StrOp::AsStr,
+        "AsBytes" => StrOp::AsBytes,
+        "SubStr" => StrOp::SubStr,
+        "PushStr" => StrOp::PushStr,
+        "PushChar" => StrOp::PushChar,
+        "Clear" => StrOp::Clear,
+        "Reserve" => StrOp::Reserve,
+        _ => return None,
+    })
+}
+
+fn parse_seq_op(s: &str) -> Option<SeqOp> {
+    use vesper::seq::{Access, IndexForm, Wide};
+    use vesper::vector::SliceIo;
+    Some(match s {
+        "New" => SeqOp::New,
+        "WithCapacity" => SeqOp::WithCapacity,
+        "Len" => SeqOp::Len,
+        "Push" => SeqOp::Push,
+        "Pop" => SeqOp::Pop,
+        "Get" => SeqOp::Get,
+        "Set" => SeqOp::Set,
+        "TryGet" => SeqOp::TryGet,
+        "Last" => SeqOp::Last,
+        "TrySet" => SeqOp::TrySet,
+        "Clear" => SeqOp::Clear,
+        "Truncate" => SeqOp::Truncate,
+        "Reserve" => SeqOp::Reserve,
+        "Extend" => SeqOp::Extend,
+        "Finish" => SeqOp::Finish,
+        "AsSlice" => SeqOp::AsSlice,
+        "SubSlice" => SeqOp::SubSlice,
+        "SliceLen" => SeqOp::SliceLen,
+        "SliceGet" => SeqOp::SliceGet,
+        "SliceSet" => SeqOp::SliceSet,
+        "Fill" => SeqOp::Fill,
+        "SumBe16" => SeqOp::SumBe16,
+        "BytesEq" => SeqOp::BytesEq,
+        "BytesCmp" => SeqOp::BytesCmp,
+        "FindByte" => SeqOp::FindByte,
+        "Swap" => SeqOp::Swap,
+        "Replace" => SeqOp::Replace,
+        "FindEither" => SeqOp::FindEither,
+        "FindNotIn" => SeqOp::FindNotIn,
+        "EqIgnoreAsciiCase" => SeqOp::EqIgnoreAsciiCase,
+        "ExtendAsciiLowercase" => SeqOp::ExtendAsciiLowercase,
+        "Resize" => SeqOp::Resize,
+        "ExtendReversed" => SeqOp::ExtendReversed,
+        "CopyFrom { total: false }" => SeqOp::CopyFrom { total: false },
+        "CopyFrom { total: true }" => SeqOp::CopyFrom { total: true },
+        "CopyWithin { total: false }" => SeqOp::CopyWithin { total: false },
+        "CopyWithin { total: true }" => SeqOp::CopyWithin { total: true },
+        "MakeAsciiLowercase { total: false }" => SeqOp::MakeAsciiLowercase { total: false },
+        "MakeAsciiLowercase { total: true }" => SeqOp::MakeAsciiLowercase { total: true },
+        "FillRange { total: false }" => SeqOp::FillRange { total: false },
+        "FillRange { total: true }" => SeqOp::FillRange { total: true },
+        "ExtendFromWithin { total: false }" => SeqOp::ExtendFromWithin { total: false },
+        "ExtendFromWithin { total: true }" => SeqOp::ExtendFromWithin { total: true },
+        "AtomicLoad { width: None }" => SeqOp::AtomicLoad { width: None },
+        "AtomicLoad { width: Some(4) }" => SeqOp::AtomicLoad { width: Some(4) },
+        "AtomicLoad { width: Some(8) }" => SeqOp::AtomicLoad { width: Some(8) },
+        "AtomicStore { width: None }" => SeqOp::AtomicStore { width: None },
+        "AtomicStore { width: Some(4) }" => SeqOp::AtomicStore { width: Some(4) },
+        "AtomicStore { width: Some(8) }" => SeqOp::AtomicStore { width: Some(8) },
+        _ if s.starts_with("Str(") && s.ends_with(')') => {
+            SeqOp::Str(parse_str_op(&s[4..s.len() - 1])?)
+        }
+        _ if s.starts_with("Hoisted(") && s.ends_with(')') => {
+            SeqOp::Hoisted(match &s[8..s.len() - 1] {
+                "Get" => Access::Get,
+                "Set" => Access::Set,
+                "TryGet" => Access::TryGet,
+                "TrySet" => Access::TrySet,
+                _ => return None,
+            })
+        }
+        _ if s.starts_with("BoundsGuard { ") && s.ends_with(" }") => {
+            let inner = s.strip_prefix("BoundsGuard { ")?.strip_suffix(" }")?;
+            let (inc_part, form_part) = inner.split_once(", ")?;
+            let inclusive = parse_bool(inc_part.strip_prefix("inclusive: ")?)?;
+            let form_inner = form_part
+                .strip_prefix("form: IndexForm { ")?
+                .strip_suffix(" }")?;
+            let mut parts = form_inner.split(", ");
+            let negated = parse_bool(parts.next()?.strip_prefix("negated: ")?)?;
+            let plus: u8 = parts.next()?.strip_prefix("plus: ")?.parse().ok()?;
+            let minus: u8 = parts.next()?.strip_prefix("minus: ")?.parse().ok()?;
+            if parts.next().is_some() {
+                return None;
+            }
+            SeqOp::BoundsGuard {
+                inclusive,
+                form: IndexForm {
+                    negated,
+                    plus,
+                    minus,
+                },
+            }
+        }
+        _ if s.starts_with("Wide(Wide { ") && s.ends_with(" })") => {
+            let inner = s.strip_prefix("Wide(Wide { ")?.strip_suffix(" })")?;
+            let mut parts = inner.split(", ");
+            let bytes: u8 = parts.next()?.strip_prefix("bytes: ")?.parse().ok()?;
+            let big = parse_bool(parts.next()?.strip_prefix("big: ")?)?;
+            let write = parse_bool(parts.next()?.strip_prefix("write: ")?)?;
+            let total = parse_bool(parts.next()?.strip_prefix("total: ")?)?;
+            if parts.next().is_some() {
+                return None;
+            }
+            SeqOp::Wide(Wide {
+                bytes,
+                big,
+                write,
+                total,
+            })
+        }
+        _ if s.starts_with("Vector(SliceIo { ") && s.ends_with(" })") => {
+            let inner = s.strip_prefix("Vector(SliceIo { ")?.strip_suffix(" })")?;
+            let (shape_str, rest) = inner.split_once(", store: ")?;
+            let shape = parse_shape(shape_str.strip_prefix("shape: ")?)?;
+            let (store_str, masked_str) = rest.split_once(", masked: ")?;
+            let store = parse_bool(store_str)?;
+            let masked = parse_bool(masked_str)?;
+            SeqOp::Vector(SliceIo {
+                shape,
+                store,
+                masked,
+            })
+        }
+        _ => return None,
+    })
+}
+
+fn parse_intrinsic(s: &str) -> Option<vesper::vector::Intrinsic> {
+    use vesper::vector::{BinOp, CmpOp, Conv, Intrinsic as I, MaskOp, ReduceOp, ShiftOp, UnaryOp};
+    Some(match s {
+        "Splat" => I::Splat,
+        "From" => I::From,
+        "Binary(Add)" => I::Binary(BinOp::Add),
+        "Binary(Sub)" => I::Binary(BinOp::Sub),
+        "Binary(Mul)" => I::Binary(BinOp::Mul),
+        "Binary(Div)" => I::Binary(BinOp::Div),
+        "Binary(Min)" => I::Binary(BinOp::Min),
+        "Binary(Max)" => I::Binary(BinOp::Max),
+        "Binary(And)" => I::Binary(BinOp::And),
+        "Binary(Or)" => I::Binary(BinOp::Or),
+        "Binary(Xor)" => I::Binary(BinOp::Xor),
+        "Binary(SaturatingAdd)" => I::Binary(BinOp::SaturatingAdd),
+        "Binary(SaturatingSub)" => I::Binary(BinOp::SaturatingSub),
+        "Not" => I::Not,
+        "Unary(Sqrt)" => I::Unary(UnaryOp::Sqrt),
+        "Unary(Abs)" => I::Unary(UnaryOp::Abs),
+        "Unary(Neg)" => I::Unary(UnaryOp::Neg),
+        "MulAdd" => I::MulAdd,
+        "Convert(ToBits)" => I::Convert(Conv::ToBits),
+        "Convert(FromBits)" => I::Convert(Conv::FromBits),
+        "Convert(Widen)" => I::Convert(Conv::Widen),
+        "Convert(Narrow)" => I::Convert(Conv::Narrow),
+        "Shift(Shl)" => I::Shift(ShiftOp::Shl),
+        "Shift(Shr)" => I::Shift(ShiftOp::Shr),
+        "Compare(Eq)" => I::Compare(CmpOp::Eq),
+        "Compare(Ne)" => I::Compare(CmpOp::Ne),
+        "Compare(Lt)" => I::Compare(CmpOp::Lt),
+        "Compare(Le)" => I::Compare(CmpOp::Le),
+        "Compare(Gt)" => I::Compare(CmpOp::Gt),
+        "Compare(Ge)" => I::Compare(CmpOp::Ge),
+        "Select" => I::Select,
+        "MaskBinary(And)" => I::MaskBinary(MaskOp::And),
+        "MaskBinary(Or)" => I::MaskBinary(MaskOp::Or),
+        "MaskBinary(Xor)" => I::MaskBinary(MaskOp::Xor),
+        "MaskNot" => I::MaskNot,
+        "MaskCount" => I::MaskCount,
+        "MaskBitmask" => I::MaskBitmask,
+        "MaskAny" => I::MaskAny,
+        "MaskAll" => I::MaskAll,
+        "Reduce(Add)" => I::Reduce(ReduceOp::Add),
+        "Reduce(Xor)" => I::Reduce(ReduceOp::Xor),
+        "Reduce(Or)" => I::Reduce(ReduceOp::Or),
+        "Reduce(And)" => I::Reduce(ReduceOp::And),
+        "Reduce(Min)" => I::Reduce(ReduceOp::Min),
+        "Reduce(Max)" => I::Reduce(ReduceOp::Max),
+        "Extract" => I::Extract,
+        "Replace" => I::Replace,
+        "Shuffle" => I::Shuffle,
+        "LoadMasked" => I::LoadMasked,
+        "Load" => I::Load,
+        "Store" => I::Store,
+        "StoreMasked" => I::StoreMasked,
+        "InBounds" => I::InBounds,
+        "Active" => I::Active,
+        "IsaSupported" => I::IsaSupported,
+        _ => return None,
+    })
+}
+
+fn parse_vector_op(s: &str) -> Option<VectorOp> {
+    if let Some(p) = s
+        .strip_prefix("IsaSupported(")
+        .and_then(|x| x.strip_suffix(')'))
+    {
+        return vesper::vector::Profile::from_name(p).map(VectorOp::IsaSupported);
+    }
+    let inner = s.strip_prefix("Lanes { ")?.strip_suffix(" }")?;
+    let (intr_str, rest) = inner.split_once(", shape: ")?;
+    let intrinsic = parse_intrinsic(intr_str.strip_prefix("intrinsic: ")?)?;
+    let (shape_str, consts_str) = rest.split_once(", constants: [")?;
+    let shape = parse_shape(shape_str)?;
+    let consts_inner = consts_str.strip_suffix(']')?;
+    let constants = if consts_inner.is_empty() {
+        vec![]
+    } else {
+        consts_inner
+            .split(", ")
+            .map(|c| c.parse::<u16>().ok())
+            .collect::<Option<Vec<_>>>()?
+    };
+    Some(VectorOp::Lanes {
+        intrinsic,
+        shape,
+        constants,
+    })
+}
+
+fn parse_tiled_op(s: &str) -> Option<TiledOp> {
+    if s == "Len" {
+        return Some(TiledOp::Len);
+    }
+    if let Some(w) = s
+        .strip_prefix("TileCount { tile_width: ")
+        .and_then(|x| x.strip_suffix(" }"))
+    {
+        return Some(TiledOp::TileCount {
+            tile_width: w.parse().ok()?,
+        });
+    }
+    let (kind, rest) = s.split_once(" { ")?;
+    let rest = rest.strip_suffix(" }")?;
+    match kind {
+        "New" | "WithCapacity" | "Push" | "Get" | "Set" => {
+            let (adt, tail) = parse_quoted_str(rest.strip_prefix("adt: ")?)?;
+            if !tail.is_empty() {
+                return None;
+            }
+            Some(match kind {
+                "New" => TiledOp::New { adt },
+                "WithCapacity" => TiledOp::WithCapacity { adt },
+                "Push" => TiledOp::Push { adt },
+                "Get" => TiledOp::Get { adt },
+                _ => TiledOp::Set { adt },
+            })
+        }
+        "WithRegion" => {
+            let (adt, tail) = parse_quoted_str(rest.strip_prefix("adt: ")?)?;
+            let (region_label, tail) = parse_quoted_str(tail.strip_prefix(", region_label: ")?)?;
+            if !tail.is_empty() {
+                return None;
+            }
+            Some(TiledOp::WithRegion { adt, region_label })
+        }
+        "ColGet" | "ColSet" => {
+            let (adt, tail) = parse_quoted_str(rest.strip_prefix("adt: ")?)?;
+            let (field, tail) = parse_quoted_str(tail.strip_prefix(", field: ")?)?;
+            if !tail.is_empty() {
+                return None;
+            }
+            Some(if kind == "ColGet" {
+                TiledOp::ColGet { adt, field }
+            } else {
+                TiledOp::ColSet { adt, field }
+            })
+        }
+        "LoadTileVec" => {
+            let (adt, tail) = parse_quoted_str(rest.strip_prefix("adt: ")?)?;
+            let (field, tail) = parse_quoted_str(tail.strip_prefix(", field: ")?)?;
+            let shape = parse_shape(tail.strip_prefix(", shape: ")?)?;
+            Some(TiledOp::LoadTileVec { adt, field, shape })
+        }
+        _ => None,
+    }
+}
+
+fn parse_fip_op(s: &str) -> Option<FipOp> {
+    match s {
+        "BoxNew" => Some(FipOp::BoxNew),
+        "BoxNewInCaller" => Some(FipOp::BoxNewInCaller),
+        _ if s.starts_with("BoxReuse { ") && s.ends_with(" }") => {
+            let inner = s.strip_prefix("BoxReuse { ")?.strip_suffix(" }")?;
+            let mut parts = inner.split(", ");
+            let bind_dest: u32 = parts.next()?.strip_prefix("bind_dest: ")?.parse().ok()?;
+            let slot_index: usize = parts.next()?.strip_prefix("slot_index: ")?.parse().ok()?;
+            let size: u32 = parts.next()?.strip_prefix("size: ")?.parse().ok()?;
+            if parts.next().is_some() {
+                return None;
+            }
+            Some(FipOp::BoxReuse {
+                bind_dest,
+                slot_index,
+                size,
+            })
+        }
+        _ => None,
+    }
+}
 
 /// The payload a Vesper pass made for pool `kind` with `label`, or `None`
 /// for an entry of the input pool.
-fn made_payload(kind: u64, label: u64) -> Option<Payload> {
+fn made_payload(kind: u64, label: u64, names: &[String]) -> Option<Payload> {
     use vesper::seq::{Access, IndexForm};
     match kind {
         5 => Some(Payload::Seq(SeqOp::Hoisted(match label {
@@ -982,6 +1385,22 @@ fn made_payload(kind: u64, label: u64) -> Option<Payload> {
                 minus: (label >> 16) as u8,
             },
         })),
+        POOL_MAKE_SEQ => names
+            .get(label as usize)
+            .and_then(|s| parse_seq_op(s))
+            .map(Payload::Seq),
+        POOL_MAKE_VECTOR => names
+            .get(label as usize)
+            .and_then(|s| parse_vector_op(s))
+            .map(Payload::Vector),
+        POOL_MAKE_TILED => names
+            .get(label as usize)
+            .and_then(|s| parse_tiled_op(s))
+            .map(Payload::Tiled),
+        POOL_MAKE_FIP => names
+            .get(label as usize)
+            .and_then(|s| parse_fip_op(s))
+            .map(Payload::Fip),
         _ => None,
     }
 }
@@ -1111,6 +1530,7 @@ impl Dec<'_> {
         let span = self.usize()..self.usize();
         if depth > 512 {
             return Pattern {
+                integer_kind: None,
                 kind: PatternKind::Wild,
                 span,
             };
@@ -1140,7 +1560,11 @@ impl Dec<'_> {
             }
             _ => PatternKind::Wild,
         };
-        Pattern { kind, span }
+        Pattern {
+            kind,
+            span,
+            integer_kind: None,
+        }
     }
 
     fn args(&mut self) -> Vec<Argument> {
@@ -1681,12 +2105,19 @@ pub fn decode_program(words: &[u64], pool: &Pool) -> Program {
     for i in 0..np {
         let kind = d.next();
         let label = d.next();
-        match made_payload(kind, label) {
+        match made_payload(kind, label, &d.names) {
             Some(p) => {
                 d.pool_map.push(pool.items.len() + d.made.len());
                 d.made.push(p);
             }
-            None => d.pool_map.push(i),
+            None => {
+                assert!(
+                    kind < POOL_MAKE_SEQ,
+                    "unparsed made payload kind={kind} label={:?}",
+                    d.names.get(label as usize)
+                );
+                d.pool_map.push(i);
+            }
         }
     }
     let n = d.count();

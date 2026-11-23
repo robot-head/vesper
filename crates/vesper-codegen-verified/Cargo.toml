@@ -11,8 +11,9 @@ blake3 = "1.8"
 serde = { version = "1", features = ["derive"] }
 toml = "=0.8.23"
 vesper-loom-calculus = { path = "../vesper-loom-calculus/seed", package = "vesper-loom-calculus-seed" }
-vesper-loom-cas = { path = "../vesper-loom-cas" }
-vesper-loom-trust = { path = "../vesper-loom-trust" }
+vesper-loom-cas = { path = "../vesper-loom-cas/seed", package = "vesper-loom-cas-seed" }
+# The compiler's build links the frozen Rust seed copy of vesper-loom-trust (#1412).
+vesper-loom-trust = { path = "../vesper-loom-trust/seed", package = "vesper-loom-trust-seed" }
 
 [dev-dependencies]
 ed25519-dalek = "2"

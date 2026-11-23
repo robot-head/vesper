@@ -24,8 +24,10 @@ use @vesper/place-ir::{
     FnRow,
     Program
 };
+use @vesper/place-ir::codes::{
+    Tag
+};
 
-const T_BLOCK: u8 = 7;
 const OUT: u8 = 0;
 const IN: u8 = 1;
 const NONE64: u64 = 18446744073709551615;
@@ -153,7 +155,7 @@ fn targets(in p: Program, f: FnRow) -> Targets {
         set64(inout t.at, b, t.to.len());
         let mut c: u64 = 0;
         for i in row.ta..add(row.ta, row.tn) {
-            if p.tag(i) == T_BLOCK {
+            if p.tag(i) == Tag::Block {
                 let x = p.op(i);
                 if x < n && u64_at(in mark, x) != inc(b) {
                     set64(inout mark, x, inc(b));

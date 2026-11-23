@@ -206,7 +206,41 @@ pub struct Assembled {
     /// The `.vsys` libraries every loaded package names in its manifest
     /// (`[package] vsys`, manuscript §16.3), in load order.
     pub vsys: Vec<PackageVsys>,
+    /// The C and assembly sources and objects every loaded package names in its
+    /// manifest (`[package] objects`, manuscript §16.3), in load order.
+    pub objects: Vec<PackageObject>,
 }
+
+/// One entry of a package's `[package] objects`: a C source (`.c`), an
+/// assembly source (`.s`, `.S`, or `.asm` for Windows) or a prebuilt object
+/// (`.o`, `.obj`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageObject {
+    /// The package that carries it.
+    pub package: String,
+    /// The manifest path, for messages (lexical, relative to the CLI input).
+    pub display: String,
+    /// The file for every target, or for a per-target path (with `@OS@`,
+    /// `@ARCH@` or `@TARGET@`) the file of each target that has one, in
+    /// [`VSYS_TARGETS`] order. A target without one links nothing for this
+    /// entry.
+    pub files: Vec<(Option<&'static str>, PathBuf)>,
+}
+
+impl PackageObject {
+    /// The file an executable for `target` (the host when `None`) links.
+    pub fn file_for(&self, target: Option<&str>) -> Result<Option<&Path>, String> {
+        let (triple, _) = vsys_target(target)?;
+        Ok(self
+            .files
+            .iter()
+            .find(|(t, _)| t.is_none_or(|t| t == triple))
+            .map(|(_, f)| f.as_path()))
+    }
+}
+
+/// The file kinds `[package] objects` accepts.
+pub const OBJECT_EXTENSIONS: [&str; 6] = ["c", "s", "S", "asm", "o", "obj"];
 
 /// One `.vsys` library a package's manifest names.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -233,7 +267,7 @@ impl PackageVsys {
     /// fills the placeholders. A library that does not parse declares no
     /// names here; [`Assembled::imports`] reports its error.
     /// A per-target import declares the names of every target's file.
-    fn type_names(&self) -> Vec<(String, String)> {
+    pub fn type_names(&self) -> Vec<(String, String)> {
         let texts: Vec<(&str, &str)> = if self.targets.is_empty() {
             let Ok((triple, _)) = vsys_target(None) else {
                 return vec![];
@@ -394,9 +428,18 @@ impl Assembled {
             let source = v
                 .source_for(target)
                 .map_err(|e| format!("{}: {e}", v.display))?;
-            imports
+            let library = imports
                 .add(&source, crate::ffi_lowering::Handler::Direct)
                 .map_err(|e| format!("{}: {e}", v.display_for(target)))?;
+            // A package's objects provide its own static libraries
+            // (manuscript §16.3).
+            let link = library.link();
+            if link.mode() == vesper_ffi::sys::LinkMode::Static
+                && self.objects.iter().any(|o| o.package == v.package)
+            {
+                let name = link.name().to_owned();
+                imports.provide_by_objects(&name, &v.package);
+            }
         }
         Ok(imports)
     }
@@ -435,13 +478,34 @@ pub fn is_package(path: &Path) -> bool {
 /// them into one module. `Err` is an I/O failure; language and manifest
 /// errors are reported in [`Assembled`].
 pub fn load(dir: &Path) -> Result<Assembled, String> {
-    load_with_parser(dir, None, None, false, None)
+    load_for_target(dir, None, false)
 }
 
 /// Include test-only declarations in the root package. Dependencies are
 /// loaded in ordinary mode.
 pub fn load_for_tests(dir: &Path) -> Result<Assembled, String> {
-    load_with_parser(dir, None, None, true, None)
+    load_for_target(dir, None, true)
+}
+
+/// Assemble a package for the requested build. A WASI component may carry
+/// a src-wasip2 implementation alongside its native src implementation.
+pub fn load_for_target(
+    dir: &Path,
+    target: Option<&str>,
+    include_tests: bool,
+) -> Result<Assembled, String> {
+    let wasi = target == Some(crate::wasm_backend::TARGET);
+    let os = if wasi {
+        "wasip2"
+    } else if let Some(triple) = target {
+        VSYS_TARGETS
+            .iter()
+            .find(|v| v.triple == triple)
+            .map_or(std::env::consts::OS, |v| v.os)
+    } else {
+        std::env::consts::OS
+    };
+    load_with_parser(dir, None, None, include_tests, None, wasi, os)
 }
 
 type RootParser<'a> = dyn FnMut(&Path) -> Result<(String, crate::parser::Parse), String> + 'a;
@@ -450,7 +514,15 @@ type RootParser<'a> = dyn FnMut(&Path) -> Result<(String, crate::parser::Parse),
 /// The callback may append synthetic source, but its AST must use offsets
 /// into the resulting text. Dependencies always use the ordinary parser.
 pub fn load_with_root_parser(dir: &Path, parse: &mut RootParser<'_>) -> Result<Assembled, String> {
-    load_with_parser(dir, Some(parse), None, false, None)
+    load_with_parser(
+        dir,
+        Some(parse),
+        None,
+        false,
+        None,
+        false,
+        std::env::consts::OS,
+    )
 }
 
 /// Assemble tests against one changed dependency source held in memory.
@@ -459,7 +531,15 @@ pub fn load_with_dependency_replacement(
     parse: &mut RootParser<'_>,
     replacement: (&Path, &str),
 ) -> Result<Assembled, String> {
-    load_with_parser(dir, Some(parse), Some(replacement), false, None)
+    load_with_parser(
+        dir,
+        Some(parse),
+        Some(replacement),
+        false,
+        None,
+        false,
+        std::env::consts::OS,
+    )
 }
 
 type PreparedParser<'a> =
@@ -471,7 +551,15 @@ pub fn load_test_sources(
     replacement: Option<(&Path, &str)>,
     prepare: &mut PreparedParser<'_>,
 ) -> Result<Assembled, String> {
-    load_with_parser(dir, None, replacement, true, Some(prepare))
+    load_with_parser(
+        dir,
+        None,
+        replacement,
+        true,
+        Some(prepare),
+        false,
+        std::env::consts::OS,
+    )
 }
 
 fn read_source(path: &Path) -> Result<String, String> {
@@ -484,8 +572,12 @@ fn load_with_parser(
     replacement: Option<(&Path, &str)>,
     root_tests: bool,
     prepare: Option<&mut PreparedParser<'_>>,
+    wasi: bool,
+    os: &str,
 ) -> Result<Assembled, String> {
     let mut loader = Loader {
+        wasi,
+        os,
         replacement,
         ..Loader::default()
     };
@@ -511,6 +603,7 @@ fn load_with_parser(
             root_module,
             root_package_files,
             vsys: loader.vsys,
+            objects: loader.objects,
         });
     }
     let module = loader.assemble(root.unwrap_or_default());
@@ -523,11 +616,13 @@ fn load_with_parser(
         root_module,
         root_package_files,
         vsys: loader.vsys,
+        objects: loader.objects,
     })
 }
 
 #[derive(Default)]
 struct Loader<'a> {
+    wasi: bool,
     packages: Vec<Package>,
     /// Canonical directory -> package index.
     by_path: BTreeMap<PathBuf, usize>,
@@ -535,6 +630,8 @@ struct Loader<'a> {
     diagnostics: Vec<PackageDiagnostic>,
     manifest_errors: Vec<(String, Diagnostic)>,
     vsys: Vec<PackageVsys>,
+    objects: Vec<PackageObject>,
+    os: &'a str,
     replacement: Option<(&'a Path, &'a str)>,
 }
 
@@ -709,7 +806,15 @@ impl Loader<'_> {
         // dependencies' (its root module is not file 0 when another source
         // sorts first; see `Assembled::root_module`).
         let mut files = vec![];
-        let src = dir.join("src");
+        let target_src = format!("src-{}", self.os);
+        let source_dir = if self.wasi && dir.join("src-wasip2").is_dir() {
+            "src-wasip2"
+        } else if !self.wasi && !self.os.is_empty() && dir.join(&target_src).is_dir() {
+            target_src.as_str()
+        } else {
+            "src"
+        };
+        let src = dir.join(source_dir);
         if src.is_dir() {
             walk(&src, 0, &mut files)?;
         }
@@ -723,7 +828,7 @@ impl Loader<'_> {
                 .collect();
             let file_shown = display(&normalize(
                 &shown
-                    .join("src")
+                    .join(source_dir)
                     .join(path.strip_prefix(&src).unwrap_or(&path)),
             ));
             if segments.len() == 1 && matches!(segments[0].as_str(), "lib" | "main") {
@@ -784,6 +889,7 @@ impl Loader<'_> {
             ));
         }
         let foreign_types = self.package_vsys(dir, &shown, &manifest_shown, &manifest)?;
+        self.package_objects(dir, &shown, &manifest_shown, &manifest);
         let index = self.packages.len();
         self.packages.push(Package {
             name: name.clone(),
@@ -881,6 +987,18 @@ impl Loader<'_> {
             let bad = |why: &str| {
                 manifest_error(INVALID_PACKAGE, format!("package.vsys '{path}': {why}"))
             };
+            // The Bridge checks the selected WASI surface using its host ABI.
+            // The component backend maps those operations to WASI imports.
+            let wasi_path;
+            let path = if self.wasi && is_per_target_path(path) {
+                wasi_path = path
+                    .replace("@TARGET@", crate::wasm_backend::TARGET)
+                    .replace("@OS@", "wasip2")
+                    .replace("@ARCH@", "wasm32");
+                &wasi_path
+            } else {
+                path
+            };
             let relative = Path::new(path);
             if !path.ends_with(".vsys") {
                 self.manifest_errors
@@ -957,6 +1075,99 @@ impl Loader<'_> {
             self.vsys.push(v);
         }
         Ok(types)
+    }
+
+    /// Record the package's `[package] objects` (manuscript §16.3).
+    fn package_objects(
+        &mut self,
+        dir: &Path,
+        shown: &Path,
+        manifest_shown: &str,
+        manifest: &Manifest,
+    ) {
+        // Objects link only through one of the package's own static `.vsys`
+        // libraries, which its capability ceiling must name (`Ffi[Lib]`), so
+        // a package cannot link native code without that capability.
+        let package = manifest.package.name.as_str();
+        let has_static_library = self.vsys.iter().filter(|v| v.package == package).any(|v| {
+            let (triple, text) = v
+                .targets
+                .first()
+                .map_or((VSYS_TARGETS[0].triple, v.text.as_str()), |(t, _, text)| {
+                    (*t, text.as_str())
+                });
+            let abi = target_of(triple).abi;
+            let source = text.replace("@TARGET@", triple).replace("@ABI@", abi);
+            vesper_ffi::sys::parse(&source, vesper_ffi::sys::Limits::default())
+                .is_ok_and(|d| d.link().mode() == vesper_ffi::sys::LinkMode::Static)
+        });
+        let mut seen = BTreeSet::new();
+        for path in &manifest.package.objects {
+            let bad = |why: &str| {
+                manifest_error(INVALID_PACKAGE, format!("package.objects '{path}': {why}"))
+            };
+            let relative = Path::new(path);
+            if !relative
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| OBJECT_EXTENSIONS.contains(&e))
+            {
+                self.manifest_errors.push((
+                    manifest_shown.into(),
+                    bad("expected a C source (.c), an assembly source (.s, .S, .asm) or an object (.o, .obj)"),
+                ));
+                continue;
+            }
+            if path.contains('\\')
+                || !relative
+                    .components()
+                    .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+            {
+                self.manifest_errors.push((
+                    manifest_shown.into(),
+                    bad("expected a relative path inside the package, with `/` separators and no `..`"),
+                ));
+                continue;
+            }
+            if !seen.insert(normalize(relative)) {
+                self.manifest_errors
+                    .push((manifest_shown.into(), bad("named twice")));
+                continue;
+            }
+            let files: Vec<(Option<&'static str>, PathBuf)> = if is_per_target_path(path) {
+                VSYS_TARGETS
+                    .iter()
+                    .map(|t| (Some(t.triple), dir.join(expand_vsys_path(path, *t))))
+                    .filter(|(_, f)| f.is_file())
+                    .collect()
+            } else {
+                Some((None, dir.join(relative)))
+                    .filter(|(_, f)| f.is_file())
+                    .into_iter()
+                    .collect()
+            };
+            if files.is_empty() {
+                let why = if is_per_target_path(path) {
+                    "no such file for any target"
+                } else {
+                    "no such file"
+                };
+                self.manifest_errors.push((manifest_shown.into(), bad(why)));
+                continue;
+            }
+            if !has_static_library {
+                self.manifest_errors.push((
+                    manifest_shown.into(),
+                    bad("objects provide a `link = \"static\"` .vsys library of this package, and it names none"),
+                ));
+                continue;
+            }
+            self.objects.push(PackageObject {
+                package: manifest.package.name.as_str().to_owned(),
+                display: display(&normalize(&shown.join(relative))),
+                files,
+            });
+        }
     }
 
     fn add_file(&mut self, display: String, text: String) -> usize {

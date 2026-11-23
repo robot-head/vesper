@@ -40,6 +40,7 @@ members = [
     "crates/vesper-loom-solver",
     "crates/vesper-loom-solver/seed",
     "crates/vesper-loom-trust",
+    "crates/vesper-loom-trust/seed",
     "crates/vesper-loom-admission",
     "crates/vesper-loom-audit",
     "crates/vesper-loom-audit/seed",
@@ -63,7 +64,7 @@ members = [
     "crates/vesper-pact-bridge",
     "crates/vesper-pact-binding",
     "crates/vesper-loom-cas",
-    "crates/vesper-loom-cas/port",
+    "crates/vesper-loom-cas/seed",
     "crates/vesper-loom-sandbox",
     "crates/vesper-loom-build",
     "crates/vesper-forge-runner",
@@ -75,7 +76,6 @@ members = [
     "crates/vesper-warp-wheel",
     "crates/vesper-warp-crypto",
     "crates/vesper-crypto-sys",
-    "crates/vesper-blake3-sys",
     "crates/vesper-warp-tcp",
     "crates/vesper-chorus",
     "crates/vesper-aegis",
@@ -92,6 +92,7 @@ members = [
     "crates/vesper-crucible/seed",
     "crates/vesper-nexus",
     "crates/vesper-vault",
+    "crates/vesper-vault/seed",
     "crates/vesper-kinetic",
     "crates/vesper-kinetic/seed",
     "crates/vesper-prism-h3",
@@ -157,6 +158,7 @@ default-members = [
     "crates/vesper-loom-solver",
     "crates/vesper-loom-solver/seed",
     "crates/vesper-loom-trust",
+    "crates/vesper-loom-trust/seed",
     "crates/vesper-loom-admission",
     "crates/vesper-loom-audit",
     "crates/vesper-loom-audit/seed",
@@ -180,6 +182,7 @@ default-members = [
     "crates/vesper-pact-bridge",
     "crates/vesper-pact-binding",
     "crates/vesper-loom-cas",
+    "crates/vesper-loom-cas/seed",
     "crates/vesper-loom-sandbox",
     "crates/vesper-loom-build",
     "crates/vesper-forge-runner",
@@ -191,7 +194,6 @@ default-members = [
     "crates/vesper-warp-wheel",
     "crates/vesper-warp-crypto",
     "crates/vesper-crypto-sys",
-    "crates/vesper-blake3-sys",
     "crates/vesper-warp-tcp",
     "crates/vesper-chorus",
     "crates/vesper-aegis",
@@ -208,6 +210,7 @@ default-members = [
     "crates/vesper-crucible/seed",
     "crates/vesper-nexus",
     "crates/vesper-vault",
+    "crates/vesper-vault/seed",
     "crates/vesper-kinetic",
     "crates/vesper-kinetic/seed",
     "crates/vesper-prism-h3",
@@ -306,7 +309,7 @@ vesper-fiber-abi = { path = "crates/vesper-fiber-abi" }
 vesper-semver = { path = "crates/vesper-semver/seed", package = "vesper-semver-seed" }
 # The compiler links the frozen Rust seed copy of vesper-loom-calculus (#913).
 vesper-loom-calculus = { path = "crates/vesper-loom-calculus/seed", package = "vesper-loom-calculus-seed" }
-vesper-loom-cas = { path = "crates/vesper-loom-cas" }
+vesper-loom-cas = { path = "crates/vesper-loom-cas/seed", package = "vesper-loom-cas-seed" }
 vesper-pact = { path = "crates/vesper-pact/seed", package = "vesper-pact-seed" }
 vesper-pact-binding = { path = "crates/vesper-pact-binding" }
 # Integration B (#136): wave-five verifiers and tools wired into the CLI.
@@ -325,7 +328,9 @@ vesper-resonance = { path = "crates/vesper-resonance/seed", package = "vesper-re
 # The compiler links the frozen Rust seed copy (seed-copy rule); the Vesper
 # port is the package crates/vesper-silicon (#1042).
 vesper-silicon = { path = "crates/vesper-silicon/seed", package = "vesper-silicon-seed" }
-vesper-vault = { path = "crates/vesper-vault" }
+# The compiler links the frozen Rust seed copy (seed-copy rule); the Vesper
+# port is the package crates/vesper-vault (Rust-exit SH6 lane 17, #1412).
+vesper-vault = { path = "crates/vesper-vault/seed", package = "vesper-vault-seed" }
 # Source Strata regions (wave seven lane 29) run on the host region allocator.
 # The compiler links the frozen Rust seed copy (seed-copy rule); the Vesper
 # port is the package crates/vesper-alloc.
@@ -367,8 +372,6 @@ sha2 = { workspace = true }
 vesper-bench = { path = "crates/vesper-bench/seed", package = "vesper-bench-seed" }
 # The one crypto shim, bound to @vesper/crypto in tests/crypto_shim.rs (SH6 lane 17).
 vesper-crypto-sys = { path = "crates/vesper-crypto-sys" }
-# The BLAKE3 C library behind @vesper-std/hash-sys, for tests/std_hash.rs.
-vesper-blake3-sys = { path = "crates/vesper-blake3-sys" }
 vesper-nexus = { path = "crates/vesper-nexus" }
 # The tools moved out of the compiler by SH6 lane 3 (#1398) link these; the
 # CLI tests still call them to check results.

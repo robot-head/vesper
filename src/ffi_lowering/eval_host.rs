@@ -12,7 +12,7 @@ use super::{EvalCall, Handler, INVALID_TYPE, Imports, handle_value, handle_word}
 use crate::runtime::Value;
 use std::collections::BTreeMap;
 use vesper_ffi::sys::{
-    Access, FunctionDescriptor, ParameterType, Pointee, PointerAccess, Scalar, ValueType,
+    AbiType, Access, FunctionDescriptor, ParameterType, Pointee, PointerAccess, Scalar, ValueType,
 };
 use vesper_ffi::{Endian, FieldKind, WireLayout};
 
@@ -37,6 +37,9 @@ enum Slot {
     /// A slice or pointee buffer (8-byte aligned), and the element count of
     /// a slice. `None` when a nullable argument was `None`.
     Buffer(Option<(Vec<u64>, usize)>),
+    /// A `CStrList`: the terminated bytes, the start offset of each string,
+    /// and the pointer array (filled once the bytes no longer move).
+    List(Vec<u64>, Vec<usize>, Vec<u64>),
 }
 
 impl EvalHost {
@@ -118,6 +121,19 @@ impl EvalHost {
         if args.len() != params.len() {
             return Err(format!("{}: {} arguments", call.symbol, args.len()));
         }
+        // The evaluator calls C with integer words only.
+        let abi = d.abi();
+        if abi
+            .parameters
+            .iter()
+            .chain(abi.result.as_ref())
+            .any(|t| matches!(t, AbiType::Float(_)))
+        {
+            return Err(format!(
+                "{}: a call passing or returning a float runs in compiled code (the JIT or an object), not the evaluator",
+                call.symbol
+            ));
+        }
         // First pass: marshal into owned buffers; addresses come after,
         // once no buffer moves.
         let mut slots = vec![];
@@ -152,6 +168,40 @@ impl EvalHost {
                     let mut buf = vec![0u64; (bytes.len() + 1).div_ceil(8)];
                     as_bytes(&mut buf)[..bytes.len()].copy_from_slice(&bytes);
                     Slot::Buffer(Some((buf, bytes.len())))
+                }
+                ParameterType::CWStr => {
+                    let units = elements(v)?
+                        .iter()
+                        .map(|u| int(u).map(|u| u as u16))
+                        .collect::<Result<Vec<u16>, _>>()?;
+                    if let Some(at) = units.iter().position(|u| *u == 0) {
+                        // Refused: `Err(ForeignInvalid { raw: offset })`.
+                        return Ok(result(
+                            "Err",
+                            data(
+                                INVALID_TYPE,
+                                INVALID_TYPE,
+                                vec![("raw", Value::UInt(at as u64, 64))],
+                            ),
+                        ));
+                    }
+                    let mut buf = vec![0u64; (units.len() + 1).div_ceil(4)];
+                    let dst = as_bytes(&mut buf);
+                    for (i, u) in units.iter().enumerate() {
+                        dst[i * 2..i * 2 + 2].copy_from_slice(&u.to_ne_bytes());
+                    }
+                    Slot::Buffer(Some((buf, units.len())))
+                }
+                ParameterType::CStrList => {
+                    let bytes = elements(v)?
+                        .iter()
+                        .map(|b| int(b).map(|b| b as u8))
+                        .collect::<Result<Vec<u8>, _>>()?;
+                    let mut buf = vec![0u64; (bytes.len() + 1).div_ceil(8)];
+                    as_bytes(&mut buf)[..bytes.len()].copy_from_slice(&bytes);
+                    let starts = cstr_list_starts(&bytes);
+                    let array = vec![0u64; starts.len() + 1];
+                    Slot::List(buf, starts, array)
                 }
                 ParameterType::Slice {
                     element, nullable, ..
@@ -205,6 +255,13 @@ impl EvalHost {
                     words.push(*n as u64);
                 }
                 (ParameterType::Slice { .. }, _) => words.extend([0, 0]),
+                (_, Slot::List(buf, starts, array)) => {
+                    let base = buf.as_mut_ptr() as u64;
+                    for (entry, start) in array.iter_mut().zip(starts.iter()) {
+                        *entry = base + *start as u64;
+                    }
+                    words.push(array.as_mut_ptr() as u64);
+                }
                 (_, Slot::Buffer(Some((buf, _)))) => words.push(buf.as_mut_ptr() as u64),
                 (_, _) => words.push(0),
             }
@@ -334,6 +391,35 @@ fn foreign_value(t: &ValueType, raw: u64) -> Result<Value, String> {
             handle_value(handle.name(), raw)
         }
         ValueType::Address { .. } => return Err("address results have no source value".into()),
+        ValueType::CStr if raw == 0 => data("Option", "None", vec![]),
+        // SAFETY: the library returned a NUL-terminated string it keeps
+        // (the `.vsys` contract), read before any other foreign call.
+        ValueType::CStr => some(Value::Seq(std::rc::Rc::new(std::cell::RefCell::new(
+            unsafe { std::ffi::CStr::from_ptr(raw as usize as *const std::ffi::c_char) }
+                .to_bytes()
+                .iter()
+                .map(|b| Value::UInt(u64::from(*b), 8))
+                .collect(),
+        )))),
+        ValueType::CWStr if raw == 0 => data("Option", "None", vec![]),
+        // SAFETY: the library returned a NUL-terminated UTF-16 string it keeps
+        // (the `.vsys` contract), read before any other foreign call.
+        ValueType::CWStr => {
+            let mut units = vec![];
+            let mut p = raw as usize as *const u16;
+            loop {
+                // SAFETY: `p` walks up to the terminating `0u16`.
+                let u = unsafe { *p };
+                if u == 0 {
+                    break;
+                }
+                units.push(Value::UInt(u64::from(u), 16));
+                // SAFETY: `p` stays within the NUL-terminated wide string.
+                p = unsafe { p.add(1) };
+            }
+            some(Value::Seq(std::rc::Rc::new(std::cell::RefCell::new(units))))
+        }
+        ValueType::Float(_) => return Err("float results run in compiled code".into()),
     })
 }
 
@@ -562,4 +648,21 @@ unsafe fn call_words(address: usize, w: &[u64]) -> Result<u64, String> {
             _ => return Err(format!("{} argument words", w.len())),
         })
     }
+}
+
+/// Where each string of a `CStrList` argument starts: every string ends at
+/// a NUL byte, and a last one without its NUL still counts.
+pub(crate) fn cstr_list_starts(bytes: &[u8]) -> Vec<usize> {
+    let mut starts = vec![];
+    let mut start = 0;
+    for (i, b) in bytes.iter().enumerate() {
+        if *b == 0 {
+            starts.push(start);
+            start = i + 1;
+        }
+    }
+    if start < bytes.len() {
+        starts.push(start);
+    }
+    starts
 }

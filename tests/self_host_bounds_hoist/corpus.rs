@@ -6,7 +6,7 @@ use vesper::ir::Program;
 
 /// A corpus world's program at the bounds-hoisting boundary of the native
 /// optimize pipeline (`native::compile_with` before `bounds_hoist::run`).
-fn at_hoist(world: &vesper::check::World) -> Option<Program> {
+pub(super) fn at_hoist(world: &vesper::check::World) -> Option<Program> {
     let mut program = vesper::ffi_lowering::drops::lower_world(world);
     vesper::ir_opt::optimize(world, &mut program).ok()?;
     vesper::ir_inline::inline(world, &mut program, &vesper::ir_inline::Budget::default());

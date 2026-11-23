@@ -1,0 +1,42 @@
+[package]
+name = "vesper-loom-trust-seed"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "Frozen Rust seed copy of vesper-loom-trust for the compiler's own build"
+autotests = false
+autoexamples = false
+autobenches = false
+build = false
+
+# The seed-copy rule ("Crates the compiler links" in
+# docs/maintenance/porting-a-crate.md): the compiler's tool binaries
+# (`vesper attest`, `vesper publish`, built as run-time data of the `vesper`
+# binary) and the crates of the compiler's build link this package, the
+# sources in ../src with cfg(vesper_port) off, so the frozen Rust engine in
+# ../src/reference runs instead of the Vesper port, under the library name
+# `vesper_loom_trust`. They depend on it with
+# `vesper-loom-trust = { path = ".../seed", package = "vesper-loom-trust-seed" }`;
+# every other crate uses the port-backed package `vesper-loom-trust`, whose
+# build needs a `vesper` compiler. The Rust code takes bug fixes only until
+# self-hosting Stage 2 (Rust-exit SH6 lane 17, #1412).
+[lib]
+name = "vesper_loom_trust"
+path = "../src/lib.rs"
+
+[[test]]
+name = "slopsquat"
+path = "../tests/slopsquat.rs"
+
+[dependencies]
+ed25519-dalek = "2"
+semver = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+vesper-loom-calculus = { path = "../../vesper-loom-calculus/seed", package = "vesper-loom-calculus-seed" }
+vesper-loom-cas = { path = "../../vesper-loom-cas/seed", package = "vesper-loom-cas-seed" }
+
+[lints.rust]
+# cfg(vesper_port) is set only by the port-backed package's build script.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(vesper_port)"] }

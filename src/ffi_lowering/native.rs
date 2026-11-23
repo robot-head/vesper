@@ -6,7 +6,9 @@
 use super::*;
 use crate::ffi_lowering::{self as ffi, Handler};
 use cranelift_module::DataDescription;
-use vesper_ffi::sys::{AbiType, Access, ParameterType, Pointee, PointerAccess, Scalar, ValueType};
+use vesper_ffi::sys::{
+    AbiType, Access, Float, ParameterType, Pointee, PointerAccess, Scalar, ValueType,
+};
 use vesper_ffi::{Endian, FieldKind, WireLayout};
 
 /// `xor ecx, ecx; rdpkru; ret` — returns PKRU in eax (System V).
@@ -55,9 +57,27 @@ fn c_type(bits: u8) -> ir::Type {
         _ => types::I64,
     }
 }
+/// C functions the runtimes import, with their word signatures (`n`
+/// 64-bit integer parameters, and a 64-bit result or none).
+fn runtime_import(symbol: &str) -> Option<(usize, bool)> {
+    Some(match symbol {
+        "write" | "memcpy" | "memmove" | "memset" => (3, true),
+        "malloc" => (1, true),
+        "calloc" | "realloc" => (2, true),
+        "free" | "exit" => (1, false),
+        _ => return None,
+    })
+}
+fn float_type(f: Float) -> ir::Type {
+    match f {
+        Float::F32 => types::F32,
+        Float::F64 => types::F64,
+    }
+}
 fn abi_param(t: AbiType, pointer: ir::Type) -> AbiParam {
     match t {
         AbiType::Pointer => AbiParam::new(pointer),
+        AbiType::Float(f) => AbiParam::new(float_type(f)),
         AbiType::Integer(s) => {
             let p = AbiParam::new(c_type(s.bits()));
             if s.bits() == 64 {
@@ -281,14 +301,14 @@ impl<M: Module> Codegen<'_, '_, M> {
         }
         // SH4 swap point (#1287): the `ffi` hook may emit this call
         // (`codegen_swap::ffi`); none is installed by default. A callback
-        // type's call is not offered: the steps name a symbol. Foreign
-        // memory viewed in place (pinned buffers and mappings) is lowered
-        // here only, so the hook is not offered such calls either.
+        // type's call is not offered: the steps name a symbol. Nor is a
+        // call taking a callback function: `foreign_trampoline` compiles a
+        // fresh function in `self.m`.
+        let abi = plan.function.abi();
         if !plan.function.is_indirect()
             && !descriptors
                 .iter()
                 .any(|d| matches!(d.ty(), ParameterType::Function { .. }))
-            && !plan.function.uses_foreign_memory()
             && let Some(v) = self.foreign_perform_swapped(&plan, &signature, args)?
         {
             return Ok(v);
@@ -300,6 +320,8 @@ impl<M: Module> Codegen<'_, '_, M> {
         // Per `CStr` argument: its malloc'd buffer, and the offset of its
         // first NUL byte (or -1).
         let mut strings: Vec<(ir::Value, ir::Value)> = vec![];
+        // The malloc'd bytes and pointer array of each `CStrList` argument.
+        let mut lists: Vec<ir::Value> = vec![];
         // The sequence headers of mappings consumed by this call, freed
         // after it, and the length argument of a mapping result.
         let mut released = vec![];
@@ -323,6 +345,20 @@ impl<M: Module> Codegen<'_, '_, M> {
                 let (data, len) = self.foreign_view(&arg.expr, 1)?;
                 strings.push(self.foreign_cstr(data, len)?);
                 c_args.push(strings.last().expect("just pushed").0);
+                continue;
+            }
+            if let ParameterType::CWStr = descriptor.ty() {
+                let (data, len) = self.foreign_view(&arg.expr, 2)?;
+                strings.push(self.foreign_cwstr(data, len)?);
+                c_args.push(strings.last().expect("just pushed").0);
+                continue;
+            }
+            if let ParameterType::CStrList = descriptor.ty() {
+                let (data, len) = self.foreign_view(&arg.expr, 1)?;
+                let (buffer, array) = self.foreign_cstr_list(data, len)?;
+                lists.push(buffer);
+                lists.push(array);
+                c_args.push(array);
                 continue;
             }
             if let ParameterType::Slice { element, .. } = descriptor.ty()
@@ -356,13 +392,13 @@ impl<M: Module> Codegen<'_, '_, M> {
                 // A pinned buffer or a mapping: its sequence's `(data, len)`.
                 // A consumed mapping's header is Vesper's, freed after the
                 // call; its memory is the library's.
-                ParameterType::Handle { handle, access } if handle.mapping().is_some() => {
+                ParameterType::Handle { handle, access } if let Some(elem) = handle.mapping() => {
                     let header = self.foreign_word(source);
                     let (data, len) = self.foreign_buffer(header);
                     c_args.push(data);
                     c_args.push(len);
                     if *access == vesper_ffi::sys::HandleAccess::Sink {
-                        released.push(header);
+                        released.push((header, data, len, u64::from(elem.bits()) / 8));
                     }
                 }
                 ParameterType::Pinned { .. } => {
@@ -372,7 +408,9 @@ impl<M: Module> Codegen<'_, '_, M> {
                     c_args.push(len);
                 }
                 ParameterType::Handle { .. } => c_args.push(self.foreign_word(source)),
-                ParameterType::CStr => unreachable!("C strings are lowered above"),
+                ParameterType::CStr | ParameterType::CWStr | ParameterType::CStrList => {
+                    unreachable!("C strings are lowered above")
+                }
                 ParameterType::Function { .. } => unreachable!("functions are lowered above"),
                 ParameterType::Pointer {
                     pointee,
@@ -428,7 +466,6 @@ impl<M: Module> Codegen<'_, '_, M> {
         // The length word is taken before any variadic padding shifts the
         // argument positions.
         let length = mapping_length.map(|i| c_args[i]);
-        let abi = plan.function.abi();
         // Apple arm64 passes variadic arguments on the stack: zero words
         // fill the remaining argument registers first (`sys::Variadic`).
         if let Some(v) = abi.variadic {
@@ -459,13 +496,7 @@ impl<M: Module> Codegen<'_, '_, M> {
             }
             Callee::Direct(self.foreign_code(plan.function.symbol(), &sig, &code)?)
         } else {
-            let symbol = plan.function.link_symbol();
-            self.foreign_symbol_free(symbol, Linkage::Import)?;
-            let callee = self
-                .m
-                .declare_function(symbol, Linkage::Import, &sig)
-                .map_err(|e| format!("foreign symbol '{symbol}': {e}"))?;
-            Callee::Direct(self.m.declare_func_in_func(callee, self.b.func))
+            self.foreign_import(plan.function.link_symbol(), sig)?
         };
         // A `CStr` argument holding a NUL byte refuses the whole call:
         // `Err(ForeignInvalid { raw: offset })` of the first such argument.
@@ -509,17 +540,26 @@ impl<M: Module> Codegen<'_, '_, M> {
         } else {
             None
         };
+        for &(_, data, len, stride) in &released {
+            self.foreign_range_unregister(data, len, stride)?;
+        }
         let call = match callee {
             Callee::Direct(f) => self.b.ins().call(f, &c_args),
             Callee::Indirect(sig, pointer) => self.b.ins().call_indirect(sig, pointer, &c_args),
         };
         let mut raw = self.b.inst_results(call).first().copied();
         if let (Some(len), Some(address)) = (length, raw) {
-            raw = Some(self.foreign_mapping(address, len)?);
+            let elem_bytes = match plan.function.result() {
+                ValueType::Handle { handle, .. } => {
+                    handle.mapping().map_or(1, |s| u64::from(s.bits()) / 8)
+                }
+                _ => 1,
+            };
+            raw = Some(self.foreign_mapping(address, len, elem_bytes)?);
         }
         if !released.is_empty() {
             let free = self.foreign_libc("free", 1, false)?;
-            for header in released {
+            for (header, _, _, _) in released {
                 self.b.ins().call(free, &[header]);
             }
         }
@@ -581,7 +621,7 @@ impl<M: Module> Codegen<'_, '_, M> {
             self.b.seal_block(join);
             value = slot;
         }
-        for (buffer, _) in strings {
+        for buffer in strings.into_iter().map(|(b, _)| b).chain(lists) {
             let free = self.foreign_libc("free", 1, false)?;
             self.b.ins().call(free, &[buffer]);
         }
@@ -623,7 +663,12 @@ impl<M: Module> Codegen<'_, '_, M> {
     /// or 0 (`None`) when the library returned `NULL` or `MAP_FAILED`
     /// (all ones). The header is freed by the `sink` import that releases
     /// the mapping; the memory is never Vesper's to free or grow.
-    fn foreign_mapping(&mut self, address: ir::Value, len: ir::Value) -> Result<ir::Value, String> {
+    fn foreign_mapping(
+        &mut self,
+        address: ir::Value,
+        len: ir::Value,
+        elem_bytes: u64,
+    ) -> Result<ir::Value, String> {
         let len = match self.b.func.dfg.value_type(len) {
             types::I64 => len,
             _ => self.b.ins().uextend(types::I64, len),
@@ -638,6 +683,7 @@ impl<M: Module> Codegen<'_, '_, M> {
         self.branch(absent, join, &[ir::BlockArg::Value(zero)], make, &[]);
         self.b.switch_to_block(make);
         self.b.seal_block(make);
+        self.foreign_range_register(address, len, elem_bytes, elem_bytes)?;
         let malloc = self.foreign_libc("malloc", 1, true)?;
         let size = self.b.ins().iconst(types::I64, 24);
         let call = self.b.ins().call(malloc, &[size]);
@@ -653,6 +699,518 @@ impl<M: Module> Codegen<'_, '_, M> {
         self.b.switch_to_block(join);
         self.b.seal_block(join);
         Ok(self.b.block_params(join)[0])
+    }
+
+    pub(crate) fn foreign_range_register(
+        &mut self,
+        addr: ir::Value,
+        len: ir::Value,
+        stride: u64,
+        align: u64,
+    ) -> Result<(), String> {
+        let bytes = if stride > 1 {
+            let s = self.b.ins().iconst(types::I64, stride as i64);
+            let (prod, overflow) = self.b.ins().umul_overflow(len, s);
+            self.b
+                .ins()
+                .trapnz(overflow, ir::TrapCode::unwrap_user(ffi::MAPPING_ALLOC_TRAP));
+            prod
+        } else {
+            len
+        };
+        let (reg_id, _) = self.foreign_range_helpers()?;
+        let fun = self.m.declare_func_in_func(reg_id, self.b.func);
+        let align_val = self.b.ins().iconst(types::I64, align.max(1) as i64);
+        self.b.ins().call(fun, &[addr, bytes, align_val]);
+        Ok(())
+    }
+
+    pub(crate) fn foreign_range_unregister(
+        &mut self,
+        addr: ir::Value,
+        len: ir::Value,
+        stride: u64,
+    ) -> Result<(), String> {
+        let bytes = if stride > 1 {
+            self.b.ins().imul_imm(len, stride as i64)
+        } else {
+            len
+        };
+        let (_, unreg_id) = self.foreign_range_helpers()?;
+        let fun = self.m.declare_func_in_func(unreg_id, self.b.func);
+        self.b.ins().call(fun, &[addr, bytes]);
+        Ok(())
+    }
+
+    fn foreign_range_helpers(&mut self) -> Result<(FuncId, FuncId), String> {
+        const LOCK_SYM: &str = "__vesper_foreign_lock";
+        const HEAD_SYM: &str = "__vesper_foreign_head";
+        const REG_SYM: &str = "__vesper_foreign_register";
+        const UNREG_SYM: &str = "__vesper_foreign_unregister";
+
+        if let (
+            Some(cranelift_module::FuncOrDataId::Func(reg_id)),
+            Some(cranelift_module::FuncOrDataId::Func(unreg_id)),
+        ) = (
+            self.m.declarations().get_name(REG_SYM),
+            self.m.declarations().get_name(UNREG_SYM),
+        ) {
+            return Ok((reg_id, unreg_id));
+        }
+
+        let is_jit = std::any::type_name::<M>().ends_with("JITModule");
+        let linkage = if is_jit {
+            Linkage::Preemptible
+        } else {
+            Linkage::Local
+        };
+        let malloc_id = self.foreign_libc_id("malloc", 1, true)?;
+        let free_id = self.foreign_libc_id("free", 1, false)?;
+
+        let lock_id = self
+            .m
+            .declare_data(LOCK_SYM, linkage, true, false)
+            .map_err(|e| e.to_string())?;
+        let head_id = self
+            .m
+            .declare_data(HEAD_SYM, linkage, true, false)
+            .map_err(|e| e.to_string())?;
+        let mut zero_desc = DataDescription::new();
+        zero_desc.set_align(8);
+        zero_desc.define(vec![0u8; 8].into_boxed_slice());
+        self.m
+            .define_data(lock_id, &zero_desc)
+            .map_err(|e| e.to_string())?;
+        self.m
+            .define_data(head_id, &zero_desc)
+            .map_err(|e| e.to_string())?;
+
+        let mut reg_sig = self.m.make_signature();
+        reg_sig.params.extend([AbiParam::new(types::I64); 3]);
+        let reg_id = self
+            .m
+            .declare_function(REG_SYM, linkage, &reg_sig)
+            .map_err(|e| e.to_string())?;
+
+        let mut unreg_sig = self.m.make_signature();
+        unreg_sig.params.extend([AbiParam::new(types::I64); 2]);
+        let unreg_id = self
+            .m
+            .declare_function(UNREG_SYM, linkage, &unreg_sig)
+            .map_err(|e| e.to_string())?;
+        let ptr_ty = self.m.target_config().pointer_type();
+        let trap = ir::TrapCode::unwrap_user(ffi::MAPPING_ALLOC_TRAP);
+        let flags = ir::MemFlags::trusted();
+
+        // __vesper_foreign_register(addr, bytes, align)
+        {
+            let mut ctx = self.m.make_context();
+            ctx.func.signature = reg_sig;
+            let mut fb = FunctionBuilderContext::new();
+            let mut b = FunctionBuilder::new(&mut ctx.func, &mut fb);
+            let entry = b.create_block();
+            b.append_block_params_for_function_params(entry);
+            b.switch_to_block(entry);
+            b.seal_block(entry);
+            let params = b.block_params(entry).to_vec();
+            let (addr, bytes, align) = (params[0], params[1], params[2]);
+
+            let done_empty = b.create_block();
+            let check_bounds = b.create_block();
+            let is_zero = b.ins().icmp_imm(IntCC::Equal, bytes, 0);
+            b.ins().brif(is_zero, done_empty, &[], check_bounds, &[]);
+
+            b.switch_to_block(done_empty);
+            b.seal_block(done_empty);
+            b.ins().return_(&[]);
+
+            b.switch_to_block(check_bounds);
+            b.seal_block(check_bounds);
+            b.ins().trapz(addr, trap);
+            let mask = b.ins().iadd_imm(align, -1);
+            let misalign = b.ins().band(addr, mask);
+            b.ins().trapnz(misalign, trap);
+            let (end, wrap) = b.ins().uadd_overflow(addr, bytes);
+            b.ins().trapnz(wrap, trap);
+
+            let lock_gv = self.m.declare_data_in_func(lock_id, b.func);
+            let head_gv = self.m.declare_data_in_func(head_id, b.func);
+            let lock_ptr = b.ins().global_value(ptr_ty, lock_gv);
+            let head_ptr = b.ins().global_value(ptr_ty, head_gv);
+
+            let spin = b.create_block();
+            let locked = b.create_block();
+            b.ins().jump(spin, &[]);
+
+            b.switch_to_block(spin);
+            let zero = b.ins().iconst(types::I64, 0);
+            let one = b.ins().iconst(types::I64, 1);
+            let old = b.ins().atomic_cas(flags, lock_ptr, zero, one);
+            b.ins().brif(old, spin, &[], locked, &[]);
+
+            b.switch_to_block(locked);
+            b.seal_block(spin);
+            b.seal_block(locked);
+            let first = b.ins().load(types::I64, flags, head_ptr, 0);
+            let walk = b.create_block();
+            b.append_block_param(walk, types::I64);
+            let check_node = b.create_block();
+            let overlap_fail = b.create_block();
+            let next_node = b.create_block();
+            let insert = b.create_block();
+            b.ins().jump(walk, &[ir::BlockArg::Value(first)]);
+
+            b.switch_to_block(walk);
+            let cur = b.block_params(walk)[0];
+            b.ins().brif(cur, check_node, &[], insert, &[]);
+
+            b.switch_to_block(check_node);
+            b.seal_block(check_node);
+            let na = b.ins().load(types::I64, flags, cur, 0);
+            let ne = b.ins().load(types::I64, flags, cur, 8);
+            let c1 = b.ins().icmp(IntCC::UnsignedLessThan, addr, ne);
+            let c2 = b.ins().icmp(IntCC::UnsignedLessThan, na, end);
+            let hit = b.ins().band(c1, c2);
+            b.ins().brif(hit, overlap_fail, &[], next_node, &[]);
+
+            b.switch_to_block(overlap_fail);
+            b.seal_block(overlap_fail);
+            let zero = b.ins().iconst(types::I64, 0);
+            b.ins().atomic_store(flags, zero, lock_ptr);
+            b.ins().trap(trap);
+
+            b.switch_to_block(next_node);
+            b.seal_block(next_node);
+            let nxt = b.ins().load(types::I64, flags, cur, 16);
+            b.ins().jump(walk, &[ir::BlockArg::Value(nxt)]);
+
+            b.switch_to_block(insert);
+            b.seal_block(walk);
+            b.seal_block(insert);
+            let malloc_fn = self.m.declare_func_in_func(malloc_id, b.func);
+            let sz = b.ins().iconst(types::I64, 24);
+            let call = b.ins().call(malloc_fn, &[sz]);
+            let node = b.inst_results(call)[0];
+            let node_zero = b.ins().icmp_imm(IntCC::Equal, node, 0);
+            let alloc_ok = b.create_block();
+            let alloc_fail = b.create_block();
+            b.ins().brif(node_zero, alloc_fail, &[], alloc_ok, &[]);
+
+            b.switch_to_block(alloc_fail);
+            b.seal_block(alloc_fail);
+            let zero = b.ins().iconst(types::I64, 0);
+            b.ins().atomic_store(flags, zero, lock_ptr);
+            b.ins().trap(trap);
+
+            b.switch_to_block(alloc_ok);
+            b.seal_block(alloc_ok);
+            let cur_head = b.ins().load(types::I64, flags, head_ptr, 0);
+            b.ins().store(flags, addr, node, 0);
+            b.ins().store(flags, end, node, 8);
+            b.ins().store(flags, cur_head, node, 16);
+            b.ins().store(flags, node, head_ptr, 0);
+            let zero = b.ins().iconst(types::I64, 0);
+            b.ins().atomic_store(flags, zero, lock_ptr);
+            b.ins().return_(&[]);
+            b.finalize();
+            if is_jit {
+                for target in ctx.func.dfg.ext_funcs.values_mut() {
+                    target.colocated = false;
+                }
+                for global in ctx.func.global_values.values_mut() {
+                    if let ir::GlobalValueData::Symbol { colocated, .. } = global {
+                        *colocated = false;
+                    }
+                }
+            }
+            self.m
+                .define_function(reg_id, &mut ctx)
+                .map_err(|e| e.to_string())?;
+            self.m.clear_context(&mut ctx);
+        }
+
+        // __vesper_foreign_unregister(addr, bytes)
+        {
+            let mut ctx = self.m.make_context();
+            ctx.func.signature = unreg_sig;
+            let mut fb = FunctionBuilderContext::new();
+            let mut b = FunctionBuilder::new(&mut ctx.func, &mut fb);
+            let entry = b.create_block();
+            b.append_block_params_for_function_params(entry);
+            b.switch_to_block(entry);
+            b.seal_block(entry);
+            let params = b.block_params(entry).to_vec();
+            let (addr, bytes) = (params[0], params[1]);
+
+            let done_empty = b.create_block();
+            let work = b.create_block();
+            let is_zero = b.ins().icmp_imm(IntCC::Equal, bytes, 0);
+            b.ins().brif(is_zero, done_empty, &[], work, &[]);
+
+            b.switch_to_block(done_empty);
+            b.seal_block(done_empty);
+            b.ins().return_(&[]);
+
+            b.switch_to_block(work);
+            b.seal_block(work);
+            let end = b.ins().iadd(addr, bytes);
+            let lock_gv = self.m.declare_data_in_func(lock_id, b.func);
+            let head_gv = self.m.declare_data_in_func(head_id, b.func);
+            let lock_ptr = b.ins().global_value(ptr_ty, lock_gv);
+            let head_ptr = b.ins().global_value(ptr_ty, head_gv);
+
+            let spin = b.create_block();
+            let locked = b.create_block();
+            b.ins().jump(spin, &[]);
+
+            b.switch_to_block(spin);
+            let zero = b.ins().iconst(types::I64, 0);
+            let one = b.ins().iconst(types::I64, 1);
+            let old = b.ins().atomic_cas(flags, lock_ptr, zero, one);
+            b.ins().brif(old, spin, &[], locked, &[]);
+
+            b.switch_to_block(locked);
+            b.seal_block(spin);
+            b.seal_block(locked);
+            let first = b.ins().load(types::I64, flags, head_ptr, 0);
+            let walk = b.create_block();
+            b.append_block_param(walk, types::I64);
+            b.append_block_param(walk, types::I64);
+            let check_node = b.create_block();
+            let remove_node = b.create_block();
+            let next_node = b.create_block();
+            let not_found = b.create_block();
+            b.ins().jump(
+                walk,
+                &[ir::BlockArg::Value(head_ptr), ir::BlockArg::Value(first)],
+            );
+
+            b.switch_to_block(walk);
+            let wparams = b.block_params(walk).to_vec();
+            let (prev, cur) = (wparams[0], wparams[1]);
+            b.ins().brif(cur, check_node, &[], not_found, &[]);
+
+            b.switch_to_block(check_node);
+            b.seal_block(check_node);
+            let na = b.ins().load(types::I64, flags, cur, 0);
+            let ne = b.ins().load(types::I64, flags, cur, 8);
+            let nxt = b.ins().load(types::I64, flags, cur, 16);
+            let eq_a = b.ins().icmp(IntCC::Equal, na, addr);
+            let eq_e = b.ins().icmp(IntCC::Equal, ne, end);
+            let same = b.ins().band(eq_a, eq_e);
+            b.ins().brif(same, remove_node, &[], next_node, &[]);
+
+            b.switch_to_block(remove_node);
+            b.seal_block(remove_node);
+            b.ins().store(flags, nxt, prev, 0);
+            let zero = b.ins().iconst(types::I64, 0);
+            b.ins().atomic_store(flags, zero, lock_ptr);
+            let free_fn = self.m.declare_func_in_func(free_id, b.func);
+            b.ins().call(free_fn, &[cur]);
+            b.ins().return_(&[]);
+
+            b.switch_to_block(next_node);
+            b.seal_block(next_node);
+            let prev_next = b.ins().iadd_imm(cur, 16);
+            b.ins().jump(
+                walk,
+                &[ir::BlockArg::Value(prev_next), ir::BlockArg::Value(nxt)],
+            );
+
+            b.switch_to_block(not_found);
+            b.seal_block(walk);
+            b.seal_block(not_found);
+            let zero = b.ins().iconst(types::I64, 0);
+            b.ins().atomic_store(flags, zero, lock_ptr);
+            b.ins().return_(&[]);
+            b.finalize();
+            if is_jit {
+                for target in ctx.func.dfg.ext_funcs.values_mut() {
+                    target.colocated = false;
+                }
+                for global in ctx.func.global_values.values_mut() {
+                    if let ir::GlobalValueData::Symbol { colocated, .. } = global {
+                        *colocated = false;
+                    }
+                }
+            }
+            self.m
+                .define_function(unreg_id, &mut ctx)
+                .map_err(|e| e.to_string())?;
+            self.m.clear_context(&mut ctx);
+        }
+
+        Ok((reg_id, unreg_id))
+    }
+    /// The `ChunkSeq[u8]` copy of the C string at `address` (its bytes
+    /// before the NUL), or 0 when `address` is `NULL`. The copy has room
+    /// for one byte more, so it is never the shared empty header.
+    fn foreign_cstr_copy(&mut self, address: ir::Value) -> Result<ir::Value, String> {
+        let copy = self.b.create_block();
+        let join = self.b.create_block();
+        self.b.append_block_param(join, types::I64);
+        let zero = self.b.ins().iconst(types::I64, 0);
+        let null = self.b.ins().icmp_imm(IntCC::Equal, address, 0);
+        self.branch(null, join, &[ir::BlockArg::Value(zero)], copy, &[]);
+        self.b.switch_to_block(copy);
+        self.b.seal_block(copy);
+        let strlen = self.foreign_libc("strlen", 1, true)?;
+        let memcpy = self.foreign_libc("memcpy", 3, true)?;
+        let call = self.b.ins().call(strlen, &[address]);
+        let len = self.b.inst_results(call)[0];
+        let cap = self.b.ins().iadd_imm(len, 1);
+        let stride = self.b.ins().iconst(types::I64, 1);
+        let header = self.seq_make(cap, stride)?;
+        let flags = ir::MemFlags::new();
+        let data = self.b.ins().load(types::I64, flags, header, 16);
+        self.b.ins().call(memcpy, &[data, address, len]);
+        self.b.ins().store(flags, len, header, 0);
+        self.jump(join, &[ir::BlockArg::Value(header)]);
+        self.b.switch_to_block(join);
+        self.b.seal_block(join);
+        Ok(self.b.block_params(join)[0])
+    }
+    /// The `ChunkSeq[u16]` copy of the NUL-terminated UTF-16 string at
+    /// `address` (its code units before `0u16`), or 0 when `address` is `NULL`.
+    fn foreign_cwstr_copy(&mut self, address: ir::Value) -> Result<ir::Value, String> {
+        let scan = self.b.create_block();
+        let step = self.b.create_block();
+        let copy = self.b.create_block();
+        let join = self.b.create_block();
+        self.b.append_block_param(scan, types::I64);
+        self.b.append_block_param(join, types::I64);
+        let zero = self.b.ins().iconst(types::I64, 0);
+        let null = self.b.ins().icmp_imm(IntCC::Equal, address, 0);
+        self.branch(
+            null,
+            join,
+            &[ir::BlockArg::Value(zero)],
+            scan,
+            &[ir::BlockArg::Value(zero)],
+        );
+
+        self.b.switch_to_block(scan);
+        let len = self.b.block_params(scan)[0];
+        let byte_off = self.b.ins().ishl_imm(len, 1);
+        let ptr = self.b.ins().iadd(address, byte_off);
+        let unit = self.b.ins().load(types::I16, ir::MemFlags::new(), ptr, 0);
+        let is_nul = self.b.ins().icmp_imm(IntCC::Equal, unit, 0);
+        self.branch(is_nul, copy, &[], step, &[]);
+
+        self.b.switch_to_block(step);
+        self.b.seal_block(step);
+        let next_len = self.b.ins().iadd_imm(len, 1);
+        self.jump(scan, &[ir::BlockArg::Value(next_len)]);
+
+        self.b.switch_to_block(copy);
+        self.b.seal_block(scan);
+        self.b.seal_block(copy);
+        let cap = self.b.ins().iadd_imm(len, 1);
+        let stride = self.b.ins().iconst(types::I64, 2);
+        let header = self.seq_make(cap, stride)?;
+        let flags = ir::MemFlags::new();
+        let data = self.b.ins().load(types::I64, flags, header, 16);
+        let bytes = self.b.ins().ishl_imm(len, 1);
+        let memcpy = self.foreign_libc("memcpy", 3, true)?;
+        self.b.ins().call(memcpy, &[data, address, bytes]);
+        self.b.ins().store(flags, len, header, 0);
+        self.jump(join, &[ir::BlockArg::Value(header)]);
+
+        self.b.switch_to_block(join);
+        self.b.seal_block(join);
+        Ok(self.b.block_params(join)[0])
+    }
+    /// A `CStrList` argument: a NUL-terminated `malloc` copy of the `len`
+    /// bytes at `data`, and a `malloc`'d NULL-terminated array pointing at
+    /// each string in it (every string ends at a NUL; a last one without
+    /// its NUL is ended by the copy's terminator).
+    fn foreign_cstr_list(
+        &mut self,
+        data: ir::Value,
+        len: ir::Value,
+    ) -> Result<(ir::Value, ir::Value), String> {
+        let malloc = self.foreign_libc("malloc", 1, true)?;
+        let memcpy = self.foreign_libc("memcpy", 3, true)?;
+        let flags = ir::MemFlags::new();
+        let size = self.b.ins().iadd_imm(len, 1);
+        let call = self.b.ins().call(malloc, &[size]);
+        let buffer = self.b.inst_results(call)[0];
+        self.b
+            .ins()
+            .trapz(buffer, ir::TrapCode::unwrap_user(ffi::CSTR_ALLOC_TRAP));
+        self.b.ins().call(memcpy, &[buffer, data, len]);
+        let end = self.b.ins().iadd(buffer, len);
+        let nul = self.b.ins().iconst(types::I8, 0);
+        self.b.ins().store(flags, nul, end, 0);
+        // Count the strings first, so the array holds just them and the NULL.
+        let count = self.cstr_list_walk(buffer, len, None)?;
+        let slots = self.b.ins().iadd_imm(count, 1);
+        let bytes = self.b.ins().imul_imm(slots, 8);
+        let call = self.b.ins().call(malloc, &[bytes]);
+        let array = self.b.inst_results(call)[0];
+        self.b
+            .ins()
+            .trapz(array, ir::TrapCode::unwrap_user(ffi::CSTR_ALLOC_TRAP));
+        let count = self.cstr_list_walk(buffer, len, Some(array))?;
+        let slot = self.b.ins().imul_imm(count, 8);
+        let slot = self.b.ins().iadd(array, slot);
+        let zero = self.b.ins().iconst(types::I64, 0);
+        self.b.ins().store(flags, zero, slot, 0);
+        Ok((buffer, array))
+    }
+    /// Walks the strings of a `CStrList` copy (`len` bytes at `buffer`,
+    /// NUL at `buffer + len`) with `memchr`, one step per string, storing
+    /// each start into `array` when given; returns the number of strings.
+    fn cstr_list_walk(
+        &mut self,
+        buffer: ir::Value,
+        len: ir::Value,
+        array: Option<ir::Value>,
+    ) -> Result<ir::Value, String> {
+        let memchr = self.foreign_libc("memchr", 3, true)?;
+        let walk = self.b.create_block();
+        let body = self.b.create_block();
+        let done = self.b.create_block();
+        for _ in 0..2 {
+            self.b.append_block_param(walk, types::I64);
+            self.b.append_block_param(body, types::I64);
+        }
+        self.b.append_block_param(done, types::I64);
+        let zero = self.b.ins().iconst(types::I64, 0);
+        self.jump(walk, &[ir::BlockArg::Value(zero); 2]);
+        self.b.switch_to_block(walk);
+        let (start, k) = {
+            let p = self.b.block_params(walk);
+            (p[0], p[1])
+        };
+        let more = self.b.ins().icmp(IntCC::UnsignedLessThan, start, len);
+        let args = [start, k].map(ir::BlockArg::Value);
+        self.branch(more, body, &args, done, &[ir::BlockArg::Value(k)]);
+        self.b.switch_to_block(body);
+        self.b.seal_block(body);
+        let (start, k) = {
+            let p = self.b.block_params(body);
+            (p[0], p[1])
+        };
+        let here = self.b.ins().iadd(buffer, start);
+        if let Some(array) = array {
+            let slot = self.b.ins().imul_imm(k, 8);
+            let slot = self.b.ins().iadd(array, slot);
+            self.b.ins().store(ir::MemFlags::new(), here, slot, 0);
+        }
+        // The copy's terminator at `len` bounds every search.
+        let rest = self.b.ins().isub(len, start);
+        let rest = self.b.ins().iadd_imm(rest, 1);
+        let call = self.b.ins().call(memchr, &[here, zero, rest]);
+        let found = self.b.inst_results(call)[0];
+        let end = self.b.ins().isub(found, buffer);
+        let next = self.b.ins().iadd_imm(end, 1);
+        let k = self.b.ins().iadd_imm(k, 1);
+        self.jump(walk, &[next, k].map(ir::BlockArg::Value));
+        self.b.seal_block(walk);
+        self.b.switch_to_block(done);
+        self.b.seal_block(done);
+        Ok(self.b.block_params(done)[0])
     }
     /// A NUL-terminated `malloc` copy of `len` bytes at `data`, and the
     /// offset of the first NUL byte among them (-1 when there is none).
@@ -682,6 +1240,79 @@ impl<M: Module> Codegen<'_, '_, M> {
         let none = self.b.ins().iconst(types::I64, -1);
         Ok((buffer, self.b.ins().select(missing, none, at)))
     }
+    /// A NUL-terminated UTF-16 `malloc` copy of the `len` code units at `data`,
+    /// and the element offset of the first `0u16` among them (-1 when none).
+    fn foreign_cwstr(
+        &mut self,
+        data: ir::Value,
+        len: ir::Value,
+    ) -> Result<(ir::Value, ir::Value), String> {
+        let malloc = self.foreign_libc("malloc", 1, true)?;
+        let memcpy = self.foreign_libc("memcpy", 3, true)?;
+        let bytes = self.b.ins().ishl_imm(len, 1);
+        let size = self.b.ins().iadd_imm(bytes, 2);
+        let call = self.b.ins().call(malloc, &[size]);
+        let buffer = self.b.inst_results(call)[0];
+        self.b
+            .ins()
+            .trapz(buffer, ir::TrapCode::unwrap_user(ffi::CSTR_ALLOC_TRAP));
+        self.b.ins().call(memcpy, &[buffer, data, bytes]);
+        let end = self.b.ins().iadd(buffer, bytes);
+        let nul = self.b.ins().iconst(types::I16, 0);
+        self.b.ins().store(ir::MemFlags::new(), nul, end, 0);
+
+        let loop_blk = self.b.create_block();
+        let check_blk = self.b.create_block();
+        let step_blk = self.b.create_block();
+        let done_blk = self.b.create_block();
+        self.b.append_block_param(loop_blk, types::I64);
+        self.b.append_block_param(done_blk, types::I64);
+        let zero = self.b.ins().iconst(types::I64, 0);
+        let none = self.b.ins().iconst(types::I64, -1);
+        self.jump(loop_blk, &[ir::BlockArg::Value(zero)]);
+
+        self.b.switch_to_block(loop_blk);
+        let idx = self.b.block_params(loop_blk)[0];
+        let more = self.b.ins().icmp(IntCC::UnsignedLessThan, idx, len);
+        self.branch(more, check_blk, &[], done_blk, &[ir::BlockArg::Value(none)]);
+
+        self.b.switch_to_block(check_blk);
+        self.b.seal_block(check_blk);
+        let off = self.b.ins().ishl_imm(idx, 1);
+        let ptr = self.b.ins().iadd(buffer, off);
+        let unit = self.b.ins().load(types::I16, ir::MemFlags::new(), ptr, 0);
+        let is_nul = self.b.ins().icmp_imm(IntCC::Equal, unit, 0);
+        self.branch(is_nul, done_blk, &[ir::BlockArg::Value(idx)], step_blk, &[]);
+
+        self.b.switch_to_block(step_blk);
+        self.b.seal_block(step_blk);
+        let next = self.b.ins().iadd_imm(idx, 1);
+        self.jump(loop_blk, &[ir::BlockArg::Value(next)]);
+
+        self.b.switch_to_block(done_blk);
+        self.b.seal_block(loop_blk);
+        self.b.seal_block(done_blk);
+        Ok((buffer, self.b.block_params(done_blk)[0]))
+    }
+    /// A C library function of 64-bit word parameters (and result), returning
+    /// its module-level `FuncId`.
+    fn foreign_libc_id(
+        &mut self,
+        name: &str,
+        params: usize,
+        returns: bool,
+    ) -> Result<cranelift_module::FuncId, String> {
+        let mut sig = self.m.make_signature();
+        for _ in 0..params {
+            sig.params.push(AbiParam::new(types::I64));
+        }
+        if returns {
+            sig.returns.push(AbiParam::new(types::I64));
+        }
+        self.m
+            .declare_function(name, Linkage::Import, &sig)
+            .map_err(|e| format!("C library function '{name}': {e}"))
+    }
     /// A C library function of 64-bit word parameters (and result), as the
     /// sequence runtime declares it.
     fn foreign_libc(
@@ -690,17 +1321,7 @@ impl<M: Module> Codegen<'_, '_, M> {
         params: usize,
         returns: bool,
     ) -> Result<ir::FuncRef, String> {
-        let mut sig = self.m.make_signature();
-        for _ in 0..params {
-            sig.params.push(AbiParam::new(types::I64));
-        }
-        if returns {
-            sig.returns.push(AbiParam::new(types::I64));
-        }
-        let id = self
-            .m
-            .declare_function(name, Linkage::Import, &sig)
-            .map_err(|e| format!("C library function '{name}': {e}"))?;
+        let id = self.foreign_libc_id(name, params, returns)?;
         Ok(self.m.declare_func_in_func(id, self.b.func))
     }
     /// The calling thread's OS error code as a 64-bit word: `errno` on
@@ -771,6 +1392,10 @@ impl<M: Module> Codegen<'_, '_, M> {
                 let word = self.foreign_word(source);
                 Ok(self.foreign_narrow(word, s.bits()))
             }
+            ValueType::Float(f) => Ok(match source {
+                Source::Scalar(v) => v,
+                Source::Memory(p) => self.b.ins().load(float_type(*f), ir::MemFlags::new(), p, 0),
+            }),
             ValueType::Bool => {
                 let word = self.foreign_word(source);
                 Ok(self.b.ins().ireduce(types::I8, word))
@@ -793,9 +1418,9 @@ impl<M: Module> Codegen<'_, '_, M> {
             ValueType::Unit
             | ValueType::Address { .. }
             | ValueType::Handle { .. }
-            | ValueType::NonNullHandle { .. } => {
-                Err("foreign parameter type has no native lowering".into())
-            }
+            | ValueType::NonNullHandle { .. }
+            | ValueType::CStr
+            | ValueType::CWStr => Err("foreign parameter type has no native lowering".into()),
         }
     }
     /// For a nullable parameter, the `Some` payload and its presence flag.
@@ -1137,6 +1762,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                 let v = raw()?;
                 Ok(self.foreign_widen(v, s.bits(), s.signed()))
             }
+            ValueType::Float(_) => raw().map_err(Into::into),
             ValueType::Bool => {
                 let v = raw()?;
                 let word = self.b.ins().uextend(types::I64, v);
@@ -1160,6 +1786,26 @@ impl<M: Module> Codegen<'_, '_, M> {
                 self.foreign_validated(ty, valid, index, word)
             }
             ValueType::Address { .. } => Err("foreign address results have no lowering".into()),
+            ValueType::CStr | ValueType::CWStr => {
+                let word = raw()?;
+                let copy = if *result == ValueType::CWStr {
+                    self.foreign_cwstr_copy(word)?
+                } else {
+                    self.foreign_cstr_copy(word)?
+                };
+                let layout = Layout::of(self.world, ty)?;
+                let (some, fields) = layout.variant("Some").ok_or("Option lacks Some")?;
+                let offset = fields.first().ok_or("Some lacks a payload")?.offset;
+                let (none, _) = layout.variant("None").ok_or("Option lacks None")?;
+                let present = self.b.ins().icmp_imm(IntCC::NotEqual, word, 0);
+                let ptr = self.alloc(layout.size);
+                let some = self.b.ins().iconst(types::I64, some as i64);
+                let none = self.b.ins().iconst(types::I64, none as i64);
+                let tag = self.b.ins().select(present, some, none);
+                self.b.ins().store(ir::MemFlags::new(), tag, ptr, 0);
+                self.b.ins().store(ir::MemFlags::new(), copy, ptr, offset);
+                Ok(ptr)
+            }
             // The library promised a handle: `NULL` breaks the promise.
             ValueType::NonNullHandle { .. } => {
                 let word = raw()?;
@@ -1276,6 +1922,73 @@ impl<M: Module> Codegen<'_, '_, M> {
     /// A foreign import must not bind to a Vesper function (for example an
     /// entry exported under the same name), and a generated helper must not
     /// bind to a foreign import: both are errors, never a silent rebinding.
+    /// The callee of a direct foreign call of `symbol` with C signature
+    /// `sig`. A symbol the runtime also imports (`write`, `malloc`, ...)
+    /// is declared with the runtime's word signature, whichever declares
+    /// it first, and called through its address with `sig`, so the two
+    /// declarations never clash.
+    fn foreign_import(&mut self, symbol: &str, sig: ir::Signature) -> Result<Callee, String> {
+        let shared = match self.m.declarations().get_name(symbol) {
+            Some(cranelift_module::FuncOrDataId::Func(id)) => {
+                let decl = self.m.declarations().get_function_decl(id);
+                if decl.linkage != Linkage::Import {
+                    return Err(format!(
+                        "foreign symbol '{symbol}' collides with another symbol of this object; rename the Vesper function or the .vsys import"
+                    ));
+                }
+                (decl.signature != sig).then_some(id)
+            }
+            Some(_) => {
+                return Err(format!(
+                    "foreign symbol '{symbol}' collides with another symbol of this object; rename the Vesper function or the .vsys import"
+                ));
+            }
+            None => match runtime_import(symbol) {
+                Some((params, result)) => {
+                    let mut word = self.m.make_signature();
+                    word.params
+                        .extend((0..params).map(|_| AbiParam::new(types::I64)));
+                    if result {
+                        word.returns.push(AbiParam::new(types::I64));
+                    }
+                    if word == sig {
+                        None
+                    } else {
+                        Some(
+                            self.m
+                                .declare_function(symbol, Linkage::Import, &word)
+                                .map_err(|e| format!("foreign symbol '{symbol}': {e}"))?,
+                        )
+                    }
+                }
+                None => None,
+            },
+        };
+        if let Some(id) = shared {
+            let f = self.m.declare_func_in_func(id, self.b.func);
+            let pointer = self.m.target_config().pointer_type();
+            let address = self.b.ins().func_addr(pointer, f);
+            return Ok(Callee::Indirect(self.b.import_signature(sig), address));
+        }
+        let callee = self
+            .m
+            .declare_function(symbol, Linkage::Import, &sig)
+            .map_err(|e| format!("foreign symbol '{symbol}': {e}"))?;
+        Ok(Callee::Direct(
+            self.m.declare_func_in_func(callee, self.b.func),
+        ))
+    }
+    /// Whether `symbol` may be declared with `sig` itself (the `ffi` hook
+    /// is offered only such calls).
+    fn foreign_import_direct(&self, symbol: &str, sig: &ir::Signature) -> bool {
+        match self.m.declarations().get_name(symbol) {
+            Some(cranelift_module::FuncOrDataId::Func(id)) => {
+                self.m.declarations().get_function_decl(id).signature == *sig
+            }
+            Some(_) => true,
+            None => runtime_import(symbol).is_none(),
+        }
+    }
     fn foreign_symbol_free(&self, name: &str, linkage: Linkage) -> Result<bool, String> {
         let declarations = self.m.declarations();
         match declarations.get_name(name) {
@@ -1367,6 +2080,14 @@ fn value_words(v: &ValueType, out: &mut Vec<u64>) {
         ValueType::Address { .. } => out.push(4),
         ValueType::Handle { nullable, .. } => out.extend([5, u64::from(*nullable)]),
         ValueType::NonNullHandle { .. } => out.push(6),
+        ValueType::Float(f) => out.extend([
+            7,
+            match f {
+                Float::F32 => 32,
+                Float::F64 => 64,
+            },
+        ]),
+        ValueType::CStr | ValueType::CWStr => out.push(8),
     }
 }
 fn integer_word(int: &vesper_ffi::Integer) -> u64 {
@@ -1531,9 +2252,39 @@ impl<M: Module> Codegen<'_, '_, M> {
         if crate::codegen_swap::hook(crate::codegen_swap::Family::Ffi).is_none() {
             return Ok(None);
         }
+        // A symbol shared with the runtime's imports is called through its
+        // address (`foreign_import`), which the steps do not express, and
         // Apple arm64 pads a variadic call's argument registers with zero
-        // words (`sys::Variadic`), which the steps do not carry.
-        if plan.function.abi().variadic.is_some_and(|v| v.padding > 0) {
+        // words (`sys::Variadic`), which they do not carry either.
+        let abi = plan.function.abi();
+        if abi.variadic.is_some_and(|v| v.padding > 0)
+            || plan
+                .function
+                .parameters()
+                .iter()
+                .any(|p| matches!(p.ty(), ParameterType::CWStr))
+            || *plan.function.result() == ValueType::CWStr
+        {
+            return Ok(None);
+        }
+        let pointer = self.m.target_config().pointer_type();
+        let mut sig = self.m.make_signature();
+        for t in &abi.parameters {
+            sig.params.push(abi_param(*t, pointer));
+        }
+        if let Some(t) = abi.result {
+            sig.returns.push(abi_param(t, pointer));
+        }
+        if !self.foreign_import_direct(plan.function.link_symbol(), &sig) {
+            return Ok(None);
+        }
+        // Multi-byte mapping results (`u16`/`u32`/`u64`) need `umul_overflow`
+        // in `foreign_range_register`, which `@vesper/cranelift` does not
+        // expose yet; decline before `BEGIN` / argument evaluation.
+        if plan.function.mapping_length().is_some()
+            && let ValueType::Handle { handle, .. } = plan.function.result()
+            && handle.mapping().is_some_and(|s| s.bits() > 8)
+        {
             return Ok(None);
         }
         let descriptors = plan.function.parameters();
@@ -1561,17 +2312,27 @@ impl<M: Module> Codegen<'_, '_, M> {
         let mut copies: Vec<Vec<u64>> = vec![];
         let mut restores = vec![];
         let mut strings: Vec<(u64, u64)> = vec![];
+        let mut lists: Vec<u64> = vec![];
+        let mut released: Vec<(u64, u64, u64, u64)> = vec![];
+        let mut mapping_length = None;
         for (i, ((arg, param), descriptor)) in args
             .iter()
             .zip(&signature.params)
             .zip(descriptors)
             .enumerate()
         {
+            if plan.function.mapping_length() == Some(i) {
+                mapping_length = Some(c_args.len());
+            }
             let mut words = vec![i as u64];
             match descriptor.ty() {
                 ParameterType::CStr => {
                     let view = self.expr(&arg.expr)?;
                     words.extend([2, word(view), little, 2]);
+                }
+                ParameterType::CStrList => {
+                    let view = self.expr(&arg.expr)?;
+                    words.extend([2, word(view), little, 7]);
                 }
                 ParameterType::Slice { element, .. } if crate::seq::is_slice_type(&param.ty) => {
                     let view = self.expr(&arg.expr)?;
@@ -1604,7 +2365,9 @@ impl<M: Module> Codegen<'_, '_, M> {
                                 ValueType::Unit
                                 | ValueType::Address { .. }
                                 | ValueType::Handle { .. }
-                                | ValueType::NonNullHandle { .. } => {
+                                | ValueType::NonNullHandle { .. }
+                                | ValueType::CStr
+                                | ValueType::CWStr => {
                                     return Err(
                                         "foreign parameter type has no native lowering".into()
                                     );
@@ -1614,11 +2377,19 @@ impl<M: Module> Codegen<'_, '_, M> {
                             words.push(0);
                             value_words(v, &mut words);
                         }
+                        ParameterType::Handle { handle, access } if handle.mapping().is_some() => {
+                            words.extend([
+                                6,
+                                u64::from(*access == vesper_ffi::sys::HandleAccess::Sink),
+                            ]);
+                        }
                         ParameterType::Handle { .. } => words.push(1),
                         ParameterType::Pinned { .. } => {
-                            return Err("pinned buffers are not offered to the ffi hook".into());
+                            words.extend([6, 0]);
                         }
-                        ParameterType::CStr => unreachable!("C strings are lowered above"),
+                        ParameterType::CStr | ParameterType::CWStr | ParameterType::CStrList => {
+                            unreachable!("C strings are lowered above")
+                        }
                         ParameterType::Function { .. } => {
                             unreachable!("calls taking functions are not offered to the hook")
                         }
@@ -1721,18 +2492,24 @@ impl<M: Module> Codegen<'_, '_, M> {
                 copies.push(copy.to_vec());
             }
             let s = *r.get(2 + k + m).ok_or_else(bad)? as usize;
-            if s == 2 {
-                strings.push((r[3 + k + m], r[4 + k + m]));
+            if s == 1 {
+                let stride = match descriptor.ty() {
+                    ParameterType::Handle { handle, .. } => {
+                        handle.mapping().map_or(1, |e| u64::from(e.bits()) / 8)
+                    }
+                    _ => 1,
+                };
+                let data = word(c_args[c_args.len() - 2]);
+                let len = word(c_args[c_args.len() - 1]);
+                released.push((r[3 + k + m], data, len, stride));
+            } else if s == 2 {
+                if matches!(descriptor.ty(), ParameterType::CStrList) {
+                    lists.push(r[3 + k + m]);
+                    lists.push(r[4 + k + m]);
+                } else {
+                    strings.push((r[3 + k + m], r[4 + k + m]));
+                }
             }
-        }
-        let abi = plan.function.abi();
-        let pointer = self.m.target_config().pointer_type();
-        let mut sig = self.m.make_signature();
-        for t in &abi.parameters {
-            sig.params.push(abi_param(*t, pointer));
-        }
-        if let Some(t) = abi.result {
-            sig.returns.push(abi_param(t, pointer));
         }
         let symbol = plan.function.link_symbol();
         self.foreign_symbol_free(symbol, Linkage::Import)?;
@@ -1767,13 +2544,33 @@ impl<M: Module> Codegen<'_, '_, M> {
         } else {
             0
         };
+        let (len_word, len_i64, reg_id) = match mapping_length {
+            Some(idx) => {
+                let v = c_args[idx];
+                let (reg_id, _) = self.foreign_range_helpers()?;
+                (
+                    word(v),
+                    u64::from(self.b.func.dfg.value_type(v) == types::I64),
+                    u64::from(reg_id.as_u32()),
+                )
+            }
+            None => (NO_VALUE, 0, NO_VALUE),
+        };
+        for &(_, data, len, stride) in &released {
+            self.foreign_range_unregister(value_of_word(data)?, value_of_word(len)?, stride)?;
+        }
         let mut words = vec![
             u64::from(callee.as_u32()),
             errno,
             u64::from(abi.result.is_some()),
             little,
-            c_args.len() as u64,
+            len_word,
+            len_i64,
+            reg_id,
+            released.len() as u64,
         ];
+        words.extend(released.iter().map(|(h, _, _, _)| *h));
+        words.push(c_args.len() as u64);
         words.extend(c_args.iter().map(|v| word(*v)));
         words.push(copies.len() as u64);
         for c in &copies {
@@ -1812,8 +2609,28 @@ impl<M: Module> Codegen<'_, '_, M> {
             (_, Some(_)) => return Err("errno result is not a pair".into()),
             (t, None) => t.clone(),
         };
-        let mut words = vec![raw.map_or(NO_VALUE, word)];
         let result = plan.function.result();
+        let jit = std::any::type_name::<M>().contains("JITModule");
+        if *result == ValueType::CStr && !jit {
+            if self.m.isa().triple().operating_system == target_lexicon::OperatingSystem::None_ {
+                return Err(
+                    "ChunkSeq in a freestanding image needs an allocator; the generated one uses the C library"
+                        .into(),
+                );
+            }
+            for (name, params) in [("strlen", 1), ("memcpy", 3)] {
+                let mut sig = self.m.make_signature();
+                for _ in 0..params {
+                    sig.params.push(AbiParam::new(types::I64));
+                }
+                sig.returns.push(AbiParam::new(types::I64));
+                self.m
+                    .declare_function(name, Linkage::Import, &sig)
+                    .map_err(|e| format!("C library function '{name}': {e}"))?;
+            }
+            self.seq_define_runtime()?;
+        }
+        let mut words = vec![raw.map_or(NO_VALUE, word), u64::from(jit)];
         value_words(result, &mut words);
         self.foreign_result_layout(result, raw.is_some(), &value_ty, &mut words)?;
         let r = self.foreign_request(swap::RESULT, &words)?;
@@ -1843,8 +2660,8 @@ impl<M: Module> Codegen<'_, '_, M> {
             self.b.seal_block(join);
             value = slot;
         }
-        if !strings.is_empty() {
-            let buffers: Vec<u64> = strings.iter().map(|(b, _)| *b).collect();
+        if !strings.is_empty() || !lists.is_empty() {
+            let buffers: Vec<u64> = strings.iter().map(|(b, _)| *b).chain(lists).collect();
             self.foreign_request(swap::FINISH, &buffers)?;
         }
         Ok(Some(value))
@@ -1884,7 +2701,7 @@ impl<M: Module> Codegen<'_, '_, M> {
             Ok(())
         };
         match v {
-            ValueType::Unit | ValueType::Scalar(_) => Ok(()),
+            ValueType::Unit | ValueType::Scalar(_) | ValueType::Float(_) => Ok(()),
             ValueType::Bool | ValueType::Enum(_) => validated(self.world, out),
             ValueType::Address { .. } => Err("foreign address results have no lowering".into()),
             ValueType::NonNullHandle { .. } => {
@@ -1892,10 +2709,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                 out.extend([u64::from(layout.aggregate()), u64::from(layout.size)]);
                 Ok(())
             }
-            ValueType::Handle { nullable, .. } => {
-                if !nullable {
-                    return validated(self.world, out);
-                }
+            ValueType::CStr | ValueType::CWStr | ValueType::Handle { nullable: true, .. } => {
                 let layout = Layout::of(self.world, ty)?;
                 let (some, fields) = layout.variant("Some").ok_or("Option lacks Some")?;
                 let offset = fields.first().ok_or("Some lacks a payload")?.offset;
@@ -1908,6 +2722,9 @@ impl<M: Module> Codegen<'_, '_, M> {
                 ]);
                 Ok(())
             }
+            ValueType::Handle {
+                nullable: false, ..
+            } => validated(self.world, out),
         }
     }
 }

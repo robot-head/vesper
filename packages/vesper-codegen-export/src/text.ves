@@ -25,6 +25,24 @@ pub fn put_u64(inout o: ChunkSeq[u8], v: u64) {
     o.push(wrapping_u8(wrapping_add(v % 10, 48)));
 }
 
+// Rust's `{:#x}`: `0x` and the lower-case hex digits, no leading zeros.
+pub fn put_hex(inout o: ChunkSeq[u8], v: u64) {
+    put(inout o, "0x");
+    put_hex_digits(inout o, v);
+}
+
+fn put_hex_digits(inout o: ChunkSeq[u8], v: u64) {
+    if v >= 16 {
+        put_hex_digits(inout o, v / 16);
+    }
+    let d = v % 16;
+    if d < 10 {
+        o.push(wrapping_u8(wrapping_add(d, 48)));
+    } else {
+        o.push(wrapping_u8(wrapping_add(d, 87)));
+    }
+}
+
 pub fn nl(inout o: ChunkSeq[u8]) {
     o.push(10);
 }

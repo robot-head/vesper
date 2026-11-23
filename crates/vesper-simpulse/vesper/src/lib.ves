@@ -253,11 +253,17 @@ fn ev_io(kind: u64, task: u64, completion: u64, a: u64, b: u64, rk: u64, rv: u64
     }
 }
 
-// SplitMix64.
+// SplitMix64 increment and finalizer multipliers.
+enum SplitMix: u64 {
+    Gamma = 0x9e3779b97f4a7c15,
+    Mul1 = 0xbf58476d1ce4e5b9,
+    Mul2 = 0x94d049bb133111eb
+}
+
 fn random(seedv: u64) -> u64 {
     let mut z = seedv;
-    z = wrapping_mul(z ^ (z >> 30), 0xbf58476d1ce4e5b9);
-    z = wrapping_mul(z ^ (z >> 27), 0x94d049bb133111eb);
+    z = wrapping_mul(z ^ (z >> 30), SplitMix::Mul1);
+    z = wrapping_mul(z ^ (z >> 27), SplitMix::Mul2);
     z ^ (z >> 31)
 }
 
@@ -996,7 +1002,7 @@ pub fn kernel_next_task(inout k: Kernel) -> Next {
         let threshold = rem(wrapping_sub(0, count), count);
         let mut index: u64 = 0;
         loop {
-            rng = wrapping_add(rng, 0x9e3779b97f4a7c15);
+            rng = wrapping_add(rng, SplitMix::Gamma);
             let value = random(rng);
             if value >= threshold {
                 index = rem(value, count);

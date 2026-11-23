@@ -1,0 +1,2919 @@
+// Module raft of @vesper/chorus (see lib.ves): Raft cluster simulation state
+// machine, ChaosPlan, RawSession choreography monitors, wire encoding/decoding,
+// and invariant checking (src/raft.rs).
+use self::{
+    new_c,
+    C
+};
+use self::util::{
+    inc,
+    intern_str,
+    none,
+    sat_add,
+    setw,
+    sw,
+    LTag
+};
+use self::local::{
+    choice,
+    l_action,
+    l_init,
+    l_msg,
+    lt as ltag
+};
+use self::session::{
+    c_mon_action,
+    c_mon_step
+};
+use self::simnet::{
+    sm_chance,
+    sm_range
+};
+use self::wire::{
+    ack_decode_range,
+    ack_encode_seq,
+    batch_decode_range,
+    batch_encode_arena_seq,
+    checker_core_committed_arena,
+    checker_core_compacted_changed,
+    checker_core_leader_elected,
+    checker_core_logs_changed_arena,
+    checker_core_new,
+    checker_core_record,
+    config_index_arena,
+    quorum_size,
+    raft_config_of_arena,
+    term_decode_range,
+    term_encode_seq,
+    votereq_decode_range,
+    votereq_encode_seq,
+    CheckerCore,
+    RaftEntry,
+    ViolKind,
+    WireAck,
+    WireErr,
+    WireHeader,
+    WireVoteReq,
+    CONFIG_FLAG,
+    MAX_BATCH
+};
+
+const MAX_U64: u64 = 18446744073709551615;
+const FNV_OFFSET: u64 = 14695981039346656037;
+const FNV_PRIME: u64 = 1099511628211;
+const MIN_SEEN_HT: u64 = 1024;
+const INIT_LOG_CAP: u64 = 64;
+
+const SEED_RAFT_XOR: u64 = 8241981442229496173;
+// 0x7261_6674_2d73_696d
+const SEED_DISK_XOR: u64 = 7238820263653106977;
+// 0x6475_7261_626c_6521
+
+const PROTO_CANDIDATE: u64 = 0;
+const PROTO_VOTER: u64 = 1;
+const PROTO_LEADER: u64 = 0;
+const PROTO_FOLLOWER: u64 = 1;
+
+pub enum RaftRole: _ {
+    Follower = 0,
+    Candidate = 1,
+    Leader = 2
+}
+
+enum RpcKind: _ {
+    Vote = 0,
+    Append = 1,
+    Snapshot = 2
+}
+
+enum NodeEv: _ {
+    Leader = 0,
+    LogChanged = 1,
+    Committed = 2,
+    CompactedChanged = 3
+}
+
+pub enum RaftInitErr: _ {
+    Ok = 0,
+    BadNodes = 1,
+    InvertedRange = 2,
+    MaxBatch = 3,
+    SnapMaxLog = 4,
+    InitialMembers = 5,
+    MembershipMaxNodes = 6,
+    TornNeedsDurable = 7
+}
+
+pub enum RaftStepCode: _ {
+    Continue = 0,
+    Finished = 1,
+    NeedPersist = 2,
+    NeedChaosRecover = 3
+}
+
+pub copy struct RaftCfg {
+    nodes: u64,
+    quorum: u64,
+    duration_ns: u64,
+    heartbeat_ns: u64,
+    election_min_ns: u64,
+    election_max_ns: u64,
+    rpc_timeout_ns: u64,
+    min_latency_ns: u64,
+    max_latency_ns: u64,
+    drop_per_mille: u64,
+    duplicate_per_mille: u64,
+    max_skew_ppm: u64,
+    crashes: bool,
+    partitions: bool,
+    propose_per_mille: u64,
+    max_log: u64,
+    max_batch: u64,
+    max_steps: u64,
+    snapshot_threshold: u64,
+    initial_members: u64,
+    membership_per_mille: u64,
+    min_members: u64,
+    durable: bool,
+    torn_crash_per_mille: u64,
+    reply_before_sync: bool
+}
+
+pub copy struct RaftStepOut {
+    code: u64,
+    arg: u64,
+    has_wake: bool,
+    wake_delay: u64,
+    net_wake_has_due: bool,
+    net_wake_earliest: u64,
+    has_violation: bool
+}
+
+pub copy struct RaftStatsOut {
+    elections: u64,
+    leaders_elected: u64,
+    max_term: u64,
+    sent: u64,
+    dropped: u64,
+    partitioned: u64,
+    duplicated: u64,
+    crashes: u64,
+    stale_responses: u64,
+    duplicate_requests: u64,
+    rejected_frames: u64,
+    timeouts: u64,
+    proposals: u64,
+    compactions: u64,
+    snapshots_sent: u64,
+    snapshots_installed: u64,
+    config_changes: u64,
+    leader_step_downs: u64,
+    sticky_vote_denials: u64
+}
+
+pub copy struct RaftPersistOut {
+    term: u64,
+    voted_for: u64,
+    snap_index: u64,
+    snap_term: u64,
+    log_off: u64,
+    log_len: u64
+}
+
+pub struct RaftCluster {
+    cfg: RaftCfg,
+    n: u64,
+    rng: u64,
+    next_cmd: u64,
+    packet_id: u64,
+
+    // Pre-built projected protocol monitor roots and symbols on `c`
+    c: C,
+    vote_cand: u64,
+    vote_voter: u64,
+    append_ldr: u64,
+    append_flw: u64,
+    snap_ldr: u64,
+    snap_flw: u64,
+    sym_req_vote: u64,
+    sym_vote_req: u64,
+    sym_grant: u64,
+    sym_deny: u64,
+    sym_vote_resp: u64,
+    sym_app_ent: u64,
+    sym_app_batch: u64,
+    sym_persist: u64,
+    sym_accept: u64,
+    sym_reject: u64,
+    sym_app_ack: u64,
+    sym_inst_snap: u64,
+    sym_snap_img: u64,
+    sym_installed: u64,
+
+    // Auditor & stats
+    audit_opened: u64,
+    audit_closed: u64,
+    audit_faulted: u64,
+    elections: u64,
+    leaders_elected: u64,
+    max_term: u64,
+    sent: u64,
+    dropped: u64,
+    partitioned: u64,
+    duplicated: u64,
+    crashes: u64,
+    stale_responses: u64,
+    duplicate_requests: u64,
+    rejected_frames: u64,
+    timeouts: u64,
+    proposals: u64,
+    compactions: u64,
+    snapshots_sent: u64,
+    snapshots_installed: u64,
+    config_changes: u64,
+    leader_step_downs: u64,
+    sticky_vote_denials: u64,
+
+    checker: CheckerCore,
+
+    // ChaosPlan: sorted events, partitions bitmatrix, skew denominators
+    ev_time: ChunkSeq[u64],
+    ev_kind: ChunkSeq[u64],
+    ev_node: ChunkSeq[u64],
+    chaos_next: u64,
+    chaos_pending_node: u64,
+    part_start: ChunkSeq[u64],
+    part_end: ChunkSeq[u64],
+    part_bits: ChunkSeq[u8],
+    part_stride: u64,
+
+    // Per-node state (0..n)
+    nd_up: ChunkSeq[bool],
+    nd_done: ChunkSeq[bool],
+    nd_incarnation: ChunkSeq[u64],
+    nd_term: ChunkSeq[u64],
+    nd_voted_for: ChunkSeq[u64],
+    nd_snap_index: ChunkSeq[u64],
+    nd_snap_term: ChunkSeq[u64],
+    nd_initial_members: u64,
+    nd_role: ChunkSeq[u64],
+    nd_commit: ChunkSeq[u64],
+    nd_votes_mask: ChunkSeq[u64],
+    nd_election_deadline: ChunkSeq[u64],
+    nd_heartbeat_deadline: ChunkSeq[u64],
+    nd_denom: ChunkSeq[u64],
+    nd_next_channel: ChunkSeq[u64],
+    nd_has_contact: ChunkSeq[bool],
+    nd_last_contact: ChunkSeq[u64],
+    nd_inbox_head: ChunkSeq[u64],
+    nd_inbox_tail: ChunkSeq[u64],
+    nd_out_head: ChunkSeq[u64],
+    nd_out_tail: ChunkSeq[u64],
+    nd_log_off: ChunkSeq[u64],
+    nd_log_len: ChunkSeq[u64],
+    nd_log_cap: ChunkSeq[u64],
+    nd_next_index: ChunkSeq[u64],
+    nd_match_index: ChunkSeq[u64],
+
+    // Durable last-synced shadow (populated only when cfg.durable)
+    sy_term: ChunkSeq[u64],
+    sy_voted_for: ChunkSeq[u64],
+    sy_snap_index: ChunkSeq[u64],
+    sy_snap_term: ChunkSeq[u64],
+    sy_log_off: ChunkSeq[u64],
+    sy_log_len: ChunkSeq[u64],
+    sy_log_cap: ChunkSeq[u64],
+
+    // Shared log entry pool
+    log_pool: ChunkSeq[RaftEntry],
+    sy_pool: ChunkSeq[RaftEntry],
+    tmp_entries: ChunkSeq[RaftEntry],
+
+    // Outstanding RPC pool
+    out_chan: ChunkSeq[u64],
+    out_mon: ChunkSeq[u64],
+    out_deadline: ChunkSeq[u64],
+    out_kind: ChunkSeq[u64],
+    out_term: ChunkSeq[u64],
+    out_peer: ChunkSeq[u64],
+    out_last: ChunkSeq[u64],
+    out_next: ChunkSeq[u64],
+    out_free: ChunkSeq[u64],
+
+    // Packet pool + inbox list + outgoing staging
+    pkt_src: ChunkSeq[u64],
+    pkt_dst: ChunkSeq[u64],
+    pkt_chan: ChunkSeq[u64],
+    pkt_from_role: ChunkSeq[u64],
+    pkt_label: ChunkSeq[u64],
+    pkt_pty: ChunkSeq[u64],
+    pkt_request: ChunkSeq[bool],
+    pkt_boff: ChunkSeq[u64],
+    pkt_blen: ChunkSeq[u64],
+    pkt_next: ChunkSeq[u64],
+    pkt_free: ChunkSeq[u64],
+    pkt_bytes: ChunkSeq[u8],
+    pkt_compact_at: u64,
+    step_out: ChunkSeq[u64],
+
+    // Network min-heap ordered by (at, packet_id)
+    h_at: ChunkSeq[u64],
+    h_pid: ChunkSeq[u64],
+    h_pkt: ChunkSeq[u64],
+
+    // Per-cluster seen requests hash set: (dst<<32 | src, channel)
+    seen_hi: ChunkSeq[u64],
+    seen_chan: ChunkSeq[u64],
+    seen_ht: ChunkSeq[u64],
+    seen_mask: u64,
+
+    // Step events queue + woken node ids
+    step_ev_kind: ChunkSeq[u64],
+    step_ev_val: ChunkSeq[u64],
+    woken: ChunkSeq[u64]
+}
+
+fn new_c_for_raft() -> C {
+    let mut c = C {
+        sy_off: ChunkSeq::new[u64](),
+        sy_len: ChunkSeq::new[u64](),
+        sy_hash: ChunkSeq::new[u64](),
+        sy_ht: ChunkSeq::new[u64](),
+        sy_flag: ChunkSeq::new[u64](),
+        sy_txt: ChunkSeq::new[u8](),
+        tb: ChunkSeq::new[u8](),
+        ro: ChunkSeq::new[u64](),
+        gt: ChunkSeq::new[u64](),
+        ga: ChunkSeq::new[u64](),
+        gb: ChunkSeq::new[u64](),
+        gc: ChunkSeq::new[u64](),
+        gsz: ChunkSeq::new[u64](),
+        gks: ChunkSeq::new[u64](),
+        gk: ChunkSeq::new[u64](),
+        lt: ChunkSeq::new[u64](),
+        la: ChunkSeq::new[u64](),
+        lb: ChunkSeq::new[u64](),
+        lc: ChunkSeq::new[u64](),
+        ld: ChunkSeq::new[u64](),
+        lks: ChunkSeq::new[u64](),
+        lkn: ChunkSeq::new[u64](),
+        lh: ChunkSeq::new[u64](),
+        lht: ChunkSeq::new[u64](),
+        lk: ChunkSeq::new[u64](),
+        lu: ChunkSeq::new[u64](),
+        tmp: ChunkSeq::new[u64](),
+        vs: ChunkSeq::new[u64](),
+        bnd: ChunkSeq::new[u64](),
+        ugs: ChunkSeq::new[u64](),
+        used: ChunkSeq::new[u64](),
+        path: ChunkSeq::new[u64](),
+        dbe: ChunkSeq::new[u64](),
+        dvx: ChunkSeq::new[u64](),
+        dvy: ChunkSeq::new[u64](),
+        xw: ChunkSeq::new[u64](),
+        xoff: ChunkSeq::new[u64](),
+        xlen: ChunkSeq::new[u64](),
+        xh: ChunkSeq::new[u64](),
+        xht: ChunkSeq::new[u64](),
+        work: ChunkSeq::new[u64](),
+        nw: ChunkSeq::new[u64](),
+        sb: ChunkSeq::new[u64](),
+        tk_kind: ChunkSeq::new[u64](),
+        tk_sym: ChunkSeq::new[u64](),
+        tk_line: ChunkSeq::new[u64](),
+        tk_col: ChunkSeq::new[u64](),
+        sc_src: ChunkSeq::new[u64](),
+        sc_uni: ChunkSeq::new[u64](),
+        s_kind: ChunkSeq::new[u64](),
+        s_a: ChunkSeq::new[u64](),
+        s_b: ChunkSeq::new[u64](),
+        s_c: ChunkSeq::new[u64](),
+        s_d: ChunkSeq::new[u64](),
+        s_line: ChunkSeq::new[u64](),
+        s_col: ChunkSeq::new[u64](),
+        sk: ChunkSeq::new[u64](),
+        bstk: ChunkSeq::new[u64](),
+        out: ChunkSeq::new[u64](),
+        ew: ChunkSeq::new[u64](),
+        sy_mask: 0,
+        l_mask: 0,
+        x_mask: 0,
+        ug_base: 0,
+        stamp: 0,
+        target: 0,
+        root: 0,
+        l_end: 0,
+        mf_kind: 0,
+        mf_a: 0,
+        mf_b: 0,
+        mf_peer: 0,
+        mf_label: 0,
+        pos: 0,
+        end_line: 0,
+        end_col: 0,
+        nodes: 0,
+        bd: 0,
+        lp: 0,
+        kw_roles: 0,
+        kw_rec: 0,
+        kw_continue: 0,
+        kw_end: 0,
+        failed: false
+    };
+    l_init(inout c);
+    c
+}
+
+fn ge_log(in pool: ChunkSeq[RaftEntry], i: u64) -> RaftEntry {
+    match pool.try_get(i) {
+        Option::Some(e) => e,
+        Option::None => RaftEntry {
+            term: 0,
+            cmd: 0
+        },
+    }
+}
+
+fn sb(in q: ChunkSeq[bool], i: u64) -> bool {
+    match q.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => false,
+    }
+}
+
+fn su8(in q: ChunkSeq[u8], i: u64) -> u8 {
+    match q.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn bit_at(bit: u64) -> u64 {
+    if bit >= 64 {
+        return 0;
+    }
+    let mut r: u64 = 1;
+    if (bit & 1) != 0 {
+        r = r << 1;
+    }
+    if (bit & 2) != 0 {
+        r = r << 2;
+    }
+    if (bit & 4) != 0 {
+        r = r << 4;
+    }
+    if (bit & 8) != 0 {
+        r = r << 8;
+    }
+    if (bit & 16) != 0 {
+        r = r << 16;
+    }
+    if (bit & 32) != 0 {
+        r = r << 32;
+    }
+    r
+}
+
+fn div_u(a: u64, b: u64) -> u64 {
+    handle Fail[RuntimeError] in {
+        a / b
+    } with {
+        return v => v,
+        raise(_e, _k) => 0,
+    }
+}
+
+fn member(mask: u64, id: u64) -> bool {
+    (mask & bit_at(id)) != 0
+}
+
+// Exact `((d as u128) * 1_000_000 / (denom as u128)).min(MAX_U64 as u128) as u64`.
+fn local_to_virtual_denom(d: u64, denom: u64) -> u64 {
+    let mul: u64 = 1000000;
+    if d <= MAX_U64 / mul {
+        return div_u(wrapping_mul(d, mul), denom);
+    }
+    let d_hi = d >> 32;
+    let d_lo = d & 4294967295;
+    let p_lo = wrapping_mul(d_lo, mul);
+    let p_mid = wrapping_add(wrapping_mul(d_hi, mul), p_lo >> 32);
+    let lo = (p_lo & 4294967295) | ((p_mid & 4294967295) << 32);
+    let hi = p_mid >> 32;
+    if hi >= denom {
+        return MAX_U64;
+    }
+    let mut rem = hi;
+    let mut x = lo;
+    let mut q: u64 = 0;
+    for _ in 0..64 {
+        let top_rem = rem >> 63;
+        rem = (rem << 1) | (x >> 63);
+        x = x << 1;
+        q = q << 1;
+        if top_rem != 0 || rem >= denom {
+            rem = wrapping_sub(rem, denom);
+            q = q | 1;
+        }
+    }
+    q
+}
+
+fn node_local_to_virtual(in rc: RaftCluster, i: u64, d: u64) -> u64 {
+    local_to_virtual_denom(d, sw(in rc.nd_denom, i))
+}
+
+fn node_reset_election(inout rc: RaftCluster, i: u64, now: u64) {
+    let min_ns = rc.cfg.election_min_ns;
+    let max_ns = rc.cfg.election_max_ns;
+    let local = sm_range(inout rc.rng, min_ns, max_ns);
+    let v = node_local_to_virtual(in rc, i, local);
+    setw(inout rc.nd_election_deadline, i, sat_add(now, v));
+}
+
+fn node_log_len(in rc: RaftCluster, i: u64) -> u64 {
+    sw(in rc.nd_log_len, i)
+}
+
+fn node_log_get(in rc: RaftCluster, i: u64, idx: u64) -> RaftEntry {
+    ge_log(in rc.log_pool, wrapping_add(sw(in rc.nd_log_off, i), idx))
+}
+
+fn node_log_push(inout rc: RaftCluster, i: u64, e: RaftEntry) {
+    let off = sw(in rc.nd_log_off, i);
+    let len = sw(in rc.nd_log_len, i);
+    let cap = sw(in rc.nd_log_cap, i);
+    if len == cap {
+        let new_cap = if cap == 0 {
+            INIT_LOG_CAP
+        } else {
+            wrapping_mul(cap, 2)
+        };
+        let new_off = rc.log_pool.len();
+        rc
+            .log_pool
+            .resize(
+                wrapping_add(new_off, new_cap),
+                RaftEntry {
+                    term: 0,
+                    cmd: 0
+                }
+            );
+        for k in 0..len {
+            let cur_e = ge_log(in rc.log_pool, wrapping_add(off, k));
+            let _ = rc.log_pool.try_set(wrapping_add(new_off, k), cur_e);
+        }
+        setw(inout rc.nd_log_off, i, new_off);
+        setw(inout rc.nd_log_cap, i, new_cap);
+        let _ = rc.log_pool.try_set(wrapping_add(new_off, len), e);
+        setw(inout rc.nd_log_len, i, inc(len));
+    } else {
+        let _ = rc.log_pool.try_set(wrapping_add(off, len), e);
+        setw(inout rc.nd_log_len, i, inc(len));
+    }
+}
+
+fn node_log_truncate(inout rc: RaftCluster, i: u64, new_len: u64) {
+    if new_len < sw(in rc.nd_log_len, i) {
+        setw(inout rc.nd_log_len, i, new_len);
+    }
+}
+
+fn node_log_replace_from_tmp(inout rc: RaftCluster, i: u64) {
+    let need = rc.tmp_entries.len();
+    let off = sw(in rc.nd_log_off, i);
+    let cap = sw(in rc.nd_log_cap, i);
+    let target_off = if need <= cap {
+        off
+    } else {
+        let new_cap = wrapping_mul(need, 2);
+        let new_off = rc.log_pool.len();
+        rc
+            .log_pool
+            .resize(
+                wrapping_add(new_off, new_cap),
+                RaftEntry {
+                    term: 0,
+                    cmd: 0
+                }
+            );
+        setw(inout rc.nd_log_off, i, new_off);
+        setw(inout rc.nd_log_cap, i, new_cap);
+        new_off
+    };
+    for k in 0..need {
+        let e = ge_log(in rc.tmp_entries, k);
+        let _ = rc.log_pool.try_set(wrapping_add(target_off, k), e);
+    }
+    setw(inout rc.nd_log_len, i, need);
+}
+
+fn node_log_replace_from_slice(inout rc: RaftCluster, i: u64, in s: Slice[RaftEntry]) {
+    let need = s.len();
+    let off = sw(in rc.nd_log_off, i);
+    let cap = sw(in rc.nd_log_cap, i);
+    let target_off = if need <= cap {
+        off
+    } else {
+        let new_cap = wrapping_mul(need, 2);
+        let new_off = rc.log_pool.len();
+        rc
+            .log_pool
+            .resize(
+                wrapping_add(new_off, new_cap),
+                RaftEntry {
+                    term: 0,
+                    cmd: 0
+                }
+            );
+        setw(inout rc.nd_log_off, i, new_off);
+        setw(inout rc.nd_log_cap, i, new_cap);
+        new_off
+    };
+    for k in 0..need {
+        let e = match s.try_get(k) {
+            Option::Some(v) => v,
+            Option::None => RaftEntry {
+                term: 0,
+                cmd: 0
+            },
+        };
+        let _ = rc.log_pool.try_set(wrapping_add(target_off, k), e);
+    }
+    setw(inout rc.nd_log_len, i, need);
+}
+
+fn sy_log_set_from_arena(inout rc: RaftCluster, i: u64, src_off: u64, need: u64) {
+    let off = sw(in rc.sy_log_off, i);
+    let cap = sw(in rc.sy_log_cap, i);
+    let target_off = if need <= cap {
+        off
+    } else {
+        let new_cap = wrapping_mul(need, 2);
+        let new_off = rc.sy_pool.len();
+        rc
+            .sy_pool
+            .resize(
+                wrapping_add(new_off, new_cap),
+                RaftEntry {
+                    term: 0,
+                    cmd: 0
+                }
+            );
+        setw(inout rc.sy_log_off, i, new_off);
+        setw(inout rc.sy_log_cap, i, new_cap);
+        new_off
+    };
+    for k in 0..need {
+        let e = ge_log(in rc.log_pool, wrapping_add(src_off, k));
+        let _ = rc.sy_pool.try_set(wrapping_add(target_off, k), e);
+    }
+    setw(inout rc.sy_log_len, i, need);
+}
+
+fn sy_log_set_from_slice(inout rc: RaftCluster, i: u64, in s: Slice[RaftEntry]) {
+    let need = s.len();
+    let off = sw(in rc.sy_log_off, i);
+    let cap = sw(in rc.sy_log_cap, i);
+    let target_off = if need <= cap {
+        off
+    } else {
+        let new_cap = wrapping_mul(need, 2);
+        let new_off = rc.sy_pool.len();
+        rc
+            .sy_pool
+            .resize(
+                wrapping_add(new_off, new_cap),
+                RaftEntry {
+                    term: 0,
+                    cmd: 0
+                }
+            );
+        setw(inout rc.sy_log_off, i, new_off);
+        setw(inout rc.sy_log_cap, i, new_cap);
+        new_off
+    };
+    for k in 0..need {
+        let e = match s.try_get(k) {
+            Option::Some(v) => v,
+            Option::None => RaftEntry {
+                term: 0,
+                cmd: 0
+            },
+        };
+        let _ = rc.sy_pool.try_set(wrapping_add(target_off, k), e);
+    }
+    setw(inout rc.sy_log_len, i, need);
+}
+
+fn node_last_index(in rc: RaftCluster, i: u64) -> u64 {
+    node_log_len(in rc, i)
+}
+
+fn node_last_term(in rc: RaftCluster, i: u64) -> u64 {
+    let n = node_log_len(in rc, i);
+    if n == 0 {
+        0
+    } else {
+        node_log_get(in rc, i, wrapping_sub(n, 1)).term
+    }
+}
+
+fn node_new_channel(inout rc: RaftCluster, i: u64) -> u64 {
+    let nc = inc(sw(in rc.nd_next_channel, i));
+    setw(inout rc.nd_next_channel, i, nc);
+    let incn = sw(in rc.nd_incarnation, i);
+    (inc(i) << 48) | ((incn & 65535) << 32) | (nc & 4294967295)
+}
+
+fn node_become_follower(inout rc: RaftCluster, i: u64, term: u64) {
+    if term > sw(in rc.nd_term, i) {
+        setw(inout rc.nd_term, i, term);
+        setw(inout rc.nd_voted_for, i, none());
+    }
+    setw(inout rc.nd_role, i, RaftRole::Follower);
+    setw(inout rc.nd_votes_mask, i, 0);
+}
+
+fn node_members(in rc: RaftCluster, i: u64) -> u64 {
+    raft_config_of_arena(
+        in rc.log_pool.as_slice(),
+        sw(in rc.nd_log_off, i),
+        sw(in rc.nd_log_len, i),
+        rc.nd_initial_members
+    )
+}
+
+fn node_config_index(in rc: RaftCluster, i: u64) -> u64 {
+    config_index_arena(in rc.log_pool.as_slice(), sw(in rc.nd_log_off, i), sw(in rc.nd_log_len, i))
+}
+
+fn node_replication_targets(in rc: RaftCluster, i: u64) -> u64 {
+    let at = node_config_index(in rc, i);
+    let mut targets = node_members(in rc, i);
+    if at > sw(in rc.nd_commit, i) {
+        targets = targets | raft_config_of_arena(
+            in rc.log_pool.as_slice(),
+            sw(in rc.nd_log_off, i),
+            wrapping_sub(at, 1),
+            rc.nd_initial_members
+        );
+    }
+    targets
+}
+
+fn node_heard_from_leader(in rc: RaftCluster, i: u64, now: u64) -> bool {
+    if rc.cfg.membership_per_mille == 0 {
+        return false;
+    }
+    if sw(in rc.nd_role, i) == RaftRole::Leader {
+        return true;
+    }
+    if sb(in rc.nd_has_contact, i) {
+        let t = sw(in rc.nd_last_contact, i);
+        return now < sat_add(t, rc.cfg.election_min_ns);
+    }
+    false
+}
+
+fn node_quorum(in rc: RaftCluster, i: u64) -> u64 {
+    let members = node_members(in rc, i);
+    let cnt = widen_u64(count_ones_u64(members));
+    quorum_size(rc.cfg.quorum, cnt)
+}
+
+fn alloc_out_slot(inout rc: RaftCluster) -> u64 {
+    match rc.out_free.pop() {
+        Option::Some(s) => s,
+        Option::None => {
+            let s = rc.out_chan.len();
+            rc.out_chan.push(0);
+            rc.out_mon.push(0);
+            rc.out_deadline.push(0);
+            rc.out_kind.push(0);
+            rc.out_term.push(0);
+            rc.out_peer.push(0);
+            rc.out_last.push(0);
+            rc.out_next.push(none());
+            s
+        }
+    }
+}
+
+fn push_out_slot(
+    inout rc: RaftCluster,
+    i: u64,
+    chan: u64,
+    mon: u64,
+    deadline: u64,
+    kind: u64,
+    term: u64,
+    peer: u64,
+    last: u64
+) {
+    let s = alloc_out_slot(inout rc);
+    setw(inout rc.out_chan, s, chan);
+    setw(inout rc.out_mon, s, mon);
+    setw(inout rc.out_deadline, s, deadline);
+    setw(inout rc.out_kind, s, kind);
+    setw(inout rc.out_term, s, term);
+    setw(inout rc.out_peer, s, peer);
+    setw(inout rc.out_last, s, last);
+    setw(inout rc.out_next, s, none());
+    let tail = sw(in rc.nd_out_tail, i);
+    if tail == none() {
+        setw(inout rc.nd_out_head, i, s);
+    } else {
+        setw(inout rc.out_next, tail, s);
+    }
+    setw(inout rc.nd_out_tail, i, s);
+}
+
+fn clear_node_outstanding_fault(inout rc: RaftCluster, i: u64) {
+    let mut cur = sw(in rc.nd_out_head, i);
+    setw(inout rc.nd_out_head, i, none());
+    setw(inout rc.nd_out_tail, i, none());
+    loop {
+        if cur == none() {
+            break;
+        }
+        let nxt = sw(in rc.out_next, cur);
+        setw(inout rc.out_next, cur, none());
+        rc.out_free.push(cur);
+        rc.audit_faulted = inc(rc.audit_faulted);
+        cur = nxt;
+    }
+}
+
+fn alloc_pkt_slot(inout rc: RaftCluster) -> u64 {
+    match rc.pkt_free.pop() {
+        Option::Some(s) => s,
+        Option::None => {
+            let s = rc.pkt_src.len();
+            rc.pkt_src.push(0);
+            rc.pkt_dst.push(0);
+            rc.pkt_chan.push(0);
+            rc.pkt_from_role.push(0);
+            rc.pkt_label.push(0);
+            rc.pkt_pty.push(0);
+            rc.pkt_request.push(false);
+            rc.pkt_boff.push(0);
+            rc.pkt_blen.push(0);
+            rc.pkt_next.push(none());
+            s
+        }
+    }
+}
+
+fn free_pkt_slot(inout rc: RaftCluster, p: u64) {
+    setw(inout rc.pkt_next, p, none());
+    setw(inout rc.pkt_blen, p, 0);
+    rc.pkt_free.push(p);
+}
+
+// Compact between steps, when every live payload has a packet slot.
+fn compact_pkt_bytes(inout rc: RaftCluster) {
+    if rc.pkt_bytes.len() < rc.pkt_compact_at {
+        return;
+    }
+    let mut bytes = ChunkSeq::new[u8]();
+    for p in 0..rc.pkt_blen.len() {
+        let len = sw(in rc.pkt_blen, p);
+        if len > 0 {
+            let off = sw(in rc.pkt_boff, p);
+            setw(inout rc.pkt_boff, p, bytes.len());
+            for i in 0..len {
+                bytes.push(su8(in rc.pkt_bytes, wrapping_add(off, i)));
+            }
+        }
+    }
+    rc.pkt_compact_at = wrapping_add(65536, wrapping_mul(2, bytes.len()));
+    rc.pkt_bytes = bytes;
+}
+
+fn clone_pkt_slot(inout rc: RaftCluster, p: u64) -> u64 {
+    let q = alloc_pkt_slot(inout rc);
+    let src = sw(in rc.pkt_src, p);
+    let dst = sw(in rc.pkt_dst, p);
+    let chan = sw(in rc.pkt_chan, p);
+    let fr = sw(in rc.pkt_from_role, p);
+    let lbl = sw(in rc.pkt_label, p);
+    let pty = sw(in rc.pkt_pty, p);
+    let req = sb(in rc.pkt_request, p);
+    let boff = sw(in rc.pkt_boff, p);
+    let blen = sw(in rc.pkt_blen, p);
+    setw(inout rc.pkt_src, q, src);
+    setw(inout rc.pkt_dst, q, dst);
+    setw(inout rc.pkt_chan, q, chan);
+    setw(inout rc.pkt_from_role, q, fr);
+    setw(inout rc.pkt_label, q, lbl);
+    setw(inout rc.pkt_pty, q, pty);
+    let _ = rc.pkt_request.try_set(q, req);
+    setw(inout rc.pkt_boff, q, boff);
+    setw(inout rc.pkt_blen, q, blen);
+    setw(inout rc.pkt_next, q, none());
+    q
+}
+
+fn push_step_packet(
+    inout rc: RaftCluster,
+    src: u64,
+    dst: u64,
+    chan: u64,
+    from_role: u64,
+    label: u64,
+    pty: u64,
+    boff: u64,
+    blen: u64,
+    request: bool
+) {
+    let p = alloc_pkt_slot(inout rc);
+    setw(inout rc.pkt_src, p, src);
+    setw(inout rc.pkt_dst, p, dst);
+    setw(inout rc.pkt_chan, p, chan);
+    setw(inout rc.pkt_from_role, p, from_role);
+    setw(inout rc.pkt_label, p, label);
+    setw(inout rc.pkt_pty, p, pty);
+    let _ = rc.pkt_request.try_set(p, request);
+    setw(inout rc.pkt_boff, p, boff);
+    setw(inout rc.pkt_blen, p, blen);
+    setw(inout rc.pkt_next, p, none());
+    rc.step_out.push(p);
+}
+
+fn clear_node_inbox(inout rc: RaftCluster, i: u64) {
+    let mut cur = sw(in rc.nd_inbox_head, i);
+    setw(inout rc.nd_inbox_head, i, none());
+    setw(inout rc.nd_inbox_tail, i, none());
+    loop {
+        if cur == none() {
+            break;
+        }
+        let nxt = sw(in rc.pkt_next, cur);
+        free_pkt_slot(inout rc, cur);
+        cur = nxt;
+    }
+}
+
+fn push_node_inbox(inout rc: RaftCluster, dst: u64, p: u64) {
+    setw(inout rc.pkt_next, p, none());
+    let tail = sw(in rc.nd_inbox_tail, dst);
+    if tail == none() {
+        setw(inout rc.nd_inbox_head, dst, p);
+    } else {
+        setw(inout rc.pkt_next, tail, p);
+    }
+    setw(inout rc.nd_inbox_tail, dst, p);
+}
+
+fn push_ev(inout rc: RaftCluster, kind: u64, val: u64) {
+    rc.step_ev_kind.push(kind);
+    rc.step_ev_val.push(val);
+}
+
+fn node_crash(inout rc: RaftCluster, i: u64) {
+    let _ = rc.nd_up.try_set(i, false);
+    setw(inout rc.nd_role, i, RaftRole::Follower);
+    let si = sw(in rc.nd_snap_index, i);
+    setw(inout rc.nd_commit, i, si);
+    let _ = rc.nd_has_contact.try_set(i, false);
+    setw(inout rc.nd_votes_mask, i, 0);
+    clear_node_inbox(inout rc, i);
+    clear_node_outstanding_fault(inout rc, i);
+}
+
+fn node_restart(inout rc: RaftCluster, i: u64, now: u64) {
+    let _ = rc.nd_up.try_set(i, true);
+    let incn = inc(sw(in rc.nd_incarnation, i));
+    setw(inout rc.nd_incarnation, i, incn);
+    setw(inout rc.nd_next_channel, i, 0);
+    node_reset_election(inout rc, i, now);
+}
+
+fn node_maybe_win(inout rc: RaftCluster, i: u64, now: u64) {
+    let members = node_members(in rc, i);
+    let vmask = sw(in rc.nd_votes_mask, i) & members;
+    let votes = widen_u64(count_ones_u64(vmask));
+    let q = node_quorum(in rc, i);
+    if sw(in rc.nd_role, i) == RaftRole::Candidate && votes >= q {
+        setw(inout rc.nd_role, i, RaftRole::Leader);
+        rc.leaders_elected = inc(rc.leaders_elected);
+        let next = inc(node_log_len(in rc, i));
+        let base = wrapping_mul(i, rc.n);
+        for p in 0..rc.n {
+            setw(inout rc.nd_next_index, wrapping_add(base, p), next);
+            setw(inout rc.nd_match_index, wrapping_add(base, p), 0);
+        }
+        setw(inout rc.nd_heartbeat_deadline, i, now);
+        push_ev(inout rc, NodeEv::Leader, sw(in rc.nd_term, i));
+    }
+}
+
+fn node_start_election(inout rc: RaftCluster, i: u64, now: u64) {
+    rc.elections = inc(rc.elections);
+    let term = inc(sw(in rc.nd_term, i));
+    setw(inout rc.nd_term, i, term);
+    if term > rc.max_term {
+        rc.max_term = term;
+    }
+    setw(inout rc.nd_role, i, RaftRole::Candidate);
+    setw(inout rc.nd_voted_for, i, i);
+    setw(inout rc.nd_votes_mask, i, bit_at(i));
+    node_reset_election(inout rc, i, now);
+    let li = node_last_index(in rc, i);
+    let lt = node_last_term(in rc, i);
+    let members = node_members(in rc, i);
+    let n = rc.n;
+    for p in 0..n {
+        if p == i || !member(members, p) {
+            continue;
+        }
+        let ch = node_new_channel(inout rc, i);
+        rc.audit_opened = inc(rc.audit_opened);
+        let mon0 = rc.vote_cand;
+        let lrv = rc.sym_req_vote;
+        let pvr = rc.sym_vote_req;
+        let mon1 = c_mon_step(inout rc.c, mon0, true, PROTO_VOTER, lrv, pvr);
+        let req = WireVoteReq {
+            term: term,
+            candidate: wrapping_u32(i),
+            last_log_index: li,
+            last_log_term: lt
+        };
+        let boff = rc.pkt_bytes.len();
+        votereq_encode_seq(in req, inout rc.pkt_bytes);
+        let blen = wrapping_sub(rc.pkt_bytes.len(), boff);
+        let lrv2 = rc.sym_req_vote;
+        let pvr2 = rc.sym_vote_req;
+        push_step_packet(inout rc, i, p, ch, PROTO_CANDIDATE, lrv2, pvr2, boff, blen, true);
+        let dl = sat_add(now, rc.cfg.rpc_timeout_ns);
+        push_out_slot(inout rc, i, ch, mon1, dl, RpcKind::Vote, term, p, 0);
+    }
+    node_maybe_win(inout rc, i, now);
+}
+
+fn node_advance_commit(inout rc: RaftCluster, i: u64) {
+    let q = node_quorum(in rc, i);
+    let members = node_members(in rc, i);
+    let term = sw(in rc.nd_term, i);
+    let commit = sw(in rc.nd_commit, i);
+    let log_len = node_log_len(in rc, i);
+    let base = wrapping_mul(i, rc.n);
+    let self_cnt: u64 = if member(members, i) {
+        1
+    } else {
+        0
+    };
+    let mut idx = log_len;
+    loop {
+        if idx <= commit {
+            break;
+        }
+        if node_log_get(in rc, i, wrapping_sub(idx, 1)).term == term {
+            let mut count = self_cnt;
+            for p in 0..rc.n {
+                if p != i && member(members, p) {
+                    if sw(in rc.nd_match_index, wrapping_add(base, p)) >= idx {
+                        count = inc(count);
+                    }
+                }
+            }
+            if count >= q {
+                setw(inout rc.nd_commit, i, idx);
+                push_ev(inout rc, NodeEv::Committed, 0);
+                break;
+            }
+        }
+        idx = wrapping_sub(idx, 1);
+    }
+    let cur_commit = sw(in rc.nd_commit, i);
+    if sw(in rc.nd_role, i) == RaftRole::Leader
+        && !member(members, i)
+        && node_config_index(in rc, i) <= cur_commit {
+        rc.leader_step_downs = inc(rc.leader_step_downs);
+        setw(inout rc.nd_role, i, RaftRole::Follower);
+    }
+}
+
+fn node_maybe_change_membership(inout rc: RaftCluster, i: u64) {
+    let mp = rc.cfg.membership_per_mille;
+    if mp == 0 {
+        return;
+    }
+    let log_len = node_log_len(in rc, i);
+    if log_len >= rc.cfg.max_log {
+        return;
+    }
+    let commit = sw(in rc.nd_commit, i);
+    if commit == 0 {
+        return;
+    }
+    let term = sw(in rc.nd_term, i);
+    if node_log_get(in rc, i, wrapping_sub(commit, 1)).term != term {
+        return;
+    }
+    if node_config_index(in rc, i) > commit {
+        return;
+    }
+    if !sm_chance(inout rc.rng, mp) {
+        return;
+    }
+    let members = node_members(in rc, i);
+    let r = sm_range(inout rc.rng, 0, wrapping_sub(rc.n, 1));
+    let next = if member(members, r) {
+        if widen_u64(count_ones_u64(members)) <= rc.cfg.min_members {
+            return;
+        }
+        members & (~bit_at(r))
+    } else {
+        members | bit_at(r)
+    };
+    node_log_push(
+        inout rc,
+        i,
+        RaftEntry {
+            term: term,
+            cmd: CONFIG_FLAG | next
+        }
+    );
+    rc.config_changes = inc(rc.config_changes);
+    push_ev(inout rc, NodeEv::LogChanged, 0);
+    if member(next, r) {
+        let base = wrapping_mul(i, rc.n);
+        setw(inout rc.nd_next_index, wrapping_add(base, r), 1);
+        setw(inout rc.nd_match_index, wrapping_add(base, r), 0);
+    }
+    node_advance_commit(inout rc, i);
+}
+
+fn node_send_snapshot(inout rc: RaftCluster, i: u64, p: u64, now: u64) {
+    let si = sw(in rc.nd_snap_index, i);
+    let st = sw(in rc.nd_snap_term, i);
+    let term = sw(in rc.nd_term, i);
+    let h = WireHeader {
+        term: term,
+        leader_id: wrapping_u32(i),
+        follower_slot: wrapping_u32(p),
+        prev_log_index: si,
+        prev_log_term: st,
+        leader_commit: sw(in rc.nd_commit, i)
+    };
+    let boff = rc.pkt_bytes.len();
+    let log_off = sw(in rc.nd_log_off, i);
+    batch_encode_arena_seq(in h, in rc.log_pool.as_slice(), log_off, si, inout rc.pkt_bytes);
+    let blen = wrapping_sub(rc.pkt_bytes.len(), boff);
+    let ch = node_new_channel(inout rc, i);
+    rc.audit_opened = inc(rc.audit_opened);
+    let mon0 = rc.snap_ldr;
+    let lsn = rc.sym_inst_snap;
+    let psn = rc.sym_snap_img;
+    let mon1 = c_mon_step(inout rc.c, mon0, true, PROTO_FOLLOWER, lsn, psn);
+    rc.snapshots_sent = inc(rc.snapshots_sent);
+    let lsn2 = rc.sym_inst_snap;
+    let psn2 = rc.sym_snap_img;
+    push_step_packet(inout rc, i, p, ch, PROTO_LEADER, lsn2, psn2, boff, blen, true);
+    let dl = sat_add(now, rc.cfg.rpc_timeout_ns);
+    push_out_slot(inout rc, i, ch, mon1, dl, RpcKind::Snapshot, term, p, si);
+}
+
+fn node_send_appends(inout rc: RaftCluster, i: u64, now: u64) {
+    let pp = rc.cfg.propose_per_mille;
+    if node_log_len(in rc, i) < rc.cfg.max_log && sm_chance(inout rc.rng, pp) {
+        let cmd = inc(rc.next_cmd);
+        rc.next_cmd = cmd;
+        let term = sw(in rc.nd_term, i);
+        node_log_push(
+            inout rc,
+            i,
+            RaftEntry {
+                term: term,
+                cmd: cmd
+            }
+        );
+        rc.proposals = inc(rc.proposals);
+        push_ev(inout rc, NodeEv::LogChanged, 0);
+        node_advance_commit(inout rc, i);
+    }
+    node_maybe_change_membership(inout rc, i);
+    if sw(in rc.nd_role, i) != RaftRole::Leader {
+        return;
+    }
+    let targets = node_replication_targets(in rc, i);
+    let n = rc.n;
+    let max_batch = rc.cfg.max_batch;
+    let base = wrapping_mul(i, n);
+    for p in 0..n {
+        if p == i || !member(targets, p) {
+            continue;
+        }
+        let log_len = node_log_len(in rc, i);
+        let raw_next = sw(in rc.nd_next_index, wrapping_add(base, p));
+        let next = if raw_next < 1 {
+            1
+        } else if raw_next > inc(log_len) {
+            inc(log_len)
+        } else {
+            raw_next
+        };
+        let prev = wrapping_sub(next, 1);
+        let si = sw(in rc.nd_snap_index, i);
+        if prev < si {
+            node_send_snapshot(inout rc, i, p, now);
+            continue;
+        }
+        let prev_term = if prev == 0 {
+            0
+        } else {
+            node_log_get(in rc, i, wrapping_sub(prev, 1)).term
+        };
+        let avail = wrapping_sub(log_len, prev);
+        let count = if avail < max_batch {
+            avail
+        } else {
+            max_batch
+        };
+        let term = sw(in rc.nd_term, i);
+        let h = WireHeader {
+            term: term,
+            leader_id: wrapping_u32(i),
+            follower_slot: wrapping_u32(p),
+            prev_log_index: prev,
+            prev_log_term: prev_term,
+            leader_commit: sw(in rc.nd_commit, i)
+        };
+        let boff = rc.pkt_bytes.len();
+        let log_off = sw(in rc.nd_log_off, i);
+        batch_encode_arena_seq(
+            in h,
+            in rc.log_pool.as_slice(),
+            wrapping_add(log_off, prev),
+            count,
+            inout rc.pkt_bytes
+        );
+        let blen = wrapping_sub(rc.pkt_bytes.len(), boff);
+        let ch = node_new_channel(inout rc, i);
+        rc.audit_opened = inc(rc.audit_opened);
+        let mon0 = rc.append_ldr;
+        let lae = rc.sym_app_ent;
+        let pab = rc.sym_app_batch;
+        let mon1 = c_mon_step(inout rc.c, mon0, true, PROTO_FOLLOWER, lae, pab);
+        let sent_last = wrapping_add(prev, count);
+        let lae2 = rc.sym_app_ent;
+        let pab2 = rc.sym_app_batch;
+        push_step_packet(inout rc, i, p, ch, PROTO_LEADER, lae2, pab2, boff, blen, true);
+        let dl = sat_add(now, rc.cfg.rpc_timeout_ns);
+        push_out_slot(inout rc, i, ch, mon1, dl, RpcKind::Append, term, p, sent_last);
+    }
+    let hb = node_local_to_virtual(in rc, i, rc.cfg.heartbeat_ns);
+    setw(inout rc.nd_heartbeat_deadline, i, sat_add(now, hb));
+}
+
+fn node_maybe_compact(inout rc: RaftCluster, i: u64) {
+    let t = rc.cfg.snapshot_threshold;
+    if t > 0 {
+        let commit = sw(in rc.nd_commit, i);
+        let si = sw(in rc.nd_snap_index, i);
+        if commit >= sat_add(si, t) {
+            setw(inout rc.nd_snap_index, i, commit);
+            let st = node_log_get(in rc, i, wrapping_sub(commit, 1)).term;
+            setw(inout rc.nd_snap_term, i, st);
+            rc.compactions = inc(rc.compactions);
+        }
+    }
+}
+
+fn node_guard_compacted(inout rc: RaftCluster, i: u64, idx: u64) {
+    if idx < sw(in rc.nd_snap_index, i) {
+        push_ev(inout rc, NodeEv::CompactedChanged, idx);
+    }
+}
+
+fn handle_request(inout rc: RaftCluster, i: u64, p: u64, now: u64) {
+    let lbl = sw(in rc.pkt_label, p);
+    let pty = sw(in rc.pkt_pty, p);
+    let fr = sw(in rc.pkt_from_role, p);
+    let chan = sw(in rc.pkt_chan, p);
+    let src = sw(in rc.pkt_src, p);
+    let boff = sw(in rc.pkt_boff, p);
+    let blen = sw(in rc.pkt_blen, p);
+    if lbl == rc.sym_req_vote {
+        rc.audit_opened = inc(rc.audit_opened);
+        let mon0 = rc.vote_voter;
+        let mon1 = c_mon_step(inout rc.c, mon0, false, fr, lbl, pty);
+        if mon1 == none() {
+            rc.rejected_frames = inc(rc.rejected_frames);
+            rc.audit_faulted = inc(rc.audit_faulted);
+            return;
+        }
+        let req_opt = handle Fail[WireErr] in {
+            Option::Some(votereq_decode_range(in rc.pkt_bytes.as_slice(), boff, blen))
+        } with {
+            return v => v,
+            raise(_e, _k) => Option::None,
+        };
+        let req = match req_opt {
+            Option::Some(r) => r,
+            Option::None => {
+                rc.rejected_frames = inc(rc.rejected_frames);
+                rc.audit_faulted = inc(rc.audit_faulted);
+                return;
+            }
+        };
+        let cur_term = sw(in rc.nd_term, i);
+        let sticky = req.term > cur_term && node_heard_from_leader(in rc, i, now);
+        if sticky {
+            rc.sticky_vote_denials = inc(rc.sticky_vote_denials);
+        } else if req.term > cur_term {
+            node_become_follower(inout rc, i, req.term);
+        }
+        let li = node_last_index(in rc, i);
+        let lt = node_last_term(in rc, i);
+        let up_to_date = req.last_log_term > lt
+            || (req.last_log_term == lt && req.last_log_index >= li);
+        let after_term = sw(in rc.nd_term, i);
+        let vf = sw(in rc.nd_voted_for, i);
+        let cand_u64 = widen_u64(req.candidate);
+        let grant = !sticky
+            && req.term == after_term
+            && (vf == none() || vf == cand_u64)
+            && up_to_date;
+        if grant {
+            setw(inout rc.nd_voted_for, i, cand_u64);
+            node_reset_election(inout rc, i, now);
+        }
+        let rlbl = if grant {
+            rc.sym_grant
+        } else {
+            rc.sym_deny
+        };
+        let rpty = rc.sym_vote_resp;
+        let mon2 = c_mon_step(inout rc.c, mon1, true, PROTO_CANDIDATE, rlbl, rpty);
+        let rboff = rc.pkt_bytes.len();
+        term_encode_seq(after_term, inout rc.pkt_bytes);
+        let rblen = wrapping_sub(rc.pkt_bytes.len(), rboff);
+        push_step_packet(inout rc, i, src, chan, PROTO_VOTER, rlbl, rpty, rboff, rblen, false);
+        if mon2 != none() && ltag(in rc.c, mon2) == LTag::End {
+            rc.audit_closed = inc(rc.audit_closed);
+        } else {
+            rc.audit_faulted = inc(rc.audit_faulted);
+        }
+        return;
+    }
+    if lbl == rc.sym_app_ent {
+        rc.audit_opened = inc(rc.audit_opened);
+        let mon0 = rc.append_flw;
+        let mon1 = c_mon_step(inout rc.c, mon0, false, fr, lbl, pty);
+        if mon1 == none() {
+            rc.rejected_frames = inc(rc.rejected_frames);
+            rc.audit_faulted = inc(rc.audit_faulted);
+            return;
+        }
+        let h_opt = handle Fail[WireErr] in {
+            Option::Some(
+                batch_decode_range(in rc.pkt_bytes.as_slice(), boff, blen, inout rc.tmp_entries)
+            )
+        } with {
+            return v => v,
+            raise(_e, _k) => Option::None,
+        };
+        let h = match h_opt {
+            Option::Some(v) => v,
+            Option::None => {
+                rc.rejected_frames = inc(rc.rejected_frames);
+                rc.audit_faulted = inc(rc.audit_faulted);
+                return;
+            }
+        };
+        let mut accepted = false;
+        let mut match_index: u64 = 0;
+        let cur_term = sw(in rc.nd_term, i);
+        if h.term >= cur_term {
+            if h.term > cur_term || sw(in rc.nd_role, i) != RaftRole::Follower {
+                node_become_follower(inout rc, i, h.term);
+            }
+            node_reset_election(inout rc, i, now);
+            let _ = rc.nd_has_contact.try_set(i, true);
+            setw(inout rc.nd_last_contact, i, now);
+            let prev = h.prev_log_index;
+            let cur_len = node_log_len(in rc, i);
+            let prev_ok = prev == 0
+                || (
+                    prev <= cur_len
+                        && node_log_get(in rc, i, wrapping_sub(prev, 1)).term == h.prev_log_term
+                );
+            if prev_ok {
+                let mut changed = false;
+                let ec = rc.tmp_entries.len();
+                for k in 0..ec {
+                    let e = ge_log(in rc.tmp_entries, k);
+                    let idx = wrapping_add(prev, k);
+                    let ll = node_log_len(in rc, i);
+                    if idx < ll {
+                        if node_log_get(in rc, i, idx).term != e.term {
+                            node_guard_compacted(inout rc, i, idx);
+                            node_log_truncate(inout rc, i, idx);
+                            node_log_push(inout rc, i, e);
+                            changed = true;
+                        }
+                    } else {
+                        node_log_push(inout rc, i, e);
+                        changed = true;
+                    }
+                }
+                if changed {
+                    push_ev(inout rc, NodeEv::LogChanged, 0);
+                }
+                match_index = wrapping_add(prev, ec);
+                let new_commit = if h.leader_commit < match_index {
+                    h.leader_commit
+                } else {
+                    match_index
+                };
+                if new_commit > sw(in rc.nd_commit, i) {
+                    setw(inout rc.nd_commit, i, new_commit);
+                    push_ev(inout rc, NodeEv::Committed, 0);
+                }
+                accepted = true;
+            }
+        }
+        let sact = rc.sym_persist;
+        let mon2 = c_mon_action(inout rc.c, mon1, sact);
+        let rlbl = if accepted {
+            rc.sym_accept
+        } else {
+            rc.sym_reject
+        };
+        let rpty = rc.sym_app_ack;
+        let mon3 = c_mon_step(inout rc.c, mon2, true, PROTO_LEADER, rlbl, rpty);
+        let ack = WireAck {
+            follower_id: wrapping_u32(i),
+            term: sw(in rc.nd_term, i),
+            match_index: match_index,
+            accepted: accepted
+        };
+        let rboff = rc.pkt_bytes.len();
+        ack_encode_seq(in ack, inout rc.pkt_bytes);
+        let rblen = wrapping_sub(rc.pkt_bytes.len(), rboff);
+        push_step_packet(inout rc, i, src, chan, PROTO_FOLLOWER, rlbl, rpty, rboff, rblen, false);
+        if mon3 != none() && ltag(in rc.c, mon3) == LTag::End {
+            rc.audit_closed = inc(rc.audit_closed);
+        } else {
+            rc.audit_faulted = inc(rc.audit_faulted);
+        }
+        return;
+    }
+    if lbl == rc.sym_inst_snap {
+        rc.audit_opened = inc(rc.audit_opened);
+        let mon0 = rc.snap_flw;
+        let mon1 = c_mon_step(inout rc.c, mon0, false, fr, lbl, pty);
+        if mon1 == none() {
+            rc.rejected_frames = inc(rc.rejected_frames);
+            rc.audit_faulted = inc(rc.audit_faulted);
+            return;
+        }
+        let h_opt = handle Fail[WireErr] in {
+            Option::Some(
+                batch_decode_range(in rc.pkt_bytes.as_slice(), boff, blen, inout rc.tmp_entries)
+            )
+        } with {
+            return v => v,
+            raise(_e, _k) => Option::None,
+        };
+        let mut valid_snap = false;
+        let mut h = WireHeader {
+            term: 0,
+            leader_id: 0,
+            follower_slot: 0,
+            prev_log_index: 0,
+            prev_log_term: 0,
+            leader_commit: 0
+        };
+        match h_opt {
+            Option::Some(v) => {
+                h = v;
+                let ilen = rc.tmp_entries.len();
+                let iterm = if ilen == 0 {
+                    0
+                } else {
+                    ge_log(in rc.tmp_entries, wrapping_sub(ilen, 1)).term
+                };
+                if ilen == h.prev_log_index && iterm == h.prev_log_term {
+                    valid_snap = true;
+                }
+            }
+            Option::None => {}
+        }
+        if !valid_snap {
+            rc.rejected_frames = inc(rc.rejected_frames);
+            rc.audit_faulted = inc(rc.audit_faulted);
+            return;
+        }
+        let mut accepted = false;
+        let last = h.prev_log_index;
+        let cur_term = sw(in rc.nd_term, i);
+        if h.term >= cur_term {
+            if h.term > cur_term || sw(in rc.nd_role, i) != RaftRole::Follower {
+                node_become_follower(inout rc, i, h.term);
+            }
+            node_reset_election(inout rc, i, now);
+            let _ = rc.nd_has_contact.try_set(i, true);
+            setw(inout rc.nd_last_contact, i, now);
+            accepted = true;
+            if last > sw(in rc.nd_commit, i) {
+                let cur_len = node_log_len(in rc, i);
+                let have = last <= cur_len
+                    && (
+                        last == 0
+                            || node_log_get(in rc, i, wrapping_sub(last, 1)).term == h.prev_log_term
+                    );
+                if !have {
+                    let ilen = rc.tmp_entries.len();
+                    let mn = if cur_len < ilen {
+                        cur_len
+                    } else {
+                        ilen
+                    };
+                    let mut first_diff = mn;
+                    for k in 0..mn {
+                        let a = node_log_get(in rc, i, k);
+                        let b = ge_log(in rc.tmp_entries, k);
+                        if a.term != b.term || a.cmd != b.cmd {
+                            first_diff = k;
+                            break;
+                        }
+                    }
+                    if first_diff < cur_len {
+                        node_guard_compacted(inout rc, i, first_diff);
+                    }
+                    node_log_replace_from_tmp(inout rc, i);
+                    push_ev(inout rc, NodeEv::LogChanged, 0);
+                }
+                setw(inout rc.nd_commit, i, last);
+                push_ev(inout rc, NodeEv::Committed, 0);
+                if last > sw(in rc.nd_snap_index, i) {
+                    setw(inout rc.nd_snap_index, i, last);
+                    setw(inout rc.nd_snap_term, i, h.prev_log_term);
+                }
+                rc.snapshots_installed = inc(rc.snapshots_installed);
+            }
+        }
+        let sact = rc.sym_persist;
+        let mon2 = c_mon_action(inout rc.c, mon1, sact);
+        let rlbl = rc.sym_installed;
+        let rpty = rc.sym_app_ack;
+        let mon3 = c_mon_step(inout rc.c, mon2, true, PROTO_LEADER, rlbl, rpty);
+        let ack = WireAck {
+            follower_id: wrapping_u32(i),
+            term: sw(in rc.nd_term, i),
+            match_index: if accepted {
+                last
+            } else {
+                0
+            },
+            accepted: accepted
+        };
+        let rboff = rc.pkt_bytes.len();
+        ack_encode_seq(in ack, inout rc.pkt_bytes);
+        let rblen = wrapping_sub(rc.pkt_bytes.len(), rboff);
+        push_step_packet(inout rc, i, src, chan, PROTO_FOLLOWER, rlbl, rpty, rboff, rblen, false);
+        if mon3 != none() && ltag(in rc.c, mon3) == LTag::End {
+            rc.audit_closed = inc(rc.audit_closed);
+        } else {
+            rc.audit_faulted = inc(rc.audit_faulted);
+        }
+        return;
+    }
+    rc.rejected_frames = inc(rc.rejected_frames);
+}
+
+fn take_outstanding(inout rc: RaftCluster, i: u64, chan: u64) -> u64 {
+    let mut prev = none();
+    let mut cur = sw(in rc.nd_out_head, i);
+    loop {
+        if cur == none() {
+            return none();
+        }
+        if sw(in rc.out_chan, cur) == chan {
+            let nxt = sw(in rc.out_next, cur);
+            if prev == none() {
+                setw(inout rc.nd_out_head, i, nxt);
+            } else {
+                setw(inout rc.out_next, prev, nxt);
+            }
+            if nxt == none() {
+                setw(inout rc.nd_out_tail, i, prev);
+            }
+            setw(inout rc.out_next, cur, none());
+            return cur;
+        }
+        prev = cur;
+        cur = sw(in rc.out_next, cur);
+    }
+}
+
+fn handle_response(inout rc: RaftCluster, i: u64, p: u64, now: u64) {
+    let chan = sw(in rc.pkt_chan, p);
+    let slot = take_outstanding(inout rc, i, chan);
+    if slot == none() {
+        rc.stale_responses = inc(rc.stale_responses);
+        return;
+    }
+    let mon0 = sw(in rc.out_mon, slot);
+    let kind = sw(in rc.out_kind, slot);
+    let o_term = sw(in rc.out_term, slot);
+    let o_peer = sw(in rc.out_peer, slot);
+    let o_last = sw(in rc.out_last, slot);
+    rc.out_free.push(slot);
+
+    let fr = sw(in rc.pkt_from_role, p);
+    let lbl = sw(in rc.pkt_label, p);
+    let pty = sw(in rc.pkt_pty, p);
+    let src = sw(in rc.pkt_src, p);
+    let boff = sw(in rc.pkt_boff, p);
+    let blen = sw(in rc.pkt_blen, p);
+
+    let mon1 = c_mon_step(inout rc.c, mon0, false, fr, lbl, pty);
+    if mon1 == none() || ltag(in rc.c, mon1) != LTag::End {
+        rc.rejected_frames = inc(rc.rejected_frames);
+        rc.audit_faulted = inc(rc.audit_faulted);
+        return;
+    }
+    rc.audit_closed = inc(rc.audit_closed);
+
+    if kind == RpcKind::Vote {
+        let rt_opt = handle Fail[WireErr] in {
+            Option::Some(term_decode_range(in rc.pkt_bytes.as_slice(), boff, blen))
+        } with {
+            return v => v,
+            raise(_e, _k) => Option::None,
+        };
+        let rterm = match rt_opt {
+            Option::Some(v) => v,
+            Option::None => {
+                rc.rejected_frames = inc(rc.rejected_frames);
+                return;
+            }
+        };
+        if rterm > sw(in rc.nd_term, i) {
+            node_become_follower(inout rc, i, rterm);
+            node_reset_election(inout rc, i, now);
+            return;
+        }
+        if lbl == rc.sym_grant
+            && o_term == sw(in rc.nd_term, i)
+            && sw(in rc.nd_role, i) == RaftRole::Candidate {
+            let m = sw(in rc.nd_votes_mask, i) | bit_at(src);
+            setw(inout rc.nd_votes_mask, i, m);
+            node_maybe_win(inout rc, i, now);
+        }
+        return;
+    }
+
+    let ack_opt = handle Fail[WireErr] in {
+        Option::Some(ack_decode_range(in rc.pkt_bytes.as_slice(), boff, blen))
+    } with {
+        return v => v,
+        raise(_e, _k) => Option::None,
+    };
+    let ack = match ack_opt {
+        Option::Some(v) => v,
+        Option::None => {
+            rc.rejected_frames = inc(rc.rejected_frames);
+            return;
+        }
+    };
+    if ack.term > sw(in rc.nd_term, i) {
+        node_become_follower(inout rc, i, ack.term);
+        node_reset_election(inout rc, i, now);
+        return;
+    }
+    if sw(in rc.nd_role, i) != RaftRole::Leader
+        || o_term != sw(in rc.nd_term, i)
+        || widen_u64(ack.follower_id) != o_peer {
+        return;
+    }
+    let idx_slot = wrapping_add(wrapping_mul(i, rc.n), o_peer);
+    if kind == RpcKind::Append {
+        if ack.accepted && ack.match_index <= o_last {
+            if ack.match_index > sw(in rc.nd_match_index, idx_slot) {
+                setw(inout rc.nd_match_index, idx_slot, ack.match_index);
+            }
+            let mi = sw(in rc.nd_match_index, idx_slot);
+            let ni = sw(in rc.nd_next_index, idx_slot);
+            let want_ni = inc(mi);
+            if want_ni > ni {
+                setw(inout rc.nd_next_index, idx_slot, want_ni);
+            }
+            node_advance_commit(inout rc, i);
+        } else if !ack.accepted {
+            let ni = sw(in rc.nd_next_index, idx_slot);
+            let dec_ni = if ni <= 1 {
+                1
+            } else {
+                wrapping_sub(ni, 1)
+            };
+            setw(inout rc.nd_next_index, idx_slot, dec_ni);
+        }
+    } else if ack.accepted && ack.match_index == o_last {
+        let mi = sw(in rc.nd_match_index, idx_slot);
+        if o_last > mi {
+            setw(inout rc.nd_match_index, idx_slot, o_last);
+        }
+        let ni = sw(in rc.nd_next_index, idx_slot);
+        let want_ni = inc(o_last);
+        if want_ni > ni {
+            setw(inout rc.nd_next_index, idx_slot, want_ni);
+        }
+        node_advance_commit(inout rc, i);
+    }
+}
+
+fn seen_hash(hi: u64, chan: u64) -> u64 {
+    let h1 = wrapping_mul(FNV_OFFSET ^ hi, FNV_PRIME);
+    let h2 = wrapping_mul(h1 ^ chan, FNV_PRIME);
+    h2 ^ (h2 >> 29)
+}
+
+fn seen_grow(inout rc: RaftCluster) {
+    let cap = if rc.seen_mask == 0 {
+        MIN_SEEN_HT
+    } else {
+        wrapping_mul(inc(rc.seen_mask), 2)
+    };
+    rc.seen_ht.resize(cap, 0);
+    rc.seen_ht.fill(0);
+    rc.seen_mask = wrapping_sub(cap, 1);
+    let len = rc.seen_hi.len();
+    for j in 0..len {
+        let mut at = seen_hash(sw(in rc.seen_hi, j), sw(in rc.seen_chan, j)) & rc.seen_mask;
+        loop {
+            if sw(in rc.seen_ht, at) == 0 {
+                setw(inout rc.seen_ht, at, inc(j));
+                break;
+            }
+            at = inc(at) & rc.seen_mask;
+        }
+    }
+}
+
+fn seen_insert(inout rc: RaftCluster, dst: u64, src: u64, chan: u64) -> bool {
+    let hi = (dst << 32) | src;
+    if wrapping_mul(inc(rc.seen_hi.len()), 2) > rc.seen_mask {
+        seen_grow(inout rc);
+    }
+    let mut at = seen_hash(hi, chan) & rc.seen_mask;
+    loop {
+        let e = sw(in rc.seen_ht, at);
+        if e == 0 {
+            break;
+        }
+        let j = wrapping_sub(e, 1);
+        if sw(in rc.seen_hi, j) == hi && sw(in rc.seen_chan, j) == chan {
+            return false;
+        }
+        at = inc(at) & rc.seen_mask;
+    }
+    let j = rc.seen_hi.len();
+    rc.seen_hi.push(hi);
+    rc.seen_chan.push(chan);
+    setw(inout rc.seen_ht, at, inc(j));
+    true
+}
+
+fn expire_outstanding(inout rc: RaftCluster, i: u64, now: u64) {
+    let mut prev = none();
+    let mut cur = sw(in rc.nd_out_head, i);
+    loop {
+        if cur == none() {
+            break;
+        }
+        let nxt = sw(in rc.out_next, cur);
+        if sw(in rc.out_deadline, cur) <= now {
+            if prev == none() {
+                setw(inout rc.nd_out_head, i, nxt);
+            } else {
+                setw(inout rc.out_next, prev, nxt);
+            }
+            if nxt == none() {
+                setw(inout rc.nd_out_tail, i, prev);
+            }
+            setw(inout rc.out_next, cur, none());
+            rc.out_free.push(cur);
+            rc.timeouts = inc(rc.timeouts);
+            rc.audit_faulted = inc(rc.audit_faulted);
+        } else {
+            prev = cur;
+        }
+        cur = nxt;
+    }
+}
+
+fn node_step(inout rc: RaftCluster, i: u64, now: u64) {
+    if !sb(in rc.nd_up, i) {
+        clear_node_inbox(inout rc, i);
+        return;
+    }
+    let mut pk = sw(in rc.nd_inbox_head, i);
+    setw(inout rc.nd_inbox_head, i, none());
+    setw(inout rc.nd_inbox_tail, i, none());
+    loop {
+        if pk == none() {
+            break;
+        }
+        let nxt = sw(in rc.pkt_next, pk);
+        setw(inout rc.pkt_next, pk, none());
+        if sb(in rc.pkt_request, pk) {
+            let src = sw(in rc.pkt_src, pk);
+            let chan = sw(in rc.pkt_chan, pk);
+            if !seen_insert(inout rc, i, src, chan) {
+                rc.duplicate_requests = inc(rc.duplicate_requests);
+                free_pkt_slot(inout rc, pk);
+                pk = nxt;
+                continue;
+            }
+            handle_request(inout rc, i, pk, now);
+        } else {
+            handle_response(inout rc, i, pk, now);
+        }
+        free_pkt_slot(inout rc, pk);
+        pk = nxt;
+    }
+    expire_outstanding(inout rc, i, now);
+    if sw(in rc.nd_role, i) != RaftRole::Leader && now >= sw(in rc.nd_election_deadline, i) {
+        if member(node_members(in rc, i), i) {
+            node_start_election(inout rc, i, now);
+        } else {
+            node_reset_election(inout rc, i, now);
+        }
+    }
+    if sw(in rc.nd_role, i) == RaftRole::Leader && now >= sw(in rc.nd_heartbeat_deadline, i) {
+        node_send_appends(inout rc, i, now);
+    }
+    node_maybe_compact(inout rc, i);
+}
+
+fn node_next_wake(in rc: RaftCluster, i: u64) -> u64 {
+    let mut t = if sw(in rc.nd_role, i) == RaftRole::Leader {
+        sw(in rc.nd_heartbeat_deadline, i)
+    } else {
+        sw(in rc.nd_election_deadline, i)
+    };
+    let mut cur = sw(in rc.nd_out_head, i);
+    loop {
+        if cur == none() {
+            break;
+        }
+        let d = sw(in rc.out_deadline, cur);
+        if d < t {
+            t = d;
+        }
+        cur = sw(in rc.out_next, cur);
+    }
+    t
+}
+
+fn node_persistent_differs(in rc: RaftCluster, i: u64) -> bool {
+    if sw(in rc.nd_term, i) != sw(in rc.sy_term, i)
+        || sw(in rc.nd_voted_for, i) != sw(in rc.sy_voted_for, i)
+        || sw(in rc.nd_snap_index, i) != sw(in rc.sy_snap_index, i)
+        || sw(in rc.nd_snap_term, i) != sw(in rc.sy_snap_term, i) {
+        return true;
+    }
+    let len = node_log_len(in rc, i);
+    if len != sw(in rc.sy_log_len, i) {
+        return true;
+    }
+    let n_off = sw(in rc.nd_log_off, i);
+    let s_off = sw(in rc.sy_log_off, i);
+    for k in 0..len {
+        let a = ge_log(in rc.log_pool, wrapping_add(n_off, k));
+        let b = ge_log(in rc.sy_pool, wrapping_add(s_off, k));
+        if a.term != b.term || a.cmd != b.cmd {
+            return true;
+        }
+    }
+    false
+}
+
+fn sy_copy_from_node(inout rc: RaftCluster, i: u64) {
+    let term = sw(in rc.nd_term, i);
+    let vf = sw(in rc.nd_voted_for, i);
+    let si = sw(in rc.nd_snap_index, i);
+    let st = sw(in rc.nd_snap_term, i);
+    let off = sw(in rc.nd_log_off, i);
+    let len = sw(in rc.nd_log_len, i);
+    setw(inout rc.sy_term, i, term);
+    setw(inout rc.sy_voted_for, i, vf);
+    setw(inout rc.sy_snap_index, i, si);
+    setw(inout rc.sy_snap_term, i, st);
+    sy_log_set_from_arena(inout rc, i, off, len);
+}
+
+fn sy_copy_from_recovered(
+    inout rc: RaftCluster,
+    i: u64,
+    term: u64,
+    voted_for: u64,
+    snap_index: u64,
+    snap_term: u64,
+    in log_s: Slice[RaftEntry]
+) {
+    setw(inout rc.sy_term, i, term);
+    setw(inout rc.sy_voted_for, i, voted_for);
+    setw(inout rc.sy_snap_index, i, snap_index);
+    setw(inout rc.sy_snap_term, i, snap_term);
+    sy_log_set_from_slice(inout rc, i, in log_s);
+}
+
+fn node_restore_from_slice(
+    inout rc: RaftCluster,
+    i: u64,
+    term: u64,
+    voted_for: u64,
+    snap_index: u64,
+    snap_term: u64,
+    in log_s: Slice[RaftEntry]
+) {
+    setw(inout rc.nd_term, i, term);
+    setw(inout rc.nd_voted_for, i, voted_for);
+    node_log_replace_from_slice(inout rc, i, in log_s);
+    setw(inout rc.nd_snap_index, i, snap_index);
+    setw(inout rc.nd_snap_term, i, snap_term);
+    setw(inout rc.nd_commit, i, snap_index);
+}
+
+fn flush_step_events(inout rc: RaftCluster, i: u64, now: u64) {
+    let m = rc.step_ev_kind.len();
+    for k in 0..m {
+        let kind = sw(in rc.step_ev_kind, k);
+        let val = sw(in rc.step_ev_val, k);
+        if kind == NodeEv::Leader {
+            let _ = checker_core_leader_elected(inout rc.checker, now, val, i);
+        } else if kind == NodeEv::LogChanged {
+            checker_core_logs_changed_arena(
+                inout rc.checker,
+                now,
+                i,
+                in rc.log_pool.as_slice(),
+                in rc.nd_log_off.as_slice(),
+                in rc.nd_log_len.as_slice()
+            );
+        } else if kind == NodeEv::Committed {
+            let off = sw(in rc.nd_log_off, i);
+            let len = sw(in rc.nd_log_len, i);
+            let commit = sw(in rc.nd_commit, i);
+            checker_core_committed_arena(
+                inout rc.checker,
+                now,
+                i,
+                in rc.log_pool.as_slice(),
+                off,
+                len,
+                commit
+            );
+        } else {
+            checker_core_compacted_changed(inout rc.checker, now, i, val);
+        }
+    }
+    rc.step_ev_kind.clear();
+    rc.step_ev_val.clear();
+}
+
+fn plan_blocked(in rc: RaftCluster, src: u64, dst: u64, now: u64) -> bool {
+    let np = rc.part_start.len();
+    let idx_in_w = wrapping_add(wrapping_mul(src, rc.n), dst);
+    for wi in 0..np {
+        let st = sw(in rc.part_start, wi);
+        if st <= now && now < sw(in rc.part_end, wi) {
+            let pos = wrapping_add(wrapping_mul(wi, rc.part_stride), idx_in_w);
+            if su8(in rc.part_bits, pos) != 0 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn heap_less(in rc: RaftCluster, a: u64, b: u64) -> bool {
+    let ta = sw(in rc.h_at, a);
+    let tb = sw(in rc.h_at, b);
+    ta < tb || (ta == tb && sw(in rc.h_pid, a) < sw(in rc.h_pid, b))
+}
+
+fn heap_swap(inout rc: RaftCluster, a: u64, b: u64) {
+    let ta = sw(in rc.h_at, a);
+    let pa = sw(in rc.h_pid, a);
+    let ka = sw(in rc.h_pkt, a);
+    let tb = sw(in rc.h_at, b);
+    let pb = sw(in rc.h_pid, b);
+    let kb = sw(in rc.h_pkt, b);
+    setw(inout rc.h_at, a, tb);
+    setw(inout rc.h_pid, a, pb);
+    setw(inout rc.h_pkt, a, kb);
+    setw(inout rc.h_at, b, ta);
+    setw(inout rc.h_pid, b, pa);
+    setw(inout rc.h_pkt, b, ka);
+}
+
+fn heap_push(inout rc: RaftCluster, at: u64, pid: u64, pkt: u64) {
+    let mut i = rc.h_at.len();
+    rc.h_at.push(at);
+    rc.h_pid.push(pid);
+    rc.h_pkt.push(pkt);
+    loop {
+        if i == 0 {
+            break;
+        }
+        let p = wrapping_sub(i, 1) / 2;
+        if heap_less(in rc, i, p) {
+            heap_swap(inout rc, i, p);
+            i = p;
+        } else {
+            break;
+        }
+    }
+}
+
+fn heap_pop_pkt(inout rc: RaftCluster) -> u64 {
+    let pkt = sw(in rc.h_pkt, 0);
+    let last = wrapping_sub(rc.h_at.len(), 1);
+    if last == 0 {
+        rc.h_at.clear();
+        rc.h_pid.clear();
+        rc.h_pkt.clear();
+        return pkt;
+    }
+    let la = sw(in rc.h_at, last);
+    let lp = sw(in rc.h_pid, last);
+    let lk = sw(in rc.h_pkt, last);
+    setw(inout rc.h_at, 0, la);
+    setw(inout rc.h_pid, 0, lp);
+    setw(inout rc.h_pkt, 0, lk);
+    rc.h_at.truncate(last);
+    rc.h_pid.truncate(last);
+    rc.h_pkt.truncate(last);
+    let mut i: u64 = 0;
+    loop {
+        let l = wrapping_add(wrapping_mul(i, 2), 1);
+        if l >= last {
+            break;
+        }
+        let r = inc(l);
+        let best = if r < last && heap_less(in rc, r, l) {
+            r
+        } else {
+            l
+        };
+        if heap_less(in rc, best, i) {
+            heap_swap(inout rc, i, best);
+            i = best;
+        } else {
+            break;
+        }
+    }
+    pkt
+}
+
+fn route_step_out(inout rc: RaftCluster, now: u64) -> (bool, u64) {
+    let mut has_earliest = false;
+    let mut earliest: u64 = 0;
+    let count = rc.step_out.len();
+    for k in 0..count {
+        let pk = sw(in rc.step_out, k);
+        rc.sent = inc(rc.sent);
+        let src = sw(in rc.pkt_src, pk);
+        let dst = sw(in rc.pkt_dst, pk);
+        if plan_blocked(in rc, src, dst, now) {
+            rc.partitioned = inc(rc.partitioned);
+            free_pkt_slot(inout rc, pk);
+            continue;
+        }
+        if sm_chance(inout rc.rng, rc.cfg.drop_per_mille) {
+            rc.dropped = inc(rc.dropped);
+            free_pkt_slot(inout rc, pk);
+            continue;
+        }
+        let dup = sm_chance(inout rc.rng, rc.cfg.duplicate_per_mille);
+        if dup {
+            rc.duplicated = inc(rc.duplicated);
+        }
+        let copies: u64 = if dup {
+            2
+        } else {
+            1
+        };
+        for ci in 0..copies {
+            let lat = sm_range(inout rc.rng, rc.cfg.min_latency_ns, rc.cfg.max_latency_ns);
+            let at = sat_add(now, lat);
+            if !has_earliest || at < earliest {
+                has_earliest = true;
+                earliest = at;
+            }
+            let pid = rc.packet_id;
+            rc.packet_id = inc(pid);
+            let pkt_slot = if ci == 0 {
+                pk
+            } else {
+                clone_pkt_slot(inout rc, pk)
+            };
+            heap_push(inout rc, at, pid, pkt_slot);
+        }
+    }
+    rc.step_out.clear();
+    (has_earliest, earliest)
+}
+
+fn sort_chaos_events(inout rc: RaftCluster) {
+    let m = rc.ev_time.len();
+    for i in 1..m {
+        let tk = sw(in rc.ev_time, i);
+        let kk = sw(in rc.ev_kind, i);
+        let nk = sw(in rc.ev_node, i);
+        let mut j = i;
+        loop {
+            if j == 0 {
+                break;
+            }
+            let prev = wrapping_sub(j, 1);
+            let tp = sw(in rc.ev_time, prev);
+            let kp = sw(in rc.ev_kind, prev);
+            let np = sw(in rc.ev_node, prev);
+            if tp > tk || (tp == tk && kp > kk) {
+                setw(inout rc.ev_time, j, tp);
+                setw(inout rc.ev_kind, j, kp);
+                setw(inout rc.ev_node, j, np);
+                j = prev;
+            } else {
+                break;
+            }
+        }
+        setw(inout rc.ev_time, j, tk);
+        setw(inout rc.ev_kind, j, kk);
+        setw(inout rc.ev_node, j, nk);
+    }
+}
+
+pub fn raft_validate_cfg(in cfg: RaftCfg) -> u64 {
+    if cfg.nodes < 1 || cfg.nodes > 64 {
+        return RaftInitErr::BadNodes;
+    }
+    if cfg.election_min_ns > cfg.election_max_ns || cfg.min_latency_ns > cfg.max_latency_ns {
+        return RaftInitErr::InvertedRange;
+    }
+    if cfg.max_batch > MAX_BATCH {
+        return RaftInitErr::MaxBatch;
+    }
+    if cfg.snapshot_threshold > 0 && cfg.max_log > MAX_BATCH {
+        return RaftInitErr::SnapMaxLog;
+    }
+    if cfg.initial_members == 0 || cfg.initial_members > cfg.nodes {
+        return RaftInitErr::InitialMembers;
+    }
+    if (cfg.membership_per_mille > 0 || cfg.initial_members < cfg.nodes) && cfg.nodes > 63 {
+        return RaftInitErr::MembershipMaxNodes;
+    }
+    if cfg.torn_crash_per_mille > 0 && !cfg.durable {
+        return RaftInitErr::TornNeedsDurable;
+    }
+    RaftInitErr::Ok
+}
+
+pub fn raft_new(seed: u64, in cfg: RaftCfg) -> RaftCluster {
+    let mut c = new_c();
+    let end = c.l_end;
+    let s_rv = intern_str(inout c, "RequestVote");
+    let s_vr = intern_str(inout c, "VoteReq");
+    let s_gr = intern_str(inout c, "Grant");
+    let s_dn = intern_str(inout c, "Deny");
+    let s_vs = intern_str(inout c, "VoteResp");
+    let s_ae = intern_str(inout c, "AppendEntries");
+    let s_ab = intern_str(inout c, "AppendBatch");
+    let s_ps = intern_str(inout c, "persist");
+    let s_ac = intern_str(inout c, "Accept");
+    let s_rj = intern_str(inout c, "Reject");
+    let s_aa = intern_str(inout c, "AppendAck");
+    let s_is = intern_str(inout c, "InstallSnapshot");
+    let s_si = intern_str(inout c, "SnapshotImage");
+    let s_in = intern_str(inout c, "Installed");
+
+    // Vote Candidate (role 0, peer=1)
+    let f_vc = c.tmp.len();
+    c.tmp.push(s_gr);
+    c.tmp.push(s_vs);
+    c.tmp.push(end);
+    c.tmp.push(s_dn);
+    c.tmp.push(s_vs);
+    c.tmp.push(end);
+    let off_vc = choice(inout c, false, PROTO_VOTER, f_vc);
+    let vote_cand = l_msg(inout c, true, PROTO_VOTER, s_rv, s_vr, off_vc);
+
+    // Vote Voter (role 1, peer=0)
+    let f_vv = c.tmp.len();
+    c.tmp.push(s_gr);
+    c.tmp.push(s_vs);
+    c.tmp.push(end);
+    c.tmp.push(s_dn);
+    c.tmp.push(s_vs);
+    c.tmp.push(end);
+    let sel_vv = choice(inout c, true, PROTO_CANDIDATE, f_vv);
+    let vote_voter = l_msg(inout c, false, PROTO_CANDIDATE, s_rv, s_vr, sel_vv);
+
+    // Append Leader (role 0, peer=1)
+    let f_al = c.tmp.len();
+    c.tmp.push(s_ac);
+    c.tmp.push(s_aa);
+    c.tmp.push(end);
+    c.tmp.push(s_rj);
+    c.tmp.push(s_aa);
+    c.tmp.push(end);
+    let off_al = choice(inout c, false, PROTO_FOLLOWER, f_al);
+    let append_ldr = l_msg(inout c, true, PROTO_FOLLOWER, s_ae, s_ab, off_al);
+
+    // Append Follower (role 1, peer=0)
+    let f_af = c.tmp.len();
+    c.tmp.push(s_ac);
+    c.tmp.push(s_aa);
+    c.tmp.push(end);
+    c.tmp.push(s_rj);
+    c.tmp.push(s_aa);
+    c.tmp.push(end);
+    let sel_af = choice(inout c, true, PROTO_LEADER, f_af);
+    let act_af = l_action(inout c, s_ps, sel_af);
+    let append_flw = l_msg(inout c, false, PROTO_LEADER, s_ae, s_ab, act_af);
+
+    // Snapshot Leader (role 0, peer=1)
+    let rcv_sl = l_msg(inout c, false, PROTO_FOLLOWER, s_in, s_aa, end);
+    let snap_ldr = l_msg(inout c, true, PROTO_FOLLOWER, s_is, s_si, rcv_sl);
+
+    // Snapshot Follower (role 1, peer=0)
+    let snd_sf = l_msg(inout c, true, PROTO_LEADER, s_in, s_aa, end);
+    let act_sf = l_action(inout c, s_ps, snd_sf);
+    let snap_flw = l_msg(inout c, false, PROTO_LEADER, s_is, s_si, act_sf);
+
+    let initial_members = if cfg.initial_members >= 64 {
+        MAX_U64
+    } else {
+        wrapping_sub(bit_at(cfg.initial_members), 1)
+    };
+    let n = cfg.nodes;
+    let mut rc = RaftCluster {
+        cfg: cfg,
+        n: n,
+        rng: seed ^ SEED_RAFT_XOR,
+        next_cmd: 0,
+        packet_id: 0,
+        c: c,
+        vote_cand: vote_cand,
+        vote_voter: vote_voter,
+        append_ldr: append_ldr,
+        append_flw: append_flw,
+        snap_ldr: snap_ldr,
+        snap_flw: snap_flw,
+        sym_req_vote: s_rv,
+        sym_vote_req: s_vr,
+        sym_grant: s_gr,
+        sym_deny: s_dn,
+        sym_vote_resp: s_vs,
+        sym_app_ent: s_ae,
+        sym_app_batch: s_ab,
+        sym_persist: s_ps,
+        sym_accept: s_ac,
+        sym_reject: s_rj,
+        sym_app_ack: s_aa,
+        sym_inst_snap: s_is,
+        sym_snap_img: s_si,
+        sym_installed: s_in,
+        audit_opened: 0,
+        audit_closed: 0,
+        audit_faulted: 0,
+        elections: 0,
+        leaders_elected: 0,
+        max_term: 0,
+        sent: 0,
+        dropped: 0,
+        partitioned: 0,
+        duplicated: 0,
+        crashes: 0,
+        stale_responses: 0,
+        duplicate_requests: 0,
+        rejected_frames: 0,
+        timeouts: 0,
+        proposals: 0,
+        compactions: 0,
+        snapshots_sent: 0,
+        snapshots_installed: 0,
+        config_changes: 0,
+        leader_step_downs: 0,
+        sticky_vote_denials: 0,
+        checker: checker_core_new(),
+        ev_time: ChunkSeq::new[u64](),
+        ev_kind: ChunkSeq::new[u64](),
+        ev_node: ChunkSeq::new[u64](),
+        chaos_next: 0,
+        chaos_pending_node: none(),
+        part_start: ChunkSeq::new[u64](),
+        part_end: ChunkSeq::new[u64](),
+        part_bits: ChunkSeq::new[u8](),
+        part_stride: wrapping_mul(n, n),
+        nd_up: ChunkSeq::new[bool](),
+        nd_done: ChunkSeq::new[bool](),
+        nd_incarnation: ChunkSeq::new[u64](),
+        nd_term: ChunkSeq::new[u64](),
+        nd_voted_for: ChunkSeq::new[u64](),
+        nd_snap_index: ChunkSeq::new[u64](),
+        nd_snap_term: ChunkSeq::new[u64](),
+        nd_initial_members: initial_members,
+        nd_role: ChunkSeq::new[u64](),
+        nd_commit: ChunkSeq::new[u64](),
+        nd_votes_mask: ChunkSeq::new[u64](),
+        nd_election_deadline: ChunkSeq::new[u64](),
+        nd_heartbeat_deadline: ChunkSeq::new[u64](),
+        nd_denom: ChunkSeq::new[u64](),
+        nd_next_channel: ChunkSeq::new[u64](),
+        nd_has_contact: ChunkSeq::new[bool](),
+        nd_last_contact: ChunkSeq::new[u64](),
+        nd_inbox_head: ChunkSeq::new[u64](),
+        nd_inbox_tail: ChunkSeq::new[u64](),
+        nd_out_head: ChunkSeq::new[u64](),
+        nd_out_tail: ChunkSeq::new[u64](),
+        nd_log_off: ChunkSeq::new[u64](),
+        nd_log_len: ChunkSeq::new[u64](),
+        nd_log_cap: ChunkSeq::new[u64](),
+        nd_next_index: ChunkSeq::new[u64](),
+        nd_match_index: ChunkSeq::new[u64](),
+        sy_term: ChunkSeq::new[u64](),
+        sy_voted_for: ChunkSeq::new[u64](),
+        sy_snap_index: ChunkSeq::new[u64](),
+        sy_snap_term: ChunkSeq::new[u64](),
+        sy_log_off: ChunkSeq::new[u64](),
+        sy_log_len: ChunkSeq::new[u64](),
+        sy_log_cap: ChunkSeq::new[u64](),
+        log_pool: ChunkSeq::new[RaftEntry](),
+        sy_pool: ChunkSeq::new[RaftEntry](),
+        tmp_entries: ChunkSeq::new[RaftEntry](),
+        out_chan: ChunkSeq::new[u64](),
+        out_mon: ChunkSeq::new[u64](),
+        out_deadline: ChunkSeq::new[u64](),
+        out_kind: ChunkSeq::new[u64](),
+        out_term: ChunkSeq::new[u64](),
+        out_peer: ChunkSeq::new[u64](),
+        out_last: ChunkSeq::new[u64](),
+        out_next: ChunkSeq::new[u64](),
+        out_free: ChunkSeq::new[u64](),
+        pkt_src: ChunkSeq::new[u64](),
+        pkt_dst: ChunkSeq::new[u64](),
+        pkt_chan: ChunkSeq::new[u64](),
+        pkt_from_role: ChunkSeq::new[u64](),
+        pkt_label: ChunkSeq::new[u64](),
+        pkt_pty: ChunkSeq::new[u64](),
+        pkt_request: ChunkSeq::new[bool](),
+        pkt_boff: ChunkSeq::new[u64](),
+        pkt_blen: ChunkSeq::new[u64](),
+        pkt_next: ChunkSeq::new[u64](),
+        pkt_free: ChunkSeq::new[u64](),
+        pkt_bytes: ChunkSeq::new[u8](),
+        pkt_compact_at: 65536,
+        step_out: ChunkSeq::new[u64](),
+        h_at: ChunkSeq::new[u64](),
+        h_pid: ChunkSeq::new[u64](),
+        h_pkt: ChunkSeq::new[u64](),
+        seen_hi: ChunkSeq::new[u64](),
+        seen_chan: ChunkSeq::new[u64](),
+        seen_ht: ChunkSeq::new[u64](),
+        seen_mask: 0,
+        step_ev_kind: ChunkSeq::new[u64](),
+        step_ev_val: ChunkSeq::new[u64](),
+        woken: ChunkSeq::new[u64]()
+    };
+
+    // ChaosPlan::generate
+    let four_fifths = wrapping_mul(cfg.duration_ns, 4) / 5;
+    if cfg.crashes {
+        let num_c = sm_range(inout rc.rng, 1, 3);
+        for _ in 0..num_c {
+            let node = sm_range(inout rc.rng, 0, wrapping_sub(n, 1));
+            let at = sm_range(inout rc.rng, 0, four_fifths);
+            let down = sm_range(inout rc.rng, 50000000, 600000000);
+            rc.ev_time.push(at);
+            rc.ev_kind.push(0);
+            rc.ev_node.push(node);
+            rc.ev_time.push(sat_add(at, down));
+            rc.ev_kind.push(1);
+            rc.ev_node.push(node);
+        }
+        sort_chaos_events(inout rc);
+    }
+    if cfg.partitions {
+        let num_p = sm_range(inout rc.rng, 1, 4);
+        for _ in 0..num_p {
+            let start = sm_range(inout rc.rng, 0, four_fifths);
+            let len = sm_range(inout rc.rng, 100000000, 800000000);
+            let p = wrapping_mul(sm_range(inout rc.rng, 15, 60), 10);
+            rc.part_start.push(start);
+            rc.part_end.push(sat_add(start, len));
+            for s in 0..n {
+                for d in 0..n {
+                    let blk: u8 = if s != d && sm_chance(inout rc.rng, p) {
+                        1
+                    } else {
+                        0
+                    };
+                    rc.part_bits.push(blk);
+                }
+            }
+        }
+    }
+    let skew = cfg.max_skew_ppm;
+    for _ in 0..n {
+        let drawn = sm_range(inout rc.rng, 0, wrapping_mul(2, skew));
+        let pos_num = wrapping_add(1000000, drawn);
+        let denom = if pos_num > skew {
+            wrapping_sub(pos_num, skew)
+        } else {
+            1
+        };
+        rc.nd_denom.push(denom);
+    }
+
+    // Node storage + initial election timers
+    rc.nd_next_index.resize(wrapping_mul(n, n), 0);
+    rc.nd_match_index.resize(wrapping_mul(n, n), 0);
+    let init_cap = if cfg.max_log == 0 {
+        INIT_LOG_CAP
+    } else if cfg.max_log < INIT_LOG_CAP {
+        cfg.max_log
+    } else {
+        INIT_LOG_CAP
+    };
+    rc
+        .log_pool
+        .resize(
+            wrapping_mul(n, init_cap),
+            RaftEntry {
+                term: 0,
+                cmd: 0
+            }
+        );
+    if cfg.durable {
+        rc
+            .sy_pool
+            .resize(
+                wrapping_mul(n, init_cap),
+                RaftEntry {
+                    term: 0,
+                    cmd: 0
+                }
+            );
+    }
+    for i in 0..n {
+        rc.nd_up.push(true);
+        rc.nd_done.push(false);
+        rc.nd_incarnation.push(0);
+        rc.nd_term.push(0);
+        rc.nd_voted_for.push(none());
+        rc.nd_snap_index.push(0);
+        rc.nd_snap_term.push(0);
+        rc.nd_role.push(RaftRole::Follower);
+        rc.nd_commit.push(0);
+        rc.nd_votes_mask.push(0);
+        rc.nd_next_channel.push(0);
+        rc.nd_has_contact.push(false);
+        rc.nd_last_contact.push(0);
+        rc.nd_inbox_head.push(none());
+        rc.nd_inbox_tail.push(none());
+        rc.nd_out_head.push(none());
+        rc.nd_out_tail.push(none());
+        rc.nd_log_off.push(wrapping_mul(i, init_cap));
+        rc.nd_log_len.push(0);
+        rc.nd_log_cap.push(init_cap);
+        let local = sm_range(inout rc.rng, cfg.election_min_ns, cfg.election_max_ns);
+        let ed = node_local_to_virtual(in rc, i, local);
+        rc.nd_election_deadline.push(ed);
+        rc.nd_heartbeat_deadline.push(0);
+        if cfg.durable {
+            rc.sy_term.push(0);
+            rc.sy_voted_for.push(none());
+            rc.sy_snap_index.push(0);
+            rc.sy_snap_term.push(0);
+            rc.sy_log_off.push(wrapping_mul(i, init_cap));
+            rc.sy_log_len.push(0);
+            rc.sy_log_cap.push(init_cap);
+        }
+    }
+    rc
+}
+
+fn net_wake_info(in rc: RaftCluster) -> (bool, u64) {
+    if rc.h_at.len() == 0 {
+        (false, 0)
+    } else {
+        (true, sw(in rc.h_at, 0))
+    }
+}
+
+pub fn raft_step_network(inout rc: RaftCluster, now: u64) -> RaftStepOut {
+    rc.woken.clear();
+    let mut woken_mask: u64 = 0;
+    loop {
+        if rc.h_at.len() == 0 {
+            break;
+        }
+        if sw(in rc.h_at, 0) > now {
+            break;
+        }
+        let pk = heap_pop_pkt(inout rc);
+        let dst = sw(in rc.pkt_dst, pk);
+        if sb(in rc.nd_up, dst) && !sb(in rc.nd_done, dst) {
+            push_node_inbox(inout rc, dst, pk);
+            woken_mask = woken_mask | bit_at(dst);
+        } else {
+            free_pkt_slot(inout rc, pk);
+        }
+    }
+    for d in 0..rc.n {
+        if member(woken_mask, d) {
+            rc.woken.push(d);
+        }
+    }
+    let mut all_done = true;
+    for d in 0..rc.n {
+        if !sb(in rc.nd_done, d) {
+            all_done = false;
+            break;
+        }
+    }
+    if all_done {
+        return RaftStepOut {
+            code: RaftStepCode::Finished,
+            arg: 0,
+            has_wake: false,
+            wake_delay: 0,
+            net_wake_has_due: false,
+            net_wake_earliest: 0,
+            has_violation: rc.checker.has_violation
+        };
+    }
+    let (has_due, earliest) = net_wake_info(in rc);
+    RaftStepOut {
+        code: RaftStepCode::Continue,
+        arg: 0,
+        has_wake: has_due,
+        wake_delay: if has_due {
+            wrapping_sub(earliest, now)
+        } else {
+            0
+        },
+        net_wake_has_due: has_due,
+        net_wake_earliest: earliest,
+        has_violation: rc.checker.has_violation
+    }
+}
+
+fn finish_chaos_out(inout rc: RaftCluster, now: u64) -> RaftStepOut {
+    let end = rc.cfg.duration_ns;
+    let m = rc.ev_time.len();
+    if rc.chaos_next < m {
+        let t = sw(in rc.ev_time, rc.chaos_next);
+        if t < end {
+            return RaftStepOut {
+                code: RaftStepCode::Continue,
+                arg: 0,
+                has_wake: true,
+                wake_delay: wrapping_sub(t, now),
+                net_wake_has_due: false,
+                net_wake_earliest: 0,
+                has_violation: rc.checker.has_violation
+            };
+        }
+    }
+    RaftStepOut {
+        code: RaftStepCode::Finished,
+        arg: 0,
+        has_wake: false,
+        wake_delay: 0,
+        net_wake_has_due: false,
+        net_wake_earliest: 0,
+        has_violation: rc.checker.has_violation
+    }
+}
+
+pub fn raft_step_chaos(inout rc: RaftCluster, now: u64) -> RaftStepOut {
+    rc.woken.clear();
+    let m = rc.ev_time.len();
+    loop {
+        if rc.chaos_next >= m || sw(in rc.ev_time, rc.chaos_next) > now {
+            break;
+        }
+        let idx = rc.chaos_next;
+        let kind = sw(in rc.ev_kind, idx);
+        let node = sw(in rc.ev_node, idx);
+        rc.chaos_next = inc(idx);
+        if kind == 0 {
+            if sb(in rc.nd_up, node) {
+                rc.crashes = inc(rc.crashes);
+                node_crash(inout rc, node);
+            }
+        } else if !sb(in rc.nd_up, node) {
+            if rc.cfg.durable {
+                rc.chaos_pending_node = node;
+                return RaftStepOut {
+                    code: RaftStepCode::NeedChaosRecover,
+                    arg: node,
+                    has_wake: false,
+                    wake_delay: 0,
+                    net_wake_has_due: false,
+                    net_wake_earliest: 0,
+                    has_violation: rc.checker.has_violation
+                };
+            }
+            node_restart(inout rc, node, now);
+            rc.woken.push(node);
+        }
+    }
+    finish_chaos_out(inout rc, now)
+}
+
+pub fn raft_chaos_finish_restart(
+    inout rc: RaftCluster,
+    node: u64,
+    now: u64,
+    ok: bool,
+    term: u64,
+    voted_for: u64,
+    snap_index: u64,
+    snap_term: u64,
+    in log_s: Slice[RaftEntry]
+) -> RaftStepOut {
+    let matches_synced = ok
+        && term == sw(in rc.sy_term, node)
+        && voted_for == sw(in rc.sy_voted_for, node)
+        && snap_index == sw(in rc.sy_snap_index, node)
+        && snap_term == sw(in rc.sy_snap_term, node)
+        && log_s.len() == sw(in rc.sy_log_len, node)
+        && logs_slice_eq_sy(in rc, node, in log_s);
+    if matches_synced {
+        node_restore_from_slice(inout rc, node, term, voted_for, snap_index, snap_term, in log_s);
+    } else {
+        checker_core_record(inout rc.checker, now, ViolKind::RecoveryLostState, node, 0, 0);
+    }
+    node_restart(inout rc, node, now);
+    rc.woken.push(node);
+    // Resume processing any remaining chaos events <= now without clearing woken.
+    let m = rc.ev_time.len();
+    loop {
+        if rc.chaos_next >= m || sw(in rc.ev_time, rc.chaos_next) > now {
+            break;
+        }
+        let idx = rc.chaos_next;
+        let kind = sw(in rc.ev_kind, idx);
+        let nd = sw(in rc.ev_node, idx);
+        rc.chaos_next = inc(idx);
+        if kind == 0 {
+            if sb(in rc.nd_up, nd) {
+                rc.crashes = inc(rc.crashes);
+                node_crash(inout rc, nd);
+            }
+        } else if !sb(in rc.nd_up, nd) {
+            if rc.cfg.durable {
+                rc.chaos_pending_node = nd;
+                return RaftStepOut {
+                    code: RaftStepCode::NeedChaosRecover,
+                    arg: nd,
+                    has_wake: false,
+                    wake_delay: 0,
+                    net_wake_has_due: false,
+                    net_wake_earliest: 0,
+                    has_violation: rc.checker.has_violation
+                };
+            }
+            node_restart(inout rc, nd, now);
+            rc.woken.push(nd);
+        }
+    }
+    finish_chaos_out(inout rc, now)
+}
+
+fn logs_slice_eq_sy(in rc: RaftCluster, i: u64, in s: Slice[RaftEntry]) -> bool {
+    let off = sw(in rc.sy_log_off, i);
+    let len = s.len();
+    for k in 0..len {
+        let a = match s.try_get(k) {
+            Option::Some(v) => v,
+            Option::None => RaftEntry {
+                term: 0,
+                cmd: 0
+            },
+        };
+        let b = ge_log(in rc.sy_pool, wrapping_add(off, k));
+        if a.term != b.term || a.cmd != b.cmd {
+            return false;
+        }
+    }
+    true
+}
+
+fn finish_node_step(inout rc: RaftCluster, i: u64, now: u64) -> RaftStepOut {
+    let end = rc.cfg.duration_ns;
+    let wake_delay = if sb(in rc.nd_up, i) {
+        let raw = node_next_wake(in rc, i);
+        let clamped = if raw < now {
+            now
+        } else if raw > end {
+            end
+        } else {
+            raw
+        };
+        wrapping_sub(clamped, now)
+    } else {
+        wrapping_sub(end, now)
+    };
+    flush_step_events(inout rc, i, now);
+    let (net_has, net_earliest) = route_step_out(inout rc, now);
+    compact_pkt_bytes(inout rc);
+    RaftStepOut {
+        code: RaftStepCode::Continue,
+        arg: 0,
+        has_wake: true,
+        wake_delay: wake_delay,
+        net_wake_has_due: net_has,
+        net_wake_earliest: net_earliest,
+        has_violation: rc.checker.has_violation
+    }
+}
+
+pub fn raft_step_node(inout rc: RaftCluster, i: u64, now: u64) -> RaftStepOut {
+    if now >= rc.cfg.duration_ns {
+        let _ = rc.nd_done.try_set(i, true);
+        return RaftStepOut {
+            code: RaftStepCode::Finished,
+            arg: 0,
+            has_wake: false,
+            wake_delay: 0,
+            net_wake_has_due: false,
+            net_wake_earliest: 0,
+            has_violation: rc.checker.has_violation
+        };
+    }
+    node_step(inout rc, i, now);
+    if rc.cfg.durable && sb(in rc.nd_up, i) && node_persistent_differs(in rc, i) {
+        return RaftStepOut {
+            code: RaftStepCode::NeedPersist,
+            arg: i,
+            has_wake: false,
+            wake_delay: 0,
+            net_wake_has_due: false,
+            net_wake_earliest: 0,
+            has_violation: rc.checker.has_violation
+        };
+    }
+    finish_node_step(inout rc, i, now)
+}
+
+pub fn raft_node_persistent(in rc: RaftCluster, i: u64) -> RaftPersistOut {
+    RaftPersistOut {
+        term: sw(in rc.nd_term, i),
+        voted_for: sw(in rc.nd_voted_for, i),
+        snap_index: sw(in rc.nd_snap_index, i),
+        snap_term: sw(in rc.nd_snap_term, i),
+        log_off: sw(in rc.nd_log_off, i),
+        log_len: sw(in rc.nd_log_len, i)
+    }
+}
+
+pub fn raft_node_synced(in rc: RaftCluster, i: u64) -> RaftPersistOut {
+    RaftPersistOut {
+        term: sw(in rc.sy_term, i),
+        voted_for: sw(in rc.sy_voted_for, i),
+        snap_index: sw(in rc.sy_snap_index, i),
+        snap_term: sw(in rc.sy_snap_term, i),
+        log_off: sw(in rc.sy_log_off, i),
+        log_len: sw(in rc.sy_log_len, i)
+    }
+}
+
+pub fn raft_finish_node_persist(
+    inout rc: RaftCluster,
+    i: u64,
+    now: u64,
+    err_kind: u64,
+    torn: bool,
+    rec_term: u64,
+    rec_vf: u64,
+    rec_si: u64,
+    rec_st: u64,
+    in rec_log: Slice[RaftEntry]
+) -> RaftStepOut {
+    // err_kind: 0 none, 1 RecoveryLostState, 2 RecoveryInconsistent
+    if err_kind != 0 {
+        let vk = if err_kind == 1 {
+            ViolKind::RecoveryLostState
+        } else {
+            ViolKind::RecoveryInconsistent
+        };
+        checker_core_record(inout rc.checker, now, vk, i, 0, 0);
+    } else if torn {
+        sy_copy_from_recovered(inout rc, i, rec_term, rec_vf, rec_si, rec_st, in rec_log);
+        if !rc.cfg.reply_before_sync {
+            let cnt = rc.step_out.len();
+            for k in 0..cnt {
+                free_pkt_slot(inout rc, sw(in rc.step_out, k));
+            }
+            rc.step_out.clear();
+        }
+        node_crash(inout rc, i);
+        node_restore_from_slice(inout rc, i, rec_term, rec_vf, rec_si, rec_st, in rec_log);
+        node_restart(inout rc, i, now);
+    } else {
+        sy_copy_from_node(inout rc, i);
+    }
+    finish_node_step(inout rc, i, now)
+}
+
+fn mix_fnv(h: u64, v: u64) -> u64 {
+    let mut x = h;
+    let mut val = v;
+    for _ in 0..8 {
+        x = wrapping_mul(x ^ (val & 255), FNV_PRIME);
+        val = val >> 8;
+    }
+    x
+}
+
+pub fn raft_shutdown_and_digest(inout rc: RaftCluster) -> u64 {
+    for i in 0..rc.n {
+        clear_node_outstanding_fault(inout rc, i);
+    }
+    let mut digest = FNV_OFFSET;
+    for i in 0..rc.n {
+        digest = mix_fnv(digest, sw(in rc.nd_term, i));
+        let vf = sw(in rc.nd_voted_for, i);
+        digest = mix_fnv(
+            digest,
+            if vf == none() {
+                MAX_U64
+            } else {
+                vf
+            }
+        );
+        digest = mix_fnv(digest, sw(in rc.nd_commit, i));
+        digest = mix_fnv(digest, sw(in rc.nd_snap_index, i));
+        let off = sw(in rc.nd_log_off, i);
+        let len = sw(in rc.nd_log_len, i);
+        for k in 0..len {
+            let e = ge_log(in rc.log_pool, wrapping_add(off, k));
+            digest = mix_fnv(digest, e.term);
+            digest = mix_fnv(digest, e.cmd);
+        }
+    }
+    digest = mix_fnv(digest, rc.sent);
+    digest = mix_fnv(digest, rc.dropped);
+    digest = mix_fnv(digest, rc.duplicated);
+    digest = mix_fnv(digest, rc.elections);
+    digest = mix_fnv(digest, rc.timeouts);
+    digest = mix_fnv(digest, rc.stale_responses);
+    digest
+}
+
+pub fn raft_stats(in rc: RaftCluster) -> RaftStatsOut {
+    RaftStatsOut {
+        elections: rc.elections,
+        leaders_elected: rc.leaders_elected,
+        max_term: rc.max_term,
+        sent: rc.sent,
+        dropped: rc.dropped,
+        partitioned: rc.partitioned,
+        duplicated: rc.duplicated,
+        crashes: rc.crashes,
+        stale_responses: rc.stale_responses,
+        duplicate_requests: rc.duplicate_requests,
+        rejected_frames: rc.rejected_frames,
+        timeouts: rc.timeouts,
+        proposals: rc.proposals,
+        compactions: rc.compactions,
+        snapshots_sent: rc.snapshots_sent,
+        snapshots_installed: rc.snapshots_installed,
+        config_changes: rc.config_changes,
+        leader_step_downs: rc.leader_step_downs,
+        sticky_vote_denials: rc.sticky_vote_denials
+    }
+}
+
+pub fn raft_node_members(in rc: RaftCluster, i: u64) -> u64 {
+    node_members(in rc, i)
+}
+
+pub fn raft_open_sessions(in rc: RaftCluster) -> u64 {
+    let closed = wrapping_add(rc.audit_closed, rc.audit_faulted);
+    if rc.audit_opened >= closed {
+        wrapping_sub(rc.audit_opened, closed)
+    } else {
+        0
+    }
+}
+
+pub fn raft_has_violation(in rc: RaftCluster) -> bool {
+    rc.checker.has_violation
+}
+
+pub fn raft_part_blocked(in rc: RaftCluster, src: u64, dst: u64, now: u64) -> bool {
+    plan_blocked(in rc, src, dst, now)
+}

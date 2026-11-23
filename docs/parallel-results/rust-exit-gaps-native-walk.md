@@ -156,3 +156,47 @@ Bazel test entry), so the Stage 1 lock is unaffected.
   stable and the shim lends a finished function.
 - Build-time ratio of the whole walk swapped in the hybrid (acceptance),
   which needs parts 2 and 3.
+
+
+## Part 2 (`@vesper/codegen-calls` switch & `register_locals` swap hook)
+
+### Changes
+- **`packages/vesper-codegen-walk/Loom.toml` & `src/lib.ves`**: Replaced the
+  private copies of `is_foreign`, `is_capability`, `is_fail`,
+  `contains_function`, `visit`, `any_param_contains_function`,
+  `capability_only`, `fail_only` and `specialized` with `@vesper/codegen-calls`
+  (`syms_new`, `specialized`, `Conc`, `ParamInfo`), cached per signature index
+  in `spec_cache`. Threaded `@vesper/check-data::types::Vars` through
+  `is_register_scalar`, `callback`, `in_param_registers` and `register_locals`,
+  and added `native_walk_register_locals` for single-graph hook invocations
+  (`world_lean`, one-function `Program`, referenced callee signatures, `Vars`,
+  `nested` flag and `Op::Handle` free names).
+- **`src/codegen_swap.rs` & `src/native.rs`**: Added `RegisterLocalsHook`
+  (`register_locals: Option<RegisterLocalsHook>`) on `CodegenHooks` and wired
+  `Codegen::ir_graph_at` to consult it when `self.operands_only` is true (`None`
+  leaves Rust `register_locals` untouched). Made `specialized_function`,
+  `cyclic_blocks` and `register_locals` `pub` in `src/native.rs`.
+- **`tests/self_host_native_walk.rs` & `tests/common/ir_words.rs`**: Removed the
+  restated Rust half (~295 lines) in favor of calling
+  `vesper::native::{specialized_function, cyclic_blocks, register_locals}`
+  directly, exposed `ir_words::function_fits`, and added
+  `the_native_walk_swap_matches_rust` comparing CLIF text and object bytes via
+  `vesper::native::object_with_options` + `codegen_swap::with_hooks` over
+  synthetic edge cases (`generic_vars` scalar/aggregate/callback substitution,
+  `nested` specialized graphs, `Op::Handle` captures) and corpus worlds.
+
+### Differential & Speed Results (`--release`, `--locked`)
+- `the_native_walk_swap_matches_rust` (`NATIVE_WALK_STEP=1`): **0 of 153**
+  compiled worlds differ (`1978` calls, `0` declined, `29` with generics,
+  `1504` nested, `135` with handles, `968` non-empty register sets).
+- `the_native_walk_swap_matches_rust` (default `step=4`): **0 of 40** compiled
+  worlds differ (`235` calls, `0` declined, `10` with generics, `119` nested,
+  `30` with handles, `135` non-empty).
+- `vesper_decisions_match_rust`: **0 of 172** programs differ (`107154` lines,
+  `217049` register locals, `5119` graphs with loops, `0` not encodable).
+- `vesper_decisions_match_rust_on_pass_mutants`: **0 of 86** programs differ.
+- `native_walk_decision_cost` (`CHECK_HARNESS_SPEED=1`, 172 programs, best of
+  5): Rust `2.1053204s`, Vesper `557.0868ms` (**0.26x**).
+- Rust compiler deletion: 0 lines deleted in `src/native.rs` (Part 2 installs
+  the swap point and keeps `register_locals` as the unhooked path/oracle until
+  the remaining graph walk and hybrid wiring land in Parts 3-4).

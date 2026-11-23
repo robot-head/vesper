@@ -97,6 +97,9 @@ const T_STRUCT: u64 = 100;
 const T_OPT_STRUCT: u64 = 200;
 
 const DATETIME_KEY: Str = "$__toml_private_datetime";
+const U32_MAX: u64 = 4294967295;
+// Reserved JSON output offset for an absent struct field.
+const MISSING_FIELD_OFFSET: u64 = 4294967295;
 
 pub struct D {
     doc: Doc,
@@ -170,7 +173,7 @@ fn field_count(k: u64) -> u64 {
     if k == S_MANIFEST {
         6
     } else if k == S_PACKAGE {
-        7
+        8
     } else if k == S_DEPENDENCY {
         5
     } else if k == S_FEATURE {
@@ -212,8 +215,10 @@ fn field_name(k: u64, i: u64) -> Str {
             "capability_ceiling"
         } else if i == 5 {
             "forbid_unsafe_ffi"
-        } else {
+        } else if i == 6 {
             "vsys"
+        } else {
+            "objects"
         }
     } else if k == S_DEPENDENCY {
         if i == 0 {
@@ -355,9 +360,10 @@ fn put_default(inout out: ChunkSeq[u8], t: u64) -> bool {
     true
 }
 
-// `skip_serializing_if`: an empty `vsys` and a `None` dependency path.
+// `skip_serializing_if`: an empty `vsys` or `objects` and a `None`
+// dependency path.
 fn skipped(k: u64, i: u64, in json: Slice[u8]) -> bool {
-    if k == S_PACKAGE && i == 6 {
+    if k == S_PACKAGE && i >= 6 {
         return json.len() == 2;
     }
     if k == S_DEPENDENCY && i == 4 {
@@ -524,8 +530,20 @@ fn put_float(inout m: ChunkSeq[u8], in src: Slice[u8], n: Node) {
 
 const LIMB_MASK: u64 = 4294967295;
 const POW5_13: u64 = 1220703125;
+const POW5_CHUNK_EXPONENT: i64 = 13;
+
+// IEEE 754 binary64 fields and exponents for the integer significand.
+const FRACTION_BITS: u64 = 52;
+const HIDDEN_BIT: u64 = 4503599627370496;
+const SIGN_BIT: u64 = 9223372036854775808;
 const INF_BITS: u64 = 9218868437227405312;
-const HIDDEN: u64 = 4503599627370496;
+const SUBNORMAL_EXPONENT: i64 = -1074;
+const EXPONENT_BIAS_WITH_FRACTION: i64 = 1075;
+
+// The exact fallback only needs exponents near binary64's decimal range.
+const EXPONENT_ACCUMULATION_LIMIT: i64 = 100000;
+const DEFINITELY_OVERFLOW_MAGNITUDE: i64 = 310;
+const DEFINITELY_UNDERFLOW_MAGNITUDE: i64 = -330;
 
 fn limb(in a: Slice[u64], i: u64) -> u64 {
     match a.try_get(i) {
@@ -552,11 +570,11 @@ fn big_mul_add(inout a: ChunkSeq[u64], k: u64, add: u64) {
 fn big_mul_pow5(inout a: ChunkSeq[u64], k: i64) {
     let mut left = k;
     loop {
-        if !(left >= 13) {
+        if !(left >= POW5_CHUNK_EXPONENT) {
             break;
         }
         big_mul_add(inout a, POW5_13, 0);
-        left = wrapping_sub(left, 13);
+        left = wrapping_sub(left, POW5_CHUNK_EXPONENT);
     }
     let mut p: u64 = 1;
     loop {
@@ -654,12 +672,12 @@ fn exact_cmp(in digits: Slice[u64], k: i64, m: u64, e: i64) -> i64 {
 
 // A positive double's bits as `m * 2^e`.
 fn bits_parts(x: u64) -> (u64, i64) {
-    let biased = x >> 52;
-    let frac = x & wrapping_sub(HIDDEN, 1);
+    let biased = x >> FRACTION_BITS;
+    let frac = x & wrapping_sub(HIDDEN_BIT, 1);
     if biased == 0 {
-        return (frac, -1074);
+        return (frac, SUBNORMAL_EXPONENT);
     }
-    (frac | HIDDEN, wrapping_sub(wrapping_i64(biased), 1075))
+    (frac | HIDDEN_BIT, wrapping_sub(wrapping_i64(biased), EXPONENT_BIAS_WITH_FRACTION))
 }
 
 // A JSON number's correctly rounded double (round half to even).
@@ -668,7 +686,7 @@ fn exact_bits(in text: Slice[u8]) -> u64 {
     let n = text.len();
     let mut sign: u64 = 0;
     if sbyte(in text, 0) == 45 {
-        sign = 9223372036854775808;
+        sign = SIGN_BIT;
         i = 1;
     }
     let mut digits: ChunkSeq[u64] = ChunkSeq::new[u64]();
@@ -709,7 +727,7 @@ fn exact_bits(in text: Slice[u8]) -> u64 {
                 break;
             }
             let d = sbyte(in text, i);
-            if exp < 100000 {
+            if exp < EXPONENT_ACCUMULATION_LIMIT {
                 exp = wrapping_add(wrapping_mul(exp, 10), wrapping_i64(wrapping_sub(d, 48)));
             }
             i = wrapping_add(i, 1);
@@ -723,10 +741,10 @@ fn exact_bits(in text: Slice[u8]) -> u64 {
     }
     let k = wrapping_sub(exp, frac);
     let magnitude = wrapping_add(k, count);
-    if magnitude > 310 {
+    if magnitude > DEFINITELY_OVERFLOW_MAGNITUDE {
         return INF_BITS | sign;
     }
-    if magnitude < -330 {
+    if magnitude < DEFINITELY_UNDERFLOW_MAGNITUDE {
         return sign;
     }
     // The largest double at or below the value: value(lo) <= input, and
@@ -1080,7 +1098,7 @@ fn value(inout d: D, in src: Slice[u8], id: u32, t: u64) -> bool {
             return invalid_type(inout d, in src, id, "u32");
         }
         let negative = wrapping_shr_u64(n.a, 63) == 1;
-        if negative || (t == T_OPT_U32 && n.a > 4294967295) {
+        if negative || (t == T_OPT_U32 && n.a > U32_MAX) {
             put(inout d.msg, "invalid value: integer `");
             put_i64(inout d.msg, n.a);
             if t == T_OPT_U64 {
@@ -1357,10 +1375,10 @@ fn struct_value(inout d: D, in src: Slice[u8], id: u32, k: u64) -> bool {
         return invalid_type_struct(inout d, in src, id, k);
     }
     let count = field_count(k);
-    // Per field: JSON start and end in `d.out`, or NONE.
+    // Per field: JSON start and end in `d.out`, or MISSING_FIELD_OFFSET.
     let mut at: ChunkSeq[u64] = ChunkSeq::new[u64]();
     for i in 0..count {
-        at.push(4294967295);
+        at.push(MISSING_FIELD_OFFSET);
         at.push(0);
     }
     let mark = d.out.len();
@@ -1406,7 +1424,7 @@ fn struct_value(inout d: D, in src: Slice[u8], id: u32, k: u64) -> bool {
     for i in 0..count {
         let s = qw(in at, wrapping_mul(i, 2));
         let t = field_type(k, i);
-        let absent = s == 4294967295;
+        let absent = s == MISSING_FIELD_OFFSET;
         if absent && !has_default_json(t) {
             put(inout d.msg, "missing field `");
             put(inout d.msg, field_name(k, i));
@@ -1415,7 +1433,8 @@ fn struct_value(inout d: D, in src: Slice[u8], id: u32, k: u64) -> bool {
             return at_item(inout d, id);
         }
         let e = qw(in at, wrapping_add(wrapping_mul(i, 2), 1));
-        // `skip_serializing_if`: a missing `vsys` or `path` is skipped too.
+        // `skip_serializing_if`: a missing `vsys`, `objects` or `path` is
+        // skipped too.
         if (absent && skippable(k, i)) || (!absent && skipped(k, i, in d.out[s..e])) {
             continue;
         }
@@ -1450,7 +1469,7 @@ fn has_default_json(t: u64) -> bool {
 }
 
 fn skippable(k: u64, i: u64) -> bool {
-    (k == S_PACKAGE && i == 6) || (k == S_DEPENDENCY && i == 4)
+    (k == S_PACKAGE && i >= 6) || (k == S_DEPENDENCY && i == 4)
 }
 
 // Whether field i has `#[serde(default)]` (an `Option` without it is
@@ -1521,99 +1540,134 @@ fn struct_from_seq(inout d: D, in src: Slice[u8], id: u32, k: u64) -> bool {
     true
 }
 
+// FNV-1a of the TOML field names above, using @vesper-std/toml key hashing.
+enum FieldHash: u64 {
+    Package = 0x53cf3eec39cf731b,
+    Features = 0xbe45a3a6ee3c626a,
+    Dependencies = 0xccfa12bb6c45a400,
+    BuildSandbox = 0x98376ace5443af45,
+    Resolver = 0x805a48bccf7b6723,
+    Verification = 0xf43118ca9bca7b5e,
+    Name = 0xc4bcadba8e631b86,
+    Version = 0xbb62c62c9808ea37,
+    Edition = 0xe04368a1e3ac3611,
+    License = 0x31c81591587fa9c4,
+    CapabilityCeiling = 0xe634574e501326a7,
+    ForbidUnsafeFfi = 0xeb33229df80f9daa,
+    Vsys = 0xdeb11201459a3a32,
+    Objects = 0x26d3ea846b0765cb,
+    Effects = 0xfd8b23cc3ea96185,
+    Optional = 0x629576c6b305d539,
+    Path = 0x3c52d0debd70676,
+    EnablesEffects = 0x5a42afb309cdbbde,
+    Deps = 0xa5ef07674280b91f,
+    SysDeps = 0x2f0e67c72f983a81,
+    Script = 0xacfc82293c04634a,
+    WasiReadPaths = 0xd31b719dc8463f9,
+    FuelLimit = 0x27e4f776d66eea15,
+    AllowNetwork = 0xf51cc97a59d8acf,
+    Optimize = 0x64a3f8b478e4050e,
+    MinReproAttestations = 0xc1b9146a605edd62,
+    BlockUnvettedNamespaces = 0xc05393167fba7945,
+    Policy = 0xbfe9e4a0d3aa473f,
+    ExportLean4Specs = 0xf3ad96d5ad67d22f,
+}
+
 // The field whose name has FNV-1a hash `h` (the key's `Ent.hash`), or
 // `field_count(k)`; the caller confirms the bytes.
 fn field_of(k: u64, h: u64) -> u64 {
     if k == S_MANIFEST {
-        if h == 0x53cf3eec39cf731b {
+        if h == FieldHash::Package {
             0
-        } else if h == 0xbe45a3a6ee3c626a {
+        } else if h == FieldHash::Features {
             1
-        } else if h == 0xccfa12bb6c45a400 {
+        } else if h == FieldHash::Dependencies {
             2
-        } else if h == 0x98376ace5443af45 {
+        } else if h == FieldHash::BuildSandbox {
             3
-        } else if h == 0x805a48bccf7b6723 {
+        } else if h == FieldHash::Resolver {
             4
-        } else if h == 0xf43118ca9bca7b5e {
+        } else if h == FieldHash::Verification {
             5
         } else {
             6
         }
     } else if k == S_PACKAGE {
-        if h == 0xc4bcadba8e631b86 {
+        if h == FieldHash::Name {
             0
-        } else if h == 0xbb62c62c9808ea37 {
+        } else if h == FieldHash::Version {
             1
-        } else if h == 0xe04368a1e3ac3611 {
+        } else if h == FieldHash::Edition {
             2
-        } else if h == 0x31c81591587fa9c4 {
+        } else if h == FieldHash::License {
             3
-        } else if h == 0xe634574e501326a7 {
+        } else if h == FieldHash::CapabilityCeiling {
             4
-        } else if h == 0xeb33229df80f9daa {
+        } else if h == FieldHash::ForbidUnsafeFfi {
             5
-        } else if h == 0xdeb11201459a3a32 {
+        } else if h == FieldHash::Vsys {
             6
-        } else {
+        } else if h == FieldHash::Objects {
             7
+        } else {
+            8
         }
     } else if k == S_DEPENDENCY {
-        if h == 0xbb62c62c9808ea37 {
+        if h == FieldHash::Version {
             0
-        } else if h == 0xfd8b23cc3ea96185 {
+        } else if h == FieldHash::Effects {
             1
-        } else if h == 0x629576c6b305d539 {
+        } else if h == FieldHash::Optional {
             2
-        } else if h == 0xbe45a3a6ee3c626a {
+        } else if h == FieldHash::Features {
             3
-        } else if h == 0x3c52d0debd70676 {
+        } else if h == FieldHash::Path {
             4
         } else {
             5
         }
     } else if k == S_FEATURE {
-        if h == 0x5a42afb309cdbbde {
+        if h == FieldHash::EnablesEffects {
             0
-        } else if h == 0xa5ef07674280b91f {
+        } else if h == FieldHash::Deps {
             1
-        } else if h == 0xbe45a3a6ee3c626a {
+        } else if h == FieldHash::Features {
             2
-        } else if h == 0x2f0e67c72f983a81 {
+        } else if h == FieldHash::SysDeps {
             3
         } else {
             4
         }
     } else if k == S_SANDBOX {
-        if h == 0xacfc82293c04634a {
+        if h == FieldHash::Script {
             0
-        } else if h == 0xd31b719dc8463f9 {
+        } else if h == FieldHash::WasiReadPaths {
             1
-        } else if h == 0x27e4f776d66eea15 {
+        } else if h == FieldHash::FuelLimit {
             2
-        } else if h == 0xf51cc97a59d8acf {
+        } else if h == FieldHash::AllowNetwork {
             3
         } else {
             4
         }
     } else if k == S_POLICY {
-        if h == 0x64a3f8b478e4050e {
+        if h == FieldHash::Optimize {
             0
-        } else if h == 0xc1b9146a605edd62 {
+        } else if h == FieldHash::MinReproAttestations {
             1
-        } else if h == 0xc05393167fba7945 {
+        } else if h == FieldHash::BlockUnvettedNamespaces {
             2
         } else {
             3
         }
     } else if k == S_RESOLVER {
-        if h == 0xbfe9e4a0d3aa473f {
+        if h == FieldHash::Policy {
             0
         } else {
             1
         }
     } else if k == S_VERIFICATION {
-        if h == 0xf3ad96d5ad67d22f {
+        if h == FieldHash::ExportLean4Specs {
             0
         } else {
             1

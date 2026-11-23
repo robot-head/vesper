@@ -397,6 +397,14 @@ impl<'a> Ast<'a> {
             other => panic!("vesper-hybrid: pattern kind {other}"),
         };
         Pattern {
+            integer_kind: if r[0] == 3 && r[4] != u64::from(NONE) {
+                Some(
+                    vesper::numeric::IntegerKind::from_name(&self.name(r[4]))
+                        .expect("integer pattern type"),
+                )
+            } else {
+                None
+            },
             kind,
             span: span(r[1], r[2]),
         }

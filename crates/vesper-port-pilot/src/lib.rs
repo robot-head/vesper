@@ -10,6 +10,8 @@ pub use vesper_port_abi::{ArithOverflow, RuntimeError};
 
 #[cfg(feature = "vesper-port")]
 pub mod arrays;
+#[cfg(feature = "vesper-port")]
+pub mod fnptrs;
 pub mod gauge;
 pub mod kit;
 #[cfg(feature = "vesper-port")]

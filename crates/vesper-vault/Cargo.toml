@@ -6,40 +6,44 @@ license = "MIT OR Apache-2.0"
 description = "Vesper Vault: constant-time SSA taint verifier, secret scalars, locked secret slots, nonce-safe AEAD and hybrid X25519MLKEM768 (design section 23)"
 publish = false
 
+[features]
+# Applies the divergence edits of build.rs (port/check.sh).
+vesper-port-divergent = []
+
 [dependencies]
-# Not called directly: enable zeroize-on-drop of the AES key schedule and the
-# GHASH/Poly1305 state inside aes-gcm and chacha20poly1305 through Cargo
-# feature unification, as crates/vesper-warp-crypto does.
-aes = { workspace = true }
-aes-gcm = { workspace = true }
-chacha20 = { workspace = true }
-chacha20poly1305 = { workspace = true }
-poly1305 = { workspace = true }
-polyval = { workspace = true }
 cranelift-codegen = { workspace = true }
-getrandom = { workspace = true }
-libcrux-ml-kem = { workspace = true }
 rand_core = { workspace = true }
 region = { workspace = true }
-x25519-dalek = { workspace = true }
+vesper-crypto-sys = { path = "../vesper-crypto-sys" }
+vesper-port-abi = { path = "../vesper-port-abi" }
 zeroize = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
 
-# ML-KEM-768 vector NTT backends (design §23.1.4 `eff [Isa[P]]`): libcrux's
-# formally verified AVX2 and NEON kernels. Each feature is only enabled on the
-# architecture whose intrinsics it compiles against.
-[target.'cfg(target_arch = "x86_64")'.dependencies]
+[build-dependencies]
+vesper-port-harness = { path = "../vesper-port-harness" }
+
+# The Rust reference in src/reference/ (for src/differential.rs) and the seed
+# crate (for examples/abba.rs) live here so RustCrypto, libcrux-ml-kem,
+# x25519-dalek, and getrandom stay out of vesper-vault's runtime dependency closure.
+[dev-dependencies]
+aes-gcm = { workspace = true }
+chacha20poly1305 = { workspace = true }
+cranelift-frontend = { workspace = true }
+getrandom = { workspace = true }
+libcrux-ml-kem = { workspace = true }
+ml-kem = { workspace = true }
+shake = { workspace = true }
+vesper-bench = { path = "../vesper-bench" }
+vesper-vault-rust = { path = "seed", package = "vesper-vault-seed" }
+x25519-dalek = { workspace = true }
+
+[target.'cfg(target_arch = "x86_64")'.dev-dependencies]
 libcrux-ml-kem = { workspace = true, features = ["simd256"] }
 
-[target.'cfg(target_arch = "aarch64")'.dependencies]
+[target.'cfg(target_arch = "aarch64")'.dev-dependencies]
 libcrux-ml-kem = { workspace = true, features = ["simd128"] }
-
-[dev-dependencies]
-ml-kem = { workspace = true }
-cranelift-frontend = { workspace = true }
-shake = { workspace = true }
 
 [target.'cfg(unix)'.dev-dependencies]
 libc = { workspace = true }

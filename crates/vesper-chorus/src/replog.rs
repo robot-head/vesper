@@ -30,15 +30,15 @@
 
 use crate::chor::Choreography;
 use crate::parse::parse_choreography;
+use crate::port::{self, binding};
 use crate::raft::{
-    APPEND_CHOREOGRAPHY, AppendAck, Checker, Entry, MAX_BATCH, RaftAppendWireHeader,
-    VOTE_CHOREOGRAPHY, Violation, VoteReq, decode_batch, encode_batch,
+    APPEND_CHOREOGRAPHY, AppendAck, Entry, RaftAppendWireHeader, VOTE_CHOREOGRAPHY, Violation,
+    VoteReq, decode_batch, encode_batch,
 };
 use crate::session::{
     Act, ActionName, AuditCounts, Branch, Case, ChorusError, End, LeakAuditor, Message, OfferN,
     Recv, SelectN, Send, Session,
 };
-use crate::simnet::SplitMix;
 use crate::warpnet::{WarpNet, WarpNetConfig, WarpNetError, WarpNetStats, WarpTls};
 use crate::{branches, role, u64_message};
 use std::collections::BTreeMap;
@@ -217,32 +217,13 @@ pub enum ReplogError {
     NoConvergence,
 }
 
-struct Node {
-    term: u64,
-    voted_for: Option<u32>,
-    log: Vec<Entry>,
-    commit: u64,
-}
-
-impl Node {
-    fn last(&self) -> (u64, u64) {
-        (self.log.len() as u64, self.log.last().map_or(0, |e| e.term))
-    }
-}
-
 struct Run {
-    cfg: ReplogConfig,
     n: u32,
     net: WarpNet,
     vote: Choreography,
     append: Choreography,
     auditor: LeakAuditor,
-    nodes: Vec<Node>,
-    checker: Checker,
-    stats: ReplogStats,
-    next_channel: u64,
-    next_cmd: u64,
-    rng: SplitMix,
+    core: binding::vesper__chorus__replog__ReplogCore,
 }
 
 /// A transport failure ends one RPC; anything else is a bug in the run.
@@ -251,36 +232,24 @@ fn transport_failure(e: &ChorusError) -> bool {
 }
 
 impl Run {
-    fn channel(&mut self) -> u64 {
-        self.next_channel += 1;
-        self.next_channel
-    }
-
-    fn check_logs(&mut self, a: u32) {
-        let logs: Vec<&[Entry]> = self.nodes.iter().map(|n| n.log.as_slice()).collect();
-        self.checker
-            .logs_changed(self.net.now_ns(), a as usize, &logs);
-    }
-
-    fn check_commit(&mut self, a: u32) {
-        let n = &self.nodes[a as usize];
-        let (log, commit) = (n.log.clone(), n.commit);
-        self.checker.committed(self.net.now_ns(), a, &log, commit);
-    }
-
     fn fault(&mut self, e: ChorusError) -> Result<(), ReplogError> {
         if transport_failure(&e) {
-            self.stats.rpc_faults += 1;
+            binding::p2_replog_on_vote_fault(&mut self.core);
             Ok(())
         } else {
             Err(ReplogError::Session(e))
         }
     }
 
-    /// One RequestVote exchange. Returns whether the vote was granted, or
-    /// the higher term the voter answered with.
-    fn request_vote(&mut self, c: u32, v: u32) -> Result<(bool, u64), ReplogError> {
-        let ch = self.channel();
+    /// One RequestVote exchange. Returns `(granted, term_answered, stepped_down)`.
+    fn request_vote(
+        &mut self,
+        c: u32,
+        v: u32,
+        elect_term: u64,
+    ) -> Result<(bool, bool), ReplogError> {
+        let prep = binding::p2_replog_prep_vote(&mut self.core, u64::from(c));
+        let ch = prep.channel;
         let placement = [c, v];
         let cs = Session::<CandidateProto>::bind(
             &self.vote,
@@ -302,12 +271,11 @@ impl Run {
             &self.auditor,
         )
         .map_err(ReplogError::Session)?;
-        let (li, lt) = self.nodes[c as usize].last();
         let req = VoteReq {
-            term: self.nodes[c as usize].term,
-            candidate: c,
-            last_log_index: li,
-            last_log_term: lt,
+            term: prep.req.term,
+            candidate: prep.req.candidate.get(),
+            last_log_index: prep.req.last_log_index,
+            last_log_term: prep.req.last_log_term,
         };
         let cs = match cs.send(&RequestVote(req)) {
             Ok(s) => s,
@@ -319,22 +287,20 @@ impl Run {
         match vs.recv() {
             Err(f) => self.fault(f.into_error())?,
             Ok((RequestVote(r), vs)) => {
-                let node = &mut self.nodes[v as usize];
-                if r.term > node.term {
-                    node.term = r.term;
-                    node.voted_for = None;
-                }
-                let (i, t) = node.last();
-                let up_to_date = (r.last_log_term, r.last_log_index) >= (t, i);
-                let grant = r.term == node.term
-                    && node.voted_for.is_none_or(|x| x == r.candidate)
-                    && up_to_date;
-                let term = node.term;
-                let sent = if grant {
-                    node.voted_for = Some(r.candidate);
-                    vs.select(&Grant(term)).map(Session::close)
+                let dec = binding::p2_replog_on_vote_req(
+                    &mut self.core,
+                    u64::from(v),
+                    &binding::repr::vesper__chorus__wire__WireVoteReq {
+                        term: r.term,
+                        candidate: vesper_port_abi::Word::new(r.candidate),
+                        last_log_index: r.last_log_index,
+                        last_log_term: r.last_log_term,
+                    },
+                );
+                let sent = if dec.grant.get() {
+                    vs.select(&Grant(dec.term)).map(Session::close)
                 } else {
-                    vs.select(&Deny(term)).map(Session::close)
+                    vs.select(&Deny(dec.term)).map(Session::close)
                 };
                 if let Err(f) = sent {
                     self.fault(f.into_error())?;
@@ -342,76 +308,79 @@ impl Run {
             }
         }
         // Candidate.
-        let c = match cs.offer() {
+        let ch_offer = match cs.offer() {
             Err(f) => {
                 self.fault(f.into_error())?;
-                return Ok((false, 0));
+                return Ok((false, false));
             }
-            Ok(c) => c,
+            Ok(ch_offer) => ch_offer,
         };
-        match c.split() {
+        match ch_offer.split() {
             Err(f) => Err(ReplogError::Session(f.into_error())),
             Ok(Case::This(Grant(t), s)) => {
                 s.close();
-                self.stats.votes_granted += 1;
-                Ok((true, t))
+                let stepped_down = binding::p2_replog_on_vote_resp(
+                    &mut self.core,
+                    u64::from(c),
+                    elect_term,
+                    true,
+                    t,
+                );
+                Ok((true, stepped_down))
             }
-            Ok(Case::Other(c)) => match c.split() {
+            Ok(Case::Other(ch_offer)) => match ch_offer.split() {
                 Err(f) => Err(ReplogError::Session(f.into_error())),
                 Ok(Case::This(Deny(t), s)) => {
                     s.close();
-                    self.stats.votes_denied += 1;
-                    Ok((false, t))
+                    let stepped_down = binding::p2_replog_on_vote_resp(
+                        &mut self.core,
+                        u64::from(c),
+                        elect_term,
+                        false,
+                        t,
+                    );
+                    Ok((false, stepped_down))
                 }
-                Ok(Case::Other(c)) => Err(ReplogError::Session(c.exhausted().into_error())),
+                Ok(Case::Other(ch_offer)) => {
+                    Err(ReplogError::Session(ch_offer.exhausted().into_error()))
+                }
             },
         }
     }
 
     fn elect(&mut self, c: u32, term: u64) -> Result<bool, ReplogError> {
-        self.stats.elections += 1;
-        {
-            let node = &mut self.nodes[c as usize];
-            if node.term >= term {
-                return Ok(false);
-            }
-            node.term = term;
-            node.voted_for = Some(c);
+        if !binding::p2_replog_start_elect(&mut self.core, u64::from(c), term) {
+            return Ok(false);
         }
-        let mut votes = 1;
+        let mut votes = 1u64;
         for v in 0..self.n {
             if v == c {
                 continue;
             }
-            let (granted, t) = self.request_vote(c, v)?;
-            if t > term {
-                let node = &mut self.nodes[c as usize];
-                node.term = t;
-                node.voted_for = None;
+            let (granted, stepped_down) = self.request_vote(c, v, term)?;
+            if stepped_down {
                 return Ok(false);
             }
             if granted {
                 votes += 1;
             }
         }
-        if votes > self.n / 2 {
-            self.stats.elections_won += 1;
-            self.checker.leader_elected(self.net.now_ns(), term, c);
-            return Ok(true);
-        }
-        Ok(false)
+        Ok(binding::p2_replog_finish_elect(
+            &mut self.core,
+            self.net.now_ns(),
+            u64::from(c),
+            term,
+            votes,
+        ))
     }
 
     /// One AppendEntries exchange. Returns `false` if the leader must step
-    /// down (a higher term answered).
-    fn append(
-        &mut self,
-        l: u32,
-        f: u32,
-        next: &mut [u64],
-        matched: &mut [u64],
-    ) -> Result<bool, ReplogError> {
-        let ch = self.channel();
+    /// down or the invariant checker flagged a violation.
+    fn append(&mut self, l: u32, f: u32) -> Result<bool, ReplogError> {
+        let prep = binding::p2_replog_prep_append(&mut self.core, u64::from(l), u64::from(f));
+        let ch = prep.channel;
+        let term = prep.header.term;
+        let sent_last = prep.sent_last;
         let placement = [l, f];
         let ls = Session::<LeaderProto>::bind(
             &self.append,
@@ -433,33 +402,29 @@ impl Run {
             &self.auditor,
         )
         .map_err(ReplogError::Session)?;
-        let leader = &self.nodes[l as usize];
-        let term = leader.term;
-        let ni = next[f as usize].clamp(1, leader.log.len() as u64 + 1);
-        let prev = ni - 1;
-        let prev_term = if prev == 0 {
-            0
-        } else {
-            leader.log[prev as usize - 1].term
-        };
-        let entries: Vec<Entry> = leader.log[prev as usize..]
-            .iter()
-            .take(self.cfg.max_batch as usize)
-            .copied()
+        let off = prep.entry_off as usize;
+        let len = prep.entry_len as usize;
+        let pool = self.core.as_ref().log_pool();
+        let entries: Vec<Entry> = (off..off + len)
+            .map(|idx| {
+                let e = pool.get(idx).expect("log entry");
+                Entry {
+                    term: e.term,
+                    cmd: e.cmd,
+                }
+            })
             .collect();
-        let sent_last = prev + entries.len() as u64;
         let msg = AppendEntries {
             header: RaftAppendWireHeader {
                 term,
-                leader_id: l,
-                follower_slot: f,
-                prev_log_index: prev,
-                prev_log_term: prev_term,
-                leader_commit: leader.commit,
+                leader_id: prep.header.leader_id.get(),
+                follower_slot: prep.header.follower_slot.get(),
+                prev_log_index: prep.header.prev_log_index,
+                prev_log_term: prep.header.prev_log_term,
+                leader_commit: prep.header.leader_commit,
             },
             entries,
         };
-        self.stats.appends += 1;
         let ls = match ls.send(&msg) {
             Ok(s) => s,
             Err(e) => return Err(ReplogError::Session(e.into_error())),
@@ -468,193 +433,130 @@ impl Run {
         match fs.recv() {
             Err(e) => self.fault(e.into_error())?,
             Ok((AppendEntries { header: h, entries }, fs)) => {
-                let node = &mut self.nodes[f as usize];
-                let mut accepted = false;
-                let mut match_index = 0;
-                let mut changed = false;
-                let mut committed = false;
-                if h.term >= node.term {
-                    if h.term > node.term {
-                        node.term = h.term;
-                        node.voted_for = None;
-                    }
-                    let p = h.prev_log_index;
-                    let ok = p == 0
-                        || (p <= node.log.len() as u64
-                            && node.log[p as usize - 1].term == h.prev_log_term);
-                    if ok {
-                        for (k, e) in entries.iter().enumerate() {
-                            let idx = p as usize + k;
-                            if idx < node.log.len() {
-                                if node.log[idx].term != e.term {
-                                    node.log.truncate(idx);
-                                    node.log.push(*e);
-                                    changed = true;
-                                }
-                            } else {
-                                node.log.push(*e);
-                                changed = true;
-                            }
-                        }
-                        match_index = p + entries.len() as u64;
-                        let c = h.leader_commit.min(match_index);
-                        if c > node.commit {
-                            node.commit = c;
-                            committed = true;
-                        }
-                        accepted = true;
-                    }
-                }
+                let raw_entries: Vec<binding::repr::vesper__chorus__wire__RaftEntry> = entries
+                    .iter()
+                    .map(|e| binding::repr::vesper__chorus__wire__RaftEntry {
+                        term: e.term,
+                        cmd: e.cmd,
+                    })
+                    .collect();
+                let req_out = binding::p2_replog_on_append_req(
+                    &mut self.core,
+                    u64::from(f),
+                    &binding::repr::vesper__chorus__wire__WireHeader {
+                        term: h.term,
+                        leader_id: vesper_port_abi::Word::new(h.leader_id),
+                        follower_slot: vesper_port_abi::Word::new(h.follower_slot),
+                        prev_log_index: h.prev_log_index,
+                        prev_log_term: h.prev_log_term,
+                        leader_commit: h.leader_commit,
+                    },
+                    &raw_entries,
+                );
                 let ack = AppendAck {
-                    follower_id: f,
-                    term: node.term,
-                    match_index,
-                    accepted,
+                    follower_id: req_out.ack.follower_id.get(),
+                    term: req_out.ack.term,
+                    match_index: req_out.ack.match_index,
+                    accepted: req_out.ack.accepted.get(),
                 };
                 let fs = fs.act();
-                let r = if accepted {
+                let r = if ack.accepted {
                     fs.select(&Accept(ack)).map(Session::close)
                 } else {
                     fs.select(&Reject(ack)).map(Session::close)
                 };
-                if changed {
-                    self.check_logs(f);
-                }
-                if committed {
-                    self.check_commit(f);
-                }
+                binding::p2_replog_check_follower(
+                    &mut self.core,
+                    self.net.now_ns(),
+                    u64::from(f),
+                    req_out.changed.get(),
+                    req_out.committed.get(),
+                );
                 if let Err(e) = r {
                     self.fault(e.into_error())?;
                 }
             }
         }
         // Leader.
-        let c = match ls.offer() {
+        let ch_offer = match ls.offer() {
             Err(e) => {
                 self.fault(e.into_error())?;
                 return Ok(true);
             }
-            Ok(c) => c,
+            Ok(ch_offer) => ch_offer,
         };
-        let (ack, ok) = match c.split() {
+        let (ack, ok) = match ch_offer.split() {
             Err(e) => return Err(ReplogError::Session(e.into_error())),
             Ok(Case::This(Accept(a), s)) => {
                 s.close();
                 (a, true)
             }
-            Ok(Case::Other(c)) => match c.split() {
+            Ok(Case::Other(ch_offer)) => match ch_offer.split() {
                 Err(e) => return Err(ReplogError::Session(e.into_error())),
                 Ok(Case::This(Reject(a), s)) => {
                     s.close();
                     (a, false)
                 }
-                Ok(Case::Other(c)) => {
-                    return Err(ReplogError::Session(c.exhausted().into_error()));
+                Ok(Case::Other(ch_offer)) => {
+                    return Err(ReplogError::Session(ch_offer.exhausted().into_error()));
                 }
             },
         };
-        if ack.term > term {
-            let node = &mut self.nodes[l as usize];
-            node.term = ack.term;
-            node.voted_for = None;
-            return Ok(false);
-        }
-        let fi = f as usize;
-        if ok {
-            self.stats.accepted += 1;
-            if ack.match_index <= sent_last {
-                matched[fi] = matched[fi].max(ack.match_index);
-                next[fi] = next[fi].max(matched[fi] + 1);
-            }
-        } else {
-            self.stats.rejected += 1;
-            next[fi] = next[fi].saturating_sub(1).max(1);
-        }
-        Ok(true)
-    }
-
-    fn advance_commit(&mut self, l: u32, matched: &[u64]) {
-        let node = &self.nodes[l as usize];
-        for idx in (node.commit + 1..=node.log.len() as u64).rev() {
-            if node.log[idx as usize - 1].term != node.term {
-                continue;
-            }
-            let count = 1
-                + (0..self.n)
-                    .filter(|p| *p != l && matched[*p as usize] >= idx)
-                    .count() as u32;
-            if count > self.n / 2 {
-                self.nodes[l as usize].commit = idx;
-                self.check_commit(l);
-                return;
-            }
-        }
+        let resp_out = binding::p2_replog_on_append_resp(
+            &mut self.core,
+            self.net.now_ns(),
+            u64::from(l),
+            u64::from(f),
+            term,
+            sent_last,
+            &binding::repr::vesper__chorus__wire__WireAck {
+                follower_id: vesper_port_abi::Word::new(ack.follower_id),
+                term: ack.term,
+                match_index: ack.match_index,
+                accepted: vesper_port_abi::Word::new(ack.accepted),
+            },
+            ok,
+        );
+        Ok(resp_out.keep_leading.get())
     }
 
     /// Lead one term for `rounds` rounds (or until stepping down). With
     /// `until_converged`, stop early once every log equals the leader's and
     /// all of it is committed everywhere.
     fn lead(&mut self, l: u32, rounds: u32, until_converged: bool) -> Result<bool, ReplogError> {
-        let len = self.nodes[l as usize].log.len() as u64;
-        let mut next = vec![len + 1; self.n as usize];
-        let mut matched = vec![0; self.n as usize];
+        binding::p2_replog_begin_lead(&mut self.core, u64::from(l));
         for round in 0..rounds {
             if !until_converged || round == 0 {
-                let term = self.nodes[l as usize].term;
-                for _ in 0..self.cfg.proposals_per_round {
-                    self.next_cmd += 1;
-                    let cmd = self.next_cmd;
-                    self.nodes[l as usize].log.push(Entry { term, cmd });
-                    self.stats.proposals += 1;
-                }
-                self.check_logs(l);
+                binding::p2_replog_propose_round(&mut self.core, self.net.now_ns(), u64::from(l));
             }
             for f in 0..self.n {
                 if f == l {
                     continue;
                 }
-                if !self.append(l, f, &mut next, &mut matched)? {
-                    return Ok(false);
-                }
-                self.advance_commit(l, &matched);
-                if self.checker.violation.is_some() {
+                if !self.append(l, f)? {
                     return Ok(false);
                 }
             }
-            if until_converged && self.converged(l) {
+            if until_converged && binding::p2_replog_converged(&self.core, u64::from(l)) {
                 return Ok(true);
             }
         }
         Ok(!until_converged)
     }
 
-    fn converged(&self, l: u32) -> bool {
-        let leader = &self.nodes[l as usize];
-        self.nodes
-            .iter()
-            .all(|n| n.log == leader.log && n.commit == leader.log.len() as u64)
-    }
-
     fn partition(&mut self, on: bool) {
+        binding::p2_replog_partition(&mut self.core, on);
+        let n = usize::from(self.n as u16);
+        let blocked = self.core.as_ref().blocked().to_vec();
         for s in 0..self.n {
             for d in 0..self.n {
                 if s == d {
                     continue;
                 }
-                let block = on && self.rng.chance(self.cfg.partition_per_mille);
-                if block {
-                    self.stats.partitioned_links += 1;
-                }
-                self.net.set_blocked(s, d, block);
+                self.net
+                    .set_blocked(s, d, blocked[s as usize * n + d as usize]);
             }
         }
-    }
-}
-
-fn fnv(h: &mut u64, v: u64) {
-    for b in v.to_le_bytes() {
-        *h ^= u64::from(b);
-        *h = h.wrapping_mul(0x100_0000_01b3);
     }
 }
 
@@ -663,33 +565,25 @@ fn fnv(h: &mut u64, v: u64) {
 /// `tls` (mutual TLS 1.3, one credential per host).
 pub fn run_replicated_log(cfg: &ReplogConfig, tls: &WarpTls) -> Result<ReplogReport, ReplogError> {
     let n = cfg.net.nodes;
-    if !(3..=7).contains(&n) {
-        return Err(ReplogError::Config("nodes must be in 3..=7"));
-    }
-    if cfg.max_batch == 0 || cfg.max_batch > MAX_BATCH {
-        return Err(ReplogError::Config("max_batch must be in 1..=MAX_BATCH"));
+    match binding::p2_replog_validate_cfg(u64::from(n), cfg.max_batch as u64) {
+        0 => {}
+        1 => return Err(ReplogError::Config("nodes must be in 3..=7")),
+        _ => return Err(ReplogError::Config("max_batch must be in 1..=MAX_BATCH")),
     }
     let net = WarpNet::new(cfg.net, tls).map_err(ReplogError::Net)?;
     let mut run = Run {
-        cfg: *cfg,
         n,
         net,
         vote: parse_choreography(VOTE_CHOREOGRAPHY).expect("vote choreography parses"),
         append: parse_choreography(APPEND_CHOREOGRAPHY).expect("append choreography parses"),
         auditor: LeakAuditor::new(),
-        nodes: (0..n)
-            .map(|_| Node {
-                term: 0,
-                voted_for: None,
-                log: Vec::new(),
-                commit: 0,
-            })
-            .collect(),
-        checker: Checker::default(),
-        stats: ReplogStats::default(),
-        next_channel: 0,
-        next_cmd: 0,
-        rng: SplitMix(cfg.net.seed ^ 0x7265_706c_6f67),
+        core: binding::p2_replog_new(
+            cfg.net.seed,
+            u64::from(n),
+            cfg.max_batch as u64,
+            u64::from(cfg.proposals_per_round),
+            u64::from(cfg.partition_per_mille),
+        ),
     };
     let mut term = 0u64;
     for t in 1..=u64::from(cfg.terms) {
@@ -699,14 +593,14 @@ pub fn run_replicated_log(cfg: &ReplogConfig, tls: &WarpTls) -> Result<ReplogRep
         if run.elect(c, t)? {
             run.lead(c, cfg.rounds_per_term, false)?;
         }
-        if run.checker.violation.is_some() {
+        if run.core.as_ref().checker().has_violation() {
             break;
         }
     }
     // Healing: no partitions; candidates in turn until one leads every log
     // to convergence.
     run.partition(false);
-    let mut converged = run.checker.violation.is_some();
+    let mut converged = run.core.as_ref().checker().has_violation();
     let mut attempts = 0;
     while !converged && attempts < 4 * n {
         attempts += 1;
@@ -722,33 +616,51 @@ pub fn run_replicated_log(cfg: &ReplogConfig, tls: &WarpTls) -> Result<ReplogRep
     // Streams cut by a long partition finish only after QUIC's backed-off
     // probe timeouts fire, which can take thousands of steps.
     let settled = run.net.settle(200_000);
-    let mut digest = 0xcbf2_9ce4_8422_2325u64;
-    for node in &run.nodes {
-        fnv(&mut digest, node.term);
-        fnv(&mut digest, node.commit);
-        for e in &node.log {
-            fnv(&mut digest, e.term);
-            fnv(&mut digest, e.cmd);
-        }
-    }
     let net_stats = run.net.stats();
-    for v in [
-        run.stats.rpc_faults,
-        run.stats.rejected,
-        net_stats.datagrams,
-        net_stats.dropped,
-    ] {
-        fnv(&mut digest, v);
-    }
+    let digest = binding::p2_replog_digest(&run.core, net_stats.datagrams, net_stats.dropped);
+    let vs = binding::p2_replog_stats(&run.core);
+    let stats = ReplogStats {
+        elections: vs.elections,
+        elections_won: vs.elections_won,
+        votes_granted: vs.votes_granted,
+        votes_denied: vs.votes_denied,
+        appends: vs.appends,
+        accepted: vs.accepted,
+        rejected: vs.rejected,
+        rpc_faults: vs.rpc_faults,
+        proposals: vs.proposals,
+        partitioned_links: vs.partitioned_links,
+    };
+    let r = run.core.as_ref();
+    let pool = r.log_pool();
+    let offs = r.nd_log_off().as_slice();
+    let lens = r.nd_log_len().as_slice();
+    let logs = (0..n as usize)
+        .map(|i| {
+            let s = offs[i] as usize;
+            let e = s + lens[i] as usize;
+            (s..e)
+                .map(|idx| {
+                    let x = pool.get(idx).expect("log entry");
+                    Entry {
+                        term: x.term,
+                        cmd: x.cmd,
+                    }
+                })
+                .collect()
+        })
+        .collect();
+    let commit = r.nd_commit().as_slice().to_vec();
+    let chk = r.checker();
     Ok(ReplogReport {
         seed: cfg.net.seed,
-        leaders: run.checker.leaders().clone(),
-        logs: run.nodes.iter().map(|n| n.log.clone()).collect(),
-        commit: run.nodes.iter().map(|n| n.commit).collect(),
-        committed: run.checker.committed_len(),
-        violation: run.checker.violation.clone().map(|(_, v)| v),
-        checks: run.checker.checks,
-        stats: run.stats,
+        leaders: port::checker_leaders(&chk),
+        logs,
+        commit,
+        committed: chk.committed().len(),
+        violation: port::checker_violation(&chk).map(|(_, v)| v),
+        checks: chk.checks(),
+        stats,
         net: net_stats,
         audit: run.auditor.counts(),
         open_sessions: run.auditor.open(),

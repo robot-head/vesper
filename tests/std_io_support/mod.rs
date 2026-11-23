@@ -62,10 +62,29 @@ pub fn jit_host() -> bool {
     ))
 }
 
-/// The `.vsys` source of package `lib` for this host.
+/// The host's `@OS@` in a per-target `.vsys` path.
+pub fn host_os() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(windows) {
+        "windows"
+    } else {
+        "linux"
+    }
+}
+
+/// The `.vsys` source of package `lib` for this host: its per-target file
+/// (`env-linux.vsys`) when it has one, else `env.vsys`.
 pub fn vsys(lib: &str) -> String {
     let (t, a) = host_target();
-    fs::read_to_string(std_dir().join(lib).join(format!("{lib}.vsys")))
+    let dir = std_dir().join(lib);
+    let per_target = dir.join(format!("{lib}-{}.vsys", host_os()));
+    let path = if per_target.exists() {
+        per_target
+    } else {
+        dir.join(format!("{lib}.vsys"))
+    };
+    fs::read_to_string(path)
         .unwrap()
         .replace("@TARGET@", t)
         .replace("@ABI@", a)
@@ -173,16 +192,92 @@ pub enum Mode {
 }
 pub const MODES: [Mode; 3] = [Mode::Jit, Mode::JitNoOpt, Mode::Evaluator];
 
+/// The C library functions the std packages import directly (`link =
+/// "dynamic"`, name `c`), as `vesper jit` binds them from the process.
+#[cfg(unix)]
+fn libc_symbols() -> Vec<(&'static str, *const u8)> {
+    use std::ffi::{c_char, c_void};
+    unsafe extern "C" {
+        fn getenv(name: *const c_char) -> *mut c_char;
+        fn getcwd(buf: *mut c_char, size: usize) -> *mut c_char;
+        fn dlsym(handle: *mut c_void, name: *const c_char) -> *mut c_void;
+        fn memcpy(dst: *mut c_void, src: *const c_void, n: usize) -> *mut c_void;
+        fn strchr(s: *const c_char, c: i32) -> *mut c_char;
+        fn strstr(haystack: *const c_char, needle: *const c_char) -> *mut c_char;
+    }
+    vec![
+        ("getenv", getenv as *const u8),
+        ("getcwd", getcwd as *const u8),
+        ("dlsym", dlsym as *const u8),
+        ("memcpy", memcpy as *const u8),
+        ("strchr", strchr as *const u8),
+        ("strstr", strstr as *const u8),
+    ]
+}
+#[cfg(windows)]
+fn libc_symbols() -> Vec<(&'static str, *const u8)> {
+    use std::ffi::c_void;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetCommandLineW() -> *const u16;
+        fn GetCurrentDirectoryW(n_buffer_length: u32, lp_buffer: *mut u16) -> u32;
+        fn GetEnvironmentVariableW(lp_name: *const u16, lp_buffer: *mut u16, n_size: u32) -> u32;
+        fn GetEnvironmentStringsW() -> *mut u16;
+        fn FreeEnvironmentStringsW(lpsz_environment_block: *mut u16) -> i32;
+        fn lstrlenW(lp_string: *const u16) -> i32;
+        fn WideCharToMultiByte(
+            code_page: u32,
+            dw_flags: u32,
+            lp_wide_char_str: *const u16,
+            cch_wide_char: i32,
+            lp_multi_byte_str: *mut u8,
+            cb_multi_byte: i32,
+            lp_default_char: *const c_void,
+            lp_used_default_char: *mut i32,
+        ) -> i32;
+    }
+    vec![
+        ("GetCommandLineW", GetCommandLineW as *const u8),
+        ("GetCurrentDirectoryW", GetCurrentDirectoryW as *const u8),
+        (
+            "GetEnvironmentVariableW",
+            GetEnvironmentVariableW as *const u8,
+        ),
+        (
+            "GetEnvironmentStringsW",
+            GetEnvironmentStringsW as *const u8,
+        ),
+        (
+            "FreeEnvironmentStringsW",
+            FreeEnvironmentStringsW as *const u8,
+        ),
+        ("lstrlenW", lstrlenW as *const u8),
+        ("WideCharToMultiByte", WideCharToMultiByte as *const u8),
+    ]
+}
+#[cfg(not(any(unix, windows)))]
+fn libc_symbols() -> Vec<(&'static str, *const u8)> {
+    vec![]
+}
+
+/// Every symbol the three libraries import on this host: the host shim's
+/// and the C library's.
+pub fn symbols() -> Vec<(&'static str, *const u8)> {
+    let mut s = vesper_std_host::symbols();
+    s.extend(libc_symbols());
+    s
+}
+
 /// Run `entry` in `mode`; panics with the error. Checks that every host
 /// handle the run created was finalized.
 pub fn run(checked: &ForeignChecked, entry: &str, mode: Mode) -> Value {
     let before = vesper_std_host::live_handles();
     let got = match mode {
         Mode::Jit | Mode::JitNoOpt => checked
-            .jit_with_options(entry, &vesper_std_host::symbols(), mode == Mode::Jit)
+            .jit_with_options(entry, &symbols(), mode == Mode::Jit)
             .unwrap_or_else(|e| panic!("{entry} ({mode:?}): {e}")),
         Mode::Evaluator => {
-            let host = ffi_lowering::EvalHost::new(&imports(), &vesper_std_host::symbols())
+            let host = ffi_lowering::EvalHost::new(&imports(), &symbols())
                 .unwrap_or_else(|e| panic!("{entry}: {e}"));
             checked
                 .evaluate(entry, |call| host.call(call))

@@ -1,0 +1,550 @@
+// @vesper/driver-commands: the `vesper` CLI's routing beyond the compile
+// path, in Vesper (self-hosting SH5 lane 13, #1336). The hybrid compiler's
+// driver (crates/vesper-hybrid/modules/driver) hands every command that is
+// not `check`, `run`, `jit`, `build` or `emit` to `run` below, which either
+// finishes it and returns the exit code, or returns `delegate()` so that
+// the Rust CLI runs it.
+//
+// Part 1 is everything in front of the command layers: no arguments,
+// `--help`/`-h`, `--version`/`-V`, the unknown-command error, and the tool
+// dispatch of src/tool_commands.rs (`vesper <tool>` runs `vesper-<tool>`
+// beside the executable or on `PATH`, with the same arguments, streams and
+// exit status). The compiler's own commands (`COMPILER_COMMANDS` in
+// src/main.rs) are handed back; docs/parallel-results/
+// self-host-cli-commands.md lists each with its lane or blocker.
+use @vesper/driver::{
+    Args,
+    args_count,
+    arg_start,
+    arg_end,
+    eq
+};
+use @vesper-std/env::{
+    var_bytes,
+    os,
+    os_windows
+};
+use @vesper-std/process::{
+    command_path,
+    arg_bytes as proc_arg,
+    spawn,
+    wait,
+    release
+};
+use @vesper-std/fs::{
+    IoError,
+    not_found
+};
+
+enum Ascii: _ {
+    LineFeed = 10,
+    DoubleQuote = 34,
+    Dash = 45,
+    Slash = 47,
+    Digit0 = 48,
+    Digit9 = 57,
+    Colon = 58,
+    Semicolon = 59,
+    UpperA = 65,
+    UpperZ = 90,
+    Backslash = 92,
+    Underscore = 95,
+    LowerA = 97,
+    LowerZ = 122,
+    NonAsciiStart = 128,
+}
+
+const HOST_TEXT_INITIAL_BYTES: u64 = 256;
+const ERROR_TEXT_INITIAL_BYTES: u64 = 128;
+const SIGNAL_EXIT_BASE: i64 = 128;
+
+// `run`'s result when the Rust CLI should run the command instead (the
+// driver's `delegate()`).
+pub fn delegate() -> i64 {
+    -1
+}
+
+fn stdout_stream() -> u32 {
+    1
+}
+
+fn stderr_stream() -> u32 {
+    2
+}
+
+// `hc_text` keys.
+fn text_version() -> u32 {
+    1
+}
+
+fn text_arch() -> u32 {
+    2
+}
+
+fn text_os() -> u32 {
+    3
+}
+
+// The directory of `env::current_exe()`, and of its canonical path.
+fn text_exe_dir() -> u32 {
+    4
+}
+
+fn text_exe_canonical_dir() -> u32 {
+    5
+}
+
+// ---------------------------------------------------------------------------
+// Dispatch.
+
+// The exit code of the command in `args` (every argument after the
+// program name), or `delegate()`.
+pub fn run(in args: Args)
+    -> i64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Ffi[HybridCommands]] {
+    let n = args_count(in args);
+    if n == 0 {
+        HybridCommands::hc_help();
+        return 0;
+    }
+    let command = arg(in args, 0);
+    let c = command.as_slice();
+    // A command with a byte outside ASCII is never a tool's, and the Rust
+    // CLI decides what it is (it panics on one that is not UTF-8).
+    if !ascii(in c) {
+        return delegate();
+    }
+    // `tool_commands::dispatch` leaves options and the compiler's own
+    // commands to the CLI.
+    if byte_at(in c, 0) == Ascii::Dash {
+        if eq(in c, in "--help") || eq(in c, in "-h") {
+            HybridCommands::hc_help();
+            return 0;
+        }
+        if eq(in c, in "--version") || eq(in c, in "-V") {
+            return version();
+        }
+        return unknown_command(in c);
+    }
+    if compiler_command(in c) {
+        return delegate();
+    }
+    if !tool(in c) {
+        // Unknown commands keep the compiler's error unless a tool exists.
+        if !tool_name(in c) {
+            return unknown_command(in c);
+        }
+        let found = locate(in c);
+        if found.len() == 0 {
+            return unknown_command(in c);
+        }
+        return run_tool(in found.as_slice(), in args);
+    }
+    let found = locate(in c);
+    if found.len() == 0 {
+        return missing(in c);
+    }
+    run_tool(in found.as_slice(), in args)
+}
+
+// Whether every byte of `c` is ASCII.
+fn ascii(in c: Slice[u8]) -> bool {
+    for i in 0..c.len() {
+        if byte_at(in c, i) >= Ascii::NonAsciiStart {
+            return false;
+        }
+    }
+    true
+}
+
+// `COMPILER_COMMANDS` of src/main.rs: the commands the compiler binary runs
+// itself (the compile commands never reach `run`).
+fn compiler_command(in c: Slice[u8]) -> bool {
+    eq(in c, in "build")
+        || eq(in c, in "check")
+        || eq(in c, in "doc")
+        || eq(in c, in "ebpf")
+        || eq(in c, in "emit")
+        || eq(in c, in "fmt")
+        || eq(in c, in "forge")
+        || eq(in c, in "graph")
+        || eq(in c, in "jit")
+        || eq(in c, in "lint")
+        || eq(in c, in "lsp")
+        || eq(in c, in "proof-audit")
+        || eq(in c, in "run")
+        || eq(in c, in "test")
+        || eq(in c, in "verify")
+}
+
+// `tool_commands::TOOLS`: subcommands served by `vesper-<name>` binaries.
+fn tool(in c: Slice[u8]) -> bool {
+    eq(in c, in "attest")
+        || eq(in c, in "audit")
+        || eq(in c, in "bench")
+        || eq(in c, in "cas")
+        || eq(in c, in "fuzz")
+        || eq(in c, in "grammar")
+        || eq(in c, in "highlight")
+        || eq(in c, in "json")
+        || eq(in c, in "migrate")
+        || eq(in c, in "publish")
+        || eq(in c, in "replay")
+        || eq(in c, in "resolve")
+        || eq(in c, in "sbom")
+        || eq(in c, in "semver")
+        || eq(in c, in "shot")
+        || eq(in c, in "simd")
+        || eq(in c, in "top")
+        || eq(in c, in "traceparent")
+}
+
+// A name an external `vesper-<name>` may have: nonempty ASCII letters,
+// digits, `-` and `_`.
+fn tool_name(in c: Slice[u8]) -> bool {
+    if c.len() == 0 {
+        return false;
+    }
+    for i in 0..c.len() {
+        let b = byte_at(in c, i);
+        let ok = (b >= Ascii::Digit0 && b <= Ascii::Digit9)
+            || ascii_letter(b)
+            || b == Ascii::Dash
+            || b == Ascii::Underscore;
+        if !ok {
+            return false;
+        }
+    }
+    true
+}
+
+// ---------------------------------------------------------------------------
+// Shared helpers.
+
+fn arg(in a: Args, i: u64) -> ChunkSeq[u8] {
+    let mut v: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let s = arg_start(in a, i);
+    let e = arg_end(in a, i);
+    v.extend(in a.bytes[s..e]);
+    v
+}
+
+fn byte_at(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(b) => b,
+        Option::None => 0,
+    }
+}
+
+fn print(stream: u32, in text: Slice[u8]) eff [Ffi[HybridCommands]] {
+    HybridCommands::hc_print(stream, in text);
+}
+
+// `vesper: <message>` on stderr (`main`'s `Err` arm); exit code 1.
+fn fail(in message: Slice[u8]) -> i64 eff [Ffi[HybridCommands]] {
+    let mut line: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    line.extend(in "vesper: ".as_bytes());
+    line.extend(in message);
+    line.push(Ascii::LineFeed);
+    print(stderr_stream(), in line.as_slice());
+    1
+}
+
+// `unknown command '<c>'; see --help` (the end of `cli()`).
+fn unknown_command(in c: Slice[u8]) -> i64 eff [Ffi[HybridCommands]] {
+    let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    m.extend(in "unknown command '".as_bytes());
+    m.extend(in c);
+    m.extend(in "'; see --help".as_bytes());
+    fail(in m.as_slice())
+}
+
+// The host's copy-out protocol: whether `buf` had to grow (call again);
+// otherwise `buf` is cut to the length. `none` is set for a negative
+// length (no text).
+fn grown(n: i64, inout buf: ChunkSeq[u8], inout none: bool) -> bool {
+    if n < 0 {
+        buf.truncate(0);
+        none = true;
+        return false;
+    }
+    let len = wrapping_u64(n);
+    if len > buf.len() {
+        buf.resize(len, 0);
+        return true;
+    }
+    buf.truncate(len);
+    false
+}
+
+// Host text `which`, and whether it exists.
+fn host_text(which: u32, inout none: bool) -> ChunkSeq[u8] eff [Ffi[HybridCommands]] {
+    let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    buf.resize(HOST_TEXT_INITIAL_BYTES, 0);
+    loop {
+        let n = HybridCommands::hc_text(which, 0, inout buf.as_slice_mut());
+        if !grown(n, inout buf, inout none) {
+            break;
+        }
+    }
+    buf
+}
+
+fn host_text_or_empty(which: u32) -> ChunkSeq[u8] eff [Ffi[HybridCommands]] {
+    let mut none = false;
+    host_text(which, inout none)
+}
+
+// Rust's `Display` of the `io::Error` with this host error word.
+fn io_error_text(word: u64) -> ChunkSeq[u8] eff [Ffi[HybridCommands]] {
+    let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    buf.resize(ERROR_TEXT_INITIAL_BYTES, 0);
+    let mut none = false;
+    loop {
+        let n = HybridCommands::hc_io_error(word, inout buf.as_slice_mut());
+        if !grown(n, inout buf, inout none) {
+            break;
+        }
+    }
+    buf
+}
+
+// ---------------------------------------------------------------------------
+// `--version` (`format_version_banner` in src/main.rs).
+
+fn version() -> i64 eff [Ffi[HybridCommands]] {
+    let mut b: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    b.extend(in "  \\\\    //   vesper ".as_bytes());
+    let v = host_text_or_empty(text_version());
+    b.extend(in v.as_slice());
+    b.extend(in " (stage3-ddc)\n   \\\\  //    target: ".as_bytes());
+    let arch = host_text_or_empty(text_arch());
+    b.extend(in arch.as_slice());
+    b.push(Ascii::Dash);
+    let os = host_text_or_empty(text_os());
+    b.extend(in os.as_slice());
+    b
+        .extend(
+            in " (cranelift + lean4)\n    \\\\||/    modes: copy <= affine <= linear | 0 sorryAx\n     \\/\n"
+                .as_bytes()
+        );
+    print(stdout_stream(), in b.as_slice());
+    0
+}
+
+// ---------------------------------------------------------------------------
+// Tool dispatch (src/tool_commands.rs).
+
+// `binary_name`: `vesper-<tool>` plus the host's executable suffix.
+fn binary_name(in t: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[StdEnv]] {
+    let mut name: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    name.extend(in "vesper-".as_bytes());
+    name.extend(in t);
+    if os() == os_windows() {
+        name.extend(in ".exe".as_bytes());
+    }
+    name
+}
+
+fn is_separator(b: u8, windows: bool) -> bool {
+    b == Ascii::Slash || (windows && b == Ascii::Backslash)
+}
+
+// `Path::join` of a relative `name`: an empty directory gives the name,
+// and a separator is added unless the directory ends with one.
+fn join(in dir: Slice[u8], in name: Slice[u8], windows: bool) -> ChunkSeq[u8] {
+    let mut p: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    p.extend(in dir);
+    // `PathBuf::push` adds no separator after an ordinary bare drive (`C:`):
+    // `C:vesper-x.exe` is relative to drive C's current directory, not its
+    // root. A verbatim drive (`\\?\C:`) is not `is_drive()` and does get `\`.
+    if windows && bare_drive(in dir) {
+        p.extend(in name);
+        return p;
+    }
+    if dir.len() != 0 && !is_separator(byte_at(in dir, wrapping_sub(dir.len(), 1)), windows) {
+        if windows {
+            p.push(Ascii::Backslash);
+        } else {
+            p.push(Ascii::Slash);
+        }
+    }
+    p.extend(in name);
+    p
+}
+
+// Whether `dir` is an ordinary Windows drive prefix and nothing else: `X:`
+// (`Prefix::Disk`, with `X` an ASCII letter; the only prefix `is_drive()` accepts).
+fn bare_drive(in dir: Slice[u8]) -> bool {
+    dir.len() == 2 && ascii_letter(byte_at(in dir, 0)) && byte_at(in dir, 1) == Ascii::Colon
+}
+
+fn ascii_letter(b: u8) -> bool {
+    (b >= Ascii::UpperA && b <= Ascii::UpperZ) || (b >= Ascii::LowerA && b <= Ascii::LowerZ)
+}
+
+fn same(in a: Slice[u8], in b: Slice[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    for i in 0..a.len() {
+        if byte_at(in a, i) != byte_at(in b, i) {
+            return false;
+        }
+    }
+    true
+}
+
+fn executable(in path: Slice[u8]) -> bool eff [Ffi[HybridCommands]] {
+    HybridCommands::hc_executable(in path) != 0
+}
+
+// The candidates in one directory beside the executable: Cargo puts the
+// tools beside `vesper`, Bazel at `<bin>/crates/vesper-tools/bin/`.
+fn in_exe_dir(in dir: Slice[u8], in name: Slice[u8], windows: bool)
+    -> ChunkSeq[u8] eff [Ffi[HybridCommands]] {
+    let direct = join(in dir, in name, windows);
+    if executable(in direct.as_slice()) {
+        return direct;
+    }
+    let tools = join(in dir, in "../crates/vesper-tools/bin".as_bytes(), windows);
+    let bazel = join(in tools.as_slice(), in name, windows);
+    if executable(in bazel.as_slice()) {
+        return bazel;
+    }
+    ChunkSeq::new[u8]()
+}
+
+// `env::split_paths` of one entry boundary: Unix splits on `:`; Windows
+// on `;` outside double quotes, and drops the quotes.
+fn path_entries(in path: Slice[u8], windows: bool) -> ChunkSeq[u64] {
+    // Each entry as (start, end) into `path`; quotes are stripped later.
+    let mut spans: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut start: u64 = 0;
+    let mut quoted = false;
+    for i in 0..path.len() {
+        let b = byte_at(in path, i);
+        if windows && b == Ascii::DoubleQuote {
+            quoted = !quoted;
+        } else if (!windows && b == Ascii::Colon) || (windows && !quoted && b == Ascii::Semicolon) {
+            spans.push(start);
+            spans.push(i);
+            start = wrapping_add(i, 1);
+        }
+    }
+    spans.push(start);
+    spans.push(path.len());
+    spans
+}
+
+fn span_at(in spans: Slice[u64], i: u64) -> u64 {
+    match spans.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+// `locate`: the tool's executable, or empty when there is none.
+fn locate(in t: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[StdEnv], Ffi[HybridCommands]] {
+    let windows = os() == os_windows();
+    let name = binary_name(in t);
+    let mut no_exe = false;
+    let exe_dir = host_text(text_exe_dir(), inout no_exe);
+    if !no_exe {
+        let found = in_exe_dir(in exe_dir.as_slice(), in name.as_slice(), windows);
+        if found.len() != 0 {
+            return found;
+        }
+        // A symlinked `vesper` (an install prefix, a Bazel runfiles tree)
+        // also finds tools beside its target.
+        let mut no_canonical = false;
+        let canonical = host_text(text_exe_canonical_dir(), inout no_canonical);
+        if !no_canonical && !same(in canonical.as_slice(), in exe_dir.as_slice()) {
+            let found = in_exe_dir(in canonical.as_slice(), in name.as_slice(), windows);
+            if found.len() != 0 {
+                return found;
+            }
+        }
+    }
+    let path = match var_bytes(in "PATH") {
+        Option::Some(p) => p,
+        Option::None => return ChunkSeq::new[u8](),
+    };
+    let spans = path_entries(in path.as_slice(), windows);
+    let count = spans.len() / 2;
+    for k in 0..count {
+        let a = span_at(in spans.as_slice(), wrapping_mul(k, 2));
+        let b = span_at(in spans.as_slice(), wrapping_add(wrapping_mul(k, 2), 1));
+        let mut dir: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        for i in a..b {
+            let c = byte_at(in path.as_slice(), i);
+            if !(windows && c == Ascii::DoubleQuote) {
+                dir.push(c);
+            }
+        }
+        let candidate = join(in dir.as_slice(), in name.as_slice(), windows);
+        if executable(in candidate.as_slice()) {
+            return candidate;
+        }
+    }
+    ChunkSeq::new[u8]()
+}
+
+// `missing`: a known tool whose binary is not there.
+fn missing(in t: Slice[u8]) -> i64 eff [Ffi[HybridCommands]] {
+    let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    m.extend(in "`vesper ".as_bytes());
+    m.extend(in t);
+    m.extend(in "` is provided by the `vesper-".as_bytes());
+    m.extend(in t);
+    m
+        .extend(
+            in "` tool, which was not found next to the vesper executable or on PATH; build it with `cargo build -p vesper-tools` (or `bazel build //crates/vesper-tools:all`) and install it beside vesper"
+                .as_bytes()
+        );
+    fail(in m.as_slice())
+}
+
+// `run` and `exit_code`: the tool with the arguments after the command,
+// inheriting the standard streams; its exit code, 128 plus the signal that
+// killed it, or 1.
+fn run_tool(in binary: Slice[u8], in args: Args) -> i64 eff [Ffi[StdProcess], Ffi[HybridCommands]] {
+    let mut c = command_path(in binary);
+    let n = args_count(in args);
+    for i in 1..n {
+        let a = arg(in args, i);
+        proc_arg(inout c, in a.as_slice());
+    }
+    let mut ch = match spawn(c) {
+        Result::Ok(ch) => ch,
+        Result::Err(e) => return spawn_failed(in binary, e),
+    };
+    let waited = wait(inout ch);
+    release(ch);
+    match waited {
+        Result::Ok(st) => {
+            if st.exited {
+                st.code
+            } else if st.signal != 0 {
+                wrapping_add(SIGNAL_EXIT_BASE, widen_i64(st.signal))
+            } else {
+                1
+            }
+        },
+        Result::Err(e) => spawn_failed(in binary, e),
+    }
+}
+
+// `{binary}: {e}`.
+fn spawn_failed(in binary: Slice[u8], e: IoError) -> i64 eff [Ffi[HybridCommands]] {
+    let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    m.extend(in binary);
+    m.extend(in ": ".as_bytes());
+    if e.kind == not_found() && e.os == 0 {
+        m.extend(in "program not found".as_bytes());
+    } else {
+        let word = widen_u64(e.kind) | (widen_u64(e.os) << 32);
+        let t = io_error_text(word);
+        m.extend(in t.as_slice());
+    }
+    fail(in m.as_slice())
+}

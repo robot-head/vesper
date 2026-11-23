@@ -25,7 +25,25 @@ const NONE32: u32 = 4294967295;
 // First byte of static data (string literals); the heap follows it
 // (`module::DATA_START`).
 pub const DATA_START: u64 = 16;
-const PAGE: u64 = 65536;
+const PAGE_BYTES: u64 = 65536;
+
+// Shared with enc.ves's instruction and value type encodings.
+const VT_I64: u8 = 126;
+const OP_I32_CONST: u8 = 65;
+const OP_I64_CONST: u8 = 66;
+const OP_END: u8 = 11;
+
+const TYPE_FUNC: u8 = 96;
+const TYPE_CONT: u8 = 93;
+const TYPE_FUNCREF: u8 = 112;
+const IMPORT_FUNC: u8 = 0;
+const LIMITS_WITH_MAX: u8 = 1;
+const TAG_EXCEPTION: u8 = 0;
+const GLOBAL_MUTABLE: u8 = 1;
+const ELEM_ACTIVE_EXPLICIT_TABLE: u8 = 2;
+const ELEM_DECLARATIVE: u8 = 3;
+const ELEM_KIND_FUNCREF: u8 = 0;
+const DATA_ACTIVE_DEFAULT_MEMORY: u8 = 0;
 
 const TD_FUNC: u8 = 0;
 const TD_CONT: u8 = 1;
@@ -425,7 +443,7 @@ impl Builder {
         for i in 0..self.types.len() {
             let t = self.type_def(i);
             if t.kind == TD_FUNC {
-                s.push(96);
+                s.push(TYPE_FUNC);
                 uleb(inout s, t.pn);
                 for k in 0..t.pn {
                     put_valtype(inout s, val_at(in self.vals, wrapping_add(t.p0, k)));
@@ -438,8 +456,8 @@ impl Builder {
                     );
                 }
             } else {
-                // `cont` composite type 0x5d with its function type index
-                s.push(93);
+                // A continuation type carries its function type index.
+                s.push(TYPE_CONT);
                 sleb(inout s, wrapping_i64(widen_u64(t.func)));
             }
         }
@@ -454,7 +472,7 @@ impl Builder {
                         copy_range(inout s, in self.text, m.m0, m.mn);
                         uleb(inout s, m.nn);
                         copy_range(inout s, in self.text, m.n0, m.nn);
-                        s.push(0);
+                        s.push(IMPORT_FUNC);
                         uleb(inout s, widen_u64(m.ty));
                     },
                     Option::None => {},
@@ -471,13 +489,13 @@ impl Builder {
         s.clear();
         // one funcref table, min = max = the slot count
         uleb(inout s, 1);
-        s.push(112);
-        s.push(1);
+        s.push(TYPE_FUNCREF);
+        s.push(LIMITS_WITH_MAX);
         uleb(inout s, self.table.len());
         uleb(inout s, self.table.len());
         section(inout out, S_TABLE, in s);
         let heap_start = self.heap_start();
-        let mut min_pages = wrapping_add(heap_start, 65535) / PAGE;
+        let mut min_pages = wrapping_add(heap_start, wrapping_sub(PAGE_BYTES, 1)) / PAGE_BYTES;
         if min_pages == 0 {
             min_pages = 1;
         }
@@ -486,7 +504,7 @@ impl Builder {
         }
         s.clear();
         uleb(inout s, 1);
-        s.push(1);
+        s.push(LIMITS_WITH_MAX);
         uleb(inout s, min_pages);
         uleb(inout s, widen_u64(max_pages));
         section(inout out, S_MEMORY, in s);
@@ -494,7 +512,7 @@ impl Builder {
             s.clear();
             uleb(inout s, self.tags.len());
             for i in 0..self.tags.len() {
-                s.push(0);
+                s.push(TAG_EXCEPTION);
                 match self.tags.try_get(i) {
                     Option::Some(t) => uleb(inout s, widen_u64(t)),
                     Option::None => {},
@@ -513,11 +531,11 @@ impl Builder {
                     Option::None => 0,
                 }
             };
-            s.push(126);
-            s.push(1);
-            s.push(66);
+            s.push(VT_I64);
+            s.push(GLOBAL_MUTABLE);
+            s.push(OP_I64_CONST);
             sleb(inout s, init);
-            s.push(11);
+            s.push(OP_END);
         }
         section(inout out, S_GLOBAL, in s);
         s.clear();
@@ -541,13 +559,13 @@ impl Builder {
         s.clear();
         if self.table.len() != 0 {
             segments = wrapping_add(segments, 1);
-            // active, explicit table 0: flag 2, table, offset, elemkind
-            s.push(2);
+            // Active segment with table index, offset expression and element kind.
+            s.push(ELEM_ACTIVE_EXPLICIT_TABLE);
             uleb(inout s, 0);
-            s.push(65);
+            s.push(OP_I32_CONST);
             sleb(inout s, 0);
-            s.push(11);
-            s.push(0);
+            s.push(OP_END);
+            s.push(ELEM_KIND_FUNCREF);
             uleb(inout s, self.table.len());
             for i in 0..self.table.len() {
                 match self.table.try_get(i) {
@@ -558,8 +576,8 @@ impl Builder {
         }
         if self.declared.len() != 0 {
             segments = wrapping_add(segments, 1);
-            s.push(3);
-            s.push(0);
+            s.push(ELEM_DECLARATIVE);
+            s.push(ELEM_KIND_FUNCREF);
             uleb(inout s, self.declared.len());
             for i in 0..self.declared.len() {
                 match self.declared.try_get(i) {
@@ -588,10 +606,10 @@ impl Builder {
         if self.data.len() != 0 {
             s.clear();
             uleb(inout s, 1);
-            s.push(0);
-            s.push(65);
+            s.push(DATA_ACTIVE_DEFAULT_MEMORY);
+            s.push(OP_I32_CONST);
             sleb(inout s, wrapping_i64(DATA_START));
-            s.push(11);
+            s.push(OP_END);
             uleb(inout s, self.data.len());
             append(inout s, in self.data);
             section(inout out, S_DATA, in s);

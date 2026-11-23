@@ -114,7 +114,7 @@ vesper-loom-solver = { path = "../vesper-loom-solver/seed", package = "vesper-lo
 # Shared with the compiler, which still links them.
 vesper-loom-calculus = { path = "../vesper-loom-calculus/seed", package = "vesper-loom-calculus-seed" }
 vesper-semver = { path = "../vesper-semver/seed", package = "vesper-semver-seed" }
-vesper-loom-cas = { path = "../vesper-loom-cas" }
+vesper-loom-cas = { path = "../vesper-loom-cas/seed", package = "vesper-loom-cas-seed" }
 vesper-fmt = { path = "../vesper-fmt/seed", package = "vesper-fmt-seed" }
 vesper-ffi = { path = "../vesper-ffi" }
 vesper-chrono = { path = "../vesper-chrono" }
@@ -126,7 +126,8 @@ vesper-simd = { path = "../vesper-simd" }
 vesper-highlight = { path = "../vesper-highlight/seed", package = "vesper-highlight-seed", features = ["shot"] }
 vesper-span = { path = "../vesper-span/seed", package = "vesper-span-seed" }
 vesper-migrate = { path = "../vesper-migrate" }
-vesper-loom-trust = { path = "../vesper-loom-trust" }
+# The compiler's build links the frozen Rust seed copy of vesper-loom-trust (#1412).
+vesper-loom-trust = { path = "../vesper-loom-trust/seed", package = "vesper-loom-trust-seed" }
 vesper-loom-admission = { path = "../vesper-loom-admission" }
 
 [target.'cfg(unix)'.dependencies]

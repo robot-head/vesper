@@ -48,25 +48,23 @@
 // Under the port the Rust codecs it replaces are kept for the default build.
 #![cfg_attr(vesper_port, allow(dead_code, unused_imports))]
 
-// @vesper-std/hash-sys's `.vsys` library `Blake3` (the official BLAKE3 C
-// implementation, built by vesper-blake3-sys), which the Vesper port of the
-// codecs imports for object ids and derivation keys.
-#[cfg(vesper_port)]
-use vesper_blake3_sys as blake3_shim;
-
-mod derivation;
-mod error;
-mod fsutil;
-mod id;
+pub(crate) mod derivation;
+pub(crate) mod error;
+pub(crate) mod fsutil;
+pub(crate) mod id;
 #[cfg(vesper_port)]
 mod port;
 #[cfg(vesper_port)]
 mod port_fs;
 #[cfg(vesper_port)]
 mod port_store;
-mod store;
+pub(crate) mod store;
 pub mod transfer;
-mod tree;
+pub(crate) mod tree;
+
+/// Which build this is: `"vesper"` for the port-backed package
+/// `vesper-loom-cas`, `"rust"` for the seed copy `vesper-loom-cas-seed`.
+pub const IMPLEMENTATION: &str = if cfg!(vesper_port) { "vesper" } else { "rust" };
 
 pub use derivation::{DerivationInputs, DerivationKey, InputSchema};
 pub use error::{CasError, DerivationError, NameError, Result, TreeError};

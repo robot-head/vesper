@@ -3023,7 +3023,35 @@ const OP_READ_TRANSFER: u8 = 43;
 
 const PACK_HEADER_BYTES: u64 = 54;
 const PACK_RECORD_BYTES: u64 = 42;
+
+// TransferLimits ceilings (src/transfer/mod.rs).
 const HARD_MAX_PACK_BYTES: u64 = 268435456;
+const HARD_MAX_OBJECTS: u64 = 16384;
+const HARD_MAX_DEPTH: u64 = 128;
+const HARD_MAX_TREE_ENTRIES: u64 = 65536;
+const HARD_MAX_METADATA_BYTES: u64 = 67108864;
+const HARD_MAX_WORK: u64 = 2147483648;
+
+// Tree decode and canonicalization budget (src/transfer/mod.rs).
+const TREE_ENCODE_BASE_BYTES: u64 = 16;
+const TREE_ENCODE_BYTES_PER_ENTRY: u64 = 64;
+const TREE_NODE_BYTES_PER_ENTRY: u64 = 2048;
+const TREE_NAME_STORAGE_FACTOR: u64 = 32;
+const TREE_ENCODE_STORAGE_FACTOR: u64 = 16;
+// Up to 64 name comparisons per entry and level, inspecting 255 bytes each.
+const TREE_COMPARE_WORK_PER_ENTRY_LEVEL: u64 = 16320;
+
+// Publication budget (src/transfer/import.rs).
+const PUBLICATION_PATH_STORAGE_FACTOR: u64 = 32;
+const PUBLICATION_FIXED_PATH_BYTES: u64 = 65536;
+const PUBLICATION_IO_BUFFER_BYTES: u64 = 65536;
+// One staging buffer plus eight occupied-object verification buffers.
+const PUBLICATION_BUFFER_COUNT: u64 = 9;
+const PUBLICATION_CHILD_PATH_BYTES: u64 = 4096;
+const PUBLICATION_STAGING_PASSES: u64 = 3;
+const PUBLICATION_VERIFY_CHECKS: u64 = 8;
+const PUBLICATION_VERIFY_PASSES: u64 = 2;
+const PUBLICATION_BOOKKEEPING_WORK: u64 = 4096;
 
 // `size_of` of the Rust records the budget charges for.
 const EXPORT_RECORD_SIZE: u64 = 72;
@@ -3042,6 +3070,7 @@ const B_METADATA: u64 = 7;
 const B_PAYLOAD: u64 = 8;
 const B_PACK: u64 = 9;
 const B_ENTRIES: u64 = 10;
+const BUDGET_WORDS: u64 = 11;
 
 fn fail_named(inout r: ChunkSeq[u8], code: u8, name: u8) eff [Fail[StoreErr]] {
     begin(inout r);
@@ -3183,29 +3212,29 @@ fn new_budget(
     if pack == 0 || pack > HARD_MAX_PACK_BYTES {
         fail_named(inout r, X_INVALID_LIMITS, N_PACK_BYTES);
     }
-    if objects == 0 || objects > 16384 {
+    if objects == 0 || objects > HARD_MAX_OBJECTS {
         fail_named(inout r, X_INVALID_LIMITS, N_OBJECTS);
     }
-    if depth == 0 || depth > 128 {
+    if depth == 0 || depth > HARD_MAX_DEPTH {
         fail_named(inout r, X_INVALID_LIMITS, N_DEPTH);
     }
-    if entries == 0 || entries > 65536 {
+    if entries == 0 || entries > HARD_MAX_TREE_ENTRIES {
         fail_named(inout r, X_INVALID_LIMITS, N_TREE_ENTRIES);
     }
-    if meta == 0 || meta > 67108864 {
+    if meta == 0 || meta > HARD_MAX_METADATA_BYTES {
         fail_named(inout r, X_INVALID_LIMITS, N_METADATA_BYTES);
     }
-    if max_work == 0 || max_work > 2147483648 {
+    if max_work == 0 || max_work > HARD_MAX_WORK {
         fail_named(inout r, X_INVALID_LIMITS, N_WORK);
     }
-    let mut b: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](11);
+    let mut b: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](BUDGET_WORDS);
     b.push(pack);
     b.push(objects);
     b.push(depth);
     b.push(entries);
     b.push(meta);
     b.push(max_work);
-    b.resize(11, 0);
+    b.resize(BUDGET_WORDS, 0);
     b
 }
 
@@ -3285,18 +3314,18 @@ fn transfer_decode_tree(
     if pos != len {
         fail_pack(inout r, N_TREE_TRAILING_BYTES);
     }
-    let per = t_mul(inout r, count, 64, N_TREE_METADATA);
-    let encode0 = t_add(inout r, 16, per, N_TREE_METADATA);
+    let per = t_mul(inout r, count, TREE_ENCODE_BYTES_PER_ENTRY, N_TREE_METADATA);
+    let encode0 = t_add(inout r, TREE_ENCODE_BASE_BYTES, per, N_TREE_METADATA);
     let encode = t_add(inout r, encode0, len, N_TREE_METADATA);
-    let nodes = t_mul(inout r, count, 2048, N_TREE_METADATA);
-    let name_bytes = t_mul(inout r, names, 32, N_TREE_METADATA);
-    let encodes = t_mul(inout r, encode, 16, N_TREE_METADATA);
+    let nodes = t_mul(inout r, count, TREE_NODE_BYTES_PER_ENTRY, N_TREE_METADATA);
+    let name_bytes = t_mul(inout r, names, TREE_NAME_STORAGE_FACTOR, N_TREE_METADATA);
+    let encodes = t_mul(inout r, encode, TREE_ENCODE_STORAGE_FACTOR, N_TREE_METADATA);
     let partial = t_add(inout r, nodes, name_bytes, N_TREE_METADATA);
     let meta = t_add(inout r, partial, encodes, N_TREE_METADATA);
     metadata(inout r, inout b, meta);
     let levels = wrapping_add(bit_length(count), 1);
     let per_level = t_mul(inout r, count, levels, N_TREE_WORK);
-    let comparisons = t_mul(inout r, per_level, 16320, N_TREE_WORK);
+    let comparisons = t_mul(inout r, per_level, TREE_COMPARE_WORK_PER_ENTRY_LEVEL, N_TREE_WORK);
     let total = t_add(inout r, comparisons, meta, N_TREE_WORK);
     work(inout r, inout b, total);
     if !tree_ok(in bytes) {
@@ -3964,8 +3993,18 @@ pub fn import_pack(
         fail_pack(inout r, N_UNREACHABLE);
     }
     // `publication_resources`.
-    let path_bytes = t_mul(inout r, store_path.len(), 32, N_PUBLICATION_METADATA);
-    let initialization = t_add(inout r, 65536, path_bytes, N_PUBLICATION_METADATA);
+    let path_bytes = t_mul(
+        inout r,
+        store_path.len(),
+        PUBLICATION_PATH_STORAGE_FACTOR,
+        N_PUBLICATION_METADATA
+    );
+    let initialization = t_add(
+        inout r,
+        PUBLICATION_FIXED_PATH_BYTES,
+        path_bytes,
+        N_PUBLICATION_METADATA
+    );
     metadata(inout r, inout b, initialization);
     work(inout r, inout b, initialization);
     let mut i: u64 = 0;
@@ -3975,27 +4014,42 @@ pub fn import_pack(
         }
         let at = word(in ats.as_slice(), i);
         let len = word(in lens.as_slice(), i);
-        let buffers = t_mul(inout r, 65536, 9, N_PUBLICATION_METADATA);
-        let paths = t_add(inout r, 65536, path_bytes, N_PUBLICATION_METADATA);
+        let buffers = t_mul(
+            inout r,
+            PUBLICATION_IO_BUFFER_BYTES,
+            PUBLICATION_BUFFER_COUNT,
+            N_PUBLICATION_METADATA
+        );
+        let paths = t_add(
+            inout r,
+            PUBLICATION_FIXED_PATH_BYTES,
+            path_bytes,
+            N_PUBLICATION_METADATA
+        );
         let mut child_paths: u64 = 0;
         if byte(in bytes, wrapping_add(at, 1)) == 2 {
             let tree_entries = read_word(
                 in bytes,
                 wrapping_add(word(in payloads.as_slice(), i), 8)
             );
-            child_paths = t_mul(inout r, tree_entries, 4096, N_PUBLICATION_METADATA);
+            child_paths = t_mul(
+                inout r,
+                tree_entries,
+                PUBLICATION_CHILD_PATH_BYTES,
+                N_PUBLICATION_METADATA
+            );
         }
         let first = t_add(inout r, buffers, paths, N_PUBLICATION_METADATA);
         let publication = t_add(inout r, first, child_paths, N_PUBLICATION_METADATA);
         metadata(inout r, inout b, publication);
         work(inout r, inout b, publication);
-        let staging = t_mul(inout r, len, 3, N_PUBLICATION_WORK);
+        let staging = t_mul(inout r, len, PUBLICATION_STAGING_PASSES, N_PUBLICATION_WORK);
         let probe = t_add(inout r, len, 1, N_PUBLICATION_WORK);
-        let checks = t_mul(inout r, probe, 8, N_PUBLICATION_WORK);
-        let verification = t_mul(inout r, checks, 2, N_PUBLICATION_WORK);
+        let checks = t_mul(inout r, probe, PUBLICATION_VERIFY_CHECKS, N_PUBLICATION_WORK);
+        let verification = t_mul(inout r, checks, PUBLICATION_VERIFY_PASSES, N_PUBLICATION_WORK);
         let both = t_add(inout r, staging, verification, N_PUBLICATION_WORK);
         work(inout r, inout b, both);
-        work(inout r, inout b, 4096);
+        work(inout r, inout b, PUBLICATION_BOOKKEEPING_WORK);
         i = wrapping_add(i, 1);
     }
     // Admission ends here: only store operations follow.

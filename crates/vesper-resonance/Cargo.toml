@@ -14,9 +14,9 @@ build = "build.rs"
 # copy, crates/vesper-resonance/seed (package vesper-resonance-seed, same
 # library name), instead; see "Crates the compiler links" in
 # docs/maintenance/porting-a-crate.md. The modules whose port is within the
-# 1.5x bar (the SVF kernel, the built-in graph and the schedule compiler)
-# have no Rust here any more: their frozen Rust is in seed/src/engine
-# (docs/parallel-results/rust-exit-kinetic-resonance.md).
+# 1.5x bar (the SVF kernel, PID controller, built-in graph, schedule
+# compiler and confinement verifier) have no Rust here any more: their frozen
+# Rust is in seed/src/engine (docs/parallel-results/rust-exit-kinetic-resonance.md).
 
 [features]
 # Deliberately wrong Vesper builds, one edit per ported module: the port test

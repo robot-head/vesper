@@ -3,17 +3,20 @@ name = "vesper-gpu-compute"
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-description = "Vesper GPU compute (design sections 28 and 36): a small Vulkan compute runtime with naga-compiled WGSL kernels for Tensor inference and the Kinetic broadphase, validated on Mesa lavapipe"
+description = "Vesper GPU compute (design sections 28 and 36): a small Vulkan compute runtime with WGSL kernels precompiled to SPIR-V for Tensor inference and the Kinetic broadphase, validated on Mesa lavapipe"
 publish = false
 
 [dependencies]
 bytemuck = "=1.25.2"
-naga = { version = "=30.0.2", default-features = false, features = ["wgsl-in", "spv-out"] }
 vesper-kinetic = { path = "../vesper-kinetic/seed", package = "vesper-kinetic-seed" }
 # The Rust seed copy: the Vesper port of vesper-tensor stays non-default
 # until it reaches performance parity (port wave P1 lane 8, #905).
 vesper-tensor = { path = "../vesper-tensor/seed", package = "vesper-tensor-seed" }
 vesper-port-abi = { path = "../vesper-port-abi" }
+
+[dev-dependencies]
+# Only tests/spirv.rs compiles WGSL, to check the committed SPIR-V.
+naga = { version = "=30.0.2", default-features = false, features = ["wgsl-in", "spv-out"] }
 
 [build-dependencies]
 vesper-port-harness = { path = "../vesper-port-harness" }

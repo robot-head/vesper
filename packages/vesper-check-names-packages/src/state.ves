@@ -117,6 +117,8 @@ pub struct St {
     root_mod: u32,
     // `Table`: item kinds and `pub` names, keyed (module, name).
     item_kind: FlatTable[u64, u8],
+    // Bridge types provided by .vsys libraries, keyed (root module, name).
+    foreign_types: FlatTable[u64, u8],
     public: FlatTable[u64, u8],
     // Each module's declared names in source order (`Kind::of`; a name
     // declared twice appears twice, its kind is the last one's).
@@ -198,11 +200,10 @@ pub struct St {
     var_shown: FlatTable[u32, u32],
     globals: FlatTable[u32, u32],
     // The outputs: diagnostics, `SourceMap::qualified` (mangled -> shown),
-    // `Module::public_items` and the renamed modules' dumps.
+    // and `Module::public_items`.
     diags: ChunkSeq[u8],
     qualified: FlatTable[u32, u32],
     public_out: ChunkSeq[u32],
-    dumps: ChunkSeq[u8],
     // The module being renamed (`Renamer`): its bound names (local ->
     // target | kind << 32), the set of their targets, the value and type
     // scopes, and its symbol maps between the AST's interner and `g`.
@@ -274,6 +275,7 @@ pub fn st_new() -> St {
         mod_collide: false,
         root_mod: none(),
         item_kind: flat_table_new[u64, u8](),
+        foreign_types: flat_table_new[u64, u8](),
         public: flat_table_new[u64, u8](),
         mod_items_first: ChunkSeq::new[u32](),
         mod_items_len: ChunkSeq::new[u32](),
@@ -335,7 +337,6 @@ pub fn st_new() -> St {
         diags: ChunkSeq::new[u8](),
         qualified: flat_table_new[u32, u32](),
         public_out: ChunkSeq::new[u32](),
-        dumps: ChunkSeq::new[u8](),
         names: flat_table_new[u32, u64](),
         targets: flat_table_new[u32, u8](),
         values: ChunkSeq::new[u32](),
@@ -596,10 +597,10 @@ pub fn push_decimal(inout o: String, v: u64) {
     o.push_char(wrapping_u32(wrapping_add(v % 10, 48)));
 }
 
-pub fn put_sym(inout o: ChunkSeq[u8], in s: St, sym: u32) {
-    let (a, b) = sym_range(in s, sym);
+pub fn put_sym(inout o: ChunkSeq[u8], in names: Interner, sym: u32) {
+    let (a, b) = names.span(symbol_from_id(sym));
     for i in a..b {
-        match s.g.text_byte(i) {
+        match names.text_byte(i) {
             Option::Some(c) => o.push(c),
             Option::None => {},
         }

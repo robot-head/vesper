@@ -27,7 +27,9 @@ use @vesper/check-data::types::{
     Vars,
     display,
     substitute,
-    vars_new
+    vars_new,
+    TyKind,
+    TyPass
 };
 use @vesper/check-data::world::{
     constructor,
@@ -48,10 +50,6 @@ use self::prog::{
 };
 
 const NONE32: u32 = 4294967295;
-const K_NAMED: u8 = 1;
-const K_TUPLE: u8 = 2;
-const K_FN: u8 = 3;
-const P_INOUT: u8 = 1;
 
 const CT: u8 = 1;
 const RT: u8 = 2;
@@ -324,7 +322,7 @@ pub fn forbidden(in c: Ctx, s: u32) -> bool {
 
 fn secret_visit(in c: Ctx, k: Syms, ty: u32, inout seen: ChunkSeq[u32]) -> bool {
     let n = c.types.node(ty);
-    if n.kind == K_NAMED {
+    if n.kind == TyKind::Named {
         if is_secret_name(k, n.name) && c.world.lookup(n.name) != NONE32 {
             return true;
         }
@@ -358,7 +356,7 @@ fn secret_visit(in c: Ctx, k: Syms, ty: u32, inout seen: ChunkSeq[u32]) -> bool 
         seen.truncate(last);
         return found;
     }
-    if n.kind == K_TUPLE {
+    if n.kind == TyKind::Tuple {
         for i in 0..w(n.n) {
             if secret_visit(in c, k, c.types.arg(ty, i), inout seen) {
                 return true;
@@ -403,7 +401,7 @@ pub fn secret_type(in c: Ctx, inout s: Walk, ty: u32) -> bool {
 
 fn carries_no_information(in c: Ctx, k: Syms, ty: u32) -> bool {
     let n = c.types.node(ty);
-    if n.kind == K_TUPLE && n.n == 0 {
+    if n.kind == TyKind::Tuple && n.n == 0 {
         return true;
     }
     let name = c.types.name(ty);
@@ -412,7 +410,7 @@ fn carries_no_information(in c: Ctx, k: Syms, ty: u32) -> bool {
 
 fn mentions_float(in c: Ctx, k: Syms, ty: u32) -> bool {
     let n = c.types.node(ty);
-    if n.kind == K_NAMED {
+    if n.kind == TyKind::Named {
         if n.name == k.f32_ || n.name == k.f64_ {
             return true;
         }
@@ -423,7 +421,7 @@ fn mentions_float(in c: Ctx, k: Syms, ty: u32) -> bool {
         }
         return false;
     }
-    if n.kind == K_TUPLE {
+    if n.kind == TyKind::Tuple {
         for i in 0..w(n.n) {
             if mentions_float(in c, k, c.types.arg(ty, i)) {
                 return true;
@@ -431,7 +429,7 @@ fn mentions_float(in c: Ctx, k: Syms, ty: u32) -> bool {
         }
         return false;
     }
-    if n.kind == K_FN {
+    if n.kind == TyKind::Fn {
         for i in 0..w(n.n) {
             if mentions_float(in c, k, c.types.arg(ty, i)) {
                 return true;
@@ -1085,7 +1083,7 @@ fn secret_access_pattern(inout c: Ctx, in p: Prog, inout s: Walk, pat: u32, ty: 
     }
     let x = p.pat(pat);
     let tn = c.types.node(ty);
-    if x.kind == 4 && tn.kind == K_TUPLE {
+    if x.kind == 4 && tn.kind == TyKind::Tuple {
         for i in 0..w(x.b) {
             if i >= w(tn.n) {
                 break;
@@ -1094,7 +1092,7 @@ fn secret_access_pattern(inout c: Ctx, in p: Prog, inout s: Walk, pat: u32, ty: 
             let st = c.types.arg(ty, i);
             secret_access_pattern(inout c, in p, inout s, sub, st);
         }
-    } else if x.kind == 5 && tn.kind == K_NAMED {
+    } else if x.kind == 5 && tn.kind == TyKind::Named {
         let at = ctor(in c, inout s, x.a);
         if at != 18446744073709551615 {
             let a = c.world.adt(n32(at / 4294967296));
@@ -1216,7 +1214,7 @@ fn place_root(in p: Prog, e: u32) -> u32 {
 // `generic_vars(generics, ty)` for an ADT: its generics bound to the
 // arguments of a `Named` type.
 fn adt_vars(in c: Ctx, at: u64, ty: u32) -> Vars {
-    if ty == NONE32 || c.types.kind(ty) != K_NAMED {
+    if ty == NONE32 || c.types.kind(ty) != TyKind::Named {
         return vars_new();
     }
     let a = c.world.adt(n32(at / 4294967296));
@@ -1276,7 +1274,7 @@ pub fn expr(inout c: Ctx, in p: Prog, inout s: Walk, e: u32) -> bool {
         let t = expr(inout c, in p, inout s, x.a);
         if !ct && s.emit {
             let bt = ty_of(inout c, in p, in s, x.a);
-            if bt != NONE32 && c.types.kind(bt) == K_NAMED {
+            if bt != NONE32 && c.types.kind(bt) == TyKind::Named {
                 let n = c.types.name(bt);
                 if is_secret_name(s.k, n) && c.world.lookup(n) != NONE32 {
                     let a = begin(inout s, "E0707");
@@ -1707,7 +1705,7 @@ fn closure(inout c: Ctx, in p: Prog, inout s: Walk, e: u32, x: ExprNode) -> bool
     let t = bt || returned;
     if has(in s, CT) && t && s.emit {
         let et = ty_of(inout c, in p, in s, e);
-        let declared = if et != NONE32 && c.types.kind(et) == K_FN {
+        let declared = if et != NONE32 && c.types.kind(et) == TyKind::Fn {
             c.types.node(et).r
         } else if x.c != c.types.infer {
             x.c
@@ -1959,7 +1957,7 @@ fn resolve(inout c: Ctx, in p: Prog, inout s: Walk, e: u32) -> Callee {
             }
         }
         let bt = ty_of(inout c, in p, in s, x.a);
-        if bt != NONE32 && c.types.kind(bt) == K_NAMED {
+        if bt != NONE32 && c.types.kind(bt) == TyKind::Named {
             s.scratch.clear();
             c.names.write(c.types.name(bt), inout s.scratch);
             s.scratch.push(58);
@@ -1972,7 +1970,7 @@ fn resolve(inout c: Ctx, in p: Prog, inout s: Walk, e: u32) -> Callee {
             }
         }
         let ct = ty_of(inout c, in p, in s, e);
-        if ct != NONE32 && c.types.kind(ct) == K_FN {
+        if ct != NONE32 && c.types.kind(ct) == TyKind::Fn {
             return callee(C_VALUE, NONE32, NONE32, ct, false);
         }
         return callee(C_UNKNOWN, NONE32, NONE32, NONE32, false);
@@ -1992,7 +1990,7 @@ fn secret_into_place(inout c: Ctx, in p: Prog, inout s: Walk, root: u32, start: 
     for i in 0..w(g.pn) {
         let q = p.param(add(w(g.pa), i));
         if q.name == root {
-            if q.pass == P_INOUT {
+            if q.pass == TyPass::Inout {
                 param_inout = true;
             }
             if index == NONE32 {
@@ -2191,7 +2189,7 @@ fn call_value(
     in taints: ChunkSeq[bool],
     any: bool
 ) -> bool {
-    let is_fn = ty != NONE32 && c.types.kind(ty) == K_FN;
+    let is_fn = ty != NONE32 && c.types.kind(ty) == TyKind::Fn;
     if cx.kind == 2 {
         let li = local(in s, cx.a);
         if li != NONE32 {
@@ -2485,7 +2483,7 @@ fn row_caps(in c: Ctx, k: Syms, row: u32) -> u8 {
 
 // `Walker::coerce`: `value` flows into a position of type `target`.
 pub fn coerce(inout c: Ctx, in p: Prog, inout s: Walk, value: u32, target: u32) {
-    if target == NONE32 || c.types.kind(target) != K_FN {
+    if target == NONE32 || c.types.kind(target) != TyKind::Fn {
         return;
     }
     let required = row_caps(in c, s.k, c.types.node(target).r2);
@@ -2533,7 +2531,7 @@ pub fn coerce(inout c: Ctx, in p: Prog, inout s: Walk, value: u32, target: u32) 
         }
     } else {
         let vt = ty_of(inout c, in p, in s, value);
-        if vt != NONE32 && c.types.kind(vt) == K_FN {
+        if vt != NONE32 && c.types.kind(vt) == TyKind::Fn {
             actual = row_caps(in c, s.k, c.types.node(vt).r2);
         }
         lexical = li != NONE32 && local_at(in s, li).lexical;

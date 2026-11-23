@@ -475,8 +475,47 @@ fn mutate_cbor(rng: &mut SplitMix, seed: &[u8]) -> Vec<u8> {
     mutate(rng, seed)
 }
 
+type Sign1Proj = (
+    Vec<u8>,
+    u8,
+    i64,
+    Option<String>,
+    Option<Vec<u8>>,
+    Vec<u8>,
+    Vec<u8>,
+);
+
+fn sign1_proj(s: &port::cca::CoseSign1) -> Sign1Proj {
+    let (ak, av) = match s.alg {
+        port::cca::CoseAlg::None => (0, 0),
+        port::cca::CoseAlg::Assigned(a) => (1, a),
+        port::cca::CoseAlg::Private(a) => (2, a),
+        port::cca::CoseAlg::Text => (3, 0),
+    };
+    (
+        s.protected_raw.clone(),
+        ak,
+        av,
+        s.content_type.clone(),
+        s.payload.clone(),
+        s.signature.clone(),
+        s.tbs_data(b"aad"),
+    )
+}
+
 fn cca_token(r: &mut Results, b: &[u8]) -> bool {
-    r.add("CcaToken::parse", port::cca::CcaToken::parse(b))
+    let res = port::cca::CcaToken::parse(b).map(|t| {
+        (
+            t.collection,
+            t.platform_profile,
+            t.realm_profile,
+            sign1_proj(&t.platform),
+            t.platform_claims,
+            sign1_proj(&t.realm),
+            t.realm_claims,
+        )
+    });
+    r.add("CcaToken::parse", res)
 }
 
 fn corim(r: &mut Results, b: &[u8]) -> bool {
@@ -605,6 +644,652 @@ fn cca_claims_agree() {
         .to_cbor();
         cca_claims(&mut r, &realm);
         cca_claims(&mut r, &mutate_cbor(rng, &realm));
+    }
+    r.check();
+}
+
+fn b64url(s: &str) -> Vec<u8> {
+    const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = Vec::new();
+    let (mut acc, mut bits) = (0u32, 0);
+    for c in s.bytes() {
+        let v = A.iter().position(|&a| a == c).expect("base64url") as u32;
+        acc = (acc << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    out
+}
+
+fn cbor_enc(v: &coset::cbor::value::Value) -> Vec<u8> {
+    let mut out = Vec::new();
+    coset::cbor::ser::into_writer(v, &mut out).unwrap();
+    out
+}
+
+fn extract_sign1s_and_keys(seeds: &[Vec<u8>]) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
+    let mut sign1s = vec![data("cca-veraison-corim/signed-good-corim.cbor")];
+    let mut keys = Vec::new();
+    for b in seeds {
+        if let Ok(t) = port::cca::CcaToken::parse(b) {
+            keys.push(t.realm_claims.public_key.clone());
+        }
+        // Extract inner byte strings from Tag 399 / CMW 907 collections.
+        let mut cur = b.as_slice();
+        if let Ok(coset::cbor::value::Value::Tag(tag, inner)) =
+            coset::cbor::de::from_reader(&mut cur)
+            && let coset::cbor::value::Value::Map(entries) = *inner
+        {
+            for (_, v) in entries {
+                match (tag, v) {
+                    (399, coset::cbor::value::Value::Bytes(raw)) => sign1s.push(raw),
+                    (907, coset::cbor::value::Value::Array(arr)) if arr.len() == 2 => {
+                        if let Some(coset::cbor::value::Value::Bytes(raw)) = arr.get(1) {
+                            sign1s.push(raw.clone());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    (sign1s, keys)
+}
+
+#[test]
+fn cose_sign1_agrees() {
+    use coset::cbor::value::Value;
+    let mut r = Results::new("cose_sign1_agrees");
+    let (mut seeds, _) = extract_sign1s_and_keys(&cbor_samples());
+    let wrap = |prot: &[u8], unprot: Vec<(Value, Value)>, pay: Value, sig: &[u8]| {
+        cbor_enc(&Value::Tag(
+            18,
+            Box::new(Value::Array(vec![
+                Value::Bytes(prot.to_vec()),
+                Value::Map(unprot),
+                pay,
+                Value::Bytes(sig.to_vec()),
+            ])),
+        ))
+    };
+    let mut prot_variants = vec![
+        vec![],
+        cbor_enc(&Value::Map(vec![])),
+        cbor_enc(&Value::Map(vec![(1.into(), (-7).into())])),
+        cbor_enc(&Value::Map(vec![(1.into(), (-35).into())])),
+        cbor_enc(&Value::Map(vec![(1.into(), (-8).into())])),
+        cbor_enc(&Value::Map(vec![(1.into(), 10.into())])),
+        cbor_enc(&Value::Map(vec![(1.into(), (-70000).into())])),
+        cbor_enc(&Value::Map(vec![(1.into(), Value::Text("ES256".into()))])),
+        cbor_enc(&Value::Map(vec![(1.into(), 1000.into())])),
+        cbor_enc(&Value::Map(vec![
+            (1.into(), (-7).into()),
+            (3.into(), Value::Text("application/rim+cbor".into())),
+            (8.into(), Value::Bytes(b"meta".to_vec())),
+        ])),
+        cbor_enc(&Value::Map(vec![(3.into(), Value::Text(" a/b".into()))])),
+        cbor_enc(&Value::Map(vec![(3.into(), Value::Text("a/b/c".into()))])),
+        cbor_enc(&Value::Map(vec![(3.into(), 263.into())])),
+        cbor_enc(&Value::Map(vec![(3.into(), Value::Text("".into()))])),
+        cbor_enc(&Value::Map(vec![(
+            2.into(),
+            Value::Array(vec![1.into(), Value::Text("foo".into()), (-70000).into()]),
+        )])),
+        cbor_enc(&Value::Map(vec![(2.into(), Value::Array(vec![]))])),
+        cbor_enc(&Value::Map(vec![(2.into(), Value::Array(vec![99.into()]))])),
+        cbor_enc(&Value::Map(vec![
+            (1.into(), (-7).into()),
+            (1.into(), (-35).into()),
+        ])),
+        cbor_enc(&Value::Map(vec![
+            (5.into(), Value::Bytes(b"iv".to_vec())),
+            (6.into(), Value::Bytes(b"piv".to_vec())),
+        ])),
+        vec![0x81, 0x00],
+    ];
+    for p in prot_variants.drain(..) {
+        seeds.push(wrap(&p, vec![], Value::Bytes(b"hi".to_vec()), b"sig"));
+        seeds.push(wrap(&p, vec![], Value::Null, b"sig"));
+    }
+    seeds.push(wrap(
+        &cbor_enc(&Value::Map(vec![(1.into(), (-7).into())])),
+        vec![(
+            7.into(),
+            Value::Array(vec![
+                Value::Bytes(vec![]),
+                Value::Map(vec![]),
+                Value::Bytes(vec![]),
+                Value::Bytes(b"cs".to_vec()),
+            ]),
+        )],
+        Value::Bytes(b"ok".to_vec()),
+        b"sig",
+    ));
+    let one = |r: &mut Results, b: &[u8]| -> bool {
+        let res = port::cca::CoseSign1::from_tagged_slice(b)
+            .ok()
+            .map(|s| sign1_proj(&s));
+        r.add("CoseSign1::from_tagged_slice", res)
+    };
+    let accepted = cbor_sweep(&mut r, &seeds, 1_500, one);
+    assert!(accepted > 10, "{accepted} COSE_Sign1 values parsed");
+    r.check();
+}
+
+#[test]
+fn cose_keys_agree() {
+    use coset::cbor::value::Value;
+    let mut r = Results::new("cose_keys_agree");
+    let (_, mut seeds) = extract_sign1s_and_keys(&cbor_samples());
+    let x = vec![0x11u8; 48];
+    let y = vec![0x22u8; 48];
+    let mut sec1_ok = vec![0x04];
+    sec1_ok.extend_from_slice(&x);
+    sec1_ok.extend_from_slice(&y);
+    seeds.push(sec1_ok.clone());
+    seeds.push(port::cca::encode_realm_cose_key(&sec1_ok));
+    let mut sec1_bad = sec1_ok.clone();
+    sec1_bad[0] = 0x02;
+    seeds.push(sec1_bad);
+    seeds.push(vec![0x04; 96]);
+    seeds.push(vec![0x04; 98]);
+    let mk = |entries: Vec<(Value, Value)>| cbor_enc(&Value::Map(entries));
+    seeds.extend([
+        mk(vec![
+            (1.into(), 2.into()),
+            ((-1).into(), 2.into()),
+            ((-2).into(), Value::Bytes(x.clone())),
+            ((-3).into(), Value::Bytes(y.clone())),
+            (2.into(), Value::Bytes(b"k".to_vec())),
+            (3.into(), (-35).into()),
+            (
+                4.into(),
+                Value::Array(vec![2.into(), Value::Text("verify".into())]),
+            ),
+            (5.into(), Value::Bytes(b"iv".to_vec())),
+        ]),
+        mk(vec![
+            (1.into(), 1.into()),
+            ((-1).into(), 2.into()),
+            ((-2).into(), Value::Bytes(x.clone())),
+            ((-3).into(), Value::Bytes(y.clone())),
+        ]),
+        mk(vec![
+            (1.into(), 2.into()),
+            ((-1).into(), 1.into()),
+            ((-2).into(), Value::Bytes(vec![1; 32])),
+            ((-3).into(), Value::Bytes(vec![2; 32])),
+        ]),
+        mk(vec![
+            (1.into(), 2.into()),
+            ((-1).into(), 2.into()),
+            ((-2).into(), Value::Bytes(vec![1; 47])),
+            ((-3).into(), Value::Bytes(y.clone())),
+        ]),
+        mk(vec![
+            (1.into(), 2.into()),
+            ((-1).into(), 2.into()),
+            (4.into(), Value::Array(vec![2.into(), 2.into()])),
+            ((-2).into(), Value::Bytes(x.clone())),
+            ((-3).into(), Value::Bytes(y.clone())),
+        ]),
+        mk(vec![
+            (1.into(), 2.into()),
+            ((-1).into(), 2.into()),
+            ((-1).into(), 2.into()),
+            ((-2).into(), Value::Bytes(x)),
+            ((-3).into(), Value::Bytes(y)),
+        ]),
+    ]);
+    let one = |r: &mut Results, b: &[u8]| -> bool {
+        r.add("realm_public_key", port::cca::realm_public_key(b))
+    };
+    let accepted = cbor_sweep(&mut r, &seeds, 1_500, one);
+    assert!(accepted > 5, "{accepted} keys accepted");
+    r.check();
+}
+
+#[test]
+fn signed_corims_agree() {
+    use coset::cbor::value::Value;
+    let mut r = Results::new("signed_corims_agree");
+    let mut sec1 = vec![4];
+    sec1.extend(b64url("MKBCTNIcKUSDii11ySs3526iDZ8AiTo7Tu6KPAqv7D4"));
+    sec1.extend(b64url("4Etl6SRW2YiLUrN5vfvVHuhp7x8PxltmWWlbbM4IFyM"));
+    let p256_key = port::chain::EcPublicKey::from_sec1(port::chain::Curve::P256, &sec1).unwrap();
+    let signed = data("cca-veraison-corim/signed-good-corim.cbor");
+    let unsigned = data("cca-veraison-corim/unsigned-good-corim.cbor");
+
+    let wrap = |prot: Value, pay: Value, sig: &[u8]| {
+        cbor_enc(&Value::Tag(
+            18,
+            Box::new(Value::Array(vec![
+                Value::Bytes(cbor_enc(&prot)),
+                Value::Map(vec![]),
+                pay,
+                Value::Bytes(sig.to_vec()),
+            ])),
+        ))
+    };
+    let mut seeds = vec![signed.clone(), unsigned];
+    seeds.extend([
+        wrap(
+            Value::Map(vec![
+                (1.into(), (-7).into()),
+                (8.into(), Value::Bytes(b"".to_vec())),
+            ]),
+            Value::Bytes(b"p".to_vec()),
+            &[0u8; 64],
+        ),
+        wrap(
+            Value::Map(vec![
+                (1.into(), (-7).into()),
+                (3.into(), Value::Text("application/rim+cbor".into())),
+            ]),
+            Value::Bytes(b"p".to_vec()),
+            &[0u8; 64],
+        ),
+        wrap(
+            Value::Map(vec![
+                (1.into(), (-7).into()),
+                (3.into(), Value::Text("application/rim+cbor".into())),
+                (8.into(), Value::Text("not bytes".into())),
+            ]),
+            Value::Bytes(b"p".to_vec()),
+            &[0u8; 64],
+        ),
+        wrap(
+            Value::Map(vec![
+                (1.into(), (-7).into()),
+                (3.into(), Value::Text("application/rim+cbor".into())),
+                (8.into(), Value::Bytes(vec![0xa0])),
+            ]),
+            Value::Null,
+            &[0u8; 64],
+        ),
+    ]);
+    let now_ok = 1_748_736_000 * 1_000_000_000;
+    let now_exp = 1_767_225_600 * 1_000_000_000;
+    let mut rng = SplitMix(0x516D_ED00);
+    let mut accepted = 0usize;
+    for seed in &seeds {
+        for &now in &[now_ok, now_exp] {
+            accepted += usize::from(r.add(
+                "Corim::verify_signed",
+                port::corim::Corim::verify_signed(seed, &p256_key, now),
+            ));
+        }
+        for _ in 0..1_500 {
+            let m = mutate_cbor(&mut rng, seed);
+            accepted += usize::from(r.add(
+                "Corim::verify_signed",
+                port::corim::Corim::verify_signed(&m, &p256_key, now_ok),
+            ));
+        }
+    }
+    assert!(accepted >= 1, "{accepted} signed CoRIMs verified");
+    r.check();
+}
+
+#[test]
+fn corim_store_agrees() {
+    use port::corim::{
+        CCA_PLATFORM_ENDORSEMENT_PROFILE, CCA_REALM_ENDORSEMENT_PROFILE, CcaCorimStore, ClassId,
+        Corim, CorimProfile, CorimValidity, CryptoKey, Instance, Mkey, RawValue,
+    };
+    let mut r = Results::new("corim_store_agrees");
+    let now = 1_748_736_000 * 1_000_000_000u64;
+    let mut corims: Vec<Corim> = cbor_samples()
+        .iter()
+        .filter_map(|b| Corim::parse_unsigned(b).ok())
+        .collect();
+    let plat_ok =
+        Corim::parse_unsigned(&data("cca-veraison-services/corim-cca-platform-valid.cbor"))
+            .unwrap();
+    let realm_ok =
+        Corim::parse_unsigned(&data("cca-veraison-services/corim-cca-realm-valid.cbor")).unwrap();
+    let mut push = |c: Corim| corims.push(c);
+
+    // Systematic platform mutations.
+    {
+        let mut c = plat_ok.clone();
+        c.validity = Some(CorimValidity {
+            not_before: Some(2_000_000_000),
+            not_after: 2_500_000_000,
+        });
+        push(c);
+    }
+    let mut c = plat_ok.clone();
+    c.profile = None;
+    push(c);
+    let mut c = plat_ok.clone();
+    c.profile = Some(CorimProfile::Uri("other".into()));
+    push(c);
+    let mut c = plat_ok.clone();
+    c.profile = Some(CorimProfile::Oid(vec![1, 2]));
+    push(c);
+
+    for f in [
+        (|c: &mut Corim| c.comids[0].reference_values[0].environment.has_group = true)
+            as fn(&mut Corim),
+        |c| c.comids[0].reference_values[0].environment.instance = Some(Instance::Bytes(vec![1])),
+        |c| c.comids[0].reference_values[0].environment.has_class = false,
+        |c| c.comids[0].reference_values[0].environment.class_id = None,
+        |c| c.comids[0].reference_values[0].environment.class_id = Some(ClassId::Uuid([1; 16])),
+        |c| {
+            c.comids[0].reference_values[0].environment.class_id = Some(ClassId::Bytes(vec![0; 31]))
+        },
+        |c| c.comids[0].reference_values[0].measurements[0].has_authorized_by = true,
+        |c| c.comids[0].reference_values[0].measurements[0].mkey = None,
+        |c| c.comids[0].reference_values[0].measurements[0].mkey = Some(Mkey::Uint(1)),
+        |c| {
+            c.comids[0].reference_values[0].measurements[0]
+                .values
+                .other_keys = vec![99]
+        },
+        |c| {
+            c.comids[0].reference_values[0].measurements[0]
+                .values
+                .raw_value = Some(RawValue {
+                value: vec![1],
+                mask: Some(vec![1]),
+            })
+        },
+        |c| {
+            c.comids[0].reference_values[0].measurements[0]
+                .values
+                .digests
+                .clear();
+        },
+        |c| {
+            c.comids[0].reference_values[0].measurements[0]
+                .values
+                .digests[0]
+                .alg = 99;
+        },
+        |c| {
+            c.comids[0].reference_values[0].measurements[0]
+                .values
+                .digests[0]
+                .value
+                .pop();
+        },
+        |c| {
+            c.comids[0].reference_values[0].measurements[0]
+                .values
+                .version_has_scheme = true;
+        },
+        |c| {
+            c.comids[0].reference_values[0].measurements[0]
+                .values
+                .cryptokeys
+                .clear();
+        },
+        |c| {
+            c.comids[0].reference_values[0].measurements[0]
+                .values
+                .cryptokeys = vec![CryptoKey::Bytes(vec![1; 31])];
+        },
+        |c| {
+            c.comids[0].reference_values[0].measurements[0]
+                .values
+                .cryptokeys = vec![CryptoKey::PkixBase64Key("x".into())];
+        },
+        |c| {
+            c.comids[0].reference_values[0].measurements[0]
+                .values
+                .cryptokeys = vec![CryptoKey::Bytes(vec![1; 32]), CryptoKey::Bytes(vec![2; 32])];
+        },
+        |c| {
+            let mut m = c.comids[0].reference_values[0].measurements[4].clone();
+            m.values.raw_value = None;
+            c.comids[0].reference_values[0].measurements[4] = m;
+        },
+        |c| {
+            c.comids[0].reference_values[0].measurements[4]
+                .values
+                .raw_value = Some(RawValue {
+                value: vec![1, 2],
+                mask: None,
+            });
+        },
+        |c| {
+            c.comids[0].reference_values[0].measurements[4]
+                .values
+                .raw_value = Some(RawValue {
+                value: vec![1, 2],
+                mask: Some(vec![1]),
+            });
+        },
+        |c| {
+            let m = c.comids[0].reference_values[0].measurements[4].clone();
+            c.comids[0].reference_values[0].measurements.push(m);
+        },
+        |c| {
+            c.comids[0].reference_values[0].measurements[6].mkey =
+                Some(Mkey::Text("cca.rotpk.CM.6".into()));
+        },
+        |c| {
+            c.comids[0].reference_values[0].measurements[6]
+                .values
+                .cryptokeys
+                .clear();
+        },
+        |c| {
+            c.comids[0].reference_values[0].measurements[6]
+                .values
+                .cryptokeys = vec![CryptoKey::Bytes(vec![1; 5])];
+        },
+        |c| {
+            c.comids[0].reference_values[0].measurements.retain(
+                |m| !matches!(&m.mkey, Some(Mkey::Text(s)) if s == "cca.software-component"),
+            );
+        },
+        |c| c.comids[1].attest_keys[0].has_conditions = true,
+        |c| c.comids[1].attest_keys[0].environment.has_group = true,
+        |c| c.comids[1].attest_keys[0].environment.instance = None,
+        |c| c.comids[1].attest_keys[0].environment.instance = Some(Instance::Uuid([1; 16])),
+        |c| c.comids[1].attest_keys[0].environment.instance = Some(Instance::Ueid(vec![2; 33])),
+        |c| c.comids[1].attest_keys[0].environment.instance = Some(Instance::Ueid(vec![1; 32])),
+        |c| c.comids[1].attest_keys[0].keys = vec![CryptoKey::Bytes(vec![1; 32])],
+        |c| c.comids[1].attest_keys[0].keys = vec![],
+        |c| {
+            c.comids[1].attest_keys[0].keys = vec![CryptoKey::PkixBase64Key("bad pem".into())];
+        },
+    ] {
+        let mut c = plat_ok.clone();
+        f(&mut c);
+        push(c);
+    }
+
+    // Systematic realm mutations.
+    let mut realm_ak = realm_ok.clone();
+    realm_ak.comids[0].attest_keys = plat_ok.comids[1].attest_keys.clone();
+    push(realm_ak);
+    for f in [
+        (|c: &mut Corim| c.comids[0].reference_values[0].environment.has_group = true)
+            as fn(&mut Corim),
+        |c| c.comids[0].reference_values[0].environment.has_class = false,
+        |c| c.comids[0].reference_values[0].environment.class_id = None,
+        |c| c.comids[0].reference_values[0].environment.class_id = Some(ClassId::Uuid([1; 16])),
+        |c| {
+            c.comids[0].reference_values[0].environment.class_id = Some(ClassId::Bytes(vec![1; 31]))
+        },
+        |c| c.comids[0].reference_values[0].measurements[0].mkey = None,
+        |c| c.comids[0].reference_values[0].measurements[0].mkey = Some(Mkey::Uint(0)),
+        |c| {
+            c.comids[0].reference_values[0].measurements[0]
+                .values
+                .digests
+                .clear()
+        },
+        |c| {
+            c.comids[0].reference_values[0].measurements[0]
+                .values
+                .digests[0]
+                .alg = 99
+        },
+        |c| {
+            let d = c.comids[0].reference_values[0].measurements[0]
+                .values
+                .digests[0]
+                .clone();
+            c.comids[0].reference_values[0].measurements[0]
+                .values
+                .digests
+                .push(d);
+        },
+        |c| {
+            c.comids[0].reference_values[0].measurements[0]
+                .values
+                .digests[0]
+                .value[0] ^= 1;
+        },
+        |c| {
+            let m = c.comids[0].reference_values[0].measurements[0].clone();
+            c.comids[0].reference_values[0].measurements.push(m);
+        },
+        |c| {
+            let m = c.comids[0].reference_values[0].measurements[1].clone();
+            c.comids[0].reference_values[0].measurements.push(m);
+        },
+        |c| {
+            c.comids[0].reference_values[0]
+                .measurements
+                .retain(|m| !matches!(&m.mkey, Some(Mkey::Text(s)) if s == "cca.rim"));
+        },
+        |c| {
+            if let Some(rpv) = c.comids[0].reference_values[0]
+                .measurements
+                .iter_mut()
+                .find(|m| matches!(&m.mkey, Some(Mkey::Text(s)) if s == "cca.rpv"))
+            {
+                rpv.values.raw_value.as_mut().unwrap().mask = Some(vec![0xff; 64]);
+            }
+        },
+        |c| {
+            if let Some(rpv) = c.comids[0].reference_values[0]
+                .measurements
+                .iter_mut()
+                .find(|m| matches!(&m.mkey, Some(Mkey::Text(s)) if s == "cca.rpv"))
+            {
+                rpv.values.raw_value.as_mut().unwrap().value = vec![1; 65];
+            }
+        },
+    ] {
+        let mut c = realm_ok.clone();
+        assert_eq!(c.profile_uri(), Some(CCA_REALM_ENDORSEMENT_PROFILE));
+        f(&mut c);
+        push(c);
+    }
+    assert_eq!(
+        plat_ok.profile_uri(),
+        Some(CCA_PLATFORM_ENDORSEMENT_PROFILE)
+    );
+
+    for c in &corims {
+        let mut s = CcaCorimStore::new();
+        let res = s.add(c, now).map(|()| s);
+        r.add("CcaCorimStore::add", res);
+    }
+    r.check();
+}
+
+#[test]
+fn cca_appraisal_agrees() {
+    use port::corim::{
+        CcaAppraisalOptions, CcaCorimStore, Corim, Digest, NI_SHA256, appraise_cca_with_options,
+    };
+    let mut r = Results::new("cca_appraisal_agrees");
+    let now = 1_748_736_000 * 1_000_000_000u64;
+    let mut store = CcaCorimStore::new();
+    for p in [
+        "cca-veraison-services/corim-cca-platform-valid.cbor",
+        "cca-veraison-services/corim-cca-realm-valid.cbor",
+    ] {
+        store
+            .add(&Corim::parse_unsigned(&data(p)).unwrap(), now)
+            .unwrap();
+    }
+    let verified = port::cca::verify_cca_endorsed(
+        &data("cca-veraison-services/cca-good.cbor"),
+        &store.endorsements,
+    )
+    .unwrap();
+
+    type CaseFn = Box<dyn FnMut(&mut port::cca::VerifiedCcaToken, &mut CcaCorimStore)>;
+    for cmp_signer in [true, false] {
+        let opts = CcaAppraisalOptions {
+            compare_signer_id: cmp_signer,
+        };
+        let mut cases: Vec<CaseFn> = vec![
+            Box::new(|_, _| {}),
+            Box::new(|_, s| s.platform.clear()),
+            Box::new(|v, _| v.token.platform_claims.sw_components.clear()),
+            Box::new(|v, _| {
+                v.token.platform_claims.sw_components[0].measurement_description =
+                    Some("md5".into());
+            }),
+            Box::new(|_, s| {
+                s.platform[0].sw_components[0].digests[0].alg = NI_SHA256;
+            }),
+            Box::new(|v, _| v.token.platform_claims.sw_components[0].measurement_type = None),
+            Box::new(|v, _| v.token.platform_claims.sw_components[0].version = None),
+            Box::new(|_, s| {
+                let mut alt = s.platform[0].clone();
+                alt.sw_components[0].digests[0].value[0] ^= 1;
+                s.platform.insert(0, alt);
+            }),
+            Box::new(|v, _| v.token.platform_claims.config = None),
+            Box::new(|v, _| v.token.platform_claims.config.as_mut().unwrap()[0] ^= 1),
+            Box::new(|v, _| v.token.platform_claims.manufacturing_config = None),
+            Box::new(|v, _| {
+                v.token
+                    .platform_claims
+                    .manufacturing_config
+                    .as_mut()
+                    .unwrap()[0] ^= 1;
+            }),
+            Box::new(|v, _| v.token.platform_claims.tbb_rotpks.clear()),
+            Box::new(|v, _| v.token.platform_claims.tbb_rotpks[0].index = 0),
+            Box::new(|v, _| v.token.platform_claims.tbb_rotpks[0].hash[0] ^= 1),
+            Box::new(|_, s| s.realm.clear()),
+            Box::new(|v, _| v.token.realm_claims.personalization[0] ^= 1),
+            Box::new(|v, _| v.token.realm_claims.extensible_measurements[0][0] ^= 1),
+            Box::new(|v, _| v.token.realm_claims.extensible_measurements[3][0] ^= 1),
+            Box::new(|v, s| {
+                let mut padded = s.realm[0].rim.clone();
+                padded.resize(64, 0);
+                v.token.realm_claims.initial_measurement = padded;
+                let mut alt = s.realm[0].clone();
+                alt.rems[2].as_mut().unwrap()[0] ^= 1;
+                s.realm.insert(0, alt);
+            }),
+            Box::new(|v, s| {
+                let mut padded = s.realm[0].rim.clone();
+                padded.resize(64, 0);
+                padded[63] = 1;
+                v.token.realm_claims.initial_measurement = padded;
+            }),
+            Box::new(|_, s| {
+                s.platform[0].sw_components[0].digests = vec![Digest {
+                    alg: 99,
+                    value: vec![0; 32],
+                }];
+            }),
+        ];
+        for tweak in &mut cases {
+            let mut v = verified.clone();
+            let mut s = store.clone();
+            tweak(&mut v, &mut s);
+            r.add(
+                "appraise_cca_with_options",
+                appraise_cca_with_options(&v, &s, &opts),
+            );
+        }
     }
     r.check();
 }

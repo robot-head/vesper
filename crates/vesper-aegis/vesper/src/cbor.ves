@@ -42,21 +42,47 @@ pub const K_FLOAT: u64 = 7;
 pub const K_BOOL: u64 = 8;
 pub const K_NULL: u64 = 9;
 pub const K_BIGNUM: u64 = 10;
+pub const I64_MAX: u64 = 9223372036854775807;
+// High bit set on a chunk offset means the bytes live in the scratch
+// slice `s` rather than the original input `b`.
+pub const SCRATCH_BIT: u64 = 4611686018427387904;
+pub const K_NEED_SCRATCH: u64 = 6;
 
-// Major types.
-const M_BYTES: u64 = 2;
-const M_TEXT: u64 = 3;
-const M_ARRAY: u64 = 4;
-const M_MAP: u64 = 5;
-const M_TAG: u64 = 6;
-const M_OTHER: u64 = 7;
-// Additional information: the value follows in 1, 2, 4 or 8 bytes; 28 to
-// 30 are reserved; 31 is an indefinite length (or a break in major 7).
-const AI_ONE: u64 = 24;
-const AI_TWO: u64 = 25;
-const AI_FOUR: u64 = 26;
-const AI_EIGHT: u64 = 27;
-const AI_INDEFINITE: u64 = 31;
+pub copy struct Scratch {
+    pos: u64
+}
+
+pub copy struct BytesSpan {
+    in_scratch: bool,
+    off: u64,
+    len: u64,
+    base: u64
+}
+
+// Initial-byte fields (RFC 8949 §3.1).
+pub enum CborMajor: u64 {
+    UnsignedInteger = 0,
+    NegativeInteger = 1,
+    Bytes = 2,
+    Text = 3,
+    Array = 4,
+    Map = 5,
+    Tag = 6,
+    Other = 7,
+}
+
+// Values 24..27 indicate a following argument of 1, 2, 4 or 8 bytes.
+pub enum CborAdditional: u64 {
+    ImmediateMax = 23,
+    OneByte = 24,
+    TwoBytes = 25,
+    FourBytes = 26,
+    EightBytes = 27,
+    Indefinite = 31,
+}
+
+pub const CBOR_MAJOR_SHIFT: u64 = 5;
+const CBOR_ADDITIONAL_MASK: u64 = 31;
 const SIMPLE_FALSE: u64 = 20;
 const SIMPLE_TRUE: u64 = 21;
 const SIMPLE_NULL: u64 = 22;
@@ -111,14 +137,14 @@ pub fn cbor_err(field: u64, reason: u64) -> Never eff [Fail[AErr]] {
 }
 
 // A failed decode: every CBOR error is one error to the caller.
-fn bad() -> Never eff [Fail[AErr]] {
-    cbor_err(WHAT, R_MALFORMED)
+fn bad(field: u64) -> Never eff [Fail[AErr]] {
+    cbor_err(field, R_MALFORMED)
 }
 
-fn byte(in b: Slice[u8], i: u64) -> u64 eff [Fail[AErr]] {
+fn byte_at(in b: Slice[u8], i: u64, field: u64) -> u64 eff [Fail[AErr]] {
     match b.try_get(i) {
         Option::Some(x) => widen_u64(x),
-        Option::None => bad(),
+        Option::None => bad(field),
     }
 }
 
@@ -131,38 +157,38 @@ copy struct Head {
 }
 
 // The header at `p`; reserved additional information fails.
-fn head(in b: Slice[u8], p: u64) -> Head eff [Fail[AErr]] {
-    let first = byte(in b, p);
-    let ai = first & 31;
+fn head(in b: Slice[u8], p: u64, field: u64) -> Head eff [Fail[AErr]] {
+    let first = byte_at(in b, p, field);
+    let ai = first & CBOR_ADDITIONAL_MASK;
     let at = wrapping_add(p, 1);
     let mut arg = ai;
     let mut end = at;
-    if ai == AI_ONE {
-        arg = byte(in b, at);
+    if ai == CborAdditional::OneByte {
+        arg = byte_at(in b, at, field);
         end = wrapping_add(at, 1);
-    } else if ai == AI_TWO {
+    } else if ai == CborAdditional::TwoBytes {
         arg = match b.try_read_u16_be(at) {
             Option::Some(v) => widen_u64(v),
-            Option::None => bad(),
+            Option::None => bad(field),
         };
         end = wrapping_add(at, 2);
-    } else if ai == AI_FOUR {
+    } else if ai == CborAdditional::FourBytes {
         arg = match b.try_read_u32_be(at) {
             Option::Some(v) => widen_u64(v),
-            Option::None => bad(),
+            Option::None => bad(field),
         };
         end = wrapping_add(at, 4);
-    } else if ai == AI_EIGHT {
+    } else if ai == CborAdditional::EightBytes {
         arg = match b.try_read_u64_be(at) {
             Option::Some(v) => v,
-            Option::None => bad(),
+            Option::None => bad(field),
         };
         end = wrapping_add(at, 8);
-    } else if ai > AI_EIGHT && ai < AI_INDEFINITE {
-        bad();
+    } else if ai > CborAdditional::EightBytes && ai < CborAdditional::Indefinite {
+        bad(field);
     }
     Head {
-        major: first >> 5,
+        major: first >> CBOR_MAJOR_SHIFT,
         ai: ai,
         arg: arg,
         end: end
@@ -170,9 +196,9 @@ fn head(in b: Slice[u8], p: u64) -> Head eff [Fail[AErr]] {
 }
 
 // The end of `n` bytes at `p`, failing past the input.
-fn span(in b: Slice[u8], p: u64, n: u64) -> u64 eff [Fail[AErr]] {
+fn span(in b: Slice[u8], p: u64, n: u64, field: u64) -> u64 eff [Fail[AErr]] {
     if n > wrapping_sub(b.len(), p) {
-        bad();
+        bad(field);
     }
     wrapping_add(p, n)
 }
@@ -333,21 +359,23 @@ fn next_slot(in w: Slice[u64]) -> u64 {
     }
 }
 
-// A string of major type `major` whose header is `h`: its chunks.
-fn string(in b: Slice[u8], h: Head, inout w: Slice[u64]) -> u64 eff [Fail[AErr]] {
-    let kind = if h.major == M_TEXT {
+// A string of major type `major` whose header is `h`: its chunks
+// shifted by `base`.
+fn string(in b: Slice[u8], h: Head, base: u64, field: u64, inout w: Slice[u64])
+    -> u64 eff [Fail[AErr]] {
+    let kind = if h.major == CborMajor::Text {
         K_TEXT
     } else {
         K_BYTES
     };
     put(inout w, kind);
-    if h.ai != AI_INDEFINITE {
-        let end = span(in b, h.end, h.arg);
+    if h.ai != CborAdditional::Indefinite {
+        let end = span(in b, h.end, h.arg, field);
         if kind == K_TEXT && !utf8(in b, h.end, end) {
-            bad();
+            bad(field);
         }
         put(inout w, 1);
-        put(inout w, h.end);
+        put(inout w, wrapping_add(base, h.end));
         put(inout w, h.arg);
         return end;
     }
@@ -357,24 +385,24 @@ fn string(in b: Slice[u8], h: Head, inout w: Slice[u64]) -> u64 eff [Fail[AErr]]
     let mut nested = 1;
     let mut p = h.end;
     loop {
-        let c = head(in b, p);
-        if c.major == M_OTHER && c.ai == AI_INDEFINITE {
+        let c = head(in b, p, field);
+        if c.major == CborMajor::Other && c.ai == CborAdditional::Indefinite {
             p = c.end;
             if nested == 1 {
                 break;
             }
             nested = wrapping_sub(nested, 1);
         } else if c.major != h.major {
-            bad();
-        } else if c.ai == AI_INDEFINITE {
+            bad(field);
+        } else if c.ai == CborAdditional::Indefinite {
             nested = wrapping_add(nested, 1);
             p = c.end;
         } else {
-            let end = span(in b, c.end, c.arg);
+            let end = span(in b, c.end, c.arg, field);
             if kind == K_TEXT && !utf8(in b, c.end, end) {
-                bad();
+                bad(field);
             }
-            put(inout w, c.end);
+            put(inout w, wrapping_add(base, c.end));
             put(inout w, c.arg);
             chunks = wrapping_add(chunks, 1);
             p = end;
@@ -386,8 +414,9 @@ fn string(in b: Slice[u8], h: Head, inout w: Slice[u64]) -> u64 eff [Fail[AErr]]
 
 // A bignum: tag 2 or 3 over the definite byte string `h` of at most 16
 // bytes.
-fn bignum(in b: Slice[u8], tag: u64, h: Head, inout w: Slice[u64]) -> u64 eff [Fail[AErr]] {
-    let end = span(in b, h.end, h.arg);
+fn bignum(in b: Slice[u8], tag: u64, h: Head, field: u64, inout w: Slice[u64])
+    -> u64 eff [Fail[AErr]] {
+    let end = span(in b, h.end, h.arg, field);
     let mut hi = 0;
     let mut lo = 0;
     let mut i = h.end;
@@ -396,11 +425,11 @@ fn bignum(in b: Slice[u8], tag: u64, h: Head, inout w: Slice[u64]) -> u64 eff [F
             break;
         }
         hi = (hi << 8) | (lo >> 56);
-        lo = (lo << 8) | byte(in b, i);
+        lo = (lo << 8) | byte_at(in b, i, field);
         i = wrapping_add(i, 1);
     }
     if tag == TAG_BIGNEG && hi & HIGH_BIT != 0 {
-        bad();
+        bad(field);
     }
     if hi == 0 {
         put(
@@ -421,8 +450,10 @@ fn bignum(in b: Slice[u8], tag: u64, h: Head, inout w: Slice[u64]) -> u64 eff [F
     end
 }
 
-// Decode one item at the start of `b` into `w`; the bytes it used.
-pub fn decode(in b: Slice[u8], inout w: Slice[u64], inout st: Slice[u64]) -> u64 eff [Fail[AErr]] {
+// Decode one item at the start of `b` into `w` (adding `base` to chunk
+// offsets); returns the bytes it used.
+pub fn decode_at(in b: Slice[u8], base: u64, field: u64, inout w: Slice[u64], inout st: Slice[u64])
+    -> u64 eff [Fail[AErr]] {
     let n = b.len();
     let mut p = 0;
     let mut depth = 0;
@@ -452,15 +483,15 @@ pub fn decode(in b: Slice[u8], inout w: Slice[u64], inout st: Slice[u64]) -> u64
             return p;
         }
         started = true;
-        let h = head(in b, p);
-        if h.major == M_OTHER && h.ai == AI_INDEFINITE {
+        let h = head(in b, p, field);
+        if h.major == CborMajor::Other && h.ai == CborAdditional::Indefinite {
             // A break ends an indefinite array, or a map between entries.
             if depth == 0 || st_get(in st, depth, S_LEFT) != INDEFINITE {
-                bad();
+                bad(field);
             }
             let kind = st_get(in st, depth, S_KIND);
             if kind == K_MAP && st_get(in st, depth, S_SEEN) & 1 != 0 {
-                bad();
+                bad(field);
             }
             st_set(inout st, depth, S_LEFT, 0);
             p = h.end;
@@ -473,36 +504,38 @@ pub fn decode(in b: Slice[u8], inout w: Slice[u64], inout st: Slice[u64]) -> u64
                 st_set(inout st, depth, S_LEFT, wrapping_sub(left, 1));
             }
         }
-        if h.major <= 1 {
-            if h.ai == AI_INDEFINITE {
-                bad();
+        if h.major <= CborMajor::NegativeInteger {
+            if h.ai == CborAdditional::Indefinite {
+                bad(field);
             }
             put(inout w, h.major);
             put(inout w, h.arg);
             p = h.end;
-        } else if h.major == M_BYTES || h.major == M_TEXT {
-            p = string(in b, h, inout w);
-        } else if h.major == M_ARRAY || h.major == M_MAP || h.major == M_TAG {
-            if h.major == M_TAG {
-                if h.ai == AI_INDEFINITE {
-                    bad();
+        } else if h.major == CborMajor::Bytes || h.major == CborMajor::Text {
+            p = string(in b, h, base, field, inout w);
+        } else if h.major == CborMajor::Array
+            || h.major == CborMajor::Map
+            || h.major == CborMajor::Tag {
+            if h.major == CborMajor::Tag {
+                if h.ai == CborAdditional::Indefinite {
+                    bad(field);
                 }
                 if h.arg == TAG_BIGPOS || h.arg == TAG_BIGNEG {
-                    let inner = head(in b, h.end);
-                    if inner.major == M_BYTES
-                        && inner.ai != AI_INDEFINITE
+                    let inner = head(in b, h.end, field);
+                    if inner.major == CborMajor::Bytes
+                        && inner.ai != CborAdditional::Indefinite
                         && inner.arg <= BIGNUM_MAX_BYTES {
-                        p = bignum(in b, h.arg, inner, inout w);
+                        p = bignum(in b, h.arg, inner, field, inout w);
                         continue;
                     }
                 }
             }
             if depth == MAX_DEPTH {
-                bad();
+                bad(field);
             }
-            let kind = if h.major == M_ARRAY {
+            let kind = if h.major == CborMajor::Array {
                 K_ARRAY
-            } else if h.major == M_MAP {
+            } else if h.major == CborMajor::Map {
                 K_MAP
             } else {
                 K_TAG
@@ -514,13 +547,13 @@ pub fn decode(in b: Slice[u8], inout w: Slice[u64], inout st: Slice[u64]) -> u64
                 1
             } else {
                 put(inout w, 0);
-                if h.ai == AI_INDEFINITE {
+                if h.ai == CborAdditional::Indefinite {
                     INDEFINITE
                 } else {
                     // Every item takes at least a byte, so a count past
                     // the input fails here instead of overflowing.
                     if h.arg > n {
-                        bad();
+                        bad(field);
                     }
                     if kind == K_MAP {
                         wrapping_mul(h.arg, 2)
@@ -537,13 +570,13 @@ pub fn decode(in b: Slice[u8], inout w: Slice[u64], inout st: Slice[u64]) -> u64
             p = h.end;
         } else {
             // Major 7: simple values and floats.
-            if h.ai == AI_TWO {
+            if h.ai == CborAdditional::TwoBytes {
                 put(inout w, K_FLOAT);
                 put(inout w, widen_f16(h.arg));
-            } else if h.ai == AI_FOUR {
+            } else if h.ai == CborAdditional::FourBytes {
                 put(inout w, K_FLOAT);
                 put(inout w, widen_f32(h.arg));
-            } else if h.ai == AI_EIGHT {
+            } else if h.ai == CborAdditional::EightBytes {
                 put(inout w, K_FLOAT);
                 put(inout w, h.arg);
             } else if h.arg == SIMPLE_FALSE || h.arg == SIMPLE_TRUE {
@@ -553,14 +586,55 @@ pub fn decode(in b: Slice[u8], inout w: Slice[u64], inout st: Slice[u64]) -> u64
                 put(inout w, K_NULL);
                 put(inout w, 0);
             } else {
-                bad();
+                bad(field);
             }
             p = h.end;
         }
     }
 }
 
+// Decode one item at the start of `b` into `w`; the bytes it used.
+pub fn decode(in b: Slice[u8], inout w: Slice[u64], inout st: Slice[u64]) -> u64 eff [Fail[AErr]] {
+    decode_at(in b, 0, WHAT, inout w, inout st)
+}
+
+pub fn decode_whole_at(
+    in b: Slice[u8],
+    base: u64,
+    field: u64,
+    inout w: Slice[u64],
+    inout st: Slice[u64]
+) -> Unit eff [Fail[AErr]] {
+    let used = decode_at(in b, base, field, inout w, inout st);
+    if used != b.len() {
+        cbor_err(field, R_TRAILING);
+    }
+}
+
 // Node accessors over a decoded buffer `n` (nodes from index 1).
+
+pub fn cur_len(in n: Slice[u64]) -> u64 {
+    match n.try_get(0) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+pub fn set_len(inout n: Slice[u64], v: u64) {
+    n.try_set(0, v);
+}
+
+pub fn need_scratch(need: u64) -> Never eff [Fail[AErr]] {
+    Fail::raise(
+        AErr {
+            kind: K_NEED_SCRATCH,
+            format: 0,
+            field: 0,
+            a: need,
+            b: 0
+        }
+    )
+}
 
 // The node kind at `i`.
 pub fn kind(in n: Slice[u64], i: u64) -> u64 {
@@ -625,8 +699,25 @@ pub fn str_len(in n: Slice[u64], i: u64) -> u64 {
     }
 }
 
-// Whether the text node at `i` reads `lit`.
-pub fn text_eq(in b: Slice[u8], in n: Slice[u64], i: u64, in lit: Slice[u8]) -> bool {
+// Read one byte at `j` from a chunk starting at `off` (in `b` or `s`).
+pub fn str_byte(in b: Slice[u8], in s: Slice[u8], off: u64, j: u64) -> u64 {
+    if off >= SCRATCH_BIT {
+        let idx = wrapping_add(wrapping_sub(off, SCRATCH_BIT), j);
+        match s.try_get(idx) {
+            Option::Some(v) => widen_u64(v),
+            Option::None => 0,
+        }
+    } else {
+        match b.try_get(wrapping_add(off, j)) {
+            Option::Some(v) => widen_u64(v),
+            Option::None => 0,
+        }
+    }
+}
+
+// Whether the text node at `i` (with chunks in `b` or `s`) reads `lit`.
+pub fn text_eq_s(in b: Slice[u8], in s: Slice[u8], in n: Slice[u64], i: u64, in lit: Slice[u8])
+    -> bool {
     if kind(in n, i) != K_TEXT || str_len(in n, i) != lit.len() {
         return false;
     }
@@ -645,12 +736,9 @@ pub fn text_eq(in b: Slice[u8], in n: Slice[u64], i: u64, in lit: Slice[u8]) -> 
             if j == len {
                 break;
             }
-            let x = match b.try_get(wrapping_add(off, j)) {
-                Option::Some(v) => v,
-                Option::None => return false,
-            };
+            let x = str_byte(in b, in s, off, j);
             let y = match lit.try_get(wrapping_add(at, j)) {
-                Option::Some(v) => v,
+                Option::Some(v) => widen_u64(v),
                 Option::None => return false,
             };
             if x != y {
@@ -661,6 +749,196 @@ pub fn text_eq(in b: Slice[u8], in n: Slice[u64], i: u64, in lit: Slice[u8]) -> 
         at = wrapping_add(at, len);
         c = wrapping_add(c, 1);
     }
+}
+
+// Whether the text node at `i` reads `lit`.
+pub fn text_eq(in b: Slice[u8], in n: Slice[u64], i: u64, in lit: Slice[u8]) -> bool {
+    text_eq_s(in b, in b, in n, i, in lit)
+}
+
+// Whether two string nodes `a` and `c` (same kind, chunks in `b` or `s`)
+// hold identical bytes.
+pub fn str_nodes_eq(in b: Slice[u8], in s: Slice[u8], in n: Slice[u64], a: u64, c: u64) -> bool {
+    let total = str_len(in n, a);
+    if total != str_len(in n, c) {
+        return false;
+    }
+    if total == 0 {
+        return true;
+    }
+    let ka = arg(in n, a);
+    let kc = arg(in n, c);
+    let mut ca = 0;
+    let mut cc = 0;
+    let mut ja = 0;
+    let mut jc = 0;
+    loop {
+        if ca == ka {
+            return true;
+        }
+        let sa = wrapping_add(a, wrapping_add(2, wrapping_mul(ca, 2)));
+        let oa = kind(in n, sa);
+        let la = arg(in n, sa);
+        if ja == la {
+            ca = wrapping_add(ca, 1);
+            ja = 0;
+            continue;
+        }
+        let sc = wrapping_add(c, wrapping_add(2, wrapping_mul(cc, 2)));
+        let oc = kind(in n, sc);
+        let lc = arg(in n, sc);
+        if jc == lc {
+            cc = wrapping_add(cc, 1);
+            jc = 0;
+            continue;
+        }
+        if str_byte(in b, in s, oa, ja) != str_byte(in b, in s, oc, jc) {
+            return false;
+        }
+        ja = wrapping_add(ja, 1);
+        jc = wrapping_add(jc, 1);
+    }
+}
+
+// Make a `K_BYTES` node contiguous in `b` or `s`.
+pub fn materialize_bytes(
+    in b: Slice[u8],
+    inout s: Slice[u8],
+    inout sc: Scratch,
+    in n: Slice[u64],
+    node: u64
+) -> BytesSpan eff [Fail[AErr]] {
+    let k = arg(in n, node);
+    if k == 0 {
+        return BytesSpan {
+            in_scratch: false,
+            off: 0,
+            len: 0,
+            base: 0
+        };
+    }
+    if k == 1 {
+        let slot = wrapping_add(node, 2);
+        let off = kind(in n, slot);
+        let len = arg(in n, slot);
+        if off >= SCRATCH_BIT {
+            return BytesSpan {
+                in_scratch: true,
+                off: wrapping_sub(off, SCRATCH_BIT),
+                len: len,
+                base: off
+            };
+        }
+        return BytesSpan {
+            in_scratch: false,
+            off: off,
+            len: len,
+            base: off
+        };
+    }
+    let total = str_len(in n, node);
+    if total == 0 {
+        return BytesSpan {
+            in_scratch: false,
+            off: 0,
+            len: 0,
+            base: 0
+        };
+    }
+    if total > s.len() || sc.pos > wrapping_sub(s.len(), total) {
+        need_scratch(wrapping_add(sc.pos, total));
+    }
+    let start = sc.pos;
+    let mut dst = start;
+    let mut c = 0;
+    loop {
+        if c == k {
+            break;
+        }
+        let slot = wrapping_add(node, wrapping_add(2, wrapping_mul(c, 2)));
+        let off = kind(in n, slot);
+        let len = arg(in n, slot);
+        if len > 0 {
+            if off >= SCRATCH_BIT {
+                let src = wrapping_sub(off, SCRATCH_BIT);
+                let mut j = 0;
+                loop {
+                    if j == len {
+                        break;
+                    }
+                    let bv = match s.try_get(wrapping_add(src, j)) {
+                        Option::Some(v) => v,
+                        Option::None => 0,
+                    };
+                    s.try_set(wrapping_add(dst, j), bv);
+                    j = wrapping_add(j, 1);
+                }
+            } else {
+                s.try_copy_from(dst, in b[off..wrapping_add(off, len)]);
+            }
+            dst = wrapping_add(dst, len);
+        }
+        c = wrapping_add(c, 1);
+    }
+    sc.pos = dst;
+    BytesSpan {
+        in_scratch: true,
+        off: start,
+        len: total,
+        base: wrapping_add(SCRATCH_BIT, start)
+    }
+}
+
+// Decode a contiguous `BytesSpan` whole into `n` (appending after `cur_len`),
+// returning its root node index.
+pub fn decode_span(
+    in b: Slice[u8],
+    in s: Slice[u8],
+    sp: BytesSpan,
+    field: u64,
+    inout n: Slice[u64],
+    inout st: Slice[u64]
+) -> u64 eff [Fail[AErr]] {
+    let root = wrapping_add(cur_len(in n), 1);
+    if sp.in_scratch {
+        decode_whole_at(
+            in s[sp.off..wrapping_add(sp.off, sp.len)],
+            sp.base,
+            field,
+            inout n,
+            inout st
+        );
+    } else {
+        decode_whole_at(
+            in b[sp.off..wrapping_add(sp.off, sp.len)],
+            sp.base,
+            field,
+            inout n,
+            inout st
+        );
+    }
+    root
+}
+
+// Whether node `i` is an integer that fits in `i64`.
+pub fn is_i64(in n: Slice[u64], i: u64) -> bool {
+    let k = kind(in n, i);
+    (k == K_UINT || k == K_NINT) && arg(in n, i) <= I64_MAX
+}
+
+// Two's complement `i64` bits of integer node `i` (caller checked `is_i64`).
+pub fn i64_bits(in n: Slice[u64], i: u64) -> u64 {
+    let a = arg(in n, i);
+    if kind(in n, i) == K_NINT {
+        a ^ INDEFINITE
+    } else {
+        a
+    }
+}
+
+// Whether two integer nodes (fitting `i64`) represent the same integer.
+pub fn int_nodes_eq(in n: Slice[u64], a: u64, c: u64) -> bool {
+    kind(in n, a) == kind(in n, c) && arg(in n, a) == arg(in n, c)
 }
 
 // Copy the string node at `i` to the output words: its chunk count, then

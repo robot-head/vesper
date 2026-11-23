@@ -96,7 +96,7 @@ pub mod drops;
 mod eval_host;
 pub use eval_host::EvalHost;
 #[path = "ffi_lowering/types.rs"]
-mod types;
+pub(crate) mod types;
 use types::ParamKind;
 
 /// Schema of a [`ForeignObject`]'s link manifest.
@@ -259,10 +259,24 @@ struct Import {
 #[derive(Debug, Clone, Default)]
 pub struct Imports {
     libraries: BTreeMap<String, Import>,
+    /// Static link names a package's objects provide (`[package]
+    /// objects`, manuscript §16.3), each with that package.
+    objects: BTreeMap<String, String>,
 }
 impl Imports {
     pub fn new() -> Self {
         Self::default()
+    }
+    /// Record that `package`'s objects provide the static library
+    /// linked as `link_name`.
+    pub fn provide_by_objects(&mut self, link_name: &str, package: &str) {
+        self.objects
+            .insert(link_name.to_owned(), package.to_owned());
+    }
+    /// The package whose objects provide the library linked as
+    /// `link_name`, if one does.
+    pub fn objects_provider(&self, link_name: &str) -> Option<&str> {
+        self.objects.get(link_name).map(String::as_str)
     }
     /// Parse one bounded `.vsys` library and import it.
     pub fn add(&mut self, vsys: &str, handler: Handler) -> Result<&LibraryDescriptor, FfiError> {
@@ -289,6 +303,41 @@ impl Imports {
             handler,
         });
         Ok(&import.descriptor)
+    }
+    /// Imports needed by a host binding this module's foreign calls. Include
+    /// other declarations of a called C symbol so the host still detects
+    /// conflicting addresses across libraries.
+    pub fn for_host_calls(&self, calls: &[ForeignCall]) -> Self {
+        let mut called = BTreeSet::new();
+        let mut symbols = BTreeSet::new();
+        for call in calls {
+            called.insert(call.library.as_str());
+            if let Some(f) = self
+                .libraries
+                .get(&call.library)
+                .and_then(|import| import.descriptor.function(&call.symbol))
+                && !f.is_indirect()
+            {
+                symbols.insert(f.link_symbol());
+            }
+        }
+        let libraries = self
+            .libraries
+            .iter()
+            .filter(|(name, import)| {
+                called.contains(name.as_str())
+                    || import
+                        .descriptor
+                        .functions()
+                        .iter()
+                        .any(|f| !f.is_indirect() && symbols.contains(f.link_symbol()))
+            })
+            .map(|(name, import)| (name.clone(), import.clone()))
+            .collect();
+        Self {
+            libraries,
+            objects: self.objects.clone(),
+        }
     }
     pub fn libraries(&self) -> impl Iterator<Item = (&LibraryDescriptor, Handler)> {
         self.libraries.values().map(|i| (&i.descriptor, i.handler))
@@ -1493,9 +1542,24 @@ impl<'a> Rewriter<'a> {
             ExprKind::Literal(_) => {}
             ExprKind::Name(n) => {
                 if let Some((library, symbol)) = self.foreign_path(n) {
-                    let message =
-                        format!("foreign function {library}::{symbol} can only be called");
-                    self.error(FfiErrorKind::ForeignValue, message, &span);
+                    if self.generated.constant(library, symbol).is_some() {
+                        let fn_name = types::const_function_name(library, symbol);
+                        *e = Expr {
+                            kind: ExprKind::Call {
+                                callee: Box::new(Expr {
+                                    kind: ExprKind::Name(fn_name),
+                                    span: span.start..span.start,
+                                }),
+                                types: vec![],
+                                args: vec![],
+                            },
+                            span,
+                        };
+                    } else {
+                        let message =
+                            format!("foreign function {library}::{symbol} can only be called");
+                        self.error(FfiErrorKind::ForeignValue, message, &span);
+                    }
                 } else if self.generated.is_handle(n) {
                     self.handle_misuse(n, "constructed", &span);
                 }
@@ -1514,6 +1578,7 @@ impl<'a> Rewriter<'a> {
                 let foreign = match &callee.kind {
                     ExprKind::Name(n) => self
                         .foreign_path(n)
+                        .filter(|(l, s)| self.generated.constant(l, s).is_none())
                         .map(|(l, s)| (l.to_owned(), s.to_owned())),
                     _ => None,
                 };
@@ -1623,12 +1688,12 @@ impl<'a> Rewriter<'a> {
                     self.expr(s);
                 }
                 self.expr(body);
-                for p in &ret.pats {
+                for p in &mut ret.pats {
                     self.pattern(p);
                 }
                 self.expr(&mut ret.body);
                 for c in ops {
-                    for p in &c.pats {
+                    for p in &mut c.pats {
                         self.pattern(p);
                     }
                     self.expr(&mut c.body);
@@ -1645,11 +1710,24 @@ impl<'a> Rewriter<'a> {
             span,
         );
     }
-    fn pattern(&mut self, p: &Pattern) {
-        match &p.kind {
+    fn pattern(&mut self, p: &mut Pattern) {
+        let span = p.span.clone();
+        match &mut p.kind {
             PatternKind::Constructor { name, fields, .. } => {
+                if fields.is_empty()
+                    && let Some((library, symbol)) = self.foreign_path(name)
+                    && let Some((scalar, value)) = self.generated.constant(library, symbol)
+                {
+                    p.kind = PatternKind::Literal(Literal::Int(value));
+                    p.integer_kind = Some(
+                        crate::numeric::IntegerKind::from_name(scalar)
+                            .expect(".vsys constant has an integer scalar"),
+                    );
+                    return;
+                }
                 if self.generated.is_handle(name) {
-                    self.handle_misuse(name, "destructured", &p.span);
+                    let name = name.clone();
+                    self.handle_misuse(&name, "destructured", &span);
                 }
                 for (_, f) in fields {
                     self.pattern(f);
@@ -1810,6 +1888,8 @@ pub fn describe_parameter(p: &ParameterType) -> String {
             )
         }
         ParameterType::CStr => "in Slice[u8]".into(),
+        ParameterType::CWStr => "in Slice[u16]".into(),
+        ParameterType::CStrList => "in Slice[u8] (NUL-ended strings)".into(),
         ParameterType::Function { callback, retain } => describe_function(callback.name(), *retain),
     }
 }
@@ -1823,6 +1903,7 @@ fn describe_value(v: &ValueType) -> String {
     match v {
         ValueType::Unit => "Unit".into(),
         ValueType::Scalar(s) => s.name().into(),
+        ValueType::Float(f) => f.name().into(),
         ValueType::Bool => "bool".into(),
         ValueType::Enum(e) => e.name().into(),
         ValueType::Address { pointee, .. } => format!("Ptr[{}]", pointee.name()),
@@ -1833,6 +1914,8 @@ fn describe_value(v: &ValueType) -> String {
         ValueType::Handle { handle, .. } | ValueType::NonNullHandle { handle } => {
             handle.name().into()
         }
+        ValueType::CStr => "Option[ChunkSeq[u8]] (a copy of the C string)".into(),
+        ValueType::CWStr => "Option[ChunkSeq[u16]] (a copy of the wide C string)".into(),
     }
 }
 

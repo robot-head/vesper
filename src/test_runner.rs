@@ -958,10 +958,6 @@ fn bridge_diagnostics(mut error: FfiError) -> Vec<Diagnostic> {
     error.diagnostics
 }
 
-fn test_host(imports: &Imports, opts: &Options) -> Result<EvalHost, String> {
-    crate::vsys_commands::eval_host_in(imports, "test", &opts.link_search)
-}
-
 impl TestProgram {
     fn standalone(display: String, source: String) -> Result<Self, Box<FileUnitTests>> {
         let prepared = vesper::forge_frontend::parse_compiler_source(&source, true)
@@ -1146,7 +1142,7 @@ fn host_target_isa() -> String {
     format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS)
 }
 
-fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> {
+fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>, Option<EvalHost>), String> {
     let target = Path::new(&opts.path);
     let package = PackageTarget::discover(target)?
         .map(|package| TestProgram::package(&package, None))
@@ -1171,6 +1167,7 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
         None
     };
 
+    let mut host = None;
     for program in programs {
         let program = match program {
             Ok(program) => program,
@@ -1205,11 +1202,13 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
                 continue;
             }
         };
-        let host = program
-            .imports
-            .as_ref()
-            .map(|i| test_host(i, opts))
-            .transpose()?;
+        if let (Some(imports), TestWorld::Foreign(foreign)) = (&program.imports, &checked) {
+            host = Some(crate::vsys_commands::eval_host_in(
+                &imports.for_host_calls(foreign.calls()),
+                "test",
+                &opts.link_search,
+            )?);
+        }
         let fn_graph = FunctionGraph::from_module(&program.module);
         let combined = program.sources.as_ref().map(SourceMap::combined);
         let package_hash = combined.as_ref().map(|text| blake3::hash(text.as_bytes()));
@@ -1241,7 +1240,7 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
             opts.filter.as_deref().unwrap_or_default()
         ));
     }
-    Ok((all_passed, results))
+    Ok((all_passed, results, host))
 }
 
 struct TestExecution<'a> {
@@ -1941,7 +1940,7 @@ fn collect_source_mutants(
 }
 
 fn run_mutation_gate(opts: &Options) -> Result<(), String> {
-    let (baseline_passed, files) = run_unit_suite(opts)?;
+    let (baseline_passed, files, host) = run_unit_suite(opts)?;
     if !baseline_passed {
         let summary = serde_json::json!({
             "mode": "mutate",
@@ -1973,11 +1972,6 @@ fn run_mutation_gate(opts: &Options) -> Result<(), String> {
     let package_program = package
         .as_ref()
         .map(|target| TestProgram::package(target, None))
-        .transpose()?;
-    let host = package_program
-        .as_ref()
-        .and_then(|program| program.imports.as_ref())
-        .map(|i| test_host(i, opts))
         .transpose()?;
     let mut all_candidates = Vec::new();
     let dependency_source = if let Some(path) = &opts.mutate_dependency {
@@ -2259,7 +2253,7 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
             }
         };
     }
-    let (all_passed, files) = match run_unit_suite(&opts) {
+    let (all_passed, files, _) = match run_unit_suite(&opts) {
         Ok(res) => res,
         Err(error) => {
             if opts.json {

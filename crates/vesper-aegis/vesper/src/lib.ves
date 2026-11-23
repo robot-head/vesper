@@ -17,6 +17,7 @@
 // (FIELDS), and `a`, `b` the variant's numbers.
 use self::cbor::decode as cbor_decode_impl;
 use self::cca::{
+    cca_token_parse as cca_token_parse_impl,
     platform_claims,
     platform_profile,
     realm_claims,
@@ -25,6 +26,19 @@ use self::cca::{
 use self::claims::{
     check_policy,
     decode_wire
+};
+use self::corim::{
+    corim_meta_parse as corim_meta_parse_impl,
+    corim_parse as corim_parse_impl
+};
+use self::corim_cca::{
+    cca_appraise as cca_appraise_impl,
+    corim_validate_cca as corim_validate_cca_impl
+};
+use self::cose::{
+    cose_key_p384 as cose_key_p384_impl,
+    sig_structure as cose_sig_structure_impl,
+    sign1_parse as cose_sign1_parse_impl
 };
 use self::sgx::parse as sgx_parse_impl;
 use self::snp::{
@@ -41,6 +55,17 @@ pub copy struct AErr {
     field: u64,
     a: u64,
     b: u64
+}
+
+// An AttestError: variant index, target/prefix index, reason index and payload.
+pub copy struct AtErr {
+    kind: u64,
+    what: u64,
+    reason: u64,
+    index: u64,
+    extra: u64,
+    off: u64,
+    len: u64
 }
 
 // An AegisVerifyError: variant index and payload.
@@ -140,4 +165,81 @@ pub fn verify_attestation_claims(
     in expected: Slice[u8]
 ) -> Unit eff [Fail[PErr]] {
     check_policy(in cw, in cb, in pw, in pb, in expected)
+}
+
+// COSE_Sign1 parsing and header validation (module cose).
+pub fn cose_sign1_parse(
+    in b: Slice[u8],
+    inout s: Slice[u8],
+    inout n: Slice[u64],
+    inout st: Slice[u64],
+    inout w: Slice[u64],
+    field: u64,
+    reason: u64
+) -> Unit eff [Fail[AErr]] {
+    cose_sign1_parse_impl(in b, inout s, inout n, inout st, inout w, field, reason)
+}
+
+// RFC 8152 Sig_structure TBS encoder (module cose).
+pub fn cose_sig_structure(
+    in prot: Slice[u8],
+    in aad: Slice[u8],
+    in pay: Slice[u8],
+    inout out: Slice[u8]
+) -> u64 {
+    cose_sig_structure_impl(in prot, in aad, in pay, inout out)
+}
+
+// COSE_Key / raw SEC1 P-384 decoder (module cose).
+pub fn cose_key_p384(
+    in b: Slice[u8],
+    inout n: Slice[u64],
+    inout st: Slice[u64],
+    inout out_sec1: Slice[u8]
+) -> Unit eff [Fail[AtErr]] {
+    cose_key_p384_impl(in b, inout n, inout st, inout out_sec1)
+}
+
+// CcaToken::parse (module cca).
+pub fn cca_token_parse(
+    in b: Slice[u8],
+    inout s: Slice[u8],
+    inout n: Slice[u64],
+    inout st: Slice[u64],
+    inout w: Slice[u64]
+) -> Unit eff [Fail[AErr]] {
+    cca_token_parse_impl(in b, inout s, inout n, inout st, inout w)
+}
+
+// Corim::parse_unsigned (module corim).
+pub fn corim_parse(
+    in b: Slice[u8],
+    inout s: Slice[u8],
+    inout n: Slice[u64],
+    inout st: Slice[u64],
+    inout w: Slice[u64]
+) -> Unit eff [Fail[AErr]] {
+    corim_parse_impl(in b, inout s, inout n, inout st, inout w)
+}
+
+// Corim corim-meta parser (module corim).
+pub fn corim_meta_parse(
+    in b: Slice[u8],
+    inout n: Slice[u64],
+    inout st: Slice[u64],
+    inout w: Slice[u64]
+) -> Unit eff [Fail[AErr]] {
+    corim_meta_parse_impl(in b, inout n, inout st, inout w)
+}
+
+// CcaCorimStore::add endorsement profile validator (module corim_cca).
+pub fn corim_validate_cca(now_sec: u64, in w: Slice[u64], in b: Slice[u8])
+    -> u64 eff [Fail[AtErr]] {
+    corim_validate_cca_impl(now_sec, in w, in b)
+}
+
+// appraise_cca_with_options (module corim_cca).
+pub fn cca_appraise(in w: Slice[u64], in b: Slice[u8], inout w_out: Slice[u64])
+    -> Unit eff [Fail[AtErr]] {
+    cca_appraise_impl(in w, in b, inout w_out)
 }

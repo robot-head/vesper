@@ -13,10 +13,16 @@
 
 use super::check_words::{Enc, pass_word};
 use super::ir_words::{self, Payload, Tables};
-use vesper::ast::{Effect, Effects, Expr, ExprKind, Function, Literal, Pattern, PatternKind};
+use std::borrow::Cow;
+use std::collections::BTreeSet;
+use vesper::ast::{Effect, Effects, Expr, ExprKind, Function, Literal, Pass, Pattern, PatternKind};
 use vesper::check::World;
-use vesper::ir::Program;
-use vesper::wasm_backend::{ENTRY_INTERFACE, EffectLowering, WasmArtifact, WasmOptions, WasmWorld};
+use vesper::ir::{Op, Program};
+use vesper::seq::SeqOp;
+use vesper::wasm_backend::{
+    ENTRY_INTERFACE, EffectLowering, HandlerLowering, HandlerMode, WasmArtifact, WasmOptions,
+    WasmWorld,
+};
 
 // ------------------------------------------------------------------ input
 
@@ -226,21 +232,46 @@ fn capability_names(w: &World) -> Vec<String> {
 /// calls: n, n x (start, end, k, k x (name, type))
 /// exprs: one per pool row: 0 | 1 closure fn, free | 2 handler (see `Sec::expr`)
 /// ```
-pub fn wasm_input(w: &World, program: &Program, entry: &str, o: &WasmOptions) -> Option<Vec<u8>> {
-    // A mutable element view (`match s.try_get_mut(i) { Some(x) => .. }`,
-    // an `inout s[i]` argument) binds a sequence element in place; the port
-    // does not lower one yet (#1506), so the program stays with Rust. A
-    // shared view reads the element, which is what the port binds.
-    if w.element_views
-        .values()
-        .any(|p| *p == vesper::ast::Pass::Inout)
-    {
-        return None;
+// Place IR represents both element views as TryGet. Mark the mutable receiver
+// in the Wasm input so the port can reject it when the function is reachable.
+// If a source view cannot be matched to an instruction, use the Rust fallback.
+fn wasm_element_views<'a>(w: &World, program: &'a Program) -> Option<Cow<'a, Program>> {
+    let mut unmatched: BTreeSet<_> = w
+        .element_views
+        .iter()
+        .filter_map(|(span, pass)| (*pass == Pass::Inout).then_some(*span))
+        .collect();
+    if unmatched.is_empty() {
+        return Some(Cow::Borrowed(program));
     }
+    let mut marked = program.clone();
+    for i in marked
+        .functions
+        .values_mut()
+        .flat_map(|f| &mut f.blocks)
+        .flat_map(|b| &mut b.instructions)
+    {
+        let span = (i.span.start, i.span.end);
+        if w.element_views.get(&span) == Some(&Pass::Inout)
+            && let Op::Seq {
+                op: SeqOp::TryGet,
+                args,
+            } = &mut i.op
+            && let Some(receiver) = args.first_mut()
+        {
+            receiver.pass = Pass::Inout;
+            unmatched.remove(&span);
+        }
+    }
+    unmatched.is_empty().then_some(Cow::Owned(marked))
+}
+
+pub fn wasm_input(w: &World, program: &Program, entry: &str, o: &WasmOptions) -> Option<Vec<u8>> {
     if !ir_words::encodable(w, program) {
         return None;
     }
-    let mut t = Tables::of(program);
+    let program = wasm_element_views(w, program)?;
+    let mut t = Tables::of(&program);
     let labels: Vec<String> = t
         .pool
         .items
@@ -353,11 +384,22 @@ pub enum Outcome {
         wit: String,
         /// `Builder::function_count` (imports and defined functions).
         functions: usize,
+        /// The plan's handlers, in plan order.
+        handlers: Vec<PortHandler>,
     },
     /// An error class as `error_class` spells it, and its site.
     Error(String, u64),
     /// A construct this port does not lower yet (handlers, host frames).
     NotPorted(u64),
+}
+
+/// One handler the port lowered: its site instance, its effect and each
+/// clause's operation index and mode (0 Abort, 1 Tail).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortHandler {
+    pub site: String,
+    pub effect: String,
+    pub clauses: Vec<(usize, u64)>,
 }
 
 fn unpack_bytes(words: &[u64]) -> (Vec<u8>, usize) {
@@ -375,11 +417,30 @@ pub fn outcome(words: &[u64]) -> Outcome {
     if words[0] == 0 {
         let functions = words[1] as usize;
         let (core, used) = unpack_bytes(&words[2..]);
-        let (wit, _) = unpack_bytes(&words[2 + used..]);
+        let (wit, more) = unpack_bytes(&words[2 + used..]);
+        let mut at = 2 + used + more;
+        let mut handlers = vec![];
+        for _ in 0..words[at] {
+            at += 1;
+            let (site, n) = unpack_bytes(&words[at..]);
+            at += n;
+            let (effect, n) = unpack_bytes(&words[at..]);
+            at += n;
+            let clauses = (0..words[at] as usize)
+                .map(|k| (words[at + 1 + 2 * k] as usize, words[at + 2 + 2 * k]))
+                .collect::<Vec<_>>();
+            at += 2 * clauses.len();
+            handlers.push(PortHandler {
+                site: String::from_utf8(site).unwrap(),
+                effect: String::from_utf8(effect).unwrap(),
+                clauses,
+            });
+        }
         return Outcome::Module {
             core,
             wit: String::from_utf8(wit).unwrap(),
             functions,
+            handlers,
         };
     }
     let (kind, construct, site) = (words[1], words[2] as usize, words[3]);
@@ -397,7 +458,126 @@ pub fn outcome(words: &[u64]) -> Outcome {
 /// The WASI packages a command world without host imports names
 /// (src/wasm_backend/host.rs `IO_WIT`, `CLI_WIT`).
 const IO_WIT: &str = "package wasi:io@0.2.0;\n\ninterface error {\n  resource error;\n}\n\ninterface streams {\n  use error.{error};\n  variant stream-error {\n    last-operation-failed(error),\n    closed,\n  }\n  resource output-stream {\n    blocking-write-and-flush: func(contents: list<u8>) -> result<_, stream-error>;\n  }\n}\n";
-const CLI_WIT: &str = "package wasi:cli@0.2.0;\n\ninterface run {\n  run: func() -> result;\n}\n\ninterface stdout {\n  use wasi:io/streams@0.2.0.{output-stream};\n  get-stdout: func() -> output-stream;\n}\n";
+const CLI_WIT: &str = "package wasi:cli@0.2.0;\n\ninterface run {\n  run: func() -> result;\n}\n\ninterface stdout {\n  use wasi:io/streams@0.2.0.{output-stream};\n  get-stdout: func() -> output-stream;\n}\n\ninterface environment {\n  get-environment: func() -> list<tuple<string, string>>;\n  get-arguments: func() -> list<string>;\n  initial-cwd: func() -> option<string>;\n}\n";
+/// The WASI 0.2 interfaces the standard I/O libraries lower to
+/// (packages/vesper-wasm-backend/src/host.ves): every type as WASI defines
+/// it, and only the functions the shims import.
+const CLOCKS_WIT: &str = r#"package wasi:clocks@0.2.0;
+
+interface wall-clock {
+  record datetime {
+    seconds: u64,
+    nanoseconds: u32,
+  }
+}
+"#;
+const FILESYSTEM_WIT: &str = r#"package wasi:filesystem@0.2.0;
+
+interface types {
+  use wasi:clocks/wall-clock@0.2.0.{datetime};
+  type filesize = u64;
+  enum descriptor-type {
+    unknown,
+    block-device,
+    character-device,
+    directory,
+    fifo,
+    symbolic-link,
+    regular-file,
+    socket,
+  }
+  flags descriptor-flags {
+    read,
+    write,
+    file-integrity-sync,
+    data-integrity-sync,
+    requested-write-sync,
+    mutate-directory,
+  }
+  flags path-flags {
+    symlink-follow,
+  }
+  flags open-flags {
+    create,
+    directory,
+    exclusive,
+    truncate,
+  }
+  type link-count = u64;
+  record descriptor-stat {
+    %type: descriptor-type,
+    link-count: link-count,
+    size: filesize,
+    data-access-timestamp: option<datetime>,
+    data-modification-timestamp: option<datetime>,
+    status-change-timestamp: option<datetime>,
+  }
+  record directory-entry {
+    %type: descriptor-type,
+    name: string,
+  }
+  enum error-code {
+    access,
+    would-block,
+    already,
+    bad-descriptor,
+    busy,
+    deadlock,
+    quota,
+    exist,
+    file-too-large,
+    illegal-byte-sequence,
+    in-progress,
+    interrupted,
+    invalid,
+    io,
+    is-directory,
+    loop,
+    too-many-links,
+    message-size,
+    name-too-long,
+    no-device,
+    no-entry,
+    no-lock,
+    insufficient-memory,
+    insufficient-space,
+    not-directory,
+    not-empty,
+    not-recoverable,
+    unsupported,
+    no-tty,
+    no-such-device,
+    overflow,
+    not-permitted,
+    pipe,
+    read-only,
+    invalid-seek,
+    text-file-busy,
+    cross-device,
+  }
+  resource descriptor {
+    read: func(length: filesize, offset: filesize) -> result<tuple<list<u8>, bool>, error-code>;
+    write: func(buffer: list<u8>, offset: filesize) -> result<filesize, error-code>;
+    read-directory: func() -> result<directory-entry-stream, error-code>;
+    sync: func() -> result<_, error-code>;
+    create-directory-at: func(path: string) -> result<_, error-code>;
+    stat: func() -> result<descriptor-stat, error-code>;
+    stat-at: func(path-flags: path-flags, path: string) -> result<descriptor-stat, error-code>;
+    open-at: func(path-flags: path-flags, path: string, open-flags: open-flags, %flags: descriptor-flags) -> result<descriptor, error-code>;
+    remove-directory-at: func(path: string) -> result<_, error-code>;
+    rename-at: func(old-path: string, new-descriptor: borrow<descriptor>, new-path: string) -> result<_, error-code>;
+    unlink-file-at: func(path: string) -> result<_, error-code>;
+  }
+  resource directory-entry-stream {
+    read-directory-entry: func() -> result<option<directory-entry>, error-code>;
+  }
+}
+
+interface preopens {
+  use types.{descriptor};
+  get-directories: func() -> list<tuple<descriptor, string>>;
+}
+"#;
 
 /// `component::encode` for a port module: the WIT world embedded, then
 /// wit-component (the part of the backend that stays in Rust).
@@ -405,6 +585,10 @@ pub fn wrap(mut core: Vec<u8>, wit: &str, world: WasmWorld) -> Vec<u8> {
     let mut resolve = wit_parser::Resolve::default();
     resolve.push_source("wasi-io.wit", IO_WIT).unwrap();
     resolve.push_source("wasi-cli.wit", CLI_WIT).unwrap();
+    resolve.push_source("wasi-clocks.wit", CLOCKS_WIT).unwrap();
+    resolve
+        .push_source("wasi-filesystem.wit", FILESYSTEM_WIT)
+        .unwrap();
     let pkg = resolve.push_source("vesper-program.wit", wit).unwrap();
     let name = match world {
         WasmWorld::Command => "program",
@@ -427,9 +611,35 @@ pub fn wrap(mut core: Vec<u8>, wit: &str, world: WasmWorld) -> Vec<u8> {
         .unwrap()
 }
 
+/// The artifact's `handlers` for the port's report: operation names from
+/// the world, as `wasm_backend::compile` writes them.
+pub fn handler_lowerings(w: &World, handlers: &[PortHandler]) -> Vec<HandlerLowering> {
+    handlers
+        .iter()
+        .map(|h| HandlerLowering {
+            effect: h.effect.clone(),
+            function: h.site.clone(),
+            clauses: h
+                .clauses
+                .iter()
+                .map(|&(op, mode)| {
+                    (
+                        w.effects[&h.effect].ops[op].name.clone(),
+                        if mode == 0 {
+                            HandlerMode::Abort
+                        } else {
+                            HandlerMode::Tail
+                        },
+                    )
+                })
+                .collect(),
+        })
+        .collect()
+}
+
 /// `wasm_backend::compile`'s artifact for a module the port returned, as the
-/// `wasm` hook hands it back. Part 1 lowers no handler and no host
-/// capability, so the module uses no WasmFX and imports nothing.
+/// `wasm` hook hands it back. The port lowers no host capability and no
+/// WasmFX, so the module imports nothing.
 pub fn artifact(
     w: &World,
     entry: &str,
@@ -437,6 +647,7 @@ pub fn artifact(
     core: Vec<u8>,
     wit: String,
     functions: usize,
+    handlers: &[PortHandler],
 ) -> WasmArtifact {
     let f = &w.functions[entry];
     let component = wrap(core.clone(), &wit, o.world);
@@ -453,7 +664,7 @@ pub fn artifact(
         result: vesper::numeric::default_type(&f.result),
         stack_switching: false,
         imports: vec![],
-        handlers: vec![],
+        handlers: handler_lowerings(w, handlers),
         functions,
     }
 }
@@ -477,7 +688,8 @@ pub fn compile_with(
             core,
             wit,
             functions,
-        } => Some(artifact(w, entry, o, core, wit, functions)),
+            handlers,
+        } => Some(artifact(w, entry, o, core, wit, functions, &handlers)),
         _ => None,
     }
 }

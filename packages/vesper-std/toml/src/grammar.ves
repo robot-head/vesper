@@ -11,6 +11,8 @@ use self::{
     Part,
     NONE,
     EOF,
+    Utf8,
+    Scalar,
     K_STRING,
     K_INTEGER,
     K_FLOAT,
@@ -72,6 +74,16 @@ const E_DIGIT: u64 = 0x3000;
 const E_LEADING: u64 = 0x3001;
 
 const LIMIT: u64 = 80;
+
+// Signed integer magnitudes allowed by TOML 1.0.
+const I64_MIN_MAGNITUDE: u64 = 0x8000000000000000;
+const I64_MAX_MAGNITUDE: u64 = 0x7fffffffffffffff;
+
+// UTF-8 encoding of the optional leading U+FEFF.
+const UTF8_BOM_FIRST: u64 = 0xef;
+const UTF8_BOM_SECOND: u64 = 0xbb;
+const UTF8_BOM_THIRD: u64 = 0xbf;
+const UTF8_BOM_BYTES: u64 = 3;
 
 // Bytes.
 const TAB: u64 = 9;
@@ -289,7 +301,7 @@ fn is_ws(c: u64) -> bool {
 }
 
 fn non_ascii(c: u64) -> bool {
-    c >= 128 && c < EOF
+    c >= Utf8::ContinuationPrefix && c < EOF
 }
 
 // ---------------------------------------------------------- trivia
@@ -417,20 +429,20 @@ fn ws_comment_newline(in s: Slice[u8], inout p: P) -> bool {
 
 // Appends the UTF-8 encoding of `c` to the decoded text.
 fn push_char(inout p: P, c: u64) {
-    if c < 0x80 {
+    if c < Scalar::TwoByteMin {
         p.text.push(wrapping_u8(c));
-    } else if c < 0x800 {
-        p.text.push(wrapping_u8(0xc0 | (c >> 6)));
-        p.text.push(wrapping_u8(0x80 | (c & 0x3f)));
-    } else if c < 0x10000 {
-        p.text.push(wrapping_u8(0xe0 | (c >> 12)));
-        p.text.push(wrapping_u8(0x80 | ((c >> 6) & 0x3f)));
-        p.text.push(wrapping_u8(0x80 | (c & 0x3f)));
+    } else if c < Scalar::ThreeByteMin {
+        p.text.push(wrapping_u8(Utf8::TwoByteLead | (c >> 6)));
+        p.text.push(wrapping_u8(Utf8::ContinuationPrefix | (c & Utf8::ContinuationMask)));
+    } else if c < Scalar::FourByteMin {
+        p.text.push(wrapping_u8(Utf8::ThreeByteLead | (c >> 12)));
+        p.text.push(wrapping_u8(Utf8::ContinuationPrefix | ((c >> 6) & Utf8::ContinuationMask)));
+        p.text.push(wrapping_u8(Utf8::ContinuationPrefix | (c & Utf8::ContinuationMask)));
     } else {
-        p.text.push(wrapping_u8(0xf0 | (c >> 18)));
-        p.text.push(wrapping_u8(0x80 | ((c >> 12) & 0x3f)));
-        p.text.push(wrapping_u8(0x80 | ((c >> 6) & 0x3f)));
-        p.text.push(wrapping_u8(0x80 | (c & 0x3f)));
+        p.text.push(wrapping_u8(Utf8::FourByteLead | (c >> 18)));
+        p.text.push(wrapping_u8(Utf8::ContinuationPrefix | ((c >> 12) & Utf8::ContinuationMask)));
+        p.text.push(wrapping_u8(Utf8::ContinuationPrefix | ((c >> 6) & Utf8::ContinuationMask)));
+        p.text.push(wrapping_u8(Utf8::ContinuationPrefix | (c & Utf8::ContinuationMask)));
     }
 }
 
@@ -458,7 +470,7 @@ fn hexescape(in s: Slice[u8], inout p: P, n: u64, label: u64) -> (bool, u64) {
         cx(inout p, label);
         return (false, 0);
     }
-    if v > 0x10ffff || (v >= 0xd800 && v <= 0xdfff) {
+    if v > Scalar::Max || (v >= Scalar::SurrogateStart && v <= Scalar::SurrogateEnd) {
         p.pos = start;
         cause_err(inout p, "value is out of range");
         cut(inout p);
@@ -1060,9 +1072,9 @@ fn parse_i64(in s: Slice[u8], a: u64, b: u64, radix: u64) -> (u64, u64) {
     // Accumulate the magnitude; the limit is 2^63 - 1, or 2^63 when
     // negative.
     let limit: u64 = if neg {
-        0x8000000000000000
+        I64_MIN_MAGNITUDE
     } else {
-        0x7fffffffffffffff
+        I64_MAX_MAGNITUDE
     };
     let mut v: u64 = 0;
     loop {
@@ -2436,8 +2448,10 @@ fn keyval(in s: Slice[u8], inout p: P) -> bool {
 }
 
 fn document(in s: Slice[u8], inout p: P) -> bool {
-    if byte_at(in s, 0) == 0xef && byte_at(in s, 1) == 0xbb && byte_at(in s, 2) == 0xbf {
-        p.pos = 3;
+    if byte_at(in s, 0) == UTF8_BOM_FIRST
+        && byte_at(in s, 1) == UTF8_BOM_SECOND
+        && byte_at(in s, 2) == UTF8_BOM_THIRD {
+        p.pos = UTF8_BOM_BYTES;
     }
     ws(in s, inout p);
     loop {

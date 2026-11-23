@@ -125,6 +125,8 @@ impl<M: Module> Codegen<'_, '_, M> {
                 | SeqOp::Fill
                 | SeqOp::FillRange { .. }
                 | SeqOp::Wide(_)
+                | SeqOp::AtomicLoad { .. }
+                | SeqOp::AtomicStore { .. }
         ) {
             return Ok(None);
         }
@@ -237,8 +239,89 @@ impl<M: Module> Codegen<'_, '_, M> {
                     }
                 }
             }
+            SeqOp::AtomicLoad { width } => {
+                let at = arg(1)?;
+                let (valid, addr, int, signed, val_ty) =
+                    self.atomic_seq_target(h, start, len, at, &elem, stride, width)?;
+                let option = Type::Named("Option".into(), vec![val_ty.clone()]);
+                self.seq_option(&option, &val_ty, valid, move |this| {
+                    let v = this.b.ins().atomic_load(int, MemFlags::trusted(), addr);
+                    Ok(if int == types::I64 {
+                        v
+                    } else if signed {
+                        this.b.ins().sextend(types::I64, v)
+                    } else {
+                        this.b.ins().uextend(types::I64, v)
+                    })
+                })?
+            }
+            SeqOp::AtomicStore { width } => {
+                let at = arg(1)?;
+                let value = arg(2)?;
+                let (valid, addr, int, _, _) =
+                    self.atomic_seq_target(h, start, len, at, &elem, stride, width)?;
+                self.seq_when(valid, true, |this| {
+                    let v = if int == types::I64 {
+                        value
+                    } else {
+                        this.b.ins().ireduce(int, value)
+                    };
+                    this.b.ins().atomic_store(MemFlags::trusted(), v, addr);
+                    Ok(())
+                })?
+            }
             _ => unreachable!("matched above"),
         }))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn atomic_seq_target(
+        &mut self,
+        h: ir::Value,
+        start: ir::Value,
+        len: ir::Value,
+        at: ir::Value,
+        elem: &Type,
+        stride: i64,
+        width: Option<u8>,
+    ) -> Result<(ir::Value, ir::Value, ir::Type, bool, Type), String> {
+        match width {
+            Some(w) => {
+                let w_i64 = i64::from(w);
+                let w_val = self.b.ins().iconst(types::I64, w_i64);
+                let in_bounds = self.seq_fits(len, at, w_val);
+                let addr = self.seq_elem_addr(h, start, at, 1);
+                let rem = self.b.ins().band_imm(addr, w_i64 - 1);
+                let aligned = self.b.ins().icmp_imm(IntCC::Equal, rem, 0);
+                let valid = self.b.ins().band(in_bounds, aligned);
+                let int = if w == 4 { types::I32 } else { types::I64 };
+                let ty = Type::named(if w == 4 { "u32" } else { "u64" });
+                Ok((valid, addr, int, false, ty))
+            }
+            None => {
+                let elem_ty = crate::numeric::default_type(elem);
+                let kind = crate::numeric::IntegerKind::from_type(&elem_ty)
+                    .filter(|k| !k.wide())
+                    .ok_or("atomic sequence op expects a single-word integer element")?;
+                let in_bounds = self.b.ins().icmp(IntCC::UnsignedLessThan, at, len);
+                let addr = self.seq_elem_addr(h, start, at, stride);
+                let align = i64::from(kind.bits() / 8);
+                let valid = if align > 1 {
+                    let rem = self.b.ins().band_imm(addr, align - 1);
+                    let aligned = self.b.ins().icmp_imm(IntCC::Equal, rem, 0);
+                    self.b.ins().band(in_bounds, aligned)
+                } else {
+                    in_bounds
+                };
+                let int = match kind.bits() {
+                    8 => types::I8,
+                    16 => types::I16,
+                    32 => types::I32,
+                    _ => types::I64,
+                };
+                Ok((valid, addr, int, kind.signed(), elem_ty))
+            }
+        }
     }
 
     /// Stores `value` in the `n` elements of `h`'s buffer from element

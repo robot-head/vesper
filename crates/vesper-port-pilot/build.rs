@@ -41,6 +41,11 @@ fn main() {
         vesper_port_harness::Port::new("arrays", "vesper/arrays.ves")
             .binding("port/arrays.rs")
             .build();
+        // The callback-handle library (#1502): copy structs holding `.vsys`
+        // callback handles cross as opaque words. Vesper build only.
+        vesper_port_harness::Port::new("fnptrs", "vesper/fnptrs.ves")
+            .binding("port/fnptrs.rs")
+            .build();
     }
 }
 

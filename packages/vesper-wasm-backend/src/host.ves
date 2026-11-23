@@ -1,0 +1,2363 @@
+// The standard I/O libraries over WASI 0.2 (rust-exit gap wave 1 lane 10,
+// #1508): the wasm seed reads its sources and writes its outputs through
+// @vesper-std/env and @vesper-std/fs, whose `.vsys` libraries `StdEnv`
+// and `StdFs` the Bridge lowers to the effects `Ffi$StdEnv` and
+// `Ffi$StdFs` (src/ffi_lowering.rs). The WASI environment surface is
+// declared in env-wasip2.vsys. Here each operation becomes a
+// generated function (a shim) over the WASI imports below, with the
+// shim's semantics:
+//
+// - Arguments and environment come from `wasi:cli/environment`
+//   (`get-arguments`, `get-environment`, `initial-cwd`). `vstd_env_os` is
+//   0: wasm is no particular platform.
+// - Paths resolve against the preopened directories
+//   (`wasi:filesystem/preopens`): an absolute path against the preopen
+//   with the longest name that is a whole-component prefix of it, a
+//   relative path against the preopen named `.` (else the first). With no
+//   such preopen a call fails with NotFound (ENOENT); a NUL byte is
+//   InvalidInput.
+// - Files and directory listings are slots of a static table (32 of them),
+//   because the heap is reset under tail loops and a handle is a plain
+//   `u64` that no evacuation follows. A file slot keeps the descriptor and
+//   the position (`read` and `write` take offsets in WASI); append mode
+//   writes at the size `stat` reports.
+// - WASI `error-code`s become the shim's error words: the `IoKind` in the
+//   low 8 bits and the Linux errno of the same condition in the high 32,
+//   so a run agrees with a native Linux run.
+// - Left out (they fail with Unsupported): `remove_dir` recursive and
+//   `current_dir` when the host gives no initial directory.
+//
+// Every shim takes `i64` arguments in parameter order (an `inout`
+// argument is its cell's address, a slice its packed view, an `FsFile` or
+// `FsDir` its handle) and returns one `i64`. The call site (`lower.ves`
+// `host_call`) builds the `Option` and struct values around it. Every
+// address the canonical ABI hands back points into memory that
+// `cabi_realloc` took from the heap.
+
+use @vesper/check-data::util::{
+    add,
+    inc
+};
+use self::enc::{
+    Code,
+    ValTy,
+    code_new,
+    function_bytes,
+    vt
+};
+use self::err::{
+    WErr,
+    werr
+};
+use self::module::{
+    Builder
+};
+
+const VT_I32: u8 = 127;
+const VT_I64: u8 = 126;
+const OP_BLOCK: u8 = 2;
+const OP_LOOP: u8 = 3;
+const OP_IF: u8 = 4;
+const OP_ELSE: u8 = 5;
+const OP_END: u8 = 11;
+const OP_RETURN: u8 = 15;
+const OP_DROP: u8 = 26;
+const OP_SELECT: u8 = 27;
+const OP_I64_LOAD: u8 = 41;
+const OP_I64_LOAD8_U: u8 = 49;
+const OP_I64_LOAD32_U: u8 = 53;
+const OP_I64_STORE: u8 = 55;
+const OP_I64_STORE8: u8 = 60;
+const OP_I32_EQZ: u8 = 69;
+const OP_I64_EQZ: u8 = 80;
+const OP_I64_EQ: u8 = 81;
+const OP_I64_NE: u8 = 82;
+const OP_I64_LT_S: u8 = 83;
+const OP_I64_LT_U: u8 = 84;
+const OP_I64_GT_U: u8 = 86;
+const OP_I64_LE_U: u8 = 88;
+const OP_I64_GE_U: u8 = 90;
+const OP_I32_AND: u8 = 113;
+const OP_I32_OR: u8 = 114;
+const OP_I64_ADD: u8 = 124;
+const OP_I64_SUB: u8 = 125;
+const OP_I64_MUL: u8 = 126;
+const OP_I64_AND: u8 = 131;
+const OP_I64_OR: u8 = 132;
+const OP_I64_SHL: u8 = 134;
+const OP_I64_SHR_U: u8 = 136;
+const OP_I32_WRAP_I64: u8 = 167;
+const OP_I64_EXTEND_I32_U: u8 = 173;
+
+const K_UNSUPPORTED: u8 = 0;
+const U_EXTERNAL_FUNCTION: u8 = 11;
+const NONE32: u32 = 4294967295;
+const MASK32: u64 = 4294967295;
+
+// `Plan.host` codes of the two libraries.
+pub const HOST_ENV: u8 = 3;
+pub const HOST_FS: u8 = 4;
+
+// The operations, by index (`op_index`).
+pub const ENV_ARG_COUNT: u64 = 0;
+pub const ENV_ARG: u64 = 1;
+pub const ENV_VAR: u64 = 2;
+pub const ENV_VAR_COUNT: u64 = 3;
+pub const ENV_VAR_AT: u64 = 4;
+pub const ENV_CURRENT_DIR: u64 = 5;
+pub const ENV_OS: u64 = 6;
+pub const FS_OPEN: u64 = 7;
+pub const FS_FILE_LEN: u64 = 8;
+pub const FS_READ: u64 = 9;
+pub const FS_WRITE: u64 = 10;
+pub const FS_SYNC: u64 = 11;
+pub const FS_CLOSE: u64 = 12;
+pub const FS_RENAME: u64 = 13;
+pub const FS_REMOVE_FILE: u64 = 14;
+pub const FS_REMOVE_DIR: u64 = 15;
+pub const FS_CREATE_DIR: u64 = 16;
+pub const FS_METADATA: u64 = 17;
+pub const FS_SYNC_DIR: u64 = 18;
+pub const FS_PARENT_LEN: u64 = 19;
+pub const FS_UNIQUE: u64 = 20;
+pub const FS_READ_DIR: u64 = 21;
+pub const FS_DIR_NEXT: u64 = 22;
+pub const FS_DIR_CLOSE: u64 = 23;
+const N_OPS: u64 = 24;
+
+// Helper functions, after the operations in `Host.fns`.
+const H_ERR: u64 = 24;
+const H_PREOPENS: u64 = 25;
+const H_RESOLVE: u64 = 26;
+const H_SLOT: u64 = 27;
+const H_COPYOUT: u64 = 28;
+const H_KIND: u64 = 29;
+const H_PATH_OP: u64 = 30;
+const N_FNS: u64 = 33;
+
+// The operation's `.vsys` name, its parameter count and the passing mode
+// of each parameter (0 in, 1 inout, 2 sink: `P_*` of plan.ves), as the
+// Bridge declares them; `op_index` checks a call against it.
+fn op_name(k: u64) -> Str {
+    if k == ENV_ARG_COUNT {
+        "vstd_env_arg_count"
+    } else if k == ENV_ARG {
+        "vstd_env_arg"
+    } else if k == ENV_VAR {
+        "vstd_env_var"
+    } else if k == ENV_VAR_COUNT {
+        "vstd_env_var_count"
+    } else if k == ENV_VAR_AT {
+        "vstd_env_var_at"
+    } else if k == ENV_CURRENT_DIR {
+        "vstd_env_current_dir"
+    } else if k == ENV_OS {
+        "vstd_env_os"
+    } else if k == FS_OPEN {
+        "vstd_fs_open"
+    } else if k == FS_FILE_LEN {
+        "vstd_fs_file_len"
+    } else if k == FS_READ {
+        "vstd_fs_read"
+    } else if k == FS_WRITE {
+        "vstd_fs_write"
+    } else if k == FS_SYNC {
+        "vstd_fs_sync"
+    } else if k == FS_CLOSE {
+        "vstd_fs_close"
+    } else if k == FS_RENAME {
+        "vstd_fs_rename"
+    } else if k == FS_REMOVE_FILE {
+        "vstd_fs_remove_file"
+    } else if k == FS_REMOVE_DIR {
+        "vstd_fs_remove_dir"
+    } else if k == FS_CREATE_DIR {
+        "vstd_fs_create_dir"
+    } else if k == FS_METADATA {
+        "vstd_fs_metadata"
+    } else if k == FS_SYNC_DIR {
+        "vstd_fs_sync_dir"
+    } else if k == FS_PARENT_LEN {
+        "vstd_fs_parent_len"
+    } else if k == FS_UNIQUE {
+        "vstd_fs_unique"
+    } else if k == FS_READ_DIR {
+        "vstd_fs_read_dir"
+    } else if k == FS_DIR_NEXT {
+        "vstd_fs_dir_next"
+    } else {
+        "vstd_fs_dir_close"
+    }
+}
+
+// Passing modes, one character per parameter: `i` in, `o` inout, `s` sink.
+fn op_passes(k: u64) -> Str {
+    if k == ENV_ARG_COUNT || k == ENV_VAR_COUNT || k == ENV_OS || k == FS_UNIQUE {
+        ""
+    } else if k == ENV_ARG || k == ENV_VAR || k == ENV_VAR_AT {
+        "io"
+    } else if k == ENV_CURRENT_DIR {
+        "oo"
+    } else if k == FS_OPEN || k == FS_REMOVE_DIR || k == FS_CREATE_DIR {
+        "iio"
+    } else if k == FS_FILE_LEN || k == FS_PARENT_LEN {
+        "i"
+    } else if k == FS_READ || k == FS_DIR_NEXT {
+        "ooo"
+    } else if k == FS_WRITE {
+        "oio"
+    } else if k == FS_SYNC {
+        "oo"
+    } else if k == FS_CLOSE || k == FS_DIR_CLOSE {
+        "s"
+    } else if k == FS_RENAME {
+        "iio"
+    } else if k == FS_REMOVE_FILE || k == FS_SYNC_DIR || k == FS_READ_DIR {
+        "io"
+    } else {
+        // FS_METADATA
+        "iioo"
+    }
+}
+
+// Whether parameter 0 is a handle (`FsFile` or `FsDir`).
+pub fn takes_handle(k: u64) -> bool {
+    k == FS_FILE_LEN
+        || k == FS_READ
+        || k == FS_WRITE
+        || k == FS_SYNC
+        || k == FS_CLOSE
+        || k == FS_DIR_NEXT
+        || k == FS_DIR_CLOSE
+}
+
+// Whether the result is `Option[FsFile]` or `Option[FsDir]` (the shim
+// returns the handle, 0 for `None`).
+pub fn returns_handle(k: u64) -> bool {
+    k == FS_OPEN || k == FS_READ_DIR
+}
+
+// Whether operation `k` takes an `inout FsMeta` (parameter 2, which the
+// shim fills in place: the call site passes a fresh copy).
+pub fn takes_meta(k: u64) -> bool {
+    k == FS_METADATA
+}
+
+fn byte(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(b) => b,
+        Option::None => 0,
+    }
+}
+
+// The operation `name` of library `lib` (`HOST_ENV` or `HOST_FS`) names,
+// with the Bridge's slice-arity suffix (`$s`, `$s_s`) ignored, checked
+// against `passes` (`P_*` codes); raises when it is not one.
+pub fn op_index(in name: Slice[u8], lib: u8, in passes: ChunkSeq[u8]) -> u64 eff [Fail[WErr]] {
+    let mut n = name.len();
+    for i in 0..name.len() {
+        match name.try_get(i) {
+            Option::Some(b) => {
+                if b == 36 {
+                    n = i;
+                    break;
+                }
+            },
+            Option::None => {},
+        }
+    }
+    let (lo, hi) = if lib == HOST_ENV {
+        (0, FS_OPEN)
+    } else {
+        (FS_OPEN, N_OPS)
+    };
+    for k in lo..hi {
+        let want = op_name(k).as_bytes();
+        if want.len() != n {
+            continue;
+        }
+        let mut same = true;
+        for i in 0..n {
+            if byte(in want, i) != byte(in name, i) {
+                same = false;
+                break;
+            }
+        }
+        if !same {
+            continue;
+        }
+        let ps = op_passes(k).as_bytes();
+        if ps.len() != passes.len() {
+            Fail::raise(werr(K_UNSUPPORTED, U_EXTERNAL_FUNCTION, 240));
+        }
+        for i in 0..ps.len() {
+            let want = match ps.try_get(i) {
+                Option::Some(c) => if c == 105 {
+                    0
+                } else if c == 111 {
+                    1
+                } else {
+                    2
+                },
+                Option::None => 0,
+            };
+            let have = match passes.try_get(i) {
+                Option::Some(p) => p,
+                Option::None => 9,
+            };
+            // A sink handle is passed like an in one.
+            let ok = have == want || (want == 2 && have == 0) || (want == 0 && have == 2);
+            if !ok {
+                Fail::raise(werr(K_UNSUPPORTED, U_EXTERNAL_FUNCTION, 241));
+            }
+        }
+        return k;
+    }
+    Fail::raise(werr(K_UNSUPPORTED, U_EXTERNAL_FUNCTION, 242))
+}
+
+// The WASI functions the shims call, as import indices (NONE32 when the
+// library that needs them is absent), and the static areas.
+pub struct Host {
+    env: bool,
+    fs: bool,
+    i_args: u32,
+    i_environ: u32,
+    i_cwd: u32,
+    i_preopens: u32,
+    i_open_at: u32,
+    i_read: u32,
+    i_write: u32,
+    i_stat: u32,
+    i_stat_at: u32,
+    i_sync: u32,
+    i_mkdir: u32,
+    i_rmdir: u32,
+    i_unlink: u32,
+    i_rename: u32,
+    i_readdir: u32,
+    i_read_entry: u32,
+    i_drop_desc: u32,
+    i_drop_stream: u32,
+    // the canonical ABI's return area (112 bytes)
+    scr: u64,
+    // [0] preopens read, [8] the last resolved relative path (a view),
+    // [16] the `vstd_fs_unique` counter, [24] the text "."
+    misc: u64,
+    // 37 `IoKind`s, then 37 errnos, by WASI `error-code`
+    errs: u64,
+    // the preopen table: count, then 16 x (descriptor, name address,
+    // name length)
+    pre: u64,
+    names: u64,
+    // NSLOT slots of SLOT bytes: a file is [descriptor + 1, position,
+    // append]; a listing is [stream + 1, has a pending entry, its name
+    // length, its kind, descriptor + 1, -] and the pending name at 48.
+    slots: u64,
+    // shim or helper function index + 1, by `ENV_*`/`FS_*`/`H_*`
+    fns: ChunkSeq[u32],
+}
+
+const NSLOT: u64 = 32;
+const SLOT: u64 = 304;
+const NPRE: u64 = 16;
+const NAMES: u64 = 1024;
+
+pub fn host_none() -> Host {
+    Host {
+        env: false,
+        fs: false,
+        i_args: NONE32,
+        i_environ: NONE32,
+        i_cwd: NONE32,
+        i_preopens: NONE32,
+        i_open_at: NONE32,
+        i_read: NONE32,
+        i_write: NONE32,
+        i_stat: NONE32,
+        i_stat_at: NONE32,
+        i_sync: NONE32,
+        i_mkdir: NONE32,
+        i_rmdir: NONE32,
+        i_unlink: NONE32,
+        i_rename: NONE32,
+        i_readdir: NONE32,
+        i_read_entry: NONE32,
+        i_drop_desc: NONE32,
+        i_drop_stream: NONE32,
+        scr: 0,
+        misc: 0,
+        errs: 0,
+        pre: 0,
+        names: 0,
+        slots: 0,
+        fns: ChunkSeq::new[u32](),
+    }
+}
+
+fn i32s(n: u64) -> ChunkSeq[ValTy] {
+    let mut v = ChunkSeq::new[ValTy]();
+    for _i in 0..n {
+        v.push(vt(VT_I32));
+    }
+    v
+}
+
+fn no_vals() -> ChunkSeq[ValTy] {
+    ChunkSeq::new[ValTy]()
+}
+
+// module 0 `wasi:cli/environment`, 1 `wasi:filesystem/types`, 2 preopens
+fn imp(inout b: Builder, module: u8, in name: Str, in params: ChunkSeq[ValTy])
+    -> u32 eff [Fail[WErr]] {
+    let m = if module == 0 {
+        "wasi:cli/environment@0.2.0"
+    } else if module == 1 {
+        "wasi:filesystem/types@0.2.0"
+    } else {
+        "wasi:filesystem/preopens@0.2.0"
+    };
+    b.import(in m.as_bytes(), in name.as_bytes(), in params, in no_vals())
+}
+
+// (i32 x n) with an `i64` at each position in `wide`.
+fn sig(n: u64, w1: u64, w2: u64) -> ChunkSeq[ValTy] {
+    let mut v = ChunkSeq::new[ValTy]();
+    for i in 0..n {
+        if i == w1 || i == w2 {
+            v.push(vt(VT_I64));
+        } else {
+            v.push(vt(VT_I32));
+        }
+    }
+    v
+}
+
+// The WASI kinds and errnos of `error-code` 0..36 (`access` .. `cross-device`).
+fn error_table() -> ChunkSeq[u8] {
+    // IoKind: 1 NotFound, 2 PermissionDenied, 3 AlreadyExists,
+    // 4 NotADirectory, 5 IsADirectory, 6 DirectoryNotEmpty,
+    // 7 InvalidInput, 8 Interrupted, 11 Unsupported, 12 OutOfMemory,
+    // 13 Other (std::io::ErrorKind of each errno).
+    let mut out = ChunkSeq::new[u8]();
+    out.push(2);
+    out.push(13);
+    out.push(13);
+    out.push(13);
+    out.push(13);
+    out.push(13);
+    out.push(13);
+    out.push(3);
+    out.push(13);
+    out.push(7);
+    out.push(13);
+    out.push(8);
+    out.push(7);
+    out.push(13);
+    out.push(5);
+    out.push(13);
+    out.push(13);
+    out.push(13);
+    out.push(7);
+    out.push(13);
+    out.push(1);
+    out.push(13);
+    out.push(12);
+    out.push(13);
+    out.push(4);
+    out.push(6);
+    out.push(13);
+    out.push(11);
+    out.push(13);
+    out.push(13);
+    out.push(13);
+    out.push(2);
+    out.push(13);
+    out.push(13);
+    out.push(13);
+    out.push(13);
+    out.push(13);
+    out.push(13);
+    out.push(11);
+    out.push(114);
+    out.push(9);
+    out.push(16);
+    out.push(35);
+    out.push(122);
+    out.push(17);
+    out.push(27);
+    out.push(84);
+    out.push(115);
+    out.push(4);
+    out.push(22);
+    out.push(5);
+    out.push(21);
+    out.push(40);
+    out.push(31);
+    out.push(90);
+    out.push(36);
+    out.push(19);
+    out.push(2);
+    out.push(37);
+    out.push(12);
+    out.push(28);
+    out.push(20);
+    out.push(39);
+    out.push(131);
+    out.push(95);
+    out.push(25);
+    out.push(6);
+    out.push(75);
+    out.push(1);
+    out.push(32);
+    out.push(30);
+    out.push(29);
+    out.push(26);
+    out.push(18);
+    out
+}
+
+fn zeros(n: u64) -> ChunkSeq[u8] {
+    let mut out = ChunkSeq::new[u8]();
+    for _i in 0..n {
+        out.push(0);
+    }
+    out
+}
+
+// Import what the libraries in `host` (`Plan.host` codes) need, before any
+// function is declared, and reserve their static memory.
+pub fn host_new(inout b: Builder, in codes: ChunkSeq[u8]) -> Host eff [Fail[WErr]] {
+    let mut h = host_none();
+    for i in 0..codes.len() {
+        match codes.try_get(i) {
+            Option::Some(c) => {
+                if c == HOST_ENV {
+                    h.env = true;
+                }
+                if c == HOST_FS {
+                    h.fs = true;
+                }
+            },
+            Option::None => {},
+        }
+    }
+    if !h.env && !h.fs {
+        return h;
+    }
+    if h.env {
+        h.i_args = imp(inout b, 0, "get-arguments", in i32s(1));
+        h.i_environ = imp(inout b, 0, "get-environment", in i32s(1));
+        h.i_cwd = imp(inout b, 0, "initial-cwd", in i32s(1));
+    }
+    if h.fs {
+        h.i_preopens = imp(inout b, 2, "get-directories", in i32s(1));
+        h.i_open_at = imp(inout b, 1, "[method]descriptor.open-at", in i32s(7));
+        h.i_read = imp(inout b, 1, "[method]descriptor.read", in sig(4, 1, 2));
+        h.i_write = imp(inout b, 1, "[method]descriptor.write", in sig(5, 3, 9));
+        h.i_stat = imp(inout b, 1, "[method]descriptor.stat", in i32s(2));
+        h.i_stat_at = imp(inout b, 1, "[method]descriptor.stat-at", in i32s(5));
+        h.i_sync = imp(inout b, 1, "[method]descriptor.sync", in i32s(2));
+        h.i_mkdir = imp(inout b, 1, "[method]descriptor.create-directory-at", in i32s(4));
+        h.i_rmdir = imp(inout b, 1, "[method]descriptor.remove-directory-at", in i32s(4));
+        h.i_unlink = imp(inout b, 1, "[method]descriptor.unlink-file-at", in i32s(4));
+        h.i_rename = imp(inout b, 1, "[method]descriptor.rename-at", in i32s(7));
+        h.i_readdir = imp(inout b, 1, "[method]descriptor.read-directory", in i32s(2));
+        h
+            .i_read_entry = imp(
+                inout b,
+                1,
+                "[method]directory-entry-stream.read-directory-entry",
+                in i32s(2)
+            );
+        h.i_drop_desc = imp(inout b, 1, "[resource-drop]descriptor", in i32s(1));
+        h.i_drop_stream = imp(inout b, 1, "[resource-drop]directory-entry-stream", in i32s(1));
+    }
+    h.scr = b.data(in zeros(112));
+    if h.fs {
+        let mut misc = zeros(32);
+        let ok = misc.try_set(24, 46);
+        h.misc = b.data(in misc);
+        h.errs = b.data(in error_table());
+        h.pre = b.data(in zeros(add(8, wrapping_mul(NPRE, 24))));
+        h.names = b.data(in zeros(NAMES));
+        h.slots = b.data(in zeros(wrapping_mul(NSLOT, SLOT)));
+    }
+    for _i in 0..N_FNS {
+        h.fns.push(0);
+    }
+    h
+}
+
+// The WIT world lines for the imported interfaces.
+pub fn wit_imports(in h: Host) -> Str {
+    if h.env && h.fs {
+        "  import wasi:cli/environment@0.2.0;\n  import wasi:filesystem/types@0.2.0;\n  import wasi:filesystem/preopens@0.2.0;\n"
+    } else if h.env {
+        "  import wasi:cli/environment@0.2.0;\n"
+    } else if h.fs {
+        "  import wasi:filesystem/types@0.2.0;\n  import wasi:filesystem/preopens@0.2.0;\n"
+    } else {
+        ""
+    }
+}
+
+pub fn active(in h: Host) -> bool {
+    h.env || h.fs
+}
+
+// ----- a small assembler over `Code` (every local is an `i64`) -----------
+
+struct A {
+    c: Code,
+    params: u32,
+    next: u32,
+}
+
+fn asm(params: u64) -> A {
+    A {
+        c: code_new(),
+        params: wrapping_u32(params),
+        next: wrapping_u32(params)
+    }
+}
+
+impl A {
+    fn loc(inout self) -> u32 {
+        let x = self.next;
+        self.next = wrapping_add(self.next, 1);
+        x
+    }
+
+    fn get(inout self, x: u32) {
+        self.c.get(x);
+    }
+
+    fn set(inout self, x: u32) {
+        self.c.set(x);
+    }
+
+    fn k(inout self, v: i64) {
+        self.c.i64_const(v);
+    }
+
+    fn ku(inout self, v: u64) {
+        self.c.u64_const(v);
+    }
+
+    fn op(inout self, o: u8) {
+        self.c.op(o);
+    }
+
+    // local `x` = constant `v`
+    fn setk(inout self, x: u32, v: i64) {
+        self.c.i64_const(v);
+        self.c.set(x);
+    }
+
+    // local `x` as an `i32` operand
+    fn w32(inout self, x: u32) {
+        self.c.get(x);
+        self.c.op(OP_I32_WRAP_I64);
+    }
+
+    fn i32k(inout self, v: u64) {
+        self.c.i32_const(wrapping_i64(v));
+    }
+
+    // an `i64` load of width `op` at `base + off` (a local base)
+    fn ldw(inout self, base: u32, off: u64, op: u8) {
+        self.w32(base);
+        self
+            .c
+            .mem(
+                op,
+                if op == OP_I64_LOAD {
+                    3
+                } else if op == OP_I64_LOAD32_U {
+                    2
+                } else {
+                    0
+                },
+                off
+            );
+    }
+
+    fn ld(inout self, base: u32, off: u64) {
+        self.ldw(base, off, OP_I64_LOAD);
+    }
+
+    fn ld32(inout self, base: u32, off: u64) {
+        self.ldw(base, off, OP_I64_LOAD32_U);
+    }
+
+    fn ld8(inout self, base: u32, off: u64) {
+        self.ldw(base, off, OP_I64_LOAD8_U);
+    }
+
+    // loads at a static address
+    fn lda(inout self, addr: u64, op: u8) {
+        self.c.i32_const(0);
+        self
+            .c
+            .mem(
+                op,
+                if op == OP_I64_LOAD {
+                    3
+                } else if op == OP_I64_LOAD32_U {
+                    2
+                } else {
+                    0
+                },
+                addr
+            );
+    }
+
+    // store local `v` at `base + off`
+    fn st(inout self, base: u32, off: u64, v: u32) {
+        self.w32(base);
+        self.c.get(v);
+        self.c.mem(OP_I64_STORE, 3, off);
+    }
+
+    // store the `i64` on the stack top... at `base + off`: pushes the
+    // address first, so the value is computed by `f` after it.
+    fn st_begin(inout self, base: u32) {
+        self.w32(base);
+    }
+
+    fn st_end(inout self, off: u64) {
+        self.c.mem(OP_I64_STORE, 3, off);
+    }
+
+    fn st8_end(inout self, off: u64) {
+        self.c.mem(OP_I64_STORE8, 0, off);
+    }
+
+    fn sta_begin(inout self) {
+        self.c.i32_const(0);
+    }
+
+    // store constant `v` at `base + off`
+    fn stk(inout self, base: u32, off: u64, v: i64) {
+        self.w32(base);
+        self.c.i64_const(v);
+        self.c.mem(OP_I64_STORE, 3, off);
+    }
+
+    fn call(inout self, f: u32) {
+        self.c.call(f);
+    }
+
+    fn open(inout self, o: u8) {
+        self.c.open(o);
+    }
+
+    fn end(inout self) {
+        self.c.op(OP_END);
+    }
+
+    fn br(inout self, d: u32) {
+        self.c.br(d);
+    }
+
+    fn br_if(inout self, d: u32) {
+        self.c.br_if(d);
+    }
+
+    // `return local x`
+    fn ret(inout self, x: u32) {
+        self.c.get(x);
+        self.c.op(OP_RETURN);
+    }
+
+    fn retk(inout self, v: i64) {
+        self.c.i64_const(v);
+        self.c.op(OP_RETURN);
+    }
+
+    // x = x + local y / + constant
+    fn addk(inout self, x: u32, v: i64) {
+        self.c.get(x);
+        self.c.i64_const(v);
+        self.c.op(OP_I64_ADD);
+        self.c.set(x);
+    }
+
+    // local x = view's address / length
+    fn view_addr(inout self, view: u32, x: u32) {
+        self.c.get(view);
+        self.c.u64_const(MASK32);
+        self.c.op(OP_I64_AND);
+        self.c.set(x);
+    }
+
+    fn view_len(inout self, view: u32, x: u32) {
+        self.c.get(view);
+        self.c.i64_const(32);
+        self.c.op(OP_I64_SHR_U);
+        self.c.set(x);
+    }
+
+    // memory.copy(dst, src, n) of locals
+    fn copy(inout self, dst: u32, src: u32, n: u32) {
+        self.w32(dst);
+        self.w32(src);
+        self.w32(n);
+        self.c.memory_copy();
+    }
+
+    fn body(in self) -> ChunkSeq[u8] {
+        let mut counts = ChunkSeq::new[u32]();
+        let mut types = ChunkSeq::new[ValTy]();
+        let n = wrapping_sub(self.next, self.params);
+        if n > 0 {
+            counts.push(n);
+            types.push(vt(VT_I64));
+        }
+        let mut c = code_new();
+        c.extend(in self.c);
+        c.op(OP_END);
+        function_bytes(in counts, in types, in c)
+    }
+}
+
+fn i64s(n: u64) -> ChunkSeq[ValTy] {
+    let mut v = ChunkSeq::new[ValTy]();
+    for _i in 0..n {
+        v.push(vt(VT_I64));
+    }
+    v
+}
+
+fn params_of(k: u64) -> u64 {
+    if k == H_ERR || k == H_RESOLVE || k == H_KIND {
+        1
+    } else if k == H_PREOPENS || k == H_SLOT {
+        0
+    } else if k == H_COPYOUT {
+        3
+    } else if k >= H_PATH_OP {
+        2
+    } else {
+        op_passes(k).len()
+    }
+}
+
+// The function of shim or helper `k`, declared and defined on first use.
+pub fn host_fn(inout b: Builder, inout h: Host, k: u64) -> u32 eff [Fail[WErr]] {
+    let cached = match h.fns.try_get(k) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    };
+    if cached != 0 {
+        return wrapping_sub(cached, 1);
+    }
+    let np = params_of(k);
+    let idx = b.declare(in i64s(np), in i64s(1));
+    let ok = h.fns.try_set(k, inc32(idx));
+    let mut a = asm(np);
+    emit(inout b, inout h, inout a, k);
+    b.define(idx, in a.body());
+    idx
+}
+
+fn inc32(x: u32) -> u32 {
+    wrapping_add(x, 1)
+}
+
+// The body of `k`; it leaves the result on the stack (or returns).
+fn emit(inout b: Builder, inout h: Host, inout a: A, k: u64) eff [Fail[WErr]] {
+    if k == H_ERR {
+        emit_err(inout a, in h);
+    } else if k == H_PREOPENS {
+        emit_preopens(inout a, in h);
+    } else if k == H_RESOLVE {
+        let pre = host_fn(inout b, inout h, H_PREOPENS);
+        emit_resolve(inout a, in h, pre);
+    } else if k == H_SLOT {
+        emit_slot(inout a, in h);
+    } else if k == H_COPYOUT {
+        emit_copyout(inout a);
+    } else if k == H_KIND {
+        emit_kind(inout a);
+    } else if k >= H_PATH_OP {
+        emit_path_op(inout b, inout h, inout a, k);
+    } else if k < FS_OPEN {
+        emit_env(inout b, inout h, inout a, k);
+    } else {
+        emit_fs(inout b, inout h, inout a, k);
+    }
+}
+
+// H_ERR(code) -> the error word of WASI `error-code` `code`.
+fn emit_err(inout a: A, in h: Host) {
+    a.get(0);
+    a.k(37);
+    a.op(OP_I64_GE_U);
+    a.open(OP_IF);
+    a.retk(13);
+    a.end();
+    a.ldw(0, h.errs, OP_I64_LOAD8_U);
+    a.ldw(0, add(h.errs, 37), OP_I64_LOAD8_U);
+    a.k(32);
+    a.op(OP_I64_SHL);
+    a.op(OP_I64_OR);
+}
+
+// H_PREOPENS() -> 0: read the preopens into the table once.
+fn emit_preopens(inout a: A, in h: Host) {
+    let lp = a.loc();
+    let ln = a.loc();
+    let i = a.loc();
+    let cnt = a.loc();
+    let off = a.loc();
+    let e = a.loc();
+    let nl = a.loc();
+    let s = a.loc();
+    let t = a.loc();
+    let over = a.loc();
+    a.setk(over, 0);
+    a.lda(h.misc, OP_I64_LOAD);
+    a.op(OP_I64_EQZ);
+    a.op(OP_I32_EQZ);
+    a.open(OP_IF);
+    a.retk(0);
+    a.end();
+    a.sta_begin();
+    a.k(1);
+    a.st_end(h.misc);
+    a.i32k(h.scr);
+    a.call(h.i_preopens);
+    a.lda(h.scr, OP_I64_LOAD32_U);
+    a.set(lp);
+    a.lda(add(h.scr, 4), OP_I64_LOAD32_U);
+    a.set(ln);
+    a.setk(i, 0);
+    a.setk(cnt, 0);
+    a.setk(off, 0);
+    a.open(OP_BLOCK);
+    a.open(OP_LOOP);
+    // i < ln && cnt < NPRE
+    a.get(i);
+    a.get(ln);
+    a.op(OP_I64_GE_U);
+    a.br_if(1);
+    // More preopens than the table holds: a partial table could resolve
+    // a path under the wrong directory, so every path fails instead.
+    a.get(cnt);
+    a.ku(NPRE);
+    a.op(OP_I64_GE_U);
+    a.open(OP_IF);
+    a.setk(over, 1);
+    a.br(2);
+    a.end();
+    // e = lp + 12 i
+    a.get(lp);
+    a.get(i);
+    a.k(12);
+    a.op(OP_I64_MUL);
+    a.op(OP_I64_ADD);
+    a.set(e);
+    a.ld32(e, 8);
+    a.set(nl);
+    // if off + nl <= NAMES
+    a.get(off);
+    a.get(nl);
+    a.op(OP_I64_ADD);
+    a.ku(NAMES);
+    a.op(OP_I64_LE_U);
+    a.open(OP_IF);
+    // t = names + off; copy the name
+    a.get(off);
+    a.ku(h.names);
+    a.op(OP_I64_ADD);
+    a.set(t);
+    a.ld32(e, 4);
+    a.set(s);
+    a.copy(t, s, nl);
+    // s = pre + 8 + 24 cnt
+    a.get(cnt);
+    a.k(24);
+    a.op(OP_I64_MUL);
+    a.ku(add(h.pre, 8));
+    a.op(OP_I64_ADD);
+    a.set(s);
+    a.st_begin(s);
+    a.ld32(e, 0);
+    a.st_end(0);
+    a.st(s, 8, t);
+    a.st(s, 16, nl);
+    a.get(off);
+    a.get(nl);
+    a.op(OP_I64_ADD);
+    a.set(off);
+    a.addk(cnt, 1);
+    a.op(OP_ELSE);
+    a.setk(over, 1);
+    a.br(2);
+    a.end();
+    a.addk(i, 1);
+    a.br(0);
+    a.end();
+    a.end();
+    // count, or -1 when the preopens did not fit
+    a.sta_begin();
+    a.k(-1);
+    a.get(cnt);
+    a.get(over);
+    a.op(OP_I64_EQZ);
+    a.op(OP_I32_EQZ);
+    a.op(OP_SELECT);
+    a.st_end(h.pre);
+    a.k(0);
+}
+
+// H_RESOLVE(path view) -> the preopen's descriptor, -1 when none fits, -2
+// for a NUL byte, -3 when the preopens overflowed the table; the relative path's view goes to misc[8].
+fn emit_resolve(inout a: A, in h: Host, pre: u32) {
+    let pa = a.loc();
+    let pn = a.loc();
+    let i = a.loc();
+    let cnt = a.loc();
+    let best = a.loc();
+    let bl = a.loc();
+    let s = a.loc();
+    let na = a.loc();
+    let nl = a.loc();
+    let eq = a.loc();
+    a.call(pre);
+    a.op(OP_DROP);
+    a.view_addr(0, pa);
+    a.view_len(0, pn);
+    // An empty path names nothing (ENOENT, as natively).
+    a.get(pn);
+    a.op(OP_I64_EQZ);
+    a.open(OP_IF);
+    a.retk(-1);
+    a.end();
+    // NUL check
+    a.setk(i, 0);
+    a.open(OP_BLOCK);
+    a.open(OP_LOOP);
+    a.get(i);
+    a.get(pn);
+    a.op(OP_I64_GE_U);
+    a.br_if(1);
+    a.get(pa);
+    a.get(i);
+    a.op(OP_I64_ADD);
+    a.set(s);
+    a.ld8(s, 0);
+    a.op(OP_I64_EQZ);
+    a.open(OP_IF);
+    a.retk(-2);
+    a.end();
+    a.addk(i, 1);
+    a.br(0);
+    a.end();
+    a.end();
+    a.lda(h.pre, OP_I64_LOAD);
+    a.set(cnt);
+    a.get(cnt);
+    a.k(-1);
+    a.op(OP_I64_EQ);
+    a.open(OP_IF);
+    a.retk(-3);
+    a.end();
+    a.setk(best, -1);
+    a.setk(bl, 0);
+    // absolute: pn > 0 && byte 0 == '/'
+    a.get(pn);
+    a.op(OP_I64_EQZ);
+    a.open(OP_IF);
+    a.k(0);
+    a.set(eq);
+    a.op(OP_ELSE);
+    a.ld8(pa, 0);
+    a.k(47);
+    a.op(OP_I64_EQ);
+    a.op(OP_I64_EXTEND_I32_U);
+    a.set(eq);
+    a.end();
+    a.get(eq);
+    a.op(OP_I64_EQZ);
+    a.op(OP_I32_EQZ);
+    a.open(OP_IF);
+    absolute(inout a, in h, pa, pn, i, cnt, best, bl, s, na, nl, eq);
+    a.op(OP_ELSE);
+    relative(inout a, in h, i, cnt, best, s, na);
+    a.end();
+    strip(inout a, in h, pa, pn, best);
+}
+
+fn absolute(
+    inout a: A,
+    in h: Host,
+    pa: u32,
+    pn: u32,
+    i: u32,
+    cnt: u32,
+    best: u32,
+    bl: u32,
+    s: u32,
+    na: u32,
+    nl: u32,
+    eq: u32
+) {
+    a.setk(i, 0);
+    a.open(OP_BLOCK);
+    a.open(OP_LOOP);
+    a.get(i);
+    a.get(cnt);
+    a.op(OP_I64_GE_U);
+    a.br_if(1);
+    a.get(i);
+    a.k(24);
+    a.op(OP_I64_MUL);
+    a.ku(add(h.pre, 8));
+    a.op(OP_I64_ADD);
+    a.set(s);
+    a.ld(s, 8);
+    a.set(na);
+    a.ld(s, 16);
+    a.set(nl);
+    // candidate: nl <= pn, a prefix, on a boundary, longer than best
+    a.get(nl);
+    a.get(pn);
+    a.op(OP_I64_LE_U);
+    a.open(OP_IF);
+    prefix_eq(inout a, pa, na, nl, eq);
+    a.get(eq);
+    a.op(OP_I64_EQZ);
+    a.op(OP_I32_EQZ);
+    a.open(OP_IF);
+    // boundary: nl == pn || pa[nl] == '/' || (nl > 0 && na[nl-1] == '/')
+    a.get(nl);
+    a.get(pn);
+    a.op(OP_I64_EQ);
+    a.get(pa);
+    a.get(nl);
+    a.op(OP_I64_ADD);
+    a.set(eq);
+    a.get(nl);
+    a.get(pn);
+    a.op(OP_I64_LT_U);
+    a.open_i32();
+    a.ld8(eq, 0);
+    a.k(47);
+    a.op(OP_I64_EQ);
+    a.op(OP_ELSE);
+    a.c.i32_const(0);
+    a.end();
+    a.op(OP_I32_OR);
+    a.get(na);
+    a.get(nl);
+    a.op(OP_I64_ADD);
+    a.k(1);
+    a.op(OP_I64_SUB);
+    a.set(eq);
+    a.get(nl);
+    a.op(OP_I64_EQZ);
+    a.open_i32();
+    a.c.i32_const(0);
+    a.op(OP_ELSE);
+    a.ld8(eq, 0);
+    a.k(47);
+    a.op(OP_I64_EQ);
+    a.end();
+    a.op(OP_I32_OR);
+    // && (best < 0 || nl > bl)
+    a.get(best);
+    a.k(0);
+    a.op(OP_I64_LT_S);
+    a.get(nl);
+    a.get(bl);
+    a.op(OP_I64_GT_U);
+    a.op(OP_I32_OR);
+    a.op(OP_I32_AND);
+    a.open(OP_IF);
+    a.ld(s, 0);
+    a.set(best);
+    a.get(nl);
+    a.set(bl);
+    a.end();
+    a.end();
+    a.end();
+    a.addk(i, 1);
+    a.br(0);
+    a.end();
+    a.end();
+    a.get(pa);
+    a.get(bl);
+    a.op(OP_I64_ADD);
+    a.set(pa);
+    a.get(pn);
+    a.get(bl);
+    a.op(OP_I64_SUB);
+    a.set(pn);
+}
+
+fn relative(inout a: A, in h: Host, i: u32, cnt: u32, best: u32, s: u32, na: u32) {
+    // relative: the preopen named ".", else the first
+    a.setk(i, 0);
+    a.open(OP_BLOCK);
+    a.open(OP_LOOP);
+    a.get(i);
+    a.get(cnt);
+    a.op(OP_I64_GE_U);
+    a.br_if(1);
+    a.get(i);
+    a.k(24);
+    a.op(OP_I64_MUL);
+    a.ku(add(h.pre, 8));
+    a.op(OP_I64_ADD);
+    a.set(s);
+    a.ld(s, 16);
+    a.k(1);
+    a.op(OP_I64_EQ);
+    a.open(OP_IF);
+    a.ld(s, 8);
+    a.set(na);
+    a.ld8(na, 0);
+    a.k(46);
+    a.op(OP_I64_EQ);
+    a.open(OP_IF);
+    a.ld(s, 0);
+    a.set(best);
+    a.br(3);
+    a.end();
+    a.end();
+    a.addk(i, 1);
+    a.br(0);
+    a.end();
+    a.end();
+    a.get(best);
+    a.k(0);
+    a.op(OP_I64_LT_S);
+    a.get(cnt);
+    a.op(OP_I64_EQZ);
+    a.op(OP_I32_EQZ);
+    a.op(OP_I32_AND);
+    a.open(OP_IF);
+    a.lda(add(h.pre, 8), OP_I64_LOAD);
+    a.set(best);
+    a.end();
+}
+
+fn strip(inout a: A, in h: Host, pa: u32, pn: u32, best: u32) {
+    // strip leading "/" and "./"; "." alone is empty
+    a.open(OP_BLOCK);
+    a.open(OP_LOOP);
+    a.get(pn);
+    a.op(OP_I64_EQZ);
+    a.br_if(1);
+    a.ld8(pa, 0);
+    a.k(47);
+    a.op(OP_I64_EQ);
+    a.open(OP_IF);
+    a.addk(pa, 1);
+    a.addk(pn, -1);
+    a.br(1);
+    a.end();
+    a.ld8(pa, 0);
+    a.k(46);
+    a.op(OP_I64_NE);
+    a.br_if(1);
+    a.get(pn);
+    a.k(1);
+    a.op(OP_I64_EQ);
+    a.open(OP_IF);
+    a.setk(pn, 0);
+    a.br(2);
+    a.end();
+    a.ld8(pa, 1);
+    a.k(47);
+    a.op(OP_I64_NE);
+    a.br_if(1);
+    a.addk(pa, 2);
+    a.addk(pn, -2);
+    a.br(0);
+    a.end();
+    a.end();
+    a.get(pn);
+    a.op(OP_I64_EQZ);
+    a.open(OP_IF);
+    a.ku(add(h.misc, 24));
+    a.set(pa);
+    a.setk(pn, 1);
+    a.end();
+    a.sta_begin();
+    a.get(pn);
+    a.k(32);
+    a.op(OP_I64_SHL);
+    a.get(pa);
+    a.op(OP_I64_OR);
+    a.st_end(add(h.misc, 8));
+    a.get(best);
+}
+
+// eq = 1 when bytes x[0..n] == y[0..n] (locals), else 0.
+fn prefix_eq(inout a: A, x: u32, y: u32, n: u32, eq: u32) {
+    let j = a.loc();
+    let p = a.loc();
+    let q = a.loc();
+    a.setk(eq, 1);
+    a.setk(j, 0);
+    a.open(OP_BLOCK);
+    a.open(OP_LOOP);
+    a.get(j);
+    a.get(n);
+    a.op(OP_I64_GE_U);
+    a.br_if(1);
+    a.get(x);
+    a.get(j);
+    a.op(OP_I64_ADD);
+    a.set(p);
+    a.get(y);
+    a.get(j);
+    a.op(OP_I64_ADD);
+    a.set(q);
+    a.ld8(p, 0);
+    a.ld8(q, 0);
+    a.op(OP_I64_NE);
+    a.open(OP_IF);
+    a.setk(eq, 0);
+    a.br(2);
+    a.end();
+    a.addk(j, 1);
+    a.br(0);
+    a.end();
+    a.end();
+}
+
+impl A {
+    // `if` with an `i32` result
+    fn open_i32(inout self) {
+        self.c.open_result(OP_IF, vt(VT_I32));
+    }
+}
+
+// H_SLOT() -> a free slot's address, or 0.
+fn emit_slot(inout a: A, in h: Host) {
+    let s = a.loc();
+    let i = a.loc();
+    a.setk(i, 0);
+    a.open(OP_BLOCK);
+    a.open(OP_LOOP);
+    a.get(i);
+    a.ku(NSLOT);
+    a.op(OP_I64_GE_U);
+    a.br_if(1);
+    a.get(i);
+    a.ku(SLOT);
+    a.op(OP_I64_MUL);
+    a.ku(h.slots);
+    a.op(OP_I64_ADD);
+    a.set(s);
+    a.ld(s, 0);
+    a.op(OP_I64_EQZ);
+    a.open(OP_IF);
+    a.ret(s);
+    a.end();
+    a.addk(i, 1);
+    a.br(0);
+    a.end();
+    a.end();
+    a.k(0);
+}
+
+// H_COPYOUT(src, n, view) -> n: copy when it fits (the shim's `copy_out`).
+fn emit_copyout(inout a: A) {
+    let d = a.loc();
+    a.get(1);
+    a.get(2);
+    a.k(32);
+    a.op(OP_I64_SHR_U);
+    a.op(OP_I64_LE_U);
+    a.open(OP_IF);
+    a.view_addr(2, d);
+    a.copy(d, 0, 1);
+    a.end();
+    a.get(1);
+}
+
+// H_KIND(descriptor-type) -> the shim's kind: 1 file, 2 dir, 3 symlink,
+// 4 other.
+fn emit_kind(inout a: A) {
+    a.k(1);
+    a.k(2);
+    a.k(3);
+    a.k(4);
+    a.get(0);
+    a.k(5);
+    a.op(OP_I64_EQ);
+    a.op(OP_SELECT);
+    a.get(0);
+    a.k(3);
+    a.op(OP_I64_EQ);
+    a.op(OP_SELECT);
+    a.get(0);
+    a.k(6);
+    a.op(OP_I64_EQ);
+    a.op(OP_SELECT);
+}
+
+// Store error word `v` (a local) through the `inout u64` cell `err`.
+fn put_err(inout a: A, err: u32, v: u32) {
+    a.st(err, 0, v);
+}
+
+fn put_errk(inout a: A, err: u32, v: i64) {
+    a.stk(err, 0, v);
+}
+
+// Raise-free failure: store the error word on the stack top... the word
+// of WASI code at static `addr` (one byte) through `err`.
+fn put_wasi_err(inout b: Builder, inout h: Host, inout a: A, err: u32, addr: u64) eff [Fail[WErr]] {
+    let f = host_fn(inout b, inout h, H_ERR);
+    a.st_begin(err);
+    a.lda(addr, OP_I64_LOAD8_U);
+    a.call(f);
+    a.st_end(0);
+}
+
+// The result discriminant at scr[0] is nonzero (`i32` on the stack).
+fn failed(inout a: A, in h: Host) {
+    a.lda(h.scr, OP_I64_LOAD8_U);
+    a.op(OP_I64_EQZ);
+    a.op(OP_I32_EQZ);
+}
+
+// `desc = H_RESOLVE(path)`; on -3, -2 or -1 store the error and return
+// `fail`.
+// Leaves the relative path in `ra`, `rn`.
+fn resolve(
+    inout b: Builder,
+    inout h: Host,
+    inout a: A,
+    path: u32,
+    err: u32,
+    fail: i64,
+    desc: u32,
+    ra: u32,
+    rn: u32
+) eff [Fail[WErr]] {
+    let f = host_fn(inout b, inout h, H_RESOLVE);
+    a.get(path);
+    a.call(f);
+    a.set(desc);
+    a.get(desc);
+    a.k(-2);
+    a.op(OP_I64_EQ);
+    a.open(OP_IF);
+    put_errk(inout a, err, 7);
+    a.retk(fail);
+    a.end();
+    a.get(desc);
+    a.k(-3);
+    a.op(OP_I64_EQ);
+    a.open(OP_IF);
+    // Unsupported | ENOTSUP << 32: too many preopens for the table
+    put_errk(inout a, err, 11 | (95 << 32));
+    a.retk(fail);
+    a.end();
+    a.get(desc);
+    a.k(0);
+    a.op(OP_I64_LT_S);
+    a.open(OP_IF);
+    put_errk(inout a, err, 1 | (2 << 32));
+    a.retk(fail);
+    a.end();
+    let v = a.loc();
+    a.lda(add(h.misc, 8), OP_I64_LOAD);
+    a.set(v);
+    a.view_addr(v, ra);
+    a.view_len(v, rn);
+}
+
+// path ops `create-directory-at`, `remove-directory-at`, `unlink-file-at`
+// as (path, err) -> status.
+const P_MKDIR: u64 = 30;
+const P_RMDIR: u64 = 31;
+const P_UNLINK: u64 = 32;
+
+fn emit_path_op(inout b: Builder, inout h: Host, inout a: A, k: u64) eff [Fail[WErr]] {
+    let desc = a.loc();
+    let ra = a.loc();
+    let rn = a.loc();
+    resolve(inout b, inout h, inout a, 0, 1, 1, desc, ra, rn);
+    a.w32(desc);
+    a.w32(ra);
+    a.w32(rn);
+    a.i32k(h.scr);
+    a
+        .call(
+            if k == P_MKDIR {
+                h.i_mkdir
+            } else if k == P_RMDIR {
+                h.i_rmdir
+            } else {
+                h.i_unlink
+            }
+        );
+    failed(inout a, in h);
+    a.open(OP_IF);
+    put_wasi_err(inout b, inout h, inout a, 1, add(h.scr, 1));
+    a.retk(1);
+    a.end();
+    put_errk(inout a, 1, 0);
+    a.k(0);
+}
+
+fn emit_env(inout b: Builder, inout h: Host, inout a: A, k: u64) eff [Fail[WErr]] {
+    if k == ENV_OS {
+        a.k(0);
+        return;
+    }
+    let lp = a.loc();
+    let ln = a.loc();
+    let e = a.loc();
+    let copy = host_fn(inout b, inout h, H_COPYOUT);
+    if k == ENV_CURRENT_DIR {
+        // (buf cell, err cell)
+        a.i32k(h.scr);
+        a.call(h.i_cwd);
+        a.lda(h.scr, OP_I64_LOAD8_U);
+        a.op(OP_I64_EQZ);
+        a.open(OP_IF);
+        put_errk(inout a, 1, 11);
+        a.retk(-1);
+        a.end();
+        put_errk(inout a, 1, 0);
+        a.lda(add(h.scr, 4), OP_I64_LOAD32_U);
+        a.lda(add(h.scr, 8), OP_I64_LOAD32_U);
+        a.ld(0, 0);
+        a.call(copy);
+        return;
+    }
+    let args = k == ENV_ARG_COUNT || k == ENV_ARG;
+    a.i32k(h.scr);
+    a
+        .call(
+            if args {
+                h.i_args
+            } else {
+                h.i_environ
+            }
+        );
+    a.lda(h.scr, OP_I64_LOAD32_U);
+    a.set(lp);
+    a.lda(add(h.scr, 4), OP_I64_LOAD32_U);
+    a.set(ln);
+    if k == ENV_ARG_COUNT || k == ENV_VAR_COUNT {
+        a.get(ln);
+        return;
+    }
+    if k == ENV_ARG || k == ENV_VAR_AT {
+        // (index, buf cell)
+        a.get(0);
+        a.get(ln);
+        a.op(OP_I64_GE_U);
+        a.open(OP_IF);
+        a.retk(-1);
+        a.end();
+        a.get(lp);
+        a.get(0);
+        a
+            .k(
+                if args {
+                    8
+                } else {
+                    16
+                }
+            );
+        a.op(OP_I64_MUL);
+        a.op(OP_I64_ADD);
+        a.set(e);
+        if args {
+            a.ld32(e, 0);
+            a.ld32(e, 4);
+            a.ld(1, 0);
+            a.call(copy);
+            return;
+        }
+        // "key=value"
+        let total = a.loc();
+        let view = a.loc();
+        let d = a.loc();
+        let x = a.loc();
+        let n = a.loc();
+        a.ld32(e, 4);
+        a.k(1);
+        a.op(OP_I64_ADD);
+        a.ld32(e, 12);
+        a.op(OP_I64_ADD);
+        a.set(total);
+        a.ld(1, 0);
+        a.set(view);
+        a.get(total);
+        a.get(view);
+        a.k(32);
+        a.op(OP_I64_SHR_U);
+        a.op(OP_I64_LE_U);
+        a.open(OP_IF);
+        a.view_addr(view, d);
+        a.ld32(e, 0);
+        a.set(x);
+        a.ld32(e, 4);
+        a.set(n);
+        a.copy(d, x, n);
+        a.get(d);
+        a.get(n);
+        a.op(OP_I64_ADD);
+        a.set(d);
+        a.st_begin(d);
+        a.k(61);
+        a.st8_end(0);
+        a.addk(d, 1);
+        a.ld32(e, 8);
+        a.set(x);
+        a.ld32(e, 12);
+        a.set(n);
+        a.copy(d, x, n);
+        a.end();
+        a.get(total);
+        return;
+    }
+    // ENV_VAR (key view, buf cell): the first entry with that key
+    let ka = a.loc();
+    let kn = a.loc();
+    let i = a.loc();
+    let s = a.loc();
+    let eq = a.loc();
+    let x = a.loc();
+    a.view_addr(0, ka);
+    a.view_len(0, kn);
+    a.get(kn);
+    a.op(OP_I64_EQZ);
+    a.open(OP_IF);
+    a.retk(-1);
+    a.end();
+    a.setk(i, 0);
+    a.open(OP_BLOCK);
+    a.open(OP_LOOP);
+    a.get(i);
+    a.get(kn);
+    a.op(OP_I64_GE_U);
+    a.br_if(1);
+    a.get(ka);
+    a.get(i);
+    a.op(OP_I64_ADD);
+    a.set(s);
+    a.ld8(s, 0);
+    a.k(61);
+    a.op(OP_I64_EQ);
+    a.ld8(s, 0);
+    a.op(OP_I64_EQZ);
+    a.op(OP_I32_OR);
+    a.open(OP_IF);
+    a.retk(-1);
+    a.end();
+    a.addk(i, 1);
+    a.br(0);
+    a.end();
+    a.end();
+    a.setk(i, 0);
+    a.open(OP_BLOCK);
+    a.open(OP_LOOP);
+    a.get(i);
+    a.get(ln);
+    a.op(OP_I64_GE_U);
+    a.br_if(1);
+    a.get(lp);
+    a.get(i);
+    a.k(16);
+    a.op(OP_I64_MUL);
+    a.op(OP_I64_ADD);
+    a.set(e);
+    a.ld32(e, 4);
+    a.get(kn);
+    a.op(OP_I64_EQ);
+    a.open(OP_IF);
+    a.ld32(e, 0);
+    a.set(x);
+    prefix_eq(inout a, x, ka, kn, eq);
+    a.get(eq);
+    a.op(OP_I64_EQZ);
+    a.op(OP_I32_EQZ);
+    a.open(OP_IF);
+    a.ld32(e, 8);
+    a.ld32(e, 12);
+    a.ld(1, 0);
+    a.call(copy);
+    a.op(OP_RETURN);
+    a.end();
+    a.end();
+    a.addk(i, 1);
+    a.br(0);
+    a.end();
+    a.end();
+    a.k(-1);
+}
+
+// The descriptor of handle (slot) `s` into local `d`.
+fn slot_desc(inout a: A, s: u32, off: u64, d: u32) {
+    a.ld(s, off);
+    a.k(1);
+    a.op(OP_I64_SUB);
+    a.set(d);
+}
+
+fn emit_fs(inout b: Builder, inout h: Host, inout a: A, k: u64) eff [Fail[WErr]] {
+    if k == FS_REMOVE_FILE || k == FS_REMOVE_DIR || k == FS_CREATE_DIR {
+        let path: u32 = 0;
+        let flag: u32 = 1;
+        let err: u32 = if k == FS_REMOVE_FILE {
+            1
+        } else {
+            2
+        };
+        if k == FS_REMOVE_DIR {
+            a.get(flag);
+            a.op(OP_I64_EQZ);
+            a.op(OP_I32_EQZ);
+            a.open(OP_IF);
+            put_errk(inout a, err, 11 | (95 << 32));
+            a.retk(1);
+            a.end();
+        }
+        if k == FS_CREATE_DIR {
+            a.get(flag);
+            a.op(OP_I64_EQZ);
+            a.op(OP_I32_EQZ);
+            a.open(OP_IF);
+            create_dir_all(inout b, inout h, inout a);
+            a.end();
+        }
+        let f = host_fn(
+            inout b,
+            inout h,
+            if k == FS_REMOVE_FILE {
+                P_UNLINK
+            } else if k == FS_REMOVE_DIR {
+                P_RMDIR
+            } else {
+                P_MKDIR
+            }
+        );
+        a.get(path);
+        a.get(err);
+        a.call(f);
+        return;
+    }
+    if k == FS_PARENT_LEN {
+        let pa = a.loc();
+        let i = a.loc();
+        let s = a.loc();
+        a.view_addr(0, pa);
+        a.view_len(0, i);
+        a.open(OP_BLOCK);
+        a.open(OP_LOOP);
+        a.get(i);
+        a.op(OP_I64_EQZ);
+        a.br_if(1);
+        a.get(pa);
+        a.get(i);
+        a.op(OP_I64_ADD);
+        a.k(1);
+        a.op(OP_I64_SUB);
+        a.set(s);
+        a.ld8(s, 0);
+        a.k(47);
+        a.op(OP_I64_EQ);
+        a.open(OP_IF);
+        a.ret(i);
+        a.end();
+        a.addk(i, -1);
+        a.br(0);
+        a.end();
+        a.end();
+        a.k(0);
+        return;
+    }
+    if k == FS_UNIQUE {
+        let v = a.loc();
+        a.lda(add(h.misc, 16), OP_I64_LOAD);
+        a.set(v);
+        a.sta_begin();
+        a.get(v);
+        a.k(1);
+        a.op(OP_I64_ADD);
+        a.st_end(add(h.misc, 16));
+        a.get(v);
+        a.ku(MASK32);
+        a.op(OP_I64_AND);
+        return;
+    }
+    let desc = a.loc();
+    let ra = a.loc();
+    let rn = a.loc();
+    if k == FS_OPEN || k == FS_READ_DIR || k == FS_SYNC_DIR {
+        // (path, mode, err) / (path, err)
+        let err: u32 = if k == FS_OPEN {
+            2
+        } else {
+            1
+        };
+        let o = a.loc();
+        let d = a.loc();
+        let ap = a.loc();
+        a.setk(ap, 0);
+        a.setk(o, 2);
+        a.setk(d, 1);
+        if k == FS_OPEN {
+            // modes: 0 read, 1 truncate, 2 create new, 3 append
+            a.get(1);
+            a.k(3);
+            a.op(OP_I64_GT_U);
+            a.open(OP_IF);
+            put_errk(inout a, err, 7);
+            a.retk(0);
+            a.end();
+            a.setk(o, 0);
+            a.get(1);
+            a.op(OP_I64_EQZ);
+            a.op(OP_I32_EQZ);
+            a.open(OP_IF);
+            a.setk(d, 2);
+            a.k(9);
+            a.k(5);
+            a.k(1);
+            a.get(1);
+            a.k(2);
+            a.op(OP_I64_EQ);
+            a.op(OP_SELECT);
+            a.get(1);
+            a.k(1);
+            a.op(OP_I64_EQ);
+            a.op(OP_SELECT);
+            a.set(o);
+            a.get(1);
+            a.k(3);
+            a.op(OP_I64_EQ);
+            a.op(OP_I64_EXTEND_I32_U);
+            a.set(ap);
+            a.end();
+        }
+        let fail: i64 = if k == FS_SYNC_DIR {
+            1
+        } else {
+            0
+        };
+        resolve(inout b, inout h, inout a, 0, err, fail, desc, ra, rn);
+        a.w32(desc);
+        a.i32k(1);
+        a.w32(ra);
+        a.w32(rn);
+        a.w32(o);
+        a.w32(d);
+        a.i32k(h.scr);
+        a.call(h.i_open_at);
+        failed(inout a, in h);
+        a.open(OP_IF);
+        put_wasi_err(inout b, inout h, inout a, err, add(h.scr, 4));
+        a.retk(fail);
+        a.end();
+        let nd = a.loc();
+        a.lda(add(h.scr, 4), OP_I64_LOAD32_U);
+        a.set(nd);
+        if k == FS_SYNC_DIR {
+            // Flush the directory entries (a rename into it), then release
+            // the descriptor on both paths.
+            a.w32(nd);
+            a.i32k(h.scr);
+            a.call(h.i_sync);
+            a.w32(nd);
+            a.call(h.i_drop_desc);
+            failed(inout a, in h);
+            a.open(OP_IF);
+            put_wasi_err(inout b, inout h, inout a, err, add(h.scr, 1));
+            a.retk(1);
+            a.end();
+            put_errk(inout a, err, 0);
+            a.k(0);
+            return;
+        }
+        let st = a.loc();
+        if k == FS_READ_DIR {
+            a.w32(nd);
+            a.i32k(h.scr);
+            a.call(h.i_readdir);
+            failed(inout a, in h);
+            a.open(OP_IF);
+            put_wasi_err(inout b, inout h, inout a, err, add(h.scr, 4));
+            a.w32(nd);
+            a.call(h.i_drop_desc);
+            a.retk(0);
+            a.end();
+            a.lda(add(h.scr, 4), OP_I64_LOAD32_U);
+            a.set(st);
+        }
+        let s = a.loc();
+        let slot = host_fn(inout b, inout h, H_SLOT);
+        a.call(slot);
+        a.set(s);
+        a.get(s);
+        a.op(OP_I64_EQZ);
+        a.open(OP_IF);
+        if k == FS_READ_DIR {
+            a.w32(st);
+            a.call(h.i_drop_stream);
+        }
+        a.w32(nd);
+        a.call(h.i_drop_desc);
+        put_errk(inout a, err, 13 | (24 << 32));
+        a.retk(0);
+        a.end();
+        if k == FS_OPEN {
+            a.st_begin(s);
+            a.get(nd);
+            a.k(1);
+            a.op(OP_I64_ADD);
+            a.st_end(0);
+            a.stk(s, 8, 0);
+            a.st(s, 16, ap);
+        } else {
+            a.st_begin(s);
+            a.get(st);
+            a.k(1);
+            a.op(OP_I64_ADD);
+            a.st_end(0);
+            a.stk(s, 8, 0);
+            a.st_begin(s);
+            a.get(nd);
+            a.k(1);
+            a.op(OP_I64_ADD);
+            a.st_end(32);
+        }
+        put_errk(inout a, err, 0);
+        a.get(s);
+        return;
+    }
+    if k == FS_FILE_LEN {
+        slot_desc(inout a, 0, 0, desc);
+        a.w32(desc);
+        a.i32k(h.scr);
+        a.call(h.i_stat);
+        failed(inout a, in h);
+        a.open(OP_IF);
+        a.retk(0);
+        a.end();
+        a.lda(add(h.scr, 24), OP_I64_LOAD);
+        return;
+    }
+    if k == FS_CLOSE || k == FS_DIR_CLOSE {
+        slot_desc(inout a, 0, 0, desc);
+        a.w32(desc);
+        a
+            .call(
+                if k == FS_CLOSE {
+                    h.i_drop_desc
+                } else {
+                    h.i_drop_stream
+                }
+            );
+        if k == FS_DIR_CLOSE {
+            slot_desc(inout a, 0, 32, desc);
+            a.w32(desc);
+            a.call(h.i_drop_desc);
+        }
+        a.stk(0, 0, 0);
+        a.k(0);
+        return;
+    }
+    if k == FS_SYNC {
+        slot_desc(inout a, 0, 0, desc);
+        a.w32(desc);
+        a.i32k(h.scr);
+        a.call(h.i_sync);
+        failed(inout a, in h);
+        a.open(OP_IF);
+        put_wasi_err(inout b, inout h, inout a, 1, add(h.scr, 1));
+        a.retk(1);
+        a.end();
+        put_errk(inout a, 1, 0);
+        a.k(0);
+        return;
+    }
+    if k == FS_READ {
+        // (file, buf cell, err cell)
+        let va = a.loc();
+        let vn = a.loc();
+        let done = a.loc();
+        let lp = a.loc();
+        let ll = a.loc();
+        let t = a.loc();
+        slot_desc(inout a, 0, 0, desc);
+        a.ld(1, 0);
+        a.set(t);
+        a.view_addr(t, va);
+        a.view_len(t, vn);
+        a.setk(done, 0);
+        a.open(OP_BLOCK);
+        a.open(OP_LOOP);
+        a.get(done);
+        a.get(vn);
+        a.op(OP_I64_GE_U);
+        a.br_if(1);
+        a.w32(desc);
+        a.get(vn);
+        a.get(done);
+        a.op(OP_I64_SUB);
+        a.ld(0, 8);
+        a.i32k(h.scr);
+        a.call(h.i_read);
+        failed(inout a, in h);
+        a.open(OP_IF);
+        put_wasi_err(inout b, inout h, inout a, 2, add(h.scr, 4));
+        a.ret(done);
+        a.end();
+        a.lda(add(h.scr, 4), OP_I64_LOAD32_U);
+        a.set(lp);
+        a.lda(add(h.scr, 8), OP_I64_LOAD32_U);
+        a.set(ll);
+        a.get(ll);
+        a.op(OP_I64_EQZ);
+        a.br_if(1);
+        // ll = min(ll, vn - done)
+        a.get(ll);
+        a.get(vn);
+        a.get(done);
+        a.op(OP_I64_SUB);
+        a.set(t);
+        a.get(t);
+        a.get(ll);
+        a.get(t);
+        a.op(OP_I64_LT_U);
+        a.op(OP_SELECT);
+        a.set(ll);
+        a.get(va);
+        a.get(done);
+        a.op(OP_I64_ADD);
+        a.set(t);
+        a.copy(t, lp, ll);
+        a.get(done);
+        a.get(ll);
+        a.op(OP_I64_ADD);
+        a.set(done);
+        a.st_begin(0);
+        a.ld(0, 8);
+        a.get(ll);
+        a.op(OP_I64_ADD);
+        a.st_end(8);
+        a.br(0);
+        a.end();
+        a.end();
+        put_errk(inout a, 2, 0);
+        a.get(done);
+        return;
+    }
+    if k == FS_WRITE {
+        // (file, buf view, err cell)
+        let va = a.loc();
+        let vn = a.loc();
+        let done = a.loc();
+        let off = a.loc();
+        let n = a.loc();
+        slot_desc(inout a, 0, 0, desc);
+        a.view_addr(1, va);
+        a.view_len(1, vn);
+        a.ld(0, 8);
+        a.set(off);
+        a.ld(0, 16);
+        a.op(OP_I64_EQZ);
+        a.op(OP_I32_EQZ);
+        a.open(OP_IF);
+        a.w32(desc);
+        a.i32k(h.scr);
+        a.call(h.i_stat);
+        failed(inout a, in h);
+        a.open(OP_IF);
+        put_wasi_err(inout b, inout h, inout a, 2, add(h.scr, 8));
+        a.retk(1);
+        a.end();
+        a.lda(add(h.scr, 24), OP_I64_LOAD);
+        a.set(off);
+        a.end();
+        a.setk(done, 0);
+        a.open(OP_BLOCK);
+        a.open(OP_LOOP);
+        a.get(done);
+        a.get(vn);
+        a.op(OP_I64_GE_U);
+        a.br_if(1);
+        a.w32(desc);
+        a.get(va);
+        a.get(done);
+        a.op(OP_I64_ADD);
+        a.op(OP_I32_WRAP_I64);
+        a.get(vn);
+        a.get(done);
+        a.op(OP_I64_SUB);
+        a.op(OP_I32_WRAP_I64);
+        a.get(off);
+        a.get(done);
+        a.op(OP_I64_ADD);
+        a.i32k(h.scr);
+        a.call(h.i_write);
+        failed(inout a, in h);
+        a.open(OP_IF);
+        keep_pos(inout a, off, done);
+        put_wasi_err(inout b, inout h, inout a, 2, add(h.scr, 8));
+        a.retk(1);
+        a.end();
+        a.lda(add(h.scr, 8), OP_I64_LOAD);
+        a.set(n);
+        a.get(n);
+        a.op(OP_I64_EQZ);
+        a.open(OP_IF);
+        keep_pos(inout a, off, done);
+        put_errk(inout a, 2, 10);
+        a.retk(1);
+        a.end();
+        a.get(done);
+        a.get(n);
+        a.op(OP_I64_ADD);
+        a.set(done);
+        a.br(0);
+        a.end();
+        a.end();
+        a.st_begin(0);
+        a.get(off);
+        a.get(vn);
+        a.op(OP_I64_ADD);
+        a.st_end(8);
+        put_errk(inout a, 2, 0);
+        a.k(0);
+        return;
+    }
+    if k == FS_RENAME {
+        // (from, to, err)
+        let d2 = a.loc();
+        let ra2 = a.loc();
+        let rn2 = a.loc();
+        resolve(inout b, inout h, inout a, 0, 2, 1, desc, ra, rn);
+        resolve(inout b, inout h, inout a, 1, 2, 1, d2, ra2, rn2);
+        a.w32(desc);
+        a.w32(ra);
+        a.w32(rn);
+        a.w32(d2);
+        a.w32(ra2);
+        a.w32(rn2);
+        a.i32k(h.scr);
+        a.call(h.i_rename);
+        failed(inout a, in h);
+        a.open(OP_IF);
+        put_wasi_err(inout b, inout h, inout a, 2, add(h.scr, 1));
+        a.retk(1);
+        a.end();
+        put_errk(inout a, 2, 0);
+        a.k(0);
+        return;
+    }
+    if k == FS_METADATA {
+        // (path, follow, meta block, err cell)
+        let kind = host_fn(inout b, inout h, H_KIND);
+        resolve(inout b, inout h, inout a, 0, 3, 1, desc, ra, rn);
+        a.w32(desc);
+        a.get(1);
+        a.op(OP_I64_EQZ);
+        a.op(OP_I32_EQZ);
+        a.w32(ra);
+        a.w32(rn);
+        a.i32k(h.scr);
+        a.call(h.i_stat_at);
+        failed(inout a, in h);
+        a.open(OP_IF);
+        put_wasi_err(inout b, inout h, inout a, 3, add(h.scr, 8));
+        a.retk(1);
+        a.end();
+        a.st_begin(2);
+        a.lda(add(h.scr, 24), OP_I64_LOAD);
+        a.st_end(0);
+        a.lda(add(h.scr, 56), OP_I64_LOAD8_U);
+        a.op(OP_I64_EQZ);
+        a.open(OP_IF);
+        a.stk(2, 8, 0);
+        a.stk(2, 16, 0);
+        a.op(OP_ELSE);
+        a.st_begin(2);
+        a.lda(add(h.scr, 64), OP_I64_LOAD);
+        a.st_end(8);
+        a.st_begin(2);
+        a.lda(add(h.scr, 72), OP_I64_LOAD32_U);
+        a.st_end(16);
+        a.end();
+        a.st_begin(2);
+        a.lda(add(h.scr, 8), OP_I64_LOAD8_U);
+        a.call(kind);
+        a.st_end(24);
+        put_errk(inout a, 3, 0);
+        a.k(0);
+        return;
+    }
+    // FS_DIR_NEXT (dir, buf cell, kind cell)
+    let kind = host_fn(inout b, inout h, H_KIND);
+    let nl = a.loc();
+    let np = a.loc();
+    let t = a.loc();
+    let view = a.loc();
+    a.ld(0, 8);
+    a.op(OP_I64_EQZ);
+    a.open(OP_IF);
+    slot_desc(inout a, 0, 0, desc);
+    a.w32(desc);
+    a.i32k(h.scr);
+    a.call(h.i_read_entry);
+    failed(inout a, in h);
+    a.open(OP_IF);
+    a.retk(-1);
+    a.end();
+    a.lda(add(h.scr, 4), OP_I64_LOAD8_U);
+    a.op(OP_I64_EQZ);
+    a.open(OP_IF);
+    a.retk(-1);
+    a.end();
+    a.lda(add(h.scr, 12), OP_I64_LOAD32_U);
+    a.set(np);
+    a.lda(add(h.scr, 16), OP_I64_LOAD32_U);
+    a.set(nl);
+    a.get(nl);
+    a.ku(wrapping_sub(SLOT, 48));
+    a.op(OP_I64_GT_U);
+    a.open(OP_IF);
+    a.retk(-1);
+    a.end();
+    a.get(0);
+    a.k(48);
+    a.op(OP_I64_ADD);
+    a.set(t);
+    a.copy(t, np, nl);
+    a.st(0, 16, nl);
+    a.st_begin(0);
+    a.lda(add(h.scr, 8), OP_I64_LOAD8_U);
+    a.call(kind);
+    a.st_end(24);
+    a.stk(0, 8, 1);
+    a.end();
+    a.ld(0, 16);
+    a.set(nl);
+    a.ld(1, 0);
+    a.set(view);
+    a.get(nl);
+    a.get(view);
+    a.k(32);
+    a.op(OP_I64_SHR_U);
+    a.op(OP_I64_LE_U);
+    a.open(OP_IF);
+    a.view_addr(view, t);
+    a.get(0);
+    a.k(48);
+    a.op(OP_I64_ADD);
+    a.set(np);
+    a.copy(t, np, nl);
+    a.stk(0, 8, 0);
+    a.st_begin(2);
+    a.ld(0, 24);
+    a.st_end(0);
+    a.end();
+    a.get(nl);
+}
+
+// `create_dir(path, true, err)`: create each prefix ending before a `/`
+// and the whole path, accepting `exist` (create_dir_all). Returns from
+// the shim.
+// The file slot's position after a write that stopped early: the bytes
+// already written still move it, as natively.
+fn keep_pos(inout a: A, off: u32, done: u32) {
+    a.st_begin(0);
+    a.get(off);
+    a.get(done);
+    a.op(OP_I64_ADD);
+    a.st_end(8);
+}
+
+fn create_dir_all(inout b: Builder, inout h: Host, inout a: A) eff [Fail[WErr]] {
+    let desc = a.loc();
+    let ra = a.loc();
+    let rn = a.loc();
+    let j = a.loc();
+    let s = a.loc();
+    resolve(inout b, inout h, inout a, 0, 2, 1, desc, ra, rn);
+    a.setk(j, 1);
+    a.open(OP_BLOCK);
+    a.open(OP_LOOP);
+    a.get(j);
+    a.get(rn);
+    a.op(OP_I64_GT_U);
+    a.br_if(1);
+    a.get(ra);
+    a.get(j);
+    a.op(OP_I64_ADD);
+    a.set(s);
+    // j == rn || ra[j] == '/'
+    a.get(j);
+    a.get(rn);
+    a.op(OP_I64_EQ);
+    a.open_i32();
+    a.c.i32_const(1);
+    a.op(OP_ELSE);
+    a.ld8(s, 0);
+    a.k(47);
+    a.op(OP_I64_EQ);
+    a.end();
+    a.open(OP_IF);
+    a.w32(desc);
+    a.w32(ra);
+    a.w32(j);
+    a.i32k(h.scr);
+    a.call(h.i_mkdir);
+    failed(inout a, in h);
+    a.open(OP_IF);
+    a.lda(add(h.scr, 1), OP_I64_LOAD8_U);
+    a.k(7);
+    a.op(OP_I64_NE);
+    a.open(OP_IF);
+    put_wasi_err(inout b, inout h, inout a, 2, add(h.scr, 1));
+    a.retk(1);
+    a.end();
+    // The whole path exists: fine only when it is a directory.
+    a.get(j);
+    a.get(rn);
+    a.op(OP_I64_EQ);
+    a.open(OP_IF);
+    a.w32(desc);
+    a.c.i32_const(1);
+    a.w32(ra);
+    a.w32(rn);
+    a.i32k(h.scr);
+    a.call(h.i_stat_at);
+    failed(inout a, in h);
+    a.open(OP_IF);
+    put_wasi_err(inout b, inout h, inout a, 2, add(h.scr, 8));
+    a.retk(1);
+    a.end();
+    a.lda(add(h.scr, 8), OP_I64_LOAD8_U);
+    a.k(3);
+    a.op(OP_I64_NE);
+    a.open(OP_IF);
+    // AlreadyExists | EEXIST << 32
+    put_errk(inout a, 2, 73014444035);
+    a.retk(1);
+    a.end();
+    a.end();
+    a.end();
+    a.end();
+    a.addk(j, 1);
+    a.br(0);
+    a.end();
+    a.end();
+    put_errk(inout a, 2, 0);
+    a.retk(0);
+}

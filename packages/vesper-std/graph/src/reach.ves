@@ -1,5 +1,8 @@
 // @vesper-std/graph::reach: reachability and depth-first orders.
-use self::Graph;
+use self::{
+    Graph,
+    GraphIndex
+};
 use self::util::{
     get32,
     get64,
@@ -25,7 +28,7 @@ pub fn reachable_from_all(in g: Graph, in roots: Slice[u32]) -> ChunkSeq[bool] {
         if i >= roots.len() {
             break;
         }
-        let r = get32(in roots, i, 4294967295);
+        let r = get32(in roots, i, GraphIndex::Missing);
         let rk = widen_u64(r);
         if rk < n && !get_bool(in seen.as_slice(), rk) {
             seen.try_set(rk, true);

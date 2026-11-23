@@ -26,7 +26,9 @@ use @vesper/check-data::types::{
     debug_type,
     default_type,
     display,
-    substitute
+    substitute,
+    TyKind,
+    TyPass
 };
 use @vesper/check-data::world::{
     World
@@ -49,10 +51,6 @@ const NONE32: u32 = 4294967295;
 const L_PRODUCT: u8 = 1;
 const L_ENUM: u8 = 2;
 const NO_ADT: u32 = 4294967295;
-const K_NAMED: u8 = 1;
-const K_TUPLE: u8 = 2;
-const K_FN: u8 = 3;
-const P_INOUT: u8 = 1;
 const MAX_READ: u32 = 4096;
 const MAX_U32: u64 = 4294967295;
 
@@ -195,7 +193,7 @@ fn align8(x: u64) -> u64 {
 // `ty == Named(n, [])` with `n` one of `a`, `b`.
 fn integer(in t: Types, ty: u32, a: u32, b: u32) -> bool {
     let n = t.node(ty);
-    n.kind == K_NAMED && n.n == 0 && (n.name == a || n.name == b)
+    n.kind == TyKind::Named && n.n == 0 && (n.name == a || n.name == b)
 }
 
 impl Planner {
@@ -234,10 +232,10 @@ impl Planner {
     // `contains_function(world, t)`.
     pub fn contains_function(inout self, inout t: Types, in wd: World, ty: u32) -> bool {
         let n = t.node(ty);
-        if n.kind == K_FN {
+        if n.kind == TyKind::Fn {
             return true;
         }
-        if n.kind == K_TUPLE {
+        if n.kind == TyKind::Tuple {
             for i in 0..w(n.n) {
                 if self.contains_function(inout t, in wd, t.arg(ty, i)) {
                     return true;
@@ -245,12 +243,12 @@ impl Planner {
             }
             return false;
         }
-        if n.kind != K_NAMED {
+        if n.kind != TyKind::Named {
             return false;
         }
         if contains32(in self.seen, n.name) {
             for i in 0..w(n.n) {
-                if t.node(t.arg(ty, i)).kind == K_FN {
+                if t.node(t.arg(ty, i)).kind == TyKind::Fn {
                     return true;
                 }
             }
@@ -441,9 +439,9 @@ impl Planner {
         }
         let node = ls.node(l);
         let n = t.node(ty);
-        let is_string = n.kind == K_NAMED && n.name == self.string_name;
+        let is_string = n.kind == TyKind::Named && n.name == self.string_name;
         if node.kind == L_PRODUCT && !is_string && node.n > 0 {
-            if n.kind == K_NAMED {
+            if n.kind == TyKind::Named {
                 let ai = wd.lookup(n.name);
                 if ai != NO_ADT && wd.adt(ai).is_enum {
                     self.err.clear();
@@ -601,7 +599,7 @@ impl Planner {
                 return false;
             }
             let p = tb.param(w(sig.pa));
-            if p.pass != P_INOUT {
+            if p.pass != TyPass::Inout {
                 self.err = head;
                 put(inout self.err, " is bound to Read but its buffer is not passed inout");
                 return false;
@@ -658,7 +656,8 @@ impl Planner {
             } else if fields.len() == 1 {
                 let f = u32_at(in fields, 0);
                 let fnode = t.node(f);
-                shaped = f == t.unit || (fnode.kind == K_NAMED && fnode.name == self.unit_name);
+                shaped = f == t.unit
+                    || (fnode.kind == TyKind::Named && fnode.name == self.unit_name);
             }
         } else if fields.len() == 1 {
             let f = u32_at(in fields, 0);

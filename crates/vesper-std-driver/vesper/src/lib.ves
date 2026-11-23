@@ -1,6 +1,6 @@
 // @export vsys StdFs rust=crate::fs
 // @export vsys StdProcess rust=crate::process
-// @export vsys StdEnv rust=crate::env
+// @export vsys StdEnv
 //
 // The sample driver of self-hosting SH0 lane 3 (#1125): the I/O a Vesper
 // compiler driver does, through @vesper-std/fs, process and env. It reads

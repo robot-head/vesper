@@ -180,11 +180,13 @@ fn run_with(
 /// lowering is checked against the evaluator in
 /// tests/self_host_wasm_backend.rs).
 fn port_extension(command: &[&str], default: &Run, hybrid: &Run) -> bool {
-    // Rust refuses an operation the port lowers: loops (`WASM_REFUSAL`),
-    // sequences, strings and integer conversions (#1506).
+    // Rust refuses an operation or integer width the port lowers: loops
+    // (`WASM_REFUSAL`), sequences, strings, `i8`/`i16`/`i32`/`u16`/`i128`
+    // and integer conversions (#1506, #1604).
+    let stderr = String::from_utf8_lossy(&default.output.stderr);
     command.contains(&"wasm32-wasip2")
         && !default.output.status.success()
-        && String::from_utf8_lossy(&default.output.stderr).contains("unsupported Operation")
+        && (stderr.contains("unsupported Operation") || stderr.contains("unsupported IntegerWidth"))
         && hybrid.output.status.success()
 }
 
@@ -382,6 +384,14 @@ fn pilot_module_runs_from_vesper() {
             .unwrap_or_else(|| panic!("no {module} report in {stderr:?}"));
         assert!(calls > 0, "the Vesper {module} module answered no calls");
     }
+    // SH4 lane 7 (#1281): the `call` hook is installed (counter.ves makes
+    // no direct calls; tests/self_host_codegen_calls_emit.rs counts them).
+    assert!(
+        stderr
+            .lines()
+            .any(|l| l.starts_with("vesper-hybrid: codegen_calls emitted ")),
+        "no codegen_calls report in {stderr:?}"
+    );
     // SH3 lane 10 (#1249): the AST optimizer's producer runs on every
     // visited expression of the optimized module.
     let proposed: u64 = stderr

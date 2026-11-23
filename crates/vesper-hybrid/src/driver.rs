@@ -13,7 +13,6 @@
 use std::{
     collections::BTreeSet,
     ffi::c_int,
-    fs,
     io::{self, Write},
     panic::{self, AssertUnwindSafe},
     path::{Path, PathBuf},
@@ -24,10 +23,10 @@ use vesper::{
     runtime::Runtime,
 };
 
-/// The standard I/O host the driver's `@vesper-std/fs`, `process` and
-/// `env` imports bind to (the binding names it).
+/// The standard I/O host the driver's `@vesper-std/fs` and `process`
+/// imports bind to (the binding names it).
 pub mod std_host {
-    pub use vesper_std_host::{env, fs, process};
+    pub use vesper_std_host::{fs, process};
 }
 
 #[rustfmt::skip]
@@ -55,18 +54,35 @@ pub fn main() -> c_int {
         // Passes catch their panics; the Vesper code does not unwind.
         .unwrap_or(PANIC_EXIT);
     if code == binding::delegate() {
-        // A panic in the Rust CLI (it resumes its CLI thread's) must not
-        // unwind across this C entry, which would abort: Rust's own start-up
-        // exits with 101 after the hook printed it.
-        let delegated = panic::catch_unwind(crate::main);
-        let _ = io::stdout().flush();
-        if delegated.is_err() {
-            std::process::exit(PANIC_EXIT as i32);
+        // Dispatch through `cli` directly and return `c_int` rather than
+        // calling `crate::main()` / `std::process::exit`: on Windows MSVC,
+        // `std::process::exit` calls `ExitProcess`, skipping C `atexit(report)`
+        // (`VESPER_HYBRID_STATS=1`).
+        const _: fn() = crate::main;
+        if let Some(tool_code) =
+            crate::tool_commands::dispatch(|c| crate::COMPILER_COMMANDS.contains(&c))
+        {
+            let _ = io::stdout().flush();
+            return tool_code as c_int;
         }
-        return 0;
+        let result = std::thread::Builder::new()
+            .name("vesper".to_owned())
+            .stack_size(crate::CLI_STACK_BYTES)
+            .spawn(crate::cli)
+            .expect("spawn the vesper CLI thread")
+            .join();
+        let _ = io::stdout().flush();
+        return match result {
+            Ok(Ok(())) => 0,
+            Ok(Err(e)) => {
+                eprintln!("vesper: {e}");
+                1
+            }
+            Err(_) => PANIC_EXIT as c_int,
+        };
     }
     let _ = io::stdout().flush();
-    std::process::exit(i32::try_from(code).unwrap_or(1))
+    c_int::try_from(code).unwrap_or(1)
 }
 
 /// Passes the Vesper driver ran (`VESPER_HYBRID_STATS=1` reports it).
@@ -305,12 +321,11 @@ enum Step {
     EmitHir,
     EmitIr,
     EmitLean,
-    EmitObject,
-    EmitClif,
+    EmitClif = 26,
     IoError,
 }
 
-const STEPS: [Step; 27] = [
+const STEPS: [Step; 26] = [
     Step::IsPackage,
     Step::Load,
     Step::EbpfBuild,
@@ -335,7 +350,6 @@ const STEPS: [Step; 27] = [
     Step::EmitHir,
     Step::EmitIr,
     Step::EmitLean,
-    Step::EmitObject,
     Step::EmitClif,
     Step::IoError,
 ];
@@ -385,11 +399,7 @@ impl Session {
                 let input = o.input();
                 if self.package {
                     let path = Path::new(input);
-                    let assembled = if o.include_tests {
-                        packages::load_for_tests(path)?
-                    } else {
-                        packages::load(path)?
-                    };
+                    let assembled = packages::load_for_target(path, o.target(), o.include_tests)?;
                     if !assembled.ok() {
                         crate::package_diagnostics(&assembled, &assembled.diagnostics, o.json);
                         return Ok(count(
@@ -399,8 +409,7 @@ impl Session {
                     self.original = assembled.sources.combined();
                     self.loaded = Some(assembled);
                 } else {
-                    self.original =
-                        fs::read_to_string(input).map_err(|e| format!("{input}: {e}"))?;
+                    self.original = io::read_to_string(arg).map_err(|e| format!("{input}: {e}"))?;
                 }
                 Ok(0)
             }
@@ -654,9 +663,8 @@ impl Session {
                 Ok(0)
             }
             Step::NativeObject => {
-                let object = PathBuf::from(utf8(arg)?);
                 let (bytes, _) = self.native_code()?;
-                fs::write(&object, bytes).map_err(|e| e.to_string())?;
+                self.text = bytes;
                 Ok(0)
             }
             Step::IsWindowsTarget => Ok(i64::from(native::windows::is_windows_target(o.target()))),
@@ -701,12 +709,6 @@ impl Session {
                     o.output(),
                     lean::extract(&self.checked()?.world)?.as_bytes(),
                 )?;
-                Ok(0)
-            }
-            Step::EmitObject => {
-                let path = o.output().ok_or("object output requires -o <path>")?;
-                let (bytes, _) = self.native_code()?;
-                fs::write(path, bytes).map_err(|e| e.to_string())?;
                 Ok(0)
             }
             Step::EmitClif => {

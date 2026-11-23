@@ -447,6 +447,27 @@ fn dump_ty(o: &mut String, t: &Type, d: usize) {
                 dump_ty(o, a, d + 1);
             }
         }
+        // The source type of a Vesper function handed to C (a callback
+        // parameter): its passes, result and closed row.
+        Type::Function {
+            params,
+            result,
+            effects,
+            mode: m,
+        } => {
+            assert!(effects.tail.is_none());
+            line(o, d, &format!("T fn mode={}", mode(*m)));
+            for (p, t) in params {
+                line(o, d + 1, &format!("P pass={}", pass(*p)));
+                dump_ty(o, t, d + 2);
+            }
+            line(o, d + 1, "R");
+            dump_ty(o, result, d + 2);
+            for e in &effects.instances {
+                assert!(e.label.is_none() && e.args.is_empty());
+                line(o, d + 1, &format!("E {}", q(&e.name)));
+            }
+        }
         other => panic!("generated type {other:?}"),
     }
 }
@@ -456,7 +477,7 @@ fn dump_ty(o: &mut String, t: &Type, d: usize) {
 fn dump_item(o: &mut String, item: &Item, d: usize) {
     match item {
         Item::Adt(a) => {
-            assert!(a.generics.is_empty() && a.tile_width.is_none());
+            assert!(a.tile_width.is_none());
             line(
                 o,
                 d,
@@ -468,6 +489,19 @@ fn dump_item(o: &mut String, item: &Item, d: usize) {
                     sp(&a.span)
                 ),
             );
+            // `Pinned[T]` is the one generic declaration.
+            for g in &a.generics {
+                line(
+                    o,
+                    d + 1,
+                    &format!(
+                        "generic {} bound={} row={}",
+                        q(&g.name),
+                        mode(g.bound),
+                        u8::from(g.row)
+                    ),
+                );
+            }
             for v in &a.variants {
                 line(
                     o,
@@ -515,6 +549,67 @@ fn dump_item(o: &mut String, item: &Item, d: usize) {
                 line(o, d + 2, "effects tail=-");
             }
         }
+        Item::Function(f) => {
+            assert!(
+                f.generics.is_empty()
+                    && f.params.is_empty()
+                    && f.effects.instances.is_empty()
+                    && f.effects.tail.is_none()
+            );
+            line(
+                o,
+                d,
+                &format!("fn {} fip={}{}", q(&f.name), u8::from(f.fip), sp(&f.span)),
+            );
+            line(o, d + 1, "result");
+            dump_ty(o, &f.result, d + 2);
+            line(o, d + 1, "effects tail=-");
+            let Some(body) = &f.body else {
+                panic!("generated function lacking body {f:?}");
+            };
+            let ExprKind::Literal(Literal::Int(value)) = body.kind else {
+                panic!("generated function unexpected body {body:?}");
+            };
+            line(o, d + 1, "body");
+            line(o, d + 2, &format!("E lit int {value}{}", sp(&body.span)));
+        }
+        Item::Impl {
+            ty,
+            generics,
+            methods,
+        } => {
+            line(o, d, "impl");
+            for g in generics {
+                line(
+                    o,
+                    d + 1,
+                    &format!(
+                        "generic {} bound={} row={}",
+                        q(&g.name),
+                        mode(g.bound),
+                        u8::from(g.row)
+                    ),
+                );
+            }
+            dump_ty(o, ty, d + 1);
+            for f in methods {
+                line(
+                    o,
+                    d + 1,
+                    &format!("fn {} fip={}{}", q(&f.name), u8::from(f.fip), sp(&f.span)),
+                );
+                for p in &f.params {
+                    line(
+                        o,
+                        d + 2,
+                        &format!("param {} pass={}{}", q(&p.name), pass(p.pass), sp(&p.span)),
+                    );
+                    dump_ty(o, &p.ty, d + 3);
+                }
+                line(o, d + 2, "result");
+                dump_ty(o, &f.result, d + 3);
+            }
+        }
         other => panic!("generated item {other:?}"),
     }
 }
@@ -542,6 +637,7 @@ fn abi_type(t: AbiType) -> String {
     match t {
         AbiType::Pointer => "ptr".into(),
         AbiType::Integer(s) => s.name().into(),
+        AbiType::Float(f) => f.name().into(),
     }
 }
 
@@ -892,7 +988,7 @@ fn embedded_sources(text: &str) -> Vec<String> {
 /// address, unit and handle parameters, pointer results, nested and
 /// byte-array structs, every slice and pointer form, `errno`, `CStr`,
 /// reserved and duplicate names.
-const HANDWRITTEN: [&str; 6] = [
+const HANDWRITTEN: [&str; 11] = [
     r#"sys library Shapes (
     target = "x86_64-unknown-linux-gnu", abi = "sysv64",
     link = "dynamic", name = "shapes", artifact = "blake3:@DIGEST@",
@@ -965,6 +1061,83 @@ const HANDWRITTEN: [&str; 6] = [
     wire struct ForeignInvalid { raw: u64 }
     fn f(nocapture in x: ForeignInvalid) -> ForeignVal[bool];
 }"#,
+    r#"sys library DarwinVar (
+    target = "aarch64-apple-darwin", abi = "darwin64",
+    link = "dynamic", name = "c", artifact = "blake3:@DIGEST@"
+) {
+    fn openat(dirfd: i32, nocapture in path: CStr, flags: i32, ..., mode: i64) -> ForeignVal[i32] errno;
+    fn log_f(nocapture in fmt: CStr, x: f64, ..., n: i64) -> ForeignVal[i32];
+}"#,
+    // Callback types (copyable handles whose calls come after the direct
+    // functions in the canonical bytes, but in symbol order everywhere
+    // else) and `#[link_name]` lookups sharing one C symbol.
+    r#"sys library Loader (
+    target = "aarch64-apple-darwin", abi = "darwin64",
+    link = "dynamic", name = "loader", artifact = "blake3:@DIGEST@"
+) {
+    enum Mode: u8 { Off = 0, On = 3 }
+    wire struct Flat { a: u64, b: i64, c: u64 }
+    linear extern type Ctx;
+    fn open(nocapture in path: CStr, flags: i32) -> ForeignVal[u64];
+    callback Bump(nocapture inout n: u32, by: u64) -> ForeignVal[i32];
+    #[link_name = "dlsym"]
+    fn load_bump(library: u64, nocapture in name: CStr) -> ForeignVal[NonNull[Bump]];
+    callback Apply(in c: Ctx, nocapture in f: Flat, m: Mode) -> ForeignVal[Mode];
+    #[link_name = "dlsym"]
+    fn load_apply(library: u64, nocapture in name: CStr) -> ForeignVal[Option[Apply]];
+    callback Zap(x: u64) -> ForeignVal[Unit];
+    #[link_name = "dlsym"]
+    fn load_zap(library: u64, nocapture in name: CStr) -> ForeignVal[Zap];
+    fn register(h: u64) -> ForeignVal[bool] errno;
+    fn ctx_free(sink c: Ctx) -> ForeignVal[Unit];
+}"#,
+    // Floats by value, Vesper functions handed to C (callback parameters,
+    // including ones no source function type can carry), pinned buffers
+    // and a mapping.
+    r#"sys library Hands (
+    target = "x86_64-unknown-linux-gnu", abi = "sysv64",
+    link = "dynamic", name = "hands", artifact = "blake3:@DIGEST@"
+) {
+    linear extern type Sock;
+    linear extern mapping Ring[u32];
+    callback Step(acc: u64, i: u32) -> ForeignVal[u64];
+    callback Tick(x: f64, n: i16) -> ForeignVal[f32];
+    callback Idle() -> ForeignVal[Unit];
+    callback Note(nocapture inout n: u32) -> ForeignVal[Unit];
+    callback Flag(on: bool) -> ForeignVal[bool];
+    fn fold(nocapture f: Step, n: u64) -> ForeignVal[u64];
+    fn on_tick(retain t: Tick, period: f32) -> ForeignVal[f64];
+    fn on_idle(retain f: Idle, nocapture g: Step) -> ForeignVal[i32] errno;
+    fn note(nocapture f: Note) -> ForeignVal[Unit];
+    fn flag(nocapture f: Flag) -> ForeignVal[Unit];
+    fn mix(a: f32, b: i32, c: f64) -> ForeignVal[f32];
+    fn give(inout umem: Pinned[u8], in table: Pinned[u64], frames: u32) -> ForeignVal[Option[Sock]];
+    fn ring_map(in s: Sock, words: u64) -> ForeignVal[Option[Ring[words]]];
+    fn ring_use(inout r: Ring, in s: Sock) -> ForeignVal[u32];
+    fn ring_unmap(sink r: Ring) -> ForeignVal[i32];
+    fn sock_free(sink s: Sock) -> ForeignVal[Unit];
+}"#,
+    r#"sys library Argv (
+    target = "x86_64-unknown-linux-gnu", abi = "sysv64",
+    link = "dynamic", name = "argv", artifact = "blake3:@DIGEST@"
+) {
+    fn execv(nocapture in path: CStr, nocapture in argv: CStrList) -> ForeignVal[i32] errno;
+    fn spawn(nocapture in argv: CStrList, nocapture in envp: CStrList, flags: u32) -> ForeignVal[i32];
+    fn count(nocapture in argv: CStrList) -> ForeignVal[u64];
+}"#,
+    r#"sys library ConstProbe (
+    target = "x86_64-unknown-linux-gnu", abi = "sysv64",
+    link = "static", name = "constprobe", artifact = "blake3:@DIGEST@"
+) {
+    const BYTE_MAX: u8 = 255;
+    const O_CREAT: i32 = 0o100;
+    const NEG: i32 = -1;
+    const FLAG: u64 = 0x200;
+    const PAGE: usize = 4096;
+    const I64_MIN: i64 = -9223372036854775808;
+    const U64_MAX: u64 = 18446744073709551615;
+    fn check_flags(flags: i32) -> ForeignVal[i32];
+}"#,
 ];
 
 fn corpus() -> &'static [Case] {
@@ -1014,15 +1187,6 @@ fn corpus() -> &'static [Case] {
             let mut found = vec![];
             libraries_of(s, &mut found);
             for d in found {
-                // Foreign memory viewed in place (pinned buffers and
-                // mappings, #1505) is not in the port yet: handed to SH4
-                // lane 13 (#1287). The native `ffi` hook is not offered
-                // those calls.
-                if d.functions().iter().any(|f| f.uses_foreign_memory())
-                    || d.extern_types().iter().any(|t| t.mapping().is_some())
-                {
-                    continue;
-                }
                 if seen.insert(d.canonical_bytes().to_vec()) {
                     libraries.push((label.clone(), d));
                 }

@@ -24,7 +24,10 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use vesper_bench::{BenchCase, Invocation, RunConfig, analyze_pairs, run_abba};
 use vesper_chorus::check::{ExploreLimits, explore};
-use vesper_chorus::raft::{APPEND_CHOREOGRAPHY, SNAPSHOT_CHOREOGRAPHY, VOTE_CHOREOGRAPHY};
+use vesper_chorus::raft::{
+    APPEND_CHOREOGRAPHY, Entry, RaftAppendWireHeader, RaftConfig, SNAPSHOT_CHOREOGRAPHY,
+    VOTE_CHOREOGRAPHY, decode_batch, encode_batch, run_cluster,
+};
 use vesper_chorus::{parse_choreography, project_all};
 
 const PROJECT_SOURCES: usize = 24;
@@ -131,10 +134,48 @@ fn explore_batch(srcs: &[String]) -> u64 {
     h
 }
 
+fn raft_batch() -> u64 {
+    let mut h = 0xcbf2_9ce4_8422_2325;
+    let cfg = RaftConfig::new(5);
+    for seed in 1..=8u64 {
+        let out = run_cluster(seed, &cfg, None).expect("raft runs");
+        h = fnv(h, format!("{out:?}").as_bytes());
+    }
+    h
+}
+
+fn wire_batch() -> u64 {
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    let hdr = RaftAppendWireHeader {
+        term: 7,
+        leader_id: 1,
+        follower_slot: 2,
+        prev_log_index: 12,
+        prev_log_term: 6,
+        leader_commit: 10,
+    };
+    let entries: Vec<Entry> = (0..32u64)
+        .map(|i| Entry {
+            term: 7,
+            cmd: i * 17 + 3,
+        })
+        .collect();
+    for _ in 0..500 {
+        let buf = encode_batch(&hdr, &entries);
+        let (dh, de) = decode_batch(&buf).expect("decode");
+        h = h
+            .wrapping_mul(0x100_0000_01b3)
+            .wrapping_add(dh.leader_commit + de.len() as u64);
+    }
+    h
+}
+
 fn batch(workload: &str, project: &[String], expl: &[String]) -> u64 {
     match workload {
         "project" => project_batch(project),
         "explore" => explore_batch(expl),
+        "raft" => raft_batch(),
+        "wire" => wire_batch(),
         other => panic!("unknown workload {other}"),
     }
 }
@@ -210,10 +251,12 @@ fn drive(workload: &str, rust: &str, vesper: &str) {
     let (operations, per_batch) = match workload {
         "project" => (16, PROJECT_SOURCES as u64),
         "explore" => (8, EXPLORE_SOURCES as u64),
+        "raft" => (4, 8),
+        "wire" => (16, 500),
         other => panic!("unknown workload {other}"),
     };
     let config = RunConfig {
-        epochs: 12,
+        epochs: 30,
         warmup_epochs: 1,
         operations_per_window: operations,
         max_elapsed_nanos: 600_000_000_000,
@@ -298,7 +341,7 @@ fn main() {
         }
         _ => {
             eprintln!(
-                "usage: abba worker <project|explore> | abba drive <project|explore> <rust-worker> <vesper-worker> | abba once <project|explore> <batches>"
+                "usage: abba worker <project|explore|raft|wire> | abba drive <project|explore|raft|wire> <rust-worker> <vesper-worker> | abba once <project|explore|raft|wire> <batches>"
             );
             std::process::exit(2);
         }

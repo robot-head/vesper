@@ -260,3 +260,39 @@ fn views_of_changing_places_freeze_them() {
         );
     }
 }
+
+#[test]
+fn nested_field_view_freezes_the_source_until_block_exit() {
+    let source = r#"
+struct Buffer { bytes: ChunkSeq[u8], count: u64 }
+fn inspect(inout b: Buffer) -> u64 {
+    let n = {
+        let all = b.bytes.as_slice();
+        let suffix = all[1..3];
+        b.count = suffix.len();
+        b.count
+    };
+    b.bytes.push(42);
+    wrapping_add(n, b.bytes.len())
+}
+fn main() -> u64 {
+    let mut bytes: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    bytes.resize(3, 0);
+    let mut b = Buffer { bytes: bytes, count: 0 };
+    inspect(inout b)
+}
+"#;
+    assert_eq!(differential("nested_field", source), 6);
+    // Move the write to the overlapping field after the last read, but
+    // before block exit. The loan lasts through the block.
+    let refused = source.replace(
+        "b.count = suffix.len();",
+        "b.count = suffix.len(); b.bytes.push(42);",
+    );
+    let c = checked(&refused);
+    assert!(
+        c.diagnostics.iter().any(|d| d.code == "E1531"),
+        "{:?}",
+        c.diagnostics
+    );
+}

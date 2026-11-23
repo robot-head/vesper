@@ -28,7 +28,9 @@ use @vesper/check-data::types::{
     default_type,
     display,
     substitute,
-    vars_new
+    vars_new,
+    TyKind,
+    TyPass
 };
 use @vesper/check-data::world::{
     World,
@@ -65,10 +67,6 @@ const NONE32: u32 = 4294967295;
 const NONE64: u64 = 18446744073709551615;
 // `layout::NO_SIZE` (constants cannot be imported yet).
 const NO_SIZE: u64 = 18446744073709551615;
-const K_NAMED: u8 = 1;
-const K_TUPLE: u8 = 2;
-const K_FN: u8 = 3;
-const P_SINK: u8 = 2;
 
 const E_LITERAL: u8 = 1;
 const E_NAME: u8 = 2;
@@ -267,12 +265,12 @@ impl Fip {
     }
 
     fn is_fn_type(in self, t: u32) -> bool {
-        self.c.types.kind(t) == K_FN
+        self.c.types.kind(t) == TyKind::Fn
     }
 
     fn is_never(in self, t: u32) -> bool {
         let n = self.c.types.node(t);
-        n.kind == K_NAMED && n.name == self.s.never
+        n.kind == TyKind::Named && n.name == self.s.never
     }
 
     // Whether name `s` contains "::".
@@ -377,7 +375,7 @@ impl Fip {
     // `is_box_type` (no `.vsys` handle plan is running in `check_world`).
     fn is_box(in self, t: u32) -> bool {
         let n = self.c.types.node(t);
-        self.c.world.box_active && n.kind == K_NAMED && n.name == self.s.box_ && n.n == 1
+        self.c.world.box_active && n.kind == TyKind::Named && n.name == self.s.box_ && n.n == 1
     }
 
     // `box_inner`, or NONE32.
@@ -452,7 +450,7 @@ impl Fip {
             return true;
         }
         let n = self.c.types.node(t);
-        if n.kind == K_TUPLE {
+        if n.kind == TyKind::Tuple {
             for i in 0..w(n.n) {
                 if self.box_visit(self.c.types.arg(t, i)) {
                     return true;
@@ -460,7 +458,7 @@ impl Fip {
             }
             return false;
         }
-        if n.kind != K_NAMED {
+        if n.kind != TyKind::Named {
             return false;
         }
         for i in 0..w(n.n) {
@@ -516,7 +514,7 @@ impl Fip {
     // `has_generic` of `slots_match` and `slot_key`.
     fn has_generic(in self, f: FnRow, t: u32) -> bool {
         let n = self.c.types.node(t);
-        if n.kind == K_NAMED {
+        if n.kind == TyKind::Named {
             if self.is_generic(f, n.name) {
                 return true;
             }
@@ -527,7 +525,7 @@ impl Fip {
             }
             return false;
         }
-        if n.kind == K_TUPLE {
+        if n.kind == TyKind::Tuple {
             for i in 0..w(n.n) {
                 if self.has_generic(f, self.c.types.arg(t, i)) {
                     return true;
@@ -535,7 +533,7 @@ impl Fip {
             }
             return false;
         }
-        if n.kind == K_FN {
+        if n.kind == TyKind::Fn {
             for i in 0..w(n.n) {
                 if self.has_generic(f, self.c.types.arg(t, i)) {
                     return true;
@@ -574,7 +572,7 @@ impl Fip {
         let norm = default_type(inout self.c.types, t);
         let n = self.c.types.node(norm);
         let mut has_gen = false;
-        if n.kind == K_NAMED {
+        if n.kind == TyKind::Named {
             if self.is_generic(f, n.name) {
                 has_gen = true;
             } else {
@@ -628,7 +626,7 @@ impl Fip {
         }
         let t = self.expr_type(base);
         let n = self.c.types.node(t);
-        if n.kind != K_NAMED {
+        if n.kind != TyKind::Named {
             return 0;
         }
         let m = c.b;
@@ -959,7 +957,7 @@ impl Fip {
             if !bad {
                 for j in 0..w(f.pn) {
                     let p = self.ast.param(add(w(f.pa), j));
-                    if p.pass == P_SINK && self.contains_box(p.ty) {
+                    if p.pass == TyPass::Sink && self.contains_box(p.ty) {
                         bad = true;
                         break;
                     }
@@ -1048,7 +1046,7 @@ impl Fip {
             return true;
         }
         let n = self.c.types.node(ty);
-        if n.kind == K_TUPLE {
+        if n.kind == TyKind::Tuple {
             for i in 0..w(n.n) {
                 let d = self.digit(i);
                 path.push(d);
@@ -1061,7 +1059,7 @@ impl Fip {
             }
             return false;
         }
-        if n.kind == K_NAMED {
+        if n.kind == TyKind::Named {
             let ai = self.c.world.lookup(n.name);
             if ai != NONE32 {
                 let a = self.c.world.adt(ai);
@@ -1161,7 +1159,7 @@ impl Fip {
         }
         if p.kind == PT_TUPLE {
             let n = self.c.types.node(ty);
-            if n.kind == K_TUPLE {
+            if n.kind == TyKind::Tuple {
                 for i in 0..w(p.b) {
                     if i >= w(n.n) {
                         break;
@@ -1200,7 +1198,7 @@ impl Fip {
             }
             let a = self.c.world.adt(n32(found >> 32));
             let v = self.c.world.variant(found & 4294967295);
-            let vars = if self.c.types.kind(ty) == K_NAMED {
+            let vars = if self.c.types.kind(ty) == TyKind::Named {
                 self.c.world.vars_of(in self.c.types, a, ty)
             } else {
                 vars_new()
@@ -1408,7 +1406,7 @@ impl Fip {
                 break;
             }
             let p = self.ast.param(add(w(callee.pa), i));
-            if p.pass == P_SINK {
+            if p.pass == TyPass::Sink {
                 if self.contains_box(p.ty) {
                     return true;
                 }
@@ -1477,7 +1475,7 @@ impl Fip {
         let mut first: u64 = 0;
         if recv != NONE32 {
             first = 1;
-            let recv_owned = callee.pn > 0 && self.ast.param(w(callee.pa)).pass == P_SINK;
+            let recv_owned = callee.pn > 0 && self.ast.param(w(callee.pa)).pass == TyPass::Sink;
             let base = self.ast.expr(recv);
             let base_ty = self.expr_type(base);
             self.check_expr(f, recv, inout st, recv_owned, false);
@@ -1499,7 +1497,7 @@ impl Fip {
             }
             let arg = u32_at(in args, pi);
             let param = self.ast.param(add(w(callee.pa), pi));
-            let arg_owned = param.pass == P_SINK;
+            let arg_owned = param.pass == TyPass::Sink;
             let a = self.ast.expr(arg);
             let arg_ty = self.expr_type(a);
             self.check_expr(f, arg, inout st, arg_owned, false);
@@ -1537,7 +1535,7 @@ impl Fip {
     fn check_args(inout self, f: FnRow, e: ExprRow, inout st: FipState, all_owned: bool) {
         for i in 0..w(e.c) {
             let arg = self.ast.at(add(add(w(e.b), wrapping_mul(i, 2)), 1));
-            let owned = all_owned || self.arg_pass(e, i) == P_SINK;
+            let owned = all_owned || self.arg_pass(e, i) == TyPass::Sink;
             self.check_expr(f, arg, inout st, owned, false);
         }
     }
@@ -1715,7 +1713,7 @@ impl Fip {
             let mut borrowed = false;
             for i in 0..w(f.pn) {
                 let q = self.ast.param(add(w(f.pa), i));
-                if q.name == root && q.pass != P_SINK {
+                if q.name == root && q.pass != TyPass::Sink {
                     borrowed = true;
                     break;
                 }
@@ -1848,7 +1846,7 @@ impl Fip {
         let mut st = state_new(false);
         for i in 0..w(f.pn) {
             let p = self.ast.param(add(w(f.pa), i));
-            if p.pass == P_SINK && self.contains_box(p.ty) {
+            if p.pass == TyPass::Sink && self.contains_box(p.ty) {
                 st
                     .binds
                     .insert(

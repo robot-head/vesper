@@ -13,20 +13,35 @@ use self::cbor::{
     K_BYTES,
     K_MAP,
     K_NINT,
+    K_TAG,
     K_TEXT,
     K_UINT,
     R_TRAILING,
+    Scratch,
     WHAT,
     arg,
     cbor_err,
+    cur_len,
     decode,
+    decode_span,
+    decode_whole_at,
     kind,
+    materialize_bytes,
     put_str,
+    set_len,
     skip,
     str_len,
-    text_eq
+    text_eq_s
 };
-use self::reader::put;
+use self::cose::{
+    R_MALFORMED_COSE_SIGN1,
+    parse_sign1_node
+};
+use self::reader::{
+    k_over_budget,
+    put,
+    raise
+};
 
 // CBOR_FIELDS of src/port.rs.
 const F_REALM_CLAIMS: u64 = 0;
@@ -59,6 +74,12 @@ const F_SW_VERSION: u64 = 26;
 const F_SW_DESCRIPTION: u64 = 27;
 const F_PLATFORM_PROFILE: u64 = 28;
 const F_REALM_PROFILE: u64 = 29;
+const F_TOKEN_COLLECTION: u64 = 30;
+const F_PLATFORM_TOKEN: u64 = 31;
+const F_REALM_TOKEN: u64 = 32;
+// FIELDS index for "token" (OverBudget).
+const FIELD_TOKEN: u64 = 129;
+const FORMAT_CCA_TOKEN: u64 = 4;
 
 // CBOR_REASONS of src/port.rs (0 and 1 are cbor's).
 const R_EXPECTED_MAP: u64 = 2;
@@ -81,6 +102,22 @@ const R_ROTPK_INDEX: u64 = 18;
 const R_DIGEST_LENGTH: u64 = 19;
 const R_UNKNOWN_KEY: u64 = 20;
 const R_UNKNOWN_PROFILE: u64 = 21;
+const R_WRONG_TAG: u64 = 22;
+const R_MISSING_COLLECTION_TAG: u64 = 23;
+const R_EXPECTED_TWO_TOKENS: u64 = 24;
+const R_DETACHED_PAYLOAD: u64 = 26;
+const R_CMW_NOT_ARRAY: u64 = 27;
+const R_CMW_CF_NOT_INT: u64 = 28;
+const R_CMW_CF_NOT_263: u64 = 29;
+const R_CMW_BAD_RECORD: u64 = 30;
+
+// Collection constants.
+const CCA_COLLECTION_TAG: u64 = 399;
+const CCA_CMW_COLLECTION_TAG: u64 = 907;
+const CCA_CMW_CONTENT_FORMAT: u64 = 263;
+const CCA_PLATFORM_TOKEN_KEY: u64 = 44234;
+const CCA_REALM_TOKEN_KEY: u64 = 44241;
+const MAX_CCA_TOKEN_LEN: u64 = 65536;
 
 // Claim keys (src/cca.rs, mod keys).
 const CHALLENGE: u64 = 10;
@@ -238,15 +275,16 @@ fn bytes(in n: Slice[u64], i: u64, field: u64) -> u64 eff [Fail[AErr]] {
 }
 
 // parse_algo: a hash algorithm name.
-fn algo(in b: Slice[u8], in n: Slice[u64], i: u64, field: u64) -> u64 eff [Fail[AErr]] {
+fn algo(in b: Slice[u8], in s: Slice[u8], in n: Slice[u64], i: u64, field: u64)
+    -> u64 eff [Fail[AErr]] {
     if kind(in n, i) != K_TEXT {
         cbor_err(field, R_EXPECTED_TEXT);
     }
-    if text_eq(in b, in n, i, "sha-256".as_bytes()) {
+    if text_eq_s(in b, in s, in n, i, "sha-256".as_bytes()) {
         SHA256
-    } else if text_eq(in b, in n, i, "sha-384".as_bytes()) {
+    } else if text_eq_s(in b, in s, in n, i, "sha-384".as_bytes()) {
         SHA384
-    } else if text_eq(in b, in n, i, "sha-512".as_bytes()) {
+    } else if text_eq_s(in b, in s, in n, i, "sha-512".as_bytes()) {
         SHA512
     } else {
         cbor_err(field, R_UNSUPPORTED_HASH)
@@ -271,15 +309,18 @@ fn digest_len_ok(len: u64) -> bool {
     len == 32 || len == 48 || len == 64
 }
 
-// CcaRealmClaims::from_cbor: hash algorithm, RIM, the four REMs,
-// challenge, personalization value, RAK and its hash algorithm.
-pub fn realm_claims(in b: Slice[u8], inout n: Slice[u64], inout st: Slice[u64], inout w: Slice[u64])
-    -> Unit eff [Fail[AErr]] {
-    decode_whole(in b, F_REALM_CLAIMS, inout n, inout st);
-    let m = 1;
+// CcaRealmClaims::from_cbor on map node `m`.
+fn realm_claims_node(
+    in b: Slice[u8],
+    in s: Slice[u8],
+    in n: Slice[u64],
+    m: u64,
+    inout w: Slice[u64]
+) -> Unit eff [Fail[AErr]] {
     claim_map(in n, m, F_REALM_CLAIMS);
     let hash_algo = algo(
         in b,
+        in s,
         in n,
         get(in n, m, REALM_HASH_ALGO, F_REALM_HASH_ALGO),
         F_REALM_HASH_ALGO
@@ -325,8 +366,22 @@ pub fn realm_claims(in b: Slice[u8], inout n: Slice[u64], inout st: Slice[u64], 
     put_str(in n, rak, inout w);
     put(
         inout w,
-        algo(in b, in n, get(in n, m, REALM_PUBLIC_KEY_HASH_ALGO, F_RAK_HASH_ALGO), F_RAK_HASH_ALGO)
+        algo(
+            in b,
+            in s,
+            in n,
+            get(in n, m, REALM_PUBLIC_KEY_HASH_ALGO, F_RAK_HASH_ALGO),
+            F_RAK_HASH_ALGO
+        )
     );
+}
+
+// CcaRealmClaims::from_cbor: hash algorithm, RIM, the four REMs,
+// challenge, personalization value, RAK and its hash algorithm.
+pub fn realm_claims(in b: Slice[u8], inout n: Slice[u64], inout st: Slice[u64], inout w: Slice[u64])
+    -> Unit eff [Fail[AErr]] {
+    decode_whole(in b, F_REALM_CLAIMS, inout n, inout st);
+    realm_claims_node(in b, in b, in n, 1, inout w);
 }
 
 // An optional text claim of a software component: presence, then chunks.
@@ -386,7 +441,7 @@ fn sw_component(in n: Slice[u64], c: u64, inout w: Slice[u64]) -> Unit eff [Fail
 }
 
 // CcaTbbRotpk::from_value: name, index and hash.
-fn tbb_rotpk(in b: Slice[u8], in n: Slice[u64], r: u64, inout w: Slice[u64])
+fn tbb_rotpk(in b: Slice[u8], in s: Slice[u8], in n: Slice[u64], r: u64, inout w: Slice[u64])
     -> Unit eff [Fail[AErr]] {
     claim_map(in n, r, F_TBB_ROTPK);
     if arg(in n, r) != ROTPK_ENTRIES {
@@ -396,7 +451,8 @@ fn tbb_rotpk(in b: Slice[u8], in n: Slice[u64], r: u64, inout w: Slice[u64])
     if kind(in n, name) != K_TEXT {
         cbor_err(F_ROTPK_NAME, R_EXPECTED_TEXT);
     }
-    if !text_eq(in b, in n, name, "CM".as_bytes()) && !text_eq(in b, in n, name, "DM".as_bytes()) {
+    if !text_eq_s(in b, in s, in n, name, "CM".as_bytes())
+        && !text_eq_s(in b, in s, in n, name, "DM".as_bytes()) {
         cbor_err(F_ROTPK_NAME, R_CM_OR_DM);
     }
     put_str(in n, name, inout w);
@@ -442,17 +498,14 @@ fn opt_bytes(in n: Slice[u64], m: u64, key: u64, field: u64, inout w: Slice[u64]
     put_str(in n, v, inout w);
 }
 
-// CcaPlatformClaims::from_cbor: lifecycle, software components, the two
-// configurations, TBB RoTPKs, challenge, instance ID, implementation ID
-// and hash algorithm.
-pub fn platform_claims(
+// CcaPlatformClaims::from_cbor on map node `m`.
+fn platform_claims_node(
     in b: Slice[u8],
-    inout n: Slice[u64],
-    inout st: Slice[u64],
+    in s: Slice[u8],
+    in n: Slice[u64],
+    m: u64,
     inout w: Slice[u64]
 ) -> Unit eff [Fail[AErr]] {
-    decode_whole(in b, F_PLATFORM_CLAIMS, inout n, inout st);
-    let m = 1;
     claim_map(in n, m, F_PLATFORM_CLAIMS);
     let lifecycle = uint(in n, get(in n, m, PLATFORM_LIFECYCLE, F_LIFECYCLE));
     if lifecycle == NONE && kind(in n, find(in n, m, PLATFORM_LIFECYCLE)) != K_UINT {
@@ -504,7 +557,7 @@ pub fn platform_claims(
             if c == count {
                 break;
             }
-            tbb_rotpk(in b, in n, at, inout w);
+            tbb_rotpk(in b, in s, in n, at, inout w);
             at = skip(in n, at);
             c = wrapping_add(c, 1);
         }
@@ -522,6 +575,7 @@ pub fn platform_claims(
         inout w,
         algo(
             in b,
+            in s,
             in n,
             get(in n, m, PLATFORM_HASH_ALGO, F_PLATFORM_HASH_ALGO),
             F_PLATFORM_HASH_ALGO
@@ -529,23 +583,59 @@ pub fn platform_claims(
     );
 }
 
+// CcaPlatformClaims::from_cbor: lifecycle, software components, the two
+// configurations, TBB RoTPKs, challenge, instance ID, implementation ID
+// and hash algorithm.
+pub fn platform_claims(
+    in b: Slice[u8],
+    inout n: Slice[u64],
+    inout st: Slice[u64],
+    inout w: Slice[u64]
+) -> Unit eff [Fail[AErr]] {
+    decode_whole(in b, F_PLATFORM_CLAIMS, inout n, inout st);
+    platform_claims_node(in b, in b, in n, 1, inout w);
+}
+
+fn platform_profile_at(in b: Slice[u8], in s: Slice[u8], in n: Slice[u64], m: u64)
+    -> u64 eff [Fail[AErr]] {
+    let p = get(in n, m, PROFILE, F_PLATFORM_PROFILE);
+    if kind(in n, p) != K_TEXT {
+        cbor_err(F_PLATFORM_PROFILE, R_EXPECTED_TEXT);
+    }
+    if text_eq_s(in b, in s, in n, p, "http://arm.com/CCA-SSD/1.0.0".as_bytes()) {
+        0
+    } else if text_eq_s(in b, in s, in n, p, "tag:arm.com,2023:cca_platform#1.0.0".as_bytes()) {
+        1
+    } else if text_eq_s(in b, in s, in n, p, "tag:arm.com,2024:cca_platform#2.0.0".as_bytes()) {
+        2
+    } else {
+        cbor_err(F_PLATFORM_PROFILE, R_UNKNOWN_PROFILE)
+    }
+}
+
 // platform_profile: CcaPlatformProfile index (CCA-SSD 1.0.0, 2023, 2024).
 pub fn platform_profile(in b: Slice[u8], inout n: Slice[u64], inout st: Slice[u64])
     -> u64 eff [Fail[AErr]] {
     decode_whole(in b, F_PLATFORM_CLAIMS, inout n, inout st);
     claim_map(in n, 1, F_PLATFORM_CLAIMS);
-    let p = get(in n, 1, PROFILE, F_PLATFORM_PROFILE);
-    if kind(in n, p) != K_TEXT {
-        cbor_err(F_PLATFORM_PROFILE, R_EXPECTED_TEXT);
+    platform_profile_at(in b, in b, in n, 1)
+}
+
+fn realm_profile_at(in b: Slice[u8], in s: Slice[u8], in n: Slice[u64], m: u64)
+    -> u64 eff [Fail[AErr]] {
+    let p = find(in n, m, PROFILE);
+    if p == NONE {
+        return 0;
     }
-    if text_eq(in b, in n, p, "http://arm.com/CCA-SSD/1.0.0".as_bytes()) {
-        0
-    } else if text_eq(in b, in n, p, "tag:arm.com,2023:cca_platform#1.0.0".as_bytes()) {
+    if kind(in n, p) != K_TEXT {
+        cbor_err(F_REALM_PROFILE, R_EXPECTED_TEXT);
+    }
+    if text_eq_s(in b, in s, in n, p, "tag:arm.com,2023:realm#1.0.0".as_bytes()) {
         1
-    } else if text_eq(in b, in n, p, "tag:arm.com,2024:cca_platform#2.0.0".as_bytes()) {
+    } else if text_eq_s(in b, in s, in n, p, "tag:arm.com,2024:realm#2.0.0".as_bytes()) {
         2
     } else {
-        cbor_err(F_PLATFORM_PROFILE, R_UNKNOWN_PROFILE)
+        cbor_err(F_REALM_PROFILE, R_UNKNOWN_PROFILE)
     }
 }
 
@@ -554,18 +644,156 @@ pub fn realm_profile(in b: Slice[u8], inout n: Slice[u64], inout st: Slice[u64])
     -> u64 eff [Fail[AErr]] {
     decode_whole(in b, F_REALM_CLAIMS, inout n, inout st);
     claim_map(in n, 1, F_REALM_CLAIMS);
-    let p = find(in n, 1, PROFILE);
-    if p == NONE {
-        return 0;
+    realm_profile_at(in b, in b, in n, 1)
+}
+
+// CMW record `[263, bstr]`, returning the byte-string node.
+fn cmw_record_node(in n: Slice[u64], v: u64, field: u64) -> u64 eff [Fail[AErr]] {
+    if kind(in n, v) != K_ARRAY {
+        cbor_err(field, R_CMW_NOT_ARRAY);
     }
-    if kind(in n, p) != K_TEXT {
-        cbor_err(F_REALM_PROFILE, R_EXPECTED_TEXT);
+    if arg(in n, v) != 2 {
+        cbor_err(field, R_CMW_BAD_RECORD);
     }
-    if text_eq(in b, in n, p, "tag:arm.com,2023:realm#1.0.0".as_bytes()) {
-        1
-    } else if text_eq(in b, in n, p, "tag:arm.com,2024:realm#2.0.0".as_bytes()) {
-        2
+    let cf = wrapping_add(v, 2);
+    let bnode = skip(in n, cf);
+    if kind(in n, cf) != K_UINT {
+        cbor_err(field, R_CMW_CF_NOT_INT);
+    }
+    if arg(in n, cf) != CCA_CMW_CONTENT_FORMAT {
+        cbor_err(field, R_CMW_CF_NOT_263);
+    }
+    bytes(in n, bnode, field);
+    bnode
+}
+
+fn collection_member(in n: Slice[u64], inner: u64, collection: u64, key: u64, field: u64)
+    -> u64 eff [Fail[AErr]] {
+    let v = get(in n, inner, key, field);
+    if collection == 0 {
+        bytes(in n, v, field);
+        v
     } else {
-        cbor_err(F_REALM_PROFILE, R_UNKNOWN_PROFILE)
+        cmw_record_node(in n, v, field)
     }
+}
+
+fn try_plat_profile(in b: Slice[u8], in s: Slice[u8], in n: Slice[u64], pm: u64)
+    -> (u64, u64, u64) {
+    handle Fail[AErr] in {
+        let p = platform_profile_at(in b, in s, in n, pm);
+        (0, p, 0)
+    } with {
+        return v => v,
+        raise(e, k) => (1, e.field, e.a)
+    }
+}
+
+// CcaToken::parse: collection envelope, platform & realm COSE_Sign1 envelopes,
+// platform & realm claims, and both profiles.
+pub fn cca_token_parse(
+    in b: Slice[u8],
+    inout s: Slice[u8],
+    inout n: Slice[u64],
+    inout st: Slice[u64],
+    inout w: Slice[u64]
+) -> Unit eff [Fail[AErr]] {
+    if b.len() > MAX_CCA_TOKEN_LEN {
+        raise(k_over_budget(), FORMAT_CCA_TOKEN, FIELD_TOKEN, MAX_CCA_TOKEN_LEN, b.len());
+    }
+    decode_whole_at(in b, 0, F_TOKEN_COLLECTION, inout n, inout st);
+    if kind(in n, 1) != K_TAG {
+        cbor_err(F_TOKEN_COLLECTION, R_MISSING_COLLECTION_TAG);
+    }
+    let tag = arg(in n, 1);
+    let collection = if tag == CCA_COLLECTION_TAG {
+        0
+    } else if tag == CCA_CMW_COLLECTION_TAG {
+        1
+    } else {
+        cbor_err(F_TOKEN_COLLECTION, R_WRONG_TAG)
+    };
+    let inner = 3;
+    claim_map(in n, inner, F_TOKEN_COLLECTION);
+    if arg(in n, inner) != 2 {
+        cbor_err(F_TOKEN_COLLECTION, R_EXPECTED_TWO_TOKENS);
+    }
+    let p_node = collection_member(
+        in n,
+        inner,
+        collection,
+        CCA_PLATFORM_TOKEN_KEY,
+        F_PLATFORM_TOKEN
+    );
+    let r_node = collection_member(in n, inner, collection, CCA_REALM_TOKEN_KEY, F_REALM_TOKEN);
+    put(inout w, collection);
+
+    let mut sc = Scratch {
+        pos: 0
+    };
+    let saved = cur_len(in n);
+    let p_sp = materialize_bytes(in b, inout s, inout sc, in n, p_node);
+    let p_root = handle Fail[AErr] in {
+        decode_span(in b, in s, p_sp, F_PLATFORM_TOKEN, inout n, inout st)
+    } with {
+        return v => v,
+        raise(e, k) => cbor_err(F_PLATFORM_TOKEN, R_MALFORMED_COSE_SIGN1)
+    };
+    let (p_has_pay, p_pay_node) = parse_sign1_node(
+        in b,
+        inout s,
+        inout sc,
+        inout n,
+        inout st,
+        p_root,
+        F_PLATFORM_TOKEN,
+        R_MALFORMED_COSE_SIGN1,
+        inout w
+    );
+    let p_pay_sp = if p_has_pay == 1 {
+        materialize_bytes(in b, inout s, inout sc, in n, p_pay_node)
+    } else {
+        p_sp
+    };
+    set_len(inout n, saved);
+
+    let r_sp = materialize_bytes(in b, inout s, inout sc, in n, r_node);
+    let r_root = handle Fail[AErr] in {
+        decode_span(in b, in s, r_sp, F_REALM_TOKEN, inout n, inout st)
+    } with {
+        return v => v,
+        raise(e, k) => cbor_err(F_REALM_TOKEN, R_MALFORMED_COSE_SIGN1)
+    };
+    let (r_has_pay, r_pay_node) = parse_sign1_node(
+        in b,
+        inout s,
+        inout sc,
+        inout n,
+        inout st,
+        r_root,
+        F_REALM_TOKEN,
+        R_MALFORMED_COSE_SIGN1,
+        inout w
+    );
+    if p_has_pay == 0 {
+        cbor_err(F_PLATFORM_TOKEN, R_DETACHED_PAYLOAD);
+    }
+    if r_has_pay == 0 {
+        cbor_err(F_REALM_TOKEN, R_DETACHED_PAYLOAD);
+    }
+    let r_pay_sp = materialize_bytes(in b, inout s, inout sc, in n, r_pay_node);
+
+    set_len(inout n, 0);
+    let pm = decode_span(in b, in s, p_pay_sp, F_PLATFORM_CLAIMS, inout n, inout st);
+    platform_claims_node(in b, in s, in n, pm, inout w);
+    let (plat_err, plat_prof_or_field, plat_err_reason) = try_plat_profile(in b, in s, in n, pm);
+
+    set_len(inout n, 0);
+    let rm = decode_span(in b, in s, r_pay_sp, F_REALM_CLAIMS, inout n, inout st);
+    realm_claims_node(in b, in s, in n, rm, inout w);
+    if plat_err == 1 {
+        cbor_err(plat_prof_or_field, plat_err_reason);
+    }
+    put(inout w, plat_prof_or_field);
+    put(inout w, realm_profile_at(in b, in s, in n, rm));
 }

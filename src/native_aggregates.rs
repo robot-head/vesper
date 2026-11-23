@@ -1552,6 +1552,15 @@ fn word_fields(shape: &EnumShape, name: &str, fields: &[(String, Pattern)]) -> b
 /// (a field path, a write, a place argument, a closure or handler that
 /// names it) keeps the old lowering for the whole connected set.
 ///
+/// Whether a `Seq` operation returns a two-word scalar `Option[T]` built
+/// through [`crate::seq::native::Codegen::seq_option`].
+fn seq_option_op(op: crate::seq::SeqOp, shape: &EnumShape) -> bool {
+    shape.words.len() == 2
+        && (matches!(op, crate::seq::SeqOp::Pop | crate::seq::SeqOp::Last)
+            || matches!(op, crate::seq::SeqOp::Wide(w) if !w.write && w.total)
+            || op.byte_scan())
+}
+
 /// Graphs with `Box` values or FIP slots keep the old lowering: their drop
 /// plans index instructions and slots.
 pub(super) fn scalar_enums(
@@ -1559,7 +1568,7 @@ pub(super) fn scalar_enums(
     f: &FunctionIr,
     generics: &BTreeMap<String, Type>,
     returns: Option<&EnumShape>,
-    specialized: &dyn Fn(&str) -> bool,
+    call_words: &dyn Fn(&str, &[Type], &EnumShape) -> bool,
     shared: &BTreeSet<String>,
 ) -> Option<ScalarEnums> {
     if !f.fip_call_slots.is_empty()
@@ -1691,7 +1700,13 @@ pub(super) fn scalar_enums(
                                 .all(|(n, _, _)| fields.iter().any(|(m, _)| m == n))
                     }),
                     Op::Read { root, .. } => cl.get(root) == Some(shape),
-                    Op::Call { callee, .. } => specialized(callee),
+                    Op::Call {
+                        callee,
+                        types,
+                        capability,
+                        ..
+                    } => capability.is_none() && call_words(callee, types, shape),
+                    Op::Seq { op, .. } if seq_option_op(*op, shape) => true,
                     _ => false,
                 },
                 Some(Def::Param(b, k)) => preds.get(b).is_some_and(|ps| {
@@ -1901,7 +1916,7 @@ pub(super) fn scalar_enums(
                         out.push(read);
                     }
                 }
-                Op::Call { .. } if cv.contains_key(&i.dest) => {
+                Op::Call { .. } | Op::Seq { .. } if cv.contains_key(&i.dest) => {
                     calls.insert(i.dest, (cv[&i.dest].clone(), words[&i.dest].clone()));
                     out.push(i.clone());
                 }
@@ -1940,6 +1955,7 @@ pub(super) fn scalar_enums(
                             dest,
                             Op::Bind {
                                 pattern: Pattern {
+                                    integer_kind: None,
                                     kind: PatternKind::Bind(n),
                                     span,
                                 },
@@ -1996,6 +2012,7 @@ pub(super) fn scalar_enums(
                             };
                             (
                                 Pattern {
+                                    integer_kind: None,
                                     kind,
                                     span: p.span.clone(),
                                 },

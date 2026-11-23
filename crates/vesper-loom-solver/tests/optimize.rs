@@ -41,6 +41,7 @@ fn manifest(
             capability_ceiling: caps.iter().map(|s| (*s).to_owned()).collect(),
             forbid_unsafe_ffi: true,
             vsys: vec![],
+            objects: vec![],
         },
         features: BTreeMap::new(),
         dependencies: dep_map,

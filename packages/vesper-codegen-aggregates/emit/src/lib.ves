@@ -87,7 +87,8 @@ use @vesper/check-data::input::{
 };
 use @vesper/check-data::types::{
     default_type,
-    display
+    display,
+    TyKind
 };
 use @vesper/check-data::util::{
     add,
@@ -116,9 +117,6 @@ pub const DROP_BOX: u32 = 1;
 const PLAIN: u32 = 0;
 const NONE32: u32 = 4294967295;
 // check-data's type kinds and check-layout's layout kinds.
-const K_NAMED: u8 = 1;
-const K_TUPLE: u8 = 2;
-const K_FN: u8 = 3;
 const L_SCALAR: u8 = 0;
 const L_PRODUCT: u8 = 1;
 // FNV-1a, 64 bits (`native::fnv1a64`).
@@ -151,10 +149,10 @@ fn mentions_dyn(in c: Ctx, ty: u32, depth: u64) -> bool {
         return true;
     }
     let n = c.types.node(ty);
-    if n.kind == K_NAMED && n.name == c.world.k.dyn_ {
+    if n.kind == TyKind::Named && n.name == c.world.k.dyn_ {
         return true;
     }
-    if n.kind == K_NAMED || n.kind == K_TUPLE || n.kind == K_FN {
+    if n.kind == TyKind::Named || n.kind == TyKind::Tuple || n.kind == TyKind::Fn {
         for i in 0..w(n.n) {
             if mentions_dyn(in c, c.types.arg(ty, i), wrapping_add(depth, 1)) {
                 return true;

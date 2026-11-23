@@ -190,10 +190,10 @@ unsafe extern "C" {
     fn vesper_kinetic_fastmath_sin(x: f64) -> f64;
     fn vesper_kinetic_fastmath_sinf(x: i64) -> i64;
     fn vesper_kinetic_gjk_separation(ka: i64, da: *mut u64, kb: i64, db: *mut u64, out: *mut u64, fail: *mut u64) -> i64;
-    fn vesper_kinetic_lbvh_build(boxes: *mut u64, codes: *mut u64, prims: *mut u64, leaf: *mut u64, left: *mut u64, right: *mut u64, node_box: *mut u64, order: *mut u64, stack: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_kinetic_lbvh_build(boxes: *mut u64, codes: *mut u64, prims: *mut u64, leaf: *mut u64, left: *mut u64, right: *mut u64, node_box: *mut u64, order: *mut u64, stack: *mut u64, tk: *mut u64, tv: *mut u64, hist: *mut u64, fail: *mut u64) -> i64;
     fn vesper_kinetic_lbvh_compact21(code: i64) -> i64;
     fn vesper_kinetic_lbvh_morton64(x: i64, y: i64, z: i64) -> i64;
-    fn vesper_kinetic_lbvh_pairs(codes: *mut u64, prims: *mut u64, leaf: *mut u64, left: *mut u64, right: *mut u64, node_box: *mut u64, stack: *mut u64, out: *mut u64, max_pairs: i64) -> i64;
+    fn vesper_kinetic_lbvh_pairs(codes: *mut u64, prims: *mut u64, leaf: *mut u64, left: *mut u64, right: *mut u64, node_box: *mut u64, stack: *mut u64, out: *mut u64, tk: *mut u64, novals: *mut u64, tv: *mut u64, hist: *mut u64, max_pairs: i64) -> i64;
     fn vesper_kinetic_lbvh_spread21(v: i64) -> i64;
     fn vesper_kinetic_morton_compact(v: i64) -> i64;
     fn vesper_kinetic_morton_decode(result: *mut u64, code: i64, fail: *mut u64) -> i64;
@@ -429,12 +429,12 @@ pub fn gjk_separation(ka: u32, da: &[f64], kb: u32, db: &[f64], out: &mut [f64])
 }
 
 /// Calls `lbvh_build` of the Vesper library `kinetic` (`vesper_kinetic_lbvh_build`).
-pub fn lbvh_build(boxes: &[u32], codes: &mut [u64], prims: &mut [u32], leaf: &mut [u32], left: &mut [u64], right: &mut [u64], node_box: &mut [u32], order: &mut [u32], stack: &mut [u64]) -> Result<(), crate::port::LbvhError> {
+pub fn lbvh_build(boxes: &[u32], codes: &mut [u64], prims: &mut [u32], leaf: &mut [u32], left: &mut [u64], right: &mut [u64], node_box: &mut [u32], order: &mut [u32], stack: &mut [u64], tk: &mut [u64], tv: &mut [u32], hist: &mut [u32]) -> Result<(), crate::port::LbvhError> {
     let mut fail = [0u64; 4];
     // SAFETY: `vesper_kinetic_lbvh_build` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = vesper_port_abi::with_slice(boxes, |view_boxes| vesper_port_abi::with_slice_mut(codes, |view_codes| vesper_port_abi::with_slice_mut(prims, |view_prims| vesper_port_abi::with_slice_mut(leaf, |view_leaf| vesper_port_abi::with_slice_mut(left, |view_left| vesper_port_abi::with_slice_mut(right, |view_right| vesper_port_abi::with_slice_mut(node_box, |view_node_box| vesper_port_abi::with_slice_mut(order, |view_order| vesper_port_abi::with_slice_mut(stack, |view_stack| unsafe { vesper_kinetic_lbvh_build(view_boxes, view_codes, view_prims, view_leaf, view_left, view_right, view_node_box, view_order, view_stack, fail.as_mut_ptr()) })))))))));
+    let raw = vesper_port_abi::with_slice(boxes, |view_boxes| vesper_port_abi::with_slice_mut(codes, |view_codes| vesper_port_abi::with_slice_mut(prims, |view_prims| vesper_port_abi::with_slice_mut(leaf, |view_leaf| vesper_port_abi::with_slice_mut(left, |view_left| vesper_port_abi::with_slice_mut(right, |view_right| vesper_port_abi::with_slice_mut(node_box, |view_node_box| vesper_port_abi::with_slice_mut(order, |view_order| vesper_port_abi::with_slice_mut(stack, |view_stack| vesper_port_abi::with_slice_mut(tk, |view_tk| vesper_port_abi::with_slice_mut(tv, |view_tv| vesper_port_abi::with_slice_mut(hist, |view_hist| unsafe { vesper_kinetic_lbvh_build(view_boxes, view_codes, view_prims, view_leaf, view_left, view_right, view_node_box, view_order, view_stack, view_tk, view_tv, view_hist, fail.as_mut_ptr()) }))))))))))));
     match fail[0] {
         0 => Ok({ let _ = raw; }),
         1 => Err(<crate::port::LbvhError as Abi>::get(&fail[1..])),
@@ -461,11 +461,11 @@ pub fn lbvh_morton64(x: u32, y: u32, z: u32) -> u64 {
 }
 
 /// Calls `lbvh_pairs` of the Vesper library `kinetic` (`vesper_kinetic_lbvh_pairs`).
-pub fn lbvh_pairs(codes: &[u64], prims: &[u32], leaf: &[u32], left: &[u64], right: &[u64], node_box: &[u32], stack: &mut [u64], out: &mut [u64], max_pairs: u64) -> u64 {
+pub fn lbvh_pairs(codes: &[u64], prims: &[u32], leaf: &[u32], left: &[u64], right: &[u64], node_box: &[u32], stack: &mut [u64], out: &mut [u64], tk: &mut [u64], novals: &mut [u32], tv: &mut [u32], hist: &mut [u32], max_pairs: u64) -> u64 {
     // SAFETY: `vesper_kinetic_lbvh_pairs` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = vesper_port_abi::with_slice(codes, |view_codes| vesper_port_abi::with_slice(prims, |view_prims| vesper_port_abi::with_slice(leaf, |view_leaf| vesper_port_abi::with_slice(left, |view_left| vesper_port_abi::with_slice(right, |view_right| vesper_port_abi::with_slice(node_box, |view_node_box| vesper_port_abi::with_slice_mut(stack, |view_stack| vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_kinetic_lbvh_pairs(view_codes, view_prims, view_leaf, view_left, view_right, view_node_box, view_stack, view_out, max_pairs as i64) }))))))));
+    let raw = vesper_port_abi::with_slice(codes, |view_codes| vesper_port_abi::with_slice(prims, |view_prims| vesper_port_abi::with_slice(leaf, |view_leaf| vesper_port_abi::with_slice(left, |view_left| vesper_port_abi::with_slice(right, |view_right| vesper_port_abi::with_slice(node_box, |view_node_box| vesper_port_abi::with_slice_mut(stack, |view_stack| vesper_port_abi::with_slice_mut(out, |view_out| vesper_port_abi::with_slice_mut(tk, |view_tk| vesper_port_abi::with_slice_mut(novals, |view_novals| vesper_port_abi::with_slice_mut(tv, |view_tv| vesper_port_abi::with_slice_mut(hist, |view_hist| unsafe { vesper_kinetic_lbvh_pairs(view_codes, view_prims, view_leaf, view_left, view_right, view_node_box, view_stack, view_out, view_tk, view_novals, view_tv, view_hist, max_pairs as i64) }))))))))))));
     raw as u64
 }
 

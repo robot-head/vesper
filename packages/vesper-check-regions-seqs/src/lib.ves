@@ -34,7 +34,8 @@ use @vesper/check-data::types::{
     Types,
     Vars,
     display,
-    vars_new
+    vars_new,
+    TyKind
 };
 use @vesper/check-data::world::{
     Known,
@@ -115,8 +116,6 @@ use self::vector::{
 };
 
 const NONE32: u32 = 4294967295;
-const K_FN: u8 = 3;
-const K_ROW: u8 = 4;
 
 fn put(inout o: ChunkSeq[u8], in s: Str) {
     o.extend(in s.as_bytes());
@@ -324,7 +323,7 @@ pub fn regions_seqs_types(in input: Str) -> ChunkSeq[u64] {
         }
         o.push(10);
         let node = c.types.node(ty);
-        if node.kind == K_ROW || node.kind == K_FN {
+        if node.kind == TyKind::Row || node.kind == TyKind::Fn {
             isa_lines(inout o, in c, in vn, node.r2, i);
         }
     }

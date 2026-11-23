@@ -30,11 +30,18 @@ fn keeps_buffer(method: &str) -> bool {
     matches!(
         method,
         "len"
+            | "address"
             | "get"
             | "set"
             | "try_get"
             | "try_set"
             | "try_get_mut"
+            | "try_atomic_load"
+            | "try_atomic_load_u32"
+            | "try_atomic_load_u64"
+            | "try_atomic_store"
+            | "try_atomic_store_u32"
+            | "try_atomic_store_u64"
             | "as_slice"
             | "as_slice_mut"
             | "copy_from"

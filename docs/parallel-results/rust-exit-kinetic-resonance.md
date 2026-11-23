@@ -434,17 +434,54 @@ which the code-size lane (#1426) owns.
    Moving the branch into its own function does not help, because that
    function is inlined back.
 
+## Part 6: Kinetic `gjk` and `sap` flipped; `lbvh` + `sap` radix speedup
+
+Base `main` at `cf28be7a`. Target: flip Kinetic modules meeting Rule 8 (`<= 1.50x` ABBA upper bound, `0` differential differences, all tests green).
+
+### Measurements (`n = 30`, `RUSTFLAGS="-C target-cpu=native"`, Windows x86_64 MSVC)
+
+| Workload | Baseline (`0f5a9eba`) | After `sap` + `lbvh` radix/traversal edits | Status |
+|---|---:|---:|---|
+| `gjk` | `1.10x [1.03x, 1.15x]` | `1.122x [1.053x, 1.168x]` | **Flipped** (`seed/src/engine/gjk.rs`) |
+| `sap` | `1.31x [1.25x, 1.35x]` | `1.088x [1.045x, 1.155x]` | **Flipped** (`seed/src/engine/sap.rs`) |
+| `scene` | `1.23x [1.18x, 1.25x]` | `1.180x [1.123x, 1.250x]` | Sub-1.5x integrated scene |
+| `pile-lbvh` | `1.85x` | `1.365x [1.250x, 1.430x]` | Sub-1.5x integrated pile |
+| `pile-lbvh-4t` | `1.79x` | `1.261x [1.201x, 1.315x]` | Sub-1.5x 4-thread pile |
+| `lbvh` | `2.09x [2.05x, 2.15x]` | `1.569x [1.491x, 1.626x]` | Kept in `src/lbvh.rs` (`> 1.50x`) |
+| `fastmath` | `1.70x [1.56x, 1.78x]` | — | Above bar on Windows MSVC (`1.42x` prior Linux) |
+| `morton` | `1.88x [1.82x, 1.96x]` | — | Above bar |
+| `crmath` | `2.27x [2.22x, 2.35x]` | — | Above bar |
+
+### What changed
+
+- **`vesper/src/sap.ves` & `vesper/src/lbvh.ves`**: Split `sap::radix_sort` into branchless `radix_pass_vals` / `radix_pass_keys` passes removing inner-loop `if` checks and duplicate histogram reloads, exported `sap::radix_sort` / `sap::radix_sort_pairs`, switched `lbvh::build` / `lbvh::pairs` onto `sap`'s radix sort with preallocated `LbvhPort` scratch buffers (`src/lbvh.rs`), hoisted box bounds / primitive indices out of `lbvh` loops, and checked `q > p` before loading leaf bounds (and updated `build.rs` + `BUILD.bazel` `lbvh` divergent hook to `"if q > p {"`).
+- **Frozen engines moved to `seed/src/engine/`**: Moved `separation_rust`, `gjk_cores`, `epa`, `closest_on_simplex`, and helpers out of `crates/vesper-kinetic/src/gjk.rs` into `crates/vesper-kinetic/seed/src/engine/gjk.rs`, and moved `sortable`, `SweepAndPrune::build`/`overlapping_pairs`, `exclusive_scan`, `radix_sort`, and `SortScratch` out of `crates/vesper-kinetic/src/sap.rs` into `crates/vesper-kinetic/seed/src/engine/sap.rs` (790 lines removed / 742 net lines deleted from `crates/vesper-kinetic/src/{gjk.rs,sap.rs}`).
+- **Differential & gate**: Added `gjk_matches_the_rust_build` (501 cases, bit-identical `f64` witness/normal/distance), `sap_matches_the_rust_build` (248 cases), and `lbvh_matches_the_rust_build` (360 cases) to `crates/vesper-kinetic/tests/port_differential.rs` (`0` differences across all 1,709 total differential cases with `coloring`). Added `gjk` and `sap` ABBA entries and `seed/src/engine/{gjk,sap}.rs` to `crates/vesper-kinetic/flip-gate.toml`.
+
+### Resonance: `schedule`, `pid` and `confine` flipped
+
+After `#1516`, `#1526` and `#1527` landed on `main` (`0f5a9eba`), re-measuring the remaining Resonance modules with `RUSTFLAGS="-C target-cpu=native"` (`n = 30`, Windows x86_64 MSVC) cleared three more modules cleanly under 1.50x:
+
+| Workload | Ratio (vesper / rust) | 95% interval | Previous | Decision |
+|---|--:|---|--:|---|
+| `schedule` (`pdc::compile_schedule`) | **1.02x** | `[0.94x, 1.13x]` | 1.50x `[1.45x, 1.53x]` | **Flipped** |
+| `pid` (`kernels::PidController`) | **1.27x** | `[1.17x, 1.30x]` | — | **Flipped** |
+| `confine` (`confine::verify_realtime`, 3 names) | **1.35x** (now **1.401x**) | `[1.294x, 1.496x]` | 1.66x | **Flipped** |
+| `confine-many` (`confine::verify_realtime`, 256 distinct `Effect::Other`) | **1.335x** | `[1.232x, 1.398x]` | quadratic intern | **HashMap intern** |
+| `slab` (`slab::DelaySlab`) | 1.89x | `[1.79x, 2.00x]` | 2.1x | Stays above bar |
+| `events` | 8.00x | `[7.76x, 8.98x]` | 5.6x | Stays above bar |
+
+Their `#[cfg(not(vesper_port))]` Rust implementations moved into `crates/vesper-resonance/seed/src/engine/` (`confine.rs`, `pdc.rs`, `kernels.rs`) so `vesper-resonance` runs only `@vesper/resonance` for all five flipped paths while `vesper-resonance-seed` stays frozen for the compiler until Stage 2. Effect interning in `confine.rs` uses a `HashMap<&Effect, u64>` alongside `effects: Vec<&Effect>` so graphs with many distinct custom effects (including unreachable functions) stay `O(N)`. `tests/port_differential.rs` keeps 0 differences across `PidController` (50,000 steps + fault cases), `compile_schedule` (400 randomized graphs) and `verify_realtime` (randomized graphs and indirect targets).
+
 ## What is left
 
-- **Resonance:** flip the schedule compiler once it passes the gate
-  (1.50x), then confine, pid, slab and events (gap 7). The Rust
+- **Resonance:** slab (1.89x) and events (8.00x) stay above the bar until codegen removes their hot-path overhead (gap 7). The Rust
   `CompiledGraph` over Rust `Box<dyn DspProcessor>` trait objects, the
   Cranelift JIT (`clif.rs`, which goes through `@vesper/cranelift` per the
   plan), the `rtrb` rings (`spsc.rs`) and the denormal registers are not
   ported yet. The SIMD paths are ported (part 3), but they run at 8-48x and
   are bound by gaps 2 and 6.
-- **Kinetic:** speed up fastmath (gap 8), gjk, sap, morton, lbvh and
-  crmath to the bar and flip them, then port `world`/`tile`, `rigid` and `rigid/**`, `soft`,
+- **Kinetic:** get isolated `lbvh` (now `1.57x`), `fastmath`, `morton` and `crmath` under `1.50x` and flip them, then port `world`/`tile`, `rigid` and `rigid/**`, `soft`,
   `articulation`, `couple`, `diff`, `rigid_diff`, `rollback`, `snapshot`,
   `detfloat`, `simd` (see `port-p3b-kinetic.md`, "Not ported yet"), then the
   speed of the ported modules (1.3-2.8x in P3b).

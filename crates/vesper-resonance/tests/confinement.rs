@@ -296,3 +296,29 @@ fn malformed_graphs_are_errors() {
         })
     );
 }
+
+#[test]
+fn many_distinct_custom_effects_scale_and_decode() {
+    let n = 2_000u32;
+    let nodes = (0..n)
+        .map(|i| {
+            FnNode::new(
+                format!("f{i}"),
+                vec![Effect::Other(format!("custom_{i}"))],
+                1,
+            )
+        })
+        .collect();
+    // Only the first 1,000 nodes are reachable; only f999's effect is disallowed.
+    let calls: Vec<(u32, u32)> = (0..999).map(|i| (i, i + 1)).collect();
+    let g = graph(nodes, &calls);
+    let mut policy = RealtimePolicy::root(FnId(0));
+    for i in 0..999 {
+        policy
+            .allowed_effects
+            .insert(Effect::Other(format!("custom_{i}")));
+    }
+    let f = verify_realtime(&g, &policy).unwrap();
+    assert_eq!(rules_of(&f), vec![rules::FORBIDDEN_EFFECT]);
+    assert!(f[0].message.contains("custom_999"), "got {}", f[0].message);
+}

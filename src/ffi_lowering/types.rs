@@ -16,7 +16,7 @@ use vesper_ffi::{FieldKind, WireLayout};
 pub(super) const BUFFER_FIELD: &str = "data";
 /// The generated pinned-buffer type (`linear struct Pinned[T] { data:
 /// ChunkSeq[T] }`), declared when an import takes one.
-pub(super) const PINNED_TYPE: &str = "Pinned";
+pub(crate) const PINNED_TYPE: &str = "Pinned";
 /// `Pinned[T]` as a source declaration.
 fn pinned_adt() -> Adt {
     let parsed = crate::parser::parse("linear struct Pinned[T] { data: ChunkSeq[T] }");
@@ -33,6 +33,49 @@ fn pinned_adt() -> Adt {
             _ => None,
         })
         .expect("Pinned declaration")
+}
+/// Generated inherent method returning the base address of a pinned buffer.
+pub(crate) const PINNED_ADDRESS: &str = "Pinned::address";
+/// Whether `name` is the generated `Pinned[T]` type in `world`.
+pub(crate) fn is_generated_pinned(world: &crate::check::World) -> bool {
+    world
+        .adts
+        .get(PINNED_TYPE)
+        .is_some_and(|a| a.span == (0..0))
+}
+fn pinned_impl() -> Item {
+    let parsed = crate::parser::parse(
+        "impl [T] Pinned[T] { fn address(in self) -> u64 { self.address() } }",
+    );
+    debug_assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    parsed
+        .module
+        .items
+        .into_iter()
+        .find_map(|i| match i {
+            Item::Impl {
+                ty,
+                generics,
+                mut methods,
+            } => {
+                for m in &mut methods {
+                    m.span = 0..0;
+                    for p in &mut m.params {
+                        p.span = 0..0;
+                        if p.name == "self" {
+                            p.ty = ty.clone();
+                        }
+                    }
+                }
+                Some(Item::Impl {
+                    ty,
+                    generics,
+                    methods,
+                })
+            }
+            _ => None,
+        })
+        .expect("Pinned::address impl")
 }
 /// Pass-1 placeholder of a slice parameter (not a source identifier).
 const OPEN: &str = "$open";
@@ -163,6 +206,13 @@ fn mentions_result(t: &Type) -> bool {
     }
 }
 
+/// The generated function name for `.vsys` constant `Lib::NAME`: keeps
+/// `const$` (`crate::arrays::is_const_function`) while avoiding `"Ffi$"`
+/// (`Generated::demangle`) and `"::"` (`src/arrays.rs`'s effect-collision check).
+pub(super) fn const_function_name(library: &str, name: &str) -> String {
+    format!("{}FfiConst${library}${name}", crate::parser::CONST_PREFIX)
+}
+
 pub(super) struct Generated {
     /// Source struct declarations by name (wire structs of every import).
     structs: BTreeMap<String, Result<Adt, String>>,
@@ -179,6 +229,8 @@ pub(super) struct Generated {
     callback_row: Effects,
     /// Per library: symbol -> shape.
     shapes: BTreeMap<String, BTreeMap<String, Result<OpShape, String>>>,
+    /// Per library: constant name -> (scalar type name, integer value).
+    consts: BTreeMap<String, BTreeMap<String, (&'static str, i128)>>,
     invalid: bool,
 }
 fn struct_adt(layout: &WireLayout) -> Result<Adt, String> {
@@ -309,6 +361,7 @@ impl Generated {
             libraries: imports.libraries.keys().cloned().collect(),
             callback_row: callback_row(imports),
             shapes: BTreeMap::new(),
+            consts: BTreeMap::new(),
             invalid: false,
         };
         let duplicate = |name: &str| {
@@ -395,8 +448,20 @@ impl Generated {
                 shapes.insert(f.symbol().to_owned(), shape);
             }
             g.shapes.insert(name.clone(), shapes);
+            let consts: BTreeMap<String, (&'static str, i128)> = import
+                .descriptor
+                .consts()
+                .iter()
+                .map(|c| (c.name().to_owned(), (result_scalar(c.scalar()), c.value())))
+                .collect();
+            if !consts.is_empty() {
+                g.consts.insert(name.clone(), consts);
+            }
         }
         Ok(g)
+    }
+    pub(super) fn constant(&self, library: &str, name: &str) -> Option<(&'static str, i128)> {
+        self.consts.get(library)?.get(name).copied()
     }
     fn pointee(&self, p: &Pointee) -> Result<Type, String> {
         match p {
@@ -418,7 +483,7 @@ impl Generated {
             .ok_or_else(|| format!("{callback} is not a callback type"))?;
         let unsupported = || {
             format!(
-                "C calls a Vesper function of callback type {callback} only with integer parameters and an integer or Unit result, without errno, for now"
+                "C calls a Vesper function of callback type {callback} only with integer or float parameters and an integer, float or Unit result, without errno, for now"
             )
         };
         let mut params = vec![];
@@ -427,12 +492,16 @@ impl Generated {
                 ParameterType::Value(ValueType::Scalar(s)) => {
                     params.push((Pass::In, Type::named(parameter_scalar(*s)?)));
                 }
+                ParameterType::Value(ValueType::Float(f)) => {
+                    params.push((Pass::In, Type::named(f.name())));
+                }
                 _ => return Err(unsupported()),
             }
         }
         let result = match f.result() {
             ValueType::Unit => Type::unit(),
             ValueType::Scalar(s) => Type::named(result_scalar(*s)),
+            ValueType::Float(f) => Type::named(f.name()),
             _ => return Err(unsupported()),
         };
         if f.reads_errno() {
@@ -457,11 +526,15 @@ impl Generated {
                     Pass::In,
                     ParamKind::Value(match v {
                         ValueType::Scalar(s) => Type::named(parameter_scalar(*s)?),
+                        ValueType::Float(f) => Type::named(f.name()),
                         ValueType::Bool => Type::named("bool"),
                         ValueType::Enum(e) => Type::named(e.name()),
                         ValueType::Unit => return Err("Unit parameter".into()),
                         ValueType::Handle { .. } | ValueType::NonNullHandle { .. } => {
                             return Err("a handle parameter needs a mode".into());
+                        }
+                        ValueType::CStr | ValueType::CWStr => {
+                            return Err("a C string result is not a parameter".into());
                         }
                         ValueType::Address { .. } => {
                             return Err(
@@ -528,12 +601,20 @@ impl Generated {
                         vec![Type::named(parameter_scalar(*element)?)],
                     )),
                 ),
-                // A C string is the caller's bytes, copied and terminated.
-                ParameterType::CStr => (
+                // A C string (or a list of them) is the caller's bytes,
+                // copied and terminated.
+                ParameterType::CStr | ParameterType::CStrList => (
                     Pass::In,
                     ParamKind::Value(Type::Named(
                         crate::seq::SLICE_TYPE.into(),
                         vec![Type::named("u8")],
+                    )),
+                ),
+                ParameterType::CWStr => (
+                    Pass::In,
+                    ParamKind::Value(Type::Named(
+                        crate::seq::SLICE_TYPE.into(),
+                        vec![Type::named("u16")],
                     )),
                 ),
             };
@@ -547,6 +628,7 @@ impl Generated {
         let result = match f.result() {
             ValueType::Unit => Type::unit(),
             ValueType::Scalar(s) => Type::named(result_scalar(*s)),
+            ValueType::Float(f) => Type::named(f.name()),
             ValueType::Bool => Type::Named("Result".into(), vec![Type::named("bool"), invalid()]),
             ValueType::Enum(e) => {
                 Type::Named("Result".into(), vec![Type::named(e.name()), invalid()])
@@ -566,6 +648,14 @@ impl Generated {
                 nullable: false,
             } => Type::Named("Result".into(), vec![Type::named(handle.name()), invalid()]),
             ValueType::NonNullHandle { handle } => Type::named(handle.name()),
+            ValueType::CStr => Type::Named(
+                "Option".into(),
+                vec![Type::Named("ChunkSeq".into(), vec![Type::named("u8")])],
+            ),
+            ValueType::CWStr => Type::Named(
+                "Option".into(),
+                vec![Type::Named("ChunkSeq".into(), vec![Type::named("u16")])],
+            ),
         };
         Ok(OpShape {
             params,
@@ -674,6 +764,9 @@ impl Generated {
         {
             module.items.push(Item::Adt(adt.clone()));
         }
+        if self.pinned.is_some() {
+            module.items.push(pinned_impl());
+        }
         if self.invalid {
             module.items.push(Item::Adt(Adt {
                 name: INVALID_TYPE.into(),
@@ -768,6 +861,42 @@ impl Generated {
                 ops,
                 span: 0..0,
             }));
+        }
+        // Give each synthetic constant body a unique non-zero span past the
+        // source module's own spans so `check::Checker::types` never overwrites
+        // `(0, 0)` across constants of different integer widths.
+        let mut next_span = module
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Adt(a) => Some(a.span.end),
+                Item::Function(f) => Some(f.span.end),
+                Item::Effect(e) => Some(e.span.end),
+                Item::Impl { methods, .. } => methods.iter().map(|m| m.span.end).max(),
+                Item::Trait(t) => Some(t.span.end),
+                Item::Conformance(c) => Some(c.span.end),
+            })
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        for (library, consts) in &self.consts {
+            for (name, (scalar, value)) in consts {
+                let body_span = next_span..next_span;
+                next_span = next_span.saturating_add(1);
+                module.items.push(Item::Function(Box::new(Function {
+                    name: const_function_name(library, name),
+                    fip: false,
+                    generics: vec![],
+                    params: vec![],
+                    result: Type::named(scalar),
+                    effects: Effects::default(),
+                    body: Some(Expr {
+                        kind: ExprKind::Literal(Literal::Int(*value)),
+                        span: body_span,
+                    }),
+                    span: 0..0,
+                })));
+            }
         }
     }
     /// Spell checker messages in source terms: `Ffi$Lib::f$3` as `Lib::f`

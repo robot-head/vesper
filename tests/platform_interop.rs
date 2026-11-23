@@ -637,3 +637,471 @@ fn the_jit_runs_fences_and_protection_keys() {
         }
     }
 }
+
+// ---- Assembly objects (G10) -------------------------------------------
+
+/// `twice_plus(x, y) = 2 * x + y` in each target's assembly.
+const TWICE_ASM: [(&str, &str); 4] = [
+    (
+        "asm/twice-x86_64-unknown-linux-gnu.s",
+        "    .text\n    .globl twice_plus\n    .type twice_plus, @function\ntwice_plus:\n    movl %esi, %eax\n    leaq (%rax,%rdi,2), %rax\n    ret\n    .section .note.GNU-stack,\"\",@progbits\n",
+    ),
+    (
+        "asm/twice-aarch64-unknown-linux-gnu.s",
+        "    .text\n    .globl twice_plus\n    .type twice_plus, %function\ntwice_plus:\n    add x0, x0, x0\n    add x0, x0, w1, uxtw\n    ret\n    .section .note.GNU-stack,\"\",%progbits\n",
+    ),
+    (
+        "asm/twice-aarch64-apple-darwin.s",
+        "    .text\n    .globl _twice_plus\n    .p2align 2\n_twice_plus:\n    add x0, x0, x0\n    add x0, x0, w1, uxtw\n    ret\n",
+    ),
+    (
+        "asm/twice-x86_64-pc-windows-msvc.asm",
+        ".code\ntwice_plus PROC\n    mov eax, edx\n    lea rax, [rax+rcx*2]\n    ret\ntwice_plus ENDP\nEND\n",
+    ),
+];
+
+/// A package whose `objects` define the static library its `.vsys` names.
+fn objects_app(t: &Temp, objects: &str) -> PathBuf {
+    for (path, text) in TWICE_ASM {
+        t.write(&format!("app/{path}"), text);
+    }
+    t.write(
+        "app/sys/twice.vsys",
+        "sys library Twice (target = \"@TARGET@\", abi = \"@ABI@\", link = \"static\", name = \"twice_asm\", \
+         artifact = \"blake3:0000000000000000000000000000000000000000000000000000000000000000\") {\n    \
+         fn twice_plus(x: u64, y: u32) -> ForeignVal[u64];\n}\n",
+    );
+    app(
+        t,
+        &format!("vsys = [\"sys/twice.vsys\"]\nobjects = {objects}"),
+        "pub fn main() -> u64 eff [Ffi[Twice]] {\n    Twice::twice_plus(20, 3)\n}\n",
+        "\"Ffi[Twice]\"",
+    )
+}
+
+const PER_TARGET_OBJECTS: &str = "[\"asm/twice-@TARGET@.s\", \"asm/twice-@TARGET@.asm\"]";
+
+/// G10: `vesper build` assembles each target's source and links it in
+/// place of the static library.
+#[test]
+fn executables_link_package_assembly() {
+    if !host_jit() || (!cfg!(windows) && Command::new("cc").arg("--version").output().is_err()) {
+        return;
+    }
+    let t = Temp::new("asm");
+    let dir = objects_app(&t, PER_TARGET_OBJECTS);
+    let exe = t.0.join(if cfg!(windows) {
+        "twice.exe"
+    } else {
+        "twice.bin"
+    });
+    run(vesper().arg("build").arg(&dir).arg("-o").arg(&exe));
+    let status = Command::new(&exe).status().unwrap();
+    assert_eq!(status.code(), Some(43));
+    // The assembled objects beside the output are removed.
+    let left: Vec<_> = fs::read_dir(&t.0)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains("vesper-asm") || n.contains("vesper.o"))
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
+}
+
+/// A C source compiles for the target and links in place of the static
+/// library (BLAKE3 in @vesper-std/hash-sys is built this way).
+#[test]
+fn executables_link_a_package_c_source() {
+    if !host_jit() || (!cfg!(windows) && Command::new("cc").arg("--version").output().is_err()) {
+        return;
+    }
+    let t = Temp::new("c-object");
+    t.write(
+        "app/c/twice.c",
+        "#include <stdint.h>\nuint64_t twice_plus(uint64_t x, uint32_t y) { return 2 * x + y; }\n",
+    );
+    let dir = objects_app(&t, "[\"c/twice.c\"]");
+    let exe = t.0.join(if cfg!(windows) {
+        "twice.exe"
+    } else {
+        "twice.bin"
+    });
+    run(vesper().arg("build").arg(&dir).arg("-o").arg(&exe));
+    assert_eq!(Command::new(&exe).status().unwrap().code(), Some(43));
+}
+
+/// A prebuilt object links as it is.
+#[test]
+fn executables_link_a_prebuilt_object() {
+    if cfg!(windows) || !host_jit() || Command::new("cc").arg("--version").output().is_err() {
+        return;
+    }
+    let t = Temp::new("prebuilt");
+    let dir = objects_app(&t, "[\"obj/twice.o\"]");
+    let (source, _) = TWICE_ASM
+        .iter()
+        .find(|(p, _)| p.contains(vesper::packages::vsys_target(None).unwrap().0))
+        .unwrap();
+    fs::create_dir_all(dir.join("obj")).unwrap();
+    let status = Command::new("cc")
+        .arg("-c")
+        .arg(dir.join(source))
+        .arg("-o")
+        .arg(dir.join("obj/twice.o"))
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let exe = t.0.join("twice.bin");
+    run(vesper().arg("build").arg(&dir).arg("-o").arg(&exe));
+    assert_eq!(Command::new(&exe).status().unwrap().code(), Some(43));
+}
+
+/// The JIT and the evaluator do not load package objects; they say so
+/// rather than looking for a `twice_asm` library.
+#[test]
+fn jit_and_run_refuse_assembly_objects() {
+    if !host_jit() {
+        return;
+    }
+    let t = Temp::new("asm-jit");
+    let dir = objects_app(&t, PER_TARGET_OBJECTS);
+    for command in ["jit", "run"] {
+        let err = fails(vesper().arg(command).arg(&dir));
+        assert!(
+            err.contains("objects of @t/app") && err.contains("only `vesper build` links"),
+            "{command}: {err}"
+        );
+    }
+}
+
+/// MASM source assembles only for Windows.
+#[test]
+fn masm_source_is_refused_for_other_targets() {
+    if cfg!(windows) || !host_jit() {
+        return;
+    }
+    let t = Temp::new("masm");
+    let dir = objects_app(&t, "[\"asm/twice-x86_64-pc-windows-msvc.asm\"]");
+    let err = fails(vesper().arg("build").arg(&dir).arg("-o").arg(t.0.join("x")));
+    assert!(err.contains("assembles only for Windows targets"), "{err}");
+}
+
+#[test]
+fn bad_object_paths_are_manifest_errors() {
+    for (objects, want) in [
+        ("[\"asm/twice.cpp\"]", "expected a C source"),
+        ("[\"asm/none.s\"]", "no such file"),
+        ("[\"asm/none-@OS@.s\"]", "no such file for any target"),
+        ("[\"../x.s\"]", "no `..`"),
+        (
+            "[\"asm/twice-@TARGET@.s\", \"./asm/twice-@TARGET@.s\"]",
+            "named twice",
+        ),
+    ] {
+        let t = Temp::new("bad-objects");
+        let dir = objects_app(&t, objects);
+        let assembled = vesper::packages::load(&dir).unwrap();
+        let messages: Vec<String> = assembled
+            .manifest_errors
+            .iter()
+            .map(|(_, d)| d.message.clone())
+            .collect();
+        assert!(
+            messages.iter().any(|m| m.contains(want)),
+            "{objects}: {messages:?}"
+        );
+    }
+}
+
+/// A per-target entry names a file for each target that has one.
+#[test]
+fn per_target_objects_select_each_targets_file() {
+    let t = Temp::new("asm-targets");
+    let dir = objects_app(&t, PER_TARGET_OBJECTS);
+    let assembled = vesper::packages::load(&dir).unwrap();
+    assert!(assembled.ok(), "{:?}", assembled.manifest_errors);
+    assert_eq!(assembled.objects.len(), 2);
+    for target in VSYS_TARGETS {
+        let files: Vec<PathBuf> = assembled
+            .objects
+            .iter()
+            .filter_map(|o| o.file_for(Some(target.triple)).unwrap())
+            .map(Path::to_path_buf)
+            .collect();
+        assert_eq!(files.len(), 1, "{}", target.triple);
+        assert!(
+            files[0].to_string_lossy().contains(target.triple),
+            "{files:?}"
+        );
+    }
+}
+
+/// Objects link only through a static library the program calls, which
+/// its `Ffi[Lib]` ceiling confines (manuscript §16.3): a package cannot slip
+/// native code, such as a constructor, into an executable without one.
+#[test]
+fn objects_link_only_through_a_called_static_library() {
+    let t = Temp::new("asm-only");
+    for (path, text) in TWICE_ASM {
+        t.write(&format!("app/{path}"), text);
+    }
+    let dir = app(
+        &t,
+        &format!("objects = {PER_TARGET_OBJECTS}"),
+        "pub fn main() -> u64 {\n    7\n}\n",
+        "",
+    );
+    let assembled = vesper::packages::load(&dir).unwrap();
+    let messages: Vec<String> = assembled
+        .manifest_errors
+        .iter()
+        .map(|(_, d)| d.message.clone())
+        .collect();
+    assert!(
+        messages.iter().any(|m| m.contains("it names none")),
+        "{messages:?}"
+    );
+    if cfg!(windows) || !host_jit() || Command::new("cc").arg("--version").output().is_err() {
+        return;
+    }
+    // With the library imported but not called, nothing is linked.
+    let t = Temp::new("asm-unused");
+    let dir = objects_app(&t, PER_TARGET_OBJECTS);
+    t.write("app/src/main.ves", "pub fn main() -> u64 {\n    7\n}\n");
+    let exe = t.0.join("unused.bin");
+    run(vesper().arg("build").arg(&dir).arg("-o").arg(&exe));
+    assert_eq!(Command::new(&exe).status().unwrap().code(), Some(7));
+    let bytes = fs::read(&exe).unwrap();
+    assert!(!bytes.windows(10).any(|w| w == b"twice_plus"));
+}
+
+#[test]
+fn test_runner_refuses_a_called_assembly_backed_library() {
+    if !host_jit() {
+        return;
+    }
+    let t = Temp::new("asm-test");
+    let dir = objects_app(&t, PER_TARGET_OBJECTS);
+    t.write(
+        "app/src/main.ves",
+        "pub fn test_twice() -> bool eff [Ffi[Twice]] { Twice::twice_plus(20, 3) == 43 }\n",
+    );
+    let err = fails(vesper().arg("test").arg(&dir));
+    assert!(
+        err.contains("objects of @t/app") && err.contains("only `vesper build` links"),
+        "{err}"
+    );
+}
+
+// ---- Per-target .vsys constants (#1504 part 3) ----------------------------
+
+#[test]
+fn reading_constants_does_not_load_or_link_the_library() {
+    let t = Temp::new("consts-only");
+    let dir = app(
+        &t,
+        "vsys = [\"sys/flags.vsys\"]",
+        "const COMBINED: i32 = Flags::O_CREAT | 4;\n\
+         pub fn main() -> i32 { match COMBINED { Flags::O_CREAT => 0, _ => COMBINED } }\n\
+         pub fn test_flags() -> bool { main() == 68 }\n",
+        "",
+    );
+    for decl in ["", "fn unused() -> ForeignVal[i32];"] {
+        t.write("app/sys/flags.vsys", &format!(
+            "sys library Flags ({HEADER}, link = \"dynamic\", name = \"vesper_absent_flags_1581\", {ARTIFACT}) {{ const O_CREAT: i32 = 0o100; {decl} }}"
+        ));
+        run(vesper().arg("check").arg(&dir));
+        assert_eq!(run(vesper().arg("run").arg(&dir)).trim(), "68");
+        run(vesper().arg("test").arg(&dir));
+        if host_jit() {
+            assert_eq!(run(vesper().arg("jit").arg(&dir)).trim(), "68");
+            run(vesper()
+                .arg("build")
+                .arg(&dir)
+                .arg("-o")
+                .arg(t.0.join("flags.bin")));
+        }
+    }
+}
+
+fn flags_app(t: &Temp, source: &str) -> PathBuf {
+    for (os, o_creat, neg, big) in [
+        ("linux", "0o100", "-7", "0x10_00"),
+        ("macos", "0x200", "-11", "0x20_00"),
+        ("windows", "0x100", "-13", "0x30_00"),
+    ] {
+        t.write(
+            &format!("app/sys/flags-{os}.vsys"),
+            &format!(
+                "sys library Flags (target = \"@TARGET@\", abi = \"@ABI@\", link = \"dynamic\", name = \"c\", \
+                 artifact = \"blake3:0000000000000000000000000000000000000000000000000000000000000000\") {{\n    \
+                 const O_CREAT: i32 = {o_creat};\n    \
+                 const NEG: i64 = {neg};\n    \
+                 const BIG: u64 = {big};\n    \
+                 const SMALL: u8 = 0b101;\n    \
+                 const PAGE: usize = 4096;\n    \
+                 fn abs(x: i32) -> ForeignVal[i32];\n\
+                 }}\n"
+            ),
+        );
+    }
+    app(
+        t,
+        "vsys = [\"sys/flags-@OS@.vsys\"]",
+        source,
+        "\"Ffi[Flags]\"",
+    )
+}
+
+#[test]
+fn per_target_vsys_constants_work_across_targets_jit_run_and_patterns() {
+    let t = Temp::new("consts");
+    let dir = flags_app(
+        &t,
+        "const COMBINED: i32 = Flags::O_CREAT | 4;\n\n\
+         fn match_flag(x: i32) -> i64 {\n    \
+             match x {\n        \
+                 Flags::O_CREAT => 10,\n        \
+                 _ => 0,\n    \
+             }\n\
+         }\n\n\
+         fn match_neg(x: i64) -> i64 {\n    \
+             match x {\n        \
+                 Flags::NEG => 5,\n        \
+                 _ => 0,\n    \
+             }\n\
+         }\n\n\
+         pub fn pure_sum() -> i64 {\n    \
+             let c = Flags::O_CREAT;\n    \
+             let neg = Flags::NEG;\n    \
+             let ok_c: i32 = c;\n    \
+             let ok_comb: i32 = COMBINED;\n    \
+             let ok_big: u64 = Flags::BIG;\n    \
+             let ok_page: usize = Flags::PAGE;\n    \
+             let ok_small: u8 = Flags::SMALL;\n    \
+             let mut total: i64 = widen_i64(ok_comb);\n    \
+             total = wrapping_add(total, neg);\n    \
+             total = wrapping_add(total, match_flag(ok_c));\n    \
+             total = wrapping_add(total, match_neg(neg));\n    \
+             total = wrapping_add(total, widen_i64(ok_small));\n    \
+             total = wrapping_add(total, wrapping_i64(ok_big));\n    \
+             wrapping_add(total, wrapping_i64(ok_page))\n\
+         }\n\n\
+         pub fn main() -> u64 eff [Ffi[Flags]] {\n    \
+             let f = Flags::abs(Flags::O_CREAT);\n    \
+             wrapping_u64(wrapping_add(pure_sum(), widen_i64(f)))\n\
+         }\n",
+    );
+    let loaded = vesper::packages::load(&dir).unwrap();
+    assert!(
+        loaded.ok(),
+        "{:?} {:?}",
+        loaded.diagnostics,
+        loaded.manifest_errors
+    );
+
+    extern "C" fn test_abs(x: i32) -> i32 {
+        x.wrapping_abs()
+    }
+
+    for (triple, o_creat, want) in [
+        (
+            "x86_64-unknown-linux-gnu",
+            64_i64,
+            (64 | 4) + (-7) + 10 + 5 + 5 + 0x1000 + 4096 + 64,
+        ),
+        (
+            "aarch64-unknown-linux-gnu",
+            64_i64,
+            (64 | 4) + (-7) + 10 + 5 + 5 + 0x1000 + 4096 + 64,
+        ),
+        (
+            "aarch64-apple-darwin",
+            0x200_i64,
+            (0x200 | 4) + (-11) + 10 + 5 + 5 + 0x2000 + 4096 + 0x200,
+        ),
+        (
+            "x86_64-pc-windows-msvc",
+            0x100_i64,
+            (0x100 | 4) + (-13) + 10 + 5 + 5 + 0x3000 + 4096 + 0x100,
+        ),
+    ] {
+        let _ = o_creat;
+        let imports = loaded.imports(Some(triple)).unwrap();
+        let checked = ffi_lowering::check_module(&loaded.module, &imports)
+            .unwrap_or_else(|e| panic!("{triple}: {e}"));
+        let obj = checked.object("main", Some(triple)).unwrap();
+        assert!(!obj.bytes.is_empty(), "{triple}");
+        if vesper_ffi::sys::Target::LinuxX86_64.triple() == triple
+            && cfg!(all(target_os = "linux", target_arch = "x86_64"))
+            || vesper_ffi::sys::Target::LinuxAarch64.triple() == triple
+                && cfg!(all(target_os = "linux", target_arch = "aarch64"))
+            || vesper_ffi::sys::Target::DarwinAarch64.triple() == triple
+                && cfg!(all(target_os = "macos", target_arch = "aarch64"))
+            || vesper_ffi::sys::Target::WindowsX86_64.triple() == triple
+                && cfg!(all(target_os = "windows", target_arch = "x86_64"))
+        {
+            for optimize in [true, false] {
+                let v = checked
+                    .jit_with_options("main", &[("abs", test_abs as *const u8)], optimize)
+                    .unwrap();
+                assert_eq!(word(&v), want as u64, "{triple} optimize={optimize}");
+            }
+            let ev = checked
+                .evaluate("pure_sum", |_| Err("unused".into()))
+                .unwrap();
+            assert_eq!(word(&ev), (want - o_creat) as u64, "{triple} eval");
+            if host_jit() {
+                let run_out = run(vesper().arg("run").arg(&dir));
+                assert_eq!(run_out.trim(), want.to_string());
+                let jit_out = run(vesper().arg("jit").arg(&dir));
+                assert_eq!(jit_out.trim(), want.to_string());
+            }
+        }
+    }
+}
+
+#[test]
+fn vsys_constant_types_and_misuses_are_checked() {
+    let t = Temp::new("consts-bad");
+    // Declared `O_CREAT: i32` cannot be used where `u64` is expected.
+    let dir = flags_app(
+        &t,
+        "pub fn main() -> u64 {\n    let x: u64 = Flags::O_CREAT;\n    x\n}\n",
+    );
+    let loaded = vesper::packages::load(&dir).unwrap();
+    let imports = loaded.imports(None).unwrap();
+    assert!(ffi_lowering::check_module(&loaded.module, &imports).is_err());
+
+    // Each value fits the scrutinee, but its declared integer kind must match.
+    for (ty, pattern, diagnostic) in [
+        ("u8", "Flags::O_CREAT", "expected u8, found i32"),
+        (
+            "(u32, u8)",
+            "(Flags::O_CREAT, _)",
+            "expected u32, found i32",
+        ),
+        ("u64", "Flags::PAGE", "expected u64, found usize"),
+    ] {
+        let source = format!("fn probe(x: {ty}) -> i32 {{ match x {{ {pattern} => 1, _ => 0 }} }}");
+        let error =
+            ffi_lowering::check_source(&source, &imports).expect_err("pattern type mismatch");
+        assert!(
+            error.diagnostics.iter().any(|d| d.code == "E0200"
+                && d.message == diagnostic
+                && source[d.span.clone()].starts_with("Flags::")),
+            "{error:?}"
+        );
+    }
+
+    // Calling a constant as a function is rejected.
+    let dir2 = flags_app(&t, "pub fn main() -> i32 {\n    Flags::O_CREAT(1)\n}\n");
+    let loaded2 = vesper::packages::load(&dir2).unwrap();
+    let imports2 = loaded2.imports(None).unwrap();
+    assert!(ffi_lowering::check_module(&loaded2.module, &imports2).is_err());
+
+    // Unknown constant name fails cleanly.
+    let dir3 = flags_app(&t, "pub fn main() -> i32 {\n    Flags::MISSING\n}\n");
+    let loaded3 = vesper::packages::load(&dir3).unwrap();
+    let imports3 = loaded3.imports(None).unwrap();
+    assert!(ffi_lowering::check_module(&loaded3.module, &imports3).is_err());
+}

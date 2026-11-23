@@ -5598,7 +5598,6 @@ dependencies = [
  "vesper-alloc-seed",
  "vesper-beacon-seed",
  "vesper-bench-seed",
- "vesper-blake3-sys",
  "vesper-chrono",
  "vesper-core",
  "vesper-crucible-seed",
@@ -5615,7 +5614,7 @@ dependencies = [
  "vesper-lean-syntax-seed",
  "vesper-lint-seed",
  "vesper-loom-calculus-seed",
- "vesper-loom-cas",
+ "vesper-loom-cas-seed",
  "vesper-lsp",
  "vesper-nexus",
  "vesper-pact-binding",
@@ -5632,7 +5631,7 @@ dependencies = [
  "vesper-syntax",
  "vesper-tensor-seed",
  "vesper-test",
- "vesper-vault",
+ "vesper-vault-seed",
  "wasm-encoder 0.261.0",
  "wasmtime",
  "wasmtime-wasi",
@@ -5779,14 +5778,6 @@ name = "vesper-bench-seed"
 version = "0.1.0"
 
 [[package]]
-name = "vesper-blake3-sys"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "cc",
-]
-
-[[package]]
 name = "vesper-chorus"
 version = "0.1.0"
 dependencies = [
@@ -5840,8 +5831,8 @@ dependencies = [
  "serde",
  "toml 0.8.23",
  "vesper-loom-calculus-seed",
- "vesper-loom-cas",
- "vesper-loom-trust",
+ "vesper-loom-cas-seed",
+ "vesper-loom-trust-seed",
 ]
 
 [[package]]
@@ -5873,6 +5864,7 @@ version = "0.1.0"
 dependencies = [
  "vesper-alloc-seed",
  "vesper-bench",
+ "vesper-crucible-seed",
  "vesper-port-abi",
  "vesper-port-harness",
  "vesper-simpulse-seed",
@@ -6009,7 +6001,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "vesper-bench",
- "vesper-blake3-sys",
  "vesper-loom-cas",
  "vesper-port-abi",
  "vesper-port-harness",
@@ -6024,7 +6015,6 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "vesper-bench",
- "vesper-blake3-sys",
  "vesper-fmt-seed",
  "vesper-lean-syntax-seed",
  "vesper-port-abi",
@@ -6204,7 +6194,7 @@ dependencies = [
  "vesper-loom-admission",
  "vesper-loom-audit-seed",
  "vesper-loom-calculus-seed",
- "vesper-loom-cas",
+ "vesper-loom-cas-seed",
  "vesper-loom-solver-seed",
  "vesper-loom-trust",
  "vesper-lsp",
@@ -6224,7 +6214,7 @@ dependencies = [
  "vesper-syntax",
  "vesper-tensor-seed",
  "vesper-test",
- "vesper-vault",
+ "vesper-vault-seed",
  "wasm-encoder 0.261.0",
  "wit-component",
  "wit-parser",
@@ -6343,8 +6333,8 @@ dependencies = [
  "serde_json",
  "tempfile",
  "vesper-loom-calculus-seed",
- "vesper-loom-cas",
- "vesper-loom-trust",
+ "vesper-loom-cas-seed",
+ "vesper-loom-trust-seed",
 ]
 
 [[package]]
@@ -6420,20 +6410,21 @@ dependencies = [
  "libc",
  "reflink-copy",
  "tempfile",
+ "vesper-bench",
+ "vesper-loom-cas-seed",
+ "vesper-port-abi",
+ "vesper-port-harness",
  "windows-sys 0.61.2",
 ]
 
 [[package]]
-name = "vesper-loom-cas-port"
+name = "vesper-loom-cas-seed"
 version = "0.1.0"
 dependencies = [
  "blake3",
  "libc",
  "reflink-copy",
  "tempfile",
- "vesper-blake3-sys",
- "vesper-port-abi",
- "vesper-port-harness",
  "windows-sys 0.61.2",
 ]
 
@@ -6486,8 +6477,24 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "vesper-bench",
+ "vesper-crypto-sys",
  "vesper-loom-calculus-seed",
  "vesper-loom-cas",
+ "vesper-port-abi",
+ "vesper-port-harness",
+]
+
+[[package]]
+name = "vesper-loom-trust-seed"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "semver",
+ "serde",
+ "serde_json",
+ "vesper-loom-calculus-seed",
+ "vesper-loom-cas-seed",
 ]
 
 [[package]]
@@ -6855,7 +6862,7 @@ dependencies = [
  "blake3",
  "serde",
  "serde_json",
- "vesper-vault",
+ "vesper-vault-seed",
 ]
 
 [[package]]
@@ -6882,9 +6889,9 @@ dependencies = [
  "vesper-loom-admission",
  "vesper-loom-audit-seed",
  "vesper-loom-calculus-seed",
- "vesper-loom-cas",
+ "vesper-loom-cas-seed",
  "vesper-loom-solver-seed",
- "vesper-loom-trust",
+ "vesper-loom-trust-seed",
  "vesper-migrate",
  "vesper-semver-seed",
  "vesper-serde-seed",
@@ -6919,6 +6926,30 @@ dependencies = [
 
 [[package]]
 name = "vesper-vault"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "chacha20poly1305",
+ "cranelift-codegen 0.125.4",
+ "cranelift-frontend 0.125.4",
+ "getrandom 0.4.3",
+ "libc",
+ "libcrux-ml-kem",
+ "ml-kem",
+ "rand_core 0.10.1",
+ "region",
+ "shake",
+ "vesper-bench",
+ "vesper-crypto-sys",
+ "vesper-port-abi",
+ "vesper-port-harness",
+ "vesper-vault-seed",
+ "x25519-dalek",
+ "zeroize",
+]
+
+[[package]]
+name = "vesper-vault-seed"
 version = "0.1.0"
 dependencies = [
  "aes",

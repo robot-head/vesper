@@ -106,7 +106,7 @@ fn unsupported_or_ambiguous_abis_fail_closed() {
     for body in [
         "fn f(x: u32, ...) -> ForeignVal[u32];",
         "fn f(x: c_long) -> ForeignVal[u32];",
-        "fn f(x: f64) -> ForeignVal[u32];",
+        "fn f(nocapture in x: CSlice[f64]) -> ForeignVal[u32];",
         "fn f(x: CSlice[u8]) -> ForeignVal[u32];",
         "fn f(nocapture sink x: CSlice[u8]) -> ForeignVal[u32];",
         "fn f(nocapture in x: CSlice[bool]) -> ForeignVal[u32];",
@@ -726,4 +726,259 @@ fn call_preparation_marshals_pinned_buffers_and_mappings_as_address_and_length()
         f.prepare_call(null, ()).unwrap_err().error(),
         &ValidationError::NullAddress
     );
+}
+
+#[test]
+fn const_declarations_parse_validate_and_canonicalize() {
+    let lib = library(
+        "const U8: u8 = 255;\n\
+         const I8_MIN: i8 = -128;\n\
+         const U16: u16 = 0b1010_0101;\n\
+         const I16_MIN: i16 = -32768;\n\
+         const O_CREAT: i32 = 0o100;\n\
+         const NEG_ONE: i32 = -1;\n\
+         const NEG_ZERO: i32 = -0;\n\
+         const HEX_U32: u32 = 0x200;\n\
+         const BIG_U64: u64 = 18_446_744_073_709_551_615;\n\
+         const SMALL_I64: i64 = -9_223_372_036_854_775_808;\n\
+         const PAGE: usize = 0X1000;\n\
+         fn ping() -> ForeignVal[Unit];",
+    );
+    assert_eq!(lib.consts().len(), 11);
+    assert_eq!(lib.constant("O_CREAT").unwrap().scalar(), Scalar::I32);
+    assert_eq!(lib.constant("O_CREAT").unwrap().value(), 64);
+    assert_eq!(lib.constant("HEX_U32").unwrap().value(), 0x200);
+    assert_eq!(lib.constant("U16").unwrap().value(), 0b1010_0101);
+    assert_eq!(lib.constant("NEG_ONE").unwrap().value(), -1);
+    assert_eq!(lib.constant("NEG_ZERO").unwrap().value(), 0);
+    assert_eq!(lib.constant("I8_MIN").unwrap().value(), -128);
+    assert_eq!(
+        lib.constant("BIG_U64").unwrap().value(),
+        i128::from(u64::MAX)
+    );
+    assert_eq!(
+        lib.constant("SMALL_I64").unwrap().value(),
+        i128::from(i64::MIN)
+    );
+    assert_eq!(lib.constant("PAGE").unwrap().scalar(), Scalar::Usize);
+    assert_eq!(lib.constant("PAGE").unwrap().value(), 4096);
+
+    // Canonical bytes are normalized (same value in decimal/octal/hex gives one identity)
+    // and libraries without constants keep their exact canonical bytes.
+    let oct = library("const O_CREAT: i32 = 0o100; fn ping() -> ForeignVal[Unit];");
+    let dec = library("const O_CREAT: i32 = 64; fn ping() -> ForeignVal[Unit];");
+    let mac = library("const O_CREAT: i32 = 0x200; fn ping() -> ForeignVal[Unit];");
+    assert_eq!(oct.canonical_bytes(), dec.canonical_bytes());
+    assert_eq!(oct.identity(), dec.identity());
+    assert_ne!(oct.identity(), mac.identity());
+
+    let plain = library("fn ping() -> ForeignVal[Unit];");
+    assert!(!String::from_utf8_lossy(plain.canonical_bytes()).contains("consts"));
+
+    // A constants-only library also parses.
+    let const_only = library("const X: i32 = 7;");
+    assert!(const_only.functions().is_empty());
+    assert_eq!(const_only.constant("X").unwrap().value(), 7);
+
+    let bad = |body: &str, expected: ErrorKind| {
+        let src = format!(
+            "sys library Bad (target = \"x86_64-unknown-linux-gnu\", abi = \"sysv64\", link = \"static\", name = \"bad\", artifact = \"blake3:{}\") {{ {body} }}",
+            "0".repeat(64)
+        );
+        let err = parse(&src, Limits::default()).unwrap_err();
+        assert_eq!(err.kind, expected, "{body}: {err}");
+    };
+    bad(
+        "const X: u8 = 256; fn f() -> ForeignVal[Unit];",
+        ErrorKind::Type,
+    );
+    bad(
+        "const X: i8 = 128; fn f() -> ForeignVal[Unit];",
+        ErrorKind::Type,
+    );
+    bad(
+        "const X: i8 = -129; fn f() -> ForeignVal[Unit];",
+        ErrorKind::Type,
+    );
+    bad(
+        "const X: u32 = -1; fn f() -> ForeignVal[Unit];",
+        ErrorKind::Type,
+    );
+    bad(
+        "const X: usize = -1; fn f() -> ForeignVal[Unit];",
+        ErrorKind::Type,
+    );
+    bad(
+        "const X: u64 = 0x; fn f() -> ForeignVal[Unit];",
+        ErrorKind::Syntax,
+    );
+    bad(
+        "const X: u64 = 0o8; fn f() -> ForeignVal[Unit];",
+        ErrorKind::Syntax,
+    );
+    bad(
+        "const X: bool = 1; fn f() -> ForeignVal[Unit];",
+        ErrorKind::Unsupported,
+    );
+    bad(
+        "const u32: i32 = 1; fn f() -> ForeignVal[Unit];",
+        ErrorKind::Type,
+    );
+    bad(
+        "const A: i32 = 1; const A: i32 = 2; fn f() -> ForeignVal[Unit];",
+        ErrorKind::Duplicate,
+    );
+    bad(
+        "const f: i32 = 1; fn f() -> ForeignVal[Unit];",
+        ErrorKind::Duplicate,
+    );
+    bad(
+        "enum E: u32 { A = 0 } const E: i32 = 1; fn f() -> ForeignVal[Unit];",
+        ErrorKind::Duplicate,
+    );
+}
+
+#[test]
+fn foreign_buffers_check_alignment_bounds_and_disjointness() {
+    let lib = library(
+        "
+        linear extern mapping Ring[u32];
+        fn unmap(sink r: Ring) -> ForeignVal[i32];
+        fn use_both(inout p: Pinned[u32], in r: Ring) -> ForeignVal[u32];
+        fn read_both(in p: Pinned[u32], in r: Ring) -> ForeignVal[u32];
+        ",
+    );
+    let use_both = lib.function("use_both").unwrap();
+    let read_both = lib.function("read_both").unwrap();
+
+    // Disjoint aligned buffers succeed.
+    assert!(
+        use_both
+            .prepare_call(
+                vec![
+                    RawArgument::Slice {
+                        address: 4096,
+                        length: 4,
+                    },
+                    RawArgument::Slice {
+                        address: 8192,
+                        length: 4,
+                    },
+                ],
+                Vec::<u8>::new(),
+            )
+            .is_ok()
+    );
+    // Adjacent unique ranges are disjoint.
+    assert!(
+        use_both
+            .prepare_call(
+                vec![
+                    RawArgument::Slice {
+                        address: 4096,
+                        length: 4,
+                    },
+                    RawArgument::Slice {
+                        address: 4096 + 16,
+                        length: 4,
+                    },
+                ],
+                Vec::<u8>::new(),
+            )
+            .is_ok()
+    );
+    // Shared (`in` + `in`) overlap is allowed.
+    assert!(
+        read_both
+            .prepare_call(
+                vec![
+                    RawArgument::Slice {
+                        address: 4096,
+                        length: 4,
+                    },
+                    RawArgument::Slice {
+                        address: 4100,
+                        length: 2,
+                    },
+                ],
+                Vec::<u8>::new(),
+            )
+            .is_ok()
+    );
+    // Mutable (`inout` + `in`) overlap, null, misaligned, and wrap fail.
+    for (p_addr, p_len, r_addr, r_len, want) in [
+        (
+            4096,
+            4,
+            4100,
+            2,
+            ValidationError::OverlappingSlices { other: 0 },
+        ),
+        (0, 4, 8192, 4, ValidationError::NullAddress),
+        (
+            4098,
+            4,
+            8192,
+            4,
+            ValidationError::MisalignedPointer { alignment: 4 },
+        ),
+        (
+            4096,
+            4,
+            8194,
+            4,
+            ValidationError::MisalignedPointer { alignment: 4 },
+        ),
+        (
+            u64::MAX - 3,
+            2,
+            8192,
+            4,
+            ValidationError::SliceRangeOverflow,
+        ),
+        (4096, 4, 8192, u64::MAX, ValidationError::SliceRangeOverflow),
+    ] {
+        let err = use_both
+            .prepare_call(
+                vec![
+                    RawArgument::Slice {
+                        address: p_addr,
+                        length: p_len,
+                    },
+                    RawArgument::Slice {
+                        address: r_addr,
+                        length: r_len,
+                    },
+                ],
+                Vec::<u8>::new(),
+            )
+            .unwrap_err();
+        assert_eq!(
+            err.error(),
+            &want,
+            "p=({p_addr},{p_len}) r=({r_addr},{r_len})"
+        );
+    }
+}
+
+#[test]
+fn cwstr_parameter_and_option_result_canonicalize_and_check_abi() {
+    let lib = library("fn echo_w(nocapture in s: CWStr) -> ForeignVal[Option[CWStr]];");
+    let f = lib.function("echo_w").unwrap();
+    assert!(f.takes_cstr());
+    assert!(matches!(f.parameters()[0].ty(), ParameterType::CWStr));
+    assert!(matches!(f.result(), ValueType::CWStr));
+    let abi = f.abi();
+    assert_eq!(abi.parameters, vec![AbiType::Pointer]);
+    assert_eq!(abi.result, Some(AbiType::Pointer));
+
+    for bad_fn in [
+        "fn f(in s: CWStr) -> ForeignVal[i32];",
+        "fn f(nocapture inout s: CWStr) -> ForeignVal[i32];",
+        "fn f(nocapture in s: Option[CWStr]) -> ForeignVal[i32];",
+        "linear extern type H; fn drop_h(sink h: H) -> ForeignVal[i32]; fn f(nocapture in s: CWStr, sink h: H) -> ForeignVal[i32];",
+    ] {
+        let err = rejects(bad_fn);
+        assert_eq!(err.kind, ErrorKind::Unsupported, "{bad_fn}: {err:?}");
+    }
 }

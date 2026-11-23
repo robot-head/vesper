@@ -146,6 +146,16 @@ pub enum SeqOp {
     Fill,
     /// A fixed-width integer read or write of a byte sequence or slice.
     Wide(Wide),
+    /// `s.try_atomic_load(i, order)` (`width: None`) or
+    /// `s.try_atomic_load_u32(at, order)` / `try_atomic_load_u64(at, order)`
+    /// (`width: Some(4 | 8)`): bounds- and alignment-checked atomic load,
+    /// returning `Option::None` when out of bounds or unaligned. Total.
+    AtomicLoad { width: Option<u8> },
+    /// `s.try_atomic_store(i, v, order)` (`width: None`) or
+    /// `s.try_atomic_store_u32(at, v, order)` / `try_atomic_store_u64(at, v, order)`
+    /// (`width: Some(4 | 8)`): bounds- and alignment-checked atomic store,
+    /// returning `false` when out of bounds or unaligned. Total.
+    AtomicStore { width: Option<u8> },
     /// `s.sum_be16()` on a byte sequence or slice: the sum, wrapping at
     /// 2^64, of its big-endian 16-bit words `s[2k] << 8 | s[2k + 1]`; an odd
     /// last byte counts as `s[n - 1] << 8`. Folding it gives the RFC 1071
@@ -390,6 +400,7 @@ impl SeqOp {
                 | Self::CopyFrom { .. }
                 | Self::CopyWithin { .. }
                 | Self::Fill
+                | Self::AtomicStore { .. }
                 | Self::Resize
                 | Self::FillRange { .. }
                 | Self::ExtendFromWithin { .. }
@@ -464,6 +475,12 @@ impl SeqOp {
             Self::FillRange { total: true } => "try_fill",
             Self::ExtendFromWithin { total: false } => "extend_from_within",
             Self::ExtendFromWithin { total: true } => "try_extend_from_within",
+            Self::AtomicLoad { width: None } => "try_atomic_load",
+            Self::AtomicLoad { width: Some(4) } => "try_atomic_load_u32",
+            Self::AtomicLoad { width: Some(_) } => "try_atomic_load_u64",
+            Self::AtomicStore { width: None } => "try_atomic_store",
+            Self::AtomicStore { width: Some(4) } => "try_atomic_store_u32",
+            Self::AtomicStore { width: Some(_) } => "try_atomic_store_u64",
             Self::ExtendReversed => "extend_reversed",
         }
     }
@@ -528,6 +545,7 @@ pub fn elem_bytes(world: &World, ty: &Type) -> Result<i64, String> {
     let ty = crate::numeric::default_type(ty);
     Ok(match ty.name() {
         "u8" | "bool" if matches!(&ty, Type::Named(_, a) if a.is_empty()) => 1,
+        "u16" if matches!(&ty, Type::Named(_, a) if a.is_empty()) => 2,
         "u32" if matches!(&ty, Type::Named(_, a) if a.is_empty()) => 4,
         _ => i64::from(crate::layout::Layout::of(world, &ty)?.size),
     })
@@ -677,6 +695,12 @@ fn shared_method(method: &str) -> Option<SeqOp> {
         "eq_ignore_ascii_case" => SeqOp::EqIgnoreAsciiCase,
         "make_ascii_lowercase" => SeqOp::MakeAsciiLowercase { total: false },
         "try_make_ascii_lowercase" => SeqOp::MakeAsciiLowercase { total: true },
+        "try_atomic_load" => SeqOp::AtomicLoad { width: None },
+        "try_atomic_load_u32" => SeqOp::AtomicLoad { width: Some(4) },
+        "try_atomic_load_u64" => SeqOp::AtomicLoad { width: Some(8) },
+        "try_atomic_store" => SeqOp::AtomicStore { width: None },
+        "try_atomic_store_u32" => SeqOp::AtomicStore { width: Some(4) },
+        "try_atomic_store_u64" => SeqOp::AtomicStore { width: Some(8) },
         _ => SeqOp::Wide(Wide::parse(method)?),
     })
 }

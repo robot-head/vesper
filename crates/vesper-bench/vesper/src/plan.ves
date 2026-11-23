@@ -98,15 +98,22 @@ pub fn do_modular_counter_delta(start: u64, end: u64, width_bits: u8) -> u64 eff
     rem(sub(add(end, modulus), start), modulus)
 }
 
+// SplitMix64 increment and finalizer multipliers.
+enum SplitMix: u64 {
+    Gamma = 0x9e3779b97f4a7c15,
+    Mul1 = 0xbf58476d1ce4e5b9,
+    Mul2 = 0x94d049bb133111eb
+}
+
 fn mix(x: u64) -> u64 {
     let mut z = x;
-    z = wrapping_mul(z ^ (z >> 30), 13787848793156543929);
-    z = wrapping_mul(z ^ (z >> 27), 10723151780598845931);
+    z = wrapping_mul(z ^ (z >> 30), SplitMix::Mul1);
+    z = wrapping_mul(z ^ (z >> 27), SplitMix::Mul2);
     z ^ (z >> 31)
 }
 
 pub fn do_layout_offset_bytes(seed: u64, epoch: u64) -> u32 {
-    let z = mix(wrapping_add(seed, wrapping_mul(epoch, 11400714819323198485)));
+    let z = mix(wrapping_add(seed, wrapping_mul(epoch, SplitMix::Gamma)));
     wrapping_u32(mul(z & OFFSET_LINE_MASK, CACHE_LINE_BYTES))
 }
 
@@ -115,7 +122,7 @@ pub fn do_layout_offset_bytes(seed: u64, epoch: u64) -> u32 {
 
 // SplitMix64: the next state and its output.
 fn splitmix64(st: u64) -> (u64, u64) {
-    let s = wrapping_add(st, 11400714819323198485);
+    let s = wrapping_add(st, SplitMix::Gamma);
     (s, mix(s))
 }
 

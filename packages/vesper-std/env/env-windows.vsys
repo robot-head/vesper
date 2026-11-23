@@ -1,0 +1,28 @@
+// @vesper-std/env's import on Windows: Win32 `kernel32` directly (no
+// `vesper_std_host`).
+sys library StdEnv (
+    target = "@TARGET@", abi = "@ABI@",
+    link = "dynamic", name = "kernel32",
+    artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+) {
+    const OS: u32 = 3;
+    const CP_UTF8: u32 = 65001;
+    const ERROR_ENVVAR_NOT_FOUND: u32 = 203;
+
+    fn GetCommandLineW() -> ForeignVal[Option[CWStr]];
+    fn GetCurrentDirectoryW(nBufferLength: u32, nocapture inout lpBuffer: CSlice[u32]) -> ForeignVal[u32] errno;
+    fn GetEnvironmentVariableW(nocapture in lpName: CWStr, nocapture inout lpBuffer: CSlice[u32]) -> ForeignVal[u32] errno;
+    fn GetEnvironmentStringsW() -> ForeignVal[u64];
+    fn FreeEnvironmentStringsW(lpszEnvironmentBlock: u64) -> ForeignVal[i32];
+    fn lstrlenW(lpString: u64) -> ForeignVal[i32];
+    fn WideCharToMultiByte(
+        codePage: u32,
+        dwFlags: u32,
+        lpWideCharStr: u64,
+        cchWideChar: i32,
+        nocapture inout lpMultiByteStr: CSlice[u8],
+        cbMultiByte: i32,
+        lpDefaultChar: u64,
+        lpUsedDefaultChar: u64
+    ) -> ForeignVal[i32];
+}
