@@ -2,6 +2,12 @@
 // value, the locals, the operands' layout, and the place a memory operation
 // names as text.
 
+use @vesper/place-ir::codes::{
+    Op,
+    Pat,
+    Tag,
+    Term
+};
 use @vesper/check-data::util::{
     add,
     inc,
@@ -15,7 +21,8 @@ use @vesper/check-data::names::{
     Names
 };
 use @vesper/check-data::types::{
-    Types
+    Types,
+    TyPass
 };
 use @vesper/place-ir::{
     BlockRow,
@@ -25,27 +32,22 @@ use @vesper/place-ir::{
 };
 
 pub const NONE: u32 = 4294967295;
+const ASCII_DOT: u8 = 46;
 
-// Opcodes (tests/common/ir_words.rs `OP_NAMES`).
-pub const OP_READ: u8 = 2;
-pub const OP_BIND: u8 = 3;
-pub const OP_WRITE: u8 = 4;
-pub const OP_CALL: u8 = 11;
-pub const OP_HANDLE: u8 = 15;
-pub const OP_FIP: u8 = 19;
-
-// Operand tags.
-pub const T_RAW: u8 = 0;
-pub const T_VALUE: u8 = 6;
-pub const T_BLOCK: u8 = 7;
-
-// Terminators.
-pub const TERM_RETURN: u8 = 0;
-pub const TERM_JUMP: u8 = 1;
-
-// `PatternKind::Bind`, `Pass::Sink`.
-pub const PAT_BIND: u64 = 1;
-pub const P_SINK: u64 = 2;
+// Place IR codes.
+pub const OP_READ: u8 = Op::Read;
+pub const OP_BIND: u8 = Op::Bind;
+pub const OP_WRITE: u8 = Op::Write;
+pub const OP_CALL: u8 = Op::Call;
+pub const OP_HANDLE: u8 = Op::Handle;
+pub const OP_FIP: u8 = Op::Fip;
+pub const T_RAW: u8 = Tag::Raw;
+pub const T_VALUE: u8 = Tag::Value;
+pub const T_BLOCK: u8 = Tag::Block;
+pub const TERM_RETURN: u8 = Term::Return;
+pub const TERM_JUMP: u8 = Term::Jump;
+pub const PAT_BIND: u64 = Pat::Bind;
+pub const P_SINK: u64 = TyPass::Sink;
 
 // Type classes (`type_classes`).
 pub const C_SCALAR: u8 = 1;
@@ -194,17 +196,17 @@ pub fn place_text(
     i: InstRow
 ) -> u32 {
     buf.clear();
-    if i.op == OP_READ {
+    if i.op == Op::Read {
         names.write(n32(p.op(i.a)), inout buf);
         let path = p.op(inc(i.a));
         let row = p.path(path);
         for k in 0..row.n {
-            buf.push(46);
+            buf.push(ASCII_DOT);
             names.write(p.path_name(path, k), inout buf);
         }
-    } else if i.op == OP_WRITE {
+    } else if i.op == Op::Write {
         names.write(n32(p.op(i.a)), inout buf);
-    } else if i.op == OP_BIND && p.op(inc(i.a)) == PAT_BIND {
+    } else if i.op == Op::Bind && p.op(inc(i.a)) == Pat::Bind {
         names.write(n32(p.op(add(i.a, 4))), inout buf);
     } else {
         return NONE;

@@ -6,6 +6,7 @@ use self::codes::{
     Ehdr,
     Et,
     Ident,
+    Out,
     Page,
     Pf,
     Phdr,
@@ -46,13 +47,13 @@ pub fn pf_rw() -> u32 {
 
 // Output section names (link.rs `OUT_NAMES` and `.stack`).
 pub fn section_name(i: u64) -> Str {
-    if i == 0 {
+    if i == Out::Text {
         ".text"
-    } else if i == 1 {
+    } else if i == Out::Rodata {
         ".rodata"
-    } else if i == 2 {
+    } else if i == Out::Data {
         ".data"
-    } else if i == 3 {
+    } else if i == Out::Bss {
         ".bss"
     } else {
         ".stack"

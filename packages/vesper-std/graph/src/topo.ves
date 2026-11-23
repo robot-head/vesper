@@ -1,5 +1,8 @@
 // @vesper-std/graph::topo: topological order with a cycle report.
-use self::Graph;
+use self::{
+    Graph,
+    GraphIndex
+};
 use self::util::{
     get32,
     get_bool,
@@ -27,7 +30,7 @@ impl Topo {
 
     // The `i`th node of the order, or `none()`.
     pub fn order_at(in self, i: u64) -> u32 {
-        get32(in self.order.as_slice(), i, 4294967295)
+        get32(in self.order.as_slice(), i, GraphIndex::Missing)
     }
 
     // The length of the reported cycle (0 for a DAG).
@@ -38,7 +41,7 @@ impl Topo {
     // The `i`th node of the cycle: there is an edge from node `i` to node
     // `i + 1`, and from the last back to the first.
     pub fn cycle_at(in self, i: u64) -> u32 {
-        get32(in self.cycle.as_slice(), i, 4294967295)
+        get32(in self.cycle.as_slice(), i, GraphIndex::Missing)
     }
 }
 
@@ -128,7 +131,7 @@ pub fn toposort(in g: Graph) -> Topo {
             step.try_set(ck, wrapping_u32(walk.len()));
             let (lo, hi) = g.pred_range(cur);
             let mut e = lo;
-            let mut next: u32 = 4294967295;
+            let mut next: u32 = GraphIndex::Missing;
             loop {
                 if e >= hi {
                     break;
@@ -140,7 +143,7 @@ pub fn toposort(in g: Graph) -> Topo {
                 }
                 e = wrapping_add(e, 1);
             }
-            if next == 4294967295 {
+            if next == GraphIndex::Missing {
                 // Unreachable: an unplaced node always has an unplaced
                 // predecessor.
                 break;

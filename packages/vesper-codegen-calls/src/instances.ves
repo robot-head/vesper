@@ -8,6 +8,9 @@
 // (name symbol, type id) pairs kept sorted by the names' bytes, so
 // iterating it is BTreeMap order and its key text is Rust's `{:?}`.
 
+use @vesper/place-ir::codes::{
+    Op
+};
 use @vesper/check-data::util::{
     add,
     inc,
@@ -21,6 +24,8 @@ use @vesper/check-data::names::{
     Names
 };
 use @vesper/check-data::types::{
+    TyKind,
+    TyPass,
     Types,
     Vars,
     debug_type,
@@ -38,6 +43,7 @@ use @vesper/place-ir::{
 };
 use self::data::{
     Calls,
+    ExprKind,
     ExprNode,
     FnInfo,
     ParamInfo,
@@ -45,16 +51,6 @@ use self::data::{
 };
 
 const NONE32: u32 = 4294967295;
-const K_LIT: u8 = 0;
-const K_NAMED: u8 = 1;
-const K_TUPLE: u8 = 2;
-const K_FN: u8 = 3;
-const P_INOUT: u8 = 1;
-const E_NAME: u8 = 1;
-const E_CALL: u8 = 5;
-const E_FIELD: u8 = 6;
-const OP_READ: u8 = 2;
-const OP_CALL: u8 = 11;
 // `MAX_NATIVE_INSTANCES` of src/native.rs.
 const MAX_NATIVE_INSTANCES: u64 = 4096;
 
@@ -445,10 +441,10 @@ pub fn contains_function(inout t: Types, in wd: World, ty: u32) -> bool {
 
 fn contains_fn_in(inout t: Types, in wd: World, ty: u32, inout seen: ChunkSeq[u32]) -> bool {
     let n = t.node(ty);
-    if n.kind == K_FN {
+    if n.kind == TyKind::Fn {
         return true;
     }
-    if n.kind == K_TUPLE {
+    if n.kind == TyKind::Tuple {
         for i in 0..w(n.n) {
             let a = t.arg(ty, i);
             if contains_fn_in(inout t, in wd, a, inout seen) {
@@ -457,13 +453,13 @@ fn contains_fn_in(inout t: Types, in wd: World, ty: u32, inout seen: ChunkSeq[u3
         }
         return false;
     }
-    if n.kind != K_NAMED {
+    if n.kind != TyKind::Named {
         return false;
     }
     for i in 0..seen.len() {
         if u32_at(in seen, i) == n.name {
             for j in 0..w(n.n) {
-                if t.kind(t.arg(ty, j)) == K_FN {
+                if t.kind(t.arg(ty, j)) == TyKind::Fn {
                     return true;
                 }
             }
@@ -596,9 +592,9 @@ fn function_value_instance(
     let mut any = false;
     for i in 0..w(f.pn) {
         let p = d.param(add(w(f.pa), i));
-        if t.kind(p.ty) == K_FN {
+        if t.kind(p.ty) == TyKind::Fn {
             any = true;
-            if p.pass == P_INOUT {
+            if p.pass == TyPass::Inout {
                 return false;
             }
         } else if contains_function(inout t, in wd, p.ty) {
@@ -807,7 +803,7 @@ pub fn program_facts(in names: Names, in d: Calls, in p: Program) -> ProgramFact
             let blk = p.block(add(f.b0, bi));
             for ii in 0..blk.ic {
                 let inst = p.inst(add(blk.i0, ii));
-                if inst.op == OP_READ {
+                if inst.op == Op::Read {
                     let root = n32(p.op(inst.a));
                     if d.function(root) != NONE32 && u32_at(in marks, w(root)) != stamp {
                         facts
@@ -820,7 +816,7 @@ pub fn program_facts(in names: Names, in d: Calls, in p: Program) -> ProgramFact
                                 }
                             );
                     }
-                } else if inst.op == OP_CALL {
+                } else if inst.op == Op::Call {
                     let callee = n32(p.op(inst.a));
                     if names.has_prefix(callee, in "$drop$".as_bytes()) {
                         let mut dup = false;
@@ -1015,7 +1011,7 @@ fn expr_type(in wd: World, e: ExprNode) -> u32 {
 // `dyn_trait::boxed_object`: the object type of `Box[dyn T]`, or NONE32.
 fn boxed_object(in t: Types, k: Syms, ty: u32) -> u32 {
     let n = t.node(ty);
-    if n.kind == K_NAMED && n.name == k.box_ && n.n == 1 {
+    if n.kind == TyKind::Named && n.name == k.box_ && n.n == 1 {
         let a = t.arg(ty, 0);
         if is_object(in t, k, a) {
             return a;
@@ -1026,7 +1022,7 @@ fn boxed_object(in t: Types, k: Syms, ty: u32) -> u32 {
 
 fn is_object(in t: Types, k: Syms, ty: u32) -> bool {
     let n = t.node(ty);
-    n.kind == K_NAMED && n.name == k.dyn_ && n.n == 1
+    n.kind == TyKind::Named && n.name == k.dyn_ && n.n == 1
 }
 
 // `DynObjects::vtable(object, self_ty)`: a vtable row index, or NONE32.
@@ -1080,25 +1076,25 @@ fn visit_node(
     inout todo: Todo
 ) {
     let e = d.expr(i);
-    if e.kind == E_NAME {
+    if e.kind == ExprKind::Name {
         if facts.has_ref(e.s0, e.s1, e.sym) && non_generic(in d, e.sym) {
             let none = ivars_new();
             todo.push(e.sym, in none);
         }
         return;
     }
-    if e.kind != E_CALL {
+    if e.kind != ExprKind::Call {
         return;
     }
     let v = vars.vars();
     let ci = inc(i);
     let callee = d.expr(ci);
     let mut target = NONE32;
-    if callee.kind == E_NAME {
+    if callee.kind == ExprKind::Name {
         if d.function(callee.sym) != NONE32 && expr_type(in wd, callee) == NONE32 {
             target = callee.sym;
         }
-    } else if callee.kind == E_FIELD {
+    } else if callee.kind == ExprKind::Field {
         let base = d.expr(inc(ci));
         let bt = expr_type(in wd, base);
         if bt != NONE32 {
@@ -1113,7 +1109,7 @@ fn visit_node(
     let nargs = wrapping_sub(w(e.children), 1);
     let first_arg = add(ci, w(callee.size));
     // A boxed object (§7.3) needs its vtable's methods.
-    if callee.kind == E_NAME && callee.sym == k.box_new && nargs > 0 {
+    if callee.kind == ExprKind::Name && callee.sym == k.box_new && nargs > 0 {
         let ty = expr_type(in wd, e);
         if ty != NONE32 {
             let s = substitute(inout t, ty, in v);
@@ -1151,10 +1147,12 @@ fn visit_node(
             let p = d.param(add(w(tf.pa), j));
             let a = d.expr(arg);
             arg = add(arg, w(a.size));
-            if t.kind(p.ty) != K_FN {
+            if t.kind(p.ty) != TyKind::Fn {
                 continue;
             }
-            if a.kind == E_NAME && facts.has_ref(a.s0, a.s1, a.sym) && non_generic(in d, a.sym) {
+            if a.kind == ExprKind::Name
+                && facts.has_ref(a.s0, a.s1, a.sym)
+                && non_generic(in d, a.sym) {
                 let mut text: ChunkSeq[u8] = ChunkSeq::new[u8]();
                 text.extend(in "$fn:".as_bytes());
                 names.write(p.name, inout text);

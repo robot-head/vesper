@@ -33,6 +33,28 @@ pub const NONE: u32 = 4294967295;
 // End of input for `byte_at`.
 pub const EOF: u64 = 256;
 
+// UTF-8 byte layout (Unicode Table 3-7).
+pub enum Utf8: _ {
+    ContinuationPrefix = 0x80,
+    TwoByteLead = 0xc0,
+    ThreeByteLead = 0xe0,
+    FourByteLead = 0xf0,
+    ContinuationMask = 0x3f,
+    TwoByteLeadMask = 0x1f,
+    ThreeByteLeadMask = 0x0f,
+    FourByteLeadMask = 0x07
+}
+
+// Unicode scalar limits and the thresholds for UTF-8 encoding widths.
+pub enum Scalar: _ {
+    TwoByteMin = 0x80,
+    ThreeByteMin = 0x800,
+    FourByteMin = 0x10000,
+    SurrogateStart = 0xd800,
+    SurrogateEnd = 0xdfff,
+    Max = 0x10ffff
+}
+
 // Node kinds: the `Value` variants, then `Item::Table` and
 // `Item::ArrayOfTables`.
 pub const K_STRING: u8 = 1;
@@ -314,7 +336,7 @@ pub fn char_span(in s: Slice[u8], offset: u64) -> (u64, u64) {
 }
 
 fn is_boundary(b: u64) -> bool {
-    b < 128 || b >= 192
+    b < Utf8::ContinuationPrefix || b >= Utf8::TwoByteLead
 }
 
 pub fn min_u64(a: u64, b: u64) -> u64 {

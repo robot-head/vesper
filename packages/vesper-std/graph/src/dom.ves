@@ -1,6 +1,9 @@
 // @vesper-std/graph::dom: immediate dominators (Cooper, Harvey and Kennedy,
 // "A Simple, Fast Dominance Algorithm", 2001).
-use self::Graph;
+use self::{
+    Graph,
+    GraphIndex
+};
 use self::reach::reverse_postorder;
 use self::util::{
     get32,
@@ -21,13 +24,13 @@ impl Dominators {
     // The immediate dominator of `v`: `v` itself for the root, `none()` for
     // a node the root does not reach.
     pub fn idom(in self, v: u32) -> u32 {
-        get32(in self.idom.as_slice(), widen_u64(v), 4294967295)
+        get32(in self.idom.as_slice(), widen_u64(v), GraphIndex::Missing)
     }
 
     // Whether `a` dominates `b` (every node the root reaches dominates
     // itself).
     pub fn dominates(in self, a: u32, b: u32) -> bool {
-        let unreached: u32 = 4294967295;
+        let unreached: u32 = GraphIndex::Missing;
         if self.idom(a) == unreached || self.idom(b) == unreached {
             false
         } else {
@@ -49,7 +52,7 @@ impl Dominators {
 // over reverse postorder until no `idom` changes.
 pub fn dominators(in g: Graph, root: u32) -> Dominators {
     let n = g.node_count();
-    let unreached: u32 = 4294967295;
+    let unreached: u32 = GraphIndex::Missing;
     let mut idom = filled32(n, unreached);
     let rpo = reverse_postorder(in g, root);
     let count = rpo.len();

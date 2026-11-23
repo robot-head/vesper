@@ -6,6 +6,9 @@ use self::{
     AtErr
 };
 use self::cbor::{
+    CBOR_MAJOR_SHIFT,
+    CborAdditional,
+    CborMajor,
     I64_MAX,
     K_ARRAY,
     K_BYTES,
@@ -44,6 +47,14 @@ const MAX_HEADER_DEPTH: u64 = 64;
 const P384_COORD_LEN: u64 = 48;
 const P384_SEC1_LEN: u64 = 97;
 const SEC1_UNCOMPRESSED: u64 = 4;
+const U8_MAX: u64 = 255;
+const U16_MAX: u64 = 65535;
+const U32_MAX: u64 = 4294967295;
+
+// RFC 8152 §4.4 Sig_structure starts with a four-item array and the ten-byte
+// text string "Signature1".
+const SIGN1_ARRAY_HEAD: u8 = 0x84;
+const SIGN1_CONTEXT_HEAD: u8 = 0x6a;
 
 // Common header parameter labels.
 const H_ALG: u64 = 1;
@@ -693,31 +704,31 @@ pub fn sign1_parse(
 // Write CBOR major-2 (bstr) or major-4 (array) header for `len` at `at`,
 // returning the new cursor.
 fn write_cbor_head(inout out: Slice[u8], at: u64, major: u64, len: u64) -> u64 {
-    let base = major << 5;
-    if len <= 23 {
+    let base = major << CBOR_MAJOR_SHIFT;
+    if len <= CborAdditional::ImmediateMax {
         out.try_set(at, wrapping_u8(base | len));
         wrapping_add(at, 1)
-    } else if len <= 255 {
-        out.try_set(at, wrapping_u8(base | 24));
+    } else if len <= U8_MAX {
+        out.try_set(at, wrapping_u8(base | CborAdditional::OneByte));
         out.try_set(wrapping_add(at, 1), wrapping_u8(len));
         wrapping_add(at, 2)
-    } else if len <= 65535 {
-        out.try_set(at, wrapping_u8(base | 25));
+    } else if len <= U16_MAX {
+        out.try_set(at, wrapping_u8(base | CborAdditional::TwoBytes));
         out.try_write_u16_be(wrapping_add(at, 1), wrapping_u16(len));
         wrapping_add(at, 3)
-    } else if len <= 4294967295 {
-        out.try_set(at, wrapping_u8(base | 26));
+    } else if len <= U32_MAX {
+        out.try_set(at, wrapping_u8(base | CborAdditional::FourBytes));
         out.try_write_u32_be(wrapping_add(at, 1), wrapping_u32(len));
         wrapping_add(at, 5)
     } else {
-        out.try_set(at, wrapping_u8(base | 27));
+        out.try_set(at, wrapping_u8(base | CborAdditional::EightBytes));
         out.try_write_u64_be(wrapping_add(at, 1), len);
         wrapping_add(at, 9)
     }
 }
 
 fn write_cbor_bstr(inout out: Slice[u8], at: u64, in data: Slice[u8]) -> u64 {
-    let p = write_cbor_head(inout out, at, 2, data.len());
+    let p = write_cbor_head(inout out, at, CborMajor::Bytes, data.len());
     out.try_copy_from(p, in data);
     wrapping_add(p, data.len())
 }
@@ -727,11 +738,11 @@ fn write_cbor_bstr(inout out: Slice[u8], at: u64, in data: Slice[u8]) -> u64 {
 // returning the written byte count.
 pub fn sig_structure(in prot: Slice[u8], in aad: Slice[u8], in pay: Slice[u8], inout out: Slice[u8])
     -> u64 {
-    // Array of 4 items: 0x84, then text "Signature1" (0x6a || bytes).
-    out.try_set(0, 132);
-    out.try_set(1, 106);
-    out.try_copy_from(2, in "Signature1".as_bytes());
-    let mut p = 12;
+    let context = "Signature1".as_bytes();
+    out.try_set(0, SIGN1_ARRAY_HEAD);
+    out.try_set(1, SIGN1_CONTEXT_HEAD);
+    out.try_copy_from(2, in context);
+    let mut p = wrapping_add(2, context.len());
     p = write_cbor_bstr(inout out, p, in prot);
     p = write_cbor_bstr(inout out, p, in aad);
     write_cbor_bstr(inout out, p, in pay)

@@ -6,7 +6,10 @@ use self::util::{
     filled32,
     filled_bool
 };
-use self::Graph;
+use self::{
+    Graph,
+    GraphIndex
+};
 
 // The strongly connected components of a graph. Components are numbered
 // `0..count()` in the order Tarjan's algorithm completes them, which is a
@@ -29,7 +32,7 @@ impl Scc {
 
     // The component of node `v`, or `none()`.
     pub fn component(in self, v: u32) -> u32 {
-        get32(in self.comp.as_slice(), widen_u64(v), 4294967295)
+        get32(in self.comp.as_slice(), widen_u64(v), GraphIndex::Missing)
     }
 
     // The number of nodes in component `c`.
@@ -45,9 +48,9 @@ impl Scc {
         let a = get64(in self.starts.as_slice(), k, 0);
         let b = get64(in self.starts.as_slice(), wrapping_add(k, 1), a);
         if i >= wrapping_sub(b, a) {
-            4294967295
+            GraphIndex::Missing
         } else {
-            get32(in self.nodes.as_slice(), wrapping_add(a, i), 4294967295)
+            get32(in self.nodes.as_slice(), wrapping_add(a, i), GraphIndex::Missing)
         }
     }
 }
@@ -65,7 +68,7 @@ fn min32(a: u32, b: u32) -> u32 {
 // graphs do not overflow.
 pub fn scc(in g: Graph) -> Scc {
     let n = g.node_count();
-    let unvisited: u32 = 4294967295;
+    let unvisited: u32 = GraphIndex::Missing;
     let mut index = filled32(n, unvisited);
     let mut low = filled32(n, 0);
     let mut on = filled_bool(n, false);

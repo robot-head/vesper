@@ -48,6 +48,23 @@ const VT_REF: u8 = 100;
 const FORM_FUNC: u8 = 96;
 const FORM_CONT: u8 = 93;
 const EXTERN_FUNC: u8 = 0;
+const EXTERN_TABLE: u8 = 1;
+const TYPE_FUNCREF: u8 = 112;
+const LIMITS_WITH_MAX: u8 = 1;
+const ELEM_ACTIVE_DEFAULT_TABLE: u8 = 0;
+const OP_LOCAL_GET: u8 = 32;
+const OP_CALL_INDIRECT: u8 = 17;
+const OP_I32_CONST: u8 = 65;
+const OP_END: u8 = 11;
+
+const CORE_HEADER_BYTES: u64 = 8;
+const S_TYPE: u8 = 1;
+const S_IMPORT: u8 = 2;
+const S_FUNCTION: u8 = 3;
+const S_TABLE: u8 = 4;
+const S_EXPORT: u8 = 7;
+const S_ELEMENT: u8 = 9;
+const S_CODE: u8 = 10;
 
 fn byte(in b: Slice[u8], i: u64) -> u8 {
     match b.try_get(i) {
@@ -408,8 +425,8 @@ pub fn read_core(in b: Slice[u8]) -> Core {
         imps: ChunkSeq::new[Imp](),
     };
     let mut r = Rd {
-        pos: 8,
-        ok: b.len() >= 8
+        pos: CORE_HEADER_BYTES,
+        ok: b.len() >= CORE_HEADER_BYTES
     };
     loop {
         if !r.ok || r.pos >= b.len() {
@@ -422,7 +439,7 @@ pub fn read_core(in b: Slice[u8]) -> Core {
             c.ok = false;
             return c;
         }
-        if id == 1 {
+        if id == S_TYPE {
             let n = rd_leb(inout r, in b);
             for k in 0..n {
                 let form = rd_byte(inout r, in b);
@@ -460,7 +477,7 @@ pub fn read_core(in b: Slice[u8]) -> Core {
                     return c;
                 }
             }
-        } else if id == 2 {
+        } else if id == S_IMPORT {
             let n = rd_leb(inout r, in b);
             for k in 0..n {
                 let ml = rd_leb(inout r, in b);
@@ -534,8 +551,8 @@ fn func_types(in c: Core, in sigs: Slice[u64], inout out: ChunkSeq[u8]) {
 
 fn table_type(n: u64, inout out: ChunkSeq[u8]) {
     // funcref, limits n..n
-    out.push(112);
-    out.push(1);
+    out.push(TYPE_FUNCREF);
+    out.push(LIMITS_WITH_MAX);
     put_uleb(inout out, n);
     put_uleb(inout out, n);
 }
@@ -553,31 +570,31 @@ pub fn shim_module(
     module_head(inout out);
     let mut body = ChunkSeq::new[u8]();
     func_types(in c, in sigs, inout body);
-    section(inout out, 1, in body.as_slice());
+    section(inout out, S_TYPE, in body.as_slice());
     body.clear();
     put_uleb(inout body, n);
     for k in 0..n {
         put_uleb(inout body, k);
     }
-    section(inout out, 3, in body.as_slice());
+    section(inout out, S_FUNCTION, in body.as_slice());
     body.clear();
     put_uleb(inout body, 1);
     table_type(n, inout body);
-    section(inout out, 4, in body.as_slice());
+    section(inout out, S_TABLE, in body.as_slice());
     body.clear();
     put_uleb(inout body, inc(n));
     for k in 0..n {
         let mut name = ChunkSeq::new[u8]();
         put_decimal(inout name, k);
         put_bytes(inout body, in name.as_slice());
-        body.push(0);
+        body.push(EXTERN_FUNC);
         put_uleb(inout body, k);
     }
     put_bytes(inout body, in "$imports".as_bytes());
     // table 0
-    body.push(1);
+    body.push(EXTERN_TABLE);
     body.push(0);
-    section(inout out, 7, in body.as_slice());
+    section(inout out, S_EXPORT, in body.as_slice());
     body.clear();
     put_uleb(inout body, n);
     for k in 0..n {
@@ -586,20 +603,19 @@ pub fn shim_module(
         // no locals
         code.push(0);
         for p in 0..s.pc {
-            // local.get p
-            code.push(32);
+            code.push(OP_LOCAL_GET);
             put_uleb(inout code, p);
         }
         // i32.const k; call_indirect (type k) (table 0); end
-        code.push(65);
+        code.push(OP_I32_CONST);
         put_sleb(inout code, k);
-        code.push(17);
+        code.push(OP_CALL_INDIRECT);
         put_uleb(inout code, k);
         code.push(0);
-        code.push(11);
+        code.push(OP_END);
         put_bytes(inout body, in code.as_slice());
     }
-    section(inout out, 10, in body.as_slice());
+    section(inout out, S_CODE, in body.as_slice());
     out.extend(in producers);
 }
 
@@ -615,7 +631,7 @@ pub fn fixup_module(
     module_head(inout out);
     let mut body = ChunkSeq::new[u8]();
     func_types(in c, in sigs, inout body);
-    section(inout out, 1, in body.as_slice());
+    section(inout out, S_TYPE, in body.as_slice());
     body.clear();
     put_uleb(inout body, inc(n));
     for k in 0..n {
@@ -628,21 +644,20 @@ pub fn fixup_module(
     }
     put_bytes(inout body, in "shim".as_bytes());
     put_bytes(inout body, in "$imports".as_bytes());
-    // a table import
-    body.push(1);
+    body.push(EXTERN_TABLE);
     table_type(n, inout body);
-    section(inout out, 2, in body.as_slice());
+    section(inout out, S_IMPORT, in body.as_slice());
     body.clear();
     // one active segment at (i32.const 0) of funcs 0..n
     put_uleb(inout body, 1);
+    body.push(ELEM_ACTIVE_DEFAULT_TABLE);
+    body.push(OP_I32_CONST);
     body.push(0);
-    body.push(65);
-    body.push(0);
-    body.push(11);
+    body.push(OP_END);
     put_uleb(inout body, n);
     for k in 0..n {
         put_uleb(inout body, k);
     }
-    section(inout out, 9, in body.as_slice());
+    section(inout out, S_ELEMENT, in body.as_slice());
     out.extend(in producers);
 }

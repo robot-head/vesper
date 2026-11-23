@@ -23,9 +23,14 @@ use self::util::{
     get64
 };
 
+// The reserved index for missing nodes and components.
+pub enum GraphIndex: _ {
+    Missing = 4294967295
+}
+
 // The id that names no node (`u32::MAX`).
 pub fn none() -> u32 {
-    4294967295
+    GraphIndex::Missing
 }
 
 pub struct GraphBuilder {
@@ -54,7 +59,7 @@ impl GraphBuilder {
 
     // Add a node and return its id (`none()` once 2^32 - 1 nodes exist).
     pub fn add_node(inout self) -> u32 {
-        if self.n >= 4294967295 {
+        if self.n >= GraphIndex::Missing {
             none()
         } else {
             let id = wrapping_u32(self.n);
