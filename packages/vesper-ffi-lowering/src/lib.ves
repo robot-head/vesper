@@ -63,6 +63,8 @@ const VT_HANDLE: u8 = 5;
 const VT_NONNULL: u8 = 6;
 // `f32` or `f64` by value; `name` spells which.
 const VT_FLOAT: u8 = 7;
+// A nullable C string copied into a Vesper byte sequence.
+const VT_CSTR: u8 = 8;
 
 // `ParameterType` tags.
 const P_VALUE: u8 = 0;
@@ -1036,6 +1038,10 @@ fn read_value(inout r: Reader, in b: Slice[u8], inout s: S) -> Vt {
         v.tag = VT_BOOL;
         return v;
     }
+    if field_is(in b, a, e, in "nullable-cstr-copy") {
+        v.tag = VT_CSTR;
+        return v;
+    }
     let name = field_sym(inout r, in b, inout s);
     if field_is(in b, a, e, in "scalar") {
         v.tag = VT_SCALAR;
@@ -1905,6 +1911,9 @@ pub fn compute_shape(inout s: S, fi: u64) -> Sh {
             } else if v.tag == VT_UNIT {
                 s.put(in "Unit parameter");
                 return shape_err(inout s, mark);
+            } else if v.tag == VT_CSTR {
+                s.put(in "a C string result is not a parameter");
+                return shape_err(inout s, mark);
             } else if v.tag == VT_HANDLE || v.tag == VT_NONNULL {
                 s.put(in "a handle parameter needs a mode");
                 return shape_err(inout s, mark);
@@ -1990,6 +1999,10 @@ pub fn compute_shape(inout s: S, fi: u64) -> Sh {
                 in "ForeignVal[Ptr[..]] results have no source carrier (source code has no raw pointers)"
             );
         return shape_err(inout s, mark);
+    } else if v.tag == VT_CSTR {
+        let byte = s.ty_name(sym8(SC_U8));
+        let text = s.ty_app1(S_CHUNK_SEQ, byte);
+        result = s.ty_app1(S_OPTION, text);
     } else if v.tag == VT_HANDLE && v.nullable {
         let t = s.ty_name(v.name);
         result = s.ty_app1(S_OPTION, t);

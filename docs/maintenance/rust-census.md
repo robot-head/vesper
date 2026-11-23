@@ -12,24 +12,25 @@ and delete its Rust (owner, 2026-11-21): full function and within 1.5x of Rust's
 
 | Class | Meaning | Non-test lines |
 |---|---|--:|
-| `gone` | Rust gone: the Vesper port is the only build (a frozen seed may remain until Stage 2) | 27,858 |
+| `gone` | Rust gone: the Vesper port is the only build (a frozen seed may remain until Stage 2) | 37,849 |
 | `flip` | At the bar (full function, <= 1.5x Rust): flip to Vesper and delete the Rust now | 0 |
-| `partial` | Port exists but is unfinished or above 1.5x: finish, speed up, then flip | 195,626 |
-| `compiler` | In the compiler: ported module by module into the hybrid; Rust deleted at the Stage 2 retirement | 212,289 |
+| `partial` | Port exists but is unfinished or above 1.5x: finish, speed up, then flip | 187,495 |
+| `compiler` | In the compiler: ported module by module into the hybrid; Rust deleted at the Stage 2 retirement | 212,317 |
 | `unported` | No Vesper port yet: port it | 4,837 |
-| `c-api` | Rust wrapper over a C or OS API: call the C API or syscalls straight from Vesper `.vsys`, no Rust left | 65,572 |
+| `c-api` | Rust wrapper over a C or OS API: call the C API or syscalls straight from Vesper `.vsys`, no Rust left | 65,640 |
 | `rust-lib` | Wraps a Rust-only library that Vesper can replace: port the library's job to Vesper | 16,609 |
 | `shim` | Irreducible: thin C-ABI shim over a vetted Rust-only library with no C equivalent | 7,864 |
 | `diverse` | Kept Rust on purpose as a diverse implementation (owner call) | 14,036 |
-| `infra` | Rust-vs-Vesper port infrastructure: deleted when the last Rust build it compares goes | 11,818 |
-| | **All non-test Rust** (root `src/` plus `crates/`) | **556,509** |
+| `infra` | Rust-vs-Vesper port infrastructure: deleted when the last Rust build it compares goes | 11,801 |
+| | **All non-test Rust** (root `src/` plus `crates/`) | **558,448** |
 
-Test and harness Rust (all lines, tracked files): `tests/` 171,976, `crates/*/tests` 232,009. These move to Vesper tests with each flip (SH6 lane 19).
+Test and harness Rust (all lines, tracked files): `tests/` 172,703, `crates/*/tests` 233,295. These move to Vesper tests with each flip (SH6 lane 19).
 
 ## Crates
 
 | Crate | Lines | Class | Vesper port | Last speed | Left | SH6 lane |
 |---|--:|---|---|---|---|---|
+| `vesper-chorus` | 9,991 | `gone` | in crate | raft 0.31x, project 0.70x, explore 0.004x; wire micro 3.79x | front end, Raft/replog, Session/Monitor and SimNet flipped (part 2); wire per-call FFI micro 3.79x (103ns Rust vs 389ns FFI); DurableLog/Transport trait glue stays Rust | 12 |
 | `vesper-pact` | 5,490 | `gone` | in crate (+ seed) | 1.10x / 0.33x | seed until Stage 2 | 12 |
 | `vesper-warp-crypto` | 3,621 | `gone` | in crate | 1.04-1.89x | header micro 1.89x (codegen, #1426); Rust holds the keys and NonceTicket; primitives via the crypto shim | 17 |
 | `vesper-aura` | 3,354 | `gone` | in crate | 0.29-0.53x |  | - |
@@ -42,14 +43,13 @@ Test and harness Rust (all lines, tracked files): `tests/` 171,976, `crates/*/te
 | `vesper-warp` | 15,207 | `partial` | in crate | 1.08-5.39x | recovery 5.4x, frames 2.3x; crypto via warp-crypto shim | 4 |
 | `vesper-ebpf` | 14,733 | `partial` | in crate | 1.2-4.7x | BTF writers, ELF, bpf() syscalls | 10 |
 | `vesper-silicon` | 14,469 | `partial` | in crate | unmeasured | SVD model, stack/prologue/hazard analysis (Cranelift IR), mmio | 10 |
-| `vesper-kinetic` | 14,281 | `partial` | in crate (+ seed) | colorer 0.78x, multi-colorer 1.35x; fastmath 1.42x, gjk 1.70x, sap 1.84x, morton 2.03x, lbvh 2.07x, crmath 2.65x | coloring flipped (Rust in seed/src/engine); fastmath, gjk, sap, morton, lbvh, crmath above the bar; world/tile, rigid, soft, articulation, couple, diff, rollback, snapshot, detfloat, simd unported | 9 |
+| `vesper-kinetic` | 14,322 | `partial` | in crate (+ seed) | colorer 0.78x, multi-colorer 1.35x, gjk 1.12x [1.05-1.17x], sap 1.09x [1.05-1.16x], scene 1.18x, pile-lbvh 1.37x; lbvh 1.57x, fastmath 1.70x (1.42x Linux), morton 1.88x, crmath 2.27x | coloring, gjk, sap flipped (Rust in seed/src/engine); lbvh, fastmath, morton, crmath above the bar on Windows MSVC; world/tile, rigid, soft, articulation, couple, diff, rollback, snapshot, detfloat, simd unported | 9 |
 | `vesper-flux` | 12,940 | `partial` | in crate | unmeasured | CDC, Kafka wire, durable state, cluster driver | 6 |
 | `vesper-quarry` | 12,595 | `partial` | in crate | 1.80x | buffer pool, executor, online DDL | 6 |
 | `vesper-sim-session` | 9,658 | `partial` | in crate | unmeasured | umem, warp, JSON, driver (SH5 lane 19) | SH5-19 |
 | `vesper-serde` | 9,066 | `partial` | in crate | 4.8-5.7x | SIMD stage 1 needs source vectors | 11 |
 | `vesper-tensor` | 9,057 | `partial` | in crate | unmeasured | safetensors, memmap, simd kernels | 11 |
 | `vesper-ignis` | 8,730 | `partial` | in crate | 0.68-3.1x | build 2.5x, lower 2.7-3.1x | 7 |
-| `vesper-chorus` | 8,172 | `partial` | in crate | 0.70x parse+project | front end Vesper-only; simulated network, Raft driver | 12 |
 | `vesper-alloc` | 8,093 | `partial` | in crate | unmeasured | cache B-tree, arena keys, OS pages | 11 |
 | `vesper-aegis` | 7,821 | `partial` | in crate | cca_token 0.37x, corim 0.58x, corim_store 1.12x, appraise_cca 0.55x | SNP/TDX/SGX/policy/claims parsers, CBOR, COSE_Sign1/Key, CCA collections, CoRIM/CoMID, and CCA appraisal flipped (part 2b; coset moved to dev-deps); gate/gpa/host/linear (part 3) and X.509/webpki/ECDSA/intel/amd (part 4) remain | 8 |
 | `vesper-prism-h3` | 7,563 | `partial` | in crate | connection 0.97x, session 0.94x, core 0.99-1.36x | protocol core and connection/client/session state machines flipped (part 3b); RoleCore Transport I/O glue and Warp adapter stay Rust | 5 |
@@ -94,7 +94,7 @@ Test and harness Rust (all lines, tracked files): `tests/` 171,976, `crates/*/te
 | `vesper-aura-gtk` | 2,626 | `c-api` |  |  | gtk4-rs: call the GTK 4 C API | 15 |
 | `vesper-bench-pmu` | 2,105 | `c-api` |  |  | perf_event_open | 14 |
 | `vesper-simd` | 1,573 | `c-api` |  |  | out of the compiler's closure (#1398); Cranelift JIT host: through vesper-cranelift-sys | 13 |
-| `vesper-std-host` | 801 | `c-api` |  |  | libc fs/process/env: import libc directly | 13 |
+| `vesper-std-host` | 869 | `c-api` |  |  | libc fs/process/env: import libc directly | 13 |
 | `vesper-loom-admission` | 370 | `c-api` |  |  | out of the compiler's closure (#1398); glue over CAS + trust | 16 |
 | `vesper-beacon-arrow` | 7,938 | `rust-lib` |  |  | arrow-rs, tonic, prost: Arrow IPC and gRPC on Prism | 18 |
 | `vesper-migrate` | 4,469 | `rust-lib` |  |  | out of the compiler's closure (#1398); lang-c, syn: C and Rust readers in Vesper | 18 |
@@ -105,16 +105,16 @@ Test and harness Rust (all lines, tracked files): `tests/` 171,976, `crates/*/te
 | `vesper-warp-tls` | 1,761 | `shim` |  |  | rustls: TLS shim (or the TLS 1.3 state machine ports over the crypto shim) | 17 |
 | `vesper-crypto-sys` | 915 | `shim` |  |  | vetted crypto C-ABI shim (SH6 lane 17) | 17 |
 | `vesper-codegen-verified` | 1,369 | `diverse` |  |  | DDC auditor, diverse on purpose | owner |
-| `vesper-hybrid` | 7,727 | `infra` |  |  | becomes the default compiler, then is deleted at the retirement | 2 |
+| `vesper-hybrid` | 7,711 | `infra` |  |  | becomes the default compiler, then is deleted at the retirement | 2 |
 | `vesper-port-pilot` | 2,241 | `infra` |  |  |  | 2 |
 | `vesper-port-abi` | 1,003 | `infra` |  |  |  | 2 |
 | `vesper-port-harness` | 550 | `infra` |  |  |  | 2 |
 | `vesper-codegen-swap-test` | 221 | `infra` |  |  |  | 2 |
 | `vesper-port-build` | 40 | `infra` |  |  |  | 2 |
-| `vesper-std-driver` | 36 | `infra` |  |  | sample driver | 13 |
+| `vesper-std-driver` | 35 | `infra` |  |  | sample driver | 13 |
 | `vesper-codegen-numeric-test` | 0 | `infra` |  |  |  | 2 |
 
-## Root compiler (`src/`, 171,943 lines)
+## Root compiler (`src/`, 171,971 lines)
 
 Every module has an owner lane. SHn-m is wave n lane m; G1-m is gap wave 1 lane m; a bare number is an SH6 lane.
 
@@ -139,7 +139,7 @@ Every module has an owner lane. SHn-m is wave n lane m; G1-m is gap wave 1 lane 
 | `fip` | 3,257 | SH2-12 | vesper-check-fip | 0.92x |
 | `bounds_hoist` | 3,108 | SH3-12 | vesper-bounds-hoist | flip gate PASS: pass 1.15x, build 1.07x; swapped in the hybrid (`hoist`) |
 | `tiled` | 3,033 | SH4-11 | vesper-codegen-numeric |  |
-| `packages` | 2,884 | SH2-6 | vesper-check-names-packages | 0.72-0.87x wall |
+| `packages` | 2,916 | SH2-6 | vesper-check-names-packages | 0.72-0.87x wall |
 | `regions` | 2,229 | SH2-9 | vesper-check-regions-seqs | 1.12-1.17x |
 | `test_runner` | 2,220 | SH5-14 | vesper-test-runner | 1.69x |
 | `capability_effects` | 2,209 | SH2-8 | vesper-check-effects | 0.28x |
@@ -168,7 +168,7 @@ Every module has an owner lane. SHn-m is wave n lane m; G1-m is gap wave 1 lane 
 | `lean_ir` | 1,014 | SH5-18 | vesper-lean-extract |  |
 | `codegen_swap` | 919 | 2 |  | goes with the hybrid |
 | `native_coverage` | 845 | SH4-17, 3 |  | links the crucible seed; only `vesper fuzz` (a tool) uses it |
-| `main` | 835 | SH5-12 | vesper-driver | #1367 |
+| `main` | 831 | SH5-12 | vesper-driver | #1367 |
 | `atomics` | 815 | SH2-10 | vesper-check-loops-atomics | 2.31x |
 | `arrays` | 800 | SH2-9 |  |  |
 | `anvil_hash` | 785 | SH5-14 |  |  |
@@ -186,8 +186,8 @@ Every module has an owner lane. SHn-m is wave n lane m; G1-m is gap wave 1 lane 
 | `vsys_commands` | 512 | SH5-13 | vesper-driver-commands |  |
 | `package_graph` | 420 | SH2-6 |  |  |
 | `lint_commands` | 417 | SH5-13 | vesper-driver-commands |  |
-| `layout` | 391 | SH2-5 | vesper-check-layout | swapped |
 | `interface` | 391 | SH2-6 |  |  |
+| `layout` | 391 | SH2-5 | vesper-check-layout | swapped |
 | `forge_commands` | 373 | SH5-13 | vesper-driver-commands |  |
 | `test_discovery` | 371 | SH5-14 |  |  |
 | `browser_tour` | 360 | G1-12 |  | tour glue over the wasm-built compiler: needs website/wasm and the wasm seed |

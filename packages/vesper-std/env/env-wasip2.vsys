@@ -1,5 +1,4 @@
-// @vesper-std/env's import (self-hosting SH0 lane 3, #1125). The functions
-// are the C-ABI host shim in crates/vesper-std-host (src/env.rs).
+// The component backend implements these operations over WASI 0.2.
 sys library StdEnv (
     target = "@TARGET@", abi = "@ABI@",
     link = "static", name = "vesper_std_host",

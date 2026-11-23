@@ -1,0 +1,1017 @@
+// Module session of @vesper/chorus (see lib.ves): dynamic protocol Monitor,
+// LeakAuditor, and Endpoint sequence-dedup / reorder state machine (src/session.rs).
+use self::{
+    new_c,
+    C
+};
+use self::util::{
+    add,
+    inc,
+    intern_slice,
+    iw,
+    none,
+    setw,
+    sw,
+    tb_str,
+    tb_sym,
+    Br,
+    LTag,
+    Out
+};
+use self::local::{
+    alpha_eq,
+    emit_l,
+    la,
+    lb,
+    lbr,
+    lc,
+    ld,
+    lkn,
+    lt,
+    read_local,
+    unfold
+};
+use self::tree::{
+    read_chor
+};
+use self::project::{
+    project_role
+};
+
+const MAX_U64: u64 = 18446744073709551615;
+const REORDER_LIMIT: u64 = 1024;
+const NODE_STRIDE: u64 = 8;
+const REORDER_STRIDE: u64 = 5;
+
+// Mon.status / bind results
+pub enum MonStatus: _ {
+    Ok = 0,
+    UnknownRole = 1,
+    ProjectionError = 2,
+    TypestateMismatch = 3
+}
+
+// Mon step errors
+pub enum StepErr: _ {
+    Ok = 0,
+    Violation = 1
+}
+
+// Endpoint send check results
+pub enum EpSendStatus: _ {
+    Ok = 0,
+    UnknownRole = 1,
+    ProtocolViolation = 2,
+    NetClosed = 3
+}
+
+// Endpoint pre-recv check results
+pub enum EpPreRecvStatus: _ {
+    NeedTransport = 0,
+    Hit = 1,
+    UnknownRole = 2,
+    ProtocolViolation = 3
+}
+
+// Endpoint on-frame results
+pub enum EpFrameStatus: _ {
+    AcceptedNow = 0,
+    Buffered = 1,
+    Duplicate = 2,
+    Misrouted = 3,
+    ProtocolViolation = 4
+}
+
+pub copy struct AuditOut {
+    opened: u64,
+    closed: u64,
+    faulted: u64,
+    leaked: u64,
+    duplicates_discarded: u64
+}
+
+pub copy struct EpSendOut {
+    status: u64,
+    peer: u64,
+    seq: u64
+}
+
+pub copy struct EpPreRecvOut {
+    status: u64,
+    peer: u64,
+    slot: u64
+}
+
+pub struct Auditor {
+    opened: u64,
+    closed: u64,
+    faulted: u64,
+    leaked: u64,
+    duplicates_discarded: u64,
+    leak_chan: ChunkSeq[u64],
+    leak_role_off: ChunkSeq[u64],
+    leak_role_len: ChunkSeq[u64],
+    leak_state_off: ChunkSeq[u64],
+    leak_state_len: ChunkSeq[u64],
+    txt: ChunkSeq[u8]
+}
+
+pub fn auditor_new() -> Auditor {
+    Auditor {
+        opened: 0,
+        closed: 0,
+        faulted: 0,
+        leaked: 0,
+        duplicates_discarded: 0,
+        leak_chan: ChunkSeq::new[u64](),
+        leak_role_off: ChunkSeq::new[u64](),
+        leak_role_len: ChunkSeq::new[u64](),
+        leak_state_off: ChunkSeq::new[u64](),
+        leak_state_len: ChunkSeq::new[u64](),
+        txt: ChunkSeq::new[u8]()
+    }
+}
+
+pub fn auditor_opened(inout a: Auditor) {
+    a.opened = wrapping_add(a.opened, 1);
+}
+
+pub fn auditor_closed(inout a: Auditor) {
+    a.closed = wrapping_add(a.closed, 1);
+}
+
+pub fn auditor_faulted(inout a: Auditor) {
+    a.faulted = wrapping_add(a.faulted, 1);
+}
+
+pub fn auditor_dup(inout a: Auditor) {
+    a.duplicates_discarded = wrapping_add(a.duplicates_discarded, 1);
+}
+
+pub fn auditor_leak(inout a: Auditor, channel: u64, in role: Str, in state: Str) {
+    a.leaked = wrapping_add(a.leaked, 1);
+    a.leak_chan.push(channel);
+    let ro = a.txt.len();
+    a.leak_role_off.push(ro);
+    a.leak_role_len.push(role.len());
+    a.txt.extend(in role.as_bytes());
+    let so = a.txt.len();
+    a.leak_state_off.push(so);
+    a.leak_state_len.push(state.len());
+    a.txt.extend(in state.as_bytes());
+}
+
+pub fn auditor_counts(in a: Auditor) -> AuditOut {
+    AuditOut {
+        opened: a.opened,
+        closed: a.closed,
+        faulted: a.faulted,
+        leaked: a.leaked,
+        duplicates_discarded: a.duplicates_discarded
+    }
+}
+
+pub fn auditor_open(in a: Auditor) -> u64 {
+    wrapping_sub(wrapping_sub(wrapping_sub(a.opened, a.closed), a.faulted), a.leaked)
+}
+
+// ---------------------------------------------------------------------------
+// Mon: Monitor + Endpoint sequence-dedup/reorder state
+
+pub struct Mon {
+    status: u64,
+    role_sym: u64,
+    cur: u64,
+    l_end: u64,
+    ro: ChunkSeq[u64],
+    sy_off: ChunkSeq[u64],
+    sy_len: ChunkSeq[u64],
+    sy_txt: ChunkSeq[u8],
+    // LocalType nodes, 8 words each: (tag, a, b, cc, d, ks, kn, unfolded)
+    nodes: ChunkSeq[u64],
+    // Branch triples (label_sym, payload_sym, next_node)
+    lk: ChunkSeq[u64],
+    send_seq: ChunkSeq[u64],
+    recv_seq: ChunkSeq[u64],
+    // Out-of-order frames, 5 words each: (peer, seq, slot, label_sym, pty_sym)
+    reorder: ChunkSeq[u64],
+    err_a: ChunkSeq[u8],
+    err_b: ChunkSeq[u8],
+    err_words: ChunkSeq[u64]
+}
+
+fn empty_mon() -> Mon {
+    Mon {
+        status: MonStatus::Ok,
+        role_sym: 0,
+        cur: 0,
+        l_end: 0,
+        ro: ChunkSeq::new[u64](),
+        sy_off: ChunkSeq::new[u64](),
+        sy_len: ChunkSeq::new[u64](),
+        sy_txt: ChunkSeq::new[u8](),
+        nodes: ChunkSeq::new[u64](),
+        lk: ChunkSeq::new[u64](),
+        send_seq: ChunkSeq::new[u64](),
+        recv_seq: ChunkSeq::new[u64](),
+        reorder: ChunkSeq::new[u64](),
+        err_a: ChunkSeq::new[u8](),
+        err_b: ChunkSeq::new[u8](),
+        err_words: ChunkSeq::new[u64]()
+    }
+}
+
+fn sb(in q: ChunkSeq[u8], i: u64) -> u8 {
+    match q.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn sib(in q: Slice[u8], i: u64) -> u8 {
+    match q.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn m_tag(in m: Mon, id: u64) -> u64 {
+    sw(in m.nodes, wrapping_mul(id, NODE_STRIDE))
+}
+fn m_a(in m: Mon, id: u64) -> u64 {
+    sw(in m.nodes, add(wrapping_mul(id, NODE_STRIDE), 1))
+}
+fn m_b(in m: Mon, id: u64) -> u64 {
+    sw(in m.nodes, add(wrapping_mul(id, NODE_STRIDE), 2))
+}
+fn m_c(in m: Mon, id: u64) -> u64 {
+    sw(in m.nodes, add(wrapping_mul(id, NODE_STRIDE), 3))
+}
+fn m_d(in m: Mon, id: u64) -> u64 {
+    sw(in m.nodes, add(wrapping_mul(id, NODE_STRIDE), 4))
+}
+fn m_ks(in m: Mon, id: u64) -> u64 {
+    sw(in m.nodes, add(wrapping_mul(id, NODE_STRIDE), 5))
+}
+fn m_kn(in m: Mon, id: u64) -> u64 {
+    sw(in m.nodes, add(wrapping_mul(id, NODE_STRIDE), 6))
+}
+fn m_unf(in m: Mon, id: u64) -> u64 {
+    sw(in m.nodes, add(wrapping_mul(id, NODE_STRIDE), 7))
+}
+fn m_br(in m: Mon, id: u64, i: u64, f: u64) -> u64 {
+    sw(in m.lk, add(add(m_ks(in m, id), wrapping_mul(i, Br::Words)), f))
+}
+
+fn m_sym_eq(in m: Mon, sym: u64, in b: Slice[u8]) -> bool {
+    let len = b.len();
+    if sw(in m.sy_len, sym) != len {
+        return false;
+    }
+    let off = sw(in m.sy_off, sym);
+    for i in 0..len {
+        if sb(in m.sy_txt, add(off, i)) != sib(in b, i) {
+            return false;
+        }
+    }
+    true
+}
+
+fn m_intern(inout m: Mon, in b: Slice[u8]) -> u64 {
+    let n = m.sy_off.len();
+    for y in 0..n {
+        if m_sym_eq(in m, y, in b) {
+            return y;
+        }
+    }
+    let y = m.sy_off.len();
+    let off = m.sy_txt.len();
+    m.sy_off.push(off);
+    m.sy_len.push(b.len());
+    m.sy_txt.extend(in b);
+    y
+}
+
+fn push_sym_to(in m: Mon, sym: u64, inout out_b: ChunkSeq[u8]) {
+    let off = sw(in m.sy_off, sym);
+    let len = sw(in m.sy_len, sym);
+    for i in 0..len {
+        let b = sb(in m.sy_txt, add(off, i));
+        out_b.push(b);
+    }
+}
+
+fn push_str_to(inout out_b: ChunkSeq[u8], in s: Str) {
+    out_b.extend(in s.as_bytes());
+}
+
+fn push_u64_to(inout out_b: ChunkSeq[u8], x: u64) {
+    if x >= 10 {
+        push_u64_to(inout out_b, x / 10);
+    }
+    let d = wrapping_u8(add(48, x % 10));
+    out_b.push(d);
+}
+
+fn m_role_name_sym(inout m: Mon, r: u64) -> u64 {
+    if r < m.ro.len() {
+        sw(in m.ro, r)
+    } else {
+        m_intern(inout m, in "?".as_bytes())
+    }
+}
+
+fn push_role_name(in m: Mon, r: u64, inout out_b: ChunkSeq[u8]) {
+    if r < m.ro.len() {
+        let sym = sw(in m.ro, r);
+        push_sym_to(in m, sym, inout out_b);
+    } else {
+        push_str_to(inout out_b, "?");
+    }
+}
+
+fn write_expected(in m: Mon, inout out_b: ChunkSeq[u8]) {
+    out_b.clear();
+    let cur = m.cur;
+    let tag = m_tag(in m, cur);
+    if tag == LTag::Send {
+        push_str_to(inout out_b, "send ");
+        push_sym_to(in m, m_b(in m, cur), inout out_b);
+        push_str_to(inout out_b, "(");
+        push_sym_to(in m, m_c(in m, cur), inout out_b);
+        push_str_to(inout out_b, ") to ");
+        push_role_name(in m, m_a(in m, cur), inout out_b);
+    } else if tag == LTag::Recv {
+        push_str_to(inout out_b, "receive ");
+        push_sym_to(in m, m_b(in m, cur), inout out_b);
+        push_str_to(inout out_b, "(");
+        push_sym_to(in m, m_c(in m, cur), inout out_b);
+        push_str_to(inout out_b, ") from ");
+        push_role_name(in m, m_a(in m, cur), inout out_b);
+    } else if tag == LTag::Select || tag == LTag::Offer {
+        if tag == LTag::Select {
+            push_str_to(inout out_b, "select ");
+        } else {
+            push_str_to(inout out_b, "offer ");
+        }
+        let n = m_kn(in m, cur);
+        for i in 0..n {
+            if i > 0 {
+                push_str_to(inout out_b, "|");
+            }
+            push_sym_to(in m, m_br(in m, cur, i, Br::Label), inout out_b);
+        }
+        push_str_to(inout out_b, " with ");
+        push_role_name(in m, m_a(in m, cur), inout out_b);
+    } else if tag == LTag::Action {
+        push_str_to(inout out_b, "local action ");
+        push_sym_to(in m, m_a(in m, cur), inout out_b);
+    } else if tag == LTag::End {
+        push_str_to(inout out_b, "end");
+    } else {
+        push_str_to(inout out_b, "unguarded recursion");
+    }
+}
+
+fn write_violation(inout m: Mon, send: bool, peer: u64, in label: Slice[u8], in pty: Slice[u8]) {
+    let mut ea = ChunkSeq::new[u8]();
+    write_expected(in m, inout ea);
+    m.err_a = ea;
+    m.err_b.clear();
+    if send {
+        push_str_to(inout m.err_b, "send ");
+    } else {
+        push_str_to(inout m.err_b, "receive ");
+    }
+    m.err_b.extend(in label);
+    push_str_to(inout m.err_b, "(");
+    m.err_b.extend(in pty);
+    if send {
+        push_str_to(inout m.err_b, ") to ");
+    } else {
+        push_str_to(inout m.err_b, ") from ");
+    }
+    let mut eb = replace(inout m.err_b, ChunkSeq::new[u8]());
+    push_role_name(in m, peer, inout eb);
+    m.err_b = eb;
+}
+
+fn m_unfold(in m: Mon, id: u64) -> u64 {
+    let u = m_unf(in m, id);
+    if u != none() {
+        u
+    } else {
+        id
+    }
+}
+
+// BFS over reachable nodes in `c` starting from `start`, ensuring `c.lu` is
+// populated for every reachable node before packing into `Mon`.
+fn pre_unfold(inout c: C, start: u64) {
+    let n0 = c.lt.len();
+    let mut seen: ChunkSeq[bool] = ChunkSeq::with_capacity[bool](n0);
+    let mut q: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for _ in 0..n0 {
+        seen.push(false);
+    }
+    q.push(start);
+    let mut qi: u64 = 0;
+    loop {
+        if qi >= q.len() {
+            break;
+        }
+        let id = sw(in q, qi);
+        qi = inc(qi);
+        if id < seen.len() {
+            let already = match seen.try_get(id) {
+                Option::Some(v) => v,
+                Option::None => false,
+            };
+            if already {
+                continue;
+            }
+            let _ = seen.try_set(id, true);
+        }
+        let u = unfold(inout c, id);
+        // `unfold` may allocate new nodes; extend `seen` to cover them.
+        loop {
+            if seen.len() >= c.lt.len() {
+                break;
+            }
+            seen.push(false);
+        }
+        if u != id {
+            q.push(u);
+        }
+        let tag = lt(in c, id);
+        if tag == LTag::Send || tag == LTag::Recv {
+            let nx = ld(in c, id);
+            q.push(nx);
+        } else if tag == LTag::Action || tag == LTag::Rec {
+            let nx = lb(in c, id);
+            q.push(nx);
+        } else if tag == LTag::Select || tag == LTag::Offer {
+            let n = lkn(in c, id);
+            for i in 0..n {
+                let nx = lbr(in c, id, i, Br::Next);
+                q.push(nx);
+            }
+        }
+    }
+}
+
+fn pack_from_c(inout c: C, start: u64, role_sym: u64) -> Mon {
+    pre_unfold(inout c, start);
+    let cur = unfold(inout c, start);
+    let mut m = empty_mon();
+    m.role_sym = role_sym;
+    m.cur = cur;
+    m.l_end = c.l_end;
+    let nr = c.ro.len();
+    for i in 0..nr {
+        let r = sw(in c.ro, i);
+        m.ro.push(r);
+        m.send_seq.push(0);
+        m.recv_seq.push(0);
+    }
+    let ns = c.sy_off.len();
+    for i in 0..ns {
+        let o = sw(in c.sy_off, i);
+        let l = sw(in c.sy_len, i);
+        m.sy_off.push(o);
+        m.sy_len.push(l);
+    }
+    let nt = c.sy_txt.len();
+    for i in 0..nt {
+        let b = sb(in c.sy_txt, i);
+        m.sy_txt.push(b);
+    }
+    let nn = c.lt.len();
+    for i in 0..nn {
+        let t = sw(in c.lt, i);
+        let a = sw(in c.la, i);
+        let b = sw(in c.lb, i);
+        let cc = sw(in c.lc, i);
+        let d = sw(in c.ld, i);
+        let ks = sw(in c.lks, i);
+        let kn = sw(in c.lkn, i);
+        let lu = sw(in c.lu, i);
+        m.nodes.push(t);
+        m.nodes.push(a);
+        m.nodes.push(b);
+        m.nodes.push(cc);
+        m.nodes.push(d);
+        m.nodes.push(ks);
+        m.nodes.push(kn);
+        m.nodes.push(lu);
+    }
+    let nk = c.lk.len();
+    for i in 0..nk {
+        let k = sw(in c.lk, i);
+        m.lk.push(k);
+    }
+    m
+}
+
+fn copy_c_errors_to_mon(in c: C, inout m: Mon) {
+    let ns = c.sy_off.len();
+    for i in 0..ns {
+        let o = sw(in c.sy_off, i);
+        let l = sw(in c.sy_len, i);
+        m.sy_off.push(o);
+        m.sy_len.push(l);
+    }
+    let nt = c.sy_txt.len();
+    for i in 0..nt {
+        let b = sb(in c.sy_txt, i);
+        m.sy_txt.push(b);
+    }
+    let ne = c.ew.len();
+    for i in 0..ne {
+        let w = sw(in c.ew, i);
+        m.err_words.push(w);
+    }
+}
+
+fn find_role_in_c(inout c: C, in role_bytes: Slice[u8]) -> u64 {
+    let target = intern_slice(inout c, in role_bytes, 0, role_bytes.len());
+    let nr = c.ro.len();
+    for i in 0..nr {
+        if sw(in c.ro, i) == target {
+            return i;
+        }
+    }
+    none()
+}
+
+pub fn mon_new(in w: Slice[u64], in t: Slice[u8], in role: Str) -> Mon {
+    let mut c = new_c();
+    let _ = read_chor(inout c, in w, in t, 0);
+    let r = find_role_in_c(inout c, in role.as_bytes());
+    if r == none() {
+        let mut m = empty_mon();
+        m.status = MonStatus::UnknownRole;
+        m.err_a.extend(in role.as_bytes());
+        return m;
+    }
+    let proj = project_role(inout c, r);
+    if c.failed {
+        let mut m = empty_mon();
+        m.status = MonStatus::ProjectionError;
+        copy_c_errors_to_mon(in c, inout m);
+        return m;
+    }
+    let role_sym = sw(in c.ro, r);
+    pack_from_c(inout c, proj, role_sym)
+}
+
+pub fn mon_bind(in w: Slice[u64], in t: Slice[u8], in role: Str) -> Mon {
+    let mut c = new_c();
+    let at = read_chor(inout c, in w, in t, 0);
+    let r = find_role_in_c(inout c, in role.as_bytes());
+    if r == none() {
+        let mut m = empty_mon();
+        m.status = MonStatus::UnknownRole;
+        m.err_a.extend(in role.as_bytes());
+        return m;
+    }
+    let proj = project_role(inout c, r);
+    if c.failed {
+        let mut m = empty_mon();
+        m.status = MonStatus::ProjectionError;
+        copy_c_errors_to_mon(in c, inout m);
+        return m;
+    }
+    let rlen = iw(in w, at);
+    let rust = read_local(inout c, in w, in t, inc(at), rlen);
+    if !alpha_eq(inout c, proj, rust) {
+        let mut m = empty_mon();
+        m.status = MonStatus::TypestateMismatch;
+        c.out.clear();
+        emit_l(inout c, proj);
+        let ns = c.sy_off.len();
+        for i in 0..ns {
+            let o = sw(in c.sy_off, i);
+            let l = sw(in c.sy_len, i);
+            m.sy_off.push(o);
+            m.sy_len.push(l);
+        }
+        let nt = c.sy_txt.len();
+        for i in 0..nt {
+            let b = sb(in c.sy_txt, i);
+            m.sy_txt.push(b);
+        }
+        let no = c.out.len();
+        for i in 0..no {
+            let x = sw(in c.out, i);
+            m.err_words.push(x);
+        }
+        return m;
+    }
+    let role_sym = sw(in c.ro, r);
+    pack_from_c(inout c, proj, role_sym)
+}
+
+pub fn mon_clone(in m: Mon) -> Mon {
+    let mut out = empty_mon();
+    out.status = m.status;
+    out.role_sym = m.role_sym;
+    out.cur = m.cur;
+    out.l_end = m.l_end;
+    out.ro.extend(in m.ro.as_slice());
+    out.sy_off.extend(in m.sy_off.as_slice());
+    out.sy_len.extend(in m.sy_len.as_slice());
+    out.sy_txt.extend(in m.sy_txt.as_slice());
+    out.nodes.extend(in m.nodes.as_slice());
+    out.lk.extend(in m.lk.as_slice());
+    out.send_seq.extend(in m.send_seq.as_slice());
+    out.recv_seq.extend(in m.recv_seq.as_slice());
+    out.reorder.extend(in m.reorder.as_slice());
+    out.err_a.extend(in m.err_a.as_slice());
+    out.err_b.extend(in m.err_b.as_slice());
+    out.err_words.extend(in m.err_words.as_slice());
+    out
+}
+
+pub fn mon_status(in m: Mon) -> u64 {
+    m.status
+}
+
+pub fn mon_role_id(in m: Mon, in name: Str) -> u64 {
+    let nr = m.ro.len();
+    for i in 0..nr {
+        let sym = sw(in m.ro, i);
+        if m_sym_eq(in m, sym, in name.as_bytes()) {
+            return i;
+        }
+    }
+    none()
+}
+
+pub fn mon_is_end(in m: Mon) -> bool {
+    m.cur == m.l_end
+}
+
+pub fn mon_awaiting(in m: Mon) -> u64 {
+    let tag = m_tag(in m, m.cur);
+    if tag == LTag::Recv || tag == LTag::Offer {
+        m_a(in m, m.cur)
+    } else {
+        none()
+    }
+}
+
+pub fn mon_expected(inout m: Mon) {
+    let mut ea = ChunkSeq::new[u8]();
+    write_expected(in m, inout ea);
+    m.err_a = ea;
+}
+
+pub fn mon_role_bytes(inout m: Mon) {
+    m.err_a.clear();
+    let rsym = m.role_sym;
+    let off = sw(in m.sy_off, rsym);
+    let len = sw(in m.sy_len, rsym);
+    for i in 0..len {
+        let b = sb(in m.sy_txt, add(off, i));
+        m.err_a.push(b);
+    }
+}
+
+fn emit_m_node(in m: Mon, t: u64, inout out_w: ChunkSeq[u64]) {
+    let tag = m_tag(in m, t);
+    if tag == LTag::Send || tag == LTag::Recv {
+        emit_m_node(in m, m_d(in m, t), inout out_w);
+        out_w.push(tag);
+        out_w.push(m_a(in m, t));
+        out_w.push(m_b(in m, t));
+        out_w.push(m_c(in m, t));
+    } else if tag == LTag::Select || tag == LTag::Offer {
+        let n = m_kn(in m, t);
+        for i in 0..n {
+            emit_m_node(in m, m_br(in m, t, i, Br::Next), inout out_w);
+        }
+        out_w.push(tag);
+        out_w.push(m_a(in m, t));
+        out_w.push(n);
+        for i in 0..n {
+            out_w.push(m_br(in m, t, i, Br::Label));
+            out_w.push(m_br(in m, t, i, Br::Payload));
+        }
+    } else if tag == LTag::Action || tag == LTag::Rec {
+        emit_m_node(in m, m_b(in m, t), inout out_w);
+        out_w.push(tag);
+        out_w.push(m_a(in m, t));
+    } else if tag == LTag::Var {
+        out_w.push(LTag::Var);
+        out_w.push(m_a(in m, t));
+    } else {
+        out_w.push(LTag::End);
+    }
+}
+
+pub fn mon_emit_current(inout m: Mon) {
+    let cur = m.cur;
+    let mut ew = ChunkSeq::new[u64]();
+    emit_m_node(in m, cur, inout ew);
+    m.err_words = ew;
+}
+
+fn step_slice(inout m: Mon, send: bool, peer: u64, in label: Slice[u8], in pty: Slice[u8]) -> u64 {
+    let cur = m.cur;
+    let tag = m_tag(in m, cur);
+    let mut found_next = none();
+    if send && tag == LTag::Send {
+        if m_a(in m, cur) == peer
+            && m_sym_eq(in m, m_b(in m, cur), in label)
+            && m_sym_eq(in m, m_c(in m, cur), in pty) {
+            found_next = m_d(in m, cur);
+        }
+    } else if !send && tag == LTag::Recv {
+        if m_a(in m, cur) == peer
+            && m_sym_eq(in m, m_b(in m, cur), in label)
+            && m_sym_eq(in m, m_c(in m, cur), in pty) {
+            found_next = m_d(in m, cur);
+        }
+    } else if (send && tag == LTag::Select) || (!send && tag == LTag::Offer) {
+        if m_a(in m, cur) == peer {
+            let n = m_kn(in m, cur);
+            for i in 0..n {
+                let ls = m_br(in m, cur, i, Br::Label);
+                let ps = m_br(in m, cur, i, Br::Payload);
+                if m_sym_eq(in m, ls, in label) && m_sym_eq(in m, ps, in pty) {
+                    found_next = m_br(in m, cur, i, Br::Next);
+                    break;
+                }
+            }
+        }
+    }
+    if found_next != none() {
+        m.cur = m_unfold(in m, found_next);
+        return StepErr::Ok;
+    }
+    write_violation(inout m, send, peer, in label, in pty);
+    StepErr::Violation
+}
+
+fn step_syms(inout m: Mon, send: bool, peer: u64, lsym: u64, psym: u64) -> u64 {
+    let cur = m.cur;
+    let tag = m_tag(in m, cur);
+    let mut found_next = none();
+    if send && tag == LTag::Send {
+        if m_a(in m, cur) == peer && m_b(in m, cur) == lsym && m_c(in m, cur) == psym {
+            found_next = m_d(in m, cur);
+        }
+    } else if !send && tag == LTag::Recv {
+        if m_a(in m, cur) == peer && m_b(in m, cur) == lsym && m_c(in m, cur) == psym {
+            found_next = m_d(in m, cur);
+        }
+    } else if (send && tag == LTag::Select) || (!send && tag == LTag::Offer) {
+        if m_a(in m, cur) == peer {
+            let n = m_kn(in m, cur);
+            for i in 0..n {
+                if m_br(in m, cur, i, Br::Label) == lsym
+                    && m_br(in m, cur, i, Br::Payload) == psym {
+                    found_next = m_br(in m, cur, i, Br::Next);
+                    break;
+                }
+            }
+        }
+    }
+    if found_next != none() {
+        m.cur = m_unfold(in m, found_next);
+        return StepErr::Ok;
+    }
+    let lo = sw(in m.sy_off, lsym);
+    let ll = sw(in m.sy_len, lsym);
+    let po = sw(in m.sy_off, psym);
+    let pl = sw(in m.sy_len, psym);
+    let mut lb = ChunkSeq::new[u8]();
+    for i in 0..ll {
+        let b = sb(in m.sy_txt, add(lo, i));
+        lb.push(b);
+    }
+    let mut pb = ChunkSeq::new[u8]();
+    for i in 0..pl {
+        let b = sb(in m.sy_txt, add(po, i));
+        pb.push(b);
+    }
+    write_violation(inout m, send, peer, in lb.as_slice(), in pb.as_slice());
+    StepErr::Violation
+}
+
+pub fn mon_on_send(inout m: Mon, peer: u64, in label: Str, in payload: Str) -> u64 {
+    step_slice(inout m, true, peer, in label.as_bytes(), in payload.as_bytes())
+}
+
+pub fn mon_on_recv(inout m: Mon, peer: u64, in label: Str, in payload: Str) -> u64 {
+    step_slice(inout m, false, peer, in label.as_bytes(), in payload.as_bytes())
+}
+
+pub fn mon_on_action(inout m: Mon, in name: Str) -> u64 {
+    let cur = m.cur;
+    let tag = m_tag(in m, cur);
+    if tag == LTag::Action && m_sym_eq(in m, m_a(in m, cur), in name.as_bytes()) {
+        m.cur = m_unfold(in m, m_b(in m, cur));
+        return StepErr::Ok;
+    }
+    let mut ea = ChunkSeq::new[u8]();
+    write_expected(in m, inout ea);
+    m.err_a = ea;
+    m.err_b.clear();
+    push_str_to(inout m.err_b, "local action ");
+    m.err_b.extend(in name.as_bytes());
+    StepErr::Violation
+}
+
+// ---------------------------------------------------------------------------
+// Endpoint sequence-dedup and reorder operations on Mon
+
+pub fn mon_ep_send(inout m: Mon, in to_name: Str, in label: Str, in payload: Str) -> EpSendOut {
+    let peer = mon_role_id(in m, in to_name);
+    if peer == none() {
+        m.err_a.clear();
+        m.err_a.extend(in to_name.as_bytes());
+        return EpSendOut {
+            status: EpSendStatus::UnknownRole,
+            peer: 0,
+            seq: 0
+        };
+    }
+    if step_slice(inout m, true, peer, in label.as_bytes(), in payload.as_bytes()) != StepErr::Ok {
+        return EpSendOut {
+            status: EpSendStatus::ProtocolViolation,
+            peer: peer,
+            seq: 0
+        };
+    }
+    let seq = sw(in m.send_seq, peer);
+    if seq == MAX_U64 {
+        return EpSendOut {
+            status: EpSendStatus::NetClosed,
+            peer: peer,
+            seq: 0
+        };
+    }
+    setw(inout m.send_seq, peer, inc(seq));
+    EpSendOut {
+        status: EpSendStatus::Ok,
+        peer: peer,
+        seq: seq
+    }
+}
+
+fn reorder_find(in m: Mon, peer: u64, seq: u64) -> u64 {
+    let n = m.reorder.len() / REORDER_STRIDE;
+    for i in 0..n {
+        let base = wrapping_mul(i, REORDER_STRIDE);
+        if sw(in m.reorder, base) == peer && sw(in m.reorder, inc(base)) == seq {
+            return i;
+        }
+    }
+    none()
+}
+
+fn reorder_remove(inout m: Mon, idx: u64) {
+    let n = m.reorder.len() / REORDER_STRIDE;
+    let last = wrapping_sub(n, 1);
+    if idx != last {
+        let dst = wrapping_mul(idx, REORDER_STRIDE);
+        let src = wrapping_mul(last, REORDER_STRIDE);
+        for k in 0..REORDER_STRIDE {
+            let v = sw(in m.reorder, add(src, k));
+            setw(inout m.reorder, add(dst, k), v);
+        }
+    }
+    m.reorder.truncate(wrapping_mul(last, REORDER_STRIDE));
+}
+
+pub fn mon_ep_pre_recv(inout m: Mon, in from_name: Str) -> EpPreRecvOut {
+    let peer = mon_role_id(in m, in from_name);
+    if peer == none() {
+        m.err_a.clear();
+        m.err_a.extend(in from_name.as_bytes());
+        return EpPreRecvOut {
+            status: EpPreRecvStatus::UnknownRole,
+            peer: 0,
+            slot: 0
+        };
+    }
+    let want = sw(in m.recv_seq, peer);
+    let idx = reorder_find(in m, peer, want);
+    if idx == none() {
+        return EpPreRecvOut {
+            status: EpPreRecvStatus::NeedTransport,
+            peer: peer,
+            slot: 0
+        };
+    }
+    let base = wrapping_mul(idx, REORDER_STRIDE);
+    let slot = sw(in m.reorder, add(base, 2));
+    let lsym = sw(in m.reorder, add(base, 3));
+    let psym = sw(in m.reorder, add(base, 4));
+    reorder_remove(inout m, idx);
+    setw(inout m.recv_seq, peer, inc(want));
+    if step_syms(inout m, false, peer, lsym, psym) != StepErr::Ok {
+        return EpPreRecvOut {
+            status: EpPreRecvStatus::ProtocolViolation,
+            peer: peer,
+            slot: slot
+        };
+    }
+    EpPreRecvOut {
+        status: EpPreRecvStatus::Hit,
+        peer: peer,
+        slot: slot
+    }
+}
+
+pub fn mon_ep_on_frame(
+    inout m: Mon,
+    chan: u64,
+    me: u64,
+    exp_from: u64,
+    f_chan: u64,
+    f_from: u64,
+    f_to: u64,
+    f_seq: u64,
+    in f_label: Str,
+    in f_pty: Str,
+    next_slot: u64
+) -> u64 {
+    if f_chan != chan || f_to != me || f_from != exp_from {
+        return EpFrameStatus::Misrouted;
+    }
+    let want = sw(in m.recv_seq, exp_from);
+    if f_seq < want || reorder_find(in m, exp_from, f_seq) != none() {
+        return EpFrameStatus::Duplicate;
+    }
+    if wrapping_sub(f_seq, want) > REORDER_LIMIT {
+        let mut ea = ChunkSeq::new[u8]();
+        write_expected(in m, inout ea);
+        m.err_a = ea;
+        m.err_b.clear();
+        push_str_to(inout m.err_b, "frame sequence ");
+        push_u64_to(inout m.err_b, f_seq);
+        push_str_to(inout m.err_b, " far ahead of ");
+        push_u64_to(inout m.err_b, want);
+        return EpFrameStatus::ProtocolViolation;
+    }
+    if f_seq == want {
+        setw(inout m.recv_seq, exp_from, inc(want));
+        if step_slice(inout m, false, exp_from, in f_label.as_bytes(), in f_pty.as_bytes())
+            != StepErr::Ok {
+            return EpFrameStatus::ProtocolViolation;
+        }
+        return EpFrameStatus::AcceptedNow;
+    }
+    let lsym = m_intern(inout m, in f_label.as_bytes());
+    let psym = m_intern(inout m, in f_pty.as_bytes());
+    m.reorder.push(exp_from);
+    m.reorder.push(f_seq);
+    m.reorder.push(next_slot);
+    m.reorder.push(lsym);
+    m.reorder.push(psym);
+    EpFrameStatus::Buffered
+}
+
+// ---------------------------------------------------------------------------
+// Shared monitor step helper on `C` for Raft's RawSession monitors
+
+pub fn c_mon_step(inout c: C, cur: u64, send: bool, peer: u64, lsym: u64, psym: u64) -> u64 {
+    let tag = lt(in c, cur);
+    let mut found_next = none();
+    if send && tag == LTag::Send {
+        if la(in c, cur) == peer && lb(in c, cur) == lsym && lc(in c, cur) == psym {
+            found_next = ld(in c, cur);
+        }
+    } else if !send && tag == LTag::Recv {
+        if la(in c, cur) == peer && lb(in c, cur) == lsym && lc(in c, cur) == psym {
+            found_next = ld(in c, cur);
+        }
+    } else if (send && tag == LTag::Select) || (!send && tag == LTag::Offer) {
+        if la(in c, cur) == peer {
+            let n = lkn(in c, cur);
+            for i in 0..n {
+                if lbr(in c, cur, i, Br::Label) == lsym && lbr(in c, cur, i, Br::Payload) == psym {
+                    found_next = lbr(in c, cur, i, Br::Next);
+                    break;
+                }
+            }
+        }
+    }
+    if found_next != none() {
+        unfold(inout c, found_next)
+    } else {
+        none()
+    }
+}
+
+pub fn c_mon_action(inout c: C, cur: u64, asym: u64) -> u64 {
+    if lt(in c, cur) == LTag::Action && la(in c, cur) == asym {
+        let nx = lb(in c, cur);
+        unfold(inout c, nx)
+    } else {
+        none()
+    }
+}

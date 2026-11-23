@@ -39,8 +39,8 @@ fn backend() -> &'static Entry {
 fn imports() -> Imports {
     let (triple, abi) = vesper::packages::vsys_target(None).expect("host target");
     let mut imports = Imports::new();
-    for lib in ["env", "fs"] {
-        let path = format!("packages/vesper-std/{lib}/{lib}.vsys");
+    for lib in ["env/env-wasip2", "fs/fs"] {
+        let path = format!("packages/vesper-std/{lib}.vsys");
         let text = std::fs::read_to_string(&path).expect("read .vsys");
         let text = text.replace("@TARGET@", triple).replace("@ABI@", abi);
         imports.add(&text, Handler::Direct).expect("import");
@@ -455,6 +455,51 @@ fn too_many_preopens_fail_every_path() {
     assert_eq!(got, 11 | (95 << 32));
     assert!(!root.join("p16/x.txt").exists());
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn env_package_selects_wasi_arguments() {
+    let pkg = fresh("wasi-env");
+    std::fs::create_dir(pkg.join("src")).unwrap();
+    let env = std::fs::canonicalize("packages/vesper-std/env").unwrap();
+    std::fs::write(
+        pkg.join("Loom.toml"),
+        format!(
+            r#"[package]
+name = "@wasm-seed/env-main"
+version = "0.1.0"
+edition = "2026"
+capability_ceiling = ["Alloc", "Fail", "Ffi[StdEnv]"]
+
+[dependencies]
+"@vesper-std/env" = {{ version = "^0.1", path = {env:?} }}
+"#
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        pkg.join("src/main.ves"),
+        "use @vesper-std/env::{arg_count};\nfn main() -> u64 eff [Ffi[StdEnv]] { arg_count() }",
+    )
+    .unwrap();
+    let assembled =
+        vesper::packages::load_for_target(&pkg, Some(vesper::wasm_backend::TARGET), false).unwrap();
+    assert!(
+        assembled.ok(),
+        "{:?} {:?}",
+        assembled.diagnostics,
+        assembled.manifest_errors
+    );
+    let imports = assembled.imports(None).unwrap();
+    let checked = vesper::ffi_lowering::check_module(&assembled.module, &imports)
+        .unwrap_or_else(|e| panic!("{e}: {:?}", e.diagnostics));
+    let component = port(&checked, &options(true)).unwrap();
+    let ctx = Ctx {
+        args: vec!["seed", "input"],
+        ..Ctx::default()
+    };
+    assert_eq!(run(&component, &ctx).unwrap(), 2);
+    std::fs::remove_dir_all(pkg).unwrap();
 }
 
 #[test]
