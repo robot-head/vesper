@@ -1,7 +1,5 @@
 //! The unified 64-bit choice tape and its shrink key.
 
-#[cfg(not(vesper_port))]
-use std::cmp::Ordering;
 use std::fmt;
 
 /// Upper bound on the number of choices one tape (or one run) may hold.
@@ -45,9 +43,8 @@ impl ShrinkKey {
             }
         }
         #[cfg(not(vesper_port))]
-        Self {
-            len: values.len(),
-            sum: values.iter().map(|&v| u128::from(v)).sum(),
+        {
+            crate::engine::tape::key_of(values)
         }
     }
 
@@ -58,10 +55,8 @@ impl ShrinkKey {
             crate::binding::key_smaller(&self.port(), &other.port())
         }
         #[cfg(not(vesper_port))]
-        match self.len.cmp(&other.len) {
-            Ordering::Less => true,
-            Ordering::Equal => self.sum < other.sum,
-            Ordering::Greater => false,
+        {
+            crate::engine::tape::key_smaller_than(self, other)
         }
     }
 
@@ -127,18 +122,9 @@ impl ChoiceTape {
                 .expect("the tape text format is ASCII")
         }
         #[cfg(not(vesper_port))]
-        self.to_text_rust()
-    }
-
-    #[cfg(not(vesper_port))]
-    fn to_text_rust(&self) -> String {
-        let mut out = String::with_capacity(TAPE_HEADER.len() + 1 + self.values.len() * 17);
-        out.push_str(TAPE_HEADER);
-        out.push('\n');
-        for value in &self.values {
-            out.push_str(&format!("{value:x}\n"));
+        {
+            crate::engine::tape::to_text(&self.values)
         }
-        out
     }
 
     /// Parse the text format. Blank lines are ignored; every other line must
@@ -166,48 +152,8 @@ impl ChoiceTape {
             }
         }
         #[cfg(not(vesper_port))]
-        Self::from_text_rust(text)
-    }
-
-    #[cfg(not(vesper_port))]
-    fn from_text_rust(text: &str) -> Result<Self, TapeError> {
-        let mut lines = text.lines();
-        let header = loop {
-            match lines.next() {
-                None => return Err(TapeError::MissingHeader),
-                Some(line) if line.trim().is_empty() => continue,
-                Some(line) => break line.trim(),
-            }
-        };
-        if header != TAPE_HEADER {
-            let shown: String = header.chars().take(64).collect();
-            return Err(TapeError::UnknownHeader(shown));
+        {
+            crate::engine::tape::from_text(text)
         }
-        let mut values = Vec::new();
-        for line in lines {
-            let token = line.trim();
-            if token.is_empty() {
-                continue;
-            }
-            if values.len() == MAX_TAPE_LEN {
-                return Err(TapeError::TooLong {
-                    limit: MAX_TAPE_LEN,
-                });
-            }
-            let index = values.len();
-            // `from_str_radix` would accept a leading `+`; check digits first.
-            let valid = !token.is_empty()
-                && token.len() <= 16
-                && token
-                    .bytes()
-                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
-            if !valid {
-                return Err(TapeError::BadValue { index });
-            }
-            let value =
-                u64::from_str_radix(token, 16).map_err(|_| TapeError::BadValue { index })?;
-            values.push(value);
-        }
-        Ok(Self { values })
     }
 }

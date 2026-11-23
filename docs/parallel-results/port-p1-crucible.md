@@ -315,3 +315,27 @@ fuzzer are 1.7x to 2.8x slower), so the Rust build stays the default.
 `arena.rs` waits until `VirtualArena` can sit on the Strata port. `sim.rs`
 and the `explore.rs` machine stay Rust adapters, for the reasons in the
 table above.
+
+## SH6 lane 12 flip (`vesper-crucible`)
+
+All 6 ported areas (`rng`, `tape`, `source`, `shrink`, `fuzz`, `dpor`) now pass
+the Rule 8 `< 1.50x` gate on `RUSTFLAGS="-C target-cpu=native"` (`n = 30`
+epochs, `20` ops/epoch, `vesper-crucible` vs `vesper-crucible-seed`):
+
+| Workload | Rust ns/run | Port ns/run | Port/Rust (median) | Sample median regression |
+|---|---:|---:|---:|---|
+| `draws` | 89,132 | 105,872 | 1.16x | +12%..+16% |
+| `tape-text` | 616,762 | 481,275 | 0.79x | -21%..-21% |
+| `shrink` | 1,961,885 | 2,866,682 | 1.47x | +46%..+47% |
+| `fuzz` | 426,248 | 423,540 | 0.99x | -1%..-1% |
+| `dpor` | 208,198 | 117,768 | 0.55x | -45%..-45% |
+| `cached` | 256,335 | 163,285 | 0.63x | -37%..-37% |
+
+- Differential check (`tests/port_differential.rs`): `0` differences across
+  `4,395` cases (`SplitMix64`, `Source`, `ChoiceTape`/`ShrinkKey`, `shrink`,
+  `fuzz`, `explore_cached`/`Dpor`).
+- Frozen Rust engine moved from `crates/vesper-crucible/src/` into
+  `crates/vesper-crucible/seed/src/engine/` for `vesper-crucible-seed`
+  (compiler closure), leaving `crates/vesper-crucible/src/` with only the
+  `#[cfg(vesper_port)]` port bindings and Rust adapters (`arena.rs`, `exec.rs`,
+  `explore.rs`, `refute.rs`, `sim.rs`).

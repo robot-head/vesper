@@ -308,7 +308,7 @@ fn bucket(hits: u32) -> u8 {
 
 /// How a source obtains choices beyond what it has recorded.
 #[derive(Clone, Debug)]
-enum Extend {
+pub(crate) enum Extend {
     /// Strict replay: running past the tape is `Invalid::Overrun`.
     Strict,
     /// Prefix replay, then fresh pseudo-random choices.
@@ -318,7 +318,7 @@ enum Extend {
 /// Generation-time distribution of one draw. Only affects choices drawn past
 /// the tape prefix; replayed values are taken from the tape as they are.
 #[derive(Clone, Copy, Debug)]
-enum Gen {
+pub(crate) enum Gen {
     Uniform,
     /// 1 with probability `n / 1024`.
     Bernoulli(u64),
@@ -457,21 +457,14 @@ impl Source {
 
     #[cfg(not(vesper_port))]
     fn next_value(&mut self, max: u64, generation: Gen) -> Result<u64, Invalid> {
-        let pos = self.realized.len();
-        if pos >= self.max_draws {
-            return Err(Invalid::Overrun);
-        }
-        let value = match self.prefix.get(pos) {
-            Some(&v) => v.min(max),
-            None => match &mut self.extend {
-                Extend::Strict => return Err(Invalid::Overrun),
-                Extend::Random(rng) => match generation {
-                    Gen::Uniform => rng.below_inclusive(max),
-                    Gen::Bernoulli(n) => u64::from(rng.chance(n)).min(max),
-                },
-            },
-        };
-        Ok(value)
+        crate::engine::source::next_value(
+            &self.prefix,
+            &mut self.extend,
+            self.realized.len(),
+            self.max_draws,
+            max,
+            generation,
+        )
     }
 
     /// FuzzSource::draw_u64_bounded: an integer in `0..=max_inclusive`.
@@ -576,7 +569,7 @@ impl Source {
         }
         #[cfg(not(vesper_port))]
         {
-            self.draw_bytes_rust(max_len)
+            crate::engine::source::draw_bytes(self, max_len, BYTES_AVERAGE)
         }
     }
 
@@ -618,15 +611,6 @@ impl Source {
             0 => Ok(out),
             _ => Err(Invalid::Overrun),
         }
-    }
-
-    #[cfg(not(vesper_port))]
-    fn draw_bytes_rust(&mut self, max_len: usize) -> Result<Vec<u8>, Invalid> {
-        let mut out = Vec::new();
-        while self.more(out.len(), max_len, BYTES_AVERAGE)? {
-            out.push(self.draw_u8()?);
-        }
-        Ok(out)
     }
 
     /// FuzzSource::assume_guard: reject this run unless `cond`.

@@ -538,42 +538,6 @@ pub(crate) enum Next {
     Timer,
 }
 
-#[cfg(not(vesper_port))]
-/// Dependence of two transitions: they may not commute, or one may enable
-/// or disable the other. A timer is dependent with everything: it is
-/// disabled by any ready fiber and by an earlier deadline, and it changes
-/// the time steps observe.
-pub(crate) fn dependent(a: (Proc, &Next), b: (Proc, &Next)) -> bool {
-    match (a, b) {
-        ((Proc::Timer { .. }, _), _) | (_, (Proc::Timer { .. }, _)) => true,
-        ((Proc::Task(i), Next::Task(fa)), (Proc::Task(j), Next::Task(fb))) => {
-            i == j
-                || fa.conflicts(fb)
-                || fa.cancels.binary_search(&j).is_ok()
-                || fb.cancels.binary_search(&i).is_ok()
-        }
-        ((Proc::Task(i), _), (Proc::Io { task, .. }, _))
-        | ((Proc::Io { task, .. }, _), (Proc::Task(i), _)) => i == task,
-        ((Proc::Io { task: a, .. }, _), (Proc::Io { task: b, .. }, _)) => a == b,
-        _ => true,
-    }
-}
-
-#[cfg(not(vesper_port))]
-/// Whether two transitions can ever be enabled in the same state. A fiber
-/// step and a timer cannot (a timer fires only when every fiber is parked); a
-/// fiber's step and the delivery of its own pending I/O cannot (it is
-/// parked until the delivery).
-pub(crate) fn may_co_enable(a: Proc, b: Proc) -> bool {
-    match (a, b) {
-        (Proc::Task(_), Proc::Timer { .. }) | (Proc::Timer { .. }, Proc::Task(_)) => false,
-        (Proc::Task(i), Proc::Io { task, .. }) | (Proc::Io { task, .. }, Proc::Task(i)) => {
-            i != task
-        }
-        _ => true,
-    }
-}
-
 /// The machine: a SimPulse simulator, the world, and the fibers.
 pub(crate) struct Machine<W, F> {
     sim: Simulator<usize>,
