@@ -427,6 +427,13 @@ fn sum_hoisted(in xs: ChunkSeq[u64]) -> u64 eff [Fail[RuntimeError]] {
     }
     acc
 }
+fn sum_guarded(in xs: ChunkSeq[u64], n: u64) -> u64 eff [Fail[RuntimeError]] {
+    let mut acc: u64 = 0;
+    for i in 0..n {
+        acc = wrapping_add(acc, xs[i]);
+    }
+    acc
+}
 fn sum_with_ref(in hh: Holder) -> u64 {
     let mut acc: u64 = 0;
     for i in 0..4 {
@@ -440,7 +447,7 @@ fn sum_with_ref(in hh: Holder) -> u64 {
 fn run() -> u64 eff [Fail[RuntimeError]] {
     let mut xs = ChunkSeq::new[u64]();
     for i in 0..12 { xs.push(i); }
-    let h = sum_hoisted(in xs);
+    let h = wrapping_add(sum_hoisted(in xs), sum_guarded(in xs, 8));
     let holder = Holder { data: xs };
     let hf = sum_with_ref(in holder);
     let mut p = Pair { s: String::new(), seq: ChunkSeq::new[u8]() };
