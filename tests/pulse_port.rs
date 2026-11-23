@@ -271,3 +271,24 @@ pub fn check_epoll() -> u64 eff [Ffi[PulseSys]] {
         100
     );
 }
+
+#[cfg(windows)]
+#[test]
+fn windows_iocp_roundtrip() {
+    let src = r#"
+use @vesper/pulse::iocp_roundtrip_check;
+
+pub fn check_iocp() -> u64 eff [Ffi[PulseSys]] {
+    iocp_roundtrip_check()
+}
+"#;
+    let checked = check_pulse_driver(src);
+    assert_eq!(
+        agree(
+            &checked,
+            "check_iocp",
+            &[std_io_support::Mode::Jit, std_io_support::Mode::JitNoOpt],
+        ),
+        100
+    );
+}
