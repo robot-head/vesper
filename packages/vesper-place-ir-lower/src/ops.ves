@@ -985,7 +985,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 matched: true,
                 label: sym_str(inout c, "TryGet"),
                 has_recv: true,
-                recv_pass: P_INOUT,
+                recv_pass: TyPass::Inout,
                 arg_mode: 0
             };
         }
@@ -1141,7 +1141,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 matched: true,
                 label: sym_str(inout c, "TryGet"),
                 has_recv: true,
-                recv_pass: P_INOUT,
+                recv_pass: TyPass::Inout,
                 arg_mode: 0
             };
         }
