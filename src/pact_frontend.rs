@@ -846,6 +846,7 @@ impl Frontend {
                 }
             }
         }
+        fe.bindings = fe.lower_bindings(identity, true);
         fe
     }
 
