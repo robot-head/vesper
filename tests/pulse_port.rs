@@ -313,3 +313,152 @@ pub fn check_kqueue() -> u64 eff [Ffi[PulseSys]] {
         100
     );
 }
+
+#[test]
+fn driver_kind_from_name_matches_rust() {
+    use vesper_pulse::driver::DriverKind as RustDriverKind;
+
+    let cases = [
+        ("io_uring", Some(RustDriverKind::IoUring)),
+        ("  IO-URING \n", Some(RustDriverKind::IoUring)),
+        ("uring", Some(RustDriverKind::IoUring)),
+        ("EPOLL", Some(RustDriverKind::Epoll)),
+        ("kqueue", Some(RustDriverKind::Kqueue)),
+        ("iocp", Some(RustDriverKind::Iocp)),
+        ("unknown", None),
+        ("", None),
+    ];
+    for (i, (input, expected)) in cases.iter().enumerate() {
+        assert_eq!(RustDriverKind::from_name(input), *expected, "case {i}");
+    }
+
+    let src = r#"
+use @vesper/pulse::{DriverKind, driver_kind_from_name, driver_kind_id};
+
+fn encode(opt: Option[DriverKind]) -> u64 {
+    match opt {
+        Option::Some(k) => wrapping_add(widen_u64(driver_kind_id(k)), 1),
+        Option::None => 0,
+    }
+}
+
+pub fn check_names() -> u64 {
+    let mut acc: u64 = 0;
+    acc = wrapping_add(acc, encode(driver_kind_from_name(in "io_uring".as_bytes())));
+    acc = wrapping_add(acc, wrapping_mul(encode(driver_kind_from_name(in "  IO-URING \n".as_bytes())), 10));
+    acc = wrapping_add(acc, wrapping_mul(encode(driver_kind_from_name(in "uring".as_bytes())), 100));
+    acc = wrapping_add(acc, wrapping_mul(encode(driver_kind_from_name(in "EPOLL".as_bytes())), 1000));
+    acc = wrapping_add(acc, wrapping_mul(encode(driver_kind_from_name(in "kqueue".as_bytes())), 10000));
+    acc = wrapping_add(acc, wrapping_mul(encode(driver_kind_from_name(in "iocp".as_bytes())), 100000));
+    acc = wrapping_add(acc, wrapping_mul(encode(driver_kind_from_name(in "unknown".as_bytes())), 1000000));
+    acc = wrapping_add(acc, wrapping_mul(encode(driver_kind_from_name(in "".as_bytes())), 10000000));
+    acc
+}
+"#;
+    let checked = check_pulse_driver(src);
+    let expected = 1 + 10 + 100 + 2 * 1000 + 3 * 10000 + 4 * 100000;
+    assert_eq!(agree(&checked, "check_names", &MODES), expected);
+}
+
+#[test]
+fn readiness_queue_protocol_invariants() {
+    let src = r#"
+use @vesper/pulse::{
+    DriverError, DriverKind, Operation, driver_kind_id, readiness_queue_cancel_all,
+    readiness_queue_complete, readiness_queue_has_ready, readiness_queue_in_flight,
+    readiness_queue_kind, readiness_queue_mark_cancelled, readiness_queue_new,
+    readiness_queue_pending, readiness_queue_submit, readiness_queue_take_ready,
+};
+
+fn err_code(e: DriverError) -> u64 {
+    match e {
+        DriverError::QueueFull => 1,
+        DriverError::UnknownRequest => 2,
+        DriverError::InvalidCapacity => 3,
+    }
+}
+
+pub fn check_queue() -> u64 {
+    let bad_cap = handle Fail[DriverError] in {
+        let _q = readiness_queue_new(DriverKind::Epoll, 0);
+        0
+    } with {
+        return x => x,
+        raise(e, _k) => err_code(e),
+    };
+    handle Fail[DriverError] in {
+        let mut q = readiness_queue_new(DriverKind::Epoll, 2);
+        let k = widen_u64(driver_kind_id(readiness_queue_kind(in q)));
+        let r1 = readiness_queue_submit(inout q, 3, Operation::Read, 0, 64, 11);
+        let r2 = readiness_queue_submit(inout q, 4, Operation::Write, 8, 32, 22);
+        let full = handle Fail[DriverError] in {
+            let _r3 = readiness_queue_submit(inout q, 5, Operation::Read, 0, 16, 33);
+            0
+        } with {
+            return x => x,
+            raise(e, _k) => err_code(e),
+        };
+        let _c1 = readiness_queue_mark_cancelled(inout q, r1);
+        readiness_queue_complete(inout q, r1, false, 0, 125);
+        // `r1` is in `ready`, `r2` is in `waiting`, so `pending` == 2 (still full).
+        let still_full = handle Fail[DriverError] in {
+            let _r3 = readiness_queue_submit(inout q, 5, Operation::Read, 0, 16, 33);
+            0
+        } with {
+            return x => x,
+            raise(e, _k) => err_code(e),
+        };
+        let inf = readiness_queue_in_flight(in q);
+        let pend = readiness_queue_pending(in q);
+        let has_r = if readiness_queue_has_ready(in q) { 1 } else { 0 };
+        let drained = readiness_queue_take_ready(inout q);
+        let c_all = readiness_queue_cancel_all(inout q);
+        readiness_queue_complete(inout q, r2, true, 32, 0);
+        let drained2 = readiness_queue_take_ready(inout q);
+        let unk = handle Fail[DriverError] in {
+            readiness_queue_complete(inout q, r2, true, 0, 0);
+            0
+        } with {
+            return x => x,
+            raise(e, _k) => err_code(e),
+        };
+        let s1 = match drained.try_get(0) {
+            Option::Some(v) => if v.cancelled && !v.ok && v.id.bits == r1.bits { 1 } else { 0 },
+            Option::None => 0,
+        };
+        let s2 = match drained2.try_get(0) {
+            Option::Some(v) => if v.cancelled && v.ok && v.bytes == 32 { 1 } else { 0 },
+            Option::None => 0,
+        };
+        let mut acc = bad_cap;
+        acc = wrapping_add(acc, wrapping_mul(k, 10));
+        acc = wrapping_add(acc, wrapping_mul(full, 100));
+        acc = wrapping_add(acc, wrapping_mul(still_full, 1000));
+        acc = wrapping_add(acc, wrapping_mul(inf, 10000));
+        acc = wrapping_add(acc, wrapping_mul(pend, 100000));
+        acc = wrapping_add(acc, wrapping_mul(has_r, 1000000));
+        acc = wrapping_add(acc, wrapping_mul(c_all, 10000000));
+        acc = wrapping_add(acc, wrapping_mul(unk, 100000000));
+        acc = wrapping_add(acc, wrapping_mul(s1, 1000000000));
+        acc = wrapping_add(acc, wrapping_mul(s2, 10000000000));
+        acc
+    } with {
+        return x => x,
+        raise(_e, _k) => 0,
+    }
+}
+"#;
+    let checked = check_pulse_driver(src);
+    let expected = 3
+        + 10
+        + 100
+        + 1000
+        + 10000
+        + 2 * 100000
+        + 1000000
+        + 10000000
+        + 2 * 100000000
+        + 1000000000
+        + 10000000000;
+    assert_eq!(agree(&checked, "check_queue", &MODES), expected);
+}
