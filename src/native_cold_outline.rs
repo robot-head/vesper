@@ -210,6 +210,7 @@ fn is_fast_return_arm(
         for inst in func.layout.block_insts(b) {
             let data = &func.dfg.insts[inst];
             if data.opcode().is_call()
+                || data.opcode().can_store()
                 || matches!(
                     data.opcode(),
                     Opcode::Udiv | Opcode::Sdiv | Opcode::Urem | Opcode::Srem
@@ -236,9 +237,7 @@ fn is_fast_return_arm(
                     }
                     queue.push_back(target);
                 }
-            } else if data.opcode().is_terminator()
-                && !matches!(data.opcode(), Opcode::Return | Opcode::Trap)
-            {
+            } else if data.opcode().is_terminator() && !matches!(data.opcode(), Opcode::Return) {
                 return None;
             }
         }

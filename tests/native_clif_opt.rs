@@ -419,3 +419,22 @@ fn main() -> u64 {
     );
     assert_eq!(agree(source), "142");
 }
+
+#[test]
+fn sign_extend_round_trips_fold() {
+    let source = "fn sum_signed(x: u8) -> i64 {
+    let a = wrapping_i8(x);
+    let b = wrapping_i8(widen_i64(a));
+    widen_i64(b)
+}
+fn main() -> i64 {
+    wrapping_add(sum_signed(250), sum_signed(7))
+}";
+    let c = accepted(source);
+    let (_, clif) = native::object(&c.world, "main").unwrap();
+    assert!(
+        clif.matches("sextend").count() <= 2,
+        "expected sextend(ireduce(sextend(x))) round-trips to fold:\n{clif}"
+    );
+    assert_eq!(agree(source), "1");
+}
