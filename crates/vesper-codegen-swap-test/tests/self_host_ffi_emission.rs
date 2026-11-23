@@ -170,6 +170,7 @@ const FORMS_VSYS: &str = r#"sys library Forms (
     wire struct Words { x: u64, y: u64 }
     linear extern type Conn;
     affine extern type Buf;
+    linear extern mapping Ring32[u32];
     fn forms_open() -> ForeignVal[Option[Conn]];
     fn forms_must() -> ForeignVal[NonNull[Conn]];
     fn forms_close(sink c: Conn) -> ForeignVal[Unit];
@@ -197,6 +198,8 @@ const FORMS_VSYS: &str = r#"sys library Forms (
     fn forms_f32(x: f32) -> ForeignVal[f32];
     fn forms_cstr_ret() -> ForeignVal[Option[CStr]];
     fn forms_argv(nocapture in args: CStrList) -> ForeignVal[i32];
+    fn forms_map32(n: usize) -> ForeignVal[Option[Ring32[n]]];
+    fn forms_unmap32(sink r: Ring32) -> ForeignVal[Unit];
 }"#;
 
 const FORMS_SOURCE: &str = r#"
@@ -323,6 +326,15 @@ fn cstr_ret_and_argv() -> u64 eff [Ffi[Forms]] {
         None => 0,
     };
     wrapping_add(widen_u64(wrapping_u32(n)), len)
+}
+fn multibyte_mapping() -> u64 eff [Ffi[Forms]] {
+    match Forms::forms_map32(Forms::forms_usize(4)) {
+        Some(r) => {
+            Forms::forms_unmap32(r);
+            1
+        },
+        None => 0,
+    }
 }
 "#;
 

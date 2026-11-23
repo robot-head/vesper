@@ -1,0 +1,64 @@
+[package]
+name = "vesper-loom-cas-seed"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Frozen Rust seed copy of vesper-loom-cas for the compiler's own dependency closure"
+publish = false
+autotests = false
+autoexamples = false
+autobenches = false
+build = false
+
+# The seed-copy rule (port wave P1 lane 2, #899; this crate's port is SH6
+# lane 16, #1411): the compiler and its tools link this package, the shared
+# API in ../src over the frozen Rust CAS engine in src/engine, under the
+# library name `vesper_loom_cas`. Crates inside `cargo tree -p vesper -e
+# normal,build` depend on it with
+# `vesper-loom-cas = { path = ".../seed", package = "vesper-loom-cas-seed" }`;
+# every other crate uses the port-backed package `vesper-loom-cas`. The
+# Rust code takes bug fixes only until self-hosting Stage 2.
+[lib]
+name = "vesper_loom_cas"
+path = "src/lib.rs"
+
+[dependencies]
+blake3 = "1.8"
+reflink-copy = "0.1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[[test]]
+name = "codec_differential"
+path = "../tests/codec_differential.rs"
+
+[[test]]
+name = "lower_table"
+path = "../tests/lower_table.rs"
+
+[[test]]
+name = "store"
+path = "../tests/store.rs"
+
+[[test]]
+name = "transfer_acceptance"
+path = "../tests/transfer_acceptance.rs"
+
+[[test]]
+name = "transfer_export"
+path = "../tests/transfer_export.rs"
+
+[[test]]
+name = "transfer_import"
+path = "../tests/transfer_import.rs"
+
+[lints.rust]
+# cfg(vesper_port) is set only by the port-backed package's build script.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(vesper_port)"] }

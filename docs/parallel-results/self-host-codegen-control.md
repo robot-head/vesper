@@ -251,3 +251,10 @@ trait objects from Vesper through the lent builder and module:
 - Unhooked Rust regression suites (`cargo +1.100.0 test --locked -p vesper`): `dyn_box` (`13 passed, 1 ignored`), `dyn_effects` (`8 passed, 1 ignored`), `dyn_trait` (`16 passed, 1 ignored`), `native_fail_exit_drops` (`9 passed`), `trace_effects` (`20 passed`).
 - Pre-push checks: `D:\vesper.exe check packages/vesper-codegen-control-emit`, `D:\vesper.exe fmt --check packages/vesper-codegen-control-emit/src/lib.ves`, `rustfmt +1.100.0 --edition 2024 --check` on all changed `.rs` files, `python tools/bazel/sync_build_files.py --check`, and `cargo +1.100.0 clippy --locked` on `vesper` (`--lib` + tests) and `vesper-codegen-swap-test` (`--tests`) passed with `-D warnings`.
 - No Rust lowering was deleted (`Rule 8` awaits hybrid hook installation and full-family parity).
+
+## Part 4 (SH4 lane 10, #1284 / #1623 — `native_session` emission)
+
+Extended `codegen_swap::control` (`ops 38..=42`: `SESSION_PARK_PREP`, `SESSION_PARK_EMIT`, `SESSION_DATA_OFFSET`, `SESSION_EXIT`, `SESSION_VIOLATION`) and `@vesper/codegen-control-emit` (`control_hook`) to emit the Cranelift IR for `native_session.rs` (`session_park`, `session_fail`, `session_return`, and `emit_violation`), keeping `copy_bytes`, `store_constructor`, and `store` in Rust.
+
+- `CODEGEN_SWAP_STEP=1 cargo +1.100.0 test --locked --release -p vesper-codegen-swap-test --test self_host_codegen_control -- --nocapture`: `3 passed, 0 failed` (`the_session_entries_match_the_rust_lowering`: `5` session programs `ticket_tally`, `lease_cleanup`, `typed_failures`, `session_f64`, `session_f32` across `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu` = **0** CLIF diffs, **0** object byte diffs, ops `38..=42` all exercised; plus `312` worlds / `966` functions / `312` runs = **0** diffs).
+- Rust lines deleted: `0` (hooked path only; default path unchanged; no root `Cargo.toml` or `crates/vesper-hybrid` edits).

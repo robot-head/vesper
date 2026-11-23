@@ -494,14 +494,18 @@ pub fn load_for_target(
     target: Option<&str>,
     include_tests: bool,
 ) -> Result<Assembled, String> {
-    load_with_parser(
-        dir,
-        None,
-        None,
-        include_tests,
-        None,
-        target == Some(crate::wasm_backend::TARGET),
-    )
+    let wasi = target == Some(crate::wasm_backend::TARGET);
+    let os = if wasi {
+        "wasip2"
+    } else if let Some(triple) = target {
+        VSYS_TARGETS
+            .iter()
+            .find(|v| v.triple == triple)
+            .map_or(std::env::consts::OS, |v| v.os)
+    } else {
+        std::env::consts::OS
+    };
+    load_with_parser(dir, None, None, include_tests, None, wasi, os)
 }
 
 type RootParser<'a> = dyn FnMut(&Path) -> Result<(String, crate::parser::Parse), String> + 'a;
@@ -510,7 +514,15 @@ type RootParser<'a> = dyn FnMut(&Path) -> Result<(String, crate::parser::Parse),
 /// The callback may append synthetic source, but its AST must use offsets
 /// into the resulting text. Dependencies always use the ordinary parser.
 pub fn load_with_root_parser(dir: &Path, parse: &mut RootParser<'_>) -> Result<Assembled, String> {
-    load_with_parser(dir, Some(parse), None, false, None, false)
+    load_with_parser(
+        dir,
+        Some(parse),
+        None,
+        false,
+        None,
+        false,
+        std::env::consts::OS,
+    )
 }
 
 /// Assemble tests against one changed dependency source held in memory.
@@ -519,7 +531,15 @@ pub fn load_with_dependency_replacement(
     parse: &mut RootParser<'_>,
     replacement: (&Path, &str),
 ) -> Result<Assembled, String> {
-    load_with_parser(dir, Some(parse), Some(replacement), false, None, false)
+    load_with_parser(
+        dir,
+        Some(parse),
+        Some(replacement),
+        false,
+        None,
+        false,
+        std::env::consts::OS,
+    )
 }
 
 type PreparedParser<'a> =
@@ -531,7 +551,15 @@ pub fn load_test_sources(
     replacement: Option<(&Path, &str)>,
     prepare: &mut PreparedParser<'_>,
 ) -> Result<Assembled, String> {
-    load_with_parser(dir, None, replacement, true, Some(prepare), false)
+    load_with_parser(
+        dir,
+        None,
+        replacement,
+        true,
+        Some(prepare),
+        false,
+        std::env::consts::OS,
+    )
 }
 
 fn read_source(path: &Path) -> Result<String, String> {
@@ -545,9 +573,11 @@ fn load_with_parser(
     root_tests: bool,
     prepare: Option<&mut PreparedParser<'_>>,
     wasi: bool,
+    os: &str,
 ) -> Result<Assembled, String> {
     let mut loader = Loader {
         wasi,
+        os,
         replacement,
         ..Loader::default()
     };
@@ -601,6 +631,7 @@ struct Loader<'a> {
     manifest_errors: Vec<(String, Diagnostic)>,
     vsys: Vec<PackageVsys>,
     objects: Vec<PackageObject>,
+    os: &'a str,
     replacement: Option<(&'a Path, &'a str)>,
 }
 
@@ -775,8 +806,11 @@ impl Loader<'_> {
         // dependencies' (its root module is not file 0 when another source
         // sorts first; see `Assembled::root_module`).
         let mut files = vec![];
+        let target_src = format!("src-{}", self.os);
         let source_dir = if self.wasi && dir.join("src-wasip2").is_dir() {
             "src-wasip2"
+        } else if !self.wasi && !self.os.is_empty() && dir.join(&target_src).is_dir() {
+            target_src.as_str()
         } else {
             "src"
         };

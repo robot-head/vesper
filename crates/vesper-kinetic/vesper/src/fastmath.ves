@@ -137,8 +137,8 @@ fn with_high(x: f64, hi: u32) -> f64 {
 }
 
 // 2^k for -1022 <= k <= 1023.
-fn pow2(k: i32) -> f64 {
-    from_bits_f64((wrapping_u64(wrapping_add(k, F64_EXP_BIAS)) << F64_MANT_BITS))
+fn pow2(k: i64) -> f64 {
+    from_bits_f64(wrapping_u64(wrapping_add(k, widen_i64(F64_EXP_BIAS))) << F64_MANT_BITS)
 }
 
 // Round to nearest, ties to even, for |x| < 2^51.
@@ -187,12 +187,14 @@ pub fn exp(x: f64) -> f64 {
     }
     let mut hi = x;
     let mut lo = 0.0;
-    let mut k: i32 = 0;
+    let mut k: i64 = 0;
     if !(ax <= 0.5 * ln2_hi()) {
-        let kf = rint(x * from_bits_f64(INV_LN2_BITS));
+        let shift = from_bits_f64(RINT_SHIFT_BITS);
+        let shifted = x * from_bits_f64(INV_LN2_BITS) + shift;
+        let kf = shifted - shift;
         hi = x - kf * ln2_hi();
         lo = kf * ln2_lo();
-        k = saturating_i32(kf);
+        k = wrapping_i64(wrapping_sub(to_bits_f64(shifted), RINT_SHIFT_BITS));
     }
     let r = hi - lo;
     let t = r * r;
@@ -217,14 +219,15 @@ pub fn exp(x: f64) -> f64 {
     let y = 1.0 - ((lo - (r * c) / (2.0 - c)) - hi);
     if k == 0 {
         y
-    } else if k >= POW2_NORMAL_MIN {
-        if k == POW2_OVERFLOW {
-            y * 2.0 * pow2(F64_EXP_BIAS)
+    } else if k >= widen_i64(POW2_NORMAL_MIN) {
+        if k == widen_i64(POW2_OVERFLOW) {
+            y * 2.0 * pow2(widen_i64(F64_EXP_BIAS))
         } else {
             y * pow2(k)
         }
     } else {
-        y * pow2(wrapping_add(k, POW2_SUBNORMAL_SPLIT)) * pow2(-POW2_SUBNORMAL_SPLIT)
+        let split = widen_i64(POW2_SUBNORMAL_SPLIT);
+        y * pow2(wrapping_add(k, split)) * pow2(widen_i64(-POW2_SUBNORMAL_SPLIT))
     }
 }
 
@@ -339,8 +342,10 @@ copy struct Reduced {
 }
 
 fn rem_pio2_medium(x: f64) -> Reduced {
-    let fnum = rint(x * from_bits_f64(INV_PIO2_BITS));
-    let n = saturating_i32(fnum);
+    let shift = from_bits_f64(RINT_SHIFT_BITS);
+    let shifted = x * from_bits_f64(INV_PIO2_BITS) + shift;
+    let fnum = shifted - shift;
+    let n = wrapping_i32(to_bits_f64(shifted) & 3);
     let mut r = x - fnum * from_bits_f64(PIO2_1_BITS);
     let mut w = fnum * from_bits_f64(PIO2_1T_BITS);
     let j = exp_of(x);
@@ -380,15 +385,12 @@ pub fn sin(x: f64) -> f64 {
     }
     let red = rem_pio2_medium(x);
     let q = red.n & 3;
-    if q == 0 {
+    let mag = if (q & 1) == 0 {
         k_sin(red.y0, red.y1, true)
-    } else if q == 1 {
-        k_cos(red.y0, red.y1)
-    } else if q == 2 {
-        -k_sin(red.y0, red.y1, true)
     } else {
-        -k_cos(red.y0, red.y1)
-    }
+        k_cos(red.y0, red.y1)
+    };
+    from_bits_f64(to_bits_f64(mag) ^ (wrapping_u64(q & 2) << 62))
 }
 
 pub fn cos(x: f64) -> f64 {
@@ -403,16 +405,13 @@ pub fn cos(x: f64) -> f64 {
         return k_cos(x, 0.0);
     }
     let red = rem_pio2_medium(x);
-    let q = red.n & 3;
-    if q == 0 {
-        k_cos(red.y0, red.y1)
-    } else if q == 1 {
-        -k_sin(red.y0, red.y1, true)
-    } else if q == 2 {
-        -k_cos(red.y0, red.y1)
-    } else {
+    let q = wrapping_add(red.n, 1) & 3;
+    let mag = if (q & 1) == 0 {
         k_sin(red.y0, red.y1, true)
-    }
+    } else {
+        k_cos(red.y0, red.y1)
+    };
+    from_bits_f64(to_bits_f64(mag) ^ (wrapping_u64(q & 2) << 62))
 }
 
 fn atan_hi(id: u64) -> f64 {
@@ -542,25 +541,18 @@ fn is_infinite(x: f64) -> bool {
 }
 
 pub fn atan2(y: f64, x: f64) -> f64 {
+    if is_nan(x) || is_nan(y) {
+        return x + y;
+    }
     let pi_o_4 = from_bits_f64(PI_O_4_BITS);
     let pi_o_2 = from_bits_f64(PI_O_2_BITS);
     let pi = from_bits_f64(PI_BITS);
     let pi_lo = from_bits_f64(PI_LO_BITS);
-    if is_nan(x) || is_nan(y) {
-        return x + y;
-    }
-    if x == 1.0 {
-        return atan(y);
-    }
-    let y_neg = sign_negative(y);
-    let x_neg = sign_negative(x);
-    let mut m: u64 = 0;
-    if y_neg {
-        m = m | 1;
-    }
-    if x_neg {
-        m = m | 2;
-    }
+    let yb = to_bits_f64(y);
+    let xb = to_bits_f64(x);
+    let y_neg = (yb >> 63) != 0;
+    let x_neg = (xb >> 63) != 0;
+    let mut m: u64 = (yb >> 63) | ((xb >> 62) & 2);
     if y == 0.0 {
         if m <= 1 {
             return y;

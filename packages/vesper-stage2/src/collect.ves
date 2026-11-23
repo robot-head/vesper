@@ -1,0 +1,549 @@
+// Stage 2 declaration collector: translates `@vesper/check-names-packages`
+// (`AssembledModule` `@vesper/ast::Ast`s) into `@vesper/check-data`
+// (`Names`, `Types`, `World`) and Stage 2 function signatures.
+
+use @vesper/ast::{
+    AdtNode,
+    Ast,
+    EffectDeclNode,
+    EffectNode,
+    EffectsNode,
+    FieldNode,
+    FnNode,
+    GenericNode,
+    ItemNode,
+    ParamNode,
+    TypeNode as AstTypeNode,
+    VariantNode,
+    list_at,
+    list_len,
+    none as ast_none
+};
+use @vesper/check-data::names::{
+    Names,
+    names_new
+};
+use @vesper/check-data::types::{
+    EffNode,
+    TyKind,
+    Types,
+    types_new
+};
+use @vesper/check-data::util::{
+    inc32,
+    n32,
+    u32_at,
+    w
+};
+use @vesper/check-data::world::{
+    Adt,
+    EffectRow,
+    Field,
+    Generic,
+    Known,
+    Variant,
+    World,
+    known_new,
+    set_by_symbol,
+    world_new
+};
+use @vesper/check-names-packages::{
+    AssembledModule
+};
+use @vesper-std/arena::{
+    idx_from_raw
+};
+use @vesper-std/intern::{
+    symbol_from_id
+};
+
+pub copy struct FnInfo {
+    name: u32,
+    fip: bool,
+    ga: u32,
+    gn: u32,
+    pa: u32,
+    pn: u32,
+    result: u32,
+    effects: u32,
+    mod_idx: u32,
+    body: u32,
+}
+
+pub copy struct ParamInfo {
+    name: u32,
+    pass: u8,
+    ty: u32,
+}
+
+pub struct CollectedProgram {
+    names: Names,
+    types: Types,
+    world: World,
+    fns: ChunkSeq[FnInfo],
+    params: ChunkSeq[ParamInfo],
+    fn_generics: ChunkSeq[Generic],
+}
+
+fn translate_sym(
+    in ast: Ast,
+    sym_id: u32,
+    inout names: Names,
+    inout cache: ChunkSeq[u32],
+    inout tmp: String
+) -> u32 {
+    if sym_id == ast_none() {
+        return ast_none();
+    }
+    let idx = w(sym_id);
+    loop {
+        if cache.len() > idx {
+            break;
+        }
+        cache.push(ast_none());
+    }
+    let cached = u32_at(in cache, idx);
+    if cached != ast_none() {
+        return cached;
+    }
+    tmp.clear();
+    ast.names.resolve_into(symbol_from_id(sym_id), inout tmp);
+    let out = names.intern(in tmp.as_bytes());
+    cache.try_set(idx, out);
+    out
+}
+
+fn lower_effects(
+    in ast: Ast,
+    effs_id: u32,
+    inout names: Names,
+    inout types: Types,
+    inout cache: ChunkSeq[u32],
+    inout tmp: String
+) -> u32 {
+    if effs_id == ast_none() {
+        let es = ChunkSeq::new[EffNode]();
+        let args = ChunkSeq::new[u32]();
+        return types.mk_row(in es, in args, 0);
+    }
+    let en = match ast.effects.get(idx_from_raw[EffectsNode](effs_id)) {
+        Option::Some(v) => v,
+        Option::None => {
+            let es = ChunkSeq::new[EffNode]();
+            let args = ChunkSeq::new[u32]();
+            return types.mk_row(in es, in args, 0);
+        },
+    };
+    let n = list_len(in ast, en.instances);
+    let mut es = ChunkSeq::new[EffNode]();
+    let mut args = ChunkSeq::new[u32]();
+    for i in 0..n {
+        let eid = list_at(in ast, en.instances, i);
+        match ast.effect_nodes.get(idx_from_raw[EffectNode](eid)) {
+            Option::Some(e) => {
+                let lbl = if e.label == ast_none() {
+                    0
+                } else {
+                    inc32(translate_sym(in ast, e.label, inout names, inout cache, inout tmp))
+                };
+                let nm = translate_sym(in ast, e.name, inout names, inout cache, inout tmp);
+                let ac = list_len(in ast, e.args);
+                let a0 = n32(args.len());
+                for j in 0..ac {
+                    let aty = lower_ty(
+                        in ast,
+                        list_at(in ast, e.args, j),
+                        inout names,
+                        inout types,
+                        inout cache,
+                        inout tmp
+                    );
+                    args.push(aty);
+                }
+                es
+                    .push(
+                        EffNode {
+                            label: lbl,
+                            name: nm,
+                            a: a0,
+                            n: n32(ac)
+                        }
+                    );
+            },
+            Option::None => {},
+        }
+    }
+    let tail = if en.tail == ast_none() {
+        0
+    } else {
+        inc32(translate_sym(in ast, en.tail, inout names, inout cache, inout tmp))
+    };
+    types.mk_row(in es, in args, tail)
+}
+
+fn lower_ty(
+    in ast: Ast,
+    ty_id: u32,
+    inout names: Names,
+    inout types: Types,
+    inout cache: ChunkSeq[u32],
+    inout tmp: String
+) -> u32 {
+    if ty_id == ast_none() {
+        return types.named0(names.intern(in "()".as_bytes()));
+    }
+    let node = match ast.types.get(idx_from_raw[AstTypeNode](ty_id)) {
+        Option::Some(v) => v,
+        Option::None => {
+            return types.named0(names.intern(in "()".as_bytes()));
+        },
+    };
+    if node.kind == 1 {
+        let nm = translate_sym(in ast, node.a, inout names, inout cache, inout tmp);
+        let n = list_len(in ast, node.b);
+        if n == 0 {
+            return types.named0(nm);
+        }
+        let mut args = ChunkSeq::new[u32]();
+        for i in 0..n {
+            args
+                .push(
+                    lower_ty(
+                        in ast,
+                        list_at(in ast, node.b, i),
+                        inout names,
+                        inout types,
+                        inout cache,
+                        inout tmp
+                    )
+                );
+        }
+        return types.named(nm, in args);
+    }
+    if node.kind == 2 {
+        let n = list_len(in ast, node.a);
+        let mut args = ChunkSeq::new[u32]();
+        for i in 0..n {
+            args
+                .push(
+                    lower_ty(
+                        in ast,
+                        list_at(in ast, node.a, i),
+                        inout names,
+                        inout types,
+                        inout cache,
+                        inout tmp
+                    )
+                );
+        }
+        return types.tuple(in args);
+    }
+    if node.kind == 3 {
+        let n = list_len(in ast, node.a) / 2;
+        let mut args = ChunkSeq::new[u32]();
+        let mut passes = ChunkSeq::new[u8]();
+        for i in 0..n {
+            let p = wrapping_u8(list_at(in ast, node.a, wrapping_mul(i, 2)));
+            let pt = lower_ty(
+                in ast,
+                list_at(in ast, node.a, wrapping_add(wrapping_mul(i, 2), 1)),
+                inout names,
+                inout types,
+                inout cache,
+                inout tmp
+            );
+            passes.push(p);
+            args.push(pt);
+        }
+        let res = lower_ty(in ast, node.b, inout names, inout types, inout cache, inout tmp);
+        let row = lower_effects(in ast, node.c, inout names, inout types, inout cache, inout tmp);
+        return types.mk_with(TyKind::Fn, wrapping_u8(node.d), 0, in args, in passes, res, row, 0);
+    }
+    if node.kind == 4 {
+        let row = lower_effects(in ast, node.a, inout names, inout types, inout cache, inout tmp);
+        return types.row_type(row);
+    }
+    let empty = ChunkSeq::new[u32]();
+    let empty_p = ChunkSeq::new[u8]();
+    types.mk_with(TyKind::Infer, 0, 0, in empty, in empty_p, 0, 0, 0)
+}
+
+fn collect_generics_into(
+    in ast: Ast,
+    list_id: u32,
+    inout names: Names,
+    inout cache: ChunkSeq[u32],
+    inout tmp: String,
+    inout dst: ChunkSeq[Generic]
+) -> (u32, u32) {
+    let ga = n32(dst.len());
+    let gn = n32(list_len(in ast, list_id));
+    for i in 0..w(gn) {
+        let gid = list_at(in ast, list_id, i);
+        match ast.generics.get(idx_from_raw[GenericNode](gid)) {
+            Option::Some(g) => {
+                let nm = translate_sym(in ast, g.name, inout names, inout cache, inout tmp);
+                dst
+                    .push(
+                        Generic {
+                            name: nm,
+                            bound: g.bound,
+                            row: g.row
+                        }
+                    );
+            },
+            Option::None => {},
+        }
+    }
+    (ga, gn)
+}
+
+pub fn collect_program(in mods: ChunkSeq[AssembledModule]) -> CollectedProgram {
+    let mut names = names_new();
+    let mut types = types_new(inout names);
+    let known = known_new(inout names);
+    let mut world = world_new(known);
+    let mut fns = ChunkSeq::new[FnInfo]();
+    let mut params = ChunkSeq::new[ParamInfo]();
+    let mut fn_generics = ChunkSeq::new[Generic]();
+    let mut tmp = String::new();
+    for mi in 0..mods.len() {
+        match mods.try_get(mi) {
+            Option::Some(m) => {
+                let mut cache = ChunkSeq::new[u32]();
+                let ic = m.ast.m_items.len();
+                for ii in 0..ic {
+                    let item_id = u32_at(in m.ast.m_items, ii);
+                    let item = match m.ast.items.get(idx_from_raw[ItemNode](item_id)) {
+                        Option::Some(v) => v,
+                        Option::None => continue,
+                    };
+                    if item.kind == 1 {
+                        let a = match m.ast.adts.get(idx_from_raw[AdtNode](item.node)) {
+                            Option::Some(v) => v,
+                            Option::None => continue,
+                        };
+                        let aname = translate_sym(
+                            in m.ast,
+                            a.name,
+                            inout names,
+                            inout cache,
+                            inout tmp
+                        );
+                        let (ga, gn) = collect_generics_into(
+                            in m.ast,
+                            a.generics,
+                            inout names,
+                            inout cache,
+                            inout tmp,
+                            inout world.generics
+                        );
+                        let va = n32(world.variants.len());
+                        let vn = n32(list_len(in m.ast, a.variants));
+                        for vi in 0..w(vn) {
+                            let vid = list_at(in m.ast, a.variants, vi);
+                            let v = match m.ast.variants.get(idx_from_raw[VariantNode](vid)) {
+                                Option::Some(vv) => vv,
+                                Option::None => continue,
+                            };
+                            let vname = translate_sym(
+                                in m.ast,
+                                v.name,
+                                inout names,
+                                inout cache,
+                                inout tmp
+                            );
+                            let fa = n32(world.fields.len());
+                            let fc = n32(list_len(in m.ast, v.fields));
+                            for fi in 0..w(fc) {
+                                let fid = list_at(in m.ast, v.fields, fi);
+                                let f = match m.ast.fields.get(idx_from_raw[FieldNode](fid)) {
+                                    Option::Some(fv) => fv,
+                                    Option::None => continue,
+                                };
+                                let fname = translate_sym(
+                                    in m.ast,
+                                    f.name,
+                                    inout names,
+                                    inout cache,
+                                    inout tmp
+                                );
+                                let fty = lower_ty(
+                                    in m.ast,
+                                    f.ty,
+                                    inout names,
+                                    inout types,
+                                    inout cache,
+                                    inout tmp
+                                );
+                                let mod_val: u8 = if f.modality >= 3 {
+                                    0
+                                } else {
+                                    wrapping_u8(wrapping_add(widen_u64(f.modality), 1))
+                                };
+                                world
+                                    .fields
+                                    .push(
+                                        Field {
+                                            name: fname,
+                                            ty: fty,
+                                            modality: mod_val
+                                        }
+                                    );
+                            }
+                            world
+                                .variants
+                                .push(
+                                    Variant {
+                                        name: vname,
+                                        fa: fa,
+                                        fc: fc,
+                                        named: v.named
+                                    }
+                                );
+                        }
+                        let adt_idx = n32(world.adts.len());
+                        let tile_val: u32 = if a.tiled {
+                            inc32(a.tile_width)
+                        } else {
+                            0
+                        };
+                        world
+                            .adts
+                            .push(
+                                Adt {
+                                    name: aname,
+                                    mode: a.mode,
+                                    ga: ga,
+                                    gn: gn,
+                                    va: va,
+                                    vn: vn,
+                                    is_enum: a.is_enum,
+                                    tile: tile_val,
+                                    span_zero: a.start == 0 && a.end == 0
+                                }
+                            );
+                        set_by_symbol(inout world.by_name, aname, inc32(adt_idx));
+                    } else if item.kind == 2 {
+                        let fn_node = match m.ast.fns.get(idx_from_raw[FnNode](item.node)) {
+                            Option::Some(v) => v,
+                            Option::None => continue,
+                        };
+                        let fname = translate_sym(
+                            in m.ast,
+                            fn_node.name,
+                            inout names,
+                            inout cache,
+                            inout tmp
+                        );
+                        let (ga, gn) = collect_generics_into(
+                            in m.ast,
+                            fn_node.generics,
+                            inout names,
+                            inout cache,
+                            inout tmp,
+                            inout fn_generics
+                        );
+                        let pa = n32(params.len());
+                        let pn = n32(list_len(in m.ast, fn_node.params));
+                        for pi in 0..w(pn) {
+                            let pid = list_at(in m.ast, fn_node.params, pi);
+                            let p = match m.ast.params.get(idx_from_raw[ParamNode](pid)) {
+                                Option::Some(pv) => pv,
+                                Option::None => continue,
+                            };
+                            let pname = translate_sym(
+                                in m.ast,
+                                p.name,
+                                inout names,
+                                inout cache,
+                                inout tmp
+                            );
+                            let pty = lower_ty(
+                                in m.ast,
+                                p.ty,
+                                inout names,
+                                inout types,
+                                inout cache,
+                                inout tmp
+                            );
+                            params
+                                .push(
+                                    ParamInfo {
+                                        name: pname,
+                                        pass: p.pass,
+                                        ty: pty
+                                    }
+                                );
+                        }
+                        let res = lower_ty(
+                            in m.ast,
+                            fn_node.result,
+                            inout names,
+                            inout types,
+                            inout cache,
+                            inout tmp
+                        );
+                        let effs = lower_effects(
+                            in m.ast,
+                            fn_node.effects,
+                            inout names,
+                            inout types,
+                            inout cache,
+                            inout tmp
+                        );
+                        fns
+                            .push(
+                                FnInfo {
+                                    name: fname,
+                                    fip: fn_node.fip,
+                                    ga: ga,
+                                    gn: gn,
+                                    pa: pa,
+                                    pn: pn,
+                                    result: res,
+                                    effects: effs,
+                                    mod_idx: n32(mi),
+                                    body: fn_node.body
+                                }
+                            );
+                    } else if item.kind == 3 {
+                        let ed = match m
+                            .ast
+                            .effect_decls
+                            .get(idx_from_raw[EffectDeclNode](item.node)) {
+                            Option::Some(v) => v,
+                            Option::None => continue,
+                        };
+                        let ename = translate_sym(
+                            in m.ast,
+                            ed.name,
+                            inout names,
+                            inout cache,
+                            inout tmp
+                        );
+                        let eidx = n32(world.effects.len());
+                        world
+                            .effects
+                            .push(
+                                EffectRow {
+                                    name: ename,
+                                    linear: ed.linear
+                                }
+                            );
+                        set_by_symbol(inout world.effect_by_name, ename, inc32(eidx));
+                    }
+                }
+            },
+            Option::None => {},
+        }
+    }
+    CollectedProgram {
+        names: names,
+        types: types,
+        world: world,
+        fns: fns,
+        params: params,
+        fn_generics: fn_generics
+    }
+}

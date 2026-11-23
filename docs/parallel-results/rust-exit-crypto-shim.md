@@ -262,18 +262,52 @@ package and C build support lanes 12 and 16 asked for (#1421).
 - `let k = key.as_slice();` of a `let mut` sequence is refused (E1521,
   as specified): a helper taking `in k: Slice[u8]` does it.
 
+## Part 5: `vesper-vault` flip (AEAD, hybrid X25519MLKEM768 KEM, `verify_tag_16_ct`)
+
+`crates/vesper-vault` keeps its Cranelift IR constant-time verifier (`verifier.rs`),
+locked-page OS primitives (`sys.rs`), `slot.rs`, `obligation.rs`, `consttime.rs`,
+and `SecMask64`/`SecU8`/`SecU32`/`SecU64`/`SecVec` scalars in Rust, while moving
+AEAD framing/limits/Doom opener (`aead.rs`), hybrid X25519MLKEM768 KEM (`kem.rs`),
+`SystemRng`, and `verify_tag_16_ct` into `@vesper/vault` (`vesper/src/lib.ves`)
+over `@vesper/crypto` (`vesper-crypto-sys`):
+
+- **Zero runtime crypto crates in `vesper-vault`**: RustCrypto (`aes`,
+  `aes-gcm`, `chacha20`, `chacha20poly1305`, `poly1305`, `polyval`),
+  `libcrux-ml-kem`, `x25519-dalek`, and `getrandom` were removed from
+  `crates/vesper-vault/Cargo.toml` `[dependencies]` (moved to
+  `[dev-dependencies]` for `src/reference/` + `src/differential.rs` and to
+  `crates/vesper-vault/seed/Cargo.toml`).
+- **Zero-allocation AEAD hot path**: `AeadSealer` and `AeadOpener` hold an
+  expanded `vesper_crypto_sys::Aead` inline alongside `SecretSlot<32>` and lend
+  it across export ABI v4 (`b::Aead::lend`), using stack scratch buckets up to
+  16 KiB (`tests/alloc.rs` and `vesper-aegis --test zero_alloc` record 0
+  heap allocations).
+- **Seed split**: `vesper-vault-seed` (`crates/vesper-vault/seed`) compiles the
+  same `../src/lib.rs` with `cfg(vesper_port)` off over the frozen Rust engine
+  moved to `src/reference/` (458 lines across `mod.rs`, `aead.rs`, `kem.rs`,
+  `secret.rs`). The compiler (`Cargo.toml`) and `vesper-test` link
+  `vesper-vault-seed`; out-of-closure consumers (`vesper-aegis`) link the
+  port-backed `vesper-vault`.
+- **Differential & divergence verification**: `src/differential.rs` runs
+  66,652 differential checks against `src/reference/` with 0 differences across
+  tag comparison, AEAD record/epoch limits, sealing/framing, Doom opening, and
+  hybrid X25519MLKEM768 client/server flows; `port/check.sh` verifies all six
+  divergence areas (`verify_tag`, `aead_limits`, `aead_seal`, `aead_open`,
+  `kem_client`, `kem_server`) fail cleanly while non-overlapping tests pass.
+
+### Flip-gate verdict (`examples/abba.rs`, `n = 30`, `RUSTFLAGS="-C target-cpu=native"`)
+
+| Workload | Differential | Every test | ABBA (Vesper/Rust, 95% interval) | Verdict |
+|---|---|---|---|---|
+| `aead-aes`: AES-256-GCM 1,200B seal+open + epoch rotation | 0 differences | passes port & seed (`0` allocs) | **1.201x** (0.998x..1.353x) | flipped |
+| `aead-chacha`: ChaCha20-Poly1305 1,200B seal+open + epoch rotation | 0 differences | passes port & seed (`0` allocs) | **1.088x** (1.039x..1.193x) | flipped |
+| `kem-hybrid`: X25519MLKEM768 keygen+encaps+decaps | 0 differences | passes port & seed | **1.051x** (0.941x..1.177x) | flipped |
+
 ### What is left
 
-1. `vesper-warp-crypto`: done (part 3), except the header micro-benchmark,
-   which waits on codegen.
-2. `vesper-loom-trust`: done (part 4).
-3. `vesper-vault`: AEAD slots, the hybrid X25519 + ML-KEM-768 KEM and the
-   secret slots to Vesper (compiler-linked: seed pattern). Its
-   constant-time verifier over Cranelift IR is compiler code, not crypto,
-   and goes with lane 3's verifier move.
-4. `vesper-warp-tls`: a TLS 1.3 session behind the shim (rustls's QUIC
+1. `vesper-warp-tls`: a TLS 1.3 session behind the shim (rustls's QUIC
    API as linear handles) and the session layer (transport parameters,
    reassembly, configuration) in Vesper.
-5. The shared BLAKE3 C package: done (part 2, PR #1462).
-6. The census rows in `scripts/rust-census.py`: warp-crypto and loom-trust
-   updated in part 4; vault and warp-tls with their flips.
+2. Stage 2 wasm seed (SH6 lane 2) retires `vesper-loom-trust-seed` and
+   `vesper-vault-seed` (`src/reference/`); lane 3 moves the constant-time
+   Cranelift verifier out of `vesper-vault`.

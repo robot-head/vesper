@@ -7,18 +7,18 @@ description = "Bounded deterministic host SQL catalog, checked plans, row and ve
 build = "build.rs"
 
 [features]
-# Run the SQL front end, optimizer and row executor in Vesper
-# (vesper/src/lib.ves) through the committed binding port/binding.rs.
-vesper-port = ["dep:vesper-port-abi", "dep:vesper-port-harness"]
+# Compatibility no-op: the Vesper port is now the only build of the
+# SQL front end, optimizer, row executor and access planner.
+vesper-port = []
 # A deliberately wrong Vesper build: the port test run must fail.
-vesper-port-divergent = ["vesper-port"]
+vesper-port-divergent = []
 
 [dependencies]
 vesper-simd = { path = "../vesper-simd" }
-vesper-port-abi = { path = "../vesper-port-abi", optional = true }
+vesper-port-abi = { path = "../vesper-port-abi" }
 
 [build-dependencies]
-vesper-port-harness = { path = "../vesper-port-harness", optional = true }
+vesper-port-harness = { path = "../vesper-port-harness" }
 
 [dev-dependencies]
 vesper-bench = { path = "../vesper-bench" }

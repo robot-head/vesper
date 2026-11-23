@@ -1,0 +1,251 @@
+// Constructor mode-scheme derivation (`vesper-pact-binding/src/modes.rs`)
+// over `@vesper/check-data`'s `World::mode_of`.
+use @vesper/check-data::util::{
+    add,
+    inc,
+    n32,
+    push_decimal,
+    u32_at,
+    u8_at,
+    w
+};
+use @vesper/check-data::names::{
+    Names
+};
+use @vesper/check-data::types::{
+    TyMode,
+    Types
+};
+
+const M_COPY: u8 = TyMode::Copy;
+use @vesper/check-data::world::{
+    Adt,
+    Bounds,
+    World,
+    bounds_new,
+    mode_of
+};
+
+// Maximum well-formed argument-mode combinations verified per ADT
+// (`vesper-pact-binding/src/modes.rs`).
+pub const MAX_MODE_COMBINATIONS: u64 = 6561;
+
+// Outcome tags of `derive_adt_scheme`.
+pub const SCHEME_OK: u8 = 0;
+pub const SCHEME_TOO_MANY_COMBOS: u8 = 1;
+pub const SCHEME_UNREPRESENTABLE: u8 = 2;
+
+pub struct DerivedScheme {
+    pub status: u8,
+    pub base: u8,
+    pub joins: ChunkSeq[u32],
+    pub non_row_count: u64,
+    pub combos: u64,
+}
+
+fn synth_param_sym(inout names: Names, idx: u64) -> u32 {
+    let mut b: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    b.extend(in "$pm_".as_bytes());
+    push_decimal(inout b, idx);
+    names.intern(in b.as_slice())
+}
+
+// Derives `(base, joins)` for `adt_idx` in `wd`, checking every
+// well-formed combination of argument modes against `World::mode_of`.
+pub fn derive_adt_scheme(inout t: Types, inout names: Names, in wd: World, adt_idx: u32)
+    -> DerivedScheme {
+    let a = wd.adt(adt_idx);
+    let gn = w(a.gn);
+    let mut is_row: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](gn);
+    let mut bounds_max: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](gn);
+    let mut non_row: u64 = 0;
+    let mut combos: u64 = 1;
+    let mut too_many = false;
+
+    for i in 0..gn {
+        let g = wd.generic(add(w(a.ga), i));
+        if g.row {
+            is_row.push(1);
+            bounds_max.push(0);
+        } else {
+            is_row.push(0);
+            bounds_max.push(g.bound);
+            non_row = inc(non_row);
+            let ways = inc(widen_u64(g.bound));
+            if !too_many {
+                combos = wrapping_mul(combos, ways);
+                if combos > MAX_MODE_COMBINATIONS {
+                    too_many = true;
+                }
+            }
+        }
+    }
+
+    if too_many {
+        return DerivedScheme {
+            status: SCHEME_TOO_MANY_COMBOS,
+            base: M_COPY,
+            joins: ChunkSeq::new[u32](),
+            non_row_count: non_row,
+            combos: combos
+        };
+    }
+
+    // Build `Adt[param_0, ...]` using synthetic placeholder symbols so
+    // parameter names never shadow existing ADTs in `wd`.
+    let no_u32: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut param_syms: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](gn);
+    let mut args: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](gn);
+    let row_empty = t.row_type(t.empty_row);
+    for i in 0..gn {
+        if u8_at(in is_row, i) != 0 {
+            param_syms.push(0);
+            args.push(row_empty);
+        } else {
+            let sym = synth_param_sym(inout names, i);
+            param_syms.push(sym);
+            let pty = t.named(sym, in no_u32);
+            args.push(pty);
+        }
+    }
+    let applied = t.named(a.name, in args);
+
+    // Evaluate all combinations in Cartesian odometer order `[0, 0, ..., 0]` first.
+    let mut cur: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](gn);
+    for _ in 0..gn {
+        cur.push(0);
+    }
+
+    let mut obs: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](combos);
+    let mut step: u64 = 0;
+    loop {
+        if step >= combos {
+            break;
+        }
+        let mut b = bounds_new();
+        for i in 0..gn {
+            if u8_at(in is_row, i) == 0 {
+                b.set(u32_at(in param_syms, i), u8_at(in cur, i));
+            }
+        }
+        let m = mode_of(inout t, in names, in wd, applied, in b);
+        obs.push(m);
+
+        // Advance odometer.
+        let mut pos = gn;
+        loop {
+            if pos == 0 {
+                break;
+            }
+            pos = wrapping_sub(pos, 1);
+            if u8_at(in is_row, pos) == 0 {
+                let next_v = wrapping_add(u8_at(in cur, pos), 1);
+                if next_v <= u8_at(in bounds_max, pos) {
+                    let _ = cur.try_set(pos, next_v);
+                    break;
+                }
+                let _ = cur.try_set(pos, 0);
+            }
+        }
+        step = inc(step);
+    }
+
+    let base = u8_at(in obs, 0);
+
+    // Compute stride of each parameter in odometer order to probe single-param bumps.
+    let mut stride: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](gn);
+    for _ in 0..gn {
+        stride.push(0);
+    }
+    let mut s_acc: u64 = 1;
+    let mut idx = gn;
+    loop {
+        if idx == 0 {
+            break;
+        }
+        idx = wrapping_sub(idx, 1);
+        if u8_at(in is_row, idx) == 0 {
+            let _ = stride.try_set(idx, s_acc);
+            s_acc = wrapping_mul(s_acc, inc(widen_u64(u8_at(in bounds_max, idx))));
+        }
+    }
+
+    let mut joins: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut join_mask: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](gn);
+    for i in 0..gn {
+        let mut dep = false;
+        if u8_at(in is_row, i) == 0 {
+            let max_m = widen_u64(u8_at(in bounds_max, i));
+            let st = match stride.try_get(i) {
+                Option::Some(v) => v,
+                Option::None => 0,
+            };
+            for mv in 1..inc(max_m) {
+                let at = wrapping_mul(mv, st);
+                if u8_at(in obs, at) > base {
+                    dep = true;
+                }
+            }
+        }
+        if dep {
+            joins.push(n32(i));
+            join_mask.push(1);
+        } else {
+            join_mask.push(0);
+        }
+    }
+
+    // Verify the fitted `(base, joins)` matches every observed combination.
+    let mut ver: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](gn);
+    for _ in 0..gn {
+        ver.push(0);
+    }
+    let mut ok = true;
+    for k in 0..combos {
+        let mut expected = base;
+        for i in 0..gn {
+            if u8_at(in join_mask, i) != 0 {
+                let vm = u8_at(in ver, i);
+                if vm > expected {
+                    expected = vm;
+                }
+            }
+        }
+        if u8_at(in obs, k) != expected {
+            ok = false;
+        }
+        let mut pos = gn;
+        loop {
+            if pos == 0 {
+                break;
+            }
+            pos = wrapping_sub(pos, 1);
+            if u8_at(in is_row, pos) == 0 {
+                let next_v = wrapping_add(u8_at(in ver, pos), 1);
+                if next_v <= u8_at(in bounds_max, pos) {
+                    let _ = ver.try_set(pos, next_v);
+                    break;
+                }
+                let _ = ver.try_set(pos, 0);
+            }
+        }
+    }
+
+    if !ok {
+        return DerivedScheme {
+            status: SCHEME_UNREPRESENTABLE,
+            base: base,
+            joins: joins,
+            non_row_count: non_row,
+            combos: combos
+        };
+    }
+
+    DerivedScheme {
+        status: SCHEME_OK,
+        base: base,
+        joins: joins,
+        non_row_count: non_row,
+        combos: combos
+    }
+}

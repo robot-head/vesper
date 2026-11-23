@@ -960,3 +960,25 @@ fn foreign_buffers_check_alignment_bounds_and_disjointness() {
         );
     }
 }
+
+#[test]
+fn cwstr_parameter_and_option_result_canonicalize_and_check_abi() {
+    let lib = library("fn echo_w(nocapture in s: CWStr) -> ForeignVal[Option[CWStr]];");
+    let f = lib.function("echo_w").unwrap();
+    assert!(f.takes_cstr());
+    assert!(matches!(f.parameters()[0].ty(), ParameterType::CWStr));
+    assert!(matches!(f.result(), ValueType::CWStr));
+    let abi = f.abi();
+    assert_eq!(abi.parameters, vec![AbiType::Pointer]);
+    assert_eq!(abi.result, Some(AbiType::Pointer));
+
+    for bad_fn in [
+        "fn f(in s: CWStr) -> ForeignVal[i32];",
+        "fn f(nocapture inout s: CWStr) -> ForeignVal[i32];",
+        "fn f(nocapture in s: Option[CWStr]) -> ForeignVal[i32];",
+        "linear extern type H; fn drop_h(sink h: H) -> ForeignVal[i32]; fn f(nocapture in s: CWStr, sink h: H) -> ForeignVal[i32];",
+    ] {
+        let err = rejects(bad_fn);
+        assert_eq!(err.kind, ErrorKind::Unsupported, "{bad_fn}: {err:?}");
+    }
+}

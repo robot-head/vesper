@@ -180,11 +180,13 @@ fn run_with(
 /// lowering is checked against the evaluator in
 /// tests/self_host_wasm_backend.rs).
 fn port_extension(command: &[&str], default: &Run, hybrid: &Run) -> bool {
-    // Rust refuses an operation the port lowers: loops (`WASM_REFUSAL`),
-    // sequences, strings and integer conversions (#1506).
+    // Rust refuses an operation or integer width the port lowers: loops
+    // (`WASM_REFUSAL`), sequences, strings, `i8`/`i16`/`i32`/`u16`/`i128`
+    // and integer conversions (#1506, #1604).
+    let stderr = String::from_utf8_lossy(&default.output.stderr);
     command.contains(&"wasm32-wasip2")
         && !default.output.status.success()
-        && String::from_utf8_lossy(&default.output.stderr).contains("unsupported Operation")
+        && (stderr.contains("unsupported Operation") || stderr.contains("unsupported IntegerWidth"))
         && hybrid.output.status.success()
 }
 
