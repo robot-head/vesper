@@ -42,12 +42,16 @@ use @vesper/cranelift::{
     ins_uload32,
     ins_uload8,
     ins_urem,
+    module_get_function,
     switch_to_block,
     trap_user,
     ty_i64,
     vals1,
     vals2,
     vals3,
+};
+use self::regions::{
+    define_region_runtime,
 };
 use self::rt::{
     no_vals,
@@ -119,6 +123,13 @@ struct TiledImports {
 // `define` after the region runtime: `region_alloc` is its
 // `vesper_region_alloc`, which a second declaration of the same name finds.
 pub fn define_tiled_runtime(inout m: Module) -> bool eff [Ffi[Cranelift]] {
+    match module_get_function(inout m, in "vesper_tiled_fault".as_bytes()) {
+        Some(_) => return true,
+        None => {},
+    }
+    if !define_region_runtime(inout m) {
+        return false;
+    }
     let mut messages: ChunkSeq[u32] = ChunkSeq::new[u32]();
     let mut lengths: ChunkSeq[i64] = ChunkSeq::new[i64]();
     for i in 0..TILED_FAULTS {
