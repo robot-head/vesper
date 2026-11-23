@@ -116,11 +116,7 @@ Smaller notes found on the way (no fix needed by this lane):
 
 | Host function group | libc / Win32 call | Expressible now? |
 |---|---|---|
-| open, read, write, fsync, close, rename, unlink, rmdir, mkdir, file length | `open`, `read`, `write`, `fsync`, `close`, `rename`, `unlink`, `rmdir`, `mkdir`, `fstat` | Linux yes (proved above). macOS needs G3 (`open` mode) and G4 (flags, `stat` layout). |
-| metadata | `stat`/`lstat` | needs G4 for the layout (a `wire struct` per target) |
-| list a directory | `opendir`/`readdir`/`closedir` | needs G1 (`readdir` returns a pointer). Linux-only fallback: `getdents64` into a `CSlice[u8]` |
-| remove a tree, create parents | built from the above in Vesper | yes, once listing works |
-| unique temp names, parent split | pure Vesper (`getpid` for the pid) | yes |
+| files, metadata, directory listings, trees, renames, temporary names | `open` (variadic mode), `read`, `write`, `fsync` (macOS `fcntl(F_FULLFSYNC)`), `close`, `fstat`, `stat`, `lstat`, `rename`, `unlink`, `rmdir`, `mkdir`, `getpid`, `opendir`/`readdir`/`closedir`, with `memcpy`, `strchr` and `bcopy` to read `struct dirent` | **done**: `@vesper-std/fs` imports libc on Linux and macOS (`fs-@OS@-@ARCH@.vsys`: `open` flags and the `struct stat`/`struct dirent` offsets are per-target constants; src/sys.ves mirrors `std::fs`, `remove_dir_all` and `create_dir_all` included). Windows keeps a libc-shaped shim over `std::fs` in `vesper-std-host/src/fs.rs` until G7; WASI keeps the `vstd_fs_*` interface (src-wasip2, `fs-wasip2-wasm32.vsys`). Reading the repository's sources runs at about the old shim's speed (1.2-1.6x of `std::fs` on a noisy 4-core runner, both). |
 | arguments, variables, current directory, OS | `getenv`, `getcwd`; `argv` and `environ` through `dlsym` (glibc `__libc_stack_end` and `environ`, macOS `_NSGetArgv`, `_NSGetArgc`, `_NSGetEnviron`), read with `memcpy`, `strchr` and `strstr` | **done**: `@vesper-std/env` imports libc on Linux and macOS (`env-@OS@.vsys`); Windows keeps six libc-shaped functions in `vesper-std-host/src/env.rs` until G7 |
 | spawn, pipes, wait, kill | `pipe`, `posix_spawn` with file actions, `poll`, `read`, `waitpid`, `kill` | needs G2 (argv/envp) |
 | exit, pid | `exit`, `getpid` | needs G6 (`exit(i32)` collides) |

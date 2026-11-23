@@ -1,416 +1,407 @@
-//! `sys library StdFs` (packages/vesper-std/fs/fs.vsys): files as linear
-//! handles, directory listings, metadata, renames and removal.
+//! `sys library StdFs` on Windows (packages/vesper-std/fs/
+//! fs-windows-x86_64.vsys).
+//!
+//! On Linux and macOS `@vesper-std/fs` imports the C library itself
+//! (fs-linux-*.vsys, fs-macos-aarch64.vsys; SH6 lane 13, #1408), so nothing
+//! here runs there. Windows keeps these functions until Vesper calls Win32
+//! itself (gap G7, UTF-16 paths): each has the C signature of the libc
+//! function its `.vsys` declaration names, over UTF-8 paths and `std::fs`.
+//!
+//! - A descriptor indexes this module's table of open files.
+//! - `stat`, `lstat` and `fstat` fill the Linux x86_64 `struct stat` fields
+//!   src/sys.ves reads (`st_mode` at byte 24, `st_size` at 48, `st_mtim`
+//!   at 88), and `readdir` returns a record laid out as glibc's `struct
+//!   dirent` (`d_type` at byte 18, `d_name` at 19).
+//! - A failure returns -1 (or NULL) with the Win32 error as the thread's
+//!   last error, or `ERROR_INVALID_NAME` (123) when the path is not UTF-8.
+use crate::env::set_last_error;
 use crate::*;
+use std::ffi::{CStr, c_char};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
-use std::sync::atomic::AtomicU64;
+use std::sync::Mutex;
 
-/// An open file (`linear extern type FsFile`).
-pub struct FsFile {
-    file: File,
+/// `ERROR_INVALID_NAME`: a path that is not UTF-8.
+const ERROR_INVALID_NAME: u32 = 123;
+/// `ERROR_CALL_NOT_IMPLEMENTED`: `fcntl`.
+const ERROR_CALL_NOT_IMPLEMENTED: u32 = 120;
+/// `ERROR_INVALID_HANDLE`: a descriptor that is not open.
+const ERROR_INVALID_HANDLE: u32 = 6;
+
+/// The `open` flags fs-windows-x86_64.vsys declares (Linux's values).
+const O_WRONLY: i32 = 1;
+const O_CREAT: i32 = 64;
+const O_EXCL: i32 = 128;
+const O_TRUNC: i32 = 512;
+const O_APPEND: i32 = 1024;
+
+/// The `st_mode` file types and `d_type` values src/sys.ves decodes.
+const S_IFDIR: u64 = 0o040000;
+const S_IFREG: u64 = 0o100000;
+const S_IFLNK: u64 = 0o120000;
+const DT_DIR: u8 = 4;
+const DT_REG: u8 = 8;
+const DT_LNK: u8 = 10;
+const DT_FIFO: u8 = 1;
+
+/// Open files, indexed by descriptor.
+static FILES: Mutex<Vec<Option<File>>> = Mutex::new(Vec::new());
+
+fn files() -> std::sync::MutexGuard<'static, Vec<Option<File>>> {
+    FILES.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// A directory listing read at open (`linear extern type FsDir`): names
-/// in the order the OS returned them, and the next one to hand out.
-pub struct FsDir {
-    entries: Vec<(Vec<u8>, u32)>,
-    next: usize,
+/// Record `e` as the thread's last error.
+fn fail(e: &std::io::Error) {
+    set_last_error(e.raw_os_error().map_or(ERROR_INVALID_NAME, |c| c as u32));
 }
 
-/// The `.vsys` wire struct `FsMeta`: 24 bytes, no padding.
-#[repr(C)]
-#[derive(Debug, Default, Clone, Copy)]
-pub struct FsMeta {
-    pub size: u64,
-    pub mtime_s: i64,
-    pub mtime_ns: u32,
-    pub kind: u32,
-}
-
-/// `FsMeta.kind` and the entry kind of a listing.
-pub const KIND_FILE: u32 = 1;
-pub const KIND_DIR: u32 = 2;
-pub const KIND_SYMLINK: u32 = 3;
-pub const KIND_OTHER: u32 = 4;
-
-/// Open modes of [`vstd_fs_open`].
-pub const OPEN_READ: u32 = 0;
-pub const OPEN_TRUNCATE: u32 = 1;
-pub const OPEN_CREATE_NEW: u32 = 2;
-pub const OPEN_APPEND: u32 = 3;
-
-fn kind_of(t: std::fs::FileType) -> u32 {
-    if t.is_symlink() {
-        KIND_SYMLINK
-    } else if t.is_dir() {
-        KIND_DIR
-    } else if t.is_file() {
-        KIND_FILE
-    } else {
-        KIND_OTHER
+/// 0, or -1 with the last error set.
+fn status(r: std::io::Result<()>) -> i32 {
+    match r {
+        Ok(()) => 0,
+        Err(e) => {
+            fail(&e);
+            -1
+        }
     }
 }
 
-/// Run `f` on the path in `(ptr, len)`; on error write `err` and return
-/// `fallback`.
-unsafe fn with_path<T>(
-    ptr: *const u8,
-    len: usize,
-    err: *mut u64,
-    fallback: T,
-    f: impl FnOnce(&std::path::Path) -> std::io::Result<T>,
-) -> T {
-    // SAFETY: the path slice is lent for the call.
-    let raw = unsafe { bytes(ptr, len) };
-    match path_of(raw).and_then(|p| f(&p)) {
-        Ok(v) => {
-            // SAFETY: the error slot is lent for the call.
-            unsafe { set_err(err, 0) };
-            v
-        }
-        Err(e) => {
-            // SAFETY: as above.
-            unsafe { set_err(err, error_word(&e)) };
+/// The path at `path`.
+///
+/// # Safety
+/// `path` is a NUL-terminated string for the call.
+unsafe fn path(path: *const c_char) -> std::io::Result<std::path::PathBuf> {
+    // SAFETY: as documented.
+    path_of(unsafe { CStr::from_ptr(path) }.to_bytes())
+}
+
+/// Run `f` on the open file `fd`.
+fn with_file<T>(fd: i32, fallback: T, f: impl FnOnce(&mut File) -> T) -> T {
+    let mut table = files();
+    match usize::try_from(fd).ok().and_then(|i| table.get_mut(i)) {
+        Some(Some(file)) => f(file),
+        _ => {
+            set_last_error(ERROR_INVALID_HANDLE);
             fallback
         }
     }
 }
 
-/// Open `path` in `mode` ([`OPEN_READ`] and friends). NULL on error.
+/// `open(path, flags, mode)`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn vstd_fs_open(
-    path: *const u8,
-    path_len: usize,
-    mode: u32,
-    err: *mut u64,
-) -> *mut FsFile {
-    // SAFETY: the `.vsys` contract lends the path and error slot.
-    unsafe {
-        with_path(path, path_len, err, std::ptr::null_mut(), |p| {
-            let mut o = OpenOptions::new();
-            match mode {
-                OPEN_READ => o.read(true),
-                OPEN_TRUNCATE => o.write(true).create(true).truncate(true),
-                OPEN_CREATE_NEW => o.write(true).create_new(true),
-                OPEN_APPEND => o.append(true).create(true),
-                _ => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        "unknown open mode",
-                    ));
-                }
-            };
-            let file = o.open(p)?;
-            Ok(new_handle(HandleKind::File, FsFile { file }))
-        })
-    }
-}
-
-/// The file's current length in bytes (0 if it cannot be read).
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn vstd_fs_file_len(f: *const FsFile) -> u64 {
-    // SAFETY: a live handle lent `in`.
-    let f = unsafe { &*f };
-    f.file.metadata().map_or(0, |m| m.len())
-}
-
-/// Read into the whole buffer, stopping early only at end of file. Returns
-/// the bytes read (fewer than the buffer only at end of file).
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn vstd_fs_read(
-    f: *mut FsFile,
-    buf: *mut u8,
-    len: usize,
-    err: *mut u64,
-) -> u64 {
-    // SAFETY: a live handle lent `inout`, and the buffer and error slot.
-    let (f, buf) = unsafe { (&mut *f, bytes_mut(buf, len)) };
-    let mut done = 0;
-    while done < buf.len() {
-        match f.file.read(&mut buf[done..]) {
-            Ok(0) => break,
-            Ok(n) => done += n,
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(e) => {
-                // SAFETY: lent for the call.
-                unsafe { set_err(err, error_word(&e)) };
-                return done as u64;
+pub unsafe extern "C" fn vstd_open(p: *const c_char, flags: i32, _mode: i64) -> i32 {
+    // SAFETY: the lowering passes a NUL-terminated copy for the call.
+    let opened = unsafe { path(p) }.and_then(|p| {
+        let mut o = OpenOptions::new();
+        if flags & O_WRONLY == 0 {
+            o.read(true);
+        } else if flags & O_APPEND != 0 {
+            o.append(true);
+        } else {
+            o.write(true);
+        }
+        if flags & O_CREAT != 0 {
+            if flags & O_EXCL != 0 {
+                o.create_new(true);
+            } else {
+                o.create(true);
             }
         }
+        if flags & O_TRUNC != 0 {
+            o.truncate(true);
+        }
+        o.open(p)
+    });
+    match opened {
+        Ok(file) => {
+            let mut table = files();
+            let fd = match table.iter().position(Option::is_none) {
+                Some(i) => {
+                    table[i] = Some(file);
+                    i
+                }
+                None => {
+                    table.push(Some(file));
+                    table.len() - 1
+                }
+            };
+            fd as i32
+        }
+        Err(e) => {
+            fail(&e);
+            -1
+        }
     }
-    // SAFETY: lent for the call.
-    unsafe { set_err(err, 0) };
-    done as u64
 }
 
-/// Write the whole buffer. Returns 0 on success, 1 on error.
+/// `read(fd, buf, n)`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn vstd_fs_write(
-    f: *mut FsFile,
-    buf: *const u8,
-    len: usize,
-    err: *mut u64,
-) -> u32 {
-    // SAFETY: a live handle lent `inout`, and the buffer and error slot.
-    let (f, buf) = unsafe { (&mut *f, bytes(buf, len)) };
-    status(err, f.file.write_all(buf))
+pub unsafe extern "C" fn vstd_read(fd: i32, buf: *mut u8, n: usize) -> i64 {
+    // SAFETY: the caller lends `n` writable bytes for the call.
+    let buf = unsafe { bytes_mut(buf, n) };
+    with_file(fd, -1, |f| match f.read(buf) {
+        Ok(n) => n as i64,
+        Err(e) => {
+            fail(&e);
+            -1
+        }
+    })
 }
 
-/// Flush the file's data and metadata to storage (`fsync`).
+/// `write(fd, buf, n)`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn vstd_fs_sync(f: *mut FsFile, err: *mut u64) -> u32 {
-    // SAFETY: a live handle lent `inout`.
-    let f = unsafe { &mut *f };
-    status(err, f.file.sync_all())
+pub unsafe extern "C" fn vstd_write(fd: i32, buf: *const u8, n: usize) -> i64 {
+    // SAFETY: the caller lends `n` readable bytes for the call.
+    let buf = unsafe { bytes(buf, n) };
+    with_file(fd, -1, |f| match f.write(buf) {
+        Ok(n) => n as i64,
+        Err(e) => {
+            fail(&e);
+            -1
+        }
+    })
 }
 
-/// Close the file (the finalizer of `FsFile`).
+/// `fsync(fd)`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn vstd_fs_close(f: *mut FsFile) {
-    // SAFETY: `sink` consumes the handle exactly once.
-    drop(unsafe { free_handle(HandleKind::File, f) });
+pub extern "C" fn vstd_fsync(fd: i32) -> i32 {
+    with_file(fd, -1, |f| status(f.sync_all()))
 }
 
-fn status(err: *mut u64, r: std::io::Result<()>) -> u32 {
-    match r {
-        Ok(()) => {
-            // SAFETY: lent for the call.
-            unsafe { set_err(err, 0) };
+/// `fcntl(fd, cmd, arg)`: src/sys.ves calls it only on macOS.
+#[unsafe(no_mangle)]
+pub extern "C" fn vstd_fcntl(_fd: i32, _cmd: i32, _arg: i64) -> i32 {
+    set_last_error(ERROR_CALL_NOT_IMPLEMENTED);
+    -1
+}
+
+/// `close(fd)`.
+#[unsafe(no_mangle)]
+pub extern "C" fn vstd_close(fd: i32) -> i32 {
+    let mut table = files();
+    match usize::try_from(fd).ok().and_then(|i| table.get_mut(i)) {
+        Some(slot @ Some(_)) => {
+            *slot = None;
+            0
+        }
+        _ => {
+            set_last_error(ERROR_INVALID_HANDLE);
+            -1
+        }
+    }
+}
+
+/// Fill the words of `st` src/sys.ves reads from `m`.
+///
+/// # Safety
+/// `st` points at the 18-word `Stat` the caller lends for the call.
+unsafe fn fill(st: *mut u64, m: &std::fs::Metadata) {
+    let t = m.file_type();
+    let mode = if t.is_symlink() {
+        S_IFLNK
+    } else if t.is_dir() {
+        S_IFDIR
+    } else if t.is_file() {
+        S_IFREG
+    } else {
+        0
+    };
+    let (secs, nanos) = match m.modified() {
+        Ok(t) => match t.duration_since(std::time::UNIX_EPOCH) {
+            Ok(d) => (d.as_secs() as i64, u64::from(d.subsec_nanos())),
+            Err(e) => {
+                // Before 1970: whole seconds below zero, then nanoseconds.
+                let d = e.duration();
+                let (s, ns) = (d.as_secs() as i64, d.subsec_nanos());
+                if ns == 0 {
+                    (-s, 0)
+                } else {
+                    (-s - 1, u64::from(1_000_000_000 - ns))
+                }
+            }
+        },
+        Err(_) => (0, 0),
+    };
+    // SAFETY: as documented; the words written are inside the 18.
+    unsafe {
+        std::ptr::write_bytes(st, 0, 18);
+        *st.add(3) = mode;
+        *st.add(6) = m.len();
+        *st.add(11) = secs as u64;
+        *st.add(12) = nanos;
+    }
+}
+
+fn stat_with(
+    p: *const c_char,
+    st: *mut u64,
+    get: impl FnOnce(&std::path::Path) -> std::io::Result<std::fs::Metadata>,
+) -> i32 {
+    // SAFETY: the lowering passes a NUL-terminated copy for the call.
+    match unsafe { path(p) }.and_then(|p| get(&p)) {
+        Ok(m) => {
+            // SAFETY: the caller lends the `Stat`.
+            unsafe { fill(st, &m) };
             0
         }
         Err(e) => {
-            // SAFETY: lent for the call.
-            unsafe { set_err(err, error_word(&e)) };
-            1
+            fail(&e);
+            -1
         }
     }
 }
 
-/// Rename `from` to `to`, replacing `to` if it exists (on Windows too).
+/// `stat(path, st)`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn vstd_fs_rename(
-    from: *const u8,
-    from_len: usize,
-    to: *const u8,
-    to_len: usize,
-    err: *mut u64,
-) -> u32 {
-    // SAFETY: both paths are lent for the call.
-    let (a, b) = unsafe { (bytes(from, from_len), bytes(to, to_len)) };
-    status(
-        err,
-        path_of(a).and_then(|a| path_of(b).and_then(|b| std::fs::rename(a, b))),
-    )
+pub unsafe extern "C" fn vstd_stat(p: *const c_char, st: *mut u64) -> i32 {
+    stat_with(p, st, |p| std::fs::metadata(p))
 }
 
-/// Remove a file (not a directory).
+/// `lstat(path, st)`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn vstd_fs_remove_file(path: *const u8, len: usize, err: *mut u64) -> u32 {
-    // SAFETY: lent for the call.
-    unsafe { with_path(path, len, err, 1, |p| std::fs::remove_file(p).map(|()| 0)) }
+pub unsafe extern "C" fn vstd_lstat(p: *const c_char, st: *mut u64) -> i32 {
+    stat_with(p, st, |p| std::fs::symlink_metadata(p))
 }
 
-/// Remove a directory: an empty one, or with `recursive` everything in it.
+/// `fstat(fd, st)`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn vstd_fs_remove_dir(
-    path: *const u8,
-    len: usize,
-    recursive: bool,
-    err: *mut u64,
-) -> u32 {
-    // SAFETY: lent for the call.
-    unsafe {
-        with_path(path, len, err, 1, |p| {
-            if recursive {
-                std::fs::remove_dir_all(p)
-            } else {
-                std::fs::remove_dir(p)
-            }
-            .map(|()| 0)
-        })
-    }
+pub unsafe extern "C" fn vstd_fstat(fd: i32, st: *mut u64) -> i32 {
+    with_file(fd, -1, |f| match f.metadata() {
+        Ok(m) => {
+            // SAFETY: the caller lends the `Stat`.
+            unsafe { fill(st, &m) };
+            0
+        }
+        Err(e) => {
+            fail(&e);
+            -1
+        }
+    })
 }
 
-/// Create a directory, with `recursive` its missing parents too (and then
-/// an existing directory is not an error).
+/// `rename(from, to)`, replacing `to` if it exists.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn vstd_fs_create_dir(
-    path: *const u8,
-    len: usize,
-    recursive: bool,
-    err: *mut u64,
-) -> u32 {
-    // SAFETY: lent for the call.
-    unsafe {
-        with_path(path, len, err, 1, |p| {
-            if recursive {
-                std::fs::create_dir_all(p)
-            } else {
-                std::fs::create_dir(p)
-            }
-            .map(|()| 0)
-        })
-    }
+pub unsafe extern "C" fn vstd_rename(from: *const c_char, to: *const c_char) -> i32 {
+    // SAFETY: both are NUL-terminated copies for the call.
+    let (a, b) = unsafe { (path(from), path(to)) };
+    status(a.and_then(|a| b.and_then(|b| std::fs::rename(a, b))))
 }
 
-/// Metadata of `path` (following symlinks when `follow`).
+/// `unlink(path)`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn vstd_fs_metadata(
-    path: *const u8,
-    len: usize,
-    follow: bool,
-    meta: *mut FsMeta,
-    err: *mut u64,
-) -> u32 {
-    // SAFETY: lent for the call.
-    unsafe {
-        with_path(path, len, err, 1, |p| {
-            let m = if follow {
-                std::fs::metadata(p)?
-            } else {
-                std::fs::symlink_metadata(p)?
+pub unsafe extern "C" fn vstd_unlink(p: *const c_char) -> i32 {
+    // SAFETY: a NUL-terminated copy for the call.
+    status(unsafe { path(p) }.and_then(std::fs::remove_file))
+}
+
+/// `rmdir(path)`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vstd_rmdir(p: *const c_char) -> i32 {
+    // SAFETY: a NUL-terminated copy for the call.
+    status(unsafe { path(p) }.and_then(std::fs::remove_dir))
+}
+
+/// `mkdir(path, mode)`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vstd_mkdir(p: *const c_char, _mode: u32) -> i32 {
+    // SAFETY: a NUL-terminated copy for the call.
+    status(unsafe { path(p) }.and_then(std::fs::create_dir))
+}
+
+/// `getpid()`.
+#[unsafe(no_mangle)]
+pub extern "C" fn vstd_getpid() -> i32 {
+    std::process::id() as i32
+}
+
+/// A listing read at `opendir`: each entry as a `struct dirent` record,
+/// and the next one to hand out.
+pub struct DirState {
+    records: Vec<Vec<u8>>,
+    next: usize,
+}
+
+/// `opendir(path)`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vstd_opendir(p: *const c_char) -> *mut DirState {
+    // SAFETY: a NUL-terminated copy for the call.
+    let listed = unsafe { path(p) }.and_then(|p| {
+        let mut records = vec![];
+        for e in std::fs::read_dir(p)? {
+            let e = e?;
+            let t = match e.file_type() {
+                Ok(t) if t.is_symlink() => DT_LNK,
+                Ok(t) if t.is_dir() => DT_DIR,
+                Ok(t) if t.is_file() => DT_REG,
+                _ => DT_FIFO,
             };
-            let (mtime_s, mtime_ns) = match m.modified() {
-                Ok(t) => match t.duration_since(std::time::UNIX_EPOCH) {
-                    Ok(d) => (d.as_secs() as i64, d.subsec_nanos()),
-                    Err(e) => {
-                        // Before 1970: floor to whole seconds below zero.
-                        let d = e.duration();
-                        let (s, ns) = (d.as_secs() as i64, d.subsec_nanos());
-                        if ns == 0 {
-                            (-s, 0)
-                        } else {
-                            (-s - 1, 1_000_000_000 - ns)
-                        }
-                    }
-                },
-                Err(_) => (0, 0),
-            };
-            *meta = FsMeta {
-                size: m.len(),
-                mtime_s,
-                mtime_ns,
-                kind: kind_of(m.file_type()),
-            };
-            Ok(0)
-        })
+            let mut r = vec![0u8; 19];
+            r[18] = t;
+            r.extend(os_bytes(&e.file_name()));
+            r.push(0);
+            records.push(r);
+        }
+        Ok(DirState { records, next: 0 })
+    });
+    match listed {
+        Ok(d) => new_handle(HandleKind::Dir, d),
+        Err(e) => {
+            fail(&e);
+            std::ptr::null_mut()
+        }
     }
 }
 
-/// Flush a directory's entries to storage after a rename (Unix `fsync` on
-/// the directory; a no-op on Windows, where `MoveFileEx` is durable).
+/// `readdir(dir)`: the next record, NULL after the last.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn vstd_fs_sync_dir(path: *const u8, len: usize, err: *mut u64) -> u32 {
-    // SAFETY: lent for the call.
-    unsafe {
-        with_path(path, len, err, 1, |p| {
-            #[cfg(unix)]
-            File::open(p)?.sync_all()?;
-            #[cfg(not(unix))]
-            let _ = p;
-            Ok(0)
-        })
+pub unsafe extern "C" fn vstd_readdir(d: *mut DirState) -> *const u8 {
+    // SAFETY: a live listing lent `inout`.
+    let d = unsafe { &mut *d };
+    match d.records.get(d.next) {
+        Some(r) => {
+            d.next += 1;
+            r.as_ptr()
+        }
+        None => std::ptr::null(),
     }
 }
 
-/// The length of the directory part of `path`, its trailing separator
-/// included: 4 for `a/b/c` (`a/b/`), 0 for a bare name. `/` separates on
-/// every platform; `\` and a drive prefix (`C:`) only on Windows, since on
-/// Unix a backslash is an ordinary name byte.
+/// `closedir(dir)`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn vstd_fs_parent_len(path: *const u8, len: usize) -> u64 {
-    // SAFETY: lent for the call.
-    let raw = unsafe { bytes(path, len) };
-    let windows = cfg!(windows);
-    let sep = |b: u8| b == b'/' || (windows && b == b'\\');
-    match raw.iter().rposition(|&b| sep(b)) {
-        Some(i) => i as u64 + 1,
-        None if windows && raw.len() >= 2 && raw[1] == b':' => 2,
-        None => 0,
-    }
-}
-
-static UNIQUE: AtomicU64 = AtomicU64::new(0);
-
-/// A process-unique number for temporary names: the process id in the high
-/// 32 bits and a counter in the low 32.
-#[unsafe(no_mangle)]
-pub extern "C" fn vstd_fs_unique() -> u64 {
-    (u64::from(std::process::id()) << 32)
-        | (UNIQUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed) & 0xffff_ffff)
-}
-
-/// List a directory. NULL on error.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn vstd_fs_read_dir(
-    path: *const u8,
-    len: usize,
-    err: *mut u64,
-) -> *mut FsDir {
-    // SAFETY: lent for the call.
-    unsafe {
-        with_path(path, len, err, std::ptr::null_mut(), |p| {
-            let mut entries = vec![];
-            for e in std::fs::read_dir(p)? {
-                let e = e?;
-                let kind = e.file_type().map_or(KIND_OTHER, kind_of);
-                entries.push((os_bytes(&e.file_name()), kind));
-            }
-            Ok(new_handle(HandleKind::Dir, FsDir { entries, next: 0 }))
-        })
-    }
-}
-
-/// The next entry's name into `buf` and its kind into `kind`. Returns the
-/// name's length, or -1 after the last entry. A name longer than `buf` is
-/// not consumed: its length comes back and the call can be repeated with a
-/// bigger buffer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn vstd_fs_dir_next(
-    d: *mut FsDir,
-    buf: *mut u8,
-    len: usize,
-    kind: *mut u32,
-) -> i64 {
-    // SAFETY: a live handle lent `inout`; the buffer and kind slot.
-    let (d, buf) = unsafe { (&mut *d, bytes_mut(buf, len)) };
-    let Some((name, k)) = d.entries.get(d.next) else {
-        return -1;
-    };
-    let n = copy_out(name, buf);
-    if n as usize <= buf.len() {
-        d.next += 1;
-        // SAFETY: lent for the call.
-        unsafe { *kind = *k };
-    }
-    n as i64
-}
-
-/// Close a listing (the finalizer of `FsDir`).
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn vstd_fs_dir_close(d: *mut FsDir) {
+pub unsafe extern "C" fn vstd_closedir(d: *mut DirState) -> i32 {
     // SAFETY: `sink` consumes the handle exactly once.
     drop(unsafe { free_handle(HandleKind::Dir, d) });
+    0
+}
+
+/// `bcopy(src, dst, n)`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vstd_bcopy(src: *const u8, dst: *mut u8, n: usize) {
+    // SAFETY: the caller passes `n` readable bytes at `src` and lends `n`
+    // writable ones at `dst`; `bcopy` allows them to overlap.
+    unsafe { std::ptr::copy(src, dst, n) };
 }
 
 pub(crate) fn symbols() -> Vec<(&'static str, *const u8)> {
     vec![
-        ("vstd_fs_open", vstd_fs_open as *const u8),
-        ("vstd_fs_file_len", vstd_fs_file_len as *const u8),
-        ("vstd_fs_read", vstd_fs_read as *const u8),
-        ("vstd_fs_write", vstd_fs_write as *const u8),
-        ("vstd_fs_sync", vstd_fs_sync as *const u8),
-        ("vstd_fs_close", vstd_fs_close as *const u8),
-        ("vstd_fs_rename", vstd_fs_rename as *const u8),
-        ("vstd_fs_remove_file", vstd_fs_remove_file as *const u8),
-        ("vstd_fs_remove_dir", vstd_fs_remove_dir as *const u8),
-        ("vstd_fs_create_dir", vstd_fs_create_dir as *const u8),
-        ("vstd_fs_metadata", vstd_fs_metadata as *const u8),
-        ("vstd_fs_sync_dir", vstd_fs_sync_dir as *const u8),
-        ("vstd_fs_parent_len", vstd_fs_parent_len as *const u8),
-        ("vstd_fs_unique", vstd_fs_unique as *const u8),
-        ("vstd_fs_read_dir", vstd_fs_read_dir as *const u8),
-        ("vstd_fs_dir_next", vstd_fs_dir_next as *const u8),
-        ("vstd_fs_dir_close", vstd_fs_dir_close as *const u8),
+        ("vstd_open", vstd_open as *const u8),
+        ("vstd_read", vstd_read as *const u8),
+        ("vstd_write", vstd_write as *const u8),
+        ("vstd_fsync", vstd_fsync as *const u8),
+        ("vstd_fcntl", vstd_fcntl as *const u8),
+        ("vstd_close", vstd_close as *const u8),
+        ("vstd_fstat", vstd_fstat as *const u8),
+        ("vstd_stat", vstd_stat as *const u8),
+        ("vstd_lstat", vstd_lstat as *const u8),
+        ("vstd_rename", vstd_rename as *const u8),
+        ("vstd_unlink", vstd_unlink as *const u8),
+        ("vstd_rmdir", vstd_rmdir as *const u8),
+        ("vstd_mkdir", vstd_mkdir as *const u8),
+        ("vstd_getpid", vstd_getpid as *const u8),
+        ("vstd_opendir", vstd_opendir as *const u8),
+        ("vstd_readdir", vstd_readdir as *const u8),
+        ("vstd_closedir", vstd_closedir as *const u8),
+        ("vstd_bcopy", vstd_bcopy as *const u8),
     ]
 }

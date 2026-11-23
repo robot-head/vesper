@@ -74,16 +74,22 @@ pub fn host_os() -> &'static str {
 }
 
 /// The `.vsys` source of package `lib` for this host: its per-target file
-/// (`env-linux.vsys`) when it has one, else `env.vsys`.
+/// (`fs-linux-x86_64.vsys`, `env-linux.vsys`) when it has one, else
+/// `env.vsys`.
 pub fn vsys(lib: &str) -> String {
     let (t, a) = host_target();
     let dir = std_dir().join(lib);
-    let per_target = dir.join(format!("{lib}-{}.vsys", host_os()));
-    let path = if per_target.exists() {
-        per_target
-    } else {
-        dir.join(format!("{lib}.vsys"))
-    };
+    let os = host_os();
+    let arch = std::env::consts::ARCH;
+    let path = [
+        format!("{lib}-{os}-{arch}.vsys"),
+        format!("{lib}-{os}.vsys"),
+        format!("{lib}.vsys"),
+    ]
+    .into_iter()
+    .map(|f| dir.join(f))
+    .find(|p| p.exists())
+    .unwrap_or_else(|| dir.join(format!("{lib}.vsys")));
     fs::read_to_string(path)
         .unwrap()
         .replace("@TARGET@", t)
@@ -204,8 +210,44 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         fn memcpy(dst: *mut c_void, src: *const c_void, n: usize) -> *mut c_void;
         fn strchr(s: *const c_char, c: i32) -> *mut c_char;
         fn strstr(haystack: *const c_char, needle: *const c_char) -> *mut c_char;
+        fn open(path: *const c_char, flags: i32, ...) -> i32;
+        fn read(fd: i32, buf: *mut c_void, n: usize) -> isize;
+        fn write(fd: i32, buf: *const c_void, n: usize) -> isize;
+        fn fsync(fd: i32) -> i32;
+        fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+        fn close(fd: i32) -> i32;
+        fn fstat(fd: i32, st: *mut c_void) -> i32;
+        fn stat(path: *const c_char, st: *mut c_void) -> i32;
+        fn lstat(path: *const c_char, st: *mut c_void) -> i32;
+        fn rename(from: *const c_char, to: *const c_char) -> i32;
+        fn unlink(path: *const c_char) -> i32;
+        fn rmdir(path: *const c_char) -> i32;
+        fn mkdir(path: *const c_char, mode: u32) -> i32;
+        fn getpid() -> i32;
+        fn opendir(path: *const c_char) -> *mut c_void;
+        fn readdir(dir: *mut c_void) -> *mut c_void;
+        fn closedir(dir: *mut c_void) -> i32;
+        fn bcopy(src: *const c_void, dst: *mut c_void, n: usize);
     }
     vec![
+        ("open", open as *const u8),
+        ("read", read as *const u8),
+        ("write", write as *const u8),
+        ("fsync", fsync as *const u8),
+        ("fcntl", fcntl as *const u8),
+        ("close", close as *const u8),
+        ("fstat", fstat as *const u8),
+        ("stat", stat as *const u8),
+        ("lstat", lstat as *const u8),
+        ("rename", rename as *const u8),
+        ("unlink", unlink as *const u8),
+        ("rmdir", rmdir as *const u8),
+        ("mkdir", mkdir as *const u8),
+        ("getpid", getpid as *const u8),
+        ("opendir", opendir as *const u8),
+        ("readdir", readdir as *const u8),
+        ("closedir", closedir as *const u8),
+        ("bcopy", bcopy as *const u8),
         ("getenv", getenv as *const u8),
         ("getcwd", getcwd as *const u8),
         ("dlsym", dlsym as *const u8),

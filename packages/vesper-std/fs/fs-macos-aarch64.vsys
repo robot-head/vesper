@@ -1,0 +1,60 @@
+// @vesper-std/fs's import on macOS on Apple silicon (SH6 lane 13, #1408):
+// the C library itself. Every target's file declares the same functions
+// with the same signatures (src/ is one source), so the C names differ
+// only through `#[link_name]`; the constants are this target's: the `open`
+// flags, and where src/sys.ves finds the fields it reads in Apple's
+// 64-bit-inode `struct stat` (144 bytes): `st_mode` (16 bits) at byte 4,
+// `st_mtimespec` at 48, `st_size` at 96; `struct dirent`: `d_type` at byte
+// 20, `d_name` at 21.
+sys library StdFs (
+    target = "@TARGET@", abi = "@ABI@",
+    link = "dynamic", name = "c",
+    artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+) {
+    const OS: u32 = 2;
+    const O_WRONLY: i32 = 1;
+    const O_CREAT: i32 = 512;
+    const O_EXCL: i32 = 2048;
+    const O_TRUNC: i32 = 1024;
+    const O_APPEND: i32 = 8;
+    const O_CLOEXEC: i32 = 16777216;
+    const STAT_MODE_WORD: u64 = 0;
+    const STAT_MODE_SHIFT: u64 = 32;
+    const STAT_SIZE_WORD: u64 = 12;
+    const STAT_MTIME_WORD: u64 = 6;
+    const DIRENT_TYPE: u64 = 20;
+    const DIRENT_NAME: u64 = 21;
+    // A `DIR *` from `opendir`.
+    linear extern type Dir;
+    // Room for every target's `struct stat`, read word by word.
+    wire struct Stat {
+        w0: u64, w1: u64, w2: u64, w3: u64, w4: u64, w5: u64, w6: u64, w7: u64, w8: u64, w9: u64, w10: u64, w11: u64, w12: u64, w13: u64, w14: u64, w15: u64, w16: u64, w17: u64
+    }
+    fn open(nocapture in path: CStr, flags: i32, ..., mode: i64) -> ForeignVal[i32] errno;
+    fn read(fd: i32, nocapture inout buf: CSlice[u8]) -> ForeignVal[i64] errno;
+    fn write(fd: i32, nocapture in buf: CSlice[u8]) -> ForeignVal[i64] errno;
+    fn fsync(fd: i32) -> ForeignVal[i32] errno;
+    fn fcntl(fd: i32, cmd: i32, ..., arg: i64) -> ForeignVal[i32] errno;
+    fn close(fd: i32) -> ForeignVal[i32];
+    fn fstat(fd: i32, nocapture inout st: Stat) -> ForeignVal[i32] errno;
+    fn stat(nocapture in path: CStr, nocapture inout st: Stat) -> ForeignVal[i32] errno;
+    fn lstat(nocapture in path: CStr, nocapture inout st: Stat) -> ForeignVal[i32] errno;
+    fn rename(nocapture in from: CStr, nocapture in to: CStr) -> ForeignVal[i32] errno;
+    fn unlink(nocapture in path: CStr) -> ForeignVal[i32] errno;
+    fn rmdir(nocapture in path: CStr) -> ForeignVal[i32] errno;
+    fn mkdir(nocapture in path: CStr, mode: u32) -> ForeignVal[i32] errno;
+    fn getpid() -> ForeignVal[i32];
+    fn opendir(nocapture in path: CStr) -> ForeignVal[Option[Dir]] errno;
+    fn readdir(inout d: Dir) -> ForeignVal[u64];
+    fn closedir(sink d: Dir) -> ForeignVal[i32];
+    // The 8 bytes of a `struct dirent` from byte 16, which hold `d_type`
+    // and the first bytes of `d_name`.
+    #[link_name = "memcpy"]
+    fn read_word(nocapture inout word: u64, address: u64, size: u64) -> ForeignVal[u64];
+    // The address of the NUL that ends the C string at `address`.
+    #[link_name = "strchr"]
+    fn find_byte(address: u64, byte: i32) -> ForeignVal[u64];
+    // Copy `buf.len()` bytes from `address` into `buf`.
+    #[link_name = "bcopy"]
+    fn copy_from(address: u64, nocapture inout buf: CSlice[u8]) -> ForeignVal[Unit];
+}
