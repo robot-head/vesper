@@ -904,6 +904,11 @@ fn diff_replog() -> (u64, usize) {
         assert_eq!(rep.open_sessions, 0);
         assert!(rep.settled);
         digest_replog(&mut h, &rep);
+        println!(
+            "replog seed={seed} nodes={nodes} loss={loss} partition={part} digest={:016x} \
+             datagrams={} dropped={} checks={} committed={} stats={:?}",
+            rep.digest, rep.net.datagrams, rep.net.dropped, rep.checks, rep.committed, rep.stats,
+        );
         cases += 1;
     }
 
