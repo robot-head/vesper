@@ -384,3 +384,85 @@ fn float_coefficients_are_constants() {
     assert!(seen > 0, "poly was not emitted");
     assert_eq!(agree(COEFFICIENTS), "33521664");
 }
+
+#[test]
+fn narrow_extend_constant_chains_fold() {
+    let source = "fn clz_like(v: u64, k: u32) -> u64 {
+    if v == 0 {
+        return wrapping_add(64, widen_u64(k));
+    }
+    let mut x = v;
+    let mut n: u64 = 0;
+    if x >> 32 == 0 {
+        n = wrapping_add(n, 32);
+        x = x << 32;
+    }
+    if x >> 48 == 0 {
+        n = wrapping_add(n, 16);
+        x = x << 16;
+    }
+    let y: u32 = wrapping_u32(widen_u64(k));
+    wrapping_add(n, widen_u64(y))
+}
+fn main() -> u64 {
+    wrapping_add(clz_like(0, 10), clz_like(12345, 20))
+}";
+    let c = accepted(source);
+    let (_, clif) = native::object(&c.world, "main").unwrap();
+    assert!(
+        !clif.contains("clz_like::cold#"),
+        "early-return guard should not outline the hot body:\n{clif}"
+    );
+    assert!(
+        clif.matches("ireduce").count() <= 2,
+        "expected constant/round-trip narrow-extend chains to fold:\n{clif}"
+    );
+    assert_eq!(agree(source), "142");
+}
+
+#[test]
+fn sign_extend_round_trips_fold() {
+    let source = "fn sum_signed(x: u8) -> i64 {
+    let a = wrapping_i8(x);
+    let b = wrapping_i8(widen_i64(a));
+    widen_i64(b)
+}
+fn main() -> i64 {
+    wrapping_add(sum_signed(250), sum_signed(7))
+}";
+    let c = accepted(source);
+    let (_, clif) = native::object(&c.world, "main").unwrap();
+    assert!(
+        clif.matches("sextend").count() <= 2,
+        "expected sextend(ireduce(sextend(x))) round-trips to fold:\n{clif}"
+    );
+    assert_eq!(agree(source), "1");
+}
+
+#[test]
+fn trivial_arith_and_bool_extends_fold() {
+    let source = "fn pick(in s: Slice[u8], i: u64) -> u64 {
+    if i < s.len() {
+        match s.try_get(i) {
+            Option::Some(b) => widen_u64(b),
+            Option::None => 0,
+        }
+    } else {
+        99
+    }
+}
+fn main() -> u64 {
+    let mut seq = ChunkSeq::new[u8]();
+    seq.push(7);
+    seq.push(11);
+    let s = seq.as_slice();
+    wrapping_add(pick(in s, 1), pick(in s, 5))
+}";
+    let c = accepted(source);
+    let (_, clif) = native::object(&c.world, "main").unwrap();
+    assert!(
+        !clif.contains("imul_imm"),
+        "expected unit-stride imul_imm x, 1 to fold:\n{clif}"
+    );
+    assert_eq!(agree(source), "110");
+}

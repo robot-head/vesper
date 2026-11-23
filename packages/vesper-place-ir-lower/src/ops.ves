@@ -10,7 +10,9 @@ use @vesper/check-data::names::{
     Names
 };
 use @vesper/check-data::types::{
-    Types
+    Types,
+    TyKind,
+    TyPass
 };
 use @vesper/check-data::util::{
     add,
@@ -25,25 +27,18 @@ use self::ast::{
     Ast,
     Ex
 };
+use @vesper/place-ir::codes::{
+    Lit
+};
 
 const NONE32: u32 = 4294967295;
 const NONE64: u64 = 18446744073709551615;
-
-// check-data type kinds.
-const K_NAMED: u8 = 1;
-const K_ROW: u8 = 4;
-
-// Passes.
-const P_IN: u8 = 0;
-const P_INOUT: u8 = 1;
-const P_SINK: u8 = 2;
 
 // AST expression kinds (ast.ves).
 const X_LITERAL: u8 = 1;
 const X_NAME: u8 = 2;
 const X_FIELD: u8 = 5;
 const X_BINARY: u8 = 8;
-const LIT_INT: u64 = 0;
 
 // Vector element codes (Elem).
 const E_NONE: u8 = 0;
@@ -89,7 +84,7 @@ fn no_seq() -> SeqRes {
         matched: false,
         label: 0,
         has_recv: false,
-        recv_pass: P_IN,
+        recv_pass: TyPass::In,
         arg_mode: 0
     }
 }
@@ -99,7 +94,7 @@ fn no_tiled() -> TiledRes {
         matched: false,
         label: 0,
         cap: 0,
-        recv_pass: P_IN,
+        recv_pass: TyPass::In,
         recv_proj: NONE32,
         skip_first: false,
         is_recv_first: false
@@ -126,14 +121,14 @@ fn span_type(in c: Ctx, s0: u64, s1: u64) -> u32 {
 
 pub fn is_seq_type(in c: Ctx, ty: u32) -> bool {
     ty != NONE32
-        && c.types.kind(ty) == K_NAMED
+        && c.types.kind(ty) == TyKind::Named
         && c.types.name(ty) == c.world.k.chunk_seq
         && c.types.arity(ty) == 1
 }
 
 pub fn is_slice_type(in c: Ctx, ty: u32) -> bool {
     ty != NONE32
-        && c.types.kind(ty) == K_NAMED
+        && c.types.kind(ty) == TyKind::Named
         && c.types.name(ty) == c.world.k.slice
         && c.types.arity(ty) == 1
 }
@@ -144,14 +139,14 @@ fn is_seq_or_slice(in c: Ctx, ty: u32) -> bool {
 
 fn is_string_type(in c: Ctx, ty: u32) -> bool {
     ty != NONE32
-        && c.types.kind(ty) == K_NAMED
+        && c.types.kind(ty) == TyKind::Named
         && c.types.name(ty) == c.world.k.string
         && c.types.arity(ty) == 0
 }
 
 fn is_str_type(in c: Ctx, ty: u32) -> bool {
     ty != NONE32
-        && c.types.kind(ty) == K_NAMED
+        && c.types.kind(ty) == TyKind::Named
         && c.types.name(ty) == c.world.k.str_
         && c.types.arity(ty) == 0
 }
@@ -162,7 +157,7 @@ fn is_text(in c: Ctx, ty: u32) -> bool {
 
 fn is_tiled_seq(in c: Ctx, ty: u32) -> bool {
     ty != NONE32
-        && c.types.kind(ty) == K_NAMED
+        && c.types.kind(ty) == TyKind::Named
         && c.types.name(ty) == c.world.k.tiled_seq
         && (c.types.arity(ty) == 1 || c.types.arity(ty) == 2)
 }
@@ -306,7 +301,7 @@ fn pack_shape(elem: u8, lanes: u64) -> u64 {
 
 fn elem_from_type(in c: Ctx, ty: u32) -> u8 {
     let n = c.types.node(ty);
-    if n.kind == K_NAMED && n.n == 0 {
+    if n.kind == TyKind::Named && n.n == 0 {
         elem_of_name(in c, n.name)
     } else {
         E_NONE
@@ -319,7 +314,7 @@ fn shape_of(in c: Ctx, ty: u32) -> u64 {
     }
     let n = c.types.node(ty);
     let k = c.world.k;
-    if n.kind != K_NAMED || (n.name != k.vec && n.name != k.mask) || n.n != 2 {
+    if n.kind != TyKind::Named || (n.name != k.vec && n.name != k.mask) || n.n != 2 {
         return NONE64;
     }
     let elem = elem_from_type(in c, c.types.arg(ty, 0));
@@ -327,7 +322,7 @@ fn shape_of(in c: Ctx, ty: u32) -> u64 {
         return NONE64;
     }
     let cn = c.types.node(c.types.arg(ty, 1));
-    if cn.kind != K_NAMED || cn.n != 0 {
+    if cn.kind != TyKind::Named || cn.n != 0 {
         return NONE64;
     }
     let lanes = parse_u16_sym(in c.names, cn.name);
@@ -346,7 +341,7 @@ fn explicit_shape(in c: Ctx, in a: Ast, e: Ex) -> u64 {
         return NONE64;
     }
     let cn = c.types.node(n32(a.x(inc(e.c))));
-    if cn.kind != K_NAMED {
+    if cn.kind != TyKind::Named {
         return NONE64;
     }
     let lanes = parse_u16_sym(in c.names, cn.name);
@@ -470,7 +465,7 @@ fn resolve_slice_io(inout c: Ctx, in a: Ast, e: Ex, n: u32) -> SeqRes {
         matched: true,
         label: label,
         has_recv: false,
-        recv_pass: P_IN,
+        recv_pass: TyPass::In,
         arg_mode: if store {
             3
         } else {
@@ -544,7 +539,7 @@ fn resolve_shared_method(inout c: Ctx, method: u32, arity: u64) -> SeqRes {
             matched: true,
             label: sym_str(inout c, "CopyFrom { total: false }"),
             has_recv: true,
-            recv_pass: P_INOUT,
+            recv_pass: TyPass::Inout,
             arg_mode: 5
         };
     }
@@ -553,7 +548,7 @@ fn resolve_shared_method(inout c: Ctx, method: u32, arity: u64) -> SeqRes {
             matched: true,
             label: sym_str(inout c, "CopyFrom { total: true }"),
             has_recv: true,
-            recv_pass: P_INOUT,
+            recv_pass: TyPass::Inout,
             arg_mode: 5
         };
     }
@@ -562,7 +557,7 @@ fn resolve_shared_method(inout c: Ctx, method: u32, arity: u64) -> SeqRes {
             matched: true,
             label: sym_str(inout c, "CopyWithin { total: false }"),
             has_recv: true,
-            recv_pass: P_INOUT,
+            recv_pass: TyPass::Inout,
             arg_mode: 0
         };
     }
@@ -571,7 +566,7 @@ fn resolve_shared_method(inout c: Ctx, method: u32, arity: u64) -> SeqRes {
             matched: true,
             label: sym_str(inout c, "CopyWithin { total: true }"),
             has_recv: true,
-            recv_pass: P_INOUT,
+            recv_pass: TyPass::Inout,
             arg_mode: 0
         };
     }
@@ -585,7 +580,7 @@ fn resolve_shared_method(inout c: Ctx, method: u32, arity: u64) -> SeqRes {
             matched: true,
             label: lbl,
             has_recv: true,
-            recv_pass: P_INOUT,
+            recv_pass: TyPass::Inout,
             arg_mode: 0
         };
     }
@@ -594,7 +589,7 @@ fn resolve_shared_method(inout c: Ctx, method: u32, arity: u64) -> SeqRes {
             matched: true,
             label: sym_str(inout c, "FillRange { total: true }"),
             has_recv: true,
-            recv_pass: P_INOUT,
+            recv_pass: TyPass::Inout,
             arg_mode: 0
         };
     }
@@ -603,7 +598,7 @@ fn resolve_shared_method(inout c: Ctx, method: u32, arity: u64) -> SeqRes {
             matched: true,
             label: sym_str(inout c, "SumBe16"),
             has_recv: true,
-            recv_pass: P_IN,
+            recv_pass: TyPass::In,
             arg_mode: 0
         };
     }
@@ -612,7 +607,7 @@ fn resolve_shared_method(inout c: Ctx, method: u32, arity: u64) -> SeqRes {
             matched: true,
             label: sym_str(inout c, "BytesEq"),
             has_recv: true,
-            recv_pass: P_IN,
+            recv_pass: TyPass::In,
             arg_mode: 1
         };
     }
@@ -621,7 +616,7 @@ fn resolve_shared_method(inout c: Ctx, method: u32, arity: u64) -> SeqRes {
             matched: true,
             label: sym_str(inout c, "BytesCmp"),
             has_recv: true,
-            recv_pass: P_IN,
+            recv_pass: TyPass::In,
             arg_mode: 1
         };
     }
@@ -630,7 +625,7 @@ fn resolve_shared_method(inout c: Ctx, method: u32, arity: u64) -> SeqRes {
             matched: true,
             label: sym_str(inout c, "FindByte"),
             has_recv: true,
-            recv_pass: P_IN,
+            recv_pass: TyPass::In,
             arg_mode: 0
         };
     }
@@ -639,7 +634,7 @@ fn resolve_shared_method(inout c: Ctx, method: u32, arity: u64) -> SeqRes {
             matched: true,
             label: sym_str(inout c, "FindEither"),
             has_recv: true,
-            recv_pass: P_IN,
+            recv_pass: TyPass::In,
             arg_mode: 0
         };
     }
@@ -648,7 +643,7 @@ fn resolve_shared_method(inout c: Ctx, method: u32, arity: u64) -> SeqRes {
             matched: true,
             label: sym_str(inout c, "FindNotIn"),
             has_recv: true,
-            recv_pass: P_IN,
+            recv_pass: TyPass::In,
             arg_mode: 0
         };
     }
@@ -657,7 +652,7 @@ fn resolve_shared_method(inout c: Ctx, method: u32, arity: u64) -> SeqRes {
             matched: true,
             label: sym_str(inout c, "AtomicLoad { width: None }"),
             has_recv: true,
-            recv_pass: P_IN,
+            recv_pass: TyPass::In,
             arg_mode: 0
         };
     }
@@ -666,7 +661,7 @@ fn resolve_shared_method(inout c: Ctx, method: u32, arity: u64) -> SeqRes {
             matched: true,
             label: sym_str(inout c, "AtomicLoad { width: Some(4) }"),
             has_recv: true,
-            recv_pass: P_IN,
+            recv_pass: TyPass::In,
             arg_mode: 0
         };
     }
@@ -675,7 +670,7 @@ fn resolve_shared_method(inout c: Ctx, method: u32, arity: u64) -> SeqRes {
             matched: true,
             label: sym_str(inout c, "AtomicLoad { width: Some(8) }"),
             has_recv: true,
-            recv_pass: P_IN,
+            recv_pass: TyPass::In,
             arg_mode: 0
         };
     }
@@ -684,7 +679,7 @@ fn resolve_shared_method(inout c: Ctx, method: u32, arity: u64) -> SeqRes {
             matched: true,
             label: sym_str(inout c, "AtomicStore { width: None }"),
             has_recv: true,
-            recv_pass: P_INOUT,
+            recv_pass: TyPass::Inout,
             arg_mode: 0
         };
     }
@@ -693,7 +688,7 @@ fn resolve_shared_method(inout c: Ctx, method: u32, arity: u64) -> SeqRes {
             matched: true,
             label: sym_str(inout c, "AtomicStore { width: Some(4) }"),
             has_recv: true,
-            recv_pass: P_INOUT,
+            recv_pass: TyPass::Inout,
             arg_mode: 0
         };
     }
@@ -702,7 +697,7 @@ fn resolve_shared_method(inout c: Ctx, method: u32, arity: u64) -> SeqRes {
             matched: true,
             label: sym_str(inout c, "AtomicStore { width: Some(8) }"),
             has_recv: true,
-            recv_pass: P_INOUT,
+            recv_pass: TyPass::Inout,
             arg_mode: 0
         };
     }
@@ -711,7 +706,7 @@ fn resolve_shared_method(inout c: Ctx, method: u32, arity: u64) -> SeqRes {
             matched: true,
             label: sym_str(inout c, "EqIgnoreAsciiCase"),
             has_recv: true,
-            recv_pass: P_IN,
+            recv_pass: TyPass::In,
             arg_mode: 1
         };
     }
@@ -720,7 +715,7 @@ fn resolve_shared_method(inout c: Ctx, method: u32, arity: u64) -> SeqRes {
             matched: true,
             label: sym_str(inout c, "MakeAsciiLowercase { total: false }"),
             has_recv: true,
-            recv_pass: P_INOUT,
+            recv_pass: TyPass::Inout,
             arg_mode: 0
         };
     }
@@ -729,7 +724,7 @@ fn resolve_shared_method(inout c: Ctx, method: u32, arity: u64) -> SeqRes {
             matched: true,
             label: sym_str(inout c, "MakeAsciiLowercase { total: true }"),
             has_recv: true,
-            recv_pass: P_INOUT,
+            recv_pass: TyPass::Inout,
             arg_mode: 0
         };
     }
@@ -757,9 +752,9 @@ fn resolve_shared_method(inout c: Ctx, method: u32, arity: u64) -> SeqRes {
         label: label,
         has_recv: true,
         recv_pass: if write {
-            P_INOUT
+            TyPass::Inout
         } else {
-            P_IN
+            TyPass::In
         },
         arg_mode: 0
     }
@@ -775,7 +770,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                     matched: true,
                     label: sym_str(inout c, "AsSlice"),
                     has_recv: true,
-                    recv_pass: P_IN,
+                    recv_pass: TyPass::In,
                     arg_mode: 0
                 };
             }
@@ -795,7 +790,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 matched: true,
                 label: sym_str(inout c, "Swap"),
                 has_recv: false,
-                recv_pass: P_IN,
+                recv_pass: TyPass::In,
                 arg_mode: 2
             };
         }
@@ -804,7 +799,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 matched: true,
                 label: sym_str(inout c, "Replace"),
                 has_recv: false,
-                recv_pass: P_IN,
+                recv_pass: TyPass::In,
                 arg_mode: 3
             };
         }
@@ -813,7 +808,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 matched: true,
                 label: sym_str(inout c, "New"),
                 has_recv: false,
-                recv_pass: P_IN,
+                recv_pass: TyPass::In,
                 arg_mode: 0
             };
         }
@@ -822,7 +817,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 matched: true,
                 label: sym_str(inout c, "WithCapacity"),
                 has_recv: false,
-                recv_pass: P_IN,
+                recv_pass: TyPass::In,
                 arg_mode: 0
             };
         }
@@ -831,7 +826,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 matched: true,
                 label: sym_str(inout c, "Finish"),
                 has_recv: false,
-                recv_pass: P_IN,
+                recv_pass: TyPass::In,
                 arg_mode: 0
             };
         }
@@ -850,7 +845,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 matched: true,
                 label: sym_str(inout c, "Str(Len)"),
                 has_recv: true,
-                recv_pass: P_IN,
+                recv_pass: TyPass::In,
                 arg_mode: 0
             };
         }
@@ -859,7 +854,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 matched: true,
                 label: sym_str(inout c, "Str(ByteAt)"),
                 has_recv: true,
-                recv_pass: P_IN,
+                recv_pass: TyPass::In,
                 arg_mode: 0
             };
         }
@@ -868,7 +863,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 matched: true,
                 label: sym_str(inout c, "Str(TryByteAt)"),
                 has_recv: true,
-                recv_pass: P_IN,
+                recv_pass: TyPass::In,
                 arg_mode: 0
             };
         }
@@ -877,7 +872,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 matched: true,
                 label: sym_str(inout c, "Str(AsStr)"),
                 has_recv: true,
-                recv_pass: P_IN,
+                recv_pass: TyPass::In,
                 arg_mode: 0
             };
         }
@@ -886,7 +881,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 matched: true,
                 label: sym_str(inout c, "Str(AsBytes)"),
                 has_recv: true,
-                recv_pass: P_IN,
+                recv_pass: TyPass::In,
                 arg_mode: 0
             };
         }
@@ -896,7 +891,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                     matched: true,
                     label: sym_str(inout c, "Str(PushStr)"),
                     has_recv: true,
-                    recv_pass: P_INOUT,
+                    recv_pass: TyPass::Inout,
                     arg_mode: 1
                 };
             }
@@ -905,7 +900,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                     matched: true,
                     label: sym_str(inout c, "Str(PushChar)"),
                     has_recv: true,
-                    recv_pass: P_INOUT,
+                    recv_pass: TyPass::Inout,
                     arg_mode: 0
                 };
             }
@@ -914,7 +909,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                     matched: true,
                     label: sym_str(inout c, "Str(Clear)"),
                     has_recv: true,
-                    recv_pass: P_INOUT,
+                    recv_pass: TyPass::Inout,
                     arg_mode: 0
                 };
             }
@@ -923,7 +918,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                     matched: true,
                     label: sym_str(inout c, "Str(Reserve)"),
                     has_recv: true,
-                    recv_pass: P_INOUT,
+                    recv_pass: TyPass::Inout,
                     arg_mode: 0
                 };
             }
@@ -936,7 +931,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 matched: true,
                 label: sym_str(inout c, "Len"),
                 has_recv: true,
-                recv_pass: P_IN,
+                recv_pass: TyPass::In,
                 arg_mode: 0
             };
         }
@@ -945,7 +940,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 matched: true,
                 label: sym_str(inout c, "Push"),
                 has_recv: true,
-                recv_pass: P_INOUT,
+                recv_pass: TyPass::Inout,
                 arg_mode: 0
             };
         }
@@ -954,7 +949,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 matched: true,
                 label: sym_str(inout c, "Pop"),
                 has_recv: true,
-                recv_pass: P_INOUT,
+                recv_pass: TyPass::Inout,
                 arg_mode: 0
             };
         }
@@ -963,7 +958,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 matched: true,
                 label: sym_str(inout c, "Get"),
                 has_recv: true,
-                recv_pass: P_IN,
+                recv_pass: TyPass::In,
                 arg_mode: 0
             };
         }
@@ -972,7 +967,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 matched: true,
                 label: sym_str(inout c, "Set"),
                 has_recv: true,
-                recv_pass: P_INOUT,
+                recv_pass: TyPass::Inout,
                 arg_mode: 0
             };
         }
@@ -981,7 +976,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 matched: true,
                 label: sym_str(inout c, "TryGet"),
                 has_recv: true,
-                recv_pass: P_IN,
+                recv_pass: TyPass::In,
                 arg_mode: 0
             };
         }
@@ -990,7 +985,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 matched: true,
                 label: sym_str(inout c, "Last"),
                 has_recv: true,
-                recv_pass: P_IN,
+                recv_pass: TyPass::In,
                 arg_mode: 0
             };
         }
@@ -999,7 +994,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 matched: true,
                 label: sym_str(inout c, "TrySet"),
                 has_recv: true,
-                recv_pass: P_INOUT,
+                recv_pass: TyPass::Inout,
                 arg_mode: 0
             };
         }
@@ -1008,7 +1003,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 matched: true,
                 label: sym_str(inout c, "Clear"),
                 has_recv: true,
-                recv_pass: P_INOUT,
+                recv_pass: TyPass::Inout,
                 arg_mode: 0
             };
         }
@@ -1017,7 +1012,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 matched: true,
                 label: sym_str(inout c, "Truncate"),
                 has_recv: true,
-                recv_pass: P_INOUT,
+                recv_pass: TyPass::Inout,
                 arg_mode: 0
             };
         }
@@ -1026,7 +1021,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 matched: true,
                 label: sym_str(inout c, "Reserve"),
                 has_recv: true,
-                recv_pass: P_INOUT,
+                recv_pass: TyPass::Inout,
                 arg_mode: 0
             };
         }
@@ -1035,7 +1030,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 matched: true,
                 label: sym_str(inout c, "Extend"),
                 has_recv: true,
-                recv_pass: P_INOUT,
+                recv_pass: TyPass::Inout,
                 arg_mode: 1
             };
         }
@@ -1044,7 +1039,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 matched: true,
                 label: sym_str(inout c, "ExtendAsciiLowercase"),
                 has_recv: true,
-                recv_pass: P_INOUT,
+                recv_pass: TyPass::Inout,
                 arg_mode: 1
             };
         }
@@ -1053,7 +1048,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 matched: true,
                 label: sym_str(inout c, "Resize"),
                 has_recv: true,
-                recv_pass: P_INOUT,
+                recv_pass: TyPass::Inout,
                 arg_mode: 0
             };
         }
@@ -1062,7 +1057,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 matched: true,
                 label: sym_str(inout c, "ExtendFromWithin { total: false }"),
                 has_recv: true,
-                recv_pass: P_INOUT,
+                recv_pass: TyPass::Inout,
                 arg_mode: 0
             };
         }
@@ -1071,7 +1066,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 matched: true,
                 label: sym_str(inout c, "ExtendFromWithin { total: true }"),
                 has_recv: true,
-                recv_pass: P_INOUT,
+                recv_pass: TyPass::Inout,
                 arg_mode: 0
             };
         }
@@ -1080,7 +1075,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 matched: true,
                 label: sym_str(inout c, "ExtendReversed"),
                 has_recv: true,
-                recv_pass: P_INOUT,
+                recv_pass: TyPass::Inout,
                 arg_mode: 1
             };
         }
@@ -1089,7 +1084,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 matched: true,
                 label: sym_str(inout c, "AsSlice"),
                 has_recv: true,
-                recv_pass: P_IN,
+                recv_pass: TyPass::In,
                 arg_mode: 0
             };
         }
@@ -1101,7 +1096,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 matched: true,
                 label: sym_str(inout c, "SliceLen"),
                 has_recv: true,
-                recv_pass: P_IN,
+                recv_pass: TyPass::In,
                 arg_mode: 0
             };
         }
@@ -1110,7 +1105,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 matched: true,
                 label: sym_str(inout c, "SliceGet"),
                 has_recv: true,
-                recv_pass: P_IN,
+                recv_pass: TyPass::In,
                 arg_mode: 0
             };
         }
@@ -1119,7 +1114,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 matched: true,
                 label: sym_str(inout c, "SliceSet"),
                 has_recv: true,
-                recv_pass: P_INOUT,
+                recv_pass: TyPass::Inout,
                 arg_mode: 0
             };
         }
@@ -1128,7 +1123,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 matched: true,
                 label: sym_str(inout c, "TryGet"),
                 has_recv: true,
-                recv_pass: P_IN,
+                recv_pass: TyPass::In,
                 arg_mode: 0
             };
         }
@@ -1137,7 +1132,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 matched: true,
                 label: sym_str(inout c, "Last"),
                 has_recv: true,
-                recv_pass: P_IN,
+                recv_pass: TyPass::In,
                 arg_mode: 0
             };
         }
@@ -1146,7 +1141,7 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 matched: true,
                 label: sym_str(inout c, "TrySet"),
                 has_recv: true,
-                recv_pass: P_INOUT,
+                recv_pass: TyPass::Inout,
                 arg_mode: 0
             };
         }
@@ -1159,14 +1154,14 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
 
 fn field_arg_name(in c: Ctx, ty: u32) -> u32 {
     let n = c.types.node(ty);
-    if n.kind == K_ROW {
+    if n.kind == TyKind::Row {
         let row = c.types.row(n.r2);
         if row.n == 0 && row.tail != 0 {
             return wrapping_sub(row.tail, 1);
         }
         return NONE32;
     }
-    if n.kind == K_NAMED && n.n == 0 {
+    if n.kind == TyKind::Named && n.n == 0 {
         return n.name;
     }
     NONE32
@@ -1207,7 +1202,7 @@ fn tiled_seq_adt(in c: Ctx, seq_ty: u32) -> u32 {
     }
     let elem = c.types.arg(seq_ty, 0);
     let en = c.types.node(elem);
-    if en.kind != K_NAMED || en.n != 0 {
+    if en.kind != TyKind::Named || en.n != 0 {
         return NONE32;
     }
     let ai = c.world.lookup(en.name);
@@ -1303,7 +1298,7 @@ pub fn resolve_tiled(inout c: Ctx, in a: Ast, e: Ex, name: u32, receiver: u64) -
             matched: true,
             label: format_tiled_adt(inout c, "New", adt),
             cap: 0,
-            recv_pass: P_IN,
+            recv_pass: TyPass::In,
             recv_proj: NONE32,
             skip_first: false,
             is_recv_first: false
@@ -1318,7 +1313,7 @@ pub fn resolve_tiled(inout c: Ctx, in a: Ast, e: Ex, name: u32, receiver: u64) -
             matched: true,
             label: format_tiled_adt(inout c, "WithCapacity", adt),
             cap: 0,
-            recv_pass: P_IN,
+            recv_pass: TyPass::In,
             recv_proj: NONE32,
             skip_first: false,
             is_recv_first: false
@@ -1345,7 +1340,7 @@ pub fn resolve_tiled(inout c: Ctx, in a: Ast, e: Ex, name: u32, receiver: u64) -
             matched: true,
             label: label,
             cap: wrapping_add(rlabel, 1),
-            recv_pass: P_IN,
+            recv_pass: TyPass::In,
             recv_proj: NONE32,
             skip_first: true,
             is_recv_first: false
@@ -1356,7 +1351,7 @@ pub fn resolve_tiled(inout c: Ctx, in a: Ast, e: Ex, name: u32, receiver: u64) -
             matched: true,
             label: sym_str(inout c, "Len"),
             cap: 0,
-            recv_pass: P_IN,
+            recv_pass: TyPass::In,
             recv_proj: NONE32,
             skip_first: false,
             is_recv_first: true
@@ -1377,7 +1372,7 @@ pub fn resolve_tiled(inout c: Ctx, in a: Ast, e: Ex, name: u32, receiver: u64) -
             matched: true,
             label: c.names.intern(in buf.as_slice()),
             cap: 0,
-            recv_pass: P_IN,
+            recv_pass: TyPass::In,
             recv_proj: NONE32,
             skip_first: false,
             is_recv_first: true
@@ -1388,7 +1383,7 @@ pub fn resolve_tiled(inout c: Ctx, in a: Ast, e: Ex, name: u32, receiver: u64) -
             matched: true,
             label: format_tiled_adt(inout c, "Push", adt_row.name),
             cap: 0,
-            recv_pass: P_INOUT,
+            recv_pass: TyPass::Inout,
             recv_proj: NONE32,
             skip_first: false,
             is_recv_first: true
@@ -1399,7 +1394,7 @@ pub fn resolve_tiled(inout c: Ctx, in a: Ast, e: Ex, name: u32, receiver: u64) -
             matched: true,
             label: format_tiled_adt(inout c, "Get", adt_row.name),
             cap: 0,
-            recv_pass: P_IN,
+            recv_pass: TyPass::In,
             recv_proj: NONE32,
             skip_first: false,
             is_recv_first: true
@@ -1410,7 +1405,7 @@ pub fn resolve_tiled(inout c: Ctx, in a: Ast, e: Ex, name: u32, receiver: u64) -
             matched: true,
             label: format_tiled_adt(inout c, "Set", adt_row.name),
             cap: 0,
-            recv_pass: P_INOUT,
+            recv_pass: TyPass::Inout,
             recv_proj: NONE32,
             skip_first: false,
             is_recv_first: true
@@ -1425,7 +1420,7 @@ pub fn resolve_tiled(inout c: Ctx, in a: Ast, e: Ex, name: u32, receiver: u64) -
             matched: true,
             label: format_tiled_col(inout c, "ColGet", adt_row.name, field),
             cap: 0,
-            recv_pass: P_IN,
+            recv_pass: TyPass::In,
             recv_proj: field,
             skip_first: false,
             is_recv_first: true
@@ -1440,7 +1435,7 @@ pub fn resolve_tiled(inout c: Ctx, in a: Ast, e: Ex, name: u32, receiver: u64) -
             matched: true,
             label: format_tiled_col(inout c, "ColSet", adt_row.name, field),
             cap: 0,
-            recv_pass: P_INOUT,
+            recv_pass: TyPass::Inout,
             recv_proj: field,
             skip_first: false,
             is_recv_first: true
@@ -1473,7 +1468,7 @@ pub fn resolve_tiled(inout c: Ctx, in a: Ast, e: Ex, name: u32, receiver: u64) -
             matched: true,
             label: c.names.intern(in buf.as_slice()),
             cap: 0,
-            recv_pass: P_IN,
+            recv_pass: TyPass::In,
             recv_proj: field,
             skip_first: false,
             is_recv_first: true
@@ -1639,7 +1634,7 @@ pub fn resolve_vector(inout c: Ctx, in a: Ast, e: Ex, name: u32) -> VecRes {
         }
         let t0 = n32(a.x(e.c));
         let nd = c.types.node(t0);
-        if nd.kind != K_NAMED || nd.n != 0 || !profile_name(in c, nd.name) {
+        if nd.kind != TyKind::Named || nd.n != 0 || !profile_name(in c, nd.name) {
             return no_vec();
         }
         let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
@@ -1715,7 +1710,7 @@ pub fn resolve_vector(inout c: Ctx, in a: Ast, e: Ex, name: u32) -> VecRes {
     let mut consts: ChunkSeq[u64] = ChunkSeq::new[u64]();
     for i in const_lo..const_hi {
         let ax = a.ex(a.x(add(e.b, inc(wrapping_mul(i, 2)))));
-        if ax.kind != X_LITERAL || ax.a != LIT_INT || ax.c != 0 || ax.b > 65535 {
+        if ax.kind != X_LITERAL || ax.a != Lit::Int || ax.c != 0 || ax.b > 65535 {
             return no_vec();
         }
         consts.push(ax.b);

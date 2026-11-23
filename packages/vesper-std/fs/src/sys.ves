@@ -1,0 +1,748 @@
+// @vesper-std/fs::sys: the package's operations over the C library
+// (SH6 lane 13, #1408). `StdFs` is libc itself on Linux and macOS
+// (fs-@OS@-@ARCH@.vsys) and a shim of the same shape on Windows. Each
+// function here does what the Rust standard library's `std::fs` does for
+// the same request, so the two report the same results and errors: the
+// same `open` flags and modes, retries on `EINTR`, and `std`'s mapping
+// from `errno` to an error kind. Errors come back through `err` as the
+// error word of src/lib.ves (the kind in the low 8 bits, the OS error in
+// the high 32).
+use self::{
+    Metadata,
+    kind_file,
+    kind_dir,
+    kind_symlink,
+    kind_other
+};
+
+const EINTR: u32 = 4;
+const ENOENT: u32 = 2;
+const EEXIST: u32 = 17;
+
+// ---------------------------------------------------------------------------
+// Errors.
+
+// The `IoError` kind of the OS error `e`, as `std` decodes it: an `errno`
+// value on Unix, a Win32 error on Windows (the shim's last error).
+fn errno_kind(e: u32) -> u32 {
+    if StdFs::OS == 3 {
+        return match e {
+            2 => 1,
+            3 => 1,
+            5 => 2,
+            8 => 12,
+            14 => 12,
+            50 => 11,
+            80 => 3,
+            87 => 7,
+            120 => 11,
+            123 => 7,
+            145 => 6,
+            161 => 7,
+            183 => 3,
+            206 => 7,
+            267 => 4,
+            _ => 13,
+        };
+    }
+    let mac = StdFs::OS == 2;
+    match e {
+        1 => 2,
+        2 => 1,
+        4 => 8,
+        12 => 12,
+        13 => 2,
+        17 => 3,
+        20 => 4,
+        21 => 5,
+        22 => 7,
+        36 => if mac {
+            13
+        } else {
+            7
+        },
+        39 => if mac {
+            13
+        } else {
+            6
+        },
+        63 => if mac {
+            7
+        } else {
+            13
+        },
+        66 => if mac {
+            6
+        } else {
+            13
+        },
+        38 => if mac {
+            13
+        } else {
+            11
+        },
+        78 => if mac {
+            11
+        } else {
+            13
+        },
+        95 => if mac {
+            13
+        } else {
+            11
+        },
+        102 => if mac {
+            11
+        } else {
+            13
+        },
+        _ => 13,
+    }
+}
+
+// The error word of the OS error `e`.
+pub fn os_error_word(e: u32) -> u64 {
+    wrapping_add(wrapping_mul(widen_u64(e), 4294967296), widen_u64(errno_kind(e)))
+}
+
+// The kind of an error word.
+pub fn os_word_kind(word: u64) -> u32 {
+    wrapping_u32(word & 255)
+}
+
+// A path that is not a C string (it holds a NUL byte): `invalid_input()`
+// with no OS error.
+fn bad_path() -> u64 {
+    7
+}
+
+// A status: 0, or 1 with `err` set from `(r, e)` when `r` is negative.
+fn status(r: i32, e: u32, inout err: u64) -> u32 {
+    if r < 0 {
+        err = os_error_word(e);
+        return 1;
+    }
+    err = 0;
+    0
+}
+
+// ---------------------------------------------------------------------------
+// Files.
+
+// Open modes, as src/lib.ves names them.
+fn open_flags(mode: u32) -> i32 {
+    let f = match mode {
+        0 => 0,
+        1 => StdFs::O_WRONLY | StdFs::O_CREAT | StdFs::O_TRUNC,
+        2 => StdFs::O_WRONLY | StdFs::O_CREAT | StdFs::O_EXCL,
+        _ => StdFs::O_WRONLY | StdFs::O_APPEND | StdFs::O_CREAT,
+    };
+    f | StdFs::O_CLOEXEC
+}
+
+// Open `path` in `mode`: its descriptor, or -1 with `err` set.
+pub fn os_open(in path: Slice[u8], mode: u32, inout err: u64) -> i32 eff [Ffi[StdFs]] {
+    let flags = open_flags(mode);
+    loop {
+        match StdFs::open(in path, flags, 438) {
+            Result::Ok((fd, e)) => {
+                if fd >= 0 {
+                    err = 0;
+                    return fd;
+                }
+                if e != EINTR {
+                    err = os_error_word(e);
+                    return -1;
+                }
+            },
+            Result::Err(_) => {
+                err = bad_path();
+                return -1;
+            },
+        }
+    }
+}
+
+// Close a descriptor `open` returned.
+pub fn os_close(fd: i32) eff [Ffi[StdFs]] {
+    let _ = StdFs::close(fd);
+}
+
+// Fill `buf[at..]`, stopping early only at end of file: the bytes read.
+pub fn os_read(fd: i32, inout buf: ChunkSeq[u8], at: u64, inout err: u64) -> u64 eff [Ffi[StdFs]] {
+    let end = buf.len();
+    let mut done = at;
+    err = 0;
+    loop {
+        if done >= end {
+            break;
+        }
+        let (n, e) = StdFs::read(fd, inout buf[done..end]);
+        if n == 0 {
+            break;
+        }
+        if n > 0 {
+            done = wrapping_add(done, wrapping_u64(n));
+        } else if e != EINTR {
+            err = os_error_word(e);
+            break;
+        }
+    }
+    wrapping_sub(done, at)
+}
+
+// Write all of `data`: 0, or 1 with `err` set.
+pub fn os_write(fd: i32, in data: Slice[u8], inout err: u64) -> u32 eff [Ffi[StdFs]] {
+    let end = data.len();
+    let mut done: u64 = 0;
+    loop {
+        if done >= end {
+            break;
+        }
+        let (n, e) = StdFs::write(fd, in data[done..end]);
+        if n == 0 {
+            // `write_zero()`: the file took nothing.
+            err = 10;
+            return 1;
+        }
+        if n > 0 {
+            done = wrapping_add(done, wrapping_u64(n));
+        } else if e != EINTR {
+            err = os_error_word(e);
+            return 1;
+        }
+    }
+    err = 0;
+    0
+}
+
+// Flush the file's data and metadata to storage: `fsync`, or on macOS
+// `fcntl(F_FULLFSYNC)` as `std` does.
+pub fn os_sync(fd: i32, inout err: u64) -> u32 eff [Ffi[StdFs]] {
+    loop {
+        let (r, e) = if StdFs::OS == 2 {
+            StdFs::fcntl(fd, 51, 0)
+        } else {
+            StdFs::fsync(fd)
+        };
+        if r >= 0 || e != EINTR {
+            return status(r, e, inout err);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Metadata.
+
+fn new_stat() -> Stat {
+    Stat {
+        w0: 0,
+        w1: 0,
+        w2: 0,
+        w3: 0,
+        w4: 0,
+        w5: 0,
+        w6: 0,
+        w7: 0,
+        w8: 0,
+        w9: 0,
+        w10: 0,
+        w11: 0,
+        w12: 0,
+        w13: 0,
+        w14: 0,
+        w15: 0,
+        w16: 0,
+        w17: 0,
+    }
+}
+
+fn stat_word(in st: Stat, i: u64) -> u64 {
+    match i {
+        0 => st.w0,
+        1 => st.w1,
+        2 => st.w2,
+        3 => st.w3,
+        4 => st.w4,
+        5 => st.w5,
+        6 => st.w6,
+        7 => st.w7,
+        8 => st.w8,
+        9 => st.w9,
+        10 => st.w10,
+        11 => st.w11,
+        12 => st.w12,
+        13 => st.w13,
+        14 => st.w14,
+        15 => st.w15,
+        16 => st.w16,
+        _ => st.w17,
+    }
+}
+
+// The kind of a `st_mode` (`S_IFMT` bits), a symbolic link first as
+// `std`'s `FileType` checks.
+fn mode_kind(mode: u64) -> u32 {
+    let t = mode & 61440;
+    if t == 40960 {
+        kind_symlink()
+    } else if t == 16384 {
+        kind_dir()
+    } else if t == 32768 {
+        kind_file()
+    } else {
+        kind_other()
+    }
+}
+
+fn metadata_of(in st: Stat) -> Metadata {
+    let mode = wrapping_shr_u64(
+        stat_word(in st, StdFs::STAT_MODE_WORD),
+        wrapping_u32(StdFs::STAT_MODE_SHIFT)
+    );
+    Metadata {
+        size: stat_word(in st, StdFs::STAT_SIZE_WORD),
+        mtime_s: wrapping_i64(stat_word(in st, StdFs::STAT_MTIME_WORD)),
+        mtime_ns: wrapping_u32(stat_word(in st, wrapping_add(StdFs::STAT_MTIME_WORD, 1))),
+        kind: mode_kind(mode),
+    }
+}
+
+fn empty_metadata() -> Metadata {
+    Metadata {
+        size: 0,
+        mtime_s: 0,
+        mtime_ns: 0,
+        kind: 0,
+    }
+}
+
+// The metadata of `path`, following a symbolic link when `follow`; all
+// zero with `err` set on failure.
+pub fn os_metadata(in path: Slice[u8], follow: bool, inout err: u64) -> Metadata eff [Ffi[StdFs]] {
+    let mut st = new_stat();
+    let r = if follow {
+        StdFs::stat(in path, inout st)
+    } else {
+        StdFs::lstat(in path, inout st)
+    };
+    match r {
+        Result::Ok((r, e)) => {
+            if status(r, e, inout err) != 0 {
+                return empty_metadata();
+            }
+            metadata_of(in st)
+        },
+        Result::Err(_) => {
+            err = bad_path();
+            empty_metadata()
+        },
+    }
+}
+
+// The length of the open file `fd` (0 when it cannot be read).
+pub fn os_file_len(fd: i32) -> u64 eff [Ffi[StdFs]] {
+    let mut st = new_stat();
+    let (r, _) = StdFs::fstat(fd, inout st);
+    if r < 0 {
+        return 0;
+    }
+    stat_word(in st, StdFs::STAT_SIZE_WORD)
+}
+
+fn is_dir(in path: Slice[u8]) -> bool eff [Ffi[StdFs]] {
+    let mut err: u64 = 0;
+    let m = os_metadata(in path, true, inout err);
+    err == 0 && m.kind == kind_dir()
+}
+
+// ---------------------------------------------------------------------------
+// Paths.
+
+fn path_status(r: Result[(i32, u32), ForeignInvalid], inout err: u64) -> u32 {
+    match r {
+        Result::Ok((r, e)) => status(r, e, inout err),
+        Result::Err(_) => {
+            err = bad_path();
+            1
+        },
+    }
+}
+
+// Rename `from` to `to`, replacing `to` if it exists.
+pub fn os_rename(in from: Slice[u8], in to: Slice[u8], inout err: u64) -> u32 eff [Ffi[StdFs]] {
+    path_status(StdFs::rename(in from, in to), inout err)
+}
+
+pub fn os_remove_file(in path: Slice[u8], inout err: u64) -> u32 eff [Ffi[StdFs]] {
+    path_status(StdFs::unlink(in path), inout err)
+}
+
+fn rmdir(in path: Slice[u8], inout err: u64) -> u32 eff [Ffi[StdFs]] {
+    path_status(StdFs::rmdir(in path), inout err)
+}
+
+fn mkdir(in path: Slice[u8], inout err: u64) -> u32 eff [Ffi[StdFs]] {
+    path_status(StdFs::mkdir(in path, 511), inout err)
+}
+
+fn is_separator(b: u8) -> bool {
+    b == 47 || (StdFs::OS == 3 && b == 92)
+}
+
+fn byte_at(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(b) => b,
+        Option::None => 0,
+    }
+}
+
+// The length of the directory part of `path`, its trailing separator
+// included: 4 for `a/b/c` (`a/b/`), 0 for a bare name. `/` separates on
+// every platform; `\` and a drive prefix (`C:`) only on Windows, since on
+// Unix a backslash is an ordinary name byte.
+pub fn os_parent_len(in path: Slice[u8]) -> u64 {
+    let mut i = path.len();
+    loop {
+        if i == 0 {
+            break;
+        }
+        if is_separator(byte_at(in path, wrapping_sub(i, 1))) {
+            return i;
+        }
+        i = wrapping_sub(i, 1);
+    }
+    if StdFs::OS == 3 && path.len() >= 2 && byte_at(in path, 1) == 58 {
+        return 2;
+    }
+    0
+}
+
+// The length of `path`'s parent as `std`'s `Path::parent` finds it, with
+// its trailing separators dropped (`a/b/` and `a//b` give `a`, `a` gives
+// the empty path), or -1 for a root, which has none.
+fn parent_end(in path: Slice[u8]) -> i64 {
+    let mut end = path.len();
+    loop {
+        if end == 0 || !is_separator(byte_at(in path, wrapping_sub(end, 1))) {
+            break;
+        }
+        end = wrapping_sub(end, 1);
+    }
+    if end == 0 {
+        return -1;
+    }
+    let cut = os_parent_len(in path[0..end]);
+    if cut == 0 {
+        return 0;
+    }
+    let mut p = cut;
+    loop {
+        if p == 0 || !is_separator(byte_at(in path, wrapping_sub(p, 1))) {
+            break;
+        }
+        p = wrapping_sub(p, 1);
+    }
+    if p == 0 {
+        // The parent is the root.
+        return 1;
+    }
+    if StdFs::OS == 3 && p == 2 && byte_at(in path, 1) == 58 {
+        // `C:\x`: the parent is the drive's root, `C:\`.
+        return wrapping_i64(cut);
+    }
+    wrapping_i64(p)
+}
+
+// Create one directory, or with `recursive` it and its missing parents
+// (and then an existing directory is fine), as `std`'s `create_dir_all`.
+pub fn os_create_dir(in path: Slice[u8], recursive: bool, inout err: u64) -> u32 eff [Ffi[StdFs]] {
+    if !recursive {
+        return mkdir(in path, inout err);
+    }
+    if path.len() == 0 {
+        err = 0;
+        return 0;
+    }
+    if mkdir(in path, inout err) == 0 {
+        return 0;
+    }
+    if os_word_kind(err) != 1 {
+        if is_dir(in path) {
+            err = 0;
+            return 0;
+        }
+        return 1;
+    }
+    let p = parent_end(in path);
+    if p < 0 {
+        // `std`'s "failed to create whole tree": an `other()` error.
+        err = 13;
+        return 1;
+    }
+    if os_create_dir(in path[0..wrapping_u64(p)], true, inout err) != 0 {
+        return 1;
+    }
+    if mkdir(in path, inout err) == 0 {
+        return 0;
+    }
+    if is_dir(in path) {
+        err = 0;
+        return 0;
+    }
+    1
+}
+
+// Remove an empty directory, or with `recursive` a directory and
+// everything in it, as `std`'s `remove_dir_all`: a symbolic link is
+// removed, not followed, and entries that vanish meanwhile are skipped.
+// The walk opens each directory relative to its parent's descriptor with
+// `O_NOFOLLOW | O_DIRECTORY`, so a directory swapped for a link while the
+// tree is removed is unlinked, never entered.
+pub fn os_remove_dir(in path: Slice[u8], recursive: bool, inout err: u64) -> u32 eff [Ffi[StdFs]] {
+    if !recursive {
+        return rmdir(in path, inout err);
+    }
+    let m = os_metadata(in path, false, inout err);
+    if err != 0 {
+        return 1;
+    }
+    if m.kind == kind_symlink() {
+        return os_remove_file(in path, inout err);
+    }
+    remove_tree(StdFs::AT_FDCWD, in path, false, inout err)
+}
+
+// `unlinkat(dirfd, name, flags)`: 0, or 1 with `err` set.
+fn unlink_at(dirfd: i32, in name: Slice[u8], flags: i32, inout err: u64) -> u32 eff [Ffi[StdFs]] {
+    path_status(StdFs::unlinkat(dirfd, in name, flags), inout err)
+}
+
+// Remove the directory `name` under `dirfd` and everything in it; a
+// `child` that turns out not to be a directory is unlinked, and one that
+// is already gone is not an error.
+fn remove_tree(dirfd: i32, in name: Slice[u8], child: bool, inout err: u64)
+    -> u32 eff [Ffi[StdFs]] {
+    let flags = StdFs::O_CLOEXEC | StdFs::O_NOFOLLOW | StdFs::O_DIRECTORY;
+    let fd = loop {
+        match StdFs::openat(dirfd, in name, flags, 0) {
+            Result::Ok((fd, e)) => {
+                if fd >= 0 {
+                    break fd;
+                }
+                if e == EINTR {
+                    continue;
+                }
+                if child && (e == StdFs::ENOTDIR || e == StdFs::ELOOP) {
+                    return unlink_at(dirfd, in name, 0, inout err);
+                }
+                err = os_error_word(e);
+                return gone(child, inout err);
+            },
+            Result::Err(_) => {
+                err = bad_path();
+                return 1;
+            },
+        }
+    };
+    let (opened, e) = StdFs::fdopendir(fd);
+    let mut d = match opened {
+        Option::Some(d) => d,
+        Option::None => {
+            os_close(fd);
+            err = os_error_word(e);
+            return gone(child, inout err);
+        },
+    };
+    let mut name_buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    loop {
+        let (p, e) = next_entry(inout d);
+        if p == 0 {
+            if e != 0 {
+                let _ = StdFs::closedir(d);
+                err = os_error_word(e);
+                return 1;
+            }
+            break;
+        }
+        let mut w: u64 = 0;
+        let _ = StdFs::read_word(inout w, wrapping_add(p, 16), 8);
+        let at = wrapping_add(p, StdFs::DIRENT_NAME);
+        let n = wrapping_sub(StdFs::find_byte(at, 0), at);
+        if !is_dots(w, n) {
+            name_buf.resize(n, 0);
+            StdFs::copy_from(at, inout name_buf[0..n]);
+            // `d_type` says what the entry was when it was listed; a
+            // directory (or an unknown kind) is opened as one, which fails
+            // safely when it is something else by now.
+            let t = dirent_byte(w, StdFs::DIRENT_TYPE);
+            let failed = if t == 4 || t == 0 {
+                remove_tree(fd, in name_buf.as_slice(), true, inout err)
+            } else if unlink_at(fd, in name_buf.as_slice(), 0, inout err) != 0 {
+                gone(true, inout err)
+            } else {
+                0
+            };
+            if failed != 0 {
+                let _ = StdFs::closedir(d);
+                return 1;
+            }
+        }
+    }
+    let _ = StdFs::closedir(d);
+    if unlink_at(dirfd, in name, StdFs::AT_REMOVEDIR, inout err) != 0 {
+        return gone(child, inout err);
+    }
+    0
+}
+
+// A failure under `remove_dir_all`: an entry inside the tree that is
+// already gone is not one.
+fn gone(child: bool, inout err: u64) -> u32 {
+    if child && os_word_kind(err) == 1 {
+        err = 0;
+        return 0;
+    }
+    1
+}
+
+// The next `struct dirent` of `d` and 0, `NULL` and 0 after the last, or
+// `NULL` and the error when reading the directory fails: `errno` is
+// cleared first, since `readdir` returns `NULL` in both cases.
+fn next_entry(inout d: Dir) -> (u64, u32) eff [Ffi[StdFs]] {
+    let _ = StdFs::fill(StdFs::errno_address(), 0, 4);
+    let (p, e) = StdFs::readdir(inout d);
+    if p != 0 {
+        return (p, 0);
+    }
+    (0, e)
+}
+
+// Flush a directory's entries to storage after a rename: `fsync` on the
+// directory on Unix, nothing on Windows, where the rename is durable.
+pub fn os_sync_dir(in path: Slice[u8], inout err: u64) -> u32 eff [Ffi[StdFs]] {
+    if StdFs::OS == 3 {
+        err = 0;
+        return 0;
+    }
+    let fd = os_open(in path, 0, inout err);
+    if fd < 0 {
+        return 1;
+    }
+    let r = os_sync(fd, inout err);
+    os_close(fd);
+    r
+}
+
+// A number for temporary names: the process id in the high 32 bits and
+// `n` in the low 32.
+pub fn os_unique(n: u64) -> u64 eff [Ffi[StdFs]] {
+    let pid = widen_u64(wrapping_u32(StdFs::getpid()));
+    wrapping_add(wrapping_mul(pid, 4294967296), n & 4294967295)
+}
+
+// ---------------------------------------------------------------------------
+// Directory listings.
+
+// Byte `at` of a `struct dirent` (16 <= `at` < 24) from the word `w` at
+// byte 16.
+fn dirent_byte(w: u64, at: u64) -> u64 {
+    wrapping_shr_u64(w, wrapping_u32(wrapping_mul(wrapping_sub(at, 16), 8))) & 255
+}
+
+// Whether the entry is `.` or `..`, from its name's length and the word
+// at byte 16, which holds the name's first bytes.
+fn is_dots(w: u64, n: u64) -> bool {
+    if n == 0 || n > 2 || dirent_byte(w, StdFs::DIRENT_NAME) != 46 {
+        return false;
+    }
+    n == 1 || dirent_byte(w, wrapping_add(StdFs::DIRENT_NAME, 1)) == 46
+}
+
+// The kind of a `d_type`; `DT_UNKNOWN` asks `lstat`, as `std` does.
+fn entry_kind(t: u8, in dir: Slice[u8], in name: Slice[u8]) -> u32 eff [Ffi[StdFs]] {
+    if t == 4 {
+        return kind_dir();
+    }
+    if t == 8 {
+        return kind_file();
+    }
+    if t == 10 {
+        return kind_symlink();
+    }
+    if t != 0 {
+        return kind_other();
+    }
+    let mut full: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    full.extend(in dir);
+    full.push(47);
+    full.extend(in name);
+    let mut err: u64 = 0;
+    let m = os_metadata(in full.as_slice(), false, inout err);
+    if err != 0 {
+        return kind_other();
+    }
+    m.kind
+}
+
+// Append the names in directory `dir` (not `.` and `..`) to the arena
+// `bytes`/`ends`/`kinds` of src/walk.ves, each prefixed by `prefix` and a
+// `/` when `prefix` is not empty, in the OS's order: 0, or 1 with `err`
+// set when the directory does not open.
+pub fn os_list(
+    in dir: Slice[u8],
+    in prefix: Slice[u8],
+    inout bytes: ChunkSeq[u8],
+    inout ends: ChunkSeq[u64],
+    inout kinds: ChunkSeq[u32],
+    inout err: u64
+) -> u32 eff [Ffi[StdFs]] {
+    let (opened, e) = match StdFs::opendir(in dir) {
+        Result::Ok(r) => r,
+        Result::Err(_) => {
+            err = bad_path();
+            return 1;
+        },
+    };
+    let mut d = match opened {
+        Option::Some(d) => d,
+        Option::None => {
+            err = os_error_word(e);
+            return 1;
+        },
+    };
+    err = 0;
+    loop {
+        let (p, e) = next_entry(inout d);
+        if p == 0 {
+            if e != 0 {
+                let _ = StdFs::closedir(d);
+                err = os_error_word(e);
+                return 1;
+            }
+            break;
+        }
+        // `d_type` and the start of `d_name` in one word; the name's
+        // bytes are copied straight into the arena.
+        let mut w: u64 = 0;
+        let _ = StdFs::read_word(inout w, wrapping_add(p, 16), 8);
+        let name = wrapping_add(p, StdFs::DIRENT_NAME);
+        let n = wrapping_sub(StdFs::find_byte(name, 0), name);
+        if !is_dots(w, n) {
+            if prefix.len() > 0 {
+                bytes.extend(in prefix);
+                bytes.push(47);
+            }
+            let at = bytes.len();
+            let end = wrapping_add(at, n);
+            bytes.resize(end, 0);
+            StdFs::copy_from(name, inout bytes[at..end]);
+            let t = wrapping_u8(dirent_byte(w, StdFs::DIRENT_TYPE));
+            let k = entry_kind(t, in dir, in bytes[at..end]);
+            ends.push(end);
+            kinds.push(k);
+        }
+    }
+    let _ = StdFs::closedir(d);
+    0
+}

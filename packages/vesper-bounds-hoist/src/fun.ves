@@ -14,6 +14,9 @@ use self::words::{
     SeqWord,
     Word,
 };
+use @vesper/check-data::types::{
+    TyPass
+};
 
 const NONE32: u32 = 4294967295;
 
@@ -27,11 +30,6 @@ const T_JUMP: u8 = 1;
 const T_BRANCH: u8 = 2;
 const T_MATCH: u8 = 3;
 const T_UNREACHABLE: u8 = 4;
-
-// Passes.
-const P_IN: u8 = 0;
-const P_INOUT: u8 = 1;
-const P_SINK: u8 = 2;
 
 // Binary operator classes.
 const B_OTHER: u32 = 0;
@@ -328,7 +326,7 @@ impl Fun {
         match self.args.try_get(i) {
             Option::Some(x) => x,
             Option::None => Arg {
-                pass: P_IN,
+                pass: TyPass::In,
                 value: NONE32,
                 place: 0
             },
@@ -340,7 +338,7 @@ impl Fun {
             Option::Some(x) => x,
             Option::None => Prm {
                 name: 0,
-                pass: P_IN,
+                pass: TyPass::In,
                 flags: 0,
                 tyname: 0
             },
@@ -541,7 +539,10 @@ impl Fun {
         }
         for j in 0..w(i.gn) {
             let a = self.arg(add(w(i.g0), j));
-            if a.pass != P_IN && a.pass != P_SINK && a.place != 0 && self.root_of(a.place) == root {
+            if a.pass != TyPass::In
+                && a.pass != TyPass::Sink
+                && a.place != 0
+                && self.root_of(a.place) == root {
                 return true;
             }
         }

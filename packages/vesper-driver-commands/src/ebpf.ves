@@ -1,0 +1,129 @@
+// `vesper ebpf`: CLI subcommand/flag parsing and error formatting in Vesper,
+// delegating ELF/hex/raw decoding, pre-flight verification, stack-bound
+// checking, and optional Linux kernel load (`src/ebpf_commands.rs`) to
+// `HybridCommands::hc_ebpf_check`.
+use @vesper/driver::{
+    Args,
+    args_count,
+    arg_start,
+    arg_end,
+    eq
+};
+use super::{
+    arg,
+    byte_at,
+    print,
+    fail,
+    stdout_stream
+};
+
+const BPF_MAX_STACK_BYTES: u64 = 512;
+
+pub fn run_ebpf(in args: Args) -> i64 eff [Ffi[HybridCommands]] {
+    let n = args_count(in args);
+    if n <= 1 {
+        print_help();
+        return 0;
+    }
+    let sub_buf = arg(in args, 1);
+    let sub = sub_buf.as_slice();
+    if eq(in sub, in "-h") || eq(in sub, in "--help") {
+        print_help();
+        return 0;
+    }
+    if !eq(in sub, in "check") {
+        let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        err.extend(in "unknown ebpf subcommand '".as_bytes());
+        err.extend(in sub);
+        err.extend(in "'; see vesper ebpf --help".as_bytes());
+        return fail(in err.as_slice());
+    }
+    let mut has_input = false;
+    let mut input: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut load = false;
+    let mut disassemble = false;
+    let mut budget: u64 = BPF_MAX_STACK_BYTES;
+    let mut i: u64 = 2;
+    loop {
+        if i >= n {
+            break;
+        }
+        let a_buf = arg(in args, i);
+        let a = a_buf.as_slice();
+        if eq(in a, in "-h") || eq(in a, in "--help") {
+            print_help();
+            return 0;
+        } else if eq(in a, in "--load") {
+            load = true;
+        } else if eq(in a, in "--disassemble") {
+            disassemble = true;
+        } else if eq(in a, in "--stack-budget") {
+            i = wrapping_add(i, 1);
+            if i >= n {
+                return fail(in "--stack-budget requires a byte count".as_bytes());
+            }
+            let val_buf = arg(in args, i);
+            match parse_u64_decimal(in val_buf.as_slice()) {
+                Option::Some(v) => budget = v,
+                Option::None => return fail(in "--stack-budget requires a byte count".as_bytes()),
+            }
+        } else if a.len() != 0 && byte_at(in a, 0) == 45 {
+            let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
+            err.extend(in "unknown ebpf check option '".as_bytes());
+            err.extend(in a);
+            err.push(39);
+            return fail(in err.as_slice());
+        } else {
+            if has_input {
+                return fail(in "only one program is supported".as_bytes());
+            }
+            has_input = true;
+            input.extend(in a);
+        }
+        i = wrapping_add(i, 1);
+    }
+    if !has_input {
+        return fail(in "missing program; see vesper ebpf --help".as_bytes());
+    }
+    let err_len = HybridCommands::hc_ebpf_check(in input.as_slice(), load, disassemble, budget);
+    if err_len == 0 {
+        return 0;
+    }
+    let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    err.resize(err_len, 0);
+    let actual = HybridCommands::hc_ebpf_err(inout err.as_slice_mut());
+    if actual > err.len() {
+        err.resize(actual, 0);
+        let _got = HybridCommands::hc_ebpf_err(inout err.as_slice_mut());
+    } else {
+        err.truncate(actual);
+    }
+    fail(in err.as_slice())
+}
+
+fn print_help() eff [Ffi[HybridCommands]] {
+    print(
+        stdout_stream(),
+        in "Usage: vesper ebpf check <object.o | program.bin | program.hex> [--load] [--stack-budget <bytes>]\n\nRun the Vesper eBPF pre-flight verifier and report typed findings.\n\nOptions:\n  --load                 Also load into the kernel where bpf() is permitted (Linux)\n  --stack-budget <bytes> Root stack budget for the stack-bound report (default 512)\n  --disassemble          Print the instructions\n"
+            .as_bytes()
+    );
+}
+
+fn parse_u64_decimal(in s: Slice[u8]) -> Option[u64] {
+    if s.len() == 0 {
+        return Option::None;
+    }
+    let mut acc: u64 = 0;
+    for i in 0..s.len() {
+        let b = byte_at(in s, i);
+        if b < 48 || b > 57 {
+            return Option::None;
+        }
+        let d = wrapping_sub(widen_u64(b), 48);
+        if acc > 429496729 || (acc == 429496729 && d > 5) {
+            return Option::None;
+        }
+        acc = wrapping_add(wrapping_mul(acc, 10), d);
+    }
+    Option::Some(acc)
+}

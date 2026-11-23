@@ -183,14 +183,26 @@ the debug default (`tests/differential.rs`, every swap on): 42.60 s against
 packages, encode 14.7 ms, Vesper 4.0 ms, decode 0.4 ms against 48.7 ms of
 debug Rust.
 
+## Part 2b: the coherence-gated trait session
+
+The full coherence-gated Pact session and query solver now run from Vesper in the hybrid build (`crates/vesper-hybrid/modules/pact`, `// @export abi 4`). Rust remains the default compiler (`0` Rust lines deleted).
+
+**Swap point.** `pact_frontend::PactSessionTable` (`install_pact_session`, `Frontend::metadata_only`, `Elaborator::select_vesper`), installed by `crates/vesper-hybrid/src/hybrid.rs`. For dependency-free packages without >64-bit integer literals, `check_package` opens `VesperPactSession` directly on `@vesper/check-pact` (`sha256.ves`, `session_input.ves`, `session_tables.ves`, `session.ves`), skipping Rust's `Frontend::with_base` validation, `lower_bindings`, and `build_session`, and `Elaborator` solves trait queries via `pact_session_solve`.
+
+| Check | Result |
+| --- | --- |
+| `declaration_pass_matches_rust`, `unoptimized_jit_agrees` | 0 of 1,933 cases differ |
+| `session_diagnostics_agree_across_corpus_and_mutants` | 0 of 1,808 cases differ (1,401 session rejections matched) |
+| `session_queries_and_revision_agree_with_rust` | pass (queries and SHA-256 revision match Rust) |
+| `check_package_agrees_through_the_swap_point` | 0 of 1,454 modules differ (1,408 rejected by Vesper) |
+| `vesper-hybrid` `hybrid_matches_the_default_compiler` (Windows x86_64 MSVC, debug) | 0 of 2,206 runs differ across 554 files (`default 207.51 s`, `hybrid 73.65 s`, `0.355x`) |
+| `divergent-pact` `hybrid_matches_the_default_compiler` | 120 runs differ (`examples\traits\overlap_rejected.ves` caught) |
+| Release ABBA (`CHECK_HARNESS_SPEED=1`, 34 corpus worlds, Windows x86_64 MSVC) | `320.71 ms` Rust vs `9.52 ms` Vesper with encode+decode (`0.03x`); `310.98 ms` vs `1.89 ms` pass alone (`0.01x`) |
+
 ## What is left
 
-- **Part 2b: the session.** Lower the declarations to `@vesper/pact`
-  programs directly (no `vesper-pact-binding` DTOs) and run coherence, so
-  a clean answer no longer needs Rust's `Frontend::new` and the swap
-  replaces Rust work instead of checking ahead of it.
-- **Part 3: call resolution** (`Elaborator`: query contexts, `select`,
-  `normalize`, `TraitCalls::resolve`) through `@vesper/pact`'s solver.
+- **Part 3: call resolution** (`Elaborator`: query contexts, `normalize`,
+  `TraitCalls::resolve`) and full elaboration wiring beyond `select_vesper`.
 - **Part 4: monomorphization and the builtin traits** (`mono.rs`,
   `builtin_traits.rs`).
 - **Dependencies.** `add_dependency` and cross-package trait references

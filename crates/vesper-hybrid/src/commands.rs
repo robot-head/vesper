@@ -10,6 +10,7 @@ use std::io;
 use std::path::Path;
 
 thread_local! {
+    static LAST_EBPF_ERR: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     static LAST_FORGE_ERR: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
 }
 
@@ -164,6 +165,189 @@ pub mod host {
         #[cfg(not(unix))]
         let ok = meta.is_file();
         u32::from(ok)
+    }
+
+    /// Run `vesper ebpf check` on `path`, printing verification/stack-bound
+    /// output to stdout as `src/ebpf_commands.rs` does. Returns `0` on success
+    /// or `err.len()` (`> 0`) on error, storing the error bytes in `LAST_EBPF_ERR`.
+    ///
+    /// # Safety
+    /// `path` is a lent byte slice.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn hc_ebpf_check(
+        path: *const u8,
+        len: usize,
+        load: bool,
+        disassemble: bool,
+        budget: u64,
+    ) -> u64 {
+        // SAFETY: lent for the call.
+        let path =
+            Path::new(unsafe { std::ffi::OsStr::from_encoded_bytes_unchecked(bytes(path, len)) });
+        let budget = u32::try_from(budget).unwrap_or(u32::MAX);
+        match ebpf_check_impl(path, load, disassemble, budget) {
+            Ok(()) => 0,
+            Err(err) => {
+                let bytes = err.into_bytes();
+                let n = bytes.len() as u64;
+                super::LAST_EBPF_ERR.with(|cell| *cell.borrow_mut() = bytes);
+                n
+            }
+        }
+    }
+
+    /// Copy `LAST_EBPF_ERR` into `buf` (copy-out protocol).
+    ///
+    /// # Safety
+    /// `buf` is a lent writable slice of `len` bytes.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn hc_ebpf_err(buf: *mut u8, len: usize) -> u64 {
+        super::LAST_EBPF_ERR.with(|cell| {
+            let data = cell.borrow();
+            if data.len() <= len && !buf.is_null() && !data.is_empty() {
+                // SAFETY: `buf` holds `len >= data.len()` bytes.
+                unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), buf, data.len()) };
+            }
+            data.len() as u64
+        })
+    }
+
+    fn ebpf_program(path: &Path, bytes: &[u8]) -> Result<vesper_ebpf::Program, String> {
+        use vesper_ebpf::{Program, ProgramType, RawInsn, elf, insn};
+        let fail = |e: String| format!("{}: {e}", path.display());
+        if bytes.starts_with(b"\x7fELF") {
+            return elf::read_object(bytes).map_err(|e| fail(format!("{e:?}")));
+        }
+        let slots = if path.extension().is_some_and(|e| e == "hex" || e == "txt") {
+            let mut raw = Vec::new();
+            for (n, line) in String::from_utf8_lossy(bytes).lines().enumerate() {
+                let line = line.split('#').next().unwrap_or_default().trim();
+                if line.is_empty() {
+                    continue;
+                }
+                let digits: String = line.chars().filter(|c| !c.is_whitespace()).collect();
+                if digits.len() != 16 || !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    return Err(fail(format!(
+                        "line {}: expected one 8-byte slot as 16 hex digits",
+                        n + 1
+                    )));
+                }
+                for i in 0..8 {
+                    raw.push(
+                        u8::from_str_radix(&digits[2 * i..2 * i + 2], 16)
+                            .map_err(|e| e.to_string())?,
+                    );
+                }
+            }
+            raw
+        } else {
+            bytes.to_vec()
+        };
+        if slots.is_empty() {
+            return Err(fail("program has no instructions".into()));
+        }
+        let insns: Vec<RawInsn> =
+            insn::slots_from_bytes(&slots).map_err(|e| fail(format!("{e:?}")))?;
+        Ok(Program {
+            name: path
+                .file_stem()
+                .map_or_else(|| "prog".into(), |s| s.to_string_lossy().into_owned()),
+            prog_type: ProgramType::Xdp,
+            insns,
+            maps: Vec::new(),
+            map_relocs: Vec::new(),
+            functions: Vec::new(),
+            license: "Dual MIT/GPL".into(),
+            attach: String::new(),
+            kfuncs: Vec::new(),
+            core_relos: Vec::new(),
+            lines: Vec::new(),
+        })
+    }
+
+    fn ebpf_check_impl(
+        input: &Path,
+        load: bool,
+        disassemble: bool,
+        budget: u32,
+    ) -> Result<(), String> {
+        use vesper::stack_bound;
+        use vesper_ebpf::{VerifierPolicy, insn};
+        let bytes = std::fs::read(input).map_err(|e| format!("{}: {e}", input.display()))?;
+        let prog = ebpf_program(input, &bytes)?;
+        if disassemble {
+            print!("{}", insn::disassemble(&prog.insns));
+        }
+        let report = match vesper_ebpf::verify(&prog, &VerifierPolicy::default()) {
+            Ok(report) => report,
+            Err(e) => {
+                for f in vesper_ebpf::findings(&prog, &VerifierPolicy::default()) {
+                    let at = f.inst.map_or_else(String::new, |i| format!(" at insn {i}"));
+                    println!("error[{}]: {}{at}: {}", f.rule, f.function, f.message);
+                }
+                return Err(format!("ebpf check: '{}' rejected ({})", prog.name, e.rule));
+            }
+        };
+        println!(
+            "ebpf check: '{}' accepted ({} insn(s) processed, {} path(s), worst stack {} bytes)",
+            prog.name, report.insns_processed, report.paths_completed, report.worst_stack
+        );
+        let graph = stack_bound::StackGraph::from(&report.call_graph);
+        let root = graph
+            .functions
+            .first()
+            .map(|f| f.name.clone())
+            .ok_or("ebpf check: the verifier returned an empty call graph")?;
+        let bound = stack_bound::stack_bound_report(
+            &graph,
+            &stack_bound::StackBoundPolicy {
+                roots: vec![stack_bound::StackBudget {
+                    function: root,
+                    budget_bytes: budget,
+                }],
+                ..Default::default()
+            },
+        )?;
+        print!("{}", stack_bound::render(&bound));
+        for f in &bound.findings {
+            println!("error[{}]: {}: {}", f.rule, f.function, f.message);
+        }
+        if !bound.accepted() {
+            return Err("ebpf check: stack bound exceeded".into());
+        }
+        if load {
+            ebpf_kernel_load(&prog)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn ebpf_kernel_load(prog: &vesper_ebpf::Program) -> Result<(), String> {
+        use vesper_ebpf::kernel::{LoadError, load};
+        match load(prog) {
+            Ok(_) => {
+                println!("kernel: loaded and accepted by the running kernel's verifier");
+                Ok(())
+            }
+            Err(LoadError::Unavailable { errno }) => {
+                println!(
+                    "kernel: unavailable (bpf() refused with errno {errno}); only the pre-flight verifier ran"
+                );
+                Ok(())
+            }
+            Err(LoadError::Rejected { errno, log }) => Err(format!(
+                "kernel: rejected by the running kernel's verifier (errno {errno}):\n{log}"
+            )),
+            Err(e) => Err(format!("kernel: {e}")),
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn ebpf_kernel_load(_prog: &vesper_ebpf::Program) -> Result<(), String> {
+        println!(
+            "kernel: unavailable (eBPF loading needs Linux); only the pre-flight verifier ran"
+        );
+        Ok(())
     }
 
     /// Execute `vesper forge <check|expand|lean>` after CLI argument parsing,

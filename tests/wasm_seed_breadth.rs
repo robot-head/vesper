@@ -248,9 +248,6 @@ fn mutable_element_views_are_refused_only_when_reached() {
         return;
     }
     let prefix = r#"fn set(inout x: u64) { x = 3; }
-fn by_match(inout s: ChunkSeq[u64]) {
-    match s.try_get_mut(0) { Option::Some(x) => set(inout x), Option::None => {} }
-}
 fn by_index(inout s: ChunkSeq[u64]) eff [Fail[RuntimeError]] { set(inout s[0]); }
 "#;
     for o in configs() {
@@ -258,20 +255,210 @@ fn by_index(inout s: ChunkSeq[u64]) eff [Fail[RuntimeError]] { set(inout s[0]); 
         let (component, _) = port(&unused, &o).expect("unused mutable views are encodable");
         assert_eq!(run_main(&component), "7");
 
-        for (write, error_class) in [
-            ("by_match(inout s);", "Unsupported(Operation)"),
-            (
-                "handle Fail[RuntimeError] in { by_index(inout s); } with { return v => v, raise(e, k) => (), };",
-                "Invalid",
-            ),
-        ] {
-            let source = format!(
-                "{prefix}fn main() -> u64 {{ let mut s = ChunkSeq::new[u64](); s.push(1); {write} s.len() }}"
-            );
-            let Err(error) = port(&source, &o) else {
-                panic!("port accepted a reachable mutable element view: {write}");
-            };
-            assert!(error.contains(error_class), "{error}: {write}");
+        let source = format!(
+            "{prefix}fn main() -> u64 {{ let mut s = ChunkSeq::new[u64](); s.push(1); handle Fail[RuntimeError] in {{ by_index(inout s); }} with {{ return v => v, raise(e, k) => (), }}; s.len() }}"
+        );
+        let Err(error) = port(&source, &o) else {
+            panic!("port accepted a reachable mutable index view: by_index");
+        };
+        assert!(error.contains("Invalid"), "{error}");
+    }
+}
+
+#[test]
+fn try_get_mut_runs_like_the_evaluator() {
+    if !corpus_shard::Shard::from_environment().contains(9) {
+        return;
+    }
+    let source = r#"
+struct Pair { a: u64, b: u64 }
+fn set(inout x: u64) { x = 3; }
+fn main() -> u64 {
+    let mut s = ChunkSeq::new[u64]();
+    s.push(1);
+    s.push(10);
+    match s.try_get_mut(0) {
+        Option::Some(x) => set(inout x),
+        Option::None => {},
+    }
+    let mut ps = ChunkSeq::new[Pair]();
+    ps.push(Pair { a: 4, b: 5 });
+    match ps.try_get_mut(0) {
+        Option::Some(p) => { p.b = 9; },
+        Option::None => {},
+    }
+    let old = match ps.try_get_mut(0) {
+        Option::Some(p) => replace(inout p, Pair { a: 20, b: 30 }),
+        Option::None => Pair { a: 0, b: 0 },
+    };
+    let oob = match ps.try_get_mut(5) {
+        Option::Some(p) => p.a,
+        Option::None => 7,
+    };
+    let s0 = match s.try_get(0) { Option::Some(v) => v, Option::None => 0 };
+    let p0_sum = match ps.try_get(0) {
+        Option::Some(v) => wrapping_add(wrapping_mul(v.a, 10), v.b),
+        Option::None => 0,
+    };
+    wrapping_add(
+        wrapping_add(wrapping_mul(s0, 10000), wrapping_mul(old.b, 1000)),
+        wrapping_add(p0_sum, oob)
+    )
+}
+"#;
+    for o in configs() {
+        let (component, world) = port(source, &o).expect("compile try_get_mut");
+        let expected = evaluate(&world);
+        assert_ne!(expected, "trap");
+        assert_eq!(run_main(&component), expected);
+    }
+}
+
+#[test]
+fn narrow_integers_run_like_the_evaluator() {
+    if !corpus_shard::Shard::from_environment().contains(10) {
+        return;
+    }
+    let programs: &[&str] = &[
+        r#"fn main() -> u64 {
+    let a: i8 = -100;
+    let b: i8 = 30;
+    let c: i8 = wrapping_add(a, b);
+    let d: i8 = wrapping_mul(a, 2);
+    let e: i8 = ~a;
+    let f: i8 = -(-12);
+    let g: i16 = -20000;
+    let h: i16 = wrapping_sub(g, 15000);
+    let i: u16 = 50000;
+    let j: u16 = wrapping_add(i, 20000);
+    let k: i32 = -1000000000;
+    let l: i32 = wrapping_mul(k, 3);
+    let m: i32 = rotate_left(k, 5);
+    let n: i32 = rotate_right(k, 5);
+    let mut acc: u64 = 0;
+    acc = wrapping_add(acc, wrapping_u64(widen_i64(c)));
+    acc = wrapping_add(wrapping_mul(acc, 31), wrapping_u64(widen_i64(d)));
+    acc = wrapping_add(wrapping_mul(acc, 31), wrapping_u64(widen_i64(e)));
+    acc = wrapping_add(wrapping_mul(acc, 31), wrapping_u64(widen_i64(f)));
+    acc = wrapping_add(wrapping_mul(acc, 31), wrapping_u64(widen_i64(h)));
+    acc = wrapping_add(wrapping_mul(acc, 31), widen_u64(j));
+    acc = wrapping_add(wrapping_mul(acc, 31), wrapping_u64(widen_i64(l)));
+    acc = wrapping_add(wrapping_mul(acc, 31), wrapping_u64(widen_i64(m)));
+    acc = wrapping_add(wrapping_mul(acc, 31), wrapping_u64(widen_i64(n)));
+    acc
+}"#,
+        r#"fn div_i32(x: i32, y: i32) -> i32 eff [Fail[ArithOverflow], Fail[RuntimeError]] { x / y }
+fn rem_i32(x: i32, y: i32) -> i32 eff [Fail[ArithOverflow], Fail[RuntimeError]] { x % y }
+fn neg_i8(x: i8) -> i8 eff [Fail[ArithOverflow]] { -x }
+fn main() -> u64 {
+    let q = handle Fail[ArithOverflow] in {
+        handle Fail[RuntimeError] in { div_i32(-7, 2) } with { return v => v, raise(e, k) => 99, }
+    } with { return v => v, raise(e, k) => 88, };
+    let r = handle Fail[ArithOverflow] in {
+        handle Fail[RuntimeError] in { rem_i32(-7, 2) } with { return v => v, raise(e, k) => 99, }
+    } with { return v => v, raise(e, k) => 88, };
+    let ov = handle Fail[ArithOverflow] in { neg_i8(-128) } with { return v => widen_i64(v), raise(e, k) => 777, };
+    let x32: i32 = -5;
+    let y32: i32 = 2;
+    let u16a: u16 = 50000;
+    let u16b: u16 = 100;
+    let cmp: u64 = if x32 < y32 && u16a > u16b { 1 } else { 0 };
+    wrapping_add(wrapping_mul(wrapping_u64(widen_i64(q)), 10000),
+                 wrapping_add(wrapping_mul(wrapping_u64(widen_i64(r)), 100),
+                              wrapping_add(wrapping_u64(ov), cmp)))
+}"#,
+    ];
+    for (idx, source) in programs.iter().enumerate() {
+        for (k, o) in configs().iter().enumerate() {
+            let (component, world) = port(source, o).unwrap_or_else(|e| panic!("[{idx}/{k}] {e}"));
+            let expected = evaluate(&world);
+            assert_ne!(expected, "trap", "[{idx}/{k}]");
+            assert_eq!(run_main(&component), expected, "[{idx}/{k}]");
+        }
+    }
+}
+
+#[test]
+fn i128_runs_like_the_evaluator() {
+    if !corpus_shard::Shard::from_environment().contains(11) {
+        return;
+    }
+    let programs: &[&str] = &[
+        r#"fn main() -> u64 {
+    let a: i128 = -170141183460469231731687303715884105728;
+    let b: i128 = 123456789012345678901234567890;
+    let c: i128 = -98765432109876543210;
+    let mut h: u64 = 0;
+    let s1 = wrapping_add(b, c);
+    let s2 = wrapping_sub(c, b);
+    let p = wrapping_mul(b, c);
+    let neg_a = wrapping_neg_i128(a);
+    let neg_c = wrapping_neg_i128(c);
+    let shl1 = wrapping_shl_i128(c, 65);
+    let shr1 = wrapping_shr_i128(c, 5);
+    let rotl = rotate_left(b, 64);
+    let rotr = rotate_right(b, 19);
+    let bit = (b & c) | (b ^ ~c);
+    let mut cmp: u64 = 0;
+    if a < c { cmp = wrapping_add(cmp, 1); }
+    if c > a { cmp = wrapping_add(cmp, 2); }
+    if c <= c { cmp = wrapping_add(cmp, 4); }
+    if b >= c { cmp = wrapping_add(cmp, 8); }
+    if !(c < a) { cmp = wrapping_add(cmp, 16); }
+    h = wrapping_add(h, wrapping_u64(s1));
+    h = wrapping_add(wrapping_mul(h, 31), wrapping_u64(s2));
+    h = wrapping_add(wrapping_mul(h, 31), wrapping_u64(p));
+    h = wrapping_add(wrapping_mul(h, 31), wrapping_u64(neg_a));
+    h = wrapping_add(wrapping_mul(h, 31), wrapping_u64(neg_c));
+    h = wrapping_add(wrapping_mul(h, 31), wrapping_u64(shl1));
+    h = wrapping_add(wrapping_mul(h, 31), wrapping_u64(shr1));
+    h = wrapping_add(wrapping_mul(h, 31), wrapping_u64(rotl));
+    h = wrapping_add(wrapping_mul(h, 31), wrapping_u64(rotr));
+    h = wrapping_add(wrapping_mul(h, 31), wrapping_u64(bit));
+    wrapping_add(wrapping_mul(h, 31), cmp)
+}"#,
+        r#"fn div_i(x: i128, y: i128) -> i128 eff [Fail[ArithOverflow], Fail[RuntimeError]] { x / y }
+fn rem_i(x: i128, y: i128) -> i128 eff [Fail[ArithOverflow], Fail[RuntimeError]] { x % y }
+fn go() -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+    let x: i128 = -100000000000000000000000007;
+    let y: i128 = 1000000000000000003;
+    let q1 = div_i(x, y);
+    let r1 = rem_i(x, y);
+    let q2 = div_i(x, -y);
+    let r2 = rem_i(x, -y);
+    let s = match checked_add_i128(q1, q2) { Option::Some(v) => v, Option::None => 0 };
+    let d = match checked_sub_i128(r1, r2) { Option::Some(v) => v, Option::None => 0 };
+    let m1: i64 = 1000000000000;
+    let m2: i64 = -700000000000;
+    let m = match checked_mul_i128(widen_i128(m1), widen_i128(m2)) { Option::Some(v) => v, Option::None => 0 };
+    let c1 = (q1 + q2) - (r1 * r2);
+    let mut h: u64 = wrapping_u64(s);
+    h = wrapping_add(wrapping_mul(h, 31), wrapping_u64(d));
+    h = wrapping_add(wrapping_mul(h, 31), wrapping_u64(m));
+    h = wrapping_add(wrapping_mul(h, 31), wrapping_u64(c1));
+    h = wrapping_add(wrapping_mul(h, 31), wrapping_u64(x >> 67));
+    h
+}
+fn main() -> u64 {
+    let ok = handle Fail[ArithOverflow] in {
+        handle Fail[RuntimeError] in { go() } with { return v => v, raise(e, k) => 555, }
+    } with { return v => v, raise(e, k) => 444, };
+    let ov_min = handle Fail[ArithOverflow] in {
+        handle Fail[RuntimeError] in {
+            let m: i128 = -170141183460469231731687303715884105728;
+            let _q = div_i(m, -1);
+            0
+        } with { return v => v, raise(e, k) => 222, }
+    } with { return v => v, raise(e, k) => 333, };
+    wrapping_add(ok, ov_min)
+}"#,
+    ];
+    for (idx, source) in programs.iter().enumerate() {
+        for (k, o) in configs().iter().enumerate() {
+            let (component, world) = port(source, o).unwrap_or_else(|e| panic!("[{idx}/{k}] {e}"));
+            let expected = evaluate(&world);
+            assert_ne!(expected, "trap", "[{idx}/{k}]");
+            assert_eq!(run_main(&component), expected, "[{idx}/{k}]");
         }
     }
 }
@@ -457,4 +644,61 @@ fn compare_package(name: &str, source: &str) {
         }
     }
     std::fs::remove_dir_all(&dir).expect("remove package dir");
+}
+
+#[test]
+fn const_tables_run_like_the_evaluator() {
+    if !corpus_shard::Shard::from_environment().contains(2) {
+        return;
+    }
+    let source = r#"
+const NONE32: u32 = 4294967295;
+struct Row { tag: u8, active: bool, id: u32, val: u64 }
+enum Kind { Empty, One(u64) }
+const NO_ROW: Row = Row { tag: 7, active: true, id: NONE32, val: 42 };
+const KIND_ONE: Kind = Kind::One(99);
+const PAIR: (u64, u64) = (13, 29);
+fn main() -> u64 {
+    let r = NO_ROW;
+    let kv = match KIND_ONE {
+        Kind::Empty => 0,
+        Kind::One(v) => v,
+    };
+    let (pa, pb) = PAIR;
+    let act: u64 = if r.active { 1 } else { 0 };
+    wrapping_add(
+        wrapping_add(widen_u64(r.tag), wrapping_add(act, widen_u64(r.id))),
+        wrapping_add(r.val, wrapping_add(kv, wrapping_add(pa, pb)))
+    )
+}
+"#;
+    for (k, o) in configs().iter().enumerate() {
+        let (component, world) = port(source, o).unwrap_or_else(|e| panic!("[{k}] {e}"));
+        let expected = evaluate(&world);
+        assert_ne!(expected, "trap", "[{k}]");
+        assert_eq!(run_main(&component), expected, "[{k}]");
+    }
+}
+
+#[test]
+fn fip_and_ir_check_packages_build_and_run() {
+    if !corpus_shard::Shard::from_environment().contains(3) {
+        return;
+    }
+    compare_package(
+        "check-fip",
+        "use @vesper/check-fip::{ check_fip };\n\
+         fn main() -> u64 {\n\
+         \x20   let r = check_fip(in \"\");\n\
+         \x20   r.len()\n\
+         }\n",
+    );
+    compare_package(
+        "ir-check",
+        "use @vesper/ir-check::{ check_ir_words };\n\
+         fn main() -> u64 {\n\
+         \x20   let r = check_ir_words(in \"\");\n\
+         \x20   r.len()\n\
+         }\n",
+    );
 }

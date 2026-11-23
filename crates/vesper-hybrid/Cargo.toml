@@ -98,7 +98,8 @@ vesper-loom-trust = { path = "../vesper-loom-trust" }
 vesper-loom-admission = { path = "../vesper-loom-admission" }
 # The compiler links the frozen Rust seed copy of vesper-loom-audit (#1039).
 vesper-loom-audit = { path = "../vesper-loom-audit/seed", package = "vesper-loom-audit-seed" }
-vesper-loom-cas = { path = "../vesper-loom-cas" }
+# The compiler links the frozen Rust seed copy of vesper-loom-cas (#1411).
+vesper-loom-cas = { path = "../vesper-loom-cas/seed", package = "vesper-loom-cas-seed" }
 # The standard I/O host `vesper jit` binds `.vsys` imports to (#1150).
 vesper-std-host = { path = "../vesper-std-host" }
 vesper-pact = { path = "../vesper-pact/seed", package = "vesper-pact-seed" }
@@ -120,7 +121,9 @@ vesper-resonance = { path = "../vesper-resonance/seed", package = "vesper-resona
 # The compiler links the frozen Rust seed copy (seed-copy rule); the Vesper
 # port is the package crates/vesper-silicon (#1042).
 vesper-silicon = { path = "../vesper-silicon/seed", package = "vesper-silicon-seed" }
-vesper-vault = { path = "../vesper-vault" }
+# The compiler links the frozen Rust seed copy (seed-copy rule); the Vesper
+# port is the package crates/vesper-vault (#1412).
+vesper-vault = { path = "../vesper-vault/seed", package = "vesper-vault-seed" }
 # Source Strata regions (wave seven lane 29) run on the host region allocator.
 # The compiler links the frozen Rust seed copy (seed-copy rule); the Vesper
 # port is the package crates/vesper-alloc.

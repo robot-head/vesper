@@ -1108,6 +1108,32 @@ impl<M: Module> Codegen<'_, '_, M> {
             .map(|f| f.offset)
             .ok_or("native Option lacks a payload")?;
         let (none_tag, _) = layout.variant("None").ok_or("native Option lacks None")?;
+        if let Some(shape) = self.scalar_enums.request.take() {
+            if shape.words.len() == 2 && !Layout::of(self.world, elem)?.aggregate() {
+                let none = self.b.create_block();
+                let some = self.b.create_block();
+                let done = self.b.create_block();
+                self.b.append_block_param(done, types::I64);
+                self.b.append_block_param(done, types::I64);
+                self.branch(present, some, &[], none, &[]);
+                self.b.switch_to_block(none);
+                let tag = self.b.ins().iconst(types::I64, none_tag as i64);
+                let zero = self.zero();
+                self.jump(done, &[tag.into(), zero.into()]);
+                self.b.switch_to_block(some);
+                let mut value = load(self)?;
+                if self.b.func.dfg.value_type(value) != types::I64 {
+                    value = self.b.ins().uextend(types::I64, value);
+                }
+                let tag = self.b.ins().iconst(types::I64, some_tag as i64);
+                self.jump(done, &[tag.into(), value.into()]);
+                self.b.switch_to_block(done);
+                let params = self.b.block_params(done);
+                self.scalar_enums.result = Some(vec![params[0], params[1]]);
+                return Ok(self.zero());
+            }
+            self.scalar_enums.request = Some(shape);
+        }
         // The optimize path zeroes the payload only on the `None` edge;
         // `Some` writes every word.
         let lazy = self.operands_only;

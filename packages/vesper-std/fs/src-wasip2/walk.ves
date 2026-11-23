@@ -1,0 +1,314 @@
+// @vesper-std/fs::walk: directory listings and recursive walks in a
+// deterministic order. Entries are sorted by the bytes of their relative
+// path, so two walks of the same tree agree on every platform whatever
+// order the OS lists a directory in.
+use self::{
+    IoError,
+    raise_io,
+    kind_dir
+};
+
+// A list of paths relative to the listed directory, separated by `/`, in
+// one byte arena: entry `i` is `bytes[start(i)..ends[i]]` (`start(0)` is
+// 0, `start(i)` is `ends[i - 1]`), its kind (`kind_file()` and friends,
+// not following symbolic links) is `kinds[i]`.
+pub struct Entries {
+    pub bytes: ChunkSeq[u8],
+    pub ends: ChunkSeq[u64],
+    pub kinds: ChunkSeq[u32],
+}
+
+fn get64(in s: Slice[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn byte(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+pub fn entry_count(in e: Entries) -> u64 {
+    e.ends.len()
+}
+
+pub fn entry_start(in e: Entries, i: u64) -> u64 {
+    if i == 0 {
+        0
+    } else {
+        get64(in e.ends.as_slice(), wrapping_sub(i, 1))
+    }
+}
+
+pub fn entry_end(in e: Entries, i: u64) -> u64 {
+    get64(in e.ends.as_slice(), i)
+}
+
+pub fn entry_kind(in e: Entries, i: u64) -> u32 {
+    match e.kinds.try_get(i) {
+        Option::Some(k) => k,
+        Option::None => 0,
+    }
+}
+
+// Entry `i`'s relative path as text (`None` past the end, or when the
+// name is not UTF-8, which only Unix allows).
+pub fn entry_path(in e: Entries, i: u64) -> Option[String] {
+    if i >= e.ends.len() {
+        return Option::None;
+    }
+    let a = entry_start(in e, i);
+    let b = entry_end(in e, i);
+    String::from_utf8(in e.bytes[a..b])
+}
+
+// `base` joined with entry `i`: `base/entry`, as path bytes.
+pub fn entry_join(in base: Slice[u8], in e: Entries, i: u64) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    out.extend(in base);
+    out.push(47);
+    let a = entry_start(in e, i);
+    let b = entry_end(in e, i);
+    out.extend(in e.bytes[a..b]);
+    out
+}
+
+fn empty_entries() -> Entries {
+    Entries {
+        bytes: ChunkSeq::new[u8](),
+        ends: ChunkSeq::new[u64](),
+        kinds: ChunkSeq::new[u32](),
+    }
+}
+
+// Append the names in directory `dir` to `out`, each prefixed by `prefix`
+// (with a `/` when `prefix` is not empty), in the OS's order.
+fn list_into(in dir: Slice[u8], in prefix: Slice[u8], inout out: Entries) eff [
+    Ffi[StdFs],
+    Fail[IoError]
+] {
+    let mut err: u64 = 0;
+    let mut d = match StdFs::vstd_fs_read_dir(in dir, inout err) {
+        Option::Some(d) => d,
+        Option::None => return raise_io(err),
+    };
+    let mut name: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    name.resize(256, 0);
+    loop {
+        let mut kind: u32 = 0;
+        let n = StdFs::vstd_fs_dir_next(inout d, inout name.as_slice_mut(), inout kind);
+        if n < 0 {
+            break;
+        }
+        let len = wrapping_u64(n);
+        if len > name.len() {
+            // Longer than the buffer: it was not consumed; ask again.
+            name.resize(len, 0);
+        } else {
+            if prefix.len() > 0 {
+                out.bytes.extend(in prefix);
+                out.bytes.push(47);
+            }
+            out.bytes.extend(in name[0..len]);
+            out.ends.push(out.bytes.len());
+            out.kinds.push(kind);
+        }
+    }
+    StdFs::vstd_fs_dir_close(d);
+}
+
+// Whether the path of entry `x` sorts before entry `y`'s (bytewise).
+fn before(in bytes: Slice[u8], in ends: Slice[u64], x: u64, y: u64) -> bool {
+    let xa = if x == 0 {
+        0
+    } else {
+        get64(in ends, wrapping_sub(x, 1))
+    };
+    let xb = get64(in ends, x);
+    let ya = if y == 0 {
+        0
+    } else {
+        get64(in ends, wrapping_sub(y, 1))
+    };
+    let yb = get64(in ends, y);
+    let xl = wrapping_sub(xb, xa);
+    let yl = wrapping_sub(yb, ya);
+    let n = if xl < yl {
+        xl
+    } else {
+        yl
+    };
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break xl < yl;
+        }
+        let p = byte(in bytes, wrapping_add(xa, i));
+        let q = byte(in bytes, wrapping_add(ya, i));
+        if p != q {
+            break p < q;
+        }
+        i = wrapping_add(i, 1);
+    }
+}
+
+// One merge pass of runs of `width` from `src` into `dst` (index arrays of
+// length `n`), stable.
+fn merge_pass(
+    in bytes: Slice[u8],
+    in ends: Slice[u64],
+    in src: Slice[u64],
+    inout dst: Slice[u64],
+    n: u64,
+    width: u64
+) {
+    let mut lo: u64 = 0;
+    loop {
+        if lo >= n {
+            break;
+        }
+        let mid0 = wrapping_add(lo, width);
+        let mid = if mid0 < n {
+            mid0
+        } else {
+            n
+        };
+        let hi0 = wrapping_add(mid, width);
+        let hi = if hi0 < n {
+            hi0
+        } else {
+            n
+        };
+        let mut i = lo;
+        let mut j = mid;
+        let mut k = lo;
+        loop {
+            if k >= hi {
+                break;
+            }
+            let take_left = if i >= mid {
+                false
+            } else if j >= hi {
+                true
+            } else {
+                !before(in bytes, in ends, get64(in src, j), get64(in src, i))
+            };
+            if take_left {
+                dst.try_set(k, get64(in src, i));
+                i = wrapping_add(i, 1);
+            } else {
+                dst.try_set(k, get64(in src, j));
+                j = wrapping_add(j, 1);
+            }
+            k = wrapping_add(k, 1);
+        }
+        lo = hi;
+    }
+}
+
+// `e` with its entries sorted by path bytes.
+fn sorted(in e: Entries) -> Entries {
+    let n = e.ends.len();
+    let mut a: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+    let mut b: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+    for i in 0..n {
+        a.push(i);
+        b.push(i);
+    }
+    let mut width: u64 = 1;
+    let mut in_a = true;
+    loop {
+        if width >= n {
+            break;
+        }
+        if in_a {
+            merge_pass(
+                in e.bytes.as_slice(),
+                in e.ends.as_slice(),
+                in a.as_slice(),
+                inout b.as_slice_mut(),
+                n,
+                width
+            );
+        } else {
+            merge_pass(
+                in e.bytes.as_slice(),
+                in e.ends.as_slice(),
+                in b.as_slice(),
+                inout a.as_slice_mut(),
+                n,
+                width
+            );
+        }
+        in_a = !in_a;
+        width = wrapping_add(width, width);
+    }
+    let mut out = Entries {
+        bytes: ChunkSeq::with_capacity[u8](e.bytes.len()),
+        ends: ChunkSeq::with_capacity[u64](n),
+        kinds: ChunkSeq::with_capacity[u32](n),
+    };
+    for k in 0..n {
+        let i = if in_a {
+            get64(in a.as_slice(), k)
+        } else {
+            get64(in b.as_slice(), k)
+        };
+        let s = entry_start(in e, i);
+        let t = entry_end(in e, i);
+        out.bytes.extend(in e.bytes[s..t]);
+        out.ends.push(out.bytes.len());
+        out.kinds.push(entry_kind(in e, i));
+    }
+    out
+}
+
+// The names in directory `path`, sorted.
+pub fn list_dir(in path: Str) -> Entries eff [Ffi[StdFs], Fail[IoError]] {
+    list_dir_path(in path.as_bytes())
+}
+
+pub fn list_dir_path(in path: Slice[u8]) -> Entries eff [Ffi[StdFs], Fail[IoError]] {
+    let mut out = empty_entries();
+    let none: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    list_into(in path, in none.as_slice(), inout out);
+    sorted(in out)
+}
+
+// Every file, directory and link under `root` (not `root` itself), as
+// paths relative to it, sorted. Directories are entered; symbolic links
+// are listed but not followed.
+pub fn walk(in root: Str) -> Entries eff [Ffi[StdFs], Fail[IoError]] {
+    walk_path(in root.as_bytes())
+}
+
+pub fn walk_path(in root: Slice[u8]) -> Entries eff [Ffi[StdFs], Fail[IoError]] {
+    let mut out = empty_entries();
+    let none: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    list_into(in root, in none.as_slice(), inout out);
+    // Entries are appended as directories are visited, so this one pass
+    // reaches every level.
+    let mut i: u64 = 0;
+    loop {
+        if i >= out.ends.len() {
+            break;
+        }
+        if entry_kind(in out, i) == kind_dir() {
+            let a = entry_start(in out, i);
+            let b = entry_end(in out, i);
+            let mut rel: ChunkSeq[u8] = ChunkSeq::new[u8]();
+            rel.extend(in out.bytes[a..b]);
+            let mut dir: ChunkSeq[u8] = ChunkSeq::new[u8]();
+            dir.extend(in root);
+            dir.push(47);
+            dir.extend(in rel.as_slice());
+            list_into(in dir.as_slice(), in rel.as_slice(), inout out);
+        }
+        i = wrapping_add(i, 1);
+    }
+    sorted(in out)
+}

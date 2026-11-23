@@ -17,18 +17,25 @@
 //! the entire frame buffer before returning [`AuthError`], so unauthenticated
 //! bytes are never left addressable.
 //!
-//! AES-256-GCM and ChaCha20-Poly1305 come from the RustCrypto `aes-gcm` and
-//! `chacha20poly1305` crates already in the workspace. Their own tag checks
-//! (via `subtle`) decide authenticity; this module adds the linear wrappers.
+//! Under `cfg(vesper_port)`, nonce accounting, header framing, limits, and the
+//! Doom-principle opener run in the compiled Vesper port `@vesper/vault` over
+//! `@vesper/crypto` (`vesper-crypto-sys`), while [`SecretSlot`] holds the locked
+//! key material and `vesper_crypto_sys::Aead` stays inline in the sealer/opener
+//! so steady-state `seal_in_place` and `open_in_place` make zero heap
+//! allocations. `vesper-vault-seed` (`cfg(not(vesper_port))`) runs the frozen
+//! Rust engine in `src/reference/`.
 
 use core::fmt;
 use core::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use aes_gcm::aead::{AeadInPlace, KeyInit};
 use zeroize::Zeroize;
 
 use crate::obligation::{ObligationKind, record_leak};
+#[cfg(vesper_port)]
+use crate::port;
+#[cfg(not(vesper_port))]
+use crate::reference::aead as ref_aead;
 use crate::slot::{SecretSlot, ShredReceipt};
 
 /// Size of [`FrameHeader`] on the wire: 4 + 8 + 16 bytes, no padding.
@@ -51,20 +58,7 @@ pub trait AeadAlgorithm: private::Sealed + 'static {
     /// Records one key may seal before it must be rotated.
     const RECORD_LIMIT: u64;
     #[doc(hidden)]
-    fn seal_detached(
-        key: &[u8; KEY_LEN],
-        nonce: &[u8; 12],
-        aad: &[u8],
-        buf: &mut [u8],
-    ) -> Result<[u8; TAG_LEN], aes_gcm::aead::Error>;
-    #[doc(hidden)]
-    fn open_detached(
-        key: &[u8; KEY_LEN],
-        nonce: &[u8; 12],
-        aad: &[u8],
-        buf: &mut [u8],
-        tag: &[u8; TAG_LEN],
-    ) -> Result<(), aes_gcm::aead::Error>;
+    const ALG_CODE: u32;
 }
 
 /// AES-256-GCM. Record limit 2^24.5 (about 23.7 million) full-size records
@@ -83,62 +77,13 @@ impl private::Sealed for ChaCha20Poly1305 {}
 impl AeadAlgorithm for Aes256Gcm {
     const NAME: &'static str = "AES-256-GCM";
     const RECORD_LIMIT: u64 = 23_726_566;
-
-    fn seal_detached(
-        key: &[u8; KEY_LEN],
-        nonce: &[u8; 12],
-        aad: &[u8],
-        buf: &mut [u8],
-    ) -> Result<[u8; TAG_LEN], aes_gcm::aead::Error> {
-        let cipher = aes_gcm::Aes256Gcm::new(key.into());
-        let tag = cipher.encrypt_in_place_detached(nonce.into(), aad, buf)?;
-        Ok(tag.into())
-    }
-
-    fn open_detached(
-        key: &[u8; KEY_LEN],
-        nonce: &[u8; 12],
-        aad: &[u8],
-        buf: &mut [u8],
-        tag: &[u8; TAG_LEN],
-    ) -> Result<(), aes_gcm::aead::Error> {
-        let cipher = aes_gcm::Aes256Gcm::new(key.into());
-        cipher.decrypt_in_place_detached(nonce.into(), aad, buf, tag.into())
-    }
+    const ALG_CODE: u32 = 2;
 }
 
 impl AeadAlgorithm for ChaCha20Poly1305 {
     const NAME: &'static str = "ChaCha20-Poly1305";
     const RECORD_LIMIT: u64 = SEQ_SPACE_LIMIT;
-
-    fn seal_detached(
-        key: &[u8; KEY_LEN],
-        nonce: &[u8; 12],
-        aad: &[u8],
-        buf: &mut [u8],
-    ) -> Result<[u8; TAG_LEN], aes_gcm::aead::Error> {
-        let cipher = chacha20poly1305::ChaCha20Poly1305::new(key.into());
-        let tag = cipher.encrypt_in_place_detached(nonce.into(), aad, buf)?;
-        Ok(tag.into())
-    }
-
-    fn open_detached(
-        key: &[u8; KEY_LEN],
-        nonce: &[u8; 12],
-        aad: &[u8],
-        buf: &mut [u8],
-        tag: &[u8; TAG_LEN],
-    ) -> Result<(), aes_gcm::aead::Error> {
-        let cipher = chacha20poly1305::ChaCha20Poly1305::new(key.into());
-        cipher.decrypt_in_place_detached(nonce.into(), aad, buf, tag.into())
-    }
-}
-
-fn nonce_for(epoch: u32, seq: u64) -> [u8; 12] {
-    let mut n = [0u8; 12];
-    n[..4].copy_from_slice(&epoch.to_be_bytes());
-    n[4..].copy_from_slice(&seq.to_be_bytes());
-    n
+    const ALG_CODE: u32 = 3;
 }
 
 /// Errors from sealing and key management.
@@ -269,15 +214,26 @@ pub struct Sealed {
     pub frame_len: usize,
 }
 
+#[cfg(vesper_port)]
+fn expand_aead<A: AeadAlgorithm>(key: &SecretSlot<KEY_LEN>) -> vesper_crypto_sys::Aead {
+    let alg = port::b::alg_code(port::aead_kind(A::ALG_CODE));
+    key.with(|k| {
+        vesper_crypto_sys::Aead::new(alg, k)
+            .expect("32-byte key matches Aes256Gcm or ChaCha20Poly1305")
+    })
+}
+
 /// A sealer for one key epoch. Linear: retire it with [`AeadSealer::retire`]
 /// or replace its key with [`AeadSealer::rotate`].
 #[must_use = "an AeadSealer must be retired so its key is shredded"]
 pub struct AeadSealer<A: AeadAlgorithm> {
     key: Option<SecretSlot<KEY_LEN>>,
-    epoch: u32,
-    next_seq: u64,
-    limit: u64,
-    id: u64,
+    #[cfg(vesper_port)]
+    aead: Option<vesper_crypto_sys::Aead>,
+    #[cfg(vesper_port)]
+    st: port::b::repr::SealerSt,
+    #[cfg(not(vesper_port))]
+    st: ref_aead::SealerState,
     _alg: PhantomData<fn() -> A>,
 }
 
@@ -285,9 +241,9 @@ impl<A: AeadAlgorithm> fmt::Debug for AeadSealer<A> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AeadSealer")
             .field("alg", &A::NAME)
-            .field("epoch", &self.epoch)
-            .field("next_seq", &self.next_seq)
-            .field("limit", &self.limit)
+            .field("epoch", &self.epoch())
+            .field("next_seq", &self.st.next_seq)
+            .field("limit", &self.st.limit)
             .finish_non_exhaustive()
     }
 }
@@ -327,49 +283,81 @@ impl<A: AeadAlgorithm> AeadSealer<A> {
     /// Resume a sealer whose counter is persisted (for example in a WAL):
     /// sequences below `next_seq` are never minted again.
     pub fn with_start(key: SecretSlot<KEY_LEN>, epoch: u32, next_seq: u64, limit: u64) -> Self {
-        Self {
-            key: Some(key),
-            epoch,
-            next_seq,
-            limit: limit.min(A::RECORD_LIMIT).min(SEQ_SPACE_LIMIT),
-            id: NEXT_SEALER_ID.fetch_add(1, Ordering::Relaxed),
-            _alg: PhantomData,
+        let id = NEXT_SEALER_ID.fetch_add(1, Ordering::Relaxed);
+        #[cfg(vesper_port)]
+        {
+            let aead = expand_aead::<A>(&key);
+            let st = port::b::sealer_new(id, port::aead_kind(A::ALG_CODE), epoch, next_seq, limit);
+            Self {
+                key: Some(key),
+                aead: Some(aead),
+                st,
+                _alg: PhantomData,
+            }
+        }
+        #[cfg(not(vesper_port))]
+        {
+            let st = ref_aead::SealerState::new(
+                id,
+                ref_aead::Alg::from_code(A::ALG_CODE),
+                epoch,
+                next_seq,
+                limit,
+            );
+            Self {
+                key: Some(key),
+                st,
+                _alg: PhantomData,
+            }
         }
     }
 
     /// Current key epoch.
     pub fn epoch(&self) -> u32 {
-        self.epoch
+        #[cfg(vesper_port)]
+        {
+            self.st.epoch.get()
+        }
+        #[cfg(not(vesper_port))]
+        {
+            self.st.epoch
+        }
     }
 
     /// Next sequence number `mint_nonce` will hand out.
     pub fn next_seq(&self) -> u64 {
-        self.next_seq
+        self.st.next_seq
     }
 
     /// Tickets left before a rekey is required.
     pub fn remaining(&self) -> u64 {
-        self.limit.saturating_sub(self.next_seq)
+        #[cfg(vesper_port)]
+        {
+            port::b::sealer_remaining(&self.st)
+        }
+        #[cfg(not(vesper_port))]
+        {
+            self.st.remaining()
+        }
     }
 
     /// Mint the next ticket. Strictly increasing per key; refuses at the
     /// record limit so the counter can never wrap.
     pub fn mint_nonce(&mut self) -> Result<NonceTicket<A>, CryptoError> {
-        if self.next_seq >= self.limit {
-            return Err(CryptoError::EpochExhaustedRekeyRequired);
-        }
-        let seq = self.next_seq;
-        // Cannot overflow: seq < limit <= SEQ_SPACE_LIMIT < u64::MAX.
-        self.next_seq = seq + 1;
+        #[cfg(vesper_port)]
+        let seq = port::b::sealer_mint_nonce(&mut self.st).map_err(port::crypto_err)?;
+        #[cfg(not(vesper_port))]
+        let seq = self.st.mint_nonce()?;
         Ok(NonceTicket {
-            epoch: self.epoch,
+            epoch: self.epoch(),
             seq,
-            sealer: self.id,
+            sealer: self.st.id,
             armed: true,
             _alg: PhantomData,
         })
     }
 
+    #[cfg(not(vesper_port))]
     fn key(&self) -> &SecretSlot<KEY_LEN> {
         match &self.key {
             Some(k) => k,
@@ -378,48 +366,104 @@ impl<A: AeadAlgorithm> AeadSealer<A> {
     }
 
     /// Seal `frame[28..]` in place under `ticket`, writing the header into
-    /// `frame[..28]`. Allocation-free.
+    /// `frame[..28]`. Allocation-free on frames up to 16 KiB.
     pub fn seal_in_place(
         &self,
         ticket: NonceTicket<A>,
         aad: &[u8],
         frame: &mut [u8],
     ) -> Result<Sealed, SealError<A>> {
-        if ticket.sealer != self.id {
-            return Err(SealError {
-                error: CryptoError::ForeignTicket,
-                ticket: Some(ticket),
+        #[cfg(vesper_port)]
+        {
+            let frame_len = frame.len();
+            let payload_len = frame_len.saturating_sub(FRAME_HEADER_LEN);
+            let work_len = aad
+                .len()
+                .saturating_add(payload_len)
+                .saturating_add(TAG_LEN);
+            let mut nonce = [0u8; 12];
+            let res = port::with_work_buf(work_len, |work| {
+                let aead = self.aead.as_ref().expect("sealer used after retire");
+                port::b::sealer_seal_frame(
+                    &self.st,
+                    ticket.sealer,
+                    ticket.epoch,
+                    ticket.seq,
+                    port::lend_aead(aead),
+                    aad,
+                    frame,
+                    &mut nonce,
+                    work,
+                )
             });
-        }
-        if frame.len() < FRAME_HEADER_LEN {
-            return Err(SealError {
-                error: CryptoError::BufferTooSmall,
-                ticket: Some(ticket),
-            });
-        }
-        let (epoch, seq) = ticket.defuse();
-        let nonce = nonce_for(epoch, seq);
-        let (hdr, payload) = frame.split_at_mut(FRAME_HEADER_LEN);
-        let tag = self
-            .key()
-            .with(|k| A::seal_detached(k, &nonce, aad, payload));
-        match tag {
-            Ok(tag) => {
-                hdr[0..4].copy_from_slice(&epoch.to_be_bytes());
-                hdr[4..12].copy_from_slice(&seq.to_be_bytes());
-                hdr[12..28].copy_from_slice(&tag);
-                Ok(Sealed {
-                    epoch,
-                    seq,
-                    frame_len: frame.len(),
-                })
+            nonce.zeroize();
+            match res {
+                Ok(len) => {
+                    let (epoch, seq) = ticket.defuse();
+                    Ok(Sealed {
+                        epoch,
+                        seq,
+                        frame_len: usize::try_from(len).unwrap_or(frame_len),
+                    })
+                }
+                Err(e) => {
+                    let error = port::crypto_err(e);
+                    match error {
+                        CryptoError::ForeignTicket | CryptoError::BufferTooSmall => {
+                            Err(SealError {
+                                error,
+                                ticket: Some(ticket),
+                            })
+                        }
+                        _ => {
+                            let _ = ticket.defuse();
+                            Err(SealError {
+                                error,
+                                ticket: None,
+                            })
+                        }
+                    }
+                }
             }
-            Err(_) => {
-                frame.zeroize();
-                Err(SealError {
-                    error: CryptoError::CipherRejected,
-                    ticket: None,
-                })
+        }
+        #[cfg(not(vesper_port))]
+        {
+            let ticket_sealer = ticket.sealer;
+            let ticket_epoch = ticket.epoch;
+            let ticket_seq = ticket.seq;
+            let res = self.key().with(|k| {
+                ref_aead::seal_frame(
+                    &self.st,
+                    k,
+                    ticket_sealer,
+                    ticket_epoch,
+                    ticket_seq,
+                    aad,
+                    frame,
+                )
+            });
+            match res {
+                Ok(frame_len) => {
+                    let (epoch, seq) = ticket.defuse();
+                    Ok(Sealed {
+                        epoch,
+                        seq,
+                        frame_len,
+                    })
+                }
+                Err(error @ (CryptoError::ForeignTicket | CryptoError::BufferTooSmall)) => {
+                    Err(SealError {
+                        error,
+                        ticket: Some(ticket),
+                    })
+                }
+                Err(error) => {
+                    let _ = ticket.defuse();
+                    Err(SealError {
+                        error,
+                        ticket: None,
+                    })
+                }
             }
         }
     }
@@ -430,14 +474,23 @@ impl<A: AeadAlgorithm> AeadSealer<A> {
         mut self,
         new_key: SecretSlot<KEY_LEN>,
     ) -> Result<(Self, ShredReceipt), Box<RotateError<A>>> {
-        let Some(epoch) = self.epoch.checked_add(1) else {
-            return Err(Box::new(RotateError {
-                error: CryptoError::EpochSpaceExhausted,
-                sealer: self,
-                new_key,
-            }));
+        #[cfg(vesper_port)]
+        let epoch_res = port::b::sealer_rotate_epoch(&self.st).map_err(port::crypto_err);
+        #[cfg(not(vesper_port))]
+        let epoch_res = self.st.rotate_epoch();
+        let epoch = match epoch_res {
+            Ok(e) => e,
+            Err(error) => {
+                return Err(Box::new(RotateError {
+                    error,
+                    sealer: self,
+                    new_key,
+                }));
+            }
         };
-        let limit = self.limit;
+        let limit = self.st.limit;
+        #[cfg(vesper_port)]
+        drop(self.aead.take());
         let old = self.key.take();
         let receipt = match old {
             Some(k) => k.shred(),
@@ -448,6 +501,8 @@ impl<A: AeadAlgorithm> AeadSealer<A> {
 
     /// Shred the key and end the sealer.
     pub fn retire(mut self) -> ShredReceipt {
+        #[cfg(vesper_port)]
+        drop(self.aead.take());
         match self.key.take() {
             Some(k) => k.shred(),
             None => unreachable!("sealer retired twice"),
@@ -457,6 +512,8 @@ impl<A: AeadAlgorithm> AeadSealer<A> {
 
 impl<A: AeadAlgorithm> Drop for AeadSealer<A> {
     fn drop(&mut self) {
+        #[cfg(vesper_port)]
+        drop(self.aead.take());
         if let Some(k) = self.key.take() {
             record_leak(ObligationKind::AeadKey);
             let _ = k.shred();
@@ -478,12 +535,14 @@ pub struct FrameHeader {
 impl FrameHeader {
     /// Parse the first 28 bytes of `frame`.
     pub fn parse(frame: &[u8]) -> Option<Self> {
-        let hdr = frame.get(..FRAME_HEADER_LEN)?;
-        Some(Self {
-            key_epoch: u32::from_be_bytes(hdr[0..4].try_into().ok()?),
-            nonce_seq: u64::from_be_bytes(hdr[4..12].try_into().ok()?),
-            tag: hdr[12..28].try_into().ok()?,
-        })
+        #[cfg(vesper_port)]
+        {
+            port::frame_header_parse(frame)
+        }
+        #[cfg(not(vesper_port))]
+        {
+            ref_aead::frame_header_parse(frame)
+        }
     }
 }
 
@@ -615,6 +674,8 @@ impl std::error::Error for AuthError {}
 #[must_use = "an AeadOpener must be retired so its key is shredded"]
 pub struct AeadOpener<A: AeadAlgorithm> {
     key: Option<SecretSlot<KEY_LEN>>,
+    #[cfg(vesper_port)]
+    aead: Option<vesper_crypto_sys::Aead>,
     epoch: u32,
     _alg: PhantomData<fn() -> A>,
 }
@@ -631,8 +692,12 @@ impl<A: AeadAlgorithm> fmt::Debug for AeadOpener<A> {
 impl<A: AeadAlgorithm> AeadOpener<A> {
     /// An opener for `key` at `epoch`.
     pub fn new(key: SecretSlot<KEY_LEN>, epoch: u32) -> Self {
+        #[cfg(vesper_port)]
+        let aead = Some(expand_aead::<A>(&key));
         Self {
             key: Some(key),
+            #[cfg(vesper_port)]
+            aead,
             epoch,
             _alg: PhantomData,
         }
@@ -644,44 +709,66 @@ impl<A: AeadAlgorithm> AeadOpener<A> {
     }
 
     /// Authenticate and decrypt in place. On any failure the whole frame
-    /// buffer is zeroized before the error is returned. Allocation-free.
+    /// buffer is zeroized before the error is returned. Allocation-free on
+    /// frames up to 16 KiB.
     pub fn open_in_place<'a>(
         &self,
         aad: &[u8],
         frame: CiphertextFrame<'a>,
     ) -> Result<VerifiedPlaintext<'a>, AuthError> {
         let buf = frame.take();
-        let Some(header) = FrameHeader::parse(buf) else {
-            buf.zeroize();
-            return Err(AuthError::MalformedHeader);
-        };
-        if header.key_epoch != self.epoch {
-            buf.zeroize();
-            return Err(AuthError::WrongEpoch {
-                expected: self.epoch,
-                found: header.key_epoch,
+        #[cfg(vesper_port)]
+        {
+            let frame_len = buf.len();
+            let ct_len = frame_len.saturating_sub(FRAME_HEADER_LEN);
+            let work_len = aad.len().saturating_add(ct_len).saturating_add(TAG_LEN);
+            let mut nonce = [0u8; 12];
+            let res = port::with_work_buf(work_len, |work| {
+                let aead = self.aead.as_ref().expect("opener used after retire");
+                port::b::opener_open_frame(
+                    self.epoch,
+                    port::lend_aead(aead),
+                    aad,
+                    buf,
+                    &mut nonce,
+                    work,
+                )
             });
+            nonce.zeroize();
+            match res {
+                Ok(hdr) => Ok(VerifiedPlaintext {
+                    header: port::frame_header_from_hdr(hdr),
+                    payload: &mut buf[FRAME_HEADER_LEN..],
+                }),
+                Err(e) => Err(port::auth_err(e)),
+            }
         }
-        let nonce = nonce_for(header.key_epoch, header.nonce_seq);
-        let key = match &self.key {
-            Some(k) => k,
-            None => unreachable!("opener used after retire"),
-        };
-        let (_, payload) = buf.split_at_mut(FRAME_HEADER_LEN);
-        let ok = key.with(|k| A::open_detached(k, &nonce, aad, payload, &header.tag));
-        if ok.is_err() {
-            // Doom principle: scrub before the error is observable.
-            buf.zeroize();
-            return Err(AuthError::AuthenticationTagMismatch);
+        #[cfg(not(vesper_port))]
+        {
+            let key = match &self.key {
+                Some(k) => k,
+                None => unreachable!("opener used after retire"),
+            };
+            let header = key.with(|k| {
+                ref_aead::open_frame(
+                    ref_aead::Alg::from_code(A::ALG_CODE),
+                    self.epoch,
+                    k,
+                    aad,
+                    buf,
+                )
+            })?;
+            Ok(VerifiedPlaintext {
+                header,
+                payload: &mut buf[FRAME_HEADER_LEN..],
+            })
         }
-        Ok(VerifiedPlaintext {
-            header,
-            payload: &mut buf[FRAME_HEADER_LEN..],
-        })
     }
 
     /// Shred the key and end the opener.
     pub fn retire(mut self) -> ShredReceipt {
+        #[cfg(vesper_port)]
+        drop(self.aead.take());
         match self.key.take() {
             Some(k) => k.shred(),
             None => unreachable!("opener retired twice"),
@@ -691,6 +778,8 @@ impl<A: AeadAlgorithm> AeadOpener<A> {
 
 impl<A: AeadAlgorithm> Drop for AeadOpener<A> {
     fn drop(&mut self) {
+        #[cfg(vesper_port)]
+        drop(self.aead.take());
         if let Some(k) = self.key.take() {
             record_leak(ObligationKind::AeadKey);
             let _ = k.shred();

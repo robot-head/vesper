@@ -1,0 +1,225 @@
+// Wire struct layout compiler (`vesper_ffi::Registry::compile`).
+use self::lexer::{
+    VsysError,
+    err_duplicate,
+    err_limit,
+    err_type,
+    fail_vsys
+};
+
+pub fn wt_int() -> u8 {
+    1
+}
+
+pub fn wt_bytes() -> u8 {
+    2
+}
+
+pub fn wt_pad() -> u8 {
+    3
+}
+
+pub fn wt_struct() -> u8 {
+    4
+}
+
+pub fn endian_native() -> u8 {
+    0
+}
+
+pub fn endian_le() -> u8 {
+    1
+}
+
+pub fn endian_be() -> u8 {
+    2
+}
+
+pub copy struct WireField {
+    pub name_a: u64,
+    pub name_b: u64,
+    pub kind: u8,
+    pub signed: bool,
+    pub bits: u8,
+    pub endian: u8,
+    pub count: u64,
+    pub struct_a: u64,
+    pub struct_b: u64,
+    pub s0: u64,
+    pub s1: u64,
+}
+
+pub copy struct WireStructDef {
+    pub name_a: u64,
+    pub name_b: u64,
+    pub f0: u64,
+    pub fn_count: u64,
+    pub size: u64,
+    pub alignment: u64,
+    pub s0: u64,
+    pub s1: u64,
+}
+
+fn slice_eq(in a: Slice[u8], in b: Slice[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    for i in 0..a.len() {
+        let xa = match a.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        let xb = match b.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        if xa != xb {
+            return false;
+        }
+    }
+    true
+}
+
+fn find_struct(in defs: Slice[WireStructDef], in arena: Slice[u8], a: u64, b: u64) -> Option[u64] {
+    for i in 0..defs.len() {
+        let d = match defs.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => continue,
+        };
+        if slice_eq(in arena[d.name_a..d.name_b], in arena[a..b]) {
+            return Option::Some(i);
+        }
+    }
+    Option::None
+}
+
+fn visit_struct(
+    idx: u64,
+    inout defs: ChunkSeq[WireStructDef],
+    in fields: Slice[WireField],
+    in arena: Slice[u8],
+    inout visiting: ChunkSeq[u64],
+    inout budget: u64
+) -> (u64, u64) eff [Fail[VsysError]] {
+    for i in 0..visiting.len() {
+        let v = match visiting.try_get(i) {
+            Option::Some(x) => x,
+            Option::None => 0,
+        };
+        if v == idx {
+            let d = match defs.try_get(idx) {
+                Option::Some(w) => w,
+                Option::None => return (0, 1),
+            };
+            return fail_vsys(err_type(), d.s0, d.s1, 100);
+        }
+    }
+    if visiting.len() >= 128 {
+        let d = match defs.try_get(idx) {
+            Option::Some(w) => w,
+            Option::None => return (0, 1),
+        };
+        return fail_vsys(err_limit(), d.s0, d.s1, 101);
+    }
+    let d = match defs.try_get(idx) {
+        Option::Some(w) => w,
+        Option::None => return (0, 1),
+    };
+    if d.alignment != 0 {
+        return (d.size, d.alignment);
+    }
+    visiting.push(idx);
+    let mut size: u64 = 0;
+    let mut alignment: u64 = 1;
+    let max_u64: u64 = 18446744073709551615;
+    for fi in 0..d.fn_count {
+        let fidx = wrapping_add(d.f0, fi);
+        let f = match fields.try_get(fidx) {
+            Option::Some(x) => x,
+            Option::None => continue,
+        };
+        if budget == 0 {
+            return fail_vsys(err_limit(), f.s0, f.s1, 102);
+        }
+        budget = wrapping_sub(budget, 1);
+        if f.name_a == f.name_b {
+            return fail_vsys(err_type(), f.s0, f.s1, 103);
+        }
+        for prev_i in 0..fi {
+            let pf = match fields.try_get(wrapping_add(d.f0, prev_i)) {
+                Option::Some(x) => x,
+                Option::None => continue,
+            };
+            if slice_eq(in arena[pf.name_a..pf.name_b], in arena[f.name_a..f.name_b]) {
+                return fail_vsys(err_duplicate(), f.s0, f.s1, 104);
+            }
+        }
+        let mut fsize: u64 = 0;
+        let mut falign: u64 = 1;
+        if f.kind == wt_int() {
+            let width = widen_u64(f.bits / 8);
+            fsize = width;
+            falign = if f.endian == endian_native() {
+                width
+            } else {
+                1
+            };
+        } else if f.kind == wt_bytes() || f.kind == wt_pad() {
+            fsize = f.count;
+            falign = 1;
+        } else {
+            let sub_idx = match find_struct(in defs.as_slice(), in arena, f.struct_a, f.struct_b) {
+                Option::Some(si) => si,
+                Option::None => return fail_vsys(err_type(), f.s0, f.s1, 105),
+            };
+            let (ss, sa) = visit_struct(
+                sub_idx,
+                inout defs,
+                in fields,
+                in arena,
+                inout visiting,
+                inout budget
+            );
+            fsize = ss;
+            falign = sa;
+        }
+        if (size & wrapping_sub(falign, 1)) != 0 {
+            return fail_vsys(err_type(), f.s0, f.s1, 106);
+        }
+        if size > wrapping_sub(max_u64, fsize) {
+            return fail_vsys(err_type(), f.s0, f.s1, 107);
+        }
+        size = wrapping_add(size, fsize);
+        if falign > alignment {
+            alignment = falign;
+        }
+    }
+    if (size & wrapping_sub(alignment, 1)) != 0 {
+        return fail_vsys(err_type(), d.s0, d.s1, 108);
+    }
+    let _ = visiting.pop();
+    let updated = WireStructDef {
+        name_a: d.name_a,
+        name_b: d.name_b,
+        f0: d.f0,
+        fn_count: d.fn_count,
+        size: size,
+        alignment: alignment,
+        s0: d.s0,
+        s1: d.s1,
+    };
+    defs.try_set(idx, updated);
+    (size, alignment)
+}
+
+pub fn compile_all(
+    inout defs: ChunkSeq[WireStructDef],
+    in fields: Slice[WireField],
+    in arena: Slice[u8]
+) eff [Fail[VsysError]] {
+    let mut visiting: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut budget: u64 = 65536;
+    for i in 0..defs.len() {
+        let _ = visit_struct(i, inout defs, in fields, in arena, inout visiting, inout budget);
+    }
+}

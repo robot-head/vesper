@@ -25,7 +25,7 @@ use std::sync::OnceLock;
 const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 
 #[cfg(windows)]
-fn set_last_error(code: u32) {
+pub(crate) fn set_last_error(code: u32) {
     unsafe extern "system" {
         fn SetLastError(code: u32);
     }
@@ -34,7 +34,7 @@ fn set_last_error(code: u32) {
 }
 
 #[cfg(not(windows))]
-fn set_last_error(_code: u32) {}
+pub(crate) fn set_last_error(_code: u32) {}
 
 thread_local! {
     static VALUE: RefCell<Option<CString>> = const { RefCell::new(None) };
