@@ -55,6 +55,7 @@ pub fn run(func: &mut ir::Function) {
     promote_slots(func);
     remove_constant_params(func);
     fold_narrow_extends(func);
+    fold_trivial_arith_and_bool_extends(func);
     sink_compares(func);
     thread_branches(func);
     thread_decided_branches(func);
@@ -2162,6 +2163,121 @@ fn fold_narrow_extends(func: &mut ir::Function) {
                         func.dfg.insts[inst] = InstructionData::Unary {
                             opcode: Opcode::Ireduce,
                             arg: inner,
+                        };
+                        changed = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+}
+
+/// Fold identity `imul_imm 1`/`0`, `iadd_imm 0`, and zero-comparisons or
+/// branches on `uextend`/`sextend` of narrower boolean values.
+fn fold_trivial_arith_and_bool_extends(func: &mut ir::Function) {
+    let unwrap_ext = |func: &ir::Function, v: Value| -> Option<(ir::Inst, Value)> {
+        let v = func.dfg.resolve_aliases(v);
+        let ir::ValueDef::Result(def, 0) = func.dfg.value_def(v) else {
+            return None;
+        };
+        if let InstructionData::Unary {
+            opcode: Opcode::Uextend | Opcode::Sextend,
+            arg,
+        } = func.dfg.insts[def]
+        {
+            Some((def, func.dfg.resolve_aliases(arg)))
+        } else {
+            None
+        }
+    };
+    for _ in 0..3 {
+        let mut changed = false;
+        for (_, inst) in insts(func) {
+            match func.dfg.insts[inst] {
+                InstructionData::BinaryImm64 {
+                    opcode: Opcode::ImulImm,
+                    arg,
+                    imm,
+                } => {
+                    let arg = func.dfg.resolve_aliases(arg);
+                    let dest = func.dfg.first_result(inst);
+                    if imm.bits() == 1 {
+                        func.layout.remove_inst(inst);
+                        func.dfg.clear_results(inst);
+                        func.dfg.change_to_alias(dest, arg);
+                        changed = true;
+                    } else if imm.bits() == 0 {
+                        let ty = func.dfg.value_type(dest);
+                        func.dfg.replace(inst).iconst(ty, 0);
+                        changed = true;
+                    }
+                }
+                InstructionData::BinaryImm64 {
+                    opcode: Opcode::IaddImm,
+                    arg,
+                    imm,
+                } if imm.bits() == 0 => {
+                    let arg = func.dfg.resolve_aliases(arg);
+                    let dest = func.dfg.first_result(inst);
+                    func.layout.remove_inst(inst);
+                    func.dfg.clear_results(inst);
+                    func.dfg.change_to_alias(dest, arg);
+                    changed = true;
+                }
+                InstructionData::IntCompareImm {
+                    opcode: Opcode::IcmpImm,
+                    cond,
+                    arg,
+                    imm,
+                } if imm.bits() == 0
+                    && matches!(
+                        cond,
+                        ir::condcodes::IntCC::Equal | ir::condcodes::IntCC::NotEqual
+                    ) =>
+                {
+                    if let Some((_, inner)) = unwrap_ext(func, arg) {
+                        let inner_is_cmp = matches!(
+                            func.dfg.value_def(inner),
+                            ir::ValueDef::Result(def, 0)
+                                if matches!(
+                                    func.dfg.insts[def],
+                                    InstructionData::IntCompare { .. }
+                                        | InstructionData::IntCompareImm { .. }
+                                )
+                        );
+                        let dest = func.dfg.first_result(inst);
+                        if cond == ir::condcodes::IntCC::NotEqual
+                            && inner_is_cmp
+                            && func.dfg.value_type(inner) == func.dfg.value_type(dest)
+                        {
+                            func.layout.remove_inst(inst);
+                            func.dfg.clear_results(inst);
+                            func.dfg.change_to_alias(dest, inner);
+                        } else {
+                            func.dfg.insts[inst] = InstructionData::IntCompareImm {
+                                opcode: Opcode::IcmpImm,
+                                cond,
+                                arg: inner,
+                                imm,
+                            };
+                        }
+                        changed = true;
+                    }
+                }
+                InstructionData::Brif {
+                    opcode: br_op,
+                    arg,
+                    blocks,
+                } => {
+                    if let Some((_, inner)) = unwrap_ext(func, arg) {
+                        func.dfg.insts[inst] = InstructionData::Brif {
+                            opcode: br_op,
+                            arg: inner,
+                            blocks,
                         };
                         changed = true;
                     }

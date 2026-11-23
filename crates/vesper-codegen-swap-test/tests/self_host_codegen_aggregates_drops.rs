@@ -17,8 +17,8 @@ mod check_harness;
 mod check_words;
 
 use check_harness::repo;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 use vesper::codegen_swap::{self, CodegenHooks, Lent};
 use vesper::native::WordFunction;
 use vesper_codegen_swap_test::*;
@@ -127,10 +127,16 @@ fn runs(case: &check_harness::Case) -> bool {
     f.params.is_empty() && f.effects.instances.is_empty() && f.effects.tail.is_none()
 }
 
+/// Serialize the two drop-swap tests: `worlds()` invokes `check_harness::corpus()`,
+/// which installs a silent process-global panic hook and spawns 8x256 MiB threads,
+/// racing with `box_test_programs_match` on macOS AArch64.
+static TEST_LOCK: Mutex<()> = Mutex::new(());
+
 /// The drop glue swap: 0 CLIF differences, byte-identical objects and
 /// equal runs, optimize on and off.
 #[test]
 fn box_drops_match_the_rust_emitter() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     big_stack(drop_swap);
 }
 
@@ -198,6 +204,7 @@ fn box_sources() -> Vec<(String, vesper::check::World)> {
 /// and enum box types.
 #[test]
 fn box_test_programs_match() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     big_stack(|| {
         let hooks = CodegenHooks {
             drops: Some(drops),
