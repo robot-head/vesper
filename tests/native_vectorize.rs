@@ -387,10 +387,7 @@ fn main() -> u64 {
     assert!(p.diagnostics.is_empty(), "{:?}", p.diagnostics);
     let c = check::check(&p.module);
     assert!(c.diagnostics.is_empty(), "{:#?}", c.diagnostics);
-    for target in [
-        "x86_64-unknown-linux-gnu",
-        "aarch64-unknown-linux-gnu",
-    ] {
+    for target in ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"] {
         let (_, clif) =
             vesper::native::object_with_options(&c.world, "main", Some(target), true).unwrap();
         let main_start = clif.find("; main\n").expect("missing main in CLIF");
@@ -407,4 +404,3 @@ fn main() -> u64 {
     let jit = vesper::native::jit_with_options(&c.world, "main", true).unwrap();
     assert_eq!(eval.to_string(), jit.to_string());
 }
-

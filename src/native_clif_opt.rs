@@ -345,10 +345,8 @@ fn split_one_join_slot(func: &mut ir::Function, split_merged: &mut HashSet<Stack
                     if data.opcode() != Opcode::Jump {
                         continue;
                     }
-                    let call = data.branch_destination(
-                        &func.dfg.jump_tables,
-                        &func.dfg.exception_tables,
-                    )[0];
+                    let call = data
+                        .branch_destination(&func.dfg.jump_tables, &func.dfg.exception_tables)[0];
                     let target = call.block(&func.dfg.value_lists);
                     if target == join {
                         continue;
@@ -380,10 +378,9 @@ fn split_one_join_slot(func: &mut ir::Function, split_merged: &mut HashSet<Stack
                         ..
                     } => {}
                     InstructionData::Jump { .. } => {
-                        let call = data.branch_destination(
-                            &func.dfg.jump_tables,
-                            &func.dfg.exception_tables,
-                        )[0];
+                        let call = data
+                            .branch_destination(&func.dfg.jump_tables, &func.dfg.exception_tables)
+                            [0];
                         let target = call.block(&func.dfg.value_lists);
                         if target == join {
                             ok = false;
