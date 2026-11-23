@@ -15,7 +15,8 @@ use @vesper/check-data::types::{
     RowNode,
     TypeNode,
     Types,
-    Vars
+    Vars,
+    TyKind
 };
 use @vesper/check-data::world::{
     Known
@@ -30,12 +31,6 @@ use self::ints::{
 };
 
 const NONE32: u32 = 4294967295;
-const K_LIT: u8 = 0;
-const K_NAMED: u8 = 1;
-const K_TUPLE: u8 = 2;
-const K_FN: u8 = 3;
-const K_ROW: u8 = 4;
-const K_INFER: u8 = 5;
 
 pub fn lit_of(n: TypeNode) -> Lit {
     Lit {
@@ -64,37 +59,37 @@ pub fn compatible(in t: Types, k: Known, a: u32, b: u32) -> bool {
     }
     let x = t.node(a);
     let y = t.node(b);
-    if x.kind == K_LIT && y.kind == K_LIT {
+    if x.kind == TyKind::Lit && y.kind == TyKind::Lit {
         return true;
     }
-    if x.kind == K_LIT {
+    if x.kind == TyKind::Lit {
         return fits_type(in t, k, b, lit_of(x));
     }
-    if y.kind == K_LIT {
+    if y.kind == TyKind::Lit {
         return fits_type(in t, k, a, lit_of(y));
     }
-    if x.kind == K_NAMED && y.kind == K_NAMED {
+    if x.kind == TyKind::Named && y.kind == TyKind::Named {
         if x.name != y.name || x.n != y.n {
             return false;
         }
         return all_compatible(in t, k, x, y);
     }
-    if x.kind == K_TUPLE && y.kind == K_TUPLE {
+    if x.kind == TyKind::Tuple && y.kind == TyKind::Tuple {
         if x.n != y.n {
             return false;
         }
         return all_compatible(in t, k, x, y);
     }
-    if x.kind == K_NAMED && y.kind == K_TUPLE {
+    if x.kind == TyKind::Named && y.kind == TyKind::Tuple {
         return x.name == k.unit && y.n == 0;
     }
-    if x.kind == K_TUPLE && y.kind == K_NAMED {
+    if x.kind == TyKind::Tuple && y.kind == TyKind::Named {
         return y.name == k.unit && x.n == 0;
     }
-    if x.kind == K_ROW && y.kind == K_ROW {
+    if x.kind == TyKind::Row && y.kind == TyKind::Row {
         return a == b;
     }
-    if x.kind == K_FN && y.kind == K_FN {
+    if x.kind == TyKind::Fn && y.kind == TyKind::Fn {
         if !effects_include(in t, k, x.r2, y.r2) || y.mode > x.mode || x.n != y.n {
             return false;
         }
@@ -126,7 +121,7 @@ fn all_compatible(in t: Types, k: Known, x: TypeNode, y: TypeNode) -> bool {
 // `IntegerKind::from_type(t).is_some_and(|k| k.fits(n))` for a non-literal `t`.
 fn fits_type(in t: Types, k: Known, ty: u32, v: Lit) -> bool {
     let n = t.node(ty);
-    if n.kind != K_NAMED {
+    if n.kind != TyKind::Named {
         return false;
     }
     fits(k, n.name, v)
@@ -176,16 +171,16 @@ pub fn effects_include(in t: Types, k: Known, expected: u32, actual: u32) -> boo
 // `check::unresolved`.
 pub fn unresolved(in t: Types, ty: u32) -> bool {
     let n = t.node(ty);
-    if n.kind == K_INFER {
+    if n.kind == TyKind::Infer {
         return true;
     }
-    if n.kind == K_NAMED || n.kind == K_TUPLE || n.kind == K_FN {
+    if n.kind == TyKind::Named || n.kind == TyKind::Tuple || n.kind == TyKind::Fn {
         for i in 0..w(n.n) {
             if unresolved(in t, item(in t, add(w(n.a), i))) {
                 return true;
             }
         }
-        if n.kind == K_FN {
+        if n.kind == TyKind::Fn {
             return unresolved(in t, n.r);
         }
     }
@@ -300,15 +295,15 @@ fn mk_fn(inout t: Types, like: u32, result: u32, row: u32, mode: u8) -> u32 {
         params.push(item(in t, add(w(n.a), i)));
         passes.push(u8_at(in t.passes, add(w(n.a), i)));
     }
-    t.mk_with(K_FN, mode, 0, in params, in passes, result, row, 0)
+    t.mk_with(TyKind::Fn, mode, 0, in params, in passes, result, row, 0)
 }
 
 // `check::refine_annotation(expected, actual)`.
 pub fn refine_annotation(inout t: Types, expected: u32, actual: u32) -> u32 {
     let x = t.node(expected);
     let y = t.node(actual);
-    if (x.kind == K_NAMED && y.kind == K_NAMED && x.name == y.name)
-        || (x.kind == K_TUPLE && y.kind == K_TUPLE) {
+    if (x.kind == TyKind::Named && y.kind == TyKind::Named && x.name == y.name)
+        || (x.kind == TyKind::Tuple && y.kind == TyKind::Tuple) {
         // `zip`: the shorter list wins.
         let mut m = w(x.n);
         if w(y.n) < m {
@@ -321,12 +316,12 @@ pub fn refine_annotation(inout t: Types, expected: u32, actual: u32) -> u32 {
             let r = refine_annotation(inout t, ea, aa);
             args.push(r);
         }
-        if x.kind == K_NAMED {
+        if x.kind == TyKind::Named {
             return t.named(x.name, in args);
         }
         return t.tuple(in args);
     }
-    if x.kind == K_FN && y.kind == K_FN {
+    if x.kind == TyKind::Fn && y.kind == TyKind::Fn {
         let mut row = row_buf(in t, y.r2);
         let er = t.row(x.r2);
         for i in 0..w(er.n) {
@@ -356,7 +351,7 @@ pub fn join_types(inout t: Types, k: Known, a: u32, b: u32, inout errors: u64) -
     }
     let x = t.node(a);
     let y = t.node(b);
-    if x.kind == K_LIT && y.kind == K_LIT {
+    if x.kind == TyKind::Lit && y.kind == TyKind::Lit {
         let lx = lit_of(x);
         let ly = lit_of(y);
         let hi = lit_max(lx, ly);
@@ -369,14 +364,14 @@ pub fn join_types(inout t: Types, k: Known, a: u32, b: u32, inout errors: u64) -
         }
         return mk_lit(inout t, n);
     }
-    if x.kind == K_LIT {
+    if x.kind == TyKind::Lit {
         return b;
     }
-    if y.kind == K_LIT {
+    if y.kind == TyKind::Lit {
         return a;
     }
-    if (x.kind == K_NAMED && y.kind == K_NAMED && x.name == y.name && x.n == y.n)
-        || (x.kind == K_TUPLE && y.kind == K_TUPLE && x.n == y.n) {
+    if (x.kind == TyKind::Named && y.kind == TyKind::Named && x.name == y.name && x.n == y.n)
+        || (x.kind == TyKind::Tuple && y.kind == TyKind::Tuple && x.n == y.n) {
         let mut args: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](w(x.n));
         for i in 0..w(x.n) {
             let ea = item(in t, add(w(x.a), i));
@@ -384,12 +379,12 @@ pub fn join_types(inout t: Types, k: Known, a: u32, b: u32, inout errors: u64) -
             let j = join_types(inout t, k, ea, eb, inout errors);
             args.push(j);
         }
-        if x.kind == K_NAMED {
+        if x.kind == TyKind::Named {
             return t.named(x.name, in args);
         }
         return t.tuple(in args);
     }
-    if x.kind == K_FN && y.kind == K_FN {
+    if x.kind == TyKind::Fn && y.kind == TyKind::Fn {
         let row = union_rows(inout t, x.r2, y.r2);
         let result = join_types(inout t, k, x.r, y.r, inout errors);
         let mut mode = x.mode;
@@ -424,15 +419,15 @@ pub fn infer(
 ) {
     let x = t.node(expected);
     let y = t.node(actual);
-    if x.kind == K_NAMED && x.n == 0 && is_generic(in generics, x.name) {
+    if x.kind == TyKind::Named && x.n == 0 && is_generic(in generics, x.name) {
         let cur = vars.get(x.name);
         if cur == NONE32 || cur == t.infer {
             vars.set(x.name, actual);
             return;
         }
         let c = t.node(cur);
-        if c.kind == K_LIT {
-            if y.kind == K_LIT {
+        if c.kind == TyKind::Lit {
+            if y.kind == TyKind::Lit {
                 let prev = lit_of(c);
                 let next = lit_of(y);
                 let mut rep = lit_max(prev, next);
@@ -452,7 +447,8 @@ pub fn infer(
         }
         return;
     }
-    if (x.kind == K_NAMED && y.kind == K_NAMED) || (x.kind == K_TUPLE && y.kind == K_TUPLE) {
+    if (x.kind == TyKind::Named && y.kind == TyKind::Named)
+        || (x.kind == TyKind::Tuple && y.kind == TyKind::Tuple) {
         let mut m = w(x.n);
         if w(y.n) < m {
             m = w(y.n);
@@ -464,7 +460,7 @@ pub fn infer(
         }
         return;
     }
-    if x.kind == K_FN && y.kind == K_FN {
+    if x.kind == TyKind::Fn && y.kind == TyKind::Fn {
         let mut m = w(x.n);
         if w(y.n) < m {
             m = w(y.n);
@@ -502,7 +498,7 @@ pub fn infer(
             }
         }
         let prev = vars.get(row);
-        if prev != NONE32 && t.kind(prev) == K_ROW {
+        if prev != NONE32 && t.kind(prev) == TyKind::Row {
             let mut p = row_buf(in t, t.node(prev).r2);
             let rr = rem.finish(inout t);
             let rn = t.row(rr);

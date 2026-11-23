@@ -20,7 +20,9 @@ use @vesper/check-data::names::{
 };
 use @vesper/check-data::types::{
     Types,
-    display
+    display,
+    TyKind,
+    TyPass
 };
 use @vesper/check-data::world::{
     Known,
@@ -31,11 +33,6 @@ use @vesper/check-data::diag::{
 };
 
 const NONE32: u32 = 4294967295;
-const K_NAMED: u8 = 1;
-const K_TUPLE: u8 = 2;
-const K_FN: u8 = 3;
-const P_IN: u8 = 0;
-const P_INOUT: u8 = 1;
 
 const OP_NEW: u32 = 1;
 const OP_WITH_CAPACITY: u32 = 2;
@@ -191,12 +188,12 @@ impl SeqNames {
 
 pub fn is_seq_type(in t: Types, k: Known, ty: u32) -> bool {
     let n = t.node(ty);
-    n.kind == K_NAMED && n.name == k.chunk_seq && n.n == 1
+    n.kind == TyKind::Named && n.name == k.chunk_seq && n.n == 1
 }
 
 pub fn is_slice_type(in t: Types, k: Known, ty: u32) -> bool {
     let n = t.node(ty);
-    n.kind == K_NAMED && n.name == k.slice && n.n == 1
+    n.kind == TyKind::Named && n.name == k.slice && n.n == 1
 }
 
 pub fn is_seq_or_slice(in t: Types, k: Known, ty: u32) -> bool {
@@ -214,27 +211,27 @@ pub fn elem(in t: Types, k: Known, ty: u32) -> u32 {
 
 pub fn mentions_slice(in t: Types, k: Known, ty: u32) -> bool {
     let n = t.node(ty);
-    if n.kind == K_NAMED && n.name == k.slice {
+    if n.kind == TyKind::Named && n.name == k.slice {
         return true;
     }
-    if n.kind == K_NAMED || n.kind == K_TUPLE || n.kind == K_FN {
+    if n.kind == TyKind::Named || n.kind == TyKind::Tuple || n.kind == TyKind::Fn {
         for i in 0..w(n.n) {
             if mentions_slice(in t, k, u32_at(in t.items, add(w(n.a), i))) {
                 return true;
             }
         }
     }
-    n.kind == K_FN && mentions_slice(in t, k, n.r)
+    n.kind == TyKind::Fn && mentions_slice(in t, k, n.r)
 }
 
 pub fn is_string_type(in t: Types, k: Known, ty: u32) -> bool {
     let n = t.node(ty);
-    n.kind == K_NAMED && n.name == k.string && n.n == 0
+    n.kind == TyKind::Named && n.name == k.string && n.n == 0
 }
 
 pub fn is_str_type(in t: Types, k: Known, ty: u32) -> bool {
     let n = t.node(ty);
-    n.kind == K_NAMED && n.name == k.str_ && n.n == 0
+    n.kind == TyKind::Named && n.name == k.str_ && n.n == 0
 }
 
 pub fn is_text(in t: Types, k: Known, ty: u32) -> bool {
@@ -243,24 +240,24 @@ pub fn is_text(in t: Types, k: Known, ty: u32) -> bool {
 
 pub fn mentions_str(in t: Types, k: Known, ty: u32) -> bool {
     let n = t.node(ty);
-    if n.kind == K_NAMED && n.name == k.str_ {
+    if n.kind == TyKind::Named && n.name == k.str_ {
         return true;
     }
-    if n.kind == K_NAMED || n.kind == K_TUPLE || n.kind == K_FN {
+    if n.kind == TyKind::Named || n.kind == TyKind::Tuple || n.kind == TyKind::Fn {
         for i in 0..w(n.n) {
             if mentions_str(in t, k, u32_at(in t.items, add(w(n.a), i))) {
                 return true;
             }
         }
     }
-    n.kind == K_FN && mentions_str(in t, k, n.r)
+    n.kind == TyKind::Fn && mentions_str(in t, k, n.r)
 }
 
 // `arrays::element`: the element type of a non-empty tuple of one type
 // (its length is the tuple's arity), or NONE32.
 pub fn array_element(in t: Types, ty: u32) -> u32 {
     let n = t.node(ty);
-    if n.kind != K_TUPLE || n.n == 0 {
+    if n.kind != TyKind::Tuple || n.n == 0 {
         return NONE32;
     }
     let first = t.arg(ty, 0);
@@ -286,7 +283,7 @@ fn holds_visit(in t: Types, in wd: World, k: Known, ty: u32, inout seen: ChunkSe
         return true;
     }
     let n = t.node(ty);
-    if n.kind == K_TUPLE {
+    if n.kind == TyKind::Tuple {
         for i in 0..w(n.n) {
             if holds_visit(in t, in wd, k, t.arg(ty, i), inout seen) {
                 return true;
@@ -294,7 +291,7 @@ fn holds_visit(in t: Types, in wd: World, k: Known, ty: u32, inout seen: ChunkSe
         }
         return false;
     }
-    if n.kind != K_NAMED {
+    if n.kind != TyKind::Named {
         return false;
     }
     for i in 0..w(n.n) {
@@ -559,9 +556,9 @@ pub fn place_primitive(op: u32) -> bool {
 
 pub fn receiver_pass(op: u32) -> u8 {
     if mutates(op) || op == OP_SLICE_SET {
-        P_INOUT
+        TyPass::Inout
     } else {
-        P_IN
+        TyPass::In
     }
 }
 
@@ -889,7 +886,7 @@ pub fn seq_check_world(in t: Types, in names: Names, in wd: World, in sg: Sigs, 
         for j in 0..w(f.pn) {
             let p = sg.param(add(w(f.pa), j));
             let is_slice = is_slice_type(in t, k, p.ty);
-            let top = is_slice && (p.pass == P_IN || p.pass == P_INOUT);
+            let top = is_slice && (p.pass == TyPass::In || p.pass == TyPass::Inout);
             let nested = if top {
                 mentions_slice(in t, k, t.arg(p.ty, 0))
             } else {
@@ -903,9 +900,9 @@ pub fn seq_check_world(in t: Types, in names: Names, in wd: World, in sg: Sigs, 
                     .extend(
                         in "Slice[T] is a second-class borrow and cannot appear in the ".as_bytes()
                     );
-                if p.pass == P_IN {
+                if p.pass == TyPass::In {
                     put(inout d.text, "in");
-                } else if p.pass == P_INOUT {
+                } else if p.pass == TyPass::Inout {
                     put(inout d.text, "inout");
                 } else {
                     put(inout d.text, "sink");

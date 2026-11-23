@@ -35,7 +35,9 @@ use @vesper/check-data::types::{
     Vars,
     default_type,
     substitute,
-    vars_new
+    vars_new,
+    TyKind,
+    TyPass
 };
 use @vesper/check-data::input::{
     Ctx,
@@ -62,35 +64,14 @@ use @vesper/place-ir::{
     Program,
     read_program
 };
+use @vesper/place-ir::codes::{
+    Op,
+    Pat,
+    Tag
+};
 
 const NONE32: u32 = 4294967295;
 const NONE64: u64 = 18446744073709551615;
-
-// check-data's type kinds.
-const K_NAMED: u8 = 1;
-const K_FN: u8 = 3;
-
-// Passes.
-const PASS_IN: u64 = 0;
-
-// Operand tags and opcodes of @vesper/place-ir.
-const T_BLOCK: u8 = 7;
-const OP_READ: u8 = 2;
-const OP_BIND: u8 = 3;
-const OP_WRITE: u8 = 4;
-const OP_CALL: u8 = 11;
-const OP_INDIRECT: u8 = 12;
-const OP_CLOSURE: u8 = 14;
-const OP_HANDLE: u8 = 15;
-const OP_TILED: u8 = 17;
-const OP_SEQ: u8 = 18;
-const OP_FIP: u8 = 19;
-
-// Pattern and literal kinds.
-const PAT_BIND: u64 = 1;
-const PAT_LITERAL: u64 = 2;
-const PAT_TUPLE: u64 = 3;
-const PAT_CONSTRUCTOR: u64 = 4;
 
 // Pool kinds: 0 seq, 5 a hoisted header read, 6 a bounds guard.
 const POOL_SEQ: u64 = 0;
@@ -404,7 +385,7 @@ fn cyclic_blocks(in p: Program, f: FnRow) -> ChunkSeq[u8] {
         set64(inout at, b, to.len());
         let row = p.block(add(f.b0, b));
         for i in row.ta..add(row.ta, row.tn) {
-            if p.tag(i) == T_BLOCK {
+            if p.tag(i) == Tag::Block {
                 let x = p.op(i);
                 if x < n {
                     to.push(x);
@@ -506,18 +487,18 @@ fn pattern_names(in p: Program, i: u64, depth: u64, inout out: ChunkSeq[u8]) -> 
     if depth > MAX_DEPTH {
         return j;
     }
-    if kind == PAT_BIND {
+    if kind == Pat::Bind {
         mark(inout out, n32(p.op(j)));
         j = inc(j);
-    } else if kind == PAT_LITERAL {
+    } else if kind == Pat::Literal {
         j = add(j, 3);
-    } else if kind == PAT_TUPLE {
+    } else if kind == Pat::Tuple {
         let n = p.op(j);
         j = inc(j);
         for k in 0..n {
             j = pattern_names(in p, j, inc(depth), inout out);
         }
-    } else if kind == PAT_CONSTRUCTOR {
+    } else if kind == Pat::Constructor {
         let n = p.op(add(j, 2));
         j = add(j, 3);
         for k in 0..n {
@@ -555,11 +536,11 @@ fn arg_root(in p: Program, i: u64, k: u64) -> u64 {
 // The argument list of instruction `inst` that the register plans read
 // (NONE64 when it has none).
 fn inst_args(in p: Program, inst: InstRow) -> u64 {
-    if inst.op == OP_CALL
-        || inst.op == OP_INDIRECT
-        || inst.op == OP_TILED
-        || inst.op == OP_SEQ
-        || inst.op == OP_FIP {
+    if inst.op == Op::Call
+        || inst.op == Op::Indirect
+        || inst.op == Op::Tiled
+        || inst.op == Op::Seq
+        || inst.op == Op::Fip {
         inc(inst.a)
     } else {
         NONE64
@@ -568,7 +549,7 @@ fn inst_args(in p: Program, inst: InstRow) -> u64 {
 
 // The aliases list (n, n x (key, value)) of a closure or handler.
 fn alias_list(inst: InstRow) -> u64 {
-    if inst.op == OP_HANDLE {
+    if inst.op == Op::Handle {
         add(inst.a, 3)
     } else {
         inc(inst.a)
@@ -580,7 +561,7 @@ fn alias_list(inst: InstRow) -> u64 {
 fn mark_capture(in p: Program, inst: InstRow, in g: Graph, inout out: ChunkSeq[u8]) {
     let al = alias_list(inst);
     let na = p.op(al);
-    if inst.op == OP_HANDLE {
+    if inst.op == Op::Handle {
         for k in 0..g.handles.len() {
             mark(inout out, u32_at(in g.handles, k));
         }
@@ -599,15 +580,15 @@ fn mark_capture(in p: Program, inst: InstRow, in g: Graph, inout out: ChunkSeq[u
 
 // `bounds_hoist::calls_out`.
 fn calls_out(in p: Program, in names: Names, inst: InstRow) -> bool {
-    if inst.op == OP_CALL
-        || inst.op == OP_TILED
-        || inst.op == OP_FIP
-        || inst.op == OP_INDIRECT
-        || inst.op == OP_CLOSURE
-        || inst.op == OP_HANDLE {
+    if inst.op == Op::Call
+        || inst.op == Op::Tiled
+        || inst.op == Op::Fip
+        || inst.op == Op::Indirect
+        || inst.op == Op::Closure
+        || inst.op == Op::Handle {
         return true;
     }
-    if inst.op != OP_SEQ {
+    if inst.op != Op::Seq {
         return false;
     }
     let pool = p.pool_row(p.op(inst.a));
@@ -660,7 +641,7 @@ impl Gen {
         let s = substitute(inout self.c.types, t, in vars);
         let d = default_type(inout self.c.types, s);
         let n = self.c.types.node(d);
-        if n.kind != K_NAMED || n.n != 0 {
+        if n.kind != TyKind::Named || n.n != 0 {
             return false;
         }
         let k = self.c.world.k;
@@ -685,26 +666,26 @@ impl Gen {
                 if calls_out(in self.p, in self.c.names, inst) {
                     calls = true;
                 }
-                if inst.op == OP_WRITE {
+                if inst.op == Op::Write {
                     let root = place_root(inout self.c.names, n32(self.p.op(inst.a)));
                     mark(inout kept, root);
-                } else if inst.op == OP_BIND {
+                } else if inst.op == Op::Bind {
                     let end = pattern_names(in self.p, inc(inst.a), 0, inout kept);
-                } else if inst.op == OP_READ {
+                } else if inst.op == Op::Read {
                     let root = n32(self.p.op(inst.a));
                     let path = self.p.op(inc(inst.a));
                     let pass = self.p.op(add(inst.a, 2));
-                    if pass != PASS_IN && !(path == 0 && self.callback(in g, root, in vars)) {
+                    if pass != TyPass::In && !(path == 0 && self.callback(in g, root, in vars)) {
                         mark(inout kept, root);
                     }
-                } else if inst.op == OP_CLOSURE || inst.op == OP_HANDLE {
+                } else if inst.op == Op::Closure || inst.op == Op::Handle {
                     mark_capture(in self.p, inst, in g, inout kept);
                 } else {
                     let a = inst_args(in self.p, inst);
                     if a != NONE64 {
                         for k in 0..self.p.op(a) {
                             let root = arg_root(in self.p, a, k);
-                            if root != 0 && arg_pass(in self.p, a, k) != PASS_IN {
+                            if root != 0 && arg_pass(in self.p, a, k) != TyPass::In {
                                 mark(inout kept, n32(wrapping_sub(root, 1)));
                             }
                         }
@@ -715,7 +696,7 @@ impl Gen {
         let all = !nested && calls;
         for i in 0..g.params.len() {
             let pr = param_at(in g, i);
-            if pr.pass != PASS_IN || all || marked(in kept, pr.name) {
+            if pr.pass != TyPass::In || all || marked(in kept, pr.name) {
                 continue;
             }
             let mut local = false;
@@ -749,7 +730,7 @@ impl Gen {
             if pr.name == name {
                 let s = substitute(inout self.c.types, pr.ty, in vars);
                 let d = default_type(inout self.c.types, s);
-                if self.c.types.kind(d) == K_FN {
+                if self.c.types.kind(d) == TyKind::Fn {
                     return true;
                 }
             }
@@ -778,12 +759,12 @@ impl Gen {
             let row = self.p.block(add(f.b0, bi));
             for ii in row.i0..add(row.i0, row.ic) {
                 let inst = self.p.inst(ii);
-                if inst.op == OP_READ {
+                if inst.op == Op::Read {
                     bump(inout touched, n32(self.p.op(inst.a)), weight);
-                } else if inst.op == OP_WRITE {
+                } else if inst.op == Op::Write {
                     let root = place_root(inout self.c.names, n32(self.p.op(inst.a)));
                     bump(inout touched, root, weight);
-                } else if inst.op == OP_CALL {
+                } else if inst.op == Op::Call {
                     let callee = n32(self.p.op(inst.a));
                     let si = sig_of(in self.s, callee);
                     let mut pure = false;
@@ -802,14 +783,14 @@ impl Gen {
                                 continue;
                             }
                             let sym = n32(wrapping_sub(root, 1));
-                            if arg_pass(in self.p, a, k) != PASS_IN {
+                            if arg_pass(in self.p, a, k) != TyPass::In {
                                 mark(inout memory, sym);
                             } else if !inlined {
                                 bump(inout lent_in, sym, weight);
                             }
                         }
                     }
-                } else if inst.op == OP_INDIRECT || inst.op == OP_TILED {
+                } else if inst.op == Op::Indirect || inst.op == Op::Tiled {
                     let a = inc(inst.a);
                     for k in 0..self.p.op(a) {
                         let root = arg_root(in self.p, a, k);
@@ -817,7 +798,7 @@ impl Gen {
                             mark(inout memory, n32(wrapping_sub(root, 1)));
                         }
                     }
-                } else if inst.op == OP_CLOSURE || inst.op == OP_HANDLE {
+                } else if inst.op == Op::Closure || inst.op == Op::Handle {
                     mark_capture(in self.p, inst, in g, inout memory);
                 }
             }

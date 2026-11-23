@@ -16,7 +16,8 @@ use @vesper/check-data::names::{
 use @vesper/check-data::types::{
     EffNode,
     Types,
-    display
+    display,
+    TyKind
 };
 use @vesper/check-data::world::{
     Known
@@ -26,7 +27,6 @@ use @vesper/check-data::diag::{
 };
 
 const NONE32: u32 = 4294967295;
-const K_NAMED: u8 = 1;
 
 pub const E_U8: u8 = 1;
 pub const E_U32: u8 = 2;
@@ -76,7 +76,7 @@ pub fn elem_of_name(k: Known, s: u32) -> u8 {
 // `Elem::from_type`, or 0.
 pub fn elem_of(in t: Types, k: Known, ty: u32) -> u8 {
     let n = t.node(ty);
-    if n.kind == K_NAMED && n.n == 0 {
+    if n.kind == TyKind::Named && n.n == 0 {
         elem_of_name(k, n.name)
     } else {
         0
@@ -202,17 +202,17 @@ fn kind_of(k: Known, s: u32) -> u8 {
 // `is_vector_spelling`.
 pub fn is_vector_spelling(in t: Types, in names: Names, k: Known, ty: u32) -> bool {
     let n = t.node(ty);
-    if n.kind != K_NAMED || kind_of(k, n.name) == 0 || n.n != 2 {
+    if n.kind != TyKind::Named || kind_of(k, n.name) == 0 || n.n != 2 {
         return false;
     }
     let c = t.node(t.arg(ty, 1));
-    c.kind == K_NAMED && c.n == 0 && is_lane_count(in names, c.name)
+    c.kind == TyKind::Named && c.n == 0 && is_lane_count(in names, c.name)
 }
 
 // `shape_of`: the kind (1 Vec, 2 Mask) and shape, or `elem` 0.
 pub fn shape_of(in t: Types, in names: Names, k: Known, ty: u32) -> Shape {
     let n = t.node(ty);
-    if n.kind != K_NAMED {
+    if n.kind != TyKind::Named {
         return no_shape();
     }
     let kind = kind_of(k, n.name);
@@ -220,7 +220,7 @@ pub fn shape_of(in t: Types, in names: Names, k: Known, ty: u32) -> Shape {
         return no_shape();
     }
     let c = t.node(t.arg(ty, 1));
-    if c.kind != K_NAMED || c.n != 0 || !is_lane_count(in names, c.name) {
+    if c.kind != TyKind::Named || c.n != 0 || !is_lane_count(in names, c.name) {
         return no_shape();
     }
     let lanes = lane_value(in names, c.name);
@@ -288,7 +288,7 @@ pub fn profile_of(in t: Types, in vn: VecNames, e: EffNode) -> u8 {
         return 0;
     }
     let a = t.node(u32_at(in t.items, w(e.a)));
-    if a.kind != K_NAMED || a.n != 0 {
+    if a.kind != TyKind::Named || a.n != 0 {
         return 0;
     }
     profile_of_name(in vn, a.name)

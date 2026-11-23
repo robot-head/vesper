@@ -8,7 +8,8 @@ use @vesper/check-data::types::{
     EffNode,
     Types,
     Vars,
-    substitute_row
+    substitute_row,
+    TyKind
 };
 use @vesper/check-data::names::{
     Names
@@ -26,12 +27,6 @@ use self::decl::{
 };
 
 const NONE32: u32 = 4294967295;
-const K_LIT: u8 = 0;
-const K_NAMED: u8 = 1;
-const K_TUPLE: u8 = 2;
-const K_FN: u8 = 3;
-const K_ROW: u8 = 4;
-const K_INFER: u8 = 5;
 
 // Names the frontend compares against, interned once.
 pub copy struct Sy {
@@ -79,12 +74,12 @@ pub fn insert32(inout s: ChunkSeq[u32], x: u32) -> bool {
 // `ast::as_projection(t).is_some()`: `$projection[self, Trait[args], A]`.
 pub fn is_projection(in t: Types, sy: Sy, ty: u32) -> bool {
     let n = t.node(ty);
-    if n.kind != K_NAMED || n.name != sy.projection || n.n != 3 {
+    if n.kind != TyKind::Named || n.name != sy.projection || n.n != 3 {
         return false;
     }
     let tr = t.node(t.arg(ty, 1));
     let a = t.node(t.arg(ty, 2));
-    tr.kind == K_NAMED && a.kind == K_NAMED && a.n == 0
+    tr.kind == TyKind::Named && a.kind == TyKind::Named && a.n == 0
 }
 
 pub fn proj_self(in t: Types, ty: u32) -> u32 {
@@ -113,7 +108,7 @@ pub fn proj_assoc(in t: Types, ty: u32) -> u32 {
 // `*t == Type::named("Self")`.
 pub fn is_self(in t: Types, sy: Sy, ty: u32) -> bool {
     let n = t.node(ty);
-    n.kind == K_NAMED && n.name == sy.self_ty && n.n == 0
+    n.kind == TyKind::Named && n.name == sy.self_ty && n.n == 0
 }
 
 fn row_contains_projection(in t: Types, sy: Sy, r: u32) -> bool {
@@ -132,7 +127,7 @@ fn row_contains_projection(in t: Types, sy: Sy, r: u32) -> bool {
 // `contains_projection`.
 pub fn contains_projection(in t: Types, sy: Sy, ty: u32) -> bool {
     let n = t.node(ty);
-    if n.kind == K_NAMED {
+    if n.kind == TyKind::Named {
         if n.name == sy.projection {
             return true;
         }
@@ -143,7 +138,7 @@ pub fn contains_projection(in t: Types, sy: Sy, ty: u32) -> bool {
         }
         return false;
     }
-    if n.kind == K_TUPLE {
+    if n.kind == TyKind::Tuple {
         for i in 0..w(n.n) {
             if contains_projection(in t, sy, t.arg(ty, i)) {
                 return true;
@@ -151,7 +146,7 @@ pub fn contains_projection(in t: Types, sy: Sy, ty: u32) -> bool {
         }
         return false;
     }
-    if n.kind == K_FN {
+    if n.kind == TyKind::Fn {
         for i in 0..w(n.n) {
             if contains_projection(in t, sy, t.arg(ty, i)) {
                 return true;
@@ -159,7 +154,7 @@ pub fn contains_projection(in t: Types, sy: Sy, ty: u32) -> bool {
         }
         return contains_projection(in t, sy, n.r) || row_contains_projection(in t, sy, n.r2);
     }
-    if n.kind == K_ROW {
+    if n.kind == TyKind::Row {
         return row_contains_projection(in t, sy, n.r2);
     }
     false
@@ -181,7 +176,7 @@ fn row_mentions(in t: Types, r: u32, name: u32) -> bool {
 // `mentions(t, name)`: the type names `name` anywhere.
 pub fn mentions(in t: Types, ty: u32, name: u32) -> bool {
     let n = t.node(ty);
-    if n.kind == K_NAMED {
+    if n.kind == TyKind::Named {
         if n.name == name {
             return true;
         }
@@ -192,7 +187,7 @@ pub fn mentions(in t: Types, ty: u32, name: u32) -> bool {
         }
         return false;
     }
-    if n.kind == K_TUPLE {
+    if n.kind == TyKind::Tuple {
         for i in 0..w(n.n) {
             if mentions(in t, t.arg(ty, i), name) {
                 return true;
@@ -200,7 +195,7 @@ pub fn mentions(in t: Types, ty: u32, name: u32) -> bool {
         }
         return false;
     }
-    if n.kind == K_FN {
+    if n.kind == TyKind::Fn {
         for i in 0..w(n.n) {
             if mentions(in t, t.arg(ty, i), name) {
                 return true;
@@ -208,7 +203,7 @@ pub fn mentions(in t: Types, ty: u32, name: u32) -> bool {
         }
         return mentions(in t, n.r, name) || row_mentions(in t, n.r2, name);
     }
-    if n.kind == K_ROW {
+    if n.kind == TyKind::Row {
         return row_mentions(in t, n.r2, name);
     }
     false
@@ -270,7 +265,7 @@ pub fn conform_type(
         }
     }
     let n = t.node(ty);
-    if n.kind == K_NAMED {
+    if n.kind == TyKind::Named {
         if n.n == 0 {
             let v = vars.get(n.name);
             if v != NONE32 {
@@ -286,7 +281,7 @@ pub fn conform_type(
         }
         return t.named(n.name, in args);
     }
-    if n.kind == K_TUPLE {
+    if n.kind == TyKind::Tuple {
         if n.n == 0 {
             return ty;
         }
@@ -298,7 +293,7 @@ pub fn conform_type(
         }
         return t.tuple(in args);
     }
-    if n.kind == K_FN {
+    if n.kind == TyKind::Fn {
         let mut args: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](w(n.n));
         let mut passes: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](w(n.n));
         for i in 0..w(n.n) {
@@ -309,9 +304,9 @@ pub fn conform_type(
         }
         let result = conform_type(inout t, in d, sy, tr, c, n.r, in vars, inout stack);
         let row = conform_row(inout t, in d, sy, tr, c, n.r2, in vars, inout stack);
-        return t.mk_with(K_FN, n.mode, 0, in args, in passes, result, row, 0);
+        return t.mk_with(TyKind::Fn, n.mode, 0, in args, in passes, result, row, 0);
     }
-    if n.kind == K_ROW {
+    if n.kind == TyKind::Row {
         let row = conform_row(inout t, in d, sy, tr, c, n.r2, in vars, inout stack);
         return t.row_type(row);
     }
@@ -362,13 +357,15 @@ pub fn conform_row(
 pub fn compatible(in t: Types, sy: Sy, a: u32, b: u32) -> bool {
     let x = t.node(a);
     let y = t.node(b);
-    if x.kind == K_INFER || y.kind == K_INFER || (y.kind == K_NAMED && y.name == sy.never) {
+    if x.kind == TyKind::Infer
+        || y.kind == TyKind::Infer
+        || (y.kind == TyKind::Named && y.name == sy.never) {
         return true;
     }
-    if x.kind == K_LIT || y.kind == K_LIT {
-        return x.kind == K_LIT && y.kind == K_LIT;
+    if x.kind == TyKind::Lit || y.kind == TyKind::Lit {
+        return x.kind == TyKind::Lit && y.kind == TyKind::Lit;
     }
-    if x.kind == K_NAMED && y.kind == K_NAMED {
+    if x.kind == TyKind::Named && y.kind == TyKind::Named {
         if x.name != y.name || x.n != y.n {
             return false;
         }
@@ -379,7 +376,7 @@ pub fn compatible(in t: Types, sy: Sy, a: u32, b: u32) -> bool {
         }
         return true;
     }
-    if x.kind == K_TUPLE && y.kind == K_TUPLE {
+    if x.kind == TyKind::Tuple && y.kind == TyKind::Tuple {
         if x.n != y.n {
             return false;
         }
@@ -390,16 +387,16 @@ pub fn compatible(in t: Types, sy: Sy, a: u32, b: u32) -> bool {
         }
         return true;
     }
-    if x.kind == K_NAMED && y.kind == K_TUPLE {
+    if x.kind == TyKind::Named && y.kind == TyKind::Tuple {
         return x.name == sy.unit && y.n == 0;
     }
-    if x.kind == K_TUPLE && y.kind == K_NAMED {
+    if x.kind == TyKind::Tuple && y.kind == TyKind::Named {
         return y.name == sy.unit && x.n == 0;
     }
-    if x.kind == K_ROW && y.kind == K_ROW {
+    if x.kind == TyKind::Row && y.kind == TyKind::Row {
         return a == b;
     }
-    if x.kind == K_FN && y.kind == K_FN {
+    if x.kind == TyKind::Fn && y.kind == TyKind::Fn {
         if !effects_include(in t, sy, x.r2, y.r2) || y.mode > x.mode || x.n != y.n {
             return false;
         }
@@ -476,7 +473,7 @@ fn segment_list(in t: Types, in names: Names, ty: u32, inout o: ChunkSeq[u8]) {
 // `key_segment`: the injective impl-key encoding of a type.
 pub fn key_segment(in t: Types, in names: Names, ty: u32, inout o: ChunkSeq[u8]) {
     let n = t.node(ty);
-    if n.kind == K_NAMED {
+    if n.kind == TyKind::Named {
         names.write(n.name, inout o);
         if n.n > 0 {
             push_bytes(inout o, "-0-");
@@ -485,7 +482,7 @@ pub fn key_segment(in t: Types, in names: Names, ty: u32, inout o: ChunkSeq[u8])
         }
         return;
     }
-    if n.kind == K_TUPLE {
+    if n.kind == TyKind::Tuple {
         if n.n == 0 {
             push_bytes(inout o, "Unit");
             return;
@@ -495,7 +492,7 @@ pub fn key_segment(in t: Types, in names: Names, ty: u32, inout o: ChunkSeq[u8])
         push_bytes(inout o, "-2");
         return;
     }
-    if n.kind == K_ROW {
+    if n.kind == TyKind::Row {
         push_bytes(inout o, "4-0-");
         let row = t.row(n.r2);
         let mut first = true;
@@ -532,10 +529,10 @@ pub fn key_segment(in t: Types, in names: Names, ty: u32, inout o: ChunkSeq[u8])
 // `row_arg`: a trait argument for an effect-row parameter, as a row.
 pub fn row_arg(inout t: Types, a: u32) -> u32 {
     let n = t.node(a);
-    if n.kind == K_ROW {
+    if n.kind == TyKind::Row {
         return a;
     }
-    if n.kind == K_NAMED {
+    if n.kind == TyKind::Named {
         let mut es: ChunkSeq[EffNode] = ChunkSeq::new[EffNode]();
         let mut args: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](w(n.n));
         for i in 0..w(n.n) {
@@ -553,7 +550,7 @@ pub fn row_arg(inout t: Types, a: u32) -> u32 {
         let r = t.mk_row(in es, in args, 0);
         return t.row_type(r);
     }
-    if n.kind == K_TUPLE && n.n == 0 {
+    if n.kind == TyKind::Tuple && n.n == 0 {
         let r = t.empty_row;
         return t.row_type(r);
     }
