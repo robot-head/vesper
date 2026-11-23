@@ -16,7 +16,7 @@
 //! ([`build`]) stays here with the BTF builder.
 
 // the Rust readers the port build replaces stay for the default build
-#![cfg_attr(vesper_port, allow(dead_code, unused_imports))]
+#![cfg_attr(feature = "vesper-port", allow(dead_code, unused_imports))]
 
 use crate::btf::{
     BTF_MAGIC, BTF_VERSION, Btf, BtfBuilder, BtfError, BtfType, FUNC_EXTERN, FuncInfo, INT_SIGNED,
@@ -360,7 +360,7 @@ fn slot_of(byte_off: u32) -> Result<usize, BtfError> {
 }
 
 /// Parse the `.BTF.ext` records of `section` against the object's `.BTF`.
-#[cfg(vesper_port)]
+#[cfg(feature = "vesper-port")]
 pub fn parse_ext(btf: &Btf, ext: &[u8], section: &str) -> Result<ObjectExt, BtfError> {
     let w = crate::port::ffi::btf_ext_parse(
         &btf.table,
@@ -413,7 +413,7 @@ pub fn parse_ext(btf: &Btf, ext: &[u8], section: &str) -> Result<ObjectExt, BtfE
     Ok(out)
 }
 
-#[cfg(not(vesper_port))]
+#[cfg(not(feature = "vesper-port"))]
 pub fn parse_ext(btf: &Btf, ext: &[u8], section: &str) -> Result<ObjectExt, BtfError> {
     if ext.len() < 8 || u16::from_le_bytes([ext[0], ext[1]]) != BTF_MAGIC || ext[2] != BTF_VERSION {
         return Err(bad(".BTF.ext: bad header"));
@@ -481,7 +481,7 @@ pub fn parse_ext(btf: &Btf, ext: &[u8], section: &str) -> Result<ObjectExt, BtfE
 }
 
 /// Convert an object BTF type back into a [`LocalType`].
-#[cfg(vesper_port)]
+#[cfg(feature = "vesper-port")]
 pub fn local_type(btf: &Btf, id: u32) -> Result<LocalType, BtfError> {
     let w = crate::port::ffi::btf_ext_local_type(&btf.table, &btf.index, id.into());
     if w[0] == 1 {
@@ -490,7 +490,7 @@ pub fn local_type(btf: &Btf, id: u32) -> Result<LocalType, BtfError> {
     Ok(port::local(btf, &w[1..], &mut 0))
 }
 
-#[cfg(not(vesper_port))]
+#[cfg(not(feature = "vesper-port"))]
 pub fn local_type(btf: &Btf, id: u32) -> Result<LocalType, BtfError> {
     local_depth(btf, id, 0)
 }
@@ -573,7 +573,7 @@ fn local_depth(btf: &Btf, id: u32, depth: u32) -> Result<LocalType, BtfError> {
 }
 
 /// Map definitions (offset in `.maps`, definition) from an object's BTF.
-#[cfg(vesper_port)]
+#[cfg(feature = "vesper-port")]
 pub fn maps_from_btf(btf: &Btf) -> Result<Vec<(u64, MapDef)>, BtfError> {
     let w = crate::port::ffi::btf_ext_maps_from_btf(&btf.table, &btf.index, btf.strings());
     if w[0] == 1 {
@@ -604,7 +604,7 @@ pub fn maps_from_btf(btf: &Btf) -> Result<Vec<(u64, MapDef)>, BtfError> {
         .collect())
 }
 
-#[cfg(not(vesper_port))]
+#[cfg(not(feature = "vesper-port"))]
 pub fn maps_from_btf(btf: &Btf) -> Result<Vec<(u64, MapDef)>, BtfError> {
     let mut out = Vec::new();
     for t in &btf.types {
@@ -653,7 +653,7 @@ pub fn maps_from_btf(btf: &Btf) -> Result<Vec<(u64, MapDef)>, BtfError> {
 
 /// The port build's decoding of `@vesper/ebpf` results (module
 /// `btf_ext.ves`).
-#[cfg(vesper_port)]
+#[cfg(feature = "vesper-port")]
 mod port {
     use super::bad;
     use crate::btf::{Btf, BtfError};

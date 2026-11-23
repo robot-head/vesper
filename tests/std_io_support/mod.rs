@@ -240,6 +240,17 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         fn epoll_ctl(epfd: i32, op: i32, fd: i32, event: *mut c_void) -> i32;
         #[cfg(target_os = "linux")]
         fn epoll_wait(epfd: i32, events: *mut c_void, maxevents: i32, timeout: i32) -> i32;
+        #[cfg(target_os = "macos")]
+        fn kqueue() -> i32;
+        #[cfg(target_os = "macos")]
+        fn kevent(
+            kq: i32,
+            changelist: *const c_void,
+            nchanges: i32,
+            eventlist: *mut c_void,
+            nevents: i32,
+            timeout: *const c_void,
+        ) -> i32;
         fn mmap(
             addr: *mut c_void,
             len: usize,
@@ -394,6 +405,11 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         syms.push(("epoll_ctl", epoll_ctl as *const u8));
         syms.push(("epoll_wait", epoll_wait as *const u8));
     }
+    #[cfg(target_os = "macos")]
+    {
+        syms.push(("kqueue", kqueue as *const u8));
+        syms.push(("kevent", kevent as *const u8));
+    }
     syms
 }
 #[cfg(windows)]
@@ -417,6 +433,27 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
             lp_default_char: *const c_void,
             lp_used_default_char: *mut i32,
         ) -> i32;
+        fn CreateIoCompletionPort(
+            file_handle: u64,
+            existing_completion_port: u64,
+            completion_key: u64,
+            number_of_concurrent_threads: u32,
+        ) -> u64;
+        fn PostQueuedCompletionStatus(
+            completion_port: u64,
+            number_of_bytes_transferred: u32,
+            completion_key: u64,
+            overlapped: u64,
+        ) -> i32;
+        fn GetQueuedCompletionStatus(
+            completion_port: u64,
+            bytes_transferred: *mut u32,
+            completion_key: *mut u64,
+            overlapped: *mut u64,
+            milliseconds: u32,
+        ) -> i32;
+        fn CloseHandle(handle: u64) -> i32;
+        fn GetLastError() -> u32;
     }
     vec![
         ("GetCommandLineW", GetCommandLineW as *const u8),
@@ -435,6 +472,20 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         ),
         ("lstrlenW", lstrlenW as *const u8),
         ("WideCharToMultiByte", WideCharToMultiByte as *const u8),
+        (
+            "CreateIoCompletionPort",
+            CreateIoCompletionPort as *const u8,
+        ),
+        (
+            "PostQueuedCompletionStatus",
+            PostQueuedCompletionStatus as *const u8,
+        ),
+        (
+            "GetQueuedCompletionStatus",
+            GetQueuedCompletionStatus as *const u8,
+        ),
+        ("CloseHandle", CloseHandle as *const u8),
+        ("GetLastError", GetLastError as *const u8),
     ]
 }
 #[cfg(not(any(unix, windows)))]

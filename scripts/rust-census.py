@@ -63,7 +63,7 @@ CRATES = {
     "vesper-kinetic": ("partial", "in crate (+ seed)", "colorer 0.78x, multi-colorer 1.35x, gjk 1.12x [1.05-1.17x], sap 1.09x [1.05-1.16x], scene 1.18x, pile-lbvh 1.37x; lbvh 1.57x, fastmath 1.70x (1.42x Linux), morton 1.88x, crmath 2.27x", "coloring, gjk, sap flipped (Rust in seed/src/engine); lbvh, fastmath, morton, crmath above the bar on Windows MSVC; world/tile, rigid, soft, articulation, couple, diff, rollback, snapshot, detfloat, simd unported", "9"),
     "vesper-resonance": ("partial", "in crate (+ seed)", "kernel 1.07x, graph 1.07x, schedule 1.02x, pid 1.27x, confine 1.35x; slab 1.89x, events 8.00x, simd 8-48x", "kernel render, PID controller, built-in graph, schedule compiler and confinement verifier flipped (Rust in seed/src/engine); slab, events, simd above the bar; clif, spsc rings, denorm, dyn CompiledGraph unported", "9"),
     "vesper-silicon": ("partial", "in crate", "unmeasured", "SVD model, stack/prologue/hazard analysis (Cranelift IR), mmio", "10"),
-    "vesper-ebpf": ("partial", "in crate", "1.2-4.7x", "BTF writers, ELF, bpf() syscalls", "10"),
+    "vesper-ebpf": ("partial", "in crate (+ seed)", "0.57-1.35x (ext 1.68x, decode 1.81x)", "btf, callgraph, core, helpers, insn, interp, program, scalar, verifier flipped; btf_ext, wire, ELF, bpf() syscalls still Rust", "10"),
     "vesper-serde": ("partial", "in crate", "4.8-5.7x", "SIMD stage 1 needs source vectors", "11"),
     "vesper-tensor": ("partial", "in crate", "unmeasured", "safetensors, memmap, simd kernels", "11"),
     "vesper-alloc": ("partial", "in crate", "unmeasured", "cache B-tree, arena keys, OS pages", "11"),
