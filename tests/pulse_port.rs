@@ -8,6 +8,30 @@ use std_io_support::{MODES, Temp, agree};
 use vesper::{ffi_lowering, packages};
 use vesper_pulse::frames::{Address, FrameError, FrameStack};
 
+fn pulse_imports() -> ffi_lowering::Imports {
+    let (triple, abi) = packages::vsys_target(None).expect("host target");
+    let os = if cfg!(target_os = "linux") {
+        "linux"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else {
+        "windows"
+    };
+    let arch = if cfg!(target_arch = "aarch64") {
+        "aarch64"
+    } else {
+        "x86_64"
+    };
+    let path = format!("crates/vesper-pulse/vesper/pulse-{os}-{arch}.vsys");
+    let text = std::fs::read_to_string(&path).expect("read pulse .vsys");
+    let text = text.replace("@TARGET@", triple).replace("@ABI@", abi);
+    let mut imports = ffi_lowering::Imports::new();
+    imports
+        .add(&text, ffi_lowering::Handler::Direct)
+        .expect("import pulse .vsys");
+    imports
+}
+
 fn check_pulse_driver(source: &str) -> ffi_lowering::ForeignChecked {
     let dir = Temp::new("pulse-port");
     let pulse_pkg = std::fs::canonicalize("crates/vesper-pulse/vesper").unwrap();
@@ -28,7 +52,7 @@ fn check_pulse_driver(source: &str) -> ffi_lowering::ForeignChecked {
         assembled.diagnostics,
         assembled.manifest_errors
     );
-    ffi_lowering::check_module(&assembled.module, &ffi_lowering::Imports::new())
+    ffi_lowering::check_module(&assembled.module, &pulse_imports())
         .unwrap_or_else(|e| panic!("{e}: {:?}", e.diagnostics))
 }
 
@@ -225,4 +249,25 @@ pub fn check_errors() -> u64 {
     let checked = check_pulse_driver(src);
     let expected = 3 + 10 + 6 * 100 + 4 * 1000 + 4 * 10000 + 5 * 100000;
     assert_eq!(agree(&checked, "check_errors", &MODES), expected);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_epoll_pipe_roundtrip() {
+    let src = r#"
+use @vesper/pulse::epoll_pipe_roundtrip_check;
+
+pub fn check_epoll() -> u64 eff [Ffi[PulseSys]] {
+    epoll_pipe_roundtrip_check()
+}
+"#;
+    let checked = check_pulse_driver(src);
+    assert_eq!(
+        agree(
+            &checked,
+            "check_epoll",
+            &[std_io_support::Mode::Jit, std_io_support::Mode::JitNoOpt],
+        ),
+        100
+    );
 }
