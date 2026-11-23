@@ -40,7 +40,10 @@ use @vesper/check-data::types::{
     Vars,
     default_type,
     substitute,
-    vars_new
+    vars_new,
+    TyKind,
+    TyMode,
+    TyPass
 };
 use @vesper/check-data::world::{
     Adt,
@@ -82,20 +85,6 @@ use self::ops::{
 const NONE32: u32 = 4294967295;
 const NONE64: u64 = 18446744073709551615;
 const LOW32: u64 = 4294967295;
-
-// check-data's type kinds.
-const K_NAMED: u8 = 1;
-const K_TUPLE: u8 = 2;
-const K_FN: u8 = 3;
-
-// Modes.
-const M_AFFINE: u8 = 1;
-const M_LINEAR: u8 = 2;
-
-// Passes.
-const P_IN: u8 = 0;
-const P_INOUT: u8 = 1;
-const P_SINK: u8 = 2;
 
 // Expression kinds (ast.ves).
 const X_FOREIGN: u8 = 0;
@@ -504,7 +493,7 @@ fn type_at(inout l: L, s0: u64, s1: u64) -> u32 {
 }
 
 fn is_named(in l: L, t: u32, s: u32) -> bool {
-    l.c.types.kind(t) == K_NAMED && l.c.types.name(t) == s
+    l.c.types.kind(t) == TyKind::Named && l.c.types.name(t) == s
 }
 
 fn is_never(in l: L, t: u32) -> bool {
@@ -784,7 +773,7 @@ fn pattern(inout l: L, pid: u64, ty: u32, rename: bool) {
         put_literal(inout l, p.a, p.b, p.c);
     } else if p.kind == Pat::Tuple {
         put(inout l, p.n, Tag::Raw);
-        let tuple = rename && l.c.types.kind(ty) == K_TUPLE;
+        let tuple = rename && l.c.types.kind(ty) == TyKind::Tuple;
         let m = if tuple {
             l.c.types.arity(ty)
         } else {
@@ -816,7 +805,7 @@ fn pattern(inout l: L, pid: u64, ty: u32, rename: bool) {
         }
         let adt = l.c.world.adt(n32(wrapping_shr_u64(ci, 32)));
         let v = l.c.world.variant(ci & LOW32);
-        let vars = if l.c.types.kind(ty) == K_NAMED {
+        let vars = if l.c.types.kind(ty) == TyKind::Named {
             l.c.world.vars_of(in l.c.types, adt, ty)
         } else {
             vars_new()
@@ -954,7 +943,7 @@ pub fn expr(inout l: L, id: u64) -> u32 {
         if root == NONE32 {
             root = s;
         }
-        return read(inout l, root, 0, P_SINK, 0, 0, e.s0, e.s1);
+        return read(inout l, root, 0, TyPass::Sink, 0, 0, e.s0, e.s1);
     }
     if k == X_TUPLE {
         let mut vs: ChunkSeq[u32] = ChunkSeq::new[u32]();
@@ -989,7 +978,7 @@ pub fn expr(inout l: L, id: u64) -> u32 {
         let root = place(in l, id, inout syms);
         if root != NONE32 {
             let path = l.p.add_path(in syms);
-            return read(inout l, root, path, P_SINK, 0, 0, e.s0, e.s1);
+            return read(inout l, root, path, TyPass::Sink, 0, 0, e.s0, e.s1);
         }
         let v = expr(inout l, e.a);
         let a = l.sops.len();
@@ -1001,9 +990,9 @@ pub fn expr(inout l: L, id: u64) -> u32 {
         let idx = l.a.ex(e.b);
         if idx.kind == X_BINARY && n32(idx.a) == l.s_dotdot {
             let mut args: ChunkSeq[Arg] = ChunkSeq::new[Arg]();
-            args.push(argument(inout l, e.a, P_IN, 0, 0));
-            args.push(argument(inout l, idx.b, P_SINK, 0, 0));
-            args.push(argument(inout l, idx.c, P_SINK, 0, 0));
+            args.push(argument(inout l, e.a, TyPass::In, 0, 0));
+            args.push(argument(inout l, idx.b, TyPass::Sink, 0, 0));
+            args.push(argument(inout l, idx.c, TyPass::Sink, 0, 0));
             return emit_pool_args(
                 inout l,
                 Op::Seq,
@@ -1023,8 +1012,8 @@ pub fn expr(inout l: L, id: u64) -> u32 {
                 l.s_seq_slice_get
             };
             let mut args: ChunkSeq[Arg] = ChunkSeq::new[Arg]();
-            args.push(argument(inout l, e.a, P_IN, 0, 0));
-            args.push(argument(inout l, e.b, P_SINK, 0, 0));
+            args.push(argument(inout l, e.a, TyPass::In, 0, 0));
+            args.push(argument(inout l, e.b, TyPass::Sink, 0, 0));
             return emit_pool_args(inout l, Op::Seq, PoolKind::MakeSeq, label, in args, e.s0, e.s1);
         }
         let x = expr(inout l, e.a);
@@ -1112,7 +1101,7 @@ fn operand(inout l: L, op: u32, id: u64) -> u32 {
         let x = l.a.ex(id);
         let t = l.c.world.expr_type(x.s0, x.s1);
         if is_text(in l, t) {
-            return argument(inout l, id, P_IN, 0, 0).value;
+            return argument(inout l, id, TyPass::In, 0, 0).value;
         }
     }
     expr(inout l, id)
@@ -1299,17 +1288,17 @@ fn callee_params(inout l: L, name: u32) -> u64 {
 
 fn seq_arg_pass(mode: u8, i: u64) -> u8 {
     if mode == 1 {
-        P_IN
+        TyPass::In
     } else if mode == 2 {
-        P_INOUT
+        TyPass::Inout
     } else if mode == 3 && i == 0 {
-        P_INOUT
+        TyPass::Inout
     } else if mode == 4 && i == 0 {
-        P_IN
+        TyPass::In
     } else if mode == 5 && i == 1 {
-        P_IN
+        TyPass::In
     } else {
-        P_SINK
+        TyPass::Sink
     }
 }
 
@@ -1341,7 +1330,7 @@ fn lower_tiled_call(inout l: L, e: Ex, receiver: u64, tr: TiledRes) -> u32 {
         if receiver == NONE64 && tr.is_recv_first && i == 0 {
             args.push(argument_proj(inout l, aid, tr.recv_pass, tr.recv_proj));
         } else {
-            args.push(argument(inout l, aid, P_SINK, 0, 0));
+            args.push(argument(inout l, aid, TyPass::Sink, 0, 0));
         }
     }
     let pid = pool_entry(inout l, PoolKind::MakeTiled, tr.label);
@@ -1362,7 +1351,7 @@ fn lower_vector_call(inout l: L, e: Ex, vr: VecRes) -> u32 {
         let ax = l.a.ex(aid);
         let t = span_type(in l, ax.s0, ax.s1);
         let v = if t != NONE32 && l.c.types.name(t) == l.c.world.k.string {
-            argument(inout l, aid, P_IN, 0, 0).value
+            argument(inout l, aid, TyPass::In, 0, 0).value
         } else {
             expr(inout l, aid)
         };
@@ -1457,7 +1446,7 @@ fn call(inout l: L, e: Ex) -> u32 {
             l.s_fip_box_new_in_caller
         };
         let mut args: ChunkSeq[Arg] = ChunkSeq::new[Arg]();
-        args.push(argument(inout l, l.a.x(inc(e.b)), P_SINK, 0, 0));
+        args.push(argument(inout l, l.a.x(inc(e.b)), TyPass::Sink, 0, 0));
         return emit_pool_args(inout l, Op::Fip, PoolKind::MakeFip, fip_label, in args, e.s0, e.s1);
     }
     if ctor_of(inout l, name) != NONE64 {
@@ -1515,14 +1504,14 @@ fn param_argument(inout l: L, id: u64, pa: u64, pn: u64, i: u64) -> Arg {
         let p = l.a.param(add(pa, i));
         return argument(inout l, id, p.pass, p.qa, p.qn);
     }
-    argument(inout l, id, P_IN, 0, 0)
+    argument(inout l, id, TyPass::In, 0, 0)
 }
 
 fn indirect(inout l: L, e: Ex, callee: Ex) -> u32 {
     let callable = expr(inout l, e.a);
     let t = l.c.world.expr_type(callee.s0, callee.s1);
     let mut modes: u64 = 0;
-    if t != NONE32 && l.c.types.kind(t) == K_FN {
+    if t != NONE32 && l.c.types.kind(t) == TyKind::Fn {
         modes = l.c.types.arity(t);
     }
     let mut args: ChunkSeq[Arg] = ChunkSeq::new[Arg]();
@@ -1554,7 +1543,7 @@ fn read_slot(inout l: L, slot: u32, s0: u64, ty: u32) -> u32 {
     let a = l.sops.len();
     put(inout l, w(slot), Tag::Name);
     put(inout l, 0, Tag::Path);
-    put(inout l, widen_u64(P_SINK), Tag::Raw);
+    put(inout l, widen_u64(TyPass::Sink), Tag::Raw);
     put(inout l, 0, Tag::Raw);
     emit_at(inout l, Op::Read, a, s0, s0, ty)
 }
@@ -1971,7 +1960,7 @@ fn capture_params(
         if ty != NONE32 {
             let mut p = Pm {
                 name: s,
-                pass: P_SINK,
+                pass: TyPass::Sink,
                 qa: 0,
                 qn: 0,
                 ty: ty,
@@ -2024,7 +2013,7 @@ fn pattern_params(inout l: L, pid: u64, ty: u32, pass: u8, inout out: ChunkSeq[P
                 }
             );
     } else if p.kind == Pat::Tuple {
-        if l.c.types.kind(ty) == K_TUPLE {
+        if l.c.types.kind(ty) == TyKind::Tuple {
             let m = min_u64(p.n, l.c.types.arity(ty));
             for i in 0..m {
                 let t = l.c.types.arg(ty, i);
@@ -2038,7 +2027,7 @@ fn pattern_params(inout l: L, pid: u64, ty: u32, pass: u8, inout out: ChunkSeq[P
         }
         let adt = l.c.world.adt(n32(wrapping_shr_u64(ci, 32)));
         let v = l.c.world.variant(ci & LOW32);
-        let vars = if l.c.types.kind(ty) == K_NAMED {
+        let vars = if l.c.types.kind(ty) == TyKind::Named {
             l.c.world.vars_of(in l.c.types, adt, ty)
         } else {
             vars_new()
@@ -2088,7 +2077,7 @@ fn add_nested(inout l: L, kind: u8, body: u64, in ps: ChunkSeq[Pm], result: u32,
         let mut ks: ChunkSeq[u64] = ChunkSeq::new[u64]();
         for i in 0..ps.len() {
             let p = pm_at(in ps, i);
-            if p.pass == P_SINK {
+            if p.pass == TyPass::Sink {
                 ks.push(wrapping_shl_u64(w(p.name), 32));
             }
         }
@@ -2156,7 +2145,7 @@ fn prepare_closure(inout l: L, e: Ex) {
     let known = free_names_of(inout l, e.c, inout names);
     free_unbind(inout l, mark);
     let t = span_type(in l, e.s0, e.s1);
-    if l.c.types.kind(t) != K_FN {
+    if l.c.types.kind(t) != TyKind::Fn {
         return;
     }
     if !known {
@@ -2258,7 +2247,7 @@ fn prepare_handler(inout l: L, e: Ex) {
     let rknown = clause_params(inout l, h.ret, inout rps);
     let rc = l.a.clause(h.ret);
     if rc.pn > 0 {
-        pattern_params(inout l, l.a.x(rc.pa), ret_type, P_SINK, inout rps);
+        pattern_params(inout l, l.a.x(rc.pa), ret_type, TyPass::Sink, inout rps);
     }
     nest_clause(inout l, h.ret, rknown, in rps, output, outgoing);
     let ei = l.a.effect_index(h.eff_name);
@@ -2272,9 +2261,9 @@ fn prepare_handler(inout l: L, e: Ex) {
     }
     let row = l.c.types.node(outgoing).r2;
     let mode = if d.linear {
-        M_LINEAR
+        TyMode::Linear
     } else {
-        M_AFFINE
+        TyMode::Affine
     };
     for j in 0..h.on {
         let ci = add(inc(h.ret), j);
@@ -2312,21 +2301,27 @@ fn prepare_handler(inout l: L, e: Ex) {
             let mut index = sig.pn;
             if h.has_state {
                 if index < c.pn {
-                    pattern_params(inout l, l.a.x(add(c.pa, index)), state_type, P_SINK, inout cps);
+                    pattern_params(
+                        inout l,
+                        l.a.x(add(c.pa, index)),
+                        state_type,
+                        TyPass::Sink,
+                        inout cps
+                    );
                 }
                 index = inc(index);
             }
             let mut items: ChunkSeq[u32] = ChunkSeq::new[u32]();
             let mut passes: ChunkSeq[u8] = ChunkSeq::new[u8]();
             items.push(substitute(inout l.c.types, sig.result, in vars));
-            passes.push(P_SINK);
+            passes.push(TyPass::Sink);
             if h.has_state {
                 items.push(state_type);
-                passes.push(P_SINK);
+                passes.push(TyPass::Sink);
             }
-            let ktype = l.c.types.mk_with(K_FN, mode, 0, in items, in passes, output, row, 0);
+            let ktype = l.c.types.mk_with(TyKind::Fn, mode, 0, in items, in passes, output, row, 0);
             if index < c.pn {
-                pattern_params(inout l, l.a.x(add(c.pa, index)), ktype, P_SINK, inout cps);
+                pattern_params(inout l, l.a.x(add(c.pa, index)), ktype, TyPass::Sink, inout cps);
             }
             nest_clause(inout l, ci, cknown, in cps, output, outgoing);
         }
@@ -2446,7 +2441,7 @@ fn handler(inout l: L, e: Ex) -> u32 {
         sv = expr(inout l, h.sexpr);
         for i in mark..l.insts.len() {
             let x = inst_at(in l, i);
-            if x.op == Op::Read && sop(in l, add(x.a, 2)) == widen_u64(P_SINK) {
+            if x.op == Op::Read && sop(in l, add(x.a, 2)) == widen_u64(TyPass::Sink) {
                 let root = n32(sop(in l, x.a));
                 let path = sop(in l, inc(x.a));
                 let qn = sop(in l, add(x.a, 3));
