@@ -32,7 +32,8 @@ use @vesper-std/process::{
     release
 };
 use @vesper-std/fs::{
-    IoError
+    IoError,
+    not_found
 };
 
 enum Ascii: _ {
@@ -166,13 +167,11 @@ fn compiler_command(in c: Slice[u8]) -> bool {
         || eq(in c, in "fmt")
         || eq(in c, in "forge")
         || eq(in c, in "graph")
-        || eq(in c, in "highlight")
         || eq(in c, in "jit")
         || eq(in c, in "lint")
         || eq(in c, in "lsp")
         || eq(in c, in "proof-audit")
         || eq(in c, in "run")
-        || eq(in c, in "shot")
         || eq(in c, in "test")
         || eq(in c, in "verify")
 }
@@ -185,6 +184,7 @@ fn tool(in c: Slice[u8]) -> bool {
         || eq(in c, in "cas")
         || eq(in c, in "fuzz")
         || eq(in c, in "grammar")
+        || eq(in c, in "highlight")
         || eq(in c, in "json")
         || eq(in c, in "migrate")
         || eq(in c, in "publish")
@@ -192,6 +192,7 @@ fn tool(in c: Slice[u8]) -> bool {
         || eq(in c, in "resolve")
         || eq(in c, in "sbom")
         || eq(in c, in "semver")
+        || eq(in c, in "shot")
         || eq(in c, in "simd")
         || eq(in c, in "top")
         || eq(in c, in "traceparent")
@@ -353,9 +354,9 @@ fn is_separator(b: u8, windows: bool) -> bool {
 fn join(in dir: Slice[u8], in name: Slice[u8], windows: bool) -> ChunkSeq[u8] {
     let mut p: ChunkSeq[u8] = ChunkSeq::new[u8]();
     p.extend(in dir);
-    // `PathBuf::push` adds no separator after a bare drive (`C:`):
+    // `PathBuf::push` adds no separator after an ordinary bare drive (`C:`):
     // `C:vesper-x.exe` is relative to drive C's current directory, not its
-    // root. A verbatim drive (`\\?\C:`) still gets one.
+    // root. A verbatim drive (`\\?\C:`) is not `is_drive()` and does get `\`.
     if windows && bare_drive(in dir) {
         p.extend(in name);
         return p;
@@ -371,8 +372,8 @@ fn join(in dir: Slice[u8], in name: Slice[u8], windows: bool) -> ChunkSeq[u8] {
     p
 }
 
-// Whether `dir` is a Windows drive prefix and nothing else: `X:` with `X`
-// an ASCII letter (a `Prefix::Disk`, the only prefix `is_drive()` accepts).
+// Whether `dir` is an ordinary Windows drive prefix and nothing else: `X:`
+// (`Prefix::Disk`, with `X` an ASCII letter; the only prefix `is_drive()` accepts).
 fn bare_drive(in dir: Slice[u8]) -> bool {
     dir.len() == 2 && ascii_letter(byte_at(in dir, 0)) && byte_at(in dir, 1) == Ascii::Colon
 }
@@ -538,8 +539,12 @@ fn spawn_failed(in binary: Slice[u8], e: IoError) -> i64 eff [Ffi[HybridCommands
     let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
     m.extend(in binary);
     m.extend(in ": ".as_bytes());
-    let word = widen_u64(e.kind) | (widen_u64(e.os) << 32);
-    let t = io_error_text(word);
-    m.extend(in t.as_slice());
+    if e.kind == not_found() && e.os == 0 {
+        m.extend(in "program not found".as_bytes());
+    } else {
+        let word = widen_u64(e.kind) | (widen_u64(e.os) << 32);
+        let t = io_error_text(word);
+        m.extend(in t.as_slice());
+    }
     fail(in m.as_slice())
 }

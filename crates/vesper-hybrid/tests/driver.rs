@@ -213,9 +213,18 @@ fn driver_matches_the_default_compiler() {
     inputs.push(invalid_utf8);
     inputs.push(scratch.join("missing.ves"));
 
-    let mut sets: Vec<&[&str]> = OPTION_SETS.to_vec();
-    #[cfg(unix)]
-    sets.push(FALSE_LINKER);
+    let sets: Vec<&[&str]> = {
+        #[cfg(unix)]
+        {
+            let mut s = OPTION_SETS.to_vec();
+            s.push(FALSE_LINKER);
+            s
+        }
+        #[cfg(not(unix))]
+        {
+            OPTION_SETS.to_vec()
+        }
+    };
     let mut mismatches = vec![];
     let (mut d_time, mut h_time, mut runs) = (Duration::ZERO, Duration::ZERO, 0);
     for (i, input) in inputs.iter().enumerate() {
@@ -253,10 +262,23 @@ fn driver_matches_the_default_compiler() {
             {
                 diff.push("stderr");
             }
-            // Executables embed nothing of their path; objects and texts
-            // must be byte-identical.
-            if d.0.written != h.0.written {
-                diff.push("output bytes");
+            // Objects, archives, wasm components and texts are byte-identical
+            // everywhere. Linked native executables embed timestamps/paths on
+            // macOS (`N_OSO` path and mtime) and Windows (PE `TimeDateStamp`),
+            // so only Linux compares raw linked executable bytes; non-Linux
+            // verifies existence while `emit --emit object` checks the object.
+            let linked_native = set.first() == Some(&"build")
+                && !set.contains(&"--lib")
+                && !set.contains(&"--target");
+            if cfg!(target_os = "linux") || !linked_native {
+                if d.0.written != h.0.written {
+                    diff.push("output bytes");
+                }
+            } else if d.0.written.is_some() != h.0.written.is_some()
+                || d.0.written.as_ref().is_some_and(Vec::is_empty)
+                || h.0.written.as_ref().is_some_and(Vec::is_empty)
+            {
+                diff.push("output presence");
             }
             if !diff.is_empty() {
                 mismatches.push(format!(
