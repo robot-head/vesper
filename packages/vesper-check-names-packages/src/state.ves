@@ -7,6 +7,7 @@
 // (`ItemKey` in src/packages.rs) is `module << 32 | name`. Tables keyed by
 // pairs pack the two `u32`s into one `u64` the same way.
 
+use @vesper/ast::lower::L;
 use @vesper-std/intern::{
     Interner,
     interner_new,
@@ -242,6 +243,7 @@ pub struct St {
     s_self: u32,
     s_super: u32,
     s_self_ty: u32,
+    cached_ls: ChunkSeq[L],
     s_empty: u32
 }
 
@@ -352,6 +354,7 @@ pub fn st_new() -> St {
         seen_param: flat_table_new[u32, u8](),
         seen_tref: flat_table_new[u32, u8](),
         const_flag: ChunkSeq::new[u8](),
+        cached_ls: ChunkSeq::new[L](),
         made_from: 0,
         groups: flat_table_new[u32, u64](),
         group_pool: ChunkSeq::new[u32](),

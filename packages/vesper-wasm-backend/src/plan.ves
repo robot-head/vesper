@@ -17,6 +17,9 @@ use @vesper/check-data::util::{
     add,
     inc,
     n32,
+    stage2_heap_mark,
+    stage2_heap_reset,
+    stage2_heap_swap,
     u32_at,
     u64_at,
     w
@@ -554,7 +557,7 @@ impl Cx {
         for k in cut..n {
             text.push(self.names.byte(name, k));
         }
-        self.names.intern(in text.as_slice())
+        self.intern(in text)
     }
 
     // The index of field `name` in variant `v` of shape `sh`, or NONE.
@@ -594,6 +597,10 @@ impl Cx {
     }
 
     pub fn intern(inout self, in text: ChunkSeq[u8]) -> u32 {
+        let hit = self.names.lookup(in text.as_slice());
+        if hit != NONE32 {
+            return hit;
+        }
         self.names.intern(in text.as_slice())
     }
 
@@ -920,7 +927,7 @@ fn call_vars(
 }
 
 // The labels a function's own effect row binds (`eff [l: E]`).
-fn row_labels(inout cx: Cx, inout out: ChunkSeq[u32], base: u32) {
+fn row_labels(in cx: Cx, inout out: ChunkSeq[u32], base: u32) {
     let fs = cx.fn_sig(base);
     if fs == 0 {
         return;
@@ -1029,9 +1036,8 @@ pub fn closure_operands(in cx: Cx, at: u64) -> (u64, u64, u64) {
     (pool, add(at, 2), n)
 }
 
-pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
-    let entry = cx.f.entry;
-    let mut p = Plan {
+pub fn empty_plan() -> Plan {
+    Plan {
         insts: ChunkSeq::new[Inst](),
         vkeys: ChunkSeq::new[u32](),
         vvals: ChunkSeq::new[u32](),
@@ -1044,8 +1050,24 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
         handlers: ChunkSeq::new[Handler](),
         clauses: ChunkSeq::new[HClause](),
         hw: ChunkSeq::new[u32](),
-    };
-    capabilities(inout cx, inout p.host, entry);
+    }
+}
+
+pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
+    let entry = cx.f.entry;
+    let mut p_insts = ChunkSeq::new[Inst]();
+    let mut p_vkeys = ChunkSeq::new[u32]();
+    let mut p_vvals = ChunkSeq::new[u32]();
+    let mut p_by_key = ChunkSeq::new[u32]();
+    let mut p_calls = ChunkSeq::new[CallTarget]();
+    let mut p_labels = ChunkSeq::new[u32]();
+    let mut p_keys = ChunkSeq::new[u32]();
+    let mut p_max_arity: u64 = 0;
+    let mut p_host = ChunkSeq::new[u8]();
+    let mut p_handlers = ChunkSeq::new[Handler]();
+    let mut p_clauses = ChunkSeq::new[HClause]();
+    let mut p_hw = ChunkSeq::new[u32]();
+    capabilities(inout cx, inout p_host, entry);
     let mut arity: u64 = 0;
     for d in 0..cx.f.decls.len() {
         let decl = cx.f.decl(d);
@@ -1059,14 +1081,14 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
     if arity < 1 {
         arity = 1;
     }
-    p.max_arity = arity;
+    p_max_arity = arity;
     // the queue: rows, their vars and labels in side tables
     let mut queue = ChunkSeq::new[Queued]();
     let mut qkeys = ChunkSeq::new[u32]();
     let mut qvals = ChunkSeq::new[u32]();
     let mut qlabels = ChunkSeq::new[u32]();
     let mut l = ChunkSeq::new[u32]();
-    row_labels(inout cx, inout l, entry);
+    row_labels(in cx, inout l, entry);
     let l0 = qlabels.len();
     for i in 0..l.len() {
         qlabels.push(u32_at(in l, i));
@@ -1086,6 +1108,28 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
             }
         );
     let mut seen = ChunkSeq::new[u32]();
+    p_insts.reserve(8192);
+    p_vkeys.reserve(32768);
+    p_vvals.reserve(32768);
+    p_by_key.reserve(262144);
+    p_calls.reserve(262144);
+    p_labels.reserve(16384);
+    p_keys.reserve(8192);
+    p_host.reserve(4096);
+    p_handlers.reserve(2048);
+    p_clauses.reserve(4096);
+    p_hw.reserve(8192);
+    queue.reserve(262144);
+    qkeys.reserve(131072);
+    qvals.reserve(131072);
+    qlabels.reserve(131072);
+    seen.reserve(262144);
+    let mut scratch = ChunkSeq::new[u8]();
+    scratch.reserve(33554432);
+    let scratch_end = stage2_heap_mark();
+    let scratch_base = wrapping_sub(scratch_end, 33554432);
+    let mut perm = stage2_heap_swap(scratch_base);
+    let mut scratch_mark = scratch_base;
     let mut head: u64 = 0;
     loop {
         if head >= queue.len() {
@@ -1109,8 +1153,12 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
         if u32_at(in seen, w(q.key)) != 0 {
             continue;
         }
+        // m moved down for bisect2
+        let n_names = cx.names.len();
+        let n_nodes = cx.types.nodes.len();
+        let n_rows = cx.types.rows.len();
         set_by_symbol(inout seen, q.key, 1);
-        if p.insts.len() >= cx.f.max_functions {
+        if p_insts.len() >= cx.f.max_functions {
             Fail::raise(werr(K_LIMIT, 0, 40));
         }
         let found = cx.ir.find(q.base);
@@ -1124,16 +1172,16 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
             vars.keys.push(u32_at(in qkeys, add(q.v0, k)));
             vars.vals.push(u32_at(in qvals, add(q.v0, k)));
         }
-        let v0 = p.vkeys.len();
+        let v0 = p_vkeys.len();
         for k in 0..vars.len() {
-            p.vkeys.push(vars.key(k));
-            p.vvals.push(vars.val(k));
+            p_vkeys.push(vars.key(k));
+            p_vvals.push(vars.val(k));
         }
-        let pl0 = p.labels.len();
+        let pl0 = p_labels.len();
         for k in 0..q.ln {
-            p.labels.push(u32_at(in qlabels, add(q.l0, k)));
+            p_labels.push(u32_at(in qlabels, add(q.l0, k)));
         }
-        let c0 = p.calls.len();
+        let c0 = p_calls.len();
         let row = cx.ir.p.function(fi);
         for bi in 0..row.bc {
             let blk = cx.ir.p.block(add(row.b0, bi));
@@ -1152,18 +1200,21 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
                     for k in 0..nt {
                         explicit.push(n32(cx.ir.word(add(inc(tat), k))));
                     }
+                    let s_cv = stage2_heap_swap(perm);
                     let cv = call_vars(inout cx, callee, ins.s0, ins.s1, in explicit, in vars);
                     let key = instance_name(inout cx, callee, in cv);
-                    p
-                        .calls
+                    perm = stage2_heap_swap(s_cv);
+                    let s_pc = stage2_heap_swap(perm);
+                    p_calls
                         .push(
                             CallTarget {
                                 dest: widen_u64(ins.dest),
                                 callee: key
                             }
                         );
+                    perm = stage2_heap_swap(s_pc);
                     let mut ls = ChunkSeq::new[u32]();
-                    row_labels(inout cx, inout ls, callee);
+                    row_labels(in cx, inout ls, callee);
                     let qv0 = qkeys.len();
                     for k in 0..cv.len() {
                         qkeys.push(cv.key(k));
@@ -1173,6 +1224,7 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
                     for k in 0..ls.len() {
                         qlabels.push(u32_at(in ls, k));
                     }
+                    let s_q = stage2_heap_swap(perm);
                     queue
                         .push(
                             Queued {
@@ -1187,6 +1239,7 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
                                 ln: ls.len()
                             }
                         );
+                    perm = stage2_heap_swap(s_q);
                 } else if ins.op == Op::Closure {
                     let (pool, aa, an) = closure_operands(in cx, ins.a);
                     let fact = cx.f.expr(pool);
@@ -1199,7 +1252,9 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
                         Fail::raise(werr(K_INVALID, 0, 43));
                     }
                     check_prefix(in cx, wrapping_sub(nf, 1), in caps);
+                    let s_in = stage2_heap_swap(perm);
                     let key = instance_name(inout cx, fact.fn_, in vars);
+                    perm = stage2_heap_swap(s_in);
                     let qv0 = qkeys.len();
                     for k in 0..vars.len() {
                         qkeys.push(vars.key(k));
@@ -1209,6 +1264,7 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
                     for k in 0..q.ln {
                         qlabels.push(u32_at(in qlabels, add(q.l0, k)));
                     }
+                    let s_q = stage2_heap_swap(perm);
                     queue
                         .push(
                             Queued {
@@ -1223,16 +1279,18 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
                                 ln: q.ln
                             }
                         );
+                    perm = stage2_heap_swap(s_q);
                 } else if ins.op == Op::Read {
                     let root = n32(cx.ir.word(ins.a));
                     let path = cx.ir.word(inc(ins.a));
                     if path == 0 && !cx.ir.has_local(info, root) && cx.ir.find(root) != 0 {
                         let mut ls = ChunkSeq::new[u32]();
-                        row_labels(inout cx, inout ls, root);
+                        row_labels(in cx, inout ls, root);
                         let ql0 = qlabels.len();
                         for k in 0..ls.len() {
                             qlabels.push(u32_at(in ls, k));
                         }
+                        let s_q = stage2_heap_swap(perm);
                         queue
                             .push(
                                 Queued {
@@ -1247,12 +1305,15 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
                                     ln: ls.len()
                                 }
                             );
+                        perm = stage2_heap_swap(s_q);
                     }
                 } else if ins.op == Op::Handle {
-                    let id = p.handlers.len();
+                    let id = p_handlers.len();
+                    let s_h = stage2_heap_swap(perm);
                     let h = handler(
                         inout cx,
-                        inout p,
+                        inout p_clauses,
+                        inout p_hw,
                         q.key,
                         info,
                         in vars,
@@ -1265,7 +1326,10 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
                         } else if r == 1 {
                             (h.ret, h.ret_base, R_RETURN_CLAUSE, 0)
                         } else {
-                            let c = p.clause(add(h.c0, wrapping_sub(r, 2)));
+                            let c = match p_clauses.try_get(add(h.c0, wrapping_sub(r, 2))) {
+                                Option::Some(cc) => cc,
+                                Option::None => clause0(),
+                            };
                             (c.function, c.base, R_OP_CLAUSE, c.op)
                         };
                         let qv0 = qkeys.len();
@@ -1304,15 +1368,16 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
                             );
                     }
                     for k in 0..h.en {
-                        sorted_insert(in cx.names, inout p.keys, u32_at(in p.hw, add(h.e0, k)));
+                        sorted_insert(in cx.names, inout p_keys, u32_at(in p_hw, add(h.e0, k)));
                     }
-                    p.handlers.push(h);
+                    p_handlers.push(h);
+                    perm = stage2_heap_swap(s_h);
                 }
             }
         }
-        let i = p.insts.len();
-        p
-            .insts
+        let i = p_insts.len();
+        let s_pi = stage2_heap_swap(perm);
+        p_insts
             .push(
                 Inst {
                     key: q.key,
@@ -1324,14 +1389,55 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
                     handler: q.handler,
                     op: q.op,
                     c0: c0,
-                    cn: wrapping_sub(p.calls.len(), c0),
+                    cn: wrapping_sub(p_calls.len(), c0),
                     l0: pl0,
                     ln: q.ln
                 }
             );
-        set_by_symbol(inout p.by_key, q.key, n32(inc(i)));
+        perm = stage2_heap_swap(s_pi);
+        set_by_symbol(inout p_by_key, q.key, n32(inc(i)));
+        if scratch_end != 0 && stage2_heap_mark() >= scratch_end {
+            Fail::raise(werr(K_LIMIT, 96, stage2_heap_mark()));
+        }
+        if cx.names.len() == n_names
+            && cx.types.nodes.len() == n_nodes
+            && cx.types.rows.len() == n_rows
+            && p_insts.len() <= 8000
+            && p_vkeys.len() <= 32000
+            && p_vvals.len() <= 32000
+            && p_by_key.len() <= 260000
+            && p_calls.len() <= 260000
+            && p_labels.len() <= 16000
+            && p_keys.len() <= 8000
+            && p_host.len() <= 4000
+            && p_handlers.len() <= 2000
+            && p_clauses.len() <= 4000
+            && p_hw.len() <= 8000
+            && queue.len() <= 260000
+            && qkeys.len() <= 130000
+            && qvals.len() <= 130000
+            && qlabels.len() <= 130000
+            && seen.len() <= 260000 {
+            stage2_heap_reset(scratch_mark);
+        } else {
+            scratch_mark = stage2_heap_mark();
+        }
     }
-    p
+    let _ = stage2_heap_swap(perm);
+    Plan {
+        insts: p_insts,
+        vkeys: p_vkeys,
+        vvals: p_vvals,
+        by_key: p_by_key,
+        calls: p_calls,
+        labels: p_labels,
+        keys: p_keys,
+        max_arity: p_max_arity,
+        host: p_host,
+        handlers: p_handlers,
+        clauses: p_clauses,
+        hw: p_hw,
+    }
 }
 
 // ----- handlers --------------------------------------------------------------
@@ -1558,8 +1664,16 @@ fn append_ascii(inout out: ChunkSeq[u8], in s: Str) {
 // `analysis::handler`: the handler of the `handle` instruction with
 // operands at ir word `a` and value `dest`, in instance `site` (IR
 // function `outer` under `vars`). Pushes its clauses and side words.
-fn handler(inout cx: Cx, inout p: Plan, site: u32, outer: FnInfo, in vars: TVars, dest: u64, a: u64)
-    -> Handler eff [Fail[WErr]] {
+fn handler(
+    inout cx: Cx,
+    inout p_clauses: ChunkSeq[HClause],
+    inout p_hw: ChunkSeq[u32],
+    site: u32,
+    outer: FnInfo,
+    in vars: TVars,
+    dest: u64,
+    a: u64
+) -> Handler eff [Fail[WErr]] {
     if cx.f.stack_switching {
         // WasmFX handlers are lowered in a later part of the port.
         Fail::raise(werr(K_NOT_PORTED, 0, 44));
@@ -1641,13 +1755,13 @@ fn handler(inout cx: Cx, inout p: Plan, site: u32, outer: FnInfo, in vars: TVars
     let rcaps = captures_h(in cx, inc(q), nfree, aa, an, outer);
     q = add(inc(q), nfree);
     check_prefix(in cx, wrapping_sub(rf, 1), in rcaps);
-    let rk0 = p.hw.len();
+    let rk0 = p_hw.len();
     for i in 0..rcaps.len() {
-        p.hw.push(u32_at(in rcaps, i));
+        p_hw.push(u32_at(in rcaps, i));
     }
     let nc = hop(in cx, q);
     q = inc(q);
-    let c0 = p.clauses.len();
+    let c0 = p_clauses.len();
     for k in 0..nc {
         let cname = n32(hop(in cx, q));
         let cfn = n32(hop(in cx, inc(q)));
@@ -1715,18 +1829,17 @@ fn handler(inout cx: Cx, inout p: Plan, site: u32, outer: FnInfo, in vars: TVars
             // A clause that resumes other than in tail position.
             Fail::raise(werr(K_NOT_PORTED, 0, 54));
         }
-        let k0 = p.hw.len();
+        let k0 = p_hw.len();
         for i in 0..caps.len() {
-            p.hw.push(u32_at(in caps, i));
+            p_hw.push(u32_at(in caps, i));
         }
-        let t0 = p.hw.len();
+        let t0 = p_hw.len();
         for i in 0..n {
             let t = cx.subst(cx.f.param(add(sig.p0, i)).ty, in dv);
-            p.hw.push(t);
+            p_hw.push(t);
         }
         let function = instance_name(inout cx, cfn, in vars);
-        p
-            .clauses
+        p_clauses
             .push(
                 HClause {
                     op: op,
@@ -1747,18 +1860,18 @@ fn handler(inout cx: Cx, inout p: Plan, site: u32, outer: FnInfo, in vars: TVars
         Fail::raise(werr(K_INVALID, 0, 55));
     }
     // `handler_keys`
-    let e0 = p.hw.len();
+    let e0 = p_hw.len();
     let by_name = prefixed_key(inout cx, false, ename);
-    p.hw.push(by_name);
+    p_hw.push(by_name);
     let exact = instance_key(inout cx, ename, in args);
     if exact != NONE32 {
-        p.hw.push(exact);
+        p_hw.push(exact);
     }
     if label != NONE32 {
         let lk = prefixed_key(inout cx, true, label);
-        p.hw.push(lk);
+        p_hw.push(lk);
     }
-    let en = wrapping_sub(p.hw.len(), e0);
+    let en = wrapping_sub(p_hw.len(), e0);
     let body_type = cx.subst(cx.ir.info(wrapping_sub(bf, 1)).result, in ov);
     let body = instance_name(inout cx, body_fn, in vars);
     let ret = instance_name(inout cx, ret_fn, in vars);
@@ -1779,7 +1892,7 @@ fn handler(inout cx: Cx, inout p: Plan, site: u32, outer: FnInfo, in vars: TVars
         rk0: rk0,
         rkn: rcaps.len(),
         c0: c0,
-        cn: wrapping_sub(p.clauses.len(), c0),
+        cn: wrapping_sub(p_clauses.len(), c0),
         alias_at: aa,
         alias_n: an
     }

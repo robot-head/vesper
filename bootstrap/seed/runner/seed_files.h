@@ -34,9 +34,30 @@ static void add_seed_file(const char *name, const char *path, int output) {
 enum { FS_ACCESS = 0, FS_BAD_FD = 3, FS_EXIST = 7, FS_INVALID = 12, FS_IO = 13,
        FS_NO_ENTRY = 20, FS_NO_MEMORY = 22, FS_NOT_DIR = 24, FS_UNSUPPORTED = 27,
        FS_OVERFLOW = 30 };
-enum { ROOT_FD = 1, INPUT_FD, OUTPUT_FD };
-typedef struct { FILE *file; int kind; } SeedFd;
+enum { ROOT_FD = 1, INPUT_FD, OUTPUT_FD, DIR_FD };
+typedef struct { FILE *file; char *prefix; int kind; } SeedFd;
 static SeedFd seed_fds[1024]; /* slot zero is always invalid */
+
+typedef struct { char *prefix; size_t pos; int active; } SeedDirStream;
+static SeedDirStream seed_streams[1024]; /* slot zero is always invalid */
+
+static char *seed_strdup(const char *s, size_t n) {
+  char *p = xmalloc(n + 1);
+  if (n) memcpy(p, s, n);
+  p[n] = 0;
+  return p;
+}
+
+static uint32_t free_seed_stream(void) {
+  for (uint32_t i = 1; i < sizeof seed_streams / sizeof seed_streams[0]; ++i)
+    if (!seed_streams[i].active) return i;
+  return 0;
+}
+
+static SeedDirStream *seed_stream(uint64_t id) {
+  if (id >= sizeof seed_streams / sizeof seed_streams[0]) return &seed_streams[0];
+  return &seed_streams[id];
+}
 
 static uint32_t free_seed_fd(void) {
   for (uint32_t i = 1; i < sizeof seed_fds / sizeof seed_fds[0]; ++i)
@@ -81,10 +102,36 @@ static int fs_errno(void) {
   return FS_IO;
 }
 
-static SeedFile *seed_lookup(const uint8_t *path, uint32_t len) {
+static SeedFile *seed_lookup(const char *path, size_t len) {
   for (size_t i = 0; i < num_seed_files; ++i)
     if (strlen(seed_files[i].name) == len && !memcmp(seed_files[i].name, path, len)) return &seed_files[i];
   return NULL;
+}
+
+static int seed_dir_exists(const char *prefix, size_t len) {
+  if (!len) return num_seed_files != 0;
+  for (size_t i = 0; i < num_seed_files; ++i) {
+    const char *nm = seed_files[i].name;
+    if (strlen(nm) > len && !memcmp(nm, prefix, len) && nm[len] == '/') return 1;
+  }
+  return 0;
+}
+
+static int seed_resolve(const SeedFd *dir, const uint8_t *path, uint32_t len, char *out, size_t cap, size_t *out_len) {
+  size_t plen = dir->prefix ? strlen(dir->prefix) : 0;
+  while (len && path[0] == '/') { path++; len--; }
+  while (len >= 2 && path[0] == '.' && path[1] == '/') { path += 2; len -= 2; }
+  while (len && path[len - 1] == '/') len--;
+  if (len == 1 && path[0] == '.') len = 0;
+  size_t need = plen + (plen && len ? 1 : 0) + len;
+  if (need >= cap) return 0;
+  size_t pos = 0;
+  if (plen) { memcpy(out, dir->prefix, plen); pos = plen; }
+  if (plen && len) out[pos++] = '/';
+  if (len) { memcpy(out + pos, path, len); pos += len; }
+  out[pos] = 0;
+  *out_len = pos;
+  return 1;
 }
 
 static void host_open_at(Vm *vm, uint64_t *a, uint64_t *r) {
@@ -93,11 +140,25 @@ static void host_open_at(Vm *vm, uint64_t *a, uint64_t *r) {
   const uint8_t *path = mem_at(vm, (uint32_t)a[2], n);
   uint32_t ret = (uint32_t)a[6];
   uint8_t *result = mem_at(vm, ret, 8);
-  SeedFile *f = seed_lookup(path, n);
-  if (seed_fd(a[0])->kind != ROOT_FD) { fs_error(result, 4, FS_BAD_FD); return; }
+  SeedFd *parent = seed_fd(a[0]);
+  if (parent->kind != ROOT_FD && parent->kind != DIR_FD) { fs_error(result, 4, FS_BAD_FD); return; }
   if (a[1] > 1) { fs_error(result, 4, FS_INVALID); return; }
+  char resolved[4096];
+  size_t rlen = 0;
+  if (!seed_resolve(parent, path, n, resolved, sizeof resolved, &rlen)) { fs_error(result, 4, FS_INVALID); return; }
+  if (flags & 2) {
+    if (flags != 2) { fs_error(result, 4, FS_UNSUPPORTED); return; }
+    if (seed_lookup(resolved, rlen)) { fs_error(result, 4, FS_NOT_DIR); return; }
+    if (!seed_dir_exists(resolved, rlen)) { fs_error(result, 4, FS_NO_ENTRY); return; }
+    uint32_t fd = free_seed_fd();
+    if (!fd) { fs_error(result, 4, FS_NO_MEMORY); return; }
+    seed_fds[fd] = (SeedFd){NULL, seed_strdup(resolved, rlen), DIR_FD};
+    result[0] = 0;
+    guest_put_u32(vm, (uint64_t)ret + 4, fd);
+    return;
+  }
+  SeedFile *f = seed_lookup(resolved, rlen);
   if (!f) { fs_error(result, 4, FS_NO_ENTRY); return; }
-  if (flags & 2) { fs_error(result, 4, FS_NOT_DIR); return; }
   if (rights != (f->output ? 2u : 1u)) { fs_error(result, 4, FS_ACCESS); return; }
 
   /* open-flags: CREATE=1, DIRECTORY=2, EXCLUSIVE=4, TRUNCATE=8. */
@@ -114,7 +175,7 @@ static void host_open_at(Vm *vm, uint64_t *a, uint64_t *r) {
     if (!file && errno == EEXIST) file = fopen(f->host, "r+b");
   }
   if (!file) { fs_error(result, 4, fs_errno()); return; }
-  seed_fds[fd] = (SeedFd){file, f->output ? OUTPUT_FD : INPUT_FD};
+  seed_fds[fd] = (SeedFd){file, NULL, f->output ? OUTPUT_FD : INPUT_FD};
   result[0] = 0;
   guest_put_u32(vm, (uint64_t)ret + 4, fd);
 }
@@ -125,6 +186,7 @@ static void host_file_drop(Vm *vm, uint64_t *a, uint64_t *r) {
   SeedFd *d = seed_fd(a[0]);
   if (!d->kind) TRAP("invalid filesystem descriptor");
   if (d->file && fclose(d->file)) TRAP("filesystem close failed");
+  free(d->prefix);
   *d = (SeedFd){0};
 }
 
@@ -154,15 +216,77 @@ static void host_file_stat_at(Vm *vm, uint64_t *a, uint64_t *r) {
   uint32_t len = (uint32_t)a[3], ret = (uint32_t)a[4];
   uint8_t *result = mem_at(vm, ret, 104);
   const uint8_t *path = mem_at(vm, (uint32_t)a[2], len);
-  if (seed_fd(a[0])->kind != ROOT_FD) { fs_error(result, 8, FS_BAD_FD); return; }
+  SeedFd *parent = seed_fd(a[0]);
+  if (parent->kind != ROOT_FD && parent->kind != DIR_FD) { fs_error(result, 8, FS_BAD_FD); return; }
   if (a[1] > 1) { fs_error(result, 8, FS_INVALID); return; }
-  if (len == 1 && path[0] == '.') { file_stat_result(vm, ret, NULL); return; }
-  SeedFile *f = seed_lookup(path, len);
+  char resolved[4096];
+  size_t rlen = 0;
+  if (!seed_resolve(parent, path, len, resolved, sizeof resolved, &rlen)) { fs_error(result, 8, FS_INVALID); return; }
+  if (!rlen || seed_dir_exists(resolved, rlen)) { file_stat_result(vm, ret, NULL); return; }
+  SeedFile *f = seed_lookup(resolved, rlen);
   if (!f) { fs_error(result, 8, FS_NO_ENTRY); return; }
   FILE *file = fopen(f->host, "rb");
   if (!file) { fs_error(result, 8, fs_errno()); return; }
   file_stat_result(vm, ret, file);
   fclose(file);
+}
+
+static void host_read_directory(Vm *vm, uint64_t *a, uint64_t *r) {
+  (void)r;
+  SeedFd *d = seed_fd(a[0]);
+  uint32_t ret = (uint32_t)a[1];
+  uint8_t *result = mem_at(vm, ret, 8);
+  if (d->kind != ROOT_FD && d->kind != DIR_FD) { fs_error(result, 4, FS_BAD_FD); return; }
+  uint32_t id = free_seed_stream();
+  if (!id) { fs_error(result, 4, FS_NO_MEMORY); return; }
+  const char *p = d->prefix ? d->prefix : "";
+  seed_streams[id] = (SeedDirStream){seed_strdup(p, strlen(p)), 0, 1};
+  result[0] = 0;
+  guest_put_u32(vm, (uint64_t)ret + 4, id);
+}
+
+static void host_read_directory_entry(Vm *vm, uint64_t *a, uint64_t *r) {
+  (void)r;
+  SeedDirStream *st = seed_stream(a[0]);
+  uint32_t ret = (uint32_t)a[1];
+  uint8_t *result = mem_at(vm, ret, 20);
+  if (!st->active) { fs_error(result, 4, FS_BAD_FD); return; }
+  size_t plen = strlen(st->prefix);
+  while (st->pos < num_seed_files) {
+    size_t i = st->pos++;
+    const char *nm = seed_files[i].name;
+    if (plen && (strlen(nm) <= plen || memcmp(nm, st->prefix, plen) || nm[plen] != '/')) continue;
+    const char *rest = plen ? nm + plen + 1 : nm;
+    size_t seglen = strcspn(rest, "/");
+    if (!seglen) continue;
+    int dup = 0;
+    for (size_t j = 0; j < i; ++j) {
+      const char *nmj = seed_files[j].name;
+      if (plen && (strlen(nmj) <= plen || memcmp(nmj, st->prefix, plen) || nmj[plen] != '/')) continue;
+      const char *restj = plen ? nmj + plen + 1 : nmj;
+      if (strcspn(restj, "/") == seglen && !memcmp(restj, rest, seglen)) { dup = 1; break; }
+    }
+    if (dup) continue;
+    uint32_t ptr = guest_alloc(vm, 1, (uint32_t)seglen);
+    guest_put_bytes(vm, ptr, rest, (uint32_t)seglen);
+    result = mem_at(vm, ret, 20);
+    memset(result, 0, 20);
+    result[4] = 1;
+    result[8] = rest[seglen] == '/' ? 3 : 6;
+    guest_put_u32(vm, (uint64_t)ret + 12, ptr);
+    guest_put_u32(vm, (uint64_t)ret + 16, (uint32_t)seglen);
+    return;
+  }
+  memset(result, 0, 20);
+}
+
+static void host_stream_drop(Vm *vm, uint64_t *a, uint64_t *r) {
+  (void)vm;
+  (void)r;
+  SeedDirStream *st = seed_stream(a[0]);
+  if (!st->active) TRAP("invalid directory entry stream");
+  free(st->prefix);
+  *st = (SeedDirStream){0};
 }
 
 /* Read at most one chunk per call. The emitted std/fs loops until full or

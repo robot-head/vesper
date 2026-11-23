@@ -1,6 +1,29 @@
 // Constant tables in the port: a use of a constant aggregate
 // (`$table$NAME`, src/arrays.rs) as read-only static data.
 
+use @vesper/check-data::names::{
+    Names,
+    names_new
+};
+pub use @vesper/check-data::util::{
+    stage2_heap_mark,
+    stage2_heap_reset,
+    stage2_heap_swap
+};
+use @vesper/check-data::types::{
+    TyKind,
+    TyMode,
+    types_new
+};
+use @vesper/check-data::world::{
+    Bounds,
+    Known,
+    mode_of,
+    world_new
+};
+use @vesper/place-ir::{
+    program_new
+};
 use @vesper/place-ir::codes::{
     Lit,
     Op
@@ -17,9 +40,55 @@ use self::err::{
     WErr,
     werr
 };
+use self::enc::{
+    Code,
+    OP_ELSE,
+    OP_END,
+    OP_I32_AND,
+    OP_I32_EQ,
+    OP_I32_OR,
+    OP_I32_WRAP_I64,
+    OP_I64_ADD,
+    OP_I64_AND,
+    OP_I64_EXTEND_I32_U,
+    OP_I64_GE_U,
+    OP_I64_GT_U,
+    OP_I64_LE_U,
+    OP_I64_LT_U,
+    OP_I64_NE,
+    OP_I64_OR,
+    OP_I64_SHL,
+    OP_I64_SHR_U,
+    OP_I64_SUB,
+    OP_IF,
+    OP_RETURN,
+    OP_SELECT,
+    OP_UNREACHABLE,
+    code_new
+};
+use self::ir::{
+    FnInfo,
+    empty_facts,
+    ir_new
+};
 use self::lower::{
     L,
+    lowerer_new,
     set64
+};
+use self::module::{
+    Builder
+};
+use self::plan::{
+    Cx,
+    Inst,
+    SH_ENUM,
+    SH_SCALAR,
+    SH_STR,
+    SH_STRUCT,
+    SH_TUPLE,
+    Syms,
+    empty_plan
 };
 
 // Consts do not cross modules: src/err.ves, src/lower.ves.
@@ -269,4 +338,483 @@ impl L {
         }
         false
     }
+
+    pub fn returns_copy_size(inout self) -> u64 eff [Fail[WErr]] {
+        let fs = self.cx.fn_sig(self.e.inst.base);
+        if fs == 0 {
+            return NONE64;
+        }
+        let sig = self.cx.f.sig(wrapping_sub(fs, 1));
+        for ei in 0..sig.en {
+            if self.host_effect(self.cx.f.eff(add(sig.e0, ei)).name) {
+                return NONE64;
+            }
+        }
+        let b = Bounds {
+            keys: ChunkSeq::new[u32](),
+            modes: ChunkSeq::new[u8]()
+        };
+        for i in 0..sig.pn {
+            let pm = self.cx.f.param(add(sig.p0, i));
+            // Do not rewind heap if a non-Copy inout parameter could receive newly allocated buffers.
+            if pm.pass == 1 {
+                let pty = self.cx.subst(pm.ty, in self.e.vars);
+                let pn = self.cx.types.node(pty);
+                if !(pn.kind == TyKind::Named && pn.n == 0 && self.cx.k.is_scalar(pn.name)) {
+                    if mode_of(inout self.cx.types, in self.cx.names, in self.cx.world, pty, in b)
+                        != TyMode::Copy {
+                        return NONE64;
+                    }
+                }
+            }
+        }
+        let rty = self.cx.subst(self.e.info.result, in self.e.vars);
+        let sh = self.cx.shape(rty);
+        if sh.kind == SH_SCALAR {
+            return 0;
+        }
+        if sh.kind == SH_TUPLE && self.cx.types.node(sh.ty).n == 0 {
+            return 0;
+        }
+        if sh.kind == SH_TUPLE {
+            if mode_of(inout self.cx.types, in self.cx.names, in self.cx.world, sh.ty, in b)
+                != TyMode::Copy {
+                return NONE64;
+            }
+            return wrapping_mul(8, self.cx.arity(sh.ty));
+        }
+        if sh.kind == SH_STRUCT {
+            let adt = self.cx.world.adt(sh.adt);
+            if adt.gn == 0 {
+                if adt.mode != TyMode::Copy {
+                    return NONE64;
+                }
+            } else if mode_of(inout self.cx.types, in self.cx.names, in self.cx.world, sh.ty, in b)
+                != TyMode::Copy {
+                return NONE64;
+            }
+            return wrapping_mul(8, self.cx.field_count(sh, 0));
+        }
+        if sh.kind == SH_ENUM {
+            let adt = self.cx.world.adt(sh.adt);
+            if adt.gn == 0 {
+                if adt.mode != TyMode::Copy {
+                    return NONE64;
+                }
+            } else if mode_of(inout self.cx.types, in self.cx.names, in self.cx.world, sh.ty, in b)
+                != TyMode::Copy {
+                return NONE64;
+            }
+            let mut max_fc: u64 = 0;
+            for i in 0..self.cx.variant_count(sh) {
+                let fc = self.cx.field_count(sh, i);
+                if fc > max_fc {
+                    max_fc = fc;
+                }
+            }
+            return wrapping_mul(8, inc(max_fc));
+        }
+        NONE64
+    }
+
+    pub fn emit_return_rewind(inout self, x: u32) eff [Fail[WErr]] {
+        if self.e.mark == 4294967295 {
+            return;
+        }
+        let rsz = self.returns_copy_size();
+        if rsz == NONE64 && rsz != 0 {
+            return;
+        }
+        self.e.code.global_get(self.free_ptr);
+        self.e.code.get(self.e.mark);
+        self.e.code.op(OP_I64_GE_U);
+        self.e.code.open(OP_IF);
+        self.e.code.i64_const(0);
+        self.e.code.global_set(self.free_ptr);
+        self.e.code.i64_const(0);
+        self.e.code.global_set(self.free_sz);
+        self.e.code.op(OP_END);
+        if rsz == 0 {
+            self.e.code.get(self.e.mark);
+            self.e.code.global_set(self.heap);
+        } else if rsz != NONE64 {
+            let csz = self.local();
+            self.e.code.get(x);
+            self.e.code.get(self.e.mark);
+            self.e.code.op(OP_I64_GE_U);
+            self.e.code.open(OP_IF);
+            self.e.code.i64_const(wrapping_i64(rsz));
+            self.e.code.global_get(self.heap);
+            self.e.code.get(x);
+            self.e.code.op(OP_I64_SUB);
+            self.e.code.i64_const(wrapping_i64(rsz));
+            self.e.code.global_get(self.heap);
+            self.e.code.get(x);
+            self.e.code.op(OP_I64_SUB);
+            self.e.code.op(OP_I64_LT_U);
+            self.e.code.op(OP_SELECT);
+            self.e.code.set(csz);
+            self.e.code.get(self.e.mark);
+            self.e.code.op(OP_I32_WRAP_I64);
+            self.e.code.get(x);
+            self.e.code.op(OP_I32_WRAP_I64);
+            self.e.code.get(csz);
+            self.e.code.op(OP_I32_WRAP_I64);
+            self.e.code.memory_copy();
+            self.e.code.get(self.e.mark);
+            self.e.code.get(csz);
+            self.e.code.op(OP_I64_ADD);
+            self.e.code.global_set(self.heap);
+            self.e.code.get(self.e.mark);
+            self.e.code.op(OP_RETURN);
+            self.e.code.op(OP_END);
+            self.e.code.get(self.e.mark);
+            self.e.code.global_set(self.heap);
+        }
+    }
+}
+
+pub fn alloc_code_free(heap: u32, free_ptr: u32, free_sz: u32) -> Code {
+    let mut c = code_new();
+    c.global_get(heap);
+    c.tee(1);
+    c.get(0);
+    c.i64_const(7);
+    c.op(OP_I64_ADD);
+    c.i64_const(-8);
+    c.op(OP_I64_AND);
+    c.op(OP_I64_ADD);
+    c.tee(2);
+    c.memory_size();
+    c.op(OP_I64_EXTEND_I32_U);
+    c.i64_const(16);
+    c.op(OP_I64_SHL);
+    c.op(OP_I64_GT_U);
+    c.open(OP_IF);
+    c.get(2);
+    c.memory_size();
+    c.op(OP_I64_EXTEND_I32_U);
+    c.i64_const(16);
+    c.op(OP_I64_SHL);
+    c.op(OP_I64_SUB);
+    c.i64_const(65535);
+    c.op(OP_I64_ADD);
+    c.i64_const(16);
+    c.op(OP_I64_SHR_U);
+    c.op(OP_I32_WRAP_I64);
+    c.memory_grow();
+    c.i32_const(-1);
+    c.op(OP_I32_EQ);
+    c.open(OP_IF);
+    c.op(OP_UNREACHABLE);
+    c.op(OP_END);
+    c.op(OP_END);
+    c.get(2);
+    c.global_set(heap);
+    c.get(1);
+    c.op(OP_END);
+    c
+}
+
+pub fn sym_contains(in names: Names, sym: u32, in sub: Slice[u8]) -> bool {
+    let n = names.size(sym);
+    let m = sub.len();
+    if n < m {
+        return false;
+    }
+    let lim = wrapping_add(wrapping_sub(n, m), 1);
+    for off in 0..lim {
+        let mut ok = true;
+        for i in 0..m {
+            let sb = match sub.try_get(i) {
+                Option::Some(b) => b,
+                Option::None => 0,
+            };
+            if names.byte(sym, wrapping_add(off, i)) != sb {
+                ok = false;
+                break;
+            }
+        }
+        if ok {
+            return true;
+        }
+    }
+    false
+}
+
+pub fn sym_ends_with(in names: Names, sym: u32, in suf: Slice[u8]) -> bool {
+    let n = names.size(sym);
+    let m = suf.len();
+    if n < m {
+        return false;
+    }
+    let off = wrapping_sub(n, m);
+    for i in 0..m {
+        let sb = match suf.try_get(i) {
+            Option::Some(b) => b,
+            Option::None => 0,
+        };
+        if names.byte(sym, wrapping_add(off, i)) != sb {
+            return false;
+        }
+    }
+    true
+}
+
+impl L {
+    pub fn pre_reserve_define_all(inout self) -> ChunkSeq[u64] {
+        self.b.funcs.reserve(8192);
+        self.b.data.reserve(262144);
+        self.b.bodies.reserve(6291456);
+        self.eq.reserve(8192);
+        self.eq_pending.reserve(1024);
+        self.trampolines.reserve(8192);
+        self.strings.reserve(8192);
+        self.tables.reserve(8192);
+        self.wide_fns.reserve(8192);
+        self.copies.reserve(8192);
+        self.hcap_name.reserve(1024);
+        self.hcap_off.reserve(1024);
+        self.b.table.reserve(4096);
+        self.b.declared.reserve(4096);
+        let mut s = ChunkSeq::new[u64]();
+        s.reserve(12);
+        s.push(self.cx.types.nodes.len());
+        s.push(self.cx.types.rows.len());
+        s.push(8000);
+        s.push(260000);
+        s.push(8000);
+        s.push(1000);
+        s.push(8000);
+        s.push(8000);
+        s.push(8000);
+        s.push(8000);
+        s.push(8000);
+        s.push(1000);
+        s
+    }
+
+    pub fn can_rewind_define(
+        in self,
+        in lim: ChunkSeq[u64],
+        nbt: u64,
+        nhf: u64,
+        n_nodes: u64,
+        n_rows: u64,
+        n_eqp: u64
+    ) -> bool {
+        self.b.types.len() == nbt
+            && self.cx.names.len() == nhf
+            && self.b.bodies.len() <= 6000000
+            && self.cx.types.nodes.len() == n_nodes
+            && self.cx.types.rows.len() == n_rows
+            && self.b.funcs.len() <= u64_at(in lim, 2)
+            && self.b.data.len() <= u64_at(in lim, 3)
+            && self.eq.len() <= u64_at(in lim, 4)
+            && self.eq_pending.len() == n_eqp
+            && self.trampolines.len() <= u64_at(in lim, 6)
+            && self.strings.len() <= u64_at(in lim, 7)
+            && self.tables.len() <= u64_at(in lim, 8)
+            && self.wide_fns.len() <= u64_at(in lim, 9)
+            && self.copies.len() <= u64_at(in lim, 10)
+            && self.hcap_name.len() <= u64_at(in lim, 11)
+            && self.b.table.len() <= 4000
+            && self.b.declared.len() <= 4000
+    }
+
+    pub fn try_heap_intrinsic(inout self, callee: u32, dv: u64, a: u64) -> bool eff [Fail[WErr]] {
+        if sym_ends_with(in self.cx.names, callee, in "stage2_1heap_1mark".as_bytes())
+            || sym_ends_with(in self.cx.names, callee, in "stage2_heap_mark".as_bytes()) {
+            let d = self.dest(dv);
+            self.e.code.global_get(self.heap);
+            self.e.code.set(d);
+            return true;
+        }
+        if sym_ends_with(in self.cx.names, callee, in "stage2_1heap_1reset".as_bytes())
+            || sym_ends_with(in self.cx.names, callee, in "stage2_heap_reset".as_bytes()) {
+            let m = self.value(self.cx.ir.word(add(a, 3)));
+            self.e.code.get(m);
+            self.e.code.i64_const(0);
+            self.e.code.op(OP_I64_NE);
+            self.e.code.open(OP_IF);
+            self.e.code.i64_const(0);
+            self.e.code.global_set(self.free_ptr);
+            self.e.code.i64_const(0);
+            self.e.code.global_set(self.free_sz);
+            self.e.code.get(m);
+            self.e.code.global_set(self.heap);
+            self.e.code.op(OP_END);
+            let d = self.dest(dv);
+            self.e.code.i64_const(0);
+            self.e.code.set(d);
+            return true;
+        }
+        if sym_ends_with(in self.cx.names, callee, in "stage2_1heap_1swap".as_bytes())
+            || sym_ends_with(in self.cx.names, callee, in "stage2_heap_swap".as_bytes()) {
+            let m = self.value(self.cx.ir.word(add(a, 3)));
+            let d = self.dest(dv);
+            self.e.code.global_get(self.heap);
+            self.e.code.set(d);
+            self.e.code.get(m);
+            self.e.code.i64_const(0);
+            self.e.code.op(OP_I64_NE);
+            self.e.code.open(OP_IF);
+            self.e.code.i64_const(0);
+            self.e.code.global_set(self.free_ptr);
+            self.e.code.i64_const(0);
+            self.e.code.global_set(self.free_sz);
+            self.e.code.get(m);
+            self.e.code.global_set(self.heap);
+            self.e.code.op(OP_END);
+            return true;
+        }
+        false
+    }
+}
+
+pub fn dummy_l(k: Known, s: Syms) -> L eff [Fail[WErr]] {
+    let mut dn = names_new();
+    let dt = types_new(inout dn);
+    let dw = world_new(k);
+    let df = empty_facts(0, 1, 1, 1);
+    let di = ir_new(program_new());
+    let cx = Cx {
+        names: dn,
+        types: dt,
+        world: dw,
+        k: k,
+        f: df,
+        ir: di,
+        s: s,
+    };
+    lowerer_new(cx, empty_plan(), 0)
+}
+
+pub fn rebuild_l(sink dl: L, d_mark: u64, d_perm: u64) -> (L, u64) {
+    let L {
+        cx,
+        plan,
+        b,
+        funcs,
+        heap,
+        abort,
+        cps,
+        tail_mark,
+        free_ptr,
+        free_sz,
+        env_keys,
+        env_globals,
+        alloc,
+        dispatch_ty,
+        eq,
+        eq_pending,
+        trampolines,
+        h_str_eq,
+        h_fmod,
+        h_seq_reserve,
+        h_bytes_eq,
+        h_utf8,
+        host,
+        seqs,
+        strings,
+        tables,
+        wide_fns,
+        copies,
+        hfns,
+        hcap_name,
+        hcap_off,
+        arity,
+        instructions,
+        max_instructions,
+        e,
+    } = dl;
+    let Builder {
+        imports,
+        data,
+        heap_global,
+        types,
+        vals,
+        funcs: b_funcs,
+        bodies,
+        globals,
+        table,
+        declared,
+        tags,
+        exports,
+        text,
+    } = b;
+    let Cx {
+        names: cx_names,
+        types: cx_types,
+        world: cx_world,
+        k: cx_k,
+        f: cx_f,
+        ir: cx_ir,
+        s: cx_s,
+    } = cx;
+    stage2_heap_reset(d_mark);
+    let s_rb = stage2_heap_swap(d_perm);
+    let fresh_cx = Cx {
+        names: cx_names,
+        types: cx_types,
+        world: cx_world,
+        k: cx_k,
+        f: cx_f,
+        ir: cx_ir,
+        s: cx_s,
+    };
+    let fresh_b = Builder {
+        imports: imports,
+        data: data,
+        heap_global: heap_global,
+        types: types,
+        vals: vals,
+        funcs: b_funcs,
+        bodies: bodies,
+        globals: globals,
+        table: table,
+        declared: declared,
+        tags: tags,
+        exports: exports,
+        text: text,
+    };
+    let fresh_l = L {
+        cx: fresh_cx,
+        plan: plan,
+        b: fresh_b,
+        funcs: funcs,
+        heap: heap,
+        abort: abort,
+        cps: cps,
+        tail_mark: tail_mark,
+        free_ptr: free_ptr,
+        free_sz: free_sz,
+        env_keys: env_keys,
+        env_globals: env_globals,
+        alloc: alloc,
+        dispatch_ty: dispatch_ty,
+        eq: eq,
+        eq_pending: eq_pending,
+        trampolines: trampolines,
+        h_str_eq: h_str_eq,
+        h_fmod: h_fmod,
+        h_seq_reserve: h_seq_reserve,
+        h_bytes_eq: h_bytes_eq,
+        h_utf8: h_utf8,
+        host: host,
+        seqs: seqs,
+        strings: strings,
+        tables: tables,
+        wide_fns: wide_fns,
+        copies: copies,
+        hfns: hfns,
+        hcap_name: hcap_name,
+        hcap_off: hcap_off,
+        arity: arity,
+        instructions: instructions,
+        max_instructions: max_instructions,
+        e: e,
+    };
+    let next_perm = stage2_heap_swap(s_rb);
+    (fresh_l, next_perm)
 }

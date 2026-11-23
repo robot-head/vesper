@@ -1,16 +1,67 @@
 // @vesper/stage2: pure-Vesper Stage 2 compiler driver (#1397).
 
+use @vesper/check-data::input::{
+    Ctx
+};
+use @vesper/check-data::util::{
+    add,
+    inc,
+    n32,
+    u32_at,
+    u64_at,
+    w
+};
+use @vesper/check-data::world::{
+    set_by_symbol
+};
+use @vesper/place-ir::{
+    Program
+};
 use @vesper/check-names-packages::{
     AssembledModule,
     assemble_next_bytes,
     assembly_begin_bytes,
     assembly_metadata
 };
+use @vesper/place-ir-lower::lower::{
+    l_new,
+    lower_all
+};
+use @vesper/wasm-backend::{
+    compile_with_facts
+};
+use @vesper/wasm-backend::err::{
+    WErr
+};
+use @vesper/wasm-backend::ir::{
+    add_eff_decl,
+    add_fn_sig,
+    empty_facts,
+    push_hop,
+    set_expr_handler
+};
+use @vesper/place-ir::codes::{
+    Pat
+};
+use @vesper-std/env::{
+    arg,
+    arg_count
+};
+use @vesper-std/fs::{
+    IoError,
+    write_path
+};
+use self::ast_lower::{
+    build_ir_ast_for_entry
+};
 use self::collect::{
     collect_program
 };
 use self::loader::{
     load_package_graph_bytes
+};
+use self::typecheck::{
+    typecheck_ast
 };
 
 /// Load, assemble, and collect declarations of a Loom package from `root_dir`
@@ -36,4 +87,363 @@ pub fn stage2_collect_dir(in root_dir: Str) -> (u64, u64, u64, u64) eff [Ffi[Std
     let meta = assembly_metadata(sink a);
     let collected = collect_program(in mods);
     (mod_count, collected.fns.len(), collected.world.adts.len(), meta.diagnostics.len())
+}
+
+fn prog_fn_params(in prog: Program, in by_sym: ChunkSeq[u32], sym: u32) -> ChunkSeq[u32] {
+    let mut out = ChunkSeq::new[u32]();
+    let idx = u32_at(in by_sym, w(sym));
+    if idx == 0 {
+        return out;
+    }
+    match prog.fns.try_get(wrapping_sub(w(idx), 1)) {
+        Option::Some(row) => {
+            let mut at = row.ha;
+            let np = u64_at(in prog.ops, at);
+            at = inc(at);
+            for _i in 0..np {
+                out.push(n32(u64_at(in prog.ops, at)));
+                let k = u64_at(in prog.ops, add(at, 2));
+                at = add(at, add(6, k));
+            }
+        },
+        Option::None => {},
+    }
+    out
+}
+
+fn push_dec(inout out: ChunkSeq[u8], v: u64) {
+    if v >= 10 {
+        push_dec(inout out, v / 10);
+    }
+    out.push(wrapping_u8(wrapping_add(48, v % 10)));
+}
+
+fn nested_sym(inout c: Ctx, in prefix: Str, s0: u64, s1: u64) -> u32 {
+    let mut b = ChunkSeq::new[u8]();
+    b.extend(in prefix.as_bytes());
+    push_dec(inout b, s0);
+    b.push(95);
+    push_dec(inout b, s1);
+    c.names.intern(in b.as_slice())
+}
+
+/// Compile a Loom package from `root_dir` to a core Wasm module at `out_wasm`
+/// with no Rust compiler calls. Returns `(ok_flag_or_code, core_len_or_site)`.
+pub fn stage2_compile_dir(in root_dir: Str, in out_wasm: Str, in entry_name: Str)
+    -> (u64, u64) eff [Ffi[StdFs]] {
+    let encoded = match load_package_graph_bytes(in root_dir.as_bytes()) {
+        Option::Some(b) => b,
+        Option::None => {
+            return (1, 1);
+        },
+    };
+    let mut a = assembly_begin_bytes(in encoded.as_slice());
+    let mut mods = ChunkSeq::new[AssembledModule]();
+    loop {
+        match assemble_next_bytes(inout a, in encoded.as_slice()) {
+            Option::Some(m) => {
+                mods.push(sink m);
+            },
+            Option::None => break,
+        }
+    }
+    let meta = assembly_metadata(sink a);
+    if meta.diagnostics.len() > 0 {
+        return (2, meta.diagnostics.len());
+    }
+    let collected = collect_program(in mods);
+    let (ir_ast, names0, types0, world0) = build_ir_ast_for_entry(
+        sink collected,
+        in mods,
+        in entry_name
+    );
+    let (names, types, world, call_rows, call_pairs) = typecheck_ast(in ir_ast, sink names0, sink types0, sink world0);
+    let mut c = Ctx {
+        names: names,
+        types: types,
+        world: world,
+        tmap: ChunkSeq::new[u32](),
+        nmap: ChunkSeq::new[u32]()
+    };
+    let entry_sym = c.names.intern(in entry_name.as_bytes());
+    let mut facts = empty_facts(entry_sym, 65535, 65536, 10000000);
+    facts.calls = call_rows;
+    facts.pairs = call_pairs;
+    let mut low = l_new(sink c, sink ir_ast);
+    lower_all(inout low);
+    for fi in 0..low.a.fns.len() {
+        match low.a.fns.try_get(fi) {
+            Option::Some(f) => {
+                let mut gnames = ChunkSeq::new[u32]();
+                let mut grows = ChunkSeq::new[bool]();
+                for gi in 0..f.gn {
+                    match low.a.gens.try_get(wrapping_add(f.ga, gi)) {
+                        Option::Some(g) => {
+                            gnames.push(g.name);
+                            grows.push(g.row);
+                        },
+                        Option::None => {},
+                    }
+                }
+                let mut pnames = ChunkSeq::new[u32]();
+                let mut ppasses = ChunkSeq::new[u8]();
+                let mut ptys = ChunkSeq::new[u32]();
+                for pi in 0..f.pn {
+                    match low.a.pms.try_get(wrapping_add(f.pa, pi)) {
+                        Option::Some(pm) => {
+                            pnames.push(pm.name);
+                            ppasses.push(pm.pass);
+                            ptys.push(pm.ty);
+                        },
+                        Option::None => {},
+                    }
+                }
+                add_fn_sig(
+                    inout facts,
+                    in low.c,
+                    f.name,
+                    in gnames,
+                    in grows,
+                    in pnames,
+                    in ppasses,
+                    in ptys,
+                    f.result,
+                    f.effects
+                );
+            },
+            Option::None => {},
+        }
+    }
+    for ei in 0..low.a.effs.len() {
+        match low.a.effs.try_get(ei) {
+            Option::Some(ef) => {
+                let mut gnames = ChunkSeq::new[u32]();
+                for gi in 0..ef.gn {
+                    match low.a.egens.try_get(wrapping_add(ef.ga, gi)) {
+                        Option::Some(g) => gnames.push(g),
+                        Option::None => {},
+                    }
+                }
+                let mut op_names = ChunkSeq::new[u32]();
+                let mut op_pa = ChunkSeq::new[u64]();
+                let mut op_pn = ChunkSeq::new[u64]();
+                let mut pnames = ChunkSeq::new[u32]();
+                let mut ppasses = ChunkSeq::new[u8]();
+                let mut ptys = ChunkSeq::new[u32]();
+                let mut op_results = ChunkSeq::new[u32]();
+                for oi in 0..ef.on {
+                    match low.a.eops.try_get(wrapping_add(ef.oa, oi)) {
+                        Option::Some(op) => {
+                            op_names.push(op.name);
+                            op_pa.push(pnames.len());
+                            op_pn.push(op.pn);
+                            op_results.push(op.result);
+                            for pi in 0..op.pn {
+                                match low.a.pms.try_get(wrapping_add(op.pa, pi)) {
+                                    Option::Some(pm) => {
+                                        pnames.push(pm.name);
+                                        ppasses.push(pm.pass);
+                                        ptys.push(pm.ty);
+                                    },
+                                    Option::None => {},
+                                }
+                            }
+                        },
+                        Option::None => {},
+                    }
+                }
+                add_eff_decl(
+                    inout facts,
+                    ef.name,
+                    ef.linear,
+                    in gnames,
+                    in op_names,
+                    in op_pa,
+                    in op_pn,
+                    in pnames,
+                    in ppasses,
+                    in ptys,
+                    in op_results
+                );
+            },
+            Option::None => {},
+        }
+    }
+    let mut c2 = low.c;
+    let prog = low.p;
+    let mut fn_by_sym = ChunkSeq::new[u32]();
+    for fi in 0..prog.fns.len() {
+        match prog.fns.try_get(fi) {
+            Option::Some(row) => set_by_symbol(inout fn_by_sym, row.name, n32(inc(fi))),
+            Option::None => {},
+        }
+    }
+    for hi in 0..low.a.hds.len() {
+        match low.a.hds.try_get(hi) {
+            Option::Some(h) => {
+                let h0 = facts.hops.len();
+                push_hop(inout facts, widen_u64(h.label));
+                push_hop(inout facts, widen_u64(h.eff_name));
+                push_hop(inout facts, h.tn);
+                for ti in 0..h.tn {
+                    let ta = match low.a.xs.try_get(wrapping_add(h.ta, ti)) {
+                        Option::Some(v) => v,
+                        Option::None => 0,
+                    };
+                    push_hop(inout facts, ta);
+                }
+                push_hop(
+                    inout facts,
+                    if h.has_state {
+                        1
+                    } else {
+                        0
+                    }
+                );
+                let bx = low.a.ex(h.body);
+                let body_fn = nested_sym(inout c2, in "$handler_body_", bx.s0, bx.s1);
+                push_hop(inout facts, widen_u64(body_fn));
+                let rc = low.a.clause(h.ret);
+                let rx = low.a.ex(rc.body);
+                let ret_fn = nested_sym(inout c2, in "$handler_clause_", rx.s0, rx.s1);
+                push_hop(inout facts, widen_u64(ret_fn));
+                push_hop(inout facts, rc.pn);
+                let mut r_binds: u64 = if h.has_state { 1 } else { 0 };
+                for pi in 0..rc.pn {
+                    let pid = match low.a.xs.try_get(wrapping_add(rc.pa, pi)) {
+                        Option::Some(v) => v,
+                        Option::None => 0,
+                    };
+                    let pt = low.a.pt(pid);
+                    if pt.kind == Pat::Bind {
+                        push_hop(inout facts, 1);
+                        push_hop(inout facts, pt.s0);
+                        push_hop(inout facts, pt.s1);
+                        push_hop(inout facts, pt.a);
+                        r_binds = inc(r_binds);
+                    } else {
+                        push_hop(inout facts, 0);
+                        push_hop(inout facts, pt.s0);
+                        push_hop(inout facts, pt.s1);
+                    }
+                }
+                let r_ps = prog_fn_params(in prog, in fn_by_sym, ret_fn);
+                let r_nfree = if r_ps.len() > r_binds {
+                    wrapping_sub(r_ps.len(), r_binds)
+                } else {
+                    0
+                };
+                push_hop(inout facts, r_nfree);
+                for fi in 0..r_nfree {
+                    push_hop(inout facts, widen_u64(u32_at(in r_ps, fi)));
+                }
+                push_hop(inout facts, h.on);
+                for oi in 0..h.on {
+                    let oc = low.a.clause(wrapping_add(h.ret, wrapping_add(oi, 1)));
+                    push_hop(inout facts, widen_u64(oc.name));
+                    let ox = low.a.ex(oc.body);
+                    let op_fn = nested_sym(inout c2, in "$handler_clause_", ox.s0, ox.s1);
+                    push_hop(inout facts, widen_u64(op_fn));
+                    push_hop(inout facts, oc.pn);
+                    let mut o_binds: u64 = if h.has_state { 1 } else { 0 };
+                    for pi in 0..oc.pn {
+                        let pid = match low.a.xs.try_get(wrapping_add(oc.pa, pi)) {
+                            Option::Some(v) => v,
+                            Option::None => 0,
+                        };
+                        let pt = low.a.pt(pid);
+                        if pt.kind == Pat::Bind {
+                            push_hop(inout facts, 1);
+                            push_hop(inout facts, pt.s0);
+                            push_hop(inout facts, pt.s1);
+                            push_hop(inout facts, pt.a);
+                            o_binds = inc(o_binds);
+                        } else {
+                            push_hop(inout facts, 0);
+                            push_hop(inout facts, pt.s0);
+                            push_hop(inout facts, pt.s1);
+                        }
+                    }
+                    let o_ps = prog_fn_params(in prog, in fn_by_sym, op_fn);
+                    let o_nfree = if o_ps.len() > o_binds {
+                        wrapping_sub(o_ps.len(), o_binds)
+                    } else {
+                        0
+                    };
+                    push_hop(inout facts, o_nfree);
+                    for fi in 0..o_nfree {
+                        push_hop(inout facts, widen_u64(u32_at(in o_ps, fi)));
+                    }
+                }
+                let b_ps = prog_fn_params(in prog, in fn_by_sym, body_fn);
+                let b_non = if h.has_state { 1 } else { 0 };
+                let b_nfree = if b_ps.len() > b_non {
+                    wrapping_sub(b_ps.len(), b_non)
+                } else {
+                    0
+                };
+                let mut h_free = ChunkSeq::new[u32]();
+                for fi in 0..b_nfree {
+                    h_free.push(u32_at(in b_ps, fi));
+                }
+                set_expr_handler(inout facts, h.pool, h0, in h_free);
+            },
+            Option::None => {},
+        }
+    }
+    handle Fail[WErr] in {
+        let (core, _wit, _fns, _handlers) = compile_with_facts(sink c2, sink prog, sink facts);
+        let clen = core.len();
+        handle Fail[IoError] in {
+            write_path(in out_wasm.as_bytes(), in core.as_slice());
+            (0, clen)
+        } with {
+            return v => v,
+            raise(_e, _k) => (4, 0),
+        }
+    } with {
+        return v => v,
+        raise(err, _k) => (3, widen_u64(err.site)),
+    }
+}
+
+/// CLI entry point for standalone Stage 2 Wasm execution (`vwasm stage2.wasm -- <pkg_dir> <out_wasm> [entry]`).
+pub fn main() -> u64 eff [Ffi[StdEnv], Ffi[StdFs]] {
+    let n = arg_count();
+    if n < 3 {
+        return 10;
+    }
+    let root_dir = match arg(1) {
+        Option::Some(s) => s,
+        Option::None => {
+            return 11;
+        },
+    };
+    let out_wasm = match arg(2) {
+        Option::Some(s) => s,
+        Option::None => {
+            return 12;
+        },
+    };
+    let (code, val) = if n >= 4 {
+        match arg(3) {
+            Option::Some(s) => stage2_compile_dir(
+                in root_dir.as_str(),
+                in out_wasm.as_str(),
+                in s.as_str()
+            ),
+            Option::None => stage2_compile_dir(
+                in root_dir.as_str(),
+                in out_wasm.as_str(),
+                in "main"
+            ),
+        }
+    } else {
+        stage2_compile_dir(in root_dir.as_str(), in out_wasm.as_str(), in "main")
+    };
+    if code == 0 {
+        0
+    } else {
+        wrapping_add(wrapping_mul(code, 1000000), val)
+    }
 }

@@ -498,5 +498,16 @@ pub fn collect_all_bytes(inout s: St, in input: Slice[u8]) {
         begin_module(inout s);
         collect(inout s, in l.ast, n32(m));
         constants(inout s, in l, n32(m));
+        s.cached_ls.push(sink l);
     }
+    let mut rev = ChunkSeq::new[L]();
+    loop {
+        match s.cached_ls.pop() {
+            Option::Some(x) => rev.push(sink x),
+            Option::None => {
+                break;
+            },
+        }
+    }
+    s.cached_ls = rev;
 }

@@ -33,12 +33,23 @@ use self::lower::{
 use self::component::{
     exports
 };
+use self::tables::{
+    dummy_l,
+    rebuild_l,
+    stage2_heap_mark,
+    stage2_heap_reset,
+    stage2_heap_swap
+};
 use @vesper/check-data::pack_text;
 use @vesper/check-data::input::{
+    Ctx,
     Reader,
     read_ctx
 };
-use @vesper/place-ir::read_program;
+use @vesper/place-ir::{
+    Program,
+    read_program
+};
 
 const K_ENTRY: u8 = 1;
 const K_LIMIT: u8 = 2;
@@ -53,6 +64,11 @@ fn compile(in b: Slice[u8]) -> (ChunkSeq[u8], ChunkSeq[u8], u64, ChunkSeq[u64]) 
     let p = read_program(inout r, in b, in c);
     let pool = p.pool.len();
     let f = read_facts(inout r, in b, in c, pool);
+    compile_with_facts(sink c, sink p, sink f)
+}
+
+pub fn compile_with_facts(sink c: Ctx, sink p: Program, sink f: Facts)
+    -> (ChunkSeq[u8], ChunkSeq[u8], u64, ChunkSeq[u64]) eff [Fail[WErr]] {
     if f.max_pages == 0 || f.max_pages > 65536 {
         Fail::raise(werr(K_LIMIT, 0, 1));
     }
@@ -67,7 +83,59 @@ fn compile(in b: Slice[u8]) -> (ChunkSeq[u8], ChunkSeq[u8], u64, ChunkSeq[u64]) 
     let mut l = lowerer_new(cx, pl, max_instructions);
     l.declare_all();
     let wit = exports(inout l);
-    l.define_all();
+    l.define_init();
+    let lim = l.pre_reserve_define_all();
+    let mut d_scratch = ChunkSeq::new[u8]();
+    d_scratch.reserve(67108864);
+    let d_end = stage2_heap_mark();
+    let d_base = wrapping_sub(d_end, 67108864);
+    let mut d_perm = stage2_heap_swap(d_base);
+    let mut d_mark = d_base;
+    for i in 0..l.plan.insts.len() {
+        let nbt = l.b.types.len();
+        let nhf = l.cx.names.len();
+        let n_nodes = l.cx.types.nodes.len();
+        let n_rows = l.cx.types.rows.len();
+        let n_bf = l.b.funcs.len();
+        let n_eqp = l.eq_pending.len();
+        let n_eq = l.eq.len();
+        let n_tr = l.trampolines.len();
+        let n_cp = l.copies.len();
+        let n_wf = l.wide_fns.len();
+        let n_h1 = l.h_str_eq;
+        let n_h2 = l.h_fmod;
+        let n_h3 = l.h_seq_reserve;
+        let n_h4 = l.h_bytes_eq;
+        let n_h5 = l.h_utf8;
+        let inst = l.plan.inst(i);
+        let body = l.function(inst);
+        let idx = l.func_of(inst.key);
+        let s_def = stage2_heap_swap(d_perm);
+        l.b.define(idx, in body);
+        d_perm = stage2_heap_swap(s_def);
+        if l.can_rewind_define(in lim, nbt, nhf, n_nodes, n_rows, n_eqp)
+            && l.b.funcs.len() == n_bf
+            && l.eq.len() == n_eq
+            && l.trampolines.len() == n_tr
+            && l.copies.len() == n_cp
+            && l.wide_fns.len() == n_wf
+            && l.h_str_eq == n_h1
+            && l.h_fmod == n_h2
+            && l.h_seq_reserve == n_h3
+            && l.h_bytes_eq == n_h4
+            && l.h_utf8 == n_h5 {
+            let mut dl = dummy_l(l.cx.k, l.cx.s);
+            swap(inout l, inout dl);
+            let (fl0, next_perm) = rebuild_l(dl, d_mark, d_perm);
+            let mut fl = fl0;
+            d_perm = next_perm;
+            swap(inout l, inout fl);
+        } else {
+            d_mark = stage2_heap_mark();
+        }
+    }
+    let _ = stage2_heap_swap(d_perm);
+    l.define_finish();
     let functions = l.b.function_count();
     let handlers = handler_report(in l);
     let core = l.b.finish(max_pages);

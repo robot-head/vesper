@@ -747,6 +747,9 @@ impl Vars {
 // still runs `substitute_effects` on every function row, which drops
 // repeated instances.
 pub fn substitute(inout t: Types, ty: u32, in vars: Vars) -> u32 {
+    if vars.keys.len() == 0 {
+        return ty;
+    }
     let n = t.node(ty);
     if n.kind == TyKind::Named {
         if n.n == 0 {
@@ -796,6 +799,9 @@ pub fn substitute(inout t: Types, ty: u32, in vars: Vars) -> u32 {
 // `ast::substitute_effects`: arguments substituted, an open tail bound to
 // a row variable spliced in, duplicates removed (first wins).
 pub fn substitute_row(inout t: Types, r: u32, in vars: Vars) -> u32 {
+    if vars.keys.len() == 0 {
+        return r;
+    }
     let row = t.row(r);
     let mut es: ChunkSeq[EffNode] = ChunkSeq::new[EffNode]();
     let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();

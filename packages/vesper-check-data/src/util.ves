@@ -78,3 +78,16 @@ pub fn inc32(x: u32) -> u32 {
 
 // `u32::MAX`: an absent index or symbol in every table.
 const NONE32: u32 = 4294967295;
+
+pub fn stage2_heap_mark() -> u64 {
+    0
+}
+
+pub fn stage2_heap_reset(m: u64) {
+    let _ = m;
+}
+
+pub fn stage2_heap_swap(m: u64) -> u64 {
+    let _ = m;
+    0
+}

@@ -976,12 +976,21 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 arg_mode: 0
             };
         }
-        if eq(in c, m, "try_get") || eq(in c, m, "try_get_mut") {
+        if eq(in c, m, "try_get") {
             return SeqRes {
                 matched: true,
                 label: sym_str(inout c, "TryGet"),
                 has_recv: true,
                 recv_pass: P_IN,
+                arg_mode: 0
+            };
+        }
+        if eq(in c, m, "try_get_mut") {
+            return SeqRes {
+                matched: true,
+                label: sym_str(inout c, "TryGet"),
+                has_recv: true,
+                recv_pass: P_INOUT,
                 arg_mode: 0
             };
         }
@@ -1123,12 +1132,21 @@ pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias:
                 arg_mode: 0
             };
         }
-        if eq(in c, m, "try_get") || eq(in c, m, "try_get_mut") {
+        if eq(in c, m, "try_get") {
             return SeqRes {
                 matched: true,
                 label: sym_str(inout c, "TryGet"),
                 has_recv: true,
                 recv_pass: P_IN,
+                arg_mode: 0
+            };
+        }
+        if eq(in c, m, "try_get_mut") {
+            return SeqRes {
+                matched: true,
+                label: sym_str(inout c, "TryGet"),
+                has_recv: true,
+                recv_pass: P_INOUT,
                 arg_mode: 0
             };
         }

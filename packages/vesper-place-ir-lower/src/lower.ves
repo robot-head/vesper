@@ -27,6 +27,8 @@ use @vesper/check-data::util::{
     inc,
     n32,
     push_decimal,
+    stage2_heap_mark,
+    stage2_heap_reset,
     u32_at,
     u64_at,
     u8_at,
@@ -2551,6 +2553,30 @@ pub fn lower_all(inout l: L) {
                 }
             );
     }
+    l.p.fns.reserve(4096);
+    l.p.blocks.reserve(32768);
+    l.p.insts.reserve(262144);
+    l.p.ops.reserve(524288);
+    l.p.tags.reserve(524288);
+    l.p.paths.reserve(16384);
+    l.p.path_syms.reserve(32768);
+    l.p.pool.reserve(4096);
+    l.blocks.reserve(2048);
+    l.insts.reserve(16384);
+    l.sops.reserve(32768);
+    l.stags.reserve(32768);
+    l.vals.reserve(8192);
+    l.alias.reserve(8192);
+    l.trail.reserve(8192);
+    l.local_ty.reserve(2048);
+    l.locals.reserve(2048);
+    l.ppath.reserve(4096);
+    l.cap_of.reserve(1024);
+    l.cap_set.reserve(1024);
+    l.loops.reserve(512);
+    l.conts.reserve(512);
+    l.fbound.reserve(1024);
+    l.fbt.reserve(1024);
     let mut fi: u64 = 0;
     loop {
         if fi >= l.a.fns.len() {
@@ -2558,7 +2584,40 @@ pub fn lower_all(inout l: L) {
         }
         let f = l.a.function(fi);
         if f.has_body {
+            let m = stage2_heap_mark();
+            let n_names = l.c.names.len();
+            let n_nodes = l.c.types.nodes.len();
+            let n_rows = l.c.types.rows.len();
             lower_fn(inout l, fi);
+            if l.c.names.len() == n_names
+                && l.c.types.nodes.len() == n_nodes
+                && l.c.types.rows.len() == n_rows
+                && l.p.fns.len() <= 4000
+                && l.p.blocks.len() <= 32000
+                && l.p.insts.len() <= 260000
+                && l.p.ops.len() <= 520000
+                && l.p.tags.len() <= 520000
+                && l.p.paths.len() <= 16000
+                && l.p.path_syms.len() <= 32000
+                && l.p.pool.len() <= 4000
+                && l.blocks.len() <= 2000
+                && l.insts.len() <= 16000
+                && l.sops.len() <= 32000
+                && l.stags.len() <= 32000
+                && l.vals.len() <= 8000
+                && l.alias.len() <= 8000
+                && l.trail.len() <= 8000
+                && l.local_ty.len() <= 2000
+                && l.locals.len() <= 2000
+                && l.ppath.len() <= 4000
+                && l.cap_of.len() <= 1000
+                && l.cap_set.len() <= 1000
+                && l.loops.len() <= 500
+                && l.conts.len() <= 500
+                && l.fbound.len() <= 1000
+                && l.fbt.len() <= 1000 {
+                // stage2_heap_reset(m);
+            }
         }
         fi = inc(fi);
     }
