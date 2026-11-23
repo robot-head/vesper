@@ -439,25 +439,45 @@ fn try_next(e: u32) -> bool {
 // ---------------------------------------------------------------------------
 // Spawning.
 
-fn new_actions() -> SpawnActions {
-    SpawnActions {
-        w0: 0,
-        w1: 0,
-        w2: 0,
-        w3: 0,
-        w4: 0,
-        w5: 0,
-        w6: 0,
-        w7: 0,
-        w8: 0,
-        w9: 0,
-        w10: 0,
-        w11: 0,
-        w12: 0,
-        w13: 0,
-        w14: 0,
-        w15: 0,
+// A `posix_spawn_file_actions_t` in `malloc`'d memory, initialized, or
+// 0 when there is no memory.
+fn new_actions() -> u64 eff [Ffi[StdProcess]] {
+    let fa = StdProcess::malloc(StdProcess::FILE_ACTIONS_SIZE);
+    if fa != 0 {
+        let _ = StdProcess::fill(fa, 0, StdProcess::FILE_ACTIONS_SIZE);
+        let _ = StdProcess::posix_spawn_file_actions_init(fa);
     }
+    fa
+}
+
+fn free_actions(fa: u64) eff [Ffi[StdProcess]] {
+    if fa != 0 {
+        let _ = StdProcess::posix_spawn_file_actions_destroy(fa);
+        let _ = StdProcess::free(fa);
+    }
+}
+
+// Add `chdir(dir)` to `fa`: 0, or the errno (`ENOSYS` when the C library
+// has no `posix_spawn_file_actions_addchdir_np`). The path goes in a
+// `malloc`'d C string, which the C library copies.
+fn add_chdir(fa: u64, in dir: Slice[u8]) -> u32 eff [Ffi[StdProcess]] {
+    let f = match StdProcess::dlsym_chdir(
+        StdProcess::RTLD_DEFAULT,
+        in "posix_spawn_file_actions_addchdir_np".as_bytes()
+    ) {
+        Result::Ok(Option::Some(f)) => f,
+        _ => return StdProcess::ENOSYS,
+    };
+    let n = dir.len();
+    let path = StdProcess::malloc(wrapping_add(n, 1));
+    if path == 0 {
+        return 12;
+    }
+    let _ = StdProcess::copy_to(path, in dir);
+    let _ = StdProcess::fill(wrapping_add(path, n), 0, 1);
+    let r = StdProcess::AddChdirFn(f, fa, path);
+    let _ = StdProcess::free(path);
+    wrapping_u32(r)
 }
 
 fn new_sigset() -> SigSet {
@@ -560,14 +580,13 @@ fn pipe() -> Result[(i32, i32), u32] eff [Ffi[StdProcess]] {
 // for a captured output stream a new pipe whose write end becomes `fd`.
 // `(read end, write end)` of that pipe (-1 when there is none), or
 // `Err(errno)`.
-fn stream(inout fa: SpawnActions, fd: i32, mode: u32)
-    -> Result[(i32, i32), u32] eff [Ffi[StdProcess]] {
+fn stream(fa: u64, fd: i32, mode: u32) -> Result[(i32, i32), u32] eff [Ffi[StdProcess]] {
     if mode == capture() && fd != 0 {
         let (rd, wr) = match pipe() {
             Result::Ok(p) => p,
             Result::Err(e) => return Result::Err(e),
         };
-        let _ = StdProcess::posix_spawn_file_actions_adddup2(inout fa, wr, fd);
+        let _ = StdProcess::posix_spawn_file_actions_adddup2(fa, wr, fd);
         return Result::Ok((rd, wr));
     }
     if mode == null() || mode == capture() {
@@ -577,7 +596,7 @@ fn stream(inout fa: SpawnActions, fd: i32, mode: u32)
             StdProcess::O_WRONLY
         };
         let _ = StdProcess::posix_spawn_file_actions_addopen(
-            inout fa,
+            fa,
             fd,
             in "/dev/null".as_bytes(),
             flags,
@@ -610,8 +629,7 @@ pub fn spawn(sink c: ProcCommand) -> Result[ProcChild, IoError] eff [Ffi[StdProc
         programs.extend(in c.program.as_slice());
         programs.push(0);
     }
-    let mut fa = new_actions();
-    let _ = StdProcess::posix_spawn_file_actions_init(inout fa);
+    let fa = new_actions();
     let mut attr = new_attr();
     let _ = StdProcess::posix_spawnattr_init(inout attr);
     let mut set = new_sigset();
@@ -623,18 +641,26 @@ pub fn spawn(sink c: ProcCommand) -> Result[ProcChild, IoError] eff [Ffi[StdProc
         inout attr,
         StdProcess::POSIX_SPAWN_SETSIGDEF | StdProcess::POSIX_SPAWN_SETSIGMASK
     );
-    let mut failed: u32 = 0;
-    let (_, _) = match stream(inout fa, 0, c.stdin) {
-        Result::Ok(p) => p,
-        Result::Err(e) => {
-            failed = e;
-            (-1, -1)
-        },
+    let mut failed: u32 = if fa == 0 {
+        12
+    } else {
+        0
+    };
+    let (_, _) = if failed != 0 {
+        (-1, -1)
+    } else {
+        match stream(fa, 0, c.stdin) {
+            Result::Ok(p) => p,
+            Result::Err(e) => {
+                failed = e;
+                (-1, -1)
+            },
+        }
     };
     let (out_rd, out_wr) = if failed != 0 {
         (-1, -1)
     } else {
-        match stream(inout fa, 1, c.stdout) {
+        match stream(fa, 1, c.stdout) {
             Result::Ok(p) => p,
             Result::Err(e) => {
                 failed = e;
@@ -645,7 +671,7 @@ pub fn spawn(sink c: ProcCommand) -> Result[ProcChild, IoError] eff [Ffi[StdProc
     let (err_rd, err_wr) = if failed != 0 {
         (-1, -1)
     } else {
-        match stream(inout fa, 2, c.stderr) {
+        match stream(fa, 2, c.stderr) {
             Result::Ok(p) => p,
             Result::Err(e) => {
                 failed = e;
@@ -654,7 +680,7 @@ pub fn spawn(sink c: ProcCommand) -> Result[ProcChild, IoError] eff [Ffi[StdProc
         }
     };
     if failed == 0 && c.has_dir {
-        let _ = StdProcess::posix_spawn_file_actions_addchdir_np(inout fa, in c.dir.as_slice());
+        failed = add_chdir(fa, in c.dir.as_slice());
     }
     let mut pid: i32 = 0;
     if failed == 0 {
@@ -669,7 +695,7 @@ pub fn spawn(sink c: ProcCommand) -> Result[ProcChild, IoError] eff [Ffi[StdProc
                     StdProcess::posix_spawnp(
                         inout pid,
                         in list[start..i],
-                        in fa,
+                        fa,
                         in attr,
                         in c.args.as_slice(),
                         in envp.as_slice()
@@ -678,7 +704,7 @@ pub fn spawn(sink c: ProcCommand) -> Result[ProcChild, IoError] eff [Ffi[StdProc
                     StdProcess::posix_spawn(
                         inout pid,
                         in list[start..i],
-                        in fa,
+                        fa,
                         in attr,
                         in c.args.as_slice(),
                         in envp.as_slice()
@@ -699,7 +725,7 @@ pub fn spawn(sink c: ProcCommand) -> Result[ProcChild, IoError] eff [Ffi[StdProc
             failed = StdProcess::EACCES;
         }
     }
-    let _ = StdProcess::posix_spawn_file_actions_destroy(inout fa);
+    free_actions(fa);
     let _ = StdProcess::posix_spawnattr_destroy(inout attr);
     close_fd(out_wr);
     close_fd(err_wr);

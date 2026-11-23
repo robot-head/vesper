@@ -232,6 +232,8 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         fn unlinkat(dirfd: i32, path: *const c_char, flags: i32) -> i32;
         fn fdopendir(fd: i32) -> *mut c_void;
         fn memset(dst: *mut c_void, byte: i32, n: usize) -> *mut c_void;
+        fn malloc(n: usize) -> *mut c_void;
+        fn free(p: *mut c_void);
         fn posix_spawn_file_actions_init(fa: *mut c_void) -> i32;
         fn posix_spawn_file_actions_destroy(fa: *mut c_void) -> i32;
         fn posix_spawn_file_actions_adddup2(fa: *mut c_void, fd: i32, to: i32) -> i32;
@@ -242,7 +244,6 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
             flags: i32,
             mode: u32,
         ) -> i32;
-        fn posix_spawn_file_actions_addchdir_np(fa: *mut c_void, path: *const c_char) -> i32;
         fn posix_spawnattr_init(attr: *mut c_void) -> i32;
         fn posix_spawnattr_destroy(attr: *mut c_void) -> i32;
         fn posix_spawnattr_setflags(attr: *mut c_void, flags: i16) -> i32;
@@ -300,6 +301,8 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         ("unlinkat", unlinkat as *const u8),
         ("fdopendir", fdopendir as *const u8),
         ("memset", memset as *const u8),
+        ("malloc", malloc as *const u8),
+        ("free", free as *const u8),
         (
             "posix_spawn_file_actions_init",
             posix_spawn_file_actions_init as *const u8,
@@ -315,10 +318,6 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         (
             "posix_spawn_file_actions_addopen",
             posix_spawn_file_actions_addopen as *const u8,
-        ),
-        (
-            "posix_spawn_file_actions_addchdir_np",
-            posix_spawn_file_actions_addchdir_np as *const u8,
         ),
         ("posix_spawnattr_init", posix_spawnattr_init as *const u8),
         (

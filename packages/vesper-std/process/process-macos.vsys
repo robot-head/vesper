@@ -29,25 +29,29 @@ sys library StdProcess (
     const EINTR: u32 = 4;
     const EACCES: u32 = 13;
     const ENOTDIR: u32 = 20;
+    const ENOSYS: u32 = 78;
     // A C function of no arguments returning an address (`_NSGetEnviron`).
     callback EnvironFn() -> ForeignVal[u64];
-    // Room for every target's `posix_spawn_file_actions_t` (glibc: 80
-    // bytes; Apple: a pointer), `posix_spawnattr_t` (glibc: 336 bytes;
+    // `posix_spawn_file_actions_addchdir_np`, found through `dlsym`: glibc
+    // has it from 2.29 only, so a program linked against an older one
+    // still loads.
+    callback AddChdirFn(fa: u64, path: u64) -> ForeignVal[i32];
+    // Room for every target's `posix_spawnattr_t` (glibc: 336 bytes;
     // Apple: a pointer) and `sigset_t` (glibc: 128 bytes; Apple: 4).
-    wire struct SpawnActions {
-        w0: u64, w1: u64, w2: u64, w3: u64, w4: u64, w5: u64, w6: u64, w7: u64, w8: u64, w9: u64, w10: u64, w11: u64, w12: u64, w13: u64, w14: u64, w15: u64
-    }
+    // The `posix_spawn_file_actions_t` (glibc: 80 bytes; Apple: a pointer)
+    // lives in `malloc`'d memory instead, `FILE_ACTIONS_SIZE` bytes, so
+    // `addchdir_np` can be called through its address.
+    const FILE_ACTIONS_SIZE: u64 = 128;
     wire struct SpawnAttr {
         w0: u64, w1: u64, w2: u64, w3: u64, w4: u64, w5: u64, w6: u64, w7: u64, w8: u64, w9: u64, w10: u64, w11: u64, w12: u64, w13: u64, w14: u64, w15: u64, w16: u64, w17: u64, w18: u64, w19: u64, w20: u64, w21: u64, w22: u64, w23: u64, w24: u64, w25: u64, w26: u64, w27: u64, w28: u64, w29: u64, w30: u64, w31: u64, w32: u64, w33: u64, w34: u64, w35: u64, w36: u64, w37: u64, w38: u64, w39: u64, w40: u64, w41: u64, w42: u64, w43: u64, w44: u64, w45: u64, w46: u64, w47: u64
     }
     wire struct SigSet {
         w0: u64, w1: u64, w2: u64, w3: u64, w4: u64, w5: u64, w6: u64, w7: u64, w8: u64, w9: u64, w10: u64, w11: u64, w12: u64, w13: u64, w14: u64, w15: u64
     }
-    fn posix_spawn_file_actions_init(nocapture inout fa: SpawnActions) -> ForeignVal[i32];
-    fn posix_spawn_file_actions_destroy(nocapture inout fa: SpawnActions) -> ForeignVal[i32];
-    fn posix_spawn_file_actions_adddup2(nocapture inout fa: SpawnActions, fd: i32, to: i32) -> ForeignVal[i32];
-    fn posix_spawn_file_actions_addopen(nocapture inout fa: SpawnActions, fd: i32, nocapture in path: CStr, flags: i32, mode: u32) -> ForeignVal[i32];
-    fn posix_spawn_file_actions_addchdir_np(nocapture inout fa: SpawnActions, nocapture in path: CStr) -> ForeignVal[i32];
+    fn posix_spawn_file_actions_init(fa: u64) -> ForeignVal[i32];
+    fn posix_spawn_file_actions_destroy(fa: u64) -> ForeignVal[i32];
+    fn posix_spawn_file_actions_adddup2(fa: u64, fd: i32, to: i32) -> ForeignVal[i32];
+    fn posix_spawn_file_actions_addopen(fa: u64, fd: i32, nocapture in path: CStr, flags: i32, mode: u32) -> ForeignVal[i32];
     fn posix_spawnattr_init(nocapture inout attr: SpawnAttr) -> ForeignVal[i32];
     fn posix_spawnattr_destroy(nocapture inout attr: SpawnAttr) -> ForeignVal[i32];
     fn posix_spawnattr_setflags(nocapture inout attr: SpawnAttr, flags: i32) -> ForeignVal[i32];
@@ -60,7 +64,7 @@ sys library StdProcess (
     fn posix_spawn(
         nocapture inout pid: i32,
         nocapture in path: CStr,
-        nocapture in fa: SpawnActions,
+        fa: u64,
         nocapture in attr: SpawnAttr,
         nocapture in argv: CStrList,
         nocapture in envp: CStrList
@@ -68,7 +72,7 @@ sys library StdProcess (
     fn posix_spawnp(
         nocapture inout pid: i32,
         nocapture in file: CStr,
-        nocapture in fa: SpawnActions,
+        fa: u64,
         nocapture in attr: SpawnAttr,
         nocapture in argv: CStrList,
         nocapture in envp: CStrList
@@ -91,6 +95,15 @@ sys library StdProcess (
     fn dlsym(handle: u64, nocapture in name: CStr) -> ForeignVal[u64];
     #[link_name = "dlsym"]
     fn dlsym_function(handle: u64, nocapture in name: CStr) -> ForeignVal[Option[EnvironFn]];
+    #[link_name = "dlsym"]
+    fn dlsym_chdir(handle: u64, nocapture in name: CStr) -> ForeignVal[Option[AddChdirFn]];
+    fn malloc(size: u64) -> ForeignVal[u64];
+    fn free(address: u64) -> ForeignVal[Unit];
+    #[link_name = "memset"]
+    fn fill(address: u64, byte: i32, size: u64) -> ForeignVal[u64];
+    // Copy `bytes` to `address`.
+    #[link_name = "memcpy"]
+    fn copy_to(address: u64, nocapture in bytes: CSlice[u8]) -> ForeignVal[u64];
     #[link_name = "memcpy"]
     fn read_word(nocapture inout word: u64, address: u64, size: u64) -> ForeignVal[u64];
     // A copy of the C string at `address` (`strstr(s, "")` is `s`).
