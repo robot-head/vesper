@@ -417,6 +417,27 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
             lp_default_char: *const c_void,
             lp_used_default_char: *mut i32,
         ) -> i32;
+        fn CreateIoCompletionPort(
+            file_handle: u64,
+            existing_completion_port: u64,
+            completion_key: u64,
+            number_of_concurrent_threads: u32,
+        ) -> u64;
+        fn PostQueuedCompletionStatus(
+            completion_port: u64,
+            number_of_bytes_transferred: u32,
+            completion_key: u64,
+            overlapped: u64,
+        ) -> i32;
+        fn GetQueuedCompletionStatus(
+            completion_port: u64,
+            bytes_transferred: *mut u32,
+            completion_key: *mut u64,
+            overlapped: *mut u64,
+            milliseconds: u32,
+        ) -> i32;
+        fn CloseHandle(handle: u64) -> i32;
+        fn GetLastError() -> u32;
     }
     vec![
         ("GetCommandLineW", GetCommandLineW as *const u8),
@@ -435,6 +456,20 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         ),
         ("lstrlenW", lstrlenW as *const u8),
         ("WideCharToMultiByte", WideCharToMultiByte as *const u8),
+        (
+            "CreateIoCompletionPort",
+            CreateIoCompletionPort as *const u8,
+        ),
+        (
+            "PostQueuedCompletionStatus",
+            PostQueuedCompletionStatus as *const u8,
+        ),
+        (
+            "GetQueuedCompletionStatus",
+            GetQueuedCompletionStatus as *const u8,
+        ),
+        ("CloseHandle", CloseHandle as *const u8),
+        ("GetLastError", GetLastError as *const u8),
     ]
 }
 #[cfg(not(any(unix, windows)))]
