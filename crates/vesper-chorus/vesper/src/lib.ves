@@ -51,7 +51,7 @@ use self::simnet::{
     sm_range,
     simnet_core_abandon,
     simnet_core_deliver_due,
-    simnet_core_earliest_new,
+    simnet_core_next_delivery,
     simnet_core_new,
     simnet_core_send,
     simnet_core_set_now,
@@ -528,8 +528,8 @@ pub fn p2_simnet_take_abandon(inout net: SimNetCore) -> bool {
     simnet_core_take_abandon(inout net)
 }
 
-pub fn p2_simnet_earliest_new(in net: SimNetCore) -> u64 {
-    simnet_core_earliest_new(in net)
+pub fn p2_simnet_next_delivery(in net: SimNetCore) -> SimDeliverOut {
+    simnet_core_next_delivery(in net)
 }
 
 pub fn p2_simnet_stats(in net: SimNetCore) -> NetStatsOut {

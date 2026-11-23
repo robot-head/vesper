@@ -772,15 +772,15 @@ impl<'a> CRef<'a> {
 /// Owned handle of a Vesper `vesper__chorus__raft__RaftCluster` value: its words, which own the Vesper
 /// allocations they point to. Dropping it calls `vesper_chorus_vesper__chorus__raft__RaftCluster_drop`.
 pub struct vesper__chorus__raft__RaftCluster {
-    words: [u64; 244],
+    words: [u64; 245],
 }
 
 impl vesper__chorus__raft__RaftCluster {
     /// # Safety
     /// `words` must hold a `vesper__chorus__raft__RaftCluster` value of this library that the caller owns.
     unsafe fn from_words(words: &[u64]) -> Self {
-        let mut owned = [0u64; 244];
-        owned.copy_from_slice(&words[..244]);
+        let mut owned = [0u64; 245];
+        owned.copy_from_slice(&words[..245]);
         Self { words: owned }
     }
 
@@ -1276,49 +1276,53 @@ impl<'a> vesper__chorus__raft__RaftClusterRef<'a> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[232]) }
     }
-    pub fn step_out(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+    pub fn pkt_compact_at(&self) -> u64 {
         let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[233]) }
+        <u64 as Abi>::get(&w[233..])
     }
-    pub fn h_at(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+    pub fn step_out(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[234]) }
     }
-    pub fn h_pid(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+    pub fn h_at(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[235]) }
     }
-    pub fn h_pkt(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+    pub fn h_pid(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[236]) }
     }
-    pub fn seen_hi(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+    pub fn h_pkt(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[237]) }
     }
-    pub fn seen_chan(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+    pub fn seen_hi(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[238]) }
     }
-    pub fn seen_ht(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+    pub fn seen_chan(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[239]) }
     }
+    pub fn seen_ht(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[240]) }
+    }
     pub fn seen_mask(&self) -> u64 {
         let w: &'a [u64] = self.words;
-        <u64 as Abi>::get(&w[240..])
+        <u64 as Abi>::get(&w[241..])
     }
     pub fn step_ev_kind(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[241]) }
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[242]) }
     }
     pub fn step_ev_val(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[242]) }
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[243]) }
     }
     pub fn woken(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[243]) }
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[244]) }
     }
 }
 
@@ -1692,15 +1696,15 @@ impl<'a> vesper__chorus__session__MonRef<'a> {
 /// Owned handle of a Vesper `vesper__chorus__simnet__SimNetCore` value: its words, which own the Vesper
 /// allocations they point to. Dropping it calls `vesper_chorus_vesper__chorus__simnet__SimNetCore_drop`.
 pub struct vesper__chorus__simnet__SimNetCore {
-    words: [u64; 50],
+    words: [u64; 49],
 }
 
 impl vesper__chorus__simnet__SimNetCore {
     /// # Safety
     /// `words` must hold a `vesper__chorus__simnet__SimNetCore` value of this library that the caller owns.
     unsafe fn from_words(words: &[u64]) -> Self {
-        let mut owned = [0u64; 50];
-        owned.copy_from_slice(&words[..50]);
+        let mut owned = [0u64; 49];
+        owned.copy_from_slice(&words[..49]);
         Self { words: owned }
     }
 
@@ -1772,169 +1776,165 @@ impl<'a> vesper__chorus__simnet__SimNetCoreRef<'a> {
         let w: &'a [u64] = self.words;
         <u64 as Abi>::get(&w[8..])
     }
-    pub fn earliest_new(&self) -> u64 {
-        let w: &'a [u64] = self.words;
-        <u64 as Abi>::get(&w[9..])
-    }
     pub fn abandon_event(&self) -> bool {
         let w: &'a [u64] = self.words;
-        <bool as Abi>::get(&w[10..])
+        <bool as Abi>::get(&w[9..])
     }
     pub fn f_chan(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[11]) }
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[10]) }
     }
     pub fn f_from(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[12]) }
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[11]) }
     }
     pub fn f_to(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[13]) }
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[12]) }
     }
     pub fn f_seq(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[14]) }
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[13]) }
     }
     pub fn f_label(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[15]) }
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[14]) }
     }
     pub fn f_pty(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[16]) }
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[15]) }
     }
     pub fn f_boff(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[17]) }
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[16]) }
     }
     pub fn f_blen(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[18]) }
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[17]) }
     }
     pub fn f_ref(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[19]) }
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[18]) }
     }
     pub fn f_free(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[20]) }
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[19]) }
     }
     pub fn f_bytes(&self) -> vesper_port_abi::SeqRef<'a, u8> {
         let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[21]) }
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[20]) }
     }
     pub fn q_fid(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[22]) }
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[21]) }
     }
     pub fn q_next(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[23]) }
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[22]) }
     }
     pub fn q_free(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[24]) }
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[23]) }
     }
     pub fn h_at(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[25]) }
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[24]) }
     }
     pub fn h_id(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[26]) }
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[25]) }
     }
     pub fn h_fid(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[27]) }
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[26]) }
     }
     pub fn mb_chan(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[28]) }
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[27]) }
     }
     pub fn mb_from(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[29]) }
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[28]) }
     }
     pub fn mb_to(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[30]) }
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[29]) }
     }
     pub fn mb_head(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[31]) }
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[30]) }
     }
     pub fn mb_tail(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[32]) }
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[31]) }
     }
     pub fn mb_ht(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[33]) }
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[32]) }
     }
     pub fn mb_mask(&self) -> u64 {
         let w: &'a [u64] = self.words;
-        <u64 as Abi>::get(&w[34..])
+        <u64 as Abi>::get(&w[33..])
     }
     pub fn mb_total(&self) -> u64 {
         let w: &'a [u64] = self.words;
-        <u64 as Abi>::get(&w[35..])
+        <u64 as Abi>::get(&w[34..])
     }
     pub fn ab_chan(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[36]) }
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[35]) }
     }
     pub fn ab_role(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[37]) }
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[36]) }
     }
     pub fn ab_ht(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[38]) }
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[37]) }
     }
     pub fn ab_mask(&self) -> u64 {
         let w: &'a [u64] = self.words;
-        <u64 as Abi>::get(&w[39..])
+        <u64 as Abi>::get(&w[38..])
     }
     pub fn sy_off(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[40]) }
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[39]) }
     }
     pub fn sy_len(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[41]) }
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[40]) }
     }
     pub fn sy_hash(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[42]) }
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[41]) }
     }
     pub fn sy_ht(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[43]) }
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[42]) }
     }
     pub fn sy_txt(&self) -> vesper_port_abi::SeqRef<'a, u8> {
         let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[44]) }
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[43]) }
     }
     pub fn sy_mask(&self) -> u64 {
         let w: &'a [u64] = self.words;
-        <u64 as Abi>::get(&w[45..])
+        <u64 as Abi>::get(&w[44..])
     }
     pub fn rx_seq(&self) -> u64 {
         let w: &'a [u64] = self.words;
-        <u64 as Abi>::get(&w[46..])
+        <u64 as Abi>::get(&w[45..])
     }
     pub fn rx_label(&self) -> vesper_port_abi::SeqRef<'a, u8> {
         let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[47]) }
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[46]) }
     }
     pub fn rx_pty(&self) -> vesper_port_abi::SeqRef<'a, u8> {
         let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[48]) }
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[47]) }
     }
     pub fn rx_body(&self) -> vesper_port_abi::SeqRef<'a, u8> {
         let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[49]) }
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[48]) }
     }
 }
 
@@ -2993,8 +2993,8 @@ unsafe extern "C" {
     fn vesper_chorus_p2_replog_validate_cfg(n: i64, max_batch: i64) -> i64;
     fn vesper_chorus_p2_simnet_abandon(net: *mut u64, chan: i64, me: i64) -> i64;
     fn vesper_chorus_p2_simnet_deliver_due(result: *mut u64, net: *mut u64, now: i64) -> i64;
-    fn vesper_chorus_p2_simnet_earliest_new(net: *mut u64) -> i64;
     fn vesper_chorus_p2_simnet_new(result: *mut u64, seed: i64, min_lat: i64, max_lat: i64, dup_pm: i64) -> i64;
+    fn vesper_chorus_p2_simnet_next_delivery(result: *mut u64, net: *mut u64) -> i64;
     fn vesper_chorus_p2_simnet_send(net: *mut u64, chan: i64, from_r: i64, to_r: i64, seq: i64, label: *mut u64, pty: *mut u64, body: *mut u64) -> i64;
     fn vesper_chorus_p2_simnet_set_now(net: *mut u64, now: i64) -> i64;
     fn vesper_chorus_p2_simnet_stats(result: *mut u64, net: *mut u64) -> i64;
@@ -3469,7 +3469,7 @@ pub fn p2_raft_has_violation(rc: &vesper__chorus__raft__RaftCluster) -> bool {
 
 /// Calls `p2_raft_new` of the Vesper library `chorus` (`vesper_chorus_p2_raft_new`).
 pub fn p2_raft_new(seed: u64, cfg: &repr::vesper__chorus__raft__RaftCfg) -> vesper__chorus__raft__RaftCluster {
-    let mut result = [0u64; 244];
+    let mut result = [0u64; 245];
     // SAFETY: `vesper_chorus_p2_raft_new` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
@@ -3779,23 +3779,24 @@ pub fn p2_simnet_deliver_due(net: &mut vesper__chorus__simnet__SimNetCore, now: 
     vesper_port_abi::mirror_from_words::<repr::vesper__chorus__simnet__SimDeliverOut>(&result[0..])
 }
 
-/// Calls `p2_simnet_earliest_new` of the Vesper library `chorus` (`vesper_chorus_p2_simnet_earliest_new`).
-pub fn p2_simnet_earliest_new(net: &vesper__chorus__simnet__SimNetCore) -> u64 {
-    // SAFETY: `vesper_chorus_p2_simnet_earliest_new` has exactly this signature in the export ABI; every
-    // pointer is a live, writable buffer of the size the ABI requires, and
-    // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_chorus_p2_simnet_earliest_new(net.words.as_ptr().cast_mut()) };
-    raw as u64
-}
-
 /// Calls `p2_simnet_new` of the Vesper library `chorus` (`vesper_chorus_p2_simnet_new`).
 pub fn p2_simnet_new(seed: u64, min_lat: u64, max_lat: u64, dup_pm: u64) -> vesper__chorus__simnet__SimNetCore {
-    let mut result = [0u64; 50];
+    let mut result = [0u64; 49];
     // SAFETY: `vesper_chorus_p2_simnet_new` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
     let raw = unsafe { vesper_chorus_p2_simnet_new(result.as_mut_ptr(), seed as i64, min_lat as i64, max_lat as i64, dup_pm as i64) };
     unsafe { vesper__chorus__simnet__SimNetCore::from_words(&result[0..]) }
+}
+
+/// Calls `p2_simnet_next_delivery` of the Vesper library `chorus` (`vesper_chorus_p2_simnet_next_delivery`).
+pub fn p2_simnet_next_delivery(net: &vesper__chorus__simnet__SimNetCore) -> repr::vesper__chorus__simnet__SimDeliverOut {
+    let mut result = [0u64; 3];
+    // SAFETY: `vesper_chorus_p2_simnet_next_delivery` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_chorus_p2_simnet_next_delivery(result.as_mut_ptr(), net.words.as_ptr().cast_mut()) };
+    vesper_port_abi::mirror_from_words::<repr::vesper__chorus__simnet__SimDeliverOut>(&result[0..])
 }
 
 /// Calls `p2_simnet_send` of the Vesper library `chorus` (`vesper_chorus_p2_simnet_send`).

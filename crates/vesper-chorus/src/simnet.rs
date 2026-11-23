@@ -286,8 +286,8 @@ pub fn run_roles(
                 }
                 // Wake the network early if a new frame is due before its
                 // current deadline, or if everyone is done.
-                let en = binding::p2_simnet_earliest_new(&net.lock());
-                let earliest = (en != u64::MAX).then_some(en);
+                let next = binding::p2_simnet_next_delivery(&net.lock());
+                let earliest = next.has_next.get().then_some(next.next_at);
                 if let Some((c, deadline)) = net_wait {
                     let wake = match (earliest, deadline) {
                         (Some(e), Some(d)) => e < d,

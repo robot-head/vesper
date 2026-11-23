@@ -313,6 +313,7 @@ pub struct RaftCluster {
     pkt_next: ChunkSeq[u64],
     pkt_free: ChunkSeq[u64],
     pkt_bytes: ChunkSeq[u8],
+    pkt_compact_at: u64,
     step_out: ChunkSeq[u64],
 
     // Network min-heap ordered by (at, packet_id)
@@ -865,7 +866,28 @@ fn alloc_pkt_slot(inout rc: RaftCluster) -> u64 {
 
 fn free_pkt_slot(inout rc: RaftCluster, p: u64) {
     setw(inout rc.pkt_next, p, none());
+    setw(inout rc.pkt_blen, p, 0);
     rc.pkt_free.push(p);
+}
+
+// Compact between steps, when every live payload has a packet slot.
+fn compact_pkt_bytes(inout rc: RaftCluster) {
+    if rc.pkt_bytes.len() < rc.pkt_compact_at {
+        return;
+    }
+    let mut bytes = ChunkSeq::new[u8]();
+    for p in 0..rc.pkt_blen.len() {
+        let len = sw(in rc.pkt_blen, p);
+        if len > 0 {
+            let off = sw(in rc.pkt_boff, p);
+            setw(inout rc.pkt_boff, p, bytes.len());
+            for i in 0..len {
+                bytes.push(su8(in rc.pkt_bytes, wrapping_add(off, i)));
+            }
+        }
+    }
+    rc.pkt_compact_at = wrapping_add(65536, wrapping_mul(2, bytes.len()));
+    rc.pkt_bytes = bytes;
 }
 
 fn clone_pkt_slot(inout rc: RaftCluster, p: u64) -> u64 {
@@ -2349,6 +2371,7 @@ pub fn raft_new(seed: u64, in cfg: RaftCfg) -> RaftCluster {
         pkt_next: ChunkSeq::new[u64](),
         pkt_free: ChunkSeq::new[u64](),
         pkt_bytes: ChunkSeq::new[u8](),
+        pkt_compact_at: 65536,
         step_out: ChunkSeq::new[u64](),
         h_at: ChunkSeq::new[u64](),
         h_pid: ChunkSeq::new[u64](),
@@ -2705,6 +2728,7 @@ fn finish_node_step(inout rc: RaftCluster, i: u64, now: u64) -> RaftStepOut {
     };
     flush_step_events(inout rc, i, now);
     let (net_has, net_earliest) = route_step_out(inout rc, now);
+    compact_pkt_bytes(inout rc);
     RaftStepOut {
         code: RaftStepCode::Continue,
         arg: 0,

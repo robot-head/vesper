@@ -76,7 +76,6 @@ pub struct SimNetCore {
     sent: u64,
     delivered: u64,
     duplicated: u64,
-    earliest_new: u64,
     abandon_event: bool,
     // Frame pool
     f_chan: ChunkSeq[u64],
@@ -587,7 +586,6 @@ pub fn simnet_core_new(seed: u64, min_lat: u64, max_lat: u64, dup_pm: u64) -> Si
         sent: 0,
         delivered: 0,
         duplicated: 0,
-        earliest_new: MAX_U64,
         abandon_event: false,
         f_chan: ChunkSeq::new[u64](),
         f_from: ChunkSeq::new[u64](),
@@ -671,9 +669,6 @@ pub fn simnet_core_send(
         let id = net.next_id;
         net.next_id = wrapping_add(id, 1);
         heap_push(inout net, at, id, fid);
-        if at < net.earliest_new {
-            net.earliest_new = at;
-        }
     }
     0
 }
@@ -721,7 +716,6 @@ pub fn simnet_core_abandon(inout net: SimNetCore, chan: u64, me: u64) {
 
 pub fn simnet_core_deliver_due(inout net: SimNetCore, now: u64) -> SimDeliverOut {
     net.now = now;
-    net.earliest_new = MAX_U64;
     let mut delivered = false;
     loop {
         if net.h_at.len() == 0 {
@@ -735,6 +729,10 @@ pub fn simnet_core_deliver_due(inout net: SimNetCore, now: u64) -> SimDeliverOut
         push_mailbox(inout net, fid);
         delivered = true;
     }
+    next_delivery(in net, delivered)
+}
+
+fn next_delivery(in net: SimNetCore, delivered: bool) -> SimDeliverOut {
     let has_next = net.h_at.len() > 0;
     let next_at = if has_next {
         sw(in net.h_at, 0)
@@ -754,8 +752,8 @@ pub fn simnet_core_take_abandon(inout net: SimNetCore) -> bool {
     ev
 }
 
-pub fn simnet_core_earliest_new(in net: SimNetCore) -> u64 {
-    net.earliest_new
+pub fn simnet_core_next_delivery(in net: SimNetCore) -> SimDeliverOut {
+    next_delivery(in net, false)
 }
 
 pub fn simnet_core_stats(in net: SimNetCore) -> NetStatsOut {

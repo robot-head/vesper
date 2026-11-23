@@ -20,7 +20,8 @@ use @vesper/check-data::types::{
     EffNode,
     Types,
     Vars,
-    display
+    display,
+    TyKind
 };
 use @vesper/check-data::world::{
     Known
@@ -30,10 +31,6 @@ use @vesper/check-data::diag::{
 };
 
 const NONE32: u32 = 4294967295;
-const K_NAMED: u8 = 1;
-const K_TUPLE: u8 = 2;
-const K_FN: u8 = 3;
-const K_ROW: u8 = 4;
 
 // `region_row(label)`: `eff [label: Region]`.
 pub fn region_row(inout t: Types, k: Known, label: u32) -> u32 {
@@ -70,7 +67,7 @@ pub fn watermark_type(inout t: Types, k: Known, label: u32) -> u32 {
 // `row_label`: label symbol + 1, or 0.
 pub fn row_label(in t: Types, k: Known, ty: u32) -> u32 {
     let n = t.node(ty);
-    if n.kind != K_ROW {
+    if n.kind != TyKind::Row {
         return 0;
     }
     let row = t.row(n.r2);
@@ -88,7 +85,7 @@ pub fn row_label(in t: Types, k: Known, ty: u32) -> u32 {
 // `box_parts`: the label + 1 (0 = none); the payload is argument 1.
 pub fn box_label(in t: Types, k: Known, ty: u32) -> u32 {
     let n = t.node(ty);
-    if n.kind != K_NAMED || n.name != k.region_box || n.n != 2 {
+    if n.kind != TyKind::Named || n.name != k.region_box || n.n != 2 {
         return 0;
     }
     row_label(in t, k, t.arg(ty, 0))
@@ -96,7 +93,7 @@ pub fn box_label(in t: Types, k: Known, ty: u32) -> u32 {
 
 pub fn watermark_label(in t: Types, k: Known, ty: u32) -> u32 {
     let n = t.node(ty);
-    if n.kind != K_NAMED || n.name != k.watermark || n.n != 1 {
+    if n.kind != TyKind::Named || n.name != k.watermark || n.n != 1 {
         return 0;
     }
     row_label(in t, k, t.arg(ty, 0))
@@ -105,7 +102,7 @@ pub fn watermark_label(in t: Types, k: Known, ty: u32) -> u32 {
 // `tiled::seq_region_label`: label + 1, or 0.
 pub fn seq_region_label(in t: Types, k: Known, ty: u32) -> u32 {
     let n = t.node(ty);
-    if n.kind != K_NAMED || n.name != k.tiled_seq || n.n != 2 {
+    if n.kind != TyKind::Named || n.name != k.tiled_seq || n.n != 2 {
         return 0;
     }
     row_label(in t, k, t.arg(ty, 1))
@@ -118,16 +115,16 @@ pub fn is_handle_name(k: Known, s: u32) -> bool {
 // `is_handle_type`.
 pub fn is_handle_type(in t: Types, k: Known, ty: u32) -> bool {
     let n = t.node(ty);
-    n.kind == K_NAMED && is_handle_name(k, n.name)
+    n.kind == TyKind::Named && is_handle_name(k, n.name)
 }
 
 // `source_name`: symbol + 1, or 0.
 fn source_name(in t: Types, ty: u32) -> u32 {
     let n = t.node(ty);
-    if n.kind == K_NAMED && n.n == 0 {
+    if n.kind == TyKind::Named && n.n == 0 {
         return inc32(n.name);
     }
-    if n.kind == K_ROW {
+    if n.kind == TyKind::Row {
         let row = t.row(n.r2);
         if row.n == 0 && row.tail != 0 {
             return row.tail;
@@ -140,7 +137,7 @@ fn source_name(in t: Types, ty: u32) -> u32 {
 // identity symbols.
 pub fn normalize(inout t: Types, k: Known, ty: u32, in labels: Vars) -> u32 {
     let n = t.node(ty);
-    if n.kind == K_NAMED {
+    if n.kind == TyKind::Named {
         if n.n == 0 {
             return ty;
         }
@@ -169,7 +166,7 @@ pub fn normalize(inout t: Types, k: Known, ty: u32, in labels: Vars) -> u32 {
         }
         return t.named(n.name, in args);
     }
-    if n.kind == K_TUPLE {
+    if n.kind == TyKind::Tuple {
         let mut args: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](w(n.n));
         for i in 0..w(n.n) {
             let a = u32_at(in t.items, add(w(n.a), i));
@@ -178,7 +175,7 @@ pub fn normalize(inout t: Types, k: Known, ty: u32, in labels: Vars) -> u32 {
         }
         return t.tuple(in args);
     }
-    if n.kind == K_FN {
+    if n.kind == TyKind::Fn {
         let mut args: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](w(n.n));
         let mut passes: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](w(n.n));
         for i in 0..w(n.n) {
@@ -188,7 +185,7 @@ pub fn normalize(inout t: Types, k: Known, ty: u32, in labels: Vars) -> u32 {
             args.push(x);
         }
         let result = normalize(inout t, k, n.r, in labels);
-        return t.mk_with(K_FN, n.mode, 0, in args, in passes, result, n.r2, 0);
+        return t.mk_with(TyKind::Fn, n.mode, 0, in args, in passes, result, n.r2, 0);
     }
     ty
 }
@@ -242,14 +239,14 @@ pub fn region_display(in t: Types, in names: Names, k: Known, ty: u32, inout out
         return;
     }
     let n = t.node(ty);
-    if n.kind == K_ROW {
+    if n.kind == TyKind::Row {
         let src = source_name(in t, ty);
         if src != 0 {
             names.write(wrapping_sub(src, 1), inout out);
             return;
         }
     }
-    if n.kind == K_NAMED && n.n > 0 {
+    if n.kind == TyKind::Named && n.n > 0 {
         names.write(n.name, inout out);
         out.push(91);
         for i in 0..w(n.n) {
@@ -261,7 +258,7 @@ pub fn region_display(in t: Types, in names: Names, k: Known, ty: u32, inout out
         out.push(93);
         return;
     }
-    if n.kind == K_TUPLE {
+    if n.kind == TyKind::Tuple {
         out.push(40);
         for i in 0..w(n.n) {
             if i > 0 {
@@ -287,7 +284,7 @@ pub fn validate_type(
     inout d: Diags
 ) -> bool {
     let n = t.node(ty);
-    if n.kind != K_NAMED {
+    if n.kind != TyKind::Named {
         return false;
     }
     if n.name == k.tiled_seq && n.n == 2 {
@@ -345,12 +342,12 @@ pub fn validate_type(
 
 fn mentions(in t: Types, k: Known, ty: u32) -> bool {
     let n = t.node(ty);
-    if n.kind == K_NAMED {
+    if n.kind == TyKind::Named {
         if is_handle_name(k, n.name) || (n.name == k.tiled_seq && n.n == 2) {
             return true;
         }
     }
-    if n.kind == K_NAMED || n.kind == K_TUPLE {
+    if n.kind == TyKind::Named || n.kind == TyKind::Tuple {
         for i in 0..w(n.n) {
             if mentions(in t, k, t.arg(ty, i)) {
                 return true;
