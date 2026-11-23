@@ -434,3 +434,141 @@ pub fn decode_session_queries(words: &[u64]) -> DecodedSessionRun {
         answers,
     }
 }
+
+/// Binary query payload for `check_pact_resolve`.
+pub struct ResolveCallPayload<'a> {
+    pub span: &'a vesper::ast::Span,
+    pub function: &'a str,
+    pub generics: &'a [vesper::ast::Generic],
+    pub gen_bounds: &'a [Vec<(String, Vec<Type>)>],
+    pub conf_bounds: &'a [(Type, String, Vec<Type>)],
+    pub scopes: &'a [Vec<String>],
+    pub callee: &'a str,
+    pub path: bool,
+    pub receiver: &'a Type,
+}
+
+/// Binary query payload for `check_pact_normalize`.
+pub struct NormalizePayload<'a> {
+    pub span: &'a vesper::ast::Span,
+    pub function: &'a str,
+    pub generics: &'a [vesper::ast::Generic],
+    pub gen_bounds: &'a [Vec<(String, Vec<Type>)>],
+    pub conf_bounds: &'a [(Type, String, Vec<Type>)],
+    pub scopes: &'a [Vec<String>],
+    pub ty: &'a Type,
+}
+
+fn push_cx_header(
+    e: &mut Enc,
+    t: &mut Vec<u64>,
+    generics: &[vesper::ast::Generic],
+    gen_bounds: &[Vec<(String, Vec<Type>)>],
+    conf_bounds: &[(Type, String, Vec<Type>)],
+    scopes: &[Vec<String>],
+) {
+    t.push(generics.len() as u64);
+    for (gi, g) in generics.iter().enumerate() {
+        t.push(e.name(&g.name));
+        t.push(mode_word(g.bound));
+        t.push(u64::from(g.row));
+        let bounds = gen_bounds.get(gi).map(Vec::as_slice).unwrap_or(&[]);
+        t.push(bounds.len() as u64);
+        for (bt, bargs) in bounds {
+            t.push(e.name(bt));
+            t.push(bargs.len() as u64);
+            for a in bargs {
+                t.push(e.ty(a));
+            }
+        }
+    }
+    t.push(conf_bounds.len() as u64);
+    for (gty, bt, bargs) in conf_bounds {
+        t.push(e.ty(gty));
+        t.push(e.name(bt));
+        t.push(bargs.len() as u64);
+        for a in bargs {
+            t.push(e.ty(a));
+        }
+    }
+    t.push(scopes.len() as u64);
+    for sc in scopes {
+        t.push(sc.len() as u64);
+        for m in sc {
+            t.push(e.name(m));
+        }
+    }
+}
+
+pub fn encode_resolve_call(q: &ResolveCallPayload<'_>) -> Option<Vec<u8>> {
+    let mut e = Enc::default();
+    let mut t = vec![];
+    t.push(q.span.start as u64);
+    t.push(q.span.end as u64);
+    t.push(e.name(q.function));
+    push_cx_header(
+        &mut e,
+        &mut t,
+        q.generics,
+        q.gen_bounds,
+        q.conf_bounds,
+        q.scopes,
+    );
+    t.push(e.name(q.callee));
+    t.push(u64::from(q.path));
+    t.push(e.ty(q.receiver));
+    Some(e.finish(&[], &t))
+}
+
+pub fn encode_normalize(q: &NormalizePayload<'_>) -> Option<Vec<u8>> {
+    let mut e = Enc::default();
+    let mut t = vec![];
+    t.push(q.span.start as u64);
+    t.push(q.span.end as u64);
+    t.push(e.name(q.function));
+    push_cx_header(
+        &mut e,
+        &mut t,
+        q.generics,
+        q.gen_bounds,
+        q.conf_bounds,
+        q.scopes,
+    );
+    t.push(e.ty(q.ty));
+    Some(e.finish(&[], &t))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum DecodedResolveOutcome {
+    None,
+    Ok(String),
+    Err(Vec<Diagnostic>),
+}
+
+pub fn decode_resolve_outcomes(
+    words: &[u64],
+) -> (Vec<Diagnostic>, bool, Vec<DecodedResolveOutcome>) {
+    let (diag_text, mut at) = decode_packed_text_at(words, 0);
+    let diagnostics = decode_session_text(&diag_text);
+    let ok = words.get(at).copied().unwrap_or(0) != 0;
+    at += 1;
+    if !ok {
+        return (diagnostics, false, vec![]);
+    }
+    let nq = words.get(at).copied().unwrap_or(0) as usize;
+    at += 1;
+    let mut outcomes = Vec::with_capacity(nq);
+    for _ in 0..nq {
+        let status = words.get(at).copied().unwrap_or(0);
+        at += 1;
+        let (text, next_at) = decode_packed_text_at(words, at);
+        at = next_at;
+        let item = match status {
+            0 => DecodedResolveOutcome::None,
+            1 => DecodedResolveOutcome::Ok(text),
+            _ => DecodedResolveOutcome::Err(decode_session_text(&text)),
+        };
+        outcomes.push(item);
+    }
+    (diagnostics, true, outcomes)
+}
