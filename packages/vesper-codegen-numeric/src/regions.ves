@@ -46,6 +46,7 @@ use @vesper/cranelift::{
     ins_umax,
     ins_ushr_imm,
     mem_trusted,
+    module_get_function,
     switch_to_block,
     trap_user,
     ty_i64,
@@ -197,6 +198,10 @@ struct RegionImports {
 // Defines every runtime function in `m` (`define`). The caller checks that
 // the module does not hold it yet (`defined`) and that pointers are 64-bit.
 pub fn define_region_runtime(inout m: Module) -> bool eff [Ffi[Cranelift]] {
+    match module_get_function(inout m, in "vesper_region_fault".as_bytes()) {
+        Some(_) => return true,
+        None => {},
+    }
     let mut messages: ChunkSeq[u32] = ChunkSeq::new[u32]();
     let mut lengths: ChunkSeq[i64] = ChunkSeq::new[i64]();
     for i in 0..REGION_FAULTS {

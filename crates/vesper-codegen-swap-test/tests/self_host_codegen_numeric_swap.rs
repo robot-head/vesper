@@ -53,9 +53,17 @@ fn numeric(lent: &mut Lent<'_, '_>) -> Result<bool, String> {
     if lent.op == INSTRUCTION {
         return Ok(false);
     }
+    if lent.op == codegen_swap::numeric::RUNTIME
+        && let Some(&kind) = lent.args.first()
+        && kind < 16
+    {
+        RUNTIME_KINDS.fetch_or(1u64 << kind, Ordering::Relaxed);
+    }
     let words = lent.args.to_vec();
     call_vesper(lent, lent.op, &words)
 }
+
+static RUNTIME_KINDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Runs request `request` with `words` through the Vesper hook.
 fn call_vesper(lent: &mut Lent<'_, '_>, request: u32, words: &[u64]) -> Result<bool, String> {
@@ -860,5 +868,82 @@ fn float_operations_match_the_rust_lowering() {
             compiled.iter().any(|n| n.contains(op)),
             "no {op} program compiled: {rejected:?}"
         );
+    }
+}
+
+#[test]
+fn runtime_definitions_match_the_rust_lowering() {
+    let _ = hook();
+    RUNTIME_KINDS.store(0, Ordering::Relaxed);
+    let before = HANDLED.load(Ordering::Relaxed);
+    let programs = [
+        (
+            "region_rt",
+            "fn main() -> u64 {\n\
+             \tregion r(256) {\n\
+             \t\tlet h: RegionBox[r, u64] = r.box(11);\n\
+             \t\tr.set(h, 42);\n\
+             \t\tr.get(h)\n\
+             \t}\n\
+             }\n",
+        ),
+        (
+            "tiled_rt",
+            "tiled(8) copy struct Row { hot a: u64, hot b: u64 }\n\
+             fn main() -> u64 {\n\
+             \tlet mut t: TiledSeq[Row] = TiledSeq::new[Row]();\n\
+             \tt.push(Row { a: 7, b: 35 });\n\
+             \tlet r = t.get(0);\n\
+             \twrapping_add(r.a, r.b)\n\
+             }\n",
+        ),
+        (
+            "box_rt",
+            "struct Pair { a: u64, b: u64 }\n\
+             fn make(x: u64) -> Box[Pair] { Box::new(Pair { a: x, b: wrapping_add(x, 1) }) }\n\
+             fn main() -> u64 {\n\
+             \tlet p = make(20);\n\
+             \tmatch p { Box(v) => wrapping_add(v.a, v.b) }\n\
+             }\n",
+        ),
+        (
+            "combined_rt",
+            "tiled(8) copy struct Row { hot a: u64, hot b: u64 }\n\
+             struct Pair { a: u64, b: u64 }\n\
+             fn main() -> u64 {\n\
+             \tlet mut t: TiledSeq[Row] = TiledSeq::new[Row]();\n\
+             \tt.push(Row { a: 3, b: 4 });\n\
+             \tlet p = Box::new(Pair { a: 10, b: 25 });\n\
+             \tlet row = t.get(0);\n\
+             \tlet r_sum = region r(256) { wrapping_add(row.a, row.b) };\n\
+             \tlet b_sum = match p { Box(v) => wrapping_add(v.a, v.b) };\n\
+             \twrapping_add(r_sum, b_sum)\n\
+             }\n",
+        ),
+    ];
+    let mut diff = Diff::default();
+    for (name, source) in programs {
+        let world = accepted(source).unwrap_or_else(|| panic!("{name} failed to check"));
+        for optimize in [false, true] {
+            diff.add(compare(name, &world, "main", hooks(), optimize, false));
+        }
+    }
+    let handled = HANDLED.load(Ordering::Relaxed) - before;
+    let kinds = RUNTIME_KINDS.load(Ordering::Relaxed);
+    eprintln!(
+        "runtime definitions differential: {}, {handled} requests, runtime mask {kinds:#x}",
+        diff.summary(),
+    );
+    assert!(diff.is_clean(), "{}", diff.summary());
+    for (label, kind) in [
+        ("RUNTIME_REGIONS", codegen_swap::numeric::RUNTIME_REGIONS),
+        ("RUNTIME_TILED", codegen_swap::numeric::RUNTIME_TILED),
+        (
+            "RUNTIME_BOX_ALLOC",
+            codegen_swap::numeric::RUNTIME_BOX_ALLOC,
+        ),
+        ("RUNTIME_BOX_FREE", codegen_swap::numeric::RUNTIME_BOX_FREE),
+    ] {
+        assert_ne!(kinds & (1u64 << kind), 0, "{label} was not exercised");
     }
 }
