@@ -266,3 +266,11 @@ No Rust bug was found.
 - **Measurements** of the swapped emission, with the hybrid install.
 - **Scoreboard row:** added to the SH4 scoreboard in
   `docs/maintenance/self-hosting-plan.md` once the plan (#1293) has merged.
+
+## Part 5 (SH4 lane 11, #1285 — `atomic_cas`, `isplit`, `iconcat`)
+
+Added `vcl_atomic_cas`, `vcl_isplit`, and `vcl_iconcat` to `vesper-cranelift-sys` / `@vesper/cranelift`, wired `ATOMIC_CAS = 9` (`compare_exchange`) in `src/native.rs` and `atomic_ops.ves`, and enabled 128-bit (`I128`) region payloads in `src/regions/native.rs` and `region_ops.ves` (blessed `crates/vesper-hybrid/port/*.rs`).
+
+- `cargo +1.100.0 test --locked --release -p vesper-codegen-swap-test --test self_host_codegen_numeric_swap -- --nocapture`: `5 passed, 0 failed` (`atomic`: `9` programs / `18` worlds / `235` functions = **0** CLIF/object/run diffs; `region`: `23` programs / `42` worlds / `56` functions including `region payload u128` = **0** CLIF/object/run diffs; plus `float`, `tiled`, `vector` = **0** diffs).
+- `cargo +1.100.0 check --locked -p vesper-hybrid` (unblessed after `VESPER_PORT_BLESS=1`): passed.
+- Rust lines deleted: `0` (hooked path only; default path unchanged).

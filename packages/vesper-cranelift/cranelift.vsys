@@ -77,6 +77,9 @@ sys library Cranelift (
     fn vcl_atomic_rmw(inout b: Builder, op: u32, ty: u32, flags: u32, addr: u32, x: u32) -> ForeignVal[u32];
     fn vcl_atomic_load(inout b: Builder, ty: u32, flags: u32, addr: u32) -> ForeignVal[u32];
     fn vcl_atomic_store(inout b: Builder, flags: u32, x: u32, addr: u32) -> ForeignVal[Unit];
+    fn vcl_atomic_cas(inout b: Builder, flags: u32, addr: u32, expected: u32, replacement: u32) -> ForeignVal[u32];
+    fn vcl_isplit(inout b: Builder, x: u32) -> ForeignVal[u32];
+    fn vcl_iconcat(inout b: Builder, lo: u32, hi: u32) -> ForeignVal[u32];
     fn vcl_func_addr(inout b: Builder, ty: u32, fref: u32) -> ForeignVal[u32];
     fn vcl_symbol_value(inout b: Builder, ty: u32, gv: u32) -> ForeignVal[u32];
     fn vcl_global_value(inout b: Builder, ty: u32, gv: u32) -> ForeignVal[u32];
