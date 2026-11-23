@@ -577,7 +577,10 @@ fn remove_dir_all_does_not_follow_links() {
         symlink(d.join("outside/keep.txt"), d.join("t/a/b/flink")).unwrap();
         symlink(d.join("outside"), d.join("dlink")).unwrap();
         assert_eq!(agree(&checked, "remove_trees", &[mode]), want, "{mode:?}");
-        assert_eq!(fs::read_to_string(d.join("outside/keep.txt")).unwrap(), "keep");
+        assert_eq!(
+            fs::read_to_string(d.join("outside/keep.txt")).unwrap(),
+            "keep"
+        );
     }
 }
 
