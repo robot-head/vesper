@@ -1,0 +1,74 @@
+# The frozen Rust seed copy of vesper-vault (package vesper-vault-seed,
+# library vesper_vault) that the compiler and crates in its closure link:
+# ../src built without the port, so cfg(vesper_port) is off, over the frozen
+# Rust engine in ../src/reference/ (Rust-exit SH6 lane 17, #1412).
+# Written by hand because its sources live in the parent package; see "Crates
+# the compiler links" in docs/maintenance/porting-a-crate.md.
+load("@rules_rs//rs:rust_library.bzl", "rust_library")
+load("@rules_rs//rs:rust_test.bzl", "rust_test")
+load("@rules_rs//rs/private:all_crate_deps.bzl", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_clippy_test")
+load("@vesper_cargo//:packages.bzl", "PACKAGES")
+
+_DATA = PACKAGES["crates/vesper-vault/seed"].crate_data()
+
+_NORMAL = all_crate_deps(_DATA, normal = True, platforms = _DATA["platforms"])
+
+_DEV = all_crate_deps(_DATA, normal_dev = True, platforms = _DATA["platforms"])
+
+_ENV = {
+    "CARGO_PKG_NAME": "vesper-vault-seed",
+    "CARGO_PKG_VERSION": "0.1.0",
+}
+
+rust_library(
+    name = "seed",
+    srcs = ["//crates/vesper-vault:rust_srcs"],
+    aliases = _DATA.get("aliases", {}),
+    crate_name = "vesper_vault",
+    crate_root = "//crates/vesper-vault:src/lib.rs",
+    edition = "2024",
+    rustc_env = _ENV,
+    version = "0.1.0",
+    visibility = ["//visibility:public"],
+    deps = _NORMAL,
+)
+
+rust_test(
+    name = "seed_unit_test",
+    crate = ":seed",
+    edition = "2024",
+    deps = _DEV,
+)
+
+# Every integration test except tests/lean.rs, which resolves lean/ through a
+# regular-file copy of the runfiles (covered on both Cargo targets and on the
+# port package here).
+[
+    rust_test(
+        name = "seed_test_" + t,
+        srcs = ["//crates/vesper-vault:tests/%s.rs" % t],
+        crate_root = "//crates/vesper-vault:tests/%s.rs" % t,
+        edition = "2024",
+        rustc_env = _ENV,
+        deps = [":seed"] + _NORMAL + _DEV,
+    )
+    for t in [
+        "aead",
+        "alloc",
+        "consttime",
+        "kem",
+        "secret",
+        "slot",
+        "verifier",
+    ]
+]
+
+rust_clippy_test(
+    name = "clippy",
+    targets = [":seed"],
+    tags = [
+        "clippy",
+        "lint",
+    ],
+)

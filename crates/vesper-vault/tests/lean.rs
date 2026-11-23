@@ -5,7 +5,14 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn lean_file() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../lean/VaultConstantTime.lean")
+    // The seed package (seed/) runs this file too, one level deeper.
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let dir = if dir.ends_with("seed") {
+        dir.join("..")
+    } else {
+        dir
+    };
+    dir.join("../../lean/VaultConstantTime.lean")
 }
 
 #[test]

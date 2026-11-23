@@ -93,7 +93,7 @@ const ALLOWED: &[(&str, &str)] = &[
     ),
     ("vesper-test", "`vesper test`"),
     (
-        "vesper-vault",
+        "vesper-vault-seed",
         "the `const-time` backend verifier (eff [ConstTime])",
     ),
 ];
