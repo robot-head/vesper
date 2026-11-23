@@ -389,7 +389,7 @@ fn bench_reading_repository_sources() {
         }
         t
     };
-    let symbols = vesper_std_host::symbols();
+    let symbols = std_io_support::symbols();
     let jit = |entry: &str| {
         let start = std::time::Instant::now();
         let v = std_io_support::word(&checked.jit(entry, &symbols).unwrap());

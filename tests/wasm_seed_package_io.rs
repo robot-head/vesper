@@ -39,7 +39,7 @@ fn backend() -> &'static Entry {
 fn imports() -> Imports {
     let (triple, abi) = vesper::packages::vsys_target(None).expect("host target");
     let mut imports = Imports::new();
-    for lib in ["env/env-wasip2", "fs/fs"] {
+    for lib in ["env/env-wasip2", "fs/fs-wasip2"] {
         let path = format!("packages/vesper-std/{lib}.vsys");
         let text = std::fs::read_to_string(&path).expect("read .vsys");
         let text = text.replace("@TARGET@", triple).replace("@ABI@", abi);
@@ -802,7 +802,9 @@ fn front_end_parses_like_native() {
     )
     .expect("Loom.toml");
     std::fs::write(pkg.join("src/main.ves"), with_base(FRONT_MAIN, &base)).expect("main.ves");
-    let assembled = vesper::packages::load(&pkg).expect("load");
+    let assembled =
+        vesper::packages::load_for_target(&pkg, Some(vesper::wasm_backend::TARGET), false)
+            .expect("load");
     assert!(
         assembled.ok(),
         "{:?} {:?}",
@@ -976,7 +978,9 @@ fn wasm_backend_emits_runnable_core_under_seed_runner() {
     )
     .unwrap();
     std::fs::write(dir.join("src/main.ves"), WASM_BACKEND_MAIN).unwrap();
-    let assembled = vesper::packages::load(&dir).expect("load backend package");
+    let assembled =
+        vesper::packages::load_for_target(&dir, Some(vesper::wasm_backend::TARGET), false)
+            .expect("load backend package");
     assert!(
         assembled.ok(),
         "{:?} {:?}",

@@ -205,14 +205,55 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         fn strchr(s: *const c_char, c: i32) -> *mut c_char;
         fn strstr(haystack: *const c_char, needle: *const c_char) -> *mut c_char;
     }
-    vec![
+    let mut syms = vec![
         ("getenv", getenv as *const u8),
         ("getcwd", getcwd as *const u8),
         ("dlsym", dlsym as *const u8),
         ("memcpy", memcpy as *const u8),
         ("strchr", strchr as *const u8),
         ("strstr", strstr as *const u8),
-    ]
+    ];
+    #[cfg(target_os = "linux")]
+    {
+        unsafe extern "C" {
+            fn openat(dirfd: i32, pathname: *const c_char, flags: i32, ...) -> i32;
+            fn read(fd: i32, buf: *mut c_void, count: usize) -> isize;
+            fn write(fd: i32, buf: *const c_void, count: usize) -> isize;
+            fn fsync(fd: i32) -> i32;
+            fn close(fd: i32) -> i32;
+            fn renameat(
+                olddirfd: i32,
+                oldpath: *const c_char,
+                newdirfd: i32,
+                newpath: *const c_char,
+            ) -> i32;
+            fn unlinkat(dirfd: i32, pathname: *const c_char, flags: i32) -> i32;
+            fn mkdirat(dirfd: i32, pathname: *const c_char, mode: u32) -> i32;
+            fn statx(
+                dirfd: i32,
+                pathname: *const c_char,
+                flags: i32,
+                mask: u32,
+                statxbuf: *mut c_void,
+            ) -> i32;
+            fn getdents64(fd: i32, dirp: *mut c_void, count: usize) -> isize;
+            fn getpid() -> i32;
+        }
+        syms.extend([
+            ("openat", openat as *const u8),
+            ("read", read as *const u8),
+            ("write", write as *const u8),
+            ("fsync", fsync as *const u8),
+            ("close", close as *const u8),
+            ("renameat", renameat as *const u8),
+            ("unlinkat", unlinkat as *const u8),
+            ("mkdirat", mkdirat as *const u8),
+            ("statx", statx as *const u8),
+            ("getdents64", getdents64 as *const u8),
+            ("getpid", getpid as *const u8),
+        ]);
+    }
+    syms
 }
 #[cfg(not(unix))]
 fn libc_symbols() -> Vec<(&'static str, *const u8)> {
