@@ -152,6 +152,8 @@ pub const SESSION_PARK_EMIT: u32 = 39;
 pub const SESSION_DATA_OFFSET: u32 = 40;
 pub const SESSION_EXIT: u32 = 41;
 pub const SESSION_VIOLATION: u32 = 42;
+pub const DYN_DROP_HELPER_HEAD: u32 = 43;
+pub const DYN_DROP_HELPER_TAIL: u32 = 44;
 
 const NO_VALUE: u64 = 18446744073709551615;
 
@@ -789,6 +791,22 @@ fn control(call: u64, inout b: Builder, inout m: Module) -> u64 eff [Ffi[Craneli
         switch_to_block(inout b, violation);
         let status = ins_iconst(inout b, ty_i64(), arg_i64(call, 1));
         ins_return1(inout b, status);
+    } else if op == DYN_DROP_HELPER_HEAD {
+        let entry = create_block(inout b);
+        append_block_params_for_function_params(inout b, entry);
+        switch_to_block(inout b, entry);
+        let data = block_param(inout b, entry, 0);
+        let scalar_ty = call_arg(call, 0);
+        let value = if scalar_ty == 0 {
+            data
+        } else {
+            ins_load(inout b, ty_of_word(scalar_ty), 0, data, 0)
+        };
+        call_result_value(call, value);
+    } else if op == DYN_DROP_HELPER_TAIL {
+        let empty = ChunkSeq::new[u32]();
+        ins_return(inout b, in empty.as_slice());
+        seal_all_blocks(inout b);
     } else {
         return DECLINED;
     }
