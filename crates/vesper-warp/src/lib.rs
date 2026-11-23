@@ -36,13 +36,11 @@
 //! [`ack`] forward to the Vesper package in `vesper/` through the committed
 //! binding (`port/binding.rs`); the Rust implementations of those modules
 //! are frozen in `src/reference/`. Rust stays the default build.
-#![cfg_attr(not(feature = "vesper-port"), forbid(unsafe_code))]
-#![cfg_attr(feature = "vesper-port", deny(unsafe_code))]
+#![deny(unsafe_code)]
 
 /// The Vesper build of the ported modules (`vesper/src/*.ves`).
-#[cfg(feature = "vesper-port")]
 mod ported;
-/// The Rust implementation of the ported modules, built without
+/// The Rust implementation of the remaining unflipped modules, built without
 /// `vesper-port`.
 #[cfg(not(feature = "vesper-port"))]
 mod reference;

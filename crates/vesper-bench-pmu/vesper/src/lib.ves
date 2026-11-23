@@ -1,0 +1,703 @@
+// @vesper/bench-pmu: hardware-counter math, event encoding, sysfs format
+// parsing, Linux perf group-read decoding, and perf mmap seqlock reads.
+pub copy struct FormatRange {
+    pub lo: u32,
+    pub hi: u32,
+}
+
+pub struct FormatSpec {
+    pub word: u8,
+    pub ranges: ChunkSeq[FormatRange],
+}
+
+pub copy struct GroupRead {
+    pub ok: bool,
+    pub count0: u64,
+    pub count1: u64,
+    pub time_enabled: u64,
+    pub time_running: u64,
+}
+
+pub copy struct PageReading {
+    // 0 = ok, 1 = RdpmcNotPermitted, 2 = NotScheduled, 3 = InvalidMetadata, 4 = Contended
+    pub status: u32,
+    pub count: u64,
+    pub time_enabled: u64,
+    pub time_running: u64,
+}
+
+pub copy struct DeltaResult {
+    pub ok: bool,
+    pub delta: u64,
+}
+
+fn byte(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn read_u64_le(in b: Slice[u8], off: u64) -> u64 {
+    match b.try_read_u64_le(off) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn read_u32_le(in b: Slice[u8], off: u64) -> u32 {
+    match b.try_read_u32_le(off) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn read_u16_le(in b: Slice[u8], off: u64) -> u16 {
+    let lo = widen_u32(byte(in b, off));
+    let hi = widen_u32(byte(in b, wrapping_add(off, 1)));
+    wrapping_u16(widen_u64(lo | wrapping_shl_u32(hi, 8)))
+}
+
+// Generic Linux perf encodings `(ok, event_type, config)` for HardwareEvent:
+// 0 = RefCycles, 1 = L1dReadMisses, 2 = LlcReadMisses, 3 = BranchMispredicts.
+pub fn generic_encoding(event: u32) -> (bool, u32, u64) {
+    if event == 0 {
+        (true, 0, 9)
+    } else if event == 1 {
+        // HW_CACHE(3): L1D(0) | (OP_READ(0) << 8) | (RESULT_MISS(1) << 16)
+        (true, 3, 65536)
+    } else if event == 2 {
+        // HW_CACHE(3): LL(2) | (OP_READ(0) << 8) | (RESULT_MISS(1) << 16)
+        (true, 3, 65538)
+    } else if event == 3 {
+        (true, 0, 5)
+    } else {
+        (false, 0, 0)
+    }
+}
+
+fn trim_bounds(in s: Slice[u8], start: u64, end: u64) -> (u64, u64) {
+    let mut a = start;
+    let mut b = end;
+    loop {
+        if a >= b {
+            break;
+        }
+        let ch = byte(in s, a);
+        if ch == 32 || ch == 9 || ch == 10 || ch == 13 {
+            a = wrapping_add(a, 1);
+        } else {
+            break;
+        }
+    }
+    loop {
+        if b <= a {
+            break;
+        }
+        let ch = byte(in s, wrapping_sub(b, 1));
+        if ch == 32 || ch == 9 || ch == 10 || ch == 13 {
+            b = wrapping_sub(b, 1);
+        } else {
+            break;
+        }
+    }
+    (a, b)
+}
+
+fn find_byte(in s: Slice[u8], start: u64, end: u64, target: u8) -> Option[u64] {
+    let mut i = start;
+    loop {
+        if i >= end {
+            break Option::None;
+        }
+        if byte(in s, i) == target {
+            break Option::Some(i);
+        }
+        i = wrapping_add(i, 1);
+    }
+}
+
+fn parse_u32_dec(in s: Slice[u8], start: u64, end: u64) -> Option[u32] {
+    if start >= end {
+        return Option::None;
+    }
+    let mut val: u64 = 0;
+    let mut i = start;
+    loop {
+        if i >= end {
+            break;
+        }
+        let ch = byte(in s, i);
+        if ch < 48 || ch > 57 {
+            return Option::None;
+        }
+        val = wrapping_add(wrapping_mul(val, 10), widen_u64(wrapping_sub(widen_u32(ch), 48)));
+        if val > 4294967295 {
+            return Option::None;
+        }
+        i = wrapping_add(i, 1);
+    }
+    Option::Some(wrapping_u32(val))
+}
+
+fn eq_str(in s: Slice[u8], a: u64, b: u64, in lit: Str) -> bool {
+    let target = lit.as_bytes();
+    let len = wrapping_sub(b, a);
+    if len != target.len() {
+        return false;
+    }
+    for i in 0..len {
+        if byte(in s, wrapping_add(a, i)) != byte(in target, i) {
+            return false;
+        }
+    }
+    true
+}
+
+// Parse a sysfs `format/<term>` file such as `config:0-7,21` or `config1:0-15`.
+pub fn parse_format_spec(in text: Slice[u8]) -> Option[FormatSpec] {
+    let (a, b) = trim_bounds(in text, 0, text.len());
+    let colon = match find_byte(in text, a, b, 58) {
+        Option::Some(c) => c,
+        Option::None => return Option::None,
+    };
+    let word: u8 = if eq_str(in text, a, colon, in "config") {
+        0
+    } else if eq_str(in text, a, colon, in "config1") {
+        1
+    } else {
+        return Option::None;
+    };
+    let mut ranges: ChunkSeq[FormatRange] = ChunkSeq::new[FormatRange]();
+    let mut pos = wrapping_add(colon, 1);
+    loop {
+        let comma = match find_byte(in text, pos, b, 44) {
+            Option::Some(c) => c,
+            Option::None => b,
+        };
+        let (lo_end, hi_start) = match find_byte(in text, pos, comma, 45) {
+            Option::Some(dash) => (dash, wrapping_add(dash, 1)),
+            Option::None => (comma, pos),
+        };
+        let lo = match parse_u32_dec(in text, pos, lo_end) {
+            Option::Some(v) => v,
+            Option::None => return Option::None,
+        };
+        let hi = match parse_u32_dec(in text, hi_start, comma) {
+            Option::Some(v) => v,
+            Option::None => return Option::None,
+        };
+        if lo > hi || hi > 63 {
+            return Option::None;
+        }
+        ranges
+            .push(
+                FormatRange {
+                    lo: lo,
+                    hi: hi
+                }
+            );
+        if ranges.len() > 8 {
+            return Option::None;
+        }
+        if comma >= b {
+            break;
+        }
+        pos = wrapping_add(comma, 1);
+    }
+    if ranges.len() == 0 {
+        return Option::None;
+    }
+    Option::Some(
+        FormatSpec {
+            word: word,
+            ranges: ranges
+        }
+    )
+}
+
+// Scatter `value` into `spec`'s bit ranges, low bits first.
+pub fn place_bits(in spec: FormatSpec, value: u64) -> Option[u64] {
+    let mut v = value;
+    let mut out: u64 = 0;
+    let n = spec.ranges.len();
+    for i in 0..n {
+        let r = match spec.ranges.try_get(i) {
+            Option::Some(r) => r,
+            Option::None => return Option::None,
+        };
+        let width = wrapping_u32(wrapping_add(wrapping_sub(widen_u64(r.hi), widen_u64(r.lo)), 1));
+        let mask = if width == 64 {
+            18446744073709551615
+        } else {
+            wrapping_sub(wrapping_shl_u64(1, width), 1)
+        };
+        out = out | wrapping_shl_u64(v & mask, r.lo);
+        v = if width == 64 {
+            0
+        } else {
+            wrapping_shr_u64(v, width)
+        };
+    }
+    if v != 0 {
+        return Option::None;
+    }
+    Option::Some(out)
+}
+
+fn parse_u64_hex(in s: Slice[u8], start: u64, end: u64) -> Option[u64] {
+    if start >= end {
+        return Option::None;
+    }
+    let mut val: u64 = 0;
+    let mut i = start;
+    loop {
+        if i >= end {
+            break;
+        }
+        let ch = byte(in s, i);
+        let d: u64 = if ch >= 48 && ch <= 57 {
+            widen_u64(wrapping_sub(widen_u32(ch), 48))
+        } else if ch >= 97 && ch <= 102 {
+            widen_u64(wrapping_sub(widen_u32(ch), 87))
+        } else if ch >= 65 && ch <= 70 {
+            widen_u64(wrapping_sub(widen_u32(ch), 55))
+        } else {
+            return Option::None;
+        };
+        if val > 1152921504606846975 {
+            return Option::None;
+        }
+        val = wrapping_add(wrapping_shl_u64(val, 4), d);
+        i = wrapping_add(i, 1);
+    }
+    Option::Some(val)
+}
+
+fn parse_u64_dec(in s: Slice[u8], start: u64, end: u64) -> Option[u64] {
+    if start >= end {
+        return Option::None;
+    }
+    let mut val: u64 = 0;
+    let mut i = start;
+    loop {
+        if i >= end {
+            break;
+        }
+        let ch = byte(in s, i);
+        if ch < 48 || ch > 57 {
+            return Option::None;
+        }
+        let d = widen_u64(wrapping_sub(widen_u32(ch), 48));
+        if val > 1844674407370955161 {
+            return Option::None;
+        }
+        let next = wrapping_add(wrapping_mul(val, 10), d);
+        if next < val {
+            return Option::None;
+        }
+        val = next;
+        i = wrapping_add(i, 1);
+    }
+    Option::Some(val)
+}
+
+fn eq_slice(in a: Slice[u8], a_start: u64, a_end: u64, in b: Slice[u8], b_start: u64, b_end: u64)
+    -> bool {
+    let la = wrapping_sub(a_end, a_start);
+    let lb = wrapping_sub(b_end, b_start);
+    if la != lb {
+        return false;
+    }
+    for i in 0..la {
+        if byte(in a, wrapping_add(a_start, i)) != byte(in b, wrapping_add(b_start, i)) {
+            return false;
+        }
+    }
+    true
+}
+
+fn lookup_format_idx(
+    in text: Slice[u8],
+    na: u64,
+    nb: u64,
+    in names: Slice[u8],
+    in name_ends: Slice[u64]
+) -> Option[u64] {
+    let n = name_ends.len();
+    for i in 0..n {
+        let a = if i == 0 {
+            0
+        } else {
+            match name_ends.try_get(wrapping_sub(i, 1)) {
+                Option::Some(v) => v,
+                Option::None => 0,
+            }
+        };
+        let b = match name_ends.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        if eq_slice(in text, na, nb, in names, a, b) {
+            return Option::Some(i);
+        }
+    }
+    Option::None
+}
+
+pub struct FormatTable {
+    pub names: ChunkSeq[u8],
+    pub name_ends: ChunkSeq[u64],
+    pub words: ChunkSeq[u8],
+    pub range_ends: ChunkSeq[u64],
+    pub range_lo: ChunkSeq[u32],
+    pub range_hi: ChunkSeq[u32],
+}
+
+pub fn format_table_new() -> FormatTable {
+    FormatTable {
+        names: ChunkSeq::new[u8](),
+        name_ends: ChunkSeq::new[u64](),
+        words: ChunkSeq::new[u8](),
+        range_ends: ChunkSeq::new[u64](),
+        range_lo: ChunkSeq::new[u32](),
+        range_hi: ChunkSeq::new[u32](),
+    }
+}
+
+pub fn format_table_add(inout t: FormatTable, in name: Slice[u8], in spec_text: Slice[u8]) -> bool {
+    let spec = match parse_format_spec(in spec_text) {
+        Option::Some(s) => s,
+        Option::None => return false,
+    };
+    t.names.extend(in name);
+    t.name_ends.push(t.names.len());
+    t.words.push(spec.word);
+    for i in 0..spec.ranges.len() {
+        let r = match spec.ranges.try_get(i) {
+            Option::Some(r) => r,
+            Option::None => return false,
+        };
+        t.range_lo.push(r.lo);
+        t.range_hi.push(r.hi);
+    }
+    t.range_ends.push(t.range_lo.len());
+    true
+}
+
+// Encode a sysfs event string such as `event=0x3c,umask=0x01,edge` into `(config, config1)`.
+pub fn encode_sysfs_event(in text: Slice[u8], in t: FormatTable) -> Option[(u64, u64)] {
+    let (a, b) = trim_bounds(in text, 0, text.len());
+    let len = wrapping_sub(b, a);
+    if len == 0 || len > 512 {
+        return Option::None;
+    }
+    let mut cfg0: u64 = 0;
+    let mut cfg1: u64 = 0;
+    let mut pos = a;
+    loop {
+        let comma = match find_byte(in text, pos, b, 44) {
+            Option::Some(c) => c,
+            Option::None => b,
+        };
+        let (na, nb, val) = match find_byte(in text, pos, comma, 61) {
+            Option::Some(eq) => {
+                let (k0, k1) = trim_bounds(in text, pos, eq);
+                let (v0, v1) = trim_bounds(in text, wrapping_add(eq, 1), comma);
+                let parsed = if wrapping_sub(v1, v0) >= 2
+                    && byte(in text, v0) == 48
+                    && (
+                        byte(in text, wrapping_add(v0, 1)) == 120
+                            || byte(in text, wrapping_add(v0, 1)) == 88
+                    ) {
+                    parse_u64_hex(in text, wrapping_add(v0, 2), v1)
+                } else {
+                    parse_u64_dec(in text, v0, v1)
+                };
+                let v = match parsed {
+                    Option::Some(x) => x,
+                    Option::None => return Option::None,
+                };
+                (k0, k1, v)
+            },
+            Option::None => {
+                let (k0, k1) = trim_bounds(in text, pos, comma);
+                (k0, k1, 1)
+            },
+        };
+        let idx = match lookup_format_idx(
+            in text,
+            na,
+            nb,
+            in t.names.as_slice(),
+            in t.name_ends.as_slice()
+        ) {
+            Option::Some(i) => i,
+            Option::None => return Option::None,
+        };
+        let word = byte(in t.words.as_slice(), idx);
+        let ra = if idx == 0 {
+            0
+        } else {
+            match t.range_ends.try_get(wrapping_sub(idx, 1)) {
+                Option::Some(v) => v,
+                Option::None => 0,
+            }
+        };
+        let rb = match t.range_ends.try_get(idx) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        let mut v = val;
+        let mut bits: u64 = 0;
+        let mut r = ra;
+        loop {
+            if r >= rb {
+                break;
+            }
+            let lo = match t.range_lo.try_get(r) {
+                Option::Some(x) => x,
+                Option::None => 0,
+            };
+            let hi = match t.range_hi.try_get(r) {
+                Option::Some(x) => x,
+                Option::None => 0,
+            };
+            let width = wrapping_u32(wrapping_add(wrapping_sub(widen_u64(hi), widen_u64(lo)), 1));
+            let mask = if width == 64 {
+                18446744073709551615
+            } else {
+                wrapping_sub(wrapping_shl_u64(1, width), 1)
+            };
+            bits = bits | wrapping_shl_u64(v & mask, lo);
+            v = if width == 64 {
+                0
+            } else {
+                wrapping_shr_u64(v, width)
+            };
+            r = wrapping_add(r, 1);
+        }
+        if v != 0 {
+            return Option::None;
+        }
+        if word == 0 {
+            cfg0 = cfg0 | bits;
+        } else {
+            cfg1 = cfg1 | bits;
+        }
+        if comma >= b {
+            break;
+        }
+        pos = wrapping_add(comma, 1);
+    }
+    Option::Some((cfg0, cfg1))
+}
+
+// Sign-extend `raw` from `width` bits (1..=64) to `i64`.
+pub fn sign_extend_pmc(raw: u64, width: u16) -> i64 {
+    let shift = wrapping_u32(wrapping_sub(64, widen_u64(width)));
+    let shifted = wrapping_shl_u64(raw, shift);
+    wrapping_shr_i64(wrapping_i64(shifted), shift)
+}
+
+// Checked monotonic, fully-scheduled 64-bit delta.
+pub fn checked_delta(
+    start_val: u64,
+    end_val: u64,
+    start_enabled: u64,
+    end_enabled: u64,
+    start_running: u64,
+    end_running: u64
+) -> DeltaResult {
+    if end_enabled < start_enabled || end_running < start_running || end_val < start_val {
+        return DeltaResult {
+            ok: false,
+            delta: 0
+        };
+    }
+    let en = wrapping_sub(end_enabled, start_enabled);
+    let run = wrapping_sub(end_running, start_running);
+    if en == 0 || en != run {
+        return DeltaResult {
+            ok: false,
+            delta: 0
+        };
+    }
+    DeltaResult {
+        ok: true,
+        delta: wrapping_sub(end_val, start_val),
+    }
+}
+
+// Decode a 2-event Linux `READ_FORMAT = 1|2|4|8` (40 bytes) group read in ID order.
+pub fn decode_group_read(in buf: Slice[u8], id0: u64, id1: u64) -> GroupRead {
+    if buf.len() != 40 {
+        return GroupRead {
+            ok: false,
+            count0: 0,
+            count1: 0,
+            time_enabled: 0,
+            time_running: 0
+        };
+    }
+    let nr = read_u64_le(in buf, 0);
+    if nr != 2 {
+        return GroupRead {
+            ok: false,
+            count0: 0,
+            count1: 0,
+            time_enabled: 0,
+            time_running: 0
+        };
+    }
+    let enabled = read_u64_le(in buf, 8);
+    let running = read_u64_le(in buf, 16);
+    let v_a = read_u64_le(in buf, 24);
+    let id_a = read_u64_le(in buf, 32);
+    GroupRead {
+        ok: false,
+        count0: v_a,
+        count1: id_a,
+        time_enabled: enabled,
+        time_running: running,
+    }
+}
+
+// Decode a 2-event Linux `READ_FORMAT = 1|2|4|8` (56 bytes: nr, enabled, running, val0, id0, val1, id1).
+pub fn decode_group_read2(in buf: Slice[u8], id0: u64, id1: u64) -> GroupRead {
+    if buf.len() != 56 {
+        return GroupRead {
+            ok: false,
+            count0: 0,
+            count1: 0,
+            time_enabled: 0,
+            time_running: 0
+        };
+    }
+    let nr = read_u64_le(in buf, 0);
+    if nr != 2 {
+        return GroupRead {
+            ok: false,
+            count0: 0,
+            count1: 0,
+            time_enabled: 0,
+            time_running: 0
+        };
+    }
+    let enabled = read_u64_le(in buf, 8);
+    let running = read_u64_le(in buf, 16);
+    let v_a = read_u64_le(in buf, 24);
+    let id_a = read_u64_le(in buf, 32);
+    let v_b = read_u64_le(in buf, 40);
+    let id_b = read_u64_le(in buf, 48);
+    if id_a == id0 && id_b == id1 {
+        GroupRead {
+            ok: true,
+            count0: v_a,
+            count1: v_b,
+            time_enabled: enabled,
+            time_running: running
+        }
+    } else if id_a == id1 && id_b == id0 {
+        GroupRead {
+            ok: true,
+            count0: v_b,
+            count1: v_a,
+            time_enabled: enabled,
+            time_running: running
+        }
+    } else {
+        GroupRead {
+            ok: false,
+            count0: 0,
+            count1: 0,
+            time_enabled: 0,
+            time_running: 0
+        }
+    }
+}
+
+// Read `struct perf_event_mmap_page` fields from a 64+ byte slice under the kernel seqlock.
+// `raw_pmc` is the counter value read from hardware for `index - 1`.
+pub fn read_perf_page_once(in page: Slice[u8], raw_pmc: u64, is_aarch64: bool) -> PageReading {
+    if page.len() < 56 {
+        return PageReading {
+            status: 3,
+            count: 0,
+            time_enabled: 0,
+            time_running: 0
+        };
+    }
+    let seq = match page.try_atomic_load_u32(8, MemoryOrder::Acquire) {
+        Option::Some(v) => v,
+        Option::None => return PageReading {
+            status: 3,
+            count: 0,
+            time_enabled: 0,
+            time_running: 0
+        },
+    };
+    let caps = read_u64_le(in page, 40);
+    let index = read_u32_le(in page, 12);
+    let width = read_u16_le(in page, 48);
+    let offset = wrapping_i64(read_u64_le(in page, 16));
+    let enabled = read_u64_le(in page, 24);
+    let running = read_u64_le(in page, 32);
+    let seq2 = match page.try_atomic_load_u32(8, MemoryOrder::Acquire) {
+        Option::Some(v) => v,
+        Option::None => return PageReading {
+            status: 3,
+            count: 0,
+            time_enabled: 0,
+            time_running: 0
+        },
+    };
+    if seq != seq2 {
+        return PageReading {
+            status: 4,
+            count: 0,
+            time_enabled: 0,
+            time_running: 0
+        };
+    }
+    if (caps & 4) == 0 {
+        return PageReading {
+            status: 1,
+            count: 0,
+            time_enabled: 0,
+            time_running: 0
+        };
+    }
+    if index == 0 {
+        return PageReading {
+            status: 2,
+            count: 0,
+            time_enabled: 0,
+            time_running: 0
+        };
+    }
+    if is_aarch64 && index > 32 {
+        return PageReading {
+            status: 3,
+            count: 0,
+            time_enabled: 0,
+            time_running: 0
+        };
+    }
+    if width == 0 || width > 64 {
+        return PageReading {
+            status: 3,
+            count: 0,
+            time_enabled: 0,
+            time_running: 0
+        };
+    }
+    let pmc = sign_extend_pmc(raw_pmc, width);
+    let count = wrapping_add(wrapping_u64(offset), wrapping_u64(pmc));
+    PageReading {
+        status: 0,
+        count: count,
+        time_enabled: enabled,
+        time_running: running,
+    }
+}

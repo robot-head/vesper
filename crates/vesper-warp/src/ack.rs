@@ -8,11 +8,7 @@
 //! (RFC 9000 §13.2.3 permits not acknowledging old ranges; §12.3 requires
 //! duplicate suppression, which this conservatively over-approximates).
 
-#[cfg(not(feature = "vesper-port"))]
-use crate::PnSpace;
 use crate::frame::AckRange;
-#[cfg(not(feature = "vesper-port"))]
-use crate::frame::EcnCounts;
 
 /// Default ACK range bound.
 pub const DEFAULT_MAX_RANGES: usize = 32;
@@ -55,30 +51,8 @@ pub struct Received {
     pub out_of_order: bool,
 }
 
-#[cfg(not(feature = "vesper-port"))]
-#[derive(Debug, Clone)]
-pub struct ReceivedPackets<const N: usize = DEFAULT_MAX_RANGES> {
-    pub(crate) space: PnSpace,
-    /// Descending, disjoint, non-adjacent; `ranges[..len]` are live.
-    pub(crate) ranges: [AckRange; N],
-    pub(crate) len: usize,
-    /// Packet numbers `<= floor` are no longer tracked.
-    pub(crate) floor: Option<u64>,
-    /// Largest packet number ever received, kept independently of the
-    /// retained ranges so ACK-of-ACK pruning never loses the packet-number
-    /// reconstruction context.
-    pub(crate) largest: Option<u64>,
-    pub(crate) largest_received_ns: u64,
-    pub(crate) last_received_ns: u64,
-    pub(crate) ecn: EcnCounts,
-    pub(crate) unacked_ack_eliciting: u32,
-    pub(crate) ack_deadline_ns: Option<u64>,
-    pub(crate) max_ack_delay_ns: u64,
-}
-
-/// The Vesper build: the range array stays here and is lent to Vesper in
-/// place; the rest of the state is the Vesper `RxState` record.
-#[cfg(feature = "vesper-port")]
+/// The range array stays here and is lent to Vesper in place; the rest of
+/// the state is the Vesper `RxState` record.
 #[derive(Debug, Clone)]
 pub struct ReceivedPackets<const N: usize = DEFAULT_MAX_RANGES> {
     pub(crate) state: crate::ported::binding::repr::RxState,

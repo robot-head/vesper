@@ -46,6 +46,7 @@ pub use {
 
 pub mod extras;
 pub mod lend;
+pub mod seq_extras;
 pub use extras::{
     vcl_define_function_bytes, vcl_module_data_at, vcl_module_data_count, vcl_module_data_linkage,
     vcl_module_data_name, vcl_module_function_at, vcl_module_function_linkage,
@@ -56,6 +57,10 @@ pub use lend::{
     Crossing, lend, lend_as, lend_module, lend_module_as, vcl_call_arg, vcl_call_arg_count,
     vcl_call_args, vcl_call_builder, vcl_call_module, vcl_call_op, vcl_call_result,
     vcl_call_return_builder, vcl_call_return_module,
+};
+pub use seq_extras::{
+    vcl_call_memmove, vcl_call_memset, vcl_declare_anonymous_data, vcl_has_x86_pshufb_lowering,
+    vcl_isa_triple_arch,
 };
 
 use cranelift_codegen::ir::{
@@ -2515,5 +2520,10 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
         vcl_module_last_relocs,
         vcl_module_last_call_sites,
         vcl_module_last_frame_size,
+        vcl_declare_anonymous_data,
+        vcl_call_memset,
+        vcl_call_memmove,
+        vcl_isa_triple_arch,
+        vcl_has_x86_pshufb_lowering,
     ]
 }

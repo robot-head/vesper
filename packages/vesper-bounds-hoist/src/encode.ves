@@ -16,7 +16,8 @@ use @vesper/check-data::names::{
 use @vesper/check-data::types::{
     Types,
     debug_type,
-    default_type
+    default_type,
+    TyKind
 };
 use @vesper/place-ir::{
     Program
@@ -34,41 +35,13 @@ use self::fun::{
     u64_at,
     w
 };
+use @vesper/place-ir::codes::{
+    Lit,
+    Op,
+    Pat,
+    Term
+};
 
-// place-ir opcodes (`OP_NAMES` of tests/common/ir_words.rs).
-const OP_CONST: u8 = 0;
-const OP_UNIT: u8 = 1;
-const OP_READ: u8 = 2;
-const OP_BIND: u8 = 3;
-const OP_WRITE: u8 = 4;
-const OP_UNARY: u8 = 5;
-const OP_BINARY: u8 = 6;
-const OP_TUPLE: u8 = 7;
-const OP_DATA: u8 = 8;
-const OP_PROJECT: u8 = 9;
-const OP_INDEX: u8 = 10;
-const OP_CALL: u8 = 11;
-const OP_INDIRECT: u8 = 12;
-const OP_TRY: u8 = 13;
-const OP_CLOSURE: u8 = 14;
-const OP_HANDLE: u8 = 15;
-const OP_VECTOR: u8 = 16;
-const OP_TILED: u8 = 17;
-const OP_SEQ: u8 = 18;
-const OP_FIP: u8 = 19;
-const OP_LOOP: u8 = 20;
-const OP_EXIT: u8 = 21;
-
-const TERM_RETURN: u8 = 0;
-const TERM_JUMP: u8 = 1;
-const TERM_BRANCH: u8 = 2;
-const TERM_MATCH: u8 = 3;
-
-const PAT_BIND: u64 = 1;
-const PAT_LITERAL: u64 = 2;
-const PAT_TUPLE: u64 = 3;
-const PAT_CONSTRUCTOR: u64 = 4;
-const LIT_INT: u64 = 0;
 const MAX_DEPTH: u64 = 512;
 
 // The pool kinds this package adds (rewrite.ves): `SeqOp::Hoisted(access)`
@@ -83,7 +56,6 @@ const TY_SEQ: u64 = 4;
 const TY_SLICE: u64 = 8;
 const TY_TEXT: u64 = 16;
 const TY_NEVER: u64 = 32;
-const K_NAMED: u8 = 1;
 // A cache entry that holds the flags (bit 63) and the type's name + 1.
 const KNOWN: u64 = 9223372036854775808;
 
@@ -120,7 +92,7 @@ pub fn type_cache(in names: Names, in t: Types) -> TypeCache {
 
 fn named_is(in t: Types, ty: u32, name: u32, arity: u32) -> bool {
     let n = t.node(ty);
-    n.kind == K_NAMED && n.name == name && n.n == arity
+    n.kind == TyKind::Named && n.name == name && n.n == arity
 }
 
 impl TypeCache {
@@ -253,7 +225,7 @@ fn pattern_names(in p: Program, at: u64, inout out: ChunkSeq[u32], depth: u64) -
     if depth > MAX_DEPTH {
         return x;
     }
-    if kind == PAT_BIND {
+    if kind == Pat::Bind {
         let n = n32(p.op(x));
         let mut seen = false;
         for i in 0..out.len() {
@@ -265,15 +237,15 @@ fn pattern_names(in p: Program, at: u64, inout out: ChunkSeq[u32], depth: u64) -
             out.push(n);
         }
         x = inc(x);
-    } else if kind == PAT_LITERAL {
+    } else if kind == Pat::Literal {
         x = add(x, 3);
-    } else if kind == PAT_TUPLE {
+    } else if kind == Pat::Tuple {
         let n = p.op(x);
         x = inc(x);
         for i in 0..n {
             x = pattern_names(in p, x, inout out, inc(depth));
         }
-    } else if kind == PAT_CONSTRUCTOR {
+    } else if kind == Pat::Constructor {
         // name, named, n, n x (field, pattern)
         let n = p.op(add(x, 2));
         x = add(x, 3);
@@ -357,8 +329,8 @@ pub fn seq_class(in p: Program, in names: Names, pool: u64) -> u64 {
 impl Enc {
     // The operands of instruction `op` from `a`, as words.rs `op`.
     fn op(inout self, in p: Program, in names: Names, op: u8, a: u64) {
-        if op == OP_CONST {
-            if p.op(a) == LIT_INT {
+        if op == Op::Const {
+            if p.op(a) == Lit::Int {
                 let lo = p.op(inc(a));
                 let hi = p.op(add(a, 2));
                 // two's complement words to a sign and a magnitude
@@ -382,21 +354,21 @@ impl Enc {
             } else {
                 self.put(Word::Other);
             }
-        } else if op == OP_UNIT {
+        } else if op == Op::Unit {
             self.put(Word::Unit);
-        } else if op == OP_LOOP {
+        } else if op == Op::Loop {
             self.put(Word::Loop);
-        } else if op == OP_READ {
+        } else if op == Op::Read {
             // root, path, pass, projections
             self.put(Word::Read);
             self.name(in names, n32(p.op(a)));
             self.put(p.op(add(a, 2)));
             self.path(in p, in names, p.op(inc(a)));
-        } else if op == OP_BIND {
+        } else if op == Op::Bind {
             self.put(Word::Bind);
             self.put(p.op(a));
             let pat = inc(a);
-            if p.op(pat) == PAT_BIND {
+            if p.op(pat) == Pat::Bind {
                 let l = self.local(in names, n32(p.op(add(pat, 3))));
                 self.put(inc(w(l)));
             } else {
@@ -408,7 +380,7 @@ impl Enc {
             for i in 0..all.len() {
                 self.name(in names, u32_at(in all, i));
             }
-        } else if op == OP_WRITE {
+        } else if op == Op::Write {
             // place (dotted), op, value
             self.put(Word::Write);
             self.put(p.op(add(a, 2)));
@@ -449,61 +421,61 @@ impl Enc {
             if first {
                 self.put(0);
             }
-        } else if op == OP_UNARY || op == OP_PROJECT {
+        } else if op == Op::Unary || op == Op::Project {
             self.put(Word::One);
-            let v = if op == OP_UNARY {
+            let v = if op == Op::Unary {
                 p.op(inc(a))
             } else {
                 p.op(a)
             };
             self.put(v);
-        } else if op == OP_TRY || op == OP_EXIT {
+        } else if op == Op::Try || op == Op::Exit {
             self.put(Word::One);
             self.put(p.op(a));
-        } else if op == OP_BINARY {
+        } else if op == Op::Binary {
             self.put(Word::Binary);
             self.name(in names, n32(p.op(a)));
             self.put(p.op(inc(a)));
             self.put(p.op(add(a, 2)));
-        } else if op == OP_INDEX {
+        } else if op == Op::Index {
             self.put(Word::List);
             self.put(2);
             self.put(p.op(a));
             self.put(p.op(inc(a)));
-        } else if op == OP_TUPLE {
+        } else if op == Op::Tuple {
             self.put(Word::List);
             let end = self.values_at(in p, a);
-        } else if op == OP_VECTOR {
+        } else if op == Op::Vector {
             self.put(Word::List);
             let end = self.values_at(in p, inc(a));
-        } else if op == OP_DATA {
+        } else if op == Op::Data {
             self.put(Word::List);
             let n = p.op(inc(a));
             self.put(n);
             for i in 0..n {
                 self.put(p.op(add(add(a, 3), wrapping_mul(i, 2))));
             }
-        } else if op == OP_CALL {
+        } else if op == Op::Call {
             self.put(Word::Call);
             self.name(in names, n32(p.op(a)));
             let end = self.args(in p, in names, inc(a));
-        } else if op == OP_SEQ {
+        } else if op == Op::Seq {
             self.put(Word::Seq);
             self.put(seq_class(in p, in names, p.op(a)));
             let end = self.args(in p, in names, inc(a));
-        } else if op == OP_TILED {
+        } else if op == Op::Tiled {
             self.put(Word::Tiled);
             let end = self.args(in p, in names, inc(a));
-        } else if op == OP_FIP {
+        } else if op == Op::Fip {
             self.put(Word::Fip);
             let end = self.args(in p, in names, inc(a));
-        } else if op == OP_INDIRECT {
+        } else if op == Op::Indirect {
             self.put(Word::Indirect);
             self.put(p.op(a));
             let end = self.args(in p, in names, inc(a));
-        } else if op == OP_CLOSURE {
+        } else if op == Op::Closure {
             self.put(Word::Closure);
-        } else if op == OP_HANDLE {
+        } else if op == Op::Handle {
             self.put(Word::Handle);
             self.put(p.op(a));
             self.put(p.op(inc(a)));
@@ -664,16 +636,16 @@ pub fn encode_fun(in p: Program, inout t: Types, in names: Names, inout tc: Type
             e.op(in p, in names, i.op, i.a);
         }
         e.put(widen_u64(bk.term));
-        if bk.term == TERM_RETURN {
+        if bk.term == Term::Return {
             e.put(p.op(bk.ta));
-        } else if bk.term == TERM_JUMP {
+        } else if bk.term == Term::Jump {
             e.put(p.op(bk.ta));
             let end2 = e.values_at(in p, inc(bk.ta));
-        } else if bk.term == TERM_BRANCH {
+        } else if bk.term == Term::Branch {
             e.put(p.op(bk.ta));
             e.put(p.op(inc(bk.ta)));
             e.put(p.op(add(bk.ta, 2)));
-        } else if bk.term == TERM_MATCH {
+        } else if bk.term == Term::Match {
             e.put(p.op(bk.ta));
             let n = p.op(inc(bk.ta));
             e.put(n);

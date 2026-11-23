@@ -7,8 +7,8 @@
 // @vesper-std/process. Every other command, and arguments that are not
 // UTF-8, go back to the Rust CLI (`main_code` returns `delegate()`).
 //
-// @export vsys StdFs rust=crate::driver::std_host::fs
-// @export vsys StdProcess rust=crate::driver::std_host::process
+// @export vsys StdFs
+// @export vsys StdProcess
 // @export vsys StdEnv
 // @export vsys HybridCommands rust=crate::commands::host
 // @export vsys direct rust=crate::driver::host

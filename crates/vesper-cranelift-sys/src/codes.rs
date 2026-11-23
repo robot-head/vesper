@@ -120,6 +120,7 @@ table!(
 table!(
     /// Memory flag bits.
     MEMFLAG: 1 notrap, 2 aligned, 4 readonly, 8 big_endian, 16 little_endian,
+    32 can_move,
 );
 
 pub fn intcc(code: u32) -> Option<IntCC> {
@@ -197,7 +198,7 @@ pub fn trap(code: u32) -> Option<TrapCode> {
 }
 
 pub fn mem_flags(bits: u32) -> Option<MemFlags> {
-    if bits & !31 != 0 || bits & 24 == 24 {
+    if bits & !63 != 0 || bits & 24 == 24 {
         return None;
     }
     let mut f = MemFlags::new();
@@ -215,6 +216,9 @@ pub fn mem_flags(bits: u32) -> Option<MemFlags> {
     }
     if bits & 16 != 0 {
         f.set_endianness(cranelift_codegen::ir::Endianness::Little);
+    }
+    if bits & 32 != 0 {
+        f.set_can_move();
     }
     Some(f)
 }

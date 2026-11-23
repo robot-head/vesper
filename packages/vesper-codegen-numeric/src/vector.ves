@@ -62,10 +62,19 @@ use self::atomic_ops::{
     atomic_known,
     atomic_request,
 };
+use self::boxes::{
+    define_box_runtime,
+};
 use self::region_ops::{
     NUM_REGION,
     region_known,
     region_request,
+};
+use self::regions::{
+    define_region_runtime,
+};
+use self::tiled::{
+    define_tiled_runtime,
 };
 use self::floats::{
     float_known,
@@ -138,9 +147,14 @@ use self::tiled_ops::{
     tiled_request,
 };
 
-// `codegen_swap::numeric::VECTOR` and `ISA_SUPPORTED`.
+// `codegen_swap::numeric::VECTOR`, `ISA_SUPPORTED`, and `RUNTIME`.
 pub const NUM_VECTOR: u32 = 2;
 pub const NUM_ISA_SUPPORTED: u32 = 3;
+pub const NUM_RUNTIME: u32 = 14;
+const RT_KIND_REGIONS: u64 = 1;
+const RT_KIND_TILED: u64 = 2;
+const RT_KIND_BOX_ALLOC: u64 = 3;
+const RT_KIND_BOX_FREE: u64 = 4;
 
 // Argument words of NUM_VECTOR: the intrinsic (`family << 8 | op`), the
 // element, the lane count, the number of literal constants, the constants,
@@ -960,6 +974,34 @@ fn numeric_request(call: u64, inout b: Builder, inout m: Module) -> u64 eff [Ffi
         let v = ins_iconst(inout b, vx_i64(), wrapping_i64(vx_arg(call, 0)));
         call_result_value(call, v);
         return HOOK_HANDLED;
+    }
+    if op == NUM_RUNTIME && call_arg_count(call) >= 1 {
+        let kind = vx_arg(call, 0);
+        if kind == RT_KIND_REGIONS {
+            if define_region_runtime(inout m) {
+                return HOOK_HANDLED;
+            }
+            return HOOK_DECLINED;
+        }
+        if kind == RT_KIND_TILED {
+            if define_tiled_runtime(inout m) {
+                return HOOK_HANDLED;
+            }
+            return HOOK_DECLINED;
+        }
+        if kind == RT_KIND_BOX_ALLOC {
+            if define_box_runtime(inout m, true, false) {
+                return HOOK_HANDLED;
+            }
+            return HOOK_DECLINED;
+        }
+        if kind == RT_KIND_BOX_FREE {
+            if define_box_runtime(inout m, false, true) {
+                return HOOK_HANDLED;
+            }
+            return HOOK_DECLINED;
+        }
+        return HOOK_DECLINED;
     }
     if op != NUM_VECTOR || call_arg_count(call) < VA_FIRST_CONSTANT {
         return HOOK_DECLINED;

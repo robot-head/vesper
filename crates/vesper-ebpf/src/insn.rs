@@ -169,35 +169,13 @@ impl RawInsn {
 }
 
 /// Serialise slots to bytes.
-#[cfg(vesper_port)]
 pub fn slots_to_bytes(slots: &[RawInsn]) -> Vec<u8> {
     crate::port::ffi::insn_slots_to_bytes(slots)
 }
 
-/// Serialise slots to bytes.
-#[cfg(not(vesper_port))]
-pub fn slots_to_bytes(slots: &[RawInsn]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(slots.len() * 8);
-    for s in slots {
-        out.extend_from_slice(&s.to_bytes());
-    }
-    out
-}
-
 /// Parse bytes into slots. The length must be a multiple of eight.
-#[cfg(vesper_port)]
 pub fn slots_from_bytes(bytes: &[u8]) -> Result<Vec<RawInsn>, DecodeError> {
     crate::port::slots_from_bytes(bytes)
-}
-
-/// Parse bytes into slots. The length must be a multiple of eight.
-#[cfg(not(vesper_port))]
-pub fn slots_from_bytes(bytes: &[u8]) -> Result<Vec<RawInsn>, DecodeError> {
-    if !bytes.len().is_multiple_of(8) {
-        return Err(DecodeError::TruncatedProgram { len: bytes.len() });
-    }
-    let (chunks, _) = bytes.as_chunks::<8>();
-    Ok(chunks.iter().map(|c| RawInsn::from_bytes(*c)).collect())
 }
 
 /// A register number known to be in `0..=10`.
@@ -279,29 +257,7 @@ pub enum AluOp {
     Arsh,
 }
 
-impl AluOp {
-    #[cfg(not(vesper_port))]
-    fn code(self) -> (u8, i16) {
-        match self {
-            AluOp::Add => (op::ADD, 0),
-            AluOp::Sub => (op::SUB, 0),
-            AluOp::Mul => (op::MUL, 0),
-            AluOp::Div => (op::DIV, 0),
-            AluOp::SDiv => (op::DIV, 1),
-            AluOp::Or => (op::OR, 0),
-            AluOp::And => (op::AND, 0),
-            AluOp::Lsh => (op::LSH, 0),
-            AluOp::Rsh => (op::RSH, 0),
-            AluOp::Neg => (op::NEG, 0),
-            AluOp::Mod => (op::MOD, 0),
-            AluOp::SMod => (op::MOD, 1),
-            AluOp::Xor => (op::XOR, 0),
-            AluOp::Mov => (op::MOV, 0),
-            AluOp::MovSx(bits) => (op::MOV, bits as i16),
-            AluOp::Arsh => (op::ARSH, 0),
-        }
-    }
-}
+impl AluOp {}
 
 /// Byte-order conversion (`BPF_END`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -330,41 +286,6 @@ pub enum JmpOp {
 }
 
 impl JmpOp {
-    #[cfg(not(vesper_port))]
-    fn code(self) -> u8 {
-        match self {
-            JmpOp::Eq => jmp::JEQ,
-            JmpOp::Gt => jmp::JGT,
-            JmpOp::Ge => jmp::JGE,
-            JmpOp::Set => jmp::JSET,
-            JmpOp::Ne => jmp::JNE,
-            JmpOp::SGt => jmp::JSGT,
-            JmpOp::SGe => jmp::JSGE,
-            JmpOp::Lt => jmp::JLT,
-            JmpOp::Le => jmp::JLE,
-            JmpOp::SLt => jmp::JSLT,
-            JmpOp::SLe => jmp::JSLE,
-        }
-    }
-
-    #[cfg(not(vesper_port))]
-    fn from_code(op: u8) -> Option<JmpOp> {
-        Some(match op {
-            jmp::JEQ => JmpOp::Eq,
-            jmp::JGT => JmpOp::Gt,
-            jmp::JGE => JmpOp::Ge,
-            jmp::JSET => JmpOp::Set,
-            jmp::JNE => JmpOp::Ne,
-            jmp::JSGT => JmpOp::SGt,
-            jmp::JSGE => JmpOp::SGe,
-            jmp::JLT => JmpOp::Lt,
-            jmp::JLE => JmpOp::Le,
-            jmp::JSLT => JmpOp::SLt,
-            jmp::JSLE => JmpOp::SLe,
-            _ => return None,
-        })
-    }
-
     /// The condition that holds on the fall-through edge.
     pub fn negate(self) -> JmpOp {
         match self {
@@ -420,26 +341,6 @@ impl Size {
         }
     }
 
-    #[cfg(not(vesper_port))]
-    fn code(self) -> u8 {
-        match self {
-            Size::W => size::W,
-            Size::H => size::H,
-            Size::B => size::B,
-            Size::DW => size::DW,
-        }
-    }
-
-    #[cfg(not(vesper_port))]
-    fn from_code(c: u8) -> Size {
-        match c & size::MASK {
-            size::W => Size::W,
-            size::H => Size::H,
-            size::B => Size::B,
-            _ => Size::DW,
-        }
-    }
-
     pub fn from_bytes(n: u32) -> Option<Size> {
         Some(match n {
             1 => Size::B,
@@ -463,38 +364,6 @@ pub enum AtomicOp {
 }
 
 impl AtomicOp {
-    #[cfg(not(vesper_port))]
-    fn imm(self) -> i32 {
-        let f = |b: bool| if b { atomic::FETCH } else { 0 };
-        match self {
-            AtomicOp::Add { fetch } => i32::from(op::ADD) | f(fetch),
-            AtomicOp::Or { fetch } => i32::from(op::OR) | f(fetch),
-            AtomicOp::And { fetch } => i32::from(op::AND) | f(fetch),
-            AtomicOp::Xor { fetch } => i32::from(op::XOR) | f(fetch),
-            AtomicOp::Xchg => atomic::XCHG,
-            AtomicOp::CmpXchg => atomic::CMPXCHG,
-        }
-    }
-
-    #[cfg(not(vesper_port))]
-    fn from_imm(imm: i32) -> Option<AtomicOp> {
-        if imm == atomic::XCHG {
-            return Some(AtomicOp::Xchg);
-        }
-        if imm == atomic::CMPXCHG {
-            return Some(AtomicOp::CmpXchg);
-        }
-        let fetch = imm & atomic::FETCH != 0;
-        let code = u8::try_from(imm & !atomic::FETCH).ok()?;
-        Some(match code {
-            op::ADD => AtomicOp::Add { fetch },
-            op::OR => AtomicOp::Or { fetch },
-            op::AND => AtomicOp::And { fetch },
-            op::XOR => AtomicOp::Xor { fetch },
-            _ => return None,
-        })
-    }
-
     pub fn fetches(self) -> bool {
         match self {
             AtomicOp::Add { fetch }
@@ -649,418 +518,20 @@ impl fmt::Display for DecodeError {
 
 impl std::error::Error for DecodeError {}
 
-#[cfg(not(vesper_port))]
-fn reg(pc: usize, n: u8) -> Result<Reg, DecodeError> {
-    Reg::new(n).ok_or(DecodeError::BadRegister { pc, reg: n })
-}
-
-#[cfg(not(vesper_port))]
-fn zero<T: PartialEq + Default>(pc: usize, v: T, field: &'static str) -> Result<(), DecodeError> {
-    if v == T::default() {
-        Ok(())
-    } else {
-        Err(DecodeError::ReservedFieldSet { pc, field })
-    }
-}
-
 /// Decode the instruction starting at slot `pc`.
-#[cfg(vesper_port)]
 pub fn decode(slots: &[RawInsn], pc: usize) -> Result<Insn, DecodeError> {
     crate::port::decode(slots, pc)
 }
 
-/// Decode the instruction starting at slot `pc`.
-#[cfg(not(vesper_port))]
-pub fn decode(slots: &[RawInsn], pc: usize) -> Result<Insn, DecodeError> {
-    let Some(&r) = slots.get(pc) else {
-        return Err(DecodeError::TruncatedProgram {
-            len: slots.len() * 8,
-        });
-    };
-    let bad = DecodeError::InvalidOpcode { pc, code: r.code };
-    match r.class() {
-        class::ALU | class::ALU64 => {
-            let wide = r.class() == class::ALU64;
-            let x = r.code & source::X != 0;
-            let dst = reg(pc, r.dst)?;
-            let opc = r.code & op::MASK;
-            if opc == op::END {
-                let kind = match (wide, x) {
-                    (false, false) => Endian::ToLe,
-                    (false, true) => Endian::ToBe,
-                    (true, false) => Endian::Swap,
-                    (true, true) => return Err(bad),
-                };
-                zero(pc, r.src, "src")?;
-                zero(pc, r.off, "off")?;
-                let bits = match r.imm {
-                    16 => 16,
-                    32 => 32,
-                    64 => 64,
-                    _ => return Err(bad),
-                };
-                return Ok(Insn::Endian { kind, bits, dst });
-            }
-            let op = match (opc, r.off) {
-                (op::ADD, 0) => AluOp::Add,
-                (op::SUB, 0) => AluOp::Sub,
-                (op::MUL, 0) => AluOp::Mul,
-                (op::DIV, 0) => AluOp::Div,
-                (op::DIV, 1) => AluOp::SDiv,
-                (op::OR, 0) => AluOp::Or,
-                (op::AND, 0) => AluOp::And,
-                (op::LSH, 0) => AluOp::Lsh,
-                (op::RSH, 0) => AluOp::Rsh,
-                (op::NEG, 0) => AluOp::Neg,
-                (op::MOD, 0) => AluOp::Mod,
-                (op::MOD, 1) => AluOp::SMod,
-                (op::XOR, 0) => AluOp::Xor,
-                (op::MOV, 0) => AluOp::Mov,
-                (op::MOV, 8) => AluOp::MovSx(8),
-                (op::MOV, 16) => AluOp::MovSx(16),
-                (op::MOV, 32) if wide => AluOp::MovSx(32),
-                (op::ARSH, 0) => AluOp::Arsh,
-                (op::ADD..=op::ARSH, _) => {
-                    return Err(DecodeError::ReservedFieldSet { pc, field: "off" });
-                }
-                _ => return Err(bad),
-            };
-            let src = if op == AluOp::Neg {
-                if x {
-                    return Err(bad);
-                }
-                zero(pc, r.src, "src")?;
-                zero(pc, r.imm, "imm")?;
-                Operand::Imm(0)
-            } else if x {
-                zero(pc, r.imm, "imm")?;
-                Operand::Reg(reg(pc, r.src)?)
-            } else {
-                zero(pc, r.src, "src")?;
-                Operand::Imm(r.imm)
-            };
-            if matches!(op, AluOp::MovSx(_)) && !x {
-                return Err(bad);
-            }
-            Ok(Insn::Alu { wide, op, dst, src })
-        }
-        class::JMP | class::JMP32 => {
-            let wide = r.class() == class::JMP;
-            let x = r.code & source::X != 0;
-            match r.code & op::MASK {
-                jmp::JA => {
-                    if x {
-                        return Err(bad);
-                    }
-                    zero(pc, r.dst, "dst")?;
-                    zero(pc, r.src, "src")?;
-                    if wide {
-                        zero(pc, r.imm, "imm")?;
-                        Ok(Insn::Ja { off: r.off as i32 })
-                    } else {
-                        // gotol: 32-bit offset in imm.
-                        zero(pc, r.off, "off")?;
-                        Ok(Insn::Ja { off: r.imm })
-                    }
-                }
-                jmp::CALL if wide => {
-                    if x {
-                        return Err(bad);
-                    }
-                    zero(pc, r.dst, "dst")?;
-                    zero(pc, r.off, "off")?;
-                    let t = match r.src {
-                        0 => CallTarget::Helper(r.imm),
-                        pseudo::CALL => CallTarget::Local(r.imm),
-                        pseudo::KFUNC_CALL => CallTarget::Kfunc(r.imm),
-                        _ => return Err(bad),
-                    };
-                    Ok(Insn::Call(t))
-                }
-                jmp::EXIT if wide => {
-                    if x {
-                        return Err(bad);
-                    }
-                    zero(pc, r.dst, "dst")?;
-                    zero(pc, r.src, "src")?;
-                    zero(pc, r.off, "off")?;
-                    zero(pc, r.imm, "imm")?;
-                    Ok(Insn::Exit)
-                }
-                opc => {
-                    let op = JmpOp::from_code(opc).ok_or(bad)?;
-                    let dst = reg(pc, r.dst)?;
-                    let src = if x {
-                        zero(pc, r.imm, "imm")?;
-                        Operand::Reg(reg(pc, r.src)?)
-                    } else {
-                        zero(pc, r.src, "src")?;
-                        Operand::Imm(r.imm)
-                    };
-                    Ok(Insn::Jcond {
-                        wide,
-                        op,
-                        dst,
-                        src,
-                        off: r.off,
-                    })
-                }
-            }
-        }
-        class::LD => {
-            let size = Size::from_code(r.code);
-            match r.code & mode::MASK {
-                mode::IMM if size == Size::DW => {
-                    let dst = reg(pc, r.dst)?;
-                    zero(pc, r.off, "off")?;
-                    let Some(&hi) = slots.get(pc + 1) else {
-                        return Err(DecodeError::BrokenLdImm64 { pc });
-                    };
-                    if hi.code != 0 || hi.dst != 0 || hi.src != 0 || hi.off != 0 {
-                        return Err(DecodeError::BrokenLdImm64 { pc });
-                    }
-                    let imm = match r.src {
-                        0 => Imm64::Value((r.imm as u32 as u64) | ((hi.imm as u32 as u64) << 32)),
-                        pseudo::MAP_FD => {
-                            if hi.imm != 0 {
-                                return Err(DecodeError::BrokenLdImm64 { pc });
-                            }
-                            Imm64::MapFd(r.imm)
-                        }
-                        pseudo::MAP_VALUE
-                        | pseudo::BTF_ID
-                        | pseudo::FUNC
-                        | pseudo::MAP_IDX
-                        | pseudo::MAP_IDX_VALUE => Imm64::Pseudo {
-                            src: r.src,
-                            imm_lo: r.imm,
-                            imm_hi: hi.imm,
-                        },
-                        _ => return Err(bad),
-                    };
-                    Ok(Insn::LdImm64 { dst, imm })
-                }
-                m @ (mode::ABS | mode::IND) if size != Size::DW => {
-                    zero(pc, r.dst, "dst")?;
-                    zero(pc, r.off, "off")?;
-                    let indirect = m == mode::IND;
-                    let src = if indirect {
-                        reg(pc, r.src)?
-                    } else {
-                        zero(pc, r.src, "src")?;
-                        Reg::R0
-                    };
-                    Ok(Insn::LdLegacy {
-                        size,
-                        indirect,
-                        src,
-                        imm: r.imm,
-                    })
-                }
-                _ => Err(bad),
-            }
-        }
-        class::LDX => {
-            let sign_extend = match r.code & mode::MASK {
-                mode::MEM => false,
-                mode::MEMSX if Size::from_code(r.code) != Size::DW => true,
-                _ => return Err(bad),
-            };
-            zero(pc, r.imm, "imm")?;
-            Ok(Insn::Ldx {
-                size: Size::from_code(r.code),
-                dst: reg(pc, r.dst)?,
-                src: reg(pc, r.src)?,
-                off: r.off,
-                sign_extend,
-            })
-        }
-        class::ST => {
-            if r.code & mode::MASK != mode::MEM {
-                return Err(bad);
-            }
-            zero(pc, r.src, "src")?;
-            Ok(Insn::St {
-                size: Size::from_code(r.code),
-                dst: reg(pc, r.dst)?,
-                off: r.off,
-                imm: r.imm,
-            })
-        }
-        class::STX => {
-            let size = Size::from_code(r.code);
-            match r.code & mode::MASK {
-                mode::MEM => {
-                    zero(pc, r.imm, "imm")?;
-                    Ok(Insn::Stx {
-                        size,
-                        dst: reg(pc, r.dst)?,
-                        src: reg(pc, r.src)?,
-                        off: r.off,
-                    })
-                }
-                mode::ATOMIC if matches!(size, Size::W | Size::DW) => {
-                    let op = AtomicOp::from_imm(r.imm).ok_or(bad)?;
-                    Ok(Insn::Atomic {
-                        size,
-                        op,
-                        dst: reg(pc, r.dst)?,
-                        src: reg(pc, r.src)?,
-                        off: r.off,
-                    })
-                }
-                _ => Err(bad),
-            }
-        }
-        _ => Err(bad),
-    }
-}
-
 /// Decode a whole program. Entry `i` is `Some` when an instruction starts at
 /// slot `i` and `None` for the second slot of an `LD_IMM64`.
-#[cfg(vesper_port)]
 pub fn decode_all(slots: &[RawInsn]) -> Result<Vec<Option<Insn>>, DecodeError> {
     crate::port::decode_all(slots)
 }
 
-/// Decode a whole program. Entry `i` is `Some` when an instruction starts at
-/// slot `i` and `None` for the second slot of an `LD_IMM64`.
-#[cfg(not(vesper_port))]
-pub fn decode_all(slots: &[RawInsn]) -> Result<Vec<Option<Insn>>, DecodeError> {
-    let mut out = Vec::with_capacity(slots.len());
-    let mut pc = 0;
-    while pc < slots.len() {
-        let insn = decode(slots, pc)?;
-        let n = insn.slots();
-        out.push(Some(insn));
-        if n == 2 {
-            out.push(None);
-        }
-        pc += n;
-    }
-    Ok(out)
-}
-
 /// Encode one typed instruction into one or two slots.
-#[cfg(vesper_port)]
 pub fn encode(insn: &Insn) -> Vec<RawInsn> {
     crate::port::encode(insn)
-}
-
-/// Encode one typed instruction into one or two slots.
-#[cfg(not(vesper_port))]
-pub fn encode(insn: &Insn) -> Vec<RawInsn> {
-    let r = |code, dst: Reg, src: u8, off, imm| RawInsn::new(code, dst.num(), src, off, imm);
-    match *insn {
-        Insn::Alu { wide, op, dst, src } => {
-            let cls = if wide { class::ALU64 } else { class::ALU };
-            let (opc, off) = op.code();
-            match src {
-                Operand::Imm(i) => vec![r(cls | opc | source::K, dst, 0, off, i)],
-                Operand::Reg(s) => vec![r(cls | opc | source::X, dst, s.num(), off, 0)],
-            }
-        }
-        Insn::Endian { kind, bits, dst } => {
-            let code = match kind {
-                Endian::ToLe => class::ALU | op::END | source::TO_LE,
-                Endian::ToBe => class::ALU | op::END | source::TO_BE,
-                Endian::Swap => class::ALU64 | op::END,
-            };
-            vec![r(code, dst, 0, 0, bits as i32)]
-        }
-        Insn::Ja { off } => match i16::try_from(off) {
-            Ok(o) => vec![RawInsn::new(class::JMP | jmp::JA, 0, 0, o, 0)],
-            Err(_) => vec![RawInsn::new(class::JMP32 | jmp::JA, 0, 0, 0, off)],
-        },
-        Insn::Jcond {
-            wide,
-            op,
-            dst,
-            src,
-            off,
-        } => {
-            let cls = if wide { class::JMP } else { class::JMP32 };
-            match src {
-                Operand::Imm(i) => vec![r(cls | op.code() | source::K, dst, 0, off, i)],
-                Operand::Reg(s) => vec![r(cls | op.code() | source::X, dst, s.num(), off, 0)],
-            }
-        }
-        Insn::Call(t) => {
-            let (src, imm) = match t {
-                CallTarget::Helper(i) => (0, i),
-                CallTarget::Local(i) => (pseudo::CALL, i),
-                CallTarget::Kfunc(i) => (pseudo::KFUNC_CALL, i),
-            };
-            vec![RawInsn::new(class::JMP | jmp::CALL, 0, src, 0, imm)]
-        }
-        Insn::Exit => vec![RawInsn::new(class::JMP | jmp::EXIT, 0, 0, 0, 0)],
-        Insn::LdImm64 { dst, imm } => {
-            let (src, lo, hi) = match imm {
-                Imm64::Value(v) => (0, v as u32 as i32, (v >> 32) as u32 as i32),
-                Imm64::MapFd(fd) => (pseudo::MAP_FD, fd, 0),
-                Imm64::Pseudo {
-                    src,
-                    imm_lo,
-                    imm_hi,
-                } => (src, imm_lo, imm_hi),
-            };
-            vec![
-                r(class::LD | mode::IMM | size::DW, dst, src, 0, lo),
-                RawInsn::new(0, 0, 0, 0, hi),
-            ]
-        }
-        Insn::Ldx {
-            size,
-            dst,
-            src,
-            off,
-            sign_extend,
-        } => {
-            let mode = if sign_extend { mode::MEMSX } else { mode::MEM };
-            vec![r(class::LDX | mode | size.code(), dst, src.num(), off, 0)]
-        }
-        Insn::St {
-            size,
-            dst,
-            off,
-            imm,
-        } => vec![r(class::ST | mode::MEM | size.code(), dst, 0, off, imm)],
-        Insn::Stx {
-            size,
-            dst,
-            src,
-            off,
-        } => vec![r(
-            class::STX | mode::MEM | size.code(),
-            dst,
-            src.num(),
-            off,
-            0,
-        )],
-        Insn::Atomic {
-            size,
-            op,
-            dst,
-            src,
-            off,
-        } => vec![r(
-            class::STX | mode::ATOMIC | size.code(),
-            dst,
-            src.num(),
-            off,
-            op.imm(),
-        )],
-        Insn::LdLegacy {
-            size,
-            indirect,
-            src,
-            imm,
-        } => {
-            let mode = if indirect { mode::IND } else { mode::ABS };
-            let s = if indirect { src.num() } else { 0 };
-            vec![RawInsn::new(class::LD | mode | size.code(), 0, s, 0, imm)]
-        }
-    }
 }
 
 /// One line per instruction (`slot: typed form`), for diagnostics.

@@ -133,6 +133,11 @@
 // |     fn vcl_module_last_relocs(in m: Module, nocapture inout out: CSlice[u64]) -> ForeignVal[u64];
 // |     fn vcl_module_last_call_sites(in m: Module, nocapture inout out: CSlice[u64]) -> ForeignVal[u64];
 // |     fn vcl_module_last_frame_size(in m: Module) -> ForeignVal[u64];
+// |     fn vcl_declare_anonymous_data(inout m: Module, writable: bool, tls: bool) -> ForeignVal[u32];
+// |     fn vcl_call_memset(inout b: Builder, in m: Module, dst: u32, val: u32, count: u32) -> ForeignVal[Unit];
+// |     fn vcl_call_memmove(inout b: Builder, in m: Module, dst: u32, src: u32, count: u32) -> ForeignVal[Unit];
+// |     fn vcl_isa_triple_arch(in m: Module) -> ForeignVal[u32];
+// |     fn vcl_has_x86_pshufb_lowering(in m: Module) -> ForeignVal[u32];
 // | }
 //
 // @vesper/cranelift: Cranelift 0.125 from Vesper (self-hosting wave SH0,
@@ -321,6 +326,29 @@ pub fn mem_readonly() -> u32 {
 pub fn mem_trusted() -> u32 {
     3
 }
+pub fn mem_big_endian() -> u32 {
+    8
+}
+pub fn mem_little_endian() -> u32 {
+    16
+}
+pub fn mem_can_move() -> u32 {
+    32
+}
+
+// Target architectures returned by `isa_triple_arch`.
+pub fn arch_other() -> u32 {
+    0
+}
+pub fn arch_x86_64() -> u32 {
+    1
+}
+pub fn arch_aarch64() -> u32 {
+    2
+}
+pub fn arch_riscv64() -> u32 {
+    3
+}
 
 pub fn trap_stack_overflow() -> u32 {
     1
@@ -424,6 +452,12 @@ pub fn declare_data(inout m: Module, in name: Slice[u8], linkage: u32, writable:
     -> DataId eff [Ffi[Cranelift]] {
     DataId {
         id: Cranelift::vcl_declare_data(inout m, in name, linkage, writable, false)
+    }
+}
+pub fn declare_anonymous_data(inout m: Module, writable: bool, tls: bool)
+    -> DataId eff [Ffi[Cranelift]] {
+    DataId {
+        id: Cranelift::vcl_declare_anonymous_data(inout m, writable, tls)
     }
 }
 // Compile and define `func` from `b`; false if it failed
@@ -777,6 +811,21 @@ pub fn ins_bitcast(inout b: Builder, ty: Ty, x: Value) -> Value eff [Ffi[Craneli
 pub fn ins_uadd_overflow(inout b: Builder, x: Value, y: Value) -> Value eff [Ffi[Cranelift]] {
     ins_overflow(inout b, 1, x, y)
 }
+pub fn ins_umul_overflow(inout b: Builder, x: Value, y: Value) -> Value eff [Ffi[Cranelift]] {
+    ins_overflow(inout b, 5, x, y)
+}
+pub fn ins_swizzle(inout b: Builder, x: Value, y: Value) -> Value eff [Ffi[Cranelift]] {
+    ins_binary(inout b, 32, x, y)
+}
+pub fn ins_vany_true(inout b: Builder, x: Value) -> Value eff [Ffi[Cranelift]] {
+    ins_unary(inout b, 18, x)
+}
+pub fn ins_vall_true(inout b: Builder, x: Value) -> Value eff [Ffi[Cranelift]] {
+    ins_unary(inout b, 19, x)
+}
+pub fn ins_vhigh_bits(inout b: Builder, ty: Ty, x: Value) -> Value eff [Ffi[Cranelift]] {
+    ins_convert(inout b, 14, ty, x)
+}
 pub fn ins_smul_overflow(inout b: Builder, x: Value, y: Value) -> Value eff [Ffi[Cranelift]] {
     ins_overflow(inout b, 6, x, y)
 }
@@ -820,10 +869,34 @@ pub fn ins_uload8(inout b: Builder, ty: Ty, flags: u32, addr: Value, offset: i32
         id: Cranelift::vcl_load(inout b, 2, ty.code, flags, addr.id, offset)
     }
 }
+pub fn ins_sload8(inout b: Builder, ty: Ty, flags: u32, addr: Value, offset: i32)
+    -> Value eff [Ffi[Cranelift]] {
+    Value {
+        id: Cranelift::vcl_load(inout b, 3, ty.code, flags, addr.id, offset)
+    }
+}
+pub fn ins_uload16(inout b: Builder, ty: Ty, flags: u32, addr: Value, offset: i32)
+    -> Value eff [Ffi[Cranelift]] {
+    Value {
+        id: Cranelift::vcl_load(inout b, 4, ty.code, flags, addr.id, offset)
+    }
+}
+pub fn ins_sload16(inout b: Builder, ty: Ty, flags: u32, addr: Value, offset: i32)
+    -> Value eff [Ffi[Cranelift]] {
+    Value {
+        id: Cranelift::vcl_load(inout b, 5, ty.code, flags, addr.id, offset)
+    }
+}
 pub fn ins_uload32(inout b: Builder, flags: u32, addr: Value, offset: i32)
     -> Value eff [Ffi[Cranelift]] {
     Value {
         id: Cranelift::vcl_load(inout b, 6, 4, flags, addr.id, offset)
+    }
+}
+pub fn ins_sload32(inout b: Builder, flags: u32, addr: Value, offset: i32)
+    -> Value eff [Ffi[Cranelift]] {
+    Value {
+        id: Cranelift::vcl_load(inout b, 7, 4, flags, addr.id, offset)
     }
 }
 pub fn ins_store(inout b: Builder, flags: u32, x: Value, addr: Value, offset: i32) eff [
@@ -835,6 +908,11 @@ pub fn ins_istore8(inout b: Builder, flags: u32, x: Value, addr: Value, offset: 
     Ffi[Cranelift]
 ] {
     Cranelift::vcl_store(inout b, 2, flags, x.id, addr.id, offset);
+}
+pub fn ins_istore16(inout b: Builder, flags: u32, x: Value, addr: Value, offset: i32) eff [
+    Ffi[Cranelift]
+] {
+    Cranelift::vcl_store(inout b, 3, flags, x.id, addr.id, offset);
 }
 pub fn ins_istore32(inout b: Builder, flags: u32, x: Value, addr: Value, offset: i32) eff [
     Ffi[Cranelift]
@@ -1421,6 +1499,22 @@ pub fn ins_fvpromote_low(inout b: Builder, x: Value) -> Value eff [Ffi[Cranelift
 }
 pub fn ins_fvdemote(inout b: Builder, x: Value) -> Value eff [Ffi[Cranelift]] {
     ins_unary(inout b, 21, x)
+}
+pub fn call_memset(inout b: Builder, in m: Module, dst: Value, val: Value, count: Value) eff [
+    Ffi[Cranelift]
+] {
+    Cranelift::vcl_call_memset(inout b, in m, dst.id, val.id, count.id);
+}
+pub fn call_memmove(inout b: Builder, in m: Module, dst: Value, src: Value, count: Value) eff [
+    Ffi[Cranelift]
+] {
+    Cranelift::vcl_call_memmove(inout b, in m, dst.id, src.id, count.id);
+}
+pub fn isa_triple_arch(in m: Module) -> u32 eff [Ffi[Cranelift]] {
+    Cranelift::vcl_isa_triple_arch(in m)
+}
+pub fn has_x86_pshufb_lowering(in m: Module) -> bool eff [Ffi[Cranelift]] {
+    Cranelift::vcl_has_x86_pshufb_lowering(in m) == 1
 }
 
 // Typed entity words: every entity a host lends as a `call_arg` word or

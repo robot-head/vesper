@@ -17,7 +17,7 @@ use vesper::native::WordFunction;
 use vesper_codegen_swap_test::*;
 
 /// The ops of `codegen_swap::control`, by number.
-const OPS: [(u32, &str); 37] = [
+const OPS: [(u32, &str); 39] = [
     (control::TAG, "tag"),
     (control::CAPTURE_SLOT, "capture slot"),
     (control::QUALIFY, "qualify"),
@@ -55,10 +55,12 @@ const OPS: [(u32, &str); 37] = [
     (control::DYN_SLOT_ADAPTER, "dyn slot adapter"),
     (control::DYN_DROP_OBJECT, "dyn drop object"),
     (control::DYN_DROP_BOXED, "dyn drop boxed"),
+    (control::DYN_DROP_HELPER_HEAD, "dyn drop helper head"),
+    (control::DYN_DROP_HELPER_TAIL, "dyn drop helper tail"),
 ];
 
 /// Requests answered from Vesper, per op (index = op number).
-static ANSWERED: [AtomicU64; 38] = [const { AtomicU64::new(0) }; 38];
+static ANSWERED: [AtomicU64; 45] = [const { AtomicU64::new(0) }; 45];
 
 fn hook() -> &'static WordFunction {
     static HOOK: OnceLock<WordFunction> = OnceLock::new();

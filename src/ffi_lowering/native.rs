@@ -300,17 +300,9 @@ impl<M: Module> Codegen<'_, '_, M> {
             ));
         }
         // SH4 swap point (#1287): the `ffi` hook may emit this call
-        // (`codegen_swap::ffi`); none is installed by default. A callback
-        // type's call is not offered: the steps name a symbol. Nor is a
-        // call taking a callback function: `foreign_trampoline` compiles a
-        // fresh function in `self.m`.
+        // (`codegen_swap::ffi`); none is installed by default.
         let abi = plan.function.abi();
-        if !plan.function.is_indirect()
-            && !descriptors
-                .iter()
-                .any(|d| matches!(d.ty(), ParameterType::Function { .. }))
-            && let Some(v) = self.foreign_perform_swapped(&plan, &signature, args)?
-        {
+        if let Some(v) = self.foreign_perform_swapped(&plan, &signature, args)? {
             return Ok(v);
         }
         let pointer = self.m.target_config().pointer_type();
@@ -2087,7 +2079,8 @@ fn value_words(v: &ValueType, out: &mut Vec<u64>) {
                 Float::F64 => 64,
             },
         ]),
-        ValueType::CStr | ValueType::CWStr => out.push(8),
+        ValueType::CStr => out.push(8),
+        ValueType::CWStr => out.push(9),
     }
 }
 fn integer_word(int: &vesper_ffi::Integer) -> u64 {
@@ -2257,14 +2250,7 @@ impl<M: Module> Codegen<'_, '_, M> {
         // Apple arm64 pads a variadic call's argument registers with zero
         // words (`sys::Variadic`), which they do not carry either.
         let abi = plan.function.abi();
-        if abi.variadic.is_some_and(|v| v.padding > 0)
-            || plan
-                .function
-                .parameters()
-                .iter()
-                .any(|p| matches!(p.ty(), ParameterType::CWStr))
-            || *plan.function.result() == ValueType::CWStr
-        {
+        if abi.variadic.is_some_and(|v| v.padding > 0) {
             return Ok(None);
         }
         let pointer = self.m.target_config().pointer_type();
@@ -2275,7 +2261,9 @@ impl<M: Module> Codegen<'_, '_, M> {
         if let Some(t) = abi.result {
             sig.returns.push(abi_param(t, pointer));
         }
-        if !self.foreign_import_direct(plan.function.link_symbol(), &sig) {
+        if !plan.function.is_indirect()
+            && !self.foreign_import_direct(plan.function.link_symbol(), &sig)
+        {
             return Ok(None);
         }
         // Multi-byte mapping results (`u16`/`u32`/`u64`) need `umul_overflow`
@@ -2326,9 +2314,19 @@ impl<M: Module> Codegen<'_, '_, M> {
             }
             let mut words = vec![i as u64];
             match descriptor.ty() {
+                ParameterType::Function { callback, .. } => {
+                    let trampoline =
+                        self.foreign_trampoline(&arg.expr, &plan.library, callback.name())?;
+                    c_args.push(trampoline);
+                    continue;
+                }
                 ParameterType::CStr => {
                     let view = self.expr(&arg.expr)?;
                     words.extend([2, word(view), little, 2]);
+                }
+                ParameterType::CWStr => {
+                    let view = self.expr(&arg.expr)?;
+                    words.extend([2, word(view), little, 8]);
                 }
                 ParameterType::CStrList => {
                     let view = self.expr(&arg.expr)?;
@@ -2511,13 +2509,20 @@ impl<M: Module> Codegen<'_, '_, M> {
                 }
             }
         }
-        let symbol = plan.function.link_symbol();
-        self.foreign_symbol_free(symbol, Linkage::Import)?;
-        let callee = self
-            .m
-            .declare_function(symbol, Linkage::Import, &sig)
-            .map_err(|e| format!("foreign symbol '{symbol}': {e}"))?;
-        let callee = self.m.declare_func_in_func(callee, self.b.func);
+        let mut words = if plan.function.is_indirect() {
+            let pointer = c_args.remove(0);
+            let sig_ref = self.b.import_signature(sig);
+            vec![u64::from(sig_ref.as_u32()), word(pointer)]
+        } else {
+            let symbol = plan.function.link_symbol();
+            self.foreign_symbol_free(symbol, Linkage::Import)?;
+            let callee = self
+                .m
+                .declare_function(symbol, Linkage::Import, &sig)
+                .map_err(|e| format!("foreign symbol '{symbol}': {e}"))?;
+            let callee = self.m.declare_func_in_func(callee, self.b.func);
+            vec![u64::from(callee.as_u32())]
+        };
         let refusal = if strings.is_empty() {
             None
         } else {
@@ -2559,8 +2564,7 @@ impl<M: Module> Codegen<'_, '_, M> {
         for &(_, data, len, stride) in &released {
             self.foreign_range_unregister(value_of_word(data)?, value_of_word(len)?, stride)?;
         }
-        let mut words = vec![
-            u64::from(callee.as_u32()),
+        words.extend([
             errno,
             u64::from(abi.result.is_some()),
             little,
@@ -2568,7 +2572,7 @@ impl<M: Module> Codegen<'_, '_, M> {
             len_i64,
             reg_id,
             released.len() as u64,
-        ];
+        ]);
         words.extend(released.iter().map(|(h, _, _, _)| *h));
         words.push(c_args.len() as u64);
         words.extend(c_args.iter().map(|v| word(*v)));
@@ -2577,7 +2581,12 @@ impl<M: Module> Codegen<'_, '_, M> {
             words.push(c.len() as u64);
             words.extend(c);
         }
-        let r = self.foreign_request(swap::CALL, &words)?;
+        let call_op = if plan.function.is_indirect() {
+            swap::CALL_INDIRECT
+        } else {
+            swap::CALL
+        };
+        let r = self.foreign_request(call_op, &words)?;
         let [raw, os] = r[..] else {
             return Err("malformed ffi CALL answer".into());
         };
@@ -2611,24 +2620,30 @@ impl<M: Module> Codegen<'_, '_, M> {
         };
         let result = plan.function.result();
         let jit = std::any::type_name::<M>().contains("JITModule");
-        if *result == ValueType::CStr && !jit {
+        if (*result == ValueType::CStr || *result == ValueType::CWStr) && !jit {
             if self.m.isa().triple().operating_system == target_lexicon::OperatingSystem::None_ {
                 return Err(
                     "ChunkSeq in a freestanding image needs an allocator; the generated one uses the C library"
                         .into(),
                 );
             }
-            for (name, params) in [("strlen", 1), ("memcpy", 3)] {
+            if *result == ValueType::CStr {
                 let mut sig = self.m.make_signature();
-                for _ in 0..params {
-                    sig.params.push(AbiParam::new(types::I64));
-                }
+                sig.params.push(AbiParam::new(types::I64));
                 sig.returns.push(AbiParam::new(types::I64));
                 self.m
-                    .declare_function(name, Linkage::Import, &sig)
-                    .map_err(|e| format!("C library function '{name}': {e}"))?;
+                    .declare_function("strlen", Linkage::Import, &sig)
+                    .map_err(|e| format!("C library function 'strlen': {e}"))?;
             }
             self.seq_define_runtime()?;
+            let mut sig = self.m.make_signature();
+            for _ in 0..3 {
+                sig.params.push(AbiParam::new(types::I64));
+            }
+            sig.returns.push(AbiParam::new(types::I64));
+            self.m
+                .declare_function("memcpy", Linkage::Import, &sig)
+                .map_err(|e| format!("C library function 'memcpy': {e}"))?;
         }
         let mut words = vec![raw.map_or(NO_VALUE, word), u64::from(jit)];
         value_words(result, &mut words);

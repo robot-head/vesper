@@ -7,7 +7,8 @@ use @vesper/check-data::names::{
     Names
 };
 use @vesper/check-data::types::{
-    Types
+    Types,
+    TyPass
 };
 use @vesper/check-data::input::{
     Reader,
@@ -60,17 +61,11 @@ use self::rewrite::{
     pool_entry,
     prog_inst
 };
+use @vesper/place-ir::codes::{
+    Op,
+    Tag
+};
 
-const T_RAW: u8 = 0;
-const T_OPT_NAME: u8 = 2;
-const T_PATH: u8 = 4;
-const T_POOL: u8 = 5;
-const T_VALUE: u8 = 6;
-const OP_CONST: u8 = 0;
-const OP_READ: u8 = 2;
-const OP_SEQ: u8 = 18;
-const P_IN: u64 = 0;
-const P_SINK: u64 = 2;
 const O_VALUE: u64 = 0;
 const O_LOCAL: u64 = 1;
 const NONE64: u64 = 18446744073709551615;
@@ -135,10 +130,10 @@ fn prog_place(in f: Fun, inout p: Program, inout names: Names, place: u32) -> (u
 }
 
 fn sink_value(inout p: Program, v: u64) {
-    p.put(P_SINK, T_RAW);
-    p.put(v, T_VALUE);
-    p.put(0, T_OPT_NAME);
-    p.put(0, T_PATH);
+    p.put(TyPass::Sink, Tag::Raw);
+    p.put(v, Tag::Value);
+    p.put(0, Tag::OptName);
+    p.put(0, Tag::Path);
 }
 
 // A `BoundsGuard` instruction over the argument words from `a`.
@@ -153,7 +148,7 @@ fn guard_inst(dest: u64, ty: u32, s0: u64, s1: u64, tin: u64, tout: u64, a: u64,
         tin: tin,
         tout: tout,
         fallible: 0,
-        op: OP_SEQ,
+        op: Op::Seq,
         a: a,
         n: n
     }
@@ -163,9 +158,9 @@ fn read_row(inout p: Program, dest: u64, ty: u32, s0: u64, s1: u64, tok: u64, ro
     -> InstRow {
     let a = p.ops.len();
     p.put(w(root), 1);
-    p.put(0, T_PATH);
-    p.put(P_SINK, T_RAW);
-    p.put(0, T_RAW);
+    p.put(0, Tag::Path);
+    p.put(TyPass::Sink, Tag::Raw);
+    p.put(0, Tag::Raw);
     InstRow {
         dest: n32(dest),
         ty: ty,
@@ -175,7 +170,7 @@ fn read_row(inout p: Program, dest: u64, ty: u32, s0: u64, s1: u64, tok: u64, ro
         tin: tok,
         tout: tok,
         fallible: 0,
-        op: OP_READ,
+        op: Op::Read,
         a: a,
         n: 4
     }
@@ -183,9 +178,9 @@ fn read_row(inout p: Program, dest: u64, ty: u32, s0: u64, s1: u64, tok: u64, ro
 
 fn const_row(inout p: Program, dest: u64, ty: u32, s0: u64, s1: u64, lo: u64, hi: u64) -> InstRow {
     let a = p.ops.len();
-    p.put(0, T_RAW);
-    p.put(lo, T_RAW);
-    p.put(hi, T_RAW);
+    p.put(0, Tag::Raw);
+    p.put(lo, Tag::Raw);
+    p.put(hi, Tag::Raw);
     InstRow {
         dest: n32(dest),
         ty: ty,
@@ -195,7 +190,7 @@ fn const_row(inout p: Program, dest: u64, ty: u32, s0: u64, s1: u64, lo: u64, hi
         tin: 0,
         tout: 0,
         fallible: 0,
-        op: OP_CONST,
+        op: Op::Const,
         a: a,
         n: 3
     }
@@ -315,7 +310,7 @@ fn clone_loop(
         let e = pool_entry(inout p, POOL_GUARD, label);
         // the pool word, then the arguments
         let a = p.ops.len();
-        p.put(e, T_POOL);
+        p.put(e, Tag::Pool);
         let nargs = add(
             add(3, tv.len()),
             if previous == NONE64 {
@@ -324,13 +319,13 @@ fn clone_loop(
                 1
             }
         );
-        p.put(nargs, T_RAW);
+        p.put(nargs, Tag::Raw);
         sink_value(inout p, lo);
         sink_value(inout p, hi);
-        p.put(P_IN, T_RAW);
-        p.put(v, T_VALUE);
-        p.put(inc(p.op(rr.a)), T_OPT_NAME);
-        p.put(p.op(inc(rr.a)), T_PATH);
+        p.put(TyPass::In, Tag::Raw);
+        p.put(v, Tag::Value);
+        p.put(inc(p.op(rr.a)), Tag::OptName);
+        p.put(p.op(inc(rr.a)), Tag::Path);
         for q in 0..tv.len() {
             sink_value(inout p, u64_at(in tv, q));
         }
@@ -439,26 +434,26 @@ fn guard_and_copy(
         row.tout = before;
         row.fallible = 0;
         g.rows.push(row);
-        let (root, path) = if rr.op == OP_READ {
+        let (root, path) = if rr.op == Op::Read {
             (n32(p.op(rr.a)), p.op(inc(rr.a)))
         } else {
             prog_place(in f, inout p, inout names, u32_at(in lp.gplace, k))
         };
         let e = pool_entry(inout p, POOL_GUARD, 0);
         let a = p.ops.len();
-        p.put(e, T_POOL);
+        p.put(e, Tag::Pool);
         let nargs: u64 = if previous == NONE64 {
             3
         } else {
             4
         };
-        p.put(nargs, T_RAW);
+        p.put(nargs, Tag::Raw);
         sink_value(inout p, lo);
         sink_value(inout p, hi);
-        p.put(P_IN, T_RAW);
-        p.put(s, T_VALUE);
-        p.put(inc(w(root)), T_OPT_NAME);
-        p.put(path, T_PATH);
+        p.put(TyPass::In, Tag::Raw);
+        p.put(s, Tag::Value);
+        p.put(inc(w(root)), Tag::OptName);
+        p.put(path, Tag::Path);
         if previous != NONE64 {
             sink_value(inout p, previous);
         }

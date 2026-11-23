@@ -18,7 +18,8 @@ use @vesper/check-data::names::{
     Names
 };
 use @vesper/check-data::types::{
-    Types
+    Types,
+    TyPass
 };
 use @vesper/place-ir::{
     BlockRow,
@@ -43,26 +44,12 @@ use self::encode::{
     POOL_HOISTED,
     seq_class
 };
+use @vesper/place-ir::codes::{
+    Op,
+    Tag,
+    Term
+};
 
-const T_RAW: u8 = 0;
-const T_NAME: u8 = 1;
-const T_OPT_NAME: u8 = 2;
-const T_TYPE: u8 = 3;
-const T_PATH: u8 = 4;
-const T_POOL: u8 = 5;
-const T_VALUE: u8 = 6;
-const T_BLOCK: u8 = 7;
-
-const OP_CONST: u8 = 0;
-const OP_READ: u8 = 2;
-const OP_HANDLE: u8 = 15;
-const OP_SEQ: u8 = 18;
-const TERM_RETURN: u8 = 0;
-const TERM_JUMP: u8 = 1;
-const TERM_BRANCH: u8 = 2;
-const TERM_MATCH: u8 = 3;
-const P_IN: u64 = 0;
-const P_SINK: u64 = 2;
 const NONE64: u64 = 18446744073709551615;
 
 pub fn inst_row(in p: Program, i: u64) -> InstRow {
@@ -120,7 +107,7 @@ pub fn prog_inst(in p: Program, fi: u64, in f: Fun, x: u64) -> u64 {
 
 // The access an instruction's sequence operation has (`hoistable`), or 4.
 fn access_of(in p: Program, in names: Names, i: InstRow) -> u64 {
-    if i.op != OP_SEQ {
+    if i.op != Op::Seq {
         return 4;
     }
     hoistable(seq_class(in p, in names, p.op(i.a)))
@@ -264,10 +251,10 @@ pub struct Guards {
 fn read_inst(inout p: Program, dest: u64, ty: u32, s0: u64, s1: u64, tok: u64, root: u32)
     -> InstRow {
     let a = p.ops.len();
-    p.put(w(root), T_NAME);
-    p.put(0, T_PATH);
-    p.put(P_SINK, T_RAW);
-    p.put(0, T_RAW);
+    p.put(w(root), Tag::Name);
+    p.put(0, Tag::Path);
+    p.put(TyPass::Sink, Tag::Raw);
+    p.put(0, Tag::Raw);
     InstRow {
         dest: n32(dest),
         ty: ty,
@@ -277,7 +264,7 @@ fn read_inst(inout p: Program, dest: u64, ty: u32, s0: u64, s1: u64, tok: u64, r
         tin: tok,
         tout: tok,
         fallible: 0,
-        op: OP_READ,
+        op: Op::Read,
         a: a,
         n: 4
     }
@@ -285,9 +272,9 @@ fn read_inst(inout p: Program, dest: u64, ty: u32, s0: u64, s1: u64, tok: u64, r
 
 fn const_inst(inout p: Program, dest: u64, ty: u32, s0: u64, s1: u64, lo: u64, hi: u64) -> InstRow {
     let a = p.ops.len();
-    p.put(0, T_RAW);
-    p.put(lo, T_RAW);
-    p.put(hi, T_RAW);
+    p.put(0, Tag::Raw);
+    p.put(lo, Tag::Raw);
+    p.put(hi, Tag::Raw);
     InstRow {
         dest: n32(dest),
         ty: ty,
@@ -297,7 +284,7 @@ fn const_inst(inout p: Program, dest: u64, ty: u32, s0: u64, s1: u64, lo: u64, h
         tin: 0,
         tout: 0,
         fallible: 0,
-        op: OP_CONST,
+        op: Op::Const,
         a: a,
         n: 3
     }
@@ -305,10 +292,10 @@ fn const_inst(inout p: Program, dest: u64, ty: u32, s0: u64, s1: u64, lo: u64, h
 
 // An argument: pass, value, optional place (root symbol + 1, path).
 fn put_arg(inout p: Program, pass: u64, v: u64, root1: u64, path: u64) {
-    p.put(pass, T_RAW);
-    p.put(v, T_VALUE);
-    p.put(root1, T_OPT_NAME);
-    p.put(path, T_PATH);
+    p.put(pass, Tag::Raw);
+    p.put(v, Tag::Value);
+    p.put(root1, Tag::OptName);
+    p.put(path, Tag::Path);
 }
 
 // ----- copy_loop ------------------------------------------------------------------
@@ -430,16 +417,16 @@ fn read_head(in p: Program, bk: BlockRow) -> Head {
 // Writes `hd` as header words; returns (start, length).
 fn put_head(inout p: Program, in hd: Head) -> (u64, u64) {
     let a = p.ops.len();
-    p.put(hd.entry, T_RAW);
-    p.put(hd.inb.len(), T_RAW);
+    p.put(hd.entry, Tag::Raw);
+    p.put(hd.inb.len(), Tag::Raw);
     for j in 0..hd.inb.len() {
-        p.put(u64_at(in hd.inb, j), T_BLOCK);
-        p.put(u64_at(in hd.intok, j), T_RAW);
+        p.put(u64_at(in hd.inb, j), Tag::Block);
+        p.put(u64_at(in hd.intok, j), Tag::Raw);
     }
-    p.put(hd.out, T_RAW);
-    p.put(hd.params.len(), T_RAW);
+    p.put(hd.out, Tag::Raw);
+    p.put(hd.params.len(), Tag::Raw);
     for j in 0..hd.params.len() {
-        p.put(u64_at(in hd.params, j), T_VALUE);
+        p.put(u64_at(in hd.params, j), Tag::Value);
     }
     (a, wrapping_sub(p.ops.len(), a))
 }
@@ -451,9 +438,9 @@ fn copy_words(inout p: Program, a: u64, n: u64, in vm: Map, in bm: Map, handle_n
     for i in 0..n {
         let x = p.op(add(a, i));
         let t = p.tag(add(a, i));
-        let y = if t == T_VALUE && !(handle_none && i == 1) {
+        let y = if t == Tag::Value && !(handle_none && i == 1) {
             vm.get(x)
-        } else if t == T_BLOCK {
+        } else if t == Tag::Block {
             bm.get(x)
         } else {
             x
@@ -466,14 +453,14 @@ fn copy_words(inout p: Program, a: u64, n: u64, in vm: Map, in bm: Map, handle_n
 // The successors of a block's terminator, in `successors` order.
 fn successors(in p: Program, bk: BlockRow) -> ChunkSeq[u64] {
     let mut s: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    if bk.term == TERM_JUMP {
+    if bk.term == Term::Jump {
         s.push(p.op(bk.ta));
-    } else if bk.term == TERM_BRANCH {
+    } else if bk.term == Term::Branch {
         s.push(p.op(inc(bk.ta)));
         s.push(p.op(add(bk.ta, 2)));
-    } else if bk.term == TERM_MATCH {
+    } else if bk.term == Term::Match {
         for i in 0..bk.tn {
-            if p.tag(add(bk.ta, i)) == T_BLOCK {
+            if p.tag(add(bk.ta, i)) == Tag::Block {
                 s.push(p.op(add(bk.ta, i)));
             }
         }
@@ -543,7 +530,7 @@ fn put_trailer(inout p: Program, fr: FnRow, in bm: Map, in vm: Map, in copies: C
                 }
             }
         }
-        p.put(add(n, extra), T_RAW);
+        p.put(add(n, extra), Tag::Raw);
         let body = copy_words(
             inout p,
             inc(y),
@@ -557,7 +544,7 @@ fn put_trailer(inout p: Program, fr: FnRow, in bm: Map, in vm: Map, in copies: C
             for e in 0..eb.len() {
                 if u64_at(in eb, e) == b {
                     let s0 = u64_at(in es, e);
-                    p.put(bm.get(b), T_BLOCK);
+                    p.put(bm.get(b), Tag::Block);
                     let rest = copy_words(
                         inout p,
                         inc(s0),
@@ -586,11 +573,11 @@ fn put_fn_header(inout p: Program, fr: FnRow, in fresh: Fresh) -> (u64, u64) {
         in map_new(),
         false
     );
-    p.put(add(vn, fresh.vals.len()), T_RAW);
+    p.put(add(vn, fresh.vals.len()), Tag::Raw);
     let old = copy_words(inout p, va, wrapping_mul(vn, 2), in map_new(), in map_new(), false);
     for i in 0..fresh.vals.len() {
-        p.put(u64_at(in fresh.vals, i), T_VALUE);
-        p.put(w(u32_at(in fresh.tys, i)), T_TYPE);
+        p.put(u64_at(in fresh.vals, i), Tag::Value);
+        p.put(w(u32_at(in fresh.tys, i)), Tag::Type);
     }
     let end = add(va, wrapping_mul(vn, 2));
     let rest = copy_words(
@@ -708,9 +695,9 @@ pub fn copy_loop(
                 wrapping_shl_u64(b, 32) | q
             };
             let access = conv.keys.find(key);
-            let handle_none = i.op == OP_HANDLE && p.op(i.a) == 0;
+            let handle_none = i.op == Op::Handle && p.op(i.a) == 0;
             let a = copy_words(inout p, i.a, i.n, in vm, in map_new(), handle_none);
-            if access != NONE64 && i.op == OP_SEQ {
+            if access != NONE64 && i.op == Op::Seq {
                 let e = pool_entry(inout p, POOL_HOISTED, n32(u64_at(in conv.keys.vals, access)));
                 set_word(inout p, a, e);
                 i.fallible = 0;
@@ -806,11 +793,11 @@ pub fn copy_loop(
     }
     prow.i0 = i0;
     prow.ic = add(prow.ic, guards.rows.len());
-    prow.term = TERM_BRANCH;
+    prow.term = Term::Branch;
     prow.ta = p.ops.len();
-    p.put(guard, T_VALUE);
-    p.put(bm.get(h), T_BLOCK);
-    p.put(h, T_BLOCK);
+    p.put(guard, Tag::Value);
+    p.put(bm.get(h), Tag::Block);
+    p.put(h, Tag::Block);
     prow.tn = 3;
     set_block(inout p, add(b0, pre), prow);
     // The function row: new blocks, the trailer with the copies' drops, the

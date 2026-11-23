@@ -7,6 +7,9 @@ use self::{
     raise_io,
     kind_dir
 };
+use self::sys::{
+    os_list
+};
 
 // A list of paths relative to the listed directory, separated by `/`, in
 // one byte arena: entry `i` is `bytes[start(i)..ends[i]]` (`start(0)` is
@@ -92,33 +95,10 @@ fn list_into(in dir: Slice[u8], in prefix: Slice[u8], inout out: Entries) eff [
     Fail[IoError]
 ] {
     let mut err: u64 = 0;
-    let mut d = match StdFs::vstd_fs_read_dir(in dir, inout err) {
-        Option::Some(d) => d,
-        Option::None => return raise_io(err),
-    };
-    let mut name: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    name.resize(256, 0);
-    loop {
-        let mut kind: u32 = 0;
-        let n = StdFs::vstd_fs_dir_next(inout d, inout name.as_slice_mut(), inout kind);
-        if n < 0 {
-            break;
-        }
-        let len = wrapping_u64(n);
-        if len > name.len() {
-            // Longer than the buffer: it was not consumed; ask again.
-            name.resize(len, 0);
-        } else {
-            if prefix.len() > 0 {
-                out.bytes.extend(in prefix);
-                out.bytes.push(47);
-            }
-            out.bytes.extend(in name[0..len]);
-            out.ends.push(out.bytes.len());
-            out.kinds.push(kind);
-        }
+    if os_list(in dir, in prefix, inout out.bytes, inout out.ends, inout out.kinds, inout err)
+        != 0 {
+        raise_io(err)
     }
-    StdFs::vstd_fs_dir_close(d);
 }
 
 // Whether the path of entry `x` sorts before entry `y`'s (bytewise).

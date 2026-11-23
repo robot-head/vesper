@@ -1,3 +1,110 @@
 load("//tools/bazel:defs.bzl", "vesper_crate")
+load("//tools/bazel:vesper_port.bzl", "VESPER_TARGET", "vesper_package", "vesper_port_object")
 
-vesper_crate()
+# The port-backed CAS store (seed-copy rule,
+# docs/maintenance/porting-a-crate.md; Rust-exit SH6 lane 16, #1411):
+# build.rs links the object built here from the Loom package in vesper/,
+# which depends on @vesper-std/hash and @vesper-std/hash-sys, and checks
+# port/binding.rs against the generated binding. The compiler, vesper-tools,
+# vesper-codegen-verified, vesper-loom-admission and vesper-loom-trust/seed
+# link the frozen Rust seed copy, //crates/vesper-loom-cas/seed, instead.
+vesper_package(
+    name = "port_package",
+    srcs = glob(["vesper/src/**/*.ves"]),
+    manifest = "vesper/Loom.toml",
+    deps = [
+        "//:std_hash_package",
+        "//:std_hash_sys_package",
+    ],
+)
+
+vesper_port_object(
+    name = "loom_cas_vesper",
+    library = "loom_cas",
+    package = ":port_package",
+    target = VESPER_TARGET,
+)
+
+filegroup(
+    name = "loom_cas_vesper_binding",
+    srcs = [":loom_cas_vesper"],
+    output_group = "rust_binding",
+)
+
+# The divergent builds, one per ported module (the Cargo
+# `vesper-port-divergent` feature applies the same edits from build.rs with
+# VESPER_CAS_DIVERGE): each must build cleanly, and port/test-port.sh asserts
+# which test catches each one.
+[
+    vesper_port_object(
+        name = "loom_cas_vesper_divergent_" + module,
+        edit_src = "vesper/src/%s.ves" % src,
+        edits = {old: new},
+        library = "loom_cas",
+        package = ":port_package",
+        target = VESPER_TARGET,
+    )
+    for module, src, old, new in [
+        ("name", "name", "if b == 47 || b == 92 {", "if b == 47 {"),
+        ("id", "id", "        kind = 2;", "        kind = 1;"),
+        ("tree", "tree", "} else if tag == 3 && size != 0 {", "} else if tag == 4 && size != 0 {"),
+        (
+            "drv",
+            "drv",
+            "            wrapping_add(base, wrapping_add(wrapping_mul(j, 2), 1)),",
+            "            wrapping_add(base, wrapping_mul(j, 2)),",
+        ),
+        (
+            "store",
+            "store",
+            "if seen == size && same(in actual.as_slice(), in id) {",
+            "if seen == size {",
+        ),
+        ("fold", "fold", "encode(inout out, 962);", "encode(inout out, 963);"),
+        ("walk", "store", "if prev != 0 {", "if prev == 0 && prev != 0 {"),
+        ("pack", "store", "    if index != next {", "    if index != next && index == next {"),
+    ]
+]
+
+vesper_crate(
+    compile_data = [
+        "src/**",
+        "vesper/**",
+        "port/binding.rs",
+        "examples/lower_table.rs",
+    ],
+    build_script_data = [
+        ":loom_cas_vesper",
+        ":loom_cas_vesper_binding",
+        # hash-sys's `[package] objects` (the BLAKE3 C library), which the
+        # harness compiles into the port's archive.
+        "//:std_hash_sys_manifest",
+        "//:std_hash_sys_package",
+    ],
+    build_script_env = {
+        # rules_rust already makes these execpaths absolute.
+        "VESPER_PORT_OBJECT": "$(execpath :loom_cas_vesper)",
+        "VESPER_PORT_GENERATED_BINDING": "$(execpath :loom_cas_vesper_binding)",
+        "VESPER_PORT_OBJECT_PACKAGES": "$(execpath //:std_hash_sys_manifest)",
+    },
+)
+
+# The seed package (seed/) builds these same shared sources without the port.
+exports_files(glob([
+    "examples/*.rs",
+    "src/**/*.rs",
+    "tests/**/*.rs",
+    "vesper/src/**/*.ves",
+]))
+
+filegroup(
+    name = "rust_srcs",
+    srcs = glob(["src/**/*.rs"]),
+    visibility = ["//crates/vesper-loom-cas/seed:__pkg__"],
+)
+
+filegroup(
+    name = "vesper_srcs",
+    srcs = glob(["vesper/src/**/*.ves"]),
+    visibility = ["//crates/vesper-loom-cas/seed:__pkg__"],
+)

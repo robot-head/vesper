@@ -19,6 +19,9 @@ use self::fun::{
     u32_at,
     w
 };
+use @vesper/check-data::types::{
+    TyPass
+};
 
 const OP_READ: u8 = 3;
 const OP_BIND: u8 = 4;
@@ -30,8 +33,6 @@ const OP_FIP: u8 = 12;
 const OP_INDIRECT: u8 = 13;
 const OP_CLOSURE: u8 = 14;
 const OP_HANDLE: u8 = 15;
-const P_IN: u8 = 0;
-const P_SINK: u8 = 2;
 
 // Every block of `f`.
 pub fn all_blocks(in f: Fun) -> ChunkSeq[u32] {
@@ -77,7 +78,7 @@ fn drop_rooted(in f: Fun, in blocks: ChunkSeq[u32], root: u32) -> bool {
 
 // Whether argument `a` lends a place overlapping `place` other than `in`.
 fn lent_overlapping(in f: Fun, a: Arg, place: u32) -> bool {
-    a.pass != P_IN && a.place != 0 && f.overlaps(a.place, place)
+    a.pass != TyPass::In && a.place != 0 && f.overlaps(a.place, place)
 }
 
 // `facts::changes_len`: whether `i` may change the handle or the length of
@@ -171,7 +172,7 @@ pub fn stable_root(in f: Fun, in blocks: ChunkSeq[u32], root: u32) -> bool {
                 let mut others = true;
                 for jj in first..w(i.gn) {
                     let a = f.arg(add(w(i.g0), jj));
-                    if rooted(in f, a, root) && a.pass != P_IN {
+                    if rooted(in f, a, root) && a.pass != TyPass::In {
                         others = false;
                     }
                 }
@@ -180,7 +181,7 @@ pub fn stable_root(in f: Fun, in blocks: ChunkSeq[u32], root: u32) -> bool {
                 let mut others = true;
                 for jj in 0..w(i.gn) {
                     let a = f.arg(add(w(i.g0), jj));
-                    if rooted(in f, a, root) && a.pass != P_IN {
+                    if rooted(in f, a, root) && a.pass != TyPass::In {
                         others = false;
                     }
                 }
@@ -267,7 +268,7 @@ pub fn single_bindings(in f: Fun) -> ChunkSeq[u32] {
             || i.op == OP_FIP {
             for j in 0..w(i.gn) {
                 let a = f.arg(add(w(i.g0), j));
-                if a.pass != P_IN && a.pass != P_SINK && a.place != 0 {
+                if a.pass != TyPass::In && a.pass != TyPass::Sink && a.place != 0 {
                     let new = insert(inout spoiled, f.root_of(a.place));
                 }
             }
