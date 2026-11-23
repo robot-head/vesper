@@ -102,7 +102,7 @@ fn none_outcome() -> ResolveOutcome {
     }
 }
 
-fn err_diag(in code: Str, s: u64, e: u64, in msg: ChunkSeq[u8]) -> ResolveOutcome {
+pub fn err_diag(in code: Str, s: u64, e: u64, in msg: ChunkSeq[u8]) -> ResolveOutcome {
     let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
     put_str(inout out, in code);
     out.push(32);
@@ -271,15 +271,15 @@ fn node_at(in t: Types, ty: u32) -> TypeNode {
     }
 }
 
-fn sym_eq_str(in names: Names, s: u32, in target: Str) -> bool {
+pub fn sym_eq_str(in names: Names, s: u32, in target: Str) -> bool {
     names.spells(s, in target.as_bytes())
 }
 
-fn sym_starts_with(in names: Names, s: u32, in prefix: Str) -> bool {
+pub fn sym_starts_with(in names: Names, s: u32, in prefix: Str) -> bool {
     names.has_prefix(s, in prefix.as_bytes())
 }
 
-fn put_sym_bytes(in names: Names, s: u32, inout out: ChunkSeq[u8]) {
+pub fn put_sym_bytes(in names: Names, s: u32, inout out: ChunkSeq[u8]) {
     put_sym(inout out, in names, s);
 }
 
@@ -443,7 +443,7 @@ fn put_conf_path(in sess: PactSession, c: Conf, inout out: ChunkSeq[u8]) {
     }
 }
 
-fn has_infer(in t: Types, ty: u32) -> bool {
+pub fn has_infer(in t: Types, ty: u32) -> bool {
     let n = node_at(in t, ty);
     if n.kind == K_INFER {
         return true;
@@ -566,7 +566,7 @@ fn unique_assoc_trait(in d: Decls, in names: Names, assoc: u32) -> (bool, u64, C
     (false, NONE64, msg)
 }
 
-fn put_bytes(inout out: ChunkSeq[u8], in b: Slice[u8]) {
+pub fn put_bytes(inout out: ChunkSeq[u8], in b: Slice[u8]) {
     for i in 0..b.len() {
         let c = match b.try_get(i) {
             Option::Some(v) => v,
@@ -576,17 +576,15 @@ fn put_bytes(inout out: ChunkSeq[u8], in b: Slice[u8]) {
     }
 }
 
-fn failure_diag(
+pub fn failure_msg(
     in t: Types,
     in names: Names,
     in what_bytes: Slice[u8],
     what_sym: u32,
     receiver: u32,
     tag: u64,
-    in msg_raw: Slice[u8],
-    s: u64,
-    e: u64
-) -> ResolveOutcome {
+    in msg_raw: Slice[u8]
+) -> (u8, ChunkSeq[u8]) {
     let tlen = trim_end_len(in msg_raw);
     let msg = msg_raw[0..tlen];
     let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
@@ -600,7 +598,7 @@ fn failure_diag(
         if what_sym != NONE32 {
             put_derive_hint(in t, in names, what_sym, receiver, inout out);
         }
-        return err_diag("E0608", s, e, in out);
+        return (1, out);
     }
     if tag == 2 {
         put_str(inout out, "ambiguous implementation of ");
@@ -612,7 +610,7 @@ fn failure_diag(
         if has_infer(in t, receiver) {
             put_str(inout out, "; annotate the receiver or bind it to a typed local");
         }
-        return err_diag("E0609", s, e, in out);
+        return (2, out);
     }
     if tag == 3 {
         put_str(inout out, "trait solving overflowed for ");
@@ -622,7 +620,7 @@ fn failure_diag(
         put_str(inout out, " (");
         put_bytes(inout out, in msg);
         out.push(41);
-        return err_diag("E0611", s, e, in out);
+        return (3, out);
     }
     if tag == 4 {
         put_str(inout out, "unsupported generic dictionary dispatch for ");
@@ -631,7 +629,7 @@ fn failure_diag(
         display(in t, in names, receiver, inout out);
         put_str(inout out, ": ");
         put_bytes(inout out, in msg);
-        return err_diag("E0607", s, e, in out);
+        return (0, out);
     }
     put_str(inout out, "unsupported trait obligation ");
     put_bytes(inout out, in what_bytes);
@@ -639,7 +637,39 @@ fn failure_diag(
     display(in t, in names, receiver, inout out);
     put_str(inout out, ": ");
     put_bytes(inout out, in msg);
-    err_diag("E0607", s, e, in out)
+    (0, out)
+}
+
+pub fn failure_diag(
+    in t: Types,
+    in names: Names,
+    in what_bytes: Slice[u8],
+    what_sym: u32,
+    receiver: u32,
+    tag: u64,
+    in msg_raw: Slice[u8],
+    s: u64,
+    e: u64
+) -> ResolveOutcome {
+    let (code_tag, out) = failure_msg(
+        in t,
+        in names,
+        in what_bytes,
+        what_sym,
+        receiver,
+        tag,
+        in msg_raw
+    );
+    let code = if code_tag == 1 {
+        "E0608"
+    } else if code_tag == 2 {
+        "E0609"
+    } else if code_tag == 3 {
+        "E0611"
+    } else {
+        "E0607"
+    };
+    err_diag(in code, s, e, in out)
 }
 
 fn boxed_trait_name(in t: Types, in names: Names, ty: u32) -> (bool, u32) {
@@ -731,7 +761,7 @@ fn bound_stub(in sess: PactSession, tr_idx: u64, method: u32, s: u64, e: u64, dy
     }
 }
 
-struct CxHeader {
+pub struct CxHeader {
     pub env_params: ChunkSeq[Gen],
     pub assumptions: ChunkSeq[QGoal],
     pub args: ChunkSeq[QArg],
@@ -804,7 +834,7 @@ fn add_gen_bounds(
     }
 }
 
-fn read_cx_header(
+pub fn read_cx_header(
     inout r: Reader,
     in b: Slice[u8],
     inout sess: PactSession,
@@ -984,7 +1014,7 @@ fn read_cx_header(
     }
 }
 
-fn select_in_cx(
+pub fn select_in_cx(
     inout sess: PactSession,
     in cx: CxHeader,
     trait_name: u32,

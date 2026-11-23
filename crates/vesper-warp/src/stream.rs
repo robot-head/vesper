@@ -188,7 +188,7 @@ impl StreamConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WindowExceeded;
 
-pub use crate::imp::stream::{RecvBuf, SendBuf};
+pub use crate::ported::stream::{RecvBuf, SendBuf};
 
 // ---------------------------------------------------------------------------
 // Stream state machines.

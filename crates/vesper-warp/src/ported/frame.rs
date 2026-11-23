@@ -2,7 +2,7 @@
 //! A parsed frame comes back with spans of the input, turned back into
 //! slices here; an encoded frame passes its byte fields beside its words.
 
-use super::binding::{self as b, repr};
+use super::binding as b;
 use super::packet_type_to;
 use crate::PacketType;
 use crate::frame::{
@@ -10,10 +10,6 @@ use crate::frame::{
     RESET_TOKEN_LEN, Ranges, StreamFrame,
 };
 use crate::varint::Reader;
-
-// The mirror is the crate's `AckRange` in this build; the Rust struct is
-// `Eq` as well.
-impl Eq for repr::AckRange {}
 
 pub(crate) fn frame_error(e: b::FrameErr) -> FrameError {
     use b::FrameErr as F;
