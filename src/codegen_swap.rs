@@ -887,6 +887,13 @@ pub mod control {
     /// `native_session`: switch to `violation` block and return `status`.
     /// Args `[violation_blk, status]`; no result.
     pub const SESSION_VIOLATION: u32 = 42;
+    /// `dyn_drop_helper` head: create entry block, append params, switch to
+    /// entry, load scalar if `scalar_ty != 0` else keep `data`. Args
+    /// `[scalar_ty]`; answers `[value]`.
+    pub const DYN_DROP_HELPER_HEAD: u32 = 43;
+    /// `dyn_drop_helper` tail: emit `return_(&[])` and `seal_all_blocks`.
+    /// Args `[]`; no result.
+    pub const DYN_DROP_HELPER_TAIL: u32 = 44;
 }
 
 /// The `ffi` family's requests (SH4 lane 13, #1287): one foreign (`.vsys`)
