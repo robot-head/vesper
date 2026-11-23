@@ -690,6 +690,10 @@ vesper_crate(
             ":files",
             "//crates/vesper-bench-pmu:vesper_pkg",
         ],
+        "test/pulse_port": [
+            ":files",
+            "//crates/vesper-pulse/vesper:vesper_pkg",
+        ],
         # .vsys imports carried by packages (#1150): drivers over @vesper-std/fs.
         "test/vsys_packages": [":files"],
         # .vsys types in `use` (#1326): the real @vesper/cranelift as a dependency.
