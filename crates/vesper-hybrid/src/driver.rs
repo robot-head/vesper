@@ -24,10 +24,10 @@ use vesper::{
     runtime::Runtime,
 };
 
-/// The standard I/O host the driver's `@vesper-std/fs`, `process` and
-/// `env` imports bind to (the binding names it).
+/// The standard I/O host the driver's `@vesper-std/fs` and `process`
+/// imports bind to (the binding names it).
 pub mod std_host {
-    pub use vesper_std_host::{env, fs, process};
+    pub use vesper_std_host::{fs, process};
 }
 
 #[rustfmt::skip]
