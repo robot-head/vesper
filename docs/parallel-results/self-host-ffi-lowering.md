@@ -241,9 +241,13 @@ Extended `Codegen::foreign_perform_swapped` (`src/ffi_lowering/native.rs`) and `
 
 | Check | Result |
 | --- | --- |
-| `FFI_EMIT_STEP=1 cargo +1.100.0 test --locked --release -p vesper-codegen-swap-test --test self_host_ffi_emission -- --nocapture` | **0** CLIF differences, **0** object differences (`29` programs, `1,392` builds, `4,296` functions, `112` built on neither side across all 4 targets with `optimize` `true` and `false`; `18,944` requests answered from Vesper, `4,328` declined; `xsk`, `forms` floats/`CStrList`/`Option[CStr]`/`callbacks` + indirect calls, `vesper-std/fs`, `vesper-std/process`, `vesper-std/env`, `vesper-cranelift`, `vesper-codegen-base`) |
+| `FFI_EMIT_STEP=1 cargo +1.100.0 test --locked --release -p vesper-codegen-swap-test --test self_host_ffi_emission -- --nocapture` | **0** CLIF differences, **0** object differences (`29` programs, `1,400` builds, `4,300` functions, `112` built on neither side across all 4 targets with `optimize` `true` and `false`; `19,236` requests answered from Vesper, `4,276` declined; `xsk`, `forms` floats/`CStrList`/`Option[CStr]`/`callbacks` + indirect calls/`CWStr` + `Option[CWStr]`, `vesper-std/fs`, `vesper-std/process`, `vesper-std/env`, `vesper-cranelift`, `vesper-codegen-base`) |
 | Rust lines deleted | `0` (hooked path only; default path unchanged) |
 
 ## Part 3 extension 2: callbacks and indirect foreign calls (`#1287` / `#1656`)
 
 Extended `Codegen::foreign_perform_swapped` (`src/ffi_lowering/native.rs`), `codegen_swap::ffi::CALL_INDIRECT` (`7`), and `@vesper/ffi-emit` (`packages/vesper-ffi-lowering/emit/src/lib.ves`) to emit callback arguments (`ParameterType::Function` via `foreign_trampoline`) and indirect foreign calls (`plan.function.is_indirect()` via `ins_call_indirect`) from Vesper with **0** CLIF/object differences.
+
+## Part 3 extension 3: `CWStr` parameters and `Option[CWStr]` results (`#1287` / `#1666`)
+
+Extended `Codegen::foreign_perform_swapped` (`src/ffi_lowering/native.rs`) and `@vesper/ffi-emit` (`packages/vesper-ffi-lowering/emit/src/lib.ves`) with `KIND_CWSTR = 8` (`cwstr`) and `V_CWSTR = 9` (`foreign_cwstr_copy`), removing the `CWStr` decline so `forms` `cwstrs` and `@vesper-std/env` Windows `CWStr` calls emit from Vesper with **0** CLIF/object differences.
