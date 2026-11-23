@@ -1063,8 +1063,8 @@ vesper_crate(
         "test/self_host_wasm_backend": "long",
         # Loads the port package, then 17 compilations and Wasmtime runs.
         "test/wasm_seed_breadth": "long",
-        # Loads the port package, then native and Wasmtime runs (~4 min debug).
-        "test/wasm_seed_package_io": "long",
+        # Loads the port package, then native, Wasmtime, and vwasm fixed-point runs.
+        "test/wasm_seed_package_io": "eternal",
         # The component wrapping differential (#1334): ~2 min release.
         "test/self_host_wit_component": "long",
         "test/self_host_codegen_scalar": "long",
