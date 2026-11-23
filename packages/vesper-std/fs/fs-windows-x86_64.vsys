@@ -17,6 +17,13 @@ sys library StdFs (
     const O_TRUNC: i32 = 512;
     const O_APPEND: i32 = 1024;
     const O_CLOEXEC: i32 = 524288;
+    const O_DIRECTORY: i32 = 65536;
+    const O_NOFOLLOW: i32 = 131072;
+    const AT_FDCWD: i32 = -100;
+    const AT_REMOVEDIR: i32 = 512;
+    // `errno` values src/sys.ves tests (Win32 errors on Windows).
+    const ENOTDIR: u32 = 267;
+    const ELOOP: u32 = 1921;
     const STAT_MODE_WORD: u64 = 3;
     const STAT_MODE_SHIFT: u64 = 0;
     const STAT_SIZE_WORD: u64 = 6;
@@ -60,9 +67,21 @@ sys library StdFs (
     #[link_name = "vstd_opendir"]
     fn opendir(nocapture in path: CStr) -> ForeignVal[Option[Dir]] errno;
     #[link_name = "vstd_readdir"]
-    fn readdir(inout d: Dir) -> ForeignVal[u64];
+    fn readdir(inout d: Dir) -> ForeignVal[u64] errno;
     #[link_name = "vstd_closedir"]
     fn closedir(sink d: Dir) -> ForeignVal[i32];
+    #[link_name = "vstd_openat"]
+    fn openat(dirfd: i32, nocapture in path: CStr, flags: i32, ..., mode: i64) -> ForeignVal[i32] errno;
+    #[link_name = "vstd_unlinkat"]
+    fn unlinkat(dirfd: i32, nocapture in path: CStr, flags: i32) -> ForeignVal[i32] errno;
+    #[link_name = "vstd_fdopendir"]
+    fn fdopendir(fd: i32) -> ForeignVal[Option[Dir]] errno;
+    // The calling thread's `errno`, which src/sys.ves clears before
+    // `readdir`, whose `NULL` is an error only when it sets one.
+    #[link_name = "vstd_errno_address"]
+    fn errno_address() -> ForeignVal[u64];
+    #[link_name = "vstd_memset"]
+    fn fill(address: u64, byte: i32, size: u64) -> ForeignVal[u64];
     // The 8 bytes of a `struct dirent` from byte 16, which hold `d_type`
     // and the first bytes of `d_name`.
     #[link_name = "vstd_memcpy"]

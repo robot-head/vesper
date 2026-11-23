@@ -86,6 +86,16 @@ fn errno_kind(e: u32) -> u32 {
         } else {
             13
         },
+        95 => if mac {
+            13
+        } else {
+            11
+        },
+        102 => if mac {
+            11
+        } else {
+            13
+        },
         _ => 13,
     }
 }
@@ -486,6 +496,9 @@ pub fn os_create_dir(in path: Slice[u8], recursive: bool, inout err: u64) -> u32
 // Remove an empty directory, or with `recursive` a directory and
 // everything in it, as `std`'s `remove_dir_all`: a symbolic link is
 // removed, not followed, and entries that vanish meanwhile are skipped.
+// The walk opens each directory relative to its parent's descriptor with
+// `O_NOFOLLOW | O_DIRECTORY`, so a directory swapped for a link while the
+// tree is removed is unlinked, never entered.
 pub fn os_remove_dir(in path: Slice[u8], recursive: bool, inout err: u64) -> u32 eff [Ffi[StdFs]] {
     if !recursive {
         return rmdir(in path, inout err);
@@ -497,47 +510,87 @@ pub fn os_remove_dir(in path: Slice[u8], recursive: bool, inout err: u64) -> u32
     if m.kind == kind_symlink() {
         return os_remove_file(in path, inout err);
     }
-    remove_tree(in path, false, inout err)
+    remove_tree(StdFs::AT_FDCWD, in path, false, inout err)
 }
 
-fn remove_tree(in path: Slice[u8], child: bool, inout err: u64) -> u32 eff [Ffi[StdFs]] {
-    let mut bytes: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    let mut ends: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    let mut kinds: ChunkSeq[u32] = ChunkSeq::new[u32]();
-    let none: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    if os_list(in path, in none.as_slice(), inout bytes, inout ends, inout kinds, inout err) != 0 {
-        return gone(child, inout err);
-    }
-    let mut start: u64 = 0;
-    for i in 0..ends.len() {
-        let end = match ends.try_get(i) {
-            Option::Some(e) => e,
-            Option::None => start,
-        };
-        let mut sub: ChunkSeq[u8] = ChunkSeq::new[u8]();
-        sub.extend(in path);
-        sub.push(47);
-        sub.extend(in bytes[start..end]);
-        start = end;
-        let k = match kinds.try_get(i) {
-            Option::Some(k) => k,
-            Option::None => kind_other(),
-        };
-        let failed = if k == kind_dir() {
-            remove_tree(in sub.as_slice(), true, inout err)
-        } else {
-            let r = os_remove_file(in sub.as_slice(), inout err);
-            if r != 0 {
+// `unlinkat(dirfd, name, flags)`: 0, or 1 with `err` set.
+fn unlink_at(dirfd: i32, in name: Slice[u8], flags: i32, inout err: u64) -> u32 eff [Ffi[StdFs]] {
+    path_status(StdFs::unlinkat(dirfd, in name, flags), inout err)
+}
+
+// Remove the directory `name` under `dirfd` and everything in it; a
+// `child` that turns out not to be a directory is unlinked, and one that
+// is already gone is not an error.
+fn remove_tree(dirfd: i32, in name: Slice[u8], child: bool, inout err: u64)
+    -> u32 eff [Ffi[StdFs]] {
+    let flags = StdFs::O_CLOEXEC | StdFs::O_NOFOLLOW | StdFs::O_DIRECTORY;
+    let fd = loop {
+        match StdFs::openat(dirfd, in name, flags, 0) {
+            Result::Ok((fd, e)) => {
+                if fd >= 0 {
+                    break fd;
+                }
+                if e == EINTR {
+                    continue;
+                }
+                if child && (e == StdFs::ENOTDIR || e == StdFs::ELOOP) {
+                    return unlink_at(dirfd, in name, 0, inout err);
+                }
+                err = os_error_word(e);
+                return gone(child, inout err);
+            },
+            Result::Err(_) => {
+                err = bad_path();
+                return 1;
+            },
+        }
+    };
+    let (opened, e) = StdFs::fdopendir(fd);
+    let mut d = match opened {
+        Option::Some(d) => d,
+        Option::None => {
+            os_close(fd);
+            err = os_error_word(e);
+            return gone(child, inout err);
+        },
+    };
+    let mut name_buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    loop {
+        let (p, e) = next_entry(inout d);
+        if p == 0 {
+            if e != 0 {
+                let _ = StdFs::closedir(d);
+                err = os_error_word(e);
+                return 1;
+            }
+            break;
+        }
+        let mut w: u64 = 0;
+        let _ = StdFs::read_word(inout w, wrapping_add(p, 16), 8);
+        let at = wrapping_add(p, StdFs::DIRENT_NAME);
+        let n = wrapping_sub(StdFs::find_byte(at, 0), at);
+        if !is_dots(w, n) {
+            name_buf.resize(n, 0);
+            StdFs::copy_from(at, inout name_buf[0..n]);
+            // `d_type` says what the entry was when it was listed; a
+            // directory (or an unknown kind) is opened as one, which fails
+            // safely when it is something else by now.
+            let t = dirent_byte(w, StdFs::DIRENT_TYPE);
+            let failed = if t == 4 || t == 0 {
+                remove_tree(fd, in name_buf.as_slice(), true, inout err)
+            } else if unlink_at(fd, in name_buf.as_slice(), 0, inout err) != 0 {
                 gone(true, inout err)
             } else {
                 0
+            };
+            if failed != 0 {
+                let _ = StdFs::closedir(d);
+                return 1;
             }
-        };
-        if failed != 0 {
-            return 1;
         }
     }
-    if rmdir(in path, inout err) != 0 {
+    let _ = StdFs::closedir(d);
+    if unlink_at(dirfd, in name, StdFs::AT_REMOVEDIR, inout err) != 0 {
         return gone(child, inout err);
     }
     0
@@ -551,6 +604,18 @@ fn gone(child: bool, inout err: u64) -> u32 {
         return 0;
     }
     1
+}
+
+// The next `struct dirent` of `d` and 0, `NULL` and 0 after the last, or
+// `NULL` and the error when reading the directory fails: `errno` is
+// cleared first, since `readdir` returns `NULL` in both cases.
+fn next_entry(inout d: Dir) -> (u64, u32) eff [Ffi[StdFs]] {
+    let _ = StdFs::fill(StdFs::errno_address(), 0, 4);
+    let (p, e) = StdFs::readdir(inout d);
+    if p != 0 {
+        return (p, 0);
+    }
+    (0, e)
 }
 
 // Flush a directory's entries to storage after a rename: `fsync` on the
@@ -648,8 +713,13 @@ pub fn os_list(
     };
     err = 0;
     loop {
-        let p = StdFs::readdir(inout d);
+        let (p, e) = next_entry(inout d);
         if p == 0 {
+            if e != 0 {
+                let _ = StdFs::closedir(d);
+                err = os_error_word(e);
+                return 1;
+            }
             break;
         }
         // `d_type` and the start of `d_name` in one word; the name's

@@ -228,6 +228,13 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         fn readdir(dir: *mut c_void) -> *mut c_void;
         fn closedir(dir: *mut c_void) -> i32;
         fn bcopy(src: *const c_void, dst: *mut c_void, n: usize);
+        fn openat(dirfd: i32, path: *const c_char, flags: i32, ...) -> i32;
+        fn unlinkat(dirfd: i32, path: *const c_char, flags: i32) -> i32;
+        fn fdopendir(fd: i32) -> *mut c_void;
+        fn memset(dst: *mut c_void, byte: i32, n: usize) -> *mut c_void;
+        #[cfg_attr(target_os = "macos", link_name = "__error")]
+        #[cfg_attr(not(target_os = "macos"), link_name = "__errno_location")]
+        fn errno_address() -> *mut i32;
     }
     vec![
         ("open", open as *const u8),
@@ -248,6 +255,18 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         ("readdir", readdir as *const u8),
         ("closedir", closedir as *const u8),
         ("bcopy", bcopy as *const u8),
+        ("openat", openat as *const u8),
+        ("unlinkat", unlinkat as *const u8),
+        ("fdopendir", fdopendir as *const u8),
+        ("memset", memset as *const u8),
+        (
+            if cfg!(target_os = "macos") {
+                "__error"
+            } else {
+                "__errno_location"
+            },
+            errno_address as *const u8,
+        ),
         ("getenv", getenv as *const u8),
         ("getcwd", getcwd as *const u8),
         ("dlsym", dlsym as *const u8),

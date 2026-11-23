@@ -7,7 +7,9 @@
 //! itself (gap G7, UTF-16 paths): each has the C signature of the libc
 //! function its `.vsys` declaration names, over UTF-8 paths and `std::fs`.
 //!
-//! - A descriptor indexes this module's table of open files.
+//! - A descriptor indexes this module's table of open files and of the
+//!   directories `openat` opened (by path: `remove_dir_all` walks the tree
+//!   by name under them, and a directory link is refused, not entered).
 //! - `stat`, `lstat` and `fstat` fill the Linux x86_64 `struct stat` fields
 //!   src/sys.ves reads (`st_mode` at byte 24, `st_size` at 48, `st_mtim`
 //!   at 88), and `readdir` returns a record laid out as glibc's `struct
@@ -27,6 +29,11 @@ const ERROR_INVALID_NAME: u32 = 123;
 const ERROR_CALL_NOT_IMPLEMENTED: u32 = 120;
 /// `ERROR_INVALID_HANDLE`: a descriptor that is not open.
 const ERROR_INVALID_HANDLE: u32 = 6;
+/// `ERROR_DIRECTORY` and `ERROR_CANT_RESOLVE_FILENAME`: what `openat` with
+/// `O_DIRECTORY | O_NOFOLLOW` reports for a file and for a link (the
+/// `ENOTDIR` and `ELOOP` of fs-windows-x86_64.vsys).
+const ERROR_DIRECTORY: u32 = 267;
+const ERROR_CANT_RESOLVE_FILENAME: u32 = 1921;
 
 /// The `open` flags fs-windows-x86_64.vsys declares (Linux's values).
 const O_WRONLY: i32 = 1;
@@ -34,6 +41,9 @@ const O_CREAT: i32 = 64;
 const O_EXCL: i32 = 128;
 const O_TRUNC: i32 = 512;
 const O_APPEND: i32 = 1024;
+const O_DIRECTORY: i32 = 65536;
+const AT_FDCWD: i32 = -100;
+const AT_REMOVEDIR: i32 = 512;
 
 /// The `st_mode` file types and `d_type` values src/sys.ves decodes.
 const S_IFDIR: u64 = 0o040000;
@@ -44,11 +54,47 @@ const DT_REG: u8 = 8;
 const DT_LNK: u8 = 10;
 const DT_FIFO: u8 = 1;
 
-/// Open files, indexed by descriptor.
-static FILES: Mutex<Vec<Option<File>>> = Mutex::new(Vec::new());
+/// What a descriptor names.
+enum Open {
+    File(File),
+    Dir(std::path::PathBuf),
+}
 
-fn files() -> std::sync::MutexGuard<'static, Vec<Option<File>>> {
+/// Open files and directories, indexed by descriptor.
+static FILES: Mutex<Vec<Option<Open>>> = Mutex::new(Vec::new());
+
+fn files() -> std::sync::MutexGuard<'static, Vec<Option<Open>>> {
     FILES.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// A new descriptor for `open`.
+fn add(open: Open) -> i32 {
+    let mut table = files();
+    let fd = match table.iter().position(Option::is_none) {
+        Some(i) => {
+            table[i] = Some(open);
+            i
+        }
+        None => {
+            table.push(Some(open));
+            table.len() - 1
+        }
+    };
+    fd as i32
+}
+
+/// `name` under the directory `dirfd` (`AT_FDCWD`: the current one).
+fn under(dirfd: i32, name: std::path::PathBuf) -> std::io::Result<std::path::PathBuf> {
+    if dirfd == AT_FDCWD {
+        return Ok(name);
+    }
+    let table = files();
+    match usize::try_from(dirfd).ok().and_then(|i| table.get(i)) {
+        Some(Some(Open::Dir(d))) => Ok(d.join(name)),
+        _ => Err(std::io::Error::from_raw_os_error(
+            ERROR_INVALID_HANDLE as i32,
+        )),
+    }
 }
 
 /// Record `e` as the thread's last error.
@@ -80,7 +126,7 @@ unsafe fn path(path: *const c_char) -> std::io::Result<std::path::PathBuf> {
 fn with_file<T>(fd: i32, fallback: T, f: impl FnOnce(&mut File) -> T) -> T {
     let mut table = files();
     match usize::try_from(fd).ok().and_then(|i| table.get_mut(i)) {
-        Some(Some(file)) => f(file),
+        Some(Some(Open::File(file))) => f(file),
         _ => {
             set_last_error(ERROR_INVALID_HANDLE);
             fallback
@@ -114,25 +160,68 @@ pub unsafe extern "C" fn vstd_open(p: *const c_char, flags: i32, _mode: i64) -> 
         o.open(p)
     });
     match opened {
-        Ok(file) => {
-            let mut table = files();
-            let fd = match table.iter().position(Option::is_none) {
-                Some(i) => {
-                    table[i] = Some(file);
-                    i
-                }
-                None => {
-                    table.push(Some(file));
-                    table.len() - 1
-                }
-            };
-            fd as i32
-        }
+        Ok(file) => add(Open::File(file)),
         Err(e) => {
             fail(&e);
             -1
         }
     }
+}
+
+/// `openat(dirfd, name, flags, mode)`: with `O_DIRECTORY` (as
+/// `remove_dir_all` opens with `O_NOFOLLOW`) the directory itself, refusing
+/// a link and a file; otherwise a file, as [`vstd_open`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vstd_openat(dirfd: i32, p: *const c_char, flags: i32, mode: i64) -> i32 {
+    // SAFETY: the lowering passes a NUL-terminated copy for the call.
+    let full = match unsafe { path(p) }.and_then(|p| under(dirfd, p)) {
+        Ok(full) => full,
+        Err(e) => {
+            fail(&e);
+            return -1;
+        }
+    };
+    if flags & O_DIRECTORY == 0 {
+        let Ok(c) = std::ffi::CString::new(os_bytes(full.as_os_str())) else {
+            set_last_error(ERROR_INVALID_NAME);
+            return -1;
+        };
+        // SAFETY: `c` is a NUL-terminated string.
+        return unsafe { vstd_open(c.as_ptr(), flags, mode) };
+    }
+    match std::fs::symlink_metadata(&full) {
+        Ok(m) if m.file_type().is_symlink() => {
+            set_last_error(ERROR_CANT_RESOLVE_FILENAME);
+            -1
+        }
+        Ok(m) if !m.is_dir() => {
+            set_last_error(ERROR_DIRECTORY);
+            -1
+        }
+        Ok(_) => add(Open::Dir(full)),
+        Err(e) => {
+            fail(&e);
+            -1
+        }
+    }
+}
+
+/// `unlinkat(dirfd, name, flags)`: the directory `name` with
+/// `AT_REMOVEDIR`, else the file.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vstd_unlinkat(dirfd: i32, p: *const c_char, flags: i32) -> i32 {
+    // SAFETY: the lowering passes a NUL-terminated copy for the call.
+    status(
+        unsafe { path(p) }
+            .and_then(|p| under(dirfd, p))
+            .and_then(|full| {
+                if flags & AT_REMOVEDIR != 0 {
+                    std::fs::remove_dir(full)
+                } else {
+                    std::fs::remove_file(full)
+                }
+            }),
+    )
 }
 
 /// `read(fd, buf, n)`.
@@ -326,7 +415,31 @@ pub struct DirState {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vstd_opendir(p: *const c_char) -> *mut DirState {
     // SAFETY: a NUL-terminated copy for the call.
-    let listed = unsafe { path(p) }.and_then(|p| {
+    open_dir(unsafe { path(p) })
+}
+
+/// `fdopendir(fd)`: the listing of the directory `openat` opened, which
+/// now owns the descriptor.
+#[unsafe(no_mangle)]
+pub extern "C" fn vstd_fdopendir(fd: i32) -> *mut DirState {
+    let taken = {
+        let mut table = files();
+        match usize::try_from(fd).ok().and_then(|i| table.get_mut(i)) {
+            Some(slot @ Some(Open::Dir(_))) => match slot.take() {
+                Some(Open::Dir(d)) => Ok(d),
+                _ => unreachable!(),
+            },
+            _ => Err(std::io::Error::from_raw_os_error(
+                ERROR_INVALID_HANDLE as i32,
+            )),
+        }
+    };
+    open_dir(taken)
+}
+
+/// A listing of the directory at `p`, or NULL with the last error set.
+fn open_dir(p: std::io::Result<std::path::PathBuf>) -> *mut DirState {
+    let listed = p.and_then(|p| {
         let mut records = vec![];
         for e in std::fs::read_dir(p)? {
             let e = e?;
@@ -340,6 +453,8 @@ pub unsafe extern "C" fn vstd_opendir(p: *const c_char) -> *mut DirState {
             r[18] = t;
             r.extend(os_bytes(&e.file_name()));
             r.push(0);
+            // src/sys.ves reads the 8 bytes from byte 16 of every record.
+            r.resize(r.len().max(24), 0);
             records.push(r);
         }
         Ok(DirState { records, next: 0 })
@@ -363,7 +478,11 @@ pub unsafe extern "C" fn vstd_readdir(d: *mut DirState) -> *const u8 {
             d.next += 1;
             r.as_ptr()
         }
-        None => std::ptr::null(),
+        None => {
+            // The end, not an error: the listing was read at `opendir`.
+            set_last_error(0);
+            std::ptr::null()
+        }
     }
 }
 
@@ -373,6 +492,25 @@ pub unsafe extern "C" fn vstd_closedir(d: *mut DirState) -> i32 {
     // SAFETY: `sink` consumes the handle exactly once.
     drop(unsafe { free_handle(HandleKind::Dir, d) });
     0
+}
+
+thread_local! {
+    static ERRNO: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// The word src/sys.ves clears before `readdir` (the shim reports errors
+/// through the last error instead).
+#[unsafe(no_mangle)]
+pub extern "C" fn vstd_errno_address() -> *mut u32 {
+    ERRNO.with(|e| e.as_ptr())
+}
+
+/// `memset(dst, byte, n)`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vstd_memset(dst: *mut u8, byte: i32, n: usize) -> *mut u8 {
+    // SAFETY: the caller passes `n` writable bytes at `dst`.
+    unsafe { std::ptr::write_bytes(dst, byte as u8, n) };
+    dst
 }
 
 /// `bcopy(src, dst, n)`.
@@ -403,5 +541,10 @@ pub(crate) fn symbols() -> Vec<(&'static str, *const u8)> {
         ("vstd_readdir", vstd_readdir as *const u8),
         ("vstd_closedir", vstd_closedir as *const u8),
         ("vstd_bcopy", vstd_bcopy as *const u8),
+        ("vstd_openat", vstd_openat as *const u8),
+        ("vstd_unlinkat", vstd_unlinkat as *const u8),
+        ("vstd_fdopendir", vstd_fdopendir as *const u8),
+        ("vstd_errno_address", vstd_errno_address as *const u8),
+        ("vstd_memset", vstd_memset as *const u8),
     ]
 }
