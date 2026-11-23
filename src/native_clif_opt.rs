@@ -2492,6 +2492,49 @@ fn eliminate_guarded_loop_add_overflows(func: &mut ir::Function) {
         }
     };
 
+    #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+    enum BaseKey {
+        Val(Value),
+        AddConst(Value, i64),
+    }
+
+    let const_val = |func: &ir::Function, v: Value| -> Option<i64> {
+        def_inst(func, v).and_then(|inst| match func.dfg.insts[inst] {
+            InstructionData::UnaryImm {
+                opcode: Opcode::Iconst,
+                imm,
+            } => Some(imm.bits()),
+            _ => None,
+        })
+    };
+
+    let base_key = |func: &ir::Function, v: Value| -> BaseKey {
+        let v = func.dfg.resolve_aliases(v);
+        let Some(inst) = def_inst(func, v) else {
+            return BaseKey::Val(v);
+        };
+        match func.dfg.insts[inst] {
+            InstructionData::BinaryImm64 {
+                opcode: Opcode::IaddImm,
+                arg,
+                imm,
+            } => BaseKey::AddConst(func.dfg.resolve_aliases(arg), imm.bits()),
+            InstructionData::Binary {
+                opcode: Opcode::Iadd,
+                args: [a, b],
+            } => {
+                if let Some(c) = const_val(func, b) {
+                    BaseKey::AddConst(func.dfg.resolve_aliases(a), c)
+                } else if let Some(c) = const_val(func, a) {
+                    BaseKey::AddConst(func.dfg.resolve_aliases(b), c)
+                } else {
+                    BaseKey::Val(v)
+                }
+            }
+            _ => BaseKey::Val(v),
+        }
+    };
+
     let is_hi_minus_one = |func: &ir::Function, v: Value, hi: Value| -> bool {
         let Some(inst) = def_inst(func, v) else {
             return false;
@@ -2522,9 +2565,14 @@ fn eliminate_guarded_loop_add_overflows(func: &mut ir::Function) {
     };
 
     let collect_ovf_flags =
-        |func: &ir::Function, flag: Value, hi: Value, out: &mut HashSet<Value>| {
+        |func: &ir::Function,
+         flag: Value,
+         hi: Value,
+         out: &mut HashSet<BaseKey>,
+         proven_add_consts: &mut HashSet<(Value, i64)>| {
             let mut work = vec![func.dfg.resolve_aliases(flag)];
             let mut visited = HashSet::new();
+            let mut ovf_insts = HashSet::new();
             while let Some(cur) = work.pop() {
                 if !visited.insert(cur) {
                     continue;
@@ -2541,22 +2589,78 @@ fn eliminate_guarded_loop_add_overflows(func: &mut ir::Function) {
                         }
                     }
                     ir::ValueDef::Result(inst, 1) => {
-                        if let InstructionData::Binary {
-                            opcode: Opcode::UaddOverflow,
-                            args: [a, b],
-                        } = func.dfg.insts[inst]
-                        {
-                            let a = func.dfg.resolve_aliases(a);
-                            let b = func.dfg.resolve_aliases(b);
-                            if is_hi_minus_one(func, a, hi) {
-                                out.insert(b);
+                        if matches!(
+                            func.dfg.insts[inst],
+                            InstructionData::Binary {
+                                opcode: Opcode::UaddOverflow,
+                                ..
                             }
-                            if is_hi_minus_one(func, b, hi) {
-                                out.insert(a);
-                            }
+                        ) {
+                            ovf_insts.insert(inst);
                         }
                     }
                     _ => {}
+                }
+            }
+            let uadd_args = |v: Value| -> Option<(Value, Value)> {
+                let inst = def_inst(func, v)?;
+                if !ovf_insts.contains(&inst) {
+                    return None;
+                }
+                match func.dfg.insts[inst] {
+                    InstructionData::Binary {
+                        opcode: Opcode::UaddOverflow,
+                        args: [u, w],
+                    } => Some((func.dfg.resolve_aliases(u), func.dfg.resolve_aliases(w))),
+                    _ => None,
+                }
+            };
+            let record_hi_pair =
+                |other: Value,
+                 out: &mut HashSet<BaseKey>,
+                 proven_add_consts: &mut HashSet<(Value, i64)>| {
+                    out.insert(BaseKey::Val(other));
+                    out.insert(base_key(func, other));
+                    if let Some((u, w)) = uadd_args(other) {
+                        if let Some(c) = const_val(func, w) {
+                            out.insert(BaseKey::AddConst(u, c));
+                            proven_add_consts.insert((u, c));
+                        }
+                        if let Some(c) = const_val(func, u) {
+                            out.insert(BaseKey::AddConst(w, c));
+                            proven_add_consts.insert((w, c));
+                        }
+                    }
+                };
+            for &inst in &ovf_insts {
+                let InstructionData::Binary {
+                    opcode: Opcode::UaddOverflow,
+                    args: [a, b],
+                } = func.dfg.insts[inst]
+                else {
+                    continue;
+                };
+                let a = func.dfg.resolve_aliases(a);
+                let b = func.dfg.resolve_aliases(b);
+                if is_hi_minus_one(func, a, hi) {
+                    record_hi_pair(b, out, proven_add_consts);
+                }
+                if is_hi_minus_one(func, b, hi) {
+                    record_hi_pair(a, out, proven_add_consts);
+                }
+                for (sum_part, const_part) in [(a, b), (b, a)] {
+                    if let Some(c) = const_val(func, const_part)
+                        && let Some((u, w)) = uadd_args(sum_part)
+                    {
+                        if is_hi_minus_one(func, u, hi) {
+                            out.insert(BaseKey::AddConst(w, c));
+                            proven_add_consts.insert((w, c));
+                        }
+                        if is_hi_minus_one(func, w, hi) {
+                            out.insert(BaseKey::AddConst(u, c));
+                            proven_add_consts.insert((u, c));
+                        }
+                    }
                 }
             }
         };
@@ -2629,7 +2733,8 @@ fn eliminate_guarded_loop_add_overflows(func: &mut ir::Function) {
         };
         let lo = func.dfg.resolve_aliases(lo);
 
-        let mut proven_bases: HashSet<Value> = HashSet::new();
+        let mut proven_bases: HashSet<BaseKey> = HashSet::new();
+        let mut proven_add_consts: HashSet<(Value, i64)> = HashSet::new();
         // Walk up chained single-predecessor `bounds_hoist` guard blocks
         // (`guard_1 -> join_1 -> guard_2 -> ... -> fast_header`), resolving any
         // `Jump` block-param forwarding along the chain.
@@ -2651,6 +2756,7 @@ fn eliminate_guarded_loop_add_overflows(func: &mut ir::Function) {
             let Some(pred_term) = func.layout.last_inst(pred) else {
                 break;
             };
+            let mut next_target = pred;
             let guard = match &func.dfg.insts[pred_term] {
                 InstructionData::Brif {
                     arg,
@@ -2676,7 +2782,7 @@ fn eliminate_guarded_loop_add_overflows(func: &mut ir::Function) {
                             if let Some(p_idx) =
                                 func.dfg.block_params(pred).iter().position(|&p| p == p_val)
                             {
-                                let mut live_vals = vec![];
+                                let mut live_incoming = vec![];
                                 for edge in cfg.pred_iter(pred) {
                                     let p = edge.block;
                                     let Some(p_term) = func.layout.last_inst(p) else {
@@ -2702,14 +2808,16 @@ fn eliminate_guarded_loop_add_overflows(func: &mut ir::Function) {
                                                 )
                                             });
                                             if !is_zero {
-                                                live_vals.push(func.dfg.resolve_aliases(v));
+                                                live_incoming
+                                                    .push((p, func.dfg.resolve_aliases(v)));
                                             }
                                         }
                                     }
                                 }
-                                let [only_val] = live_vals[..] else {
+                                let [(only_pred, only_val)] = live_incoming[..] else {
                                     break;
                                 };
+                                next_target = only_pred;
                                 only_val
                             } else {
                                 p_val
@@ -2759,7 +2867,7 @@ fn eliminate_guarded_loop_add_overflows(func: &mut ir::Function) {
                 } else if is_empty_range(b) {
                     conj = func.dfg.resolve_aliases(a);
                 } else {
-                    target = pred;
+                    target = next_target;
                     continue;
                 }
             }
@@ -2787,12 +2895,12 @@ fn eliminate_guarded_loop_add_overflows(func: &mut ir::Function) {
                         arg,
                         imm,
                     } if imm.bits() == 0 => {
-                        collect_ovf_flags(func, arg, hi, &mut proven_bases);
+                        collect_ovf_flags(func, arg, hi, &mut proven_bases, &mut proven_add_consts);
                     }
                     _ => {}
                 }
             }
-            target = pred;
+            target = next_target;
         }
         if proven_bases.is_empty() {
             continue;
@@ -2831,8 +2939,17 @@ fn eliminate_guarded_loop_add_overflows(func: &mut ir::Function) {
                 if bound != x && bound != y {
                     continue;
                 }
-                if (x == iv && proven_bases.contains(&y)) || (y == iv && proven_bases.contains(&x))
-                {
+                let is_proven_iv_sum = (x == iv
+                    && (proven_bases.contains(&BaseKey::Val(y))
+                        || proven_bases.contains(&base_key(func, y))))
+                    || (y == iv
+                        && (proven_bases.contains(&BaseKey::Val(x))
+                            || proven_bases.contains(&base_key(func, x))));
+                let is_proven_const_sum = matches!(
+                    base_key(func, sum),
+                    BaseKey::AddConst(base, c) if proven_add_consts.contains(&(base, c))
+                );
+                if is_proven_iv_sum || is_proven_const_sum {
                     func.dfg.replace(inst).iconst(types::I8, 0);
                 }
             }
