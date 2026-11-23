@@ -38,6 +38,7 @@ use cranelift_codegen::ir::{
     self, Block, BlockArg, Inst, InstBuilder, InstructionData, Opcode, StackSlot, StackSlotKind,
     Type, Value, types,
 };
+use cranelift_codegen::loop_analysis::{Loop, LoopAnalysis};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Run every step on `func`.
@@ -55,6 +56,7 @@ pub fn run(func: &mut ir::Function) {
     promote_slots(func);
     remove_constant_params(func);
     fold_narrow_extends(func);
+    fold_trivial_arith_and_bool_extends(func);
     sink_compares(func);
     thread_branches(func);
     thread_decided_branches(func);
@@ -65,6 +67,7 @@ pub fn run(func: &mut ir::Function) {
     }
     remove_dead(func);
     share_invariant_loads(func);
+    hoist_loop_invariants(func);
     sink_slot_inits(func);
     merge_tails(func);
     shrink_unused_slots(func);
@@ -2017,7 +2020,7 @@ fn fold_narrow_extends(func: &mut ir::Function) {
             let InstructionData::Unary { opcode, arg } = func.dfg.insts[inst] else {
                 continue;
             };
-            if !matches!(opcode, Opcode::Ireduce | Opcode::Uextend) {
+            if !matches!(opcode, Opcode::Ireduce | Opcode::Uextend | Opcode::Sextend) {
                 continue;
             }
             let dest = func.dfg.first_result(inst);
@@ -2079,6 +2082,62 @@ fn fold_narrow_extends(func: &mut ir::Function) {
                     }
                 }
                 (
+                    Opcode::Sextend,
+                    InstructionData::UnaryImm {
+                        opcode: Opcode::Iconst,
+                        imm,
+                    },
+                ) => {
+                    let shift = 64 - src_ty.bits();
+                    let v = (((imm.bits() << shift) >> shift) as u64) & dst_mask;
+                    func.dfg.replace(inst).iconst(dst_ty, v as i64);
+                    changed = true;
+                }
+                (
+                    Opcode::Ireduce,
+                    InstructionData::Unary {
+                        opcode: Opcode::Sextend,
+                        arg: inner,
+                    },
+                ) => {
+                    let inner = func.dfg.resolve_aliases(inner);
+                    let inner_ty = func.dfg.value_type(inner);
+                    if inner_ty == dst_ty {
+                        func.layout.remove_inst(inst);
+                        func.dfg.clear_results(inst);
+                        func.dfg.change_to_alias(dest, inner);
+                        changed = true;
+                    } else if inner_ty.bits() < dst_ty.bits() {
+                        func.dfg.insts[inst] = InstructionData::Unary {
+                            opcode: Opcode::Sextend,
+                            arg: inner,
+                        };
+                        changed = true;
+                    } else if mask_for(inner_ty).is_some() {
+                        func.dfg.insts[inst] = InstructionData::Unary {
+                            opcode: Opcode::Ireduce,
+                            arg: inner,
+                        };
+                        changed = true;
+                    }
+                }
+                (
+                    Opcode::Sextend,
+                    InstructionData::Unary {
+                        opcode: Opcode::Sextend,
+                        arg: inner,
+                    },
+                ) => {
+                    let inner = func.dfg.resolve_aliases(inner);
+                    if mask_for(func.dfg.value_type(inner)).is_some() {
+                        func.dfg.insts[inst] = InstructionData::Unary {
+                            opcode: Opcode::Sextend,
+                            arg: inner,
+                        };
+                        changed = true;
+                    }
+                }
+                (
                     Opcode::Uextend,
                     InstructionData::Unary {
                         opcode: Opcode::Uextend,
@@ -2115,6 +2174,275 @@ fn fold_narrow_extends(func: &mut ir::Function) {
         }
         if !changed {
             break;
+        }
+    }
+}
+
+/// Fold identity `imul_imm 1`/`0`, `iadd_imm 0`, and zero-comparisons or
+/// branches on `uextend`/`sextend` of narrower boolean values.
+fn fold_trivial_arith_and_bool_extends(func: &mut ir::Function) {
+    let unwrap_ext = |func: &ir::Function, v: Value| -> Option<(ir::Inst, Value)> {
+        let v = func.dfg.resolve_aliases(v);
+        let ir::ValueDef::Result(def, 0) = func.dfg.value_def(v) else {
+            return None;
+        };
+        if let InstructionData::Unary {
+            opcode: Opcode::Uextend | Opcode::Sextend,
+            arg,
+        } = func.dfg.insts[def]
+        {
+            Some((def, func.dfg.resolve_aliases(arg)))
+        } else {
+            None
+        }
+    };
+    for _ in 0..3 {
+        let mut changed = false;
+        for (_, inst) in insts(func) {
+            match func.dfg.insts[inst] {
+                InstructionData::BinaryImm64 {
+                    opcode: Opcode::ImulImm,
+                    arg,
+                    imm,
+                } => {
+                    let arg = func.dfg.resolve_aliases(arg);
+                    let dest = func.dfg.first_result(inst);
+                    if imm.bits() == 1 {
+                        func.layout.remove_inst(inst);
+                        func.dfg.clear_results(inst);
+                        func.dfg.change_to_alias(dest, arg);
+                        changed = true;
+                    } else if imm.bits() == 0 {
+                        let ty = func.dfg.value_type(dest);
+                        func.dfg.replace(inst).iconst(ty, 0);
+                        changed = true;
+                    }
+                }
+                InstructionData::BinaryImm64 {
+                    opcode: Opcode::IaddImm,
+                    arg,
+                    imm,
+                } if imm.bits() == 0 => {
+                    let arg = func.dfg.resolve_aliases(arg);
+                    let dest = func.dfg.first_result(inst);
+                    func.layout.remove_inst(inst);
+                    func.dfg.clear_results(inst);
+                    func.dfg.change_to_alias(dest, arg);
+                    changed = true;
+                }
+                InstructionData::IntCompareImm {
+                    opcode: Opcode::IcmpImm,
+                    cond,
+                    arg,
+                    imm,
+                } if imm.bits() == 0
+                    && matches!(
+                        cond,
+                        ir::condcodes::IntCC::Equal | ir::condcodes::IntCC::NotEqual
+                    ) =>
+                {
+                    if let Some((_, inner)) = unwrap_ext(func, arg) {
+                        let inner_is_cmp = matches!(
+                            func.dfg.value_def(inner),
+                            ir::ValueDef::Result(def, 0)
+                                if matches!(
+                                    func.dfg.insts[def],
+                                    InstructionData::IntCompare { .. }
+                                        | InstructionData::IntCompareImm { .. }
+                                )
+                        );
+                        let dest = func.dfg.first_result(inst);
+                        if cond == ir::condcodes::IntCC::NotEqual
+                            && inner_is_cmp
+                            && func.dfg.value_type(inner) == func.dfg.value_type(dest)
+                        {
+                            func.layout.remove_inst(inst);
+                            func.dfg.clear_results(inst);
+                            func.dfg.change_to_alias(dest, inner);
+                        } else {
+                            func.dfg.insts[inst] = InstructionData::IntCompareImm {
+                                opcode: Opcode::IcmpImm,
+                                cond,
+                                arg: inner,
+                                imm,
+                            };
+                        }
+                        changed = true;
+                    }
+                }
+                InstructionData::Brif {
+                    opcode: br_op,
+                    arg,
+                    blocks,
+                } => {
+                    if let Some((_, inner)) = unwrap_ext(func, arg) {
+                        func.dfg.insts[inst] = InstructionData::Brif {
+                            opcode: br_op,
+                            arg: inner,
+                            blocks,
+                        };
+                        changed = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+}
+
+/// Hoist pure loop-invariant instructions (and `notrap readonly can_move`
+/// loads) out of single-preheader loops into their unconditional preheader,
+/// innermost loop first.
+fn hoist_loop_invariants(func: &mut ir::Function) {
+    let cfg = ControlFlowGraph::with_function(func);
+    let domtree = DominatorTree::with_function(func, &cfg);
+    let mut loops = LoopAnalysis::new();
+    loops.compute(func, &cfg, &domtree);
+
+    let mut seen: HashSet<Loop> = HashSet::new();
+    let mut ordered: Vec<(usize, Loop)> = vec![];
+    for block in func.layout.blocks() {
+        let mut cur = loops.innermost_loop(block);
+        while let Some(lp) = cur {
+            if seen.insert(lp) {
+                let mut depth = 0usize;
+                let mut p = loops.loop_parent(lp);
+                while let Some(parent) = p {
+                    depth += 1;
+                    p = loops.loop_parent(parent);
+                }
+                ordered.push((depth, lp));
+            }
+            cur = loops.loop_parent(lp);
+        }
+    }
+    ordered.sort_by_key(|a| std::cmp::Reverse(a.0));
+
+    let in_loop = |b: Block, lp: Loop| -> bool {
+        let mut cur = loops.innermost_loop(b);
+        while let Some(l) = cur {
+            if l == lp {
+                return true;
+            }
+            cur = loops.loop_parent(l);
+        }
+        false
+    };
+
+    for (_, lp) in ordered {
+        let header = loops.loop_header(lp);
+        let mut outside_preds: Vec<Block> = cfg
+            .pred_iter(header)
+            .map(|p| p.block)
+            .filter(|&p| !in_loop(p, lp))
+            .collect();
+        outside_preds.sort_unstable();
+        outside_preds.dedup();
+        let [preheader] = outside_preds[..] else {
+            continue;
+        };
+        if !domtree.dominates(preheader, header, &func.layout) {
+            continue;
+        }
+        let Some(term) = func.layout.last_inst(preheader) else {
+            continue;
+        };
+        if !matches!(
+            func.dfg.insts[term],
+            InstructionData::Jump {
+                opcode: Opcode::Jump,
+                ..
+            }
+        ) {
+            continue;
+        }
+
+        let loop_blocks: Vec<Block> = func.layout.blocks().filter(|&b| in_loop(b, lp)).collect();
+
+        for _ in 0..4 {
+            let mut changed = false;
+            for &b in &loop_blocks {
+                let body: Vec<Inst> = func.layout.block_insts(b).collect();
+                for inst in body {
+                    if func.dfg.inst_results(inst).is_empty() {
+                        continue;
+                    }
+                    let hoistable = match &func.dfg.insts[inst] {
+                        InstructionData::Load {
+                            opcode:
+                                Opcode::Load
+                                | Opcode::Uload8
+                                | Opcode::Sload8
+                                | Opcode::Uload16
+                                | Opcode::Sload16
+                                | Opcode::Uload32
+                                | Opcode::Sload32,
+                            flags,
+                            ..
+                        } => flags.notrap() && flags.readonly() && flags.can_move(),
+                        data => matches!(
+                            data.opcode(),
+                            Opcode::Iconst
+                                | Opcode::F32const
+                                | Opcode::F64const
+                                | Opcode::Iadd
+                                | Opcode::IaddImm
+                                | Opcode::Isub
+                                | Opcode::Imul
+                                | Opcode::ImulImm
+                                | Opcode::Ishl
+                                | Opcode::Ushr
+                                | Opcode::Sshr
+                                | Opcode::Band
+                                | Opcode::Bor
+                                | Opcode::Bxor
+                                | Opcode::Bnot
+                                | Opcode::Ineg
+                                | Opcode::Uextend
+                                | Opcode::Sextend
+                                | Opcode::Ireduce
+                                | Opcode::Fadd
+                                | Opcode::Fsub
+                                | Opcode::Fmul
+                                | Opcode::Fneg
+                                | Opcode::Fabs
+                                | Opcode::Bitcast
+                                | Opcode::FcvtFromUint
+                                | Opcode::FcvtFromSint
+                                | Opcode::Icmp
+                                | Opcode::IcmpImm
+                                | Opcode::Fcmp
+                                | Opcode::Select
+                        ),
+                    };
+                    if !hoistable {
+                        continue;
+                    }
+                    let all_outside = values_of(func, inst).into_iter().all(|v| {
+                        let def_block = match func.dfg.value_def(v) {
+                            ir::ValueDef::Result(d, _) => func.layout.inst_block(d),
+                            ir::ValueDef::Param(pb, _) => Some(pb),
+                            ir::ValueDef::Union(_, _) => None,
+                        };
+                        def_block.is_some_and(|db| {
+                            !in_loop(db, lp) && domtree.dominates(db, preheader, &func.layout)
+                        })
+                    });
+                    if !all_outside {
+                        continue;
+                    }
+                    let term = func.layout.last_inst(preheader).unwrap();
+                    func.layout.remove_inst(inst);
+                    func.layout.insert_inst(inst, term);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
         }
     }
 }

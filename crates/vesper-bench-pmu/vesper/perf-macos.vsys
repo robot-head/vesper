@@ -1,0 +1,8 @@
+// macOS stub for `@vesper/bench-pmu`.
+sys library PerfSys (
+    target = "@TARGET@", abi = "@ABI@",
+    link = "dynamic", name = "c",
+    artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+) {
+    const PERF_IOC_ENABLE: u64 = 9216;
+}

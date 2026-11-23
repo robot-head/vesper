@@ -559,6 +559,36 @@ pub(crate) fn request_control_builder(
     .is_some())
 }
 
+/// Dispatches a `numeric` request from a module-level runtime helper that
+/// holds only a module without a [`crate::native::Codegen`] context.
+pub(crate) fn request_numeric_module(
+    module: &mut dyn Module,
+    op: u32,
+    args: &[u64],
+) -> Result<Option<Vec<u64>>, String> {
+    if hook(Family::Numeric).is_none() {
+        return Ok(None);
+    }
+    static EMPTY_WORLD: OnceLock<World> = OnceLock::new();
+    static EMPTY_PROGRAM: OnceLock<Program> = OnceLock::new();
+    let world = EMPTY_WORLD.get_or_init(World::default);
+    let program = EMPTY_PROGRAM.get_or_init(Program::default);
+    let mut func = cranelift_codegen::ir::Function::new();
+    let mut fb_ctx = cranelift_frontend::FunctionBuilderContext::new();
+    let mut builder = cranelift_frontend::FunctionBuilder::new(&mut func, &mut fb_ctx);
+    request(
+        Family::Numeric,
+        &mut builder,
+        module,
+        world,
+        program,
+        Site::NONE,
+        op,
+        args,
+        None,
+    )
+}
+
 /// The graph walk's request for one Place IR instruction: `inst` (block
 /// `block`, index `index` of lowered function `function`), whose operands
 /// have the Cranelift values in `values`, and whose type is `ty`. `None`
@@ -857,6 +887,13 @@ pub mod control {
     /// `native_session`: switch to `violation` block and return `status`.
     /// Args `[violation_blk, status]`; no result.
     pub const SESSION_VIOLATION: u32 = 42;
+    /// `dyn_drop_helper` head: create entry block, append params, switch to
+    /// entry, load scalar if `scalar_ty != 0` else keep `data`. Args
+    /// `[scalar_ty]`; answers `[value]`.
+    pub const DYN_DROP_HELPER_HEAD: u32 = 43;
+    /// `dyn_drop_helper` tail: emit `return_(&[])` and `seal_all_blocks`.
+    /// Args `[]`; no result.
+    pub const DYN_DROP_HELPER_TAIL: u32 = 44;
 }
 
 /// The `ffi` family's requests (SH4 lane 13, #1287): one foreign (`.vsys`)
@@ -1033,6 +1070,15 @@ pub mod numeric {
     /// The `vesper_parallel_for(body, data, n)` call of `parallel_for_call`:
     /// `[body FuncRef, v data, v n]`. Result `[value]` (`0`).
     pub const PARALLEL_FOR: u32 = 13;
+    /// Define an AOT runtime on the lent module (`regions::aot_runtime::define`,
+    /// `tiled::aot_runtime::define`, `fip::aot_runtime::declare_or_define[_free]`):
+    /// `[kind]` one of `RUNTIME_*`. No result; callers look up any needed
+    /// `FuncId` by symbol name on `m`.
+    pub const RUNTIME: u32 = 14;
+    pub const RUNTIME_REGIONS: u64 = 1;
+    pub const RUNTIME_TILED: u64 = 2;
+    pub const RUNTIME_BOX_ALLOC: u64 = 3;
+    pub const RUNTIME_BOX_FREE: u64 = 4;
     /// The classes of a [`FLOAT_CONVERT`] operand (`FROM_F32` and
     /// `FROM_F64` are also the float words of the other requests).
     pub const FROM_F32: u64 = 1;

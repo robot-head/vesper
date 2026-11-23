@@ -5,4 +5,3 @@ pub(crate) mod cc;
 pub(crate) mod conn;
 pub(crate) mod rtt;
 pub(crate) mod seq;
-pub(crate) mod wire;

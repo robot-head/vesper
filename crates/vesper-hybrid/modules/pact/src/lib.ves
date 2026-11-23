@@ -1,27 +1,46 @@
-// @vesper/hybrid-pact: the declaration pass of `pact_frontend::check_package`
-// served from Vesper in the hybrid Stage 2 build (self-hosting SH2 lane 13,
-// #1185).
-//
-// `pass_words` takes one package's input as little-endian words
-// (names, types, the world of the module without trait declarations, then
-// the declarations; written by `declaration_input` in
-// tests/common/pact_words.rs) and returns the diagnostics as packed text,
-// one `CODE START END MESSAGE` line each, which `decode_declaration_text`
-// reads back into Rust diagnostics.
+// @vesper/hybrid-pact: the trait declaration pass and full coherence-gated
+// Pact session of `pact_frontend::check_package` served from Vesper in the
+// hybrid Stage 2 build (self-hosting SH2 lane 13, #1185).
 
 // @export abi 4
 
 use @vesper/check-pact::{
-    declarations_words
+    PactSession,
+    declarations_words,
+    session_is_ok,
+    session_open,
+    session_revision,
+    session_solve,
+    session_take_diagnostics
 };
 
-// The layout version of `pass_words`; the hybrid's tests check it.
+// The layout version of the hybrid pact module; the hybrid's tests check it.
 pub fn format() -> u64 {
-    1
+    2
 }
 
 pub fn pass_words(in input: Slice[u8]) -> ChunkSeq[u64] {
     declarations_words(in input)
+}
+
+pub fn pact_session_open(in input: Slice[u8]) -> PactSession {
+    session_open(in input)
+}
+
+pub fn pact_session_is_ok(in s: PactSession) -> bool {
+    session_is_ok(in s)
+}
+
+pub fn pact_session_revision(in s: PactSession) -> ChunkSeq[u64] {
+    session_revision(in s)
+}
+
+pub fn pact_session_take_diagnostics(in s: PactSession) -> ChunkSeq[u64] {
+    session_take_diagnostics(in s)
+}
+
+pub fn pact_session_solve(inout s: PactSession, in query: Slice[u8]) -> ChunkSeq[u64] {
+    session_solve(inout s, in query)
 }
 
 // The divergent build's answer (build.rs `divergent-pact`): every package
@@ -33,4 +52,13 @@ fn divergent_words(in input: Slice[u8]) -> ChunkSeq[u64] {
     o.push(7454131892500308016);
     o.push(7630437);
     o
+}
+
+fn divergent_session(in input: Slice[u8]) -> PactSession {
+    let mut sess = session_open(in input);
+    sess.ok = false;
+    sess.out.clear();
+    let msg = "E0600 0 0 divergent\n".as_bytes();
+    sess.out.extend(in msg);
+    sess
 }

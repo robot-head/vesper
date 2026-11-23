@@ -141,6 +141,15 @@ pub fn define<M: Module>(m: &mut M) -> Result<(), String> {
     if m.target_config().pointer_type() != types::I64 {
         return Err("source regions in executables need a 64-bit target".into());
     }
+    if crate::codegen_swap::request_numeric_module(
+        m,
+        crate::codegen_swap::numeric::RUNTIME,
+        &[crate::codegen_swap::numeric::RUNTIME_REGIONS],
+    )?
+    .is_some()
+    {
+        return Ok(());
+    }
     let e = |e: cranelift_module::ModuleError| e.to_string();
     let sig = |m: &M, params: usize, ret: bool| {
         let mut s = m.make_signature();

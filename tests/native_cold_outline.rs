@@ -188,3 +188,37 @@ fn main() -> u64 {
         );
     }
 }
+
+#[test]
+fn fail_guard_does_not_invert_hot_tail() {
+    let source = "fn step(x: u64, y: u64) -> u64 {
+    wrapping_add(wrapping_mul(x, 3), y)
+}
+
+fn checked_hot_body(n: u64) -> u64 eff [Fail[ArithOverflow]] {
+    let m = n - 1;
+    let mut acc: u64 = 0;
+    for i in 0..m {
+        acc = wrapping_add(acc, step(i, m));
+    }
+    acc
+}
+
+fn main() -> u64 {
+    handle Fail[ArithOverflow] in {
+        checked_hot_body(10)
+    } with {
+        return x => x,
+        raise(_, _) => 0,
+    }
+}";
+    let world = check_world(source);
+    let eval = runtime::Runtime::new(&world).run("main", vec![]).unwrap();
+    let jit_opt = native::jit_with_options(&world, "main", true).unwrap();
+    assert_eq!(eval.to_string(), jit_opt.to_string());
+    let (_, clif) = native::object_with_options(&world, "main", None, true).unwrap();
+    assert!(
+        !clif.contains("checked_hot_body::cold#"),
+        "Fail error-return guard must not outline the hot body as ::cold#0:\n{clif}"
+    );
+}

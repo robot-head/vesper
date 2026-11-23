@@ -32,6 +32,8 @@ use @vesper/cranelift::{
     linkage_import,
     linkage_local,
     mem_trusted,
+    module_get_data,
+    module_get_function,
     switch_to_block,
     trap_user,
     ty_i64,
@@ -58,6 +60,10 @@ const ATOMIC_ADD: u32 = 1;
 
 // `live_counter`: the zeroed, eight-byte aligned, writable counter word.
 fn box_live_counter(inout m: Module) -> Option[DataId] eff [Ffi[Cranelift]] {
+    match module_get_data(inout m, in "vesper_box_live".as_bytes()) {
+        Some(id) => return Some(id),
+        None => {},
+    }
     let id = declare_data(inout m, in "vesper_box_live".as_bytes(), linkage_local(), true);
     let mut d = match data_new() {
         Some(d) => d,
@@ -90,11 +96,23 @@ pub fn define_box_runtime(inout m: Module, alloc: bool, free: bool) -> bool eff 
         Some(x) => x,
         None => return false,
     };
-    if alloc && !box_define_alloc(inout m, live) {
-        return false;
+    if alloc {
+        let missing = match module_get_function(inout m, in "vesper_box_alloc".as_bytes()) {
+            Some(_) => false,
+            None => true,
+        };
+        if missing && !box_define_alloc(inout m, live) {
+            return false;
+        }
     }
-    if free && !box_define_free(inout m, live) {
-        return false;
+    if free {
+        let missing = match module_get_function(inout m, in "vesper_box_free".as_bytes()) {
+            Some(_) => false,
+            None => true,
+        };
+        if missing && !box_define_free(inout m, live) {
+            return false;
+        }
     }
     true
 }

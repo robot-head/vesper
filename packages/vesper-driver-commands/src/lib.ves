@@ -38,6 +38,12 @@ use @vesper-std/fs::{
 use self::graph::{
     run_graph
 };
+use self::forge::{
+    run_forge
+};
+use self::ebpf::{
+    run_ebpf
+};
 
 enum Ascii: _ {
     LineFeed = 10,
@@ -130,6 +136,19 @@ pub fn run(in args: Args)
     }
     if eq(in c, in "graph") {
         return run_graph(in args);
+    }
+    if eq(in c, in "forge") {
+        return run_forge(in args);
+    }
+    if eq(in c, in "ebpf") {
+        return run_ebpf(in args);
+    }
+    if eq(in c, in "verify") && has_arg(in args, in "--refute") {
+        let found = locate(in "refute".as_bytes());
+        if found.len() == 0 {
+            return missing(in "refute".as_bytes());
+        }
+        return run_tool(in found.as_slice(), in args);
     }
     if compiler_command(in c) {
         return delegate();
@@ -493,6 +512,17 @@ fn locate(in t: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[StdEnv], Ffi[HybridCommands]
         }
     }
     ChunkSeq::new[u8]()
+}
+
+fn has_arg(in args: Args, in needle: Str) -> bool {
+    let n = args_count(in args);
+    for i in 1..n {
+        let a = arg(in args, i);
+        if eq(in a.as_slice(), in needle) {
+            return true;
+        }
+    }
+    false
 }
 
 // `missing`: a known tool whose binary is not there.
