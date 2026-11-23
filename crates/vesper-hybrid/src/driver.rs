@@ -55,18 +55,35 @@ pub fn main() -> c_int {
         // Passes catch their panics; the Vesper code does not unwind.
         .unwrap_or(PANIC_EXIT);
     if code == binding::delegate() {
-        // A panic in the Rust CLI (it resumes its CLI thread's) must not
-        // unwind across this C entry, which would abort: Rust's own start-up
-        // exits with 101 after the hook printed it.
-        let delegated = panic::catch_unwind(crate::main);
-        let _ = io::stdout().flush();
-        if delegated.is_err() {
-            std::process::exit(PANIC_EXIT as i32);
+        // Dispatch through `cli` directly and return `c_int` rather than
+        // calling `crate::main()` / `std::process::exit`: on Windows MSVC,
+        // `std::process::exit` calls `ExitProcess`, skipping C `atexit(report)`
+        // (`VESPER_HYBRID_STATS=1`).
+        const _: fn() = crate::main;
+        if let Some(tool_code) =
+            crate::tool_commands::dispatch(|c| crate::COMPILER_COMMANDS.contains(&c))
+        {
+            let _ = io::stdout().flush();
+            return tool_code as c_int;
         }
-        return 0;
+        let result = std::thread::Builder::new()
+            .name("vesper".to_owned())
+            .stack_size(crate::CLI_STACK_BYTES)
+            .spawn(crate::cli)
+            .expect("spawn the vesper CLI thread")
+            .join();
+        let _ = io::stdout().flush();
+        return match result {
+            Ok(Ok(())) => 0,
+            Ok(Err(e)) => {
+                eprintln!("vesper: {e}");
+                1
+            }
+            Err(_) => PANIC_EXIT as c_int,
+        };
     }
     let _ = io::stdout().flush();
-    std::process::exit(i32::try_from(code).unwrap_or(1))
+    c_int::try_from(code).unwrap_or(1)
 }
 
 /// Passes the Vesper driver ran (`VESPER_HYBRID_STATS=1` reports it).
