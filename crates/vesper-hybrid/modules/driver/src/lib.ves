@@ -77,6 +77,8 @@ use @vesper-std/process::{
 };
 use @vesper-std/fs::{
     IoError,
+    read_path,
+    write_path,
     remove_file
 };
 use @vesper-std/fmt::{
@@ -195,10 +197,6 @@ fn step_emit_ir() -> u32 {
 
 fn step_emit_lean() -> u32 {
     24
-}
-
-fn step_emit_object() -> u32 {
-    25
 }
 
 fn step_emit_clif() -> u32 {
@@ -361,27 +359,55 @@ pub fn main_code()
     }
 }
 
-// `cli()` of src/main.rs from loading the input on, pass by pass.
-fn drive(inout s: Session, in o: Options)
-    -> i64 eff [Ffi[StdFs], Ffi[StdProcess], Ffi[StdEnv], Ffi[HybridDriver]] {
-    let c = o.command;
+// A package is assembled by the package loader. For a standalone file, pass
+// the source bytes to the Rust session that still holds the parse and world.
+fn load_input(inout s: Session, in o: Options) -> i64 eff [Ffi[StdFs], Ffi[HybridDriver]] {
     let r = step(inout s, step_is_package());
     if is_failure(r) {
         return pass_failed(in s, r);
     }
-    if r == 1 {
+    let r = if r == 1 {
         let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
         package_checks(in o, inout err);
         if err.len() != 0 {
             return error(in err.as_slice());
         }
-    }
-    let r = step(inout s, step_load());
+        step(inout s, step_load())
+    } else {
+        let input = value(in o, slot_input());
+        let mut source: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        let failed = handle Fail[IoError] in {
+            source = read_path(in input.as_slice());
+            0
+        } with {
+            return v => v,
+            raise(e, _) => error_word(e),
+        };
+        if failed != 0 {
+            let mut message = input;
+            message.extend(in ": ".as_bytes());
+            let detail = io_error_text(inout s, wrapping_sub(failed, 2));
+            message.extend(in detail.as_slice());
+            return error(in message.as_slice());
+        }
+        step_with(inout s, step_load(), in source.as_slice())
+    };
     if is_failure(r) {
         return pass_failed(in s, r);
     }
     if r > 0 {
         return count_error(r, in "package error(s)");
+    }
+    0
+}
+
+// `cli()` of src/main.rs from loading the input on, pass by pass.
+fn drive(inout s: Session, in o: Options)
+    -> i64 eff [Ffi[StdFs], Ffi[StdProcess], Ffi[StdEnv], Ffi[HybridDriver]] {
+    let c = o.command;
+    let loaded = load_input(inout s, in o);
+    if loaded != 0 {
+        return loaded;
     }
     if c == cmd_build() && is(in o, slot_target(), in "bpf") {
         return pass(inout s, step_ebpf_build());
@@ -506,9 +532,9 @@ fn build(inout s: Session, in o: Options)
     }
     let windows_host = os() == os_windows();
     let object = with_extension(in path.as_slice(), in "vesper.o", windows_host);
-    let r = step_with(inout s, step_native_object(), in object.as_slice());
-    if is_failure(r) {
-        return pass_failed(in s, r);
+    let r = write_object(inout s, in object.as_slice());
+    if r != 0 {
+        return r;
     }
     // Windows targets link with link.exe/lld-link (lane 24, #347); the
     // default `cc` there means "find the MSVC linker".
@@ -622,7 +648,28 @@ fn remove(inout s: Session, in object: Slice[u8]) -> i64 eff [Ffi[StdFs], Ffi[Hy
     error(in m.as_slice())
 }
 
-fn emit(inout s: Session, in o: Options) -> i64 eff [Ffi[HybridDriver]] {
+// Both the link and emit paths use the same bytes from native codegen.
+fn write_object(inout s: Session, in path: Slice[u8]) -> i64 eff [Ffi[StdFs], Ffi[HybridDriver]] {
+    let r = step(inout s, step_native_object());
+    if is_failure(r) {
+        return pass_failed(in s, r);
+    }
+    let object = text(in s);
+    let failed = handle Fail[IoError] in {
+        write_path(in path, in object.as_slice());
+        0
+    } with {
+        return v => v,
+        raise(e, _) => error_word(e),
+    };
+    if failed == 0 {
+        return 0;
+    }
+    let message = io_error_text(inout s, wrapping_sub(failed, 2));
+    error(in message.as_slice())
+}
+
+fn emit(inout s: Session, in o: Options) -> i64 eff [Ffi[StdFs], Ffi[HybridDriver]] {
     if is(in o, slot_format(), in "hir") {
         return pass(inout s, step_emit_hir());
     }
@@ -636,7 +683,8 @@ fn emit(inout s: Session, in o: Options) -> i64 eff [Ffi[HybridDriver]] {
         if !has(in o, slot_output()) {
             return error(in "object output requires -o <path>".as_bytes());
         }
-        return pass(inout s, step_emit_object());
+        let output = value(in o, slot_output());
+        return write_object(inout s, in output.as_slice());
     }
     if is(in o, slot_format(), in "clif") {
         return pass(inout s, step_emit_clif());
