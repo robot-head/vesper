@@ -882,7 +882,7 @@ fn digest_replog(h: &mut u64, rep: &vesper_chorus::replog::ReplogReport) {
 fn diff_replog() -> (u64, usize) {
     let mut h = 0xcbf2_9ce4_8422_2325u64;
     let mut cases = 0usize;
-    let tls = common::replog_pki();
+    let tls = common::pki();
 
     for (seed, nodes, loss, part) in [
         (1u64, 3u32, 0u32, 0u32),
@@ -943,7 +943,21 @@ const PIN_WIRE: (u64, usize) = (0x4b1ab48d7939fda6, 184);
 const PIN_SIMNET: (u64, usize) = (0x1e878dfdaf9fd030, 356);
 const PIN_SESSION: (u64, usize) = (0x8894357d773e0dbb, 9);
 const PIN_RAFT: (u64, usize) = (0x4149c4cb64fa4a56, 27);
-const PIN_REPLOG: (u64, usize) = (0x9ce9a53c48241d55, 7);
+const PIN_REPLOG_X25519: (u64, usize) = (0x9ce9a53c48241d55, 7);
+const PIN_REPLOG_X25519_MLKEM768: (u64, usize) = (0x17cc9fc8176c85d9, 7);
+
+fn replog_pin() -> (u64, usize) {
+    use vesper_warp::handshake::tls::{config::provider, rustls::NamedGroup};
+
+    // Whole-workspace builds enable rustls's prefer-post-quantum feature
+    // through tough. The larger hybrid key share changes packet counts
+    // and the seeded loss schedule. Both pins come from the Rust baseline.
+    match provider().kx_groups[0].name() {
+        NamedGroup::X25519 => PIN_REPLOG_X25519,
+        NamedGroup::X25519MLKEM768 => PIN_REPLOG_X25519_MLKEM768,
+        group => panic!("no replicated-log Rust baseline for {group:?}"),
+    }
+}
 
 static RESULTS: OnceLock<[(u64, usize); 5]> = OnceLock::new();
 
@@ -963,7 +977,7 @@ fn compute_all() -> [(u64, usize); 5] {
 fn part2_differential_against_cf28be7a_pin() {
     let all = compute_all();
     let names = ["WIRE", "SIMNET", "SESSION", "RAFT", "REPLOG"];
-    let pins = [PIN_WIRE, PIN_SIMNET, PIN_SESSION, PIN_RAFT, PIN_REPLOG];
+    let pins = [PIN_WIRE, PIN_SIMNET, PIN_SESSION, PIN_RAFT, replog_pin()];
     if std::env::var("VESPER_CHORUS_PRINT_PIN").is_ok() {
         for (n, (d, c)) in names.iter().zip(all.iter()) {
             println!("const PIN_{n}: (u64, usize) = ({d:#018x}, {c});");

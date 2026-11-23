@@ -245,7 +245,9 @@ scoreboard lane to regenerate, as its line counts move with every PR.
   lines (`970` net lines removed across `crates/vesper-chorus/src/{raft,replog,session,simnet,port}.rs`)
   while keeping `DurableLog`/`Transport` trait glue in Rust.
 - **Differential (`tests/part2_differential.rs`)**: `0` differences across
-  `583` cases against pinned `cf28be7a` Rust digests; `port_live_allocations() == 0`.
+  `583` cases against pinned `cf28be7a` Rust digests, including separate replog
+  digests for the X25519 and X25519MLKEM768 TLS key exchanges.
+  `port_live_allocations() == 0`.
 - **Divergence (`port/test-port.sh`)**: `simnet`, `session`, `wire`, `raft`, and
   `replog` each fail their guarding test while an unrelated test passes.
 - **ABBA (`examples/abba.rs`, `n = 30`, `RUSTFLAGS="-C target-cpu=native"` vs `origin/main`)**:
