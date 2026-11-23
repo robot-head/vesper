@@ -184,7 +184,11 @@ fn walk(root: &Path, files: &mut Vec<PathBuf>, visited: &mut usize) -> Result<()
     }
     Ok(())
 }
-fn format_file(path: &Path, check: bool, recovery: bool) -> Result<serde_json::Value, String> {
+pub(crate) fn format_file(
+    path: &Path,
+    check: bool,
+    recovery: bool,
+) -> Result<serde_json::Value, String> {
     let input = open_input(path)?;
     let (result, edits) = if recovery {
         let partial = format_recovery_source(&input.text, Limits::default())

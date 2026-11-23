@@ -13,4 +13,6 @@ sys library HybridCommands (
     fn hc_text(which: u32, index: u64, nocapture inout buf: CSlice[u8]) -> ForeignVal[i64];
     fn hc_io_error(word: u64, nocapture inout buf: CSlice[u8]) -> ForeignVal[i64];
     fn hc_executable(nocapture in path: CSlice[u8]) -> ForeignVal[u32];
+    fn hc_fmt_file(nocapture in path: CSlice[u8], flags: u32, nocapture inout stats: CSlice[u64]) -> ForeignVal[u32];
+    fn hc_fmt_error(nocapture inout buf: CSlice[u8]) -> ForeignVal[i64];
 }

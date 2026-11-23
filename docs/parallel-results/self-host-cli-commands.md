@@ -1,4 +1,8 @@
-# Self-hosting SH5 lane 13: the other CLI commands, part 1: routing (#1336)
+# Self-hosting SH5 lane 13: the other CLI commands (#1336)
+
+Part 1 (routing, PR #1372) is below; part 2 (`vesper fmt`) follows it.
+
+## Part 1: routing
 
 > Stacks on lane 12's driver, PR #1367 (`claude/project-thread-9cpzfd` at
 > `12fa0969`, which merged `main` with #1371 and #1398's tool split). Prompt:
@@ -56,7 +60,7 @@ sits in front of them.
 | Test | What | Result (Linux, this branch) |
 |---|---|---|
 | `self_host_cli_commands.rs` `routing_matches_the_default_compiler` | Both compilers are hard linked side by side into 3 layouts (every tool beside them plus an external one; no tools; Bazel's `bin/` + `crates/vesper-tools/bin/` tree) and run under 8 `PATH`s (unset, empty, one entry, two entries, a trailing `/`, leading and doubled empty entries meaning the working directory, a relative entry; on Windows quoted entries with `;`). 80 argument vectors: every top-level option, unknown options and names (empty, `$`, space, `/`, upper case, non-ASCII, DEL, non-UTF-8), compiler commands handed back, every `TOOLS` entry, external tools on `PATH`, a non-executable shadow before an executable one, an owner-only executable, a directory, a script killed by SIGTERM and SIGKILL, a tool that writes a file, spawn errors (no `#!`, a missing interpreter), and non-UTF-8 tool arguments. A tool is a hard link of the default compiler (so every host can run one) or, on Unix, a shell script. Each run is in a fresh directory: exit status, signal, stdout, stderr and every file afterwards | 1,920 runs, 0 differ |
-| `routing_runs_in_vesper` | the stats line: help, version, an unknown option, an unknown command and a missing tool print from Vesper; `fmt --help`, `check --fuel` and a non-ASCII command do not | ok |
+| `routing_runs_in_vesper` | the stats line: help, version, an unknown option, an unknown command and a missing tool print from Vesper; `check --fuel` and a non-ASCII command do not (since part 2, `fmt` prints from Vesper too) | ok |
 | `full_stdout_fails_as_in_rust` (Linux) | stdout on `/dev/full`: help and version panic with std's `failed printing to stdout` and exit 101, as the Rust CLI does | ok |
 | `driver.rs` (lane 12's) | the driver's own differential, rerun with the new dispatch | 3 tests pass |
 
@@ -82,7 +86,7 @@ does not touch).
 
 | Command | Rust layer | Engine | Owner or blocker |
 |---|---|---|---|
-| `fmt` | src/fmt_commands.rs (544 lines) | `vesper-fmt` (Vesper port in crates/vesper-fmt/vesper) | this lane, part 2: the layer over the Vesper formatter |
+| `fmt` (one file's read, format and replace) | `fmt_commands::format_file` | `vesper-fmt-seed` | part 2 moved the rest of the layer; this stays until @vesper-std/fs has a no-follow open, inode identity, permission copy and `sync_all` |
 | `lint` | src/lint_commands.rs (509) | `vesper::tooling::lint` (compiler) and `vesper-lint` (port) | this lane, later part; needs the checked world |
 | `forge` | src/forge_commands.rs (380) | `vesper-forge` (port) over the parser | this lane, later part |
 | `ebpf` | src/ebpf_commands.rs (189) | `vesper-ebpf` (port) and `vesper::stack_bound` | this lane, later part |
@@ -118,6 +122,88 @@ each tool is SH6's Rust-exit work, not the compiler CLI's.
 
 ## What is left
 
-- Part 2: `fmt` over the Vesper formatter, then the layers that need the
+- Part 2 is done (below). Next, the layers that need the
   checked world (`highlight`, `lint`, `forge`, `ebpf`, `shot`, `graph`),
   and `verify --refute`'s spawn.
+
+## Part 2: `vesper fmt`
+
+The hybrid now runs `vesper fmt` in `@vesper/driver-commands` (`fmt` in
+packages/vesper-driver-commands/src/lib.ves) instead of handing it back to
+the Rust CLI. **Rust stays the default build**: the only `src/**` change is
+`fmt_commands::format_file` becoming `pub(crate)`, so the host can call it.
+
+**What moved to Vesper.**
+
+- **Options.** `--help`/`-h` and `--json` before `--`, `--check`,
+  `--recovery`, `--`, and the `unknown fmt option` error.
+- **Paths.** The single-file case and the workspace case.
+- **The walk** (`walk`), over `@vesper-std/fs::walk::list_dir_path`:
+  - files and directories in byte order, without following symbolic links;
+  - hidden, `target` and `bazel-*` directories skipped;
+  - `Path::extension() == "ves"` decided the way Rust decides it;
+  - the 200,000-entry limit;
+  - the `{dir}: {io error}` message.
+- **Output.** Every status line and the summary.
+- **JSON.** Both JSON reports and the error report, written as serde_json
+  writes them: keys sorted, compact, with its string escapes.
+- **Exit codes and errors.** Every exit code and error message.
+- **Non-UTF-8 arguments.** Any argument that is not UTF-8 goes back to
+  Rust, which panics on it as before.
+
+**What stays on the host.** `hc_fmt_file` calls `fmt_commands::format_file`
+for one file. That is the bounded read (`O_NOFOLLOW`, regular file,
+256 KiB, UTF-8), the formatter, and the checked atomic replace:
+
+- a 0600 stage file;
+- the permission copy;
+- `sync_all`;
+- a re-read that checks dev, inode, length and mtime;
+- the rename.
+
+`@vesper-std/fs` has none of the open flags, inode identity, permission or
+sync calls yet, and this replace is the security-relevant part. The hybrid
+links the Rust seed formatter (`vesper-fmt-seed`), as every other compiler
+crate does, so the engine is unchanged. The Codex §39 formatter work had no
+open issue or PR, and nothing under crates/vesper-fmt changed.
+
+| Path | What |
+|---|---|
+| `packages/vesper-driver-commands/src/lib.ves` | `fmt`, the dispatch row, the walk, the JSON writer, the UTF-8 check |
+| `packages/vesper-driver-commands/commands.vsys` | `hc_fmt_file` (status, plus changed, input bytes, output bytes and edits in a `u64` slice) and `hc_fmt_error` (the last error, copied out) |
+| `crates/vesper-hybrid/src/commands.rs` | their host side |
+| `crates/vesper-hybrid/port/driver.rs` | regenerated binding (keeps the two symbols linked) |
+| `src/fmt_commands.rs` | `format_file` is `pub(crate)` |
+| `crates/vesper-hybrid/tests/self_host_cli_commands.rs` | `fmt_matches_the_default_compiler`; `routing_runs_in_vesper` now expects `fmt` to print from Vesper |
+
+**The differential.** `fmt_matches_the_default_compiler` builds a fresh
+fixture for each compiler and each argument vector, then compares exit
+status, stdout, stderr and every file left, with its contents and mode
+(symbolic links by target). The fixture covers:
+
+- canonical, noncanonical and damaged sources;
+- a recovery source;
+- a file one byte over 256 KiB, and one exactly at it;
+- a file that is not UTF-8;
+- `..ves`, `.ves`, `a.ves.bak` and `.txt` names;
+- nested and sibling directories;
+- hidden, `target`, `bazel-out` and `targets` directories;
+- an empty directory;
+- on Unix: file, directory and dangling symbolic links, a name with `"`,
+  `\`, a tab, U+0001 and `é`, a name that is not UTF-8, and a read-only
+  file.
+
+The 68 argument vectors cover every option and its position around `--`,
+help precedence, unknown options, `-`, an empty path, a single file, a
+repeated file, a mix of directories and files, `sub/` and `sub//`, missing
+files and directories, and `--check`, `--json` and `--recovery` together.
+
+**Result (Linux x86_64, debug builds):** 68 vectors, **0 differ**. Default
+0.74 to 0.92 s, hybrid 0.69 to 0.70 s, which is 0.75x to 0.94x of Rust's
+time. The whole test file passes, and the routing differential still shows
+0 differences on 2,040 runs.
+
+**Compiler gap found.** A `handle` that returns `Result[Entries, IoError]`
+fails codegen with `native layout is not yet defined for _`. This is gap 4
+of part 1, now hit with a generic enum. `try_list` works around it by
+writing the listing to an `inout` parameter and returning the error word.

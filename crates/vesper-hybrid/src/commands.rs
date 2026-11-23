@@ -160,4 +160,77 @@ pub mod host {
         let ok = meta.is_file();
         u32::from(ok)
     }
+
+    /// One file of `vesper fmt` (`fmt_commands::format_file`: the bounded
+    /// read, the formatter and the checked atomic replace). Flag 1 is
+    /// `--check`, 2 `--recovery`. The status is 0 unchanged, 1 formatted,
+    /// 2 needs formatting or 3 failed (`hc_fmt_error` has the error);
+    /// `stats` gets changed, input bytes, output bytes, whether there is an
+    /// edit count, and the edit count.
+    ///
+    /// # Safety
+    /// `path` is a lent byte slice and `stats` a lent writable slice of
+    /// `slen` words.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn hc_fmt_file(
+        path: *const u8,
+        len: usize,
+        flags: u32,
+        stats: *mut u64,
+        slen: usize,
+    ) -> u32 {
+        // SAFETY: lent for the call; the bytes came from the command line
+        // or from a directory listing.
+        let path = unsafe { std::ffi::OsStr::from_encoded_bytes_unchecked(bytes(path, len)) };
+        let out: &mut [u64] = if slen == 0 || stats.is_null() {
+            &mut []
+        } else {
+            // SAFETY: as documented.
+            unsafe { std::slice::from_raw_parts_mut(stats, slen) }
+        };
+        out.iter_mut().for_each(|w| *w = 0);
+        let report =
+            match crate::fmt_commands::format_file(Path::new(path), flags & 1 != 0, flags & 2 != 0)
+            {
+                Ok(report) => report,
+                Err(error) => {
+                    FMT_ERROR.with(|e| *e.borrow_mut() = error);
+                    return 3;
+                }
+            };
+        let word = |key: &str| report[key].as_u64();
+        let values = [
+            u64::from(report["changed"].as_bool().unwrap_or(false)),
+            word("input_bytes").unwrap_or(0),
+            word("output_bytes").unwrap_or(0),
+            u64::from(word("edits").is_some()),
+            word("edits").unwrap_or(0),
+        ];
+        for (slot, v) in out.iter_mut().zip(values) {
+            *slot = v;
+        }
+        match report["status"].as_str() {
+            Some("formatted") => 1,
+            Some("needs_format") => 2,
+            _ => 0,
+        }
+    }
+
+    /// The error of the last failed `hc_fmt_file`.
+    ///
+    /// # Safety
+    /// `buf` is a lent writable slice.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn hc_fmt_error(buf: *mut u8, len: usize) -> i64 {
+        FMT_ERROR.with(|e| {
+            let e = e.borrow();
+            // SAFETY: lent for the call.
+            unsafe { copy_out(Some(e.as_bytes()), buf, len) }
+        })
+    }
+}
+
+thread_local! {
+    /// The error of the last failed `hc_fmt_file`.
+    static FMT_ERROR: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
 }
