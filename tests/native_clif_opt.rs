@@ -497,3 +497,47 @@ fn loop_invariants_hoist_to_preheader() {
     );
     assert_eq!(agree(source), "695");
 }
+
+#[test]
+fn guarded_loop_add_overflow_is_eliminated() {
+    let source = "fn copy_offset(in src: Slice[u8], inout dst: Slice[u8], at: u64) eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+    for i in 0..16 {
+        let b = src[2 + i];
+        dst.set(at + i, b);
+    }
+}
+fn main() -> u64 {
+    let mut a = ChunkSeq::new[u8]();
+    let mut b = ChunkSeq::new[u8]();
+    for i in 0..32 {
+        a.push(wrapping_u8(i));
+        b.push(0);
+    }
+    handle Fail[ArithOverflow] in {
+        handle Fail[RuntimeError] in {
+            copy_offset(in a.as_slice(), inout b.as_slice_mut(), 4);
+            match b.try_get(7) {
+                Option::Some(v) => widen_u64(v),
+                Option::None => 999,
+            }
+        } with {
+            return x => x,
+            raise(_, _) => 998,
+        }
+    } with {
+        return x => x,
+        raise(_, _) => 997,
+    }
+}";
+    let c = accepted(source);
+    let (_, clif) = native::object(&c.world, "main").unwrap();
+    assert_eq!(agree(source), "5");
+    let fast_body = clif
+        .split("\n\n")
+        .find(|blk| blk.contains("uload8") && blk.contains("istore8"))
+        .unwrap_or("");
+    assert!(
+        !fast_body.is_empty() && !fast_body.contains("icmp ult"),
+        "expected guarded fast-loop iadd overflow check to be eliminated and body merged:\n{clif}"
+    );
+}
