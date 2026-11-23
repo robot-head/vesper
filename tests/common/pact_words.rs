@@ -578,6 +578,24 @@ pub fn encode_mono_check_input(
     pkg_name: &str,
     pkg_ver: &str,
 ) -> Option<Vec<u8>> {
+    encode_mono_input_with_tail(outcome, pkg_name, pkg_ver, &[])
+}
+
+pub fn encode_mono_plan_input(
+    outcome: &vesper::pact_frontend::MonoCheckOutcome,
+    pkg_name: &str,
+    pkg_ver: &str,
+) -> Option<Vec<u8>> {
+    let tail: Vec<u64> = outcome.funcs.iter().map(|f| u64::from(f.has_dyn)).collect();
+    encode_mono_input_with_tail(outcome, pkg_name, pkg_ver, &tail)
+}
+
+fn encode_mono_input_with_tail(
+    outcome: &vesper::pact_frontend::MonoCheckOutcome,
+    pkg_name: &str,
+    pkg_ver: &str,
+    tail: &[u64],
+) -> Option<Vec<u8>> {
     let prelude = vesper::pact_frontend::prelude_world();
     let fp = vesper::pact_frontend::declaration_fingerprint(&outcome.module);
     let mut out = session_input(
@@ -679,6 +697,7 @@ pub fn encode_mono_check_input(
             t.push(e.ty(ty));
         }
     }
+    t.extend_from_slice(tail);
     out.extend_from_slice(&e.finish(&[], &t));
     Some(out)
 }
@@ -719,4 +738,71 @@ pub fn decode_mono_check(words: &[u64]) -> (Vec<Diagnostic>, bool, Vec<bool>, Ve
         errors.push(Diagnostic::new(code, msg, start..end));
     }
     (session_diags, true, bounded, errors)
+}
+
+#[allow(clippy::type_complexity)]
+pub fn decode_mono_plan(
+    words: &[u64],
+) -> (
+    Vec<Diagnostic>,
+    bool,
+    Vec<Diagnostic>,
+    Vec<(String, String)>,
+    Vec<(String, usize, usize, String)>,
+) {
+    let (diag_text, mut at) = decode_packed_text_at(words, 0);
+    let session_diags = decode_session_text(&diag_text);
+    let ok = words.get(at).copied().unwrap_or(0) != 0;
+    at += 1;
+    if !ok {
+        return (session_diags, false, vec![], vec![], vec![]);
+    }
+    let ne = words.get(at).copied().unwrap_or(0) as usize;
+    at += 1;
+    let mut errors = Vec::with_capacity(ne);
+    for _ in 0..ne {
+        let code_tag = words.get(at).copied().unwrap_or(0);
+        at += 1;
+        let start = words.get(at).copied().unwrap_or(0) as usize;
+        at += 1;
+        let end = words.get(at).copied().unwrap_or(0) as usize;
+        at += 1;
+        let (msg, next_at) = decode_packed_text_at(words, at);
+        at = next_at;
+        let code = match code_tag {
+            1 => "E0608",
+            2 => "E0609",
+            3 => "E0611",
+            4 => "E0615",
+            _ => "E0607",
+        };
+        errors.push(Diagnostic::new(code, msg, start..end));
+    }
+    if !errors.is_empty() {
+        return (session_diags, true, errors, vec![], vec![]);
+    }
+    let nc = words.get(at).copied().unwrap_or(0) as usize;
+    at += 1;
+    let mut clones = Vec::with_capacity(nc);
+    for _ in 0..nc {
+        let (origin, next_at) = decode_packed_text_at(words, at);
+        let (cname, next_at2) = decode_packed_text_at(words, next_at);
+        at = next_at2;
+        clones.push((origin, cname));
+    }
+    let nr = words.get(at).copied().unwrap_or(0) as usize;
+    at += 1;
+    let mut rewrites = Vec::with_capacity(nr);
+    for _ in 0..nr {
+        let (caller, next_at) = decode_packed_text_at(words, at);
+        at = next_at;
+        let start = words.get(at).copied().unwrap_or(0) as usize;
+        at += 1;
+        let end = words.get(at).copied().unwrap_or(0) as usize;
+        at += 1;
+        let (target, next_at2) = decode_packed_text_at(words, at);
+        at = next_at2;
+        rewrites.push((caller, start, end, target));
+    }
+    (session_diags, true, errors, clones, rewrites)
 }
