@@ -2267,6 +2267,26 @@ pub fn append(inout s: S, pass2: bool, in insts: ChunkSeq[Inst], in lens: ChunkS
         let t = s.ty_name(S_T);
         let seq = s.ty_app1(S_CHUNK_SEQ, t);
         field_line(inout s, S_DATA, seq);
+        s.indent(1);
+        s.put(in "impl");
+        s.nl();
+        s.indent(2);
+        s.put(in "generic \"T\" bound=linear row=0");
+        s.nl();
+        let pt = s.ty_app1(S_PINNED, t);
+        s.dump_ty(pt, 2);
+        s.indent(2);
+        s.put(in "fn \"address\" fip=0 @0..0");
+        s.nl();
+        s.indent(3);
+        s.put(in "param \"self\" pass=in @0..0");
+        s.nl();
+        s.dump_ty(pt, 4);
+        s.indent(3);
+        s.put(in "result");
+        s.nl();
+        let u64t = s.ty_name(sym8(SC_U64));
+        s.dump_ty(u64t, 4);
     }
     if s.invalid {
         adt_head(inout s, S_INVALID, false, false, false);

@@ -365,6 +365,8 @@ impl Checker<'_> {
             SeqOp::FillRange { .. } => 3,
             SeqOp::FindNotIn => 3,
             SeqOp::Wide(w) if !w.write => 1,
+            SeqOp::AtomicLoad { .. } => 2,
+            SeqOp::AtomicStore { .. } => 3,
             SeqOp::CopyWithin { .. } => 3,
             SeqOp::MakeAsciiLowercase { .. } => 2,
             _ => 2,
@@ -444,13 +446,33 @@ impl Checker<'_> {
                     span.clone(),
                 )
             }
-            _ if (matches!(op, SeqOp::Wide(_)) || op.byte_scan())
+            _ if (matches!(
+                op,
+                SeqOp::Wide(_)
+                    | SeqOp::AtomicLoad { width: Some(_) }
+                    | SeqOp::AtomicStore { width: Some(_) }
+            ) || op.byte_scan())
                 && known && crate::numeric::default_type(&elem_ty) != Type::named("u8") =>
             {
                 self.error(
                     "E1525",
                     format!(
                         "'{method}' reads and writes bytes, so it needs a ChunkSeq[u8] or Slice[u8], found element type '{elem_ty}'"
+                    ),
+                    span.clone(),
+                )
+            }
+            SeqOp::AtomicLoad { width: None } | SeqOp::AtomicStore { width: None }
+                if known
+                    && !crate::numeric::IntegerKind::from_type(&crate::numeric::default_type(
+                        &elem_ty,
+                    ))
+                    .is_some_and(|k| !k.wide()) =>
+            {
+                self.error(
+                    "E1525",
+                    format!(
+                        "'{method}' requires a single-word integer element type, found '{elem_ty}'"
                     ),
                     span.clone(),
                 )
@@ -482,7 +504,9 @@ impl Checker<'_> {
                         | SeqOp::Reserve
                         | SeqOp::CopyFrom { .. }
                         | SeqOp::Resize
-                        | SeqOp::Wide(_),
+                        | SeqOp::Wide(_)
+                        | SeqOp::AtomicLoad { .. }
+                        | SeqOp::AtomicStore { .. },
                     0
                 )
             ) || (matches!(op, SeqOp::CopyWithin { .. }) && i < 3)
@@ -546,6 +570,28 @@ impl Checker<'_> {
                 let int_ty = Type::named(w.int_type());
                 let t = self.expr_expected(&a.expr, env, Usage::Own, &int_ty);
                 self.expect_type(&int_ty, &t, a.expr.span.clone());
+            } else if let (SeqOp::AtomicStore { width }, 1) = (op, i) {
+                self.seq_by_value(method, a);
+                let val_ty = match width {
+                    Some(4) => Type::named("u32"),
+                    Some(_) => Type::named("u64"),
+                    None => elem_ty.clone(),
+                };
+                let t = self.expr_expected(&a.expr, env, Usage::Own, &val_ty);
+                self.expect_type(&val_ty, &t, a.expr.span.clone());
+            } else if let (SeqOp::AtomicLoad { .. }, 1) | (SeqOp::AtomicStore { .. }, 2) = (op, i) {
+                self.seq_by_value(method, a);
+                let order_ty = Type::named(crate::atomics::MEMORY_ORDER);
+                let t = self.expr_expected(&a.expr, env, Usage::Own, &order_ty);
+                self.expect_type(&order_ty, &t, a.expr.span.clone());
+                let aop = if matches!(op, SeqOp::AtomicLoad { .. }) {
+                    crate::atomics::AtomicOp::Load
+                } else {
+                    crate::atomics::AtomicOp::Store
+                };
+                if let Some(d) = crate::atomics::check_seq_order(aop, method, &a.expr) {
+                    self.diagnostics.push(d);
+                }
             } else if i < arity {
                 let t = self.expr_expected(&a.expr, env, Usage::Own, &elem_ty);
                 self.expect_type(&elem_ty, &t, a.expr.span.clone());
@@ -580,6 +626,15 @@ impl Checker<'_> {
                 (true, false) => Type::unit(),
                 (true, true) => Type::named("bool"),
             },
+            SeqOp::AtomicLoad { width } => {
+                let inner = match width {
+                    Some(4) => Type::named("u32"),
+                    Some(_) => Type::named("u64"),
+                    None => elem_ty,
+                };
+                Type::Named("Option".into(), vec![inner])
+            }
+            SeqOp::AtomicStore { .. } => Type::named("bool"),
             _ => Type::unit(),
         })
     }

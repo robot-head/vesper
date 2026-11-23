@@ -129,6 +129,8 @@ impl Generator<'_> {
                 | SeqOp::Swap
                 | SeqOp::Replace
                 | SeqOp::Vector(_)
+                | SeqOp::AtomicLoad { .. }
+                | SeqOp::AtomicStore { .. }
         ) || op.byte_scan()
         {
             return Err(format!(
@@ -266,7 +268,9 @@ impl Generator<'_> {
             | SeqOp::EqIgnoreAsciiCase
             | SeqOp::ExtendAsciiLowercase
             | SeqOp::MakeAsciiLowercase { .. }
-            | SeqOp::Vector(_) => {
+            | SeqOp::Vector(_)
+            | SeqOp::AtomicLoad { .. }
+            | SeqOp::AtomicStore { .. } => {
                 unreachable!("refused above")
             }
         })

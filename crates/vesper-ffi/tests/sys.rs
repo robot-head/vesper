@@ -837,3 +837,126 @@ fn const_declarations_parse_validate_and_canonicalize() {
         ErrorKind::Duplicate,
     );
 }
+
+#[test]
+fn foreign_buffers_check_alignment_bounds_and_disjointness() {
+    let lib = library(
+        "
+        linear extern mapping Ring[u32];
+        fn unmap(sink r: Ring) -> ForeignVal[i32];
+        fn use_both(inout p: Pinned[u32], in r: Ring) -> ForeignVal[u32];
+        fn read_both(in p: Pinned[u32], in r: Ring) -> ForeignVal[u32];
+        ",
+    );
+    let use_both = lib.function("use_both").unwrap();
+    let read_both = lib.function("read_both").unwrap();
+
+    // Disjoint aligned buffers succeed.
+    assert!(
+        use_both
+            .prepare_call(
+                vec![
+                    RawArgument::Slice {
+                        address: 4096,
+                        length: 4,
+                    },
+                    RawArgument::Slice {
+                        address: 8192,
+                        length: 4,
+                    },
+                ],
+                Vec::<u8>::new(),
+            )
+            .is_ok()
+    );
+    // Adjacent unique ranges are disjoint.
+    assert!(
+        use_both
+            .prepare_call(
+                vec![
+                    RawArgument::Slice {
+                        address: 4096,
+                        length: 4,
+                    },
+                    RawArgument::Slice {
+                        address: 4096 + 16,
+                        length: 4,
+                    },
+                ],
+                Vec::<u8>::new(),
+            )
+            .is_ok()
+    );
+    // Shared (`in` + `in`) overlap is allowed.
+    assert!(
+        read_both
+            .prepare_call(
+                vec![
+                    RawArgument::Slice {
+                        address: 4096,
+                        length: 4,
+                    },
+                    RawArgument::Slice {
+                        address: 4100,
+                        length: 2,
+                    },
+                ],
+                Vec::<u8>::new(),
+            )
+            .is_ok()
+    );
+    // Mutable (`inout` + `in`) overlap, null, misaligned, and wrap fail.
+    for (p_addr, p_len, r_addr, r_len, want) in [
+        (
+            4096,
+            4,
+            4100,
+            2,
+            ValidationError::OverlappingSlices { other: 0 },
+        ),
+        (0, 4, 8192, 4, ValidationError::NullAddress),
+        (
+            4098,
+            4,
+            8192,
+            4,
+            ValidationError::MisalignedPointer { alignment: 4 },
+        ),
+        (
+            4096,
+            4,
+            8194,
+            4,
+            ValidationError::MisalignedPointer { alignment: 4 },
+        ),
+        (
+            u64::MAX - 3,
+            2,
+            8192,
+            4,
+            ValidationError::SliceRangeOverflow,
+        ),
+        (4096, 4, 8192, u64::MAX, ValidationError::SliceRangeOverflow),
+    ] {
+        let err = use_both
+            .prepare_call(
+                vec![
+                    RawArgument::Slice {
+                        address: p_addr,
+                        length: p_len,
+                    },
+                    RawArgument::Slice {
+                        address: r_addr,
+                        length: r_len,
+                    },
+                ],
+                Vec::<u8>::new(),
+            )
+            .unwrap_err();
+        assert_eq!(
+            err.error(),
+            &want,
+            "p=({p_addr},{p_len}) r=({r_addr},{r_len})"
+        );
+    }
+}

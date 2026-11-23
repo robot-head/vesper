@@ -652,6 +652,60 @@ fn resolve_shared_method(inout c: Ctx, method: u32, arity: u64) -> SeqRes {
             arg_mode: 0
         };
     }
+    if eq(in c, method, "try_atomic_load") {
+        return SeqRes {
+            matched: true,
+            label: sym_str(inout c, "AtomicLoad { width: None }"),
+            has_recv: true,
+            recv_pass: P_IN,
+            arg_mode: 0
+        };
+    }
+    if eq(in c, method, "try_atomic_load_u32") {
+        return SeqRes {
+            matched: true,
+            label: sym_str(inout c, "AtomicLoad { width: Some(4) }"),
+            has_recv: true,
+            recv_pass: P_IN,
+            arg_mode: 0
+        };
+    }
+    if eq(in c, method, "try_atomic_load_u64") {
+        return SeqRes {
+            matched: true,
+            label: sym_str(inout c, "AtomicLoad { width: Some(8) }"),
+            has_recv: true,
+            recv_pass: P_IN,
+            arg_mode: 0
+        };
+    }
+    if eq(in c, method, "try_atomic_store") {
+        return SeqRes {
+            matched: true,
+            label: sym_str(inout c, "AtomicStore { width: None }"),
+            has_recv: true,
+            recv_pass: P_INOUT,
+            arg_mode: 0
+        };
+    }
+    if eq(in c, method, "try_atomic_store_u32") {
+        return SeqRes {
+            matched: true,
+            label: sym_str(inout c, "AtomicStore { width: Some(4) }"),
+            has_recv: true,
+            recv_pass: P_INOUT,
+            arg_mode: 0
+        };
+    }
+    if eq(in c, method, "try_atomic_store_u64") {
+        return SeqRes {
+            matched: true,
+            label: sym_str(inout c, "AtomicStore { width: Some(8) }"),
+            has_recv: true,
+            recv_pass: P_INOUT,
+            arg_mode: 0
+        };
+    }
     if eq(in c, method, "eq_ignore_ascii_case") {
         return SeqRes {
             matched: true,

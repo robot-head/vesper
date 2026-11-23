@@ -1120,6 +1120,12 @@ fn parse_seq_op(s: &str) -> Option<SeqOp> {
         "FillRange { total: true }" => SeqOp::FillRange { total: true },
         "ExtendFromWithin { total: false }" => SeqOp::ExtendFromWithin { total: false },
         "ExtendFromWithin { total: true }" => SeqOp::ExtendFromWithin { total: true },
+        "AtomicLoad { width: None }" => SeqOp::AtomicLoad { width: None },
+        "AtomicLoad { width: Some(4) }" => SeqOp::AtomicLoad { width: Some(4) },
+        "AtomicLoad { width: Some(8) }" => SeqOp::AtomicLoad { width: Some(8) },
+        "AtomicStore { width: None }" => SeqOp::AtomicStore { width: None },
+        "AtomicStore { width: Some(4) }" => SeqOp::AtomicStore { width: Some(4) },
+        "AtomicStore { width: Some(8) }" => SeqOp::AtomicStore { width: Some(8) },
         _ if s.starts_with("Str(") && s.ends_with(')') => {
             SeqOp::Str(parse_str_op(&s[4..s.len() - 1])?)
         }

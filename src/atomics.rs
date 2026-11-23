@@ -460,6 +460,35 @@ fn order_name(e: &Expr) -> Option<&str> {
     }
 }
 
+/// Validates a `MemoryOrder` argument on a sequence/foreign-memory atomic
+/// load or store, returning an `E0820` diagnostic if invalid.
+pub(crate) fn check_seq_order(op: AtomicOp, method: &str, expr: &Expr) -> Option<Diagnostic> {
+    let Some(order) = order_name(expr) else {
+        return Some(
+            diagnostic(
+                "E0820",
+                format!("the memory order of '{method}' must be a literal 'MemoryOrder'"),
+                &expr.span,
+            )
+            .with_help(
+                "write one of `MemoryOrder::Relaxed`, `Acquire`, `Release`, `AcqRel`, `SeqCst`",
+            ),
+        );
+    };
+    let bad = match op {
+        AtomicOp::Load => matches!(order, "Release" | "AcqRel"),
+        AtomicOp::Store => matches!(order, "Acquire" | "AcqRel"),
+        _ => false,
+    };
+    bad.then(|| {
+        diagnostic(
+            "E0820",
+            format!("'{method}' cannot use 'MemoryOrder::{order}'"),
+            &expr.span,
+        )
+    })
+}
+
 /// The source rules of atomics: cell kinds, literal and valid orders, and
 /// the private cell (module docs).
 pub fn check_world(world: &World) -> Vec<Diagnostic> {
