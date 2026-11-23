@@ -138,6 +138,26 @@ pub fn lifecycle() -> u64 eff [Ffi[StdProcess]] {
     mix(mix(mix(mix(first, again), hash(in text.as_slice())), killed), me)
 }
 
+// A changed `PATH` is searched in the child: a relative entry from the
+// child's directory, and past a candidate that cannot run (a directory).
+pub fn path_search() -> u64 eff [Ffi[StdProcess]] {
+    handle Fail[IoError] in {
+        let mut c = command(in "vesper-std-prog");
+        env(inout c, in "PATH", in "bin");
+        cwd(inout c, in "@DIR@");
+        let a = output(c);
+        let mut d = command(in "sh");
+        arg(inout d, in "-c");
+        arg(inout d, in "printf ok");
+        env(inout d, in "PATH", in "@DIR@/first:/bin:/usr/bin");
+        let b = output(d);
+        mix(hash(in a.stdout.as_slice()), hash(in b.stdout.as_slice()))
+    } with {
+        return v => v,
+        raise(e, _) => code(e),
+    }
+}
+
 // The benchmark: `rounds` runs of a program with both streams captured,
 // and one with an edited environment.
 fn bench(rounds: u64) -> u64 eff [Ffi[StdProcess]] {
@@ -225,6 +245,22 @@ fn commands_run_with_args_env_and_directory() {
 
     let want = mix(hash(b"unset1"), hash(b"gone"));
     assert_eq!(agree(&checked, "environment", &MODES), want);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_changed_path_is_searched_in_the_child() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = Temp::new("std-process");
+    let bin = dir.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::create_dir_all(dir.path().join("first/sh")).unwrap();
+    let prog = bin.join("vesper-std-prog");
+    std::fs::write(&prog, "#!/bin/sh\nprintf found\n").unwrap();
+    std::fs::set_permissions(&prog, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let checked = check_driver(&source(&dir));
+    let want = mix(hash(b"found"), hash(b"ok"));
+    assert_eq!(agree(&checked, "path_search", &MODES), want);
 }
 
 #[cfg(unix)]

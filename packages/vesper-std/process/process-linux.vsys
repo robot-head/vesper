@@ -18,7 +18,6 @@ sys library StdProcess (
     const PIPE_CLOEXEC: u32 = 1;
     const F_SETFD: i32 = 2;
     const FD_CLOEXEC: i64 = 1;
-    const X_OK: i32 = 1;
     const POLLIN: u64 = 1;
     const SIGKILL: i32 = 9;
     const SIGPIPE: i32 = 13;
@@ -84,7 +83,6 @@ sys library StdProcess (
     fn poll(nocapture inout fds: CSlice[u64], timeout: i32) -> ForeignVal[i32] errno;
     fn waitpid(pid: i32, nocapture inout status: i32, options: i32) -> ForeignVal[i32] errno;
     fn kill(pid: i32, sig: i32) -> ForeignVal[i32];
-    fn access(nocapture in path: CStr, mode: i32) -> ForeignVal[i32] errno;
     fn exit(code: i32) -> ForeignVal[Unit];
     fn getpid() -> ForeignVal[i32];
     // The environment table (`environ`, or Apple's `_NSGetEnviron`), read

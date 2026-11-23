@@ -406,42 +406,34 @@ fn search_path(in envp: Slice[u8]) -> ChunkSeq[u8] {
     out
 }
 
-// The program a bare name runs under a changed `PATH`: the first
-// executable `dir/name` along it (an empty entry is the current
-// directory), as `execvp` searches. `Err` is the errno to report:
-// `EACCES` when a candidate exists but cannot run, else `ENOENT`.
-fn find_program(in name: Slice[u8], in path: Slice[u8])
-    -> Result[ChunkSeq[u8], u32] eff [Ffi[StdProcess]] {
-    let mut denied = false;
+// The programs a bare name may run under a changed `PATH`: `dir/name`
+// for each entry along it (an empty entry is the current directory), each
+// ended by a NUL byte. `spawn` tries them in order, as `execvp` does, so a
+// relative entry is resolved in the child's directory.
+fn candidates(in name: Slice[u8], in path: Slice[u8]) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
     let mut start: u64 = 0;
     let n = path.len();
     for i in 0..wrapping_add(n, 1) {
         if i == n || byte_at(in path, i) == 58 {
-            let mut cand: ChunkSeq[u8] = ChunkSeq::new[u8]();
             if i == start {
-                cand.push(46);
+                out.push(46);
             } else {
-                cand.extend(in path[start..i]);
+                out.extend(in path[start..i]);
             }
-            cand.push(47);
-            cand.extend(in name);
-            match StdProcess::access(in cand.as_slice(), StdProcess::X_OK) {
-                Result::Ok((0, _)) => return Result::Ok(cand),
-                Result::Ok((_, e)) => {
-                    if e == StdProcess::EACCES {
-                        denied = true;
-                    }
-                },
-                Result::Err(_) => {},
-            }
+            out.push(47);
+            out.extend(in name);
+            out.push(0);
             start = wrapping_add(i, 1);
         }
     }
-    if denied {
-        Result::Err(StdProcess::EACCES)
-    } else {
-        Result::Err(StdProcess::ENOENT)
-    }
+    out
+}
+
+// Whether a failed candidate lets the search go on: it is missing, a
+// component is not a directory, or it cannot be run (`execvp`'s rule).
+fn try_next(e: u32) -> bool {
+    e == StdProcess::ENOENT || e == StdProcess::ENOTDIR || e == StdProcess::EACCES
 }
 
 // ---------------------------------------------------------------------------
@@ -604,21 +596,19 @@ pub fn spawn(sink c: ProcCommand) -> Result[ProcChild, IoError] eff [Ffi[StdProc
     let envp = child_environment(in c);
     let bare = !has_byte(in c.program.as_slice(), 47);
     // A bare name under a changed `PATH` is searched here, along the
-    // child's `PATH` (Rust's `Command` searches the child's too).
-    let mut program: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    let mut search = false;
-    if bare && path_changed(in c) {
-        let path = search_path(in envp.as_slice());
-        match find_program(in c.program.as_slice(), in path.as_slice()) {
-            Result::Ok(p) => program.extend(in p.as_slice()),
-            Result::Err(e) => {
-                discard(c);
-                return Result::Err(io_errno(e));
-            },
-        }
+    // child's `PATH` (Rust's `Command` searches the child's too); one with
+    // the parent's `PATH` is left to `posix_spawnp`.
+    let lookup = bare && path_changed(in c);
+    let search = bare && !lookup;
+    let path = search_path(in envp.as_slice());
+    let mut programs: ChunkSeq[u8] = if lookup {
+        candidates(in c.program.as_slice(), in path.as_slice())
     } else {
-        program.extend(in c.program.as_slice());
-        search = bare;
+        ChunkSeq::new[u8]()
+    };
+    if !lookup {
+        programs.extend(in c.program.as_slice());
+        programs.push(0);
     }
     let mut fa = new_actions();
     let _ = StdProcess::posix_spawn_file_actions_init(inout fa);
@@ -668,29 +658,46 @@ pub fn spawn(sink c: ProcCommand) -> Result[ProcChild, IoError] eff [Ffi[StdProc
     }
     let mut pid: i32 = 0;
     if failed == 0 {
-        let r = if search {
-            StdProcess::posix_spawnp(
-                inout pid,
-                in program.as_slice(),
-                in fa,
-                in attr,
-                in c.args.as_slice(),
-                in envp.as_slice()
-            )
-        } else {
-            StdProcess::posix_spawn(
-                inout pid,
-                in program.as_slice(),
-                in fa,
-                in attr,
-                in c.args.as_slice(),
-                in envp.as_slice()
-            )
-        };
-        failed = match r {
-            Result::Ok(e) => wrapping_u32(e),
-            Result::Err(_) => 22,
-        };
+        let list = programs.as_slice();
+        let mut denied = false;
+        let mut done = false;
+        let mut start: u64 = 0;
+        failed = StdProcess::ENOENT;
+        for i in 0..list.len() {
+            if !done && byte_at(in list, i) == 0 {
+                let r = if search {
+                    StdProcess::posix_spawnp(
+                        inout pid,
+                        in list[start..i],
+                        in fa,
+                        in attr,
+                        in c.args.as_slice(),
+                        in envp.as_slice()
+                    )
+                } else {
+                    StdProcess::posix_spawn(
+                        inout pid,
+                        in list[start..i],
+                        in fa,
+                        in attr,
+                        in c.args.as_slice(),
+                        in envp.as_slice()
+                    )
+                };
+                failed = match r {
+                    Result::Ok(e) => wrapping_u32(e),
+                    Result::Err(_) => 22,
+                };
+                if failed == StdProcess::EACCES {
+                    denied = true;
+                }
+                done = !lookup || !try_next(failed);
+                start = wrapping_add(i, 1);
+            }
+        }
+        if lookup && !done && denied {
+            failed = StdProcess::EACCES;
+        }
     }
     let _ = StdProcess::posix_spawn_file_actions_destroy(inout fa);
     let _ = StdProcess::posix_spawnattr_destroy(inout attr);

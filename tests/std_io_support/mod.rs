@@ -272,7 +272,6 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         fn poll(fds: *mut c_void, n: usize, timeout: i32) -> i32;
         fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
         fn kill(pid: i32, sig: i32) -> i32;
-        fn access(path: *const c_char, mode: i32) -> i32;
         fn exit(code: i32) -> !;
         #[cfg_attr(target_os = "macos", link_name = "__error")]
         #[cfg_attr(not(target_os = "macos"), link_name = "__errno_location")]
@@ -353,7 +352,6 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         ("poll", poll as *const u8),
         ("waitpid", waitpid as *const u8),
         ("kill", kill as *const u8),
-        ("access", access as *const u8),
         ("exit", exit as *const u8),
         (
             if cfg!(target_os = "macos") {
