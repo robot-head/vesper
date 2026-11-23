@@ -2627,16 +2627,22 @@ impl<M: Module> Codegen<'_, '_, M> {
                         .into(),
                 );
             }
-            for (name, params) in [("strlen", 1), ("memcpy", 3)] {
+            if *result == ValueType::CStr {
                 let mut sig = self.m.make_signature();
-                for _ in 0..params {
-                    sig.params.push(AbiParam::new(types::I64));
-                }
+                sig.params.push(AbiParam::new(types::I64));
                 sig.returns.push(AbiParam::new(types::I64));
                 self.m
-                    .declare_function(name, Linkage::Import, &sig)
-                    .map_err(|e| format!("C library function '{name}': {e}"))?;
+                    .declare_function("strlen", Linkage::Import, &sig)
+                    .map_err(|e| format!("C library function 'strlen': {e}"))?;
             }
+            let mut sig = self.m.make_signature();
+            for _ in 0..3 {
+                sig.params.push(AbiParam::new(types::I64));
+            }
+            sig.returns.push(AbiParam::new(types::I64));
+            self.m
+                .declare_function("memcpy", Linkage::Import, &sig)
+                .map_err(|e| format!("C library function 'memcpy': {e}"))?;
             self.seq_define_runtime()?;
         }
         let mut words = vec![raw.map_or(NO_VALUE, word), u64::from(jit)];
