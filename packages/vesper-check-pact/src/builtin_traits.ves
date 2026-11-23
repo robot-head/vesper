@@ -14,17 +14,20 @@ use @vesper/check-data::{
     pack_text
 };
 use @vesper/check-data::types::{
-    K_FN,
-    K_NAMED,
-    K_ROW,
-    K_TUPLE,
-    M_AFFINE,
-    M_COPY,
-    M_LINEAR,
+    TyKind,
+    TyMode,
     TypeNode,
     Types,
     display
 };
+
+const K_FN: u8 = TyKind::Fn;
+const K_NAMED: u8 = TyKind::Named;
+const K_ROW: u8 = TyKind::Row;
+const K_TUPLE: u8 = TyKind::Tuple;
+const M_AFFINE: u8 = TyMode::Affine;
+const M_COPY: u8 = TyMode::Copy;
+const M_LINEAR: u8 = TyMode::Linear;
 use @vesper/check-data::util::{
     add,
     n32,
