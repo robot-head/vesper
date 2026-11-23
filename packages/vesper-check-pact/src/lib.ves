@@ -39,10 +39,18 @@ pub use self::session::{
     session_open,
     session_solve
 };
+use self::builtin_traits::{
+    builtin_derive_words
+};
 use self::resolve::{
     normalize_words,
     resolve_words
 };
+
+// Task "builtin_derive" (part 4): `builtin_traits::derivable` + derived `impl`s.
+pub fn check_pact_builtin_derive(in input: Str) -> ChunkSeq[u64] {
+    builtin_derive_words(in input.as_bytes())
+}
 use self::session::{
     queries_words,
     session_words
