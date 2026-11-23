@@ -1,5 +1,5 @@
 // @export vsys StdFs
-// @export vsys StdProcess rust=crate::process
+// @export vsys StdProcess
 // @export vsys StdEnv
 //
 // The sample driver of self-hosting SH0 lane 3 (#1125): the I/O a Vesper

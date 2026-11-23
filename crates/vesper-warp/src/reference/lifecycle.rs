@@ -1,6 +1,8 @@
 //! [`crate::lifecycle`]'s keyed tokens in Rust: address-validation tokens
 //! sealed with AES-256-GCM and stateless reset tokens from HMAC-SHA-256.
 
+pub(crate) use crate::ported::lifecycle::keys;
+
 use aes_gcm::aead::{AeadInPlace, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
 use hkdf::hmac::{Hmac, Mac};

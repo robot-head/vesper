@@ -89,17 +89,10 @@ impl FrameError {
     }
 }
 
-#[cfg(not(feature = "vesper-port"))]
-/// An inclusive range of acknowledged packet numbers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AckRange {
-    pub smallest: u64,
-    pub largest: u64,
-}
 /// An inclusive range of acknowledged packet numbers (the export ABI
 /// mirror of the Vesper `AckRange`, so ranges are lent to Vesper in place).
-#[cfg(feature = "vesper-port")]
 pub use crate::ported::binding::repr::AckRange;
+impl Eq for AckRange {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct EcnCounts {
