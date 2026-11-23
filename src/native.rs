@@ -1551,7 +1551,7 @@ fn define_instances_observed_with_trace<M: Module>(
                 || closure_capabilities(&f)
                     .contains(&crate::capability_effects::Capability::ConstTime);
             if !is_const_time {
-                cold_helpers = crate::native_cold_outline::outline(m, &key, &mut ctx.func)?;
+                cold_helpers = crate::native_cold_outline::outline(m, key, &mut ctx.func)?;
             }
         }
         let user_callees = |func: &ir::Function| -> Vec<(u32, String)> {
@@ -3577,10 +3577,8 @@ impl<M: Module> Codegen<'_, '_, M> {
         let scalar_join = self.scalar_enums.join.take().or_else(|| {
             if return_to.is_none() && self.operands_only && !self.in_fip_fn {
                 self.own_abi.result_words.and_then(|words| {
-                    let ty = crate::numeric::default_type(&substitute(
-                        &f.result,
-                        &self.generic_vars,
-                    ));
+                    let ty =
+                        crate::numeric::default_type(&substitute(&f.result, &self.generic_vars));
                     let shape = aggregates::enum_shape(self.world, &ty)?;
                     (shape.words.len() as u32 == words).then_some(shape)
                 })
@@ -4068,9 +4066,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                 // value in every block, not a copy through a block parameter,
                 // so its header words are recognized as invariant everywhere.
                 for id in crate::ir_inline::operands(&inst.op) {
-                    if let Some(receiver) = entry_reads
-                        .get(&id)
-                        .or_else(|| hoisted_reads.get(&id))
+                    if let Some(receiver) = entry_reads.get(&id).or_else(|| hoisted_reads.get(&id))
                     {
                         values.insert(id, *receiver);
                     }

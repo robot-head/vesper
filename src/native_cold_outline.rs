@@ -14,8 +14,8 @@ use cranelift_codegen::dominator_tree::DominatorTree;
 use cranelift_codegen::flowgraph::ControlFlowGraph;
 use cranelift_codegen::ir::instructions::InstructionData;
 use cranelift_codegen::ir::{
-    self, AbiParam, BlockArg, BlockCall, ExtFuncData, ExternalName, GlobalValueData,
-    JumpTableData, MemFlags, Opcode, StackSlot, TrapCode, Type, ValueDef, ValueList,
+    self, AbiParam, BlockArg, BlockCall, ExtFuncData, ExternalName, GlobalValueData, JumpTableData,
+    MemFlags, Opcode, StackSlot, TrapCode, Type, ValueDef, ValueList,
 };
 use cranelift_codegen::loop_analysis::LoopAnalysis;
 use cranelift_module::{FuncId, Module};
@@ -85,9 +85,7 @@ pub(crate) fn outline<M: Module>(
             stub_blocks.insert(root);
             continue;
         };
-        let flags = cranelift_codegen::settings::Flags::new(
-            cranelift_codegen::settings::builder(),
-        );
+        let flags = cranelift_codegen::settings::Flags::new(cranelift_codegen::settings::builder());
         if let Err(errors) = cranelift_codegen::verify_function(&cold_func, &flags) {
             return Err(format!(
                 "cold outline '{cold_key}' verifier errors:\n{errors}\n{}",
@@ -224,7 +222,8 @@ fn is_fast_return_arm(
                 }
             }
             if data.opcode().is_branch() {
-                for dest in data.branch_destination(&func.dfg.jump_tables, &func.dfg.exception_tables)
+                for dest in
+                    data.branch_destination(&func.dfg.jump_tables, &func.dfg.exception_tables)
                 {
                     let target = dest.block(&func.dfg.value_lists);
                     if target == b {
@@ -306,8 +305,14 @@ fn build_closed_region(
     let mut all_slots = BTreeSet::new();
 
     for &b in &owned {
-        if !check_block_supported(func, b, false, &mut has_return, &mut first_trap, &mut all_slots)
-        {
+        if !check_block_supported(
+            func,
+            b,
+            false,
+            &mut has_return,
+            &mut first_trap,
+            &mut all_slots,
+        ) {
             return None;
         }
     }
@@ -567,10 +572,7 @@ fn extract_region<M: Module>(
     // Visit `region_blocks \ {root}` in reverse postorder from `root` so
     // dominating definitions are always cloned before their uses.
     let rpo_blocks = rpo_order(func, root, &region_blocks);
-    let ordered_blocks: Vec<ir::Block> = rpo_blocks
-        .into_iter()
-        .filter(|b| *b != root)
-        .collect();
+    let ordered_blocks: Vec<ir::Block> = rpo_blocks.into_iter().filter(|b| *b != root).collect();
     for &b in &ordered_blocks {
         let new_b = cold_func.dfg.make_block();
         cold_func.layout.append_block(new_b);
@@ -652,7 +654,9 @@ fn extract_region<M: Module>(
         func.layout.append_inst(ret_inst, root);
         func.set_srcloc(ret_inst, stub_loc);
     } else {
-        let code = region.first_trap.unwrap_or_else(|| TrapCode::unwrap_user(1));
+        let code = region
+            .first_trap
+            .unwrap_or_else(|| TrapCode::unwrap_user(1));
         let trap_inst = func.dfg.make_inst(InstructionData::Trap {
             opcode: Opcode::Trap,
             code,
@@ -872,12 +876,18 @@ impl<'a> Cloner<'a> {
             .iter()
             .map(|&c| self.remap_block_call(c, val_map, block_map))
             .collect();
-        let mapped = self.dst.create_jump_table(JumpTableData::new(default, &cases));
+        let mapped = self
+            .dst
+            .create_jump_table(JumpTableData::new(default, &cases));
         self.jt_map.insert(jt, mapped);
         mapped
     }
 
-    fn remap_list(&mut self, list: &ValueList, val_map: &BTreeMap<ir::Value, ir::Value>) -> ValueList {
+    fn remap_list(
+        &mut self,
+        list: &ValueList,
+        val_map: &BTreeMap<ir::Value, ir::Value>,
+    ) -> ValueList {
         let vals: Vec<ir::Value> = list
             .as_slice(&self.src.dfg.value_lists)
             .iter()
@@ -895,7 +905,7 @@ impl<'a> Cloner<'a> {
         val_map: &mut BTreeMap<ir::Value, ir::Value>,
         block_map: &BTreeMap<ir::Block, ir::Block>,
     ) -> Result<(), String> {
-        let data = self.src.dfg.insts[inst].clone();
+        let data = self.src.dfg.insts[inst];
         let ctrl = self.src.dfg.ctrl_typevar(inst);
         let old_results: Vec<ir::Value> = self.src.dfg.inst_results(inst).to_vec();
 
@@ -1044,11 +1054,7 @@ impl<'a> Cloner<'a> {
                 args: [r(args[0]), r(args[1])],
                 imm,
             },
-            InstructionData::Shuffle {
-                opcode,
-                args,
-                imm,
-            } => InstructionData::Shuffle {
+            InstructionData::Shuffle { opcode, args, imm } => InstructionData::Shuffle {
                 opcode,
                 args: [r(args[0]), r(args[1])],
                 imm: self.remap_imm(imm),
@@ -1069,13 +1075,11 @@ impl<'a> Cloner<'a> {
                 arg: r(arg),
                 imm,
             },
-            InstructionData::FloatCompare { opcode, cond, args } => {
-                InstructionData::FloatCompare {
-                    opcode,
-                    cond,
-                    args: [r(args[0]), r(args[1])],
-                }
-            }
+            InstructionData::FloatCompare { opcode, cond, args } => InstructionData::FloatCompare {
+                opcode,
+                cond,
+                args: [r(args[0]), r(args[1])],
+            },
             InstructionData::Load {
                 opcode,
                 flags,
@@ -1087,13 +1091,11 @@ impl<'a> Cloner<'a> {
                 arg: r(arg),
                 offset,
             },
-            InstructionData::LoadNoOffset { opcode, flags, arg } => {
-                InstructionData::LoadNoOffset {
-                    opcode,
-                    flags,
-                    arg: r(arg),
-                }
-            }
+            InstructionData::LoadNoOffset { opcode, flags, arg } => InstructionData::LoadNoOffset {
+                opcode,
+                flags,
+                arg: r(arg),
+            },
             InstructionData::Store {
                 opcode,
                 flags,
@@ -1220,18 +1222,10 @@ impl<'a> Cloner<'a> {
                     blocks: [b0, b1],
                 }
             }
-            InstructionData::BranchTable {
-                opcode,
-                arg,
-                table,
-            } => {
+            InstructionData::BranchTable { opcode, arg, table } => {
                 let arg = r(arg);
                 let table = self.remap_jt(table, val_map, block_map);
-                InstructionData::BranchTable {
-                    opcode,
-                    arg,
-                    table,
-                }
+                InstructionData::BranchTable { opcode, arg, table }
             }
             other => {
                 return Err(format!(
@@ -1259,11 +1253,7 @@ where
     visited
 }
 
-fn rpo_order(
-    func: &ir::Function,
-    root: ir::Block,
-    region: &BTreeSet<ir::Block>,
-) -> Vec<ir::Block> {
+fn rpo_order(func: &ir::Function, root: ir::Block, region: &BTreeSet<ir::Block>) -> Vec<ir::Block> {
     fn visit(
         func: &ir::Function,
         b: ir::Block,
