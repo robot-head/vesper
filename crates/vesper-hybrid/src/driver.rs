@@ -385,11 +385,7 @@ impl Session {
                 let input = o.input();
                 if self.package {
                     let path = Path::new(input);
-                    let assembled = if o.include_tests {
-                        packages::load_for_tests(path)?
-                    } else {
-                        packages::load(path)?
-                    };
+                    let assembled = packages::load_for_target(path, o.target(), o.include_tests)?;
                     if !assembled.ok() {
                         crate::package_diagnostics(&assembled, &assembled.diagnostics, o.json);
                         return Ok(count(
