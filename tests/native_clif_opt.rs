@@ -438,3 +438,31 @@ fn main() -> i64 {
     );
     assert_eq!(agree(source), "1");
 }
+
+#[test]
+fn trivial_arith_and_bool_extends_fold() {
+    let source = "fn pick(in s: Slice[u8], i: u64) -> u64 {
+    if i < s.len() {
+        match s.try_get(i) {
+            Option::Some(b) => widen_u64(b),
+            Option::None => 0,
+        }
+    } else {
+        99
+    }
+}
+fn main() -> u64 {
+    let mut seq = ChunkSeq::new[u8]();
+    seq.push(7);
+    seq.push(11);
+    let s = seq.as_slice();
+    wrapping_add(pick(in s, 1), pick(in s, 5))
+}";
+    let c = accepted(source);
+    let (_, clif) = native::object(&c.world, "main").unwrap();
+    assert!(
+        !clif.contains("imul_imm"),
+        "expected unit-stride imul_imm x, 1 to fold:\n{clif}"
+    );
+    assert_eq!(agree(source), "110");
+}
