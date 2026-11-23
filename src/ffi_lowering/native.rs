@@ -2156,6 +2156,15 @@ impl<M: Module> Codegen<'_, '_, M> {
         if !self.foreign_import_direct(plan.function.link_symbol(), &sig) {
             return Ok(None);
         }
+        // Multi-byte mapping results (`u16`/`u32`/`u64`) need `umul_overflow`
+        // in `foreign_range_register`, which `@vesper/cranelift` does not
+        // expose yet; decline before `BEGIN` / argument evaluation.
+        if plan.function.mapping_length().is_some()
+            && let ValueType::Handle { handle, .. } = plan.function.result()
+            && handle.mapping().is_some_and(|s| s.bits() > 8)
+        {
+            return Ok(None);
+        }
         let descriptors = plan.function.parameters();
         let handler = match plan.handler {
             Handler::Direct => 0,
@@ -2414,15 +2423,6 @@ impl<M: Module> Codegen<'_, '_, M> {
         };
         let (len_word, len_i64, reg_id) = match mapping_length {
             Some(idx) => {
-                let elem_bytes = match plan.function.result() {
-                    ValueType::Handle { handle, .. } => {
-                        handle.mapping().map_or(1, |s| u64::from(s.bits()) / 8)
-                    }
-                    _ => 1,
-                };
-                if elem_bytes > 1 {
-                    return Ok(None);
-                }
                 let v = c_args[idx];
                 let (reg_id, _) = self.foreign_range_helpers()?;
                 (
