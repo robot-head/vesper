@@ -1,0 +1,105 @@
+// Canonical byte encoder for `.vsys` `LibraryDescriptor` (`vesper_ffi::sys::canonicalize`).
+use self::lexer::{
+    VsysError,
+    err_limit,
+    fail_vsys
+};
+
+pub struct Encoder {
+    pub out: ChunkSeq[u8],
+    pub limit: u64,
+}
+
+pub fn new_encoder(limit: u64) -> Encoder {
+    Encoder {
+        out: ChunkSeq::new[u8](),
+        limit: limit,
+    }
+}
+
+pub fn put_bytes(inout e: Encoder, in data: Slice[u8]) eff [Fail[VsysError]] {
+    let n = data.len();
+    let max_u32: u64 = 4294967295;
+    if n > max_u32 {
+        return fail_vsys(err_limit(), 0, 0, 200);
+    }
+    let cur = e.out.len();
+    let needed = wrapping_add(4, n);
+    if wrapping_add(cur, needed) > e.limit {
+        return fail_vsys(err_limit(), 0, 0, 201);
+    }
+    let len32 = wrapping_u32(n);
+    e.out.push(wrapping_u8(len32 & 255));
+    e.out.push(wrapping_u8(wrapping_shr_u32(len32, 8) & 255));
+    e.out.push(wrapping_u8(wrapping_shr_u32(len32, 16) & 255));
+    e.out.push(wrapping_u8(wrapping_shr_u32(len32, 24) & 255));
+    e.out.extend(in data);
+}
+
+pub fn put_str(inout e: Encoder, in s: Str) eff [Fail[VsysError]] {
+    put_bytes(inout e, in s.as_bytes());
+}
+
+pub fn put_u16(inout e: Encoder, v: u16) eff [Fail[VsysError]] {
+    let mut buf: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](2);
+    buf.push(wrapping_u8(v & 255));
+    buf.push(wrapping_u8(wrapping_shr_u16(v, 8) & 255));
+    put_bytes(inout e, in buf.as_slice());
+}
+
+pub fn put_count(inout e: Encoder, v: u64) eff [Fail[VsysError]] {
+    let mut buf: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](8);
+    let mut x = v;
+    for i in 0..8 {
+        buf.push(wrapping_u8(x & 255));
+        x = wrapping_shr_u64(x, 8);
+    }
+    put_bytes(inout e, in buf.as_slice());
+}
+
+pub fn put_u128_u64(inout e: Encoder, v: u64) eff [Fail[VsysError]] {
+    let mut buf: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](16);
+    let mut x = v;
+    for i in 0..8 {
+        buf.push(wrapping_u8(x & 255));
+        x = wrapping_shr_u64(x, 8);
+    }
+    for i in 0..8 {
+        buf.push(0);
+    }
+    put_bytes(inout e, in buf.as_slice());
+}
+
+pub fn put_decimal_const(inout e: Encoder, neg: bool, mag: u64) eff [Fail[VsysError]] {
+    let mut tmp: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    if mag == 0 {
+        tmp.push(48);
+        return put_bytes(inout e, in tmp.as_slice());
+    }
+    let mut x = mag;
+    let mut rev: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    loop {
+        if x == 0 {
+            break;
+        }
+        let d = x % 10;
+        rev.push(wrapping_add(wrapping_u8(d), 48));
+        x = x / 10;
+    }
+    if neg {
+        tmp.push(45);
+    }
+    let mut k = rev.len();
+    loop {
+        if k == 0 {
+            break;
+        }
+        k = wrapping_sub(k, 1);
+        let ch = match rev.try_get(k) {
+            Option::Some(v) => v,
+            Option::None => 48,
+        };
+        tmp.push(ch);
+    }
+    put_bytes(inout e, in tmp.as_slice());
+}
