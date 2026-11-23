@@ -45,6 +45,9 @@ use self::text::{
 use self::plans::{
     sort_u64
 };
+use @vesper/check-data::types::{
+    TyPass
+};
 
 const NONE32: u32 = 4294967295;
 const OP_READ: u8 = 3;
@@ -55,8 +58,6 @@ const OP_INDIRECT: u8 = 13;
 const OP_CLOSURE: u8 = 14;
 const OP_HANDLE: u8 = 15;
 const T_BRANCH: u8 = 2;
-const P_IN: u8 = 0;
-const P_INOUT: u8 = 1;
 const S_GUARD: u64 = 18;
 const C_PATH: u64 = 1;
 const C_RAISE: u64 = 2;
@@ -185,7 +186,7 @@ fn only_access_receivers(
         if u.sub == S_GUARD {
             for j in 0..w(u.gn) {
                 let a = f.arg(add(w(u.g0), j));
-                if a.value == read && !(a.pass == P_IN && a.place == place) {
+                if a.value == read && !(a.pass == TyPass::In && a.place == place) {
                     return false;
                 }
             }
@@ -279,7 +280,7 @@ fn stable_views(in f: Fun, in us: Users, inout out: Hoists) {
     let roots = copy_places(in f);
     for p in 0..f.params.len() {
         let q = f.param(p);
-        if opaque || !(q.pass == P_IN || q.pass == P_INOUT) || !seq_like(q.flags) {
+        if opaque || !(q.pass == TyPass::In || q.pass == TyPass::Inout) || !seq_like(q.flags) {
             continue;
         }
         let place = roots.lookup_root(q.name);
@@ -297,7 +298,7 @@ fn stable_views(in f: Fun, in us: Users, inout out: Hoists) {
                 continue;
             }
             let pass = wrapping_u8(i.sub);
-            if (pass == P_IN || pass == P_INOUT)
+            if (pass == TyPass::In || pass == TyPass::Inout)
                 && only_access_receivers(
                     in f,
                     in us,
@@ -334,7 +335,7 @@ fn stable_views(in f: Fun, in us: Users, inout out: Hoists) {
     let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
     for p in 0..f.params.len() {
         let q = f.param(p);
-        if q.pass != P_IN || handles {
+        if q.pass != TyPass::In || handles {
             continue;
         }
         let mut rebound = false;
@@ -358,7 +359,16 @@ fn stable_views(in f: Fun, in us: Users, inout out: Hoists) {
             if (i.flags & TY_SEQ) == 0 || (i.flags & TY_TEXT) != 0 {
                 continue;
             }
-            if !only_access_receivers(in f, in us, i.dest, P_IN, i.place, false, in none, false) {
+            if !only_access_receivers(
+                in f,
+                in us,
+                i.dest,
+                TyPass::In,
+                i.place,
+                false,
+                in none,
+                false
+            ) {
                 continue;
             }
             buf.clear();
@@ -542,7 +552,7 @@ fn header_hoists(in f: Fun, in us: Users, inout out: Hoists) {
                     continue;
                 }
                 let pass = wrapping_u8(i.sub);
-                if !(pass == P_IN || (pass == P_INOUT && !calls)) {
+                if !(pass == TyPass::In || (pass == TyPass::Inout && !calls)) {
                     continue;
                 }
                 if !seq_like(i.flags) {
