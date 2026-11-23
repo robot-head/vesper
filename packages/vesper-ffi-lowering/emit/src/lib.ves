@@ -13,6 +13,7 @@
 
 use @vesper/cranelift::{
     Block,
+    FuncId,
     FuncRef,
     Ty,
     Value,
@@ -449,8 +450,14 @@ fn cstr_list(inout b: Builder, inout m: Module, data: Value, len: Value, inout a
     a.text.push(value_word(array));
 }
 
-fn foreign_mapping(inout b: Builder, inout m: Module, address: Value, raw_len: Value, len_i64: bool)
-    -> Value eff [Ffi[Cranelift]] {
+fn foreign_mapping(
+    inout b: Builder,
+    inout m: Module,
+    address: Value,
+    raw_len: Value,
+    len_i64: bool,
+    reg_id: u64
+) -> Value eff [Ffi[Cranelift]] {
     let len = if len_i64 {
         raw_len
     } else {
@@ -469,6 +476,15 @@ fn foreign_mapping(inout b: Builder, inout m: Module, address: Value, raw_len: V
     ins_brif(inout b, absent, join, in yes_args.as_slice(), make, in no_args.as_slice());
     switch_to_block(inout b, make);
     seal_block(inout b, make);
+    let reg_fn = import_function(
+        inout b,
+        inout m,
+        FuncId {
+            id: wrapping_u32(reg_id)
+        }
+    );
+    let align = ins_iconst(inout b, ty_i64(), 1);
+    call3(inout b, reg_fn, address, len, align);
     let malloc = libc(inout b, inout m, MALLOC, 1, true);
     let size = ins_iconst(inout b, ty_i64(), 24);
     call1(inout b, malloc, size);
@@ -1114,8 +1130,9 @@ fn the_call(call: u64, inout b: Builder, inout m: Module) eff [Ffi[Cranelift]] {
     let little = at(in r, 3) == 1;
     let len_word = at(in r, 4);
     let len_i64 = at(in r, 5) == 1;
-    let rel_n = at(in r, 6);
-    let n_idx = wrapping_add(7, rel_n);
+    let reg_id = at(in r, 6);
+    let rel_n = at(in r, 7);
+    let n_idx = wrapping_add(8, rel_n);
     let n = at(in r, n_idx);
     let args_start = wrapping_add(n_idx, 1);
     let mut args: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](n);
@@ -1129,12 +1146,14 @@ fn the_call(call: u64, inout b: Builder, inout m: Module) eff [Ffi[Cranelift]] {
         NO_VALUE
     };
     if len_word != NO_VALUE && raw != NO_VALUE {
-        raw = value_word(foreign_mapping(inout b, inout m, val(raw), val(len_word), len_i64));
+        raw = value_word(
+            foreign_mapping(inout b, inout m, val(raw), val(len_word), len_i64, reg_id)
+        );
     }
     if rel_n > 0 {
         let free = libc(inout b, inout m, FREE, 1, false);
         for j in 0..rel_n {
-            call1(inout b, free, val(at(in r, wrapping_add(7, j))));
+            call1(inout b, free, val(at(in r, wrapping_add(8, j))));
         }
     }
     let os = if errno != 0 {

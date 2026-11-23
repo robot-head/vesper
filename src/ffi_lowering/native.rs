@@ -2182,7 +2182,7 @@ impl<M: Module> Codegen<'_, '_, M> {
         let mut restores = vec![];
         let mut strings: Vec<(u64, u64)> = vec![];
         let mut lists: Vec<u64> = vec![];
-        let mut released: Vec<u64> = vec![];
+        let mut released: Vec<(u64, u64, u64, u64)> = vec![];
         let mut mapping_length = None;
         for (i, ((arg, param), descriptor)) in args
             .iter()
@@ -2361,7 +2361,15 @@ impl<M: Module> Codegen<'_, '_, M> {
             }
             let s = *r.get(2 + k + m).ok_or_else(bad)? as usize;
             if s == 1 {
-                released.push(r[3 + k + m]);
+                let stride = match descriptor.ty() {
+                    ParameterType::Handle { handle, .. } => {
+                        handle.mapping().map_or(1, |e| u64::from(e.bits()) / 8)
+                    }
+                    _ => 1,
+                };
+                let data = word(c_args[c_args.len() - 2]);
+                let len = word(c_args[c_args.len() - 1]);
+                released.push((r[3 + k + m], data, len, stride));
             } else if s == 2 {
                 if matches!(descriptor.ty(), ParameterType::CStrList) {
                     lists.push(r[3 + k + m]);
@@ -2404,16 +2412,30 @@ impl<M: Module> Codegen<'_, '_, M> {
         } else {
             0
         };
-        let (len_word, len_i64) = match mapping_length {
+        let (len_word, len_i64, reg_id) = match mapping_length {
             Some(idx) => {
+                let elem_bytes = match plan.function.result() {
+                    ValueType::Handle { handle, .. } => {
+                        handle.mapping().map_or(1, |s| u64::from(s.bits()) / 8)
+                    }
+                    _ => 1,
+                };
+                if elem_bytes > 1 {
+                    return Ok(None);
+                }
                 let v = c_args[idx];
+                let (reg_id, _) = self.foreign_range_helpers()?;
                 (
                     word(v),
                     u64::from(self.b.func.dfg.value_type(v) == types::I64),
+                    u64::from(reg_id.as_u32()),
                 )
             }
-            None => (NO_VALUE, 0),
+            None => (NO_VALUE, 0, NO_VALUE),
         };
+        for &(_, data, len, stride) in &released {
+            self.foreign_range_unregister(value_of_word(data)?, value_of_word(len)?, stride)?;
+        }
         let mut words = vec![
             u64::from(callee.as_u32()),
             errno,
@@ -2421,9 +2443,10 @@ impl<M: Module> Codegen<'_, '_, M> {
             little,
             len_word,
             len_i64,
+            reg_id,
             released.len() as u64,
         ];
-        words.extend(&released);
+        words.extend(released.iter().map(|(h, _, _, _)| *h));
         words.push(c_args.len() as u64);
         words.extend(c_args.iter().map(|v| word(*v)));
         words.push(copies.len() as u64);
