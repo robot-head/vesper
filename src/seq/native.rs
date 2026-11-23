@@ -549,6 +549,7 @@ impl<M: Module> Codegen<'_, '_, M> {
         }
         Ok(match self.seq_stride(elem)? {
             1 => self.b.ins().uload8(types::I64, MemFlags::new(), addr, 0),
+            2 => self.b.ins().uload16(types::I64, MemFlags::new(), addr, 0),
             4 => self.b.ins().uload32(MemFlags::new(), addr, 0),
             _ => self
                 .b
@@ -572,6 +573,9 @@ impl<M: Module> Codegen<'_, '_, M> {
         match self.seq_stride(elem)? {
             1 => {
                 self.b.ins().istore8(MemFlags::new(), value, addr, 0);
+            }
+            2 => {
+                self.b.ins().istore16(MemFlags::new(), value, addr, 0);
             }
             4 => {
                 self.b.ins().istore32(MemFlags::new(), value, addr, 0);

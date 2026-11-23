@@ -1556,13 +1556,8 @@ fn word_fields(shape: &EnumShape, name: &str, fields: &[(String, Pattern)]) -> b
 /// through [`crate::seq::native::Codegen::seq_option`].
 fn seq_option_op(op: crate::seq::SeqOp, shape: &EnumShape) -> bool {
     shape.words.len() == 2
-        && (matches!(
-            op,
-            crate::seq::SeqOp::Pop
-                | crate::seq::SeqOp::Last
-                | crate::seq::SeqOp::TryGet
-                | crate::seq::SeqOp::Hoisted(crate::seq::Access::TryGet)
-        ) || matches!(op, crate::seq::SeqOp::Wide(w) if !w.write && w.total)
+        && (matches!(op, crate::seq::SeqOp::Pop | crate::seq::SeqOp::Last)
+            || matches!(op, crate::seq::SeqOp::Wide(w) if !w.write && w.total)
             || op.byte_scan())
 }
 
@@ -1711,28 +1706,7 @@ pub(super) fn scalar_enums(
                         capability,
                         ..
                     } => capability.is_none() && call_words(callee, types, shape),
-                    Op::Seq { op, .. } if seq_option_op(*op, shape) => {
-                        // Keep directly matched `try_get` on `seq_fused` so
-                        // element views and slice checks stay fused.
-                        let try_get = matches!(
-                            op,
-                            crate::seq::SeqOp::TryGet
-                                | crate::seq::SeqOp::Hoisted(crate::seq::Access::TryGet)
-                        );
-                        let fused_match = try_get
-                            && uses.get(v).is_some_and(|us| {
-                                us.len() == 1
-                                    && matches!(
-                                        us[0],
-                                        Use::Term(tb) if tb == *b
-                                            && matches!(
-                                                f.blocks[tb].terminator,
-                                                Terminator::Match { .. }
-                                            )
-                                    )
-                            });
-                        !fused_match
-                    }
+                    Op::Seq { op, .. } if seq_option_op(*op, shape) => true,
                     _ => false,
                 },
                 Some(Def::Param(b, k)) => preds.get(b).is_some_and(|ps| {

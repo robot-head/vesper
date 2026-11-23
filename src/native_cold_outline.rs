@@ -436,7 +436,8 @@ fn region_worth_outlining(
             {
                 if inside {
                     region_slots.insert(stack_slot);
-                } else {
+                }
+                if !region.owned.contains(&b) {
                     outside_slots.insert(stack_slot);
                 }
             }
@@ -483,7 +484,8 @@ fn extract_region<M: Module>(
             {
                 if inside {
                     region_slots.insert(stack_slot);
-                } else {
+                }
+                if !region.owned.contains(&b) {
                     outside_slots.insert(stack_slot);
                 }
             }
