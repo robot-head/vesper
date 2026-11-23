@@ -225,11 +225,14 @@ Flux (Rust still in `src/`):
 | `kafka.rs`, `kafka_client.rs`, `sink.rs` | 3,203 | sockets need lane 13's libc imports; TLS and SASL need lane 17's crypto shim |
 | `cdc.rs` header codec and policy checks | ~150 | small; with the Kafka decoders that share them |
 
-Quarry: the planner, DDL and row executor are ported (non-default
-`vesper-port`, last measured at 1.80x wall, 1.59x instructions in
-`port-parity.md`). The store, WAL, pages, buffer pool, device I/O, the
-vectorized executor and the durable layer are Rust. Next: re-measure the
-planner on current `main`, then close the gap to 1.5x and flip it.
+Quarry: the planner, DDL, row executor and access planner are now flipped
+to the Vesper port (`vesper-quarry` builds the port unconditionally;
+`parse.rs` and the Rust DDL/checker/optimizer/row-executor arms were
+deleted: 1,259 Rust lines deleted, 29 insertions). On `main` (`53c9bf6e`),
+`examples/planner_abba.rs` passes the Rule 8 `< 1.50x` gate on
+`RUSTFLAGS="-C target-cpu=native"`: `1.362x` (`9` epochs,
+`BasisPointBounds { floor: 3623, ceil: 3624 }`) and `1.390x` median (`n = 30`,
+95% CI `[1.218x, 1.431x]`). The store, WAL, pages, buffer pool, device I/O,
+vectorized executor and durable layer remain Rust.
 
-The census row (`scripts/rust-census.py`) is updated once the census lands
-on `main` with plan PR #1415.
+The census row (`scripts/rust-census.py`) is updated for `vesper-quarry`.
