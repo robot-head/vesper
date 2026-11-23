@@ -267,7 +267,7 @@ impl PackageVsys {
     /// fills the placeholders. A library that does not parse declares no
     /// names here; [`Assembled::imports`] reports its error.
     /// A per-target import declares the names of every target's file.
-    fn type_names(&self) -> Vec<(String, String)> {
+    pub fn type_names(&self) -> Vec<(String, String)> {
         let texts: Vec<(&str, &str)> = if self.targets.is_empty() {
             let Ok((triple, _)) = vsys_target(None) else {
                 return vec![];
