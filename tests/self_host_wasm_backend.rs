@@ -139,12 +139,14 @@ fn loop_refusal(e: &WasmError) -> bool {
 }
 
 /// Rust's refusal of an operation: loops, and the sequence, string and
-/// integer conversion operations the port lowers (#1506).
+/// integer conversion operations the port lowers (#1506), and of `u128`,
+/// which the port lowers as a 16-byte block (#1508).
 fn operation_refusal(e: &WasmError) -> bool {
     matches!(
         e,
         WasmError::Unsupported {
-            construct: wasm_backend::Unsupported::Operation,
+            construct: wasm_backend::Unsupported::Operation
+                | wasm_backend::Unsupported::IntegerWidth,
             ..
         }
     )
@@ -304,7 +306,12 @@ pub fn differential_run(step: usize, execute: bool) -> Tally {
             t.compared += 1;
             let tag = format!("{} [{k}]", c.name);
             match (&rust, &port) {
-                (_, Outcome::NotPorted(_)) => t.not_ported += 1,
+                (_, Outcome::NotPorted(site)) => {
+                    t.not_ported += 1;
+                    if std::env::var_os("WASM_PORT_SITES").is_some() {
+                        eprintln!("not ported site {site}: {tag}");
+                    }
+                }
                 (Err(e), Outcome::Module { core, wit, .. }) if operation_refusal(e) => {
                     t.loops += 1;
                     if execute && k == 0 && c.world.functions["main"].params.is_empty() {
@@ -325,8 +332,10 @@ pub fn differential_run(step: usize, execute: bool) -> Tally {
                         core,
                         wit,
                         functions,
+                        handlers,
                     },
                 ) => {
+                    let lowered = handler_lowerings(&c.world, handlers);
                     if a.functions != *functions {
                         t.diffs
                             .push(format!("{tag}: {} vs {functions} functions", a.functions));
@@ -339,6 +348,9 @@ pub fn differential_run(step: usize, execute: bool) -> Tally {
                     } else if &a.wit != wit {
                         t.diffs
                             .push(format!("{tag}: WIT differs\n{}\n---\n{wit}", a.wit));
+                    } else if a.handlers != lowered {
+                        t.diffs
+                            .push(format!("{tag}: handlers {:?} vs {lowered:?}", a.handlers));
                     } else {
                         let component = wrap(core.clone(), wit, o.world);
                         if component != a.component {

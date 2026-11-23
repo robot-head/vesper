@@ -1,0 +1,1334 @@
+// Module corim_cca of @vesper/aegis (see lib.ves): CCA endorsement profile
+// validation (CcaCorimStore::add) and reference-value appraisal
+// (appraise_cca_with_options).
+use self::AtErr;
+use self::reader::put;
+
+const CCA_IMPLEMENTATION_ID_LEN: u64 = 32;
+const CCA_ROTPK_MAX_INDEX: u64 = 5;
+const MAX_ROTPK_KEYS: u64 = 48;
+const CCA_MAX_PERS_LEN: u64 = 64;
+const CCA_MAX_MEASUREMENT_LEN: u64 = 64;
+const UEID_RAND_LEN: u64 = 33;
+const UEID_TYPE_RAND: u64 = 1;
+const CCA_REMS: u64 = 4;
+
+// IANA Named Information hash algorithms.
+const NI_SHA256: u64 = 1;
+const NI_SHA384: u64 = 7;
+const NI_SHA512: u64 = 8;
+
+// AttestError kinds in src/port.rs (5 is UnexpectedKeyType in cose.ves).
+const AT_COLLATERAL_EXPIRED: u64 = 0;
+const AT_COLLATERAL: u64 = 1;
+const AT_UNSUPPORTED_REF: u64 = 2;
+const AT_REF_MISSING: u64 = 3;
+const AT_REF_MISMATCH: u64 = 4;
+
+// Profile prefixes for AT_COLLATERAL (`AtErr::what`).
+const P_NONE: u64 = 0;
+const P_PLAT_REF: u64 = 1;
+const P_PLAT_AK: u64 = 2;
+const P_REALM_REF: u64 = 3;
+
+// AT_COLLATERAL reason IDs (src/port.rs).
+const R_NOT_CCA_PROFILE: u64 = 0;
+const R_REALM_ATTEST_KEYS: u64 = 1;
+const R_INST_GROUP_NOT_ALLOWED: u64 = 2;
+const R_ENV_CLASS_REQ: u64 = 3;
+const R_CLASS_ID_REQ: u64 = 4;
+const R_CLASS_ID_BYTES: u64 = 5;
+const R_IMPL_ID_32: u64 = 6;
+const R_MKEY_MANDATORY: u64 = 7;
+const R_MKEY_STRING: u64 = 8;
+const R_FIELD_NOT_ALLOWED: u64 = 9;
+const R_DIGESTS_MANDATORY: u64 = 10;
+const R_ONE_DIGEST_REQ: u64 = 11;
+const R_DIGEST_LEN_ALG: u64 = 12;
+const R_UNSUPPORTED_DIGEST_ALG: u64 = 13;
+const R_VER_SCHEME_PRESENT: u64 = 14;
+const R_SIGNER_LEN: u64 = 15;
+const R_SIGNER_MANDATORY: u64 = 16;
+const R_SIGNER_TYPE_BYTES: u64 = 17;
+const R_EXACTLY_ONE_SIGNER: u64 = 18;
+const R_RAW_MANDATORY: u64 = 19;
+const R_RAW_MASK_LEN: u64 = 20;
+const R_RAW_MUST_MASK: u64 = 21;
+const R_DUP_WHAT: u64 = 22;
+const R_INVALID_MKEY: u64 = 23;
+const R_ROTPK_COUNT: u64 = 24;
+const R_ROTPK_HASH_BYTES: u64 = 25;
+const R_SW_REQUIRED: u64 = 26;
+const R_INST_33_RAND: u64 = 27;
+const R_INST_UEID: u64 = 28;
+const R_INST_REQ: u64 = 29;
+const R_VK_PKIX: u64 = 30;
+const R_EXACTLY_ONE_VK: u64 = 31;
+const R_REALM_CLASS_REQ: u64 = 32;
+const R_REALM_RIM_LEN: u64 = 33;
+const R_REALM_RIM_BYTES: u64 = 34;
+const R_REALM_RIM_REQ: u64 = 35;
+const R_DUP_CCA_RIM: u64 = 36;
+const R_RIM_DIFFERS: u64 = 37;
+const R_RPV_RAW_REQ: u64 = 38;
+const R_RPV_LEN: u64 = 39;
+const R_DUP_CCA_RPV: u64 = 40;
+const R_RIM_NOT_FOUND: u64 = 41;
+
+// Bitmasks for allowed MeasurementValues fields.
+const ALLOW_VERSION: u64 = 1;
+const ALLOW_DIGESTS: u64 = 2;
+const ALLOW_RAW: u64 = 4;
+const ALLOW_NAME: u64 = 8;
+const ALLOW_CRYPTOKEYS: u64 = 16;
+
+// AT_UNSUPPORTED_REF `what` indices.
+const U_AUTHORIZED_BY: u64 = 0;
+const U_OTHER_MVAL_KEYS: u64 = 1;
+const U_AK_CONDITIONS: u64 = 2;
+const U_MASKED_RPV: u64 = 3;
+const U_SW_DESC_ALG: u64 = 4;
+
+// AT_REF_MISSING `what` indices.
+const M_PLAT_IMPL: u64 = 0;
+const M_PLAT_NO_SW: u64 = 1;
+const M_PLAT_CFG: u64 = 2;
+const M_PLAT_MFG: u64 = 3;
+const M_PLAT_ROTPK: u64 = 4;
+const M_REALM_RIM: u64 = 5;
+
+// AT_REF_MISMATCH `what` indices.
+const MM_PLAT_SW: u64 = 0;
+const MM_PLAT_CFG: u64 = 1;
+const MM_PLAT_MFG: u64 = 2;
+const MM_PLAT_ROTPK: u64 = 3;
+const MM_REALM_RPV: u64 = 4;
+const MM_REALM_REM: u64 = 5;
+
+fn at_err(kind: u64, what: u64) -> Never eff [Fail[AtErr]] {
+    Fail::raise(
+        AtErr {
+            kind: kind,
+            what: what,
+            reason: 0,
+            index: 0,
+            extra: 0,
+            off: 0,
+            len: 0
+        }
+    )
+}
+
+fn col_err(prefix: u64, reason: u64, index: u64, extra: u64, off: u64, len: u64)
+    -> Never eff [Fail[AtErr]] {
+    Fail::raise(
+        AtErr {
+            kind: AT_COLLATERAL,
+            what: prefix,
+            reason: reason,
+            index: index,
+            extra: extra,
+            off: off,
+            len: len
+        }
+    )
+}
+
+copy struct Cur {
+    pos: u64
+}
+
+fn rd(in w: Slice[u64], inout c: Cur) -> u64 {
+    let v = match w.try_get(c.pos) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    };
+    c.pos = wrapping_add(c.pos, 1);
+    v
+}
+
+fn b_byte(in b: Slice[u8], i: u64) -> u64 {
+    match b.try_get(i) {
+        Option::Some(v) => widen_u64(v),
+        Option::None => 0,
+    }
+}
+
+fn ct_eq(in b: Slice[u8], a_off: u64, a_len: u64, b_off: u64, b_len: u64) -> bool {
+    if a_len != b_len {
+        return false;
+    }
+    let mut diff = 0;
+    let mut i = 0;
+    loop {
+        if i == a_len {
+            break;
+        }
+        diff = diff | (b_byte(in b, wrapping_add(a_off, i)) ^ b_byte(in b, wrapping_add(b_off, i)));
+        i = wrapping_add(i, 1);
+    }
+    diff == 0
+}
+
+fn slice_eq_lit(in b: Slice[u8], off: u64, len: u64, in lit: Slice[u8]) -> bool {
+    if len != lit.len() {
+        return false;
+    }
+    let mut diff = 0;
+    let mut i = 0;
+    loop {
+        if i == len {
+            break;
+        }
+        let lb = match lit.try_get(i) {
+            Option::Some(v) => widen_u64(v),
+            Option::None => 0,
+        };
+        diff = diff | (b_byte(in b, wrapping_add(off, i)) ^ lb);
+        i = wrapping_add(i, 1);
+    }
+    diff == 0
+}
+
+fn measurement_eq(in b: Slice[u8], r_off: u64, r_len: u64, e_off: u64, e_len: u64) -> bool {
+    if r_len == e_len {
+        return ct_eq(in b, r_off, r_len, e_off, e_len);
+    }
+    if r_len != CCA_MAX_MEASUREMENT_LEN || e_len > r_len {
+        return false;
+    }
+    let mut diff = 0;
+    let mut i = 0;
+    loop {
+        if i == e_len {
+            break;
+        }
+        diff = diff | (b_byte(in b, wrapping_add(r_off, i)) ^ b_byte(in b, wrapping_add(e_off, i)));
+        i = wrapping_add(i, 1);
+    }
+    loop {
+        if i == CCA_MAX_MEASUREMENT_LEN {
+            break;
+        }
+        diff = diff | b_byte(in b, wrapping_add(r_off, i));
+        i = wrapping_add(i, 1);
+    }
+    diff == 0
+}
+
+fn alg_len(alg: u64) -> u64 {
+    if alg == NI_SHA256 {
+        32
+    } else if alg == NI_SHA384 {
+        48
+    } else if alg == NI_SHA512 {
+        64
+    } else {
+        0
+    }
+}
+
+fn digest_len_ok(len: u64) -> bool {
+    len == 32 || len == 48 || len == 64
+}
+
+fn check_digests(
+    in w: Slice[u64],
+    inout c: Cur,
+    count: u64,
+    exactly_one: bool,
+    prefix: u64,
+    idx: u64,
+    mk_off: u64,
+    mk_len: u64
+) -> (u64, u64) eff [Fail[AtErr]] {
+    if count == 0 {
+        col_err(prefix, R_DIGESTS_MANDATORY, idx, 0, mk_off, mk_len);
+    }
+    if exactly_one && count != 1 {
+        col_err(prefix, R_ONE_DIGEST_REQ, idx, 0, mk_off, mk_len);
+    }
+    let mut first_off = 0;
+    let mut first_len = 0;
+    let mut d = 0;
+    loop {
+        if d == count {
+            return (first_off, first_len);
+        }
+        let alg = rd(in w, inout c);
+        let doff = rd(in w, inout c);
+        let dlen = rd(in w, inout c);
+        if d == 0 {
+            first_off = doff;
+            first_len = dlen;
+        }
+        let want = alg_len(alg);
+        if want == 0 {
+            col_err(prefix, R_UNSUPPORTED_DIGEST_ALG, idx, alg, mk_off, mk_len);
+        }
+        if dlen != want {
+            col_err(prefix, R_DIGEST_LEN_ALG, idx, 0, mk_off, mk_len);
+        }
+        d = wrapping_add(d, 1);
+    }
+}
+
+fn check_plain_values(
+    has_other: u64,
+    has_ver: u64,
+    has_digests: u64,
+    has_raw: u64,
+    has_name: u64,
+    has_ck: u64,
+    allowed: u64,
+    prefix: u64,
+    idx: u64
+) -> Unit eff [Fail[AtErr]] {
+    if has_other != 0 {
+        at_err(AT_UNSUPPORTED_REF, U_OTHER_MVAL_KEYS);
+    }
+    if has_ver != 0 && (allowed & ALLOW_VERSION) == 0 {
+        col_err(prefix, R_FIELD_NOT_ALLOWED, idx, 0, 0, 0);
+    }
+    if has_digests != 0 && (allowed & ALLOW_DIGESTS) == 0 {
+        col_err(prefix, R_FIELD_NOT_ALLOWED, idx, 1, 0, 0);
+    }
+    if has_raw != 0 && (allowed & ALLOW_RAW) == 0 {
+        col_err(prefix, R_FIELD_NOT_ALLOWED, idx, 2, 0, 0);
+    }
+    if has_name != 0 && (allowed & ALLOW_NAME) == 0 {
+        col_err(prefix, R_FIELD_NOT_ALLOWED, idx, 3, 0, 0);
+    }
+    if has_ck != 0 && (allowed & ALLOW_CRYPTOKEYS) == 0 {
+        col_err(prefix, R_FIELD_NOT_ALLOWED, idx, 4, 0, 0);
+    }
+}
+
+fn check_class_bytes(has_class: u64, class_kind: u64, class_len: u64, prefix: u64, idx: u64)
+    -> Unit eff [Fail[AtErr]] {
+    if has_class == 0 {
+        col_err(prefix, R_ENV_CLASS_REQ, idx, 0, 0, 0);
+    }
+    if class_kind == 0 {
+        col_err(prefix, R_CLASS_ID_REQ, idx, 0, 0, 0);
+    }
+    if class_kind != 1 {
+        col_err(prefix, R_CLASS_ID_BYTES, idx, 0, 0, 0);
+    }
+    if class_len != CCA_IMPLEMENTATION_ID_LEN {
+        col_err(prefix, R_IMPL_ID_32, idx, 0, 0, 0);
+    }
+}
+
+// Parse `"cca.rotpk.{CM,DM}.{0..=5}"`. Returns `(ok, index)`.
+fn rotpk_key(in b: Slice[u8], off: u64, len: u64) -> bool {
+    if len != 14 {
+        return false;
+    }
+    let prefix = "cca.rotpk.".as_bytes();
+    let mut i = 0;
+    loop {
+        if i == 10 {
+            break;
+        }
+        let pb = match prefix.try_get(i) {
+            Option::Some(v) => widen_u64(v),
+            Option::None => 0,
+        };
+        if b_byte(in b, wrapping_add(off, i)) != pb {
+            return false;
+        }
+        i = wrapping_add(i, 1);
+    }
+    let b10 = b_byte(in b, wrapping_add(off, 10));
+    let b11 = b_byte(in b, wrapping_add(off, 11));
+    // 'C'=67, 'D'=68, 'M'=77.
+    if (b10 != 67 && b10 != 68) || b11 != 77 {
+        return false;
+    }
+    // '.'=46, '0'=48.
+    if b_byte(in b, wrapping_add(off, 12)) != 46 {
+        return false;
+    }
+    let idx_ch = b_byte(in b, wrapping_add(off, 13));
+    idx_ch >= 48 && idx_ch <= wrapping_add(48, CCA_ROTPK_MAX_INDEX)
+}
+
+fn validate_plat_refs(in w: Slice[u64], in b: Slice[u8], inout c: Cur) -> Unit eff [Fail[AtErr]] {
+    let ref_count = rd(in w, inout c);
+    let mut i = 0;
+    loop {
+        if i == ref_count {
+            return;
+        }
+        let has_group = rd(in w, inout c);
+        let has_inst = rd(in w, inout c);
+        let has_class = rd(in w, inout c);
+        let class_kind = rd(in w, inout c);
+        let class_len = rd(in w, inout c);
+        if has_inst != 0 || has_group != 0 {
+            col_err(P_PLAT_REF, R_INST_GROUP_NOT_ALLOWED, i, 0, 0, 0);
+        }
+        check_class_bytes(has_class, class_kind, class_len, P_PLAT_REF, i);
+        let meas_count = rd(in w, inout c);
+        let mut j = 0;
+        let mut sw_count = 0;
+        let mut seen_cfg = 0;
+        let mut seen_mfg = 0;
+        loop {
+            if j == meas_count {
+                break;
+            }
+            let has_auth = rd(in w, inout c);
+            let mk_kind = rd(in w, inout c);
+            let mk_off = rd(in w, inout c);
+            let mk_len = rd(in w, inout c);
+            let has_other = rd(in w, inout c);
+            let has_ver = rd(in w, inout c);
+            let ver_has_scheme = rd(in w, inout c);
+            let dcount = rd(in w, inout c);
+            let dcur_start = c;
+            let mut di = 0;
+            loop {
+                if di == dcount {
+                    break;
+                }
+                rd(in w, inout c);
+                rd(in w, inout c);
+                rd(in w, inout c);
+                di = wrapping_add(di, 1);
+            }
+            let has_raw = rd(in w, inout c);
+            let raw_len = rd(in w, inout c);
+            let has_mask = rd(in w, inout c);
+            let mask_len = rd(in w, inout c);
+            let has_name = rd(in w, inout c);
+            let ck_count = rd(in w, inout c);
+            let ccur_start = c;
+            let mut ki = 0;
+            loop {
+                if ki == ck_count {
+                    break;
+                }
+                rd(in w, inout c);
+                rd(in w, inout c);
+                ki = wrapping_add(ki, 1);
+            }
+            if has_auth != 0 {
+                at_err(AT_UNSUPPORTED_REF, U_AUTHORIZED_BY);
+            }
+            if mk_kind == 0 {
+                col_err(P_PLAT_REF, R_MKEY_MANDATORY, j, 0, 0, 0);
+            }
+            if mk_kind != 1 {
+                col_err(P_PLAT_REF, R_MKEY_STRING, j, 0, 0, 0);
+            }
+            let has_dig = if dcount > 0 {
+                1
+            } else {
+                0
+            };
+            let has_ck = if ck_count > 0 {
+                1
+            } else {
+                0
+            };
+            if slice_eq_lit(in b, mk_off, mk_len, "cca.software-component".as_bytes()) {
+                check_plain_values(
+                    has_other,
+                    has_ver,
+                    has_dig,
+                    has_raw,
+                    has_name,
+                    has_ck,
+                    ALLOW_VERSION | ALLOW_DIGESTS | ALLOW_NAME | ALLOW_CRYPTOKEYS,
+                    P_PLAT_REF,
+                    i
+                );
+                let mut dc = dcur_start;
+                check_digests(in w, inout dc, dcount, false, P_PLAT_REF, i, 0, 0);
+                if ver_has_scheme != 0 {
+                    col_err(P_PLAT_REF, R_VER_SCHEME_PRESENT, i, 0, 0, 0);
+                }
+                let mut kc = ccur_start;
+                if ck_count == 0 {
+                    col_err(P_PLAT_REF, R_SIGNER_MANDATORY, i, 0, 0, 0);
+                } else if ck_count == 1 {
+                    let kkind = rd(in w, inout kc);
+                    let klen = rd(in w, inout kc);
+                    if kkind == 0 {
+                        if !digest_len_ok(klen) {
+                            col_err(P_PLAT_REF, R_SIGNER_LEN, i, 0, 0, 0);
+                        }
+                    } else {
+                        col_err(P_PLAT_REF, R_SIGNER_TYPE_BYTES, i, 0, 0, 0);
+                    }
+                } else {
+                    col_err(P_PLAT_REF, R_EXACTLY_ONE_SIGNER, i, 0, 0, 0);
+                }
+                sw_count = wrapping_add(sw_count, 1);
+            } else if slice_eq_lit(in b, mk_off, mk_len, "cca.platform-config".as_bytes())
+                || slice_eq_lit(
+                    in b,
+                    mk_off,
+                    mk_len,
+                    "cca.platform-manufacturing-config".as_bytes()
+                ) {
+                check_plain_values(
+                    has_other,
+                    has_ver,
+                    has_dig,
+                    has_raw,
+                    has_name,
+                    has_ck,
+                    ALLOW_RAW,
+                    P_PLAT_REF,
+                    i
+                );
+                if has_raw == 0 {
+                    col_err(P_PLAT_REF, R_RAW_MANDATORY, i, 0, mk_off, mk_len);
+                }
+                if has_mask == 0 {
+                    col_err(P_PLAT_REF, R_RAW_MUST_MASK, i, 0, mk_off, mk_len);
+                }
+                if raw_len == 0 || mask_len != raw_len {
+                    col_err(P_PLAT_REF, R_RAW_MASK_LEN, i, 0, mk_off, mk_len);
+                }
+                if slice_eq_lit(in b, mk_off, mk_len, "cca.platform-config".as_bytes()) {
+                    if seen_cfg != 0 {
+                        col_err(P_PLAT_REF, R_DUP_WHAT, i, 0, mk_off, mk_len);
+                    }
+                    seen_cfg = 1;
+                } else {
+                    if seen_mfg != 0 {
+                        col_err(P_PLAT_REF, R_DUP_WHAT, i, 0, mk_off, mk_len);
+                    }
+                    seen_mfg = 1;
+                }
+            } else if rotpk_key(in b, mk_off, mk_len) {
+                check_plain_values(
+                    has_other,
+                    has_ver,
+                    has_dig,
+                    has_raw,
+                    has_name,
+                    has_ck,
+                    ALLOW_CRYPTOKEYS,
+                    P_PLAT_REF,
+                    i
+                );
+                if ck_count == 0 || ck_count > MAX_ROTPK_KEYS {
+                    col_err(P_PLAT_REF, R_ROTPK_COUNT, i, 0, 0, 0);
+                }
+                let mut kc = ccur_start;
+                let mut k = 0;
+                loop {
+                    if k == ck_count {
+                        break;
+                    }
+                    let kkind = rd(in w, inout kc);
+                    let klen = rd(in w, inout kc);
+                    if kkind != 0 || !digest_len_ok(klen) {
+                        col_err(P_PLAT_REF, R_ROTPK_HASH_BYTES, i, 0, 0, 0);
+                    }
+                    k = wrapping_add(k, 1);
+                }
+            } else {
+                col_err(P_PLAT_REF, R_INVALID_MKEY, i, 0, mk_off, mk_len);
+            }
+            j = wrapping_add(j, 1);
+        }
+        if sw_count == 0 {
+            col_err(P_PLAT_REF, R_SW_REQUIRED, i, 0, 0, 0);
+        }
+        i = wrapping_add(i, 1);
+    }
+}
+
+fn validate_plat_ak(in w: Slice[u64], inout c: Cur, idx: u64) -> Unit eff [Fail[AtErr]] {
+    let has_cond = rd(in w, inout c);
+    let has_group = rd(in w, inout c);
+    let has_class = rd(in w, inout c);
+    let class_kind = rd(in w, inout c);
+    let class_len = rd(in w, inout c);
+    let inst_kind = rd(in w, inout c);
+    let inst_len = rd(in w, inout c);
+    let inst_b0 = rd(in w, inout c);
+    let key_count = rd(in w, inout c);
+    let key0_is_pkix = rd(in w, inout c);
+    if has_cond != 0 || has_group != 0 {
+        at_err(AT_UNSUPPORTED_REF, U_AK_CONDITIONS);
+    }
+    check_class_bytes(has_class, class_kind, class_len, P_PLAT_AK, idx);
+    if inst_kind == 0 {
+        col_err(P_PLAT_AK, R_INST_REQ, idx, 0, 0, 0);
+    }
+    if inst_kind != 1 {
+        col_err(P_PLAT_AK, R_INST_UEID, idx, 0, 0, 0);
+    }
+    if inst_len != UEID_RAND_LEN || inst_b0 != UEID_TYPE_RAND {
+        col_err(P_PLAT_AK, R_INST_33_RAND, idx, 0, 0, 0);
+    }
+    if key_count != 1 {
+        col_err(P_PLAT_AK, R_EXACTLY_ONE_VK, idx, 0, 0, 0);
+    }
+    if key0_is_pkix == 0 {
+        col_err(P_PLAT_AK, R_VK_PKIX, idx, 0, 0, 0);
+    }
+}
+
+fn validate_realm_comid(in w: Slice[u64], in b: Slice[u8], inout c: Cur) -> Unit eff [Fail[AtErr]] {
+    let ak_count = rd(in w, inout c);
+    if ak_count != 0 {
+        col_err(P_NONE, R_REALM_ATTEST_KEYS, 0, 0, 0, 0);
+    }
+    let ref_count = rd(in w, inout c);
+    let mut i = 0;
+    loop {
+        if i == ref_count {
+            return;
+        }
+        let has_group = rd(in w, inout c);
+        let has_inst = rd(in w, inout c);
+        let has_class = rd(in w, inout c);
+        let class_kind = rd(in w, inout c);
+        let class_off = rd(in w, inout c);
+        let class_len = rd(in w, inout c);
+        if has_group != 0 || has_inst != 0 {
+            col_err(P_REALM_REF, R_INST_GROUP_NOT_ALLOWED, i, 0, 0, 0);
+        }
+        if has_class == 0 {
+            col_err(P_REALM_REF, R_REALM_CLASS_REQ, i, 0, 0, 0);
+        }
+        if class_kind == 0 {
+            col_err(P_REALM_REF, R_REALM_RIM_REQ, i, 0, 0, 0);
+        }
+        if class_kind != 1 {
+            col_err(P_REALM_REF, R_REALM_RIM_BYTES, i, 0, 0, 0);
+        }
+        if !digest_len_ok(class_len) {
+            col_err(P_REALM_REF, R_REALM_RIM_LEN, i, 0, 0, 0);
+        }
+        let meas_count = rd(in w, inout c);
+        let mut j = 0;
+        let mut has_rim = 0;
+        let mut seen_rem0 = 0;
+        let mut seen_rem1 = 0;
+        let mut seen_rem2 = 0;
+        let mut seen_rem3 = 0;
+        let mut seen_rpv = 0;
+        loop {
+            if j == meas_count {
+                break;
+            }
+            let has_auth = rd(in w, inout c);
+            let mk_kind = rd(in w, inout c);
+            let mk_off = rd(in w, inout c);
+            let mk_len = rd(in w, inout c);
+            let has_other = rd(in w, inout c);
+            let has_ver = rd(in w, inout c);
+            let _ver_has_scheme = rd(in w, inout c);
+            let dcount = rd(in w, inout c);
+            let dcur_start = c;
+            let mut di = 0;
+            loop {
+                if di == dcount {
+                    break;
+                }
+                rd(in w, inout c);
+                rd(in w, inout c);
+                rd(in w, inout c);
+                di = wrapping_add(di, 1);
+            }
+            let has_raw = rd(in w, inout c);
+            let raw_len = rd(in w, inout c);
+            let has_mask = rd(in w, inout c);
+            let _mask_len = rd(in w, inout c);
+            let has_name = rd(in w, inout c);
+            let ck_count = rd(in w, inout c);
+            let mut ki = 0;
+            loop {
+                if ki == ck_count {
+                    break;
+                }
+                rd(in w, inout c);
+                rd(in w, inout c);
+                ki = wrapping_add(ki, 1);
+            }
+            if has_auth != 0 {
+                at_err(AT_UNSUPPORTED_REF, U_AUTHORIZED_BY);
+            }
+            if mk_kind == 0 {
+                col_err(P_REALM_REF, R_MKEY_MANDATORY, j, 0, 0, 0);
+            }
+            if mk_kind != 1 {
+                col_err(P_REALM_REF, R_MKEY_STRING, j, 0, 0, 0);
+            }
+            let has_dig = if dcount > 0 {
+                1
+            } else {
+                0
+            };
+            let has_ck = if ck_count > 0 {
+                1
+            } else {
+                0
+            };
+            let is_rim = slice_eq_lit(in b, mk_off, mk_len, "cca.rim".as_bytes());
+            let rem_idx = if slice_eq_lit(in b, mk_off, mk_len, "cca.rem0".as_bytes()) {
+                0
+            } else if slice_eq_lit(in b, mk_off, mk_len, "cca.rem1".as_bytes()) {
+                1
+            } else if slice_eq_lit(in b, mk_off, mk_len, "cca.rem2".as_bytes()) {
+                2
+            } else if slice_eq_lit(in b, mk_off, mk_len, "cca.rem3".as_bytes()) {
+                3
+            } else {
+                99
+            };
+            if is_rim || rem_idx < CCA_REMS {
+                check_plain_values(
+                    has_other,
+                    has_ver,
+                    has_dig,
+                    has_raw,
+                    has_name,
+                    has_ck,
+                    ALLOW_DIGESTS,
+                    P_REALM_REF,
+                    i
+                );
+                let mut dc = dcur_start;
+                let (first_off, first_len) = check_digests(
+                    in w,
+                    inout dc,
+                    dcount,
+                    true,
+                    P_REALM_REF,
+                    i,
+                    mk_off,
+                    mk_len
+                );
+                if rem_idx < CCA_REMS {
+                    let dup = if rem_idx == 0 {
+                        let s = seen_rem0;
+                        seen_rem0 = 1;
+                        s
+                    } else if rem_idx == 1 {
+                        let s = seen_rem1;
+                        seen_rem1 = 1;
+                        s
+                    } else if rem_idx == 2 {
+                        let s = seen_rem2;
+                        seen_rem2 = 1;
+                        s
+                    } else {
+                        let s = seen_rem3;
+                        seen_rem3 = 1;
+                        s
+                    };
+                    if dup != 0 {
+                        col_err(P_REALM_REF, R_DUP_WHAT, i, 0, mk_off, mk_len);
+                    }
+                } else {
+                    if has_rim != 0 {
+                        col_err(P_REALM_REF, R_DUP_CCA_RIM, i, 0, 0, 0);
+                    }
+                    if !ct_eq(in b, first_off, first_len, class_off, class_len) {
+                        col_err(P_REALM_REF, R_RIM_DIFFERS, i, 0, 0, 0);
+                    }
+                    has_rim = 1;
+                }
+            } else if slice_eq_lit(in b, mk_off, mk_len, "cca.rpv".as_bytes()) {
+                check_plain_values(
+                    has_other,
+                    has_ver,
+                    has_dig,
+                    has_raw,
+                    has_name,
+                    has_ck,
+                    ALLOW_RAW,
+                    P_REALM_REF,
+                    i
+                );
+                if has_raw == 0 {
+                    col_err(P_REALM_REF, R_RPV_RAW_REQ, i, 0, 0, 0);
+                }
+                if has_mask != 0 {
+                    at_err(AT_UNSUPPORTED_REF, U_MASKED_RPV);
+                }
+                if raw_len == 0 || raw_len > CCA_MAX_PERS_LEN {
+                    col_err(P_REALM_REF, R_RPV_LEN, i, 0, 0, 0);
+                }
+                if seen_rpv != 0 {
+                    col_err(P_REALM_REF, R_DUP_CCA_RPV, i, 0, 0, 0);
+                }
+                seen_rpv = 1;
+            } else {
+                col_err(P_REALM_REF, R_INVALID_MKEY, i, 0, mk_off, mk_len);
+            }
+            j = wrapping_add(j, 1);
+        }
+        if has_rim == 0 {
+            col_err(P_REALM_REF, R_RIM_NOT_FOUND, i, 0, 0, 0);
+        }
+        i = wrapping_add(i, 1);
+    }
+}
+
+// Validate CcaCorimStore::add.
+// op = 0: header (validity, profile) + optional all comids (`run_all == 1` or realm). Returns mode (0=plat, 1=realm).
+// op = 1: one platform CoMID's reference_values.
+// op = 2: one platform CoMID's attest_key triple at `ak_idx`.
+pub fn corim_validate_cca(now_sec: u64, in w: Slice[u64], in b: Slice[u8])
+    -> u64 eff [Fail[AtErr]] {
+    let mut c = Cur {
+        pos: 0
+    };
+    let op = rd(in w, inout c);
+    if op == 1 {
+        validate_plat_refs(in w, in b, inout c);
+        return 0;
+    }
+    if op == 2 {
+        let idx = rd(in w, inout c);
+        validate_plat_ak(in w, inout c, idx);
+        return 0;
+    }
+    let has_val = rd(in w, inout c);
+    if has_val != 0 {
+        let has_nb = rd(in w, inout c);
+        let nb = rd(in w, inout c);
+        let na = rd(in w, inout c);
+        if (has_nb != 0 && now_sec < nb) || now_sec >= na {
+            at_err(AT_COLLATERAL_EXPIRED, 0);
+        }
+    }
+    let has_uri = rd(in w, inout c);
+    let uri_off = rd(in w, inout c);
+    let uri_len = rd(in w, inout c);
+    if has_uri == 0 {
+        col_err(P_NONE, R_NOT_CCA_PROFILE, 0, 0, 0, 0);
+    }
+    let mode = if slice_eq_lit(
+        in b,
+        uri_off,
+        uri_len,
+        "tag:arm.com,2025:cca_platform#1.0.0".as_bytes()
+    ) {
+        0
+    } else if slice_eq_lit(in b, uri_off, uri_len, "tag:arm.com,2025:cca_realm#1.0.0".as_bytes()) {
+        1
+    } else {
+        col_err(P_NONE, R_NOT_CCA_PROFILE, 0, 0, 0, 0)
+    };
+    let run_comids = rd(in w, inout c);
+    if run_comids != 0 {
+        let cc = rd(in w, inout c);
+        let mut ci = 0;
+        loop {
+            if ci == cc {
+                break;
+            }
+            if mode == 0 {
+                validate_plat_refs(in w, in b, inout c);
+            } else {
+                validate_realm_comid(in w, in b, inout c);
+            }
+            ci = wrapping_add(ci, 1);
+        }
+    }
+    mode
+}
+
+fn description_alg(in b: Slice[u8], off: u64, len: u64) -> u64 eff [Fail[AtErr]] {
+    if slice_eq_lit(in b, off, len, "sha-256".as_bytes()) {
+        NI_SHA256
+    } else if slice_eq_lit(in b, off, len, "sha-384".as_bytes()) {
+        NI_SHA384
+    } else if slice_eq_lit(in b, off, len, "sha-512".as_bytes()) {
+        NI_SHA512
+    } else {
+        at_err(AT_UNSUPPORTED_REF, U_SW_DESC_ALG)
+    }
+}
+
+fn sw_ref_matches(
+    in w: Slice[u64],
+    in b: Slice[u8],
+    ref_cur: Cur,
+    sw_val_off: u64,
+    sw_val_len: u64,
+    sw_signer_off: u64,
+    sw_signer_len: u64,
+    has_type: u64,
+    type_off: u64,
+    type_len: u64,
+    has_ver: u64,
+    ver_off: u64,
+    ver_len: u64,
+    has_alg: u64,
+    alg: u64,
+    cmp_signer: u64
+) -> (bool, Cur) {
+    let mut c = ref_cur;
+    let r_has_name = rd(in w, inout c);
+    let r_name_off = rd(in w, inout c);
+    let r_name_len = rd(in w, inout c);
+    let r_has_ver = rd(in w, inout c);
+    let r_ver_off = rd(in w, inout c);
+    let r_ver_len = rd(in w, inout c);
+    let r_signer_off = rd(in w, inout c);
+    let r_signer_len = rd(in w, inout c);
+    let dcount = rd(in w, inout c);
+    let mut dig_ok = false;
+    let mut d = 0;
+    loop {
+        if d == dcount {
+            break;
+        }
+        let dalg = rd(in w, inout c);
+        let doff = rd(in w, inout c);
+        let dlen = rd(in w, inout c);
+        let want = alg_len(dalg);
+        if (has_alg == 0 || alg == dalg)
+            && want != 0
+            && dlen == want
+            && ct_eq(in b, doff, dlen, sw_val_off, sw_val_len) {
+            dig_ok = true;
+        }
+        d = wrapping_add(d, 1);
+    }
+    if !dig_ok {
+        return (false, c);
+    }
+    if cmp_signer != 0 && !ct_eq(in b, r_signer_off, r_signer_len, sw_signer_off, sw_signer_len) {
+        return (false, c);
+    }
+    if r_has_name != 0
+        && (has_type == 0 || !ct_eq(in b, r_name_off, r_name_len, type_off, type_len)) {
+        return (false, c);
+    }
+    if r_has_ver != 0 && (has_ver == 0 || !ct_eq(in b, r_ver_off, r_ver_len, ver_off, ver_len)) {
+        return (false, c);
+    }
+    (true, c)
+}
+
+fn try_plat_candidate(
+    in w: Slice[u64],
+    in b: Slice[u8],
+    tok_sw_cur: Cur,
+    tok_sw_count: u64,
+    tok_has_cfg: u64,
+    tok_cfg_off: u64,
+    tok_cfg_len: u64,
+    tok_has_mfg: u64,
+    tok_mfg_off: u64,
+    tok_mfg_len: u64,
+    tok_rotpk_cur: Cur,
+    tok_rotpk_count: u64,
+    ref_cur: Cur,
+    cmp_signer: u64
+) -> (u64, u64, u64) eff [Fail[AtErr]] {
+    let mut rc = ref_cur;
+    let ref_sw_count = rd(in w, inout rc);
+    let ref_sw_start = rc;
+    if tok_sw_count == 0 {
+        at_err(AT_REF_MISSING, M_PLAT_NO_SW);
+    }
+    let mut sc = tok_sw_cur;
+    let mut si = 0;
+    loop {
+        if si == tok_sw_count {
+            break;
+        }
+        let val_off = rd(in w, inout sc);
+        let val_len = rd(in w, inout sc);
+        let sig_off = rd(in w, inout sc);
+        let sig_len = rd(in w, inout sc);
+        let has_type = rd(in w, inout sc);
+        let type_off = rd(in w, inout sc);
+        let type_len = rd(in w, inout sc);
+        let has_ver = rd(in w, inout sc);
+        let ver_off = rd(in w, inout sc);
+        let ver_len = rd(in w, inout sc);
+        let has_desc = rd(in w, inout sc);
+        let desc_off = rd(in w, inout sc);
+        let desc_len = rd(in w, inout sc);
+        let alg = if has_desc != 0 {
+            description_alg(in b, desc_off, desc_len)
+        } else {
+            0
+        };
+        let mut rsc = ref_sw_start;
+        let mut rj = 0;
+        let mut matched = false;
+        loop {
+            if rj == ref_sw_count {
+                break;
+            }
+            let (match_sw, next_rsc) = sw_ref_matches(
+                in w,
+                in b,
+                rsc,
+                val_off,
+                val_len,
+                sig_off,
+                sig_len,
+                has_type,
+                type_off,
+                type_len,
+                has_ver,
+                ver_off,
+                ver_len,
+                has_desc,
+                alg,
+                cmp_signer
+            );
+            rsc = next_rsc;
+            if match_sw {
+                matched = true;
+                break;
+            }
+            rj = wrapping_add(rj, 1);
+        }
+        if !matched {
+            at_err(AT_REF_MISMATCH, MM_PLAT_SW);
+        }
+        si = wrapping_add(si, 1);
+    }
+    // Advance rc past all ref_sw entries cleanly.
+    let mut adv = 0;
+    loop {
+        if adv == ref_sw_count {
+            break;
+        }
+        rd(in w, inout rc);
+        rd(in w, inout rc);
+        rd(in w, inout rc);
+        rd(in w, inout rc);
+        rd(in w, inout rc);
+        rd(in w, inout rc);
+        rd(in w, inout rc);
+        rd(in w, inout rc);
+        let dc = rd(in w, inout rc);
+        rc.pos = wrapping_add(rc.pos, wrapping_mul(dc, 3));
+        adv = wrapping_add(adv, 1);
+    }
+    let ref_has_cfg = rd(in w, inout rc);
+    let ref_cfg_off = rd(in w, inout rc);
+    let ref_cfg_len = rd(in w, inout rc);
+    let cfg_matched: u64 = if ref_has_cfg == 0 {
+        0
+    } else if tok_has_cfg == 0 {
+        at_err(AT_REF_MISSING, M_PLAT_CFG)
+    } else if ct_eq(in b, ref_cfg_off, ref_cfg_len, tok_cfg_off, tok_cfg_len) {
+        1
+    } else {
+        at_err(AT_REF_MISMATCH, MM_PLAT_CFG)
+    };
+    let ref_has_mfg = rd(in w, inout rc);
+    let ref_mfg_off = rd(in w, inout rc);
+    let ref_mfg_len = rd(in w, inout rc);
+    let mfg_matched: u64 = if ref_has_mfg == 0 {
+        0
+    } else if tok_has_mfg == 0 {
+        at_err(AT_REF_MISSING, M_PLAT_MFG)
+    } else if ct_eq(in b, ref_mfg_off, ref_mfg_len, tok_mfg_off, tok_mfg_len) {
+        1
+    } else {
+        at_err(AT_REF_MISMATCH, MM_PLAT_MFG)
+    };
+    let ref_rotpk_count = rd(in w, inout rc);
+    let ref_rotpk_start = rc;
+    let mut rotpks_matched: u64 = 0;
+    if ref_rotpk_count > 0 {
+        if tok_rotpk_count == 0 {
+            at_err(AT_REF_MISSING, M_PLAT_ROTPK);
+        }
+        let mut tc = tok_rotpk_cur;
+        let mut ti = 0;
+        loop {
+            if ti == tok_rotpk_count {
+                break;
+            }
+            let e_name_off = rd(in w, inout tc);
+            let e_name_len = rd(in w, inout tc);
+            let e_idx = rd(in w, inout tc);
+            let e_hash_off = rd(in w, inout tc);
+            let e_hash_len = rd(in w, inout tc);
+            let mut rrc = ref_rotpk_start;
+            let mut rri = 0;
+            let mut ok = false;
+            loop {
+                if rri == ref_rotpk_count {
+                    break;
+                }
+                let r_name_off = rd(in w, inout rrc);
+                let r_name_len = rd(in w, inout rrc);
+                let r_idx = rd(in w, inout rrc);
+                let r_hcount = rd(in w, inout rrc);
+                let name_idx_ok = r_idx == e_idx
+                    && ct_eq(in b, r_name_off, r_name_len, e_name_off, e_name_len);
+                let mut hi = 0;
+                loop {
+                    if hi == r_hcount {
+                        break;
+                    }
+                    let hoff = rd(in w, inout rrc);
+                    let hlen = rd(in w, inout rrc);
+                    if name_idx_ok && ct_eq(in b, hoff, hlen, e_hash_off, e_hash_len) {
+                        ok = true;
+                    }
+                    hi = wrapping_add(hi, 1);
+                }
+                if ok {
+                    break;
+                }
+                rri = wrapping_add(rri, 1);
+            }
+            if !ok {
+                at_err(AT_REF_MISMATCH, MM_PLAT_ROTPK);
+            }
+            rotpks_matched = wrapping_add(rotpks_matched, 1);
+            ti = wrapping_add(ti, 1);
+        }
+    }
+    (cfg_matched, mfg_matched, rotpks_matched)
+}
+
+// Appraise VerifiedCcaToken against CcaCorimStore and CcaAppraisalOptions.
+// Outputs to `w_out`:
+// platform_reference, sw_components_matched, config_matched,
+// manufacturing_config_matched, rotpks_matched, realm_reference,
+// rems_constrained[0..4], personalization_matched.
+pub fn cca_appraise(in w: Slice[u64], in b: Slice[u8], inout w_out: Slice[u64])
+    -> Unit eff [Fail[AtErr]] {
+    let mut c = Cur {
+        pos: 0
+    };
+    let cmp_signer = rd(in w, inout c);
+    let tok_impl_off = rd(in w, inout c);
+    let tok_impl_len = rd(in w, inout c);
+    let tok_sw_count = rd(in w, inout c);
+    let tok_sw_cur = c;
+    c.pos = wrapping_add(c.pos, wrapping_mul(tok_sw_count, 13));
+    let tok_has_cfg = rd(in w, inout c);
+    let tok_cfg_off = rd(in w, inout c);
+    let tok_cfg_len = rd(in w, inout c);
+    let tok_has_mfg = rd(in w, inout c);
+    let tok_mfg_off = rd(in w, inout c);
+    let tok_mfg_len = rd(in w, inout c);
+    let tok_rotpk_count = rd(in w, inout c);
+    let tok_rotpk_cur = c;
+    c.pos = wrapping_add(c.pos, wrapping_mul(tok_rotpk_count, 5));
+
+    let tok_rim_off = rd(in w, inout c);
+    let tok_rim_len = rd(in w, inout c);
+    let tok_rem0_off = rd(in w, inout c);
+    let tok_rem0_len = rd(in w, inout c);
+    let tok_rem1_off = rd(in w, inout c);
+    let tok_rem1_len = rd(in w, inout c);
+    let tok_rem2_off = rd(in w, inout c);
+    let tok_rem2_len = rd(in w, inout c);
+    let tok_rem3_off = rd(in w, inout c);
+    let tok_rem3_len = rd(in w, inout c);
+    let tok_pers_off = rd(in w, inout c);
+    let tok_pers_len = rd(in w, inout c);
+
+    // Platform store candidates.
+    let plat_count = rd(in w, inout c);
+    let mut p_cands = 0;
+    let mut p_matched = false;
+    let mut p_idx = 0;
+    let mut p_cfg = 0;
+    let mut p_mfg = 0;
+    let mut p_rotpks = 0;
+    let mut p_err = AtErr {
+        kind: 0,
+        what: 0,
+        reason: 0,
+        index: 0,
+        extra: 0,
+        off: 0,
+        len: 0
+    };
+    let mut pi = 0;
+    loop {
+        if pi == plat_count {
+            break;
+        }
+        let body_words = rd(in w, inout c);
+        let body_start = c;
+        let next_pos = wrapping_add(body_start.pos, body_words);
+        let r_impl_off = rd(in w, inout c);
+        let r_impl_len = rd(in w, inout c);
+        if !p_matched && ct_eq(in b, r_impl_off, r_impl_len, tok_impl_off, tok_impl_len) {
+            p_cands = wrapping_add(p_cands, 1);
+            let dummy_err = p_err;
+            let (cand_ok, cfg_m, mfg_m, rotpks_m, cand_err) = handle Fail[AtErr] in {
+                let (cm, mm, rm) = try_plat_candidate(
+                    in w,
+                    in b,
+                    tok_sw_cur,
+                    tok_sw_count,
+                    tok_has_cfg,
+                    tok_cfg_off,
+                    tok_cfg_len,
+                    tok_has_mfg,
+                    tok_mfg_off,
+                    tok_mfg_len,
+                    tok_rotpk_cur,
+                    tok_rotpk_count,
+                    c,
+                    cmp_signer
+                );
+                (true, cm, mm, rm, dummy_err)
+            } with {
+                return v => v,
+                raise(e, k) => (false, 0, 0, 0, e)
+            };
+            if cand_ok {
+                p_matched = true;
+                p_idx = pi;
+                p_cfg = cfg_m;
+                p_mfg = mfg_m;
+                p_rotpks = rotpks_m;
+            } else {
+                p_err = cand_err;
+            }
+        }
+        c.pos = next_pos;
+        pi = wrapping_add(pi, 1);
+    }
+    if p_cands == 0 {
+        at_err(AT_REF_MISSING, M_PLAT_IMPL);
+    }
+    if !p_matched {
+        Fail::raise(p_err);
+    }
+
+    // Realm store candidates.
+    let realm_count = rd(in w, inout c);
+    let mut r_cands = 0;
+    let mut r_matched = false;
+    let mut r_idx = 0;
+    let mut c0 = 0;
+    let mut c1 = 0;
+    let mut c2 = 0;
+    let mut c3 = 0;
+    let mut r_pers = 0;
+    let mut r_err = AtErr {
+        kind: 0,
+        what: 0,
+        reason: 0,
+        index: 0,
+        extra: 0,
+        off: 0,
+        len: 0
+    };
+    let mut ri = 0;
+    loop {
+        if ri == realm_count {
+            break;
+        }
+        let r_rim_off = rd(in w, inout c);
+        let r_rim_len = rd(in w, inout c);
+        let h0 = rd(in w, inout c);
+        let r0_off = rd(in w, inout c);
+        let r0_len = rd(in w, inout c);
+        let h1 = rd(in w, inout c);
+        let r1_off = rd(in w, inout c);
+        let r1_len = rd(in w, inout c);
+        let h2 = rd(in w, inout c);
+        let r2_off = rd(in w, inout c);
+        let r2_len = rd(in w, inout c);
+        let h3 = rd(in w, inout c);
+        let r3_off = rd(in w, inout c);
+        let r3_len = rd(in w, inout c);
+        let h_pers = rd(in w, inout c);
+        let r_pers_off = rd(in w, inout c);
+        let r_pers_len = rd(in w, inout c);
+        if !r_matched && measurement_eq(in b, tok_rim_off, tok_rim_len, r_rim_off, r_rim_len) {
+            r_cands = wrapping_add(r_cands, 1);
+            if h_pers != 0 && !ct_eq(in b, r_pers_off, r_pers_len, tok_pers_off, tok_pers_len) {
+                r_err = AtErr {
+                    kind: AT_REF_MISMATCH,
+                    what: MM_REALM_RPV,
+                    reason: 0,
+                    index: 0,
+                    extra: 0,
+                    off: 0,
+                    len: 0
+                };
+            } else if h0 != 0 && !measurement_eq(in b, tok_rem0_off, tok_rem0_len, r0_off, r0_len) {
+                r_err = AtErr {
+                    kind: AT_REF_MISMATCH,
+                    what: MM_REALM_REM,
+                    reason: 0,
+                    index: 0,
+                    extra: 0,
+                    off: 0,
+                    len: 0
+                };
+            } else if h1 != 0 && !measurement_eq(in b, tok_rem1_off, tok_rem1_len, r1_off, r1_len) {
+                r_err = AtErr {
+                    kind: AT_REF_MISMATCH,
+                    what: MM_REALM_REM,
+                    reason: 0,
+                    index: 0,
+                    extra: 0,
+                    off: 0,
+                    len: 0
+                };
+            } else if h2 != 0 && !measurement_eq(in b, tok_rem2_off, tok_rem2_len, r2_off, r2_len) {
+                r_err = AtErr {
+                    kind: AT_REF_MISMATCH,
+                    what: MM_REALM_REM,
+                    reason: 0,
+                    index: 0,
+                    extra: 0,
+                    off: 0,
+                    len: 0
+                };
+            } else if h3 != 0 && !measurement_eq(in b, tok_rem3_off, tok_rem3_len, r3_off, r3_len) {
+                r_err = AtErr {
+                    kind: AT_REF_MISMATCH,
+                    what: MM_REALM_REM,
+                    reason: 0,
+                    index: 0,
+                    extra: 0,
+                    off: 0,
+                    len: 0
+                };
+            } else {
+                r_matched = true;
+                r_idx = ri;
+                c0 = h0;
+                c1 = h1;
+                c2 = h2;
+                c3 = h3;
+                r_pers = h_pers;
+            }
+        }
+        ri = wrapping_add(ri, 1);
+    }
+    if r_cands == 0 {
+        at_err(AT_REF_MISSING, M_REALM_RIM);
+    }
+    if !r_matched {
+        Fail::raise(r_err);
+    }
+    put(inout w_out, p_idx);
+    put(inout w_out, tok_sw_count);
+    put(inout w_out, p_cfg);
+    put(inout w_out, p_mfg);
+    put(inout w_out, p_rotpks);
+    put(inout w_out, r_idx);
+    put(inout w_out, c0);
+    put(inout w_out, c1);
+    put(inout w_out, c2);
+    put(inout w_out, c3);
+    put(inout w_out, r_pers);
+}

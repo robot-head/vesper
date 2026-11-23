@@ -113,11 +113,13 @@ fn rewrite_expr(
     // The `?` token.
     let question = e.span.end.saturating_sub(1)..e.span.end;
     let some = Pattern {
+        integer_kind: None,
         kind: PatternKind::Constructor {
             name: "Option::Some".into(),
             fields: vec![(
                 "0".into(),
                 Pattern {
+                    integer_kind: None,
                     kind: PatternKind::Bind(name.clone()),
                     span: question.clone(),
                 },
@@ -127,6 +129,7 @@ fn rewrite_expr(
         span: e.span.clone(),
     };
     let none = Pattern {
+        integer_kind: None,
         kind: PatternKind::Constructor {
             name: "Option::None".into(),
             fields: vec![],

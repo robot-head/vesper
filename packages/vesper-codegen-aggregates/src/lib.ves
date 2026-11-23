@@ -47,7 +47,9 @@ use @vesper/check-data::names::{
 use @vesper/check-data::types::{
     Types,
     default_type,
-    substitute
+    substitute,
+    TyKind,
+    TyPass
 };
 use @vesper/check-data::world::{
     SpanRow,
@@ -74,19 +76,10 @@ use @vesper/place-ir::{
 const NONE32: u32 = 4294967295;
 const NONE32_64: u64 = 4294967295;
 const NO_ADT: u32 = 4294967295;
-const K_NAMED: u8 = 1;
-const K_TUPLE: u8 = 2;
-const K_FN: u8 = 3;
-const K_ROW: u8 = 4;
-const K_INFER: u8 = 5;
 
 const L_SCALAR: u8 = 0;
 const L_PRODUCT: u8 = 1;
 const L_ENUM: u8 = 2;
-
-// `Pass` words.
-const PASS_INOUT: u64 = 1;
-const PASS_SINK: u64 = 2;
 
 // Function facts, by symbol.
 const FN_DEFINED: u32 = 1;
@@ -355,7 +348,7 @@ fn aggregate(inout e: Env, inout c: Ctx, ty: u32) -> bool {
 
 fn named0(in c: Ctx, ty: u32, name: u32) -> bool {
     let n = c.types.node(ty);
-    n.kind == K_NAMED && n.n == 0 && n.name == name
+    n.kind == TyKind::Named && n.n == 0 && n.name == name
 }
 
 // `strings::is_text`: `String` or `Str`.
@@ -425,7 +418,7 @@ fn plain_data(inout e: Env, inout c: Ctx, ty: u32) -> bool {
 // `fip::is_box_type`: the built-in `Box[T]` (no handle drop plan runs here).
 pub fn is_box(in c: Ctx, ty: u32) -> bool {
     let n = c.types.node(ty);
-    c.world.box_active && n.kind == K_NAMED && n.name == c.world.k.box_ && n.n == 1
+    c.world.box_active && n.kind == TyKind::Named && n.name == c.world.k.box_ && n.n == 1
 }
 
 fn arg_of(in c: Ctx, ty: u32, i: u64) -> u32 {
@@ -470,7 +463,7 @@ fn drop_visit(inout c: Ctx, ty0: u32, inout seen: ChunkSeq[u32], unknown: bool) 
     let ty = default_type(inout c.types, ty0);
     let n = c.types.node(ty);
     let k = c.world.k;
-    if n.kind == K_NAMED {
+    if n.kind == TyKind::Named {
         if (n.name == k.chunk_seq && n.n == 1) || (n.name == k.string && n.n == 0) {
             return true;
         }
@@ -515,7 +508,7 @@ fn drop_visit(inout c: Ctx, ty0: u32, inout seen: ChunkSeq[u32], unknown: bool) 
         pop32(inout seen);
         return found;
     }
-    if n.kind == K_TUPLE {
+    if n.kind == TyKind::Tuple {
         for i in 0..w(n.n) {
             if drop_visit(inout c, arg_of(in c, ty, i), inout seen, unknown) {
                 return true;
@@ -523,7 +516,7 @@ fn drop_visit(inout c: Ctx, ty0: u32, inout seen: ChunkSeq[u32], unknown: bool) 
         }
         return false;
     }
-    n.kind == K_INFER && unknown
+    n.kind == TyKind::Infer && unknown
 }
 
 fn is_wide_name(in c: Ctx, s: u32) -> bool {
@@ -553,7 +546,7 @@ fn box_visit(inout c: Ctx, ty: u32, inout seen: ChunkSeq[u32]) -> bool {
         return true;
     }
     let n = c.types.node(ty);
-    if n.kind == K_TUPLE {
+    if n.kind == TyKind::Tuple {
         for i in 0..w(n.n) {
             if box_visit(inout c, arg_of(in c, ty, i), inout seen) {
                 return true;
@@ -561,7 +554,7 @@ fn box_visit(inout c: Ctx, ty: u32, inout seen: ChunkSeq[u32]) -> bool {
         }
         return false;
     }
-    if n.kind != K_NAMED {
+    if n.kind != TyKind::Named {
         return false;
     }
     for i in 0..w(n.n) {
@@ -612,7 +605,7 @@ fn recursive_visit(inout c: Ctx, ty0: u32, inout seen: ChunkSeq[u32]) -> bool {
         return recursive_visit(inout c, arg_of(in c, ty, 0), inout seen);
     }
     let n = c.types.node(ty);
-    if n.kind == K_TUPLE {
+    if n.kind == TyKind::Tuple {
         for i in 0..w(n.n) {
             if recursive_visit(inout c, arg_of(in c, ty, i), inout seen) {
                 return true;
@@ -620,7 +613,7 @@ fn recursive_visit(inout c: Ctx, ty0: u32, inout seen: ChunkSeq[u32]) -> bool {
         }
         return false;
     }
-    if n.kind != K_NAMED {
+    if n.kind != TyKind::Named {
         return false;
     }
     let ai = c.world.lookup(n.name);
@@ -689,7 +682,7 @@ fn mentions_box(in c: Ctx, ty: u32, depth: u64) -> bool {
         return false;
     }
     let n = c.types.node(ty);
-    if n.kind == K_NAMED {
+    if n.kind == TyKind::Named {
         if n.name == c.world.k.box_ {
             return true;
         }
@@ -700,7 +693,7 @@ fn mentions_box(in c: Ctx, ty: u32, depth: u64) -> bool {
         }
         return false;
     }
-    if n.kind == K_TUPLE {
+    if n.kind == TyKind::Tuple {
         for i in 0..w(n.n) {
             if mentions_box(in c, u32_at(in c.types.items, add(w(n.a), i)), inc(depth)) {
                 return true;
@@ -708,7 +701,7 @@ fn mentions_box(in c: Ctx, ty: u32, depth: u64) -> bool {
         }
         return false;
     }
-    if n.kind == K_FN {
+    if n.kind == TyKind::Fn {
         for i in 0..w(n.n) {
             if mentions_box(in c, u32_at(in c.types.items, add(w(n.a), i)), inc(depth)) {
                 return true;
@@ -719,7 +712,7 @@ fn mentions_box(in c: Ctx, ty: u32, depth: u64) -> bool {
         }
         return row_mentions_box(in c, n.r2, depth);
     }
-    if n.kind == K_ROW {
+    if n.kind == TyKind::Row {
         return row_mentions_box(in c, n.r2, depth);
     }
     false
@@ -748,7 +741,7 @@ fn mentions_wide(inout e: Env, in c: Ctx, ty: u32, depth: u64) -> bool {
         return false;
     }
     let n = c.types.node(ty);
-    if n.kind == K_NAMED {
+    if n.kind == TyKind::Named {
         if n.name == e.s_i128 || n.name == e.s_u128 {
             return true;
         }
@@ -789,13 +782,13 @@ fn mentions_wide(inout e: Env, in c: Ctx, ty: u32, depth: u64) -> bool {
         }
         return found;
     }
-    if n.kind == K_TUPLE || n.kind == K_FN {
+    if n.kind == TyKind::Tuple || n.kind == TyKind::Fn {
         for i in 0..w(n.n) {
             if mentions_wide(inout e, in c, u32_at(in c.types.items, add(w(n.a), i)), inc(depth)) {
                 return true;
             }
         }
-        if n.kind == K_FN {
+        if n.kind == TyKind::Fn {
             return mentions_wide(inout e, in c, n.r, inc(depth));
         }
     }
@@ -840,10 +833,11 @@ fn leaves_new() -> Leaves {
 fn product_type(in c: Ctx, ty: u32) -> bool {
     let n = c.types.node(ty);
     let k = c.world.k;
-    let shaped = n.kind == K_TUPLE || (n.kind == K_NAMED && c.world.lookup(n.name) != NO_ADT);
+    let shaped = n.kind == TyKind::Tuple
+        || (n.kind == TyKind::Named && c.world.lookup(n.name) != NO_ADT);
     shaped
-        && !(n.kind == K_NAMED && n.name == k.slice && n.n == 1)
-        && !(n.kind == K_NAMED && n.name == k.dyn_ && n.n == 1)
+        && !(n.kind == TyKind::Named && n.name == k.slice && n.n == 1)
+        && !(n.kind == TyKind::Named && n.name == k.dyn_ && n.n == 1)
         && !is_text(in c, ty)
         && vector_words(in c.types, in c.names, k, ty) == 0
 }
@@ -854,7 +848,7 @@ fn split_walk(inout e: Env, inout c: Ctx, l: u32, base: i64, inout out: Leaves) 
         let ty = default_type(inout c.types, node.ty);
         let n = c.types.node(ty);
         let k = c.world.k;
-        let word = n.kind == K_NAMED
+        let word = n.kind == TyKind::Named
             && n.n == 0
             && (
                 integer_name(in e, in c, n.name)
@@ -1366,9 +1360,9 @@ fn graph_of(in p: Program, inout c: Ctx, inout s: Syms, fi: u64) -> G {
     at = inc(at);
     for i in 0..np {
         s.flag(n32(p.op(at)), S_PARAM);
-        if p.op(inc(at)) == PASS_SINK {
+        if p.op(inc(at)) == TyPass::Sink {
             s.flag(n32(p.op(at)), S_SINK);
-        } else if p.op(inc(at)) == PASS_INOUT {
+        } else if p.op(inc(at)) == TyPass::Inout {
             s.flag(n32(p.op(at)), S_INOUT);
         }
         let k = p.op(add(at, 2));
@@ -1731,7 +1725,7 @@ fn pass_through(
         if inst.op == Op::Read
             && n32(p.op(inst.a)) == name
             && p.op(inc(inst.a)) == 0
-            && p.op(add(inst.a, 2)) == PASS_SINK {
+            && p.op(add(inst.a, 2)) == TyPass::Sink {
             return Through {
                 found: true,
                 k: k,
@@ -2029,7 +2023,7 @@ fn scalar_local(inout e: Env, inout c: Ctx, in g: G, in s: Syms, name: u32) -> b
     let raw = u32_at(in g.lty, li);
     let t = default_type(inout c.types, raw);
     let l = lay(inout e, inout c, t);
-    l != NONE32 && !e.ls.aggregate(l) && c.types.kind(raw) != K_FN
+    l != NONE32 && !e.ls.aggregate(l) && c.types.kind(raw) != TyKind::Fn
 }
 
 fn value_aggregate(inout e: Env, inout c: Ctx, in g: G, v: u32) -> bool {
@@ -2048,7 +2042,7 @@ fn fresh(inout e: Env, inout c: Ctx, in p: Program, in g: G, in members: ChunkSe
 // `window_ok`'s `scalar_args` of the argument list at word `at`.
 fn scalar_args(inout e: Env, inout c: Ctx, in p: Program, in g: G, at: u64) -> bool {
     for j in 0..arg_count(in p, at) {
-        if p.op(arg_word(at, j, 2)) != 0 || p.op(arg_word(at, j, 0)) == PASS_INOUT {
+        if p.op(arg_word(at, j, 2)) != 0 || p.op(arg_word(at, j, 0)) == TyPass::Inout {
             return false;
         }
         if value_aggregate(inout e, inout c, in g, n32(p.op(arg_word(at, j, 1)))) {
@@ -2743,7 +2737,7 @@ fn split_locals(inout e: Env, inout c: Ctx, in p: Program, inout g: G, in s: Sym
             let at = inc(a);
             for j in 0..arg_count(in p, at) {
                 let root = p.op(arg_word(at, j, 2));
-                if p.op(arg_word(at, j, 0)) == PASS_INOUT && root != 0 {
+                if p.op(arg_word(at, j, 0)) == TyPass::Inout && root != 0 {
                     mark_memory(in s, inout memory, n32(wrapping_sub(root, 1)));
                 }
             }
@@ -2958,7 +2952,7 @@ const SD_FIELDS: u8 = 4;
 fn holds_visit(inout c: Ctx, ty: u32, inout seen: ChunkSeq[u32]) -> bool {
     let n = c.types.node(ty);
     let k = c.world.k;
-    if n.kind == K_TUPLE {
+    if n.kind == TyKind::Tuple {
         for i in 0..w(n.n) {
             if holds_visit(inout c, arg_of(in c, ty, i), inout seen) {
                 return true;
@@ -2966,7 +2960,7 @@ fn holds_visit(inout c: Ctx, ty: u32, inout seen: ChunkSeq[u32]) -> bool {
         }
         return false;
     }
-    if n.kind != K_NAMED {
+    if n.kind != TyKind::Named {
         return false;
     }
     if (n.name == k.chunk_seq || n.name == k.slice) && n.n == 1 {
@@ -3189,13 +3183,13 @@ fn seq_drop_plan(inout e: Env, inout c: Ctx, in p: Program, in g: G, in s: Syms)
         let n = c.types.node(ty);
         let param = s.has(sym, S_PARAM);
         let mut kind = SD_NONE;
-        if n.kind == K_NAMED && n.name == k.chunk_seq && n.n == 1 {
+        if n.kind == TyKind::Named && n.name == k.chunk_seq && n.n == 1 {
             kind = SD_SEQ;
-        } else if n.kind == K_NAMED && n.name == k.string && n.n == 0 {
+        } else if n.kind == TyKind::Named && n.name == k.string && n.n == 0 {
             kind = SD_STR;
         } else if param && needs_drop(inout c, ty) {
             kind = SD_OWNED;
-        } else if n.kind == K_NAMED
+        } else if n.kind == TyKind::Named
             && c.world.lookup(n.name) != NO_ADT
             && !param
             && (holds_sequence(inout c, ty) || needs_drop(inout c, ty)) {
@@ -3219,7 +3213,7 @@ fn seq_drop_plan(inout e: Env, inout c: Ctx, in p: Program, in g: G, in s: Syms)
         let inst = p.inst(add(g.i0, ki));
         let a = inst.a;
         let op = inst.op;
-        if op == Op::Read && read_pass(in p, a) == PASS_SINK {
+        if op == Op::Read && read_pass(in p, a) == TyPass::Sink {
             let root = n32(p.op(a));
             let pk = plan_kind(in plan, in s, root);
             let pr = p.path(p.op(inc(a)));
@@ -3241,7 +3235,7 @@ fn seq_drop_plan(inout e: Env, inout c: Ctx, in p: Program, in g: G, in s: Syms)
             let q = inc(a);
             let dop = def_op(in p, in g, in defs, v);
             let borrow_read = dop == Op::Read
-                && read_pass(in p, p.inst(add(g.i0, u64_at(in defs, w(v)))).a) != PASS_SINK;
+                && read_pass(in p, p.inst(add(g.i0, u64_at(in defs, w(v)))).a) != TyPass::Sink;
             if borrow_read
                 || (w(v) < g.nv && u8_at(in borrowed, w(v)) != 0)
                 || (p.op(q) != Pat::Bind && pattern_has_box(inout e, inout c, in p, q)) {
@@ -3361,7 +3355,7 @@ fn closure_refusals(
 fn replace_moves(inout c: Ctx, in p: Program, ii: u64) -> bool {
     let inst = p.inst(ii);
     if inst.op == Op::Read
-        && read_pass(in p, inst.a) == PASS_SINK
+        && read_pass(in p, inst.a) == TyPass::Sink
         && p.path(p.op(inc(inst.a))).n > 0 {
         return may_need_drop(inout c, inst.ty);
     }
@@ -3382,7 +3376,7 @@ fn replace_step(
 ) {
     let inst = p.inst(ii);
     let a = inst.a;
-    if inst.op == Op::Read && read_pass(in p, a) == PASS_SINK {
+    if inst.op == Op::Read && read_pass(in p, a) == TyPass::Sink {
         let li = s.local_of(n32(p.op(a)));
         if li != NONE32_64 && u64_at(in cidx, li) != NONE32_64 {
             set8(inout state, add(base, u64_at(in cidx, li)), 1);
@@ -3631,7 +3625,9 @@ fn sole_jump(in u: Uses, v: u64) -> bool {
 fn scalar_result(inout e: Env, inout c: Ctx, ty: u32) -> bool {
     let t = default_type(inout c.types, ty);
     let n = c.types.node(t);
-    n.kind == K_NAMED && n.n == 0 && (scalar_name(in e, in c, n.name) || n.name == c.world.k.bool_)
+    n.kind == TyKind::Named
+        && n.n == 0
+        && (scalar_name(in e, in c, n.name) || n.name == c.world.k.bool_)
 }
 
 // `fip::temporary_drops`: each owned temporary as (block, index, value),
@@ -3664,7 +3660,7 @@ fn temporary_drops(
         let q = inc(inst.a);
         if p.op(q) == Pat::Bind
             && def_op(in p, in g, in defs, v) == Op::Read
-            && read_pass(in p, p.inst(add(g.i0, u64_at(in defs, w(v)))).a) != PASS_SINK {
+            && read_pass(in p, p.inst(add(g.i0, u64_at(in defs, w(v)))).a) != TyPass::Sink {
             mark_sym(in s, inout borrow_bound, n32(p.op(add(q, 3))));
         }
         if w(v) < nv && u8_at(in borrowed, w(v)) != 0 {
@@ -3713,7 +3709,7 @@ fn temporary_drops(
             } else if inst.op == Op::Seq {
                 let label = p.pool_row(p.op(a)).label;
                 owned = label == e.s_new || label == e.s_with_capacity;
-            } else if inst.op == Op::Read && read_pass(in p, a) == PASS_SINK {
+            } else if inst.op == Op::Read && read_pass(in p, a) == TyPass::Sink {
                 let root = n32(p.op(a));
                 let pk = plan_kind(in plan, in s, root);
                 let path_empty = p.path(p.op(inc(a))).n == 0;
@@ -3736,7 +3732,7 @@ fn temporary_drops(
             if inst.op == Op::Call || inst.op == Op::Indirect {
                 let at = inc(a);
                 for j in 0..arg_count(in p, at) {
-                    if p.op(arg_word(at, j, 0)) != PASS_SINK && p.op(arg_word(at, j, 2)) == 0 {
+                    if p.op(arg_word(at, j, 0)) != TyPass::Sink && p.op(arg_word(at, j, 2)) == 0 {
                         brw.push(n32(p.op(arg_word(at, j, 1))));
                     }
                 }

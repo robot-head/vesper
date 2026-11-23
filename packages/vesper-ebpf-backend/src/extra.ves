@@ -22,7 +22,8 @@ use @vesper/check-data::names::{
 };
 use @vesper/check-data::types::{
     EffNode,
-    Types
+    Types,
+    TyKind
 };
 use @vesper/check-data::input::{
     Reader
@@ -30,8 +31,6 @@ use @vesper/check-data::input::{
 use @vesper/check-data::world::{
     set_by_symbol
 };
-
-const K_FN: u8 = 3;
 
 // A parameter of a `world.functions` entry.
 pub copy struct XParam {
@@ -193,7 +192,7 @@ pub fn read_ty(inout r: Reader, in b: Slice[u8], inout t: Types, inout names: Na
         let result = read_ty(inout r, in b, inout t, inout names);
         let row = read_row(inout r, in b, inout t, inout names);
         let mode = wrapping_u8(r.word(in b));
-        return t.mk_with(K_FN, mode, 0, in args, in passes, result, row, 0);
+        return t.mk_with(TyKind::Fn, mode, 0, in args, in passes, result, row, 0);
     }
     if kind == 4 {
         let row = read_row(inout r, in b, inout t, inout names);

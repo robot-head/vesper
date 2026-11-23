@@ -12,7 +12,9 @@ use @vesper/check-data::types::{
     Types,
     Vars,
     substitute,
-    vars_new
+    vars_new,
+    TyKind,
+    TyPass
 };
 use @vesper/check-data::util::{
     add,
@@ -197,13 +199,6 @@ use self::emit::{
 };
 
 const NONE64: u64 = 18446744073709551615;
-const K_LIT: u8 = 0;
-const K_NAMED: u8 = 1;
-const K_TUPLE: u8 = 2;
-const K_FN: u8 = 3;
-const K_INFER: u8 = 5;
-const PASS_IN: u64 = 0;
-const PASS_INOUT: u64 = 1;
 
 // Integer kinds: bits, plus 256 when signed; 0 is no kind.
 const SIGNED: u64 = 256;
@@ -449,7 +444,7 @@ fn is_named(in b: B, in t: Types, ty: u32, in name: Str) -> bool {
         return false;
     }
     let n = t.node(ty);
-    n.kind == K_NAMED && spells(in b, n.name, in name)
+    n.kind == TyKind::Named && spells(in b, n.name, in name)
 }
 
 fn never(in b: B, in t: Types, ty: u32) -> bool {
@@ -462,13 +457,13 @@ fn int_kind(in b: B, in t: Types, ty: u32) -> u64 {
         return 0;
     }
     let n = t.node(ty);
-    if n.kind == K_LIT {
+    if n.kind == TyKind::Lit {
         if n.mode == 0 && wrapping_u64(n.lit) > 9223372036854775807 {
             return 64;
         }
         return add(64, SIGNED);
     }
-    if n.kind != K_NAMED {
+    if n.kind != TyKind::Named {
         return 0;
     }
     let s = n.name;
@@ -525,10 +520,10 @@ fn ty_ok(in b: B, in t: Types, in y: Y, ty: u32) -> bool {
 // `known_type`.
 fn known_type(in t: Types, ty: u32) -> bool {
     let n = t.node(ty);
-    if n.kind == K_INFER {
+    if n.kind == TyKind::Infer {
         return false;
     }
-    if n.kind == K_NAMED || n.kind == K_TUPLE {
+    if n.kind == TyKind::Named || n.kind == TyKind::Tuple {
         for i in 0..w(n.n) {
             if !known_type(in t, t.arg(ty, i)) {
                 return false;
@@ -536,7 +531,7 @@ fn known_type(in t: Types, ty: u32) -> bool {
         }
         return true;
     }
-    if n.kind == K_FN {
+    if n.kind == TyKind::Fn {
         for i in 0..w(n.n) {
             if !known_type(in t, t.arg(ty, i)) {
                 return false;
@@ -553,14 +548,14 @@ fn field_type(inout t: Types, in b: B, in y: Y, ty: u32, field: u32) -> u32 {
         return NONE32;
     }
     let n = t.node(ty);
-    if n.kind == K_TUPLE {
+    if n.kind == TyKind::Tuple {
         let k = parse_index(in b, field);
         if k == NONE64 || k >= w(n.n) {
             return NONE32;
         }
         return t.arg(ty, k);
     }
-    if n.kind != K_NAMED {
+    if n.kind != TyKind::Named {
         return NONE32;
     }
     let ai = y.x.wd.lookup(n.name);
@@ -582,7 +577,7 @@ fn field_type(inout t: Types, in b: B, in y: Y, ty: u32, field: u32) -> u32 {
 }
 
 fn is_tuple(in t: Types, ty: u32) -> bool {
-    ty != NONE32 && t.node(ty).kind == K_TUPLE
+    ty != NONE32 && t.node(ty).kind == TyKind::Tuple
 }
 
 fn rec_struct(in y: Y, ai: u32) -> bool {
@@ -598,7 +593,7 @@ fn box_inner(in b: B, in t: Types, in y: Y, ty: u32) -> u32 {
         return NONE32;
     }
     let n = t.node(ty);
-    if n.kind == K_NAMED && n.n == 1 && spells(in b, n.name, in "Box") {
+    if n.kind == TyKind::Named && n.n == 1 && spells(in b, n.name, in "Box") {
         t.arg(ty, 0)
     } else {
         NONE32
@@ -1023,7 +1018,7 @@ fn set_path(
         }
         return tuple(inout b, in parts);
     }
-    if ty != NONE32 && t.node(ty).kind == K_NAMED {
+    if ty != NONE32 && t.node(ty).kind == TyKind::Named {
         let ai = y.x.wd.lookup(t.node(ty).name);
         if ai != NONE32 && rec_struct(in y, ai) {
             let a = y.x.wd.adt(ai);
@@ -1161,7 +1156,7 @@ fn pattern_types(
             let adt = adt_of(in y.x.wd, c);
             let v = variant_of(in y.x.wd, c);
             let mut vars = vars_new();
-            if ty != NONE32 && t.node(ty).kind == K_NAMED {
+            if ty != NONE32 && t.node(ty).kind == TyKind::Named {
                 vars = y.x.wd.vars_of(in t, adt, ty);
             }
             let n = y.a.px(p, 2);
@@ -2271,9 +2266,9 @@ fn inout_slice(in b: B, in t: Types, in y: Y, n: u32) -> bool {
     let s = y.x.fx.sig(w(si));
     for i in 0..s.pn {
         let p = y.x.fx.param(s, i);
-        if widen_u64(p.pass) == PASS_INOUT {
+        if widen_u64(p.pass) == TyPass::Inout {
             let pt = t.node(p.ty);
-            if pt.kind == K_NAMED && pt.n == 1 && spells(in b, pt.name, in "Slice") {
+            if pt.kind == TyKind::Named && pt.n == 1 && spells(in b, pt.name, in "Slice") {
                 return true;
             }
         }
@@ -2611,7 +2606,7 @@ fn call(
     let callt = app_args(inout b, f, in arguments);
     let mut states: u64 = 0;
     for i in 0..s.pn {
-        if widen_u64(y.x.fx.param(s, i).pass) == PASS_INOUT && i < args.len() {
+        if widen_u64(y.x.fx.param(s, i).pass) == TyPass::Inout && i < args.len() {
             states = inc(states);
         }
     }
@@ -2637,7 +2632,7 @@ fn call(
     let mut k: u64 = 0;
     for i in 0..s.pn {
         let p = y.x.fx.param(s, i);
-        if widen_u64(p.pass) == PASS_INOUT && i < args.len() {
+        if widen_u64(p.pass) == TyPass::Inout && i < args.len() {
             let arg = match args.try_get(i) {
                 Option::Some(x) => x,
                 Option::None => 0,
@@ -2690,7 +2685,7 @@ fn local_call(
 ) -> T {
     let l = g.local(g.find(n));
     let ft = t.node(l.ty);
-    if ft.kind != K_FN {
+    if ft.kind != TyKind::Fn {
         b.fail(in "call of a non-function Lean local");
         return unit(inout b);
     }
@@ -2705,7 +2700,7 @@ fn local_call(
     let effectful = row.n > 0 || row.tail != 0;
     let mut states: u64 = 0;
     for i in 0..w(ft.n) {
-        if i < args.len() && widen_u64(t.param_pass(l.ty, i)) == PASS_INOUT {
+        if i < args.len() && widen_u64(t.param_pass(l.ty, i)) == TyPass::Inout {
             states = inc(states);
         }
     }
@@ -2723,7 +2718,7 @@ fn local_call(
     let total = inc(states);
     let mut k: u64 = 0;
     for i in 0..w(ft.n) {
-        if i < args.len() && widen_u64(t.param_pass(l.ty, i)) == PASS_INOUT {
+        if i < args.len() && widen_u64(t.param_pass(l.ty, i)) == TyPass::Inout {
             let arg = match args.try_get(i) {
                 Option::Some(x) => x,
                 Option::None => 0,
@@ -2746,7 +2741,7 @@ fn local_call(
 
 fn closure(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out: ChunkSeq[T]) -> T {
     let ft = y.a.xt(e, 0);
-    if ft == NONE32 || t.node(ft).kind != K_FN {
+    if ft == NONE32 || t.node(ft).kind != TyKind::Fn {
         b.fail(in "closure lacks its checked arrow type");
         return unit(inout b);
     }
@@ -2835,7 +2830,7 @@ fn closure(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out: C
     let rr = lref(inout b, r);
     results.push(rr);
     for i in 0..pcount {
-        if widen_u64(t.param_pass(ft, i)) == PASS_INOUT {
+        if widen_u64(t.param_pass(ft, i)) == TyPass::Inout {
             let v = var(inout b, in g, y.a.xs(e, add(2, i)));
             results.push(v);
         }
@@ -2885,7 +2880,7 @@ pub fn function(inout b: B, inout t: Types, in y: Y, inout g: G, fi: u64) -> T {
     let r0 = ty(inout b, in t, in y, inout g, f.result);
     results.push(r0);
     for i in 0..f.pn {
-        if y.a.param_pass(f, i) == PASS_INOUT {
+        if y.a.param_pass(f, i) == TyPass::Inout {
             let pt = ty(inout b, in t, in y, inout g, y.a.param_ty(f, i));
             results.push(pt);
         }
@@ -2910,7 +2905,7 @@ pub fn function(inout b: B, inout t: Types, in y: Y, inout g: G, fi: u64) -> T {
     let rr = lref(inout b, r);
     values.push(rr);
     for i in 0..f.pn {
-        if y.a.param_pass(f, i) == PASS_INOUT {
+        if y.a.param_pass(f, i) == TyPass::Inout {
             let v = var(inout b, in g, y.a.param_name(f, i));
             values.push(v);
         }

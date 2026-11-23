@@ -38,7 +38,10 @@ use @vesper/check-data::types::{
     default_type,
     substitute,
     vars_new,
-    zero_slots
+    zero_slots,
+    TyKind,
+    TyMode,
+    TyPass
 };
 use @vesper/check-data::world::{
     Bounds,
@@ -67,18 +70,6 @@ use @vesper/check-data::input::{
 // copies equal check-data's.
 const NONE32: u32 = 4294967295;
 const NO_ADT: u32 = 4294967295;
-const K_LIT: u8 = 0;
-const K_NAMED: u8 = 1;
-const K_TUPLE: u8 = 2;
-const K_FN: u8 = 3;
-const K_ROW: u8 = 4;
-const K_INFER: u8 = 5;
-const M_COPY: u8 = 0;
-const M_AFFINE: u8 = 1;
-const M_LINEAR: u8 = 2;
-const P_IN: u8 = 0;
-const P_INOUT: u8 = 1;
-const P_SINK: u8 = 2;
 
 // Input name index -> symbol (`sym` of check-data's input.ves).
 fn sym(in nmap: ChunkSeq[u32], x: u64) -> u32 {
@@ -1772,7 +1763,7 @@ impl Flow {
             return;
         }
         let v = s.val_at(at);
-        if self.mode(inout t, in names, in wd, v.ty) == M_COPY {
+        if self.mode(inout t, in names, in wd, v.ty) == TyMode::Copy {
             return;
         }
         if !v.owned {
@@ -1917,12 +1908,12 @@ impl Flow {
             ft
         };
         let tymode = self.mode(inout t, in names, in wd, ty);
-        let exclusive = pass == P_INOUT || (pass == P_SINK && tymode != M_COPY);
+        let exclusive = pass == TyPass::Inout || (pass == TyPass::Sink && tymode != TyMode::Copy);
         for vi in 0..s.values.len() {
             let v = s.val_at(vi);
             if v.lpass != 255
                 && !v.consumed
-                && (exclusive || (v.lpass == P_INOUT && !self.reserved(v.id))) {
+                && (exclusive || (v.lpass == TyPass::Inout && !self.reserved(v.id))) {
                 let mut hit = false;
                 for j in 0..w(v.ln) {
                     let q = s.loan(add(w(v.la), j));
@@ -1956,7 +1947,7 @@ impl Flow {
                 }
             }
         }
-        if pass == P_INOUT && slot.pass == P_IN {
+        if pass == TyPass::Inout && slot.pass == TyPass::In {
             self.say("IR mutates a shared parameter");
             self
                 .caused(
@@ -1967,8 +1958,8 @@ impl Flow {
                     "Shared parameters do not grant mutation permission."
                 );
         }
-        if pass == P_SINK && tymode != M_COPY {
-            if slot.pass != P_SINK {
+        if pass == TyPass::Sink && tymode != TyMode::Copy {
+            if slot.pass != TyPass::Sink {
                 self.say("IR moves from a borrowed parameter");
                 self
                     .caused(
@@ -1979,7 +1970,7 @@ impl Flow {
                         "Borrowed parameters do not transfer ownership to this function."
                     );
             }
-            if path != 0 && self.mode(inout t, in names, in wd, slot.ty) == M_LINEAR {
+            if path != 0 && self.mode(inout t, in names, in wd, slot.ty) == TyMode::Linear {
                 self.say("IR must destructure a linear aggregate before moving fields");
                 self
                     .caused(
@@ -2014,7 +2005,7 @@ impl Flow {
                 continue;
             }
             let va = s.val_at(x);
-            if va.lpass != P_INOUT || va.consumed {
+            if va.lpass != TyPass::Inout || va.consumed {
                 continue;
             }
             for j in 0..n {
@@ -2025,10 +2016,10 @@ impl Flow {
                     continue;
                 }
                 let vb = s.val_at(y);
-                if vb.lpass != P_IN || vb.consumed {
+                if vb.lpass != TyPass::In || vb.consumed {
                     continue;
                 }
-                if bpass != P_INOUT && is_scalar_type(in t, k, vb.ty) {
+                if bpass != TyPass::Inout && is_scalar_type(in t, k, vb.ty) {
                     continue;
                 }
                 let mut found: u64 = 18446744073709551615;
@@ -2076,10 +2067,10 @@ impl Flow {
 // `default_type` (an integer literal is i64).
 fn is_scalar_type(in t: Types, k: Known, ty: u32) -> bool {
     let n = t.node(ty);
-    if n.kind == K_LIT {
+    if n.kind == TyKind::Lit {
         return true;
     }
-    n.kind == K_NAMED && n.n == 0 && k.is_scalar(n.name)
+    n.kind == TyKind::Named && n.n == 0 && k.is_scalar(n.name)
 }
 // src/ir_check.rs, part 3: bind, frame, end, the instruction transfer,
 // merge, the worklist and `validate`.
@@ -2112,7 +2103,7 @@ impl Flow {
                     }
                 );
         } else if kind == 0 {
-            if pass == P_SINK && self.mode(inout t, in names, in wd, ty) == M_LINEAR {
+            if pass == TyPass::Sink && self.mode(inout t, in names, in wd, ty) == TyMode::Linear {
                 self.say("IR wildcard discards a linear value");
                 self
                     .caused(
@@ -2124,7 +2115,7 @@ impl Flow {
                     );
             }
         } else if kind == 2 {
-            if t.kind(ty) == K_TUPLE {
+            if t.kind(ty) == TyKind::Tuple {
                 let n = p.pat(add(pat, 3));
                 let m = t.arity(ty);
                 for i in 0..n {
@@ -2153,7 +2144,7 @@ impl Flow {
             if c != 18446744073709551615 {
                 let a = wd.adt(n32(c >> 32));
                 let v = wd.variant(c & 4294967295);
-                let vars = if t.kind(ty) == K_NAMED {
+                let vars = if t.kind(ty) == TyKind::Named {
                     wd.vars_of(in t, a, ty)
                 } else {
                     vars_new()
@@ -2200,8 +2191,8 @@ impl Flow {
         in wd: World,
         sl: SlotS
     ) -> bool {
-        sl.pass == P_SINK
-            && self.mode(inout t, in names, in wd, sl.ty) == M_LINEAR
+        sl.pass == TyPass::Sink
+            && self.mode(inout t, in names, in wd, sl.ty) == TyMode::Linear
             && !s.moved_has(sl.rank, 0)
     }
 
@@ -2257,7 +2248,9 @@ impl Flow {
         }
         for i in 0..s.values.len() {
             let v = s.val_at(i);
-            if v.owned && !v.consumed && self.mode(inout t, in names, in wd, v.ty) == M_LINEAR {
+            if v.owned
+                && !v.consumed
+                && self.mode(inout t, in names, in wd, v.ty) == TyMode::Linear {
                 if end {
                     self.say_id("linear temporary ", v.id, " remains live at IR return");
                     self
@@ -2300,7 +2293,7 @@ impl Flow {
         for i in 0..n {
             let pass = wrapping_u8(p.op(add(a, inc(wrapping_mul(i, 2)))));
             let v = n32(p.op(add(a, add(2, wrapping_mul(i, 2)))));
-            if pass == P_SINK {
+            if pass == TyPass::Sink {
                 self.consume(inout s, inout t, in names, in wd, v, s0, s1);
             } else {
                 let x = self.release(inout s, v);
@@ -2310,7 +2303,7 @@ impl Flow {
 
     fn row_effectful(in self, in t: Types, in p: Program, ty: u32) -> bool {
         let n = t.node(ty);
-        if n.kind != K_FN {
+        if n.kind != TyKind::Fn {
             return false;
         }
         let row = t.row(n.r2);
@@ -2356,24 +2349,24 @@ impl Flow {
             // A by-value read that only a `match` inspects, of a borrowed
             // slot's non-copy place, is a borrow (§4.3).
             let mut pass = read_pass;
-            if pass == P_SINK && self.scrutinee(i.dest) {
+            if pass == TyPass::Sink && self.scrutinee(i.dest) {
                 let si = s.find_slot(p.rank_of(root));
                 if si < 9223372036854775808
-                    && s.slot_at(si).pass != P_SINK
-                    && self.mode(inout t, in names, in wd, i.ty) != M_COPY {
-                    pass = P_IN;
+                    && s.slot_at(si).pass != TyPass::Sink
+                    && self.mode(inout t, in names, in wd, i.ty) != TyMode::Copy {
+                    pass = TyPass::In;
                 }
             }
             // Calling a borrowed slot's function value that is not `copy`
             // reads it (a lent function parameter, §4.2).
-            if pass == P_SINK && np == 1 && p.op(add(a, 4)) == 0 && self.callee(i.dest) {
+            if pass == TyPass::Sink && np == 1 && p.op(add(a, 4)) == 0 && self.callee(i.dest) {
                 let si = s.find_slot(p.rank_of(root));
                 let tn = t.node(i.ty);
                 if si < 9223372036854775808
-                    && s.slot_at(si).pass != P_SINK
-                    && tn.kind == K_FN
-                    && tn.mode != M_COPY {
-                    pass = P_IN;
+                    && s.slot_at(si).pass != TyPass::Sink
+                    && tn.kind == TyKind::Fn
+                    && tn.mode != TyMode::Copy {
+                    pass = TyPass::In;
                 }
             }
             if s.find_slot(p.rank_of(root)) < 9223372036854775808 || !is_fn {
@@ -2393,12 +2386,12 @@ impl Flow {
                         );
                 }
             }
-            if pass != P_SINK {
+            if pass != TyPass::Sink {
                 owned = false;
                 // A borrowed scrutinee lends its place to the arms'
                 // bindings, which the checker keeps from conflicting with
                 // any write (§4.3); it takes no value loan.
-                if read_pass != P_SINK {
+                if read_pass != TyPass::Sink {
                     lpass = pass;
                     loan_from = add(a, 4);
                     loan_n = np;
@@ -2415,10 +2408,10 @@ impl Flow {
             // A borrowed scrutinee binds borrows of its payloads.
             let borrowed = self.scrutinee(value) && at < 9223372036854775808 && !s.val_at(at).owned;
             let pass = if borrowed {
-                P_IN
+                TyPass::In
             } else {
                 self.consume(inout s, inout t, in names, in wd, value, s0, s1);
-                P_SINK
+                TyPass::Sink
             };
             self.bind(inout s, inout t, inout names, in wd, in p, p.op(inc(a)), ty, value, pass);
         } else if i.op == OP_WRITE {
@@ -2439,7 +2432,7 @@ impl Flow {
                     in wd,
                     in p,
                     place(root, path),
-                    P_INOUT,
+                    TyPass::Inout,
                     s0,
                     s1
                 );
@@ -2451,7 +2444,7 @@ impl Flow {
                 } else {
                     ft
                 };
-                if self.mode(inout t, in names, in wd, fty) == M_LINEAR {
+                if self.mode(inout t, in names, in wd, fty) == TyMode::Linear {
                     self.say("IR assignment overwrites a linear obligation");
                     self
                         .caused(
@@ -2475,7 +2468,7 @@ impl Flow {
                     let x = s.val_at(at);
                     let n = t.node(x.ty);
                     if !x.owned
-                        && n.kind == K_NAMED
+                        && n.kind == TyKind::Named
                         && n.n == 0
                         && (n.name == k.string || n.name == k.str_) {
                         s
@@ -2521,7 +2514,7 @@ impl Flow {
             let v = n32(p.op(a));
             let at = s.find_val(v);
             if at < 9223372036854775808
-                && self.mode(inout t, in names, in wd, s.val_at(at).ty) == M_LINEAR {
+                && self.mode(inout t, in names, in wd, s.val_at(at).ty) == TyMode::Linear {
                 self.say("projection would abandon a temporary linear aggregate");
                 self
                     .caused(
@@ -2544,7 +2537,7 @@ impl Flow {
             let lent = if at < 9223372036854775808 {
                 let v = s.val_at(at);
                 let tn = t.node(v.ty);
-                !v.owned && tn.kind == K_FN && tn.mode != M_COPY
+                !v.owned && tn.kind == TyKind::Fn && tn.mode != TyMode::Copy
             } else {
                 false
             };
@@ -2586,7 +2579,7 @@ impl Flow {
                         in wd,
                         in p,
                         p.op(add(inc(a), j)),
-                        P_SINK,
+                        TyPass::Sink,
                         s0,
                         s1
                     );
@@ -2707,7 +2700,7 @@ impl Flow {
             let at = out.find_val(v.id);
             if at < 9223372036854775808 {
                 let old = out.val_at(at);
-                if self.mode(inout t, in names, in wd, old.ty) == M_LINEAR
+                if self.mode(inout t, in names, in wd, old.ty) == TyMode::Linear
                     && old.owned
                     && old.consumed != v.consumed {
                     self
@@ -2903,7 +2896,7 @@ impl Flow {
                 if a != 18446744073709551615 {
                     let n = p.op(a);
                     for j in 0..n {
-                        if wrapping_u8(p.op(add(a, inc(wrapping_mul(j, 2))))) == P_INOUT {
+                        if wrapping_u8(p.op(add(a, inc(wrapping_mul(j, 2))))) == TyPass::Inout {
                             let x = set_insert(
                                 inout self.reservable,
                                 n32(p.op(add(a, add(2, wrapping_mul(j, 2)))))

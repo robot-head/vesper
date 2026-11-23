@@ -141,20 +141,65 @@ directory entry has option disc@4, type@8, name ptr@12 and len@16.
 ## Gaps found
 
 1. Every `@vesper-std/fs` and `@vesper-std/env` function raises
-   `Fail[IoError]`, so a whole-package seed build waits for `Fail`
-   handlers (lane 9, `Op::Handle`). The tests call the `.vsys` functions
-   directly from an `eff [Ffi[StdEnv], Ffi[StdFs]]` entry.
+   `Fail[IoError]`, so a whole-package seed build waited for `Fail`
+   handlers (lane 9, `Op::Handle`, #1551, now merged; part 2 below uses
+   them).
 2. `StdProcess` (spawning the C compiler) has no WASI equivalent. The seed
    driver has to skip it, and the port refuses the program (entry must
    handle `Ffi$StdProcess`).
 3. The evaluator overflows the default 2 MiB test stack on a 500-deep
    boxed-list recursion. The test runs on a 256 MiB thread.
 
+## Part 2: the front end builds to wasm
+
+`front_end_parses_like_native` (tests/wasm_seed_package_io.rs) builds a
+package over `@vesper/front` and `@vesper-std/fs` whose `main` reads each
+corpus file (the 19 files under examples/ and the 9 sources of
+packages/vesper-front itself, 28 in all, 210 KiB), parses it with
+`parse_tables`, and writes the tables as little-endian words. `main`
+handles `Fail[IoError]`, so the package runs through lane 9's handlers.
+It runs natively (JIT plus crates/vesper-std-host) and as a component
+under Wasmtime, and all 28 output files are byte-identical. Rust's wasm
+backend refuses the package.
+
+The build found four gaps in the port, all refused by Rust too:
+
+1. Constant tables. `$table$NAME` callees (src/arrays.rs) were refused as
+   external functions (site 221). New src/tables.ves emits the table's
+   words as static data once, from the constant function's single
+   block, and the call gives its address (site 246 refuses any other
+   shape).
+2. Byte scans. `find_byte`, `find_either` and `find_not_in`
+   (`SeqOp::FindByte`, `FindEither`, `FindNotIn`) lower to a loop that
+   gives `Option[u64]` (src/scans.ves; site 247 refuses a stride other
+   than one byte).
+3. `u128` and `~`. The front end checks literal ranges in `u128`, through
+   the prelude's `checked_add_u128` and `checked_mul_u128`. New
+   src/wide.ves makes a `u128` a 16-byte block (plan.ves gives it the
+   shape of `(u64, u64)`, so moves, `==` and copies work unchanged) and
+   lowers constants, `widen_u128`, `wrapping_u64`, `+` (checked) and
+   `wrapping_add`, `wrapping_mul`, `/` and `%`, `<<` and the four
+   comparisons. `i128` and the other `u128` operations are refused
+   (sites 248, 249). `~` on the scalar kinds is a mask XOR.
+4. Heap reclaim with WASI effects. The heap is a bump heap that a self
+   tail call reclaims (`Lowerer::reclaiming`). Rust allows a function
+   whose effects are host capabilities of the plan to reclaim; the port
+   did not count the WASI libraries, so the driver's per-file tail call
+   kept every file's garbage and ran out of 4 GiB on the 24th file. The
+   port now counts `plan.host` (src/tables.ves `host_effect`).
+
+The driver recurses rather than loops for the same reason: a `loop` does
+not reclaim, since only a self tail call does.
+
+Time: the test takes about 100 s, almost all of it the port compiling the
+package in the evaluator.
+
 ## What is left
 
-- After lane 9's handlers: build `packages/vesper-front` (then the checker
-  packages) to wasm, run it under Wasmtime and `vwasm`, and compare it with
-  the native build on the corpus. This is step 3 of the prompt and needs
-  this PR and lane 9's.
-- Closures and handlers as the compiler uses them (lane 9 owns `Op::Handle`).
-- The runner imports above (lane 2).
+- Run the front end under lane 2's `vwasm` (#1397): it needs the WASI
+  imports listed above.
+- The checker packages: build them the same way and compare with native.
+- `while` is unresolved sugar (E0142) in package code, so the driver uses
+  `loop`; a variable shift raises `Fail[RuntimeError]` where the driver
+  uses constant shifts.
+- `StdProcess` (gap 2 above).

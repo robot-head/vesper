@@ -13,7 +13,9 @@
 
 use @vesper/check-data::types::{
     Types,
-    substitute
+    substitute,
+    TyKind,
+    TyPass
 };
 use @vesper/check-data::util::{
     add,
@@ -92,40 +94,8 @@ use self::fn_input::{
 use self::cfg::{
     ARG_WORDS,
     Fun,
-    LIT_BOOL,
-    LIT_FLOAT,
-    LIT_INT,
-    LIT_STRING,
     NONE32,
     NONE64,
-    OP_BIND,
-    OP_BINARY,
-    OP_CALL,
-    OP_CLOSURE,
-    OP_CONST,
-    OP_DATA,
-    OP_EXIT,
-    OP_FIP,
-    OP_INDIRECT,
-    OP_LOOP,
-    OP_PROJECT,
-    OP_READ,
-    OP_TILED,
-    OP_TUPLE,
-    OP_UNARY,
-    OP_UNIT,
-    OP_WRITE,
-    PASS_INOUT,
-    PAT_BIND,
-    PAT_CONSTRUCTOR,
-    PAT_LITERAL,
-    PAT_TUPLE,
-    PAT_WILD,
-    TERM_BRANCH,
-    TERM_JUMP,
-    TERM_MATCH,
-    TERM_RETURN,
-    TERM_UNREACHABLE,
     arg_at,
     arm_bindings,
     block_has,
@@ -136,11 +106,12 @@ use self::cfg::{
     set_next,
     takes
 };
-
-const K_LIT: u8 = 0;
-const K_NAMED: u8 = 1;
-const K_TUPLE: u8 = 2;
-const K_FN: u8 = 3;
+use @vesper/place-ir::codes::{
+    Lit,
+    Op,
+    Pat,
+    Term
+};
 
 pub const LOOP_REFUSAL: Str = "Lean extraction does not model loop, for, break or return yet; write the iteration as a tail-recursive function";
 
@@ -302,7 +273,7 @@ fn generic_args(inout b: B, in x: X, sig: Sig) {
 fn inout_count(in f: Fun) -> u64 {
     let mut n: u64 = 0;
     for k in 0..f.params.len() {
-        if f.param(k).pass == PASS_INOUT {
+        if f.param(k).pass == TyPass::Inout {
             n = inc(n);
         }
     }
@@ -319,7 +290,7 @@ fn result_type(inout b: B, in t: Types, in x: X, in f: Fun) {
     emit_ty(inout b, in t, f.result, x.fip);
     for k in 0..f.params.len() {
         let q = f.param(k);
-        if q.pass == PASS_INOUT {
+        if q.pass == TyPass::Inout {
             emit_ty(inout b, in t, q.ty, x.fip);
         }
     }
@@ -329,7 +300,7 @@ fn result_check(inout b: B, in t: Types, in x: X, in f: Fun) {
     ty_check(inout b, in t, f.result, x.fip);
     for k in 0..f.params.len() {
         let q = f.param(k);
-        if q.pass == PASS_INOUT {
+        if q.pass == TyPass::Inout {
             ty_check(inout b, in t, q.ty, x.fip);
         }
     }
@@ -411,10 +382,10 @@ fn signed_kind(in b: B, in t: Types, ty: u32) -> bool {
         return false;
     }
     let n = t.node(ty);
-    if n.kind == K_LIT {
+    if n.kind == TyKind::Lit {
         return !(n.mode == 0 && wrapping_u64(n.lit) > 9223372036854775807);
     }
-    if n.kind != K_NAMED {
+    if n.kind != TyKind::Named {
         return false;
     }
     spells(in b, n.name, in "i8")
@@ -533,14 +504,14 @@ fn field_type(inout t: Types, in b: B, in wd: World, ty: u32, field: u32) -> u32
         return NONE32;
     }
     let n = t.node(ty);
-    if n.kind == K_TUPLE {
+    if n.kind == TyKind::Tuple {
         let k = parse_index(in b, field);
         if k == NONE64 || k >= w(n.n) {
             return NONE32;
         }
         return t.arg(ty, k);
     }
-    if n.kind != K_NAMED {
+    if n.kind != TyKind::Named {
         return NONE32;
     }
     let mut adt_ty = ty;
@@ -550,7 +521,7 @@ fn field_type(inout t: Types, in b: B, in wd: World, ty: u32, field: u32) -> u32
         }
         adt_ty = t.arg(ty, 0);
         let e = t.node(adt_ty);
-        if e.kind != K_NAMED {
+        if e.kind != TyKind::Named {
             return NONE32;
         }
         let ai = wd.lookup(e.name);
@@ -628,7 +599,7 @@ fn proj_count(in b: B, in t: Types, in path: ChunkSeq[u32], ty: u32) -> u64 {
         let field = u32_at(in path, i);
         let node = t.node(cur);
         let k = parse_index(in b, field);
-        if cur != NONE32 && node.kind == K_TUPLE && k != NONE64 {
+        if cur != NONE32 && node.kind == TyKind::Tuple && k != NONE64 {
             if k >= w(node.n) {
                 return n;
             }
@@ -651,7 +622,7 @@ fn proj_tail(inout b: B, in t: Types, in path: ChunkSeq[u32], ty: u32) {
         let field = u32_at(in path, i);
         let node = t.node(cur);
         let k = parse_index(in b, field);
-        if cur != NONE32 && node.kind == K_TUPLE && k != NONE64 {
+        if cur != NONE32 && node.kind == TyKind::Tuple && k != NONE64 {
             if k >= w(node.n) {
                 b.fail(in "tuple projection is outside Lean tuple type");
                 return;
@@ -727,7 +698,7 @@ fn update(
     b.check(field, in "identifier");
     let node = t.node(ty);
     let mut ai = NONE32;
-    if ty != NONE32 && node.kind == K_NAMED {
+    if ty != NONE32 && node.kind == TyKind::Named {
         ai = x.wd.lookup(node.name);
     }
     let mut is_rec = false;
@@ -929,7 +900,7 @@ fn literal(inout b: B, in t: Types, in x: X, i: u64, ty: u32) {
     let kind = x.p.op(i);
     let lo = x.p.op(inc(i));
     let hi = x.p.op(add(i, 2));
-    if kind == LIT_INT {
+    if kind == Lit::Int {
         if wrapping_shr_u64(hi, 63) != 0 {
             // the magnitude of a negative i128
             let nlo = wrapping_add(lo ^ 18446744073709551615, 1);
@@ -943,16 +914,16 @@ fn literal(inout b: B, in t: Types, in x: X, i: u64, ty: u32) {
         } else {
             nat_u128(inout b, hi, lo);
         }
-    } else if kind == LIT_FLOAT {
+    } else if kind == Lit::Float {
         let n = t.node(ty);
-        if n.kind == K_NAMED && spells(in b, n.name, in "f32") {
+        if n.kind == TyKind::Named && spells(in b, n.name, in "f32") {
             global_app(inout b, in "Float32", in "ofBits");
             nat_u64(inout b, f32_bits(lo));
         } else {
             global_app(inout b, in "Float", in "ofBits");
             nat_u64(inout b, lo);
         }
-    } else if kind == LIT_BOOL {
+    } else if kind == Lit::Bool {
         b.w(T_BOOL);
         b.w(lo);
     } else {
@@ -965,7 +936,7 @@ fn literal(inout b: B, in t: Types, in x: X, i: u64, ty: u32) {
 
 // Whether the pattern at `i` is a built-in `Box` pattern (`is_box_pattern`).
 fn box_pattern(inout b: B, in x: X, i: u64) -> bool {
-    if !x.fip || x.p.op(i) != PAT_CONSTRUCTOR {
+    if !x.fip || x.p.op(i) != Pat::Constructor {
         return false;
     }
     let name = n32(x.p.op(add(i, 3)));
@@ -984,28 +955,28 @@ fn pattern(inout b: B, in t: Types, in x: X, i: u64) {
     }
     let kind = x.p.op(i);
     let j = add(i, 3);
-    if kind == PAT_BIND {
+    if kind == Pat::Bind {
         b.w(P_BIND);
         b.ident(n32(x.p.op(j)));
-    } else if kind == PAT_WILD {
+    } else if kind == Pat::Wild {
         b.w(P_WILD);
-    } else if kind == PAT_LITERAL {
+    } else if kind == Pat::Literal {
         let lk = x.p.op(j);
-        if lk == LIT_INT {
+        if lk == Lit::Int {
             b.w(P_INT);
             b.w(x.p.op(inc(j)));
             b.w(x.p.op(add(j, 2)));
-        } else if lk == LIT_BOOL {
+        } else if lk == Lit::Bool {
             b.w(P_BOOL);
             b.w(x.p.op(inc(j)));
-        } else if lk == LIT_STRING {
+        } else if lk == Lit::String {
             b.w(P_STRING);
             b.sym(n32(x.p.op(inc(j))));
         } else {
             b.fail(in "floating-point patterns are unsupported in Lean extraction");
             b.w(P_WILD);
         }
-    } else if kind == PAT_TUPLE {
+    } else if kind == Pat::Tuple {
         let n = x.p.op(j);
         if n != 1 {
             b.w(P_TUPLE);
@@ -1016,7 +987,7 @@ fn pattern(inout b: B, in t: Types, in x: X, i: u64) {
             pattern(inout b, in t, in x, k);
             k = pattern_end(in x.p, k);
         }
-    } else if kind == PAT_CONSTRUCTOR {
+    } else if kind == Pat::Constructor {
         let c = lookup_constructor(inout b, in x.wd, n32(x.p.op(j)));
         if c == NONE64 {
             b.fail(in "unknown Lean pattern");
@@ -1228,7 +1199,7 @@ fn float_intrinsic(in b: B, name: u32) -> bool {
 fn instruction(inout b: B, inout t: Types, in x: X, in s: S, ins: InstRow) -> u64 {
     let a = ins.a;
     let op = ins.op;
-    if op == OP_BIND {
+    if op == Op::Bind {
         b.w(S_LET);
         b.w(0);
         pattern(inout b, in t, in x, inc(a));
@@ -1239,7 +1210,7 @@ fn instruction(inout b: B, inout t: Types, in x: X, in s: S, ins: InstRow) -> u6
         let_dest_end(inout b, in t, in x, ins);
         return 2;
     }
-    if op == OP_WRITE {
+    if op == Op::Write {
         let mut path: ChunkSeq[u32] = ChunkSeq::new[u32]();
         let root = split_place(inout b, n32(x.p.op(a)), inout path);
         let o = n32(x.p.op(inc(a)));
@@ -1281,16 +1252,16 @@ fn instruction(inout b: B, inout t: Types, in x: X, in s: S, ins: InstRow) -> u6
         let_dest_end(inout b, in t, in x, ins);
         return 2;
     }
-    if op == OP_INDIRECT {
+    if op == Op::Indirect {
         return indirect(inout b, inout t, in x, in s, ins);
     }
-    if op == OP_CALL {
+    if op == Op::Call {
         return call(inout b, inout t, in x, in s, ins);
     }
-    if op == OP_TILED {
+    if op == Op::Tiled {
         return tiled(inout b, inout t, in x, in s, ins);
     }
-    if (op == OP_UNARY || op == OP_BINARY) && float_intrinsic(in b, n32(x.p.op(a))) {
+    if (op == Op::Unary || op == Op::Binary) && float_intrinsic(in b, n32(x.p.op(a))) {
         // float_math::lean_refusal
         let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
         put(inout m, in "Lean extraction does not model the float intrinsic '");
@@ -1305,26 +1276,26 @@ fn instruction(inout b: B, inout t: Types, in x: X, in s: S, ins: InstRow) -> u6
         }
         return 0;
     }
-    if op == OP_LOOP || op == OP_EXIT {
+    if op == Op::Loop || op == Op::Exit {
         b.fail(in LOOP_REFUSAL);
         return 0;
     }
     if !(
-        op == OP_CONST
-            || op == OP_UNIT
-            || op == OP_READ
-            || op == OP_CLOSURE
-            || op == OP_UNARY
-            || op == OP_BINARY
-            || op == OP_TUPLE
-            || op == OP_DATA
-            || op == OP_PROJECT
-            || op == OP_FIP
+        op == Op::Const
+            || op == Op::Unit
+            || op == Op::Read
+            || op == Op::Closure
+            || op == Op::Unary
+            || op == Op::Binary
+            || op == Op::Tuple
+            || op == Op::Data
+            || op == Op::Project
+            || op == Op::Fip
     ) {
         b.fail(in "unsupported operation in Lean CFG extraction");
         return 0;
     }
-    if op == OP_CLOSURE {
+    if op == Op::Closure {
         // The binders' types and the lifted name are checked after the
         // arguments.
         let_dest(inout b, in t, in x, ins);
@@ -1333,13 +1304,13 @@ fn instruction(inout b: B, inout t: Types, in x: X, in s: S, ins: InstRow) -> u6
         return 1;
     }
     let_dest(inout b, in t, in x, ins);
-    if op == OP_CONST {
+    if op == Op::Const {
         b.w(T_ASCRIBE);
         literal(inout b, in t, in x, a, ins.ty);
         typ(inout b, in t, in x, ins.ty);
-    } else if op == OP_UNIT {
+    } else if op == Op::Unit {
         unit_tuple(inout b);
-    } else if op == OP_READ {
+    } else if op == Op::Read {
         let root = n32(x.p.op(a));
         let callee = x.fx.find(root);
         if callee != NONE32 && s.f.slot_bit(root) == NONE64 {
@@ -1357,7 +1328,7 @@ fn instruction(inout b: B, inout t: Types, in x: X, in s: S, ins: InstRow) -> u6
             let path = ir_path(in x.p, x.p.op(inc(a)));
             project_ref(inout b, in t, root, in path, s.f.local_ty(root));
         }
-    } else if op == OP_UNARY {
+    } else if op == Op::Unary {
         let o = n32(x.p.op(a));
         if spells(in b, o, in "-") || spells(in b, o, in "!") {
             b.w(T_UNARY);
@@ -1380,7 +1351,7 @@ fn instruction(inout b: B, inout t: Types, in x: X, in s: S, ins: InstRow) -> u6
             }
             unit_tuple(inout b);
         }
-    } else if op == OP_BINARY {
+    } else if op == Op::Binary {
         let o = unwrapped(inout b, n32(x.p.op(a)));
         let va = x.p.op(inc(a));
         let vb = x.p.op(add(a, 2));
@@ -1414,7 +1385,7 @@ fn instruction(inout b: B, inout t: Types, in x: X, in s: S, ins: InstRow) -> u6
                 signed_mod(inout b, in lhs, in rhs);
             }
         }
-    } else if op == OP_TUPLE {
+    } else if op == Op::Tuple {
         let n = x.p.op(a);
         if n != 1 {
             b.w(T_TUPLE);
@@ -1423,7 +1394,7 @@ fn instruction(inout b: B, inout t: Types, in x: X, in s: S, ins: InstRow) -> u6
         for k in 0..n {
             value(inout b, x.p.op(add(inc(a), k)));
         }
-    } else if op == OP_DATA {
+    } else if op == Op::Data {
         let c = lookup_constructor(inout b, in x.wd, n32(x.p.op(a)));
         if c == NONE64 {
             b.fail(in "unknown Lean data");
@@ -1455,12 +1426,12 @@ fn instruction(inout b: B, inout t: Types, in x: X, in s: S, ins: InstRow) -> u6
             }
             constructor_check(inout b, in x.wd, c);
         }
-    } else if op == OP_PROJECT {
+    } else if op == Op::Project {
         let v = x.p.op(a);
         let mut path: ChunkSeq[u32] = ChunkSeq::new[u32]();
         path.push(n32(x.p.op(inc(a))));
         project_value(inout b, in t, v, in path, s.f.value_ty(v));
-    } else if op == OP_FIP {
+    } else if op == Op::Fip {
         let args = inc(a);
         if x.p.op(args) != 1 {
             b.fail(in "Box op expects 1 argument");
@@ -1551,7 +1522,7 @@ fn indirect(inout b: B, inout t: Types, in x: X, in s: S, ins: InstRow) -> u64 {
     let n = x.p.op(args);
     let mut states: u64 = 0;
     for k in 0..n {
-        if x.p.op(arg_at(args, k)) == PASS_INOUT {
+        if x.p.op(arg_at(args, k)) == TyPass::Inout {
             states = inc(states);
         }
     }
@@ -1587,7 +1558,7 @@ fn indirect(inout b: B, inout t: Types, in x: X, in s: S, ins: InstRow) -> u64 {
     let mut si: u64 = 0;
     for k in 0..n {
         let at = arg_at(args, k);
-        if x.p.op(at) == PASS_INOUT {
+        if x.p.op(at) == TyPass::Inout {
             let root = x.p.op(add(at, 2));
             if root == 0 {
                 b.fail(in "mutable indirect argument requires place");
@@ -1619,7 +1590,7 @@ fn call(inout b: B, inout t: Types, in x: X, in s: S, ins: InstRow) -> u64 {
     // call_states: the inout parameters zipped with the arguments
     let mut states: u64 = 0;
     for k in 0..n {
-        if k < sig.pn && widen_u64(x.fx.param(sig, k).pass) == PASS_INOUT {
+        if k < sig.pn && widen_u64(x.fx.param(sig, k).pass) == TyPass::Inout {
             states = inc(states);
         }
     }
@@ -1661,7 +1632,7 @@ fn call(inout b: B, inout t: Types, in x: X, in s: S, ins: InstRow) -> u64 {
     let mut count: u64 = 1;
     let mut si: u64 = 0;
     for k in 0..n {
-        if k < sig.pn && widen_u64(x.fx.param(sig, k).pass) == PASS_INOUT {
+        if k < sig.pn && widen_u64(x.fx.param(sig, k).pass) == TyPass::Inout {
             let q = x.fx.param(sig, k);
             let at = arg_at(args, k);
             let root = x.p.op(add(at, 2));
@@ -1898,7 +1869,7 @@ fn tiled(inout b: B, inout t: Types, in x: X, in s: S, ins: InstRow) -> u64 {
     let n = x.p.op(args);
     let mut at = NONE64;
     for k in 0..n {
-        if at == NONE64 && x.p.op(arg_at(args, k)) == PASS_INOUT {
+        if at == NONE64 && x.p.op(arg_at(args, k)) == TyPass::Inout {
             at = arg_at(args, k);
         }
     }
@@ -1921,7 +1892,7 @@ fn tiled(inout b: B, inout t: Types, in x: X, in s: S, ins: InstRow) -> u64 {
 fn terminator(inout b: B, in t: Types, in x: X, in s: S, k: u64) {
     let blk = s.f.block(in x.p, k);
     let ta = blk.ta;
-    if blk.term == TERM_RETURN {
+    if blk.term == Term::Return {
         let n = inout_count(in s.f);
         pure_app(inout b);
         if n > 0 {
@@ -1931,21 +1902,21 @@ fn terminator(inout b: B, in t: Types, in x: X, in s: S, k: u64) {
         value(inout b, x.p.op(ta));
         for j in 0..s.f.params.len() {
             let q = s.f.param(j);
-            if q.pass == PASS_INOUT {
+            if q.pass == TyPass::Inout {
                 b.sref(q.name);
             }
         }
-    } else if blk.term == TERM_JUMP {
+    } else if blk.term == Term::Jump {
         pure_app(inout b);
         call_block(inout b, in x, in s, x.p.op(ta), inc(ta));
-    } else if blk.term == TERM_BRANCH {
+    } else if blk.term == Term::Branch {
         b.w(T_IF);
         value(inout b, x.p.op(ta));
         pure_app(inout b);
         call_block(inout b, in x, in s, x.p.op(inc(ta)), NONE64);
         pure_app(inout b);
         call_block(inout b, in x, in s, x.p.op(add(ta, 2)), NONE64);
-    } else if blk.term == TERM_MATCH {
+    } else if blk.term == Term::Match {
         let n = x.p.op(inc(ta));
         b.w(T_MATCH);
         b.w(n);
@@ -2058,7 +2029,7 @@ pub fn extract(inout b: B, inout t: Types, in x: X, fi: u64, inout count: u64) -
         let blk = f.block(in x.p, bi);
         for ii in 0..blk.ic {
             let ins = x.p.inst(add(blk.i0, ii));
-            if ins.op == OP_CLOSURE {
+            if ins.op == Op::Closure {
                 let ci = x.fx.closure(f.row.name, w(ins.dest));
                 if ci == NONE32 {
                     b.fail(in "invalid closure IR");

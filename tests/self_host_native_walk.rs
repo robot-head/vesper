@@ -1,29 +1,15 @@
-//! Rust-exit gap wave 1, lane 11 (#1509), part 1: `@vesper/native-walk`'s
-//! function plans against the Rust walk of src/native.rs, over every corpus
-//! world's program as the native path compiles it (optimize on: after
-//! bounds hoisting; optimize off: after drop elaboration).
+//! Rust-exit gap wave 1, lane 11 (#1509), parts 1-2: `@vesper/native-walk`
+//! against the Rust walk of `src/native.rs`, both at the decision boundary
+//! (`vesper_decisions_match_rust`) and end-to-end through the
+//! `register_locals` codegen swap hook (`the_native_walk_swap_matches_rust`).
 //!
-//! Part 1 ports what the walk decides about a function before it emits
-//! anything (see packages/vesper-codegen-walk/src/lib.ves):
-//!
-//! - **Callee facts**: for every function of `world.functions`, whether
-//!   its row is empty and whether it is specialized into its callers
-//!   (`specialized_function`), the two things the register plan asks of a
-//!   callee. The predicates belong to SH4 lane 7 (#1281, PR #1306); the
-//!   package's copies are private until that merges.
-//! - **Register plans**: for every lowered graph, its cyclic blocks
-//!   (`aggregates::cyclic_blocks`) and the locals `register_locals` keeps
-//!   in registers, for a top-level graph and for one a specialized call
-//!   inlines (`nested`), with the generic substitution empty.
-//!
-//! [`decisions`] is the Rust half. src/native.rs is read-only to this lane
-//! and keeps these functions private, so the Rust half restates them
-//! here, calling the compiler's own predicates where they are public
-//! (`Layout::of`, `check::free_names`, `numeric::default_type`, the effect
-//! name tests). Keep it in step with src/native.rs: a change there to a
-//! function named above changes the matching function below and the
-//! package. Part 2 replaces this restatement with the walk's own answers
-//! through the swap point.
+//! - **Callee facts** (`@vesper/codegen-calls`): whether each callee's effect
+//!   row is empty and whether it is specialized into its callers
+//!   (`specialized_function`).
+//! - **Register plans**: cyclic blocks (`cyclic_blocks`) and scalar/parameter
+//!   locals kept in Cranelift SSA variables (`register_locals`, including
+//!   non-empty `generic_vars`, `nested` inlined graphs and `Op::Handle`
+//!   captures), proved to produce 0 CLIF and 0 object diffs on real compiles.
 #[path = "common/check_harness.rs"]
 mod check_harness;
 #[path = "common/check_words.rs"]
@@ -35,11 +21,13 @@ use check_harness::*;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::sync::OnceLock;
-use vesper::ast::{Function, Pass, Pattern, PatternKind, Type};
-use vesper::check::World;
-use vesper::ir::{Argument, FunctionIr, Op, Program, Terminator};
-use vesper::layout::Layout;
-use vesper::seq::SeqOp;
+use std::sync::atomic::{AtomicU64, Ordering};
+use vesper::ast::{Pass, Type};
+use vesper::check::{self, World};
+use vesper::codegen_swap::{self, CodegenHooks};
+use vesper::ir::{FunctionIr, Op, Program};
+use vesper::native::{cyclic_blocks, register_locals, specialized_function};
+use vesper::parser;
 
 fn package() -> &'static Package {
     static P: OnceLock<Package> = OnceLock::new();
@@ -175,304 +163,137 @@ fn handler_names(f: &FunctionIr) -> BTreeSet<String> {
         .collect()
 }
 
-// ------------------------------------------------------------ Rust half
-//
-// Restated from src/native.rs (`capability_only`, `fail_only`,
-// `specialized_function`, `register_locals`, `keeps_in_home`,
-// `in_param_registers`, `bound_names`), src/native_aggregates.rs
-// (`cyclic_blocks`, `LOOP_WEIGHT`), src/source_analysis.rs
-// (`contains_function`) and src/bounds_hoist.rs (`calls_out`,
-// `keeps_length`), with the generic substitution empty.
+// ------------------------------------------------------------ swap hook
 
-const LOOP_WEIGHT: usize = 8;
-
-fn contains_function(world: &World, t: &Type) -> bool {
-    fn visit(world: &World, t: &Type, seen: &mut BTreeSet<String>) -> bool {
-        match t {
-            Type::Function { .. } => true,
-            Type::Tuple(ts) => ts.iter().any(|t| visit(world, t, seen)),
-            Type::Named(n, args) => {
-                if !seen.insert(n.clone()) {
-                    return args.iter().any(|t| matches!(t, Type::Function { .. }));
-                }
-                let result = world.adts.get(n).is_some_and(|a| {
-                    let vars = a
-                        .generics
-                        .iter()
-                        .zip(args)
-                        .map(|(g, t)| (g.name.clone(), t.clone()))
-                        .collect();
-                    a.variants
-                        .iter()
-                        .flat_map(|v| &v.fields)
-                        .any(|f| visit(world, &vesper::ast::substitute(&f.ty, &vars), seen))
-                });
-                seen.remove(n);
-                result
-            }
-            _ => false,
-        }
-    }
-    visit(world, t, &mut BTreeSet::new())
-}
-
-fn capability_only(f: &Function) -> bool {
-    f.effects.instances.iter().all(|e| {
-        vesper::capability_effects::is_capability_effect(&e.name)
-            || vesper::ffi_lowering::is_foreign_effect(&e.name)
+fn register_locals_entry() -> &'static Entry {
+    static E: OnceLock<Entry> = OnceLock::new();
+    // Compiled with hooks disabled so initializing the entry never recurses.
+    E.get_or_init(|| {
+        codegen_swap::with_hooks(CodegenHooks::default(), || {
+            package().entry("native_walk_register_locals", true)
+        })
     })
 }
 
-fn fail_only(world: &World, f: &Function) -> bool {
-    f.effects.tail.is_none()
-        && f.effects.instances.iter().any(|e| e.name == "Fail")
-        && f.effects.instances.iter().all(|e| {
-            (e.name == "Fail" && e.label.is_none() && e.args.len() == 1)
-                || ((vesper::capability_effects::is_capability_effect(&e.name)
-                    || vesper::ffi_lowering::is_foreign_effect(&e.name))
-                    && e.label.is_none()
-                    && e.args.is_empty())
-        })
-        && !contains_function(world, &f.result)
-        && !f.params.iter().any(|p| contains_function(world, &p.ty))
-}
-
-fn specialized_function(world: &World, f: &Function) -> bool {
-    (!capability_only(f)
-        || f.effects.tail.is_some()
-        || contains_function(world, &f.result)
-        || f.params.iter().any(|p| contains_function(world, &p.ty)))
-        && !fail_only(world, f)
-}
-
-fn cyclic_blocks(f: &FunctionIr) -> BTreeSet<usize> {
-    let mut graph = petgraph::graphmap::DiGraphMap::<usize, ()>::new();
-    for (b, block) in f.blocks.iter().enumerate() {
-        graph.add_node(b);
-        let targets: Vec<usize> = match &block.terminator {
-            Terminator::Jump { block, .. } => vec![*block],
-            Terminator::Branch { yes, no, .. } => vec![*yes, *no],
-            Terminator::Match { arms, .. } => arms.iter().map(|(_, b)| *b).collect(),
-            _ => vec![],
-        };
-        for t in targets {
-            graph.add_edge(b, t, ());
-        }
-    }
-    petgraph::algo::tarjan_scc(&graph)
-        .into_iter()
-        .filter(|c| c.len() > 1 || graph.contains_edge(c[0], c[0]))
-        .flatten()
-        .collect()
-}
-
-fn keeps_length(op: SeqOp) -> bool {
-    matches!(
-        op,
-        SeqOp::Get
-            | SeqOp::SliceGet
-            | SeqOp::Set
-            | SeqOp::SliceSet
-            | SeqOp::TryGet
-            | SeqOp::TrySet
-            | SeqOp::Len
-            | SeqOp::SliceLen
-            | SeqOp::AsSlice
-            | SeqOp::SubSlice
-    )
-}
-
-fn calls_out(op: &Op) -> bool {
-    match op {
-        Op::Call { .. }
-        | Op::Tiled { .. }
-        | Op::Fip { .. }
-        | Op::Indirect { .. }
-        | Op::Closure { .. }
-        | Op::Handle { .. } => true,
-        Op::Seq { op, .. } => {
-            !(keeps_length(*op) || matches!(op, SeqOp::Hoisted(_) | SeqOp::BoundsGuard { .. }))
-        }
-        _ => false,
-    }
-}
-
-fn keeps_in_home(others: usize, loans: usize) -> bool {
-    loans >= LOOP_WEIGHT && others > 0
-}
-
-fn bound_names(p: &Pattern, out: &mut BTreeSet<String>) {
-    match &p.kind {
-        PatternKind::Bind(n) => {
-            out.insert(n.clone());
-        }
-        PatternKind::Tuple(ps) => ps.iter().for_each(|p| bound_names(p, out)),
-        PatternKind::Constructor { fields, .. } => {
-            fields.iter().for_each(|(_, p)| bound_names(p, out))
-        }
-        PatternKind::Wild | PatternKind::Literal(_) => {}
-    }
-}
-
-fn register_locals(world: &World, f: &FunctionIr, nested: bool) -> BTreeSet<String> {
-    let mut memory = BTreeSet::new();
-    let place_roots = |args: &[Argument], memory: &mut BTreeSet<String>| {
-        for a in args {
-            if let Some(p) = &a.place {
-                memory.insert(p.root.clone());
-            }
-        }
-    };
-    let cyclic = cyclic_blocks(f);
-    let weight = |b: usize| {
-        if cyclic.contains(&b) { LOOP_WEIGHT } else { 1 }
-    };
-    let mut lent_in: BTreeMap<String, usize> = BTreeMap::new();
-    let mut touched: BTreeMap<String, usize> = BTreeMap::new();
-    for (b, inst) in f
-        .blocks
-        .iter()
-        .enumerate()
-        .flat_map(|(b, block)| block.instructions.iter().map(move |i| (b, i)))
-    {
-        match &inst.op {
-            Op::Read { root, .. } => *touched.entry(root.clone()).or_default() += weight(b),
-            Op::Write { place, .. } => {
-                *touched
-                    .entry(place.split('.').next().unwrap_or(place).to_owned())
-                    .or_default() += weight(b)
-            }
-            _ => {}
-        }
-        match &inst.op {
-            Op::Call { callee, args, .. } => {
-                let g = world.functions.get(callee);
-                let pure =
-                    g.is_some_and(|g| g.effects.instances.is_empty() && g.effects.tail.is_none());
-                let inlined = g.is_some_and(|g| specialized_function(world, g));
-                if !pure {
-                    for a in args {
-                        let Some(p) = &a.place else {
-                            continue;
-                        };
-                        if a.pass != Pass::In {
-                            memory.insert(p.root.clone());
-                        } else if !inlined {
-                            *lent_in.entry(p.root.clone()).or_default() += weight(b);
-                        }
-                    }
-                }
-            }
-            Op::Indirect { args, .. } | Op::Tiled { args, .. } => place_roots(args, &mut memory),
-            Op::Closure { moves, .. } => {
-                memory.extend(moves.iter().map(|p| p.root.clone()));
-            }
-            Op::Handle {
-                expr,
-                aliases,
-                moves,
-                ..
-            } => {
-                memory.extend(vesper::check::free_names(expr));
-                memory.extend(aliases.keys().cloned());
-                memory.extend(aliases.values().cloned());
-                memory.extend(moves.iter().map(|p| p.root.clone()));
-            }
-            _ => {}
-        }
-    }
-    for (n, loans) in lent_in {
-        let others = touched.get(&n).copied().unwrap_or(0).saturating_sub(loans);
-        if keeps_in_home(others, loans) {
-            memory.insert(n);
-        }
-    }
-    f.locals
-        .iter()
-        .filter(|(n, t)| {
-            let t = vesper::numeric::default_type(t);
-            !memory.contains(*n)
-                && matches!(&t, Type::Named(name, args) if args.is_empty()
-                    && (vesper::numeric::is_integer_name(name)
-                        || matches!(name.as_str(), "f32" | "f64" | "bool")))
-        })
-        .map(|(n, _)| n.clone())
-        .chain(in_param_registers(world, f, nested))
-        .collect()
-}
-
-fn in_param_registers(world: &World, f: &FunctionIr, nested: bool) -> Vec<String> {
-    let mut kept = BTreeSet::new();
-    let lent = |args: &[Argument], kept: &mut BTreeSet<String>| {
-        for a in args {
-            if a.pass != Pass::In
-                && let Some(p) = &a.place
-            {
-                kept.insert(p.root.clone());
-            }
-        }
-    };
-    let callback = |name: &str| {
-        f.params.iter().any(|p| {
-            p.name == name && matches!(vesper::numeric::default_type(&p.ty), Type::Function { .. })
-        })
-    };
-    for inst in f.blocks.iter().flat_map(|b| &b.instructions) {
-        match &inst.op {
-            Op::Write { place, .. } => {
-                kept.insert(place.split('.').next().unwrap_or(place).to_owned());
-            }
-            Op::Bind { pattern, .. } => bound_names(pattern, &mut kept),
-            Op::Read {
-                root, pass, path, ..
-            } if *pass != Pass::In && !(path.is_empty() && callback(root)) => {
-                kept.insert(root.clone());
-            }
-            Op::Call { args, .. }
-            | Op::Indirect { args, .. }
-            | Op::Tiled { args, .. }
-            | Op::Fip { args, .. }
-            | Op::Seq { args, .. } => lent(args, &mut kept),
-            Op::Closure { moves, .. } => kept.extend(moves.iter().map(|p| p.root.clone())),
-            Op::Handle {
-                expr,
-                aliases,
-                moves,
-                ..
-            } => {
-                kept.extend(vesper::check::free_names(expr));
-                kept.extend(aliases.keys().cloned());
-                kept.extend(aliases.values().cloned());
-                kept.extend(moves.iter().map(|p| p.root.clone()));
-            }
-            _ => {}
-        }
-    }
-    if !nested
-        && f.blocks
+/// Encodes one `ir_graph_at` graph (`world_lean`, 1-function `Program`,
+/// referenced callee signatures, `generics`, `nested`, handler free names)
+/// for `@vesper/native-walk::native_walk_register_locals`.
+fn function_input(
+    world: &World,
+    f: &FunctionIr,
+    generics: &BTreeMap<String, Type>,
+    nested: bool,
+) -> Option<Vec<u8>> {
+    let adts_fit = world.adts.values().all(|a| {
+        a.variants
             .iter()
-            .flat_map(|b| &b.instructions)
-            .any(|i| calls_out(&i.op))
-    {
-        kept.extend(f.params.iter().map(|p| p.name.clone()));
+            .all(|v| v.fields.iter().all(|fld| ir_words::literal_fits(&fld.ty)))
+    });
+    if !adts_fit || !ir_words::function_fits(f) || !generics.values().all(ir_words::literal_fits) {
+        return None;
     }
-    f.params
-        .iter()
-        .filter(|p| {
-            let ty = vesper::numeric::default_type(&p.ty);
-            p.pass == Pass::In
-                && !kept.contains(&p.name)
-                && f.locals.contains_key(&p.name)
-                && Layout::of(world, &ty).is_ok_and(|l| !l.aggregate())
-        })
-        .map(|p| p.name.clone())
-        .collect()
+    let mut callees: BTreeSet<&str> = BTreeSet::new();
+    for b in &f.blocks {
+        for i in &b.instructions {
+            if let Op::Call { callee, .. } = &i.op
+                && world.functions.contains_key(callee)
+            {
+                callees.insert(callee.as_str());
+            }
+        }
+    }
+    for callee in &callees {
+        let g = &world.functions[*callee];
+        let sig_fits = ir_words::literal_fits(&g.result)
+            && ir_words::literal_fits(&Type::Row(g.effects.clone()))
+            && g.params.iter().all(|p| ir_words::literal_fits(&p.ty));
+        if !sig_fits {
+            return None;
+        }
+    }
+    let program = Program {
+        functions: BTreeMap::from([(f.name.clone(), f.clone())]),
+    };
+    let mut t = ir_words::Tables::of(&program);
+    t.label_names();
+    let mut tail = t.section();
+    tail.push(callees.len() as u64);
+    for callee in callees {
+        let g = &world.functions[callee];
+        tail.push(t.enc.name(callee));
+        tail.push(g.generics.len() as u64);
+        tail.push(t.enc.ty(&g.result));
+        tail.push(t.enc.ty(&Type::Row(g.effects.clone())));
+        tail.push(g.params.len() as u64);
+        for q in &g.params {
+            tail.push(t.enc.name(&q.name));
+            tail.push(check_words::pass_word(q.pass));
+            tail.push(t.enc.ty(&q.ty));
+        }
+    }
+    tail.push(generics.len() as u64);
+    for (k, v) in generics {
+        tail.push(t.enc.name(k));
+        tail.push(t.enc.ty(v));
+    }
+    tail.push(u64::from(nested));
+    let names = handler_names(f);
+    tail.push(names.len() as u64);
+    for n in &names {
+        tail.push(t.enc.name(n));
+    }
+    let world_words = t.enc.world_lean(world);
+    Some(t.enc.finish(&world_words, &tail))
 }
 
-/// The decisions text of one program (the package's `native_walk_decisions`).
+static SWAP_CALLS: AtomicU64 = AtomicU64::new(0);
+static SWAP_DECLINED: AtomicU64 = AtomicU64::new(0);
+static SWAP_GENERICS: AtomicU64 = AtomicU64::new(0);
+static SWAP_NESTED: AtomicU64 = AtomicU64::new(0);
+static SWAP_HANDLES: AtomicU64 = AtomicU64::new(0);
+static SWAP_REGS: AtomicU64 = AtomicU64::new(0);
+
+fn vesper_register_locals(
+    world: &World,
+    f: &FunctionIr,
+    generics: &BTreeMap<String, Type>,
+    nested: bool,
+) -> Option<BTreeSet<String>> {
+    SWAP_CALLS.fetch_add(1, Ordering::Relaxed);
+    let Some(bytes) = function_input(world, f, generics, nested) else {
+        SWAP_DECLINED.fetch_add(1, Ordering::Relaxed);
+        return None;
+    };
+    if !generics.is_empty() {
+        SWAP_GENERICS.fetch_add(1, Ordering::Relaxed);
+    }
+    if nested {
+        SWAP_NESTED.fetch_add(1, Ordering::Relaxed);
+    }
+    if f.blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i.op, Op::Handle { .. }))
+    {
+        SWAP_HANDLES.fetch_add(1, Ordering::Relaxed);
+    }
+    let out = register_locals_entry().text(&bytes);
+    let regs: BTreeSet<String> = out
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(str::to_owned)
+        .collect();
+    if !regs.is_empty() {
+        SWAP_REGS.fetch_add(1, Ordering::Relaxed);
+    }
+    Some(regs)
+}
+
+/// The decisions text of one program from `src/native.rs` directly.
 fn decisions(w: &World, p: &Program) -> String {
     let mut o = String::new();
     let bit = |b: bool| if b { '1' } else { '0' };
+    let empty = BTreeMap::new();
     for (name, f) in &w.functions {
         let pure = f.effects.instances.is_empty() && f.effects.tail.is_none();
         let _ = writeln!(
@@ -490,7 +311,7 @@ fn decisions(w: &World, p: &Program) -> String {
         }
         o.push('\n');
         for (label, nested) in [("registers", false), ("nested", true)] {
-            let regs = register_locals(w, f, nested);
+            let regs = register_locals(w, f, &empty, nested);
             o.push_str(label);
             for n in f.locals.keys().filter(|n| regs.contains(*n)) {
                 let _ = write!(o, " {n}");
@@ -506,6 +327,201 @@ fn decisions(w: &World, p: &Program) -> String {
 #[test]
 fn the_package_compiles() {
     let _ = package().entry("native_walk_decisions", true);
+    let _ = register_locals_entry();
+}
+
+fn check_source(source: &str) -> World {
+    let p = parser::parse(source);
+    assert!(p.diagnostics.is_empty(), "{:?}", p.diagnostics);
+    let c = check::check(&p.module);
+    assert!(c.diagnostics.is_empty(), "{:#?}", c.diagnostics);
+    c.world
+}
+
+fn synthetic_swap_worlds() -> Vec<(&'static str, World)> {
+    vec![
+        (
+            "generics_and_callbacks",
+            check_source(
+                r#"
+copy struct Pair { a: i64, b: i64 }
+
+fn bump(x: i64) -> i64 { wrapping_add(x, 1) }
+
+fn swap_pair(in p: Pair) -> i64 { wrapping_add(p.a, p.b) }
+
+fn apply_twice[T: mod copy](x: T, in cb: fn(T) -> T) -> T {
+    let first = cb(x);
+    cb(first)
+}
+
+fn keep_in[T](in a: T, in b: i64) -> i64 { b }
+
+fn id_local[T: mod copy](x: T) -> T {
+    let tmp = x;
+    tmp
+}
+
+pub fn main() -> i64 {
+    let s = apply_twice[i64](3, in bump);
+    let p = id_local[Pair](Pair { a: 4, b: 5 });
+    let k = id_local[i64](s);
+    let r1 = keep_in[i64](in k, in 1);
+    let r2 = keep_in[Pair](in p, in 2);
+    wrapping_add(wrapping_add(r1, r2), swap_pair(in p))
+}
+"#,
+            ),
+        ),
+        (
+            "handles_and_nested_graphs",
+            check_source(
+                r#"
+linear effect Ask {
+    fn ask() -> i64;
+}
+
+fn helper(in seed: i64) -> i64 eff [Ask] {
+    let mut acc = seed;
+    let delta = Ask::ask();
+    acc = wrapping_add(acc, delta);
+    acc
+}
+
+pub fn main() -> i64 {
+    let mut outer = 10;
+    let inner = handle Ask in { helper(in outer) } with {
+        return v => wrapping_add(v, outer),
+        ask(k) => {
+            outer = wrapping_add(outer, 2);
+            k(outer)
+        },
+    };
+    wrapping_add(outer, inner)
+}
+"#,
+            ),
+        ),
+    ]
+}
+
+fn big_stack(f: impl FnOnce() + Send) {
+    std::thread::scope(|s| {
+        std::thread::Builder::new()
+            .stack_size(256 << 20)
+            .spawn_scoped(s, f)
+            .expect("spawn a compile thread")
+            .join()
+            .unwrap_or_else(|e| std::panic::resume_unwind(e))
+    })
+}
+
+/// Installs `@vesper/native-walk::native_walk_register_locals` at the
+/// `register_locals` swap hook and proves 0 CLIF and 0 object diffs on
+/// synthetic edge-case programs and corpus worlds.
+#[test]
+fn the_native_walk_swap_matches_rust() {
+    big_stack(|| {
+        let _ = register_locals_entry();
+        let hooks = CodegenHooks {
+            register_locals: Some(vesper_register_locals),
+            ..CodegenHooks::default()
+        };
+        let before = [
+            &SWAP_CALLS,
+            &SWAP_DECLINED,
+            &SWAP_GENERICS,
+            &SWAP_NESTED,
+            &SWAP_HANDLES,
+            &SWAP_REGS,
+        ]
+        .map(|c| c.load(Ordering::Relaxed));
+
+        let mut bad = 0usize;
+        let mut compiled = 0usize;
+
+        let synthetic = synthetic_swap_worlds();
+        let mut cases: Vec<(String, &World)> = synthetic
+            .iter()
+            .map(|(n, w)| ((*n).to_owned(), w))
+            .collect();
+        for c in corpus()
+            .iter()
+            .filter(|c| c.world.functions.contains_key("main"))
+            .step_by(step())
+        {
+            cases.push((c.name.clone(), &c.world));
+        }
+
+        for (name, world) in &cases {
+            let rust = vesper::native::object_with_options(world, "main", None, true);
+            let hooked = codegen_swap::with_hooks(hooks, || {
+                vesper::native::object_with_options(world, "main", None, true)
+            });
+            match (rust, hooked) {
+                (Ok((robj, rclif)), Ok((hobj, hclif))) => {
+                    compiled += 1;
+                    if rclif != hclif || robj != hobj {
+                        bad += 1;
+                        if bad <= 5 {
+                            let diff = first_difference(&rclif, &hclif)
+                                .unwrap_or_else(|| "object bytes differ".into());
+                            eprintln!("native walk swap: {name} differs: {diff}");
+                        }
+                    }
+                }
+                (Err(re), Err(he)) => {
+                    assert_eq!(re, he, "native walk swap error mismatch on {name}");
+                }
+                (r, h) => {
+                    bad += 1;
+                    eprintln!(
+                        "native walk swap outcome mismatch on {name}: rust={:?}, hooked={:?}",
+                        r.err(),
+                        h.err()
+                    );
+                }
+            }
+        }
+
+        // Unoptimized compilation does not call `register_locals` and stays clean.
+        let unopt_rust = vesper::native::object_with_options(&synthetic[0].1, "main", None, false)
+            .expect("unoptimized compile");
+        let unopt_hooked = codegen_swap::with_hooks(hooks, || {
+            vesper::native::object_with_options(&synthetic[0].1, "main", None, false)
+        })
+        .expect("unoptimized hooked compile");
+        assert_eq!(unopt_rust, unopt_hooked, "unoptimized build differed");
+
+        let after = [
+            &SWAP_CALLS,
+            &SWAP_DECLINED,
+            &SWAP_GENERICS,
+            &SWAP_NESTED,
+            &SWAP_HANDLES,
+            &SWAP_REGS,
+        ]
+        .map(|c| c.load(Ordering::Relaxed));
+        let [calls, declined, generics, nested, handles, regs] =
+            [0, 1, 2, 3, 4, 5].map(|i| after[i] - before[i]);
+
+        eprintln!(
+            "native walk swap: {bad} of {compiled} compiled worlds differ \
+             ({calls} calls, {declined} declined, {generics} with generics, \
+             {nested} nested, {handles} with handles, {regs} non-empty)"
+        );
+        assert!(
+            compiled >= synthetic.len(),
+            "only {compiled} worlds compiled"
+        );
+        assert!(calls > 0, "hook never called");
+        assert_eq!(declined, 0, "{declined} graphs were declined");
+        assert!(generics > 0, "no non-empty generic_vars exercised");
+        assert!(nested > 0, "no nested graph exercised");
+        assert!(handles > 0, "no Op::Handle graph exercised");
+        assert!(regs > 0, "no non-empty register set exercised");
+        assert_eq!(bad, 0);
+    });
 }
 
 /// Every corpus program's decisions, Rust and Vesper, line for line.

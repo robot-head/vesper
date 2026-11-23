@@ -200,6 +200,46 @@ fn sequences_and_strings_run_like_the_evaluator() {
     }
 }
 
+/// `u128` as the port lowers it (a 16-byte block, #1508), against the
+/// evaluator. Rust refuses every one (`IntegerWidth`).
+const WIDE_PROGRAMS: &[&str] = &[
+    // `<<` below, at and past 64 bits, including 0.
+    r#"fn hi(x: u128) -> u64 eff [Fail[ArithOverflow]] { wrapping_u64(x / 18446744073709551616) }
+fn mix(a: u64, x: u128) -> u64 eff [Fail[ArithOverflow]] { wrapping_add(wrapping_mul(a, 1000003), wrapping_add(wrapping_u64(x), wrapping_mul(hi(x), 7919))) }
+fn sh(x: u128, k: u128) -> u128 eff [Fail[ArithOverflow]] { x << k }
+fn go() -> u64 eff [Fail[ArithOverflow]] { let one = widen_u128(1); let x = widen_u128(12345678901234567); let mut a: u64 = 0;
+  a = mix(a, sh(x, widen_u128(0))); a = mix(a, sh(x, widen_u128(1))); a = mix(a, sh(sh(one, widen_u128(63)), widen_u128(1)));
+  a = mix(a, sh(x, widen_u128(63))); a = mix(a, sh(x, widen_u128(64))); a = mix(a, sh(x, widen_u128(100))); a }
+fn main() -> u64 { handle Fail[ArithOverflow] in { go() } with { return v => v, raise(e, k) => 999, } }"#,
+    // A literal pattern on a runtime `u128`, add with carry, mul, div, rem, compare.
+    r#"fn class(x: u128) -> u64 { match x { 0 => 1, 1 => 7, 18446744073709551616 => 11, _ => 9 } }
+fn f(a: u128, b: u128) -> u64 eff [Fail[ArithOverflow]] { let s = wrapping_add(a, b); let m = wrapping_mul(a, b);
+  let q = m / 1000000007; let r = m % 1000000007;
+  let c: u64 = if a < b { 1 } else if a > b { 2 } else { 3 };
+  wrapping_add(wrapping_add(wrapping_u64(s), wrapping_u64(q)), wrapping_add(wrapping_mul(wrapping_u64(r), 3), c)) }
+fn go() -> u64 eff [Fail[ArithOverflow]] { let big = widen_u128(18446744073709551615);
+  wrapping_add(wrapping_add(class(widen_u128(1)), class(widen_u128(0))), wrapping_add(class(wrapping_add(big, widen_u128(1))),
+  wrapping_add(class(widen_u128(5)), wrapping_mul(f(big, big), 13)))) }
+fn main() -> u64 { handle Fail[ArithOverflow] in { go() } with { return v => v, raise(e, k) => 999, } }"#,
+];
+
+#[test]
+fn u128_runs_like_the_evaluator() {
+    let o = &configs()[0];
+    for (i, src) in WIDE_PROGRAMS.iter().enumerate() {
+        let p = vesper::parser::parse(src);
+        let c = vesper::check::check(&p.module);
+        assert!(c.diagnostics.is_empty(), "#{i}: {:?}", c.diagnostics);
+        assert!(
+            vesper::wasm_backend::compile(&c.world, "main", o).is_err(),
+            "#{i}: Rust now lowers this; compare byte for byte instead"
+        );
+        let (component, world) = port(src, o).unwrap_or_else(|e| panic!("#{i}: {e}\n{src}"));
+        let (got, expected) = (run_main(&component), evaluate(&world));
+        assert_eq!(got, expected, "#{i}: wasm vs evaluator\n{src}");
+    }
+}
+
 /// The programs of `WASM_SEED_PROBE` (a file, or a directory of `.ves`
 /// files): the port's answer and the run against the evaluator.
 #[test]
@@ -232,4 +272,68 @@ fn probe() {
             }
         }
     }
+}
+
+/// A compiler package built to wasm (lane 9 acceptance): a program over
+/// `@vesper/place-ir` (the place-IR reader and writer, and `@vesper/check-data`
+/// under it) compiles through the port, handlers and bit operators included,
+/// and runs like the evaluator. Rust refuses it (bit operators).
+#[test]
+fn place_ir_package_builds_and_runs() {
+    // One package: shard 0 runs it.
+    if !corpus_shard::Shard::from_environment().contains(0) {
+        return;
+    }
+    let dep = std::fs::canonicalize("packages/vesper-place-ir").expect("place-ir package");
+    let dir = std::env::temp_dir().join(format!("wasm-seed-place-ir-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("src")).expect("package dir");
+    std::fs::write(
+        dir.join("Loom.toml"),
+        format!(
+            "[package]\nname = \"@wasm-seed/place-ir-main\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n\
+             [dependencies]\n\"@vesper/place-ir\" = {{ version = \"^0.1\", path = {:?} }}\n",
+            dep.display().to_string()
+        ),
+    )
+    .expect("Loom.toml");
+    std::fs::write(
+        dir.join("src/main.ves"),
+        "use @vesper/place-ir::{ place_ir_round_trip };\n\
+         fn main() -> u64 {\n\
+         \x20   let s = \"\";\n\
+         \x20   let words = place_ir_round_trip(in s.as_bytes());\n\
+         \x20   words.len()\n\
+         }\n",
+    )
+    .expect("main.ves");
+    let assembled = vesper::packages::load(&dir).expect("load");
+    assert!(
+        assembled.ok(),
+        "{:?} {:?}",
+        assembled.diagnostics,
+        assembled.manifest_errors
+    );
+    let c = vesper::check::check(&assembled.module);
+    assert!(c.diagnostics.is_empty(), "{:?}", c.diagnostics);
+    for (k, o) in configs().iter().enumerate() {
+        assert!(
+            vesper::wasm_backend::compile(&c.world, "main", o).is_err(),
+            "[{k}] Rust now lowers place-ir; compare byte for byte instead"
+        );
+        let program = backend_program(&c.world, o).expect("optimize");
+        let input = wasm_input(&c.world, &program, "main", o).expect("encodable");
+        let f = package().entry("wasm_backend_compile", true);
+        match outcome(&f.words(&input)) {
+            Outcome::Module { core, wit, .. } => {
+                let component = wrap(core, &wit, o.world);
+                assert_eq!(
+                    run_main(&component),
+                    evaluate(&c.world),
+                    "[{k}] wasm vs evaluator"
+                );
+            }
+            other => panic!("[{k}] port {other:?}"),
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }

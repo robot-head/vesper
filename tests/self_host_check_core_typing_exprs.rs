@@ -99,6 +99,10 @@ fn encode_pattern(e: &mut Enc, p: &Pattern, out: &mut Vec<u64>) {
         PatternKind::Literal(Literal::Bool(false)) => out.extend([3, s, t]),
         PatternKind::Literal(l) => {
             out.extend([4, s, t]);
+            if let Some(kind) = p.integer_kind {
+                out.extend([4, e.name(kind.name())]);
+                return;
+            }
             // The literal's type (`literal_type`), for `bind_mode`.
             // An integer past `u64::MAX` in magnitude is not ported yet (as
             // in `encode_expr`): code 3 skips the function, as a string does.
@@ -370,6 +374,44 @@ fn vesper_types(text: &str) -> (String, Vec<(usize, usize)>, usize) {
     }
     flush(&mut out, current.take(), &mut rows);
     (out, checked, skipped)
+}
+
+#[test]
+fn typed_constant_pattern_checks_the_scrutinee() {
+    use vesper::ffi_lowering::{Handler, Imports, plan_probe};
+
+    let mut imports = Imports::new();
+    imports
+        .add(
+            r#"sys library Flags (
+        target = "x86_64-unknown-linux-gnu", abi = "sysv64", link = "static", name = "flags",
+        artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+    ) { const O_CREAT: i32 = 64; }"#,
+            Handler::Direct,
+        )
+        .unwrap();
+    let source = "fn probe(x: u8) -> i32 { match x { Flags::O_CREAT => 1, 64 => 2, _ => 0 } }";
+    let mut module = vesper::parser::parse(source).module;
+    let generated = plan_probe::generated(&imports).unwrap();
+    assert!(
+        plan_probe::rewrite(&mut module, &imports, &generated, None)
+            .error
+            .is_none()
+    );
+    let (world, errors) = World::collect(&module);
+    assert!(errors.is_empty());
+    let result = package()
+        .entry("core_typing_exprs", true)
+        .text(&exprs_input(&world));
+    let start = source.find("Flags::O_CREAT").unwrap();
+    let want = format!("D E0200 {start} {}", start + "Flags::O_CREAT".len());
+    assert_eq!(
+        result
+            .lines()
+            .filter(|l| l.starts_with("D "))
+            .collect::<Vec<_>>(),
+        [want]
+    );
 }
 
 #[test]

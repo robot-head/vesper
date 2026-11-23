@@ -215,6 +215,9 @@ class PlatformWorkflowTests(unittest.TestCase):
         defs = (ROOT / "tools/bazel/defs.bzl").read_text()
         self.assertIn('startswith("self_host_")', defs)
         self.assertIn('"self_host_codegen"', defs)
+        # Three "Self-host differentials" tests at a time fit the runner (#1519).
+        self.assertIn('_SELF_HOST_MEMORY = "resources:memory:6144"', defs)
+        self.assertIn("--local_resources=memory=18432", (ROOT / ".bazelrc").read_text())
 
     def test_native_checks_start_only_after_the_gate_and_buildbuddy(self):
         native = workflow("native-checks.yml")

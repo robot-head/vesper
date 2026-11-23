@@ -8,7 +8,9 @@
 // order: slots by name, then values by id.
 
 use @vesper/check-data::types::{
-    Types
+    Types,
+    TyKind,
+    TyPass
 };
 use @vesper/check-data::util::{
     add,
@@ -34,57 +36,15 @@ use self::fn_input::{
     Fns,
     Sig
 };
+use @vesper/place-ir::codes::{
+    Lit,
+    Op,
+    Pat,
+    Term
+};
 
 pub const NONE32: u32 = 4294967295;
 pub const NONE64: u64 = 18446744073709551615;
-
-// Opcodes (place-ir).
-pub const OP_CONST: u8 = 0;
-pub const OP_UNIT: u8 = 1;
-pub const OP_READ: u8 = 2;
-pub const OP_BIND: u8 = 3;
-pub const OP_WRITE: u8 = 4;
-pub const OP_UNARY: u8 = 5;
-pub const OP_BINARY: u8 = 6;
-pub const OP_TUPLE: u8 = 7;
-pub const OP_DATA: u8 = 8;
-pub const OP_PROJECT: u8 = 9;
-pub const OP_INDEX: u8 = 10;
-pub const OP_CALL: u8 = 11;
-pub const OP_INDIRECT: u8 = 12;
-pub const OP_TRY: u8 = 13;
-pub const OP_CLOSURE: u8 = 14;
-pub const OP_HANDLE: u8 = 15;
-pub const OP_VECTOR: u8 = 16;
-pub const OP_TILED: u8 = 17;
-pub const OP_SEQ: u8 = 18;
-pub const OP_FIP: u8 = 19;
-pub const OP_LOOP: u8 = 20;
-pub const OP_EXIT: u8 = 21;
-
-pub const TERM_RETURN: u8 = 0;
-pub const TERM_JUMP: u8 = 1;
-pub const TERM_BRANCH: u8 = 2;
-pub const TERM_MATCH: u8 = 3;
-pub const TERM_UNREACHABLE: u8 = 4;
-
-pub const PAT_WILD: u64 = 0;
-pub const PAT_BIND: u64 = 1;
-pub const PAT_LITERAL: u64 = 2;
-pub const PAT_TUPLE: u64 = 3;
-pub const PAT_CONSTRUCTOR: u64 = 4;
-
-pub const LIT_INT: u64 = 0;
-pub const LIT_FLOAT: u64 = 1;
-pub const LIT_BOOL: u64 = 2;
-pub const LIT_STRING: u64 = 3;
-
-pub const PASS_INOUT: u64 = 1;
-
-const K_LIT: u8 = 0;
-const K_NAMED: u8 = 1;
-const K_TUPLE: u8 = 2;
-const K_FN: u8 = 3;
 
 // Argument width: pass, value, place root (symbol + 1, or 0), place path.
 pub const ARG_WORDS: u64 = 4;
@@ -349,18 +309,18 @@ pub fn block_has(in all: ChunkSeq[u64], b: u64, nw: u64, k: u64) -> bool {
 pub fn pattern_end(in p: Program, i: u64) -> u64 {
     let kind = p.op(i);
     let j = add(i, 3);
-    if kind == PAT_BIND {
+    if kind == Pat::Bind {
         inc(j)
-    } else if kind == PAT_LITERAL {
+    } else if kind == Pat::Literal {
         add(j, 3)
-    } else if kind == PAT_TUPLE {
+    } else if kind == Pat::Tuple {
         let n = p.op(j);
         let mut k = inc(j);
         for m in 0..n {
             k = pattern_end(in p, k);
         }
         k
-    } else if kind == PAT_CONSTRUCTOR {
+    } else if kind == Pat::Constructor {
         let n = p.op(add(j, 2));
         let mut k = add(j, 3);
         for m in 0..n {
@@ -376,16 +336,16 @@ pub fn pattern_end(in p: Program, i: u64) -> u64 {
 pub fn pattern_slots(in p: Program, in f: Fun, i: u64, inout s: ChunkSeq[u64]) {
     let kind = p.op(i);
     let j = add(i, 3);
-    if kind == PAT_BIND {
+    if kind == Pat::Bind {
         set_add(inout s, f.slot_bit(n32(p.op(j))));
-    } else if kind == PAT_TUPLE {
+    } else if kind == Pat::Tuple {
         let n = p.op(j);
         let mut k = inc(j);
         for m in 0..n {
             pattern_slots(in p, in f, k, inout s);
             k = pattern_end(in p, k);
         }
-    } else if kind == PAT_CONSTRUCTOR {
+    } else if kind == Pat::Constructor {
         let n = p.op(add(j, 2));
         let mut k = add(j, 3);
         for m in 0..n {
@@ -437,7 +397,7 @@ fn has_effects(in t: Types, row_ty: u32) -> bool {
 // `effectful_arrow`.
 pub fn effectful_arrow(in t: Types, ty: u32) -> bool {
     let n = t.node(ty);
-    if n.kind == K_FN {
+    if n.kind == TyKind::Fn {
         let row = t.row(n.r2);
         if row.n > 0 || row.tail != 0 {
             return true;
@@ -449,7 +409,7 @@ pub fn effectful_arrow(in t: Types, ty: u32) -> bool {
         }
         return effectful_arrow(in t, n.r);
     }
-    if n.kind == K_NAMED || n.kind == K_TUPLE {
+    if n.kind == TyKind::Named || n.kind == TyKind::Tuple {
         for i in 0..w(n.n) {
             if effectful_arrow(in t, t.arg(ty, i)) {
                 return true;
@@ -479,10 +439,13 @@ pub fn takes(in p: Program, in t: Types, in wd: World, in fx: Fns, in f: Fun) ->
                 || wd.may_overflow(ins.s0, ins.s1) {
                 return false;
             }
-            if ins.op == OP_HANDLE || ins.op == OP_TRY || ins.op == OP_INDEX || ins.op == OP_SEQ {
+            if ins.op == Op::Handle
+                || ins.op == Op::Try
+                || ins.op == Op::Index
+                || ins.op == Op::Seq {
                 return false;
             }
-            if ins.op == OP_CALL {
+            if ins.op == Op::Call {
                 let callee = fx.find(n32(p.op(ins.a)));
                 if callee == NONE32 || fx.sig(w(callee)).effectful {
                     return false;
@@ -505,7 +468,7 @@ pub fn arm_bindings(in p: Program, in f: Fun) -> ChunkSeq[u64] {
     }
     for bi in 0..f.row.bc {
         let blk = f.block(in p, bi);
-        if blk.term == TERM_MATCH {
+        if blk.term == Term::Match {
             let n = p.op(inc(blk.ta));
             let mut k = add(blk.ta, 2);
             for m in 0..n {
@@ -515,7 +478,7 @@ pub fn arm_bindings(in p: Program, in f: Fun) -> ChunkSeq[u64] {
                 let tb = f.block(in p, target);
                 if tb.ic > 0 {
                     let first = p.inst(tb.i0);
-                    if first.op == OP_BIND {
+                    if first.op == Op::Bind {
                         // operands: value, then the pattern
                         let ok = arms.try_set(target, inc(first.a));
                     }
@@ -539,7 +502,7 @@ fn inout_roots(
     for k in 0..n {
         let a = arg_at(i, k);
         let root = p.op(add(a, 2));
-        if p.op(a) == PASS_INOUT && root != 0 {
+        if p.op(a) == TyPass::Inout && root != 0 {
             let s = f.slot_bit(n32(wrapping_sub(root, 1)));
             set_add(inout uses, s);
             set_add(inout defs, s);
@@ -573,16 +536,16 @@ pub fn uses_defs(
 ) {
     let a = ins.a;
     let op = ins.op;
-    if op == OP_READ {
+    if op == Op::Read {
         let root = n32(p.op(a));
         let k = f.slot_bit(root);
         if k != NONE64 || fx.find(root) == NONE32 {
             set_add(inout uses, k);
         }
-    } else if op == OP_BIND {
+    } else if op == Op::Bind {
         set_add(inout uses, f.value_bit(p.op(a)));
         pattern_slots(in p, in f, inc(a), inout defs);
-    } else if op == OP_WRITE {
+    } else if op == Op::Write {
         set_add(inout uses, f.value_bit(p.op(add(a, 2))));
         let mut dotted = false;
         let root = place_root(inout names, n32(p.op(a)), inout dotted);
@@ -591,26 +554,26 @@ pub fn uses_defs(
             set_add(inout uses, k);
         }
         set_add(inout defs, k);
-    } else if op == OP_UNARY {
+    } else if op == Op::Unary {
         set_add(inout uses, f.value_bit(p.op(inc(a))));
-    } else if op == OP_PROJECT {
+    } else if op == Op::Project {
         set_add(inout uses, f.value_bit(p.op(a)));
-    } else if op == OP_BINARY {
+    } else if op == Op::Binary {
         set_add(inout uses, f.value_bit(p.op(inc(a))));
         set_add(inout uses, f.value_bit(p.op(add(a, 2))));
-    } else if op == OP_INDEX {
+    } else if op == Op::Index {
         set_add(inout uses, f.value_bit(p.op(a)));
         set_add(inout uses, f.value_bit(p.op(inc(a))));
-    } else if op == OP_TUPLE {
+    } else if op == Op::Tuple {
         value_list(in p, in f, a, inout uses);
-    } else if op == OP_VECTOR {
+    } else if op == Op::Vector {
         value_list(in p, in f, inc(a), inout uses);
-    } else if op == OP_DATA {
+    } else if op == Op::Data {
         let n = p.op(inc(a));
         for k in 0..n {
             set_add(inout uses, f.value_bit(p.op(add(a, add(3, wrapping_mul(k, 2))))));
         }
-    } else if op == OP_CLOSURE {
+    } else if op == Op::Closure {
         let c = fx.closure(f.row.name, w(ins.dest));
         if c != NONE32 {
             let row = fx.closure_at(w(c));
@@ -618,11 +581,11 @@ pub fn uses_defs(
                 set_add(inout uses, f.slot_bit(fx.capture(row, k)));
             }
         }
-    } else if op == OP_INDIRECT {
+    } else if op == Op::Indirect {
         set_add(inout uses, f.value_bit(p.op(a)));
         arg_values(in p, in f, inc(a), inout uses);
         inout_roots(in p, in f, inc(a), inout uses, inout defs);
-    } else if op == OP_CALL {
+    } else if op == Op::Call {
         let args = inc(a);
         arg_values(in p, in f, args, inout uses);
         let callee = fx.find(n32(p.op(a)));
@@ -630,7 +593,7 @@ pub fn uses_defs(
             let sig = fx.sig(w(callee));
             let n = p.op(args);
             for k in 0..n {
-                if k < sig.pn && widen_u64(fx.param(sig, k).pass) == PASS_INOUT {
+                if k < sig.pn && widen_u64(fx.param(sig, k).pass) == TyPass::Inout {
                     let root = p.op(add(arg_at(args, k), 2));
                     if root != 0 {
                         let s = f.slot_bit(n32(wrapping_sub(root, 1)));
@@ -640,7 +603,7 @@ pub fn uses_defs(
                 }
             }
         }
-    } else if op == OP_TILED || op == OP_SEQ || op == OP_FIP {
+    } else if op == Op::Tiled || op == Op::Seq || op == Op::Fip {
         arg_values(in p, in f, inc(a), inout uses);
         inout_roots(in p, in f, inc(a), inout uses, inout defs);
     }
@@ -672,15 +635,15 @@ pub fn liveness(in p: Program, inout names: Names, in fx: Fns, in f: Fun, in arm
             id = wrapping_sub(id, 1);
             let blk = f.block(in p, id);
             clear(inout required);
-            if blk.term == TERM_RETURN {
+            if blk.term == Term::Return {
                 set_add(inout required, f.value_bit(p.op(blk.ta)));
                 for k in 0..f.params.len() {
                     let q = f.param(k);
-                    if q.pass == PASS_INOUT {
+                    if q.pass == TyPass::Inout {
                         set_add(inout required, f.slot_bit(q.name));
                     }
                 }
-            } else if blk.term == TERM_JUMP {
+            } else if blk.term == Term::Jump {
                 let target = p.op(blk.ta);
                 union_block(inout required, in live, target, nw);
                 let tb = f.block(in p, target);
@@ -697,11 +660,11 @@ pub fn liveness(in p: Program, inout names: Names, in fx: Fns, in f: Fun, in arm
                         }
                     }
                 }
-            } else if blk.term == TERM_BRANCH {
+            } else if blk.term == Term::Branch {
                 set_add(inout required, f.value_bit(p.op(blk.ta)));
                 union_block(inout required, in live, p.op(inc(blk.ta)), nw);
                 union_block(inout required, in live, p.op(add(blk.ta, 2)), nw);
-            } else if blk.term == TERM_MATCH {
+            } else if blk.term == Term::Match {
                 set_add(inout required, f.value_bit(p.op(blk.ta)));
                 let n = p.op(inc(blk.ta));
                 let mut k = add(blk.ta, 2);

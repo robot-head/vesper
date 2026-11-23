@@ -466,11 +466,12 @@ After `#1516`, `#1526` and `#1527` landed on `main` (`0f5a9eba`), re-measuring t
 |---|--:|---|--:|---|
 | `schedule` (`pdc::compile_schedule`) | **1.02x** | `[0.94x, 1.13x]` | 1.50x `[1.45x, 1.53x]` | **Flipped** |
 | `pid` (`kernels::PidController`) | **1.27x** | `[1.17x, 1.30x]` | — | **Flipped** |
-| `confine` (`confine::verify_realtime`) | **1.35x** | `[1.30x, 1.37x]` | 1.66x | **Flipped** |
+| `confine` (`confine::verify_realtime`, 3 names) | **1.35x** (now **1.401x**) | `[1.294x, 1.496x]` | 1.66x | **Flipped** |
+| `confine-many` (`confine::verify_realtime`, 256 distinct `Effect::Other`) | **1.335x** | `[1.232x, 1.398x]` | quadratic intern | **HashMap intern** |
 | `slab` (`slab::DelaySlab`) | 1.89x | `[1.79x, 2.00x]` | 2.1x | Stays above bar |
 | `events` | 8.00x | `[7.76x, 8.98x]` | 5.6x | Stays above bar |
 
-Their `#[cfg(not(vesper_port))]` Rust implementations moved into `crates/vesper-resonance/seed/src/engine/` (`confine.rs`, `pdc.rs`, `kernels.rs`) so `vesper-resonance` runs only `@vesper/resonance` for all five flipped paths while `vesper-resonance-seed` stays frozen for the compiler until Stage 2. `tests/port_differential.rs` keeps 0 differences across `PidController` (50,000 steps + fault cases), `compile_schedule` (400 randomized graphs) and `verify_realtime` (randomized graphs and indirect targets).
+Their `#[cfg(not(vesper_port))]` Rust implementations moved into `crates/vesper-resonance/seed/src/engine/` (`confine.rs`, `pdc.rs`, `kernels.rs`) so `vesper-resonance` runs only `@vesper/resonance` for all five flipped paths while `vesper-resonance-seed` stays frozen for the compiler until Stage 2. Effect interning in `confine.rs` uses a `HashMap<&Effect, u64>` alongside `effects: Vec<&Effect>` so graphs with many distinct custom effects (including unreachable functions) stay `O(N)`. `tests/port_differential.rs` keeps 0 differences across `PidController` (50,000 steps + fault cases), `compile_schedule` (400 randomized graphs) and `verify_realtime` (randomized graphs and indirect targets).
 
 ## What is left
 

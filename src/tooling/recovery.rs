@@ -980,6 +980,7 @@ mod budget_tests {
         assert!(walk.scope(&scope).is_err());
         assert_eq!(scope.len(), 2);
         let pat = Pattern {
+            integer_kind: None,
             kind: PatternKind::Bind("name".into()),
             span: 0..0,
         };

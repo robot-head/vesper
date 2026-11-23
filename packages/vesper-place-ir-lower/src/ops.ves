@@ -1,0 +1,1696 @@
+// Pure resolvers for sequence (`SeqOp`), tiled (`TiledOp`), vector
+// (`VectorOp`) and `Box` (`FipOp`) operations, matching `src/seq/ir.rs`,
+// `src/seq.rs`, `src/strings.rs`, `src/tiled.rs`, `src/vector.rs` and
+// `src/ir.rs`.
+
+use @vesper/check-data::input::{
+    Ctx
+};
+use @vesper/check-data::names::{
+    Names
+};
+use @vesper/check-data::types::{
+    Types
+};
+use @vesper/check-data::util::{
+    add,
+    inc,
+    n32,
+    push_decimal,
+    u32_at,
+    u8_at,
+    w
+};
+use self::ast::{
+    Ast,
+    Ex
+};
+
+const NONE32: u32 = 4294967295;
+const NONE64: u64 = 18446744073709551615;
+
+// check-data type kinds.
+const K_NAMED: u8 = 1;
+const K_ROW: u8 = 4;
+
+// Passes.
+const P_IN: u8 = 0;
+const P_INOUT: u8 = 1;
+const P_SINK: u8 = 2;
+
+// AST expression kinds (ast.ves).
+const X_LITERAL: u8 = 1;
+const X_NAME: u8 = 2;
+const X_FIELD: u8 = 5;
+const X_BINARY: u8 = 8;
+const LIT_INT: u64 = 0;
+
+// Vector element codes (Elem).
+const E_NONE: u8 = 0;
+const E_U8: u8 = 1;
+const E_U32: u8 = 2;
+const E_U64: u8 = 3;
+const E_I64: u8 = 4;
+const E_F32: u8 = 5;
+const E_F64: u8 = 6;
+
+// Intrinsic constant position modes.
+const C_NONE: u8 = 0;
+const C_SECOND: u8 = 1;
+const C_TAIL: u8 = 2;
+
+pub copy struct SeqRes {
+    matched: bool,
+    label: u32,
+    has_recv: bool,
+    recv_pass: u8,
+    arg_mode: u8,
+}
+
+pub copy struct TiledRes {
+    matched: bool,
+    label: u32,
+    cap: u32,
+    recv_pass: u8,
+    recv_proj: u32,
+    skip_first: bool,
+    is_recv_first: bool,
+}
+
+pub copy struct VecRes {
+    matched: bool,
+    label: u32,
+    const_lo: u64,
+    const_hi: u64,
+}
+
+fn no_seq() -> SeqRes {
+    SeqRes {
+        matched: false,
+        label: 0,
+        has_recv: false,
+        recv_pass: P_IN,
+        arg_mode: 0
+    }
+}
+
+fn no_tiled() -> TiledRes {
+    TiledRes {
+        matched: false,
+        label: 0,
+        cap: 0,
+        recv_pass: P_IN,
+        recv_proj: NONE32,
+        skip_first: false,
+        is_recv_first: false
+    }
+}
+
+fn no_vec() -> VecRes {
+    VecRes {
+        matched: false,
+        label: 0,
+        const_lo: 0,
+        const_hi: 0
+    }
+}
+
+fn span_type(in c: Ctx, s0: u64, s1: u64) -> u32 {
+    let t = c.world.expr_type(s0, s1);
+    if t == NONE32 {
+        c.types.infer
+    } else {
+        t
+    }
+}
+
+pub fn is_seq_type(in c: Ctx, ty: u32) -> bool {
+    ty != NONE32
+        && c.types.kind(ty) == K_NAMED
+        && c.types.name(ty) == c.world.k.chunk_seq
+        && c.types.arity(ty) == 1
+}
+
+pub fn is_slice_type(in c: Ctx, ty: u32) -> bool {
+    ty != NONE32
+        && c.types.kind(ty) == K_NAMED
+        && c.types.name(ty) == c.world.k.slice
+        && c.types.arity(ty) == 1
+}
+
+fn is_seq_or_slice(in c: Ctx, ty: u32) -> bool {
+    is_seq_type(in c, ty) || is_slice_type(in c, ty)
+}
+
+fn is_string_type(in c: Ctx, ty: u32) -> bool {
+    ty != NONE32
+        && c.types.kind(ty) == K_NAMED
+        && c.types.name(ty) == c.world.k.string
+        && c.types.arity(ty) == 0
+}
+
+fn is_str_type(in c: Ctx, ty: u32) -> bool {
+    ty != NONE32
+        && c.types.kind(ty) == K_NAMED
+        && c.types.name(ty) == c.world.k.str_
+        && c.types.arity(ty) == 0
+}
+
+fn is_text(in c: Ctx, ty: u32) -> bool {
+    is_string_type(in c, ty) || is_str_type(in c, ty)
+}
+
+fn is_tiled_seq(in c: Ctx, ty: u32) -> bool {
+    ty != NONE32
+        && c.types.kind(ty) == K_NAMED
+        && c.types.name(ty) == c.world.k.tiled_seq
+        && (c.types.arity(ty) == 1 || c.types.arity(ty) == 2)
+}
+
+fn sym_str(inout c: Ctx, in s: Str) -> u32 {
+    c.names.intern(in s.as_bytes())
+}
+
+fn eq(in c: Ctx, sym: u32, in s: Str) -> bool {
+    c.names.spells(sym, in s.as_bytes())
+}
+
+fn put_str(inout out: ChunkSeq[u8], in s: Str) {
+    out.extend(in s.as_bytes());
+}
+
+fn put_bool(inout out: ChunkSeq[u8], v: bool) {
+    if v {
+        put_str(inout out, "true");
+    } else {
+        put_str(inout out, "false");
+    }
+}
+
+fn put_quoted(inout out: ChunkSeq[u8], in names: Names, s: u32) {
+    out.push(34);
+    let a = names.start(s);
+    let b = names.end(s);
+    for i in a..b {
+        let ch = u8_at(in names.text, i);
+        if ch == 92 {
+            out.push(92);
+            out.push(92);
+        } else if ch == 34 {
+            out.push(92);
+            out.push(34);
+        } else if ch == 10 {
+            out.push(92);
+            out.push(110);
+        } else if ch == 13 {
+            out.push(92);
+            out.push(114);
+        } else if ch == 9 {
+            out.push(92);
+            out.push(116);
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push(34);
+}
+
+// ----- Shapes ----------------------------------------------------------------
+
+fn elem_of_name(in c: Ctx, s: u32) -> u8 {
+    let k = c.world.k;
+    if s == k.u8_ {
+        E_U8
+    } else if s == k.u32_ {
+        E_U32
+    } else if s == k.u64_ {
+        E_U64
+    } else if s == k.i64_ {
+        E_I64
+    } else if s == k.f32_ {
+        E_F32
+    } else if s == k.f64_ {
+        E_F64
+    } else {
+        E_NONE
+    }
+}
+
+fn elem_bits(e: u8) -> u64 {
+    if e == E_U8 {
+        8
+    } else if e == E_U32 || e == E_F32 {
+        32
+    } else if e == E_U64 || e == E_I64 || e == E_F64 {
+        64
+    } else {
+        0
+    }
+}
+
+fn put_elem(inout out: ChunkSeq[u8], e: u8) {
+    if e == E_U8 {
+        put_str(inout out, "U8");
+    } else if e == E_U32 {
+        put_str(inout out, "U32");
+    } else if e == E_U64 {
+        put_str(inout out, "U64");
+    } else if e == E_I64 {
+        put_str(inout out, "I64");
+    } else if e == E_F32 {
+        put_str(inout out, "F32");
+    } else {
+        put_str(inout out, "F64");
+    }
+}
+
+fn put_shape(inout out: ChunkSeq[u8], elem: u8, lanes: u64) {
+    put_str(inout out, "Shape { elem: ");
+    put_elem(inout out, elem);
+    put_str(inout out, ", lanes: ");
+    push_decimal(inout out, lanes);
+    put_str(inout out, " }");
+}
+
+fn parse_u16_sym(in names: Names, s: u32) -> u64 {
+    let size = names.size(s);
+    if size == 0 {
+        return NONE64;
+    }
+    let mut v: u64 = 0;
+    for i in 0..size {
+        let b = names.byte(s, i);
+        if b < 48 || b > 57 {
+            return NONE64;
+        }
+        v = add(wrapping_mul(v, 10), widen_u64(wrapping_sub(b, 48)));
+        if v > 65535 {
+            return NONE64;
+        }
+    }
+    v
+}
+
+// Packs `(elem as u64) << 16 | lanes` when valid (128, 256, 512 bits), else NONE64.
+fn pack_shape(elem: u8, lanes: u64) -> u64 {
+    if elem == E_NONE || lanes > 65535 {
+        return NONE64;
+    }
+    let bits = wrapping_mul(elem_bits(elem), lanes);
+    if bits == 128 || bits == 256 || bits == 512 {
+        wrapping_shl_u64(widen_u64(elem), 16) | lanes
+    } else {
+        NONE64
+    }
+}
+
+fn elem_from_type(in c: Ctx, ty: u32) -> u8 {
+    let n = c.types.node(ty);
+    if n.kind == K_NAMED && n.n == 0 {
+        elem_of_name(in c, n.name)
+    } else {
+        E_NONE
+    }
+}
+
+fn shape_of(in c: Ctx, ty: u32) -> u64 {
+    if ty == NONE32 {
+        return NONE64;
+    }
+    let n = c.types.node(ty);
+    let k = c.world.k;
+    if n.kind != K_NAMED || (n.name != k.vec && n.name != k.mask) || n.n != 2 {
+        return NONE64;
+    }
+    let elem = elem_from_type(in c, c.types.arg(ty, 0));
+    if elem == E_NONE {
+        return NONE64;
+    }
+    let cn = c.types.node(c.types.arg(ty, 1));
+    if cn.kind != K_NAMED || cn.n != 0 {
+        return NONE64;
+    }
+    let lanes = parse_u16_sym(in c.names, cn.name);
+    if lanes == NONE64 {
+        return NONE64;
+    }
+    pack_shape(elem, lanes)
+}
+
+fn explicit_shape(in c: Ctx, in a: Ast, e: Ex) -> u64 {
+    if e.m != 2 {
+        return NONE64;
+    }
+    let elem = elem_from_type(in c, n32(a.x(e.c)));
+    if elem == E_NONE {
+        return NONE64;
+    }
+    let cn = c.types.node(n32(a.x(inc(e.c))));
+    if cn.kind != K_NAMED {
+        return NONE64;
+    }
+    let lanes = parse_u16_sym(in c.names, cn.name);
+    if lanes == NONE64 {
+        return NONE64;
+    }
+    pack_shape(elem, lanes)
+}
+
+// ----- SliceIo & SeqOp -------------------------------------------------------
+
+// Splits `name` at the first `::`; returns index of `:` or NONE64.
+fn split_colons(in names: Names, s: u32) -> u64 {
+    let size = names.size(s);
+    let mut i: u64 = 0;
+    loop {
+        if inc(i) >= size {
+            break;
+        }
+        if names.byte(s, i) == 58 && names.byte(s, inc(i)) == 58 {
+            return i;
+        }
+        i = inc(i);
+    }
+    NONE64
+}
+
+fn slice_suffix(in names: Names, s: u32, start: u64, in target: Str) -> bool {
+    let size = names.size(s);
+    let tb = target.as_bytes();
+    if wrapping_sub(size, start) != tb.len() {
+        return false;
+    }
+    for i in 0..tb.len() {
+        let b = match tb.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        if names.byte(s, add(start, i)) != b {
+            return false;
+        }
+    }
+    true
+}
+
+fn slice_prefix(in names: Names, s: u32, len: u64, in target: Str) -> bool {
+    let tb = target.as_bytes();
+    if len != tb.len() {
+        return false;
+    }
+    for i in 0..len {
+        let b = match tb.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        if names.byte(s, i) != b {
+            return false;
+        }
+    }
+    true
+}
+
+fn resolve_slice_io(inout c: Ctx, in a: Ast, e: Ex, n: u32) -> SeqRes {
+    if !c.names.has_prefix(n, in "Vec::".as_bytes()) {
+        return no_seq();
+    }
+    let mut store = false;
+    let mut masked = false;
+    let mut ok = false;
+    if eq(in c, n, "Vec::load") {
+        ok = true;
+    } else if eq(in c, n, "Vec::store") {
+        store = true;
+        ok = true;
+    } else if eq(in c, n, "Vec::store_masked") {
+        store = true;
+        masked = true;
+        ok = true;
+    } else if eq(in c, n, "Vec::load_masked") {
+        if e.n > 0 {
+            let a0 = a.ex(a.x(inc(e.b)));
+            let t0 = span_type(in c, a0.s0, a0.s1);
+            if is_seq_or_slice(in c, t0) {
+                masked = true;
+                ok = true;
+            }
+        }
+    }
+    if !ok {
+        return no_seq();
+    }
+    let shape = if store {
+        if e.n < 3 {
+            return no_seq();
+        }
+        let a2 = a.ex(a.x(add(e.b, 5)));
+        shape_of(in c, span_type(in c, a2.s0, a2.s1))
+    } else {
+        let sr = shape_of(in c, span_type(in c, e.s0, e.s1));
+        if sr != NONE64 {
+            sr
+        } else {
+            explicit_shape(in c, in a, e)
+        }
+    };
+    if shape == NONE64 {
+        return no_seq();
+    }
+    let elem = wrapping_u8(wrapping_shr_u64(shape, 16));
+    let lanes = shape & 65535;
+    let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put_str(inout buf, "Vector(SliceIo { shape: ");
+    put_shape(inout buf, elem, lanes);
+    put_str(inout buf, ", store: ");
+    put_bool(inout buf, store);
+    put_str(inout buf, ", masked: ");
+    put_bool(inout buf, masked);
+    put_str(inout buf, " })");
+    let label = c.names.intern(in buf.as_slice());
+    SeqRes {
+        matched: true,
+        label: label,
+        has_recv: false,
+        recv_pass: P_IN,
+        arg_mode: if store {
+            3
+        } else {
+            4
+        }
+    }
+}
+
+fn wide_parse(inout c: Ctx, method: u32) -> u64 {
+    // Returns packed (bytes << 3) | (big << 2) | (write << 1) | total, or NONE64.
+    let sizes_ok = c.names.size(method);
+    if sizes_ok < 11 {
+        return NONE64;
+    }
+    if eq(in c, method, "read_u16_le") {
+        16
+    } else if eq(in c, method, "read_u16_be") {
+        20
+    } else if eq(in c, method, "read_u32_le") {
+        32
+    } else if eq(in c, method, "read_u32_be") {
+        36
+    } else if eq(in c, method, "read_u64_le") {
+        64
+    } else if eq(in c, method, "read_u64_be") {
+        68
+    } else if eq(in c, method, "write_u16_le") {
+        18
+    } else if eq(in c, method, "write_u16_be") {
+        22
+    } else if eq(in c, method, "write_u32_le") {
+        34
+    } else if eq(in c, method, "write_u32_be") {
+        38
+    } else if eq(in c, method, "write_u64_le") {
+        66
+    } else if eq(in c, method, "write_u64_be") {
+        70
+    } else if eq(in c, method, "try_read_u16_le") {
+        17
+    } else if eq(in c, method, "try_read_u16_be") {
+        21
+    } else if eq(in c, method, "try_read_u32_le") {
+        33
+    } else if eq(in c, method, "try_read_u32_be") {
+        37
+    } else if eq(in c, method, "try_read_u64_le") {
+        65
+    } else if eq(in c, method, "try_read_u64_be") {
+        69
+    } else if eq(in c, method, "try_write_u16_le") {
+        19
+    } else if eq(in c, method, "try_write_u16_be") {
+        23
+    } else if eq(in c, method, "try_write_u32_le") {
+        35
+    } else if eq(in c, method, "try_write_u32_be") {
+        39
+    } else if eq(in c, method, "try_write_u64_le") {
+        67
+    } else if eq(in c, method, "try_write_u64_be") {
+        71
+    } else {
+        NONE64
+    }
+}
+
+fn resolve_shared_method(inout c: Ctx, method: u32, arity: u64) -> SeqRes {
+    if eq(in c, method, "copy_from") {
+        return SeqRes {
+            matched: true,
+            label: sym_str(inout c, "CopyFrom { total: false }"),
+            has_recv: true,
+            recv_pass: P_INOUT,
+            arg_mode: 5
+        };
+    }
+    if eq(in c, method, "try_copy_from") {
+        return SeqRes {
+            matched: true,
+            label: sym_str(inout c, "CopyFrom { total: true }"),
+            has_recv: true,
+            recv_pass: P_INOUT,
+            arg_mode: 5
+        };
+    }
+    if eq(in c, method, "copy_within") {
+        return SeqRes {
+            matched: true,
+            label: sym_str(inout c, "CopyWithin { total: false }"),
+            has_recv: true,
+            recv_pass: P_INOUT,
+            arg_mode: 0
+        };
+    }
+    if eq(in c, method, "try_copy_within") {
+        return SeqRes {
+            matched: true,
+            label: sym_str(inout c, "CopyWithin { total: true }"),
+            has_recv: true,
+            recv_pass: P_INOUT,
+            arg_mode: 0
+        };
+    }
+    if eq(in c, method, "fill") {
+        let lbl = if arity == 3 {
+            sym_str(inout c, "FillRange { total: false }")
+        } else {
+            sym_str(inout c, "Fill")
+        };
+        return SeqRes {
+            matched: true,
+            label: lbl,
+            has_recv: true,
+            recv_pass: P_INOUT,
+            arg_mode: 0
+        };
+    }
+    if eq(in c, method, "try_fill") {
+        return SeqRes {
+            matched: true,
+            label: sym_str(inout c, "FillRange { total: true }"),
+            has_recv: true,
+            recv_pass: P_INOUT,
+            arg_mode: 0
+        };
+    }
+    if eq(in c, method, "sum_be16") {
+        return SeqRes {
+            matched: true,
+            label: sym_str(inout c, "SumBe16"),
+            has_recv: true,
+            recv_pass: P_IN,
+            arg_mode: 0
+        };
+    }
+    if eq(in c, method, "eq") {
+        return SeqRes {
+            matched: true,
+            label: sym_str(inout c, "BytesEq"),
+            has_recv: true,
+            recv_pass: P_IN,
+            arg_mode: 1
+        };
+    }
+    if eq(in c, method, "cmp") {
+        return SeqRes {
+            matched: true,
+            label: sym_str(inout c, "BytesCmp"),
+            has_recv: true,
+            recv_pass: P_IN,
+            arg_mode: 1
+        };
+    }
+    if eq(in c, method, "find_byte") {
+        return SeqRes {
+            matched: true,
+            label: sym_str(inout c, "FindByte"),
+            has_recv: true,
+            recv_pass: P_IN,
+            arg_mode: 0
+        };
+    }
+    if eq(in c, method, "find_either") {
+        return SeqRes {
+            matched: true,
+            label: sym_str(inout c, "FindEither"),
+            has_recv: true,
+            recv_pass: P_IN,
+            arg_mode: 0
+        };
+    }
+    if eq(in c, method, "find_not_in") {
+        return SeqRes {
+            matched: true,
+            label: sym_str(inout c, "FindNotIn"),
+            has_recv: true,
+            recv_pass: P_IN,
+            arg_mode: 0
+        };
+    }
+    if eq(in c, method, "eq_ignore_ascii_case") {
+        return SeqRes {
+            matched: true,
+            label: sym_str(inout c, "EqIgnoreAsciiCase"),
+            has_recv: true,
+            recv_pass: P_IN,
+            arg_mode: 1
+        };
+    }
+    if eq(in c, method, "make_ascii_lowercase") {
+        return SeqRes {
+            matched: true,
+            label: sym_str(inout c, "MakeAsciiLowercase { total: false }"),
+            has_recv: true,
+            recv_pass: P_INOUT,
+            arg_mode: 0
+        };
+    }
+    if eq(in c, method, "try_make_ascii_lowercase") {
+        return SeqRes {
+            matched: true,
+            label: sym_str(inout c, "MakeAsciiLowercase { total: true }"),
+            has_recv: true,
+            recv_pass: P_INOUT,
+            arg_mode: 0
+        };
+    }
+    let wbits = wide_parse(inout c, method);
+    if wbits == NONE64 {
+        return no_seq();
+    }
+    let bytes = wrapping_shr_u64(wbits, 3);
+    let big = (wbits & 4) != 0;
+    let write = (wbits & 2) != 0;
+    let total = (wbits & 1) != 0;
+    let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put_str(inout buf, "Wide(Wide { bytes: ");
+    push_decimal(inout buf, bytes);
+    put_str(inout buf, ", big: ");
+    put_bool(inout buf, big);
+    put_str(inout buf, ", write: ");
+    put_bool(inout buf, write);
+    put_str(inout buf, ", total: ");
+    put_bool(inout buf, total);
+    put_str(inout buf, " })");
+    let label = c.names.intern(in buf.as_slice());
+    SeqRes {
+        matched: true,
+        label: label,
+        has_recv: true,
+        recv_pass: if write {
+            P_INOUT
+        } else {
+            P_IN
+        },
+        arg_mode: 0
+    }
+}
+
+pub fn resolve_seq_call(inout c: Ctx, in a: Ast, e: Ex, callee: Ex, local_alias: bool) -> SeqRes {
+    if e.n == 0 && callee.kind == X_FIELD {
+        let m = n32(callee.b);
+        if eq(in c, m, "as_slice") || eq(in c, m, "as_slice_mut") {
+            let base = a.ex(callee.a);
+            if is_seq_type(in c, span_type(in c, base.s0, base.s1)) {
+                return SeqRes {
+                    matched: true,
+                    label: sym_str(inout c, "AsSlice"),
+                    has_recv: true,
+                    recv_pass: P_IN,
+                    arg_mode: 0
+                };
+            }
+        }
+    }
+    if callee.kind == X_NAME && !local_alias {
+        let n = n32(callee.a);
+        if a.fn_index(n) != NONE64 {
+            return no_seq();
+        }
+        let sio = resolve_slice_io(inout c, in a, e, n);
+        if sio.matched {
+            return sio;
+        }
+        if eq(in c, n, "swap") {
+            return SeqRes {
+                matched: true,
+                label: sym_str(inout c, "Swap"),
+                has_recv: false,
+                recv_pass: P_IN,
+                arg_mode: 2
+            };
+        }
+        if eq(in c, n, "replace") {
+            return SeqRes {
+                matched: true,
+                label: sym_str(inout c, "Replace"),
+                has_recv: false,
+                recv_pass: P_IN,
+                arg_mode: 3
+            };
+        }
+        if eq(in c, n, "ChunkSeq::new") {
+            return SeqRes {
+                matched: true,
+                label: sym_str(inout c, "New"),
+                has_recv: false,
+                recv_pass: P_IN,
+                arg_mode: 0
+            };
+        }
+        if eq(in c, n, "ChunkSeq::with_capacity") {
+            return SeqRes {
+                matched: true,
+                label: sym_str(inout c, "WithCapacity"),
+                has_recv: false,
+                recv_pass: P_IN,
+                arg_mode: 0
+            };
+        }
+        if eq(in c, n, "ChunkSeq::finish") {
+            return SeqRes {
+                matched: true,
+                label: sym_str(inout c, "Finish"),
+                has_recv: false,
+                recv_pass: P_IN,
+                arg_mode: 0
+            };
+        }
+        return no_seq();
+    }
+    if callee.kind != X_FIELD {
+        return no_seq();
+    }
+    let base = a.ex(callee.a);
+    let t = span_type(in c, base.s0, base.s1);
+    let m = n32(callee.b);
+    if is_text(in c, t) {
+        let is_strg = is_string_type(in c, t);
+        if eq(in c, m, "len") {
+            return SeqRes {
+                matched: true,
+                label: sym_str(inout c, "Str(Len)"),
+                has_recv: true,
+                recv_pass: P_IN,
+                arg_mode: 0
+            };
+        }
+        if eq(in c, m, "byte_at") {
+            return SeqRes {
+                matched: true,
+                label: sym_str(inout c, "Str(ByteAt)"),
+                has_recv: true,
+                recv_pass: P_IN,
+                arg_mode: 0
+            };
+        }
+        if eq(in c, m, "try_byte_at") {
+            return SeqRes {
+                matched: true,
+                label: sym_str(inout c, "Str(TryByteAt)"),
+                has_recv: true,
+                recv_pass: P_IN,
+                arg_mode: 0
+            };
+        }
+        if eq(in c, m, "as_str") {
+            return SeqRes {
+                matched: true,
+                label: sym_str(inout c, "Str(AsStr)"),
+                has_recv: true,
+                recv_pass: P_IN,
+                arg_mode: 0
+            };
+        }
+        if eq(in c, m, "as_bytes") {
+            return SeqRes {
+                matched: true,
+                label: sym_str(inout c, "Str(AsBytes)"),
+                has_recv: true,
+                recv_pass: P_IN,
+                arg_mode: 0
+            };
+        }
+        if is_strg {
+            if eq(in c, m, "push_str") {
+                return SeqRes {
+                    matched: true,
+                    label: sym_str(inout c, "Str(PushStr)"),
+                    has_recv: true,
+                    recv_pass: P_INOUT,
+                    arg_mode: 1
+                };
+            }
+            if eq(in c, m, "push_char") {
+                return SeqRes {
+                    matched: true,
+                    label: sym_str(inout c, "Str(PushChar)"),
+                    has_recv: true,
+                    recv_pass: P_INOUT,
+                    arg_mode: 0
+                };
+            }
+            if eq(in c, m, "clear") {
+                return SeqRes {
+                    matched: true,
+                    label: sym_str(inout c, "Str(Clear)"),
+                    has_recv: true,
+                    recv_pass: P_INOUT,
+                    arg_mode: 0
+                };
+            }
+            if eq(in c, m, "reserve") {
+                return SeqRes {
+                    matched: true,
+                    label: sym_str(inout c, "Str(Reserve)"),
+                    has_recv: true,
+                    recv_pass: P_INOUT,
+                    arg_mode: 0
+                };
+            }
+        }
+        return no_seq();
+    }
+    if is_seq_type(in c, t) {
+        if eq(in c, m, "len") {
+            return SeqRes {
+                matched: true,
+                label: sym_str(inout c, "Len"),
+                has_recv: true,
+                recv_pass: P_IN,
+                arg_mode: 0
+            };
+        }
+        if eq(in c, m, "push") {
+            return SeqRes {
+                matched: true,
+                label: sym_str(inout c, "Push"),
+                has_recv: true,
+                recv_pass: P_INOUT,
+                arg_mode: 0
+            };
+        }
+        if eq(in c, m, "pop") {
+            return SeqRes {
+                matched: true,
+                label: sym_str(inout c, "Pop"),
+                has_recv: true,
+                recv_pass: P_INOUT,
+                arg_mode: 0
+            };
+        }
+        if eq(in c, m, "get") {
+            return SeqRes {
+                matched: true,
+                label: sym_str(inout c, "Get"),
+                has_recv: true,
+                recv_pass: P_IN,
+                arg_mode: 0
+            };
+        }
+        if eq(in c, m, "set") {
+            return SeqRes {
+                matched: true,
+                label: sym_str(inout c, "Set"),
+                has_recv: true,
+                recv_pass: P_INOUT,
+                arg_mode: 0
+            };
+        }
+        if eq(in c, m, "try_get") || eq(in c, m, "try_get_mut") {
+            return SeqRes {
+                matched: true,
+                label: sym_str(inout c, "TryGet"),
+                has_recv: true,
+                recv_pass: P_IN,
+                arg_mode: 0
+            };
+        }
+        if eq(in c, m, "last") {
+            return SeqRes {
+                matched: true,
+                label: sym_str(inout c, "Last"),
+                has_recv: true,
+                recv_pass: P_IN,
+                arg_mode: 0
+            };
+        }
+        if eq(in c, m, "try_set") {
+            return SeqRes {
+                matched: true,
+                label: sym_str(inout c, "TrySet"),
+                has_recv: true,
+                recv_pass: P_INOUT,
+                arg_mode: 0
+            };
+        }
+        if eq(in c, m, "clear") {
+            return SeqRes {
+                matched: true,
+                label: sym_str(inout c, "Clear"),
+                has_recv: true,
+                recv_pass: P_INOUT,
+                arg_mode: 0
+            };
+        }
+        if eq(in c, m, "truncate") {
+            return SeqRes {
+                matched: true,
+                label: sym_str(inout c, "Truncate"),
+                has_recv: true,
+                recv_pass: P_INOUT,
+                arg_mode: 0
+            };
+        }
+        if eq(in c, m, "reserve") {
+            return SeqRes {
+                matched: true,
+                label: sym_str(inout c, "Reserve"),
+                has_recv: true,
+                recv_pass: P_INOUT,
+                arg_mode: 0
+            };
+        }
+        if eq(in c, m, "extend") || eq(in c, m, "extend_from_slice") {
+            return SeqRes {
+                matched: true,
+                label: sym_str(inout c, "Extend"),
+                has_recv: true,
+                recv_pass: P_INOUT,
+                arg_mode: 1
+            };
+        }
+        if eq(in c, m, "extend_ascii_lowercase") {
+            return SeqRes {
+                matched: true,
+                label: sym_str(inout c, "ExtendAsciiLowercase"),
+                has_recv: true,
+                recv_pass: P_INOUT,
+                arg_mode: 1
+            };
+        }
+        if eq(in c, m, "resize") {
+            return SeqRes {
+                matched: true,
+                label: sym_str(inout c, "Resize"),
+                has_recv: true,
+                recv_pass: P_INOUT,
+                arg_mode: 0
+            };
+        }
+        if eq(in c, m, "extend_from_within") {
+            return SeqRes {
+                matched: true,
+                label: sym_str(inout c, "ExtendFromWithin { total: false }"),
+                has_recv: true,
+                recv_pass: P_INOUT,
+                arg_mode: 0
+            };
+        }
+        if eq(in c, m, "try_extend_from_within") {
+            return SeqRes {
+                matched: true,
+                label: sym_str(inout c, "ExtendFromWithin { total: true }"),
+                has_recv: true,
+                recv_pass: P_INOUT,
+                arg_mode: 0
+            };
+        }
+        if eq(in c, m, "extend_reversed") {
+            return SeqRes {
+                matched: true,
+                label: sym_str(inout c, "ExtendReversed"),
+                has_recv: true,
+                recv_pass: P_INOUT,
+                arg_mode: 1
+            };
+        }
+        if eq(in c, m, "as_slice") || eq(in c, m, "as_slice_mut") {
+            return SeqRes {
+                matched: true,
+                label: sym_str(inout c, "AsSlice"),
+                has_recv: true,
+                recv_pass: P_IN,
+                arg_mode: 0
+            };
+        }
+        return resolve_shared_method(inout c, m, e.n);
+    }
+    if is_slice_type(in c, t) {
+        if eq(in c, m, "len") {
+            return SeqRes {
+                matched: true,
+                label: sym_str(inout c, "SliceLen"),
+                has_recv: true,
+                recv_pass: P_IN,
+                arg_mode: 0
+            };
+        }
+        if eq(in c, m, "get") {
+            return SeqRes {
+                matched: true,
+                label: sym_str(inout c, "SliceGet"),
+                has_recv: true,
+                recv_pass: P_IN,
+                arg_mode: 0
+            };
+        }
+        if eq(in c, m, "set") {
+            return SeqRes {
+                matched: true,
+                label: sym_str(inout c, "SliceSet"),
+                has_recv: true,
+                recv_pass: P_INOUT,
+                arg_mode: 0
+            };
+        }
+        if eq(in c, m, "try_get") || eq(in c, m, "try_get_mut") {
+            return SeqRes {
+                matched: true,
+                label: sym_str(inout c, "TryGet"),
+                has_recv: true,
+                recv_pass: P_IN,
+                arg_mode: 0
+            };
+        }
+        if eq(in c, m, "last") {
+            return SeqRes {
+                matched: true,
+                label: sym_str(inout c, "Last"),
+                has_recv: true,
+                recv_pass: P_IN,
+                arg_mode: 0
+            };
+        }
+        if eq(in c, m, "try_set") {
+            return SeqRes {
+                matched: true,
+                label: sym_str(inout c, "TrySet"),
+                has_recv: true,
+                recv_pass: P_INOUT,
+                arg_mode: 0
+            };
+        }
+        return resolve_shared_method(inout c, m, e.n);
+    }
+    no_seq()
+}
+
+// ----- TiledOp ---------------------------------------------------------------
+
+fn field_arg_name(in c: Ctx, ty: u32) -> u32 {
+    let n = c.types.node(ty);
+    if n.kind == K_ROW {
+        let row = c.types.row(n.r2);
+        if row.n == 0 && row.tail != 0 {
+            return wrapping_sub(row.tail, 1);
+        }
+        return NONE32;
+    }
+    if n.kind == K_NAMED && n.n == 0 {
+        return n.name;
+    }
+    NONE32
+}
+
+fn col_name_from_type_args(in c: Ctx, in a: Ast, e: Ex, is_static: bool) -> u32 {
+    let idx = if is_static && e.m == 2 {
+        1
+    } else {
+        0
+    };
+    if idx >= e.m {
+        return NONE32;
+    }
+    field_arg_name(in c, n32(a.x(add(e.c, idx))))
+}
+
+fn load_vec_col_name(in c: Ctx, in a: Ast, e: Ex, is_static: bool) -> u32 {
+    let start = if is_static && e.m >= 2 {
+        1
+    } else {
+        0
+    };
+    let rem = wrapping_sub(e.m, start);
+    if rem == 1 {
+        field_arg_name(in c, n32(a.x(add(e.c, start))))
+    } else if rem == 2 {
+        field_arg_name(in c, n32(a.x(add(e.c, inc(start)))))
+    } else {
+        NONE32
+    }
+}
+
+// Returns ADT index when `seq_ty` is `TiledSeq[T]` for a tiled ADT, else NONE32.
+fn tiled_seq_adt(in c: Ctx, seq_ty: u32) -> u32 {
+    if !is_tiled_seq(in c, seq_ty) {
+        return NONE32;
+    }
+    let elem = c.types.arg(seq_ty, 0);
+    let en = c.types.node(elem);
+    if en.kind != K_NAMED || en.n != 0 {
+        return NONE32;
+    }
+    let ai = c.world.lookup(en.name);
+    if ai == NONE32 || c.world.adt(ai).tile == 0 {
+        return NONE32;
+    }
+    ai
+}
+
+// ADT name for `TiledSeq::new` / `with_capacity` / `with_region`, or NONE32.
+fn tiled_new_adt(in c: Ctx, in a: Ast, e: Ex) -> u32 {
+    let res = span_type(in c, e.s0, e.s1);
+    let elem = if is_tiled_seq(in c, res) {
+        c.types.arg(res, 0)
+    } else if e.m > 0 {
+        n32(a.x(e.c))
+    } else {
+        return NONE32;
+    };
+    let ename = c.types.name(elem);
+    let ai = c.world.lookup(ename);
+    if ai == NONE32 {
+        NONE32
+    } else {
+        c.world.adt(ai).name
+    }
+}
+
+fn format_tiled_adt(inout c: Ctx, in prefix: Str, adt: u32) -> u32 {
+    let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put_str(inout buf, in prefix);
+    put_str(inout buf, " { adt: ");
+    put_quoted(inout buf, in c.names, adt);
+    put_str(inout buf, " }");
+    c.names.intern(in buf.as_slice())
+}
+
+fn format_tiled_col(inout c: Ctx, in prefix: Str, adt: u32, field: u32) -> u32 {
+    let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put_str(inout buf, in prefix);
+    put_str(inout buf, " { adt: ");
+    put_quoted(inout buf, in c.names, adt);
+    put_str(inout buf, ", field: ");
+    put_quoted(inout buf, in c.names, field);
+    put_str(inout buf, " }");
+    c.names.intern(in buf.as_slice())
+}
+
+pub fn resolve_tiled(inout c: Ctx, in a: Ast, e: Ex, name: u32, receiver: u64) -> TiledRes {
+    let mut recv_ty = NONE32;
+    let mut op_start: u64 = 0;
+    if receiver != NONE64 {
+        let base = a.ex(receiver);
+        let bt = span_type(in c, base.s0, base.s1);
+        if !is_tiled_seq(in c, bt) {
+            return no_tiled();
+        }
+        recv_ty = bt;
+        // `name` is "TiledSeq::{method}" from `call`; find last `::` or start after "TiledSeq::".
+        op_start = 10;
+        let size = c.names.size(name);
+        let mut i: u64 = 0;
+        loop {
+            if inc(i) >= size {
+                break;
+            }
+            if c.names.byte(name, i) == 58 && c.names.byte(name, inc(i)) == 58 {
+                op_start = add(i, 2);
+                i = add(i, 2);
+            } else {
+                i = inc(i);
+            }
+        }
+    } else {
+        if !c.names.has_prefix(name, in "TiledSeq::".as_bytes()) {
+            return no_tiled();
+        }
+        op_start = 10;
+        if e.n > 0 {
+            let a0 = a.ex(a.x(inc(e.b)));
+            let t0 = span_type(in c, a0.s0, a0.s1);
+            if is_tiled_seq(in c, t0) {
+                recv_ty = t0;
+            }
+        }
+    }
+    if receiver == NONE64 && slice_suffix(in c.names, name, op_start, "new") {
+        let adt = tiled_new_adt(in c, in a, e);
+        if adt == NONE32 {
+            return no_tiled();
+        }
+        return TiledRes {
+            matched: true,
+            label: format_tiled_adt(inout c, "New", adt),
+            cap: 0,
+            recv_pass: P_IN,
+            recv_proj: NONE32,
+            skip_first: false,
+            is_recv_first: false
+        };
+    }
+    if receiver == NONE64 && slice_suffix(in c.names, name, op_start, "with_capacity") {
+        let adt = tiled_new_adt(in c, in a, e);
+        if adt == NONE32 {
+            return no_tiled();
+        }
+        return TiledRes {
+            matched: true,
+            label: format_tiled_adt(inout c, "WithCapacity", adt),
+            cap: 0,
+            recv_pass: P_IN,
+            recv_proj: NONE32,
+            skip_first: false,
+            is_recv_first: false
+        };
+    }
+    if receiver == NONE64 && slice_suffix(in c.names, name, op_start, "with_region") {
+        let adt = tiled_new_adt(in c, in a, e);
+        if adt == NONE32 || e.n == 0 {
+            return no_tiled();
+        }
+        let a0 = a.ex(a.x(inc(e.b)));
+        if a0.kind != X_NAME {
+            return no_tiled();
+        }
+        let rlabel = n32(a0.a);
+        let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        put_str(inout buf, "WithRegion { adt: ");
+        put_quoted(inout buf, in c.names, adt);
+        put_str(inout buf, ", region_label: ");
+        put_quoted(inout buf, in c.names, rlabel);
+        put_str(inout buf, " }");
+        let label = c.names.intern(in buf.as_slice());
+        return TiledRes {
+            matched: true,
+            label: label,
+            cap: wrapping_add(rlabel, 1),
+            recv_pass: P_IN,
+            recv_proj: NONE32,
+            skip_first: true,
+            is_recv_first: false
+        };
+    }
+    if slice_suffix(in c.names, name, op_start, "len") {
+        return TiledRes {
+            matched: true,
+            label: sym_str(inout c, "Len"),
+            cap: 0,
+            recv_pass: P_IN,
+            recv_proj: NONE32,
+            skip_first: false,
+            is_recv_first: true
+        };
+    }
+    let ai = tiled_seq_adt(in c, recv_ty);
+    if ai == NONE32 {
+        return no_tiled();
+    }
+    let adt_row = c.world.adt(ai);
+    let width = wrapping_sub(adt_row.tile, 1);
+    if slice_suffix(in c.names, name, op_start, "tile_count") {
+        let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        put_str(inout buf, "TileCount { tile_width: ");
+        push_decimal(inout buf, w(width));
+        put_str(inout buf, " }");
+        return TiledRes {
+            matched: true,
+            label: c.names.intern(in buf.as_slice()),
+            cap: 0,
+            recv_pass: P_IN,
+            recv_proj: NONE32,
+            skip_first: false,
+            is_recv_first: true
+        };
+    }
+    if slice_suffix(in c.names, name, op_start, "push") {
+        return TiledRes {
+            matched: true,
+            label: format_tiled_adt(inout c, "Push", adt_row.name),
+            cap: 0,
+            recv_pass: P_INOUT,
+            recv_proj: NONE32,
+            skip_first: false,
+            is_recv_first: true
+        };
+    }
+    if slice_suffix(in c.names, name, op_start, "get") {
+        return TiledRes {
+            matched: true,
+            label: format_tiled_adt(inout c, "Get", adt_row.name),
+            cap: 0,
+            recv_pass: P_IN,
+            recv_proj: NONE32,
+            skip_first: false,
+            is_recv_first: true
+        };
+    }
+    if slice_suffix(in c.names, name, op_start, "set") {
+        return TiledRes {
+            matched: true,
+            label: format_tiled_adt(inout c, "Set", adt_row.name),
+            cap: 0,
+            recv_pass: P_INOUT,
+            recv_proj: NONE32,
+            skip_first: false,
+            is_recv_first: true
+        };
+    }
+    if slice_suffix(in c.names, name, op_start, "col_get") {
+        let field = col_name_from_type_args(in c, in a, e, receiver == NONE64);
+        if field == NONE32 {
+            return no_tiled();
+        }
+        return TiledRes {
+            matched: true,
+            label: format_tiled_col(inout c, "ColGet", adt_row.name, field),
+            cap: 0,
+            recv_pass: P_IN,
+            recv_proj: field,
+            skip_first: false,
+            is_recv_first: true
+        };
+    }
+    if slice_suffix(in c.names, name, op_start, "col_set") {
+        let field = col_name_from_type_args(in c, in a, e, receiver == NONE64);
+        if field == NONE32 {
+            return no_tiled();
+        }
+        return TiledRes {
+            matched: true,
+            label: format_tiled_col(inout c, "ColSet", adt_row.name, field),
+            cap: 0,
+            recv_pass: P_INOUT,
+            recv_proj: field,
+            skip_first: false,
+            is_recv_first: true
+        };
+    }
+    if slice_suffix(in c.names, name, op_start, "load_tile_vec") {
+        let field = load_vec_col_name(in c, in a, e, receiver == NONE64);
+        if field == NONE32 || adt_row.vn == 0 {
+            return no_tiled();
+        }
+        let v = c.world.variant(w(adt_row.va));
+        let fi = c.world.find_field(v, field);
+        if fi == NONE32 {
+            return no_tiled();
+        }
+        let elem = elem_from_type(in c, c.world.field(w(fi)).ty);
+        let shape = pack_shape(elem, w(width));
+        if shape == NONE64 {
+            return no_tiled();
+        }
+        let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        put_str(inout buf, "LoadTileVec { adt: ");
+        put_quoted(inout buf, in c.names, adt_row.name);
+        put_str(inout buf, ", field: ");
+        put_quoted(inout buf, in c.names, field);
+        put_str(inout buf, ", shape: ");
+        put_shape(inout buf, elem, w(width));
+        put_str(inout buf, " }");
+        return TiledRes {
+            matched: true,
+            label: c.names.intern(in buf.as_slice()),
+            cap: 0,
+            recv_pass: P_IN,
+            recv_proj: field,
+            skip_first: false,
+            is_recv_first: true
+        };
+    }
+    no_tiled()
+}
+
+// ----- VectorOp --------------------------------------------------------------
+
+fn profile_name(in c: Ctx, s: u32) -> bool {
+    eq(in c, s, "Baseline128")
+        || eq(in c, s, "Avx2")
+        || eq(in c, s, "Avx512")
+        || eq(in c, s, "Sve2")
+        || eq(in c, s, "Rvv1")
+}
+
+// Lookup intrinsic Debug string and mode: returns (label bytes in `intr`,
+// is_convert, const_mode, is_load_masked), or false if not a vector intrinsic.
+fn lookup_vec_intrinsic(
+    in c: Ctx,
+    name: u32,
+    at: u64,
+    inout intr: ChunkSeq[u8],
+    inout is_conv: bool,
+    inout cmode: u8,
+    inout is_load_masked: bool
+) -> bool {
+    let op = add(at, 2);
+    is_conv = false;
+    cmode = C_NONE;
+    is_load_masked = false;
+    if slice_prefix(in c.names, name, at, "Vec") {
+        if slice_suffix(in c.names, name, op, "splat") {
+            put_str(inout intr, "Splat");
+        } else if slice_suffix(in c.names, name, op, "from") {
+            put_str(inout intr, "From");
+        } else if slice_suffix(in c.names, name, op, "add") {
+            put_str(inout intr, "Binary(Add)");
+        } else if slice_suffix(in c.names, name, op, "sub") {
+            put_str(inout intr, "Binary(Sub)");
+        } else if slice_suffix(in c.names, name, op, "mul") {
+            put_str(inout intr, "Binary(Mul)");
+        } else if slice_suffix(in c.names, name, op, "div") {
+            put_str(inout intr, "Binary(Div)");
+        } else if slice_suffix(in c.names, name, op, "min") {
+            put_str(inout intr, "Binary(Min)");
+        } else if slice_suffix(in c.names, name, op, "max") {
+            put_str(inout intr, "Binary(Max)");
+        } else if slice_suffix(in c.names, name, op, "and") {
+            put_str(inout intr, "Binary(And)");
+        } else if slice_suffix(in c.names, name, op, "or") {
+            put_str(inout intr, "Binary(Or)");
+        } else if slice_suffix(in c.names, name, op, "xor") {
+            put_str(inout intr, "Binary(Xor)");
+        } else if slice_suffix(in c.names, name, op, "saturating_add") {
+            put_str(inout intr, "Binary(SaturatingAdd)");
+        } else if slice_suffix(in c.names, name, op, "saturating_sub") {
+            put_str(inout intr, "Binary(SaturatingSub)");
+        } else if slice_suffix(in c.names, name, op, "not") {
+            put_str(inout intr, "Not");
+        } else if slice_suffix(in c.names, name, op, "sqrt") {
+            put_str(inout intr, "Unary(Sqrt)");
+        } else if slice_suffix(in c.names, name, op, "abs") {
+            put_str(inout intr, "Unary(Abs)");
+        } else if slice_suffix(in c.names, name, op, "neg") {
+            put_str(inout intr, "Unary(Neg)");
+        } else if slice_suffix(in c.names, name, op, "mul_add") {
+            put_str(inout intr, "MulAdd");
+        } else if slice_suffix(in c.names, name, op, "to_bits") {
+            put_str(inout intr, "Convert(ToBits)");
+            is_conv = true;
+        } else if slice_suffix(in c.names, name, op, "from_bits") {
+            put_str(inout intr, "Convert(FromBits)");
+            is_conv = true;
+        } else if slice_suffix(in c.names, name, op, "widen_f64") {
+            put_str(inout intr, "Convert(Widen)");
+            is_conv = true;
+        } else if slice_suffix(in c.names, name, op, "nearest_f32") {
+            put_str(inout intr, "Convert(Narrow)");
+            is_conv = true;
+        } else if slice_suffix(in c.names, name, op, "shl") {
+            put_str(inout intr, "Shift(Shl)");
+        } else if slice_suffix(in c.names, name, op, "shr") {
+            put_str(inout intr, "Shift(Shr)");
+        } else if slice_suffix(in c.names, name, op, "eq") {
+            put_str(inout intr, "Compare(Eq)");
+        } else if slice_suffix(in c.names, name, op, "ne") {
+            put_str(inout intr, "Compare(Ne)");
+        } else if slice_suffix(in c.names, name, op, "lt") {
+            put_str(inout intr, "Compare(Lt)");
+        } else if slice_suffix(in c.names, name, op, "le") {
+            put_str(inout intr, "Compare(Le)");
+        } else if slice_suffix(in c.names, name, op, "gt") {
+            put_str(inout intr, "Compare(Gt)");
+        } else if slice_suffix(in c.names, name, op, "ge") {
+            put_str(inout intr, "Compare(Ge)");
+        } else if slice_suffix(in c.names, name, op, "select") {
+            put_str(inout intr, "Select");
+        } else if slice_suffix(in c.names, name, op, "reduce_add") {
+            put_str(inout intr, "Reduce(Add)");
+        } else if slice_suffix(in c.names, name, op, "reduce_xor") {
+            put_str(inout intr, "Reduce(Xor)");
+        } else if slice_suffix(in c.names, name, op, "reduce_or") {
+            put_str(inout intr, "Reduce(Or)");
+        } else if slice_suffix(in c.names, name, op, "reduce_and") {
+            put_str(inout intr, "Reduce(And)");
+        } else if slice_suffix(in c.names, name, op, "reduce_min") {
+            put_str(inout intr, "Reduce(Min)");
+        } else if slice_suffix(in c.names, name, op, "reduce_max") {
+            put_str(inout intr, "Reduce(Max)");
+        } else if slice_suffix(in c.names, name, op, "extract") {
+            put_str(inout intr, "Extract");
+            cmode = C_SECOND;
+        } else if slice_suffix(in c.names, name, op, "replace") {
+            put_str(inout intr, "Replace");
+            cmode = C_SECOND;
+        } else if slice_suffix(in c.names, name, op, "shuffle") {
+            put_str(inout intr, "Shuffle");
+            cmode = C_TAIL;
+        } else if slice_suffix(in c.names, name, op, "load_masked") {
+            put_str(inout intr, "LoadMasked");
+            is_load_masked = true;
+        } else {
+            return false;
+        }
+        return true;
+    }
+    if slice_prefix(in c.names, name, at, "Mask") {
+        if slice_suffix(in c.names, name, op, "and") {
+            put_str(inout intr, "MaskBinary(And)");
+        } else if slice_suffix(in c.names, name, op, "or") {
+            put_str(inout intr, "MaskBinary(Or)");
+        } else if slice_suffix(in c.names, name, op, "xor") {
+            put_str(inout intr, "MaskBinary(Xor)");
+        } else if slice_suffix(in c.names, name, op, "not") {
+            put_str(inout intr, "MaskNot");
+        } else if slice_suffix(in c.names, name, op, "count") {
+            put_str(inout intr, "MaskCount");
+        } else if slice_suffix(in c.names, name, op, "bitmask") {
+            put_str(inout intr, "MaskBitmask");
+        } else if slice_suffix(in c.names, name, op, "any") {
+            put_str(inout intr, "MaskAny");
+        } else if slice_suffix(in c.names, name, op, "all") {
+            put_str(inout intr, "MaskAll");
+        } else if slice_suffix(in c.names, name, op, "in_bounds") {
+            put_str(inout intr, "InBounds");
+        } else if slice_suffix(in c.names, name, op, "active") {
+            put_str(inout intr, "Active");
+        } else {
+            return false;
+        }
+        return true;
+    }
+    false
+}
+
+pub fn resolve_vector(inout c: Ctx, in a: Ast, e: Ex, name: u32) -> VecRes {
+    if eq(in c, name, "Isa::supported") {
+        if e.m != 1 {
+            return no_vec();
+        }
+        let t0 = n32(a.x(e.c));
+        let nd = c.types.node(t0);
+        if nd.kind != K_NAMED || nd.n != 0 || !profile_name(in c, nd.name) {
+            return no_vec();
+        }
+        let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        put_str(inout buf, "IsaSupported(");
+        c.names.write(nd.name, inout buf);
+        buf.push(41);
+        return VecRes {
+            matched: true,
+            label: c.names.intern(in buf.as_slice()),
+            const_lo: 0,
+            const_hi: 0
+        };
+    }
+    let at = split_colons(in c.names, name);
+    if at == NONE64 {
+        return no_vec();
+    }
+    let mut intr: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut is_conv = false;
+    let mut cmode = C_NONE;
+    let mut is_load_masked = false;
+    if !lookup_vec_intrinsic(
+        in c,
+        name,
+        at,
+        inout intr,
+        inout is_conv,
+        inout cmode,
+        inout is_load_masked
+    ) {
+        return no_vec();
+    }
+    let arg0_ty = if e.n > 0 {
+        let a0 = a.ex(a.x(inc(e.b)));
+        span_type(in c, a0.s0, a0.s1)
+    } else {
+        NONE32
+    };
+    if is_load_masked && is_seq_or_slice(in c, arg0_ty) {
+        return no_vec();
+    }
+    let op_shape = shape_of(in c, arg0_ty);
+    let shape = if is_conv {
+        op_shape
+    } else {
+        let res = shape_of(in c, span_type(in c, e.s0, e.s1));
+        if res != NONE64 {
+            res
+        } else if op_shape != NONE64 {
+            op_shape
+        } else {
+            explicit_shape(in c, in a, e)
+        }
+    };
+    if shape == NONE64 {
+        return no_vec();
+    }
+    let mut const_lo: u64 = 0;
+    let mut const_hi: u64 = 0;
+    if cmode == C_SECOND {
+        if e.n < 2 {
+            return no_vec();
+        }
+        const_lo = 1;
+        const_hi = 2;
+    } else if cmode == C_TAIL {
+        if e.n == 0 {
+            return no_vec();
+        }
+        const_lo = 1;
+        const_hi = e.n;
+    }
+    let mut consts: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for i in const_lo..const_hi {
+        let ax = a.ex(a.x(add(e.b, inc(wrapping_mul(i, 2)))));
+        if ax.kind != X_LITERAL || ax.a != LIT_INT || ax.c != 0 || ax.b > 65535 {
+            return no_vec();
+        }
+        consts.push(ax.b);
+    }
+    let elem = wrapping_u8(wrapping_shr_u64(shape, 16));
+    let lanes = shape & 65535;
+    let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put_str(inout buf, "Lanes { intrinsic: ");
+    buf.extend(in intr.as_slice());
+    put_str(inout buf, ", shape: ");
+    put_shape(inout buf, elem, lanes);
+    put_str(inout buf, ", constants: [");
+    for i in 0..consts.len() {
+        if i > 0 {
+            put_str(inout buf, ", ");
+        }
+        push_decimal(
+            inout buf,
+            match consts.try_get(i) {
+                Option::Some(v) => v,
+                Option::None => 0,
+            }
+        );
+    }
+    put_str(inout buf, "] }");
+    VecRes {
+        matched: true,
+        label: c.names.intern(in buf.as_slice()),
+        const_lo: const_lo,
+        const_hi: const_hi
+    }
+}

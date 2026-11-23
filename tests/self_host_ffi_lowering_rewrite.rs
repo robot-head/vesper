@@ -194,7 +194,12 @@ impl Dump {
         match &p.kind {
             PatternKind::Wild => self.line(d, &format!("P _{s}")),
             PatternKind::Bind(n) => self.line(d, &format!("P bind {}{s}", q(n))),
-            PatternKind::Literal(l) => self.line(d, &format!("P lit {}{s}", lit(l))),
+            PatternKind::Literal(l) => {
+                let ty = p
+                    .integer_kind
+                    .map_or_else(String::new, |k| format!(" type={}", q(k.name())));
+                self.line(d, &format!("P lit {}{ty}{s}", lit(l)));
+            }
             PatternKind::Tuple(ps) => {
                 self.line(d, &format!("P tuple{s}"));
                 for p in ps {
@@ -979,6 +984,21 @@ fn values() -> u64 eff [Ffi[Bridge]] {
 }
 "#,
     ),
+    (
+        "ConstProbe",
+        r#"
+fn uses_consts(v: i32) -> i32 eff [Ffi[ConstProbe]] {
+    let a = ConstProbe::O_CREAT;
+    let b = ConstProbe::NEG;
+    let c = match v {
+        ConstProbe::O_CREAT => 1,
+        ConstProbe::NEG => 2,
+        _ => ConstProbe::check_flags(a),
+    };
+    c + b
+}
+"#,
+    ),
 ];
 
 /// Textual mutants of the Bridge fixture that make each rewriter error
@@ -1300,7 +1320,7 @@ fn embedded_sources(text: &str) -> Vec<String> {
 /// address, unit and handle parameters, pointer results, nested and
 /// byte-array structs, every slice and pointer form, `errno`, `CStr`,
 /// reserved and duplicate names.
-const HANDWRITTEN: [&str; 6] = [
+const HANDWRITTEN: [&str; 7] = [
     r#"sys library Shapes (
     target = "x86_64-unknown-linux-gnu", abi = "sysv64",
     link = "dynamic", name = "shapes", artifact = "blake3:@DIGEST@",
@@ -1372,6 +1392,19 @@ const HANDWRITTEN: [&str; 6] = [
 ) {
     wire struct ForeignInvalid { raw: u64 }
     fn f(nocapture in x: ForeignInvalid) -> ForeignVal[bool];
+}"#,
+    r#"sys library ConstProbe (
+    target = "x86_64-unknown-linux-gnu", abi = "sysv64",
+    link = "static", name = "constprobe", artifact = "blake3:@DIGEST@"
+) {
+    const BYTE_MAX: u8 = 255;
+    const O_CREAT: i32 = 0o100;
+    const NEG: i32 = -1;
+    const FLAG: u64 = 0x200;
+    const PAGE: usize = 4096;
+    const I64_MIN: i64 = -9223372036854775808;
+    const U64_MAX: u64 = 18446744073709551615;
+    fn check_flags(flags: i32) -> ForeignVal[i32];
 }"#,
 ];
 

@@ -14,7 +14,8 @@ use @vesper/check-data::names::{
 };
 use @vesper/check-data::types::{
     Types,
-    display
+    display,
+    TyKind
 };
 use @vesper/check-data::world::{
     Known,
@@ -33,7 +34,6 @@ use self::vector::{
 };
 
 const NONE32: u32 = 4294967295;
-const K_NAMED: u8 = 1;
 const T_HOT: u8 = 1;
 const T_COLD: u8 = 2;
 
@@ -43,7 +43,7 @@ pub fn is_valid_width(width: u64) -> bool {
 
 pub fn is_tiled_seq(in t: Types, k: Known, ty: u32) -> bool {
     let n = t.node(ty);
-    n.kind == K_NAMED && n.name == k.tiled_seq && (n.n == 1 || n.n == 2)
+    n.kind == TyKind::Named && n.name == k.tiled_seq && (n.n == 1 || n.n == 2)
 }
 
 // `seq_elem`, or NONE32.
@@ -62,7 +62,7 @@ pub fn seq_adt(in t: Types, in wd: World, k: Known, ty: u32) -> u32 {
         return NONE32;
     }
     let n = t.node(e);
-    if n.kind != K_NAMED || n.n != 0 {
+    if n.kind != TyKind::Named || n.n != 0 {
         return NONE32;
     }
     let id = wd.lookup(n.name);
@@ -75,7 +75,7 @@ pub fn seq_adt(in t: Types, in wd: World, k: Known, ty: u32) -> u32 {
 // `hot_elem_bytes`, or 0.
 pub fn hot_elem_bytes(in t: Types, k: Known, ty: u32) -> u64 {
     let n = t.node(ty);
-    if n.kind != K_NAMED || n.n != 0 {
+    if n.kind != TyKind::Named || n.n != 0 {
         return 0;
     }
     let s = n.name;
