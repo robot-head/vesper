@@ -214,7 +214,48 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         ("strstr", strstr as *const u8),
     ]
 }
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn libc_symbols() -> Vec<(&'static str, *const u8)> {
+    use std::ffi::c_void;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetCommandLineW() -> *const u16;
+        fn GetCurrentDirectoryW(n_buffer_length: u32, lp_buffer: *mut u16) -> u32;
+        fn GetEnvironmentVariableW(lp_name: *const u16, lp_buffer: *mut u16, n_size: u32) -> u32;
+        fn GetEnvironmentStringsW() -> *mut u16;
+        fn FreeEnvironmentStringsW(lpsz_environment_block: *mut u16) -> i32;
+        fn lstrlenW(lp_string: *const u16) -> i32;
+        fn WideCharToMultiByte(
+            code_page: u32,
+            dw_flags: u32,
+            lp_wide_char_str: *const u16,
+            cch_wide_char: i32,
+            lp_multi_byte_str: *mut u8,
+            cb_multi_byte: i32,
+            lp_default_char: *const c_void,
+            lp_used_default_char: *mut i32,
+        ) -> i32;
+    }
+    vec![
+        ("GetCommandLineW", GetCommandLineW as *const u8),
+        ("GetCurrentDirectoryW", GetCurrentDirectoryW as *const u8),
+        (
+            "GetEnvironmentVariableW",
+            GetEnvironmentVariableW as *const u8,
+        ),
+        (
+            "GetEnvironmentStringsW",
+            GetEnvironmentStringsW as *const u8,
+        ),
+        (
+            "FreeEnvironmentStringsW",
+            FreeEnvironmentStringsW as *const u8,
+        ),
+        ("lstrlenW", lstrlenW as *const u8),
+        ("WideCharToMultiByte", WideCharToMultiByte as *const u8),
+    ]
+}
+#[cfg(not(any(unix, windows)))]
 fn libc_symbols() -> Vec<(&'static str, *const u8)> {
     vec![]
 }

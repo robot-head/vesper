@@ -35,7 +35,7 @@ semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 vesper-loom-calculus = { path = "../../vesper-loom-calculus/seed", package = "vesper-loom-calculus-seed" }
-vesper-loom-cas = { path = "../../vesper-loom-cas" }
+vesper-loom-cas = { path = "../../vesper-loom-cas/seed", package = "vesper-loom-cas-seed" }
 
 [lints.rust]
 # cfg(vesper_port) is set only by the port-backed package's build script.
