@@ -831,6 +831,32 @@ pub mod control {
     /// `emit_drop_boxed`: drop boxed object via vtable word 0 and free block.
     /// Args `[block, header, box_free_id]`; no result.
     pub const DYN_DROP_BOXED: u32 = 37;
+    /// `native_session::session_park` prep: load evidence identity and optional
+    /// staging address. Args `[ptr_code, ctx, depth, has_buffer, staging,
+    /// ctx_evidence_off, ev_slots_off, slot_size, slot_identity_off,
+    /// ctx_data_base_off]`; answers `[identity, staged]`.
+    pub const SESSION_PARK_PREP: u32 = 38;
+    /// `native_session::session_park` emit: fill `ctx.park`, call `park`,
+    /// check signal/identity, branch on resume kind, switch to `on_value`.
+    /// Args `[ptr_code, park_ref, ctx, identity, op_tag, arg0, arg1,
+    /// violation_blk, has_buffer, staging, park_at, park_evidence_off,
+    /// park_op_off, park_flags_off, park_arg0_off, park_arg1_off,
+    /// resume_evidence_off, resume_kind_off, resume_value_off,
+    /// resume_data_base_off, kind_value, kind_error, kind_cancelled]`;
+    /// answers `[park_value, park_data_base, on_error, on_cancel, join,
+    /// staged_after]`.
+    pub const SESSION_PARK_EMIT: u32 = 39;
+    /// `native_session`: load `ctx.data_base` and add `offset`.
+    /// Args `[ptr_code, ctx, ctx_data_base_off, offset]`; answers `[dest]`.
+    pub const SESSION_DATA_OFFSET: u32 = 40;
+    /// `native_session`: store `ctx.result` (with optional f64/f32 bitcast)
+    /// and return `status`, optionally creating & switching to a dead block.
+    /// Args `[ctx, ctx_result_off, status, result_kind, value, create_dead]`;
+    /// answers `[dead]` if `create_dead == 1`.
+    pub const SESSION_EXIT: u32 = 41;
+    /// `native_session`: switch to `violation` block and return `status`.
+    /// Args `[violation_blk, status]`; no result.
+    pub const SESSION_VIOLATION: u32 = 42;
 }
 
 /// The `ffi` family's requests (SH4 lane 13, #1287): one foreign (`.vsys`)
