@@ -8567,6 +8567,24 @@ impl<M: Module> Codegen<'_, '_, M> {
                 _ => result,
             }
         } else {
+            if self.operands_only
+                && name == crate::integer_widths::MUL_WIDE
+                && dyn_target.is_none()
+                && values.len() == 2
+                && crate::codegen_swap::hook(crate::codegen_swap::Family::Call).is_none()
+            {
+                let a = values[0];
+                let b = values[1];
+                let lo = self.b.ins().imul(a, b);
+                let hi = self.b.ins().umulhi(a, b);
+                let buffer = match into {
+                    Some(out) => out,
+                    None => self.alloc_uninit(16),
+                };
+                self.b.ins().store(ir::MemFlags::new(), lo, buffer, 0);
+                self.b.ins().store(ir::MemFlags::new(), hi, buffer, 8);
+                return Ok(buffer);
+            }
             let key = instance_key(name, &vars);
             let id = match (&self.trace_entry, dyn_target) {
                 (_, Some(_)) => None,

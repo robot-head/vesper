@@ -243,7 +243,7 @@ fn is_fast_return_arm(
             }
         }
     }
-    Some(non_const)
+    (non_const >= 2).then_some(non_const)
 }
 
 fn build_closed_region(
@@ -469,7 +469,9 @@ fn region_worth_outlining(
     }
     match kind {
         OutlineKind::ExplicitCold => calls > 0 || non_term_insts >= EXPLICIT_COLD_MIN_INSTS,
-        OutlineKind::AsymmetricTail => non_term_insts >= ASYM_MIN_COLD_INSTS,
+        OutlineKind::AsymmetricTail => {
+            (calls > 0 || !region.has_return) && non_term_insts >= ASYM_MIN_COLD_INSTS
+        }
         OutlineKind::LoopEarlyExit => calls > 0 || non_term_insts >= LOOP_EXIT_MIN_INSTS,
     }
 }
