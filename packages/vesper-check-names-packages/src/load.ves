@@ -11,6 +11,7 @@
 //   files      count; per file its display path (str) and base offset
 //   modules    count; per module its package, its path (count, then str
 //              each segment), its file and its source text (str)
+//   foreign types (optional suffix) count; per type the package and name (str)
 //
 // Package 0 is the root package.
 
@@ -139,6 +140,17 @@ pub fn decode(inout s: St, in input: Str) {
         }
         if pkg == 0 && ns == 0 {
             s.root_mod = n32(m);
+        }
+    }
+    // An absent suffix is a graph with no foreign types.
+    let nforeign = rd(in input.as_bytes(), inout pos);
+    path.clear();
+    for _i in 0..nforeign {
+        let pkg = n32(rd(in input.as_bytes(), inout pos));
+        let name = rd_sym(inout s, in input, inout pos);
+        let root = find_module(in s, pkg, in path);
+        if root != none() {
+            s.foreign_types.insert(pair(root, name), 1);
         }
     }
 }

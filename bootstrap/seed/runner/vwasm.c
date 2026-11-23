@@ -24,10 +24,15 @@
  *     --invoke NAME   call the export NAME (default: "wasi:cli/run@0.2.0#run"
  *                     if present, else "vesper:program/entry@0.1.0#main",
  *                     else "_start", else "main")
+ *     --arg VALUE     append one WASI argument (including the program name)
+ *     --env KEY=VALUE append one WASI environment entry
+ *     --cwd PATH      report PATH as the guest's initial working directory
  *     --print         print the flat results of the call, one per line,
  *                     as signed decimal (i32/i64) or %.17g (f32/f64)
  *     --fuel N        trap after N instructions (0 = unlimited, the default)
  *     --stack N       value stack slots (default 16M)
+ *     --input G H     grant read access to host file H as virtual path G
+ *     --output G H    grant write/create access to host file H as G
  *     --dump          print the module's imports and exports and exit
  *     --report FILE   write "ok", the flat results (one per line, as hex
  *                     bit patterns) and "memory PAGES FNV1A64" to FILE, or
@@ -212,6 +217,10 @@ typedef struct Vm {
   Segment *elems; /* element segments as function index arrays (data = u32 array) */
   uint32_t nelems;
   int32_t start;
+  char **args, **env;
+  uint32_t nargs, nenv;
+  const char *cwd;
+  int in_realloc;
   /* execution */
   uint64_t *stack;
   size_t stack_cap;
@@ -421,7 +430,7 @@ static const uint8_t *find_core_module(const uint8_t *buf, size_t len, size_t *m
   return NULL;
 }
 
-static HostFn resolve_host(const char *module, const char *name);
+static HostFn resolve_host(const char *module, const char *name, const FuncType *type);
 
 static void load(Vm *vm, const uint8_t *buf, size_t len) {
   if (len < 8 || memcmp(buf, "\0asm\1\0\0\0", 8) != 0) LOAD_FAIL("not a core WebAssembly module");
@@ -476,7 +485,7 @@ static void load(Vm *vm, const uint8_t *buf, size_t len) {
           f->type = ty;
           f->imp_module = m;
           f->imp_name = nm;
-          f->host = resolve_host(m, nm);
+          f->host = resolve_host(m, nm, &vm->types[ty]);
           vm->nimports++;
         } else {
           LOAD_FAIL("import %s.%s: only function imports are supported", m, nm);
@@ -649,6 +658,81 @@ static uint8_t *mem_at(Vm *vm, uint64_t addr, uint64_t n) {
   return vm->mem + addr;
 }
 
+static int find_export(Vm *vm, const char *name);
+static void invoke(Vm *vm, uint32_t entry, uint64_t *args, uint64_t *results);
+
+/* Lower a WASI list or string using the allocating module's canonical ABI. */
+static uint32_t guest_alloc(Vm *vm, uint32_t align, uint32_t len) {
+  if (!len) return align;
+  int idx = find_export(vm, "cabi_realloc");
+  if (idx < 0 || (uint32_t)idx >= vm->nfuncs || vm->funcs[idx].host)
+    TRAP("WASI result requires a guest cabi_realloc");
+  const FuncType *type = &vm->types[vm->funcs[idx].type];
+  if (type->np != 4 || type->nr != 1 || type->r[0] != T_I32 ||
+      type->p[0] != T_I32 || type->p[1] != T_I32 || type->p[2] != T_I32 || type->p[3] != T_I32)
+    TRAP("invalid cabi_realloc signature");
+  if (vm->in_realloc) TRAP("recursive cabi_realloc");
+  uint64_t params[] = {0, 0, align, len}, result;
+  vm->in_realloc = 1;
+  invoke(vm, (uint32_t)idx, params, &result);
+  vm->in_realloc = 0;
+  uint32_t ptr = (uint32_t)result;
+  if (ptr % align) TRAP("cabi_realloc returned a misaligned pointer");
+  mem_at(vm, ptr, len);
+  return ptr;
+}
+
+static void guest_put_u32(Vm *vm, uint64_t addr, uint32_t v) {
+  uint8_t *p = mem_at(vm, addr, 4);
+  for (unsigned k = 0; k < 4; k++) p[k] = (uint8_t)(v >> (8 * k));
+}
+
+static void guest_put_bytes(Vm *vm, uint64_t slot, const void *data, uint32_t len) {
+  uint32_t ptr = guest_alloc(vm, 1, len);
+  if (len) memcpy(mem_at(vm, ptr, len), data, len);
+  guest_put_u32(vm, slot, ptr);
+  guest_put_u32(vm, slot + 4, len);
+}
+
+static void guest_put_string(Vm *vm, uint64_t slot, const char *s, size_t n) {
+  if (n > UINT32_MAX) TRAP("WASI string too long");
+  guest_put_bytes(vm, slot, s, (uint32_t)n);
+}
+
+static uint32_t guest_list(Vm *vm, uint32_t ret, uint32_t count, uint32_t stride) {
+  if (count > UINT32_MAX / stride) TRAP("WASI list too long");
+  uint32_t ptr = guest_alloc(vm, 4, count * stride);
+  guest_put_u32(vm, ret, ptr);
+  guest_put_u32(vm, (uint64_t)ret + 4, count);
+  return ptr;
+}
+
+static void host_arguments(Vm *vm, uint64_t *a, uint64_t *r) {
+  (void)r;
+  uint64_t slot = guest_list(vm, (uint32_t)a[0], vm->nargs, 8);
+  for (uint32_t i = 0; i < vm->nargs; i++, slot += 8)
+    guest_put_string(vm, slot, vm->args[i], strlen(vm->args[i]));
+}
+
+static void host_environment(Vm *vm, uint64_t *a, uint64_t *r) {
+  (void)r;
+  uint64_t slot = guest_list(vm, (uint32_t)a[0], vm->nenv, 16);
+  for (uint32_t i = 0; i < vm->nenv; i++, slot += 16) {
+    const char *entry = vm->env[i], *eq = strchr(entry, '=');
+    guest_put_string(vm, slot, entry, (size_t)(eq - entry));
+    guest_put_string(vm, slot + 8, eq + 1, strlen(eq + 1));
+  }
+}
+
+static void host_cwd(Vm *vm, uint64_t *a, uint64_t *r) {
+  (void)r;
+  uint64_t ret = (uint32_t)a[0];
+  *mem_at(vm, ret, 1) = vm->cwd != NULL;
+  if (vm->cwd) guest_put_string(vm, ret + 4, vm->cwd, strlen(vm->cwd));
+}
+
+#include "seed_files.h"
+
 static void host_get_stdout(Vm *vm, uint64_t *a, uint64_t *r) {
   (void)vm;
   (void)a;
@@ -701,24 +785,48 @@ static void host_missing(Vm *vm, uint64_t *a, uint64_t *r) {
   TRAP("called an import this runner does not provide");
 }
 
-static HostFn resolve_host(const char *module, const char *name) {
+/* Signatures below use i for i32 and I for i64. */
+static int matches_types(const char *signature, const uint8_t *types, uint32_t count) {
+  if (strlen(signature) != count) return 0;
+  for (uint32_t i = 0; i < count; i++)
+    if (types[i] != (signature[i] == 'i' ? T_I32 : T_I64)) return 0;
+  return 1;
+}
+
+static HostFn resolve_host(const char *module, const char *name, const FuncType *type) {
   static const struct {
     const char *m, *n;
     HostFn f;
+    const char *params, *results;
   } table[] = {
-      {"wasi:cli/stdout@0.2.0", "get-stdout", host_get_stdout},
-      {"wasi:io/streams@0.2.0", "[method]output-stream.blocking-write-and-flush", host_write_flush},
-      {"wasi:io/streams@0.2.0", "[resource-drop]output-stream", host_nop},
-      {"wasi:clocks/monotonic-clock@0.2.0", "now", host_now},
-      {"vesper:beacon/trace@0.1.0", "current-ctx", host_trace_ctx},
-      {"vesper:beacon/trace@0.1.0", "start-span", host_trace_span},
-      {"vesper:beacon/trace@0.1.0", "start-child", host_trace_child},
-      {"vesper:beacon/trace@0.1.0", "emit-ok", host_nop},
-      {"vesper:beacon/trace@0.1.0", "emit-err", host_nop},
-      {"vesper:beacon/trace@0.1.0", "emit-attr", host_nop},
+      {"wasi:cli/environment@0.2.0", "get-arguments", host_arguments, "i", ""},
+      {"wasi:cli/environment@0.2.0", "get-environment", host_environment, "i", ""},
+      {"wasi:cli/environment@0.2.0", "initial-cwd", host_cwd, "i", ""},
+      {"wasi:filesystem/preopens@0.2.0", "get-directories", host_directories, "i", ""},
+      {"wasi:filesystem/types@0.2.0", "[method]descriptor.open-at", host_open_at, "iiiiiii", ""},
+      {"wasi:filesystem/types@0.2.0", "[method]descriptor.read", host_file_read, "iIIi", ""},
+      {"wasi:filesystem/types@0.2.0", "[method]descriptor.write", host_file_write, "iiiIi", ""},
+      {"wasi:filesystem/types@0.2.0", "[method]descriptor.stat-at", host_file_stat_at, "iiiii", ""},
+      {"wasi:filesystem/types@0.2.0", "[method]descriptor.stat", host_file_stat, "ii", ""},
+      {"wasi:filesystem/types@0.2.0", "[resource-drop]descriptor", host_file_drop, "i", ""},
+      {"wasi:cli/stdout@0.2.0", "get-stdout", host_get_stdout, "", "i"},
+      {"wasi:io/streams@0.2.0", "[method]output-stream.blocking-write-and-flush", host_write_flush, "iiii", ""},
+      {"wasi:io/streams@0.2.0", "[resource-drop]output-stream", host_nop, "i", ""},
+      {"wasi:clocks/monotonic-clock@0.2.0", "now", host_now, "", "I"},
+      {"vesper:beacon/trace@0.1.0", "current-ctx", host_trace_ctx, "i", ""},
+      {"vesper:beacon/trace@0.1.0", "start-span", host_trace_span, "iiii", ""},
+      {"vesper:beacon/trace@0.1.0", "start-child", host_trace_child, "IIIiiiii", ""},
+      {"vesper:beacon/trace@0.1.0", "emit-ok", host_nop, "IIIiIIiI", ""},
+      {"vesper:beacon/trace@0.1.0", "emit-err", host_nop, "IIIiIIiiii", ""},
+      {"vesper:beacon/trace@0.1.0", "emit-attr", host_nop, "IIIiIIiiI", ""},
   };
-  for (size_t i = 0; i < sizeof table / sizeof table[0]; i++)
-    if (!strcmp(table[i].m, module) && !strcmp(table[i].n, name)) return table[i].f;
+  for (size_t i = 0; i < sizeof table / sizeof table[0]; i++) {
+    if (strcmp(table[i].m, module) || strcmp(table[i].n, name)) continue;
+    if (!matches_types(table[i].params, type->p, type->np) ||
+        !matches_types(table[i].results, type->r, type->nr))
+      LOAD_FAIL("incorrect signature for import %s.%s", module, name);
+    return table[i].f;
+  }
   return host_missing;
 }
 
@@ -940,10 +1048,10 @@ static void invoke(Vm *vm, uint32_t entry, uint64_t *args, uint64_t *results) {
   size_t sp = 0, cap = vm->stack_cap;
   uint32_t nframes = 0, nlabels = 0;
   const FuncType *et = &vm->types[vm->funcs[entry].type];
+  if (et->np > cap) TRAP("value stack exhausted");
   for (uint32_t i = 0; i < et->np; i++) S[sp++] = args[i];
   if (vm->funcs[entry].host) {
-    vm->funcs[entry].host(vm, S, S);
-    memcpy(results, S, sizeof(uint64_t) * et->nr);
+    vm->funcs[entry].host(vm, args, results);
     free(frames);
     free(labels);
     return;
@@ -1210,7 +1318,13 @@ static void invoke(Vm *vm, uint32_t entry, uint64_t *args, uint64_t *results) {
         if (gt->np > 64 || gt->nr > 64) TRAP("host call with too many values");
         sp -= gt->np;
         memcpy(tmp, S + sp, sizeof(uint64_t) * gt->np);
+        /* A canonical ABI import can call back into cabi_realloc. Give it
+           the unused stack suffix, preserving all live locals and operands. */
+        vm->stack = S + sp;
+        vm->stack_cap = cap - sp;
         g->host(vm, tmp, res);
+        vm->stack = S;
+        vm->stack_cap = cap;
         memcpy(S + sp, res, sizeof(uint64_t) * gt->nr);
         sp += gt->nr;
         if (tail) goto do_return;
@@ -1630,6 +1744,9 @@ static void print_value(uint8_t t, uint64_t v) {
 }
 
 int main(int argc, char **argv) {
+  Vm vm = {0};
+  vm.args = xmalloc(sizeof(*vm.args) * (size_t)argc);
+  vm.env = xmalloc(sizeof(*vm.env) * (size_t)argc);
   const char *invoke_name = NULL, *path = NULL;
   int print = 0, dump = 0;
   uint64_t fuel = 0;
@@ -1637,9 +1754,20 @@ int main(int argc, char **argv) {
   int i = 1;
   for (; i < argc; i++) {
     if (!strcmp(argv[i], "--invoke") && i + 1 < argc) invoke_name = argv[++i];
+    else if (!strcmp(argv[i], "--arg") && i + 1 < argc) vm.args[vm.nargs++] = argv[++i];
+    else if (!strcmp(argv[i], "--cwd") && i + 1 < argc) vm.cwd = argv[++i];
+    else if (!strcmp(argv[i], "--env") && i + 1 < argc) {
+      const char *eq = strchr(argv[++i], '=');
+      if (!eq || eq == argv[i]) die(2, "--env expects KEY=VALUE");
+      vm.env[vm.nenv++] = argv[i];
+    }
     else if (!strcmp(argv[i], "--print")) print = 1;
     else if (!strcmp(argv[i], "--dump")) dump = 1;
     else if (!strcmp(argv[i], "--report") && i + 1 < argc) report_path = argv[++i];
+    else if ((!strcmp(argv[i], "--input") || !strcmp(argv[i], "--output")) && i + 2 < argc) {
+      add_seed_file(argv[i + 1], argv[i + 2], !strcmp(argv[i], "--output"));
+      i += 2;
+    }
     else if (!strcmp(argv[i], "--fuel") && i + 1 < argc) fuel = strtoull(argv[++i], NULL, 10);
     else if (!strcmp(argv[i], "--stack") && i + 1 < argc) stack = (size_t)strtoull(argv[++i], NULL, 10);
     else if (argv[i][0] == '-' && argv[i][1] == '-') die(2, "unknown option %s", argv[i]);
@@ -1648,12 +1776,10 @@ int main(int argc, char **argv) {
       break;
     }
   }
-  if (!path) die(2, "usage: vwasm [--invoke NAME] [--print] [--fuel N] [--stack N] [--dump] FILE.wasm [ARG...]");
+  if (!path) die(2, "usage: vwasm [--invoke NAME] [--arg VALUE] [--env KEY=VALUE] [--cwd PATH] [--input G H] [--output G H] [--print] [--fuel N] [--stack N] [--dump] FILE.wasm [ARG...]");
   size_t len, mlen;
   uint8_t *file = read_file(path, &len);
   const uint8_t *mod = find_core_module(file, len, &mlen);
-  Vm vm;
-  memset(&vm, 0, sizeof vm);
   load(&vm, mod, mlen);
   if (dump) {
     for (uint32_t k = 0; k < vm.nimports; k++)

@@ -13,7 +13,6 @@
 use std::{
     collections::BTreeSet,
     ffi::c_int,
-    fs,
     io::{self, Write},
     panic::{self, AssertUnwindSafe},
     path::{Path, PathBuf},
@@ -322,12 +321,11 @@ enum Step {
     EmitHir,
     EmitIr,
     EmitLean,
-    EmitObject,
-    EmitClif,
+    EmitClif = 26,
     IoError,
 }
 
-const STEPS: [Step; 27] = [
+const STEPS: [Step; 26] = [
     Step::IsPackage,
     Step::Load,
     Step::EbpfBuild,
@@ -352,7 +350,6 @@ const STEPS: [Step; 27] = [
     Step::EmitHir,
     Step::EmitIr,
     Step::EmitLean,
-    Step::EmitObject,
     Step::EmitClif,
     Step::IoError,
 ];
@@ -412,8 +409,7 @@ impl Session {
                     self.original = assembled.sources.combined();
                     self.loaded = Some(assembled);
                 } else {
-                    self.original =
-                        fs::read_to_string(input).map_err(|e| format!("{input}: {e}"))?;
+                    self.original = io::read_to_string(arg).map_err(|e| format!("{input}: {e}"))?;
                 }
                 Ok(0)
             }
@@ -667,9 +663,8 @@ impl Session {
                 Ok(0)
             }
             Step::NativeObject => {
-                let object = PathBuf::from(utf8(arg)?);
                 let (bytes, _) = self.native_code()?;
-                fs::write(&object, bytes).map_err(|e| e.to_string())?;
+                self.text = bytes;
                 Ok(0)
             }
             Step::IsWindowsTarget => Ok(i64::from(native::windows::is_windows_target(o.target()))),
@@ -714,12 +709,6 @@ impl Session {
                     o.output(),
                     lean::extract(&self.checked()?.world)?.as_bytes(),
                 )?;
-                Ok(0)
-            }
-            Step::EmitObject => {
-                let path = o.output().ok_or("object output requires -o <path>")?;
-                let (bytes, _) = self.native_code()?;
-                fs::write(path, bytes).map_err(|e| e.to_string())?;
                 Ok(0)
             }
             Step::EmitClif => {
