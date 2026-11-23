@@ -2756,6 +2756,49 @@ fn eliminate_guarded_loop_add_overflows(func: &mut ir::Function) {
             let Some(pred_term) = func.layout.last_inst(pred) else {
                 break;
             };
+            let resolve_guard_val = |val: Value, next_target: &mut Block| -> Option<Value> {
+                let p_val = func.dfg.resolve_aliases(val);
+                let Some(p_idx) = func.dfg.block_params(pred).iter().position(|&p| p == p_val)
+                else {
+                    return Some(p_val);
+                };
+                let mut live_incoming = vec![];
+                for edge in cfg.pred_iter(pred) {
+                    let p = edge.block;
+                    let Some(p_term) = func.layout.last_inst(p) else {
+                        continue;
+                    };
+                    for call in func.dfg.insts[p_term]
+                        .branch_destination(&func.dfg.jump_tables, &func.dfg.exception_tables)
+                    {
+                        if call.block(&func.dfg.value_lists) != pred {
+                            continue;
+                        }
+                        if let Some(BlockArg::Value(v)) =
+                            call.args(&func.dfg.value_lists).nth(p_idx)
+                        {
+                            let is_zero = def_inst(func, v).is_some_and(|vi| {
+                                matches!(
+                                    func.dfg.insts[vi],
+                                    InstructionData::UnaryImm {
+                                        opcode: Opcode::Iconst,
+                                        imm,
+                                    } if imm.bits() == 0
+                                )
+                            });
+                            if !is_zero {
+                                live_incoming.push((p, func.dfg.resolve_aliases(v)));
+                            }
+                        }
+                    }
+                }
+                let [(only_pred, only_val)] = live_incoming[..] else {
+                    return None;
+                };
+                *next_target = only_pred;
+                Some(only_val)
+            };
+
             let mut next_target = pred;
             let guard = match &func.dfg.insts[pred_term] {
                 InstructionData::Brif {
@@ -2766,7 +2809,10 @@ fn eliminate_guarded_loop_add_overflows(func: &mut ir::Function) {
                     let pb0 = pred_blocks[0].block(&func.dfg.value_lists);
                     let pb1 = pred_blocks[1].block(&func.dfg.value_lists);
                     if pb0 == target && pb1 != target {
-                        func.dfg.resolve_aliases(*arg)
+                        let Some(g) = resolve_guard_val(*arg, &mut next_target) else {
+                            break;
+                        };
+                        g
                     } else if pb1 == target && pb0 != target {
                         let resolved = func.dfg.resolve_aliases(*arg);
                         if let Some(ci) = def_inst(func, resolved)
@@ -2778,50 +2824,10 @@ fn eliminate_guarded_loop_add_overflows(func: &mut ir::Function) {
                             } = func.dfg.insts[ci]
                             && imm.bits() == 0
                         {
-                            let p_val = func.dfg.resolve_aliases(inner);
-                            if let Some(p_idx) =
-                                func.dfg.block_params(pred).iter().position(|&p| p == p_val)
-                            {
-                                let mut live_incoming = vec![];
-                                for edge in cfg.pred_iter(pred) {
-                                    let p = edge.block;
-                                    let Some(p_term) = func.layout.last_inst(p) else {
-                                        continue;
-                                    };
-                                    for call in func.dfg.insts[p_term].branch_destination(
-                                        &func.dfg.jump_tables,
-                                        &func.dfg.exception_tables,
-                                    ) {
-                                        if call.block(&func.dfg.value_lists) != pred {
-                                            continue;
-                                        }
-                                        if let Some(BlockArg::Value(v)) =
-                                            call.args(&func.dfg.value_lists).nth(p_idx)
-                                        {
-                                            let is_zero = def_inst(func, v).is_some_and(|vi| {
-                                                matches!(
-                                                    func.dfg.insts[vi],
-                                                    InstructionData::UnaryImm {
-                                                        opcode: Opcode::Iconst,
-                                                        imm,
-                                                    } if imm.bits() == 0
-                                                )
-                                            });
-                                            if !is_zero {
-                                                live_incoming
-                                                    .push((p, func.dfg.resolve_aliases(v)));
-                                            }
-                                        }
-                                    }
-                                }
-                                let [(only_pred, only_val)] = live_incoming[..] else {
-                                    break;
-                                };
-                                next_target = only_pred;
-                                only_val
-                            } else {
-                                p_val
-                            }
+                            let Some(g) = resolve_guard_val(inner, &mut next_target) else {
+                                break;
+                            };
+                            g
                         } else {
                             target = pred;
                             continue;
