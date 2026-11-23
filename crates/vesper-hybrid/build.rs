@@ -197,8 +197,8 @@ const DIVERGENT_IR_OPT_EDIT: (&str, &str) = (
 /// modules/pact), so every trait program fails to check.
 #[cfg(feature = "divergent-pact")]
 const DIVERGENT_PACT_EDIT: (&str, &str) = (
-    "    declarations_words(in input)\n",
-    "    divergent_words(in input)\n",
+    "    session_open(in input)\n",
+    "    divergent_session(in input)\n",
 );
 
 /// The parse module's divergence check: every AST flag (`let mut`, `pub`,

@@ -237,29 +237,49 @@ fn check_lowered_package(
     };
     let base = base_module(module);
     let (base_world, _) = World::collect(&base);
-    // The installed declaration pass (the hybrid build's Vesper port) may
-    // reject the module before Rust collects it; a clean answer leaves the
-    // collection, the bindings and the session to Rust.
-    if options.dependencies.is_empty()
-        && let Some(table) = DECLARATION_PASS.get()
-        && let Some(d) = (table.diagnostics)(module, &base_world, identity)
-        && !d.is_empty()
-    {
-        return fail(d, empty);
-    }
-    let mut fe = match Frontend::with_base(module, base, base_world, identity, options) {
-        Ok(fe) => fe,
-        Err(d) => return fail(d, empty),
+    let (fe, session, revision) = if options.dependencies.is_empty()
+        && let Some(table) = PACT_SESSION.get()
+        && let Some(open_res) = (table.open)(
+            module,
+            &base_world,
+            identity,
+            options.solver,
+            &declaration_fingerprint(module),
+        ) {
+        match open_res {
+            PactOpenResult::Diagnostics(d) => return fail(d, empty),
+            PactOpenResult::Open(vs) => {
+                let rev = Revision(vs.revision().to_owned());
+                let fe = Frontend::metadata_only(module, base, base_world, identity, options);
+                (fe, SessionBackend::Vesper(vs), rev)
+            }
+        }
+    } else {
+        // The installed declaration pass (the hybrid build's Vesper port) may
+        // reject the module before Rust collects it; a clean answer leaves the
+        // collection, the bindings and the session to Rust.
+        if options.dependencies.is_empty()
+            && let Some(table) = DECLARATION_PASS.get()
+            && let Some(d) = (table.diagnostics)(module, &base_world, identity)
+            && !d.is_empty()
+        {
+            return fail(d, empty);
+        }
+        let mut fe = match Frontend::with_base(module, base, base_world, identity, options) {
+            Ok(fe) => fe,
+            Err(d) => return fail(d, empty),
+        };
+        let bindings = fe.bindings.clone();
+        if !fe.diagnostics.is_empty() {
+            return fail(std::mem::take(&mut fe.diagnostics), bindings);
+        }
+        let session = match fe.build_session() {
+            Ok(s) => s,
+            Err(d) => return fail(d, bindings),
+        };
+        let revision = session.revision().clone();
+        (fe, SessionBackend::Rust(Box::new(session)), revision)
     };
-    let bindings = fe.bindings.clone();
-    if !fe.diagnostics.is_empty() {
-        return fail(std::mem::take(&mut fe.diagnostics), bindings);
-    }
-    let session = match fe.build_session() {
-        Ok(s) => s,
-        Err(d) => return fail(d, bindings),
-    };
-    let revision = session.revision().clone();
     let fe = Elaborator {
         spans,
         instances: RefCell::new(BTreeMap::new()),
@@ -293,7 +313,7 @@ fn check_lowered_package(
         return FrontendChecked {
             checked: first,
             bindings: fe.bindings,
-            session: Some(session),
+            session: session.into_rust(),
             revision: Some(revision),
             evidence: vec![],
         };
@@ -348,7 +368,7 @@ fn check_lowered_package(
     FrontendChecked {
         checked,
         bindings: fe.bindings,
-        session: Some(session),
+        session: session.into_rust(),
         revision: Some(revision),
         evidence,
     }
@@ -418,6 +438,45 @@ static DECLARATION_PASS: std::sync::OnceLock<DeclarationPassTable> = std::sync::
 /// Only the first call takes effect; a later one returns its table back.
 pub fn install_declaration_pass(table: DeclarationPassTable) -> Result<(), DeclarationPassTable> {
     DECLARATION_PASS.set(table)
+}
+
+/// A `(self_ty, trait_name, args, brand)` goal or assumption tuple in [`PactQuery`].
+pub type PactGoal = (Type, String, Vec<(bool, Type)>, Option<String>);
+
+/// Binary-ready query descriptor passed to [`VesperPactSession::solve`],
+/// avoiding `vesper-pact-binding` DTO construction.
+pub struct PactQuery<'a> {
+    pub env_params: &'a [Generic],
+    pub assumptions: &'a [PactGoal],
+    pub scopes: &'a [Vec<String>],
+    pub infer: &'a [(String, u8)],
+    pub goal: PactGoal,
+}
+
+/// An open Vesper-backed Pact session (SH2 lane 13 part 2b, `#1185`).
+pub trait VesperPactSession: Send + Sync {
+    fn revision(&self) -> &str;
+    fn solve(&self, query: &PactQuery<'_>) -> Result<(usize, String), (u8, String)>;
+}
+
+/// Result of opening a Vesper-backed Pact session.
+pub enum PactOpenResult {
+    Open(Box<dyn VesperPactSession>),
+    Diagnostics(Vec<Diagnostic>),
+}
+
+/// Swap-in point for the full trait session (SH2 lane 13 part 2b, `#1185`).
+#[derive(Clone, Copy)]
+pub struct PactSessionTable {
+    pub open:
+        fn(&Module, &World, &PackageIdentity, Option<SolverConfig>, &str) -> Option<PactOpenResult>,
+}
+
+static PACT_SESSION: std::sync::OnceLock<PactSessionTable> = std::sync::OnceLock::new();
+
+/// Runs the full Pact trait session through `table` for the rest of the process.
+pub fn install_pact_session(table: PactSessionTable) -> Result<(), PactSessionTable> {
+    PACT_SESSION.set(table)
 }
 
 /// [`DeclarationPassTable::diagnostics`] in Rust: `Frontend::new` without
@@ -706,6 +765,89 @@ impl Frontend {
         fe.collect_local();
         fe.bindings = fe.lower_bindings(&fe.identity.clone(), true);
         Ok(fe)
+    }
+
+    /// Lightweight metadata-only [`Frontend`] used when the Vesper session
+    /// already validated and opened the package.
+    fn metadata_only(
+        module: &Module,
+        base: Module,
+        base_world: World,
+        identity: &PackageIdentity,
+        options: &FrontendOptions,
+    ) -> Self {
+        let mut fe = Frontend {
+            identity: identity.clone(),
+            module: module.clone(),
+            base,
+            base_world,
+            traits: BTreeMap::new(),
+            confs: vec![],
+            deps: vec![],
+            dep_names: BTreeMap::new(),
+            bindings: BindingsDto::empty(identity.clone()),
+            solver: options.solver,
+            diagnostics: vec![],
+            spans: BTreeMap::new(),
+            bounds: BTreeMap::new(),
+            type_bounds: BTreeMap::new(),
+        };
+        for item in &module.items {
+            if let Item::Trait(t) = item {
+                fe.traits.insert(
+                    (identity.clone(), t.name.clone()),
+                    TraitInfo {
+                        decl: t.clone(),
+                        package: identity.clone(),
+                        local: true,
+                    },
+                );
+            }
+        }
+        for item in &module.items {
+            let Item::Conformance(c) = item else { continue };
+            let trait_key = (identity.clone(), c.trait_ref.name.clone());
+            if !fe.traits.contains_key(&trait_key) {
+                continue;
+            }
+            let path = conformance_path(identity, c);
+            let generated = c
+                .methods
+                .iter()
+                .map(|m| (m.name.clone(), generated_name(c, &m.name)))
+                .collect();
+            fe.confs.push(ConfInfo {
+                decl: c.clone(),
+                path,
+                trait_key,
+                local: true,
+                generated,
+            });
+        }
+        for b in &module.trait_bounds {
+            fe.collect_bound(b);
+        }
+        for c in fe.confs.clone() {
+            let bounds: Vec<Bound> = c
+                .decl
+                .where_clauses
+                .iter()
+                .filter_map(|w| {
+                    Some(Bound {
+                        ty: w.ty.clone(),
+                        key: fe.where_key(&w.trait_ref)?,
+                        args: w.trait_ref.args.clone(),
+                    })
+                })
+                .collect();
+            if !bounds.is_empty() {
+                for g in c.generated.values() {
+                    fe.bounds.insert(g.clone(), bounds.clone());
+                }
+            }
+        }
+        fe.bindings = fe.lower_bindings(identity, true);
+        fe
     }
 
     fn add_dependency(&mut self, dep: &Dependency) -> Result<(), Vec<Diagnostic>> {
@@ -1858,6 +2000,20 @@ fn bridge_diagnostics(e: &BridgeError, spans: &BTreeMap<DefPath, Span>) -> Vec<D
 // ---------------------------------------------------------------------------
 // Elaboration
 
+enum SessionBackend {
+    Rust(Box<CoherentSession>),
+    Vesper(Box<dyn VesperPactSession>),
+}
+
+impl SessionBackend {
+    fn into_rust(self) -> Option<CoherentSession> {
+        match self {
+            SessionBackend::Rust(s) => Some(*s),
+            SessionBackend::Vesper(_) => None,
+        }
+    }
+}
+
 struct Elaborator {
     /// Span ranges of builtin declarations, stubs and instances.
     spans: mono::SpanMap,
@@ -1875,7 +2031,7 @@ struct Elaborator {
     /// Vtable slot functions to add to the module ([`mono`]).
     dyn_thunks: RefCell<Vec<Function>>,
     fe: Frontend,
-    session: CoherentSession,
+    session: SessionBackend,
     evidence: RefCell<BTreeMap<(usize, usize), ResolvedCall>>,
     /// Projections being normalized on the current path (cycle guard).
     normalizing: RefCell<Vec<String>>,
@@ -2020,55 +2176,206 @@ impl Elaborator {
         generics: &[Generic],
         function: &str,
         span: &Span,
-    ) -> Result<(usize, Certificate, String), (u8, String)> {
+    ) -> Result<(usize, Option<Certificate>, String), (u8, String)> {
+        match &self.session {
+            SessionBackend::Vesper(vs) => self.select_vesper(
+                vs.as_ref(),
+                key,
+                receiver,
+                brand,
+                trait_args,
+                generics,
+                function,
+                span,
+            ),
+            SessionBackend::Rust(session) => {
+                let info = &self.fe.traits[key];
+                let mut cx = self.query_cx(generics, function);
+                let self_ty = self.query_type(receiver, &mut cx).map_err(|m| (0, m))?;
+                let mut args = vec![];
+                for (i, g) in info.decl.generics.iter().enumerate() {
+                    let name = format!("_arg{i}");
+                    if let Some(a) = trait_args.get(i) {
+                        args.push(if g.row {
+                            ArgDto::from_source(&row_arg(a)).map_err(|m| (0, m))?
+                        } else {
+                            ArgDto::Type(self.query_type(a, &mut cx).map_err(|m| (0, m))?)
+                        });
+                    } else if g.row {
+                        cx.infer.push(ParamDto::of(name.clone(), ParamKindDto::Row));
+                        args.push(ArgDto::Row(vesper_pact_binding::RowDto {
+                            labels: vec![],
+                            tail: Some(name),
+                        }));
+                    } else {
+                        cx.infer.push(ParamDto::ty(name.clone(), None));
+                        args.push(ArgDto::Type(TypeDto::Param(name)));
+                    }
+                }
+                let goal = GoalDto::Implements {
+                    self_ty,
+                    trait_ref: self.fe.trait_def_ref(key, self.identity()),
+                    args,
+                    brand: brand.map(|m| vesper_pact_binding::BrandDto::Model(DefRefDto::local(m))),
+                };
+                let q = self.query(cx, goal, span.start);
+                let outcome = session.solve(&q).map_err(|e| (0, e.to_string()))?;
+                self.accept(session, outcome)
+            }
+        }
+    }
+
+    #[expect(clippy::too_many_arguments)]
+    fn select_vesper(
+        &self,
+        vs: &dyn VesperPactSession,
+        key: &TraitKey,
+        receiver: &Type,
+        brand: Option<&str>,
+        trait_args: &[Type],
+        generics: &[Generic],
+        function: &str,
+        span: &Span,
+    ) -> Result<(usize, Option<Certificate>, String), (u8, String)> {
+        fn query_ty_ast(t: &Type, infer: &mut Vec<(String, u8)>) -> Result<Type, String> {
+            Ok(match t {
+                Type::Infer => {
+                    let name = format!("_infer{}", infer.len());
+                    infer.push((name.clone(), 0));
+                    Type::named(&name)
+                }
+                Type::IntLiteral(_) => Type::named("i64"),
+                Type::Named(n, args) => Type::Named(
+                    n.clone(),
+                    args.iter()
+                        .map(|a| match a {
+                            Type::Row(_) => Ok(a.clone()),
+                            _ => query_ty_ast(a, infer),
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                ),
+                Type::Tuple(ts) => Type::Tuple(
+                    ts.iter()
+                        .map(|a| query_ty_ast(a, infer))
+                        .collect::<Result<Vec<_>, _>>()?,
+                ),
+                Type::Function { .. } => {
+                    return Err(format!(
+                        "a function value of type {t} cannot implement a trait in this fragment"
+                    ));
+                }
+                Type::Row(_) => return Err("an effect row is not a type".into()),
+            })
+        }
+
+        let mut assumptions = vec![];
+        if let Some(c) = self
+            .fe
+            .confs
+            .iter()
+            .find(|c| c.local && c.generated.values().any(|g| g == function))
+        {
+            for w in &c.decl.where_clauses {
+                if let Some(wk) = self.fe.where_key(&w.trait_ref) {
+                    let params = &self.fe.traits[&wk].decl.generics;
+                    if params.len() == w.trait_ref.args.len() {
+                        let args = params
+                            .iter()
+                            .zip(&w.trait_ref.args)
+                            .map(|(g, a)| {
+                                if g.row {
+                                    (true, row_arg(a))
+                                } else {
+                                    (false, a.clone())
+                                }
+                            })
+                            .collect();
+                        assumptions.push((w.ty.clone(), wk.1, args, None));
+                    }
+                }
+            }
+        } else if let Some(bounds) = self.fe.bounds.get(function) {
+            for b in bounds {
+                let params = &self.fe.traits[&b.key].decl.generics;
+                if params.len() == b.args.len() {
+                    let args = params
+                        .iter()
+                        .zip(&b.args)
+                        .map(|(g, a)| {
+                            if g.row {
+                                (true, row_arg(a))
+                            } else {
+                                (false, a.clone())
+                            }
+                        })
+                        .collect();
+                    assumptions.push((b.ty.clone(), b.key.1.clone(), args, None));
+                }
+            }
+        }
+
+        let mut uses: Vec<&ModelUse> = self
+            .fe
+            .module
+            .model_uses
+            .iter()
+            .filter(|u| {
+                u.scope.start <= span.start && span.start < u.scope.end && u.span.end <= span.start
+            })
+            .collect();
+        uses.sort_by_key(|u| (u.scope.start, std::cmp::Reverse(u.scope.end), u.span.start));
+        let scopes: Vec<Vec<String>> = uses.into_iter().map(|u| vec![u.model.clone()]).collect();
+
+        let mut infer = vec![];
+        let self_ty = query_ty_ast(receiver, &mut infer).map_err(|m| (0u8, m))?;
         let info = &self.fe.traits[key];
-        let mut cx = self.query_cx(generics, function);
-        let self_ty = self.query_type(receiver, &mut cx).map_err(|m| (0, m))?;
         let mut args = vec![];
         for (i, g) in info.decl.generics.iter().enumerate() {
             let name = format!("_arg{i}");
-            // Arguments the source states constrain the goal; the rest are
-            // inferred.
             if let Some(a) = trait_args.get(i) {
-                args.push(if g.row {
-                    ArgDto::from_source(&row_arg(a)).map_err(|m| (0, m))?
+                if g.row {
+                    args.push((true, row_arg(a)));
                 } else {
-                    ArgDto::Type(self.query_type(a, &mut cx).map_err(|m| (0, m))?)
-                });
+                    args.push((false, query_ty_ast(a, &mut infer).map_err(|m| (0u8, m))?));
+                }
             } else if g.row {
-                cx.infer.push(ParamDto::of(name.clone(), ParamKindDto::Row));
-                args.push(ArgDto::Row(vesper_pact_binding::RowDto {
-                    labels: vec![],
-                    tail: Some(name),
-                }));
+                infer.push((name.clone(), 2));
+                args.push((
+                    true,
+                    Type::Row(Effects {
+                        instances: vec![],
+                        tail: Some(name),
+                    }),
+                ));
             } else {
-                cx.infer.push(ParamDto::ty(name.clone(), None));
-                args.push(ArgDto::Type(TypeDto::Param(name)));
+                infer.push((name.clone(), 0));
+                args.push((false, Type::named(&name)));
             }
         }
-        let goal = GoalDto::Implements {
-            self_ty,
-            trait_ref: self.fe.trait_def_ref(key, self.identity()),
-            args,
-            brand: brand.map(|m| vesper_pact_binding::BrandDto::Model(DefRefDto::local(m))),
+        let pq = PactQuery {
+            env_params: generics,
+            assumptions: &assumptions,
+            scopes: &scopes,
+            infer: &infer,
+            goal: (self_ty, key.1.clone(), args, brand.map(ToOwned::to_owned)),
         };
-        let q = self.query(cx, goal, span.start);
-        let outcome = self.session.solve(&q).map_err(|e| (0, e.to_string()))?;
-        self.accept(outcome)
+        vs.solve(&pq).map(|(idx, sel)| (idx, None, sel))
     }
 
     /// Accepts only re-checked, consumed `Proven` evidence that selects an
     /// impl or model. Error tags: 0 unsupported, 1 no solution, 2
     /// ambiguous, 3 overflow, 4 dictionary (rigid/alias bound), 5 a bound
     /// of the enclosing generic (see [`mono`]).
-    fn accept(&self, outcome: BridgeOutcome) -> Result<(usize, Certificate, String), (u8, String)> {
+    fn accept(
+        &self,
+        session: &CoherentSession,
+        outcome: BridgeOutcome,
+    ) -> Result<(usize, Option<Certificate>, String), (u8, String)> {
         match outcome {
             BridgeOutcome::Proven(e) => {
-                let consumed = self.session.consume(&e).map_err(|e| (0, e.to_string()))?;
+                let consumed = session.consume(&e).map_err(|e| (0, e.to_string()))?;
                 let path = match &consumed.selection {
                     Selection::Impl { path, .. } | Selection::Model { path, .. } => path.clone(),
-                    // A bound of the enclosing generic: resolved per
-                    // instance by monomorphization.
                     Selection::Assumption(_) => {
                         return Err((
                             5,
@@ -2090,7 +2397,7 @@ impl Elaborator {
                     .iter()
                     .position(|c| c.path == path)
                     .ok_or((0, format!("no declaration for {path}")))?;
-                Ok((index, e.certificate(), consumed.selection.to_string()))
+                Ok((index, Some(e.certificate()), consumed.selection.to_string()))
             }
             BridgeOutcome::NoSolution { explanation, .. } => Err((1, explanation)),
             BridgeOutcome::Ambiguous { explanation, .. } => Err((2, explanation)),
@@ -2125,16 +2432,24 @@ impl Elaborator {
         })
     }
 
-    fn record(&self, span: &Span, function: &str, certificate: Certificate, selection: String) {
-        self.evidence.borrow_mut().insert(
-            (span.start, span.end),
-            ResolvedCall {
-                span: span.clone(),
-                function: function.to_owned(),
-                selection,
-                certificate,
-            },
-        );
+    fn record(
+        &self,
+        span: &Span,
+        function: &str,
+        certificate: Option<Certificate>,
+        selection: String,
+    ) {
+        if let Some(certificate) = certificate {
+            self.evidence.borrow_mut().insert(
+                (span.start, span.end),
+                ResolvedCall {
+                    span: span.clone(),
+                    function: function.to_owned(),
+                    selection,
+                    certificate,
+                },
+            );
+        }
     }
 
     fn failure(

@@ -989,3 +989,510 @@ fn declaration_pass_speed() {
         },
     );
 }
+
+fn session_entry() -> &'static Entry {
+    static ENTRY: OnceLock<Entry> = OnceLock::new();
+    ENTRY.get_or_init(|| package().entry("check_pact_session", true))
+}
+
+fn queries_entry() -> &'static Entry {
+    static ENTRY: OnceLock<Entry> = OnceLock::new();
+    ENTRY.get_or_init(|| package().entry("check_pact_queries", true))
+}
+
+fn build_session_input_for(
+    m: &Module,
+    pkg_name: &str,
+    pkg_ver: &str,
+    max_depth: u64,
+    max_steps: u64,
+    max_fix: u64,
+) -> Option<(Module, Vec<u8>)> {
+    let (prepared, _) = pact_frontend::declaration_pass(m)?;
+    let base_mod = Module {
+        sugar_origins: prepared.sugar_origins.clone(),
+        items: prepared
+            .items
+            .iter()
+            .filter(|i| !matches!(i, Item::Trait(_) | Item::Conformance(_)))
+            .cloned()
+            .collect(),
+        ..Module::default()
+    };
+    let base = World::collect(&base_mod).0;
+    let prelude = pact_frontend::prelude_world();
+    let fp = pact_frontend::declaration_fingerprint(&prepared);
+    let input = pact_words::session_input(
+        &prepared, &base, &prelude, pkg_name, pkg_ver, max_depth, max_steps, max_fix, &fp,
+    )?;
+    Some((prepared, input))
+}
+
+fn rust_query_solve(
+    sess: &vesper_pact_binding::CoherentSession,
+    tables_confs: &[String],
+    q: &vesper_pact_binding::QueryBindingDto,
+) -> Result<(usize, String), (u8, String)> {
+    let outcome = sess.solve(q).map_err(|e| (0u8, e.to_string()))?;
+    match outcome {
+        vesper_pact_binding::BridgeOutcome::Proven(e) => {
+            let consumed = sess.consume(&e).map_err(|e| (0u8, e.to_string()))?;
+            let path = match &consumed.selection {
+                vesper_pact_binding::Selection::Impl { path, .. }
+                | vesper_pact_binding::Selection::Model { path, .. } => path.to_string(),
+                vesper_pact_binding::Selection::Assumption(_) => {
+                    return Err((
+                        5,
+                        "the obligation is discharged by a trait bound of the enclosing generic"
+                            .into(),
+                    ));
+                }
+                other => {
+                    return Err((
+                        4,
+                        format!(
+                            "the obligation is discharged by {other}, which needs generic dictionary dispatch"
+                        ),
+                    ));
+                }
+            };
+            let idx = tables_confs
+                .iter()
+                .position(|p| *p == path)
+                .ok_or_else(|| (0u8, format!("no declaration for {path}")))?;
+            Ok((idx, consumed.selection.to_string()))
+        }
+        vesper_pact_binding::BridgeOutcome::NoSolution { explanation, .. } => Err((1, explanation)),
+        vesper_pact_binding::BridgeOutcome::Ambiguous { explanation, .. } => Err((2, explanation)),
+        vesper_pact_binding::BridgeOutcome::Overflow { kind } => Err((3, format!("{kind:?}"))),
+        vesper_pact_binding::BridgeOutcome::Unsupported { explanation, .. } => {
+            Err((0, explanation))
+        }
+    }
+}
+
+fn with_large_stack<F: FnOnce() + Send + 'static>(f: F) {
+    std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(f)
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn session_diagnostics_agree_across_corpus_and_mutants() {
+    with_large_stack(|| {
+        let f = session_entry();
+        let mut cases: Vec<(String, Module, String, String)> = vec![];
+        for c in corpus() {
+            cases.push((
+                c.name.clone(),
+                c.module.clone(),
+                "@local/main".into(),
+                "0.0.0".into(),
+            ));
+        }
+        for (k, (name, src)) in checker_tests().into_iter().enumerate() {
+            let m = parse(&src);
+            for (label, x) in mutants(&m, k) {
+                cases.push((
+                    format!("{name}#{label}"),
+                    x,
+                    "@local/main".into(),
+                    "0.0.0".into(),
+                ));
+            }
+            cases.push((name, m, "@local/main".into(), "0.0.0".into()));
+        }
+
+        // Session-phase specific mutants (Part 2b): identity, BRIDGE0001, BRIDGE0002, PACT0102, PACT0103.
+        let id_ok = parse(
+            "trait Tag { fn tag(in self) -> i64; } impl Tag for i64 { fn tag(in self) -> i64 { 1 } } fn main() -> i64 { 0 }",
+        );
+        cases.push((
+            "bad_pkg_name".into(),
+            id_ok.clone(),
+            "Bad Name".into(),
+            "0.0.0".into(),
+        ));
+        cases.push((
+            "bad_pkg_ver".into(),
+            id_ok.clone(),
+            "@a/b".into(),
+            "1 0".into(),
+        ));
+        cases.push((
+            "reserved_pkg".into(),
+            id_ok.clone(),
+            "@vesper/builtin".into(),
+            "0.0.0".into(),
+        ));
+        cases.push((
+            "pkg_order_gt".into(),
+            id_ok,
+            "@z/pkg".into(),
+            "1.0.0".into(),
+        ));
+
+        // BRIDGE0001: unknown primitive (`f32`), wrong arg mode on Copy ADT.
+        cases.push((
+            "bridge_unknown_f32".into(),
+            parse("trait T { fn f(in self) -> i64; } impl T for f32 { fn f(in self) -> i64 { 0 } } fn main() -> i64 { 0 }"),
+            "@test/s".into(),
+            "0.1.0".into(),
+        ));
+        cases.push((
+            "bridge_copy_mode_violation".into(),
+            parse(
+                "struct CopyBox[T: mod copy] { v: T } trait T { fn f(in self) -> i64; } impl T for CopyBox[String] { fn f(in self) -> i64 { 0 } } fn main() -> i64 { 0 }",
+            ),
+            "@test/s".into(),
+            "0.1.0".into(),
+        ));
+        // BRIDGE0002: Wide9 (>6561 combinations), Tuple13 (>12 elements), projection to Copy bound.
+        cases.push((
+            "bridge_wide9".into(),
+            parse(
+                "struct Wide[A, B, C, D, E, F, G, H, I] { a: A, b: B, c: C, d: D, e: E, f: F, g: G, h: H, i: I } trait T { fn f(in self) -> i64; } impl T for i64 { fn f(in self) -> i64 { 0 } } fn main() -> i64 { 0 }",
+            ),
+            "@test/s".into(),
+            "0.1.0".into(),
+        ));
+        cases.push((
+            "bridge_tuple13".into(),
+            parse(
+                "trait T { fn f(in self) -> i64; } impl T for (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) { fn f(in self) -> i64 { 0 } } fn main() -> i64 { 0 }",
+            ),
+            "@test/s".into(),
+            "0.1.0".into(),
+        ));
+        cases.push((
+            "bridge_proj_in_copy_box".into(),
+            parse(
+                "struct CopyBox[T: mod copy] { v: T } trait K { type A; } trait T { fn f(in self) -> i64; } impl[X] T for CopyBox[<X as K>::A] where X: K { fn f(in self) -> i64 { 0 } } fn main() -> i64 { 0 }",
+            ),
+            "@test/s".into(),
+            "0.1.0".into(),
+        ));
+        // PACT0102: overlapping parameterized canonical impls; PACT0103: impl not well-formed.
+        cases.push((
+            "pact_overlap".into(),
+            parse(
+                "struct Pair[A, B] { a: A, b: B } trait T { fn f(in self) -> i64; } impl[X] T for Pair[X, i64] { fn f(in self) -> i64 { 0 } } impl[Y] T for Pair[i64, Y] { fn f(in self) -> i64 { 1 } } fn main() -> i64 { 0 }",
+            ),
+            "@test/s".into(),
+            "0.1.0".into(),
+        ));
+        cases.push((
+            "pact_not_wf".into(),
+            parse(
+                "struct CopyBox[T: mod copy] { v: T } trait T { fn f(in self) -> i64; } impl[X] T for CopyBox[X] { fn f(in self) -> i64 { 0 } } fn main() -> i64 { 0 }",
+            ),
+            "@test/s".into(),
+            "0.1.0".into(),
+        ));
+        // Duplicate effect labels in row argument.
+        cases.push((
+            "effect_row_arg".into(),
+            parse(
+                "effect E { fn e() -> Unit; } trait T[r: eff] { fn f(in self) -> i64; } impl T[E] for i64 { fn f(in self) -> i64 { 0 } } fn main() -> i64 { 0 }",
+            ),
+            "@test/s".into(),
+            "0.1.0".into(),
+        ));
+
+        let mut diffs = 0usize;
+        let mut rejected = 0usize;
+        for (name, m, pkg, ver) in &cases {
+            let Some((_prepared, input)) = build_session_input_for(m, pkg, ver, 48, 100_000, 16)
+            else {
+                continue;
+            };
+            let vesper_diags = pact_words::decode_session_words(&f.words(&input));
+            let ident = vesper_pact_binding::PackageIdentity::new(pkg, ver);
+            let rust = pact_frontend::check_package(m, &ident).checked.diagnostics;
+
+            // Only diagnostics produced before pass1/pass2 (E0600, E0601, E0605, E0606, E0607, E0613)
+            // fire inside `session_open`; clean `session_open` means Rust either succeeds cleanly
+            // or later fails in pass1/mono/check_core (`E0610`..`E0612`, `E02xx`, etc.).
+            if !vesper_diags.is_empty() {
+                rejected += 1;
+                if vesper_diags != rust {
+                    diffs += 1;
+                    if diffs <= 8 {
+                        eprintln!("DIFF {name}:\n  rust:   {rust:?}\n  vesper: {vesper_diags:?}");
+                    }
+                }
+            } else {
+                // If Vesper says session is open, check Rust did not reject it with E0600..E0607/E0613
+                // during collection/session build!
+                let rust_session_rejected = rust.iter().any(|d| {
+                    matches!(
+                        d.code.as_str(),
+                        "E0600" | "E0601" | "E0605" | "E0606" | "E0613"
+                    ) || (d.code == "E0607"
+                        && (d.message.starts_with("BRIDGE0002:")
+                            || d.message.starts_with("cannot lower ")
+                            || d.message.contains("are not supported")))
+                });
+                if rust_session_rejected {
+                    diffs += 1;
+                    if diffs <= 8 {
+                        eprintln!("MISSED SESSION ERROR {name}:\n  rust: {rust:?}\n  vesper: []");
+                    }
+                }
+            }
+        }
+        eprintln!(
+            "session_diagnostics: {diffs} of {} cases differ ({rejected} session rejections matched)",
+            cases.len()
+        );
+        assert_eq!(diffs, 0);
+        assert!(
+            rejected >= 10,
+            "expected session rejections, got {rejected}"
+        );
+    });
+}
+
+#[test]
+fn session_queries_and_revision_agree_with_rust() {
+    with_large_stack(|| {
+        let fq = queries_entry();
+        let src = r#"
+struct CopyBox[T: mod copy] { x: T }
+struct Boxed[T] { x: T }
+trait Show { fn show(in self) -> i64; }
+trait Rank { fn rank(in self) -> i64; }
+impl Show for i64 { fn show(in self) -> i64 { 1 } }
+impl[T] Show for Boxed[T] where T: Show { fn show(in self) -> i64 { 2 } }
+model Fast: Rank for i64 { fn rank(in self) -> i64 { 10 } }
+model Slow: Rank for i64 { fn rank(in self) -> i64 { 20 } }
+fn helper() -> i64 { 0 }
+fn main() -> i64 { 0 }
+"#;
+        let m = parse(src);
+        let ident = vesper_pact_binding::PackageIdentity::new("@test/q", "0.1.0");
+        let rust_res = pact_frontend::check_package(&m, &ident);
+        assert!(
+            rust_res.checked.diagnostics.is_empty(),
+            "{:?}",
+            rust_res.checked.diagnostics
+        );
+        let rust_sess = rust_res.session.as_ref().unwrap();
+        let conf_paths: Vec<String> = rust_res
+            .bindings
+            .impls
+            .iter()
+            .map(|i| format!("impl {ident}::{}", i.key))
+            .chain(
+                rust_res
+                    .bindings
+                    .models
+                    .iter()
+                    .map(|m| format!("model {ident}::{}", m.name)),
+            )
+            .collect();
+        // Match `Frontend::confs` order as Rust iterates `impl` + `model` items in module order:
+        let conf_paths_decl_order: Vec<String> = m
+            .items
+            .iter()
+            .filter_map(|it| match it {
+                Item::Conformance(c) => match &c.kind {
+                    ConformanceKind::Canonical => {
+                        let key = match &c.self_ty {
+                            Type::Named(n, args) if args.is_empty() => {
+                                format!("{}.{n}", c.trait_ref.name)
+                            }
+                            Type::Named(n, args) => {
+                                let segs: Vec<String> =
+                                    args.iter().map(|a| format!("{a}")).collect();
+                                format!("{}.{n}-0-{}-2", c.trait_ref.name, segs.join("-1-"))
+                            }
+                            _ => unreachable!(),
+                        };
+                        Some(format!("impl {ident}::{key}"))
+                    }
+                    ConformanceKind::Model { name, .. } => Some(format!("model {ident}::{name}")),
+                },
+                _ => None,
+            })
+            .collect();
+        let _ = conf_paths;
+
+        let g_param = |n: &str| Generic {
+            name: n.into(),
+            bound: Mode::Linear,
+            row: false,
+        };
+        let t_named = |n: &str| Type::Named(n.into(), vec![]);
+        let t_app = |n: &str, a: Type| Type::Named(n.into(), vec![a]);
+
+        let queries = vec![
+            // 1. Direct canonical impl: `i64: Show`
+            (
+                vec![],
+                vec![],
+                vec![],
+                vec![],
+                (t_named("i64"), "Show".into(), vec![], None),
+            ),
+            // 2. Recursive canonical impl with infer var: `Boxed[?X]: Show` -> solves `?X` or picks Boxed? (Wait: Boxed[?X] needs Show on ?X -> Self unknown / NoSolution vs concrete Boxed[i64])
+            (
+                vec![],
+                vec![],
+                vec![],
+                vec![],
+                (t_app("Boxed", t_named("i64")), "Show".into(), vec![], None),
+            ),
+            // 3. Explicit named model: `i64: Rank` via `Fast`
+            (
+                vec![],
+                vec![],
+                vec![],
+                vec![],
+                (t_named("i64"), "Rank".into(), vec![], Some("Fast".into())),
+            ),
+            // 4. Scoped model via `use model`: `[Slow]`
+            (
+                vec![],
+                vec![],
+                vec![vec!["Slow".into()]],
+                vec![],
+                (t_named("i64"), "Rank".into(), vec![], None),
+            ),
+            // 5. Conflicting scoped models: `[Fast, Slow]` -> Ambiguous
+            (
+                vec![],
+                vec![],
+                vec![vec!["Fast".into(), "Slow".into()]],
+                vec![],
+                (t_named("i64"), "Rank".into(), vec![], None),
+            ),
+            // 6. Generic assumption -> tag 5
+            (
+                vec![g_param("U")],
+                vec![(t_named("U"), "Show".into(), vec![], None)],
+                vec![],
+                vec![],
+                (t_named("U"), "Show".into(), vec![], None),
+            ),
+            // 7. NoSolution multiline failure: `bool: Show`
+            (
+                vec![],
+                vec![],
+                vec![],
+                vec![],
+                (t_named("bool"), "Show".into(), vec![], None),
+            ),
+            // 8. Inference variable self-type ambiguity: `?Z: Show`
+            (
+                vec![],
+                vec![],
+                vec![],
+                vec![("_z".into(), 0u8)],
+                (t_named("_z"), "Show".into(), vec![], None),
+            ),
+        ];
+
+        let (_, sess_bytes) =
+            build_session_input_for(&m, "@test/q", "0.1.0", 48, 100_000, 16).unwrap();
+        let mut full_input = sess_bytes;
+        full_input.extend((queries.len() as u64).to_le_bytes());
+
+        let mut rust_answers = vec![];
+        for (env_params, assumptions, scopes, infer, goal) in &queries {
+            let sq = pact_words::SessionQuery {
+                env_params,
+                assumptions,
+                scopes,
+                infer,
+                goal: goal.clone(),
+            };
+            let qbytes = pact_words::encode_session_query(&sq);
+            full_input.extend((qbytes.len() as u64).to_le_bytes());
+            full_input.extend(&qbytes);
+            while !full_input.len().is_multiple_of(8) {
+                full_input.push(0);
+            }
+
+            let dto = vesper_pact_binding::QueryBindingDto::new(
+                ident.clone(),
+                vesper_pact_binding::EnvDto {
+                    params: env_params
+                        .iter()
+                        .map(|g| vesper_pact_binding::ParamDto::ty(g.name.clone(), Some(g.bound)))
+                        .collect(),
+                    assumptions: assumptions
+                        .iter()
+                        .map(
+                            |(st, tr, args, br)| vesper_pact_binding::GoalDto::Implements {
+                                self_ty: vesper_pact_binding::TypeDto::from_source(st).unwrap(),
+                                trait_ref: vesper_pact_binding::DefRefDto::local(tr.clone()),
+                                args: args
+                                    .iter()
+                                    .map(|(_, t)| {
+                                        vesper_pact_binding::ArgDto::from_source(t).unwrap()
+                                    })
+                                    .collect(),
+                                brand: br.as_ref().map(|m| {
+                                    vesper_pact_binding::BrandDto::Model(
+                                        vesper_pact_binding::DefRefDto::local(m.clone()),
+                                    )
+                                }),
+                            },
+                        )
+                        .collect(),
+                    use_models: scopes
+                        .iter()
+                        .map(|sc| {
+                            sc.iter()
+                                .map(|m| vesper_pact_binding::DefRefDto::local(m.clone()))
+                                .collect()
+                        })
+                        .collect(),
+                },
+                infer
+                    .iter()
+                    .map(|(n, _)| vesper_pact_binding::ParamDto::ty(n.clone(), None))
+                    .collect(),
+                vesper_pact_binding::GoalDto::Implements {
+                    self_ty: vesper_pact_binding::TypeDto::from_source(&goal.0).unwrap(),
+                    trait_ref: vesper_pact_binding::DefRefDto::local(goal.1.clone()),
+                    args: vec![],
+                    brand: goal.3.as_ref().map(|m| {
+                        vesper_pact_binding::BrandDto::Model(vesper_pact_binding::DefRefDto::local(
+                            m.clone(),
+                        ))
+                    }),
+                },
+            );
+            rust_answers.push(rust_query_solve(rust_sess, &conf_paths_decl_order, &dto));
+        }
+
+        let words = fq.words(&full_input);
+        let decoded = pact_words::decode_session_queries(&words);
+        assert!(decoded.diagnostics.is_empty(), "{:?}", decoded.diagnostics);
+        assert!(decoded.ok);
+        assert_eq!(decoded.revision.len(), 64);
+        assert_eq!(decoded.answers, rust_answers);
+
+        // Revision stability across whitespace/reformat vs sensitivity to signature edit:
+        let reformatted = parse(&format!("\n  /* comment */ \n{src}\n"));
+        let (_, input_refmt) =
+            build_session_input_for(&reformatted, "@test/q", "0.1.0", 48, 100_000, 16).unwrap();
+        let mut q_refmt = input_refmt;
+        q_refmt.extend(0u64.to_le_bytes());
+        let rev_refmt = pact_words::decode_session_queries(&fq.words(&q_refmt)).revision;
+        assert_eq!(decoded.revision, rev_refmt);
+
+        let edited = parse(&src.replace("fn helper() -> i64", "fn helper(x: i64) -> i64"));
+        let (_, input_edited) =
+            build_session_input_for(&edited, "@test/q", "0.1.0", 48, 100_000, 16).unwrap();
+        let mut q_edit = input_edited;
+        q_edit.extend(0u64.to_le_bytes());
+        let rev_edit = pact_words::decode_session_queries(&fq.words(&q_edit)).revision;
+        assert_ne!(decoded.revision, rev_edit);
+    });
+}
