@@ -177,3 +177,45 @@ pub fn check_seqlock() -> u64 {
     let checked = check_pmu_driver(src);
     assert_eq!(agree(&checked, "check_seqlock", &MODES), 1);
 }
+
+#[test]
+fn sysfs_event_encoder_matches() {
+    let src = r#"
+use @vesper/bench-pmu::{format_table_new, format_table_add, encode_sysfs_event};
+
+pub fn check_encode() -> u64 {
+    let mut t = format_table_new();
+    if !format_table_add(inout t, in "event".as_bytes(), in "config:0-7".as_bytes()) {
+        return 0;
+    }
+    if !format_table_add(inout t, in "umask".as_bytes(), in "config:8-15".as_bytes()) {
+        return 0;
+    }
+    if !format_table_add(inout t, in "edge".as_bytes(), in "config:18".as_bytes()) {
+        return 0;
+    }
+    if !format_table_add(inout t, in "ldlat".as_bytes(), in "config1:0-15".as_bytes()) {
+        return 0;
+    }
+
+    let (c0, c1) = match encode_sysfs_event(
+        in "event=0x3c,umask=0x01,edge,ldlat=12".as_bytes(),
+        in t
+    ) {
+        Option::Some(v) => v,
+        Option::None => return 0,
+    };
+    // 0x3c | (0x01 << 8) | (1 << 18) = 60 + 256 + 262144 = 262460
+    if c0 != 262460 || c1 != 12 {
+        return 0;
+    }
+    // Unknown term must fail
+    match encode_sysfs_event(in "bogus=1".as_bytes(), in t) {
+        Option::Some(_) => 0,
+        Option::None => 1,
+    }
+}
+"#;
+    let checked = check_pmu_driver(src);
+    assert_eq!(agree(&checked, "check_encode", &MODES), 1);
+}
