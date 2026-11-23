@@ -21,10 +21,10 @@ and delete its Rust (owner, 2026-11-21): full function and within 1.5x of Rust's
 | `rust-lib` | Wraps a Rust-only library that Vesper can replace: port the library's job to Vesper | 16,609 |
 | `shim` | Irreducible: thin C-ABI shim over a vetted Rust-only library with no C equivalent | 7,864 |
 | `diverse` | Kept Rust on purpose as a diverse implementation (owner call) | 14,036 |
-| `infra` | Rust-vs-Vesper port infrastructure: deleted when the last Rust build it compares goes | 11,812 |
-| | **All non-test Rust** (root `src/` plus `crates/`) | **558,459** |
+| `infra` | Rust-vs-Vesper port infrastructure: deleted when the last Rust build it compares goes | 11,801 |
+| | **All non-test Rust** (root `src/` plus `crates/`) | **558,448** |
 
-Test and harness Rust (all lines, tracked files): `tests/` 172,075, `crates/*/tests` 233,292. These move to Vesper tests with each flip (SH6 lane 19).
+Test and harness Rust (all lines, tracked files): `tests/` 172,703, `crates/*/tests` 233,295. These move to Vesper tests with each flip (SH6 lane 19).
 
 ## Crates
 
@@ -105,7 +105,7 @@ Test and harness Rust (all lines, tracked files): `tests/` 172,075, `crates/*/te
 | `vesper-warp-tls` | 1,761 | `shim` |  |  | rustls: TLS shim (or the TLS 1.3 state machine ports over the crypto shim) | 17 |
 | `vesper-crypto-sys` | 915 | `shim` |  |  | vetted crypto C-ABI shim (SH6 lane 17) | 17 |
 | `vesper-codegen-verified` | 1,369 | `diverse` |  |  | DDC auditor, diverse on purpose | owner |
-| `vesper-hybrid` | 7,722 | `infra` |  |  | becomes the default compiler, then is deleted at the retirement | 2 |
+| `vesper-hybrid` | 7,711 | `infra` |  |  | becomes the default compiler, then is deleted at the retirement | 2 |
 | `vesper-port-pilot` | 2,241 | `infra` |  |  |  | 2 |
 | `vesper-port-abi` | 1,003 | `infra` |  |  |  | 2 |
 | `vesper-port-harness` | 550 | `infra` |  |  |  | 2 |
@@ -186,8 +186,8 @@ Every module has an owner lane. SHn-m is wave n lane m; G1-m is gap wave 1 lane 
 | `vsys_commands` | 512 | SH5-13 | vesper-driver-commands |  |
 | `package_graph` | 420 | SH2-6 |  |  |
 | `lint_commands` | 417 | SH5-13 | vesper-driver-commands |  |
-| `layout` | 391 | SH2-5 | vesper-check-layout | swapped |
 | `interface` | 391 | SH2-6 |  |  |
+| `layout` | 391 | SH2-5 | vesper-check-layout | swapped |
 | `forge_commands` | 373 | SH5-13 | vesper-driver-commands |  |
 | `test_discovery` | 371 | SH5-14 |  |  |
 | `browser_tour` | 360 | G1-12 |  | tour glue over the wasm-built compiler: needs website/wasm and the wasm seed |
