@@ -222,3 +222,35 @@ owns read without a call per field. A faster in-place loop waits on #1426.
     the UMEM as `inout mem: Slice[u8]`;
   - lane 13's io_uring driver for `vesper-pulse`, once the atomic views
     (gap 1) exist for its SQ and CQ heads.
+
+## Follow-ups (#1505)
+
+All three runtime/language follow-ups from "New gaps found" are implemented:
+
+1. **Atomic views (`try_atomic_load*`, `try_atomic_store*`).**
+   - `ChunkSeq` and `Slice` expose `try_atomic_load(at, order) -> Option[T]`,
+     `try_atomic_store(at, v, order) -> bool` (single-word integer elements),
+     and byte-addressed `try_atomic_load_u32` / `try_atomic_load_u64` /
+     `try_atomic_store_u32` / `try_atomic_store_u64` (`u8` sequences).
+   - `MemoryOrder` is validated with `E0820` (`check_seq_order`), lowered to
+     Cranelift `atomic_load` / `atomic_store` with bounds and alignment checks,
+     and mirrored in `packages/vesper-place-ir-lower/src/ops.ves`.
+   - Verified with a concurrent `WordFunction` + `std::thread::spawn` spin-loop
+     test (`Acquire`/`Release` with no foreign call inside the loop), typed
+     `ChunkSeq[u32]` differential JIT-vs-evaluator test, out-of-bounds/misaligned
+     `None`/`false` checks, and `E0820` negative tests (`tests/foreign_memory.rs`).
+2. **Pinned buffer address as a value (`Pinned::address(in self) -> u64`).**
+   - Emitted on the generated `impl [T] Pinned[T]` (`src/ffi_lowering/types.rs`
+     and `packages/vesper-ffi-lowering/src/lib.ves`), lowered to load the
+     backing data pointer (`[handle + 16]`), preserved in `buffers::keeps_buffer`,
+     and refused in the evaluator (`src/runtime.rs`).
+3. **Checked aliasing rule.**
+   - `crates/vesper-ffi/src/sys/assume.rs` (`before_call` / `expectations`)
+     checks null, alignment, range overflow/wrap, and `Disjoint` overlap on
+     `Pinned` and `Mapping` arguments (`crates/vesper-ffi/tests/sys.rs`).
+   - Runtime live-range tracking (`__vesper_foreign_register` /
+     `__vesper_foreign_unregister` in `src/ffi_lowering/native.rs` and
+     `src/native.rs`) traps on null, misaligned, wrapping, or overlapping live
+     `Pinned` and `Mapping` ranges in both JIT and AOT `ObjectModule` builds,
+     and releases ranges on `sink` unmap or `let Pinned { data } = p;`
+     destructuring (`tests/foreign_memory.rs`).

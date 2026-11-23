@@ -192,12 +192,24 @@ impl FunctionDescriptor {
         let returns_pointer = matches!(self.result, ValueType::Address { .. });
         for (i, p) in self.parameters.iter().enumerate() {
             let list: &[(Assumption, Checkability)] = match &p.ty {
+                ParameterType::Handle { handle, .. } if handle.mapping().is_some() => &[
+                    (ValidBits, BeforeCall),
+                    (Aligned, BeforeCall),
+                    (InBounds, BeforeCall),
+                    (Disjoint, BeforeCall),
+                ],
                 ParameterType::Value(_) | ParameterType::Handle { .. } => {
                     &[(ValidBits, BeforeCall)]
                 }
                 // Memory C may keep: its address and length are Vesper's own
-                // sequence, valid until the program releases it.
-                ParameterType::Pinned { .. } => &[(ValidBits, BeforeCall)],
+                // sequence, valid until the program releases it, and checked
+                // for alignment, range wrap, and borrow disjointness.
+                ParameterType::Pinned { .. } => &[
+                    (ValidBits, BeforeCall),
+                    (Aligned, BeforeCall),
+                    (InBounds, BeforeCall),
+                    (Disjoint, BeforeCall),
+                ],
                 ParameterType::Slice { .. } => &[
                     (NonNull, BeforeCall),
                     (Aligned, BeforeCall),
@@ -462,22 +474,41 @@ impl FunctionDescriptor {
                     );
                 }
                 // A pinned buffer or a mapping: `(data, len)` of memory that
-                // stays where it is until the program releases it.
-                (ParameterType::Pinned { .. }, RawArgument::Slice { .. }) => {
-                    report.push(at, name, ValidBits, Outcome::Held);
-                }
-                (ParameterType::Handle { handle, .. }, RawArgument::Slice { address, .. })
-                    if handle.mapping().is_some() =>
-                {
-                    report.push(
-                        at,
+                // stays where it is until the program releases it, checked for
+                // null, alignment, non-wrapping range, and disjointness.
+                (
+                    ParameterType::Pinned { element, access },
+                    RawArgument::Slice { address, length },
+                ) => {
+                    check_foreign_buffer(
+                        &mut report,
+                        &mut borrows,
+                        i,
                         name,
-                        ValidBits,
-                        if *address == 0 {
-                            Outcome::Violated(ValidationError::NullAddress)
-                        } else {
-                            Outcome::Held
-                        },
+                        *address,
+                        *length,
+                        u64::from(element.bits()) / 8,
+                        usize::from(element.bits()) / 8,
+                        *access == Access::Inout,
+                        true,
+                    );
+                }
+                (
+                    ParameterType::Handle { handle, access },
+                    RawArgument::Slice { address, length },
+                ) if handle.mapping().is_some() => {
+                    let elem = handle.mapping().expect("checked is_some");
+                    check_foreign_buffer(
+                        &mut report,
+                        &mut borrows,
+                        i,
+                        name,
+                        *address,
+                        *length,
+                        u64::from(elem.bits()) / 8,
+                        usize::from(elem.bits()) / 8,
+                        *access != HandleAccess::In,
+                        false,
                     );
                 }
                 (ParameterType::Handle { handle, .. }, RawArgument::Bits(bits))
@@ -664,6 +695,87 @@ fn disjoint(earlier: &[Borrow], b: &Borrow) -> Outcome {
         }
     }
     Outcome::Held
+}
+
+#[allow(clippy::too_many_arguments)]
+fn check_foreign_buffer(
+    report: &mut BoundaryReport,
+    borrows: &mut Vec<Borrow>,
+    index: usize,
+    name: Option<&str>,
+    address: u64,
+    length: u64,
+    elem_bytes: u64,
+    alignment: usize,
+    writes: bool,
+    allow_empty_null: bool,
+) {
+    let at = Position::Argument(index);
+    let na = |why| Outcome::NotApplicable(why);
+    if address == 0 {
+        let valid = if allow_empty_null && length == 0 {
+            Outcome::Held
+        } else {
+            Outcome::Violated(ValidationError::NullAddress)
+        };
+        report.push(at, name, Assumption::ValidBits, valid);
+        for (a, why) in [
+            (Assumption::Aligned, "null"),
+            (Assumption::InBounds, "null"),
+            (Assumption::Disjoint, "null"),
+        ] {
+            report.push(at, name, a, na(why));
+        }
+        return;
+    }
+    report.push(at, name, Assumption::ValidBits, Outcome::Held);
+    if !address.is_multiple_of(alignment as u64) {
+        report.push(
+            at,
+            name,
+            Assumption::Aligned,
+            Outcome::Violated(ValidationError::MisalignedPointer { alignment }),
+        );
+        report.push(at, name, Assumption::InBounds, na("misaligned"));
+        report.push(at, name, Assumption::Disjoint, na("misaligned"));
+        return;
+    }
+    report.push(at, name, Assumption::Aligned, Outcome::Held);
+    let range = length
+        .checked_mul(elem_bytes)
+        .ok_or(ValidationError::SliceRangeOverflow)
+        .and_then(|bytes| {
+            if bytes == 0 {
+                Ok(None)
+            } else {
+                address
+                    .checked_add(bytes - 1)
+                    .map(|last| Some((address, last)))
+                    .ok_or(ValidationError::SliceRangeOverflow)
+            }
+        });
+    match range {
+        Err(e) => {
+            report.push(at, name, Assumption::InBounds, Outcome::Violated(e));
+            report.push(at, name, Assumption::Disjoint, na("out of bounds"));
+        }
+        Ok(None) => {
+            report.push(at, name, Assumption::InBounds, Outcome::Held);
+            report.push(at, name, Assumption::Disjoint, na("empty buffer"));
+        }
+        Ok(Some((first, last))) => {
+            let b = Borrow {
+                argument: index,
+                first,
+                last,
+                writes,
+            };
+            let outcome = disjoint(borrows, &b);
+            borrows.push(b);
+            report.push(at, name, Assumption::InBounds, Outcome::Held);
+            report.push(at, name, Assumption::Disjoint, outcome);
+        }
+    }
 }
 
 fn guard(g: &GuardObservation) -> Outcome {
