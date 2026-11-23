@@ -96,7 +96,7 @@ pub mod drops;
 mod eval_host;
 pub use eval_host::EvalHost;
 #[path = "ffi_lowering/types.rs"]
-mod types;
+pub(crate) mod types;
 use types::ParamKind;
 
 /// Schema of a [`ForeignObject`]'s link manifest.

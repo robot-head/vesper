@@ -1039,6 +1039,8 @@ impl<M: Module> Codegen<'_, '_, M> {
             | SeqOp::Fill
             | SeqOp::FillRange { .. }
             | SeqOp::Wide(_)
+            | SeqOp::AtomicLoad { .. }
+            | SeqOp::AtomicStore { .. }
             | SeqOp::SumBe16
             | SeqOp::BytesEq
             | SeqOp::BytesCmp

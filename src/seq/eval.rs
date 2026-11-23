@@ -374,6 +374,8 @@ impl Runtime<'_> {
                 V(Value::Tuple(vec![]))
             }
             SeqOp::Wide(wide) => return self.wide_op(wide, &args, site),
+            SeqOp::AtomicLoad { width } => return self.atomic_load_op(width, &args, site),
+            SeqOp::AtomicStore { width } => return self.atomic_store_op(width, &args, site),
             SeqOp::SumBe16 => {
                 let bytes = byte_view(arg(0)?)?;
                 let mut sum: u64 = 0;
@@ -581,6 +583,94 @@ impl Runtime<'_> {
                 )?)
             }
         })
+    }
+
+    fn atomic_load_op(
+        &mut self,
+        width: Option<u8>,
+        args: &[Value],
+        site: &crate::ast::Span,
+    ) -> Result<SeqOutcome, String> {
+        let arg = |i: usize| {
+            args.get(i)
+                .ok_or_else(|| "atomic load is missing an operand".to_string())
+        };
+        let (cell, start, len) = view(arg(0)?)?;
+        let at = index(arg(1)?)?;
+        let loaded = match width {
+            Some(w) => {
+                let n = usize::from(w);
+                if at.is_multiple_of(n as u64) && fits(len, at, n) {
+                    let items = cell.borrow();
+                    let base = start + at as usize;
+                    let mut v: u64 = 0;
+                    for k in 0..n {
+                        let b = index(&items[base + n - 1 - k])?;
+                        v = (v << 8) | (b & 0xff);
+                    }
+                    Some(Value::UInt(v, u32::from(w) * 8))
+                } else {
+                    None
+                }
+            }
+            None => {
+                if at < len as u64 {
+                    Some(cell.borrow()[start + at as usize].clone())
+                } else {
+                    None
+                }
+            }
+        };
+        let (constructor, fields) = match loaded {
+            Some(v) => ("Some", BTreeMap::from([("0".to_string(), v)])),
+            None => ("None", BTreeMap::new()),
+        };
+        Ok(SeqOutcome::Value(self.construct_data(
+            "Option".into(),
+            constructor.into(),
+            fields,
+            Some(site.clone()),
+        )?))
+    }
+
+    fn atomic_store_op(
+        &mut self,
+        width: Option<u8>,
+        args: &[Value],
+        _site: &crate::ast::Span,
+    ) -> Result<SeqOutcome, String> {
+        let arg = |i: usize| {
+            args.get(i)
+                .ok_or_else(|| "atomic store is missing an operand".to_string())
+        };
+        let (cell, start, len) = view(arg(0)?)?;
+        let at = index(arg(1)?)?;
+        let ok = match width {
+            Some(w) => {
+                let n = usize::from(w);
+                if at.is_multiple_of(n as u64) && fits(len, at, n) {
+                    let v = index(arg(2)?)?;
+                    let bytes = v.to_le_bytes();
+                    let mut items = cell.borrow_mut();
+                    let base = start + at as usize;
+                    for (k, b) in bytes.iter().take(n).enumerate() {
+                        items[base + k] = Value::UInt(u64::from(*b), 8);
+                    }
+                    true
+                } else {
+                    false
+                }
+            }
+            None => {
+                if at < len as u64 {
+                    cell.borrow_mut()[start + at as usize] = arg(2)?.clone();
+                    true
+                } else {
+                    false
+                }
+            }
+        };
+        Ok(SeqOutcome::Value(Value::Bool(ok)))
     }
 
     /// A string primitive (§13 strings). A string and a view are both a

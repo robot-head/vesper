@@ -16,7 +16,7 @@ use vesper_ffi::{FieldKind, WireLayout};
 pub(super) const BUFFER_FIELD: &str = "data";
 /// The generated pinned-buffer type (`linear struct Pinned[T] { data:
 /// ChunkSeq[T] }`), declared when an import takes one.
-pub(super) const PINNED_TYPE: &str = "Pinned";
+pub(crate) const PINNED_TYPE: &str = "Pinned";
 /// `Pinned[T]` as a source declaration.
 fn pinned_adt() -> Adt {
     let parsed = crate::parser::parse("linear struct Pinned[T] { data: ChunkSeq[T] }");
@@ -33,6 +33,49 @@ fn pinned_adt() -> Adt {
             _ => None,
         })
         .expect("Pinned declaration")
+}
+/// Generated inherent method returning the base address of a pinned buffer.
+pub(crate) const PINNED_ADDRESS: &str = "Pinned::address";
+/// Whether `name` is the generated `Pinned[T]` type in `world`.
+pub(crate) fn is_generated_pinned(world: &crate::check::World) -> bool {
+    world
+        .adts
+        .get(PINNED_TYPE)
+        .is_some_and(|a| a.span == (0..0))
+}
+fn pinned_impl() -> Item {
+    let parsed = crate::parser::parse(
+        "impl [T] Pinned[T] { fn address(in self) -> u64 { self.address() } }",
+    );
+    debug_assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    parsed
+        .module
+        .items
+        .into_iter()
+        .find_map(|i| match i {
+            Item::Impl {
+                ty,
+                generics,
+                mut methods,
+            } => {
+                for m in &mut methods {
+                    m.span = 0..0;
+                    for p in &mut m.params {
+                        p.span = 0..0;
+                        if p.name == "self" {
+                            p.ty = ty.clone();
+                        }
+                    }
+                }
+                Some(Item::Impl {
+                    ty,
+                    generics,
+                    methods,
+                })
+            }
+            _ => None,
+        })
+        .expect("Pinned::address impl")
 }
 /// Pass-1 placeholder of a slice parameter (not a source identifier).
 const OPEN: &str = "$open";
@@ -709,6 +752,9 @@ impl Generated {
             .chain(&self.pinned)
         {
             module.items.push(Item::Adt(adt.clone()));
+        }
+        if self.pinned.is_some() {
+            module.items.push(pinned_impl());
         }
         if self.invalid {
             module.items.push(Item::Adt(Adt {
