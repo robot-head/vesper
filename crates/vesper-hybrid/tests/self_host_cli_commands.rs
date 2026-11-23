@@ -561,6 +561,7 @@ fn routing_runs_in_vesper() {
     assert_eq!(prints(&bare, &["forge", "--help"]), 1);
     assert_eq!(prints(&bare, &["graph", "--help"]), 1);
     assert_eq!(prints(&bare, &["verify", "--refute"]), 1);
+    assert_eq!(prints(&bare, &["lint", "--help"]), 1);
     // Handed back: the Rust CLI prints.
     assert_eq!(prints(&bare, &["verify", "--help"]), 0);
     assert_eq!(prints(&bare, &["fmt", "--help"]), 0);
@@ -961,6 +962,130 @@ fn graph_runs_in_vesper() {
         .current_dir(&dir)
         .env("VESPER_HYBRID_STATS", "1")
         .args(["graph", "--help"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let prints: u64 = stderr
+        .lines()
+        .find_map(|l| {
+            l.strip_prefix("vesper-hybrid: the command layers printed ")
+                .and_then(|s| s.strip_suffix(" times from Vesper"))
+                .and_then(|n| n.parse().ok())
+        })
+        .unwrap_or_else(|| panic!("no command-layer report in {stderr:?}"));
+    assert_eq!(prints, 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn seed_lint_tree(dir: &Path) {
+    std::fs::write(
+        dir.join("Loom.toml"),
+        "[package]\nname = \"@acme/lint_test\"\nversion = \"0.1.0\"\nedition = \"2026\"\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join("src/clean.ves"),
+        "pub fn add(a: i64, b: i64) -> i64 {\n    wrapping_add(a, b)\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/unused_eff.ves"),
+        "pub fn pure_but_eff() -> i64 eff [Fail[i64]] {\n    42\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("deny.toml"),
+        "[package]\nname = \"@acme/lint_test\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n[lints]\nunused_effect = \"deny\"\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn lint_matches_the_default_compiler() {
+    let default = default_compiler();
+    let hybrid = hybrid();
+    let root = scratch("vesper-cli-lint");
+    let cases: &[&[&str]] = &[
+        &["lint", "--help"],
+        &["lint", "-h"],
+        &["lint", "--unknown"],
+        &["lint", "--unknown", "--json"],
+        &["lint", "--config"],
+        &["lint", "--config", "--json"],
+        &["lint", "--config", "a", "--config", "b"],
+        &["lint", "src/clean.ves", "src/unused_eff.ves"],
+        &["lint", "missing.ves"],
+        &["lint", "missing.ves", "--json"],
+        &["lint", "src/clean.ves"],
+        &["lint", "src/clean.ves", "--json"],
+        &["lint", "src/unused_eff.ves"],
+        &["lint", "src/unused_eff.ves", "--config", "deny.toml"],
+        &[
+            "lint",
+            "src/unused_eff.ves",
+            "--config",
+            "deny.toml",
+            "--json",
+        ],
+        &["lint", "src/unused_eff.ves", "--fix"],
+        &["lint"],
+        &["lint", "--json"],
+    ];
+    let mut diffs = vec![];
+    for argv in cases {
+        let mut results = vec![];
+        let work = root.join("work");
+        for compiler in [&default, &hybrid] {
+            let _ = std::fs::remove_dir_all(&work);
+            std::fs::create_dir_all(&work).unwrap();
+            seed_lint_tree(&work);
+            let out = Command::new(compiler)
+                .current_dir(&work)
+                .env_remove("VESPER_HYBRID_STATS")
+                .args(*argv)
+                .output()
+                .unwrap();
+            results.push((out, std::fs::read(work.join("src/unused_eff.ves")).unwrap()));
+        }
+        let (d, d_file) = &results[0];
+        let (h, h_file) = &results[1];
+        if d.status.code() != h.status.code()
+            || d.stdout != h.stdout
+            || d.stderr != h.stderr
+            || d_file != h_file
+        {
+            diffs.push(format!(
+                "{argv:?}: status {:?} vs {:?}, stdout {:?} vs {:?}, stderr {:?} vs {:?}, file {}",
+                d.status.code(),
+                h.status.code(),
+                String::from_utf8_lossy(&d.stdout),
+                String::from_utf8_lossy(&h.stdout),
+                String::from_utf8_lossy(&d.stderr),
+                String::from_utf8_lossy(&h.stderr),
+                d_file == h_file,
+            ));
+        }
+    }
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(
+        diffs.is_empty(),
+        "Vesper `lint` differs from default CLI on {} cases:\n{}",
+        diffs.len(),
+        diffs.join("\n")
+    );
+}
+
+#[test]
+fn lint_runs_in_vesper() {
+    let hybrid = hybrid();
+    let dir = scratch("vesper-cli-lint-runs");
+    seed_lint_tree(&dir);
+    let out = Command::new(&hybrid)
+        .current_dir(&dir)
+        .env("VESPER_HYBRID_STATS", "1")
+        .args(["lint", "--help"])
         .output()
         .unwrap();
     assert!(out.status.success());
