@@ -78,55 +78,62 @@ fn rd_str(in b: Slice[u8], inout pos: u64) -> (u64, u64) {
     (a, wrapping_add(a, n))
 }
 
-fn rd_sym(inout s: St, in input: Str, inout pos: u64) -> u32 {
-    let (a, z) = rd_str(in input.as_bytes(), inout pos);
-    s.g.intern(in input[a..z]).id()
+fn rd_sym_bytes(inout s: St, in input: Slice[u8], inout pos: u64) -> u32 {
+    let (a, z) = rd_str(in input, inout pos);
+    match String::from_utf8(in input[a..z]) {
+        Option::Some(t) => s.g.intern(in t.as_str()).id(),
+        Option::None => s.g.intern(in "").id(),
+    }
 }
 
 pub fn decode(inout s: St, in input: Str) {
+    decode_bytes(inout s, in input.as_bytes());
+}
+
+pub fn decode_bytes(inout s: St, in input: Slice[u8]) {
     let mut pos: u64 = 0;
-    let npkg = rd(in input.as_bytes(), inout pos);
+    let npkg = rd(in input, inout pos);
     for p in 0..npkg {
-        let name = rd_sym(inout s, in input, inout pos);
+        let name = rd_sym_bytes(inout s, in input, inout pos);
         s.pkg_name.push(name);
-        let nd = rd(in input.as_bytes(), inout pos);
+        let nd = rd(in input, inout pos);
         s.pkg_dep_first.push(n32(s.dep_name.len()));
         s.pkg_dep_len.push(n32(nd));
         for i in 0..nd {
-            let d = rd_sym(inout s, in input, inout pos);
+            let d = rd_sym_bytes(inout s, in input, inout pos);
             s.dep_name.push(d);
-            s.dep_target.push(n32(rd(in input.as_bytes(), inout pos)));
+            s.dep_target.push(n32(rd(in input, inout pos)));
         }
-        let no = rd(in input.as_bytes(), inout pos);
+        let no = rd(in input, inout pos);
         s.pkg_opt_first.push(n32(s.opt_name.len()));
         s.pkg_opt_len.push(n32(no));
         for i in 0..no {
-            let d = rd_sym(inout s, in input, inout pos);
+            let d = rd_sym_bytes(inout s, in input, inout pos);
             s.opt_name.push(d);
         }
     }
-    let nfiles = rd(in input.as_bytes(), inout pos);
+    let nfiles = rd(in input, inout pos);
     for f in 0..nfiles {
-        let d = rd_sym(inout s, in input, inout pos);
+        let d = rd_sym_bytes(inout s, in input, inout pos);
         s.file_display.push(d);
-        s.file_base.push(rd(in input.as_bytes(), inout pos));
+        s.file_base.push(rd(in input, inout pos));
     }
-    let nmods = rd(in input.as_bytes(), inout pos);
+    let nmods = rd(in input, inout pos);
     let mut path: ChunkSeq[u32] = ChunkSeq::new[u32]();
     for m in 0..nmods {
-        let pkg = n32(rd(in input.as_bytes(), inout pos));
+        let pkg = n32(rd(in input, inout pos));
         s.mod_pkg.push(pkg);
-        let ns = rd(in input.as_bytes(), inout pos);
+        let ns = rd(in input, inout pos);
         s.mod_seg_first.push(n32(s.seg.len()));
         s.mod_seg_len.push(n32(ns));
         path.clear();
         for i in 0..ns {
-            let x = rd_sym(inout s, in input, inout pos);
+            let x = rd_sym_bytes(inout s, in input, inout pos);
             s.seg.push(x);
             path.push(x);
         }
-        s.mod_file.push(n32(rd(in input.as_bytes(), inout pos)));
-        let (a, z) = rd_str(in input.as_bytes(), inout pos);
+        s.mod_file.push(n32(rd(in input, inout pos)));
+        let (a, z) = rd_str(in input, inout pos);
         s.mod_text_start.push(a);
         s.mod_text_end.push(z);
         let h = mod_hash(pkg, in path);
@@ -143,11 +150,11 @@ pub fn decode(inout s: St, in input: Str) {
         }
     }
     // An absent suffix is a graph with no foreign types.
-    let nforeign = rd(in input.as_bytes(), inout pos);
+    let nforeign = rd(in input, inout pos);
     path.clear();
     for _i in 0..nforeign {
-        let pkg = n32(rd(in input.as_bytes(), inout pos));
-        let name = rd_sym(inout s, in input, inout pos);
+        let pkg = n32(rd(in input, inout pos));
+        let name = rd_sym_bytes(inout s, in input, inout pos);
         let root = find_module(in s, pkg, in path);
         if root != none() {
             s.foreign_types.insert(pair(root, name), 1);
@@ -470,6 +477,10 @@ fn constants(inout s: St, in l: L, m: u32) {
 
 // Parses every module and collects its tables.
 pub fn collect_all(inout s: St, in input: Str) {
+    collect_all_bytes(inout s, in input.as_bytes());
+}
+
+pub fn collect_all_bytes(inout s: St, in input: Slice[u8]) {
     for m in 0..s.mod_pkg.len() {
         let a = s.mod_text_start.try_get(m);
         let z = s.mod_text_end.try_get(m);
@@ -480,7 +491,10 @@ pub fn collect_all(inout s: St, in input: Str) {
             },
             Option::None => (0, 0),
         };
-        let l = lower_source(in input[x..y]);
+        let l = match String::from_utf8(in input[x..y]) {
+            Option::Some(src) => lower_source(in src.as_str()),
+            Option::None => lower_source(in ""),
+        };
         begin_module(inout s);
         collect(inout s, in l.ast, n32(m));
         constants(inout s, in l, n32(m));

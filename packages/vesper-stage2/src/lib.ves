@@ -1,0 +1,33 @@
+// @vesper/stage2: pure-Vesper Stage 2 compiler driver (#1397).
+
+use @vesper/check-names-packages::{
+    assemble_next_bytes,
+    assembly_begin_bytes,
+    assembly_metadata
+};
+use self::loader::{
+    load_package_graph_bytes
+};
+
+/// Load and assemble a Loom package from `root_dir` via `@vesper-std/fs`,
+/// returning `(module_count, diagnostic_bytes)`.
+pub fn stage2_assemble_dir(in root_dir: Str) -> (u64, u64) eff [Ffi[StdFs]] {
+    let encoded = match load_package_graph_bytes(in root_dir.as_bytes()) {
+        Option::Some(b) => b,
+        Option::None => {
+            return (0, 0);
+        },
+    };
+    let mut a = assembly_begin_bytes(in encoded.as_slice());
+    let mut count: u64 = 0;
+    loop {
+        match assemble_next_bytes(inout a, in encoded.as_slice()) {
+            Option::Some(_m) => {
+                count = wrapping_add(count, 1);
+            },
+            Option::None => break,
+        }
+    }
+    let meta = assembly_metadata(sink a);
+    (count, meta.diagnostics.len())
+}
