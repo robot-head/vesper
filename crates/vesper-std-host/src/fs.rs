@@ -16,7 +16,8 @@
 //!   dirent` (`d_type` at byte 18, `d_name` at 19).
 //! - A failure returns -1 (or NULL) with the Win32 error as the thread's
 //!   last error, or `ERROR_INVALID_NAME` (123) when the path is not UTF-8.
-use crate::env::set_last_error;
+//! - `vstd_memcpy` and `vstd_strchr` are `memcpy` and `strchr`, which
+//!   src/sys.ves reads `struct dirent` records with.
 use crate::*;
 use std::ffi::{CStr, c_char};
 use std::fs::{File, OpenOptions};
@@ -521,8 +522,44 @@ pub unsafe extern "C" fn vstd_bcopy(src: *const u8, dst: *mut u8, n: usize) {
     unsafe { std::ptr::copy(src, dst, n) };
 }
 
+#[cfg(windows)]
+fn set_last_error(code: u32) {
+    unsafe extern "system" {
+        fn SetLastError(code: u32);
+    }
+    // SAFETY: sets the calling thread's last-error value.
+    unsafe { SetLastError(code) };
+}
+
+#[cfg(not(windows))]
+fn set_last_error(_code: u32) {}
+
+/// `memcpy(dst, src, n)`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vstd_memcpy(dst: *mut u8, src: *const u8, n: usize) -> *mut u8 {
+    // SAFETY: the caller passes `n` readable bytes at `src` and writable
+    // ones at `dst`, not overlapping.
+    unsafe { std::ptr::copy_nonoverlapping(src, dst, n) };
+    dst
+}
+
+/// `strchr(s, c)`: the first `c` byte in `s`, or NULL (`c` 0 finds the NUL).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vstd_strchr(s: *const c_char, c: i32) -> *const c_char {
+    // SAFETY: `s` is a NUL-terminated string for the call.
+    let text = unsafe { CStr::from_ptr(s) }.to_bytes_with_nul();
+    let byte = c as u8;
+    match text.iter().position(|&b| b == byte) {
+        // SAFETY: `i` is inside the string or at its NUL.
+        Some(i) => unsafe { s.add(i) },
+        None => std::ptr::null(),
+    }
+}
+
 pub(crate) fn symbols() -> Vec<(&'static str, *const u8)> {
     vec![
+        ("vstd_memcpy", vstd_memcpy as *const u8),
+        ("vstd_strchr", vstd_strchr as *const u8),
         ("vstd_open", vstd_open as *const u8),
         ("vstd_read", vstd_read as *const u8),
         ("vstd_write", vstd_write as *const u8),
