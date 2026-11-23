@@ -45,9 +45,10 @@ VesperPackageInfo = provider(
 def _vesper_package_impl(ctx):
     own = [ctx.file.manifest] + ctx.files.srcs + ctx.files.vsys + ctx.files.objects
     prefix = ctx.file.manifest.dirname + "/src/"
+    wasi_prefix = ctx.file.manifest.dirname + "/src-wasip2/"
     for f in ctx.files.srcs:
-        if not f.path.startswith(prefix):
-            fail("%s is not under %s" % (f.path, prefix))
+        if not f.path.startswith(prefix) and not f.path.startswith(wasi_prefix):
+            fail("%s is outside the package source directories" % f.path)
     for f in ctx.files.vsys:
         if f.dirname != ctx.file.manifest.dirname:
             fail("%s is not next to %s" % (f.path, ctx.file.manifest.path))

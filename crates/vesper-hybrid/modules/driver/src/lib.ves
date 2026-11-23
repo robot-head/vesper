@@ -9,7 +9,7 @@
 //
 // @export vsys StdFs rust=crate::driver::std_host::fs
 // @export vsys StdProcess rust=crate::driver::std_host::process
-// @export vsys StdEnv rust=crate::driver::std_host::env
+// @export vsys StdEnv
 // @export vsys HybridCommands rust=crate::commands::host
 // @export vsys direct rust=crate::driver::host
 // | sys library HybridDriver (

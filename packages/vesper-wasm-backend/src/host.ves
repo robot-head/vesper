@@ -2,8 +2,8 @@
 // #1508): the wasm seed reads its sources and writes its outputs through
 // @vesper-std/env and @vesper-std/fs, whose `.vsys` libraries `StdEnv`
 // and `StdFs` the Bridge lowers to the effects `Ffi$StdEnv` and
-// `Ffi$StdFs` (src/ffi_lowering.rs). Natively the C-ABI shim
-// crates/vesper-std-host implements them. Here each operation becomes a
+// `Ffi$StdFs` (src/ffi_lowering.rs). The WASI environment surface is
+// declared in env-wasip2.vsys. Here each operation becomes a
 // generated function (a shim) over the WASI imports below, with the
 // shim's semantics:
 //
