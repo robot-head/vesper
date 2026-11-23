@@ -91,6 +91,10 @@ pub const SC_BOOL: u8 = 4;
 pub const SC_F64: u8 = 5;
 pub const SC_UNIT: u8 = 6;
 pub const SC_NEVER: u8 = 7;
+pub const SC_U16: u8 = 8;
+pub const SC_I32: u8 = 9;
+pub const SC_I16: u8 = 10;
+pub const SC_I8: u8 = 11;
 
 // Clause modes (`analysis::HandlerMode`). A clause that resumes other
 // than in tail position runs on a WasmFX continuation or in CPS, which
@@ -336,6 +340,18 @@ impl Cx {
             if n == s.u8_ {
                 return shape_of(SH_SCALAR, SC_U8, NO_ADT, ty);
             }
+            if n == self.k.u16_ {
+                return shape_of(SH_SCALAR, SC_U16, NO_ADT, ty);
+            }
+            if n == self.k.i32_ {
+                return shape_of(SH_SCALAR, SC_I32, NO_ADT, ty);
+            }
+            if n == self.k.i16_ {
+                return shape_of(SH_SCALAR, SC_I16, NO_ADT, ty);
+            }
+            if n == self.k.i8_ {
+                return shape_of(SH_SCALAR, SC_I8, NO_ADT, ty);
+            }
             if n == s.bool_ {
                 return shape_of(SH_SCALAR, SC_BOOL, NO_ADT, ty);
             }
@@ -354,7 +370,7 @@ impl Cx {
             if n == s.f32_ {
                 Fail::raise(werr(K_UNSUPPORTED, U_FLOAT32, 10));
             }
-            if n == s.u128_ {
+            if n == s.u128_ || n == s.i128_ {
                 // the tuple (low word, high word): src/wide.ves
                 let u = self.types.named0(s.u64_);
                 let mut e = ChunkSeq::new[u32]();

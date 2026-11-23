@@ -1090,3 +1090,76 @@ fn wasm_backend_emits_runnable_core_under_seed_runner() {
     );
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn stage2_collects_package_under_wasi() {
+    let dir = fresh("stage2-collect");
+    let sample_dir = dir.join("sample");
+    let runner_dir = dir.join("runner");
+    std::fs::create_dir_all(sample_dir.join("src")).unwrap();
+    std::fs::create_dir_all(runner_dir.join("src")).unwrap();
+
+    std::fs::write(
+        sample_dir.join("Loom.toml"),
+        "[package]\nname = \"@vesper-test/sample\"\nversion = \"0.1.0\"\nedition = \"2026\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        sample_dir.join("src/lib.ves"),
+        "mod sub;\n\
+         use self::sub::helper;\n\
+         struct Pair { a: u64, b: u64 }\n\
+         enum Flag { Off, On(u64) }\n\
+         effect Ping { fn ping(x: u64) -> u64; }\n\
+         pub fn main() -> u64 { helper(21) }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        sample_dir.join("src/sub.ves"),
+        "pub fn helper(x: u64) -> u64 { wrapping_mul(x, 2) }\n",
+    )
+    .unwrap();
+
+    let stage2_path = repo()
+        .join("packages/vesper-stage2")
+        .to_string_lossy()
+        .replace('\\', "/");
+    std::fs::write(
+        runner_dir.join("Loom.toml"),
+        format!(
+            "[package]\nname = \"@vesper-test/stage2-run\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n\
+             [dependencies]\n\"@vesper/stage2\" = {{ version = \"^0.1\", path = \"{stage2_path}\" }}\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        runner_dir.join("src/lib.ves"),
+        "use @vesper/stage2::stage2_collect_dir;\n\
+         pub fn main() -> u64 eff [Ffi[StdFs]] {\n\
+             let (mods, fns, adts, diags) = stage2_collect_dir(in \".\");\n\
+             wrapping_add(\n\
+                 wrapping_add(wrapping_mul(mods, 1000000), wrapping_mul(fns, 10000)),\n\
+                 wrapping_add(wrapping_mul(adts, 100), diags)\n\
+             )\n\
+         }\n",
+    )
+    .unwrap();
+
+    let assembled = vesper::packages::load(&runner_dir).expect("load");
+    assert!(assembled.ok(), "{:?}", assembled.diagnostics);
+    let checked = vesper::ffi_lowering::check_module(&assembled.module, &imports()).expect("check");
+    let o = options(false);
+    let component = port(&checked, &o).expect("compile @vesper/stage2 to wasm");
+    let got = run(
+        &component,
+        &Ctx {
+            dirs: vec![(sample_dir, ".".into())],
+            ..Ctx::default()
+        },
+    )
+    .expect("run @vesper/stage2 under WASI");
+    // 2 modules (`lib.ves`, `sub.ves`), 2 functions (`main`, `helper`),
+    // 2 ADTs (`Pair`, `Flag`), 0 diagnostic bytes => 2020200.
+    assert_eq!(got, 2020200);
+    std::fs::remove_dir_all(dir).unwrap();
+}

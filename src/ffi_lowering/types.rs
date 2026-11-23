@@ -533,7 +533,7 @@ impl Generated {
                         ValueType::Handle { .. } | ValueType::NonNullHandle { .. } => {
                             return Err("a handle parameter needs a mode".into());
                         }
-                        ValueType::CStr => {
+                        ValueType::CStr | ValueType::CWStr => {
                             return Err("a C string result is not a parameter".into());
                         }
                         ValueType::Address { .. } => {
@@ -610,6 +610,13 @@ impl Generated {
                         vec![Type::named("u8")],
                     )),
                 ),
+                ParameterType::CWStr => (
+                    Pass::In,
+                    ParamKind::Value(Type::Named(
+                        crate::seq::SLICE_TYPE.into(),
+                        vec![Type::named("u16")],
+                    )),
+                ),
             };
             params.push(ParamShape {
                 name: p.name().to_owned(),
@@ -644,6 +651,10 @@ impl Generated {
             ValueType::CStr => Type::Named(
                 "Option".into(),
                 vec![Type::Named("ChunkSeq".into(), vec![Type::named("u8")])],
+            ),
+            ValueType::CWStr => Type::Named(
+                "Option".into(),
+                vec![Type::Named("ChunkSeq".into(), vec![Type::named("u16")])],
             ),
         };
         Ok(OpShape {

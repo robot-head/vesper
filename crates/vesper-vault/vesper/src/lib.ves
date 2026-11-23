@@ -1,0 +1,603 @@
+// @vesper/vault: the Vesper port of vesper-vault (Rust-exit SH6 lane 17, #1412):
+// - §23.3 linear nonce-safe AEAD (`AeadSealer`, `AeadOpener`, `FrameHeader`,
+//   Doom-principle zeroize on every failure, per-algorithm record limits)
+// - §23.1.4 hybrid X25519MLKEM768 key establishment (`KemIsa`, client share,
+//   encapsulation/validation/decapsulation, non-contributory rejection)
+// - §23.2 constant-time 16-byte tag comparison (`verify_tag_16_ct`)
+//
+// All cryptographic primitives come from `@vesper/crypto` (`vesper-crypto-sys`).
+// The Rust crate retains `SecretSlot` (`sys.rs`), `LeakAuditor` (`obligation.rs`),
+// `ConstTime` (`consttime.rs`), opaque secret scalars (`secret.rs`), and the
+// Cranelift SSA taint verifier (`verifier.rs`), and lends inline
+// `vesper_crypto_sys::Aead` schedules via export ABI 4 with zero heap allocations
+// on the seal/open hot path.
+//
+// @export abi 4 options
+use @vesper/crypto::{
+    Aead,
+    CryptoError,
+    aead_open,
+    aead_seal,
+    ct_eq,
+    mlkem768_decaps,
+    mlkem768_encaps,
+    mlkem768_isa_available,
+    mlkem768_isa_detect,
+    mlkem768_keygen,
+    mlkem768_validate,
+    random,
+    wipe,
+    x25519,
+    x25519_base
+};
+
+// ---------------------------------------------------------------------------
+// Constants and shared errors.
+
+const FRAME_HEADER_LEN: u64 = 28;
+const TAG_LEN: u64 = 16;
+const NONCE_LEN: u64 = 12;
+const SEQ_SPACE_LIMIT: u64 = 18446744073709551614;
+const AES256_RECORD_LIMIT: u64 = 23726566;
+const U32_MAX: u32 = 4294967295;
+
+const MLKEM768_EK_LEN: u64 = 1184;
+const MLKEM768_DK_LEN: u64 = 2400;
+const MLKEM768_CT_LEN: u64 = 1088;
+const X25519_LEN: u64 = 32;
+const CLIENT_SHARE_LEN: u64 = 1216;
+const SERVER_SHARE_LEN: u64 = 1120;
+const SHARED_SECRET_LEN: u64 = 64;
+const CLIENT_SECRET_LEN: u64 = 96;
+const MLKEM_SEED_LEN: u64 = 64;
+
+pub copy enum AeadKind {
+    Aes256Gcm,
+    ChaCha20Poly1305
+}
+
+pub enum AeadAlgCode: _ {
+    Aes256Gcm = 2,
+    ChaCha20Poly1305 = 3
+}
+
+pub copy enum KemIsaKind {
+    Portable,
+    Avx2,
+    Neon
+}
+
+pub copy enum VaultErr {
+    EpochExhaustedRekeyRequired,
+    EpochSpaceExhausted,
+    BufferTooSmall,
+    ForeignTicket,
+    CipherRejected,
+    MalformedHeader,
+    WrongEpoch {
+        expected: u32,
+        found: u32
+    },
+    AuthenticationTagMismatch,
+    BadShareLength {
+        expected: u64,
+        found: u64
+    },
+    InvalidEncapsulationKey,
+    NonContributoryX25519,
+    Rng,
+    IsaUnavailable {
+        isa: KemIsaKind
+    }
+}
+
+// ---------------------------------------------------------------------------
+// §23.2 secret tag comparison.
+
+pub fn verify_tag_16_ct(in expected: Slice[u8], in computed: Slice[u8]) -> bool eff [Ffi[Crypto]] {
+    if expected.len() != TAG_LEN || computed.len() != TAG_LEN {
+        return false;
+    }
+    ct_eq(in expected, in computed)
+}
+
+// ---------------------------------------------------------------------------
+// §23.3 AEAD framing, sealer state, and Doom-principle opener.
+
+pub copy struct FrameHdr {
+    key_epoch: u32,
+    nonce_seq: u64,
+    tag_lo: u64,
+    tag_hi: u64
+}
+
+pub copy struct SealerSt {
+    id: u64,
+    alg: AeadKind,
+    epoch: u32,
+    next_seq: u64,
+    limit: u64
+}
+
+pub fn alg_record_limit(alg: AeadKind) -> u64 {
+    match alg {
+        AeadKind::Aes256Gcm => AES256_RECORD_LIMIT,
+        AeadKind::ChaCha20Poly1305 => SEQ_SPACE_LIMIT,
+    }
+}
+
+pub fn alg_code(alg: AeadKind) -> u32 {
+    match alg {
+        AeadKind::Aes256Gcm => AeadAlgCode::Aes256Gcm,
+        AeadKind::ChaCha20Poly1305 => AeadAlgCode::ChaCha20Poly1305,
+    }
+}
+
+pub fn frame_header_parse(in frame: Slice[u8]) -> Option[FrameHdr] {
+    if frame.len() < FRAME_HEADER_LEN {
+        return Option::None;
+    }
+    let key_epoch = match frame.try_read_u32_be(0) {
+        Option::Some(v) => v,
+        Option::None => return Option::None,
+    };
+    let nonce_seq = match frame.try_read_u64_be(4) {
+        Option::Some(v) => v,
+        Option::None => return Option::None,
+    };
+    let tag_lo = match frame.try_read_u64_le(12) {
+        Option::Some(v) => v,
+        Option::None => return Option::None,
+    };
+    let tag_hi = match frame.try_read_u64_le(20) {
+        Option::Some(v) => v,
+        Option::None => return Option::None,
+    };
+    Option::Some(
+        FrameHdr {
+            key_epoch: key_epoch,
+            nonce_seq: nonce_seq,
+            tag_lo: tag_lo,
+            tag_hi: tag_hi
+        }
+    )
+}
+
+pub fn sealer_new(id: u64, alg: AeadKind, epoch: u32, next_seq: u64, limit: u64) -> SealerSt {
+    let max_rec = alg_record_limit(alg);
+    let clamped_alg = if limit < max_rec {
+        limit
+    } else {
+        max_rec
+    };
+    let clamped = if clamped_alg < SEQ_SPACE_LIMIT {
+        clamped_alg
+    } else {
+        SEQ_SPACE_LIMIT
+    };
+    SealerSt {
+        id: id,
+        alg: alg,
+        epoch: epoch,
+        next_seq: next_seq,
+        limit: clamped
+    }
+}
+
+pub fn sealer_remaining(in s: SealerSt) -> u64 {
+    if s.next_seq >= s.limit {
+        0
+    } else {
+        wrapping_sub(s.limit, s.next_seq)
+    }
+}
+
+pub fn sealer_mint_nonce(inout s: SealerSt) -> u64 eff [Fail[VaultErr]] {
+    if s.next_seq >= s.limit {
+        Fail::raise(VaultErr::EpochExhaustedRekeyRequired);
+    }
+    let seq = s.next_seq;
+    s.next_seq = wrapping_add(seq, 1);
+    seq
+}
+
+pub fn sealer_rotate_epoch(in s: SealerSt) -> u32 eff [Fail[VaultErr]] {
+    if s.epoch == U32_MAX {
+        Fail::raise(VaultErr::EpochSpaceExhausted);
+    }
+    wrapping_add(s.epoch, 1)
+}
+
+fn write_nonce(epoch: u32, seq: u64, inout nonce: Slice[u8]) {
+    let _w1 = nonce.try_write_u32_be(0, epoch);
+    let _w2 = nonce.try_write_u64_be(4, seq);
+}
+
+pub fn sealer_seal_frame(
+    in s: SealerSt,
+    ticket_sealer: u64,
+    ticket_epoch: u32,
+    ticket_seq: u64,
+    in a: Aead,
+    in aad: Slice[u8],
+    inout frame: Slice[u8],
+    inout nonce: Slice[u8],
+    inout work: Slice[u8]
+) -> u64 eff [Ffi[Crypto], Fail[VaultErr]] {
+    if ticket_sealer != s.id {
+        Fail::raise(VaultErr::ForeignTicket);
+    }
+    if frame.len() < FRAME_HEADER_LEN {
+        Fail::raise(VaultErr::BufferTooSmall);
+    }
+    let aad_len = aad.len();
+    let frame_len = frame.len();
+    let msg_len = wrapping_sub(frame_len, FRAME_HEADER_LEN);
+    let with_aad = wrapping_add(aad_len, msg_len);
+    let total = wrapping_add(with_aad, TAG_LEN);
+    if with_aad < aad_len || total < with_aad || work.len() < total || nonce.len() < NONCE_LEN {
+        wipe(inout frame);
+        Fail::raise(VaultErr::CipherRejected);
+    }
+    write_nonce(ticket_epoch, ticket_seq, inout nonce);
+    let _c1 = work.try_copy_from(0, in aad);
+    let _c2 = work.try_copy_from(aad_len, in frame[28..frame_len]);
+    let ok = handle Fail[CryptoError] in {
+        aead_seal(in a, in nonce[0..NONCE_LEN], inout work[0..total], aad_len, msg_len);
+        true
+    } with {
+        return v => v,
+        raise(_e, _) => false,
+    };
+    if !ok {
+        wipe(inout work[0..total]);
+        wipe(inout frame);
+        Fail::raise(VaultErr::CipherRejected);
+    }
+    let _h1 = frame.try_write_u32_be(0, ticket_epoch);
+    let _h2 = frame.try_write_u64_be(4, ticket_seq);
+    let _h3 = frame.try_copy_from(12, in work[with_aad..total]);
+    let _p = frame.try_copy_from(28, in work[aad_len..with_aad]);
+    frame_len
+}
+
+pub fn opener_open_frame(
+    expected_epoch: u32,
+    in a: Aead,
+    in aad: Slice[u8],
+    inout frame: Slice[u8],
+    inout nonce: Slice[u8],
+    inout work: Slice[u8]
+) -> FrameHdr eff [Ffi[Crypto], Fail[VaultErr]] {
+    let hdr = match frame_header_parse(in frame) {
+        Option::Some(h) => h,
+        Option::None => {
+            wipe(inout frame);
+            Fail::raise(VaultErr::MalformedHeader);
+            FrameHdr {
+                key_epoch: 0,
+                nonce_seq: 0,
+                tag_lo: 0,
+                tag_hi: 0
+            }
+        },
+    };
+    if hdr.key_epoch != expected_epoch {
+        wipe(inout frame);
+        Fail::raise(
+            VaultErr::WrongEpoch {
+                expected: expected_epoch,
+                found: hdr.key_epoch
+            }
+        );
+    }
+    let aad_len = aad.len();
+    let frame_len = frame.len();
+    let ct_len = wrapping_sub(frame_len, FRAME_HEADER_LEN);
+    let with_aad = wrapping_add(aad_len, ct_len);
+    let total = wrapping_add(with_aad, TAG_LEN);
+    if with_aad < aad_len || total < with_aad || work.len() < total || nonce.len() < NONCE_LEN {
+        wipe(inout frame);
+        Fail::raise(VaultErr::AuthenticationTagMismatch);
+    }
+    write_nonce(hdr.key_epoch, hdr.nonce_seq, inout nonce);
+    let _c1 = work.try_copy_from(0, in aad);
+    let _c2 = work.try_copy_from(aad_len, in frame[28..frame_len]);
+    let _c3 = work.try_copy_from(with_aad, in frame[12..28]);
+    let ok = handle Fail[CryptoError] in {
+        aead_open(in a, in nonce[0..NONCE_LEN], inout work[0..total], aad_len);
+        true
+    } with {
+        return v => v,
+        raise(_e, _) => false,
+    };
+    if !ok {
+        wipe(inout work[0..total]);
+        wipe(inout frame);
+        Fail::raise(VaultErr::AuthenticationTagMismatch);
+    }
+    let _p = frame.try_copy_from(28, in work[aad_len..with_aad]);
+    wipe(inout work[aad_len..with_aad]);
+    hdr
+}
+
+// ---------------------------------------------------------------------------
+// §23.1.4 hybrid X25519MLKEM768 key establishment.
+
+fn isa_code(isa: KemIsaKind) -> u32 {
+    match isa {
+        KemIsaKind::Portable => 0,
+        KemIsaKind::Avx2 => 1,
+        KemIsaKind::Neon => 2,
+    }
+}
+
+pub fn kem_isa_available(isa: KemIsaKind) -> bool eff [Ffi[Crypto]] {
+    mlkem768_isa_available(isa_code(isa))
+}
+
+pub fn kem_isa_detect() -> KemIsaKind eff [Ffi[Crypto]] {
+    let code = mlkem768_isa_detect();
+    if code == 1 {
+        KemIsaKind::Avx2
+    } else if code == 2 {
+        KemIsaKind::Neon
+    } else {
+        KemIsaKind::Portable
+    }
+}
+
+pub fn kem_require_isa(isa: KemIsaKind) eff [Ffi[Crypto], Fail[VaultErr]] {
+    if !kem_isa_available(isa) {
+        Fail::raise(
+            VaultErr::IsaUnavailable {
+                isa: isa
+            }
+        );
+    }
+}
+
+pub fn fill_random(inout out: Slice[u8]) eff [Ffi[Crypto], Fail[VaultErr]] {
+    let ok = handle Fail[CryptoError] in {
+        random(inout out);
+        true
+    } with {
+        return v => v,
+        raise(_e, _) => false,
+    };
+    if !ok {
+        Fail::raise(VaultErr::Rng);
+    }
+}
+
+pub fn kem_mlkem768_ek(
+    isa: KemIsaKind,
+    in seed: Slice[u8],
+    inout ek: Slice[u8],
+    inout dk_scratch: Slice[u8]
+) eff [Ffi[Crypto], Fail[VaultErr]] {
+    kem_require_isa(isa);
+    let ok = handle Fail[CryptoError] in {
+        mlkem768_keygen(isa_code(isa), in seed, inout ek, inout dk_scratch);
+        true
+    } with {
+        return v => v,
+        raise(_e, _) => false,
+    };
+    wipe(inout dk_scratch);
+    if !ok {
+        wipe(inout ek);
+        Fail::raise(
+            VaultErr::IsaUnavailable {
+                isa: isa
+            }
+        );
+    }
+}
+
+pub fn kem_mlkem768_encaps(
+    isa: KemIsaKind,
+    in ek: Slice[u8],
+    in m: Slice[u8],
+    inout ct: Slice[u8],
+    inout ss: Slice[u8]
+) eff [Ffi[Crypto], Fail[VaultErr]] {
+    kem_require_isa(isa);
+    if !mlkem768_validate(isa_code(isa), in ek) {
+        Fail::raise(VaultErr::InvalidEncapsulationKey);
+    }
+    let ok = handle Fail[CryptoError] in {
+        mlkem768_encaps(isa_code(isa), in ek, in m, inout ct, inout ss);
+        true
+    } with {
+        return v => v,
+        raise(_e, _) => false,
+    };
+    if !ok {
+        wipe(inout ct);
+        wipe(inout ss);
+        Fail::raise(VaultErr::InvalidEncapsulationKey);
+    }
+}
+
+pub fn kem_mlkem768_decaps(
+    isa: KemIsaKind,
+    in seed: Slice[u8],
+    in ct: Slice[u8],
+    inout ss: Slice[u8],
+    inout ek_scratch: Slice[u8],
+    inout dk_scratch: Slice[u8]
+) eff [Ffi[Crypto], Fail[VaultErr]] {
+    kem_require_isa(isa);
+    let ok = handle Fail[CryptoError] in {
+        mlkem768_keygen(isa_code(isa), in seed, inout ek_scratch, inout dk_scratch);
+        mlkem768_decaps(isa_code(isa), in dk_scratch, in ct, inout ss);
+        true
+    } with {
+        return v => v,
+        raise(_e, _) => false,
+    };
+    wipe(inout ek_scratch);
+    wipe(inout dk_scratch);
+    if !ok {
+        wipe(inout ss);
+        Fail::raise(
+            VaultErr::IsaUnavailable {
+                isa: isa
+            }
+        );
+    }
+}
+
+pub fn kem_client_share(
+    isa: KemIsaKind,
+    in seeds: Slice[u8],
+    inout share: Slice[u8],
+    inout dk_scratch: Slice[u8]
+) eff [Ffi[Crypto], Fail[VaultErr]] {
+    kem_require_isa(isa);
+    let ok = handle Fail[CryptoError] in {
+        mlkem768_keygen(
+            isa_code(isa),
+            in seeds[0..64],
+            inout share[0..1184],
+            inout dk_scratch[0..2400]
+        );
+        x25519_base(in seeds[64..96], inout share[1184..1216]);
+        true
+    } with {
+        return v => v,
+        raise(_e, _) => false,
+    };
+    wipe(inout dk_scratch);
+    if !ok {
+        wipe(inout share);
+        Fail::raise(
+            VaultErr::IsaUnavailable {
+                isa: isa
+            }
+        );
+    }
+}
+
+pub fn kem_check_server_share(len: u64) eff [Fail[VaultErr]] {
+    if len != SERVER_SHARE_LEN {
+        Fail::raise(
+            VaultErr::BadShareLength {
+                expected: SERVER_SHARE_LEN,
+                found: len
+            }
+        );
+    }
+}
+
+pub fn kem_client_decapsulate(
+    isa: KemIsaKind,
+    in seeds: Slice[u8],
+    in server_share: Slice[u8],
+    inout out_ss: Slice[u8],
+    inout scratch: Slice[u8]
+) eff [Ffi[Crypto], Fail[VaultErr]] {
+    kem_require_isa(isa);
+    kem_check_server_share(server_share.len());
+    let dk_end = wrapping_add(MLKEM768_EK_LEN, MLKEM768_DK_LEN);
+    let ek_end = MLKEM768_EK_LEN;
+    let ok_ml = handle Fail[CryptoError] in {
+        mlkem768_keygen(
+            isa_code(isa),
+            in seeds[0..64],
+            inout scratch[0..ek_end],
+            inout scratch[ek_end..dk_end]
+        );
+        mlkem768_decaps(
+            isa_code(isa),
+            in scratch[ek_end..dk_end],
+            in server_share[0..1088],
+            inout out_ss[0..32]
+        );
+        true
+    } with {
+        return v => v,
+        raise(_e, _) => false,
+    };
+    wipe(inout scratch[0..dk_end]);
+    if !ok_ml {
+        wipe(inout out_ss);
+        Fail::raise(
+            VaultErr::IsaUnavailable {
+                isa: isa
+            }
+        );
+    }
+    let ok_x = handle Fail[CryptoError] in {
+        x25519(in seeds[64..96], in server_share[1088..1120], inout out_ss[32..64]);
+        true
+    } with {
+        return v => v,
+        raise(_e, _) => false,
+    };
+    if !ok_x {
+        wipe(inout out_ss);
+        Fail::raise(VaultErr::NonContributoryX25519);
+    }
+}
+
+pub fn kem_server_validate(isa: KemIsaKind, in client_share: Slice[u8]) eff [
+    Ffi[Crypto],
+    Fail[VaultErr]
+] {
+    kem_require_isa(isa);
+    if client_share.len() != CLIENT_SHARE_LEN {
+        Fail::raise(
+            VaultErr::BadShareLength {
+                expected: CLIENT_SHARE_LEN,
+                found: client_share.len()
+            }
+        );
+    }
+    if !mlkem768_validate(isa_code(isa), in client_share[0..1184]) {
+        Fail::raise(VaultErr::InvalidEncapsulationKey);
+    }
+}
+
+pub fn kem_server_encapsulate(
+    isa: KemIsaKind,
+    in client_share: Slice[u8],
+    in m: Slice[u8],
+    in x25519_eph: Slice[u8],
+    inout server_share: Slice[u8],
+    inout out_ss: Slice[u8]
+) eff [Ffi[Crypto], Fail[VaultErr]] {
+    kem_server_validate(isa, in client_share);
+    let ok_ml = handle Fail[CryptoError] in {
+        mlkem768_encaps(
+            isa_code(isa),
+            in client_share[0..1184],
+            in m,
+            inout server_share[0..1088],
+            inout out_ss[0..32]
+        );
+        x25519_base(in x25519_eph, inout server_share[1088..1120]);
+        true
+    } with {
+        return v => v,
+        raise(_e, _) => false,
+    };
+    if !ok_ml {
+        wipe(inout out_ss);
+        wipe(inout server_share);
+        Fail::raise(VaultErr::InvalidEncapsulationKey);
+    }
+    let ok_x = handle Fail[CryptoError] in {
+        x25519(in x25519_eph, in client_share[1184..1216], inout out_ss[32..64]);
+        true
+    } with {
+        return v => v,
+        raise(_e, _) => false,
+    };
+    if !ok_x {
+        wipe(inout out_ss);
+        wipe(inout server_share);
+        Fail::raise(VaultErr::NonContributoryX25519);
+    }
+}

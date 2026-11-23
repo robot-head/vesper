@@ -569,6 +569,87 @@ const VESPER_DECLARATION_PASS: vesper::pact_frontend::DeclarationPassTable =
         },
     };
 
+struct VesperPactSessionImpl {
+    inner: std::sync::Mutex<pact_binding::vesper__check_2pact__session__PactSession>,
+    revision: String,
+}
+
+impl vesper::pact_frontend::VesperPactSession for VesperPactSessionImpl {
+    fn revision(&self) -> &str {
+        &self.revision
+    }
+
+    fn solve(
+        &self,
+        q: &vesper::pact_frontend::PactQuery<'_>,
+    ) -> Result<(usize, String), (u8, String)> {
+        let timer = stats::Timer::start();
+        let sq = pact_words::SessionQuery {
+            env_params: q.env_params,
+            assumptions: q.assumptions,
+            scopes: q.scopes,
+            infer: q.infer,
+            goal: q.goal.clone(),
+        };
+        let qbytes = pact_words::encode_session_query(&sq);
+        let timer = timer.lap(&stats::PACT.encode);
+        let words = {
+            let mut sess = self.inner.lock().expect("pact session mutex");
+            pact_binding::pact_session_solve(&mut sess, &qbytes)
+        };
+        let timer = timer.lap(&stats::PACT.vesper);
+        let res = pact_words::decode_solve_words(&words);
+        timer.lap(&stats::PACT.decode);
+        PACT_CALLS.fetch_add(1, Relaxed);
+        res
+    }
+}
+
+/// Full coherence-gated Pact session from `modules/pact` (SH2 lane 13 part 2b).
+const VESPER_PACT_SESSION: vesper::pact_frontend::PactSessionTable =
+    vesper::pact_frontend::PactSessionTable {
+        open: |module, base_world, identity, solver, fingerprint| {
+            let timer = stats::Timer::start();
+            let (max_depth, max_steps, max_fix) = solver.map_or((48, 100_000, 16), |s| {
+                (
+                    s.max_depth as u64,
+                    s.max_steps,
+                    s.max_fixpoint_iterations as u64,
+                )
+            });
+            let prelude = vesper::pact_frontend::prelude_world();
+            let input = pact_words::session_input(
+                module,
+                base_world,
+                &prelude,
+                &identity.name,
+                &identity.version,
+                max_depth,
+                max_steps,
+                max_fix,
+                fingerprint,
+            )?;
+            let timer = timer.lap(&stats::PACT.encode);
+            let sess = pact_binding::pact_session_open(&input);
+            let timer = timer.lap(&stats::PACT.vesper);
+            let out = if pact_binding::pact_session_is_ok(&sess) {
+                let rev_words = pact_binding::pact_session_revision(&sess);
+                let revision = check_words::Words::new(&rev_words).text();
+                vesper::pact_frontend::PactOpenResult::Open(Box::new(VesperPactSessionImpl {
+                    inner: std::sync::Mutex::new(sess),
+                    revision,
+                }))
+            } else {
+                let diag_words = pact_binding::pact_session_take_diagnostics(&sess);
+                let diagnostics = pact_words::decode_session_words(&diag_words);
+                vesper::pact_frontend::PactOpenResult::Diagnostics(diagnostics)
+            };
+            timer.lap(&stats::PACT.decode);
+            PACT_CALLS.fetch_add(1, Relaxed);
+            Some(out)
+        },
+    };
+
 /// The swaps' input and output costs (SH4 lane 2, #1276), reported at exit
 /// with `VESPER_HYBRID_STATS=1`. `VESPER_HYBRID_STATS=time` also runs the
 /// Rust pass on every swapped call, times it and counts the calls whose
@@ -1439,6 +1520,9 @@ extern "C" fn install() {
         std::process::abort();
     }
     if vesper::pact_frontend::install_declaration_pass(VESPER_DECLARATION_PASS).is_err() {
+        std::process::abort();
+    }
+    if vesper::pact_frontend::install_pact_session(VESPER_PACT_SESSION).is_err() {
         std::process::abort();
     }
     if std::env::var_os("VESPER_HYBRID_STATS").is_some_and(|v| v == "1" || v == "time") {

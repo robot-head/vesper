@@ -10,35 +10,22 @@
 //!   secret (32 bytes), 64 bytes, concatenated with no KDF (TLS 1.3 feeds it
 //!   to its own key schedule).
 //!
-//! ML-KEM-768 (FIPS 203) is Cryspen `libcrux-ml-kem` 0.0.11, built without
-//! `std`, `alloc` or `rand`; X25519 is `x25519-dalek` 3.0.0. As the draft
-//! requires, the server rejects an encapsulation key that fails the FIPS 203
-//! modulus check and both sides reject an all-zero X25519 output. Secret
-//! seeds and shared secrets live in [`SecretSlot`]s.
-//!
-//! # Vector NTT (`eff [Isa[P]]`)
-//!
-//! The design asks for the ML-KEM polynomial NTT to run on vector units.
-//! Vault does not implement any of that arithmetic itself (the shared rules
-//! forbid hand-rolled primitives): it delegates to libcrux, whose portable,
-//! AVX2 and NEON backends are formally verified with hax and F* for panic
-//! freedom, functional correctness against the FIPS 203 specification and
-//! secret independence. [`KemIsa`] is the explicit ISA witness: every
-//! exchange records the backend that ran it, the `_on` entry points pin one,
-//! a backend the CPU lacks is refused with [`KemError::IsaUnavailable`]
-//! instead of being run, and the default is [`KemIsa::detect`]. Vault itself
-//! contains no `unsafe`; the intrinsics calls are inside libcrux.
+//! Under `cfg(vesper_port)`, hybrid encapsulation, decapsulation, validation,
+//! ISA dispatch, and OS CSPRNG run in the compiled Vesper port `@vesper/vault`
+//! over `@vesper/crypto` (`vesper-crypto-sys`), while secret seeds and shared
+//! secrets stay in [`SecretSlot`]s. `vesper-vault-seed` (`cfg(not(vesper_port))`)
+//! runs the frozen Rust engine in `src/reference/`.
 
 use core::fmt;
 
-use libcrux_ml_kem::mlkem768::{
-    MlKem768Ciphertext, MlKem768KeyPair, MlKem768PrivateKey, MlKem768PublicKey,
-};
 use rand_core::TryCryptoRng;
-use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroize;
 
 use crate::obligation::{ObligationKind, record_leak};
+#[cfg(vesper_port)]
+use crate::port;
+#[cfg(not(vesper_port))]
+use crate::reference::kem as ref_kem;
 use crate::slot::{LockPolicy, SecretSlot, ShredReceipt, SlotError};
 
 /// ML-KEM-768 encapsulation key length.
@@ -57,7 +44,10 @@ pub const SHARED_SECRET_LEN: usize = 64;
 pub const X25519MLKEM768_GROUP: u16 = 0x11EC;
 
 /// ML-KEM seed (`d || z`, 64 bytes) followed by the X25519 scalar.
-const CLIENT_SECRET_LEN: usize = 64 + 32;
+pub(crate) const CLIENT_SECRET_LEN: usize = 64 + 32;
+/// ML-KEM-768 expanded decapsulation key length.
+#[cfg(vesper_port)]
+pub(crate) const MLKEM768_DK_LEN: usize = 2400;
 
 /// Key establishment failures.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -111,8 +101,8 @@ impl From<SlotError> for KemError {
 
 /// The instruction set that runs the ML-KEM-768 polynomial arithmetic
 /// (NTT, inverse NTT, base-case multiplication, sampling and compression):
-/// the `P` of the design's `eff [Isa[P]]`. Every backend is libcrux's and all
-/// of them produce identical bytes; only speed differs.
+/// the `P` of the design's `eff [Isa[P]]`. Every backend produces identical
+/// bytes; only speed differs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum KemIsa {
     /// Portable scalar code, available everywhere.
@@ -138,21 +128,25 @@ impl KemIsa {
 
     /// Whether this backend was compiled in and the running CPU supports it.
     pub fn is_available(self) -> bool {
-        match self {
-            KemIsa::Portable => true,
-            KemIsa::Avx2 => avx2_available(),
-            KemIsa::Neon => neon_available(),
+        #[cfg(vesper_port)]
+        {
+            port::b::kem_isa_available(port::isa_kind(self))
+        }
+        #[cfg(not(vesper_port))]
+        {
+            ref_kem::is_isa_available(self)
         }
     }
 
     /// The fastest available backend.
     pub fn detect() -> KemIsa {
-        if KemIsa::Avx2.is_available() {
-            KemIsa::Avx2
-        } else if KemIsa::Neon.is_available() {
-            KemIsa::Neon
-        } else {
-            KemIsa::Portable
+        #[cfg(vesper_port)]
+        {
+            port::isa_from_kind(port::b::kem_isa_detect())
+        }
+        #[cfg(not(vesper_port))]
+        {
+            ref_kem::detect_isa()
         }
     }
 
@@ -162,10 +156,14 @@ impl KemIsa {
     }
 
     fn require(self) -> Result<KemIsa, KemError> {
-        if self.is_available() {
+        #[cfg(vesper_port)]
+        {
+            port::b::kem_require_isa(port::isa_kind(self)).map_err(port::kem_err)?;
             Ok(self)
-        } else {
-            Err(KemError::IsaUnavailable(self))
+        }
+        #[cfg(not(vesper_port))]
+        {
+            ref_kem::require_isa(self)
         }
     }
 
@@ -175,10 +173,18 @@ impl KemIsa {
         self,
         seed: &[u8; 64],
     ) -> Result<[u8; MLKEM768_EK_LEN], KemError> {
-        let kp = ml::keygen(self.require()?, seed);
-        let (sk, pk) = kp.into_parts();
-        drop(WipedKey(sk));
-        Ok(*pk.as_slice())
+        #[cfg(vesper_port)]
+        {
+            let mut ek = [0u8; MLKEM768_EK_LEN];
+            let mut dk_scratch = [0u8; MLKEM768_DK_LEN];
+            port::b::kem_mlkem768_ek(port::isa_kind(self), seed, &mut ek, &mut dk_scratch)
+                .map_err(port::kem_err)?;
+            Ok(ek)
+        }
+        #[cfg(not(vesper_port))]
+        {
+            ref_kem::mlkem768_encapsulation_key(self, seed)
+        }
     }
 
     /// Plain ML-KEM-768 encapsulation with explicit message `m`, on this
@@ -190,13 +196,18 @@ impl KemIsa {
         ek: &[u8; MLKEM768_EK_LEN],
         m: &[u8; 32],
     ) -> Result<([u8; MLKEM768_CT_LEN], [u8; 32]), KemError> {
-        let isa = self.require()?;
-        let pk = MlKem768PublicKey::from(ek);
-        if !ml::validate(isa, &pk) {
-            return Err(KemError::InvalidEncapsulationKey);
+        #[cfg(vesper_port)]
+        {
+            let mut ct = [0u8; MLKEM768_CT_LEN];
+            let mut ss = [0u8; 32];
+            port::b::kem_mlkem768_encaps(port::isa_kind(self), ek, m, &mut ct, &mut ss)
+                .map_err(port::kem_err)?;
+            Ok((ct, ss))
         }
-        let (ct, k) = ml::encaps(isa, &pk, m);
-        Ok((*ct.as_slice(), k))
+        #[cfg(not(vesper_port))]
+        {
+            ref_kem::mlkem768_encapsulate(self, ek, m)
+        }
     }
 
     /// Plain ML-KEM-768 decapsulation (with implicit rejection) under the
@@ -207,111 +218,25 @@ impl KemIsa {
         seed: &[u8; 64],
         ct: &[u8; MLKEM768_CT_LEN],
     ) -> Result<[u8; 32], KemError> {
-        let isa = self.require()?;
-        let (sk, _) = ml::keygen(isa, seed).into_parts();
-        let sk = WipedKey(sk);
-        Ok(ml::decaps(isa, &sk.0, &MlKem768Ciphertext::from(ct)))
-    }
-}
-
-#[cfg(target_arch = "x86_64")]
-fn avx2_available() -> bool {
-    std::arch::is_x86_feature_detected!("avx2")
-}
-
-#[cfg(not(target_arch = "x86_64"))]
-fn avx2_available() -> bool {
-    false
-}
-
-#[cfg(target_arch = "aarch64")]
-fn neon_available() -> bool {
-    std::arch::is_aarch64_feature_detected!("neon")
-}
-
-#[cfg(not(target_arch = "aarch64"))]
-fn neon_available() -> bool {
-    false
-}
-
-/// An expanded ML-KEM-768 decapsulation key (2400 bytes), wiped on drop.
-struct WipedKey(MlKem768PrivateKey);
-
-impl Drop for WipedKey {
-    fn drop(&mut self) {
-        self.0[0..].zeroize();
-    }
-}
-
-/// Dispatch to libcrux's per-ISA instantiations. Callers pass a backend
-/// that [`KemIsa::require`] accepted, so an arm for a backend that is not
-/// compiled for this architecture is never reached.
-mod ml {
-    use super::KemIsa;
-    use libcrux_ml_kem::mlkem768::{
-        self as m, MlKem768Ciphertext, MlKem768KeyPair, MlKem768PrivateKey, MlKem768PublicKey,
-    };
-    use zeroize::Zeroize;
-
-    pub(super) fn keygen(isa: KemIsa, seed: &[u8; 64]) -> MlKem768KeyPair {
-        let mut s = *seed;
-        let kp = match isa {
-            #[cfg(target_arch = "x86_64")]
-            KemIsa::Avx2 => m::avx2::generate_key_pair(s),
-            #[cfg(target_arch = "aarch64")]
-            KemIsa::Neon => m::neon::generate_key_pair(s),
-            KemIsa::Portable => m::portable::generate_key_pair(s),
-            #[allow(unreachable_patterns)]
-            _ => unreachable!("backend not compiled for this architecture"),
-        };
-        s.zeroize();
-        kp
-    }
-
-    pub(super) fn validate(isa: KemIsa, pk: &MlKem768PublicKey) -> bool {
-        match isa {
-            #[cfg(target_arch = "x86_64")]
-            KemIsa::Avx2 => m::avx2::validate_public_key(pk),
-            #[cfg(target_arch = "aarch64")]
-            KemIsa::Neon => m::neon::validate_public_key(pk),
-            KemIsa::Portable => m::portable::validate_public_key(pk),
-            #[allow(unreachable_patterns)]
-            _ => unreachable!("backend not compiled for this architecture"),
+        #[cfg(vesper_port)]
+        {
+            let mut ss = [0u8; 32];
+            let mut ek_scratch = [0u8; MLKEM768_EK_LEN];
+            let mut dk_scratch = [0u8; MLKEM768_DK_LEN];
+            port::b::kem_mlkem768_decaps(
+                port::isa_kind(self),
+                seed,
+                ct,
+                &mut ss,
+                &mut ek_scratch,
+                &mut dk_scratch,
+            )
+            .map_err(port::kem_err)?;
+            Ok(ss)
         }
-    }
-
-    pub(super) fn encaps(
-        isa: KemIsa,
-        pk: &MlKem768PublicKey,
-        msg: &[u8; 32],
-    ) -> (MlKem768Ciphertext, [u8; 32]) {
-        let mut r = *msg;
-        let out = match isa {
-            #[cfg(target_arch = "x86_64")]
-            KemIsa::Avx2 => m::avx2::encapsulate(pk, r),
-            #[cfg(target_arch = "aarch64")]
-            KemIsa::Neon => m::neon::encapsulate(pk, r),
-            KemIsa::Portable => m::portable::encapsulate(pk, r),
-            #[allow(unreachable_patterns)]
-            _ => unreachable!("backend not compiled for this architecture"),
-        };
-        r.zeroize();
-        out
-    }
-
-    pub(super) fn decaps(
-        isa: KemIsa,
-        sk: &MlKem768PrivateKey,
-        ct: &MlKem768Ciphertext,
-    ) -> [u8; 32] {
-        match isa {
-            #[cfg(target_arch = "x86_64")]
-            KemIsa::Avx2 => m::avx2::decapsulate(sk, ct),
-            #[cfg(target_arch = "aarch64")]
-            KemIsa::Neon => m::neon::decapsulate(sk, ct),
-            KemIsa::Portable => m::portable::decapsulate(sk, ct),
-            #[allow(unreachable_patterns)]
-            _ => unreachable!("backend not compiled for this architecture"),
+        #[cfg(not(vesper_port))]
+        {
+            ref_kem::mlkem768_decapsulate(self, seed, ct)
         }
     }
 }
@@ -346,27 +271,6 @@ pub struct DecapError {
 /// Draw randomness straight into `buf`.
 fn fill<R: TryCryptoRng + ?Sized>(rng: &mut R, buf: &mut [u8]) -> Result<(), KemError> {
     rng.try_fill_bytes(buf).map_err(|_| KemError::Rng)
-}
-
-/// Expand the ML-KEM key pair from the slot's seed, wiping the local copy
-/// of the seed; the expanded decapsulation key is wiped when dropped.
-fn mlkem_key(isa: KemIsa, s: &[u8; CLIENT_SECRET_LEN]) -> (WipedKey, MlKem768PublicKey) {
-    let mut seed = [0u8; 64];
-    seed.copy_from_slice(&s[..64]);
-    let kp: MlKem768KeyPair = ml::keygen(isa, &seed);
-    seed.zeroize();
-    let (sk, pk) = kp.into_parts();
-    (WipedKey(sk), pk)
-}
-
-/// The X25519 scalar from the slot, wiping the local copy (`StaticSecret`
-/// zeroizes itself on drop).
-fn x25519_key(s: &[u8; CLIENT_SECRET_LEN]) -> StaticSecret {
-    let mut x = [0u8; 32];
-    x.copy_from_slice(&s[64..]);
-    let sk = StaticSecret::from(x);
-    x.zeroize();
-    sk
 }
 
 impl HybridClientSecret {
@@ -453,13 +357,20 @@ impl HybridClientSecret {
     }
 
     fn share(&self) -> [u8; CLIENT_SHARE_LEN] {
-        self.slot().with(|s| {
-            let (_sk, ek) = mlkem_key(self.isa, s);
-            let mut out = [0u8; CLIENT_SHARE_LEN];
-            out[..MLKEM768_EK_LEN].copy_from_slice(ek.as_slice());
-            out[MLKEM768_EK_LEN..].copy_from_slice(PublicKey::from(&x25519_key(s)).as_bytes());
-            out
-        })
+        #[cfg(vesper_port)]
+        {
+            self.slot().with(|s| {
+                let mut out = [0u8; CLIENT_SHARE_LEN];
+                let mut dk_scratch = [0u8; MLKEM768_DK_LEN];
+                port::b::kem_client_share(port::isa_kind(self.isa), s, &mut out, &mut dk_scratch)
+                    .expect("backend already verified at construction");
+                out
+            })
+        }
+        #[cfg(not(vesper_port))]
+        {
+            self.slot().with(|s| ref_kem::client_share(self.isa, s))
+        }
     }
 
     /// Complete the exchange with the server's 1120-byte share.
@@ -468,55 +379,84 @@ impl HybridClientSecret {
         server_share: &[u8],
         policy: LockPolicy,
     ) -> Result<HybridSharedSecret, DecapError> {
-        if server_share.len() != SERVER_SHARE_LEN {
-            return Err(DecapError {
-                error: KemError::BadShareLength {
-                    expected: SERVER_SHARE_LEN,
-                    found: server_share.len(),
-                },
-                secret: self,
-            });
-        }
-        let mut out = match SecretSlot::<SHARED_SECRET_LEN>::new(policy) {
-            Ok(o) => o,
-            Err(e) => {
+        #[cfg(vesper_port)]
+        {
+            let share_len = u64::try_from(server_share.len()).unwrap_or(u64::MAX);
+            if let Err(e) = port::b::kem_check_server_share(share_len).map_err(port::kem_err) {
                 return Err(DecapError {
-                    error: e.into(),
+                    error: e,
                     secret: self,
                 });
             }
-        };
-        let ct = match MlKem768Ciphertext::try_from(&server_share[..MLKEM768_CT_LEN]) {
-            Ok(c) => c,
-            Err(_) => unreachable!("length checked"),
-        };
-        let peer: [u8; 32] = match server_share[MLKEM768_CT_LEN..].try_into() {
-            Ok(p) => p,
-            Err(_) => unreachable!("length checked"),
-        };
-        let contributory = self.slot().with(|s| {
-            out.with_mut(|o| {
-                let (sk, _) = mlkem_key(self.isa, s);
-                let mut k = ml::decaps(self.isa, &sk.0, &ct);
-                drop(sk);
-                o[..32].copy_from_slice(&k);
-                k.zeroize();
-                let ss = x25519_key(s).diffie_hellman(&PublicKey::from(peer));
-                o[32..].copy_from_slice(ss.as_bytes());
-                ss.was_contributory()
-            })
-        });
-        if !contributory {
-            let _ = out.shred();
-            return Err(DecapError {
-                error: KemError::NonContributoryX25519,
-                secret: self,
+            let mut out = match SecretSlot::<SHARED_SECRET_LEN>::new(policy) {
+                Ok(o) => o,
+                Err(e) => {
+                    return Err(DecapError {
+                        error: e.into(),
+                        secret: self,
+                    });
+                }
+            };
+            let mut scratch = [0u8; MLKEM768_EK_LEN + MLKEM768_DK_LEN];
+            let res = self.slot().with(|s| {
+                out.with_mut(|o| {
+                    port::b::kem_client_decapsulate(
+                        port::isa_kind(self.isa),
+                        s,
+                        server_share,
+                        o,
+                        &mut scratch,
+                    )
+                })
             });
+            scratch.zeroize();
+            if let Err(e) = res.map_err(port::kem_err) {
+                let _ = out.shred();
+                return Err(DecapError {
+                    error: e,
+                    secret: self,
+                });
+            }
+            if let Some(s) = self.seeds.take() {
+                let _ = s.shred();
+            }
+            Ok(out)
         }
-        if let Some(s) = self.seeds.take() {
-            let _ = s.shred();
+        #[cfg(not(vesper_port))]
+        {
+            if server_share.len() != SERVER_SHARE_LEN {
+                return Err(DecapError {
+                    error: KemError::BadShareLength {
+                        expected: SERVER_SHARE_LEN,
+                        found: server_share.len(),
+                    },
+                    secret: self,
+                });
+            }
+            let mut out = match SecretSlot::<SHARED_SECRET_LEN>::new(policy) {
+                Ok(o) => o,
+                Err(e) => {
+                    return Err(DecapError {
+                        error: e.into(),
+                        secret: self,
+                    });
+                }
+            };
+            let res = self.slot().with(|s| {
+                out.with_mut(|o| ref_kem::client_decapsulate(self.isa, s, server_share, o))
+            });
+            if let Err(error) = res {
+                let _ = out.shred();
+                return Err(DecapError {
+                    error,
+                    secret: self,
+                });
+            }
+            if let Some(s) = self.seeds.take() {
+                let _ = s.shred();
+            }
+            Ok(out)
         }
-        Ok(out)
     }
 
     /// Abandon the exchange and shred the secrets.
@@ -544,41 +484,40 @@ fn server_core(
     x25519_eph: &[u8; 32],
     policy: LockPolicy,
 ) -> Result<([u8; SERVER_SHARE_LEN], HybridSharedSecret), KemError> {
-    if client_share.len() != CLIENT_SHARE_LEN {
-        return Err(KemError::BadShareLength {
-            expected: CLIENT_SHARE_LEN,
-            found: client_share.len(),
+    #[cfg(vesper_port)]
+    {
+        port::b::kem_server_validate(port::isa_kind(isa), client_share).map_err(port::kem_err)?;
+        let mut out = SecretSlot::<SHARED_SECRET_LEN>::new(policy)?;
+        let mut share = [0u8; SERVER_SHARE_LEN];
+        let res = out.with_mut(|o| {
+            port::b::kem_server_encapsulate(
+                port::isa_kind(isa),
+                client_share,
+                m,
+                x25519_eph,
+                &mut share,
+                o,
+            )
         });
+        if let Err(e) = res.map_err(port::kem_err) {
+            let _ = out.shred();
+            return Err(e);
+        }
+        Ok((share, out))
     }
-    let ek = match MlKem768PublicKey::try_from(&client_share[..MLKEM768_EK_LEN]) {
-        Ok(e) => e,
-        Err(_) => unreachable!("length checked"),
-    };
-    if !ml::validate(isa, &ek) {
-        return Err(KemError::InvalidEncapsulationKey);
+    #[cfg(not(vesper_port))]
+    {
+        ref_kem::server_validate(isa, client_share)?;
+        let mut out = SecretSlot::<SHARED_SECRET_LEN>::new(policy)?;
+        let mut share = [0u8; SERVER_SHARE_LEN];
+        if let Err(e) = out.with_mut(|o| {
+            ref_kem::server_encapsulate(isa, client_share, m, x25519_eph, &mut share, o)
+        }) {
+            let _ = out.shred();
+            return Err(e);
+        }
+        Ok((share, out))
     }
-    let peer: [u8; 32] = match client_share[MLKEM768_EK_LEN..].try_into() {
-        Ok(p) => p,
-        Err(_) => unreachable!("length checked"),
-    };
-    let mut out = SecretSlot::<SHARED_SECRET_LEN>::new(policy)?;
-    let mut share = [0u8; SERVER_SHARE_LEN];
-    let contributory = out.with_mut(|o| {
-        let (ct, mut k) = ml::encaps(isa, &ek, m);
-        share[..MLKEM768_CT_LEN].copy_from_slice(ct.as_slice());
-        o[..32].copy_from_slice(&k);
-        k.zeroize();
-        let sk = StaticSecret::from(*x25519_eph);
-        share[MLKEM768_CT_LEN..].copy_from_slice(PublicKey::from(&sk).as_bytes());
-        let ss = sk.diffie_hellman(&PublicKey::from(peer));
-        o[32..].copy_from_slice(ss.as_bytes());
-        ss.was_contributory()
-    });
-    if !contributory {
-        let _ = out.shred();
-        return Err(KemError::NonContributoryX25519);
-    }
-    Ok((share, out))
 }
 
 /// Server side: validate the client share, encapsulate, and return the
@@ -653,28 +592,39 @@ pub fn server_encapsulate_for_testing_on(
     )
 }
 
-/// Operating-system randomness (`getrandom`) as a `rand_core` 0.10 fallible
-/// cryptographic RNG.
+fn fill_random(dst: &mut [u8]) -> Result<(), KemError> {
+    #[cfg(vesper_port)]
+    {
+        port::b::fill_random(dst).map_err(port::kem_err)
+    }
+    #[cfg(not(vesper_port))]
+    {
+        ref_kem::fill_random(dst)
+    }
+}
+
+/// Operating-system randomness (`vesper-crypto-sys` `vcr_random` on the port,
+/// `getrandom` on the Rust seed) as a `rand_core` 0.10 fallible cryptographic RNG.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SystemRng;
 
 impl rand_core::TryRng for SystemRng {
-    type Error = getrandom::Error;
+    type Error = KemError;
 
     fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
         let mut b = [0u8; 4];
-        getrandom::fill(&mut b)?;
+        fill_random(&mut b)?;
         Ok(u32::from_le_bytes(b))
     }
 
     fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
         let mut b = [0u8; 8];
-        getrandom::fill(&mut b)?;
+        fill_random(&mut b)?;
         Ok(u64::from_le_bytes(b))
     }
 
     fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
-        getrandom::fill(dst)
+        fill_random(dst)
     }
 }
 

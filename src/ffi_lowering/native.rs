@@ -347,6 +347,12 @@ impl<M: Module> Codegen<'_, '_, M> {
                 c_args.push(strings.last().expect("just pushed").0);
                 continue;
             }
+            if let ParameterType::CWStr = descriptor.ty() {
+                let (data, len) = self.foreign_view(&arg.expr, 2)?;
+                strings.push(self.foreign_cwstr(data, len)?);
+                c_args.push(strings.last().expect("just pushed").0);
+                continue;
+            }
             if let ParameterType::CStrList = descriptor.ty() {
                 let (data, len) = self.foreign_view(&arg.expr, 1)?;
                 let (buffer, array) = self.foreign_cstr_list(data, len)?;
@@ -402,7 +408,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                     c_args.push(len);
                 }
                 ParameterType::Handle { .. } => c_args.push(self.foreign_word(source)),
-                ParameterType::CStr | ParameterType::CStrList => {
+                ParameterType::CStr | ParameterType::CWStr | ParameterType::CStrList => {
                     unreachable!("C strings are lowered above")
                 }
                 ParameterType::Function { .. } => unreachable!("functions are lowered above"),
@@ -1064,6 +1070,56 @@ impl<M: Module> Codegen<'_, '_, M> {
         self.b.seal_block(join);
         Ok(self.b.block_params(join)[0])
     }
+    /// The `ChunkSeq[u16]` copy of the NUL-terminated UTF-16 string at
+    /// `address` (its code units before `0u16`), or 0 when `address` is `NULL`.
+    fn foreign_cwstr_copy(&mut self, address: ir::Value) -> Result<ir::Value, String> {
+        let scan = self.b.create_block();
+        let step = self.b.create_block();
+        let copy = self.b.create_block();
+        let join = self.b.create_block();
+        self.b.append_block_param(scan, types::I64);
+        self.b.append_block_param(join, types::I64);
+        let zero = self.b.ins().iconst(types::I64, 0);
+        let null = self.b.ins().icmp_imm(IntCC::Equal, address, 0);
+        self.branch(
+            null,
+            join,
+            &[ir::BlockArg::Value(zero)],
+            scan,
+            &[ir::BlockArg::Value(zero)],
+        );
+
+        self.b.switch_to_block(scan);
+        let len = self.b.block_params(scan)[0];
+        let byte_off = self.b.ins().ishl_imm(len, 1);
+        let ptr = self.b.ins().iadd(address, byte_off);
+        let unit = self.b.ins().load(types::I16, ir::MemFlags::new(), ptr, 0);
+        let is_nul = self.b.ins().icmp_imm(IntCC::Equal, unit, 0);
+        self.branch(is_nul, copy, &[], step, &[]);
+
+        self.b.switch_to_block(step);
+        self.b.seal_block(step);
+        let next_len = self.b.ins().iadd_imm(len, 1);
+        self.jump(scan, &[ir::BlockArg::Value(next_len)]);
+
+        self.b.switch_to_block(copy);
+        self.b.seal_block(scan);
+        self.b.seal_block(copy);
+        let cap = self.b.ins().iadd_imm(len, 1);
+        let stride = self.b.ins().iconst(types::I64, 2);
+        let header = self.seq_make(cap, stride)?;
+        let flags = ir::MemFlags::new();
+        let data = self.b.ins().load(types::I64, flags, header, 16);
+        let bytes = self.b.ins().ishl_imm(len, 1);
+        let memcpy = self.foreign_libc("memcpy", 3, true)?;
+        self.b.ins().call(memcpy, &[data, address, bytes]);
+        self.b.ins().store(flags, len, header, 0);
+        self.jump(join, &[ir::BlockArg::Value(header)]);
+
+        self.b.switch_to_block(join);
+        self.b.seal_block(join);
+        Ok(self.b.block_params(join)[0])
+    }
     /// A `CStrList` argument: a NUL-terminated `malloc` copy of the `len`
     /// bytes at `data`, and a `malloc`'d NULL-terminated array pointing at
     /// each string in it (every string ends at a NUL; a last one without
@@ -1183,6 +1239,60 @@ impl<M: Module> Codegen<'_, '_, M> {
         let at = self.b.ins().isub(found, data);
         let none = self.b.ins().iconst(types::I64, -1);
         Ok((buffer, self.b.ins().select(missing, none, at)))
+    }
+    /// A NUL-terminated UTF-16 `malloc` copy of the `len` code units at `data`,
+    /// and the element offset of the first `0u16` among them (-1 when none).
+    fn foreign_cwstr(
+        &mut self,
+        data: ir::Value,
+        len: ir::Value,
+    ) -> Result<(ir::Value, ir::Value), String> {
+        let malloc = self.foreign_libc("malloc", 1, true)?;
+        let memcpy = self.foreign_libc("memcpy", 3, true)?;
+        let bytes = self.b.ins().ishl_imm(len, 1);
+        let size = self.b.ins().iadd_imm(bytes, 2);
+        let call = self.b.ins().call(malloc, &[size]);
+        let buffer = self.b.inst_results(call)[0];
+        self.b
+            .ins()
+            .trapz(buffer, ir::TrapCode::unwrap_user(ffi::CSTR_ALLOC_TRAP));
+        self.b.ins().call(memcpy, &[buffer, data, bytes]);
+        let end = self.b.ins().iadd(buffer, bytes);
+        let nul = self.b.ins().iconst(types::I16, 0);
+        self.b.ins().store(ir::MemFlags::new(), nul, end, 0);
+
+        let loop_blk = self.b.create_block();
+        let check_blk = self.b.create_block();
+        let step_blk = self.b.create_block();
+        let done_blk = self.b.create_block();
+        self.b.append_block_param(loop_blk, types::I64);
+        self.b.append_block_param(done_blk, types::I64);
+        let zero = self.b.ins().iconst(types::I64, 0);
+        let none = self.b.ins().iconst(types::I64, -1);
+        self.jump(loop_blk, &[ir::BlockArg::Value(zero)]);
+
+        self.b.switch_to_block(loop_blk);
+        let idx = self.b.block_params(loop_blk)[0];
+        let more = self.b.ins().icmp(IntCC::UnsignedLessThan, idx, len);
+        self.branch(more, check_blk, &[], done_blk, &[ir::BlockArg::Value(none)]);
+
+        self.b.switch_to_block(check_blk);
+        self.b.seal_block(check_blk);
+        let off = self.b.ins().ishl_imm(idx, 1);
+        let ptr = self.b.ins().iadd(buffer, off);
+        let unit = self.b.ins().load(types::I16, ir::MemFlags::new(), ptr, 0);
+        let is_nul = self.b.ins().icmp_imm(IntCC::Equal, unit, 0);
+        self.branch(is_nul, done_blk, &[ir::BlockArg::Value(idx)], step_blk, &[]);
+
+        self.b.switch_to_block(step_blk);
+        self.b.seal_block(step_blk);
+        let next = self.b.ins().iadd_imm(idx, 1);
+        self.jump(loop_blk, &[ir::BlockArg::Value(next)]);
+
+        self.b.switch_to_block(done_blk);
+        self.b.seal_block(loop_blk);
+        self.b.seal_block(done_blk);
+        Ok((buffer, self.b.block_params(done_blk)[0]))
     }
     /// A C library function of 64-bit word parameters (and result), returning
     /// its module-level `FuncId`.
@@ -1309,7 +1419,8 @@ impl<M: Module> Codegen<'_, '_, M> {
             | ValueType::Address { .. }
             | ValueType::Handle { .. }
             | ValueType::NonNullHandle { .. }
-            | ValueType::CStr => Err("foreign parameter type has no native lowering".into()),
+            | ValueType::CStr
+            | ValueType::CWStr => Err("foreign parameter type has no native lowering".into()),
         }
     }
     /// For a nullable parameter, the `Some` payload and its presence flag.
@@ -1675,9 +1786,13 @@ impl<M: Module> Codegen<'_, '_, M> {
                 self.foreign_validated(ty, valid, index, word)
             }
             ValueType::Address { .. } => Err("foreign address results have no lowering".into()),
-            ValueType::CStr => {
+            ValueType::CStr | ValueType::CWStr => {
                 let word = raw()?;
-                let copy = self.foreign_cstr_copy(word)?;
+                let copy = if *result == ValueType::CWStr {
+                    self.foreign_cwstr_copy(word)?
+                } else {
+                    self.foreign_cstr_copy(word)?
+                };
                 let layout = Layout::of(self.world, ty)?;
                 let (some, fields) = layout.variant("Some").ok_or("Option lacks Some")?;
                 let offset = fields.first().ok_or("Some lacks a payload")?.offset;
@@ -1972,7 +2087,7 @@ fn value_words(v: &ValueType, out: &mut Vec<u64>) {
                 Float::F64 => 64,
             },
         ]),
-        ValueType::CStr => out.push(8),
+        ValueType::CStr | ValueType::CWStr => out.push(8),
     }
 }
 fn integer_word(int: &vesper_ffi::Integer) -> u64 {
@@ -2142,7 +2257,14 @@ impl<M: Module> Codegen<'_, '_, M> {
         // Apple arm64 pads a variadic call's argument registers with zero
         // words (`sys::Variadic`), which they do not carry either.
         let abi = plan.function.abi();
-        if abi.variadic.is_some_and(|v| v.padding > 0) {
+        if abi.variadic.is_some_and(|v| v.padding > 0)
+            || plan
+                .function
+                .parameters()
+                .iter()
+                .any(|p| matches!(p.ty(), ParameterType::CWStr))
+            || *plan.function.result() == ValueType::CWStr
+        {
             return Ok(None);
         }
         let pointer = self.m.target_config().pointer_type();
@@ -2244,7 +2366,8 @@ impl<M: Module> Codegen<'_, '_, M> {
                                 | ValueType::Address { .. }
                                 | ValueType::Handle { .. }
                                 | ValueType::NonNullHandle { .. }
-                                | ValueType::CStr => {
+                                | ValueType::CStr
+                                | ValueType::CWStr => {
                                     return Err(
                                         "foreign parameter type has no native lowering".into()
                                     );
@@ -2264,7 +2387,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                         ParameterType::Pinned { .. } => {
                             words.extend([6, 0]);
                         }
-                        ParameterType::CStr | ParameterType::CStrList => {
+                        ParameterType::CStr | ParameterType::CWStr | ParameterType::CStrList => {
                             unreachable!("C strings are lowered above")
                         }
                         ParameterType::Function { .. } => {
@@ -2586,7 +2709,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                 out.extend([u64::from(layout.aggregate()), u64::from(layout.size)]);
                 Ok(())
             }
-            ValueType::CStr | ValueType::Handle { nullable: true, .. } => {
+            ValueType::CStr | ValueType::CWStr | ValueType::Handle { nullable: true, .. } => {
                 let layout = Layout::of(self.world, ty)?;
                 let (some, fields) = layout.variant("Some").ok_or("Option lacks Some")?;
                 let offset = fields.first().ok_or("Some lacks a payload")?.offset;

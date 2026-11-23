@@ -53,7 +53,7 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_module::{FuncId, Linkage, Module};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use vesper_fiber_abi::{
-    abi::{exit, offsets},
+    abi::{ResumeKind, exit, offsets},
     clif,
     prototype::{OP_READ, OP_YIELD},
 };
@@ -677,22 +677,15 @@ impl<M: Module> Codegen<'_, '_, M> {
         let ptr = self.m.target_config().pointer_type();
         let size = Layout::of(self.world, &bound.result)?.size;
         let out = self.alloc(size);
-        let evidence = clif::load_evidence(&mut self.b, ptr, s.ctx, depth as u32).identity;
         let staging = s.plan.frame.staging_offset;
         let buffer = match &bound.buffer {
-            Some((_, len)) => {
-                let place = refs
-                    .first()
+            Some((_, len)) => Some((
+                refs.first()
                     .copied()
                     .flatten()
-                    .ok_or("read buffer must be a place")?;
-                // Stage the current contents through the base loaded after the
-                // previous park; it is dead once this park is issued.
-                let base = clif::entry_data_base(&mut self.b, ptr, s.ctx);
-                let staged = self.b.ins().iadd_imm(base, i64::from(staging));
-                self.copy_bytes(place, staged, *len);
-                Some((place, *len))
-            }
+                    .ok_or("read buffer must be a place")?,
+                *len,
+            )),
             None => None,
         };
         let (tag, arg0, arg1) = match bound.operation {
@@ -702,6 +695,122 @@ impl<M: Module> Codegen<'_, '_, M> {
                 i64::from(buffer.map_or(0, |(_, len)| len)),
                 i64::from(staging),
             ),
+        };
+        if crate::codegen_swap::hook(crate::codegen_swap::Family::Control).is_some() {
+            use crate::codegen_swap::{NO_VALUE, control as swap, ty_code, value_of, word};
+            let [identity_w, staged_w] = self
+                .control_words::<2>(
+                    swap::SESSION_PARK_PREP,
+                    &[
+                        ty_code(ptr),
+                        word(s.ctx),
+                        depth as u64,
+                        u64::from(buffer.is_some()),
+                        u64::from(staging),
+                        offsets::CTX_EVIDENCE as u64,
+                        offsets::EV_SLOTS as u64,
+                        offsets::SLOT_SIZE as u64,
+                        offsets::SLOT_IDENTITY as u64,
+                        offsets::SLOT_HANDLER_FN as u64,
+                        offsets::SLOT_STATE_PTR as u64,
+                        offsets::CTX_DATA_BASE as u64,
+                    ],
+                )
+                .ok_or("control hook declined SESSION_PARK_PREP")?;
+            if let Some((place, len)) = buffer {
+                if staged_w == NO_VALUE {
+                    return Err("malformed SESSION_PARK_PREP staging".into());
+                }
+                self.copy_bytes(place, value_of(&[staged_w])?, len);
+            }
+            let emit = self
+                .control_words(
+                    swap::SESSION_PARK_EMIT,
+                    &[
+                        ty_code(ptr),
+                        u64::from(s.park.as_u32()),
+                        word(s.ctx),
+                        identity_w,
+                        u64::from(tag),
+                        arg0 as u64,
+                        arg1 as u64,
+                        u64::from(s.violation.as_u32()),
+                        u64::from(buffer.is_some()),
+                        u64::from(staging),
+                        offsets::CTX_PARK as u64,
+                        offsets::PARK_EVIDENCE as u64,
+                        offsets::PARK_OP as u64,
+                        offsets::PARK_FLAGS as u64,
+                        offsets::PARK_ARG0 as u64,
+                        offsets::PARK_ARG1 as u64,
+                        offsets::RESUME_EVIDENCE as u64,
+                        offsets::RESUME_KIND as u64,
+                        offsets::RESUME_VALUE as u64,
+                        offsets::RESUME_DATA_BASE as u64,
+                        ResumeKind::Value as u64,
+                        ResumeKind::Error as u64,
+                        ResumeKind::Cancelled as u64,
+                    ],
+                )
+                .ok_or("control hook declined SESSION_PARK_EMIT")?;
+            let [
+                park_val_w,
+                _,
+                on_error_w,
+                on_cancel_w,
+                join_w,
+                staged_after_w,
+            ] = emit;
+            let park_value = value_of(&[park_val_w])?;
+            if let Some((place, len)) = buffer {
+                self.copy_bytes(value_of(&[staged_after_w])?, place, len);
+            }
+            let value_field = bound.value_field.clone();
+            self.store_constructor(
+                out,
+                &bound.result,
+                &bound.value,
+                value_field.as_ref().map(|t| (park_value, t)),
+            )?;
+            self.control_words::<0>(swap::JUMP_ARGS, &[join_w]);
+            self.control_words::<0>(swap::SWITCH_BLOCK, &[on_error_w]);
+            self.store_constructor(
+                out,
+                &bound.result,
+                &bound.error,
+                Some((park_value, &bound.error_field)),
+            )?;
+            self.control_words::<0>(swap::JUMP_ARGS, &[join_w]);
+            self.control_words::<0>(swap::SWITCH_BLOCK, &[on_cancel_w]);
+            match &bound.cancel {
+                BoundCancel::Constructor(c) => {
+                    self.store_constructor(out, &bound.result, c, None)?
+                }
+                BoundCancel::Error(code) => {
+                    let code = self.b.ins().iconst(types::I64, *code as i64);
+                    self.store_constructor(
+                        out,
+                        &bound.result,
+                        &bound.error,
+                        Some((code, &bound.error_field)),
+                    )?
+                }
+            }
+            self.control_words::<0>(swap::JUMP_ARGS, &[join_w]);
+            self.control_words::<0>(swap::SWITCH_BLOCK, &[join_w]);
+            return Ok(out);
+        }
+        let evidence = clif::load_evidence(&mut self.b, ptr, s.ctx, depth as u32).identity;
+        let buffer = match buffer {
+            Some((place, len)) => {
+                // Stage the current contents through the base loaded after the
+                // previous park; it is dead once this park is issued.
+                let base = clif::entry_data_base(&mut self.b, ptr, s.ctx);
+                let staged = self.b.ins().iadd_imm(base, i64::from(staging));
+                self.copy_bytes(place, staged, len);
+                Some((place, len))
+            }
+            None => None,
         };
         let arg0 = self.b.ins().iconst(types::I64, arg0);
         let arg1 = self.b.ins().iconst(types::I64, arg1);
@@ -788,6 +897,35 @@ impl<M: Module> Codegen<'_, '_, M> {
             .cloned()
             .ok_or("session failure names an unknown instance")?;
         let ptr = self.m.target_config().pointer_type();
+        if crate::codegen_swap::hook(crate::codegen_swap::Family::Control).is_some() {
+            use crate::codegen_swap::{control as swap, ty_code, value_of, word};
+            let [dest_w] = self
+                .control_words(
+                    swap::SESSION_DATA_OFFSET,
+                    &[
+                        ty_code(ptr),
+                        word(s.ctx),
+                        offsets::CTX_DATA_BASE as u64,
+                        u64::from(s.plan.frame.failure_offset),
+                    ],
+                )
+                .ok_or("control hook declined SESSION_DATA_OFFSET")?;
+            self.store(value_of(&[dest_w])?, values[0], &ty)?;
+            let code = self.b.ins().iconst(types::I64, index as i64 + 1);
+            self.control_words::<1>(
+                swap::SESSION_EXIT,
+                &[
+                    word(s.ctx),
+                    offsets::CTX_RESULT as u64,
+                    exit::FAILED,
+                    0,
+                    word(code),
+                    1,
+                ],
+            )
+            .ok_or("control hook declined SESSION_EXIT")?;
+            return Ok(self.zero());
+        }
         let base = clif::entry_data_base(&mut self.b, ptr, s.ctx);
         let dest = self
             .b
@@ -805,6 +943,43 @@ impl<M: Module> Codegen<'_, '_, M> {
         let s = self.session()?;
         let ptr = self.m.target_config().pointer_type();
         let layout = Layout::of(self.world, &s.plan.result)?;
+        if crate::codegen_swap::hook(crate::codegen_swap::Family::Control).is_some() {
+            use crate::codegen_swap::{control as swap, ty_code, value_of, word};
+            let (kind, payload) = if layout.aggregate() {
+                let [dest_w] = self
+                    .control_words(
+                        swap::SESSION_DATA_OFFSET,
+                        &[
+                            ty_code(ptr),
+                            word(s.ctx),
+                            offsets::CTX_DATA_BASE as u64,
+                            u64::from(s.plan.frame.result_offset),
+                        ],
+                    )
+                    .ok_or("control hook declined SESSION_DATA_OFFSET")?;
+                self.copy_bytes(value, value_of(&[dest_w])?, layout.size);
+                (0, self.b.ins().iconst(types::I64, 0))
+            } else if self.b.func.dfg.value_type(value) == types::F64 {
+                (1, value)
+            } else if self.b.func.dfg.value_type(value) == types::F32 {
+                (2, value)
+            } else {
+                (0, self.coerce(value, Some(&s.plan.result)))
+            };
+            self.control_words::<0>(
+                swap::SESSION_EXIT,
+                &[
+                    word(s.ctx),
+                    offsets::CTX_RESULT as u64,
+                    exit::COMPLETE,
+                    kind,
+                    word(payload),
+                    0,
+                ],
+            )
+            .ok_or("control hook declined SESSION_EXIT")?;
+            return Ok(());
+        }
         let word = if layout.aggregate() {
             let base = clif::entry_data_base(&mut self.b, ptr, s.ctx);
             let dest = self
@@ -979,7 +1154,14 @@ fn compile_session_with_linkage<M: Module>(
         c.b.switch_to_block(join);
         let value = c.b.block_params(join)[0];
         c.session_return(value)?;
-        clif::emit_violation(&mut c.b, violation);
+        if crate::codegen_swap::hook(crate::codegen_swap::Family::Control).is_some() {
+            c.control_words::<0>(
+                crate::codegen_swap::control::SESSION_VIOLATION,
+                &[u64::from(violation.as_u32()), exit::ABI_VIOLATION],
+            );
+        } else {
+            clif::emit_violation(&mut c.b, violation);
+        }
         c.b.seal_all_blocks();
         c.b.finalize();
         (context, park, c.wide_divisions)

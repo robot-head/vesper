@@ -1,8 +1,78 @@
 load("//tools/bazel:defs.bzl", "vesper_crate")
+load("//tools/bazel:vesper_port.bzl", "VESPER_TARGET", "vesper_package", "vesper_port_object")
+
+# AEAD framing/limits/Doom opener, X25519MLKEM768 KEM, and constant-time tag
+# comparison are the Vesper port (Rust-exit SH6 lane 17, #1412): build.rs
+# links the object built here from vesper/ (which depends on @vesper/crypto)
+# and checks port/binding.rs against the generated binding. The compiler and
+# crates in its closure link the Rust seed copy, //crates/vesper-vault/seed.
+vesper_package(
+    name = "port_package",
+    srcs = glob(["vesper/src/**/*.ves"]),
+    manifest = "vesper/Loom.toml",
+    deps = ["//packages/vesper-crypto:crypto_package"],
+)
+
+vesper_port_object(
+    name = "vault_vesper",
+    library = "vault",
+    package = ":port_package",
+    target = VESPER_TARGET,
+)
+
+filegroup(
+    name = "vault_vesper_binding",
+    srcs = [":vault_vesper"],
+    output_group = "rust_binding",
+)
 
 vesper_crate(
+    build_script_data = [
+        ":vault_vesper",
+        ":vault_vesper_binding",
+    ],
+    build_script_env = {
+        # rules_rust already makes these execpaths absolute.
+        "VESPER_PORT_OBJECT": "$(execpath :vault_vesper)",
+        "VESPER_PORT_GENERATED_BINDING": "$(execpath :vault_vesper_binding)",
+    },
     # Lean resolves symlinked runfiles to the source tree, so the Lean proof
     # check runs in a copy of regular files, like the other Lean-backed crates.
     copy_test_cwd = ["test/lean"],
     extra_test_data = ["//:lean"],
+)
+
+# The divergent builds, one per ported area (the Cargo `vesper-port-divergent`
+# feature applies the same edits from build.rs, one at a time with
+# VESPER_VAULT_DIVERGE): each must keep compiling, and port/check.sh asserts
+# that the differential test catches it.
+[
+    vesper_port_object(
+        name = "vault_vesper_divergent_" + area,
+        edit_src = "vesper/src/lib.ves",
+        edits = {old: new},
+        library = "vault",
+        package = ":port_package",
+        target = VESPER_TARGET,
+    )
+    for area, old, new in [
+        ("verify_tag", "ct_eq(in expected, in computed)", "!ct_eq(in expected, in computed)"),
+        ("aead_limits", "AeadKind::Aes256Gcm => AES256_RECORD_LIMIT,", "AeadKind::Aes256Gcm => 10,"),
+        ("aead_seal", "let _h2 = frame.try_write_u64_be(4, ticket_seq);", "let _h2 = frame.try_write_u64_be(4, wrapping_add(ticket_seq, 1));"),
+        ("aead_open", "if hdr.key_epoch != expected_epoch {", "if false {"),
+        ("kem_client", "x25519_base(in seeds[64..96], inout share[1184..1216]);", "x25519_base(in seeds[0..32], inout share[1184..1216]);"),
+        ("kem_server", "if !mlkem768_validate(isa_code(isa), in client_share[0..1184]) {", "if false {"),
+    ]
+]
+
+# The seed package (seed/) builds these same Rust sources without the port.
+exports_files(glob([
+    "src/**/*.rs",
+    "tests/**/*.rs",
+]))
+
+filegroup(
+    name = "rust_srcs",
+    srcs = glob(["src/**/*.rs"]),
+    visibility = ["//crates/vesper-vault/seed:__pkg__"],
 )

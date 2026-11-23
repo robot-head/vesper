@@ -386,6 +386,10 @@ pub enum ValueType {
     /// right after C returns, so source code receives
     /// `Option[ChunkSeq[u8]]`; `NULL` is `None`. C keeps its string.
     CStr,
+    /// `ForeignVal[Option[CWStr]]`: a borrowed NUL-terminated UTF-16 C
+    /// string returned by a library (`NULL` or `const wchar_t *`).
+    /// Copies code units before `0u16` into a fresh `ChunkSeq[u16]`.
+    CWStr,
 }
 /// Whether an `extern type`'s handles must be finalized.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -595,6 +599,10 @@ pub enum ParameterType {
     /// bytes are copied into a fresh buffer with the terminator appended; an
     /// argument holding a NUL byte is refused before the call.
     CStr,
+    /// `nocapture in s: CWStr`: a borrowed NUL-terminated UTF-16 C string
+    /// (`LPCWSTR`). Lowered from `Slice[u16]`; an argument holding `0u16`
+    /// is refused before the call.
+    CWStr,
     /// `nocapture f: Cb` or `retain f: Cb`: a Vesper function handed to C as
     /// a pointer of the callback type `Cb` (a compiler-generated C-ABI
     /// trampoline). `nocapture` C calls it only during the call; `retain`
@@ -760,11 +768,11 @@ impl FunctionDescriptor {
     pub fn reads_errno(&self) -> bool {
         self.errno
     }
-    /// Whether any parameter is a `CStr`, so the call may be refused.
+    /// Whether any parameter is a `CStr` or `CWStr`, so the call may be refused.
     pub fn takes_cstr(&self) -> bool {
         self.parameters
             .iter()
-            .any(|p| matches!(p.ty, ParameterType::CStr))
+            .any(|p| matches!(p.ty, ParameterType::CStr | ParameterType::CWStr))
     }
     pub fn abi(&self) -> AbiSignature {
         let mut parameters = vec![];
@@ -809,6 +817,7 @@ impl FunctionDescriptor {
                 ParameterType::Pointer { .. }
                 | ParameterType::Handle { .. }
                 | ParameterType::CStr
+                | ParameterType::CWStr
                 | ParameterType::CStrList
                 | ParameterType::Function { .. } => parameters.push(AbiType::Pointer),
             }
@@ -831,7 +840,8 @@ fn carrier(t: &ValueType) -> Option<AbiType> {
         ValueType::Address { .. }
         | ValueType::Handle { .. }
         | ValueType::NonNullHandle { .. }
-        | ValueType::CStr => AbiType::Pointer,
+        | ValueType::CStr
+        | ValueType::CWStr => AbiType::Pointer,
     })
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1031,6 +1041,7 @@ fn canonicalize(library: &LibraryDescriptor, limit: usize) -> Result<Vec<u8>, Er
                         e.text(handle.name())?;
                     }
                     ParameterType::CStr => e.text("nocapture-cstr")?,
+                    ParameterType::CWStr => e.text("nocapture-cwstr")?,
                     ParameterType::CStrList => e.text("nocapture-cstr-list")?,
                     ParameterType::Function { callback, retain } => {
                         e.text("callback-function")?;
@@ -1104,6 +1115,7 @@ fn canonicalize(library: &LibraryDescriptor, limit: usize) -> Result<Vec<u8>, Er
                     self.text(handle.name())
                 }
                 ValueType::CStr => self.text("nullable-cstr-copy"),
+                ValueType::CWStr => self.text("nullable-cwstr-copy"),
             }
         }
     }

@@ -757,14 +757,22 @@ pub fn verify_emitted(
         };
         let selected: Vec<&EmittedFunction> = match &policy.det_float.functions {
             None => functions.iter().collect(),
-            Some(list) => list
-                .iter()
-                .map(|n| {
-                    by_key.get(n.as_str()).copied().ok_or_else(|| {
+            Some(list) => {
+                let mut selected = Vec::new();
+                for n in list {
+                    let parent = by_key.get(n.as_str()).copied().ok_or_else(|| {
                         format!("verifier policy: det_float names '{n}', which was not emitted")
-                    })
-                })
-                .collect::<Result<_, _>>()?,
+                    })?;
+                    selected.push(parent);
+                    let cold_prefix = format!("{n}::cold#");
+                    for f in functions {
+                        if f.key.starts_with(&cold_prefix) {
+                            selected.push(f);
+                        }
+                    }
+                }
+                selected
+            }
         };
         // Calls between audited emitted functions are checked at the callee.
         for f in &selected {

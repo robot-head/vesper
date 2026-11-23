@@ -1888,6 +1888,7 @@ pub fn describe_parameter(p: &ParameterType) -> String {
             )
         }
         ParameterType::CStr => "in Slice[u8]".into(),
+        ParameterType::CWStr => "in Slice[u16]".into(),
         ParameterType::CStrList => "in Slice[u8] (NUL-ended strings)".into(),
         ParameterType::Function { callback, retain } => describe_function(callback.name(), *retain),
     }
@@ -1914,6 +1915,7 @@ fn describe_value(v: &ValueType) -> String {
             handle.name().into()
         }
         ValueType::CStr => "Option[ChunkSeq[u8]] (a copy of the C string)".into(),
+        ValueType::CWStr => "Option[ChunkSeq[u16]] (a copy of the wide C string)".into(),
     }
 }
 

@@ -431,3 +431,173 @@ fn divergent() {
     }
     assert!(!total.clif.is_empty(), "{}", total.summary());
 }
+
+#[test]
+fn the_session_entries_match_the_rust_lowering() {
+    big_stack(session_entries);
+}
+
+fn session_entries() {
+    use std::sync::atomic::AtomicUsize;
+    use vesper::native::session::{
+        Cancellation, ECANCELED, EffectBinding, Operation, OperationBinding,
+        object as session_object,
+    };
+
+    static OP_HITS: [AtomicUsize; 5] = [const { AtomicUsize::new(0) }; 5];
+    fn counted_session(lent: &mut Lent<'_, '_>) -> Result<bool, String> {
+        let ok = control_hook(lent)?;
+        if ok && (38..=42).contains(&lent.op) {
+            OP_HITS[(lent.op - 38) as usize].fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(ok)
+    }
+
+    let pulse_bindings = vec![EffectBinding {
+        effect: "Pulse".into(),
+        ops: vec![
+            OperationBinding::new(
+                "pause",
+                Operation::Yield,
+                "Ticked",
+                "TickFailed",
+                Cancellation::Constructor("TickCancelled".into()),
+            ),
+            OperationBinding::new(
+                "read",
+                Operation::Read,
+                "Got",
+                "IoFailed",
+                Cancellation::Constructor("IoCancelled".into()),
+            ),
+        ],
+    }];
+    let lease_bindings = vec![EffectBinding {
+        effect: "Pulse".into(),
+        ops: vec![
+            OperationBinding::new(
+                "pause",
+                Operation::Yield,
+                "Ticked",
+                "TickFailed",
+                Cancellation::ErrorCode(ECANCELED),
+            ),
+            OperationBinding::new(
+                "read",
+                Operation::Read,
+                "Got",
+                "IoFailed",
+                Cancellation::ErrorCode(ECANCELED),
+            ),
+        ],
+    }];
+    let failing_bindings = vec![EffectBinding {
+        effect: "Source".into(),
+        ops: vec![OperationBinding::new(
+            "read",
+            Operation::Read,
+            "Got",
+            "IoFailed",
+            Cancellation::ErrorCode(ECANCELED),
+        )],
+    }];
+    let float_bindings = vec![EffectBinding {
+        effect: "Pulse".into(),
+        ops: vec![OperationBinding::new(
+            "pause",
+            Operation::Yield,
+            "Ticked",
+            "TickFailed",
+            Cancellation::Constructor("TickCancelled".into()),
+        )],
+    }];
+    let float_src = r#"
+enum Wait { Ticked, TickFailed(u64), TickCancelled }
+linear effect Pulse { fn pause() -> Wait; }
+fn run_f64() -> f64 eff [Pulse] {
+    match Pulse::pause() {
+        Wait::Ticked => 1.5,
+        Wait::TickFailed(_) => 2.5,
+        Wait::TickCancelled => 3.5,
+    }
+}
+fn run_f32() -> f32 eff [Pulse] {
+    match Pulse::pause() {
+        Wait::Ticked => 1.5,
+        Wait::TickFailed(_) => 2.5,
+        Wait::TickCancelled => 3.5,
+    }
+}
+"#;
+
+    let cases: [(&str, String, &str, &[EffectBinding]); 5] = [
+        (
+            "ticket_tally",
+            std::fs::read_to_string(repo().join("examples/native-pulse/ticket_tally.ves")).unwrap(),
+            "main",
+            &pulse_bindings,
+        ),
+        (
+            "lease_cleanup",
+            std::fs::read_to_string(repo().join("examples/native-pulse/lease_cleanup.ves"))
+                .unwrap(),
+            "main",
+            &lease_bindings,
+        ),
+        (
+            "typed_failures",
+            std::fs::read_to_string(repo().join("examples/native-pulse/typed_failures.ves"))
+                .unwrap(),
+            "main",
+            &failing_bindings,
+        ),
+        ("session_f64", float_src.into(), "run_f64", &float_bindings),
+        ("session_f32", float_src.into(), "run_f32", &float_bindings),
+    ];
+
+    let hooks = CodegenHooks {
+        control: Some(counted_session),
+        ..CodegenHooks::default()
+    };
+    let mut clif_diffs = vec![];
+    let mut obj_diffs = vec![];
+    for (name, src, entry, bindings) in &cases {
+        let parsed = vesper::parser::parse(src);
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "{name}: {:?}",
+            parsed.diagnostics
+        );
+        let checked = vesper::check::check(&parsed.module);
+        assert!(
+            checked.diagnostics.is_empty(),
+            "{name}: {:?}",
+            checked.diagnostics
+        );
+        let world = checked.world;
+        for target in ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"] {
+            let (r_obj, r_clif) = session_object(&world, entry, bindings, Some(target)).unwrap();
+            let (h_obj, h_clif) = codegen_swap::with_hooks(hooks, || {
+                session_object(&world, entry, bindings, Some(target))
+            })
+            .unwrap();
+            if r_clif != h_clif {
+                clif_diffs.push(format!(
+                    "{name} [{target}]: {}",
+                    first_difference(&r_clif, &h_clif)
+                ));
+            }
+            if r_obj != h_obj {
+                obj_diffs.push(format!("{name} [{target}]"));
+            }
+        }
+    }
+    assert!(
+        clif_diffs.is_empty() && obj_diffs.is_empty(),
+        "session diffs: clif={clif_diffs:?} obj={obj_diffs:?}"
+    );
+    for (i, op) in (38..=42).enumerate() {
+        let hits = OP_HITS[i].load(Ordering::Relaxed);
+        assert!(hits > 0, "session op {op} was never exercised");
+    }
+}
