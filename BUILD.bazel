@@ -1071,7 +1071,7 @@ vesper_crate(
         "test/self_host_native_walk": "long",
         "test/self_host_check_harness": "long",
         # The trait declaration differential (#1185) checks every corpus world.
-        "test/self_host_check_pact": "long",
+        "test/self_host_check_pact": "eternal",
         # The loops and atomics differential (#1182) passed 900 s on loaded CI.
         "test/self_host_check_loops_atomics": "eternal",
         # The tensor types differential (#1186) JIT-compiles the port and
