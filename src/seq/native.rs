@@ -176,7 +176,11 @@ impl<M: Module> Codegen<'_, '_, M> {
         }
     }
 
-    pub(super) fn seq_option_meta(&self, option: &Type) -> Result<[u64; 4], String> {
+    pub(super) fn seq_option_meta_for(
+        &self,
+        option: &Type,
+        elem: &Type,
+    ) -> Result<[u64; 4], String> {
         let layout = Layout::of(self.world, option)?;
         let (some_tag, some_fields) = layout.variant("Some").ok_or("native Option lacks Some")?;
         let payload = some_fields
@@ -184,12 +188,30 @@ impl<M: Module> Codegen<'_, '_, M> {
             .map(|f| f.offset)
             .ok_or("native Option lacks a payload")?;
         let (none_tag, _) = layout.variant("None").ok_or("native Option lacks None")?;
+        let scalar = self.scalar_enums.request.as_ref().is_some_and(|shape| {
+            shape.words.len() == 2 && !Layout::of(self.world, elem).is_ok_and(|l| l.aggregate())
+        });
         Ok([
-            u64::from(layout.size),
+            u64::from(layout.size) | (u64::from(scalar) << 32),
             some_tag as u64,
             none_tag as u64,
             payload as u64,
         ])
+    }
+
+    pub(super) fn seq_option_finish_swap(
+        &mut self,
+        res: &[u64],
+        meta: [u64; 4],
+    ) -> Result<ir::Value, String> {
+        if (meta[0] >> 32) != 0 && res.len() == 3 {
+            self.scalar_enums.request.take();
+            let p0 = crate::codegen_swap::value_of(&res[1..2])?;
+            let p1 = crate::codegen_swap::value_of(&res[2..3])?;
+            self.scalar_enums.result = Some(vec![p0, p1]);
+            return Ok(self.zero());
+        }
+        crate::codegen_swap::value_of(&res[..1])
     }
 
     pub(super) fn seq_runtime_call(
@@ -726,13 +748,13 @@ impl<M: Module> Codegen<'_, '_, M> {
         ty: &Type,
     ) -> Result<ir::Value, String> {
         let e = ir_place_expr(place, 0..0);
+        let is_slice = seq::is_slice_type(ty);
+        let raw = if is_slice {
+            self.address(&e)?
+        } else {
+            self.expr(&e)?
+        };
         if self.seq_hook_active() {
-            let is_slice = seq::is_slice_type(ty);
-            let raw = if is_slice {
-                self.address(&e)?
-            } else {
-                self.expr(&e)?
-            };
             let inv = self.invariant_headers.contains(&raw);
             if let Some(res) = self.seq_swap_req(
                 crate::codegen_swap::seq::SEQ_OP,
@@ -777,16 +799,14 @@ impl<M: Module> Codegen<'_, '_, M> {
             }
         }
         let mut words = vec![];
-        let (receiver, handle) = if seq::is_slice_type(ty) {
-            let view = self.address(&e)?;
-            let view = self.hoisted_receiver(view);
+        let (receiver, handle) = if is_slice {
+            let view = self.hoisted_receiver(raw);
             for offset in [0, 8, 16] {
                 words.push(((view, offset), self.seq_word(view, offset)));
             }
             (view, words[0].1)
         } else {
-            let handle = self.expr(&e)?;
-            let handle = self.hoisted_receiver(handle);
+            let handle = self.hoisted_receiver(raw);
             (handle, handle)
         };
         for offset in [LEN, DATA] {
@@ -1264,7 +1284,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                     let cdata = self.seq_cached_word(h, DATA);
                     let desc = self.seq_elem_desc(&elem)?;
                     let option = Type::Named("Option".into(), vec![elem.clone()]);
-                    let meta = self.seq_option_meta(&option)?;
+                    let meta = self.seq_option_meta_for(&option, &elem)?;
                     if let Some(res) = self.seq_swap_req(
                         sops::SEQ_OP,
                         &[
@@ -1283,7 +1303,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                             meta[3],
                         ],
                     )? {
-                        return value_of(&res);
+                        return self.seq_option_finish_swap(&res, meta);
                     }
                 }
                 SeqOp::Get | SeqOp::SliceGet => {
@@ -1396,7 +1416,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                         self.seq_cached_view(arg(0)?, &arg_types[0]);
                     let desc = self.seq_elem_desc(&elem)?;
                     let option = Type::Named("Option".into(), vec![elem.clone()]);
-                    let meta = self.seq_option_meta(&option)?;
+                    let meta = self.seq_option_meta_for(&option, &elem)?;
                     if let Some(res) = self.seq_swap_req(
                         sops::SEQ_OP,
                         &[
@@ -1420,7 +1440,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                             meta[3],
                         ],
                     )? {
-                        return value_of(&res);
+                        return self.seq_option_finish_swap(&res, meta);
                     }
                 }
                 SeqOp::TrySet => {
@@ -1472,7 +1492,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                         self.seq_cached_view(arg(0)?, &arg_types[0]);
                     let desc = self.seq_elem_desc(&elem)?;
                     let option = Type::Named("Option".into(), vec![elem.clone()]);
-                    let meta = self.seq_option_meta(&option)?;
+                    let meta = self.seq_option_meta_for(&option, &elem)?;
                     if let Some(res) = self.seq_swap_req(
                         sops::SEQ_OP,
                         &[
@@ -1495,7 +1515,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                             meta[3],
                         ],
                     )? {
-                        return value_of(&res);
+                        return self.seq_option_finish_swap(&res, meta);
                     }
                 }
                 SeqOp::Clear => {
@@ -2414,10 +2434,10 @@ impl<M: Module> Codegen<'_, '_, M> {
         let elem = crate::numeric::default_type(&elem);
         let stride = self.seq_stride(&elem)?;
         let value = self.expr(base)?;
+        let i = self.expr(index)?;
         if self.seq_hook_active() {
             use crate::codegen_swap::{seq as sops, value_of, word};
             let (is_seq, inv, h_inv, c0, c1, c2, cdata) = self.seq_cached_view(value, &ty);
-            let i = self.expr(index)?;
             if let Some(ck) = self.seq_swap_req(
                 sops::SEQ_OP,
                 &[
@@ -2482,7 +2502,6 @@ impl<M: Module> Codegen<'_, '_, M> {
             }
         }
         let (h, start, len) = self.seq_view(value, &ty);
-        let i = self.expr(index)?;
         let valid = self.b.ins().icmp(IntCC::UnsignedLessThan, i, len);
         self.seq_guard(valid)?;
         let addr = self.seq_elem_addr(h, start, i, stride);

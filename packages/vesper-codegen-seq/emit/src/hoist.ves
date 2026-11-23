@@ -37,6 +37,7 @@ use self::common::{
     invariant_word,
     seq_elem_addr,
     seq_load_elem,
+    seq_option_answer,
     seq_option_begin,
     seq_option_finish,
     seq_store_elem,
@@ -249,7 +250,7 @@ pub fn emit_hoisted_access(call: u64, inout b: Builder, in m: Module) eff [Ffi[C
         };
         call_result_value(call, res);
     } else if kind == HOIST_TRY_GET {
-        let opt_size = wrapping_u32(call_arg(call, 15));
+        let opt_meta = call_arg(call, 15);
         let some_tag = wrapping_i64(call_arg(call, 16));
         let none_tag = wrapping_i64(call_arg(call, 17));
         let payload_off = wrapping_u32(call_arg(call, 18));
@@ -258,27 +259,25 @@ pub fn emit_hoisted_access(call: u64, inout b: Builder, in m: Module) eff [Ffi[C
             inout b,
             in m,
             present,
-            opt_size,
+            opt_meta,
             some_tag,
             none_tag,
             optimize
         );
         let addr = seq_elem_addr(inout b, h, start, i, elem.stride, h_invariant, cdata);
         let loaded = seq_load_elem(inout b, in m, addr, elem, optimize);
-        call_result_value(
-            call,
-            seq_option_finish(
-                inout b,
-                out,
-                done,
-                loaded,
-                elem,
-                opt_size,
-                some_tag,
-                payload_off,
-                optimize
-            )
+        let res = seq_option_finish(
+            inout b,
+            out,
+            done,
+            loaded,
+            elem,
+            opt_meta,
+            some_tag,
+            payload_off,
+            optimize
         );
+        seq_option_answer(call, inout b, res, done, opt_meta);
     }
 }
 

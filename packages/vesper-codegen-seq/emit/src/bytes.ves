@@ -87,6 +87,7 @@ use self::common::{
     seq_elem_addr,
     seq_has_libc,
     seq_move,
+    seq_option_answer,
     seq_option_begin,
     seq_option_finish,
     seq_set_len_if,
@@ -1501,7 +1502,7 @@ pub fn emit_byte_op(call: u64, inout b: Builder, in m: Module) eff [Ffi[Cranelif
         let wbytes = call_arg(call, 13);
         let at = value_of_word(call_arg(call, 14));
         let val = value_of_word(call_arg(call, 15));
-        let opt_size = wrapping_u32(call_arg(call, 16));
+        let opt_meta = call_arg(call, 16);
         let some_tag = wrapping_i64(call_arg(call, 17));
         let none_tag = wrapping_i64(call_arg(call, 18));
         let payload_off = wrapping_u32(call_arg(call, 19));
@@ -1561,7 +1562,7 @@ pub fn emit_byte_op(call: u64, inout b: Builder, in m: Module) eff [Ffi[Cranelif
                 inout b,
                 in m,
                 valid,
-                opt_size,
+                opt_meta,
                 some_tag,
                 none_tag,
                 optimize
@@ -1579,20 +1580,18 @@ pub fn emit_byte_op(call: u64, inout b: Builder, in m: Module) eff [Ffi[Cranelif
                 size_or_ty: widen_u64(int_ty.code),
                 stride: wrapping_i64(wbytes),
             };
-            call_result_value(
-                call,
-                seq_option_finish(
-                    inout b,
-                    out,
-                    done,
-                    v,
-                    e,
-                    opt_size,
-                    some_tag,
-                    payload_off,
-                    optimize
-                )
+            let res = seq_option_finish(
+                inout b,
+                out,
+                done,
+                v,
+                e,
+                opt_meta,
+                some_tag,
+                payload_off,
+                optimize
             );
+            seq_option_answer(call, inout b, res, done, opt_meta);
         } else {
             let addr = if has_view {
                 value_of_word(call_arg(call, 24))
@@ -1654,7 +1653,7 @@ pub fn emit_byte_op(call: u64, inout b: Builder, in m: Module) eff [Ffi[Cranelif
         call_result_value(call, bytes_cmp(inout b, in m, p, q, len, len2, simd, optimize));
     } else if sub == BYTE_FIND_BYTE || sub == BYTE_FIND_EITHER || sub == BYTE_FIND_NOT_IN {
         let (h, start, len) = seq_view_cached(inout b, receiver, is_seq, invariant, c0, c1, c2);
-        let opt_size = wrapping_u32(call_arg(call, 10));
+        let opt_meta = call_arg(call, 10);
         let some_tag = wrapping_i64(call_arg(call, 11));
         let none_tag = wrapping_i64(call_arg(call, 12));
         let payload_off = wrapping_u32(call_arg(call, 13));
@@ -1707,25 +1706,23 @@ pub fn emit_byte_op(call: u64, inout b: Builder, in m: Module) eff [Ffi[Cranelif
             inout b,
             in m,
             present,
-            opt_size,
+            opt_meta,
             some_tag,
             none_tag,
             optimize
         );
-        call_result_value(
-            call,
-            seq_option_finish(
-                inout b,
-                out,
-                done,
-                index,
-                u64_e,
-                opt_size,
-                some_tag,
-                payload_off,
-                optimize
-            )
+        let res = seq_option_finish(
+            inout b,
+            out,
+            done,
+            index,
+            u64_e,
+            opt_meta,
+            some_tag,
+            payload_off,
+            optimize
         );
+        seq_option_answer(call, inout b, res, done, opt_meta);
     } else if sub == BYTE_EXTEND_LOWER {
         let h = receiver;
         // Called after `seq_reserve` with grown/current `h`:

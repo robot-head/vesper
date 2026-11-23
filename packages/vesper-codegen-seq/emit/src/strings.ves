@@ -60,6 +60,7 @@ use self::common::{
     alloc,
     runtime_call,
     seq_copy_run,
+    seq_option_answer,
     seq_option_begin,
     seq_option_finish,
     zero
@@ -263,7 +264,7 @@ pub fn emit_str_op(call: u64, inout b: Builder, inout m: Module) eff [Ffi[Cranel
         call_result_value(call, str_byte(inout b, s, i));
     } else if kind == STR_TRY_BYTE_AT {
         let i = value_of_word(call_arg(call, 2));
-        let opt_size = wrapping_u32(call_arg(call, 3));
+        let opt_meta = call_arg(call, 3);
         let some_tag = wrapping_i64(call_arg(call, 4));
         let none_tag = wrapping_i64(call_arg(call, 5));
         let payload_off = wrapping_u32(call_arg(call, 6));
@@ -274,7 +275,7 @@ pub fn emit_str_op(call: u64, inout b: Builder, inout m: Module) eff [Ffi[Cranel
             inout b,
             in m,
             valid,
-            opt_size,
+            opt_meta,
             some_tag,
             none_tag,
             optimize
@@ -285,20 +286,18 @@ pub fn emit_str_op(call: u64, inout b: Builder, inout m: Module) eff [Ffi[Cranel
             size_or_ty: 4,
             stride: 1,
         };
-        call_result_value(
-            call,
-            seq_option_finish(
-                inout b,
-                out,
-                done,
-                byte,
-                e,
-                opt_size,
-                some_tag,
-                payload_off,
-                optimize
-            )
+        let res = seq_option_finish(
+            inout b,
+            out,
+            done,
+            byte,
+            e,
+            opt_meta,
+            some_tag,
+            payload_off,
+            optimize
         );
+        seq_option_answer(call, inout b, res, done, opt_meta);
     } else if kind == STR_AS_BYTES {
         let len = str_word(inout b, s, LEN);
         let z = zero(inout b);

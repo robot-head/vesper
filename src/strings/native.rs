@@ -131,8 +131,8 @@ impl<M: Module> Codegen<'_, '_, M> {
                 StrOp::TryByteAt => {
                     let i = arg(1)?;
                     let u8_ty = Type::named("u8");
-                    let option = Type::Named("Option".into(), vec![u8_ty]);
-                    let meta = self.seq_option_meta(&option)?;
+                    let option = Type::Named("Option".into(), vec![u8_ty.clone()]);
+                    let meta = self.seq_option_meta_for(&option, &u8_ty)?;
                     if let Some(res) = self.seq_swap_req(
                         sops::STR_OP,
                         &[
@@ -146,7 +146,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                             u64::from(self.operands_only),
                         ],
                     )? {
-                        return value_of(&res);
+                        return self.seq_option_finish_swap(&res, meta);
                     }
                 }
                 StrOp::AsBytes => {

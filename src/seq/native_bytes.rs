@@ -310,13 +310,16 @@ impl<M: Module> Codegen<'_, '_, M> {
                         word(at),
                         val,
                     ]);
-                    if !wide.write && wide.total {
+                    let opt_meta = if !wide.write && wide.total {
                         let int_ty = Type::named(wide.int_type());
-                        let option = Type::Named("Option".into(), vec![int_ty]);
-                        req.extend_from_slice(&self.seq_option_meta(&option)?);
+                        let option = Type::Named("Option".into(), vec![int_ty.clone()]);
+                        let m = self.seq_option_meta_for(&option, &int_ty)?;
+                        req.extend_from_slice(&m);
+                        Some(m)
                     } else {
                         req.extend_from_slice(&[0, 0, 0, 0]);
-                    }
+                        None
+                    };
                     if let Some(v) = cached {
                         req.push(1);
                         req.extend_from_slice(&v);
@@ -324,7 +327,11 @@ impl<M: Module> Codegen<'_, '_, M> {
                         req.push(0);
                     }
                     if let Some(res) = self.seq_swap_req(sops::BYTE_OP, &req)? {
-                        return value_of(&res).map(Some);
+                        return if let Some(m) = opt_meta {
+                            self.seq_option_finish_swap(&res, m).map(Some)
+                        } else {
+                            value_of(&res).map(Some)
+                        };
                     }
                 }
                 _ => {}
@@ -780,8 +787,8 @@ impl<M: Module> Codegen<'_, '_, M> {
                 }
                 SeqOp::FindByte | SeqOp::FindEither | SeqOp::FindNotIn => {
                     let u64_ty = Type::named("u64");
-                    let option = Type::Named("Option".into(), vec![u64_ty]);
-                    let meta = self.seq_option_meta(&option)?;
+                    let option = Type::Named("Option".into(), vec![u64_ty.clone()]);
+                    let meta = self.seq_option_meta_for(&option, &u64_ty)?;
                     let sub = match op {
                         SeqOp::FindByte => sops::BYTE_FIND_BYTE,
                         SeqOp::FindEither => sops::BYTE_FIND_EITHER,
@@ -797,7 +804,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                         req.push(word(operand(3)?.0));
                     }
                     if let Some(res) = self.seq_swap_req(sops::BYTE_OP, &req)? {
-                        return value_of(&res);
+                        return self.seq_option_finish_swap(&res, meta);
                     }
                 }
                 SeqOp::ExtendAsciiLowercase if !self.seq_is_freestanding() => {

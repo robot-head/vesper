@@ -16,6 +16,8 @@ use @vesper/cranelift::{
     call_conv_default,
     call_memmove,
     call_memset,
+    call_result,
+    call_result_value,
     create_block,
     create_stack_slot,
     data_align,
@@ -79,6 +81,7 @@ use @vesper/cranelift::{
     ty_i8,
     ty_of_word,
     vals1,
+    vals2,
     value_of_word,
     value_type,
     cc_eq,
@@ -404,11 +407,29 @@ pub fn seq_option_begin(
     inout b: Builder,
     in m: Module,
     present: Value,
-    opt_size: u32,
+    opt_meta: u64,
     some_tag: i64,
     none_tag: i64,
     optimize: bool,
 ) -> (Value, Block, Block) eff [Ffi[Cranelift]] {
+    let scalar = (opt_meta >> 32) != 0;
+    let opt_size = wrapping_u32(opt_meta & 0xffffffff);
+    if scalar {
+        let none = create_block(inout b);
+        let some = create_block(inout b);
+        let done = create_block(inout b);
+        append_block_param(inout b, done, ty_i64());
+        append_block_param(inout b, done, ty_i64());
+        ins_brif0(inout b, present, some, none);
+        switch_to_block(inout b, none);
+        let ntag = ins_iconst(inout b, ty_i64(), none_tag);
+        let z = zero(inout b);
+        let jargs = vals2(ntag, z);
+        ins_jump(inout b, done, in jargs.as_slice());
+        switch_to_block(inout b, some);
+        let _ = some_tag;
+        return (value_of_word(0), some, done);
+    }
     let out = if optimize {
         alloc_uninit(inout b, in m, opt_size)
     } else {
@@ -444,11 +465,26 @@ pub fn seq_option_finish(
     done: Block,
     value: Value,
     e: ElemDesc,
-    opt_size: u32,
+    opt_meta: u64,
     some_tag: i64,
     payload_off: u32,
     optimize: bool,
 ) -> Value eff [Ffi[Cranelift]] {
+    let scalar = (opt_meta >> 32) != 0;
+    let opt_size = wrapping_u32(opt_meta & 0xffffffff);
+    if scalar {
+        let vt = value_type(inout b, value);
+        let v = if vt.code != ty_i64().code {
+            ins_uextend(inout b, ty_i64(), value)
+        } else {
+            value
+        };
+        let stag = ins_iconst(inout b, ty_i64(), some_tag);
+        let jargs = vals2(stag, v);
+        ins_jump(inout b, done, in jargs.as_slice());
+        switch_to_block(inout b, done);
+        return value_of_word(0);
+    }
     let stag = ins_iconst(inout b, ty_i64(), some_tag);
     seq_set_word(inout b, out, 0, stag);
     if optimize {
@@ -474,6 +510,22 @@ pub fn seq_option_finish(
     ins_jump0(inout b, done);
     switch_to_block(inout b, done);
     out
+}
+
+pub fn seq_option_answer(
+    call: u64,
+    inout b: Builder,
+    out: Value,
+    done: Block,
+    opt_meta: u64,
+) eff [Ffi[Cranelift]] {
+    if (opt_meta >> 32) != 0 {
+        call_result(call, 0);
+        call_result_value(call, block_param(inout b, done, 0));
+        call_result_value(call, block_param(inout b, done, 1));
+    } else {
+        call_result_value(call, out);
+    }
 }
 
 pub fn seq_copy(inout b: Builder, dst: Value, src: Value, bytes: Value) eff [Ffi[Cranelift]] {

@@ -68,6 +68,7 @@ use self::common::{
     seq_elem_for_store,
     seq_load_elem,
     seq_move,
+    seq_option_answer,
     seq_option_begin,
     seq_option_finish,
     seq_set_len_if,
@@ -277,7 +278,7 @@ pub fn emit_seq_op(call: u64, inout b: Builder, inout m: Module) eff [Ffi[Cranel
         let c2 = call_arg(call, 9);
         let cdata = call_arg(call, 10);
         let elem = elem_from_call(call, 11);
-        let opt_size = wrapping_u32(call_arg(call, 14));
+        let opt_meta = call_arg(call, 14);
         let some_tag = wrapping_i64(call_arg(call, 15));
         let none_tag = wrapping_i64(call_arg(call, 16));
         let payload_off = wrapping_u32(call_arg(call, 17));
@@ -287,27 +288,25 @@ pub fn emit_seq_op(call: u64, inout b: Builder, inout m: Module) eff [Ffi[Cranel
             inout b,
             in m,
             valid,
-            opt_size,
+            opt_meta,
             some_tag,
             none_tag,
             optimize
         );
         let addr = seq_elem_addr(inout b, h, start, i, elem.stride, h_inv, cdata);
         let loaded = seq_elem_for_store(inout b, in m, addr, elem, optimize);
-        call_result_value(
-            call,
-            seq_option_finish(
-                inout b,
-                out,
-                done,
-                loaded,
-                elem,
-                opt_size,
-                some_tag,
-                payload_off,
-                optimize
-            )
+        let res = seq_option_finish(
+            inout b,
+            out,
+            done,
+            loaded,
+            elem,
+            opt_meta,
+            some_tag,
+            payload_off,
+            optimize
         );
+        seq_option_answer(call, inout b, res, done, opt_meta);
     } else if sub == SEQ_TRY_SET {
         let is_seq = call_arg(call, 1) != 0;
         let inv = call_arg(call, 2) != 0;
@@ -372,7 +371,7 @@ pub fn emit_seq_op(call: u64, inout b: Builder, inout m: Module) eff [Ffi[Cranel
         let c2 = call_arg(call, 8);
         let cdata = call_arg(call, 9);
         let elem = elem_from_call(call, 10);
-        let opt_size = wrapping_u32(call_arg(call, 13));
+        let opt_meta = call_arg(call, 13);
         let some_tag = wrapping_i64(call_arg(call, 14));
         let none_tag = wrapping_i64(call_arg(call, 15));
         let payload_off = wrapping_u32(call_arg(call, 16));
@@ -382,7 +381,7 @@ pub fn emit_seq_op(call: u64, inout b: Builder, inout m: Module) eff [Ffi[Cranel
             inout b,
             in m,
             present,
-            opt_size,
+            opt_meta,
             some_tag,
             none_tag,
             optimize
@@ -390,20 +389,18 @@ pub fn emit_seq_op(call: u64, inout b: Builder, inout m: Module) eff [Ffi[Cranel
         let last = ins_iadd_imm(inout b, len, -1);
         let addr = seq_elem_addr(inout b, h, start, last, elem.stride, h_inv, cdata);
         let loaded = seq_elem_for_store(inout b, in m, addr, elem, optimize);
-        call_result_value(
-            call,
-            seq_option_finish(
-                inout b,
-                out,
-                done,
-                loaded,
-                elem,
-                opt_size,
-                some_tag,
-                payload_off,
-                optimize
-            )
+        let res = seq_option_finish(
+            inout b,
+            out,
+            done,
+            loaded,
+            elem,
+            opt_meta,
+            some_tag,
+            payload_off,
+            optimize
         );
+        seq_option_answer(call, inout b, res, done, opt_meta);
     } else if sub == SEQ_POP {
         let h_inv = call_arg(call, 1) != 0;
         let optimize = call_arg(call, 2) != 0;
@@ -411,7 +408,7 @@ pub fn emit_seq_op(call: u64, inout b: Builder, inout m: Module) eff [Ffi[Cranel
         let clen = call_arg(call, 4);
         let cdata = call_arg(call, 5);
         let elem = elem_from_call(call, 6);
-        let opt_size = wrapping_u32(call_arg(call, 9));
+        let opt_meta = call_arg(call, 9);
         let some_tag = wrapping_i64(call_arg(call, 10));
         let none_tag = wrapping_i64(call_arg(call, 11));
         let payload_off = wrapping_u32(call_arg(call, 12));
@@ -421,7 +418,7 @@ pub fn emit_seq_op(call: u64, inout b: Builder, inout m: Module) eff [Ffi[Cranel
             inout b,
             in m,
             present,
-            opt_size,
+            opt_meta,
             some_tag,
             none_tag,
             optimize
@@ -431,20 +428,18 @@ pub fn emit_seq_op(call: u64, inout b: Builder, inout m: Module) eff [Ffi[Cranel
         let addr = seq_elem_addr(inout b, h, z, last, elem.stride, h_inv, cdata);
         let loaded = seq_elem_for_store(inout b, in m, addr, elem, optimize);
         seq_set_word(inout b, h, LEN, last);
-        call_result_value(
-            call,
-            seq_option_finish(
-                inout b,
-                out,
-                done,
-                loaded,
-                elem,
-                opt_size,
-                some_tag,
-                payload_off,
-                optimize
-            )
+        let res = seq_option_finish(
+            inout b,
+            out,
+            done,
+            loaded,
+            elem,
+            opt_meta,
+            some_tag,
+            payload_off,
+            optimize
         );
+        seq_option_answer(call, inout b, res, done, opt_meta);
     } else if sub == SEQ_CLEAR {
         let h_inv = call_arg(call, 1) != 0;
         let has_drop = call_arg(call, 2) != 0;

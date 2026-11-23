@@ -138,12 +138,20 @@ impl<M: Module> Codegen<'_, '_, M> {
                         desc[1],
                         desc[2],
                     ];
-                    if access == Access::TryGet {
+                    let meta = if access == Access::TryGet {
                         let option = Type::Named("Option".into(), vec![elem.clone()]);
-                        req.extend_from_slice(&self.seq_option_meta(&option)?);
-                    }
+                        let m = self.seq_option_meta_for(&option, &elem)?;
+                        req.extend_from_slice(&m);
+                        Some(m)
+                    } else {
+                        None
+                    };
                     if let Some(res) = self.seq_swap_req(sops::HOISTED_ACCESS, &req)? {
-                        return value_of(&res).map(Some);
+                        return if let Some(m) = meta {
+                            self.seq_option_finish_swap(&res, m).map(Some)
+                        } else {
+                            value_of(&res).map(Some)
+                        };
                     }
                 }
                 let (h, start, _) = self.seq_view(arg(0)?, ty);
