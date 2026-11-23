@@ -1,13 +1,13 @@
 #!/bin/sh
 # vesper-loom-cas under Cargo (Rust-exit wave SH6 lane 16, #1411), run from
-# the repository root by scripts/test-port-harness.sh. The crate's tests
-# (the store and transfer suites run against the ported store), including
-# the codec differential (tests/codec_differential.rs, whose
-# digest is pinned from the Rust build), must pass against the port build,
-# and each deliberately divergent module (DIVERGENT_EDITS in build.rs,
-# picked by VESPER_CAS_DIVERGE) must fail.
+# the repository root by scripts/test-port-harness.sh. Both the port-backed
+# package (`vesper-loom-cas`) and the frozen Rust seed copy
+# (`vesper-loom-cas-seed`) must pass the crate's tests (including
+# `tests/codec_differential.rs`, `tests/port_differential.rs` and the store
+# and transfer suites), and each deliberately divergent module
+# (`DIVERGENT_EDITS` in build.rs, picked by VESPER_CAS_DIVERGE) must fail.
 set -eu
-cargo test --locked -p vesper-loom-cas-port
+cargo test --locked -p vesper-loom-cas -p vesper-loom-cas-seed
 log=$(mktemp)
 trap 'rm -f "$log"' EXIT HUP INT TERM
 expect() { # <module> <test target args> <text that must appear>
@@ -15,7 +15,7 @@ expect() { # <module> <test target args> <text that must appear>
     args=$2
     text=$3
     # shellcheck disable=SC2086
-    if VESPER_CAS_DIVERGE=$module cargo test --locked -p vesper-loom-cas-port --features divergent $args >"$log" 2>&1; then
+    if VESPER_CAS_DIVERGE=$module cargo test --locked -p vesper-loom-cas --features vesper-port-divergent $args >"$log" 2>&1; then
         cat "$log"
         echo "the divergent loom-cas port ($module) passed $args" >&2
         exit 1
