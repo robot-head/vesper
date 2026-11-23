@@ -339,14 +339,10 @@ fn multibyte_mapping() -> u64 eff [Ffi[Forms]] {
         None => 0,
     }
 }
-fn add_cb(a: u64, b: u64) -> u64 {
-    wrapping_add(a, b)
-}
 fn callbacks() -> u64 eff [Ffi[Forms]] {
-    let a = Forms::forms_apply(add_cb, 10);
     match Forms::forms_lookup() {
-        Some(f) => wrapping_add(a, Forms::Add(f, 3, 4)),
-        None => a,
+        Some(f) => wrapping_add(Forms::forms_apply(f, 10), Forms::Add(f, 3, 4)),
+        None => 0,
     }
 }
 "#;
