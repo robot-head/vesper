@@ -2635,6 +2635,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                     .declare_function("strlen", Linkage::Import, &sig)
                     .map_err(|e| format!("C library function 'strlen': {e}"))?;
             }
+            self.seq_define_runtime()?;
             let mut sig = self.m.make_signature();
             for _ in 0..3 {
                 sig.params.push(AbiParam::new(types::I64));
@@ -2643,7 +2644,6 @@ impl<M: Module> Codegen<'_, '_, M> {
             self.m
                 .declare_function("memcpy", Linkage::Import, &sig)
                 .map_err(|e| format!("C library function 'memcpy': {e}"))?;
-            self.seq_define_runtime()?;
         }
         let mut words = vec![raw.map_or(NO_VALUE, word), u64::from(jit)];
         value_words(result, &mut words);
