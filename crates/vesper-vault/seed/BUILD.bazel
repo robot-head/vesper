@@ -51,7 +51,7 @@ rust_test(
         crate_root = "//crates/vesper-vault:tests/%s.rs" % t,
         edition = "2024",
         rustc_env = _ENV,
-        deps = [":seed"] + _NORMAL + _DEV,
+        deps = [":seed"] + _DEV,
     )
     for t in [
         "aead",
