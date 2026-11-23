@@ -456,7 +456,11 @@ impl<M: Module> Codegen<'_, '_, M> {
             for offset in [0, 8, 16] {
                 words.push(((view, offset), self.seq_word(view, offset)));
             }
-            (view, words[0].1)
+            let handle = words[0].1;
+            if self.invariant_headers.contains(&view) {
+                self.invariant_headers.insert(handle);
+            }
+            (view, handle)
         } else {
             let handle = self.expr(&e)?;
             let handle = self.hoisted_receiver(handle);
