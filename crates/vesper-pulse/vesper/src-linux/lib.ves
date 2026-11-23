@@ -1,0 +1,614 @@
+//! Relocatable data frames for suspended native computations.
+//!
+//! Stored addresses name a live frame and byte offset; no address points into a
+//! raw host pointer. Machine code, continuation entry points, and drop plans
+//! belong to the caller.
+
+pub copy struct FrameId {
+    pub bits: u64,
+}
+
+pub copy struct Address {
+    pub frame: FrameId,
+    pub offset: u32,
+}
+
+pub copy enum FrameError {
+    Allocation,
+    ExhaustedIds,
+    InvalidSize,
+    StaleFrame,
+    OutOfBounds,
+    NotTopFrame,
+}
+
+copy struct Frame {
+    id: FrameId,
+    segment: u64,
+    start: u64,
+    length: u64,
+}
+
+pub struct FrameStack {
+    segment_size: u64,
+    seg_bytes: ChunkSeq[u8],
+    seg_bases: ChunkSeq[u64],
+    seg_caps: ChunkSeq[u64],
+    seg_used: ChunkSeq[u64],
+    frames: ChunkSeq[Frame],
+    next_id: u64,
+}
+
+fn u64_at(in seq: ChunkSeq[u64], idx: u64) -> u64 {
+    match seq.try_get(idx) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn u8_at(in seq: ChunkSeq[u8], idx: u64) -> u8 {
+    match seq.try_get(idx) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn frame_at(in seq: ChunkSeq[Frame], idx: u64) -> Frame {
+    match seq.try_get(idx) {
+        Option::Some(v) => v,
+        Option::None => Frame {
+            id: FrameId {
+                bits: 0
+            },
+            segment: 0,
+            start: 0,
+            length: 0,
+        },
+    }
+}
+
+fn align_up_8(length: u64) -> (bool, u64) {
+    let min_len = if length == 0 {
+        1
+    } else {
+        length
+    };
+    let max_u64: u64 = wrapping_sub(0, 1);
+    if min_len > wrapping_sub(max_u64, 7) {
+        return (false, 0);
+    }
+    let aligned = wrapping_add(min_len, 7) & (!7);
+    (true, aligned)
+}
+
+fn find_frame_index(in frames: ChunkSeq[Frame], target_bits: u64) -> (bool, u64) {
+    let mut lo: u64 = 0;
+    let mut hi: u64 = frames.len();
+    loop {
+        if lo >= hi {
+            break;
+        }
+        let half = wrapping_shr_u64(wrapping_sub(hi, lo), 1);
+        let mid = wrapping_add(lo, half);
+        let mid_bits = frame_at(in frames, mid).id.bits;
+        if mid_bits == target_bits {
+            return (true, mid);
+        }
+        if mid_bits < target_bits {
+            lo = wrapping_add(mid, 1);
+        } else {
+            hi = mid;
+        }
+    }
+    (false, 0)
+}
+
+pub fn frame_stack_new(segment_size: u64) -> FrameStack eff [Fail[FrameError]] {
+    if segment_size == 0 || segment_size > 4294967295 {
+        return Fail::raise(FrameError::InvalidSize);
+    }
+    FrameStack {
+        segment_size: segment_size,
+        seg_bytes: ChunkSeq::new[u8](),
+        seg_bases: ChunkSeq::new[u64](),
+        seg_caps: ChunkSeq::new[u64](),
+        seg_used: ChunkSeq::new[u64](),
+        frames: ChunkSeq::new[Frame](),
+        next_id: 1,
+    }
+}
+
+pub fn frame_stack_depth(in stack: FrameStack) -> u64 {
+    stack.frames.len()
+}
+
+pub fn frame_stack_segments(in stack: FrameStack) -> u64 {
+    stack.seg_caps.len()
+}
+
+pub fn frame_stack_bytes(in stack: FrameStack) -> u64 {
+    let mut total: u64 = 0;
+    let n = stack.frames.len();
+    for i in 0..n {
+        total = wrapping_add(total, frame_at(in stack.frames, i).length);
+    }
+    total
+}
+
+pub fn frame_stack_live_id(in stack: FrameStack, bits: u64) -> FrameId eff [Fail[FrameError]] {
+    let (found, _idx) = find_frame_index(in stack.frames, bits);
+    if !found {
+        return Fail::raise(FrameError::StaleFrame);
+    }
+    FrameId {
+        bits: bits
+    }
+}
+
+fn resolve_range(
+    in stack: FrameStack,
+    address: Address,
+    length: u64,
+) -> u64 eff [Fail[FrameError]] {
+    let (found, idx) = find_frame_index(in stack.frames, address.frame.bits);
+    if !found {
+        return Fail::raise(FrameError::StaleFrame);
+    }
+    let frame = frame_at(in stack.frames, idx);
+    let offset = widen_u64(address.offset);
+    let max_u64: u64 = wrapping_sub(0, 1);
+    if offset > wrapping_sub(max_u64, length) {
+        return Fail::raise(FrameError::OutOfBounds);
+    }
+    let end = wrapping_add(offset, length);
+    if end > frame.length {
+        return Fail::raise(FrameError::OutOfBounds);
+    }
+    let seg_base = u64_at(in stack.seg_bases, frame.segment);
+    wrapping_add(wrapping_add(seg_base, frame.start), offset)
+}
+
+pub fn frame_stack_push(inout stack: FrameStack, length: u32) -> FrameId eff [Fail[FrameError]] {
+    let id_bits = stack.next_id;
+    let max_u64: u64 = wrapping_sub(0, 1);
+    if id_bits == max_u64 {
+        return Fail::raise(FrameError::ExhaustedIds);
+    }
+    let next = wrapping_add(id_bits, 1);
+    let len_u64 = widen_u64(length);
+    let (ok_align, aligned) = align_up_8(len_u64);
+    if !ok_align {
+        return Fail::raise(FrameError::InvalidSize);
+    }
+    let seg_count = stack.seg_caps.len();
+    let need_segment = if seg_count == 0 {
+        true
+    } else {
+        let last = wrapping_sub(seg_count, 1);
+        let cap = u64_at(in stack.seg_caps, last);
+        let used = u64_at(in stack.seg_used, last);
+        wrapping_sub(cap, used) < aligned
+    };
+    if need_segment {
+        let cap = if stack.segment_size > aligned {
+            stack.segment_size
+        } else {
+            aligned
+        };
+        let base = stack.seg_bytes.len();
+        for _i in 0..cap {
+            stack.seg_bytes.push(0);
+        }
+        stack.seg_bases.push(base);
+        stack.seg_caps.push(cap);
+        stack.seg_used.push(0);
+    }
+    let seg_idx = wrapping_sub(stack.seg_caps.len(), 1);
+    let seg_base = u64_at(in stack.seg_bases, seg_idx);
+    let start = u64_at(in stack.seg_used, seg_idx);
+    for k in 0..aligned {
+        let _ok = stack.seg_bytes.try_set(wrapping_add(wrapping_add(seg_base, start), k), 0);
+    }
+    let _ok_u = stack.seg_used.try_set(seg_idx, wrapping_add(start, aligned));
+    let id = FrameId {
+        bits: id_bits
+    };
+    stack
+        .frames
+        .push(
+            Frame {
+                id: id,
+                segment: seg_idx,
+                start: start,
+                length: len_u64,
+            }
+        );
+    stack.next_id = next;
+    id
+}
+
+pub fn frame_stack_read(
+    in stack: FrameStack,
+    address: Address,
+    length: u64,
+) -> ChunkSeq[u8] eff [Fail[FrameError]] {
+    let base = resolve_range(in stack, address, length);
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for i in 0..length {
+        out.push(u8_at(in stack.seg_bytes, wrapping_add(base, i)));
+    }
+    out
+}
+
+pub fn frame_stack_write(
+    inout stack: FrameStack,
+    address: Address,
+    in bytes: Slice[u8],
+) -> () eff [Fail[FrameError]] {
+    let len = bytes.len();
+    let base = resolve_range(in stack, address, len);
+    for i in 0..len {
+        let b = match bytes.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        let _ok = stack.seg_bytes.try_set(wrapping_add(base, i), b);
+    }
+}
+
+pub fn frame_stack_read_word(in stack: FrameStack, address: Address) -> u64 eff [Fail[FrameError]] {
+    let base = resolve_range(in stack, address, 8);
+    let mut val: u64 = 0;
+    for i in 0..8 {
+        let idx = wrapping_u64(i);
+        let shift = wrapping_u32(wrapping_mul(idx, 8));
+        let b = widen_u64(u8_at(in stack.seg_bytes, wrapping_add(base, idx)));
+        val = val | wrapping_shl_u64(b, shift);
+    }
+    val
+}
+
+pub fn frame_stack_write_word(
+    inout stack: FrameStack,
+    address: Address,
+    value: u64,
+) -> () eff [Fail[FrameError]] {
+    let base = resolve_range(in stack, address, 8);
+    for i in 0..8 {
+        let idx = wrapping_u64(i);
+        let shift = wrapping_u32(wrapping_mul(idx, 8));
+        let b = wrapping_u8(wrapping_shr_u64(value, shift) & 255);
+        let _ok = stack.seg_bytes.try_set(wrapping_add(base, idx), b);
+    }
+}
+
+pub fn frame_stack_write_address(
+    inout stack: FrameStack,
+    destination: Address,
+    value: Address,
+) -> () eff [Fail[FrameError]] {
+    let _check = resolve_range(in stack, value, 0);
+    let base = resolve_range(in stack, destination, 16);
+    for i in 0..8 {
+        let idx = wrapping_u64(i);
+        let shift = wrapping_u32(wrapping_mul(idx, 8));
+        let b = wrapping_u8(wrapping_shr_u64(value.frame.bits, shift) & 255);
+        let _ok = stack.seg_bytes.try_set(wrapping_add(base, idx), b);
+    }
+    let off = widen_u64(value.offset);
+    for j in 0..4 {
+        let jdx = wrapping_u64(j);
+        let shift = wrapping_u32(wrapping_mul(jdx, 8));
+        let b = wrapping_u8(wrapping_shr_u64(off, shift) & 255);
+        let _ok = stack.seg_bytes.try_set(wrapping_add(wrapping_add(base, 8), jdx), b);
+    }
+    for z in 12..16 {
+        let _ok = stack.seg_bytes.try_set(wrapping_add(base, wrapping_u64(z)), 0);
+    }
+}
+
+pub fn frame_stack_read_address(
+    in stack: FrameStack,
+    source: Address,
+) -> Address eff [Fail[FrameError]] {
+    let base = resolve_range(in stack, source, 16);
+    let mut bits: u64 = 0;
+    for i in 0..8 {
+        let idx = wrapping_u64(i);
+        let shift = wrapping_u32(wrapping_mul(idx, 8));
+        let b = widen_u64(u8_at(in stack.seg_bytes, wrapping_add(base, idx)));
+        bits = bits | wrapping_shl_u64(b, shift);
+    }
+    let mut off: u32 = 0;
+    for j in 0..4 {
+        let jdx = wrapping_u64(j);
+        let shift = wrapping_u32(wrapping_mul(jdx, 8));
+        let b = widen_u32(u8_at(in stack.seg_bytes, wrapping_add(wrapping_add(base, 8), jdx)));
+        off = off | wrapping_shl_u32(b, shift);
+    }
+    let id = frame_stack_live_id(in stack, bits);
+    let addr = Address {
+        frame: id,
+        offset: off
+    };
+    let _check = resolve_range(in stack, addr, 0);
+    addr
+}
+
+pub fn frame_stack_pop(inout stack: FrameStack, id: FrameId)
+    -> ChunkSeq[u8] eff [Fail[FrameError]] {
+    let n = stack.frames.len();
+    if n == 0 {
+        return Fail::raise(FrameError::StaleFrame);
+    }
+    let top = frame_at(in stack.frames, wrapping_sub(n, 1));
+    if top.id.bits != id.bits {
+        let (found, _idx) = find_frame_index(in stack.frames, id.bits);
+        if found {
+            return Fail::raise(FrameError::NotTopFrame);
+        }
+        return Fail::raise(FrameError::StaleFrame);
+    }
+    let seg_base = u64_at(in stack.seg_bases, top.segment);
+    let mut owned: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for i in 0..top.length {
+        owned.push(u8_at(in stack.seg_bytes, wrapping_add(wrapping_add(seg_base, top.start), i)));
+    }
+    let _popped = stack.frames.pop();
+    let _ok_u = stack.seg_used.try_set(top.segment, top.start);
+    loop {
+        if stack.seg_caps.len() == 0 {
+            break;
+        }
+        let last_idx = wrapping_sub(stack.seg_caps.len(), 1);
+        if u64_at(in stack.seg_used, last_idx) == 0 {
+            let cap = u64_at(in stack.seg_caps, last_idx);
+            let _c = stack.seg_caps.pop();
+            let _u = stack.seg_used.pop();
+            let _b = stack.seg_bases.pop();
+            for _k in 0..cap {
+                let _byte = stack.seg_bytes.pop();
+            }
+        } else {
+            break;
+        }
+    }
+    owned
+}
+
+pub fn frame_stack_relocate(inout stack: FrameStack) -> () {
+    let mut replacements: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let n = stack.seg_bytes.len();
+    for i in 0..n {
+        replacements.push(u8_at(in stack.seg_bytes, i));
+    }
+    stack.seg_bytes = replacements;
+}
+
+pub copy struct EpollPoller {
+    pub fd: i32,
+}
+
+pub copy struct EpollArmResult {
+    // 0 = Registered, 1 = AlwaysReady (EPERM), 2 = Error
+    pub status: u32,
+    pub errno: u32,
+}
+
+pub copy struct EpollWaitResult {
+    pub ok: bool,
+    pub fired: bool,
+    pub token: u64,
+    pub events: u32,
+    pub errno: u32,
+}
+
+fn epoll_mask(interest: u32) -> u32 {
+    let base = PulseSys::EPOLLONESHOT | PulseSys::EPOLLRDHUP;
+    if interest == 0 {
+        base | PulseSys::EPOLLIN
+    } else {
+        base | PulseSys::EPOLLOUT
+    }
+}
+
+fn make_epoll_event(events: u32, token: u64) -> EpollEvent {
+    let lo = wrapping_u32(token);
+    let hi = wrapping_u32(wrapping_shr_u64(token, 32));
+    if PulseSys::EPOLL_DATA_WORD == 1 {
+        EpollEvent {
+            w0: events,
+            w1: lo,
+            w2: hi,
+            w3: 0,
+        }
+    } else {
+        EpollEvent {
+            w0: events,
+            w1: 0,
+            w2: lo,
+            w3: hi,
+        }
+    }
+}
+
+fn epoll_event_token(ev: EpollEvent) -> u64 {
+    let (lo, hi) = if PulseSys::EPOLL_DATA_WORD == 1 {
+        (ev.w1, ev.w2)
+    } else {
+        (ev.w2, ev.w3)
+    };
+    widen_u64(lo) | wrapping_shl_u64(widen_u64(hi), 32)
+}
+
+pub fn epoll_new() -> Option[EpollPoller] eff [Ffi[PulseSys]] {
+    let (fd, _) = PulseSys::epoll_create1(PulseSys::EPOLL_CLOEXEC);
+    if fd < 0 {
+        return Option::None;
+    }
+    Option::Some(
+        EpollPoller {
+            fd: fd
+        }
+    )
+}
+
+pub fn epoll_arm(
+    in poller: EpollPoller,
+    fd: i32,
+    interest: u32,
+    token: u64,
+) -> EpollArmResult eff [Ffi[PulseSys]] {
+    let ev = make_epoll_event(epoll_mask(interest), token);
+    let (rc, err) = PulseSys::epoll_ctl_add_mod(poller.fd, PulseSys::EPOLL_CTL_ADD, fd, in ev);
+    if rc >= 0 {
+        return EpollArmResult {
+            status: 0,
+            errno: 0
+        };
+    }
+    if err == PulseSys::EPERM_ERR {
+        return EpollArmResult {
+            status: 1,
+            errno: 0
+        };
+    }
+    EpollArmResult {
+        status: 2,
+        errno: err
+    }
+}
+
+pub fn epoll_rearm(
+    in poller: EpollPoller,
+    fd: i32,
+    interest: u32,
+    token: u64,
+) -> (bool, u32) eff [Ffi[PulseSys]] {
+    let ev = make_epoll_event(epoll_mask(interest), token);
+    let (rc, err) = PulseSys::epoll_ctl_add_mod(poller.fd, PulseSys::EPOLL_CTL_MOD, fd, in ev);
+    if rc >= 0 {
+        (true, 0)
+    } else {
+        (false, err)
+    }
+}
+
+pub fn epoll_release(in poller: EpollPoller, fd: i32) -> (bool, u32) eff [Ffi[PulseSys]] {
+    let (rc, err) = PulseSys::epoll_ctl_del(poller.fd, PulseSys::EPOLL_CTL_DEL, fd, 0);
+    if rc >= 0 {
+        (true, 0)
+    } else {
+        (false, err)
+    }
+}
+
+pub fn epoll_wait_one(in poller: EpollPoller, timeout_ms: i32)
+    -> EpollWaitResult eff [Ffi[PulseSys]] {
+    let mut ev = EpollEvent {
+        w0: 0,
+        w1: 0,
+        w2: 0,
+        w3: 0,
+    };
+    let (rc, err) = PulseSys::epoll_wait(poller.fd, inout ev, 1, timeout_ms);
+    if rc < 0 {
+        if err == PulseSys::EINTR_ERR {
+            return EpollWaitResult {
+                ok: true,
+                fired: false,
+                token: 0,
+                events: 0,
+                errno: 0,
+            };
+        }
+        return EpollWaitResult {
+            ok: false,
+            fired: false,
+            token: 0,
+            events: 0,
+            errno: err,
+        };
+    }
+    if rc == 0 {
+        return EpollWaitResult {
+            ok: true,
+            fired: false,
+            token: 0,
+            events: 0,
+            errno: 0,
+        };
+    }
+    EpollWaitResult {
+        ok: true,
+        fired: true,
+        token: epoll_event_token(ev),
+        events: ev.w0,
+        errno: 0,
+    }
+}
+
+pub fn epoll_close(in poller: EpollPoller) -> () eff [Ffi[PulseSys]] {
+    let _ = PulseSys::close(poller.fd);
+}
+
+pub fn epoll_pipe_roundtrip_check() -> u64 eff [Ffi[PulseSys]] {
+    let poller = match epoll_new() {
+        Option::Some(p) => p,
+        Option::None => return 0,
+    };
+    // Empty epoll_wait(timeout=0) must return ok=true, fired=false.
+    let w0 = epoll_wait_one(in poller, 0);
+    if !w0.ok || w0.fired {
+        epoll_close(in poller);
+        return 1;
+    }
+    let mut fds = PipeFds {
+        read_fd: -1,
+        write_fd: -1,
+    };
+    let (prc, _) = PulseSys::pipe2(inout fds, PulseSys::EPOLL_CLOEXEC);
+    if prc < 0 {
+        epoll_close(in poller);
+        return 2;
+    }
+    let token: u64 = 1311768467463790320;
+    let arm = epoll_arm(in poller, fds.read_fd, 0, token);
+    if arm.status != 0 {
+        let _ = PulseSys::close(fds.read_fd);
+        let _ = PulseSys::close(fds.write_fd);
+        epoll_close(in poller);
+        return 3;
+    }
+    // Before writing, pipe read end is not ready.
+    let w1 = epoll_wait_one(in poller, 0);
+    if !w1.ok || w1.fired {
+        let _ = PulseSys::close(fds.read_fd);
+        let _ = PulseSys::close(fds.write_fd);
+        epoll_close(in poller);
+        return 4;
+    }
+    let b: u8 = 42;
+    let (wrc, _) = PulseSys::write_byte(fds.write_fd, in b, 1);
+    if wrc != 1 {
+        let _ = PulseSys::close(fds.read_fd);
+        let _ = PulseSys::close(fds.write_fd);
+        epoll_close(in poller);
+        return 5;
+    }
+    let w2 = epoll_wait_one(in poller, 1000);
+    if !w2.ok || !w2.fired || w2.token != token {
+        let _ = PulseSys::close(fds.read_fd);
+        let _ = PulseSys::close(fds.write_fd);
+        epoll_close(in poller);
+        return 6;
+    }
+    let (rel_ok, _) = epoll_release(in poller, fds.read_fd);
+    let _ = PulseSys::close(fds.read_fd);
+    let _ = PulseSys::close(fds.write_fd);
+    epoll_close(in poller);
+    if !rel_ok {
+        return 7;
+    }
+    100
+}
