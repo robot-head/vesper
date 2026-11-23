@@ -1496,3 +1496,393 @@ fn main() -> i64 { 0 }
         assert_ne!(decoded.revision, rev_edit);
     });
 }
+
+#[test]
+fn resolve_call_and_normalize_agree_with_rust() {
+    std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            let resolve_fn = package().entry("check_pact_resolve", true);
+            let normalize_fn = package().entry("check_pact_normalize", true);
+
+            let src = r#"
+                trait Area {
+                    fn area(in self) -> i64;
+                }
+                trait Perim {
+                    fn area(in self) -> i64;
+                    fn perim(in self) -> i64;
+                }
+                trait Container {
+                    type Item;
+                    fn get(in self) -> Self::Item;
+                }
+                trait OtherContainer {
+                    type Item;
+                    fn other(in self) -> Self::Item;
+                }
+                trait Tagged[U] {
+                    type Tag;
+                    fn tag(in self) -> Self::Tag;
+                }
+                copy struct Circle { r: i64 }
+                copy struct Rect { w: i64, h: i64 }
+                copy struct Wrap[T] { val: T }
+                impl Area for Circle {
+                    fn area(in self) -> i64 { self.r }
+                }
+                impl Area for Rect {
+                    fn area(in self) -> i64 { self.w }
+                }
+                impl Perim for Rect {
+                    fn area(in self) -> i64 { self.w }
+                    fn perim(in self) -> i64 { self.h }
+                }
+                model FastArea: Area for Circle {
+                    fn area(in self) -> i64 { self.r }
+                }
+                impl[T] Container for Wrap[T] {
+                    type Item = T;
+                    fn get(in self) -> Self::Item { self.val }
+                }
+                fn helper[T: Area](in x: T) -> i64 { x.area() }
+                fn helper_c[T: Container](in x: T) -> i64 { 0 }
+                fn helper_dyn(in x: dyn Area) -> i64 { x.area() }
+            "#;
+
+            let m = parse(src);
+            let identity =
+                vesper_pact_binding::PackageIdentity::new("@local/resolve_test", "0.0.0");
+            let (prepared, sess_bytes) =
+                build_session_input_for(&m, "@local/resolve_test", "0.0.0", 48, 100_000, 16)
+                    .unwrap();
+            let base = base_world(&prepared);
+            let sp = vesper::ast::Span { start: 10, end: 20 };
+
+            let t_circle = Type::Named("Circle".into(), vec![]);
+            let t_rect = Type::Named("Rect".into(), vec![]);
+            let t_i64 = Type::Named("i64".into(), vec![]);
+            let t_bool = Type::Named("bool".into(), vec![]);
+            let t_box_area = Type::Named(
+                "Box".into(),
+                vec![Type::Named(
+                    "dyn".into(),
+                    vec![Type::Named("Area".into(), vec![])],
+                )],
+            );
+            let t_dyn_gen = Type::Named("__dyn__x".into(), vec![]);
+            let t_param = Type::Named("T".into(), vec![]);
+
+            let bounded_gen = vec![Generic {
+                name: "T".into(),
+                bound: Mode::Linear,
+                row: false,
+            }];
+            let area_bounds = vec![vec![("Area".to_string(), vec![])]];
+            let container_bounds = vec![vec![("Container".to_string(), vec![])]];
+            let no_bounds: Vec<Vec<(String, Vec<Type>)>> = vec![];
+            let dyn_gen = vec![Generic {
+                name: "__dyn__x".into(),
+                bound: Mode::Linear,
+                row: false,
+            }];
+
+            type GenBounds = Vec<Vec<(String, Vec<Type>)>>;
+            type CallCase<'a> = (&'a str, bool, Type, Vec<Generic>, GenBounds, &'a str);
+            let call_cases: Vec<CallCase<'_>> = vec![
+                (
+                    "area",
+                    false,
+                    t_circle.clone(),
+                    vec![],
+                    no_bounds.clone(),
+                    "main",
+                ),
+                (
+                    "Area::area",
+                    true,
+                    t_circle.clone(),
+                    vec![],
+                    no_bounds.clone(),
+                    "main",
+                ),
+                (
+                    "FastArea::area",
+                    true,
+                    t_circle.clone(),
+                    vec![],
+                    no_bounds.clone(),
+                    "main",
+                ),
+                (
+                    "FastArea::area",
+                    true,
+                    t_rect.clone(),
+                    vec![],
+                    no_bounds.clone(),
+                    "main",
+                ),
+                (
+                    "Area::missing",
+                    true,
+                    t_circle.clone(),
+                    vec![],
+                    no_bounds.clone(),
+                    "main",
+                ),
+                (
+                    "unknown_fn",
+                    false,
+                    t_circle.clone(),
+                    vec![],
+                    no_bounds.clone(),
+                    "main",
+                ),
+                (
+                    "area",
+                    false,
+                    t_rect.clone(),
+                    vec![],
+                    no_bounds.clone(),
+                    "main",
+                ),
+                (
+                    "perim",
+                    false,
+                    t_circle.clone(),
+                    vec![],
+                    no_bounds.clone(),
+                    "main",
+                ),
+                (
+                    "eq",
+                    false,
+                    t_circle.clone(),
+                    vec![],
+                    no_bounds.clone(),
+                    "main",
+                ),
+                (
+                    "area",
+                    false,
+                    t_box_area.clone(),
+                    vec![],
+                    no_bounds.clone(),
+                    "main",
+                ),
+                (
+                    "perim",
+                    false,
+                    t_box_area.clone(),
+                    vec![],
+                    no_bounds.clone(),
+                    "main",
+                ),
+                (
+                    "area",
+                    false,
+                    t_param.clone(),
+                    bounded_gen.clone(),
+                    area_bounds.clone(),
+                    "helper",
+                ),
+                (
+                    "area",
+                    false,
+                    t_param.clone(),
+                    bounded_gen.clone(),
+                    no_bounds.clone(),
+                    "main",
+                ),
+                (
+                    "area",
+                    false,
+                    t_dyn_gen.clone(),
+                    dyn_gen.clone(),
+                    area_bounds.clone(),
+                    "helper_dyn",
+                ),
+            ];
+
+            let call_probes: Vec<pact_frontend::ResolveCallProbe<'_>> = call_cases
+                .iter()
+                .map(
+                    |(callee, path, recv, gens, _, func)| pact_frontend::ResolveCallProbe {
+                        callee,
+                        path: *path,
+                        receiver: recv.clone(),
+                        generics: gens.as_slice(),
+                        function: func,
+                        span: sp.clone(),
+                    },
+                )
+                .collect();
+
+            let proj_wrap_i64 = Type::Named(
+                "$projection".into(),
+                vec![
+                    Type::Named("Wrap".into(), vec![t_i64.clone()]),
+                    Type::Named("Container".into(), vec![]),
+                    Type::Named("Item".into(), vec![]),
+                ],
+            );
+            let proj_nested = Type::Named(
+                "$projection".into(),
+                vec![
+                    Type::Named("Wrap".into(), vec![proj_wrap_i64.clone()]),
+                    Type::Named("Container".into(), vec![]),
+                    Type::Named("Item".into(), vec![]),
+                ],
+            );
+            let proj_tuple = Type::Tuple(vec![
+                proj_wrap_i64.clone(),
+                Type::Named("Wrap".into(), vec![proj_nested.clone()]),
+            ]);
+            let proj_unknown_trait = Type::Named(
+                "$projection".into(),
+                vec![
+                    t_i64.clone(),
+                    Type::Named("NoSuchTrait".into(), vec![]),
+                    Type::Named("Item".into(), vec![]),
+                ],
+            );
+            let proj_missing_assoc = Type::Named(
+                "$projection".into(),
+                vec![
+                    t_circle.clone(),
+                    Type::Named("Area".into(), vec![]),
+                    Type::Named("Nope".into(), vec![]),
+                ],
+            );
+            let proj_ambig_assoc = Type::Named(
+                "$projection".into(),
+                vec![
+                    t_i64.clone(),
+                    Type::Named("".into(), vec![]),
+                    Type::Named("Item".into(), vec![]),
+                ],
+            );
+            let proj_wrong_args = Type::Named(
+                "$projection".into(),
+                vec![
+                    t_i64.clone(),
+                    Type::Named("Tagged".into(), vec![t_i64.clone(), t_bool.clone()]),
+                    Type::Named("Tag".into(), vec![]),
+                ],
+            );
+            let proj_bounded = Type::Named(
+                "$projection".into(),
+                vec![
+                    t_param.clone(),
+                    Type::Named("Container".into(), vec![]),
+                    Type::Named("Item".into(), vec![]),
+                ],
+            );
+
+            type NormCase<'a> = (Type, Vec<Generic>, GenBounds, &'a str);
+            let norm_cases: Vec<NormCase<'_>> = vec![
+                (proj_wrap_i64, vec![], no_bounds.clone(), "main"),
+                (proj_nested, vec![], no_bounds.clone(), "main"),
+                (proj_tuple, vec![], no_bounds.clone(), "main"),
+                (proj_unknown_trait, vec![], no_bounds.clone(), "main"),
+                (proj_missing_assoc, vec![], no_bounds.clone(), "main"),
+                (proj_ambig_assoc, vec![], no_bounds.clone(), "main"),
+                (proj_wrong_args, vec![], no_bounds.clone(), "main"),
+                (proj_bounded, bounded_gen, container_bounds, "helper_c"),
+            ];
+
+            let norm_probes: Vec<pact_frontend::NormalizeProbe<'_>> = norm_cases
+                .iter()
+                .map(|(ty, gens, _, func)| pact_frontend::NormalizeProbe {
+                    ty: ty.clone(),
+                    generics: gens.as_slice(),
+                    function: func,
+                    at: sp.start,
+                    span: sp.clone(),
+                })
+                .collect();
+
+            let probe = pact_frontend::probe_resolve_and_normalize(
+                &prepared,
+                &base,
+                &identity,
+                &call_probes,
+                &norm_probes,
+            )
+            .unwrap();
+            let rust_calls = probe.calls;
+            let rust_norms = probe.norms;
+
+            let mut full_resolve = sess_bytes.clone();
+            full_resolve.extend((call_cases.len() as u64).to_le_bytes());
+            for (callee, path, recv, gens, gbounds, func) in &call_cases {
+                let qbytes = pact_words::encode_resolve_call(&pact_words::ResolveCallPayload {
+                    span: &sp,
+                    function: func,
+                    generics: gens.as_slice(),
+                    gen_bounds: gbounds.as_slice(),
+                    conf_bounds: &[],
+                    scopes: &[],
+                    callee,
+                    path: *path,
+                    receiver: recv,
+                })
+                .unwrap();
+                full_resolve.extend((qbytes.len() as u64).to_le_bytes());
+                full_resolve.extend(&qbytes);
+                let pad = (8 - (qbytes.len() % 8)) % 8;
+                full_resolve.resize(full_resolve.len() + pad, 0);
+            }
+            let (r_diags, r_ok, v_calls) =
+                pact_words::decode_resolve_outcomes(&resolve_fn.words(&full_resolve));
+            assert!(r_diags.is_empty(), "{r_diags:?}");
+            assert!(r_ok);
+            assert_eq!(v_calls.len(), rust_calls.len());
+            for (i, (v, r)) in v_calls.iter().zip(&rust_calls).enumerate() {
+                let expected = match r {
+                    None => pact_words::DecodedResolveOutcome::None,
+                    Some(Ok(s)) => pact_words::DecodedResolveOutcome::Ok(s.clone()),
+                    Some(Err(d)) => pact_words::DecodedResolveOutcome::Err(vec![d.clone()]),
+                };
+                assert_eq!(
+                    v, &expected,
+                    "resolve mismatch on case {i}: {:?}",
+                    call_cases[i].0
+                );
+            }
+
+            let mut full_norm = sess_bytes;
+            full_norm.extend((norm_cases.len() as u64).to_le_bytes());
+            for (ty, gens, gbounds, func) in &norm_cases {
+                let qbytes = pact_words::encode_normalize(&pact_words::NormalizePayload {
+                    span: &sp,
+                    function: func,
+                    generics: gens.as_slice(),
+                    gen_bounds: gbounds.as_slice(),
+                    conf_bounds: &[],
+                    scopes: &[],
+                    ty,
+                })
+                .unwrap();
+                full_norm.extend((qbytes.len() as u64).to_le_bytes());
+                full_norm.extend(&qbytes);
+                let pad = (8 - (qbytes.len() % 8)) % 8;
+                full_norm.resize(full_norm.len() + pad, 0);
+            }
+            let (n_diags, n_ok, v_norms) =
+                pact_words::decode_resolve_outcomes(&normalize_fn.words(&full_norm));
+            assert!(n_diags.is_empty(), "{n_diags:?}");
+            assert!(n_ok);
+            assert_eq!(v_norms.len(), rust_norms.len());
+            for (i, (v, r)) in v_norms.iter().zip(&rust_norms).enumerate() {
+                let expected = match r {
+                    Ok(t) => pact_words::DecodedResolveOutcome::Ok(format!("{t}")),
+                    Err(d) => pact_words::DecodedResolveOutcome::Err(vec![d.clone()]),
+                };
+                assert_eq!(v, &expected, "normalize mismatch on case {i}");
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}

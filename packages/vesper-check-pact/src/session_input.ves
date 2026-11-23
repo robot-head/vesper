@@ -57,11 +57,11 @@ impl SessionMeta {
     }
 }
 
-fn sym(in nmap: ChunkSeq[u32], x: u64) -> u32 {
+pub fn sym(in nmap: ChunkSeq[u32], x: u64) -> u32 {
     u32_at(in nmap, x)
 }
 
-fn opt_sym(in nmap: ChunkSeq[u32], x: u64) -> u32 {
+pub fn opt_sym(in nmap: ChunkSeq[u32], x: u64) -> u32 {
     if x == 0 {
         0
     } else {
@@ -153,7 +153,12 @@ pub struct QuerySpec {
     pub goal: QGoal,
 }
 
-fn read_q_names(inout r: Reader, in b: Slice[u8], inout names: Names, inout nmap: ChunkSeq[u32]) {
+pub fn read_q_names(
+    inout r: Reader,
+    in b: Slice[u8],
+    inout names: Names,
+    inout nmap: ChunkSeq[u32]
+) {
     let count = r.word(in b);
     for _ in 0..count {
         let len = r.word(in b);
@@ -197,7 +202,7 @@ fn read_q_row(
     c.types.mk_row(in es, in args, tail)
 }
 
-fn read_q_types(
+pub fn read_q_types(
     inout r: Reader,
     in b: Slice[u8],
     inout c: Ctx,
