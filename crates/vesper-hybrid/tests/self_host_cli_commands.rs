@@ -976,3 +976,118 @@ fn graph_runs_in_vesper() {
     assert_eq!(prints, 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+fn seed_doc_tree(dir: &Path) {
+    std::fs::write(
+        dir.join("mod.ves"),
+        "/// Adds two unsigned integers.\npub fn add(a: u64, b: u64) -> u64 {\n    a + b\n}\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn doc_matches_the_default_compiler() {
+    let hybrid = hybrid();
+    let default = default_compiler();
+    let root = scratch("vesper-cli-doc-diff");
+    let cases: &[&[&str]] = &[
+        &["doc", "--help"],
+        &["doc", "-h"],
+        &["doc", "store-olean", "--help"],
+        &["doc"],
+        &["doc", "--json"],
+        &["doc", "--unknown"],
+        &["doc", "--unknown", "--json"],
+        &["doc", "mod.ves", "--target", "x86_64-unknown-linux-gnu"],
+        &["doc", "mod.ves", "-o", "a.html", "--bundle", "b"],
+        &["doc", "mod.ves", "--bundle", "b", "--json"],
+        &["doc", "mod.ves", "--search", "add"],
+        &["doc", "mod.ves", "--search", "-> u64", "--json"],
+        &["doc", "mod.ves", "--olean-store", "store"],
+        &["doc", "mod.ves", "--olean-root", "lean-build"],
+        &["doc", "mod.ves", "--target", "a", "--target", "b"],
+        &["doc", "mod.ves", "other.ves"],
+        &["doc", "store-olean"],
+        &[
+            "doc",
+            "store-olean",
+            "--proof-audit",
+            "a.json",
+            "--proof-audit",
+            "b.json",
+        ],
+        &["doc", "mod.ves"],
+        &["doc", "mod.ves", "--json"],
+        &["doc", "mod.ves", "-o", "out.html"],
+        &["doc", "mod.ves", "--bundle", "bundle-out"],
+    ];
+    let mut diffs = vec![];
+    for argv in cases {
+        let mut results = vec![];
+        let mut trees = vec![];
+        for compiler in [&default, &hybrid] {
+            let work = root.join(if compiler == &default { "d" } else { "h" });
+            let _ = std::fs::remove_dir_all(&work);
+            std::fs::create_dir_all(&work).unwrap();
+            seed_doc_tree(&work);
+            let out = Command::new(compiler)
+                .current_dir(&work)
+                .env_remove("VESPER_HYBRID_STATS")
+                .args(*argv)
+                .output()
+                .unwrap();
+            results.push(out);
+            trees.push(snapshot(&work));
+        }
+        let d = &results[0];
+        let h = &results[1];
+        if d.status.code() != h.status.code()
+            || d.stdout != h.stdout
+            || d.stderr != h.stderr
+            || trees[0] != trees[1]
+        {
+            diffs.push(format!(
+                "{argv:?}: status {:?} vs {:?}, stdout {:?} vs {:?}, stderr {:?} vs {:?}, tree_eq {}",
+                d.status.code(),
+                h.status.code(),
+                String::from_utf8_lossy(&d.stdout),
+                String::from_utf8_lossy(&h.stdout),
+                String::from_utf8_lossy(&d.stderr),
+                String::from_utf8_lossy(&h.stderr),
+                trees[0] == trees[1],
+            ));
+        }
+    }
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(
+        diffs.is_empty(),
+        "Vesper `doc` differs from default CLI on {} cases:\n{}",
+        diffs.len(),
+        diffs.join("\n")
+    );
+}
+
+#[test]
+fn doc_runs_in_vesper() {
+    let hybrid = hybrid();
+    let dir = scratch("vesper-cli-doc-runs");
+    seed_doc_tree(&dir);
+    let out = Command::new(&hybrid)
+        .current_dir(&dir)
+        .env("VESPER_HYBRID_STATS", "1")
+        .args(["doc", "--help"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let prints: u64 = stderr
+        .lines()
+        .find_map(|l| {
+            l.strip_prefix("vesper-hybrid: the command layers printed ")
+                .and_then(|s| s.strip_suffix(" times from Vesper"))
+                .and_then(|n| n.parse().ok())
+        })
+        .unwrap_or_else(|| panic!("no command-layer report in {stderr:?}"));
+    assert_eq!(prints, 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}

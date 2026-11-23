@@ -13,6 +13,7 @@ thread_local! {
     static LAST_EBPF_ERR: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     static LAST_FORGE_ERR: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     static LAST_GRAPH_ERR: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    static LAST_DOC_ERR: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Prints of the Vesper command layers (`hc_print` and `hc_help`);
@@ -1130,5 +1131,92 @@ pub mod host {
             print!("{}", render_text(&report));
         }
         Ok(())
+    }
+
+    fn truncate_doc_error(mut message: String) -> String {
+        if message.len() > 4096 {
+            let mut end = 4096;
+            while !message.is_char_boundary(end) {
+                end -= 1;
+            }
+            message.truncate(end);
+            message.push_str(" [truncated]");
+        }
+        message
+    }
+
+    fn unpack_doc_args(raw: &[u8]) -> Result<Vec<String>, String> {
+        let mut args = Vec::new();
+        for slice in raw.split(|&b| b == 0) {
+            if slice.is_empty() && args.is_empty() && raw.is_empty() {
+                break;
+            }
+            args.push(String::from_utf8_lossy(slice).into_owned());
+        }
+        // `pack_args` appends a trailing NUL after each argument, so `split`
+        // yields one final empty element when `raw` is non-empty.
+        if raw.ends_with(&[0]) {
+            args.pop();
+        }
+        Ok(args)
+    }
+
+    /// Run `vesper doc` from the Vesper `doc` command layer after CLI validation.
+    ///
+    /// Returns `0` on success, or the byte length of the error message stored in
+    /// `LAST_DOC_ERR`.
+    ///
+    /// # Safety
+    /// `packed` is a lent readable slice of `packed_len` bytes.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn hc_doc_run(packed: *const u8, packed_len: usize) -> u64 {
+        // SAFETY: lent for the call.
+        let raw = unsafe { bytes(packed, packed_len) };
+        let result = unpack_doc_args(raw).and_then(crate::doc_commands::run);
+        match result {
+            Ok(()) => 0,
+            Err(err) => {
+                let bytes = err.into_bytes();
+                let n = bytes.len() as u64;
+                super::LAST_DOC_ERR.with(|cell| *cell.borrow_mut() = bytes);
+                n
+            }
+        }
+    }
+
+    /// Emit the `--json` error object on stdout for a CLI error detected in Vesper
+    /// and store the (possibly truncated) error message in `LAST_DOC_ERR`.
+    ///
+    /// # Safety
+    /// `message` is a lent readable slice of `message_len` bytes.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn hc_doc_json_err(message: *const u8, message_len: usize) -> u64 {
+        // SAFETY: lent for the call.
+        let msg = String::from_utf8_lossy(unsafe { bytes(message, message_len) }).into_owned();
+        let msg = truncate_doc_error(msg);
+        println!(
+            "{}",
+            serde_json::json!({"schema_version": 1, "status": "invalid", "error": msg})
+        );
+        let bytes = msg.into_bytes();
+        let n = bytes.len() as u64;
+        super::LAST_DOC_ERR.with(|cell| *cell.borrow_mut() = bytes);
+        n
+    }
+
+    /// Copy `LAST_DOC_ERR` into `buf` (copy-out protocol).
+    ///
+    /// # Safety
+    /// `buf` is a lent writable slice of `len` bytes.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn hc_doc_err(buf: *mut u8, len: usize) -> u64 {
+        super::LAST_DOC_ERR.with(|cell| {
+            let data = cell.borrow();
+            if data.len() <= len && !buf.is_null() && !data.is_empty() {
+                // SAFETY: `buf` holds `len >= data.len()` bytes.
+                unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), buf, data.len()) };
+            }
+            data.len() as u64
+        })
     }
 }
