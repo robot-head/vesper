@@ -8,6 +8,7 @@ use @vesper/place-ir::codes::{
 use @vesper/check-data::util::{
     add,
     inc,
+    n32,
     u64_at,
     u8_at,
     w
@@ -23,8 +24,20 @@ use self::lower::{
 
 // Consts do not cross modules: src/err.ves, src/lower.ves.
 const K_UNSUPPORTED: u8 = 0;
+const K_INVALID: u8 = 3;
 const U_EXTERNAL_FUNCTION: u8 = 11;
 const U_OPERATION: u8 = 13;
+const NONE64: u64 = 18446744073709551615;
+
+fn lookup_word(in dests: ChunkSeq[u64], in vals: ChunkSeq[u64], v: u64) -> u64 eff [Fail[WErr]] {
+    for q in 0..dests.len() {
+        if u64_at(in dests, q) == v {
+            return u64_at(in vals, q);
+        }
+    }
+    Fail::raise(werr(K_UNSUPPORTED, U_OPERATION, 246));
+    0
+}
 
 impl L {
     // A use of a constant aggregate (`$table$NAME`, src/arrays.rs): the
@@ -53,17 +66,7 @@ impl L {
             }
             let name = self.cx.intern(in rest);
             let words = self.table_words(name);
-            let mut bytes = ChunkSeq::new[u8]();
-            for i in 0..words.len() {
-                let x = u64_at(in words, i);
-                for k in 0..8 {
-                    bytes
-                        .push(
-                            wrapping_u8(wrapping_shr_u64(x, wrapping_u32(wrapping_mul(k, 8))) & 255)
-                        );
-                }
-            }
-            let a = self.b.data(in bytes);
+            let a = self.static_words(in words);
             set64(inout self.tables, callee, inc(a));
             a
         };
@@ -73,8 +76,75 @@ impl L {
         true
     }
 
-    // The words of the tuple that constant function `name` returns: one
-    // block of literals and one tuple of them, else refused (site 246).
+    fn static_words(inout self, in words: ChunkSeq[u64]) -> u64 {
+        if words.len() == 0 {
+            return 0;
+        }
+        let mut bytes = ChunkSeq::new[u8]();
+        for i in 0..words.len() {
+            let x = u64_at(in words, i);
+            for k in 0..8 {
+                bytes
+                    .push(wrapping_u8(wrapping_shr_u64(x, wrapping_u32(wrapping_mul(k, 8))) & 255));
+            }
+        }
+        self.b.data(in bytes)
+    }
+
+    // The words of the aggregate that constant function `name` returns:
+    // one block of constants, tuples, and data constructors, else refused (site 246).
+    // If `name` is a 0-arg constant function returning a scalar, return its
+    // 64-bit word; otherwise Fail(246).
+    fn const_scalar(inout self, name: u32) -> u64 eff [Fail[WErr]] {
+        let fi = self.cx.ir.find(name);
+        if fi == 0 {
+            Fail::raise(werr(K_UNSUPPORTED, U_EXTERNAL_FUNCTION, 246));
+        }
+        let row = self.cx.ir.p.function(wrapping_sub(fi, 1));
+        if row.bc != 1 {
+            Fail::raise(werr(K_UNSUPPORTED, U_OPERATION, 246));
+        }
+        let blk = self.cx.ir.p.block(row.b0);
+        let mut dests = ChunkSeq::new[u64]();
+        let mut vals = ChunkSeq::new[u64]();
+        let mut last: u64 = 0;
+        let mut has_last = false;
+        for j in 0..blk.ic {
+            let ins = self.cx.ir.p.inst(add(blk.i0, j));
+            let a = ins.a;
+            if ins.op == Op::Const {
+                let lk = self.cx.ir.word(a);
+                let lo = self.cx.ir.word(inc(a));
+                let hi = self.cx.ir.word(add(a, 2));
+                let val = if lk == Lit::String {
+                    let text = n32(lo);
+                    let addr = self.string_literal(text);
+                    add(addr, 8) | wrapping_shl_u64(self.cx.names.size(text), 32)
+                } else {
+                    wrapping_u64(self.constant_bits(lk, lo, hi, ins.ty))
+                };
+                dests.push(widen_u64(ins.dest));
+                vals.push(val);
+                last = val;
+                has_last = true;
+            } else if ins.op == Op::Unit {
+                dests.push(widen_u64(ins.dest));
+                vals.push(0);
+                last = 0;
+                has_last = true;
+            } else if ins.op == Op::Exit {
+                last = lookup_word(in dests, in vals, self.cx.ir.word(inc(a)));
+                has_last = true;
+            } else {
+                Fail::raise(werr(K_UNSUPPORTED, U_OPERATION, 246));
+            }
+        }
+        if !has_last {
+            Fail::raise(werr(K_UNSUPPORTED, U_OPERATION, 246));
+        }
+        last
+    }
+
     fn table_words(inout self, name: u32) -> ChunkSeq[u64] eff [Fail[WErr]] {
         let fi = self.cx.ir.find(name);
         if fi == 0 {
@@ -85,43 +155,94 @@ impl L {
             Fail::raise(werr(K_UNSUPPORTED, U_OPERATION, 246));
         }
         let blk = self.cx.ir.p.block(row.b0);
-        // (dest, value) of each literal, and the last tuple's words
+        // (dest, value) of each instruction, and the last aggregate's words
         let mut dests = ChunkSeq::new[u64]();
         let mut vals = ChunkSeq::new[u64]();
         let mut out = ChunkSeq::new[u64]();
+        let mut has_out = false;
         for j in 0..blk.ic {
             let ins = self.cx.ir.p.inst(add(blk.i0, j));
             let a = ins.a;
             if ins.op == Op::Const {
                 let lk = self.cx.ir.word(a);
-                if lk == Lit::String {
+                let lo = self.cx.ir.word(inc(a));
+                let hi = self.cx.ir.word(add(a, 2));
+                let val = if lk == Lit::String {
+                    let text = n32(lo);
+                    let addr = self.string_literal(text);
+                    add(addr, 8) | wrapping_shl_u64(self.cx.names.size(text), 32)
+                } else if self.is_u128(ins.ty) {
+                    let mut w2 = ChunkSeq::new[u64]();
+                    w2.push(lo);
+                    w2.push(hi);
+                    self.static_words(in w2)
+                } else {
+                    wrapping_u64(self.constant_bits(lk, lo, hi, ins.ty))
+                };
+                dests.push(widen_u64(ins.dest));
+                vals.push(val);
+            } else if ins.op == Op::Unit {
+                dests.push(widen_u64(ins.dest));
+                vals.push(0);
+            } else if ins.op == Op::Call {
+                let callee = n32(self.cx.ir.word(a));
+                let nargs = self.cx.ir.word(inc(a));
+                if nargs != 0 {
                     Fail::raise(werr(K_UNSUPPORTED, U_OPERATION, 246));
                 }
-                let c = self
-                    .constant_bits(lk, self.cx.ir.word(inc(a)), self.cx.ir.word(add(a, 2)), ins.ty);
+                let val = self.const_scalar(callee);
                 dests.push(widen_u64(ins.dest));
-                vals.push(wrapping_u64(c));
+                vals.push(val);
+            } else if ins.op == Op::Exit {
+                // Constant functions end with `Op::Exit` returning the aggregate.
             } else if ins.op == Op::Tuple {
                 out.clear();
                 let k = self.cx.ir.word(a);
                 for i in 0..k {
                     let v = self.cx.ir.word(add(inc(a), i));
-                    let mut found = false;
-                    for q in 0..dests.len() {
-                        if u64_at(in dests, q) == v {
-                            out.push(u64_at(in vals, q));
-                            found = true;
-                        }
-                    }
-                    if !found {
-                        Fail::raise(werr(K_UNSUPPORTED, U_OPERATION, 246));
-                    }
+                    out.push(lookup_word(in dests, in vals, v));
                 }
+                has_out = true;
+                let addr = self.static_words(in out);
+                dests.push(widen_u64(ins.dest));
+                vals.push(addr);
+            } else if ins.op == Op::Data {
+                let cname = n32(self.cx.ir.word(a));
+                let (index, is_enum, sh) = self.cx.variant_of(ins.ty, cname);
+                let nf = self.cx.field_count(sh, index);
+                let base: u64 = if is_enum {
+                    1
+                } else {
+                    0
+                };
+                let slots = add(nf, base);
+                out.clear();
+                for _i in 0..slots {
+                    out.push(0);
+                }
+                if is_enum {
+                    set64(inout out, 0, index);
+                }
+                let n = self.cx.ir.word(inc(a));
+                for k in 0..n {
+                    let fname = n32(self.cx.ir.word(add(add(a, 2), wrapping_mul(k, 2))));
+                    let vid = self.cx.ir.word(add(add(a, 3), wrapping_mul(k, 2)));
+                    let fi0 = self.cx.field_index(sh, index, fname);
+                    if fi0 == NONE64 {
+                        Fail::raise(werr(K_INVALID, 0, 195));
+                    }
+                    let fv = lookup_word(in dests, in vals, vid);
+                    set64(inout out, wrapping_u32(add(fi0, base)), fv);
+                }
+                has_out = true;
+                let addr = self.static_words(in out);
+                dests.push(widen_u64(ins.dest));
+                vals.push(addr);
             } else {
                 Fail::raise(werr(K_UNSUPPORTED, U_OPERATION, 246));
             }
         }
-        if out.len() == 0 {
+        if !has_out {
             Fail::raise(werr(K_UNSUPPORTED, U_OPERATION, 246));
         }
         out
