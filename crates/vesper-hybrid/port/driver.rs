@@ -40,8 +40,6 @@ pub fn delegate() -> i64 {
 
 /// Calls `main_code` of the Vesper library `hybrid_driver` (`vesper_hybrid_driver_main_code`).
 pub fn main_code() -> i64 {
-    // Keep the crate's `StdProcess` symbols linked: the Vesper object calls them.
-    let _ = core::hint::black_box([crate::driver::std_host::process::vstd_proc_arg as *const (), crate::driver::std_host::process::vstd_proc_child_id as *const (), crate::driver::std_host::process::vstd_proc_command as *const (), crate::driver::std_host::process::vstd_proc_command_free as *const (), crate::driver::std_host::process::vstd_proc_cwd as *const (), crate::driver::std_host::process::vstd_proc_env as *const (), crate::driver::std_host::process::vstd_proc_env_clear as *const (), crate::driver::std_host::process::vstd_proc_env_remove as *const (), crate::driver::std_host::process::vstd_proc_exit as *const (), crate::driver::std_host::process::vstd_proc_free as *const (), crate::driver::std_host::process::vstd_proc_id as *const (), crate::driver::std_host::process::vstd_proc_output as *const (), crate::driver::std_host::process::vstd_proc_spawn as *const (), crate::driver::std_host::process::vstd_proc_stdio as *const (), crate::driver::std_host::process::vstd_proc_wait as *const ()]);
     // Keep the crate's `HybridDriver` symbols linked: the Vesper object calls them.
     let _ = core::hint::black_box([crate::driver::host::hd_free as *const (), crate::driver::host::hd_help as *const (), crate::driver::host::hd_print as *const (), crate::driver::host::hd_session as *const (), crate::driver::host::hd_step as *const (), crate::driver::host::hd_text as *const ()]);
     // Keep the crate's `HybridCommands` symbols linked: the Vesper object calls them.
