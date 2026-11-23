@@ -193,6 +193,10 @@ const FORMS_VSYS: &str = r#"sys library Forms (
     fn forms_lent(nocapture in a: CSlice[u8], nocapture inout b: CSlice[u64]) -> ForeignVal[u64];
     fn forms_cstr(nocapture in a: CStr, nocapture in b: CStr) -> ForeignVal[i32];
     fn forms_cstr_errno(nocapture in a: CStr) -> ForeignVal[u32] errno;
+    fn forms_float(a: f64, n: i32, b: f32) -> ForeignVal[f64];
+    fn forms_f32(x: f32) -> ForeignVal[f32];
+    fn forms_cstr_ret() -> ForeignVal[Option[CStr]];
+    fn forms_argv(nocapture in args: CStrList) -> ForeignVal[i32];
 }"#;
 
 const FORMS_SOURCE: &str = r#"
@@ -303,6 +307,23 @@ fn strings() -> u64 eff [Ffi[Forms]] {
     };
     wrapping_add(a, b)
 }
+fn floats() -> f64 eff [Ffi[Forms]] {
+    let x = Forms::forms_f32(1.5);
+    Forms::forms_float(2.0, 3, x)
+}
+fn cstr_ret_and_argv() -> u64 eff [Ffi[Forms]] {
+    let mut bytes = ChunkSeq::new[u8]();
+    bytes.push(97);
+    bytes.push(0);
+    bytes.push(98);
+    bytes.push(0);
+    let n = Forms::forms_argv(in bytes.as_slice());
+    let len = match Forms::forms_cstr_ret() {
+        Some(s) => s.len(),
+        None => 0,
+    };
+    wrapping_add(widen_u64(wrapping_u32(n)), len)
+}
 "#;
 
 /// A program: its name, source and `.vsys` libraries with their handlers.
@@ -321,6 +342,8 @@ fn programs() -> (Vec<Program>, Vec<String>) {
     let sandbox = fixture("tests/fixtures/ffi_lowering/sandbox.ves");
     let aead_vsys = fixture("tests/fixtures/ffi_handles/aead.vsys");
     let aead = fixture("tests/fixtures/ffi_handles/aead.ves");
+    let xsk_vsys = fixture("tests/fixtures/foreign_memory/xsk.vsys");
+    let xsk = fixture("tests/fixtures/foreign_memory/xsk.ves");
     for target in TARGETS {
         let sources: Vec<Source<'_>> = vec![
             ("bridge", &bridge, vec![(&bridge_vsys, Handler::Direct)]),
@@ -335,6 +358,7 @@ fn programs() -> (Vec<Program>, Vec<String>) {
                 vec![(&sandbox_vsys, Handler::IsolatedMpk)],
             ),
             ("aead", &aead, vec![(&aead_vsys, Handler::Direct)]),
+            ("xsk", &xsk, vec![(&xsk_vsys, Handler::Direct)]),
             ("forms", FORMS_SOURCE, vec![(FORMS_VSYS, Handler::Direct)]),
         ];
         for (name, source, libraries) in sources {
@@ -437,7 +461,7 @@ fn foreign_call_emission_matches_rust() {
             eprintln!("skipped: {s}");
         }
         // The fixtures and the hand-written forms build for every target.
-        for name in ["bridge", "bridge mpk", "sandbox", "aead", "forms"] {
+        for name in ["bridge", "bridge mpk", "sandbox", "aead", "xsk", "forms"] {
             for target in TARGETS {
                 let want = format!("{name} [{target}]");
                 assert!(
