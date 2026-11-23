@@ -6214,7 +6214,7 @@ dependencies = [
  "vesper-syntax",
  "vesper-tensor-seed",
  "vesper-test",
- "vesper-vault",
+ "vesper-vault-seed",
  "wasm-encoder 0.261.0",
  "wit-component",
  "wit-parser",
