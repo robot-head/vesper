@@ -292,3 +292,24 @@ pub fn check_iocp() -> u64 eff [Ffi[PulseSys]] {
         100
     );
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_kqueue_pipe_roundtrip() {
+    let src = r#"
+use @vesper/pulse::kqueue_pipe_roundtrip_check;
+
+pub fn check_kqueue() -> u64 eff [Ffi[PulseSys]] {
+    kqueue_pipe_roundtrip_check()
+}
+"#;
+    let checked = check_pulse_driver(src);
+    assert_eq!(
+        agree(
+            &checked,
+            "check_kqueue",
+            &[std_io_support::Mode::Jit, std_io_support::Mode::JitNoOpt],
+        ),
+        100
+    );
+}

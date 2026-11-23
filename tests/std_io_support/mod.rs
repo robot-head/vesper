@@ -240,6 +240,17 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         fn epoll_ctl(epfd: i32, op: i32, fd: i32, event: *mut c_void) -> i32;
         #[cfg(target_os = "linux")]
         fn epoll_wait(epfd: i32, events: *mut c_void, maxevents: i32, timeout: i32) -> i32;
+        #[cfg(target_os = "macos")]
+        fn kqueue() -> i32;
+        #[cfg(target_os = "macos")]
+        fn kevent(
+            kq: i32,
+            changelist: *const c_void,
+            nchanges: i32,
+            eventlist: *mut c_void,
+            nevents: i32,
+            timeout: *const c_void,
+        ) -> i32;
         fn mmap(
             addr: *mut c_void,
             len: usize,
@@ -393,6 +404,11 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         syms.push(("epoll_create1", epoll_create1 as *const u8));
         syms.push(("epoll_ctl", epoll_ctl as *const u8));
         syms.push(("epoll_wait", epoll_wait as *const u8));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        syms.push(("kqueue", kqueue as *const u8));
+        syms.push(("kevent", kevent as *const u8));
     }
     syms
 }
