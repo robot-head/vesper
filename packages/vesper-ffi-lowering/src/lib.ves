@@ -209,6 +209,8 @@ pub copy struct Fun {
     pn: u64,
     result: Vt,
     errno: bool,
+    has_variadic: bool,
+    variadic_first: u64,
     // the library row
     lib: u64,
     // the call of a callback type: params[p0] is the pointer itself
@@ -619,6 +621,8 @@ impl S {
                 pn: 0,
                 result: vt_unit(),
                 errno: false,
+                has_variadic: false,
+                variadic_first: 0,
                 lib: 0,
                 indirect: false
             },
@@ -1205,9 +1209,12 @@ fn read_function(inout r: Reader, in b: Slice[u8], inout s: S, lib: u64, indirec
     if errno {
         let marker = r.field(in b);
     }
+    let mut has_variadic = false;
+    let mut variadic_first: u64 = 0;
     if peek_is(in r, in b, in "variadic/from") {
         let marker = r.field(in b);
-        let first = r.count(in b);
+        variadic_first = r.count(in b);
+        has_variadic = true;
     }
     // The C symbol several declarations may share (`#[link_name]`): the
     // plans and shapes name the declaration's own symbol.
@@ -1224,6 +1231,8 @@ fn read_function(inout r: Reader, in b: Slice[u8], inout s: S, lib: u64, indirec
                 pn: np,
                 result: result,
                 errno: errno,
+                has_variadic: has_variadic,
+                variadic_first: variadic_first,
                 lib: lib,
                 indirect: indirect
             }
@@ -3135,19 +3144,39 @@ pub fn dump_abi(inout s: S) {
         } else {
             0
         };
+        let darwin = triple_os(in s, l.triple) == TargetOs::Darwin;
+        let mut integers: u64 = 0;
+        let mut emitted = false;
         for j in first..f.pn {
+            if darwin && f.has_variadic && j == f.variadic_first && integers < 8 {
+                let pad = wrapping_sub(8, integers);
+                for k in 0..pad {
+                    if emitted {
+                        s.put(in ",");
+                    }
+                    s.put(in "u64");
+                    emitted = true;
+                }
+            }
             let p = s.par(add(f.p0, j));
-            if j > first {
+            if emitted {
                 s.put(in ",");
             }
+            emitted = true;
             if p.tag == P_VALUE {
                 let any = put_carrier(inout s, f.lib, p.vt);
+                if p.vt.tag != VT_FLOAT {
+                    integers = add(integers, 1);
+                }
             } else if p.tag == P_SLICE || p.tag == P_PINNED {
                 s.put(in "ptr,usize");
+                integers = add(integers, 2);
             } else if p.tag == P_HANDLE && is_mapping(in s, f.lib, p.pname) {
                 s.put(in "ptr,usize");
+                integers = add(integers, 2);
             } else {
                 s.put(in "ptr");
+                integers = add(integers, 1);
             }
         }
         s.put(in " result=");
