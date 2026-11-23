@@ -692,7 +692,7 @@ vesper_crate(
         ],
         "test/pulse_port": [
             ":files",
-            "//crates/vesper-pulse:vesper_pkg",
+            "//crates/vesper-pulse/vesper:vesper_pkg",
         ],
         # .vsys imports carried by packages (#1150): drivers over @vesper-std/fs.
         "test/vsys_packages": [":files"],

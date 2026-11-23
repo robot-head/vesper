@@ -1,9 +1,3 @@
 load("//tools/bazel:defs.bzl", "vesper_crate")
 
 vesper_crate()
-
-filegroup(
-    name = "vesper_pkg",
-    srcs = glob(["vesper/**"]),
-    visibility = ["//visibility:public"],
-)
