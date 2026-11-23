@@ -258,3 +258,10 @@ Extended `codegen_swap::control` (`ops 38..=42`: `SESSION_PARK_PREP`, `SESSION_P
 
 - `CODEGEN_SWAP_STEP=1 cargo +1.100.0 test --locked --release -p vesper-codegen-swap-test --test self_host_codegen_control -- --nocapture`: `3 passed, 0 failed` (`the_session_entries_match_the_rust_lowering`: `5` session programs `ticket_tally`, `lease_cleanup`, `typed_failures`, `session_f64`, `session_f32` across `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu` = **0** CLIF diffs, **0** object byte diffs, ops `38..=42` all exercised; plus `312` worlds / `966` functions / `312` runs = **0** diffs).
 - Rust lines deleted: `0` (hooked path only; default path unchanged; no root `Cargo.toml` or `crates/vesper-hybrid` edits).
+
+## Part 5 (SH4 lane 10, #1284 / #1652 — `dyn_drop_helper` wrapper)
+
+Extended `codegen_swap::control` (`ops 43..=44`: `DYN_DROP_HELPER_HEAD`, `DYN_DROP_HELPER_TAIL`) and `@vesper/codegen-control-emit` (`control_hook`) to emit the entry block, parameter load (`helper_load`), `return_(&[])`, and `seal_all_blocks` for `dyn_drop_helper` (`src/dyn_trait/native.rs`), keeping `seq_native::emit_drop_glue` and `define_function` in Rust.
+
+- `CODEGEN_SWAP_STEP=1 cargo +1.100.0 test --locked --release -p vesper-codegen-swap-test --test self_host_codegen_control -- --nocapture`: `3 passed, 0 failed` (`312` worlds / `969` functions / `312` runs = **0** CLIF, **0** object, **0** run, **0** one-sided differences; `("dyn drop helper head", 4)`, `("dyn drop helper tail", 4)`).
+- Rust lines deleted: `0` (hooked path only; default path unchanged; no root `Cargo.toml` or `crates/vesper-hybrid` edits).
