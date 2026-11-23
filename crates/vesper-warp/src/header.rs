@@ -31,7 +31,7 @@
 
 // Constants, helpers and layouts that only the Rust implementation
 // (src/reference/) reads.
-#![cfg_attr(feature = "vesper-port", allow(dead_code))]
+#![allow(dead_code)]
 
 use crate::packet_number::{PnLen, TruncatedPn};
 use crate::varint::VarIntError;
@@ -313,7 +313,7 @@ impl HeaderParser {
     }
 }
 
-pub use crate::imp::header::{write_long, write_retry, write_version_negotiation};
+pub use crate::ported::header::{write_long, write_retry, write_version_negotiation};
 
 /// Fields of a version 1 Initial, 0-RTT or Handshake header to serialize.
 #[derive(Debug, Clone, Copy)]
