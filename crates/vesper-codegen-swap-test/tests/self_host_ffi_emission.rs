@@ -200,6 +200,9 @@ const FORMS_VSYS: &str = r#"sys library Forms (
     fn forms_argv(nocapture in args: CStrList) -> ForeignVal[i32];
     fn forms_map32(n: usize) -> ForeignVal[Option[Ring32[n]]];
     fn forms_unmap32(sink r: Ring32) -> ForeignVal[Unit];
+    callback Add(a: u64, b: u64) -> ForeignVal[u64];
+    fn forms_lookup() -> ForeignVal[Option[Add]];
+    fn forms_apply(in f: Add, x: u64) -> ForeignVal[u64];
 }"#;
 
 const FORMS_SOURCE: &str = r#"
@@ -334,6 +337,16 @@ fn multibyte_mapping() -> u64 eff [Ffi[Forms]] {
             1
         },
         None => 0,
+    }
+}
+fn add_cb(a: u64, b: u64) -> u64 {
+    wrapping_add(a, b)
+}
+fn callbacks() -> u64 eff [Ffi[Forms]] {
+    let a = Forms::forms_apply(add_cb, 10);
+    match Forms::forms_lookup() {
+        Some(f) => wrapping_add(a, Forms::Add(f, 3, 4)),
+        None => a,
     }
 }
 "#;
