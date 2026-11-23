@@ -35,130 +35,22 @@ use std::sync::Arc;
 
 /// Concrete ALU semantics (RFC 9669 §4.1) on 64-bit register values; for
 /// 32-bit ops the operands are truncated and the result zero-extended.
-#[cfg(vesper_port)]
 pub fn alu_concrete(op: AluOp, wide: bool, a: u64, b: u64) -> u64 {
     crate::port::ffi::interp_alu_concrete(op, wide, a, b)
 }
 
-#[cfg(not(vesper_port))]
-pub fn alu_concrete(op: AluOp, wide: bool, a: u64, b: u64) -> u64 {
-    if !wide {
-        let x = a as u32;
-        let y = b as u32;
-        let r: u32 = match op {
-            AluOp::Add => x.wrapping_add(y),
-            AluOp::Sub => x.wrapping_sub(y),
-            AluOp::Mul => x.wrapping_mul(y),
-            AluOp::Div => x.checked_div(y).unwrap_or(0),
-            AluOp::SDiv => {
-                if y == 0 {
-                    0
-                } else {
-                    (x as i32).wrapping_div(y as i32) as u32
-                }
-            }
-            AluOp::Mod => x.checked_rem(y).unwrap_or(x),
-            AluOp::SMod => {
-                if y == 0 {
-                    x
-                } else {
-                    (x as i32).wrapping_rem(y as i32) as u32
-                }
-            }
-            AluOp::Or => x | y,
-            AluOp::And => x & y,
-            AluOp::Xor => x ^ y,
-            AluOp::Lsh => x.wrapping_shl(y & 31),
-            AluOp::Rsh => x.wrapping_shr(y & 31),
-            AluOp::Arsh => ((x as i32).wrapping_shr(y & 31)) as u32,
-            AluOp::Neg => x.wrapping_neg(),
-            AluOp::Mov => y,
-            AluOp::MovSx(bits) => sext_const(y as u64, bits as u32) as u32,
-        };
-        return r as u64;
-    }
-    match op {
-        AluOp::Add => a.wrapping_add(b),
-        AluOp::Sub => a.wrapping_sub(b),
-        AluOp::Mul => a.wrapping_mul(b),
-        AluOp::Div => a.checked_div(b).unwrap_or(0),
-        AluOp::SDiv => {
-            if b == 0 {
-                0
-            } else {
-                (a as i64).wrapping_div(b as i64) as u64
-            }
-        }
-        AluOp::Mod => a.checked_rem(b).unwrap_or(a),
-        AluOp::SMod => {
-            if b == 0 {
-                a
-            } else {
-                (a as i64).wrapping_rem(b as i64) as u64
-            }
-        }
-        AluOp::Or => a | b,
-        AluOp::And => a & b,
-        AluOp::Xor => a ^ b,
-        AluOp::Lsh => a.wrapping_shl((b & 63) as u32),
-        AluOp::Rsh => a.wrapping_shr((b & 63) as u32),
-        AluOp::Arsh => ((a as i64).wrapping_shr((b & 63) as u32)) as u64,
-        AluOp::Neg => a.wrapping_neg(),
-        AluOp::Mov => b,
-        AluOp::MovSx(bits) => sext_const(b, bits as u32),
-    }
-}
 
 /// Concrete conditional-jump semantics.
-#[cfg(vesper_port)]
 pub fn cmp_concrete(op: JmpOp, wide: bool, a: u64, b: u64) -> bool {
     crate::port::ffi::interp_cmp_concrete(op, wide, a, b)
 }
 
-#[cfg(not(vesper_port))]
-pub fn cmp_concrete(op: JmpOp, wide: bool, a: u64, b: u64) -> bool {
-    let (a, b) = if wide {
-        (a, b)
-    } else {
-        (a as u32 as u64, b as u32 as u64)
-    };
-    let (sa, sb) = if wide {
-        (a as i64, b as i64)
-    } else {
-        (a as u32 as i32 as i64, b as u32 as i32 as i64)
-    };
-    match op {
-        JmpOp::Eq => a == b,
-        JmpOp::Ne => a != b,
-        JmpOp::Gt => a > b,
-        JmpOp::Ge => a >= b,
-        JmpOp::Lt => a < b,
-        JmpOp::Le => a <= b,
-        JmpOp::Set => a & b != 0,
-        JmpOp::SGt => sa > sb,
-        JmpOp::SGe => sa >= sb,
-        JmpOp::SLt => sa < sb,
-        JmpOp::SLe => sa <= sb,
-    }
-}
 
 /// Concrete `BPF_END` semantics on a little-endian target.
-#[cfg(vesper_port)]
 pub fn endian(kind: Endian, bits: u8, v: u64) -> u64 {
     crate::port::ffi::interp_endian(kind, bits, v)
 }
 
-#[cfg(not(vesper_port))]
-pub fn endian(kind: Endian, bits: u8, v: u64) -> u64 {
-    match (kind, bits) {
-        (Endian::ToLe, 16) => v as u16 as u64,
-        (Endian::ToLe, 32) => v as u32 as u64,
-        (Endian::ToLe, _) => v,
-        (_, 16) => (v as u16).swap_bytes() as u64,
-        (_, 32) => (v as u32).swap_bytes() as u64,
-        (_, _) => v.swap_bytes(),
-    }
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InterpError {
@@ -666,16 +558,13 @@ pub struct Env {
     pkt_start: usize,
     /// The port build's state: map values, entries and spills in the
     /// port's words (the Rust fields above stay empty there).
-    #[cfg(vesper_port)]
     port: crate::port::InterpState,
     /// The port build's installed targets.
-    #[cfg(vesper_port)]
     targets: std::collections::BTreeMap<(usize, u32), PortTarget>,
 }
 
 /// A tail-call target in the port build: its program type, slots, map
 /// indices in the environment and kfunc codes.
-#[cfg(vesper_port)]
 #[derive(Clone, Debug)]
 struct PortTarget {
     prog_type: ProgramType,
@@ -716,9 +605,7 @@ impl Env {
             persistent: 0,
             deferred: Vec::new(),
             pkt_start: 0,
-            #[cfg(vesper_port)]
             port: Default::default(),
-            #[cfg(vesper_port)]
             targets: Default::default(),
         };
         for def in &prog.maps {
@@ -731,7 +618,6 @@ impl Env {
             };
             env.maps.push(st);
         }
-        #[cfg(vesper_port)]
         {
             env.port = crate::port::interp_new_env(&port::map_words(&env));
             return env;
@@ -793,7 +679,6 @@ impl Env {
             maps.push(i);
         }
         let code = Code::new(target, maps).map_err(TailCallError::Decode)?;
-        #[cfg(vesper_port)]
         {
             self.targets.insert(
                 (map, index),
@@ -815,7 +700,6 @@ impl Env {
 
     /// Empty slot `index` of program array `map` (`bpf_map_delete_elem`).
     pub fn remove_tail_call(&mut self, map: usize, index: u32) -> bool {
-        #[cfg(vesper_port)]
         {
             return self.targets.remove(&(map, index)).is_some();
         }
@@ -841,7 +725,6 @@ impl Env {
 
     /// Value bytes stored under `key` in a hash or array map.
     pub fn map_get(&self, map: usize, key: &[u8]) -> Option<Vec<u8>> {
-        #[cfg(vesper_port)]
         if let MapState::Kv { .. } = &self.maps[map] {
             return self.port.map_get(map, key);
         }
@@ -856,7 +739,6 @@ impl Env {
     /// The keys stored in a hash or array map, sorted (empty for a ring
     /// buffer).
     pub fn map_keys(&self, map: usize) -> Vec<Vec<u8>> {
-        #[cfg(vesper_port)]
         if let MapState::Kv { .. } = &self.maps[map] {
             return self.port.map_keys(map);
         }
@@ -968,7 +850,6 @@ pub fn run_skb(
 }
 
 /// Execute `prog` once from `input`, which must match its program type.
-#[cfg(vesper_port)]
 pub fn run(prog: &Program, env: &mut Env, input: Input<'_>) -> Result<RunResult, InterpError> {
     if input.prog_type() != prog.prog_type {
         return Err(InterpError::BadInput(format!(
@@ -978,521 +859,6 @@ pub fn run(prog: &Program, env: &mut Env, input: Input<'_>) -> Result<RunResult,
         )));
     }
     port::run(prog, env, input)
-}
-
-/// Execute `prog` once from `input`, which must match its program type.
-#[cfg(not(vesper_port))]
-pub fn run(prog: &Program, env: &mut Env, input: Input<'_>) -> Result<RunResult, InterpError> {
-    if input.prog_type() != prog.prog_type {
-        return Err(InterpError::BadInput(format!(
-            "a {:?} program cannot run on {:?} input",
-            prog.prog_type,
-            input.prog_type()
-        )));
-    }
-    let code = Code::new(prog, (0..prog.maps.len()).collect()).map_err(InterpError::Decode)?;
-    let ptype = prog.prog_type;
-    env.pkt_start = HEADROOM;
-    let (pkt, ctx_bytes) = match input {
-        Input::Xdp(p) => {
-            let mut buf = vec![0u8; HEADROOM];
-            buf.extend_from_slice(p);
-            (
-                Some(env.alloc(Kind::Packet, buf, true)),
-                vec![0; XDP_MD_SIZE as usize],
-            )
-        }
-        Input::Skb { packet, meta } => {
-            let len = u32::try_from(packet.len())
-                .map_err(|_| InterpError::BadInput("packet too long".into()))?;
-            let mut buf = vec![0u8; HEADROOM];
-            buf.extend_from_slice(packet);
-            (Some(env.alloc(Kind::Packet, buf, true)), meta.to_ctx(len))
-        }
-        Input::Tracepoint(rec) => {
-            if rec.len() > PERF_MAX_TRACE_SIZE as usize {
-                return Err(InterpError::BadInput(format!(
-                    "tracepoint record of {} bytes exceeds {PERF_MAX_TRACE_SIZE}",
-                    rec.len()
-                )));
-            }
-            let mut b = rec.to_vec();
-            b.resize(PERF_MAX_TRACE_SIZE as usize, 0);
-            (None, b)
-        }
-        Input::Kprobe(regs) => {
-            if PT_REGS_SIZE == 0 || regs.len() != PT_REGS_SIZE as usize {
-                return Err(InterpError::BadInput(format!(
-                    "pt_regs must be {PT_REGS_SIZE} bytes on this architecture, got {}",
-                    regs.len()
-                )));
-            }
-            (None, regs.to_vec())
-        }
-    };
-    let mut data_off = HEADROOM;
-    let ctx = env.alloc(Kind::Ctx, ctx_bytes, true);
-    let ctx_ptr = Value {
-        v: env.regions[ctx as usize].base,
-        prov: Some(ctx),
-    };
-    let new_stack = |env: &mut Env| {
-        let r = env.alloc(Kind::Stack, vec![0; STACK_BYTES], false);
-        Value {
-            v: env.regions[r as usize].base + STACK_BYTES as u64,
-            prov: Some(r),
-        }
-    };
-    let mut code = Arc::new(code);
-    let mut regs = [Value::scalar(0); MAX_BPF_REG];
-    let mut init = [false; MAX_BPF_REG];
-    regs[1] = ctx_ptr;
-    init[1] = true;
-    regs[10] = new_stack(env);
-    init[10] = true;
-    let mut frames: Vec<Frame> = Vec::new();
-    let mut held: Vec<RegionId> = Vec::new();
-    let mut pc = 0usize;
-    let mut count = 0u64;
-    let mut tail_calls = 0u32;
-    let mut tail_taken = 0u32;
-    let result = loop {
-        count += 1;
-        if count > env.insn_budget {
-            break Err(InterpError::InsnBudget);
-        }
-        let Some(Some(insn)) = code.insns.get(pc).copied() else {
-            break Err(InterpError::PcOutOfRange { pc });
-        };
-        let next = pc + insn.slots();
-        macro_rules! get {
-            ($r:expr) => {{
-                let r: Reg = $r;
-                if !init[r.index()] {
-                    break Err(InterpError::UninitRegister { pc, reg: r.num() });
-                }
-                regs[r.index()]
-            }};
-        }
-        macro_rules! set {
-            ($r:expr, $v:expr) => {{
-                let r: Reg = $r;
-                regs[r.index()] = $v;
-                init[r.index()] = true;
-            }};
-        }
-        macro_rules! tri {
-            ($e:expr) => {
-                match $e {
-                    Ok(v) => v,
-                    Err(e) => break Err(e),
-                }
-            };
-        }
-        match insn {
-            Insn::Alu { wide, op, dst, src } => {
-                let b = match src {
-                    Operand::Imm(i) => Value::scalar(if wide {
-                        i as i64 as u64
-                    } else {
-                        i as u32 as u64
-                    }),
-                    Operand::Reg(r) => get!(r),
-                };
-                let a = if matches!(op, AluOp::Mov | AluOp::MovSx(_)) {
-                    Value::scalar(0)
-                } else {
-                    get!(dst)
-                };
-                let v = alu_concrete(op, wide, a.v, b.v);
-                let prov = match (op, wide, a.prov, b.prov) {
-                    (AluOp::Mov, true, _, p) => p,
-                    (AluOp::Add, true, Some(p), None) | (AluOp::Add, true, None, Some(p)) => {
-                        Some(p)
-                    }
-                    (AluOp::Sub, true, Some(p), None) => Some(p),
-                    _ => None,
-                };
-                set!(dst, Value { v, prov });
-            }
-            Insn::Endian { kind, bits, dst } => {
-                let a = get!(dst);
-                set!(dst, Value::scalar(endian(kind, bits, a.v)));
-            }
-            Insn::Ja { off } => {
-                pc = (pc as i64 + 1 + off as i64) as usize;
-                continue;
-            }
-            Insn::Jcond {
-                wide,
-                op,
-                dst,
-                src,
-                off,
-            } => {
-                let a = get!(dst);
-                let b = match src {
-                    Operand::Imm(i) => {
-                        if wide {
-                            i as i64 as u64
-                        } else {
-                            i as u32 as u64
-                        }
-                    }
-                    Operand::Reg(r) => get!(r).v,
-                };
-                if cmp_concrete(op, wide, a.v, b) {
-                    pc = (pc as i64 + 1 + off as i64) as usize;
-                    continue;
-                }
-            }
-            Insn::LdImm64 { dst, imm } => match imm {
-                Imm64::Value(v) => set!(dst, Value::scalar(v)),
-                // map "pointers" are tagged scalars: the environment's map
-                // index
-                Imm64::MapFd(i) => match code.maps.get(i as usize) {
-                    Some(&m) => set!(dst, Value::scalar(MAP_TAG | m as u64)),
-                    None => {
-                        break Err(InterpError::BadHelperArg {
-                            pc,
-                            detail: format!("map index {i} out of range"),
-                        });
-                    }
-                },
-                // callback "pointers" are tagged scalars: the entry slot
-                Imm64::Pseudo {
-                    src: crate::insn::pseudo::FUNC,
-                    imm_lo,
-                    ..
-                } => set!(
-                    dst,
-                    Value::scalar(FUNC_TAG | (pc as i64 + 1 + imm_lo as i64) as u32 as u64)
-                ),
-                Imm64::Pseudo { .. } => break Err(InterpError::UnsupportedInsn { pc }),
-            },
-            Insn::Ldx {
-                size,
-                dst,
-                src,
-                off,
-                sign_extend,
-            } => {
-                let p = get!(src);
-                let n = size.bytes() as usize;
-                let (rid, at) = tri!(resolve(env, pc, p, off, n));
-                let mut v = {
-                    let r = &env.regions[rid as usize];
-                    let ctx_ptr = match r.kind {
-                        Kind::Ctx => tri!(ctx_read(env, pc, ptype, pkt, data_off, at, n)),
-                        _ => None,
-                    };
-                    if let Some(v) = ctx_ptr {
-                        v
-                    } else {
-                        if r.init[at..at + n].iter().any(|b| !b) {
-                            break Err(InterpError::UninitStackRead {
-                                pc,
-                                off: at as i64 - STACK_BYTES as i64,
-                            });
-                        }
-                        let mut b = [0u8; 8];
-                        b[..n].copy_from_slice(&r.bytes[at..at + n]);
-                        let v = u64::from_le_bytes(b);
-                        let prov = if n == 8 {
-                            r.spills.get(&at).copied()
-                        } else {
-                            None
-                        };
-                        Value { v, prov }
-                    }
-                };
-                if sign_extend {
-                    v = Value::scalar(sext_const(v.v, size.bytes() * 8));
-                }
-                set!(dst, v);
-            }
-            Insn::St {
-                size,
-                dst,
-                off,
-                imm,
-            } => {
-                let p = get!(dst);
-                tri!(store(
-                    env,
-                    pc,
-                    ptype,
-                    p,
-                    off,
-                    size,
-                    Value::scalar(imm as i64 as u64)
-                ));
-            }
-            Insn::Stx {
-                size,
-                dst,
-                src,
-                off,
-            } => {
-                let p = get!(dst);
-                let v = get!(src);
-                tri!(store(env, pc, ptype, p, off, size, v));
-            }
-            Insn::Atomic {
-                size,
-                op,
-                dst,
-                src,
-                off,
-            } => {
-                let p = get!(dst);
-                let s = get!(src);
-                let n = size.bytes() as usize;
-                let (rid, at) = tri!(resolve(env, pc, p, off, n));
-                let old = {
-                    let r = &env.regions[rid as usize];
-                    if matches!(r.kind, Kind::Ctx | Kind::Packet) {
-                        break Err(InterpError::InvalidAccess {
-                            pc,
-                            detail: "atomic on the context or packet".into(),
-                        });
-                    }
-                    if r.init[at..at + n].iter().any(|b| !b) {
-                        break Err(InterpError::UninitStackRead { pc, off: at as i64 });
-                    }
-                    let mut b = [0u8; 8];
-                    b[..n].copy_from_slice(&r.bytes[at..at + n]);
-                    u64::from_le_bytes(b)
-                };
-                let trunc = |v: u64| if n == 4 { v as u32 as u64 } else { v };
-                let sv = trunc(s.v);
-                let (new, fetched_to) = match op {
-                    AtomicOp::Add { fetch } => (old.wrapping_add(sv), fetch.then_some(src)),
-                    AtomicOp::Or { fetch } => (old | sv, fetch.then_some(src)),
-                    AtomicOp::And { fetch } => (old & sv, fetch.then_some(src)),
-                    AtomicOp::Xor { fetch } => (old ^ sv, fetch.then_some(src)),
-                    AtomicOp::Xchg => (sv, Some(src)),
-                    AtomicOp::CmpXchg => {
-                        let r0 = get!(Reg::R0);
-                        (if trunc(r0.v) == old { sv } else { old }, Some(Reg::R0))
-                    }
-                };
-                let r = &mut env.regions[rid as usize];
-                r.bytes[at..at + n].copy_from_slice(&trunc(new).to_le_bytes()[..n]);
-                r.spills.remove(&(at & !7));
-                if let Some(d) = fetched_to {
-                    set!(d, Value::scalar(old));
-                }
-            }
-            Insn::Call(CallTarget::Local(off)) => {
-                if frames.len() + 1 >= MAX_CALL_FRAMES {
-                    break Err(InterpError::CallDepth { pc });
-                }
-                frames.push(Frame {
-                    saved: [regs[6], regs[7], regs[8], regs[9]],
-                    fp: regs[10],
-                    ret_pc: next,
-                    lp: None,
-                });
-                regs[10] = new_stack(env);
-                init[CALLEE_SAVED].fill(false);
-                init[0] = false;
-                pc = (pc as i64 + 1 + off as i64) as usize;
-                continue;
-            }
-            Insn::Call(CallTarget::Helper(h::LOOP)) => {
-                // The kernel inlines bpf_loop (flags 0) and compares the
-                // whole 64-bit r1 against BPF_MAX_LOOPS: 1 << 32 gives
-                // -E2BIG there, not zero iterations (checked by
-                // `accept/bpf_loop_upper_bits` against Linux 6.18).
-                let n = get!(Reg::R1).v;
-                let cb = get!(Reg::R2);
-                let arg = get!(Reg::R3);
-                if cb.prov.is_some() || cb.v & !0xffff_ffff != FUNC_TAG {
-                    break Err(InterpError::BadHelperArg {
-                        pc,
-                        detail: "bpf_loop callback is not a function".into(),
-                    });
-                }
-                if n > BPF_MAX_LOOPS {
-                    set!(Reg::R0, Value::scalar(E2BIG.wrapping_neg()));
-                    init[1..=5].fill(false);
-                } else if n == 0 {
-                    set!(Reg::R0, Value::scalar(0));
-                    init[1..=5].fill(false);
-                } else {
-                    if frames.len() + 1 >= MAX_CALL_FRAMES {
-                        break Err(InterpError::CallDepth { pc });
-                    }
-                    let entry = (cb.v & 0xffff_ffff) as usize;
-                    frames.push(Frame {
-                        saved: [regs[6], regs[7], regs[8], regs[9]],
-                        fp: regs[10],
-                        ret_pc: next,
-                        lp: Some(LoopFrame {
-                            entry,
-                            i: 0,
-                            n,
-                            arg,
-                        }),
-                    });
-                    regs[10] = new_stack(env);
-                    init.fill(false);
-                    init[10] = true;
-                    set!(Reg::R1, Value::scalar(0));
-                    set!(Reg::R2, arg);
-                    pc = entry;
-                    continue;
-                }
-            }
-            Insn::Call(CallTarget::Helper(h::TAIL_CALL)) => {
-                // `___bpf_prog_run` JMP_TAIL_CALL: index check, then the
-                // count check, then the count is bumped, then an empty slot
-                // falls through. On success the target starts over at its
-                // first instruction with r1 = ctx and a fresh stack.
-                let m = tri!(map_of(env, pc, get!(Reg::R2)));
-                let index = get!(Reg::R3).v as u32;
-                let Some(def) = env.defs.get(m).filter(|d| d.kind == MapKind::ProgArray) else {
-                    break Err(InterpError::BadHelperArg {
-                        pc,
-                        detail: "bpf_tail_call needs a program array".into(),
-                    });
-                };
-                let max = def.max_entries;
-                init[0..=5].fill(false);
-                if index >= max || tail_calls >= MAX_TAIL_CALL_CNT {
-                    pc = next;
-                    continue;
-                }
-                tail_calls += 1;
-                let Some(target) = env.tail.get(&(m, index)).cloned() else {
-                    pc = next;
-                    continue;
-                };
-                if !frames.is_empty() {
-                    break Err(InterpError::BadHelperArg {
-                        pc,
-                        detail: "tail call from a subprogram or callback".into(),
-                    });
-                }
-                if !held.is_empty() {
-                    break Err(InterpError::ReferenceLeak {
-                        pc,
-                        count: held.len(),
-                    });
-                }
-                if let Some(p) = regs[10].prov {
-                    env.regions[p as usize].live = false;
-                }
-                tail_taken += 1;
-                code = target;
-                init.fill(false);
-                set!(Reg::R1, ctx_ptr);
-                regs[10] = new_stack(env);
-                init[10] = true;
-                pc = 0;
-                continue;
-            }
-            Insn::Call(CallTarget::Kfunc(_)) => {
-                let name = code
-                    .kfuncs
-                    .iter()
-                    .find(|(slot, _)| *slot == pc)
-                    .map(|(_, n)| n.as_str());
-                let Some(name) = name.filter(|n| crate::helpers::KFUNCS.contains(n)) else {
-                    break Err(InterpError::UnsupportedInsn { pc });
-                };
-                let r1 = regs[1];
-                let args = [r1, regs[2], regs[3]];
-                let r0 = tri!(call_kfunc(env, pc, name, &args, &init));
-                init[0..=5].fill(false);
-                if let Some(v) = r0 {
-                    set!(Reg::R0, v);
-                }
-            }
-            Insn::Call(CallTarget::Helper(id)) => {
-                if !h::allowed(code.prog_type, id) {
-                    break Err(InterpError::BadHelperArg {
-                        pc,
-                        detail: format!("helper {id} is not available to {:?}", code.prog_type),
-                    });
-                }
-                let a: [Value; 5] = [regs[1], regs[2], regs[3], regs[4], regs[5]];
-                let r = tri!(call_helper(env, pc, id, &a, pkt, &mut data_off, &mut held));
-                set!(Reg::R0, r);
-                init[1..=5].fill(false);
-            }
-            Insn::LdLegacy { .. } => {
-                break Err(InterpError::UnsupportedInsn { pc });
-            }
-            Insn::Exit => {
-                let r0 = get!(Reg::R0);
-                match frames.pop() {
-                    Some(mut f) if f.lp.is_some() => {
-                        let mut lp = f.lp.expect("loop frame");
-                        if let Some(p) = regs[10].prov {
-                            env.regions[p as usize].live = false;
-                        }
-                        if r0.v != 0 || lp.i + 1 == lp.n {
-                            regs[CALLEE_SAVED].copy_from_slice(&f.saved);
-                            init.fill(false);
-                            init[CALLEE_SAVED].fill(true);
-                            init[10] = true;
-                            regs[10] = f.fp;
-                            let done = if r0.v != 0 { lp.i + 1 } else { lp.n };
-                            set!(Reg::R0, Value::scalar(done));
-                            pc = f.ret_pc;
-                        } else {
-                            lp.i += 1;
-                            f.lp = Some(lp);
-                            frames.push(f);
-                            regs[10] = new_stack(env);
-                            init.fill(false);
-                            init[10] = true;
-                            set!(Reg::R1, Value::scalar(lp.i));
-                            set!(Reg::R2, lp.arg);
-                            pc = lp.entry;
-                        }
-                        continue;
-                    }
-                    Some(f) => {
-                        if let Some(p) = regs[10].prov {
-                            env.regions[p as usize].live = false;
-                        }
-                        regs[CALLEE_SAVED].copy_from_slice(&f.saved);
-                        init[CALLEE_SAVED].fill(true);
-                        regs[10] = f.fp;
-                        init[1..=5].fill(false);
-                        set!(Reg::R0, r0);
-                        pc = f.ret_pc;
-                        continue;
-                    }
-                    None => {
-                        if !held.is_empty() {
-                            break Err(InterpError::ReferenceLeak {
-                                pc,
-                                count: held.len(),
-                            });
-                        }
-                        let packet = match pkt {
-                            Some(p) => env.regions[p as usize].bytes[data_off..].to_vec(),
-                            None => Vec::new(),
-                        };
-                        break Ok(RunResult {
-                            ret: r0.v,
-                            insns: count,
-                            packet,
-                            ctx: env.regions[ctx as usize].bytes.clone(),
-                            tail_calls: tail_taken,
-                        });
-                    }
-                }
-            }
-        }
-        pc = next;
-    };
-    env.reset_transient();
-    result
 }
 
 /// The value `bpf_local_irq_save` stores in its flag word here (x86
@@ -2010,7 +1376,6 @@ fn call_helper(
 /// The port build's side of `run`: the environment and the input as the
 /// port's words (the header of `vesper/src/interp.ves`), and the results,
 /// faults and ring writes back.
-#[cfg(vesper_port)]
 mod port {
     use super::*;
     use crate::program::KfuncRef;

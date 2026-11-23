@@ -6,7 +6,6 @@
 //! buffers carry over between runs; after every run both builds must give
 //! the same result or fault, and the same map keys and values, ring bytes,
 //! producer and prandom state. Port wave P3a lane 6 (#1041).
-#![cfg(feature = "vesper-port")]
 
 mod common;
 

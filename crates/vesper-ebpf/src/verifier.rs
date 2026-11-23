@@ -53,8 +53,6 @@ use crate::insn::{
 };
 use crate::program::{MapKind, Program, ProgramType};
 use crate::scalar::Scalar;
-#[cfg(not(vesper_port))]
-use crate::scalar::{Tnum, sext_const};
 use std::collections::HashMap;
 use std::fmt;
 
@@ -837,35 +835,10 @@ enum Step {
 /// again without widening and accepts if either succeeds (both are sound
 /// over-approximations). A rejection reports the exact exploration's
 /// reason unless that one only ran out of budget.
-#[cfg(vesper_port)]
 pub fn verify(prog: &Program, policy: &VerifierPolicy) -> Result<VerifyReport, VerifyError> {
     crate::port::verify(prog, policy)
 }
 
-#[cfg(not(vesper_port))]
-pub fn verify(prog: &Program, policy: &VerifierPolicy) -> Result<VerifyReport, VerifyError> {
-    if !policy.widen_loops {
-        return Verifier::new(prog, policy)?.run();
-    }
-    let mut wide = Verifier::new(prog, policy)?;
-    wide.widen = true;
-    let first = wide.run();
-    if first.is_ok() || wide.widenings == 0 {
-        return first;
-    }
-    match Verifier::new(prog, policy)?.run() {
-        Ok(r) => Ok(r),
-        Err(e)
-            if e.rule == "complexity.limit"
-                && first
-                    .as_ref()
-                    .is_err_and(|f| f.rule != "loop.widened_precise") =>
-        {
-            first
-        }
-        Err(e) => Err(e),
-    }
-}
 
 /// Run the verifier and return contract-shaped findings (empty = accepted).
 pub fn findings(prog: &Program, policy: &VerifierPolicy) -> Vec<VerifierFinding> {
@@ -3507,68 +3480,14 @@ fn mark_null(
 }
 
 /// The abstract result of a scalar ALU op on already-truncated operands.
-#[cfg(vesper_port)]
 pub fn scalar_alu(op: AluOp, wide: bool, a: Scalar, b: Scalar) -> Scalar {
     crate::port::ffi::verifier_scalar_alu(op, wide, a, b)
 }
 
-#[cfg(not(vesper_port))]
-pub fn scalar_alu(op: AluOp, wide: bool, a: Scalar, b: Scalar) -> Scalar {
-    let bits = if wide { 64 } else { 32 };
-    let shift = |b: Scalar| b.as_const().map(|c| (c & (bits - 1)) as u32);
-    match op {
-        AluOp::Add => Scalar::add(a, b),
-        AluOp::Sub => Scalar::sub(a, b),
-        AluOp::Mul => Scalar::mul(a, b),
-        // The kernel does not track division or modulo results
-        // (`is_safe_to_compute_dst_reg_range`); matching it keeps an
-        // accept here from being a kernel rejection.
-        AluOp::Div | AluOp::Mod | AluOp::SDiv | AluOp::SMod => Scalar::UNKNOWN,
-        AluOp::Or => Scalar::or(a, b),
-        AluOp::And => Scalar::and(a, b),
-        AluOp::Xor => Scalar::xor(a, b),
-        AluOp::Lsh => match shift(b) {
-            Some(s) => Scalar::lsh(a, s),
-            None => Scalar::UNKNOWN,
-        },
-        AluOp::Rsh => match shift(b) {
-            Some(s) => Scalar::rsh(a, s),
-            None => Scalar::urange(0, a.umax),
-        },
-        AluOp::Arsh => match (shift(b), wide) {
-            (Some(s), true) => Scalar::arsh(a, s),
-            (Some(s), false) => match a.as_const() {
-                Some(c) => Scalar::konst(((c as u32 as i32) >> s) as u32 as u64),
-                None => Scalar::unknown_bits(32),
-            },
-            (None, _) => Scalar::UNKNOWN,
-        },
-        AluOp::Mov | AluOp::MovSx(_) | AluOp::Neg => unreachable!("handled by caller"),
-    }
-}
 
-#[cfg(not(vesper_port))]
-fn exclude(s: Scalar, c: u64) -> Option<Scalar> {
-    let mut s = s;
-    if s.umin == c {
-        s.umin = c.checked_add(1)?;
-    }
-    if s.umax == c {
-        s.umax = c.checked_sub(1)?;
-    }
-    let ci = c as i64;
-    if s.smin == ci {
-        s.smin = ci.checked_add(1)?;
-    }
-    if s.smax == ci {
-        s.smax = ci.checked_sub(1)?;
-    }
-    s.normalize()
-}
 
 /// Refine `(a, b)` assuming `a op b` holds (`holds = true`) or does not.
 /// `None` means that outcome is impossible.
-#[cfg(vesper_port)]
 pub fn refine_jmp(
     op: JmpOp,
     wide: bool,
@@ -3579,129 +3498,9 @@ pub fn refine_jmp(
     crate::port::ffi::verifier_refine_jmp(op, wide, a, b, holds)
 }
 
-#[cfg(not(vesper_port))]
-pub fn refine_jmp(
-    op: JmpOp,
-    wide: bool,
-    a: Scalar,
-    b: Scalar,
-    holds: bool,
-) -> Option<(Scalar, Scalar)> {
-    if !wide {
-        // 32-bit comparisons: exact for constants; otherwise refine only
-        // when both values provably fit so 32- and 64-bit order agree.
-        if let (Some(x), Some(y)) = (a.as_const(), b.as_const()) {
-            let r = crate::interp::cmp_concrete(op, false, x, y);
-            return (r == holds).then_some((a, b));
-        }
-        let fits = match op {
-            JmpOp::SGt | JmpOp::SGe | JmpOp::SLt | JmpOp::SLe => {
-                a.umax <= i32::MAX as u64 && b.umax <= i32::MAX as u64
-            }
-            _ => a.umax <= u32::MAX as u64 && b.umax <= u32::MAX as u64,
-        };
-        if !fits {
-            return Some((a, b));
-        }
-    }
-    if !holds {
-        if op == JmpOp::Set {
-            // a & b == 0
-            return match b.as_const() {
-                Some(c) => {
-                    let na = Scalar::meet(
-                        a,
-                        Scalar {
-                            var: Tnum { value: 0, mask: !c },
-                            ..Scalar::UNKNOWN
-                        },
-                    )?;
-                    Some((na, b))
-                }
-                None => match a.as_const() {
-                    Some(c) => {
-                        let nb = Scalar::meet(
-                            b,
-                            Scalar {
-                                var: Tnum { value: 0, mask: !c },
-                                ..Scalar::UNKNOWN
-                            },
-                        )?;
-                        Some((a, nb))
-                    }
-                    None => Some((a, b)),
-                },
-            };
-        }
-        return refine_jmp(op.negate(), true, a, b, true);
-    }
-    let mut a = a;
-    let mut b = b;
-    match op {
-        JmpOp::Eq => {
-            let m = Scalar::meet(a, b)?;
-            return Some((m, m));
-        }
-        JmpOp::Ne => {
-            if let (Some(x), Some(y)) = (a.as_const(), b.as_const()) {
-                return (x != y).then_some((a, b));
-            }
-            if let Some(c) = b.as_const() {
-                a = exclude(a, c)?;
-            } else if let Some(c) = a.as_const() {
-                b = exclude(b, c)?;
-            }
-            return Some((a, b));
-        }
-        JmpOp::Set => {
-            if Tnum::and(a.var, b.var) == Tnum::konst(0) {
-                return None;
-            }
-            return Some((a, b));
-        }
-        JmpOp::Gt => {
-            a.umin = a.umin.max(b.umin.checked_add(1)?);
-            b.umax = b.umax.min(a.umax.checked_sub(1)?);
-        }
-        JmpOp::Ge => {
-            a.umin = a.umin.max(b.umin);
-            b.umax = b.umax.min(a.umax);
-        }
-        JmpOp::Lt => {
-            let (nb, na) = refine_jmp(JmpOp::Gt, true, b, a, true)?;
-            return Some((na, nb));
-        }
-        JmpOp::Le => {
-            let (nb, na) = refine_jmp(JmpOp::Ge, true, b, a, true)?;
-            return Some((na, nb));
-        }
-        JmpOp::SGt => {
-            a.smin = a.smin.max(b.smin.checked_add(1)?);
-            b.smax = b.smax.min(a.smax.checked_sub(1)?);
-        }
-        JmpOp::SGe => {
-            a.smin = a.smin.max(b.smin);
-            b.smax = b.smax.min(a.smax);
-        }
-        JmpOp::SLt => {
-            let (nb, na) = refine_jmp(JmpOp::SGt, true, b, a, true)?;
-            return Some((na, nb));
-        }
-        JmpOp::SLe => {
-            let (nb, na) = refine_jmp(JmpOp::SGe, true, b, a, true)?;
-            return Some((na, nb));
-        }
-    }
-    Some((a.normalize()?, b.normalize()?))
-}
 
 /// Used by tests: the abstract value of a constant.
-#[cfg(vesper_port)]
 pub fn sext_imm(imm: i32, bits: u32) -> u64 {
     crate::port::ffi::verifier_sext_imm(imm, bits)
 }
 
-#[cfg(not(vesper_port))]
-pub fn sext_imm(imm: i32, bits: u32) -> u64 {
-    sext_const(imm as u32 as u64, bits)
-}

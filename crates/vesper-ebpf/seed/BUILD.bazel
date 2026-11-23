@@ -14,9 +14,9 @@ _CRATE_DATA = PACKAGES["crates/vesper-ebpf/seed"].crate_data()
 
 rust_library(
     name = "seed",
-    srcs = ["//crates/vesper-ebpf:rust_srcs"],
+    srcs = glob(["src/**/*.rs"]) + ["//crates/vesper-ebpf:rust_srcs"],
     crate_name = "vesper_ebpf",
-    crate_root = "//crates/vesper-ebpf:src/lib.rs",
+    crate_root = "src/lib.rs",
     edition = "2024",
     rustc_env = {
         "CARGO_PKG_NAME": "vesper-ebpf-seed",
@@ -26,6 +26,8 @@ rust_library(
     visibility = ["//visibility:public"],
     deps = all_crate_deps(_CRATE_DATA, normal = True, platforms = _CRATE_DATA["platforms"]),
 )
+
+exports_files(["src/engine/verifier.rs"])
 
 rust_clippy_test(
     name = "clippy",

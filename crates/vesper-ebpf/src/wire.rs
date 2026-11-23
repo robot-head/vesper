@@ -106,12 +106,12 @@ pub mod eth_ipv4_tcp {
     pub const URGENT_PTR: usize = 52;
 }
 
-#[cfg(not(vesper_port))]
+#[cfg(not(feature = "vesper-port"))]
 fn be16(b: &[u8], at: usize) -> u16 {
     u16::from_be_bytes([b[at], b[at + 1]])
 }
 
-#[cfg(not(vesper_port))]
+#[cfg(not(feature = "vesper-port"))]
 fn be32(b: &[u8], at: usize) -> u32 {
     u32::from_be_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]])
 }
@@ -119,12 +119,12 @@ fn be32(b: &[u8], at: usize) -> u32 {
 impl WireFrame for EthIpv4TcpWire {
     const SIZE: usize = 54;
 
-    #[cfg(vesper_port)]
+    #[cfg(feature = "vesper-port")]
     fn encode(&self) -> Vec<u8> {
         crate::port::eth_encode(self)
     }
 
-    #[cfg(not(vesper_port))]
+    #[cfg(not(feature = "vesper-port"))]
     fn encode(&self) -> Vec<u8> {
         let mut b = Vec::with_capacity(Self::SIZE);
         b.extend_from_slice(&self.dst_mac);
@@ -152,12 +152,12 @@ impl WireFrame for EthIpv4TcpWire {
         b
     }
 
-    #[cfg(vesper_port)]
+    #[cfg(feature = "vesper-port")]
     fn decode(b: &[u8]) -> Result<Self, WireError> {
         crate::port::eth_decode(b)
     }
 
-    #[cfg(not(vesper_port))]
+    #[cfg(not(feature = "vesper-port"))]
     fn decode(b: &[u8]) -> Result<Self, WireError> {
         use eth_ipv4_tcp as o;
         if b.len() < Self::SIZE {
@@ -217,12 +217,12 @@ pub mod syn_drop_alert {
 impl WireFrame for SynDropAlertWire {
     const SIZE: usize = 16;
 
-    #[cfg(vesper_port)]
+    #[cfg(feature = "vesper-port")]
     fn encode(&self) -> Vec<u8> {
         crate::port::ffi::wire_alert_encode(*self)
     }
 
-    #[cfg(not(vesper_port))]
+    #[cfg(not(feature = "vesper-port"))]
     fn encode(&self) -> Vec<u8> {
         let mut b = Vec::with_capacity(Self::SIZE);
         b.extend_from_slice(&self.src_ipv4.to_be_bytes());
@@ -232,12 +232,12 @@ impl WireFrame for SynDropAlertWire {
         b
     }
 
-    #[cfg(vesper_port)]
+    #[cfg(feature = "vesper-port")]
     fn decode(b: &[u8]) -> Result<Self, WireError> {
         crate::port::ffi::wire_alert_decode(b)
     }
 
-    #[cfg(not(vesper_port))]
+    #[cfg(not(feature = "vesper-port"))]
     fn decode(b: &[u8]) -> Result<Self, WireError> {
         if b.len() < Self::SIZE {
             return Err(WireError::Short {
