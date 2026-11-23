@@ -1,0 +1,289 @@
+// Bounds hoisting and invariant header emission.
+
+use @vesper/cranelift::{
+    Value,
+    append_block_param,
+    block_param,
+    call_arg,
+    call_result_value,
+    cc_eq,
+    cc_ugt,
+    cc_uge,
+    cc_ule,
+    cc_ult,
+    create_block,
+    ins_band,
+    ins_bor,
+    ins_brif,
+    ins_iadd,
+    ins_iadd_imm,
+    ins_icmp,
+    ins_icmp_imm,
+    ins_iconst,
+    ins_isub,
+    ins_jump,
+    ins_overflow,
+    ins_uextend,
+    inst_result,
+    switch_to_block,
+    ty_i64,
+    ty_i8,
+    vals1,
+    value_of_word
+};
+use self::common::{
+    at_val,
+    elem_from_call,
+    invariant_word,
+    seq_elem_addr,
+    seq_load_elem,
+    seq_option_begin,
+    seq_option_finish,
+    seq_store_elem,
+    seq_view_cached,
+    zero
+};
+
+const MIN_GUARDED_SPAN: i64 = 4;
+const UADD_OVERFLOW: u32 = 1;
+
+pub const HOIST_GET: u64 = 0;
+pub const HOIST_SET: u64 = 1;
+pub const HOIST_TRY_GET: u64 = 2;
+pub const HOIST_TRY_SET: u64 = 3;
+
+fn checked_sum(
+    inout b: Builder,
+    first: Option[Value],
+    in terms: Slice[Value],
+    inout overflow: Value,
+) -> Value eff [Ffi[Cranelift]] {
+    let mut acc = first;
+    let mut i: u64 = 0;
+    loop {
+        if i >= terms.len() {
+            break;
+        }
+        let t = at_val(in terms, i);
+        acc = match acc {
+            None => Some(t),
+            Some(a) => {
+                let s = ins_overflow(inout b, UADD_OVERFLOW, a, t);
+                let o = inst_result(inout b, 1);
+                overflow = ins_bor(inout b, overflow, o);
+                Some(s)
+            },
+        };
+        i = wrapping_add(i, 1);
+    }
+    match acc {
+        Some(v) => v,
+        None => ins_iconst(inout b, ty_i64(), 0),
+    }
+}
+
+fn guard_range_fits(
+    inout b: Builder,
+    lo: Value,
+    last: Value,
+    negated: bool,
+    in plus: Slice[Value],
+    in minus: Slice[Value],
+    len: Value,
+) -> Value eff [Ffi[Cranelift]] {
+    if !negated && plus.len() == 0 && minus.len() == 0 {
+        return ins_icmp(inout b, cc_ult(), last, len);
+    }
+    let mut overflow = ins_iconst(inout b, ty_i8(), 0);
+    let at_last = if negated {
+        checked_sum(inout b, Some(last), in minus, inout overflow)
+    } else {
+        checked_sum(inout b, Some(last), in plus, inout overflow)
+    };
+    let constant = if negated {
+        checked_sum(inout b, None, in plus, inout overflow)
+    } else {
+        checked_sum(inout b, None, in minus, inout overflow)
+    };
+    let mut at_lo = lo;
+    let terms_len = if negated {
+        minus.len()
+    } else {
+        plus.len()
+    };
+    let mut i: u64 = 0;
+    loop {
+        if i >= terms_len {
+            break;
+        }
+        let term = if negated {
+            at_val(in minus, i)
+        } else {
+            at_val(in plus, i)
+        };
+        at_lo = ins_iadd(inout b, at_lo, term);
+        i = wrapping_add(i, 1);
+    }
+    let (low_p, low_n, high_p, high_n) = if negated {
+        (constant, at_last, constant, at_lo)
+    } else {
+        (at_lo, constant, at_last, constant)
+    };
+    let below = ins_icmp(inout b, cc_ule(), low_n, low_p);
+    let d = ins_isub(inout b, high_p, high_n);
+    let inside = ins_icmp(inout b, cc_ult(), d, len);
+    let ok = ins_band(inout b, below, inside);
+    let ok_flag = ins_icmp_imm(inout b, cc_eq(), overflow, 0);
+    ins_band(inout b, ok, ok_flag)
+}
+
+pub fn emit_bounds_guard(call: u64, inout b: Builder) eff [Ffi[Cranelift]] {
+    // Args: [inclusive, is_seq, invariant, negated, has_ok, lo, hi, receiver, ok,
+    //        c0, c1, c2, np, nm, plus..., minus...]
+    let inclusive = call_arg(call, 0) != 0;
+    let is_seq = call_arg(call, 1) != 0;
+    let invariant = call_arg(call, 2) != 0;
+    let negated = call_arg(call, 3) != 0;
+    let has_ok = call_arg(call, 4) != 0;
+    let lo = value_of_word(call_arg(call, 5));
+    let hi = value_of_word(call_arg(call, 6));
+    let receiver = value_of_word(call_arg(call, 7));
+    let ok = value_of_word(call_arg(call, 8));
+    let c0 = call_arg(call, 9);
+    let c1 = call_arg(call, 10);
+    let c2 = call_arg(call, 11);
+    let np = call_arg(call, 12);
+    let nm = call_arg(call, 13);
+
+    let mut plus = ChunkSeq::with_capacity[Value](np);
+    let mut k: u64 = 0;
+    loop {
+        if k >= np {
+            break;
+        }
+        plus.push(value_of_word(call_arg(call, wrapping_add(14, k))));
+        k = wrapping_add(k, 1);
+    }
+    let mut minus = ChunkSeq::with_capacity[Value](nm);
+    let mut j: u64 = 0;
+    loop {
+        if j >= nm {
+            break;
+        }
+        minus.push(value_of_word(call_arg(call, wrapping_add(14, wrapping_add(np, j)))));
+        j = wrapping_add(j, 1);
+    }
+
+    let (_, _, len) = seq_view_cached(inout b, receiver, is_seq, invariant, c0, c1, c2);
+    let skip = if has_ok {
+        ins_icmp_imm(inout b, cc_eq(), ok, 0)
+    } else {
+        let span = ins_isub(inout b, hi, lo);
+        ins_icmp_imm(inout b, cc_ult(), span, MIN_GUARDED_SPAN)
+    };
+    let compute = create_block(inout b);
+    let done = create_block(inout b);
+    append_block_param(inout b, done, ty_i64());
+    let no = zero(inout b);
+    let no_args = vals1(no);
+    let empty_args = ChunkSeq::new[u32]();
+    ins_brif(inout b, skip, done, in no_args.as_slice(), compute, in empty_args.as_slice());
+    switch_to_block(inout b, compute);
+    let empty_cc = if inclusive {
+        cc_ugt()
+    } else {
+        cc_uge()
+    };
+    let empty = ins_icmp(inout b, empty_cc, lo, hi);
+    let last = if inclusive {
+        hi
+    } else {
+        ins_iadd_imm(inout b, hi, -1)
+    };
+    let fits = guard_range_fits(
+        inout b,
+        lo,
+        last,
+        negated,
+        in plus.as_slice(),
+        in minus.as_slice(),
+        len
+    );
+    let inside = ins_bor(inout b, empty, fits);
+    let inside = ins_uextend(inout b, ty_i64(), inside);
+    let in_args = vals1(inside);
+    ins_jump(inout b, done, in in_args.as_slice());
+    switch_to_block(inout b, done);
+    call_result_value(call, block_param(inout b, done, 0));
+}
+
+pub fn emit_hoisted_access(call: u64, inout b: Builder, in m: Module) eff [Ffi[Cranelift]] {
+    // Args: [kind, is_seq, invariant, h_invariant, optimize, receiver, i, val,
+    //        c0, c1, c2, cdata, elem_flags, elem_sz_ty, elem_stride,
+    //        (opt_size, some_tag, none_tag, payload_off)]
+    let kind = call_arg(call, 0);
+    let is_seq = call_arg(call, 1) != 0;
+    let invariant = call_arg(call, 2) != 0;
+    let h_invariant = call_arg(call, 3) != 0;
+    let optimize = call_arg(call, 4) != 0;
+    let receiver = value_of_word(call_arg(call, 5));
+    let i = value_of_word(call_arg(call, 6));
+    let val = value_of_word(call_arg(call, 7));
+    let c0 = call_arg(call, 8);
+    let c1 = call_arg(call, 9);
+    let c2 = call_arg(call, 10);
+    let cdata = call_arg(call, 11);
+    let elem = elem_from_call(call, 12);
+
+    let (h, start, _) = seq_view_cached(inout b, receiver, is_seq, invariant, c0, c1, c2);
+    if kind == HOIST_GET {
+        let addr = seq_elem_addr(inout b, h, start, i, elem.stride, h_invariant, cdata);
+        call_result_value(call, seq_load_elem(inout b, in m, addr, elem, optimize));
+    } else if kind == HOIST_SET || kind == HOIST_TRY_SET {
+        let addr = seq_elem_addr(inout b, h, start, i, elem.stride, h_invariant, cdata);
+        seq_store_elem(inout b, addr, val, elem, optimize);
+        let res = if kind == HOIST_SET {
+            zero(inout b)
+        } else {
+            ins_iconst(inout b, ty_i64(), 1)
+        };
+        call_result_value(call, res);
+    } else if kind == HOIST_TRY_GET {
+        let opt_size = wrapping_u32(call_arg(call, 15));
+        let some_tag = wrapping_i64(call_arg(call, 16));
+        let none_tag = wrapping_i64(call_arg(call, 17));
+        let payload_off = wrapping_u32(call_arg(call, 18));
+        let present = ins_iconst(inout b, ty_i8(), 1);
+        let (out, _some, done) = seq_option_begin(
+            inout b,
+            in m,
+            present,
+            opt_size,
+            some_tag,
+            none_tag,
+            optimize
+        );
+        let addr = seq_elem_addr(inout b, h, start, i, elem.stride, h_invariant, cdata);
+        let loaded = seq_load_elem(inout b, in m, addr, elem, optimize);
+        call_result_value(
+            call,
+            seq_option_finish(
+                inout b,
+                out,
+                done,
+                loaded,
+                elem,
+                opt_size,
+                some_tag,
+                payload_off,
+                optimize
+            )
+        );
+    }
+}
+
+pub fn emit_invariant_word(call: u64, inout b: Builder) eff [Ffi[Cranelift]] {
+    let ptr = value_of_word(call_arg(call, 0));
+    let offset = wrapping_i32(call_arg(call, 1));
+    call_result_value(call, invariant_word(inout b, ptr, offset));
+}

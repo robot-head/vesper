@@ -1,0 +1,786 @@
+// Core sequence operations emission (`EMPTY_HEADER` and `SEQ_OP`).
+
+use @vesper/cranelift::{
+    Block,
+    Value,
+    append_block_param,
+    block_param,
+    call_arg,
+    call_result,
+    call_result_block,
+    call_result_slot,
+    call_result_value,
+    cc_eq,
+    cc_ne,
+    cc_ugt,
+    cc_uge,
+    cc_ule,
+    cc_ult,
+    create_block,
+    create_stack_slot,
+    import_data,
+    ins_band,
+    ins_brif,
+    ins_brif0,
+    ins_bswap,
+    ins_iadd,
+    ins_iadd_imm,
+    ins_icmp,
+    ins_icmp_imm,
+    ins_iconst,
+    ins_imul_imm,
+    ins_isub,
+    ins_jump,
+    ins_jump0,
+    ins_load,
+    ins_select,
+    ins_stack_addr,
+    ins_store,
+    ins_symbol_value,
+    ins_uextend,
+    is_invalid_slot,
+    module_get_data,
+    module_pointer_type,
+    set_cold_block,
+    slot_of_word,
+    switch_to_block,
+    ty_i64,
+    vals1,
+    vals2,
+    value_of_word,
+    value_word
+};
+use self::bytes::seq_fill_elems;
+use self::common::{
+    CAP,
+    DATA,
+    ElemDesc,
+    LEN,
+    PLAIN,
+    alloc,
+    alloc_uninit,
+    copy_bytes,
+    elem_from_call,
+    elem_is_agg,
+    elem_size,
+    runtime_call,
+    seq_elem_addr,
+    seq_elem_for_store,
+    seq_load_elem,
+    seq_move,
+    seq_option_begin,
+    seq_option_finish,
+    seq_set_len_if,
+    seq_set_word,
+    seq_slice_value,
+    seq_store_elem,
+    seq_view_cached,
+    seq_word,
+    seq_word_or_cached,
+    zero
+};
+use self::drops::{
+    emit_drop_elements_tree,
+    emit_drop_tree
+};
+
+pub const SEQ_WITH_CAPACITY: u64 = 1;
+pub const SEQ_LEN: u64 = 2;
+pub const SEQ_SLICE_LEN: u64 = 3;
+pub const SEQ_PUSH_TAIL: u64 = 4;
+pub const SEQ_POP: u64 = 5;
+pub const SEQ_GET: u64 = 6;
+pub const SEQ_SET: u64 = 7;
+pub const SEQ_TRY_GET: u64 = 8;
+pub const SEQ_TRY_SET: u64 = 9;
+pub const SEQ_LAST: u64 = 10;
+pub const SEQ_CLEAR: u64 = 11;
+pub const SEQ_TRUNCATE: u64 = 12;
+pub const SEQ_EXTEND_TAIL: u64 = 13;
+pub const SEQ_RESIZE_CMP: u64 = 14;
+pub const SEQ_RESIZE_SHRINK: u64 = 15;
+pub const SEQ_RESIZE_GROW_TAIL: u64 = 16;
+pub const SEQ_EXTEND_WITHIN_TAIL: u64 = 17;
+pub const SEQ_EXTEND_REVERSED_TAIL: u64 = 18;
+pub const SEQ_FINISH: u64 = 19;
+pub const SEQ_AS_SLICE: u64 = 20;
+pub const SEQ_SUB_SLICE: u64 = 21;
+pub const SEQ_CHECK_INDEX: u64 = 22;
+pub const SEQ_CHECK_EXTEND_WITHIN: u64 = 23;
+pub const SEQ_CHECK_FINISH: u64 = 24;
+pub const SEQ_RESERVE_BEGIN: u64 = 25;
+pub const SEQ_RESERVE_ONE: u64 = 26;
+pub const SEQ_HOIST_HEADER: u64 = 27;
+pub const SEQ_ELEM_ADDR: u64 = 28;
+pub const SEQ_LOAD_ELEM: u64 = 29;
+pub const SEQ_STORE_ELEM: u64 = 30;
+pub const SEQ_ALLOC: u64 = 31;
+pub const SEQ_RESERVE_GROW: u64 = 32;
+
+fn helper_load(inout b: Builder, ptr: Value, e: ElemDesc) -> Value eff [Ffi[Cranelift]] {
+    if elem_is_agg(e) {
+        ptr
+    } else {
+        ins_load(inout b, @vesper/cranelift::ty_of_word(e.size_or_ty), PLAIN, ptr, 0)
+    }
+}
+
+fn seq_copy_reversed(
+    inout b: Builder,
+    in m: Module,
+    dst: Value,
+    src: Value,
+    n: Value,
+    elem: ElemDesc,
+    optimize: bool,
+) eff [Ffi[Cranelift]] {
+    let z = zero(inout b);
+    let mut from = z;
+    if elem.stride == 1 {
+        let head = create_block(inout b);
+        let body = create_block(inout b);
+        let tail = create_block(inout b);
+        append_block_param(inout b, head, ty_i64());
+        append_block_param(inout b, tail, ty_i64());
+        let zargs = vals1(z);
+        ins_jump(inout b, head, in zargs.as_slice());
+        switch_to_block(inout b, head);
+        let k = block_param(inout b, head, 0);
+        let left = ins_isub(inout b, n, k);
+        let word = ins_icmp_imm(inout b, cc_uge(), left, 8);
+        let kargs = vals1(k);
+        let empty = ChunkSeq::new[u32]();
+        ins_brif(inout b, word, body, in empty.as_slice(), tail, in kargs.as_slice());
+        switch_to_block(inout b, body);
+        let at = ins_iadd(inout b, src, left);
+        let w = ins_load(inout b, ty_i64(), PLAIN, at, -8);
+        let w = ins_bswap(inout b, w);
+        let to = ins_iadd(inout b, dst, k);
+        ins_store(inout b, PLAIN, w, to, 0);
+        let next = ins_iadd_imm(inout b, k, 8);
+        let nargs = vals1(next);
+        ins_jump(inout b, head, in nargs.as_slice());
+        switch_to_block(inout b, tail);
+        from = block_param(inout b, tail, 0);
+    }
+    let head = create_block(inout b);
+    let body = create_block(inout b);
+    let done = create_block(inout b);
+    append_block_param(inout b, head, ty_i64());
+    let fargs = vals1(from);
+    ins_jump(inout b, head, in fargs.as_slice());
+    switch_to_block(inout b, head);
+    let k = block_param(inout b, head, 0);
+    let more = ins_icmp(inout b, cc_ult(), k, n);
+    ins_brif0(inout b, more, body, done);
+    switch_to_block(inout b, body);
+    let last = ins_iadd_imm(inout b, n, -1);
+    let back = ins_isub(inout b, last, k);
+    let boff = ins_imul_imm(inout b, back, elem.stride);
+    let from_addr = ins_iadd(inout b, src, boff);
+    let koff = ins_imul_imm(inout b, k, elem.stride);
+    let to_addr = ins_iadd(inout b, dst, koff);
+    if elem_is_agg(elem) {
+        copy_bytes(inout b, from_addr, to_addr, elem_size(elem));
+    } else {
+        let v = seq_load_elem(inout b, in m, from_addr, elem, optimize);
+        seq_store_elem(inout b, to_addr, v, elem, optimize);
+    }
+    let next = ins_iadd_imm(inout b, k, 1);
+    let nargs = vals1(next);
+    ins_jump(inout b, head, in nargs.as_slice());
+    switch_to_block(inout b, done);
+}
+
+pub fn emit_empty_header(call: u64, inout b: Builder, inout m: Module) eff [Ffi[Cranelift]] {
+    let jit_addr = call_arg(call, 0);
+    if jit_addr != 0 {
+        call_result_value(call, ins_iconst(inout b, ty_i64(), wrapping_i64(jit_addr)));
+        return;
+    }
+    let id = match module_get_data(inout m, in "vesper_seq_empty".as_bytes()) {
+        Some(d) => d,
+        None => return,
+    };
+    let gv = import_data(inout b, in m, id);
+    call_result_value(call, ins_symbol_value(inout b, ty_i64(), gv));
+}
+
+pub fn emit_seq_op(call: u64, inout b: Builder, inout m: Module) eff [Ffi[Cranelift]] {
+    let sub = call_arg(call, 0);
+    if sub == SEQ_WITH_CAPACITY {
+        let cap = value_of_word(call_arg(call, 1));
+        let stride = wrapping_i64(call_arg(call, 2));
+        let sv = ins_iconst(inout b, ty_i64(), stride);
+        let args = vals2(cap, sv);
+        call_result_value(
+            call,
+            runtime_call(inout b, inout m, in "vesper_seq_make", in args.as_slice())
+        );
+    } else if sub == SEQ_LEN {
+        let h = value_of_word(call_arg(call, 1));
+        let inv = call_arg(call, 2) != 0;
+        call_result_value(call, seq_word(inout b, h, LEN, inv));
+    } else if sub == SEQ_SLICE_LEN {
+        let s = value_of_word(call_arg(call, 1));
+        let inv = call_arg(call, 2) != 0;
+        call_result_value(call, seq_word(inout b, s, 16, inv));
+    } else if sub == SEQ_CHECK_INDEX {
+        let is_seq = call_arg(call, 1) != 0;
+        let inv = call_arg(call, 2) != 0;
+        let receiver = value_of_word(call_arg(call, 3));
+        let i = value_of_word(call_arg(call, 4));
+        let c0 = call_arg(call, 5);
+        let c1 = call_arg(call, 6);
+        let c2 = call_arg(call, 7);
+        let (h, start, len) = seq_view_cached(inout b, receiver, is_seq, inv, c0, c1, c2);
+        call_result_value(call, ins_icmp(inout b, cc_ult(), i, len));
+        call_result_value(call, h);
+        call_result_value(call, start);
+    } else if sub == SEQ_GET {
+        let h_inv = call_arg(call, 1) != 0;
+        let optimize = call_arg(call, 2) != 0;
+        let h = value_of_word(call_arg(call, 3));
+        let start = value_of_word(call_arg(call, 4));
+        let i = value_of_word(call_arg(call, 5));
+        let cdata = call_arg(call, 6);
+        let elem = elem_from_call(call, 7);
+        let addr = seq_elem_addr(inout b, h, start, i, elem.stride, h_inv, cdata);
+        call_result_value(call, seq_load_elem(inout b, in m, addr, elem, optimize));
+    } else if sub == SEQ_SET {
+        let h_inv = call_arg(call, 1) != 0;
+        let optimize = call_arg(call, 2) != 0;
+        let has_drop = call_arg(call, 3) != 0;
+        let h = value_of_word(call_arg(call, 4));
+        let start = value_of_word(call_arg(call, 5));
+        let i = value_of_word(call_arg(call, 6));
+        let val = value_of_word(call_arg(call, 7));
+        let cdata = call_arg(call, 8);
+        let elem = elem_from_call(call, 9);
+        let addr = seq_elem_addr(inout b, h, start, i, elem.stride, h_inv, cdata);
+        if has_drop {
+            let old = helper_load(inout b, addr, elem);
+            let mut pos: u64 = 12;
+            emit_drop_tree(call, inout pos, inout b, inout m, old);
+        }
+        seq_store_elem(inout b, addr, val, elem, optimize);
+        call_result_value(call, zero(inout b));
+    } else if sub == SEQ_TRY_GET {
+        let is_seq = call_arg(call, 1) != 0;
+        let inv = call_arg(call, 2) != 0;
+        let h_inv = call_arg(call, 3) != 0;
+        let optimize = call_arg(call, 4) != 0;
+        let receiver = value_of_word(call_arg(call, 5));
+        let i = value_of_word(call_arg(call, 6));
+        let c0 = call_arg(call, 7);
+        let c1 = call_arg(call, 8);
+        let c2 = call_arg(call, 9);
+        let cdata = call_arg(call, 10);
+        let elem = elem_from_call(call, 11);
+        let opt_size = wrapping_u32(call_arg(call, 14));
+        let some_tag = wrapping_i64(call_arg(call, 15));
+        let none_tag = wrapping_i64(call_arg(call, 16));
+        let payload_off = wrapping_u32(call_arg(call, 17));
+        let (h, start, len) = seq_view_cached(inout b, receiver, is_seq, inv, c0, c1, c2);
+        let valid = ins_icmp(inout b, cc_ult(), i, len);
+        let (out, _some, done) = seq_option_begin(
+            inout b,
+            in m,
+            valid,
+            opt_size,
+            some_tag,
+            none_tag,
+            optimize
+        );
+        let addr = seq_elem_addr(inout b, h, start, i, elem.stride, h_inv, cdata);
+        let loaded = seq_elem_for_store(inout b, in m, addr, elem, optimize);
+        call_result_value(
+            call,
+            seq_option_finish(
+                inout b,
+                out,
+                done,
+                loaded,
+                elem,
+                opt_size,
+                some_tag,
+                payload_off,
+                optimize
+            )
+        );
+    } else if sub == SEQ_TRY_SET {
+        let is_seq = call_arg(call, 1) != 0;
+        let inv = call_arg(call, 2) != 0;
+        let h_inv = call_arg(call, 3) != 0;
+        let optimize = call_arg(call, 4) != 0;
+        let has_drop = call_arg(call, 5) != 0;
+        let receiver = value_of_word(call_arg(call, 6));
+        let i = value_of_word(call_arg(call, 7));
+        let val = value_of_word(call_arg(call, 8));
+        let slot_in = slot_of_word(call_arg(call, 9));
+        let c0 = call_arg(call, 10);
+        let c1 = call_arg(call, 11);
+        let c2 = call_arg(call, 12);
+        let cdata = call_arg(call, 13);
+        let elem = elem_from_call(call, 14);
+        let (h, start, len) = seq_view_cached(inout b, receiver, is_seq, inv, c0, c1, c2);
+        let valid = ins_icmp(inout b, cc_ult(), i, len);
+        let plain_word = optimize && !elem_is_agg(elem) && !has_drop;
+        if plain_word {
+            let slot = if is_invalid_slot(slot_in) {
+                create_stack_slot(inout b, 16, 3)
+            } else {
+                slot_in
+            };
+            let discard = ins_stack_addr(inout b, module_pointer_type(in m), slot, 0);
+            let addr = seq_elem_addr(inout b, h, start, i, elem.stride, h_inv, cdata);
+            let target = ins_select(inout b, valid, addr, discard);
+            seq_store_elem(inout b, target, val, elem, optimize);
+            call_result_value(call, ins_uextend(inout b, ty_i64(), valid));
+            call_result_slot(call, slot);
+        } else {
+            let yes = create_block(inout b);
+            let no = create_block(inout b);
+            let done = create_block(inout b);
+            ins_brif0(inout b, valid, yes, no);
+            switch_to_block(inout b, yes);
+            let addr = seq_elem_addr(inout b, h, start, i, elem.stride, h_inv, cdata);
+            if has_drop {
+                let old = helper_load(inout b, addr, elem);
+                let mut pos1: u64 = 17;
+                emit_drop_tree(call, inout pos1, inout b, inout m, old);
+            }
+            seq_store_elem(inout b, addr, val, elem, optimize);
+            ins_jump0(inout b, done);
+            switch_to_block(inout b, no);
+            if has_drop {
+                let mut pos2: u64 = 17;
+                emit_drop_tree(call, inout pos2, inout b, inout m, val);
+            }
+            ins_jump0(inout b, done);
+            switch_to_block(inout b, done);
+            call_result_value(call, ins_uextend(inout b, ty_i64(), valid));
+        }
+    } else if sub == SEQ_LAST {
+        let is_seq = call_arg(call, 1) != 0;
+        let inv = call_arg(call, 2) != 0;
+        let h_inv = call_arg(call, 3) != 0;
+        let optimize = call_arg(call, 4) != 0;
+        let receiver = value_of_word(call_arg(call, 5));
+        let c0 = call_arg(call, 6);
+        let c1 = call_arg(call, 7);
+        let c2 = call_arg(call, 8);
+        let cdata = call_arg(call, 9);
+        let elem = elem_from_call(call, 10);
+        let opt_size = wrapping_u32(call_arg(call, 13));
+        let some_tag = wrapping_i64(call_arg(call, 14));
+        let none_tag = wrapping_i64(call_arg(call, 15));
+        let payload_off = wrapping_u32(call_arg(call, 16));
+        let (h, start, len) = seq_view_cached(inout b, receiver, is_seq, inv, c0, c1, c2);
+        let present = ins_icmp_imm(inout b, cc_ne(), len, 0);
+        let (out, _some, done) = seq_option_begin(
+            inout b,
+            in m,
+            present,
+            opt_size,
+            some_tag,
+            none_tag,
+            optimize
+        );
+        let last = ins_iadd_imm(inout b, len, -1);
+        let addr = seq_elem_addr(inout b, h, start, last, elem.stride, h_inv, cdata);
+        let loaded = seq_elem_for_store(inout b, in m, addr, elem, optimize);
+        call_result_value(
+            call,
+            seq_option_finish(
+                inout b,
+                out,
+                done,
+                loaded,
+                elem,
+                opt_size,
+                some_tag,
+                payload_off,
+                optimize
+            )
+        );
+    } else if sub == SEQ_POP {
+        let h_inv = call_arg(call, 1) != 0;
+        let optimize = call_arg(call, 2) != 0;
+        let h = value_of_word(call_arg(call, 3));
+        let clen = call_arg(call, 4);
+        let cdata = call_arg(call, 5);
+        let elem = elem_from_call(call, 6);
+        let opt_size = wrapping_u32(call_arg(call, 9));
+        let some_tag = wrapping_i64(call_arg(call, 10));
+        let none_tag = wrapping_i64(call_arg(call, 11));
+        let payload_off = wrapping_u32(call_arg(call, 12));
+        let len = seq_word_or_cached(inout b, h, LEN, h_inv, clen);
+        let present = ins_icmp_imm(inout b, cc_ne(), len, 0);
+        let (out, _some, done) = seq_option_begin(
+            inout b,
+            in m,
+            present,
+            opt_size,
+            some_tag,
+            none_tag,
+            optimize
+        );
+        let last = ins_iadd_imm(inout b, len, -1);
+        let z = zero(inout b);
+        let addr = seq_elem_addr(inout b, h, z, last, elem.stride, h_inv, cdata);
+        let loaded = seq_elem_for_store(inout b, in m, addr, elem, optimize);
+        seq_set_word(inout b, h, LEN, last);
+        call_result_value(
+            call,
+            seq_option_finish(
+                inout b,
+                out,
+                done,
+                loaded,
+                elem,
+                opt_size,
+                some_tag,
+                payload_off,
+                optimize
+            )
+        );
+    } else if sub == SEQ_CLEAR {
+        let h_inv = call_arg(call, 1) != 0;
+        let has_drop = call_arg(call, 2) != 0;
+        let h = value_of_word(call_arg(call, 3));
+        let clen = call_arg(call, 4);
+        let cdata = call_arg(call, 5);
+        let stride = wrapping_i64(call_arg(call, 6));
+        let z = zero(inout b);
+        let len = seq_word_or_cached(inout b, h, LEN, h_inv, clen);
+        if has_drop {
+            let ehash = call_arg(call, 7);
+            let eagg = call_arg(call, 8) != 0;
+            let ety = call_arg(call, 9);
+            let z2 = zero(inout b);
+            let data = seq_elem_addr(inout b, h, z2, z, stride, h_inv, cdata);
+            let mut pos: u64 = 10;
+            emit_drop_elements_tree(
+                call,
+                inout pos,
+                inout b,
+                inout m,
+                data,
+                len,
+                stride,
+                ehash,
+                eagg,
+                ety
+            );
+        }
+        let some = ins_icmp_imm(inout b, cc_ne(), len, 0);
+        seq_set_len_if(inout b, h, some, z);
+        call_result_value(call, z);
+    } else if sub == SEQ_TRUNCATE {
+        let h_inv = call_arg(call, 1) != 0;
+        let has_drop = call_arg(call, 2) != 0;
+        let h = value_of_word(call_arg(call, 3));
+        let n = value_of_word(call_arg(call, 4));
+        let clen = call_arg(call, 5);
+        let cdata = call_arg(call, 6);
+        let stride = wrapping_i64(call_arg(call, 7));
+        let len = seq_word_or_cached(inout b, h, LEN, h_inv, clen);
+        let shorter = ins_icmp(inout b, cc_ult(), n, len);
+        let next = ins_select(inout b, shorter, n, len);
+        let removed = ins_isub(inout b, len, next);
+        if has_drop {
+            let ehash = call_arg(call, 8);
+            let eagg = call_arg(call, 9) != 0;
+            let ety = call_arg(call, 10);
+            let z = zero(inout b);
+            let data = seq_elem_addr(inout b, h, z, next, stride, h_inv, cdata);
+            let mut pos: u64 = 11;
+            emit_drop_elements_tree(
+                call,
+                inout pos,
+                inout b,
+                inout m,
+                data,
+                removed,
+                stride,
+                ehash,
+                eagg,
+                ety
+            );
+        }
+        seq_set_len_if(inout b, h, shorter, next);
+        call_result_value(call, zero(inout b));
+    } else if sub == SEQ_RESERVE_BEGIN {
+        let h = value_of_word(call_arg(call, 1));
+        let needed = value_of_word(call_arg(call, 2));
+        let h_inv = call_arg(call, 3) != 0;
+        let cap = seq_word(inout b, h, CAP, h_inv);
+        let fits = ins_icmp(inout b, cc_ule(), needed, cap);
+        let fast = create_block(inout b);
+        let grow = create_block(inout b);
+        let done = create_block(inout b);
+        ins_brif0(inout b, fits, fast, grow);
+        switch_to_block(inout b, fast);
+        call_result_block(call, fast);
+        call_result_block(call, grow);
+        call_result_block(call, done);
+    } else if sub == SEQ_RESERVE_GROW {
+        let grow = @vesper/cranelift::block_of_word(call_arg(call, 1));
+        let h = value_of_word(call_arg(call, 2));
+        let needed = value_of_word(call_arg(call, 3));
+        let stride = wrapping_i64(call_arg(call, 4));
+        switch_to_block(inout b, grow);
+        set_cold_block(inout b, grow);
+        let sv = ins_iconst(inout b, ty_i64(), stride);
+        let mut rargs = ChunkSeq::new[u32]();
+        rargs.push(h.id);
+        rargs.push(sv.id);
+        rargs.push(needed.id);
+        let grown = runtime_call(inout b, inout m, in "vesper_seq_grow", in rargs.as_slice());
+        call_result_value(call, grown);
+    } else if sub == SEQ_RESERVE_ONE {
+        let h = value_of_word(call_arg(call, 1));
+        let needed = value_of_word(call_arg(call, 2));
+        let stride = wrapping_i64(call_arg(call, 3));
+        let has_receiver = call_arg(call, 4) != 0;
+        let h_inv = call_arg(call, 5) != 0;
+        let cap = seq_word(inout b, h, CAP, h_inv);
+        let fits = ins_icmp(inout b, cc_ule(), needed, cap);
+        let grow = create_block(inout b);
+        let done = create_block(inout b);
+        if !has_receiver {
+            ins_brif0(inout b, fits, done, grow);
+            switch_to_block(inout b, grow);
+            let sv = ins_iconst(inout b, ty_i64(), stride);
+            let mut rargs = ChunkSeq::new[u32]();
+            rargs.push(h.id);
+            rargs.push(sv.id);
+            rargs.push(needed.id);
+            let _ = runtime_call(inout b, inout m, in "vesper_seq_grow", in rargs.as_slice());
+            ins_jump0(inout b, done);
+            switch_to_block(inout b, done);
+            call_result_value(call, h);
+        } else {
+            append_block_param(inout b, done, ty_i64());
+            let hargs = vals1(h);
+            let empty = ChunkSeq::new[u32]();
+            ins_brif(inout b, fits, done, in hargs.as_slice(), grow, in empty.as_slice());
+            switch_to_block(inout b, grow);
+            let sv = ins_iconst(inout b, ty_i64(), stride);
+            let mut rargs = ChunkSeq::new[u32]();
+            rargs.push(h.id);
+            rargs.push(sv.id);
+            rargs.push(needed.id);
+            let grown = runtime_call(inout b, inout m, in "vesper_seq_grow", in rargs.as_slice());
+            call_result_block(call, grow);
+            call_result_block(call, done);
+            call_result_value(call, grown);
+        }
+    } else if sub == SEQ_PUSH_TAIL {
+        let h = value_of_word(call_arg(call, 1));
+        let len = value_of_word(call_arg(call, 2));
+        let next = value_of_word(call_arg(call, 3));
+        let val = value_of_word(call_arg(call, 4));
+        let h_inv = call_arg(call, 5) != 0;
+        let cdata = call_arg(call, 6);
+        let optimize = call_arg(call, 7) != 0;
+        let elem = elem_from_call(call, 8);
+        let z = zero(inout b);
+        let addr = seq_elem_addr(inout b, h, z, len, elem.stride, h_inv, cdata);
+        seq_store_elem(inout b, addr, val, elem, optimize);
+        seq_set_word(inout b, h, LEN, next);
+    } else if sub == SEQ_EXTEND_TAIL {
+        let h = value_of_word(call_arg(call, 1));
+        let len = value_of_word(call_arg(call, 2));
+        let needed = value_of_word(call_arg(call, 3));
+        let sh = value_of_word(call_arg(call, 4));
+        let sstart = value_of_word(call_arg(call, 5));
+        let slen = value_of_word(call_arg(call, 6));
+        let h_inv = call_arg(call, 7) != 0;
+        let sh_inv = call_arg(call, 8) != 0;
+        let cdata = call_arg(call, 9);
+        let scdata = call_arg(call, 10);
+        let stride = wrapping_i64(call_arg(call, 11));
+        let z = zero(inout b);
+        let dst = seq_elem_addr(inout b, h, z, len, stride, h_inv, cdata);
+        let src = seq_elem_addr(inout b, sh, sstart, z, stride, sh_inv, scdata);
+        let bytes = ins_imul_imm(inout b, slen, stride);
+        seq_move(inout b, in m, dst, src, bytes);
+        let some = ins_icmp_imm(inout b, cc_ne(), slen, 0);
+        seq_set_len_if(inout b, h, some, needed);
+    } else if sub == SEQ_RESIZE_CMP {
+        let n = value_of_word(call_arg(call, 1));
+        let len = value_of_word(call_arg(call, 2));
+        let longer = ins_icmp(inout b, cc_ugt(), n, len);
+        let grow = create_block(inout b);
+        let shrink = create_block(inout b);
+        let done = create_block(inout b);
+        ins_brif0(inout b, longer, grow, shrink);
+        call_result_block(call, grow);
+        call_result_block(call, shrink);
+        call_result_block(call, done);
+    } else if sub == SEQ_RESIZE_SHRINK {
+        let h = value_of_word(call_arg(call, 1));
+        let n = value_of_word(call_arg(call, 2));
+        let len = value_of_word(call_arg(call, 3));
+        let shorter = ins_icmp(inout b, cc_ult(), n, len);
+        seq_set_len_if(inout b, h, shorter, n);
+    } else if sub == SEQ_RESIZE_GROW_TAIL {
+        let h = value_of_word(call_arg(call, 1));
+        let n = value_of_word(call_arg(call, 2));
+        let len = value_of_word(call_arg(call, 3));
+        let val = value_of_word(call_arg(call, 4));
+        let h_inv = call_arg(call, 5) != 0;
+        let cdata = call_arg(call, 6);
+        let optimize = call_arg(call, 7) != 0;
+        let elem = elem_from_call(call, 8);
+        let added = ins_isub(inout b, n, len);
+        seq_fill_elems(inout b, in m, h, len, added, val, elem, optimize, cdata, h_inv);
+        seq_set_word(inout b, h, LEN, n);
+    } else if sub == SEQ_CHECK_EXTEND_WITHIN {
+        let h = value_of_word(call_arg(call, 1));
+        let lo = value_of_word(call_arg(call, 2));
+        let hi = value_of_word(call_arg(call, 3));
+        let h_inv = call_arg(call, 4) != 0;
+        let clen = call_arg(call, 5);
+        let len = seq_word_or_cached(inout b, h, LEN, h_inv, clen);
+        let ordered = ins_icmp(inout b, cc_ule(), lo, hi);
+        let inside = ins_icmp(inout b, cc_ule(), hi, len);
+        call_result_value(call, ins_band(inout b, ordered, inside));
+        call_result_value(call, len);
+    } else if sub == SEQ_EXTEND_WITHIN_TAIL {
+        let h = value_of_word(call_arg(call, 1));
+        let lo = value_of_word(call_arg(call, 2));
+        let n = value_of_word(call_arg(call, 3));
+        let len = value_of_word(call_arg(call, 4));
+        let needed = value_of_word(call_arg(call, 5));
+        let h_inv = call_arg(call, 6) != 0;
+        let cdata = call_arg(call, 7);
+        let stride = wrapping_i64(call_arg(call, 8));
+        let z = zero(inout b);
+        let dst = seq_elem_addr(inout b, h, z, len, stride, h_inv, cdata);
+        let src = seq_elem_addr(inout b, h, z, lo, stride, h_inv, cdata);
+        let bytes = ins_imul_imm(inout b, n, stride);
+        seq_move(inout b, in m, dst, src, bytes);
+        let some = ins_icmp_imm(inout b, cc_ne(), n, 0);
+        seq_set_len_if(inout b, h, some, needed);
+    } else if sub == SEQ_EXTEND_REVERSED_TAIL {
+        let h = value_of_word(call_arg(call, 1));
+        let len = value_of_word(call_arg(call, 2));
+        let needed = value_of_word(call_arg(call, 3));
+        let sh = value_of_word(call_arg(call, 4));
+        let sstart = value_of_word(call_arg(call, 5));
+        let slen = value_of_word(call_arg(call, 6));
+        let h_inv = call_arg(call, 7) != 0;
+        let sh_inv = call_arg(call, 8) != 0;
+        let cdata = call_arg(call, 9);
+        let scdata = call_arg(call, 10);
+        let optimize = call_arg(call, 11) != 0;
+        let elem = elem_from_call(call, 12);
+        let z = zero(inout b);
+        let dst = seq_elem_addr(inout b, h, z, len, elem.stride, h_inv, cdata);
+        let src = seq_elem_addr(inout b, sh, sstart, z, elem.stride, sh_inv, scdata);
+        seq_copy_reversed(inout b, in m, dst, src, slen, elem, optimize);
+        let some = ins_icmp_imm(inout b, cc_ne(), slen, 0);
+        seq_set_len_if(inout b, h, some, needed);
+    } else if sub == SEQ_CHECK_FINISH {
+        let h = value_of_word(call_arg(call, 1));
+        let h_inv = call_arg(call, 2) != 0;
+        let clen = call_arg(call, 3);
+        let len = seq_word_or_cached(inout b, h, LEN, h_inv, clen);
+        call_result_value(call, ins_icmp_imm(inout b, cc_eq(), len, 0));
+    } else if sub == SEQ_FINISH {
+        let h = value_of_word(call_arg(call, 1));
+        let hargs = vals1(h);
+        let _ = runtime_call(inout b, inout m, in "vesper_seq_free", in hargs.as_slice());
+        call_result_value(call, zero(inout b));
+    } else if sub == SEQ_AS_SLICE {
+        let is_seq = call_arg(call, 1) != 0;
+        let inv = call_arg(call, 2) != 0;
+        let receiver = value_of_word(call_arg(call, 3));
+        let c0 = call_arg(call, 4);
+        let c1 = call_arg(call, 5);
+        let c2 = call_arg(call, 6);
+        let (h, start, len) = seq_view_cached(inout b, receiver, is_seq, inv, c0, c1, c2);
+        call_result_value(call, seq_slice_value(inout b, in m, h, start, len));
+    } else if sub == SEQ_SUB_SLICE {
+        let is_seq = call_arg(call, 1) != 0;
+        let inv = call_arg(call, 2) != 0;
+        let receiver = value_of_word(call_arg(call, 3));
+        let lo = value_of_word(call_arg(call, 4));
+        let hi = value_of_word(call_arg(call, 5));
+        let c0 = call_arg(call, 6);
+        let c1 = call_arg(call, 7);
+        let c2 = call_arg(call, 8);
+        let (h, start, len) = seq_view_cached(inout b, receiver, is_seq, inv, c0, c1, c2);
+        let ordered = ins_icmp(inout b, cc_ule(), lo, hi);
+        let inside = ins_icmp(inout b, cc_ule(), hi, len);
+        let valid = ins_band(inout b, ordered, inside);
+        let good = create_block(inout b);
+        let bad = create_block(inout b);
+        let done = create_block(inout b);
+        ins_brif0(inout b, valid, good, bad);
+        switch_to_block(inout b, bad);
+        let code = ins_iconst(inout b, ty_i64(), 1);
+        let cargs = vals1(code);
+        let _ = runtime_call(inout b, inout m, in "vesper_seq_fault", in cargs.as_slice());
+        ins_jump0(inout b, done);
+        switch_to_block(inout b, good);
+        ins_jump0(inout b, done);
+        switch_to_block(inout b, done);
+        let z = zero(inout b);
+        let at = ins_iadd(inout b, start, lo);
+        let at = ins_select(inout b, valid, at, z);
+        let n = ins_isub(inout b, hi, lo);
+        let n = ins_select(inout b, valid, n, z);
+        call_result_value(call, seq_slice_value(inout b, in m, h, at, n));
+    } else if sub == SEQ_HOIST_HEADER {
+        let is_slice = call_arg(call, 1) != 0;
+        let inv = call_arg(call, 2) != 0;
+        let raw = value_of_word(call_arg(call, 3));
+        let copy = ins_iadd_imm(inout b, raw, 0);
+        call_result_value(call, copy);
+        if is_slice {
+            let w0 = seq_word(inout b, copy, 0, inv);
+            let w8 = seq_word(inout b, copy, 8, inv);
+            let w16 = seq_word(inout b, copy, 16, inv);
+            call_result_value(call, w0);
+            call_result_value(call, w8);
+            call_result_value(call, w16);
+            call_result_value(call, seq_word(inout b, w0, LEN, inv));
+            call_result_value(call, seq_word(inout b, w0, DATA, inv));
+        } else {
+            call_result_value(call, seq_word(inout b, copy, LEN, inv));
+            call_result_value(call, seq_word(inout b, copy, DATA, inv));
+        }
+    } else if sub == SEQ_ELEM_ADDR {
+        let h = value_of_word(call_arg(call, 1));
+        let start = value_of_word(call_arg(call, 2));
+        let i = value_of_word(call_arg(call, 3));
+        let stride = wrapping_i64(call_arg(call, 4));
+        let h_inv = call_arg(call, 5) != 0;
+        let cdata = call_arg(call, 6);
+        call_result_value(call, seq_elem_addr(inout b, h, start, i, stride, h_inv, cdata));
+    } else if sub == SEQ_LOAD_ELEM {
+        let addr = value_of_word(call_arg(call, 1));
+        let optimize = call_arg(call, 2) != 0;
+        let elem = elem_from_call(call, 3);
+        call_result_value(call, seq_load_elem(inout b, in m, addr, elem, optimize));
+    } else if sub == SEQ_STORE_ELEM {
+        let addr = value_of_word(call_arg(call, 1));
+        let val = value_of_word(call_arg(call, 2));
+        let optimize = call_arg(call, 3) != 0;
+        let elem = elem_from_call(call, 4);
+        seq_store_elem(inout b, addr, val, elem, optimize);
+    } else if sub == SEQ_ALLOC {
+        let uninit = call_arg(call, 1) != 0;
+        let sz = wrapping_u32(call_arg(call, 2));
+        let ptr = if uninit {
+            alloc_uninit(inout b, in m, sz)
+        } else {
+            alloc(inout b, in m, sz)
+        };
+        call_result_value(call, ptr);
+    }
+}

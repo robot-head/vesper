@@ -1,0 +1,434 @@
+// String literal, String/Str primitive, and comparison emission.
+
+use @vesper/cranelift::{
+    Value,
+    append_block_param,
+    block_param,
+    call_arg,
+    call_result_value,
+    cc_eq,
+    cc_ne,
+    cc_uge,
+    cc_ugt,
+    cc_ule,
+    cc_ult,
+    create_block,
+    data_align,
+    data_define,
+    data_new,
+    declare_anonymous_data,
+    define_data,
+    import_data,
+    ins_band,
+    ins_band_imm,
+    ins_bor,
+    ins_bor_imm,
+    ins_brif,
+    ins_brif0,
+    ins_bxor_imm,
+    ins_iadd,
+    ins_iadd_imm,
+    ins_icmp,
+    ins_icmp_imm,
+    ins_iconst,
+    ins_ishl_imm,
+    ins_isub,
+    ins_jump,
+    ins_jump0,
+    ins_load,
+    ins_overflow,
+    ins_select,
+    ins_store,
+    ins_symbol_value,
+    ins_uextend,
+    ins_uload8,
+    ins_ushr_imm,
+    inst_result,
+    module_pointer_type,
+    switch_to_block,
+    ty_i64,
+    ty_i8,
+    vals1,
+    value_of_word
+};
+use self::common::{
+    CAP,
+    DATA,
+    ElemDesc,
+    LEN,
+    PLAIN,
+    alloc,
+    runtime_call,
+    seq_copy_run,
+    seq_option_begin,
+    seq_option_finish,
+    zero
+};
+
+pub const STR_LEN: u64 = 1;
+pub const STR_BYTE_VALID: u64 = 2;
+pub const STR_BYTE: u64 = 3;
+pub const STR_TRY_BYTE_AT: u64 = 4;
+pub const STR_AS_BYTES: u64 = 5;
+pub const STR_SUB_STR: u64 = 6;
+pub const STR_PUSH_STR: u64 = 7;
+pub const STR_PUSH_CHAR: u64 = 8;
+pub const STR_CLEAR: u64 = 9;
+pub const STR_RESERVE: u64 = 10;
+
+const BOUNDARY_FAULT: i64 = 2;
+const UADD_OVERFLOW: u32 = 1;
+
+fn str_word(inout b: Builder, ptr: Value, offset: i32) -> Value eff [Ffi[Cranelift]] {
+    ins_load(inout b, ty_i64(), PLAIN, ptr, offset)
+}
+
+fn str_value(inout b: Builder, in m: Module, len: Value, cap: Value, data: Value)
+    -> Value eff [Ffi[Cranelift]] {
+    let ptr = alloc(inout b, in m, 24);
+    ins_store(inout b, PLAIN, len, ptr, LEN);
+    ins_store(inout b, PLAIN, cap, ptr, CAP);
+    ins_store(inout b, PLAIN, data, ptr, DATA);
+    ptr
+}
+
+fn str_byte(inout b: Builder, value: Value, i: Value) -> Value eff [Ffi[Cranelift]] {
+    let data = str_word(inout b, value, DATA);
+    let at = ins_iadd(inout b, data, i);
+    ins_uload8(inout b, ty_i64(), PLAIN, at, 0)
+}
+
+fn str_boundary(inout b: Builder, in m: Module, value: Value, i: Value, len: Value)
+    -> Value eff [Ffi[Cranelift]] {
+    let at_end = ins_icmp(inout b, cc_eq(), i, len);
+    let scratch = alloc(inout b, in m, 8);
+    let data = str_word(inout b, value, DATA);
+    let inside = ins_iadd(inout b, data, i);
+    let addr = ins_select(inout b, at_end, scratch, inside);
+    let byte = ins_uload8(inout b, ty_i64(), PLAIN, addr, 0);
+    let high = ins_band_imm(inout b, byte, 192);
+    let lead = ins_icmp_imm(inout b, cc_ne(), high, 128);
+    ins_bor(inout b, at_end, lead)
+}
+
+fn str_reserve(inout b: Builder, inout m: Module, h: Value, needed: Value) eff [Ffi[Cranelift]] {
+    let cap = str_word(inout b, h, CAP);
+    let fits = ins_icmp(inout b, cc_ule(), needed, cap);
+    let grow = create_block(inout b);
+    let done = create_block(inout b);
+    ins_brif0(inout b, fits, done, grow);
+    switch_to_block(inout b, grow);
+    let stride = ins_iconst(inout b, ty_i64(), 1);
+    let args = ChunkSeq::new[u32]();
+    let mut a = args;
+    a.push(h.id);
+    a.push(stride.id);
+    a.push(needed.id);
+    let _ = runtime_call(inout b, inout m, in "vesper_seq_grow", in a.as_slice());
+    ins_jump0(inout b, done);
+    switch_to_block(inout b, done);
+}
+
+fn str_append(inout b: Builder, inout m: Module, h: Value, src: Value, n: Value) eff [
+    Ffi[Cranelift]
+] {
+    let len = str_word(inout b, h, LEN);
+    let needed = ins_iadd(inout b, len, n);
+    str_reserve(inout b, inout m, h, needed);
+    let data = str_word(inout b, h, DATA);
+    let dst = ins_iadd(inout b, data, len);
+    seq_copy_run(inout b, in m, dst, src, n);
+    ins_store(inout b, PLAIN, needed, h, LEN);
+}
+
+pub fn emit_string_literal(call: u64, inout b: Builder, inout m: Module) eff [Ffi[Cranelift]] {
+    let byte_len = call_arg(call, 0);
+    let len = ins_iconst(inout b, ty_i64(), wrapping_i64(byte_len));
+    let z = zero(inout b);
+    if byte_len == 0 {
+        call_result_value(call, str_value(inout b, in m, len, z, z));
+        return;
+    }
+    let mut bytes = ChunkSeq::with_capacity[u8](byte_len);
+    let mut k: u64 = 0;
+    loop {
+        if k >= byte_len {
+            break;
+        }
+        let mut word = call_arg(call, wrapping_add(1, k >> 3));
+        let rem = k & 7;
+        for _ in 0..rem {
+            word = word >> 8;
+        }
+        bytes.push(wrapping_u8(word & 255));
+        k = wrapping_add(k, 1);
+    }
+    let id = declare_anonymous_data(inout m, false, false);
+    let mut d = match data_new() {
+        Some(d) => d,
+        None => return,
+    };
+    data_define(inout d, in bytes.as_slice());
+    data_align(inout d, 8);
+    if !define_data(inout m, id, d) {
+        return;
+    }
+    let gv = import_data(inout b, in m, id);
+    let addr = ins_symbol_value(inout b, module_pointer_type(in m), gv);
+    call_result_value(call, str_value(inout b, in m, len, z, addr));
+}
+
+fn cont_byte(inout b: Builder, c: Value, shift: i64) -> Value eff [Ffi[Cranelift]] {
+    let v = ins_ushr_imm(inout b, c, shift);
+    let v = ins_band_imm(inout b, v, 63);
+    ins_bor_imm(inout b, v, 128)
+}
+
+fn lead_byte(inout b: Builder, c: Value, shift: i64, tag: i64) -> Value eff [Ffi[Cranelift]] {
+    let v = ins_ushr_imm(inout b, c, shift);
+    ins_bor_imm(inout b, v, tag)
+}
+
+fn str_push_char(inout b: Builder, inout m: Module, s: Value, c: Value)
+    -> Value eff [Ffi[Cranelift]] {
+    let scratch = alloc(inout b, in m, 8);
+    let one = ins_icmp_imm(inout b, cc_ult(), c, 128);
+    let two = ins_icmp_imm(inout b, cc_ult(), c, 2048);
+    let three = ins_icmp_imm(inout b, cc_ult(), c, 65536);
+    let four = ins_icmp_imm(inout b, cc_ult(), c, 1114112);
+    let low_sur = ins_icmp_imm(inout b, cc_uge(), c, 55296);
+    let high_sur = ins_icmp_imm(inout b, cc_ult(), c, 57344);
+    let surrogate = ins_band(inout b, low_sur, high_sur);
+    let not_sur = ins_bxor_imm(inout b, surrogate, 1);
+    let valid = ins_band(inout b, four, not_sur);
+
+    let l2 = lead_byte(inout b, c, 6, 192);
+    let c20 = cont_byte(inout b, c, 0);
+    let c20 = ins_ishl_imm(inout b, c20, 8);
+    let w2 = ins_bor(inout b, l2, c20);
+
+    let l3 = lead_byte(inout b, c, 12, 224);
+    let c31 = cont_byte(inout b, c, 6);
+    let c31 = ins_ishl_imm(inout b, c31, 8);
+    let c30 = cont_byte(inout b, c, 0);
+    let c30 = ins_ishl_imm(inout b, c30, 16);
+    let w3 = ins_bor(inout b, l3, c31);
+    let w3 = ins_bor(inout b, w3, c30);
+
+    let l4 = lead_byte(inout b, c, 18, 240);
+    let c42 = cont_byte(inout b, c, 12);
+    let c42 = ins_ishl_imm(inout b, c42, 8);
+    let c41 = cont_byte(inout b, c, 6);
+    let c41 = ins_ishl_imm(inout b, c41, 16);
+    let c40 = cont_byte(inout b, c, 0);
+    let c40 = ins_ishl_imm(inout b, c40, 24);
+    let w4 = ins_bor(inout b, l4, c42);
+    let w4 = ins_bor(inout b, w4, c41);
+    let w4 = ins_bor(inout b, w4, c40);
+
+    let word = ins_select(inout b, three, w3, w4);
+    let word = ins_select(inout b, two, w2, word);
+    let word = ins_select(inout b, one, c, word);
+
+    let n4 = ins_iconst(inout b, ty_i64(), 4);
+    let n3 = ins_iconst(inout b, ty_i64(), 3);
+    let n2 = ins_iconst(inout b, ty_i64(), 2);
+    let n1 = ins_iconst(inout b, ty_i64(), 1);
+    let width = ins_select(inout b, three, n3, n4);
+    let width = ins_select(inout b, two, n2, width);
+    let width = ins_select(inout b, one, n1, width);
+
+    ins_store(inout b, PLAIN, word, scratch, 0);
+    let push = create_block(inout b);
+    let done = create_block(inout b);
+    ins_brif0(inout b, valid, push, done);
+    switch_to_block(inout b, push);
+    str_append(inout b, inout m, s, scratch, width);
+    ins_jump0(inout b, done);
+    switch_to_block(inout b, done);
+    ins_uextend(inout b, ty_i64(), valid)
+}
+
+pub fn emit_str_op(call: u64, inout b: Builder, inout m: Module) eff [Ffi[Cranelift]] {
+    let kind = call_arg(call, 0);
+    let s = value_of_word(call_arg(call, 1));
+    if kind == STR_LEN {
+        call_result_value(call, str_word(inout b, s, LEN));
+    } else if kind == STR_BYTE_VALID {
+        let len = str_word(inout b, s, LEN);
+        let i = value_of_word(call_arg(call, 2));
+        call_result_value(call, ins_icmp(inout b, cc_ult(), i, len));
+    } else if kind == STR_BYTE {
+        let i = value_of_word(call_arg(call, 2));
+        call_result_value(call, str_byte(inout b, s, i));
+    } else if kind == STR_TRY_BYTE_AT {
+        let i = value_of_word(call_arg(call, 2));
+        let opt_size = wrapping_u32(call_arg(call, 3));
+        let some_tag = wrapping_i64(call_arg(call, 4));
+        let none_tag = wrapping_i64(call_arg(call, 5));
+        let payload_off = wrapping_u32(call_arg(call, 6));
+        let optimize = call_arg(call, 7) != 0;
+        let len = str_word(inout b, s, LEN);
+        let valid = ins_icmp(inout b, cc_ult(), i, len);
+        let (out, _some, done) = seq_option_begin(
+            inout b,
+            in m,
+            valid,
+            opt_size,
+            some_tag,
+            none_tag,
+            optimize
+        );
+        let byte = str_byte(inout b, s, i);
+        let e = ElemDesc {
+            flags: 8 << 8,
+            size_or_ty: 4,
+            stride: 1,
+        };
+        call_result_value(
+            call,
+            seq_option_finish(
+                inout b,
+                out,
+                done,
+                byte,
+                e,
+                opt_size,
+                some_tag,
+                payload_off,
+                optimize
+            )
+        );
+    } else if kind == STR_AS_BYTES {
+        let len = str_word(inout b, s, LEN);
+        let z = zero(inout b);
+        call_result_value(call, str_value(inout b, in m, s, z, len));
+    } else if kind == STR_SUB_STR {
+        let lo = value_of_word(call_arg(call, 2));
+        let hi = value_of_word(call_arg(call, 3));
+        let len = str_word(inout b, s, LEN);
+        let ordered = ins_icmp(inout b, cc_ule(), lo, hi);
+        let inside = ins_icmp(inout b, cc_ule(), hi, len);
+        let valid = ins_band(inout b, ordered, inside);
+        let good = create_block(inout b);
+        let bad = create_block(inout b);
+        let done = create_block(inout b);
+        append_block_param(inout b, done, ty_i8());
+        ins_brif0(inout b, valid, good, bad);
+        switch_to_block(inout b, bad);
+        let c1 = ins_iconst(inout b, ty_i64(), 1);
+        let c1args = vals1(c1);
+        let _ = runtime_call(inout b, inout m, in "vesper_seq_fault", in c1args.as_slice());
+        let no1 = ins_iconst(inout b, ty_i8(), 0);
+        let no1args = vals1(no1);
+        ins_jump(inout b, done, in no1args.as_slice());
+        switch_to_block(inout b, good);
+        let a = str_boundary(inout b, in m, s, lo, len);
+        let bv = str_boundary(inout b, in m, s, hi, len);
+        let on = ins_band(inout b, a, bv);
+        let fault = create_block(inout b);
+        let fine = create_block(inout b);
+        ins_brif0(inout b, on, fine, fault);
+        switch_to_block(inout b, fault);
+        let c2 = ins_iconst(inout b, ty_i64(), BOUNDARY_FAULT);
+        let c2args = vals1(c2);
+        let _ = runtime_call(inout b, inout m, in "vesper_seq_fault", in c2args.as_slice());
+        let no2 = ins_iconst(inout b, ty_i8(), 0);
+        let no2args = vals1(no2);
+        ins_jump(inout b, done, in no2args.as_slice());
+        switch_to_block(inout b, fine);
+        let yes = ins_iconst(inout b, ty_i8(), 1);
+        let yesargs = vals1(yes);
+        ins_jump(inout b, done, in yesargs.as_slice());
+        switch_to_block(inout b, done);
+        let ok = block_param(inout b, done, 0);
+        let z = zero(inout b);
+        let n = ins_isub(inout b, hi, lo);
+        let n = ins_select(inout b, ok, n, z);
+        let data = str_word(inout b, s, DATA);
+        let at = ins_iadd(inout b, data, lo);
+        let at = ins_select(inout b, ok, at, data);
+        call_result_value(call, str_value(inout b, in m, n, z, at));
+    } else if kind == STR_PUSH_STR {
+        let src = value_of_word(call_arg(call, 2));
+        let n = str_word(inout b, src, LEN);
+        let data = str_word(inout b, src, DATA);
+        str_append(inout b, inout m, s, data, n);
+        call_result_value(call, zero(inout b));
+    } else if kind == STR_PUSH_CHAR {
+        let c = value_of_word(call_arg(call, 2));
+        call_result_value(call, str_push_char(inout b, inout m, s, c));
+    } else if kind == STR_CLEAR {
+        let z = zero(inout b);
+        ins_store(inout b, PLAIN, z, s, LEN);
+        call_result_value(call, z);
+    } else if kind == STR_RESERVE {
+        let n = value_of_word(call_arg(call, 2));
+        let len = str_word(inout b, s, LEN);
+        let needed = ins_overflow(inout b, UADD_OVERFLOW, len, n);
+        let over = inst_result(inout b, 1);
+        let max = ins_iconst(inout b, ty_i64(), -1);
+        let needed = ins_select(inout b, over, max, needed);
+        str_reserve(inout b, inout m, s, needed);
+        call_result_value(call, zero(inout b));
+    }
+}
+
+pub fn emit_str_order(inout b: Builder, x: Value, y: Value) -> Value eff [Ffi[Cranelift]] {
+    let xl = ins_load(inout b, ty_i64(), PLAIN, x, LEN);
+    let yl = ins_load(inout b, ty_i64(), PLAIN, y, LEN);
+    let xd = ins_load(inout b, ty_i64(), PLAIN, x, DATA);
+    let yd = ins_load(inout b, ty_i64(), PLAIN, y, DATA);
+    let shorter = ins_icmp(inout b, cc_ult(), xl, yl);
+    let n = ins_select(inout b, shorter, xl, yl);
+    let head = create_block(inout b);
+    let body = create_block(inout b);
+    let differ = create_block(inout b);
+    let tail = create_block(inout b);
+    let done = create_block(inout b);
+    append_block_param(inout b, head, ty_i64());
+    append_block_param(inout b, done, ty_i64());
+    let z = ins_iconst(inout b, ty_i64(), 0);
+    let zargs = vals1(z);
+    ins_jump(inout b, head, in zargs.as_slice());
+    switch_to_block(inout b, head);
+    let k = block_param(inout b, head, 0);
+    let more = ins_icmp(inout b, cc_ult(), k, n);
+    ins_brif0(inout b, more, body, tail);
+    switch_to_block(inout b, body);
+    let xa = ins_iadd(inout b, xd, k);
+    let ya = ins_iadd(inout b, yd, k);
+    let xb = ins_uload8(inout b, ty_i64(), PLAIN, xa, 0);
+    let yb = ins_uload8(inout b, ty_i64(), PLAIN, ya, 0);
+    let same = ins_icmp(inout b, cc_eq(), xb, yb);
+    let next = ins_iadd_imm(inout b, k, 1);
+    let nargs = vals1(next);
+    let empty = ChunkSeq::new[u32]();
+    ins_brif(inout b, same, head, in nargs.as_slice(), differ, in empty.as_slice());
+    switch_to_block(inout b, differ);
+    let less = ins_icmp(inout b, cc_ult(), xb, yb);
+    let minus = ins_iconst(inout b, ty_i64(), -1);
+    let plus = ins_iconst(inout b, ty_i64(), 1);
+    let r = ins_select(inout b, less, minus, plus);
+    let rargs = vals1(r);
+    ins_jump(inout b, done, in rargs.as_slice());
+    switch_to_block(inout b, tail);
+    let lt = ins_icmp(inout b, cc_ult(), xl, yl);
+    let gt = ins_icmp(inout b, cc_ugt(), xl, yl);
+    let lt = ins_uextend(inout b, ty_i64(), lt);
+    let gt = ins_uextend(inout b, ty_i64(), gt);
+    let r = ins_isub(inout b, gt, lt);
+    let rargs = vals1(r);
+    ins_jump(inout b, done, in rargs.as_slice());
+    switch_to_block(inout b, done);
+    block_param(inout b, done, 0)
+}
+
+pub fn emit_str_compare(call: u64, inout b: Builder) eff [Ffi[Cranelift]] {
+    let cc = wrapping_u32(call_arg(call, 0));
+    let a = value_of_word(call_arg(call, 1));
+    let b_val = value_of_word(call_arg(call, 2));
+    let order = emit_str_order(inout b, a, b_val);
+    let r = ins_icmp_imm(inout b, cc, order, 0);
+    call_result_value(call, ins_uextend(inout b, ty_i64(), r));
+}
