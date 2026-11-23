@@ -219,6 +219,9 @@ struct LbvhPort {
     order: Vec<u32>,
     stack: Vec<u64>,
     pairs: Vec<u64>,
+    tk: Vec<u64>,
+    tv: Vec<u32>,
+    hist: Vec<u32>,
 }
 
 #[cfg(vesper_port)]
@@ -236,6 +239,9 @@ impl LbvhPort {
             order: Vec::with_capacity(n),
             stack: Vec::with_capacity(n + 1),
             pairs: Vec::with_capacity(4 * n),
+            tk: Vec::with_capacity(4 * n),
+            tv: Vec::with_capacity(n),
+            hist: vec![0; 256],
         }
     }
 }
@@ -288,6 +294,7 @@ impl Lbvh {
         {
             let p = &mut self.port;
             p.pairs.reserve(max_pairs.saturating_sub(p.pairs.len()));
+            p.tk.reserve(max_pairs.saturating_sub(p.tk.len()));
         }
         #[cfg(not(vesper_port))]
         let _ = max_pairs;
@@ -365,6 +372,8 @@ impl Lbvh {
         p.node_box.resize(6 * inner, 0);
         p.order.resize(n, 0);
         p.stack.resize(n + 1, 0);
+        p.tk.resize(n, 0);
+        p.tv.resize(n, 0);
         crate::port::lbvh_build(
             &p.boxes,
             &mut p.codes,
@@ -375,6 +384,9 @@ impl Lbvh {
             &mut p.node_box,
             &mut p.order,
             &mut p.stack,
+            &mut p.tk,
+            &mut p.tv,
+            &mut p.hist,
         )?;
         self.keys
             .extend(p.codes.iter().copied().zip(p.prims.iter().copied()));
@@ -544,6 +556,9 @@ impl Lbvh {
             if p.pairs.len() < room {
                 p.pairs.resize(room, 0);
             }
+            if p.tk.len() < p.pairs.len() {
+                p.tk.resize(p.pairs.len(), 0);
+            }
             loop {
                 let got = crate::port::lbvh_pairs(
                     &p.codes,
@@ -554,6 +569,10 @@ impl Lbvh {
                     &p.node_box,
                     &mut p.stack,
                     &mut p.pairs,
+                    &mut p.tk,
+                    &mut [],
+                    &mut [],
+                    &mut p.hist,
                     max,
                 );
                 if got == max + 1 {
@@ -564,6 +583,7 @@ impl Lbvh {
                 if got as usize > p.pairs.len() {
                     let grow = (2 * p.pairs.len()).min(max_pairs);
                     p.pairs.resize(grow, 0);
+                    p.tk.resize(grow, 0);
                     continue;
                 }
                 out.extend(

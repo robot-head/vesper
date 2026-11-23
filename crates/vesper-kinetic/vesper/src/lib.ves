@@ -351,7 +351,8 @@ pub copy enum SapError {
 }
 
 // Lbvh::build (module lbvh): `codes`, `prims` n slots, `leaf` 6n, `left`,
-// `right` n - 1, `node_box` 6(n - 1), `order` n and `stack` n + 1.
+// `right` n - 1, `node_box` 6(n - 1), `order` n, `stack` n + 1, `tk`/`tv` n
+// and `hist` 256.
 pub fn lbvh_build(
     in boxes: Slice[u32],
     inout codes: Slice[u64],
@@ -361,7 +362,10 @@ pub fn lbvh_build(
     inout right: Slice[u64],
     inout node_box: Slice[u32],
     inout order: Slice[u32],
-    inout stack: Slice[u64]
+    inout stack: Slice[u64],
+    inout tk: Slice[u64],
+    inout tv: Slice[u32],
+    inout hist: Slice[u32]
 ) eff [Fail[LbvhError]] {
     l_build(
         in boxes,
@@ -372,7 +376,10 @@ pub fn lbvh_build(
         inout right,
         inout node_box,
         inout order,
-        inout stack
+        inout stack,
+        inout tk,
+        inout tv,
+        inout hist
     );
 }
 
@@ -388,6 +395,10 @@ pub fn lbvh_pairs(
     in node_box: Slice[u32],
     inout stack: Slice[u64],
     inout out: Slice[u64],
+    inout tk: Slice[u64],
+    inout novals: Slice[u32],
+    inout tv: Slice[u32],
+    inout hist: Slice[u32],
     max_pairs: u64
 ) -> u64 {
     l_pairs(
@@ -399,6 +410,10 @@ pub fn lbvh_pairs(
         in node_box,
         inout stack,
         inout out,
+        inout tk,
+        inout novals,
+        inout tv,
+        inout hist,
         max_pairs
     )
 }

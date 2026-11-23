@@ -64,8 +64,8 @@ filegroup(
         (
             "lbvh",
             "lbvh",
-            "if q > p && boxes_overlap(in leaf, p, in leaf, q) {",
-            "if q > inc(p) && boxes_overlap(in leaf, p, in leaf, q) {",
+            "if q > p {",
+            "if q > inc(p) {",
         ),
         (
             "sap",
