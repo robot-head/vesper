@@ -490,7 +490,6 @@ impl CoreSpec {
         port::result(self, w[0], w[1], w[2])
     }
 
-
     /// Candidate ids for this relocation's root in `target`: same
     /// essential name, compatible kind. With `from`, only ids at or above
     /// it (the module's own types in a split BTF).
@@ -510,7 +509,6 @@ impl CoreSpec {
             .map(|i| i as u32)
             .collect()
     }
-
 
     /// The value for the target kernel described by `target`, matching
     /// only `cands`; `None` when no candidate gives a value.
@@ -545,12 +543,10 @@ impl CoreSpec {
         Ok(w[1..].to_vec())
     }
 
-
     fn combine(&self, results: Vec<u64>) -> Result<u64, CoreError> {
         let w = crate::port::ffi::core_combine(self.kind.code().into(), &results);
         port::result(self, w[0], w[1], 0)
     }
-
 
     /// The value for the target kernel described by `target`.
     pub fn target_value(&self, target: &Btf) -> Result<u64, CoreError> {
@@ -586,7 +582,6 @@ impl CoreSpec {
         }
         self.combine(all)
     }
-
 
     /// Walk the access path in target type `cand`; `None` when a member is
     /// missing or of an incompatible kind (the candidate does not match).
@@ -881,7 +876,6 @@ pub fn patch(
         }),
     }
 }
-
 
 /// Apply every relocation of `prog` for `target`; the result carries the
 /// target values and no relocations.

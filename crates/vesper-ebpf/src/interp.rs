@@ -39,18 +39,15 @@ pub fn alu_concrete(op: AluOp, wide: bool, a: u64, b: u64) -> u64 {
     crate::port::ffi::interp_alu_concrete(op, wide, a, b)
 }
 
-
 /// Concrete conditional-jump semantics.
 pub fn cmp_concrete(op: JmpOp, wide: bool, a: u64, b: u64) -> bool {
     crate::port::ffi::interp_cmp_concrete(op, wide, a, b)
 }
 
-
 /// Concrete `BPF_END` semantics on a little-endian target.
 pub fn endian(kind: Endian, bits: u8, v: u64) -> u64 {
     crate::port::ffi::interp_endian(kind, bits, v)
 }
-
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InterpError {

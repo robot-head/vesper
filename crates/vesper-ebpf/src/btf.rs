@@ -407,7 +407,6 @@ impl Btf {
         Ok(b)
     }
 
-
     /// The string section (the base's first for split BTF).
     pub(crate) fn strings(&self) -> &[u8] {
         &self.strings

@@ -68,4 +68,3 @@ pub fn check_stack(
 ) -> Result<u32, StackError> {
     crate::port::check_stack(g, root, limit, max_frames)
 }
-

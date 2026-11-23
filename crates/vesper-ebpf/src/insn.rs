@@ -257,8 +257,7 @@ pub enum AluOp {
     Arsh,
 }
 
-impl AluOp {
-}
+impl AluOp {}
 
 /// Byte-order conversion (`BPF_END`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -287,8 +286,6 @@ pub enum JmpOp {
 }
 
 impl JmpOp {
-
-
     /// The condition that holds on the fall-through edge.
     pub fn negate(self) -> JmpOp {
         match self {
@@ -344,8 +341,6 @@ impl Size {
         }
     }
 
-
-
     pub fn from_bytes(n: u32) -> Option<Size> {
         Some(match n {
             1 => Size::B,
@@ -369,8 +364,6 @@ pub enum AtomicOp {
 }
 
 impl AtomicOp {
-
-
     pub fn fetches(self) -> bool {
         match self {
             AtomicOp::Add { fetch }
@@ -524,8 +517,6 @@ impl fmt::Display for DecodeError {
 }
 
 impl std::error::Error for DecodeError {}
-
-
 
 /// Decode the instruction starting at slot `pc`.
 pub fn decode(slots: &[RawInsn], pc: usize) -> Result<Insn, DecodeError> {

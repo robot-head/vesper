@@ -839,7 +839,6 @@ pub fn verify(prog: &Program, policy: &VerifierPolicy) -> Result<VerifyReport, V
     crate::port::verify(prog, policy)
 }
 
-
 /// Run the verifier and return contract-shaped findings (empty = accepted).
 pub fn findings(prog: &Program, policy: &VerifierPolicy) -> Vec<VerifierFinding> {
     match verify(prog, policy) {
@@ -3484,8 +3483,6 @@ pub fn scalar_alu(op: AluOp, wide: bool, a: Scalar, b: Scalar) -> Scalar {
     crate::port::ffi::verifier_scalar_alu(op, wide, a, b)
 }
 
-
-
 /// Refine `(a, b)` assuming `a op b` holds (`holds = true`) or does not.
 /// `None` means that outcome is impossible.
 pub fn refine_jmp(
@@ -3498,9 +3495,7 @@ pub fn refine_jmp(
     crate::port::ffi::verifier_refine_jmp(op, wide, a, b, holds)
 }
 
-
 /// Used by tests: the abstract value of a constant.
 pub fn sext_imm(imm: i32, bits: u32) -> u64 {
     crate::port::ffi::verifier_sext_imm(imm, bits)
 }
-

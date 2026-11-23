@@ -45,16 +45,13 @@ impl MapKind {
         crate::port::ffi::program_map_kernel_type(self)
     }
 
-
     pub fn from_kernel_type(t: u32) -> Option<MapKind> {
         crate::port::ffi::program_map_from_kernel_type(t)
     }
 
-
     pub fn is_array(self) -> bool {
         crate::port::ffi::program_map_is_array(self)
     }
-
 }
 
 /// A map the program references. In a [`Program`], `LD_IMM64` with
@@ -101,7 +98,6 @@ impl MapDef {
     pub fn validate(&self) -> Result<(), String> {
         crate::port::map_validate(self)
     }
-
 }
 
 /// Program types this crate verifies.
@@ -131,18 +127,15 @@ impl ProgramType {
         crate::port::ffi::program_prog_kernel_type(self)
     }
 
-
     pub fn from_kernel_type(t: u32) -> Option<ProgramType> {
         crate::port::ffi::program_prog_from_kernel_type(t)
     }
-
 
     /// Whether the program reads and writes packet bytes directly
     /// (`data`/`data_end` in its context).
     pub fn has_packet(self) -> bool {
         crate::port::ffi::program_has_packet(self)
     }
-
 
     /// Whether `BPF_PROG_TEST_RUN` can execute the program type.
     pub fn test_runnable(self) -> bool {
@@ -154,7 +147,6 @@ impl ProgramType {
     pub fn is_tracing(self) -> bool {
         crate::port::ffi::program_is_tracing(self)
     }
-
 }
 
 /// A kernel function (kfunc) call site: `CALL` with `src = 2` whose
