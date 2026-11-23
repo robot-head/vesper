@@ -387,9 +387,9 @@ fn float_coefficients_are_constants() {
 
 #[test]
 fn narrow_extend_constant_chains_fold() {
-    let source = "fn clz_like(v: u64) -> u64 {
+    let source = "fn clz_like(v: u64, k: u32) -> u64 {
     if v == 0 {
-        return 64;
+        return wrapping_add(64, widen_u64(k));
     }
     let mut x = v;
     let mut n: u64 = 0;
@@ -401,10 +401,11 @@ fn narrow_extend_constant_chains_fold() {
         n = wrapping_add(n, 16);
         x = x << 16;
     }
-    n
+    let y: u32 = wrapping_u32(widen_u64(k));
+    wrapping_add(n, widen_u64(y))
 }
 fn main() -> u64 {
-    wrapping_add(clz_like(0), clz_like(12345))
+    wrapping_add(clz_like(0, 10), clz_like(12345, 20))
 }";
     let c = accepted(source);
     let (_, clif) = native::object(&c.world, "main").unwrap();
@@ -413,8 +414,8 @@ fn main() -> u64 {
         "early-return guard should not outline the hot body:\n{clif}"
     );
     assert!(
-        !clif.contains("ireduce"),
-        "expected constant narrow-extend chains to fold:\n{clif}"
+        clif.matches("ireduce").count() <= 2,
+        "expected constant/round-trip narrow-extend chains to fold:\n{clif}"
     );
-    assert_eq!(agree(source), "112");
+    assert_eq!(agree(source), "142");
 }

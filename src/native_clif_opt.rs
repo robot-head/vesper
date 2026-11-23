@@ -2067,6 +2067,7 @@ fn fold_narrow_extends(func: &mut ir::Function) {
                     let inner_ty = func.dfg.value_type(inner);
                     if inner_ty == dst_ty {
                         func.layout.remove_inst(inst);
+                        func.dfg.clear_results(inst);
                         func.dfg.change_to_alias(dest, inner);
                         changed = true;
                     } else if inner_ty.bits() < dst_ty.bits() {
