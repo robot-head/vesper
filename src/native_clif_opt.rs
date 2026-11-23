@@ -38,6 +38,7 @@ use cranelift_codegen::ir::{
     self, Block, BlockArg, Inst, InstBuilder, InstructionData, Opcode, StackSlot, StackSlotKind,
     Type, Value, types,
 };
+use cranelift_codegen::loop_analysis::{Loop, LoopAnalysis};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Run every step on `func`.
@@ -66,6 +67,7 @@ pub fn run(func: &mut ir::Function) {
     }
     remove_dead(func);
     share_invariant_loads(func);
+    hoist_loop_invariants(func);
     sink_slot_inits(func);
     merge_tails(func);
     shrink_unused_slots(func);
@@ -2287,6 +2289,160 @@ fn fold_trivial_arith_and_bool_extends(func: &mut ir::Function) {
         }
         if !changed {
             break;
+        }
+    }
+}
+
+/// Hoist pure loop-invariant instructions (and `notrap readonly can_move`
+/// loads) out of single-preheader loops into their unconditional preheader,
+/// innermost loop first.
+fn hoist_loop_invariants(func: &mut ir::Function) {
+    let cfg = ControlFlowGraph::with_function(func);
+    let domtree = DominatorTree::with_function(func, &cfg);
+    let mut loops = LoopAnalysis::new();
+    loops.compute(func, &cfg, &domtree);
+
+    let mut seen: HashSet<Loop> = HashSet::new();
+    let mut ordered: Vec<(usize, Loop)> = vec![];
+    for block in func.layout.blocks() {
+        let mut cur = loops.innermost_loop(block);
+        while let Some(lp) = cur {
+            if seen.insert(lp) {
+                let mut depth = 0usize;
+                let mut p = loops.loop_parent(lp);
+                while let Some(parent) = p {
+                    depth += 1;
+                    p = loops.loop_parent(parent);
+                }
+                ordered.push((depth, lp));
+            }
+            cur = loops.loop_parent(lp);
+        }
+    }
+    ordered.sort_by_key(|a| std::cmp::Reverse(a.0));
+
+    let in_loop = |b: Block, lp: Loop| -> bool {
+        let mut cur = loops.innermost_loop(b);
+        while let Some(l) = cur {
+            if l == lp {
+                return true;
+            }
+            cur = loops.loop_parent(l);
+        }
+        false
+    };
+
+    for (_, lp) in ordered {
+        let header = loops.loop_header(lp);
+        let mut outside_preds: Vec<Block> = cfg
+            .pred_iter(header)
+            .map(|p| p.block)
+            .filter(|&p| !in_loop(p, lp))
+            .collect();
+        outside_preds.sort_unstable();
+        outside_preds.dedup();
+        let [preheader] = outside_preds[..] else {
+            continue;
+        };
+        if !domtree.dominates(preheader, header, &func.layout) {
+            continue;
+        }
+        let Some(term) = func.layout.last_inst(preheader) else {
+            continue;
+        };
+        if !matches!(
+            func.dfg.insts[term],
+            InstructionData::Jump {
+                opcode: Opcode::Jump,
+                ..
+            }
+        ) {
+            continue;
+        }
+
+        let loop_blocks: Vec<Block> = func.layout.blocks().filter(|&b| in_loop(b, lp)).collect();
+
+        for _ in 0..4 {
+            let mut changed = false;
+            for &b in &loop_blocks {
+                let body: Vec<Inst> = func.layout.block_insts(b).collect();
+                for inst in body {
+                    if func.dfg.inst_results(inst).is_empty() {
+                        continue;
+                    }
+                    let hoistable = match &func.dfg.insts[inst] {
+                        InstructionData::Load {
+                            opcode:
+                                Opcode::Load
+                                | Opcode::Uload8
+                                | Opcode::Sload8
+                                | Opcode::Uload16
+                                | Opcode::Sload16
+                                | Opcode::Uload32
+                                | Opcode::Sload32,
+                            flags,
+                            ..
+                        } => flags.notrap() && flags.readonly() && flags.can_move(),
+                        data => matches!(
+                            data.opcode(),
+                            Opcode::Iconst
+                                | Opcode::F32const
+                                | Opcode::F64const
+                                | Opcode::Iadd
+                                | Opcode::IaddImm
+                                | Opcode::Isub
+                                | Opcode::Imul
+                                | Opcode::ImulImm
+                                | Opcode::Ishl
+                                | Opcode::Ushr
+                                | Opcode::Sshr
+                                | Opcode::Band
+                                | Opcode::Bor
+                                | Opcode::Bxor
+                                | Opcode::Bnot
+                                | Opcode::Ineg
+                                | Opcode::Uextend
+                                | Opcode::Sextend
+                                | Opcode::Ireduce
+                                | Opcode::Fadd
+                                | Opcode::Fsub
+                                | Opcode::Fmul
+                                | Opcode::Fneg
+                                | Opcode::Fabs
+                                | Opcode::Bitcast
+                                | Opcode::FcvtFromUint
+                                | Opcode::FcvtFromSint
+                                | Opcode::Icmp
+                                | Opcode::IcmpImm
+                                | Opcode::Fcmp
+                                | Opcode::Select
+                        ),
+                    };
+                    if !hoistable {
+                        continue;
+                    }
+                    let all_outside = values_of(func, inst).into_iter().all(|v| {
+                        let def_block = match func.dfg.value_def(v) {
+                            ir::ValueDef::Result(d, _) => func.layout.inst_block(d),
+                            ir::ValueDef::Param(pb, _) => Some(pb),
+                            ir::ValueDef::Union(_, _) => None,
+                        };
+                        def_block.is_some_and(|db| {
+                            !in_loop(db, lp) && domtree.dominates(db, preheader, &func.layout)
+                        })
+                    });
+                    if !all_outside {
+                        continue;
+                    }
+                    let term = func.layout.last_inst(preheader).unwrap();
+                    func.layout.remove_inst(inst);
+                    func.layout.insert_inst(inst, term);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
         }
     }
 }

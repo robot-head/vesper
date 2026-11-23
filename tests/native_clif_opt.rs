@@ -466,3 +466,34 @@ fn main() -> u64 {
     );
     assert_eq!(agree(source), "110");
 }
+
+#[test]
+fn loop_invariants_hoist_to_preheader() {
+    let source = "fn main() -> u64 {
+    let mut acc: u64 = 0;
+    let end_k: u64 = 3;
+    for k in 0..end_k {
+        let a = wrapping_add(k, 2);
+        let b = wrapping_add(k, 5);
+        for i in 0..10 {
+            let scale = wrapping_mul(a, b);
+            acc = wrapping_add(acc, wrapping_add(i, scale));
+        }
+    }
+    acc
+}";
+    let c = accepted(source);
+    let (_, clif) = native::object(&c.world, "main").unwrap();
+    // `imul` is loop-invariant in the inner `0..10` loop, so it must be
+    // hoisted into the preheader rather than appearing in the same block as
+    // the inner loop body's `iadd`s.
+    let inner_body = clif
+        .split("\n\n")
+        .find(|blk| blk.trim_start().starts_with("block5:"))
+        .unwrap_or("");
+    assert!(
+        !inner_body.is_empty() && !inner_body.contains("imul"),
+        "expected loop-invariant imul to hoist out of inner loop:\n{clif}"
+    );
+    assert_eq!(agree(source), "695");
+}
