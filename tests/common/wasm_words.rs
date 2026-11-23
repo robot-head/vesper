@@ -13,9 +13,12 @@
 
 use super::check_words::{Enc, pass_word};
 use super::ir_words::{self, Payload, Tables};
-use vesper::ast::{Effect, Effects, Expr, ExprKind, Function, Literal, Pattern, PatternKind};
+use std::borrow::Cow;
+use std::collections::BTreeSet;
+use vesper::ast::{Effect, Effects, Expr, ExprKind, Function, Literal, Pass, Pattern, PatternKind};
 use vesper::check::World;
-use vesper::ir::Program;
+use vesper::ir::{Op, Program};
+use vesper::seq::SeqOp;
 use vesper::wasm_backend::{
     ENTRY_INTERFACE, EffectLowering, HandlerLowering, HandlerMode, WasmArtifact, WasmOptions,
     WasmWorld,
@@ -229,21 +232,46 @@ fn capability_names(w: &World) -> Vec<String> {
 /// calls: n, n x (start, end, k, k x (name, type))
 /// exprs: one per pool row: 0 | 1 closure fn, free | 2 handler (see `Sec::expr`)
 /// ```
-pub fn wasm_input(w: &World, program: &Program, entry: &str, o: &WasmOptions) -> Option<Vec<u8>> {
-    // A mutable element view (`match s.try_get_mut(i) { Some(x) => .. }`,
-    // an `inout s[i]` argument) binds a sequence element in place; the port
-    // does not lower one yet (#1506), so the program stays with Rust. A
-    // shared view reads the element, which is what the port binds.
-    if w.element_views
-        .values()
-        .any(|p| *p == vesper::ast::Pass::Inout)
-    {
-        return None;
+// Place IR represents both element views as TryGet. Mark the mutable receiver
+// in the Wasm input so the port can reject it when the function is reachable.
+// If a source view cannot be matched to an instruction, use the Rust fallback.
+fn wasm_element_views<'a>(w: &World, program: &'a Program) -> Option<Cow<'a, Program>> {
+    let mut unmatched: BTreeSet<_> = w
+        .element_views
+        .iter()
+        .filter_map(|(span, pass)| (*pass == Pass::Inout).then_some(*span))
+        .collect();
+    if unmatched.is_empty() {
+        return Some(Cow::Borrowed(program));
     }
+    let mut marked = program.clone();
+    for i in marked
+        .functions
+        .values_mut()
+        .flat_map(|f| &mut f.blocks)
+        .flat_map(|b| &mut b.instructions)
+    {
+        let span = (i.span.start, i.span.end);
+        if w.element_views.get(&span) == Some(&Pass::Inout)
+            && let Op::Seq {
+                op: SeqOp::TryGet,
+                args,
+            } = &mut i.op
+            && let Some(receiver) = args.first_mut()
+        {
+            receiver.pass = Pass::Inout;
+            unmatched.remove(&span);
+        }
+    }
+    unmatched.is_empty().then_some(Cow::Owned(marked))
+}
+
+pub fn wasm_input(w: &World, program: &Program, entry: &str, o: &WasmOptions) -> Option<Vec<u8>> {
     if !ir_words::encodable(w, program) {
         return None;
     }
-    let mut t = Tables::of(program);
+    let program = wasm_element_views(w, program)?;
+    let mut t = Tables::of(&program);
     let labels: Vec<String> = t
         .pool
         .items
