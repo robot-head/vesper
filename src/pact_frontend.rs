@@ -479,6 +479,93 @@ pub fn install_pact_session(table: PactSessionTable) -> Result<(), PactSessionTa
     PACT_SESSION.set(table)
 }
 
+/// Probe input for differential verification of `TraitCalls::resolve`
+/// (`#1612`, SH2 lane 13 part 3).
+#[doc(hidden)]
+pub struct ResolveCallProbe<'a> {
+    pub callee: &'a str,
+    pub path: bool,
+    pub receiver: Type,
+    pub generics: &'a [Generic],
+    pub function: &'a str,
+    pub span: Span,
+}
+
+/// Probe input for differential verification of `Elaborator::normalize`
+/// (`#1612`, SH2 lane 13 part 3).
+#[doc(hidden)]
+pub struct NormalizeProbe<'a> {
+    pub ty: Type,
+    pub generics: &'a [Generic],
+    pub function: &'a str,
+    pub at: usize,
+    pub span: Span,
+}
+
+/// Differential probe result returned by [`probe_resolve_and_normalize`].
+#[doc(hidden)]
+pub struct ProbeOutcome {
+    pub calls: Vec<Option<Result<String, Diagnostic>>>,
+    pub norms: Vec<Result<Type, Diagnostic>>,
+}
+
+/// Differential reference oracle for `TraitCalls::resolve` and
+/// `Elaborator::normalize` over a dependency-free module (`#1612`).
+#[doc(hidden)]
+pub fn probe_resolve_and_normalize(
+    module: &Module,
+    base_world: &World,
+    identity: &PackageIdentity,
+    calls: &[ResolveCallProbe<'_>],
+    norms: &[NormalizeProbe<'_>],
+) -> Result<ProbeOutcome, Vec<Diagnostic>> {
+    let mut fe = Frontend::with_base(
+        module,
+        base_module(module),
+        base_world.clone(),
+        identity,
+        &FrontendOptions::default(),
+    )?;
+    let session = fe.build_session()?;
+    let elab = Elaborator {
+        spans: mono::SpanMap::new(&fe.module),
+        instances: RefCell::new(BTreeMap::new()),
+        dyn_params: BTreeMap::new(),
+        dyn_boxed: BTreeSet::new(),
+        dyn_vtables: RefCell::new(vec![]),
+        dyn_instance_params: RefCell::new(BTreeMap::new()),
+        dyn_thunks: RefCell::new(vec![]),
+        fe,
+        session: SessionBackend::Rust(Box::new(session)),
+        evidence: RefCell::new(BTreeMap::new()),
+        normalizing: RefCell::new(vec![]),
+    };
+    let call_res = calls
+        .iter()
+        .map(|c| {
+            TraitCalls::resolve(
+                &elab,
+                &crate::check::TraitCall {
+                    callee: c.callee,
+                    path: c.path,
+                    receiver: c.receiver.clone(),
+                    generics: c.generics,
+                    function: c.function,
+                    span: c.span.clone(),
+                },
+            )
+        })
+        .collect();
+    let norm_res = norms
+        .iter()
+        .map(|n| elab.normalize(&n.ty, n.generics, n.function, n.at, &n.span))
+        .collect();
+    Ok(ProbeOutcome {
+        calls: call_res,
+        norms: norm_res,
+    })
+}
+
 /// [`DeclarationPassTable::diagnostics`] in Rust: `Frontend::new` without
 /// dependencies.
 pub fn rust_declaration_diagnostics(
