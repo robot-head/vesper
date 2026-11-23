@@ -1,0 +1,8 @@
+// Windows stub for `@vesper/pulse`.
+sys library PulseSys (
+    target = "@TARGET@", abi = "@ABI@",
+    link = "dynamic", name = "kernel32",
+    artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+) {
+    const EPOLL_DATA_WORD: u64 = 1;
+}

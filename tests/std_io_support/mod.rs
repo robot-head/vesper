@@ -234,6 +234,12 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         fn memset(dst: *mut c_void, byte: i32, n: usize) -> *mut c_void;
         fn syscall(nr: i64, ...) -> i64;
         fn ioctl(fd: i32, req: u64, ...) -> i32;
+        #[cfg(target_os = "linux")]
+        fn epoll_create1(flags: i32) -> i32;
+        #[cfg(target_os = "linux")]
+        fn epoll_ctl(epfd: i32, op: i32, fd: i32, event: *mut c_void) -> i32;
+        #[cfg(target_os = "linux")]
+        fn epoll_wait(epfd: i32, events: *mut c_void, maxevents: i32, timeout: i32) -> i32;
         fn mmap(
             addr: *mut c_void,
             len: usize,
@@ -289,7 +295,7 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         #[cfg_attr(not(target_os = "macos"), link_name = "__errno_location")]
         fn errno_address() -> *mut i32;
     }
-    vec![
+    let mut syms = vec![
         ("open", open as *const u8),
         ("read", read as *const u8),
         ("write", write as *const u8),
@@ -381,7 +387,14 @@ fn libc_symbols() -> Vec<(&'static str, *const u8)> {
         ("ioctl", ioctl as *const u8),
         ("mmap", mmap as *const u8),
         ("munmap", munmap as *const u8),
-    ]
+    ];
+    #[cfg(target_os = "linux")]
+    {
+        syms.push(("epoll_create1", epoll_create1 as *const u8));
+        syms.push(("epoll_ctl", epoll_ctl as *const u8));
+        syms.push(("epoll_wait", epoll_wait as *const u8));
+    }
+    syms
 }
 #[cfg(windows)]
 fn libc_symbols() -> Vec<(&'static str, *const u8)> {

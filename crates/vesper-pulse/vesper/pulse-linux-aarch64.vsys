@@ -1,0 +1,42 @@
+// Linux aarch64 `epoll` & `close` bindings for `@vesper/pulse` (#1681).
+sys library PulseSys (
+    target = "@TARGET@", abi = "@ABI@",
+    link = "dynamic", name = "c",
+    artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+) {
+    const EPOLL_DATA_WORD: u64 = 2;
+    const EPOLL_CLOEXEC: i32 = 524288;
+    const EPOLL_CTL_ADD: i32 = 1;
+    const EPOLL_CTL_DEL: i32 = 2;
+    const EPOLL_CTL_MOD: i32 = 3;
+    const EPOLLIN: u32 = 1;
+    const EPOLLOUT: u32 = 4;
+    const EPOLLRDHUP: u32 = 8192;
+    const EPOLLONESHOT: u32 = 1073741824;
+    const EPERM_ERR: u32 = 1;
+    const EINTR_ERR: u32 = 4;
+
+    // On aarch64 Linux, `struct epoll_event` is 16 bytes (events @ 0, pad @ 4, data @ 8).
+    wire struct EpollEvent {
+        w0: u32,
+        w1: u32,
+        w2: u32,
+        w3: u32,
+    }
+
+    wire struct PipeFds {
+        read_fd: i32,
+        write_fd: i32,
+    }
+
+    fn epoll_create1(flags: i32) -> ForeignVal[i32] errno;
+    #[link_name = "epoll_ctl"]
+    fn epoll_ctl_add_mod(epfd: i32, op: i32, fd: i32, nocapture in event: EpollEvent) -> ForeignVal[i32] errno;
+    #[link_name = "epoll_ctl"]
+    fn epoll_ctl_del(epfd: i32, op: i32, fd: i32, event_null: u64) -> ForeignVal[i32] errno;
+    fn epoll_wait(epfd: i32, nocapture inout event: EpollEvent, maxevents: i32, timeout: i32) -> ForeignVal[i32] errno;
+    fn pipe2(nocapture inout fds: PipeFds, flags: i32) -> ForeignVal[i32] errno;
+    #[link_name = "write"]
+    fn write_byte(fd: i32, nocapture in byte_val: u8, count: u64) -> ForeignVal[i64] errno;
+    fn close(fd: i32) -> ForeignVal[i32] errno;
+}

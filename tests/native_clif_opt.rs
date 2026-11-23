@@ -637,3 +637,53 @@ fn main() -> u64 {
         "expected guarded fast-loop pb0 join-param iadd overflow check to be eliminated:\n{clif}"
     );
 }
+
+#[test]
+fn brif_preheader_hoists_reassociated_address_arithmetic() {
+    let source = "fn copy_strided(in src: Slice[u8], inout dst: Slice[u32], blocks: u64) eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+    for b in 0..blocks {
+        let base = 16 * b;
+        for i in 0..16 {
+            let v = widen_u32(src[2 + i]);
+            dst.set(base + i, v);
+        }
+    }
+}
+fn main() -> u64 {
+    let mut a = ChunkSeq::new[u8]();
+    let mut b = ChunkSeq::new[u32]();
+    for i in 0..20 {
+        a.push(wrapping_u8(i));
+    }
+    for _ in 0..32 {
+        b.push(0);
+    }
+    handle Fail[ArithOverflow] in {
+        handle Fail[RuntimeError] in {
+            copy_strided(in a.as_slice(), inout b.as_slice_mut(), 2);
+            match b.try_get(19) {
+                Option::Some(v) => widen_u64(v),
+                Option::None => 999,
+            }
+        } with {
+            return x => x,
+            raise(_, _) => 998,
+        }
+    } with {
+        return x => x,
+        raise(_, _) => 997,
+    }
+}";
+    let c = accepted(source);
+    let (_, clif) = native::object(&c.world, "main").unwrap();
+    assert_eq!(agree(source), "5");
+    let fast_body = clif
+        .split("\n\n")
+        .find(|blk| blk.contains("uload8") && blk.contains("istore32"))
+        .unwrap_or("");
+    let imul_count = fast_body.matches("imul_imm").count();
+    assert!(
+        !fast_body.is_empty() && imul_count <= 1,
+        "expected invariant base/scale arithmetic to hoist into brif preheader (imul_imm={imul_count}):\n{fast_body}"
+    );
+}
