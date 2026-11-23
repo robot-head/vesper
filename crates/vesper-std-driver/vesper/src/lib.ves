@@ -1,4 +1,4 @@
-// @export vsys StdFs rust=crate::fs
+// @export vsys StdFs
 // @export vsys StdProcess rust=crate::process
 // @export vsys StdEnv
 //
