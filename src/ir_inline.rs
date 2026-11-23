@@ -1319,6 +1319,7 @@ fn splice(
                 dest,
                 op: Op::Bind {
                     pattern: Pattern {
+                        integer_kind: None,
                         kind: PatternKind::Bind(rename.names[&p.name].clone()),
                         span: call.span.clone(),
                     },

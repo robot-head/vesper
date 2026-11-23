@@ -1524,6 +1524,7 @@ impl Dec<'_> {
         let span = self.usize()..self.usize();
         if depth > 512 {
             return Pattern {
+                integer_kind: None,
                 kind: PatternKind::Wild,
                 span,
             };
@@ -1553,7 +1554,11 @@ impl Dec<'_> {
             }
             _ => PatternKind::Wild,
         };
-        Pattern { kind, span }
+        Pattern {
+            kind,
+            span,
+            integer_kind: None,
+        }
     }
 
     fn args(&mut self) -> Vec<Argument> {
