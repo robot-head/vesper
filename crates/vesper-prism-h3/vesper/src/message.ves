@@ -44,8 +44,15 @@ const MAX_CONTENT_LENGTH_DIGITS: u64 = 19;
 const DECIMAL_BASE: u64 = 10;
 // RFC 9110 §15: a status code is three digits, 100..=599.
 const STATUS_DIGITS: u64 = 3;
-const STATUS_MIN: u64 = 100;
-const STATUS_MAX: u64 = 599;
+pub enum HttpStatus: _ {
+    Continue = 100,
+    SwitchingProtocols = 101,
+    Ok = 200,
+    NoContent = 204,
+    MultipleChoices = 300,
+    NotModified = 304,
+    Max = 599,
+}
 const ASCII_TAB: u8 = 0x09;
 const ASCII_SPACE: u8 = 0x20;
 const ASCII_ZERO: u8 = 0x30;
@@ -422,7 +429,7 @@ pub fn message_parse_response(in b: Slice[u8], in meta: Slice[u64])
     if !seen {
         return Result::Err(MessageError::MissingPseudoHeader);
     }
-    if status < STATUS_MIN || status > STATUS_MAX {
+    if status < HttpStatus::Continue || status > HttpStatus::Max {
         return Result::Err(MessageError::InvalidStatus);
     }
     let cl = match content_length(in b, in meta, pseudo) {

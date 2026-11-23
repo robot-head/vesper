@@ -93,6 +93,8 @@ use self::pool::{
     hev_buf_new
 };
 use self::session::{
+    CODE_DATAGRAM_ERROR,
+    CODE_EXCESSIVE_LOAD,
     session_table_new,
     session_known_gone,
     incoming_wt_stream_fin,
@@ -102,6 +104,21 @@ use self::session::{
 const STREAM_CONTROL: u64 = 0x00;
 const STREAM_QPACK_ENCODER: u64 = 0x02;
 const STREAM_QPACK_DECODER: u64 = 0x03;
+
+// Application error codes (RFC 9114 §8.1 and RFC 9204 §6).
+enum ConnectionCode: u64 {
+    InternalError = 0x102,
+    StreamCreationError = 0x103,
+    ClosedCriticalStream = 0x104,
+    FrameUnexpected = 0x105,
+    FrameError = 0x106,
+    IdError = 0x108,
+    SettingsError = 0x109,
+    MissingSettings = 0x10a,
+    QpackDecompressionFailed = 0x200,
+    QpackEncoderStreamError = 0x201,
+    QpackDecoderStreamError = 0x202,
+}
 
 pub const FLUSH_STATUS_OK: u64 = 0;
 pub const FLUSH_STATUS_BLOCKED: u64 = 1;
@@ -208,38 +225,38 @@ pub fn connection_error_code(e: ConnectionError) -> u64 {
             stream_id: _sid,
             error: error
         } => match error {
-            FrameError::Malformed => 0x106,
+            FrameError::Malformed => ConnectionCode::FrameError,
             FrameError::TooLarge {
                 frame_type: _ft,
                 len: _len
-            } => 0x107,
-            FrameError::Http2Frame(_) => 0x105,
-            FrameError::BadSetting(_) => 0x109,
+            } => CODE_EXCESSIVE_LOAD,
+            FrameError::Http2Frame(_) => ConnectionCode::FrameUnexpected,
+            FrameError::BadSetting(_) => ConnectionCode::SettingsError,
         },
         ConnectionError::Qpack(q) => match q {
-            QpackError::Decompression(_) => 0x200,
-            QpackError::EncoderStream(_) => 0x201,
-            QpackError::DecoderStream(_) => 0x202,
+            QpackError::Decompression(_) => ConnectionCode::QpackDecompressionFailed,
+            QpackError::EncoderStream(_) => ConnectionCode::QpackEncoderStreamError,
+            QpackError::DecoderStream(_) => ConnectionCode::QpackDecoderStreamError,
             QpackError::FieldSectionTooLarge {
                 stream_id: _sid
-            } => 0x107,
+            } => CODE_EXCESSIVE_LOAD,
         },
         ConnectionError::FrameUnexpected {
             stream_id: _sid,
             frame_type: _ft
-        } => 0x105,
-        ConnectionError::MissingSettings => 0x10a,
+        } => ConnectionCode::FrameUnexpected,
+        ConnectionError::MissingSettings => ConnectionCode::MissingSettings,
         ConnectionError::StreamCreation {
             stream_id: _sid
-        } => 0x103,
+        } => ConnectionCode::StreamCreationError,
         ConnectionError::ClosedCriticalStream {
             stream_id: _sid
-        } => 0x104,
-        ConnectionError::BadGoaway(_) => 0x108,
-        ConnectionError::BadPushId(_) => 0x108,
-        ConnectionError::BadStreamId(_) => 0x108,
-        ConnectionError::Transport(_) => 0x102,
-        ConnectionError::Datagram => 0x33,
+        } => ConnectionCode::ClosedCriticalStream,
+        ConnectionError::BadGoaway(_) => ConnectionCode::IdError,
+        ConnectionError::BadPushId(_) => ConnectionCode::IdError,
+        ConnectionError::BadStreamId(_) => ConnectionCode::IdError,
+        ConnectionError::Transport(_) => ConnectionCode::InternalError,
+        ConnectionError::Datagram => CODE_DATAGRAM_ERROR,
     }
 }
 

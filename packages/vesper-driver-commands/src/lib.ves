@@ -35,6 +35,28 @@ use @vesper-std/fs::{
     IoError
 };
 
+enum Ascii: _ {
+    LineFeed = 10,
+    DoubleQuote = 34,
+    Dash = 45,
+    Slash = 47,
+    Digit0 = 48,
+    Digit9 = 57,
+    Colon = 58,
+    Semicolon = 59,
+    UpperA = 65,
+    UpperZ = 90,
+    Backslash = 92,
+    Underscore = 95,
+    LowerA = 97,
+    LowerZ = 122,
+    NonAsciiStart = 128,
+}
+
+const HOST_TEXT_INITIAL_BYTES: u64 = 256;
+const ERROR_TEXT_INITIAL_BYTES: u64 = 128;
+const SIGNAL_EXIT_BASE: i64 = 128;
+
 // `run`'s result when the Rust CLI should run the command instead (the
 // driver's `delegate()`).
 pub fn delegate() -> i64 {
@@ -92,7 +114,7 @@ pub fn run(in args: Args)
     }
     // `tool_commands::dispatch` leaves options and the compiler's own
     // commands to the CLI.
-    if byte_at(in c, 0) == 45 {
+    if byte_at(in c, 0) == Ascii::Dash {
         if eq(in c, in "--help") || eq(in c, in "-h") {
             HybridCommands::hc_help();
             return 0;
@@ -126,7 +148,7 @@ pub fn run(in args: Args)
 // Whether every byte of `c` is ASCII.
 fn ascii(in c: Slice[u8]) -> bool {
     for i in 0..c.len() {
-        if byte_at(in c, i) >= 128 {
+        if byte_at(in c, i) >= Ascii::NonAsciiStart {
             return false;
         }
     }
@@ -183,11 +205,10 @@ fn tool_name(in c: Slice[u8]) -> bool {
     }
     for i in 0..c.len() {
         let b = byte_at(in c, i);
-        let ok = (b >= 48 && b <= 57)
-            || (b >= 65 && b <= 90)
-            || (b >= 97 && b <= 122)
-            || b == 45
-            || b == 95;
+        let ok = (b >= Ascii::Digit0 && b <= Ascii::Digit9)
+            || ascii_letter(b)
+            || b == Ascii::Dash
+            || b == Ascii::Underscore;
         if !ok {
             return false;
         }
@@ -222,7 +243,7 @@ fn fail(in message: Slice[u8]) -> i64 eff [Ffi[HybridCommands]] {
     let mut line: ChunkSeq[u8] = ChunkSeq::new[u8]();
     line.extend(in "vesper: ".as_bytes());
     line.extend(in message);
-    line.push(10);
+    line.push(Ascii::LineFeed);
     print(stderr_stream(), in line.as_slice());
     1
 }
@@ -257,7 +278,7 @@ fn grown(n: i64, inout buf: ChunkSeq[u8], inout none: bool) -> bool {
 // Host text `which`, and whether it exists.
 fn host_text(which: u32, inout none: bool) -> ChunkSeq[u8] eff [Ffi[HybridCommands]] {
     let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    buf.resize(256, 0);
+    buf.resize(HOST_TEXT_INITIAL_BYTES, 0);
     loop {
         let n = HybridCommands::hc_text(which, 0, inout buf.as_slice_mut());
         if !grown(n, inout buf, inout none) {
@@ -275,7 +296,7 @@ fn host_text_or_empty(which: u32) -> ChunkSeq[u8] eff [Ffi[HybridCommands]] {
 // Rust's `Display` of the `io::Error` with this host error word.
 fn io_error_text(word: u64) -> ChunkSeq[u8] eff [Ffi[HybridCommands]] {
     let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    buf.resize(128, 0);
+    buf.resize(ERROR_TEXT_INITIAL_BYTES, 0);
     let mut none = false;
     loop {
         let n = HybridCommands::hc_io_error(word, inout buf.as_slice_mut());
@@ -297,7 +318,7 @@ fn version() -> i64 eff [Ffi[HybridCommands]] {
     b.extend(in " (stage3-ddc)\n   \\\\  //    target: ".as_bytes());
     let arch = host_text_or_empty(text_arch());
     b.extend(in arch.as_slice());
-    b.push(45);
+    b.push(Ascii::Dash);
     let os = host_text_or_empty(text_os());
     b.extend(in os.as_slice());
     b
@@ -324,7 +345,7 @@ fn binary_name(in t: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[StdEnv]] {
 }
 
 fn is_separator(b: u8, windows: bool) -> bool {
-    b == 47 || (windows && b == 92)
+    b == Ascii::Slash || (windows && b == Ascii::Backslash)
 }
 
 // `Path::join` of a relative `name`: an empty directory gives the name,
@@ -341,9 +362,9 @@ fn join(in dir: Slice[u8], in name: Slice[u8], windows: bool) -> ChunkSeq[u8] {
     }
     if dir.len() != 0 && !is_separator(byte_at(in dir, wrapping_sub(dir.len(), 1)), windows) {
         if windows {
-            p.push(92);
+            p.push(Ascii::Backslash);
         } else {
-            p.push(47);
+            p.push(Ascii::Slash);
         }
     }
     p.extend(in name);
@@ -353,11 +374,11 @@ fn join(in dir: Slice[u8], in name: Slice[u8], windows: bool) -> ChunkSeq[u8] {
 // Whether `dir` is a Windows drive prefix and nothing else: `X:` with `X`
 // an ASCII letter (a `Prefix::Disk`, the only prefix `is_drive()` accepts).
 fn bare_drive(in dir: Slice[u8]) -> bool {
-    dir.len() == 2 && ascii_letter(byte_at(in dir, 0)) && byte_at(in dir, 1) == 58
+    dir.len() == 2 && ascii_letter(byte_at(in dir, 0)) && byte_at(in dir, 1) == Ascii::Colon
 }
 
 fn ascii_letter(b: u8) -> bool {
-    (b >= 65 && b <= 90) || (b >= 97 && b <= 122)
+    (b >= Ascii::UpperA && b <= Ascii::UpperZ) || (b >= Ascii::LowerA && b <= Ascii::LowerZ)
 }
 
 fn same(in a: Slice[u8], in b: Slice[u8]) -> bool {
@@ -401,9 +422,9 @@ fn path_entries(in path: Slice[u8], windows: bool) -> ChunkSeq[u64] {
     let mut quoted = false;
     for i in 0..path.len() {
         let b = byte_at(in path, i);
-        if windows && b == 34 {
+        if windows && b == Ascii::DoubleQuote {
             quoted = !quoted;
-        } else if (!windows && b == 58) || (windows && !quoted && b == 59) {
+        } else if (!windows && b == Ascii::Colon) || (windows && !quoted && b == Ascii::Semicolon) {
             spans.push(start);
             spans.push(i);
             start = wrapping_add(i, 1);
@@ -455,7 +476,7 @@ fn locate(in t: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[StdEnv], Ffi[HybridCommands]
         let mut dir: ChunkSeq[u8] = ChunkSeq::new[u8]();
         for i in a..b {
             let c = byte_at(in path.as_slice(), i);
-            if !(windows && c == 34) {
+            if !(windows && c == Ascii::DoubleQuote) {
                 dir.push(c);
             }
         }
@@ -503,7 +524,7 @@ fn run_tool(in binary: Slice[u8], in args: Args) -> i64 eff [Ffi[StdProcess], Ff
             if st.exited {
                 st.code
             } else if st.signal != 0 {
-                wrapping_add(128, widen_i64(st.signal))
+                wrapping_add(SIGNAL_EXIT_BASE, widen_i64(st.signal))
             } else {
                 1
             }

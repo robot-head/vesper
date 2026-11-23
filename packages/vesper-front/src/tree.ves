@@ -20,6 +20,29 @@ use self::lex::{
     token_end
 };
 
+// Event words encode a token index, the start base plus the node kind,
+// or a finish.
+pub enum Event: _ {
+    NodeStartBase = 2147483648,
+    NodeFinish = 4294967295
+}
+
+// The rowan raw kinds after the token discriminants in vesper-syntax.
+pub enum NodeKind: _ {
+    Module = 200,
+    Item = 201,
+    Expr = 202,
+    Pattern = 203,
+    TypeNode = 204,
+    Block = 205,
+    Error = 206,
+    Incomplete = 207
+}
+
+enum Parent: _ {
+    Root = 4294967295
+}
+
 pub fn tree_new() -> Tree {
     Tree {
         node_kind: ChunkSeq::new[u8](),
@@ -43,20 +66,20 @@ pub fn build_events(inout tree: Tree, in t: Tokens, in ev: ChunkSeq[u32]) {
     tree.leaf_token.reserve(t.kind.len());
     for i in 0..ev.len() {
         let e = u32_at(in ev, i);
-        if e == 4294967295 {
+        if e == Event::NodeFinish {
             let last = wrapping_sub(open.len(), 1);
             let node = w32(in open, last);
             open.truncate(last);
             tree.node_end.try_set(node, narrow(offset));
-        } else if e >= 2147483648 {
+        } else if e >= Event::NodeStartBase {
             let parent = if open.len() == 0 {
                 // The root's parent is the node count, fixed up below.
-                4294967295
+                Parent::Root
             } else {
                 u32_at(in open, wrapping_sub(open.len(), 1))
             };
             let node = narrow(tree.node_kind.len());
-            tree.node_kind.push(wrapping_u8(wrapping_sub(e, 2147483648)));
+            tree.node_kind.push(wrapping_u8(wrapping_sub(e, Event::NodeStartBase)));
             tree.node_parent.push(parent);
             tree.node_start.push(narrow(offset));
             tree.node_end.push(narrow(offset));
@@ -96,7 +119,7 @@ pub fn report_into(inout out: ChunkSeq[u64], in tree: Tree, in t: Tokens, in d: 
         let parent = w32(in tree.node_parent, i);
         out
             .push(
-                if parent == 4294967295 {
+                if parent == Parent::Root {
                     nodes
                 } else {
                     parent

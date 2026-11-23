@@ -8,6 +8,13 @@
 // raises `K_NOT_PORTED`. Their absence also means the evidence key set is
 // empty, so every operation finds no frame and traps, as in Rust.
 
+use @vesper/place-ir::codes::{
+    Lit,
+    Op,
+    Pat,
+    PoolKind,
+    Term
+};
 use @vesper/check-data::util::{
     add,
     inc,
@@ -17,6 +24,8 @@ use @vesper/check-data::util::{
     w
 };
 use @vesper/check-data::types::{
+    TyKind,
+    TyPass,
     Vars,
     vars_new
 };
@@ -213,31 +222,6 @@ const R_OP_CLAUSE: u8 = 3;
 // clause modes (plan.ves)
 const M_ABORT: u8 = 0;
 const M_TAIL: u8 = 1;
-// check-data type kinds
-const K_NAMED: u8 = 1;
-const K_TUPLE: u8 = 2;
-const K_FN: u8 = 3;
-// Pass
-const P_INOUT: u8 = 1;
-// IR opcodes and terminators (ir_words.rs)
-const IR_CONST: u8 = 0;
-const IR_UNIT: u8 = 1;
-const IR_READ: u8 = 2;
-const IR_BIND: u8 = 3;
-const IR_WRITE: u8 = 4;
-const IR_UNARY: u8 = 5;
-const IR_BINARY: u8 = 6;
-const IR_TUPLE: u8 = 7;
-const IR_DATA: u8 = 8;
-const IR_PROJECT: u8 = 9;
-const IR_INDEX: u8 = 10;
-const IR_CALL: u8 = 11;
-const IR_INDIRECT: u8 = 12;
-const IR_TRY: u8 = 13;
-const IR_CLOSURE: u8 = 14;
-const IR_HANDLE: u8 = 15;
-const IR_LOOP: u8 = 20;
-const IR_EXIT: u8 = 21;
 // `Op::Seq` operations `seq_code` knows (#1506): the index of the
 // operation's `Debug` text in `L::seq_code`, from 1; Wide variants from
 // SQ_WIDE (see `wide_bytes`).
@@ -282,23 +266,7 @@ const SK_BUF: u8 = 1;
 const SK_VIEW: u8 = 2;
 const LOW32: u64 = 4294967295;
 const HIGH32: u64 = 18446744069414584320;
-const IR_SEQ: u8 = 18;
-const IR_FIP: u8 = 19;
-const TERM_RETURN: u8 = 0;
-const TERM_JUMP: u8 = 1;
-const TERM_BRANCH: u8 = 2;
-const TERM_MATCH: u8 = 3;
-const PAT_WILD: u64 = 0;
-const PAT_BIND: u64 = 1;
-const PAT_LITERAL: u64 = 2;
-const PAT_TUPLE: u64 = 3;
-const PAT_CONSTRUCTOR: u64 = 4;
-const LIT_INT: u64 = 0;
-const LIT_FLOAT: u64 = 1;
-const LIT_BOOL: u64 = 2;
-const LIT_STRING: u64 = 3;
 // A literal past `i128::MAX` (`Literal::WideInt`): it fits no wasm scalar.
-const LIT_WIDE: u64 = 4;
 // IntegerKind of a scalar: 0 none, else the scalar + 1
 const IK_NONE: u8 = 0;
 
@@ -535,7 +503,7 @@ pub fn lowerer_new(sink cx: Cx, sink plan: Plan, max_instructions: u64) -> L eff
     }
     let mut seqs = false;
     for i in 0..cx.ir.p.pool.len() {
-        if cx.ir.p.pool_row(i).kind == 0 {
+        if cx.ir.p.pool_row(i).kind == PoolKind::Seq {
             seqs = true;
         }
     }
@@ -847,13 +815,13 @@ fn copy_u64s(in xs: ChunkSeq[u64]) -> ChunkSeq[u64] {
 fn successors(in l: L, fi: u64, b: u64) -> (u64, u64) {
     let row = l.cx.ir.p.function(fi);
     let blk = l.cx.ir.p.block(add(row.b0, b));
-    if blk.term == TERM_JUMP {
+    if blk.term == Term::Jump {
         return (blk.ta, 1);
     }
-    if blk.term == TERM_BRANCH {
+    if blk.term == Term::Branch {
         return (blk.ta, 2);
     }
-    if blk.term == TERM_MATCH {
+    if blk.term == Term::Match {
         return (blk.ta, l.cx.ir.word(inc(blk.ta)));
     }
     (blk.ta, 0)
@@ -863,10 +831,10 @@ fn successors(in l: L, fi: u64, b: u64) -> (u64, u64) {
 fn successor(in l: L, fi: u64, b: u64, i: u64) -> u64 {
     let row = l.cx.ir.p.function(fi);
     let blk = l.cx.ir.p.block(add(row.b0, b));
-    if blk.term == TERM_JUMP {
+    if blk.term == Term::Jump {
         return l.cx.ir.word(blk.ta);
     }
-    if blk.term == TERM_BRANCH {
+    if blk.term == Term::Branch {
         return l.cx.ir.word(add(blk.ta, inc(i)));
     }
     // match: v, n, n x (pattern, block)
@@ -1392,7 +1360,7 @@ impl L {
             return false;
         }
         for k in 0..sig.pn {
-            if self.cx.f.param(add(sig.p0, k)).pass == P_INOUT {
+            if self.cx.f.param(add(sig.p0, k)).pass == TyPass::Inout {
                 return false;
             }
         }
@@ -1653,7 +1621,7 @@ impl L {
             if p.name == e.resume {
                 continue;
             }
-            let cell = p.pass == P_INOUT || inst.role == R_HANDLER_BODY;
+            let cell = p.pass == TyPass::Inout || inst.role == R_HANDLER_BODY;
             e
                 .names
                 .push(
@@ -1921,7 +1889,7 @@ impl L {
             let blk = self.cx.ir.p.block(add(row.b0, bi));
             for ii in 0..blk.ic {
                 let op = self.cx.ir.p.inst(add(blk.i0, ii)).op;
-                if op == IR_LOOP {
+                if op == Op::Loop {
                     loops = true;
                 }
             }
@@ -1986,7 +1954,7 @@ impl L {
                 self.tail_call(at);
                 continue;
             }
-            if self.cx.ir.p.inst(at).op == IR_LOOP {
+            if self.cx.ir.p.inst(at).op == Op::Loop {
                 // The loop-header marker: the `loop` frame is the loop.
                 continue;
             }
@@ -2075,11 +2043,11 @@ impl L {
         let row = self.cx.ir.p.function(fi);
         let blk = self.cx.ir.p.block(add(row.b0, bi));
         let ta = blk.ta;
-        if blk.term == TERM_RETURN {
+        if blk.term == Term::Return {
             let x = self.value(self.cx.ir.word(ta));
             self.e.code.get(x);
             self.e.code.op(OP_RETURN);
-        } else if blk.term == TERM_JUMP {
+        } else if blk.term == Term::Jump {
             let t = self.cx.ir.word(ta);
             let n = self.cx.ir.word(inc(ta));
             let (p0, pn) = self.cx.ir.block_params(fi, t);
@@ -2096,7 +2064,7 @@ impl L {
             }
             let d = self.depth(in position, t, pos);
             self.e.code.br(d);
-        } else if blk.term == TERM_BRANCH {
+        } else if blk.term == Term::Branch {
             let c = self.value(self.cx.ir.word(ta));
             let dy = self.depth(in position, self.cx.ir.word(inc(ta)), pos);
             let dn = self.depth(in position, self.cx.ir.word(add(ta, 2)), pos);
@@ -2104,7 +2072,7 @@ impl L {
             self.e.code.op(OP_I32_WRAP_I64);
             self.e.code.br_if(dy);
             self.e.code.br(dn);
-        } else if blk.term == TERM_MATCH {
+        } else if blk.term == Term::Match {
             let vid = self.cx.ir.word(ta);
             let v = self.value(vid);
             let ty = self.vty(vid);
@@ -2131,10 +2099,10 @@ impl L {
         }
         let row = self.cx.ir.p.function(fi);
         let blk = self.cx.ir.p.block(add(row.b0, b));
-        if blk.term == TERM_RETURN {
+        if blk.term == Term::Return {
             return self.cx.ir.word(blk.ta) == value;
         }
-        if blk.term != TERM_JUMP {
+        if blk.term != Term::Jump {
             return false;
         }
         let t = self.cx.ir.word(blk.ta);
@@ -2170,7 +2138,7 @@ impl L {
 
     fn tail_callable(in self, at: u64) -> bool {
         let ins = self.cx.ir.p.inst(at);
-        if ins.op != IR_CALL {
+        if ins.op != Op::Call {
             return false;
         }
         // An intercepted `Atomic` operation is no call (`atomic_call`).
@@ -2194,7 +2162,7 @@ impl L {
         }
         let sig = self.cx.f.sig(wrapping_sub(fs, 1));
         for k in 0..sig.pn {
-            if self.cx.f.param(add(sig.p0, k)).pass == P_INOUT {
+            if self.cx.f.param(add(sig.p0, k)).pass == TyPass::Inout {
                 return false;
             }
         }
@@ -2359,19 +2327,19 @@ impl L {
     // value in local `v` of type `ty`?
     fn condition(inout self, at: u64, v: u32, ty: u32) eff [Fail[WErr]] {
         let kind = self.cx.ir.word(at);
-        if kind == PAT_WILD || kind == PAT_BIND {
+        if kind == Pat::Wild || kind == Pat::Bind {
             self.e.code.i32_const(1);
-        } else if kind == PAT_LITERAL {
+        } else if kind == Pat::Literal {
             let sh = self.cx.shape(ty);
             self.e.code.get(v);
             let lk = self.cx.ir.word(add(at, 3));
             let lo = self.cx.ir.word(add(at, 4));
             let hi = self.cx.ir.word(add(at, 5));
-            if lk == LIT_FLOAT {
+            if lk == Lit::Float {
                 self.e.code.op(OP_F64_REINTERPRET_I64);
                 self.e.code.f64_const(lo);
                 self.e.code.op(OP_F64_EQ);
-            } else if lk == LIT_STRING && self.seq_kind(ty) == SK_VIEW {
+            } else if lk == Lit::String && self.seq_kind(ty) == SK_VIEW {
                 // A `Str` view against the literal's bytes.
                 self.e.code.op(OP_DROP);
                 let (base, n) = self.parts(v, ty);
@@ -2383,7 +2351,7 @@ impl L {
                 self.e.code.u64_const(self.cx.names.size(n32(lo)));
                 self.e.code.call(f);
                 self.e.code.op(OP_I32_WRAP_I64);
-            } else if lk == LIT_STRING {
+            } else if lk == Lit::String {
                 let a = self.string_literal(n32(lo));
                 let eq = self.str_eq();
                 self.e.code.u64_const(a);
@@ -2396,9 +2364,9 @@ impl L {
                 self.e.code.i64_const(c);
                 self.e.code.op(OP_I64_EQ);
             }
-        } else if kind == PAT_TUPLE {
+        } else if kind == Pat::Tuple {
             let dt = self.cx.default_ty(ty);
-            if self.cx.types.kind(dt) != K_TUPLE {
+            if self.cx.types.kind(dt) != TyKind::Tuple {
                 Fail::raise(werr(K_INVALID, 0, 170));
             }
             self.e.code.i32_const(1);
@@ -2417,7 +2385,7 @@ impl L {
                 self.e.code.op(OP_I32_AND);
                 p = pattern_end(in self.cx.ir.p.ops, p, 0);
             }
-        } else if kind == PAT_CONSTRUCTOR {
+        } else if kind == Pat::Constructor {
             let name = n32(self.cx.ir.word(add(at, 3)));
             let (index, is_enum, sh) = self.cx.variant_of(ty, name);
             if is_enum {
@@ -2469,11 +2437,11 @@ impl L {
     // `ops[at]` binds.
     fn bind(inout self, at: u64, v: u32, ty: u32) eff [Fail[WErr]] {
         let kind = self.cx.ir.word(at);
-        if kind == PAT_BIND {
+        if kind == Pat::Bind {
             self.write_name(n32(self.cx.ir.word(add(at, 3))), v);
-        } else if kind == PAT_TUPLE {
+        } else if kind == Pat::Tuple {
             let dt = self.cx.default_ty(ty);
-            if self.cx.types.kind(dt) != K_TUPLE {
+            if self.cx.types.kind(dt) != TyKind::Tuple {
                 Fail::raise(werr(K_INVALID, 0, 172));
             }
             let n = self.cx.ir.word(add(at, 3));
@@ -2490,7 +2458,7 @@ impl L {
                 self.bind(p, x, t);
                 p = pattern_end(in self.cx.ir.p.ops, p, 0);
             }
-        } else if kind == PAT_CONSTRUCTOR {
+        } else if kind == Pat::Constructor {
             let name = n32(self.cx.ir.word(add(at, 3)));
             let (index, is_enum, sh) = self.cx.variant_of(ty, name);
             let n = self.cx.ir.word(add(at, 5));
@@ -2527,19 +2495,19 @@ impl L {
 
     // `constant_bits` of literal (kind, lo, hi) at type `ty`.
     fn constant_bits(inout self, kind: u64, lo: u64, hi: u64, ty: u32) -> i64 eff [Fail[WErr]] {
-        if kind == LIT_INT {
+        if kind == Lit::Int {
             if !self.fits(lo, hi, ty) {
                 Fail::raise(werr(K_INVALID, 0, 180));
             }
             return wrapping_i64(lo);
         }
-        if kind == LIT_BOOL {
+        if kind == Lit::Bool {
             return wrapping_i64(lo);
         }
-        if kind == LIT_FLOAT {
+        if kind == Lit::Float {
             return wrapping_i64(lo);
         }
-        if kind == LIT_WIDE {
+        if kind == Lit::WideInt {
             Fail::raise(werr(K_INVALID, 0, 180));
         }
         Fail::raise(werr(K_UNSUPPORTED, U_STRING, 181));
@@ -2554,7 +2522,7 @@ impl L {
         let small_neg = hi == NONE64;
         let node = self.cx.types.node(ty);
         let mut name: u32 = NONE32;
-        if node.kind == K_NAMED {
+        if node.kind == TyKind::Named {
             name = node.name;
         }
         let k = self.cx.k;
@@ -2613,11 +2581,11 @@ impl L {
         let a = ins.a;
         let dv = widen_u64(ins.dest);
         let op = ins.op;
-        if op == IR_CONST {
+        if op == Op::Const {
             let lk = self.cx.ir.word(a);
             let lo = self.cx.ir.word(inc(a));
             let hi = self.cx.ir.word(add(a, 2));
-            if lk == LIT_STRING {
+            if lk == Lit::String {
                 let addr = self.string_literal(n32(lo));
                 let d = self.dest(dv);
                 self.e.code.u64_const(addr);
@@ -2630,7 +2598,7 @@ impl L {
                 self.e.code.i64_const(c);
                 self.e.code.set(d);
             }
-        } else if op == IR_EXIT {
+        } else if op == Op::Exit {
             // `return value` from this function (`Op::Exit`); one that
             // leaves an enclosing function from a handled body is not
             // lowered here yet.
@@ -2641,11 +2609,11 @@ impl L {
             let x = self.value(self.cx.ir.word(a));
             self.e.code.get(x);
             self.e.code.op(OP_RETURN);
-        } else if op == IR_UNIT {
+        } else if op == Op::Unit {
             let d = self.dest(dv);
             self.e.code.i64_const(0);
             self.e.code.set(d);
-        } else if op == IR_READ {
+        } else if op == Op::Read {
             let root = n32(self.cx.ir.word(a));
             let path = self.cx.ir.word(inc(a));
             if root == self.e.resume {
@@ -2668,7 +2636,7 @@ impl L {
             let segs = self.path_names(path);
             let (v, t) = self.read_place(root, in segs);
             self.set_value(dv, v);
-        } else if op == IR_BIND {
+        } else if op == Op::Bind {
             let vid = self.cx.ir.word(a);
             let v = self.value(vid);
             let t = self.vty(vid);
@@ -2676,7 +2644,7 @@ impl L {
             let d = self.dest(dv);
             self.e.code.i64_const(0);
             self.e.code.set(d);
-        } else if op == IR_WRITE {
+        } else if op == Op::Write {
             let place = n32(self.cx.ir.word(a));
             let opn = n32(self.cx.ir.word(inc(a)));
             let vid = self.cx.ir.word(add(a, 2));
@@ -2700,7 +2668,7 @@ impl L {
             let d = self.dest(dv);
             self.e.code.i64_const(0);
             self.e.code.set(d);
-        } else if op == IR_UNARY {
+        } else if op == Op::Unary {
             let opn = n32(self.cx.ir.word(a));
             let vid = self.cx.ir.word(inc(a));
             let x = self.value(vid);
@@ -2744,7 +2712,7 @@ impl L {
                 Fail::raise(werr(K_UNSUPPORTED, U_OPERATION, 194));
             }
             self.e.code.set(d);
-        } else if op == IR_BINARY {
+        } else if op == Op::Binary {
             let opn = n32(self.cx.ir.word(a));
             let ai = self.cx.ir.word(inc(a));
             let bi = self.cx.ir.word(add(a, 2));
@@ -2782,7 +2750,7 @@ impl L {
                 self.binary(opn, x, y, s1, s2)
             };
             self.set_value(dv, r);
-        } else if op == IR_TUPLE {
+        } else if op == Op::Tuple {
             let n = self.cx.ir.word(a);
             if n == 0 {
                 let d = self.dest(dv);
@@ -2796,7 +2764,7 @@ impl L {
                 self.store(block, wrapping_mul(8, i), v);
             }
             self.set_value(dv, block);
-        } else if op == IR_DATA {
+        } else if op == Op::Data {
             let name = n32(self.cx.ir.word(a));
             let (index, is_enum, sh) = self.cx.variant_of(ty, name);
             let nf = self.cx.field_count(sh, index);
@@ -2849,7 +2817,7 @@ impl L {
                     );
             }
             self.set_value(dv, block);
-        } else if op == IR_PROJECT {
+        } else if op == Op::Project {
             let bid = self.cx.ir.word(a);
             let fname = n32(self.cx.ir.word(inc(a)));
             let b = self.value(bid);
@@ -2858,11 +2826,11 @@ impl L {
             let d = self.dest(dv);
             self.load(b, off);
             self.e.code.set(d);
-        } else if op == IR_INDEX {
+        } else if op == Op::Index {
             let bid = self.cx.ir.word(a);
             let iid = self.cx.ir.word(inc(a));
             let bt = self.vty(bid);
-            if self.cx.types.kind(bt) != K_TUPLE {
+            if self.cx.types.kind(bt) != TyKind::Tuple {
                 Fail::raise(werr(K_UNSUPPORTED, U_INDEX, 196));
             }
             let b = self.value(bid);
@@ -2884,9 +2852,9 @@ impl L {
             self.e.code.op(OP_I32_WRAP_I64);
             self.e.code.load(0);
             self.e.code.set(d);
-        } else if op == IR_CALL {
+        } else if op == Op::Call {
             self.call(at);
-        } else if op == IR_INDIRECT {
+        } else if op == Op::Indirect {
             let callee = self.cx.ir.word(a);
             let mut resumes = false;
             for k in 0..self.e.resume_reads.len() {
@@ -2899,12 +2867,12 @@ impl L {
             } else {
                 self.indirect(at);
             }
-        } else if op == IR_TRY {
+        } else if op == Op::Try {
             let vid = self.cx.ir.word(a);
             let x = self.value(vid);
             let t = self.vty(vid);
             let node = self.cx.types.node(t);
-            if !(node.kind == K_NAMED && node.name == self.cx.s.result && node.n == 2) {
+            if !(node.kind == TyKind::Named && node.name == self.cx.s.result && node.n == 2) {
                 Fail::raise(werr(K_UNSUPPORTED, U_OPERATION, 197));
             }
             let err_ty = self.cx.types.arg(t, 1);
@@ -2927,9 +2895,9 @@ impl L {
             let r = self.perform(fail, raise, in inst, NONE32, in args);
             self.e.code.op(OP_UNREACHABLE);
             self.e.code.op(OP_END);
-        } else if op == IR_SEQ {
+        } else if op == Op::Seq {
             self.seq(at, ty, dv);
-        } else if op == IR_FIP {
+        } else if op == Op::Fip {
             // `Box::new(v)` (and its `@fip` forms, `new_in_caller` and slot
             // reuse): a `Box[T]` is the one-field struct of the prelude, a
             // block holding `v`. The heap is a bump region that tail loops
@@ -2942,7 +2910,7 @@ impl L {
             let block = self.alloc_block(8);
             self.store(block, 0, v);
             self.set_value(dv, block);
-        } else if op == IR_HANDLE {
+        } else if op == Op::Handle {
             let id = self.plan.handler_at(self.e.inst.key, dv);
             if id == NONE64 {
                 Fail::raise(werr(K_INVALID, 0, 198));
@@ -2954,7 +2922,7 @@ impl L {
             };
             let r = self.handle(id, sv);
             self.set_value(dv, r);
-        } else if op == IR_CLOSURE {
+        } else if op == Op::Closure {
             let (pool, aa, an) = closure_operands(in self.cx, a);
             let fact = self.cx.f.expr(pool);
             let caps = captures(in self.cx, fact.f0, fact.fc, aa, an, self.e.info);
@@ -3239,7 +3207,7 @@ impl L {
     fn bind_evidence(inout self, c: u32, ty: u32) -> u32 eff [Fail[WErr]] {
         let d = self.cx.default_ty(ty);
         let node = self.cx.types.node(d);
-        if node.kind != K_FN {
+        if node.kind != TyKind::Fn {
             return c;
         }
         let nkeys = self.env_globals.len();
@@ -3418,7 +3386,7 @@ impl L {
             let root = self.cx.ir.word(add(q, 2));
             let path = self.cx.ir.word(add(q, 3));
             let pinout = match passes.try_get(i) {
-                Option::Some(p) => p == P_INOUT,
+                Option::Some(p) => p == TyPass::Inout,
                 Option::None => false,
             };
             if !(pass == 1 || pinout) {
@@ -3615,7 +3583,7 @@ impl L {
                 Option::Some(p) => p,
                 Option::None => 0,
             };
-            if p0 == P_INOUT {
+            if p0 == TyPass::Inout {
                 self.load(v, 0);
                 self.e.code.set(x);
                 self.load(x, 0);
@@ -3693,7 +3661,7 @@ impl L {
         for i in 0..n {
             let q = add(inc(at), wrapping_mul(i, 4));
             let pinout = match passes.try_get(i) {
-                Option::Some(p) => p == P_INOUT,
+                Option::Some(p) => p == TyPass::Inout,
                 Option::None => false,
             };
             let root = self.cx.ir.word(add(q, 2));
@@ -3726,7 +3694,7 @@ impl L {
             let root = self.cx.ir.word(add(q, 2));
             let path = self.cx.ir.word(add(q, 3));
             let pinout = match passes.try_get(i) {
-                Option::Some(p) => p == P_INOUT,
+                Option::Some(p) => p == TyPass::Inout,
                 Option::None => false,
             };
             if !(pass == 1 || pinout) {
@@ -3942,7 +3910,7 @@ impl L {
         let ct = self.cx.default_ty(ct0);
         let mut passes = ChunkSeq::new[u8]();
         let mut tys = ChunkSeq::new[u32]();
-        if self.cx.types.kind(ct) == K_FN {
+        if self.cx.types.kind(ct) == TyKind::Fn {
             for k in 0..self.cx.arity(ct) {
                 passes.push(self.cx.types.param_pass(ct, k));
                 tys.push(self.cx.types.arg(ct, k));
@@ -3994,12 +3962,12 @@ impl L {
         inout count: u64
     ) eff [Fail[WErr]] {
         let kind = self.hop(at);
-        if kind == PAT_BIND {
+        if kind == Pat::Bind {
             c.get(value);
             count = inc(count);
-        } else if kind == PAT_TUPLE {
+        } else if kind == Pat::Tuple {
             let dt = self.cx.default_ty(ty);
-            if self.cx.types.kind(dt) != K_TUPLE {
+            if self.cx.types.kind(dt) != TyKind::Tuple {
                 return;
             }
             let n = self.hop(add(at, 3));
@@ -4019,7 +3987,7 @@ impl L {
                 self.flatten(inout c, inout locals, nparams, p, tmp, t, inout count);
                 p = pattern_end(in self.cx.f.hops, p, 0);
             }
-        } else if kind == PAT_CONSTRUCTOR {
+        } else if kind == Pat::Constructor {
             let name = n32(self.hop(add(at, 3)));
             let (index, is_enum, sh) = self.cx.variant_of(ty, name);
             let n = self.hop(add(at, 5));
@@ -4414,11 +4382,11 @@ impl L {
     // `type_mentions(t, generics)`.
     fn type_mentions(in self, t: u32) -> bool {
         let n = self.cx.types.node(t);
-        if n.kind == K_NAMED {
+        if n.kind == TyKind::Named {
             if contains32(in self.e.generics, n.name) {
                 return true;
             }
-        } else if n.kind != K_TUPLE {
+        } else if n.kind != TyKind::Tuple {
             return false;
         }
         for i in 0..w(n.n) {
@@ -5117,7 +5085,7 @@ impl L {
     fn seq_kind(inout self, t: u32) -> u8 {
         let d = self.cx.default_ty(t);
         let node = self.cx.types.node(d);
-        if node.kind != K_NAMED {
+        if node.kind != TyKind::Named {
             return SK_OTHER;
         }
         let s = self.cx.s;

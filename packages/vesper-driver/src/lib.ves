@@ -12,6 +12,15 @@ use @vesper-std/fmt::{
     parse_u64
 };
 
+enum Ascii: _ {
+    Plus = 43,
+    Comma = 44,
+    Dash = 45,
+    Dot = 46,
+    Slash = 47,
+    Backslash = 92,
+}
+
 // ---------------------------------------------------------------------------
 // Commands.
 
@@ -491,7 +500,7 @@ fn verifier_list(in list: Slice[u8], inout err: ChunkSeq[u8]) -> u64 {
     let mut start: u64 = 0;
     let mut i: u64 = 0;
     loop {
-        if i < n && at(in list, i) != 44 {
+        if i < n && at(in list, i) != Ascii::Comma {
             i = wrapping_add(i, 1);
             continue;
         }
@@ -547,7 +556,7 @@ fn verifier_list(in list: Slice[u8], inout err: ChunkSeq[u8]) -> u64 {
 // range.
 fn parse_fuel(in s: Slice[u8]) -> Option[u64] {
     let mut from: u64 = 0;
-    if s.len() > 1 && at(in s, 0) == 43 {
+    if s.len() > 1 && at(in s, 0) == Ascii::Plus {
         from = 1;
     }
     match parse_u64(in s[from..s.len()]) {
@@ -617,34 +626,39 @@ fn missing_value(k: u64) -> Str {
     "--package requires a package namespace"
 }
 
-// The library flags (`LibFlags::flag`): 1 for `--lib`, 2 for a flag with a
-// value, 0 otherwise. `k` gets the slot, or `slot_count()` for
-// `--instance`.
+enum LibFlag: _ {
+    Unrecognized = 0,
+    Enable = 1,
+    WithValue = 2,
+}
+
+// A library flag (`LibFlags::flag`). For a flag with a value, `k` gets
+// the slot, or `slot_count()` for `--instance`.
 fn lib_flag(in a: Slice[u8], inout k: u64) -> u64 {
     if eq(in a, in "--lib") {
-        return 1;
+        return LibFlag::Enable;
     }
     if eq(in a, in "--lib-name") {
         k = slot_lib_name();
-        return 2;
+        return LibFlag::WithValue;
     }
     if eq(in a, in "--interface") {
         k = slot_interface();
-        return 2;
+        return LibFlag::WithValue;
     }
     if eq(in a, in "--rust-binding") {
         k = slot_rust_binding();
-        return 2;
+        return LibFlag::WithValue;
     }
     if eq(in a, in "--rust-types") {
         k = slot_rust_types();
-        return 2;
+        return LibFlag::WithValue;
     }
     if eq(in a, in "--instance") {
         k = slot_count();
-        return 2;
+        return LibFlag::WithValue;
     }
-    0
+    LibFlag::Unrecognized
 }
 
 fn lib_what(k: u64) -> Str {
@@ -754,11 +768,11 @@ pub fn parse(in args: Args) -> Parsed {
         }
         let mut lk = slot_count();
         let lf = lib_flag(in a, inout lk);
-        if lf == 1 {
+        if lf == LibFlag::Enable {
             o.lib = true;
             continue;
         }
-        if lf == 2 {
+        if lf == LibFlag::WithValue {
             if i >= n {
                 let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
                 m.extend(in a);
@@ -776,7 +790,7 @@ pub fn parse(in args: Args) -> Parsed {
             }
             continue;
         }
-        if a.len() > 0 && at(in a, 0) == 45 {
+        if a.len() > 0 && at(in a, 0) == Ascii::Dash {
             let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
             m.extend(in "unknown option '".as_bytes());
             m.extend(in a);
@@ -874,7 +888,7 @@ pub fn lib_job_checks(in o: Options, inout err: ChunkSeq[u8]) {
 // Paths.
 
 fn is_separator(b: u8, windows: bool) -> bool {
-    b == 47 || (windows && b == 92)
+    b == Ascii::Slash || (windows && b == Ascii::Backslash)
 }
 
 // The file name of `path` (Rust's `Path::file_name`): the last component
@@ -900,7 +914,7 @@ fn file_name(in path: Slice[u8], windows: bool) -> Span {
         let lone = end == 1 || is_separator(at(in path, wrapping_sub(end, 2)), windows);
         // A `.` component is dropped, except a leading one (the current
         // directory), which has no file name either.
-        if b == 46 && lone {
+        if b == Ascii::Dot && lone {
             if end == 1 {
                 end = 0;
                 break;
@@ -918,8 +932,8 @@ fn file_name(in path: Slice[u8], windows: bool) -> Span {
         start = wrapping_sub(start, 1);
     }
     let dotdot = wrapping_sub(end, start) == 2
-        && at(in path, start) == 46
-        && at(in path, wrapping_add(start, 1)) == 46;
+        && at(in path, start) == Ascii::Dot
+        && at(in path, wrapping_add(start, 1)) == Ascii::Dot;
     Span {
         found: end > start && !dotdot,
         start: start,
@@ -937,7 +951,7 @@ fn extension_dot(in path: Slice[u8], name: Span) -> u64 {
             return name.end;
         }
         j = wrapping_sub(j, 1);
-        if at(in path, j) == 46 {
+        if at(in path, j) == Ascii::Dot {
             return j;
         }
     }
@@ -955,7 +969,7 @@ fn set_extension(in path: Slice[u8], in ext: Slice[u8], windows: bool) -> ChunkS
     let stem_end = extension_dot(in path, name);
     out.extend(in path[0..stem_end]);
     if ext.len() > 0 {
-        out.push(46);
+        out.push(Ascii::Dot);
         out.extend(in ext);
     }
     out
@@ -986,6 +1000,14 @@ pub fn with_extension(in path: Slice[u8], in ext: Str, windows: bool) -> ChunkSe
 //     for each slot: present (0/1), length, bytes
 //     item count, then each: kind, length, bytes
 
+enum RecordFlag: _ {
+    IncludeTests = 1,
+    Json = 2,
+    Optimize = 4,
+    Tee = 8,
+    Lib = 16,
+}
+
 pub fn record_format() -> u64 {
     2
 }
@@ -1008,19 +1030,19 @@ pub fn record(in o: Options) -> ChunkSeq[u8] {
     push_word(inout out, widen_u64(o.command));
     let mut flags: u64 = 0;
     if o.include_tests {
-        flags = flags | 1;
+        flags = flags | RecordFlag::IncludeTests;
     }
     if o.json {
-        flags = flags | 2;
+        flags = flags | RecordFlag::Json;
     }
     if o.optimize {
-        flags = flags | 4;
+        flags = flags | RecordFlag::Optimize;
     }
     if o.tee {
-        flags = flags | 8;
+        flags = flags | RecordFlag::Tee;
     }
     if o.lib {
-        flags = flags | 16;
+        flags = flags | RecordFlag::Lib;
     }
     push_word(inout out, flags);
     push_word(inout out, o.verifiers);

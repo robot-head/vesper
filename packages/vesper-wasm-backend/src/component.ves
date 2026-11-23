@@ -5,6 +5,10 @@
 // wit-parser) stays in Rust: the harness wraps this port's core module and
 // WIT text with it.
 
+use @vesper/check-data::types::{
+    TyKind,
+    TyPass
+};
 use @vesper/check-data::util::{
     add,
     inc,
@@ -40,10 +44,6 @@ const K_UNSUPPORTED: u8 = 0;
 const K_ENTRY: u8 = 1;
 const K_INVALID: u8 = 3;
 const U_EXPORT_TYPE: u8 = 12;
-const P_INOUT: u8 = 1;
-
-const K_NAMED: u8 = 1;
-const K_TUPLE: u8 = 2;
 
 const SH_SCALAR: u8 = 0;
 const SH_TUPLE: u8 = 1;
@@ -188,7 +188,7 @@ fn ident_sym(in l: L, s: u32, inout out: ChunkSeq[u8]) {
 // `component::mangle`.
 fn mangle(in l: L, t: u32, inout out: ChunkSeq[u8]) {
     let node = l.cx.types.node(t);
-    if node.kind == K_NAMED {
+    if node.kind == TyKind::Named {
         ident_sym(in l, node.name, inout out);
         for i in 0..w(node.n) {
             out.push(45);
@@ -196,7 +196,7 @@ fn mangle(in l: L, t: u32, inout out: ChunkSeq[u8]) {
         }
         return;
     }
-    if node.kind == K_TUPLE {
+    if node.kind == TyKind::Tuple {
         text(inout out, in "tuple".as_bytes());
         for i in 0..w(node.n) {
             out.push(45);
@@ -1087,7 +1087,7 @@ pub fn exports(inout l: L) -> ChunkSeq[u8] eff [Fail[WErr]] {
     let mut scalars = ChunkSeq::new[u8]();
     for i in 0..sig.pn {
         let p = l.cx.f.param(add(sig.p0, i));
-        if p.pass == P_INOUT {
+        if p.pass == TyPass::Inout {
             Fail::raise(werr(K_ENTRY, 0, 21));
         }
         if i > 0 {

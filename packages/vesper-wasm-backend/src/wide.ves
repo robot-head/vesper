@@ -7,6 +7,9 @@
 // `/`, `%`, `<<` and the orderings. Anything else on a `u128` (and every
 // `i128`) is refused (sites 248 and 249).
 
+use @vesper/check-data::types::{
+    TyKind
+};
 use @vesper/check-data::util::{
     u32_at
 };
@@ -64,7 +67,6 @@ const SC_I64: u8 = 0;
 const SC_U64: u8 = 1;
 const SC_U32: u8 = 2;
 const SC_U8: u8 = 3;
-const K_NAMED: u8 = 1;
 
 fn i64s(n: u64) -> ChunkSeq[ValTy] {
     let mut v = ChunkSeq::new[ValTy]();
@@ -93,7 +95,7 @@ impl L {
     pub fn is_u128(inout self, t: u32) -> bool eff [Fail[WErr]] {
         let ty = self.cx.default_ty(t);
         let node = self.cx.types.node(ty);
-        if node.kind != K_NAMED {
+        if node.kind != TyKind::Named {
             return false;
         }
         if node.name == self.cx.s.i128_ {

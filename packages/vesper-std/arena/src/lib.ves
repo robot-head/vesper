@@ -27,6 +27,11 @@
 // `items`: `match a.items.try_get(i.index()) { Some(v) => .., None => .. }`,
 // and `try_get_mut` to update one.
 
+// The reserved raw index also bounds the number of stored values.
+enum Index: _ {
+    Missing = 4294967295
+}
+
 // A typed index into an `Arena[T]`.
 pub copy struct Idx[T] {
     raw: u32
@@ -49,7 +54,7 @@ pub fn idx_from_raw[T](raw: u32) -> Idx[T] {
 // The reserved index that names no value (`u32::MAX`).
 pub fn idx_none[T]() -> Idx[T] {
     Idx {
-        raw: 4294967295
+        raw: Index::Missing
     }
 }
 
@@ -65,7 +70,7 @@ impl [T] Idx[T] {
     }
 
     pub fn is_none(self) -> bool {
-        self.raw == 4294967295
+        self.raw == Index::Missing
     }
 }
 
@@ -89,7 +94,7 @@ pub fn arena_with_capacity[T: mod affine](n: u64) -> Arena[T] {
 }
 
 fn at_capacity(len: u64) -> bool {
-    len >= 4294967295
+    len >= Index::Missing
 }
 
 impl [T: mod affine] Arena[T] {
@@ -108,7 +113,7 @@ impl [T: mod affine] Arena[T] {
         let n = self.items.len();
         if at_capacity(n) {
             Idx {
-                raw: 4294967295
+                raw: Index::Missing
             }
         } else {
             self.items.push(v);
@@ -123,7 +128,7 @@ impl [T: mod affine] Arena[T] {
         let n = self.items.len();
         if at_capacity(n) {
             Idx {
-                raw: 4294967295
+                raw: Index::Missing
             }
         } else {
             Idx {
@@ -213,7 +218,7 @@ impl [K, V: mod affine] IdxMap[K, V] {
     pub fn put(inout self, i: Idx[K], sink v: V) -> Option[V] {
         let k = widen_u64(i.raw);
         let n = self.vals.len();
-        if i.raw == 4294967295 || k > n {
+        if i.raw == Index::Missing || k > n {
             Option::Some(v)
         } else if k == n {
             self.vals.push(v);
@@ -232,7 +237,7 @@ impl [K, V: mod affine] IdxMap[K, V] {
     // closure (§4.2).
     pub fn put_with[e: eff](inout self, i: Idx[K], sink v: V, fill: fn(u64) -> V eff [e])
         -> Option[V] eff [e] {
-        if i.raw == 4294967295 {
+        if i.raw == Index::Missing {
             return Option::Some(v);
         }
         let k = widen_u64(i.raw);
@@ -279,7 +284,7 @@ impl [K, V: mod copy] IdxMap[K, V] {
     // Set the value for `i`, growing the table with defaults as needed.
     // `false` (nothing written) for `idx_none()`.
     pub fn set(inout self, i: Idx[K], v: V) -> bool {
-        if i.raw == 4294967295 {
+        if i.raw == Index::Missing {
             false
         } else {
             let k = widen_u64(i.raw);

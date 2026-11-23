@@ -2,6 +2,11 @@
 // rowan raw kind), generated from the Rust enum. The differential test
 // (tests/self_host_front_v2.rs) checks every kind against the logos lexer.
 
+// Sentinel outside the TokenKind discriminants.
+pub enum TokenSentinel: _ {
+    Missing = 255
+}
+
 pub fn k_whitespace() -> u8 {
     0
 }

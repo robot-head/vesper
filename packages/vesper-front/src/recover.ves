@@ -23,6 +23,7 @@ use self::{
     Tree
 };
 use self::kinds::{
+    TokenSentinel,
     k_upper,
     k_lower,
     k_struct,
@@ -81,13 +82,14 @@ use self::lex::{
 use self::parse::{
     editor_parser,
     editor_reset,
-    parse_item,
-    n_error
+    parse_item
 };
 use self::tree::{
     tree_new,
     build_events,
-    report_into
+    report_into,
+    Event,
+    NodeKind
 };
 
 fn none() -> u64 {
@@ -222,21 +224,20 @@ fn is_type(k: u8) -> bool {
 }
 
 // Declaration kinds (`DeclarationKind` order).
-fn d_function() -> u64 {
-    0
-}
+const DECL_FUNCTION: u64 = 0;
+const DECL_STRUCT: u64 = 1;
+const DECL_ENUM: u64 = 2;
+const DECL_EFFECT: u64 = 3;
+const DECL_TRAIT: u64 = 4;
+const DECL_IMPL: u64 = 5;
+const DECL_MODEL: u64 = 6;
+const DECL_USE: u64 = 7;
+const DECL_OTHER: u64 = 8;
 
-fn d_impl() -> u64 {
-    5
-}
-
-fn d_use() -> u64 {
-    7
-}
-
-fn d_other() -> u64 {
-    8
-}
+// Declaration status in the recovery table.
+const DECL_COMPLETE: u64 = 0;
+const DECL_RECOVERED: u64 = 1;
+const DECL_OPAQUE: u64 = 2;
 
 // `prefix`: the declaration kind at token `at` and its name token, else
 // (none, none).
@@ -289,26 +290,27 @@ fn prefix(in t: Tokens, at: u64) -> (u64, u64) {
     }
     let n = next(in t, inc(i));
     let (kind, name_kind): (u64, u8) = if k == k_fn() {
-        (0, k_lower())
+        (DECL_FUNCTION, k_lower())
     } else if k == k_struct() {
-        (1, k_upper())
+        (DECL_STRUCT, k_upper())
     } else if k == k_enum() {
-        (2, k_upper())
+        (DECL_ENUM, k_upper())
     } else if k == k_effect() {
-        (3, k_upper())
+        (DECL_EFFECT, k_upper())
     } else if k == k_impl() {
-        (5, 255)
+        (DECL_IMPL, TokenSentinel::Missing)
     } else if word(in t, i, w_trait()) {
-        (4, k_upper())
+        (DECL_TRAIT, k_upper())
     } else if word(in t, i, w_model()) {
-        (6, k_upper())
+        (DECL_MODEL, k_upper())
     } else if word(in t, i, w_use()) {
-        (7, 255)
+        (DECL_USE, TokenSentinel::Missing)
     } else {
         return (none(), none());
     };
     let nk = kind_at(in t, n);
-    let name = if name_kind != 255 && (nk == name_kind || (kind == 0 && nk == k_self_kw())) {
+    let name = if name_kind != TokenSentinel::Missing
+        && (nk == name_kind || (kind == DECL_FUNCTION && nk == k_self_kw())) {
         n
     } else {
         none()
@@ -321,10 +323,10 @@ fn anchor(in t: Tokens, at: u64) -> bool {
     if kind == none() {
         return false;
     }
-    if kind == d_impl() {
+    if kind == DECL_IMPL {
         return true;
     }
-    if kind == d_use() {
+    if kind == DECL_USE {
         return word(in t, next(in t, inc(at)), w_model());
     }
     name != none()
@@ -338,7 +340,7 @@ fn closing(k: u8) -> u8 {
     } else if k == k_l_brace() {
         k_r_brace()
     } else {
-        255
+        TokenSentinel::Missing
     }
 }
 
@@ -369,7 +371,7 @@ fn macro_start(in b: Slice[u8], in t: Tokens, at: u64) -> u64 {
     let n = next(in t, inc(at));
     if kind_at(in t, n) == k_bang() {
         let open = next(in t, inc(n));
-        if closing(kind_at(in t, open)) != 255 {
+        if closing(kind_at(in t, open)) != TokenSentinel::Missing {
             return open;
         }
         return none();
@@ -401,7 +403,7 @@ fn macro_end(in t: Tokens, in lim: ChunkSeq[u64], open: u64, limit: u64, inout w
         }
         let k = kind_at(in t, i);
         let c = closing(k);
-        if c != 255 {
+        if c != TokenSentinel::Missing {
             if stack.len() >= l_depth(in lim) {
                 return (13, none());
             }
@@ -409,7 +411,7 @@ fn macro_end(in t: Tokens, in lim: ChunkSeq[u64], open: u64, limit: u64, inout w
         } else if is_closer(k) {
             let n = stack.len();
             let top = if n == 0 {
-                255
+                TokenSentinel::Missing
             } else {
                 u8_at(in stack, wrapping_sub(n, 1))
             };
@@ -491,7 +493,7 @@ fn extent(
             head = next(in t, inc(head));
         }
     }
-    let mut i = if kind == d_other() {
+    let mut i = if kind == DECL_OTHER {
         start
     } else {
         inc(head)
@@ -533,7 +535,7 @@ fn extent(
             continue;
         }
         let k = kind_at(in t, i);
-        if !trivia_kind(k) && (kind == d_function() || body_start == none()) && anchor(in t, i) {
+        if !trivia_kind(k) && (kind == DECL_FUNCTION || body_start == none()) && anchor(in t, i) {
             return extent_of(0, i, body_start, w32(in t.start, i), true);
         }
         if k == k_l_brace() && body_start == none() {
@@ -563,7 +565,7 @@ fn extent(
             }
         }
         let c = closing(k);
-        if c != 255 {
+        if c != TokenSentinel::Missing {
             if stack.len() >= l_depth(in lim) {
                 return extent_of(13, 0, none(), 0, false);
             }
@@ -583,7 +585,7 @@ fn extent(
         }
         i = inc(i);
     }
-    extent_of(0, i, body_start, n, stack.len() != 0 || (kind != d_other() && body_start == none()))
+    extent_of(0, i, body_start, n, stack.len() != 0 || (kind != DECL_OTHER && body_start == none()))
 }
 
 // ---------------------------------------------------------------- driver
@@ -737,7 +739,7 @@ pub fn parse_recovery_tables(in source: Str, in lim: ChunkSeq[u64]) -> ChunkSeq[
     let mut sites = ChunkSeq::new[u64]();
     let mut macros = ChunkSeq::new[u64]();
     let mut ev = ChunkSeq::with_capacity[u32](add(ntok, ntok >> 1));
-    ev.push(wrapping_add(2147483648, 200));
+    ev.push(wrapping_add(Event::NodeStartBase, NodeKind::Module));
     let mut nodes: u64 = 1;
     let mut cursor: u64 = 0;
     loop {
@@ -760,7 +762,7 @@ pub fn parse_recovery_tables(in source: Str, in lim: ChunkSeq[u64]) -> ChunkSeq[
         }
         let (pk, name) = prefix(in t, start);
         let kind = if pk == none() {
-            d_other()
+            DECL_OTHER
         } else {
             pk
         };
@@ -784,10 +786,10 @@ pub fn parse_recovery_tables(in source: Str, in lim: ChunkSeq[u64]) -> ChunkSeq[
             && kind_at(in t, next(in t, inc(start))) == k_l_brace();
         let opaque_item = lexical
             || macros.len() != 0
-            || (kind == d_other() && !test_block)
-            || (ext.uncertain && kind != d_function())
-            || (name == none() && kind != d_impl() && kind != d_use() && !test_block);
-        let mut status: u64 = 1;
+            || (kind == DECL_OTHER && !test_block)
+            || (ext.uncertain && kind != DECL_FUNCTION)
+            || (name == none() && kind != DECL_IMPL && kind != DECL_USE && !test_block);
+        let mut status = DECL_RECOVERED;
         let mut header_start = span_start;
         let mut header_end = if has_body {
             ext.body_start
@@ -822,14 +824,14 @@ pub fn parse_recovery_tables(in source: Str, in lim: ChunkSeq[u64]) -> ChunkSeq[
                     return fail(14);
                 }
             }
-            status = 2;
-            ev.push(wrapping_add(2147483648, 201));
-            ev.push(wrapping_add(2147483648, n_error()));
+            status = DECL_OPAQUE;
+            ev.push(wrapping_add(Event::NodeStartBase, NodeKind::Item));
+            ev.push(wrapping_add(Event::NodeStartBase, NodeKind::Error));
             for i in start..end {
                 ev.push(narrow(i));
             }
-            ev.push(4294967295);
-            ev.push(4294967295);
+            ev.push(Event::NodeFinish);
+            ev.push(Event::NodeFinish);
             nodes = add(nodes, 2);
         } else {
             let count = wrapping_sub(end, start);
@@ -855,7 +857,7 @@ pub fn parse_recovery_tables(in source: Str, in lim: ChunkSeq[u64]) -> ChunkSeq[
                 return fail(14);
             }
             let has_header = p.hdr.len() != 0;
-            if kind == d_function() {
+            if kind == DECL_FUNCTION {
                 if has_header
                     && u64_at(in p.hdr, 2) == 1
                     && has_body
@@ -863,14 +865,14 @@ pub fn parse_recovery_tables(in source: Str, in lim: ChunkSeq[u64]) -> ChunkSeq[
                     header_start = u64_at(in p.hdr, 0);
                     header_end = u64_at(in p.hdr, 1);
                 } else {
-                    status = 2;
+                    status = DECL_OPAQUE;
                 }
             }
             if p.d.code.len() == 0 && exact && !ext.uncertain {
-                status = 0;
+                status = DECL_COMPLETE;
                 declared_start = p.item_start;
                 header_start = declared_start;
-                if kind == d_function() && has_header && has_body {
+                if kind == DECL_FUNCTION && has_header && has_body {
                     if u64_at(in p.hdr, 2) == 1 && u64_at(in p.hdr, 3) == 1 {
                         let rows = u64_at(in p.hdr, 4);
                         context = add(
@@ -913,8 +915,8 @@ pub fn parse_recovery_tables(in source: Str, in lim: ChunkSeq[u64]) -> ChunkSeq[
             diags_append(inout d, in p.d);
             for j in 0..p.ev.len() {
                 let e = u32_at(in p.ev, j);
-                if e >= 2147483648 {
-                    if e != 4294967295 {
+                if e >= Event::NodeStartBase {
+                    if e != Event::NodeFinish {
                         nodes = inc(nodes);
                     }
                     ev.push(e);
@@ -926,7 +928,7 @@ pub fn parse_recovery_tables(in source: Str, in lim: ChunkSeq[u64]) -> ChunkSeq[
         if d.code.len() > max_diag {
             return fail(12);
         }
-        if status != 0 && !diag_within(in d, span_start, span_end) {
+        if status != DECL_COMPLETE && !diag_within(in d, span_start, span_end) {
             if d.code.len() == max_diag {
                 return fail(12);
             }
@@ -960,7 +962,7 @@ pub fn parse_recovery_tables(in source: Str, in lim: ChunkSeq[u64]) -> ChunkSeq[
         info.push(first_node);
         cursor = end;
     }
-    ev.push(4294967295);
+    ev.push(Event::NodeFinish);
     if work == 0 {
         return fail(17);
     }
@@ -1140,12 +1142,12 @@ fn assemble(
     let mut tokens: u64 = 0;
     for j in 0..ev.len() {
         let e = u32_at(in ev, j);
-        if e == 4294967295 {
+        if e == Event::NodeFinish {
             if !spend(inout used, 1, max) {
                 return 17;
             }
             depth = wrapping_sub(depth, 1);
-        } else if e >= 2147483648 {
+        } else if e >= Event::NodeStartBase {
             if !spend(inout used, 1, max) {
                 return 17;
             }
@@ -1255,7 +1257,7 @@ fn assemble(
                 }
                 if w32(in tree.node_start, k) == green_start
                     && w32(in tree.node_end, k) == green_end
-                    && (context == none() || u8_at(in tree.node_kind, k) == 205) {
+                    && (context == none() || u8_at(in tree.node_kind, k) == NodeKind::Block) {
                     found = k;
                     break;
                 }

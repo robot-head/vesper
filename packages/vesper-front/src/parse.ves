@@ -13,6 +13,7 @@ use self::{
     Ex
 };
 use self::kinds::{
+    TokenSentinel,
     k_upper,
     k_lower,
     k_float,
@@ -133,6 +134,10 @@ use self::util::{
     w32,
     shl
 };
+use self::tree::{
+    Event,
+    NodeKind
+};
 use self::diag::{
     diags_new,
     diag_push_limit,
@@ -149,36 +154,8 @@ use self::lex::{
 
 // ---------------------------------------------------------------- kinds
 
-fn n_module() -> u32 {
-    200
-}
-
-fn n_item() -> u32 {
-    201
-}
-
-fn n_expr() -> u32 {
-    202
-}
-
-fn n_pattern() -> u32 {
-    203
-}
-
-fn n_type() -> u32 {
-    204
-}
-
-fn n_block() -> u32 {
-    205
-}
-
 pub fn n_error() -> u32 {
-    206
-}
-
-fn n_incomplete() -> u32 {
-    207
+    NodeKind::Error
 }
 
 // `HARD_PARSE_DEPTH`, the default `max_depth`.
@@ -379,11 +356,11 @@ fn last_end(in p: P) -> u64 {
 }
 
 fn start_node(inout p: P, kind: u32) {
-    p.ev.push(wrapping_add(2147483648, kind));
+    p.ev.push(wrapping_add(Event::NodeStartBase, kind));
 }
 
 fn finish_node(inout p: P) {
-    p.ev.push(4294967295);
+    p.ev.push(Event::NodeFinish);
 }
 
 fn trivia(inout p: P) {
@@ -519,7 +496,7 @@ fn start_node_at(inout p: P, at: u64, kind: u32) {
         p.ev.try_set(i, v);
         i = prev;
     }
-    p.ev.try_set(at, wrapping_add(2147483648, kind));
+    p.ev.try_set(at, wrapping_add(Event::NodeStartBase, kind));
 }
 
 fn enter(inout p: P) -> bool {
@@ -1807,7 +1784,7 @@ fn signature(inout p: P) {
 }
 
 fn ty_inner(inout p: P) -> u8 {
-    start_node(inout p, n_type());
+    start_node(inout p, NodeKind::TypeNode);
     let mut leaves: u64 = 1;
     let shape = if eat(inout p, k_fn()) {
         if eat(inout p, k_at()) {
@@ -1912,7 +1889,7 @@ fn dimension(inout p: P) {
 
 fn dimension_factor(inout p: P) {
     if at(in p, k_int()) {
-        start_node(inout p, n_type());
+        start_node(inout p, NodeKind::TypeNode);
         bump(inout p);
         finish_node(inout p);
     } else {
@@ -2166,7 +2143,7 @@ fn type_args_inner(inout p: P) {
                 }
             }
         } else if at(in p, k_int()) {
-            start_node(inout p, n_type());
+            start_node(inout p, NodeKind::TypeNode);
             bump(inout p);
             finish_node(inout p);
         } else {
@@ -2244,7 +2221,7 @@ fn ends_with_brace(in p: P, end: u32) -> bool {
 fn block_inner(inout p: P) -> Ex {
     if p.editor {
         trivia(inout p);
-        start_node(inout p, n_block());
+        start_node(inout p, NodeKind::Block);
     }
     let outer = p.vals_trail.len();
     let start = cur_start(in p);
@@ -2338,7 +2315,7 @@ fn recover_statement(inout p: P) {
         return;
     }
     let start = cur_start(in p);
-    start_node(inout p, n_error());
+    start_node(inout p, NodeKind::Error);
     let mut closing = ChunkSeq::new[u8]();
     loop {
         if at(in p, k_eof()) {
@@ -2355,9 +2332,9 @@ fn recover_statement(inout p: P) {
         } else if k == k_l_brace() {
             k_r_brace()
         } else {
-            255
+            TokenSentinel::Missing
         };
-        if expected != 255 {
+        if expected != TokenSentinel::Missing {
             if closing.len() >= p.max_depth {
                 exhaust(inout p, 3, p.max_depth);
                 break;
@@ -2406,7 +2383,7 @@ fn jump_end(k: u8) -> bool {
 }
 
 fn expr_inner(inout p: P) -> Ex {
-    start_node(inout p, n_expr());
+    start_node(inout p, NodeKind::Expr);
     let cur = idx(in p, 0);
     let k = tk(in p, cur);
     let w = if k == k_lower() {
@@ -3004,7 +2981,7 @@ fn postfix_inner(inout p: P) -> Ex {
                 let s = last_end(in p);
                 site(inout p, s, s, 0, e.rcv);
                 err(inout p, in "expected a lower-case member name after '.'");
-                start_node_at(inout p, checkpoint, n_incomplete());
+                start_node_at(inout p, checkpoint, NodeKind::Incomplete);
                 finish_node(inout p);
                 let mut f = ex(x_field(), start, last_end(in p), e.h);
                 if e.path != 0 {
@@ -3232,7 +3209,7 @@ fn primary_inner(inout p: P) -> Ex {
     }
     if !at(in p, k_eof()) {
         if p.editor {
-            start_node(inout p, n_error());
+            start_node(inout p, NodeKind::Error);
         }
         bump(inout p);
         if p.editor {
@@ -3342,7 +3319,7 @@ fn pattern(inout p: P) {
 }
 
 fn pattern_inner(inout p: P) {
-    start_node(inout p, n_pattern());
+    start_node(inout p, NodeKind::Pattern);
     let negative = eat(inout p, k_minus());
     let class = if at(in p, k_int()) {
         int_class(in p, idx(in p, 0))
@@ -3437,7 +3414,7 @@ pub fn parse_tokens(
 ) -> P {
     let nsyms = inc(t.sym_start.len());
     let mut p = parse_tokens_new(in source, t, d, nsyms, max_diag, max_depth);
-    start_node(inout p, n_module());
+    start_node(inout p, NodeKind::Module);
     let ntok = p.ntok;
     if p.t.limited {
         for i in 0..wrapping_sub(ntok, 1) {
@@ -3453,7 +3430,7 @@ pub fn parse_tokens(
             break;
         }
         let before = p.pos;
-        start_node(inout p, n_item());
+        start_node(inout p, NodeKind::Item);
         declaration(inout p);
         finish_node(inout p);
         if p.pos == before {
@@ -3527,7 +3504,7 @@ fn index_tokens(inout p: P) {
 
 // `contextual_item_names`: `fn break()` and friends keep the word a name.
 fn contextual_item_names(inout p: P) {
-    let mut previous: u8 = 255;
+    let mut previous: u8 = TokenSentinel::Missing;
     let mut depth: u64 = 0;
     let mut skipping_test = false;
     for j in 0..p.sig.len() {
@@ -3595,7 +3572,7 @@ pub fn editor_reset(inout p: P, sink t: Tokens) {
 // `recovery_driver::parse_item`: one ITEM, then an ERROR_NODE over any
 // tokens left before the Eof. Whether the item ended at the Eof (`exact`).
 pub fn parse_item(inout p: P) -> bool {
-    start_node(inout p, n_item());
+    start_node(inout p, NodeKind::Item);
     p.item_start = cur_start(in p);
     declaration(inout p);
     let exact = at(in p, k_eof());
@@ -3603,7 +3580,7 @@ pub fn parse_item(inout p: P) -> bool {
         let i = idx(in p, 0);
         site(inout p, tstart(in p, i), tend(in p, i), 2, 0);
         err(inout p, in "unexpected tokens after recovered declaration");
-        start_node(inout p, n_error());
+        start_node(inout p, NodeKind::Error);
         loop {
             if at(in p, k_eof()) {
                 break;
