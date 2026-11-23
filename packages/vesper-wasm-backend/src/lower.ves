@@ -215,6 +215,10 @@ const SC_BOOL: u8 = 4;
 const SC_F64: u8 = 5;
 const SC_UNIT: u8 = 6;
 const SC_NEVER: u8 = 7;
+const SC_U16: u8 = 8;
+const SC_I32: u8 = 9;
+const SC_I16: u8 = 10;
+const SC_I8: u8 = 11;
 const R_ORDINARY: u8 = 0;
 const R_HANDLER_BODY: u8 = 1;
 const R_RETURN_CLAUSE: u8 = 2;
@@ -313,6 +317,7 @@ pub struct Em {
     // value id -> (address local | stride << 32) + 1 of an element view
     // (`s[i]` read for `swap(inout s[i], ..)`)
     elems: ChunkSeq[u64],
+    elem_names: ChunkSeq[u64],
     // An operation clause: its continuation's name (NONE32: none), the
     // values that read it, its handler and frame local (NONE: none).
     resume: u32,
@@ -351,6 +356,7 @@ fn em_new(inst: Inst, info: FnInfo) -> Em {
         frames: ChunkSeq::new[u64](),
         structured: false,
         elems: ChunkSeq::new[u64](),
+        elem_names: ChunkSeq::new[u64](),
         resume: NONE32,
         resume_reads: ChunkSeq::new[u64](),
         clause_handler: NONE64,
@@ -459,14 +465,31 @@ pub fn i64s(n: u64) -> ChunkSeq[ValTy] {
     v
 }
 
-// Integer kinds of the four lowered widths, by scalar.
 fn ik_unsigned(s: u8) -> bool {
-    s == SC_U64 || s == SC_U32 || s == SC_U8
+    s == SC_U64 || s == SC_U32 || s == SC_U16 || s == SC_U8
+}
+
+fn ik_signed(s: u8) -> bool {
+    s == SC_I64 || s == SC_I32 || s == SC_I16 || s == SC_I8
+}
+
+fn ik_bits(s: u8) -> u64 {
+    if s == SC_U8 || s == SC_I8 {
+        8
+    } else if s == SC_U16 || s == SC_I16 {
+        16
+    } else if s == SC_U32 || s == SC_I32 {
+        32
+    } else {
+        64
+    }
 }
 
 fn ik_mask(s: u8) -> u64 {
     if s == SC_U8 {
         255
+    } else if s == SC_U16 {
+        65535
     } else if s == SC_U32 {
         4294967295
     } else {
@@ -474,8 +497,32 @@ fn ik_mask(s: u8) -> u64 {
     }
 }
 
+fn ik_min(s: u8) -> i64 {
+    if s == SC_I8 {
+        -128
+    } else if s == SC_I16 {
+        -32768
+    } else if s == SC_I32 {
+        -2147483648
+    } else {
+        I64_MIN
+    }
+}
+
+fn ik_max(s: u8) -> i64 {
+    if s == SC_I8 {
+        127
+    } else if s == SC_I16 {
+        32767
+    } else if s == SC_I32 {
+        2147483647
+    } else {
+        9223372036854775807
+    }
+}
+
 fn is_int(s: u8) -> bool {
-    s == SC_I64 || s == SC_U64 || s == SC_U32 || s == SC_U8
+    ik_unsigned(s) || ik_signed(s)
 }
 
 fn lo_mask(n: u64) -> u64 {
@@ -1817,6 +1864,16 @@ impl L {
             self.e.code.get(v);
             self.e.code.set(s.local);
         }
+        let idx = self.slot_index(n);
+        if idx != NONE64 && idx < self.e.elem_names.len() {
+            let el = u64_at(in self.e.elem_names, idx);
+            if el != 0 {
+                let addr = wrapping_u32(wrapping_sub(el, 1) & LOW32);
+                let stride = wrapping_shr_u64(wrapping_sub(el, 1), 32);
+                let zero = self.const_local(0);
+                self.elem_store(addr, zero, stride, v);
+            }
+        }
     }
 
     // `read_place` over path `path` (`segs`): (local, type).
@@ -2440,7 +2497,12 @@ impl L {
     fn bind(inout self, at: u64, v: u32, ty: u32) eff [Fail[WErr]] {
         let kind = self.cx.ir.word(at);
         if kind == Pat::Bind {
-            self.write_name(n32(self.cx.ir.word(add(at, 3))), v);
+            let bn = n32(self.cx.ir.word(add(at, 3)));
+            let idx = self.slot_index(bn);
+            if idx != NONE64 {
+                set64(inout self.e.elem_names, wrapping_u32(idx), 0);
+            }
+            self.write_name(bn, v);
         } else if kind == Pat::Tuple {
             let dt = self.cx.default_ty(ty);
             if self.cx.types.kind(dt) != TyKind::Tuple {
@@ -2650,6 +2712,21 @@ impl L {
             let v = self.value(vid);
             let t = self.vty(vid);
             self.bind(inc(a), v, t);
+            let el = if vid < self.e.elems.len() {
+                u64_at(in self.e.elems, vid)
+            } else {
+                0
+            };
+            if el != 0
+                && self.cx.ir.word(inc(a)) == Pat::Constructor
+                && self.cx.ir.word(add(a, 6)) == 1
+                && self.cx.ir.word(add(a, 8)) == Pat::Bind {
+                let bn = n32(self.cx.ir.word(add(a, 11)));
+                let idx = self.slot_index(bn);
+                if idx != NONE64 {
+                    set64(inout self.e.elem_names, wrapping_u32(idx), el);
+                }
+            }
             let d = self.dest(dv);
             self.e.code.i64_const(0);
             self.e.code.set(d);
@@ -2696,9 +2773,9 @@ impl L {
                 self.e.code.op(OP_F64_REINTERPRET_I64);
                 self.e.code.op(OP_F64_NEG);
                 self.e.code.op(OP_I64_REINTERPRET_F64);
-            } else if self.is_op(opn, "-") && s == SC_I64 {
+            } else if self.is_op(opn, "-") && ik_signed(s) {
                 self.e.code.get(x);
-                self.e.code.i64_const(I64_MIN);
+                self.e.code.i64_const(ik_min(s));
                 self.e.code.op(OP_I64_EQ);
                 self.e.code.open(OP_IF);
                 self.raise_overflow();
@@ -2974,30 +3051,43 @@ impl L {
             return false;
         }
         if kind == 1 && from != to {
-            // Out of range: above the largest value of `to` (unsigned, so a
-            // negative `i64` counts as large), or negative into `u64`.
-            let max: u64 = if to == SC_I64 {
-                9223372036854775807
-            } else {
-                ik_mask(to)
-            };
-            self.e.code.get(x);
-            self.e.code.u64_const(max);
-            self.e.code.op(OP_I64_GT_U);
-            if from == SC_I64 && to == SC_U64 {
-                self.e.code.op(OP_DROP);
+            if ik_unsigned(to) {
                 self.e.code.get(x);
-                self.e.code.i64_const(0);
+                self.e.code.u64_const(ik_mask(to));
+                self.e.code.op(OP_I64_GT_U);
+                if ik_signed(from) && to == SC_U64 {
+                    self.e.code.op(OP_DROP);
+                    self.e.code.get(x);
+                    self.e.code.i64_const(0);
+                    self.e.code.op(OP_I64_LT_S);
+                }
+            } else if ik_signed(from) {
+                self.e.code.get(x);
+                self.e.code.i64_const(ik_min(to));
                 self.e.code.op(OP_I64_LT_S);
+                self.e.code.get(x);
+                self.e.code.i64_const(ik_max(to));
+                self.e.code.op(OP_I64_GT_S);
+                self.e.code.op(OP_I32_OR);
+            } else {
+                self.e.code.get(x);
+                self.e.code.u64_const(wrapping_u64(ik_max(to)));
+                self.e.code.op(OP_I64_GT_U);
             }
             self.e.code.open(OP_IF);
             self.raise_overflow();
             self.e.code.op(OP_END);
         }
         self.e.code.get(x);
-        if kind == 2 && (to == SC_U8 || to == SC_U32) {
+        if kind == 2 && (to == SC_U8 || to == SC_U16 || to == SC_U32) {
             self.e.code.u64_const(ik_mask(to));
             self.e.code.op(OP_I64_AND);
+        } else if kind == 2 && (to == SC_I8 || to == SC_I16 || to == SC_I32) {
+            let sh = wrapping_sub(64, ik_bits(to));
+            self.e.code.u64_const(sh);
+            self.e.code.op(OP_I64_SHL);
+            self.e.code.u64_const(sh);
+            self.e.code.op(OP_I64_SHR_S);
         }
         true
     }
@@ -4614,7 +4704,7 @@ impl L {
         } else {
             s2
         };
-        let signed = kind == SC_I64;
+        let signed = ik_signed(kind);
         if self.is_op(opn, "==") {
             self.cmp(x, y, OP_I64_EQ);
         } else if self.is_op(opn, "!=") {
@@ -4676,9 +4766,15 @@ impl L {
             self.e.code.get(x);
             self.e.code.get(y);
             self.e.code.op(ins);
-            if kind == SC_U8 || kind == SC_U32 {
+            if kind == SC_U8 || kind == SC_U16 || kind == SC_U32 {
                 self.e.code.u64_const(ik_mask(kind));
                 self.e.code.op(OP_I64_AND);
+            } else if kind == SC_I8 || kind == SC_I16 || kind == SC_I32 {
+                let sh = wrapping_sub(64, ik_bits(kind));
+                self.e.code.u64_const(sh);
+                self.e.code.op(OP_I64_SHL);
+                self.e.code.u64_const(sh);
+                self.e.code.op(OP_I64_SHR_S);
             }
         } else if self.is_op(opn, "+") || self.is_op(opn, "-") || self.is_op(opn, "*") {
             self.overflow_check(opn, kind, x, y);
@@ -4702,7 +4798,7 @@ impl L {
             self.e.code.op(OP_END);
             if signed && div {
                 self.e.code.get(x);
-                self.e.code.i64_const(I64_MIN);
+                self.e.code.i64_const(ik_min(kind));
                 self.e.code.op(OP_I64_EQ);
                 self.e.code.get(y);
                 self.e.code.i64_const(-1);
@@ -4738,13 +4834,7 @@ impl L {
             // The amount must be in 0..bits of the left operand's kind (a
             // negative amount compares as a huge unsigned one), else
             // Fail[ArithOverflow]; `<<` drops the bits shifted out.
-            let bits: u64 = if s1 == SC_U8 {
-                8
-            } else if s1 == SC_U32 {
-                32
-            } else {
-                64
-            };
+            let bits = ik_bits(s1);
             self.e.code.get(y);
             self.e.code.u64_const(bits);
             self.e.code.op(OP_I64_GE_U);
@@ -4755,36 +4845,38 @@ impl L {
             self.e.code.get(y);
             if self.is_op(opn, "<<") {
                 self.e.code.op(OP_I64_SHL);
-                if s1 == SC_U8 || s1 == SC_U32 {
+                if s1 == SC_U8 || s1 == SC_U16 || s1 == SC_U32 {
                     self.e.code.u64_const(ik_mask(s1));
                     self.e.code.op(OP_I64_AND);
+                } else if s1 == SC_I8 || s1 == SC_I16 || s1 == SC_I32 {
+                    let sh = wrapping_sub(64, bits);
+                    self.e.code.u64_const(sh);
+                    self.e.code.op(OP_I64_SHL);
+                    self.e.code.u64_const(sh);
+                    self.e.code.op(OP_I64_SHR_S);
                 }
-            } else if s1 == SC_I64 {
+            } else if ik_signed(s1) {
                 self.e.code.op(OP_I64_SHR_S);
             } else {
                 self.e.code.op(OP_I64_SHR_U);
             }
         } else if self.is_op(opn, "rotate_left") || self.is_op(opn, "rotate_right") {
-            // Total: the amount is taken modulo the width (two's complement
-            // makes `& (bits - 1)` the Euclidean remainder of an i64 amount).
             let left = self.is_op(opn, "rotate_left");
-            if s1 == SC_U8 || s1 == SC_U32 {
-                let bits: u64 = if s1 == SC_U8 {
-                    8
-                } else {
-                    32
-                };
-                let low: u64 = if s1 == SC_U8 {
-                    7
-                } else {
-                    31
-                };
+            if s1 != SC_U64 && s1 != SC_I64 {
+                let bits = ik_bits(s1);
+                let low = wrapping_sub(bits, 1);
+                let mask = wrapping_shr_u64(NONE64, wrapping_u32(wrapping_sub(64, bits)));
                 let n = self.local();
+                let xm = self.local();
                 self.e.code.get(y);
                 self.e.code.u64_const(low);
                 self.e.code.op(OP_I64_AND);
                 self.e.code.set(n);
                 self.e.code.get(x);
+                self.e.code.u64_const(mask);
+                self.e.code.op(OP_I64_AND);
+                self.e.code.set(xm);
+                self.e.code.get(xm);
                 self.e.code.get(n);
                 self
                     .e
@@ -4796,7 +4888,7 @@ impl L {
                             OP_I64_SHR_U
                         }
                     );
-                self.e.code.get(x);
+                self.e.code.get(xm);
                 self.e.code.u64_const(bits);
                 self.e.code.get(n);
                 self.e.code.op(OP_I64_SUB);
@@ -4811,8 +4903,16 @@ impl L {
                         }
                     );
                 self.e.code.op(OP_I64_OR);
-                self.e.code.u64_const(ik_mask(s1));
-                self.e.code.op(OP_I64_AND);
+                if ik_unsigned(s1) {
+                    self.e.code.u64_const(mask);
+                    self.e.code.op(OP_I64_AND);
+                } else {
+                    let sh = wrapping_sub(64, bits);
+                    self.e.code.u64_const(sh);
+                    self.e.code.op(OP_I64_SHL);
+                    self.e.code.u64_const(sh);
+                    self.e.code.op(OP_I64_SHR_S);
+                }
             } else {
                 self.e.code.get(x);
                 self.e.code.get(y);
@@ -4845,7 +4945,7 @@ impl L {
         let add_ = self.is_op(opn, "+");
         let sub_ = self.is_op(opn, "-");
         let mul_ = self.is_op(opn, "*");
-        if (add_ || mul_) && (kind == SC_U8 || kind == SC_U32) {
+        if (add_ || mul_) && (kind == SC_U8 || kind == SC_U16 || kind == SC_U32) {
             self.e.code.get(x);
             self.e.code.get(y);
             self
@@ -4860,6 +4960,29 @@ impl L {
                 );
             self.e.code.u64_const(ik_mask(kind));
             self.e.code.op(OP_I64_GT_U);
+        } else if (add_ || sub_ || mul_) && (kind == SC_I8 || kind == SC_I16 || kind == SC_I32) {
+            let r = self.local();
+            self.e.code.get(x);
+            self.e.code.get(y);
+            self
+                .e
+                .code
+                .op(
+                    if add_ {
+                        OP_I64_ADD
+                    } else if sub_ {
+                        OP_I64_SUB
+                    } else {
+                        OP_I64_MUL
+                    }
+                );
+            self.e.code.tee(r);
+            self.e.code.i64_const(ik_min(kind));
+            self.e.code.op(OP_I64_LT_S);
+            self.e.code.get(r);
+            self.e.code.i64_const(ik_max(kind));
+            self.e.code.op(OP_I64_GT_S);
+            self.e.code.op(OP_I32_OR);
         } else if sub_ && ik_unsigned(kind) {
             self.e.code.get(x);
             self.e.code.get(y);
@@ -5434,10 +5557,7 @@ impl L {
         let a = ins.a;
         let code = self.seq_code(self.cx.ir.word(a));
         let c = widen_u64(code);
-        if c == 0
-            || (
-                c == SQ_TRY_GET && self.cx.ir.word(self.seq_arg(a, 0)) == widen_u64(TyPass::Inout)
-            ) {
+        if c == 0 {
             Fail::raise(werr(K_UNSUPPORTED, U_OPERATION, 233));
         }
         if c == SQ_NEW || c == SQ_WITH_CAPACITY {
@@ -5548,10 +5668,27 @@ impl L {
         } else if c == SQ_TRY_GET || c == SQ_STR_TRY_BYTE_AT {
             let i = self.seq_val(a, 1);
             let d = self.dest(dv);
+            let view = c == SQ_TRY_GET
+                && self.cx.ir.word(self.seq_arg(a, 0)) == widen_u64(TyPass::Inout);
+            let addr = if view {
+                self.local()
+            } else {
+                0
+            };
             self.e.code.get(i);
             self.e.code.get(n);
             self.e.code.op(OP_I64_LT_U);
             self.e.code.open(OP_IF);
+            if view {
+                self.elem_addr(base, i, stride);
+                self.e.code.op(OP_I64_EXTEND_I32_U);
+                self.e.code.set(addr);
+                set64(
+                    inout self.e.elems,
+                    wrapping_u32(dv),
+                    inc(widen_u64(addr) | wrapping_shl_u64(stride, 32))
+                );
+            }
             let v = self.elem_load(base, i, stride);
             self.option_into(d, ty, v);
             self.e.code.op(OP_ELSE);
