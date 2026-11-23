@@ -32,6 +32,11 @@
 //! rejected before a World is accepted.
 mod builtin_traits;
 mod mono;
+#[doc(hidden)]
+pub use mono::{
+    MonoAdtInput, MonoBoundInput, MonoCallInput, MonoCheckOutcome, MonoFuncInput,
+    MonoTypeBoundInput,
+};
 pub(crate) use mono::{each_expr, specialize_boxed_stub};
 
 use crate::ast::*;
@@ -564,6 +569,80 @@ pub fn probe_resolve_and_normalize(
         calls: call_res,
         norms: norm_res,
     })
+}
+
+/// Differential reference oracle for `Mono::close_bounded` and
+/// `Mono::check_obligations` over a dependency-free module (`#1659`).
+#[doc(hidden)]
+pub fn probe_mono_check(module: &Module, identity: &PackageIdentity) -> Option<MonoCheckOutcome> {
+    let dyn_lowered;
+    let module = if crate::dyn_trait::uses_dyn(module) {
+        dyn_lowered = crate::dyn_trait::lower(module).ok()?;
+        &dyn_lowered.module
+    } else {
+        dyn_lowered = crate::dyn_trait::Lowered {
+            module: Module::default(),
+            params: BTreeMap::new(),
+            forwards: vec![],
+            boxed: BTreeSet::new(),
+        };
+        module
+    };
+    if !has_frontend_syntax(module) && !builtin_traits::wanted(module) {
+        return None;
+    }
+    identity.validate().ok()?;
+    let spans = mono::SpanMap::new(module);
+    let injected;
+    let module = if builtin_traits::wanted(module) {
+        let (stripped, items, owners) = builtin_traits::prelude(module).ok()?;
+        injected = spans.with_builtins(&stripped, items, &owners);
+        &injected
+    } else {
+        module
+    };
+    let base = base_module(module);
+    let (base_world, _) = World::collect(&base);
+    let mut fe = Frontend::with_base(
+        module,
+        base,
+        base_world,
+        identity,
+        &FrontendOptions::default(),
+    )
+    .ok()?;
+    if !fe.diagnostics.is_empty() {
+        return None;
+    }
+    let session = fe.build_session().ok()?;
+    let elab = Elaborator {
+        spans,
+        instances: RefCell::new(BTreeMap::new()),
+        dyn_params: dyn_lowered.params.clone(),
+        dyn_boxed: dyn_lowered.boxed.clone(),
+        dyn_vtables: RefCell::new(vec![]),
+        dyn_instance_params: RefCell::new(BTreeMap::new()),
+        dyn_thunks: RefCell::new(vec![]),
+        fe,
+        session: SessionBackend::Rust(Box::new(session)),
+        evidence: RefCell::new(BTreeMap::new()),
+        normalizing: RefCell::new(vec![]),
+    };
+    if elab.fe.bounds.is_empty() && elab.fe.type_bounds.is_empty() && elab.dyn_boxed.is_empty() {
+        return None;
+    }
+    let pass1 = elab.pass1_module().ok()?;
+    let (mut first, resolved) = check::check_core(&pass1, Some(&elab));
+    elab.spans.drop_stub_errors(&mut first.diagnostics);
+    if first.diagnostics.is_empty() {
+        first.diagnostics = crate::dyn_trait::check_forwards(&dyn_lowered, &first.world, &resolved);
+    }
+    elab.spans.relocate(&mut first.diagnostics);
+    if !first.diagnostics.is_empty() {
+        return None;
+    }
+    let pass2 = rewrite_calls(pass1, &resolved);
+    Some(elab.probe_mono_check_step(&pass2, &first.world))
 }
 
 /// [`DeclarationPassTable::diagnostics`] in Rust: `Frontend::new` without
