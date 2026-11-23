@@ -849,6 +849,14 @@ impl Parser {
                     ));
                 }
                 RawType::OptionCStr
+            } else if name == "CWStr" && length.is_none() {
+                if keyword == "callback" {
+                    return Err(self.error(
+                        ErrorKind::Unsupported,
+                        "a callback cannot return a wide C string: nothing would own or free it",
+                    ));
+                }
+                RawType::OptionCWStr
             } else {
                 RawType::OptionHandle(name)
             }
@@ -912,6 +920,16 @@ impl Parser {
             }
             self.bump();
             RawParameterType::CStrList
+        } else if self.is_word("CWStr") {
+            // `nocapture in s: CWStr`: a NUL-terminated copy of a UTF-16 slice.
+            if access != PointerAccess::In || nullable {
+                return Err(self.error(
+                    ErrorKind::Unsupported,
+                    "a wide C string parameter is `nocapture in s: CWStr`: C may only read it, and it is never NULL",
+                ));
+            }
+            self.bump();
+            RawParameterType::CWStr
         } else if self.is_word("CSlice") {
             let slice_access = match access {
                 PointerAccess::In => Access::In,
@@ -1017,6 +1035,8 @@ enum RawType {
     NonNullHandle(String),
     /// `Option[CStr]`, as a result: a C string copied at the call.
     OptionCStr,
+    /// `Option[CWStr]`, as a result: a wide C string copied at the call.
+    OptionCWStr,
 }
 enum RawParameterType {
     Value(RawType),
@@ -1042,6 +1062,8 @@ enum RawParameterType {
     },
     /// `nocapture in s: CStr`.
     CStr,
+    /// `nocapture in s: CWStr`.
+    CWStr,
     /// `nocapture in argv: CStrList`.
     CStrList,
     /// `nocapture f: Cb` or `retain f: Cb`: a Vesper function as a pointer
@@ -1141,6 +1163,7 @@ fn resolve(
     match t {
         RawType::Address { pointee, nullable } => Ok(ValueType::Address { pointee, nullable }),
         RawType::OptionCStr => Ok(ValueType::CStr),
+        RawType::OptionCWStr => Ok(ValueType::CWStr),
         RawType::OptionHandle(n) => match externs.iter().find(|e| e.name() == n) {
             Some(handle) => Ok(ValueType::Handle {
                 handle: handle.clone(),
@@ -1592,6 +1615,7 @@ pub(super) fn parse(source: &str, limits: Limits) -> Result<LibraryDescriptor, E
                     nullable,
                 },
                 RawParameterType::CStr => ParameterType::CStr,
+                RawParameterType::CWStr => ParameterType::CWStr,
                 RawParameterType::CStrList => ParameterType::CStrList,
                 RawParameterType::Function {
                     callback,
@@ -1684,7 +1708,7 @@ pub(super) fn parse(source: &str, limits: Limits) -> Result<LibraryDescriptor, E
         // whose ownership the call would consume.
         if parameters
             .iter()
-            .any(|p| matches!(p.ty, ParameterType::CStr))
+            .any(|p| matches!(p.ty, ParameterType::CStr | ParameterType::CWStr))
             && parameters.iter().any(|p| {
                 matches!(
                     p.ty,

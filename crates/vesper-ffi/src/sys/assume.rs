@@ -230,7 +230,7 @@ impl FunctionDescriptor {
                 ],
                 // The callee reads a fresh NUL-terminated copy, never the
                 // caller's memory.
-                ParameterType::CStr | ParameterType::CStrList => {
+                ParameterType::CStr | ParameterType::CWStr | ParameterType::CStrList => {
                     &[(NonNull, BeforeCall), (NoRetention, Unverifiable)]
                 }
                 // A compiler-generated trampoline: never NULL. A `retain`
@@ -267,7 +267,7 @@ impl FunctionDescriptor {
             }),
             // A C string result is read up to its NUL at the call: that it
             // is one is trusted, like a pointer parameter's extent.
-            ValueType::CStr => {}
+            ValueType::CStr | ValueType::CWStr => {}
             ValueType::Address { nullable, .. } => {
                 if !nullable {
                     out.push(DeclaredAssumption {
@@ -333,6 +333,7 @@ impl FunctionDescriptor {
                 ParameterType::Value(_)
                 | ParameterType::Handle { .. }
                 | ParameterType::CStr
+                | ParameterType::CWStr
                 | ParameterType::CStrList
                 | ParameterType::Function { .. }
                 | ParameterType::Pinned { .. } => {
@@ -387,6 +388,7 @@ impl FunctionDescriptor {
                 ParameterType::Value(_)
                     | ParameterType::Handle { .. }
                     | ParameterType::CStr
+                    | ParameterType::CWStr
                     | ParameterType::CStrList
                     | ParameterType::Function { .. }
             ) {
@@ -459,7 +461,10 @@ impl FunctionDescriptor {
                     );
                 }
                 (
-                    ParameterType::CStr | ParameterType::CStrList | ParameterType::Function { .. },
+                    ParameterType::CStr
+                    | ParameterType::CWStr
+                    | ParameterType::CStrList
+                    | ParameterType::Function { .. },
                     RawArgument::Pointer { address },
                 ) => {
                     report.push(

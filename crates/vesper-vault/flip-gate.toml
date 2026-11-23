@@ -1,0 +1,31 @@
+# The flip gate for vesper-vault (scripts/ci/flip_gate.py, SH6 lane 17, #1412).
+# The port is @vesper/vault over @vesper/crypto (`vesper-crypto-sys`); the
+# frozen Rust baseline is the seed package `vesper-vault-seed` (`src/reference/`),
+# which the compiler links until self-hosting Stage 2.
+name = "vesper-vault"
+lane = "SH6-17"
+rust = [
+    "crates/vesper-vault/src/reference/aead.rs",
+    "crates/vesper-vault/src/reference/kem.rs",
+    "crates/vesper-vault/src/reference/secret.rs",
+]
+env = { CARGO_PROFILE_DEV_DEBUG = "0", CARGO_PROFILE_TEST_DEBUG = "0" }
+build = ["cargo build --locked --release -p vesper-vault --example abba"]
+
+[[tests]]
+run = "cargo test --locked --release -p vesper-vault -p vesper-vault-seed"
+
+[differential]
+run = "cargo test --locked --release -p vesper-vault --lib differential -- --nocapture"
+
+[[abba]]
+workload = "aead-aes"
+run = "${CARGO_TARGET_DIR:-target}/release/examples/abba flip-gate aead-aes 16"
+
+[[abba]]
+workload = "aead-chacha"
+run = "${CARGO_TARGET_DIR:-target}/release/examples/abba flip-gate aead-chacha 16"
+
+[[abba]]
+workload = "kem-hybrid"
+run = "${CARGO_TARGET_DIR:-target}/release/examples/abba flip-gate kem-hybrid 256"
