@@ -1182,4 +1182,107 @@ pub mod seq {
             crate::seq::HEADER_BYTES as u64,
         ]
     }
+
+    // SH4 lane 9 part 2b (#1283): seq/str/byte/hoist/fused/drop emission ops.
+    pub const STRING_LITERAL: u32 = 2;
+    pub const STR_OP: u32 = 3;
+    pub const STR_COMPARE: u32 = 4;
+    pub const BOUNDS_GUARD: u32 = 5;
+    pub const HOISTED_ACCESS: u32 = 6;
+    pub const INVARIANT_WORD: u32 = 7;
+    pub const EMPTY_HEADER: u32 = 8;
+    pub const SEQ_OP: u32 = 9;
+    pub const BYTE_OP: u32 = 10;
+    pub const FUSED_TRY_GET: u32 = 11;
+    pub const FUSED_CONDITION: u32 = 12;
+    pub const DROP_OP: u32 = 13;
+
+    // `STR_OP` sub-ops.
+    pub const STR_LEN: u64 = 1;
+    pub const STR_BYTE_VALID: u64 = 2;
+    pub const STR_BYTE: u64 = 3;
+    pub const STR_TRY_BYTE_AT: u64 = 4;
+    pub const STR_AS_BYTES: u64 = 5;
+    pub const STR_SUB_STR: u64 = 6;
+    pub const STR_PUSH_STR: u64 = 7;
+    pub const STR_PUSH_CHAR: u64 = 8;
+    pub const STR_CLEAR: u64 = 9;
+    pub const STR_RESERVE: u64 = 10;
+
+    // `HOISTED_ACCESS` kinds.
+    pub const HOIST_GET: u64 = 0;
+    pub const HOIST_SET: u64 = 1;
+    pub const HOIST_TRY_GET: u64 = 2;
+    pub const HOIST_TRY_SET: u64 = 3;
+
+    // `SEQ_OP` sub-ops.
+    pub const SEQ_WITH_CAPACITY: u64 = 1;
+    pub const SEQ_LEN: u64 = 2;
+    pub const SEQ_SLICE_LEN: u64 = 3;
+    pub const SEQ_PUSH_TAIL: u64 = 4;
+    pub const SEQ_POP: u64 = 5;
+    pub const SEQ_GET: u64 = 6;
+    pub const SEQ_SET: u64 = 7;
+    pub const SEQ_TRY_GET: u64 = 8;
+    pub const SEQ_TRY_SET: u64 = 9;
+    pub const SEQ_LAST: u64 = 10;
+    pub const SEQ_CLEAR: u64 = 11;
+    pub const SEQ_TRUNCATE: u64 = 12;
+    pub const SEQ_EXTEND_TAIL: u64 = 13;
+    pub const SEQ_RESIZE_CMP: u64 = 14;
+    pub const SEQ_RESIZE_SHRINK: u64 = 15;
+    pub const SEQ_RESIZE_GROW_TAIL: u64 = 16;
+    pub const SEQ_EXTEND_WITHIN_TAIL: u64 = 17;
+    pub const SEQ_EXTEND_REVERSED_TAIL: u64 = 18;
+    pub const SEQ_FINISH: u64 = 19;
+    pub const SEQ_AS_SLICE: u64 = 20;
+    pub const SEQ_SUB_SLICE: u64 = 21;
+    pub const SEQ_CHECK_INDEX: u64 = 22;
+    pub const SEQ_CHECK_EXTEND_WITHIN: u64 = 23;
+    pub const SEQ_CHECK_FINISH: u64 = 24;
+    pub const SEQ_RESERVE_BEGIN: u64 = 25;
+    pub const SEQ_RESERVE_ONE: u64 = 26;
+    pub const SEQ_HOIST_HEADER: u64 = 27;
+    pub const SEQ_ELEM_ADDR: u64 = 28;
+    pub const SEQ_LOAD_ELEM: u64 = 29;
+    pub const SEQ_STORE_ELEM: u64 = 30;
+    pub const SEQ_ALLOC: u64 = 31;
+    pub const SEQ_RESERVE_GROW: u64 = 32;
+
+    // `BYTE_OP` sub-ops.
+    pub const BYTE_COPY_FROM: u64 = 1;
+    pub const BYTE_COPY_WITHIN: u64 = 2;
+    pub const BYTE_FILL: u64 = 3;
+    pub const BYTE_FILL_RANGE: u64 = 4;
+    pub const BYTE_WIDE: u64 = 5;
+    pub const BYTE_SUM_BE16: u64 = 6;
+    pub const BYTE_BYTES_EQ: u64 = 7;
+    pub const BYTE_BYTES_CMP: u64 = 8;
+    pub const BYTE_FIND_BYTE: u64 = 9;
+    pub const BYTE_FIND_EITHER: u64 = 10;
+    pub const BYTE_FIND_NOT_IN: u64 = 11;
+    pub const BYTE_EXTEND_LOWER: u64 = 12;
+    pub const BYTE_MAKE_LOWER: u64 = 13;
+    pub const BYTE_CHECK_COPY_FROM: u64 = 14;
+    pub const BYTE_CHECK_COPY_WITHIN: u64 = 15;
+    pub const BYTE_CHECK_FILL_RANGE: u64 = 16;
+    pub const BYTE_CHECK_WIDE: u64 = 17;
+    pub const BYTE_CHECK_MAKE_LOWER: u64 = 18;
+
+    // `DROP_OP` sub-ops.
+    pub const DROP_SLOTS_STR: u64 = 1;
+    pub const DROP_SLOTS_FIELDS: u64 = 2;
+    pub const DROP_MOVED_ZERO: u64 = 3;
+    pub const DROP_MOVED_CLEAR: u64 = 4;
+    pub const DROP_FIELD_MOVED: u64 = 5;
+    pub const DROP_REBIND_COPY: u64 = 6;
+    pub const DROP_FREE_GUARD: u64 = 7;
+    pub const DROP_GLUE: u64 = 8;
+
+    // `DROP_GLUE` tree node tags.
+    pub const DROP_NODE_SEQ: u64 = 1;
+    pub const DROP_NODE_STR: u64 = 2;
+    pub const DROP_NODE_DYN: u64 = 3;
+    pub const DROP_NODE_PRODUCT: u64 = 4;
+    pub const DROP_NODE_ENUM: u64 = 5;
 }

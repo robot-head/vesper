@@ -232,6 +232,7 @@ pub enum MemFlag: _ {
     Readonly = 4,
     BigEndian = 8,
     LittleEndian = 16,
+    CanMove = 32,
 }
 
 // `EXT`: The `ext` argument of `vcl_sig_param_ext` and `vcl_sig_return_ext`.
