@@ -1452,7 +1452,11 @@ vesper_package(
 
 vesper_package(
     name = "std_env_package",
-    srcs = glob(["packages/vesper-std/env/src/**/*.ves", "packages/vesper-std/env/src-wasip2/**/*.ves"]),
+    srcs = glob([
+        "packages/vesper-std/env/src/**/*.ves",
+        "packages/vesper-std/env/src-wasip2/**/*.ves",
+        "packages/vesper-std/env/src-windows/**/*.ves",
+    ]),
     manifest = "packages/vesper-std/env/Loom.toml",
     visibility = ["//visibility:public"],
     vsys = glob(["packages/vesper-std/env/env-*.vsys"]),

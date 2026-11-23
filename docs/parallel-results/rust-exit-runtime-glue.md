@@ -210,3 +210,9 @@ results", so whoever lands G1 should say so there.
 The STATUS rows for these six crates live in `scripts/rust-census.py`, which
 arrives with the plan PR (#1415). This audit changes no row's class; the rows
 are updated in the first port PR after #1415 merges.
+
+
+## Update (#1629, #1633): `@vesper/vsys` and `@vesper-std/env` on Windows over `kernel32`
+
+- **PR #1629 (`@vesper/vsys`, `#1627`):** Ported `vesper-ffi::sys` (`.vsys` lexer, `wire struct` layout compiler, canonical byte encoder, and library validator) to `packages/vesper-vsys`, verified byte-for-byte against `vesper_ffi::sys::parse` across all `.vsys` files in the repository (`tests/self_host_vsys.rs`).
+- **PR (`@vesper-std/env` Windows, `#1633`):** Replaced `vesper_std_host` in `packages/vesper-std/env/env-windows.vsys` with direct `kernel32` bindings (`GetCommandLineW`, `GetCurrentDirectoryW`, `GetEnvironmentVariableW`, `GetEnvironmentStringsW`, `FreeEnvironmentStringsW`, `lstrlenW`, `WideCharToMultiByte`) and `packages/vesper-std/env/src-windows/lib.ves` (`CWStr` + UTF-8/UTF-16). `@vesper-std/env` now uses zero `vesper_std_host` across Linux, macOS, and Windows.

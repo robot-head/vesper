@@ -1,0 +1,500 @@
+// @vesper-std/env (Windows): arguments, environment variables and current
+// directory directly over Win32 `kernel32` (`env-windows.vsys`).
+use @vesper-std/fs::{
+    IoError,
+    raise_kind
+};
+
+fn u8_at(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn u16_at(in s: Slice[u16], i: u64) -> u16 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn push_utf8_cp(inout out: ChunkSeq[u8], cp: u32) {
+    if cp < 128 {
+        out.push(wrapping_u8(cp));
+    } else if cp < 2048 {
+        out.push(wrapping_u8(192 | wrapping_shr_u32(cp, 6)));
+        out.push(wrapping_u8(128 | (cp & 63)));
+    } else if cp < 65536 {
+        out.push(wrapping_u8(224 | wrapping_shr_u32(cp, 12)));
+        out.push(wrapping_u8(128 | (wrapping_shr_u32(cp, 6) & 63)));
+        out.push(wrapping_u8(128 | (cp & 63)));
+    } else {
+        out.push(wrapping_u8(240 | wrapping_shr_u32(cp, 18)));
+        out.push(wrapping_u8(128 | (wrapping_shr_u32(cp, 12) & 63)));
+        out.push(wrapping_u8(128 | (wrapping_shr_u32(cp, 6) & 63)));
+        out.push(wrapping_u8(128 | (cp & 63)));
+    }
+}
+
+fn utf16_to_utf8(in src: Slice[u16]) -> ChunkSeq[u8] {
+    let n = src.len();
+    let mut out: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](n);
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let w1 = widen_u32(u16_at(in src, i));
+        i = wrapping_add(i, 1);
+        if w1 >= 55296 && w1 <= 56319 && i < n {
+            let w2 = widen_u32(u16_at(in src, i));
+            if w2 >= 56320 && w2 <= 57343 {
+                i = wrapping_add(i, 1);
+                let hi = wrapping_shl_u32(wrapping_sub(w1, 55296), 10);
+                let lo = wrapping_sub(w2, 56320);
+                push_utf8_cp(inout out, wrapping_add(65536, hi | lo));
+                continue;
+            }
+        }
+        if w1 >= 55296 && w1 <= 57343 {
+            push_utf8_cp(inout out, 65533);
+        } else {
+            push_utf8_cp(inout out, w1);
+        }
+    }
+    out
+}
+
+fn utf8_to_utf16(in src: Slice[u8]) -> Option[ChunkSeq[u16]] {
+    let n = src.len();
+    let mut out: ChunkSeq[u16] = ChunkSeq::with_capacity[u16](n);
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let b0 = widen_u32(u8_at(in src, i));
+        if b0 < 128 {
+            out.push(wrapping_u16(b0));
+            i = wrapping_add(i, 1);
+        } else if b0 >= 194 && b0 <= 223 && wrapping_add(i, 1) < n {
+            let b1 = widen_u32(u8_at(in src, wrapping_add(i, 1)));
+            if (b1 & 192) != 128 {
+                return Option::None;
+            }
+            let cp = wrapping_shl_u32(b0 & 31, 6) | (b1 & 63);
+            out.push(wrapping_u16(cp));
+            i = wrapping_add(i, 2);
+        } else if b0 >= 224 && b0 <= 239 && wrapping_add(i, 2) < n {
+            let b1 = widen_u32(u8_at(in src, wrapping_add(i, 1)));
+            let b2 = widen_u32(u8_at(in src, wrapping_add(i, 2)));
+            if (b1 & 192) != 128 || (b2 & 192) != 128 {
+                return Option::None;
+            }
+            let cp = wrapping_shl_u32(b0 & 15, 12) | wrapping_shl_u32(b1 & 63, 6) | (b2 & 63);
+            out.push(wrapping_u16(cp));
+            i = wrapping_add(i, 3);
+        } else if b0 >= 240 && b0 <= 244 && wrapping_add(i, 3) < n {
+            let b1 = widen_u32(u8_at(in src, wrapping_add(i, 1)));
+            let b2 = widen_u32(u8_at(in src, wrapping_add(i, 2)));
+            let b3 = widen_u32(u8_at(in src, wrapping_add(i, 3)));
+            if (b1 & 192) != 128 || (b2 & 192) != 128 || (b3 & 192) != 128 {
+                return Option::None;
+            }
+            let cp = wrapping_shl_u32(b0 & 7, 18) | wrapping_shl_u32(
+                b1 & 63,
+                12
+            ) | wrapping_shl_u32(b2 & 63, 6) | (b3 & 63);
+            let adj = wrapping_sub(cp, 65536);
+            out.push(wrapping_u16(wrapping_add(55296, wrapping_shr_u32(adj, 10))));
+            out.push(wrapping_u16(wrapping_add(56320, adj & 1023)));
+            i = wrapping_add(i, 4);
+        } else {
+            return Option::None;
+        }
+    }
+    Option::Some(out)
+}
+
+fn is_cmd_ws(c: u16) -> bool {
+    c == 32 || c == 9
+}
+
+// Parse Windows command line (`CommandLineToArgvW` rules) into argument `target`
+// (or count all arguments when `count_only` is true).
+fn parse_cmdline(in cmd: Slice[u16], target: u64, count_only: bool, inout out: ChunkSeq[u16])
+    -> (u64, bool) {
+    let n = cmd.len();
+    let mut i: u64 = 0;
+    loop {
+        if i >= n || !is_cmd_ws(u16_at(in cmd, i)) {
+            break;
+        }
+        i = wrapping_add(i, 1);
+    }
+    if i >= n {
+        return (0, false);
+    }
+    let mut argc: u64 = 0;
+    let collect0 = !count_only && target == 0;
+    let mut in_quotes = false;
+    // Argument 0: quotes toggle, backslashes are literal.
+    loop {
+        if i >= n {
+            break;
+        }
+        let c = u16_at(in cmd, i);
+        if c == 34 {
+            in_quotes = !in_quotes;
+            i = wrapping_add(i, 1);
+        } else if is_cmd_ws(c) && !in_quotes {
+            break;
+        } else {
+            if collect0 {
+                out.push(c);
+            }
+            i = wrapping_add(i, 1);
+        }
+    }
+    argc = 1;
+    if collect0 {
+        return (1, true);
+    }
+    loop {
+        loop {
+            if i >= n || !is_cmd_ws(u16_at(in cmd, i)) {
+                break;
+            }
+            i = wrapping_add(i, 1);
+        }
+        if i >= n {
+            break;
+        }
+        let collect = !count_only && argc == target;
+        in_quotes = false;
+        loop {
+            if i >= n {
+                break;
+            }
+            let c = u16_at(in cmd, i);
+            if c == 92 {
+                let mut bs: u64 = 0;
+                loop {
+                    if i >= n || u16_at(in cmd, i) != 92 {
+                        break;
+                    }
+                    bs = wrapping_add(bs, 1);
+                    i = wrapping_add(i, 1);
+                }
+                if i < n && u16_at(in cmd, i) == 34 {
+                    if collect {
+                        let pairs = wrapping_shr_u64(bs, 1);
+                        for k in 0..pairs {
+                            out.push(92);
+                        }
+                    }
+                    if (bs & 1) == 1 {
+                        if collect {
+                            out.push(34);
+                        }
+                        i = wrapping_add(i, 1);
+                    } else {
+                        if in_quotes
+                            && wrapping_add(i, 1) < n
+                            && u16_at(in cmd, wrapping_add(i, 1)) == 34 {
+                            if collect {
+                                out.push(34);
+                            }
+                            i = wrapping_add(i, 2);
+                        } else {
+                            in_quotes = !in_quotes;
+                            i = wrapping_add(i, 1);
+                        }
+                    }
+                } else if collect {
+                    for k in 0..bs {
+                        out.push(92);
+                    }
+                }
+            } else if c == 34 {
+                if in_quotes && wrapping_add(i, 1) < n && u16_at(in cmd, wrapping_add(i, 1)) == 34 {
+                    if collect {
+                        out.push(34);
+                    }
+                    i = wrapping_add(i, 2);
+                } else {
+                    in_quotes = !in_quotes;
+                    i = wrapping_add(i, 1);
+                }
+            } else if is_cmd_ws(c) && !in_quotes {
+                break;
+            } else {
+                if collect {
+                    out.push(c);
+                }
+                i = wrapping_add(i, 1);
+            }
+        }
+        if collect {
+            return (wrapping_add(argc, 1), true);
+        }
+        argc = wrapping_add(argc, 1);
+    }
+    (argc, false)
+}
+
+pub fn arg_count() -> u64 eff [Ffi[StdEnv]] {
+    match StdEnv::GetCommandLineW() {
+        Option::Some(cmd) => {
+            let mut dummy: ChunkSeq[u16] = ChunkSeq::new[u16]();
+            let (n, _) = parse_cmdline(in cmd.as_slice(), 0, true, inout dummy);
+            n
+        }
+        Option::None => 0,
+    }
+}
+
+pub fn arg_bytes(i: u64) -> Option[ChunkSeq[u8]] eff [Ffi[StdEnv]] {
+    match StdEnv::GetCommandLineW() {
+        Option::Some(cmd) => {
+            let mut out: ChunkSeq[u16] = ChunkSeq::new[u16]();
+            let (_, found) = parse_cmdline(in cmd.as_slice(), i, false, inout out);
+            if found {
+                Option::Some(utf16_to_utf8(in out.as_slice()))
+            } else {
+                Option::None
+            }
+        }
+        Option::None => Option::None,
+    }
+}
+
+pub fn arg(i: u64) -> Option[String] eff [Ffi[StdEnv]] {
+    match arg_bytes(i) {
+        Option::Some(b) => String::from_utf8(in b.as_slice()),
+        Option::None => Option::None,
+    }
+}
+
+fn utf16_u32_to_utf8(in src: Slice[u32], len_u16: u64) -> ChunkSeq[u8] {
+    let mut u16s: ChunkSeq[u16] = ChunkSeq::with_capacity[u16](len_u16);
+    for i in 0..len_u16 {
+        let w = match src.try_get(wrapping_shr_u64(i, 1)) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        let cu = if (i & 1) == 0 {
+            wrapping_u16(w & 65535)
+        } else {
+            wrapping_u16(wrapping_shr_u32(w, 16))
+        };
+        u16s.push(cu);
+    }
+    utf16_to_utf8(in u16s.as_slice())
+}
+
+pub fn var_bytes(in key: Str) -> Option[ChunkSeq[u8]] eff [Ffi[StdEnv]] {
+    let k = key.as_bytes();
+    if k.len() == 0 {
+        return Option::None;
+    }
+    for i in 0..k.len() {
+        if u8_at(in k, i) == 61 {
+            return Option::None;
+        }
+    }
+    let wkey = match utf8_to_utf16(in k) {
+        Option::Some(w) => w,
+        Option::None => return Option::None,
+    };
+    let mut buf: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    buf.resize(256, 0);
+    loop {
+        match StdEnv::GetEnvironmentVariableW(in wkey.as_slice(), inout buf.as_slice_mut()) {
+            Result::Ok((n, err)) => {
+                if n == 0 {
+                    if err == StdEnv::ERROR_ENVVAR_NOT_FOUND {
+                        return Option::None;
+                    }
+                    return Option::Some(ChunkSeq::new[u8]());
+                }
+                let nu = widen_u64(n);
+                if nu < buf.len() {
+                    return Option::Some(utf16_u32_to_utf8(in buf.as_slice(), nu));
+                }
+                buf.resize(wrapping_add(nu, 1), 0);
+            }
+            Result::Err(_) => return Option::None,
+        }
+    }
+    Option::None
+}
+
+pub fn var(in key: Str) -> Option[String] eff [Ffi[StdEnv]] {
+    match var_bytes(in key) {
+        Option::Some(b) => String::from_utf8(in b.as_slice()),
+        Option::None => Option::None,
+    }
+}
+
+fn wide_to_utf8(ptr: u64, wlen: i32) -> ChunkSeq[u8] eff [Ffi[StdEnv]] {
+    let mut empty: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let needed = StdEnv::WideCharToMultiByte(
+        StdEnv::CP_UTF8,
+        0,
+        ptr,
+        wlen,
+        inout empty.as_slice_mut(),
+        0,
+        0,
+        0
+    );
+    if needed <= 0 {
+        return empty;
+    }
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    out.resize(wrapping_u64(needed), 0);
+    let wrote = StdEnv::WideCharToMultiByte(
+        StdEnv::CP_UTF8,
+        0,
+        ptr,
+        wlen,
+        inout out.as_slice_mut(),
+        needed,
+        0,
+        0
+    );
+    if wrote > 0 {
+        out.truncate(wrapping_u64(wrote));
+    } else {
+        out.clear();
+    }
+    out
+}
+
+fn is_valid_env_entry(in s: Slice[u8]) -> bool {
+    let n = s.len();
+    if n == 0 || u8_at(in s, 0) == 61 {
+        return false;
+    }
+    for i in 1..n {
+        if u8_at(in s, i) == 61 {
+            return true;
+        }
+    }
+    false
+}
+
+pub fn var_count() -> u64 eff [Ffi[StdEnv]] {
+    let base = StdEnv::GetEnvironmentStringsW();
+    if base == 0 {
+        return 0;
+    }
+    let mut count: u64 = 0;
+    let mut ptr = base;
+    loop {
+        let wlen = StdEnv::lstrlenW(ptr);
+        if wlen <= 0 {
+            break;
+        }
+        let utf8 = wide_to_utf8(ptr, wlen);
+        if is_valid_env_entry(in utf8.as_slice()) {
+            count = wrapping_add(count, 1);
+        }
+        ptr = wrapping_add(ptr, wrapping_mul(wrapping_add(wrapping_u64(wlen), 1), 2));
+    }
+    let _ = StdEnv::FreeEnvironmentStringsW(base);
+    count
+}
+
+pub fn var_at_bytes(i: u64) -> Option[ChunkSeq[u8]] eff [Ffi[StdEnv]] {
+    let base = StdEnv::GetEnvironmentStringsW();
+    if base == 0 {
+        return Option::None;
+    }
+    let mut seen: u64 = 0;
+    let mut ptr = base;
+    let mut found: Option[ChunkSeq[u8]] = Option::None;
+    loop {
+        let wlen = StdEnv::lstrlenW(ptr);
+        if wlen <= 0 {
+            break;
+        }
+        let utf8 = wide_to_utf8(ptr, wlen);
+        if is_valid_env_entry(in utf8.as_slice()) {
+            if seen == i {
+                found = Option::Some(utf8);
+                break;
+            }
+            seen = wrapping_add(seen, 1);
+        }
+        ptr = wrapping_add(ptr, wrapping_mul(wrapping_add(wrapping_u64(wlen), 1), 2));
+    }
+    let _ = StdEnv::FreeEnvironmentStringsW(base);
+    found
+}
+
+fn errno_kind(e: u32) -> u32 {
+    match e {
+        2 => 1,
+        3 => 1,
+        5 => 2,
+        8 => 12,
+        14 => 12,
+        50 => 11,
+        80 => 3,
+        87 => 7,
+        145 => 6,
+        183 => 3,
+        267 => 4,
+        _ => 13,
+    }
+}
+
+pub fn current_dir_bytes() -> ChunkSeq[u8] eff [Ffi[StdEnv], Fail[IoError]] {
+    let mut buf: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    buf.resize(260, 0);
+    loop {
+        let cap = wrapping_u32(buf.len());
+        let (n, err) = StdEnv::GetCurrentDirectoryW(cap, inout buf.as_slice_mut());
+        if n == 0 {
+            return Fail::raise(
+                IoError {
+                    kind: errno_kind(err),
+                    os: err,
+                }
+            );
+        }
+        let nu = widen_u64(n);
+        if nu < buf.len() {
+            return utf16_u32_to_utf8(in buf.as_slice(), nu);
+        }
+        buf.resize(nu, 0);
+    }
+    ChunkSeq::new[u8]()
+}
+
+pub fn current_dir() -> String eff [Ffi[StdEnv], Fail[IoError]] {
+    let b = current_dir_bytes();
+    match String::from_utf8(in b.as_slice()) {
+        Option::Some(s) => s,
+        Option::None => raise_kind(7),
+    }
+}
+
+pub fn os() -> u32 {
+    StdEnv::OS
+}
+
+pub fn os_linux() -> u32 {
+    1
+}
+
+pub fn os_macos() -> u32 {
+    2
+}
+
+pub fn os_windows() -> u32 {
+    3
+}
