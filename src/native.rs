@@ -1334,6 +1334,7 @@ fn define_instances_observed_with_trace<M: Module>(
     );
     let mut clif = String::new();
     let denorm = crate::capability_effects::const_denorm_spans(world);
+    let mut deferred_defs = Vec::new();
     for (key, (name, generic_vars)) in instances {
         let f = concrete(world, name, generic_vars)?;
         let entry_name = trace_entry.map(|(e, _)| e).unwrap_or("");
@@ -1538,7 +1539,6 @@ fn define_instances_observed_with_trace<M: Module>(
             rewrite(key, &mut ctx.func)?;
         }
         linkage.normalize_references(&mut ctx.func);
-        let mut cold_helpers = Vec::new();
         if operands_only {
             crate::native_clif_opt::run(&mut ctx.func);
             let simd = matches!(
@@ -1550,9 +1550,15 @@ fn define_instances_observed_with_trace<M: Module>(
                 .contains(&crate::capability_effects::Capability::ConstTime)
                 || closure_capabilities(&f)
                     .contains(&crate::capability_effects::Capability::ConstTime);
-            if !is_const_time {
-                cold_helpers = crate::native_cold_outline::outline(m, key, &mut ctx.func)?;
-            }
+            deferred_defs.push((
+                define_id,
+                key.clone(),
+                name.clone(),
+                generic_vars.clone(),
+                is_const_time,
+                ctx,
+            ));
+            continue;
         }
         let user_callees = |func: &ir::Function| -> Vec<(u32, String)> {
             let declarations = m.declarations();
@@ -1574,6 +1580,57 @@ fn define_instances_observed_with_trace<M: Module>(
         };
         // No JIT caller reads the CLIF text, and printing it costs as much
         // as half of Cranelift's own work on a large function (#1151).
+        if matches!(linkage, DefinitionLinkage::Object) {
+            clif.push_str(&format!("; {key}\n{}\n", ctx.func.display()));
+        }
+        if let Some(observe) = observer.as_mut() {
+            let mut function = ctx.func.clone();
+            function.name = ir::UserFuncName::user(0, define_id.as_u32());
+            let callees = user_callees(&function);
+            observe(EmittedFunction {
+                key: key.clone(),
+                source: name.clone(),
+                symbol: m
+                    .declarations()
+                    .get_function_decl(define_id)
+                    .linkage_name(define_id)
+                    .into_owned(),
+                func_id: define_id.as_u32(),
+                function,
+                callees,
+                vars: generic_vars.clone(),
+                optimized: operands_only,
+                inlined: Default::default(),
+            });
+        }
+        m.define_function(define_id, &mut ctx)
+            .map_err(|e| format!("native codegen '{name}': {e}"))?;
+        m.clear_context(&mut ctx);
+    }
+    for (define_id, key, name, generic_vars, is_const_time, mut ctx) in deferred_defs {
+        let cold_helpers = if !is_const_time {
+            crate::native_cold_outline::outline(m, &key, &mut ctx.func)?
+        } else {
+            Vec::new()
+        };
+        let user_callees = |func: &ir::Function| -> Vec<(u32, String)> {
+            let declarations = m.declarations();
+            func.params
+                .user_named_funcs()
+                .values()
+                .filter(|name| name.namespace == 0)
+                .map(|name| {
+                    let callee = FuncId::from_u32(name.index);
+                    (
+                        name.index,
+                        declarations
+                            .get_function_decl(callee)
+                            .linkage_name(callee)
+                            .into_owned(),
+                    )
+                })
+                .collect()
+        };
         if matches!(linkage, DefinitionLinkage::Object) {
             clif.push_str(&format!("; {key}\n{}\n", ctx.func.display()));
             for (_, cold_key, cold_func) in &cold_helpers {
