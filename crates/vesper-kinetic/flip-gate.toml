@@ -5,7 +5,11 @@
 # compiler links until Stage 2.
 name = "vesper-kinetic"
 lane = "SH6-9"
-rust = ["crates/vesper-kinetic/seed/src/engine/coloring.rs"]
+rust = [
+  "crates/vesper-kinetic/seed/src/engine/coloring.rs",
+  "crates/vesper-kinetic/seed/src/engine/gjk.rs",
+  "crates/vesper-kinetic/seed/src/engine/sap.rs",
+]
 env = { CARGO_PROFILE_DEV_DEBUG = "0", CARGO_PROFILE_TEST_DEBUG = "0" }
 build = ["cargo build --locked --release -p vesper-kinetic --example abba"]
 
@@ -25,3 +29,11 @@ run = "${CARGO_TARGET_DIR:-target}/release/examples/abba flip-gate colorer 20"
 [[abba]]
 workload = "multi-colorer"
 run = "${CARGO_TARGET_DIR:-target}/release/examples/abba flip-gate multi-colorer 20"
+
+[[abba]]
+workload = "gjk"
+run = "${CARGO_TARGET_DIR:-target}/release/examples/abba flip-gate gjk 20"
+
+[[abba]]
+workload = "sap"
+run = "${CARGO_TARGET_DIR:-target}/release/examples/abba flip-gate sap 5"

@@ -48,10 +48,77 @@ pub fn sortable(bits: u32) -> u32 {
     }
 }
 
+// One LSD radix pass over `sk[0..n]` -> `dk[0..n]` (and `sv` -> `dv`), using
+// `hist[0..256]` without redundant histogram reloads or inner branches.
+fn radix_pass_vals(
+    in sk: Slice[u64],
+    in sv: Slice[u32],
+    inout dk: Slice[u64],
+    inout dv: Slice[u32],
+    n: u64,
+    shift: u32,
+    inout hist: Slice[u32]
+) {
+    for d in 0..u(RADIX_BUCKETS) {
+        hist.try_set(d, 0);
+    }
+    for i in 0..n {
+        let k = g64(in sk, i);
+        let d = shr_u64(k, shift) & RADIX_MASK;
+        hist.try_set(d, wrapping_add(g32(in hist, d), 1));
+    }
+    let mut run: u32 = 0;
+    for d in 0..u(RADIX_BUCKETS) {
+        let c = g32(in hist, d);
+        hist.try_set(d, run);
+        run = wrapping_add(run, c);
+    }
+    for i in 0..n {
+        let k = g64(in sk, i);
+        let d = shr_u64(k, shift) & RADIX_MASK;
+        let cur = g32(in hist, d);
+        let at = widen_u64(cur);
+        hist.try_set(d, wrapping_add(cur, 1));
+        dk.try_set(at, k);
+        dv.try_set(at, g32(in sv, i));
+    }
+}
+
+fn radix_pass_keys(
+    in sk: Slice[u64],
+    inout dk: Slice[u64],
+    n: u64,
+    shift: u32,
+    inout hist: Slice[u32]
+) {
+    for d in 0..u(RADIX_BUCKETS) {
+        hist.try_set(d, 0);
+    }
+    for i in 0..n {
+        let k = g64(in sk, i);
+        let d = shr_u64(k, shift) & RADIX_MASK;
+        hist.try_set(d, wrapping_add(g32(in hist, d), 1));
+    }
+    let mut run: u32 = 0;
+    for d in 0..u(RADIX_BUCKETS) {
+        let c = g32(in hist, d);
+        hist.try_set(d, run);
+        run = wrapping_add(run, c);
+    }
+    for i in 0..n {
+        let k = g64(in sk, i);
+        let d = shr_u64(k, shift) & RADIX_MASK;
+        let cur = g32(in hist, d);
+        let at = widen_u64(cur);
+        hist.try_set(d, wrapping_add(cur, 1));
+        dk.try_set(at, k);
+    }
+}
+
 // Stable LSD radix sort of `keys[0..n]` (with `vals` when `with_vals`) on
 // the low `passes * 8` bits, through `tk`/`tv` and the 256-slot `hist`.
 // Even pass counts leave the result in `keys`/`vals`.
-fn radix_sort(
+pub fn radix_sort(
     inout keys: Slice[u64],
     inout vals: Slice[u32],
     with_vals: bool,
@@ -61,49 +128,21 @@ fn radix_sort(
     inout tv: Slice[u32],
     inout hist: Slice[u32]
 ) {
-    for pass in 0..passes {
-        let shift = wrapping_u32(wrapping_mul(pass, RADIX_BITS));
-        for d in 0..u(RADIX_BUCKETS) {
-            hist.try_set(d, 0);
+    let mut pass: u64 = 0;
+    loop {
+        if !(pass < passes) {
+            break;
         }
-        let odd = (pass & 1) == 1;
-        for i in 0..n {
-            let mut k: u64 = 0;
-            if odd {
-                k = g64(in tk, i);
-            } else {
-                k = g64(in keys, i);
-            }
-            let d = shr_u64(k, shift) & RADIX_MASK;
-            hist.try_set(d, wrapping_add(g32(in hist, d), 1));
+        let shift0 = wrapping_u32(wrapping_mul(pass, RADIX_BITS));
+        let shift1 = wrapping_u32(wrapping_mul(inc(pass), RADIX_BITS));
+        if with_vals {
+            radix_pass_vals(in keys, in vals, inout tk, inout tv, n, shift0, inout hist);
+            radix_pass_vals(in tk, in tv, inout keys, inout vals, n, shift1, inout hist);
+        } else {
+            radix_pass_keys(in keys, inout tk, n, shift0, inout hist);
+            radix_pass_keys(in tk, inout keys, n, shift1, inout hist);
         }
-        let mut run: u32 = 0;
-        for d in 0..u(RADIX_BUCKETS) {
-            let c = g32(in hist, d);
-            hist.try_set(d, run);
-            run = wrapping_add(run, c);
-        }
-        for i in 0..n {
-            if odd {
-                let k = g64(in tk, i);
-                let d = shr_u64(k, shift) & RADIX_MASK;
-                let at = widen_u64(g32(in hist, d));
-                hist.try_set(d, wrapping_add(g32(in hist, d), 1));
-                keys.try_set(at, k);
-                if with_vals {
-                    vals.try_set(at, g32(in tv, i));
-                }
-            } else {
-                let k = g64(in keys, i);
-                let d = shr_u64(k, shift) & RADIX_MASK;
-                let at = widen_u64(g32(in hist, d));
-                hist.try_set(d, wrapping_add(g32(in hist, d), 1));
-                tk.try_set(at, k);
-                if with_vals {
-                    tv.try_set(at, g32(in vals, i));
-                }
-            }
-        }
+        pass = wrapping_add(pass, 2);
     }
 }
 
@@ -287,20 +326,34 @@ pub fn write_pairs(
             bt = wrapping_add(bt, 3);
         }
     }
+    radix_sort_pairs(inout out, total, n, inout tk, inout novals, inout tv, inout hist);
+}
+
+// Sort packed `(a << 32) | b` pairs (`0..len`) for `n` items, compressing to
+// 4 passes when indices fit in 16 bits (`n <= 65,536`).
+pub fn radix_sort_pairs(
+    inout keys: Slice[u64],
+    len: u64,
+    n: u64,
+    inout tk: Slice[u64],
+    inout novals: Slice[u32],
+    inout tv: Slice[u32],
+    inout hist: Slice[u32]
+) {
     let mut passes: u64 = PAIR_PASSES;
     if n <= SMALL_INDEX_COUNT {
         // Indices fit in 16 bits: compress each key so four passes sort it.
         passes = SMALL_PAIR_PASSES;
-        for i in 0..total {
-            let k = g64(in out, i);
-            out.try_set(i, ((k >> 32) << 16) | (k & SMALL_INDEX_MASK));
+        for i in 0..len {
+            let k = g64(in keys, i);
+            keys.try_set(i, ((k >> 32) << 16) | (k & SMALL_INDEX_MASK));
         }
     }
-    radix_sort(inout out, inout novals, false, total, passes, inout tk, inout tv, inout hist);
+    radix_sort(inout keys, inout novals, false, len, passes, inout tk, inout tv, inout hist);
     if passes == SMALL_PAIR_PASSES {
-        for i in 0..total {
-            let k = g64(in out, i);
-            out.try_set(i, ((k >> 16) << 32) | (k & SMALL_INDEX_MASK));
+        for i in 0..len {
+            let k = g64(in keys, i);
+            keys.try_set(i, ((k >> 16) << 32) | (k & SMALL_INDEX_MASK));
         }
     }
 }
