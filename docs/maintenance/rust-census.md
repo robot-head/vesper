@@ -14,7 +14,7 @@ and delete its Rust (owner, 2026-11-21): full function and within 1.5x of Rust's
 |---|---|--:|
 | `gone` | Rust gone: the Vesper port is the only build (a frozen seed may remain until Stage 2) | 27,858 |
 | `flip` | At the bar (full function, <= 1.5x Rust): flip to Vesper and delete the Rust now | 0 |
-| `partial` | Port exists but is unfinished or above 1.5x: finish, speed up, then flip | 195,626 |
+| `partial` | Port exists but is unfinished or above 1.5x: finish, speed up, then flip | 195,667 |
 | `compiler` | In the compiler: ported module by module into the hybrid; Rust deleted at the Stage 2 retirement | 212,289 |
 | `unported` | No Vesper port yet: port it | 4,837 |
 | `c-api` | Rust wrapper over a C or OS API: call the C API or syscalls straight from Vesper `.vsys`, no Rust left | 65,572 |
@@ -22,9 +22,9 @@ and delete its Rust (owner, 2026-11-21): full function and within 1.5x of Rust's
 | `shim` | Irreducible: thin C-ABI shim over a vetted Rust-only library with no C equivalent | 7,864 |
 | `diverse` | Kept Rust on purpose as a diverse implementation (owner call) | 14,036 |
 | `infra` | Rust-vs-Vesper port infrastructure: deleted when the last Rust build it compares goes | 11,818 |
-| | **All non-test Rust** (root `src/` plus `crates/`) | **556,509** |
+| | **All non-test Rust** (root `src/` plus `crates/`) | **556,550** |
 
-Test and harness Rust (all lines, tracked files): `tests/` 171,976, `crates/*/tests` 232,009. These move to Vesper tests with each flip (SH6 lane 19).
+Test and harness Rust (all lines, tracked files): `tests/` 171,976, `crates/*/tests` 232,286. These move to Vesper tests with each flip (SH6 lane 19).
 
 ## Crates
 
@@ -42,7 +42,7 @@ Test and harness Rust (all lines, tracked files): `tests/` 171,976, `crates/*/te
 | `vesper-warp` | 15,207 | `partial` | in crate | 1.08-5.39x | recovery 5.4x, frames 2.3x; crypto via warp-crypto shim | 4 |
 | `vesper-ebpf` | 14,733 | `partial` | in crate | 1.2-4.7x | BTF writers, ELF, bpf() syscalls | 10 |
 | `vesper-silicon` | 14,469 | `partial` | in crate | unmeasured | SVD model, stack/prologue/hazard analysis (Cranelift IR), mmio | 10 |
-| `vesper-kinetic` | 14,281 | `partial` | in crate (+ seed) | colorer 0.78x, multi-colorer 1.35x; fastmath 1.42x, gjk 1.70x, sap 1.84x, morton 2.03x, lbvh 2.07x, crmath 2.65x | coloring flipped (Rust in seed/src/engine); fastmath, gjk, sap, morton, lbvh, crmath above the bar; world/tile, rigid, soft, articulation, couple, diff, rollback, snapshot, detfloat, simd unported | 9 |
+| `vesper-kinetic` | 14,322 | `partial` | in crate (+ seed) | colorer 0.78x, multi-colorer 1.35x, gjk 1.12x [1.05-1.17x], sap 1.09x [1.05-1.16x], scene 1.18x, pile-lbvh 1.37x; lbvh 1.57x, fastmath 1.70x (1.42x Linux), morton 1.88x, crmath 2.27x | coloring, gjk, sap flipped (Rust in seed/src/engine); lbvh, fastmath, morton, crmath above the bar on Windows MSVC; world/tile, rigid, soft, articulation, couple, diff, rollback, snapshot, detfloat, simd unported | 9 |
 | `vesper-flux` | 12,940 | `partial` | in crate | unmeasured | CDC, Kafka wire, durable state, cluster driver | 6 |
 | `vesper-quarry` | 12,595 | `partial` | in crate | 1.80x | buffer pool, executor, online DDL | 6 |
 | `vesper-sim-session` | 9,658 | `partial` | in crate | unmeasured | umem, warp, JSON, driver (SH5 lane 19) | SH5-19 |
