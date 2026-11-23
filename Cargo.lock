@@ -5631,7 +5631,7 @@ dependencies = [
  "vesper-syntax",
  "vesper-tensor-seed",
  "vesper-test",
- "vesper-vault",
+ "vesper-vault-seed",
  "wasm-encoder 0.261.0",
  "wasmtime",
  "wasmtime-wasi",
@@ -6214,7 +6214,7 @@ dependencies = [
  "vesper-syntax",
  "vesper-tensor-seed",
  "vesper-test",
- "vesper-vault",
+ "vesper-vault-seed",
  "wasm-encoder 0.261.0",
  "wit-component",
  "wit-parser",
@@ -6860,7 +6860,7 @@ dependencies = [
  "blake3",
  "serde",
  "serde_json",
- "vesper-vault",
+ "vesper-vault-seed",
 ]
 
 [[package]]
@@ -6924,6 +6924,30 @@ dependencies = [
 
 [[package]]
 name = "vesper-vault"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "chacha20poly1305",
+ "cranelift-codegen 0.125.4",
+ "cranelift-frontend 0.125.4",
+ "getrandom 0.4.3",
+ "libc",
+ "libcrux-ml-kem",
+ "ml-kem",
+ "rand_core 0.10.1",
+ "region",
+ "shake",
+ "vesper-bench",
+ "vesper-crypto-sys",
+ "vesper-port-abi",
+ "vesper-port-harness",
+ "vesper-vault-seed",
+ "x25519-dalek",
+ "zeroize",
+]
+
+[[package]]
+name = "vesper-vault-seed"
 version = "0.1.0"
 dependencies = [
  "aes",

@@ -65,6 +65,8 @@ const VT_NONNULL: u8 = 6;
 const VT_FLOAT: u8 = 7;
 // A nullable C string copied into a Vesper byte sequence.
 const VT_CSTR: u8 = 8;
+// A nullable wide C string copied into a Vesper UTF-16 sequence.
+const VT_CWSTR: u8 = 9;
 
 // `ParameterType` tags.
 const P_VALUE: u8 = 0;
@@ -78,6 +80,8 @@ const P_FUNCTION: u8 = 5;
 const P_PINNED: u8 = 6;
 // `nocapture in argv: CStrList`: NUL-ended strings in one `Slice[u8]`.
 const P_CSTR_LIST: u8 = 7;
+// `nocapture in s: CWStr`: NUL-terminated UTF-16 string in `Slice[u16]`.
+const P_CWSTR: u8 = 8;
 
 // Accesses: `Access` (in, inout), `PointerAccess` (in, out, inout) and
 // `HandleAccess` (in, inout, sink) share these codes.
@@ -1076,6 +1080,10 @@ fn read_value(inout r: Reader, in b: Slice[u8], inout s: S) -> Vt {
         v.tag = VT_CSTR;
         return v;
     }
+    if field_is(in b, a, e, in "nullable-cwstr-copy") {
+        v.tag = VT_CWSTR;
+        return v;
+    }
     let name = field_sym(inout r, in b, inout s);
     if field_is(in b, a, e, in "scalar") {
         v.tag = VT_SCALAR;
@@ -1167,6 +1175,8 @@ fn read_param(inout r: Reader, in b: Slice[u8], inout s: S) -> Par {
     } else if field_is(in b, a, e, in "nocapture-cstr-list") {
         // Only a `CStr` can refuse a call, so a list keeps its own tag.
         p.tag = P_CSTR_LIST;
+    } else if field_is(in b, a, e, in "nocapture-cwstr") {
+        p.tag = P_CWSTR;
     } else if field_is(in b, a, e, in "pinned-buffer") {
         p.tag = P_PINNED;
         let (c, d) = r.field(in b);
@@ -1945,7 +1955,7 @@ pub fn compute_shape(inout s: S, fi: u64) -> Sh {
             } else if v.tag == VT_UNIT {
                 s.put(in "Unit parameter");
                 return shape_err(inout s, mark);
-            } else if v.tag == VT_CSTR {
+            } else if v.tag == VT_CSTR || v.tag == VT_CWSTR {
                 s.put(in "a C string result is not a parameter");
                 return shape_err(inout s, mark);
             } else if v.tag == VT_HANDLE || v.tag == VT_NONNULL {
@@ -2004,6 +2014,9 @@ pub fn compute_shape(inout s: S, fi: u64) -> Sh {
             };
             let t = s.ty_name(sym8(p.psc));
             sp.ty = s.ty_app1(S_PINNED, t);
+        } else if p.tag == P_CWSTR {
+            let u16t = s.ty_name(sym8(SC_U16));
+            sp.ty = s.ty_app1(S_SLICE, u16t);
         } else {
             let u8t = s.ty_name(sym8(SC_U8));
             sp.ty = s.ty_app1(S_SLICE, u8t);
@@ -2036,6 +2049,10 @@ pub fn compute_shape(inout s: S, fi: u64) -> Sh {
     } else if v.tag == VT_CSTR {
         let byte = s.ty_name(sym8(SC_U8));
         let text = s.ty_app1(S_CHUNK_SEQ, byte);
+        result = s.ty_app1(S_OPTION, text);
+    } else if v.tag == VT_CWSTR {
+        let unit = s.ty_name(sym8(SC_U16));
+        let text = s.ty_app1(S_CHUNK_SEQ, unit);
         result = s.ty_app1(S_OPTION, text);
     } else if v.tag == VT_HANDLE && v.nullable {
         let t = s.ty_name(v.name);
@@ -2078,7 +2095,8 @@ pub fn compute_shape(inout s: S, fi: u64) -> Sh {
 fn takes_cstr(in s: S, fi: u64) -> bool {
     let f = s.fun(fi);
     for j in 0..f.pn {
-        if s.par(add(f.p0, j)).tag == P_CSTR {
+        let tag = s.par(add(f.p0, j)).tag;
+        if tag == P_CSTR || tag == P_CWSTR {
             return true;
         }
     }

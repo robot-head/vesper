@@ -545,6 +545,7 @@ pub fn elem_bytes(world: &World, ty: &Type) -> Result<i64, String> {
     let ty = crate::numeric::default_type(ty);
     Ok(match ty.name() {
         "u8" | "bool" if matches!(&ty, Type::Named(_, a) if a.is_empty()) => 1,
+        "u16" if matches!(&ty, Type::Named(_, a) if a.is_empty()) => 2,
         "u32" if matches!(&ty, Type::Named(_, a) if a.is_empty()) => 4,
         _ => i64::from(crate::layout::Layout::of(world, &ty)?.size),
     })
