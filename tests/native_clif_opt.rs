@@ -384,3 +384,37 @@ fn float_coefficients_are_constants() {
     assert!(seen > 0, "poly was not emitted");
     assert_eq!(agree(COEFFICIENTS), "33521664");
 }
+
+#[test]
+fn narrow_extend_constant_chains_fold() {
+    let source = "fn clz_like(v: u64) -> u64 {
+    if v == 0 {
+        return 64;
+    }
+    let mut x = v;
+    let mut n: u64 = 0;
+    if x >> 32 == 0 {
+        n = wrapping_add(n, 32);
+        x = x << 32;
+    }
+    if x >> 48 == 0 {
+        n = wrapping_add(n, 16);
+        x = x << 16;
+    }
+    n
+}
+fn main() -> u64 {
+    wrapping_add(clz_like(0), clz_like(12345))
+}";
+    let c = accepted(source);
+    let (_, clif) = native::object(&c.world, "main").unwrap();
+    assert!(
+        !clif.contains("clz_like::cold#"),
+        "early-return guard should not outline the hot body:\n{clif}"
+    );
+    assert!(
+        !clif.contains("ireduce"),
+        "expected constant narrow-extend chains to fold:\n{clif}"
+    );
+    assert_eq!(agree(source), "112");
+}
