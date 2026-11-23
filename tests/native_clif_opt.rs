@@ -588,3 +588,52 @@ fn main() -> u64 {
         "expected guarded fast-loop iadd+const overflow checks to be eliminated and body merged:\n{clif}"
     );
 }
+
+#[test]
+fn guarded_loop_pb0_join_param_overflow_is_eliminated() {
+    let source = "fn copy_blocks(in src: Slice[u8], inout dst: Slice[u8], blocks: u64) eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+    for b in 0..blocks {
+        let base = 16 * b;
+        for i in 0..16 {
+            let v = src[i];
+            dst.set(base + i, v);
+        }
+    }
+}
+fn main() -> u64 {
+    let mut a = ChunkSeq::new[u8]();
+    let mut b = ChunkSeq::new[u8]();
+    for i in 0..16 {
+        a.push(wrapping_u8(i));
+    }
+    for _ in 0..32 {
+        b.push(0);
+    }
+    handle Fail[ArithOverflow] in {
+        handle Fail[RuntimeError] in {
+            copy_blocks(in a.as_slice(), inout b.as_slice_mut(), 2);
+            match b.try_get(19) {
+                Option::Some(v) => widen_u64(v),
+                Option::None => 999,
+            }
+        } with {
+            return x => x,
+            raise(_, _) => 998,
+        }
+    } with {
+        return x => x,
+        raise(_, _) => 997,
+    }
+}";
+    let c = accepted(source);
+    let (_, clif) = native::object(&c.world, "main").unwrap();
+    assert_eq!(agree(source), "3");
+    let fast_body = clif
+        .split("\n\n")
+        .find(|blk| blk.contains("uload8") && blk.contains("istore8"))
+        .unwrap_or("");
+    assert!(
+        !fast_body.is_empty() && !fast_body.contains("icmp ult"),
+        "expected guarded fast-loop pb0 join-param iadd overflow check to be eliminated:\n{clif}"
+    );
+}
