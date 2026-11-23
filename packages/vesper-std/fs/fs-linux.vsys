@@ -1,0 +1,84 @@
+// Linux libc bindings for `@vesper-std/fs`, bypassing `vesper_std_host`.
+
+sys library StdFs (
+    target = "@TARGET@", abi = "@ABI@",
+    link = "dynamic", name = "c",
+    artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+) {
+    // `openat` / `statx` / `unlinkat` flags (identical on x86_64 and aarch64 Linux).
+    const AT_FDCWD: i32 = -100;
+    const AT_SYMLINK_NOFOLLOW: i32 = 256;
+    const AT_REMOVEDIR: i32 = 512;
+    const AT_EMPTY_PATH: i32 = 4096;
+
+    // `openat` flags (identical on x86_64 and aarch64 Linux).
+    const O_RDONLY: i32 = 0;
+    const O_WRONLY: i32 = 1;
+    const O_CREAT: i32 = 64;
+    const O_EXCL: i32 = 128;
+    const O_TRUNC: i32 = 512;
+    const O_APPEND: i32 = 1024;
+    const O_CLOEXEC: i32 = 524288;
+
+    // `statx` request masks.
+    const STATX_BASIC_STATS: u32 = 2047;
+    const STATX_TYPE: u32 = 1;
+    const STATX_SIZE: u32 = 512;
+
+    wire struct StatxTs {
+        tv_sec: i64,
+        tv_nsec: u32,
+        reserved: i32,
+    }
+
+    // `struct statx` (256 bytes; identical layout on x86_64 and aarch64 Linux).
+    wire struct StatxBuf {
+        stx_mask: u32,
+        stx_blksize: u32,
+        stx_attributes: u64,
+        stx_nlink: u32,
+        stx_uid: u32,
+        stx_gid: u32,
+        stx_mode: u16,
+        spare0: u16,
+        stx_ino: u64,
+        stx_size: u64,
+        stx_blocks: u64,
+        stx_attributes_mask: u64,
+        stx_atime: StatxTs,
+        stx_btime: StatxTs,
+        stx_ctime: StatxTs,
+        stx_mtime: StatxTs,
+        rdev_major: u32,
+        rdev_minor: u32,
+        dev_major: u32,
+        dev_minor: u32,
+        stx_mnt_id: u64,
+        dio_mem_align: u32,
+        dio_offset_align: u32,
+        s0: u64,
+        s1: u64,
+        s2: u64,
+        s3: u64,
+        s4: u64,
+        s5: u64,
+        s6: u64,
+        s7: u64,
+        s8: u64,
+        s9: u64,
+        s10: u64,
+        s11: u64,
+    }
+
+    fn openat(dirfd: i32, nocapture in path: CStr, flags: i32, ..., mode: i64) -> ForeignVal[i32] errno;
+    fn read(fd: i32, nocapture inout buf: CSlice[u8]) -> ForeignVal[i64] errno;
+    fn write(fd: i32, nocapture in buf: CSlice[u8]) -> ForeignVal[i64] errno;
+    fn fsync(fd: i32) -> ForeignVal[i32] errno;
+    fn close(fd: i32) -> ForeignVal[i32];
+    fn renameat(olddirfd: i32, nocapture in oldpath: CStr, newdirfd: i32, nocapture in newpath: CStr) -> ForeignVal[i32] errno;
+    fn unlinkat(dirfd: i32, nocapture in path: CStr, flags: i32) -> ForeignVal[i32] errno;
+    fn mkdirat(dirfd: i32, nocapture in path: CStr, mode: u32) -> ForeignVal[i32] errno;
+    fn statx(dirfd: i32, nocapture in path: CStr, flags: i32, mask: u32, nocapture inout buf: StatxBuf) -> ForeignVal[i32] errno;
+    fn getdents64(fd: i32, nocapture inout dirp: CSlice[u8]) -> ForeignVal[i64] errno;
+    fn getpid() -> ForeignVal[i32];
+}

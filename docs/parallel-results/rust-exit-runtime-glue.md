@@ -210,3 +210,10 @@ results", so whoever lands G1 should say so there.
 The STATUS rows for these six crates live in `scripts/rust-census.py`, which
 arrives with the plan PR (#1415). This audit changes no row's class; the rows
 are updated in the first port PR after #1415 merges.
+
+
+## Update (#1620): `@vesper-std/fs` on Linux over libc
+
+- `packages/vesper-std/fs/Loom.toml` now uses `vsys = ["fs-@OS@.vsys"]`, and `src/packages.rs` selects `src-<os>` when `!self.wasi` and that directory exists (keeping `src/` + `fs-{macos,windows,wasip2}.vsys` unchanged).
+- `packages/vesper-std/fs/fs-linux.vsys` binds Linux `libc` (`openat`, `read`, `write`, `fsync`, `close`, `renameat`, `unlinkat`, `mkdirat`, `statx`, `getdents64`, `getpid`) with `StatxBuf` and target-neutral constants (`x86_64` and `aarch64` Linux).
+- `packages/vesper-std/fs/src-linux/{lib.ves, walk.ves}` implements the full `@vesper-std/fs` and `@vesper-std/fs::walk` API directly over `libc` without `vesper_std_host`, verified by cross-compiling (`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`) and running the linked smoke binary (`-lc -lpthread -ldl -lm`) in Docker (`gcc:bookworm`, exit `0`).

@@ -1,0 +1,725 @@
+// @vesper-std/fs (Linux): files and directories directly over libc (`fs-linux.vsys`).
+
+pub copy struct IoError {
+    pub kind: u32,
+    pub os: u32,
+}
+
+pub fn not_found() -> u32 {
+    1
+}
+
+pub fn permission_denied() -> u32 {
+    2
+}
+
+pub fn already_exists() -> u32 {
+    3
+}
+
+pub fn not_a_directory() -> u32 {
+    4
+}
+
+pub fn is_a_directory() -> u32 {
+    5
+}
+
+pub fn directory_not_empty() -> u32 {
+    6
+}
+
+pub fn invalid_input() -> u32 {
+    7
+}
+
+pub fn interrupted() -> u32 {
+    8
+}
+
+pub fn unexpected_eof() -> u32 {
+    9
+}
+
+pub fn broken_pipe() -> u32 {
+    10
+}
+
+pub fn unsupported() -> u32 {
+    11
+}
+
+pub fn out_of_memory() -> u32 {
+    12
+}
+
+pub fn other() -> u32 {
+    13
+}
+
+fn errno_kind(os: u32) -> u32 {
+    if os == 1 || os == 13 {
+        permission_denied()
+    } else if os == 2 {
+        not_found()
+    } else if os == 4 {
+        interrupted()
+    } else if os == 12 {
+        out_of_memory()
+    } else if os == 17 {
+        already_exists()
+    } else if os == 20 {
+        not_a_directory()
+    } else if os == 21 {
+        is_a_directory()
+    } else if os == 22 {
+        invalid_input()
+    } else if os == 32 {
+        broken_pipe()
+    } else if os == 38 {
+        unsupported()
+    } else if os == 39 {
+        directory_not_empty()
+    } else {
+        other()
+    }
+}
+
+pub fn error_of(os: u64) -> IoError {
+    let code = wrapping_u32(os);
+    IoError {
+        kind: errno_kind(code),
+        os: code,
+    }
+}
+
+pub fn raise_io[T](os: u64) -> T eff [Fail[IoError]] {
+    Fail::raise(error_of(os))
+}
+
+pub fn raise_kind[T](kind: u32) -> T eff [Fail[IoError]] {
+    Fail::raise(
+        IoError {
+            kind: kind,
+            os: 0,
+        }
+    )
+}
+
+pub copy struct Metadata {
+    pub size: u64,
+    pub mtime_s: i64,
+    pub mtime_ns: u32,
+    pub kind: u32,
+}
+
+pub fn kind_file() -> u32 {
+    1
+}
+
+pub fn kind_dir() -> u32 {
+    2
+}
+
+pub fn kind_symlink() -> u32 {
+    3
+}
+
+pub fn kind_other() -> u32 {
+    4
+}
+
+fn zero_ts() -> StatxTs {
+    StatxTs {
+        tv_sec: 0,
+        tv_nsec: 0,
+        reserved: 0,
+    }
+}
+
+fn zero_statx() -> StatxBuf {
+    StatxBuf {
+        stx_mask: 0,
+        stx_blksize: 0,
+        stx_attributes: 0,
+        stx_nlink: 0,
+        stx_uid: 0,
+        stx_gid: 0,
+        stx_mode: 0,
+        spare0: 0,
+        stx_ino: 0,
+        stx_size: 0,
+        stx_blocks: 0,
+        stx_attributes_mask: 0,
+        stx_atime: zero_ts(),
+        stx_btime: zero_ts(),
+        stx_ctime: zero_ts(),
+        stx_mtime: zero_ts(),
+        rdev_major: 0,
+        rdev_minor: 0,
+        dev_major: 0,
+        dev_minor: 0,
+        stx_mnt_id: 0,
+        dio_mem_align: 0,
+        dio_offset_align: 0,
+        s0: 0,
+        s1: 0,
+        s2: 0,
+        s3: 0,
+        s4: 0,
+        s5: 0,
+        s6: 0,
+        s7: 0,
+        s8: 0,
+        s9: 0,
+        s10: 0,
+        s11: 0,
+    }
+}
+
+fn mode_to_kind(stx_mode: u16) -> u32 {
+    let fmt = wrapping_shr_u32(widen_u32(stx_mode), 12) & 15;
+    if fmt == 8 {
+        kind_file()
+    } else if fmt == 4 {
+        kind_dir()
+    } else if fmt == 10 {
+        kind_symlink()
+    } else {
+        kind_other()
+    }
+}
+
+fn open_at(dirfd: i32, in path: Slice[u8], flags: i32, mode: i64)
+    -> i32 eff [Ffi[StdFs], Fail[IoError]] {
+    match StdFs::openat(dirfd, in path, flags, mode) {
+        Result::Ok((fd, err)) => {
+            if fd < 0 {
+                raise_io(widen_u64(err))
+            } else {
+                fd
+            }
+        }
+        Result::Err(_) => raise_kind(invalid_input()),
+    }
+}
+
+fn close_fd(fd: i32) eff [Ffi[StdFs]] {
+    let _ = StdFs::close(fd);
+}
+
+fn fsync_fd(fd: i32) -> u32 eff [Ffi[StdFs]] {
+    loop {
+        let (r, err) = StdFs::fsync(fd);
+        if r >= 0 {
+            return 0;
+        }
+        if err != 4 {
+            return err;
+        }
+    }
+}
+
+fn write_all_fd(fd: i32, in data: Slice[u8]) -> u32 eff [Ffi[StdFs]] {
+    let total = data.len();
+    let mut off: u64 = 0;
+    loop {
+        if off >= total {
+            break;
+        }
+        let (n, err) = StdFs::write(fd, in data[off..total]);
+        if n < 0 {
+            if err == 4 {
+                continue;
+            }
+            return err;
+        }
+        if n == 0 {
+            return 5;
+        }
+        off = wrapping_add(off, wrapping_u64(n));
+    }
+    0
+}
+
+// ---------------------------------------------------------------------------
+// Whole files.
+
+pub fn read(in path: Str) -> ChunkSeq[u8] eff [Ffi[StdFs], Fail[IoError]] {
+    read_path(in path.as_bytes())
+}
+
+pub fn read_path(in path: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[StdFs], Fail[IoError]] {
+    let fd = open_at(StdFs::AT_FDCWD, in path, StdFs::O_RDONLY | StdFs::O_CLOEXEC, 0);
+    let mut stx = zero_statx();
+    let mut hint: u64 = 4096;
+    match StdFs::statx(fd, in "".as_bytes(), StdFs::AT_EMPTY_PATH, StdFs::STATX_SIZE, inout stx) {
+        Result::Ok((sr, _)) => {
+            if sr == 0 && stx.stx_size > 0 {
+                hint = wrapping_add(stx.stx_size, 1);
+            }
+        }
+        Result::Err(_) => (),
+    }
+    let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    buf.resize(hint, 0);
+    let mut total: u64 = 0;
+    let mut err: u32 = 0;
+    loop {
+        let cap = buf.len();
+        if total == cap {
+            let next_cap = if cap < 4096 {
+                4096
+            } else {
+                wrapping_mul(cap, 2)
+            };
+            buf.resize(next_cap, 0);
+        }
+        let end = buf.len();
+        let (got, rerr) = StdFs::read(fd, inout buf[total..end]);
+        if got < 0 {
+            if rerr == 4 {
+                continue;
+            }
+            err = rerr;
+            break;
+        }
+        if got == 0 {
+            break;
+        }
+        total = wrapping_add(total, wrapping_u64(got));
+    }
+    close_fd(fd);
+    if err != 0 {
+        return raise_io(widen_u64(err));
+    }
+    buf.truncate(total);
+    buf
+}
+
+pub fn read_string(in path: Str) -> String eff [Ffi[StdFs], Fail[IoError]] {
+    let bytes = read_path(in path.as_bytes());
+    match String::from_utf8(in bytes.as_slice()) {
+        Option::Some(s) => s,
+        Option::None => raise_kind(invalid_input()),
+    }
+}
+
+fn write_mode(in path: Slice[u8], in data: Slice[u8], flags: i32, sync: bool) eff [
+    Ffi[StdFs],
+    Fail[IoError]
+] {
+    let fd = open_at(StdFs::AT_FDCWD, in path, flags | StdFs::O_CLOEXEC, 438);
+    let mut err = write_all_fd(fd, in data);
+    if err == 0 && sync {
+        err = fsync_fd(fd);
+    }
+    close_fd(fd);
+    if err != 0 {
+        raise_io(widen_u64(err))
+    }
+}
+
+pub fn write(in path: Str, in data: Slice[u8]) eff [Ffi[StdFs], Fail[IoError]] {
+    write_mode(
+        in path.as_bytes(),
+        in data,
+        StdFs::O_WRONLY | StdFs::O_CREAT | StdFs::O_TRUNC,
+        false
+    );
+}
+
+pub fn write_path(in path: Slice[u8], in data: Slice[u8]) eff [Ffi[StdFs], Fail[IoError]] {
+    write_mode(in path, in data, StdFs::O_WRONLY | StdFs::O_CREAT | StdFs::O_TRUNC, false);
+}
+
+pub fn append(in path: Str, in data: Slice[u8]) eff [Ffi[StdFs], Fail[IoError]] {
+    write_mode(
+        in path.as_bytes(),
+        in data,
+        StdFs::O_WRONLY | StdFs::O_CREAT | StdFs::O_APPEND,
+        false
+    );
+}
+
+pub fn create_new(in path: Str, in data: Slice[u8]) eff [Ffi[StdFs], Fail[IoError]] {
+    write_mode(
+        in path.as_bytes(),
+        in data,
+        StdFs::O_WRONLY | StdFs::O_CREAT | StdFs::O_EXCL,
+        false
+    );
+}
+
+fn push_hex(inout out: ChunkSeq[u8], n: u64) {
+    let mut shift: u64 = 60;
+    loop {
+        let d = wrapping_u8(wrapping_shr_u64(n, wrapping_u32(shift)) & 15);
+        if d < 10 {
+            out.push(wrapping_add(d, 48));
+        } else {
+            out.push(wrapping_add(d, 87));
+        }
+        if shift == 0 {
+            break;
+        }
+        shift = wrapping_sub(shift, 4);
+    }
+}
+
+fn byte_at(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn parent_len(in path: Slice[u8]) -> u64 {
+    let mut i = path.len();
+    loop {
+        if i == 0 {
+            break;
+        }
+        i = wrapping_sub(i, 1);
+        if byte_at(in path, i) == 47 {
+            return wrapping_add(i, 1);
+        }
+    }
+    0
+}
+
+pub fn replace(in path: Str, in data: Slice[u8]) eff [Ffi[StdFs], Fail[IoError]] {
+    replace_path(in path.as_bytes(), in data);
+}
+
+pub fn replace_path(in path: Slice[u8], in data: Slice[u8]) eff [Ffi[StdFs], Fail[IoError]] {
+    let cut = parent_len(in path);
+    let pid = widen_u64(wrapping_u32(StdFs::getpid()));
+    let mut attempt: u64 = 0;
+    let mut temp: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut fd: i32 = -1;
+    loop {
+        temp.clear();
+        temp.extend(in path[0..cut]);
+        temp.push(46);
+        temp.push(118);
+        temp.push(115);
+        temp.push(116);
+        temp.push(45);
+        let tag = (wrapping_shl_u64(pid, 32)) | attempt;
+        push_hex(inout temp, tag);
+        temp.push(46);
+        temp.push(116);
+        temp.push(109);
+        temp.push(112);
+        match StdFs::openat(
+            StdFs::AT_FDCWD,
+            in temp.as_slice(),
+            StdFs::O_WRONLY | StdFs::O_CREAT | StdFs::O_EXCL | StdFs::O_CLOEXEC,
+            384
+        ) {
+            Result::Ok((opened, err)) => {
+                if opened >= 0 {
+                    fd = opened;
+                    break;
+                }
+                if err == 17 && attempt < 1024 {
+                    attempt = wrapping_add(attempt, 1);
+                    continue;
+                }
+                return raise_io(widen_u64(err));
+            }
+            Result::Err(_) => return raise_kind(invalid_input()),
+        }
+    }
+    let mut err = write_all_fd(fd, in data);
+    if err == 0 {
+        err = fsync_fd(fd);
+    }
+    close_fd(fd);
+    if err == 0 {
+        match StdFs::renameat(StdFs::AT_FDCWD, in temp.as_slice(), StdFs::AT_FDCWD, in path) {
+            Result::Ok((r, rerr)) => {
+                if r < 0 {
+                    err = rerr;
+                }
+            }
+            Result::Err(_) => {
+                let _ = StdFs::unlinkat(StdFs::AT_FDCWD, in temp.as_slice(), 0);
+                return raise_kind(invalid_input());
+            }
+        }
+    }
+    if err != 0 {
+        let _ = StdFs::unlinkat(StdFs::AT_FDCWD, in temp.as_slice(), 0);
+        return raise_io(widen_u64(err));
+    }
+    let mut dir: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    if cut == 0 {
+        dir.push(46);
+    } else {
+        dir.extend(in path[0..cut]);
+    }
+    match StdFs::openat(StdFs::AT_FDCWD, in dir.as_slice(), StdFs::O_RDONLY | StdFs::O_CLOEXEC, 0) {
+        Result::Ok((dfd, _)) => {
+            if dfd >= 0 {
+                let serr = fsync_fd(dfd);
+                close_fd(dfd);
+                if serr != 0 && serr != 22 && serr != 9 && serr != 30 && serr != 38 {
+                    return raise_io(widen_u64(serr));
+                }
+            }
+        }
+        Result::Err(_) => (),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Paths.
+
+fn check_cstr_call(res: Result[(i32, u32), ForeignInvalid]) eff [Fail[IoError]] {
+    match res {
+        Result::Ok((r, err)) => {
+            if r < 0 {
+                raise_io(widen_u64(err))
+            }
+        }
+        Result::Err(_) => raise_kind(invalid_input()),
+    }
+}
+
+pub fn rename(in from: Str, in to: Str) eff [Ffi[StdFs], Fail[IoError]] {
+    check_cstr_call(
+        StdFs::renameat(StdFs::AT_FDCWD, in from.as_bytes(), StdFs::AT_FDCWD, in to.as_bytes())
+    );
+}
+
+pub fn remove_file(in path: Str) eff [Ffi[StdFs], Fail[IoError]] {
+    check_cstr_call(StdFs::unlinkat(StdFs::AT_FDCWD, in path.as_bytes(), 0));
+}
+
+pub fn remove_dir(in path: Str) eff [Ffi[StdFs], Fail[IoError]] {
+    check_cstr_call(StdFs::unlinkat(StdFs::AT_FDCWD, in path.as_bytes(), StdFs::AT_REMOVEDIR));
+}
+
+fn is_dot_or_dotdot(in name: Slice[u8]) -> bool {
+    let n = name.len();
+    if n == 1 && byte_at(in name, 0) == 46 {
+        true
+    } else if n == 2 && byte_at(in name, 0) == 46 && byte_at(in name, 1) == 46 {
+        true
+    } else {
+        false
+    }
+}
+
+fn entry_is_dir(dirfd: i32, in name: Slice[u8], d_type: u8)
+    -> bool eff [Ffi[StdFs], Fail[IoError]] {
+    if d_type == 4 {
+        return true;
+    }
+    if d_type != 0 {
+        return false;
+    }
+    let mut stx = zero_statx();
+    match StdFs::statx(dirfd, in name, StdFs::AT_SYMLINK_NOFOLLOW, StdFs::STATX_TYPE, inout stx) {
+        Result::Ok((r, err)) => {
+            if r < 0 {
+                raise_io(widen_u64(err))
+            } else {
+                mode_to_kind(stx.stx_mode) == kind_dir()
+            }
+        }
+        Result::Err(_) => raise_kind(invalid_input()),
+    }
+}
+
+fn remove_dir_contents(fd: i32) eff [Ffi[StdFs], Fail[IoError]] {
+    let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    buf.resize(4096, 0);
+    let mut child: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    loop {
+        let (nread, err) = StdFs::getdents64(fd, inout buf.as_slice_mut());
+        if nread < 0 {
+            if err == 4 {
+                continue;
+            }
+            return raise_io(widen_u64(err));
+        }
+        if nread == 0 {
+            break;
+        }
+        let end = wrapping_u64(nread);
+        let mut pos: u64 = 0;
+        loop {
+            if pos >= end {
+                break;
+            }
+            let reclen = widen_u64(
+                wrapping_u16(
+                    widen_u32(byte_at(in buf.as_slice(), wrapping_add(pos, 16))) | wrapping_shl_u32(
+                        widen_u32(byte_at(in buf.as_slice(), wrapping_add(pos, 17))),
+                        8
+                    )
+                )
+            );
+            let d_type = byte_at(in buf.as_slice(), wrapping_add(pos, 18));
+            let name_start = wrapping_add(pos, 19);
+            let rec_end = wrapping_add(pos, reclen);
+            let mut nul = name_start;
+            loop {
+                if nul >= rec_end || byte_at(in buf.as_slice(), nul) == 0 {
+                    break;
+                }
+                nul = wrapping_add(nul, 1);
+            }
+            child.clear();
+            child.extend(in buf[name_start..nul]);
+            if !is_dot_or_dotdot(in child.as_slice()) {
+                if entry_is_dir(fd, in child.as_slice(), d_type) {
+                    let cfd = open_at(
+                        fd,
+                        in child.as_slice(),
+                        StdFs::O_RDONLY | StdFs::O_CLOEXEC,
+                        0
+                    );
+                    remove_dir_contents(cfd);
+                    close_fd(cfd);
+                    check_cstr_call(StdFs::unlinkat(fd, in child.as_slice(), StdFs::AT_REMOVEDIR));
+                } else {
+                    check_cstr_call(StdFs::unlinkat(fd, in child.as_slice(), 0));
+                }
+            }
+            pos = rec_end;
+        }
+    }
+}
+
+pub fn remove_dir_all(in path: Str) eff [Ffi[StdFs], Fail[IoError]] {
+    let fd = open_at(StdFs::AT_FDCWD, in path.as_bytes(), StdFs::O_RDONLY | StdFs::O_CLOEXEC, 0);
+    let mut stx = zero_statx();
+    match StdFs::statx(fd, in "".as_bytes(), StdFs::AT_EMPTY_PATH, StdFs::STATX_TYPE, inout stx) {
+        Result::Ok((r, err)) => {
+            if r < 0 {
+                close_fd(fd);
+                return raise_io(widen_u64(err));
+            }
+            if mode_to_kind(stx.stx_mode) != kind_dir() {
+                close_fd(fd);
+                return raise_io(20);
+            }
+        }
+        Result::Err(_) => {
+            close_fd(fd);
+            return raise_kind(invalid_input());
+        }
+    }
+    remove_dir_contents(fd);
+    close_fd(fd);
+    check_cstr_call(StdFs::unlinkat(StdFs::AT_FDCWD, in path.as_bytes(), StdFs::AT_REMOVEDIR));
+}
+
+pub fn create_dir(in path: Str) eff [Ffi[StdFs], Fail[IoError]] {
+    check_cstr_call(StdFs::mkdirat(StdFs::AT_FDCWD, in path.as_bytes(), 511));
+}
+
+pub fn create_dir_all(in path: Str) eff [Ffi[StdFs], Fail[IoError]] {
+    create_dir_all_path(in path.as_bytes());
+}
+
+fn ensure_one_dir(in prefix: Slice[u8]) eff [Ffi[StdFs], Fail[IoError]] {
+    match StdFs::mkdirat(StdFs::AT_FDCWD, in prefix, 511) {
+        Result::Ok((r, err)) => {
+            if r >= 0 {
+                return ();
+            }
+            if err != 17 {
+                return raise_io(widen_u64(err));
+            }
+            let mut stx = zero_statx();
+            match StdFs::statx(StdFs::AT_FDCWD, in prefix, 0, StdFs::STATX_TYPE, inout stx) {
+                Result::Ok((sr, _)) => {
+                    if sr == 0 && mode_to_kind(stx.stx_mode) == kind_dir() {
+                        return ();
+                    }
+                    raise_io(17)
+                }
+                Result::Err(_) => raise_io(17),
+            }
+        }
+        Result::Err(_) => raise_kind(invalid_input()),
+    }
+}
+
+pub fn create_dir_all_path(in path: Slice[u8]) eff [Ffi[StdFs], Fail[IoError]] {
+    let n = path.len();
+    if n == 0 {
+        return ();
+    }
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        loop {
+            if i >= n || byte_at(in path, i) != 47 {
+                break;
+            }
+            i = wrapping_add(i, 1);
+        }
+        if i >= n {
+            break;
+        }
+        loop {
+            if i >= n || byte_at(in path, i) == 47 {
+                break;
+            }
+            i = wrapping_add(i, 1);
+        }
+        ensure_one_dir(in path[0..i]);
+    }
+}
+
+fn meta_path(in path: Slice[u8], follow: bool) -> Metadata eff [Ffi[StdFs], Fail[IoError]] {
+    let mut stx = zero_statx();
+    let flags = if follow {
+        0
+    } else {
+        StdFs::AT_SYMLINK_NOFOLLOW
+    };
+    match StdFs::statx(StdFs::AT_FDCWD, in path, flags, StdFs::STATX_BASIC_STATS, inout stx) {
+        Result::Ok((r, err)) => {
+            if r < 0 {
+                raise_io(widen_u64(err))
+            } else {
+                Metadata {
+                    size: stx.stx_size,
+                    mtime_s: stx.stx_mtime.tv_sec,
+                    mtime_ns: stx.stx_mtime.tv_nsec,
+                    kind: mode_to_kind(stx.stx_mode),
+                }
+            }
+        }
+        Result::Err(_) => raise_kind(invalid_input()),
+    }
+}
+
+pub fn metadata(in path: Str) -> Metadata eff [Ffi[StdFs], Fail[IoError]] {
+    meta_path(in path.as_bytes(), true)
+}
+
+pub fn metadata_path(in path: Slice[u8]) -> Metadata eff [Ffi[StdFs], Fail[IoError]] {
+    meta_path(in path, true)
+}
+
+pub fn symlink_metadata(in path: Str) -> Metadata eff [Ffi[StdFs], Fail[IoError]] {
+    meta_path(in path.as_bytes(), false)
+}
+
+pub fn exists(in path: Str) -> bool eff [Ffi[StdFs]] {
+    let mut stx = zero_statx();
+    match StdFs::statx(StdFs::AT_FDCWD, in path.as_bytes(), 0, StdFs::STATX_TYPE, inout stx) {
+        Result::Ok((r, _)) => r == 0,
+        Result::Err(_) => false,
+    }
+}
