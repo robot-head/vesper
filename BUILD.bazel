@@ -761,8 +761,8 @@ vesper_crate(
     # "Test all targets" (8-9 min each), which hit BuildBuddy's 1-hour limit.
     test_shards = {
         "test/self_host_bounds_hoist_jit": 4,
-        # One test per shard: the file took 51 minutes in one process.
-        "test/self_host_check_pact": 9,
+        # Four balanced shards: keeps per-shard JIT setup small while staying well under 1h.
+        "test/self_host_check_pact": 4,
         "test/self_host_codegen_scalar": 4,
         "test/self_host_front_end": 4,
         "test/self_host_ir_opt": 4,
