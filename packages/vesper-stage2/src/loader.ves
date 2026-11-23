@@ -1,0 +1,625 @@
+// Pure-Vesper Loom package graph loader over `@vesper-std/fs`, encoding
+// the package graph into the word stream expected by
+// `@vesper/check-names-packages::assembly_begin`.
+
+use @vesper-std/fs::{
+    IoError,
+    read_path
+};
+
+fn put_u64(inout o: ChunkSeq[u8], v: u64) {
+    for k in 0..8 {
+        o.push(wrapping_u8(wrapping_shr_u64(v, wrapping_u32(wrapping_mul(k, 8))) & 255));
+    }
+}
+
+fn put_str(inout o: ChunkSeq[u8], in s: Slice[u8]) {
+    put_u64(inout o, s.len());
+    o.extend(in s);
+    let rem = s.len() & 7;
+    if rem != 0 {
+        let pad = wrapping_sub(8, rem);
+        for _i in 0..pad {
+            o.push(0);
+        }
+    }
+}
+
+fn join_path(in dir: Slice[u8], in rel: Slice[u8]) -> ChunkSeq[u8] {
+    let mut out = ChunkSeq::new[u8]();
+    if dir.len() == 0 || (dir.len() == 1 && byte_at(in dir, 0) == 46) {
+        out.extend(in rel);
+        return out;
+    }
+    out.extend(in dir);
+    let last = byte_at(in dir, wrapping_sub(dir.len(), 1));
+    if last != 47 && last != 92 {
+        out.push(47);
+    }
+    out.extend(in rel);
+    out
+}
+
+fn byte_at(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(b) => b,
+        Option::None => 0,
+    }
+}
+
+fn eq_bytes(in a: Slice[u8], in b: Slice[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    for i in 0..a.len() {
+        if byte_at(in a, i) != byte_at(in b, i) {
+            return false;
+        }
+    }
+    true
+}
+
+fn try_read_file(in path: Slice[u8]) -> Option[ChunkSeq[u8]] eff [Ffi[StdFs]] {
+    handle Fail[IoError] in {
+        let bytes = read_path(in path);
+        Option::Some(bytes)
+    } with {
+        return v => v,
+        raise(_e, _k) => Option::None,
+    }
+}
+
+fn trim_range(in s: Slice[u8], start: u64, end0: u64) -> (u64, u64) {
+    let mut a = start;
+    let mut z = end0;
+    if z > a && byte_at(in s, wrapping_sub(z, 1)) == 13 {
+        z = wrapping_sub(z, 1);
+    }
+    loop {
+        if a >= z {
+            break;
+        }
+        let b = byte_at(in s, a);
+        if b == 32 || b == 9 {
+            a = wrapping_add(a, 1);
+        } else {
+            break;
+        }
+    }
+    loop {
+        if z <= a {
+            break;
+        }
+        let b = byte_at(in s, wrapping_sub(z, 1));
+        if b == 32 || b == 9 {
+            z = wrapping_sub(z, 1);
+        } else {
+            break;
+        }
+    }
+    (a, z)
+}
+
+fn find_byte(in s: Slice[u8], from: u64, end0: u64, target: u8) -> u64 {
+    for i in from..end0 {
+        if byte_at(in s, i) == target {
+            return i;
+        }
+    }
+    end0
+}
+
+// Parse `"..."` starting at or after `from` within `..end0`.
+fn parse_quoted(in s: Slice[u8], from: u64, end0: u64) -> (u64, u64, bool) {
+    let q1 = find_byte(in s, from, end0, 34);
+    if q1 >= end0 {
+        return (0, 0, false);
+    }
+    let a = wrapping_add(q1, 1);
+    let q2 = find_byte(in s, a, end0, 34);
+    if q2 >= end0 {
+        return (0, 0, false);
+    }
+    (a, q2, true)
+}
+
+fn normalize_dir(in base: Slice[u8], in rel: Slice[u8]) -> ChunkSeq[u8] {
+    let joined = if rel.len() > 0 && byte_at(in rel, 0) == 47 {
+        let mut c = ChunkSeq::new[u8]();
+        c.extend(in rel);
+        c
+    } else {
+        join_path(in base, in rel)
+    };
+    let s = joined.as_slice();
+    let abs = s.len() > 0 && byte_at(in s, 0) == 47;
+    let mut segs = ChunkSeq::new[ChunkSeq[u8]]();
+    let mut i: u64 = 0;
+    loop {
+        if i >= s.len() {
+            break;
+        }
+        let next = find_byte(in s, i, s.len(), 47);
+        let seg = s[i..next];
+        if seg.len() > 0 && !eq_bytes(in seg, in ".".as_bytes()) {
+            if eq_bytes(in seg, in "..".as_bytes()) {
+                if segs.len() > 0 {
+                    segs.truncate(wrapping_sub(segs.len(), 1));
+                }
+            } else {
+                let mut cp = ChunkSeq::new[u8]();
+                cp.extend(in seg);
+                segs.push(sink cp);
+            }
+        }
+        i = wrapping_add(next, 1);
+    }
+    let mut out = ChunkSeq::new[u8]();
+    if abs {
+        out.push(47);
+    }
+    for k in 0..segs.len() {
+        if k > 0 {
+            out.push(47);
+        }
+        match segs.try_get(k) {
+            Option::Some(seg) => out.extend(in seg.as_slice()),
+            Option::None => {},
+        }
+    }
+    if out.len() == 0 {
+        out.push(46);
+    }
+    out
+}
+
+struct DepSpec {
+    name: ChunkSeq[u8],
+    path: ChunkSeq[u8],
+}
+
+struct Manifest {
+    name: ChunkSeq[u8],
+    deps: ChunkSeq[DepSpec],
+}
+
+fn parse_manifest(in text: Slice[u8]) -> Manifest {
+    let mut pkg_name = ChunkSeq::new[u8]();
+    let mut deps = ChunkSeq::new[DepSpec]();
+    let mut sec: u8 = 0;
+    let mut pos: u64 = 0;
+    loop {
+        if pos >= text.len() {
+            break;
+        }
+        let nl = find_byte(in text, pos, text.len(), 10);
+        let (la, lz) = trim_range(in text, pos, nl);
+        pos = wrapping_add(nl, 1);
+        if la >= lz || byte_at(in text, la) == 35 {
+            continue;
+        }
+        if byte_at(in text, la) == 91 {
+            let line = text[la..lz];
+            if eq_bytes(in line, in "[package]".as_bytes()) {
+                sec = 1;
+            } else if eq_bytes(in line, in "[dependencies]".as_bytes()) {
+                sec = 2;
+            } else {
+                sec = 0;
+            }
+            continue;
+        }
+        if sec == 1 {
+            let eq = find_byte(in text, la, lz, 61);
+            if eq < lz {
+                let (ka, kz) = trim_range(in text, la, eq);
+                if eq_bytes(in text[ka..kz], in "name".as_bytes()) {
+                    let (a, z, ok) = parse_quoted(in text, wrapping_add(eq, 1), lz);
+                    if ok {
+                        pkg_name.clear();
+                        pkg_name.extend(in text[a..z]);
+                    }
+                }
+            }
+        } else if sec == 2 {
+            let eq = find_byte(in text, la, lz, 61);
+            if eq < lz {
+                let (rka, rkz) = trim_range(in text, la, eq);
+                let (ka, kz, kok) = parse_quoted(in text, rka, rkz);
+                let (da, dz) = if kok {
+                    (ka, kz)
+                } else {
+                    (rka, rkz)
+                };
+                let mut p_idx = wrapping_add(eq, 1);
+                let mut found_path = false;
+                let mut pa: u64 = 0;
+                let mut pz: u64 = 0;
+                loop {
+                    if p_idx >= lz {
+                        break;
+                    }
+                    if wrapping_add(p_idx, 4) <= lz
+                        && eq_bytes(in text[p_idx..wrapping_add(p_idx, 4)], in "path".as_bytes()) {
+                        let peq = find_byte(in text, wrapping_add(p_idx, 4), lz, 61);
+                        if peq < lz {
+                            let (qa, qz, qok) = parse_quoted(in text, wrapping_add(peq, 1), lz);
+                            if qok {
+                                pa = qa;
+                                pz = qz;
+                                found_path = true;
+                                break;
+                            }
+                        }
+                    }
+                    p_idx = wrapping_add(p_idx, 1);
+                }
+                if found_path {
+                    let mut dn = ChunkSeq::new[u8]();
+                    dn.extend(in text[da..dz]);
+                    let mut dp = ChunkSeq::new[u8]();
+                    dp.extend(in text[pa..pz]);
+                    deps
+                        .push(
+                            sink DepSpec {
+                                name: dn,
+                                path: dp
+                            }
+                        );
+                }
+            }
+        }
+    }
+    Manifest {
+        name: pkg_name,
+        deps: deps
+    }
+}
+
+fn is_ident_byte(b: u8) -> bool {
+    (b >= 97 && b <= 122) || (b >= 65 && b <= 90) || (b >= 48 && b <= 57) || b == 95
+}
+
+// Scan top-level `mod <ident>;` or `pub mod <ident>;` declarations.
+fn scan_mods(in src: Slice[u8]) -> ChunkSeq[ChunkSeq[u8]] {
+    let mut out = ChunkSeq::new[ChunkSeq[u8]]();
+    let mut pos: u64 = 0;
+    loop {
+        if pos >= src.len() {
+            break;
+        }
+        let nl = find_byte(in src, pos, src.len(), 10);
+        let (la0, lz) = trim_range(in src, pos, nl);
+        let mut la = la0;
+        pos = wrapping_add(nl, 1);
+        if wrapping_sub(lz, la) >= 4
+            && eq_bytes(in src[la..wrapping_add(la, 4)], in "pub ".as_bytes()) {
+            let (na, _nz) = trim_range(in src, wrapping_add(la, 4), lz);
+            la = na;
+        }
+        if wrapping_sub(lz, la) >= 4
+            && eq_bytes(in src[la..wrapping_add(la, 4)], in "mod ".as_bytes()) {
+            let (ra, rz) = trim_range(in src, wrapping_add(la, 4), lz);
+            let mut end = ra;
+            loop {
+                if end >= rz || !is_ident_byte(byte_at(in src, end)) {
+                    break;
+                }
+                end = wrapping_add(end, 1);
+            }
+            if end > ra {
+                let (aa, az) = trim_range(in src, end, rz);
+                if aa < az && byte_at(in src, aa) == 59 {
+                    let mut name = ChunkSeq::new[u8]();
+                    name.extend(in src[ra..end]);
+                    out.push(sink name);
+                }
+            }
+        }
+    }
+    out
+}
+
+struct PkgNode {
+    name: ChunkSeq[u8],
+    dir: ChunkSeq[u8],
+    dep_names: ChunkSeq[ChunkSeq[u8]],
+    dep_indices: ChunkSeq[u64],
+}
+
+struct FileEntry {
+    display: ChunkSeq[u8],
+    base: u64,
+}
+
+struct ModEntry {
+    pkg: u64,
+    segs: ChunkSeq[ChunkSeq[u8]],
+    file: u64,
+    text: ChunkSeq[u8],
+}
+
+fn find_pkg_by_dir(in pkgs: ChunkSeq[PkgNode], in dir: Slice[u8]) -> Option[u64] {
+    for i in 0..pkgs.len() {
+        match pkgs.try_get(i) {
+            Option::Some(p) => {
+                if eq_bytes(in p.dir.as_slice(), in dir) {
+                    return Option::Some(i);
+                }
+            },
+            Option::None => {},
+        }
+    }
+    Option::None
+}
+
+fn load_pkg_graph(in root_dir: Slice[u8], inout pkgs: ChunkSeq[PkgNode])
+    -> Option[u64] eff [Ffi[StdFs]] {
+    let norm = normalize_dir(in ".".as_bytes(), in root_dir);
+    match find_pkg_by_dir(in pkgs, in norm.as_slice()) {
+        Option::Some(idx) => {
+            return Option::Some(idx);
+        },
+        Option::None => {},
+    }
+    let mpath = join_path(in norm.as_slice(), in "Loom.toml".as_bytes());
+    let mbytes = match try_read_file(in mpath.as_slice()) {
+        Option::Some(b) => b,
+        Option::None => {
+            return Option::None;
+        },
+    };
+    let manifest = parse_manifest(in mbytes.as_slice());
+    let idx = pkgs.len();
+    pkgs
+        .push(
+            sink PkgNode {
+                name: manifest.name,
+                dir: norm,
+                dep_names: ChunkSeq::new[ChunkSeq[u8]](),
+                dep_indices: ChunkSeq::new[u64]()
+            }
+        );
+    for i in 0..manifest.deps.len() {
+        match manifest.deps.try_get(i) {
+            Option::Some(d) => {
+                let ddir = match pkgs.try_get(idx) {
+                    Option::Some(p) => normalize_dir(in p.dir.as_slice(), in d.path.as_slice()),
+                    Option::None => ChunkSeq::new[u8](),
+                };
+                match load_pkg_graph(in ddir.as_slice(), inout pkgs) {
+                    Option::Some(di) => {
+                        match pkgs.try_get_mut(idx) {
+                            Option::Some(p) => {
+                                let mut dn = ChunkSeq::new[u8]();
+                                dn.extend(in d.name.as_slice());
+                                p.dep_names.push(sink dn);
+                                p.dep_indices.push(di);
+                            },
+                            Option::None => {},
+                        }
+                    },
+                    Option::None => {},
+                }
+            },
+            Option::None => {},
+        }
+    }
+    Option::Some(idx)
+}
+
+fn collect_mod_files(
+    pkg_idx: u64,
+    in src_dir: Slice[u8],
+    in segs: ChunkSeq[ChunkSeq[u8]],
+    in fpath: Slice[u8],
+    sink text: ChunkSeq[u8],
+    inout base_off: u64,
+    inout files: ChunkSeq[FileEntry],
+    inout mods: ChunkSeq[ModEntry]
+) eff [Ffi[StdFs]] {
+    let fidx = files.len();
+    let mut disp = ChunkSeq::new[u8]();
+    disp.extend(in fpath);
+    let len = text.len();
+    files
+        .push(
+            sink FileEntry {
+                display: disp,
+                base: base_off
+            }
+        );
+    base_off = wrapping_add(base_off, wrapping_add(len, 1));
+    let sub_names = scan_mods(in text.as_slice());
+    let mut seg_copy = ChunkSeq::new[ChunkSeq[u8]]();
+    for i in 0..segs.len() {
+        match segs.try_get(i) {
+            Option::Some(s) => {
+                let mut sc = ChunkSeq::new[u8]();
+                sc.extend(in s.as_slice());
+                seg_copy.push(sink sc);
+            },
+            Option::None => {},
+        }
+    }
+    mods
+        .push(
+            sink ModEntry {
+                pkg: pkg_idx,
+                segs: seg_copy,
+                file: fidx,
+                text: text
+            }
+        );
+    for i in 0..sub_names.len() {
+        match sub_names.try_get(i) {
+            Option::Some(sub) => {
+                let mut rel1 = ChunkSeq::new[u8]();
+                rel1.extend(in sub.as_slice());
+                rel1.extend(in ".ves".as_bytes());
+                let p1 = join_path(in src_dir, in rel1.as_slice());
+                let mut next_segs = ChunkSeq::new[ChunkSeq[u8]]();
+                for j in 0..segs.len() {
+                    match segs.try_get(j) {
+                        Option::Some(s) => {
+                            let mut sc = ChunkSeq::new[u8]();
+                            sc.extend(in s.as_slice());
+                            next_segs.push(sink sc);
+                        },
+                        Option::None => {},
+                    }
+                }
+                let mut sn = ChunkSeq::new[u8]();
+                sn.extend(in sub.as_slice());
+                next_segs.push(sink sn);
+                match try_read_file(in p1.as_slice()) {
+                    Option::Some(sub_text) => {
+                        collect_mod_files(
+                            pkg_idx,
+                            in src_dir,
+                            in next_segs,
+                            in p1.as_slice(),
+                            sink sub_text,
+                            inout base_off,
+                            inout files,
+                            inout mods
+                        );
+                    },
+                    Option::None => {
+                        let sub_dir = join_path(in src_dir, in sub.as_slice());
+                        let p2 = join_path(in sub_dir.as_slice(), in "mod.ves".as_bytes());
+                        match try_read_file(in p2.as_slice()) {
+                            Option::Some(sub_text) => {
+                                collect_mod_files(
+                                    pkg_idx,
+                                    in sub_dir.as_slice(),
+                                    in next_segs,
+                                    in p2.as_slice(),
+                                    sink sub_text,
+                                    inout base_off,
+                                    inout files,
+                                    inout mods
+                                );
+                            },
+                            Option::None => {},
+                        }
+                    },
+                }
+            },
+            Option::None => {},
+        }
+    }
+}
+
+/// Load a Loom package graph from `root_dir` via `@vesper-std/fs` and
+/// encode it in the `@vesper/check-names-packages::assembly_begin` format.
+pub fn load_package_graph_bytes(in root_dir: Slice[u8]) -> Option[ChunkSeq[u8]] eff [Ffi[StdFs]] {
+    let mut pkgs = ChunkSeq::new[PkgNode]();
+    match load_pkg_graph(in root_dir, inout pkgs) {
+        Option::Some(_) => {},
+        Option::None => {
+            return Option::None;
+        },
+    }
+    let mut files = ChunkSeq::new[FileEntry]();
+    let mut mods = ChunkSeq::new[ModEntry]();
+    let mut base_off: u64 = 0;
+    for pi in 0..pkgs.len() {
+        let dir = match pkgs.try_get(pi) {
+            Option::Some(p) => {
+                let mut d = ChunkSeq::new[u8]();
+                d.extend(in p.dir.as_slice());
+                d
+            },
+            Option::None => ChunkSeq::new[u8](),
+        };
+        let src_dir = join_path(in dir.as_slice(), in "src".as_bytes());
+        let lib_p = join_path(in src_dir.as_slice(), in "lib.ves".as_bytes());
+        let main_p = join_path(in src_dir.as_slice(), in "main.ves".as_bytes());
+        let root_segs = ChunkSeq::new[ChunkSeq[u8]]();
+        match try_read_file(in lib_p.as_slice()) {
+            Option::Some(t) => {
+                collect_mod_files(
+                    pi,
+                    in src_dir.as_slice(),
+                    in root_segs,
+                    in lib_p.as_slice(),
+                    sink t,
+                    inout base_off,
+                    inout files,
+                    inout mods
+                );
+            },
+            Option::None => {
+                match try_read_file(in main_p.as_slice()) {
+                    Option::Some(t) => {
+                        collect_mod_files(
+                            pi,
+                            in src_dir.as_slice(),
+                            in root_segs,
+                            in main_p.as_slice(),
+                            sink t,
+                            inout base_off,
+                            inout files,
+                            inout mods
+                        );
+                    },
+                    Option::None => {},
+                }
+            },
+        }
+    }
+    let mut out = ChunkSeq::new[u8]();
+    put_u64(inout out, pkgs.len());
+    for pi in 0..pkgs.len() {
+        match pkgs.try_get(pi) {
+            Option::Some(p) => {
+                put_str(inout out, in p.name.as_slice());
+                put_u64(inout out, p.dep_names.len());
+                for di in 0..p.dep_names.len() {
+                    let idx = match p.dep_indices.try_get(di) {
+                        Option::Some(v) => v,
+                        Option::None => 0,
+                    };
+                    match p.dep_names.try_get(di) {
+                        Option::Some(n) => put_str(inout out, in n.as_slice()),
+                        Option::None => put_str(inout out, in "".as_bytes()),
+                    }
+                    put_u64(inout out, idx);
+                }
+                // optional dependencies count = 0
+                put_u64(inout out, 0);
+            },
+            Option::None => {},
+        }
+    }
+    put_u64(inout out, files.len());
+    for fi in 0..files.len() {
+        match files.try_get(fi) {
+            Option::Some(f) => {
+                put_str(inout out, in f.display.as_slice());
+                put_u64(inout out, f.base);
+            },
+            Option::None => {},
+        }
+    }
+    put_u64(inout out, mods.len());
+    for mi in 0..mods.len() {
+        match mods.try_get(mi) {
+            Option::Some(m) => {
+                put_u64(inout out, m.pkg);
+                put_u64(inout out, m.segs.len());
+                for si in 0..m.segs.len() {
+                    match m.segs.try_get(si) {
+                        Option::Some(s) => put_str(inout out, in s.as_slice()),
+                        Option::None => put_str(inout out, in "".as_bytes()),
+                    }
+                }
+                put_u64(inout out, m.file);
+                put_str(inout out, in m.text.as_slice());
+            },
+            Option::None => {},
+        }
+    }
+    Option::Some(out)
+}

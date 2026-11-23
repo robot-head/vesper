@@ -645,3 +645,60 @@ fn compare_package(name: &str, source: &str) {
     }
     std::fs::remove_dir_all(&dir).expect("remove package dir");
 }
+
+#[test]
+fn const_tables_run_like_the_evaluator() {
+    if !corpus_shard::Shard::from_environment().contains(2) {
+        return;
+    }
+    let source = r#"
+const NONE32: u32 = 4294967295;
+struct Row { tag: u8, active: bool, id: u32, val: u64 }
+enum Kind { Empty, One(u64) }
+const NO_ROW: Row = Row { tag: 7, active: true, id: NONE32, val: 42 };
+const KIND_ONE: Kind = Kind::One(99);
+const PAIR: (u64, u64) = (13, 29);
+fn main() -> u64 {
+    let r = NO_ROW;
+    let kv = match KIND_ONE {
+        Kind::Empty => 0,
+        Kind::One(v) => v,
+    };
+    let (pa, pb) = PAIR;
+    let act: u64 = if r.active { 1 } else { 0 };
+    wrapping_add(
+        wrapping_add(widen_u64(r.tag), wrapping_add(act, widen_u64(r.id))),
+        wrapping_add(r.val, wrapping_add(kv, wrapping_add(pa, pb)))
+    )
+}
+"#;
+    for (k, o) in configs().iter().enumerate() {
+        let (component, world) = port(source, o).unwrap_or_else(|e| panic!("[{k}] {e}"));
+        let expected = evaluate(&world);
+        assert_ne!(expected, "trap", "[{k}]");
+        assert_eq!(run_main(&component), expected, "[{k}]");
+    }
+}
+
+#[test]
+fn fip_and_ir_check_packages_build_and_run() {
+    if !corpus_shard::Shard::from_environment().contains(3) {
+        return;
+    }
+    compare_package(
+        "check-fip",
+        "use @vesper/check-fip::{ check_fip };\n\
+         fn main() -> u64 {\n\
+         \x20   let r = check_fip(in \"\");\n\
+         \x20   r.len()\n\
+         }\n",
+    );
+    compare_package(
+        "ir-check",
+        "use @vesper/ir-check::{ check_ir_words };\n\
+         fn main() -> u64 {\n\
+         \x20   let r = check_ir_words(in \"\");\n\
+         \x20   r.len()\n\
+         }\n",
+    );
+}

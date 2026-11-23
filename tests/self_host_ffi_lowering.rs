@@ -988,7 +988,7 @@ fn embedded_sources(text: &str) -> Vec<String> {
 /// address, unit and handle parameters, pointer results, nested and
 /// byte-array structs, every slice and pointer form, `errno`, `CStr`,
 /// reserved and duplicate names.
-const HANDWRITTEN: [&str; 10] = [
+const HANDWRITTEN: [&str; 11] = [
     r#"sys library Shapes (
     target = "x86_64-unknown-linux-gnu", abi = "sysv64",
     link = "dynamic", name = "shapes", artifact = "blake3:@DIGEST@",
@@ -1060,6 +1060,13 @@ const HANDWRITTEN: [&str; 10] = [
 ) {
     wire struct ForeignInvalid { raw: u64 }
     fn f(nocapture in x: ForeignInvalid) -> ForeignVal[bool];
+}"#,
+    r#"sys library DarwinVar (
+    target = "aarch64-apple-darwin", abi = "darwin64",
+    link = "dynamic", name = "c", artifact = "blake3:@DIGEST@"
+) {
+    fn openat(dirfd: i32, nocapture in path: CStr, flags: i32, ..., mode: i64) -> ForeignVal[i32] errno;
+    fn log_f(nocapture in fmt: CStr, x: f64, ..., n: i64) -> ForeignVal[i32];
 }"#,
     // Callback types (copyable handles whose calls come after the direct
     // functions in the canonical bytes, but in symbol order everywhere
