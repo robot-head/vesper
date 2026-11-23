@@ -72,6 +72,7 @@ pub fn run(func: &mut ir::Function) {
         remove_unreachable(func);
     }
     remove_dead(func);
+    hoist_loop_invariants(func);
     share_invariant_loads(func);
     hoist_loop_invariants(func);
     sink_slot_inits(func);
