@@ -1970,17 +1970,6 @@ impl<M: Module> Codegen<'_, '_, M> {
             self.m.declare_func_in_func(callee, self.b.func),
         ))
     }
-    /// Whether `symbol` may be declared with `sig` itself (the `ffi` hook
-    /// is offered only such calls).
-    fn foreign_import_direct(&self, symbol: &str, sig: &ir::Signature) -> bool {
-        match self.m.declarations().get_name(symbol) {
-            Some(cranelift_module::FuncOrDataId::Func(id)) => {
-                self.m.declarations().get_function_decl(id).signature == *sig
-            }
-            Some(_) => true,
-            None => runtime_import(symbol).is_none(),
-        }
-    }
     fn foreign_symbol_free(&self, name: &str, linkage: Linkage) -> Result<bool, String> {
         let declarations = self.m.declarations();
         match declarations.get_name(name) {
@@ -2245,8 +2234,6 @@ impl<M: Module> Codegen<'_, '_, M> {
         if crate::codegen_swap::hook(crate::codegen_swap::Family::Ffi).is_none() {
             return Ok(None);
         }
-        // A symbol shared with the runtime's imports is called through its
-        // address (`foreign_import`), which the steps do not express.
         let abi = plan.function.abi();
         let pointer = self.m.target_config().pointer_type();
         let mut sig = self.m.make_signature();
@@ -2255,11 +2242,6 @@ impl<M: Module> Codegen<'_, '_, M> {
         }
         if let Some(t) = abi.result {
             sig.returns.push(abi_param(t, pointer));
-        }
-        if !plan.function.is_indirect()
-            && !self.foreign_import_direct(plan.function.link_symbol(), &sig)
-        {
-            return Ok(None);
         }
         let descriptors = plan.function.parameters();
         let handler = match plan.handler {
@@ -2495,19 +2477,29 @@ impl<M: Module> Codegen<'_, '_, M> {
                 }
             }
         }
-        let mut words = if plan.function.is_indirect() {
+        let architecture = self.m.isa().triple().architecture;
+        let cpu = ffi::cpu::code_for(plan.function.symbol(), architecture)?;
+        let (call_op, mut words) = if plan.function.is_indirect() {
             let pointer = c_args.remove(0);
             let sig_ref = self.b.import_signature(sig);
-            vec![u64::from(sig_ref.as_u32()), word(pointer)]
+            (
+                swap::CALL_INDIRECT,
+                vec![u64::from(sig_ref.as_u32()), word(pointer)],
+            )
+        } else if let Some((arch, code)) = cpu {
+            if arch == ffi::cpu::Arch::X86_64 {
+                sig.call_conv = cranelift_codegen::isa::CallConv::SystemV;
+            }
+            let callee = self.foreign_code(plan.function.symbol(), &sig, &code)?;
+            (swap::CALL, vec![u64::from(callee.as_u32())])
         } else {
-            let symbol = plan.function.link_symbol();
-            self.foreign_symbol_free(symbol, Linkage::Import)?;
-            let callee = self
-                .m
-                .declare_function(symbol, Linkage::Import, &sig)
-                .map_err(|e| format!("foreign symbol '{symbol}': {e}"))?;
-            let callee = self.m.declare_func_in_func(callee, self.b.func);
-            vec![u64::from(callee.as_u32())]
+            match self.foreign_import(plan.function.link_symbol(), sig)? {
+                Callee::Direct(callee) => (swap::CALL, vec![u64::from(callee.as_u32())]),
+                Callee::Indirect(sig_ref, address) => (
+                    swap::CALL_INDIRECT,
+                    vec![u64::from(sig_ref.as_u32()), word(address)],
+                ),
+            }
         };
         let refusal = if strings.is_empty() {
             None
@@ -2580,11 +2572,6 @@ impl<M: Module> Codegen<'_, '_, M> {
             words.push(c.len() as u64);
             words.extend(c);
         }
-        let call_op = if plan.function.is_indirect() {
-            swap::CALL_INDIRECT
-        } else {
-            swap::CALL
-        };
         let r = self.foreign_request(call_op, &words)?;
         let [raw, os] = r[..] else {
             return Err("malformed ffi CALL answer".into());
