@@ -41,3 +41,4 @@ check cca port_differential cca_claims_agree snp_reports_agree
 check cose port_differential cose_sign1_agrees snp_reports_agree
 check corim port_differential corims_agree snp_reports_agree
 check corim_cca port_differential corim_store_agrees snp_reports_agree
+check gpa gpa_props tracker_matches_reference_bitmap dropped_owner_is_counted_as_leaked
