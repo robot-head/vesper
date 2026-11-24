@@ -375,6 +375,29 @@ fn lbvh_matches_the_rust_build() {
             }
         }
     }
+    // Benchmark-sized trees, and small pair bounds (the port's pair scratch
+    // then holds fewer entries than the tree has nodes, so the query tests
+    // every subtree instead of pruning the ones below the query leaf).
+    let mut pl = Lbvh::with_capacity(4096);
+    let mut rl = rust::Lbvh::with_capacity(4096);
+    for round in 0..12u32 {
+        let n = 2048 + (rng.next() % 2049) as usize;
+        let (pb, rb) = rand_boxes(&mut rng, n, 64.0, 0.8);
+        cases += 1;
+        if pl.build(&pb).is_ok() != rl.build(&rb).is_ok() {
+            differences += 1;
+            continue;
+        }
+        for max in [usize::MAX, 64, 1 + (rng.next() % 4096) as usize] {
+            let max = if round % 2 == 0 { max } else { max.min(n / 2) };
+            let pq = pl.overlapping_pairs(&mut po, max);
+            let rq = rl.overlapping_pairs(&mut ro, max);
+            cases += 1;
+            if format!("{pq:?}") != format!("{rq:?}") || (pq.is_ok() && po != ro) {
+                differences += 1;
+            }
+        }
+    }
     println!("flip-gate differential differences={differences} cases={cases}");
     assert_eq!(differences, 0);
 }

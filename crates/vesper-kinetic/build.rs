@@ -44,7 +44,7 @@ const EDITS: &[(&str, &str)] = &[
         "masks.try_set(ca, g64(in masks, ca));",
     ),
     // lbvh.rs: pairs of adjacent sorted leaves are dropped.
-    ("if q > p {", "if q > inc(p) {"),
+    ("(c & INDEX_MASK) > p\n", "(c & INDEX_MASK) > inc(p)\n"),
     // sap.rs: sortable keys flip the sign test.
     ("if (bits >> 31) == 1 {", "if (bits >> 31) == 0 {"),
     // crmath.rs: the sine of the third quadrant keeps its sign.

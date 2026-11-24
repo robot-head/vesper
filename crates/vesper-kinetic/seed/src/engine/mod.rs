@@ -7,5 +7,6 @@ pub(crate) mod fastmath;
 // `!(x > y)` is deliberate: it is also true when `x` is NaN.
 #[allow(clippy::neg_cmp_op_on_partial_ord)]
 pub(crate) mod gjk;
+pub(crate) mod lbvh;
 pub(crate) mod morton;
 pub(crate) mod sap;

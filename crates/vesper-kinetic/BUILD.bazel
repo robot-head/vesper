@@ -64,8 +64,8 @@ filegroup(
         (
             "lbvh",
             "lbvh",
-            "if q > p {",
-            "if q > inc(p) {",
+            "(c & INDEX_MASK) > p\n",
+            "(c & INDEX_MASK) > inc(p)\n",
         ),
         (
             "sap",
