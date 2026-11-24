@@ -83,6 +83,7 @@ pub fn run(func: &mut ir::Function) {
     fold_constant_branches(func);
     merge_blocks(func);
     dense_icmp_chains_to_br_table(func);
+    remove_dead(func);
     sink_slot_inits(func);
     merge_tails(func);
     shrink_unused_slots(func);
@@ -4490,23 +4491,30 @@ fn dense_icmp_chains_to_br_table(func: &mut ir::Function) {
             if func.layout.inst_block(cmp_inst) != Some(blk) {
                 return None;
             }
-            let (arg, raw_k) = match func.dfg.insts[cmp_inst] {
+            let (arg, raw_k, is_eq) = match func.dfg.insts[cmp_inst] {
                 InstructionData::IntCompareImm {
                     opcode: Opcode::IcmpImm,
                     cond: IntCC::Equal,
                     arg,
                     imm,
-                } => (arg, imm.bits()),
+                } => (arg, imm.bits(), true),
+                InstructionData::IntCompareImm {
+                    opcode: Opcode::IcmpImm,
+                    cond: IntCC::NotEqual,
+                    arg,
+                    imm,
+                } => (arg, imm.bits(), false),
                 InstructionData::IntCompare {
                     opcode: Opcode::Icmp,
-                    cond: IntCC::Equal,
+                    cond,
                     args: [lhs, rhs],
-                } => {
+                } if matches!(cond, IntCC::Equal | IntCC::NotEqual) => {
+                    let eq = cond == IntCC::Equal;
                     if let Some(c) = constant(func, rhs, 2) {
-                        (lhs, c)
+                        (lhs, c, eq)
                     } else {
                         let c = constant(func, lhs, 2)?;
-                        (rhs, c)
+                        (rhs, c, eq)
                     }
                 }
                 _ => return None,
@@ -4519,7 +4527,12 @@ fn dense_icmp_chains_to_br_table(func: &mut ir::Function) {
             if t_blk == f_blk || t_blk == blk || f_blk == blk {
                 return None;
             }
-            Some((brif_inst, cmp_inst, key, key_ty, k, t_blk, f_blk))
+            let (arm_blk, next_blk) = if is_eq {
+                (t_blk, f_blk)
+            } else {
+                (f_blk, t_blk)
+            };
+            Some((brif_inst, cmp_inst, key, key_ty, k, arm_blk, next_blk))
         };
 
     let blocks: Vec<Block> = func.layout.blocks().collect();
@@ -4533,7 +4546,7 @@ fn dense_icmp_chains_to_br_table(func: &mut ir::Function) {
             continue;
         };
         let mut cases: Vec<(i64, Block)> = vec![(k0, arm0)];
-        let mut chain_nodes: Vec<(Block, Inst, Inst)> = Vec::new();
+        let mut chain_nodes: Vec<Block> = Vec::new();
         let mut seen: HashSet<Block> = HashSet::from([head]);
 
         while !seen.contains(&cur)
@@ -4546,11 +4559,7 @@ fn dense_icmp_chains_to_br_table(func: &mut ir::Function) {
             else {
                 break;
             };
-            if k_val != key {
-                break;
-            }
-            let inst_count = func.layout.block_insts(cur).count();
-            if inst_count != 2
+            if k_val != key
                 || use_counts
                     .get(&func.dfg.first_result(cmp_inst))
                     .copied()
@@ -4559,9 +4568,22 @@ fn dense_icmp_chains_to_br_table(func: &mut ir::Function) {
             {
                 break;
             }
+            let only_cmp_and_consts = func.layout.block_insts(cur).all(|i| {
+                i == brif_inst
+                    || i == cmp_inst
+                    || (func.dfg.insts[i].opcode() == Opcode::Iconst
+                        && use_counts
+                            .get(&func.dfg.first_result(i))
+                            .copied()
+                            .unwrap_or(0)
+                            == 1)
+            });
+            if !only_cmp_and_consts {
+                break;
+            }
             seen.insert(cur);
             cases.push((ki, arm_i));
-            chain_nodes.push((cur, cmp_inst, brif_inst));
+            chain_nodes.push(cur);
             cur = next_i;
         }
 
@@ -4658,9 +4680,10 @@ fn dense_icmp_chains_to_br_table(func: &mut ir::Function) {
         {
             func.layout.remove_inst(head_cmp);
         }
-        for (blk, cmp_inst, brif_inst) in chain_nodes {
-            func.layout.remove_inst(brif_inst);
-            func.layout.remove_inst(cmp_inst);
+        for blk in chain_nodes {
+            while let Some(inst) = func.layout.first_inst(blk) {
+                func.layout.remove_inst(inst);
+            }
             func.layout.remove_block(blk);
             removed.insert(blk);
         }
