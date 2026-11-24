@@ -82,7 +82,7 @@ CRATES = {
     "vesper-lean-syntax": ("compiler", "in crate", "pilot", "", "2"),
     "vesper-fmt": ("compiler", "in crate", "unmeasured", "", "2"),
     "vesper-lint": ("compiler", "in crate", "unmeasured", "", "2"),
-    "vesper-highlight": ("partial", "in crate (lexical)", "unmeasured", "out of the compiler's closure (#1398): no seed needed; rasterizer: tiny-skia, rustybuzz, png, ttf-parser", "15"),
+    "vesper-highlight": ("partial", "in crate (lexical)", "tokens 1.14-1.28x, cst 0.22-0.23x (flipped)", "Tier 0 lexical flipped to Vesper (seed in seed/ for compiler); palettes, Tier 1, renderers, rasterizer (tiny-skia, rustybuzz, png, ttf-parser) stay Rust", "15"),
     "vesper-forge": ("compiler", "in crate", "unmeasured", "macro expansion #1157", "SH1-14"),
     "vesper-doc": ("compiler", "packages (SH5-15)", "0.76-0.87x", "renderers part 2", "SH5-15"),
     "vesper-lsp": ("compiler", "SH5-16", "unmeasured", "", "SH5-16"),
