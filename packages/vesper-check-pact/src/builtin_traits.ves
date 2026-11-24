@@ -8,7 +8,8 @@ use @vesper/check-data::input::{
     read_ctx
 };
 use @vesper/check-data::names::{
-    Names
+    Names,
+    names_new
 };
 use @vesper/check-data::{
     pack_text
@@ -969,5 +970,102 @@ pub fn builtin_derive_words(in b: Slice[u8]) -> ChunkSeq[u64] {
     }
     let p_impls = pack_text(in impls);
     out.extend(in p_impls.as_slice());
+    out
+}
+
+fn is_builtin_name(in names: Names, s: u32) -> bool {
+    names.spells(s, in "Eq".as_bytes())
+        || names.spells(s, in "Ord".as_bytes())
+        || names.spells(s, in "Hash".as_bytes())
+        || names.spells(s, in "Ordering".as_bytes())
+}
+
+fn is_builtin_trait_name(in names: Names, s: u32) -> bool {
+    names.spells(s, in "Eq".as_bytes())
+        || names.spells(s, in "Ord".as_bytes())
+        || names.spells(s, in "Hash".as_bytes())
+}
+
+fn bytes_contains(in hay: Slice[u8], start: u64, end: u64, in needle: Str) -> bool {
+    let nb = needle.as_bytes();
+    let nl = nb.len();
+    if end < start || wrapping_sub(end, start) < nl {
+        return false;
+    }
+    let limit = add(wrapping_sub(wrapping_sub(end, start), nl), 1);
+    for off in 0..limit {
+        let base = add(start, off);
+        let mut eq = true;
+        for j in 0..nl {
+            let hb = match hay.try_get(add(base, j)) {
+                Option::Some(v) => v,
+                Option::None => 0,
+            };
+            let nbb = match nb.try_get(j) {
+                Option::Some(v) => v,
+                Option::None => 0,
+            };
+            if hb != nbb {
+                eq = false;
+                break;
+            }
+        }
+        if eq {
+            return true;
+        }
+    }
+    false
+}
+
+// Entrypoint for `check_pact_builtin_wanted` (`builtin_traits::wanted`).
+pub fn builtin_wanted_words(in b: Slice[u8]) -> ChunkSeq[u64] {
+    let mut r = Reader {
+        pos: 0
+    };
+    let mut names = names_new();
+    let mut nmap = ChunkSeq::new[u32]();
+    read_q_names(inout r, in b, inout names, inout nmap);
+    let _nt = r.word(in b);
+    let n_decls = r.word(in b);
+    let mut declares = false;
+    for _ in 0..n_decls {
+        let s = u32_at(in nmap, r.word(in b));
+        if is_builtin_name(in names, s) {
+            declares = true;
+        }
+    }
+    let n_refs = r.word(in b);
+    let mut named_ref = false;
+    for _ in 0..n_refs {
+        let pkg_none = r.word(in b) != 0;
+        let tname = u32_at(in nmap, r.word(in b));
+        if pkg_none && is_builtin_trait_name(in names, tname) {
+            named_ref = true;
+        }
+    }
+    let n_bytes = r.word(in b);
+    let text_start = r.pos;
+    let text_end = add(text_start, n_bytes);
+    let mut out = ChunkSeq::with_capacity[u64](1);
+    if declares {
+        out.push(0);
+        return out;
+    }
+    if named_ref {
+        out.push(1);
+        return out;
+    }
+    let found = bytes_contains(in b, text_start, text_end, "\"Eq::")
+        || bytes_contains(in b, text_start, text_end, "\"Ord::")
+        || bytes_contains(in b, text_start, text_end, "\"Hash::")
+        || bytes_contains(in b, text_start, text_end, "\"Ordering\"");
+    out
+        .push(
+            if found {
+                1
+            } else {
+                0
+            }
+        );
     out
 }

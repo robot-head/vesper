@@ -653,6 +653,12 @@ pub fn probe_mono_check(module: &Module, identity: &PackageIdentity) -> Option<M
     Some(elab.probe_mono_check_step(&pass2, &world))
 }
 
+/// Differential reference oracle for `builtin_traits::wanted` (`#1719`).
+#[doc(hidden)]
+pub fn builtin_traits_wanted(module: &Module) -> bool {
+    builtin_traits::wanted(module)
+}
+
 /// Differential reference oracle for `Mono::evidence`, `Mono::instance`, and
 /// `Mono::instantiate_body` over a dependency-free module (`#1668`).
 #[doc(hidden)]
