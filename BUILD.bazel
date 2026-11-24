@@ -1300,6 +1300,20 @@ vesper_package(
     ],
 )
 
+# Tensor type checker as a dependency of the hybrid compiler's tensor_types
+# module (self-hosting SH2 lane 14, #1186).
+vesper_package(
+    name = "check_tensor_types_package",
+    srcs = glob(["packages/vesper-check-tensor-types/src/**/*.ves"]),
+    manifest = "packages/vesper-check-tensor-types/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":ast_package",
+        ":check_data_package",
+        ":std_intern_package",
+    ],
+)
+
 vesper_package(
     name = "doc_package",
     srcs = glob(["packages/vesper-doc/src/**/*.ves"]),
