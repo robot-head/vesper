@@ -214,6 +214,10 @@ vesper_hybrid(
             "//:place_ir_package",
             "//:ebpf_backend_package",
         ],
+        # The freestanding swap (#1288) builds on @vesper/codegen-freestanding.
+        "hybrid_freestanding": [
+            "//:codegen_freestanding_package",
+        ],
         # Test discovery (#1337) builds on @vesper/test-runner.
         "hybrid_test_runner": [
             "//:front_package",
@@ -242,6 +246,7 @@ vesper_hybrid(
         "hybrid_parse": "modules/parse",
         "hybrid_wasm_backend": "modules/wasm_backend",
         "hybrid_ebpf_backend": "modules/ebpf_backend",
+        "hybrid_freestanding": "modules/freestanding",
         "hybrid_test_runner": "modules/test_runner",
         "hybrid_place_ir": "modules/place_ir",
         "hybrid_stack_bound": "modules/stack_bound",
