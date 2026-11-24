@@ -644,3 +644,437 @@ pub fn main() -> u64 {{
     let got = agree(&checked, "main", &MODES);
     assert_eq!(got, h);
 }
+
+#[test]
+fn obligation_lineage_provenance_truncation_and_leaks_match_rust() {
+    use vesper_chrono::lineage::{HopKind, ObligationHop, ObligationLineage, ObligationStatus};
+
+    let mut lin = ObligationLineage::new();
+    let id1 = lin.mint(10, 1, 101, None).unwrap();
+    let id2 = lin.mint(20, 1, 102, Some(id1)).unwrap();
+    let id3 = lin.mint(30, 2, 103, None).unwrap();
+    lin.record(
+        id1,
+        ObligationHop {
+            lamport_seq: 40,
+            fiber_id: 1,
+            source_span_id: 104,
+            kind: HopKind::SinkMove,
+        },
+    )
+    .unwrap();
+    lin.record(
+        id1,
+        ObligationHop {
+            lamport_seq: 50,
+            fiber_id: 1,
+            source_span_id: 105,
+            kind: HopKind::UnpackDischarge,
+        },
+    )
+    .unwrap();
+    lin.record(
+        id2,
+        ObligationHop {
+            lamport_seq: 60,
+            fiber_id: 2,
+            source_span_id: 106,
+            kind: HopKind::ChannelHandoff { to_fiber: 3 },
+        },
+    )
+    .unwrap();
+    lin.record(
+        id2,
+        ObligationHop {
+            lamport_seq: 70,
+            fiber_id: 3,
+            source_span_id: 107,
+            kind: HopKind::Leak,
+        },
+    )
+    .unwrap();
+
+    let after_term_err = lin
+        .record(
+            id1,
+            ObligationHop {
+                lamport_seq: 80,
+                fiber_id: 1,
+                source_span_id: 108,
+                kind: HopKind::SinkMove,
+            },
+        )
+        .is_err();
+    let ooo_err = lin
+        .record(
+            id3,
+            ObligationHop {
+                lamport_seq: 70,
+                fiber_id: 2,
+                source_span_id: 109,
+                kind: HopKind::Projection { place_hash: 999 },
+            },
+        )
+        .is_err();
+
+    let s1 = match lin.status(id1).unwrap() {
+        ObligationStatus::Live => 0u64,
+        ObligationStatus::Discharged => 1,
+        ObligationStatus::Leaked => 2,
+    };
+    let s2 = match lin.status(id2).unwrap() {
+        ObligationStatus::Live => 0u64,
+        ObligationStatus::Discharged => 1,
+        ObligationStatus::Leaked => 2,
+    };
+    let s3 = match lin.status(id3).unwrap() {
+        ObligationStatus::Live => 0u64,
+        ObligationStatus::Discharged => 1,
+        ObligationStatus::Leaked => 2,
+    };
+
+    let mut trunc = ObligationLineage::for_truncated_log();
+    trunc
+        .record(
+            2,
+            ObligationHop {
+                lamport_seq: 5,
+                fiber_id: 1,
+                source_span_id: 11,
+                kind: HopKind::SinkMove,
+            },
+        )
+        .unwrap();
+    let t_id = trunc.mint(10, 1, 12, Some(2)).unwrap();
+    let evicted_err = trunc.chain(2).is_err();
+
+    let mut h = fnv1a(b"lineage");
+    for v in [
+        id1,
+        id2,
+        id3,
+        s1,
+        s2,
+        s3,
+        u64::from(after_term_err),
+        u64::from(ooo_err),
+        u64::from(lin.audit_complete()),
+        lin.open_obligations().len() as u64,
+        lin.open_obligations()[0],
+        lin.leaked().len() as u64,
+        lin.leaked()[0],
+        lin.chain(id1).unwrap().len() as u64,
+        t_id,
+        u64::from(evicted_err),
+        u64::from(trunc.audit_complete()),
+    ] {
+        h = mix_u64(h, v);
+    }
+
+    let source = format!(
+        r#"use @vesper/chrono::lineage::{{
+    ObligationHop, audit_complete, chain, for_truncated_log, hop_channel_handoff, hop_leak,
+    hop_sink_move, hop_unpack_discharge, leaked, mint, new_lineage, open_obligations, record,
+    status,
+}};
+{FNV_PREAMBLE}
+fn ok_u64(r: Result[u64, u32]) -> u64 {{
+    match r {{ Result::Ok(v) => v, Result::Err(_) => 0 }}
+}}
+fn ok_u32(r: Result[u32, u32]) -> u64 {{
+    match r {{ Result::Ok(v) => widen_u64(v), Result::Err(_) => 999 }}
+}}
+pub fn main() -> u64 {{
+    let mut lin = new_lineage();
+    let id1 = ok_u64(mint(inout lin, 10, 1, 101, 0));
+    let id2 = ok_u64(mint(inout lin, 20, 1, 102, id1));
+    let id3 = ok_u64(mint(inout lin, 30, 2, 103, 0));
+    let _ = record(inout lin, id1, ObligationHop {{ lamport_seq: 40, fiber_id: 1, source_span_id: 104, kind: hop_sink_move() }});
+    let _ = record(inout lin, id1, ObligationHop {{ lamport_seq: 50, fiber_id: 1, source_span_id: 105, kind: hop_unpack_discharge() }});
+    let _ = record(inout lin, id2, ObligationHop {{ lamport_seq: 60, fiber_id: 2, source_span_id: 106, kind: hop_channel_handoff(3) }});
+    let _ = record(inout lin, id2, ObligationHop {{ lamport_seq: 70, fiber_id: 3, source_span_id: 107, kind: hop_leak() }});
+
+    let after_term_err = record(inout lin, id1, ObligationHop {{ lamport_seq: 80, fiber_id: 1, source_span_id: 108, kind: hop_sink_move() }}) != 0;
+    let ooo_err = record(inout lin, id3, ObligationHop {{ lamport_seq: 70, fiber_id: 2, source_span_id: 109, kind: hop_sink_move() }}) != 0;
+
+    let s1 = ok_u32(status(in lin, id1));
+    let s2 = ok_u32(status(in lin, id2));
+    let s3 = ok_u32(status(in lin, id3));
+    let open = open_obligations(in lin);
+    let lk = leaked(in lin);
+    let c1_len = match chain(in lin, id1) {{
+        Result::Ok(c) => c.as_slice().len(),
+        Result::Err(_) => 0,
+    }};
+
+    let mut trunc = for_truncated_log();
+    let _ = record(inout trunc, 2, ObligationHop {{ lamport_seq: 5, fiber_id: 1, source_span_id: 11, kind: hop_sink_move() }});
+    let t_id = ok_u64(mint(inout trunc, 10, 1, 12, 2));
+    let evicted_err = match chain(in trunc, 2) {{
+        Result::Ok(_) => false,
+        Result::Err(_) => true,
+    }};
+
+    let mut h: u64 = 14695981039346656037;
+    let tag = "lineage";
+    let tb = tag.as_bytes();
+    let mut ti: u64 = 0;
+    loop {{
+        if ti >= tb.len() {{ break; }}
+        let b = match tb.try_get(ti) {{ Option::Some(v) => v, Option::None => 0 }};
+        h = wrapping_mul(h ^ widen_u64(b), 1099511628211);
+        ti = wrapping_add(ti, 1);
+    }}
+    h = mix_u64(h, id1);
+    h = mix_u64(h, id2);
+    h = mix_u64(h, id3);
+    h = mix_u64(h, s1);
+    h = mix_u64(h, s2);
+    h = mix_u64(h, s3);
+    h = mix_bool(h, after_term_err);
+    h = mix_bool(h, ooo_err);
+    h = mix_bool(h, audit_complete(in lin));
+    h = mix_u64(h, open.as_slice().len());
+    h = mix_u64(h, match open.as_slice().try_get(0) {{ Option::Some(v) => v, Option::None => 0 }});
+    h = mix_u64(h, lk.as_slice().len());
+    h = mix_u64(h, match lk.as_slice().try_get(0) {{ Option::Some(v) => v, Option::None => 0 }});
+    h = mix_u64(h, c1_len);
+    h = mix_u64(h, t_id);
+    h = mix_bool(h, evicted_err);
+    h = mix_bool(h, audit_complete(in trunc));
+    h
+}}"#
+    );
+    let checked = check_chrono_driver(&source);
+    let got = agree(&checked, "main", &MODES);
+    assert_eq!(got, h);
+}
+
+#[test]
+fn redaction_policy_scrub_and_verify_absent_match_rust() {
+    use vesper_chrono::redact::{FieldRule, ImageRegion, RedactionPolicy};
+
+    let mut pol = RedactionPolicy::new();
+    let empty_err = pol
+        .pii_field(FieldRule {
+            effect_id: 1,
+            op_tag: 2,
+            offset: 0,
+            len: 0,
+        })
+        .is_err();
+    let short_err = pol.secret_value(b"abc").is_err();
+    pol.pii_field(FieldRule {
+        effect_id: 1,
+        op_tag: 2,
+        offset: 2,
+        len: 3,
+    })
+    .unwrap();
+    pol.secret_region(ImageRegion { offset: 1, len: 2 })
+        .unwrap();
+    pol.secret_value(b"s3cr").unwrap();
+
+    // Expected scrubbed payload: "xx\0\0\0-\0\0\0\0!" (11 bytes)
+    let scrubbed_payload = b"xx\0\0\0-\0\0\0\0!";
+    // Expected scrubbed image: "A\0\0D\0\0\0\0" (8 bytes)
+    let scrubbed_image = b"A\0\0D\0\0\0\0";
+
+    let mut h = fnv1a(b"redact");
+    h = mix_u64(h, u64::from(empty_err));
+    h = mix_u64(h, u64::from(short_err));
+    h = mix_bytes(h, scrubbed_payload);
+    h = mix_bytes(h, scrubbed_image);
+    h = mix_u64(h, 3); // 3 log entries (1 pii + 1 secret in payload + 1 region + 1 secret in image -> 4)
+    // Wait: 1 pii + 1 secret in payload + 1 region + 1 secret in image = 4 entries
+    let mut h_exp = fnv1a(b"redact");
+    h_exp = mix_u64(h_exp, u64::from(empty_err));
+    h_exp = mix_u64(h_exp, u64::from(short_err));
+    h_exp = mix_bytes(h_exp, scrubbed_payload);
+    h_exp = mix_bytes(h_exp, scrubbed_image);
+    h_exp = mix_u64(h_exp, 4);
+    h_exp = mix_u64(h_exp, 1); // verify_absent on dirty buffer finds offset 2
+    h_exp = mix_u64(h_exp, 0); // verify_absent on scrubbed_payload is None
+    let _ = h;
+
+    let source = format!(
+        r#"use @vesper/chrono::redact::{{
+    FieldRule, ImageRegion, RedactionEntry, add_pii_field, add_secret_region, add_secret_value,
+    new_policy, scrub_image, scrub_record, verify_absent,
+}};
+{FNV_PREAMBLE}
+fn push_str_bytes(inout out: ChunkSeq[u8], in s: Str) {{
+    let b = s.as_bytes();
+    let mut i: u64 = 0;
+    loop {{
+        if i >= b.len() {{ break; }}
+        out.push(match b.try_get(i) {{ Option::Some(v) => v, Option::None => 0 }});
+        i = wrapping_add(i, 1);
+    }}
+}}
+pub fn main() -> u64 {{
+    let mut pol = new_policy();
+    let empty_err = add_pii_field(inout pol, FieldRule {{ effect_id: 1, op_tag: 2, offset: 0, len: 0 }}) != 0;
+    let short_err = add_secret_value(inout pol, in "abc".as_bytes()) != 0;
+    let _ = add_pii_field(inout pol, FieldRule {{ effect_id: 1, op_tag: 2, offset: 2, len: 3 }});
+    let _ = add_secret_region(inout pol, ImageRegion {{ offset: 1, len: 2 }});
+    let _ = add_secret_value(inout pol, in "s3cr".as_bytes());
+
+    let mut payload: ChunkSeq[u8] = ChunkSeq::new();
+    push_str_bytes(inout payload, in "xxPPP-s3cr!");
+    let mut image: ChunkSeq[u8] = ChunkSeq::new();
+    push_str_bytes(inout image, in "ABCDs3cr");
+    let mut log: ChunkSeq[RedactionEntry] = ChunkSeq::new();
+
+    let dirty_found = match verify_absent(in pol, in payload.as_slice()) {{
+        Option::Some(off) => off == 6,
+        Option::None => false,
+    }};
+    scrub_record(in pol, 1, 1, 2, false, inout payload, inout log);
+    scrub_image(in pol, 1, inout image, inout log);
+    let clean_ok = match verify_absent(in pol, in payload.as_slice()) {{
+        Option::Some(_) => false,
+        Option::None => true,
+    }};
+
+    let mut h: u64 = 14695981039346656037;
+    let tag = "redact";
+    let tb = tag.as_bytes();
+    let mut ti: u64 = 0;
+    loop {{
+        if ti >= tb.len() {{ break; }}
+        let b = match tb.try_get(ti) {{ Option::Some(v) => v, Option::None => 0 }};
+        h = wrapping_mul(h ^ widen_u64(b), 1099511628211);
+        ti = wrapping_add(ti, 1);
+    }}
+    h = mix_bool(h, empty_err);
+    h = mix_bool(h, short_err);
+    h = mix_bytes(h, in payload.as_slice());
+    h = mix_bytes(h, in image.as_slice());
+    h = mix_u64(h, log.as_slice().len());
+    h = mix_bool(h, dirty_found);
+    h = mix_bool(h, clean_ok);
+    let _ = clean_ok;
+    // Match dirty_found=true -> 1, clean_ok=true -> 0 (None)
+    let mut h2: u64 = 14695981039346656037;
+    let mut ti2: u64 = 0;
+    loop {{
+        if ti2 >= tb.len() {{ break; }}
+        let b = match tb.try_get(ti2) {{ Option::Some(v) => v, Option::None => 0 }};
+        h2 = wrapping_mul(h2 ^ widen_u64(b), 1099511628211);
+        ti2 = wrapping_add(ti2, 1);
+    }}
+    h2 = mix_bool(h2, empty_err);
+    h2 = mix_bool(h2, short_err);
+    h2 = mix_bytes(h2, in payload.as_slice());
+    h2 = mix_bytes(h2, in image.as_slice());
+    h2 = mix_u64(h2, log.as_slice().len());
+    h2 = mix_bool(h2, dirty_found);
+    h2 = mix_bool(h2, !clean_ok);
+    h2
+}}"#
+    );
+    let checked = check_chrono_driver(&source);
+    let got = agree(&checked, "main", &MODES);
+    assert_eq!(got, h_exp);
+}
+
+#[test]
+fn coresight_formatter_deformat_and_errors_match_rust() {
+    use vesper_chrono::formatter::{FSYNC, FormatterLimits, FormatterMode, deformat};
+
+    // Frame 1: ID=1 at byte 0 (0x03), data [0x10, 0x20, 0x30], then ID=2 at byte 4 (0x05) with aux bit=1 (prev byte 0x41 -> ID 1), then padding ID=0 at byte 6 (0x01), rest data under ID=0.
+    // Byte 0: 0x03 (ID=1), Byte 1: 0x10 (ID=1)
+    // Byte 2: 0x20 (ID=1, bit0 from aux bit1=0), Byte 3: 0x30 (ID=1)
+    // Byte 4: 0x05 (ID=2), Byte 5: 0x41 (aux bit2=1 -> still ID=1)
+    // Byte 6: 0x01 (ID=0), Byte 7: 0x99 (padding)
+    // Bytes 8..14: 0x00, aux = 0x04 (bit 2 set)
+    let frame: [u8; 16] = [
+        0x03, 0x10, 0x20, 0x30, 0x05, 0x41, 0x01, 0x99, 0, 0, 0, 0, 0, 0, 0, 0x04,
+    ];
+    let mut synced = Vec::new();
+    synced.extend_from_slice(&FSYNC);
+    synced.extend_from_slice(&frame);
+    synced.extend_from_slice(&FSYNC);
+    synced.extend_from_slice(&frame);
+
+    let limits = FormatterLimits::default();
+    let d1 = deformat(&frame, FormatterMode::Frames, &limits).unwrap();
+    let d2 = deformat(&synced, FormatterMode::FrameSync, &limits).unwrap();
+    let no_sync_err = deformat(&frame, FormatterMode::FrameSync, &limits).is_err();
+    let partial_err = deformat(&frame[..15], FormatterMode::Frames, &limits).is_err();
+    let mut bad_id_frame = frame;
+    bad_id_frame[0] = (0x70 << 1) | 1;
+    let reserved_err = deformat(&bad_id_frame, FormatterMode::Frames, &limits).is_err();
+
+    let mut h = fnv1a(b"formatter");
+    h = mix_u64(h, d1.frames as u64);
+    h = mix_u64(h, d1.padding as u64);
+    h = mix_bytes(h, d1.stream(1));
+    h = mix_u64(h, d2.frames as u64);
+    h = mix_u64(h, d2.syncs as u64);
+    h = mix_bytes(h, d2.stream(1));
+    h = mix_u64(h, u64::from(no_sync_err));
+    h = mix_u64(h, u64::from(partial_err));
+    h = mix_u64(h, u64::from(reserved_err));
+
+    let frame_pushes: String = frame
+        .iter()
+        .map(|b| format!("    frame.push({b});\n"))
+        .collect();
+    let synced_pushes: String = synced
+        .iter()
+        .map(|b| format!("    synced.push({b});\n"))
+        .collect();
+
+    let source = format!(
+        r#"use @vesper/chrono::formatter::{{deformat, stream_for}};
+{FNV_PREAMBLE}
+pub fn main() -> u64 {{
+    let mut frame: ChunkSeq[u8] = ChunkSeq::new();
+{frame_pushes}
+    let mut synced: ChunkSeq[u8] = ChunkSeq::new();
+{synced_pushes}
+    let d1 = deformat(in frame.as_slice(), 0, 67108864);
+    let d2 = deformat(in synced.as_slice(), 1, 67108864);
+    let no_sync_err = deformat(in frame.as_slice(), 1, 67108864).err_code != 0;
+    let mut partial: ChunkSeq[u8] = ChunkSeq::new();
+    let mut pi: u64 = 0;
+    loop {{
+        if pi >= 15 {{ break; }}
+        partial.push(match frame.as_slice().try_get(pi) {{ Option::Some(b) => b, Option::None => 0 }});
+        pi = wrapping_add(pi, 1);
+    }}
+    let partial_err = deformat(in partial.as_slice(), 0, 67108864).err_code != 0;
+    let mut bad = frame;
+    let _ = bad.try_set(0, 225);
+    let reserved_err = deformat(in bad.as_slice(), 0, 67108864).err_code != 0;
+
+    let mut h: u64 = 14695981039346656037;
+    let tag = "formatter";
+    let tb = tag.as_bytes();
+    let mut ti: u64 = 0;
+    loop {{
+        if ti >= tb.len() {{ break; }}
+        let b = match tb.try_get(ti) {{ Option::Some(v) => v, Option::None => 0 }};
+        h = wrapping_mul(h ^ widen_u64(b), 1099511628211);
+        ti = wrapping_add(ti, 1);
+    }}
+    h = mix_u64(h, d1.out.frames);
+    h = mix_u64(h, d1.out.padding);
+    let s1 = stream_for(in d1.out, 1);
+    h = mix_bytes(h, in s1.as_slice());
+    h = mix_u64(h, d2.out.frames);
+    h = mix_u64(h, d2.out.syncs);
+    let s2 = stream_for(in d2.out, 1);
+    h = mix_bytes(h, in s2.as_slice());
+    h = mix_bool(h, no_sync_err);
+    h = mix_bool(h, partial_err);
+    h = mix_bool(h, reserved_err);
+    h
+}}"#
+    );
+    let checked = check_chrono_driver(&source);
+    let got = agree(&checked, "main", &MODES);
+    assert_eq!(got, h);
+}
