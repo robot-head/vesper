@@ -81,6 +81,15 @@ fn divergent_access_planner_fails_the_golden_access_paths() {
 }
 
 #[test]
+fn divergent_page_fails_the_corrupt_header_test() {
+    run(
+        "VESPER_QUARRY_DIVERGENT_PAGE",
+        &["corruption_and_wrong_sizes_are_rejected_before_trusting_offsets"],
+        "exact_little_endian_header_and_actual_record_roundtrip",
+    );
+}
+
+#[test]
 fn committed_binding_is_current() {
     let Some(generated) = std::env::var_os("VESPER_QUARRY_BINDING") else {
         return;
