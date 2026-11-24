@@ -306,6 +306,14 @@ pub fn scrub_image(
     scrub_secrets(in p, inout image, 1, widen_u64(epoch_id), inout log);
 }
 
+pub fn scrub_metadata(
+    in p: RedactionPolicy,
+    inout metadata: ChunkSeq[u8],
+    inout log: ChunkSeq[RedactionEntry],
+) {
+    scrub_secrets(in p, inout metadata, 2, 0, inout log);
+}
+
 pub fn verify_absent(in p: RedactionPolicy, in bundle: Slice[u8]) -> Option[u64] {
     let spans = p.secret_spans.as_slice();
     let sbuf = p.secret_buf.as_slice();

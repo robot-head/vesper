@@ -1,0 +1,496 @@
+// Native activation checkpoints as Chrono snapshot epochs (§31.1 item 2).
+use @vesper-std/hash::blake3::{
+    blake3,
+    digest_bytes
+};
+use super::ring::{
+    FlightRecorder,
+    capture_snapshot
+};
+
+pub copy struct ParkPoint {
+    pub evidence_depth: u32,
+    pub op: u32,
+    pub flags: u32,
+    pub arg0: u64,
+    pub arg1: u64,
+}
+
+// ResumeTag: 0 = Value, 1 = Error, 2 = Cancelled.
+pub struct JournalEntry {
+    pub park: ParkPoint,
+    pub data: ChunkSeq[u8],
+    pub tag: u8,
+    pub value: u64,
+}
+
+pub copy struct StackWord {
+    pub slot: u64,
+    pub target: u64,
+}
+
+pub struct StackShape {
+    pub anchor: u64,
+    pub words: ChunkSeq[StackWord],
+}
+
+pub struct ActivationCheckpoint {
+    pub fiber_id: u64,
+    pub generation: u64,
+    pub park: ParkPoint,
+    pub data_at_park: ChunkSeq[u8],
+    pub data: ChunkSeq[u8],
+    pub has_stack: bool,
+    pub stack: StackShape,
+    pub journal: ChunkSeq[JournalEntry],
+    pub has_image: bool,
+    pub image: ChunkSeq[u8],
+}
+
+pub copy struct CheckpointLimits {
+    pub max_data_bytes: u64,
+    pub max_journal: u64,
+    pub max_stack_words: u64,
+    pub max_image_bytes: u64,
+}
+
+pub fn default_checkpoint_limits() -> CheckpointLimits {
+    CheckpointLimits {
+        max_data_bytes: 65536,
+        max_journal: 4096,
+        max_stack_words: 65536,
+        max_image_bytes: 16777216,
+    }
+}
+
+// CheckpointError codes:
+// 0 = Ok
+// 1 = Truncated
+// 2 = BadMagic
+// 3 = UnsupportedVersion
+// 4 = Corrupt
+// 5 = TrailingBytes
+// 6 = TooLarge
+// 7 = BadResumeTag
+// 8 = BadFlag
+// 9 = RecordError
+
+fn byte_at(in b: Slice[u8], i: u64) -> u8 {
+    match b.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn push_u16_le(inout out: ChunkSeq[u8], v: u16) {
+    let w = widen_u64(widen_u32(v));
+    out.push(wrapping_u8(w & 255));
+    out.push(wrapping_u8(wrapping_shr_u64(w, 8) & 255));
+}
+
+fn push_u32_le(inout out: ChunkSeq[u8], v: u32) {
+    let w = widen_u64(v);
+    out.push(wrapping_u8(w & 255));
+    out.push(wrapping_u8(wrapping_shr_u64(w, 8) & 255));
+    out.push(wrapping_u8(wrapping_shr_u64(w, 16) & 255));
+    out.push(wrapping_u8(wrapping_shr_u64(w, 24) & 255));
+}
+
+fn push_u64_le(inout out: ChunkSeq[u8], v: u64) {
+    let mut i: u64 = 0;
+    loop {
+        if i >= 8 {
+            break;
+        }
+        out
+            .push(
+                wrapping_u8(
+                    wrapping_shr_u64(v, wrapping_u32(wrapping_mul(i, 8))) & 255,
+                )
+            );
+        i = wrapping_add(i, 1);
+    }
+}
+
+fn push_slice(inout out: ChunkSeq[u8], in s: Slice[u8]) {
+    let mut i: u64 = 0;
+    loop {
+        if i >= s.len() {
+            break;
+        }
+        out.push(byte_at(in s, i));
+        i = wrapping_add(i, 1);
+    }
+}
+
+fn put_park(inout out: ChunkSeq[u8], p: ParkPoint) {
+    push_u32_le(inout out, p.evidence_depth);
+    push_u32_le(inout out, p.op);
+    push_u32_le(inout out, p.flags);
+    push_u64_le(inout out, p.arg0);
+    push_u64_le(inout out, p.arg1);
+}
+
+fn read_u16_le(in b: Slice[u8], off: u64) -> u16 {
+    let lo = widen_u32(byte_at(in b, off));
+    let hi = widen_u32(byte_at(in b, wrapping_add(off, 1)));
+    wrapping_u16(widen_u64(lo | wrapping_shl_u32(hi, 8)))
+}
+
+fn read_u32_le(in b: Slice[u8], off: u64) -> u32 {
+    match b.try_read_u32_le(off) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn read_u64_le(in b: Slice[u8], off: u64) -> u64 {
+    match b.try_read_u64_le(off) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn read_park(in b: Slice[u8], off: u64) -> ParkPoint {
+    ParkPoint {
+        evidence_depth: read_u32_le(in b, off),
+        op: read_u32_le(in b, wrapping_add(off, 4)),
+        flags: read_u32_le(in b, wrapping_add(off, 8)),
+        arg0: read_u64_le(in b, wrapping_add(off, 12)),
+        arg1: read_u64_le(in b, wrapping_add(off, 20)),
+    }
+}
+
+fn slice_copy(in src: Slice[u8], start: u64, len: u64) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new();
+    let mut i: u64 = 0;
+    loop {
+        if i >= len {
+            break;
+        }
+        out.push(byte_at(in src, wrapping_add(start, i)));
+        i = wrapping_add(i, 1);
+    }
+    out
+}
+
+pub fn encode_checkpoint(in cp: ActivationCheckpoint) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new();
+    // MAGIC "VCHKPT\0\x01"
+    out.push(86);
+    out.push(67);
+    out.push(72);
+    out.push(75);
+    out.push(80);
+    out.push(84);
+    out.push(0);
+    out.push(1);
+    push_u16_le(inout out, 2);
+    push_u16_le(inout out, 0);
+    push_u64_le(inout out, cp.fiber_id);
+    push_u64_le(inout out, cp.generation);
+    put_park(inout out, cp.park);
+
+    let dp_len = cp.data_at_park.as_slice().len();
+    push_u32_le(inout out, wrapping_u32(dp_len));
+    push_slice(inout out, in cp.data_at_park.as_slice());
+
+    let d_len = cp.data.as_slice().len();
+    push_u32_le(inout out, wrapping_u32(d_len));
+    push_slice(inout out, in cp.data.as_slice());
+
+    if !cp.has_stack {
+        out.push(0);
+    } else {
+        out.push(1);
+        push_u64_le(inout out, cp.stack.anchor);
+        let ws = cp.stack.words.as_slice();
+        push_u32_le(inout out, wrapping_u32(ws.len()));
+        let mut wi: u64 = 0;
+        loop {
+            if wi >= ws.len() {
+                break;
+            }
+            match ws.try_get(wi) {
+                Option::Some(w) => {
+                    push_u64_le(inout out, w.slot);
+                    push_u64_le(inout out, w.target);
+                }
+                Option::None => {}
+            }
+            wi = wrapping_add(wi, 1);
+        }
+    }
+
+    let js = cp.journal.as_slice();
+    push_u32_le(inout out, wrapping_u32(js.len()));
+    let mut ji: u64 = 0;
+    loop {
+        if ji >= js.len() {
+            break;
+        }
+        match js.try_get(ji) {
+            Option::Some(e) => {
+                put_park(inout out, e.park);
+                out.push(e.tag);
+                push_u64_le(inout out, e.value);
+                let elen = e.data.as_slice().len();
+                push_u32_le(inout out, wrapping_u32(elen));
+                push_slice(inout out, in e.data.as_slice());
+            }
+            Option::None => {}
+        }
+        ji = wrapping_add(ji, 1);
+    }
+
+    if !cp.has_image {
+        out.push(0);
+    } else {
+        out.push(1);
+        let ilen = cp.image.as_slice().len();
+        push_u32_le(inout out, wrapping_u32(ilen));
+        push_slice(inout out, in cp.image.as_slice());
+    }
+
+    let digest = blake3(in out.as_slice());
+    digest_bytes(digest, inout out);
+    out
+}
+
+pub fn decode_checkpoint(
+    in bytes: Slice[u8],
+    limits: CheckpointLimits,
+) -> Result[ActivationCheckpoint, u32] {
+    if bytes.len() < 40 {
+        return Result::Err(1);
+    }
+    if byte_at(in bytes, 0) != 86
+        || byte_at(in bytes, 1) != 67
+        || byte_at(in bytes, 2) != 72
+        || byte_at(in bytes, 3) != 75
+        || byte_at(in bytes, 4) != 80
+        || byte_at(in bytes, 5) != 84
+        || byte_at(in bytes, 6) != 0
+        || byte_at(in bytes, 7) != 1 {
+        return Result::Err(2);
+    }
+    let body_len = wrapping_sub(bytes.len(), 32);
+    let body = slice_copy(in bytes, 0, body_len);
+    let expected = blake3(in body.as_slice());
+    let mut exp_bytes: ChunkSeq[u8] = ChunkSeq::new();
+    digest_bytes(expected, inout exp_bytes);
+    let mut di: u64 = 0;
+    loop {
+        if di >= 32 {
+            break;
+        }
+        if byte_at(in exp_bytes.as_slice(), di) != byte_at(in bytes, wrapping_add(body_len, di)) {
+            return Result::Err(4);
+        }
+        di = wrapping_add(di, 1);
+    }
+
+    let bs = body.as_slice();
+    let mut at: u64 = 8;
+    if wrapping_sub(body_len, at) < 48 {
+        return Result::Err(1);
+    }
+    let version = read_u16_le(in bs, at);
+    at = wrapping_add(at, 2);
+    if version != 1 && version != 2 {
+        return Result::Err(3);
+    }
+    let flags = read_u16_le(in bs, at);
+    at = wrapping_add(at, 2);
+    if flags != 0 {
+        return Result::Err(8);
+    }
+    let fiber_id = read_u64_le(in bs, at);
+    let generation = read_u64_le(in bs, wrapping_add(at, 8));
+    at = wrapping_add(at, 16);
+    let park = read_park(in bs, at);
+    at = wrapping_add(at, 28);
+
+    if wrapping_sub(body_len, at) < 4 {
+        return Result::Err(1);
+    }
+    let dp_len = widen_u64(read_u32_le(in bs, at));
+    at = wrapping_add(at, 4);
+    if dp_len > limits.max_data_bytes {
+        return Result::Err(6);
+    }
+    if wrapping_sub(body_len, at) < dp_len {
+        return Result::Err(1);
+    }
+    let data_at_park = slice_copy(in bs, at, dp_len);
+    at = wrapping_add(at, dp_len);
+
+    if wrapping_sub(body_len, at) < 4 {
+        return Result::Err(1);
+    }
+    let d_len = widen_u64(read_u32_le(in bs, at));
+    at = wrapping_add(at, 4);
+    if d_len > limits.max_data_bytes {
+        return Result::Err(6);
+    }
+    if wrapping_sub(body_len, at) < d_len {
+        return Result::Err(1);
+    }
+    let data = slice_copy(in bs, at, d_len);
+    at = wrapping_add(at, d_len);
+
+    if wrapping_sub(body_len, at) < 1 {
+        return Result::Err(1);
+    }
+    let stack_flag = byte_at(in bs, at);
+    at = wrapping_add(at, 1);
+    let mut has_stack = false;
+    let mut stack = StackShape {
+        anchor: 0,
+        words: ChunkSeq::new(),
+    };
+    if stack_flag == 1 {
+        has_stack = true;
+        if wrapping_sub(body_len, at) < 12 {
+            return Result::Err(1);
+        }
+        let anchor = read_u64_le(in bs, at);
+        let wcount = widen_u64(read_u32_le(in bs, wrapping_add(at, 8)));
+        at = wrapping_add(at, 12);
+        if wcount > limits.max_stack_words {
+            return Result::Err(6);
+        }
+        let mut words: ChunkSeq[StackWord] = ChunkSeq::new();
+        let mut wi: u64 = 0;
+        loop {
+            if wi >= wcount {
+                break;
+            }
+            if wrapping_sub(body_len, at) < 16 {
+                return Result::Err(1);
+            }
+            let slot = read_u64_le(in bs, at);
+            let target = read_u64_le(in bs, wrapping_add(at, 8));
+            at = wrapping_add(at, 16);
+            words
+                .push(
+                    StackWord {
+                        slot: slot,
+                        target: target,
+                    }
+                );
+            wi = wrapping_add(wi, 1);
+        }
+        stack = StackShape {
+            anchor: anchor,
+            words: words,
+        };
+    } else if stack_flag != 0 {
+        return Result::Err(8);
+    }
+
+    if wrapping_sub(body_len, at) < 4 {
+        return Result::Err(1);
+    }
+    let jcount = widen_u64(read_u32_le(in bs, at));
+    at = wrapping_add(at, 4);
+    if jcount > limits.max_journal {
+        return Result::Err(6);
+    }
+    let mut journal: ChunkSeq[JournalEntry] = ChunkSeq::new();
+    let mut ji: u64 = 0;
+    loop {
+        if ji >= jcount {
+            break;
+        }
+        if wrapping_sub(body_len, at) < 41 {
+            return Result::Err(1);
+        }
+        let epark = read_park(in bs, at);
+        at = wrapping_add(at, 28);
+        let etag = byte_at(in bs, at);
+        if etag > 2 {
+            return Result::Err(7);
+        }
+        let eval = read_u64_le(in bs, wrapping_add(at, 1));
+        let elen = widen_u64(read_u32_le(in bs, wrapping_add(at, 9)));
+        at = wrapping_add(at, 13);
+        if elen > limits.max_data_bytes {
+            return Result::Err(6);
+        }
+        if wrapping_sub(body_len, at) < elen {
+            return Result::Err(1);
+        }
+        let edata = slice_copy(in bs, at, elen);
+        at = wrapping_add(at, elen);
+        journal
+            .push(
+                JournalEntry {
+                    park: epark,
+                    data: edata,
+                    tag: etag,
+                    value: eval,
+                }
+            );
+        ji = wrapping_add(ji, 1);
+    }
+
+    let mut has_image = false;
+    let mut image: ChunkSeq[u8] = ChunkSeq::new();
+    if version == 2 {
+        if wrapping_sub(body_len, at) < 1 {
+            return Result::Err(1);
+        }
+        let img_flag = byte_at(in bs, at);
+        at = wrapping_add(at, 1);
+        if img_flag == 1 {
+            has_image = true;
+            if wrapping_sub(body_len, at) < 4 {
+                return Result::Err(1);
+            }
+            let ilen = widen_u64(read_u32_le(in bs, at));
+            at = wrapping_add(at, 4);
+            if ilen > limits.max_image_bytes {
+                return Result::Err(6);
+            }
+            if wrapping_sub(body_len, at) < ilen {
+                return Result::Err(1);
+            }
+            image = slice_copy(in bs, at, ilen);
+            at = wrapping_add(at, ilen);
+        } else if img_flag != 0 {
+            return Result::Err(8);
+        }
+    }
+
+    if at != body_len {
+        return Result::Err(5);
+    }
+
+    Result::Ok(
+        ActivationCheckpoint {
+            fiber_id: fiber_id,
+            generation: generation,
+            park: park,
+            data_at_park: data_at_park,
+            data: data,
+            has_stack: has_stack,
+            stack: stack,
+            journal: journal,
+            has_image: has_image,
+            image: image,
+        }
+    )
+}
+
+pub fn capture_epoch(
+    inout recorder: FlightRecorder,
+    time_ns: u64,
+    in cp: ActivationCheckpoint,
+) -> Result[u32, u32] {
+    let encoded = encode_checkpoint(in cp);
+    match capture_snapshot(inout recorder, time_ns, in encoded.as_slice()) {
+        Result::Ok(ep) => Result::Ok(ep),
+        Result::Err(_) => Result::Err(9),
+    }
+}
