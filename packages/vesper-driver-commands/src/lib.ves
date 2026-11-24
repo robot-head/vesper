@@ -64,6 +64,9 @@ use self::doc::{
 use self::lint::{
     run_lint
 };
+use self::proof_audit::{
+    run_proof_audit
+};
 
 enum Ascii: _ {
     LineFeed = 10,
@@ -174,6 +177,9 @@ pub fn run(in args: Args)
     }
     if eq(in c, in "lint") {
         return run_lint(in args);
+    }
+    if eq(in c, in "proof-audit") {
+        return run_proof_audit(in args);
     }
     if eq(in c, in "verify") && has_arg(in args, in "--refute") {
         let found = locate(in "refute".as_bytes());
