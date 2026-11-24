@@ -116,7 +116,11 @@ const MODULES: &[(&str, &str, &str)] = &[
     // SH2 lane 13 (#1185): the declaration pass of the trait frontend.
     ("hybrid_pact", "modules/pact", "port/pact.rs"),
     // SH2 lane 14 (#1186): the tensor type checker.
-    ("hybrid_tensor_types", "modules/tensor_types", "port/tensor_types.rs"),
+    (
+        "hybrid_tensor_types",
+        "modules/tensor_types",
+        "port/tensor_types.rs",
+    ),
     // SH5 lane 15 (#1338): the doc renderers.
     ("hybrid_doc", "modules/doc", "port/doc.rs"),
 ];
