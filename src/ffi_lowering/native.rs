@@ -2246,13 +2246,8 @@ impl<M: Module> Codegen<'_, '_, M> {
             return Ok(None);
         }
         // A symbol shared with the runtime's imports is called through its
-        // address (`foreign_import`), which the steps do not express, and
-        // Apple arm64 pads a variadic call's argument registers with zero
-        // words (`sys::Variadic`), which they do not carry either.
+        // address (`foreign_import`), which the steps do not express.
         let abi = plan.function.abi();
-        if abi.variadic.is_some_and(|v| v.padding > 0) {
-            return Ok(None);
-        }
         let pointer = self.m.target_config().pointer_type();
         let mut sig = self.m.make_signature();
         for t in &abi.parameters {
@@ -2263,15 +2258,6 @@ impl<M: Module> Codegen<'_, '_, M> {
         }
         if !plan.function.is_indirect()
             && !self.foreign_import_direct(plan.function.link_symbol(), &sig)
-        {
-            return Ok(None);
-        }
-        // Multi-byte mapping results (`u16`/`u32`/`u64`) need `umul_overflow`
-        // in `foreign_range_register`, which `@vesper/cranelift` does not
-        // expose yet; decline before `BEGIN` / argument evaluation.
-        if plan.function.mapping_length().is_some()
-            && let ValueType::Handle { handle, .. } = plan.function.result()
-            && handle.mapping().is_some_and(|s| s.bits() > 8)
         {
             return Ok(None);
         }
@@ -2553,14 +2539,27 @@ impl<M: Module> Codegen<'_, '_, M> {
             Some(idx) => {
                 let v = c_args[idx];
                 let (reg_id, _) = self.foreign_range_helpers()?;
+                let elem_bytes = match plan.function.result() {
+                    ValueType::Handle { handle, .. } => handle
+                        .mapping()
+                        .map_or(1, |s| u64::from(s.bits() / 8))
+                        .max(1),
+                    _ => 1,
+                };
                 (
                     word(v),
-                    u64::from(self.b.func.dfg.value_type(v) == types::I64),
+                    u64::from(self.b.func.dfg.value_type(v) == types::I64) | (elem_bytes << 1),
                     u64::from(reg_id.as_u32()),
                 )
             }
             None => (NO_VALUE, 0, NO_VALUE),
         };
+        if let Some(v) = abi.variadic {
+            for _ in 0..v.padding {
+                let zero = self.b.ins().iconst(types::I64, 0);
+                c_args.insert(v.first - v.padding, zero);
+            }
+        }
         for &(_, data, len, stride) in &released {
             self.foreign_range_unregister(value_of_word(data)?, value_of_word(len)?, stride)?;
         }
