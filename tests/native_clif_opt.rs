@@ -743,3 +743,106 @@ fn main() -> u64 {
         "expected uextend->ushr->ireduce.i32 chain to fold to native i32 ops (ireduce_count={ireduce_count}):\n{fn_clif}"
     );
 }
+
+#[test]
+fn pure_shift_diamond_if_converts_to_select() {
+    let source = "
+fn safe_shl(x: u64, s: u32) -> u64 {
+    if s < 64 {
+        wrapping_shl_u64(x, s)
+    } else {
+        0
+    }
+}
+
+fn main() -> u64 {
+    wrapping_add(safe_shl(3, 5), safe_shl(3, 70))
+}";
+    let c = accepted(source);
+    let (_, clif) = native::object(&c.world, "main").unwrap();
+    let eval = vesper::runtime::Runtime::new(&c.world)
+        .run("main", vec![])
+        .unwrap();
+    let jit = native::jit(&c.world, "main").unwrap();
+    assert_eq!(eval.to_string(), jit.to_string());
+    let fn_clif = clif
+        .split("\n; ")
+        .find(|s| s.starts_with("safe_shl\n"))
+        .unwrap_or(&clif);
+    assert!(
+        fn_clif.contains("select ") && !fn_clif.contains("brif "),
+        "expected pure shift diamond to if-convert to branchless select:\n{fn_clif}"
+    );
+}
+
+#[test]
+fn seq_header_loads_reuse_across_try_set() {
+    let source = "
+struct Bag {
+    s: ChunkSeq[u64],
+}
+
+fn fill_and_sum(inout b: Bag, n: u64) -> u64 {
+    let mut i: u64 = 0;
+    let mut acc: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let _ = b.s.try_set(i, wrapping_mul(i, 3));
+        let v = match b.s.try_get(i) {
+            Option::Some(x) => x,
+            Option::None => 0,
+        };
+        acc = wrapping_add(acc, v);
+        i = wrapping_add(i, 1);
+    }
+    acc
+}
+
+fn make_bag() -> Bag {
+    let mut s: ChunkSeq[u64] = ChunkSeq::new();
+    s.push(0);
+    s.push(0);
+    s.push(0);
+    s.push(0);
+    s.push(0);
+    s.push(0);
+    Bag { s: s }
+}
+
+fn main() -> u64 {
+    let mut b = make_bag();
+    let a = fill_and_sum(inout b, 6);
+    let c = fill_and_sum(inout b, 4);
+    wrapping_add(a, c)
+}";
+    let c = accepted(source);
+    let (_, clif) = native::object(&c.world, "main").unwrap();
+    let eval = vesper::runtime::Runtime::new(&c.world)
+        .run("main", vec![])
+        .unwrap();
+    let jit = native::jit(&c.world, "main").unwrap();
+    assert_eq!(eval.to_string(), jit.to_string());
+    let fn_clif = clif
+        .split("\n; ")
+        .find(|s| s.starts_with("main\n"))
+        .unwrap_or(&clif);
+    // `b.s` handle + its `len` and `data` should be hoisted out of the loop,
+    // so no `try_set` block (`select` + `store`) reloads `b.s`, `len`, or `data`.
+    let try_set_blocks: Vec<&str> = fn_clif
+        .split("\n\n")
+        .filter(|blk| {
+            blk.contains("stack_addr.i64") && blk.contains("select ") && blk.contains("store ")
+        })
+        .collect();
+    assert!(
+        !try_set_blocks.is_empty()
+            && try_set_blocks.iter().all(|blk| !blk
+                .split("store ")
+                .nth(1)
+                .unwrap_or("")
+                .contains("load.i64")),
+        "expected SeqHeader/Param loads to hoist and reuse across try_set:\n{fn_clif}"
+    );
+}
