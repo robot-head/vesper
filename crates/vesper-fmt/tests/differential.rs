@@ -9,9 +9,11 @@ use vesper_fmt::{Limits, port_format_source};
 
 fn root() -> PathBuf {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    // Cargo: crates/vesper-fmt; Bazel runs the test from the execroot.
+    // Cargo: crates/vesper-fmt; Bazel runs the test from the package dir.
     if manifest.join("../../Cargo.toml").is_file() {
         manifest.join("../..")
+    } else if Path::new("../../packages").is_dir() {
+        PathBuf::from("../..")
     } else {
         PathBuf::from(".")
     }

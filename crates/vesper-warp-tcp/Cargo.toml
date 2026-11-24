@@ -9,7 +9,8 @@ build = "build.rs"
 
 [features]
 # wire (codec + checksum) is unconditionally Vesper (part of #1399).
-# Enabling vesper-port also switches seq, rtt, cc, and conn to Vesper.
+# All ported modules (wire, seq, rtt, cc, conn) are unconditionally Vesper;
+# `vesper-port` is kept as an empty compatibility feature.
 vesper-port = []
 # A deliberately wrong Vesper build, one change per ported module: the port
 # test runs must fail (scripts/test-port-harness.sh and Bazel assert it).

@@ -46,37 +46,8 @@ pub const SUPPORTED: &[(i32, &str)] = &[
 
 /// Whether `prog_type` may call helper `id` (the kernel's per-type
 /// `get_func_proto`, restricted to [`SUPPORTED`]).
-#[cfg(vesper_port)]
 pub fn allowed(prog_type: ProgramType, id: i32) -> bool {
     crate::port::ffi::helpers_allowed(prog_type, id)
-}
-
-#[cfg(not(vesper_port))]
-pub fn allowed(prog_type: ProgramType, id: i32) -> bool {
-    let common = matches!(
-        id,
-        MAP_LOOKUP_ELEM
-            | MAP_UPDATE_ELEM
-            | MAP_DELETE_ELEM
-            | KTIME_GET_NS
-            | GET_PRANDOM_U32
-            | GET_SMP_PROCESSOR_ID
-            | TAIL_CALL
-            | RINGBUF_OUTPUT
-            | RINGBUF_RESERVE
-            | RINGBUF_SUBMIT
-            | RINGBUF_DISCARD
-            | LOOP
-    );
-    common
-        || match prog_type {
-            ProgramType::Xdp => matches!(id, XDP_ADJUST_HEAD | SK_LOOKUP_TCP | SK_RELEASE),
-            ProgramType::SchedCls => matches!(id, SK_LOOKUP_TCP | SK_RELEASE),
-            ProgramType::Tracepoint | ProgramType::Kprobe => matches!(
-                id,
-                GET_CURRENT_PID_TGID | GET_CURRENT_UID_GID | GET_CURRENT_COMM
-            ),
-        }
 }
 
 /// kfuncs the verifier and the interpreter model (generic kfuncs the
@@ -94,22 +65,8 @@ pub const KFUNCS: &[&str] = &[
 ];
 
 /// `license_is_gpl_compatible`.
-#[cfg(vesper_port)]
 pub fn gpl_compatible(license: &str) -> bool {
     crate::port::ffi::helpers_gpl_compatible(license)
-}
-
-#[cfg(not(vesper_port))]
-pub fn gpl_compatible(license: &str) -> bool {
-    matches!(
-        license,
-        "GPL"
-            | "GPL v2"
-            | "GPL and additional rights"
-            | "Dual BSD/GPL"
-            | "Dual MIT/GPL"
-            | "Dual MPL/GPL"
-    )
 }
 
 pub fn name(id: i32) -> Option<&'static str> {

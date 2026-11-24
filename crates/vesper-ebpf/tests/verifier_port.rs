@@ -4,7 +4,6 @@
 //! with small budgets. The two builds must agree exactly: the verdict, the
 //! rule, the instruction, the message, and every count of an accepted
 //! program's report. Port wave P3a lane 6 (#1041).
-#![cfg(feature = "vesper-port")]
 
 mod common;
 

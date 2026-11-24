@@ -33,7 +33,18 @@ use @vesper-std/process::{
 };
 use @vesper-std/fs::{
     IoError,
-    not_found
+    not_found,
+    symlink_metadata,
+    kind_dir,
+    kind_file
+};
+use @vesper-std/fs::walk::{
+    Entries,
+    entry_count,
+    entry_start,
+    entry_end,
+    entry_kind,
+    list_dir_path
 };
 use self::graph::{
     run_graph
@@ -136,6 +147,9 @@ pub fn run(in args: Args)
             return version();
         }
         return unknown_command(in c);
+    }
+    if eq(in c, in "fmt") {
+        return fmt(in args);
     }
     if eq(in c, in "graph") {
         return run_graph(in args);
@@ -589,4 +603,830 @@ fn spawn_failed(in binary: Slice[u8], e: IoError) -> i64 eff [Ffi[HybridCommands
         m.extend(in t.as_slice());
     }
     fail(in m.as_slice())
+}
+
+// ---------------------------------------------------------------------------
+// `vesper fmt` (src/fmt_commands.rs, part 2 of #1336): the options, the
+// single-file and workspace runs, the directory walk, the status lines and
+// the JSON reports are here. One file's bounded read, the formatter and
+// the checked atomic replace stay `fmt_commands::format_file` (the host's
+// `hc_fmt_file`): @vesper-std/fs has no no-follow open, inode identity,
+// permission copy or `sync_all` yet.
+
+const FMT_MAX_WALK_ENTRIES: u64 = 200000;
+const FMT_STATS: u64 = 5;
+
+// `hc_fmt_file` statuses.
+fn fmt_unchanged() -> u32 {
+    0
+}
+
+fn fmt_formatted() -> u32 {
+    1
+}
+
+fn fmt_needs_format() -> u32 {
+    2
+}
+
+fn fmt_error() -> u32 {
+    3
+}
+
+// `hc_fmt_file` stats slots.
+fn stat_changed() -> u64 {
+    0
+}
+
+fn stat_input_bytes() -> u64 {
+    1
+}
+
+fn stat_output_bytes() -> u64 {
+    2
+}
+
+fn stat_has_edits() -> u64 {
+    3
+}
+
+fn stat_edits() -> u64 {
+    4
+}
+
+fn fmt_help() -> Str {
+    "Usage: vesper fmt [PATH...] [--recovery] [--check] [--json]\n\nWith no PATH the current directory is formatted. Directories are walked for .ves files in sorted\norder without following symlinks, skipping hidden, target/ and bazel-* directories.\nFormat supported Vesper source and expression macros with a canonical 100-column ribbon.\nRecovery mode formats only complete functions and preserves damaged or opaque source bytes.\nCheck mode never writes and exits nonzero when formatting is needed.\nInputs are bounded to 256 KiB regular UTF-8 files without final symlinks.\nDefault mode rejects invalid/incomplete source; failures always leave input unchanged.\nToken/string/comment bytes are preserved; indivisible leaves may exceed 100 columns.\n"
+}
+
+// A list of paths in one byte arena: path `i` is `bytes[start(i)..ends[i]]`.
+struct Paths {
+    bytes: ChunkSeq[u8],
+    ends: ChunkSeq[u64],
+}
+
+fn paths_new() -> Paths {
+    Paths {
+        bytes: ChunkSeq::new[u8](),
+        ends: ChunkSeq::new[u64](),
+    }
+}
+
+fn paths_push(inout p: Paths, in path: Slice[u8]) {
+    p.bytes.extend(in path);
+    p.ends.push(p.bytes.len());
+}
+
+fn paths_start(in p: Paths, i: u64) -> u64 {
+    if i == 0 {
+        0
+    } else {
+        span_at(in p.ends.as_slice(), wrapping_sub(i, 1))
+    }
+}
+
+fn paths_get(in p: Paths, i: u64) -> ChunkSeq[u8] {
+    let mut v: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let a = paths_start(in p, i);
+    let b = span_at(in p.ends.as_slice(), i);
+    v.extend(in p.bytes[a..b]);
+    v
+}
+
+// Remove and return the last path.
+fn paths_pop(inout p: Paths) -> ChunkSeq[u8] {
+    let n = p.ends.len();
+    let last = paths_get(in p, wrapping_sub(n, 1));
+    let a = paths_start(in p, wrapping_sub(n, 1));
+    p.bytes.truncate(a);
+    p.ends.truncate(wrapping_sub(n, 1));
+    last
+}
+
+// Rust's `str::from_utf8`: whether `s` is well-formed UTF-8 (no overlong
+// forms, surrogates or code points past U+10FFFF).
+fn utf8(in s: Slice[u8]) -> bool {
+    let mut i: u64 = 0;
+    loop {
+        if i >= s.len() {
+            break;
+        }
+        let b = byte_at(in s, i);
+        if b < Ascii::NonAsciiStart {
+            i = wrapping_add(i, 1);
+        } else {
+            let mut need: u64 = 0;
+            let mut lo: u8 = 128;
+            let mut hi: u8 = 191;
+            if b >= 194 && b <= 223 {
+                need = 1;
+            } else if b == 224 {
+                need = 2;
+                lo = 160;
+            } else if b >= 225 && b <= 236 {
+                need = 2;
+            } else if b == 237 {
+                need = 2;
+                hi = 159;
+            } else if b == 238 || b == 239 {
+                need = 2;
+            } else if b == 240 {
+                need = 3;
+                lo = 144;
+            } else if b >= 241 && b <= 243 {
+                need = 3;
+            } else if b == 244 {
+                need = 3;
+                hi = 143;
+            } else {
+                return false;
+            }
+            if wrapping_add(i, need) >= s.len() {
+                return false;
+            }
+            let c1 = byte_at(in s, wrapping_add(i, 1));
+            if c1 < lo || c1 > hi {
+                return false;
+            }
+            for k in 2..wrapping_add(need, 1) {
+                let c = byte_at(in s, wrapping_add(i, k));
+                if c < 128 || c > 191 {
+                    return false;
+                }
+            }
+            i = wrapping_add(i, wrapping_add(need, 1));
+        }
+    }
+    true
+}
+
+fn push_decimal(inout out: ChunkSeq[u8], v: u64) {
+    if v >= 10 {
+        push_decimal(inout out, v / 10);
+    }
+    out.push(wrapping_u8(wrapping_add(v % 10, 48)));
+}
+
+fn hex_digit(v: u8) -> u8 {
+    if v < 10 {
+        wrapping_add(v, 48)
+    } else {
+        wrapping_add(v, 87)
+    }
+}
+
+// A JSON string as serde_json writes it: `"` and `\` escaped, the control
+// bytes as `\b \f \n \r \t` or `\u00xx`, everything else as is.
+fn json_string(inout out: ChunkSeq[u8], in s: Slice[u8]) {
+    out.push(Ascii::DoubleQuote);
+    for i in 0..s.len() {
+        let b = byte_at(in s, i);
+        if b == Ascii::DoubleQuote || b == Ascii::Backslash {
+            out.push(Ascii::Backslash);
+            out.push(b);
+        } else if b < 32 {
+            out.push(Ascii::Backslash);
+            if b == 8 {
+                out.push(98);
+            } else if b == 12 {
+                out.push(102);
+            } else if b == 10 {
+                out.push(110);
+            } else if b == 13 {
+                out.push(114);
+            } else if b == 9 {
+                out.push(116);
+            } else {
+                out.extend(in "u00".as_bytes());
+                out.push(hex_digit(b >> 4));
+                out.push(hex_digit(b & 15));
+            }
+        } else {
+            out.push(b);
+        }
+    }
+    out.push(Ascii::DoubleQuote);
+}
+
+// `"key":` (after a `,` unless it is the object's first key).
+fn json_key(inout out: ChunkSeq[u8], in key: Str, first: bool) {
+    if !first {
+        out.push(44);
+    }
+    json_string(inout out, in key.as_bytes());
+    out.push(Ascii::Colon);
+}
+
+fn json_bool(inout out: ChunkSeq[u8], v: bool) {
+    if v {
+        out.extend(in "true".as_bytes());
+    } else {
+        out.extend(in "false".as_bytes());
+    }
+}
+
+fn status_name(status: u32) -> Str {
+    if status == fmt_formatted() {
+        "formatted"
+    } else if status == fmt_needs_format() {
+        "needs_format"
+    } else if status == fmt_error() {
+        "error"
+    } else {
+        "unchanged"
+    }
+}
+
+fn mode_name(recovery: bool) -> Str {
+    if recovery {
+        "recovery"
+    } else {
+        "source"
+    }
+}
+
+// One file's `format_file` report (its keys sorted, as serde_json's map
+// writes them); `path` replaces `schema_version` in a workspace entry.
+fn file_report(
+    inout out: ChunkSeq[u8],
+    status: u32,
+    in stats: Slice[u64],
+    check: bool,
+    recovery: bool,
+    in path: Slice[u8],
+    entry: bool
+) {
+    out.push(123);
+    json_key(inout out, in "changed", true);
+    json_bool(inout out, span_at(in stats, stat_changed()) != 0);
+    json_key(inout out, in "check", false);
+    json_bool(inout out, check);
+    if span_at(in stats, stat_has_edits()) != 0 {
+        json_key(inout out, in "edits", false);
+        push_decimal(inout out, span_at(in stats, stat_edits()));
+    }
+    json_key(inout out, in "input_bytes", false);
+    push_decimal(inout out, span_at(in stats, stat_input_bytes()));
+    json_key(inout out, in "mode", false);
+    json_string(inout out, in mode_name(recovery).as_bytes());
+    json_key(inout out, in "output_bytes", false);
+    push_decimal(inout out, span_at(in stats, stat_output_bytes()));
+    if entry {
+        json_key(inout out, in "path", false);
+        json_string(inout out, in path);
+    } else {
+        json_key(inout out, in "schema_version", false);
+        out.push(49);
+    }
+    json_key(inout out, in "status", false);
+    json_string(inout out, in status_name(status).as_bytes());
+    json_key(inout out, in "width", false);
+    out.extend(in "100".as_bytes());
+    out.push(125);
+}
+
+// The last `hc_fmt_file` error.
+fn fmt_error_text() -> ChunkSeq[u8] eff [Ffi[HybridCommands]] {
+    let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    buf.resize(ERROR_TEXT_INITIAL_BYTES, 0);
+    let mut none = false;
+    loop {
+        let n = HybridCommands::hc_fmt_error(inout buf.as_slice_mut());
+        if !grown(n, inout buf, inout none) {
+            break;
+        }
+    }
+    buf
+}
+
+// `fs::symlink_metadata(path).is_ok_and(|m| m.is_dir())`; `path` is UTF-8.
+fn is_dir(in path: Slice[u8]) -> bool eff [Ffi[StdFs]] {
+    let text = match String::from_utf8(in path) {
+        Option::Some(t) => t,
+        Option::None => return false,
+    };
+    handle Fail[IoError] in {
+        symlink_metadata(in text.as_str()).kind == kind_dir()
+    } with {
+        return v => v,
+        raise(_e, _k) => false,
+    }
+}
+
+fn io_word(e: IoError) -> u64 {
+    widen_u64(e.kind) | (widen_u64(e.os) << 32)
+}
+
+// Directory `dir`'s names and kinds (not following symbolic links) into
+// `out`, in the OS's order, reading at most `budget` entries: one more sets
+// `over` and stops, so the walk's limit holds while the listing is read,
+// as in Rust. 0, or the error word of a directory that cannot be read.
+fn list_bounded(in dir: Slice[u8], budget: u64, inout out: Entries, inout over: bool)
+    -> u64 eff [Ffi[StdFs]] {
+    let mut err_word: u64 = 0;
+    let listed = handle Fail[IoError] in {
+        list_dir_path(in dir)
+    } with {
+        return v => v,
+        raise(e, _k) => {
+            err_word = io_word(e);
+            Entries {
+                bytes: ChunkSeq::new[u8](),
+                ends: ChunkSeq::new[u64](),
+                kinds: ChunkSeq::new[u32](),
+            }
+        },
+    };
+    if err_word != 0 {
+        return err_word;
+    }
+    if listed.ends.len() > budget {
+        over = true;
+        return 0;
+    }
+    out.bytes.extend(in listed.bytes.as_slice());
+    out.ends.extend(in listed.ends.as_slice());
+    out.kinds.extend(in listed.kinds.as_slice());
+    0
+}
+
+// Whether name `x` sorts before name `y` (bytewise, as `OsString` does).
+fn name_before(in e: Entries, x: u64, y: u64) -> bool {
+    let xa = entry_start(in e, x);
+    let xb = entry_end(in e, x);
+    let ya = entry_start(in e, y);
+    let yb = entry_end(in e, y);
+    let xl = wrapping_sub(xb, xa);
+    let yl = wrapping_sub(yb, ya);
+    let n = if xl < yl {
+        xl
+    } else {
+        yl
+    };
+    for i in 0..n {
+        let p = byte_at(in e.bytes.as_slice(), wrapping_add(xa, i));
+        let q = byte_at(in e.bytes.as_slice(), wrapping_add(ya, i));
+        if p != q {
+            return p < q;
+        }
+    }
+    xl < yl
+}
+
+// The entry order of `e` sorted by name: a stable bottom-up merge sort of
+// indices.
+fn sorted_order(in e: Entries) -> ChunkSeq[u64] {
+    let n = e.ends.len();
+    let mut a: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut b: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for i in 0..n {
+        a.push(i);
+        b.push(i);
+    }
+    let mut width: u64 = 1;
+    loop {
+        if width >= n {
+            break;
+        }
+        let mut lo: u64 = 0;
+        loop {
+            if lo >= n {
+                break;
+            }
+            let mid = min_u64(wrapping_add(lo, width), n);
+            let hi = min_u64(wrapping_add(mid, width), n);
+            let mut i = lo;
+            let mut j = mid;
+            for k in lo..hi {
+                let ai = span_at(in a.as_slice(), i);
+                let aj = span_at(in a.as_slice(), j);
+                let take_left = if i >= mid {
+                    false
+                } else if j >= hi {
+                    true
+                } else {
+                    !name_before(in e, aj, ai)
+                };
+                if take_left {
+                    set64(inout b.as_slice_mut(), k, ai);
+                    i = wrapping_add(i, 1);
+                } else {
+                    set64(inout b.as_slice_mut(), k, aj);
+                    j = wrapping_add(j, 1);
+                }
+            }
+            lo = hi;
+        }
+        for k in 0..n {
+            set64(inout a.as_slice_mut(), k, span_at(in b.as_slice(), k));
+        }
+        width = wrapping_add(width, width);
+    }
+    a
+}
+
+fn set64(inout s: Slice[u64], i: u64, v: u64) {
+    s.try_set(i, v);
+}
+
+fn min_u64(x: u64, y: u64) -> u64 {
+    if x < y {
+        x
+    } else {
+        y
+    }
+}
+
+// Whether `name` holds U+FFFD: on Windows the host lists names lossily, so
+// such a name may not be the file's real (unpaired-surrogate) name.
+fn replacement_char(in name: Slice[u8]) -> bool {
+    if name.len() < 3 {
+        return false;
+    }
+    for i in 0..wrapping_sub(name.len(), 2) {
+        if byte_at(in name, i) == 239
+            && byte_at(in name, wrapping_add(i, 1)) == 191
+            && byte_at(in name, wrapping_add(i, 2)) == 189 {
+            return true;
+        }
+    }
+    false
+}
+
+// `Path::extension() == Some("ves")` of a file name.
+fn ves_name(in name: Slice[u8]) -> bool {
+    let n = name.len();
+    if n < 5 {
+        return false;
+    }
+    let d = wrapping_sub(n, 4);
+    byte_at(in name, d) == 46
+        && byte_at(in name, wrapping_add(d, 1)) == 118
+        && byte_at(in name, wrapping_add(d, 2)) == 101
+        && byte_at(in name, wrapping_add(d, 3)) == 115
+}
+
+fn starts_with(in s: Slice[u8], in prefix: Str) -> bool {
+    let p = prefix.as_bytes();
+    if s.len() < p.len() {
+        return false;
+    }
+    for i in 0..p.len() {
+        if byte_at(in s, i) != byte_at(in p, i) {
+            return false;
+        }
+    }
+    true
+}
+
+// `skipped_dir`: hidden, `target` and `bazel-*` directories.
+fn skipped_dir(in name: Slice[u8]) -> bool {
+    byte_at(in name, 0) == 46 || eq(in name, in "target") || starts_with(in name, in "bazel-")
+}
+
+// `walk`: the `.ves` files below `root` in sorted order, appended to
+// `files`; symbolic links are never followed. `walk_ok()`; `walk_failed()`
+// with `err` set when a directory cannot be read or the walk visits too
+// many entries; or `walk_delegate()` when a Windows name may have been
+// listed lossily, so the Rust CLI, which keeps the `OsString`, must run.
+fn walk(in root: Slice[u8], inout files: Paths, inout visited: u64, inout err: ChunkSeq[u8])
+    -> u32 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[HybridCommands]] {
+    let windows = os() == os_windows();
+    let mut pending = paths_new();
+    paths_push(inout pending, in root);
+    loop {
+        if pending.ends.len() == 0 {
+            break;
+        }
+        let dir = paths_pop(inout pending);
+        let mut entries = Entries {
+            bytes: ChunkSeq::new[u8](),
+            ends: ChunkSeq::new[u64](),
+            kinds: ChunkSeq::new[u32](),
+        };
+        let mut over = false;
+        let budget = wrapping_sub(FMT_MAX_WALK_ENTRIES, visited);
+        let word = list_bounded(in dir.as_slice(), budget, inout entries, inout over);
+        if word != 0 {
+            err.extend(in dir.as_slice());
+            err.extend(in ": ".as_bytes());
+            let t = io_error_text(word);
+            err.extend(in t.as_slice());
+            return walk_failed();
+        }
+        if over {
+            err
+                .extend(
+                    in "fmt visited more than 200000 directory entries; pass narrower paths"
+                        .as_bytes()
+                );
+            return walk_failed();
+        }
+        let count = entry_count(in entries);
+        visited = wrapping_add(visited, count);
+        let order = sorted_order(in entries);
+        let mut subdirs = paths_new();
+        for k in 0..count {
+            let i = span_at(in order.as_slice(), k);
+            let a = entry_start(in entries, i);
+            let b = entry_end(in entries, i);
+            let mut name: ChunkSeq[u8] = ChunkSeq::new[u8]();
+            name.extend(in entries.bytes[a..b]);
+            if windows && replacement_char(in name.as_slice()) {
+                return walk_delegate();
+            }
+            let kind = entry_kind(in entries, i);
+            if kind == kind_dir() {
+                if !skipped_dir(in name.as_slice()) {
+                    let p = join(in dir.as_slice(), in name.as_slice(), windows);
+                    paths_push(inout subdirs, in p.as_slice());
+                }
+            } else if kind == kind_file() && ves_name(in name.as_slice()) {
+                let p = join(in dir.as_slice(), in name.as_slice(), windows);
+                paths_push(inout files, in p.as_slice());
+            }
+        }
+        let k = subdirs.ends.len();
+        for j in 0..k {
+            let p = paths_get(in subdirs, wrapping_sub(wrapping_sub(k, 1), j));
+            paths_push(inout pending, in p.as_slice());
+        }
+    }
+    walk_ok()
+}
+
+fn walk_ok() -> u32 {
+    0
+}
+
+fn walk_failed() -> u32 {
+    1
+}
+
+fn walk_delegate() -> u32 {
+    2
+}
+
+fn format_one(in path: Slice[u8], check: bool, recovery: bool, inout stats: ChunkSeq[u64])
+    -> u32 eff [Ffi[HybridCommands]] {
+    let mut flags: u32 = 0;
+    if check {
+        flags = flags | 1;
+    }
+    if recovery {
+        flags = flags | 2;
+    }
+    stats.resize(FMT_STATS, 0);
+    HybridCommands::hc_fmt_file(in path, flags, inout stats.as_slice_mut())
+}
+
+// `{"error":...,"schema_version":1,"status":"error"}` and `vesper: <error>`.
+fn fmt_failed(in error: Slice[u8], json: bool) -> i64 eff [Ffi[HybridCommands]] {
+    if json {
+        let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        out.push(123);
+        json_key(inout out, in "error", true);
+        json_string(inout out, in error);
+        json_key(inout out, in "schema_version", false);
+        out.push(49);
+        json_key(inout out, in "status", false);
+        json_string(inout out, in "error".as_bytes());
+        out.push(125);
+        out.push(Ascii::LineFeed);
+        print(stdout_stream(), in out.as_slice());
+    }
+    fail(in error)
+}
+
+fn line(inout out: ChunkSeq[u8], in text: Slice[u8]) {
+    out.extend(in text);
+    out.push(Ascii::LineFeed);
+}
+
+// `fmt_commands::run`.
+fn fmt(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[HybridCommands]] {
+    let n = args_count(in args);
+    // The Rust CLI panics on an argument that is not UTF-8.
+    for i in 1..n {
+        let a = arg(in args, i);
+        if !utf8(in a.as_slice()) {
+            return delegate();
+        }
+    }
+    let mut json = false;
+    let mut help = false;
+    for i in 1..n {
+        let a = arg(in args, i);
+        if eq(in a.as_slice(), in "--") {
+            break;
+        }
+        if eq(in a.as_slice(), in "--help") || eq(in a.as_slice(), in "-h") {
+            help = true;
+        }
+        if eq(in a.as_slice(), in "--json") {
+            json = true;
+        }
+    }
+    if help {
+        print(stdout_stream(), in fmt_help().as_bytes());
+        return 0;
+    }
+    // `execute`.
+    let mut paths = paths_new();
+    let mut check = false;
+    let mut recovery = false;
+    let mut positional = false;
+    for i in 1..n {
+        let a = arg(in args, i);
+        let s = a.as_slice();
+        let mut taken = false;
+        if !positional {
+            if eq(in s, in "--check") {
+                check = true;
+                taken = true;
+            } else if eq(in s, in "--json") {
+                taken = true;
+            } else if eq(in s, in "--recovery") {
+                recovery = true;
+                taken = true;
+            } else if eq(in s, in "--") {
+                positional = true;
+                taken = true;
+            } else if byte_at(in s, 0) == Ascii::Dash && s.len() != 0 {
+                let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
+                m.extend(in "unknown fmt option '".as_bytes());
+                m.extend(in s);
+                m.push(39);
+                return fmt_failed(in m.as_slice(), json);
+            }
+        }
+        if !taken {
+            paths_push(inout paths, in s);
+        }
+    }
+    let mut stats: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    // One explicit non-directory path keeps the single-file report schema.
+    if paths.ends.len() == 1 {
+        let only = paths_get(in paths, 0);
+        if !is_dir(in only.as_slice()) {
+            let status = format_one(in only.as_slice(), check, recovery, inout stats);
+            if status == fmt_error() {
+                let e = fmt_error_text();
+                return fmt_failed(in e.as_slice(), json);
+            }
+            let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+            if json {
+                let none: ChunkSeq[u8] = ChunkSeq::new[u8]();
+                file_report(
+                    inout out,
+                    status,
+                    in stats.as_slice(),
+                    check,
+                    recovery,
+                    in none.as_slice(),
+                    false
+                );
+                out.push(Ascii::LineFeed);
+            } else {
+                out.extend(in "fmt: ".as_bytes());
+                out.extend(in status_name(status).as_bytes());
+                out.push(Ascii::LineFeed);
+            }
+            print(stdout_stream(), in out.as_slice());
+            if status == fmt_needs_format() {
+                return fail(in "source is not canonically formatted".as_bytes());
+            }
+            return 0;
+        }
+    }
+    if paths.ends.len() == 0 {
+        paths_push(inout paths, in ".".as_bytes());
+    }
+    let mut files = paths_new();
+    let mut visited: u64 = 0;
+    for i in 0..paths.ends.len() {
+        let p = paths_get(in paths, i);
+        if is_dir(in p.as_slice()) {
+            let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
+            let walked = walk(in p.as_slice(), inout files, inout visited, inout err);
+            if walked == walk_delegate() {
+                return delegate();
+            }
+            if walked == walk_failed() {
+                return fmt_failed(in err.as_slice(), json);
+            }
+        } else {
+            paths_push(inout files, in p.as_slice());
+        }
+    }
+    let mut changed: u64 = 0;
+    let mut needs: u64 = 0;
+    let mut failed: u64 = 0;
+    let mut lines: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut reports: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let count = files.ends.len();
+    for i in 0..count {
+        let file = paths_get(in files, i);
+        let shown = file.as_slice();
+        let status = format_one(in shown, check, recovery, inout stats);
+        if i != 0 {
+            reports.push(44);
+        }
+        if status == fmt_error() {
+            failed = wrapping_add(failed, 1);
+            let e = fmt_error_text();
+            lines.extend(in "fmt: error ".as_bytes());
+            lines.extend(in shown);
+            lines.extend(in ": ".as_bytes());
+            line(inout lines, in e.as_slice());
+            reports.push(123);
+            json_key(inout reports, in "error", true);
+            json_string(inout reports, in e.as_slice());
+            json_key(inout reports, in "path", false);
+            json_string(inout reports, in shown);
+            json_key(inout reports, in "status", false);
+            json_string(inout reports, in "error".as_bytes());
+            reports.push(125);
+        } else {
+            if status == fmt_needs_format() {
+                needs = wrapping_add(needs, 1);
+            } else if status == fmt_formatted() {
+                changed = wrapping_add(changed, 1);
+            }
+            if status != fmt_unchanged() {
+                lines.extend(in "fmt: ".as_bytes());
+                lines.extend(in status_name(status).as_bytes());
+                lines.push(32);
+                line(inout lines, in shown);
+            }
+            file_report(
+                inout reports,
+                status,
+                in stats.as_slice(),
+                check,
+                recovery,
+                in shown,
+                true
+            );
+        }
+    }
+    let mut overall = fmt_unchanged();
+    if failed > 0 {
+        overall = fmt_error();
+    } else if needs > 0 {
+        overall = fmt_needs_format();
+    } else if changed > 0 {
+        overall = fmt_formatted();
+    }
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    if json {
+        out.push(123);
+        json_key(inout out, in "check", true);
+        json_bool(inout out, check);
+        json_key(inout out, in "errors", false);
+        push_decimal(inout out, failed);
+        json_key(inout out, in "file_count", false);
+        push_decimal(inout out, count);
+        json_key(inout out, in "files", false);
+        out.push(91);
+        out.extend(in reports.as_slice());
+        out.push(93);
+        json_key(inout out, in "formatted", false);
+        push_decimal(inout out, changed);
+        json_key(inout out, in "mode", false);
+        json_string(inout out, in mode_name(recovery).as_bytes());
+        json_key(inout out, in "needs_format", false);
+        push_decimal(inout out, needs);
+        json_key(inout out, in "schema_version", false);
+        out.push(49);
+        json_key(inout out, in "status", false);
+        json_string(inout out, in status_name(overall).as_bytes());
+        json_key(inout out, in "width", false);
+        out.extend(in "100".as_bytes());
+        out.push(125);
+        out.push(Ascii::LineFeed);
+    } else {
+        out.extend(in lines.as_slice());
+        out.extend(in "fmt: ".as_bytes());
+        out.extend(in status_name(overall).as_bytes());
+        out.extend(in " (".as_bytes());
+        push_decimal(inout out, count);
+        out.extend(in " files, ".as_bytes());
+        push_decimal(inout out, changed);
+        out.extend(in " formatted, ".as_bytes());
+        push_decimal(inout out, needs);
+        out.extend(in " need formatting, ".as_bytes());
+        push_decimal(inout out, failed);
+        out.extend(in " errors)\n".as_bytes());
+    }
+    print(stdout_stream(), in out.as_slice());
+    if failed > 0 {
+        let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        push_decimal(inout m, failed);
+        m.extend(in " file(s) could not be formatted".as_bytes());
+        return fail(in m.as_slice());
+    }
+    if needs > 0 {
+        return fail(in "source is not canonically formatted".as_bytes());
+    }
+    0
 }

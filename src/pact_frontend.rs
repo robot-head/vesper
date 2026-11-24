@@ -34,7 +34,7 @@ mod builtin_traits;
 mod mono;
 #[doc(hidden)]
 pub use mono::{
-    MonoAdtInput, MonoBoundInput, MonoCallInput, MonoCheckOutcome, MonoFuncInput,
+    MonoAdtInput, MonoBoundInput, MonoCallInput, MonoCheckOutcome, MonoFuncInput, MonoPlanOutcome,
     MonoTypeBoundInput,
 };
 pub(crate) use mono::{each_expr, specialize_boxed_stub};
@@ -571,10 +571,10 @@ pub fn probe_resolve_and_normalize(
     })
 }
 
-/// Differential reference oracle for `Mono::close_bounded` and
-/// `Mono::check_obligations` over a dependency-free module (`#1659`).
-#[doc(hidden)]
-pub fn probe_mono_check(module: &Module, identity: &PackageIdentity) -> Option<MonoCheckOutcome> {
+fn prepare_mono_probe(
+    module: &Module,
+    identity: &PackageIdentity,
+) -> Option<(Elaborator, Module, World)> {
     let dyn_lowered;
     let module = if crate::dyn_trait::uses_dyn(module) {
         dyn_lowered = crate::dyn_trait::lower(module).ok()?;
@@ -642,7 +642,29 @@ pub fn probe_mono_check(module: &Module, identity: &PackageIdentity) -> Option<M
         return None;
     }
     let pass2 = rewrite_calls(pass1, &resolved);
-    Some(elab.probe_mono_check_step(&pass2, &first.world))
+    Some((elab, pass2, first.world))
+}
+
+/// Differential reference oracle for `Mono::close_bounded` and
+/// `Mono::check_obligations` over a dependency-free module (`#1659`).
+#[doc(hidden)]
+pub fn probe_mono_check(module: &Module, identity: &PackageIdentity) -> Option<MonoCheckOutcome> {
+    let (elab, pass2, world) = prepare_mono_probe(module, identity)?;
+    Some(elab.probe_mono_check_step(&pass2, &world))
+}
+
+/// Differential reference oracle for `builtin_traits::wanted` (`#1719`).
+#[doc(hidden)]
+pub fn builtin_traits_wanted(module: &Module) -> bool {
+    builtin_traits::wanted(module)
+}
+
+/// Differential reference oracle for `Mono::evidence`, `Mono::instance`, and
+/// `Mono::instantiate_body` over a dependency-free module (`#1668`).
+#[doc(hidden)]
+pub fn probe_mono_plan(module: &Module, identity: &PackageIdentity) -> Option<MonoPlanOutcome> {
+    let (elab, pass2, world) = prepare_mono_probe(module, identity)?;
+    Some(elab.probe_mono_plan_step(&pass2, &world))
 }
 
 /// [`DeclarationPassTable::diagnostics`] in Rust: `Frontend::new` without

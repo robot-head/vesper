@@ -5,13 +5,9 @@
 //! of the export ABI, and the application of recorded congestion-controller
 //! calls.
 
-#[cfg(feature = "vesper-port")]
 pub(crate) mod cc;
-#[cfg(feature = "vesper-port")]
 pub(crate) mod conn;
-#[cfg(feature = "vesper-port")]
 pub(crate) mod rtt;
-#[cfg(feature = "vesper-port")]
 pub(crate) mod seq;
 pub(crate) mod types;
 pub(crate) mod wire;

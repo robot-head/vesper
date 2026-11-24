@@ -17,10 +17,7 @@
 use crate::rtt::RtoConfig;
 use crate::wire::{IpPair, WireError};
 
-#[cfg(feature = "vesper-port")]
 pub use crate::ported::conn::Connection;
-#[cfg(not(feature = "vesper-port"))]
-pub use crate::reference::conn::Connection;
 
 /// Smallest sender MSS accepted from a peer; smaller advertisements are
 /// clamped up so that a hostile MSS option cannot stall the sender.

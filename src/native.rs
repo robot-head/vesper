@@ -3564,8 +3564,8 @@ impl<M: Module> Codegen<'_, '_, M> {
                     && let Type::Named(_, args) = ty
                     && let Some(elem_ty) = args.first()
                 {
-                    let elem_layout = Layout::of(self.world, elem_ty)?;
-                    let stride = u64::from(elem_layout.size.max(1));
+                    // The same byte width the constructor registered.
+                    let stride = crate::seq::elem_bytes(self.world, elem_ty)?.max(1) as u64;
                     let handle = self
                         .b
                         .ins()
@@ -6499,9 +6499,12 @@ impl<M: Module> Codegen<'_, '_, M> {
             && let Type::Named(_, args) = ty
             && let Some(elem_ty) = args.first()
         {
-            let elem_layout = Layout::of(self.world, elem_ty)?;
-            let stride = u64::from(elem_layout.size.max(1));
-            let align = u64::from(elem_layout.size.clamp(1, 8));
+            // The buffer's element width in bytes, as `ChunkSeq` stores it
+            // (`Layout::of` gives a scalar's word-sized slot: registering
+            // `len * 8` bytes of a `Pinned[u8]` would claim memory past the
+            // buffer and trap on an unrelated mapping allocated there).
+            let stride = crate::seq::elem_bytes(self.world, elem_ty)?.max(1) as u64;
+            let align = stride.clamp(1, 8);
             let handle = self
                 .b
                 .ins()
@@ -7720,7 +7723,6 @@ impl<M: Module> Codegen<'_, '_, M> {
             A::FetchAnd => Some(n::ATOMIC_AND),
             A::FetchOr => Some(n::ATOMIC_OR),
             A::FetchXor => Some(n::ATOMIC_XOR),
-            // The Cranelift shim has no `atomic_cas` yet.
             A::CompareExchange => None,
         };
         if let Some(code) = swap_op {
@@ -7734,6 +7736,44 @@ impl<M: Module> Codegen<'_, '_, M> {
             if let Some(v) = self.swap_numeric(n::ATOMIC, &words) {
                 return Ok(v);
             }
+        }
+        if op == A::CompareExchange {
+            let ty = Type::Named("Result".into(), vec![cell.clone(), cell.clone()]);
+            let layout = Layout::of(self.world, &ty)?;
+            let (ok, ok_fields) = layout.variant("Ok").ok_or("native Result without Ok")?;
+            let (err, _) = layout.variant("Err").ok_or("native Result without Err")?;
+            let offset = ok_fields.first().map_or(8, |f| f.offset);
+            let ptr = match into {
+                Some(out) => out,
+                None => self.alloc(layout.size),
+            };
+            let words = [
+                n::ATOMIC_CAS,
+                crate::codegen_swap::ty_code(narrow),
+                u64::from(signed),
+                word(data),
+                word(operands[0]),
+                word(operands[1]),
+                word(ptr),
+                ok as u64,
+                err as u64,
+                offset as u64,
+            ];
+            if let Some(v) = self.swap_numeric(n::ATOMIC, &words) {
+                return Ok(v);
+            }
+            let old = self
+                .b
+                .ins()
+                .atomic_cas(flags, data, operands[0], operands[1]);
+            let same = self.b.ins().icmp(IntCC::Equal, old, operands[0]);
+            let old = widen(self, old);
+            let ok = self.b.ins().iconst(types::I64, ok as i64);
+            let err = self.b.ins().iconst(types::I64, err as i64);
+            let tag = self.b.ins().select(same, ok, err);
+            self.b.ins().store(ir::MemFlags::new(), tag, ptr, 0);
+            self.b.ins().store(ir::MemFlags::new(), old, ptr, offset);
+            return Ok(ptr);
         }
         let rmw = match op {
             A::Load => {

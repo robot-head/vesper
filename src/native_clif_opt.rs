@@ -72,6 +72,7 @@ pub fn run(func: &mut ir::Function) {
         remove_unreachable(func);
     }
     remove_dead(func);
+    hoist_loop_invariants(func);
     share_invariant_loads(func);
     hoist_loop_invariants(func);
     sink_slot_inits(func);
@@ -2020,7 +2021,28 @@ fn fold_narrow_extends(func: &mut ir::Function) {
             _ => None,
         }
     };
-    for _ in 0..3 {
+    let narrow_operand =
+        |func: &ir::Function, v: Value, dst_ty: ir::Type| -> Option<(Option<Value>, Option<i64>)> {
+            let v = func.dfg.resolve_aliases(v);
+            let ir::ValueDef::Result(d, 0) = func.dfg.value_def(v) else {
+                return None;
+            };
+            match func.dfg.insts[d] {
+                InstructionData::Unary {
+                    opcode: Opcode::Uextend | Opcode::Sextend,
+                    arg,
+                } => {
+                    let inner = func.dfg.resolve_aliases(arg);
+                    (func.dfg.value_type(inner) == dst_ty).then_some((Some(inner), None))
+                }
+                InstructionData::UnaryImm {
+                    opcode: Opcode::Iconst,
+                    imm,
+                } => Some((None, Some(imm.bits()))),
+                _ => None,
+            }
+        };
+    for _ in 0..10 {
         let mut changed = false;
         for (_, inst) in insts(func) {
             let InstructionData::Unary { opcode, arg } = func.dfg.insts[inst] else {
@@ -2124,6 +2146,80 @@ fn fold_narrow_extends(func: &mut ir::Function) {
                             opcode: Opcode::Ireduce,
                             arg: inner,
                         };
+                        changed = true;
+                    }
+                }
+                (
+                    Opcode::Ireduce,
+                    InstructionData::Binary {
+                        opcode:
+                            bin_op @ (Opcode::Band
+                            | Opcode::Bor
+                            | Opcode::Bxor
+                            | Opcode::Iadd
+                            | Opcode::Isub
+                            | Opcode::Imul
+                            | Opcode::Ishl),
+                        args: [a, b],
+                    },
+                ) => {
+                    if let Some(na) = narrow_operand(func, a, dst_ty)
+                        && let Some(nb) = narrow_operand(func, b, dst_ty)
+                        && (bin_op != Opcode::Ishl
+                            || matches!(nb, (None, Some(s)) if s >= 0 && s < i64::from(dst_ty.bits())))
+                    {
+                        use cranelift_codegen::cursor::{Cursor, FuncCursor};
+                        use cranelift_codegen::ir::InstBuilder;
+                        let materialize = |pos: &mut FuncCursor<'_>,
+                                           op: (Option<Value>, Option<i64>),
+                                           ty: ir::Type| {
+                            match op {
+                                (Some(v), _) => v,
+                                (None, Some(c)) => {
+                                    let m = mask_for(ty).unwrap_or(u64::MAX);
+                                    pos.ins().iconst(ty, ((c as u64) & m) as i64)
+                                }
+                                _ => unreachable!(),
+                            }
+                        };
+                        let (va, vb) = {
+                            let mut pos = FuncCursor::new(func).at_inst(inst);
+                            let va = materialize(&mut pos, na, dst_ty);
+                            let vb = materialize(
+                                &mut pos,
+                                nb,
+                                if bin_op == Opcode::Ishl {
+                                    types::I32
+                                } else {
+                                    dst_ty
+                                },
+                            );
+                            (va, vb)
+                        };
+                        match bin_op {
+                            Opcode::Band => {
+                                func.dfg.replace(inst).band(va, vb);
+                            }
+                            Opcode::Bor => {
+                                func.dfg.replace(inst).bor(va, vb);
+                            }
+                            Opcode::Bxor => {
+                                func.dfg.replace(inst).bxor(va, vb);
+                            }
+                            Opcode::Iadd => {
+                                func.dfg.replace(inst).iadd(va, vb);
+                            }
+                            Opcode::Isub => {
+                                func.dfg.replace(inst).isub(va, vb);
+                            }
+                            Opcode::Imul => {
+                                func.dfg.replace(inst).imul(va, vb);
+                            }
+                            Opcode::Ishl => {
+                                func.dfg.replace(inst).ishl(va, vb);
+                            }
+                            _ => unreachable!(),
+                        }
                         changed = true;
                     }
                 }
@@ -2299,9 +2395,35 @@ fn fold_trivial_arith_and_bool_extends(func: &mut ir::Function) {
     }
 }
 
+fn value_is_loop_invariant(
+    func: &ir::Function,
+    domtree: &DominatorTree,
+    loops: &LoopAnalysis,
+    lp: Loop,
+    preheader: Block,
+    v: Value,
+) -> bool {
+    let v = func.dfg.resolve_aliases(v);
+    let def_block = match func.dfg.value_def(v) {
+        ir::ValueDef::Result(d, _) => func.layout.inst_block(d),
+        ir::ValueDef::Param(pb, _) => Some(pb),
+        ir::ValueDef::Union(_, _) => None,
+    };
+    def_block.is_some_and(|db| {
+        let mut cur = loops.innermost_loop(db);
+        while let Some(l) = cur {
+            if l == lp {
+                return false;
+            }
+            cur = loops.loop_parent(l);
+        }
+        domtree.dominates(db, preheader, &func.layout)
+    })
+}
+
 /// Hoist pure loop-invariant instructions (and `notrap readonly can_move`
-/// loads) out of single-preheader loops into their unconditional preheader,
-/// innermost loop first.
+/// loads when the preheader ends with an unconditional `Jump`) into the loop
+/// preheader, reassociating invariant offsets/scales out of address arithmetic.
 fn hoist_loop_invariants(func: &mut ir::Function) {
     let cfg = ControlFlowGraph::with_function(func);
     let domtree = DominatorTree::with_function(func, &cfg);
@@ -2356,13 +2478,21 @@ fn hoist_loop_invariants(func: &mut ir::Function) {
         let Some(term) = func.layout.last_inst(preheader) else {
             continue;
         };
-        if !matches!(
+        let is_jump_preheader = matches!(
             func.dfg.insts[term],
             InstructionData::Jump {
                 opcode: Opcode::Jump,
                 ..
             }
-        ) {
+        );
+        let is_brif_preheader = matches!(
+            func.dfg.insts[term],
+            InstructionData::Brif {
+                opcode: Opcode::Brif,
+                ..
+            }
+        );
+        if !is_jump_preheader && !is_brif_preheader {
             continue;
         }
 
@@ -2388,7 +2518,12 @@ fn hoist_loop_invariants(func: &mut ir::Function) {
                                 | Opcode::Sload32,
                             flags,
                             ..
-                        } => flags.notrap() && flags.readonly() && flags.can_move(),
+                        } => {
+                            is_jump_preheader
+                                && flags.notrap()
+                                && flags.readonly()
+                                && flags.can_move()
+                        }
                         data => matches!(
                             data.opcode(),
                             Opcode::Iconst
@@ -2438,6 +2573,151 @@ fn hoist_loop_invariants(func: &mut ir::Function) {
                         })
                     });
                     if !all_outside {
+                        // Reassociate `iadd(inv1, iadd(inv2, var))` -> `iadd(iadd(inv1, inv2), var)`
+                        // and distribute `imul_imm(iadd(inv, var), imm)` -> `iadd(imul_imm(inv, imm), imul_imm(var, imm))`
+                        // so invariant base offsets and scaled strides hoist into `preheader`.
+                        let term = func.layout.last_inst(preheader).unwrap();
+                        let inv_pair = match func.dfg.insts[inst] {
+                            InstructionData::Binary {
+                                opcode: Opcode::Iadd,
+                                args: [a, b],
+                            } => {
+                                let a = func.dfg.resolve_aliases(a);
+                                let b = func.dfg.resolve_aliases(b);
+                                [
+                                    (
+                                        a,
+                                        b,
+                                        value_is_loop_invariant(
+                                            func, &domtree, &loops, lp, preheader, a,
+                                        ),
+                                    ),
+                                    (
+                                        b,
+                                        a,
+                                        value_is_loop_invariant(
+                                            func, &domtree, &loops, lp, preheader, b,
+                                        ),
+                                    ),
+                                ]
+                                .into_iter()
+                                .find(|(_, _, is_inv)| *is_inv)
+                                .and_then(|(inv1, inner, _)| {
+                                    let ir::ValueDef::Result(inner_inst, 0) =
+                                        func.dfg.value_def(func.dfg.resolve_aliases(inner))
+                                    else {
+                                        return None;
+                                    };
+                                    match func.dfg.insts[inner_inst] {
+                                        InstructionData::Binary {
+                                            opcode: Opcode::Iadd,
+                                            args: [c, d],
+                                        } => {
+                                            let c = func.dfg.resolve_aliases(c);
+                                            let d = func.dfg.resolve_aliases(d);
+                                            let c_inv = value_is_loop_invariant(
+                                                func, &domtree, &loops, lp, preheader, c,
+                                            );
+                                            let d_inv = value_is_loop_invariant(
+                                                func, &domtree, &loops, lp, preheader, d,
+                                            );
+                                            if c_inv && !d_inv {
+                                                Some((inv1, Some(c), None, d))
+                                            } else if d_inv && !c_inv {
+                                                Some((inv1, Some(d), None, c))
+                                            } else {
+                                                None
+                                            }
+                                        }
+                                        InstructionData::BinaryImm64 {
+                                            opcode: Opcode::IaddImm,
+                                            arg,
+                                            imm,
+                                        } if !value_is_loop_invariant(
+                                            func, &domtree, &loops, lp, preheader, arg,
+                                        ) =>
+                                        {
+                                            Some((
+                                                inv1,
+                                                None,
+                                                Some(imm),
+                                                func.dfg.resolve_aliases(arg),
+                                            ))
+                                        }
+                                        _ => None,
+                                    }
+                                })
+                            }
+                            _ => None,
+                        };
+                        if let Some((inv1, inv2_opt, imm_opt, var)) = inv_pair {
+                            use cranelift_codegen::cursor::{Cursor, FuncCursor};
+                            use cranelift_codegen::ir::InstBuilder;
+                            let new_base = {
+                                let mut pos = FuncCursor::new(func).at_inst(term);
+                                if let Some(inv2) = inv2_opt {
+                                    if pos.func.dfg.value_type(inv1)
+                                        == pos.func.dfg.value_type(inv2)
+                                    {
+                                        Some(pos.ins().iadd(inv1, inv2))
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    imm_opt.map(|imm| pos.ins().iadd_imm(inv1, imm))
+                                }
+                            };
+                            if let Some(new_base) = new_base {
+                                func.dfg.replace(inst).iadd(new_base, var);
+                                changed = true;
+                            }
+                            continue;
+                        }
+                        if let InstructionData::BinaryImm64 {
+                            opcode: Opcode::ImulImm,
+                            arg,
+                            imm,
+                        } = func.dfg.insts[inst]
+                        {
+                            let arg = func.dfg.resolve_aliases(arg);
+                            if !value_is_loop_invariant(func, &domtree, &loops, lp, preheader, arg)
+                                && let ir::ValueDef::Result(inner_inst, 0) = func.dfg.value_def(arg)
+                                && let InstructionData::Binary {
+                                    opcode: Opcode::Iadd,
+                                    args: [c, d],
+                                } = func.dfg.insts[inner_inst]
+                            {
+                                let c = func.dfg.resolve_aliases(c);
+                                let d = func.dfg.resolve_aliases(d);
+                                let c_inv = value_is_loop_invariant(
+                                    func, &domtree, &loops, lp, preheader, c,
+                                );
+                                let d_inv = value_is_loop_invariant(
+                                    func, &domtree, &loops, lp, preheader, d,
+                                );
+                                let pair = if c_inv && !d_inv {
+                                    Some((c, d))
+                                } else if d_inv && !c_inv {
+                                    Some((d, c))
+                                } else {
+                                    None
+                                };
+                                if let Some((inv, var)) = pair {
+                                    use cranelift_codegen::cursor::{Cursor, FuncCursor};
+                                    use cranelift_codegen::ir::InstBuilder;
+                                    let inv_scaled = {
+                                        let mut pos = FuncCursor::new(func).at_inst(term);
+                                        pos.ins().imul_imm(inv, imm)
+                                    };
+                                    let var_scaled = {
+                                        let mut pos = FuncCursor::new(func).at_inst(inst);
+                                        pos.ins().imul_imm(var, imm)
+                                    };
+                                    func.dfg.replace(inst).iadd(inv_scaled, var_scaled);
+                                    changed = true;
+                                }
+                            }
+                        }
                         continue;
                     }
                     let term = func.layout.last_inst(preheader).unwrap();
@@ -2756,6 +3036,49 @@ fn eliminate_guarded_loop_add_overflows(func: &mut ir::Function) {
             let Some(pred_term) = func.layout.last_inst(pred) else {
                 break;
             };
+            let resolve_guard_val = |val: Value, next_target: &mut Block| -> Option<Value> {
+                let p_val = func.dfg.resolve_aliases(val);
+                let Some(p_idx) = func.dfg.block_params(pred).iter().position(|&p| p == p_val)
+                else {
+                    return Some(p_val);
+                };
+                let mut live_incoming = vec![];
+                for edge in cfg.pred_iter(pred) {
+                    let p = edge.block;
+                    let Some(p_term) = func.layout.last_inst(p) else {
+                        continue;
+                    };
+                    for call in func.dfg.insts[p_term]
+                        .branch_destination(&func.dfg.jump_tables, &func.dfg.exception_tables)
+                    {
+                        if call.block(&func.dfg.value_lists) != pred {
+                            continue;
+                        }
+                        if let Some(BlockArg::Value(v)) =
+                            call.args(&func.dfg.value_lists).nth(p_idx)
+                        {
+                            let is_zero = def_inst(func, v).is_some_and(|vi| {
+                                matches!(
+                                    func.dfg.insts[vi],
+                                    InstructionData::UnaryImm {
+                                        opcode: Opcode::Iconst,
+                                        imm,
+                                    } if imm.bits() == 0
+                                )
+                            });
+                            if !is_zero {
+                                live_incoming.push((p, func.dfg.resolve_aliases(v)));
+                            }
+                        }
+                    }
+                }
+                let [(only_pred, only_val)] = live_incoming[..] else {
+                    return None;
+                };
+                *next_target = only_pred;
+                Some(only_val)
+            };
+
             let mut next_target = pred;
             let guard = match &func.dfg.insts[pred_term] {
                 InstructionData::Brif {
@@ -2766,7 +3089,10 @@ fn eliminate_guarded_loop_add_overflows(func: &mut ir::Function) {
                     let pb0 = pred_blocks[0].block(&func.dfg.value_lists);
                     let pb1 = pred_blocks[1].block(&func.dfg.value_lists);
                     if pb0 == target && pb1 != target {
-                        func.dfg.resolve_aliases(*arg)
+                        let Some(g) = resolve_guard_val(*arg, &mut next_target) else {
+                            break;
+                        };
+                        g
                     } else if pb1 == target && pb0 != target {
                         let resolved = func.dfg.resolve_aliases(*arg);
                         if let Some(ci) = def_inst(func, resolved)
@@ -2778,50 +3104,10 @@ fn eliminate_guarded_loop_add_overflows(func: &mut ir::Function) {
                             } = func.dfg.insts[ci]
                             && imm.bits() == 0
                         {
-                            let p_val = func.dfg.resolve_aliases(inner);
-                            if let Some(p_idx) =
-                                func.dfg.block_params(pred).iter().position(|&p| p == p_val)
-                            {
-                                let mut live_incoming = vec![];
-                                for edge in cfg.pred_iter(pred) {
-                                    let p = edge.block;
-                                    let Some(p_term) = func.layout.last_inst(p) else {
-                                        continue;
-                                    };
-                                    for call in func.dfg.insts[p_term].branch_destination(
-                                        &func.dfg.jump_tables,
-                                        &func.dfg.exception_tables,
-                                    ) {
-                                        if call.block(&func.dfg.value_lists) != pred {
-                                            continue;
-                                        }
-                                        if let Some(BlockArg::Value(v)) =
-                                            call.args(&func.dfg.value_lists).nth(p_idx)
-                                        {
-                                            let is_zero = def_inst(func, v).is_some_and(|vi| {
-                                                matches!(
-                                                    func.dfg.insts[vi],
-                                                    InstructionData::UnaryImm {
-                                                        opcode: Opcode::Iconst,
-                                                        imm,
-                                                    } if imm.bits() == 0
-                                                )
-                                            });
-                                            if !is_zero {
-                                                live_incoming
-                                                    .push((p, func.dfg.resolve_aliases(v)));
-                                            }
-                                        }
-                                    }
-                                }
-                                let [(only_pred, only_val)] = live_incoming[..] else {
-                                    break;
-                                };
-                                next_target = only_pred;
-                                only_val
-                            } else {
-                                p_val
-                            }
+                            let Some(g) = resolve_guard_val(inner, &mut next_target) else {
+                                break;
+                            };
+                            g
                         } else {
                             target = pred;
                             continue;

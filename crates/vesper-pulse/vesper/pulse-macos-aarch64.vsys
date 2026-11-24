@@ -1,0 +1,72 @@
+// macOS aarch64 `kqueue` & `close` bindings for `@vesper/pulse` (#1687).
+sys library PulseSys (
+    target = "@TARGET@", abi = "@ABI@",
+    link = "dynamic", name = "System",
+    artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+) {
+    const EVFILT_READ: u16 = 65535;
+    const EVFILT_WRITE: u16 = 65534;
+    const EV_ADD: u16 = 1;
+    const EV_DELETE: u16 = 2;
+    const EV_ONESHOT: u16 = 16;
+    const F_SETFD: i32 = 2;
+    const FD_CLOEXEC: i64 = 1;
+    const EINTR_ERR: u32 = 4;
+    const ENODEV_ERR: u32 = 19;
+    const EINVAL_ERR: u32 = 22;
+    const ENOTSUP_ERR: u32 = 45;
+
+    wire struct Kevent {
+        ident: u64,
+        filter: u16,
+        flags: u16,
+        fflags: u32,
+        data: i64,
+        udata: u64,
+    }
+
+    wire struct Timespec {
+        tv_sec: i64,
+        tv_nsec: i64,
+    }
+
+    wire struct PipeFds {
+        read_fd: i32,
+        write_fd: i32,
+    }
+
+    fn kqueue() -> ForeignVal[i32] errno;
+    #[link_name = "fcntl"]
+    fn fcntl_setfd(fd: i32, cmd: i32, arg: i64) -> ForeignVal[i32] errno;
+    #[link_name = "kevent"]
+    fn kevent_apply(
+        kq: i32,
+        nocapture in changelist: Kevent,
+        nchanges: i32,
+        eventlist_null: u64,
+        nevents: i32,
+        timeout_null: u64
+    ) -> ForeignVal[i32] errno;
+    #[link_name = "kevent"]
+    fn kevent_wait_ts(
+        kq: i32,
+        changelist_null: u64,
+        nchanges: i32,
+        nocapture inout eventlist: Kevent,
+        nevents: i32,
+        nocapture in timeout: Timespec
+    ) -> ForeignVal[i32] errno;
+    #[link_name = "kevent"]
+    fn kevent_wait_inf(
+        kq: i32,
+        changelist_null: u64,
+        nchanges: i32,
+        nocapture inout eventlist: Kevent,
+        nevents: i32,
+        timeout_null: u64
+    ) -> ForeignVal[i32] errno;
+    fn pipe(nocapture inout fds: PipeFds) -> ForeignVal[i32] errno;
+    #[link_name = "write"]
+    fn write_byte(fd: i32, nocapture in byte_val: u8, count: u64) -> ForeignVal[i64] errno;
+    fn close(fd: i32) -> ForeignVal[i32] errno;
+}

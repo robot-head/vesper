@@ -19,14 +19,17 @@ build = "build.rs"
 # with the Rust build (docs/parallel-results/port-p3-ebpf.md).
 
 [features]
-vesper-port = ["dep:vesper-port-abi"]
+# btf, callgraph, core, helpers, insn, interp, program, scalar and verifier
+# are unconditionally Vesper; btf_ext and wire stay behind `vesper-port`
+# until `ext` (1.68x) and `decode` (1.81x) clear 1.50x.
+vesper-port = []
 # Deliberately wrong Vesper builds, one edit per ported module: the port
 # test runs must fail (scripts/test-port-harness.sh asserts which tests do).
-vesper-port-divergent = ["vesper-port"]
+vesper-port-divergent = []
 
 [dependencies]
 object = { version = "=0.37.3", default-features = false, features = ["write_core", "elf", "std", "read_core"] }
-vesper-port-abi = { path = "../vesper-port-abi", optional = true }
+vesper-port-abi = { path = "../vesper-port-abi" }
 
 # The one gated unsafe module (`kernel`) issues the bpf() syscall on Linux.
 [target.'cfg(target_os = "linux")'.dependencies]

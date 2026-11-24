@@ -473,6 +473,144 @@ After `#1516`, `#1526` and `#1527` landed on `main` (`0f5a9eba`), re-measuring t
 
 Their `#[cfg(not(vesper_port))]` Rust implementations moved into `crates/vesper-resonance/seed/src/engine/` (`confine.rs`, `pdc.rs`, `kernels.rs`) so `vesper-resonance` runs only `@vesper/resonance` for all five flipped paths while `vesper-resonance-seed` stays frozen for the compiler until Stage 2. Effect interning in `confine.rs` uses a `HashMap<&Effect, u64>` alongside `effects: Vec<&Effect>` so graphs with many distinct custom effects (including unreachable functions) stay `O(N)`. `tests/port_differential.rs` keeps 0 differences across `PidController` (50,000 steps + fault cases), `compile_schedule` (400 randomized graphs) and `verify_realtime` (randomized graphs and indirect targets).
 
+## Part 7: Kinetic `fastmath` flipped; `lbvh`, `morton`, `crmath` re-measured
+
+Base `main` at `7f9b71c` (2026-11-24), after the Cranelift SIMD/LICM
+waves. Cloud Linux x86_64 (4 vCPUs), `RUSTFLAGS="-C target-cpu=native"`,
+release compiler built from that commit in `VESPER_PORT_COMPILER`.
+
+### Measurements
+
+`scripts/ci/flip_gate.py vesper-kinetic` (`n = 30`), plus `abba compare 9`
+for the modules still above the bar:
+
+| Workload | Part 6 (Windows MSVC) | Now (Linux, `main`) | Decision |
+|---|--:|--:|---|
+| `fastmath` | 1.70x `[1.56x, 1.78x]` | **1.08x `[1.07x, 1.09x]`** | **Flipped** |
+| `colorer` | 0.78x | 0.82x `[0.81x, 0.82x]` | flipped earlier |
+| `multi-colorer` | 1.35x | 1.30x `[1.28x, 1.31x]` | flipped earlier |
+| `gjk` | 1.12x `[1.05x, 1.17x]` | 1.46x `[1.44x, 1.48x]` | flipped earlier; now close to the bar |
+| `sap` | 1.09x `[1.05x, 1.16x]` | 1.07x `[1.07x, 1.08x]` | flipped earlier |
+| `lbvh` | 1.57x `[1.49x, 1.63x]` | 1.54x `[1.53x, 1.56x]` | stays (above the bar) |
+| `morton` | 1.88x | 2.07x (9 epochs) | stays: per-call export ABI (fail and result buffers) on a ~10 instruction body |
+| `crmath` | 2.27x | 1.92x (9 epochs) | stays: bignum arithmetic |
+
+The `fastmath` gap since part 6 is the inliner fix for gap 8 (`#1527`) and
+the later codegen waves: `sin`/`cos` no longer carry a cold-path sequence
+in their frames. `gjk` went the other way on this host (1.12x on Windows in
+part 6, 1.46x here); it still passes, but it is the next one to watch.
+
+### What changed
+
+- `src/fastmath.rs`: the fdlibm Rust bodies of `exp`, `log`, `sin`, `cos`
+  and `atan2` and all their constants and helpers moved to
+  `seed/src/engine/fastmath.rs`. The package keeps the public API, the ULP
+  bounds, the DetFloat symbol list and `ulp_distance`; the port-backed build
+  calls `@vesper/kinetic`, the seed build calls the frozen engine
+  (563 to 142 non-comment lines in `src/fastmath.rs`).
+- `tests/port_differential.rs`: `fastmath_matches_the_rust_build`, bit for
+  bit on 752,532 cases (special values, both edges of every binade, random
+  arguments inside and outside the fast reduction's range, random bit
+  patterns; all ten binary64 and binary32 functions). 0 differences.
+- `flip-gate.toml`: the `fastmath` workload and the new engine file.
+
+### Finding: NaN payloads
+
+The first run of the new differential found 2 differences, both in
+`atan2(NaN, NaN')` (and its binary32 form) with two different NaN inputs:
+the port returned `x`'s payload, the Rust build `y`'s. Both builds compute
+`x + y`; LLVM treats `fadd` as commutative and swapped the operands, so the
+Rust build's payload is itself an accident of codegen (Rust leaves NaN
+payloads of arithmetic unspecified). The differential therefore treats any
+two NaNs as equal; every non-NaN result is compared bit for bit.
+
+### Checks
+
+Flip gate PASS: every test of the port and the seed
+(`cargo test --release -p vesper-kinetic -p vesper-kinetic-seed`), 0
+differences on 754,241 differential cases, all five ABBA workloads under
+1.50x. The existing `fastmath` divergent edit (the cosine kernel's tail
+sign) stays in `build.rs`.
+
+## Part 8: Kinetic `morton`, `lbvh` and `crmath` flipped
+
+Base: `main` `7f9b71c`, the same host and compiler as part 7; the gate
+ran before part 7's `fastmath` was stacked under it (on the stacked branch
+the seven differentials cover 1,960,401 cases, 0 differences). All three modules were above the bar in part 7; each needed a
+change in the port, not in the compiler.
+
+### Measurements
+
+`scripts/ci/flip_gate.py vesper-kinetic` (`n = 30`): **PASS**, every test
+of the port and the seed, 0 differences on 1,207,869 differential cases.
+
+| Workload | Part 7 | Now | Decision |
+|---|--:|--:|---|
+| `morton` | 2.07x | **0.77x `[0.76x, 0.77x]`** | **Flipped** |
+| `lbvh` | 1.54x `[1.53x, 1.56x]` | **1.32x `[1.31x, 1.33x]`** | **Flipped** |
+| `pile-lbvh` | 1.37x | 1.16x `[1.15x, 1.18x]` | (scene workload over `lbvh`) |
+| `crmath` | 1.92x | **1.39x `[1.38x, 1.41x]`** | **Flipped** |
+| `colorer` | 0.82x | 0.80x `[0.79x, 0.80x]` | flipped earlier |
+| `multi-colorer` | 1.30x | 1.31x `[1.30x, 1.32x]` | flipped earlier |
+| `gjk` | 1.46x | 1.41x `[1.39x, 1.41x]` | flipped earlier |
+| `sap` | 1.07x | 1.07x `[1.05x, 1.07x]` | flipped earlier |
+
+### What changed
+
+- **`morton`** was bound by the export ABI, not by its body: each call
+  passed a fail buffer and a result buffer for a ten-instruction
+  interleave. The port's exports now return one packed `u64` (the code, or
+  bit 63 with the axis and value of the error; decodes pack
+  `x | y << 10 | z << 20`), and the interleave reads generated lookup tables
+  (`MORTON_SPREAD10`, `MORTON_COMPACT_B0..B3`) in place of the magic-bits
+  shifts. The `MortonError` enum leaves the Vesper side; Rust builds the
+  typed error from the packed word. The BMI2 `pdep`/`pext` paths and the
+  bit-by-bit specification stay in `src/morton.rs`.
+- **`lbvh`**: `pairs()` pruned too late. A child is now tested before it is
+  pushed: a node whose highest leaf (the end of its right spine, filled
+  once per query into the scratch it already had) is not above the query
+  leaf can never yield a pair, so it is never visited. The leaf test
+  `q > p` goes away with it. The divergent edit moves to the push-time
+  test.
+- **`crmath`** spent its time in bignum arithmetic and allocation (about
+  40% allocation: about 242,000 sequence allocations per run against the
+  Rust build's 70,000 `malloc`s). `bignum.ves` moves from 32-bit to
+  64-bit limbs (`u128` products, two-step 32-bit small division, Knuth D
+  for long division; the constant cache keeps its 32-bit layout) and gains
+  in-place add, subtract, negate, truncating shift and small division.
+  The series loops of `exp`, `log`, `sin`/`cos`, `atan` and the constant
+  series use them, so a term no longer allocates three intermediates.
+  Instructions fell from 142.6M to 120.6M on the 64-bit limbs alone.
+- Each module's Rust body moved to `seed/src/engine/{morton,lbvh,crmath}.rs`
+  (1,122 lines); `src/` loses 1,141 lines and gains 83 (dispatch and the
+  packed-word unpacking), net **1,058 Rust lines out of the package**.
+- `tests/port_differential.rs`: `morton_matches_the_rust_build` (1,133,072
+  cases: every 16-bit value through `spread`/`compact`, edges and random
+  coordinates and codes through the checked forms, errors compared),
+  `lbvh_matches_the_rust_build` gains 12 benchmark-sized rounds with small
+  pair budgets (408 cases), and `crmath_matches_the_rust_build` (73,040
+  cases: Annex F specials, edges, random inputs in each reduction range and
+  random bit patterns, all ten functions, bit for bit).
+- Divergent edits: `lbvh` moves to the push-time test, `bignum` to the new
+  64-bit low word (`big_low_u64` keeps only its low half; the binary64 ULP
+  test fails, binary32 passes). All four of `morton`, `lbvh`, `crmath` and
+  `bignum` checked: the named test fails, the other passes.
+
+### Compiler gap found
+
+`mul_wide(a, b) -> (lo, hi)` lowers to one `mul`/`umulhi` only when it
+stays a call (`src/native.rs`); once the inliner inlines its portable
+schoolbook body it becomes four multiplies. The bignum port uses
+`wrapping_mul` on `u128` values instead, which is better but not one
+instruction. Reported for the codegen owners; not fixed here.
+
+### Checks
+
+`vesper fmt --check` on the changed `.ves` files,
+`rustfmt +1.100.0 --edition 2024 --check` on the changed Rust files,
+`cargo +1.100.0 clippy -p vesper-kinetic -p vesper-kinetic-seed
+--all-targets -- -D warnings` and `tools/bazel/sync_build_files.py --check`.
+
 ## What is left
 
 - **Resonance:** slab (1.89x) and events (8.00x) stay above the bar until codegen removes their hot-path overhead (gap 7). The Rust
@@ -481,7 +619,7 @@ Their `#[cfg(not(vesper_port))]` Rust implementations moved into `crates/vesper-
   plan), the `rtrb` rings (`spsc.rs`) and the denormal registers are not
   ported yet. The SIMD paths are ported (part 3), but they run at 8-48x and
   are bound by gaps 2 and 6.
-- **Kinetic:** get isolated `lbvh` (now `1.57x`), `fastmath`, `morton` and `crmath` under `1.50x` and flip them, then port `world`/`tile`, `rigid` and `rigid/**`, `soft`,
+- **Kinetic:** every isolated module is flipped (part 8). Next, port `world`/`tile`, `rigid` and `rigid/**`, `soft`,
   `articulation`, `couple`, `diff`, `rigid_diff`, `rollback`, `snapshot`,
   `detfloat`, `simd` (see `port-p3b-kinetic.md`, "Not ported yet"), then the
   speed of the ported modules (1.3-2.8x in P3b).

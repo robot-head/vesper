@@ -6,7 +6,6 @@
 //! when present; plus `patch` on random instructions. Local values,
 //! candidates, target values and errors must agree exactly. Port wave P3a
 //! lane 6 (#1041).
-#![cfg(feature = "vesper-port")]
 
 mod common;
 

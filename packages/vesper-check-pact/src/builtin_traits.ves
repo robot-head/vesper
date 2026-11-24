@@ -1,0 +1,1071 @@
+// Builtin `Eq`, `Ord`, and `Hash` trait derivation (`builtin_traits::derivable`
+// and derived `impl` source generation) for `@vesper/check-pact`
+// (SH2 lane 13 part 4, #1617).
+
+use @vesper/check-data::input::{
+    Ctx,
+    Reader,
+    read_ctx
+};
+use @vesper/check-data::names::{
+    Names,
+    names_new
+};
+use @vesper/check-data::{
+    pack_text
+};
+use @vesper/check-data::types::{
+    TyKind,
+    TyMode,
+    TypeNode,
+    Types,
+    display
+};
+
+const K_FN: u8 = TyKind::Fn;
+const K_NAMED: u8 = TyKind::Named;
+const K_ROW: u8 = TyKind::Row;
+const K_TUPLE: u8 = TyKind::Tuple;
+const M_AFFINE: u8 = TyMode::Affine;
+const M_COPY: u8 = TyMode::Copy;
+const M_LINEAR: u8 = TyMode::Linear;
+use @vesper/check-data::util::{
+    add,
+    n32,
+    u32_at,
+    u64_at,
+    u8_at,
+    w
+};
+use self::session_input::{
+    put_num,
+    put_str,
+    put_sym,
+    read_q_names,
+    read_q_types,
+    sym
+};
+
+const NONE32: u32 = 4294967295;
+const NONE64: u64 = 18446744073709551615;
+
+const OFFSET_STR: Str = "14695981039346656037";
+const HASH_MIX: Str = "vesper_builtin_hash_mix";
+
+copy struct StructInfo {
+    pub name: u32,
+    pub mode: u8,
+    pub is_enum: bool,
+    pub has_row_gen: bool,
+    pub ga: u32,
+    pub gn: u32,
+    pub fa: u32,
+    pub fn_cnt: u32,
+}
+
+copy struct ConfInfo {
+    pub is_canonical: bool,
+    pub pkg_none: bool,
+    pub trait_name: u32,
+    pub targ_cnt: u64,
+    pub self_ty: u32,
+    pub ga: u32,
+    pub gn: u32,
+    pub has_where: bool,
+    pub empty_body: bool,
+    pub s: u64,
+    pub e: u64,
+}
+
+copy struct OwnBound {
+    pub owner: u32,
+    pub param: u32,
+    pub trait_name: u32,
+    pub arg_a: u32,
+    pub arg_n: u32,
+}
+
+struct BuiltinMod {
+    pub c: Ctx,
+    pub gen_names: ChunkSeq[u32],
+    pub gen_bounds: ChunkSeq[u8],
+    pub field_names: ChunkSeq[u32],
+    pub field_tys: ChunkSeq[u32],
+    pub structs: ChunkSeq[StructInfo],
+    pub confs: ChunkSeq[ConfInfo],
+    pub own_bounds: ChunkSeq[OwnBound],
+    pub bound_args: ChunkSeq[u32],
+}
+
+fn struct_at(in m: BuiltinMod, i: u64) -> StructInfo {
+    match m.structs.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => StructInfo {
+            name: 0,
+            mode: 0,
+            is_enum: true,
+            has_row_gen: false,
+            ga: 0,
+            gn: 0,
+            fa: 0,
+            fn_cnt: 0
+        },
+    }
+}
+
+fn conf_at(in m: BuiltinMod, i: u64) -> ConfInfo {
+    match m.confs.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => ConfInfo {
+            is_canonical: false,
+            pkg_none: false,
+            trait_name: 0,
+            targ_cnt: 0,
+            self_ty: 0,
+            ga: 0,
+            gn: 0,
+            has_where: false,
+            empty_body: false,
+            s: 0,
+            e: 0
+        },
+    }
+}
+
+fn own_at(in m: BuiltinMod, i: u64) -> OwnBound {
+    match m.own_bounds.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => OwnBound {
+            owner: 0,
+            param: 0,
+            trait_name: 0,
+            arg_a: 0,
+            arg_n: 0
+        },
+    }
+}
+
+fn node_at(in t: Types, ty: u32) -> TypeNode {
+    match t.nodes.try_get(w(ty)) {
+        Option::Some(v) => v,
+        Option::None => TypeNode {
+            kind: 0,
+            mode: 0,
+            name: 0,
+            a: 0,
+            n: 0,
+            r: 0,
+            r2: 0,
+            lit: 0
+        },
+    }
+}
+
+fn is_builtin_trait(in names: Names, s: u32) -> bool {
+    names.spells(s, in "Eq".as_bytes())
+        || names.spells(s, in "Ord".as_bytes())
+        || names.spells(s, in "Hash".as_bytes())
+}
+
+fn is_scalar(in names: Names, s: u32) -> bool {
+    names.spells(s, in "u8".as_bytes())
+        || names.spells(s, in "u32".as_bytes())
+        || names.spells(s, in "u64".as_bytes())
+        || names.spells(s, in "i64".as_bytes())
+        || names.spells(s, in "bool".as_bytes())
+}
+
+fn is_request(in names: Names, c: ConfInfo) -> bool {
+    c.is_canonical
+        && c.pkg_none
+        && is_builtin_trait(in names, c.trait_name)
+        && c.targ_cnt == 0
+        && c.empty_body
+}
+
+fn find_derivable_struct(in m: BuiltinMod, name: u32) -> u64 {
+    for i in 0..m.structs.len() {
+        let st = struct_at(in m, i);
+        if !st.is_enum && !st.has_row_gen && st.name == name {
+            return i;
+        }
+    }
+    NONE64
+}
+
+fn mentions_name(in t: Types, ty: u32, name: u32) -> bool {
+    let n = node_at(in t, ty);
+    if n.kind == K_NAMED {
+        if n.name == name {
+            return true;
+        }
+        for i in 0..w(n.n) {
+            if mentions_name(in t, u32_at(in t.items, add(w(n.a), i)), name) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if n.kind == K_TUPLE {
+        for i in 0..w(n.n) {
+            if mentions_name(in t, u32_at(in t.items, add(w(n.a), i)), name) {
+                return true;
+            }
+        }
+        return false;
+    }
+    n.kind == K_FN || n.kind == K_ROW
+}
+
+fn same_type_bt(in t: Types, a: u32, b: u32) -> bool {
+    if a == b {
+        return true;
+    }
+    let na = node_at(in t, a);
+    let nb = node_at(in t, b);
+    if na.kind != nb.kind {
+        return false;
+    }
+    if na.kind == K_NAMED {
+        if na.name != nb.name || na.n != nb.n {
+            return false;
+        }
+        for i in 0..w(na.n) {
+            if !same_type_bt(
+                in t,
+                u32_at(in t.items, add(w(na.a), i)),
+                u32_at(in t.items, add(w(nb.a), i))
+            ) {
+                return false;
+            }
+        }
+        return true;
+    }
+    if na.kind == K_TUPLE {
+        if na.n != nb.n {
+            return false;
+        }
+        for i in 0..w(na.n) {
+            if !same_type_bt(
+                in t,
+                u32_at(in t.items, add(w(na.a), i)),
+                u32_at(in t.items, add(w(nb.a), i))
+            ) {
+                return false;
+            }
+        }
+        return true;
+    }
+    false
+}
+
+fn param_index(in m: BuiltinMod, ga: u32, gn: u32, name: u32) -> u64 {
+    for i in 0..w(gn) {
+        if u32_at(in m.gen_names, add(w(ga), i)) == name {
+            return i;
+        }
+    }
+    NONE64
+}
+
+fn copy_type(in m: BuiltinMod, ty: u32, ga: u32, gn: u32) -> bool {
+    let n = node_at(in m.c.types, ty);
+    if n.kind == K_NAMED && n.n == 0 {
+        let pi = param_index(in m, ga, gn, n.name);
+        if pi != NONE64 {
+            return u8_at(in m.gen_bounds, add(w(ga), pi)) == M_COPY;
+        }
+    }
+    if n.kind == K_NAMED && is_scalar(in m.c.names, n.name) {
+        return true;
+    }
+    if n.kind == K_TUPLE {
+        for i in 0..w(n.n) {
+            if !copy_type(in m, u32_at(in m.c.types.items, add(w(n.a), i)), ga, gn) {
+                return false;
+            }
+        }
+        return true;
+    }
+    if n.kind == K_NAMED {
+        let si = find_derivable_struct(in m, n.name);
+        if si != NONE64 {
+            return struct_at(in m, si).mode == M_COPY;
+        }
+    }
+    false
+}
+
+fn user_impl_covers(in m: BuiltinMod, tname: u32, ty: u32) -> bool {
+    let tn = node_at(in m.c.types, ty);
+    for i in 0..m.confs.len() {
+        let c = conf_at(in m, i);
+        if !c.is_canonical || !c.pkg_none || is_request(in m.c.names, c) {
+            continue;
+        }
+        if c.trait_name != tname {
+            continue;
+        }
+        let sn = node_at(in m.c.types, c.self_ty);
+        if sn.kind == K_NAMED && tn.kind == K_NAMED && sn.name == tn.name {
+            let mut all_params = true;
+            for ai in 0..w(sn.n) {
+                let arg_ty = u32_at(in m.c.types.items, add(w(sn.a), ai));
+                let an = node_at(in m.c.types, arg_ty);
+                if !(
+                    an.kind == K_NAMED
+                        && an.n == 0
+                        && param_index(in m, c.ga, c.gn, an.name) != NONE64
+                ) {
+                    all_params = false;
+                    break;
+                }
+            }
+            if all_params || same_type_bt(in m.c.types, c.self_ty, ty) {
+                return true;
+            }
+        } else if same_type_bt(in m.c.types, c.self_ty, ty) {
+            return true;
+        }
+    }
+    false
+}
+
+fn has_request(in req_trait: ChunkSeq[u32], in req_struct: ChunkSeq[u32], tname: u32, sname: u32)
+    -> bool {
+    for i in 0..req_trait.len() {
+        if u32_at(in req_trait, i) == tname && u32_at(in req_struct, i) == sname {
+            return true;
+        }
+    }
+    false
+}
+
+// `memo_state`: 0 = unvisited, 1 = false (including active cycle), 2 = true.
+fn struct_conforms(
+    in m: BuiltinMod,
+    si: u64,
+    tname: u32,
+    in req_trait: ChunkSeq[u32],
+    in req_struct: ChunkSeq[u32],
+    inout memo_state: ChunkSeq[u8]
+) -> bool {
+    let st_val = u8_at(in memo_state, si);
+    if st_val != 0 {
+        return st_val == 2;
+    }
+    let _ = memo_state.try_set(si, 1);
+    let st = struct_at(in m, si);
+    let mut ok = true;
+    for fi in 0..w(st.fn_cnt) {
+        let fty = u32_at(in m.field_tys, add(w(st.fa), fi));
+        if !type_conforms(
+            in m,
+            fty,
+            tname,
+            st.ga,
+            st.gn,
+            in req_trait,
+            in req_struct,
+            inout memo_state
+        ) {
+            ok = false;
+            break;
+        }
+    }
+    let _ = memo_state
+        .try_set(
+            si,
+            if ok {
+                2
+            } else {
+                1
+            }
+        );
+    ok
+}
+
+fn type_conforms(
+    in m: BuiltinMod,
+    ty: u32,
+    tname: u32,
+    ga: u32,
+    gn: u32,
+    in req_trait: ChunkSeq[u32],
+    in req_struct: ChunkSeq[u32],
+    inout memo_state: ChunkSeq[u8]
+) -> bool {
+    let n = node_at(in m.c.types, ty);
+    if n.kind == K_NAMED && n.n == 0 {
+        if param_index(in m, ga, gn, n.name) != NONE64 {
+            return true;
+        }
+        if is_scalar(in m.c.names, n.name) {
+            return true;
+        }
+    }
+    if n.kind == K_TUPLE {
+        if !(n.n == 0 || (w(n.n) >= 2 && w(n.n) <= 4)) {
+            return false;
+        }
+        for i in 0..w(n.n) {
+            let ety = u32_at(in m.c.types.items, add(w(n.a), i));
+            if !copy_type(in m, ety, ga, gn)
+                || !type_conforms(
+                    in m,
+                    ety,
+                    tname,
+                    ga,
+                    gn,
+                    in req_trait,
+                    in req_struct,
+                    inout memo_state
+                ) {
+                return false;
+            }
+        }
+        return true;
+    }
+    if n.kind == K_NAMED {
+        if user_impl_covers(in m, tname, ty) {
+            return true;
+        }
+        let si = find_derivable_struct(in m, n.name);
+        if si == NONE64 {
+            return false;
+        }
+        if !has_request(in req_trait, in req_struct, tname, n.name) {
+            return false;
+        }
+        if !struct_conforms(in m, si, tname, in req_trait, in req_struct, inout memo_state) {
+            return false;
+        }
+        let ast = struct_at(in m, si);
+        let lim = if w(ast.gn) < w(n.n) {
+            w(ast.gn)
+        } else {
+            w(n.n)
+        };
+        for gi in 0..lim {
+            let gname = u32_at(in m.gen_names, add(w(ast.ga), gi));
+            let mut mentioned = false;
+            for fi in 0..w(ast.fn_cnt) {
+                if mentions_name(in m.c.types, u32_at(in m.field_tys, add(w(ast.fa), fi)), gname) {
+                    mentioned = true;
+                    break;
+                }
+            }
+            if mentioned {
+                let arg_ty = u32_at(in m.c.types.items, add(w(n.a), gi));
+                if !type_conforms(
+                    in m,
+                    arg_ty,
+                    tname,
+                    ga,
+                    gn,
+                    in req_trait,
+                    in req_struct,
+                    inout memo_state
+                ) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+    false
+}
+
+fn emit_diag(inout out: ChunkSeq[u8], in code: Str, s: u64, e: u64, in msg: ChunkSeq[u8]) {
+    put_str(inout out, in code);
+    out.push(32);
+    put_num(inout out, s);
+    out.push(32);
+    put_num(inout out, e);
+    out.push(32);
+    for i in 0..msg.len() {
+        let b = u8_at(in msg, i);
+        if b == 10 {
+            out.push(1);
+        } else {
+            out.push(b);
+        }
+    }
+    out.push(10);
+}
+
+fn str_eq_bytes(in a: Slice[u8], in b: Slice[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    for i in 0..a.len() {
+        let ca = match a.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        let cb = match b.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        if ca != cb {
+            return false;
+        }
+    }
+    true
+}
+
+fn eq_items_contain(
+    in buf: ChunkSeq[u8],
+    in offs: ChunkSeq[u32],
+    in lens: ChunkSeq[u32],
+    in needle: Slice[u8]
+) -> bool {
+    for i in 0..offs.len() {
+        let a = w(u32_at(in offs, i));
+        let n = w(u32_at(in lens, i));
+        if str_eq_bytes(in buf[a..add(a, n)], in needle) {
+            return true;
+        }
+    }
+    false
+}
+
+fn emit_derived_conformance(in m: BuiltinMod, st: StructInfo, tname: u32, inout out: ChunkSeq[u8]) {
+    let mut ty = ChunkSeq::new[u8]();
+    put_sym(inout ty, in m.c.names, st.name);
+    if st.gn > 0 {
+        ty.push(91);
+        for gi in 0..w(st.gn) {
+            if gi > 0 {
+                put_str(inout ty, ", ");
+            }
+            put_sym(inout ty, in m.c.names, u32_at(in m.gen_names, add(w(st.ga), gi)));
+        }
+        ty.push(93);
+    }
+
+    let mut head = ChunkSeq::new[u8]();
+    if st.gn > 0 {
+        head.push(91);
+        for gi in 0..w(st.gn) {
+            if gi > 0 {
+                put_str(inout head, ", ");
+            }
+            put_sym(inout head, in m.c.names, u32_at(in m.gen_names, add(w(st.ga), gi)));
+            let gb = u8_at(in m.gen_bounds, add(w(st.ga), gi));
+            if gb == M_AFFINE {
+                put_str(inout head, ": mod affine");
+            } else if gb == M_COPY {
+                put_str(inout head, ": mod copy");
+            }
+        }
+        head.push(93);
+    }
+
+    let mut wh_buf = ChunkSeq::new[u8]();
+    let mut wh_offs = ChunkSeq::new[u32]();
+    let mut wh_lens = ChunkSeq::new[u32]();
+
+    for gi in 0..w(st.gn) {
+        let gname = u32_at(in m.gen_names, add(w(st.ga), gi));
+        let mut mentioned = false;
+        for fi in 0..w(st.fn_cnt) {
+            if mentions_name(in m.c.types, u32_at(in m.field_tys, add(w(st.fa), fi)), gname) {
+                mentioned = true;
+                break;
+            }
+        }
+        if mentioned {
+            let a = n32(wh_buf.len());
+            put_sym(inout wh_buf, in m.c.names, gname);
+            put_str(inout wh_buf, ": ");
+            put_sym(inout wh_buf, in m.c.names, tname);
+            wh_offs.push(a);
+            wh_lens.push(n32(wrapping_sub(wh_buf.len(), w(a))));
+        }
+    }
+
+    for oi in 0..m.own_bounds.len() {
+        let ob = own_at(in m, oi);
+        if ob.owner != st.name {
+            continue;
+        }
+        let mut item = ChunkSeq::new[u8]();
+        put_sym(inout item, in m.c.names, ob.param);
+        put_str(inout item, ": ");
+        put_sym(inout item, in m.c.names, ob.trait_name);
+        if ob.arg_n > 0 {
+            item.push(91);
+            for ai in 0..w(ob.arg_n) {
+                if ai > 0 {
+                    put_str(inout item, ", ");
+                }
+                display(
+                    in m.c.types,
+                    in m.c.names,
+                    u32_at(in m.bound_args, add(w(ob.arg_a), ai)),
+                    inout item
+                );
+            }
+            item.push(93);
+        }
+        if !eq_items_contain(in wh_buf, in wh_offs, in wh_lens, in item.as_slice()) {
+            let a = n32(wh_buf.len());
+            wh_buf.extend(in item.as_slice());
+            wh_offs.push(a);
+            wh_lens.push(n32(item.len()));
+        }
+    }
+
+    put_str(inout out, "impl");
+    out.extend(in head.as_slice());
+    out.push(32);
+    put_sym(inout out, in m.c.names, tname);
+    put_str(inout out, " for ");
+    out.extend(in ty.as_slice());
+    if wh_offs.len() > 0 {
+        put_str(inout out, " where ");
+        for wi in 0..wh_offs.len() {
+            if wi > 0 {
+                put_str(inout out, ", ");
+            }
+            let a = w(u32_at(in wh_offs, wi));
+            let n = w(u32_at(in wh_lens, wi));
+            out.extend(in wh_buf[a..add(a, n)]);
+        }
+    }
+    put_str(inout out, " { ");
+
+    if m.c.names.spells(tname, in "Eq".as_bytes()) {
+        put_str(inout out, "fn eq(in self, in other: ");
+        out.extend(in ty.as_slice());
+        put_str(inout out, ") -> bool { ");
+        let mut body = ChunkSeq::new[u8]();
+        put_str(inout body, "true");
+        let mut fi = w(st.fn_cnt);
+        loop {
+            if fi == 0 {
+                break;
+            }
+            fi = wrapping_sub(fi, 1);
+            let fname = u32_at(in m.field_names, add(w(st.fa), fi));
+            let mut next = ChunkSeq::new[u8]();
+            put_str(inout next, "if Eq::eq(self.");
+            put_sym(inout next, in m.c.names, fname);
+            put_str(inout next, ", other.");
+            put_sym(inout next, in m.c.names, fname);
+            put_str(inout next, ") { ");
+            next.extend(in body.as_slice());
+            put_str(inout next, " } else { false }");
+            body = next;
+        }
+        out.extend(in body.as_slice());
+        put_str(inout out, " }");
+    } else if m.c.names.spells(tname, in "Ord".as_bytes()) {
+        put_str(inout out, "fn cmp(in self, in other: ");
+        out.extend(in ty.as_slice());
+        put_str(inout out, ") -> Ordering { ");
+        let mut body = ChunkSeq::new[u8]();
+        put_str(inout body, "Equal");
+        let mut fi = w(st.fn_cnt);
+        loop {
+            if fi == 0 {
+                break;
+            }
+            fi = wrapping_sub(fi, 1);
+            let fname = u32_at(in m.field_names, add(w(st.fa), fi));
+            let mut next = ChunkSeq::new[u8]();
+            if str_eq_bytes(in body.as_slice(), in "Equal".as_bytes()) {
+                put_str(inout next, "Ord::cmp(self.");
+                put_sym(inout next, in m.c.names, fname);
+                put_str(inout next, ", other.");
+                put_sym(inout next, in m.c.names, fname);
+                next.push(41);
+            } else {
+                put_str(inout next, "match Ord::cmp(self.");
+                put_sym(inout next, in m.c.names, fname);
+                put_str(inout next, ", other.");
+                put_sym(inout next, in m.c.names, fname);
+                put_str(inout next, ") { Equal => ");
+                next.extend(in body.as_slice());
+                put_str(inout next, ", unequal => unequal }");
+            }
+            body = next;
+        }
+        out.extend(in body.as_slice());
+        put_str(inout out, " }");
+    } else {
+        put_str(inout out, "fn hash(in self) -> u64 { ");
+        let mut body = ChunkSeq::new[u8]();
+        put_str(inout body, in OFFSET_STR);
+        for fi in 0..w(st.fn_cnt) {
+            let fname = u32_at(in m.field_names, add(w(st.fa), fi));
+            let mut next = ChunkSeq::new[u8]();
+            put_str(inout next, in HASH_MIX);
+            next.push(40);
+            next.extend(in body.as_slice());
+            put_str(inout next, ", Hash::hash(self.");
+            put_sym(inout next, in m.c.names, fname);
+            put_str(inout next, "))");
+            body = next;
+        }
+        out.extend(in body.as_slice());
+        put_str(inout out, " }");
+    }
+    put_str(inout out, " }\n");
+}
+
+fn read_builtin_mod(in b: Slice[u8]) -> BuiltinMod {
+    let mut r = Reader {
+        pos: 0
+    };
+    let c = read_ctx(inout r, in b);
+
+    let mut gen_names = ChunkSeq::new[u32]();
+    let mut gen_bounds = ChunkSeq::new[u8]();
+    let mut field_names = ChunkSeq::new[u32]();
+    let mut field_tys = ChunkSeq::new[u32]();
+
+    let ns = r.word(in b);
+    let mut structs = ChunkSeq::with_capacity[StructInfo](ns);
+    for _ in 0..ns {
+        let sname = u32_at(in c.nmap, r.word(in b));
+        let smode = wrapping_u8(r.word(in b));
+        let is_enum = r.word(in b) != 0;
+        let ga = n32(gen_names.len());
+        let gn = r.word(in b);
+        let mut has_row_gen = false;
+        for _ in 0..gn {
+            gen_names.push(u32_at(in c.nmap, r.word(in b)));
+            gen_bounds.push(wrapping_u8(r.word(in b)));
+            if r.word(in b) != 0 {
+                has_row_gen = true;
+            }
+        }
+        let fa = n32(field_names.len());
+        let fn_cnt = r.word(in b);
+        for _ in 0..fn_cnt {
+            field_names.push(u32_at(in c.nmap, r.word(in b)));
+            field_tys.push(u32_at(in c.tmap, r.word(in b)));
+        }
+        structs
+            .push(
+                StructInfo {
+                    name: sname,
+                    mode: smode,
+                    is_enum: is_enum,
+                    has_row_gen: has_row_gen,
+                    ga: ga,
+                    gn: n32(gn),
+                    fa: fa,
+                    fn_cnt: n32(fn_cnt)
+                }
+            );
+    }
+
+    let nc = r.word(in b);
+    let mut confs = ChunkSeq::with_capacity[ConfInfo](nc);
+    for _ in 0..nc {
+        let is_canonical = r.word(in b) != 0;
+        let pkg_none = r.word(in b) != 0;
+        let trait_name = u32_at(in c.nmap, r.word(in b));
+        let targ_cnt = r.word(in b);
+        let self_ty = u32_at(in c.tmap, r.word(in b));
+        let ga = n32(gen_names.len());
+        let gn = r.word(in b);
+        for _ in 0..gn {
+            gen_names.push(u32_at(in c.nmap, r.word(in b)));
+            gen_bounds.push(wrapping_u8(r.word(in b)));
+            let _ = r.word(in b);
+        }
+        let has_where = r.word(in b) != 0;
+        let empty_body = r.word(in b) != 0;
+        let s = r.word(in b);
+        let e = r.word(in b);
+        confs
+            .push(
+                ConfInfo {
+                    is_canonical: is_canonical,
+                    pkg_none: pkg_none,
+                    trait_name: trait_name,
+                    targ_cnt: targ_cnt,
+                    self_ty: self_ty,
+                    ga: ga,
+                    gn: n32(gn),
+                    has_where: has_where,
+                    empty_body: empty_body,
+                    s: s,
+                    e: e
+                }
+            );
+    }
+
+    let nb = r.word(in b);
+    let mut own_bounds = ChunkSeq::with_capacity[OwnBound](nb);
+    let mut bound_args = ChunkSeq::new[u32]();
+    for _ in 0..nb {
+        let owner = u32_at(in c.nmap, r.word(in b));
+        let param = u32_at(in c.nmap, r.word(in b));
+        let trait_name = u32_at(in c.nmap, r.word(in b));
+        let arg_a = n32(bound_args.len());
+        let arg_n = r.word(in b);
+        for _ in 0..arg_n {
+            bound_args.push(u32_at(in c.tmap, r.word(in b)));
+        }
+        own_bounds
+            .push(
+                OwnBound {
+                    owner: owner,
+                    param: param,
+                    trait_name: trait_name,
+                    arg_a: arg_a,
+                    arg_n: n32(arg_n)
+                }
+            );
+    }
+
+    BuiltinMod {
+        c: c,
+        gen_names: gen_names,
+        gen_bounds: gen_bounds,
+        field_names: field_names,
+        field_tys: field_tys,
+        structs: structs,
+        confs: confs,
+        own_bounds: own_bounds,
+        bound_args: bound_args
+    }
+}
+
+pub fn builtin_derive_words(in b: Slice[u8]) -> ChunkSeq[u64] {
+    let m = read_builtin_mod(in b);
+    let mut diags = ChunkSeq::new[u8]();
+    let mut req_trait = ChunkSeq::new[u32]();
+    let mut req_struct_idx = ChunkSeq::new[u64]();
+    let mut req_struct_name = ChunkSeq::new[u32]();
+    let mut req_s = ChunkSeq::new[u64]();
+    let mut req_e = ChunkSeq::new[u64]();
+
+    for ci in 0..m.confs.len() {
+        let c = conf_at(in m, ci);
+        if !is_request(in m.c.names, c) {
+            continue;
+        }
+        let sn = node_at(in m.c.types, c.self_ty);
+        let mut target_si: u64 = NONE64;
+        if sn.kind == K_NAMED && !c.has_where {
+            let si = find_derivable_struct(in m, sn.name);
+            if si != NONE64 {
+                let st = struct_at(in m, si);
+                if w(sn.n) == w(st.gn) && w(c.gn) == w(sn.n) {
+                    let mut params_ok = true;
+                    for ai in 0..w(sn.n) {
+                        let arg_ty = u32_at(in m.c.types.items, add(w(sn.a), ai));
+                        let an = node_at(in m.c.types, arg_ty);
+                        let cg_name = u32_at(in m.gen_names, add(w(c.ga), ai));
+                        if !(an.kind == K_NAMED && an.n == 0 && an.name == cg_name) {
+                            params_ok = false;
+                            break;
+                        }
+                    }
+                    if params_ok {
+                        target_si = si;
+                    }
+                }
+            }
+        }
+        if target_si == NONE64 {
+            let mut msg = ChunkSeq::new[u8]();
+            put_str(inout msg, "an empty `impl ");
+            put_sym(inout msg, in m.c.names, c.trait_name);
+            put_str(inout msg, " for ");
+            display(in m.c.types, in m.c.names, c.self_ty, inout msg);
+            put_str(inout msg, "` derives ");
+            put_sym(inout msg, in m.c.names, c.trait_name);
+            put_str(
+                inout msg,
+                ", which needs a struct of this package with all its parameters in order and no where clause (for example `impl[T] "
+            );
+            put_sym(inout msg, in m.c.names, c.trait_name);
+            put_str(inout msg, " for Pair[T] {}`); write the methods of ");
+            put_sym(inout msg, in m.c.names, c.trait_name);
+            put_str(inout msg, " otherwise");
+            emit_diag(inout diags, "E0616", c.s, c.e, in msg);
+            continue;
+        }
+        req_trait.push(c.trait_name);
+        req_struct_idx.push(target_si);
+        req_struct_name.push(struct_at(in m, target_si).name);
+        req_s.push(c.s);
+        req_e.push(c.e);
+    }
+
+    // Group accepted derivations by struct index in module struct order (matching BTreeMap by name?
+    // Wait: Rust groups `Derived` by `BTreeMap<String, Vec<(&str, Span)>>`; we emit in `(struct, trait)` order
+    // or sort structs by name if needed; each impl is independent).
+    let mut ok_trait = ChunkSeq::new[u32]();
+    let mut ok_si = ChunkSeq::new[u64]();
+
+    for ri in 0..req_trait.len() {
+        let tname = u32_at(in req_trait, ri);
+        let si = u64_at(in req_struct_idx, ri);
+        let st = struct_at(in m, si);
+        let mut memo_state = ChunkSeq::with_capacity[u8](m.structs.len());
+        for _ in 0..m.structs.len() {
+            memo_state.push(0);
+        }
+        let mut bad_fi: u64 = NONE64;
+        for fi in 0..w(st.fn_cnt) {
+            let fty = u32_at(in m.field_tys, add(w(st.fa), fi));
+            if !type_conforms(
+                in m,
+                fty,
+                tname,
+                st.ga,
+                st.gn,
+                in req_trait,
+                in req_struct_name,
+                inout memo_state
+            ) {
+                bad_fi = fi;
+                break;
+            }
+        }
+        if bad_fi != NONE64 {
+            let fname = u32_at(in m.field_names, add(w(st.fa), bad_fi));
+            let fty = u32_at(in m.field_tys, add(w(st.fa), bad_fi));
+            let mut msg = ChunkSeq::new[u8]();
+            put_str(inout msg, "cannot derive ");
+            put_sym(inout msg, in m.c.names, tname);
+            put_str(inout msg, " for '");
+            put_sym(inout msg, in m.c.names, st.name);
+            put_str(inout msg, "': field '");
+            put_sym(inout msg, in m.c.names, fname);
+            put_str(inout msg, "' of type ");
+            display(in m.c.types, in m.c.names, fty, inout msg);
+            put_str(inout msg, " does not conform to ");
+            put_sym(inout msg, in m.c.names, tname);
+            put_str(inout msg, " (derive or write ");
+            put_sym(inout msg, in m.c.names, tname);
+            put_str(inout msg, " for it first)");
+            emit_diag(inout diags, "E0616", u64_at(in req_s, ri), u64_at(in req_e, ri), in msg);
+            continue;
+        }
+        ok_trait.push(tname);
+        ok_si.push(si);
+    }
+
+    let mut out = ChunkSeq::new[u64]();
+    let p_diags = pack_text(in diags);
+    out.extend(in p_diags.as_slice());
+    if diags.len() > 0 {
+        out.push(0);
+        return out;
+    }
+    out.push(1);
+    let mut impls = ChunkSeq::new[u8]();
+    for oi in 0..ok_trait.len() {
+        let st = struct_at(in m, u64_at(in ok_si, oi));
+        emit_derived_conformance(in m, st, u32_at(in ok_trait, oi), inout impls);
+    }
+    let p_impls = pack_text(in impls);
+    out.extend(in p_impls.as_slice());
+    out
+}
+
+fn is_builtin_name(in names: Names, s: u32) -> bool {
+    names.spells(s, in "Eq".as_bytes())
+        || names.spells(s, in "Ord".as_bytes())
+        || names.spells(s, in "Hash".as_bytes())
+        || names.spells(s, in "Ordering".as_bytes())
+}
+
+fn is_builtin_trait_name(in names: Names, s: u32) -> bool {
+    names.spells(s, in "Eq".as_bytes())
+        || names.spells(s, in "Ord".as_bytes())
+        || names.spells(s, in "Hash".as_bytes())
+}
+
+fn bytes_contains(in hay: Slice[u8], start: u64, end: u64, in needle: Str) -> bool {
+    let nb = needle.as_bytes();
+    let nl = nb.len();
+    if end < start || wrapping_sub(end, start) < nl {
+        return false;
+    }
+    let limit = add(wrapping_sub(wrapping_sub(end, start), nl), 1);
+    for off in 0..limit {
+        let base = add(start, off);
+        let mut eq = true;
+        for j in 0..nl {
+            let hb = match hay.try_get(add(base, j)) {
+                Option::Some(v) => v,
+                Option::None => 0,
+            };
+            let nbb = match nb.try_get(j) {
+                Option::Some(v) => v,
+                Option::None => 0,
+            };
+            if hb != nbb {
+                eq = false;
+                break;
+            }
+        }
+        if eq {
+            return true;
+        }
+    }
+    false
+}
+
+// Entrypoint for `check_pact_builtin_wanted` (`builtin_traits::wanted`).
+pub fn builtin_wanted_words(in b: Slice[u8]) -> ChunkSeq[u64] {
+    let mut r = Reader {
+        pos: 0
+    };
+    let mut names = names_new();
+    let mut nmap = ChunkSeq::new[u32]();
+    read_q_names(inout r, in b, inout names, inout nmap);
+    let _nt = r.word(in b);
+    let n_decls = r.word(in b);
+    let mut declares = false;
+    for _ in 0..n_decls {
+        let s = u32_at(in nmap, r.word(in b));
+        if is_builtin_name(in names, s) {
+            declares = true;
+        }
+    }
+    let n_refs = r.word(in b);
+    let mut named_ref = false;
+    for _ in 0..n_refs {
+        let pkg_none = r.word(in b) != 0;
+        let tname = u32_at(in nmap, r.word(in b));
+        if pkg_none && is_builtin_trait_name(in names, tname) {
+            named_ref = true;
+        }
+    }
+    let n_bytes = r.word(in b);
+    let text_start = r.pos;
+    let text_end = add(text_start, n_bytes);
+    let mut out = ChunkSeq::with_capacity[u64](1);
+    if declares {
+        out.push(0);
+        return out;
+    }
+    if named_ref {
+        out.push(1);
+        return out;
+    }
+    let found = bytes_contains(in b, text_start, text_end, "\"Eq::")
+        || bytes_contains(in b, text_start, text_end, "\"Ord::")
+        || bytes_contains(in b, text_start, text_end, "\"Hash::")
+        || bytes_contains(in b, text_start, text_end, "\"Ordering\"");
+    out
+        .push(
+            if found {
+                1
+            } else {
+                0
+            }
+        );
+    out
+}
