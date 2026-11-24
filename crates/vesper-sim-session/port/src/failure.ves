@@ -1,0 +1,103 @@
+// Deterministic failure-injection occurrence counter and rule lookup
+// (src/model/mod.rs `failures` / `occurrences` and src/session/model_ops.rs `injected`).
+
+const RULE_WORDS: u64 = 4;
+const KEY_WORDS: u64 = 2;
+
+pub struct FailureTable {
+    rules: ChunkSeq[u64],
+    keys: ChunkSeq[u64],
+    counts: ChunkSeq[u64]
+}
+
+fn word_at(in s: ChunkSeq[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn copy_seq(in src: ChunkSeq[u64]) -> ChunkSeq[u64] {
+    let mut out = ChunkSeq::new[u64]();
+    let n = src.len();
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        out.push(word_at(in src, i));
+        i = wrapping_add(i, 1);
+    }
+    out
+}
+
+pub fn failure_table_new(in rules_slice: Slice[u64]) -> FailureTable {
+    let mut rules = ChunkSeq::new[u64]();
+    let n = rules_slice.len();
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let w = match rules_slice.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        rules.push(w);
+        i = wrapping_add(i, 1);
+    }
+    FailureTable {
+        rules: rules,
+        keys: ChunkSeq::new[u64](),
+        counts: ChunkSeq::new[u64]()
+    }
+}
+
+pub fn failure_table_clone(in t: FailureTable) -> FailureTable {
+    FailureTable {
+        rules: copy_seq(in t.rules),
+        keys: copy_seq(in t.keys),
+        counts: copy_seq(in t.counts)
+    }
+}
+
+pub fn failure_table_next(inout t: FailureTable, target_id: u64, op: u64) -> (u64, bool, u64) {
+    let n_keys = t.counts.len();
+    let mut idx: u64 = 0;
+    let mut found = false;
+    loop {
+        if idx >= n_keys {
+            break;
+        }
+        let k_off = wrapping_mul(idx, KEY_WORDS);
+        if word_at(in t.keys, k_off) == target_id
+            && word_at(in t.keys, wrapping_add(k_off, 1)) == op {
+            found = true;
+            break;
+        }
+        idx = wrapping_add(idx, 1);
+    }
+    let mut occ: u64 = 1;
+    if found {
+        occ = wrapping_add(word_at(in t.counts, idx), 1);
+        let _ = t.counts.try_set(idx, occ);
+    } else {
+        t.keys.push(target_id);
+        t.keys.push(op);
+        t.counts.push(occ);
+    }
+    let n_rules = t.rules.len();
+    let mut r_off: u64 = 0;
+    loop {
+        if wrapping_add(r_off, RULE_WORDS) > n_rules {
+            break;
+        }
+        if word_at(in t.rules, r_off) == target_id
+            && word_at(in t.rules, wrapping_add(r_off, 1)) == op
+            && word_at(in t.rules, wrapping_add(r_off, 2)) == occ {
+            return (occ, true, word_at(in t.rules, wrapping_add(r_off, 3)));
+        }
+        r_off = wrapping_add(r_off, RULE_WORDS);
+    }
+    (occ, false, 0)
+}

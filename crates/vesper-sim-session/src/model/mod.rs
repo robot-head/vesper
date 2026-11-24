@@ -471,6 +471,26 @@ impl Clone for PortProcessTable {
     }
 }
 
+#[cfg(feature = "vesper-port")]
+#[derive(Debug)]
+pub(crate) struct PortFailureTable(crate::port::FailureTable);
+
+#[cfg(feature = "vesper-port")]
+impl Clone for PortFailureTable {
+    fn clone(&self) -> Self {
+        Self(crate::port::sim_failure_table_clone(&self.0))
+    }
+}
+
+#[cfg(feature = "vesper-port")]
+fn fail_op_code(op: FailOp) -> u64 {
+    match op {
+        FailOp::Append => 0,
+        FailOp::Flush => 1,
+        FailOp::Send => 2,
+    }
+}
+
 /// Mutable model state. It holds no runtime owners, so a step can be computed
 /// on a copy, checked against budgets and the expected trace, then committed.
 #[derive(Debug, Clone)]
@@ -483,7 +503,12 @@ pub(crate) struct ModelState {
     pub process_table: PortProcessTable,
     pub logs: BTreeMap<String, LogState>,
     pub networks: BTreeMap<String, NetState>,
+    #[cfg(not(feature = "vesper-port"))]
     pub occurrences: BTreeMap<(String, FailOp), u64>,
+    #[cfg(feature = "vesper-port")]
+    pub failure_targets: BTreeMap<String, u64>,
+    #[cfg(feature = "vesper-port")]
+    pub failure_table: PortFailureTable,
     #[cfg(not(feature = "vesper-port"))]
     pub crashes: u32,
     pub warp: Option<warp::WarpState>,
@@ -550,6 +575,35 @@ impl ModelState {
             self.processes[p].epoch = epoch;
             self.processes[p].up = true;
             Ok(epoch)
+        }
+    }
+
+    pub fn next_failure(
+        &mut self,
+        plan: &ModelPlan,
+        target: &str,
+        op: FailOp,
+    ) -> (u64, Option<u32>) {
+        #[cfg(feature = "vesper-port")]
+        {
+            let _ = plan;
+            let target_id = self.failure_targets[target];
+            let (occ, has_code, code) = crate::port::sim_failure_table_next(
+                &mut self.failure_table.0,
+                target_id,
+                fail_op_code(op),
+            );
+            (occ, has_code.then_some(code as u32))
+        }
+        #[cfg(not(feature = "vesper-port"))]
+        {
+            let count = self.occurrences.entry((target.into(), op)).or_insert(0);
+            *count += 1;
+            let occurrence = *count;
+            (
+                occurrence,
+                plan.failures.get(&(target.into(), op, occurrence)).copied(),
+            )
         }
     }
 
@@ -622,6 +676,24 @@ impl ModelState {
                 )
             })
             .collect();
+        #[cfg(feature = "vesper-port")]
+        let failure_targets: BTreeMap<String, u64> = spec
+            .logs
+            .iter()
+            .map(|l| l.name.clone())
+            .chain(spec.networks.iter().map(|n| n.name.clone()))
+            .enumerate()
+            .map(|(i, name)| (name, i as u64))
+            .collect();
+        #[cfg(feature = "vesper-port")]
+        let failure_table = {
+            let mut rules = Vec::with_capacity(plan.failures.len() * 4);
+            for ((target, op, occ), code) in &plan.failures {
+                let target_id = failure_targets[target];
+                rules.extend_from_slice(&[target_id, fail_op_code(*op), *occ, u64::from(*code)]);
+            }
+            PortFailureTable(crate::port::sim_failure_table_new(&rules))
+        };
         Self {
             #[cfg(not(feature = "vesper-port"))]
             processes,
@@ -631,7 +703,12 @@ impl ModelState {
             process_table,
             logs,
             networks,
+            #[cfg(not(feature = "vesper-port"))]
             occurrences: BTreeMap::new(),
+            #[cfg(feature = "vesper-port")]
+            failure_targets,
+            #[cfg(feature = "vesper-port")]
+            failure_table,
             #[cfg(not(feature = "vesper-port"))]
             crashes: 0,
             warp: spec
