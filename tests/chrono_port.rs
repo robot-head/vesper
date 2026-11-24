@@ -2409,3 +2409,529 @@ pub fn main() -> u64 {{
     let got = agree(&checked, "main", &MODES);
     assert_eq!(got, h);
 }
+
+#[test]
+fn ete_flow_a64_classify_and_reconstruct_match_rust() {
+    use vesper_chrono::ete::{EteElement, EteElementAt, InstructionSet};
+    use vesper_chrono::ete_flow::{EteFlowError, reconstruct};
+    use vesper_chrono::ipt_flow::{BranchKind, CodeImage, FlowLimits};
+
+    // Build A64 code image at 0x1000:
+    // 0x1000: NOP (0xd503201f) -> Sequential
+    // 0x1004: B.eq +8 (0x54000040 -> 0x100c) -> Conditional
+    // 0x1008: NOP (0xd503201f) -> Sequential
+    // 0x100c: BL +8 (0x94000002 -> 0x1014) -> Direct { call: true }
+    // 0x1010: NOP (0xd503201f)
+    // 0x1014: RET (0xd65f03c0) -> Return
+    let mut code1 = Vec::new();
+    for insn in [
+        0xd503_201fu32,
+        0x5400_0040u32,
+        0xd503_201fu32,
+        0x9400_0002u32,
+        0xd503_201fu32,
+        0xd65f_03c0u32,
+    ] {
+        code1.extend_from_slice(&insn.to_le_bytes());
+    }
+    let mut code2 = Vec::new();
+    // 0x2000: NOP, 0x2004: B -4 (0x17ffffff -> 0x2000)
+    for insn in [0xd503_201fu32, 0x17ff_ffffu32] {
+        code2.extend_from_slice(&insn.to_le_bytes());
+    }
+
+    let mut image = CodeImage::single(0x1000, &code1);
+    image.add(0x2000, &code2).expect("add segment 2");
+
+    let elements = vec![
+        EteElementAt {
+            offset: 0,
+            element: EteElement::Sync,
+        },
+        EteElementAt {
+            offset: 12,
+            element: EteElement::Timestamp {
+                timestamp: 100,
+                cycle_count: None,
+            },
+        },
+        EteElementAt {
+            offset: 15,
+            element: EteElement::Address {
+                address: 0x1000,
+                isa: InstructionSet::Is0,
+            },
+        },
+        EteElementAt {
+            offset: 20,
+            element: EteElement::Atom { executed: true },
+        },
+        EteElementAt {
+            offset: 21,
+            element: EteElement::Atom { executed: true },
+        },
+        EteElementAt {
+            offset: 22,
+            element: EteElement::Atom { executed: true },
+        },
+        EteElementAt {
+            offset: 23,
+            element: EteElement::Timestamp {
+                timestamp: 200,
+                cycle_count: None,
+            },
+        },
+        EteElementAt {
+            offset: 26,
+            element: EteElement::Address {
+                address: 0x2000,
+                isa: InstructionSet::Is0,
+            },
+        },
+        EteElementAt {
+            offset: 30,
+            element: EteElement::Atom { executed: true },
+        },
+        EteElementAt {
+            offset: 31,
+            element: EteElement::Overflow,
+        },
+    ];
+
+    let trace = reconstruct(&elements, &image, &FlowLimits::default()).expect("rust reconstruct");
+
+    let n_err = match reconstruct(
+        &[
+            EteElementAt {
+                offset: 0,
+                element: EteElement::Address {
+                    address: 0x100c,
+                    isa: InstructionSet::Is0,
+                },
+            },
+            EteElementAt {
+                offset: 1,
+                element: EteElement::Atom { executed: false },
+            },
+        ],
+        &image,
+        &FlowLimits::default(),
+    ) {
+        Err(EteFlowError::UnexpectedNotTaken { ip, element_index }) => (ip, element_index as u64),
+        _ => panic!("expected UnexpectedNotTaken"),
+    };
+
+    let fnv_mix = |mut h: u64, v: u64| -> u64 {
+        for i in 0..8 {
+            let b = (v >> (i * 8)) & 0xff;
+            h ^= b;
+            h = h.wrapping_mul(1099511628211);
+        }
+        h
+    };
+    let mut h: u64 = 14695981039346656037;
+    for &b in b"ete_flow" {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(1099511628211);
+    }
+    h = fnv_mix(h, trace.instructions);
+    h = fnv_mix(h, u64::from(trace.overflows));
+    h = match trace.stopped_at {
+        Some(v) => fnv_mix(fnv_mix(h, 1), v),
+        None => fnv_mix(h, 0),
+    };
+    h = fnv_mix(h, trace.branches.len() as u64);
+    for b in &trace.branches {
+        h = fnv_mix(h, b.from);
+        h = match b.to {
+            Some(v) => fnv_mix(fnv_mix(h, 1), v),
+            None => fnv_mix(h, 0),
+        };
+        let k = match b.kind {
+            BranchKind::Conditional { taken } => {
+                if taken {
+                    1
+                } else {
+                    2
+                }
+            }
+            BranchKind::DirectJump => 3,
+            BranchKind::DirectCall => 4,
+            BranchKind::IndirectJump => 5,
+            BranchKind::IndirectCall => 6,
+            BranchKind::Return { compressed } => {
+                if compressed {
+                    7
+                } else {
+                    8
+                }
+            }
+            BranchKind::Far => 9,
+            BranchKind::Async => 10,
+            BranchKind::Enable => 11,
+            BranchKind::Disable => 12,
+        };
+        h = fnv_mix(h, k);
+        h = match b.tsc_lo {
+            Some(v) => fnv_mix(fnv_mix(h, 1), v),
+            None => fnv_mix(h, 0),
+        };
+        h = match b.tsc_hi {
+            Some(v) => fnv_mix(fnv_mix(h, 1), v),
+            None => fnv_mix(h, 0),
+        };
+        h = fnv_mix(h, b.packet_index as u64);
+    }
+    h = fnv_mix(h, n_err.0);
+    h = fnv_mix(h, n_err.1);
+
+    let c1_lit: String = code1
+        .iter()
+        .map(|b| format!("    c1.push({});\n", b))
+        .collect();
+    let c2_lit: String = code2
+        .iter()
+        .map(|b| format!("    c2.push({});\n", b))
+        .collect();
+    let source = format!(
+        r#"use @vesper/chrono::ete::{{EteElement, EteElementAt, InstructionSet}};
+use @vesper/chrono::ete_flow::{{
+    Branch, BranchKind, EteFlowError, add_segment, default_flow_limits, reconstruct,
+    single_code_image
+}};
+fn mix_u64(h_in: u64, v: u64) -> u64 {{
+    let mut h = h_in;
+    let mut i: u64 = 0;
+    loop {{
+        if i >= 8 {{ break; }}
+        let byte = (wrapping_shr_u64(v, wrapping_u32(wrapping_mul(i, 8)))) & 255;
+        h = wrapping_mul(h ^ byte, 1099511628211);
+        i = wrapping_add(i, 1);
+    }}
+    h
+}}
+fn mix_opt(h_in: u64, in o: Option[u64]) -> u64 {{
+    match o {{
+        Option::Some(v) => mix_u64(mix_u64(h_in, 1), v),
+        Option::None => mix_u64(h_in, 0),
+    }}
+}}
+fn mix_branch(h_in: u64, in b: Branch) -> u64 {{
+    let mut h = mix_u64(h_in, b.from);
+    h = mix_opt(h, in b.to);
+    let k: u64 = match b.kind {{
+        BranchKind::Conditional {{ taken }} => if taken {{ 1 }} else {{ 2 }},
+        BranchKind::DirectJump => 3,
+        BranchKind::DirectCall => 4,
+        BranchKind::IndirectJump => 5,
+        BranchKind::IndirectCall => 6,
+        BranchKind::Return {{ compressed }} => if compressed {{ 7 }} else {{ 8 }},
+        BranchKind::Far => 9,
+        BranchKind::Async => 10,
+        BranchKind::Enable => 11,
+        BranchKind::Disable => 12,
+    }};
+    h = mix_u64(h, k);
+    h = mix_opt(h, in b.tsc_lo);
+    h = mix_opt(h, in b.tsc_hi);
+    mix_u64(h, b.packet_index)
+}}
+pub fn main() -> u64 {{
+    let mut c1: ChunkSeq[u8] = ChunkSeq::new();
+{c1_lit}    let mut c2: ChunkSeq[u8] = ChunkSeq::new();
+{c2_lit}    let mut img = single_code_image(0x1000, inout c1);
+    match add_segment(inout img, 0x2000, inout c2) {{
+        Result::Ok(_) => {{}}
+        Result::Err(_) => return 1,
+    }}
+    let mut elems: ChunkSeq[EteElementAt] = ChunkSeq::new();
+    elems.push(EteElementAt {{ offset: 0, element: EteElement::Sync }});
+    elems.push(EteElementAt {{ offset: 12, element: EteElement::Timestamp {{ timestamp: 100, cycle_count: Option::None }} }});
+    elems.push(EteElementAt {{ offset: 15, element: EteElement::Address {{ address: 0x1000, isa: InstructionSet::Is0 }} }});
+    elems.push(EteElementAt {{ offset: 20, element: EteElement::Atom {{ executed: true }} }});
+    elems.push(EteElementAt {{ offset: 21, element: EteElement::Atom {{ executed: true }} }});
+    elems.push(EteElementAt {{ offset: 22, element: EteElement::Atom {{ executed: true }} }});
+    elems.push(EteElementAt {{ offset: 23, element: EteElement::Timestamp {{ timestamp: 200, cycle_count: Option::None }} }});
+    elems.push(EteElementAt {{ offset: 26, element: EteElement::Address {{ address: 0x2000, isa: InstructionSet::Is0 }} }});
+    elems.push(EteElementAt {{ offset: 30, element: EteElement::Atom {{ executed: true }} }});
+    elems.push(EteElementAt {{ offset: 31, element: EteElement::Overflow }});
+
+    let mut trace = match reconstruct(in elems.as_slice(), in img, in default_flow_limits()) {{
+        Result::Ok(v) => v,
+        Result::Err(_) => return 2,
+    }};
+
+    let mut bad_elems: ChunkSeq[EteElementAt] = ChunkSeq::new();
+    bad_elems.push(EteElementAt {{ offset: 0, element: EteElement::Address {{ address: 0x100c, isa: InstructionSet::Is0 }} }});
+    bad_elems.push(EteElementAt {{ offset: 1, element: EteElement::Atom {{ executed: false }} }});
+    let mut err_ip: u64 = 0;
+    let mut err_idx: u64 = 0;
+    match reconstruct(in bad_elems.as_slice(), in img, in default_flow_limits()) {{
+        Result::Err(EteFlowError::UnexpectedNotTaken {{ ip, element_index }}) => {{
+            err_ip = ip;
+            err_idx = element_index;
+        }}
+        _ => return 3,
+    }}
+
+    let mut h: u64 = 14695981039346656037;
+    let tag = "ete_flow";
+    let tb = tag.as_bytes();
+    let mut ti: u64 = 0;
+    loop {{
+        if ti >= tb.len() {{ break; }}
+        let b = match tb.try_get(ti) {{ Option::Some(v) => v, Option::None => 0 }};
+        h = wrapping_mul(h ^ widen_u64(b), 1099511628211);
+        ti = wrapping_add(ti, 1);
+    }}
+    h = mix_u64(h, trace.instructions);
+    h = mix_u64(h, trace.overflows);
+    h = mix_opt(h, in trace.stopped_at);
+    h = mix_u64(h, trace.branches.len());
+    let mut rev: ChunkSeq[Branch] = ChunkSeq::new();
+    loop {{
+        match trace.branches.pop() {{
+            Option::Some(b) => rev.push(b),
+            Option::None => break,
+        }}
+    }}
+    loop {{
+        match rev.pop() {{
+            Option::Some(b) => {{ h = mix_branch(h, in b); }},
+            Option::None => break,
+        }}
+    }}
+    h = mix_u64(h, err_ip);
+    h = mix_u64(h, err_idx);
+    h
+}}"#
+    );
+    let checked = check_chrono_driver(&source);
+    let got = agree(&checked, "main", &MODES);
+    assert_eq!(got, h);
+}
+
+#[test]
+fn hwpath_branch_timeline_and_reverse_watch_path_match_rust() {
+    use vesper_chrono::bundle::Bundle;
+    use vesper_chrono::ete::{EteElement, EteElementAt, InstructionSet};
+    use vesper_chrono::hwpath::{BranchTimeline, reverse_watch_path};
+    use vesper_chrono::redact::RedactionPolicy;
+    use vesper_chrono::replay::ReplaySession;
+    use vesper_chrono::ring::{FlightRecorder, RecorderConfig};
+
+    let cfg = RecorderConfig {
+        ring_bytes: 4096,
+        max_records: 64,
+        max_payload: 64,
+        snapshot_slots: 4,
+        snapshot_image_bytes: 64,
+    };
+    let mut rec = FlightRecorder::new(cfg).expect("recorder");
+    let s1 = rec.record_effect(0, 100, 1, 1, b"a").expect("s1");
+    let s2 = rec
+        .record_inout_write(2, 200, 0xdead_beef, 101)
+        .expect("s2");
+    let s3 = rec.record_effect(0, 300, 1, 3, b"c").expect("s3");
+
+    let anchors = BranchTimeline::anchors_from_events(rec.events());
+    let elements = vec![
+        EteElementAt {
+            offset: 0,
+            element: EteElement::Timestamp {
+                timestamp: 50,
+                cycle_count: None,
+            },
+        },
+        EteElementAt {
+            offset: 1,
+            element: EteElement::Address {
+                address: 0x1000,
+                isa: InstructionSet::Is0,
+            },
+        },
+        EteElementAt {
+            offset: 2,
+            element: EteElement::Timestamp {
+                timestamp: 150,
+                cycle_count: None,
+            },
+        },
+        EteElementAt {
+            offset: 3,
+            element: EteElement::Atom { executed: true },
+        },
+        EteElementAt {
+            offset: 4,
+            element: EteElement::Timestamp {
+                timestamp: 180,
+                cycle_count: None,
+            },
+        },
+        EteElementAt {
+            offset: 5,
+            element: EteElement::Atom { executed: false },
+        },
+        EteElementAt {
+            offset: 6,
+            element: EteElement::Timestamp {
+                timestamp: 250,
+                cycle_count: None,
+            },
+        },
+    ];
+    let steps = BranchTimeline::steps_from_ete(&elements);
+    let tl = BranchTimeline::new(anchors, steps).expect("rust BranchTimeline::new");
+    let between = tl.path_between(s1, s3).expect("rust path_between");
+    let bundle = Bundle::capture(&rec, &RedactionPolicy::new(), b"");
+    let mut session = ReplaySession::from_bundle(bundle).expect("from_bundle");
+    session.seek(s3).expect("seek");
+    let wp = reverse_watch_path(&mut session, 0xdead_beef, &tl).expect("rust reverse_watch_path");
+    let wp_seq = wp.cursor.lamport_seq;
+    let wp_from = wp.path.from.lamport_seq;
+    let wp_to = wp.path.to.lamport_seq;
+    let wp_def = wp.path.definite.len() as u64;
+    let wp_us = wp.path.uncertain_start.len() as u64;
+    let wp_ue = wp.path.uncertain_end.len() as u64;
+    session.close();
+
+    let fnv_mix = |mut h: u64, v: u64| -> u64 {
+        for i in 0..8 {
+            let b = (v >> (i * 8)) & 0xff;
+            h ^= b;
+            h = h.wrapping_mul(1099511628211);
+        }
+        h
+    };
+    let mut h: u64 = 14695981039346656037;
+    for &b in b"hwpath" {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(1099511628211);
+    }
+    h = fnv_mix(h, tl.anchors().len() as u64);
+    h = fnv_mix(h, tl.steps().len() as u64);
+    h = fnv_mix(h, between.from.lamport_seq);
+    h = fnv_mix(h, between.to.lamport_seq);
+    h = fnv_mix(h, between.definite.len() as u64);
+    h = fnv_mix(h, between.uncertain_start.len() as u64);
+    h = fnv_mix(h, between.uncertain_end.len() as u64);
+    h = fnv_mix(h, wp_seq);
+    h = fnv_mix(h, wp_from);
+    h = fnv_mix(h, wp_to);
+    h = fnv_mix(h, wp_def);
+    h = fnv_mix(h, wp_us);
+    h = fnv_mix(h, wp_ue);
+    let _ = s2;
+
+    let source = r#"use @vesper/chrono::ete::{EteElement, EteElementAt, InstructionSet};
+use @vesper/chrono::hwpath::{
+    anchors_from_events, new_branch_timeline, path_between, reverse_watch_path, steps_from_ete
+};
+use @vesper/chrono::redact::RedactionEntry;
+use @vesper/chrono::replay::{ReplayBundle, from_bundle, seek};
+use @vesper/chrono::ring::{RecorderConfig, SnapshotImage, events, new_recorder, record_effect, record_inout_write};
+fn ok_u64(r: Result[u64, u32]) -> u64 {
+    match r { Result::Ok(v) => v, Result::Err(_) => 0 }
+}
+fn mix_u64(h_in: u64, v: u64) -> u64 {
+    let mut h = h_in;
+    let mut i: u64 = 0;
+    loop {
+        if i >= 8 { break; }
+        let byte = (wrapping_shr_u64(v, wrapping_u32(wrapping_mul(i, 8)))) & 255;
+        h = wrapping_mul(h ^ byte, 1099511628211);
+        i = wrapping_add(i, 1);
+    }
+    h
+}
+pub fn main() -> u64 {
+    let cfg = RecorderConfig {
+        ring_bytes: 4096,
+        max_records: 64,
+        max_payload: 64,
+        snapshot_slots: 4,
+        snapshot_image_bytes: 64,
+    };
+    let mut rec = match new_recorder(cfg) {
+        Result::Ok(r) => r,
+        Result::Err(_) => return 9,
+    };
+    let mut p1: ChunkSeq[u8] = ChunkSeq::new();
+    p1.push(97);
+    let mut p3: ChunkSeq[u8] = ChunkSeq::new();
+    p3.push(99);
+    let s1 = ok_u64(record_effect(inout rec, 0, 100, 1, 1, in p1.as_slice()));
+    let _s2 = ok_u64(record_inout_write(inout rec, 2, 200, 0xdead_beef, 101));
+    let s3 = ok_u64(record_effect(inout rec, 0, 300, 1, 3, in p3.as_slice()));
+
+    let evs = events(in rec);
+    let mut anchors = anchors_from_events(in evs.as_slice());
+    let mut elems: ChunkSeq[EteElementAt] = ChunkSeq::new();
+    elems.push(EteElementAt { offset: 0, element: EteElement::Timestamp { timestamp: 50, cycle_count: Option::None } });
+    elems.push(EteElementAt { offset: 1, element: EteElement::Address { address: 0x1000, isa: InstructionSet::Is0 } });
+    elems.push(EteElementAt { offset: 2, element: EteElement::Timestamp { timestamp: 150, cycle_count: Option::None } });
+    elems.push(EteElementAt { offset: 3, element: EteElement::Atom { executed: true } });
+    elems.push(EteElementAt { offset: 4, element: EteElement::Timestamp { timestamp: 180, cycle_count: Option::None } });
+    elems.push(EteElementAt { offset: 5, element: EteElement::Atom { executed: false } });
+    elems.push(EteElementAt { offset: 6, element: EteElement::Timestamp { timestamp: 250, cycle_count: Option::None } });
+    let mut steps = steps_from_ete(in elems.as_slice());
+    let tl = match new_branch_timeline(inout anchors, inout steps) {
+        Result::Ok(v) => v,
+        Result::Err(_) => return 1,
+    };
+    let between = match path_between(in tl, s1, s3) {
+        Result::Ok(v) => v,
+        Result::Err(_) => return 2,
+    };
+    let snaps: ChunkSeq[SnapshotImage] = ChunkSeq::new();
+    let reds: ChunkSeq[RedactionEntry] = ChunkSeq::new();
+    let rb = ReplayBundle {
+        first_seq: 1,
+        next_seq: 4,
+        evicted_records: 0,
+        records: evs,
+        snapshots: snaps,
+        redactions: reds,
+    };
+    let mut session = match from_bundle(rb) {
+        Result::Ok(s) => s,
+        Result::Err(_) => return 5,
+    };
+    match seek(inout session, s3) {
+        Result::Ok(_) => {}
+        Result::Err(_) => return 3,
+    }
+    let wp = match reverse_watch_path(inout session, 0xdead_beef, in tl) {
+        Result::Ok(v) => v,
+        Result::Err(_) => return 4,
+    };
+
+    let mut h: u64 = 14695981039346656037;
+    let tag = "hwpath";
+    let tb = tag.as_bytes();
+    let mut ti: u64 = 0;
+    loop {
+        if ti >= tb.len() { break; }
+        let b = match tb.try_get(ti) { Option::Some(v) => v, Option::None => 0 };
+        h = wrapping_mul(h ^ widen_u64(b), 1099511628211);
+        ti = wrapping_add(ti, 1);
+    }
+    h = mix_u64(h, tl.anchors.len());
+    h = mix_u64(h, tl.steps.len());
+    h = mix_u64(h, between.from.lamport_seq);
+    h = mix_u64(h, between.to.lamport_seq);
+    h = mix_u64(h, wrapping_sub(between.def_end, between.def_start));
+    h = mix_u64(h, wrapping_sub(between.u_start_end, between.u_start_begin));
+    h = mix_u64(h, wrapping_sub(between.u_end_end, between.u_end_begin));
+    h = mix_u64(h, wp.cursor.lamport_seq);
+    h = mix_u64(h, wp.path.from.lamport_seq);
+    h = mix_u64(h, wp.path.to.lamport_seq);
+    h = mix_u64(h, wrapping_sub(wp.path.def_end, wp.path.def_start));
+    h = mix_u64(h, wrapping_sub(wp.path.u_start_end, wp.path.u_start_begin));
+    h = mix_u64(h, wrapping_sub(wp.path.u_end_end, wp.path.u_end_begin));
+    h
+}"#;
+    let checked = check_chrono_driver(source);
+    let got = agree(&checked, "main", &MODES);
+    assert_eq!(got, h);
+}

@@ -58,6 +58,11 @@ mod wasm_backend_binding;
 
 #[rustfmt::skip]
 #[allow(clippy::all)]
+#[path = "../port/ebpf_backend.rs"]
+mod ebpf_backend_binding;
+
+#[rustfmt::skip]
+#[allow(clippy::all)]
 #[path = "../port/codegen_numeric.rs"]
 mod codegen_numeric_binding;
 
@@ -188,6 +193,11 @@ mod ir_words;
 #[path = "../../../tests/common/wasm_words.rs"]
 mod wasm_words;
 
+// The eBPF backend swap's input encoder and decoder (#1290), shared with
+// tests/self_host_ebpf_backend.rs.
+#[path = "../../../tests/common/ebpf_words.rs"]
+mod ebpf_words;
+
 /// Calls answered by the Vesper word-layout module.
 static LAYOUT_CALLS: AtomicU64 = AtomicU64::new(0);
 /// Sources parsed by the Vesper parse module.
@@ -207,6 +217,9 @@ static CALLS_DECLINED: AtomicU64 = AtomicU64::new(0);
 /// Programs the Vesper wasm backend compiled, and left to Rust.
 static WASM_CALLS: AtomicU64 = AtomicU64::new(0);
 static WASM_DECLINED: AtomicU64 = AtomicU64::new(0);
+/// Programs the Vesper eBPF backend compiled, and left to Rust.
+static EBPF_CALLS: AtomicU64 = AtomicU64::new(0);
+static EBPF_DECLINED: AtomicU64 = AtomicU64::new(0);
 /// Components `@vesper/wit-component` wrapped, and left to wit-component.
 static WRAP_CALLS: AtomicU64 = AtomicU64::new(0);
 static WRAP_DECLINED: AtomicU64 = AtomicU64::new(0);
@@ -1031,6 +1044,25 @@ fn artifact(
     }
 }
 
+/// The `ebpf` hook of `vesper::codegen_swap` from `modules/ebpf_backend`
+/// (#1290): `@vesper/ebpf-backend` compiles the world from Place IR and
+/// returns the assembled program or typed error. Worlds whose literals or
+/// Place IR ops are not encodable decline to Rust.
+fn vesper_ebpf(
+    world: &vesper::check::World,
+    source: Option<&str>,
+    options: &vesper::ebpf_backend::Options,
+) -> Option<Result<vesper::ebpf_backend::Compiled, vesper::ebpf_backend::EbpfBackendError>> {
+    let Some(bytes) = ebpf_words::input(world, source, options) else {
+        EBPF_DECLINED.fetch_add(1, Relaxed);
+        return None;
+    };
+    let words = ebpf_backend_binding::compile_words(&bytes);
+    let result = ebpf_words::decode(&words, options);
+    EBPF_CALLS.fetch_add(1, Relaxed);
+    Some(result)
+}
+
 /// The `component` hook of `vesper::codegen_swap` (#1334): every component
 /// the Rust wasm backend wraps (programs the Vesper backend leaves to it,
 /// host imports among them) is written by `@vesper/wit-component`, with
@@ -1630,6 +1662,8 @@ extern "C" fn install() {
         aggregate: Some(vesper_aggregate),
         call: Some(vesper_call),
         wasm: Some(vesper_wasm),
+        ebpf: (!std::env::var_os("VESPER_HYBRID_EBPF").is_some_and(|v| v == "0"))
+            .then_some(vesper_ebpf as vesper::codegen_swap::EbpfHook),
         component: Some(vesper_component),
         numeric: Some(vesper_numeric),
         seq: (!std::env::var_os("VESPER_HYBRID_SEQ").is_some_and(|v| v == "0"))
@@ -1741,6 +1775,11 @@ extern "C" fn report() {
         "vesper-hybrid: wasm backend compiled {} programs from Vesper ({} declined)",
         WASM_CALLS.load(Relaxed),
         WASM_DECLINED.load(Relaxed)
+    );
+    eprintln!(
+        "vesper-hybrid: eBPF backend compiled {} programs from Vesper ({} declined)",
+        EBPF_CALLS.load(Relaxed),
+        EBPF_DECLINED.load(Relaxed)
     );
     eprintln!(
         "vesper-hybrid: wit-component wrapped {} components from Vesper ({} declined)",

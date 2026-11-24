@@ -211,24 +211,118 @@ impl RigidWorld {
         let margin = f64::from(self.config.contact_margin);
         let target = 0.5 * margin;
         let (sa0, sb0) = (self.bodies[a], self.bodies[b]);
-        let mut d = self.distance_at(a, b, &sa0, &sb0, va, vb)?;
-        if d <= margin {
-            return Ok(None);
+        #[cfg(vesper_port)]
+        {
+            self.ccd_pair_port(a, b, &sa0, &sb0, margin, target, mu, cfg, va, vb)
         }
-        let mut s = 0.0f64;
-        for _ in 0..cfg.max_iterations {
-            let step = (d - target) / mu;
-            s += step;
-            if s > 1.0 {
+        #[cfg(not(vesper_port))]
+        {
+            let mut d = self.distance_at(a, b, &sa0, &sb0, va, vb)?;
+            if d <= margin {
                 return Ok(None);
             }
-            let (pa, pb) = (self.pose_at(a, s as f32), self.pose_at(b, s as f32));
-            d = self.distance_at(a, b, &pa, &pb, va, vb)?;
-            if d <= margin {
-                return Ok(Some((s, pa, pb)));
+            let mut s = 0.0f64;
+            for _ in 0..cfg.max_iterations {
+                let step = (d - target) / mu;
+                s += step;
+                if s > 1.0 {
+                    return Ok(None);
+                }
+                let (pa, pb) = (self.pose_at(a, s as f32), self.pose_at(b, s as f32));
+                d = self.distance_at(a, b, &pa, &pb, va, vb)?;
+                if d <= margin {
+                    return Ok(Some((s, pa, pb)));
+                }
+            }
+            Ok(None)
+        }
+    }
+
+    #[cfg(vesper_port)]
+    #[allow(clippy::too_many_arguments)]
+    fn ccd_pair_port(
+        &self,
+        a: usize,
+        b: usize,
+        sa0: &State,
+        sb0: &State,
+        margin: f64,
+        target: f64,
+        mu: f64,
+        cfg: CcdConfig,
+        va: &mut Vec<[f64; 3]>,
+        vb: &mut Vec<[f64; 3]>,
+    ) -> Result<Option<(f64, State, State)>, RigidError> {
+        let mut poses = [0.0f32; 28];
+        pack_ccd_pose(sa0, &mut poses[0..14]);
+        pack_ccd_pose(sb0, &mut poses[14..28]);
+
+        let mut local_pts = [0.0f64; 3 * 2 * super::MAX_HULL_VERTICES];
+        let (ka, na, ra) =
+            pack_local_shape(&self.colliders[sa0.collider as usize].shape, &mut local_pts);
+        let off_b = na * 3;
+        let (kb, nb, rb) = pack_local_shape(
+            &self.colliders[sb0.collider as usize].shape,
+            &mut local_pts[off_b..],
+        );
+
+        let len_a = na * 3 + usize::from(ka != 2);
+        let len_b = nb * 3 + usize::from(kb != 2);
+        let need_a = len_a.div_ceil(3);
+        let need_b = len_b.div_ceil(3);
+        if va.len() < need_a {
+            va.resize(need_a, [0.0; 3]);
+        }
+        if vb.len() < need_b {
+            vb.resize(need_b, [0.0; 3]);
+        }
+        let mut gjk_out = [0.0f64; 10];
+        let mut out_poses = [0.0f32; 14];
+        let mut out_s = [0.0f64; 1];
+
+        let status = crate::port::ccd_pair_toi(
+            &poses,
+            ka,
+            na as u64,
+            ra,
+            kb,
+            nb as u64,
+            rb,
+            &local_pts[..(na + nb) * 3],
+            self.config.dt,
+            self.config.gravity[0],
+            self.config.gravity[1],
+            self.config.gravity[2],
+            margin,
+            target,
+            mu,
+            cfg.max_iterations as u64,
+            &mut va.as_flattened_mut()[..len_a],
+            &mut vb.as_flattened_mut()[..len_b],
+            &mut gjk_out,
+            &mut out_poses,
+            &mut out_s,
+        );
+        match status {
+            0 => Ok(None),
+            1 => {
+                let mut pa = *sa0;
+                pa.x = [out_poses[0], out_poses[1], out_poses[2]];
+                pa.q = [out_poses[3], out_poses[4], out_poses[5], out_poses[6]];
+                let mut pb = *sb0;
+                pb.x = [out_poses[7], out_poses[8], out_poses[9]];
+                pb.q = [out_poses[10], out_poses[11], out_poses[12], out_poses[13]];
+                Ok(Some((out_s[0], pa, pb)))
+            }
+            code => {
+                let error = match code {
+                    4 => crate::gjk::GjkError::InvalidShape,
+                    5 => crate::gjk::GjkError::NoConvergence,
+                    _ => crate::gjk::GjkError::Degenerate,
+                };
+                Err(RigidError::Narrowphase { a, b, error })
             }
         }
-        Ok(None)
     }
 
     /// Time-of-impact pose of body `i` against the ground, when `i` is fast,
@@ -467,5 +561,58 @@ impl RigidWorld {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(vesper_port)]
+fn pack_ccd_pose(st: &State, out: &mut [f32]) {
+    out[0..3].copy_from_slice(&st.x);
+    out[3..6].copy_from_slice(&st.v);
+    out[6..10].copy_from_slice(&st.q);
+    out[10..13].copy_from_slice(&st.w);
+    out[13] = st.inv_mass;
+}
+
+#[cfg(vesper_port)]
+fn pack_local_shape(shape: &super::ColliderShape, out: &mut [f64]) -> (u32, usize, f64) {
+    use super::ColliderShape;
+    match shape {
+        ColliderShape::Sphere { radius } => (0, 1, f64::from(*radius)),
+        ColliderShape::Capsule {
+            half_height,
+            radius,
+        } => {
+            let h = f64::from(*half_height);
+            out[0..6].copy_from_slice(&[0.0, -h, 0.0, 0.0, h, 0.0]);
+            (1, 2, f64::from(*radius))
+        }
+        ColliderShape::Box { half_extents } => {
+            let [hx, hy, hz] = super::to64(*half_extents);
+            for i in 0..8 {
+                let sx = if i & 1 == 0 { -hx } else { hx };
+                let sy = if i & 2 == 0 { -hy } else { hy };
+                let sz = if i & 4 == 0 { -hz } else { hz };
+                out[i * 3..i * 3 + 3].copy_from_slice(&[sx, sy, sz]);
+            }
+            (2, 8, 0.0)
+        }
+        ColliderShape::ConvexHull { vertices } => {
+            for (i, v) in vertices.iter().enumerate() {
+                out[i * 3..i * 3 + 3].copy_from_slice(&super::to64(*v));
+            }
+            (2, vertices.len(), 0.0)
+        }
+        ColliderShape::Segment { a, b, radius } => {
+            out[0..3].copy_from_slice(&super::to64(*a));
+            let rad = f64::from(*radius);
+            if a != b {
+                out[3..6].copy_from_slice(&super::to64(*b));
+                (1, 2, rad)
+            } else if rad > 0.0 {
+                (0, 1, rad)
+            } else {
+                (2, 1, 0.0)
+            }
+        }
     }
 }

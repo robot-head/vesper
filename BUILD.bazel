@@ -1039,6 +1039,7 @@ vesper_crate(
     # Actual formatter witnesses replay Lean serially; keep every case enabled
     # while allowing the complete target 900 seconds on slower macOS runners.
     test_timeouts = {
+        "test/chrono_port": "long",
         "test/format_proof_cli": "long",
         # SH6 lane 2 (#1397): builds bootstrap/seed/runner/vwasm.c with the
         # host C compiler and runs ~270 corpus programs in Wasmtime and vwasm.
@@ -1395,6 +1396,18 @@ vesper_package(
     deps = [
         ":check_data_package",
         ":place_ir_package",
+    ],
+)
+
+vesper_package(
+    name = "ebpf_backend_package",
+    srcs = glob(["packages/vesper-ebpf-backend/src/**/*.ves"]),
+    manifest = "packages/vesper-ebpf-backend/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":check_data_package",
+        ":place_ir_package",
+        "//crates/vesper-ebpf:port_package",
     ],
 )
 

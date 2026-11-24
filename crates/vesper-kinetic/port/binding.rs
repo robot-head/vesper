@@ -142,6 +142,7 @@ unsafe extern "C" {
     fn vesper_kinetic_seq_new(capacity: i64, stride: i64) -> i64;
     fn vesper_kinetic_seq_free(seq: i64) -> i64;
     fn vesper_kinetic_live_allocations() -> i64;
+    fn vesper_kinetic_ccd_pair_toi(poses: *mut u64, ka: i64, na: i64, ra: f64, kb: i64, nb: i64, rb: f64, local_pts: *mut u64, dt: f32, gx: f32, gy: f32, gz: f32, margin: f64, target: f64, mu: f64, max_iter: i64, va: *mut u64, vb: *mut u64, gjk_out: *mut u64, out_poses: *mut u64, out_s: *mut u64) -> i64;
     fn vesper_kinetic_colorer_color(a: *mut u64, b: *mut u64, capacity: i64, masks: *mut u64, keys: *mut u64, order: *mut u64, colors: *mut u64, offsets: *mut u64, sorted: *mut u64, fail: *mut u64) -> i64;
     fn vesper_kinetic_crmath_atan2(y: f64, x: f64, cache: *mut u64) -> f64;
     fn vesper_kinetic_crmath_atan2f(y: i64, x: i64, cache: *mut u64) -> i64;
@@ -192,6 +193,15 @@ pub const RUNTIME: vesper_port_abi::SeqRuntime = vesper_port_abi::SeqRuntime {
 pub fn live_allocations() -> i64 {
     // SAFETY: the function only reads two counters.
     unsafe { vesper_kinetic_live_allocations() }
+}
+
+/// Calls `ccd_pair_toi` of the Vesper library `kinetic` (`vesper_kinetic_ccd_pair_toi`).
+pub fn ccd_pair_toi(poses: &[f32], ka: u32, na: u64, ra: f64, kb: u32, nb: u64, rb: f64, local_pts: &[f64], dt: f32, gx: f32, gy: f32, gz: f32, margin: f64, target: f64, mu: f64, max_iter: u64, va: &mut [f64], vb: &mut [f64], gjk_out: &mut [f64], out_poses: &mut [f32], out_s: &mut [f64]) -> u64 {
+    // SAFETY: `vesper_kinetic_ccd_pair_toi` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(poses, |view_poses| vesper_port_abi::with_slice(local_pts, |view_local_pts| vesper_port_abi::with_slice_mut(va, |view_va| vesper_port_abi::with_slice_mut(vb, |view_vb| vesper_port_abi::with_slice_mut(gjk_out, |view_gjk_out| vesper_port_abi::with_slice_mut(out_poses, |view_out_poses| vesper_port_abi::with_slice_mut(out_s, |view_out_s| unsafe { vesper_kinetic_ccd_pair_toi(view_poses, ka as i64, na as i64, ra, kb as i64, nb as i64, rb, view_local_pts, dt, gx, gy, gz, margin, target, mu, max_iter as i64, view_va, view_vb, view_gjk_out, view_out_poses, view_out_s) })))))));
+    raw as u64
 }
 
 /// Calls `colorer_color` of the Vesper library `kinetic` (`vesper_kinetic_colorer_color`).

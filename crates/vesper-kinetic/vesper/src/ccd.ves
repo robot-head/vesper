@@ -1,0 +1,251 @@
+// @vesper/kinetic::ccd: conservative-advancement TOI (`src/rigid/ccd.rs`).
+use self::gjk::separation as g_separation;
+
+copy struct Pose32 {
+    x0: f32,
+    x1: f32,
+    x2: f32,
+    v0: f32,
+    v1: f32,
+    v2: f32,
+    q0: f32,
+    q1: f32,
+    q2: f32,
+    q3: f32,
+    w0: f32,
+    w1: f32,
+    w2: f32,
+    inv_mass: f32
+}
+
+fn gf32(in s: Slice[f32], i: u64) -> f32 {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0.0,
+    }
+}
+
+fn sf32(inout s: Slice[f32], i: u64, v: f32) {
+    s.try_set(i, v);
+}
+
+fn gf64(in s: Slice[f64], i: u64) -> f64 {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0.0,
+    }
+}
+
+fn sf64(inout s: Slice[f64], i: u64, v: f64) {
+    s.try_set(i, v);
+}
+
+fn sqrt32(x: f32) -> f32 {
+    nearest_f32(sqrt(widen_f64(x)))
+}
+
+fn read_pose(in s: Slice[f32], base: u64) -> Pose32 {
+    Pose32 {
+        x0: gf32(in s, base),
+        x1: gf32(in s, wrapping_add(base, 1)),
+        x2: gf32(in s, wrapping_add(base, 2)),
+        v0: gf32(in s, wrapping_add(base, 3)),
+        v1: gf32(in s, wrapping_add(base, 4)),
+        v2: gf32(in s, wrapping_add(base, 5)),
+        q0: gf32(in s, wrapping_add(base, 6)),
+        q1: gf32(in s, wrapping_add(base, 7)),
+        q2: gf32(in s, wrapping_add(base, 8)),
+        q3: gf32(in s, wrapping_add(base, 9)),
+        w0: gf32(in s, wrapping_add(base, 10)),
+        w1: gf32(in s, wrapping_add(base, 11)),
+        w2: gf32(in s, wrapping_add(base, 12)),
+        inv_mass: gf32(in s, wrapping_add(base, 13))
+    }
+}
+
+fn write_xq(inout out: Slice[f32], base: u64, p: Pose32) {
+    sf32(inout out, base, p.x0);
+    sf32(inout out, wrapping_add(base, 1), p.x1);
+    sf32(inout out, wrapping_add(base, 2), p.x2);
+    sf32(inout out, wrapping_add(base, 3), p.q0);
+    sf32(inout out, wrapping_add(base, 4), p.q1);
+    sf32(inout out, wrapping_add(base, 5), p.q2);
+    sf32(inout out, wrapping_add(base, 6), p.q3);
+}
+
+fn ballistic(st: Pose32, s: f32, dt: f32, gx: f32, gy: f32, gz: f32) -> Pose32 {
+    if st.inv_mass == 0.0 || s == 0.0 {
+        return st;
+    }
+    let t = s * dt;
+    let half_t2 = 0.5 * (t * t);
+    let nx0 = (st.x0 + st.v0 * t) + gx * half_t2;
+    let nx1 = (st.x1 + st.v1 * t) + gy * half_t2;
+    let nx2 = (st.x2 + st.v2 * t) + gz * half_t2;
+
+    // qmul([w0, w1, w2, 0.0], st.q)
+    let qw: f32 = 0.0;
+    let cx = st.w1 * st.q2 - st.w2 * st.q1;
+    let cy = st.w2 * st.q0 - st.w0 * st.q2;
+    let cz = st.w0 * st.q1 - st.w1 * st.q0;
+    let sp0 = (st.q0 * qw + st.w0 * st.q3) + cx;
+    let sp1 = (st.q1 * qw + st.w1 * st.q3) + cy;
+    let sp2 = (st.q2 * qw + st.w2 * st.q3) + cz;
+    let dot_qv = (st.w0 * st.q0 + st.w1 * st.q1) + st.w2 * st.q2;
+    let sp3 = qw * st.q3 - dot_qv;
+
+    let half = 0.5 * t;
+    let r0 = st.q0 + half * sp0;
+    let r1 = st.q1 + half * sp1;
+    let r2 = st.q2 + half * sp2;
+    let r3 = st.q3 + half * sp3;
+    let n = sqrt32(((r0 * r0 + r1 * r1) + r2 * r2) + r3 * r3);
+    let mut nq0: f32 = 0.0;
+    let mut nq1: f32 = 0.0;
+    let mut nq2: f32 = 0.0;
+    let mut nq3: f32 = 1.0;
+    if n > 0.0 {
+        let inv_n = 1.0 / n;
+        nq0 = r0 * inv_n;
+        nq1 = r1 * inv_n;
+        nq2 = r2 * inv_n;
+        nq3 = r3 * inv_n;
+    }
+    Pose32 {
+        x0: nx0,
+        x1: nx1,
+        x2: nx2,
+        v0: st.v0,
+        v1: st.v1,
+        v2: st.v2,
+        q0: nq0,
+        q1: nq1,
+        q2: nq2,
+        q3: nq3,
+        w0: st.w0,
+        w1: st.w1,
+        w2: st.w2,
+        inv_mass: st.inv_mass
+    }
+}
+
+fn place_core(
+    kind: u32,
+    in local_pts: Slice[f64],
+    local_off: u64,
+    n_pts: u64,
+    rad: f64,
+    p: Pose32,
+    inout dst: Slice[f64]
+) {
+    let x0 = widen_f64(p.x0);
+    let x1 = widen_f64(p.x1);
+    let x2 = widen_f64(p.x2);
+    if kind == 0 {
+        sf64(inout dst, 0, x0);
+        sf64(inout dst, 1, x1);
+        sf64(inout dst, 2, x2);
+        sf64(inout dst, 3, rad);
+        return;
+    }
+    let u0 = widen_f64(p.q0);
+    let u1 = widen_f64(p.q1);
+    let u2 = widen_f64(p.q2);
+    let qw = widen_f64(p.q3);
+    let mut i: u64 = 0;
+    loop {
+        if i >= n_pts {
+            break;
+        }
+        let sbase = wrapping_add(local_off, wrapping_mul(i, 3));
+        let v0 = gf64(in local_pts, sbase);
+        let v1 = gf64(in local_pts, wrapping_add(sbase, 1));
+        let v2 = gf64(in local_pts, wrapping_add(sbase, 2));
+        let c1x = u1 * v2 - u2 * v1;
+        let c1y = u2 * v0 - u0 * v2;
+        let c1z = u0 * v1 - u1 * v0;
+        let tx = 2.0 * c1x;
+        let ty = 2.0 * c1y;
+        let tz = 2.0 * c1z;
+        let c2x = u1 * tz - u2 * ty;
+        let c2y = u2 * tx - u0 * tz;
+        let c2z = u0 * ty - u1 * tx;
+        let dbase = wrapping_mul(i, 3);
+        sf64(inout dst, dbase, x0 + ((v0 + qw * tx) + c2x));
+        sf64(inout dst, wrapping_add(dbase, 1), x1 + ((v1 + qw * ty) + c2y));
+        sf64(inout dst, wrapping_add(dbase, 2), x2 + ((v2 + qw * tz) + c2z));
+        i = wrapping_add(i, 1);
+    }
+    if kind != 2 {
+        sf64(inout dst, wrapping_mul(n_pts, 3), rad);
+    }
+}
+
+// Returns 0 = None, 1 = Some(hit written to out_poses[0..14] and out_s[0]), or 2 + gjk_err.
+pub fn pair_toi(
+    in poses: Slice[f32],
+    ka: u32,
+    na: u64,
+    ra: f64,
+    kb: u32,
+    nb: u64,
+    rb: f64,
+    in local_pts: Slice[f64],
+    dt: f32,
+    gx: f32,
+    gy: f32,
+    gz: f32,
+    margin: f64,
+    target: f64,
+    mu: f64,
+    max_iter: u64,
+    inout va: Slice[f64],
+    inout vb: Slice[f64],
+    inout gjk_out: Slice[f64],
+    inout out_poses: Slice[f32],
+    inout out_s: Slice[f64]
+) -> u64 {
+    let sa0 = read_pose(in poses, 0);
+    let sb0 = read_pose(in poses, 14);
+    let b_off = wrapping_mul(na, 3);
+    place_core(ka, in local_pts, 0, na, ra, sa0, inout va);
+    place_core(kb, in local_pts, b_off, nb, rb, sb0, inout vb);
+    let st0 = g_separation(ka, in va, kb, in vb, inout gjk_out);
+    if st0 != 0 {
+        return wrapping_add(2, st0);
+    }
+    let mut d = gf64(in gjk_out, 0);
+    if d <= margin {
+        return 0;
+    }
+    let mut s: f64 = 0.0;
+    let mut iter: u64 = 0;
+    loop {
+        if iter >= max_iter {
+            break;
+        }
+        let step = (d - target) / mu;
+        s = s + step;
+        if s > 1.0 {
+            return 0;
+        }
+        let sf = nearest_f32(s);
+        let pa = ballistic(sa0, sf, dt, gx, gy, gz);
+        let pb = ballistic(sb0, sf, dt, gx, gy, gz);
+        place_core(ka, in local_pts, 0, na, ra, pa, inout va);
+        place_core(kb, in local_pts, b_off, nb, rb, pb, inout vb);
+        let st = g_separation(ka, in va, kb, in vb, inout gjk_out);
+        if st != 0 {
+            return wrapping_add(2, st);
+        }
+        d = gf64(in gjk_out, 0);
+        if d <= margin {
+            write_xq(inout out_poses, 0, pa);
+            write_xq(inout out_poses, 7, pb);
+            sf64(inout out_s, 0, s);
+            return 1;
+        }
+        iter = wrapping_add(iter, 1);
+    }
+    0
+}
