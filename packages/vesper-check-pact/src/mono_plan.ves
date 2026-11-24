@@ -748,20 +748,12 @@ fn plan_body(
     }
 }
 
-// Entrypoint for `check_pact_mono_plan`: `[session_input][mono_input][fn_has_dyn...]`.
-pub fn mono_plan_words(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader {
-        pos: 0
-    };
-    let mut sess = session_open_reader(inout r, in b);
-    let mut out = ChunkSeq::new[u64]();
-    let p_out = pack_text(in sess.out);
-    out.extend(in p_out.as_slice());
-    if !sess.ok {
-        out.push(0);
-        return out;
-    }
-    out.push(1);
+fn mono_plan_body(
+    inout sess: PactSession,
+    inout r: Reader,
+    in b: Slice[u8],
+    inout out: ChunkSeq[u64]
+) {
     let mut nmap = ChunkSeq::new[u32]();
     read_q_names(inout r, in b, inout sess.c.names, inout nmap);
     let mut tmap = ChunkSeq::new[u32]();
@@ -836,7 +828,7 @@ pub fn mono_plan_words(in b: Slice[u8]) -> ChunkSeq[u64] {
         out.extend(in pmsg.as_slice());
     }
     if errors.codes.len() > 0 {
-        return out;
+        return;
     }
     out.push(ps.clone_origin.len());
     for i in 0..ps.clone_origin.len() {
@@ -864,5 +856,34 @@ pub fn mono_plan_words(in b: Slice[u8]) -> ChunkSeq[u64] {
         let pt = pack_text(in tb);
         out.extend(in pt.as_slice());
     }
+}
+
+// Entrypoint for an already-open `PactSession`: `[mono_input][fn_has_dyn...]`.
+pub fn session_mono_plan_words(inout sess: PactSession, in b: Slice[u8]) -> ChunkSeq[u64] {
+    let mut r = Reader {
+        pos: 0
+    };
+    let mut out = ChunkSeq::new[u64]();
+    out.push(0);
+    out.push(1);
+    mono_plan_body(inout sess, inout r, in b, inout out);
+    out
+}
+
+// Entrypoint for `check_pact_mono_plan`: `[session_input][mono_input][fn_has_dyn...]`.
+pub fn mono_plan_words(in b: Slice[u8]) -> ChunkSeq[u64] {
+    let mut r = Reader {
+        pos: 0
+    };
+    let mut sess = session_open_reader(inout r, in b);
+    let mut out = ChunkSeq::new[u64]();
+    let p_out = pack_text(in sess.out);
+    out.extend(in p_out.as_slice());
+    if !sess.ok {
+        out.push(0);
+        return out;
+    }
+    out.push(1);
+    mono_plan_body(inout sess, inout r, in b, inout out);
     out
 }

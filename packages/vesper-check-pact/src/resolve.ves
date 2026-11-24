@@ -465,23 +465,11 @@ fn is_builtin_derive_trait(in names: Names, tname: u32) -> bool {
 }
 
 fn is_scalar_name(in names: Names, n: u32) -> bool {
-    sym_eq_str(in names, n, "i8")
-        || sym_eq_str(in names, n, "i16")
-        || sym_eq_str(in names, n, "i32")
-        || sym_eq_str(in names, n, "i64")
-        || sym_eq_str(in names, n, "i128")
-        || sym_eq_str(in names, n, "u8")
-        || sym_eq_str(in names, n, "u16")
+    sym_eq_str(in names, n, "u8")
         || sym_eq_str(in names, n, "u32")
         || sym_eq_str(in names, n, "u64")
-        || sym_eq_str(in names, n, "u128")
-        || sym_eq_str(in names, n, "f32")
-        || sym_eq_str(in names, n, "f64")
+        || sym_eq_str(in names, n, "i64")
         || sym_eq_str(in names, n, "bool")
-        || sym_eq_str(in names, n, "char")
-        || sym_eq_str(in names, n, "str")
-        || sym_eq_str(in names, n, "Str")
-        || sym_eq_str(in names, n, "String")
 }
 
 fn put_derive_hint(

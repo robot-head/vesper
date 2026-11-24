@@ -603,7 +603,85 @@ impl vesper::pact_frontend::VesperPactSession for VesperPactSessionImpl {
         PACT_CALLS.fetch_add(1, Relaxed);
         res
     }
+
+    fn mono_check(
+        &self,
+        input: &vesper::pact_frontend::MonoCheckOutcome,
+    ) -> Option<Result<Vec<bool>, Vec<vesper_core::ast::Diagnostic>>> {
+        let timer = stats::Timer::start();
+        let bytes = pact_words::encode_mono_body(input, &[]);
+        let timer = timer.lap(&stats::PACT.encode);
+        let words = {
+            let mut sess = self.inner.lock().expect("pact session mutex");
+            pact_binding::pact_session_mono_check(&mut sess, &bytes)
+        };
+        let timer = timer.lap(&stats::PACT.vesper);
+        let (_session_diags, ok, bounded, errors) = pact_words::decode_mono_check(&words);
+        timer.lap(&stats::PACT.decode);
+        PACT_CALLS.fetch_add(1, Relaxed);
+        if !ok {
+            return None;
+        }
+        if errors.is_empty() {
+            Some(Ok(bounded))
+        } else {
+            Some(Err(errors))
+        }
+    }
 }
+
+/// `builtin_traits::wanted` from `modules/pact` (SH2 lane 13, `#1185`).
+const VESPER_BUILTIN_WANTED: vesper::pact_frontend::BuiltinWantedTable =
+    vesper::pact_frontend::BuiltinWantedTable {
+        wanted: |module| {
+            let timer = stats::Timer::start();
+            let input = pact_words::encode_builtin_wanted(module);
+            let timer = timer.lap(&stats::PACT.encode);
+            let words = pact_binding::pact_builtin_wanted(&input);
+            let timer = timer.lap(&stats::PACT.vesper);
+            let wanted = words.first().copied().unwrap_or(0) != 0;
+            timer.lap(&stats::PACT.decode);
+            PACT_CALLS.fetch_add(1, Relaxed);
+            Some(wanted)
+        },
+    };
+
+/// `Frontend::add_dependency` declaration pass from `modules/pact` (SH2 lane 13, `#1185`).
+const VESPER_DEPS_PASS: vesper::pact_frontend::DepsPassTable =
+    vesper::pact_frontend::DepsPassTable {
+        diagnostics: |module, base_world, identity, deps| {
+            let timer = stats::Timer::start();
+            let dep_worlds: Vec<_> = deps
+                .iter()
+                .map(|d| vesper::check::World::collect(&d.module).0)
+                .collect();
+            let dep_refs: Vec<_> = deps
+                .iter()
+                .zip(&dep_worlds)
+                .map(|(d, w)| {
+                    (
+                        d.identity.name.as_str(),
+                        d.identity.version.as_str(),
+                        &d.module,
+                        w,
+                    )
+                })
+                .collect();
+            let input = pact_words::encode_deps_input(
+                module,
+                base_world,
+                &identity.to_string(),
+                &dep_refs,
+            )?;
+            let timer = timer.lap(&stats::PACT.encode);
+            let words = pact_binding::pact_deps_words(&input);
+            let timer = timer.lap(&stats::PACT.vesper);
+            let diagnostics = pact_words::decode_declarations(&words);
+            timer.lap(&stats::PACT.decode);
+            PACT_CALLS.fetch_add(1, Relaxed);
+            Some(diagnostics)
+        },
+    };
 
 /// Full coherence-gated Pact session from `modules/pact` (SH2 lane 13 part 2b).
 const VESPER_PACT_SESSION: vesper::pact_frontend::PactSessionTable =
@@ -1523,6 +1601,12 @@ extern "C" fn install() {
         std::process::abort();
     }
     if vesper::pact_frontend::install_pact_session(VESPER_PACT_SESSION).is_err() {
+        std::process::abort();
+    }
+    if vesper::pact_frontend::install_builtin_wanted(VESPER_BUILTIN_WANTED).is_err() {
+        std::process::abort();
+    }
+    if vesper::pact_frontend::install_deps_pass(VESPER_DEPS_PASS).is_err() {
         std::process::abort();
     }
     if std::env::var_os("VESPER_HYBRID_STATS").is_some_and(|v| v == "1" || v == "time") {

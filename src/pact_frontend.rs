@@ -201,10 +201,11 @@ fn check_lowered_package(
         };
         module
     };
-    if !has_frontend_syntax(module)
-        && !builtin_traits::wanted(module)
-        && options.dependencies.is_empty()
-    {
+    let builtin_wanted = BUILTIN_WANTED
+        .get()
+        .and_then(|t| (t.wanted)(module))
+        .unwrap_or_else(|| builtin_traits::wanted(module));
+    if !has_frontend_syntax(module) && !builtin_wanted && options.dependencies.is_empty() {
         let checked = check::check_core(module, None).0;
         return FrontendChecked {
             checked,
@@ -230,7 +231,7 @@ fn check_lowered_package(
     }
     let spans = mono::SpanMap::new(module);
     let injected;
-    let module = if builtin_traits::wanted(module) {
+    let module = if builtin_wanted {
         let (stripped, items, owners) = match builtin_traits::prelude(module) {
             Ok(p) => p,
             Err(d) => return fail(d, empty),
@@ -266,6 +267,14 @@ fn check_lowered_package(
         if options.dependencies.is_empty()
             && let Some(table) = DECLARATION_PASS.get()
             && let Some(d) = (table.diagnostics)(module, &base_world, identity)
+            && !d.is_empty()
+        {
+            return fail(d, empty);
+        }
+        if !options.dependencies.is_empty()
+            && let Some(table) = DEPS_PASS.get()
+            && let Some(d) =
+                (table.diagnostics)(module, &base_world, identity, &options.dependencies)
             && !d.is_empty()
         {
             return fail(d, empty);
@@ -462,6 +471,44 @@ pub struct PactQuery<'a> {
 pub trait VesperPactSession: Send + Sync {
     fn revision(&self) -> &str;
     fn solve(&self, query: &PactQuery<'_>) -> Result<(usize, String), (u8, String)>;
+    fn mono_check(&self, _input: &MonoCheckOutcome) -> Option<Result<Vec<bool>, Vec<Diagnostic>>> {
+        None
+    }
+    #[allow(clippy::type_complexity)]
+    fn mono_plan(
+        &self,
+        _input: &MonoCheckOutcome,
+    ) -> Option<Result<(Vec<(String, String)>, Vec<(String, usize, usize, String)>), Vec<Diagnostic>>>
+    {
+        None
+    }
+}
+
+/// Swap-in point for `builtin_traits::wanted` (SH2 lane 13, `#1185`).
+#[derive(Clone, Copy)]
+pub struct BuiltinWantedTable {
+    pub wanted: fn(&Module) -> Option<bool>,
+}
+
+static BUILTIN_WANTED: std::sync::OnceLock<BuiltinWantedTable> = std::sync::OnceLock::new();
+
+pub fn install_builtin_wanted(table: BuiltinWantedTable) -> Result<(), BuiltinWantedTable> {
+    BUILTIN_WANTED.set(table)
+}
+
+pub type DepsPassFn =
+    fn(&Module, &World, &PackageIdentity, &[Dependency]) -> Option<Vec<Diagnostic>>;
+
+/// Swap-in point for `Frontend::add_dependency` declaration validation (SH2 lane 13, `#1185`).
+#[derive(Clone, Copy)]
+pub struct DepsPassTable {
+    pub diagnostics: DepsPassFn,
+}
+
+static DEPS_PASS: std::sync::OnceLock<DepsPassTable> = std::sync::OnceLock::new();
+
+pub fn install_deps_pass(table: DepsPassTable) -> Result<(), DepsPassTable> {
+    DEPS_PASS.set(table)
 }
 
 /// Result of opening a Vesper-backed Pact session.

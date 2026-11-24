@@ -647,12 +647,6 @@ impl Elaborator {
     /// Differential probe for `Mono::close_bounded` and `Mono::check_obligations` (`#1659`).
     pub(super) fn probe_mono_check_step(&self, module: &Module, world: &World) -> MonoCheckOutcome {
         let funcs = collect_mono_funcs(module);
-        let fn_names: Vec<String> = funcs.keys().cloned().collect();
-        let fn_index: BTreeMap<String, usize> = fn_names
-            .iter()
-            .enumerate()
-            .map(|(i, n)| (n.clone(), i))
-            .collect();
         let mut m = Mono {
             el: self,
             world,
@@ -661,7 +655,7 @@ impl Elaborator {
                 .filter(|n| !self.bounds_of(n).is_empty() || n.starts_with(STUB))
                 .cloned()
                 .collect(),
-            funcs: funcs.clone(),
+            funcs,
             instances: BTreeMap::new(),
             names: BTreeSet::new(),
             clones: vec![],
@@ -669,19 +663,38 @@ impl Elaborator {
             record_rewrites: false,
             rewrites: vec![],
         };
+        let mut outcome = m.build_input();
+        m.close_bounded();
+        m.check_obligations();
+        outcome.bounded = m.funcs.keys().map(|n| m.bounded.contains(n)).collect();
+        outcome.errors = m.errors;
+        outcome
+    }
+}
+
+impl Mono<'_> {
+    fn build_input(&self) -> MonoCheckOutcome {
+        let fn_names: Vec<String> = self.funcs.keys().cloned().collect();
+        let fn_index: BTreeMap<String, usize> = fn_names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (n.clone(), i))
+            .collect();
         let mut func_inputs = Vec::with_capacity(fn_names.len());
         for name in &fn_names {
-            let f = &m.funcs[name];
-            let scopes = scopes_at(&self.fe.module, f.span.start)
+            let f = &self.funcs[name];
+            let scopes = scopes_at(&self.el.fe.module, f.span.start)
                 .into_iter()
                 .map(|layer| layer.into_iter().map(|r| r.name).collect::<Vec<_>>())
                 .collect();
             let is_conf_generated = self
+                .el
                 .fe
                 .confs
                 .iter()
                 .any(|c| c.local && c.generated.values().any(|g| g == name));
             let all_bounds = self
+                .el
                 .fe
                 .bounds
                 .get(name)
@@ -696,6 +709,7 @@ impl Elaborator {
                 })
                 .unwrap_or_default();
             let bounds = self
+                .el
                 .bounds_of(name)
                 .into_iter()
                 .map(|b| MonoBoundInput {
@@ -704,12 +718,12 @@ impl Elaborator {
                     args: b.args,
                 })
                 .collect();
-            let calls = m
+            let calls = self
                 .calls_in(f)
                 .into_iter()
                 .filter_map(|(span, callee, vars)| {
                     let callee_idx = *fn_index.get(&callee)?;
-                    let scopes = scopes_at(&self.fe.module, span.start)
+                    let scopes = scopes_at(&self.el.fe.module, span.start)
                         .into_iter()
                         .map(|layer| layer.into_iter().map(|r| r.name).collect::<Vec<_>>())
                         .collect();
@@ -734,7 +748,7 @@ impl Elaborator {
                     && let Some(&target) = fn_index.get(n)
                     && !callees.contains(&(e.span.start, e.span.end))
                     && matches!(
-                        world.types.get(&(e.span.start, e.span.end)),
+                        self.world.types.get(&(e.span.start, e.span.end)),
                         Some(Type::Function { .. })
                     )
                 {
@@ -743,9 +757,9 @@ impl Elaborator {
             });
             let mut walked_types = vec![];
             walk_function(&mut probe, &mut |t| walked_types.push(t.clone()));
-            if !self.spans.is_builtin(&f.span) {
+            if !self.el.spans.is_builtin(&f.span) {
                 walked_types.extend(
-                    world
+                    self.world
                         .types
                         .range((f.span.start, 0)..=(f.span.end, usize::MAX))
                         .map(|(_, t)| t.clone()),
@@ -757,7 +771,7 @@ impl Elaborator {
                 generics: f.generics.clone(),
                 scopes,
                 is_conf_generated,
-                has_dyn: self.dyn_params_of(name).is_some(),
+                has_dyn: self.el.dyn_params_of(name).is_some(),
                 all_bounds,
                 bounds,
                 calls,
@@ -765,10 +779,8 @@ impl Elaborator {
                 walked_types,
             });
         }
-        m.close_bounded();
-        m.check_obligations();
-        let bounded = fn_names.iter().map(|n| m.bounded.contains(n)).collect();
         let adts = self
+            .el
             .fe
             .base_world
             .adts
@@ -779,6 +791,7 @@ impl Elaborator {
             })
             .collect();
         let type_bounds = self
+            .el
             .fe
             .type_bounds
             .iter()
@@ -791,16 +804,18 @@ impl Elaborator {
             })
             .collect();
         MonoCheckOutcome {
-            module: self.fe.module.clone(),
-            base_world: self.fe.base_world.clone(),
+            module: self.el.fe.module.clone(),
+            base_world: self.el.fe.base_world.clone(),
             adts,
             type_bounds,
             funcs: func_inputs,
-            bounded,
-            errors: m.errors,
+            bounded: vec![],
+            errors: vec![],
         }
     }
+}
 
+impl Elaborator {
     /// Differential probe for `Mono::evidence`, `Mono::instance`, and
     /// `Mono::instantiate_body` (`#1668`).
     pub(super) fn probe_mono_plan_step(&self, module: &Module, world: &World) -> MonoPlanOutcome {
@@ -882,10 +897,30 @@ impl Elaborator {
             record_rewrites: false,
             rewrites: vec![],
         };
-        m.close_bounded();
-        m.check_obligations();
-        if !m.errors.is_empty() {
-            return Err(m.errors);
+        let vesper_bounded = if let SessionBackend::Vesper(vs) = &self.session {
+            let input = m.build_input();
+            match vs.mono_check(&input) {
+                Some(Ok(flags)) => {
+                    m.bounded = input
+                        .funcs
+                        .into_iter()
+                        .zip(flags)
+                        .filter_map(|(f, is_b)| is_b.then_some(f.name))
+                        .collect();
+                    true
+                }
+                Some(Err(errors)) => return Err(errors),
+                None => false,
+            }
+        } else {
+            false
+        };
+        if !vesper_bounded {
+            m.close_bounded();
+            m.check_obligations();
+            if !m.errors.is_empty() {
+                return Err(m.errors);
+            }
         }
         // Instantiate from every unbounded function.
         let roots: Vec<String> = m
