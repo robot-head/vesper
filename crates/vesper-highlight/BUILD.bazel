@@ -78,6 +78,7 @@ vesper_crate(
         "//:examples",
         "//:website",
     ],
+    extra_test_data = ["//:vesper_sources"],
 )
 
 # The seed package (seed/) builds these same Rust sources without the port.
