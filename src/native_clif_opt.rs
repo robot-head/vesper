@@ -3781,13 +3781,8 @@ fn propagate_branch_conditions(func: &mut ir::Function) {
         return;
     };
 
-    fn walk(
-        func: &mut ir::Function,
-        block: Block,
-        cfg: &ControlFlowGraph,
-        dom_children: &HashMap<Block, Vec<Block>>,
-        known: HashMap<Value, bool>,
-    ) {
+    let mut stack: Vec<(Block, HashMap<Value, bool>)> = vec![(entry, HashMap::new())];
+    while let Some((block, mut known)) = stack.pop() {
         let insts: Vec<Inst> = func.layout.block_insts(block).collect();
         for inst in insts {
             if let InstructionData::Ternary {
@@ -3837,9 +3832,13 @@ fn propagate_branch_conditions(func: &mut ir::Function) {
         }
 
         if let Some(children) = dom_children.get(&block) {
-            for &child in children {
+            for (idx, &child) in children.iter().enumerate() {
                 let mut child_known = if cfg.pred_iter(child).count() == 1 {
-                    known.clone()
+                    if idx + 1 == children.len() {
+                        std::mem::take(&mut known)
+                    } else {
+                        known.clone()
+                    }
                 } else {
                     HashMap::new()
                 };
@@ -3848,12 +3847,10 @@ fn propagate_branch_conditions(func: &mut ir::Function) {
                         child_known.insert(cond, val);
                     }
                 }
-                walk(func, child, cfg, dom_children, child_known);
+                stack.push((child, child_known));
             }
         }
     }
-
-    walk(func, entry, &cfg, &dom_children, HashMap::new());
 }
 
 fn resolve_base_offset(func: &ir::Function, mut addr: Value, mut off: i64) -> (Value, i64) {
