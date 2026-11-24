@@ -63,4 +63,9 @@ const EDITS: &[(&str, &str)] = &[
     ("        if d <= margin {\n", "        if d < -1.0 {\n"),
     // rigid.rs (manifold): narrowphase always reports no contact.
     ("    if d0 > margin {\n", "    if d0 <= margin {\n"),
+    // rigid/sleep.rs: quiet islands never fall asleep.
+    (
+        "if g8(in island_awake, r) == 0 {",
+        "if g8(in island_awake, r) != 0 {",
+    ),
 ];

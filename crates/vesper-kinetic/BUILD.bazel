@@ -103,6 +103,12 @@ filegroup(
             "    if d0 > margin {\n",
             "    if d0 <= margin {\n",
         ),
+        (
+            "sleep",
+            "sleep",
+            "if g8(in island_awake, r) == 0 {",
+            "if g8(in island_awake, r) != 0 {",
+        ),
     ]
 ]
 
