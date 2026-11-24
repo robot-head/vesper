@@ -3564,8 +3564,8 @@ impl<M: Module> Codegen<'_, '_, M> {
                     && let Type::Named(_, args) = ty
                     && let Some(elem_ty) = args.first()
                 {
-                    let elem_layout = Layout::of(self.world, elem_ty)?;
-                    let stride = u64::from(elem_layout.size.max(1));
+                    // The same byte width the constructor registered.
+                    let stride = crate::seq::elem_bytes(self.world, elem_ty)?.max(1) as u64;
                     let handle = self
                         .b
                         .ins()
@@ -6499,9 +6499,12 @@ impl<M: Module> Codegen<'_, '_, M> {
             && let Type::Named(_, args) = ty
             && let Some(elem_ty) = args.first()
         {
-            let elem_layout = Layout::of(self.world, elem_ty)?;
-            let stride = u64::from(elem_layout.size.max(1));
-            let align = u64::from(elem_layout.size.clamp(1, 8));
+            // The buffer's element width in bytes, as `ChunkSeq` stores it
+            // (`Layout::of` gives a scalar's word-sized slot: registering
+            // `len * 8` bytes of a `Pinned[u8]` would claim memory past the
+            // buffer and trap on an unrelated mapping allocated there).
+            let stride = crate::seq::elem_bytes(self.world, elem_ty)?.max(1) as u64;
+            let align = stride.clamp(1, 8);
             let handle = self
                 .b
                 .ins()

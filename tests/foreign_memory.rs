@@ -942,6 +942,23 @@ fn checked_aliasing_rule_runtime_traps_and_reuse_after_release() {
                 0
             }"
             .to_string(),
+            // A mapping that starts where a pinned buffer ends does not
+            // overlap it: the buffer registers its bytes (16 u32s are 64),
+            // not one word per element.
+            "adjacent_to_pinned" => "pub fn run() -> u64 eff [Ffi[Alias]] {
+                let mut b = ChunkSeq::with_capacity[u32](16);
+                b.resize(16, 1);
+                let p = Pinned { data: b };
+                let addr = p.address();
+                let m = match Alias::map_fixed(wrapping_add(addr, 64), 4) {
+                    Some(m) => m,
+                    None => { let Pinned { data } = p; return 1 }
+                };
+                Alias::unmap_fixed(m);
+                let Pinned { data } = p;
+                42
+            }"
+            .to_string(),
             "misaligned_mapping" => format!(
                 "pub fn run() -> u64 eff [Ffi[Alias]] {{
                     let m = match Alias::map_fixed({}, 4) {{ Some(m) => m, None => return 1 }};
@@ -980,6 +997,7 @@ fn checked_aliasing_rule_runtime_traps_and_reuse_after_release() {
         ("overlap_mapping_and_pinned", false),
         ("misaligned_mapping", false),
         ("reuse_after_release", true),
+        ("adjacent_to_pinned", true),
     ] {
         let out = std::process::Command::new(&exe)
             .args([
