@@ -46,4 +46,7 @@ const DIVERGENT: &[(&str, &str)] = &[
         "                    } else if op == 4 {\n                        2",
         "                    } else if op == 4 {\n                        4",
     ),
+    // page.rs (vesper/src/page.ves): unsupported header check disabled;
+    // pages corruption_and_wrong_sizes_are_rejected_before_trusting_offsets fails.
+    ("if kind != 1 || level != 0 || flags != 0 {", "if false {"),
 ];

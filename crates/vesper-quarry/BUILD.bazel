@@ -58,6 +58,9 @@ PORT_DIVERGENT = {
     "stats": ("vesper/src/stats.ves", {
         "                    } else if op == 4 {\n                        2": "                    } else if op == 4 {\n                        4",
     }),
+    "page": ("vesper/src/page.ves", {
+        "if kind != 1 || level != 0 || flags != 0 {": "if false {",
+    }),
 }
 
 [

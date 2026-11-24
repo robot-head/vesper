@@ -751,6 +751,7 @@ const _: () = assert!(<Raw as Abi>::WORDS == 5);
 const _: () = assert!(<Rng as Abi>::WORDS == 2);
 const _: () = assert!(<Sel as Abi>::WORDS == 3);
 const _: () = assert!(<Tok as Abi>::WORDS == 4);
+const _: () = assert!(<u64 as Abi>::WORDS == 1);
 
 unsafe extern "C" {
     fn vesper_quarry_seq_new(capacity: i64, stride: i64) -> i64;
@@ -761,6 +762,10 @@ unsafe extern "C" {
     fn vesper_quarry_ddl_apply(result: *mut u64, meta: *mut u64, text: *mut u64, revision: i64, sql: *mut u64, limits: *mut u64) -> i64;
     fn vesper_quarry_execute(result: *mut u64, prog: *mut u64, text: *mut u64) -> i64;
     fn vesper_quarry_optimize(result: *mut u64, plan: *mut u64) -> i64;
+    fn vesper_quarry_page_insert(b: *mut u64, record: *mut u64) -> i64;
+    fn vesper_quarry_page_update(b: *mut u64, slot: i64, record: *mut u64, scratch: *mut u64) -> i64;
+    fn vesper_quarry_page_used_bytes(b: *mut u64) -> i64;
+    fn vesper_quarry_page_validate(b: *mut u64, seen: *mut u64) -> i64;
     fn vesper_quarry_prepare(result: *mut u64, tabs: *mut u64, cols: *mut u64, meta: *mut u64, text: *mut u64, sql: *mut u64, limits: *mut u64) -> i64;
     fn vesper_quarry_set_rows(result: *mut u64, prog: *mut u64, text: *mut u64) -> i64;
 }
@@ -815,6 +820,42 @@ pub fn optimize(plan: &[u64]) -> Q {
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_slice(plan, |view_plan| unsafe { vesper_quarry_optimize(result.as_mut_ptr(), view_plan) });
     unsafe { Q::from_words(&result[0..]) }
+}
+
+/// Calls `page_insert` of the Vesper library `quarry` (`vesper_quarry_page_insert`).
+pub fn page_insert(b: &mut [u8], record: &[u8]) -> u64 {
+    // SAFETY: `vesper_quarry_page_insert` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice_mut(b, |view_b| vesper_port_abi::with_slice(record, |view_record| unsafe { vesper_quarry_page_insert(view_b, view_record) }));
+    raw as u64
+}
+
+/// Calls `page_update` of the Vesper library `quarry` (`vesper_quarry_page_update`).
+pub fn page_update(b: &mut [u8], slot: u64, record: &[u8], scratch: &mut [u8]) -> u64 {
+    // SAFETY: `vesper_quarry_page_update` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice_mut(b, |view_b| vesper_port_abi::with_slice(record, |view_record| vesper_port_abi::with_slice_mut(scratch, |view_scratch| unsafe { vesper_quarry_page_update(view_b, slot as i64, view_record, view_scratch) })));
+    raw as u64
+}
+
+/// Calls `page_used_bytes` of the Vesper library `quarry` (`vesper_quarry_page_used_bytes`).
+pub fn page_used_bytes(b: &[u8]) -> u64 {
+    // SAFETY: `vesper_quarry_page_used_bytes` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(b, |view_b| unsafe { vesper_quarry_page_used_bytes(view_b) });
+    raw as u64
+}
+
+/// Calls `page_validate` of the Vesper library `quarry` (`vesper_quarry_page_validate`).
+pub fn page_validate(b: &[u8], seen: &mut [u64]) -> u64 {
+    // SAFETY: `vesper_quarry_page_validate` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(b, |view_b| vesper_port_abi::with_slice_mut(seen, |view_seen| unsafe { vesper_quarry_page_validate(view_b, view_seen) }));
+    raw as u64
 }
 
 /// Calls `prepare` of the Vesper library `quarry` (`vesper_quarry_prepare`).
