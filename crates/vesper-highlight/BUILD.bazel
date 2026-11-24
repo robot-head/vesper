@@ -74,7 +74,10 @@ vesper_crate(
         "VESPER_PORT_OBJECT": "$(execpath :highlight_vesper)",
         "VESPER_PORT_GENERATED_BINDING": "$(execpath :highlight_vesper_binding)",
     },
-    extra_compile_data = ["//:website"],
+    extra_compile_data = [
+        "//:examples",
+        "//:website",
+    ],
 )
 
 # The seed package (seed/) builds these same Rust sources without the port.
