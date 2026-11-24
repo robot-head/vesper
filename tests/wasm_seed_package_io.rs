@@ -1347,8 +1347,24 @@ fn wasm_backend_emits_runnable_core_under_seed_runner() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+fn with_large_stack<F>(f: F)
+where
+    F: FnOnce() + Send + 'static,
+{
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(f)
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
 #[test]
 fn stage2_collects_package_under_wasi() {
+    with_large_stack(stage2_collects_package_under_wasi_impl);
+}
+
+fn stage2_collects_package_under_wasi_impl() {
     let dir = fresh("stage2-collect");
     let sample_dir = dir.join("sample");
     let runner_dir = dir.join("runner");
@@ -1425,12 +1441,7 @@ fn stage2_collects_package_under_wasi() {
 
 #[test]
 fn stage2_compiles_package_to_runnable_wasm() {
-    std::thread::Builder::new()
-        .stack_size(16 * 1024 * 1024)
-        .spawn(stage2_compiles_package_to_runnable_wasm_impl)
-        .unwrap()
-        .join()
-        .unwrap();
+    with_large_stack(stage2_compiles_package_to_runnable_wasm_impl);
 }
 
 fn stage2_compiles_package_to_runnable_wasm_impl() {
@@ -1543,6 +1554,10 @@ fn stage2_compiles_package_to_runnable_wasm_impl() {
 
 #[test]
 fn stage2_compiles_vesper_ast() {
+    with_large_stack(stage2_compiles_vesper_ast_impl);
+}
+
+fn stage2_compiles_vesper_ast_impl() {
     let dir = fresh("stage2-ast");
     let runner_dir = dir.join("runner");
     std::fs::create_dir_all(runner_dir.join("src")).unwrap();
@@ -1563,7 +1578,7 @@ fn stage2_compiles_vesper_ast() {
         runner_dir.join("src/lib.ves"),
         "use @vesper/stage2::stage2_compile_dir;\n\
          pub fn main() -> u64 eff [Ffi[StdFs]] {\n\
-             let (code, val) = stage2_compile_dir(in \"packages/vesper-stage2\", in \"target/tmp_stage2_ast_out.wasm\", in \"main\");\n\
+             let (code, val) = stage2_compile_dir(in \"packages/vesper-stage2\", in \"/out/tmp_stage2_ast_out.wasm\", in \"main\");\n\
              wrapping_add(wrapping_mul(code, 1000000), val)\n\
          }\n",
     )
@@ -1576,12 +1591,12 @@ fn stage2_compiles_vesper_ast() {
     let mut o = options(false);
     o.max_memory_pages = 65535;
     let component = port(&checked, &o).expect("compile @vesper/stage2 to wasm");
-    let ast_out_path = repo().join("target/tmp_stage2_ast_out.wasm");
+    let ast_out_path = dir.join("tmp_stage2_ast_out.wasm");
     remove_stage2_sidecars(&ast_out_path);
     let got = run(
         &component,
         &Ctx {
-            dirs: vec![(repo(), ".".into())],
+            dirs: vec![(repo(), ".".into()), (dir.clone(), "/out".into())],
             fuel: Some(u64::MAX),
             diag_base: Some(ast_out_path.clone()),
             ..Ctx::default()
@@ -1603,6 +1618,10 @@ fn stage2_compiles_vesper_ast() {
 
 #[test]
 fn stage2_self_compilation_fixed_point() {
+    with_large_stack(stage2_self_compilation_fixed_point_impl);
+}
+
+fn stage2_self_compilation_fixed_point_impl() {
     let dir = fresh("stage2-fixed-point");
     let stage2_pkg = repo().join("packages/vesper-stage2");
     let assembled = vesper::packages::load_for_target(&stage2_pkg, Some("wasm32-wasip2"), false)
@@ -1611,10 +1630,10 @@ fn stage2_self_compilation_fixed_point() {
     let checked = vesper::ffi_lowering::check_module(&assembled.module, &imports()).expect("check");
     let mut o = options(false);
     o.max_memory_pages = 65535;
-    let stage2_rel = "target/tmp_stage2_fp.wasm";
-    let stage3_rel = "target/tmp_stage3_fp.wasm";
-    let stage2_path = repo().join(stage2_rel);
-    let stage3_path = repo().join(stage3_rel);
+    let stage2_guest = "/out/tmp_stage2_fp.wasm";
+    let stage3_guest = "/out/tmp_stage3_fp.wasm";
+    let stage2_path = dir.join("tmp_stage2_fp.wasm");
+    let stage3_path = dir.join("tmp_stage3_fp.wasm");
     let boot_syms_path = sidecar_path(&stage2_path, ".boot.syms");
     remove_stage2_sidecars(&stage2_path);
     remove_stage2_sidecars(&stage3_path);
@@ -1625,9 +1644,9 @@ fn stage2_self_compilation_fixed_point() {
     let got = run(
         &boot_component,
         &Ctx {
-            args: vec!["stage2", "packages/vesper-stage2", stage2_rel, "main"],
+            args: vec!["stage2", "packages/vesper-stage2", stage2_guest, "main"],
             env: vec![("VESPER_STAGE2_SYMS", "1")],
-            dirs: vec![(repo(), ".".into())],
+            dirs: vec![(repo(), ".".into()), (dir.clone(), "/out".into())],
             fuel: Some(u64::MAX),
             diag_base: Some(stage2_path.clone()),
             syms_file: Some(boot_syms_path.clone()),
@@ -1655,9 +1674,9 @@ fn stage2_self_compilation_fixed_point() {
     let got3 = run(
         &stage2_component,
         &Ctx {
-            args: vec!["stage2", "packages/vesper-stage2", stage3_rel, "main"],
+            args: vec!["stage2", "packages/vesper-stage2", stage3_guest, "main"],
             env: vec![("VESPER_STAGE2_SYMS", "1")],
-            dirs: vec![(repo(), ".".into())],
+            dirs: vec![(repo(), ".".into()), (dir.clone(), "/out".into())],
             fuel: Some(u64::MAX),
             diag_base: Some(stage3_path.clone()),
             syms_file: Some(stage2_syms),
@@ -1688,6 +1707,10 @@ fn stage2_self_compilation_fixed_point() {
 
 #[test]
 fn stage2_compiles_package_under_seed_runner() {
+    with_large_stack(stage2_compiles_package_under_seed_runner_impl);
+}
+
+fn stage2_compiles_package_under_seed_runner_impl() {
     let dir = fresh("stage2-seed-runner");
     let sample_dir = dir.join("sample");
     std::fs::create_dir_all(sample_dir.join("src")).unwrap();

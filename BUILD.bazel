@@ -68,6 +68,7 @@ vesper_crate(
         "test/lean4lean_normalized_completion42",
         "test/lean4lean_map_tree42",
         "test/resource_oracle42",
+        "test/wasm_seed_package_io",
     ],
     extra_integration_compile_data = [
         "//crates/vesper-doc:files",
@@ -128,6 +129,8 @@ vesper_crate(
         "test/imported_source_tests": glob([
             "packages/vesper-ast/Loom.toml",
             "packages/vesper-ast/src/*.ves",
+            "packages/vesper-check-data/Loom.toml",
+            "packages/vesper-check-data/src/*.ves",
             "packages/vesper-front/Loom.toml",
             "packages/vesper-front/src/*.ves",
             "packages/vesper-std/*/Loom.toml",
@@ -169,6 +172,7 @@ vesper_crate(
             "src/**/*.ves",
             "tests/**/*.ves",
             "packages/vesper-ast/**",
+            "packages/vesper-check-data/**",
             "packages/vesper-front/**",
             "packages/vesper-std/**",
             "tests/self_host_parse.rs",
@@ -671,6 +675,7 @@ vesper_crate(
             "src/lsp/fixtures/**",
             "packages/vesper-lsp-features/**",
             "packages/vesper-ast/**",
+            "packages/vesper-check-data/**",
             "packages/vesper-front/**",
             "packages/vesper-std/**",
         ]) + [
@@ -759,7 +764,10 @@ vesper_crate(
             "EstimatedMemory": "5GiB",
         },
     },
-    test_path_binaries = {"test/self_host_front_end": []},
+    test_path_binaries = {
+        "test/self_host_front_end": [],
+        "test/wasm_seed_package_io": [],
+    },
     # The corpus implements TEST_TOTAL_SHARDS/TEST_SHARD_INDEX itself
     # (tests/common/corpus_shard.rs). The others were the slow tail of
     # "Test all targets" (8-9 min each), which hit BuildBuddy's 1-hour limit.
@@ -1234,6 +1242,7 @@ vesper_package(
     manifest = "packages/vesper-ast/Loom.toml",
     visibility = ["//visibility:public"],
     deps = [
+        ":check_data_package",
         ":front_package",
         ":std_arena_package",
         ":std_intern_package",

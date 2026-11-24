@@ -6,6 +6,7 @@ use @vesper-std/fs::{
     IoError,
     kind_dir,
     kind_file,
+    kind_symlink,
     read_path
 };
 use @vesper-std/fs::walk::{
@@ -842,13 +843,13 @@ fn scan_dir_mods(
         };
         let nb = nm.as_bytes();
         let k = entry_kind(in entries, i);
-        if k == kind_file() {
-            if !ends_with_ves(in nb)
-                || slice_eq_lit(in nb, in "lib.ves")
-                || slice_eq_lit(in nb, in "main.ves")
-                || slice_eq_lit(in nb, in "mod.ves") {
-                continue;
-            }
+        let is_file_candidate = (k == kind_file() || k == kind_symlink())
+            && ends_with_ves(in nb)
+            && !slice_eq_lit(in nb, in "lib.ves")
+            && !slice_eq_lit(in nb, in "main.ves")
+            && !slice_eq_lit(in nb, in "mod.ves");
+        let mut is_dir = k == kind_dir();
+        if is_file_candidate {
             let p1 = entry_join(in dir, in entries, i);
             let mut next_segs = ChunkSeq::new[ChunkSeq[u8]]();
             for j in 0..segs.len() {
@@ -878,10 +879,17 @@ fn scan_dir_mods(
                             inout mods
                         );
                     },
-                    Option::None => {},
+                    Option::None => {
+                        if k == kind_symlink() {
+                            is_dir = true;
+                        }
+                    },
                 }
             }
-        } else if k == kind_dir() {
+        } else if k == kind_symlink() && !ends_with_ves(in nb) {
+            is_dir = true;
+        }
+        if is_dir {
             let sub_dir = entry_join(in dir, in entries, i);
             let mut next_segs = ChunkSeq::new[ChunkSeq[u8]]();
             for j in 0..segs.len() {
