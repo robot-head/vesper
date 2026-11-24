@@ -140,13 +140,15 @@ branch is linked from the PR.
    (#1189) carry `Box` trees, which this flat design does not use; a
    lane-4 `CheckInput` handle of `ChunkSeq` tables would remove the copy.
 
+## Part 2: the hybrid swap (#1826, part of #1184)
+
+- Added `FipCheckTable` + `install_fip_check` in `src/fip.rs` (`check_world`).
+- Added `check_fip_bytes` in `packages/vesper-check-fip/src/lib.ves`, shared `tests/common/fip_words.rs` (`encode_world` / `decode_diagnostics`), and `crates/vesper-hybrid/modules/fip` (`port/fip.rs`, ABI v4) wired via `VESPER_FIP_CHECK` in `crates/vesper-hybrid/src/hybrid.rs`.
+- `vesper-hybrid` `differential`: `5/5` passed, `0` of `2,202` runs differ across `554` files (default `231.22 s`, hybrid `108.78 s`, `0.470x`).
+
 ## What is left
 
-- **Part 2: the hybrid swap.** A swap point for `fip::check_world` in
-  `src/fip.rs` (a function table like `layout::install_word_layout`), the
-  module `crates/vesper-hybrid/modules/fip` with its binding, the encoder
-  moved where the hybrid crate can use it, the divergence check, the full
-  suite on the hybrid build, and the swap's scoreboard numbers.
+- Callgrind Ir counts for the hybrid swap and retiring the hand-encoded `fip_words` boundary once ABI v4 owned trees / `CheckInput` land.
 - **Part 3: the drop elaboration.** The rest of `src/fip.rs` works on the
   Place IR rather than the AST (`elaborate_non_fip_drops`,
   `loop_drops_elaborated`, `handle_drop_plan`, `seq_drop_plan`,

@@ -207,6 +207,11 @@ vesper_hybrid(
             "//:check_data_package",
             "//:check_effects_package",
         ],
+        # The fip checker (#1184) builds on @vesper/check-fip.
+        "hybrid_fip": [
+            "//:check_data_package",
+            "//:check_fip_package",
+        ],
         "hybrid_parse": [
             "//:ast_package",
             "//:front_package",
@@ -256,6 +261,7 @@ vesper_hybrid(
         "hybrid_optimize": "modules/optimize",
         "hybrid_pact": "modules/pact",
         "hybrid_effects": "modules/effects",
+        "hybrid_fip": "modules/fip",
         "hybrid_tensor_types": "modules/tensor_types",
         "hybrid_parse": "modules/parse",
         "hybrid_wasm_backend": "modules/wasm_backend",

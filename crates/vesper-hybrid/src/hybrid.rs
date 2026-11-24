@@ -133,6 +133,11 @@ mod effects_binding;
 
 #[rustfmt::skip]
 #[allow(clippy::all)]
+#[path = "../port/fip.rs"]
+mod fip_binding;
+
+#[rustfmt::skip]
+#[allow(clippy::all)]
 #[path = "../port/bounds_hoist.rs"]
 mod bounds_hoist_binding;
 
@@ -182,6 +187,10 @@ mod tensor_words;
 // The capability effect checker's encoder and diagnostic decoder (#1180).
 #[path = "../../../tests/common/effects_words.rs"]
 mod effects_words;
+
+// The fip checker's encoder and diagnostic decoder (#1184).
+#[path = "../../../tests/common/fip_words.rs"]
+mod fip_words;
 
 // The stack-bound swap's encoder and decoder (#1182), shared with the root
 // package's tests/self_host_check_loops_atomics.rs.
@@ -769,6 +778,15 @@ const VESPER_EFFECTS_CHECK: vesper::capability_effects::EffectsCheckTable =
             effects_words::decode_diagnostics(&words)
         },
     };
+
+/// `fip::check_world` from `modules/fip` (SH2 lane 12, `#1184`).
+const VESPER_FIP_CHECK: vesper::fip::FipCheckTable = vesper::fip::FipCheckTable {
+    check_world: |world| {
+        let bytes = fip_words::encode_world(world);
+        let words = fip_binding::fip_diags(&bytes);
+        fip_words::decode_diagnostics(&words)
+    },
+};
 
 /// Full coherence-gated Pact session from `modules/pact` (SH2 lane 13 part 2b).
 const VESPER_PACT_SESSION: vesper::pact_frontend::PactSessionTable =
@@ -1753,6 +1771,7 @@ extern "C" fn install() {
         std::process::abort();
     }
     vesper::capability_effects::install_effects_check(VESPER_EFFECTS_CHECK);
+    vesper::fip::install_fip_check(VESPER_FIP_CHECK);
     // Swaps keep one input per compilation (SH4 lane 2, #1276).
     // `VESPER_HYBRID_SCOPES=0` encodes per call instead (the before side of
     // the report's measurement).
