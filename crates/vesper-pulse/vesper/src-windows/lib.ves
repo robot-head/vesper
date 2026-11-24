@@ -510,3 +510,279 @@ pub fn iocp_roundtrip_check() -> u64 eff [Ffi[PulseSys]] {
     }
     100
 }
+
+pub copy enum DriverKind {
+    IoUring,
+    Epoll,
+    Kqueue,
+    Iocp,
+}
+
+pub copy struct RequestId {
+    pub bits: u64,
+}
+
+pub copy enum Operation {
+    Read,
+    Write,
+}
+
+pub copy enum DriverError {
+    QueueFull,
+    UnknownRequest,
+    InvalidCapacity,
+}
+
+pub copy struct RequestSlot {
+    pub id: RequestId,
+    pub fd: i32,
+    pub op: Operation,
+    pub offset: u64,
+    pub len: u64,
+    pub token: u64,
+    pub cancelled: bool,
+}
+
+pub copy struct CompletionSlot {
+    pub id: RequestId,
+    pub ok: bool,
+    pub bytes: u64,
+    pub errno: u32,
+    pub cancelled: bool,
+}
+
+pub struct ReadinessQueue {
+    kind: DriverKind,
+    capacity: u64,
+    next_id: u64,
+    waiting: ChunkSeq[RequestSlot],
+    ready: ChunkSeq[CompletionSlot],
+}
+
+fn ascii_lower(b: u8) -> u8 {
+    if b >= 65 && b <= 90 {
+        wrapping_u8(wrapping_add(widen_u64(b), 32))
+    } else {
+        b
+    }
+}
+
+fn is_ascii_ws(b: u8) -> bool {
+    b == 32 || b == 9 || b == 10 || b == 13
+}
+
+fn slice_byte(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn eq_trimmed_lower(in name: Slice[u8], a: u64, b: u64, in target: Slice[u8]) -> bool {
+    let len = wrapping_sub(b, a);
+    if len != target.len() {
+        return false;
+    }
+    for i in 0..len {
+        let ch = ascii_lower(slice_byte(in name, wrapping_add(a, i)));
+        let tc = slice_byte(in target, i);
+        if ch != tc {
+            return false;
+        }
+    }
+    true
+}
+
+pub fn driver_kind_id(k: DriverKind) -> u32 {
+    match k {
+        DriverKind::IoUring => 0,
+        DriverKind::Epoll => 1,
+        DriverKind::Kqueue => 2,
+        DriverKind::Iocp => 3,
+    }
+}
+
+pub fn driver_kind_from_name(in name: Slice[u8]) -> Option[DriverKind] {
+    let mut a: u64 = 0;
+    let mut b: u64 = name.len();
+    loop {
+        if a >= b {
+            break;
+        }
+        if !is_ascii_ws(slice_byte(in name, a)) {
+            break;
+        }
+        a = wrapping_add(a, 1);
+    }
+    loop {
+        if b <= a {
+            break;
+        }
+        if !is_ascii_ws(slice_byte(in name, wrapping_sub(b, 1))) {
+            break;
+        }
+        b = wrapping_sub(b, 1);
+    }
+    if eq_trimmed_lower(in name, a, b, in "io_uring".as_bytes())
+        || eq_trimmed_lower(in name, a, b, in "io-uring".as_bytes())
+        || eq_trimmed_lower(in name, a, b, in "uring".as_bytes()) {
+        return Option::Some(DriverKind::IoUring);
+    }
+    if eq_trimmed_lower(in name, a, b, in "epoll".as_bytes()) {
+        return Option::Some(DriverKind::Epoll);
+    }
+    if eq_trimmed_lower(in name, a, b, in "kqueue".as_bytes()) {
+        return Option::Some(DriverKind::Kqueue);
+    }
+    if eq_trimmed_lower(in name, a, b, in "iocp".as_bytes()) {
+        return Option::Some(DriverKind::Iocp);
+    }
+    Option::None
+}
+
+fn slot_at(in seq: ChunkSeq[RequestSlot], idx: u64) -> RequestSlot {
+    match seq.try_get(idx) {
+        Option::Some(v) => v,
+        Option::None => RequestSlot {
+            id: RequestId {
+                bits: 0
+            },
+            fd: -1,
+            op: Operation::Read,
+            offset: 0,
+            len: 0,
+            token: 0,
+            cancelled: false,
+        },
+    }
+}
+
+pub fn readiness_queue_new(kind: DriverKind, capacity: u64)
+    -> ReadinessQueue eff [Fail[DriverError]] {
+    if capacity == 0 {
+        return Fail::raise(DriverError::InvalidCapacity);
+    }
+    ReadinessQueue {
+        kind: kind,
+        capacity: capacity,
+        next_id: 1,
+        waiting: ChunkSeq::new[RequestSlot](),
+        ready: ChunkSeq::new[CompletionSlot](),
+    }
+}
+
+pub fn readiness_queue_kind(in q: ReadinessQueue) -> DriverKind {
+    q.kind
+}
+
+pub fn readiness_queue_pending(in q: ReadinessQueue) -> u64 {
+    wrapping_add(q.waiting.len(), q.ready.len())
+}
+
+pub fn readiness_queue_in_flight(in q: ReadinessQueue) -> u64 {
+    q.waiting.len()
+}
+
+pub fn readiness_queue_has_ready(in q: ReadinessQueue) -> bool {
+    q.ready.len() > 0
+}
+
+pub fn readiness_queue_submit(
+    inout q: ReadinessQueue,
+    fd: i32,
+    op: Operation,
+    offset: u64,
+    len: u64,
+    token: u64,
+) -> RequestId eff [Fail[DriverError]] {
+    if readiness_queue_pending(in q) >= q.capacity {
+        return Fail::raise(DriverError::QueueFull);
+    }
+    let id = RequestId {
+        bits: q.next_id
+    };
+    q.next_id = wrapping_add(q.next_id, 1);
+    q
+        .waiting
+        .push(
+            RequestSlot {
+                id: id,
+                fd: fd,
+                op: op,
+                offset: offset,
+                len: len,
+                token: token,
+                cancelled: false,
+            }
+        );
+    id
+}
+
+pub fn readiness_queue_mark_cancelled(inout q: ReadinessQueue, id: RequestId) -> bool {
+    let n = q.waiting.len();
+    for i in 0..n {
+        let mut s = slot_at(in q.waiting, i);
+        if s.id.bits == id.bits {
+            s.cancelled = true;
+            let _ok = q.waiting.try_set(i, s);
+            return true;
+        }
+    }
+    false
+}
+
+pub fn readiness_queue_cancel_all(inout q: ReadinessQueue) -> u64 {
+    let n = q.waiting.len();
+    for i in 0..n {
+        let mut s = slot_at(in q.waiting, i);
+        s.cancelled = true;
+        let _ok = q.waiting.try_set(i, s);
+    }
+    n
+}
+
+pub fn readiness_queue_complete(
+    inout q: ReadinessQueue,
+    id: RequestId,
+    ok: bool,
+    bytes: u64,
+    errno: u32,
+) -> () eff [Fail[DriverError]] {
+    let n = q.waiting.len();
+    let mut found = false;
+    let mut found_idx: u64 = 0;
+    let mut was_cancelled = false;
+    for i in 0..n {
+        let s = slot_at(in q.waiting, i);
+        if s.id.bits == id.bits {
+            found = true;
+            found_idx = i;
+            was_cancelled = s.cancelled;
+            break;
+        }
+    }
+    if !found {
+        return Fail::raise(DriverError::UnknownRequest);
+    }
+    let last = wrapping_sub(n, 1);
+    for j in found_idx..last {
+        let next_slot = slot_at(in q.waiting, wrapping_add(j, 1));
+        let _ok = q.waiting.try_set(j, next_slot);
+    }
+    let _popped = q.waiting.pop();
+    q
+        .ready
+        .push(
+            CompletionSlot {
+                id: id,
+                ok: ok,
+                bytes: bytes,
+                errno: errno,
+                cancelled: was_cancelled,
+            }
+        );
+}
+
+pub fn readiness_queue_take_ready(inout q: ReadinessQueue) -> ChunkSeq[CompletionSlot] {
+    replace(inout q.ready, ChunkSeq::new[CompletionSlot]())
+}
