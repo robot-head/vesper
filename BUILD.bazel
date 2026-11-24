@@ -732,6 +732,7 @@ vesper_crate(
         "test/self_host_ast": {"VESPER_AST_FUZZ": "1000"},
         "test/self_host_check_core_typing_exprs": {"CHECK_HARNESS_STRIDE": "4"},
         "test/self_host_check_loops_atomics": {"CHECK_HARNESS_STRIDE": "4"},
+        "test/self_host_check_pact": {"RUST_TEST_THREADS": "1"},
         "test/self_host_check_regions_seqs": {"CHECK_HARNESS_STRIDE": "4"},
         "test/self_host_egraph": {"CHECK_HARNESS_STRIDE": "4"},
         "test/self_host_front_v2": {"VESPER_FRONT_FUZZ": "1000"},
