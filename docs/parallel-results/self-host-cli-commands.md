@@ -94,7 +94,7 @@ does not touch).
 | `graph` | `HybridCommands::hc_graph_run` | `package_graph` | CLI option parsing, validation, and `--help` in Vesper (`graph.ves`, #1669) |
 | `doc` | `HybridCommands::hc_doc_run` | `vesper-doc` (port) | CLI option parsing, validation, `store-olean`, and `--help` in Vesper (`doc.ves`, #1738) |
 | `test` (and `--doc`) | `HybridCommands::hc_test_run` | test runner, doctests | CLI option parsing, validation, and `--help` in Vesper (`test.ves`, #1745) |
-| `lsp` | `vesper::lsp` | LSP | lanes 16 and 17 (#1339, #1340) |
+| `lsp` | `HybridCommands::hc_lsp_serve` | `vesper::lsp` (lanes 16 and 17: #1339, #1340) | CLI routing, option validation, and `--help` in Vesper (`lsp.ves`, #1790 / #1809) |
 | `proof-audit` | `HybridCommands::hc_proof_audit_run` | Lean | CLI option parsing, validation, and `--help` in Vesper (`proof_audit.ves`, #1764) |
 | `verify` | `HybridCommands::hc_verify_run` | Lean | CLI option parsing, validation, and `--help` in Vesper (`verify.ves`, #1784) |
 | top-level `--help` text | `HELP` in src/main.rs | | printed by the host (`hc_help`), shared with the driver's `hd_help`; the routing to it is Vesper |
