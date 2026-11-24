@@ -68,4 +68,6 @@ const EDITS: &[(&str, &str)] = &[
         "if g8(in island_awake, r) == 0 {",
         "if g8(in island_awake, r) != 0 {",
     ),
+    // diff.rs: backward sweep skips nonzero adjoints.
+    ("if a != 0.0 {", "if a == 0.0 {"),
 ];

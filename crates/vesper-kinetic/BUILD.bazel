@@ -109,6 +109,12 @@ filegroup(
             "if g8(in island_awake, r) == 0 {",
             "if g8(in island_awake, r) != 0 {",
         ),
+        (
+            "diff",
+            "diff",
+            "if a != 0.0 {",
+            "if a == 0.0 {",
+        ),
     ]
 ]
 

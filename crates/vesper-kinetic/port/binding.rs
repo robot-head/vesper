@@ -155,6 +155,8 @@ unsafe extern "C" {
     fn vesper_kinetic_crmath_logf(x: i64, cache: *mut u64) -> i64;
     fn vesper_kinetic_crmath_sin(x: f64, cache: *mut u64) -> f64;
     fn vesper_kinetic_crmath_sinf(x: i64, cache: *mut u64) -> i64;
+    fn vesper_kinetic_diff_detect_contacts(pos: *mut u64, vel: *mut u64, inv_mass: *mut u64, radii: *mut u64, dt: f64, g1: f64, margin: f64, has_ground: i64, ground_y: f64, sweep: *mut u64, out_a: *mut u64, out_b: *mut u64) -> i64;
+    fn vesper_kinetic_diff_tape_backward(p0: *mut u64, p1: *mut u64, d0: *mut u64, d1: *mut u64, adj: *mut u64) -> i64;
     fn vesper_kinetic_fastmath_atan2(y: f64, x: f64) -> f64;
     fn vesper_kinetic_fastmath_atan2f(y: i64, x: i64) -> i64;
     fn vesper_kinetic_fastmath_cos(x: f64) -> f64;
@@ -310,6 +312,24 @@ pub fn crmath_sinf(x: u32, cache: &mut [u32]) -> u32 {
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_slice_mut(cache, |view_cache| unsafe { vesper_kinetic_crmath_sinf(x as i64, view_cache) });
     raw as u32
+}
+
+/// Calls `diff_detect_contacts` of the Vesper library `kinetic` (`vesper_kinetic_diff_detect_contacts`).
+pub fn diff_detect_contacts(pos: &[f64], vel: &[f64], inv_mass: &[f64], radii: &[f64], dt: f64, g1: f64, margin: f64, has_ground: bool, ground_y: f64, sweep: &mut [f64], out_a: &mut [u32], out_b: &mut [u32]) -> u64 {
+    // SAFETY: `vesper_kinetic_diff_detect_contacts` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(pos, |view_pos| vesper_port_abi::with_slice(vel, |view_vel| vesper_port_abi::with_slice(inv_mass, |view_inv_mass| vesper_port_abi::with_slice(radii, |view_radii| vesper_port_abi::with_slice_mut(sweep, |view_sweep| vesper_port_abi::with_slice_mut(out_a, |view_out_a| vesper_port_abi::with_slice_mut(out_b, |view_out_b| unsafe { vesper_kinetic_diff_detect_contacts(view_pos, view_vel, view_inv_mass, view_radii, dt, g1, margin, has_ground as i64, ground_y, view_sweep, view_out_a, view_out_b) })))))));
+    raw as u64
+}
+
+/// Calls `diff_tape_backward` of the Vesper library `kinetic` (`vesper_kinetic_diff_tape_backward`).
+pub fn diff_tape_backward(p0: &[u32], p1: &[u32], d0: &[f64], d1: &[f64], adj: &mut [f64]) -> () {
+    // SAFETY: `vesper_kinetic_diff_tape_backward` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(p0, |view_p0| vesper_port_abi::with_slice(p1, |view_p1| vesper_port_abi::with_slice(d0, |view_d0| vesper_port_abi::with_slice(d1, |view_d1| vesper_port_abi::with_slice_mut(adj, |view_adj| unsafe { vesper_kinetic_diff_tape_backward(view_p0, view_p1, view_d0, view_d1, view_adj) })))));
+    { let _ = raw; }
 }
 
 /// Calls `fastmath_atan2` of the Vesper library `kinetic` (`vesper_kinetic_fastmath_atan2`).
