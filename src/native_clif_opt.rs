@@ -3698,12 +3698,15 @@ fn reuse_seq_header_loads(func: &mut ir::Function) {
     fn walk_dom(
         func: &mut ir::Function,
         block: Block,
+        cfg: &ControlFlowGraph,
         dom_children: &HashMap<Block, Vec<Block>>,
         header_clobbers: &HeaderClobbers,
         seq_handles: &HashSet<Value>,
         mut avail: HashMap<(Value, i64), Value>,
     ) {
-        if let Some((clobber_all, written_fields)) = header_clobbers.get(&block) {
+        if cfg.pred_iter(block).count() > 1 {
+            avail.clear();
+        } else if let Some((clobber_all, written_fields)) = header_clobbers.get(&block) {
             if *clobber_all {
                 avail.clear();
             } else {
@@ -3769,6 +3772,7 @@ fn reuse_seq_header_loads(func: &mut ir::Function) {
                 walk_dom(
                     func,
                     child,
+                    cfg,
                     dom_children,
                     header_clobbers,
                     seq_handles,
@@ -3781,6 +3785,7 @@ fn reuse_seq_header_loads(func: &mut ir::Function) {
     walk_dom(
         func,
         entry,
+        &cfg,
         &dom_children,
         &header_clobbers,
         &seq_handles,
