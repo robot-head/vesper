@@ -130,7 +130,11 @@ rust_library(
             "-Clink-arg=$(location :aether_vesper)",
             "-Clink-arg=$(location :aether_rng)",
         ],
-        deps = [":port"] + extra,
+        deps = [":port"] + all_crate_deps(
+            _CRATE_DATA,
+            normal = True,
+            platforms = _CRATE_DATA["platforms"],
+        ) + extra,
     )
     for test, extra in [
         ("slot_plan", ["//crates/vesper-loom-cas"]),
