@@ -1058,11 +1058,12 @@ pub mod numeric {
     /// The element address of an `Atomic[T]` receiver (`atomic_call`):
     /// `[v receiver]`. Result `[address]` (two trusted loads).
     pub const ATOMIC_CELL: u32 = 11;
-    /// One atomic operation besides `compare_exchange` (the shim has no
-    /// `atomic_cas`): `[op, type, signed, v address, v operands...]`, `op`
-    /// one of the `ATOMIC_*` codes below, `type` the narrow lane's
-    /// [`super::ty_code`] and the operands already narrowed. Result
-    /// `[value]`, the old value as a canonical lane (`0` for a store).
+    /// One atomic operation: `[op, type, signed, v address, v operands...]`,
+    /// `op` one of the `ATOMIC_*` codes below (`ATOMIC_CAS` appends
+    /// `[v out_ptr, ok_tag, err_tag, payload_offset]`), `type` the narrow
+    /// lane's [`super::ty_code`] and the operands already narrowed. Result
+    /// `[value]`, the old value as a canonical lane (`0` for a store, or
+    /// `out_ptr` for `ATOMIC_CAS`).
     pub const ATOMIC: u32 = 12;
     pub const ATOMIC_LOAD: u64 = 1;
     pub const ATOMIC_STORE: u64 = 2;
@@ -1072,6 +1073,7 @@ pub mod numeric {
     pub const ATOMIC_AND: u64 = 6;
     pub const ATOMIC_OR: u64 = 7;
     pub const ATOMIC_XOR: u64 = 8;
+    pub const ATOMIC_CAS: u64 = 9;
     /// The `vesper_parallel_for(body, data, n)` call of `parallel_for_call`:
     /// `[body FuncRef, v data, v n]`. Result `[value]` (`0`).
     pub const PARALLEL_FOR: u32 = 13;

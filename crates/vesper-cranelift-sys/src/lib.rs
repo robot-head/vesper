@@ -1778,6 +1778,39 @@ pub unsafe extern "C" fn vcl_atomic_store(b: *mut Builder, fl: u32, x: u32, addr
     })
 }
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn vcl_atomic_cas(
+    b: *mut Builder,
+    fl: u32,
+    addr: u32,
+    expected: u32,
+    replacement: u32,
+) -> u32 {
+    with_builder(b, INVALID, |b| {
+        let f = flags(fl)?;
+        let v = b
+            .fb()
+            .ins()
+            .atomic_cas(f, value(addr), value(expected), value(replacement));
+        Ok(defined(b, v))
+    })
+}
+/// Splits a 128-bit integer into `(lo, hi)`: returns `lo`; `hi` is
+/// `vcl_inst_result(b, 1)`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vcl_isplit(b: *mut Builder, x: u32) -> u32 {
+    with_builder(b, INVALID, |b| {
+        let (lo, _hi) = b.fb().ins().isplit(value(x));
+        Ok(defined(b, lo))
+    })
+}
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vcl_iconcat(b: *mut Builder, lo: u32, hi: u32) -> u32 {
+    with_builder(b, INVALID, |b| {
+        let v = b.fb().ins().iconcat(value(lo), value(hi));
+        Ok(defined(b, v))
+    })
+}
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn vcl_func_addr(b: *mut Builder, ty_code: u32, fref: u32) -> u32 {
     with_builder(b, INVALID, |b| {
         let t = ty(ty_code)?;
@@ -2465,6 +2498,9 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
         vcl_atomic_rmw,
         vcl_atomic_load,
         vcl_atomic_store,
+        vcl_atomic_cas,
+        vcl_isplit,
+        vcl_iconcat,
         vcl_func_addr,
         vcl_symbol_value,
         vcl_global_value,
