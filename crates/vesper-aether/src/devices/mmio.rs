@@ -654,6 +654,39 @@ impl<D: VirtioDevice> MmioTransport<D> {
     }
 
     fn write_status(&mut self, new: u32) -> Result<(), MmioError> {
+        #[cfg(feature = "vesper-port")]
+        {
+            let outcome = crate::binding::mmio_write_status(
+                self.status,
+                new,
+                self.driver_accepted_unknown,
+                self.driver_features,
+                self.offered_features(),
+            )
+            .map_err(MmioError::from)?;
+            if outcome.reset {
+                self.reset();
+                return Ok(());
+            }
+            if outcome.rejected_features {
+                self.stats.rejected_feature_sets += 1;
+            }
+            if outcome.accepted_features {
+                self.negotiated = self.driver_features;
+            }
+            if outcome.activate {
+                self.device.activate(self.negotiated);
+            }
+            self.status = outcome.next_status;
+            Ok(())
+        }
+        #[cfg(not(feature = "vesper-port"))]
+        self.write_status_reference(new)
+    }
+
+    /// The Rust implementation of `write_status`, exposed for differential tests.
+    #[doc(hidden)]
+    pub fn write_status_reference(&mut self, new: u32) -> Result<(), MmioError> {
         if new == 0 {
             self.reset();
             return Ok(());

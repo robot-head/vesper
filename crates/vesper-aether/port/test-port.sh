@@ -60,3 +60,5 @@ expect net_port tx_and_ctrl_match_rust -- config_space_matches_rust
 expect vsock_port credit_saturates_on_shrunken_alloc -- header_codec_matches_rust
 # vmgenid: page-crossing address is rejected.
 expect vmgenid_port address_validation_matches_rust -- encode_matches_rust
+# mmio: FEATURES_OK requires VIRTIO_F_VERSION_1.
+expect mmio_port feature_negotiation_matches_rust -- status_errors_and_reset_match_rust
