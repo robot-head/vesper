@@ -59,4 +59,6 @@ const EDITS: &[(&str, &str)] = &[
         "            gd0 - radii,\n            normal,\n",
         "            gd0 - ra,\n            normal,\n",
     ),
+    // rigid/ccd.rs: conservative advancement never detects a hit.
+    ("        if d <= margin {\n", "        if d < -1.0 {\n"),
 ];

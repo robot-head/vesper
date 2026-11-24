@@ -1400,6 +1400,18 @@ vesper_package(
 )
 
 vesper_package(
+    name = "ebpf_backend_package",
+    srcs = glob(["packages/vesper-ebpf-backend/src/**/*.ves"]),
+    manifest = "packages/vesper-ebpf-backend/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":check_data_package",
+        ":place_ir_package",
+        "//crates/vesper-ebpf:port_package",
+    ],
+)
+
+vesper_package(
     name = "wit_component_package",
     srcs = glob(["packages/vesper-wit-component/src/**/*.ves"]),
     manifest = "packages/vesper-wit-component/Loom.toml",
