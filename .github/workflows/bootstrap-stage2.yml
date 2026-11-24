@@ -27,6 +27,18 @@ jobs:
       - name: Install the bootstrap toolchain
         run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
       - uses: Swatinem/rust-cache@v2
+      - name: Install pinned wasmtime CLI (v50.0.1) for Stage 2 checks
+        run: |
+          wt_url="https://github.com/bytecodealliance/wasmtime/releases/download/v50.0.1/wasmtime-v50.0.1-x86_64-linux.tar.xz"
+          wt_sha="685466455dd42a14774a86c36c8f2e45cbb9bd6d92a850139315df60a75498a5"
+          curl -fsSL "$wt_url" -o "$RUNNER_TEMP/wasmtime.tar.xz"
+          echo "$wt_sha  $RUNNER_TEMP/wasmtime.tar.xz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/wasmtime"
+          tar -xJf "$RUNNER_TEMP/wasmtime.tar.xz" --strip-components=1 -C "$RUNNER_TEMP/wasmtime"
+          echo "WASMTIME_BIN=$RUNNER_TEMP/wasmtime/wasmtime" >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/wasmtime" >> "$GITHUB_PATH"
+      - name: Verify Stage 2 runner wrapper
+        run: bootstrap/stage2.sh which
       - name: Build the compiler used by the port and hybrid tests
         run: |
           cargo build --locked -p vesper --bin vesper

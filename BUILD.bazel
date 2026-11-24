@@ -783,7 +783,7 @@ vesper_crate(
     },
     test_path_binaries = {
         "test/self_host_front_end": [],
-        "test/wasm_seed_package_io": [],
+        "test/wasm_seed_package_io": ["@wasmtime//:wasmtime"],
     },
     # The corpus implements TEST_TOTAL_SHARDS/TEST_SHARD_INDEX itself
     # (tests/common/corpus_shard.rs). The others were the slow tail of
@@ -1099,7 +1099,7 @@ vesper_crate(
         "test/self_host_wasm_backend": "long",
         # Loads the port package, then 17 compilations and Wasmtime runs.
         "test/wasm_seed_breadth": "long",
-        # Loads the port package, then native, Wasmtime, and vwasm fixed-point runs.
+        # Loads the port package, then native, Wasmtime (crate + hermetic @wasmtime CLI), and fixed-point runs.
         "test/wasm_seed_package_io": "eternal",
         # The component wrapping differential (#1334): ~2 min release.
         "test/self_host_wit_component": "long",

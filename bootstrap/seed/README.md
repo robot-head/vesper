@@ -1,33 +1,41 @@
 # The bootstrap seed
 
-Owner decision (2026-11-21): once the Rust compiler is deleted, the repository
-bootstraps from a **committed wasm seed**, the way Zig does. SH6 lane 2
-(#1397) owns this directory. The plan is in
+Owner decisions:
+- 2026-11-21: once the Rust compiler is deleted, the repository bootstraps from a **committed wasm seed**, the way Zig does.
+- 2026-11-24: **`wasmtime` (`v50.0.1`) CLI**, wired hermetically via Bazel in [MODULE.bazel](../../MODULE.bazel) (`@wasmtime//:wasmtime`, [tools/bazel/wasmtime.bzl](../../tools/bazel/wasmtime.bzl)), is the official **Stage 2 bootstrap runner** for full multi-package compiler self-hosting. The C11 core interpreter ([runner/vwasm.c](runner/vwasm.c)) is frozen for Stage 1 / core-differential corpus checks.
+
+SH6 lane 2 (#1397) owns this directory. The plan is in
 [rust-exit-plan.md](../../docs/maintenance/rust-exit-plan.md), and the lane
 report is
 [rust-exit-stage2-retirement.md](../../docs/parallel-results/rust-exit-stage2-retirement.md).
 
-## How it will work
+## How Stage 2 runs
 
-```text
-cc -O2 -o vwasm bootstrap/seed/runner/vwasm.c -lm   # any C11 compiler, no Rust
-vwasm --arg vesper --arg build ... bootstrap/seed/vesper.wasm  # seed builds stage 1
-stage1/vesper build ...                              # stage 1 builds stage 2
+```sh
+# Run any Wasm target under the pinned Bazel toolchain:
+bazel run @wasmtime//:wasmtime -- --version
+
+# Rebuild a package (or self-rebuild @vesper/stage2) using the official Stage 2 runner:
+bootstrap/stage2.sh run bootstrap/seed/vesper.wasm packages/vesper-stage2 target/stage3.wasm main
+bootstrap/stage2.sh verify target/stage2.wasm
 ```
 
-- `vesper.wasm` (not committed yet) is the Vesper compiler built by its own
-  wasm backend with the portable effect lowering.
-- `runner/vwasm.c` runs it. Build the C11 source with the adjacent
-  `seed_files.h` header and the C standard library.
-- A regeneration script rebuilds `vesper.wasm` from the current compiler.
-  CI checks that the seed, run by `vwasm`, rebuilds the compiler to the
-  same bytes.
+Under Bazel (`test/wasm_seed_package_io`), `BUILD.bazel` places `@wasmtime//:wasmtime`
+on `PATH` for `stage2_self_compilation_fixed_point`, which executes `stage2.wasm`
+directly under the hermetic `wasmtime` CLI and verifies bit-identical self-compilation
+(`stage2.wasm == stage3.wasm`).
+
+- `vesper.wasm` (committed once the remaining driver/compiler gaps land) is the
+  Vesper compiler built by its own wasm backend with portable effects.
+- [bootstrap/stage2.sh](../stage2.sh) wraps `wasmtime run --dir <workspace>::. --dir <out>::/out --argv0 stage2 ...`
+  and checks Stage 2 sidecar diagnostics (`.err.txt`).
 
 ## What is here today
 
 | Piece | State |
 |---|---|
-| `runner/vwasm.c` | Done. A core WebAssembly interpreter covering the MVP, sign extension, saturating truncation, bulk memory, multi-value, funcref tables and tail calls. It takes the first core module of a `wasm32-wasip2` component. Its WASI imports cover stdout, guest arguments, environment, initial directory and access to explicitly mapped files. It refuses WasmFX, SIMD, threads, memory64 and exceptions when it loads a module, so it never runs them wrongly. |
+| Hermetic `@wasmtime//:wasmtime` (`v50.0.1`) | Wired in `MODULE.bazel` / `tools/bazel/wasmtime.bzl` for Linux (`x86_64`, `aarch64`), macOS (`aarch64`, `x86_64`), and Windows (`x86_64`, `aarch64`). Official Stage 2 CLI runner via `bootstrap/stage2.sh` and `test/wasm_seed_package_io`. |
+| `runner/vwasm.c` (frozen) | A core WebAssembly interpreter covering the MVP, sign extension, saturating truncation, bulk memory, multi-value, funcref tables and tail calls. Frozen; kept for historical Stage 1 / core-differential checks (`tests/stage2_seed_runner.rs`, `tests/wasm_seed_package_io.rs`). |
 | Runner differential | `tests/stage2_seed_runner.rs`. Every corpus program the wasm backend builds (portable effects, optimizer on and off) runs in Wasmtime and in `vwasm`. They must agree on trap or return, the result bits, stdout and a digest of the whole linear memory. |
 | Stage 1 front end under the runner | The same test builds the Stage 1 front end (`packages/vesper-compiler`) with the wasm backend. `vwasm` then reproduces all 11 results in `bootstrap/stage1.lock`: 10 CST digests and the byte-class checksum. |
 | Parser with filesystem input | The Vesper backend builds `@vesper/front` to Wasm. The test compares native and Wasmtime parse tables across the corpus, then compares the C runner's output for one mapped source file. |
