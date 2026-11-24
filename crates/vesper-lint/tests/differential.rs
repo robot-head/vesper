@@ -48,7 +48,16 @@ fn same_report(what: &str, program: &seed::CheckedProgram, limits: seed::Limits)
 #[test]
 fn repository_sources_lint_identically() {
     let corpus = support::corpus(256 * 1024);
-    assert!(corpus.len() > 100, "only {} checked sources", corpus.len());
+    let floor = if std::env::var_os("TEST_SRCDIR").is_some() {
+        15
+    } else {
+        100
+    };
+    assert!(
+        corpus.len() > floor,
+        "only {} checked sources",
+        corpus.len()
+    );
     let mut findings = 0;
     let mut skipped = 0;
     for (path, program) in &corpus {

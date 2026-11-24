@@ -4,6 +4,9 @@
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rustc-check-cfg=cfg({})", vesper_port_harness::CFG);
+    if std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("wasm32") {
+        return;
+    }
     let port = vesper_port_harness::Port::new("lint", "vesper")
         .binding("port/binding.rs")
         .rust_types("crate::port");
