@@ -45,6 +45,9 @@ use self::builtin_traits::{
 use self::mono_check::{
     mono_check_words
 };
+use self::mono_plan::{
+    mono_plan_words
+};
 use self::resolve::{
     normalize_words,
     resolve_words
@@ -53,6 +56,11 @@ use self::session::{
     queries_words,
     session_words
 };
+
+// Task "mono_plan" (part 6): `Mono::evidence`, `Mono::instance`, `Mono::instantiate_body`.
+pub fn check_pact_mono_plan(in input: Str) -> ChunkSeq[u64] {
+    mono_plan_words(in input.as_bytes())
+}
 
 // Task "builtin_derive" (part 4): `builtin_traits::derivable` + derived `impl`s.
 pub fn check_pact_builtin_derive(in input: Str) -> ChunkSeq[u64] {

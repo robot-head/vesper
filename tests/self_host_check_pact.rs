@@ -2115,3 +2115,89 @@ fn mono_check_agrees_with_rust() {
         .join()
         .unwrap();
 }
+
+#[test]
+fn mono_plan_agrees_with_rust() {
+    if !owned_by_shard(9) {
+        return;
+    }
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let plan_fn = package().entry("check_pact_mono_plan", true);
+            let identity = pact_frontend::default_identity();
+            let mut cases: Vec<(String, Module)> = checker_tests()
+                .into_iter()
+                .map(|(n, s)| (n, parse(&s)))
+                .collect();
+            for c in corpus() {
+                cases.push((c.name.clone(), c.module.clone()));
+            }
+            let extra_sources = [
+                (
+                    "mono_plan_poly_rec_e0615",
+                    "trait Show { fn show(in self) -> i64; }
+                     struct Box1[T] { x: T }
+                     impl Show for i64 { fn show(in self) -> i64 { self } }
+                     impl[T: Show] Show for Box1[T] { fn show(in self) -> i64 { self.x.show() } }
+                     fn rec[T: Show](in x: T, in n: i64) -> i64 {
+                         if n == 0 { x.show() } else { rec(Box1 { x }, n - 1) }
+                     }
+                     fn main() -> i64 { rec(1, 2) }",
+                ),
+                (
+                    "mono_plan_use_model_chain",
+                    "trait Show { fn show(in self) -> i64; }
+                     fn leaf[T: Show](in x: T) -> i64 { x.show() }
+                     fn mid[T: Show](in x: T) -> i64 { leaf(x) }
+                     model M1: Show for i64 { fn show(in self) -> i64 { self } }
+                     model M2: Show for i64 { fn show(in self) -> i64 { self + 10 } }
+                     fn main() -> i64 {
+                         let a = { use model M1; mid(1) };
+                         let b = { use model M2; mid(1) };
+                         a + b
+                     }",
+                ),
+            ];
+            for (name, src) in extra_sources {
+                cases.push((name.to_string(), parse(src)));
+            }
+
+            let mut checked = 0usize;
+            let mut total_clones = 0usize;
+            let mut total_rewrites = 0usize;
+            for (name, m) in &cases {
+                let Some(outcome) = pact_frontend::probe_mono_plan(m, &identity) else {
+                    continue;
+                };
+                let Some(input) = pact_words::encode_mono_plan_input(
+                    &outcome.check,
+                    pact_frontend::DEFAULT_PACKAGE,
+                    pact_frontend::DEFAULT_VERSION,
+                ) else {
+                    continue;
+                };
+                checked += 1;
+                let (s_diags, ok, v_errors, v_clones, v_rewrites) =
+                    pact_words::decode_mono_plan(&plan_fn.words(&input));
+                assert!(s_diags.is_empty(), "{name}: session diags {s_diags:?}");
+                assert!(ok, "{name}: session failed");
+                assert_eq!(v_errors, outcome.errors, "{name}: errors mismatch");
+                if outcome.errors.is_empty() {
+                    total_clones += v_clones.len();
+                    total_rewrites += v_rewrites.len();
+                    assert_eq!(v_clones, outcome.clones, "{name}: clones mismatch");
+                    assert_eq!(v_rewrites, outcome.rewrites, "{name}: rewrites mismatch");
+                }
+            }
+            eprintln!(
+                "mono_plan: {checked} modules checked ({total_clones} clones, {total_rewrites} rewrites), 0 differ"
+            );
+            assert!(checked > 0);
+            assert!(total_clones > 0);
+            assert!(total_rewrites > 0);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
