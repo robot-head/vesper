@@ -53,6 +53,9 @@ use self::kinds::{
 use self::infer::{
     analyze,
 };
+use self::elaborate::{
+    elaborate_report
+};
 
 const NONE: u32 = 4294967295;
 
@@ -236,10 +239,7 @@ fn map_names(inout st: St, in a: Ast) {
     }
 }
 
-// Input words: the source (length, bytes); the wire diagnostics (count,
-// then code number, start, end, message); the checked wires (count, then
-// name, has-format flag, mismatch message).
-pub fn check_tensor_types(in input: Str) -> ChunkSeq[u64] {
+fn setup_and_analyze(in input: Str) -> (bool, St, Cx, Ast) {
     let b = input.as_bytes();
     let mut r = Reader {
         pos: 0
@@ -250,10 +250,8 @@ pub fn check_tensor_types(in input: Str) -> ChunkSeq[u64] {
     let mut st = st_new();
     map_names(inout st, in l.ast);
     let mut cx = cx_new(inout st);
-    let mut out = ChunkSeq::new[u8]();
     if !active(inout st, in l.ast) {
-        put(inout out, in "inactive\n");
-        return pack_text(in out);
+        return (false, st, cx, l.ast);
     }
     let nd = r.word(in b);
     for i in 0..nd {
@@ -288,6 +286,30 @@ pub fn check_tensor_types(in input: Str) -> ChunkSeq[u64] {
         }
     }
     analyze(inout st, inout cx, in l.ast);
+    (true, st, cx, l.ast)
+}
+
+// Input words: the source (length, bytes); the wire diagnostics (count,
+// then code number, start, end, message); the checked wires (count, then
+// name, has-format flag, mismatch message).
+pub fn check_tensor_types(in input: Str) -> ChunkSeq[u64] {
+    let (is_active, st, cx, _a) = setup_and_analyze(in input);
+    let mut out = ChunkSeq::new[u8]();
+    if !is_active {
+        put(inout out, in "inactive\n");
+        return pack_text(in out);
+    }
     report(in st, in cx, inout out);
+    pack_text(in out)
+}
+
+pub fn check_tensor_types_elaborate(in input: Str) -> ChunkSeq[u64] {
+    let (is_active, st, cx, a) = setup_and_analyze(in input);
+    if !is_active {
+        let mut out = ChunkSeq::new[u8]();
+        put(inout out, in "inactive\n");
+        return pack_text(in out);
+    }
+    let out = elaborate_report(in st, in cx, in a);
     pack_text(in out)
 }
