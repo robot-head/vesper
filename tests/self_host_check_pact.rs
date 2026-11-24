@@ -2254,3 +2254,135 @@ fn builtin_wanted_agrees_with_rust() {
         .join()
         .unwrap();
 }
+
+#[test]
+fn deps_agrees_with_rust() {
+    if !owned_by_shard(11) {
+        return;
+    }
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let deps_fn = package().entry("check_pact_deps", true);
+            let local_id = pact_frontend::default_identity();
+            let dep_a_id = vesper_pact_binding::PackageIdentity::new("@dep/a", "0.1.0");
+            let dep_b_id = vesper_pact_binding::PackageIdentity::new("@dep/b", "0.1.0");
+
+            let dep_ok_mod = parse(
+                "trait Show { fn show(in self) -> i64; }
+                 trait Conv[T] { type Out; fn conv(in self, in x: T) -> i64; }",
+            );
+            let dep_adt_mod = parse(
+                "struct Foreign { x: i64 }
+                 trait BadDep { fn take(in self, in f: Foreign) -> i64; }",
+            );
+            let dep_err_mod = parse(
+                "trait Bad { fn f(in self, in x: Self) -> i64; }
+                 struct S { x: i64 }
+                 impl Bad for S { fn f(in self, in x: i64) -> i64 { 0 } }",
+            );
+
+            let cases: Vec<(
+                &str,
+                &str,
+                Vec<(&str, &vesper_pact_binding::PackageIdentity, &Module)>,
+            )> = vec![
+                (
+                    "dep_valid_impl",
+                    "struct Local { v: i64 }
+                     impl a::Show for Local { fn show(in self) -> i64 { self.v } }
+                     fn main() -> i64 { 0 }",
+                    vec![("a", &dep_a_id, &dep_ok_mod)],
+                ),
+                (
+                    "dep_valid_generic_assoc",
+                    "struct Local { v: i64 }
+                     impl a::Conv[i64] for Local {
+                         type Out = i64;
+                         fn conv(in self, in x: i64) -> i64 { self.v + x }
+                     }
+                     fn main() -> i64 { 0 }",
+                    vec![("a", &dep_a_id, &dep_ok_mod)],
+                ),
+                (
+                    "dep_missing_method",
+                    "struct Local { v: i64 }
+                     impl a::Show for Local {}
+                     fn main() -> i64 { 0 }",
+                    vec![("a", &dep_a_id, &dep_ok_mod)],
+                ),
+                (
+                    "dep_wrong_sig",
+                    "struct Local { v: i64 }
+                     impl a::Show for Local { fn show(in self) -> bool { true } }
+                     fn main() -> i64 { 0 }",
+                    vec![("a", &dep_a_id, &dep_ok_mod)],
+                ),
+                (
+                    "dep_unknown_pkg",
+                    "struct Local { v: i64 }
+                     impl missing::Show for Local { fn show(in self) -> i64 { 0 } }
+                     fn main() -> i64 { 0 }",
+                    vec![("a", &dep_a_id, &dep_ok_mod)],
+                ),
+                (
+                    "dep_unknown_trait",
+                    "struct Local { v: i64 }
+                     impl a::Missing for Local {}
+                     fn main() -> i64 { 0 }",
+                    vec![("a", &dep_a_id, &dep_ok_mod)],
+                ),
+                (
+                    "dep_foreign_adt_e0607",
+                    "struct Local { v: i64 }
+                     impl b::BadDep for Local { fn take(in self, in f: i64) -> i64 { 0 } }
+                     fn main() -> i64 { 0 }",
+                    vec![("b", &dep_b_id, &dep_adt_mod)],
+                ),
+                (
+                    "dep_duplicate",
+                    "fn main() -> i64 { 0 }",
+                    vec![("a", &dep_a_id, &dep_ok_mod), ("a", &dep_b_id, &dep_ok_mod)],
+                ),
+                (
+                    "dep_error_forwarded",
+                    "fn main() -> i64 { 0 }",
+                    vec![("a", &dep_a_id, &dep_err_mod)],
+                ),
+            ];
+
+            let mut with_errors = 0usize;
+            for (name, local_src, deps) in cases {
+                let m = parse(local_src);
+                let base = base_world(&m);
+                let rust_deps: Vec<pact_frontend::Dependency> = deps
+                    .iter()
+                    .map(|(_, id, dm)| pact_frontend::Dependency {
+                        identity: (*id).clone(),
+                        module: (*dm).clone(),
+                    })
+                    .collect();
+                let rust = pact_frontend::probe_deps_declarations(&m, &local_id, &rust_deps);
+                if !rust.is_empty() {
+                    with_errors += 1;
+                }
+                let dep_bases: Vec<(String, String, &Module, World)> = deps
+                    .iter()
+                    .map(|(pkg, id, dm)| ((*pkg).to_string(), id.to_string(), *dm, base_world(dm)))
+                    .collect();
+                let dep_refs: Vec<(&str, &str, &Module, &World)> = dep_bases
+                    .iter()
+                    .map(|(p, i, dm, db)| (p.as_str(), i.as_str(), *dm, db))
+                    .collect();
+                let input =
+                    pact_words::encode_deps_input(&m, &base, &local_id.to_string(), &dep_refs)
+                        .unwrap();
+                let vesper = pact_words::decode_declaration_text(&deps_fn.text(&input));
+                assert_eq!(vesper, rust, "{name}: deps diagnostics mismatch");
+            }
+            assert!(with_errors > 0);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
