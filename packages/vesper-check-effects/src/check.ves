@@ -596,3 +596,28 @@ pub fn write_text(in s: Walk, in rows: ChunkSeq[u64], inout o: ChunkSeq[u8]) {
         o.extend(in " | 0\n".as_bytes());
     }
 }
+
+fn push_u32_le(inout o: ChunkSeq[u8], x: u64) {
+    o.push(wrapping_u8(x & 255));
+    o.push(wrapping_u8((x >> 8) & 255));
+    o.push(wrapping_u8((x >> 16) & 255));
+    o.push(wrapping_u8((x >> 24) & 255));
+}
+
+// Binary diagnostic encoding for vesper-hybrid: u32 count, then per row:
+// u32 start, u32 end, u32 code_len, u32 msg_len, u32 help_len, followed by
+// the raw UTF-8 bytes of code, message, and help.
+pub fn write_bin(in s: Walk, in rows: ChunkSeq[u64], inout o: ChunkSeq[u8]) {
+    push_u32_le(inout o, rows.len());
+    for i in 0..rows.len() {
+        let r = row(in s, u64_at(in rows, i));
+        push_u32_le(inout o, r.start);
+        push_u32_le(inout o, r.end);
+        push_u32_le(inout o, wrapping_sub(r.m, r.a));
+        push_u32_le(inout o, wrapping_sub(r.h, r.m));
+        push_u32_le(inout o, wrapping_sub(r.z, r.h));
+        for j in r.a..r.z {
+            o.push(u8_at(in s.text, j));
+        }
+    }
+}

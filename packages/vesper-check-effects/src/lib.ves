@@ -29,6 +29,7 @@ use self::walker::{
 };
 use self::check::{
     check_world,
+    write_bin,
     write_text
 };
 
@@ -46,5 +47,21 @@ pub fn check_effects(in input: Str) -> ChunkSeq[u64] {
     let rows = check_world(inout c, in p, inout s);
     let mut o = ChunkSeq::new[u8]();
     write_text(in s, in rows, inout o);
+    pack_text(in o)
+}
+
+// Binary entrypoint for `vesper-hybrid`: takes the encoded world+task bytes
+// directly and returns packed binary diagnostics (`write_bin`).
+pub fn check_effects_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
+    let mut r = Reader {
+        pos: 0
+    };
+    let mut c = read_ctx(inout r, in b);
+    let p = read_prog(inout r, in b, in c);
+    let k = syms_new(inout c);
+    let mut s = walk_new(k);
+    let rows = check_world(inout c, in p, inout s);
+    let mut o = ChunkSeq::new[u8]();
+    write_bin(in s, in rows, inout o);
     pack_text(in o)
 }

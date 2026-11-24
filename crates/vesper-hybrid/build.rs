@@ -127,6 +127,8 @@ const MODULES: &[(&str, &str, &str)] = &[
         "modules/tensor_types",
         "port/tensor_types.rs",
     ),
+    // SH2 lane 8 (#1180): capability effect rules (`capability_effects::check_world`).
+    ("hybrid_effects", "modules/effects", "port/effects.rs"),
     // SH5 lane 15 (#1338): the doc renderers.
     ("hybrid_doc", "modules/doc", "port/doc.rs"),
 ];

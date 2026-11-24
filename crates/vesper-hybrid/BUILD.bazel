@@ -202,6 +202,11 @@ vesper_hybrid(
             "//:check_tensor_types_package",
             "//:std_intern_package",
         ],
+        # The capability effect checker (#1180) builds on @vesper/check-effects.
+        "hybrid_effects": [
+            "//:check_data_package",
+            "//:check_effects_package",
+        ],
         "hybrid_parse": [
             "//:ast_package",
             "//:front_package",
@@ -250,6 +255,7 @@ vesper_hybrid(
         "hybrid_layout": "modules/layout",
         "hybrid_optimize": "modules/optimize",
         "hybrid_pact": "modules/pact",
+        "hybrid_effects": "modules/effects",
         "hybrid_tensor_types": "modules/tensor_types",
         "hybrid_parse": "modules/parse",
         "hybrid_wasm_backend": "modules/wasm_backend",

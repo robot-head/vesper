@@ -1300,6 +1300,18 @@ vesper_package(
     ],
 )
 
+# Capability effect checker as a dependency of the hybrid compiler's effects
+# module (self-hosting SH2 lane 8, #1180).
+vesper_package(
+    name = "check_effects_package",
+    srcs = glob(["packages/vesper-check-effects/src/**/*.ves"]),
+    manifest = "packages/vesper-check-effects/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":check_data_package",
+    ],
+)
+
 # Tensor type checker as a dependency of the hybrid compiler's tensor_types
 # module (self-hosting SH2 lane 14, #1186).
 vesper_package(
