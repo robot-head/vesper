@@ -1,0 +1,155 @@
+// ---------------------------------------------------------------------------
+// virtio-blk span math, discard/write-zeroes validation, and config space
+// (src/devices/block.rs).
+
+const BLK_SECTOR_BYTES: u64 = 512;
+const BLK_SEGMENT_BYTES: u64 = 16;
+const BLK_MAX_DISCARD_SECTORS: u32 = 65536;
+const BLK_MAX_DISCARD_SEG: u64 = 16;
+const BLK_DISCARD_SECTOR_ALIGNMENT: u64 = 8;
+const BLK_MAX_WRITE_ZEROES_SECTORS: u32 = 65536;
+const BLK_MAX_WRITE_ZEROES_SEG: u64 = 16;
+const BLK_CONFIG_BYTES: u64 = 60;
+
+const BLK_S_OK: u8 = 0;
+const BLK_S_IOERR: u8 = 1;
+const BLK_S_UNSUPP: u8 = 2;
+
+fn blk_byte(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn blk_read_u32_le(in s: Slice[u8], off: u64) -> u32 {
+    let b0 = widen_u32(blk_byte(in s, off));
+    let b1 = widen_u32(blk_byte(in s, wrapping_add(off, 1))) << 8;
+    let b2 = widen_u32(blk_byte(in s, wrapping_add(off, 2))) << 16;
+    let b3 = widen_u32(blk_byte(in s, wrapping_add(off, 3))) << 24;
+    b0 | b1 | b2 | b3
+}
+
+fn blk_read_u64_le(in s: Slice[u8], off: u64) -> u64 {
+    let lo = widen_u64(blk_read_u32_le(in s, off));
+    let hi = widen_u64(blk_read_u32_le(in s, wrapping_add(off, 4))) << 32;
+    lo | hi
+}
+
+fn blk_write_u16_le(inout out: Slice[u8], off: u64, val: u16) {
+    let v = widen_u32(val);
+    out.try_set(off, wrapping_u8(v));
+    out.try_set(wrapping_add(off, 1), wrapping_u8(v >> 8));
+}
+
+fn blk_write_u32_le(inout out: Slice[u8], off: u64, val: u32) {
+    out.try_set(off, wrapping_u8(val));
+    out.try_set(wrapping_add(off, 1), wrapping_u8(val >> 8));
+    out.try_set(wrapping_add(off, 2), wrapping_u8(val >> 16));
+    out.try_set(wrapping_add(off, 3), wrapping_u8(val >> 24));
+}
+
+fn blk_write_u64_le(inout out: Slice[u8], off: u64, val: u64) {
+    blk_write_u32_le(inout out, off, wrapping_u32(val));
+    blk_write_u32_le(inout out, wrapping_add(off, 4), wrapping_u32(val >> 32));
+}
+
+pub fn blk_span(disk_bytes: u64, sector: u64, len: u64) -> Option[(u64, u64)] {
+    if len % BLK_SECTOR_BYTES != 0 {
+        return Option::None;
+    }
+    if sector > U64_MAX / BLK_SECTOR_BYTES {
+        return Option::None;
+    }
+    let start = wrapping_mul(sector, BLK_SECTOR_BYTES);
+    if add_overflows(start, len) {
+        return Option::None;
+    }
+    let end = wrapping_add(start, len);
+    if end > disk_bytes {
+        return Option::None;
+    }
+    Option::Some((start, end))
+}
+
+pub fn blk_validate_discard_or_zero(
+    disk_bytes: u64,
+    read_only: bool,
+    in payload: Slice[u8],
+    data_in: u64,
+    discard: bool,
+    inout out_spans: Slice[u64]
+) -> (u8, u64) {
+    let max_sectors = if discard {
+        BLK_MAX_DISCARD_SECTORS
+    } else {
+        BLK_MAX_WRITE_ZEROES_SECTORS
+    };
+    let max_seg = if discard {
+        BLK_MAX_DISCARD_SEG
+    } else {
+        BLK_MAX_WRITE_ZEROES_SEG
+    };
+    if read_only {
+        return (BLK_S_IOERR, 0);
+    }
+    let plen = payload.len();
+    if data_in != 0 || plen == 0 || plen % BLK_SEGMENT_BYTES != 0 {
+        return (BLK_S_IOERR, 0);
+    }
+    let seg_count = plen / BLK_SEGMENT_BYTES;
+    if seg_count > max_seg || wrapping_mul(seg_count, 2) > out_spans.len() {
+        return (BLK_S_IOERR, 0);
+    }
+
+    for i in 0..seg_count {
+        let base = wrapping_mul(i, BLK_SEGMENT_BYTES);
+        let sector = blk_read_u64_le(in payload, base);
+        let count = blk_read_u32_le(in payload, wrapping_add(base, 8));
+        let flags = blk_read_u32_le(in payload, wrapping_add(base, 12));
+
+        if (flags & ~1) != 0 || (discard && (flags & 1) != 0) {
+            return (BLK_S_UNSUPP, 0);
+        }
+        if count == 0 || count > max_sectors {
+            return (BLK_S_IOERR, 0);
+        }
+        if discard {
+            if sector % BLK_DISCARD_SECTOR_ALIGNMENT != 0
+                || widen_u64(count) % BLK_DISCARD_SECTOR_ALIGNMENT != 0 {
+                return (BLK_S_IOERR, 0);
+            }
+        }
+        let span_bytes = wrapping_mul(widen_u64(count), BLK_SECTOR_BYTES);
+        match blk_span(disk_bytes, sector, span_bytes) {
+            Option::Some((s, e)) => {
+                let dst = wrapping_mul(i, 2);
+                out_spans.try_set(dst, s);
+                out_spans.try_set(wrapping_add(dst, 1), e);
+            }
+            Option::None => return (BLK_S_IOERR, 0),
+        }
+    }
+    (BLK_S_OK, seg_count)
+}
+
+pub fn blk_config_space(disk_bytes: u64, read_only: bool, queues: u16, inout out: Slice[u8])
+    -> u64 {
+    if out.len() < BLK_CONFIG_BYTES {
+        return 0;
+    }
+    for i in 0..BLK_CONFIG_BYTES {
+        out.try_set(i, 0);
+    }
+    blk_write_u64_le(inout out, 0, disk_bytes / BLK_SECTOR_BYTES);
+    blk_write_u32_le(inout out, 20, wrapping_u32(BLK_SECTOR_BYTES));
+    blk_write_u16_le(inout out, 34, queues);
+    if !read_only {
+        blk_write_u32_le(inout out, 36, BLK_MAX_DISCARD_SECTORS);
+        blk_write_u32_le(inout out, 40, wrapping_u32(BLK_MAX_DISCARD_SEG));
+        blk_write_u32_le(inout out, 44, wrapping_u32(BLK_DISCARD_SECTOR_ALIGNMENT));
+        blk_write_u32_le(inout out, 48, BLK_MAX_WRITE_ZEROES_SECTORS);
+        blk_write_u32_le(inout out, 52, wrapping_u32(BLK_MAX_WRITE_ZEROES_SEG));
+    }
+    BLK_CONFIG_BYTES
+}
