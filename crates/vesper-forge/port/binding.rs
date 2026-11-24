@@ -13,6 +13,7 @@ unsafe extern "C" {
     fn vesper_forge_live_allocations() -> i64;
     fn vesper_forge_fg_delimiters(kinds: *mut u64, max_depth: i64) -> i64;
     fn vesper_forge_fg_parse(toks: *mut u64, text: *mut u64, max_depth: i64) -> i64;
+    fn vesper_forge_fg_requirements(g: *mut u64, op_kind: i64, op_a: i64, op_b: i64, op_c: i64, op_d: i64) -> i64;
     fn vesper_forge_fg_resolve(w: *mut u64, text: *mut u64, g: *mut u64, gt: *mut u64) -> i64;
 }
 
@@ -43,6 +44,15 @@ pub fn fg_parse(toks: &[u64], text: &[u8], max_depth: u64) -> Vec<u64> {
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_slice(toks, |view_toks| vesper_port_abi::with_slice(text, |view_text| unsafe { vesper_forge_fg_parse(view_toks, view_text, max_depth as i64) }));
+    unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
+}
+
+/// Calls `fg_requirements` of the Vesper library `forge` (`vesper_forge_fg_requirements`).
+pub fn fg_requirements(g: &[u64], op_kind: u64, op_a: u64, op_b: u64, op_c: u64, op_d: u64) -> Vec<u64> {
+    // SAFETY: `vesper_forge_fg_requirements` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(g, |view_g| unsafe { vesper_forge_fg_requirements(view_g, op_kind as i64, op_a as i64, op_b as i64, op_c as i64, op_d as i64) });
     unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
 }
 

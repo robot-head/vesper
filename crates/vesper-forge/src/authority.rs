@@ -12,7 +12,9 @@
 //! authority its implementation needs. Unknown nodes, unresolved edges and
 //! handler constructions without a rule fail closed.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+#[cfg(not(vesper_port))]
+use std::collections::VecDeque;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -339,8 +341,30 @@ impl AuthorityGraph {
         Ok(())
     }
 
+    #[cfg_attr(not(vesper_port), allow(dead_code))]
+    pub(crate) fn raw_tables(
+        &self,
+    ) -> (
+        &BTreeMap<DefId, AuthorityNode>,
+        &BTreeMap<DefId, BTreeSet<Authority>>,
+    ) {
+        (&self.nodes, &self.handler_rules)
+    }
+
     /// Transitive authority requirements of one operation.
     pub fn requirements(&self, op: &OperationKind) -> Result<Requirements, GraphFault> {
+        #[cfg(vesper_port)]
+        {
+            crate::port::graph_requirements(self, op)
+        }
+        #[cfg(not(vesper_port))]
+        {
+            self.requirements_rust(op)
+        }
+    }
+
+    #[cfg(not(vesper_port))]
+    fn requirements_rust(&self, op: &OperationKind) -> Result<Requirements, GraphFault> {
         let mut reqs = Requirements::new();
         let mut parent: BTreeMap<DefId, Option<DefId>> = BTreeMap::new();
         let mut queue = VecDeque::new();
@@ -399,6 +423,7 @@ impl AuthorityGraph {
         Ok(reqs)
     }
 
+    #[cfg(not(vesper_port))]
     fn add_rule(
         &self,
         effect: DefId,
